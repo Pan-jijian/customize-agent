@@ -1,0 +1,57 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 构建输出
+dist/
+dist-ssr/
+.npm-cache
+# 环境文件
+.env
+.env.local
+.env.*.local
+.turbo
+# IDE
+.vscode/
+.idea/
+
+# 日志
+*.log
+*.log.*
+
+# 测试
+/coverage
+.nyc_output
+
+# 缓存
+.cache
+*.tsbuildinfo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.temp
+*.swp
+*.swo
+*.eslint-report.json
+*~
+auto-imports.d.ts
+set-claude-env.ps1
+set-claude-env.sh
+
+# 不提交 智能体工具 配置文件
+.claude/
+.qoder/
+.trae/
+.codebuddy
+.agents/
+skills/
+.cursor/
+# Changesets 临时文件
+.changeset/*.md
+.CLAUDE.md
+!.changeset/README.md
+!.changeset/config.json
