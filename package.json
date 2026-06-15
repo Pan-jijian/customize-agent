@@ -4,18 +4,43 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "vitest run tests/e2e/",
+    "dev": "turbo run build && node apps/cli/dist/index.js",
     "start:cli": "pnpm --filter cli start",
-    "build": "turbo run build"
+    "check": "turbo run typecheck lint && vitest run"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "packageManager": "pnpm@10.26.1",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "tree-sitter",
+      "tree-sitter-javascript",
+      "tree-sitter-typescript",
+      "tree-sitter-python",
+      "tree-sitter-rust",
+      "tree-sitter-go",
+      "tree-sitter-java",
+      "tree-sitter-c",
+      "tree-sitter-cpp",
+      "tree-sitter-ruby",
+      "tree-sitter-php",
+      "better-sqlite3"
+    ]
+  },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^25.9.3",
+    "eslint": "^10.5.0",
     "turbo": "^2.9.18",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.0",
+    "vitest": "^4.1.9"
   }
 }

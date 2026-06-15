@@ -1,0 +1,12 @@
+{
+  "name": "@code-agent/telemetry",
+  "version": "1.0.0",
+  "description": "审计日志 + 遥测指标",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "lint": "eslint src/" },
+  "dependencies": {
+    "@code-agent/types": "workspace:*",
+    "@types/node": "^25.9.3"
+  }
+}

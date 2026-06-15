@@ -1,0 +1,8 @@
+{
+  "name": "@code-agent/types",
+  "version": "1.0.0",
+  "description": "跨包类型契约层",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "lint": "eslint src/" }
+}

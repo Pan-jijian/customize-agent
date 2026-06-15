@@ -1,0 +1,14 @@
+{
+  "name": "@code-agent/llm",
+  "version": "1.0.0",
+  "description": "AI 模型提供商 + 自动路由网关",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "lint": "eslint src/" },
+  "dependencies": {
+    "@code-agent/types": "workspace:*",
+    "@types/node": "^25.9.3",
+    "openai": "^6.42.0",
+    "dotenv": "^17.4.2"
+  }
+}

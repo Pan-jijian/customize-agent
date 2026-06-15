@@ -1,0 +1,17 @@
+{
+  "name": "@code-agent/tools",
+  "version": "1.0.0",
+  "description": "Agent 工具 — 文件操作、终端、Git、沙箱、语法验证",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "lint": "eslint src/" },
+  "dependencies": {
+    "@code-agent/codex": "workspace:*",
+    "@code-agent/diff": "workspace:*",
+    "@types/node": "^25.9.3",
+    "execa": "^9.6.1",
+    "fast-glob": "^3.3.3",
+    "tree-sitter": "^0.22.0",
+    "yaml": "^2.9.0"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "@code-agent/diff",
+  "version": "1.0.0",
+  "description": "SEARCH/REPLACE 补丁解析 + Unified Diff",
+  "main": "./dist/diff.js",
+  "types": "./dist/diff.d.ts",
+  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "lint": "eslint src/" }
+}

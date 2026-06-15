@@ -1,0 +1,144 @@
+import Database from 'better-sqlite3';
+
+/** 符号搜索结果 */
+export interface SearchResult {
+  /** 符号名 */
+  name: string;
+  /** 符号类型（Function/Class/Interface 等） */
+  kind: string;
+  /** 所在文件路径 */
+  file_path: string;
+  /** 起始行号 */
+  start_line: number;
+  /** 结束行号 */
+  end_line: number;
+  /** FTS5 全文搜索专用：匹配片段（高亮） */
+  snippet?: string;
+}
+
+/**
+ * 存储管理器 — SQLite 文件索引 + FTS5 全文搜索
+ */
+export class StorageManager {
+  private db: Database.Database;
+
+  constructor(storagePath: string = '.agent-content.db') {
+    this.db = new Database(storagePath);
+    this.db.pragma('journal_mode = WAL');
+    this.initTables();
+  }
+
+  private initTables(): void {
+    // 文件索引表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT UNIQUE NOT NULL,
+        mtime INTEGER NOT NULL
+      );
+    `);
+
+    // 符号表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS symbols (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        start_line INTEGER NOT NULL,
+        end_line INTEGER NOT NULL,
+        FOREIGN KEY(file_path) REFERENCES files(path) ON DELETE CASCADE
+      );
+    `);
+
+    // FTS5 全文索引虚拟表（索引符号名 + 类型 + 路径）
+    this.db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
+        name,
+        kind,
+        file_path,
+        content='symbols',
+        content_rowid='id'
+      );
+    `);
+
+    // FTS5 同步触发器: INSERT
+    this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
+        INSERT INTO symbols_fts(rowid, name, kind, file_path)
+        VALUES (new.id, new.name, new.kind, new.file_path);
+      END;
+    `);
+
+    // FTS5 同步触发器: DELETE
+    this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
+        INSERT INTO symbols_fts(symbols_fts, rowid, name, kind, file_path)
+        VALUES ('delete', old.id, old.name, old.kind, old.file_path);
+      END;
+    `);
+
+    // FTS5 同步触发器: UPDATE
+    this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
+        INSERT INTO symbols_fts(symbols_fts, rowid, name, kind, file_path)
+        VALUES ('delete', old.id, old.name, old.kind, old.file_path);
+        INSERT INTO symbols_fts(rowid, name, kind, file_path)
+        VALUES (new.id, new.name, new.kind, new.file_path);
+      END;
+    `);
+  }
+
+  /** 清除指定文件的所有索引数据 */
+  clearFileIndex(filePath: string): void {
+    this.db.prepare('DELETE FROM files WHERE path = ?').run(filePath);
+    this.db.prepare('DELETE FROM symbols WHERE file_path = ?').run(filePath);
+  }
+
+  /** 记录文件信息（路径 + 修改时间） */
+  insertFile(filePath: string, mtime: number): void {
+    this.db.prepare('INSERT INTO files (path, mtime) VALUES (?, ?)').run(filePath, mtime);
+  }
+
+  /** 插入一条符号记录（自动同步到 FTS5 虚拟表） */
+  insertSymbol(name: string, kind: string, filePath: string, startLine: number, endLine: number): void {
+    this.db.prepare(
+      'INSERT INTO symbols (name, kind, file_path, start_line, end_line) VALUES (?, ?, ?, ?, ?)',
+    ).run(name, kind, filePath, startLine, endLine);
+  }
+
+  /** 按符号名 LIKE 搜索（简单场景保留） */
+  searchSymbol(name: string): SearchResult[] {
+    const stmt = this.db.prepare(`
+      SELECT name, kind, file_path, start_line, end_line
+      FROM symbols
+      WHERE name LIKE ?
+      LIMIT 20
+    `);
+    return stmt.all(`%${name}%`) as SearchResult[];
+  }
+
+  /** FTS5 全文搜索 — O(log n)，返回高亮片段 */
+  searchFts(query: string, limit: number = 20): SearchResult[] {
+    const stmt = this.db.prepare(`
+      SELECT
+        s.name,
+        s.kind,
+        s.file_path,
+        s.start_line,
+        s.end_line,
+        snippet(symbols_fts, 1, '<mark>', '</mark>', '...', 32) AS snippet
+      FROM symbols_fts fts
+      JOIN symbols s ON s.rowid = fts.rowid
+      WHERE symbols_fts MATCH ?
+      ORDER BY rank
+      LIMIT ?
+    `);
+    return stmt.all(query, limit) as SearchResult[];
+  }
+
+  /** 关闭数据库连接 */
+  close(): void {
+    this.db.close();
+  }
+}

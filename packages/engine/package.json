@@ -1,0 +1,14 @@
+{
+  "name": "@code-agent/engine",
+  "version": "1.0.0",
+  "description": "Agent 引擎 — 工具注册、权限控制、执行调度、子智能体编排",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "lint": "eslint src/" },
+  "dependencies": {
+    "@code-agent/llm": "workspace:*",
+    "@code-agent/types": "workspace:*",
+    "@types/node": "^25.9.3",
+    "execa": "^9.6.1"
+  }
+}

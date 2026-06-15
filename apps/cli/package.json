@@ -8,6 +8,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
     "start": "node ./dist/index.js"
   },
   "keywords": [],
@@ -15,10 +17,12 @@
   "license": "ISC",
   "packageManager": "pnpm@10.26.1",
   "dependencies": {
-    "@code-agent/context-engine": "workspace:*",
-    "@code-agent/llm-provider": "workspace:*",
-    "@code-agent/shared": "workspace:*",
-    "@code-agent/tool-kit": "workspace:*",
+    "@code-agent/engine": "workspace:*",
+    "@code-agent/codex": "workspace:*",
+    "@code-agent/llm": "workspace:*",
+    "@code-agent/telemetry": "workspace:*",
+    "@code-agent/types": "workspace:*",
+    "@code-agent/tools": "workspace:*",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
     "fast-glob": "^3.3.3",
