@@ -27,10 +27,15 @@ dist-ssr/
 .cache
 *.tsbuildinfo
 
+# SQLite 数据库（不提交）
+*.db
+*.db-shm
+*.db-wal
+
 # 系统文件
 .DS_Store
 Thumbs.db
-
+*.agent-content
 # 临时文件
 *.tmp
 *.temp
