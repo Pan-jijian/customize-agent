@@ -1,51 +1,148 @@
 # Code Agent
 
-企业级开源 AI Code Agent — 6 个 Phase 已实施，10 个包 Monorepo。
+企业级开源 AI Code Agent — 9 包 + 1 App Monorepo，原生 Function Calling 工具协议。
 
 ## 技术栈
 
-- **Runtime**: Node.js 22, TypeScript 6 (ES2022, NodeNext)
-- **Package Manager**: pnpm 10 (workspace)
-- **Build**: tsc + Turbo
-- **LLM**: OpenAI 兼容 API (DeepSeek/OpenAI/Anthropic/Google/OpenRouter/Ollama)
+- **Runtime**: Node.js 22, TypeScript 6.0 (ES2022, NodeNext)
+- **Package Manager**: pnpm 10.26 (workspace)
+- **Build**: tsc + Turbo 2.9
+- **Test**: Vitest 4.1
+- **Lint**: ESLint 10 + typescript-eslint 8
+- **LLM**: OpenAI 兼容 API — 6 个 Provider + AI Gateway 自动路由
 - **Code Intelligence**: tree-sitter (10 语言), vscode-jsonrpc LSP
 - **Storage**: SQLite (better-sqlite3), FTS5
-- **Sandbox**: macOS Seatbelt / Linux Bubblewrap
+- **Sandbox**: macOS Seatbelt / Linux Bubblewrap (内核级，启动 < 10ms)
 
-## 包结构 (10 包)
+## 包结构 (9 包 + 1 App)
 
 ```
 packages/
-├── shared/          — Message, LLMResponse 接口
-├── diff-engine/     — SEARCH/REPLACE 补丁解析 + Unified Diff
-├── llm-provider/    — 6 个 Provider + AI Gateway + 重试
-├── tool-kit/        — 文件读写、沙箱、语法验证、Git
-├── context-engine/  — tree-sitter 索引器、搜索、LSP、Embedding
-├── agent-core/      — ToolRegistry、权限、执行控制、子智能体、Hooks/Skills/MCP
-├── runtime/         — AgentRuntime、EventBus、StateMachine、DI
+├── types/           — 跨包类型契约：Message, LLMResponse, Session, LifecycleAware, 零外部依赖
+├── diff/            — SEARCH/REPLACE 补丁解析 + 模糊容错 + Unified Diff
+├── llm/             — 6 个 Provider + AI Gateway + 重试 + 创建工厂
+├── tools/           — 文件读写、沙箱、终端、Git、tree-sitter 通用语法验证
+├── codex/           — 代码智能：tree-sitter 索引、ripgrep 搜索、LSP、语义 Embedding
+├── engine/          — ToolRegistry、SchemaAdapter、权限、执行控制、上下文管理、规划、子智能体、MCP、Hooks、Skills
+├── runtime/         — 统一调度层：LifecycleAware、拓扑初始化、ComponentState、状态机、事件总线、DI
 ├── memory/          — 跨会话记忆 (SQLite + FTS5)
-├── logger/          — 审计日志 (JSONL)
+├── telemetry/       — 审计日志 (JSONL) + 遥测指标
 └── apps/
-    └── cli/         — Commander+Inquirer CLI 入口
+    └── cli/         — Commander+Inquirer CLI 入口、REPL、TUI 渲染、@file 引用
 ```
+
+### 各包导出清单
+
+| 包 | 主要导出 |
+|----|---------|
+| `@code-agent/types` | `Message`, `LLMResponse`, `ToolCall`, `StreamChunk`, `FunctionDefinition`, `DiffBlock`, `LifecycleAware`, `Session`, `createSession` |
+| `@code-agent/diff` | `DiffEngine.parseBlocks()`, `DiffEngine.applyPatch()`, `DiffEngine.generateUnifiedDiff()` |
+| `@code-agent/llm` | `ILLMProvider` 接口, `DeepSeekProvider`, `OpenAIProvider`, `AnthropicProvider`, `GoogleProvider`, `OpenRouterProvider`, `OllamaProvider`, `createProvider()`, `AIGateway`, `TaskAnalyzer`, `CostTracker`, `HealthManager`, `FallbackManager`, 4 种路由策略 |
+| `@code-agent/tools` | `ToolKit` (文件读写), `SandboxExecutor` (Seatbelt/Bubblewrap), `TerminalTool`, `GitTool`, `UnifiedSyntaxValidator` (tree-sitter 通用) |
+| `@code-agent/codex` | `StorageManager`, `RepositoryIndexer`, `TreeSitterWorkerPool`, `CodeSearcher` (ripgrep), `EmbeddingSearch`, `LSPManager`, 语言配置 |
+| `@code-agent/engine` | `ToolRegistry`, `SchemaAdapter`, `PermissionEngine`, `Capability` 系统, `ExecutionController` (LoopGuard/BudgetManager/GoalManager/CheckpointManager), `ContextManager`, `PlanModeManager`, `SubagentRunner`, `Orchestrator`, `SafeWorktreeManager`, `McpServer`, `McpClient`, `HooksEngine`, `SkillsLoader` |
+| `@code-agent/runtime` | `LifecycleAware` 接口, `topologicalSort()`, `initializeComponents()`, `ComponentStatus`, `ComponentState`, 状态机、事件总线、DI 容器 |
+| `@code-agent/memory` | `MemoryManager` (跨会话记忆 CRUD) |
+| `@code-agent/telemetry` | `AuditLogger` (JSONL 审计日志), `MetricsCollector` (遥测指标) |
+
+### CLI 工具集 (8 个)
+
+| 工具 | 功能 | 审批 |
+|------|------|:--:|
+| `search_symbol` | SQLite FTS 符号搜索 | 否 |
+| `read_file` | 路径沙箱内读文件 | 否 |
+| `list_files` | 列出项目根目录文件 | 否 |
+| `modify_file` | SEARCH/REPLACE 修改 + 回滚 | 是 |
+| `execute_command` | 沙箱内终端执行 | 是 |
+| `git_status` | 查看 Git 工作树状态 | 否 |
+| `git_diff` | 查看 Git 未暂存变更 | 否 |
+| `git_commit` | 暂存并提交 | 是 |
 
 ## 常用命令
 
 ```bash
 pnpm install                          # 安装依赖
-pnpm run typecheck                    # 全量类型检查
-pnpm run build                        # 全量构建
+pnpm run typecheck                    # 全量类型检查 (turbo)
+pnpm run build                        # 全量构建 (turbo)
 pnpm --filter <package> run typecheck # 单包类型检查
+pnpm --filter <package> run build     # 单包构建
+pnpm run test                         # Vitest 单元测试
+pnpm run test:watch                   # Vitest 监听模式
+pnpm run test:e2e                     # E2E 测试 (tests/e2e/)
+pnpm run lint                         # ESLint 全量检查
+pnpm run check                        # typecheck + lint + test 一键检查
 pnpm start:cli                        # 启动 CLI
 ```
 
 ## 核心架构
 
-- **工具分发**: ToolRegistry.register() → SchemaAdapter.toOpenAI/Anthropic() → Provider.chat()
-- **执行控制**: ExecutionController = LoopGuard + BudgetManager + GoalManager
-- **上下文**: ContextManager = ContextSource[] 收集 → 优先级排序 → token 裁剪
-- **权限**: PermissionEngine (allow/deny/ask) + Capability 系统
-- **子智能体**: SubagentRunner 独立上下文 → SubagentResult.summary → Orchestrator 汇总
+### 工具分发链
+
+```
+ToolRegistry.register() → SchemaAdapter.toOpenAI/Anthropic() → Provider.chat(tools)
+AgentExecutor 使用原生 function calling，不再解析 XML
+```
+
+### 执行控制
+
+```
+ExecutionController = LoopGuard (最大迭代熔断) + BudgetManager (token 预算) + GoalManager (目标检测)
+CheckpointManager — 文件修改前自动保存快照，失败时回滚
+```
+
+### 上下文管理
+
+```
+ContextManager = ContextSource[] 收集 → ChunkPriority 排序 → token 裁剪
+内置源: SystemPromptSource, ToolDefinitionSource, ToolResultSource
+```
+
+### 权限系统
+
+```
+PermissionEngine (allow/deny/ask) + Capability 系统
+TOOL_CAPABILITY_MAP — 每个工具绑定所需权能
+ROLE_CAPABILITY_MAP — 子智能体角色权限继承
+```
+
+### AI Gateway 自动路由
+
+```
+TaskAnalyzer → 任务分类 (代码生成/问答/搜索/重构)
+  → RoutingStrategy (CostFirst | QualityFirst | LatencyFirst | PrivacyFirst)
+    → HealthManager (健康检查) → 选择最优 Provider
+      → FallbackManager (故障转移)
+```
+
+### 子智能体编排
+
+```
+SubagentRunner → 独立上下文 + 独立工作树 (SafeWorktreeManager)
+  → SubagentResult.summary → Orchestrator 汇总
+CollaborationMode: sequential | parallel | hierarchical
+```
+
+### MCP 协议
+
+```
+McpServer — 将内部工具暴露给外部 AI 客户端 (Claude Desktop, Cursor)
+McpClient — 连接社区 MCP Server 生态 (GitHub, Postgres, Jira)
+```
+
+### Hooks & Skills
+
+```
+HooksEngine — PreToolUse / PostToolUse / Stop 事件钩子
+SkillsLoader — Markdown 定义的技能包，自动触发或命令调用
+```
+
+### 生命周期管理 (ADR-16)
+
+```
+LifecycleAware 接口 → topologicalSort() → initializeComponents()
+所有组件统一 init/shutdown/healthCheck/restart/reload 契约
+DAG 拓扑排序保证初始化顺序，依赖故障时自动降级
+```
 
 ## 环境变量
 
@@ -60,7 +157,20 @@ CODE_AGENT_OLLAMA_API_KEY=
 
 ## 代码风格
 
-- 严格 TypeScript (strict: true, noUncheckedIndexedAccess, noUnusedLocals)
-- ES Module (NodeNext module resolution)
-- 接口优先: ILLMProvider > 具体 Provider, ContextSource > ad-hoc 收集
-- 工具注册: 新增工具只需 registry.register()，不修改 executor
+- 严格 TypeScript (`strict: true`, `noUncheckedIndexedAccess`, `noUnusedLocals`, `noUnusedParameters`)
+- ES Module (`NodeNext` module resolution)
+- 接口优先: `ILLMProvider` > 具体 Provider, `ContextSource` > ad-hoc 收集
+- 工具注册: 新增工具只需 `registry.register()`，不修改 executor
+- 类型导入: `import type { ... }` 用于仅类型用途
+- 零测试容忍度: 每个包应有 `__tests__/` 目录
+
+## 关键设计决策 (ADR)
+
+| ADR | 决策 | 理由 |
+|-----|------|------|
+| ADR-1 | 内部工具走函数调用，MCP 仅用于外部集成 | 避免进程内 JSON-RPC 序列化开销 |
+| ADR-2 | Seatbelt/Bubblewrap 为主沙箱，容器可选 | 内核级隔离，启动 < 10ms，无 daemon 依赖 |
+| ADR-3 | tree-sitter 统一代码智能 + 语法验证 | 一套 DFS 覆盖 10 语言，无需各语言编译器 |
+| ADR-4 | LSP 使用 vscode-jsonrpc 标准库 | 不重复造轮子，VS Code 数百万用户验证 |
+| ADR-5 | AI Gateway 按任务类型/成本/质量自动路由 | 核心差异化能力，避免单模型锁定 |
+| ADR-16 | LifecycleAware 统一组件生命周期 | `restart()` 严禁更换实例指针，防止 Stale Reference |

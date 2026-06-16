@@ -139,11 +139,14 @@ export class SandboxExecutor {
     ;; 允许读项目目录
     (allow file-read* (subpath "${root}"))
 
+    ;; 允许读 OS 动态链接库（所有命令必需）
+    (allow file-read* (subpath "/usr/lib"))
+    (allow file-read* (subpath "/bin"))
+    (allow file-read* (subpath "/usr/bin"))
     ;; 允许读 node/pnpm 运行时
     (allow file-read* (subpath "${home}/.nvm"))
     (allow file-read* (subpath "/usr/local/bin"))
     (allow file-read* (subpath "/opt/homebrew"))
-    (allow file-read* (subpath "/usr/bin"))
 
     ;; 允许进程执行和管道通信
     (allow process-exec)
@@ -180,6 +183,7 @@ export class SandboxExecutor {
       '--ro-bind', '/lib', '/lib',
       '--ro-bind', '/lib64', '/lib64',
       '--ro-bind', '/bin', '/bin',
+      '--ro-bind', '/sbin', '/sbin',
       '--ro-bind', '/etc', '/etc',
       bindFlag, root, root,
       '--chdir', cwd ?? root,
