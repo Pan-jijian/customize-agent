@@ -82,9 +82,7 @@ export class TuiInput {
     this.hi = this.hist.length;
   }
 
-  // ═══════════════════════════════════════════════════
   // read 读取输入
-  // ═══════════════════════════════════════════════════
 
   async read(): Promise<string> {
     return new Promise<string>(resolve => {
@@ -187,9 +185,7 @@ export class TuiInput {
     });
   }
 
-  // ═══════════════════════════════════════════════════
   // history 历史导航
-  // ═══════════════════════════════════════════════════
 
   private _hUp(st: St): void {
     if (!this.hist.length) return;
@@ -215,9 +211,7 @@ export class TuiInput {
     this._sync(st);
   }
 
-  // ═══════════════════════════════════════════════════
   // dropdown apply 下拉应用
-  // ═══════════════════════════════════════════════════
 
   private _apply(st: St, it: DropdownItem): void {
     const end = st.fEnd >= 0 ? st.fEnd : st.text.length;
@@ -227,9 +221,7 @@ export class TuiInput {
     this._draw(st);
   }
 
-  // ═══════════════════════════════════════════════════
   // dropdown builder 下拉构建
-  // ═══════════════════════════════════════════════════
 
   private _sync(st: St): void {
     st.dd = 'none'; st.items = []; st.fStart = -1; st.fEnd = -1;
@@ -272,9 +264,7 @@ export class TuiInput {
     this._draw(st);
   }
 
-  // ═══════════════════════════════════════════════════
   // draw — 单次写入，一次 clearBelow，无逐行 clearLine
-  // ═══════════════════════════════════════════════════
 
   private _draw(st: St): void {
     const pad = '  ';
@@ -336,9 +326,7 @@ export class TuiInput {
     this._prevLines = totalLines;
   }
 
-  // ═══════════════════════════════════════════════════
   // file size cache 文件大小缓存
-  // ═══════════════════════════════════════════════════
 
   private _sz(rel: string): string {
     const c = this.sz.get(rel);

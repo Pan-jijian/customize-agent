@@ -1,6 +1,4 @@
-// ============================================================
 // 子组件类型定义
-// ============================================================
 
 /** 工具调用哈希条目 — 用于语义死循环检测 */
 interface HashEntry {
@@ -42,9 +40,7 @@ export interface EvalResult {
   reason: string;
 }
 
-// ============================================================
 // LoopGuard — 语义死循环检测
-// ============================================================
 
 /** 连续 N 轮相同的 toolName+args+result 哈希 → 判定为死循环 */
 export class LoopGuard {
@@ -109,9 +105,7 @@ export class LoopGuard {
   }
 }
 
-// ============================================================
 // BudgetManager — 财务熔断
-// ============================================================
 
 /** 对标 Claude Code ANTHROPIC_COST_BUDGET */
 export class BudgetManager {
@@ -148,9 +142,7 @@ export class BudgetManager {
   reset(): void { this.usedCost = 0; }
 }
 
-// ============================================================
 // GoalManager — Goal 完成检测
-// ============================================================
 
 /** 触发 Goal 检测的里程碑事件 */
 const GOAL_TRIGGER_EVENTS = new Set([
@@ -245,9 +237,7 @@ export class GoalManager {
   }
 }
 
-// ============================================================
 // CheckpointManager — 人机检查点
-// ============================================================
 
 /** 对标 Codex CLI turn_budget 模式 — 每 N 轮弹窗询问 */
 export class CheckpointManager {
@@ -268,9 +258,7 @@ export class CheckpointManager {
   }
 }
 
-// ============================================================
 // ExecutionController — 编排器（委托给各子组件）
-// ============================================================
 
 export interface ExecutionControllerConfig {
   /** 语义死循环检测连续次数阈值 */

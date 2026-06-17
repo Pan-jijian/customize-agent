@@ -1,10 +1,8 @@
 import type { Message } from '@code-agent/types';
 
-// ============================================================
 // LifecycleAware — 统一组件生命周期接口 (ADR-16)
 // 所有需要 init/shutdown 的组件必须实现此接口。
 // restart() 严禁更换类实例指针（就地重置契约），防止 Stale Reference。
-// ============================================================
 
 export interface LifecycleAware {
   readonly name: string;
@@ -147,9 +145,7 @@ export async function shutdownComponents(states: ComponentState[]): Promise<void
   }
 }
 
-// ============================================================
 // Session
-// ============================================================
 
 /** 会话创建配置 */
 export interface SessionConfig {
@@ -197,9 +193,7 @@ export function createSession(config: SessionConfig): Session {
   };
 }
 
-// ============================================================
 // TaskState — 状态机 (ADR-19)
-// ============================================================
 
 export enum TaskState {
   IDLE = 'IDLE',
@@ -349,9 +343,7 @@ export class StateMachine {
   }
 }
 
-// ============================================================
 // EventBus — 类型安全的三层分层事件总线
-// ============================================================
 
 // L0 — 系统事件
 export interface SystemEvents {
@@ -436,9 +428,7 @@ export class EventBus {
   }
 }
 
-// ============================================================
 // CancellationToken
-// ============================================================
 
 /**
  * 取消令牌 — 支持取消传播，长时间操作可检查 isCancelled 提前退出。
@@ -484,9 +474,7 @@ export class CancellationToken {
   }
 }
 
-// ============================================================
 // ExecutionContext — 依赖注入容器
-// ============================================================
 
 /**
  * 执行上下文 — 运行时依赖注入容器。
@@ -520,9 +508,7 @@ export class ExecutionContext {
   }
 }
 
-// ============================================================
 // Checkpoint — 会话检查点
-// ============================================================
 
 /** 会话检查点 — 用于 Resume 时恢复状态 */
 export interface Checkpoint {
@@ -542,9 +528,7 @@ export interface Checkpoint {
   metadata: Record<string, unknown>;
 }
 
-// ============================================================
 // Runtime Config & TaskResult
-// ============================================================
 
 /** 运行时配置 */
 export interface RuntimeConfig {

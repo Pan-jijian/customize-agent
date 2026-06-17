@@ -35,9 +35,7 @@ export interface ContextSource {
   collect(session: unknown, currentRound: number): Promise<ContextChunk[]>;
 }
 
-// ============================================================
 // 内置 ContextSource 实现
-// ============================================================
 
 /** System Prompt — 优先级 0，永不裁剪 */
 export class SystemPromptSource implements ContextSource {
@@ -85,9 +83,7 @@ export class ToolResultSource implements ContextSource {
   }
 }
 
-// ============================================================
 // ContextManager — 收集 → 排序 → 裁剪 → 注入管道
-// ============================================================
 
 export interface ContextManagerConfig {
   /** 上下文最大 token 预算 */

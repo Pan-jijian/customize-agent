@@ -57,9 +57,7 @@ export class AgentRuntime {
     this.context.register('context', this.context);
   }
 
-  // ============================================================
   // 静态工厂方法
-  // ============================================================
 
   /** 创建新的 AgentRuntime 实例（内部执行拓扑排序 → init 所有组件） */
   static async create(config: RuntimeConfig): Promise<AgentRuntime> {
@@ -85,9 +83,7 @@ export class AgentRuntime {
     return runtime;
   }
 
-  // ============================================================
   // 组件生命周期管理
-  // ============================================================
 
   /** 注册 LifecycleAware 组件并注入 DI 容器 */
   registerComponent(component: LifecycleAware): void {
@@ -121,9 +117,7 @@ export class AgentRuntime {
     this.eventBus.emit('session:ended', { sessionId: this.session.id, reason: 'destroy' });
   }
 
-  // ============================================================
   // 健康检查 + 自愈恢复
-  // ============================================================
 
   /** 对所有组件执行健康检查，不健康组件自动触发自愈 */
   async healthCheck(): Promise<Map<string, boolean>> {
@@ -178,9 +172,7 @@ export class AgentRuntime {
     }
   }
 
-  // ============================================================
   // 任务执行
-  // ============================================================
 
   /** 启动主循环执行任务（executeStep 由 Executor 提供） */
   async run(task: string, executeStep: (runtime: AgentRuntime, round: number) => Promise<boolean>): Promise<TaskResult> {
@@ -234,9 +226,7 @@ export class AgentRuntime {
     this.loopToken?.cancel(reason);
   }
 
-  // ============================================================
   // 物理世界调和（Resume 用）
-  // ============================================================
 
   /** 执行物理世界调和：扫描孤儿 Worktree + 通知组件恢复内部状态 */
   async performReconciliation(checkpoint: Checkpoint): Promise<ReconciliationResult> {

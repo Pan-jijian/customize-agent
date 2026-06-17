@@ -3,9 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import type { Message } from '@code-agent/types';
 
-// ============================================================
 // 审计事件类型
-// ============================================================
 
 export type AuditEventType =
   | 'session_metadata'
@@ -97,9 +95,7 @@ export class AuditLogger {
     return this.events.length;
   }
 
-  // ============================================================
   // 便捷方法 — 每种事件类型一个方法
-  // ============================================================
 
   /** 记录会话元数据 */
   async logSessionMetadata(meta: SessionMetadata): Promise<void> {
@@ -154,9 +150,7 @@ export class AuditLogger {
     await this.log('task_finish', { summary, costUsd, rounds });
   }
 
-  // ============================================================
   // 静态方法 — 会话恢复与列表
-  // ============================================================
 
   /**
    * 从 JSONL 日志重建对话历史（用于 --resume）。

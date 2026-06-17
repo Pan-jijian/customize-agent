@@ -61,9 +61,7 @@ export class Repl {
     console.log('\n👋 Goodbye.');
   }
 
-  // ═══════════════════════════════════════
   // @file 解析
-  // ═══════════════════════════════════════
 
   /** 扫描文本中的 @file 引用，读取内容并拼接到 prompt */
   private async _resolveAtRefs(text: string): Promise<string> {
@@ -117,9 +115,7 @@ export class Repl {
     return cleanText ? `${cleanText}\n\n参考文件:\n${ctx}` : `请分析以下文件:\n${ctx}`;
   }
 
-  // ═══════════════════════════════════════
   // 任务执行
-  // ═══════════════════════════════════════
 
   private async _execute(input: string): Promise<void> {
     this.history.push({ role: 'user', content: input });
@@ -146,9 +142,7 @@ export class Repl {
     }
   }
 
-  // ═══════════════════════════════════════
   // /commands 命令分发
-  // ═══════════════════════════════════════
 
   private async _command(raw: string): Promise<boolean> {
     const sp = raw.indexOf(' ');
