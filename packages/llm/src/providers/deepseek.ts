@@ -2,6 +2,9 @@ import OpenAI from 'openai';
 import type { Message, ToolCall } from '@code-agent/types';
 import type { ILLMProvider, LLMResponse, ChatOptions, ModelCapabilities, StreamChunk, FunctionDefinition } from '../interface.js';
 import { withRetry } from '../network/retry.js';
+import { countTokensFromMessages } from '../utils/tokens.js';
+import { openAIHealthCheck } from '../utils/messages.js';
+import { createLLMResponse } from '../utils/response.js';
 
 /** DeepSeek 模型能力声明 */
 const DEEPSEEK_CAPABILITIES: ModelCapabilities = {
@@ -111,7 +114,7 @@ export class DeepSeekProvider implements ILLMProvider {
       if (!choice) throw new Error('LLM returned empty choices');
 
       const msg = choice.message as { reasoning_content?: string; content?: string | null };
-      return {
+      return createLLMResponse({
         content: msg.content ?? '',
         thinkingContent: msg.reasoning_content,
         toolCalls: extractToolCalls(choice),
@@ -119,7 +122,7 @@ export class DeepSeekProvider implements ILLMProvider {
           promptTokens: response.usage.prompt_tokens,
           completionTokens: response.usage.completion_tokens,
         } : undefined,
-      };
+      });
     });
   }
 
@@ -204,28 +207,22 @@ export class DeepSeekProvider implements ILLMProvider {
 
         onChunk({ type: 'done' });
 
-        return {
+        return createLLMResponse({
           content,
           thinkingContent: thinkingContent || undefined,
           toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
           usage: { promptTokens, completionTokens },
-        };
+        });
       },
-      { onRetry: (_a, _e) => { onChunk({ type: 'reset' }); } },
+      { onRetry: () => { onChunk({ type: 'reset' }); } },
     );
   }
 
   async countTokens(messages: Message[]): Promise<number> {
-    const text = messages.map(m => m.content).join('\n');
-    return Math.ceil(text.length / 4);
+    return countTokensFromMessages(messages);
   }
 
   async healthCheck(): Promise<boolean> {
-    try {
-      const result = await this.client.models.list();
-      return result.data.length > 0;
-    } catch {
-      return false;
-    }
+    return openAIHealthCheck(this.client);
   }
 }

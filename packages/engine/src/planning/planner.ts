@@ -1,3 +1,5 @@
+import { Capability } from '../security/capability.js';
+
 /** 执行计划的单一步骤 */
 export interface PlanStep {
   /** 步骤编号 */
@@ -79,11 +81,11 @@ Output ONLY the following JSON structure (no markdown wrapping):
  */
 export class PlanModeManager {
   /** Planner 可用的 Capability（只读 + 搜索 + LSP + Embedding） */
-  static readonly PLANNER_CAPABILITIES = [
-    'read_code',
-    'search_symbol',
-    'lsp_query',
-    'embedding_search',
+  static readonly PLANNER_CAPABILITIES: Capability[] = [
+    Capability.READ_CODE,
+    Capability.SEARCH_SYMBOL,
+    Capability.LSP_QUERY,
+    Capability.EMBEDDING_SEARCH,
   ];
 
   /** 获取 Planner System Prompt */

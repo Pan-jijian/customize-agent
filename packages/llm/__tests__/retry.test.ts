@@ -85,13 +85,13 @@ describe('withRetry', () => {
     expect(onRetry).toHaveBeenCalledWith(1, expect.any(Error));
   });
 
-  it('重试时应触发 onStreamReset 回调', async () => {
-    const onStreamReset = vi.fn();
+  it('重试时应触发 onRetry 回调', async () => {
+    const onRetry = vi.fn();
     const fn = vi.fn()
       .mockRejectedValueOnce(new Error('network error'))
       .mockResolvedValue('ok');
 
-    await withRetry(fn, { baseDelayMs: 10, onStreamReset });
-    expect(onStreamReset).toHaveBeenCalledTimes(1);
+    await withRetry(fn, { baseDelayMs: 10, onRetry });
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
 });

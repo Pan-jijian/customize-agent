@@ -10,8 +10,6 @@
     "@code-agent/diff": "workspace:*",
     "@types/node": "^25.9.3",
     "execa": "^9.6.1",
-    "fast-glob": "^3.3.3",
-    "tree-sitter": "^0.22.0",
-    "yaml": "^2.9.0"
+    "tree-sitter": "^0.22.0"
   }
 }

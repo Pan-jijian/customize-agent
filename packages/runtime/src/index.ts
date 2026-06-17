@@ -1,41 +1,32 @@
-import type { Message } from '@code-agent/types';
+import {
+  type LifecycleAware,
+  type ComponentStatus,
+  type ComponentState,
+  type SessionConfig,
+  type Session,
+  type SessionStatus,
+  createSession,
+  TaskState,
+  type TaskStateEvent,
+  type Checkpoint,
+  type RuntimeConfig,
+  type TaskResult,
+} from '@code-agent/types';
 
-// LifecycleAware — 统一组件生命周期接口 (ADR-16)
-// 所有需要 init/shutdown 的组件必须实现此接口。
-// restart() 严禁更换类实例指针（就地重置契约），防止 Stale Reference。
-
-export interface LifecycleAware {
-  readonly name: string;
-  readonly dependencies?: string[];
-
-  init?(): Promise<void>;
-  healthCheck?(): Promise<boolean>;
-  shutdown?(): Promise<void>;
-
-  /** 自恢复：shutdown → init，但严禁更换类实例指针 (ADR-16) */
-  restart?(): Promise<void>;
-  /** 运行时热更新配置 */
-  reload?(config: Record<string, unknown>): Promise<void>;
-  /** 依赖组件故障回调，通知本组件进入降级模式 */
-  onDependencyFailure?(failedComponent: string): Promise<void>;
-  /** Resume 时恢复内部状态 */
-  onRestore?(snapshot: unknown): Promise<void>;
-}
-
-/** 组件运行状态 */
-export type ComponentStatus = 'uninitialized' | 'initializing' | 'healthy' | 'degraded' | 'failed' | 'shutdown';
-
-/** 组件状态追踪信息 */
-export interface ComponentState {
-  /** 组件实例 */
-  component: LifecycleAware;
-  /** 当前状态 */
-  status: ComponentStatus;
-  /** 连续失败次数（自愈用） */
-  failureCount: number;
-  /** 启动时间戳 */
-  startedAt?: number;
-}
+// ── 从 @code-agent/types 重导出纯类型定义 ──
+export type {
+  LifecycleAware,
+  ComponentStatus,
+  ComponentState,
+  SessionConfig,
+  Session,
+  SessionStatus,
+  TaskStateEvent,
+  Checkpoint,
+  RuntimeConfig,
+  TaskResult,
+};
+export { createSession, TaskState };
 
 /**
  * 拓扑排序：按 dependencies 构建 DAG，确定初始化顺序。
@@ -126,6 +117,8 @@ export async function initializeComponents(
 /**
  * 按初始化逆序 shutdown 所有组件。单个超时 5s。
  */
+const SHUTDOWN_TIMEOUT = Symbol('timeout');
+
 export async function shutdownComponents(states: ComponentState[]): Promise<void> {
   const reversed = [...states].reverse();
   for (const state of reversed) {
@@ -133,9 +126,9 @@ export async function shutdownComponents(states: ComponentState[]): Promise<void
     try {
       const result = await Promise.race([
         state.component.shutdown?.(),
-        new Promise<void>(resolve => setTimeout(resolve, 5000)),
+        new Promise<symbol>(resolve => setTimeout(() => resolve(SHUTDOWN_TIMEOUT), 5000)),
       ]);
-      if (result === undefined) {
+      if (result === SHUTDOWN_TIMEOUT) {
         console.warn(`[Lifecycle] Shutdown timeout for "${state.component.name}"`);
       }
     } catch (err) {
@@ -145,96 +138,9 @@ export async function shutdownComponents(states: ComponentState[]): Promise<void
   }
 }
 
-// Session
+// Session / TaskState — 从 @code-agent/types 重导出，runtime 仅保留值实现
 
-/** 会话创建配置 */
-export interface SessionConfig {
-  /** 唯一会话 ID */
-  id: string;
-  /** 项目工作目录 */
-  cwd: string;
-  /** 任务描述 */
-  task?: string;
-  /** 附加元数据 */
-  metadata?: Record<string, unknown>;
-}
-
-/** 会话实体 — 整个任务生命周期的核心数据 */
-export interface Session {
-  /** 唯一会话 ID */
-  readonly id: string;
-  /** 项目工作目录 */
-  readonly cwd: string;
-  /** 创建时间戳 */
-  readonly createdAt: number;
-  /** 当前任务 */
-  task?: string;
-  /** 会话状态 */
-  status: SessionStatus;
-  /** 附加元数据 */
-  metadata: Record<string, unknown>;
-  /** 对话历史 */
-  history: Message[];
-}
-
-/** 会话状态枚举 */
-export type SessionStatus = 'active' | 'suspended' | 'completed' | 'failed' | 'cancelled';
-
-/** 创建新的会话实例 */
-export function createSession(config: SessionConfig): Session {
-  return {
-    id: config.id,
-    cwd: config.cwd,
-    createdAt: Date.now(),
-    task: config.task,
-    status: 'active',
-    metadata: config.metadata ?? {},
-    history: [],
-  };
-}
-
-// TaskState — 状态机 (ADR-19)
-
-export enum TaskState {
-  IDLE = 'IDLE',
-  PLANNING = 'PLANNING',
-  WAIT_APPROVAL = 'WAIT_APPROVAL',
-  EXECUTING = 'EXECUTING',
-  TESTING = 'TESTING',
-  REVIEWING = 'REVIEWING',
-  FINISHED = 'FINISHED',
-  FAILED = 'FAILED',
-  CANCELLED = 'CANCELLED',
-  // 子智能体/Worktree 扩展状态
-  WAIT_SUBTASK = 'WAIT_SUBTASK',
-  MERGING = 'MERGING',
-  CONFLICT_RESOLVING = 'CONFLICT_RESOLVING',
-  PAUSED = 'PAUSED',
-  RECOVERING = 'RECOVERING',
-}
-
-/** 状态迁移事件 — 触发状态机流转 */
-export type TaskStateEvent =
-  | 'start_planning'
-  | 'plan_complete'
-  | 'user_approved'
-  | 'user_rejected'
-  | 'execution_start'
-  | 'execution_complete'
-  | 'testing_start'
-  | 'testing_complete'
-  | 'review_start'
-  | 'review_complete'
-  | 'task_finish'
-  | 'error'
-  | 'cancel'
-  | 'suspend'
-  | 'resume'
-  | 'subtask_dispatch'
-  | 'subtask_complete'
-  | 'merge_start'
-  | 'merge_conflict'
-  | 'merge_complete';
+// ── 状态机 (StateMachine) ──
 
 type TransitionMap = Partial<Record<TaskState, Partial<Record<TaskStateEvent, TaskState>>>>;
 
@@ -508,50 +414,4 @@ export class ExecutionContext {
   }
 }
 
-// Checkpoint — 会话检查点
-
-/** 会话检查点 — 用于 Resume 时恢复状态 */
-export interface Checkpoint {
-  /** 会话 ID */
-  sessionId: string;
-  /** 任务状态 */
-  taskState: TaskState;
-  /** 当前轮数 */
-  round: number;
-  /** 已花费费用 */
-  costUsd: number;
-  /** 检查点时间戳 */
-  timestamp: number;
-  /** 对话历史 */
-  history: Message[];
-  /** 附加元数据 */
-  metadata: Record<string, unknown>;
-}
-
-// Runtime Config & TaskResult
-
-/** 运行时配置 */
-export interface RuntimeConfig {
-  /** 项目工作目录 */
-  cwd: string;
-  /** 会话 ID（可选，不指定则自动生成） */
-  sessionId?: string;
-  /** 最大预算上限（美元，默认 $3.00） */
-  maxBudgetUsd?: number;
-  /** 检查点间隔（轮数，默认 15） */
-  checkpointInterval?: number;
-}
-
-/** 任务执行结果 */
-export interface TaskResult {
-  /** 是否成功 */
-  success: boolean;
-  /** 结果摘要 */
-  summary: string;
-  /** 实际执行轮数 */
-  rounds: number;
-  /** 实际花费（美元） */
-  costUsd: number;
-  /** 执行耗时（毫秒） */
-  durationMs: number;
-}
+// Checkpoint / RuntimeConfig / TaskResult — 已从 @code-agent/types 重导出

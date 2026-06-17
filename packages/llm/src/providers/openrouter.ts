@@ -1,7 +1,11 @@
 import OpenAI from 'openai';
 import type { Message } from '@code-agent/types';
-import type { ILLMProvider, LLMResponse, ChatOptions, ModelCapabilities, StreamChunk } from '../interface.js';
+import type { ILLMProvider, LLMResponse, ChatOptions, ModelCapabilities, StreamChunk, ToolCall } from '../interface.js';
 import { withRetry } from '../network/retry.js';
+import { toOpenAIMessages } from '../utils/messages.js';
+import { countTokensFromMessages } from '../utils/tokens.js';
+import { openAIHealthCheck } from '../utils/messages.js';
+import { createLLMResponse } from '../utils/response.js';
 
 const OPENROUTER_CAPABILITIES: ModelCapabilities = {
   maxContextTokens: 200_000,
@@ -40,21 +44,29 @@ export class OpenRouterProvider implements ILLMProvider {
     return withRetry(async () => {
       const response = await this.client.chat.completions.create({
         model: this.modelName,
-        messages: messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+        messages: toOpenAIMessages(messages),
         temperature: options?.temperature ?? 0.2,
         max_tokens: options?.maxTokens,
+        tools: options?.tools?.length ? options.tools.map(t => ({ type: 'function' as const, function: t })) : undefined,
       });
 
       const choice = response.choices[0];
       if (!choice) throw new Error('LLM returned empty choices');
 
-      return {
+      const toolCalls: ToolCall[] | undefined = choice.message.tool_calls?.map(tc => {
+        const fn = (tc as { function?: { name?: string; arguments?: string } }).function;
+        try { return { id: tc.id, name: fn?.name ?? '', arguments: JSON.parse(fn?.arguments ?? '{}') }; }
+        catch { return { id: tc.id, name: fn?.name ?? '', arguments: {} }; }
+      });
+
+      return createLLMResponse({
         content: choice.message.content ?? '',
+        toolCalls: toolCalls?.length ? toolCalls : undefined,
         usage: response.usage ? {
           promptTokens: response.usage.prompt_tokens,
           completionTokens: response.usage.completion_tokens,
         } : undefined,
-      };
+      });
     });
   }
 
@@ -67,15 +79,17 @@ export class OpenRouterProvider implements ILLMProvider {
       async () => {
         const stream = await this.client.chat.completions.create({
           model: this.modelName,
-          messages: messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+          messages: toOpenAIMessages(messages),
           temperature: options?.temperature ?? 0.2,
           max_tokens: options?.maxTokens,
           stream: true,
+          tools: options?.tools?.length ? options.tools.map(t => ({ type: 'function' as const, function: t })) : undefined,
         });
 
         let content = '';
         let promptTokens = 0;
         let completionTokens = 0;
+        const toolCalls = new Map<number, { id: string; name: string; args: string }>();
 
         for await (const chunk of stream) {
           const delta = chunk.choices[0]?.delta;
@@ -83,30 +97,41 @@ export class OpenRouterProvider implements ILLMProvider {
             content += delta.content;
             onChunk({ type: 'content', text: delta.content });
           }
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index;
+              if (!toolCalls.has(idx)) toolCalls.set(idx, { id: tc.id ?? '', name: tc.function?.name ?? '', args: '' });
+              const acc = toolCalls.get(idx)!;
+              if (tc.id) acc.id = tc.id;
+              if (tc.function?.name) acc.name = tc.function.name;
+              if (tc.function?.arguments) acc.args += tc.function.arguments;
+            }
+          }
           if (chunk.usage) {
             promptTokens = chunk.usage.prompt_tokens;
             completionTokens = chunk.usage.completion_tokens;
           }
         }
 
+        for (const [, tc] of toolCalls) {
+          if (tc.id) {
+            try { onChunk({ type: 'tool_call', call: { id: tc.id, name: tc.name, arguments: JSON.parse(tc.args || '{}') } }); }
+            catch { /* skip malformed */ }
+          }
+        }
+
         onChunk({ type: 'done' });
-        return { content, usage: { promptTokens, completionTokens } };
+        return createLLMResponse({ content, usage: { promptTokens, completionTokens } });
       },
       { onRetry: () => { onChunk({ type: 'reset' }); } },
     );
   }
 
   async countTokens(messages: Message[]): Promise<number> {
-    const text = messages.map(m => m.content).join('\n');
-    return Math.ceil(text.length / 4);
+    return countTokensFromMessages(messages);
   }
 
   async healthCheck(): Promise<boolean> {
-    try {
-      const result = await this.client.models.list();
-      return result.data.length > 0;
-    } catch {
-      return false;
-    }
+    return openAIHealthCheck(this.client);
   }
 }

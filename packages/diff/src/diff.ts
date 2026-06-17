@@ -48,28 +48,108 @@ export class DiffEngine {
 
   /**
    * 生成 Unified Diff 格式的预览 —— 在修改前展示给用户确认用。
+   * 使用 LCS（最长公共子序列）算法进行行级内容匹配。
    */
   static generateUnifiedDiff(
     filename: string, oldStr: string, newStr: string,
   ): string {
     const oldLines = oldStr.split('\n');
     const newLines = newStr.split('\n');
+
+    // 计算 LCS 表
+    const lcs = DiffEngine._lcsMatrix(oldLines, newLines);
+    // 回溯生成 diff hunks
+    const hunks = DiffEngine._backtrackHunks(oldLines, newLines, lcs);
+
+    if (hunks.length === 0) return '(无变化)';
+
     let preview = `\`\`\`diff\n--- a/${filename}\n+++ b/${filename}\n`;
+    for (const hunk of hunks) {
+      preview += `@@ -${hunk.oldStart + 1},${hunk.oldCount} +${hunk.newStart + 1},${hunk.newCount} @@\n`;
+      for (const line of hunk.lines) {
+        preview += line + '\n';
+      }
+    }
+    preview += `\`\`\``;
+    return preview;
+  }
 
-    const maxLen = Math.max(oldLines.length, newLines.length);
-    let hasChanges = false;
+  /** 计算行级 LCS 长度矩阵 */
+  private static _lcsMatrix(a: string[], b: string[]): number[][] {
+    const m = a.length;
+    const n = b.length;
+    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        if (a[i - 1] === b[j - 1]) {
+          dp[i]![j] = dp[i - 1]![j - 1]! + 1;
+        } else {
+          dp[i]![j] = Math.max(dp[i - 1]![j]!, dp[i]![j - 1]!);
+        }
+      }
+    }
+    return dp;
+  }
 
-    for (let i = 0; i < maxLen; i++) {
-      const oldLine = oldLines[i] ?? '';
-      const newLine = newLines[i] ?? '';
-      if (oldLine !== newLine) {
-        hasChanges = true;
-        if (oldLines[i] !== undefined) preview += `-${oldLine}\n`;
-        if (newLines[i] !== undefined) preview += `+${newLine}\n`;
+  /** 回溯 LCS 矩阵生成 diff hunks */
+  private static _backtrackHunks(
+    oldLines: string[], newLines: string[], dp: number[][],
+  ): Array<{ oldStart: number; oldCount: number; newStart: number; newCount: number; lines: string[] }> {
+    // 1. 回溯生成编辑序列
+    const edits: Array<{ type: '+' | '-' | ' '; line: string }> = [];
+    let i = oldLines.length;
+    let j = newLines.length;
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+        edits.unshift({ type: ' ', line: oldLines[i - 1]! });
+        i--; j--;
+      } else if (j > 0 && (i === 0 || dp[i]![j - 1]! >= dp[i - 1]![j]!)) {
+        edits.unshift({ type: '+', line: newLines[j - 1]! });
+        j--;
+      } else {
+        edits.unshift({ type: '-', line: oldLines[i - 1]! });
+        i--;
       }
     }
 
-    preview += `\`\`\``;
-    return hasChanges ? preview : '(无变化)';
+    // 2. 将编辑序列分组为 hunks（前后各扩展 3 行上下文）
+    const CTX = 3;
+    const hunks: Array<{ oldStart: number; oldCount: number; newStart: number; newCount: number; lines: string[] }> = [];
+    let idx = 0;
+    while (idx < edits.length) {
+      // 跳过连续的上下文行，找到第一个变更
+      while (idx < edits.length && edits[idx]!.type === ' ') idx++;
+      if (idx >= edits.length) break;
+
+      const changeStart = idx;
+      // 找到变更块的结束
+      while (idx < edits.length && (edits[idx]!.type !== ' ' || (idx < edits.length - 1 && edits[idx + 1]!.type !== ' '))) idx++;
+
+      // 扩展上下文
+      const hunkStart = Math.max(0, changeStart - CTX);
+      const hunkEnd = Math.min(edits.length, idx + CTX);
+      const slice = edits.slice(hunkStart, hunkEnd);
+
+      // 计算行号范围
+      let oldLineCount = 0, newLineCount = 0;
+      for (const e of slice) {
+        if (e.type !== '+') oldLineCount++;
+        if (e.type !== '-') newLineCount++;
+      }
+
+      // 找到 slice 在原始数组中的起止行号
+      const oldStart = hunkStart > 0 ? edits.slice(0, hunkStart).filter(e => e.type !== '+').length : 0;
+      const newStart = hunkStart > 0 ? edits.slice(0, hunkStart).filter(e => e.type !== '-').length : 0;
+
+      hunks.push({
+        oldStart,
+        oldCount: oldLineCount,
+        newStart,
+        newCount: newLineCount,
+        lines: slice.map(e => `${e.type}${e.line}`),
+      });
+    }
+
+    return hunks;
   }
 }

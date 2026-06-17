@@ -153,7 +153,7 @@ if (parentPort) {
       const response: WorkerResponse = {
         id: req.id,
         skipped: true,
-        reason: `No tree-sitter grammar for "${ext}"`,
+        reason: `tree-sitter 不支持 "${ext}" 语言`,
         language: ext,
         valid: true,
       };
@@ -166,7 +166,7 @@ if (parentPort) {
       const response: WorkerResponse = {
         id: req.id,
         skipped: true,
-        reason: `File exceeds ${MAX_FILE_SIZE} bytes circuit breaker`,
+        reason: `文件大小超出 ${MAX_FILE_SIZE} 字节熔断限制`,
       };
       parentPort!.postMessage(response);
       return;
@@ -181,7 +181,7 @@ if (parentPort) {
       const response: WorkerResponse = {
         id: req.id,
         errors,
-        valid: errors !== undefined && errors.length === 0,
+        valid: !errors || errors.length === 0,
         language: lang.name,
       };
       parentPort!.postMessage(response);

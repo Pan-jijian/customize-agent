@@ -87,6 +87,43 @@ export class StorageManager {
         VALUES (new.id, new.name, new.kind, new.file_path);
       END;
     `);
+
+    // Embedding 向量持久化表（重启后恢复语义搜索缓存）
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS embeddings (
+        file_path TEXT PRIMARY KEY,
+        chunk_index INTEGER NOT NULL,
+        vector BLOB NOT NULL,
+        content TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  /** 保存文件 chunk 的 embedding 向量 */
+  saveEmbedding(filePath: string, chunkIndex: number, vector: number[], content: string): void {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO embeddings (file_path, chunk_index, vector, content, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(filePath, chunkIndex, Buffer.from(new Float32Array(vector).buffer), content, Date.now());
+  }
+
+  /** 加载所有持久化的 embedding 向量 */
+  loadEmbeddings(): Array<{ filePath: string; chunkIndex: number; vector: number[]; content: string }> {
+    const rows = this.db.prepare('SELECT * FROM embeddings ORDER BY file_path, chunk_index').all() as Array<{
+      file_path: string; chunk_index: number; vector: Buffer; content: string;
+    }>;
+    return rows.map(r => ({
+      filePath: r.file_path,
+      chunkIndex: r.chunk_index,
+      vector: Array.from(new Float32Array(r.vector.buffer, r.vector.byteOffset, r.vector.length / 4)),
+      content: r.content,
+    }));
+  }
+
+  /** 清除所有 embedding 缓存 */
+  clearEmbeddings(): void {
+    this.db.prepare('DELETE FROM embeddings').run();
   }
 
   /** 清除指定文件的所有索引数据 */
@@ -97,7 +134,13 @@ export class StorageManager {
 
   /** 记录文件信息（路径 + 修改时间） */
   insertFile(filePath: string, mtime: number): void {
-    this.db.prepare('INSERT INTO files (path, mtime) VALUES (?, ?)').run(filePath, mtime);
+    this.db.prepare('INSERT OR REPLACE INTO files (path, mtime) VALUES (?, ?)').run(filePath, mtime);
+  }
+
+  /** 查询已存储的文件 mtime，用于增量索引判断。无记录返回 null */
+  getFileMtime(filePath: string): number | null {
+    const row = this.db.prepare('SELECT mtime FROM files WHERE path = ?').get(filePath) as { mtime: number } | undefined;
+    return row?.mtime ?? null;
   }
 
   /** 插入一条符号记录（自动同步到 FTS5 虚拟表） */

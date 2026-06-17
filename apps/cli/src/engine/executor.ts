@@ -20,6 +20,11 @@ const TOOL_CN: Record<string, string> = {
 
 function cn(toolName: string): string { return TOOL_CN[toolName] ?? toolName; }
 
+/** 不截断输出的工具（完整内容保留） */
+const NO_TRUNCATE_TOOLS = new Set(['read_file', 'modify_file', 'list_files', 'search_symbol', 'web_search', 'git_status', 'git_diff']);
+const CMD_OUTPUT_LIMIT = 5000;
+const OTHER_OUTPUT_LIMIT = 8000;
+
 /** 工具审批回调 */
 export type ApprovalHandler = (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
 
@@ -359,6 +364,8 @@ export class AgentExecutor {
 
     try {
       const result = await this.registry.dispatch(name, args);
+      // 记录工具调用（供死循环检测使用）
+      this.controller?.recordToolCall(name, args, result);
       // 展示 diff 预览（modify_file）或首行摘要（其他工具）
       if (this.stream && result) {
         const preview = name === 'modify_file'
@@ -367,8 +374,7 @@ export class AgentExecutor {
         if (preview.trim()) process.stdout.write(preview + '\n');
       }
       // 分级截断：只读/修改工具保留完整内容，命令输出限长
-      const NO_TRUNCATE = new Set(['read_file', 'modify_file', 'list_files', 'search_symbol', 'web_search', 'git_status', 'git_diff']);
-      const limit = name === 'execute_command' ? 5000 : NO_TRUNCATE.has(name) ? Infinity : 8000;
+      const limit = name === 'execute_command' ? CMD_OUTPUT_LIMIT : NO_TRUNCATE_TOOLS.has(name) ? Infinity : OTHER_OUTPUT_LIMIT;
       const truncated = result.length > limit
         ? result.slice(0, limit - 100) + `\n...[截断 ${result.length - limit} 字符]`
         : result;
@@ -377,10 +383,12 @@ export class AgentExecutor {
       }
       return truncated;
     } catch (err) {
+      const errMsg = (err as Error).message;
+      this.controller?.recordToolCall(name, args, `[异常]: ${errMsg}`);
       if (this.stream) {
-        process.stdout.write(toolCallEnd('error', (err as Error).message) + '\n');
+        process.stdout.write(toolCallEnd('error', errMsg) + '\n');
       }
-      return `[${label} 异常]: ${(err as Error).message}`;
+      return `[${label} 异常]: ${errMsg}`;
     }
   }
 }

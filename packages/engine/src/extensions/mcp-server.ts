@@ -30,7 +30,7 @@ interface McpTool {
  * 外部 AI 客户端（Claude Desktop、Cursor）可连接本 Server 使用 Code Agent 工具。
  *
  * 传输层: stdio (JSON-RPC 2.0)
- * 内部复用: ToolRegistry.getMCPSchemas() + dispatch()
+ * 内部复用: ToolRegistry.listAll() + dispatch()
  */
 export class McpServer {
   private registry: ToolRegistry;

@@ -33,18 +33,12 @@ const DEFAULT_CONFIG: PermissionConfig = {
     list_files: 'allow',
     search_symbol: 'allow',
     web_search: 'allow',
-    grep_search: 'allow',
-    fts_search: 'allow',
-    lsp_definition: 'allow',
-    lsp_references: 'allow',
-    lsp_diagnostics: 'allow',
     git_status: 'allow',
     git_diff: 'allow',
     modify_file: 'ask',
     write_file: 'ask',
     execute_command: 'ask',
     git_commit: 'ask',
-    semantic_search: 'allow',
   },
   rules: [
     {
@@ -161,8 +155,8 @@ export class PermissionEngine {
       }
     }
 
-    // 2. 检查文件路径模式规则
-    const filePath = args.path as string | undefined;
+    // 2. 检查文件路径模式规则（支持多个常见路径参数名）
+    const filePath = (args.path ?? args.input ?? args.file ?? args.source) as string | undefined;
     if (filePath) {
       const pathResult = this._matchPathRule(toolName, filePath);
       if (pathResult) return pathResult;
