@@ -1,7 +1,7 @@
 // @code-agent/types — 跨包类型契约层
 // 零外部依赖，任何包都可以安全导入
 
-// ---- Message & LLM Response ----
+// ---- Message & LLM 响应 ----
 
 /** 消息体 — Agent 与 LLM 之间的对话单元 */
 export interface Message {
@@ -13,19 +13,33 @@ export interface Message {
   toolCallId?: string;
 }
 
-/** LLM 返回体 — 单次模型调用的完整响应 */
+/**
+ * LLM 返回体 — 单次模型调用的完整响应。
+ *
+ * 设计原则 (ADR-20 厂商无关抽象):
+ *   - 所有字段为所有厂商能力的超集
+ *   - 厂商不支持某字段时填入 undefined（不删除字段）
+ *   - vendorExtensions 收容厂商特有数据，避免核心类型随厂商变更而修改
+ */
 export interface LLMResponse {
   content: string;
   thinkingContent?: string;
   toolCalls?: ToolCall[];
   usage?: { promptTokens: number; completionTokens: number };
+  /** 厂商特有扩展字段（如 x-openai-*, x-anthropic-* 前缀命名空间） */
+  vendorExtensions?: Record<string, unknown>;
 }
 
-/** 单次工具调用 — LLM function calling / tool_use 的抽象表示 */
+/**
+ * 单次工具调用 — LLM function calling / tool_use 的抽象表示。
+ * 对齐 MCP CallToolResult 语义，是各厂商原生格式的超集。
+ */
 export interface ToolCall {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  /** 厂商特有扩展（如 Anthropic 的 tool_use 原始 content_block） */
+  vendorExtensions?: Record<string, unknown>;
 }
 
 /** 流式输出的切块类型 — Provider 无关的流式事件 */
@@ -37,7 +51,10 @@ export type StreamChunk =
   | { type: 'reset' }
   | { type: 'done' };
 
-/** Function calling 工具定义（Provider 无关的抽象格式） */
+/**
+ * Function calling 工具定义（Provider 无关的抽象格式）。
+ * 基于 JSON Schema 子集，所有厂商均可表达。
+ */
 export interface FunctionDefinition {
   name: string;
   description: string;
@@ -47,17 +64,11 @@ export interface FunctionDefinition {
     required?: string[];
     additionalProperties?: boolean;
   };
+  /** 厂商特有扩展 */
+  vendorExtensions?: Record<string, unknown>;
 }
 
-// ---- Diff ----
-
-/** SEARCH/REPLACE 补丁块 */
-export interface DiffBlock {
-  search: string;
-  replace: string;
-}
-
-// ---- Lifecycle (ADR-16) ----
+// ---- 组件生命周期 (ADR-16) ----
 
 /** 统一组件生命周期接口 */
 export interface LifecycleAware {
@@ -81,7 +92,7 @@ export interface ComponentState {
   startedAt?: number;
 }
 
-// ---- Session ----
+// ---- 会话 ----
 
 export interface SessionConfig { id: string; cwd: string; task?: string; metadata?: Record<string, unknown>; }
 
@@ -96,7 +107,7 @@ export function createSession(config: SessionConfig): Session {
   return { id: config.id, cwd: config.cwd, createdAt: Date.now(), task: config.task, status: 'active', metadata: config.metadata ?? {}, history: [] };
 }
 
-// ---- Task State ----
+// ---- 任务状态 ----
 
 export enum TaskState {
   IDLE = 'IDLE', PLANNING = 'PLANNING', WAIT_APPROVAL = 'WAIT_APPROVAL',
@@ -113,49 +124,11 @@ export type TaskStateEvent =
   | 'suspend' | 'resume' | 'subtask_dispatch' | 'subtask_complete'
   | 'merge_start' | 'merge_conflict' | 'merge_complete';
 
-// ---- Events ----
-
-export interface SystemEvents {
-  'runtime:ready': Record<string, never>;
-  'runtime:shutdown': { reason: string };
-  'component:degraded': { component: string; reason: string };
-  'component:recovered': { component: string };
-  'session:started': { sessionId: string };
-  'session:ended': { sessionId: string; reason: string };
-}
-
-export interface DomainEvents {
-  'task:started': { task: string };
-  'task:completed': { result: unknown };
-  'task:failed': { error: Error };
-  'task:cancelled': { reason: string };
-  'state:changed': { from: TaskState; to: TaskState };
-  'loop:iteration': { round: number; cost: number };
-  'tool:beforeExecute': { toolName: string; args: Record<string, unknown> };
-  'tool:afterExecute': { toolName: string; result: string; durationMs: number };
-  'permission:requested': { toolName: string; args: Record<string, unknown> };
-  'permission:granted': { toolName: string };
-  'permission:denied': { toolName: string; reason: string };
-  'provider:switched': { from: string; to: string; reason: string };
-}
-
-export interface TelemetryEvents {
-  'budget:warning': { used: number; limit: number };
-  'budget:exceeded': { used: number; limit: number };
-  'checkpoint:reached': { round: number; cost: number };
-  'error:recoverable': { error: Error; attempt: number };
-  'error:fatal': { error: Error };
-  'metric:counter': { name: string; value: number; tags?: Record<string, string> };
-  'metric:histogram': { name: string; value: number; tags?: Record<string, string> };
-}
-
-export type AgentEvents = SystemEvents & DomainEvents & TelemetryEvents;
-
-// ---- Checkpoint & Runtime Config ----
+// ---- Checkpoint & 运行时配置 ----
 
 export interface Checkpoint {
-  sessionId: string; taskState: TaskState; round: number;
-  costUsd: number; timestamp: number; history: Message[]; metadata: Record<string, unknown>;
+  sessionId: string; taskState: TaskState; round: number; costUsd: number;
+  timestamp: number; history: Message[]; metadata: Record<string, unknown>;
 }
 
 export interface RuntimeConfig {
@@ -166,75 +139,5 @@ export interface TaskResult {
   success: boolean; summary: string; rounds: number; costUsd: number; durationMs: number;
 }
 
-// ---- Lifecycle utilities ----
-
-/** 拓扑排序：按 dependencies 构建 DAG，确定初始化顺序 */
-export function topologicalSort(components: LifecycleAware[]): LifecycleAware[] {
-  const nameSet = new Set(components.map(c => c.name));
-  const inDegree = new Map<string, number>();
-  const adjacency = new Map<string, string[]>();
-  for (const c of components) { inDegree.set(c.name, 0); adjacency.set(c.name, []); }
-  for (const c of components) {
-    for (const dep of c.dependencies ?? []) {
-      if (!nameSet.has(dep)) throw new Error(`[Lifecycle] Component "${c.name}" depends on unknown component "${dep}"`);
-      adjacency.get(dep)!.push(c.name);
-      inDegree.set(c.name, (inDegree.get(c.name) ?? 0) + 1);
-    }
-  }
-  const queue: string[] = [];
-  for (const [name, degree] of inDegree) { if (degree === 0) queue.push(name); }
-  const sorted: LifecycleAware[] = [];
-  const nameToComponent = new Map(components.map(c => [c.name, c]));
-  while (queue.length > 0) {
-    const name = queue.shift()!;
-    const comp = nameToComponent.get(name);
-    if (comp) sorted.push(comp);
-    for (const neighbor of adjacency.get(name) ?? []) {
-      const newDegree = (inDegree.get(neighbor) ?? 1) - 1;
-      inDegree.set(neighbor, newDegree);
-      if (newDegree === 0) queue.push(neighbor);
-    }
-  }
-  if (sorted.length !== components.length) throw new Error('[Lifecycle] Circular dependency detected');
-  return sorted;
-}
-
-/** 按初始化顺序依次 init 所有组件。任一失败则逆序 shutdown 已初始化组件。 */
-export async function initializeComponents(sorted: LifecycleAware[]): Promise<ComponentState[]> {
-  const states: ComponentState[] = [];
-  const initialized: ComponentState[] = [];
-  for (const comp of sorted) {
-    const state: ComponentState = { component: comp, status: 'initializing', failureCount: 0, startedAt: Date.now() };
-    states.push(state);
-    try {
-      if (comp.init) await comp.init();
-      state.status = 'healthy';
-      initialized.push(state);
-    } catch (err) {
-      state.status = 'failed';
-      for (const s of initialized.reverse()) {
-        try { if (s.component.shutdown) await s.component.shutdown(); } catch { /* best-effort */ }
-        s.status = 'shutdown';
-      }
-      throw new Error(`[Lifecycle] Failed to initialize "${comp.name}": ${(err as Error).message}`, { cause: err });
-    }
-  }
-  return states;
-}
-
-/** 按初始化逆序 shutdown 所有组件。单个超时 5s。 */
-export async function shutdownComponents(states: ComponentState[]): Promise<void> {
-  const reversed = [...states].reverse();
-  for (const state of reversed) {
-    if (state.status === 'shutdown') continue;
-    try {
-      await Promise.race([
-        state.component.shutdown?.(),
-        new Promise<void>(resolve => setTimeout(resolve, 5000)),
-      ]);
-    } catch (err) {
-      console.warn(`[Lifecycle] Shutdown error for "${state.component.name}": ${(err as Error).message}`);
-    }
-    state.status = 'shutdown';
-  }
-}
+// 事件接口（SystemEvents/DomainEvents/TelemetryEvents）及生命周期工具函数
+// 权威实现已迁移至 @code-agent/runtime 包

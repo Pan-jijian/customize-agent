@@ -9,7 +9,7 @@
 - **Build**: tsc + Turbo 2.9
 - **Test**: Vitest 4.1
 - **Lint**: ESLint 10 + typescript-eslint 8
-- **LLM**: OpenAI 兼容 API — 6 个 Provider + AI Gateway 自动路由
+- **LLM**: OpenAI 兼容 API — 6 个 Provider，用户通过 `--provider` 显式选择，不做自动切换
 - **Code Intelligence**: tree-sitter (10 语言), vscode-jsonrpc LSP
 - **Storage**: SQLite (better-sqlite3), FTS5
 - **Sandbox**: macOS Seatbelt / Linux Bubblewrap (内核级，启动 < 10ms)
@@ -20,7 +20,7 @@
 packages/
 ├── types/           — 跨包类型契约：Message, LLMResponse, Session, LifecycleAware, 零外部依赖
 ├── diff/            — SEARCH/REPLACE 补丁解析 + 模糊容错 + Unified Diff
-├── llm/             — 6 个 Provider + AI Gateway + 重试 + 创建工厂
+├── llm/             — 6 个 Provider + 重试 + 创建工厂
 ├── tools/           — 文件读写、沙箱、终端、Git、tree-sitter 通用语法验证
 ├── codex/           — 代码智能：tree-sitter 索引、ripgrep 搜索、LSP、语义 Embedding
 ├── engine/          — ToolRegistry、SchemaAdapter、权限、执行控制、上下文管理、规划、子智能体、MCP、Hooks、Skills
@@ -35,9 +35,9 @@ packages/
 
 | 包 | 主要导出 |
 |----|---------|
-| `@code-agent/types` | `Message`, `LLMResponse`, `ToolCall`, `StreamChunk`, `FunctionDefinition`, `DiffBlock`, `LifecycleAware`, `Session`, `createSession` |
+| `@code-agent/types` | `Message`, `LLMResponse`, `ToolCall`, `StreamChunk`, `FunctionDefinition`, `LifecycleAware`, `Session`, `createSession`, `TaskState`, `ComponentState`, `Checkpoint` |
 | `@code-agent/diff` | `DiffEngine.parseBlocks()`, `DiffEngine.applyPatch()`, `DiffEngine.generateUnifiedDiff()` |
-| `@code-agent/llm` | `ILLMProvider` 接口, `DeepSeekProvider`, `OpenAIProvider`, `AnthropicProvider`, `GoogleProvider`, `OpenRouterProvider`, `OllamaProvider`, `createProvider()`, `AIGateway`, `TaskAnalyzer`, `CostTracker`, `HealthManager`, `FallbackManager`, 4 种路由策略 |
+| `@code-agent/llm` | `ILLMProvider` 接口, `DeepSeekProvider`, `OpenAIProvider`, `AnthropicProvider`, `GoogleProvider`, `OpenRouterProvider`, `OllamaProvider`, `createProvider()`, `estimateTokens`, `countTokensFromMessages`, `toOpenAIMessages`, `createLLMResponse` |
 | `@code-agent/tools` | `ToolKit` (文件读写), `SandboxExecutor` (Seatbelt/Bubblewrap), `TerminalTool`, `GitTool`, `UnifiedSyntaxValidator` (tree-sitter 通用) |
 | `@code-agent/codex` | `StorageManager`, `RepositoryIndexer`, `TreeSitterWorkerPool`, `CodeSearcher` (ripgrep), `EmbeddingSearch`, `LSPManager`, 语言配置 |
 | `@code-agent/engine` | `ToolRegistry`, `SchemaAdapter`, `PermissionEngine`, `Capability` 系统, `ExecutionController` (LoopGuard/BudgetManager/GoalManager/CheckpointManager), `ContextManager`, `PlanModeManager`, `SubagentRunner`, `Orchestrator`, `SafeWorktreeManager`, `McpServer`, `McpClient`, `HooksEngine`, `SkillsLoader` |
@@ -45,7 +45,7 @@ packages/
 | `@code-agent/memory` | `MemoryManager` (跨会话记忆 CRUD) |
 | `@code-agent/telemetry` | `AuditLogger` (JSONL 审计日志), `MetricsCollector` (遥测指标) |
 
-### CLI 工具集 (8 个)
+### CLI 工具集 (13 个)
 
 | 工具 | 功能 | 审批 |
 |------|------|:--:|
@@ -53,10 +53,15 @@ packages/
 | `read_file` | 路径沙箱内读文件 | 否 |
 | `list_files` | 列出项目根目录文件 | 否 |
 | `modify_file` | SEARCH/REPLACE 修改 + 回滚 | 是 |
+| `write_file` | 创建/覆盖文件 | 是 |
 | `execute_command` | 沙箱内终端执行 | 是 |
 | `git_status` | 查看 Git 工作树状态 | 否 |
 | `git_diff` | 查看 Git 未暂存变更 | 否 |
 | `git_commit` | 暂存并提交 | 是 |
+| `web_search` | 网络搜索 (DuckDuckGo) | 否 |
+| `lsp_definition` | 跳转到符号定义 | 否 |
+| `lsp_references` | 查找符号所有引用 | 否 |
+| `lsp_diagnostics` | LSP 诊断信息（错误/警告） | 否 |
 
 ## 常用命令
 
@@ -105,14 +110,9 @@ TOOL_CAPABILITY_MAP — 每个工具绑定所需权能
 ROLE_CAPABILITY_MAP — 子智能体角色权限继承
 ```
 
-### AI Gateway 自动路由
+### Provider 选择策略
 
-```
-TaskAnalyzer → 任务分类 (代码生成/问答/搜索/重构)
-  → RoutingStrategy (CostFirst | QualityFirst | LatencyFirst | PrivacyFirst)
-    → HealthManager (健康检查) → 选择最优 Provider
-      → FallbackManager (故障转移)
-```
+用户通过 `--provider` 和 `--model` 显式指定模型，不做自动切换或静默降级。Provider 失败时直接报错，由用户决定重试或更换。信任优先于自动化。
 
 ### 子智能体编排
 
@@ -172,5 +172,5 @@ CODE_AGENT_OLLAMA_API_KEY=
 | ADR-2 | Seatbelt/Bubblewrap 为主沙箱，容器可选 | 内核级隔离，启动 < 10ms，无 daemon 依赖 |
 | ADR-3 | tree-sitter 统一代码智能 + 语法验证 | 一套 DFS 覆盖 10 语言，无需各语言编译器 |
 | ADR-4 | LSP 使用 vscode-jsonrpc 标准库 | 不重复造轮子，VS Code 数百万用户验证 |
-| ADR-5 | AI Gateway 按任务类型/成本/质量自动路由 | 核心差异化能力，避免单模型锁定 |
+| ADR-5 | 废弃 — AI Gateway 自动路由已移除，用户显式选择模型 | 自动切换破坏用户信任，显式控制优于自动化 |
 | ADR-16 | LifecycleAware 统一组件生命周期 | `restart()` 严禁更换实例指针，防止 Stale Reference |

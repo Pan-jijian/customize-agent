@@ -2,10 +2,11 @@ import { Command } from 'commander';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
-import { createProvider } from '@code-agent/llm';
+import { createProvider, BINARY_EXTENSIONS } from '@code-agent/llm';
 import { ToolRegistry, PermissionEngine, ExecutionController } from '@code-agent/engine';
 import { ToolKit } from '@code-agent/tools';
-import { StorageManager, RepositoryIndexer } from '@code-agent/codex';
+import { StorageManager, RepositoryIndexer, TreeSitterWorkerPool, LSPManager } from '@code-agent/codex';
+import { MemoryManager } from '@code-agent/memory';
 import { AgentExecutor } from './engine/executor.js';
 import { Repl } from './repl/repl.js';
 import { approvalBox, t } from './tui/renderer.js';
@@ -17,39 +18,52 @@ import glob from 'fast-glob';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const envPath = resolve(__dirname, '../../../.env');
-// dotenv v17+ 会打印注入信息，先静默
-{ const _c = console.log; console.log = () => {}; dotenv.config({ path: envPath }); console.log = _c; }
+// dotenv v17+ 会打印注入信息，静默处理
+{ const _c = console.log; try { console.log = () => {}; dotenv.config({ path: envPath }); } finally { console.log = _c; } }
 
 /** 项目根目录 — 所有文件操作的锚点 */
 const PROJECT_ROOT = resolve(__dirname, '../../..');
 
 const program = new Command();
 const dbManager = new StorageManager();
-const indexer = new RepositoryIndexer(dbManager);
+const workerPool = new TreeSitterWorkerPool();
+const indexer = new RepositoryIndexer(dbManager, { workerPool });
 const toolkit = new ToolKit(PROJECT_ROOT);
 
-/** 构建 ToolRegistry 并注册全部核心工具 */
-function buildRegistry(): ToolRegistry {
+/** 简化的工具注册辅助：自动补全 parameters.type='object' + additionalProperties=false */
+function reg(
+  r: ToolRegistry,
+  name: string,
+  desc: string,
+  props: Record<string, { type: string; description: string }>,
+  required: string[],
+  caps: string[],
+  needsApproval: boolean,
+  handler: (args: Record<string, unknown>) => Promise<string>,
+): void {
+  r.register({
+    name,
+    description: desc,
+    parameters: { type: 'object', properties: props, required, additionalProperties: false },
+    requiresApproval: needsApproval,
+    capabilities: caps,
+    handler,
+  });
+}
+
+/** 构建 ToolRegistry 并注册全部核心工具。传入 lspManager 时额外注册 LSP 工具 */
+function buildRegistry(lspManager?: LSPManager): ToolRegistry {
   const registry = new ToolRegistry();
 
-  registry.register({
-    name: 'search_symbol',
-    description: 'Search for symbols (functions, classes, interfaces) by name across the codebase.',
-    parameters: {
-      type: 'object',
-      properties: { input: { type: 'string', description: 'Symbol name to search for' } },
-      required: ['input'],
-      additionalProperties: false,
-    },
-    requiresApproval: false,
-    capabilities: ['search_symbol'],
-    handler: async (args: Record<string, unknown>) => {
+  reg(registry, 'search_symbol', 'Search for symbols (functions, classes, interfaces) by name across the codebase.',
+    { input: { type: 'string', description: 'Symbol name to search for' } },
+    ['input'], ['search_symbol'], false,
+    async (args) => {
       const input = String(args.input);
       const symbols = dbManager.searchSymbol(input);
       if (symbols.length === 0) return `No symbols found matching "${input}".\n\nsearch_symbol 只搜索代码符号（函数/类/接口/变量），不能搜索文件名或路径。搜索文件请用 list_files，查看文件内容请用 read_file。`;
       return JSON.stringify(symbols.slice(0, 20), null, 2);
-    },
-  });
+    });
 
   registry.register({
     name: 'read_file',
@@ -70,13 +84,21 @@ function buildRegistry(): ToolRegistry {
       // 路径归一化：去尾部 /，防止扩展名检查绕过
       const filePath = String(args.input).replace(/\/+$/, '');
       const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
-      const BINARY = new Set(['pdf', 'png', 'jpg', 'jpeg', 'gif', 'ico', 'svg', 'woff', 'woff2', 'ttf', 'eot', 'db', 'db-shm', 'db-wal', 'lock', 'map', 'min.js', 'min.css', 'docx', 'xlsx', 'pptx', 'zip', 'tar', 'gz', 'bz2', '7z', 'mp3', 'mp4', 'avi', 'mov', 'webm', 'webp', 'wasm']);
-
-      if (BINARY.has(ext)) {
+      if (BINARY_EXTENSIONS.has(ext)) {
         return `[二进制文件] ${filePath} 是 ${ext} 格式，read_file 不支持。请用 execute_command 调用外部工具处理。`;
       }
 
       const content = await toolkit.readFile(filePath);
+
+      // 扩展名不明确时，检查内容是否为二进制（含大量不可打印字符或 NUL 字节）
+      if (!BINARY_EXTENSIONS.has(ext)) {
+        const head = content.slice(0, 1024);
+        const nulCount = head.split('\x00').length - 1;
+        const nonPrintable = head.replace(/[\x20-\x7e\n\r\t]/g, '').length;
+        if (nulCount > 0 || nonPrintable > head.length * 0.3) {
+          return `[二进制文件] ${filePath} 被检测为二进制内容（NUL=${nulCount}, 不可打印比例=${(nonPrintable / head.length * 100).toFixed(0)}%），请用 execute_command 调用外部工具处理。`;
+        }
+      }
       const offset = typeof args.offset === 'number' ? args.offset : undefined;
       const limit = typeof args.limit === 'number' ? args.limit : undefined;
 
@@ -96,21 +118,9 @@ function buildRegistry(): ToolRegistry {
     },
   });
 
-  registry.register({
-    name: 'list_files',
-    description: 'List files and directories in the project root.',
-    parameters: {
-      type: 'object',
-      properties: {},
-      additionalProperties: false,
-    },
-    requiresApproval: false,
-    capabilities: ['read_code'],
-    handler: async (): Promise<string> => {
-      const files = await toolkit.listFiles();
-      return files.join('\n');
-    },
-  });
+  reg(registry, 'list_files', 'List files and directories in the project root.',
+    {}, [], ['read_code'], false,
+    async () => (await toolkit.listFiles()).join('\n'));
 
   registry.register({
     name: 'modify_file',
@@ -132,18 +142,10 @@ function buildRegistry(): ToolRegistry {
     },
   });
 
-  registry.register({
-    name: 'execute_command',
-    description: 'Execute a terminal command and return stdout/stderr/exit code.',
-    parameters: {
-      type: 'object',
-      properties: { input: { type: 'string', description: 'The command to execute' } },
-      required: ['input'],
-      additionalProperties: false,
-    },
-    requiresApproval: true,
-    capabilities: ['execute_command'],
-    handler: async (args: Record<string, unknown>) => {
+  reg(registry, 'execute_command', 'Execute a terminal command and return stdout/stderr/exit code.',
+    { input: { type: 'string', description: 'The command to execute' } },
+    ['input'], ['execute_command'], true,
+    async (args) => {
       const result = await toolkit.terminal.executeCommand(String(args.input));
       const parts: string[] = [];
       if (result.stdout) parts.push(result.stdout.trimEnd());
@@ -153,48 +155,20 @@ function buildRegistry(): ToolRegistry {
         parts.push(`[诊断] 命令无任何输出且退出码非零。可能原因: 1) 命令不存在 2) 缺少依赖 3) 权限不足。请检查 stderr 或尝试其他方式。`);
       }
       return parts.join('\n') || `[Exit ${result.code}]`;
-    },
-  });
+    });
 
-  registry.register({
-    name: 'git_status',
-    description: 'Show the current git working tree status.',
-    parameters: {
-      type: 'object',
-      properties: {},
-      additionalProperties: false,
-    },
-    requiresApproval: false,
-    capabilities: ['git_operation'],
-    handler: async (): Promise<string> => toolkit.git.getStatus(),
-  });
+  reg(registry, 'git_status', 'Show the current git working tree status.',
+    {}, [], ['git_operation'], false,
+    async () => toolkit.git.getStatus());
 
-  registry.register({
-    name: 'git_diff',
-    description: 'Show the current git diff (unstaged changes).',
-    parameters: {
-      type: 'object',
-      properties: {},
-      additionalProperties: false,
-    },
-    requiresApproval: false,
-    capabilities: ['git_operation'],
-    handler: async (): Promise<string> => toolkit.git.getDiff(),
-  });
+  reg(registry, 'git_diff', 'Show the current git diff (unstaged changes).',
+    {}, [], ['git_operation'], false,
+    async () => toolkit.git.getDiff());
 
-  registry.register({
-    name: 'git_commit',
-    description: 'Stage all changes and create a git commit with the given message.',
-    parameters: {
-      type: 'object',
-      properties: { input: { type: 'string', description: 'Commit message' } },
-      required: ['input'],
-      additionalProperties: false,
-    },
-    requiresApproval: true,
-    capabilities: ['git_operation'],
-    handler: async (args: Record<string, unknown>) => toolkit.git.commitAll(String(args.input)),
-  });
+  reg(registry, 'git_commit', 'Stage all changes and create a git commit with the given message.',
+    { input: { type: 'string', description: 'Commit message' } },
+    ['input'], ['git_operation'], true,
+    async (args) => toolkit.git.commitAll(String(args.input)));
 
   registry.register({
     name: 'write_file',
@@ -261,6 +235,46 @@ function buildRegistry(): ToolRegistry {
     },
   });
 
+  // LSP 工具 — 仅在 LSPManager 可用时注册
+  if (lspManager) {
+    reg(registry, 'lsp_definition', 'Go to the definition of a symbol at the given file/line/column.',
+      {
+        input: { type: 'string', description: 'Relative file path' },
+        line: { type: 'number', description: '1-indexed line number' },
+        column: { type: 'number', description: '1-indexed column number' },
+      },
+      ['input', 'line', 'column'], ['lsp_query'], false,
+      async (args) => {
+        const locations = await lspManager.getDefinition(String(args.input), Number(args.line), Number(args.column));
+        if (!locations.length) return '未找到定义。';
+        return locations.map(l => `${l.uri}:${l.range.start.line + 1}:${l.range.start.character + 1}`).join('\n');
+      });
+
+    reg(registry, 'lsp_references', 'Find all references of a symbol at the given file/line/column.',
+      {
+        input: { type: 'string', description: 'Relative file path' },
+        line: { type: 'number', description: '1-indexed line number' },
+        column: { type: 'number', description: '1-indexed column number' },
+      },
+      ['input', 'line', 'column'], ['lsp_query'], false,
+      async (args) => {
+        const locations = await lspManager.getReferences(String(args.input), Number(args.line), Number(args.column));
+        if (!locations.length) return '未找到引用。';
+        return locations.map(l => `${l.uri}:${l.range.start.line + 1}:${l.range.start.character + 1}`).join('\n');
+      });
+
+    reg(registry, 'lsp_diagnostics', 'Get language server diagnostics (errors/warnings/hints) for a file.',
+      { input: { type: 'string', description: 'Relative file path' } },
+      ['input'], ['lsp_query'], false,
+      async (args) => {
+        const diagnostics = await lspManager.getDiagnostics(String(args.input));
+        if (!diagnostics.length) return '该文件无诊断问题。';
+        return diagnostics.map(d =>
+          `${d.severity === 1 ? 'ERROR' : d.severity === 2 ? 'WARNING' : 'INFO'} L${d.range.start.line + 1}: ${d.message}`
+        ).join('\n');
+      });
+  }
+
   return registry;
 }
 
@@ -277,14 +291,14 @@ async function scanWorkspace() {
 
 /** 扫描全部项目文件（供 @file 模糊匹配） */
 function scanAllFiles(): string[] {
+  // 从共享常量推导需要忽略的二进制/构建产物扩展名
+  const binaryIgnores = Array.from(BINARY_EXTENSIONS).map(ext => `**/*.${ext}`);
   return glob.globSync(['**/*'], {
     cwd: PROJECT_ROOT,
     ignore: [
       '**/node_modules/**', '**/dist/**', '**/.git/**',
       '**/*.db', '**/*.db-*', '**/*.lock', '**/*.log',
-      '**/*.png', '**/*.jpg', '**/*.jpeg', '**/*.gif', '**/*.ico', '**/*.svg',
-      '**/*.woff', '**/*.woff2', '**/*.ttf', '**/*.eot',
-      '**/*.map', '**/*.min.js', '**/*.min.css',
+      ...binaryIgnores,
     ],
     dot: false,
   });
@@ -328,9 +342,9 @@ function createApprovalHandler(rl: readline.Interface) {
 }
 
 /** 创建 Executor 实例 */
-function createExecutor(providerName?: string, modelName?: string, rl?: readline.Interface) {
+function createExecutor(providerName?: string, modelName?: string, rl?: readline.Interface, lspManager?: LSPManager) {
   const provider = createProvider(providerName ?? 'deepseek', { modelName });
-  const registry = buildRegistry();
+  const registry = buildRegistry(lspManager);
   const permissionEngine = new PermissionEngine();
   const controller = new ExecutionController({ maxBudgetUsd: 5.0, deadLoopThreshold: 4 });
   const approvalHandler = rl ? createApprovalHandler(rl) : undefined;
@@ -396,9 +410,11 @@ program.action(async () => {
   // ── REPL 模式 ──
   // terminal: false 阻止 Interface 在 raw mode 下回显/处理 keypress，避免与 TuiInput 冲突
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
-  const executor = createExecutor(opts.provider, opts.model, rl);
+  const lsp = new LSPManager(PROJECT_ROOT);
+  const executor = createExecutor(opts.provider, opts.model, rl, lsp);
   const projectFiles = scanAllFiles();
-  const repl = new Repl({ executor, files: projectFiles, projectRoot: PROJECT_ROOT });
+  const memory = new MemoryManager();
+  const repl = new Repl({ executor, files: projectFiles, projectRoot: PROJECT_ROOT, memory });
 
   await repl.start();
   rl.close();

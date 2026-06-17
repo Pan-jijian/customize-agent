@@ -2,6 +2,10 @@ import OpenAI from 'openai';
 import type { Message } from '@code-agent/types';
 import type { ILLMProvider, LLMResponse, ChatOptions, ModelCapabilities, StreamChunk, ToolCall } from '../interface.js';
 import { withRetry } from '../network/retry.js';
+import { toOpenAIMessages } from '../utils/messages.js';
+import { countTokensFromMessages } from '../utils/tokens.js';
+import { openAIHealthCheck } from '../utils/messages.js';
+import { createLLMResponse } from '../utils/response.js';
 
 const OPENAI_CAPABILITIES: ModelCapabilities = {
   maxContextTokens: 200_000,
@@ -9,7 +13,7 @@ const OPENAI_CAPABILITIES: ModelCapabilities = {
   supportsStreaming: true,
   supportsFunctionCalling: true,
   supportsVision: false,
-  supportsThinking: true,
+  supportsThinking: false, // OpenAI 无 Anthropic 风格的 thinking 块
   supportsEmbedding: true,
 };
 
@@ -35,7 +39,7 @@ export class OpenAIProvider implements ILLMProvider {
     return withRetry(async () => {
       const response = await this.client.chat.completions.create({
         model: this.modelName,
-        messages: messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+        messages: toOpenAIMessages(messages),
         temperature: options?.temperature ?? 0.2,
         max_tokens: options?.maxTokens,
         tools: options?.tools?.map(t => ({ type: 'function' as const, function: t })),
@@ -54,14 +58,14 @@ export class OpenAIProvider implements ILLMProvider {
         };
       });
 
-      return {
+      return createLLMResponse({
         content: msg.content ?? '',
         toolCalls,
         usage: response.usage ? {
           promptTokens: response.usage.prompt_tokens,
           completionTokens: response.usage.completion_tokens,
         } : undefined,
-      };
+      });
     });
   }
 
@@ -74,7 +78,7 @@ export class OpenAIProvider implements ILLMProvider {
       async () => {
         const stream = await this.client.chat.completions.create({
           model: this.modelName,
-          messages: messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+          messages: toOpenAIMessages(messages),
           temperature: options?.temperature ?? 0.2,
           max_tokens: options?.maxTokens,
           tools: options?.tools?.map(t => ({ type: 'function' as const, function: t })),
@@ -123,28 +127,22 @@ export class OpenAIProvider implements ILLMProvider {
           arguments: JSON.parse(acc.args || '{}'),
         }));
 
-        return {
+        return createLLMResponse({
           content,
           toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
           usage: { promptTokens, completionTokens },
-        };
+        });
       },
-      { onRetry: (_a, _e) => { onChunk({ type: 'reset' }); } },
+      { onRetry: () => { onChunk({ type: 'reset' }); } },
     );
   }
 
   async countTokens(messages: Message[]): Promise<number> {
-    const text = messages.map(m => m.content).join('\n');
-    return Math.ceil(text.length / 4);
+    return countTokensFromMessages(messages);
   }
 
   async healthCheck(): Promise<boolean> {
-    try {
-      const result = await this.client.models.list();
-      return result.data.length > 0;
-    } catch {
-      return false;
-    }
+    return openAIHealthCheck(this.client);
   }
 
   async embed(texts: string[]): Promise<number[][]> {

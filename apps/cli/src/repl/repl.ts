@@ -4,6 +4,8 @@ import type { Message } from '@code-agent/types';
 import type { AgentExecutor } from '../engine/executor.js';
 import { TuiInput } from '../tui/input.js';
 import { welcomeBanner, t, s, divider, errorMsg, infoMsg, contextStats } from '../tui/renderer.js';
+import type { MemoryManager } from '@code-agent/memory';
+import { BINARY_EXTENSIONS } from '@code-agent/llm';
 
 /** REPL 配置 */
 export interface ReplConfig {
@@ -11,10 +13,13 @@ export interface ReplConfig {
   files: string[];
   projectRoot: string;
   commands?: Array<{ name: string; desc: string }>;
+  memory?: MemoryManager;
 }
 
-/** @file 引用正则 */
-const RE_AT = /@([^\s@]+(?::\d+(?:-\d+)?)?)/g;
+/** @file 引用正则（排除邮箱地址：前面必须为空白或行首） */
+const RE_AT = /(?:^|\s)@([^\s@]+(?::\d+(?:-\d+)?)?)/g;
+/** @file 注入文件最大大小 (500KB) */
+const MAX_INLINE_SIZE = 500_000;
 
 /**
  * REPL — 会话管理 + TUI 输入 + 消息格式化。
@@ -24,10 +29,12 @@ export class Repl {
   private tui: TuiInput;
   private history: Message[];
   private root: string;
+  private memory?: MemoryManager;
 
   constructor(config: ReplConfig) {
     this.executor = config.executor;
     this.root = config.projectRoot;
+    this.memory = config.memory;
     this.history = [{ role: 'system', content: this.executor.getSystemPrompt() }];
     this.tui = new TuiInput({
       files: config.files,
@@ -83,16 +90,13 @@ export class Repl {
 
     if (!refs.length) return text;
 
-    const BINARY_EXT = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.woff', '.woff2', '.ttf', '.eot', '.db', '.db-shm', '.db-wal', '.lock', '.log', '.map', '.min.js', '.min.css']);
-    const MAX_INLINE_SIZE = 500_000; // 500KB，超过不注入内容
-
     const parts: string[] = [];
     for (const ref of refs) {
       const full = path.resolve(this.root, ref.filePath);
       try {
         const stat = await fs.promises.stat(full);
         const ext = path.extname(ref.filePath).toLowerCase();
-        if (BINARY_EXT.has(ext) || stat.size > MAX_INLINE_SIZE) {
+        if (BINARY_EXTENSIONS.has(ext.slice(1)) || stat.size > MAX_INLINE_SIZE) {
           parts.push(`[文件: ${ref.filePath}] (${(stat.size / 1024).toFixed(1)} KB, 二进制/大文件 — 请用 read_file 分段读取)`);
           continue;
         }
@@ -118,7 +122,19 @@ export class Repl {
   // 任务执行
 
   private async _execute(input: string): Promise<void> {
-    this.history.push({ role: 'user', content: input });
+    // 注入相关历史记忆到用户消息
+    let enhancedInput = input;
+    if (this.memory) {
+      const memories = this.memory.recall(input, 3);
+      if (memories.length > 0) {
+        const memoryLines = memories.map((m: { type: string; content: string }) =>
+          `[记忆·${m.type === 'feedback' ? '历史纠偏' : m.type === 'user_preference' ? '用户偏好' : '项目知识'}]: ${m.content}`
+        );
+        enhancedInput = `${input}\n\n--- 相关历史记忆 ---\n${memoryLines.join('\n')}\n--- 记忆结束 ---`;
+      }
+    }
+
+    this.history.push({ role: 'user', content: enhancedInput });
     process.stdout.write('\n');
 
     try {
@@ -126,11 +142,19 @@ export class Repl {
       this.history.length = 0;
       this.history.push(...updated);
 
+      // 记录项目知识记忆（提取任务摘要）
+      if (this.memory) {
+        const lastAssistant = [...updated].reverse().find(m => m.role === 'assistant');
+        if (lastAssistant?.content) {
+          const summary = lastAssistant.content.slice(0, 500);
+          this.memory.remember('project_fact', summary, `任务: ${input.slice(0, 200)}`);
+        }
+      }
+
       const last = [...updated].reverse().find(m => m.role === 'assistant');
       if (last?.content) {
-        // 展示时去除 call_tool 标签和 task_finish 标签
+        // 展示时去除 task_finish 标签
         const txt = last.content
-          .replace(/<call_tool[\s\S]*?<\/call_tool>/g, '')
           .replace(/<task_finish>[\s\S]*?<\/task_finish>/g, '')
           .trim();
         if (txt) process.stdout.write(`\n${t.text(txt)}\n`);
@@ -159,10 +183,8 @@ export class Repl {
         return false;
       }
       case '/context': {
-        let chars = 0;
-        for (const m of this.history) chars += m.content?.length ?? 0;
-        const currentTokens = Math.ceil(chars / 3);
-        process.stdout.write(contextStats(currentTokens, 960000) + '\n\n');
+        const ctxStats = this.executor.getContextStats();
+        process.stdout.write(contextStats(ctxStats.tokens, ctxStats.limit) + '\n\n');
         return false;
       }
       case '/clear':

@@ -33,14 +33,15 @@ function loadGitignorePatterns(rootDir: string): RegExp[] {
       if (dirOnly) line = line.slice(0, -1);
 
       const anchored = line.startsWith('/');
-      let p = anchored ? line.slice(1) : line;
+      const p = anchored ? line.slice(1) : line;
 
+      const GLOBSTAR = '\x01'; // 临时占位符，避免 ** 和 * 替换顺序冲突
       let re = p
         .replace(/[.+^${}()|[\\]/g, '\\$&')
-        .replace(/\*\*/g, '\x00')
+        .replace(/\*\*/g, GLOBSTAR)
         .replace(/\*/g, '[^/]*')
         .replace(/\?/g, '[^/]')
-        .replace(/\x00/g, '.*');
+        .replace(new RegExp(GLOBSTAR, 'g'), '.*');
 
       if (anchored) re = '^' + re;
       else re = '(^|.*/)' + re;

@@ -1,5 +1,6 @@
 import type { ILLMProvider } from '@code-agent/llm';
 import { getLanguageConfig } from '../index/languages.js';
+import type { StorageManager } from '../index/db.js';
 import Parser, { type SyntaxNode } from 'tree-sitter';
 
 /** Embedding 搜索结果项 */
@@ -182,13 +183,17 @@ export class EmbeddingSearch {
   private chunks: CodeChunk[] = [];
   /** 会话级脏文件集：被 modify_file 修改过的文件，跳过旧向量 */
   private dirtyFiles = new Set<string>();
+  private db?: StorageManager;
 
-  constructor(provider: ILLMProvider) {
+  constructor(provider: ILLMProvider, db?: StorageManager) {
     this.provider = provider;
+    this.db = db;
+    // 从 DB 恢复持久化向量，避免重复调用昂贵的 embedding API
+    if (db) this._loadFromDB();
   }
 
   /**
-   * 索引项目文件：切块 → 注入 Header → 向量化 → 本地存储。
+   * 索引项目文件：切块 → 注入 Header → 向量化 → 持久化到 DB。
    * embedding API 不可用时跳过（后续搜索降级 FTS5）。
    */
   async indexFiles(files: Array<{ path: string; content: string }>): Promise<void> {
@@ -197,10 +202,15 @@ export class EmbeddingSearch {
       return;
     }
 
+    // 跳过 DB 中已有向量的文件（增量索引）
+    const pending = this.db
+      ? files.filter(f => !this.chunks.some(c => c.file === f.path))
+      : files;
+
     const texts: string[] = [];
     const meta: Array<{ file: string; startLine: number; endLine: number }> = [];
 
-    for (const file of files) {
+    for (const file of pending) {
       const chunks = chunker.chunk(file.path, file.content);
       for (const chunk of chunks) {
         const header = buildHeaderInjection(file.path, file.content, chunk.startLine);
@@ -215,13 +225,18 @@ export class EmbeddingSearch {
       const embeddings = await this.provider.embed(texts);
       for (let i = 0; i < embeddings.length; i++) {
         const m = meta[i]!;
+        const embedding = embeddings[i]!;
         this.chunks.push({
           text: texts[i]!,
           file: m.file,
           startLine: m.startLine,
           endLine: m.endLine,
-          embedding: embeddings[i]!,
+          embedding,
         });
+        // 持久化到 DB
+        if (this.db) {
+          this.db.saveEmbedding(m.file, i, embedding, texts[i]!);
+        }
       }
     } catch {
       console.warn('[EmbeddingSearch] 向量化失败，语义搜索不可用。');
@@ -256,6 +271,26 @@ export class EmbeddingSearch {
   }
 
   /** 标记文件为脏（modify_file 修改后调用，跳过旧向量） */
+  /** 从 DB 恢复持久化的 embedding 向量 */
+  private _loadFromDB(): void {
+    if (!this.db) return;
+    try {
+      const stored = this.db.loadEmbeddings();
+      for (const row of stored) {
+        this.chunks.push({
+          text: row.content,
+          file: row.filePath,
+          startLine: 0,
+          endLine: 0,
+          embedding: row.vector,
+        });
+      }
+      if (stored.length > 0) {
+        console.warn(`[EmbeddingSearch] 从 DB 恢复 ${stored.length} 个向量缓存`);
+      }
+    } catch { /* DB 为空或损坏，静默跳过 */ }
+  }
+
   markDirty(filePath: string): void { this.dirtyFiles.add(filePath); }
 
   /** 获取已索引文件数 */

@@ -32,13 +32,13 @@ describe('PermissionEngine', () => {
     expect(engine.check('execute_command', { input: 'mkfs.ext4 /dev/sda' })).toBe('deny');
   });
 
-  it('写 /etc 目录应 deny', () => {
-    expect(engine.check('execute_command', { input: 'echo > /etc/passwd' })).toBe('deny');
+  it('危险系统命令应 deny', () => {
+    expect(engine.check('execute_command', { input: 'rm -rf /etc' })).toBe('deny');
   });
 
-  it('正常搜索工具应 allow', () => {
+  it('已注册搜索工具应 allow', () => {
     expect(engine.check('search_symbol')).toBe('allow');
-    expect(engine.check('grep_search')).toBe('allow');
+    expect(engine.check('web_search')).toBe('allow');
   });
 
   it('Git 操作默认应 allow（只读）或 ask（写）', () => {

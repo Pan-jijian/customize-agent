@@ -1,4 +1,3 @@
-import type { ILLMProvider } from '@code-agent/llm';
 import type { SubagentConfig, SubagentResult, SubagentTask } from './subagent/types.js';
 import { SubagentRunner } from './subagent/runner.js';
 import type { SafeWorktreeManager, WorktreeContext } from './subagent/worktree.js';
@@ -38,8 +37,7 @@ export class Orchestrator {
   private runner = new SubagentRunner();
   private worktreeManager?: SafeWorktreeManager;
 
-  constructor(_providers: Map<string, ILLMProvider>, worktreeManager?: SafeWorktreeManager) {
-    // _providers 保留供未来按任务自动选择 Provider 使用
+  constructor(worktreeManager?: SafeWorktreeManager) {
     this.worktreeManager = worktreeManager;
   }
 

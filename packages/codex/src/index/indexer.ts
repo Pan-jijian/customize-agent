@@ -37,6 +37,10 @@ export class RepositoryIndexer {
       const lang = getLanguageConfig(ext);
       if (!lang) return; // 不支持的语言扩展名，静默跳过
 
+      // 增量索引：mtime 未变则跳过
+      const storedMtime = this.dbManager.getFileMtime(filePath);
+      if (storedMtime !== null && storedMtime === stats.mtimeMs) return;
+
       // 清除旧索引，写入新文件记录
       this.dbManager.clearFileIndex(filePath);
       this.dbManager.insertFile(filePath, stats.mtimeMs);

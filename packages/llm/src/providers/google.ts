@@ -1,6 +1,7 @@
 import type { Message } from '@code-agent/types';
 import type { ILLMProvider, LLMResponse, ChatOptions, ModelCapabilities, StreamChunk } from '../interface.js';
 import { withRetry } from '../network/retry.js';
+import { createLLMResponse } from '../utils/response.js';
 
 /** Google Gemini 模型能力声明 */
 const GEMINI_CAPABILITIES: ModelCapabilities = {
@@ -13,9 +14,14 @@ const GEMINI_CAPABILITIES: ModelCapabilities = {
   supportsEmbedding: false,
 };
 
+interface GeminiPart {
+  text?: string;
+  functionCall?: { name: string; args: Record<string, unknown> };
+  functionResponse?: { name: string; response: Record<string, unknown> };
+}
 interface GeminiContent {
   role: string;
-  parts: Array<{ text?: string; functionCall?: { name: string; args: Record<string, unknown> } }>;
+  parts: GeminiPart[];
 }
 
 /**
@@ -39,13 +45,19 @@ export class GoogleProvider implements ILLMProvider {
     const contents: GeminiContent[] = [];
     for (const m of messages) {
       if (m.role === 'system') {
-        // Gemini 将 system 转为第一个 user 消息的前缀
-        contents.push({
-          role: 'user',
-          parts: [{ text: `[System Instruction]: ${m.content}` }],
-        });
-        // 紧跟着一个 model 确认
+        contents.push({ role: 'user', parts: [{ text: `[System Instruction]: ${m.content}` }] });
         contents.push({ role: 'model', parts: [{ text: 'Understood.' }] });
+      } else if (m.role === 'tool') {
+        // tool 消息转为 Gemini functionResponse 格式
+        contents.push({ role: 'function', parts: [{ functionResponse: { name: m.toolCallId ?? '', response: { result: m.content } } } as unknown as { text?: string }] });
+      } else if (m.role === 'assistant' && m.toolCalls?.length) {
+        // assistant 中的 tool_calls 转为 Gemini functionCall 格式
+        const parts: Array<{ text?: string; functionCall?: { name: string; args: Record<string, unknown> } }> = [];
+        if (m.content) parts.push({ text: m.content });
+        for (const tc of m.toolCalls) {
+          parts.push({ functionCall: { name: tc.name, args: tc.arguments } });
+        }
+        contents.push({ role: 'model', parts });
       } else {
         const role = m.role === 'assistant' ? 'model' : 'user';
         contents.push({ role, parts: [{ text: m.content }] });
@@ -64,6 +76,9 @@ export class GoogleProvider implements ILLMProvider {
           maxOutputTokens: options?.maxTokens ?? 8192,
         },
       };
+      if (options?.tools?.length) {
+        body.tools = [{ functionDeclarations: options.tools.map(t => ({ name: t.name, description: t.description, parameters: t.parameters })) }];
+      }
 
       const url = `${this.baseUrl}:generateContent?key=${this.apiKey}`;
       const response = await fetch(url, {
@@ -78,20 +93,31 @@ export class GoogleProvider implements ILLMProvider {
       }
 
       const data = await response.json() as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+        candidates?: Array<{ content?: { parts?: GeminiPart[] } }>;
         usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number };
       };
 
       const candidate = data.candidates?.[0];
-      const text = candidate?.content?.parts?.map(p => p.text ?? '').join('') ?? '';
+      const parts = candidate?.content?.parts ?? [];
+      const text = parts.filter(p => p.text).map(p => p.text).join('');
 
-      return {
+      // 提取 functionCall
+      const toolCalls = parts
+        .filter(p => p.functionCall)
+        .map((p, i) => ({
+          id: `call_${i}`,
+          name: p.functionCall!.name,
+          arguments: p.functionCall!.args,
+        }));
+
+      return createLLMResponse({
         content: text,
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
         usage: data.usageMetadata ? {
           promptTokens: data.usageMetadata.promptTokenCount,
           completionTokens: data.usageMetadata.candidatesTokenCount,
         } : undefined,
-      };
+      });
     });
   }
 
@@ -110,6 +136,9 @@ export class GoogleProvider implements ILLMProvider {
             maxOutputTokens: options?.maxTokens ?? 8192,
           },
         };
+        if (options?.tools?.length) {
+          body.tools = [{ functionDeclarations: options.tools.map(t => ({ name: t.name, description: t.description, parameters: t.parameters })) }];
+        }
 
         const url = `${this.baseUrl}:streamGenerateContent?alt=sse&key=${this.apiKey}`;
         const response = await fetch(url, {
@@ -131,6 +160,7 @@ export class GoogleProvider implements ILLMProvider {
         let textContent = '';
         let promptTokens = 0;
         let completionTokens = 0;
+        let tcIdx = 0;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -147,21 +177,22 @@ export class GoogleProvider implements ILLMProvider {
 
             try {
               const event = JSON.parse(jsonStr) as {
-                candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+                candidates?: Array<{ content?: { parts?: GeminiPart[] } }>;
                 usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number };
               };
 
-              const text = event.candidates?.[0]?.content?.parts?.map(p => p.text ?? '').join('');
-              if (text) {
-                textContent += text;
-                onChunk({ type: 'content', text });
+              const parts = event.candidates?.[0]?.content?.parts ?? [];
+              for (const p of parts) {
+                if (p.text) {
+                  textContent += p.text;
+                  onChunk({ type: 'content', text: p.text });
+                }
+                if (p.functionCall) {
+                  onChunk({ type: 'tool_call', call: { id: `call_${tcIdx++}`, name: p.functionCall.name, arguments: p.functionCall.args } });
+                }
               }
-              if (event.usageMetadata?.promptTokenCount) {
-                promptTokens = event.usageMetadata.promptTokenCount;
-              }
-              if (event.usageMetadata?.candidatesTokenCount) {
-                completionTokens = event.usageMetadata.candidatesTokenCount;
-              }
+              if (event.usageMetadata?.promptTokenCount) promptTokens = event.usageMetadata.promptTokenCount;
+              if (event.usageMetadata?.candidatesTokenCount) completionTokens = event.usageMetadata.candidatesTokenCount;
             } catch {
               // 跳过无法解析的 SSE 行
             }
@@ -170,10 +201,10 @@ export class GoogleProvider implements ILLMProvider {
 
         onChunk({ type: 'done' });
 
-        return {
+        return createLLMResponse({
           content: textContent,
           usage: { promptTokens, completionTokens },
-        };
+        });
       },
       { onRetry: () => { onChunk({ type: 'reset' }); } },
     );

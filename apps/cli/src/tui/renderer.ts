@@ -5,7 +5,7 @@
  *   accent cyan:  #7dcfff → 117    blue:     #7aa2f7 → 111
  *   purple:       #9d7cd8 → 140    success:  #9ece6a → 114
  *   warning gold: #e0af68 → 180    error:    #f7768e → 211
- *   text:         #a9b1d6 → 146    dim:      #565f89 →  60
+ *   text:         #a9b1d6 → 146    dim:      #565f89 → 103
  *
  * 布局: 2 空格左边距，竖线 (│) 连接输入行与下拉菜单。
  */
@@ -69,11 +69,6 @@ export function modeAccent(mode: Mode): (s: string) => string {
 
 export function modeBadge(mode: Mode): string {
   return mode === 'PLAN' ? t.planBadge(` ${mode} `) : t.badge(` ${mode} `);
-}
-
-// ── 全宽细分隔线 ──
-export function thinDivider(): string {
-  return t.subtle(B.h.repeat(tw()));
 }
 
 // ── 带标签分隔线 ──
@@ -209,10 +204,6 @@ export function renderDiff(diffText: string, maxLines = 30): string {
 
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-export function spinnerFrame(): string {
-  return SPIN[Math.floor(Date.now() / 120) % SPIN.length]!;
-}
-
 /** 启动持续旋转的 spinner，返回停止函数 */
 export function spinnerStart(): () => void {
   let idx = 0;
@@ -224,10 +215,6 @@ export function spinnerStart(): () => void {
     clearInterval(interval);
     process.stdout.write('\r\x1b[2K'); // 清除 spinner 行
   };
-}
-
-export function spinnerStop(): void {
-  process.stdout.write('\r\x1b[2K');
 }
 
 // ── 状态消息 ──
@@ -282,8 +269,16 @@ export function approvalBox(toolName: string, label: string, detail?: string): s
 }
 
 // ── 辅助函数 ──
+
+/** 字符串可见宽度（去除 ANSI 转义序列，CJK/全角字符计为 2 列） */
 function visibleLen(s: string): number {
-  return s.replace(/\x1b\[[0-9;]*m/g, '').length;
+  const clean = s.replace(new RegExp(`${CSI.replace(/\[/g, '\\[')}[0-9;]*m`, 'g'), '');
+  let w = 0;
+  for (const ch of clean) {
+    const cp = ch.codePointAt(0) ?? 0;
+    w += (cp >= 0x2E80) ? 2 : 1;
+  }
+  return w;
 }
 
 export { visibleLen };

@@ -1,6 +1,8 @@
 import type { Message } from '@code-agent/types';
 import type { ILLMProvider, LLMResponse, ChatOptions, ModelCapabilities, StreamChunk, ToolCall } from '../interface.js';
 import { withRetry } from '../network/retry.js';
+import { countTokensFromMessages } from '../utils/tokens.js';
+import { createLLMResponse } from '../utils/response.js';
 
 const ANTHROPIC_CAPABILITIES: ModelCapabilities = {
   maxContextTokens: 200_000,
@@ -114,14 +116,14 @@ export class AnthropicProvider implements ILLMProvider {
         }
       }
 
-      return {
+      return createLLMResponse({
         content: textContent,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
         usage: data.usage ? {
           promptTokens: data.usage.input_tokens,
           completionTokens: data.usage.output_tokens,
         } : undefined,
-      };
+      });
     });
   }
 
@@ -196,7 +198,12 @@ export class AnthropicProvider implements ILLMProvider {
                     thinkingContent += d.thinking;
                     onChunk({ type: 'thinking', text: d.thinking });
                   } else if (d.type === 'input_json_delta' && d.partial_json) {
-                    // Accumulate tool call args
+                    // 累积 tool_use 参数（JSON 字符串拼接，在 content_block_stop 时解析）
+                    const lastTc = toolCalls[toolCalls.length - 1];
+                    if (lastTc) {
+                      const prev = (lastTc as unknown as Record<string, unknown>)._rawArgs as string || '';
+                      (lastTc as unknown as Record<string, unknown>)._rawArgs = prev + d.partial_json;
+                    }
                   }
                   break;
                 }
@@ -208,6 +215,15 @@ export class AnthropicProvider implements ILLMProvider {
                   break;
                 }
                 case 'content_block_stop': {
+                  // 解析累积的工具调用参数
+                  const lastTc = toolCalls[toolCalls.length - 1];
+                  if (lastTc) {
+                    const raw = (lastTc as unknown as Record<string, unknown>)._rawArgs as string | undefined;
+                    if (raw) {
+                      try { lastTc.arguments = JSON.parse(raw); } catch { /* 保持空对象 */ }
+                      delete (lastTc as unknown as Record<string, unknown>)._rawArgs;
+                    }
+                  }
                   break;
                 }
                 case 'message_delta': {
@@ -231,20 +247,19 @@ export class AnthropicProvider implements ILLMProvider {
 
         onChunk({ type: 'done' });
 
-        return {
+        return createLLMResponse({
           content: textContent,
           thinkingContent: thinkingContent || undefined,
           toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
           usage: { promptTokens, completionTokens },
-        };
+        });
       },
-      { onRetry: (_a, _e) => { onChunk({ type: 'reset' }); } },
+      { onRetry: () => { onChunk({ type: 'reset' }); } },
     );
   }
 
   async countTokens(messages: Message[]): Promise<number> {
-    const text = messages.map(m => m.content).join('\n');
-    return Math.ceil(text.length / 4);
+    return countTokensFromMessages(messages);
   }
 
   async healthCheck(): Promise<boolean> {

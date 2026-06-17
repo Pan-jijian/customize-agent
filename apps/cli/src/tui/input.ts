@@ -99,6 +99,14 @@ export class TuiInput {
       this._prevLines = 0;
       this._draw(st);
 
+      // 终端 resize 时重新绘制
+      const onResize = () => {
+        process.stdout.write(CSI + '2J' + CSI + 'H'); // 清屏
+        this._prevLines = 0;
+        this._draw(st);
+      };
+      process.stdout.on('resize', onResize);
+
       const onKP = (_str: string | undefined, key: readline.Key) => {
         if (!key) return;
         const nm = key.name;
@@ -164,8 +172,8 @@ export class TuiInput {
         if (key.ctrl && nm === 'k') { st.text = st.text.slice(0, st.pos); this._sync(st); return; }
         if (key.ctrl && nm === 'u') { st.text = st.text.slice(st.pos); st.pos = 0; this._sync(st); return; }
 
-        // 可打印字符
-        if (_str && _str.length === 1 && _str.charCodeAt(0) >= 32) {
+        // 可打印字符（支持 BMP 外 Unicode，如 emoji）
+        if (_str && _str.length >= 1 && (_str.codePointAt(0) ?? 0) >= 32) {
           st.text = st.text.slice(0, st.pos) + _str + st.text.slice(st.pos);
           st.pos++;
           this._sync(st);
@@ -179,6 +187,7 @@ export class TuiInput {
         if (done_) return;
         done_ = true;
         process.stdin.removeListener('keypress', onKP);
+        process.stdout.removeListener('resize', onResize);
         if (raw) try { process.stdin.setRawMode(false); } catch { /* */ }
         process.stdout.write(CSI + '?25h');
       };

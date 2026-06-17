@@ -1,3 +1,5 @@
+import { estimateTokens } from '@code-agent/llm';
+
 /**
  * 上下文切块的优先级分组。
  */
@@ -48,7 +50,7 @@ export class SystemPromptSource implements ContextSource {
     return [{
       priority: this.priority,
       content: this.content,
-      tokens: Math.ceil(this.content.length / 4),
+      tokens: estimateTokens(this.content),
       source: this.id,
       ttl: Infinity,
     }];
@@ -66,7 +68,7 @@ export class ToolDefinitionSource implements ContextSource {
     return [{
       priority: this.priority,
       content: this.schema,
-      tokens: Math.ceil(this.schema.length / 4),
+      tokens: estimateTokens(this.schema),
       source: this.id,
       ttl: Infinity,
     }];
@@ -157,7 +159,8 @@ export class ContextManager {
     }
 
     // 3. TTL 过期过滤
-    const alive = allChunks.filter(c => c.ttl === undefined || c.ttl === Infinity || c.ttl >= 0);
+    // TTL=undefined/Infinity → 永久保留；TTL=number → 在 currentRound >= ttl 时过期丢弃
+    const alive = allChunks.filter(c => c.ttl === undefined || c.ttl === Infinity || c.ttl > currentRound);
 
     // 4. 计算总 token 数
     const totalTokens = alive.reduce((sum, c) => sum + c.tokens, 0);
@@ -228,7 +231,7 @@ export class ContextManager {
     return {
       ...chunk,
       content: `${head}\n...[已压缩 ${chunk.content.length - maxLen} 字符]...\n${tail}`,
-      tokens: Math.ceil(maxLen / 4),
+      tokens: Math.ceil(maxLen / 3),  // maxLen 是字符数，非文本内容
     };
   }
 

@@ -20,12 +20,12 @@
     "@code-agent/engine": "workspace:*",
     "@code-agent/codex": "workspace:*",
     "@code-agent/llm": "workspace:*",
+    "@code-agent/memory": "workspace:*",
     "@code-agent/telemetry": "workspace:*",
     "@code-agent/types": "workspace:*",
     "@code-agent/tools": "workspace:*",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
-    "fast-glob": "^3.3.3",
-    "inquirer": "^14.0.2"
+    "fast-glob": "^3.3.3"
   }
 }

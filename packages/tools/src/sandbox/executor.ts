@@ -74,12 +74,12 @@ export class SandboxExecutor {
     return this._executeVfsGuard(command, cwd);
   }
 
-  /** VFS-Guard：路径虚拟沙箱 — CWD 强绑定 + 危险命令拦截 */
+  /** VFS-Guard：路径虚拟沙箱 — CWD 强绑定 + 危险命令拦截 + read-only 模式写拦截 */
   private async _executeVfsGuard(command: string, cwd?: string): Promise<SandboxResult> {
     // CWD 强绑定在项目根目录
     const safeCwd = cwd ?? this.workspaceRoot;
 
-    // 危险命令意图扫描
+    // 危险命令意图扫描（所有模式均拦截）
     const dangerousPatterns = [
       { pattern: /> \/(etc|sys|proc|dev)\//, reason: '禁止写系统目录' },
       { pattern: /rm\s+-rf\s+\//, reason: '禁止 rm -rf /' },
@@ -90,6 +90,28 @@ export class SandboxExecutor {
     for (const { pattern, reason } of dangerousPatterns) {
       if (pattern.test(command)) {
         return { stdout: '', stderr: `命令被拦截 (vfs-guard): ${reason}`, code: 1 };
+      }
+    }
+
+    // read-only 模式：拦截文件写入/修改/删除命令
+    if (this.mode === 'read-only') {
+      const writePatterns = [
+        { pattern: /\brm\s+-/, reason: 'read-only 模式禁止删除文件' },
+        { pattern: /\bmv\s+/, reason: 'read-only 模式禁止移动/重命名文件' },
+        { pattern: /\bcp\s+.*-f/, reason: 'read-only 模式禁止强制复制' },
+        { pattern: /\bgit\s+(commit|push|add|tag)\b/, reason: 'read-only 模式禁止 Git 写操作' },
+        { pattern: /\bnpm\s+(install|uninstall|publish|link)\b/, reason: 'read-only 模式禁止 npm 写操作' },
+        { pattern: /\bpnpm\s+(install|add|publish|link)\b/, reason: 'read-only 模式禁止 pnpm 写操作' },
+        { pattern: />\s*\S/, reason: 'read-only 模式禁止输出重定向（写入文件）' },
+        { pattern: />>\s*\S/, reason: 'read-only 模式禁止追加重定向（写入文件）' },
+        { pattern: /\bmkdir\b/, reason: 'read-only 模式禁止创建目录' },
+        { pattern: /\btouch\b/, reason: 'read-only 模式禁止创建/修改文件时间戳' },
+        { pattern: /\btee\b/, reason: 'read-only 模式禁止 tee（写入文件）' },
+      ];
+      for (const { pattern, reason } of writePatterns) {
+        if (pattern.test(command)) {
+          return { stdout: '', stderr: `命令被拦截 (vfs-guard): ${reason}`, code: 1 };
+        }
       }
     }
 
@@ -106,18 +128,18 @@ export class SandboxExecutor {
     }
   }
 
-  /** macOS Seatbelt sandbox-exec 实现 */
+  /** macOS Seatbelt sandbox-exec 实现 — 通过 stdin 传命令避免 shell 注入 */
   private async _executeSeatbelt(command: string, cwd?: string): Promise<SandboxResult> {
     const profilePath = path.join(this.workspaceRoot, '.agent-sandbox.sb');
     const profile = this._buildSeatbeltProfile();
     await fs.writeFile(profilePath, profile);
     try {
       const result = await execa({
-        shell: true,
         cwd: cwd ?? this.workspaceRoot,
         reject: false,
         timeout: 120_000,
-      })`/usr/bin/sandbox-exec -f ${profilePath} sh -c ${JSON.stringify(command)}`;
+        input: command,  // 通过 stdin 传入命令，避免 shell 元字符注入
+      })`/usr/bin/sandbox-exec -f ${profilePath} sh`;
       return {
         stdout: result.stdout,
         stderr: result.stderr,

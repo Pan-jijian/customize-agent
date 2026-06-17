@@ -61,9 +61,10 @@ export class CodeSearcher {
       }
     }
 
-    args.push('--', pattern);
     if (options.path) {
-      args[args.length - 1] = path.resolve(this.cwd, options.path);
+      args.push('--', pattern, path.resolve(this.cwd, options.path));
+    } else {
+      args.push('--', pattern);
     }
 
     const result = await execa({
@@ -73,7 +74,7 @@ export class CodeSearcher {
     })`rg ${args}`;
 
     if (result.exitCode !== 0 && result.exitCode !== 1) {
-      throw new Error(result.stderr || 'rg failed');
+      throw new Error(result.stderr || 'ripgrep 搜索异常');
     }
 
     return this._parseRgOutput(result.stdout);

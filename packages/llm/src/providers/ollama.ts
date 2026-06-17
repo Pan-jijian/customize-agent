@@ -2,6 +2,8 @@ import OpenAI from 'openai';
 import type { Message } from '@code-agent/types';
 import type { ILLMProvider, LLMResponse, ChatOptions, ModelCapabilities, StreamChunk } from '../interface.js';
 import { withRetry } from '../network/retry.js';
+import { countTokensFromMessages } from '../utils/tokens.js';
+import { createLLMResponse } from '../utils/response.js';
 
 const OLLAMA_CAPABILITIES: ModelCapabilities = {
   maxContextTokens: 128_000,
@@ -45,13 +47,13 @@ export class OllamaProvider implements ILLMProvider {
       const choice = response.choices[0];
       if (!choice) throw new Error('LLM returned empty choices');
 
-      return {
+      return createLLMResponse({
         content: choice.message.content ?? '',
         usage: response.usage ? {
           promptTokens: response.usage.prompt_tokens,
           completionTokens: response.usage.completion_tokens,
         } : undefined,
-      };
+      });
     });
   }
 
@@ -87,15 +89,14 @@ export class OllamaProvider implements ILLMProvider {
         }
 
         onChunk({ type: 'done' });
-        return { content, usage: { promptTokens, completionTokens } };
+        return createLLMResponse({ content, usage: { promptTokens, completionTokens } });
       },
       { onRetry: () => { onChunk({ type: 'reset' }); } },
     );
   }
 
   async countTokens(messages: Message[]): Promise<number> {
-    const text = messages.map(m => m.content).join('\n');
-    return Math.ceil(text.length / 4);
+    return countTokensFromMessages(messages);
   }
 
   async healthCheck(): Promise<boolean> {

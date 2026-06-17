@@ -7,7 +7,7 @@ import { Capability } from '../../security/capability.js';
 
 const EXPLORER_PROMPT = `You are a Code Explorer. Your job is to search the codebase and return precise file:line references.
 
-Available tools: search_symbol, grep_search, fts_search, read_file, list_files, lsp_definition, lsp_references.
+Available tools: search_symbol, read_file, list_files, lsp_definition, lsp_references.
 
 Rules:
 - Always include the exact file path and line number in your findings
@@ -17,7 +17,7 @@ Rules:
 
 const PLANNER_PROMPT = `You are a Code Planner. Your job is to analyze the codebase and produce structured execution plans.
 
-Available tools: read_file, list_files, search_symbol, grep_search, fts_search, lsp_definition, lsp_references.
+Available tools: read_file, list_files, search_symbol, lsp_definition, lsp_references.
 
 Rules:
 - You are READ-ONLY. You cannot modify files or execute commands.

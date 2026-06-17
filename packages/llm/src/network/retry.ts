@@ -4,10 +4,8 @@ export interface RetryOptions {
   maxRetries?: number;
   /** 基础退避延迟 ms（默认 1000） */
   baseDelayMs?: number;
-  /** 每次重试时的回调 */
+  /** 每次重试时的回调（流式模式可通过 onRetry 发送 type:'reset' chunk 实现回滚） */
   onRetry?: (attempt: number, error: Error) => void;
-  /** 流式模式重试触发前回调 — 通知终端回滚投机性输出 */
-  onStreamReset?: () => void;
 }
 
 /** 可重试的 HTTP 状态码 */
@@ -59,10 +57,6 @@ export async function withRetry<T>(
       }
 
       options.onRetry?.(attempt + 1, lastError);
-      // 流式回滚信号
-      if (options.onStreamReset) {
-        options.onStreamReset();
-      }
 
       // 指数退避 + 随机抖动
       const jitter = Math.floor(Math.random() * 1000);
