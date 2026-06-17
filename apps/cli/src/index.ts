@@ -7,7 +7,7 @@ import { ToolRegistry, PermissionEngine, ExecutionController } from '@code-agent
 import { ToolKit } from '@code-agent/tools';
 import { StorageManager, RepositoryIndexer } from '@code-agent/codex';
 import { AgentExecutor } from './engine/executor.js';
-import { Repl } from './repl.js';
+import { Repl } from './repl/repl.js';
 import { approvalBox, t } from './tui/renderer.js';
 import type { Message } from '@code-agent/types';
 import * as readline from 'readline';
