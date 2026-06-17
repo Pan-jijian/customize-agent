@@ -3,9 +3,7 @@ import type { SubagentConfig, SubagentResult, SubagentTask } from './subagent/ty
 import { SubagentRunner } from './subagent/runner.js';
 import type { SafeWorktreeManager, WorktreeContext } from './subagent/worktree.js';
 
-// ============================================================
 // 编排器 — DAG 任务分解 + 动态 Worker 派生
-// ============================================================
 
 /** 协作模式 */
 export type CollaborationMode = 'orchestrator' | 'pipeline' | 'swarm';

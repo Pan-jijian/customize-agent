@@ -344,9 +344,7 @@ function createExecutor(providerName?: string, modelName?: string, rl?: readline
   });
 }
 
-// ══════════════════════════════════════════════════════════
 // CLI 定义
-// ══════════════════════════════════════════════════════════
 program
   .name('code-agent')
   .description('企业级开源 Code Agent v3.0 — 启动进入交互式 REPL')
@@ -406,9 +404,7 @@ program.action(async () => {
   rl.close();
 });
 
-// ══════════════════════════════════════════════════════════
 // 子命令: mcp-server
-// ══════════════════════════════════════════════════════════
 program
   .command('mcp-server')
   .description('启动 MCP Server (stdio JSON-RPC)，供 Claude Desktop/Cursor 等外部客户端连接')

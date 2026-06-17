@@ -3,9 +3,7 @@ import type { ILLMProvider } from '@code-agent/llm';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { Capability } from '../../security/capability.js';
 
-// ============================================================
 // 6 种内置子智能体的静态 System Prompt
-// ============================================================
 
 const EXPLORER_PROMPT = `You are a Code Explorer. Your job is to search the codebase and return precise file:line references.
 
@@ -77,9 +75,7 @@ Rules:
 - Then git commit to complete the merge
 - Output <task_finish>merge summary</task_finish> when done`;
 
-// ============================================================
 // 角色 → Prompt + Capability + 推荐模型 + maxLoops 映射
-// ============================================================
 
 interface BuiltinRoleConfig {
   prompt: string;

@@ -1,8 +1,6 @@
 import type { ILLMProvider } from '../interface.js';
 
-// ============================================================
 // 类型定义
-// ============================================================
 
 /** 任务分析结果 */
 export interface TaskAnalysis {
@@ -40,9 +38,7 @@ export interface CallRecord {
   timestamp: number;
 }
 
-// ============================================================
 // 模型定价表 ($/1M tokens)
-// ============================================================
 
 const PRICING: Record<string, { input: number; output: number }> = {
   'deepseek-v4-flash': { input: 0.14, output: 0.28 },
@@ -59,9 +55,7 @@ const PRICING: Record<string, { input: number; output: number }> = {
 const QUALITY_UPGRADE_CHAIN = ['deepseek', 'openai', 'anthropic'];
 const FALLBACK_CHAIN = ['deepseek', 'openai', 'anthropic', 'openrouter'];
 
-// ============================================================
 // TaskAnalyzer — 任务特征分析
-// ============================================================
 
 /** 关键词启发式分析任务复杂度、领域和隐私需求 */
 export class TaskAnalyzer {
@@ -110,9 +104,7 @@ export class TaskAnalyzer {
   }
 }
 
-// ============================================================
 // 可插拔路由策略
-// ============================================================
 
 /** 成本优先策略 — 选择最便宜的可用 Provider */
 export class CostFirstStrategy implements RoutingStrategy {
@@ -182,9 +174,7 @@ export class PrivacyFirstStrategy implements RoutingStrategy {
   }
 }
 
-// ============================================================
 // CostTracker — 成本累加与上限检查
-// ============================================================
 
 /** 成本追踪器 — 记录每次 LLM 调用费用，支持预算上限检查 */
 export class CostTracker {
@@ -277,9 +267,7 @@ export class CostTracker {
   }
 }
 
-// ============================================================
 // HealthManager — 健康检查与故障标记
-// ============================================================
 
 /** 健康管理器 — 定期健康检查 + 故障标记，30s 内不重复检查 */
 export class HealthManager {
@@ -322,9 +310,7 @@ export class HealthManager {
   }
 }
 
-// ============================================================
 // FallbackManager — 降级链管理
-// ============================================================
 
 /** 降级链管理器 — L1 故障降级 + L2 质量驱动升级 + Reflection Snapshot */
 export class FallbackManager {
@@ -386,9 +372,7 @@ export class FallbackManager {
   }
 }
 
-// ============================================================
 // AIGateway — 协调器（仅编排，不嵌入具体路由逻辑）
-// ============================================================
 
 /** AI Gateway 配置选项 */
 export interface GatewayConfig {
