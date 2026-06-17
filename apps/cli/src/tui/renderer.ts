@@ -1,17 +1,17 @@
 /**
- * Terminal UI rendering — ANSI escapes + Unicode box drawing.
+ * TUI 渲染 — ANSI 转义序列 + Unicode 框线绘制。
  *
- * Tokyo Night palette (256-color):
+ * Tokyo Night 调色板 (256 色):
  *   accent cyan:  #7dcfff → 117    blue:     #7aa2f7 → 111
  *   purple:       #9d7cd8 → 140    success:  #9ece6a → 114
  *   warning gold: #e0af68 → 180    error:    #f7768e → 211
  *   text:         #a9b1d6 → 146    dim:      #565f89 →  60
  *
- * Layout: 2-space left gutter, vertical bar (│) connects input ↔ dropdown.
+ * 布局: 2 空格左边距，竖线 (│) 连接输入行与下拉菜单。
  */
 const CSI = '\x1b[';
 
-// ── 256-color helpers ──
+// ── 256 色辅助函数 ──
 function c(t: string, code: number): string { return `${CSI}38;5;${code}m${t}${CSI}39m`; }
 function cb(t: string, fg: number, bg: number): string { return `${CSI}38;5;${fg}m${CSI}48;5;${bg}m${t}${CSI}39;49m`; }
 
@@ -52,7 +52,7 @@ export const cur = {
   restore:    `${CSI}u`,
 };
 
-// ── box chars ──
+// ── 框线字符 ──
 const B = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
 const D = { tl: '╔', tr: '╗', bl: '╚', br: '╝', h: '═', v: '║' };
 
@@ -62,7 +62,7 @@ export function tw(): number {
 
 export type Mode = 'AGENT' | 'PLAN';
 
-// ── mode helpers ──
+// ── 模式辅助函数 ──
 export function modeAccent(mode: Mode): (s: string) => string {
   return mode === 'PLAN' ? t.blue : t.accent;
 }
@@ -71,19 +71,19 @@ export function modeBadge(mode: Mode): string {
   return mode === 'PLAN' ? t.planBadge(` ${mode} `) : t.badge(` ${mode} `);
 }
 
-// ── full-width thin divider ──
+// ── 全宽细分隔线 ──
 export function thinDivider(): string {
   return t.subtle(B.h.repeat(tw()));
 }
 
-// ── divider with label ──
+// ── 带标签分隔线 ──
 export function divider(label: string): string {
   const w = tw();
   const side = Math.max(0, Math.floor((w - visibleLen(label) - 4) / 2));
   return t.subtle(B.h.repeat(side) + '  ' + t.dim(label) + '  ' + B.h.repeat(side));
 }
 
-// ── welcome banner ──
+// ── 欢迎横幅 ──
 export function welcomeBanner(version: string, provider: string): string {
   const w = Math.min(tw() - 6, 72);
   const pd = (s: string, n: number) => s + ' '.repeat(Math.max(0, n - visibleLen(s)));
@@ -104,7 +104,7 @@ export function welcomeBanner(version: string, provider: string): string {
   return '\n' + top + '\n' + inner.map(l => v + ' ' + l + ' ' + v).join('\n') + '\n' + bot + '\n';
 }
 
-// ── file dropdown (prefix-aware: caller provides "  │ " prefix) ──
+// ── 文件下拉菜单（前缀感知：调用方提供 "  │ " 前缀）──
 export function renderFileDropdown(
   items: Array<{ label: string; detail?: string; highlighted: boolean }>,
   maxH = 8,
@@ -131,7 +131,7 @@ export function renderFileDropdown(
   return out;
 }
 
-// ── command dropdown ──
+// ── 命令下拉菜单 ──
 export function renderCommandMenu(
   items: Array<{ cmd: string; desc: string; highlighted: boolean }>,
   w?: number,
@@ -152,7 +152,7 @@ export function renderCommandMenu(
   return out;
 }
 
-// ── hint bar (single line, no prefix) ──
+// ── 提示栏（单行，无前缀）──
 export function hintText(): string {
   return [
     `${t.dim('Tab')} select`,
@@ -162,7 +162,7 @@ export function hintText(): string {
   ].join('  ·  ');
 }
 
-// ── tool call ──
+// ── 工具调用 ──
 function formatArgs(args?: Record<string, unknown>): string {
   if (!args) return '';
   const val = args.path ?? args.input;
@@ -230,7 +230,7 @@ export function spinnerStop(): void {
   process.stdout.write('\r\x1b[2K');
 }
 
-// ── status messages ──
+// ── 状态消息 ──
 export function taskComplete(summary?: string): string {
   const s = summary ? ` ${t.dim('— ' + summary)}` : '';
   return `\n  ${t.success('✓')} ${t.text('Task complete')}${s}\n`;
@@ -248,7 +248,7 @@ export function infoMsg(msg: string): string {
   return `  ${t.accent('ℹ')} ${t.dim(msg)}`;
 }
 
-// ── context management display ──
+// ── 上下文管理显示 ──
 export function contextCompacting(beforeTokens: number, limit: number): string {
   const pct = Math.round((beforeTokens / limit) * 100);
   return `\n  ${t.warning('⚠')} ${t.text(`上下文使用 ${pct}%（${Math.round(beforeTokens / 1000)}K / ${Math.round(limit / 1000)}K token），正在压缩…`)}`;
@@ -264,7 +264,7 @@ export function contextStats(currentTokens: number, limit: number): string {
   return `  ${t.dim('上下文:')} ${color(`${Math.round(currentTokens / 1000)}K / ${Math.round(limit / 1000)}K token (${pct}%)`)}`;
 }
 
-// ── approval box ──
+// ── 审批弹框 ──
 export function approvalBox(toolName: string, label: string, detail?: string): string {
   const w = Math.min(tw() - 4, 64);
   const bar = t.warning('│');
@@ -281,7 +281,7 @@ export function approvalBox(toolName: string, label: string, detail?: string): s
   return lines.join('\n');
 }
 
-// ── helpers ──
+// ── 辅助函数 ──
 function visibleLen(s: string): number {
   return s.replace(/\x1b\[[0-9;]*m/g, '').length;
 }

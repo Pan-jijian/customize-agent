@@ -1,12 +1,12 @@
 /**
- * TUI Input — raw-mode keyboard input with fuzzy file/command completion.
+ * TUI 输入 — 原始模式键盘输入，支持模糊文件名/命令补全。
  *
- * Draw strategy:
- *   1. \r to column 0 of the input line (always reachable — previous draw left us here)
- *   2. \x1b[0J (clearBelow) to wipe the previous render in one shot
- *   3. Write input line + optional dropdown
- *   4. \x1b[{n}A back to input line, \r, \x1b[{col}C to caret
- *   5. Single process.stdout.write() — zero flicker
+ * 绘制策略:
+ *   1. \r 回到输入行第 0 列（前一次绘制已确保光标在此行）
+ *   2. \x1b[0J (clearBelow) 一次清除前次渲染
+ *   3. 写入输入行 + 可选下拉菜单
+ *   4. \x1b[{n}A 回到输入行，\r，\x1b[{col}C 移到光标列
+ *   5. 单次 process.stdout.write() — 零闪烁
  */
 import * as fs from 'fs';
 import * as readline from 'readline';
@@ -16,7 +16,7 @@ import {
 } from './renderer.js';
 import type { Mode } from './renderer.js';
 
-// ── types ──
+// ── 类型定义 ──
 export interface DropdownItem { label: string; detail?: string; data: string; }
 export interface TuiConfig {
   files: string[]; projectRoot: string;
@@ -42,25 +42,25 @@ const CMDS: Array<{ name: string; desc: string }> = [
 
 let _kprInit = false;
 
-// ── prefix visible width (for cursor column) ──
-// "  AGENT  │ ➜ " → 2 + (mode+2) + 1 + 1 + 1 + 1 + 1 = mode.length + 9
+// ── 前缀可见宽度（用于光标列计算）──
+// "  AGENT  │ ➜ " → 2 + (mode+2) + 各分隔符(空格+│+空格+➜+空格) = mode.length + 9
 function prefixVis(mode: string): number { return mode.length + 9; }
 
-// ── display width (CJK/fullwidth = 2 columns, ASCII = 1) ──
+// ── 显示宽度（CJK/全角 = 2 列，ASCII = 1 列）──
 function displayWidth(s: string): number {
   let w = 0;
   for (const ch of s) {
     const cp = ch.codePointAt(0) ?? 0;
-    // CJK Unified, Compatibility, Extensions, fullwidth forms, Hangul, etc.
+    // CJK 统一表意文字、兼容区、扩展区、全角形式、谚文等
     w += (cp >= 0x2E80) ? 2 : 1;
   }
   return w;
 }
 
-// ── bare ANSI escapes ──
+// ── 裸 ANSI 转义序列 ──
 const CSI = '\x1b[';
 
-// ── TuiInput ──
+// ── TuiInput 类 ──
 export class TuiInput {
   private files: string[];
   private root: string;
@@ -83,7 +83,7 @@ export class TuiInput {
   }
 
   // ═══════════════════════════════════════════════════
-  // read
+  // read 读取输入
   // ═══════════════════════════════════════════════════
 
   async read(): Promise<string> {
@@ -96,7 +96,7 @@ export class TuiInput {
         try { process.stdin.setRawMode(true); raw = true; } catch { /* */ }
       }
 
-      // Start on a clean line
+      // 从空白行开始
       process.stdout.write(CSI + '?25l\n');
       this._prevLines = 0;
       this._draw(st);
@@ -105,11 +105,11 @@ export class TuiInput {
         if (!key) return;
         const nm = key.name;
 
-        // exit
+        // 退出处理
         if (key.ctrl && nm === 'c') { done(); process.stdout.write(CSI + '?25h\n'); process.exit(0); }
         if (key.ctrl && nm === 'd' && !st.text)  { done(); resolve('/exit'); return; }
 
-        // Enter
+        // 回车处理
         if (nm === 'return' || nm === 'enter') {
           if (st.dd !== 'none') {
             const sel = st.items[st.sel];
@@ -123,19 +123,19 @@ export class TuiInput {
           return;
         }
 
-        // Tab
+        // Tab 补全
         if (nm === 'tab') {
           if (st.dd !== 'none') { const it = st.items[st.sel]; if (it) this._apply(st, it); }
           return;
         }
 
-        // Escape
+        // Escape 取消
         if (nm === 'escape') {
           if (st.dd !== 'none') { st.dd = 'none'; st.items = []; st.fStart = -1; st.fEnd = -1; this._draw(st); }
           return;
         }
 
-        // arrows
+        // 方向键处理
         if (nm === 'up') {
           if (st.dd !== 'none') { st.sel = Math.max(0, st.sel - 1); this._draw(st); }
           else this._hUp(st);
@@ -149,7 +149,7 @@ export class TuiInput {
         if (nm === 'left')  { st.pos = Math.max(0, st.pos - 1); this._draw(st); return; }
         if (nm === 'right') { st.pos = Math.min(st.text.length, st.pos + 1); this._draw(st); return; }
 
-        // backspace / delete
+        // 退格键 / 删除键
         if (nm === 'backspace') {
           if (st.pos > 0) { st.text = st.text.slice(0, st.pos - 1) + st.text.slice(st.pos); st.pos--; this._sync(st); }
           return;
@@ -159,14 +159,14 @@ export class TuiInput {
           return;
         }
 
-        // ctrl combos
+        // Ctrl 组合键
         if (key.ctrl && nm === 'w') { this._cW(st); return; }
         if (key.ctrl && nm === 'a') { st.pos = 0; this._draw(st); return; }
         if (key.ctrl && nm === 'e') { st.pos = st.text.length; this._draw(st); return; }
         if (key.ctrl && nm === 'k') { st.text = st.text.slice(0, st.pos); this._sync(st); return; }
         if (key.ctrl && nm === 'u') { st.text = st.text.slice(st.pos); st.pos = 0; this._sync(st); return; }
 
-        // printable
+        // 可打印字符
         if (_str && _str.length === 1 && _str.charCodeAt(0) >= 32) {
           st.text = st.text.slice(0, st.pos) + _str + st.text.slice(st.pos);
           st.pos++;
@@ -188,7 +188,7 @@ export class TuiInput {
   }
 
   // ═══════════════════════════════════════════════════
-  // history
+  // history 历史导航
   // ═══════════════════════════════════════════════════
 
   private _hUp(st: St): void {
@@ -216,7 +216,7 @@ export class TuiInput {
   }
 
   // ═══════════════════════════════════════════════════
-  // dropdown apply
+  // dropdown apply 下拉应用
   // ═══════════════════════════════════════════════════
 
   private _apply(st: St, it: DropdownItem): void {
@@ -228,7 +228,7 @@ export class TuiInput {
   }
 
   // ═══════════════════════════════════════════════════
-  // dropdown builder
+  // dropdown builder 下拉构建
   // ═══════════════════════════════════════════════════
 
   private _sync(st: St): void {
@@ -273,7 +273,7 @@ export class TuiInput {
   }
 
   // ═══════════════════════════════════════════════════
-  // draw — single write, clearBelow once, no per-line clearLine
+  // draw — 单次写入，一次 clearBelow，无逐行 clearLine
   // ═══════════════════════════════════════════════════
 
   private _draw(st: St): void {
@@ -288,7 +288,7 @@ export class TuiInput {
     const after = st.text.slice(st.pos + 1);
     const caret = s.inverse(ch);
 
-    // ── build lines ──
+    // ── 构建行内容 ──
     const lines: string[] = [];
     lines.push(`${pad}${badge} ${bar} ${pr} ${before}${caret}${after}`);
 
@@ -310,22 +310,22 @@ export class TuiInput {
     const totalLines = lines.length;
     const prevLines = this._prevLines;
 
-    // ── build single ANSI string ──
-    // Use clearLine per line (not clearBelow) — more surgical, less flash.
-    // Input line: \r + spaces to cover old content, then clearLine to trim extras.
-    // Dropdown lines: \n + clearLine + content.
-    let out = '\r' + lines[0] + CSI + 'K';  // write then clear to end of line
+    // ── 构建单条 ANSI 字符串 ──
+    // 使用逐行 clearLine（而非 clearBelow）— 更精细，闪烁更少。
+    // 输入行: \r + 空格覆盖旧内容，然后 clearLine 修剪多余。
+    // 下拉行: \n + clearLine + 内容。
+    let out = '\r' + lines[0] + CSI + 'K';  // 写入后清除到行尾
     for (let i = 1; i < totalLines; i++) {
       out += '\n' + CSI + 'K' + lines[i];
     }
-    // clear leftover lines from taller previous render
+    // 清除前次更高渲染遗留的多余行
     if (prevLines > totalLines) {
       for (let i = totalLines; i < prevLines; i++) {
         out += '\n' + CSI + 'K';
       }
     }
 
-    // cursor back to input line, then to target column
+    // 光标回到输入行，再移到目标列
     const lastTouched = Math.max(totalLines, prevLines);
     if (lastTouched > 1) out += `${CSI}${lastTouched - 1}A`;
     out += '\r';
@@ -337,7 +337,7 @@ export class TuiInput {
   }
 
   // ═══════════════════════════════════════════════════
-  // file size cache
+  // file size cache 文件大小缓存
   // ═══════════════════════════════════════════════════
 
   private _sz(rel: string): string {

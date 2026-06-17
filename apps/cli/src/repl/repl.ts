@@ -1,9 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Message } from '@code-agent/types';
-import type { AgentExecutor } from './engine/executor.js';
-import { TuiInput } from './tui/input.js';
-import { welcomeBanner, t, s, divider, errorMsg, infoMsg, contextStats } from './tui/renderer.js';
+import type { AgentExecutor } from '../engine/executor.js';
+import { TuiInput } from '../tui/input.js';
+import { welcomeBanner, t, s, divider, errorMsg, infoMsg, contextStats } from '../tui/renderer.js';
 
 /** REPL 配置 */
 export interface ReplConfig {
@@ -147,7 +147,7 @@ export class Repl {
   }
 
   // ═══════════════════════════════════════
-  // /commands
+  // /commands 命令分发
   // ═══════════════════════════════════════
 
   private async _command(raw: string): Promise<boolean> {
