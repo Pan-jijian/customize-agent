@@ -1,4 +1,4 @@
-import { SandboxExecutor, type SandboxMode } from '../sandbox/executor.js';
+import { SandboxExecutor, type SandboxMode } from './sandbox-executor.js';
 
 /** 终端工具 — 命令执行入口，内部委托 SandboxExecutor 做内核级隔离 */
 export class TerminalTool {

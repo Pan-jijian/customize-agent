@@ -1,6 +1,6 @@
-import type { Message, FunctionDefinition } from '@code-agent/types';
+import type { Message, FunctionDefinition } from '@customize-agent/types';
 import type { SubagentConfig, SubagentResult } from './types.js';
-import { BudgetManager, LoopGuard } from '../../execution/controller.js';
+import { ExecutionController } from '../../execution-controller.js';
 
 /**
  * 子智能体运行器 — 独立上下文，完成后仅返回摘要。
@@ -10,12 +10,17 @@ import { BudgetManager, LoopGuard } from '../../execution/controller.js';
  * 完成后仅将 SubagentResult.summary 灌回 Orchestrator，不共享 conversation history。
  *
  * 使用原生 Function Calling（非 XML 解析）。
+ * 通过 ExecutionController 复用 L1 死循环检测 + L2 财务熔断。
  */
 export class SubagentRunner {
   async run(config: SubagentConfig, task: string): Promise<SubagentResult> {
     const startTime = Date.now();
-    const budget = new BudgetManager(1.0); // 子智能体独立 $1 预算
-    const loopGuard = new LoopGuard(3);
+    // 复用 ExecutionController：子智能体独立 $1 预算，死循环阈值 3，禁用检查点
+    const controller = new ExecutionController({
+      maxBudgetUsd: 1.0,
+      deadLoopThreshold: 3,
+      checkpointInterval: 9999,
+    });
     let totalTokens = 0;
     // 成本追踪待集成 Provider 定价表，当前 token 累加见 LLM 响应 usage 字段
     let totalCost = 0;
@@ -31,10 +36,9 @@ export class SubagentRunner {
     const findings: string[] = [];
     const filesModified: string[] = [];
 
-    let deadLoop = false;
-    for (let round = 1; round <= config.maxLoops && !deadLoop; round++) {
-      // 财务熔断
-      if (budget.checkBudget().isOverBudget) break;
+    for (let round = 1; round <= config.maxLoops; round++) {
+      // L2 财务熔断
+      if (controller.budget.checkBudget().isOverBudget) break;
 
       // 调用 LLM（原生 Function Calling）
       let responseContent: string;
@@ -87,9 +91,21 @@ export class SubagentRunner {
           try {
             const result = await config.tools.dispatch(tc.name, tc.arguments);
 
-            // 死循环检测
-            loopGuard.recordCall(tc.name, tc.arguments, result);
-            if (loopGuard.detectDeadLoop().isDeadLoop) { deadLoop = true; break; }
+            // L1 死循环检测（通过 ExecutionController）
+            controller.recordToolCall(tc.name, tc.arguments, result);
+            const deadLoop = controller.loopDetector.detectDeadLoop();
+            if (deadLoop.isDeadLoop) {
+              return {
+                success: false,
+                role: config.role,
+                summary: deadLoop.reason!,
+                findings,
+                filesModified: [...new Set(filesModified)],
+                tokensUsed: totalTokens,
+                costUsd: totalCost,
+                durationMs: Date.now() - startTime,
+              };
+            }
 
             if (tc.name === 'modify_file' || tc.name === 'write_file') {
               const fp = tc.arguments.path;

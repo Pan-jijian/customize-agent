@@ -1,6 +1,6 @@
 import type { SubagentConfig, SubagentResult, SubagentTask } from './subagent/types.js';
 import { SubagentRunner } from './subagent/runner.js';
-import type { SafeWorktreeManager, WorktreeContext } from './subagent/worktree.js';
+import type { SafeWorktreeManager, WorktreeContext } from './worktree.js';
 
 // 编排器 — DAG 任务分解 + 动态 Worker 派生
 
@@ -98,7 +98,7 @@ export class Orchestrator {
 
       const result = await this.runner.run(config, task.description);
       allResults.push(result);
-      completed.set(task.description, result);
+      completed.set(task.id, result);
       totalTokens += result.tokensUsed;
       totalCost += result.costUsd;
 
@@ -210,19 +210,19 @@ export class Orchestrator {
 
   /** 简单拓扑排序（Kahn 算法） */
   private _topologicalSort(tasks: SubagentTask[]): SubagentTask[] {
-    const taskMap = new Map(tasks.map(t => [t.description, t]));
+    const taskMap = new Map(tasks.map(t => [t.id, t]));
     const inDegree = new Map<string, number>();
     const adjacency = new Map<string, string[]>();
 
     for (const t of tasks) {
-      inDegree.set(t.description, t.dependsOn.length);
+      inDegree.set(t.id, t.dependsOn.length);
       for (const dep of t.dependsOn) {
         if (!adjacency.has(dep)) adjacency.set(dep, []);
-        adjacency.get(dep)!.push(t.description);
+        adjacency.get(dep)!.push(t.id);
       }
     }
 
-    const queue = tasks.filter(t => t.dependsOn.length === 0).map(t => t.description);
+    const queue = tasks.filter(t => t.dependsOn.length === 0).map(t => t.id);
     const sorted: SubagentTask[] = [];
 
     while (queue.length > 0) {

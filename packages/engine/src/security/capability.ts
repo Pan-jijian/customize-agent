@@ -45,7 +45,7 @@ export const TOOL_CAPABILITY_MAP: Record<string, Capability[]> = {
 };
 
 /** 子智能体角色 */
-export type SubagentRole = 'explorer' | 'planner' | 'implementer' | 'reviewer' | 'tester' | 'conflictResolver';
+export type SubagentRole = 'explorer' | 'planner' | 'implementer' | 'reviewer' | 'tester' | 'conflict_resolver';
 
 /**
  * 角色 → Capability 绑定表。
@@ -74,7 +74,7 @@ export const ROLE_CAPABILITY_MAP: Record<SubagentRole, Capability[]> = {
     Capability.READ_CODE, Capability.WRITE_CODE,
     Capability.EXECUTE_COMMAND, Capability.SEARCH_SYMBOL,
   ],
-  conflictResolver: [
+  conflict_resolver: [
     Capability.READ_CODE, Capability.WRITE_CODE, Capability.GIT_OPERATION,
   ],
 };

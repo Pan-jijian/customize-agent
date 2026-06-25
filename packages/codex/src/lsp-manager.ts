@@ -5,7 +5,7 @@ import type {
   Diagnostic,
   Position,
 } from 'vscode-languageserver-protocol';
-import type { LifecycleAware } from '@code-agent/types';
+import type { LifecycleAware } from '@customize-agent/types';
 
 interface LspServerConfig {
   id: string;

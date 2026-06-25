@@ -1,7 +1,7 @@
 import type { SubagentConfig, SubagentRole } from './types.js';
-import type { ILLMProvider } from '@code-agent/llm';
+import type { ILLMProvider } from '@customize-agent/llm';
 import type { ToolRegistry } from '../../tools/registry.js';
-import { Capability } from '../../security/capability.js';
+import { ROLE_CAPABILITY_MAP } from '../../security/capability.js';
 
 // 6 种内置子智能体的静态 System Prompt
 
@@ -79,7 +79,6 @@ Rules:
 
 interface BuiltinRoleConfig {
   prompt: string;
-  capabilities: Capability[];
   maxLoops: number;
   recommendedModel: string;
 }
@@ -87,40 +86,31 @@ interface BuiltinRoleConfig {
 const BUILTIN_ROLES: Record<SubagentRole, BuiltinRoleConfig> = {
   explorer: {
     prompt: EXPLORER_PROMPT,
-    capabilities: [Capability.READ_CODE, Capability.SEARCH_SYMBOL, Capability.LSP_QUERY, Capability.EMBEDDING_SEARCH],
     maxLoops: 4,
     recommendedModel: 'deepseek-v4-flash',
   },
   planner: {
     prompt: PLANNER_PROMPT,
-    capabilities: [Capability.READ_CODE, Capability.SEARCH_SYMBOL, Capability.LSP_QUERY, Capability.EMBEDDING_SEARCH, Capability.MEMORY_ACCESS],
     maxLoops: 8,
     recommendedModel: 'claude-sonnet-4-6',
   },
   implementer: {
     prompt: IMPLEMENTER_PROMPT,
-    capabilities: [
-      Capability.READ_CODE, Capability.WRITE_CODE, Capability.SEARCH_SYMBOL,
-      Capability.EXECUTE_COMMAND, Capability.GIT_OPERATION, Capability.LSP_QUERY,
-    ],
     maxLoops: 12,
     recommendedModel: 'gpt-5.3-codex',
   },
   reviewer: {
     prompt: REVIEWER_PROMPT,
-    capabilities: [Capability.READ_CODE, Capability.SEARCH_SYMBOL, Capability.LSP_QUERY, Capability.GIT_OPERATION],
     maxLoops: 4,
     recommendedModel: 'claude-sonnet-4-6',
   },
   tester: {
     prompt: TESTER_PROMPT,
-    capabilities: [Capability.READ_CODE, Capability.WRITE_CODE, Capability.EXECUTE_COMMAND, Capability.SEARCH_SYMBOL],
     maxLoops: 8,
     recommendedModel: 'deepseek-v4-pro',
   },
-  conflictResolver: {
+  conflict_resolver: {
     prompt: CONFLICT_RESOLVER_PROMPT,
-    capabilities: [Capability.READ_CODE, Capability.WRITE_CODE, Capability.GIT_OPERATION],
     maxLoops: 4,
     recommendedModel: 'claude-sonnet-4-6',
   },
@@ -149,7 +139,7 @@ export function createBuiltinSubagentConfig(
     provider,
     tools,
     maxLoops: builtin.maxLoops,
-    allowedCapabilities: builtin.capabilities,
+    allowedCapabilities: ROLE_CAPABILITY_MAP[role],
   };
 }
 

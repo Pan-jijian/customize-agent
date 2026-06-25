@@ -26,9 +26,20 @@ export interface AnthropicToolDefinition {
   };
 }
 
+/** MCP tools/list 工具格式（仅保留 type + description，剥离 enum/additionalProperties） */
+export interface McpToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, { type: string; description: string }>;
+    required?: string[];
+  };
+}
+
 /**
- * Schema 适配器 — 将 ToolRegistry 中的工具定义转换为各 Provider 原生格式。
- * 新增 Provider 时只改这里，不碰 ToolRegistry。
+ * Schema 适配器 — 将 ToolRegistry 中的工具定义转换为各 Provider/协议原生格式。
+ * 新增 Provider 或协议时只改这里，不碰 ToolRegistry。
  */
 export class SchemaAdapter {
   /** 转为 OpenAI / DeepSeek function calling 工具定义 */
@@ -57,6 +68,23 @@ export class SchemaAdapter {
         type: 'object' as const,
         properties: tool.parameters.properties ?? {},
         required: tool.parameters.required,
+      },
+    }));
+  }
+
+  /** 转为 MCP tools/list 工具定义（仅保留 type + description，剥离枚举约束） */
+  static toMcpTools(registry: ToolRegistry): McpToolDefinition[] {
+    return registry.listAll().map(t => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: {
+        type: 'object' as const,
+        properties: Object.fromEntries(
+          Object.entries(t.parameters.properties ?? {}).map(([k, v]) => [
+            k, { type: v.type, description: v.description },
+          ]),
+        ),
+        required: t.parameters.required,
       },
     }));
   }

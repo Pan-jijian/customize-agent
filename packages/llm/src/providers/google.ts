@@ -1,10 +1,10 @@
-import type { Message } from '@code-agent/types';
+import type { Message } from '@customize-agent/types';
 import type { ILLMProvider, LLMResponse, ChatOptions, ModelCapabilities, StreamChunk } from '../interface.js';
-import { withRetry } from '../network/retry.js';
+import { withRetry } from '../retry.js';
 import { createLLMResponse } from '../utils/response.js';
 
 /** Google Gemini 模型能力声明 */
-const GEMINI_CAPABILITIES: ModelCapabilities = {
+const GOOGLE_CAPABILITIES: ModelCapabilities = {
   maxContextTokens: 1_000_000,
   maxOutputTokens: 8_192,
   supportsStreaming: true,
@@ -26,17 +26,17 @@ interface GeminiContent {
 
 /**
  * Google Gemini Provider — 支持 100 万 token 上下文窗口。
- * 默认模型: gemini-2.5-pro，通过 CODE_AGENT_GOOGLE_API_KEY 环境变量配置。
+ * 默认模型: gemini-2.5-pro，通过 CUSTOMIZE_AGENT_GOOGLE_API_KEY 环境变量配置。
  */
 export class GoogleProvider implements ILLMProvider {
   readonly name = 'google';
-  readonly capabilities = GEMINI_CAPABILITIES;
+  readonly capabilities = GOOGLE_CAPABILITIES;
   readonly modelName: string;
   private apiKey: string;
   private baseUrl: string;
 
   constructor(options: { apiKey?: string; modelName?: string } = {}) {
-    this.apiKey = options.apiKey ?? process.env.CODE_AGENT_GOOGLE_API_KEY ?? '';
+    this.apiKey = options.apiKey ?? process.env.CUSTOMIZE_AGENT_GOOGLE_API_KEY ?? '';
     this.modelName = options.modelName ?? 'gemini-2.5-pro';
     this.baseUrl = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelName}`;
   }

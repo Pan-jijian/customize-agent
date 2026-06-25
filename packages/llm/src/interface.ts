@@ -1,4 +1,4 @@
-import type { Message, ToolCall, StreamChunk, FunctionDefinition, LLMResponse } from '@code-agent/types';
+import type { Message, ToolCall, StreamChunk, FunctionDefinition, LLMResponse } from '@customize-agent/types';
 
 // 从 shared 重导出跨包类型（向后兼容）
 export type { ToolCall, StreamChunk, FunctionDefinition, LLMResponse };

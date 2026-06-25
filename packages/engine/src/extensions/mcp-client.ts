@@ -1,12 +1,13 @@
 import { spawn, type ChildProcess } from 'child_process';
 import type { ToolRegistry, RegisteredTool } from '../tools/registry.js';
+import { type JsonRpcResponse, jsonRpcSerialize, splitJsonLines } from './json-rpc.js';
 
 /** MCP Server 连接信息 */
 interface McpConnection {
   serverName: string;
   process: ChildProcess;
   requestId: number;
-  pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
+  pending: Map<number | string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
   buffer: string;
   tools: RegisteredTool[];
 }
@@ -80,7 +81,7 @@ export class McpClient {
     // 初始化握手
     await this._sendRequest(conn, 'initialize', {
       protocolVersion: '2024-11-05',
-      clientInfo: { name: 'code-agent', version: '1.0.0' },
+      clientInfo: { name: 'customize-agent', version: '1.0.0' },
       capabilities: {},
     });
 
@@ -125,7 +126,7 @@ export class McpClient {
   /** 发送 JSON-RPC 请求 */
   private async _sendRequest(conn: McpConnection, method: string, params: unknown): Promise<unknown> {
     const id = ++conn.requestId;
-    const content = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+    const content = jsonRpcSerialize(method, params, id);
 
     return new Promise((resolve, reject) => {
       conn.pending.set(id, { resolve, reject });
@@ -135,13 +136,13 @@ export class McpClient {
 
   /** 处理 stdout 缓冲中的 JSON-RPC 响应 */
   private _processBuffer(conn: McpConnection): void {
-    const lines = conn.buffer.split('\n');
-    conn.buffer = lines.pop() ?? '';
+    const { lines, rest } = splitJsonLines(conn.buffer);
+    conn.buffer = rest;
 
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
-        const msg = JSON.parse(line) as { jsonrpc: string; id?: number; result?: unknown; error?: { message: string } };
+        const msg = JSON.parse(line) as JsonRpcResponse;
         if (msg.id !== undefined) {
           const pending = conn.pending.get(msg.id);
           if (pending) {

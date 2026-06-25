@@ -1,4 +1,6 @@
-import { estimateTokens } from '@code-agent/llm';
+import { estimateTokens } from '@customize-agent/llm';
+import type { Message } from '@customize-agent/types';
+import type { ILLMProvider } from '@customize-agent/llm';
 
 /**
  * 上下文切块的优先级分组。
@@ -96,6 +98,11 @@ export interface ContextManagerConfig {
   observationCompressThreshold?: number;
 }
 
+/** 轻量消息压缩的上下文水位线 */
+const WARN_PCT = 0.60;   // 60%: 打印警告
+const LIGHT_PCT = 0.75;  // 75%: 轻量裁剪旧 tool 结果
+const FULL_PCT = 0.85;   // 85%: LLM 摘要压缩
+
 /**
  * 上下文管理器 (ADR-17)。
  *
@@ -105,6 +112,7 @@ export interface ContextManagerConfig {
  *   3. 按 token 预算从低优先级开始裁剪
  *   4. Observation 过长时压缩（保留头尾）
  *   5. 提示词缓存优化（System Prompt 放在最前）
+ *   6. 消息数组压缩（轻量截断 + LLM 摘要），供 AgentExecutor 和子智能体共用
  */
 export class ContextManager {
   private sources: ContextSource[] = [];
@@ -159,7 +167,6 @@ export class ContextManager {
     }
 
     // 3. TTL 过期过滤
-    // TTL=undefined/Infinity → 永久保留；TTL=number → 在 currentRound >= ttl 时过期丢弃
     const alive = allChunks.filter(c => c.ttl === undefined || c.ttl === Infinity || c.ttl > currentRound);
 
     // 4. 计算总 token 数
@@ -183,27 +190,23 @@ export class ContextManager {
   private _trim(chunks: ContextChunk[], _totalTokens: number): ContextChunk[] {
     const budget = this.config.maxTokens;
 
-    // 排序：priority 小的在前（更重要）
     const sorted = [...chunks].sort((a, b) => a.priority - b.priority);
 
     const result: ContextChunk[] = [];
     let usedTokens = 0;
 
     for (const chunk of sorted) {
-      // uncuttable 强制全额保留
       if (chunk.uncuttable) {
         result.push(chunk);
         usedTokens += chunk.tokens;
         continue;
       }
 
-      // system/high (priority < 100) — 尽量保留
       if (chunk.priority < 100) {
         if (usedTokens + chunk.tokens <= budget) {
           result.push(chunk);
           usedTokens += chunk.tokens;
         } else if (chunk.mergeStrategy === 'summarize') {
-          // 高优先级但超预算 → 压缩
           const compressed = this._summarizeChunk(chunk);
           result.push(compressed);
           usedTokens += compressed.tokens;
@@ -211,7 +214,6 @@ export class ContextManager {
         continue;
       }
 
-      // medium/low — 有空间就加，没空间就丢弃
       if (usedTokens + chunk.tokens <= budget) {
         result.push(chunk);
         usedTokens += chunk.tokens;
@@ -231,13 +233,12 @@ export class ContextManager {
     return {
       ...chunk,
       content: `${head}\n...[已压缩 ${chunk.content.length - maxLen} 字符]...\n${tail}`,
-      tokens: Math.ceil(maxLen / 3),  // maxLen 是字符数，非文本内容
+      tokens: Math.ceil(maxLen / 3),
     };
   }
 
   /**
    * Observation 压缩：超长工具结果截头尾。
-   * 例如 5000 行编译错误 → 保留前 30 行 + 最后 10 行。
    */
   compressObservation(observation: string): string {
     const threshold = this.config.observationCompressThreshold;
@@ -255,7 +256,6 @@ export class ContextManager {
 
   /**
    * 构建提示词缓存优化的消息数组。
-   * System Prompt + 工具定义作为静态前缀，放在最前面。
    */
   buildCacheFriendlyMessages(context: ContextChunk[]): Array<{ role: string; content: string }> {
     const systemChunks = context.filter(c => c.priority <= 1);
@@ -263,7 +263,6 @@ export class ContextManager {
 
     const messages: Array<{ role: string; content: string }> = [];
 
-    // 静态前缀（匹配 prompt caching cache break 边界）
     if (systemChunks.length > 0) {
       messages.push({
         role: 'system',
@@ -271,11 +270,122 @@ export class ContextManager {
       });
     }
 
-    // 其他内容
     for (const chunk of otherChunks) {
       messages.push({ role: 'user', content: `[${chunk.source}]:\n${chunk.content}` });
     }
 
     return messages;
+  }
+
+  // ── 消息数组压缩（从 AgentExecutor 下沉，供 CLI 和子智能体共用）──
+
+  /**
+   * 压缩对话消息数组，使其适配 token 预算。
+   * 三级水位：60% 警告 → 75% 轻量截断 → 85% LLM 摘要。
+   *
+   * @returns 压缩后的消息数组（原地修改 + 返回同一引用）
+   */
+  async compactMessages(
+    working: Message[],
+    provider: ILLMProvider,
+    currentTokens: number,
+  ): Promise<{ didCompact: boolean; newTokens: number }> {
+    const limit = provider.capabilities.maxContextTokens;
+    let tokens = currentTokens;
+
+    if (tokens > limit * FULL_PCT) {
+      await this._llmCompact(working, provider);
+      tokens = await this._countTokens(provider, working);
+      return { didCompact: true, newTokens: tokens };
+    }
+
+    if (tokens > limit * LIGHT_PCT) {
+      this._lightCompact(working);
+      tokens = await this._countTokens(provider, working);
+      return { didCompact: true, newTokens: tokens };
+    }
+
+    return { didCompact: false, newTokens: tokens };
+  }
+
+  /** 是否需要打印上下文警告 */
+  shouldWarn(currentTokens: number, maxTokens: number): boolean {
+    return currentTokens > maxTokens * WARN_PCT;
+  }
+
+  /**
+   * 查找尾部保留边界：从末尾向前找最近的 assistant 消息，保证 tool 消息有前置 tool_calls。
+   * 返回 { tailStart, TAIL } 或 null（消息太短无需压缩）。
+   */
+  private _findTailStart(working: Message[], minHead: number): { tailStart: number; TAIL: number } | null {
+    let TAIL = 8; // 最后 4 轮完整保留
+    let tailStart = working.length - TAIL;
+    while (tailStart > minHead && tailStart < working.length && working[tailStart]?.role !== 'assistant') {
+      tailStart++; TAIL++;
+    }
+    if (tailStart >= working.length) return null;
+    return { tailStart, TAIL };
+  }
+
+  /** 轻量压缩：截断旧 tool 结果到 200 字符，不动用户消息和 assistant 思考 */
+  private _lightCompact(working: Message[]): void {
+    const MIN_HEAD = 2;
+    const boundary = this._findTailStart(working, MIN_HEAD);
+    if (!boundary || working.length <= boundary.TAIL) return;
+    for (let i = MIN_HEAD; i < working.length - boundary.TAIL; i++) {
+      const m = working[i]!;
+      if (m.role === 'user') continue;
+      if (m.role === 'tool' && m.content && m.content.length > 200) {
+        m.content = m.content.slice(0, 197) + '...';
+      }
+    }
+  }
+
+  /** LLM 摘要压缩：调用模型生成结构化摘要，替换旧消息 */
+  private async _llmCompact(working: Message[], provider: ILLMProvider): Promise<void> {
+    const HEAD = 2;
+    const boundary = this._findTailStart(working, HEAD);
+    if (!boundary || working.length <= HEAD + boundary.TAIL) return;
+    const TAIL = boundary.TAIL;
+
+    const compacted: Message[] = [];
+    const protectedUserMsgs: Message[] = [];
+    for (let i = HEAD; i < working.length - TAIL; i++) {
+      const m = working[i]!;
+      if (m.role === 'user') {
+        protectedUserMsgs.push(m);
+      } else {
+        compacted.push(m);
+      }
+    }
+
+    if (compacted.length === 0) return;
+
+    const compactText = compacted.map(m =>
+      `[${m.role}] ${(m.content ?? '').slice(0, 500)}`
+    ).join('\n---\n');
+
+    const summaryPrompt: Message[] = [
+      { role: 'system', content: '你是一个对话摘要器。将以下 Agent 对话历史压缩为一份结构化摘要，包含：1) 用户任务 2) 已完成操作（工具调用统计）3) 关键发现/决策 4) 待办事项。用中文输出，不超过 800 字。只输出摘要，不要解释。' },
+      { role: 'user', content: `请压缩以下对话历史：\n\n${compactText}` },
+    ];
+
+    try {
+      const res = await provider.chat(summaryPrompt);
+      const summary = `[上下文压缩] 此前对话已自动总结：\n${res.content.trim()}`;
+      const summaryMsg: Message = { role: 'user', content: summary };
+
+      const tail = working.splice(working.length - TAIL, TAIL);
+      working.splice(HEAD, working.length - HEAD, ...protectedUserMsgs, summaryMsg);
+      working.push(...tail);
+    } catch {
+      this._lightCompact(working);
+    }
+  }
+
+  /** 用 Provider 真实 API 计数 */
+  private async _countTokens(provider: ILLMProvider, msgs: Message[]): Promise<number> {
+    try { return await provider.countTokens(msgs); }
+    catch { return Math.ceil(msgs.reduce((s, m) => s + (m.content?.length ?? 0), 0) / 3); }
   }
 }

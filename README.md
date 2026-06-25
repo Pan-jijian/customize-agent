@@ -1,6 +1,6 @@
-# Code Agent
+# Customize Agent
 
-企业级开源 AI Code Agent — 9 包 + 1 App Monorepo，原生 Function Calling 工具协议。
+企业级开源 AI Customize Agent — 7 包 + 1 App Monorepo，原生 Function Calling 工具协议。
 
 ## 技术栈
 
@@ -14,19 +14,17 @@
 - **Storage**: SQLite (better-sqlite3), FTS5
 - **Sandbox**: macOS Seatbelt / Linux Bubblewrap (内核级，启动 < 10ms)
 
-## 包结构 (9 包 + 1 App)
+## 包结构 (7 包 + 1 App)
 
 ```
 packages/
 ├── types/           — 跨包类型契约：Message, LLMResponse, Session, LifecycleAware, 零外部依赖
-├── diff/            — SEARCH/REPLACE 补丁解析 + 模糊容错 + Unified Diff
 ├── llm/             — 6 个 Provider + 重试 + 创建工厂
-├── tools/           — 文件读写、沙箱、终端、Git、tree-sitter 通用语法验证
+├── tools/           — 文件读写、沙箱、终端、Git、tree-sitter 通用语法验证 + Diff Engine
 ├── codex/           — 代码智能：tree-sitter 索引、ripgrep 搜索、LSP、语义 Embedding
 ├── engine/          — ToolRegistry、SchemaAdapter、权限、执行控制、上下文管理、规划、子智能体、MCP、Hooks、Skills
-├── runtime/         — 统一调度层：LifecycleAware、拓扑初始化、ComponentState、状态机、事件总线、DI
+├── runtime/         — 统一调度层：LifecycleAware、拓扑初始化、ComponentState、状态机、事件总线、DI + 遥测
 ├── memory/          — 跨会话记忆 (SQLite + FTS5)
-├── telemetry/       — 审计日志 (JSONL) + 遥测指标
 └── apps/
     └── cli/         — Commander+Inquirer CLI 入口、REPL、TUI 渲染、@file 引用
 ```
@@ -35,15 +33,13 @@ packages/
 
 | 包 | 主要导出 |
 |----|---------|
-| `@code-agent/types` | `Message`, `LLMResponse`, `ToolCall`, `StreamChunk`, `FunctionDefinition`, `LifecycleAware`, `Session`, `createSession`, `TaskState`, `ComponentState`, `Checkpoint` |
-| `@code-agent/diff` | `DiffEngine.parseBlocks()`, `DiffEngine.applyPatch()`, `DiffEngine.generateUnifiedDiff()` |
-| `@code-agent/llm` | `ILLMProvider` 接口, `DeepSeekProvider`, `OpenAIProvider`, `AnthropicProvider`, `GoogleProvider`, `OpenRouterProvider`, `OllamaProvider`, `createProvider()`, `estimateTokens`, `countTokensFromMessages`, `toOpenAIMessages`, `createLLMResponse` |
-| `@code-agent/tools` | `ToolKit` (文件读写), `SandboxExecutor` (Seatbelt/Bubblewrap), `TerminalTool`, `GitTool`, `UnifiedSyntaxValidator` (tree-sitter 通用) |
-| `@code-agent/codex` | `StorageManager`, `RepositoryIndexer`, `TreeSitterWorkerPool`, `CodeSearcher` (ripgrep), `EmbeddingSearch`, `LSPManager`, 语言配置 |
-| `@code-agent/engine` | `ToolRegistry`, `SchemaAdapter`, `PermissionEngine`, `Capability` 系统, `ExecutionController` (LoopGuard/BudgetManager/GoalManager/CheckpointManager), `ContextManager`, `PlanModeManager`, `SubagentRunner`, `Orchestrator`, `SafeWorktreeManager`, `McpServer`, `McpClient`, `HooksEngine`, `SkillsLoader` |
-| `@code-agent/runtime` | `LifecycleAware` 接口, `topologicalSort()`, `initializeComponents()`, `ComponentStatus`, `ComponentState`, 状态机、事件总线、DI 容器 |
-| `@code-agent/memory` | `MemoryManager` (跨会话记忆 CRUD) |
-| `@code-agent/telemetry` | `AuditLogger` (JSONL 审计日志), `MetricsCollector` (遥测指标) |
+| `@customize-agent/types` | `Message`, `LLMResponse`, `ToolCall`, `StreamChunk`, `FunctionDefinition`, `LifecycleAware`, `Session`, `createSession`, `TaskState`, `ComponentState`, `Checkpoint`, `BINARY_EXTENSIONS` |
+| `@customize-agent/llm` | `LLMProvider` 接口, `DeepSeekProvider`, `OpenAIProvider`, `AnthropicProvider`, `GoogleProvider`, `OpenRouterProvider`, `OllamaProvider`, `createProvider()`, `estimateTokens`, `countTokensFromMessages`, `toOpenAIMessages`, `createLLMResponse` |
+| `@customize-agent/tools` | `ToolKit` (文件读写), `SandboxExecutor` (Seatbelt/Bubblewrap), `TerminalTool`, `GitTool`, `UnifiedSyntaxValidator` (tree-sitter 通用), `DiffEngine` |
+| `@customize-agent/codex` | `StorageManager`, `RepositoryIndexer`, `TreeSitterWorkerPool`, `CodeSearcher` (ripgrep), `EmbeddingSearch`, `LSPManager`, 语言配置, `extractSymbolName`, `collectAstErrors` |
+| `@customize-agent/engine` | `ToolRegistry`, `SchemaAdapter`, `PermissionEngine`, `Capability` 系统, `ExecutionController` (LoopGuard/BudgetManager/GoalManager/CheckpointManager), `ContextManager`, `PlanModeManager`, `SubagentRunner`, `Orchestrator`, `WorktreeManager`, `MCPServer`, `MCPClient`, `HooksEngine`, `SkillsLoader` |
+| `@customize-agent/runtime` | `LifecycleAware` 接口, `topologicalSort()`, `initializeComponents()`, `ComponentStatus`, `ComponentState`, 状态机、事件总线、DI 容器, `AgentRuntime`, `AuditLogger`, `MetricsCollector` |
+| `@customize-agent/memory` | `MemoryManager` (跨会话记忆 CRUD) |
 
 ### CLI 工具集 (13 个)
 
@@ -73,7 +69,6 @@ pnpm --filter <package> run typecheck # 单包类型检查
 pnpm --filter <package> run build     # 单包构建
 pnpm run test                         # Vitest 单元测试
 pnpm run test:watch                   # Vitest 监听模式
-pnpm run test:e2e                     # E2E 测试 (tests/e2e/)
 pnpm run lint                         # ESLint 全量检查
 pnpm run check                        # typecheck + lint + test 一键检查
 pnpm start:cli                        # 启动 CLI
@@ -117,7 +112,7 @@ ROLE_CAPABILITY_MAP — 子智能体角色权限继承
 ### 子智能体编排
 
 ```
-SubagentRunner → 独立上下文 + 独立工作树 (SafeWorktreeManager)
+SubagentRunner → 独立上下文 + 独立工作树 (WorktreeManager)
   → SubagentResult.summary → Orchestrator 汇总
 CollaborationMode: sequential | parallel | hierarchical
 ```
@@ -125,8 +120,8 @@ CollaborationMode: sequential | parallel | hierarchical
 ### MCP 协议
 
 ```
-McpServer — 将内部工具暴露给外部 AI 客户端 (Claude Desktop, Cursor)
-McpClient — 连接社区 MCP Server 生态 (GitHub, Postgres, Jira)
+MCPServer — 将内部工具暴露给外部 AI 客户端 (Claude Desktop, Cursor)
+MCPClient — 连接社区 MCP Server 生态 (GitHub, Postgres, Jira)
 ```
 
 ### Hooks & Skills
@@ -147,19 +142,19 @@ DAG 拓扑排序保证初始化顺序，依赖故障时自动降级
 ## 环境变量
 
 ```
-CODE_AGENT_DEEPSEEK_API_KEY=
-CODE_AGENT_OPENAI_API_KEY=
-CODE_AGENT_ANTHROPIC_API_KEY=
-CODE_AGENT_GOOGLE_API_KEY=
-CODE_AGENT_OPENROUTER_API_KEY=
-CODE_AGENT_OLLAMA_API_KEY=
+CUSTOMIZE_AGENT_DEEPSEEK_API_KEY=
+CUSTOMIZE_AGENT_OPENAI_API_KEY=
+CUSTOMIZE_AGENT_ANTHROPIC_API_KEY=
+CUSTOMIZE_AGENT_GOOGLE_API_KEY=
+CUSTOMIZE_AGENT_OPENROUTER_API_KEY=
+CUSTOMIZE_AGENT_OLLAMA_API_KEY=
 ```
 
 ## 代码风格
 
 - 严格 TypeScript (`strict: true`, `noUncheckedIndexedAccess`, `noUnusedLocals`, `noUnusedParameters`)
 - ES Module (`NodeNext` module resolution)
-- 接口优先: `ILLMProvider` > 具体 Provider, `ContextSource` > ad-hoc 收集
+- 接口优先: `LLMProvider` > 具体 Provider, `ContextSource` > ad-hoc 收集
 - 工具注册: 新增工具只需 `registry.register()`，不修改 executor
 - 类型导入: `import type { ... }` 用于仅类型用途
 - 零测试容忍度: 每个包应有 `__tests__/` 目录

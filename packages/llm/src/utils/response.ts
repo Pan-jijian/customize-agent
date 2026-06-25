@@ -1,4 +1,4 @@
-import type { LLMResponse } from '@code-agent/types';
+import type { LLMResponse } from '@customize-agent/types';
 
 /**
  * LLMResponse 构造工厂 — 所有 Provider 必须通过此函数构建响应。

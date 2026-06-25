@@ -1,6 +1,7 @@
 import { parentPort } from 'worker_threads';
 import Parser, { type SyntaxNode } from 'tree-sitter';
 import { getLanguageConfig, type LanguageConfig } from './languages.js';
+import { extractSymbolName, collectAstErrors, friendlyKind } from './ast-utils.js';
 
 /** 主线程发来的请求 */
 interface WorkerRequest {
@@ -46,44 +47,6 @@ function getParser(lang: LanguageConfig): Parser {
   return parser;
 }
 
-/** 声明类节点类型：通过这些类型的节点需要从 declarator 子节点提取名称 */
-const DECLARATOR_TYPES = new Set(['variable_declaration', 'lexical_declaration', 'field_declaration']);
-
-/** 从 AST 节点中提取符号名（通用算法，覆盖全部 10 种语言） */
-function extractName(node: SyntaxNode): string | null {
-  // 策略 1：直接查找 name 字段或 identifier 子节点
-  const nameNode =
-    node.childForFieldName('name') ??
-    node.descendantsOfType('identifier')[0] ??
-    node.descendantsOfType('property_identifier')[0] ??
-    node.descendantsOfType('type_identifier')[0];
-
-  if (nameNode) return nameNode.text;
-
-  // 策略 2：声明语句 → variable_declarator → name 字段
-  if (DECLARATOR_TYPES.has(node.type)) {
-    const declarators = node.descendantsOfType('variable_declarator');
-    if (declarators.length > 0) {
-      const names: string[] = [];
-      for (const d of declarators) {
-        const n = d.childForFieldName('name') ?? d.descendantsOfType('identifier')[0];
-        if (n) names.push(n.text);
-      }
-      return names.join(', ');
-    }
-  }
-
-  // 策略 3：C/C++ function_definition → declarator 字段 → identifier
-  const declarator = node.childForFieldName('declarator');
-  if (declarator) {
-    const id = declarator.descendantsOfType('identifier')[0] ??
-              declarator.descendantsOfType('field_identifier')[0];
-    if (id) return id.text;
-  }
-
-  return null;
-}
-
 /** 符号索引模式：DFS 遍历 AST，提取所有具名符号 */
 function indexFile(code: string, lang: LanguageConfig): SymbolEntry[] {
   const parser = getParser(lang);
@@ -92,14 +55,14 @@ function indexFile(code: string, lang: LanguageConfig): SymbolEntry[] {
 
   function walk(node: SyntaxNode): void {
     if (lang.symbolNodeTypes.includes(node.type)) {
-      const name = extractName(node);
+      const name = extractSymbolName(node);
       if (name) {
         for (const singleName of name.split(', ')) {
           const trimmed = singleName.trim();
           if (trimmed) {
             symbols.push({
               name: trimmed,
-              kind: node.type,
+              kind: friendlyKind(node.type),
               startLine: node.startPosition.row + 1,
               endLine: node.endPosition.row + 1,
             });
@@ -115,31 +78,6 @@ function indexFile(code: string, lang: LanguageConfig): SymbolEntry[] {
 
   walk(tree.rootNode);
   return symbols;
-}
-
-/** 语法验证模式：DFS 遍历 AST，收集所有 ERROR 节点和缺失节点 */
-function validateFile(code: string, lang: LanguageConfig): WorkerResponse['errors'] {
-  const parser = getParser(lang);
-  const tree = parser.parse(code);
-  const result: Array<{ line: number; column: number; message: string }> = [];
-
-  function findErrors(node: SyntaxNode): void {
-    if (node.type === 'ERROR' || node.isMissing) {
-      result.push({
-        line: node.startPosition.row + 1,
-        column: node.startPosition.column + 1,
-        message: node.isMissing
-          ? `Missing element at line ${node.startPosition.row + 1}`
-          : `Syntax error: unexpected '${node.text.slice(0, 40)}'`,
-      });
-    }
-    for (const child of node.children) {
-      findErrors(child);
-    }
-  }
-
-  findErrors(tree.rootNode);
-  return result.length > 0 ? result : undefined;
 }
 
 // Worker 线程入口：监听主线程消息，解析完成后 postMessage 回传
@@ -177,11 +115,13 @@ if (parentPort) {
       const response: WorkerResponse = { id: req.id, symbols, language: lang.name };
       parentPort!.postMessage(response);
     } else if (req.mode === 'validate') {
-      const errors = validateFile(req.code, lang);
+      const parser = getParser(lang);
+      const tree = parser.parse(req.code);
+      const errors = collectAstErrors(tree.rootNode);
       const response: WorkerResponse = {
         id: req.id,
-        errors,
-        valid: !errors || errors.length === 0,
+        errors: errors.length > 0 ? errors : undefined,
+        valid: errors.length === 0,
         language: lang.name,
       };
       parentPort!.postMessage(response);

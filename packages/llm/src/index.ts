@@ -15,11 +15,11 @@ export { AnthropicProvider } from './providers/anthropic.js';
 export { GoogleProvider } from './providers/google.js';
 export { OpenRouterProvider } from './providers/openrouter.js';
 export { OllamaProvider } from './providers/ollama.js';
-export { withRetry, isRetryableError, type RetryOptions } from './network/retry.js';
+export { withRetry, isRetryableError, type RetryOptions } from './retry.js';
 // AIGateway（自动路由/静默切换）已移除 — 用户通过 --provider 显式选择模型
 
 export { estimateTokens, countTokensFromMessages } from './utils/tokens.js';
-export { toOpenAIMessages, openAIHealthCheck, BINARY_EXTENSIONS } from './utils/messages.js';
+export { toOpenAIMessages, openAIHealthCheck } from './utils/messages.js';
 export { createLLMResponse } from './utils/response.js';
 
 import { DeepSeekProvider } from './providers/deepseek.js';

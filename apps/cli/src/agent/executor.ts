@@ -1,11 +1,12 @@
-import type { ILLMProvider, StreamChunk, FunctionDefinition } from '@code-agent/llm';
-import type { ToolRegistry, PermissionEngine, ExecutionController } from '@code-agent/engine';
-import type { Message, ToolCall } from '@code-agent/types';
+import type { ILLMProvider, StreamChunk, FunctionDefinition } from '@customize-agent/llm';
+import type { ToolRegistry, PermissionEngine, ExecutionController, ContextManager } from '@customize-agent/engine';
+import { ContextManager as ContextManagerImpl } from '@customize-agent/engine';
+import type { Message, ToolCall } from '@customize-agent/types';
 import { AUTONOMOUS_SYSTEM_PROMPT } from './prompt.js';
 import { t, taskComplete, taskWarning, toolCallStart, toolCallEnd, renderDiff, contextCompacting, contextCompacted, contextStats, spinnerStart } from '../tui/renderer.js';
 
 /** 工具中文名映射 */
-const TOOL_CN: Record<string, string> = {
+export const TOOL_CN: Record<string, string> = {
   search_symbol: '搜索代码符号',
   read_file: '读取文件',
   list_files: '列出目录',
@@ -35,6 +36,7 @@ export interface ExecutorConfig {
   registry: ToolRegistry;
   permissionEngine?: PermissionEngine;
   controller?: ExecutionController;
+  contextManager?: ContextManager;
   approvalHandler?: ApprovalHandler;
   maxIterations?: number;
   stream?: boolean;
@@ -45,6 +47,7 @@ export class AgentExecutor {
   private registry: ToolRegistry;
   private permissionEngine?: PermissionEngine;
   private controller?: ExecutionController;
+  private contextManager: ContextManager;
   private approvalHandler?: ApprovalHandler;
   private maxIterations: number;
   private stream: boolean;
@@ -55,6 +58,7 @@ export class AgentExecutor {
     this.registry = config.registry;
     this.permissionEngine = config.permissionEngine;
     this.controller = config.controller;
+    this.contextManager = config.contextManager ?? new ContextManagerImpl();
     this.approvalHandler = config.approvalHandler;
     this.maxIterations = config.maxIterations ?? 200;
     this.stream = config.stream ?? true;
@@ -63,11 +67,6 @@ export class AgentExecutor {
 
   getSystemPrompt(): string { return this.systemPrompt; }
   get providerName(): string { return `${this.provider.name}/${this.provider.modelName}`; }
-
-  // 上下文水位线（占 maxContextTokens 的百分比）
-  private static WARN_PCT = 0.60;    // 60%: 打印警告
-  private static LIGHT_PCT = 0.75;   // 75%: 轻量裁剪旧 tool 结果
-  private static FULL_PCT = 0.85;    // 85%: LLM 摘要压缩
 
   /** 最后一次 LLM 调用消耗的 prompt token 数 */
   private _lastPromptTokens = 0;
@@ -79,13 +78,12 @@ export class AgentExecutor {
   /** 手动触发压缩（/compact 命令），返回是否执行了压缩 */
   async compactContext(working: Message[]): Promise<boolean> {
     const limit = this.provider.capabilities.maxContextTokens;
-    const before = this._lastPromptTokens || await this._countTokens(working);
-    if (before < limit * AgentExecutor.WARN_PCT) return false;
+    const before = this._lastPromptTokens;
+    if (!this.contextManager.shouldWarn(before, limit)) return false;
     process.stdout.write(contextCompacting(before, limit));
-    await this._llmCompact(working);
-    const after = await this._countTokens(working);
-    process.stdout.write(contextCompacted(after, before - after));
-    this._lastPromptTokens = after;
+    const { newTokens } = await this.contextManager.compactMessages(working, this.provider, before);
+    process.stdout.write(contextCompacted(newTokens, before - newTokens));
+    this._lastPromptTokens = newTokens;
     return true;
   }
 
@@ -95,13 +93,13 @@ export class AgentExecutor {
 
     const allTools = this.registry.listAll();
     const filteredTools = readonly
-      ? allTools.filter(t => !t.requiresApproval && !t.capabilities.includes('write_code'))
+      ? allTools.filter(tool => !tool.requiresApproval && !tool.capabilities.includes('write_code'))
       : allTools;
 
-    const tools: FunctionDefinition[] = filteredTools.map(t => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters as FunctionDefinition['parameters'],
+    const tools: FunctionDefinition[] = filteredTools.map(tool => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters as FunctionDefinition['parameters'],
     }));
 
     for (let round = 1; round <= this.maxIterations; round++) {
@@ -115,7 +113,7 @@ export class AgentExecutor {
       const assistantMsg: Message = { role: 'assistant', content: response.content, toolCalls: response.toolCalls };
       working.push(assistantMsg);
 
-      const hasFinishTag = response.content.includes('<task_finish');
+      const hasFinishTag = response.content.includes('<task_finish>');
 
       if (!response.toolCalls?.length) {
         if (hasFinishTag) {
@@ -150,105 +148,23 @@ export class AgentExecutor {
     return working;
   }
 
-  /** 用 Provider 真实 API 计数 */
-  private async _countTokens(msgs: Message[]): Promise<number> {
-    try { return await this.provider.countTokens(msgs); }
-    catch { return Math.ceil(msgs.reduce((s, m) => s + (m.content?.length ?? 0), 0) / 3); }
-  }
-
-  /** 每轮水位检查：60% 警告 → 75% 轻量裁剪 → 85% LLM 摘要 */
+  /** 每轮水位检查：60% 警告 → 75% 轻量裁剪 → 85% LLM 摘要（委托给 ContextManager） */
   private async _maybeCompact(working: Message[]): Promise<void> {
     const limit = this.provider.capabilities.maxContextTokens;
-    const tokens = this._lastPromptTokens || await this._countTokens(working);
+    const tokens = this._lastPromptTokens;
+    const ctxMgr = this.contextManager;
 
-    if (tokens > limit * AgentExecutor.FULL_PCT) {
-      process.stdout.write(contextCompacting(tokens, limit));
-      await this._llmCompact(working);
-      const after = await this._countTokens(working);
-      this._lastPromptTokens = after;
-      process.stdout.write(contextCompacted(after, tokens - after));
-    } else if (tokens > limit * AgentExecutor.LIGHT_PCT) {
-      process.stdout.write(contextCompacting(tokens, limit));
-      this._lightCompact(working);
-      const after = await this._countTokens(working);
-      this._lastPromptTokens = after;
-      process.stdout.write(contextCompacted(after, tokens - after));
-    } else if (tokens > limit * AgentExecutor.WARN_PCT) {
-      process.stdout.write(contextStats(tokens, limit) + '\n');
-    }
-  }
-
-  /** 轻量压缩：截断旧 tool 结果到 200 字符，不动用户消息和 assistant 思考 */
-  private _lightCompact(working: Message[]): void {
-    let TAIL = 8; // 最后 4 轮完整保留
-    // 保证 TAIL 从 assistant 开始
-    let tailStart = working.length - TAIL;
-    while (tailStart > 2 && tailStart < working.length && working[tailStart]?.role !== 'assistant') {
-      tailStart++; TAIL++;
-    }
-    if (tailStart >= working.length) return;
-    if (working.length <= TAIL) return;
-    for (let i = 2; i < working.length - TAIL; i++) {
-      const m = working[i]!;
-      // 用户消息永不压缩
-      if (m.role === 'user') continue;
-      if (m.role === 'tool' && m.content && m.content.length > 200) {
-        m.content = m.content.slice(0, 197) + '...';
-      }
-    }
-  }
-
-  /** LLM 摘要压缩：调用模型生成结构化摘要，替换旧消息 */
-  private async _llmCompact(working: Message[]): Promise<void> {
-    const HEAD = 2;  // system + 首条 user
-    let TAIL = 8;    // 最后 4 轮
-
-    // 保证 TAIL 从 assistant 开始（API 要求 tool 消息必须有前置 tool_calls）
-    let tailStart = working.length - TAIL;
-    while (tailStart > HEAD && tailStart < working.length && working[tailStart]?.role !== 'assistant') {
-      tailStart++;
-      TAIL++;
-    }
-    if (tailStart >= working.length) return;
-
-    if (working.length <= HEAD + TAIL) return;
-
-    // 收集中间消息（要压缩的部分），跳过 user 消息（保护）
-    const compacted: Message[] = [];
-    const protectedUserMsgs: Message[] = [];
-    for (let i = HEAD; i < working.length - TAIL; i++) {
-      const m = working[i]!;
-      if (m.role === 'user') {
-        protectedUserMsgs.push(m);
+    if (ctxMgr.shouldWarn(tokens, limit)) {
+      if (tokens > limit * 0.85 || tokens > limit * 0.75) {
+        process.stdout.write(contextCompacting(tokens, limit));
+        const { didCompact, newTokens } = await ctxMgr.compactMessages(working, this.provider, tokens);
+        if (didCompact) {
+          this._lastPromptTokens = newTokens;
+          process.stdout.write(contextCompacted(newTokens, tokens - newTokens));
+        }
       } else {
-        compacted.push(m);
+        process.stdout.write(contextStats(tokens, limit) + '\n');
       }
-    }
-
-    if (compacted.length === 0) return;
-
-    // 用 LLM 生成摘要
-    const compactText = compacted.map(m =>
-      `[${m.role}] ${(m.content ?? '').slice(0, 500)}`
-    ).join('\n---\n');
-
-    const summaryPrompt: Message[] = [
-      { role: 'system', content: '你是一个对话摘要器。将以下 Agent 对话历史压缩为一份结构化摘要，包含：1) 用户任务 2) 已完成操作（工具调用统计）3) 关键发现/决策 4) 待办事项。用中文输出，不超过 800 字。只输出摘要，不要解释。' },
-      { role: 'user', content: `请压缩以下对话历史：\n\n${compactText}` },
-    ];
-
-    try {
-      const res = await this.provider.chat(summaryPrompt);
-      const summary = `[上下文压缩] 此前对话已自动总结：\n${res.content.trim()}`;
-      const summaryMsg: Message = { role: 'user', content: summary };
-
-      // 替换：system + 首条user + 被保护的用户消息 + 摘要 + 尾部
-      const tail = working.splice(working.length - TAIL, TAIL);
-      working.splice(HEAD, working.length - HEAD, ...protectedUserMsgs, summaryMsg);
-      working.push(...tail);
-    } catch {
-      // LLM 摘要失败 → 降级到轻量压缩
-      this._lightCompact(working);
     }
   }
 
@@ -276,6 +192,7 @@ export class AgentExecutor {
     let spinnerStopped = false;
     let firstThink = true;
     // <task_finish> 标签过滤缓冲区（仅用于展示过滤，不影响 content 累积）
+    const TAG_LEN = '<task_finish>'.length; // 13
     let tagBuf = '';
     let inTag = false;
 
@@ -288,16 +205,15 @@ export class AgentExecutor {
         tagBuf += ch;
         if (!inTag && tagBuf.endsWith('<task_finish>')) {
           // 回退已输出的标签起始部分
-          const tagLen = '<task_finish>'.length;
-          const clean = tagBuf.slice(0, -tagLen);
+          const clean = tagBuf.slice(0, -TAG_LEN);
           if (clean) process.stdout.write(clean);
           tagBuf = ''; inTag = true;
         } else if (inTag && tagBuf.endsWith('</task_finish>')) {
           tagBuf = ''; inTag = false;
-        } else if (!inTag && tagBuf.length > 13) {
+        } else if (!inTag && tagBuf.length > TAG_LEN) {
           // 缓冲足够大且确认不在标签内，安全输出前缀
-          process.stdout.write(tagBuf.slice(0, -13));
-          tagBuf = tagBuf.slice(-13);
+          process.stdout.write(tagBuf.slice(0, -TAG_LEN));
+          tagBuf = tagBuf.slice(-TAG_LEN);
         }
       }
     };

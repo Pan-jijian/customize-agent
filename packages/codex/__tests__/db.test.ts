@@ -27,8 +27,8 @@ describe('StorageManager', () => {
     const sym = results[0]!;
     expect(sym.name).toBe('hello');
     expect(sym.kind).toBe('Function');
-    expect(sym.file_path).toBe('src/test.ts');
-    expect(sym.start_line).toBe(10);
+    expect(sym.filePath).toBe('src/test.ts');
+    expect(sym.startLine).toBe(10);
   });
 
   it('不应返回不匹配的符号', () => {

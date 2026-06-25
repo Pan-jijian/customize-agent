@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { withRetry, isRetryableError } from '../src/network/retry.js';
+import { withRetry, isRetryableError } from '../src/retry.js';
 
 describe('isRetryableError', () => {
   it('5xx 状态码应可重试', () => {

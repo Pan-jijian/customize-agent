@@ -2,15 +2,15 @@ import { Command } from 'commander';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
-import { createProvider, BINARY_EXTENSIONS } from '@code-agent/llm';
-import { ToolRegistry, PermissionEngine, ExecutionController } from '@code-agent/engine';
-import { ToolKit } from '@code-agent/tools';
-import { StorageManager, RepositoryIndexer, TreeSitterWorkerPool, LSPManager } from '@code-agent/codex';
-import { MemoryManager } from '@code-agent/memory';
-import { AgentExecutor } from './engine/executor.js';
+import { createProvider } from '@customize-agent/llm';
+import { ToolRegistry, PermissionEngine, ExecutionController } from '@customize-agent/engine';
+import { ToolKit } from '@customize-agent/tools';
+import { StorageManager, RepositoryIndexer, TreeSitterWorkerPool, LSPManager } from '@customize-agent/codex';
+import { MemoryManager } from '@customize-agent/memory';
+import { AgentExecutor, TOOL_CN } from './agent/executor.js';
 import { Repl } from './repl/repl.js';
 import { approvalBox, t } from './tui/renderer.js';
-import type { Message } from '@code-agent/types';
+import { type Message, BINARY_EXTENSIONS } from '@customize-agent/types';
 import * as readline from 'readline';
 import glob from 'fast-glob';
 
@@ -304,26 +304,10 @@ function scanAllFiles(): string[] {
   });
 }
 
-/** 工具中文名 */
-const TOOL_LABELS: Record<string, string> = {
-  search_symbol: '搜索符号',
-  read_file: '读取文件',
-  list_files: '列出目录',
-  modify_file: '修改文件',
-  write_file: '创建/覆盖文件',
-  execute_command: '执行命令',
-  git_status: 'Git 状态',
-  git_diff: 'Git 差异',
-  git_commit: 'Git 提交',
-  web_search: '搜索网络',
-};
-
-function toolLabel(name: string): string { return TOOL_LABELS[name] ?? name; }
-
 /** 创建审批回调 */
 function createApprovalHandler(rl: readline.Interface) {
   return async (toolName: string, args: Record<string, unknown>) => {
-    const label = toolLabel(toolName);
+    const label = TOOL_CN[toolName] ?? toolName;
     const detail = args.path
       ? `File: ${args.path}`
       : args.input
@@ -360,8 +344,8 @@ function createExecutor(providerName?: string, modelName?: string, rl?: readline
 
 // CLI 定义
 program
-  .name('code-agent')
-  .description('企业级开源 Code Agent v3.0 — 启动进入交互式 REPL')
+  .name('customize-agent')
+  .description('企业级开源 Customize Agent v3.0 — 启动进入交互式 REPL')
   .option('-p, --prompt <text>', '单次执行模式，直接完成任务后退出')
   .option('--plan', 'Plan 模式：只读探索，生成执行计划（需配合 -p 使用）')
   .option('--provider <name>', '模型提供商 (deepseek, openai, anthropic, google, openrouter, ollama)', 'deepseek')
@@ -389,7 +373,7 @@ program.action(async () => {
       console.log(`\n📋 Plan Mode [${executor.providerName}]`);
     } else {
       history.push({ role: 'user', content: opts.prompt });
-      console.log(`\n🚀 Code Agent v3.0 [${executor.providerName}]`);
+      console.log(`\n🚀 Customize Agent v3.0 [${executor.providerName}]`);
     }
 
     console.log(`   任务: "${opts.prompt}"`);
@@ -425,10 +409,10 @@ program
   .command('mcp-server')
   .description('启动 MCP Server (stdio JSON-RPC)，供 Claude Desktop/Cursor 等外部客户端连接')
   .action(async () => {
-    const { McpServer } = await import('@code-agent/engine');
+    const { McpServer } = await import('@customize-agent/engine');
     console.error('[MCP Server] 启动 stdio JSON-RPC 2.0 服务...');
     const registry = buildRegistry();
-    const server = new McpServer(registry, 'code-agent', '3.0.0');
+    const server = new McpServer(registry, 'customize-agent', '3.0.0');
     await server.start();
   });
 

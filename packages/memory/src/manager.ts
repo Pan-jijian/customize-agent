@@ -19,7 +19,7 @@ export interface MemoryEntry {
 
 /**
  * 跨会话记忆管理器。
- * 存储: ~/.code-agent/memory.db (SQLite + FTS5)
+ * 存储: ~/.customize-agent/memory.db (SQLite + FTS5)
  *
  * 4 种记忆类型:
  *   - project_fact:    项目架构、模块依存、构建系统
@@ -31,7 +31,7 @@ export class MemoryManager {
   private db: Database.Database;
 
   constructor(storagePath?: string) {
-    const dbPath = storagePath ?? path.join(os.homedir(), '.code-agent', 'memory.db');
+    const dbPath = storagePath ?? path.join(os.homedir(), '.customize-agent', 'memory.db');
     const dir = path.dirname(dbPath);
     fs.mkdirSync(dir, { recursive: true });
 

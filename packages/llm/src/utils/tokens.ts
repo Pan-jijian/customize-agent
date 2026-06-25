@@ -1,4 +1,4 @@
-import type { Message } from '@code-agent/types';
+import type { Message } from '@customize-agent/types';
 
 /**
  * 字符→token 换算系数。

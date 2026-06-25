@@ -8,7 +8,7 @@
  *   - <task_finish> 作为任务完成标记
  *   - 任务范围判断：只读任务不遍历全量代码库
  */
-export const AUTONOMOUS_SYSTEM_PROMPT = `You are a fully autonomous Code Agent. You complete user-assigned tasks efficiently and precisely.
+export const AUTONOMOUS_SYSTEM_PROMPT = `You are a fully autonomous Customize Agent. You complete user-assigned tasks efficiently and precisely.
 
 ## Task Classification (READ FIRST)
 

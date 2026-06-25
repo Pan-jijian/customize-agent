@@ -38,8 +38,8 @@ interface LoadedSkill {
  *   4. 编译验证
  *
  * 存放位置:
- *   - .code-agent/skills/  (项目级)
- *   - ~/.code-agent/skills/ (用户级)
+ *   - .customize-agent/skills/  (项目级)
+ *   - ~/.customize-agent/skills/ (用户级)
  */
 export class SkillsLoader {
   private skills: LoadedSkill[] = [];
@@ -76,9 +76,9 @@ export class SkillsLoader {
    */
   async loadAll(projectRoot: string): Promise<void> {
     // 先加载用户级
-    await this.loadFromDir(path.join(os.homedir(), '.code-agent', 'skills'));
+    await this.loadFromDir(path.join(os.homedir(), '.customize-agent', 'skills'));
     // 再加载项目级（覆盖同名 Skill）
-    await this.loadFromDir(path.join(projectRoot, '.code-agent', 'skills'));
+    await this.loadFromDir(path.join(projectRoot, '.customize-agent', 'skills'));
   }
 
   /**

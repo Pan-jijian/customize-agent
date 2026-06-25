@@ -1,10 +1,10 @@
 import * as fs from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
 import * as path from 'path';
-import { DiffEngine } from '@code-agent/diff';
-import { TerminalTool } from '../terminal/shell.js';
-import { GitTool } from '../git/git.js';
-import { UnifiedSyntaxValidator } from '../validator/syntax.js';
+import { DiffEngine } from './diff.js';
+import { TerminalTool } from './terminal-shell.js';
+import { GitTool } from './git.js';
+import { UnifiedSyntaxValidator } from './syntax-validator.js';
 
 // ── .gitignore 匹配器 ──
 const IGNORE_CACHE = new Map<string, RegExp[]>();

@@ -1,11 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { Message } from '@code-agent/types';
-import type { AgentExecutor } from '../engine/executor.js';
+import type { Message } from '@customize-agent/types';
+import type { AgentExecutor } from '../agent/executor.js';
 import { TuiInput } from '../tui/input.js';
 import { welcomeBanner, t, s, divider, errorMsg, infoMsg, contextStats } from '../tui/renderer.js';
-import type { MemoryManager } from '@code-agent/memory';
-import { BINARY_EXTENSIONS } from '@code-agent/llm';
+import type { MemoryManager } from '@customize-agent/memory';
+import { BINARY_EXTENSIONS } from '@customize-agent/types';
 
 /** REPL 配置 */
 export interface ReplConfig {
@@ -233,7 +233,7 @@ ${s.bold('Tips:')}
 
   private async _sessions(): Promise<void> {
     try {
-      const { AuditLogger } = await import('@code-agent/telemetry');
+      const { AuditLogger } = await import('@customize-agent/runtime');
       const sessions = await AuditLogger.listSessions();
       if (!sessions.length) { process.stdout.write(t.dim('No sessions.\n\n')); return; }
       process.stdout.write(t.dim(`Total: ${sessions.length}\n`));

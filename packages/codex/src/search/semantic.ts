@@ -1,4 +1,4 @@
-import type { ILLMProvider } from '@code-agent/llm';
+import type { ILLMProvider } from '@customize-agent/llm';
 import { getLanguageConfig } from '../index/languages.js';
 import type { StorageManager } from '../index/db.js';
 import Parser, { type SyntaxNode } from 'tree-sitter';

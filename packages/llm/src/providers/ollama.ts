@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
-import type { Message } from '@code-agent/types';
+import type { Message } from '@customize-agent/types';
 import type { ILLMProvider, LLMResponse, ChatOptions, ModelCapabilities, StreamChunk } from '../interface.js';
-import { withRetry } from '../network/retry.js';
+import { withRetry } from '../retry.js';
 import { countTokensFromMessages } from '../utils/tokens.js';
 import { createLLMResponse } from '../utils/response.js';
 
@@ -19,7 +19,7 @@ const OLLAMA_CAPABILITIES: ModelCapabilities = {
  * Ollama Provider — 本地开源模型运行在 http://localhost:11434。
  * 默认模型: qwen3:14b（可通过 --model 覆盖）。
  * 数据不出机器，适用于敏感代码。
- * 通过 CODE_AGENT_OLLAMA_API_KEY 环境变量配置（本地通常不需要）。
+ * 通过 CUSTOMIZE_AGENT_OLLAMA_API_KEY 环境变量配置（本地通常不需要）。
  */
 export class OllamaProvider implements ILLMProvider {
   readonly name = 'ollama';
@@ -29,7 +29,7 @@ export class OllamaProvider implements ILLMProvider {
 
   constructor(options: { apiKey?: string; baseUrl?: string; modelName?: string } = {}) {
     this.client = new OpenAI({
-      apiKey: options.apiKey ?? process.env.CODE_AGENT_OLLAMA_API_KEY ?? 'ollama',
+      apiKey: options.apiKey ?? process.env.CUSTOMIZE_AGENT_OLLAMA_API_KEY ?? 'ollama',
       baseURL: options.baseUrl ?? 'http://localhost:11434/v1',
     });
     this.modelName = options.modelName ?? 'qwen3:14b';

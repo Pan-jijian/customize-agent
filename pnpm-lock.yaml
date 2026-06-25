@@ -32,25 +32,25 @@ importers:
 
   apps/cli:
     dependencies:
-      '@code-agent/codex':
+      '@customize-agent/codex':
         specifier: workspace:*
         version: link:../../packages/codex
-      '@code-agent/engine':
+      '@customize-agent/engine':
         specifier: workspace:*
         version: link:../../packages/engine
-      '@code-agent/llm':
+      '@customize-agent/llm':
         specifier: workspace:*
         version: link:../../packages/llm
-      '@code-agent/memory':
+      '@customize-agent/memory':
         specifier: workspace:*
         version: link:../../packages/memory
-      '@code-agent/telemetry':
+      '@customize-agent/runtime':
         specifier: workspace:*
-        version: link:../../packages/telemetry
-      '@code-agent/tools':
+        version: link:../../packages/runtime
+      '@customize-agent/tools':
         specifier: workspace:*
         version: link:../../packages/tools
-      '@code-agent/types':
+      '@customize-agent/types':
         specifier: workspace:*
         version: link:../../packages/types
       commander:
@@ -65,10 +65,10 @@ importers:
 
   packages/codex:
     dependencies:
-      '@code-agent/llm':
+      '@customize-agent/llm':
         specifier: workspace:*
         version: link:../llm
-      '@code-agent/types':
+      '@customize-agent/types':
         specifier: workspace:*
         version: link:../types
       '@types/better-sqlite3':
@@ -126,14 +126,12 @@ importers:
         specifier: ^3.17.5
         version: 3.18.0
 
-  packages/diff: {}
-
   packages/engine:
     dependencies:
-      '@code-agent/llm':
+      '@customize-agent/llm':
         specifier: workspace:*
         version: link:../llm
-      '@code-agent/types':
+      '@customize-agent/types':
         specifier: workspace:*
         version: link:../types
       '@types/node':
@@ -145,7 +143,7 @@ importers:
 
   packages/llm:
     dependencies:
-      '@code-agent/types':
+      '@customize-agent/types':
         specifier: workspace:*
         version: link:../types
       '@types/node':
@@ -170,7 +168,7 @@ importers:
 
   packages/runtime:
     dependencies:
-      '@code-agent/types':
+      '@customize-agent/types':
         specifier: workspace:*
         version: link:../types
     devDependencies:
@@ -178,23 +176,11 @@ importers:
         specifier: ^25.9.3
         version: 25.9.3
 
-  packages/telemetry:
-    dependencies:
-      '@code-agent/types':
-        specifier: workspace:*
-        version: link:../types
-      '@types/node':
-        specifier: ^25.9.3
-        version: 25.9.3
-
   packages/tools:
     dependencies:
-      '@code-agent/codex':
+      '@customize-agent/codex':
         specifier: workspace:*
         version: link:../codex
-      '@code-agent/diff':
-        specifier: workspace:*
-        version: link:../diff
       '@types/node':
         specifier: ^25.9.3
         version: 25.9.3
