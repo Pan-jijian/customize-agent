@@ -9,7 +9,7 @@
     "lint": "turbo run lint",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "vitest run tests/e2e/",
+
     "dev": "turbo run build && node apps/cli/dist/index.js",
     "start:cli": "pnpm --filter cli start",
     "check": "turbo run typecheck lint && vitest run"
