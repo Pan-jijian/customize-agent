@@ -18,9 +18,21 @@ import type { Mode } from './renderer.js';
 
 // ── 类型定义 ──
 export interface DropdownItem { label: string; detail?: string; data: string; }
+export interface TuiLabels {
+  filesHeader: string;
+  commandsHeader: string;
+  more: (n: number) => string;
+  hintTab: string;
+  hintNavigate: string;
+  hintConfirm: string;
+  hintDismiss: string;
+  hintSep: string;
+}
+
 export interface TuiConfig {
   files: string[]; projectRoot: string;
   commands?: Array<{ name: string; desc: string }>;
+  labels?: TuiLabels;
   prompt?: string; mode?: Mode; history?: string[];
 }
 
@@ -30,15 +42,6 @@ interface St {
   items: DropdownItem[]; sel: number;
   fStart: number; fEnd: number;
 }
-
-const CMDS: Array<{ name: string; desc: string }> = [
-  { name: '/plan',     desc: '制定执行计划（只读探索）' },
-  { name: '/clear',    desc: '重置当前会话' },
-  { name: '/sessions', desc: '查看历史会话' },
-  { name: '/model',    desc: '查看当前模型' },
-  { name: '/help',     desc: '显示帮助' },
-  { name: '/exit',     desc: '退出' },
-];
 
 let _kprInit = false;
 
@@ -51,8 +54,14 @@ function displayWidth(s: string): number {
   let w = 0;
   for (const ch of s) {
     const cp = ch.codePointAt(0) ?? 0;
-    // CJK 统一表意文字、兼容区、扩展区、全角形式、谚文等
-    w += (cp >= 0x2E80) ? 2 : 1;
+    // 2-column ranges: CJK + Fullwidth + arrows + misc symbols
+    if (cp >= 0x2E80 && cp <= 0x9FFF) { w += 2; }
+    else if (cp >= 0x3400 && cp <= 0x4DBF) { w += 2; }
+    else if (cp >= 0xFF00 && cp <= 0xFFEF) { w += 2; }
+    else if (cp >= 0x3000 && cp <= 0x303F) { w += 2; }
+    else if (cp >= 0x2190 && cp <= 0x21FF) { w += 2; }
+    else if (cp >= 0x2600 && cp <= 0x27BF) { w += 2; }
+    else { w += 1; }
   }
   return w;
 }
@@ -71,15 +80,22 @@ export class TuiInput {
   private hi: number;
   private sz = new Map<string, string>();
   private _prevLines = 0;
+  private labels: TuiLabels;
 
   constructor(cfg: TuiConfig) {
     this.files = cfg.files;
     this.root = cfg.projectRoot;
-    this.cmds = cfg.commands ?? CMDS;
+    this.cmds = cfg.commands ?? [];
     this.prompt = cfg.prompt ?? '➜';
     this.mode = cfg.mode ?? 'AGENT';
     this.hist = cfg.history ?? [];
     this.hi = this.hist.length;
+    this.labels = cfg.labels ?? {
+      filesHeader: 'Files', commandsHeader: 'Commands',
+      more: (n) => `… ${n} more`,
+      hintTab: 'Tab select', hintNavigate: '↑↓ navigate', hintConfirm: 'Enter confirm', hintDismiss: 'Esc dismiss',
+      hintSep: '  ·  ',
+    };
   }
 
   // read 读取输入
@@ -297,13 +313,21 @@ export class TuiInput {
       if (st.dd === 'command') {
         for (const l of renderCommandMenu(
           st.items.map((it, i) => ({ cmd: it.label, desc: it.detail ?? '', highlighted: i === st.sel })),
+          this.labels.commandsHeader,
         )) lines.push(ddPrefix + l);
       } else {
         for (const l of renderFileDropdown(
           st.items.map((it, i) => ({ label: it.label, detail: it.detail, highlighted: i === st.sel })),
+          { header: this.labels.filesHeader, more: this.labels.more },
         )) lines.push(ddPrefix + l);
       }
-      lines.push(ddPrefix + t.subtle(hintText()));
+      lines.push(ddPrefix + t.subtle(hintText({
+        tab: this.labels.hintTab,
+        navigate: this.labels.hintNavigate,
+        confirm: this.labels.hintConfirm,
+        dismiss: this.labels.hintDismiss,
+        sep: this.labels.hintSep,
+      })));
     }
 
     const totalLines = lines.length;

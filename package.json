@@ -19,6 +19,11 @@
   "license": "ISC",
   "packageManager": "pnpm@10.26.1",
   "pnpm": {
+    "peerDependencyRules": {
+      "allowAny": [
+        "tree-sitter"
+      ]
+    },
     "onlyBuiltDependencies": [
       "tree-sitter",
       "tree-sitter-javascript",

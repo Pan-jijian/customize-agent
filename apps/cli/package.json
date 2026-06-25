@@ -17,15 +17,15 @@
   "license": "ISC",
   "packageManager": "pnpm@10.26.1",
   "dependencies": {
-    "@customize-agent/engine": "workspace:*",
     "@customize-agent/codex": "workspace:*",
+    "@customize-agent/engine": "workspace:*",
     "@customize-agent/llm": "workspace:*",
     "@customize-agent/memory": "workspace:*",
     "@customize-agent/runtime": "workspace:*",
-    "@customize-agent/types": "workspace:*",
     "@customize-agent/tools": "workspace:*",
+    "@customize-agent/types": "workspace:*",
     "commander": "^15.0.0",
-    "dotenv": "^17.4.2",
-    "fast-glob": "^3.3.3"
+    "fast-glob": "^3.3.3",
+    "figlet": "^1.11.0"
   }
 }

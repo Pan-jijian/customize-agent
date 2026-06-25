@@ -1,35 +1,32 @@
 /**
- * TUI 渲染 — ANSI 转义序列 + Unicode 框线绘制。
- *
- * Tokyo Night 调色板 (256 色):
- *   accent cyan:  #7dcfff → 117    blue:     #7aa2f7 → 111
- *   purple:       #9d7cd8 → 140    success:  #9ece6a → 114
- *   warning gold: #e0af68 → 180    error:    #f7768e → 211
- *   text:         #a9b1d6 → 146    dim:      #565f89 → 103
- *
- * 布局: 2 空格左边距，竖线 (│) 连接输入行与下拉菜单。
+ * TUI 渲染 — ANSI + Unicode 框线。Modern 256-color palette.
+ *    accent #5fd7ff → 81    blue    #5f87ff → 69
+ *    purple #d787ff → 177   success #87d787 → 114
+ *    warn   #ffd787 → 222   error   #ff8787 → 210
+ *    text   #eeeeee → 255   dim     #808080 → 244
  */
+import { bannerText } from './big-text.js';
+
 const CSI = '\x1b[';
 
-// ── 256 色辅助函数 ──
 function c(t: string, code: number): string { return `${CSI}38;5;${code}m${t}${CSI}39m`; }
 function cb(t: string, fg: number, bg: number): string { return `${CSI}38;5;${fg}m${CSI}48;5;${bg}m${t}${CSI}39;49m`; }
 
 export const t = {
-  accent:    (s: string) => c(s, 117),
-  blue:      (s: string) => c(s, 111),
-  purple:    (s: string) => c(s, 140),
+  accent:    (s: string) => c(s, 81),
+  blue:      (s: string) => c(s, 69),
+  purple:    (s: string) => c(s, 177),
   success:   (s: string) => c(s, 114),
-  warning:   (s: string) => c(s, 180),
-  error:     (s: string) => c(s, 211),
+  warning:   (s: string) => c(s, 222),
+  error:     (s: string) => c(s, 210),
   white:     (s: string) => c(s, 255),
-  text:      (s: string) => c(s, 146),
-  dim:       (s: string) => c(s, 103),
-  subtle:    (s: string) => c(s, 60),
-  faint:     (s: string) => c(s, 59),
-  selected:  (s: string) => cb(s, 255, 60),
-  badge:     (s: string) => cb(s, 0, 117),
-  planBadge: (s: string) => cb(s, 0, 111),
+  text:      (s: string) => c(s, 252),
+  dim:       (s: string) => c(s, 244),
+  subtle:    (s: string) => c(s, 240),
+  faint:     (s: string) => c(s, 236),
+  selected:  (s: string) => cb(s, 255, 240),
+  badge:     (s: string) => cb(s, 232, 81),
+  planBadge: (s: string) => cb(s, 232, 69),
 };
 
 export const s = {
@@ -54,7 +51,6 @@ export const cur = {
 
 // ── 框线字符 ──
 const B = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
-const D = { tl: '╔', tr: '╗', bl: '╚', br: '╝', h: '═', v: '║' };
 
 export function tw(): number {
   return Math.max(60, Math.min(process.stdout.columns ?? 80, 200));
@@ -74,34 +70,111 @@ export function modeBadge(mode: Mode): string {
 // ── 带标签分隔线 ──
 export function divider(label: string): string {
   const w = tw();
-  const side = Math.max(0, Math.floor((w - visibleLen(label) - 4) / 2));
-  return t.subtle(B.h.repeat(side) + '  ' + t.dim(label) + '  ' + B.h.repeat(side));
+  const side = Math.max(0, Math.floor((w - visibleLen(label) - 6) / 2));
+  return '\n' + t.subtle('─'.repeat(side) + '  ' + s.bold(t.purple(label)) + '  ' + '─'.repeat(side)) + '\n';
 }
+
+// ── 统一消息样式系统 ──
+
+/** 消息类型对应的颜色/图标 */
+const MSG_BLUE    = { border: (x: string) => t.blue(x),    icon: t.blue('ℹ'),   title: (x: string) => s.bold(t.blue(x)) };
+const MSG_WARN    = { border: (x: string) => t.warning(x), icon: t.warning('⚡'), title: (x: string) => s.bold(t.warning(x)) };
+const MSG_ERR     = { border: (x: string) => t.error(x),   icon: t.error('✗'),  title: (x: string) => s.bold(t.error(x)) };
+const MSG_SUCCESS = { border: (x: string) => t.success(x), icon: t.success('✓'), title: (x: string) => s.bold(t.success(x)) };
+
+const MSG_MAP = { info: MSG_BLUE, warn: MSG_WARN, error: MSG_ERR, success: MSG_SUCCESS } as const;
+type MsgType = keyof typeof MSG_MAP;
+
+function _msgBox(type: MsgType, text: string, title?: string): string {
+  const style = MSG_MAP[type];
+  const lines = text.split('\n');
+  const result: string[] = [];
+
+  result.push('');
+  if (title) {
+    result.push('  ' + style.title(title));
+  }
+  for (const line of lines) {
+    result.push('  ' + style.icon + ' ' + t.text(line));
+  }
+  result.push('');
+  return result.join('\n');
+}
+
+/** 统一消息 API */
+export const msg = {
+  info:    (text: string, title?: string) => _msgBox('info', text, title),
+  warn:    (text: string, title?: string) => _msgBox('warn', text, title),
+  error:   (text: string, title?: string) => _msgBox('error', text, title),
+  success: (text: string, title?: string) => _msgBox('success', text, title),
+};
+
+// ── 兼容旧 API（逐步迁移）──
+export function infoMsg(text: string): string { return msg.info(text); }
+export function errorMsg(text: string): string { return msg.error(text); }
 
 // ── 欢迎横幅 ──
-export function welcomeBanner(version: string, provider: string): string {
-  const w = Math.min(tw() - 6, 72);
-  const pd = (s: string, n: number) => s + ' '.repeat(Math.max(0, n - visibleLen(s)));
-  const v = t.subtle(D.v);
-  const inner = [
-    '',
-    pd(`  ${t.accent(s.bold('◆'))} ${t.white(s.bold('Customize Agent'))}  ${t.subtle('v' + version)}`, w),
-    pd(`  ${t.subtle(B.h.repeat(28))}`, w),
-    '',
-    pd(`  ${t.dim('Provider')}  ${t.text(provider)}`, w),
-    '',
-    pd(`  ${t.success('▶')}  ${t.text('Type a task to begin')}`, w),
-    pd(`  ${t.accent('@')} ${t.dim('attach files')}   ${t.purple('/')} ${t.dim('commands')}   ${t.dim('↑↓ history')}`, w),
-    '',
-  ];
-  const top = t.subtle(D.tl + D.h.repeat(w + 2) + D.tr);
-  const bot = t.subtle(D.bl + D.h.repeat(w + 2) + D.br);
-  return '\n' + top + '\n' + inner.map(l => v + ' ' + l + ' ' + v).join('\n') + '\n' + bot + '\n';
+export function welcomeBanner(version: string, provider: string, opts?: {
+  title?: string; providerLabel?: string; startHint?: string; usageHints?: string; configHint?: string;
+}): string {
+  const title = opts?.title ?? 'Customize Agent';
+  const providerLabel = opts?.providerLabel ?? 'Provider';
+  const startHint = opts?.startHint ?? 'Type a task to begin';
+  const usageHints = opts?.usageHints ?? '@ attach files   / commands   ↑↓ history';
+  const configHint = opts?.configHint ?? '';
+  const W = tw();
+  const pad = (s: string) => '  ' + s + ' '.repeat(Math.max(0, W - 4 - visibleLen(s)));
+  const center = (s: string) => {
+    const vLen = visibleLen(s);
+    const left = Math.floor((W - 4 - vLen) / 2);
+    return '  ' + ' '.repeat(Math.max(0, left)) + s;
+  };
+
+  // ═══ top border ═══
+  const topB = t.dim('╭' + '─'.repeat(W - 4) + '╮');
+
+  const out: string[] = [];
+  out.push(topB);
+
+  // title: 4×6 pixel banner with gradient
+  for (const row of bannerText(title)) {
+    out.push(center(row));
+  }
+  out.push('');
+
+  // version
+  out.push(center(s.bold(t.faint(version))));
+  out.push(pad(''));
+
+  // provider
+  out.push(center(`${t.dim(providerLabel + '  ')}${t.text(provider)}`));
+  out.push(pad(''));
+
+  if (configHint) {
+    const hintLines = configHint.split('\n');
+    const iconPrefix = `${t.warning('⚡')} `;
+    const maxHintLen = Math.max(...hintLines.map(l => visibleLen(iconPrefix + l)));
+    for (const line of hintLines) {
+      const leftPad = 2 + Math.floor((W - 4 - maxHintLen) / 2);
+      out.push(' '.repeat(Math.max(0, leftPad)) + iconPrefix + t.warning(line));
+    }
+    out.push(pad(''));
+  }
+
+  out.push(center(`${t.success('▶')}  ${s.bold(t.text(startHint))}`));
+  out.push(center(`${t.accent('@')} ${s.bold(t.dim(usageHints))}`));
+
+  // ═══ bottom border ═══
+  const botB = t.dim('╰' + '─'.repeat(W - 4) + '╯');
+  out.push(botB);
+
+  return '\n' + out.join('\n') + '\n';
 }
 
-// ── 文件下拉菜单（前缀感知：调用方提供 "  │ " 前缀）──
+// ── 文件下拉菜单 ──
 export function renderFileDropdown(
   items: Array<{ label: string; detail?: string; highlighted: boolean }>,
+  labels: { header: string; more: (n: number) => string },
   maxH = 8,
   w?: number,
 ): string[] {
@@ -110,51 +183,52 @@ export function renderFileDropdown(
   const vis = items.slice(0, maxH);
   const out: string[] = [];
 
-  out.push(`╭${B.h.repeat(2)} ${t.dim('Files')} ${B.h.repeat(Math.max(0, width - 10))}╮`);
+  out.push(t.subtle('╭') + t.subtle('─'.repeat(2)) + ' ' + s.bold(t.purple(labels.header)) + ' ' + t.subtle('─'.repeat(Math.max(0, width - 5 - visibleLen(labels.header)))) + t.subtle('╮'));
   for (const it of vis) {
-    const mark = it.highlighted ? t.accent('❯') : ' ';
+    const mark = it.highlighted ? t.accent('▸') : ' ';
     const name = it.highlighted ? t.selected(` ${it.label} `) : t.text(` ${it.label} `);
-    const extra = it.detail ? ' ' + t.subtle(it.detail) : '';
+    const extra = it.detail ? ' ' + t.faint(it.detail) : '';
     const rpad = Math.max(0, width - 4 - visibleLen(it.label) - (it.detail ? 1 + it.detail.length : 0));
-    out.push(`${B.v} ${mark} ${name}${extra}${' '.repeat(rpad)} ${B.v}`);
+    out.push(t.subtle(B.v) + ` ${mark} ${name}${extra}${' '.repeat(rpad)} ` + t.subtle(B.v));
   }
   if (items.length > maxH) {
-    const more = `… ${items.length - maxH} more`;
-    out.push(`${B.v} ${t.subtle(more)}${' '.repeat(Math.max(0, width - 1 - visibleLen(more)))} ${B.v}`);
+    const more = labels.more(items.length - maxH);
+    out.push(t.subtle(B.v) + ' ' + t.faint(more) + ' '.repeat(Math.max(0, width - 1 - visibleLen(more))) + ' ' + t.subtle(B.v));
   }
-  out.push(`╰${B.h.repeat(width)}╯`);
+  out.push(t.subtle('╰' + '─'.repeat(width) + '╯'));
   return out;
 }
 
 // ── 命令下拉菜单 ──
 export function renderCommandMenu(
   items: Array<{ cmd: string; desc: string; highlighted: boolean }>,
+  header: string,
   w?: number,
 ): string[] {
   if (!items.length) return [];
   const width = Math.min((w ?? tw()) - 8, 52);
   const out: string[] = [];
 
-  out.push(`╭${B.h.repeat(2)} ${t.dim('Commands')} ${B.h.repeat(Math.max(0, width - 13))}╮`);
+  out.push(t.subtle('╭') + t.subtle('─'.repeat(2)) + ' ' + s.bold(t.purple(header)) + ' ' + t.subtle('─'.repeat(Math.max(0, width - 5 - visibleLen(header)))) + t.subtle('╮'));
   for (const it of items) {
-    const mark = it.highlighted ? t.accent('❯') : ' ';
+    const mark = it.highlighted ? t.accent('▸') : ' ';
     const cmd = it.highlighted ? t.accent(it.cmd.padEnd(14)) : t.dim(it.cmd.padEnd(14));
-    const desc = t.subtle(it.desc);
+    const desc = it.highlighted ? t.text(it.desc) : t.faint(it.desc);
     const rpad = Math.max(0, width - 18 - visibleLen(it.desc));
-    out.push(`${B.v} ${mark} ${cmd}${desc}${' '.repeat(rpad)} ${B.v}`);
+    out.push(t.subtle(B.v) + ` ${mark} ${cmd}${desc}${' '.repeat(rpad)} ` + t.subtle(B.v));
   }
-  out.push(`╰${B.h.repeat(width)}╯`);
+  out.push(t.subtle('╰' + '─'.repeat(width) + '╯'));
   return out;
 }
 
-// ── 提示栏（单行，无前缀）──
-export function hintText(): string {
+// ── 提示栏 ──
+export function hintText(labels: { tab: string; navigate: string; confirm: string; dismiss: string; sep: string }): string {
   return [
-    `${t.dim('Tab')} select`,
-    `${t.dim('↑↓')} navigate`,
-    `${t.dim('Enter')} confirm`,
-    `${t.dim('Esc')} dismiss`,
-  ].join('  ·  ');
+    `${t.faint(labels.tab)}`,
+    `${t.faint(labels.navigate)}`,
+    `${t.faint(labels.confirm)}`,
+    `${t.faint(labels.dismiss)}`,
+  ].join(t.subtle(labels.sep));
 }
 
 // ── 工具调用 ──
@@ -162,20 +236,20 @@ function formatArgs(args?: Record<string, unknown>): string {
   if (!args) return '';
   const val = args.path ?? args.input;
   if (typeof val === 'string' && val.length > 0) {
-    const short = val.length > 50 ? val.slice(0, 47) + '...' : val;
-    return ` (${short})`;
+    const short = val.length > 50 ? val.slice(0, 47) + '…' : val;
+    return ` ${t.faint(short)}`;
   }
   return '';
 }
 
 export function toolCallStart(toolName: string, args?: Record<string, unknown>): string {
-  return `  ${t.accent('┌')} ${t.accent(s.bold(toolName))}${t.dim(formatArgs(args))}`;
+  return `  ${t.accent('▸')} ${t.accent(s.bold(toolName))}${formatArgs(args)}`;
 }
 
 export function toolCallEnd(status: 'success' | 'error', detail?: string): string {
-  const icon = status === 'success' ? t.success('└ ✓') : t.error('└ ✗');
-  const extra = detail ? ` ${t.subtle(detail.slice(0, 80))}` : '';
-  return `  ${icon}${extra}`;
+  const mark = status === 'success' ? `  ${t.success('✓')}` : `  ${t.error('✗')}`;
+  const extra = detail ? ` ${t.faint(detail.slice(0, 80))}` : '';
+  return `${mark}${extra}`;
 }
 
 /** 渲染 unified diff 预览（modify_file 专用） */
@@ -184,9 +258,8 @@ export function renderDiff(diffText: string, maxLines = 30): string {
   const out: string[] = [];
   let count = 0;
   for (const raw of lines) {
-    if (count >= maxLines) break;
+        if (count >= maxLines) { out.push(t.faint(`… ${lines.length - maxLines} more lines`)); break; }
     // 跳过末尾提示语
-    if (raw.startsWith('请运行编译命令')) continue;
     let line: string;
     if (raw.startsWith('+++') || raw.startsWith('---')) line = t.accent(s.bold(raw));
     else if (raw.startsWith('@@')) line = t.accent(raw);
@@ -196,74 +269,66 @@ export function renderDiff(diffText: string, maxLines = 30): string {
     out.push(`  ${t.subtle('│')} ${line}`);
     count++;
   }
-  if (lines.length > maxLines) {
-    out.push(`  ${t.subtle('│')} ${t.dim(`… ${lines.length - maxLines} more lines`)}`);
-  }
   return out.join('\n');
 }
 
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-/** 启动持续旋转的 spinner，返回停止函数 */
-export function spinnerStart(): () => void {
+export function spinnerStart(label?: string): () => void {
+  const text = label ?? 'Thinking…';
   let idx = 0;
   const interval = setInterval(() => {
-    process.stdout.write('\r  ' + t.accent(SPIN[idx % SPIN.length]!) + ' ' + t.subtle('Thinking…'));
+    process.stdout.write('\r  ' + t.accent(SPIN[idx % SPIN.length]!) + ' ' + t.dim(text));
     idx++;
   }, 100);
   return () => {
     clearInterval(interval);
-    process.stdout.write('\r\x1b[2K'); // 清除 spinner 行
+    process.stdout.write('\r\x1b[2K');
   };
 }
 
 // ── 状态消息 ──
-export function taskComplete(summary?: string): string {
+export function taskComplete(label?: string, summary?: string): string {
+  const title = label ?? 'Task complete';
   const s = summary ? ` ${t.dim('— ' + summary)}` : '';
-  return `\n  ${t.success('✓')} ${t.text('Task complete')}${s}\n`;
+  return `\n  ${t.success('✓')} ${t.text(title)}${s}\n`;
 }
 
-export function taskWarning(msg: string): string {
-  return `\n  ${t.warning('⚠')} ${t.text(msg)}\n`;
-}
-
-export function errorMsg(msg: string): string {
-  return `\n  ${t.error('✗')} ${t.text(msg)}\n`;
-}
-
-export function infoMsg(msg: string): string {
-  return `  ${t.accent('ℹ')} ${t.dim(msg)}`;
+export function taskWarning(text: string): string {
+  return `\n  ${t.warning('⚠')} ${t.text(text)}\n`;
 }
 
 // ── 上下文管理显示 ──
-export function contextCompacting(beforeTokens: number, limit: number): string {
-  const pct = Math.round((beforeTokens / limit) * 100);
-  return `\n  ${t.warning('⚠')} ${t.text(`上下文使用 ${pct}%（${Math.round(beforeTokens / 1000)}K / ${Math.round(limit / 1000)}K token），正在压缩…`)}`;
+export function contextCompacting(compactingLabel: string): string {
+  return `\n  ${t.warning('⟳')} ${t.text(compactingLabel)}`;
 }
 
-export function contextCompacted(afterTokens: number, removedTokens: number): string {
-  return `  ${t.success('✓')} ${t.dim(`压缩完成，释放约 ${Math.round(removedTokens / 1000)}K token → 当前 ${Math.round(afterTokens / 1000)}K token`)}\n`;
+export function contextCompacted(compactedLabel: string): string {
+  return `  ${t.success('✓')} ${t.dim(compactedLabel)}\n`;
 }
 
-export function contextStats(currentTokens: number, limit: number): string {
+export function contextStats(currentTokens: number, limit: number, label?: string): string {
   const pct = Math.round((currentTokens / limit) * 100);
   const color = pct > 85 ? t.error : pct > 60 ? t.warning : t.success;
-  return `  ${t.dim('上下文:')} ${color(`${Math.round(currentTokens / 1000)}K / ${Math.round(limit / 1000)}K token (${pct}%)`)}`;
+  const prefix = label ?? 'Context';
+  return `  ${t.dim(prefix + ':')} ${color(`${Math.round(currentTokens / 1000)}K / ${Math.round(limit / 1000)}K token (${pct}%)`)}`;
 }
 
 // ── 审批弹框 ──
-export function approvalBox(toolName: string, label: string, detail?: string): string {
+export function approvalBox(toolName: string, label: string, detail?: string, labels?: { title?: string; prompt?: string }): string {
+  const title = labels?.title ?? '⚠ Approval Required';
+  const prompt = labels?.prompt ?? '[y/N]';
   const w = Math.min(tw() - 4, 64);
   const bar = t.warning('│');
   const lines = [
     `\n ${t.warning('╭' + '─'.repeat(w) + '╮')}`,
-    ` ${bar} ${t.warning(s.bold(' ⚠ Approval Required'))}${' '.repeat(Math.max(0, w - 22))} ${bar}`,
+    ` ${bar} ${t.warning(s.bold(' ' + title))}${' '.repeat(Math.max(0, w - 1 - visibleLen(title)))} ${bar}`,
     ` ${bar} ${t.text(label + ': ')}${t.accent(toolName)}${' '.repeat(Math.max(0, w - 3 - visibleLen(label) - visibleLen(toolName)))} ${bar}`,
   ];
   if (detail) {
     lines.push(` ${bar} ${t.dim(' ' + detail)}${' '.repeat(Math.max(0, w - 1 - visibleLen(detail)))} ${bar}`);
   }
-  lines.push(` ${bar} ${t.dim('[y/N]')}${' '.repeat(Math.max(0, w - 6))} ${bar}`);
+  lines.push(` ${bar} ${t.dim(prompt)}${' '.repeat(Math.max(0, w - visibleLen(prompt)))} ${bar}`);
   lines.push(` ${t.warning('╰' + '─'.repeat(w) + '╯')}`);
   return lines.join('\n');
 }
@@ -276,7 +341,14 @@ function visibleLen(s: string): number {
   let w = 0;
   for (const ch of clean) {
     const cp = ch.codePointAt(0) ?? 0;
-    w += (cp >= 0x2E80) ? 2 : 1;
+    // 2-column ranges: CJK + Fullwidth + arrows (↑↓) + misc symbols (⚡◆▶)
+    if (cp >= 0x2E80 && cp <= 0x9FFF) { w += 2; }          // CJK Unified
+    else if (cp >= 0x3400 && cp <= 0x4DBF) { w += 2; }     // CJK Ext-A
+    else if (cp >= 0xFF00 && cp <= 0xFFEF) { w += 2; }     // Fullwidth forms
+    else if (cp >= 0x3000 && cp <= 0x303F) { w += 2; }     // CJK Symbols
+    else if (cp >= 0x2190 && cp <= 0x21FF) { w += 2; }     // Arrows (↑↓→←)
+    else if (cp >= 0x2600 && cp <= 0x27BF) { w += 2; }     // Misc Symbols (⚡◆▶★)
+    else { w += 1; }
   }
   return w;
 }

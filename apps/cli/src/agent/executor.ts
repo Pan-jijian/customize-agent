@@ -2,24 +2,9 @@ import type { ILLMProvider, StreamChunk, FunctionDefinition } from '@customize-a
 import type { ToolRegistry, PermissionEngine, ExecutionController, ContextManager } from '@customize-agent/engine';
 import { ContextManager as ContextManagerImpl } from '@customize-agent/engine';
 import type { Message, ToolCall } from '@customize-agent/types';
+import type { I18nManager } from '../i18n/manager.js';
 import { AUTONOMOUS_SYSTEM_PROMPT } from './prompt.js';
 import { t, taskComplete, taskWarning, toolCallStart, toolCallEnd, renderDiff, contextCompacting, contextCompacted, contextStats, spinnerStart } from '../tui/renderer.js';
-
-/** 工具中文名映射 */
-export const TOOL_CN: Record<string, string> = {
-  search_symbol: '搜索代码符号',
-  read_file: '读取文件',
-  list_files: '列出目录',
-  modify_file: '修改文件',
-  write_file: '创建文件',
-  execute_command: '执行终端命令',
-  git_status: '查看 Git 状态',
-  git_diff: '查看 Git 变更',
-  git_commit: '提交 Git 变更',
-  web_search: '搜索网络',
-};
-
-function cn(toolName: string): string { return TOOL_CN[toolName] ?? toolName; }
 
 /** 不截断输出的工具（完整内容保留） */
 const NO_TRUNCATE_TOOLS = new Set(['read_file', 'modify_file', 'list_files', 'search_symbol', 'web_search', 'git_status', 'git_diff']);
@@ -38,6 +23,7 @@ export interface ExecutorConfig {
   controller?: ExecutionController;
   contextManager?: ContextManager;
   approvalHandler?: ApprovalHandler;
+  i18n?: I18nManager;
   maxIterations?: number;
   stream?: boolean;
 }
@@ -49,6 +35,7 @@ export class AgentExecutor {
   private controller?: ExecutionController;
   private contextManager: ContextManager;
   private approvalHandler?: ApprovalHandler;
+  private i18n: I18nManager | undefined;
   private maxIterations: number;
   private stream: boolean;
   private systemPrompt: string;
@@ -60,6 +47,7 @@ export class AgentExecutor {
     this.controller = config.controller;
     this.contextManager = config.contextManager ?? new ContextManagerImpl();
     this.approvalHandler = config.approvalHandler;
+    this.i18n = config.i18n;
     this.maxIterations = config.maxIterations ?? 200;
     this.stream = config.stream ?? true;
     this.systemPrompt = AUTONOMOUS_SYSTEM_PROMPT;
@@ -80,9 +68,9 @@ export class AgentExecutor {
     const limit = this.provider.capabilities.maxContextTokens;
     const before = this._lastPromptTokens;
     if (!this.contextManager.shouldWarn(before, limit)) return false;
-    process.stdout.write(contextCompacting(before, limit));
+    process.stdout.write(contextCompacting(this.i18n?.t('context.compacting', { pct: String(Math.round(before / limit * 100)), usedK: String(Math.round(before / 1000)), limitK: String(Math.round(limit / 1000)) }) ?? 'Compacting…'));
     const { newTokens } = await this.contextManager.compactMessages(working, this.provider, before);
-    process.stdout.write(contextCompacted(newTokens, before - newTokens));
+    process.stdout.write(contextCompacted(this.i18n?.t('context.compacted', { removedK: String(Math.round((before - newTokens) / 1000)), currentK: String(Math.round(newTokens / 1000)) }) ?? 'Compacted.'));
     this._lastPromptTokens = newTokens;
     return true;
   }
@@ -120,7 +108,7 @@ export class AgentExecutor {
           const m = response.content.match(/<task_finish>([\s\S]*?)<\/task_finish>/);
           let summary = m?.[1]?.trim() || '';
           if (summary.length > 120) summary = summary.slice(0, 117) + '...';
-          process.stdout.write(taskComplete(summary || undefined));
+          process.stdout.write(taskComplete(this.i18n?.t('status.task_complete'), summary || undefined));
           break;
         }
         continue;
@@ -156,14 +144,14 @@ export class AgentExecutor {
 
     if (ctxMgr.shouldWarn(tokens, limit)) {
       if (tokens > limit * 0.85 || tokens > limit * 0.75) {
-        process.stdout.write(contextCompacting(tokens, limit));
+        process.stdout.write(contextCompacting(this.i18n?.t('context.compacting', { pct: String(Math.round(tokens / limit * 100)), usedK: String(Math.round(tokens / 1000)), limitK: String(Math.round(limit / 1000)) }) ?? 'Compacting…'));
         const { didCompact, newTokens } = await ctxMgr.compactMessages(working, this.provider, tokens);
         if (didCompact) {
           this._lastPromptTokens = newTokens;
-          process.stdout.write(contextCompacted(newTokens, tokens - newTokens));
+          process.stdout.write(contextCompacted(this.i18n?.t('context.compacted', { removedK: String(Math.round((tokens - newTokens) / 1000)), currentK: String(Math.round(newTokens / 1000)) }) ?? 'Compacted.'));
         }
       } else {
-        process.stdout.write(contextStats(tokens, limit) + '\n');
+        process.stdout.write(contextStats(tokens, limit, this.i18n?.t('context.usage')) + '\n');
       }
     }
   }
@@ -257,18 +245,18 @@ export class AgentExecutor {
   private async _executeTool(tc: ToolCall): Promise<string> {
     const name = tc.name;
     const args = tc.arguments;
-    const label = cn(name);
+    const label = this.i18n?.toolLabel(name) ?? name;
 
     // 权限检查
     if (this.permissionEngine) {
       const perm = this.permissionEngine.check(name, args);
-      if (perm === 'deny') return `[安全策略禁止] ${label}`;
+      if (perm === 'deny') return this.i18n?.t('executor.security_policy_deny', { label }) ?? `[Denied] ${label}`;
       if (perm === 'ask') {
         if (this.approvalHandler) {
           const ok = await this.approvalHandler(name, args);
-          if (!ok) return `[用户取消] ${label}`;
+          if (!ok) return this.i18n?.t('executor.user_cancelled', { label }) ?? `[Cancelled] ${label}`;
         } else {
-          return `[缺少审批处理器] ${label}`;
+          return this.i18n?.t('executor.missing_approval_handler', { label }) ?? `[No approval handler] ${label}`;
         }
       }
     }
@@ -292,7 +280,7 @@ export class AgentExecutor {
       // 分级截断：只读/修改工具保留完整内容，命令输出限长
       const limit = name === 'execute_command' ? CMD_OUTPUT_LIMIT : NO_TRUNCATE_TOOLS.has(name) ? Infinity : OTHER_OUTPUT_LIMIT;
       const truncated = result.length > limit
-        ? result.slice(0, limit - 100) + `\n...[截断 ${result.length - limit} 字符]`
+        ? result.slice(0, limit - 100) + (this.i18n?.t('executor.truncated', { count: String(result.length - limit) }) ?? `\n...[Truncated ${result.length - limit} chars]`)
         : result;
       if (this.stream) {
         process.stdout.write(toolCallEnd('success') + '\n');
@@ -300,11 +288,11 @@ export class AgentExecutor {
       return truncated;
     } catch (err) {
       const errMsg = (err as Error).message;
-      this.controller?.recordToolCall(name, args, `[异常]: ${errMsg}`);
+      this.controller?.recordToolCall(name, args, this.i18n?.t('executor.exception', { msg: errMsg }) ?? `[Exception]: ${errMsg}`);
       if (this.stream) {
         process.stdout.write(toolCallEnd('error', errMsg) + '\n');
       }
-      return `[${label} 异常]: ${errMsg}`;
+      return `[${label}]: ${(this.i18n?.t('common.error') ?? 'Error')} - ${errMsg}`;
     }
   }
 }
