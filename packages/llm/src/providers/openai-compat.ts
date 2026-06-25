@@ -30,7 +30,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
     defaultHeaders?: Record<string, string>;
   }) {
     this.client = new OpenAI({
-      apiKey: params.apiKey ?? params.defaultApiKey ?? '',
+      apiKey: params.apiKey || params.defaultApiKey || 'sk-placeholder', // 占位符避免 SDK 崩溃，空串也回退
       baseURL: params.baseUrl ?? params.defaultBaseUrl,
       defaultHeaders: params.defaultHeaders,
     });
