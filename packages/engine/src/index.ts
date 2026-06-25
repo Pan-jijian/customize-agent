@@ -1,5 +1,5 @@
 export { ToolRegistry, type RegisteredTool, type JSONSchema } from './tools/registry.js';
-export { SchemaAdapter, type OpenAIFunctionDefinition, type AnthropicToolDefinition } from './tools/adapter.js';
+export { SchemaAdapter, type OpenAIFunctionDefinition, type AnthropicToolDefinition, type McpToolDefinition } from './tools/adapter.js';
 export {
   Capability, TOOL_CAPABILITY_MAP, ROLE_CAPABILITY_MAP,
   getCapabilitiesForTool, roleHasCapability, roleHasCapabilities,
@@ -9,12 +9,12 @@ export { PermissionEngine, type Permission, type PermissionConfig } from './secu
 export {
   ExecutionController, LoopGuard, BudgetManager, GoalManager, CheckpointManager,
   type ExecutionControllerConfig, type EvalAction, type EvalResult, type GoalCheckContext,
-} from './execution/controller.js';
+} from './execution-controller.js';
 export {
   ContextManager, SystemPromptSource, ToolDefinitionSource, ToolResultSource,
   type ContextSource, type ContextChunk, type ChunkPriority, type ContextManagerConfig,
-} from './context/manager.js';
-export { PlanModeManager, type ExecutionPlan, type PlanStep } from './planning/planner.js';
+} from './context-manager.js';
+export { PlanModeManager, type ExecutionPlan, type PlanStep } from './planner.js';
 export { SubagentRunner } from './orchestration/subagent/runner.js';
 export { createBuiltinSubagentConfig, getBuiltinPrompt, getRecommendedModel } from './orchestration/subagent/builtins.js';
 export { Orchestrator, type CollaborationMode, type OrchestrationResult } from './orchestration/orchestrator.js';

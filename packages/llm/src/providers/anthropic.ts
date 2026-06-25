@@ -1,6 +1,6 @@
-import type { Message } from '@code-agent/types';
+import type { Message } from '@customize-agent/types';
 import type { ILLMProvider, LLMResponse, ChatOptions, ModelCapabilities, StreamChunk, ToolCall } from '../interface.js';
-import { withRetry } from '../network/retry.js';
+import { withRetry } from '../retry.js';
 import { countTokensFromMessages } from '../utils/tokens.js';
 import { createLLMResponse } from '../utils/response.js';
 
@@ -26,7 +26,7 @@ interface AnthropicContentBlock {
 /**
  * Anthropic Provider — 原生 tool_use + vision + prompt caching。
  * 默认模型: claude-sonnet-4-6，API 格式与 OpenAI 不同（system 为顶层参数，tool_use 为 content block）。
- * 通过 CODE_AGENT_ANTHROPIC_API_KEY 环境变量配置。
+ * 通过 CUSTOMIZE_AGENT_ANTHROPIC_API_KEY 环境变量配置。
  */
 export class AnthropicProvider implements ILLMProvider {
   readonly name = 'anthropic';
@@ -36,7 +36,7 @@ export class AnthropicProvider implements ILLMProvider {
   private baseUrl: string;
 
   constructor(options: { apiKey?: string; baseUrl?: string; modelName?: string } = {}) {
-    this.apiKey = options.apiKey ?? process.env.CODE_AGENT_ANTHROPIC_API_KEY ?? '';
+    this.apiKey = options.apiKey ?? process.env.CUSTOMIZE_AGENT_ANTHROPIC_API_KEY ?? '';
     this.baseUrl = options.baseUrl ?? 'https://api.anthropic.com';
     this.modelName = options.modelName ?? 'claude-sonnet-4-6';
   }

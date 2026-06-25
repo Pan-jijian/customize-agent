@@ -1,4 +1,4 @@
-import { Capability } from '../security/capability.js';
+import { Capability } from './security/capability.js';
 
 /** 执行计划的单一步骤 */
 export interface PlanStep {

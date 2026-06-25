@@ -1,4 +1,4 @@
-import type { ComponentState, Session, Checkpoint } from '../index.js';
+import type { ComponentState, Session, Checkpoint } from './index.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 

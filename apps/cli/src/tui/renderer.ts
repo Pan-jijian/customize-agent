@@ -85,7 +85,7 @@ export function welcomeBanner(version: string, provider: string): string {
   const v = t.subtle(D.v);
   const inner = [
     '',
-    pd(`  ${t.accent(s.bold('◆'))} ${t.white(s.bold('Code Agent'))}  ${t.subtle('v' + version)}`, w),
+    pd(`  ${t.accent(s.bold('◆'))} ${t.white(s.bold('Customize Agent'))}  ${t.subtle('v' + version)}`, w),
     pd(`  ${t.subtle(B.h.repeat(28))}`, w),
     '',
     pd(`  ${t.dim('Provider')}  ${t.text(provider)}`, w),

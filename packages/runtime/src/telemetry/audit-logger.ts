@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import type { Message } from '@code-agent/types';
+import type { Message } from '@customize-agent/types';
 
 // 审计事件类型
 
@@ -59,7 +59,7 @@ export class AuditLogger {
 
   constructor(sessionId: string, logDir?: string) {
     this.sessionId = sessionId;
-    this.logDir = logDir ?? path.join(os.homedir(), '.code-agent', 'logs');
+    this.logDir = logDir ?? path.join(os.homedir(), '.customize-agent', 'logs');
     this.logFile = path.join(this.logDir, `${sessionId}.jsonl`);
   }
 
@@ -157,7 +157,7 @@ export class AuditLogger {
    * 提取所有 user/assistant 消息对，按时间排序。
    */
   static async loadHistory(sessionId: string, logDir?: string): Promise<Message[]> {
-    const dir = logDir ?? path.join(os.homedir(), '.code-agent', 'logs');
+    const dir = logDir ?? path.join(os.homedir(), '.customize-agent', 'logs');
     const logFile = path.join(dir, `${sessionId}.jsonl`);
 
     try {
@@ -196,7 +196,7 @@ export class AuditLogger {
    * 返回会话 ID、日期、任务概述、事件数。
    */
   static async listSessions(logDir?: string): Promise<SessionEntry[]> {
-    const dir = logDir ?? path.join(os.homedir(), '.code-agent', 'logs');
+    const dir = logDir ?? path.join(os.homedir(), '.customize-agent', 'logs');
 
     try {
       const files = await fs.readdir(dir);

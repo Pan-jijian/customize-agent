@@ -14,8 +14,8 @@ import {
   topologicalSort,
   initializeComponents,
   shutdownComponents,
-} from '../index.js';
-import { reconcile, type ReconciliationResult } from '../engine/reconciliation.js';
+} from './index.js';
+import { reconcile, type ReconciliationResult } from './reconciliation.js';
 
 let runtimeCounter = 0;
 

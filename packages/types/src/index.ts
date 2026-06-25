@@ -1,4 +1,4 @@
-// @code-agent/types — 跨包类型契约层
+// @customize-agent/types — 跨包类型契约层
 // 零外部依赖，任何包都可以安全导入
 
 // ---- Message & LLM 响应 ----
@@ -139,5 +139,17 @@ export interface TaskResult {
   success: boolean; summary: string; rounds: number; costUsd: number; durationMs: number;
 }
 
+/** 已知二进制文件扩展名（read_file 不可读取） */
+export const BINARY_EXTENSIONS = new Set([
+  'pdf', 'png', 'jpg', 'jpeg', 'gif', 'ico', 'svg',
+  'woff', 'woff2', 'ttf', 'eot',
+  'db', 'db-shm', 'db-wal', 'lock', 'log', 'map',
+  'min.js', 'min.css',
+  'docx', 'xlsx', 'pptx',
+  'zip', 'tar', 'gz', 'bz2', '7z',
+  'mp3', 'mp4', 'avi', 'mov', 'webm', 'webp',
+  'wasm',
+]);
+
 // 事件接口（SystemEvents/DomainEvents/TelemetryEvents）及生命周期工具函数
-// 权威实现已迁移至 @code-agent/runtime 包
+// 权威实现已迁移至 @customize-agent/runtime 包

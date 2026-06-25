@@ -58,7 +58,7 @@ export class SandboxExecutor {
   /** 执行命令（自动选择对应平台的沙箱实现，vfs-guard 作为通用降级方案） */
   async execute(command: string, cwd?: string): Promise<SandboxResult> {
     if (this.mode === 'danger-full-access') {
-      throw new Error('danger-full-access 模式需要显式确认，请设置环境变量 CODE_AGENT_DANGER_MODE=1');
+      throw new Error('danger-full-access 模式需要显式确认，请设置环境变量 CUSTOMIZE_AGENT_DANGER_MODE=1');
     }
     // vfs-guard：纯 JS 路径虚拟沙箱（跨平台通用降级方案）
     if (this.mode === 'vfs-guard') {
@@ -68,7 +68,7 @@ export class SandboxExecutor {
       return this._executeSeatbelt(command, cwd);
     }
     if (process.platform === 'linux') {
-      return this._executeLandlockBwrap(command, cwd);
+      return this._executeBwrap(command, cwd);
     }
     // 未知平台 → 自动降级 vfs-guard
     return this._executeVfsGuard(command, cwd);
@@ -196,7 +196,7 @@ export class SandboxExecutor {
   }
 
   /** Linux Bubblewrap 实现 — 内核级 namespace 隔离 */
-  private async _executeLandlockBwrap(command: string, cwd?: string): Promise<SandboxResult> {
+  private async _executeBwrap(command: string, cwd?: string): Promise<SandboxResult> {
     const root = this.workspaceRoot;
     // 根据模式选择只读绑定或可写绑定（二选一，不重复，修复 v2 重复挂载 bug）
     const bindFlag = this.mode === 'workspace-write' ? '--bind' : '--ro-bind';

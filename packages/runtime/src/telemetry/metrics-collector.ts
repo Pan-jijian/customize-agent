@@ -15,7 +15,7 @@ export interface MetricsSnapshot {
   providerCalls: Record<string, { count: number; totalLatencyMs: number }>;
   /** 安全指标 */
   approvalCount: number;
-  approvalDenyRate: number;
+  approvalDenialRate: number;
 }
 
 /**
@@ -101,7 +101,7 @@ export class MetricsCollector {
       toolCalls,
       providerCalls,
       approvalCount: this._approvalCount,
-      approvalDenyRate: this._approvalCount > 0 ? this._denialCount / this._approvalCount : 0,
+      approvalDenialRate: this._approvalCount > 0 ? this._denialCount / this._approvalCount : 0,
     };
   }
 

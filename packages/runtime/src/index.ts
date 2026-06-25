@@ -11,9 +11,9 @@ import {
   type Checkpoint,
   type RuntimeConfig,
   type TaskResult,
-} from '@code-agent/types';
+} from '@customize-agent/types';
 
-// ── 从 @code-agent/types 重导出纯类型定义 ──
+// ── 从 @customize-agent/types 重导出纯类型定义 ──
 export type {
   LifecycleAware,
   ComponentStatus,
@@ -138,7 +138,7 @@ export async function shutdownComponents(states: ComponentState[]): Promise<void
   }
 }
 
-// Session / TaskState — 从 @code-agent/types 重导出，runtime 仅保留值实现
+// Session / TaskState — 从 @customize-agent/types 重导出，runtime 仅保留值实现
 
 // ── 状态机 (StateMachine) ──
 
@@ -161,6 +161,7 @@ const transitions: TransitionMap = {
   },
   [TaskState.EXECUTING]: {
     execution_complete: TaskState.TESTING,
+    task_finish: TaskState.FINISHED,
     subtask_dispatch: TaskState.WAIT_SUBTASK,
     error: TaskState.FAILED,
     cancel: TaskState.CANCELLED,
@@ -414,4 +415,12 @@ export class ExecutionContext {
   }
 }
 
-// Checkpoint / RuntimeConfig / TaskResult — 已从 @code-agent/types 重导出
+// AgentRuntime + Reconciliation — 运行时核心实现
+export { AgentRuntime } from './agent-runtime.js';
+export { reconcile, type ReconciliationResult } from './reconciliation.js';
+
+// Telemetry — 审计日志 + 遥测指标（已从独立包合并到 runtime）
+export { AuditLogger, type AuditEvent, type AuditEventType, type SessionMetadata, type SessionEntry } from './telemetry/audit-logger.js';
+export { MetricsCollector, type MetricsSnapshot } from './telemetry/metrics-collector.js';
+
+// Checkpoint / RuntimeConfig / TaskResult — 已从 @customize-agent/types 重导出

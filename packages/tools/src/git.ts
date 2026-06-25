@@ -1,5 +1,5 @@
 import { execa } from 'execa';
-import { TerminalTool } from '../terminal/shell.js';
+import { TerminalTool } from './terminal-shell.js';
 
 /** Git 工具 — 封装通用 Git 操作供 Agent 调用 */
 export class GitTool {

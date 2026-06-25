@@ -1,15 +1,8 @@
-import type { ILLMProvider } from '@code-agent/llm';
+import type { ILLMProvider } from '@customize-agent/llm';
 import type { ToolRegistry } from '../../tools/registry.js';
-import type { Capability } from '../../security/capability.js';
+import type { Capability, SubagentRole } from '../../security/capability.js';
 
-/** 子智能体角色（静态定义，不可动态发明） */
-export type SubagentRole =
-  | 'explorer'
-  | 'planner'
-  | 'implementer'
-  | 'reviewer'
-  | 'tester'
-  | 'conflictResolver';
+export type { SubagentRole };
 
 /** 子智能体配置 */
 export interface SubagentConfig {
@@ -52,6 +45,8 @@ export interface SubagentResult {
 
 /** 子智能体执行任务 */
 export interface SubagentTask {
+  /** 唯一任务标识（用于依赖引用） */
+  id: string;
   /** 任务描述 */
   description: string;
   /** 依赖的前置任务 ID */

@@ -7,11 +7,11 @@ export interface SearchResult {
   /** 符号类型（Function/Class/Interface 等） */
   kind: string;
   /** 所在文件路径 */
-  file_path: string;
+  filePath: string;
   /** 起始行号 */
-  start_line: number;
+  startLine: number;
   /** 结束行号 */
-  end_line: number;
+  endLine: number;
   /** FTS5 全文搜索专用：匹配片段（高亮） */
   snippet?: string;
 }
@@ -153,7 +153,7 @@ export class StorageManager {
   /** 按符号名 LIKE 搜索（简单场景保留） */
   searchSymbol(name: string): SearchResult[] {
     const stmt = this.db.prepare(`
-      SELECT name, kind, file_path, start_line, end_line
+      SELECT name, kind, file_path as filePath, start_line as startLine, end_line as endLine
       FROM symbols
       WHERE name LIKE ?
       LIMIT 20
@@ -167,9 +167,9 @@ export class StorageManager {
       SELECT
         s.name,
         s.kind,
-        s.file_path,
-        s.start_line,
-        s.end_line,
+        s.file_path as filePath,
+        s.start_line as startLine,
+        s.end_line as endLine,
         snippet(symbols_fts, 1, '<mark>', '</mark>', '...', 32) AS snippet
       FROM symbols_fts fts
       JOIN symbols s ON s.rowid = fts.rowid

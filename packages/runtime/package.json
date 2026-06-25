@@ -1,5 +1,5 @@
 {
-  "name": "@code-agent/runtime",
+  "name": "@customize-agent/runtime",
   "version": "1.0.0",
   "description": "Agent Runtime - unified scheduling layer for all entry points",
   "main": "./dist/index.js",
@@ -10,7 +10,7 @@
     "lint": "eslint src/"
   },
   "dependencies": {
-    "@code-agent/types": "workspace:*"
+    "@customize-agent/types": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^25.9.3"

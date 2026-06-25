@@ -1,5 +1,5 @@
 import type OpenAI from 'openai';
-import type { Message } from '@code-agent/types';
+import type { Message, FunctionDefinition } from '@customize-agent/types';
 
 /** 将内部 Message 数组转为 OpenAI SDK 兼容的消息格式 */
 export function toOpenAIMessages(
@@ -26,6 +26,20 @@ export function toOpenAIMessages(
   });
 }
 
+/** 将内部 FunctionDefinition[] 转为 OpenAI tools 格式 */
+export function toOpenAITools(
+  tools: FunctionDefinition[],
+): OpenAI.Chat.Completions.ChatCompletionTool[] {
+  return tools.map(t => ({
+    type: 'function' as const,
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    },
+  }));
+}
+
 /** OpenAI SDK 通用健康检查：调用 models.list 验证 API 连通性 */
 export async function openAIHealthCheck(client: OpenAI): Promise<boolean> {
   try {
@@ -36,14 +50,3 @@ export async function openAIHealthCheck(client: OpenAI): Promise<boolean> {
   }
 }
 
-/** 已知二进制文件扩展名（read_file 不可读取） */
-export const BINARY_EXTENSIONS = new Set([
-  'pdf', 'png', 'jpg', 'jpeg', 'gif', 'ico', 'svg',
-  'woff', 'woff2', 'ttf', 'eot',
-  'db', 'db-shm', 'db-wal', 'lock', 'log', 'map',
-  'min.js', 'min.css',
-  'docx', 'xlsx', 'pptx',
-  'zip', 'tar', 'gz', 'bz2', '7z',
-  'mp3', 'mp4', 'avi', 'mov', 'webm', 'webp',
-  'wasm',
-]);

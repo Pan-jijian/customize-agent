@@ -1,5 +1,5 @@
-import Parser, { type SyntaxNode } from 'tree-sitter';
-import { getLanguageConfig } from '@code-agent/codex';
+import Parser from 'tree-sitter';
+import { getLanguageConfig, collectAstErrors } from '@customize-agent/codex';
 
 export interface ValidationError {
   line: number;
@@ -35,25 +35,11 @@ export class UnifiedSyntaxValidator {
     parser.setLanguage(lang.grammar);
     const tree = parser.parse(content);
 
-    const errors: ValidationError[] = [];
-
-    function walk(node: SyntaxNode): void {
-      if (node.type === 'ERROR' || node.isMissing) {
-        errors.push({
-          line: node.startPosition.row + 1,
-          column: node.startPosition.column + 1,
-          message: node.isMissing
-            ? `Missing element at line ${node.startPosition.row + 1}`
-            : `Syntax error: unexpected '${node.text.slice(0, 60)}'`,
-          severity: 'error',
-        });
-      }
-      for (const child of node.children) {
-        walk(child);
-      }
-    }
-
-    walk(tree.rootNode);
+    const rawErrors = collectAstErrors(tree.rootNode, 60);
+    const errors: ValidationError[] = rawErrors.map(e => ({
+      ...e,
+      severity: 'error',
+    }));
 
     return {
       valid: errors.length === 0,

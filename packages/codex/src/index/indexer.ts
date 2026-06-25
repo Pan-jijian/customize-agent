@@ -3,6 +3,7 @@ import Parser, { type SyntaxNode } from 'tree-sitter';
 import type { StorageManager } from './db.js';
 import { getLanguageConfig, type LanguageConfig } from './languages.js';
 import type { TreeSitterWorkerPool } from './pool.js';
+import { extractSymbolName, friendlyKind } from './ast-utils.js';
 
 /** 索引器配置选项 */
 export interface IndexOptions {
@@ -74,12 +75,12 @@ export class RepositoryIndexer {
     onSymbol: (sym: { name: string; kind: string; startLine: number; endLine: number }) => void,
   ): void {
     if (lang.symbolNodeTypes.includes(node.type)) {
-      const name = this._extractName(node, lang);
+      const name = extractSymbolName(node);
       if (name) {
         for (const singleName of name.split(', ')) {
           onSymbol({
             name: singleName.trim(),
-            kind: this._friendlyKind(node.type),
+            kind: friendlyKind(node.type),
             startLine: node.startPosition.row + 1,
             endLine: node.endPosition.row + 1,
           });
@@ -92,80 +93,4 @@ export class RepositoryIndexer {
     }
   }
 
-  /** 从 AST 节点中提取符号名（name 字段 → identifier → variable_declarator → C/C++ declarator） */
-  private _extractName(node: SyntaxNode, _lang: LanguageConfig): string | null {
-    // 优先查找 name 字段或 identifier 子节点
-    const nameNode =
-      node.childForFieldName('name') ??
-      node.descendantsOfType('identifier')[0] ??
-      node.descendantsOfType('property_identifier')[0] ??
-      node.descendantsOfType('type_identifier')[0];
-
-    if (nameNode) return nameNode.text;
-
-    // 变量声明 → 提取 variable_declarator 的名称
-    const declarators = node.descendantsOfType('variable_declarator');
-    if (declarators.length > 0) {
-      return declarators
-        .map(d => d.childForFieldName('name') ?? d.descendantsOfType('identifier')[0])
-        .filter(Boolean)
-        .map(n => n!.text)
-        .join(', ');
-    }
-
-    // C/C++ function_definition → 从 function_declarator 提取 identifier
-    const declarator = node.childForFieldName('declarator');
-    if (declarator) {
-      const id = declarator.descendantsOfType('identifier')[0] ??
-                declarator.descendantsOfType('field_identifier')[0];
-      if (id) return id.text;
-    }
-
-    return null;
-  }
-
-  /** AST 节点类型 → 人类可读的符号分类名 */
-  private _friendlyKind(nodeType: string): string {
-    const map: Record<string, string> = {
-      function_declaration: 'Function',
-      function_definition: 'Function',
-      function_item: 'Function',
-      method_definition: 'Method',
-      method_declaration: 'Method',
-      class_declaration: 'Class',
-      class_definition: 'Class',
-      class_specifier: 'Class',
-      interface_declaration: 'Interface',
-      struct_item: 'Struct',
-      struct_specifier: 'Struct',
-      enum_declaration: 'Enum',
-      enum_item: 'Enum',
-      enum_specifier: 'Enum',
-      trait_item: 'Trait',
-      trait_declaration: 'Trait',
-      variable_declaration: 'Variable',
-      lexical_declaration: 'Variable',
-      const_declaration: 'Constant',
-      const_item: 'Constant',
-      static_item: 'Static',
-      type_declaration: 'Type',
-      type_alias_declaration: 'Type',
-      type_definition: 'Type',
-      namespace_definition: 'Namespace',
-      module: 'Module',
-      mod_item: 'Module',
-      macro_definition: 'Macro',
-      export_statement: 'Export',
-      impl_item: 'Impl',
-      field_declaration: 'Field',
-      public_field_definition: 'Field',
-      constructor_declaration: 'Constructor',
-      preproc_def: 'Define',
-      abstract_class_declaration: 'AbstractClass',
-      singleton_method: 'Method',
-      template_declaration: 'Template',
-      union_specifier: 'Union',
-    };
-    return map[nodeType] ?? nodeType;
-  }
 }
