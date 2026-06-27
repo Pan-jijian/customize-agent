@@ -48,7 +48,8 @@
     "CJK",
     "tokyo",
     "Bubblewrap",
-    "backtrack"
+    "backtrack",
+    "subcmd"
   ],
   "ignorePaths": [
     "pnpm-lock.yaml",

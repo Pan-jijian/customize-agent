@@ -3,8 +3,10 @@ import type { ToolRegistry, PermissionEngine, ExecutionController, ContextManage
 import { ContextManager as ContextManagerImpl } from '@customize-agent/engine';
 import type { Message, ToolCall } from '@customize-agent/types';
 import type { I18nManager } from '../i18n/manager.js';
-import { AUTONOMOUS_SYSTEM_PROMPT } from './prompt.js';
+import { buildSystemPrompt } from './prompt.js';
 import { t, taskComplete, taskWarning, toolCallStart, toolCallEnd, renderDiff, contextCompacting, contextCompacted, contextStats, spinnerStart } from '../tui/renderer.js';
+import { readFileSync, existsSync } from 'fs';
+import { resolve } from 'path';
 
 /** 不截断输出的工具（完整内容保留） */
 const NO_TRUNCATE_TOOLS = new Set(['read_file', 'modify_file', 'list_files', 'search_symbol', 'web_search', 'git_status', 'git_diff']);
@@ -24,6 +26,7 @@ export interface ExecutorConfig {
   contextManager?: ContextManager;
   approvalHandler?: ApprovalHandler;
   i18n?: I18nManager;
+  projectRoot?: string;
   maxIterations?: number;
   stream?: boolean;
 }
@@ -36,9 +39,9 @@ export class AgentExecutor {
   private contextManager: ContextManager;
   private approvalHandler?: ApprovalHandler;
   private i18n: I18nManager | undefined;
+  private projectRoot: string;
   private maxIterations: number;
   private stream: boolean;
-  private systemPrompt: string;
 
   constructor(config: ExecutorConfig) {
     this.provider = config.provider;
@@ -48,12 +51,16 @@ export class AgentExecutor {
     this.contextManager = config.contextManager ?? new ContextManagerImpl();
     this.approvalHandler = config.approvalHandler;
     this.i18n = config.i18n;
+    this.projectRoot = config.projectRoot ?? process.cwd();
     this.maxIterations = config.maxIterations ?? 200;
     this.stream = config.stream ?? true;
-    this.systemPrompt = AUTONOMOUS_SYSTEM_PROMPT;
   }
 
-  getSystemPrompt(): string { return this.systemPrompt; }
+  getSystemPrompt(): string {
+    const customizePath = resolve(this.projectRoot, 'CUSTOMIZE.md');
+    const content = existsSync(customizePath) ? readFileSync(customizePath, 'utf-8') : undefined;
+    return buildSystemPrompt(content);
+  }
   get providerName(): string { return `${this.provider.name}/${this.provider.modelName}`; }
 
   /** 最后一次 LLM 调用消耗的 prompt token 数 */
@@ -68,9 +75,9 @@ export class AgentExecutor {
     const limit = this.provider.capabilities.maxContextTokens;
     const before = this._lastPromptTokens;
     if (!this.contextManager.shouldWarn(before, limit)) return false;
-    process.stdout.write(contextCompacting(this.i18n?.t('context.compacting', { pct: String(Math.round(before / limit * 100)), usedK: String(Math.round(before / 1000)), limitK: String(Math.round(limit / 1000)) }) ?? 'Compacting…'));
+    process.stdout.write(contextCompacting(this.i18n?.t('context.compacting', { pct: String(Math.round(before / limit * 100)), usedK: String(Math.round(before / 1000)), limitK: String(Math.round(limit / 1000)) }) ?? '…'));
     const { newTokens } = await this.contextManager.compactMessages(working, this.provider, before);
-    process.stdout.write(contextCompacted(this.i18n?.t('context.compacted', { removedK: String(Math.round((before - newTokens) / 1000)), currentK: String(Math.round(newTokens / 1000)) }) ?? 'Compacted.'));
+    process.stdout.write(contextCompacted(this.i18n?.t('context.compacted', { removedK: String(Math.round((before - newTokens) / 1000)), currentK: String(Math.round(newTokens / 1000)) }) ?? '✓'));
     this._lastPromptTokens = newTokens;
     return true;
   }
@@ -144,11 +151,11 @@ export class AgentExecutor {
 
     if (ctxMgr.shouldWarn(tokens, limit)) {
       if (tokens > limit * 0.85 || tokens > limit * 0.75) {
-        process.stdout.write(contextCompacting(this.i18n?.t('context.compacting', { pct: String(Math.round(tokens / limit * 100)), usedK: String(Math.round(tokens / 1000)), limitK: String(Math.round(limit / 1000)) }) ?? 'Compacting…'));
+        process.stdout.write(contextCompacting(this.i18n?.t('context.compacting', { pct: String(Math.round(tokens / limit * 100)), usedK: String(Math.round(tokens / 1000)), limitK: String(Math.round(limit / 1000)) }) ?? '…'));
         const { didCompact, newTokens } = await ctxMgr.compactMessages(working, this.provider, tokens);
         if (didCompact) {
           this._lastPromptTokens = newTokens;
-          process.stdout.write(contextCompacted(this.i18n?.t('context.compacted', { removedK: String(Math.round((tokens - newTokens) / 1000)), currentK: String(Math.round(newTokens / 1000)) }) ?? 'Compacted.'));
+          process.stdout.write(contextCompacted(this.i18n?.t('context.compacted', { removedK: String(Math.round((tokens - newTokens) / 1000)), currentK: String(Math.round(newTokens / 1000)) }) ?? '✓'));
         }
       } else {
         process.stdout.write(contextStats(tokens, limit, this.i18n?.t('context.usage')) + '\n');
@@ -161,7 +168,7 @@ export class AgentExecutor {
     tools: FunctionDefinition[],
   ): Promise<{ content: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } }> {
     if (this.stream) return this._streamChat(messages, tools);
-    const stop = spinnerStart();
+    const stop = spinnerStart(this.i18n?.t('stream.thinking'));
     const response = await this.provider.chat(messages, { tools });
     stop();
     const displayContent = response.content.replace(/<task_finish>[\s\S]*?<\/task_finish>/g, '').trim();
@@ -176,7 +183,7 @@ export class AgentExecutor {
     let content = '';
     const toolCalls: ToolCall[] = [];
     // spinner 在第一个 chunk 到达时停止
-    const stopSpinner = spinnerStart();
+    const stopSpinner = spinnerStart(this.i18n?.t('stream.thinking'));
     let spinnerStopped = false;
     let firstThink = true;
     // <task_finish> 标签过滤缓冲区（仅用于展示过滤，不影响 content 累积）

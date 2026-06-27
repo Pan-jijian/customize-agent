@@ -15,6 +15,7 @@ import {
   renderFileDropdown, renderCommandMenu, hintText,
 } from './renderer.js';
 import type { Mode } from './renderer.js';
+import { FileIndex } from './file-index.js';
 
 // ── 类型定义 ──
 export interface DropdownItem { label: string; detail?: string; data: string; }
@@ -30,7 +31,7 @@ export interface TuiLabels {
 }
 
 export interface TuiConfig {
-  files: string[]; projectRoot: string;
+  projectRoot: string;
   commands?: Array<{ name: string; desc: string }>;
   labels?: TuiLabels;
   prompt?: string; mode?: Mode; history?: string[];
@@ -54,7 +55,6 @@ function displayWidth(s: string): number {
   let w = 0;
   for (const ch of s) {
     const cp = ch.codePointAt(0) ?? 0;
-    // 2-column ranges: CJK + Fullwidth + arrows + misc symbols
     if (cp >= 0x2E80 && cp <= 0x9FFF) { w += 2; }
     else if (cp >= 0x3400 && cp <= 0x4DBF) { w += 2; }
     else if (cp >= 0xFF00 && cp <= 0xFFEF) { w += 2; }
@@ -71,7 +71,7 @@ const CSI = '\x1b[';
 
 // ── TuiInput 类 ──
 export class TuiInput {
-  private files: string[];
+  private fileIndex: FileIndex;
   private root: string;
   private cmds: Array<{ name: string; desc: string }>;
   private prompt: string;
@@ -83,8 +83,8 @@ export class TuiInput {
   private labels: TuiLabels;
 
   constructor(cfg: TuiConfig) {
-    this.files = cfg.files;
     this.root = cfg.projectRoot;
+    this.fileIndex = new FileIndex(cfg.projectRoot);
     this.cmds = cfg.commands ?? [];
     this.prompt = cfg.prompt ?? '➜';
     this.mode = cfg.mode ?? 'AGENT';
@@ -270,14 +270,7 @@ export class TuiInput {
     const partial = st.text.slice(at + 1, wordEnd).toLowerCase();
     if (!partial) { this._draw(st); return; }
 
-    const m = this.files
-      .filter(f => f.toLowerCase().includes(partial))
-      .sort((a, b) => {
-        const ap = a.toLowerCase().startsWith(partial);
-        if (ap !== (b.toLowerCase().startsWith(partial))) return ap ? -1 : 1;
-        return a.length - b.length;
-      })
-      .slice(0, 8);
+    const m = this.fileIndex.search(partial, 8);
 
     if (!m.length) { this._draw(st); return; }
 

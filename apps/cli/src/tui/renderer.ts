@@ -37,22 +37,10 @@ export const s = {
   underline: (t: string) => `${CSI}4m${t}${CSI}24m`,
 };
 
-export const cur = {
-  hide:       `${CSI}?25l`,
-  show:       `${CSI}?25h`,
-  up:         (n = 1) => `${CSI}${n}A`,
-  down:       (n = 1) => `${CSI}${n}B`,
-  fwd:        (n = 1) => `${CSI}${n}C`,
-  clearLine:  `${CSI}2K`,
-  clearBelow: `${CSI}0J`,
-  save:       `${CSI}s`,
-  restore:    `${CSI}u`,
-};
-
 // ── 框线字符 ──
 const B = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
 
-export function tw(): number {
+function tw(): number {
   return Math.max(60, Math.min(process.stdout.columns ?? 80, 200));
 }
 
@@ -109,10 +97,6 @@ export const msg = {
   success: (text: string, title?: string) => _msgBox('success', text, title),
 };
 
-// ── 兼容旧 API（逐步迁移）──
-export function infoMsg(text: string): string { return msg.info(text); }
-export function errorMsg(text: string): string { return msg.error(text); }
-
 // ── 欢迎横幅 ──
 export function welcomeBanner(version: string, provider: string, opts?: {
   title?: string; providerLabel?: string; startHint?: string; usageHints?: string; configHint?: string;
@@ -161,12 +145,11 @@ export function welcomeBanner(version: string, provider: string, opts?: {
     out.push(pad(''));
   }
 
-  out.push(center(`${t.success('▶')}  ${s.bold(t.text(startHint))}`));
-  out.push(center(`${t.accent('@')} ${s.bold(t.dim(usageHints))}`));
+  out.push(center(`${t.success('▶')}  ${s.bold(t.text(startHint))}   ${t.accent('@')} ${s.bold(t.dim(usageHints))}`));
+  out.push('');
 
-  // ═══ bottom border ═══
-  const botB = t.dim('╰' + '─'.repeat(W - 4) + '╯');
-  out.push(botB);
+  // bottom border
+  out.push(t.dim('╰' + '─'.repeat(W - 4) + '╯'));
 
   return '\n' + out.join('\n') + '\n';
 }
@@ -341,7 +324,6 @@ function visibleLen(s: string): number {
   let w = 0;
   for (const ch of clean) {
     const cp = ch.codePointAt(0) ?? 0;
-    // 2-column ranges: CJK + Fullwidth + arrows (↑↓) + misc symbols (⚡◆▶)
     if (cp >= 0x2E80 && cp <= 0x9FFF) { w += 2; }          // CJK Unified
     else if (cp >= 0x3400 && cp <= 0x4DBF) { w += 2; }     // CJK Ext-A
     else if (cp >= 0xFF00 && cp <= 0xFFEF) { w += 2; }     // Fullwidth forms
@@ -353,4 +335,3 @@ function visibleLen(s: string): number {
   return w;
 }
 
-export { visibleLen };

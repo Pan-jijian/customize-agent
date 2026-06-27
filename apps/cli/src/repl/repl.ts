@@ -3,28 +3,23 @@ import * as path from 'path';
 import type { Message } from '@customize-agent/types';
 import type { AgentExecutor } from '../agent/executor.js';
 import { TuiInput } from '../tui/input.js';
-import { welcomeBanner, t, s, divider, errorMsg, infoMsg, contextStats } from '../tui/renderer.js';
+import { welcomeBanner, t, s, divider, msg, contextStats } from '../tui/renderer.js';
 import type { MemoryManager } from '@customize-agent/memory';
 import { BINARY_EXTENSIONS } from '@customize-agent/types';
 import type { ConfigStore, ModelRegistry, ModelTier } from '@customize-agent/runtime';
+import { resolveProtocol } from '@customize-agent/runtime';
 import type { I18nManager } from '../i18n/manager.js';
-
-const TIER_LABELS: Record<ModelTier, string> = {
-  reader: 'Reader',
-  reasoning: 'Reasoning',
-  action: 'Action',
-};
 
 /** REPL 配置 */
 export interface ReplConfig {
   executor: AgentExecutor;
-  files: string[];
   projectRoot: string;
   commands?: Array<{ name: string; desc: string }>;
   memory?: MemoryManager;
   i18n: I18nManager;
   configStore: ConfigStore;
   modelRegistry: ModelRegistry;
+  providerDisplay?: string;
 }
 
 /** @file 引用正则（排除邮箱地址：前面必须为空白或行首） */
@@ -36,13 +31,14 @@ const MAX_INLINE_SIZE = 500_000;
  */
 export class Repl {
   public executor: AgentExecutor;
-  private tui: TuiInput;
+  private tui!: TuiInput;
   private history: Message[];
   private root: string;
   private memory?: MemoryManager;
   private i18n: I18nManager;
   private configStore: ConfigStore;
   private modelRegistry: ModelRegistry;
+  private providerDisplay: string | undefined;
 
   constructor(config: ReplConfig) {
     this.executor = config.executor;
@@ -51,49 +47,14 @@ export class Repl {
     this.i18n = config.i18n;
     this.configStore = config.configStore;
     this.modelRegistry = config.modelRegistry;
+    this.providerDisplay = config.providerDisplay;
     this.history = [{ role: 'system', content: this.executor.getSystemPrompt() }];
-    const cmds = config.commands ?? [
-      { name: '/plan',     desc: this.i18n.t('help.plan') },
-      { name: '/clear',    desc: this.i18n.t('help.clear') },
-      { name: '/sessions', desc: this.i18n.t('help.sessions') },
-      { name: '/model',    desc: this.i18n.t('help.model') },
-      { name: '/language', desc: this.i18n.t('help.language') },
-      { name: '/help',     desc: this.i18n.t('help.help') },
-      { name: '/exit',     desc: this.i18n.t('help.exit') },
-    ];
-    this.tui = new TuiInput({
-      files: config.files,
-      projectRoot: config.projectRoot,
-      commands: cmds,
-      labels: {
-        filesHeader: this.i18n.t('dropdown.files_header'),
-        commandsHeader: this.i18n.t('dropdown.commands_header'),
-        more: (n: number) => this.i18n.t('dropdown.more', { count: String(n) }),
-        hintTab: this.i18n.t('hint.tab_select'),
-        hintNavigate: this.i18n.t('hint.arrow_navigate'),
-        hintConfirm: this.i18n.t('hint.enter_confirm'),
-        hintDismiss: this.i18n.t('hint.esc_dismiss'),
-        hintSep: this.i18n.t('hint.separator'),
-      },
-      prompt: '➜',
-      mode: 'AGENT',
-    });
+    this._buildTui(config.commands);
   }
 
   /** 启动 REPL */
   async start(): Promise<void> {
-    // 首次进入提示配置
-    const config = this.configStore.load();
-    const hasModels = config.models.reader.list.length > 0
-                   || config.models.reasoning.list.length > 0
-                   || config.models.action.list.length > 0;
-    process.stdout.write(welcomeBanner('0.0.3', this.executor.providerName, {
-      title: this.i18n.t('welcome.title'),
-      providerLabel: this.i18n.t('welcome.provider_label'),
-      startHint: this.i18n.t('welcome.start_hint'),
-      usageHints: this.i18n.t('welcome.usage_hints'),
-      configHint: hasModels ? undefined : this.i18n.t('cmd.first_config'),
-    }));
+    this._redrawBanner();
 
     while (true) {
       const input = await this.tui.read();
@@ -207,7 +168,7 @@ export class Repl {
       }
       process.stdout.write('\n');
     } catch (err) {
-      process.stdout.write(errorMsg((err as Error).message));
+      process.stdout.write(msg.error((err as Error).message));
       this.history.pop();
     }
   }
@@ -224,19 +185,16 @@ export class Repl {
 
       case '/language': {
         if (args === 'zh' || args === 'en') {
-          this.i18n.setLanguage(args);
-          this.configStore.set('language', args);
-          process.stdout.write(t.success(`${this.i18n.t('cmd.language_changed')} ${args}\n\n`));
+          this._switchLanguage(args);
+          process.stdout.write(t.success(this.i18n.t('cmd.language_changed', { lang: args }) + '\n\n'));
         } else {
-          // 无参数或无效 → 弹出语言选择面板
-          this._showLanguageSelector();
+          await this._showLanguageSelector();
         }
         return false;
       }
 
-      case '/model': {
-        return this._handleModelCommand(args);
-      }
+      case '/model': return this._handleModelCommand(args);
+      case '/provider': return this._handleProviderCommand(args);
 
       case '/compact': {
         const compacted = await this.executor.compactContext(this.history);
@@ -283,14 +241,14 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
       case '/plan': {
         if (!args) { process.stdout.write(t.warning(this.i18n.t('cmd.plan_usage') + '\n\n')); return false; }
         process.stdout.write('\n' + divider(this.i18n.t('plan.banner')) + '\n');
-        process.stdout.write(infoMsg(args) + '\n\n');
+        process.stdout.write(msg.info(args) + '\n\n');
         const prompt = `Create an execution plan (read-only, do not modify files).\n\nTask: ${args}\n\nOutput the plan and end with <task_finish>.`;
         this.history.push({ role: 'user', content: prompt });
         try {
           const u = await this.executor.runTask(this.history, { readonly: true });
           this.history.length = 0; this.history.push(...u);
         } catch (err) {
-          process.stdout.write(errorMsg((err as Error).message));
+          process.stdout.write(msg.error((err as Error).message));
           this.history.pop();
         }
         process.stdout.write('\n' + divider(this.i18n.t('plan.complete')) + '\n\n');
@@ -303,166 +261,203 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
     }
   }
 
-  /**
-   * /model 命令处理器。
-   *
-   * /model list                          — 显示所有层模型配置
-   * /model add <tier> <provider> <name>  — 添加模型到指定层
-   * /model set <tier> <name>             — 切换该层激活模型
-   * /model rm <tier> <name>              — 移除模型
-   * /model fallback                      — 查看回退路径
-   */
+  // ── /model & /provider ──
+
   private _handleModelCommand(args: string): boolean {
-    if (!args) {
-      this._showModelList();
-      return false;
-    }
-
+    if (!args) { this._showModelView(); return false; }
     const parts = args.split(/\s+/);
-    const sub = parts[0]!;
-    const rest = parts.slice(1);
-
+    const sub = parts[0]!; const rest = parts.slice(1);
     switch (sub) {
-      case 'list': this._showModelList(); return false;
-
       case 'add': {
-        if (rest.length < 3) {
-          process.stdout.write(t.warning(this.i18n.t('model.add_usage') + '\n\n'));
-          return false;
-        }
+        if (rest.length < 3) { process.stdout.write(t.warning(this.i18n.t('model.add_usage')+'\n\n')); return false; }
         const tier = rest[0]! as ModelTier;
-        if (!TIER_LABELS[tier]) {
-          process.stdout.write(t.error(this.i18n.t('model.invalid_tier', { tier }) + '\n\n'));
-          return false;
-        }
-        const provider = rest[1]!;
-        const name = rest.slice(2).join(' ');
-        this.configStore.addModel(tier, { name, provider });
-        process.stdout.write(t.success(this.i18n.t('model.added', { name, provider, tier: TIER_LABELS[tier]! }) + '\n\n'));
+        if (!['reader','reasoning','action'].includes(tier)) { process.stdout.write(t.error(this.i18n.t('model.invalid_tier',{tier})+'\n\n')); return false; }
+        const prov = rest[1]!; const name = rest.slice(2).join(' ');
+        this.configStore.addModel(tier, { name, provider: prov });
+        process.stdout.write(t.success(this.i18n.t('model.added',{name,provider:prov,tier:this.i18n.t('tier.'+tier)||tier})+'\n\n'));
         return false;
       }
-
       case 'set': {
-        if (rest.length < 2) {
-          process.stdout.write(t.warning(this.i18n.t('model.set_usage') + '\n\n'));
-          return false;
-        }
+        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('model.set_usage')+'\n\n')); return false; }
         const tier = rest[0]! as ModelTier;
-        if (!TIER_LABELS[tier]) {
-          process.stdout.write(t.error(this.i18n.t('model.invalid_tier', { tier }) + '\n\n'));
-          return false;
-        }
+        if (!['reader','reasoning','action'].includes(tier)) { process.stdout.write(t.error(this.i18n.t('model.invalid_tier',{tier})+'\n\n')); return false; }
         const name = rest.slice(1).join(' ');
         this.configStore.setActiveModel(tier, name);
-        process.stdout.write(t.success(this.i18n.t('model.active_set', { tier: TIER_LABELS[tier]!, name }) + '\n\n'));
+        process.stdout.write(t.success(this.i18n.t('model.active_set',{tier:this.i18n.t('tier.'+tier)||tier,name})+'\n\n'));
         return false;
       }
-
       case 'rm': {
-        if (rest.length < 2) {
-          process.stdout.write(t.warning(this.i18n.t('model.rm_usage') + '\n\n'));
-          return false;
-        }
+        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('model.rm_usage')+'\n\n')); return false; }
         const tier = rest[0]! as ModelTier;
-        if (!TIER_LABELS[tier]) {
-          process.stdout.write(t.error(this.i18n.t('model.invalid_tier', { tier }) + '\n\n'));
-          return false;
-        }
+        if (!['reader','reasoning','action'].includes(tier)) { process.stdout.write(t.error(this.i18n.t('model.invalid_tier',{tier})+'\n\n')); return false; }
         const name = rest.slice(1).join(' ');
         this.configStore.removeModel(tier, name);
-        process.stdout.write(t.success(this.i18n.t('model.removed', { name, tier: TIER_LABELS[tier]! }) + '\n\n'));
+        process.stdout.write(t.success(this.i18n.t('model.removed',{name,tier:this.i18n.t('tier.'+tier)||tier})+'\n\n'));
         return false;
       }
-
       case 'key': {
-        if (rest.length < 3) {
-          process.stdout.write(t.warning(this.i18n.t('model.key_usage') + '\n\n'));
-          return false;
-        }
-        const tier = rest[0]! as ModelTier;
-        if (!TIER_LABELS[tier]) {
-          process.stdout.write(t.error(this.i18n.t('model.invalid_tier', { tier }) + '\n\n'));
-          return false;
-        }
-        const name = rest[1]!;
-        const apiKey = rest.slice(2).join(' ');
-        try {
-          this.configStore.setModelKey(tier, name, apiKey);
-          const masked = apiKey.slice(0, 8) + '...' + apiKey.slice(-4);
-          process.stdout.write(t.success(this.i18n.t('model.key_set', { name, masked }) + '\n\n'));
-        } catch (err) {
-          process.stdout.write(t.error((err as Error).message + '\n\n'));
-        }
+        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('model.key_usage')+'\n\n')); return false; }
+        const prov = rest[0]!; const key = rest.slice(1).join(' ');
+        const cleanKey = key.trim();
+        this.configStore.setProviderKey(prov, cleanKey);
+        const masked = cleanKey.length > 10 ? cleanKey.slice(0,6) + '****' + cleanKey.slice(-4) : '****';
+        process.stdout.write(t.success(this.i18n.t('model.key_set',{provider:prov,masked})+'\n\n'));
         return false;
       }
-
-      case 'fallback': {
-        this._showFallbackChains();
-        return false;
-      }
-
-      default:
-        process.stdout.write(t.warning(this.i18n.t('model.unknown_subcmd', { sub }) + '\n\n'));
-        return false;
+      case 'fallback': { this._showFallbackChains(); return false; }
+      default: { process.stdout.write(t.warning(this.i18n.t('model.unknown_subcmd',{sub})+'\n\n')); return false; }
     }
   }
 
-  private _showModelList(): void {
-    const config = this.configStore.load();
-    const tiers: ModelTier[] = ['reader', 'reasoning', 'action'];
-
-    for (const tier of tiers) {
-      const tc = config.models[tier];
-      const resolved = this.modelRegistry.resolve(tier);
-      const activeName = tc.active || this.i18n.t('model.no_active');
-      process.stdout.write(s.bold(`${TIER_LABELS[tier]}`) + `  active: ${t.accent(activeName)}`);
-      if (resolved && resolved.name !== tc.active) {
-        process.stdout.write(t.dim(`  ${this.i18n.t('model.fallback_label')} ${resolved.name}`));
+  private _handleProviderCommand(args: string): boolean {
+    if (!args) { this._showProviderList(); return false; }
+    const parts = args.split(/\s+/);
+    const sub = parts[0]!; const rest = parts.slice(1);
+    switch (sub) {
+      case 'key': {
+        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('provider.key_usage')+'\n\n')); return false; }
+        this.configStore.setProviderKey(rest[0]!, rest.slice(1).join(' ').trim());
+        process.stdout.write(t.success(this.i18n.t('provider.key_set',{name:rest[0]!})+'\n\n'));
+        return false;
       }
-      process.stdout.write('\n');
-      if (tc.list.length === 0) {
-        process.stdout.write(t.dim('  ' + this.i18n.t('model.empty') + '\n'));
+      case 'url': {
+        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('provider.url_usage')+'\n\n')); return false; }
+        this.configStore.setProviderUrl(rest[0]!, rest.slice(1).join(' '));
+        process.stdout.write(t.success(this.i18n.t('provider.url_set',{name:rest[0]!})+'\n\n'));
+        return false;
+      }
+      case 'protocol': {
+        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('provider.protocol_usage')+'\n\n')); return false; }
+        this.configStore.setProviderProtocol(rest[0]!, rest[1]!);
+        process.stdout.write(t.success(this.i18n.t('provider.protocol_set',{name:rest[0]!,protocol:rest[1]!})+'\n\n'));
+        return false;
+      }
+      default: { process.stdout.write(t.warning(this.i18n.t('provider.unknown_subcmd',{sub})+'\n\n')); return false; }
+    }
+  }
+
+  private _showModelView(): void {
+    const cfg = this.configStore.load();
+    const tiers: ModelTier[] = ['reader','reasoning','action'];
+
+    process.stdout.write('\n');
+    for (const tier of tiers) {
+      const tc = cfg.models[tier];
+      const r = this.modelRegistry.resolve(tier);
+      const label = this.i18n.t('tier.'+tier) || tier;
+      const desc = this.i18n.t('tier.'+tier+'_desc') || '';
+      const icon = tier==='reader'?t.blue('◆'):tier==='reasoning'?t.purple('◆'):t.success('◆');
+      process.stdout.write(`  ${icon} ${s.bold(label)}  ${t.faint(desc)}\n`);
+      if (!tc.list.length) {
+        process.stdout.write(`    ${t.faint(this.i18n.t('model.empty'))}\n`);
       } else {
         for (const m of tc.list) {
-          const marker = m.name === tc.active ? t.accent(' ▶') : '  ';
-          const keyStatus = m.apiKey ? t.success(' 🔑') : '';
-          process.stdout.write(`${marker} ${m.name}  ${t.dim('@' + m.provider)}${keyStatus}\n`);
+          const mark = m.name===tc.active?t.accent('▶'):' ';
+          const keyOk = cfg.providers[m.provider]?.apiKey ? t.success('🔑') : t.faint('🔒');
+          process.stdout.write(`    ${mark} ${m.name}  ${t.dim('@'+m.provider)} ${keyOk}\n`);
         }
+      }
+      if (r && r.name!==tc.active) {
+        process.stdout.write(`    ${t.faint('→ '+this.i18n.t('model.fallback_label')+' '+r.name)}\n`);
       }
     }
     process.stdout.write('\n');
-    process.stdout.write(t.dim(this.i18n.t('model.commands_hint') + '\n\n'));
+    process.stdout.write(`  ${t.dim(this.i18n.t('model.quick_start'))}\n`);
+    process.stdout.write(`  ${t.dim(this.i18n.t('model.example_add'))}\n`);
+    process.stdout.write(`  ${t.dim(this.i18n.t('model.example_key'))}\n`);
+    process.stdout.write(`  ${t.dim(this.i18n.t('model.example_more'))}\n`);
+    process.stdout.write('\n');
+  }
+
+  private _showProviderList(): void {
+    const cfg = this.configStore.load();
+    const names = Object.keys(cfg.providers);
+    if (!names.length) { process.stdout.write(t.dim(this.i18n.t('provider.none')+'\n\n')); return; }
+    process.stdout.write('\n');
+    for (const name of names) {
+      const p = cfg.providers[name]!;
+      const proto = resolveProtocol(name, p);
+      const keyIcon = p.apiKey ? t.success('🔑') : t.faint('🔒');
+      process.stdout.write(`  ${s.bold(name)}  ${t.dim('protocol: '+proto)}  ${keyIcon}\n`);
+    }
+    process.stdout.write(`\n  ${t.dim(this.i18n.t('provider.hint'))}\n\n`);
   }
 
   private _showFallbackChains(): void {
-    const tiers: ModelTier[] = ['reader', 'reasoning', 'action'];
-    for (const tier of tiers) {
+    for (const tier of ['reader','reasoning','action'] as ModelTier[]) {
       const chain = this.modelRegistry.getFallbackChain(tier);
-      const parts = chain.map(c => `${c.model.name} ${t.dim(`(${TIER_LABELS[c.from]})`)}`);
+      const parts = chain.map(c => `${c.model.name} ${t.dim('('+this.i18n.t('tier.'+c.from)+')')}`);
       const sep = this.i18n.t('model.chain_separator');
-      process.stdout.write(`${s.bold(TIER_LABELS[tier])}: ${parts.join(sep)}\n`);
+      process.stdout.write(`${s.bold(this.i18n.t('tier.'+tier)||tier)}: ${parts.join(sep)}\n`);
     }
     process.stdout.write('\n');
   }
 
-  /** 弹出语言选择面板（TUI raw-mode） */
   private async _showLanguageSelector(): Promise<void> {
-    // 暂停 TuiInput raw mode，临时切换到 language selector 的 raw mode
-    process.stdin.pause();
-    process.stdin.removeAllListeners('keypress');
-    try { process.stdin.setRawMode(false); } catch { /* */ }
+    try {
+      if (process.stdin.isTTY) {
+        try { process.stdin.setRawMode(false); } catch { /* */ }
+      }
+      const { selectLanguage } = await import('../tui/language-selector.js');
+      const lang = await selectLanguage({
+        title: this.i18n.t('lang.select.title'),
+        prompt: this.i18n.t('lang.select.prompt'),
+        zhLabel: this.i18n.t('lang.select.zh'),
+        enLabel: this.i18n.t('lang.select.en'),
+      });
+      this._switchLanguage(lang);
+    } catch {
+      // 选择器异常，保持当前语言
+      this._redrawBanner();
+    }
+  }
 
-    const { selectLanguage } = await import('../tui/language-selector.js');
-    const lang = await selectLanguage({
-      title: this.i18n.t('lang.select.title'),
-      prompt: this.i18n.t('lang.select.prompt'),
-      zhLabel: this.i18n.t('lang.select.zh'),
-      enLabel: this.i18n.t('lang.select.en'),
+  private _buildTui(cmds?: Array<{ name: string; desc: string }>): void {
+    const defaults: Array<{ name: string; desc: string }> = [
+      { name: '/plan',     desc: this.i18n.t('help.plan') },
+      { name: '/clear',    desc: this.i18n.t('help.clear') },
+      { name: '/sessions', desc: this.i18n.t('help.sessions') },
+      { name: '/model',    desc: this.i18n.t('help.model') },
+      { name: '/provider', desc: this.i18n.t('help.provider') },
+      { name: '/language', desc: this.i18n.t('help.language') },
+      { name: '/help',     desc: this.i18n.t('help.help') },
+      { name: '/exit',     desc: this.i18n.t('help.exit') },
+    ];
+    this.tui = new TuiInput({
+      projectRoot: this.root,
+      commands: cmds ?? defaults,
+      labels: {
+        filesHeader: this.i18n.t('dropdown.files_header'),
+        commandsHeader: this.i18n.t('dropdown.commands_header'),
+        more: (n: number) => this.i18n.t('dropdown.more', { count: String(n) }),
+        hintTab: this.i18n.t('hint.tab_select'),
+        hintNavigate: this.i18n.t('hint.arrow_navigate'),
+        hintConfirm: this.i18n.t('hint.enter_confirm'),
+        hintDismiss: this.i18n.t('hint.esc_dismiss'),
+        hintSep: this.i18n.t('hint.separator'),
+      },
+      prompt: '➜',
+      mode: 'AGENT',
     });
-    this.i18n.setLanguage(lang);
-    this.configStore.set('language', lang);
+  }
 
-    process.stdout.write(t.success(`${this.i18n.t('cmd.language_changed')} ${lang}\n\n`));
+  private _switchLanguage(lang: 'zh' | 'en'): void {
+    this.i18n.setLanguage(lang);
+    this.configStore.setLanguage(lang);
+    this._buildTui();
+    this._redrawBanner();
+  }
+
+  private _redrawBanner(): void {
+    const cfg = this.configStore.load();
+    const hasModels = cfg.models.reader.list.length > 0 || cfg.models.reasoning.list.length > 0 || cfg.models.action.list.length > 0;
+    process.stdout.write(welcomeBanner('0.0.3', this.providerDisplay ?? this.executor.providerName, {
+      title: this.i18n.t('welcome.title'),
+      providerLabel: this.i18n.t('welcome.provider_label'),
+      startHint: this.i18n.t('welcome.start_hint'),
+      usageHints: this.i18n.t('welcome.usage_hints'),
+      configHint: hasModels ? undefined : this.i18n.t('cmd.first_config'),
+    }));
   }
 
   private async _sessions(): Promise<void> {
