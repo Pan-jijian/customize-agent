@@ -420,7 +420,7 @@ export { AgentRuntime } from './agent-runtime.js';
 export { reconcile, type ReconciliationResult } from './reconciliation.js';
 
 // ConfigStore — 用户配置持久化 + 模型注册中心
-export { ConfigStore, ModelRegistry, type UserConfig, type ModelTier, type ModelEntry, type TierConfig, type ModelsConfig } from './config-store.js';
+export { ConfigStore, ModelRegistry, detectProtocol, resolveProtocol, type UserConfig, type ModelTier, type ModelEntry, type TierConfig, type ModelsConfig, type ProviderConfig } from './config-store.js';
 
 // Telemetry — 审计日志 + 遥测指标（已从独立包合并到 runtime）
 export { AuditLogger, type AuditEvent, type AuditEventType, type SessionMetadata, type SessionEntry } from './telemetry/audit-logger.js';

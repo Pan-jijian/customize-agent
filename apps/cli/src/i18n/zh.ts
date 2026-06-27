@@ -23,6 +23,7 @@ const zh: Record<string, string> = {
   'welcome.goodbye': '👋 Goodbye.',
   'welcome.title': 'Customize Agent',
   'welcome.provider_label': 'Provider',
+  'welcome.no_model': '暂无添加模型',
   'welcome.start_hint': '输入任务开始',
   'welcome.usage_hints': '引用文件   / 命令   ↑↓ 历史',
 
@@ -36,6 +37,7 @@ const zh: Record<string, string> = {
   'help.clear': '重置当前会话',
   'help.sessions': '查看历史会话',
   'help.model': '模型管理',
+  'help.provider': 'Provider 管理',
   'help.language': '切换界面语言',
   'help.help': '显示帮助',
   'help.exit': '退出',
@@ -124,14 +126,29 @@ const zh: Record<string, string> = {
   'model.active_set': '✓ {tier} 激活模型设为: {name}',
   'model.rm_usage': '用法: /model rm <reader|reasoning|action> <model-name>',
   'model.removed': '✓ 已从 {tier} 移除 {name}',
-  'model.key_usage': '用法: /model key <reader|reasoning|action> <model-name> <api-key>',
-  'model.key_set': '✓ {name} API key 已设置: {masked}',
-  'model.unknown_subcmd': '未知子命令: "/model {sub}"。可用: list, add, set, rm, key, fallback',
+  'model.key_usage': '用法: /model key <provider-name> <api-key>',
+  'model.key_set': '✓ {provider} API key 已设置: {masked}',
+  'model.unknown_subcmd': '未知子命令: "/model {sub}"。可用: add, set, rm, key, fallback',
   'model.no_active': '(无)',
   'model.empty': '(空)',
   'model.commands_hint': '命令: /model add <层级> <提供商> <模型名>  |  set  |  rm  |  key  |  fallback',
   'model.fallback_label': '→ 回退:',
   'model.chain_separator': ' → ',
+  'model.quick_start': '快速开始:',
+  'model.example_add': '/model add action deepseek deepseek-v4-flash',
+  'model.example_key': '/model key deepseek sk-xxx',
+  'model.example_more': '/model set reader deepseek-v4-flash  |  rm  |  fallback',
+
+  // ── Provider 管理 ──
+  'provider.key_usage': '用法: /provider key <name> <api-key>',
+  'provider.key_set': '✓ {name} API key 已设置',
+  'provider.url_usage': '用法: /provider url <name> <base-url>',
+  'provider.url_set': '✓ {name} 端点已设置',
+  'provider.protocol_usage': '用法: /provider protocol <name> <openai|anthropic|google>',
+  'provider.protocol_set': '✓ {name} 协议设为: {protocol}',
+  'provider.unknown_subcmd': '未知子命令: "/provider {sub}"。可用: key, url, protocol',
+  'provider.none': '暂无 Provider。添加模型时会自动创建。',
+  'provider.hint': '/provider key <name> <key>  |  protocol <name> <p>  |  url <name> <url>',
 
   // ── 会话历史 ──
   'session.date_label': '日期',
@@ -139,9 +156,12 @@ const zh: Record<string, string> = {
   'session.task_label': '任务',
 
   // ── 模型层级标签 ──
-  'tier.reader': 'Reader',
-  'tier.reasoning': 'Reasoning',
-  'tier.action': 'Action',
+  'tier.reader': '读取层',
+  'tier.reader_desc': '读文件、搜索符号',
+  'tier.reasoning': '推理层',
+  'tier.reasoning_desc': '分析代码、制定方案',
+  'tier.action': '执行层',
+  'tier.action_desc': '修改文件、执行命令',
 
   // ── 斜杠命令 ──
   'cmd.unknown': '未知命令',
@@ -151,7 +171,7 @@ const zh: Record<string, string> = {
   'cmd.sessions_total': '总计',
   'cmd.plan_usage': '用法: /plan <任务描述>',
   'cmd.no_api_key': '⚠ 未设置 API Key。请设置环境变量 {env}。',
-  'cmd.first_config': '欢迎使用！请先配置:\n/language  切换界面语言\n/model  添加模型\n/help      查看全部命令',
+  'cmd.first_config': '/model  添加模型并开始\n/model key <provider> <key>  设置 API Key\n/language  切换界面语言\n/help  查看全部命令',
   'cmd.no_model_configured': '⚠ 未配置任何模型，无法执行任务。',
 
   // ── 执行器 ──

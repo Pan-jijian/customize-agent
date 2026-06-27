@@ -41,20 +41,20 @@ export function selectLanguage(texts: SelectorTexts): Promise<Language> {
     if (process.stdin.isTTY) {
       try { process.stdin.setRawMode(true); } catch { /* */ }
     }
-    readline.emitKeypressEvents(process.stdin);
+    try { readline.emitKeypressEvents(process.stdin); } catch { /* already initialized */ }
     process.stdout.write(CSI + '?25l\n');
 
-    const draw = () => {
+    let firstDraw = true;
+    let drawCount = 0;
+    const drawAndReset = () => {
       const lines: string[] = [];
       const pad = '  ';
       const w = 40;
-
       lines.push('');
       lines.push(pad + accent(bold('◆')) + ' ' + text(bold('Customize Agent')) + ' ' + dim('v0.0.3'));
       lines.push('');
       lines.push(pad + bold(texts.title));
       lines.push(pad + '┌' + '─'.repeat(w - 2) + '┐');
-
       for (let i = 0; i < OPTIONS.length; i++) {
         const opt = OPTIONS[i]!;
         const prefix = i === sel ? accent(' ▶ ') : '   ';
@@ -62,12 +62,15 @@ export function selectLanguage(texts: SelectorTexts): Promise<Language> {
         const padded = (line + ' '.repeat(w - 4 - visibleLen(opt.label))).slice(0, w - 4);
         lines.push(pad + '│' + (i === sel ? selected(padded) : dim(padded)) + '│');
       }
-
       lines.push(pad + '└' + '─'.repeat(w - 2) + '┘');
       lines.push('');
       lines.push(pad + dim(texts.prompt));
 
-      process.stdout.write(CSI + '2J' + CSI + 'H');
+      drawCount = lines.length + 1;
+      if (!firstDraw) {
+        process.stdout.write(CSI + drawCount + 'A');
+      }
+      firstDraw = false;
       process.stdout.write(lines.join('\n') + '\n');
     };
 
@@ -79,12 +82,12 @@ export function selectLanguage(texts: SelectorTexts): Promise<Language> {
       }
       if (key.name === 'up') {
         sel = Math.max(0, sel - 1);
-        draw();
+        drawAndReset();
         return;
       }
       if (key.name === 'down') {
         sel = Math.min(OPTIONS.length - 1, sel + 1);
-        draw();
+        drawAndReset();
         return;
       }
       if (key.name === 'return' || key.name === 'enter') {
@@ -94,15 +97,21 @@ export function selectLanguage(texts: SelectorTexts): Promise<Language> {
       }
     };
 
+    let _cleaned = false;
     process.stdin.on('keypress', onKP);
     const cleanup = () => {
+      if (_cleaned) return;
+      _cleaned = true;
       process.stdin.removeListener('keypress', onKP);
       try { process.stdin.setRawMode(false); } catch { /* */ }
       process.stdout.write(CSI + '?25h');
-      process.stdout.write(CSI + '2J' + CSI + 'H');
+      // 清除选择器区域，保留背后的 banner
+      if (drawCount > 0) {
+        process.stdout.write(CSI + drawCount + 'A' + CSI + '0J');
+      }
     };
 
-    draw();
+    drawAndReset();
   });
 }
 

@@ -4,7 +4,7 @@ import { dirname, resolve } from 'path';
 import { createProvider } from '@customize-agent/llm';
 import { ToolRegistry, PermissionEngine, ExecutionController } from '@customize-agent/engine';
 import { ToolKit } from '@customize-agent/tools';
-import { StorageManager, RepositoryIndexer, TreeSitterWorkerPool, LSPManager } from '@customize-agent/codex';
+import { StorageManager, LSPManager } from '@customize-agent/codex';
 import { MemoryManager } from '@customize-agent/memory';
 import { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import { AgentExecutor } from './agent/executor.js';
@@ -13,7 +13,6 @@ import { approvalBox, t } from './tui/renderer.js';
 import { type Message, BINARY_EXTENSIONS } from '@customize-agent/types';
 import { I18nManager } from './i18n/manager.js';
 import * as readline from 'readline';
-import glob from 'fast-glob';
 
 /** 项目根目录 */
 const __filename = fileURLToPath(import.meta.url);
@@ -21,10 +20,8 @@ const PROJECT_ROOT = resolve(dirname(__filename), '../../..');
 
 const program = new Command();
 const configStore = new ConfigStore();
-const dbManager = new StorageManager();
-const workerPool = new TreeSitterWorkerPool();
-const indexer = new RepositoryIndexer(dbManager, { workerPool });
 const toolkit = new ToolKit(PROJECT_ROOT);
+
 
 // ── 国际化 ──
 let i18n: I18nManager;
@@ -59,7 +56,8 @@ function buildRegistry(lspManager?: LSPManager): ToolRegistry {
     ['input'], ['search_symbol'], false,
     async (args) => {
       const input = String(args.input);
-      const symbols = dbManager.searchSymbol(input);
+      const db = new StorageManager();
+      const symbols = db.searchSymbol(input);
       if (symbols.length === 0) return `No symbols found matching "${input}".`;
       return JSON.stringify(symbols.slice(0, 20), null, 2);
     });
@@ -251,25 +249,6 @@ function buildRegistry(lspManager?: LSPManager): ToolRegistry {
   return registry;
 }
 
-async function scanWorkspace() {
-  const files = glob.globSync(['apps/**/*.ts', 'packages/**/*.ts'], {
-    cwd: PROJECT_ROOT,
-    ignore: ['**/dist/**', '**/node_modules/**'],
-  });
-  for (const file of files) {
-    await indexer.indexFile(resolve(PROJECT_ROOT, file));
-  }
-}
-
-function scanAllFiles(): string[] {
-  const binaryIgnores = Array.from(BINARY_EXTENSIONS).map(ext => `**/*.${ext}`);
-  return glob.globSync(['**/*'], {
-    cwd: PROJECT_ROOT,
-    ignore: ['**/node_modules/**', '**/dist/**', '**/.git/**', '**/*.db', '**/*.db-*', '**/*.lock', '**/*.log', ...binaryIgnores],
-    dot: false,
-  });
-}
-
 /** 创建审批回调（使用 i18n） */
 function createApprovalHandler(rl: readline.Interface) {
   return async (toolName: string, args: Record<string, unknown>) => {
@@ -295,8 +274,8 @@ function createApprovalHandler(rl: readline.Interface) {
 }
 
 /** 创建 Executor 实例（懒加载：provider 无 API key 也能进入 REPL） */
-function createExecutor(providerName?: string, modelName?: string, apiKey?: string, rl?: readline.Interface, lspManager?: LSPManager) {
-  const provider = createProvider(providerName ?? 'deepseek', { modelName, apiKey });
+function createExecutor(providerName?: string, modelName?: string, apiKey?: string, baseUrl?: string, rl?: readline.Interface, lspManager?: LSPManager) {
+  const provider = createProvider(providerName ?? 'deepseek', { modelName, apiKey, baseUrl });
   const registry = buildRegistry(lspManager);
   const permissionEngine = new PermissionEngine();
   const controller = new ExecutionController({ maxBudgetUsd: 5.0, deadLoopThreshold: 4 });
@@ -309,6 +288,7 @@ function createExecutor(providerName?: string, modelName?: string, apiKey?: stri
     controller,
     approvalHandler,
     i18n,
+    projectRoot: PROJECT_ROOT,
   });
 }
 
@@ -326,8 +306,6 @@ program.action(async () => {
 
   i18n = new I18nManager(config.language);
 
-  await scanWorkspace();
-
   // ── 单次执行模式 ──
   if (opts.prompt) {
     const resolved = modelRegistry.resolve('action');
@@ -336,7 +314,8 @@ program.action(async () => {
       console.log(i18n.t('cmd.first_config'));
       return;
     }
-    const executor = createExecutor(resolved.provider, resolved.name, resolved.apiKey);
+    const pCfg = configStore.getProvider(resolved.provider);
+    const executor = createExecutor(resolved.provider, resolved.name, pCfg?.apiKey, pCfg?.baseUrl);
 
     const history: Message[] = [
       { role: 'system', content: executor.getSystemPrompt() },
@@ -371,22 +350,25 @@ program.action(async () => {
   const lsp = new LSPManager(PROJECT_ROOT);
 
   // 为 REPL 创建 executor — 用回退链解析模型
-  const resolved = modelRegistry.resolve('action'); // action 层或回退
+  const resolved = modelRegistry.resolve('action');
+  const providerDisplay = resolved
+    ? `${resolved.provider}/${resolved.name}`
+    : i18n.t('welcome.no_model');
+  const providerCfg = resolved ? configStore.getProvider(resolved.provider) : undefined;
   const executor = resolved
-    ? createExecutor(resolved.provider, resolved.name, resolved.apiKey, rl, lsp)
-    : createExecutor('deepseek', undefined, undefined, rl, lsp); // 无配置时兜底
+    ? createExecutor(resolved.provider, resolved.name, providerCfg?.apiKey, providerCfg?.baseUrl, rl, lsp)
+    : createExecutor(undefined, undefined, undefined, undefined, rl, lsp);
 
-  const projectFiles = scanAllFiles();
   const memory = new MemoryManager();
 
   const repl = new Repl({
     executor,
-    files: projectFiles,
     projectRoot: PROJECT_ROOT,
     memory,
     i18n,
     configStore,
     modelRegistry,
+    providerDisplay,
   });
 
   await repl.start();

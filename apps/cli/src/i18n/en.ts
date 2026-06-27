@@ -23,6 +23,7 @@ const en: Record<string, string> = {
   'welcome.goodbye': '👋 Goodbye.',
   'welcome.title': 'Customize Agent',
   'welcome.provider_label': 'Provider',
+  'welcome.no_model': 'No model configured',
   'welcome.start_hint': 'Type a task to begin',
   'welcome.usage_hints': '@ attach files   / commands   ↑↓ history',
 
@@ -36,6 +37,7 @@ const en: Record<string, string> = {
   'help.clear': 'Reset session',
   'help.sessions': 'View session history',
   'help.model': 'Model management',
+  'help.provider': 'Provider config',
   'help.language': 'Switch UI language',
   'help.help': 'Show help',
   'help.exit': 'Exit',
@@ -124,9 +126,24 @@ const en: Record<string, string> = {
   'model.active_set': '✓ {tier} active model set to: {name}',
   'model.rm_usage': 'Usage: /model rm <reader|reasoning|action> <model-name>',
   'model.removed': '✓ Removed {name} from {tier}',
-  'model.key_usage': 'Usage: /model key <reader|reasoning|action> <model-name> <api-key>',
-  'model.key_set': '✓ API key set for {name}: {masked}',
-  'model.unknown_subcmd': 'Unknown subcommand: "/model {sub}". Use: list, add, set, rm, key, fallback',
+  'model.key_usage': 'Usage: /model key <provider-name> <api-key>',
+  'model.key_set': '✓ API key set for {provider}: {masked}',
+  'model.unknown_subcmd': 'Unknown subcommand: "/model {sub}". Use: add, set, rm, key, fallback',
+  'model.quick_start': 'Quick start:',
+  'model.example_add': '/model add action deepseek deepseek-v4-flash',
+  'model.example_key': '/model key deepseek sk-xxx',
+  'model.example_more': '/model set reader deepseek-v4-flash  |  rm  |  fallback',
+
+  // ── Provider ──
+  'provider.key_usage': 'Usage: /provider key <name> <api-key>',
+  'provider.key_set': '✓ API key set for {name}',
+  'provider.url_usage': 'Usage: /provider url <name> <base-url>',
+  'provider.url_set': '✓ Endpoint set for {name}',
+  'provider.protocol_usage': 'Usage: /provider protocol <name> <openai|anthropic|google>',
+  'provider.protocol_set': '✓ {name} protocol set to: {protocol}',
+  'provider.unknown_subcmd': 'Unknown subcommand: "/provider {sub}". Use: key, url, protocol',
+  'provider.none': 'No providers. They are auto-created when you add models.',
+  'provider.hint': '/provider key <name> <key>  |  protocol <name> <p>  |  url <name> <url>',
   'model.no_active': '(none)',
   'model.empty': '(empty)',
   'model.commands_hint': 'Commands: /model add <tier> <provider> <name>  |  set  |  rm  |  key  |  fallback',
@@ -140,8 +157,11 @@ const en: Record<string, string> = {
 
   // ── Tier Labels ──
   'tier.reader': 'Reader',
+  'tier.reader_desc': 'Read files, search symbols',
   'tier.reasoning': 'Reasoning',
+  'tier.reasoning_desc': 'Analyze code, make plans',
   'tier.action': 'Action',
+  'tier.action_desc': 'Modify files, run commands',
 
   // ── Slash Commands ──
   'cmd.unknown': 'Unknown command',
@@ -151,7 +171,7 @@ const en: Record<string, string> = {
   'cmd.sessions_total': 'Total',
   'cmd.plan_usage': 'Usage: /plan <task description>',
   'cmd.no_api_key': '⚠ No API key configured. Set env var {env}.',
-  'cmd.first_config': 'Welcome! First-time setup:\n/language  Switch UI language\n/model   Add model\n/help      Show all commands',
+  'cmd.first_config': '/model  Add model & get started\n/model key <provider> <key>  Set API key\n/language  Switch UI language\n/help  Show all commands',
   'cmd.no_model_configured': '⚠ No model configured. Cannot execute tasks.',
 
   // ── Executor ──
