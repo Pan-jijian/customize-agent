@@ -1,5 +1,5 @@
 import Parser from 'tree-sitter';
-import { getLanguageConfig, collectAstErrors } from '@customize-agent/codex';
+import { getLanguageConfig, collectAstErrors } from '@customize-agent/search';
 
 export interface ValidationError {
   line: number;

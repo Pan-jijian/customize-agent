@@ -19,7 +19,7 @@ describe('ToolRegistry', () => {
     });
 
     registry.register({
-      name: 'modify_file',
+      name: 'write_file',
       description: '修改文件',
       parameters: {
         type: 'object',
@@ -45,13 +45,13 @@ describe('ToolRegistry', () => {
     const registry = createRegistry();
     const all = registry.listAll();
     expect(all).toHaveLength(2);
-    expect(all.map(t => t.name).sort()).toEqual(['modify_file', 'read_file']);
+    expect(all.map(t => t.name).sort()).toEqual(['read_file', 'write_file']);
   });
 
   it('应正确列出所有工具名', () => {
     const registry = createRegistry();
     expect(registry.listNames()).toContain('read_file');
-    expect(registry.listNames()).toContain('modify_file');
+    expect(registry.listNames()).toContain('write_file');
   });
 
   it('应正确分发工具调用', async () => {
@@ -65,7 +65,7 @@ describe('ToolRegistry', () => {
     const result = await registry.dispatch('unknown_tool', {});
     expect(result).toContain('Unknown tool');
     expect(result).toContain('read_file');
-    expect(result).toContain('modify_file');
+    expect(result).toContain('write_file');
   });
 
   it('重复注册应抛异常', () => {

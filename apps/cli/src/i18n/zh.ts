@@ -61,16 +61,12 @@ const zh: Record<string, string> = {
   'hint.separator': '  ·  ',
 
   // ── 工具名 ──
-  'tool.search_symbol': '搜索代码符号',
+  'tool.search': '全文搜索',
   'tool.read_file': '读取文件',
   'tool.list_files': '列出目录',
-  'tool.modify_file': '修改文件',
-  'tool.write_file': '创建文件',
+  'tool.write_file': '写入文件',
   'tool.execute_command': '执行终端命令',
-  'tool.git_status': '查看 Git 状态',
-  'tool.git_diff': '查看 Git 变更',
   'tool.git_commit': '提交 Git 变更',
-  'tool.web_search': '搜索网络',
   'tool.lsp_definition': '跳转定义',
   'tool.lsp_references': '查找引用',
   'tool.lsp_diagnostics': '代码诊断',

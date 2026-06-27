@@ -17,7 +17,7 @@
   "license": "ISC",
   "packageManager": "pnpm@10.26.1",
   "dependencies": {
-    "@customize-agent/codex": "workspace:*",
+    "@customize-agent/search": "workspace:*",
     "@customize-agent/engine": "workspace:*",
     "@customize-agent/llm": "workspace:*",
     "@customize-agent/memory": "workspace:*",

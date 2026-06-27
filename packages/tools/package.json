@@ -6,7 +6,7 @@
   "types": "./dist/index.d.ts",
   "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "lint": "eslint src/" },
   "dependencies": {
-    "@customize-agent/codex": "workspace:*",
+    "@customize-agent/search": "workspace:*",
     "@types/node": "^25.9.3",
     "execa": "^9.6.1",
     "tree-sitter": "^0.22.0"

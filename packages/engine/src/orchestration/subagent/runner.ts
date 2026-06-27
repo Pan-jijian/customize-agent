@@ -107,7 +107,7 @@ export class SubagentRunner {
               };
             }
 
-            if (tc.name === 'modify_file' || tc.name === 'write_file') {
+            if (tc.name === 'write_file') {
               const fp = tc.arguments.path;
               if (typeof fp === 'string') filesModified.push(fp);
             }

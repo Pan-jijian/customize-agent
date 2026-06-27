@@ -8,8 +8,8 @@ describe('PermissionEngine', () => {
     expect(engine.check('read_file')).toBe('allow');
   });
 
-  it('modify_file 默认应 ask (需要用户确认)', () => {
-    expect(engine.check('modify_file')).toBe('ask');
+  it('write_file 默认应 ask (需要用户确认)', () => {
+    expect(engine.check('write_file')).toBe('ask');
   });
 
   it('.env 文件读取应 deny', () => {
@@ -36,14 +36,11 @@ describe('PermissionEngine', () => {
     expect(engine.check('execute_command', { input: 'rm -rf /etc' })).toBe('deny');
   });
 
-  it('已注册搜索工具应 allow', () => {
-    expect(engine.check('search_symbol')).toBe('allow');
-    expect(engine.check('web_search')).toBe('allow');
+  it('已注册读文件工具应 allow', () => {
+    expect(engine.check('read_file')).toBe('allow');
   });
 
-  it('Git 操作默认应 allow（只读）或 ask（写）', () => {
-    expect(engine.check('git_status')).toBe('allow');
-    expect(engine.check('git_diff')).toBe('allow');
+  it('Git 操作默认应 ask', () => {
     expect(engine.check('git_commit')).toBe('ask');
   });
 
@@ -54,14 +51,14 @@ describe('PermissionEngine', () => {
   it('合并外部配置后应生效', () => {
     const custom = new PermissionEngine();
     custom.mergeConfig({
-      defaults: { modify_file: 'allow' },
+      defaults: { write_file: 'allow' },
     });
-    expect(custom.check('modify_file')).toBe('allow');
+    expect(custom.check('write_file')).toBe('allow');
   });
 
   it('角色限制应 deny 无权限的工具', () => {
     // explorer 只有 read_code, search_symbol, lsp_query, embedding_search
-    expect(engine.check('modify_file', {}, 'explorer')).toBe('deny');
+    expect(engine.check('write_file', {}, 'explorer')).toBe('deny');
     expect(engine.check('execute_command', {}, 'explorer')).toBe('deny');
     expect(engine.check('read_file', {}, 'explorer')).toBe('allow');
   });
