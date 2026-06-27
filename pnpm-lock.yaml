@@ -32,9 +32,6 @@ importers:
 
   apps/cli:
     dependencies:
-      '@customize-agent/codex':
-        specifier: workspace:*
-        version: link:../../packages/codex
       '@customize-agent/engine':
         specifier: workspace:*
         version: link:../../packages/engine
@@ -47,6 +44,9 @@ importers:
       '@customize-agent/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
+      '@customize-agent/search':
+        specifier: workspace:*
+        version: link:../../packages/search
       '@customize-agent/tools':
         specifier: workspace:*
         version: link:../../packages/tools
@@ -63,7 +63,57 @@ importers:
         specifier: ^1.11.0
         version: 1.11.0
 
-  packages/codex:
+  packages/engine:
+    dependencies:
+      '@customize-agent/llm':
+        specifier: workspace:*
+        version: link:../llm
+      '@customize-agent/types':
+        specifier: workspace:*
+        version: link:../types
+      '@types/node':
+        specifier: ^25.9.3
+        version: 25.9.3
+      execa:
+        specifier: ^9.6.1
+        version: 9.6.1
+
+  packages/llm:
+    dependencies:
+      '@customize-agent/types':
+        specifier: workspace:*
+        version: link:../types
+      '@types/node':
+        specifier: ^25.9.3
+        version: 25.9.3
+      openai:
+        specifier: ^6.42.0
+        version: 6.42.0
+
+  packages/memory:
+    dependencies:
+      better-sqlite3:
+        specifier: ^12.10.0
+        version: 12.10.0
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
+      '@types/node':
+        specifier: ^25.9.3
+        version: 25.9.3
+
+  packages/runtime:
+    dependencies:
+      '@customize-agent/types':
+        specifier: workspace:*
+        version: link:../types
+    devDependencies:
+      '@types/node':
+        specifier: ^25.9.3
+        version: 25.9.3
+
+  packages/search:
     dependencies:
       '@customize-agent/llm':
         specifier: workspace:*
@@ -126,61 +176,11 @@ importers:
         specifier: ^3.17.5
         version: 3.18.0
 
-  packages/engine:
-    dependencies:
-      '@customize-agent/llm':
-        specifier: workspace:*
-        version: link:../llm
-      '@customize-agent/types':
-        specifier: workspace:*
-        version: link:../types
-      '@types/node':
-        specifier: ^25.9.3
-        version: 25.9.3
-      execa:
-        specifier: ^9.6.1
-        version: 9.6.1
-
-  packages/llm:
-    dependencies:
-      '@customize-agent/types':
-        specifier: workspace:*
-        version: link:../types
-      '@types/node':
-        specifier: ^25.9.3
-        version: 25.9.3
-      openai:
-        specifier: ^6.42.0
-        version: 6.42.0
-
-  packages/memory:
-    dependencies:
-      better-sqlite3:
-        specifier: ^12.10.0
-        version: 12.10.0
-    devDependencies:
-      '@types/better-sqlite3':
-        specifier: ^7.6.13
-        version: 7.6.13
-      '@types/node':
-        specifier: ^25.9.3
-        version: 25.9.3
-
-  packages/runtime:
-    dependencies:
-      '@customize-agent/types':
-        specifier: workspace:*
-        version: link:../types
-    devDependencies:
-      '@types/node':
-        specifier: ^25.9.3
-        version: 25.9.3
-
   packages/tools:
     dependencies:
-      '@customize-agent/codex':
+      '@customize-agent/search':
         specifier: workspace:*
-        version: link:../codex
+        version: link:../search
       '@types/node':
         specifier: ^25.9.3
         version: 25.9.3

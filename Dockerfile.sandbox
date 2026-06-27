@@ -1,0 +1,8 @@
+FROM python:3.11-slim
+RUN pip install --no-cache-dir \
+    numpy pandas scipy matplotlib seaborn \
+    requests beautifulsoup4 lxml pdfplumber \
+    tabulate Pillow playwright
+RUN playwright install --with-deps chromium
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace

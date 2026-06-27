@@ -61,16 +61,12 @@ const en: Record<string, string> = {
   'hint.separator': '  ·  ',
 
   // ── Tool Names ──
-  'tool.search_symbol': 'Search Symbol',
+  'tool.search': 'Search',
   'tool.read_file': 'Read File',
   'tool.list_files': 'List Files',
-  'tool.modify_file': 'Modify File',
   'tool.write_file': 'Write File',
   'tool.execute_command': 'Execute Command',
-  'tool.git_status': 'Git Status',
-  'tool.git_diff': 'Git Diff',
   'tool.git_commit': 'Git Commit',
-  'tool.web_search': 'Web Search',
   'tool.lsp_definition': 'Go to Definition',
   'tool.lsp_references': 'Find References',
   'tool.lsp_diagnostics': 'Diagnostics',

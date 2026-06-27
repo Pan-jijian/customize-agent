@@ -4,9 +4,8 @@ import { dirname, resolve, join } from 'path';
 import { readdirSync, statSync } from 'fs';
 import { createProvider } from '@customize-agent/llm';
 import { ToolRegistry, PermissionEngine, ExecutionController } from '@customize-agent/engine';
-import { ToolKit } from '@customize-agent/tools';
-import { StorageManager, LSPManager, CodeSearcher, EmbeddingSearch } from '@customize-agent/codex';
-import type { ILLMProvider } from '@customize-agent/llm';
+import { ToolKit, SandboxExecutor } from '@customize-agent/tools';
+import { LSPManager, CodeSearcher } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
 import { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import { AgentExecutor } from './agent/executor.js';
@@ -24,34 +23,6 @@ const program = new Command();
 const configStore = new ConfigStore();
 const toolkit = new ToolKit(PROJECT_ROOT);
 
-// L3 语义搜索：懒加载，首次 search_symbol 无 L1/L2 结果时激活
-let _semanticProvider: ILLMProvider | null = null;
-let _embedder: EmbeddingSearch | null = null;
-function _getEmbedder(): EmbeddingSearch | null {
-  if (!_semanticProvider?.embed) return null;
-  if (!_embedder) _embedder = new EmbeddingSearch(_semanticProvider, new StorageManager());
-  return _embedder;
-}
-const _embedderFileTimes = new Map<string, number>();
-async function _ensureEmbedderIndexed(): Promise<void> {
-  const e = _getEmbedder();
-  if (!e) return;
-  const glob = await import('fast-glob');
-  const fsSync = await import('fs');
-  const files = glob.globSync(['**/*'], { cwd: PROJECT_ROOT, ignore: ['**/node_modules/**', '**/dist/**', '**/.git/**', '**/*.db', '**/*.lock', '**/*.log'], dot: false });
-  // 增量：跳过 mtime 未变的文件
-  const contents: Array<{path:string; content:string}> = [];
-  for (const f of files.slice(0, 500)) {
-    const full = resolve(PROJECT_ROOT, f);
-    try {
-      const mtime = fsSync.statSync(full).mtimeMs;
-      if (_embedderFileTimes.get(f) === mtime) continue;
-      contents.push({ path: f, content: fsSync.readFileSync(full, 'utf-8') });
-      _embedderFileTimes.set(f, mtime);
-    } catch { /* skip */ }
-  }
-  if (contents.length > 0) await e.indexFiles(contents);
-}
 
 // Repository Map — 启动时生成项目结构树
 function _generateRepoMap(): string {
@@ -109,28 +80,6 @@ function reg(
 function buildRegistry(lspManager?: LSPManager): ToolRegistry {
   const registry = new ToolRegistry();
 
-  reg(registry, 'search_symbol', 'Search for symbols (functions, classes, interfaces) by name across the codebase.',
-    { input: { type: 'string', description: 'Symbol name to search for' } },
-    ['input'], ['search_symbol'], false,
-    async (args) => {
-      const input = String(args.input);
-      const db = new StorageManager();
-      // L1: FTS5 符号搜索
-      const symbols = db.searchSymbol(input);
-      if (symbols.length > 0) return JSON.stringify(symbols.slice(0, 20), null, 2);
-      // L2: ripgrep 文本搜索回退
-      const searcher = new CodeSearcher(PROJECT_ROOT);
-      const matches = await searcher.grep(input, { maxResults: 15 });
-      if (matches.length > 0) return matches.map(m => `${m.file}:${m.line}: ${m.content}`).join('\n');
-      // L3: 语义搜索（EmbeddingSearch）
-      const e = _getEmbedder();
-      if (e) {
-        await _ensureEmbedderIndexed();
-        const semantic = await e.search(input, 5);
-        if (semantic.length > 0) return semantic.map(s => `${s.file}:${s.line} [${(s.similarity*100).toFixed(0)}%] ${s.text.slice(0, 200)}`).join('\n');
-      }
-      return `No matches found for "${input}".`;
-    });
 
   registry.register({
     name: 'read_file',
@@ -181,59 +130,25 @@ function buildRegistry(lspManager?: LSPManager): ToolRegistry {
     {}, [], ['read_code'], false,
     async () => (await toolkit.listFiles()).join('\n'));
 
-  registry.register({
-    name: 'modify_file',
-    description: 'Modify a file using SEARCH/REPLACE diff blocks.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Relative path to the file to modify' },
-        input: { type: 'string', description: 'Diff content in SEARCH/REPLACE format' },
-      },
-      required: ['path', 'input'],
-      additionalProperties: false,
-    },
-    requiresApproval: true,
-    capabilities: ['write_code'],
-    handler: async (args: Record<string, unknown>) => {
-      const result = await toolkit.modifyFileWithDiff(String(args.path), String(args.input));
-      return `${result.preview}\n\nPlease run the build command to validate this change.`;
-    },
-  });
-
-  reg(registry, 'execute_command', 'Execute a terminal command and return stdout/stderr/exit code.',
-    { input: { type: 'string', description: 'The command to execute' } },
-    ['input'], ['execute_command'], true,
+  reg(registry, 'search', 'Fast text search across all files using ripgrep. Use for finding any text, patterns, documentation, config values, or code references.',
+    { pattern: { type: 'string', description: 'Text or regex pattern to search for' } },
+    ['pattern'], ['read_code'], false,
     async (args) => {
-      const result = await toolkit.terminal.executeCommand(String(args.input));
-      const parts: string[] = [];
-      if (result.stdout) parts.push(result.stdout.trimEnd());
-      if (result.stderr) parts.push(`[Stderr]\n${result.stderr.trimEnd()}`);
-      if (result.code !== 0) parts.push(`[Exit ${result.code}]`);
-      return parts.join('\n') || `[Exit ${result.code}]`;
+      const searcher = new CodeSearcher(PROJECT_ROOT);
+      const matches = await searcher.grep(String(args.pattern), { maxResults: 20 });
+      return matches.length > 0
+        ? matches.map(m => `${m.file}:${m.line}: ${m.content}`).join('\n')
+        : `No matches found for "${args.pattern}".`;
     });
-
-  reg(registry, 'git_status', 'Show the current git working tree status.',
-    {}, [], ['git_operation'], false,
-    async () => toolkit.git.getStatus());
-
-  reg(registry, 'git_diff', 'Show the current git diff (unstaged changes).',
-    {}, [], ['git_operation'], false,
-    async () => toolkit.git.getDiff());
-
-  reg(registry, 'git_commit', 'Stage all changes and create a git commit with the given message.',
-    { input: { type: 'string', description: 'Commit message' } },
-    ['input'], ['git_operation'], true,
-    async (args) => toolkit.git.commitAll(String(args.input)));
 
   registry.register({
     name: 'write_file',
-    description: 'Create a new file or overwrite an existing file with the given content.',
+    description: 'Create/overwrite a file, or modify using SEARCH/REPLACE blocks. If input contains `<<<<<<< SEARCH` it is treated as a diff; otherwise it is treated as the full new file content.',
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Relative path to the file to create/overwrite' },
-        input: { type: 'string', description: 'Full file content' },
+        path: { type: 'string', description: 'Relative path to create or modify' },
+        input: { type: 'string', description: 'Full file content or SEARCH/REPLACE diff block' },
       },
       required: ['path', 'input'],
       additionalProperties: false,
@@ -242,50 +157,53 @@ function buildRegistry(lspManager?: LSPManager): ToolRegistry {
     capabilities: ['write_code'],
     handler: async (args: Record<string, unknown>) => {
       const filePath = String(args.path);
-      const content = String(args.input);
-      await toolkit.writeFileWithBackup(filePath, content);
-      return `File created: ${filePath} (${content.length} chars)`;
+      const input = String(args.input);
+      if (input.includes('<<<<<<< SEARCH')) {
+        const result = await toolkit.modifyFileWithDiff(filePath, input);
+        return `${result.preview}\n\nPlease run the build command to validate this change.`;
+      }
+      await toolkit.writeFileWithBackup(filePath, input);
+      return `File created/updated: ${filePath} (${input.length} chars)`;
     },
   });
 
   registry.register({
-    name: 'web_search',
-    description: 'Search the web and return results with titles and URLs.',
+    name: 'execute_command',
+    description: 'Execute a terminal command. Supports both native shell commands and code execution (python3, node). For Python/data analysis scripts, Docker sandbox is auto-selected if available; otherwise falls back to native sandbox.',
     parameters: {
       type: 'object',
-      properties: { input: { type: 'string', description: 'Search query' } },
+      properties: {
+        input: { type: 'string', description: 'The command or code to execute.' },
+      },
       required: ['input'],
       additionalProperties: false,
     },
-    requiresApproval: false,
-    capabilities: ['search_symbol'],
+    requiresApproval: true,
+    capabilities: ['execute_command'],
     handler: async (args: Record<string, unknown>) => {
-      const query = String(args.input);
-      const { execSync } = await import('child_process');
-      try {
-        const html = execSync(
-          `curl -sL --max-time 10 "https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}"`,
-          { encoding: 'utf-8', timeout: 12000, maxBuffer: 512 * 1024 },
-        );
-        const results: string[] = [];
-        const linkRe = /<a[^>]*href="([^"]*)"[^>]*>([^<]*)<\/a>/g;
-        let m;
-        while ((m = linkRe.exec(html)) !== null) {
-          let url = m[1]!;
-          const title = m[2]!.replace(/<[^>]*>/g, '').trim();
-          if (!title || url.includes('duckduckgo.com') || url.startsWith('//')) continue;
-          if (url.startsWith('/l/?uddg=')) {
-            url = decodeURIComponent(url.slice('/l/?uddg='.length));
-          }
-          results.push(`- [${title}](${url})`);
-          if (results.length >= 8) break;
-        }
-        return results.length ? `Web search results for: "${query}"\n\n${results.join('\n')}` : `[web_search] No results for "${query}".`;
-      } catch (err) {
-        return `[web_search] Search failed: ${(err as Error).message}`;
-      }
+      const cmd = String(args.input);
+      const isCode = cmd.startsWith('python3 -c') || cmd.startsWith('python -c') || cmd.startsWith('node -e');
+      const executor = isCode ? new SandboxExecutor('docker', PROJECT_ROOT) : null;
+      const result = executor
+        ? await executor.execute(cmd)
+        : await toolkit.terminal.executeCommand(cmd);
+      const out: string[] = [];
+      if (result.stdout) out.push(result.stdout.trimEnd());
+      if (result.stderr) out.push(`[Stderr]\n${result.stderr.trimEnd()}`);
+      if (result.code !== 0) out.push(`[Exit ${result.code}]`);
+      return out.join('\n') || `[Exit ${result.code}]`;
     },
   });
+
+  reg(registry, 'git_commit', 'Stage all changes and create a git commit with the given message.',
+    { input: { type: 'string', description: 'Commit message' } },
+    ['input'], ['git_operation'], true,
+    async (args) => toolkit.git.commitAll(String(args.input)));
+
+
+
+
+
 
   if (lspManager) {
     reg(registry, 'lsp_definition', 'Go to the definition of a symbol at the given file/line/column.',
@@ -346,7 +264,6 @@ function createApprovalHandler(rl: readline.Interface) {
 /** 创建 Executor 实例（懒加载：provider 无 API key 也能进入 REPL） */
 function createExecutor(providerName?: string, modelName?: string, apiKey?: string, baseUrl?: string, rl?: readline.Interface, lspManager?: LSPManager) {
   const provider = createProvider(providerName ?? 'deepseek', { modelName, apiKey, baseUrl });
-  _semanticProvider = _semanticProvider ?? provider;
   const registry = buildRegistry(lspManager);
   const permissionEngine = new PermissionEngine();
   const controller = new ExecutionController({ maxBudgetUsd: 5.0, deadLoopThreshold: 4 });

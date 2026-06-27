@@ -9,7 +9,7 @@ import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
 /** 不截断输出的工具（完整内容保留） */
-const NO_TRUNCATE_TOOLS = new Set(['read_file', 'modify_file', 'list_files', 'search_symbol', 'web_search', 'git_status', 'git_diff']);
+const NO_TRUNCATE_TOOLS = new Set(['read_file', 'list_files', 'search']);
 const CMD_OUTPUT_LIMIT = 5000;
 const OTHER_OUTPUT_LIMIT = 8000;
 
@@ -282,7 +282,7 @@ export class AgentExecutor {
       this.controller?.recordToolCall(name, args, result);
       // 展示 diff 预览（modify_file）或首行摘要（其他工具）
       if (this.stream && result) {
-        const preview = name === 'modify_file'
+        const preview = name === 'write_file'
           ? renderDiff(result)
           : `  ${t.subtle('│')} ${t.dim(result.split('\n')[0]?.slice(0, 100) || '')}`;
         if (preview.trim()) process.stdout.write(preview + '\n');

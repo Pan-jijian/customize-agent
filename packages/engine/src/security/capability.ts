@@ -31,13 +31,8 @@ export enum Capability {
 export const TOOL_CAPABILITY_MAP: Record<string, Capability[]> = {
   read_file: [Capability.READ_CODE],
   list_files: [Capability.READ_CODE],
-  modify_file: [Capability.WRITE_CODE],
   write_file: [Capability.WRITE_CODE],
-  search_symbol: [Capability.SEARCH_SYMBOL],
-  web_search: [Capability.SEARCH_SYMBOL],
   execute_command: [Capability.EXECUTE_COMMAND],
-  git_status: [Capability.GIT_OPERATION],
-  git_diff: [Capability.GIT_OPERATION],
   git_commit: [Capability.GIT_OPERATION],
   lsp_definition: [Capability.LSP_QUERY],
   lsp_references: [Capability.LSP_QUERY],

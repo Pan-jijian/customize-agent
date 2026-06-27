@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 
 /** 沙箱模式 */
-export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access' | 'vfs-guard';
+export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access' | 'vfs-guard' | 'docker';
 
 /** 沙箱命令执行结果 */
 export interface SandboxResult {
@@ -60,6 +60,10 @@ export class SandboxExecutor {
     if (this.mode === 'danger-full-access') {
       throw new Error('danger-full-access 模式需要显式确认，请设置环境变量 CUSTOMIZE_AGENT_DANGER_MODE=1');
     }
+    // docker：容器沙箱
+    if (this.mode === 'docker') {
+      return this._executeDocker(command, cwd);
+    }
     // vfs-guard：纯 JS 路径虚拟沙箱（跨平台通用降级方案）
     if (this.mode === 'vfs-guard') {
       return this._executeVfsGuard(command, cwd);
@@ -72,6 +76,31 @@ export class SandboxExecutor {
     }
     // 未知平台 → 自动降级 vfs-guard
     return this._executeVfsGuard(command, cwd);
+  }
+
+  /** Docker 容器执行（不可用时自动降级 VFS） */
+  private async _executeDocker(command: string, cwd?: string): Promise<SandboxResult> {
+    try {
+      await execa({ reject: false })`docker version`;
+    } catch {
+      console.warn('[Sandbox] Docker 不可用，降级为 VFS-Guard');
+      return this._executeVfsGuard(command, cwd);
+    }
+    const workspace = cwd ?? this.workspaceRoot;
+    try {
+      const result = await execa({
+        cwd: workspace,
+        reject: false,
+        timeout: 60_000,
+      })`docker run --rm -i --network=none --memory=1g --cpus=2 -v ${workspace}:/workspace -w /workspace python:3.11-slim sh -c ${command}`;
+      return {
+        stdout: result.stdout.slice(0, 10_000),
+        stderr: result.stderr,
+        code: result.exitCode ?? 0,
+      };
+    } catch (err) {
+      return { stdout: '', stderr: (err as Error).message, code: 1 };
+    }
   }
 
   /** VFS-Guard：路径虚拟沙箱 — CWD 强绑定 + 危险命令拦截 + read-only 模式写拦截 */

@@ -6,7 +6,7 @@ const OPENAI_CAPABILITIES: ModelCapabilities = {
   maxOutputTokens: 16_384,
   supportsStreaming: true,
   supportsFunctionCalling: true,
-  supportsVision: false,
+  supportsVision: true,
   supportsThinking: false,
   supportsEmbedding: true,
 };

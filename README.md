@@ -10,8 +10,8 @@
 - **双语 TUI** — 中/英文界面即时切换，4×6 像素字标题（天蓝→紫渐变），下拉菜单 + 提示栏完整双语
 - **三级模型分层** — 读取 / 推理 / 执行 三层独立配置不同模型，未配层自动回退，降低 token 成本
 - **Provider 独立管理** — API key 属于 Provider（同厂商多模型共享），协议自动推断 + 手动覆盖
-- **14 个 CLI 工具** — 文件读写、代码搜索、终端执行、Git 操作、LSP 跳转、web 搜索
-- **零启动扫描** — `@file` 首次触发 `git ls-files` 毫秒级扫描；`search_symbol` 按需懒索引
+- **9 个 CLI 工具** — 文件读写、全文搜索、终端执行、Git、LSP 跳转
+- **零启动扫描** — `@file` 首次触发 `git ls-files` 毫秒级扫描
 - **配置持久化** — `~/.customize-agent/config.json`，语言/Provider/模型全持久化，跨会话保留
 - **上下文自动压缩** — 三级水位（60% 警告 → 75% 截断旧工具结果 → 85% LLM 摘要）
 
@@ -74,7 +74,7 @@ packages/
 ├── types/      (1 file)  跨包类型契约 + BINARY_EXTENSIONS，零外部依赖
 ├── llm/        (12 files) 6 个 Provider + OpenAICompat 抽象基类 + 重试 + Token 估算
 ├── tools/      (7 files)  文件读写、沙箱（Seatbelt/Bubblewrap）、终端、Git、Diff、语法验证
-├── codex/      (10 files) tree-sitter 索引 + ripgrep 搜索 + LSP + 语义 Embedding
+├── search/      (10 files) tree-sitter 索引 + ripgrep 搜索 + LSP + 语义 Embedding
 ├── engine/     (18 files) ToolRegistry、权限、执行控制、上下文、规划、子智能体、MCP、Hooks
 ├── runtime/    (5 files)  统一调度 + ConfigStore + ModelRegistry + 遥测 + 生命周期
 ├── memory/     (2 files)  跨会话记忆 (SQLite + FTS5)
@@ -131,7 +131,7 @@ types (零依赖)
 | `UnifiedSyntaxValidator` | tree-sitter 通用语法验证（11 语言） |
 | `DiffEngine` | SEARCH/REPLACE 解析 + Unified Diff 生成 |
 
-**@customize-agent/codex** — 代码智能
+**@customize-agent/search** — 代码智能
 | 导出 | 说明 |
 |------|------|
 | `StorageManager` | SQLite 文件索引 + FTS5 + Embedding 持久化 |
@@ -203,26 +203,21 @@ types (零依赖)
 
 ---
 
-## CLI 工具集 (14 个)
+## CLI 工具集 (9 个)
 
 AI Agent 可调用以下工具，通过原生 Function Calling 协议传递给 LLM：
 
 | 工具 | 功能 | 审批 | 对应 Capability |
 |------|------|:--:|------|
-| `search_symbol` | SQLite FTS5 符号搜索 | 否 | SEARCH_SYMBOL |
-| `read_file` | 路径沙箱内读文件（含分页/二进制检测） | 否 | READ_CODE |
-| `list_files` | 列出项目根目录文件（.gitignore 感知） | 否 | READ_CODE |
-| `modify_file` | SEARCH/REPLACE 修改 + 语法验证 + 备份回滚 | 是 | WRITE_CODE |
-| `write_file` | 创建/覆盖文件 + 备份回滚 | 是 | WRITE_CODE |
-| `execute_command` | 沙箱内终端执行（Seatbelt/Bubblewrap/VFS） | 是 | EXECUTE_COMMAND |
-| `git_status` | Git 工作树状态（-s） | 否 | GIT_OPERATION |
-| `git_diff` | Git 未暂存变更 | 否 | GIT_OPERATION |
-| `git_commit` | 暂存全部 + 提交 | 是 | GIT_OPERATION |
-| `web_search` | DuckDuckGo 网络搜索 | 否 | SEARCH_SYMBOL |
+| `read_file` | 路径沙箱内读文件（分页/二进制检测） | 否 | READ_CODE |
+| `list_files` | 列出项目文件（.gitignore 感知） | 否 | READ_CODE |
+| `search` | 全文搜索（ripgrep），不限文件类型 | 否 | READ_CODE |
+| `write_file` | 创建/覆盖 或 SEARCH/REPLACE 修改 + 备份回滚 | 是 | WRITE_CODE |
+| `execute_command` | 终端执行（Seatbelt/Bubblewrap/Docker 自适应） | 是 | EXECUTE_COMMAND |
+| `git_commit` | 暂存 + 提交 | 是 | GIT_OPERATION |
 | `lsp_definition` | 跳转到符号定义 | 否 | LSP_QUERY |
-| `lsp_references` | 查找符号所有引用 | 否 | LSP_QUERY |
-| `lsp_diagnostics` | LSP 诊断（错误/警告/提示） | 否 | LSP_QUERY |
-| `lsp_hover` | LSP 悬停类型信息 | 否 | LSP_QUERY |
+| `lsp_references` | 查找符号引用 | 否 | LSP_QUERY |
+| `lsp_diagnostics` | LSP 诊断 | 否 | LSP_QUERY |
 
 ### 沙箱模式
 
