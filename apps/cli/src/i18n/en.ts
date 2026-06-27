@@ -38,6 +38,7 @@ const en: Record<string, string> = {
   'help.sessions': 'View session history',
   'help.model': 'Model management',
   'help.provider': 'Provider config',
+  'help.memory': 'Memory management',
   'help.language': 'Switch UI language',
   'help.help': 'Show help',
   'help.exit': 'Exit',
@@ -115,8 +116,12 @@ const en: Record<string, string> = {
   'memory.feedback': 'Feedback',
   'memory.user_preference': 'Preference',
   'memory.project_knowledge': 'Project Knowledge',
+  'memory.pattern': 'Solution Pattern',
   'memory.section_header': '--- Related Memory ---',
   'memory.section_footer': '--- End Memory ---',
+  'memory.count': '{count} memories',
+  'memory.cleared': '✓ Memories cleared',
+  'memory.clear_usage': 'Usage: /memory clear [feedback|project_fact|user_preference|pattern]',
 
   // ── Model Management ──
   'model.add_usage': 'Usage: /model add <reader|reasoning|action> <provider> <model-name>',

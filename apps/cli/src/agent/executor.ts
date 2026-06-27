@@ -27,6 +27,7 @@ export interface ExecutorConfig {
   approvalHandler?: ApprovalHandler;
   i18n?: I18nManager;
   projectRoot?: string;
+  repoMap?: string;
   maxIterations?: number;
   stream?: boolean;
 }
@@ -40,6 +41,7 @@ export class AgentExecutor {
   private approvalHandler?: ApprovalHandler;
   private i18n: I18nManager | undefined;
   private projectRoot: string;
+  private repoMap: string | undefined;
   private maxIterations: number;
   private stream: boolean;
 
@@ -52,6 +54,7 @@ export class AgentExecutor {
     this.approvalHandler = config.approvalHandler;
     this.i18n = config.i18n;
     this.projectRoot = config.projectRoot ?? process.cwd();
+    this.repoMap = config.repoMap;
     this.maxIterations = config.maxIterations ?? 200;
     this.stream = config.stream ?? true;
   }
@@ -59,7 +62,7 @@ export class AgentExecutor {
   getSystemPrompt(): string {
     const customizePath = resolve(this.projectRoot, 'CUSTOMIZE.md');
     const content = existsSync(customizePath) ? readFileSync(customizePath, 'utf-8') : undefined;
-    return buildSystemPrompt(content);
+    return buildSystemPrompt(content, this.repoMap);
   }
   get providerName(): string { return `${this.provider.name}/${this.provider.modelName}`; }
 
