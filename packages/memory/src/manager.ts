@@ -17,6 +17,12 @@ export interface MemoryEntry {
   updatedAt: string;
 }
 
+/** 带相关性评分的检索结果 */
+export interface ScoredMemory {
+  entry: MemoryEntry;
+  relevance: number; // 0~1, 越高越相关
+}
+
 /**
  * 跨会话记忆管理器。
  * 存储: ~/.customize-agent/memory.db (SQLite + FTS5)
@@ -105,31 +111,42 @@ export class MemoryManager {
   }
 
   /**
-   * 检索相关记忆。先 FTS5 全文搜索 → 无结果则 LIKE 回退 → 按 access_count 排序。
+   * 检索相关记忆，返回带相关性评分的列表。
+   * FTS5 全文搜索 → 无结果则 LIKE 回退。
+   * 评分 = FTS5 rank 倒数 × log(1+access_count) 热度加权
    */
-  recall(query: string, limit: number = 10): MemoryEntry[] {
-    // FTS5 搜索优先
+  recallScored(query: string, limit: number = 10): ScoredMemory[] {
     const ftsResults = this.db.prepare(`
-      SELECT m.* FROM memories m
+      SELECT m.*, rank FROM memories m
       JOIN memories_fts fts ON m.rowid = fts.rowid
       WHERE memories_fts MATCH ?
-      ORDER BY rank, m.access_count DESC
+      ORDER BY rank
       LIMIT ?
     `).all(query, limit) as Array<Record<string, unknown>>;
 
     if (ftsResults.length > 0) {
-      return ftsResults.map(r => this._rowToEntry(r));
+      return ftsResults.map(r => ({
+        entry: this._rowToEntry(r),
+        relevance: (1 / (1 + Number(r.rank ?? 0))) * Math.log(1 + Number(r.access_count ?? 0) + 1),
+      })).sort((a, b) => b.relevance - a.relevance);
     }
 
-    // FTS5 无结果 → LIKE 回退
+    // LIKE 回退：相关性 = 0.1 × log(1+access_count)
     const likeResults = this.db.prepare(`
       SELECT * FROM memories
       WHERE content LIKE ? OR context LIKE ?
-      ORDER BY access_count DESC
-      LIMIT ?
+      ORDER BY access_count DESC LIMIT ?
     `).all(`%${query}%`, `%${query}%`, limit) as Array<Record<string, unknown>>;
 
-    return likeResults.map(r => this._rowToEntry(r));
+    return likeResults.map(r => ({
+      entry: this._rowToEntry(r),
+      relevance: 0.1 * Math.log(1 + Number(r.access_count ?? 0) + 1),
+    }));
+  }
+
+  /** 简单检索（向后兼容） */
+  recall(query: string, limit: number = 10): MemoryEntry[] {
+    return this.recallScored(query, limit).map(s => s.entry);
   }
 
   /**
@@ -141,7 +158,7 @@ export class MemoryManager {
     if (memories.length === 0) return systemPrompt;
 
     const memoryLines = memories.map(m =>
-      `[记忆·${this._typeLabel(m.type)}]: ${m.content}`
+      `[记忆·${this.typeLabel(m.type)}]: ${m.content}`
     );
 
     return `${systemPrompt}\n\n--- 相关历史记忆 ---\n${memoryLines.join('\n')}\n--- 记忆结束 ---`;
@@ -195,14 +212,26 @@ export class MemoryManager {
     };
   }
 
-  private _typeLabel(type: MemoryType): string {
+  /** 记忆类型的中文标签（供外部 i18n 覆盖） */
+  typeLabel(type: MemoryType): string {
     const labels: Record<MemoryType, string> = {
       project_fact: '项目知识',
       user_preference: '用户偏好',
       feedback: '历史纠偏',
       pattern: '解决方案',
     };
-    return labels[type];
+    return labels[type] ?? type;
+  }
+
+  /** 获取记忆总数 */
+  count(): number {
+    return (this.db.prepare('SELECT COUNT(*) as c FROM memories').get() as { c: number }).c;
+  }
+
+  /** 列出所有记忆（按更新时间倒序） */
+  listAll(limit = 20): MemoryEntry[] {
+    const rows = this.db.prepare('SELECT * FROM memories ORDER BY updated_at DESC LIMIT ?').all(limit) as Array<Record<string, unknown>>;
+    return rows.map(r => this._rowToEntry(r));
   }
 
   /** 简单字符串哈希 (FNV-1a) */

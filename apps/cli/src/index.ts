@@ -1,10 +1,12 @@
 import { Command } from 'commander';
 import { fileURLToPath } from 'url';
-import { dirname, resolve } from 'path';
+import { dirname, resolve, join } from 'path';
+import { readdirSync, statSync } from 'fs';
 import { createProvider } from '@customize-agent/llm';
 import { ToolRegistry, PermissionEngine, ExecutionController } from '@customize-agent/engine';
 import { ToolKit } from '@customize-agent/tools';
-import { StorageManager, LSPManager } from '@customize-agent/codex';
+import { StorageManager, LSPManager, CodeSearcher, EmbeddingSearch } from '@customize-agent/codex';
+import type { ILLMProvider } from '@customize-agent/llm';
 import { MemoryManager } from '@customize-agent/memory';
 import { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import { AgentExecutor } from './agent/executor.js';
@@ -22,6 +24,62 @@ const program = new Command();
 const configStore = new ConfigStore();
 const toolkit = new ToolKit(PROJECT_ROOT);
 
+// L3 语义搜索：懒加载，首次 search_symbol 无 L1/L2 结果时激活
+let _semanticProvider: ILLMProvider | null = null;
+let _embedder: EmbeddingSearch | null = null;
+function _getEmbedder(): EmbeddingSearch | null {
+  if (!_semanticProvider?.embed) return null;
+  if (!_embedder) _embedder = new EmbeddingSearch(_semanticProvider, new StorageManager());
+  return _embedder;
+}
+const _embedderFileTimes = new Map<string, number>();
+async function _ensureEmbedderIndexed(): Promise<void> {
+  const e = _getEmbedder();
+  if (!e) return;
+  const glob = await import('fast-glob');
+  const fsSync = await import('fs');
+  const files = glob.globSync(['**/*'], { cwd: PROJECT_ROOT, ignore: ['**/node_modules/**', '**/dist/**', '**/.git/**', '**/*.db', '**/*.lock', '**/*.log'], dot: false });
+  // 增量：跳过 mtime 未变的文件
+  const contents: Array<{path:string; content:string}> = [];
+  for (const f of files.slice(0, 500)) {
+    const full = resolve(PROJECT_ROOT, f);
+    try {
+      const mtime = fsSync.statSync(full).mtimeMs;
+      if (_embedderFileTimes.get(f) === mtime) continue;
+      contents.push({ path: f, content: fsSync.readFileSync(full, 'utf-8') });
+      _embedderFileTimes.set(f, mtime);
+    } catch { /* skip */ }
+  }
+  if (contents.length > 0) await e.indexFiles(contents);
+}
+
+// Repository Map — 启动时生成项目结构树
+function _generateRepoMap(): string {
+  const ignore = new Set(['node_modules', 'dist', '.git', '.DS_Store', '__pycache__', 'target']);
+  const lines: string[] = []; let count = 0; const max = 200;
+  function walk(dir: string, prefix: string): void {
+    if (count >= max) return;
+    let entries: string[];
+    try { entries = readdirSync(dir).filter(e => !e.startsWith('.') && !ignore.has(e)).sort(); } catch { return; }
+    for (let i = 0; i < entries.length && count < max; i++) {
+      const e = entries[i]!; const full = join(dir, e);
+      try {
+        if (statSync(full).isDirectory()) { lines.push(`${prefix}${i===entries.length-1?'└── ':'├── '}${e}/`); count++; walk(full, prefix+(i===entries.length-1?'    ':'│   ')); }
+      } catch { /* skip */ }
+    }
+  }
+  const top = readdirSync(PROJECT_ROOT).filter(e => !e.startsWith('.') && !ignore.has(e)).sort();
+  for (const e of top) {
+    if (count >= max) break;
+    try {
+      const full = join(PROJECT_ROOT, e);
+      if (statSync(full).isDirectory()) { lines.push(`${e}/`); count++; walk(full, '    '); }
+      else { lines.push(e); count++; }
+    } catch { /* skip */ }
+  }
+  return lines.join('\n');
+}
+let _repoMap: string | null = null;
 
 // ── 国际化 ──
 let i18n: I18nManager;
@@ -57,9 +115,21 @@ function buildRegistry(lspManager?: LSPManager): ToolRegistry {
     async (args) => {
       const input = String(args.input);
       const db = new StorageManager();
+      // L1: FTS5 符号搜索
       const symbols = db.searchSymbol(input);
-      if (symbols.length === 0) return `No symbols found matching "${input}".`;
-      return JSON.stringify(symbols.slice(0, 20), null, 2);
+      if (symbols.length > 0) return JSON.stringify(symbols.slice(0, 20), null, 2);
+      // L2: ripgrep 文本搜索回退
+      const searcher = new CodeSearcher(PROJECT_ROOT);
+      const matches = await searcher.grep(input, { maxResults: 15 });
+      if (matches.length > 0) return matches.map(m => `${m.file}:${m.line}: ${m.content}`).join('\n');
+      // L3: 语义搜索（EmbeddingSearch）
+      const e = _getEmbedder();
+      if (e) {
+        await _ensureEmbedderIndexed();
+        const semantic = await e.search(input, 5);
+        if (semantic.length > 0) return semantic.map(s => `${s.file}:${s.line} [${(s.similarity*100).toFixed(0)}%] ${s.text.slice(0, 200)}`).join('\n');
+      }
+      return `No matches found for "${input}".`;
     });
 
   registry.register({
@@ -276,11 +346,13 @@ function createApprovalHandler(rl: readline.Interface) {
 /** 创建 Executor 实例（懒加载：provider 无 API key 也能进入 REPL） */
 function createExecutor(providerName?: string, modelName?: string, apiKey?: string, baseUrl?: string, rl?: readline.Interface, lspManager?: LSPManager) {
   const provider = createProvider(providerName ?? 'deepseek', { modelName, apiKey, baseUrl });
+  _semanticProvider = _semanticProvider ?? provider;
   const registry = buildRegistry(lspManager);
   const permissionEngine = new PermissionEngine();
   const controller = new ExecutionController({ maxBudgetUsd: 5.0, deadLoopThreshold: 4 });
   const approvalHandler = rl ? createApprovalHandler(rl) : undefined;
 
+  if (_repoMap === null) _repoMap = _generateRepoMap();
   return new AgentExecutor({
     provider,
     registry,
@@ -289,6 +361,7 @@ function createExecutor(providerName?: string, modelName?: string, apiKey?: stri
     approvalHandler,
     i18n,
     projectRoot: PROJECT_ROOT,
+    repoMap: _repoMap,
   });
 }
 

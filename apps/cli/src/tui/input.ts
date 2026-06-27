@@ -35,6 +35,7 @@ export interface TuiConfig {
   commands?: Array<{ name: string; desc: string }>;
   labels?: TuiLabels;
   prompt?: string; mode?: Mode; history?: string[];
+  tokenStats?: () => { used: number; limit: number } | null;
 }
 
 interface St {
@@ -81,6 +82,7 @@ export class TuiInput {
   private sz = new Map<string, string>();
   private _prevLines = 0;
   private labels: TuiLabels;
+  private _tokenStats?: () => { used: number; limit: number } | null;
 
   constructor(cfg: TuiConfig) {
     this.root = cfg.projectRoot;
@@ -90,6 +92,7 @@ export class TuiInput {
     this.mode = cfg.mode ?? 'AGENT';
     this.hist = cfg.history ?? [];
     this.hi = this.hist.length;
+    this._tokenStats = cfg.tokenStats;
     this.labels = cfg.labels ?? {
       filesHeader: 'Files', commandsHeader: 'Commands',
       more: (n) => `… ${n} more`,
@@ -298,6 +301,13 @@ export class TuiInput {
 
     // ── 构建行内容 ──
     const lines: string[] = [];
+    // Token 使用量
+    const stats = this._tokenStats?.();
+    if (stats) {
+      const pct = Math.round((stats.used / stats.limit) * 100);
+      const color = pct > 85 ? t.error : pct > 60 ? t.warning : t.faint;
+      lines.push(`  ${color(`[${Math.round(stats.used/1000)}K/${Math.round(stats.limit/1000)}K ${pct}%]`)}`);
+    }
     lines.push(`${pad}${badge} ${bar} ${pr} ${before}${caret}${after}`);
 
     if (st.dd !== 'none' && st.items.length) {

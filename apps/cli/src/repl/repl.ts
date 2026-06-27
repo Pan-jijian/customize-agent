@@ -4,7 +4,7 @@ import type { Message } from '@customize-agent/types';
 import type { AgentExecutor } from '../agent/executor.js';
 import { TuiInput } from '../tui/input.js';
 import { welcomeBanner, t, s, divider, msg, contextStats } from '../tui/renderer.js';
-import type { MemoryManager } from '@customize-agent/memory';
+import type { MemoryManager, MemoryType } from '@customize-agent/memory';
 import { BINARY_EXTENSIONS } from '@customize-agent/types';
 import type { ConfigStore, ModelRegistry, ModelTier } from '@customize-agent/runtime';
 import { resolveProtocol } from '@customize-agent/runtime';
@@ -138,9 +138,9 @@ export class Repl {
     if (this.memory) {
       const memories = this.memory.recall(input, 3);
       if (memories.length > 0) {
-        const memoryLines = memories.map((m: { type: string; content: string }) => {
-          const label = m.type === 'feedback' ? this.i18n.t('memory.feedback') : m.type === 'user_preference' ? this.i18n.t('memory.user_preference') : this.i18n.t('memory.project_knowledge');
-          return `[Memory·${label}]: ${m.content}`;
+        const memoryLines = memories.map(m => {
+          const label = this.i18n.t('memory.' + m.type);
+          return `[${label}]: ${m.content}`;
         });
         enhancedInput = `${input}\n\n${this.i18n.t('memory.section_header')}\n${memoryLines.join('\n')}\n${this.i18n.t('memory.section_footer')}`;
       }
@@ -193,6 +193,7 @@ export class Repl {
         return false;
       }
 
+      case '/memory': return this._handleMemoryCommand(args);
       case '/model': return this._handleModelCommand(args);
       case '/provider': return this._handleProviderCommand(args);
 
@@ -211,6 +212,12 @@ export class Repl {
       }
 
       case '/clear':
+        if (this.memory && this.history.length > 2) {
+          // 保存当前会话摘要到长期记忆
+          const msgs = this.history.filter(m => m.role === 'user' || m.role === 'assistant');
+          const summary = msgs.map(m => `[${m.role}] ${(m.content ?? '').slice(0, 200)}`).join('\n');
+          this.memory.remember('pattern', summary.slice(0, 500), '会话摘要');
+        }
         this.history.length = 0;
         this.history.push({ role: 'system', content: this.executor.getSystemPrompt() });
         process.stdout.write(t.success(this.i18n.t('context.session_cleared') + '\n\n'));
@@ -369,6 +376,25 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
     process.stdout.write('\n');
   }
 
+  private _handleMemoryCommand(args: string): boolean {
+    if (!this.memory) { process.stdout.write(t.dim('Memory disabled.\n\n')); return false; }
+    if (args.startsWith('clear')) {
+      const type = args.split(/\s+/)[1] as string | undefined;
+      this.memory.clear(type as MemoryType | undefined);
+      process.stdout.write(t.success(this.i18n.t('memory.cleared') + '\n\n'));
+      return false;
+    }
+    const all = this.memory.listAll(20);
+    if (!all.length) { process.stdout.write(t.dim(this.i18n.t('memory.count', { count: '0' }) + '\n\n')); return false; }
+    process.stdout.write('\n' + t.dim(this.i18n.t('memory.count', { count: String(all.length) })) + '\n');
+    for (const m of all) {
+      const label = this.i18n.t('memory.' + m.type);
+      process.stdout.write(`  ${t.accent('▸')} ${t.dim(label)}  ${m.content.slice(0, 80)}\n`);
+    }
+    process.stdout.write(`\n  ${t.dim(this.i18n.t('memory.clear_usage'))}\n\n`);
+    return false;
+  }
+
   private _showProviderList(): void {
     const cfg = this.configStore.load();
     const names = Object.keys(cfg.providers);
@@ -419,6 +445,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
       { name: '/sessions', desc: this.i18n.t('help.sessions') },
       { name: '/model',    desc: this.i18n.t('help.model') },
       { name: '/provider', desc: this.i18n.t('help.provider') },
+      { name: '/memory',   desc: this.i18n.t('help.memory') },
       { name: '/language', desc: this.i18n.t('help.language') },
       { name: '/help',     desc: this.i18n.t('help.help') },
       { name: '/exit',     desc: this.i18n.t('help.exit') },
@@ -438,6 +465,10 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
       },
       prompt: '➜',
       mode: 'AGENT',
+      tokenStats: () => {
+        const s = this.executor.getContextStats();
+        return s.tokens > 0 ? { used: s.tokens, limit: s.limit } : null;
+      },
     });
   }
 
