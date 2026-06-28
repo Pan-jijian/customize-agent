@@ -49,7 +49,7 @@ function App({ executor, i18n, onReady }: {
 
   useInput((inputChar, key) => {
     if (busy) return;
-    if (key.return) { executeInput(input); }
+    if (key.return) { void executeInput(input); }
     else if (key.backspace || key.delete) { setInput(prev => prev.slice(0, -1)); }
     else if (inputChar) { setInput(prev => prev + inputChar); }
   });

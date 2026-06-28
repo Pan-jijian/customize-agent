@@ -317,7 +317,7 @@ program.action(async () => {
     if (opts.plan) {
       history.push({
         role: 'user',
-        content: `Create an execution plan for the following task. Read-only exploration. Do not modify any files.\n\nTask: ${opts.prompt}\n\nOutput the plan and end with <task_finish>.`,
+        content: `Create an execution plan for the following task. Read-only exploration. Do not modify any files.\n\nTask: ${opts.prompt}\n\nOutput the plan.`,
       });
       console.log(`\n📋 ${i18n.t('plan.banner')} [${executor.providerName}]`);
     } else {
@@ -330,7 +330,7 @@ program.action(async () => {
       const updated = await executor.runTask(history, { readonly: opts.plan ?? false });
       const lastAssistant = [...updated].reverse().find(m => m.role === 'assistant');
       if (lastAssistant) {
-        const cleanContent = lastAssistant.content.replace(/<task_finish>[\s\S]*?<\/task_finish>\n*/g, '').trim();
+        const cleanContent = lastAssistant.content.trim();
         process.stdout.write('\n' + t.purple('📋 Result:') + '\n');
         process.stdout.write(renderMarkdown(cleanContent) + '\n');
       }

@@ -242,7 +242,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         if (!args) { process.stdout.write(t.warning(this.i18n.t('cmd.plan_usage') + '\n\n')); return false; }
         process.stdout.write('\n' + divider(this.i18n.t('plan.banner')) + '\n');
         process.stdout.write(msg.info(args) + '\n\n');
-        const prompt = `Create an execution plan (read-only, do not modify files).\n\nTask: ${args}\n\nOutput the plan and end with <task_finish>.`;
+        const prompt = `Create an execution plan (read-only, do not modify files).\n\nTask: ${args}\n\nOutput the plan.`;
         this.history.push({ role: 'user', content: prompt });
         try {
           const u = await this.executor.runTask(this.history, { readonly: true });
