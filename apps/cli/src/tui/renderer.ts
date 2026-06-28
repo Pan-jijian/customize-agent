@@ -6,6 +6,8 @@
  *    text   #eeeeee → 255   dim     #808080 → 244
  */
 import { bannerText } from './big-text.js';
+import stringWidth from 'string-width';
+import wrapAnsi from 'wrap-ansi';
 
 const CSI = '\x1b[';
 
@@ -325,11 +327,9 @@ export function thinkingExpanded(content: string, boxTitle: string): string {
   out.push(`  ${t.subtle('┌─')} ${s.bold(t.purple(boxTitle))} ${t.subtle('─'.repeat(Math.max(0, W - 5 - visibleLen(boxTitle))))}${t.subtle('┐')}`);
 
   for (const raw of lines) {
-    let remain = raw;
-    while (remain.length > 0) {
-      const chunk = remain.slice(0, innerW);
-      remain = remain.slice(innerW);
-      const padding = ' '.repeat(Math.max(0, innerW - visibleLen(chunk)));
+    const wrapped = wrapAnsi(raw, innerW, { hard: true });
+    for (const chunk of wrapped.split('\n')) {
+      const padding = ' '.repeat(Math.max(0, innerW - stringWidth(chunk)));
       out.push(`  ${t.subtle('│')} ${t.dim(chunk)}${padding} ${t.subtle('│')}`);
     }
   }
@@ -435,6 +435,15 @@ export function thinkingSpinner(tipPool: string[] = []): {
 
 import { marked, Renderer } from 'marked';
 
+// 从 Renderer 基类方法签名提取 marked 的 token 类型，避免直接 import 的 CJS/ESM 命名空间冲突
+type HeadingToken    = Parameters<Renderer['heading']>[0];
+type ParagraphToken  = Parameters<Renderer['paragraph']>[0];
+type BlockquoteToken = Parameters<Renderer['blockquote']>[0];
+type ListToken       = Parameters<Renderer['list']>[0];
+type ListItemToken   = Parameters<Renderer['listitem']>[0];
+type TableToken      = Parameters<Renderer['table']>[0];
+type InlineTokens    = NonNullable<Parameters<Renderer['strong']>[0]['tokens']>;
+
 class TerminalRenderer extends Renderer {
   space(_token: { raw: string }): string { return '\n'; }
 
@@ -453,84 +462,175 @@ class TerminalRenderer extends Renderer {
     return t.faint(`[img: ${token.text || token.href}]`);
   }
 
-  /** 对 block 文本手动处理行内 markdown — marked v15 setOptions 不传递自定义 renderer 给行内解析器 */
-  private _inline(text: string): string {
-    return text
-      .replace(/`([^`]+)`/g, (_, c: string) => this.codespan({ text: c }))
-      .replace(/\*\*([^*]+)\*\*/g, (_, c: string) => this.strong({ text: c }))
-      .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, (_, c: string) => this.em({ text: c }))
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, txt: string, href: string) => this.link({ text: txt, href }))
-      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, txt: string, href: string) => this.image({ text: txt, href }));
+  /** 渲染行内 token 数组：marked 负责解析，我们负责映射终端样式 */
+  private _renderInline(tokens?: InlineTokens): string {
+    if (!tokens?.length) return '';
+    return this.parser.parseInline(tokens);
   }
 
-  heading(token: { text: string; depth: number }): string {
-    return `\n${s.bold(t.purple(this._inline(token.text)))}\n`;
+  heading(token: HeadingToken): string {
+    const content = this._renderInline(token.tokens);
+    const colors: Array<(s: string) => string> = [t.purple, t.blue, t.accent, t.dim, t.dim, t.dim];
+    const color = colors[Math.min(token.depth - 1, 5)]!;
+    return `\n${s.bold(color(content))}\n`;
   }
 
-  paragraph(token: { text: string }): string {
-    return this._inline(token.text) + '\n';
+  paragraph(token: ParagraphToken): string {
+    return this._renderInline(token.tokens) + '\n';
   }
 
-  hr(): string { return `\n${t.dim('─'.repeat(Math.min(tw() - 4, 80)))}\n`; }
+  hr(): string {
+    const w = Math.min(tw() - 4, 80);
+    const side = '─'.repeat(Math.max(0, Math.floor((w - 4) / 2)));
+    return `\n${t.subtle(side + ' ◆ ' + side)}\n`;
+  }
 
   code(token: { text: string; lang?: string }): string {
-    const lines = token.text.replace(/\n$/, '').split('\n');
     const W = Math.min(tw() - 4, 80);
-    const innerW = W - 4;
+    const BAR = t.accent('│');
     const langLabel = token.lang ? ` ${token.lang} ` : '';
-    const topBar = t.subtle('┌') + t.subtle('─'.repeat(2)) +
-      (token.lang ? t.dim(langLabel) : '') +
-      t.subtle('─'.repeat(Math.max(0, W - 4 - langLabel.length))) + t.subtle('┐');
+    // 顶框：┌─ [label] ─...─┐ → 左右 2 + 内容 W-4 + 左右 2 = W
+    const topBar = t.accent('┌─') +
+      (token.lang ? s.bold(t.accent(langLabel)) : '') +
+      t.accent('─'.repeat(Math.max(0, W - 4 - langLabel.length)) + '─┐');
+
     const out = [topBar];
-    for (const raw of lines) {
-      let remain = raw;
-      while (remain.length > 0) {
-        const chunk = remain.slice(0, innerW);
-        remain = remain.slice(innerW);
-        const pad = ' '.repeat(Math.max(0, innerW - visibleLen(chunk)));
-        out.push(t.subtle('│') + ' ' + t.faint(chunk) + pad + ' ' + t.subtle('│'));
-      }
+    const innerW = W - 4;
+    const content = token.text.replace(/\n$/, '');
+    const wrapped = wrapAnsi(content, innerW, { hard: true });
+    for (const line of wrapped.split('\n')) {
+      const padding = ' '.repeat(Math.max(0, innerW - stringWidth(line)));
+      out.push(BAR + ' ' + t.faint(line) + padding + ' ' + BAR);
     }
-    out.push(t.subtle('└') + t.subtle('─'.repeat(W - 2)) + t.subtle('┘'));
+    // 底框
+    out.push(t.accent('└' + '─'.repeat(W - 2) + '┘'));
     return '\n' + out.join('\n') + '\n';
   }
 
-  blockquote(token: { text: string }): string {
-    return token.text.split('\n').map(l => `${t.subtle('│')} ${t.dim(this._inline(l))}`).join('\n') + '\n';
+  blockquote(token: BlockquoteToken): string {
+    const inner = token.tokens?.length
+      ? this.parser.parse(token.tokens).trimEnd()
+      : token.text;
+    const bar = t.accent('▎');
+    return inner.split('\n').map(l => `${bar} ${t.dim(l)}`).join('\n') + '\n';
   }
 
-  list(token: { items: Array<{ text: string; task?: boolean; checked?: boolean }>; ordered: boolean; start?: number | '' }): string {
+  list(token: ListToken): string {
     let out = '';
     let n = typeof token.start === 'number' ? token.start : 1;
     for (const item of token.items) {
-      const bullet = token.ordered ? `${n}.` : '•';
-      const checkbox = item.task ? (item.checked ? '[X] ' : '[ ] ') : '';
-      out += `  ${t.accent(bullet)} ${checkbox}${this._inline(item.text)}\n`;
+      const bullet = token.ordered
+        ? t.blue(`${n}.`)
+        : t.accent('•');
+      let checkbox = '';
+      if (item.task) {
+        checkbox = item.checked ? t.success('[X] ') : t.faint('[ ] ');
+      }
+      // 从 item 的第一个文本块（paragraph 或 text）中提取行内 token 渲染
+      const firstBlock = item.tokens?.find(
+        (t): t is typeof t & { tokens: InlineTokens } => t.type === 'paragraph' || t.type === 'text',
+      );
+      const inlineContent = this._renderInline(firstBlock?.tokens ?? []);
+      out += `  ${t.accent(bullet)} ${checkbox}${inlineContent}\n`;
       if (token.ordered) n++;
     }
     return out + '\n';
   }
 
-  listitem(token: { text: string }): string { return this._inline(token.text); }
+  listitem(token: ListItemToken): string {
+    return token.tokens?.length ? this.parser.parse(token.tokens).trimEnd() : token.text;
+  }
 
-  table(token: { header: Array<{ text: string }>; rows: Array<Array<{ text: string }>>; align: Array<string | null> }): string {
-    const allRows = [token.header, ...token.rows];
+  table(token: TableToken): string {
     const colCount = token.header.length;
-    const colWidths: number[] = [];
+    const totalW = Math.min(tw() - 4, 80);
+    // 每列左右各 2 填充空格 + 列间 │
+    const cellPad = 4;
+    const overhead = colCount * (cellPad + 1) + 1;
+    const usableW = Math.max(colCount * 4, totalW - overhead);
+
+    const pad = (s: string, w: number): string => { const v = stringWidth(s); return s + ' '.repeat(Math.max(0, w - v)); };
+
+    // ── 预渲染 cell ──
+    const renderedHeader = token.header.map(c => this._renderInline(c.tokens));
+    const renderedRows = token.rows.map(row => row.map(c => this._renderInline(c.tokens)));
+
+    // ── 列宽分配：先保证每列内容测量宽度，再按比例分配剩余 ──
+    const rawMaxPerCol: number[] = [];
     for (let i = 0; i < colCount; i++) {
-      colWidths.push(Math.min(30, Math.max(4, ...allRows.map(r => visibleLen(r[i]?.text ?? '')))));
+      let maxW = stringWidth(renderedHeader[i]!);
+      for (const row of renderedRows) maxW = Math.max(maxW, stringWidth(row[i]!));
+      rawMaxPerCol.push(maxW);
     }
-    const pad = (s: string, w: number) => { const v = visibleLen(s); return s + ' '.repeat(Math.max(0, w - v)); };
-    const bar = t.subtle('│');
-    const sep = t.subtle('┼');
+    // 每列以内容宽度为起点（不超过可用总宽）
+    const colWidths: number[] = rawMaxPerCol.map(raw => Math.min(raw, usableW));
+    let allocSum = colWidths.reduce((a, b) => a + b, 0);
+
+    if (allocSum > usableW) {
+      // 内容总宽超过可用 → 等比例缩放，保底 4
+      const scale = usableW / allocSum;
+      for (let i = 0; i < colCount; i++) {
+        colWidths[i] = Math.max(4, Math.floor(colWidths[i]! * scale));
+      }
+      allocSum = colWidths.reduce((a, b) => a + b, 0);
+      let rrr = 0;
+      while (allocSum < usableW) { colWidths[rrr % colCount]!++; allocSum++; rrr++; }
+      while (allocSum > usableW) {
+        const mi = colWidths.indexOf(Math.max(...colWidths));
+        if (colWidths[mi]! <= 4) break;
+        colWidths[mi]!--; allocSum--;
+      }
+    } else if (allocSum < usableW) {
+      // 有剩余 → 轮询分配
+      let rrr = 0;
+      while (allocSum < usableW) { colWidths[rrr % colCount]!++; allocSum++; rrr++; }
+    }
+
+    // ── 按列宽换行 ──
+    const wrapCell = (content: string, w: number): string[] =>
+      stringWidth(content) <= w ? [content] : wrapAnsi(content, w, { hard: true, trim: false }).split('\n');
+    const headerWrapped = renderedHeader.map((c, i) => wrapCell(c, colWidths[i]!));
+    const rowsWrapped = renderedRows.map(row => row.map((c, i) => wrapCell(c, colWidths[i]!)));
+
+    // 行构建函数
+    const buildRow = (
+      cells: string[][],
+      barColor: (s: string) => string,
+      subColor: (s: string) => string,
+      cellWrap: (c: string) => string,
+    ): string[] => {
+      const maxLines = Math.max(...cells.map(c => c.length), 1);
+      const lines: string[] = [];
+      for (let line = 0; line < maxLines; line++) {
+        // 边框独立 ANSI，填充空格无色 — cell 内容保持自己的 ANSI 不被覆盖
+        const joinBar = barColor('│');
+        const leadingBar = line === 0 ? barColor('│') : subColor('┊');
+        const content = cells.map((c, i) => {
+          const text = c[line] ?? '';
+          return pad(cellWrap(text), colWidths[i]!);
+        }).join(`  ${joinBar}  `);
+        lines.push(leadingBar + '  ' + content + '  ' + barColor('│'));
+      }
+      return lines;
+    };
+
     const out: string[] = [];
-    out.push(t.subtle('┌' + colWidths.map(w => '─'.repeat(w + 2)).join('┬') + '┐'));
-    out.push(bar + ' ' + token.header.map((c, i) => pad(s.bold(this._inline(c.text)), colWidths[i]!)).join(` ${bar} `) + ' ' + bar);
-    out.push(t.subtle('├' + colWidths.map(w => '─'.repeat(w + 2)).join(sep) + '┤'));
-    for (const row of token.rows) {
-      out.push(bar + ' ' + row.map((c, i) => pad(this._inline(c.text), colWidths[i]!)).join(` ${bar} `) + ' ' + bar);
+
+    // 顶框：subtle
+    out.push(t.subtle('┌' + colWidths.map(w => '─'.repeat(w + cellPad)).join('┬') + '┐'));
+    // 表头：边框统一 subtle，cell 加粗
+    out.push(...buildRow(headerWrapped, t.subtle, t.subtle, (c) => s.bold(c)));
+    // 分隔线
+    out.push(t.subtle('├' + colWidths.map(w => '─'.repeat(w + cellPad)).join('┼') + '┤'));
+
+    // 数据行：边框统一 subtle，cell 内容不额外着色
+    for (let ri = 0; ri < rowsWrapped.length; ri++) {
+      const row = rowsWrapped[ri]!;
+      out.push(...buildRow(row, t.subtle, t.subtle, (c) => c));
     }
-    out.push(t.subtle('└' + colWidths.map(w => '─'.repeat(w + 2)).join('┴') + '┘'));
+
+    // 底框
+    out.push(t.subtle('└' + colWidths.map(w => '─'.repeat(w + cellPad)).join('┴') + '┘'));
     return '\n' + out.join('\n') + '\n';
   }
 
@@ -549,6 +649,73 @@ export function renderMarkdown(text: string): string {
     console.error('[renderMarkdown] parse failed:', (err as Error).message);
     return text;
   }
+}
+
+/** 行内 markdown 样式转换 — 流式输出时按行渲染，同时处理行前缀块级标记（标题/引用/列表） */
+export function renderInlineMarkdown(text: string): string {
+  const stash: string[] = [];
+  const NUL = String.fromCharCode(0);
+  let idx = 0;
+
+  const applyInline = (line: string): string => {
+    // image → 索引占位符（必须先于 link）
+    let result = line.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, txt: string, href: string) => {
+      stash[idx] = t.faint(`[img: ${txt || href}]`);
+      return NUL + String(idx++) + NUL;
+    });
+    // link → 索引占位符
+    result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, txt: string, href: string) => {
+      stash[idx] = `${txt} ${t.faint(href.slice(0, 60))}`;
+      return NUL + String(idx++) + NUL;
+    });
+    // 行内样式
+    result = result
+      .replace(/\*\*([^*]+)\*\*/g, (_m, c: string) => s.bold(c))
+      .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, (_m, c: string) => s.italic(c))
+      .replace(/`([^`]+)`/g, (_m, c: string) => cb(c, 255, 238))
+      .replace(/~~([^~]+)~~/g, (_m, c: string) => t.faint(c));
+    // 还原占位符
+    const unstashRe = new RegExp(NUL + '(\\d+)' + NUL, 'g');
+    return result.replace(unstashRe, (_m, i: string) => stash[+i] ?? '');
+  };
+
+  // 行前缀块级标记
+  const HEADING_RE = /^(#{1,6})\s+(.*)/;
+  const QUOTE_RE   = /^>\s?(.*)/;
+  const UL_RE      = /^[-*]\s+(.*)/;
+  const OL_RE      = /^(\d+)\.\s+(.*)/;
+  const FENCE_RE   = /^(`{3,}|~{3,})\s*(.*)/;  // 代码围栏
+  const PIPE_RE    = /^\|.+$/;                   // 类表格行（含 | 分隔）
+
+  const headingMatch = text.match(HEADING_RE);
+  if (headingMatch) {
+    const depth = headingMatch[1]!.length;
+    const colors: Array<(s: string) => string> = [t.purple, t.blue, t.accent, t.dim, t.dim, t.dim];
+    return s.bold(colors[Math.min(depth - 1, 5)]!(applyInline(headingMatch[2]!))) + '\n';
+  }
+  const fenceMatch = text.match(FENCE_RE);
+  if (fenceMatch) {
+    const lang = fenceMatch[2]!;
+    return t.accent(fenceMatch[1]!) + (lang ? s.bold(t.accent(' ' + lang + ' ')) : '') + '\n';
+  }
+  const pipeMatch = text.match(PIPE_RE);
+  if (pipeMatch) {
+    // 表格行：先 inline 样式，再 | 着色
+    return applyInline(text).replace(/\|/g, t.subtle('│'));
+  }
+  const quoteMatch = text.match(QUOTE_RE);
+  if (quoteMatch) {
+    return `${t.accent('▎')} ${t.dim(applyInline(quoteMatch[1]!))}\n`;
+  }
+  const ulMatch = text.match(UL_RE);
+  if (ulMatch) {
+    return `  ${t.accent('•')} ${applyInline(ulMatch[1]!)}\n`;
+  }
+  const olMatch = text.match(OL_RE);
+  if (olMatch) {
+    return `  ${t.blue(olMatch[1]! + '.')} ${applyInline(olMatch[2]!)}\n`;
+  }
+  return applyInline(text);
 }
 
 // ── 工具颜色映射 ──
@@ -619,18 +786,6 @@ export function approvalBox(toolName: string, label: string, detail?: string, la
 
 /** 字符串可见宽度（去除 ANSI 转义序列，CJK/全角字符计为 2 列） */
 function visibleLen(s: string): number {
-  const clean = s.replace(new RegExp(`${CSI.replace(/\[/g, '\\[')}[0-9;]*m`, 'g'), '');
-  let w = 0;
-  for (const ch of clean) {
-    const cp = ch.codePointAt(0) ?? 0;
-    if (cp >= 0x2E80 && cp <= 0x9FFF) { w += 2; }          // CJK Unified
-    else if (cp >= 0x3400 && cp <= 0x4DBF) { w += 2; }     // CJK Ext-A
-    else if (cp >= 0xFF00 && cp <= 0xFFEF) { w += 2; }     // Fullwidth forms
-    else if (cp >= 0x3000 && cp <= 0x303F) { w += 2; }     // CJK Symbols
-    else if (cp >= 0x2190 && cp <= 0x21FF) { w += 2; }     // Arrows (↑↓→←)
-    else if (cp >= 0x2600 && cp <= 0x27BF) { w += 2; }     // Misc Symbols (⚡◆▶★)
-    else { w += 1; }
-  }
-  return w;
+  return stringWidth(s);
 }
 
