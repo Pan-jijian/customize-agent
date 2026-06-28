@@ -229,10 +229,33 @@ export function toolCallStart(toolName: string, args?: Record<string, unknown>):
   return `  ${t.accent('▸')} ${t.accent(s.bold(toolName))}${formatArgs(args)}`;
 }
 
-export function toolCallEnd(status: 'success' | 'error', detail?: string): string {
+export function toolCallEnd(status: 'success' | 'error', detail?: string, durationMs?: number): string {
   const mark = status === 'success' ? `  ${t.success('✓')}` : `  ${t.error('✗')}`;
   const extra = detail ? ` ${t.faint(detail.slice(0, 80))}` : '';
-  return `${mark}${extra}`;
+  const dur = durationMs ? ` ${t.faint(`[${(durationMs / 1000).toFixed(1)}s]`)}` : '';
+  return `${mark}${extra}${dur}`;
+}
+
+/** 同类工具折叠 — 进行中 */
+export function toolCallFolding(toolName: string, count: number, latest: string, elapsedMs?: number): string {
+  const color = toolColor(toolName);
+  const argsStr = latest ? ` ${t.faint(latest.slice(0, 60))}` : '';
+  const dur = elapsedMs ? t.faint(` ${(elapsedMs / 1000).toFixed(1)}s`) : '';
+  return `\r\x1b[2K  ${color('▸')} ${color(s.bold(toolName))} ${t.dim(`(${count})`)}${argsStr}${dur}\r`;
+}
+
+/** 同类工具折叠 — 完成摘要，write_file 时附带 diff 预览 */
+export function toolCallFold(toolName: string, count: number, args: string[], _totalMs?: number, diffResult?: string): string {
+  const color = toolColor(toolName);
+  const valid = args.filter(a => a);
+  const preview = valid.length > 0
+    ? ` · ${valid.slice(0, 4).map(a => t.faint(a.slice(0, 40))).join(t.dim(', '))}${valid.length > 4 ? t.dim(` …${valid.length - 4} more`) : ''}`
+    : '';
+  let out = `  ${t.success('✓')} ${color(`${count}× ${toolName}`)}${preview}`;
+  if (diffResult) {
+    out += '\n' + renderDiff(diffResult, 12);
+  }
+  return out;
 }
 
 /** 渲染 unified diff 预览（modify_file 专用） */
@@ -257,17 +280,293 @@ export function renderDiff(diffText: string, maxLines = 30): string {
 
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-export function spinnerStart(label?: string): () => void {
-  const text = label ?? 'Thinking…';
+/** 基础 spinner（非思考场景使用） */
+export function spinnerStart(label?: string): { stop: () => void; update: (text: string) => void; tick: () => void } {
+  let text = label ?? 'Thinking…';
   let idx = 0;
-  const interval = setInterval(() => {
+  const redraw = () => {
     process.stdout.write('\r  ' + t.accent(SPIN[idx % SPIN.length]!) + ' ' + t.dim(text));
-    idx++;
-  }, 100);
-  return () => {
-    clearInterval(interval);
-    process.stdout.write('\r\x1b[2K');
   };
+  const interval = setInterval(() => { idx++; redraw(); }, 100);
+  return {
+    update: (t: string) => { text = t; redraw(); },
+    tick: () => { redraw(); },
+    stop: () => {
+      clearInterval(interval);
+      process.stdout.write('\r\x1b[2K');
+    },
+  };
+}
+
+// ── 思考链渲染（参考 Claude Code 三阶段模式） ──
+
+/** Phase 1 — 思考进行中实时状态行（始终 2 行结构，保证回退覆写一致） */
+export function thinkingLive(frame: string, elapsed: string, tokens: string, subtitle: string): string {
+  const head = `  ${t.accent(frame)} ${t.text('Thinking…')} ${t.dim(`(${elapsed} · ↓ ${tokens} tokens)`)}`;
+  // 始终 2 行：subtitle 为空时也占一行（空白），保证 line count 固定 = 2
+  const sub = subtitle
+    ? `\n  ${t.subtle('⎿')}  ${t.faint(subtitle)}`
+    : '\n ';
+  return head + sub;
+}
+
+/** Phase 2 — 思考完成折叠摘要 */
+export function thinkingSummary(time: string, tokens: string, expandHint: string): string {
+  return `  ${t.success('✓')} ${t.text('Thought for')} ${t.dim(time)} ${t.text('·')} ${t.dim(`↓ ${tokens} tokens`)}  ${t.faint(expandHint)}`;
+}
+
+/** Phase 3 — 展开完整思考（dim 内容 + 边框） */
+export function thinkingExpanded(content: string, boxTitle: string): string {
+  const W = Math.min(tw() - 4, 80);
+  const innerW = W - 4;
+  const lines = content.split('\n');
+  const out: string[] = [];
+
+  out.push(`  ${t.subtle('┌─')} ${s.bold(t.purple(boxTitle))} ${t.subtle('─'.repeat(Math.max(0, W - 5 - visibleLen(boxTitle))))}${t.subtle('┐')}`);
+
+  for (const raw of lines) {
+    let remain = raw;
+    while (remain.length > 0) {
+      const chunk = remain.slice(0, innerW);
+      remain = remain.slice(innerW);
+      const padding = ' '.repeat(Math.max(0, innerW - visibleLen(chunk)));
+      out.push(`  ${t.subtle('│')} ${t.dim(chunk)}${padding} ${t.subtle('│')}`);
+    }
+  }
+
+  out.push(`  ${t.subtle('└')}${t.subtle('─'.repeat(W - 2))}${t.subtle('┘')}`);
+  return out.join('\n');
+}
+
+/** 从 thinking 缓冲中提取动态 subtitle（最后一句，限长） */
+export function extractThinkingSubtitle(buf: string, maxLen = 60): string {
+  if (!buf) return '';
+  const lines = buf.split('\n').filter(l => l.trim());
+  let last = lines[lines.length - 1]?.trim() || '';
+  last = last.replace(/^(I |Let me |First, |Next, |Then, |Also, |Now, |So, |We |The )/, '');
+  if (last.length > maxLen) last = last.slice(0, maxLen - 3) + '...';
+  return last;
+}
+
+/**
+ * 思考专用 spinner（Phase 1/2）。
+ * tipPool: subtitle 为空时 fallback 的提示文本池，每次 thinkStart 随机选一条。
+ */
+export function thinkingSpinner(tipPool: string[] = []): {
+  stop: () => void;
+  thinkStart: () => void;
+  thinkTick: (elapsedMs: number, tokens: number, subtitle: string) => void;
+  thinkDone: (elapsedMs: number, tokens: number, expandHint: string) => void;
+} {
+  let idx = 0;
+  let state: { elapsedMs: number; tokens: number; subtitle: string } = { elapsedMs: 0, tokens: 0, subtitle: '' };
+  let interval: ReturnType<typeof setInterval> | null = null;
+  let done = false;
+  let linesOnScreen = 0; // 0 或 2
+  let currentTip = '';
+
+  const pickTip = () => {
+    currentTip = tipPool.length > 0 ? tipPool[Math.floor(Math.random() * tipPool.length)]! : '';
+  };
+
+  const formatTime = (ms: number): string => {
+    if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    return `${m}m ${s % 60}s`;
+  };
+
+  const formatTokens = (n: number): string => {
+    if (n < 1000) return `${n}`;
+    return `${(n / 1000).toFixed(1)}K`;
+  };
+
+  const redraw = () => {
+    if (done || linesOnScreen === 0) return;
+    const frame = SPIN[idx % SPIN.length]!;
+    const elapsed = formatTime(state.elapsedMs);
+    const tok = formatTokens(state.tokens);
+    const sub = state.subtitle || currentTip || '';
+    const lines = thinkingLive(frame, elapsed, tok, sub).split('\n');
+    // 光标在 Sub 行（N+1）→ \x1b[1A 回到 Head 行（N）→ 覆写 → 换行到 N+1 → 覆写 Sub → \r
+    process.stdout.write(`\x1b[1A\r\x1b[2K${lines[0]}\n\x1b[2K${lines[1]}\r`);
+  };
+
+  return {
+    thinkStart: () => {
+      idx = 0;
+      state = { elapsedMs: 0, tokens: 0, subtitle: '' };
+      done = false;
+      pickTip();
+      // 预留 2 行空白 → 回退 1 行到 Head 行 → 首次绘制
+      process.stdout.write('\n\n\x1b[1A');
+      linesOnScreen = 2;
+      redraw();
+      if (!interval) interval = setInterval(() => { idx++; redraw(); }, 100);
+    },
+    thinkTick: (elapsedMs: number, tokens: number, subtitle: string) => {
+      state = { elapsedMs, tokens, subtitle };
+    },
+    thinkDone: (elapsedMs: number, tokens: number, expandHint: string) => {
+      if (interval) { clearInterval(interval); interval = null; }
+      done = true;
+      if (linesOnScreen === 0) return;
+      const time = formatTime(elapsedMs);
+      const tok = formatTokens(tokens);
+      // 光标在 Sub 行（N+1）→ \x1b[1A 回到 Head 行（N）→ 写摘要 → \x1b[0J 清残留 → \n
+      process.stdout.write(
+        `\x1b[1A\r\x1b[2K${thinkingSummary(time, tok, expandHint)}\x1b[0J\n`
+      );
+      linesOnScreen = 0;
+    },
+    stop: () => {
+      if (interval) { clearInterval(interval); interval = null; }
+      done = true;
+      if (linesOnScreen > 0) {
+        process.stdout.write(`\x1b[1A\r\x1b[2K\x1b[0J`);
+        linesOnScreen = 0;
+      }
+    },
+  };
+}
+
+// ── Markdown 渲染（marked v15 自定义 Renderer，不依赖 marked-terminal） ──
+
+import { marked, Renderer } from 'marked';
+
+class TerminalRenderer extends Renderer {
+  space(_token: { raw: string }): string { return '\n'; }
+
+  text(token: { text: string }): string { return token.text; }
+
+  // 行内元素 — 直接被 marked 块级渲染器调用（段落/标题内）
+  strong(token: { text: string }): string { return s.bold(token.text); }
+  em(token: { text: string }): string { return s.italic(token.text); }
+  del(token: { text: string }): string { return t.faint(token.text); }
+  codespan(token: { text: string }): string { return cb(token.text, 255, 238); }
+
+  link(token: { href: string; text: string }): string {
+    return `${token.text} ${t.faint(token.href.slice(0, 60))}`;
+  }
+  image(token: { href: string; text: string }): string {
+    return t.faint(`[img: ${token.text || token.href}]`);
+  }
+
+  /** 对 block 文本手动处理行内 markdown — marked v15 setOptions 不传递自定义 renderer 给行内解析器 */
+  private _inline(text: string): string {
+    return text
+      .replace(/`([^`]+)`/g, (_, c: string) => this.codespan({ text: c }))
+      .replace(/\*\*([^*]+)\*\*/g, (_, c: string) => this.strong({ text: c }))
+      .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, (_, c: string) => this.em({ text: c }))
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, txt: string, href: string) => this.link({ text: txt, href }))
+      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, txt: string, href: string) => this.image({ text: txt, href }));
+  }
+
+  heading(token: { text: string; depth: number }): string {
+    return `\n${s.bold(t.purple(this._inline(token.text)))}\n`;
+  }
+
+  paragraph(token: { text: string }): string {
+    return this._inline(token.text) + '\n';
+  }
+
+  hr(): string { return `\n${t.dim('─'.repeat(Math.min(tw() - 4, 80)))}\n`; }
+
+  code(token: { text: string; lang?: string }): string {
+    const lines = token.text.replace(/\n$/, '').split('\n');
+    const W = Math.min(tw() - 4, 80);
+    const innerW = W - 4;
+    const langLabel = token.lang ? ` ${token.lang} ` : '';
+    const topBar = t.subtle('┌') + t.subtle('─'.repeat(2)) +
+      (token.lang ? t.dim(langLabel) : '') +
+      t.subtle('─'.repeat(Math.max(0, W - 4 - langLabel.length))) + t.subtle('┐');
+    const out = [topBar];
+    for (const raw of lines) {
+      let remain = raw;
+      while (remain.length > 0) {
+        const chunk = remain.slice(0, innerW);
+        remain = remain.slice(innerW);
+        const pad = ' '.repeat(Math.max(0, innerW - visibleLen(chunk)));
+        out.push(t.subtle('│') + ' ' + t.faint(chunk) + pad + ' ' + t.subtle('│'));
+      }
+    }
+    out.push(t.subtle('└') + t.subtle('─'.repeat(W - 2)) + t.subtle('┘'));
+    return '\n' + out.join('\n') + '\n';
+  }
+
+  blockquote(token: { text: string }): string {
+    return token.text.split('\n').map(l => `${t.subtle('│')} ${t.dim(this._inline(l))}`).join('\n') + '\n';
+  }
+
+  list(token: { items: Array<{ text: string; task?: boolean; checked?: boolean }>; ordered: boolean; start?: number | '' }): string {
+    let out = '';
+    let n = typeof token.start === 'number' ? token.start : 1;
+    for (const item of token.items) {
+      const bullet = token.ordered ? `${n}.` : '•';
+      const checkbox = item.task ? (item.checked ? '[X] ' : '[ ] ') : '';
+      out += `  ${t.accent(bullet)} ${checkbox}${this._inline(item.text)}\n`;
+      if (token.ordered) n++;
+    }
+    return out + '\n';
+  }
+
+  listitem(token: { text: string }): string { return this._inline(token.text); }
+
+  table(token: { header: Array<{ text: string }>; rows: Array<Array<{ text: string }>>; align: Array<string | null> }): string {
+    const allRows = [token.header, ...token.rows];
+    const colCount = token.header.length;
+    const colWidths: number[] = [];
+    for (let i = 0; i < colCount; i++) {
+      colWidths.push(Math.min(30, Math.max(4, ...allRows.map(r => visibleLen(r[i]?.text ?? '')))));
+    }
+    const pad = (s: string, w: number) => { const v = visibleLen(s); return s + ' '.repeat(Math.max(0, w - v)); };
+    const bar = t.subtle('│');
+    const sep = t.subtle('┼');
+    const out: string[] = [];
+    out.push(t.subtle('┌' + colWidths.map(w => '─'.repeat(w + 2)).join('┬') + '┐'));
+    out.push(bar + ' ' + token.header.map((c, i) => pad(s.bold(this._inline(c.text)), colWidths[i]!)).join(` ${bar} `) + ' ' + bar);
+    out.push(t.subtle('├' + colWidths.map(w => '─'.repeat(w + 2)).join(sep) + '┤'));
+    for (const row of token.rows) {
+      out.push(bar + ' ' + row.map((c, i) => pad(this._inline(c.text), colWidths[i]!)).join(` ${bar} `) + ' ' + bar);
+    }
+    out.push(t.subtle('└' + colWidths.map(w => '─'.repeat(w + 2)).join('┴') + '┘'));
+    return '\n' + out.join('\n') + '\n';
+  }
+
+  html(token: { text: string }): string { return token.text; }
+}
+
+marked.setOptions({ renderer: new TerminalRenderer() });
+
+export function renderMarkdown(text: string): string {
+  if (!text) return '';
+  try {
+    const pre = text.replace(/\n{3,}/g, '\n\n');
+    const parsed = marked.parse(pre, { async: false }) as string;
+    return parsed.split('\n').map(l => l ? `  ${l}` : l).join('\n');
+  } catch (err) {
+    console.error('[renderMarkdown] parse failed:', (err as Error).message);
+    return text;
+  }
+}
+
+// ── 工具颜色映射 ──
+
+const TOOL_COLOR: Record<string, (s: string) => string> = {
+  read_file: t.blue,
+  list_files: t.blue,
+  search: t.blue,
+  lsp_definition: t.purple,
+  lsp_references: t.purple,
+  lsp_diagnostics: t.purple,
+  write_file: t.accent,
+  execute_command: t.warning,
+  git_commit: t.success,
+};
+
+function toolColor(name: string): (s: string) => string {
+  return TOOL_COLOR[name] ?? t.accent;
 }
 
 // ── 状态消息 ──

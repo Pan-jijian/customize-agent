@@ -1,6 +1,7 @@
 import { execa } from 'execa';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { rgPath } from '@vscode/ripgrep';
 import glob from 'fast-glob';
 
 /** 搜索结果条目 */
@@ -35,22 +36,27 @@ export class CodeSearcher {
     this.cwd = cwd;
   }
 
-  /** 执行文本搜索：ripgrep 优先，不可用时降级 fast-glob + 行扫描 */
+  /** 执行文本搜索：@vscode/ripgrep 内置二进制 */
   async grep(pattern: string, options: SearchOptions = {}): Promise<SearchMatch[]> {
     const maxResults = options.maxResults ?? 50;
-
-    // 优先使用 ripgrep
     try {
       return await this._rgSearch(pattern, options, maxResults);
     } catch {
-      // rg 不可用 → 降级为纯 JS 实现
-      console.warn('[CodeSearcher] ripgrep unavailable, falling back to JS search');
       return this._jsSearch(pattern, options, maxResults);
     }
   }
 
   private async _rgSearch(pattern: string, options: SearchOptions, maxResults: number): Promise<SearchMatch[]> {
-    const args: string[] = ['--no-heading', '--with-filename', '--line-number', '--max-count', String(maxResults)];
+    const args: string[] = [
+      '--no-heading', '--with-filename', '--line-number',
+      '--max-count', String(maxResults),
+      '--max-filesize', '1M',
+      // 排除大型自动生成目录，避免搜索卡死
+      '-g', '!node_modules',
+      '-g', '!.git',
+      '-g', '!dist',
+      '-g', '!.pnpm',
+    ];
 
     if (!options.caseSensitive) {
       args.push('--ignore-case');
@@ -67,11 +73,11 @@ export class CodeSearcher {
       args.push('--', pattern);
     }
 
-    const result = await execa({
+    const result = await execa(rgPath, args, {
       cwd: this.cwd,
       reject: false,
       timeout: 30_000,
-    })`rg ${args}`;
+    });
 
     if (result.exitCode !== 0 && result.exitCode !== 1) {
       throw new Error(result.stderr || 'ripgrep 搜索异常');

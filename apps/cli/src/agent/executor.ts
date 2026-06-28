@@ -4,7 +4,7 @@ import { ContextManager as ContextManagerImpl } from '@customize-agent/engine';
 import type { Message, ToolCall } from '@customize-agent/types';
 import type { I18nManager } from '../i18n/manager.js';
 import { buildSystemPrompt } from './prompt.js';
-import { t, taskComplete, taskWarning, toolCallStart, toolCallEnd, renderDiff, contextCompacting, contextCompacted, contextStats, spinnerStart } from '../tui/renderer.js';
+import { t, taskWarning, toolCallFold, toolCallFolding, renderMarkdown, contextCompacting, contextCompacted, contextStats, spinnerStart, thinkingSpinner, extractThinkingSubtitle } from '../tui/renderer.js';
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
@@ -16,7 +16,7 @@ const OTHER_OUTPUT_LIMIT = 8000;
 /** 工具审批回调 */
 export type ApprovalHandler = (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
 
-export interface RunTaskOptions { readonly?: boolean; }
+export interface RunTaskOptions { readonly?: boolean; onWrite?: (text: string) => void; }
 
 export interface ExecutorConfig {
   provider: ILLMProvider;
@@ -30,6 +30,8 @@ export interface ExecutorConfig {
   repoMap?: string;
   maxIterations?: number;
   stream?: boolean;
+  /** Ink 渲染回调：替代 process.stdout.write */
+  onWrite?: (text: string) => void;
 }
 
 export class AgentExecutor {
@@ -44,6 +46,10 @@ export class AgentExecutor {
   private repoMap: string | undefined;
   private maxIterations: number;
   private stream: boolean;
+  private onWrite?: (text: string) => void;
+  /** 最近一次 thinking 完整内容（ctrl+o 展开用） */
+  private _lastThinkingContent = '';
+  get lastThinkingContent(): string { return this._lastThinkingContent; }
 
   constructor(config: ExecutorConfig) {
     this.provider = config.provider;
@@ -57,6 +63,7 @@ export class AgentExecutor {
     this.repoMap = config.repoMap;
     this.maxIterations = config.maxIterations ?? 200;
     this.stream = config.stream ?? true;
+    this.onWrite = config.onWrite;
   }
 
   getSystemPrompt(): string {
@@ -65,6 +72,25 @@ export class AgentExecutor {
     return buildSystemPrompt(content, this.repoMap);
   }
   get providerName(): string { return `${this.provider.name}/${this.provider.modelName}`; }
+
+  /** 从 tool args 提取文件路径或首参数用于折叠摘要 */
+  private _formatArg(args?: Record<string, unknown>): string {
+    if (!args) return '';
+    const val = args.path ?? args.query ?? args.pattern ?? args.filePath ?? args.command ?? args.input;
+    if (typeof val !== 'string' || val.length === 0) return '';
+    if (val.length <= 50) return val;
+    // shell 命令不缩略
+    if (args.command || args.input) return val.slice(0, 47) + '...';
+    // 长文件路径：保留最后 2 层
+    const parts = val.split('/');
+    if (parts.length > 2) return '…/' + parts.slice(-2).join('/');
+    return val.slice(0, 47) + '...';
+  }
+
+  /** 统一输出：onWrite 回调优先，否则 process.stdout */
+  private _write(text: string): void {
+    if (this.onWrite) { this.onWrite(text); } else { process.stdout.write(text); }
+  }
 
   /** 最后一次 LLM 调用消耗的 prompt token 数 */
   private _lastPromptTokens = 0;
@@ -88,6 +114,10 @@ export class AgentExecutor {
   async runTask(messages: Message[], options?: RunTaskOptions): Promise<Message[]> {
     const working = [...messages];
     const readonly = options?.readonly ?? false;
+    // 临时覆盖 onWrite（options 优先级高于 config）
+    const prevOnWrite = this.onWrite;
+    if (options?.onWrite) this.onWrite = options.onWrite;
+    try {
 
     const allTools = this.registry.listAll();
     const filteredTools = readonly
@@ -100,34 +130,93 @@ export class AgentExecutor {
       parameters: tool.parameters as FunctionDefinition['parameters'],
     }));
 
+    let totalPrompt = 0;
+    let totalCompletion = 0;
+    let tokenSummaryShown = false;
+    let lastRound = 0;
+    const taskStartMs = Date.now();
+    const fmt = (n: number) => n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}K`;
+
+    const showTokenSummary = () => {
+      if (tokenSummaryShown || totalPrompt === 0) return;
+      tokenSummaryShown = true;
+      const elapsed = ((Date.now() - taskStartMs) / 1000).toFixed(1);
+      const pLabel = this.i18n?.t('token.prompt') ?? 'prompt';
+      const oLabel = this.i18n?.t('token.output') ?? 'output';
+      const rLabel = this.i18n?.t('token.rounds') ?? 'rounds';
+      process.stdout.write(`  ${t.faint(`${fmt(totalPrompt)} ${pLabel} · ${fmt(totalCompletion)} ${oLabel} · ${lastRound} ${rLabel} · ${elapsed}s`)}\n`);
+    };
+
     for (let round = 1; round <= this.maxIterations; round++) {
+      lastRound = round;
       // ── 每轮主动检查上下文 ──
       await this._maybeCompact(working);
 
       const response = await this._callLLM(working, tools);
-      // 记录真实 token 使用量
-      if (response.usage) this._lastPromptTokens = response.usage.promptTokens;
+      // 累加 token（任务结束时统一输出一行汇总）
+      if (response.usage) {
+        this._lastPromptTokens = response.usage.promptTokens;
+        totalPrompt += response.usage.promptTokens;
+        totalCompletion += response.usage.completionTokens ?? 0;
+      }
 
       const assistantMsg: Message = { role: 'assistant', content: response.content, toolCalls: response.toolCalls };
       working.push(assistantMsg);
 
-      const hasFinishTag = response.content.includes('<task_finish>');
+      // 仅当 content 末尾有完整闭合的 <task_finish>...</task_finish> 时才视为停止信号
+      const hasFinishTag = /<task_finish>[\s\S]*<\/task_finish>\s*$/.test(response.content);
 
       if (!response.toolCalls?.length) {
         if (hasFinishTag) {
-          const m = response.content.match(/<task_finish>([\s\S]*?)<\/task_finish>/);
-          let summary = m?.[1]?.trim() || '';
-          if (summary.length > 120) summary = summary.slice(0, 117) + '...';
-          process.stdout.write(taskComplete(this.i18n?.t('status.task_complete'), summary || undefined));
+          showTokenSummary();
           break;
         }
-        continue;
+        // 模型返回了内容但无工具调用也无完成标签 → 自然结束
+        if (!response.content?.trim()) break;
+        break;
       }
 
+      // 同类工具折叠（参考 Claude Code collapseReadSearchGroups）
+      let foldType = '';
+      let foldCount = 0;
+      let foldArgs: string[] = [];
+      let foldTotalMs = 0;
+      let foldDiff = '';
+      let foldStartMs = 0;
+
+      const flushFold = () => {
+        if (foldCount === 0) return;
+        if (this.stream) {
+          process.stdout.write('\r\x1b[2K' + toolCallFold(foldType, foldCount, foldArgs, foldTotalMs, foldDiff) + '\n');
+        }
+        foldType = ''; foldCount = 0; foldArgs = []; foldTotalMs = 0; foldDiff = ''; foldStartMs = 0;
+      };
+
       for (const tc of response.toolCalls) {
-        const toolResult = await this._executeTool(tc);
-        working.push({ role: 'tool', content: toolResult, toolCallId: tc.id });
+        if (tc.name === foldType) {
+          foldCount++;
+          foldArgs.push(this._formatArg(tc.arguments));
+          if (this.stream) {
+            process.stdout.write(toolCallFolding(tc.name, foldCount, foldArgs[foldArgs.length - 1]!, Date.now() - foldStartMs));
+          }
+        } else {
+          flushFold();
+          foldType = tc.name;
+          foldCount = 1;
+          foldArgs = [this._formatArg(tc.arguments)];
+          foldTotalMs = 0;
+          foldStartMs = Date.now();
+          if (this.stream) {
+            process.stdout.write(toolCallFolding(tc.name, 1, foldArgs[0]!, 0));
+          }
+        }
+        const { result, duration } = await this._executeTool(tc);
+        foldTotalMs += duration;
+        // write_file 保存 diff 结果供渲染
+        if (tc.name === 'write_file' && result) foldDiff = result;
+        working.push({ role: 'tool', content: result, toolCallId: tc.id });
       }
+      flushFold();
 
       if (this.controller) {
         const lastTc = response.toolCalls[response.toolCalls.length - 1]!;
@@ -143,7 +232,11 @@ export class AgentExecutor {
       }
     }
 
+    showTokenSummary();
     return working;
+  } finally {
+    this.onWrite = prevOnWrite;
+  }
   }
 
   /** 每轮水位检查：60% 警告 → 75% 轻量裁剪 → 85% LLM 摘要（委托给 ContextManager） */
@@ -170,12 +263,13 @@ export class AgentExecutor {
     messages: Message[],
     tools: FunctionDefinition[],
   ): Promise<{ content: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } }> {
+    const opts = { tools };
     if (this.stream) return this._streamChat(messages, tools);
-    const stop = spinnerStart(this.i18n?.t('stream.thinking'));
-    const response = await this.provider.chat(messages, { tools });
-    stop();
-    const displayContent = response.content.replace(/<task_finish>[\s\S]*?<\/task_finish>/g, '').trim();
-    if (displayContent) process.stdout.write(displayContent + '\n');
+    const spin = spinnerStart(this.i18n?.t('stream.thinking'));
+    const response = await this.provider.chat(messages, { ...opts, maxTokens: 32000 });
+    spin.stop();
+    const displayContent = response.content.replace(/<task_finish>[\s\S]*?<\/task_finish>\n*/g, '').trim();
+    if (displayContent) this._write(renderMarkdown(displayContent) + '\n');
     return { content: response.content, toolCalls: response.toolCalls, usage: response.usage };
   }
 
@@ -185,74 +279,109 @@ export class AgentExecutor {
   ): Promise<{ content: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } }> {
     let content = '';
     const toolCalls: ToolCall[] = [];
-    // spinner 在第一个 chunk 到达时停止
-    const stopSpinner = spinnerStart(this.i18n?.t('stream.thinking'));
+    const spin = spinnerStart(this.i18n?.t('stream.thinking'));
     let spinnerStopped = false;
-    let firstThink = true;
-    // <task_finish> 标签过滤缓冲区（仅用于展示过滤，不影响 content 累积）
-    const TAG_LEN = '<task_finish>'.length; // 13
-    let tagBuf = '';
-    let inTag = false;
+
+    // 思考链状态行（参考 Claude Code: 思考内容不入主流，替换为实时状态行）
+    const tips = this.i18n?.tList('think.tips') ?? [];
+    const think = thinkingSpinner(tips);
+    let thinkActive = false;
+    let thinkStartMs = 0;
+    let thinkTokens = 0;
 
     const stopSpin = () => {
-      if (!spinnerStopped) { stopSpinner(); spinnerStopped = true; }
+      if (!spinnerStopped) { spin.stop(); spinnerStopped = true; }
     };
 
-    const writeContent = (text: string) => {
-      for (const ch of text) {
-        tagBuf += ch;
-        if (!inTag && tagBuf.endsWith('<task_finish>')) {
-          // 回退已输出的标签起始部分
-          const clean = tagBuf.slice(0, -TAG_LEN);
-          if (clean) process.stdout.write(clean);
-          tagBuf = ''; inTag = true;
-        } else if (inTag && tagBuf.endsWith('</task_finish>')) {
-          tagBuf = ''; inTag = false;
-        } else if (!inTag && tagBuf.length > TAG_LEN) {
-          // 缓冲足够大且确认不在标签内，安全输出前缀
-          process.stdout.write(tagBuf.slice(0, -TAG_LEN));
-          tagBuf = tagBuf.slice(-TAG_LEN);
-        }
-      }
+    const flushThink = () => {
+      if (!thinkActive) return;
+      const elapsed = Date.now() - thinkStartMs;
+      think.thinkDone(elapsed, thinkTokens, this.i18n?.t('think.expand_hint') ?? '(ctrl+o to expand thinking)');
+      thinkActive = false;
     };
 
-    const flushTagBuf = () => {
-      if (!inTag && tagBuf) process.stdout.write(tagBuf);
-      tagBuf = ''; inTag = false;
-    };
+    // ── 段落级流式：完整段落直接输出，当前段落缓冲 ──
+    let paraBuf = '';
+    let insideTaskFinish = false;
 
     const response = await this.provider.chatStream(messages, (chunk: StreamChunk) => {
       switch (chunk.type) {
         case 'content':
           stopSpin();
-          writeContent(chunk.text);
+          flushThink();
           content += chunk.text;
+          paraBuf += chunk.text;
+
+          // task_finish 状态机
+          if (insideTaskFinish) {
+            const ei = paraBuf.indexOf('</task_finish>');
+            if (ei !== -1) {
+              paraBuf = paraBuf.slice(ei + '</task_finish>'.length);
+              insideTaskFinish = false;
+            } else { paraBuf = ''; }
+          } else if (paraBuf.includes('<task_finish>')) {
+            const si = paraBuf.indexOf('<task_finish>');
+            if (si > 0) process.stdout.write(renderMarkdown(paraBuf.slice(0, si)));
+            paraBuf = paraBuf.slice(si + '<task_finish>'.length);
+            insideTaskFinish = true;
+            const ei = paraBuf.indexOf('</task_finish>');
+            if (ei !== -1) {
+              paraBuf = paraBuf.slice(ei + '</task_finish>'.length);
+              insideTaskFinish = false;
+            } else { paraBuf = ''; }
+          }
+
+          // flush 完整段落
+          while (!insideTaskFinish) {
+            const pb = paraBuf.indexOf('\n\n');
+            if (pb === -1) break;
+            const block = paraBuf.slice(0, pb + 2);
+            paraBuf = paraBuf.slice(pb + 2);
+            if (block.trim()) process.stdout.write(renderMarkdown(block));
+          }
           break;
         case 'thinking':
           stopSpin();
-          if (firstThink) { process.stdout.write('\n'); firstThink = false; }
-          process.stdout.write(t.faint(chunk.text));
+          if (!thinkActive) {
+            thinkActive = true;
+            thinkStartMs = Date.now();
+            thinkTokens = 0;
+            this._lastThinkingContent = '';
+            think.thinkStart();
+          }
+          this._lastThinkingContent += chunk.text;
+          thinkTokens += Math.ceil(chunk.text.length / 4);
+          think.thinkTick(Date.now() - thinkStartMs, thinkTokens, extractThinkingSubtitle(this._lastThinkingContent));
           break;
         case 'tool_call':
           toolCalls.push(chunk.call);
           break;
         case 'reset':
+          if (thinkActive) { think.stop(); thinkActive = false; }
           process.stdout.write('\x1b[1G\x1b[2K');
-          content = ''; toolCalls.length = 0; firstThink = true;
-          tagBuf = ''; inTag = false;
+          content = ''; toolCalls.length = 0;
+          paraBuf = ''; insideTaskFinish = false;
           break;
         case 'done':
           stopSpin();
-          flushTagBuf();
+          flushThink();
+          insideTaskFinish = false;
+          if (paraBuf.trim()) process.stdout.write(renderMarkdown(paraBuf));
+          paraBuf = '';
           if (content || toolCalls.length) process.stdout.write('\n');
           break;
+        case 'error':
+          stopSpin();
+          if (thinkActive) { think.stop(); thinkActive = false; }
+          process.stdout.write(t.error(chunk.message ?? 'Stream error') + '\n');
+          break;
       }
-    }, { tools });
+    }, { tools, maxTokens: 32000 });
 
     return { content, toolCalls: toolCalls.length > 0 ? toolCalls : undefined, usage: response.usage };
   }
 
-  private async _executeTool(tc: ToolCall): Promise<string> {
+  private async _executeTool(tc: ToolCall): Promise<{ result: string; duration: number }> {
     const name = tc.name;
     const args = tc.arguments;
     const label = this.i18n?.toolLabel(name) ?? name;
@@ -260,49 +389,40 @@ export class AgentExecutor {
     // 权限检查
     if (this.permissionEngine) {
       const perm = this.permissionEngine.check(name, args);
-      if (perm === 'deny') return this.i18n?.t('executor.security_policy_deny', { label }) ?? `[Denied] ${label}`;
+      if (perm === 'deny') {
+        const msg = this.i18n?.t('executor.security_policy_deny', { label }) ?? `[Denied] ${label}`;
+        return { result: msg, duration: 0 };
+      }
       if (perm === 'ask') {
         if (this.approvalHandler) {
           const ok = await this.approvalHandler(name, args);
-          if (!ok) return this.i18n?.t('executor.user_cancelled', { label }) ?? `[Cancelled] ${label}`;
+          if (!ok) {
+            const msg = this.i18n?.t('executor.user_cancelled', { label }) ?? `[Cancelled] ${label}`;
+            return { result: msg, duration: 0 };
+          }
         } else {
-          return this.i18n?.t('executor.missing_approval_handler', { label }) ?? `[No approval handler] ${label}`;
+          const msg = this.i18n?.t('executor.missing_approval_handler', { label }) ?? `[No approval handler] ${label}`;
+          return { result: msg, duration: 0 };
         }
       }
     }
 
-    // 工具执行指示
-    if (this.stream) {
-      process.stdout.write(toolCallStart(name, args) + '\n');
-    }
-
+    const toolStart = Date.now();
     try {
       const result = await this.registry.dispatch(name, args);
-      // 记录工具调用（供死循环检测使用）
+      const duration = Date.now() - toolStart;
       this.controller?.recordToolCall(name, args, result);
-      // 展示 diff 预览（modify_file）或首行摘要（其他工具）
-      if (this.stream && result) {
-        const preview = name === 'write_file'
-          ? renderDiff(result)
-          : `  ${t.subtle('│')} ${t.dim(result.split('\n')[0]?.slice(0, 100) || '')}`;
-        if (preview.trim()) process.stdout.write(preview + '\n');
-      }
-      // 分级截断：只读/修改工具保留完整内容，命令输出限长
+
       const limit = name === 'execute_command' ? CMD_OUTPUT_LIMIT : NO_TRUNCATE_TOOLS.has(name) ? Infinity : OTHER_OUTPUT_LIMIT;
       const truncated = result.length > limit
         ? result.slice(0, limit - 100) + (this.i18n?.t('executor.truncated', { count: String(result.length - limit) }) ?? `\n...[Truncated ${result.length - limit} chars]`)
         : result;
-      if (this.stream) {
-        process.stdout.write(toolCallEnd('success') + '\n');
-      }
-      return truncated;
+      return { result: truncated, duration };
     } catch (err) {
       const errMsg = (err as Error).message;
+      const duration = Date.now() - toolStart;
       this.controller?.recordToolCall(name, args, this.i18n?.t('executor.exception', { msg: errMsg }) ?? `[Exception]: ${errMsg}`);
-      if (this.stream) {
-        process.stdout.write(toolCallEnd('error', errMsg) + '\n');
-      }
-      return `[${label}]: ${(this.i18n?.t('common.error') ?? 'Error')} - ${errMsg}`;
+      return { result: `[${label}]: ${(this.i18n?.t('common.error') ?? 'Error')} - ${errMsg}`, duration };
     }
   }
 }

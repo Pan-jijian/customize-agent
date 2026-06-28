@@ -4,15 +4,15 @@ import { SandboxExecutor, type SandboxMode } from './sandbox-executor.js';
 export class TerminalTool {
   private sandbox: SandboxExecutor;
 
-  constructor(cwd: string, mode: SandboxMode = 'workspace-write') {
+  constructor(cwd: string, mode: SandboxMode = 'vfs-guard') {
     this.sandbox = new SandboxExecutor(mode, cwd);
   }
 
   /**
    * 安全执行终端命令。
-   * 返回值包含 stdout、stderr 与退出码，由 Agent 自行判断成败。
+   * @param approved 用户已审批 → VFS-Guard 不拦截
    */
-  async executeCommand(command: string): Promise<{ stdout: string; stderr: string; code: number }> {
-    return this.sandbox.execute(command);
+  async executeCommand(command: string, approved?: boolean): Promise<{ stdout: string; stderr: string; code: number }> {
+    return this.sandbox.execute(command, undefined, approved);
   }
 }

@@ -1,7 +1,7 @@
 /**
  * 中文翻译包
  */
-const zh: Record<string, string> = {
+const zh: Record<string, string | string[]> = {
   // ── 语言选择 ──
   'lang.select.title': '语言 / Language',
   'lang.select.prompt': '↑↓ 选择  Enter 确认',
@@ -70,8 +70,7 @@ const zh: Record<string, string> = {
   'tool.lsp_definition': '跳转定义',
   'tool.lsp_references': '查找引用',
   'tool.lsp_diagnostics': '代码诊断',
-  'tool.no_symbols': '未找到匹配 "{input}" 的符号。',
-  'tool.validate_build': '请运行编译命令验证此修改。',
+
 
   // ── 审批 ──
   'approval.box_title': '⚠ 需要审批',
@@ -91,6 +90,30 @@ const zh: Record<string, string> = {
   'tool_call.error': '└ ✗',
   'tool_call.truncated': '\n...[截断 {count} 字符]',
   'stream.thinking': '思考中…',
+  'token.prompt': '输入',
+  'token.output': '输出',
+  'token.rounds': '轮',
+  'think.expand_hint': '(ctrl+o 展开思考)',
+  'think.no_content': '没有可展开的思考内容。',
+  'search.fallback': '[搜索] ripgrep 不可用，回退到 JS 搜索',
+  'search.no_matches': '未找到匹配 "{pattern}" 的结果。',
+  'lsp.no_definition': '未找到定义。',
+  'lsp.no_references': '未找到引用。',
+  'lsp.no_diagnostics': '无诊断信息。',
+  'git.not_installed': 'Git 未安装。',
+  'git.not_initialized': '当前目录未初始化 Git 仓库。',
+  'git.committed': '已提交: {msg}',
+  'git.commit_failed': '提交失败: {detail}',
+  'git.error': 'Git 错误: {msg}',
+  'think.box_title': '思考过程',
+  'think.tips': [
+    '/clear  清除会话历史，开始新对话',
+    '@file  引用文件并将其内容注入上下文',
+    '↑↓  浏览历史命令 / 下拉菜单',
+    '/language zh|en  切换界面语言',
+    '/model  管理 AI 模型与 API Key',
+    '/plan  先制定执行计划，再动手实施',
+  ],
 
   // ── Diff 预览 ──
   'diff.more_lines': '… 还有 {count} 行',
@@ -111,7 +134,7 @@ const zh: Record<string, string> = {
   // ── 记忆 ──
   'memory.feedback': '历史纠偏',
   'memory.user_preference': '用户偏好',
-  'memory.project_knowledge': '项目知识',
+  'memory.project_fact': '项目知识',
   'memory.pattern': '解决方案',
   'memory.section_header': '--- 相关历史记忆 ---',
   'memory.section_footer': '--- 记忆结束 ---',
@@ -189,6 +212,7 @@ const zh: Record<string, string> = {
   // ── 通用 ──
   'common.truncation': '…',
   'common.error': '错误',
+  'error.execution': '执行失败',
 };
 
 export default zh;
