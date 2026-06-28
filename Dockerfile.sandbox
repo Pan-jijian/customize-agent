@@ -1,8 +1,22 @@
 FROM python:3.11-slim
+
+# ── 系统工具 ──
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl wget jq ca-certificates openssh-client \
+    build-essential nodejs npm bash \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── JS 生态 ──
+RUN npm install -g pnpm typescript tsx prettier eslint
+
+# ── Python 生态 ──
 RUN pip install --no-cache-dir \
     numpy pandas scipy matplotlib seaborn \
     requests beautifulsoup4 lxml pdfplumber \
-    tabulate Pillow playwright
+    tabulate Pillow playwright \
+    pytest black ruff mypy
+
+# ── 浏览器（Playwright） ──
 RUN playwright install --with-deps chromium
-RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace

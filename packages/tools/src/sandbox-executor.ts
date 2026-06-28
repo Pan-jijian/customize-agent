@@ -55,18 +55,19 @@ export class SandboxExecutor {
     return 'vfs-guard' as SandboxMode;
   }
 
-  /** 执行命令（自动选择对应平台的沙箱实现，vfs-guard 作为通用降级方案） */
-  async execute(command: string, cwd?: string): Promise<SandboxResult> {
+  /**
+   * 执行命令（自动选择对应平台的沙箱实现，vfs-guard 作为通用降级方案）。
+   * @param approved 用户已在上层审批通过 → VFS-Guard 跳过危险命令拦截
+   */
+  async execute(command: string, cwd?: string, approved?: boolean): Promise<SandboxResult> {
     if (this.mode === 'danger-full-access') {
       throw new Error('danger-full-access 模式需要显式确认，请设置环境变量 CUSTOMIZE_AGENT_DANGER_MODE=1');
     }
-    // docker：容器沙箱
     if (this.mode === 'docker') {
       return this._executeDocker(command, cwd);
     }
-    // vfs-guard：纯 JS 路径虚拟沙箱（跨平台通用降级方案）
     if (this.mode === 'vfs-guard') {
-      return this._executeVfsGuard(command, cwd);
+      return this._executeVfsGuard(command, cwd, approved);
     }
     if (process.platform === 'darwin') {
       return this._executeSeatbelt(command, cwd);
@@ -74,8 +75,7 @@ export class SandboxExecutor {
     if (process.platform === 'linux') {
       return this._executeBwrap(command, cwd);
     }
-    // 未知平台 → 自动降级 vfs-guard
-    return this._executeVfsGuard(command, cwd);
+    return this._executeVfsGuard(command, cwd, approved);
   }
 
   /** Docker 容器执行（不可用时自动降级 VFS） */
@@ -104,38 +104,36 @@ export class SandboxExecutor {
   }
 
   /** VFS-Guard：路径虚拟沙箱 — CWD 强绑定 + 危险命令拦截 + read-only 模式写拦截 */
-  private async _executeVfsGuard(command: string, cwd?: string): Promise<SandboxResult> {
-    // CWD 强绑定在项目根目录
+  private async _executeVfsGuard(command: string, cwd?: string, approved?: boolean): Promise<SandboxResult> {
     const safeCwd = cwd ?? this.workspaceRoot;
 
-    // 危险命令意图扫描（所有模式均拦截）
-    const dangerousPatterns = [
-      { pattern: /> \/(etc|sys|proc|dev)\//, reason: '禁止写系统目录' },
-      { pattern: /rm\s+-rf\s+\//, reason: '禁止 rm -rf /' },
-      { pattern: /mkfs\.\w+/, reason: '禁止格式化磁盘' },
-      { pattern: /dd\s+if=/, reason: '禁止 dd 操作' },
-      { pattern: /chmod\s+777/, reason: '禁止 chmod 777' },
-    ];
-    for (const { pattern, reason } of dangerousPatterns) {
-      if (pattern.test(command)) {
-        return { stdout: '', stderr: `命令被拦截 (vfs-guard): ${reason}`, code: 1 };
+    // 危险命令扫描（已审批通过的命令跳过拦截，直接执行）
+    if (!approved && this.mode !== 'read-only') {
+      const dangerousPatterns = [
+        { pattern: /> \/(etc|sys|proc|dev)\//, reason: '禁止写系统目录' },
+        { pattern: /rm\s+-rf\s+\//, reason: '禁止 rm -rf /' },
+        { pattern: /mkfs\.\w+/, reason: '禁止格式化磁盘' },
+        { pattern: /dd\s+if=/, reason: '禁止 dd 操作' },
+        { pattern: /chmod\s+777/, reason: '禁止 chmod 777' },
+      ];
+      for (const { pattern, reason } of dangerousPatterns) {
+        if (pattern.test(command)) {
+          return { stdout: '', stderr: `命令被拦截 (vfs-guard): ${reason}`, code: 1 };
+        }
       }
     }
 
-    // read-only 模式：拦截文件写入/修改/删除命令
-    if (this.mode === 'read-only') {
+    // read-only 模式：写操作拦截
+    if (!approved && this.mode === 'read-only') {
       const writePatterns = [
         { pattern: /\brm\s+-/, reason: 'read-only 模式禁止删除文件' },
         { pattern: /\bmv\s+/, reason: 'read-only 模式禁止移动/重命名文件' },
-        { pattern: /\bcp\s+.*-f/, reason: 'read-only 模式禁止强制复制' },
         { pattern: /\bgit\s+(commit|push|add|tag)\b/, reason: 'read-only 模式禁止 Git 写操作' },
         { pattern: /\bnpm\s+(install|uninstall|publish|link)\b/, reason: 'read-only 模式禁止 npm 写操作' },
         { pattern: /\bpnpm\s+(install|add|publish|link)\b/, reason: 'read-only 模式禁止 pnpm 写操作' },
-        { pattern: />\s*\S/, reason: 'read-only 模式禁止输出重定向（写入文件）' },
-        { pattern: />>\s*\S/, reason: 'read-only 模式禁止追加重定向（写入文件）' },
+        { pattern: />\s*\S/, reason: 'read-only 模式禁止输出重定向' },
         { pattern: /\bmkdir\b/, reason: 'read-only 模式禁止创建目录' },
-        { pattern: /\btouch\b/, reason: 'read-only 模式禁止创建/修改文件时间戳' },
-        { pattern: /\btee\b/, reason: 'read-only 模式禁止 tee（写入文件）' },
+        { pattern: /\btouch\b/, reason: 'read-only 模式禁止修改文件时间戳' },
       ];
       for (const { pattern, reason } of writePatterns) {
         if (pattern.test(command)) {
@@ -182,40 +180,27 @@ export class SandboxExecutor {
   /** 构建 macOS Seatbelt 沙箱策略文件 */
   private _buildSeatbeltProfile(): string {
     const root = path.resolve(this.workspaceRoot);
-    const home = process.env.HOME ?? '/Users/unknown';
+    // 对齐 Claude Code / Codex CLI：写限制 + 读放开。OS 内核级 enforce，非静默拦截
     let profile = `(version 1)
-    ;; 默认拒绝一切
-    (deny default)
-
-    ;; 允许读项目目录
-    (allow file-read* (subpath "${root}"))
-
-    ;; 允许读 OS 动态链接库（所有命令必需）
-    (allow file-read* (subpath "/usr/lib"))
-    (allow file-read* (subpath "/bin"))
-    (allow file-read* (subpath "/usr/bin"))
-    ;; 允许读 node/pnpm 运行时
-    (allow file-read* (subpath "${home}/.nvm"))
-    (allow file-read* (subpath "/usr/local/bin"))
-    (allow file-read* (subpath "/opt/homebrew"))
-
-    ;; 允许进程执行和管道通信
+    ;; ── 默认：读全部放开，进程/网络正常 ──
+    (allow file-read*)
     (allow process-exec)
     (allow process-fork)
     (allow signal)
     (allow sysctl-read)
-
-    ;; 允许网络访问（Agent 需要调用 LLM API、下载依赖包等）
     (allow network*)
     `;
 
     if (this.mode === 'workspace-write') {
       profile += `
-    ;; 允许写项目目录（但拒绝写入 .env 和密钥文件）
+    ;; ── 写限制：仅工作目录和临时目录 ──
     (allow file-write* (subpath "${root}"))
-    (deny file-write* (regex #"^${root}/\\.env$"))
-    (deny file-write* (regex #"^${root}/.*\\.key$"))
-    (deny file-write* (regex #"^${root}/.*secret"))
+    (allow file-write* (subpath "/tmp"))
+    (allow file-write* (subpath "/private/tmp"))
+    ;; 敏感文件拒绝写入（内核级 enforce → EPERM → 模型感知并报告）
+    (deny file-write* (regex #"\\.env$"))
+    (deny file-write* (regex #"\\.key$"))
+    (deny file-write* (regex #"secret"))
     `;
     } else {
       profile += `(deny file-write*)\n`;

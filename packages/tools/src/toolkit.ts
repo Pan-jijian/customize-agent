@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'fs';
 import * as path from 'path';
 import { DiffEngine } from './diff.js';
 import { TerminalTool } from './terminal-shell.js';
-import { GitTool } from './git.js';
+import { execa } from 'execa';
 import { UnifiedSyntaxValidator } from './syntax-validator.js';
 
 // ── .gitignore 匹配器 ──
@@ -75,13 +75,10 @@ function isGitignored(rootDir: string, relativePath: string): boolean {
 export class ToolKit {
   private cwd: string;
   public terminal: TerminalTool;
-  public git: GitTool;
   private syntaxValidator: UnifiedSyntaxValidator;
-
   constructor(cwd: string = process.cwd()) {
     this.cwd = cwd;
     this.terminal = new TerminalTool(cwd);
-    this.git = new GitTool(cwd);
     this.syntaxValidator = new UnifiedSyntaxValidator();
   }
 
@@ -204,6 +201,21 @@ export class ToolKit {
         `修改失败，已自动回滚到原始内容:\n${(error as Error).message}`,
         { cause: error },
       );
+    }
+  }
+
+  /** Git 提交 */
+  async commitAll(message: string): Promise<string> {
+    try {
+      const v = await execa({ reject: false })`git --version`;
+      if (v.exitCode !== 0) return 'Git not installed.';
+      const check = await execa({ cwd: this.cwd, reject: false })`git rev-parse --git-dir`;
+      if (check.exitCode !== 0) return 'Git not initialized in this directory.';
+      await execa({ cwd: this.cwd, reject: false })`git add .`;
+      const res = await execa({ cwd: this.cwd, reject: false })`git commit -m ${message}`;
+      return res.exitCode === 0 ? `Committed: ${message}` : `Commit failed: ${res.stderr || res.stdout}`;
+    } catch (err) {
+      return `Git error: ${(err as Error).message}`;
     }
   }
 }

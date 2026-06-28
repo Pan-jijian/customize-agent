@@ -31,7 +31,7 @@ const DEFAULT_CONFIG: PermissionConfig = {
   defaults: {
     read_file: 'allow',
     list_files: 'allow',
-    search_symbol: 'allow',
+    search: 'allow',
     write_file: 'ask',
     execute_command: 'ask',
     git_commit: 'ask',

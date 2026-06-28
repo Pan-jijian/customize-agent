@@ -1,7 +1,7 @@
 /**
  * English translation pack
  */
-const en: Record<string, string> = {
+const en: Record<string, string | string[]> = {
   // ── Language Selection ──
   'lang.select.title': 'Language / 语言',
   'lang.select.prompt': '↑↓ Select  Enter Confirm',
@@ -70,8 +70,7 @@ const en: Record<string, string> = {
   'tool.lsp_definition': 'Go to Definition',
   'tool.lsp_references': 'Find References',
   'tool.lsp_diagnostics': 'Diagnostics',
-  'tool.no_symbols': 'No symbols found matching "{input}".',
-  'tool.validate_build': 'Please run the build command to validate this change.',
+
 
   // ── Approval ──
   'approval.box_title': '⚠ Approval Required',
@@ -91,6 +90,30 @@ const en: Record<string, string> = {
   'tool_call.error': '└ ✗',
   'tool_call.truncated': '\n...[Truncated {count} chars]',
   'stream.thinking': 'Thinking…',
+  'token.prompt': 'prompt',
+  'token.output': 'output',
+  'token.rounds': 'rounds',
+  'think.expand_hint': '(ctrl+o to expand thinking)',
+  'think.no_content': 'No thinking to show.',
+  'search.fallback': '[Search] ripgrep unavailable, falling back to JS search',
+  'search.no_matches': 'No matches found for "{pattern}".',
+  'lsp.no_definition': 'No definition found.',
+  'lsp.no_references': 'No references found.',
+  'lsp.no_diagnostics': 'No diagnostics.',
+  'git.not_installed': 'Git not installed.',
+  'git.not_initialized': 'Git not initialized in this directory.',
+  'git.committed': 'Committed: {msg}',
+  'git.commit_failed': 'Commit failed: {detail}',
+  'git.error': 'Git error: {msg}',
+  'think.box_title': 'Thinking',
+  'think.tips': [
+    '/clear  clears session history',
+    '@file  attaches a file to context',
+    '↑↓  browse history / dropdown',
+    '/language zh|en  switches UI language',
+    '/model  manage AI models & API keys',
+    '/plan  create execution plan first',
+  ],
 
   // ── Diff Preview ──
   'diff.more_lines': '… {count} more lines',
@@ -111,7 +134,7 @@ const en: Record<string, string> = {
   // ── Memory ──
   'memory.feedback': 'Feedback',
   'memory.user_preference': 'Preference',
-  'memory.project_knowledge': 'Project Knowledge',
+  'memory.project_fact': 'Project Knowledge',
   'memory.pattern': 'Solution Pattern',
   'memory.section_header': '--- Related Memory ---',
   'memory.section_footer': '--- End Memory ---',
@@ -189,6 +212,7 @@ const en: Record<string, string> = {
   // ── Common ──
   'common.truncation': '…',
   'common.error': 'Error',
+  'error.execution': 'Execution failed',
 };
 
 export default en;

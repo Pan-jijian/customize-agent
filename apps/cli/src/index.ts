@@ -10,7 +10,7 @@ import { MemoryManager } from '@customize-agent/memory';
 import { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import { AgentExecutor } from './agent/executor.js';
 import { Repl } from './repl/repl.js';
-import { approvalBox, t } from './tui/renderer.js';
+import { approvalBox, t, renderMarkdown } from './tui/renderer.js';
 import { type Message, BINARY_EXTENSIONS } from '@customize-agent/types';
 import { I18nManager } from './i18n/manager.js';
 import * as readline from 'readline';
@@ -184,12 +184,15 @@ function buildRegistry(lspManager?: LSPManager): ToolRegistry {
       const cmd = String(args.input);
       const isCode = cmd.startsWith('python3 -c') || cmd.startsWith('python -c') || cmd.startsWith('node -e');
       const executor = isCode ? new SandboxExecutor('docker', PROJECT_ROOT) : null;
+      // approved: true — 该工具 requiresApproval=true，用户已在上层审批通过
       const result = executor
-        ? await executor.execute(cmd)
-        : await toolkit.terminal.executeCommand(cmd);
+        ? await executor.execute(cmd, undefined, true)
+        : await toolkit.terminal.executeCommand(cmd, true);
+
       const out: string[] = [];
       if (result.stdout) out.push(result.stdout.trimEnd());
       if (result.stderr) out.push(`[Stderr]\n${result.stderr.trimEnd()}`);
+      if (!result.stdout && !result.stderr && result.code !== 0) out.push('(no output)');
       if (result.code !== 0) out.push(`[Exit ${result.code}]`);
       return out.join('\n') || `[Exit ${result.code}]`;
     },
@@ -198,7 +201,7 @@ function buildRegistry(lspManager?: LSPManager): ToolRegistry {
   reg(registry, 'git_commit', 'Stage all changes and create a git commit with the given message.',
     { input: { type: 'string', description: 'Commit message' } },
     ['input'], ['git_operation'], true,
-    async (args) => toolkit.git.commitAll(String(args.input)));
+    async (args) => toolkit.commitAll(String(args.input)));
 
 
 
@@ -327,7 +330,9 @@ program.action(async () => {
       const updated = await executor.runTask(history, { readonly: opts.plan ?? false });
       const lastAssistant = [...updated].reverse().find(m => m.role === 'assistant');
       if (lastAssistant) {
-        console.log(`\n📋 Result:\n${lastAssistant.content}`);
+        const cleanContent = lastAssistant.content.replace(/<task_finish>[\s\S]*?<\/task_finish>\n*/g, '').trim();
+        process.stdout.write('\n' + t.purple('📋 Result:') + '\n');
+        process.stdout.write(renderMarkdown(cleanContent) + '\n');
       }
     } catch (err) {
       console.log(`\n${i18n.t('error.execution')} ${(err as Error).message}`);

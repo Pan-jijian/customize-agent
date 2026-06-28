@@ -116,13 +116,18 @@ export class MemoryManager {
    * 评分 = FTS5 rank 倒数 × log(1+access_count) 热度加权
    */
   recallScored(query: string, limit: number = 10): ScoredMemory[] {
-    const ftsResults = this.db.prepare(`
-      SELECT m.*, rank FROM memories m
-      JOIN memories_fts fts ON m.rowid = fts.rowid
-      WHERE memories_fts MATCH ?
-      ORDER BY rank
-      LIMIT ?
-    `).all(query, limit) as Array<Record<string, unknown>>;
+    // FTS5 MATCH 不支持 @ [ * 等特殊字符，包裹为字面量或回退 LIKE
+    const safeQuery = `"${query.replace(/"/g, '""')}"`;
+    let ftsResults: Array<Record<string, unknown>> = [];
+    try {
+      ftsResults = this.db.prepare(`
+        SELECT m.*, rank FROM memories m
+        JOIN memories_fts fts ON m.rowid = fts.rowid
+        WHERE memories_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+      `).all(safeQuery, limit) as Array<Record<string, unknown>>;
+    } catch { /* FTS5 syntax error → fallback to LIKE */ }
 
     if (ftsResults.length > 0) {
       return ftsResults.map(r => ({

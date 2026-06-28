@@ -3,7 +3,7 @@ import en from './en.js';
 
 export type Language = 'zh' | 'en';
 
-const TRANSLATIONS: Record<Language, Record<string, string>> = { zh, en };
+const TRANSLATIONS: Record<Language, Record<string, string | string[]>> = { zh, en };
 
 /**
  * 国际化管理器。
@@ -34,18 +34,36 @@ export class I18nManager {
    */
   t(key: string, params?: Record<string, string>): string {
     const pack = TRANSLATIONS[this._lang];
-    let text = pack[key];
-    if (text === undefined) {
+    const val = pack[key];
+    if (typeof val !== 'string') {
       // 回退到中文
-      text = TRANSLATIONS['zh'][key];
-      if (text === undefined) return key;
-    }
-    if (params) {
-      for (const [k, v] of Object.entries(params)) {
-        text = text.replaceAll(`{${k}}`, v);
+      const zhVal = TRANSLATIONS['zh'][key];
+      if (typeof zhVal === 'string') {
+        return this._interpolate(zhVal, params);
       }
+      return key;
     }
-    return text;
+    return this._interpolate(val, params);
+  }
+
+  private _interpolate(text: string, params?: Record<string, string>): string {
+    if (!params) return text;
+    let result = text;
+    for (const [k, v] of Object.entries(params)) {
+      result = result.replaceAll(`{${k}}`, v);
+    }
+    return result;
+  }
+
+  /** 获取字符串数组类型翻译（如 tips 池） */
+  tList(key: string): string[] {
+    const pack = TRANSLATIONS[this._lang];
+    const val = pack[key];
+    if (Array.isArray(val)) return val;
+    // fallback to zh
+    const zhVal = TRANSLATIONS['zh'][key];
+    if (Array.isArray(zhVal)) return zhVal;
+    return [];
   }
 
   /** 获取工具中文/英文名 */

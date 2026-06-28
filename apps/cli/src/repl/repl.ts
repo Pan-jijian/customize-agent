@@ -3,7 +3,7 @@ import * as path from 'path';
 import type { Message } from '@customize-agent/types';
 import type { AgentExecutor } from '../agent/executor.js';
 import { TuiInput } from '../tui/input.js';
-import { welcomeBanner, t, s, divider, msg, contextStats } from '../tui/renderer.js';
+import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded } from '../tui/renderer.js';
 import type { MemoryManager, MemoryType } from '@customize-agent/memory';
 import { BINARY_EXTENSIONS } from '@customize-agent/types';
 import type { ConfigStore, ModelRegistry, ModelTier } from '@customize-agent/runtime';
@@ -160,13 +160,6 @@ export class Repl {
           this.memory.remember('project_fact', lastAssistant.content.slice(0, 500), `Task: ${input.slice(0, 200)}`);
         }
       }
-
-      const last = [...updated].reverse().find(m => m.role === 'assistant');
-      if (last?.content) {
-        const txt = last.content.replace(/<task_finish>[\s\S]*?<\/task_finish>/g, '').trim();
-        if (txt) process.stdout.write(`\n${t.text(txt)}\n`);
-      }
-      process.stdout.write('\n');
     } catch (err) {
       process.stdout.write(msg.error((err as Error).message));
       this.history.pop();
@@ -469,6 +462,13 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         const s = this.executor.getContextStats();
         return s.tokens > 0 ? { used: s.tokens, limit: s.limit } : null;
       },
+      onCtrlO: () => {
+        const content = this.executor.lastThinkingContent;
+        if (!content) {
+          return `  ${t.dim(this.i18n.t('think.no_content'))}`;
+        }
+        return thinkingExpanded(content, this.i18n.t('think.box_title'));
+      },
     });
   }
 
@@ -496,7 +496,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
       const { AuditLogger } = await import('@customize-agent/runtime');
       const sessions = await AuditLogger.listSessions();
       if (!sessions.length) { process.stdout.write(t.dim(this.i18n.t('cmd.no_sessions') + '\n\n')); return; }
-      process.stdout.write(t.dim(`${this.i18n.t('context.sessions_total')} ${sessions.length}\n`));
+      process.stdout.write(t.dim(`${this.i18n.t('cmd.sessions_total')} ${sessions.length}\n`));
       for (const s of sessions.slice(0, 20)) {
         process.stdout.write(`  ${t.text(s.id)}\n    ${t.dim(this.i18n.t('session.date_label') + ':')} ${s.date}  ${t.dim(this.i18n.t('session.events_label') + ':')} ${s.eventCount}\n    ${t.dim(this.i18n.t('session.task_label') + ':')} ${s.taskPreview}\n\n`);
       }

@@ -6,7 +6,7 @@ import { createLLMResponse } from '../utils/response.js';
 
 const ANTHROPIC_CAPABILITIES: ModelCapabilities = {
   maxContextTokens: 200_000,
-  maxOutputTokens: 16_384,
+  maxOutputTokens: 64_000,
   supportsStreaming: true,
   supportsFunctionCalling: true,
   supportsVision: true,
@@ -51,7 +51,7 @@ export class AnthropicProvider implements ILLMProvider {
 
     const body: Record<string, unknown> = {
       model: this.modelName,
-      max_tokens: options?.maxTokens ?? 8192,
+      max_tokens: options?.maxTokens ?? 64000,
       temperature: options?.temperature ?? 0.3,
       messages: conversationMessages,
     };
@@ -162,6 +162,7 @@ export class AnthropicProvider implements ILLMProvider {
         const toolCalls: ToolCall[] = [];
         let promptTokens = 0;
         let completionTokens = 0;
+        let stopReason = '';
 
         while (true) {
           const { done, value } = await reader.read();
@@ -229,6 +230,10 @@ export class AnthropicProvider implements ILLMProvider {
                 case 'message_delta': {
                   if (event.usage) {
                     completionTokens = event.usage.output_tokens;
+                  }
+                  stopReason = (event.delta as Record<string,unknown>)?.stop_reason as string || stopReason;
+                  if (stopReason && stopReason !== 'end_turn') {
+                    console.error(`[Anthropic] stream stop_reason=${stopReason}`);
                   }
                   break;
                 }

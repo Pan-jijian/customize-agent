@@ -36,6 +36,8 @@ export interface TuiConfig {
   labels?: TuiLabels;
   prompt?: string; mode?: Mode; history?: string[];
   tokenStats?: () => { used: number; limit: number } | null;
+  /** ctrl+o 回调：返回要展示的内容，或 null 表示无内容 */
+  onCtrlO?: () => string | null;
 }
 
 interface St {
@@ -83,6 +85,7 @@ export class TuiInput {
   private _prevLines = 0;
   private labels: TuiLabels;
   private _tokenStats?: () => { used: number; limit: number } | null;
+  private _onCtrlO?: () => string | null;
 
   constructor(cfg: TuiConfig) {
     this.root = cfg.projectRoot;
@@ -93,6 +96,7 @@ export class TuiInput {
     this.hist = cfg.history ?? [];
     this.hi = this.hist.length;
     this._tokenStats = cfg.tokenStats;
+    this._onCtrlO = cfg.onCtrlO;
     this.labels = cfg.labels ?? {
       filesHeader: 'Files', commandsHeader: 'Commands',
       more: (n) => `… ${n} more`,
@@ -185,6 +189,16 @@ export class TuiInput {
         }
 
         // Ctrl 组合键
+        if (key.ctrl && nm === 'o') {
+          if (this._onCtrlO) {
+            const content = this._onCtrlO();
+            if (content) {
+              process.stdout.write('\r\x1b[2K' + content + '\n');
+              this._draw(st);
+            }
+          }
+          return;
+        }
         if (key.ctrl && nm === 'w') { this._cW(st); return; }
         if (key.ctrl && nm === 'a') { st.pos = 0; this._draw(st); return; }
         if (key.ctrl && nm === 'e') { st.pos = st.text.length; this._draw(st); return; }
