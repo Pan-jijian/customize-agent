@@ -35,7 +35,9 @@ const zh: Record<string, string | string[]> = {
 
   // ── 帮助 ──
   'help.title': '命令',
-  'help.plan': '制定执行计划（只读探索）',
+  'help.plan': '制定执行计划并可选择执行',
+  'help.rewind': '回退最近对话轮次',
+  'help.resume': '恢复历史会话',
   'help.clear': '重置当前会话',
   'help.sessions': '查看历史会话',
   'help.model': '模型管理',
@@ -77,7 +79,9 @@ const zh: Record<string, string | string[]> = {
 
   // ── 审批 ──
   'approval.box_title': '⚠ 需要审批',
-  'approval.allow': '允许执行？[y/N]',
+  'approval.allow': '允许执行？',
+  'approval.run': '运行',
+  'approval.cancel': '取消',
   'approval.file_detail': '文件: {path}',
   'approval.command_detail': '命令: {cmd}',
 
@@ -204,6 +208,22 @@ const zh: Record<string, string | string[]> = {
   'cmd.no_api_key': '⚠ 未设置 API Key。请设置环境变量 {env}。',
   'cmd.first_config': '/model  添加模型并开始\n/model key <provider> <key>  设置 API Key\n/language  切换界面语言\n/help  查看全部命令',
   'cmd.no_model_configured': '⚠ 未配置任何模型，无法执行任务。',
+  'cmd.no_rewind': '暂无可回退的对话轮次。',
+  'cmd.rewind_done': '已回退，原始用户输入已放回输入框。',
+  'cmd.rewind_scope_chat': '只回退对话',
+  'cmd.rewind_scope_chat_desc': '删除所选轮次之后的上下文，并把该轮输入放回输入框',
+  'cmd.rewind_scope_all': '对话 + 修改',
+  'cmd.rewind_scope_all_desc': '同时恢复执行前的工作区快照，不依赖 Git',
+  'cmd.rewind_snapshot_failed': '文件修改回退失败：工作区快照无法完整恢复。',
+  'cmd.rewind_snapshot_missing': '没有找到该轮任务的工作区快照，只回退了对话。',
+  'cmd.resume_done': '已恢复会话: {id}',
+  'cmd.resume_scope_chat': '只恢复对话',
+  'cmd.resume_scope_chat_desc': '仅恢复历史会话消息',
+  'cmd.resume_scope_all': '对话 + 修改',
+  'cmd.resume_scope_all_desc': '恢复历史会话消息，并恢复该会话保存的工作区快照',
+  'cmd.resume_changes_unavailable': '没有找到该会话的工作区快照，只恢复了对话。',
+  'cmd.plan_execute': '按计划执行',
+  'cmd.plan_keep': '仅保留计划',
 
   // ── 执行器 ──
   'executor.security_policy_deny': '[安全策略禁止] {label}',

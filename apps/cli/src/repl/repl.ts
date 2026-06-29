@@ -1,9 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import type { Message } from '@customize-agent/types';
 import type { AgentEvent, AgentExecutor } from '../agent/executor.js';
 import { TuiInput } from '../tui/input.js';
-import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded, userMessageBlock } from '../tui/renderer.js';
+import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded, userMessageBlock, modeBadge, modeAccent } from '../tui/renderer.js';
 import type { MemoryManager, MemoryType } from '@customize-agent/memory';
 import { BINARY_EXTENSIONS } from '@customize-agent/types';
 import type { ConfigStore, ModelRegistry, ModelTier } from '@customize-agent/runtime';
@@ -26,8 +27,12 @@ export interface ReplConfig {
 
 /** @file 引用正则（排除邮箱地址：前面必须为空白或行首） */
 const RE_AT = /(?:^|\s)@([^\s@]+(?::\d+(?:-\d+)?)?)/g;
-const MAX_INLINE_SIZE = 500_000;
+const MAX_INLINE_SIZE = 500_000;const SNAPSHOT_MAX_FILE_SIZE = 25_000_000;
+const SNAPSHOT_SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'target', '.next', '.turbo', '.cache']);
 let keypressInitialized = false;
+
+type WorkspaceSnapshot = Map<string, Buffer>;
+type SerializedWorkspaceSnapshot = Array<[string, string]>;
 
 /**
  * REPL — 会话管理 + TUI 输入 + 消息格式化 + 斜杠命令。
@@ -42,6 +47,8 @@ export class Repl {
   private configStore: ConfigStore;
   private modelRegistry: ModelRegistry;
   private providerDisplay: string | undefined;
+  private sessionId = `session-${Date.now()}`;
+  private snapshots = new Map<number, WorkspaceSnapshot>();
 
   constructor(config: ReplConfig) {
     this.executor = config.executor;
@@ -148,12 +155,14 @@ export class Repl {
     process.stdin.resume();
 
     let buffer = '';
+    let pos = 0;
     let outputLineOpen = false;
     let statusLineActive = false;
     let inputLinesOnScreen = 0;
     let inputCursorLineIndex = 0;
     const pending: string[] = [];
-    const prompt = `${t.badge(' AGENT ')} ${t.subtle('│')} ${t.accent('➜')} `;
+    const mode = 'AGENT';
+    const promptSymbol = '➜';
     const clearInputLine = () => {
       if (inputLinesOnScreen > 0) {
         const up = inputCursorLineIndex;
@@ -179,17 +188,29 @@ export class Repl {
       }
       const width = Math.max(40, process.stdout.columns ?? 80);
       const inner = width - 2;
-      const content = `${prompt}${buffer}`;
-      const promptWidth = 13;
-      const bufferWidth = stringWidth(buffer);
-      const plainWidth = promptWidth + bufferWidth;
-      const pad = ' '.repeat(Math.max(0, inner - 2 - plainWidth));
+      const before = buffer.slice(0, pos);
+      const ch = buffer[pos] || ' ';
+      const after = buffer.slice(pos + 1);
+      const caret = s.inverse(ch);
       const queuedLines = pending.flatMap(text => userMessageBlock(text, this.i18n.t('message.queued'), 'queued').trimEnd().split('\n'));
-      const top = t.subtle('╭' + '─'.repeat(inner) + '╮');
-      const mid = `${t.subtle('│')} ${content}${pad} ${t.subtle('│')}`;
+      const stats = this.executor.getContextStats();
+      const pct = Math.round((stats.tokens / stats.limit) * 100);
+      const statsLabel = stats.tokens > 0 ? `[${Math.round(stats.tokens / 1000)}K/${Math.round(stats.limit / 1000)}K ${pct}%]` : '';
+      const statsText = statsLabel ? (pct > 85 ? t.error(` ${statsLabel} `) : pct > 60 ? t.warning(` ${statsLabel} `) : t.faint(` ${statsLabel} `)) : '';
+      const topFill = Math.max(1, inner - (statsLabel ? stringWidth(` ${statsLabel} `) : 0));
+      const top = t.subtle('╭' + '─'.repeat(topFill)) + statsText + t.subtle('╮');
+      const badge = modeBadge(mode);
+      const bar = modeAccent(mode)('│');
+      const pr = modeAccent(mode)(promptSymbol);
+      const inputPrefix = `${badge} ${bar} ${pr} `;
+      const prefixWidth = mode.length + 7;
+      const inputVisible = prefixWidth + stringWidth(before + ch + after);
+      const inputPad = ' '.repeat(Math.max(0, inner - 2 - inputVisible));
+      const mid = `${t.subtle('│')} ${inputPrefix}${before}${caret}${after}${inputPad} ${t.subtle('│')}`;
       const bottom = t.subtle('╰' + '─'.repeat(inner) + '╯');
       const lines = [...queuedLines, top, mid, bottom];
-      process.stdout.write(`\r${lines.map((line, i) => `${i === 0 ? '' : '\n'}\x1b[2K${line}`).join('')}\x1b[1A\r\x1b[${Math.max(1, 2 + promptWidth + bufferWidth)}C`);
+      const cursorCol = 2 + prefixWidth + stringWidth(before);
+      process.stdout.write(`\r${lines.map((line, i) => `${i === 0 ? '' : '\n'}\x1b[2K${line}`).join('')}\x1b[1A\r\x1b[${Math.max(1, cursorCol)}C`);
       inputLinesOnScreen = lines.length;
       inputCursorLineIndex = lines.length - 2;
     };
@@ -245,6 +266,7 @@ export class Repl {
       if (key?.ctrl && key.name === 'c') {
         if (buffer) {
           buffer = '';
+          pos = 0;
           renderBuffer();
           return;
         }
@@ -255,6 +277,7 @@ export class Repl {
       if (key?.name === 'return' || key?.name === 'enter') {
         const text = buffer.trim();
         buffer = '';
+        pos = 0;
         clearStatusLine();
         clearBuffer();
         if (text) {
@@ -263,18 +286,48 @@ export class Repl {
         renderBuffer();
         return;
       }
+      if (key?.name === 'left') {
+        pos = Math.max(0, pos - 1);
+        renderBuffer();
+        return;
+      }
+      if (key?.name === 'right') {
+        pos = Math.min(buffer.length, pos + 1);
+        renderBuffer();
+        return;
+      }
       if (key?.name === 'backspace') {
-        buffer = buffer.slice(0, -1);
+        if (pos > 0) {
+          buffer = buffer.slice(0, pos - 1) + buffer.slice(pos);
+          pos--;
+        }
+        renderBuffer();
+        return;
+      }
+      if (key?.name === 'delete') {
+        if (pos < buffer.length) buffer = buffer.slice(0, pos) + buffer.slice(pos + 1);
+        renderBuffer();
+        return;
+      }
+      if (key?.ctrl && key.name === 'a') {
+        pos = 0;
+        renderBuffer();
+        return;
+      }
+      if (key?.ctrl && key.name === 'e') {
+        pos = buffer.length;
         renderBuffer();
         return;
       }
       if (key?.ctrl && key.name === 'u') {
         buffer = '';
+        pos = 0;
         renderBuffer();
         return;
       }
       if (str && str >= ' ') {
-        buffer += str;
+        buffer = buffer.slice(0, pos) + str + buffer.slice(pos);
+        pos += str.length;
         renderBuffer();
       }
     };
@@ -309,6 +362,87 @@ export class Repl {
     };
   }
 
+  private async _takeWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
+    const snapshot: WorkspaceSnapshot = new Map();
+    const walk = async (dir: string) => {
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue;
+        if (entry.isDirectory() && SNAPSHOT_SKIP_DIRS.has(entry.name)) continue;
+        const full = path.join(dir, entry.name);
+        const rel = path.relative(this.root, full);
+        if (entry.isDirectory()) {
+          await walk(full);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const stat = await fs.promises.stat(full);
+        if (stat.size > SNAPSHOT_MAX_FILE_SIZE) continue;
+        try {
+          snapshot.set(rel, await fs.promises.readFile(full));
+        } catch { /* ignore unreadable files */ }
+      }
+    };
+    await walk(this.root);
+    return snapshot;
+  }
+
+  private _snapshotDir(): string {
+    return path.join(os.homedir(), '.customize-agent', 'snapshots');
+  }
+
+  private _snapshotFile(id: string): string {
+    return path.join(this._snapshotDir(), `${id}.json`);
+  }
+
+  private _serializeSnapshot(snapshot: WorkspaceSnapshot): SerializedWorkspaceSnapshot {
+    return [...snapshot.entries()].map(([rel, content]) => [rel, content.toString('base64')]);
+  }
+
+  private _deserializeSnapshot(data: SerializedWorkspaceSnapshot): WorkspaceSnapshot {
+    return new Map(data.map(([rel, content]) => [rel, Buffer.from(content, 'base64')]));
+  }
+
+  private async _saveWorkspaceSnapshot(id: string, snapshot: WorkspaceSnapshot): Promise<void> {
+    await fs.promises.mkdir(this._snapshotDir(), { recursive: true });
+    await fs.promises.writeFile(this._snapshotFile(id), JSON.stringify(this._serializeSnapshot(snapshot)), 'utf-8');
+  }
+
+  private async _loadWorkspaceSnapshot(id: string): Promise<WorkspaceSnapshot | null> {
+    try {
+      const raw = await fs.promises.readFile(this._snapshotFile(id), 'utf-8');
+      return this._deserializeSnapshot(JSON.parse(raw) as SerializedWorkspaceSnapshot);
+    } catch {
+      return null;
+    }
+  }
+
+  private _findSnapshotForTurn(index: number): WorkspaceSnapshot | undefined {
+    let bestIndex = -1;
+    let best: WorkspaceSnapshot | undefined;
+    for (const [snapshotIndex, snapshot] of this.snapshots) {
+      if (snapshotIndex <= index && snapshotIndex > bestIndex) {
+        bestIndex = snapshotIndex;
+        best = snapshot;
+      }
+    }
+    return best;
+  }
+
+  private async _restoreWorkspaceSnapshot(snapshot: WorkspaceSnapshot): Promise<void> {
+    const current = await this._takeWorkspaceSnapshot();
+    for (const [rel] of current) {
+      if (!snapshot.has(rel)) {
+        await fs.promises.rm(path.join(this.root, rel), { force: true });
+      }
+    }
+    for (const [rel, content] of snapshot) {
+      const full = path.join(this.root, rel);
+      await fs.promises.mkdir(path.dirname(full), { recursive: true });
+      await fs.promises.writeFile(full, content);
+    }
+  }
+
   private async _execute(input: string): Promise<void> {
     // 检查是否配置了模型
     const resolved = this.modelRegistry.resolve('action');
@@ -332,6 +466,12 @@ export class Repl {
       }
     }
 
+    const userIndex = this.history.length;
+    try {
+      const snapshot = await this._takeWorkspaceSnapshot();
+      this.snapshots.set(userIndex, snapshot);
+      await this._saveWorkspaceSnapshot(this.sessionId, snapshot);
+    } catch { /* snapshot is best-effort */ }
     this.history.push({ role: 'user', content: enhancedInput });
 
     const abortController = new AbortController();
@@ -367,6 +507,69 @@ export class Repl {
     }
   }
 
+  private async _selectList<T>(title: string, items: Array<{ label: string; detail?: string; value: T }>): Promise<T | null> {
+    if (!items.length) return null;
+    if (!keypressInitialized) {
+      readline.emitKeypressEvents(process.stdin);
+      keypressInitialized = true;
+    }
+    let raw = false;
+    if (process.stdin.isTTY) {
+      try { process.stdin.setRawMode(true); raw = true; } catch { /* ignore */ }
+    }
+    process.stdin.resume();
+
+    let sel = 0;
+    let linesDrawn = 0;
+    const clear = () => {
+      if (linesDrawn <= 0) return;
+      process.stdout.write(`\x1b[${linesDrawn}A\r\x1b[0J`);
+      linesDrawn = 0;
+    };
+    const clip = (text: string, width: number) => {
+      let out = '';
+      for (const ch of text.replace(/\s+/g, ' ')) {
+        if (stringWidth(out + ch) > width - 1) return out + '…';
+        out += ch;
+      }
+      return out;
+    };
+    const draw = () => {
+      clear();
+      const width = Math.max(40, process.stdout.columns ?? 80);
+      const itemWidth = width - 5;
+      const lines = [
+        s.bold(clip(title, width - 1)),
+        ...items.map((item, i) => {
+          const cursor = i === sel ? t.accent('▶') : ' ';
+          const raw = `${item.label}${item.detail ? `  ${item.detail}` : ''}`;
+          const label = clip(raw, itemWidth);
+          return `${cursor} ${i === sel ? s.bold(label) : label}`;
+        }),
+        '',
+        t.dim('↑↓  Enter  Esc'),
+      ];
+      process.stdout.write(lines.join('\n') + '\n');
+      linesDrawn = lines.length;
+    };
+
+    return new Promise(resolve => {
+      const cleanup = () => {
+        clear();
+        process.stdin.removeListener('keypress', onKey);
+        if (raw) try { process.stdin.setRawMode(false); } catch { /* ignore */ }
+      };
+      const onKey = (_str: string | undefined, key: readline.Key) => {
+        if (key.name === 'up') { sel = Math.max(0, sel - 1); draw(); return; }
+        if (key.name === 'down') { sel = Math.min(items.length - 1, sel + 1); draw(); return; }
+        if (key.name === 'escape' || (key.ctrl && key.name === 'c')) { cleanup(); resolve(null); return; }
+        if (key.name === 'return' || key.name === 'enter') { const value = items[sel]!.value; cleanup(); resolve(value); }
+      };
+      process.stdin.on('keypress', onKey);
+      draw();
+    });
+  }
+
   // /commands 命令分发
 
   private async _command(raw: string): Promise<boolean> {
@@ -390,6 +593,10 @@ export class Repl {
       case '/memory': return this._handleMemoryCommand(args);
       case '/model': return this._handleModelCommand(args);
       case '/provider': return this._handleProviderCommand(args);
+      case '/rewind': await this._rewind(args); return false;
+      case '/resume': await this._resume(args); return false;
+      case '/history': case '/sessions': await this._sessions(); return false;
+      case '/reset': return this._command('/clear');
 
       case '/compact': {
         const compacted = await this.executor.compactContext(this.history);
@@ -421,6 +628,8 @@ export class Repl {
         process.stdout.write(`
 ${s.bold(this.i18n.t('help.title')) + ':'}
   ${t.accent('/plan <task>')}    ${t.dim(this.i18n.t('help.plan'))}
+  ${t.accent('/rewind')}        ${t.dim(this.i18n.t('help.rewind'))}
+  ${t.accent('/resume')}        ${t.dim(this.i18n.t('help.resume'))}
   ${t.accent('/clear')}         ${t.dim(this.i18n.t('help.clear'))}
   ${t.accent('/sessions')}      ${t.dim(this.i18n.t('help.sessions'))}
   ${t.accent('/language zh|en')} ${t.dim(this.i18n.t('help.language'))}
@@ -436,8 +645,6 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
   ${t.purple('Tab')}            ${t.dim(this.i18n.t('help.tab_tip'))}
 `);
         return false;
-
-      case '/sessions': await this._sessions(); return false;
 
       case '/plan': {
         if (!args) { process.stdout.write(t.warning(this.i18n.t('cmd.plan_usage') + '\n\n')); return false; }
@@ -469,7 +676,15 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         } finally {
           taskInput.stop();
         }
-        process.stdout.write('\n' + divider(this.i18n.t('plan.complete')) + '\n\n');
+        const next = await this._selectList(this.i18n.t('plan.complete'), [
+          { label: this.i18n.t('cmd.plan_execute'), detail: args, value: 'execute' as const },
+          { label: this.i18n.t('cmd.plan_keep'), detail: this.i18n.t('help.plan'), value: 'keep' as const },
+        ]);
+        if (next === 'execute') {
+          await this._execute(args);
+        } else {
+          process.stdout.write('\n' + divider(this.i18n.t('plan.complete')) + '\n\n');
+        }
         return false;
       }
 
@@ -477,6 +692,86 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         process.stdout.write(t.warning(`${this.i18n.t('cmd.unknown')} ${cmd}. ${this.i18n.t('help.help')}: /help\n\n`));
         return false;
     }
+  }
+
+  private async _rewind(args: string): Promise<void> {
+    const userTurns = this.history
+      .map((m, i) => ({ message: m, index: i }))
+      .filter(x => x.message.role === 'user');
+    if (!userTurns.length) {
+      process.stdout.write(t.dim(this.i18n.t('cmd.no_rewind') + '\n\n'));
+      return;
+    }
+    const selected = args
+      ? userTurns[Math.max(0, userTurns.length - Number.parseInt(args, 10))]
+      : await this._selectList(this.i18n.t('help.rewind'), userTurns.slice().reverse().map((turn, i) => ({
+          label: `${i + 1}. ${turn.message.content.slice(0, 80).replace(/\n/g, ' ')}`,
+          detail: `#${turn.index}`,
+          value: turn,
+        })));
+    if (!selected) return;
+
+    const scope = await this._selectList(this.i18n.t('help.rewind'), [
+      { label: this.i18n.t('cmd.rewind_scope_chat'), detail: this.i18n.t('cmd.rewind_scope_chat_desc'), value: 'chat' as const },
+      { label: this.i18n.t('cmd.rewind_scope_all'), detail: this.i18n.t('cmd.rewind_scope_all_desc'), value: 'all' as const },
+    ]);
+    if (!scope) return;
+
+    const original = selected.message.content;
+    this.history.splice(selected.index);
+    if (scope === 'all') {
+      const snapshot = this._findSnapshotForTurn(selected.index) ?? await this._loadWorkspaceSnapshot(this.sessionId);
+      if (snapshot) {
+        try {
+          await this._restoreWorkspaceSnapshot(snapshot);
+        } catch {
+          process.stdout.write(t.warning(this.i18n.t('cmd.rewind_snapshot_failed') + '\n'));
+        }
+      } else {
+        process.stdout.write(t.warning(this.i18n.t('cmd.rewind_snapshot_missing') + '\n'));
+      }
+    }
+    this.tui.setDraft(original);
+    process.stdout.write(t.success(this.i18n.t('cmd.rewind_done') + '\n\n'));
+  }
+
+  private async _resume(args: string): Promise<void> {
+    const { AuditLogger } = await import('@customize-agent/runtime');
+    const sessions = await AuditLogger.listSessions();
+    if (!sessions.length) {
+      process.stdout.write(t.dim(this.i18n.t('cmd.no_sessions') + '\n\n'));
+      return;
+    }
+    const id = args.trim() && args.trim() !== 'last'
+      ? args.trim()
+      : await this._selectList(this.i18n.t('help.resume'), sessions.slice(0, 20).map(session => ({
+          label: session.taskPreview,
+          detail: `${session.id} · ${session.date}`,
+          value: session.id,
+        })));
+    if (!id) return;
+    const scope = await this._selectList(this.i18n.t('help.resume'), [
+      { label: this.i18n.t('cmd.resume_scope_chat'), detail: this.i18n.t('cmd.resume_scope_chat_desc'), value: 'chat' as const },
+      { label: this.i18n.t('cmd.resume_scope_all'), detail: this.i18n.t('cmd.resume_scope_all_desc'), value: 'all' as const },
+    ]);
+    if (!scope) return;
+    const loaded = await AuditLogger.loadHistory(id);
+    this.history.length = 0;
+    this.history.push({ role: 'system', content: this.executor.getSystemPrompt() }, ...loaded.filter(m => m.role !== 'system'));
+    this.sessionId = id;
+    if (scope === 'all') {
+      const snapshot = await this._loadWorkspaceSnapshot(id);
+      if (snapshot) {
+        try {
+          await this._restoreWorkspaceSnapshot(snapshot);
+        } catch {
+          process.stdout.write(t.warning(this.i18n.t('cmd.rewind_snapshot_failed') + '\n'));
+        }
+      } else {
+        process.stdout.write(t.warning(this.i18n.t('cmd.rewind_snapshot_missing') + '\n'));
+      }
+    }
+    process.stdout.write(t.success(this.i18n.t('cmd.resume_done', { id }) + '\n\n'));
   }
 
   // ── /model & /provider ──
@@ -652,8 +947,12 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
   private _buildTui(cmds?: Array<{ name: string; desc: string }>): void {
     const defaults: Array<{ name: string; desc: string }> = [
       { name: '/plan',     desc: this.i18n.t('help.plan') },
+      { name: '/rewind',   desc: this.i18n.t('help.rewind') },
+      { name: '/resume',   desc: this.i18n.t('help.resume') },
       { name: '/clear',    desc: this.i18n.t('help.clear') },
+      { name: '/reset',    desc: this.i18n.t('help.clear') },
       { name: '/sessions', desc: this.i18n.t('help.sessions') },
+      { name: '/history',  desc: this.i18n.t('help.sessions') },
       { name: '/model',    desc: this.i18n.t('help.model') },
       { name: '/provider', desc: this.i18n.t('help.provider') },
       { name: '/memory',   desc: this.i18n.t('help.memory') },
@@ -683,7 +982,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
       onCtrlO: () => {
         const content = this.executor.lastThinkingContent;
         if (!content) {
-          return `  ${t.dim(this.i18n.t('think.no_content'))}`;
+          return t.dim(this.i18n.t('think.no_content'));
         }
         return thinkingExpanded(content, this.i18n.t('think.box_title'));
       },
