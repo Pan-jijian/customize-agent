@@ -35,7 +35,9 @@ const en: Record<string, string | string[]> = {
 
   // ── Help ──
   'help.title': 'Commands',
-  'help.plan': 'Create execution plan (read-only)',
+  'help.plan': 'Create a plan and optionally execute it',
+  'help.rewind': 'Rewind recent turns',
+  'help.resume': 'Resume a previous session',
   'help.clear': 'Reset session',
   'help.sessions': 'View session history',
   'help.model': 'Model management',
@@ -77,7 +79,9 @@ const en: Record<string, string | string[]> = {
 
   // ── Approval ──
   'approval.box_title': '⚠ Approval Required',
-  'approval.allow': 'Allow execution? [y/N]',
+  'approval.allow': 'Allow execution?',
+  'approval.run': 'Run',
+  'approval.cancel': 'Cancel',
   'approval.file_detail': 'File: {path}',
   'approval.command_detail': 'Command: {cmd}',
 
@@ -204,6 +208,22 @@ const en: Record<string, string | string[]> = {
   'cmd.no_api_key': '⚠ No API key configured. Set env var {env}.',
   'cmd.first_config': '/model  Add model & get started\n/model key <provider> <key>  Set API key\n/language  Switch UI language\n/help  Show all commands',
   'cmd.no_model_configured': '⚠ No model configured. Cannot execute tasks.',
+  'cmd.no_rewind': 'No conversation turn to rewind.',
+  'cmd.rewind_done': 'Rewound. The original user input has been restored to the input box.',
+  'cmd.rewind_scope_chat': 'Chat only',
+  'cmd.rewind_scope_chat_desc': 'Remove context after the selected turn and restore that input to the input box',
+  'cmd.rewind_scope_all': 'Chat + changes',
+  'cmd.rewind_scope_all_desc': 'Also restore the workspace snapshot captured before execution; no Git required',
+  'cmd.rewind_snapshot_failed': 'Failed to restore file changes: workspace snapshot could not be fully restored.',
+  'cmd.rewind_snapshot_missing': 'No workspace snapshot found for that turn; only conversation was rewound.',
+  'cmd.resume_done': 'Resumed session: {id}',
+  'cmd.resume_scope_chat': 'Chat only',
+  'cmd.resume_scope_chat_desc': 'Restore conversation messages only',
+  'cmd.resume_scope_all': 'Chat + changes',
+  'cmd.resume_scope_all_desc': 'Restore conversation and the workspace snapshot saved for that session',
+  'cmd.resume_changes_unavailable': 'No workspace snapshot found for that session; only conversation was restored.',
+  'cmd.plan_execute': 'Execute plan',
+  'cmd.plan_keep': 'Keep plan only',
 
   // ── Executor ──
   'executor.security_policy_deny': '[Denied by policy] {label}',

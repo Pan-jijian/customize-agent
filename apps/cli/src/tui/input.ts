@@ -86,6 +86,7 @@ export class TuiInput {
   private labels: TuiLabels;
   private _tokenStats?: () => { used: number; limit: number } | null;
   private _onCtrlO?: () => string | null;
+  private _draft = '';
 
   constructor(cfg: TuiConfig) {
     this.root = cfg.projectRoot;
@@ -105,13 +106,19 @@ export class TuiInput {
     };
   }
 
+  setDraft(text: string): void {
+    this._draft = text;
+  }
+
   // read 读取输入
 
   async read(): Promise<string> {
     return new Promise<string>(resolve => {
       if (!_kprInit) { readline.emitKeypressEvents(process.stdin); _kprInit = true; }
 
-      const st: St = { text: '', pos: 0, dd: 'none', items: [], sel: 0, fStart: -1, fEnd: -1 };
+      const initialDraft = this._draft;
+      this._draft = '';
+      const st: St = { text: initialDraft, pos: initialDraft.length, dd: 'none', items: [], sel: 0, fStart: -1, fEnd: -1 };
       let lastEmptyCtrlC = 0;
       let raw = false;
       if (process.stdin.isTTY) {

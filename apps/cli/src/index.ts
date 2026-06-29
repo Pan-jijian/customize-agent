@@ -10,7 +10,7 @@ import { MemoryManager } from '@customize-agent/memory';
 import { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import { AgentExecutor } from './agent/executor.js';
 import { Repl } from './repl/repl.js';
-import { approvalBox, t, renderMarkdown } from './tui/renderer.js';
+import { t, s, renderMarkdown } from './tui/renderer.js';
 import { type Message, BINARY_EXTENSIONS } from '@customize-agent/types';
 import { I18nManager } from './i18n/manager.js';
 import * as readline from 'readline';
@@ -252,12 +252,10 @@ function createApprovalHandler() {
         ? i18n.t('approval.command_detail', { cmd: String(args.input).slice(0, 120) })
         : undefined;
 
-    process.stdout.write(approvalBox(toolName, label, detail, {
-      title: i18n.t('approval.box_title'),
-      prompt: '[y/N]',
-    }));
+    process.stdout.write(`\n${t.warning(s.bold(i18n.t('approval.box_title')))}\n`);
+    process.stdout.write(`${t.text(label + ':')} ${t.accent(toolName)}\n`);
+    if (detail) process.stdout.write(`${t.dim(detail)}\n`);
     process.stdout.write('\n');
-    process.stdout.write(`${t.dim(i18n.t('approval.allow'))} `);
 
     if (!keypressInitialized) {
       readline.emitKeypressEvents(process.stdin);
@@ -270,28 +268,41 @@ function createApprovalHandler() {
         try { process.stdin.setRawMode(true); raw = true; } catch { /* ignore */ }
       }
       process.stdin.resume();
-
+      const choices = [
+        { label: i18n.t('approval.run'), value: true },
+        { label: i18n.t('approval.cancel'), value: false },
+      ];
+      let sel = 0;
+      let linesDrawn = 0;
+      const clear = () => {
+        if (linesDrawn > 0) process.stdout.write(`\x1b[${linesDrawn}A\r\x1b[0J`);
+        linesDrawn = 0;
+      };
+      const draw = () => {
+        clear();
+        const lines = choices.map((choice, i) => `${i === sel ? t.accent('▶') : ' '} ${i === sel ? s.bold(choice.label) : choice.label}`);
+        lines.push('', t.dim('↑↓  Enter  Esc'));
+        process.stdout.write(lines.join('\n') + '\n');
+        linesDrawn = lines.length;
+      };
       const cleanup = () => {
+        clear();
         process.stdin.removeListener('keypress', onKeypress);
         if (raw) try { process.stdin.setRawMode(false); } catch { /* ignore */ }
       };
       const finish = (approved: boolean) => {
         cleanup();
-        process.stdout.write(approved ? 'y\n' : 'n\n');
         resolve(approved);
       };
-      const onKeypress = (str: string | undefined, key: readline.Key) => {
-        const value = (str ?? '').toLowerCase();
-        if (key?.ctrl && key.name === 'c') {
-          cleanup();
-          process.stdout.write('\n');
-          process.exit(130);
-        }
-        if (value === 'y') finish(true);
-        else if (value === 'n' || key?.name === 'return' || key?.name === 'enter' || key?.name === 'escape') finish(false);
+      const onKeypress = (_str: string | undefined, key: readline.Key) => {
+        if (key?.ctrl && key.name === 'c') finish(false);
+        else if (key?.name === 'up' || key?.name === 'down') { sel = sel === 0 ? 1 : 0; draw(); }
+        else if (key?.name === 'return' || key?.name === 'enter') finish(choices[sel]!.value);
+        else if (key?.name === 'escape') finish(false);
       };
 
       process.stdin.on('keypress', onKeypress);
+      draw();
     });
   };
 }
