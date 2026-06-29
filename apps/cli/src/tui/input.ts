@@ -50,8 +50,8 @@ interface St {
 let _kprInit = false;
 
 // ── 前缀可见宽度（用于光标列计算）──
-// "  AGENT  │ ➜ " → 2 + (mode+2) + 各分隔符(空格+│+空格+➜+空格) = mode.length + 9
-function prefixVis(mode: string): number { return mode.length + 9; }
+// " AGENT  │ ➜ " → (mode+2) + 各分隔符(空格+│+空格+➜+空格) = mode.length + 7
+function prefixVis(mode: string): number { return mode.length + 7; }
 
 // ── 显示宽度（CJK/全角 = 2 列，ASCII = 1 列）──
 function displayWidth(s: string): number {
@@ -112,6 +112,7 @@ export class TuiInput {
       if (!_kprInit) { readline.emitKeypressEvents(process.stdin); _kprInit = true; }
 
       const st: St = { text: '', pos: 0, dd: 'none', items: [], sel: 0, fStart: -1, fEnd: -1 };
+      let lastEmptyCtrlC = 0;
       let raw = false;
       if (process.stdin.isTTY) {
         try { process.stdin.setRawMode(true); raw = true; } catch { /* */ }
@@ -135,7 +136,22 @@ export class TuiInput {
         const nm = key.name;
 
         // 退出处理
-        if (key.ctrl && nm === 'c') { done(); process.stdout.write(CSI + '?25h\n'); process.exit(0); }
+        if (key.ctrl && nm === 'c') {
+          if (st.text) {
+            st.text = '';
+            st.pos = 0;
+            st.dd = 'none';
+            st.items = [];
+            this._draw(st);
+            lastEmptyCtrlC = 0;
+            return;
+          }
+          const now = Date.now();
+          if (now - lastEmptyCtrlC < 1500) { done(); process.stdout.write(CSI + '?25h\n'); process.exit(0); }
+          lastEmptyCtrlC = now;
+          process.stdout.write('\x07');
+          return;
+        }
         if (key.ctrl && nm === 'd' && !st.text)  { done(); resolve('/exit'); return; }
 
         // 回车处理
@@ -145,6 +161,12 @@ export class TuiInput {
             if (sel) { this._apply(st, sel); return; }
           }
           if (done_) return;
+          if (this._prevLines > 1) {
+            process.stdout.write('\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[2B\r\x1b[2K\x1b[2A\r');
+            this._prevLines = 0;
+          } else {
+            process.stdout.write('\r\x1b[2K');
+          }
           done();
           const r = st.text.trim();
           if (r) { this.hist.push(r); this.hi = this.hist.length; }
@@ -302,7 +324,6 @@ export class TuiInput {
   // draw — 单次写入，一次 clearBelow，无逐行 clearLine
 
   private _draw(st: St): void {
-    const pad = '  ';
     const badge = modeBadge(this.mode);
     const barColor = st.dd !== 'none' ? modeAccent(this.mode) : t.subtle;
     const bar = barColor('│');
@@ -315,18 +336,29 @@ export class TuiInput {
 
     // ── 构建行内容 ──
     const lines: string[] = [];
-    // Token 使用量
+    const boxW = Math.max(40, process.stdout.columns ?? 80);
+    const innerW = boxW - 2;
     const stats = this._tokenStats?.();
+    let statsLabel = '';
+    let statsText = '';
     if (stats) {
       const pct = Math.round((stats.used / stats.limit) * 100);
       const color = pct > 85 ? t.error : pct > 60 ? t.warning : t.faint;
-      lines.push(`  ${color(`[${Math.round(stats.used/1000)}K/${Math.round(stats.limit/1000)}K ${pct}%]`)}`);
+      statsLabel = `[${Math.round(stats.used/1000)}K/${Math.round(stats.limit/1000)}K ${pct}%]`;
+      statsText = color(` ${statsLabel} `);
     }
-    lines.push(`${pad}${badge} ${bar} ${pr} ${before}${caret}${after}`);
+    const topFill = Math.max(1, innerW - (statsLabel ? displayWidth(` ${statsLabel} `) : 0));
+    lines.push(t.subtle('╭' + '─'.repeat(topFill)) + statsText + t.subtle('╮'));
+
+    const inputPrefix = `${badge} ${bar} ${pr} `;
+    const inputPlainWidth = prefixVis(this.mode);
+    const inputVisible = inputPlainWidth + displayWidth(before + ch + after);
+    const inputPad = ' '.repeat(Math.max(0, innerW - 2 - inputVisible));
+    lines.push(`${t.subtle('│')} ${inputPrefix}${before}${caret}${after}${inputPad} ${t.subtle('│')}`);
+    lines.push(t.subtle('╰' + '─'.repeat(innerW) + '╯'));
 
     if (st.dd !== 'none' && st.items.length) {
-      lines.push(`${pad}${bar}`);
-      const ddPrefix = `${pad}${bar} `;
+      const ddPrefix = `${bar} `;
       if (st.dd === 'command') {
         for (const l of renderCommandMenu(
           st.items.map((it, i) => ({ cmd: it.label, desc: it.detail ?? '', highlighted: i === st.sel })),
@@ -354,7 +386,8 @@ export class TuiInput {
     // 使用逐行 clearLine（而非 clearBelow）— 更精细，闪烁更少。
     // 输入行: \r + 空格覆盖旧内容，然后 clearLine 修剪多余。
     // 下拉行: \n + clearLine + 内容。
-    let out = '\r' + lines[0] + CSI + 'K';  // 写入后清除到行尾
+    let out = prevLines > 1 ? `${CSI}1A` : '';
+    out += '\r' + lines[0] + CSI + 'K';  // 写入后清除到行尾
     for (let i = 1; i < totalLines; i++) {
       out += '\n' + CSI + 'K' + lines[i];
     }
@@ -365,11 +398,13 @@ export class TuiInput {
       }
     }
 
-    // 光标回到输入行，再移到目标列
+    // 光标回到输入框内容行，再移到目标列
     const lastTouched = Math.max(totalLines, prevLines);
-    if (lastTouched > 1) out += `${CSI}${lastTouched - 1}A`;
+    const inputLineIndex = 1;
+    const linesBelowInput = Math.max(0, lastTouched - 1 - inputLineIndex);
+    if (linesBelowInput > 0) out += `${CSI}${linesBelowInput}A`;
     out += '\r';
-    const targetCol = prefixVis(this.mode) + displayWidth(before);
+    const targetCol = 2 + prefixVis(this.mode) + displayWidth(before);
     if (targetCol > 0) out += `${CSI}${targetCol}C`;
 
     process.stdout.write(out);

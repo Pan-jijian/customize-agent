@@ -1,14 +1,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Message } from '@customize-agent/types';
-import type { AgentExecutor } from '../agent/executor.js';
+import type { AgentEvent, AgentExecutor } from '../agent/executor.js';
 import { TuiInput } from '../tui/input.js';
-import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded } from '../tui/renderer.js';
+import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded, userMessageBlock } from '../tui/renderer.js';
 import type { MemoryManager, MemoryType } from '@customize-agent/memory';
 import { BINARY_EXTENSIONS } from '@customize-agent/types';
 import type { ConfigStore, ModelRegistry, ModelTier } from '@customize-agent/runtime';
 import { resolveProtocol } from '@customize-agent/runtime';
 import type { I18nManager } from '../i18n/manager.js';
+import * as readline from 'readline';
+import stringWidth from 'string-width';
 
 /** REPL 配置 */
 export interface ReplConfig {
@@ -25,6 +27,7 @@ export interface ReplConfig {
 /** @file 引用正则（排除邮箱地址：前面必须为空白或行首） */
 const RE_AT = /(?:^|\s)@([^\s@]+(?::\d+(?:-\d+)?)?)/g;
 const MAX_INLINE_SIZE = 500_000;
+let keypressInitialized = false;
 
 /**
  * REPL — 会话管理 + TUI 输入 + 消息格式化 + 斜杠命令。
@@ -125,6 +128,187 @@ export class Repl {
 
   // 任务执行
 
+  private _renderAgentEvent(event: AgentEvent): void {
+    if (event.type === 'output') {
+      process.stdout.write(event.text);
+    } else if (event.type === 'user_message') {
+      process.stdout.write(userMessageBlock(event.text, this.i18n.t('message.user')));
+    }
+  }
+
+  private _captureInputDuringTask(onCancel: () => void): { stop: () => void; pause: () => void; resume: () => void; drain: () => string[]; writeOutput: (text: string) => void } {
+    if (!keypressInitialized) {
+      readline.emitKeypressEvents(process.stdin);
+      keypressInitialized = true;
+    }
+    let raw = false;
+    if (process.stdin.isTTY) {
+      try { process.stdin.setRawMode(true); raw = true; } catch { /* ignore */ }
+    }
+    process.stdin.resume();
+
+    let buffer = '';
+    let outputLineOpen = false;
+    let statusLineActive = false;
+    let inputLinesOnScreen = 0;
+    let inputCursorLineIndex = 0;
+    const pending: string[] = [];
+    const prompt = `${t.badge(' AGENT ')} ${t.subtle('│')} ${t.accent('➜')} `;
+    const clearInputLine = () => {
+      if (inputLinesOnScreen > 0) {
+        const up = inputCursorLineIndex;
+        let out = up > 0 ? `\x1b[${up}A` : '';
+        out += '\r';
+        for (let i = 0; i < inputLinesOnScreen; i++) {
+          out += '\x1b[2K';
+          if (i < inputLinesOnScreen - 1) out += '\n';
+        }
+        if (inputLinesOnScreen > 1) out += `\x1b[${inputLinesOnScreen - 1}A\r`;
+        process.stdout.write(out);
+        inputLinesOnScreen = 0;
+        inputCursorLineIndex = 0;
+        return;
+      }
+      process.stdout.write('\r\x1b[2K');
+    };
+    const renderBuffer = () => {
+      clearInputLine();
+      if (outputLineOpen) {
+        process.stdout.write('\n');
+        outputLineOpen = false;
+      }
+      const width = Math.max(40, process.stdout.columns ?? 80);
+      const inner = width - 2;
+      const content = `${prompt}${buffer}`;
+      const promptWidth = 13;
+      const bufferWidth = stringWidth(buffer);
+      const plainWidth = promptWidth + bufferWidth;
+      const pad = ' '.repeat(Math.max(0, inner - 2 - plainWidth));
+      const queuedLines = pending.flatMap(text => userMessageBlock(text, this.i18n.t('message.queued'), 'queued').trimEnd().split('\n'));
+      const top = t.subtle('╭' + '─'.repeat(inner) + '╮');
+      const mid = `${t.subtle('│')} ${content}${pad} ${t.subtle('│')}`;
+      const bottom = t.subtle('╰' + '─'.repeat(inner) + '╯');
+      const lines = [...queuedLines, top, mid, bottom];
+      process.stdout.write(`\r${lines.map((line, i) => `${i === 0 ? '' : '\n'}\x1b[2K${line}`).join('')}\x1b[1A\r\x1b[${Math.max(1, 2 + promptWidth + bufferWidth)}C`);
+      inputLinesOnScreen = lines.length;
+      inputCursorLineIndex = lines.length - 2;
+    };
+    const clearStatusLine = () => {
+      if (!statusLineActive) return;
+      clearInputLine();
+      process.stdout.write('\x1b[1A\r\x1b[2K');
+      statusLineActive = false;
+    };
+    const clearBuffer = () => {
+      if (outputLineOpen) {
+        process.stdout.write('\n');
+        outputLineOpen = false;
+        return;
+      }
+      clearInputLine();
+    };
+    const CURSOR_CONTROL_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[ABCDGJK]`, 'g');
+    const normalizeStatusText = (text: string) => text
+      .replace(CURSOR_CONTROL_RE, '')
+      .replace(/^\r+/, '');
+    const writeStatus = (text: string) => {
+      const normalized = normalizeStatusText(text);
+      const isClear = normalized.trim().length === 0;
+      if (statusLineActive) {
+        clearInputLine();
+        process.stdout.write('\x1b[1A\r\x1b[2K');
+      } else {
+        clearBuffer();
+      }
+      if (isClear) {
+        statusLineActive = false;
+        renderBuffer();
+        return;
+      }
+      process.stdout.write(normalized.endsWith('\n') ? normalized : normalized + '\n');
+      statusLineActive = !normalized.endsWith('\n');
+      renderBuffer();
+    };
+    const writeOutput = (text: string) => {
+      if (text.startsWith('\r')) {
+        writeStatus(text);
+        return;
+      }
+      clearStatusLine();
+      clearBuffer();
+      process.stdout.write(text);
+      outputLineOpen = text.length > 0 && !text.endsWith('\n');
+      if (!outputLineOpen) renderBuffer();
+    };
+    renderBuffer();
+    const onKeypress = (str: string | undefined, key: readline.Key) => {
+      if (key?.ctrl && key.name === 'c') {
+        if (buffer) {
+          buffer = '';
+          renderBuffer();
+          return;
+        }
+        writeOutput(t.warning(this.i18n.t('status.cancelled')) + '\n');
+        onCancel();
+        return;
+      }
+      if (key?.name === 'return' || key?.name === 'enter') {
+        const text = buffer.trim();
+        buffer = '';
+        clearStatusLine();
+        clearBuffer();
+        if (text) {
+          pending.push(text);
+        }
+        renderBuffer();
+        return;
+      }
+      if (key?.name === 'backspace') {
+        buffer = buffer.slice(0, -1);
+        renderBuffer();
+        return;
+      }
+      if (key?.ctrl && key.name === 'u') {
+        buffer = '';
+        renderBuffer();
+        return;
+      }
+      if (str && str >= ' ') {
+        buffer += str;
+        renderBuffer();
+      }
+    };
+    let active = true;
+    process.stdin.on('keypress', onKeypress);
+    return {
+      drain: () => {
+        const drained = pending.splice(0, pending.length);
+        renderBuffer();
+        return drained;
+      },
+      writeOutput,
+      pause: () => {
+        if (!active) return;
+        active = false;
+        process.stdin.removeListener('keypress', onKeypress);
+        clearBuffer();
+      },
+      resume: () => {
+        if (active) return;
+        active = true;
+        process.stdin.on('keypress', onKeypress);
+        renderBuffer();
+      },
+      stop: () => {
+        if (active) process.stdin.removeListener('keypress', onKeypress);
+        active = false;
+        clearStatusLine();
+        clearBuffer();
+        if (raw) try { process.stdin.setRawMode(false); } catch { /* ignore */ }
+      },
+    };
+  }
+
   private async _execute(input: string): Promise<void> {
     // 检查是否配置了模型
     const resolved = this.modelRegistry.resolve('action');
@@ -133,6 +317,8 @@ export class Repl {
       process.stdout.write(t.dim(this.i18n.t('cmd.first_config') + '\n\n'));
       return;
     }
+
+    process.stdout.write('\r\x1b[2K' + userMessageBlock(input, this.i18n.t('message.user')));
 
     let enhancedInput = input;
     if (this.memory) {
@@ -147,10 +333,21 @@ export class Repl {
     }
 
     this.history.push({ role: 'user', content: enhancedInput });
-    process.stdout.write('\n');
 
+    const abortController = new AbortController();
+    const taskInput = this._captureInputDuringTask(() => abortController.abort());
     try {
-      const updated = await this.executor.runTask(this.history);
+      const updated = await this.executor.runTask(this.history, {
+        onEvent: event => {
+          if (event.type === 'approval_request') taskInput.pause();
+          if (event.type === 'output') taskInput.writeOutput(event.text);
+          else if (event.type === 'user_message') taskInput.writeOutput(userMessageBlock(event.text, this.i18n.t('message.user')));
+          else this._renderAgentEvent(event);
+          if (event.type === 'approval_response') taskInput.resume();
+        },
+        drainUserInput: () => taskInput.drain(),
+        signal: abortController.signal,
+      });
       this.history.length = 0;
       this.history.push(...updated);
 
@@ -161,8 +358,12 @@ export class Repl {
         }
       }
     } catch (err) {
-      process.stdout.write(msg.error((err as Error).message));
+      if (!abortController.signal.aborted) {
+        process.stdout.write(msg.error((err as Error).message));
+      }
       this.history.pop();
+    } finally {
+      taskInput.stop();
     }
   }
 
@@ -244,12 +445,29 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         process.stdout.write(msg.info(args) + '\n\n');
         const prompt = `Create an execution plan (read-only, do not modify files).\n\nTask: ${args}\n\nOutput the plan.`;
         this.history.push({ role: 'user', content: prompt });
+        const abortController = new AbortController();
+        const taskInput = this._captureInputDuringTask(() => abortController.abort());
         try {
-          const u = await this.executor.runTask(this.history, { readonly: true });
+          const u = await this.executor.runTask(this.history, {
+            readonly: true,
+            onEvent: event => {
+              if (event.type === 'approval_request') taskInput.pause();
+              if (event.type === 'output') taskInput.writeOutput(event.text);
+              else if (event.type === 'user_message') taskInput.writeOutput(userMessageBlock(event.text, this.i18n.t('message.user')));
+              else this._renderAgentEvent(event);
+              if (event.type === 'approval_response') taskInput.resume();
+            },
+            drainUserInput: () => taskInput.drain(),
+            signal: abortController.signal,
+          });
           this.history.length = 0; this.history.push(...u);
         } catch (err) {
-          process.stdout.write(msg.error((err as Error).message));
+          if (!abortController.signal.aborted) {
+            process.stdout.write(msg.error((err as Error).message));
+          }
           this.history.pop();
+        } finally {
+          taskInput.stop();
         }
         process.stdout.write('\n' + divider(this.i18n.t('plan.complete')) + '\n\n');
         return false;

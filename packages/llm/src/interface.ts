@@ -19,6 +19,7 @@ export interface ChatOptions {
   temperature?: number;
   maxTokens?: number;
   tools?: FunctionDefinition[];
+  signal?: AbortSignal;
 }
 
 /**

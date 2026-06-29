@@ -30,6 +30,8 @@ const en: Record<string, string | string[]> = {
   // ── Mode Labels ──
   'mode.agent': 'AGENT',
   'mode.plan': 'PLAN',
+  'message.user': 'User',
+  'message.queued': 'Queued',
 
   // ── Help ──
   'help.title': 'Commands',
@@ -70,6 +72,7 @@ const en: Record<string, string | string[]> = {
   'tool.lsp_definition': 'Go to Definition',
   'tool.lsp_references': 'Find References',
   'tool.lsp_diagnostics': 'Diagnostics',
+  'tool.count_label': 'tools',
 
 
   // ── Approval ──
@@ -90,6 +93,9 @@ const en: Record<string, string | string[]> = {
   'tool_call.error': '└ ✗',
   'tool_call.truncated': '\n...[Truncated {count} chars]',
   'stream.thinking': 'Thinking…',
+  'think.thinking': 'Thinking…',
+  'think.thought_for': 'Thought for',
+  'think.tokens': 'tokens',
   'token.prompt': 'prompt',
   'token.output': 'output',
   'token.rounds': 'rounds',
@@ -123,6 +129,7 @@ const en: Record<string, string | string[]> = {
   'status.warning': '⚠',
   'status.error': '✗',
   'status.info': 'ℹ',
+  'status.cancelled': 'Current task cancelled',
 
   // ── File References ──
   'file.not_found': 'File not found',

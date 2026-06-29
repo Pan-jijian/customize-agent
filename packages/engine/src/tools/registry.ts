@@ -7,6 +7,10 @@ export interface JSONSchema {
 }
 
 /** 已注册的工具描述 */
+export interface ToolExecutionContext {
+  signal?: AbortSignal;
+}
+
 export interface RegisteredTool {
   /** 工具唯一名称（LLM function calling 使用） */
   name: string;
@@ -19,7 +23,7 @@ export interface RegisteredTool {
   /** 绑定的 Capability（权限检查用） */
   capabilities: string[];
   /** 工具执行函数 */
-  handler: (args: Record<string, unknown>) => Promise<string>;
+  handler: (args: Record<string, unknown>, context?: ToolExecutionContext) => Promise<string>;
 }
 
 /**
@@ -38,12 +42,13 @@ export class ToolRegistry {
   }
 
   /** 按名称分发执行工具 */
-  async dispatch(name: string, args: Record<string, unknown>): Promise<string> {
+  async dispatch(name: string, args: Record<string, unknown>, context?: ToolExecutionContext): Promise<string> {
     const tool = this.tools.get(name);
     if (!tool) {
       return `Unknown tool: "${name}". Available tools: ${this.listNames().join(', ')}`;
     }
-    return tool.handler(args);
+    if (context?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    return tool.handler(args, context);
   }
 
   /** 按名称查找工具 */

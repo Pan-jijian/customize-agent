@@ -57,7 +57,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
         temperature: options?.temperature ?? 0.2,
         max_tokens: options?.maxTokens,
         tools: this._buildTools(options?.tools),
-      });
+      }, { signal: options?.signal });
 
       const choice = response.choices[0];
       if (!choice) throw new Error('LLM returned empty choices');

@@ -39,6 +39,14 @@ export const s = {
   underline: (t: string) => `${CSI}4m${t}${CSI}24m`,
 };
 
+export function formatDuration(ms: number): string {
+  const seconds = Math.max(ms / 1000, 0.1);
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = seconds / 60;
+  if (minutes < 60) return `${minutes.toFixed(1)}m`;
+  return `${(minutes / 60).toFixed(1)}h`;
+}
+
 // ── 框线字符 ──
 const B = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
 
@@ -98,6 +106,22 @@ export const msg = {
   error:   (text: string, title?: string) => _msgBox('error', text, title),
   success: (text: string, title?: string) => _msgBox('success', text, title),
 };
+
+export function userMessageBlock(text: string, labelTextValue = 'User', variant: 'user' | 'queued' = 'user'): string {
+  const maxInner = Math.max(12, Math.min(tw() - 6, 88));
+  const labelText = ` ${labelTextValue} `;
+  const renderedLabel = variant === 'queued' ? cb(labelText, 232, 220) : t.badge(labelText);
+  const lines = wrapAnsi(text, maxInner, { hard: true }).split('\n');
+  const inner = Math.min(maxInner, Math.max(stringWidth(labelText), ...lines.map(line => stringWidth(line))));
+  const out: string[] = [''];
+  out.push(`${t.subtle('╭')}${renderedLabel}${t.subtle('─'.repeat(Math.max(1, inner + 2 - stringWidth(labelText))))}${t.subtle('╮')}`);
+  for (const line of lines) {
+    const pad = ' '.repeat(Math.max(0, inner - stringWidth(line)));
+    out.push(`${t.subtle('│')} ${t.text(line)}${pad} ${t.subtle('│')}`);
+  }
+  out.push(`${t.subtle('╰')}${t.subtle('─'.repeat(inner + 2))}${t.subtle('╯')}`);
+  return out.join('\n') + '\n';
+}
 
 // ── 欢迎横幅 ──
 export function welcomeBanner(version: string, provider: string, opts?: {
@@ -222,38 +246,39 @@ function formatArgs(args?: Record<string, unknown>): string {
   const val = args.path ?? args.input;
   if (typeof val === 'string' && val.length > 0) {
     const short = val.length > 50 ? val.slice(0, 47) + '…' : val;
-    return ` ${t.faint(short)}`;
+    return ` ${t.subtle('·')} ${t.dim(short)}`;
   }
   return '';
 }
 
-export function toolCallStart(toolName: string, args?: Record<string, unknown>): string {
-  return `  ${t.accent('▸')} ${t.accent(s.bold(toolName))}${formatArgs(args)}`;
+export function toolCallStart(toolName: string, args?: Record<string, unknown>, label?: string): string {
+  return `${toolTitle(toolName, label)}${formatArgs(args)}`;
 }
 
 export function toolCallEnd(status: 'success' | 'error', detail?: string, durationMs?: number): string {
-  const mark = status === 'success' ? `  ${t.success('✓')}` : `  ${t.error('✗')}`;
+  const mark = status === 'success' ? t.success('✓') : t.error('✗');
   const extra = detail ? ` ${t.faint(detail.slice(0, 80))}` : '';
-  const dur = durationMs ? ` ${t.faint(`[${(durationMs / 1000).toFixed(1)}s]`)}` : '';
+  const dur = durationMs ? ` ${t.faint(`[${formatDuration(durationMs)}]`)}` : '';
   return `${mark}${extra}${dur}`;
 }
 
 /** 同类工具折叠 — 进行中 */
-export function toolCallFolding(toolName: string, count: number, latest: string, elapsedMs?: number): string {
-  const color = toolColor(toolName);
-  const argsStr = latest ? ` ${t.faint(latest.slice(0, 60))}` : '';
-  const dur = elapsedMs ? t.faint(` ${(elapsedMs / 1000).toFixed(1)}s`) : '';
-  return `\r\x1b[2K  ${color('▸')} ${color(s.bold(toolName))} ${t.dim(`(${count})`)}${argsStr}${dur}\r`;
+export function toolCallFolding(toolName: string, count: number, latest: string, elapsedMs?: number, label?: string, toolsLabel = 'tools'): string {
+  const countText = count > 1 ? ` ${t.subtle(`· ${count} ${toolsLabel}`)}` : '';
+  const argsStr = latest ? ` ${t.subtle('·')} ${t.dim(latest.slice(0, 60))}` : '';
+  const dur = elapsedMs ? t.subtle(` ${formatDuration(elapsedMs)}`) : '';
+  return `\r\x1b[2K${toolTitle(toolName, label)}${countText}${argsStr}${dur}\r`;
 }
 
 /** 同类工具折叠 — 完成摘要，write_file 时附带 diff 预览 */
-export function toolCallFold(toolName: string, count: number, args: string[], _totalMs?: number, diffResult?: string): string {
-  const color = toolColor(toolName);
+export function toolCallFold(toolName: string, count: number, args: string[], totalMs?: number, diffResult?: string, label?: string, toolsLabel = 'tools'): string {
   const valid = args.filter(a => a);
   const preview = valid.length > 0
-    ? ` · ${valid.slice(0, 4).map(a => t.faint(a.slice(0, 40))).join(t.dim(', '))}${valid.length > 4 ? t.dim(` …${valid.length - 4} more`) : ''}`
+    ? ` ${t.subtle('·')} ${valid.slice(0, 4).map(a => t.dim(a.slice(0, 40))).join(t.subtle(', '))}${valid.length > 4 ? t.subtle(` …${valid.length - 4} more`) : ''}`
     : '';
-  let out = `  ${t.success('✓')} ${color(`${count}× ${toolName}`)}${preview}`;
+  const countText = count > 1 ? ` ${t.subtle(`· ${count} ${toolsLabel}`)}` : '';
+  const dur = totalMs ? ` ${t.subtle(`[${formatDuration(totalMs)}]`)}` : '';
+  let out = `${toolTitle(toolName, label)}${countText}${preview}${dur}`;
   if (diffResult) {
     out += '\n' + renderDiff(diffResult, 12);
   }
@@ -274,7 +299,7 @@ export function renderDiff(diffText: string, maxLines = 30): string {
     else if (raw.startsWith('+')) line = t.success(raw);
     else if (raw.startsWith('-')) line = t.error(raw);
     else line = t.dim(raw);
-    out.push(`  ${t.subtle('│')} ${line}`);
+    out.push(`${t.subtle('│')} ${line}`);
     count++;
   }
   return out.join('\n');
@@ -283,11 +308,11 @@ export function renderDiff(diffText: string, maxLines = 30): string {
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /** 基础 spinner（非思考场景使用） */
-export function spinnerStart(label?: string): { stop: () => void; update: (text: string) => void; tick: () => void } {
+export function spinnerStart(label?: string, write: (text: string) => void = process.stdout.write.bind(process.stdout)): { stop: () => void; update: (text: string) => void; tick: () => void } {
   let text = label ?? 'Thinking…';
   let idx = 0;
   const redraw = () => {
-    process.stdout.write('\r  ' + t.accent(SPIN[idx % SPIN.length]!) + ' ' + t.dim(text));
+    write('\r' + t.accent(SPIN[idx % SPIN.length]!) + ' ' + t.dim(text));
   };
   const interval = setInterval(() => { idx++; redraw(); }, 100);
   return {
@@ -295,7 +320,7 @@ export function spinnerStart(label?: string): { stop: () => void; update: (text:
     tick: () => { redraw(); },
     stop: () => {
       clearInterval(interval);
-      process.stdout.write('\r\x1b[2K');
+      write('\r\x1b[2K');
     },
   };
 }
@@ -303,18 +328,17 @@ export function spinnerStart(label?: string): { stop: () => void; update: (text:
 // ── 思考链渲染（参考 Claude Code 三阶段模式） ──
 
 /** Phase 1 — 思考进行中实时状态行（始终 2 行结构，保证回退覆写一致） */
-export function thinkingLive(frame: string, elapsed: string, tokens: string, subtitle: string): string {
-  const head = `  ${t.accent(frame)} ${t.text('Thinking…')} ${t.dim(`(${elapsed} · ↓ ${tokens} tokens)`)}`;
-  // 始终 2 行：subtitle 为空时也占一行（空白），保证 line count 固定 = 2
+export function thinkingLive(frame: string, elapsed: string, tokens: string, subtitle: string, labels?: { thinking: string; tokens: string }): string {
+  const head = `${t.accent(frame)} ${t.text(labels?.thinking ?? 'Thinking…')} ${t.dim(`(${elapsed} · ↓ ${tokens} ${labels?.tokens ?? 'tokens'})`)}`;
   const sub = subtitle
-    ? `\n  ${t.subtle('⎿')}  ${t.faint(subtitle)}`
-    : '\n ';
+    ? `\n${t.subtle('⎿')} ${t.faint(subtitle)}`
+    : '';
   return head + sub;
 }
 
 /** Phase 2 — 思考完成折叠摘要 */
-export function thinkingSummary(time: string, tokens: string, expandHint: string): string {
-  return `  ${t.success('✓')} ${t.text('Thought for')} ${t.dim(time)} ${t.text('·')} ${t.dim(`↓ ${tokens} tokens`)}  ${t.faint(expandHint)}`;
+export function thinkingSummary(time: string, tokens: string, expandHint: string, labels?: { thoughtFor: string; tokens: string }): string {
+  return `${t.success('✓')} ${t.text(labels?.thoughtFor ?? 'Thought for')} ${t.dim(time)} ${t.text('·')} ${t.dim(`↓ ${tokens} ${labels?.tokens ?? 'tokens'}`)} ${t.faint(expandHint)}`;
 }
 
 /** Phase 3 — 展开完整思考（dim 内容 + 边框） */
@@ -324,17 +348,17 @@ export function thinkingExpanded(content: string, boxTitle: string): string {
   const lines = content.split('\n');
   const out: string[] = [];
 
-  out.push(`  ${t.subtle('┌─')} ${s.bold(t.purple(boxTitle))} ${t.subtle('─'.repeat(Math.max(0, W - 5 - visibleLen(boxTitle))))}${t.subtle('┐')}`);
+  out.push(`${t.subtle('┌─')} ${s.bold(t.purple(boxTitle))} ${t.subtle('─'.repeat(Math.max(0, W - 5 - visibleLen(boxTitle))))}${t.subtle('┐')}`);
 
   for (const raw of lines) {
     const wrapped = wrapAnsi(raw, innerW, { hard: true });
     for (const chunk of wrapped.split('\n')) {
       const padding = ' '.repeat(Math.max(0, innerW - stringWidth(chunk)));
-      out.push(`  ${t.subtle('│')} ${t.dim(chunk)}${padding} ${t.subtle('│')}`);
+      out.push(`${t.subtle('│')} ${t.dim(chunk)}${padding} ${t.subtle('│')}`);
     }
   }
 
-  out.push(`  ${t.subtle('└')}${t.subtle('─'.repeat(W - 2))}${t.subtle('┘')}`);
+  out.push(`${t.subtle('└')}${t.subtle('─'.repeat(W - 2))}${t.subtle('┘')}`);
   return out.join('\n');
 }
 
@@ -352,7 +376,7 @@ export function extractThinkingSubtitle(buf: string, maxLen = 60): string {
  * 思考专用 spinner（Phase 1/2）。
  * tipPool: subtitle 为空时 fallback 的提示文本池，每次 thinkStart 随机选一条。
  */
-export function thinkingSpinner(tipPool: string[] = []): {
+export function thinkingSpinner(tipPool: string[] = [], write: (text: string) => void = process.stdout.write.bind(process.stdout), labels?: { thinking: string; thoughtFor: string; tokens: string }): {
   stop: () => void;
   thinkStart: () => void;
   thinkTick: (elapsedMs: number, tokens: number, subtitle: string) => void;
@@ -369,13 +393,7 @@ export function thinkingSpinner(tipPool: string[] = []): {
     currentTip = tipPool.length > 0 ? tipPool[Math.floor(Math.random() * tipPool.length)]! : '';
   };
 
-  const formatTime = (ms: number): string => {
-    if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
-    const s = Math.floor(ms / 1000);
-    if (s < 60) return `${s}s`;
-    const m = Math.floor(s / 60);
-    return `${m}m ${s % 60}s`;
-  };
+  const formatTime = formatDuration;
 
   const formatTokens = (n: number): string => {
     if (n < 1000) return `${n}`;
@@ -388,9 +406,8 @@ export function thinkingSpinner(tipPool: string[] = []): {
     const elapsed = formatTime(state.elapsedMs);
     const tok = formatTokens(state.tokens);
     const sub = state.subtitle || currentTip || '';
-    const lines = thinkingLive(frame, elapsed, tok, sub).split('\n');
-    // 光标在 Sub 行（N+1）→ \x1b[1A 回到 Head 行（N）→ 覆写 → 换行到 N+1 → 覆写 Sub → \r
-    process.stdout.write(`\x1b[1A\r\x1b[2K${lines[0]}\n\x1b[2K${lines[1]}\r`);
+    const line = thinkingLive(frame, elapsed, tok, sub, labels).split('\n')[0]!;
+    write(`\r${line}`);
   };
 
   return {
@@ -399,9 +416,7 @@ export function thinkingSpinner(tipPool: string[] = []): {
       state = { elapsedMs: 0, tokens: 0, subtitle: '' };
       done = false;
       pickTip();
-      // 预留 2 行空白 → 回退 1 行到 Head 行 → 首次绘制
-      process.stdout.write('\n\n\x1b[1A');
-      linesOnScreen = 2;
+      linesOnScreen = 1;
       redraw();
       if (!interval) interval = setInterval(() => { idx++; redraw(); }, 100);
     },
@@ -414,17 +429,14 @@ export function thinkingSpinner(tipPool: string[] = []): {
       if (linesOnScreen === 0) return;
       const time = formatTime(elapsedMs);
       const tok = formatTokens(tokens);
-      // 光标在 Sub 行（N+1）→ \x1b[1A 回到 Head 行（N）→ 写摘要 → \x1b[0J 清残留 → \n
-      process.stdout.write(
-        `\x1b[1A\r\x1b[2K${thinkingSummary(time, tok, expandHint)}\x1b[0J\n`
-      );
+      write(`\r${thinkingSummary(time, tok, expandHint, labels)}\n`);
       linesOnScreen = 0;
     },
     stop: () => {
       if (interval) { clearInterval(interval); interval = null; }
       done = true;
       if (linesOnScreen > 0) {
-        process.stdout.write(`\x1b[1A\r\x1b[2K\x1b[0J`);
+        write('\r\x1b[2K');
         linesOnScreen = 0;
       }
     },
@@ -531,7 +543,7 @@ class TerminalRenderer extends Renderer {
         (t): t is typeof t & { tokens: InlineTokens } => t.type === 'paragraph' || t.type === 'text',
       );
       const inlineContent = this._renderInline(firstBlock?.tokens ?? []);
-      out += `  ${t.accent(bullet)} ${checkbox}${inlineContent}\n`;
+      out += `${t.accent(bullet)} ${checkbox}${inlineContent}\n`;
       if (token.ordered) n++;
     }
     return out + '\n';
@@ -644,7 +656,7 @@ export function renderMarkdown(text: string): string {
   try {
     const pre = text.replace(/\n{3,}/g, '\n\n');
     const parsed = marked.parse(pre, { async: false }) as string;
-    return parsed.split('\n').map(l => l ? `  ${l}` : l).join('\n');
+    return parsed;
   } catch (err) {
     console.error('[renderMarkdown] parse failed:', (err as Error).message);
     return text;
@@ -709,11 +721,11 @@ export function renderInlineMarkdown(text: string): string {
   }
   const ulMatch = text.match(UL_RE);
   if (ulMatch) {
-    return `  ${t.accent('•')} ${applyInline(ulMatch[1]!)}\n`;
+    return `${t.accent('•')} ${applyInline(ulMatch[1]!)}\n`;
   }
   const olMatch = text.match(OL_RE);
   if (olMatch) {
-    return `  ${t.blue(olMatch[1]! + '.')} ${applyInline(olMatch[2]!)}\n`;
+    return `${t.blue(olMatch[1]! + '.')} ${applyInline(olMatch[2]!)}\n`;
   }
   return applyInline(text);
 }
@@ -723,7 +735,7 @@ export function renderInlineMarkdown(text: string): string {
 const TOOL_COLOR: Record<string, (s: string) => string> = {
   read_file: t.blue,
   list_files: t.blue,
-  search: t.blue,
+  search: t.purple,
   lsp_definition: t.purple,
   lsp_references: t.purple,
   lsp_diagnostics: t.purple,
@@ -732,15 +744,36 @@ const TOOL_COLOR: Record<string, (s: string) => string> = {
   git_commit: t.success,
 };
 
+const TOOL_ICON: Record<string, string> = {
+  read_file: '◰',
+  list_files: '▤',
+  search: '⌕',
+  write_file: '✎',
+  execute_command: '⌘',
+  git_commit: '⑂',
+  lsp_definition: '◇',
+  lsp_references: '◇',
+  lsp_diagnostics: '◇',
+};
+
 function toolColor(name: string): (s: string) => string {
   return TOOL_COLOR[name] ?? t.accent;
+}
+
+function toolIcon(name: string): string {
+  return TOOL_ICON[name] ?? '▸';
+}
+
+function toolTitle(name: string, label?: string): string {
+  const color = toolColor(name);
+  return `${color(toolIcon(name))} ${color(s.bold(label ?? name))}`;
 }
 
 // ── 状态消息 ──
 export function taskComplete(label?: string, summary?: string): string {
   const title = label ?? 'Task complete';
   const s = summary ? ` ${t.dim('— ' + summary)}` : '';
-  return `\n  ${t.success('✓')} ${t.text(title)}${s}\n`;
+  return `\n${t.success('✓')} ${t.text(title)}${s}\n`;
 }
 
 export function taskWarning(text: string): string {
@@ -749,18 +782,18 @@ export function taskWarning(text: string): string {
 
 // ── 上下文管理显示 ──
 export function contextCompacting(compactingLabel: string): string {
-  return `\n  ${t.warning('⟳')} ${t.text(compactingLabel)}`;
+  return `\n${t.warning('⟳')} ${t.text(compactingLabel)}`;
 }
 
 export function contextCompacted(compactedLabel: string): string {
-  return `  ${t.success('✓')} ${t.dim(compactedLabel)}\n`;
+  return `${t.success('✓')} ${t.dim(compactedLabel)}\n`;
 }
 
 export function contextStats(currentTokens: number, limit: number, label?: string): string {
   const pct = Math.round((currentTokens / limit) * 100);
   const color = pct > 85 ? t.error : pct > 60 ? t.warning : t.success;
   const prefix = label ?? 'Context';
-  return `  ${t.dim(prefix + ':')} ${color(`${Math.round(currentTokens / 1000)}K / ${Math.round(limit / 1000)}K token (${pct}%)`)}`;
+  return `${t.dim(prefix + ':')} ${color(`${Math.round(currentTokens / 1000)}K / ${Math.round(limit / 1000)}K token (${pct}%)`)}`;
 }
 
 // ── 审批弹框 ──

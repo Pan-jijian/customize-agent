@@ -24,6 +24,7 @@ export interface SearchOptions {
   maxResults?: number;
   /** 大小写敏感（默认 false） */
   caseSensitive?: boolean;
+  signal?: AbortSignal;
 }
 
 /**
@@ -39,9 +40,11 @@ export class CodeSearcher {
   /** 执行文本搜索：@vscode/ripgrep 内置二进制 */
   async grep(pattern: string, options: SearchOptions = {}): Promise<SearchMatch[]> {
     const maxResults = options.maxResults ?? 50;
+    if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     try {
       return await this._rgSearch(pattern, options, maxResults);
-    } catch {
+    } catch (err) {
+      if (options.signal?.aborted || (err as Error).name === 'AbortError') throw err;
       return this._jsSearch(pattern, options, maxResults);
     }
   }
@@ -77,6 +80,7 @@ export class CodeSearcher {
       cwd: this.cwd,
       reject: false,
       timeout: 30_000,
+      cancelSignal: options.signal,
     });
 
     if (result.exitCode !== 0 && result.exitCode !== 1) {
@@ -119,10 +123,12 @@ export class CodeSearcher {
       absolute: true,
       ignore: ['**/node_modules/**', '**/dist/**', '**/.git/**', '**/target/**'],
     });
+    if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
     const regex = new RegExp(pattern, options.caseSensitive ? 'g' : 'gi');
 
     for (const file of files) {
+      if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       if (results.length >= maxResults) break;
       try {
         const content = await fs.readFile(file, 'utf-8');

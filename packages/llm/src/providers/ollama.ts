@@ -42,7 +42,7 @@ export class OllamaProvider implements ILLMProvider {
         messages: messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
         temperature: options?.temperature ?? 0.2,
         max_tokens: options?.maxTokens,
-      });
+      }, { signal: options?.signal });
 
       const choice = response.choices[0];
       if (!choice) throw new Error('LLM returned empty choices');

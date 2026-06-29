@@ -3,7 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
 import { readdirSync, statSync } from 'fs';
 import { createProvider } from '@customize-agent/llm';
-import { ToolRegistry, PermissionEngine, ExecutionController } from '@customize-agent/engine';
+import { ToolRegistry, PermissionEngine, ExecutionController, type ToolExecutionContext } from '@customize-agent/engine';
 import { ToolKit, SandboxExecutor } from '@customize-agent/tools';
 import { LSPManager, CodeSearcher } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
@@ -64,7 +64,7 @@ function reg(
   required: string[],
   caps: string[],
   needsApproval: boolean,
-  handler: (args: Record<string, unknown>) => Promise<string>,
+  handler: (args: Record<string, unknown>, context?: ToolExecutionContext) => Promise<string>,
 ): void {
   r.register({
     name,
@@ -133,9 +133,9 @@ function buildRegistry(lspManager?: LSPManager): ToolRegistry {
   reg(registry, 'search', 'Fast text search across all files using ripgrep. Use for finding any text, patterns, documentation, config values, or code references.',
     { pattern: { type: 'string', description: 'Text or regex pattern to search for' } },
     ['pattern'], ['read_code'], false,
-    async (args) => {
+    async (args, context) => {
       const searcher = new CodeSearcher(PROJECT_ROOT);
-      const matches = await searcher.grep(String(args.pattern), { maxResults: 20 });
+      const matches = await searcher.grep(String(args.pattern), { maxResults: 20, signal: context?.signal });
       return matches.length > 0
         ? matches.map(m => `${m.file}:${m.line}: ${m.content}`).join('\n')
         : `No matches found for "${args.pattern}".`;
@@ -180,14 +180,14 @@ function buildRegistry(lspManager?: LSPManager): ToolRegistry {
     },
     requiresApproval: true,
     capabilities: ['execute_command'],
-    handler: async (args: Record<string, unknown>) => {
+    handler: async (args: Record<string, unknown>, context?: ToolExecutionContext) => {
       const cmd = String(args.input);
       const isCode = cmd.startsWith('python3 -c') || cmd.startsWith('python -c') || cmd.startsWith('node -e');
       const executor = isCode ? new SandboxExecutor('docker', PROJECT_ROOT) : null;
       // approved: true — 该工具 requiresApproval=true，用户已在上层审批通过
       const result = executor
-        ? await executor.execute(cmd, undefined, true)
-        : await toolkit.terminal.executeCommand(cmd, true);
+        ? await executor.execute(cmd, undefined, true, context?.signal)
+        : await toolkit.terminal.executeCommand(cmd, true, context?.signal);
 
       const out: string[] = [];
       if (result.stdout) out.push(result.stdout.trimEnd());
@@ -240,8 +240,10 @@ function buildRegistry(lspManager?: LSPManager): ToolRegistry {
   return registry;
 }
 
+let keypressInitialized = false;
+
 /** 创建审批回调（使用 i18n） */
-function createApprovalHandler(rl: readline.Interface) {
+function createApprovalHandler() {
   return async (toolName: string, args: Record<string, unknown>) => {
     const label = i18n.toolLabel(toolName);
     const detail = args.path
@@ -255,22 +257,52 @@ function createApprovalHandler(rl: readline.Interface) {
       prompt: '[y/N]',
     }));
     process.stdout.write('\n');
+    process.stdout.write(`${t.dim(i18n.t('approval.allow'))} `);
+
+    if (!keypressInitialized) {
+      readline.emitKeypressEvents(process.stdin);
+      keypressInitialized = true;
+    }
 
     return new Promise<boolean>(resolve => {
-      rl.question(`  ${t.dim(i18n.t('approval.allow'))} `, answer => {
-        resolve(answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes');
-      });
+      let raw = false;
+      if (process.stdin.isTTY) {
+        try { process.stdin.setRawMode(true); raw = true; } catch { /* ignore */ }
+      }
+      process.stdin.resume();
+
+      const cleanup = () => {
+        process.stdin.removeListener('keypress', onKeypress);
+        if (raw) try { process.stdin.setRawMode(false); } catch { /* ignore */ }
+      };
+      const finish = (approved: boolean) => {
+        cleanup();
+        process.stdout.write(approved ? 'y\n' : 'n\n');
+        resolve(approved);
+      };
+      const onKeypress = (str: string | undefined, key: readline.Key) => {
+        const value = (str ?? '').toLowerCase();
+        if (key?.ctrl && key.name === 'c') {
+          cleanup();
+          process.stdout.write('\n');
+          process.exit(130);
+        }
+        if (value === 'y') finish(true);
+        else if (value === 'n' || key?.name === 'return' || key?.name === 'enter' || key?.name === 'escape') finish(false);
+      };
+
+      process.stdin.on('keypress', onKeypress);
     });
   };
 }
 
 /** 创建 Executor 实例（懒加载：provider 无 API key 也能进入 REPL） */
-function createExecutor(providerName?: string, modelName?: string, apiKey?: string, baseUrl?: string, rl?: readline.Interface, lspManager?: LSPManager) {
+function createExecutor(providerName?: string, modelName?: string, apiKey?: string, baseUrl?: string, lspManager?: LSPManager) {
   const provider = createProvider(providerName ?? 'deepseek', { modelName, apiKey, baseUrl });
   const registry = buildRegistry(lspManager);
   const permissionEngine = new PermissionEngine();
   const controller = new ExecutionController({ maxBudgetUsd: 5.0, deadLoopThreshold: 4 });
-  const approvalHandler = rl ? createApprovalHandler(rl) : undefined;
+  const approvalHandler = createApprovalHandler();
 
   if (_repoMap === null) _repoMap = _generateRepoMap();
   return new AgentExecutor({
@@ -341,7 +373,6 @@ program.action(async () => {
   }
 
   // ── REPL 模式 ──
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
   const lsp = new LSPManager(PROJECT_ROOT);
 
   // 为 REPL 创建 executor — 用回退链解析模型
@@ -351,8 +382,8 @@ program.action(async () => {
     : i18n.t('welcome.no_model');
   const providerCfg = resolved ? configStore.getProvider(resolved.provider) : undefined;
   const executor = resolved
-    ? createExecutor(resolved.provider, resolved.name, providerCfg?.apiKey, providerCfg?.baseUrl, rl, lsp)
-    : createExecutor(undefined, undefined, undefined, undefined, rl, lsp);
+    ? createExecutor(resolved.provider, resolved.name, providerCfg?.apiKey, providerCfg?.baseUrl, lsp)
+    : createExecutor(undefined, undefined, undefined, undefined, lsp);
 
   const memory = new MemoryManager();
 
@@ -367,7 +398,6 @@ program.action(async () => {
   });
 
   await repl.start();
-  rl.close();
 });
 
 program

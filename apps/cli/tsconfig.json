@@ -3,7 +3,13 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "types": ["node", "react"],
+    "baseUrl": ".",
+    "paths": {
+      "@customize-agent/memory": ["../../packages/memory/dist/index.d.ts"]
+    },
+    "ignoreDeprecations": "6.0"
   },
   "include": ["src/**/*"]
 }
