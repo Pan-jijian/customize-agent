@@ -12,7 +12,7 @@ export class TerminalTool {
    * 安全执行终端命令。
    * @param approved 用户已审批 → VFS-Guard 不拦截
    */
-  async executeCommand(command: string, approved?: boolean): Promise<{ stdout: string; stderr: string; code: number }> {
-    return this.sandbox.execute(command, undefined, approved);
+  async executeCommand(command: string, approved?: boolean, signal?: AbortSignal): Promise<{ stdout: string; stderr: string; code: number }> {
+    return this.sandbox.execute(command, undefined, approved, signal);
   }
 }

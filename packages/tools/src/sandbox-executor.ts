@@ -59,32 +59,34 @@ export class SandboxExecutor {
    * 执行命令（自动选择对应平台的沙箱实现，vfs-guard 作为通用降级方案）。
    * @param approved 用户已在上层审批通过 → VFS-Guard 跳过危险命令拦截
    */
-  async execute(command: string, cwd?: string, approved?: boolean): Promise<SandboxResult> {
+  async execute(command: string, cwd?: string, approved?: boolean, signal?: AbortSignal): Promise<SandboxResult> {
     if (this.mode === 'danger-full-access') {
       throw new Error('danger-full-access 模式需要显式确认，请设置环境变量 CUSTOMIZE_AGENT_DANGER_MODE=1');
     }
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     if (this.mode === 'docker') {
-      return this._executeDocker(command, cwd);
+      return this._executeDocker(command, cwd, signal);
     }
     if (this.mode === 'vfs-guard') {
-      return this._executeVfsGuard(command, cwd, approved);
+      return this._executeVfsGuard(command, cwd, approved, signal);
     }
     if (process.platform === 'darwin') {
-      return this._executeSeatbelt(command, cwd);
+      return this._executeSeatbelt(command, cwd, signal);
     }
     if (process.platform === 'linux') {
-      return this._executeBwrap(command, cwd);
+      return this._executeBwrap(command, cwd, signal);
     }
-    return this._executeVfsGuard(command, cwd, approved);
+    return this._executeVfsGuard(command, cwd, approved, signal);
   }
 
   /** Docker 容器执行（不可用时自动降级 VFS） */
-  private async _executeDocker(command: string, cwd?: string): Promise<SandboxResult> {
+  private async _executeDocker(command: string, cwd?: string, signal?: AbortSignal): Promise<SandboxResult> {
     try {
-      await execa({ reject: false })`docker version`;
-    } catch {
+      await execa({ reject: false, cancelSignal: signal })`docker version`;
+    } catch (err) {
+      if (signal?.aborted || (err as Error).name === 'AbortError') throw err;
       console.warn('[Sandbox] Docker 不可用，降级为 VFS-Guard');
-      return this._executeVfsGuard(command, cwd);
+      return this._executeVfsGuard(command, cwd, undefined, signal);
     }
     const workspace = cwd ?? this.workspaceRoot;
     try {
@@ -92,6 +94,7 @@ export class SandboxExecutor {
         cwd: workspace,
         reject: false,
         timeout: 60_000,
+        cancelSignal: signal,
       })`docker run --rm -i --network=none --memory=1g --cpus=2 -v ${workspace}:/workspace -w /workspace python:3.11-slim sh -c ${command}`;
       return {
         stdout: result.stdout.slice(0, 10_000),
@@ -99,12 +102,13 @@ export class SandboxExecutor {
         code: result.exitCode ?? 0,
       };
     } catch (err) {
+      if (signal?.aborted || (err as Error).name === 'AbortError') throw err;
       return { stdout: '', stderr: (err as Error).message, code: 1 };
     }
   }
 
   /** VFS-Guard：路径虚拟沙箱 — CWD 强绑定 + 危险命令拦截 + read-only 模式写拦截 */
-  private async _executeVfsGuard(command: string, cwd?: string, approved?: boolean): Promise<SandboxResult> {
+  private async _executeVfsGuard(command: string, cwd?: string, approved?: boolean, signal?: AbortSignal): Promise<SandboxResult> {
     const safeCwd = cwd ?? this.workspaceRoot;
 
     // 危险命令扫描（已审批通过的命令跳过拦截，直接执行）
@@ -148,15 +152,17 @@ export class SandboxExecutor {
         cwd: safeCwd,
         reject: false,
         timeout: 120_000,
+        cancelSignal: signal,
       })`${command}`;
       return { stdout: result.stdout, stderr: result.stderr, code: result.exitCode ?? 1 };
     } catch (err) {
+      if (signal?.aborted || (err as Error).name === 'AbortError') throw err;
       return { stdout: '', stderr: (err as Error).message, code: 1 };
     }
   }
 
   /** macOS Seatbelt sandbox-exec 实现 — 通过 stdin 传命令避免 shell 注入 */
-  private async _executeSeatbelt(command: string, cwd?: string): Promise<SandboxResult> {
+  private async _executeSeatbelt(command: string, cwd?: string, signal?: AbortSignal): Promise<SandboxResult> {
     const profilePath = path.join(this.workspaceRoot, '.agent-sandbox.sb');
     const profile = this._buildSeatbeltProfile();
     await fs.writeFile(profilePath, profile);
@@ -165,6 +171,7 @@ export class SandboxExecutor {
         cwd: cwd ?? this.workspaceRoot,
         reject: false,
         timeout: 120_000,
+        cancelSignal: signal,
         input: command,  // 通过 stdin 传入命令，避免 shell 元字符注入
       })`/usr/bin/sandbox-exec -f ${profilePath} sh`;
       return {
@@ -210,7 +217,7 @@ export class SandboxExecutor {
   }
 
   /** Linux Bubblewrap 实现 — 内核级 namespace 隔离 */
-  private async _executeBwrap(command: string, cwd?: string): Promise<SandboxResult> {
+  private async _executeBwrap(command: string, cwd?: string, signal?: AbortSignal): Promise<SandboxResult> {
     const root = this.workspaceRoot;
     // 根据模式选择只读绑定或可写绑定（二选一，不重复，修复 v2 重复挂载 bug）
     const bindFlag = this.mode === 'workspace-write' ? '--bind' : '--ro-bind';
@@ -235,6 +242,7 @@ export class SandboxExecutor {
     const result = await execa({
       reject: false,
       timeout: 120_000,
+      cancelSignal: signal,
     })`bwrap ${bwrapArgs}`;
     return {
       stdout: result.stdout,

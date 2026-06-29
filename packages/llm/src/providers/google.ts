@@ -85,6 +85,7 @@ export class GoogleProvider implements ILLMProvider {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: options?.signal,
       });
 
       if (!response.ok) {

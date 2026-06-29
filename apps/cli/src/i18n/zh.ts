@@ -30,6 +30,8 @@ const zh: Record<string, string | string[]> = {
   // ── 模式标签 ──
   'mode.agent': 'AGENT',
   'mode.plan': 'PLAN',
+  'message.user': '用户',
+  'message.queued': '排队',
 
   // ── 帮助 ──
   'help.title': '命令',
@@ -70,6 +72,7 @@ const zh: Record<string, string | string[]> = {
   'tool.lsp_definition': '跳转定义',
   'tool.lsp_references': '查找引用',
   'tool.lsp_diagnostics': '代码诊断',
+  'tool.count_label': '工具',
 
 
   // ── 审批 ──
@@ -90,6 +93,9 @@ const zh: Record<string, string | string[]> = {
   'tool_call.error': '└ ✗',
   'tool_call.truncated': '\n...[截断 {count} 字符]',
   'stream.thinking': '思考中…',
+  'think.thinking': '思考中…',
+  'think.thought_for': '思考用时',
+  'think.tokens': 'token',
   'token.prompt': '输入',
   'token.output': '输出',
   'token.rounds': '轮',
@@ -123,6 +129,7 @@ const zh: Record<string, string | string[]> = {
   'status.warning': '⚠',
   'status.error': '✗',
   'status.info': 'ℹ',
+  'status.cancelled': '已中止当前任务',
 
   // ── 文件引用 ──
   'file.not_found': '文件未找到',

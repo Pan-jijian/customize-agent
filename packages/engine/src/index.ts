@@ -1,4 +1,4 @@
-export { ToolRegistry, type RegisteredTool, type JSONSchema } from './tools/registry.js';
+export { ToolRegistry, type RegisteredTool, type ToolExecutionContext, type JSONSchema } from './tools/registry.js';
 export { SchemaAdapter, type OpenAIFunctionDefinition, type AnthropicToolDefinition, type McpToolDefinition } from './tools/adapter.js';
 export {
   Capability, TOOL_CAPABILITY_MAP, ROLE_CAPABILITY_MAP,

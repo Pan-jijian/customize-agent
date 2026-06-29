@@ -4,7 +4,7 @@ import { ContextManager as ContextManagerImpl } from '@customize-agent/engine';
 import type { Message, ToolCall } from '@customize-agent/types';
 import type { I18nManager } from '../i18n/manager.js';
 import { buildSystemPrompt } from './prompt.js';
-import { t, taskWarning, toolCallFold, toolCallFolding, renderMarkdown, renderInlineMarkdown, contextCompacting, contextCompacted, contextStats, spinnerStart, thinkingSpinner, extractThinkingSubtitle } from '../tui/renderer.js';
+import { t, taskWarning, toolCallFold, toolCallFolding, renderMarkdown, renderInlineMarkdown, contextCompacting, contextCompacted, contextStats, spinnerStart, thinkingSpinner, extractThinkingSubtitle, formatDuration } from '../tui/renderer.js';
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
@@ -16,7 +16,21 @@ const OTHER_OUTPUT_LIMIT = 8000;
 /** 工具审批回调 */
 export type ApprovalHandler = (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
 
-export interface RunTaskOptions { readonly?: boolean; onWrite?: (text: string) => void; }
+export type AgentEvent =
+  | { type: 'output'; text: string }
+  | { type: 'task_start' }
+  | { type: 'task_done' }
+  | { type: 'user_message'; text: string }
+  | { type: 'approval_request'; toolName: string; args: Record<string, unknown> }
+  | { type: 'approval_response'; toolName: string; approved: boolean };
+
+export interface RunTaskOptions {
+  readonly?: boolean;
+  onWrite?: (text: string) => void;
+  onEvent?: (event: AgentEvent) => void;
+  drainUserInput?: () => string[];
+  signal?: AbortSignal;
+}
 
 export interface ExecutorConfig {
   provider: ILLMProvider;
@@ -32,6 +46,7 @@ export interface ExecutorConfig {
   stream?: boolean;
   /** Ink 渲染回调：替代 process.stdout.write */
   onWrite?: (text: string) => void;
+  onEvent?: (event: AgentEvent) => void;
 }
 
 export class AgentExecutor {
@@ -47,6 +62,7 @@ export class AgentExecutor {
   private maxIterations: number;
   private stream: boolean;
   private onWrite?: (text: string) => void;
+  private onEvent?: (event: AgentEvent) => void;
   /** 最近一次 thinking 完整内容（ctrl+o 展开用） */
   private _lastThinkingContent = '';
   get lastThinkingContent(): string { return this._lastThinkingContent; }
@@ -64,6 +80,7 @@ export class AgentExecutor {
     this.maxIterations = config.maxIterations ?? 200;
     this.stream = config.stream ?? true;
     this.onWrite = config.onWrite;
+    this.onEvent = config.onEvent;
   }
 
   getSystemPrompt(): string {
@@ -87,9 +104,15 @@ export class AgentExecutor {
     return val.slice(0, 47) + '...';
   }
 
-  /** 统一输出：onWrite 回调优先，否则 process.stdout */
+  /** 统一输出：事件回调优先，否则 process.stdout */
   private _write(text: string): void {
-    if (this.onWrite) { this.onWrite(text); } else { process.stdout.write(text); }
+    this.onEvent?.({ type: 'output', text });
+    if (this.onWrite) { this.onWrite(text); }
+    else if (!this.onEvent) { process.stdout.write(text); }
+  }
+
+  private _emit(event: AgentEvent): void {
+    this.onEvent?.(event);
   }
 
   /** 最后一次 LLM 调用消耗的 prompt token 数 */
@@ -104,9 +127,9 @@ export class AgentExecutor {
     const limit = this.provider.capabilities.maxContextTokens;
     const before = this._lastPromptTokens;
     if (!this.contextManager.shouldWarn(before, limit)) return false;
-    process.stdout.write(contextCompacting(this.i18n?.t('context.compacting', { pct: String(Math.round(before / limit * 100)), usedK: String(Math.round(before / 1000)), limitK: String(Math.round(limit / 1000)) }) ?? '…'));
+    this._write(contextCompacting(this.i18n?.t('context.compacting', { pct: String(Math.round(before / limit * 100)), usedK: String(Math.round(before / 1000)), limitK: String(Math.round(limit / 1000)) }) ?? '…'));
     const { newTokens } = await this.contextManager.compactMessages(working, this.provider, before);
-    process.stdout.write(contextCompacted(this.i18n?.t('context.compacted', { removedK: String(Math.round((before - newTokens) / 1000)), currentK: String(Math.round(newTokens / 1000)) }) ?? '✓'));
+    this._write(contextCompacted(this.i18n?.t('context.compacted', { removedK: String(Math.round((before - newTokens) / 1000)), currentK: String(Math.round(newTokens / 1000)) }) ?? '✓'));
     this._lastPromptTokens = newTokens;
     return true;
   }
@@ -116,7 +139,10 @@ export class AgentExecutor {
     const readonly = options?.readonly ?? false;
     // 临时覆盖 onWrite（options 优先级高于 config）
     const prevOnWrite = this.onWrite;
+    const prevOnEvent = this.onEvent;
     if (options?.onWrite) this.onWrite = options.onWrite;
+    if (options?.onEvent) this.onEvent = options.onEvent;
+    this._emit({ type: 'task_start' });
     try {
 
     const allTools = this.registry.listAll();
@@ -140,19 +166,30 @@ export class AgentExecutor {
     const showTokenSummary = () => {
       if (tokenSummaryShown || totalPrompt === 0) return;
       tokenSummaryShown = true;
-      const elapsed = ((Date.now() - taskStartMs) / 1000).toFixed(1);
+      const elapsed = formatDuration(Date.now() - taskStartMs);
       const pLabel = this.i18n?.t('token.prompt') ?? 'prompt';
       const oLabel = this.i18n?.t('token.output') ?? 'output';
       const rLabel = this.i18n?.t('token.rounds') ?? 'rounds';
-      process.stdout.write(`  ${t.faint(`${fmt(totalPrompt)} ${pLabel} · ${fmt(totalCompletion)} ${oLabel} · ${lastRound} ${rLabel} · ${elapsed}s`)}\n`);
+      this._write(`${t.faint(`[${fmt(totalPrompt)} ${pLabel} · ${fmt(totalCompletion)} ${oLabel} · ${lastRound} ${rLabel} · ${elapsed}]`)}\n`);
+    };
+
+    const drainPendingUserInput = () => {
+      const injectedInputs = options?.drainUserInput?.() ?? [];
+      for (const injected of injectedInputs) {
+        this._emit({ type: 'user_message', text: injected });
+        working.push({ role: 'user', content: injected });
+      }
+      return injectedInputs.length > 0;
     };
 
     for (let round = 1; round <= this.maxIterations; round++) {
+      if (options?.signal?.aborted) break;
       lastRound = round;
+      drainPendingUserInput();
       // ── 每轮主动检查上下文 ──
       await this._maybeCompact(working);
 
-      const response = await this._callLLM(working, tools);
+      const response = await this._callLLM(working, tools, options?.signal);
       // 累加 token（任务结束时统一输出一行汇总）
       if (response.usage) {
         this._lastPromptTokens = response.usage.promptTokens;
@@ -164,6 +201,7 @@ export class AgentExecutor {
       working.push(assistantMsg);
 
       if (!response.toolCalls?.length) {
+        if (drainPendingUserInput()) continue;
         break;
       }
 
@@ -175,10 +213,12 @@ export class AgentExecutor {
       let foldDiff = '';
       let foldStartMs = 0;
 
+      const toolsLabel = this.i18n?.t('tool.count_label') ?? 'tools';
+      const toolLabel = (name: string) => this.i18n?.toolLabel(name) ?? name;
       const flushFold = () => {
         if (foldCount === 0) return;
         if (this.stream) {
-          process.stdout.write('\r\x1b[2K' + toolCallFold(foldType, foldCount, foldArgs, foldTotalMs, foldDiff) + '\n');
+          this._write('\r\x1b[2K' + toolCallFold(foldType, foldCount, foldArgs, foldTotalMs, foldDiff, toolLabel(foldType), toolsLabel) + '\n');
         }
         foldType = ''; foldCount = 0; foldArgs = []; foldTotalMs = 0; foldDiff = ''; foldStartMs = 0;
       };
@@ -188,7 +228,7 @@ export class AgentExecutor {
           foldCount++;
           foldArgs.push(this._formatArg(tc.arguments));
           if (this.stream) {
-            process.stdout.write(toolCallFolding(tc.name, foldCount, foldArgs[foldArgs.length - 1]!, Date.now() - foldStartMs));
+            this._write(toolCallFolding(tc.name, foldCount, foldArgs[foldArgs.length - 1]!, Date.now() - foldStartMs, toolLabel(tc.name), toolsLabel));
           }
         } else {
           flushFold();
@@ -198,10 +238,25 @@ export class AgentExecutor {
           foldTotalMs = 0;
           foldStartMs = Date.now();
           if (this.stream) {
-            process.stdout.write(toolCallFolding(tc.name, 1, foldArgs[0]!, 0));
+            this._write(toolCallFolding(tc.name, 1, foldArgs[0]!, 0, toolLabel(tc.name), toolsLabel));
           }
         }
-        const { result, duration } = await this._executeTool(tc);
+        let toolTimer: NodeJS.Timeout | undefined;
+        if (this.stream) {
+          toolTimer = setInterval(() => {
+            this._write(toolCallFolding(tc.name, foldCount, foldArgs[foldArgs.length - 1]!, Date.now() - foldStartMs, toolLabel(tc.name), toolsLabel));
+          }, 250);
+        }
+        let result = '';
+        let duration = 0;
+        try {
+          ({ result, duration } = await this._executeTool(tc, options?.signal));
+        } finally {
+          if (toolTimer) clearInterval(toolTimer);
+        }
+        if (this.stream) {
+          this._write(toolCallFolding(tc.name, foldCount, foldArgs[foldArgs.length - 1]!, Date.now() - foldStartMs, toolLabel(tc.name), toolsLabel));
+        }
         foldTotalMs += duration;
         // write_file 保存 diff 结果供渲染
         if (tc.name === 'write_file' && result) foldDiff = result;
@@ -216,7 +271,7 @@ export class AgentExecutor {
           round, lastTc.name, lastResult, '',
         );
         if (evalResult.action === 'stop' || evalResult.action === 'replan') {
-          process.stdout.write(taskWarning(evalResult.reason));
+          this._write(taskWarning(evalResult.reason));
           break;
         }
       }
@@ -225,7 +280,9 @@ export class AgentExecutor {
     showTokenSummary();
     return working;
   } finally {
+    this._emit({ type: 'task_done' });
     this.onWrite = prevOnWrite;
+    this.onEvent = prevOnEvent;
   }
   }
 
@@ -237,14 +294,14 @@ export class AgentExecutor {
 
     if (ctxMgr.shouldWarn(tokens, limit)) {
       if (tokens > limit * 0.85 || tokens > limit * 0.75) {
-        process.stdout.write(contextCompacting(this.i18n?.t('context.compacting', { pct: String(Math.round(tokens / limit * 100)), usedK: String(Math.round(tokens / 1000)), limitK: String(Math.round(limit / 1000)) }) ?? '…'));
+        this._write(contextCompacting(this.i18n?.t('context.compacting', { pct: String(Math.round(tokens / limit * 100)), usedK: String(Math.round(tokens / 1000)), limitK: String(Math.round(limit / 1000)) }) ?? '…'));
         const { didCompact, newTokens } = await ctxMgr.compactMessages(working, this.provider, tokens);
         if (didCompact) {
           this._lastPromptTokens = newTokens;
-          process.stdout.write(contextCompacted(this.i18n?.t('context.compacted', { removedK: String(Math.round((tokens - newTokens) / 1000)), currentK: String(Math.round(newTokens / 1000)) }) ?? '✓'));
+          this._write(contextCompacted(this.i18n?.t('context.compacted', { removedK: String(Math.round((tokens - newTokens) / 1000)), currentK: String(Math.round(newTokens / 1000)) }) ?? '✓'));
         }
       } else {
-        process.stdout.write(contextStats(tokens, limit, this.i18n?.t('context.usage')) + '\n');
+        this._write(contextStats(tokens, limit, this.i18n?.t('context.usage')) + '\n');
       }
     }
   }
@@ -252,10 +309,11 @@ export class AgentExecutor {
   private async _callLLM(
     messages: Message[],
     tools: FunctionDefinition[],
+    signal?: AbortSignal,
   ): Promise<{ content: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } }> {
-    const opts = { tools };
-    if (this.stream) return this._streamChat(messages, tools);
-    const spin = spinnerStart(this.i18n?.t('stream.thinking'));
+    const opts = { tools, signal };
+    if (this.stream) return this._streamChat(messages, tools, signal);
+    const spin = spinnerStart(this.i18n?.t('stream.thinking'), text => this._write(text));
     const response = await this.provider.chat(messages, { ...opts });
     spin.stop();
     const displayContent = response.content.trim();
@@ -266,15 +324,20 @@ export class AgentExecutor {
   private async _streamChat(
     messages: Message[],
     tools: FunctionDefinition[],
+    signal?: AbortSignal,
   ): Promise<{ content: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } }> {
     let content = '';
     const toolCalls: ToolCall[] = [];
-    const spin = spinnerStart(this.i18n?.t('stream.thinking'));
+    const spin = spinnerStart(this.i18n?.t('stream.thinking'), text => this._write(text));
     let spinnerStopped = false;
 
     // 思考链状态行（参考 Claude Code: 思考内容不入主流，替换为实时状态行）
     const tips = this.i18n?.tList('think.tips') ?? [];
-    const think = thinkingSpinner(tips);
+    const think = thinkingSpinner(tips, text => this._write(text), {
+      thinking: this.i18n?.t('think.thinking') ?? this.i18n?.t('stream.thinking') ?? 'Thinking…',
+      thoughtFor: this.i18n?.t('think.thought_for') ?? 'Thought for',
+      tokens: this.i18n?.t('think.tokens') ?? 'tokens',
+    });
     let thinkActive = false;
     let thinkStartMs = 0;
     let thinkTokens = 0;
@@ -319,7 +382,7 @@ export class AgentExecutor {
               } else if (isFenceLine) {
                 // 闭合围栏 → 整体渲染
                 fenceBuf.push(line);
-                process.stdout.write(renderMarkdown(fenceBuf.join('\n') + '\n'));
+                this._write(renderMarkdown(fenceBuf.join('\n') + '\n'));
                 fenceBuf = null;
               } else {
                 fenceBuf.push(line);
@@ -332,10 +395,10 @@ export class AgentExecutor {
               tableBuf.push(line);
             } else {
               if (tableBuf.length > 0) {
-                process.stdout.write(renderMarkdown(tableBuf.join('\n') + '\n'));
+                this._write(renderMarkdown(tableBuf.join('\n') + '\n'));
                 tableBuf.length = 0;
               }
-              process.stdout.write(renderInlineMarkdown(line + '\n'));
+              this._write(renderInlineMarkdown(line + '\n'));
             }
           }
           break;
@@ -358,7 +421,7 @@ export class AgentExecutor {
           break;
         case 'reset':
           if (thinkActive) { think.stop(); thinkActive = false; }
-          process.stdout.write('\x1b[1G\x1b[2K');
+          this._write('\x1b[1G\x1b[2K');
           content = ''; toolCalls.length = 0;
           lineBuf = ''; tableBuf.length = 0; fenceBuf = null;
           break;
@@ -366,28 +429,28 @@ export class AgentExecutor {
           stopSpin();
           flushThink();
           if (fenceBuf !== null) {
-            process.stdout.write(renderMarkdown(fenceBuf.join('\n') + '\n'));
+            this._write(renderMarkdown(fenceBuf.join('\n') + '\n'));
             fenceBuf = null;
           }
           if (tableBuf.length > 0) {
-            process.stdout.write(renderMarkdown(tableBuf.join('\n') + '\n'));
+            this._write(renderMarkdown(tableBuf.join('\n') + '\n'));
             tableBuf.length = 0;
           }
-          if (lineBuf) process.stdout.write(renderInlineMarkdown(lineBuf));
+          if (lineBuf) this._write(renderInlineMarkdown(lineBuf));
           lineBuf = '';
-          if (content || toolCalls.length) process.stdout.write('\n');
+          if (content || toolCalls.length) this._write('\n');
           break;
         case 'error':
           stopSpin();
           if (thinkActive) { think.stop(); thinkActive = false; }
-          process.stdout.write(t.error(chunk.message ?? 'Stream error') + '\n');
+          this._write(t.error(chunk.message ?? 'Stream error') + '\n');
           break;
       }
-    }, { tools });
+    }, { tools, signal });
     return { content, toolCalls: toolCalls.length > 0 ? toolCalls : undefined, usage: response.usage };
   }
 
-  private async _executeTool(tc: ToolCall): Promise<{ result: string; duration: number }> {
+  private async _executeTool(tc: ToolCall, signal?: AbortSignal): Promise<{ result: string; duration: number }> {
     const name = tc.name;
     const args = tc.arguments;
     const label = this.i18n?.toolLabel(name) ?? name;
@@ -401,7 +464,9 @@ export class AgentExecutor {
       }
       if (perm === 'ask') {
         if (this.approvalHandler) {
+          this._emit({ type: 'approval_request', toolName: name, args });
           const ok = await this.approvalHandler(name, args);
+          this._emit({ type: 'approval_response', toolName: name, approved: ok });
           if (!ok) {
             const msg = this.i18n?.t('executor.user_cancelled', { label }) ?? `[Cancelled] ${label}`;
             return { result: msg, duration: 0 };
@@ -415,7 +480,8 @@ export class AgentExecutor {
 
     const toolStart = Date.now();
     try {
-      const result = await this.registry.dispatch(name, args);
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      const result = await this.registry.dispatch(name, args, { signal });
       const duration = Date.now() - toolStart;
       this.controller?.recordToolCall(name, args, result);
 
