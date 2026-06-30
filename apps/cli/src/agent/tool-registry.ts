@@ -246,69 +246,84 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
     },
   });
 
+  // ── 声明式注册：从 BuiltinTools.toolDefs 读取 Schema，只需提供 Handler ──
+  const S = String;
+  const N = Number;
+  const handlers: Record<string, (args: Record<string, unknown>, context?: ToolExecutionContext) => Promise<string>> = {
+    edit_file:             (a) => builtinTools.editFile(S(a.path), S(a.search), S(a.replace)),
+    multi_edit:            (a) => builtinTools.multiEdit(S(a.path), a.edits as Array<{ search: string; replace: string }>),
+    delete_file:           (a) => builtinTools.deleteFile(S(a.path)),
+    move_file:             (a) => builtinTools.moveFile(S(a.from), S(a.to)),
+    copy_file:             (a) => builtinTools.copyFile(S(a.from), S(a.to)),
+    mkdir:                 (a) => builtinTools.mkdir(S(a.path)),
+    stat_file:             (a) => builtinTools.statFile(S(a.path)),
+    inspect_file:          (a) => builtinTools.inspectFile(S(a.path)),
+    tree:                  (a) => builtinTools.tree(S(a.path ?? '.'), N(a.depth ?? 3)),
+    repo_map:              () => builtinTools.repoMap(),
+    symbol_search:         (a) => builtinTools.symbolSearch(S(a.query)),
+    glob:                  (a) => builtinTools.glob(S(a.pattern)),
+    dependency_graph:      () => builtinTools.dependencyGraph(),
+    detect_package_manager:() => builtinTools.detectPackageManager(),
+    web_search:            (a, c) => builtinTools.webSearch(S(a.query), c?.signal),
+    web_fetch:             (a, c) => builtinTools.webFetch(S(a.url), c?.signal),
+    download_file:         (a, c) => builtinTools.downloadFile(S(a.url), S(a.output), c?.signal),
+    export_markdown:       (a) => builtinTools.exportMarkdown(S(a.output), S(a.content)),
+    export_json:           (a) => builtinTools.exportJson(S(a.output), a.data),
+    export_html:           (a) => builtinTools.exportHtml(S(a.output), S(a.title ?? 'Export'), S(a.content)),
+    export_pdf:            (a) => builtinTools.exportPdf(S(a.output), S(a.title ?? 'Export'), S(a.content)),
+    export_session:        (a) => builtinTools.exportSession(S(a.output), a.data),
+    zip_files:             (a) => builtinTools.zipFiles(S(a.output), a.files as string[]),
+    git_status:            () => builtinTools.git(['status', '--short']),
+    git_diff:              () => builtinTools.git(['diff']),
+    git_log:               () => builtinTools.git(['log', '--oneline', '-20']),
+    git_stash:             () => builtinTools.git(['stash', 'push']),
+    git_apply_patch:       (a) => builtinTools.git(['apply', S(a.path)]),
+    git_create_patch:      (a) => builtinTools.exportMarkdown(S(a.output), (async () => await builtinTools.git(['diff']))() as unknown as string),
+    export_patch:           (a) => builtinTools.exportMarkdown(S(a.output), (async () => await builtinTools.git(['diff']))() as unknown as string),
+    run_background:        (a) => builtinTools.runBackground(S(a.command ?? a.input)),
+    check_command:         (a) => builtinTools.checkCommand(S(a.id)),
+    stop_command:          (a) => builtinTools.stopCommand(S(a.id)),
+    open_preview:          (a) => builtinTools.openPreview(S(a.url)),
+    browser_open:          (a) => builtinTools.browserOpen(S(a.url)),
+    run_test:              () => builtinTools.runScript('test'),
+    run_build:             () => builtinTools.runScript('build'),
+    run_lint:              () => builtinTools.runScript('lint'),
+    doctor:                () => builtinTools.doctor(),
+    version:               () => builtinTools.version(),
+    tool_health:           () => builtinTools.toolHealth(),
+    todo_write:            (a) => builtinTools.todoWrite(a.items as string[]),
+    check_update:          (a) => builtinTools.checkUpdate(a.package ? S(a.package) : undefined, a.current ? S(a.current) : undefined),
+    update:                (a) => builtinTools.update(a.package ? S(a.package) : undefined),
+    extract_text:          (a) => builtinTools.extractText(S(a.path)),
+    extract_pdf_text:      (a) => builtinTools.extractPdfText(S(a.path)),
+    extract_docx_text:     (a) => builtinTools.extractDocxText(S(a.path)),
+    extract_xlsx_data:     (a) => builtinTools.extractXlsxData(S(a.path)),
+    ocr_image:             (a) => builtinTools.ocrImage(S(a.path)),
+    transcribe_audio:      (a) => builtinTools.transcribeAudio(S(a.path)),
+    video_metadata:        (a) => builtinTools.videoMetadata(S(a.path)),
+    convert_file:          (a) => builtinTools.convertFile(S(a.input), S(a.output)),
+    compress_image:        (a) => builtinTools.compressImage(S(a.input), S(a.output)),
+    generate_thumbnail:    (a) => builtinTools.generateThumbnail(S(a.input), S(a.output)),
+    mcp_list:              () => builtinTools.mcpList(),
+    mcp_add:               (a) => builtinTools.mcpAdd(S(a.name), S(a.command)),
+    mcp_remove:            (a) => builtinTools.mcpRemove(S(a.name)),
+    mcp_tools:             (a) => builtinTools.mcpTools(a.name ? S(a.name) : undefined),
+    plugin_list:           () => builtinTools.pluginList(),
+    plugin_install:        (a) => builtinTools.pluginInstall(S(a.name)),
+    checkpoint_create:     (a) => builtinTools.checkpointCreate(S(a.name)),
+    checkpoint_list:       () => builtinTools.checkpointList(),
+    checkpoint_restore:    (a) => builtinTools.checkpointRestore(S(a.name)),
+    checkpoint_delete:     (a) => builtinTools.checkpointDelete(S(a.name)),
+  };
+
+  for (const def of BuiltinTools.toolDefs) {
+    const handler = handlers[def.name];
+    if (!handler) continue; // 跳过未在 handlers 中定义的（如某些内置工具可能暂未注册）
+    reg(registry, def.name, def.description, def.params, def.required, def.capabilities, def.needsApproval, handler);
+  }
+
+  // git_commit 需要 toolkit（不在 BuiltinTools 中）
   reg(registry, 'git_commit', 'Stage all changes and create a git commit with the given message.', { input: { type: 'string', description: 'Commit message' } }, ['input'], ['git_operation'], true, async args => toolkit.commitAll(String(args.input)));
-  reg(registry, 'edit_file', 'Replace exact text in a file.', { path: { type: 'string', description: 'File path' }, search: { type: 'string', description: 'Text to replace' }, replace: { type: 'string', description: 'Replacement text' } }, ['path', 'search', 'replace'], ['write_code'], true, async args => builtinTools.editFile(String(args.path), String(args.search), String(args.replace)));
-  reg(registry, 'multi_edit', 'Apply multiple exact replacements to a file.', { path: { type: 'string', description: 'File path' }, edits: { type: 'array', description: 'Array of {search, replace}' } }, ['path', 'edits'], ['write_code'], true, async args => builtinTools.multiEdit(String(args.path), args.edits as Array<{ search: string; replace: string }>));
-  reg(registry, 'delete_file', 'Delete a file or directory.', { path: { type: 'string', description: 'Path to delete' } }, ['path'], ['write_code'], true, async args => builtinTools.deleteFile(String(args.path)));
-  reg(registry, 'move_file', 'Move or rename a file or directory.', { from: { type: 'string', description: 'Source path' }, to: { type: 'string', description: 'Destination path' } }, ['from', 'to'], ['write_code'], true, async args => builtinTools.moveFile(String(args.from), String(args.to)));
-  reg(registry, 'copy_file', 'Copy a file or directory.', { from: { type: 'string', description: 'Source path' }, to: { type: 'string', description: 'Destination path' } }, ['from', 'to'], ['write_code'], true, async args => builtinTools.copyFile(String(args.from), String(args.to)));
-  reg(registry, 'mkdir', 'Create a directory recursively.', { path: { type: 'string', description: 'Directory path' } }, ['path'], ['write_code'], true, async args => builtinTools.mkdir(String(args.path)));
-  reg(registry, 'stat_file', 'Return file metadata.', { path: { type: 'string', description: 'Path to inspect' } }, ['path'], ['read_code'], false, async args => builtinTools.statFile(String(args.path)));
-  reg(registry, 'tree', 'Show a directory tree.', { path: { type: 'string', description: 'Directory path' }, depth: { type: 'number', description: 'Max depth' } }, [], ['read_code'], false, async args => builtinTools.tree(String(args.path ?? '.'), Number(args.depth ?? 3)));
-  reg(registry, 'repo_map', 'Show a repository map.', {}, [], ['read_code'], false, async () => builtinTools.repoMap());
-  reg(registry, 'symbol_search', 'Search symbols by name.', { query: { type: 'string', description: 'Symbol query' } }, ['query'], ['read_code'], false, async args => builtinTools.symbolSearch(String(args.query)));
-  reg(registry, 'dependency_graph', 'Show dependency graph summary.', {}, [], ['read_code'], false, async () => builtinTools.dependencyGraph());
-  reg(registry, 'detect_package_manager', 'Detect package manager.', {}, [], ['read_code'], false, async () => builtinTools.detectPackageManager());
-  reg(registry, 'glob', 'Find files by simple name pattern.', { pattern: { type: 'string', description: 'Pattern or substring' } }, ['pattern'], ['read_code'], false, async args => builtinTools.glob(String(args.pattern)));
-  reg(registry, 'web_search', 'Search the web. No approval required.', { query: { type: 'string', description: 'Search query' } }, ['query'], ['network'], false, async (args, context) => builtinTools.webSearch(String(args.query), context?.signal));
-  reg(registry, 'web_fetch', 'Fetch URL content.', { url: { type: 'string', description: 'URL to fetch' } }, ['url'], ['network'], false, async (args, context) => builtinTools.webFetch(String(args.url), context?.signal));
-  reg(registry, 'download_file', 'Download a URL to a local file.', { url: { type: 'string', description: 'URL' }, output: { type: 'string', description: 'Output path' } }, ['url', 'output'], ['network', 'write_code'], true, async (args, context) => builtinTools.downloadFile(String(args.url), String(args.output), context?.signal));
-  reg(registry, 'export_markdown', 'Export markdown content to a file.', { output: { type: 'string', description: 'Output .md path' }, content: { type: 'string', description: 'Markdown content' } }, ['output', 'content'], ['write_code'], true, async args => builtinTools.exportMarkdown(String(args.output), String(args.content)));
-  reg(registry, 'export_json', 'Export JSON data to a file.', { output: { type: 'string', description: 'Output .json path' }, data: { type: 'object', description: 'JSON data' } }, ['output', 'data'], ['write_code'], true, async args => builtinTools.exportJson(String(args.output), args.data));
-  reg(registry, 'export_html', 'Export text content as HTML.', { output: { type: 'string', description: 'Output .html path' }, title: { type: 'string', description: 'Title' }, content: { type: 'string', description: 'Content' } }, ['output', 'content'], ['write_code'], true, async args => builtinTools.exportHtml(String(args.output), String(args.title ?? 'Export'), String(args.content)));
-  reg(registry, 'export_pdf', 'Export text content as a simple PDF.', { output: { type: 'string', description: 'Output .pdf path' }, title: { type: 'string', description: 'Title' }, content: { type: 'string', description: 'Content' } }, ['output', 'content'], ['write_code'], true, async args => builtinTools.exportPdf(String(args.output), String(args.title ?? 'Export'), String(args.content)));
-  reg(registry, 'export_session', 'Export session data as JSON.', { output: { type: 'string', description: 'Output path' }, data: { type: 'object', description: 'Session data' } }, ['output', 'data'], ['write_code'], true, async args => builtinTools.exportSession(String(args.output), args.data));
-  reg(registry, 'zip_files', 'Create a tar archive from files.', { output: { type: 'string', description: 'Archive output' }, files: { type: 'array', description: 'Files to include' } }, ['output', 'files'], ['write_code'], true, async args => builtinTools.zipFiles(String(args.output), args.files as string[]));
-  reg(registry, 'git_status', 'Run git status.', {}, [], ['git_operation'], false, async () => builtinTools.git(['status', '--short']));
-  reg(registry, 'git_diff', 'Run git diff.', {}, [], ['git_operation'], false, async () => builtinTools.git(['diff']));
-  reg(registry, 'git_log', 'Run git log.', {}, [], ['git_operation'], false, async () => builtinTools.git(['log', '--oneline', '-20']));
-  reg(registry, 'git_stash', 'Run git stash push.', {}, [], ['git_operation'], true, async () => builtinTools.git(['stash', 'push']));
-  reg(registry, 'git_apply_patch', 'Apply a patch file.', { path: { type: 'string', description: 'Patch path' } }, ['path'], ['git_operation', 'write_code'], true, async args => builtinTools.git(['apply', String(args.path)]));
-  reg(registry, 'git_create_patch', 'Create a patch from current diff.', { output: { type: 'string', description: 'Output patch path' } }, ['output'], ['read_code'], false, async args => builtinTools.exportMarkdown(String(args.output), await builtinTools.git(['diff'])));
-  reg(registry, 'export_patch', 'Export current git diff as a patch.', { output: { type: 'string', description: 'Output patch path' } }, ['output'], ['read_code'], false, async args => builtinTools.exportMarkdown(String(args.output), await builtinTools.git(['diff'])));
-  reg(registry, 'run_background', 'Run a shell command in the background.', { command: { type: 'string', description: 'Command to run' } }, ['command'], ['execute_command'], true, async args => builtinTools.runBackground(String(args.command)));
-  reg(registry, 'check_command', 'Check a background command status.', { id: { type: 'string', description: 'Command id' } }, ['id'], ['read_code'], false, async args => builtinTools.checkCommand(String(args.id)));
-  reg(registry, 'stop_command', 'Stop a background command.', { id: { type: 'string', description: 'Command id' } }, ['id'], ['execute_command'], true, async args => builtinTools.stopCommand(String(args.id)));
-  reg(registry, 'open_preview', 'Return a local preview URL.', { url: { type: 'string', description: 'Preview URL' } }, ['url'], ['read_code'], false, async args => builtinTools.openPreview(String(args.url)));
-  reg(registry, 'browser_open', 'Open a URL in the system browser.', { url: { type: 'string', description: 'URL to open' } }, ['url'], ['execute_command'], true, async args => builtinTools.browserOpen(String(args.url)));
-  reg(registry, 'run_test', 'Run package test script.', {}, [], ['execute_command'], true, async () => builtinTools.runScript('test'));
-  reg(registry, 'run_build', 'Run package build script.', {}, [], ['execute_command'], true, async () => builtinTools.runScript('build'));
-  reg(registry, 'run_lint', 'Run package lint script.', {}, [], ['execute_command'], true, async () => builtinTools.runScript('lint'));
-  reg(registry, 'doctor', 'Check local toolchain health.', {}, [], ['read_code'], false, async () => builtinTools.doctor());
-  reg(registry, 'inspect_file', 'Inspect any file including media/binary files.', { path: { type: 'string', description: 'File path' } }, ['path'], ['read_code'], false, async args => builtinTools.inspectFile(String(args.path)));
-  reg(registry, 'extract_text', 'Best-effort text extraction from a file.', { path: { type: 'string', description: 'File path' } }, ['path'], ['read_code'], false, async args => builtinTools.extractText(String(args.path)));
-  reg(registry, 'extract_pdf_text', 'Best-effort PDF text extraction.', { path: { type: 'string', description: 'PDF path' } }, ['path'], ['read_code'], false, async args => builtinTools.extractPdfText(String(args.path)));
-  reg(registry, 'extract_docx_text', 'Best-effort DOCX text extraction.', { path: { type: 'string', description: 'DOCX path' } }, ['path'], ['read_code'], false, async args => builtinTools.extractDocxText(String(args.path)));
-  reg(registry, 'extract_xlsx_data', 'Best-effort XLSX data extraction.', { path: { type: 'string', description: 'XLSX path' } }, ['path'], ['read_code'], false, async args => builtinTools.extractXlsxData(String(args.path)));
-  reg(registry, 'ocr_image', 'OCR an image if OCR engine is available.', { path: { type: 'string', description: 'Image path' } }, ['path'], ['read_code'], false, async args => builtinTools.ocrImage(String(args.path)));
-  reg(registry, 'transcribe_audio', 'Transcribe audio if transcription engine is available.', { path: { type: 'string', description: 'Audio path' } }, ['path'], ['read_code'], false, async args => builtinTools.transcribeAudio(String(args.path)));
-  reg(registry, 'video_metadata', 'Inspect video metadata.', { path: { type: 'string', description: 'Video path' } }, ['path'], ['read_code'], false, async args => builtinTools.videoMetadata(String(args.path)));
-  reg(registry, 'convert_file', 'Convert a file with ffmpeg.', { input: { type: 'string', description: 'Input path' }, output: { type: 'string', description: 'Output path' } }, ['input', 'output'], ['write_code'], true, async args => builtinTools.convertFile(String(args.input), String(args.output)));
-  reg(registry, 'compress_image', 'Compress an image with sharp.', { input: { type: 'string', description: 'Input path' }, output: { type: 'string', description: 'Output path' } }, ['input', 'output'], ['write_code'], true, async args => builtinTools.compressImage(String(args.input), String(args.output)));
-  reg(registry, 'generate_thumbnail', 'Generate an image thumbnail with sharp.', { input: { type: 'string', description: 'Input path' }, output: { type: 'string', description: 'Output path' } }, ['input', 'output'], ['write_code'], true, async args => builtinTools.generateThumbnail(String(args.input), String(args.output)));
-  reg(registry, 'version', 'Show project version.', {}, [], ['read_code'], false, async () => builtinTools.version());
-  reg(registry, 'tool_health', 'Check built-in tool health.', {}, [], ['read_code'], false, async () => builtinTools.toolHealth());
-  reg(registry, 'todo_write', 'Create a todo checklist.', { items: { type: 'array', description: 'Todo items' } }, ['items'], ['read_code'], false, async args => builtinTools.todoWrite(args.items as string[]));
-  reg(registry, 'mcp_list', 'List MCP servers.', {}, [], ['read_code'], false, async () => builtinTools.mcpList());
-  reg(registry, 'mcp_add', 'Add MCP server configuration.', { name: { type: 'string', description: 'Server name' }, command: { type: 'string', description: 'Server command' } }, ['name', 'command'], ['write_code'], true, async args => builtinTools.mcpAdd(String(args.name), String(args.command)));
-  reg(registry, 'mcp_remove', 'Remove MCP server configuration.', { name: { type: 'string', description: 'Server name' } }, ['name'], ['write_code'], true, async args => builtinTools.mcpRemove(String(args.name)));
-  reg(registry, 'mcp_tools', 'List MCP tools.', { name: { type: 'string', description: 'Server name' } }, [], ['read_code'], false, async args => builtinTools.mcpTools(args.name ? String(args.name) : undefined));
-  reg(registry, 'plugin_list', 'List plugins.', {}, [], ['read_code'], false, async () => builtinTools.pluginList());
-  reg(registry, 'plugin_install', 'Record a plugin as installed in local plugin config.', { name: { type: 'string', description: 'Plugin name' } }, ['name'], ['write_code'], true, async args => builtinTools.pluginInstall(String(args.name)));
-  reg(registry, 'checkpoint_create', 'Create an internal workspace checkpoint.', { name: { type: 'string', description: 'Checkpoint name' } }, ['name'], ['write_code'], true, async args => builtinTools.checkpointCreate(String(args.name)));
-  reg(registry, 'checkpoint_list', 'List internal workspace checkpoints.', {}, [], ['read_code'], false, async () => builtinTools.checkpointList());
-  reg(registry, 'checkpoint_restore', 'Restore an internal workspace checkpoint.', { name: { type: 'string', description: 'Checkpoint name' } }, ['name'], ['write_code'], true, async args => builtinTools.checkpointRestore(String(args.name)));
-  reg(registry, 'checkpoint_delete', 'Delete an internal workspace checkpoint.', { name: { type: 'string', description: 'Checkpoint name' } }, ['name'], ['write_code'], true, async args => builtinTools.checkpointDelete(String(args.name)));
 
   if (provider && includeOrchestrator) {
     registry.register({

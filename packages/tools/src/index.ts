@@ -1,9 +1,35 @@
+// @customize-agent/tools — Agent 工具集
+
+// 核心基础设施
+export { WorkspaceFs } from './core/workspace-fs.js';
+export { WorkspaceSnapshotService, type WorkspaceSnapshot, type SerializedWorkspaceSnapshot } from './core/workspace-snapshot.js';
+export { resolveSafe, walk } from './core/path-utils.js';
+export { SKIP_DIRS } from './core/constants.js';
+
+// 沙箱
+export { SandboxExecutor, type SandboxMode, type SandboxResult } from './sandbox/sandbox-executor.js';
+
+// 编辑工具
+export { DiffEngine, type DiffBlock } from './editing/diff.js';
+export { UnifiedSyntaxValidator, type SyntaxValidationResult, type ValidationError } from './editing/syntax-validator.js';
+
+// 内置工具（按领域拆分）
+export {
+  FileTools,
+  SearchTools,
+  ShellTools,
+  WebTools,
+  ExportTools,
+  MediaTools,
+  McpTools,
+  CheckpointTools,
+} from './builtins/index.js';
+
+// BuiltinTools 外观类（向后兼容 CLI tool-registry）
+export { BuiltinTools } from './builtins-facade.js';
+
+// ToolKit 高质量文件操作（.gitignore 感知 + 备份/回滚 + 语法验证）
 export { ToolKit } from './toolkit.js';
-export { SandboxExecutor, type SandboxMode, type SandboxResult } from './sandbox-executor.js';
-export { TerminalTool } from './terminal-shell.js';
-export { UnifiedSyntaxValidator, type SyntaxValidationResult, type ValidationError } from './syntax-validator.js';
-export { DiffEngine, type DiffBlock } from './diff.js';
-export { PerceptionGateway } from './perception-gateway.js';
-export { BuiltinTools } from './builtin-tools.js';
-export { WorkspaceSnapshotService, type WorkspaceSnapshot, type SerializedWorkspaceSnapshot } from './workspace-snapshot.js';
-export { WorkspaceFs } from './workspace-fs.js';
+
+// 声明式工具定义
+export type { ToolDef, ToolParamDef } from './tool-def.js';

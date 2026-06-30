@@ -160,7 +160,7 @@ export function createBuiltinSubagentConfig(
 ): SubagentConfig {
   const builtin = BUILTIN_ROLES[role];
   if (!builtin) {
-    throw new Error(`未知的内置角色: ${role}`);
+    throw new Error(`Unknown built-in role: ${role}`);
   }
 
   return {

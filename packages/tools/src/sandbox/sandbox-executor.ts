@@ -37,8 +37,8 @@ export class SandboxExecutor {
           }
         }
       } catch { /* bwrap 不可用 */ }
-      console.warn('⚠️  [Sandbox] Bubblewrap 不可用或 unprivileged user namespaces 未启用，降级为 VFS-Guard 模式');
-      console.warn('⚠️  [Sandbox] 安全策略：CWD 强绑定 + 命令意图扫描');
+      console.warn('[Sandbox] Bubblewrap unavailable or unprivileged user namespaces not enabled, falling back to VFS-Guard mode');
+      console.warn('[Sandbox] Security policy: CWD binding + command intent scanning');
       return 'vfs-guard' as SandboxMode;
     }
     if (process.platform === 'darwin') {
@@ -48,10 +48,10 @@ export class SandboxExecutor {
           return 'workspace-write';
         }
       } catch { /* sandbox-exec 不可用 */ }
-      console.warn('⚠️  [Sandbox] sandbox-exec 不可用，降级为 VFS-Guard 模式');
+      console.warn('[Sandbox] sandbox-exec unavailable, falling back to VFS-Guard mode');
       return 'vfs-guard' as SandboxMode;
     }
-    console.warn('⚠️  [Sandbox] 当前平台不支持内核级沙箱，降级为 VFS-Guard 模式');
+    console.warn('[Sandbox] Kernel-level sandbox unavailable on current platform, falling back to VFS-Guard mode');
     return 'vfs-guard' as SandboxMode;
   }
 
@@ -61,7 +61,7 @@ export class SandboxExecutor {
    */
   async execute(command: string, cwd?: string, approved?: boolean, signal?: AbortSignal): Promise<SandboxResult> {
     if (this.mode === 'danger-full-access') {
-      throw new Error('danger-full-access 模式需要显式确认，请设置环境变量 CUSTOMIZE_AGENT_DANGER_MODE=1');
+      throw new Error('danger-full-access mode requires explicit confirmation. Set CUSTOMIZE_AGENT_DANGER_MODE=1');
     }
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     if (this.mode === 'docker') {

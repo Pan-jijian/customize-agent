@@ -212,20 +212,22 @@ export class GoalManager {
    * 构建 Goal 检测的 Prompt（极致压缩上下文 ~500 token）。
    * 不传全量对话历史，只传：任务目标 + 最新 git diff + 最后一轮工具结果。
    */
-  buildGoalCheckPrompt(ctx: GoalCheckContext): string {
-    return [
+  static buildGoalCheckPrompt(ctx: GoalCheckContext): string {
+    const lines = [
       `判断以下任务是否已完全达成：`,
       `任务目标: ${ctx.taskGoal}`,
       `最后一次操作: ${ctx.lastToolName}`,
       `操作结果: ${ctx.lastToolResult.slice(0, 300)}`,
-      `Git Diff 摘要: ${ctx.gitDiff.slice(0, 300)}`,
-      ``,
-      `任务目标是否已完全达成？请仅回答 YES（附原因）或 NO（附原因）。`,
-    ].join('\n');
+    ];
+    if (ctx.gitDiff) {
+      lines.push(`Git Diff 摘要: ${ctx.gitDiff.slice(0, 300)}`);
+    }
+    lines.push(``, `任务目标是否已完全达成？请仅回答 YES（附原因）或 NO（附原因）。`);
+    return lines.join('\n');
   }
 
   /** 解析 Goal 检测模型的响应 */
-  parseGoalResponse(response: string): GoalResult {
+  static parseGoalResponse(response: string): GoalResult {
     const upper = response.trim().toUpperCase();
     if (upper.startsWith('YES')) {
       return { achieved: true, reason: response };

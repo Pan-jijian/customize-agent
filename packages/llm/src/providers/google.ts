@@ -80,10 +80,13 @@ export class GoogleProvider implements ILLMProvider {
         body.tools = [{ functionDeclarations: options.tools.map(t => ({ name: t.name, description: t.description, parameters: t.parameters })) }];
       }
 
-      const url = `${this.baseUrl}:generateContent?key=${this.apiKey}`;
+      const url = `${this.baseUrl}:generateContent`;
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': this.apiKey,
+        },
         body: JSON.stringify(body),
         signal: options?.signal,
       });
@@ -141,11 +144,15 @@ export class GoogleProvider implements ILLMProvider {
           body.tools = [{ functionDeclarations: options.tools.map(t => ({ name: t.name, description: t.description, parameters: t.parameters })) }];
         }
 
-        const url = `${this.baseUrl}:streamGenerateContent?alt=sse&key=${this.apiKey}`;
+        const url = `${this.baseUrl}:streamGenerateContent?alt=sse`;
         const response = await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': this.apiKey,
+          },
           body: JSON.stringify(body),
+          signal: options?.signal,
         });
 
         if (!response.ok) {
@@ -214,10 +221,13 @@ export class GoogleProvider implements ILLMProvider {
   async countTokens(messages: Message[]): Promise<number> {
     try {
       const contents = this._convertMessages(messages);
-      const url = `${this.baseUrl}:countTokens?key=${this.apiKey}`;
+      const url = `${this.baseUrl}:countTokens`;
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': this.apiKey,
+        },
         body: JSON.stringify({ contents }),
       });
       if (response.ok) {
@@ -231,9 +241,12 @@ export class GoogleProvider implements ILLMProvider {
 
   async healthCheck(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.baseUrl}:generateContent?key=${this.apiKey}`, {
+      const response = await fetch(`${this.baseUrl}:generateContent`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': this.apiKey,
+        },
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
           generationConfig: { maxOutputTokens: 1 },

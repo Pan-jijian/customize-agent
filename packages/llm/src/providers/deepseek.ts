@@ -1,5 +1,5 @@
 import type { ModelCapabilities, StreamChunk } from '../interface.js';
-import { OpenAICompatProvider } from './openai-compat.js';
+import { OpenAICompatProvider } from './openai-base.js';
 
 /** DeepSeek 模型能力声明 */
 const DEEPSEEK_CAPABILITIES: ModelCapabilities = {

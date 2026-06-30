@@ -1,7 +1,7 @@
 import type { Message } from '@customize-agent/types';
 import type { SubagentConfig, SubagentResult } from './types.js';
-import { ExecutionController } from '../../execution-controller.js';
-import { buildToolDefinitions, runToolLoop } from '../../tool-loop-runner.js';
+import { ExecutionController } from '../../core/execution-controller.js';
+import { buildToolDefinitions, runToolLoop } from '../../core/tool-loop-runner.js';
 
 /**
  * 子智能体运行器 — 独立上下文，完成后仅返回摘要。

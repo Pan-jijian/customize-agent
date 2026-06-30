@@ -5,15 +5,13 @@ import { ContextManager as ContextManagerImpl, PlanModeManager } from '@customiz
 import type { Message, ToolCall } from '@customize-agent/types';
 import type { I18nManager } from '../i18n/manager.js';
 import { buildSystemPrompt } from './prompt.js';
-import { t, taskWarning, toolCallFold, toolCallFolding, renderMarkdown, contextCompacting, contextCompacted, contextStats, spinnerStart, formatDuration } from '../tui/renderer.js';
+import { t, taskWarning, renderMarkdown, contextCompacting, contextCompacted, contextStats, spinnerStart, formatDuration } from '../tui/renderer.js';
 import { streamChat } from './stream-chat.js';
 import { truncateToolResult } from './tool-result.js';
+import { ToolPreviewTracker, ToolFoldTracker } from './tool-tracker.js';
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
-
-
-/** 工具审批回调 */
-export type ApprovalHandler = (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+import type { ApprovalHandler } from './approval.js';
 
 export type AgentEvent =
   | { type: 'output'; text: string }
@@ -105,11 +103,17 @@ export class AgentExecutor {
     return val.slice(0, 47) + '...';
   }
 
-  /** 统一输出：事件回调优先，否则 process.stdout */
+  /** 统一输出：onWrite 优先 → onEvent 其次 → process.stdout 回退 */
   private _write(text: string): void {
-    this.onEvent?.({ type: 'output', text });
-    if (this.onWrite) { this.onWrite(text); }
-    else if (!this.onEvent) { process.stdout.write(text); }
+    if (this.onWrite) {
+      this.onWrite(text);
+      return;
+    }
+    if (this.onEvent) {
+      this.onEvent({ type: 'output', text });
+      return;
+    }
+    process.stdout.write(text);
   }
 
   private _emit(event: AgentEvent): void {
@@ -177,18 +181,9 @@ export class AgentExecutor {
       this._write(`${t.faint(`[${fmt(totalPrompt)} ${pLabel} · ${fmt(totalCompletion)} ${oLabel} · ${lastRound} ${rLabel} · ${elapsed}]`)}\n`);
     };
 
-    const previewedToolCalls = new Set<string>();
-    const toolPreviewKeys = (tc: ToolCall) => [tc.name, tc.id].filter(Boolean);
-    const wasToolPreviewed = (tc: ToolCall) => toolPreviewKeys(tc).some(key => previewedToolCalls.has(key));
-    const markToolPreviewed = (tc: ToolCall) => {
-      for (const key of toolPreviewKeys(tc)) previewedToolCalls.add(key);
-    };
-    const emitToolCallPreview = (tc: ToolCall, elapsedMs = Date.now() - taskStartMs): boolean => {
-      if (wasToolPreviewed(tc)) return false;
-      markToolPreviewed(tc);
-      this._emit({ type: 'tool_call_preview', toolName: tc.name, args: tc.arguments, elapsedMs });
-      return true;
-    };
+    const previewTracker = new ToolPreviewTracker();
+    const emitToolCallPreview = (tc: ToolCall, elapsedMs = Date.now() - taskStartMs): boolean =>
+      previewTracker.emit(tc, elapsedMs, e => this._emit(e));
 
     const drainPendingUserInput = () => {
       const injectedInputs = options?.drainUserInput?.() ?? [];
@@ -228,56 +223,33 @@ export class AgentExecutor {
       }
 
       // 同类工具折叠（参考 Claude Code collapseReadSearchGroups）
-      const previewedBeforeExecution = new Set(previewedToolCalls);
-      const wasPreviewedBeforeExecution = (tc: ToolCall) => toolPreviewKeys(tc).some(key => previewedBeforeExecution.has(key));
-      let foldType = '';
-      let foldCount = 0;
-      let foldArgs: string[] = [];
-      let foldTotalMs = 0;
-      let foldDiff = '';
-      let foldStartMs = 0;
-
-      const toolsLabel = this.i18n?.t('tool.count_label') ?? 'tools';
-      const toolLabel = (name: string) => this.i18n?.toolLabel(name) ?? name;
-      const flushFold = () => {
-        if (foldCount === 0) return;
-        if (this.stream) {
-          this._write('\r\x1b[2K' + toolCallFold(foldType, foldCount, foldArgs, foldTotalMs, foldDiff, toolLabel(foldType), toolsLabel) + '\n');
-        }
-        foldType = ''; foldCount = 0; foldArgs = []; foldTotalMs = 0; foldDiff = ''; foldStartMs = 0;
-      };
+      const previewedSnapshot = previewTracker.snapshot();
+      const wasPreviewedBeforeExec = (tc: ToolCall) => previewTracker.wasPreviewed(tc) || previewedSnapshot.has(tc.name) || previewedSnapshot.has(tc.id);
+      const foldTracker = new ToolFoldTracker(
+        this.stream,
+        text => this._write(text),
+        name => this.i18n?.toolLabel(name) ?? name,
+        this.i18n?.t('tool.count_label') ?? 'tools',
+        args => this._formatArg(args),
+      );
 
       for (const tc of response.toolCalls) {
         if (options?.signal?.aborted) break;
         const previewElapsedMs = Date.now() - taskStartMs;
-        const wasPreviewed = wasPreviewedBeforeExecution(tc);
+        const wasPreviewed = wasPreviewedBeforeExec(tc);
         const renderedPreview = emitToolCallPreview(tc, previewElapsedMs);
         const skipStartRender = wasPreviewed || renderedPreview;
         let preApproved = false;
-        if (tc.name === foldType) {
-          foldCount++;
-          foldArgs.push(this._formatArg(tc.arguments));
-          if (this.stream && !skipStartRender) {
-            this._write(toolCallFolding(tc.name, foldCount, foldArgs[foldArgs.length - 1]!, Date.now() - foldStartMs, toolLabel(tc.name), toolsLabel));
-          }
-        } else {
-          flushFold();
-          foldType = tc.name;
-          foldCount = 1;
-          foldArgs = [this._formatArg(tc.arguments)];
-          foldTotalMs = 0;
-          foldStartMs = Date.now();
-          if (this.stream && !skipStartRender) {
-            this._write(toolCallFolding(tc.name, 1, foldArgs[0]!, previewElapsedMs, toolLabel(tc.name), toolsLabel));
-          }
-        }
+
+        foldTracker.push(tc, skipStartRender, previewElapsedMs);
+
         if (this.permissionEngine?.check(tc.name, tc.arguments) === 'ask' && this.approvalHandler) {
           this._emit({ type: 'approval_request', toolName: tc.name, args: tc.arguments });
           const ok = await this.approvalHandler(tc.name, tc.arguments);
           this._emit({ type: 'approval_response', toolName: tc.name, approved: ok });
           if (options?.signal?.aborted) break;
           if (!ok) {
-            const label = toolLabel(tc.name);
+            const label = this.i18n?.toolLabel(tc.name) ?? tc.name;
             const msg = this.i18n?.t('executor.user_cancelled', { label }) ?? `[Cancelled] ${label}`;
             working.push({ role: 'tool', content: msg, toolCallId: tc.id });
             continue;
@@ -288,15 +260,11 @@ export class AgentExecutor {
         let duration = 0;
         ({ result, duration } = await this._executeTool(tc, options?.signal, preApproved));
         if (options?.signal?.aborted) break;
-        if (this.stream && !skipStartRender) {
-          this._write(toolCallFolding(tc.name, foldCount, foldArgs[foldArgs.length - 1]!, Date.now() - foldStartMs, toolLabel(tc.name), toolsLabel));
-        }
-        foldTotalMs += duration;
-        // write_file 保存 diff 结果供渲染
-        if (tc.name === 'write_file' && result) foldDiff = result;
+        foldTracker.addDuration(duration);
+        if (tc.name === 'write_file' && result) foldTracker.setDiff(result);
         working.push({ role: 'tool', content: result, toolCallId: tc.id });
       }
-      if (!options?.signal?.aborted) flushFold();
+      if (!options?.signal?.aborted) foldTracker.flush();
       if (options?.signal?.aborted) break;
 
       if (this.controller) {
@@ -347,11 +315,11 @@ export class AgentExecutor {
         const validation = PlanModeManager.validatePlan(JSON.parse(jsonText));
         const formatted = validation.valid && validation.plan
           ? PlanModeManager.formatPlan(validation.plan)
-          : `计划 JSON 校验失败:\n${validation.errors.join('\n')}`;
+          : `Plan JSON validation failed:\n${validation.errors.join('\n')}`;
         this._write('\n' + renderMarkdown('```\n' + formatted + '\n```') + '\n');
         return [...updated, { role: 'assistant', content: formatted }];
       } catch (err) {
-        const msg = `计划 JSON 解析失败: ${(err as Error).message}`;
+        const msg = `Plan JSON parse failed: ${(err as Error).message}`;
         this._write(taskWarning(msg));
         return [...updated, { role: 'assistant', content: msg }];
       }

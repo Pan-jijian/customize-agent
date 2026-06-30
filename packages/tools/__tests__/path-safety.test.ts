@@ -13,7 +13,7 @@ describe('ToolKit 路径安全', () => {
   });
 
   it('路径遍历攻击应被拦截', async () => {
-    await expect(toolkit.readFile('../../../etc/passwd')).rejects.toThrow('超出项目边界');
+    await expect(toolkit.readFile('../../../etc/passwd')).rejects.toThrow('Path traversal detected');
   });
 
   it('listFiles 应返回文件列表', async () => {

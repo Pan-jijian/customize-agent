@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ExecutionController } from '../src/execution-controller.js';
+import { ExecutionController } from '../src/core/execution-controller.js';
 
 describe('ExecutionController GoalManager', () => {
   it('触发 Goal 检测时应调用 LLM 判定器并在达成时停止', async () => {

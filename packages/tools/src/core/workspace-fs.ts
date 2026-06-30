@@ -1,14 +1,13 @@
+// @customize-agent/tools — 工作区文件系统抽象
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { resolveSafe } from './path-utils.js';
 
 export class WorkspaceFs {
   constructor(private cwd: string = process.cwd()) {}
 
   resolveSafe(relativePath: string): string {
-    const resolved = path.resolve(this.cwd, relativePath || '.');
-    const root = path.resolve(this.cwd);
-    if (!resolved.startsWith(root + path.sep) && resolved !== root) throw new Error(`文件路径 ${resolved} 超出项目边界`);
-    return resolved;
+    return resolveSafe(relativePath, this.cwd);
   }
 
   async readText(relativePath: string): Promise<string> {

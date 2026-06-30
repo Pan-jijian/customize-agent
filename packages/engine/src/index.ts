@@ -9,13 +9,13 @@ export { PermissionEngine, type Permission, type PermissionConfig } from './secu
 export {
   ExecutionController, LoopGuard, BudgetManager, GoalManager, CheckpointManager,
   type ExecutionControllerConfig, type EvalAction, type EvalResult, type GoalCheckContext, type GoalResult, type GoalEvaluator,
-} from './execution-controller.js';
+} from './core/execution-controller.js';
 export {
   ContextManager, SystemPromptSource, ToolDefinitionSource, ToolResultSource,
   type ContextSource, type ContextChunk, type ChunkPriority, type ContextManagerConfig,
-} from './context-manager.js';
-export { PlanModeManager, type ExecutionPlan, type PlanStep } from './planner.js';
-export { buildToolDefinitions, runToolLoop, type ToolLoopRunOptions, type ToolLoopRunResult } from './tool-loop-runner.js';
+} from './core/context-manager.js';
+export { PlanModeManager, type ExecutionPlan, type PlanStep } from './core/planner.js';
+export { buildToolDefinitions, runToolLoop, type ToolLoopRunOptions, type ToolLoopRunResult } from './core/tool-loop-runner.js';
 export { SubagentRunner } from './orchestration/subagent/runner.js';
 export { createBuiltinSubagentConfig, getBuiltinPrompt, getRecommendedModel } from './orchestration/subagent/builtins.js';
 export { Orchestrator, type CollaborationMode, type OrchestrationResult } from './orchestration/orchestrator.js';

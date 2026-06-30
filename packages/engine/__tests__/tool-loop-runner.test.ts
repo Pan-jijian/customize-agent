@@ -3,7 +3,7 @@ import type { ChatOptions, ILLMProvider } from '@customize-agent/llm';
 import { DEFAULT_CAPABILITIES } from '@customize-agent/llm';
 import type { LLMResponse, Message, StreamChunk } from '@customize-agent/types';
 import { ToolRegistry } from '../src/tools/registry.js';
-import { runToolLoop } from '../src/tool-loop-runner.js';
+import { runToolLoop } from '../src/core/tool-loop-runner.js';
 
 class FakeProvider implements ILLMProvider {
   readonly name = 'fake';
