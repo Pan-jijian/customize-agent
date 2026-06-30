@@ -34,6 +34,7 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     try { process.stdin.setRawMode(true); } catch { /* ignore */ }
   }
   process.stdin.resume();
+  process.stdout.write('\x1b[?2004h');
 
   const pending: string[] = [];
   const fileIndex = new FileIndex(options.projectRoot);
@@ -48,6 +49,11 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
   let inputCursorLineIndex = 0;
   let statusLineActive = false;
   let outputLineOpen = false;
+  let cancelling = false;
+  let bracketedPaste = false;
+  let pasteBuffer = '';
+  const pasteInlineLimit = 300;
+  const pasteBlocks: Array<{ placeholder: string; content: string }> = [];
   const promptSymbol = '›';
   const mode = 'AGENT';
 
@@ -109,6 +115,82 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     renderBuffer();
     return true;
   };
+  const insertText = (text: string) => {
+    buffer = buffer.slice(0, pos) + text + buffer.slice(pos);
+    pos += text.length;
+    syncDropdown();
+    renderBuffer();
+  };
+  const commitPaste = (text: string) => {
+    const normalized = text.replace(/\r\n?/g, '\n');
+    if (!normalized) return;
+    if (normalized.length <= pasteInlineLimit && normalized.split('\n').length <= 8) {
+      insertText(normalized);
+      return;
+    }
+    const lineCount = normalized.split('\n').length;
+    const placeholder = `[Pasted text #${pasteBlocks.length + 1} · ${lineCount} lines · ${normalized.length} chars]`;
+    pasteBlocks.push({ placeholder, content: normalized });
+    insertText(placeholder);
+  };
+  const resolvePastes = (text: string) => {
+    let resolved = text;
+    for (const paste of pasteBlocks) {
+      resolved = resolved.split(paste.placeholder).join(paste.content);
+    }
+    return resolved;
+  };
+
+  const wrapInput = (text: string, width: number): string[] => {
+    const rows: string[] = [];
+    let row = '';
+    let rowW = 0;
+    for (const ch of text) {
+      if (ch === '\n') { rows.push(row); row = ''; rowW = 0; continue; }
+      const w = stringWidth(ch);
+      if (rowW > 0 && rowW + w > width) { rows.push(row); row = ''; rowW = 0; }
+      row += ch;
+      rowW += w;
+    }
+    rows.push(row);
+    return rows;
+  };
+  const locateCursor = (text: string, index: number, width: number): { line: number; col: number } => {
+    let line = 0;
+    let col = 0;
+    let rowW = 0;
+    let offset = 0;
+    for (const ch of text) {
+      if (offset >= index) break;
+      if (ch === '\n') { line++; col = 0; rowW = 0; offset += ch.length; continue; }
+      const w = stringWidth(ch);
+      if (rowW > 0 && rowW + w > width) { line++; col = 0; rowW = 0; }
+      col++;
+      rowW += w;
+      offset += ch.length;
+    }
+    return { line, col };
+  };
+  const prevCharIndex = (text: string, current: number): number => {
+    if (current <= 0) return 0;
+    let index = 0;
+    for (const ch of text) {
+      const next = index + ch.length;
+      if (next >= current) return index;
+      index = next;
+    }
+    return index;
+  };
+  const nextCharIndex = (text: string, current: number): number => {
+    if (current >= text.length) return text.length;
+    for (const ch of text.slice(current)) return current + ch.length;
+    return text.length;
+  };
+  const renderCaret = (row: string, col: number): string => {
+    const chars = [...row];
+    const caretChar = chars[col] ?? ' ';
+    return chars.slice(0, col).join('') + s.inverse(caretChar) + chars.slice(col + 1).join('');
+  };
 
   const renderBuffer = () => {
     clearInputLine();
@@ -121,7 +203,6 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     const before = buffer.slice(0, pos);
     const ch = buffer[pos] || ' ';
     const after = buffer.slice(pos + 1);
-    const caret = s.inverse(ch);
     const queuedLines = pending.flatMap(text => {
       const lines = userMessageBlock(text, options.i18n.t('message.queued'), 'queued').trimEnd().split('\n');
       if (lines[0] === '') lines.shift();
@@ -138,12 +219,23 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     const pr = modeAccent(mode)(promptSymbol);
     const inputPrefix = `${badge} ${bar} ${pr} `;
     const prefixWidth = mode.length + 7;
-    const inputVisible = prefixWidth + stringWidth(before + ch + after);
-    const inputPad = ' '.repeat(Math.max(0, inner - 2 - inputVisible));
-    const mid = `${t.subtle('│')} ${inputPrefix}${before}${caret}${after}${inputPad} ${t.subtle('│')}`;
+    const contentW = Math.max(1, inner - 2 - prefixWidth);
+    const inputText = before + ch + after;
+    const wrapped = wrapInput(inputText, contentW);
+    const caretLoc = locateCursor(inputText, before.length, contentW);
+    const inputRows: string[] = wrapped.length ? wrapped : [''];
+    const lines = [...queuedLines, top];
+    inputRows.forEach((row: string, i: number) => {
+      const hasCaret = i === caretLoc.line;
+      const caretCol = hasCaret ? caretLoc.col : -1;
+      const rawLine = hasCaret ? renderCaret(row, caretCol) : row;
+      const pad = ' '.repeat(Math.max(0, contentW - stringWidth(row)));
+      const prefix = i === 0 ? inputPrefix : ' '.repeat(prefixWidth);
+      lines.push(`${t.subtle('│')} ${prefix}${rawLine}${pad} ${t.subtle('│')}`);
+    });
     const bottom = t.subtle('╰' + '─'.repeat(inner) + '╯');
-    const lines = [...queuedLines, top, mid, bottom];
-    const midIndex = queuedLines.length + 1;
+    lines.push(bottom);
+    const midIndex = queuedLines.length + 1 + caretLoc.line;
     if (dd !== 'none' && items.length) {
       const ddPrefix = `${bar} `;
       if (dd === 'command') {
@@ -165,7 +257,7 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
         sep: options.i18n.t('hint.sep'),
       })));
     }
-    const cursorCol = 2 + prefixWidth + stringWidth(before);
+    const cursorCol = 2 + prefixWidth + stringWidth(inputRows[caretLoc.line]?.slice(0, caretLoc.col) ?? '');
     process.stdout.write(`\r${lines.map((line, i) => `${i === 0 ? '' : '\n'}\x1b[2K${line}`).join('')}\x1b[${Math.max(0, lines.length - 1 - midIndex)}A\r\x1b[${Math.max(1, cursorCol)}C`);
     inputLinesOnScreen = lines.length;
     inputCursorLineIndex = midIndex;
@@ -206,6 +298,7 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     renderBuffer();
   };
   const writeOutput = (text: string) => {
+    if (cancelling) return;
     if (text.startsWith('\r')) {
       writeStatus(text);
       return;
@@ -225,25 +318,61 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
 
   renderBuffer();
   const onKeypress = (str: string | undefined, key: readline.Key) => {
+    const seq = key?.sequence ?? str ?? '';
+    if (cancelling) return;
+    if (bracketedPaste) {
+      const end = seq.indexOf('\x1b[201~');
+      if (end >= 0) {
+        pasteBuffer += seq.slice(0, end);
+        bracketedPaste = false;
+        commitPaste(pasteBuffer);
+        pasteBuffer = '';
+        const rest = seq.slice(end + 6);
+        if (rest) commitPaste(rest);
+      } else {
+        pasteBuffer += seq;
+      }
+      return;
+    }
+    const pasteStart = seq.indexOf('\x1b[200~');
+    if (pasteStart >= 0) {
+      const afterStart = seq.slice(pasteStart + 6);
+      const pasteEnd = afterStart.indexOf('\x1b[201~');
+      if (pasteEnd >= 0) {
+        commitPaste(afterStart.slice(0, pasteEnd));
+        const rest = afterStart.slice(pasteEnd + 6);
+        if (rest) commitPaste(rest);
+      } else {
+        bracketedPaste = true;
+        pasteBuffer = afterStart;
+      }
+      return;
+    }
+
     if (key?.ctrl && key.name === 'c') {
       if (buffer) {
         buffer = '';
         pos = 0;
+        pasteBlocks.length = 0;
         resetDropdown();
         renderBuffer();
         return;
       }
-      writeOutput(t.warning(options.i18n.t('status.cancelled')) + '\n');
-      active = false;
-      process.stdin.removeListener('keypress', onKeypress);
+      cancelling = true;
+      buffer = '';
+      pos = 0;
+      pasteBlocks.length = 0;
+      resetDropdown();
+      renderBuffer();
       options.onCancel();
       return;
     }
     if (key?.name === 'return' || key?.name === 'enter') {
       if (dd !== 'none' && applyDropdown()) return;
-      const text = buffer.trim();
+      const text = resolvePastes(buffer).trim();
       buffer = '';
       pos = 0;
+      pasteBlocks.length = 0;
       resetDropdown();
       clearStatusLine();
       clearBuffer();
@@ -264,27 +393,31 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
       if (dd !== 'none') { sel = Math.min(items.length - 1, sel + 1); renderBuffer(); return; }
     }
     if (key?.name === 'left') {
-      pos = Math.max(0, pos - 1);
+      pos = prevCharIndex(buffer, pos);
       syncDropdown();
       renderBuffer();
       return;
     }
     if (key?.name === 'right') {
-      pos = Math.min(buffer.length, pos + 1);
+      pos = nextCharIndex(buffer, pos);
       renderBuffer();
       return;
     }
     if (key?.name === 'backspace') {
       if (pos > 0) {
-        buffer = buffer.slice(0, pos - 1) + buffer.slice(pos);
-        pos--;
+        const prev = prevCharIndex(buffer, pos);
+        buffer = buffer.slice(0, prev) + buffer.slice(pos);
+        pos = prev;
       }
       syncDropdown();
       renderBuffer();
       return;
     }
     if (key?.name === 'delete') {
-      if (pos < buffer.length) buffer = buffer.slice(0, pos) + buffer.slice(pos + 1);
+      if (pos < buffer.length) {
+        const next = nextCharIndex(buffer, pos);
+        buffer = buffer.slice(0, pos) + buffer.slice(next);
+      }
       syncDropdown();
       renderBuffer();
       return;
@@ -309,10 +442,7 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
       return;
     }
     if (str && str >= ' ') {
-      buffer = buffer.slice(0, pos) + str + buffer.slice(pos);
-      pos += str.length;
-      syncDropdown();
-      renderBuffer();
+      insertText(str);
     }
   };
 
@@ -321,7 +451,7 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
   return {
     drain: () => {
       const drained = pending.splice(0, pending.length);
-      renderBuffer();
+      if (!cancelling) renderBuffer();
       return drained;
     },
     writeOutput,
@@ -339,17 +469,19 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     stop: () => {
       if (active) process.stdin.removeListener('keypress', onKeypress);
       active = false;
+      process.stdout.write('\x1b[?2004l');
       clearStatusLine();
       // 清理 task-input-capture 渲染的行，让主 TuiInput 干净接管
       if (inputLinesOnScreen > 0) {
-        const up = inputLinesOnScreen - 1 - inputCursorLineIndex;
-        if (up > 0) process.stdout.write(`\x1b[${up}B`);
+        const down = Math.max(0, inputLinesOnScreen - 1 - inputCursorLineIndex);
+        if (down > 0) process.stdout.write(`\x1b[${down}B`);
+        process.stdout.write('\r');
         for (let i = 0; i < inputLinesOnScreen; i++) {
           process.stdout.write('\x1b[2K');
-          if (i < inputLinesOnScreen - 1) process.stdout.write('\x1b[1A');
+          if (i < inputLinesOnScreen - 1) process.stdout.write('\x1b[1A\r');
         }
-        process.stdout.write('\r');
         inputLinesOnScreen = 0;
+        inputCursorLineIndex = 0;
       }
     },
   };

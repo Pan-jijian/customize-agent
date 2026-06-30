@@ -1,10 +1,12 @@
 // @customize-agent/tools — Shell & Git 工具
 import * as fs from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, createWriteStream } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { execa, execaCommand } from 'execa';
 import { resolveSafe } from '../core/path-utils.js';
+import { killProcess } from '../core/platform/process.js';
+import { translateCommand } from '../core/platform/shell.js';
 
 type BackgroundProcess = { command: string; child: any; output: string[]; startedAt: string };
 
@@ -20,7 +22,10 @@ export class ShellTools {
 
   async runBackground(command: string): Promise<string> {
     const id = `cmd-${Date.now()}`;
-    const child = execaCommand(command, { cwd: this.cwd, shell: true, reject: false });
+    const translated = await translateCommand(command);
+    // execaCommand returns ResultPromise which supports .stdout.on('data') at runtime
+    // even though TypeScript types in execa v9 don't perfectly capture this
+    const child: any = execaCommand(translated, { cwd: this.cwd, shell: true, reject: false });
     const proc: BackgroundProcess = { command, child, output: [], startedAt: new Date().toISOString() };
     child.stdout?.on('data', (chunk: Buffer) => proc.output.push(chunk.toString()));
     child.stderr?.on('data', (chunk: Buffer) => proc.output.push(chunk.toString()));
@@ -39,17 +44,18 @@ export class ShellTools {
   async stopCommand(id: string): Promise<string> {
     const proc = ShellTools.background.get(id);
     if (!proc) return `Unknown command: ${id}`;
-    proc.child.kill('SIGTERM');
+    await killProcess(proc.child);
     return `Stopped ${id}`;
   }
 
-  async runScript(kind: 'test' | 'build' | 'lint'): Promise<string> {
+  async runScript(kind: 'test' | 'build' | 'lint', signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const pkgPath = path.join(this.cwd, 'package.json');
     if (!existsSync(pkgPath)) return 'No package.json found.';
     const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf-8')) as { scripts?: Record<string, string> };
     if (!pkg.scripts?.[kind]) return `No ${kind} script found.`;
     const manager = existsSync(path.join(this.cwd, 'pnpm-lock.yaml')) ? 'pnpm' : existsSync(path.join(this.cwd, 'yarn.lock')) ? 'yarn' : 'npm';
-    const res = await execa(manager, ['run', kind], { cwd: this.cwd, reject: false });
+    const res = await execa(manager, ['run', kind], { cwd: this.cwd, reject: false, cancelSignal: signal });
     return [res.stdout, res.stderr, `[Exit ${res.exitCode}]`].filter(Boolean).join('\n');
   }
 
@@ -67,10 +73,26 @@ export class ShellTools {
   async zipFiles(output: string, files: string[]): Promise<string> {
     const out = resolveSafe(output.endsWith('.tar') ? output : `${output}.tar`, this.cwd);
     await fs.mkdir(path.dirname(out), { recursive: true });
-    const args = ['-cf', out, ...files.map(f => resolveSafe(f, this.cwd))];
-    const res = await execa('tar', args, { cwd: this.cwd, reject: false });
-    if (res.exitCode !== 0) throw new Error(res.stderr || res.stdout || 'tar failed');
-    return `Created archive ${path.relative(this.cwd, out)}`;
+
+    // Dynamic import: archiver v8 is ESM-only with named exports
+    const { Archiver } = await import('archiver');
+
+    return new Promise((resolve, reject) => {
+      const stream = createWriteStream(out);
+      const archive = new Archiver({ format: 'tar', gzip: false });
+      archive.on('error', (err: Error) => reject(err));
+      stream.on('error', (err: Error) => reject(err));
+      stream.on('close', () => {
+        resolve(`Created archive ${path.relative(this.cwd, out)}`);
+      });
+      archive.pipe(stream);
+
+      for (const f of files) {
+        const fullPath = resolveSafe(f, this.cwd);
+        archive.file(fullPath, { name: f });
+      }
+      void archive.finalize();
+    });
   }
 
   async doctor(): Promise<string> {

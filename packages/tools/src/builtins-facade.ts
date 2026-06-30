@@ -57,7 +57,7 @@ export class BuiltinTools {
   runBackground = (command: string) => this._shell.runBackground(command);
   checkCommand = (id: string) => this._shell.checkCommand(id);
   stopCommand = (id: string) => this._shell.stopCommand(id);
-  runScript = (kind: 'test' | 'build' | 'lint') => this._shell.runScript(kind);
+  runScript = (kind: 'test' | 'build' | 'lint', signal?: AbortSignal) => this._shell.runScript(kind, signal);
   openPreview = (url: string) => this._shell.openPreview(url);
   browserOpen = (url: string) => this._shell.browserOpen(url);
   zipFiles = (output: string, files: string[]) => this._shell.zipFiles(output, files);
@@ -146,6 +146,7 @@ export class BuiltinTools {
     { name: 'git_stash', description: 'Stash current changes.', params: {}, required: [], capabilities: ['git_operation'], needsApproval: true },
     { name: 'git_apply_patch', description: 'Apply a git patch from a file.', params: { path: { type: 'string', description: 'Patch file path' } }, required: ['path'], capabilities: ['git_operation'], needsApproval: true },
     { name: 'git_create_patch', description: 'Create a git patch file.', params: { output: { type: 'string', description: 'Output file path' } }, required: ['output'], capabilities: ['git_operation', 'write_code'], needsApproval: true },
+    { name: 'export_patch', description: 'Export the current git diff as a patch file.', params: { output: { type: 'string', description: 'Output file path' } }, required: ['output'], capabilities: ['git_operation', 'write_code'], needsApproval: true },
     { name: 'run_background', description: 'Run a command in the background.', params: { input: { type: 'string', description: 'Command to run' } }, required: ['input'], capabilities: ['execute_command'], needsApproval: true },
     { name: 'check_command', description: 'Check status of a background command.', params: { id: { type: 'string', description: 'Command ID' } }, required: ['id'], capabilities: ['execute_command'], needsApproval: false },
     { name: 'stop_command', description: 'Stop a running background command.', params: { id: { type: 'string', description: 'Command ID' } }, required: ['id'], capabilities: ['execute_command'], needsApproval: true },

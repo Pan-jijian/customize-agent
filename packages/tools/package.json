@@ -31,8 +31,10 @@
   ],
   "dependencies": {
     "@customize-agent/search": "workspace:*",
+    "@customize-agent/types": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^25.9.3",
+    "archiver": "^8.0.0",
     "execa": "^9.6.1",
     "mammoth": "^1.12.0",
     "pdf-parse": "^2.4.5",
@@ -40,5 +42,8 @@
     "tesseract.js": "^7.0.0",
     "tree-sitter": "^0.22.0",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/archiver": "^8.0.0"
   }
 }

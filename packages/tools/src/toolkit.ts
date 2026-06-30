@@ -5,6 +5,7 @@ import * as path from 'path';
 import { DiffEngine } from './editing/diff.js';
 import { UnifiedSyntaxValidator } from './editing/syntax-validator.js';
 import { SandboxExecutor } from './sandbox/sandbox-executor.js';
+import { reportNonFatalError } from '@customize-agent/types';
 import { WorkspaceFs } from './core/workspace-fs.js';
 
 // ── .gitignore 匹配器 ──
@@ -33,7 +34,9 @@ function loadGitignorePatterns(rootDir: string): RegExp[] {
       if (dirOnly) re += '(/.*)?$'; else re += '$';
       patterns.push(new RegExp(re));
     }
-  } catch { /* ignore read errors */ }
+  } catch (err) {
+    reportNonFatalError({ source: 'toolkit.gitignore_read', error: err, details: { gitignorePath } });
+  }
   IGNORE_CACHE.set(rootDir, patterns);
   return patterns;
 }
@@ -118,7 +121,13 @@ export class ToolKit {
       if (backupPath) await fs.unlink(backupPath);
     } catch (error) {
       if (backupPath) {
-        try { await fs.cp(backupPath, fullPath); await fs.unlink(backupPath); } catch { /* best-effort */ }
+        try { await fs.cp(backupPath, fullPath); await fs.unlink(backupPath); } catch (rollbackErr) {
+          reportNonFatalError({
+            source: 'toolkit.write_rollback',
+            error: rollbackErr,
+            details: { relativeFilePath, backupPath },
+          });
+        }
       }
       throw new Error(`Write failed: ${(error as Error).message}`, { cause: error });
     }

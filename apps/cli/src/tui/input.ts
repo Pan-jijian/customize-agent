@@ -42,11 +42,17 @@ export interface TuiConfig {
   onCancel?: () => boolean;
 }
 
+interface PasteBlock {
+  placeholder: string;
+  content: string;
+}
+
 interface St {
   text: string; pos: number;
   dd: 'none' | 'file' | 'command';
   items: DropdownItem[]; sel: number;
   fStart: number; fEnd: number;
+  pastes: PasteBlock[];
 }
 
 let _kprInit = false;
@@ -85,6 +91,7 @@ export class TuiInput {
   private hi: number;
   private sz = new Map<string, string>();
   private _prevLines = 0;
+  private _prevCursorLine = 0;
   private labels: TuiLabels;
   private _tokenStats?: () => { used: number; limit: number } | null;
   private _onCtrlO?: () => string | null;
@@ -159,24 +166,37 @@ export class TuiInput {
 
       const initialDraft = this._draft;
       this._draft = '';
-      const st: St = { text: initialDraft, pos: initialDraft.length, dd: 'none', items: [], sel: 0, fStart: -1, fEnd: -1 };
+      const st: St = { text: initialDraft, pos: initialDraft.length, dd: 'none', items: [], sel: 0, fStart: -1, fEnd: -1, pastes: [] };
       let lastEmptyCtrlC = 0;
       let ctrlOOpen = false;
       let ctrlOLines = 0;
       let externalStatusActive = false;
       let raw = false;
+      let bracketedPaste = false;
+      let pasteBuffer = '';
+      const pasteInlineLimit = 300;
+      let resizeDebounce: ReturnType<typeof setTimeout> | undefined;
       if (process.stdin.isTTY) {
         try { process.stdin.setRawMode(true); raw = true; } catch { /* */ }
       }
 
-      process.stdout.write(CSI + '?25l');
+      process.stdout.write(CSI + '?25l' + CSI + '?2004h');
       this._draw(st);
 
-      // 终端 resize 时重新绘制
+      // 终端 resize：debounce 后用新宽度重绘，不碰上方对话历史
       const onResize = () => {
-        process.stdout.write(CSI + '2J' + CSI + 'H'); // 清屏
-        this._prevLines = 0;
-        this._draw(st);
+        if (resizeDebounce) clearTimeout(resizeDebounce);
+        resizeDebounce = setTimeout(() => {
+          resizeDebounce = undefined;
+          // 向上 1 行到顶部边框（光标从输入行 → 顶部边框）
+          const cursorLine = this._prevCursorLine;
+          if (cursorLine > 0) process.stdout.write(`${CSI}${cursorLine}A`);
+          // 从顶部边框清到屏幕底部（清除旧宽度 reflow 残骸）
+          process.stdout.write('\r' + CSI + '0J');
+          this._prevLines = 0;
+          this._prevCursorLine = 0;
+          this._draw(st);
+        }, 100);
       };
       this._activeResize = onResize;
       this._activeRender = () => this._draw(st);
@@ -185,15 +205,17 @@ export class TuiInput {
       const clearRendered = () => {
         const lines = this._prevLines;
         if (lines <= 0) return;
-        let out = lines > 1 ? `${CSI}1A` : '';
+        const cursorLine = this._prevCursorLine;
+        const linesBelowCursor = Math.max(0, lines - 1 - cursorLine);
+        let out = linesBelowCursor > 0 ? `${CSI}${linesBelowCursor}B` : '';
         out += '\r';
         for (let i = 0; i < lines; i++) {
           out += CSI + '2K';
-          if (i < lines - 1) out += '\n';
+          if (i < lines - 1) out += `${CSI}1A\r`;
         }
-        if (lines > 1) out += `${CSI}${lines - 1}A\r`;
         process.stdout.write(out);
         this._prevLines = 0;
+        this._prevCursorLine = 0;
       };
       this._activeClear = clearRendered;
 
@@ -244,9 +266,57 @@ export class TuiInput {
         ctrlOLines = 0;
       };
 
+      const insertText = (text: string) => {
+        st.text = st.text.slice(0, st.pos) + text + st.text.slice(st.pos);
+        st.pos += text.length;
+        this._sync(st);
+      };
+      const commitPaste = (text: string) => {
+        const normalized = text.replace(/\r\n?/g, '\n');
+        if (!normalized) return;
+        if (normalized.length <= pasteInlineLimit && normalized.split('\n').length <= 8) {
+          insertText(normalized);
+          return;
+        }
+        const lineCount = normalized.split('\n').length;
+        const placeholder = `[Pasted text #${st.pastes.length + 1} · ${lineCount} lines · ${normalized.length} chars]`;
+        st.pastes.push({ placeholder, content: normalized });
+        insertText(placeholder);
+      };
+
       const onKP = (_str: string | undefined, key: readline.Key) => {
         if (!key) return;
         const nm = key.name;
+        const seq = key.sequence ?? _str ?? '';
+
+        if (bracketedPaste) {
+          const end = seq.indexOf('\x1b[201~');
+          if (end >= 0) {
+            pasteBuffer += seq.slice(0, end);
+            bracketedPaste = false;
+            commitPaste(pasteBuffer);
+            pasteBuffer = '';
+            const rest = seq.slice(end + 6);
+            if (rest) commitPaste(rest);
+          } else {
+            pasteBuffer += seq;
+          }
+          return;
+        }
+        const pasteStart = seq.indexOf('\x1b[200~');
+        if (pasteStart >= 0) {
+          const afterStart = seq.slice(pasteStart + 6);
+          const pasteEnd = afterStart.indexOf('\x1b[201~');
+          if (pasteEnd >= 0) {
+            commitPaste(afterStart.slice(0, pasteEnd));
+            const rest = afterStart.slice(pasteEnd + 6);
+            if (rest) commitPaste(rest);
+          } else {
+            bracketedPaste = true;
+            pasteBuffer = afterStart;
+          }
+          return;
+        }
         if (ctrlOOpen && !(key.ctrl && nm === 'o')) {
           clearCtrlO();
           this._draw(st);
@@ -282,14 +352,9 @@ export class TuiInput {
             if (sel) { this._apply(st, sel); return; }
           }
           if (done_) return;
-          if (this._prevLines > 1) {
-            process.stdout.write('\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[2B\r\x1b[2K\x1b[2A\r');
-            this._prevLines = 0;
-          } else {
-            process.stdout.write('\r\x1b[2K');
-          }
+          clearRendered();
           done();
-          const r = st.text.trim();
+          const r = this._resolvePastes(st).trim();
           if (r) { this.hist.push(r); this.hi = this.hist.length; }
           resolve(r);
           return;
@@ -318,16 +383,25 @@ export class TuiInput {
           else this._hDn(st);
           return;
         }
-        if (nm === 'left')  { st.pos = Math.max(0, st.pos - 1); this._draw(st); return; }
-        if (nm === 'right') { st.pos = Math.min(st.text.length, st.pos + 1); this._draw(st); return; }
+        if (nm === 'left')  { st.pos = this._prevCharIndex(st.text, st.pos); this._draw(st); return; }
+        if (nm === 'right') { st.pos = this._nextCharIndex(st.text, st.pos); this._draw(st); return; }
 
         // 退格键 / 删除键
         if (nm === 'backspace') {
-          if (st.pos > 0) { st.text = st.text.slice(0, st.pos - 1) + st.text.slice(st.pos); st.pos--; this._sync(st); }
+          if (st.pos > 0) {
+            const prev = this._prevCharIndex(st.text, st.pos);
+            st.text = st.text.slice(0, prev) + st.text.slice(st.pos);
+            st.pos = prev;
+            this._sync(st);
+          }
           return;
         }
         if (nm === 'delete') {
-          if (st.pos < st.text.length) { st.text = st.text.slice(0, st.pos) + st.text.slice(st.pos + 1); this._sync(st); }
+          if (st.pos < st.text.length) {
+            const next = this._nextCharIndex(st.text, st.pos);
+            st.text = st.text.slice(0, st.pos) + st.text.slice(next);
+            this._sync(st);
+          }
           return;
         }
 
@@ -358,9 +432,7 @@ export class TuiInput {
 
         // 可打印字符（支持 BMP 外 Unicode，如 emoji）
         if (_str && _str.length >= 1 && (_str.codePointAt(0) ?? 0) >= 32) {
-          st.text = st.text.slice(0, st.pos) + _str + st.text.slice(st.pos);
-          st.pos++;
-          this._sync(st);
+          insertText(_str);
         }
       };
 
@@ -371,6 +443,7 @@ export class TuiInput {
       const done = () => {
         if (done_) return;
         done_ = true;
+        if (resizeDebounce) clearTimeout(resizeDebounce);
         process.stdin.removeListener('keypress', onKP);
         process.stdout.removeListener('resize', onResize);
         this._activeKeypress = undefined;
@@ -381,7 +454,7 @@ export class TuiInput {
         clearCtrlO();
         this._externalWrite = undefined;
         if (raw) try { process.stdin.setRawMode(false); } catch { /* */ }
-        process.stdout.write(CSI + '?25h');
+        process.stdout.write(CSI + '?2004l' + CSI + '?25h');
       };
     });
   }
@@ -472,7 +545,6 @@ export class TuiInput {
     const before = st.text.slice(0, st.pos);
     const ch = st.text[st.pos] || ' ';
     const after = st.text.slice(st.pos + 1);
-    const caret = s.inverse(ch);
 
     // ── 构建行内容 ──
     const lines: string[] = [];
@@ -498,9 +570,20 @@ export class TuiInput {
 
     const inputPrefix = `${badge} ${bar} ${pr} `;
     const inputPlainWidth = prefixVis(this.mode);
-    const inputVisible = inputPlainWidth + displayWidth(before + ch + after);
-    const inputPad = ' '.repeat(Math.max(0, innerW - 2 - inputVisible));
-    lines.push(`${t.subtle('│')} ${inputPrefix}${before}${caret}${after}${inputPad} ${t.subtle('│')}`);
+    const contentW = Math.max(1, innerW - 2 - inputPlainWidth);
+    const inputText = before + ch + after;
+    const wrapped = this._wrapInput(inputText, contentW);
+    const caretIndex = before.length;
+    const caretLoc = this._locateCursor(inputText, caretIndex, contentW);
+    const inputRows: string[] = wrapped.length ? wrapped : [''];
+    inputRows.forEach((row: string, i: number) => {
+      const hasCaret = i === caretLoc.line;
+      const caretCol = hasCaret ? caretLoc.col : -1;
+      const rawLine = hasCaret ? this._renderCaret(row, caretCol) : row;
+      const pad = ' '.repeat(Math.max(0, contentW - displayWidth(row)));
+      const prefix = i === 0 ? inputPrefix : ' '.repeat(inputPlainWidth);
+      lines.push(`${t.subtle('│')} ${prefix}${rawLine}${pad} ${t.subtle('│')}`);
+    });
     lines.push(t.subtle('╰' + '─'.repeat(innerW) + '╯'));
 
     if (st.dd !== 'none' && st.items.length) {
@@ -532,7 +615,7 @@ export class TuiInput {
     // 使用逐行 clearLine（而非 clearBelow）— 更精细，闪烁更少。
     // 输入行: \r + 空格覆盖旧内容，然后 clearLine 修剪多余。
     // 下拉行: \n + clearLine + 内容。
-    let out = prevLines > 1 ? `${CSI}1A` : '';
+    let out = this._prevCursorLine > 0 ? `${CSI}${this._prevCursorLine}A` : '';
     out += '\r' + lines[0] + CSI + 'K';  // 写入后清除到行尾
     for (let i = 1; i < totalLines; i++) {
       out += '\n' + CSI + 'K' + lines[i];
@@ -546,15 +629,98 @@ export class TuiInput {
 
     // 光标回到输入框内容行，再移到目标列
     const lastTouched = Math.max(totalLines, prevLines);
-    const inputLineIndex = 1;
+    const inputLineIndex = 1 + caretLoc.line;
     const linesBelowInput = Math.max(0, lastTouched - 1 - inputLineIndex);
     if (linesBelowInput > 0) out += `${CSI}${linesBelowInput}A`;
     out += '\r';
-    const targetCol = 2 + prefixVis(this.mode) + displayWidth(before);
+    const targetCol = 2 + (caretLoc.line === 0 ? prefixVis(this.mode) : inputPlainWidth) + displayWidth(inputRows[caretLoc.line]?.slice(0, caretLoc.col) ?? '');
     if (targetCol > 0) out += `${CSI}${targetCol}C`;
 
     process.stdout.write(out);
     this._prevLines = totalLines;
+    this._prevCursorLine = inputLineIndex;
+  }
+
+  private _prevCharIndex(text: string, pos: number): number {
+    if (pos <= 0) return 0;
+    let index = 0;
+    for (const ch of text) {
+      const next = index + ch.length;
+      if (next >= pos) return index;
+      index = next;
+    }
+    return index;
+  }
+
+  private _nextCharIndex(text: string, pos: number): number {
+    if (pos >= text.length) return text.length;
+    for (const ch of text.slice(pos)) return pos + ch.length;
+    return text.length;
+  }
+
+  private _renderCaret(row: string, col: number): string {
+    const chars = [...row];
+    const caretChar = chars[col] ?? ' ';
+    return chars.slice(0, col).join('') + s.inverse(caretChar) + chars.slice(col + 1).join('');
+  }
+
+  private _resolvePastes(st: St): string {
+    let text = st.text;
+    for (const paste of st.pastes) {
+      text = text.split(paste.placeholder).join(paste.content);
+    }
+    return text;
+  }
+
+  private _wrapInput(text: string, width: number): string[] {
+    const rows: string[] = [];
+    let row = '';
+    let rowW = 0;
+    for (const ch of text) {
+      if (ch === '\n') {
+        rows.push(row);
+        row = '';
+        rowW = 0;
+        continue;
+      }
+      const w = displayWidth(ch);
+      if (rowW > 0 && rowW + w > width) {
+        rows.push(row);
+        row = '';
+        rowW = 0;
+      }
+      row += ch;
+      rowW += w;
+    }
+    rows.push(row);
+    return rows;
+  }
+
+  private _locateCursor(text: string, index: number, width: number): { line: number; col: number } {
+    let line = 0;
+    let col = 0;
+    let rowW = 0;
+    let offset = 0;
+    for (const ch of text) {
+      if (offset >= index) break;
+      if (ch === '\n') {
+        line++;
+        col = 0;
+        rowW = 0;
+        offset += ch.length;
+        continue;
+      }
+      const w = displayWidth(ch);
+      if (rowW > 0 && rowW + w > width) {
+        line++;
+        col = 0;
+        rowW = 0;
+      }
+      col++;
+      rowW += w;
+      offset += ch.length;
+    }
+    return { line, col };
   }
 
   // file size cache 文件大小缓存

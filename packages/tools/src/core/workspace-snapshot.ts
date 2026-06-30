@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { createHash } from 'crypto';
+import { reportNonFatalError } from '@customize-agent/types';
 import { SKIP_DIRS } from './constants.js';
 import { resolveSafe, walk } from './path-utils.js';
 const SNAPSHOT_MAX_FILE_SIZE = 25_000_000;
@@ -146,7 +147,13 @@ export class WorkspaceSnapshotService {
       const full = this._resolveSafe(entry.path);
       await fs.mkdir(path.dirname(full), { recursive: true });
       await fs.copyFile(path.join(checkpointDir, 'files', entry.file), full);
-      await fs.chmod(full, entry.mode).catch(() => undefined);
+      await fs.chmod(full, entry.mode).catch(err => {
+        reportNonFatalError({
+          source: 'workspace_snapshot.restore_chmod',
+          error: err,
+          details: { path: entry.path, mode: entry.mode },
+        });
+      });
     }
   }
 }

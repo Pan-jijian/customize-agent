@@ -33,3 +33,10 @@ export { ToolKit } from './toolkit.js';
 
 // 声明式工具定义
 export type { ToolDef, ToolParamDef } from './tool-def.js';
+
+// 平台抽象层（跨平台 Shell、进程管理、二进制解析）
+export { executeCommand, spawnBackground, translateCommand, detectShell, translateForCmd, translateForPowerShell, getShellConfig, resetShellConfig } from './core/platform/shell.js';
+export { killProcess, killByPid, onCleanup, offCleanup, shutdown } from './core/platform/process.js';
+export { resolveBinary, resolveLspCommand, resolveCommand } from './core/platform/binary.js';
+export type { Platform, ShellConfig, ShellResult, ProcessReference } from './core/platform/types.js';
+export { isWindows, isMacOS, isLinux, getHomeDir, getTempDir, normalizePath, isAbsolutePath, resolveWindowsCommand, nullDevice, shellEscape, commandSeparator, platform } from './core/platform/utils.js';

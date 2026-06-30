@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'child_process';
 import type { ToolRegistry, RegisteredTool } from '../tools/registry.js';
 import { type JsonRpcResponse, jsonRpcSerialize, splitJsonLines } from '../utils/json-rpc.js';
+import { killProcess, onCleanup } from '@customize-agent/tools';
 
 interface McpConnection {
   serverName: string;
@@ -35,9 +36,8 @@ export class McpClient {
   private connections = new Map<string, McpConnection>();
 
   constructor(private registry: ToolRegistry) {
-    for (const signal of ['SIGINT', 'SIGTERM', 'exit'] as const) {
-      process.on(signal, () => this.disconnectAll());
-    }
+    // Use cross-platform cleanup handler (SIGINT+SIGTERM+exit — works on Windows too)
+    onCleanup(() => this.disconnectAll());
   }
 
   async connect(config: McpServerConfig): Promise<void> {
@@ -166,7 +166,7 @@ export class McpClient {
   disconnect(serverName: string): void {
     const conn = this.connections.get(serverName);
     if (!conn) return;
-    conn.process.kill();
+    void killProcess(conn.process);
     this.connections.delete(serverName);
   }
 

@@ -6,6 +6,7 @@ import * as XLSX from 'xlsx';
 import { createWorker } from 'tesseract.js';
 import { execa } from 'execa';
 import { resolveSafe } from '../core/path-utils.js';
+import { resolveBinary } from '../core/platform/binary.js';
 
 export class MediaTools {
   constructor(private cwd: string) {}
@@ -60,7 +61,8 @@ export class MediaTools {
   }
 
   async convertFile(input: string, output: string): Promise<string> {
-    const res = await execa('ffmpeg', ['-y', '-i', resolveSafe(input, this.cwd), resolveSafe(output, this.cwd)], { reject: false });
+    const ffmpeg = resolveBinary('ffmpeg');
+    const res = await execa(ffmpeg, ['-y', '-i', resolveSafe(input, this.cwd), resolveSafe(output, this.cwd)], { reject: false });
     if (res.exitCode !== 0) throw new Error(res.stderr || 'ffmpeg conversion failed');
     return `Converted ${input} -> ${output}`;
   }
@@ -77,7 +79,8 @@ export class MediaTools {
 
   private async mediaProbe(filePath: string): Promise<string> {
     const full = resolveSafe(filePath, this.cwd);
-    const res = await execa('ffprobe', ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', full], { reject: false });
+    const ffprobe = resolveBinary('ffprobe');
+    const res = await execa(ffprobe, ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', full], { reject: false });
     if (res.exitCode !== 0) {
       const stat = await fs.stat(full);
       return JSON.stringify({ path: filePath, size: stat.size, isFile: stat.isFile() });

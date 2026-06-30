@@ -1,11 +1,86 @@
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, type ChildProcess, execSync } from 'child_process';
 import { readFileSync } from 'fs';
+import { execa } from 'execa';
 import type {
   Location,
   Diagnostic,
   Position,
 } from 'vscode-languageserver-protocol';
-import type { LifecycleAware } from '@customize-agent/types';
+import { reportNonFatalError, type LifecycleAware } from '@customize-agent/types';
+
+const IS_WINDOWS = process.platform === 'win32';
+
+// ── Cross-platform process kill (inline — search cannot depend on tools) ──
+
+/**
+ * Kill a process tree in a cross-platform manner.
+ * Windows: uses taskkill /T /F (tree kill + force)
+ * Unix:    uses SIGTERM with 3s timeout fallback to SIGKILL
+ */
+async function crossPlatformKill(proc: ChildProcess | null): Promise<void> {
+  if (!proc) return;
+  if (IS_WINDOWS && proc.pid) {
+    try {
+      await execa('taskkill', ['/T', '/F', '/PID', String(proc.pid)], { reject: false });
+      return;
+    } catch (err) {
+      reportNonFatalError({ source: 'lsp.taskkill', error: err, details: { pid: proc.pid } });
+    }
+  }
+  // Unix: SIGTERM → wait → SIGKILL
+  try {
+    proc.kill(); // SIGTERM
+    // Wait up to 3s for graceful shutdown
+    await new Promise<void>(resolve => {
+      const check = setInterval(() => {
+        if (proc.exitCode !== null || proc.killed) { clearInterval(check); resolve(); }
+      }, 200);
+      setTimeout(() => { clearInterval(check); resolve(); }, 3000);
+    });
+    if (proc.exitCode === null && !proc.killed) {
+      proc.kill('SIGKILL');
+    }
+  } catch {
+    // Process already exited — ok
+  }
+}
+
+// ── LSP command resolution (cross-platform) ──
+
+/** Resolve a command name for Windows (try .cmd, .exe suffixes) */
+function resolveLspCommand(command: string, args: string[]): { command: string; args: string[] } {
+  if (!IS_WINDOWS) return { command, args };
+
+  // Commands that already have a Windows extension
+  if (/\.(exe|cmd|bat|com)$/i.test(command)) return { command, args };
+
+  // Known Node.js / npm CLI commands → try .cmd
+  const nodeCmds = new Set(['npx', 'tsc', 'tsx', 'node', 'pnpm', 'npm', 'yarn', 'eslint', 'prettier']);
+  if (nodeCmds.has(command)) {
+    return { command: command + '.cmd', args };
+  }
+
+  // Other commands: quick exists check for .cmd then .exe
+  try {
+    execSync(`where ${command}.cmd`, { timeout: 2000, stdio: 'ignore' });
+    return { command: command + '.cmd', args };
+  } catch { /* .cmd not found */ }
+
+  try {
+    execSync(`where ${command}.exe`, { timeout: 2000, stdio: 'ignore' });
+    return { command: command + '.exe', args };
+  } catch { /* .exe not found */ }
+
+  // Convert Unix-style paths in args to backslashes
+  const resolvedArgs = args.map(arg => {
+    if (arg.includes('/') && !arg.startsWith('--') && !arg.startsWith('-')) {
+      return arg.replace(/\//g, '\\');
+    }
+    return arg;
+  });
+
+  return { command, args: resolvedArgs };
+}
 
 interface LspServerConfig {
   id: string;
@@ -79,7 +154,7 @@ const BUILTIN_SERVERS: LspServerConfig[] = [
     languageIds: ['php'],
     extensions: ['.php'],
     command: 'php',
-    args: ['vendor/bin/intelephense', '--stdio'],
+    args: IS_WINDOWS ? ['vendor\\bin\\intelephense', '--stdio'] : ['vendor/bin/intelephense', '--stdio'],
     installHint: 'composer require intelephense/intelphense',
   },
   {
@@ -146,10 +221,11 @@ export class LSPManager implements LifecycleAware {
     this.workspaceRoot = workspaceRoot;
     this.serverConfigs = [...BUILTIN_SERVERS, ...extraServers];
 
-    // 退出时清理所有 LSP 进程
-    for (const signal of ['SIGINT', 'SIGTERM', 'exit'] as const) {
-      process.on(signal, () => { void this.shutdownAll(); });
-    }
+    // 退出时清理所有 LSP 进程（跨平台信号处理）
+    const cleanupHandler = () => { void this.shutdownAll(); };
+    process.on('SIGINT', cleanupHandler);
+    process.on('SIGTERM', cleanupHandler);
+    process.on('exit', cleanupHandler);
   }
 
   // === LifecycleAware ===
@@ -195,7 +271,8 @@ export class LSPManager implements LifecycleAware {
 
   private async createConnection(config: LspServerConfig): Promise<LspConnection | null> {
     try {
-      const proc = spawn(config.command, config.args, {
+      const { command: resolvedCmd, args: resolvedArgs } = resolveLspCommand(config.command, config.args);
+      const proc = spawn(resolvedCmd, resolvedArgs, {
         cwd: this.workspaceRoot,
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: false, // 绑定父进程生命周期 (ADR-8)
@@ -416,9 +493,9 @@ export class LSPManager implements LifecycleAware {
     try {
       void this.sendNotification(conn, 'shutdown', {});
       conn.process?.stdin?.end();
-      conn.process?.kill();
+      void crossPlatformKill(conn.process);
     } catch {
-      conn.process?.kill('SIGKILL');
+      void crossPlatformKill(conn.process);
     }
     conn.available = false;
     this.connections.delete(conn.config.id);
@@ -429,9 +506,9 @@ export class LSPManager implements LifecycleAware {
     for (const [, conn] of this.connections) {
       try {
         await this.sendNotification(conn, 'shutdown', {});
-        conn.process?.kill();
+        await crossPlatformKill(conn.process);
       } catch {
-        conn.process?.kill('SIGKILL');
+        await crossPlatformKill(conn.process);
       }
     }
     this.connections.clear();
@@ -445,7 +522,9 @@ export class LSPManager implements LifecycleAware {
           await this.sendNotification(conn, 'workspace/didChangeWorkspaceFolders', {
             event: { added: [{ uri, name }], removed: [] },
           });
-        } catch { /* 部分 Server 不支持 */ }
+        } catch (err) {
+          reportNonFatalError({ source: 'lsp.add_workspace_folder', error: err, details: { uri, name } });
+        }
       }
     }
   }
@@ -458,7 +537,9 @@ export class LSPManager implements LifecycleAware {
           await this.sendNotification(conn, 'workspace/didChangeWorkspaceFolders', {
             event: { added: [], removed: [{ uri }] },
           });
-        } catch { /* 部分 Server 不支持 */ }
+        } catch (err) {
+          reportNonFatalError({ source: 'lsp.remove_workspace_folder', error: err, details: { uri } });
+        }
       }
     }
   }

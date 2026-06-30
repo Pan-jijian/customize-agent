@@ -1,3 +1,4 @@
+import { reportNonFatalError } from '@customize-agent/types';
 import type { ILLMProvider } from '@customize-agent/llm';
 import { getLanguageConfig } from '../index/languages.js';
 import type { StorageManager } from '../index/db.js';
@@ -95,7 +96,8 @@ class CodeChunker {
       boundaries.push(totalLines + 1);
       boundaries.sort((a, b) => a - b);
       return boundaries;
-    } catch {
+    } catch (err) {
+      reportNonFatalError({ source: 'semantic.find_boundaries', error: err, details: { filePath } });
       return [1, totalLines + 1];
     }
   }
@@ -129,7 +131,9 @@ function buildHeaderInjection(filePath: string, content: string, startLine: numb
       if (enclosing) {
         header.push(`// Enclosing: ${enclosing}`);
       }
-    } catch { /* best-effort */ }
+    } catch (err) {
+      reportNonFatalError({ source: 'semantic.header_enclosing_scope', error: err, details: { filePath } });
+    }
   }
 
   header.push('// ' + '='.repeat(60));
@@ -288,7 +292,9 @@ export class EmbeddingSearch {
       if (stored.length > 0) {
         console.warn(`[EmbeddingSearch] 从 DB 恢复 ${stored.length} 个向量缓存`);
       }
-    } catch { /* DB 为空或损坏，静默跳过 */ }
+    } catch (err) {
+      reportNonFatalError({ source: 'semantic.restore_vector_cache', error: err });
+    }
   }
 
   markDirty(filePath: string): void { this.dirtyFiles.add(filePath); }

@@ -1,4 +1,4 @@
-import type { Message } from '@customize-agent/types';
+import { formatExecutionErrorForModel, reportNonFatalError, type Message } from '@customize-agent/types';
 import type { AgentEvent, AgentExecutor } from '../agent/executor.js';
 import { TuiInput } from '../tui/input.js';
 import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded, userMessageBlock, toolCallPending } from '../tui/renderer.js';
@@ -237,7 +237,9 @@ export class Repl {
       const snapshot = await this.snapshotService.takeSnapshot();
       this.snapshots.set(userIndex, snapshot);
       await this.snapshotService.saveSerialized(this.sessionId, snapshot);
-    } catch { /* snapshot is best-effort */ }
+    } catch (err) {
+      reportNonFatalError({ source: 'repl.snapshot', error: err, details: { sessionId: this.sessionId } });
+    }
     this.history.push({ role: 'user', content: enhancedInput });
 
     const abortController = new AbortController();
@@ -273,10 +275,13 @@ export class Repl {
         }
       }
     } catch (err) {
-      if (!abortController.signal.aborted) {
+      if (abortController.signal.aborted) {
+        this.history.pop();
+      } else {
+        const errorContent = formatExecutionErrorForModel({ scope: 'task', error: err as Error });
+        this.history.push({ role: 'assistant', content: errorContent });
         taskInput.writeOutput(msg.error((err as Error).message));
       }
-      this.history.pop();
     } finally {
       stopToolPreview();
       taskInput.stop();
@@ -399,6 +404,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         const taskInput = this._captureInputDuringTask(() => abortController.abort());
         let toolPreviewTimer: ReturnType<typeof setInterval> | null = null;
         let toolPreview: { toolName: string; args: Record<string, unknown>; startMs: number } | null = null;
+        let planSucceeded = false;
         const renderToolPreview = () => {
           if (!toolPreview) return;
           taskInput.writeOutput('\r' + toolCallPending(
@@ -438,15 +444,20 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
             signal: abortController.signal,
           });
           this.history.length = 0; this.history.push(...u);
+          planSucceeded = true;
         } catch (err) {
-          if (!abortController.signal.aborted) {
+          if (abortController.signal.aborted) {
+            this.history.pop();
+          } else {
+            const errorContent = formatExecutionErrorForModel({ scope: 'plan', error: err as Error });
+            this.history.push({ role: 'assistant', content: errorContent });
             process.stdout.write(msg.error((err as Error).message));
           }
-          this.history.pop();
         } finally {
           stopToolPreview();
           taskInput.stop();
         }
+        if (!planSucceeded) return false;
         const next = await this._selectList(this.i18n.t('plan.complete'), [
           { label: this.i18n.t('cmd.plan_execute'), detail: args, value: 'execute' as const },
           { label: this.i18n.t('cmd.plan_keep'), detail: this.i18n.t('help.plan'), value: 'keep' as const },

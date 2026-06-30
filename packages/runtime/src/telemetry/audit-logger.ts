@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import type { Message } from '@customize-agent/types';
+import { reportNonFatalError, type Message } from '@customize-agent/types';
 
 // 审计事件类型
 
@@ -80,8 +80,12 @@ export class AuditLogger {
 
     // 写入 JSONL（一行一个 JSON）
     const line = JSON.stringify(entry) + '\n';
-    await fs.appendFile(this.logFile, line, 'utf-8').catch(() => {
-      // 静默失败，不中断 Agent 主流程
+    await fs.appendFile(this.logFile, line, 'utf-8').catch(err => {
+      reportNonFatalError({
+        source: 'audit_logger.append',
+        error: err,
+        details: { event, logFile: this.logFile },
+      });
     });
   }
 

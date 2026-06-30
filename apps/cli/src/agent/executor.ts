@@ -2,7 +2,7 @@ import type { ILLMProvider, FunctionDefinition } from '@customize-agent/llm';
 import { estimateCostUsd } from '@customize-agent/llm';
 import type { ToolRegistry, PermissionEngine, ExecutionController, ContextManager } from '@customize-agent/engine';
 import { ContextManager as ContextManagerImpl, PlanModeManager } from '@customize-agent/engine';
-import type { Message, ToolCall } from '@customize-agent/types';
+import { formatToolErrorForModel, type Message, type ToolCall } from '@customize-agent/types';
 import type { I18nManager } from '../i18n/manager.js';
 import { buildSystemPrompt } from './prompt.js';
 import { t, taskWarning, renderMarkdown, contextCompacting, contextCompacted, contextStats, spinnerStart, formatDuration } from '../tui/renderer.js';
@@ -389,27 +389,14 @@ export class AgentExecutor {
     const args = tc.arguments;
     const label = this.i18n?.toolLabel(name) ?? name;
 
-    // 权限检查
+    // deny 检查（approval 由 runTask 统一处理，此处仅处理安全策略直接拒绝）
     if (!preApproved && this.permissionEngine) {
       const perm = this.permissionEngine.check(name, args);
       if (perm === 'deny') {
         const msg = this.i18n?.t('executor.security_policy_deny', { label }) ?? `[Denied] ${label}`;
         return { result: msg, duration: 0 };
       }
-      if (perm === 'ask') {
-        if (this.approvalHandler) {
-          this._emit({ type: 'approval_request', toolName: name, args });
-          const ok = await this.approvalHandler(name, args);
-          this._emit({ type: 'approval_response', toolName: name, approved: ok });
-          if (!ok) {
-            const msg = this.i18n?.t('executor.user_cancelled', { label }) ?? `[Cancelled] ${label}`;
-            return { result: msg, duration: 0 };
-          }
-        } else {
-          const msg = this.i18n?.t('executor.missing_approval_handler', { label }) ?? `[No approval handler] ${label}`;
-          return { result: msg, duration: 0 };
-        }
-      }
+      // 'ask' 不在此处理 — runTask 已预先做 approval 并传 preApproved=true
     }
 
     const toolStart = Date.now();
@@ -430,8 +417,9 @@ export class AgentExecutor {
       if (signal?.aborted || (err as Error).name === 'AbortError' || /SIGINT|User interruption|CTRL-C|aborted/i.test(errMsg)) {
         return { result: this.i18n?.t('status.cancelled') ?? 'Cancelled', duration };
       }
-      this.controller?.recordToolCall(name, args, this.i18n?.t('executor.exception', { msg: errMsg }) ?? `[Exception]: ${errMsg}`);
-      return { result: `[${label}]: ${(this.i18n?.t('common.error') ?? 'Error')} - ${errMsg}`, duration };
+      const formatted = formatToolErrorForModel({ toolName: name, label, args, error: err as Error });
+      this.controller?.recordToolCall(name, args, formatted);
+      return { result: formatted, duration };
     }
   }
 }

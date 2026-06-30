@@ -2,14 +2,29 @@
 
 import * as path from 'path';
 
+const IS_WINDOWS = process.platform === 'win32';
+
 /**
  * 路径安全解析：确保目标路径在工作区根目录内，防止路径遍历攻击。
  * 返回绝对路径，若路径逃逸则抛出异常。
+ *
+ * Windows 注意事项：
+ *   - NTFS 大小写不敏感 → 比较时统一转小写
+ *   - 驱动器号边界 → 规范化后再比较前缀
+ *   - UNC 路径 → resolve 后已自动处理
  */
 export function resolveSafe(relativePath: string, root: string): string {
   const absolute = path.resolve(root, relativePath);
-  const sep = path.sep;
-  if (!(absolute.startsWith(root + sep) || absolute === root)) {
+  const normalizedRoot = path.normalize(root) + path.sep;
+  const normalizedAbsolute = path.normalize(absolute);
+
+  // Windows: case-insensitive comparison
+  const rootCompare = IS_WINDOWS ? normalizedRoot.toLowerCase() : normalizedRoot;
+  const absCompare = IS_WINDOWS ? normalizedAbsolute.toLowerCase() : normalizedAbsolute;
+
+  // Must either be exactly the root, or start with root + separator
+  // Using normalize + sep ensures "C:\project" doesn't match "C:\project-other"
+  if (!(absCompare === rootCompare.slice(0, -path.sep.length) || absCompare.startsWith(rootCompare))) {
     throw new Error(`Path traversal detected: "${relativePath}" escapes workspace "${root}"`);
   }
   return absolute;

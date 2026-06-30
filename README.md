@@ -274,7 +274,7 @@ customize-agent/
 │   │       │   └── tool-loop-runner.ts # 工具循环运行器
 │   │       ├── orchestration/        # 子智能体编排
 │   │       │   ├── orchestrator.ts   # Orchestrator（三种协作模式）
-│   │       │   ├── worktree.ts       # SafeWorktreeManager（Git Worktree 管理）
+│   │       │   ├── isolation.ts      # 多策略子 Agent 隔离（Git Worktree + 内存快照）
 │   │       │   └── subagent/         # 子智能体
 │   │       │       ├── runner.ts     # SubagentRunner
 │   │       │       ├── builtins.ts   # 内置子智能体定义
@@ -429,7 +429,7 @@ customize-agent/
 | `PlanModeManager` | 只读探索模式（生成 JSON 格式执行计划） |
 | `SubagentRunner` | 子智能体运行器（独立上下文 + 独立 LLM 循环 + 完成标记） |
 | `Orchestrator` | 多智能体编排（Orchestrator DAG / Pipeline / Swarm 三种模式） |
-| `SafeWorktreeManager` | Git Worktree 生命周期管理（FIFO 互斥锁 + 自动清理） |
+| `GitWorktreeIsolation` / `SnapshotIsolation` | 子 Agent 隔离策略（Git Worktree + 内存快照，自动检测降级） |
 | `McpServer` | MCP stdio 服务端（JSON-RPC 2.0），暴露工具给外部客户端 |
 | `McpClient` | MCP 客户端，连接外部 MCP 服务器并注册工具 |
 | `HooksEngine` | 6 事件生命周期钩子系统（command 和 prompt 两种类型） |
