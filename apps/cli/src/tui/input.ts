@@ -12,7 +12,7 @@ import * as fs from 'fs';
 import * as readline from 'readline';
 import {
   t, s, modeBadge, modeAccent,
-  renderFileDropdown, renderCommandMenu, hintText,
+  renderFileDropdown, renderCommandMenu, hintText, userMessageBlock,
 } from './renderer.js';
 import type { Mode } from './renderer.js';
 import { FileIndex } from './file-index.js';
@@ -38,6 +38,8 @@ export interface TuiConfig {
   tokenStats?: () => { used: number; limit: number } | null;
   /** ctrl+o 回调：返回要展示的内容，或 null 表示无内容 */
   onCtrlO?: () => string | null;
+  /** 空输入 Ctrl+C 回调：返回 true 表示已处理，不退出 */
+  onCancel?: () => boolean;
 }
 
 interface St {
@@ -86,6 +88,14 @@ export class TuiInput {
   private labels: TuiLabels;
   private _tokenStats?: () => { used: number; limit: number } | null;
   private _onCtrlO?: () => string | null;
+  private _onCancel?: () => boolean;
+  private _externalWrite?: (text: string) => void;
+  private _activeKeypress?: (str: string | undefined, key: readline.Key) => void;
+  private _activeResize?: () => void;
+  private _activeRender?: () => void;
+  private _activeClear?: () => void;
+  private _suspended = false;
+  private _pendingBlocks: Array<{ text: string; label: string; variant: 'user' | 'queued' }> = [];
   private _draft = '';
 
   constructor(cfg: TuiConfig) {
@@ -98,6 +108,7 @@ export class TuiInput {
     this.hi = this.hist.length;
     this._tokenStats = cfg.tokenStats;
     this._onCtrlO = cfg.onCtrlO;
+    this._onCancel = cfg.onCancel;
     this.labels = cfg.labels ?? {
       filesHeader: 'Files', commandsHeader: 'Commands',
       more: (n) => `… ${n} more`,
@@ -110,6 +121,36 @@ export class TuiInput {
     this._draft = text;
   }
 
+  writeExternal(text: string): void {
+    if (this._externalWrite) this._externalWrite(text);
+    else process.stdout.write(text);
+  }
+
+  setPendingBlocks(blocks: Array<{ text: string; label: string; variant: 'user' | 'queued' }>, options: { redraw?: boolean } = { redraw: true }): void {
+    this._pendingBlocks = blocks;
+    if (options.redraw !== false) this._activeRender?.();
+  }
+
+  suspend(): void {
+    if (this._suspended) return;
+    if (this._activeKeypress) process.stdin.removeListener('keypress', this._activeKeypress);
+    if (this._activeResize) process.stdout.removeListener('resize', this._activeResize);
+    this._activeClear?.();
+    this._suspended = true;
+  }
+
+  resume(options: { redraw?: boolean } = {}): void {
+    if (!this._suspended) return;
+    if (process.stdin.isTTY) {
+      try { process.stdin.setRawMode(true); } catch { /* ignore */ }
+    }
+    process.stdin.resume();
+    if (this._activeKeypress) process.stdin.on('keypress', this._activeKeypress);
+    if (this._activeResize) process.stdout.on('resize', this._activeResize);
+    this._suspended = false;
+    if (options.redraw) this._activeRender?.();
+  }
+
   // read 读取输入
 
   async read(): Promise<string> {
@@ -120,6 +161,9 @@ export class TuiInput {
       this._draft = '';
       const st: St = { text: initialDraft, pos: initialDraft.length, dd: 'none', items: [], sel: 0, fStart: -1, fEnd: -1 };
       let lastEmptyCtrlC = 0;
+      let ctrlOOpen = false;
+      let ctrlOLines = 0;
+      let externalStatusActive = false;
       let raw = false;
       if (process.stdin.isTTY) {
         try { process.stdin.setRawMode(true); raw = true; } catch { /* */ }
@@ -136,11 +180,79 @@ export class TuiInput {
         this._prevLines = 0;
         this._draw(st);
       };
+      this._activeResize = onResize;
+      this._activeRender = () => this._draw(st);
       process.stdout.on('resize', onResize);
+
+      const clearRendered = () => {
+        const lines = this._prevLines;
+        if (lines <= 0) return;
+        let out = lines > 1 ? `${CSI}1A` : '';
+        out += '\r';
+        for (let i = 0; i < lines; i++) {
+          out += CSI + '2K';
+          if (i < lines - 1) out += '\n';
+        }
+        if (lines > 1) out += `${CSI}${lines - 1}A\r`;
+        process.stdout.write(out);
+        this._prevLines = 0;
+      };
+      this._activeClear = clearRendered;
+
+      const cursorControlRe = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[ABCDGJK]`, 'g');
+      const stripCursorControls = (text: string) => text
+        .replace(cursorControlRe, '')
+        .replace(/^\r+/, '');
+
+      const clearExternalStatus = () => {
+        if (!externalStatusActive) return;
+        clearRendered();
+        process.stdout.write(`${CSI}1A\r${CSI}2K`);
+        externalStatusActive = false;
+      };
+
+      this._externalWrite = (text: string) => {
+        clearCtrlO();
+        const isStatus = text.startsWith('\r');
+        const normalized = stripCursorControls(text);
+        if (isStatus) {
+          clearRendered();
+          if (externalStatusActive) process.stdout.write(`${CSI}1A\r${CSI}2K`);
+          if (normalized.trim().length > 0) {
+            process.stdout.write(normalized.endsWith('\n') ? normalized : normalized + '\n');
+            externalStatusActive = true;
+          } else {
+            externalStatusActive = false;
+          }
+          this._draw(st);
+          return;
+        }
+        clearExternalStatus();
+        clearRendered();
+        process.stdout.write(normalized);
+        this._draw(st);
+      };
+
+      const clearCtrlO = () => {
+        if (!ctrlOOpen || ctrlOLines <= 0) return;
+        let out = `\x1b[${ctrlOLines}A\r`;
+        for (let i = 0; i < ctrlOLines; i++) {
+          out += CSI + '2K';
+          if (i < ctrlOLines - 1) out += '\n';
+        }
+        if (ctrlOLines > 1) out += `\x1b[${ctrlOLines - 1}A\r`;
+        process.stdout.write(out);
+        ctrlOOpen = false;
+        ctrlOLines = 0;
+      };
 
       const onKP = (_str: string | undefined, key: readline.Key) => {
         if (!key) return;
         const nm = key.name;
+        if (ctrlOOpen && !(key.ctrl && nm === 'o')) {
+          clearCtrlO();
+          this._draw(st);
+        }
 
         // 退出处理
         if (key.ctrl && nm === 'c') {
@@ -151,6 +263,10 @@ export class TuiInput {
             st.items = [];
             this._draw(st);
             lastEmptyCtrlC = 0;
+            return;
+          }
+          if (this._onCancel?.()) {
+            this._draw(st);
             return;
           }
           const now = Date.now();
@@ -220,10 +336,18 @@ export class TuiInput {
         // Ctrl 组合键
         if (key.ctrl && nm === 'o') {
           if (this._onCtrlO) {
+            if (ctrlOOpen) {
+              clearCtrlO();
+              this._draw(st);
+              return;
+            }
             const content = this._onCtrlO();
             if (content) {
-              process.stdout.write('\r\x1b[2K' + content + '\n');
-              this._draw(st);
+              clearRendered();
+              const text = content.endsWith('\n') ? content : content + '\n';
+              process.stdout.write(text);
+              ctrlOLines = text.split('\n').length - 1;
+              ctrlOOpen = true;
             }
           }
           return;
@@ -242,6 +366,7 @@ export class TuiInput {
         }
       };
 
+      this._activeKeypress = onKP;
       process.stdin.on('keypress', onKP);
 
       let done_ = false;
@@ -250,6 +375,13 @@ export class TuiInput {
         done_ = true;
         process.stdin.removeListener('keypress', onKP);
         process.stdout.removeListener('resize', onResize);
+        this._activeKeypress = undefined;
+        this._activeResize = undefined;
+        this._activeRender = undefined;
+        this._activeClear = undefined;
+        this._suspended = false;
+        clearCtrlO();
+        this._externalWrite = undefined;
         if (raw) try { process.stdin.setRawMode(false); } catch { /* */ }
         process.stdout.write(CSI + '?25h');
       };
@@ -298,25 +430,28 @@ export class TuiInput {
     st.dd = 'none'; st.items = []; st.fStart = -1; st.fEnd = -1;
 
     if (st.text.startsWith('/')) {
-      const p = st.text.slice(1).toLowerCase();
-      const m = this.cmds
-        .filter(c => c.name.toLowerCase().includes(p))
-        .map(c => ({ label: c.name, detail: c.desc, data: c.name + ' ' }));
-      if (m.length) { st.dd = 'command'; st.items = m; st.fStart = 0; st.fEnd = st.text.length; st.sel = 0; }
-      this._draw(st);
-      return;
+      const firstSpace = st.text.indexOf(' ');
+      const commandEnd = firstSpace >= 0 ? firstSpace : st.text.length;
+      if (st.pos <= commandEnd) {
+        const p = st.text.slice(1, commandEnd).toLowerCase();
+        const m = this.cmds
+          .filter(c => c.name.toLowerCase().includes(p))
+          .map(c => ({ label: c.name, detail: c.desc, data: c.name + ' ' }));
+        if (m.length) { st.dd = 'command'; st.items = m; st.fStart = 0; st.fEnd = commandEnd; st.sel = 0; }
+        this._draw(st);
+        return;
+      }
     }
 
     const at = st.text.lastIndexOf('@', st.pos - 1);
-    if (at < 0 || !st.text[at + 1] || st.text[at + 1] === ' ') { this._draw(st); return; }
+    if (at < 0 || st.text[at + 1] === ' ') { this._draw(st); return; }
 
     const endOfWord = st.text.indexOf(' ', at + 1);
-    const wordEnd = (endOfWord >= 0 && endOfWord < st.pos) ? endOfWord : st.pos;
-    if (st.pos > wordEnd + 1) { this._draw(st); return; }
+    if (endOfWord >= 0 && endOfWord < st.pos) { this._draw(st); return; }
+    const wordEnd = st.pos;
     const partial = st.text.slice(at + 1, wordEnd).toLowerCase();
-    if (!partial) { this._draw(st); return; }
 
-    const m = this.fileIndex.search(partial, 8);
+    const m = this.fileIndex.search(partial, 50);
 
     if (!m.length) { this._draw(st); return; }
 
@@ -354,6 +489,12 @@ export class TuiInput {
       statsLabel = `[${Math.round(stats.used/1000)}K/${Math.round(stats.limit/1000)}K ${pct}%]`;
       statsText = color(` ${statsLabel} `);
     }
+    for (const block of this._pendingBlocks) {
+      const blockLines = userMessageBlock(block.text, block.label, block.variant).trimEnd().split('\n');
+      if (blockLines[0] === '') blockLines.shift();
+      lines.push(...blockLines);
+    }
+
     const topFill = Math.max(1, innerW - (statsLabel ? displayWidth(` ${statsLabel} `) : 0));
     lines.push(t.subtle('╭' + '─'.repeat(topFill)) + statsText + t.subtle('╮'));
 

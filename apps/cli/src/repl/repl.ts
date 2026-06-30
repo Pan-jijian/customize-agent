@@ -4,9 +4,11 @@ import * as os from 'os';
 import type { Message } from '@customize-agent/types';
 import type { AgentEvent, AgentExecutor } from '../agent/executor.js';
 import { TuiInput } from '../tui/input.js';
-import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded, userMessageBlock, modeBadge, modeAccent } from '../tui/renderer.js';
+import { FileIndex } from '../tui/file-index.js';
+import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded, userMessageBlock, modeBadge, modeAccent, renderCommandMenu, renderFileDropdown, hintText, toolCallPending } from '../tui/renderer.js';
 import type { MemoryManager, MemoryType } from '@customize-agent/memory';
 import { BINARY_EXTENSIONS } from '@customize-agent/types';
+import { BuiltinTools } from '@customize-agent/tools';
 import type { ConfigStore, ModelRegistry, ModelTier } from '@customize-agent/runtime';
 import { resolveProtocol } from '@customize-agent/runtime';
 import type { I18nManager } from '../i18n/manager.js';
@@ -46,7 +48,12 @@ export class Repl {
   private i18n: I18nManager;
   private configStore: ConfigStore;
   private modelRegistry: ModelRegistry;
+  private builtinTools: BuiltinTools;
   private providerDisplay: string | undefined;
+  private commands: Array<{ name: string; desc: string }> = [];
+  private currentTaskAbort?: AbortController;
+  private taskRunning = false;
+  private pendingInputs: Array<{ content: string; display: string; rendered: boolean }> = [];
   private sessionId = `session-${Date.now()}`;
   private snapshots = new Map<number, WorkspaceSnapshot>();
 
@@ -57,6 +64,7 @@ export class Repl {
     this.i18n = config.i18n;
     this.configStore = config.configStore;
     this.modelRegistry = config.modelRegistry;
+    this.builtinTools = new BuiltinTools(config.projectRoot);
     this.providerDisplay = config.providerDisplay;
     this.history = [{ role: 'system', content: this.executor.getSystemPrompt() }];
     this._buildTui(config.commands);
@@ -77,7 +85,12 @@ export class Repl {
       }
 
       const enhanced = await this._resolveAtRefs(input);
-      await this._execute(enhanced);
+      if (this.taskRunning) {
+        this.pendingInputs.push({ content: enhanced, display: input, rendered: false });
+        this._renderPendingInputs({ redraw: false });
+        continue;
+      }
+      await this._runTaskQueue({ content: enhanced, display: input, rendered: false });
     }
 
     console.log('\n' + this.i18n.t('welcome.goodbye'));
@@ -135,11 +148,24 @@ export class Repl {
 
   // 任务执行
 
+  private _formatToolPreviewArg(args?: Record<string, unknown>): string {
+    if (!args) return '';
+    const val = args.path ?? args.query ?? args.pattern ?? args.filePath ?? args.command ?? args.input;
+    if (typeof val !== 'string' || val.length === 0) return '';
+    if (val.length <= 50) return val;
+    if (args.command || args.input) return val.slice(0, 47) + '...';
+    const parts = val.split('/');
+    if (parts.length > 2) return '…/' + parts.slice(-2).join('/');
+    return val.slice(0, 47) + '...';
+  }
+
   private _renderAgentEvent(event: AgentEvent): void {
     if (event.type === 'output') {
-      process.stdout.write(event.text);
+      this.tui.writeExternal(event.text);
     } else if (event.type === 'user_message') {
-      process.stdout.write(userMessageBlock(event.text, this.i18n.t('message.user')));
+      this.tui.writeExternal(userMessageBlock(event.text, this.i18n.t('message.user')).replace(/^\n/, ''));
+    } else if (event.type === 'tool_call_preview') {
+      this.tui.writeExternal(toolCallPending(event.toolName, 1, this._formatToolPreviewArg(event.args), event.elapsedMs, this.i18n.toolLabel(event.toolName)));
     }
   }
 
@@ -156,6 +182,12 @@ export class Repl {
 
     let buffer = '';
     let pos = 0;
+    let dd: 'none' | 'command' | 'file' = 'none';
+    let items: Array<{ label: string; detail?: string; data: string }> = [];
+    let sel = 0;
+    let fStart = -1;
+    let fEnd = -1;
+    const fileIndex = new FileIndex(this.root);
     let outputLineOpen = false;
     let statusLineActive = false;
     let inputLinesOnScreen = 0;
@@ -180,6 +212,52 @@ export class Repl {
       }
       process.stdout.write('\r\x1b[2K');
     };
+    const sizeOf = (rel: string) => {
+      try {
+        const stat = fs.statSync(path.join(this.root, rel));
+        if (stat.size < 1024) return `${stat.size}B`;
+        if (stat.size < 1024 * 1024) return `${Math.round(stat.size / 1024)}KB`;
+        return `${(stat.size / 1024 / 1024).toFixed(1)}MB`;
+      } catch { return ''; }
+    };
+    const resetDropdown = () => { dd = 'none'; items = []; sel = 0; fStart = -1; fEnd = -1; };
+    const syncDropdown = () => {
+      resetDropdown();
+      if (buffer.startsWith('/')) {
+        const firstSpace = buffer.indexOf(' ');
+        const commandEnd = firstSpace >= 0 ? firstSpace : buffer.length;
+        if (pos <= commandEnd) {
+          const p = buffer.slice(1, commandEnd).toLowerCase();
+          const m = this.commands
+            .filter(c => c.name.toLowerCase().includes(p))
+            .map(c => ({ label: c.name, detail: c.desc, data: c.name + ' ' }));
+          if (m.length) { dd = 'command'; items = m; fStart = 0; fEnd = commandEnd; }
+        }
+        return;
+      }
+      const at = buffer.lastIndexOf('@', pos - 1);
+      if (at < 0 || buffer[at + 1] === ' ') return;
+      const endOfWord = buffer.indexOf(' ', at + 1);
+      if (endOfWord >= 0 && endOfWord < pos) return;
+      const partial = buffer.slice(at + 1, pos).toLowerCase();
+      const matches = fileIndex.search(partial, 50);
+      if (matches.length) {
+        dd = 'file';
+        items = matches.map(f => ({ label: f, detail: sizeOf(f), data: '@' + f + ' ' }));
+        fStart = at;
+        fEnd = pos;
+      }
+    };
+    const applyDropdown = () => {
+      const item = items[sel];
+      if (!item) return false;
+      const end = fEnd >= 0 ? fEnd : buffer.length;
+      buffer = buffer.slice(0, fStart) + item.data + buffer.slice(end);
+      pos = fStart + item.data.length;
+      resetDropdown();
+      renderBuffer();
+      return true;
+    };
     const renderBuffer = () => {
       clearInputLine();
       if (outputLineOpen) {
@@ -192,7 +270,11 @@ export class Repl {
       const ch = buffer[pos] || ' ';
       const after = buffer.slice(pos + 1);
       const caret = s.inverse(ch);
-      const queuedLines = pending.flatMap(text => userMessageBlock(text, this.i18n.t('message.queued'), 'queued').trimEnd().split('\n'));
+      const queuedLines = pending.flatMap(text => {
+        const lines = userMessageBlock(text, this.i18n.t('message.queued'), 'queued').trimEnd().split('\n');
+        if (lines[0] === '') lines.shift();
+        return lines;
+      });
       const stats = this.executor.getContextStats();
       const pct = Math.round((stats.tokens / stats.limit) * 100);
       const statsLabel = stats.tokens > 0 ? `[${Math.round(stats.tokens / 1000)}K/${Math.round(stats.limit / 1000)}K ${pct}%]` : '';
@@ -209,10 +291,32 @@ export class Repl {
       const mid = `${t.subtle('│')} ${inputPrefix}${before}${caret}${after}${inputPad} ${t.subtle('│')}`;
       const bottom = t.subtle('╰' + '─'.repeat(inner) + '╯');
       const lines = [...queuedLines, top, mid, bottom];
+      const midIndex = queuedLines.length + 1;
+      if (dd !== 'none' && items.length) {
+        const ddPrefix = `${bar} `;
+        if (dd === 'command') {
+          for (const line of renderCommandMenu(
+            items.map((it, i) => ({ cmd: it.label, desc: it.detail ?? '', highlighted: i === sel })),
+            this.i18n.t('dropdown.commands_header'),
+          )) lines.push(ddPrefix + line);
+        } else {
+          for (const line of renderFileDropdown(
+            items.map((it, i) => ({ label: it.label, detail: it.detail, highlighted: i === sel })),
+            { header: this.i18n.t('dropdown.files_header'), more: (n: number) => this.i18n.t('dropdown.more', { count: String(n) }) },
+          )) lines.push(ddPrefix + line);
+        }
+        lines.push(ddPrefix + t.subtle(hintText({
+          tab: this.i18n.t('hint.tab'),
+          navigate: this.i18n.t('hint.navigate'),
+          confirm: this.i18n.t('hint.confirm'),
+          dismiss: this.i18n.t('hint.dismiss'),
+          sep: this.i18n.t('hint.sep'),
+        })));
+      }
       const cursorCol = 2 + prefixWidth + stringWidth(before);
-      process.stdout.write(`\r${lines.map((line, i) => `${i === 0 ? '' : '\n'}\x1b[2K${line}`).join('')}\x1b[1A\r\x1b[${Math.max(1, cursorCol)}C`);
+      process.stdout.write(`\r${lines.map((line, i) => `${i === 0 ? '' : '\n'}\x1b[2K${line}`).join('')}\x1b[${Math.max(0, lines.length - 1 - midIndex)}A\r\x1b[${Math.max(1, cursorCol)}C`);
       inputLinesOnScreen = lines.length;
-      inputCursorLineIndex = lines.length - 2;
+      inputCursorLineIndex = midIndex;
     };
     const clearStatusLine = () => {
       if (!statusLineActive) return;
@@ -256,6 +360,12 @@ export class Repl {
         return;
       }
       clearStatusLine();
+      if (outputLineOpen) {
+        process.stdout.write(text);
+        outputLineOpen = text.length > 0 && !text.endsWith('\n');
+        if (!outputLineOpen) renderBuffer();
+        return;
+      }
       clearBuffer();
       process.stdout.write(text);
       outputLineOpen = text.length > 0 && !text.endsWith('\n');
@@ -267,17 +377,23 @@ export class Repl {
         if (buffer) {
           buffer = '';
           pos = 0;
+          resetDropdown();
           renderBuffer();
           return;
         }
         writeOutput(t.warning(this.i18n.t('status.cancelled')) + '\n');
+        active = false;
+        process.stdin.removeListener('keypress', onKeypress);
+        clearInputLine();
         onCancel();
         return;
       }
       if (key?.name === 'return' || key?.name === 'enter') {
+        if (dd !== 'none' && applyDropdown()) return;
         const text = buffer.trim();
         buffer = '';
         pos = 0;
+        resetDropdown();
         clearStatusLine();
         clearBuffer();
         if (text) {
@@ -286,8 +402,21 @@ export class Repl {
         renderBuffer();
         return;
       }
+      if (key?.name === 'tab') {
+        if (dd !== 'none' && applyDropdown()) return;
+      }
+      if (key?.name === 'escape') {
+        if (dd !== 'none') { resetDropdown(); renderBuffer(); return; }
+      }
+      if (key?.name === 'up') {
+        if (dd !== 'none') { sel = Math.max(0, sel - 1); renderBuffer(); return; }
+      }
+      if (key?.name === 'down') {
+        if (dd !== 'none') { sel = Math.min(items.length - 1, sel + 1); renderBuffer(); return; }
+      }
       if (key?.name === 'left') {
         pos = Math.max(0, pos - 1);
+        syncDropdown();
         renderBuffer();
         return;
       }
@@ -301,33 +430,39 @@ export class Repl {
           buffer = buffer.slice(0, pos - 1) + buffer.slice(pos);
           pos--;
         }
+        syncDropdown();
         renderBuffer();
         return;
       }
       if (key?.name === 'delete') {
         if (pos < buffer.length) buffer = buffer.slice(0, pos) + buffer.slice(pos + 1);
+        syncDropdown();
         renderBuffer();
         return;
       }
       if (key?.ctrl && key.name === 'a') {
         pos = 0;
+        syncDropdown();
         renderBuffer();
         return;
       }
       if (key?.ctrl && key.name === 'e') {
         pos = buffer.length;
+        syncDropdown();
         renderBuffer();
         return;
       }
       if (key?.ctrl && key.name === 'u') {
         buffer = '';
         pos = 0;
+        resetDropdown();
         renderBuffer();
         return;
       }
       if (str && str >= ' ') {
         buffer = buffer.slice(0, pos) + str + buffer.slice(pos);
         pos += str.length;
+        syncDropdown();
         renderBuffer();
       }
     };
@@ -443,7 +578,32 @@ export class Repl {
     }
   }
 
-  private async _execute(input: string): Promise<void> {
+  private _renderPendingInputs(options: { redraw?: boolean } = {}): void {
+    this.tui.setPendingBlocks(this.pendingInputs.map(item => ({
+      text: item.display,
+      label: this.i18n.t('message.queued'),
+      variant: 'queued' as const,
+    })), options);
+  }
+
+  private async _runTaskQueue(input: { content: string; display: string; rendered: boolean }): Promise<void> {
+    this.taskRunning = true;
+    let next: { content: string; display: string; rendered: boolean } | undefined = input;
+    while (next) {
+      await this._execute(next.content, next.display, !next.rendered);
+      if (this.currentTaskAbort?.signal.aborted) {
+        this.pendingInputs.length = 0;
+        break;
+      }
+      next = this.pendingInputs.shift();
+      this._renderPendingInputs();
+    }
+    this.tui.setPendingBlocks([]);
+    this.currentTaskAbort = undefined;
+    this.taskRunning = false;
+  }
+
+  private async _execute(input: string, displayInput = input, renderUserMessage = true): Promise<void> {
     // 检查是否配置了模型
     const resolved = this.modelRegistry.resolve('action');
     if (!resolved) {
@@ -452,7 +612,37 @@ export class Repl {
       return;
     }
 
-    process.stdout.write('\r\x1b[2K' + userMessageBlock(input, this.i18n.t('message.user')));
+    if (renderUserMessage) this.tui.writeExternal(userMessageBlock(displayInput, this.i18n.t('message.user')));
+
+    const taskInput = this._captureInputDuringTask(() => {
+      this.currentTaskAbort?.abort();
+      this.pendingInputs.length = 0;
+    });
+    const drainTaskInput = () => taskInput.drain().map(text => ({ content: text, display: text }));
+    let toolPreviewTimer: ReturnType<typeof setInterval> | null = null;
+    let toolPreview: { toolName: string; args: Record<string, unknown>; startMs: number } | null = null;
+    const renderToolPreview = () => {
+      if (!toolPreview) return;
+      taskInput.writeOutput('\r' + toolCallPending(
+        toolPreview.toolName,
+        1,
+        this._formatToolPreviewArg(toolPreview.args),
+        Date.now() - toolPreview.startMs,
+        this.i18n.toolLabel(toolPreview.toolName),
+      ).trimEnd());
+    };
+    const stopToolPreview = () => {
+      if (toolPreviewTimer) clearInterval(toolPreviewTimer);
+      toolPreviewTimer = null;
+      if (toolPreview) taskInput.writeOutput('\r');
+      toolPreview = null;
+    };
+    const startToolPreview = (event: Extract<AgentEvent, { type: 'tool_call_preview' }>) => {
+      const startMs = Date.now() - (event.elapsedMs ?? 0);
+      toolPreview = { toolName: event.toolName, args: event.args, startMs };
+      renderToolPreview();
+      if (!toolPreviewTimer) toolPreviewTimer = setInterval(renderToolPreview, 100);
+    };
 
     let enhancedInput = input;
     if (this.memory) {
@@ -475,19 +665,28 @@ export class Repl {
     this.history.push({ role: 'user', content: enhancedInput });
 
     const abortController = new AbortController();
-    const taskInput = this._captureInputDuringTask(() => abortController.abort());
+    this.currentTaskAbort = abortController;
     try {
       const updated = await this.executor.runTask(this.history, {
         onEvent: event => {
-          if (event.type === 'approval_request') taskInput.pause();
-          if (event.type === 'output') taskInput.writeOutput(event.text);
-          else if (event.type === 'user_message') taskInput.writeOutput(userMessageBlock(event.text, this.i18n.t('message.user')));
-          else this._renderAgentEvent(event);
-          if (event.type === 'approval_response') taskInput.resume();
+          if (abortController.signal.aborted) return;
+          if (event.type === 'tool_call_preview') {
+            startToolPreview(event);
+            return;
+          }
+          if (event.type === 'approval_request') { stopToolPreview(); taskInput.pause(); return; }
+          if (event.type === 'approval_response') { taskInput.resume(); return; }
+          if (event.type === 'output') { stopToolPreview(); taskInput.writeOutput(event.text); }
+          else if (event.type === 'user_message') { stopToolPreview(); taskInput.writeOutput(userMessageBlock(event.text, this.i18n.t('message.user')).replace(/^\n/, '')); }
+          else { stopToolPreview(); this._renderAgentEvent(event); }
         },
-        drainUserInput: () => taskInput.drain(),
+        drainUserInput: () => drainTaskInput(),
         signal: abortController.signal,
       });
+      if (abortController.signal.aborted) {
+        this.history.pop();
+        return;
+      }
       this.history.length = 0;
       this.history.push(...updated);
 
@@ -499,10 +698,11 @@ export class Repl {
       }
     } catch (err) {
       if (!abortController.signal.aborted) {
-        process.stdout.write(msg.error((err as Error).message));
+        taskInput.writeOutput(msg.error((err as Error).message));
       }
       this.history.pop();
     } finally {
+      stopToolPreview();
       taskInput.stop();
     }
   }
@@ -513,6 +713,7 @@ export class Repl {
       readline.emitKeypressEvents(process.stdin);
       keypressInitialized = true;
     }
+    this.tui.suspend();
     let raw = false;
     if (process.stdin.isTTY) {
       try { process.stdin.setRawMode(true); raw = true; } catch { /* ignore */ }
@@ -558,6 +759,7 @@ export class Repl {
         clear();
         process.stdin.removeListener('keypress', onKey);
         if (raw) try { process.stdin.setRawMode(false); } catch { /* ignore */ }
+        this.tui.resume();
       };
       const onKey = (_str: string | undefined, key: readline.Key) => {
         if (key.name === 'up') { sel = Math.max(0, sel - 1); draw(); return; }
@@ -597,6 +799,23 @@ export class Repl {
       case '/resume': await this._resume(args); return false;
       case '/history': case '/sessions': await this._sessions(); return false;
       case '/reset': return this._command('/clear');
+      case '/web': await this._webCommand(args); return false;
+      case '/export': await this._exportCommand(args); return false;
+      case '/doctor': process.stdout.write(await this.builtinTools.doctor() + '\n\n'); return false;
+      case '/checkpoint': await this._checkpointCommand(args); return false;
+      case '/git': await this._gitCommand(args); return false;
+      case '/test': process.stdout.write(await this.builtinTools.runScript('test') + '\n\n'); return false;
+      case '/build': process.stdout.write(await this.builtinTools.runScript('build') + '\n\n'); return false;
+      case '/lint': process.stdout.write(await this.builtinTools.runScript('lint') + '\n\n'); return false;
+      case '/preview': await this._previewCommand(args); return false;
+      case '/file': await this._fileCommand(args); return false;
+      case '/zip': await this._zipCommand(args); return false;
+      case '/repo': process.stdout.write(await this.builtinTools.repoMap() + '\n\n'); return false;
+      case '/symbol': process.stdout.write(await this.builtinTools.symbolSearch(args) + '\n\n'); return false;
+      case '/deps': process.stdout.write(await this.builtinTools.dependencyGraph() + '\n\n'); return false;
+      case '/mcp': await this._mcpCommand(args); return false;
+      case '/plugin': await this._pluginCommand(args); return false;
+      case '/version': process.stdout.write(await this.builtinTools.version() + '\n\n'); return false;
 
       case '/compact': {
         const compacted = await this.executor.compactContext(this.history);
@@ -635,6 +854,10 @@ ${s.bold(this.i18n.t('help.title')) + ':'}
   ${t.accent('/language zh|en')} ${t.dim(this.i18n.t('help.language'))}
   ${t.accent('/model [name]')}  ${t.dim(this.i18n.t('help.model'))}
   ${t.accent('/provider <name>')}${t.dim(this.i18n.t('help.provider'))}
+  ${t.accent('/web search <q>')} ${t.dim(this.i18n.t('help.web'))}
+  ${t.accent('/export pdf <file>')} ${t.dim(this.i18n.t('help.export'))}
+  ${t.accent('/checkpoint')}    ${t.dim(this.i18n.t('help.checkpoint'))}
+  ${t.accent('/doctor')}        ${t.dim(this.i18n.t('help.doctor'))}
   ${t.accent('/help')}          ${t.dim(this.i18n.t('help.help'))}
   ${t.accent('/exit')}          ${t.dim(this.i18n.t('help.exit'))}
 
@@ -654,14 +877,41 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         this.history.push({ role: 'user', content: prompt });
         const abortController = new AbortController();
         const taskInput = this._captureInputDuringTask(() => abortController.abort());
+        let toolPreviewTimer: ReturnType<typeof setInterval> | null = null;
+        let toolPreview: { toolName: string; args: Record<string, unknown>; startMs: number } | null = null;
+        const renderToolPreview = () => {
+          if (!toolPreview) return;
+          taskInput.writeOutput('\r' + toolCallPending(
+            toolPreview.toolName,
+            1,
+            this._formatToolPreviewArg(toolPreview.args),
+            Date.now() - toolPreview.startMs,
+            this.i18n.toolLabel(toolPreview.toolName),
+          ).trimEnd());
+        };
+        const stopToolPreview = () => {
+          if (toolPreviewTimer) clearInterval(toolPreviewTimer);
+          toolPreviewTimer = null;
+          if (toolPreview) taskInput.writeOutput('\r');
+          toolPreview = null;
+        };
+        const startToolPreview = (event: Extract<AgentEvent, { type: 'tool_call_preview' }>) => {
+          toolPreview = { toolName: event.toolName, args: event.args, startMs: Date.now() - (event.elapsedMs ?? 0) };
+          renderToolPreview();
+          if (!toolPreviewTimer) toolPreviewTimer = setInterval(renderToolPreview, 100);
+        };
         try {
           const u = await this.executor.runTask(this.history, {
             readonly: true,
             onEvent: event => {
-              if (event.type === 'approval_request') taskInput.pause();
-              if (event.type === 'output') taskInput.writeOutput(event.text);
-              else if (event.type === 'user_message') taskInput.writeOutput(userMessageBlock(event.text, this.i18n.t('message.user')));
-              else this._renderAgentEvent(event);
+              if (event.type === 'tool_call_preview') {
+                startToolPreview(event);
+                return;
+              }
+              if (event.type === 'approval_request') { stopToolPreview(); taskInput.pause(); }
+              if (event.type === 'output') { stopToolPreview(); taskInput.writeOutput(event.text); }
+              else if (event.type === 'user_message') { stopToolPreview(); taskInput.writeOutput(userMessageBlock(event.text, this.i18n.t('message.user'))); }
+              else { stopToolPreview(); this._renderAgentEvent(event); }
               if (event.type === 'approval_response') taskInput.resume();
             },
             drainUserInput: () => taskInput.drain(),
@@ -674,6 +924,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
           }
           this.history.pop();
         } finally {
+          stopToolPreview();
           taskInput.stop();
         }
         const next = await this._selectList(this.i18n.t('plan.complete'), [
@@ -692,6 +943,76 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         process.stdout.write(t.warning(`${this.i18n.t('cmd.unknown')} ${cmd}. ${this.i18n.t('help.help')}: /help\n\n`));
         return false;
     }
+  }
+
+  private async _webCommand(args: string): Promise<void> {
+    const [sub, ...rest] = args.split(/\s+/);
+    const input = rest.join(' ');
+    if (sub === 'search' && input) process.stdout.write(await this.builtinTools.webSearch(input) + '\n\n');
+    else if (sub === 'fetch' && input) process.stdout.write((await this.builtinTools.webFetch(input)).slice(0, 6000) + '\n\n');
+    else process.stdout.write(t.warning('Usage: /web search <query> | /web fetch <url>\n\n'));
+  }
+
+  private async _exportCommand(args: string): Promise<void> {
+    const [kind, output = `export-${Date.now()}.md`] = args.split(/\s+/);
+    const content = this.history.filter(m => m.role !== 'system').map(m => `## ${m.role}\n\n${m.content}`).join('\n\n');
+    if (kind === 'json') process.stdout.write(await this.builtinTools.exportJson(output, this.history) + '\n\n');
+    else if (kind === 'html') process.stdout.write(await this.builtinTools.exportHtml(output, 'Session Export', content) + '\n\n');
+    else if (kind === 'pdf') process.stdout.write(await this.builtinTools.exportPdf(output, 'Session Export', content) + '\n\n');
+    else if (kind === 'session') process.stdout.write(await this.builtinTools.exportSession(output, this.history) + '\n\n');
+    else process.stdout.write(await this.builtinTools.exportMarkdown(output, content) + '\n\n');
+  }
+
+  private async _checkpointCommand(args: string): Promise<void> {
+    const [sub, name = `checkpoint-${Date.now()}`] = args.split(/\s+/);
+    if (sub === 'create') process.stdout.write(await this.builtinTools.checkpointCreate(name) + '\n\n');
+    else if (sub === 'restore') process.stdout.write(await this.builtinTools.checkpointRestore(name) + '\n\n');
+    else if (sub === 'delete') process.stdout.write(await this.builtinTools.checkpointDelete(name) + '\n\n');
+    else process.stdout.write(await this.builtinTools.checkpointList() + '\n\n');
+  }
+
+  private async _gitCommand(args: string): Promise<void> {
+    const sub = args.trim() || 'status';
+    const map: Record<string, string[]> = {
+      status: ['status', '--short'],
+      diff: ['diff'],
+      log: ['log', '--oneline', '-20'],
+      stash: ['stash', 'push'],
+    };
+    process.stdout.write(await this.builtinTools.git(map[sub] ?? ['status', '--short']) + '\n\n');
+  }
+
+  private async _previewCommand(args: string): Promise<void> {
+    const url = args.trim();
+    if (!url) { process.stdout.write(t.warning(this.i18n.t('cmd.usage_preview') + '\n\n')); return; }
+    process.stdout.write(await this.builtinTools.openPreview(url) + '\n\n');
+  }
+
+  private async _fileCommand(args: string): Promise<void> {
+    const [sub, file] = args.split(/\s+/);
+    if (!file) { process.stdout.write(t.warning('Usage: /file inspect <path> | /file text <path>\n\n')); return; }
+    if (sub === 'text') process.stdout.write(await this.builtinTools.extractText(file) + '\n\n');
+    else process.stdout.write(await this.builtinTools.inspectFile(file) + '\n\n');
+  }
+
+  private async _mcpCommand(args: string): Promise<void> {
+    const [sub, name, ...rest] = args.split(/\s+/).filter(Boolean);
+    if (sub === 'add' && name) process.stdout.write(await this.builtinTools.mcpAdd(name, rest.join(' ')) + '\n\n');
+    else if (sub === 'remove' && name) process.stdout.write(await this.builtinTools.mcpRemove(name) + '\n\n');
+    else if (sub === 'tools') process.stdout.write(await this.builtinTools.mcpTools(name) + '\n\n');
+    else process.stdout.write(await this.builtinTools.mcpList() + '\n\n');
+  }
+
+  private async _pluginCommand(args: string): Promise<void> {
+    const [sub, name] = args.split(/\s+/).filter(Boolean);
+    if (sub === 'install' && name) process.stdout.write(await this.builtinTools.pluginInstall(name) + '\n\n');
+    else process.stdout.write(await this.builtinTools.pluginList() + '\n\n');
+  }
+
+  private async _zipCommand(args: string): Promise<void> {
+    const [output, ...files] = args.split(/\s+/).filter(Boolean);
+    if (!output || !files.length) { process.stdout.write(t.warning('Usage: /zip <output.tar> <files...>\n\n')); return; }
+    process.stdout.write(await this.builtinTools.zipFiles(output, files) + '\n\n');
   }
 
   private async _rewind(args: string): Promise<void> {
@@ -956,13 +1277,31 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
       { name: '/model',    desc: this.i18n.t('help.model') },
       { name: '/provider', desc: this.i18n.t('help.provider') },
       { name: '/memory',   desc: this.i18n.t('help.memory') },
+      { name: '/web',      desc: this.i18n.t('help.web') },
+      { name: '/export',   desc: this.i18n.t('help.export') },
+      { name: '/doctor',   desc: this.i18n.t('help.doctor') },
+      { name: '/checkpoint', desc: this.i18n.t('help.checkpoint') },
+      { name: '/git',      desc: this.i18n.t('help.git') },
+      { name: '/test',     desc: this.i18n.t('help.test') },
+      { name: '/build',    desc: this.i18n.t('help.build') },
+      { name: '/lint',     desc: this.i18n.t('help.lint') },
+      { name: '/preview',  desc: this.i18n.t('help.preview') },
+      { name: '/file',     desc: this.i18n.t('help.file') },
+      { name: '/zip',      desc: this.i18n.t('help.zip') },
+      { name: '/repo',     desc: this.i18n.t('help.repo') },
+      { name: '/symbol',   desc: this.i18n.t('help.symbol') },
+      { name: '/deps',     desc: this.i18n.t('help.deps') },
+      { name: '/mcp',      desc: this.i18n.t('help.mcp') },
+      { name: '/plugin',   desc: this.i18n.t('help.plugin') },
+      { name: '/version',  desc: this.i18n.t('help.version') },
       { name: '/language', desc: this.i18n.t('help.language') },
       { name: '/help',     desc: this.i18n.t('help.help') },
       { name: '/exit',     desc: this.i18n.t('help.exit') },
     ];
+    this.commands = cmds ?? defaults;
     this.tui = new TuiInput({
       projectRoot: this.root,
-      commands: cmds ?? defaults,
+      commands: this.commands,
       labels: {
         filesHeader: this.i18n.t('dropdown.files_header'),
         commandsHeader: this.i18n.t('dropdown.commands_header'),
@@ -985,6 +1324,14 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
           return t.dim(this.i18n.t('think.no_content'));
         }
         return thinkingExpanded(content, this.i18n.t('think.box_title'));
+      },
+      onCancel: () => {
+        if (!this.currentTaskAbort || this.currentTaskAbort.signal.aborted) return false;
+        this.currentTaskAbort.abort();
+        this.pendingInputs.length = 0;
+        this.tui.setPendingBlocks([]);
+        this.tui.writeExternal(t.warning(this.i18n.t('status.cancelled')) + '\n');
+        return true;
       },
     });
   }

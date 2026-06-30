@@ -212,7 +212,9 @@ export class AnthropicProvider implements ILLMProvider {
                 case 'content_block_start': {
                   const cb = event.content_block;
                   if (cb?.type === 'tool_use' && cb.id) {
-                    toolCalls.push({ id: cb.id, name: cb.name ?? '', arguments: {} });
+                    const name = cb.name ?? '';
+                    toolCalls.push({ id: cb.id, name, arguments: {} });
+                    if (name) onChunk({ type: 'tool_call_preview', id: cb.id, name });
                   }
                   break;
                 }

@@ -21,6 +21,7 @@ export type AgentEvent =
   | { type: 'task_start' }
   | { type: 'task_done' }
   | { type: 'user_message'; text: string }
+  | { type: 'tool_call_preview'; toolName: string; args: Record<string, unknown>; elapsedMs?: number }
   | { type: 'approval_request'; toolName: string; args: Record<string, unknown> }
   | { type: 'approval_response'; toolName: string; approved: boolean };
 
@@ -28,7 +29,7 @@ export interface RunTaskOptions {
   readonly?: boolean;
   onWrite?: (text: string) => void;
   onEvent?: (event: AgentEvent) => void;
-  drainUserInput?: () => string[];
+  drainUserInput?: () => Array<string | { content: string; display: string }>;
   signal?: AbortSignal;
 }
 
@@ -173,11 +174,26 @@ export class AgentExecutor {
       this._write(`${t.faint(`[${fmt(totalPrompt)} ${pLabel} · ${fmt(totalCompletion)} ${oLabel} · ${lastRound} ${rLabel} · ${elapsed}]`)}\n`);
     };
 
+    const previewedToolCalls = new Set<string>();
+    const toolPreviewKeys = (tc: ToolCall) => [tc.name, tc.id].filter(Boolean);
+    const wasToolPreviewed = (tc: ToolCall) => toolPreviewKeys(tc).some(key => previewedToolCalls.has(key));
+    const markToolPreviewed = (tc: ToolCall) => {
+      for (const key of toolPreviewKeys(tc)) previewedToolCalls.add(key);
+    };
+    const emitToolCallPreview = (tc: ToolCall, elapsedMs = Date.now() - taskStartMs): boolean => {
+      if (wasToolPreviewed(tc)) return false;
+      markToolPreviewed(tc);
+      this._emit({ type: 'tool_call_preview', toolName: tc.name, args: tc.arguments, elapsedMs });
+      return true;
+    };
+
     const drainPendingUserInput = () => {
       const injectedInputs = options?.drainUserInput?.() ?? [];
       for (const injected of injectedInputs) {
-        this._emit({ type: 'user_message', text: injected });
-        working.push({ role: 'user', content: injected });
+        const content = typeof injected === 'string' ? injected : injected.content;
+        const display = typeof injected === 'string' ? injected : injected.display;
+        this._emit({ type: 'user_message', text: display });
+        working.push({ role: 'user', content });
       }
       return injectedInputs.length > 0;
     };
@@ -189,7 +205,8 @@ export class AgentExecutor {
       // ── 每轮主动检查上下文 ──
       await this._maybeCompact(working);
 
-      const response = await this._callLLM(working, tools, options?.signal);
+      const response = await this._callLLM(working, tools, options?.signal, emitToolCallPreview);
+      if (options?.signal?.aborted) break;
       // 累加 token（任务结束时统一输出一行汇总）
       if (response.usage) {
         this._lastPromptTokens = response.usage.promptTokens;
@@ -206,6 +223,8 @@ export class AgentExecutor {
       }
 
       // 同类工具折叠（参考 Claude Code collapseReadSearchGroups）
+      const previewedBeforeExecution = new Set(previewedToolCalls);
+      const wasPreviewedBeforeExecution = (tc: ToolCall) => toolPreviewKeys(tc).some(key => previewedBeforeExecution.has(key));
       let foldType = '';
       let foldCount = 0;
       let foldArgs: string[] = [];
@@ -224,10 +243,16 @@ export class AgentExecutor {
       };
 
       for (const tc of response.toolCalls) {
+        if (options?.signal?.aborted) break;
+        const previewElapsedMs = Date.now() - taskStartMs;
+        const wasPreviewed = wasPreviewedBeforeExecution(tc);
+        const renderedPreview = emitToolCallPreview(tc, previewElapsedMs);
+        const skipStartRender = wasPreviewed || renderedPreview;
+        let preApproved = false;
         if (tc.name === foldType) {
           foldCount++;
           foldArgs.push(this._formatArg(tc.arguments));
-          if (this.stream) {
+          if (this.stream && !skipStartRender) {
             this._write(toolCallFolding(tc.name, foldCount, foldArgs[foldArgs.length - 1]!, Date.now() - foldStartMs, toolLabel(tc.name), toolsLabel));
           }
         } else {
@@ -237,24 +262,28 @@ export class AgentExecutor {
           foldArgs = [this._formatArg(tc.arguments)];
           foldTotalMs = 0;
           foldStartMs = Date.now();
-          if (this.stream) {
-            this._write(toolCallFolding(tc.name, 1, foldArgs[0]!, 0, toolLabel(tc.name), toolsLabel));
+          if (this.stream && !skipStartRender) {
+            this._write(toolCallFolding(tc.name, 1, foldArgs[0]!, previewElapsedMs, toolLabel(tc.name), toolsLabel));
           }
         }
-        let toolTimer: NodeJS.Timeout | undefined;
-        if (this.stream) {
-          toolTimer = setInterval(() => {
-            this._write(toolCallFolding(tc.name, foldCount, foldArgs[foldArgs.length - 1]!, Date.now() - foldStartMs, toolLabel(tc.name), toolsLabel));
-          }, 250);
+        if (this.permissionEngine?.check(tc.name, tc.arguments) === 'ask' && this.approvalHandler) {
+          this._emit({ type: 'approval_request', toolName: tc.name, args: tc.arguments });
+          const ok = await this.approvalHandler(tc.name, tc.arguments);
+          this._emit({ type: 'approval_response', toolName: tc.name, approved: ok });
+          if (options?.signal?.aborted) break;
+          if (!ok) {
+            const label = toolLabel(tc.name);
+            const msg = this.i18n?.t('executor.user_cancelled', { label }) ?? `[Cancelled] ${label}`;
+            working.push({ role: 'tool', content: msg, toolCallId: tc.id });
+            continue;
+          }
+          preApproved = true;
         }
         let result = '';
         let duration = 0;
-        try {
-          ({ result, duration } = await this._executeTool(tc, options?.signal));
-        } finally {
-          if (toolTimer) clearInterval(toolTimer);
-        }
-        if (this.stream) {
+        ({ result, duration } = await this._executeTool(tc, options?.signal, preApproved));
+        if (options?.signal?.aborted) break;
+        if (this.stream && !skipStartRender) {
           this._write(toolCallFolding(tc.name, foldCount, foldArgs[foldArgs.length - 1]!, Date.now() - foldStartMs, toolLabel(tc.name), toolsLabel));
         }
         foldTotalMs += duration;
@@ -262,7 +291,8 @@ export class AgentExecutor {
         if (tc.name === 'write_file' && result) foldDiff = result;
         working.push({ role: 'tool', content: result, toolCallId: tc.id });
       }
-      flushFold();
+      if (!options?.signal?.aborted) flushFold();
+      if (options?.signal?.aborted) break;
 
       if (this.controller) {
         const lastTc = response.toolCalls[response.toolCalls.length - 1]!;
@@ -277,7 +307,7 @@ export class AgentExecutor {
       }
     }
 
-    showTokenSummary();
+    if (!options?.signal?.aborted) showTokenSummary();
     return working;
   } finally {
     this._emit({ type: 'task_done' });
@@ -310,9 +340,10 @@ export class AgentExecutor {
     messages: Message[],
     tools: FunctionDefinition[],
     signal?: AbortSignal,
+    onToolCall?: (tc: ToolCall) => void,
   ): Promise<{ content: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } }> {
     const opts = { tools, signal };
-    if (this.stream) return this._streamChat(messages, tools, signal);
+    if (this.stream) return this._streamChat(messages, tools, signal, onToolCall);
     const spin = spinnerStart(this.i18n?.t('stream.thinking'), text => this._write(text));
     const response = await this.provider.chat(messages, { ...opts });
     spin.stop();
@@ -325,6 +356,7 @@ export class AgentExecutor {
     messages: Message[],
     tools: FunctionDefinition[],
     signal?: AbortSignal,
+    onToolCall?: (tc: ToolCall) => void,
   ): Promise<{ content: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } }> {
     let content = '';
     const toolCalls: ToolCall[] = [];
@@ -416,8 +448,12 @@ export class AgentExecutor {
           thinkTokens += Math.ceil(chunk.text.length / 4);
           think.thinkTick(Date.now() - thinkStartMs, thinkTokens, extractThinkingSubtitle(this._lastThinkingContent));
           break;
+        case 'tool_call_preview':
+          onToolCall?.({ id: chunk.id, name: chunk.name, arguments: {} });
+          break;
         case 'tool_call':
           toolCalls.push(chunk.call);
+          onToolCall?.(chunk.call);
           break;
         case 'reset':
           if (thinkActive) { think.stop(); thinkActive = false; }
@@ -450,13 +486,13 @@ export class AgentExecutor {
     return { content, toolCalls: toolCalls.length > 0 ? toolCalls : undefined, usage: response.usage };
   }
 
-  private async _executeTool(tc: ToolCall, signal?: AbortSignal): Promise<{ result: string; duration: number }> {
+  private async _executeTool(tc: ToolCall, signal?: AbortSignal, preApproved = false): Promise<{ result: string; duration: number }> {
     const name = tc.name;
     const args = tc.arguments;
     const label = this.i18n?.toolLabel(name) ?? name;
 
     // 权限检查
-    if (this.permissionEngine) {
+    if (!preApproved && this.permissionEngine) {
       const perm = this.permissionEngine.check(name, args);
       if (perm === 'deny') {
         const msg = this.i18n?.t('executor.security_policy_deny', { label }) ?? `[Denied] ${label}`;
@@ -481,7 +517,11 @@ export class AgentExecutor {
     const toolStart = Date.now();
     try {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      const result = await this.registry.dispatch(name, args, { signal });
+      const abortPromise = signal ? new Promise<string>((_, reject) => {
+        if (signal.aborted) reject(new DOMException('Aborted', 'AbortError'));
+        else signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+      }) : undefined;
+      const result = await (abortPromise ? Promise.race([this.registry.dispatch(name, args, { signal }), abortPromise]) : this.registry.dispatch(name, args, { signal }));
       const duration = Date.now() - toolStart;
       this.controller?.recordToolCall(name, args, result);
 
@@ -493,6 +533,9 @@ export class AgentExecutor {
     } catch (err) {
       const errMsg = (err as Error).message;
       const duration = Date.now() - toolStart;
+      if (signal?.aborted || (err as Error).name === 'AbortError' || /SIGINT|User interruption|CTRL-C|aborted/i.test(errMsg)) {
+        return { result: this.i18n?.t('status.cancelled') ?? 'Cancelled', duration };
+      }
       this.controller?.recordToolCall(name, args, this.i18n?.t('executor.exception', { msg: errMsg }) ?? `[Exception]: ${errMsg}`);
       return { result: `[${label}]: ${(this.i18n?.t('common.error') ?? 'Error')} - ${errMsg}`, duration };
     }
