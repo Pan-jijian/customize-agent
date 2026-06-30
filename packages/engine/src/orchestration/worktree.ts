@@ -59,13 +59,19 @@ export class SafeWorktreeManager {
   async createWorktree(subagentId: string): Promise<WorktreeContext> {
     await this._acquireLock();
     try {
-      const branch = `agent/${subagentId}-${Date.now()}`;
-      const worktreePath = path.join(this.tempDir, branch);
+      const safeId = subagentId.replace(/[^a-zA-Z0-9._-]/g, '-');
+      const branch = `agent/${safeId}-${Date.now()}`;
+      const worktreePath = path.join(this.tempDir, safeId, String(Date.now()));
 
       await fs.mkdir(this.tempDir, { recursive: true });
 
-      // 基于当前 HEAD 创建临时分支
-      await execa({ cwd: this.projectRoot, reject: false })`git branch ${branch}`;
+      const insideWorktree = await execa({ cwd: this.projectRoot, reject: false })`git rev-parse --is-inside-work-tree`;
+      if (insideWorktree.exitCode !== 0 || insideWorktree.stdout.trim() !== 'true') {
+        throw new Error('SafeWorktreeManager requires a Git worktree');
+      }
+
+      // 基于当前 HEAD 创建临时分支和隔离 worktree
+      await execa({ cwd: this.projectRoot })`git branch ${branch}`;
       await execa({ cwd: this.projectRoot })`git worktree add ${worktreePath} ${branch}`;
 
       return { path: worktreePath, branch, subagentId };
@@ -105,11 +111,20 @@ export class SafeWorktreeManager {
   async safeMerge(context: WorktreeContext): Promise<{ success: boolean; conflicts: string[] }> {
     await this._acquireLock();
     try {
+      const status = await execa({ cwd: context.path, reject: false })`git status --porcelain`;
+      if (status.stdout.trim()) {
+        await execa({ cwd: context.path, reject: false })`git add -A`;
+        const commit = await execa({ cwd: context.path, reject: false })`git commit -m ${`agent: ${context.subagentId}`}`;
+        if (commit.exitCode !== 0) {
+          throw new Error(commit.stderr || commit.stdout || 'git commit failed in worktree');
+        }
+      }
+
       // 合并临时分支到当前分支
       const result = await execa({
         cwd: this.projectRoot,
         reject: false,
-      })`git merge ${context.branch}`;
+      })`git merge --no-ff ${context.branch}`;
 
       if (result.exitCode === 0) {
         return { success: true, conflicts: [] };

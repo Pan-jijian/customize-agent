@@ -1,4 +1,4 @@
-import { type Capability, type SubagentRole, roleHasCapability, TOOL_CAPABILITY_MAP } from './capability.js';
+import { Capability, type SubagentRole, roleHasCapability, TOOL_CAPABILITY_MAP } from './capability.js';
 
 /** 权限判定结果 */
 export type Permission = 'allow' | 'deny' | 'ask';
@@ -185,6 +185,7 @@ export class PermissionEngine {
 
   /** 获取工具对应的 Capability */
   private _getToolCapability(toolName: string): Capability[] {
+    if (toolName.startsWith('mcp_')) return [Capability.MCP_EXTERNAL];
     return TOOL_CAPABILITY_MAP[toolName] ?? [];
   }
 

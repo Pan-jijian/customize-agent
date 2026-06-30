@@ -62,7 +62,7 @@ Output ONLY the following JSON structure (no markdown wrapping):
     {
       "id": 1,
       "description": "具体做什么",
-      "tool": "modify_file 或 execute_command",
+      "tool": "edit_file/write_file 或 execute_command",
       "file": "目标文件路径",
       "expectedOutcome": "预期结果",
       "dependsOn": [],
