@@ -1,5 +1,24 @@
 # @customize-agent/engine
 
+## 1.0.2
+
+### Patch Changes
+
+- 修复并优化：
+
+  - **CLI**: 修复 TUI 多行输入、粘贴模式和渲染问题；修复 task-input-capture 逻辑
+  - **Tools**: 新增跨平台抽象层（Shell、进程管理、二进制解析）；修复 archiver 类型声明；修复 shell-tools floating promise 和 process cleanup 警告
+  - **Engine**: 新增 Git Worktree / Snapshot 隔离策略；修复 Orchestrator 编排逻辑；增强权限引擎
+  - **Search**: 修复 LSP Manager；优化 grep 搜索
+  - **Types**: 新增统一错误类型定义
+  - **Runtime**: 修复遥测审计日志
+  - 所有包: 消除 lint 警告，通过 typecheck
+
+- Updated dependencies
+  - @customize-agent/tools@1.0.2
+  - @customize-agent/llm@1.0.2
+  - @customize-agent/types@1.0.2
+
 ## 1.0.1
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/engine",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Agent 引擎 — 工具注册、权限控制、执行调度、子智能体编排",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/search",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "代码智能 — tree-sitter 索引、ripgrep 搜索、LSP、语义理解",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

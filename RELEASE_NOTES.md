@@ -1,7 +1,7 @@
-# Customize Agent v1.0 — 发行说明
+# Customize Agent v1.0.3 — 发行说明
 
-> 🎉 通用终端 AI 助手首次公开发布
-> 发布日期：2025-06-30
+> 🎉 通用终端 AI 助手 — 跨平台抽象层、子智能体隔离、CI/CD 自动化发布
+> 发布日期：2026-06-30
 
 ---
 
@@ -48,19 +48,29 @@
 
 | 项目 | 信息 |
 |------|------|
-| 版本号 | **v1.0.2** |
-| 代号 | 🎉 Initial Public Release |
-| 发布类型 | 首次公开发布 |
+| 版本号 | **v1.0.3** |
+| 代号 | 🔧 跨平台抽象层 + 子智能体隔离 |
+| 发布类型 | 功能增强 + 质量修复 |
 | Node.js 要求 | >= 18（推荐 22 LTS） |
 | 包管理器 | pnpm 10+（开发）/ npm（用户安装） |
 | CLI 命令 | `customize` |
 | npm 包名 | `customize-agent` |
 
+### 本次更新亮点（v1.0.3）
+
+| 类别 | 更新内容 |
+|------|---------|
+| **跨平台抽象层** | 新增 Shell 命令翻译（Windows CMD/PowerShell 自动适配）、进程管理、二进制路径解析（`packages/tools/src/core/platform/`） |
+| **子智能体隔离** | 新增 Git Worktree 隔离 和 内存快照隔离 两种策略，子 Agent 可在完全独立的文件系统中运行 |
+| **TUI 多行输入** | 修复多行粘贴、输入渲染问题，优化按键处理 |
+| **代码质量** | 消除全部 lint 警告和 typecheck 错误，ESLint 0 warning |
+| **CI/CD** | 完善 Changesets 版本管理 + Release 自动发布流程 |
+
 ### npm 包清单（8 个包）
 
 | # | npm 包名 | 版本 | 说明 |
 |---|------|:--:|------|
-| 1 | `customize-agent` | 1.0.2 | 🎯 **主程序** — `npx customize-agent` 安装，`customize` 启动 |
+| 1 | `customize-agent` | 1.0.3 | 🎯 **主程序** — `npx customize-agent` 安装，`customize` 启动 |
 | 2 | `@customize-agent/types` | 1.0.1 | 跨包类型契约层，零外部依赖 |
 | 3 | `@customize-agent/llm` | 1.0.1 | AI 模型提供商 — 6 个 Provider，统一接口 |
 | 4 | `@customize-agent/tools` | 1.0.1 | Agent 工具集 — 50+ 内置工具，沙箱执行 |
@@ -409,7 +419,7 @@ customize
 #### 方式三：指定版本安装
 
 ```bash
-npm install -g customize-agent@1.0.2
+npm install -g customize-agent@1.0.3
 ```
 
 #### 验证安装
@@ -423,7 +433,7 @@ customize --help
 ```
 Usage: customize [options] [command]
 
-Customize Agent v1.0.2 — interactive REPL
+Customize Agent v1.0.3 — interactive REPL
 
 Options:
   -p, --prompt <text>  Single-shot execution mode
@@ -455,7 +465,7 @@ customize
 │     █  █ █  █    █ █  █ █  █           │
 │      ██   ███  ███  ████  ███           │
 │                                          │
-│               v1.0.2                     │
+│               v1.0.3                     │
 │        Provider  No model configured     │
 │                                          │
 │    ▶  输入任务开始  @ 引用文件  / 命令    │
@@ -995,7 +1005,7 @@ customize mcp-server
 
 | # | 包名 | npm 上名称 | 版本 | 内部依赖 | 发布状态 |
 |---|------|------|:--:|------|:--:|
-| 1 | CLI | `customize-agent` | 1.0.2 | engine, llm, memory, runtime, search, tools, types | ✅ |
+| 1 | CLI | `customize-agent` | 1.0.3 | engine, llm, memory, runtime, search, tools, types | ✅ |
 | 2 | Engine | `@customize-agent/engine` | 1.0.1 | llm, types | ✅ |
 | 3 | LLM | `@customize-agent/llm` | 1.0.1 | types | ✅ |
 | 4 | Tools | `@customize-agent/tools` | 1.0.1 | search | ✅ |
