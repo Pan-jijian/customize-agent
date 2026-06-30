@@ -184,20 +184,26 @@ export function welcomeBanner(version: string, provider: string, opts?: {
 export function renderFileDropdown(
   items: Array<{ label: string; detail?: string; highlighted: boolean }>,
   labels: { header: string; more: (n: number) => string },
-  maxH = 8,
+  maxH = 10,
   w?: number,
 ): string[] {
   if (!items.length) return [];
   const width = Math.min((w ?? tw()) - 8, 64);
-  const vis = items.slice(0, maxH);
+  const selected = Math.max(0, items.findIndex(i => i.highlighted));
+  const start = Math.max(0, Math.min(selected - Math.floor(maxH / 2), items.length - maxH));
+  const vis = items.slice(start, start + maxH);
   const out: string[] = [];
 
   out.push(t.subtle('╭') + t.subtle('─'.repeat(2)) + ' ' + s.bold(t.purple(labels.header)) + ' ' + t.subtle('─'.repeat(Math.max(0, width - 5 - visibleLen(labels.header)))) + t.subtle('╮'));
   for (const it of vis) {
     const mark = it.highlighted ? t.accent('▸') : ' ';
-    const name = it.highlighted ? t.selected(` ${it.label} `) : t.text(` ${it.label} `);
-    const extra = it.detail ? ' ' + t.faint(it.detail) : '';
-    const rpad = Math.max(0, width - 4 - visibleLen(it.label) - (it.detail ? 1 + it.detail.length : 0));
+    const detailW = it.detail ? Math.min(12, visibleLen(it.detail)) : 0;
+    const labelW = Math.max(8, width - 6 - detailW);
+    const clippedLabel = clipAnsiSafe(it.label, labelW);
+    const clippedDetail = it.detail ? clipAnsiSafe(it.detail, detailW) : '';
+    const name = it.highlighted ? t.selected(` ${clippedLabel} `) : t.text(` ${clippedLabel} `);
+    const extra = clippedDetail ? ' ' + t.faint(clippedDetail) : '';
+    const rpad = Math.max(0, width - 4 - visibleLen(clippedLabel) - (clippedDetail ? 1 + visibleLen(clippedDetail) : 0));
     out.push(t.subtle(B.v) + ` ${mark} ${name}${extra}${' '.repeat(rpad)} ` + t.subtle(B.v));
   }
   if (items.length > maxH) {
@@ -213,17 +219,24 @@ export function renderCommandMenu(
   items: Array<{ cmd: string; desc: string; highlighted: boolean }>,
   header: string,
   w?: number,
+  maxH = 10,
 ): string[] {
   if (!items.length) return [];
   const width = Math.min((w ?? tw()) - 8, 52);
+  const selected = Math.max(0, items.findIndex(i => i.highlighted));
+  const start = Math.max(0, Math.min(selected - Math.floor(maxH / 2), items.length - maxH));
+  const vis = items.slice(start, start + maxH);
   const out: string[] = [];
 
   out.push(t.subtle('╭') + t.subtle('─'.repeat(2)) + ' ' + s.bold(t.purple(header)) + ' ' + t.subtle('─'.repeat(Math.max(0, width - 5 - visibleLen(header)))) + t.subtle('╮'));
-  for (const it of items) {
+  for (const it of vis) {
     const mark = it.highlighted ? t.accent('▸') : ' ';
-    const cmd = it.highlighted ? t.accent(it.cmd.padEnd(14)) : t.dim(it.cmd.padEnd(14));
-    const desc = it.highlighted ? t.text(it.desc) : t.faint(it.desc);
-    const rpad = Math.max(0, width - 18 - visibleLen(it.desc));
+    const rawCmd = clipAnsiSafe(it.cmd, 14);
+    const rawDesc = clipAnsiSafe(it.desc, Math.max(8, width - 20));
+    const cmdText = rawCmd + ' '.repeat(Math.max(0, 14 - visibleLen(rawCmd)));
+    const cmd = it.highlighted ? t.accent(cmdText) : t.dim(cmdText);
+    const desc = it.highlighted ? t.text(rawDesc) : t.faint(rawDesc);
+    const rpad = Math.max(0, width - 18 - visibleLen(rawDesc));
     out.push(t.subtle(B.v) + ` ${mark} ${cmd}${desc}${' '.repeat(rpad)} ` + t.subtle(B.v));
   }
   out.push(t.subtle('╰' + '─'.repeat(width) + '╯'));
@@ -266,8 +279,15 @@ export function toolCallEnd(status: 'success' | 'error', detail?: string, durati
 export function toolCallFolding(toolName: string, count: number, latest: string, elapsedMs?: number, label?: string, toolsLabel = 'tools'): string {
   const countText = count > 1 ? ` ${t.subtle(`· ${count} ${toolsLabel}`)}` : '';
   const argsStr = latest ? ` ${t.subtle('·')} ${t.dim(latest.slice(0, 60))}` : '';
-  const dur = elapsedMs ? t.subtle(` ${formatDuration(elapsedMs)}`) : '';
+  const dur = elapsedMs !== undefined ? t.subtle(` ${formatDuration(elapsedMs)}`) : '';
   return `\r\x1b[2K${toolTitle(toolName, label)}${countText}${argsStr}${dur}\r`;
+}
+
+export function toolCallPending(toolName: string, count: number, latest: string, elapsedMs?: number, label?: string, toolsLabel = 'tools'): string {
+  const countText = count > 1 ? ` ${t.subtle(`· ${count} ${toolsLabel}`)}` : '';
+  const argsStr = latest ? ` ${t.subtle('·')} ${t.dim(latest.slice(0, 60))}` : '';
+  const dur = elapsedMs !== undefined ? t.subtle(` ${formatDuration(elapsedMs)}`) : '';
+  return `${toolTitle(toolName, label)}${countText}${argsStr}${dur}\n`;
 }
 
 /** 同类工具折叠 — 完成摘要，write_file 时附带 diff 预览 */
@@ -386,8 +406,9 @@ export function thinkingSpinner(tipPool: string[] = [], write: (text: string) =>
   let state: { elapsedMs: number; tokens: number; subtitle: string } = { elapsedMs: 0, tokens: 0, subtitle: '' };
   let interval: ReturnType<typeof setInterval> | null = null;
   let done = false;
-  let linesOnScreen = 0; // 0 或 2
+  let linesOnScreen = 0; // 0 或 1
   let currentTip = '';
+  let startMs = 0;
 
   const pickTip = () => {
     currentTip = tipPool.length > 0 ? tipPool[Math.floor(Math.random() * tipPool.length)]! : '';
@@ -403,7 +424,8 @@ export function thinkingSpinner(tipPool: string[] = [], write: (text: string) =>
   const redraw = () => {
     if (done || linesOnScreen === 0) return;
     const frame = SPIN[idx % SPIN.length]!;
-    const elapsed = formatTime(state.elapsedMs);
+    const elapsedMs = startMs > 0 ? Date.now() - startMs : state.elapsedMs;
+    const elapsed = formatTime(elapsedMs);
     const tok = formatTokens(state.tokens);
     const sub = state.subtitle || currentTip || '';
     const line = thinkingLive(frame, elapsed, tok, sub, labels).split('\n')[0]!;
@@ -413,6 +435,7 @@ export function thinkingSpinner(tipPool: string[] = [], write: (text: string) =>
   return {
     thinkStart: () => {
       idx = 0;
+      startMs = Date.now();
       state = { elapsedMs: 0, tokens: 0, subtitle: '' };
       done = false;
       pickTip();
@@ -735,22 +758,146 @@ export function renderInlineMarkdown(text: string): string {
 const TOOL_COLOR: Record<string, (s: string) => string> = {
   read_file: t.blue,
   list_files: t.blue,
+  stat_file: t.blue,
+  tree: t.blue,
+  glob: t.blue,
+  inspect_file: t.blue,
+  extract_text: t.blue,
+  extract_pdf_text: t.blue,
+  extract_docx_text: t.blue,
+  extract_xlsx_data: t.blue,
+  video_metadata: t.blue,
+  repo_map: t.purple,
+  symbol_search: t.purple,
+  dependency_graph: t.purple,
+  detect_package_manager: t.blue,
   search: t.purple,
   lsp_definition: t.purple,
   lsp_references: t.purple,
   lsp_diagnostics: t.purple,
+  web_search: t.accent,
+  web_fetch: t.accent,
+  download_file: t.accent,
+  browser_open: t.accent,
   write_file: t.accent,
+  edit_file: t.accent,
+  multi_edit: t.accent,
+  delete_file: t.error,
+  move_file: t.accent,
+  copy_file: t.accent,
+  mkdir: t.accent,
+  export_markdown: t.success,
+  export_json: t.success,
+  export_html: t.success,
+  export_pdf: t.success,
+  export_session: t.success,
+  export_patch: t.success,
+  zip_files: t.success,
+  checkpoint_create: t.success,
+  checkpoint_list: t.blue,
+  checkpoint_restore: t.warning,
+  checkpoint_delete: t.error,
   execute_command: t.warning,
+  run_background: t.warning,
+  check_command: t.blue,
+  stop_command: t.error,
+  run_test: t.warning,
+  run_build: t.warning,
+  run_lint: t.warning,
+  open_preview: t.accent,
   git_commit: t.success,
+  git_status: t.success,
+  git_diff: t.success,
+  git_log: t.success,
+  git_stash: t.warning,
+  git_apply_patch: t.warning,
+  git_create_patch: t.success,
+  ocr_image: t.purple,
+  transcribe_audio: t.purple,
+  convert_file: t.warning,
+  compress_image: t.warning,
+  generate_thumbnail: t.warning,
+  doctor: t.blue,
+  version: t.blue,
+  tool_health: t.blue,
+  todo_write: t.success,
+  mcp_list: t.purple,
+  mcp_add: t.warning,
+  mcp_remove: t.error,
+  mcp_tools: t.purple,
+  plugin_list: t.purple,
+  plugin_install: t.warning,
 };
 
 const TOOL_ICON: Record<string, string> = {
   read_file: '◰',
   list_files: '▤',
+  stat_file: 'ℹ',
+  tree: '┬',
+  glob: '⌁',
+  inspect_file: '◉',
+  extract_text: '▣',
+  extract_pdf_text: '📄',
+  extract_docx_text: '📃',
+  extract_xlsx_data: '▦',
+  video_metadata: '▶',
+  repo_map: '⌂',
+  symbol_search: '⌘',
+  dependency_graph: '⟡',
+  detect_package_manager: '◫',
   search: '⌕',
+  web_search: '🌐',
+  web_fetch: '↧',
+  download_file: '⇩',
+  browser_open: '↗',
   write_file: '✎',
+  edit_file: '✐',
+  multi_edit: '✐',
+  delete_file: '✕',
+  move_file: '↦',
+  copy_file: '⧉',
+  mkdir: '⊕',
+  export_markdown: '▤',
+  export_json: '◈',
+  export_html: '◇',
+  export_pdf: '📄',
+  export_session: '⇪',
+  export_patch: 'Δ',
+  zip_files: '▣',
+  checkpoint_create: '●',
+  checkpoint_list: '○',
+  checkpoint_restore: '↶',
+  checkpoint_delete: '⊗',
   execute_command: '⌘',
+  run_background: '◷',
+  check_command: '◴',
+  stop_command: '■',
+  run_test: '✓',
+  run_build: '▲',
+  run_lint: '⚑',
+  open_preview: '◌',
   git_commit: '⑂',
+  git_status: '⑂',
+  git_diff: 'Δ',
+  git_log: '⑂',
+  git_stash: '⇥',
+  git_apply_patch: 'Δ',
+  git_create_patch: 'Δ',
+  ocr_image: '◍',
+  transcribe_audio: '♪',
+  convert_file: '⇄',
+  compress_image: '▣',
+  generate_thumbnail: '▧',
+  doctor: '✚',
+  version: '◷',
+  tool_health: '✚',
+  todo_write: '☑',
+  mcp_list: '◬',
+  mcp_add: '⊕',
+  mcp_remove: '⊖',
+  mcp_tools: '◬',
+  plugin_list: '◧',
+  plugin_install: '⊞',
   lsp_definition: '◇',
   lsp_references: '◇',
   lsp_diagnostics: '◇',
@@ -820,5 +967,16 @@ export function approvalBox(toolName: string, label: string, detail?: string, la
 /** 字符串可见宽度（去除 ANSI 转义序列，CJK/全角字符计为 2 列） */
 function visibleLen(s: string): number {
   return stringWidth(s);
+}
+
+function clipAnsiSafe(text: string, maxWidth: number): string {
+  if (maxWidth <= 1) return '';
+  if (visibleLen(text) <= maxWidth) return text;
+  let out = '';
+  for (const ch of text) {
+    if (visibleLen(out + ch) > maxWidth - 1) return out + '…';
+    out += ch;
+  }
+  return out;
 }
 

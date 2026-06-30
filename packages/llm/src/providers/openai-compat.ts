@@ -96,6 +96,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
         let content = '';
         this._thinkingContent = '';
         const toolCallAccum = new Map<number, { id: string; name: string; args: string }>();
+        const previewedToolCalls = new Set<number>();
         let promptTokens = 0;
         let completionTokens = 0;
 
@@ -120,6 +121,10 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
               const acc = toolCallAccum.get(tc.index) ?? { id: '', name: '', args: '' };
               if (tc.id) acc.id = tc.id;
               if (tc.function?.name) acc.name = tc.function.name;
+              if (acc.name && !previewedToolCalls.has(tc.index)) {
+                previewedToolCalls.add(tc.index);
+                onChunk({ type: 'tool_call_preview', id: acc.id || `call_${tc.index}`, name: acc.name });
+              }
               if (tc.function?.arguments) acc.args += tc.function.arguments;
               toolCallAccum.set(tc.index, acc);
             }

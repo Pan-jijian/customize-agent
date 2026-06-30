@@ -46,6 +46,7 @@ export interface ToolCall {
 export type StreamChunk =
   | { type: 'content'; text: string }
   | { type: 'thinking'; text: string }
+  | { type: 'tool_call_preview'; id: string; name: string }
   | { type: 'tool_call'; call: ToolCall }
   | { type: 'error'; message: string }
   | { type: 'reset' }
