@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { fileURLToPath } from 'url';
+import { readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
@@ -11,14 +12,16 @@ import { type Message } from '@customize-agent/types';
 import { I18nManager } from './i18n/manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
-const PROJECT_ROOT = resolve(dirname(__filename), '../../..');
+const __dirname = dirname(__filename);
+const PROJECT_ROOT = resolve(__dirname, '../../..');
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
 
 const program = new Command();
 const configStore = new ConfigStore();
 
 program
   .name('customize-agent')
-  .description('Customize Agent v0.0.3 — interactive REPL')
+  .description(`Customize Agent v${pkg.version} — interactive REPL`)
   .option('-p, --prompt <text>', 'Single-shot execution mode')
   .option('--plan', 'Plan mode: read-only exploration (requires -p)');
 
@@ -49,7 +52,7 @@ program.action(async () => {
       console.log(`\n📋 ${i18n.t('plan.banner')} [${executor.providerName}]`);
     } else {
       history.push({ role: 'user', content: opts.prompt });
-      console.log(`\n🚀 Customize Agent v0.0.3 [${executor.providerName}]`);
+      console.log(`\n🚀 Customize Agent v${pkg.version} [${executor.providerName}]`);
     }
     console.log(`   Task: "${opts.prompt}"`);
 
@@ -98,7 +101,7 @@ program
     console.error(i18nMcp.t('cli.mcp_server_start'));
     const { buildRegistry } = await import('./agent/tool-registry.js');
     const registry = buildRegistry({ root: PROJECT_ROOT });
-    const server = new McpServer(registry, 'customize-agent', '0.0.3');
+    const server = new McpServer(registry, 'customize-agent', pkg.version);
     await server.start();
   });
 

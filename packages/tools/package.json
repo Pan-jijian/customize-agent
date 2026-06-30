@@ -9,6 +9,16 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/"
   },
+  "license": "MIT",
+  "author": "Pan-jijian",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Pan-jijian/customize-agent.git",
+    "directory": "packages/tools"
+  },
+  "files": ["dist"],
+  "publishConfig": { "access": "public" },
+  "keywords": ["ai-agent", "cli", "llm", "customize-agent", "tools"],
   "dependencies": {
     "@customize-agent/search": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",

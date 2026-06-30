@@ -5,6 +5,16 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "lint": "eslint src/" },
+  "license": "MIT",
+  "author": "Pan-jijian",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Pan-jijian/customize-agent.git",
+    "directory": "packages/engine"
+  },
+  "files": ["dist"],
+  "publishConfig": { "access": "public" },
+  "keywords": ["ai-agent", "cli", "llm", "customize-agent", "engine", "orchestration"],
   "dependencies": {
     "@customize-agent/llm": "workspace:*",
     "@customize-agent/types": "workspace:*",

@@ -55,8 +55,5 @@ set-claude-env.sh
 .agents/
 skills/
 .cursor/
-# Changesets 临时文件
-.changeset/*.md
+# Claude Code 项目文件
 .CLAUDE.md
-!.changeset/README.md
-!.changeset/config.json

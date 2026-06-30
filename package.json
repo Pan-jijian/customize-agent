@@ -1,24 +1,27 @@
 {
   "name": "customize-agent-monorepo",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "private": true,
+  "description": "Customize Agent — 通用终端 AI 助手 Monorepo",
   "scripts": {
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "test": "vitest run",
     "test:watch": "vitest",
-
     "dev": "turbo run build && node apps/cli/dist/index.js",
-    "start:cli": "pnpm --filter cli start",
-    "check": "turbo run typecheck lint && vitest run"
+    "start:cli": "pnpm --filter customize-agent start",
+    "check": "turbo run typecheck lint && vitest run",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm run build && changeset publish"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": ["ai-agent", "cli", "llm", "customize-agent", "terminal", "tui"],
+  "author": "Pan-jijian",
+  "license": "MIT",
   "packageManager": "pnpm@10.26.1",
   "devDependencies": {
+    "@changesets/cli": "^2.28.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.9.3",
     "eslint": "^10.5.0",
