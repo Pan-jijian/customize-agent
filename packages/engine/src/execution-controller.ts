@@ -21,10 +21,12 @@ interface BudgetResult {
 }
 
 /** Goal 检测结果 */
-interface GoalResult {
+export interface GoalResult {
   achieved: boolean;
   reason?: string;
 }
+
+export type GoalEvaluator = (ctx: GoalCheckContext) => Promise<GoalResult>;
 
 /** 检查点结果 */
 interface CheckpointResult {
@@ -267,6 +269,8 @@ export interface ExecutionControllerConfig {
   maxBudgetUsd?: number;
   /** 人机检查点间隔（轮数） */
   checkpointInterval?: number;
+  /** 触发 Goal 检测时执行轻量 LLM 判定 */
+  goalEvaluator?: GoalEvaluator;
 }
 
 /**
@@ -280,12 +284,14 @@ export class ExecutionController {
   private budgetManager: BudgetManager;
   private goalManager: GoalManager;
   private checkpointManager: CheckpointManager;
+  private goalEvaluator?: GoalEvaluator;
 
   constructor(config: ExecutionControllerConfig = {}) {
     this.loopGuard = new LoopGuard(config.deadLoopThreshold ?? 3);
     this.budgetManager = new BudgetManager(config.maxBudgetUsd ?? 3.0);
     this.goalManager = new GoalManager();
     this.checkpointManager = new CheckpointManager(config.checkpointInterval ?? 15);
+    this.goalEvaluator = config.goalEvaluator;
   }
 
   get budget(): BudgetManager { return this.budgetManager; }
@@ -335,10 +341,19 @@ export class ExecutionController {
       // Agent 声明完成 → 直接停止，不需要 LLM 判定
       return { action: 'stop', reason: 'Agent 主动声明任务完成 <task_finish>' };
     }
-    // 触发式 Goal 检测（里程碑事件/步长保底）→ 标记需要 LLM 判定
+    if (shouldCheckGoal && this.goalEvaluator) {
+      const goal = await this.goalEvaluator({
+        taskGoal: _taskGoal,
+        lastToolName,
+        lastToolResult: _lastToolResult,
+        gitDiff: options.gitDiff ?? '',
+      });
+      if (goal.achieved) return { action: 'stop', reason: goal.reason ?? 'Goal achieved' };
+      return { action: 'continue', reason: goal.reason ?? 'Goal not achieved' };
+    }
+
     if (shouldCheckGoal) {
-      // 留给外部用轻量模型执行 Goal 检测
-      return { action: 'continue', reason: 'Goal check triggered (delegated to lightweight model)' };
+      return { action: 'continue', reason: 'Goal check skipped: no evaluator configured' };
     }
 
     // L4 — 人机检查点

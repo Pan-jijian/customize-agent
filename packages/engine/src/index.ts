@@ -8,13 +8,14 @@ export {
 export { PermissionEngine, type Permission, type PermissionConfig } from './security/permissions.js';
 export {
   ExecutionController, LoopGuard, BudgetManager, GoalManager, CheckpointManager,
-  type ExecutionControllerConfig, type EvalAction, type EvalResult, type GoalCheckContext,
+  type ExecutionControllerConfig, type EvalAction, type EvalResult, type GoalCheckContext, type GoalResult, type GoalEvaluator,
 } from './execution-controller.js';
 export {
   ContextManager, SystemPromptSource, ToolDefinitionSource, ToolResultSource,
   type ContextSource, type ContextChunk, type ChunkPriority, type ContextManagerConfig,
 } from './context-manager.js';
 export { PlanModeManager, type ExecutionPlan, type PlanStep } from './planner.js';
+export { buildToolDefinitions, runToolLoop, type ToolLoopRunOptions, type ToolLoopRunResult } from './tool-loop-runner.js';
 export { SubagentRunner } from './orchestration/subagent/runner.js';
 export { createBuiltinSubagentConfig, getBuiltinPrompt, getRecommendedModel } from './orchestration/subagent/builtins.js';
 export { Orchestrator, type CollaborationMode, type OrchestrationResult } from './orchestration/orchestrator.js';

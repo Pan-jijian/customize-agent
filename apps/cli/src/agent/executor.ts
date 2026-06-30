@@ -1,17 +1,16 @@
-import type { ILLMProvider, StreamChunk, FunctionDefinition } from '@customize-agent/llm';
+import type { ILLMProvider, FunctionDefinition } from '@customize-agent/llm';
+import { estimateCostUsd } from '@customize-agent/llm';
 import type { ToolRegistry, PermissionEngine, ExecutionController, ContextManager } from '@customize-agent/engine';
 import { ContextManager as ContextManagerImpl, PlanModeManager } from '@customize-agent/engine';
 import type { Message, ToolCall } from '@customize-agent/types';
 import type { I18nManager } from '../i18n/manager.js';
 import { buildSystemPrompt } from './prompt.js';
-import { t, taskWarning, toolCallFold, toolCallFolding, renderMarkdown, renderInlineMarkdown, contextCompacting, contextCompacted, contextStats, spinnerStart, thinkingSpinner, extractThinkingSubtitle, formatDuration } from '../tui/renderer.js';
+import { t, taskWarning, toolCallFold, toolCallFolding, renderMarkdown, contextCompacting, contextCompacted, contextStats, spinnerStart, formatDuration } from '../tui/renderer.js';
+import { streamChat } from './stream-chat.js';
+import { truncateToolResult } from './tool-result.js';
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
-/** 不截断输出的工具（完整内容保留） */
-const NO_TRUNCATE_TOOLS = new Set(['read_file', 'list_files', 'search']);
-const CMD_OUTPUT_LIMIT = 5000;
-const OTHER_OUTPUT_LIMIT = 8000;
 
 /** 工具审批回调 */
 export type ApprovalHandler = (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
@@ -165,6 +164,7 @@ export class AgentExecutor {
     let tokenSummaryShown = false;
     let lastRound = 0;
     const taskStartMs = Date.now();
+    const taskGoal = [...working].reverse().find(message => message.role === 'user')?.content ?? '';
     const fmt = (n: number) => n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}K`;
 
     const showTokenSummary = () => {
@@ -211,10 +211,12 @@ export class AgentExecutor {
       const response = await this._callLLM(working, tools, options?.signal, emitToolCallPreview);
       if (options?.signal?.aborted) break;
       // 累加 token（任务结束时统一输出一行汇总）
+      let costThisRound = 0;
       if (response.usage) {
         this._lastPromptTokens = response.usage.promptTokens;
         totalPrompt += response.usage.promptTokens;
         totalCompletion += response.usage.completionTokens ?? 0;
+        costThisRound = estimateCostUsd(this.provider, response.usage);
       }
 
       const assistantMsg: Message = { role: 'assistant', content: response.content, toolCalls: response.toolCalls };
@@ -301,7 +303,11 @@ export class AgentExecutor {
         const lastTc = response.toolCalls[response.toolCalls.length - 1]!;
         const lastResult = working[working.length - 1]?.content ?? '';
         const evalResult = await this.controller.evaluate(
-          round, lastTc.name, lastResult, '',
+          round,
+          lastTc.name,
+          lastResult,
+          taskGoal,
+          { hasTaskFinishTag: response.content.includes('<task_finish>'), costThisRound },
         );
         if (evalResult.action === 'stop' || evalResult.action === 'replan') {
           this._write(taskWarning(evalResult.reason));
@@ -398,132 +404,16 @@ export class AgentExecutor {
     signal?: AbortSignal,
     onToolCall?: (tc: ToolCall) => void,
   ): Promise<{ content: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } }> {
-    let content = '';
-    const toolCalls: ToolCall[] = [];
-    const spin = spinnerStart(this.i18n?.t('stream.thinking'), text => this._write(text));
-    let spinnerStopped = false;
-
-    // 思考链状态行（参考 Claude Code: 思考内容不入主流，替换为实时状态行）
-    const tips = this.i18n?.tList('think.tips') ?? [];
-    const think = thinkingSpinner(tips, text => this._write(text), {
-      thinking: this.i18n?.t('think.thinking') ?? this.i18n?.t('stream.thinking') ?? 'Thinking…',
-      thoughtFor: this.i18n?.t('think.thought_for') ?? 'Thought for',
-      tokens: this.i18n?.t('think.tokens') ?? 'tokens',
+    return streamChat({
+      provider: this.provider,
+      messages,
+      tools,
+      signal,
+      i18n: this.i18n,
+      write: text => this._write(text),
+      onToolCall,
+      onThinkingContent: content => { this._lastThinkingContent = content; },
     });
-    let thinkActive = false;
-    let thinkStartMs = 0;
-    let thinkTokens = 0;
-
-    const stopSpin = () => {
-      if (!spinnerStopped) { spin.stop(); spinnerStopped = true; }
-    };
-
-    const flushThink = () => {
-      if (!thinkActive) return;
-      const elapsed = Date.now() - thinkStartMs;
-      think.thinkDone(elapsed, thinkTokens, this.i18n?.t('think.expand_hint') ?? '(ctrl+o to expand thinking)');
-      thinkActive = false;
-    };
-
-    // 行级缓冲 + 表格/代码块缓冲
-    let lineBuf = '';
-    const tableBuf: string[] = [];
-    let fenceBuf: string[] | null = null; // 非 null 表示在代码围栏内
-
-    const FENCE_RE = /^(`{3,}|~{3,})/;
-
-    const response = await this.provider.chatStream(messages, (chunk: StreamChunk) => {
-      switch (chunk.type) {
-        case 'content': {
-          stopSpin();
-          flushThink();
-          content += chunk.text;
-          lineBuf += chunk.text;
-
-          const lines = lineBuf.split('\n');
-          lineBuf = lines.pop() ?? '';
-
-          for (const line of lines) {
-            const isFenceLine = FENCE_RE.test(line);
-
-            // 代码围栏处理
-            if (isFenceLine || fenceBuf !== null) {
-              if (fenceBuf === null) {
-                // 进入代码块
-                fenceBuf = [line];
-              } else if (isFenceLine) {
-                // 闭合围栏 → 整体渲染
-                fenceBuf.push(line);
-                this._write(renderMarkdown(fenceBuf.join('\n') + '\n'));
-                fenceBuf = null;
-              } else {
-                fenceBuf.push(line);
-              }
-              continue;
-            }
-
-            // 表格行缓冲
-            if (/^\|/.test(line)) {
-              tableBuf.push(line);
-            } else {
-              if (tableBuf.length > 0) {
-                this._write(renderMarkdown(tableBuf.join('\n') + '\n'));
-                tableBuf.length = 0;
-              }
-              this._write(renderInlineMarkdown(line + '\n'));
-            }
-          }
-          break;
-        }
-        case 'thinking':
-          stopSpin();
-          if (!thinkActive) {
-            thinkActive = true;
-            thinkStartMs = Date.now();
-            thinkTokens = 0;
-            this._lastThinkingContent = '';
-            think.thinkStart();
-          }
-          this._lastThinkingContent += chunk.text;
-          thinkTokens += Math.ceil(chunk.text.length / 4);
-          think.thinkTick(Date.now() - thinkStartMs, thinkTokens, extractThinkingSubtitle(this._lastThinkingContent));
-          break;
-        case 'tool_call_preview':
-          onToolCall?.({ id: chunk.id, name: chunk.name, arguments: {} });
-          break;
-        case 'tool_call':
-          toolCalls.push(chunk.call);
-          onToolCall?.(chunk.call);
-          break;
-        case 'reset':
-          if (thinkActive) { think.stop(); thinkActive = false; }
-          this._write('\x1b[1G\x1b[2K');
-          content = ''; toolCalls.length = 0;
-          lineBuf = ''; tableBuf.length = 0; fenceBuf = null;
-          break;
-        case 'done':
-          stopSpin();
-          flushThink();
-          if (fenceBuf !== null) {
-            this._write(renderMarkdown(fenceBuf.join('\n') + '\n'));
-            fenceBuf = null;
-          }
-          if (tableBuf.length > 0) {
-            this._write(renderMarkdown(tableBuf.join('\n') + '\n'));
-            tableBuf.length = 0;
-          }
-          if (lineBuf) this._write(renderInlineMarkdown(lineBuf));
-          lineBuf = '';
-          if (content || toolCalls.length) this._write('\n');
-          break;
-        case 'error':
-          stopSpin();
-          if (thinkActive) { think.stop(); thinkActive = false; }
-          this._write(t.error(chunk.message ?? 'Stream error') + '\n');
-          break;
-      }
-    }, { tools, signal });
-    return { content, toolCalls: toolCalls.length > 0 ? toolCalls : undefined, usage: response.usage };
   }
 
   private async _executeTool(tc: ToolCall, signal?: AbortSignal, preApproved = false): Promise<{ result: string; duration: number }> {
@@ -565,11 +455,7 @@ export class AgentExecutor {
       const duration = Date.now() - toolStart;
       this.controller?.recordToolCall(name, args, result);
 
-      const limit = name === 'execute_command' ? CMD_OUTPUT_LIMIT : NO_TRUNCATE_TOOLS.has(name) ? Infinity : OTHER_OUTPUT_LIMIT;
-      const truncated = result.length > limit
-        ? result.slice(0, limit) + `\n\n[输出被截断：原始 ${result.length} 字符，仅显示前 ${limit} 字符。剩余 ${result.length - limit} 字符未显示。]`
-        : result;
-      return { result: truncated, duration };
+      return { result: truncateToolResult(name, result), duration };
     } catch (err) {
       const errMsg = (err as Error).message;
       const duration = Date.now() - toolStart;
