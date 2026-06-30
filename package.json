@@ -18,27 +18,6 @@
   "author": "",
   "license": "ISC",
   "packageManager": "pnpm@10.26.1",
-  "pnpm": {
-    "peerDependencyRules": {
-      "allowAny": [
-        "tree-sitter"
-      ]
-    },
-    "onlyBuiltDependencies": [
-      "tree-sitter",
-      "tree-sitter-javascript",
-      "tree-sitter-typescript",
-      "tree-sitter-python",
-      "tree-sitter-rust",
-      "tree-sitter-go",
-      "tree-sitter-java",
-      "tree-sitter-c",
-      "tree-sitter-cpp",
-      "tree-sitter-ruby",
-      "tree-sitter-php",
-      "better-sqlite3"
-    ]
-  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.9.3",

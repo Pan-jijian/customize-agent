@@ -5,6 +5,7 @@ import { DiffEngine } from './diff.js';
 import { TerminalTool } from './terminal-shell.js';
 import { execa } from 'execa';
 import { UnifiedSyntaxValidator } from './syntax-validator.js';
+import { WorkspaceFs } from './workspace-fs.js';
 
 // ── .gitignore 匹配器 ──
 const IGNORE_CACHE = new Map<string, RegExp[]>();
@@ -76,20 +77,17 @@ export class ToolKit {
   private cwd: string;
   public terminal: TerminalTool;
   private syntaxValidator: UnifiedSyntaxValidator;
+  private workspaceFs: WorkspaceFs;
   constructor(cwd: string = process.cwd()) {
     this.cwd = cwd;
     this.terminal = new TerminalTool(cwd);
     this.syntaxValidator = new UnifiedSyntaxValidator();
+    this.workspaceFs = new WorkspaceFs(cwd);
   }
 
   /** 安全路径解析 — 确保 LLM 提供的相对路径不会逃逸出项目根目录 */
   private resolveSafe(relativePath: string): string {
-    const resolved = path.resolve(this.cwd, relativePath);
-    const root = path.resolve(this.cwd);
-    if (!resolved.startsWith(root + path.sep) && resolved !== root) {
-      throw new Error(`文件路径 ${resolved} 超出项目边界`);
-    }
-    return resolved;
+    return this.workspaceFs.resolveSafe(relativePath);
   }
 
   /** 检查路径是否被 .gitignore 忽略 */

@@ -1,40 +1,30 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
 import type { Message } from '@customize-agent/types';
 import type { AgentEvent, AgentExecutor } from '../agent/executor.js';
 import { TuiInput } from '../tui/input.js';
-import { FileIndex } from '../tui/file-index.js';
-import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded, userMessageBlock, modeBadge, modeAccent, renderCommandMenu, renderFileDropdown, hintText, toolCallPending } from '../tui/renderer.js';
+import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded, userMessageBlock, toolCallPending } from '../tui/renderer.js';
 import type { MemoryManager, MemoryType } from '@customize-agent/memory';
-import { BINARY_EXTENSIONS } from '@customize-agent/types';
-import { BuiltinTools } from '@customize-agent/tools';
-import type { ConfigStore, ModelRegistry, ModelTier } from '@customize-agent/runtime';
-import { resolveProtocol } from '@customize-agent/runtime';
+import { BuiltinTools, WorkspaceSnapshotService, type WorkspaceSnapshot } from '@customize-agent/tools';
+import type { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import type { I18nManager } from '../i18n/manager.js';
-import * as readline from 'readline';
-import stringWidth from 'string-width';
+import { buildDefaultCommands, type ReplCommandInfo } from './commands.js';
+import { ModelProviderCommands } from './model-provider-commands.js';
+import { captureInputDuringTask } from './task-input-capture.js';
+import { resolveAtRefs } from './at-file-resolver.js';
+import { selectList } from './select-list.js';
+import { ToolCommands } from './tool-commands.js';
+import { SessionCommands } from './session-commands.js';
 
 /** REPL 配置 */
 export interface ReplConfig {
   executor: AgentExecutor;
   projectRoot: string;
-  commands?: Array<{ name: string; desc: string }>;
+  commands?: ReplCommandInfo[];
   memory?: MemoryManager;
   i18n: I18nManager;
   configStore: ConfigStore;
   modelRegistry: ModelRegistry;
   providerDisplay?: string;
 }
-
-/** @file 引用正则（排除邮箱地址：前面必须为空白或行首） */
-const RE_AT = /(?:^|\s)@([^\s@]+(?::\d+(?:-\d+)?)?)/g;
-const MAX_INLINE_SIZE = 500_000;const SNAPSHOT_MAX_FILE_SIZE = 25_000_000;
-const SNAPSHOT_SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'target', '.next', '.turbo', '.cache']);
-let keypressInitialized = false;
-
-type WorkspaceSnapshot = Map<string, Buffer>;
-type SerializedWorkspaceSnapshot = Array<[string, string]>;
 
 /**
  * REPL — 会话管理 + TUI 输入 + 消息格式化 + 斜杠命令。
@@ -49,8 +39,12 @@ export class Repl {
   private configStore: ConfigStore;
   private modelRegistry: ModelRegistry;
   private builtinTools: BuiltinTools;
+  private snapshotService: WorkspaceSnapshotService;
   private providerDisplay: string | undefined;
-  private commands: Array<{ name: string; desc: string }> = [];
+  private modelProviderCommands: ModelProviderCommands;
+  private toolCommands: ToolCommands;
+  private sessionCommands: SessionCommands;
+  private commands: ReplCommandInfo[] = [];
   private currentTaskAbort?: AbortController;
   private taskRunning = false;
   private pendingInputs: Array<{ content: string; display: string; rendered: boolean }> = [];
@@ -65,8 +59,23 @@ export class Repl {
     this.configStore = config.configStore;
     this.modelRegistry = config.modelRegistry;
     this.builtinTools = new BuiltinTools(config.projectRoot);
+    this.snapshotService = new WorkspaceSnapshotService(config.projectRoot);
     this.providerDisplay = config.providerDisplay;
+    this.modelProviderCommands = new ModelProviderCommands({ configStore: this.configStore, modelRegistry: this.modelRegistry, i18n: this.i18n });
     this.history = [{ role: 'system', content: this.executor.getSystemPrompt() }];
+    this.toolCommands = new ToolCommands(this.builtinTools, this.i18n, this.history);
+    this.sessionCommands = new SessionCommands({
+      history: this.history,
+      executor: this.executor,
+      i18n: this.i18n,
+      selectList: (title, items) => this._selectList(title, items),
+      getSessionId: () => this.sessionId,
+      setSessionId: id => { this.sessionId = id; },
+      setDraft: text => this.tui.setDraft(text),
+      findSnapshotForTurn: index => this._findSnapshotForTurn(index),
+      loadSnapshot: id => this._loadWorkspaceSnapshot(id),
+      restoreSnapshot: snapshot => this._restoreWorkspaceSnapshot(snapshot),
+    });
     this._buildTui(config.commands);
   }
 
@@ -96,54 +105,8 @@ export class Repl {
     console.log('\n' + this.i18n.t('welcome.goodbye'));
   }
 
-  // @file 解析
-
   private async _resolveAtRefs(text: string): Promise<string> {
-    const refs: Array<{ raw: string; filePath: string; startLine?: number; endLine?: number }> = [];
-
-    for (const m of text.matchAll(RE_AT)) {
-      const raw = m[1]!;
-      const ci = raw.lastIndexOf(':');
-      if (ci > 0) {
-        const fp = raw.slice(0, ci);
-        const rng = raw.slice(ci + 1);
-        const parts = rng.split('-');
-        const s = parseInt(parts[0]!, 10);
-        const e = parts[1] ? parseInt(parts[1], 10) : undefined;
-        if (!isNaN(s)) { refs.push({ raw, filePath: fp, startLine: s, endLine: e ?? s }); continue; }
-      }
-      refs.push({ raw, filePath: raw });
-    }
-
-    if (!refs.length) return text;
-
-    const parts: string[] = [];
-    for (const ref of refs) {
-      const full = path.resolve(this.root, ref.filePath);
-      try {
-        const stat = await fs.promises.stat(full);
-        const ext = path.extname(ref.filePath).toLowerCase();
-        if (BINARY_EXTENSIONS.has(ext.slice(1)) || stat.size > MAX_INLINE_SIZE) {
-          parts.push(this.i18n.t('file.binary', { path: ref.filePath, size: (stat.size / 1024).toFixed(1) }));
-          continue;
-        }
-        const content = await fs.promises.readFile(full, 'utf-8');
-        const lines = content.split('\n');
-        let snippet: string;
-        if (ref.startLine !== undefined) {
-          const s = Math.max(1, ref.startLine);
-          const e = Math.min(lines.length, ref.endLine ?? s);
-          snippet = lines.slice(s - 1, e).map((l, i) => `${s + i}: ${l}`).join('\n');
-        } else {
-          snippet = content;
-        }
-        parts.push(`[File: ${ref.filePath}${ref.startLine ? ` L${ref.startLine}-${ref.endLine}` : ''}]\n${snippet}`);
-      } catch { parts.push(`${this.i18n.t('file.not_found')} ${ref.filePath}`); }
-    }
-
-    const cleanText = text.replace(RE_AT, '').trim();
-    const ctx = parts.join('\n\n');
-    return cleanText ? `${cleanText}\n\n${this.i18n.t('file.reference')}\n${ctx}` : `${this.i18n.t('file.please_analyze')}\n${ctx}`;
+    return resolveAtRefs(text, this.root, this.i18n);
   }
 
   // 任务执行
@@ -169,387 +132,26 @@ export class Repl {
     }
   }
 
-  private _captureInputDuringTask(onCancel: () => void): { stop: () => void; pause: () => void; resume: () => void; drain: () => string[]; writeOutput: (text: string) => void } {
-    if (!keypressInitialized) {
-      readline.emitKeypressEvents(process.stdin);
-      keypressInitialized = true;
-    }
-    let raw = false;
-    if (process.stdin.isTTY) {
-      try { process.stdin.setRawMode(true); raw = true; } catch { /* ignore */ }
-    }
-    process.stdin.resume();
-
-    let buffer = '';
-    let pos = 0;
-    let dd: 'none' | 'command' | 'file' = 'none';
-    let items: Array<{ label: string; detail?: string; data: string }> = [];
-    let sel = 0;
-    let fStart = -1;
-    let fEnd = -1;
-    const fileIndex = new FileIndex(this.root);
-    let outputLineOpen = false;
-    let statusLineActive = false;
-    let inputLinesOnScreen = 0;
-    let inputCursorLineIndex = 0;
-    const pending: string[] = [];
-    const mode = 'AGENT';
-    const promptSymbol = '➜';
-    const clearInputLine = () => {
-      if (inputLinesOnScreen > 0) {
-        const up = inputCursorLineIndex;
-        let out = up > 0 ? `\x1b[${up}A` : '';
-        out += '\r';
-        for (let i = 0; i < inputLinesOnScreen; i++) {
-          out += '\x1b[2K';
-          if (i < inputLinesOnScreen - 1) out += '\n';
-        }
-        if (inputLinesOnScreen > 1) out += `\x1b[${inputLinesOnScreen - 1}A\r`;
-        process.stdout.write(out);
-        inputLinesOnScreen = 0;
-        inputCursorLineIndex = 0;
-        return;
-      }
-      process.stdout.write('\r\x1b[2K');
-    };
-    const sizeOf = (rel: string) => {
-      try {
-        const stat = fs.statSync(path.join(this.root, rel));
-        if (stat.size < 1024) return `${stat.size}B`;
-        if (stat.size < 1024 * 1024) return `${Math.round(stat.size / 1024)}KB`;
-        return `${(stat.size / 1024 / 1024).toFixed(1)}MB`;
-      } catch { return ''; }
-    };
-    const resetDropdown = () => { dd = 'none'; items = []; sel = 0; fStart = -1; fEnd = -1; };
-    const syncDropdown = () => {
-      resetDropdown();
-      if (buffer.startsWith('/')) {
-        const firstSpace = buffer.indexOf(' ');
-        const commandEnd = firstSpace >= 0 ? firstSpace : buffer.length;
-        if (pos <= commandEnd) {
-          const p = buffer.slice(1, commandEnd).toLowerCase();
-          const m = this.commands
-            .filter(c => c.name.toLowerCase().includes(p))
-            .map(c => ({ label: c.name, detail: c.desc, data: c.name + ' ' }));
-          if (m.length) { dd = 'command'; items = m; fStart = 0; fEnd = commandEnd; }
-        }
-        return;
-      }
-      const at = buffer.lastIndexOf('@', pos - 1);
-      if (at < 0 || buffer[at + 1] === ' ') return;
-      const endOfWord = buffer.indexOf(' ', at + 1);
-      if (endOfWord >= 0 && endOfWord < pos) return;
-      const partial = buffer.slice(at + 1, pos).toLowerCase();
-      const matches = fileIndex.search(partial, 50);
-      if (matches.length) {
-        dd = 'file';
-        items = matches.map(f => ({ label: f, detail: sizeOf(f), data: '@' + f + ' ' }));
-        fStart = at;
-        fEnd = pos;
-      }
-    };
-    const applyDropdown = () => {
-      const item = items[sel];
-      if (!item) return false;
-      const end = fEnd >= 0 ? fEnd : buffer.length;
-      buffer = buffer.slice(0, fStart) + item.data + buffer.slice(end);
-      pos = fStart + item.data.length;
-      resetDropdown();
-      renderBuffer();
-      return true;
-    };
-    const renderBuffer = () => {
-      clearInputLine();
-      if (outputLineOpen) {
-        process.stdout.write('\n');
-        outputLineOpen = false;
-      }
-      const width = Math.max(40, process.stdout.columns ?? 80);
-      const inner = width - 2;
-      const before = buffer.slice(0, pos);
-      const ch = buffer[pos] || ' ';
-      const after = buffer.slice(pos + 1);
-      const caret = s.inverse(ch);
-      const queuedLines = pending.flatMap(text => {
-        const lines = userMessageBlock(text, this.i18n.t('message.queued'), 'queued').trimEnd().split('\n');
-        if (lines[0] === '') lines.shift();
-        return lines;
-      });
-      const stats = this.executor.getContextStats();
-      const pct = Math.round((stats.tokens / stats.limit) * 100);
-      const statsLabel = stats.tokens > 0 ? `[${Math.round(stats.tokens / 1000)}K/${Math.round(stats.limit / 1000)}K ${pct}%]` : '';
-      const statsText = statsLabel ? (pct > 85 ? t.error(` ${statsLabel} `) : pct > 60 ? t.warning(` ${statsLabel} `) : t.faint(` ${statsLabel} `)) : '';
-      const topFill = Math.max(1, inner - (statsLabel ? stringWidth(` ${statsLabel} `) : 0));
-      const top = t.subtle('╭' + '─'.repeat(topFill)) + statsText + t.subtle('╮');
-      const badge = modeBadge(mode);
-      const bar = modeAccent(mode)('│');
-      const pr = modeAccent(mode)(promptSymbol);
-      const inputPrefix = `${badge} ${bar} ${pr} `;
-      const prefixWidth = mode.length + 7;
-      const inputVisible = prefixWidth + stringWidth(before + ch + after);
-      const inputPad = ' '.repeat(Math.max(0, inner - 2 - inputVisible));
-      const mid = `${t.subtle('│')} ${inputPrefix}${before}${caret}${after}${inputPad} ${t.subtle('│')}`;
-      const bottom = t.subtle('╰' + '─'.repeat(inner) + '╯');
-      const lines = [...queuedLines, top, mid, bottom];
-      const midIndex = queuedLines.length + 1;
-      if (dd !== 'none' && items.length) {
-        const ddPrefix = `${bar} `;
-        if (dd === 'command') {
-          for (const line of renderCommandMenu(
-            items.map((it, i) => ({ cmd: it.label, desc: it.detail ?? '', highlighted: i === sel })),
-            this.i18n.t('dropdown.commands_header'),
-          )) lines.push(ddPrefix + line);
-        } else {
-          for (const line of renderFileDropdown(
-            items.map((it, i) => ({ label: it.label, detail: it.detail, highlighted: i === sel })),
-            { header: this.i18n.t('dropdown.files_header'), more: (n: number) => this.i18n.t('dropdown.more', { count: String(n) }) },
-          )) lines.push(ddPrefix + line);
-        }
-        lines.push(ddPrefix + t.subtle(hintText({
-          tab: this.i18n.t('hint.tab'),
-          navigate: this.i18n.t('hint.navigate'),
-          confirm: this.i18n.t('hint.confirm'),
-          dismiss: this.i18n.t('hint.dismiss'),
-          sep: this.i18n.t('hint.sep'),
-        })));
-      }
-      const cursorCol = 2 + prefixWidth + stringWidth(before);
-      process.stdout.write(`\r${lines.map((line, i) => `${i === 0 ? '' : '\n'}\x1b[2K${line}`).join('')}\x1b[${Math.max(0, lines.length - 1 - midIndex)}A\r\x1b[${Math.max(1, cursorCol)}C`);
-      inputLinesOnScreen = lines.length;
-      inputCursorLineIndex = midIndex;
-    };
-    const clearStatusLine = () => {
-      if (!statusLineActive) return;
-      clearInputLine();
-      process.stdout.write('\x1b[1A\r\x1b[2K');
-      statusLineActive = false;
-    };
-    const clearBuffer = () => {
-      if (outputLineOpen) {
-        process.stdout.write('\n');
-        outputLineOpen = false;
-        return;
-      }
-      clearInputLine();
-    };
-    const CURSOR_CONTROL_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[ABCDGJK]`, 'g');
-    const normalizeStatusText = (text: string) => text
-      .replace(CURSOR_CONTROL_RE, '')
-      .replace(/^\r+/, '');
-    const writeStatus = (text: string) => {
-      const normalized = normalizeStatusText(text);
-      const isClear = normalized.trim().length === 0;
-      if (statusLineActive) {
-        clearInputLine();
-        process.stdout.write('\x1b[1A\r\x1b[2K');
-      } else {
-        clearBuffer();
-      }
-      if (isClear) {
-        statusLineActive = false;
-        renderBuffer();
-        return;
-      }
-      process.stdout.write(normalized.endsWith('\n') ? normalized : normalized + '\n');
-      statusLineActive = !normalized.endsWith('\n');
-      renderBuffer();
-    };
-    const writeOutput = (text: string) => {
-      if (text.startsWith('\r')) {
-        writeStatus(text);
-        return;
-      }
-      clearStatusLine();
-      if (outputLineOpen) {
-        process.stdout.write(text);
-        outputLineOpen = text.length > 0 && !text.endsWith('\n');
-        if (!outputLineOpen) renderBuffer();
-        return;
-      }
-      clearBuffer();
-      process.stdout.write(text);
-      outputLineOpen = text.length > 0 && !text.endsWith('\n');
-      if (!outputLineOpen) renderBuffer();
-    };
-    renderBuffer();
-    const onKeypress = (str: string | undefined, key: readline.Key) => {
-      if (key?.ctrl && key.name === 'c') {
-        if (buffer) {
-          buffer = '';
-          pos = 0;
-          resetDropdown();
-          renderBuffer();
-          return;
-        }
-        writeOutput(t.warning(this.i18n.t('status.cancelled')) + '\n');
-        active = false;
-        process.stdin.removeListener('keypress', onKeypress);
-        clearInputLine();
-        onCancel();
-        return;
-      }
-      if (key?.name === 'return' || key?.name === 'enter') {
-        if (dd !== 'none' && applyDropdown()) return;
-        const text = buffer.trim();
-        buffer = '';
-        pos = 0;
-        resetDropdown();
-        clearStatusLine();
-        clearBuffer();
-        if (text) {
-          pending.push(text);
-        }
-        renderBuffer();
-        return;
-      }
-      if (key?.name === 'tab') {
-        if (dd !== 'none' && applyDropdown()) return;
-      }
-      if (key?.name === 'escape') {
-        if (dd !== 'none') { resetDropdown(); renderBuffer(); return; }
-      }
-      if (key?.name === 'up') {
-        if (dd !== 'none') { sel = Math.max(0, sel - 1); renderBuffer(); return; }
-      }
-      if (key?.name === 'down') {
-        if (dd !== 'none') { sel = Math.min(items.length - 1, sel + 1); renderBuffer(); return; }
-      }
-      if (key?.name === 'left') {
-        pos = Math.max(0, pos - 1);
-        syncDropdown();
-        renderBuffer();
-        return;
-      }
-      if (key?.name === 'right') {
-        pos = Math.min(buffer.length, pos + 1);
-        renderBuffer();
-        return;
-      }
-      if (key?.name === 'backspace') {
-        if (pos > 0) {
-          buffer = buffer.slice(0, pos - 1) + buffer.slice(pos);
-          pos--;
-        }
-        syncDropdown();
-        renderBuffer();
-        return;
-      }
-      if (key?.name === 'delete') {
-        if (pos < buffer.length) buffer = buffer.slice(0, pos) + buffer.slice(pos + 1);
-        syncDropdown();
-        renderBuffer();
-        return;
-      }
-      if (key?.ctrl && key.name === 'a') {
-        pos = 0;
-        syncDropdown();
-        renderBuffer();
-        return;
-      }
-      if (key?.ctrl && key.name === 'e') {
-        pos = buffer.length;
-        syncDropdown();
-        renderBuffer();
-        return;
-      }
-      if (key?.ctrl && key.name === 'u') {
-        buffer = '';
-        pos = 0;
-        resetDropdown();
-        renderBuffer();
-        return;
-      }
-      if (str && str >= ' ') {
-        buffer = buffer.slice(0, pos) + str + buffer.slice(pos);
-        pos += str.length;
-        syncDropdown();
-        renderBuffer();
-      }
-    };
-    let active = true;
-    process.stdin.on('keypress', onKeypress);
-    return {
-      drain: () => {
-        const drained = pending.splice(0, pending.length);
-        renderBuffer();
-        return drained;
-      },
-      writeOutput,
-      pause: () => {
-        if (!active) return;
-        active = false;
-        process.stdin.removeListener('keypress', onKeypress);
-        clearBuffer();
-      },
-      resume: () => {
-        if (active) return;
-        active = true;
-        process.stdin.on('keypress', onKeypress);
-        renderBuffer();
-      },
-      stop: () => {
-        if (active) process.stdin.removeListener('keypress', onKeypress);
-        active = false;
-        clearStatusLine();
-        clearBuffer();
-        if (raw) try { process.stdin.setRawMode(false); } catch { /* ignore */ }
-      },
-    };
+  private _captureInputDuringTask(onCancel: () => void) {
+    return captureInputDuringTask({
+      projectRoot: this.root,
+      commands: this.commands,
+      i18n: this.i18n,
+      tokenStats: () => this.executor.getContextStats(),
+      onCancel,
+    });
   }
 
   private async _takeWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
-    const snapshot: WorkspaceSnapshot = new Map();
-    const walk = async (dir: string) => {
-      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name.startsWith('.')) continue;
-        if (entry.isDirectory() && SNAPSHOT_SKIP_DIRS.has(entry.name)) continue;
-        const full = path.join(dir, entry.name);
-        const rel = path.relative(this.root, full);
-        if (entry.isDirectory()) {
-          await walk(full);
-          continue;
-        }
-        if (!entry.isFile()) continue;
-        const stat = await fs.promises.stat(full);
-        if (stat.size > SNAPSHOT_MAX_FILE_SIZE) continue;
-        try {
-          snapshot.set(rel, await fs.promises.readFile(full));
-        } catch { /* ignore unreadable files */ }
-      }
-    };
-    await walk(this.root);
-    return snapshot;
-  }
-
-  private _snapshotDir(): string {
-    return path.join(os.homedir(), '.customize-agent', 'snapshots');
-  }
-
-  private _snapshotFile(id: string): string {
-    return path.join(this._snapshotDir(), `${id}.json`);
-  }
-
-  private _serializeSnapshot(snapshot: WorkspaceSnapshot): SerializedWorkspaceSnapshot {
-    return [...snapshot.entries()].map(([rel, content]) => [rel, content.toString('base64')]);
-  }
-
-  private _deserializeSnapshot(data: SerializedWorkspaceSnapshot): WorkspaceSnapshot {
-    return new Map(data.map(([rel, content]) => [rel, Buffer.from(content, 'base64')]));
+    return this.snapshotService.takeSnapshot();
   }
 
   private async _saveWorkspaceSnapshot(id: string, snapshot: WorkspaceSnapshot): Promise<void> {
-    await fs.promises.mkdir(this._snapshotDir(), { recursive: true });
-    await fs.promises.writeFile(this._snapshotFile(id), JSON.stringify(this._serializeSnapshot(snapshot)), 'utf-8');
+    await this.snapshotService.saveSerialized(id, snapshot);
   }
 
   private async _loadWorkspaceSnapshot(id: string): Promise<WorkspaceSnapshot | null> {
-    try {
-      const raw = await fs.promises.readFile(this._snapshotFile(id), 'utf-8');
-      return this._deserializeSnapshot(JSON.parse(raw) as SerializedWorkspaceSnapshot);
-    } catch {
-      return null;
-    }
+    return this.snapshotService.loadSerialized(id);
   }
 
   private _findSnapshotForTurn(index: number): WorkspaceSnapshot | undefined {
@@ -565,17 +167,7 @@ export class Repl {
   }
 
   private async _restoreWorkspaceSnapshot(snapshot: WorkspaceSnapshot): Promise<void> {
-    const current = await this._takeWorkspaceSnapshot();
-    for (const [rel] of current) {
-      if (!snapshot.has(rel)) {
-        await fs.promises.rm(path.join(this.root, rel), { force: true });
-      }
-    }
-    for (const [rel, content] of snapshot) {
-      const full = path.join(this.root, rel);
-      await fs.promises.mkdir(path.dirname(full), { recursive: true });
-      await fs.promises.writeFile(full, content);
-    }
+    await this.snapshotService.restoreSnapshot(snapshot);
   }
 
   private _renderPendingInputs(options: { redraw?: boolean } = {}): void {
@@ -708,68 +300,12 @@ export class Repl {
   }
 
   private async _selectList<T>(title: string, items: Array<{ label: string; detail?: string; value: T }>): Promise<T | null> {
-    if (!items.length) return null;
-    if (!keypressInitialized) {
-      readline.emitKeypressEvents(process.stdin);
-      keypressInitialized = true;
-    }
     this.tui.suspend();
-    let raw = false;
-    if (process.stdin.isTTY) {
-      try { process.stdin.setRawMode(true); raw = true; } catch { /* ignore */ }
+    try {
+      return await selectList(title, items);
+    } finally {
+      this.tui.resume();
     }
-    process.stdin.resume();
-
-    let sel = 0;
-    let linesDrawn = 0;
-    const clear = () => {
-      if (linesDrawn <= 0) return;
-      process.stdout.write(`\x1b[${linesDrawn}A\r\x1b[0J`);
-      linesDrawn = 0;
-    };
-    const clip = (text: string, width: number) => {
-      let out = '';
-      for (const ch of text.replace(/\s+/g, ' ')) {
-        if (stringWidth(out + ch) > width - 1) return out + '…';
-        out += ch;
-      }
-      return out;
-    };
-    const draw = () => {
-      clear();
-      const width = Math.max(40, process.stdout.columns ?? 80);
-      const itemWidth = width - 5;
-      const lines = [
-        s.bold(clip(title, width - 1)),
-        ...items.map((item, i) => {
-          const cursor = i === sel ? t.accent('▶') : ' ';
-          const raw = `${item.label}${item.detail ? `  ${item.detail}` : ''}`;
-          const label = clip(raw, itemWidth);
-          return `${cursor} ${i === sel ? s.bold(label) : label}`;
-        }),
-        '',
-        t.dim('↑↓  Enter  Esc'),
-      ];
-      process.stdout.write(lines.join('\n') + '\n');
-      linesDrawn = lines.length;
-    };
-
-    return new Promise(resolve => {
-      const cleanup = () => {
-        clear();
-        process.stdin.removeListener('keypress', onKey);
-        if (raw) try { process.stdin.setRawMode(false); } catch { /* ignore */ }
-        this.tui.resume();
-      };
-      const onKey = (_str: string | undefined, key: readline.Key) => {
-        if (key.name === 'up') { sel = Math.max(0, sel - 1); draw(); return; }
-        if (key.name === 'down') { sel = Math.min(items.length - 1, sel + 1); draw(); return; }
-        if (key.name === 'escape' || (key.ctrl && key.name === 'c')) { cleanup(); resolve(null); return; }
-        if (key.name === 'return' || key.name === 'enter') { const value = items[sel]!.value; cleanup(); resolve(value); }
-      };
-      process.stdin.on('keypress', onKey);
-      draw();
-    });
   }
 
   // /commands 命令分发
@@ -793,28 +329,28 @@ export class Repl {
       }
 
       case '/memory': return this._handleMemoryCommand(args);
-      case '/model': return this._handleModelCommand(args);
-      case '/provider': return this._handleProviderCommand(args);
-      case '/rewind': await this._rewind(args); return false;
-      case '/resume': await this._resume(args); return false;
-      case '/history': case '/sessions': await this._sessions(); return false;
+      case '/model': return this.modelProviderCommands.handleModelCommand(args);
+      case '/provider': return this.modelProviderCommands.handleProviderCommand(args);
+      case '/rewind': await this.sessionCommands.rewind(args); return false;
+      case '/resume': await this.sessionCommands.resume(args); return false;
+      case '/history': case '/sessions': await this.sessionCommands.sessions(); return false;
       case '/reset': return this._command('/clear');
-      case '/web': await this._webCommand(args); return false;
-      case '/export': await this._exportCommand(args); return false;
+      case '/web': await this.toolCommands.web(args); return false;
+      case '/export': await this.toolCommands.export(args); return false;
       case '/doctor': process.stdout.write(await this.builtinTools.doctor() + '\n\n'); return false;
-      case '/checkpoint': await this._checkpointCommand(args); return false;
-      case '/git': await this._gitCommand(args); return false;
+      case '/checkpoint': await this.toolCommands.checkpoint(args); return false;
+      case '/git': await this.toolCommands.git(args); return false;
       case '/test': process.stdout.write(await this.builtinTools.runScript('test') + '\n\n'); return false;
       case '/build': process.stdout.write(await this.builtinTools.runScript('build') + '\n\n'); return false;
       case '/lint': process.stdout.write(await this.builtinTools.runScript('lint') + '\n\n'); return false;
-      case '/preview': await this._previewCommand(args); return false;
-      case '/file': await this._fileCommand(args); return false;
-      case '/zip': await this._zipCommand(args); return false;
+      case '/preview': await this.toolCommands.preview(args); return false;
+      case '/file': await this.toolCommands.file(args); return false;
+      case '/zip': await this.toolCommands.zip(args); return false;
       case '/repo': process.stdout.write(await this.builtinTools.repoMap() + '\n\n'); return false;
       case '/symbol': process.stdout.write(await this.builtinTools.symbolSearch(args) + '\n\n'); return false;
       case '/deps': process.stdout.write(await this.builtinTools.dependencyGraph() + '\n\n'); return false;
-      case '/mcp': await this._mcpCommand(args); return false;
-      case '/plugin': await this._pluginCommand(args); return false;
+      case '/mcp': await this.toolCommands.mcp(args); return false;
+      case '/plugin': await this.toolCommands.plugin(args); return false;
       case '/version': process.stdout.write(await this.builtinTools.version() + '\n\n'); return false;
 
       case '/compact': {
@@ -945,264 +481,6 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
     }
   }
 
-  private async _webCommand(args: string): Promise<void> {
-    const [sub, ...rest] = args.split(/\s+/);
-    const input = rest.join(' ');
-    if (sub === 'search' && input) process.stdout.write(await this.builtinTools.webSearch(input) + '\n\n');
-    else if (sub === 'fetch' && input) process.stdout.write((await this.builtinTools.webFetch(input)).slice(0, 6000) + '\n\n');
-    else process.stdout.write(t.warning('Usage: /web search <query> | /web fetch <url>\n\n'));
-  }
-
-  private async _exportCommand(args: string): Promise<void> {
-    const [kind, output = `export-${Date.now()}.md`] = args.split(/\s+/);
-    const content = this.history.filter(m => m.role !== 'system').map(m => `## ${m.role}\n\n${m.content}`).join('\n\n');
-    if (kind === 'json') process.stdout.write(await this.builtinTools.exportJson(output, this.history) + '\n\n');
-    else if (kind === 'html') process.stdout.write(await this.builtinTools.exportHtml(output, 'Session Export', content) + '\n\n');
-    else if (kind === 'pdf') process.stdout.write(await this.builtinTools.exportPdf(output, 'Session Export', content) + '\n\n');
-    else if (kind === 'session') process.stdout.write(await this.builtinTools.exportSession(output, this.history) + '\n\n');
-    else process.stdout.write(await this.builtinTools.exportMarkdown(output, content) + '\n\n');
-  }
-
-  private async _checkpointCommand(args: string): Promise<void> {
-    const [sub, name = `checkpoint-${Date.now()}`] = args.split(/\s+/);
-    if (sub === 'create') process.stdout.write(await this.builtinTools.checkpointCreate(name) + '\n\n');
-    else if (sub === 'restore') process.stdout.write(await this.builtinTools.checkpointRestore(name) + '\n\n');
-    else if (sub === 'delete') process.stdout.write(await this.builtinTools.checkpointDelete(name) + '\n\n');
-    else process.stdout.write(await this.builtinTools.checkpointList() + '\n\n');
-  }
-
-  private async _gitCommand(args: string): Promise<void> {
-    const sub = args.trim() || 'status';
-    const map: Record<string, string[]> = {
-      status: ['status', '--short'],
-      diff: ['diff'],
-      log: ['log', '--oneline', '-20'],
-      stash: ['stash', 'push'],
-    };
-    process.stdout.write(await this.builtinTools.git(map[sub] ?? ['status', '--short']) + '\n\n');
-  }
-
-  private async _previewCommand(args: string): Promise<void> {
-    const url = args.trim();
-    if (!url) { process.stdout.write(t.warning(this.i18n.t('cmd.usage_preview') + '\n\n')); return; }
-    process.stdout.write(await this.builtinTools.openPreview(url) + '\n\n');
-  }
-
-  private async _fileCommand(args: string): Promise<void> {
-    const [sub, file] = args.split(/\s+/);
-    if (!file) { process.stdout.write(t.warning('Usage: /file inspect <path> | /file text <path>\n\n')); return; }
-    if (sub === 'text') process.stdout.write(await this.builtinTools.extractText(file) + '\n\n');
-    else process.stdout.write(await this.builtinTools.inspectFile(file) + '\n\n');
-  }
-
-  private async _mcpCommand(args: string): Promise<void> {
-    const [sub, name, ...rest] = args.split(/\s+/).filter(Boolean);
-    if (sub === 'add' && name) process.stdout.write(await this.builtinTools.mcpAdd(name, rest.join(' ')) + '\n\n');
-    else if (sub === 'remove' && name) process.stdout.write(await this.builtinTools.mcpRemove(name) + '\n\n');
-    else if (sub === 'tools') process.stdout.write(await this.builtinTools.mcpTools(name) + '\n\n');
-    else process.stdout.write(await this.builtinTools.mcpList() + '\n\n');
-  }
-
-  private async _pluginCommand(args: string): Promise<void> {
-    const [sub, name] = args.split(/\s+/).filter(Boolean);
-    if (sub === 'install' && name) process.stdout.write(await this.builtinTools.pluginInstall(name) + '\n\n');
-    else process.stdout.write(await this.builtinTools.pluginList() + '\n\n');
-  }
-
-  private async _zipCommand(args: string): Promise<void> {
-    const [output, ...files] = args.split(/\s+/).filter(Boolean);
-    if (!output || !files.length) { process.stdout.write(t.warning('Usage: /zip <output.tar> <files...>\n\n')); return; }
-    process.stdout.write(await this.builtinTools.zipFiles(output, files) + '\n\n');
-  }
-
-  private async _rewind(args: string): Promise<void> {
-    const userTurns = this.history
-      .map((m, i) => ({ message: m, index: i }))
-      .filter(x => x.message.role === 'user');
-    if (!userTurns.length) {
-      process.stdout.write(t.dim(this.i18n.t('cmd.no_rewind') + '\n\n'));
-      return;
-    }
-    const selected = args
-      ? userTurns[Math.max(0, userTurns.length - Number.parseInt(args, 10))]
-      : await this._selectList(this.i18n.t('help.rewind'), userTurns.slice().reverse().map((turn, i) => ({
-          label: `${i + 1}. ${turn.message.content.slice(0, 80).replace(/\n/g, ' ')}`,
-          detail: `#${turn.index}`,
-          value: turn,
-        })));
-    if (!selected) return;
-
-    const scope = await this._selectList(this.i18n.t('help.rewind'), [
-      { label: this.i18n.t('cmd.rewind_scope_chat'), detail: this.i18n.t('cmd.rewind_scope_chat_desc'), value: 'chat' as const },
-      { label: this.i18n.t('cmd.rewind_scope_all'), detail: this.i18n.t('cmd.rewind_scope_all_desc'), value: 'all' as const },
-    ]);
-    if (!scope) return;
-
-    const original = selected.message.content;
-    this.history.splice(selected.index);
-    if (scope === 'all') {
-      const snapshot = this._findSnapshotForTurn(selected.index) ?? await this._loadWorkspaceSnapshot(this.sessionId);
-      if (snapshot) {
-        try {
-          await this._restoreWorkspaceSnapshot(snapshot);
-        } catch {
-          process.stdout.write(t.warning(this.i18n.t('cmd.rewind_snapshot_failed') + '\n'));
-        }
-      } else {
-        process.stdout.write(t.warning(this.i18n.t('cmd.rewind_snapshot_missing') + '\n'));
-      }
-    }
-    this.tui.setDraft(original);
-    process.stdout.write(t.success(this.i18n.t('cmd.rewind_done') + '\n\n'));
-  }
-
-  private async _resume(args: string): Promise<void> {
-    const { AuditLogger } = await import('@customize-agent/runtime');
-    const sessions = await AuditLogger.listSessions();
-    if (!sessions.length) {
-      process.stdout.write(t.dim(this.i18n.t('cmd.no_sessions') + '\n\n'));
-      return;
-    }
-    const id = args.trim() && args.trim() !== 'last'
-      ? args.trim()
-      : await this._selectList(this.i18n.t('help.resume'), sessions.slice(0, 20).map(session => ({
-          label: session.taskPreview,
-          detail: `${session.id} · ${session.date}`,
-          value: session.id,
-        })));
-    if (!id) return;
-    const scope = await this._selectList(this.i18n.t('help.resume'), [
-      { label: this.i18n.t('cmd.resume_scope_chat'), detail: this.i18n.t('cmd.resume_scope_chat_desc'), value: 'chat' as const },
-      { label: this.i18n.t('cmd.resume_scope_all'), detail: this.i18n.t('cmd.resume_scope_all_desc'), value: 'all' as const },
-    ]);
-    if (!scope) return;
-    const loaded = await AuditLogger.loadHistory(id);
-    this.history.length = 0;
-    this.history.push({ role: 'system', content: this.executor.getSystemPrompt() }, ...loaded.filter(m => m.role !== 'system'));
-    this.sessionId = id;
-    if (scope === 'all') {
-      const snapshot = await this._loadWorkspaceSnapshot(id);
-      if (snapshot) {
-        try {
-          await this._restoreWorkspaceSnapshot(snapshot);
-        } catch {
-          process.stdout.write(t.warning(this.i18n.t('cmd.rewind_snapshot_failed') + '\n'));
-        }
-      } else {
-        process.stdout.write(t.warning(this.i18n.t('cmd.rewind_snapshot_missing') + '\n'));
-      }
-    }
-    process.stdout.write(t.success(this.i18n.t('cmd.resume_done', { id }) + '\n\n'));
-  }
-
-  // ── /model & /provider ──
-
-  private _handleModelCommand(args: string): boolean {
-    if (!args) { this._showModelView(); return false; }
-    const parts = args.split(/\s+/);
-    const sub = parts[0]!; const rest = parts.slice(1);
-    switch (sub) {
-      case 'add': {
-        if (rest.length < 3) { process.stdout.write(t.warning(this.i18n.t('model.add_usage')+'\n\n')); return false; }
-        const tier = rest[0]! as ModelTier;
-        if (!['reader','reasoning','action'].includes(tier)) { process.stdout.write(t.error(this.i18n.t('model.invalid_tier',{tier})+'\n\n')); return false; }
-        const prov = rest[1]!; const name = rest.slice(2).join(' ');
-        this.configStore.addModel(tier, { name, provider: prov });
-        process.stdout.write(t.success(this.i18n.t('model.added',{name,provider:prov,tier:this.i18n.t('tier.'+tier)||tier})+'\n\n'));
-        return false;
-      }
-      case 'set': {
-        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('model.set_usage')+'\n\n')); return false; }
-        const tier = rest[0]! as ModelTier;
-        if (!['reader','reasoning','action'].includes(tier)) { process.stdout.write(t.error(this.i18n.t('model.invalid_tier',{tier})+'\n\n')); return false; }
-        const name = rest.slice(1).join(' ');
-        this.configStore.setActiveModel(tier, name);
-        process.stdout.write(t.success(this.i18n.t('model.active_set',{tier:this.i18n.t('tier.'+tier)||tier,name})+'\n\n'));
-        return false;
-      }
-      case 'rm': {
-        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('model.rm_usage')+'\n\n')); return false; }
-        const tier = rest[0]! as ModelTier;
-        if (!['reader','reasoning','action'].includes(tier)) { process.stdout.write(t.error(this.i18n.t('model.invalid_tier',{tier})+'\n\n')); return false; }
-        const name = rest.slice(1).join(' ');
-        this.configStore.removeModel(tier, name);
-        process.stdout.write(t.success(this.i18n.t('model.removed',{name,tier:this.i18n.t('tier.'+tier)||tier})+'\n\n'));
-        return false;
-      }
-      case 'key': {
-        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('model.key_usage')+'\n\n')); return false; }
-        const prov = rest[0]!; const key = rest.slice(1).join(' ');
-        const cleanKey = key.trim();
-        this.configStore.setProviderKey(prov, cleanKey);
-        const masked = cleanKey.length > 10 ? cleanKey.slice(0,6) + '****' + cleanKey.slice(-4) : '****';
-        process.stdout.write(t.success(this.i18n.t('model.key_set',{provider:prov,masked})+'\n\n'));
-        return false;
-      }
-      case 'fallback': { this._showFallbackChains(); return false; }
-      default: { process.stdout.write(t.warning(this.i18n.t('model.unknown_subcmd',{sub})+'\n\n')); return false; }
-    }
-  }
-
-  private _handleProviderCommand(args: string): boolean {
-    if (!args) { this._showProviderList(); return false; }
-    const parts = args.split(/\s+/);
-    const sub = parts[0]!; const rest = parts.slice(1);
-    switch (sub) {
-      case 'key': {
-        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('provider.key_usage')+'\n\n')); return false; }
-        this.configStore.setProviderKey(rest[0]!, rest.slice(1).join(' ').trim());
-        process.stdout.write(t.success(this.i18n.t('provider.key_set',{name:rest[0]!})+'\n\n'));
-        return false;
-      }
-      case 'url': {
-        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('provider.url_usage')+'\n\n')); return false; }
-        this.configStore.setProviderUrl(rest[0]!, rest.slice(1).join(' '));
-        process.stdout.write(t.success(this.i18n.t('provider.url_set',{name:rest[0]!})+'\n\n'));
-        return false;
-      }
-      case 'protocol': {
-        if (rest.length < 2) { process.stdout.write(t.warning(this.i18n.t('provider.protocol_usage')+'\n\n')); return false; }
-        this.configStore.setProviderProtocol(rest[0]!, rest[1]!);
-        process.stdout.write(t.success(this.i18n.t('provider.protocol_set',{name:rest[0]!,protocol:rest[1]!})+'\n\n'));
-        return false;
-      }
-      default: { process.stdout.write(t.warning(this.i18n.t('provider.unknown_subcmd',{sub})+'\n\n')); return false; }
-    }
-  }
-
-  private _showModelView(): void {
-    const cfg = this.configStore.load();
-    const tiers: ModelTier[] = ['reader','reasoning','action'];
-
-    process.stdout.write('\n');
-    for (const tier of tiers) {
-      const tc = cfg.models[tier];
-      const r = this.modelRegistry.resolve(tier);
-      const label = this.i18n.t('tier.'+tier) || tier;
-      const desc = this.i18n.t('tier.'+tier+'_desc') || '';
-      const icon = tier==='reader'?t.blue('◆'):tier==='reasoning'?t.purple('◆'):t.success('◆');
-      process.stdout.write(`  ${icon} ${s.bold(label)}  ${t.faint(desc)}\n`);
-      if (!tc.list.length) {
-        process.stdout.write(`    ${t.faint(this.i18n.t('model.empty'))}\n`);
-      } else {
-        for (const m of tc.list) {
-          const mark = m.name===tc.active?t.accent('▶'):' ';
-          const keyOk = cfg.providers[m.provider]?.apiKey ? t.success('🔑') : t.faint('🔒');
-          process.stdout.write(`    ${mark} ${m.name}  ${t.dim('@'+m.provider)} ${keyOk}\n`);
-        }
-      }
-      if (r && r.name!==tc.active) {
-        process.stdout.write(`    ${t.faint('→ '+this.i18n.t('model.fallback_label')+' '+r.name)}\n`);
-      }
-    }
-    process.stdout.write('\n');
-    process.stdout.write(`  ${t.dim(this.i18n.t('model.quick_start'))}\n`);
-    process.stdout.write(`  ${t.dim(this.i18n.t('model.example_add'))}\n`);
-    process.stdout.write(`  ${t.dim(this.i18n.t('model.example_key'))}\n`);
-    process.stdout.write(`  ${t.dim(this.i18n.t('model.example_more'))}\n`);
-    process.stdout.write('\n');
-  }
-
   private _handleMemoryCommand(args: string): boolean {
     if (!this.memory) { process.stdout.write(t.dim('Memory disabled.\n\n')); return false; }
     if (args.startsWith('clear')) {
@@ -1222,29 +500,6 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
     return false;
   }
 
-  private _showProviderList(): void {
-    const cfg = this.configStore.load();
-    const names = Object.keys(cfg.providers);
-    if (!names.length) { process.stdout.write(t.dim(this.i18n.t('provider.none')+'\n\n')); return; }
-    process.stdout.write('\n');
-    for (const name of names) {
-      const p = cfg.providers[name]!;
-      const proto = resolveProtocol(name, p);
-      const keyIcon = p.apiKey ? t.success('🔑') : t.faint('🔒');
-      process.stdout.write(`  ${s.bold(name)}  ${t.dim('protocol: '+proto)}  ${keyIcon}\n`);
-    }
-    process.stdout.write(`\n  ${t.dim(this.i18n.t('provider.hint'))}\n\n`);
-  }
-
-  private _showFallbackChains(): void {
-    for (const tier of ['reader','reasoning','action'] as ModelTier[]) {
-      const chain = this.modelRegistry.getFallbackChain(tier);
-      const parts = chain.map(c => `${c.model.name} ${t.dim('('+this.i18n.t('tier.'+c.from)+')')}`);
-      const sep = this.i18n.t('model.chain_separator');
-      process.stdout.write(`${s.bold(this.i18n.t('tier.'+tier)||tier)}: ${parts.join(sep)}\n`);
-    }
-    process.stdout.write('\n');
-  }
 
   private async _showLanguageSelector(): Promise<void> {
     try {
@@ -1265,40 +520,8 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
     }
   }
 
-  private _buildTui(cmds?: Array<{ name: string; desc: string }>): void {
-    const defaults: Array<{ name: string; desc: string }> = [
-      { name: '/plan',     desc: this.i18n.t('help.plan') },
-      { name: '/rewind',   desc: this.i18n.t('help.rewind') },
-      { name: '/resume',   desc: this.i18n.t('help.resume') },
-      { name: '/clear',    desc: this.i18n.t('help.clear') },
-      { name: '/reset',    desc: this.i18n.t('help.clear') },
-      { name: '/sessions', desc: this.i18n.t('help.sessions') },
-      { name: '/history',  desc: this.i18n.t('help.sessions') },
-      { name: '/model',    desc: this.i18n.t('help.model') },
-      { name: '/provider', desc: this.i18n.t('help.provider') },
-      { name: '/memory',   desc: this.i18n.t('help.memory') },
-      { name: '/web',      desc: this.i18n.t('help.web') },
-      { name: '/export',   desc: this.i18n.t('help.export') },
-      { name: '/doctor',   desc: this.i18n.t('help.doctor') },
-      { name: '/checkpoint', desc: this.i18n.t('help.checkpoint') },
-      { name: '/git',      desc: this.i18n.t('help.git') },
-      { name: '/test',     desc: this.i18n.t('help.test') },
-      { name: '/build',    desc: this.i18n.t('help.build') },
-      { name: '/lint',     desc: this.i18n.t('help.lint') },
-      { name: '/preview',  desc: this.i18n.t('help.preview') },
-      { name: '/file',     desc: this.i18n.t('help.file') },
-      { name: '/zip',      desc: this.i18n.t('help.zip') },
-      { name: '/repo',     desc: this.i18n.t('help.repo') },
-      { name: '/symbol',   desc: this.i18n.t('help.symbol') },
-      { name: '/deps',     desc: this.i18n.t('help.deps') },
-      { name: '/mcp',      desc: this.i18n.t('help.mcp') },
-      { name: '/plugin',   desc: this.i18n.t('help.plugin') },
-      { name: '/version',  desc: this.i18n.t('help.version') },
-      { name: '/language', desc: this.i18n.t('help.language') },
-      { name: '/help',     desc: this.i18n.t('help.help') },
-      { name: '/exit',     desc: this.i18n.t('help.exit') },
-    ];
-    this.commands = cmds ?? defaults;
+  private _buildTui(cmds?: ReplCommandInfo[]): void {
+    this.commands = cmds ?? buildDefaultCommands(this.i18n);
     this.tui = new TuiInput({
       projectRoot: this.root,
       commands: this.commands,
@@ -1355,15 +578,5 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
     }));
   }
 
-  private async _sessions(): Promise<void> {
-    try {
-      const { AuditLogger } = await import('@customize-agent/runtime');
-      const sessions = await AuditLogger.listSessions();
-      if (!sessions.length) { process.stdout.write(t.dim(this.i18n.t('cmd.no_sessions') + '\n\n')); return; }
-      process.stdout.write(t.dim(`${this.i18n.t('cmd.sessions_total')} ${sessions.length}\n`));
-      for (const s of sessions.slice(0, 20)) {
-        process.stdout.write(`  ${t.text(s.id)}\n    ${t.dim(this.i18n.t('session.date_label') + ':')} ${s.date}  ${t.dim(this.i18n.t('session.events_label') + ':')} ${s.eventCount}\n    ${t.dim(this.i18n.t('session.task_label') + ':')} ${s.taskPreview}\n\n`);
-      }
-    } catch (err) { process.stdout.write(t.error(`Error: ${(err as Error).message}\n\n`)); }
-  }
+
 }

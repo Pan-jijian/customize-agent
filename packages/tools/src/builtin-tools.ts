@@ -3,6 +3,8 @@ import { existsSync } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { createHash } from 'crypto';
+import { WorkspaceSnapshotService } from './workspace-snapshot.js';
+import { WorkspaceFs } from './workspace-fs.js';
 import { execa, execaCommand } from 'execa';
 import sharp from 'sharp';
 import mammoth from 'mammoth';
@@ -12,12 +14,6 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'target', '.next', '.turbo', '.cache']);
-const SNAPSHOT_MAX_FILE_SIZE = 25_000_000;
-const SNAPSHOT_MAX_TOTAL_SIZE = 250_000_000;
-
-type SnapshotEntry = { path: string; file: string; size: number; mtimeMs: number; mode: number };
-type SnapshotManifest = { version: 2; name: string; createdAt: string; files: SnapshotEntry[]; skipped: Array<{ path: string; reason: string }> };
-type Snapshot = Map<string, Buffer>;
 
 type PackageInfo = { version?: string };
 type BackgroundProcess = { command: string; child: any; output: string[]; startedAt: string };
@@ -26,31 +22,18 @@ type PluginConfig = { installed: string[] };
 
 export class BuiltinTools {
   private static background = new Map<string, BackgroundProcess>();
+  private snapshots: WorkspaceSnapshotService;
+  private workspaceFs: WorkspaceFs;
 
-  constructor(private cwd: string = process.cwd()) {}
+  constructor(private cwd: string = process.cwd()) {
+    this.snapshots = new WorkspaceSnapshotService(cwd);
+    this.workspaceFs = new WorkspaceFs(cwd);
+  }
 
   private resolveSafe(relativePath: string): string {
-    const resolved = path.resolve(this.cwd, relativePath || '.');
-    const root = path.resolve(this.cwd);
-    if (!resolved.startsWith(root + path.sep) && resolved !== root) throw new Error(`Path escapes project root: ${relativePath}`);
-    return resolved;
+    return this.workspaceFs.resolveSafe(relativePath);
   }
 
-  private snapshotDir(): string {
-    return path.join(os.homedir(), '.customize-agent', 'snapshots');
-  }
-
-  private snapshotFile(name: string): string {
-    return path.join(this.snapshotDir(), `${name}.json`);
-  }
-
-  private checkpointDir(name: string): string {
-    return path.join(this.snapshotDir(), name);
-  }
-
-  private checkpointManifestFile(name: string): string {
-    return path.join(this.checkpointDir(name), 'manifest.json');
-  }
 
   private configDir(): string {
     return path.join(os.homedir(), '.customize-agent');
@@ -78,50 +61,42 @@ export class BuiltinTools {
   }
 
   async editFile(filePath: string, search: string, replace: string): Promise<string> {
-    const full = this.resolveSafe(filePath);
-    const original = await fs.readFile(full, 'utf-8');
+    const original = await this.workspaceFs.readText(filePath);
     if (!original.includes(search)) throw new Error(`Search text not found in ${filePath}`);
     const updated = original.replace(search, replace);
-    await fs.writeFile(full, updated, 'utf-8');
+    await this.workspaceFs.writeText(filePath, updated);
     return `Edited ${filePath}: ${original.length} -> ${updated.length} chars`;
   }
 
   async multiEdit(filePath: string, edits: Array<{ search: string; replace: string }>): Promise<string> {
-    const full = this.resolveSafe(filePath);
-    let content = await fs.readFile(full, 'utf-8');
+    let content = await this.workspaceFs.readText(filePath);
     let count = 0;
     for (const edit of edits) {
       if (!content.includes(edit.search)) throw new Error(`Search text not found for edit ${count + 1}`);
       content = content.replace(edit.search, edit.replace);
       count++;
     }
-    await fs.writeFile(full, content, 'utf-8');
+    await this.workspaceFs.writeText(filePath, content);
     return `Applied ${count} edits to ${filePath}`;
   }
 
   async deleteFile(filePath: string): Promise<string> {
-    await fs.rm(this.resolveSafe(filePath), { recursive: true, force: true });
+    await this.workspaceFs.delete(filePath);
     return `Deleted ${filePath}`;
   }
 
   async moveFile(from: string, to: string): Promise<string> {
-    const src = this.resolveSafe(from);
-    const dst = this.resolveSafe(to);
-    await fs.mkdir(path.dirname(dst), { recursive: true });
-    await fs.rename(src, dst);
+    await this.workspaceFs.move(from, to);
     return `Moved ${from} -> ${to}`;
   }
 
   async copyFile(from: string, to: string): Promise<string> {
-    const src = this.resolveSafe(from);
-    const dst = this.resolveSafe(to);
-    await fs.mkdir(path.dirname(dst), { recursive: true });
-    await fs.cp(src, dst, { recursive: true });
+    await this.workspaceFs.copy(from, to);
     return `Copied ${from} -> ${to}`;
   }
 
   async mkdir(dir: string): Promise<string> {
-    await fs.mkdir(this.resolveSafe(dir), { recursive: true });
+    await this.workspaceFs.mkdir(dir);
     return `Created directory ${dir}`;
   }
 
@@ -472,69 +447,23 @@ export class BuiltinTools {
   }
 
   async checkpointCreate(name: string): Promise<string> {
-    const dir = this.checkpointDir(name);
-    const filesDir = path.join(dir, 'files');
-    await fs.rm(dir, { recursive: true, force: true });
-    await fs.mkdir(filesDir, { recursive: true });
-
-    const manifest: SnapshotManifest = { version: 2, name, createdAt: new Date().toISOString(), files: [], skipped: [] };
-    let totalSize = 0;
-    for (const rel of await this.walk(this.cwd)) {
-      const full = this.resolveSafe(rel);
-      const stat = await fs.stat(full);
-      if (stat.size > SNAPSHOT_MAX_FILE_SIZE) {
-        manifest.skipped.push({ path: rel, reason: `file too large (${stat.size} bytes)` });
-        continue;
-      }
-      if (totalSize + stat.size > SNAPSHOT_MAX_TOTAL_SIZE) {
-        manifest.skipped.push({ path: rel, reason: 'snapshot total size limit reached' });
-        continue;
-      }
-      const file = createHash('sha256').update(rel).digest('hex');
-      await fs.copyFile(full, path.join(filesDir, file));
-      manifest.files.push({ path: rel, file, size: stat.size, mtimeMs: stat.mtimeMs, mode: stat.mode });
-      totalSize += stat.size;
-    }
-
-    await fs.writeFile(this.checkpointManifestFile(name), JSON.stringify(manifest, null, 2), 'utf-8');
+    const manifest = await this.snapshots.createCheckpoint(name);
     return `Checkpoint created: ${name} (${manifest.files.length} files, ${manifest.skipped.length} skipped)`;
   }
 
   async checkpointList(): Promise<string> {
-    await fs.mkdir(this.snapshotDir(), { recursive: true });
-    const entries = await fs.readdir(this.snapshotDir(), { withFileTypes: true });
-    const names = entries
-      .filter(entry => entry.isDirectory() || entry.name.endsWith('.json'))
-      .map(entry => entry.isDirectory() ? entry.name : entry.name.replace(/\.json$/, ''));
-    return [...new Set(names)].join('\n') || 'No checkpoints.';
+    const names = await this.snapshots.listCheckpoints();
+    return names.join('\n') || 'No checkpoints.';
   }
 
   async checkpointRestore(name: string): Promise<string> {
-    if (existsSync(this.checkpointManifestFile(name))) {
-      const manifest = JSON.parse(await fs.readFile(this.checkpointManifestFile(name), 'utf-8')) as SnapshotManifest;
-      await this.restoreManifestSnapshot(manifest, this.checkpointDir(name));
-      return `Checkpoint restored: ${name} (${manifest.files.length} files)`;
-    }
-    const raw = await fs.readFile(this.snapshotFile(name), 'utf-8');
-    const snapshot = new Map((JSON.parse(raw) as Array<[string, string]>).map(([k, v]) => [k, Buffer.from(v, 'base64')]));
-    await this.restoreSnapshot(snapshot);
-    return `Checkpoint restored: ${name}`;
+    const result = await this.snapshots.restoreCheckpoint(name);
+    return `Checkpoint restored: ${name} (${result.files} files)`;
   }
 
   async checkpointDelete(name: string): Promise<string> {
-    await fs.rm(this.checkpointDir(name), { recursive: true, force: true });
-    await fs.rm(this.snapshotFile(name), { force: true });
+    await this.snapshots.deleteCheckpoint(name);
     return `Checkpoint deleted: ${name}`;
-  }
-
-  private async takeSnapshot(): Promise<Snapshot> {
-    const snapshot: Snapshot = new Map();
-    for (const rel of await this.walk(this.cwd)) {
-      const full = this.resolveSafe(rel);
-      const stat = await fs.stat(full);
-      if (stat.size <= SNAPSHOT_MAX_FILE_SIZE) snapshot.set(rel, await fs.readFile(full));
-    }
-    return snapshot;
   }
 
   private async mediaProbe(filePath: string): Promise<string> {
@@ -563,28 +492,6 @@ export class BuiltinTools {
     await fs.writeFile(this.pluginConfigFile(), JSON.stringify(config, null, 2), 'utf-8');
   }
 
-  private async restoreSnapshot(snapshot: Snapshot): Promise<void> {
-    const current = await this.takeSnapshot();
-    for (const [rel] of current) if (!snapshot.has(rel)) await fs.rm(this.resolveSafe(rel), { force: true });
-    for (const [rel, content] of snapshot) {
-      const full = this.resolveSafe(rel);
-      await fs.mkdir(path.dirname(full), { recursive: true });
-      await fs.writeFile(full, content);
-    }
-  }
-
-  private async restoreManifestSnapshot(manifest: SnapshotManifest, checkpointDir: string): Promise<void> {
-    const keep = new Set(manifest.files.map(file => file.path));
-    for (const rel of await this.walk(this.cwd)) {
-      if (!keep.has(rel)) await fs.rm(this.resolveSafe(rel), { force: true });
-    }
-    for (const entry of manifest.files) {
-      const full = this.resolveSafe(entry.path);
-      await fs.mkdir(path.dirname(full), { recursive: true });
-      await fs.copyFile(path.join(checkpointDir, 'files', entry.file), full);
-      await fs.chmod(full, entry.mode).catch(() => undefined);
-    }
-  }
 
   private async versionOf(bin: string, args: string[]): Promise<string> {
     const res = await execa(bin, args, { reject: false });

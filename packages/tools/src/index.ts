@@ -5,3 +5,5 @@ export { UnifiedSyntaxValidator, type SyntaxValidationResult, type ValidationErr
 export { DiffEngine, type DiffBlock } from './diff.js';
 export { PerceptionGateway } from './perception-gateway.js';
 export { BuiltinTools } from './builtin-tools.js';
+export { WorkspaceSnapshotService, type WorkspaceSnapshot, type SerializedWorkspaceSnapshot } from './workspace-snapshot.js';
+export { WorkspaceFs } from './workspace-fs.js';
