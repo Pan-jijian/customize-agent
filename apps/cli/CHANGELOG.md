@@ -1,5 +1,11 @@
 # customize-agent
 
+## 1.0.3
+
+### Patch Changes
+
+- 修复 Commander 程序名统一为 `customize`（与 bin 入口保持一致）
+
 ## 1.0.2
 
 ### Patch Changes
