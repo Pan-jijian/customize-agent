@@ -1,4 +1,5 @@
 import type { Message, FunctionDefinition } from '@customize-agent/types';
+import { estimateCostUsd } from '@customize-agent/llm';
 import type { SubagentConfig, SubagentResult } from './types.js';
 import { ExecutionController } from '../../execution-controller.js';
 
@@ -52,8 +53,9 @@ export class SubagentRunner {
         toolCalls = response.toolCalls;
         if (response.usage) {
           totalTokens += response.usage.promptTokens + response.usage.completionTokens;
-          // 粗略成本估算：混合费率约 $3/1M token
-          totalCost += (response.usage.promptTokens + response.usage.completionTokens) * 3 / 1_000_000;
+          const roundCost = estimateCostUsd(config.provider, response.usage);
+          totalCost += roundCost;
+          controller.budget.addCost(roundCost);
         }
       } catch (err) {
         return {

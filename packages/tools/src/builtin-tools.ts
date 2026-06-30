@@ -13,7 +13,10 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'target', '.next', '.turbo', '.cache']);
 const SNAPSHOT_MAX_FILE_SIZE = 25_000_000;
+const SNAPSHOT_MAX_TOTAL_SIZE = 250_000_000;
 
+type SnapshotEntry = { path: string; file: string; size: number; mtimeMs: number; mode: number };
+type SnapshotManifest = { version: 2; name: string; createdAt: string; files: SnapshotEntry[]; skipped: Array<{ path: string; reason: string }> };
 type Snapshot = Map<string, Buffer>;
 
 type PackageInfo = { version?: string };
@@ -39,6 +42,14 @@ export class BuiltinTools {
 
   private snapshotFile(name: string): string {
     return path.join(this.snapshotDir(), `${name}.json`);
+  }
+
+  private checkpointDir(name: string): string {
+    return path.join(this.snapshotDir(), name);
+  }
+
+  private checkpointManifestFile(name: string): string {
+    return path.join(this.checkpointDir(name), 'manifest.json');
   }
 
   private configDir(): string {
@@ -461,19 +472,49 @@ export class BuiltinTools {
   }
 
   async checkpointCreate(name: string): Promise<string> {
-    const snapshot = await this.takeSnapshot();
-    await fs.mkdir(this.snapshotDir(), { recursive: true });
-    await fs.writeFile(this.snapshotFile(name), JSON.stringify([...snapshot.entries()].map(([k, v]) => [k, v.toString('base64')])), 'utf-8');
-    return `Checkpoint created: ${name}`;
+    const dir = this.checkpointDir(name);
+    const filesDir = path.join(dir, 'files');
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.mkdir(filesDir, { recursive: true });
+
+    const manifest: SnapshotManifest = { version: 2, name, createdAt: new Date().toISOString(), files: [], skipped: [] };
+    let totalSize = 0;
+    for (const rel of await this.walk(this.cwd)) {
+      const full = this.resolveSafe(rel);
+      const stat = await fs.stat(full);
+      if (stat.size > SNAPSHOT_MAX_FILE_SIZE) {
+        manifest.skipped.push({ path: rel, reason: `file too large (${stat.size} bytes)` });
+        continue;
+      }
+      if (totalSize + stat.size > SNAPSHOT_MAX_TOTAL_SIZE) {
+        manifest.skipped.push({ path: rel, reason: 'snapshot total size limit reached' });
+        continue;
+      }
+      const file = createHash('sha256').update(rel).digest('hex');
+      await fs.copyFile(full, path.join(filesDir, file));
+      manifest.files.push({ path: rel, file, size: stat.size, mtimeMs: stat.mtimeMs, mode: stat.mode });
+      totalSize += stat.size;
+    }
+
+    await fs.writeFile(this.checkpointManifestFile(name), JSON.stringify(manifest, null, 2), 'utf-8');
+    return `Checkpoint created: ${name} (${manifest.files.length} files, ${manifest.skipped.length} skipped)`;
   }
 
   async checkpointList(): Promise<string> {
     await fs.mkdir(this.snapshotDir(), { recursive: true });
-    const files = (await fs.readdir(this.snapshotDir())).filter(f => f.endsWith('.json'));
-    return files.map(f => f.replace(/\.json$/, '')).join('\n') || 'No checkpoints.';
+    const entries = await fs.readdir(this.snapshotDir(), { withFileTypes: true });
+    const names = entries
+      .filter(entry => entry.isDirectory() || entry.name.endsWith('.json'))
+      .map(entry => entry.isDirectory() ? entry.name : entry.name.replace(/\.json$/, ''));
+    return [...new Set(names)].join('\n') || 'No checkpoints.';
   }
 
   async checkpointRestore(name: string): Promise<string> {
+    if (existsSync(this.checkpointManifestFile(name))) {
+      const manifest = JSON.parse(await fs.readFile(this.checkpointManifestFile(name), 'utf-8')) as SnapshotManifest;
+      await this.restoreManifestSnapshot(manifest, this.checkpointDir(name));
+      return `Checkpoint restored: ${name} (${manifest.files.length} files)`;
+    }
     const raw = await fs.readFile(this.snapshotFile(name), 'utf-8');
     const snapshot = new Map((JSON.parse(raw) as Array<[string, string]>).map(([k, v]) => [k, Buffer.from(v, 'base64')]));
     await this.restoreSnapshot(snapshot);
@@ -481,6 +522,7 @@ export class BuiltinTools {
   }
 
   async checkpointDelete(name: string): Promise<string> {
+    await fs.rm(this.checkpointDir(name), { recursive: true, force: true });
     await fs.rm(this.snapshotFile(name), { force: true });
     return `Checkpoint deleted: ${name}`;
   }
@@ -528,6 +570,19 @@ export class BuiltinTools {
       const full = this.resolveSafe(rel);
       await fs.mkdir(path.dirname(full), { recursive: true });
       await fs.writeFile(full, content);
+    }
+  }
+
+  private async restoreManifestSnapshot(manifest: SnapshotManifest, checkpointDir: string): Promise<void> {
+    const keep = new Set(manifest.files.map(file => file.path));
+    for (const rel of await this.walk(this.cwd)) {
+      if (!keep.has(rel)) await fs.rm(this.resolveSafe(rel), { force: true });
+    }
+    for (const entry of manifest.files) {
+      const full = this.resolveSafe(entry.path);
+      await fs.mkdir(path.dirname(full), { recursive: true });
+      await fs.copyFile(path.join(checkpointDir, 'files', entry.file), full);
+      await fs.chmod(full, entry.mode).catch(() => undefined);
     }
   }
 

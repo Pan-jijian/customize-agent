@@ -1,3 +1,5 @@
+import type { Message } from '@customize-agent/types';
+import { estimateCostUsd } from '@customize-agent/llm';
 import type { SubagentConfig, SubagentResult, SubagentTask } from './subagent/types.js';
 import { SubagentRunner } from './subagent/runner.js';
 import type { SafeWorktreeManager, WorktreeContext } from './worktree.js';
@@ -46,7 +48,7 @@ export class Orchestrator {
    */
   async orchestrate(
     tasks: SubagentTask[],
-    configFactory: (task: SubagentTask, index: number) => SubagentConfig,
+    configFactory: (task: SubagentTask, index: number, worktreePath?: string) => SubagentConfig,
     mode: CollaborationMode = 'orchestrator',
   ): Promise<OrchestrationResult> {
     switch (mode) {
@@ -59,62 +61,75 @@ export class Orchestrator {
     }
   }
 
-  /** Orchestrator 模式：按 DAG 拓扑序串行执行 */
+  /** Orchestrator 模式：按 DAG 依赖层并发执行 */
   private async _runOrchestrator(
     tasks: SubagentTask[],
-    configFactory: (task: SubagentTask, index: number) => SubagentConfig,
+    configFactory: (task: SubagentTask, index: number, worktreePath?: string) => SubagentConfig,
   ): Promise<OrchestrationResult> {
     const completed = new Map<string, SubagentResult>();
+    const skipped = new Set<string>();
     const allResults: SubagentResult[] = [];
     let totalTokens = 0;
     let totalCost = 0;
     const startTime = Date.now();
+    const remaining = new Map(tasks.map(task => [task.id, task]));
 
-    // 拓扑排序：按依赖关系确定执行顺序
-    const sorted = this._topologicalSort(tasks);
-
-    for (const task of sorted) {
-      // 检查依赖是否全部完成
-      const depsFailed = task.dependsOn.filter(depId => {
-        const dep = completed.get(depId);
-        return !dep || !dep.success;
-      });
-      if (depsFailed.length > 0) {
-        continue; // 跳过依赖失败的步骤
+    while (remaining.size > 0) {
+      const blocked = Array.from(remaining.values()).filter(task =>
+        task.dependsOn.some(depId => skipped.has(depId) || (completed.has(depId) && !completed.get(depId)!.success))
+      );
+      for (const task of blocked) {
+        remaining.delete(task.id);
+        skipped.add(task.id);
       }
 
-      // 派生子智能体
-      const config = configFactory(task, allResults.length);
+      const ready = Array.from(remaining.values()).filter(task =>
+        task.dependsOn.every(depId => completed.has(depId))
+      );
 
-      // 如果需要修改文件，创建临时 Worktree
-      let worktree: WorktreeContext | undefined;
-      if (task.expectedFiles.length > 0 && this.worktreeManager) {
-        try {
-          worktree = await this.worktreeManager.createWorktree(config.name);
-        } catch {
-          // Worktree 不可用则直接在主线执行
+      if (ready.length === 0) break;
+
+      const results = await Promise.all(ready.map(async (task, index) => {
+        const baseName = `${task.id}-${allResults.length + index + 1}`;
+        let worktree: WorktreeContext | undefined;
+        if (task.expectedFiles.length > 0) {
+          if (!this.worktreeManager) throw new Error(`Task ${task.id} requires isolated worktree but no SafeWorktreeManager is configured`);
+          worktree = await this.worktreeManager.createWorktree(baseName);
         }
-      }
+        const config = configFactory(task, allResults.length + index, worktree?.path);
 
-      const result = await this.runner.run(config, task.description);
-      allResults.push(result);
-      completed.set(task.id, result);
-      totalTokens += result.tokensUsed;
-      totalCost += result.costUsd;
-
-      // 清理 Worktree
-      if (worktree) {
-        try {
-          await this.worktreeManager!.destroyWorktree(worktree, result.success);
-        } catch {
-          // 最好清理
+        const result = await this.runner.run(config, task.description);
+        if (worktree) {
+          try {
+            if (result.success) {
+              const merge = await this.worktreeManager!.safeMerge(worktree);
+              if (!merge.success) {
+                result.success = false;
+                result.summary += `\nWorktree merge conflicts: ${merge.conflicts.join(', ')}`;
+              }
+            }
+            await this.worktreeManager!.destroyWorktree(worktree, result.success);
+          } catch (err) {
+            result.success = false;
+            result.summary += `\nWorktree cleanup/merge failed: ${(err as Error).message}`;
+          }
         }
+        return { task, result };
+      }));
+
+      for (const { task, result } of results) {
+        remaining.delete(task.id);
+        completed.set(task.id, result);
+        allResults.push(result);
+        totalTokens += result.tokensUsed;
+        totalCost += result.costUsd;
+        if (!result.success) skipped.add(task.id);
       }
     }
 
     return {
-      success: allResults.every(r => r.success),
-      summary: `${allResults.length}/${tasks.length} 子任务完成`,
+      success: allResults.length === tasks.length && allResults.every(r => r.success),
+      summary: `${allResults.length}/${tasks.length} 子任务完成${skipped.size > 0 ? `，跳过 ${skipped.size} 个依赖失败任务` : ''}`,
       subagentResults: allResults,
       totalTokens,
       totalCost,
@@ -125,7 +140,7 @@ export class Orchestrator {
   /** Pipeline 模式：串行流水线（A→B→C），每阶段结果作为下一阶段输入 */
   private async _runPipeline(
     tasks: SubagentTask[],
-    configFactory: (task: SubagentTask, index: number) => SubagentConfig,
+    configFactory: (task: SubagentTask, index: number, worktreePath?: string) => SubagentConfig,
   ): Promise<OrchestrationResult> {
     const allResults: SubagentResult[] = [];
     let totalTokens = 0;
@@ -166,7 +181,7 @@ export class Orchestrator {
   /** Swarm 模式：同任务多方案并发执行，返回最优结果 */
   private async _runSwarm(
     tasks: SubagentTask[],
-    configFactory: (task: SubagentTask, index: number) => SubagentConfig,
+    configFactory: (task: SubagentTask, index: number, worktreePath?: string) => SubagentConfig,
   ): Promise<OrchestrationResult> {
     const allResults: SubagentResult[] = [];
     let totalTokens = 0;
@@ -192,15 +207,16 @@ export class Orchestrator {
       totalCost += r.costUsd;
     }
 
-    // 选择最优：优先选择成功的结果，其中选 summary 最长的（内容最详细）
     const successful = results.filter(r => r.success);
-    const best = successful.length > 0
-      ? successful.reduce((a, b) => a.summary.length > b.summary.length ? a : b)
-      : results[0]!;
+    const judgeConfig = configFactory(mainTask, swarmSize);
+    const judged = await this._judgeSwarmResults(mainTask.description, results, judgeConfig);
+    totalTokens += judged.tokensUsed;
+    totalCost += judged.costUsd;
+    const best = results[judged.bestIndex] ?? successful[0] ?? results[0]!;
 
     return {
       success: best.success,
-      summary: `Swarm: ${successful.length}/${swarmSize} 方案成功，采纳最优方案:\n${best.summary}`,
+      summary: `Swarm: ${successful.length}/${swarmSize} 方案成功，评判选择方案 ${judged.bestIndex + 1}:\n${best.summary}\n\n评判理由:\n${judged.reason}`,
       subagentResults: allResults,
       totalTokens,
       totalCost,
@@ -208,35 +224,56 @@ export class Orchestrator {
     };
   }
 
-  /** 简单拓扑排序（Kahn 算法） */
-  private _topologicalSort(tasks: SubagentTask[]): SubagentTask[] {
-    const taskMap = new Map(tasks.map(t => [t.id, t]));
-    const inDegree = new Map<string, number>();
-    const adjacency = new Map<string, string[]>();
+  private async _judgeSwarmResults(
+    task: string,
+    results: SubagentResult[],
+    config: SubagentConfig,
+  ): Promise<{ bestIndex: number; reason: string; tokensUsed: number; costUsd: number }> {
+    const messages: Message[] = [
+      {
+        role: 'system',
+        content: 'You are a strict evaluator. Compare candidate agent results and choose the best one for correctness, completeness, safety, and usefulness. Return only JSON: {"bestIndex":0,"reason":"..."}.',
+      },
+      {
+        role: 'user',
+        content: [
+          `Task: ${task}`,
+          '',
+          ...results.map((result, index) => [
+            `Candidate ${index}:`,
+            `success=${result.success}`,
+            `summary=${result.summary}`,
+            `findings=${result.findings.join('\n')}`,
+            `filesModified=${result.filesModified.join(', ')}`,
+          ].join('\n')),
+        ].join('\n\n'),
+      },
+    ];
 
-    for (const t of tasks) {
-      inDegree.set(t.id, t.dependsOn.length);
-      for (const dep of t.dependsOn) {
-        if (!adjacency.has(dep)) adjacency.set(dep, []);
-        adjacency.get(dep)!.push(t.id);
-      }
+    try {
+      const response = await config.provider.chat(messages, { temperature: 0, maxTokens: 800 });
+      const usage = response.usage;
+      const tokensUsed = usage ? usage.promptTokens + usage.completionTokens : 0;
+      const costUsd = usage ? estimateCostUsd(config.provider, usage) : 0;
+      const jsonText = response.content.match(/\{[\s\S]*\}/)?.[0] ?? response.content;
+      const parsed = JSON.parse(jsonText) as { bestIndex?: number; reason?: string };
+      const bestIndex = Number.isInteger(parsed.bestIndex) && parsed.bestIndex! >= 0 && parsed.bestIndex! < results.length
+        ? parsed.bestIndex!
+        : this._fallbackBestIndex(results);
+      return { bestIndex, reason: parsed.reason ?? response.content.trim(), tokensUsed, costUsd };
+    } catch {
+      return { bestIndex: this._fallbackBestIndex(results), reason: '评判模型不可用，回退为优先成功且内容更完整的方案。', tokensUsed: 0, costUsd: 0 };
     }
-
-    const queue = tasks.filter(t => t.dependsOn.length === 0).map(t => t.id);
-    const sorted: SubagentTask[] = [];
-
-    while (queue.length > 0) {
-      const desc = queue.shift()!;
-      const task = taskMap.get(desc);
-      if (task) sorted.push(task);
-
-      for (const neighbor of adjacency.get(desc) ?? []) {
-        const newDegree = (inDegree.get(neighbor) ?? 1) - 1;
-        inDegree.set(neighbor, newDegree);
-        if (newDegree === 0) queue.push(neighbor);
-      }
-    }
-
-    return sorted;
   }
+
+  private _fallbackBestIndex(results: SubagentResult[]): number {
+    const successful = results
+      .map((result, index) => ({ result, index }))
+      .filter(item => item.result.success);
+    const candidates = successful.length > 0 ? successful : results.map((result, index) => ({ result, index }));
+    return candidates.reduce((best, item) =>
+      item.result.summary.length > best.result.summary.length ? item : best
+    ).index;
+  }
+
 }

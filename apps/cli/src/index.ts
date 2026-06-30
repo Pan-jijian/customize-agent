@@ -1,9 +1,9 @@
 import { Command } from 'commander';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
-import { readdirSync, statSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import { createProvider, type ILLMProvider } from '@customize-agent/llm';
-import { ToolRegistry, PermissionEngine, ExecutionController, Orchestrator, createBuiltinSubagentConfig, ROLE_CAPABILITY_MAP, type ToolExecutionContext, type CollaborationMode, type SubagentRole, type SubagentTask } from '@customize-agent/engine';
+import { ToolRegistry, PermissionEngine, ExecutionController, Orchestrator, SafeWorktreeManager, McpClient, createBuiltinSubagentConfig, ROLE_CAPABILITY_MAP, type ToolExecutionContext, type CollaborationMode, type SubagentRole, type SubagentTask, type McpServerConfig } from '@customize-agent/engine';
 import { ToolKit, SandboxExecutor, BuiltinTools } from '@customize-agent/tools';
 import { LSPManager, CodeSearcher } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
@@ -14,6 +14,7 @@ import { t, s, renderMarkdown } from './tui/renderer.js';
 import { type Message, BINARY_EXTENSIONS } from '@customize-agent/types';
 import { I18nManager } from './i18n/manager.js';
 import * as readline from 'readline';
+import * as os from 'os';
 
 /** 项目根目录 */
 const __filename = fileURLToPath(import.meta.url);
@@ -21,10 +22,6 @@ const PROJECT_ROOT = resolve(dirname(__filename), '../../..');
 
 const program = new Command();
 const configStore = new ConfigStore();
-const toolkit = new ToolKit(PROJECT_ROOT);
-const builtinTools = new BuiltinTools(PROJECT_ROOT);
-
-
 // Repository Map — 启动时生成项目结构树
 function _generateRepoMap(): string {
   const ignore = new Set(['node_modules', 'dist', '.git', '.DS_Store', '__pycache__', 'target']);
@@ -52,6 +49,39 @@ function _generateRepoMap(): string {
   return lines.join('\n');
 }
 let _repoMap: string | null = null;
+
+type CliMcpConfig = Record<string, { command: string; args?: string[]; cwd?: string; env?: Record<string, string> }>;
+
+function loadMcpServerConfigs(): McpServerConfig[] {
+  const file = join(os.homedir(), '.customize-agent', 'mcp.json');
+  if (!existsSync(file)) return [];
+  try {
+    const config = JSON.parse(readFileSync(file, 'utf-8')) as CliMcpConfig;
+    return Object.entries(config).map(([name, value]) => ({
+      name,
+      command: value.command,
+      args: value.args ?? [],
+      cwd: value.cwd ?? PROJECT_ROOT,
+      env: value.env,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function connectConfiguredMcp(registry: ToolRegistry): Promise<McpClient | undefined> {
+  const configs = loadMcpServerConfigs();
+  if (configs.length === 0) return undefined;
+  const client = new McpClient(registry);
+  for (const config of configs) {
+    try {
+      await client.connect(config);
+    } catch {
+      // MCP Server 不可用时跳过，避免阻塞主 Agent 启动。
+    }
+  }
+  return client;
+}
 
 // ── 国际化 ──
 let i18n: I18nManager;
@@ -109,10 +139,11 @@ function parseOrchestrationTasks(args: Record<string, unknown>): SubagentTask[] 
   return task ? [{ id: 'task-1', description: task, dependsOn: [], expectedFiles: [] }] : [];
 }
 
-function createSubagentToolRegistry(registry: ToolRegistry, role: SubagentRole): ToolRegistry {
+function createSubagentToolRegistry(role: SubagentRole, provider: ILLMProvider, root: string, lspManager?: LSPManager): ToolRegistry {
   const allowed = new Set<string>(ROLE_CAPABILITY_MAP[role]);
+  const baseRegistry = buildRegistry(lspManager, provider, root, false);
   const subRegistry = new ToolRegistry();
-  for (const tool of registry.listAll()) {
+  for (const tool of baseRegistry.listAll()) {
     if (tool.name === 'orchestrate_agents') continue;
     if (tool.capabilities.every(cap => allowed.has(cap))) {
       subRegistry.register(tool);
@@ -140,8 +171,10 @@ function formatOrchestrationResult(result: Awaited<ReturnType<Orchestrator['orch
 }
 
 /** 构建 ToolRegistry 并注册全部核心工具。传入 lspManager 时额外注册 LSP 工具 */
-function buildRegistry(lspManager?: LSPManager, provider?: ILLMProvider): ToolRegistry {
+function buildRegistry(lspManager?: LSPManager, provider?: ILLMProvider, root: string = PROJECT_ROOT, includeOrchestrator: boolean = true): ToolRegistry {
   const registry = new ToolRegistry();
+  const toolkit = new ToolKit(root);
+  const builtinTools = new BuiltinTools(root);
 
 
   registry.register({
@@ -169,8 +202,8 @@ function buildRegistry(lspManager?: LSPManager, provider?: ILLMProvider): ToolRe
       if (!BINARY_EXTENSIONS.has(ext)) {
         const head = content.slice(0, 1024);
         const nulCount = head.split('\x00').length - 1;
-        const nonPrintable = head.replace(/[\x20-\x7e\n\r\t]/g, '').length;
-        if (nulCount > 0 || nonPrintable > head.length * 0.3) {
+        const controlChars = head.replace(/[\P{Cc}\n\r\t]/gu, '').length;
+        if (nulCount > 0 || controlChars > head.length * 0.1) {
           return `[Binary] ${filePath} detected as binary content.`;
         }
       }
@@ -329,7 +362,7 @@ function buildRegistry(lspManager?: LSPManager, provider?: ILLMProvider): ToolRe
   reg(registry, 'checkpoint_restore', 'Restore an internal workspace checkpoint.', { name: { type: 'string', description: 'Checkpoint name' } }, ['name'], ['write_code'], true, async args => builtinTools.checkpointRestore(String(args.name)));
   reg(registry, 'checkpoint_delete', 'Delete an internal workspace checkpoint.', { name: { type: 'string', description: 'Checkpoint name' } }, ['name'], ['write_code'], true, async args => builtinTools.checkpointDelete(String(args.name)));
 
-  if (provider) {
+  if (provider && includeOrchestrator) {
     registry.register({
       name: 'orchestrate_agents',
       description: 'Delegate a complex task to built-in subagents and aggregate their results. Supports orchestrator, pipeline, and swarm collaboration modes.',
@@ -354,14 +387,16 @@ function buildRegistry(lspManager?: LSPManager, provider?: ILLMProvider): ToolRe
         const mode = parseCollaborationMode(args.mode);
         const defaultRole = parseSubagentRole(args.role, mode === 'swarm' ? 'implementer' : 'planner');
         const roles = Array.isArray(args.roles) ? args.roles : [];
-        const orchestrator = new Orchestrator();
-        const result = await orchestrator.orchestrate(tasks, (task, index) => {
+        const orchestrator = new Orchestrator(new SafeWorktreeManager(root));
+        const result = await orchestrator.orchestrate(tasks, (task, index, worktreePath) => {
           const role = parseSubagentRole(roles[index], defaultRole);
+          const subRoot = worktreePath ?? root;
+          const subLsp = worktreePath ? new LSPManager(worktreePath) : lspManager;
           return createBuiltinSubagentConfig(
             role,
             `${role}-${task.id}-${index + 1}`,
             provider,
-            createSubagentToolRegistry(registry, role),
+            createSubagentToolRegistry(role, provider, subRoot, subLsp),
           );
         }, mode);
 
@@ -476,9 +511,10 @@ function createApprovalHandler() {
 }
 
 /** 创建 Executor 实例（懒加载：provider 无 API key 也能进入 REPL） */
-function createExecutor(providerName?: string, modelName?: string, apiKey?: string, baseUrl?: string, lspManager?: LSPManager) {
+async function createExecutor(providerName?: string, modelName?: string, apiKey?: string, baseUrl?: string, lspManager?: LSPManager) {
   const provider = createProvider(providerName ?? 'deepseek', { modelName, apiKey, baseUrl });
   const registry = buildRegistry(lspManager, provider);
+  await connectConfiguredMcp(registry);
   const permissionEngine = new PermissionEngine();
   const controller = new ExecutionController({ maxBudgetUsd: 5.0, deadLoopThreshold: 4 });
   const approvalHandler = createApprovalHandler();
@@ -519,7 +555,8 @@ program.action(async () => {
       return;
     }
     const pCfg = configStore.getProvider(resolved.provider);
-    const executor = createExecutor(resolved.provider, resolved.name, pCfg?.apiKey, pCfg?.baseUrl);
+    const lsp = new LSPManager(PROJECT_ROOT);
+    const executor = await createExecutor(resolved.provider, resolved.name, pCfg?.apiKey, pCfg?.baseUrl, lsp);
 
     const history: Message[] = [
       { role: 'system', content: executor.getSystemPrompt() },
@@ -538,7 +575,7 @@ program.action(async () => {
     console.log(`   Task: "${opts.prompt}"`);
 
     try {
-      const updated = await executor.runTask(history, { readonly: opts.plan ?? false });
+      const updated = await executor.runTask(history, { plan: opts.plan ?? false, readonly: opts.plan ?? false });
       const lastAssistant = [...updated].reverse().find(m => m.role === 'assistant');
       if (lastAssistant) {
         const cleanContent = lastAssistant.content.trim();
@@ -561,8 +598,8 @@ program.action(async () => {
     : i18n.t('welcome.no_model');
   const providerCfg = resolved ? configStore.getProvider(resolved.provider) : undefined;
   const executor = resolved
-    ? createExecutor(resolved.provider, resolved.name, providerCfg?.apiKey, providerCfg?.baseUrl, lsp)
-    : createExecutor(undefined, undefined, undefined, undefined, lsp);
+    ? await createExecutor(resolved.provider, resolved.name, providerCfg?.apiKey, providerCfg?.baseUrl, lsp)
+    : await createExecutor(undefined, undefined, undefined, undefined, lsp);
 
   const memory = new MemoryManager();
 

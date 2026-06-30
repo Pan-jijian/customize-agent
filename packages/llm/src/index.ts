@@ -19,6 +19,7 @@ export { withRetry, isRetryableError, type RetryOptions } from './retry.js';
 // AIGateway（自动路由/静默切换）已移除 — 用户通过 --provider 显式选择模型
 
 export { estimateTokens, countTokensFromMessages } from './utils/tokens.js';
+export { estimateCostUsd, getModelPricing, type ModelPricing } from './utils/pricing.js';
 export { toOpenAIMessages, openAIHealthCheck } from './utils/messages.js';
 export { createLLMResponse } from './utils/response.js';
 

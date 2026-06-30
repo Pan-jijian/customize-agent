@@ -1,6 +1,6 @@
 import type { ILLMProvider, StreamChunk, FunctionDefinition } from '@customize-agent/llm';
 import type { ToolRegistry, PermissionEngine, ExecutionController, ContextManager } from '@customize-agent/engine';
-import { ContextManager as ContextManagerImpl } from '@customize-agent/engine';
+import { ContextManager as ContextManagerImpl, PlanModeManager } from '@customize-agent/engine';
 import type { Message, ToolCall } from '@customize-agent/types';
 import type { I18nManager } from '../i18n/manager.js';
 import { buildSystemPrompt } from './prompt.js';
@@ -27,6 +27,7 @@ export type AgentEvent =
 
 export interface RunTaskOptions {
   readonly?: boolean;
+  plan?: boolean;
   onWrite?: (text: string) => void;
   onEvent?: (event: AgentEvent) => void;
   drainUserInput?: () => Array<string | { content: string; display: string }>;
@@ -136,6 +137,8 @@ export class AgentExecutor {
   }
 
   async runTask(messages: Message[], options?: RunTaskOptions): Promise<Message[]> {
+    if (options?.plan) return this._runPlanTask(messages, options);
+
     const working = [...messages];
     const readonly = options?.readonly ?? false;
     // 临时覆盖 onWrite（options 优先级高于 config）
@@ -314,6 +317,43 @@ export class AgentExecutor {
     this.onWrite = prevOnWrite;
     this.onEvent = prevOnEvent;
   }
+  }
+
+  private async _runPlanTask(messages: Message[], options?: RunTaskOptions): Promise<Message[]> {
+    const prevOnWrite = this.onWrite;
+    const prevOnEvent = this.onEvent;
+    if (options?.onWrite) this.onWrite = options.onWrite;
+    if (options?.onEvent) this.onEvent = options.onEvent;
+    this._emit({ type: 'task_start' });
+    try {
+      const task = [...messages].reverse().find(m => m.role === 'user')?.content ?? '';
+      const working: Message[] = [
+        { role: 'system', content: PlanModeManager.getSystemPrompt() },
+        { role: 'user', content: task },
+      ];
+
+      const updated = await this.runTask(working, { ...options, plan: false, readonly: true });
+      const lastAssistant = [...updated].reverse().find(m => m.role === 'assistant');
+      if (!lastAssistant) return updated;
+
+      const jsonText = lastAssistant.content.match(/\{[\s\S]*\}/)?.[0] ?? lastAssistant.content;
+      try {
+        const validation = PlanModeManager.validatePlan(JSON.parse(jsonText));
+        const formatted = validation.valid && validation.plan
+          ? PlanModeManager.formatPlan(validation.plan)
+          : `计划 JSON 校验失败:\n${validation.errors.join('\n')}`;
+        this._write('\n' + renderMarkdown('```\n' + formatted + '\n```') + '\n');
+        return [...updated, { role: 'assistant', content: formatted }];
+      } catch (err) {
+        const msg = `计划 JSON 解析失败: ${(err as Error).message}`;
+        this._write(taskWarning(msg));
+        return [...updated, { role: 'assistant', content: msg }];
+      }
+    } finally {
+      this._emit({ type: 'task_done' });
+      this.onWrite = prevOnWrite;
+      this.onEvent = prevOnEvent;
+    }
   }
 
   /** 每轮水位检查：60% 警告 → 75% 轻量裁剪 → 85% LLM 摘要（委托给 ContextManager） */
