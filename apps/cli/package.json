@@ -1,20 +1,29 @@
 {
-  "name": "cli",
+  "name": "customize-agent",
   "version": "1.0.0",
-  "description": "",
+  "description": "通用终端 AI 助手 — 原生 Function Calling + 双语 TUI + 三级模型分层",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "type": "module",
+  "bin": {
+    "customize-agent": "./dist/index.js"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "start": "node ./dist/index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "license": "MIT",
+  "author": "Pan-jijian",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Pan-jijian/customize-agent.git",
+    "directory": "apps/cli"
+  },
+  "files": ["dist"],
+  "publishConfig": { "access": "public" },
+  "keywords": ["ai-agent", "cli", "llm", "customize-agent", "terminal", "tui", "mcp"],
   "packageManager": "pnpm@10.26.1",
   "dependencies": {
     "@customize-agent/engine": "workspace:*",
