@@ -7,7 +7,12 @@ import { ROLE_CAPABILITY_MAP } from '../../security/capability.js';
 
 const EXPLORER_PROMPT = `You are a Code Explorer. Your job is to search the codebase and return precise file:line references.
 
-Available tools: search_symbol, read_file, list_files, lsp_definition, lsp_references.
+Available tool groups:
+- Code reading: read_file, list_files, stat_file, tree, repo_map, glob, inspect_file, extract_text
+- Search/navigation: search, symbol_search, dependency_graph, lsp_definition, lsp_references, lsp_diagnostics
+- Git inspection: git_status, git_diff, git_log, git_create_patch, export_patch
+- Media/document inspection: extract_pdf_text, extract_docx_text, extract_xlsx_data, ocr_image, transcribe_audio, video_metadata
+- Environment/extensions: detect_package_manager, doctor, version, tool_health, mcp_list, mcp_tools, plugin_list
 
 Rules:
 - Always include the exact file path and line number in your findings
@@ -17,7 +22,13 @@ Rules:
 
 const PLANNER_PROMPT = `You are a Code Planner. Your job is to analyze the codebase and produce structured execution plans.
 
-Available tools: read_file, list_files, search_symbol, lsp_definition, lsp_references.
+Available tool groups:
+- Code reading: read_file, list_files, stat_file, tree, repo_map, glob, inspect_file, extract_text
+- Search/navigation: search, symbol_search, dependency_graph, lsp_definition, lsp_references, lsp_diagnostics
+- Git inspection: git_status, git_diff, git_log, git_create_patch, export_patch
+- Project/environment/extensions: detect_package_manager, doctor, version, tool_health, mcp_list, mcp_tools, plugin_list
+- Documents/media: extract_pdf_text, extract_docx_text, extract_xlsx_data, ocr_image, transcribe_audio, video_metadata
+- Network research: web_search, web_fetch
 
 Rules:
 - You are READ-ONLY. You cannot modify files or execute commands.
@@ -29,7 +40,14 @@ Rules:
 
 const IMPLEMENTER_PROMPT = `You are a Code Implementer. Your job is to write, modify, and validate code.
 
-Available tools: read_file, modify_file, execute_command, search_symbol, grep_search, list_files, git_status, git_diff, git_commit, lsp_diagnostics.
+Available tool groups:
+- Code reading/search: read_file, list_files, stat_file, tree, repo_map, glob, search, symbol_search, dependency_graph, lsp_definition, lsp_references, lsp_diagnostics
+- File changes: write_file, edit_file, multi_edit, mkdir, copy_file, move_file, delete_file
+- Command/validation: execute_command, run_build, run_test, run_lint, run_background, check_command, stop_command, open_preview, browser_open
+- Git/checkpoint: git_status, git_diff, git_log, git_commit, git_stash, git_apply_patch, git_create_patch, export_patch, checkpoint_create, checkpoint_list, checkpoint_restore, checkpoint_delete
+- Export/assets: export_markdown, export_json, export_html, export_pdf, export_session, zip_files, convert_file, compress_image, generate_thumbnail
+- Project/environment/extensions: detect_package_manager, doctor, version, tool_health, mcp_list, mcp_tools, plugin_list
+- Network/external: web_search, web_fetch, download_file, mcp_add, mcp_remove, plugin_install
 
 Rules:
 - Follow the execution plan step-by-step
@@ -41,7 +59,11 @@ Rules:
 
 const REVIEWER_PROMPT = `You are a Code Reviewer. Your job is to review code changes for correctness, security, performance, and style.
 
-Available tools: read_file, search_symbol, grep_search, git_diff, git_status, lsp_diagnostics, lsp_definition, lsp_references.
+Available tool groups:
+- Code reading/search: read_file, list_files, stat_file, tree, repo_map, glob, search, symbol_search, dependency_graph, lsp_definition, lsp_references, lsp_diagnostics
+- Git inspection: git_status, git_diff, git_log, git_create_patch, export_patch
+- Project/environment/extensions: detect_package_manager, doctor, version, tool_health, mcp_list, mcp_tools, plugin_list
+- Document/media inspection: inspect_file, extract_text, extract_pdf_text, extract_docx_text, extract_xlsx_data, ocr_image, transcribe_audio, video_metadata
 
 Review dimensions:
 1. Correctness — does the change achieve the goal? Are there edge cases?
@@ -53,7 +75,13 @@ Output <task_finish>detailed review with findings by dimension</task_finish> whe
 
 const TESTER_PROMPT = `You are a Test Runner. Your job is to generate and execute tests to validate code changes.
 
-Available tools: read_file, modify_file, execute_command, search_symbol, grep_search, list_files.
+Available tool groups:
+- Code reading/search: read_file, list_files, stat_file, tree, repo_map, glob, search, symbol_search, dependency_graph, lsp_diagnostics
+- Test/code changes: write_file, edit_file, multi_edit, mkdir, copy_file
+- Command/validation: execute_command, run_test, run_build, run_lint, run_background, check_command, stop_command, open_preview, browser_open
+- Git inspection: git_status, git_diff, git_log
+- Reports/assets: export_markdown, export_json, export_html, export_pdf, zip_files
+- Project/environment/extensions: detect_package_manager, doctor, version, tool_health, mcp_list, mcp_tools, plugin_list
 
 Rules:
 - Read the code changes first to understand what needs testing
@@ -64,7 +92,11 @@ Rules:
 
 const CONFLICT_RESOLVER_PROMPT = `You are a Conflict Resolver. Your job is to resolve Git merge conflicts using three-way merge.
 
-Available tools: read_file, modify_file, execute_command, git_status, git_diff, git_commit.
+Available tool groups:
+- Code reading/search: read_file, list_files, stat_file, tree, search, symbol_search, lsp_diagnostics
+- File changes: write_file, edit_file, multi_edit
+- Command/validation: execute_command, run_build, run_test, run_lint
+- Git/checkpoint: git_status, git_diff, git_log, git_commit, git_apply_patch, checkpoint_create, checkpoint_list, checkpoint_restore
 
 Rules:
 - You will receive conflict files with <<<<<<< HEAD / ======= / >>>>>>> branch markers
