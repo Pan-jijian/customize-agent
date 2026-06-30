@@ -1,10 +1,14 @@
 {
   "name": "@customize-agent/llm",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "AI 模型提供商 + 自动路由网关",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "lint": "eslint src/" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
   "license": "MIT",
   "author": "Pan-jijian",
   "repository": {
@@ -12,9 +16,19 @@
     "url": "https://github.com/Pan-jijian/customize-agent.git",
     "directory": "packages/llm"
   },
-  "files": ["dist"],
-  "publishConfig": { "access": "public" },
-  "keywords": ["ai-agent", "cli", "llm", "customize-agent", "provider"],
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai-agent",
+    "cli",
+    "llm",
+    "customize-agent",
+    "provider"
+  ],
   "dependencies": {
     "@customize-agent/types": "workspace:*",
     "@types/node": "^25.9.3",

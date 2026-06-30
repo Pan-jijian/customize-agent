@@ -1,10 +1,14 @@
 {
   "name": "@customize-agent/types",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "跨包类型契约层",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "lint": "eslint src/" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
   "license": "MIT",
   "author": "Pan-jijian",
   "repository": {
@@ -12,7 +16,17 @@
     "url": "https://github.com/Pan-jijian/customize-agent.git",
     "directory": "packages/types"
   },
-  "files": ["dist"],
-  "publishConfig": { "access": "public" },
-  "keywords": ["ai-agent", "cli", "llm", "customize-agent", "types"]
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai-agent",
+    "cli",
+    "llm",
+    "customize-agent",
+    "types"
+  ]
 }

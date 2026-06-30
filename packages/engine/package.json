@@ -1,10 +1,14 @@
 {
   "name": "@customize-agent/engine",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Agent 引擎 — 工具注册、权限控制、执行调度、子智能体编排",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "lint": "eslint src/" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
   "license": "MIT",
   "author": "Pan-jijian",
   "repository": {
@@ -12,9 +16,20 @@
     "url": "https://github.com/Pan-jijian/customize-agent.git",
     "directory": "packages/engine"
   },
-  "files": ["dist"],
-  "publishConfig": { "access": "public" },
-  "keywords": ["ai-agent", "cli", "llm", "customize-agent", "engine", "orchestration"],
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai-agent",
+    "cli",
+    "llm",
+    "customize-agent",
+    "engine",
+    "orchestration"
+  ],
   "dependencies": {
     "@customize-agent/llm": "workspace:*",
     "@customize-agent/types": "workspace:*",

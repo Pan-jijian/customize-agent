@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/memory",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Cross-session memory system with SQLite + FTS5",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,9 +16,19 @@
     "url": "https://github.com/Pan-jijian/customize-agent.git",
     "directory": "packages/memory"
   },
-  "files": ["dist"],
-  "publishConfig": { "access": "public" },
-  "keywords": ["ai-agent", "cli", "llm", "customize-agent", "memory"],
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai-agent",
+    "cli",
+    "llm",
+    "customize-agent",
+    "memory"
+  ],
   "dependencies": {
     "better-sqlite3": "^12.10.0"
   },
