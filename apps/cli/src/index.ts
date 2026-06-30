@@ -22,7 +22,7 @@ const program = new Command();
 const configStore = new ConfigStore();
 
 program
-  .name('customize-agent')
+  .name('customize')
   .description(`Customize Agent v${pkg.version} — interactive REPL`)
   .option('-p, --prompt <text>', 'Single-shot execution mode')
   .option('--plan', 'Plan mode: read-only exploration (requires -p)');
