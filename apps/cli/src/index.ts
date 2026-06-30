@@ -2,8 +2,8 @@ import { Command } from 'commander';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
 import { readdirSync, statSync } from 'fs';
-import { createProvider } from '@customize-agent/llm';
-import { ToolRegistry, PermissionEngine, ExecutionController, type ToolExecutionContext } from '@customize-agent/engine';
+import { createProvider, type ILLMProvider } from '@customize-agent/llm';
+import { ToolRegistry, PermissionEngine, ExecutionController, Orchestrator, createBuiltinSubagentConfig, ROLE_CAPABILITY_MAP, type ToolExecutionContext, type CollaborationMode, type SubagentRole, type SubagentTask } from '@customize-agent/engine';
 import { ToolKit, SandboxExecutor, BuiltinTools } from '@customize-agent/tools';
 import { LSPManager, CodeSearcher } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
@@ -77,8 +77,70 @@ function reg(
   });
 }
 
+const SUBAGENT_ROLES: SubagentRole[] = ['explorer', 'planner', 'implementer', 'reviewer', 'tester', 'conflict_resolver'];
+const COLLABORATION_MODES: CollaborationMode[] = ['orchestrator', 'pipeline', 'swarm'];
+
+function parseSubagentRole(value: unknown, fallback: SubagentRole): SubagentRole {
+  return SUBAGENT_ROLES.includes(value as SubagentRole) ? value as SubagentRole : fallback;
+}
+
+function parseCollaborationMode(value: unknown): CollaborationMode {
+  return COLLABORATION_MODES.includes(value as CollaborationMode) ? value as CollaborationMode : 'orchestrator';
+}
+
+function parseOrchestrationTasks(args: Record<string, unknown>): SubagentTask[] {
+  const rawTasks = args.tasks;
+  if (Array.isArray(rawTasks) && rawTasks.length > 0) {
+    return rawTasks.map((item, index) => {
+      if (typeof item === 'string') {
+        return { id: `task-${index + 1}`, description: item, dependsOn: index === 0 ? [] : [`task-${index}`], expectedFiles: [] };
+      }
+      const task = item as Record<string, unknown>;
+      return {
+        id: String(task.id ?? `task-${index + 1}`),
+        description: String(task.description ?? task.task ?? ''),
+        dependsOn: Array.isArray(task.dependsOn) ? task.dependsOn.map(String) : [],
+        expectedFiles: Array.isArray(task.expectedFiles) ? task.expectedFiles.map(String) : [],
+      };
+    }).filter(task => task.description.trim().length > 0);
+  }
+
+  const task = String(args.task ?? '').trim();
+  return task ? [{ id: 'task-1', description: task, dependsOn: [], expectedFiles: [] }] : [];
+}
+
+function createSubagentToolRegistry(registry: ToolRegistry, role: SubagentRole): ToolRegistry {
+  const allowed = new Set<string>(ROLE_CAPABILITY_MAP[role]);
+  const subRegistry = new ToolRegistry();
+  for (const tool of registry.listAll()) {
+    if (tool.name === 'orchestrate_agents') continue;
+    if (tool.capabilities.every(cap => allowed.has(cap))) {
+      subRegistry.register(tool);
+    }
+  }
+  return subRegistry;
+}
+
+function formatOrchestrationResult(result: Awaited<ReturnType<Orchestrator['orchestrate']>>): string {
+  const lines = [
+    `Status: ${result.success ? 'success' : 'failed'}`,
+    `Summary: ${result.summary}`,
+    `Tokens: ${result.totalTokens}`,
+    `Cost: $${result.totalCost.toFixed(6)}`,
+    `Duration: ${result.totalDurationMs}ms`,
+  ];
+
+  for (const [index, subResult] of result.subagentResults.entries()) {
+    lines.push('', `## Subagent ${index + 1}: ${subResult.role}`, `Success: ${subResult.success}`, subResult.summary);
+    if (subResult.filesModified.length > 0) lines.push(`Files modified: ${subResult.filesModified.join(', ')}`);
+    if (subResult.findings.length > 0) lines.push(`Findings:\n${subResult.findings.join('\n')}`);
+  }
+
+  return lines.join('\n');
+}
+
 /** 构建 ToolRegistry 并注册全部核心工具。传入 lspManager 时额外注册 LSP 工具 */
-function buildRegistry(lspManager?: LSPManager): ToolRegistry {
+function buildRegistry(lspManager?: LSPManager, provider?: ILLMProvider): ToolRegistry {
   const registry = new ToolRegistry();
 
 
@@ -267,6 +329,47 @@ function buildRegistry(lspManager?: LSPManager): ToolRegistry {
   reg(registry, 'checkpoint_restore', 'Restore an internal workspace checkpoint.', { name: { type: 'string', description: 'Checkpoint name' } }, ['name'], ['write_code'], true, async args => builtinTools.checkpointRestore(String(args.name)));
   reg(registry, 'checkpoint_delete', 'Delete an internal workspace checkpoint.', { name: { type: 'string', description: 'Checkpoint name' } }, ['name'], ['write_code'], true, async args => builtinTools.checkpointDelete(String(args.name)));
 
+  if (provider) {
+    registry.register({
+      name: 'orchestrate_agents',
+      description: 'Delegate a complex task to built-in subagents and aggregate their results. Supports orchestrator, pipeline, and swarm collaboration modes.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: 'Single task description. Used when tasks is omitted.' },
+          tasks: { type: 'array', description: 'Optional array of task strings or task objects with id, description, dependsOn, expectedFiles.' },
+          mode: { type: 'string', description: 'Collaboration mode: orchestrator, pipeline, or swarm.' },
+          role: { type: 'string', description: 'Default subagent role: explorer, planner, implementer, reviewer, tester, or conflict_resolver.' },
+          roles: { type: 'array', description: 'Optional role per task, e.g. ["explorer", "implementer", "reviewer"].' },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+      requiresApproval: true,
+      capabilities: ['read_code', 'write_code', 'execute_command', 'git_operation'],
+      handler: async (args) => {
+        const tasks = parseOrchestrationTasks(args);
+        if (tasks.length === 0) return 'No subagent task provided.';
+
+        const mode = parseCollaborationMode(args.mode);
+        const defaultRole = parseSubagentRole(args.role, mode === 'swarm' ? 'implementer' : 'planner');
+        const roles = Array.isArray(args.roles) ? args.roles : [];
+        const orchestrator = new Orchestrator();
+        const result = await orchestrator.orchestrate(tasks, (task, index) => {
+          const role = parseSubagentRole(roles[index], defaultRole);
+          return createBuiltinSubagentConfig(
+            role,
+            `${role}-${task.id}-${index + 1}`,
+            provider,
+            createSubagentToolRegistry(registry, role),
+          );
+        }, mode);
+
+        return formatOrchestrationResult(result);
+      },
+    });
+  }
+
   if (lspManager) {
     reg(registry, 'lsp_definition', 'Go to the definition of a symbol at the given file/line/column.',
       { input: { type: 'string', description: 'File path' }, line: { type: 'number', description: 'Line number (1-indexed)' }, column: { type: 'number', description: 'Column number (1-indexed)' } },
@@ -375,7 +478,7 @@ function createApprovalHandler() {
 /** 创建 Executor 实例（懒加载：provider 无 API key 也能进入 REPL） */
 function createExecutor(providerName?: string, modelName?: string, apiKey?: string, baseUrl?: string, lspManager?: LSPManager) {
   const provider = createProvider(providerName ?? 'deepseek', { modelName, apiKey, baseUrl });
-  const registry = buildRegistry(lspManager);
+  const registry = buildRegistry(lspManager, provider);
   const permissionEngine = new PermissionEngine();
   const controller = new ExecutionController({ maxBudgetUsd: 5.0, deadLoopThreshold: 4 });
   const approvalHandler = createApprovalHandler();
