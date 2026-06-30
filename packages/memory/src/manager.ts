@@ -93,9 +93,19 @@ export class MemoryManager {
    */
   remember(type: MemoryType, content: string, context: string = ''): string {
     const id = this._hash(content.slice(0, 200));
+    const contentDigest = this._hash(content); // 额外哈希用于碰撞检测
 
-    const existing = this.db.prepare('SELECT id FROM memories WHERE id = ?').get(id) as { id: string } | undefined;
+    const existing = this.db.prepare('SELECT id, content FROM memories WHERE id = ?').get(id) as { id: string; content: string } | undefined;
     if (existing) {
+      // 哈希碰撞检测：若不同内容产生相同哈希，追加后缀避免覆盖
+      if (existing.content !== content) {
+        const collisionId = `${id}_${contentDigest.slice(0, 8)}`;
+        this.db.prepare(`
+          INSERT INTO memories (id, type, content, context) VALUES (?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET access_count = access_count + 1, updated_at = datetime('now'), context = ?
+        `).run(collisionId, type, content, context, context);
+        return collisionId;
+      }
       this.db.prepare(`
         UPDATE memories
         SET access_count = access_count + 1, updated_at = datetime('now'), context = ?
@@ -104,7 +114,8 @@ export class MemoryManager {
     } else {
       this.db.prepare(`
         INSERT INTO memories (id, type, content, context) VALUES (?, ?, ?, ?)
-      `).run(id, type, content, context);
+        ON CONFLICT(id) DO UPDATE SET access_count = access_count + 1, updated_at = datetime('now'), context = ?
+      `).run(id, type, content, context, context);
     }
 
     return id;
@@ -127,12 +138,17 @@ export class MemoryManager {
         ORDER BY rank
         LIMIT ?
       `).all(safeQuery, limit) as Array<Record<string, unknown>>;
-    } catch { /* FTS5 syntax error → fallback to LIKE */ }
+    } catch (err: unknown) {
+      // FTS5 syntax error → fallback to LIKE (only for expected FTS errors, re-throw unexpected)
+      if (err instanceof Error && !(err as { code?: string }).code?.startsWith('SQLITE_')) {
+        throw err;
+      }
+    }
 
     if (ftsResults.length > 0) {
       return ftsResults.map(r => ({
         entry: this._rowToEntry(r),
-        relevance: (1 / (1 + Number(r.rank ?? 0))) * Math.log(1 + Number(r.access_count ?? 0) + 1),
+        relevance: (1 / (1 + Number(r.rank ?? 0))) * Math.log(2 + Number(r.access_count ?? 0)),
       })).sort((a, b) => b.relevance - a.relevance);
     }
 
@@ -145,7 +161,7 @@ export class MemoryManager {
 
     return likeResults.map(r => ({
       entry: this._rowToEntry(r),
-      relevance: 0.1 * Math.log(1 + Number(r.access_count ?? 0) + 1),
+      relevance: 0.1 * Math.log(2 + Number(r.access_count ?? 0)),
     }));
   }
 

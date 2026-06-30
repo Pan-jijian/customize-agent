@@ -1,5 +1,5 @@
 import type { ModelCapabilities } from '../interface.js';
-import { OpenAICompatProvider } from './openai-compat.js';
+import { OpenAICompatProvider } from './openai-base.js';
 
 const OPENROUTER_CAPABILITIES: ModelCapabilities = {
   maxContextTokens: 200_000,

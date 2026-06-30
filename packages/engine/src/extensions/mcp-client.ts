@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'child_process';
 import type { ToolRegistry, RegisteredTool } from '../tools/registry.js';
-import { type JsonRpcResponse, jsonRpcSerialize, splitJsonLines } from './json-rpc.js';
+import { type JsonRpcResponse, jsonRpcSerialize, splitJsonLines } from '../utils/json-rpc.js';
 
 interface McpConnection {
   serverName: string;

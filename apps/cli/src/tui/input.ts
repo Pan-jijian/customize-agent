@@ -169,9 +169,7 @@ export class TuiInput {
         try { process.stdin.setRawMode(true); raw = true; } catch { /* */ }
       }
 
-      // 从空白行开始
-      process.stdout.write(CSI + '?25l\n');
-      this._prevLines = 0;
+      process.stdout.write(CSI + '?25l');
       this._draw(st);
 
       // 终端 resize 时重新绘制

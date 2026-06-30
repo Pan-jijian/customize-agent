@@ -1,7 +1,7 @@
 import type { ILLMProvider } from '@customize-agent/llm';
 import { estimateCostUsd } from '@customize-agent/llm';
 import type { FunctionDefinition, Message, ToolCall } from '@customize-agent/types';
-import type { ToolRegistry } from './tools/registry.js';
+import type { ToolRegistry } from '../tools/registry.js';
 import type { ExecutionController } from './execution-controller.js';
 
 export interface ToolLoopRunOptions {

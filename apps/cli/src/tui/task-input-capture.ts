@@ -2,10 +2,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import stringWidth from 'string-width';
-import { FileIndex } from '../tui/file-index.js';
-import { t, s, modeBadge, modeAccent, renderCommandMenu, renderFileDropdown, hintText, userMessageBlock } from '../tui/renderer.js';
+import { FileIndex } from './file-index.js';
+import { t, s, modeBadge, modeAccent, renderCommandMenu, renderFileDropdown, hintText, userMessageBlock } from './renderer.js';
 import type { I18nManager } from '../i18n/manager.js';
-import type { ReplCommandInfo } from './commands.js';
+import type { ReplCommandInfo } from '../repl/commands.js';
 
 export interface CapturedTaskInput {
   drain: () => string[];
@@ -30,9 +30,8 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     readline.emitKeypressEvents(process.stdin);
     keypressInitialized = true;
   }
-  let raw = false;
   if (process.stdin.isTTY) {
-    try { process.stdin.setRawMode(true); raw = true; } catch { /* ignore */ }
+    try { process.stdin.setRawMode(true); } catch { /* ignore */ }
   }
   process.stdin.resume();
 
@@ -237,7 +236,6 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
       writeOutput(t.warning(options.i18n.t('status.cancelled')) + '\n');
       active = false;
       process.stdin.removeListener('keypress', onKeypress);
-      clearInputLine();
       options.onCancel();
       return;
     }
@@ -331,7 +329,6 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
       if (!active) return;
       active = false;
       process.stdin.removeListener('keypress', onKeypress);
-      clearBuffer();
     },
     resume: () => {
       if (active) return;
@@ -343,8 +340,17 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
       if (active) process.stdin.removeListener('keypress', onKeypress);
       active = false;
       clearStatusLine();
-      clearBuffer();
-      if (raw) try { process.stdin.setRawMode(false); } catch { /* ignore */ }
+      // 清理 task-input-capture 渲染的行，让主 TuiInput 干净接管
+      if (inputLinesOnScreen > 0) {
+        const up = inputLinesOnScreen - 1 - inputCursorLineIndex;
+        if (up > 0) process.stdout.write(`\x1b[${up}B`);
+        for (let i = 0; i < inputLinesOnScreen; i++) {
+          process.stdout.write('\x1b[2K');
+          if (i < inputLinesOnScreen - 1) process.stdout.write('\x1b[1A');
+        }
+        process.stdout.write('\r');
+        inputLinesOnScreen = 0;
+      }
     },
   };
 }

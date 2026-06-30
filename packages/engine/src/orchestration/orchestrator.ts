@@ -9,6 +9,21 @@ import type { SafeWorktreeManager, WorktreeContext } from './worktree.js';
 /** 协作模式 */
 export type CollaborationMode = 'orchestrator' | 'pipeline' | 'swarm';
 
+/** 带并发限制的 Promise.all：最多 maxConcurrency 个异步任务同时执行 */
+async function limitedParallel<T>(tasks: Array<() => Promise<T>>, maxConcurrency: number): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let index = 0;
+  async function worker(): Promise<void> {
+    while (index < tasks.length) {
+      const i = index++;
+      results[i] = await tasks[i]!();
+    }
+  }
+  const workers = Array.from({ length: Math.min(maxConcurrency, tasks.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 /** 编排执行结果 */
 export interface OrchestrationResult {
   /** 是否全部子任务成功 */
@@ -35,6 +50,9 @@ export interface OrchestrationResult {
  *
  * 动态性体现在"任务拆解"和"实例克隆"，而非"角色发明"。
  */
+/** 同层最大并发子智能体数 */
+const MAX_CONCURRENT_SUBAGENTS = 4;
+
 export class Orchestrator {
   private runner = new SubagentRunner();
   private worktreeManager?: SafeWorktreeManager;
@@ -89,7 +107,7 @@ export class Orchestrator {
 
       if (ready.length === 0) break;
 
-      const results = await Promise.all(ready.map(async (task, index) => {
+      const results = await limitedParallel(ready.map((task, index) => async () => {
         const baseName = `${task.id}-${allResults.length + index + 1}`;
         let worktree: WorktreeContext | undefined;
         if (task.expectedFiles.length > 0) {
@@ -115,7 +133,7 @@ export class Orchestrator {
           }
         }
         return { task, result };
-      }));
+      }), MAX_CONCURRENT_SUBAGENTS);
 
       for (const { task, result } of results) {
         remaining.delete(task.id);

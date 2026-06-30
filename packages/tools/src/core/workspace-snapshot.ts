@@ -3,8 +3,8 @@ import { existsSync } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { createHash } from 'crypto';
-
-const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'target', '.next', '.turbo', '.cache']);
+import { SKIP_DIRS } from './constants.js';
+import { resolveSafe, walk } from './path-utils.js';
 const SNAPSHOT_MAX_FILE_SIZE = 25_000_000;
 const SNAPSHOT_MAX_TOTAL_SIZE = 250_000_000;
 
@@ -17,11 +17,8 @@ type SnapshotManifest = { version: 2; name: string; createdAt: string; files: Sn
 export class WorkspaceSnapshotService {
   constructor(private cwd: string = process.cwd()) {}
 
-  private resolveSafe(relativePath: string): string {
-    const resolved = path.resolve(this.cwd, relativePath || '.');
-    const root = path.resolve(this.cwd);
-    if (!resolved.startsWith(root + path.sep) && resolved !== root) throw new Error(`Path escapes project root: ${relativePath}`);
-    return resolved;
+  private _resolveSafe(relativePath: string): string {
+    return resolveSafe(relativePath, this.cwd);
   }
 
   snapshotDir(): string {
@@ -40,23 +37,11 @@ export class WorkspaceSnapshotService {
     return path.join(this.checkpointDir(name), 'manifest.json');
   }
 
-  async walk(dir = this.cwd, files: string[] = []): Promise<string[]> {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue;
-      if (entry.isDirectory() && SKIP_DIRS.has(entry.name)) continue;
-      const full = path.join(dir, entry.name);
-      const rel = path.relative(this.cwd, full);
-      if (entry.isDirectory()) await this.walk(full, files);
-      else if (entry.isFile()) files.push(rel);
-    }
-    return files;
-  }
 
   async takeSnapshot(): Promise<WorkspaceSnapshot> {
     const snapshot: WorkspaceSnapshot = new Map();
-    for (const rel of await this.walk()) {
-      const full = this.resolveSafe(rel);
+    for (const rel of await walk(this.cwd, SKIP_DIRS)) {
+      const full = this._resolveSafe(rel);
       const stat = await fs.stat(full);
       if (stat.size <= SNAPSHOT_MAX_FILE_SIZE) snapshot.set(rel, await fs.readFile(full));
     }
@@ -88,10 +73,10 @@ export class WorkspaceSnapshotService {
   async restoreSnapshot(snapshot: WorkspaceSnapshot): Promise<void> {
     const current = await this.takeSnapshot();
     for (const [rel] of current) {
-      if (!snapshot.has(rel)) await fs.rm(this.resolveSafe(rel), { force: true });
+      if (!snapshot.has(rel)) await fs.rm(this._resolveSafe(rel), { force: true });
     }
     for (const [rel, content] of snapshot) {
-      const full = this.resolveSafe(rel);
+      const full = this._resolveSafe(rel);
       await fs.mkdir(path.dirname(full), { recursive: true });
       await fs.writeFile(full, content);
     }
@@ -105,8 +90,8 @@ export class WorkspaceSnapshotService {
 
     const manifest: SnapshotManifest = { version: 2, name, createdAt: new Date().toISOString(), files: [], skipped: [] };
     let totalSize = 0;
-    for (const rel of await this.walk()) {
-      const full = this.resolveSafe(rel);
+    for (const rel of await walk(this.cwd, SKIP_DIRS)) {
+      const full = this._resolveSafe(rel);
       const stat = await fs.stat(full);
       if (stat.size > SNAPSHOT_MAX_FILE_SIZE) {
         manifest.skipped.push({ path: rel, reason: `file too large (${stat.size} bytes)` });
@@ -154,11 +139,11 @@ export class WorkspaceSnapshotService {
 
   private async restoreManifestSnapshot(manifest: SnapshotManifest, checkpointDir: string): Promise<void> {
     const keep = new Set(manifest.files.map(file => file.path));
-    for (const rel of await this.walk()) {
-      if (!keep.has(rel)) await fs.rm(this.resolveSafe(rel), { force: true });
+    for (const rel of await walk(this.cwd, SKIP_DIRS)) {
+      if (!keep.has(rel)) await fs.rm(this._resolveSafe(rel), { force: true });
     }
     for (const entry of manifest.files) {
-      const full = this.resolveSafe(entry.path);
+      const full = this._resolveSafe(entry.path);
       await fs.mkdir(path.dirname(full), { recursive: true });
       await fs.copyFile(path.join(checkpointDir, 'files', entry.file), full);
       await fs.chmod(full, entry.mode).catch(() => undefined);

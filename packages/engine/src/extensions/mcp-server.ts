@@ -1,6 +1,6 @@
 import type { ToolRegistry } from '../tools/registry.js';
 import { SchemaAdapter } from '../tools/adapter.js';
-import { type JsonRpcRequest, type JsonRpcResponse, jsonRpcResult, jsonRpcError, splitJsonLines } from './json-rpc.js';
+import { type JsonRpcRequest, type JsonRpcResponse, jsonRpcResult, jsonRpcError, splitJsonLines } from '../utils/json-rpc.js';
 
 /**
  * MCP Server — 通过 stdio 将内部工具暴露为 MCP 协议。

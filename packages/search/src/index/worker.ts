@@ -2,34 +2,7 @@ import { parentPort } from 'worker_threads';
 import Parser, { type SyntaxNode } from 'tree-sitter';
 import { getLanguageConfig, type LanguageConfig } from './languages.js';
 import { extractSymbolName, collectAstErrors, friendlyKind } from './ast-utils.js';
-
-/** 主线程发来的请求 */
-interface WorkerRequest {
-  id: number;
-  filePath: string;
-  code: string;
-  /** index=符号提取, validate=语法错误检测 */
-  mode: 'index' | 'validate';
-}
-
-/** 提取到的单个符号 */
-interface SymbolEntry {
-  name: string;
-  kind: string;
-  startLine: number;
-  endLine: number;
-}
-
-/** Worker 返回给主线程的响应 */
-interface WorkerResponse {
-  id: number;
-  symbols?: SymbolEntry[];
-  errors?: Array<{ line: number; column: number; message: string }>;
-  valid?: boolean;
-  language?: string;
-  skipped?: boolean;
-  reason?: string;
-}
+import type { WorkerRequest, SymbolEntry, WorkerResponse } from './types.js';
 
 /** 文件大小熔断线：1MB */
 const MAX_FILE_SIZE = 1_000_000;

@@ -8,7 +8,7 @@ import type { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import type { I18nManager } from '../i18n/manager.js';
 import { buildDefaultCommands, type ReplCommandInfo } from './commands.js';
 import { ModelProviderCommands } from './model-provider-commands.js';
-import { captureInputDuringTask } from './task-input-capture.js';
+import { captureInputDuringTask } from '../tui/task-input-capture.js';
 import { resolveAtRefs } from './at-file-resolver.js';
 import { selectList } from './select-list.js';
 import { ToolCommands } from './tool-commands.js';
@@ -73,8 +73,8 @@ export class Repl {
       setSessionId: id => { this.sessionId = id; },
       setDraft: text => this.tui.setDraft(text),
       findSnapshotForTurn: index => this._findSnapshotForTurn(index),
-      loadSnapshot: id => this._loadWorkspaceSnapshot(id),
-      restoreSnapshot: snapshot => this._restoreWorkspaceSnapshot(snapshot),
+      loadSnapshot: id => this.snapshotService.loadSerialized(id),
+      restoreSnapshot: snapshot => this.snapshotService.restoreSnapshot(snapshot),
     });
     this._buildTui(config.commands);
   }
@@ -111,7 +111,7 @@ export class Repl {
 
   // 任务执行
 
-  private _formatToolPreviewArg(args?: Record<string, unknown>): string {
+  private _fmtArg(args?: Record<string, unknown>): string {
     if (!args) return '';
     const val = args.path ?? args.query ?? args.pattern ?? args.filePath ?? args.command ?? args.input;
     if (typeof val !== 'string' || val.length === 0) return '';
@@ -128,7 +128,7 @@ export class Repl {
     } else if (event.type === 'user_message') {
       this.tui.writeExternal(userMessageBlock(event.text, this.i18n.t('message.user')).replace(/^\n/, ''));
     } else if (event.type === 'tool_call_preview') {
-      this.tui.writeExternal(toolCallPending(event.toolName, 1, this._formatToolPreviewArg(event.args), event.elapsedMs, this.i18n.toolLabel(event.toolName)));
+      this.tui.writeExternal(toolCallPending(event.toolName, 1, this._fmtArg(event.args), event.elapsedMs, this.i18n.toolLabel(event.toolName)));
     }
   }
 
@@ -142,18 +142,6 @@ export class Repl {
     });
   }
 
-  private async _takeWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
-    return this.snapshotService.takeSnapshot();
-  }
-
-  private async _saveWorkspaceSnapshot(id: string, snapshot: WorkspaceSnapshot): Promise<void> {
-    await this.snapshotService.saveSerialized(id, snapshot);
-  }
-
-  private async _loadWorkspaceSnapshot(id: string): Promise<WorkspaceSnapshot | null> {
-    return this.snapshotService.loadSerialized(id);
-  }
-
   private _findSnapshotForTurn(index: number): WorkspaceSnapshot | undefined {
     let bestIndex = -1;
     let best: WorkspaceSnapshot | undefined;
@@ -164,10 +152,6 @@ export class Repl {
       }
     }
     return best;
-  }
-
-  private async _restoreWorkspaceSnapshot(snapshot: WorkspaceSnapshot): Promise<void> {
-    await this.snapshotService.restoreSnapshot(snapshot);
   }
 
   private _renderPendingInputs(options: { redraw?: boolean } = {}): void {
@@ -218,7 +202,7 @@ export class Repl {
       taskInput.writeOutput('\r' + toolCallPending(
         toolPreview.toolName,
         1,
-        this._formatToolPreviewArg(toolPreview.args),
+        this._fmtArg(toolPreview.args),
         Date.now() - toolPreview.startMs,
         this.i18n.toolLabel(toolPreview.toolName),
       ).trimEnd());
@@ -250,9 +234,9 @@ export class Repl {
 
     const userIndex = this.history.length;
     try {
-      const snapshot = await this._takeWorkspaceSnapshot();
+      const snapshot = await this.snapshotService.takeSnapshot();
       this.snapshots.set(userIndex, snapshot);
-      await this._saveWorkspaceSnapshot(this.sessionId, snapshot);
+      await this.snapshotService.saveSerialized(this.sessionId, snapshot);
     } catch { /* snapshot is best-effort */ }
     this.history.push({ role: 'user', content: enhancedInput });
 
@@ -420,7 +404,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
           taskInput.writeOutput('\r' + toolCallPending(
             toolPreview.toolName,
             1,
-            this._formatToolPreviewArg(toolPreview.args),
+            this._fmtArg(toolPreview.args),
             Date.now() - toolPreview.startMs,
             this.i18n.toolLabel(toolPreview.toolName),
           ).trimEnd());

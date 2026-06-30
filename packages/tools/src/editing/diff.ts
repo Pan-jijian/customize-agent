@@ -43,7 +43,7 @@ export class DiffEngine {
     if (cleanSearch && fileContent.includes(cleanSearch)) {
       return fileContent.replace(cleanSearch, replace.trim());
     }
-    throw new Error(`无法找到匹配项：${search}`);
+    throw new Error(`Search text not found: ${search}`);
   }
 
   /**

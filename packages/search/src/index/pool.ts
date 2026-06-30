@@ -1,33 +1,7 @@
 import { Worker } from 'worker_threads';
 import * as path from 'path';
 import * as os from 'os';
-
-/** 发给 Worker 线程的请求 */
-interface WorkerRequest {
-  id: number;
-  filePath: string;
-  code: string;
-  mode: 'index' | 'validate';
-}
-
-/** Worker 返回的符号条目 */
-interface SymbolEntry {
-  name: string;
-  kind: string;
-  startLine: number;
-  endLine: number;
-}
-
-/** Worker 线程的响应消息 */
-interface WorkerResponse {
-  id: number;
-  symbols?: SymbolEntry[];
-  errors?: Array<{ line: number; column: number; message: string }>;
-  valid?: boolean;
-  language?: string;
-  skipped?: boolean;
-  reason?: string;
-}
+import type { WorkerRequest, WorkerResponse } from './types.js';
 
 /** 池中的单个 Worker 封装 */
 interface PoolWorker {

@@ -1,5 +1,6 @@
 import type { ModelCapabilities } from '../interface.js';
-import { OpenAICompatProvider } from './openai-compat.js';
+import { OpenAICompatProvider } from './openai-base.js';
+import { withRetry } from '../retry.js';
 
 const OPENAI_CAPABILITIES: ModelCapabilities = {
   maxContextTokens: 200_000,
@@ -31,7 +32,6 @@ export class OpenAIProvider extends OpenAICompatProvider {
   }
 
   async embed(texts: string[]): Promise<number[][]> {
-    const { withRetry } = await import('../retry.js');
     const response = await withRetry(async () => {
       return this.client.embeddings.create({
         model: 'text-embedding-3-small',
