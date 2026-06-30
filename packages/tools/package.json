@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/tools",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Agent 工具 — 文件操作、终端、Git、沙箱、语法验证",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,9 +16,19 @@
     "url": "https://github.com/Pan-jijian/customize-agent.git",
     "directory": "packages/tools"
   },
-  "files": ["dist"],
-  "publishConfig": { "access": "public" },
-  "keywords": ["ai-agent", "cli", "llm", "customize-agent", "tools"],
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai-agent",
+    "cli",
+    "llm",
+    "customize-agent",
+    "tools"
+  ],
   "dependencies": {
     "@customize-agent/search": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",

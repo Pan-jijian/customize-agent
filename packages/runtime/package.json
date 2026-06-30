@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/runtime",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Agent Runtime - unified scheduling layer for all entry points",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,9 +16,19 @@
     "url": "https://github.com/Pan-jijian/customize-agent.git",
     "directory": "packages/runtime"
   },
-  "files": ["dist"],
-  "publishConfig": { "access": "public" },
-  "keywords": ["ai-agent", "cli", "llm", "customize-agent", "runtime"],
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai-agent",
+    "cli",
+    "llm",
+    "customize-agent",
+    "runtime"
+  ],
   "dependencies": {
     "@customize-agent/types": "workspace:*"
   },
