@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/tools",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Agent 工具 — 文件操作、终端、Git、沙箱、语法验证",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

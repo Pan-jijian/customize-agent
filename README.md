@@ -65,6 +65,9 @@
 - **零启动扫描** — `@file` 首次触发 `git ls-files` 毫秒级扫描
 - **配置持久化** — `~/.customize-agent/config.json`，语言/Provider/模型全持久化，跨会话保留
 - **上下文自动压缩** — 三级水位（60% 警告 → 75% 截断旧工具结果 → 85% LLM 摘要）
+- **跨平台抽象层** — Shell 命令翻译（Windows CMD/PowerShell 自动适配）、进程管理、二进制路径解析
+- **子智能体文件隔离** — Git Worktree 隔离 + 内存快照隔离，子 Agent 可在完全独立的文件系统中并发运行
+- **Changesets 自动化发布** — CI/CD 流水线自动版本管理 + npm 发布
 
 ---
 
@@ -196,6 +199,7 @@ customize-agent/
 │   │       ├── session.ts            # Session / ConversationHistory
 │   │       ├── task.ts               # TaskState / Checkpoint / TaskContext
 │   │       ├── lifecycle.ts          # LifecycleAware 接口
+│   │       ├── errors.ts             # 统一错误类型定义
 │   │       └── constants.ts          # BINARY_EXTENSIONS 等常量
 │   ├── llm/                          # AI 模型 Provider（15 个源文件）
 │   │   └── src/
@@ -222,11 +226,18 @@ customize-agent/
 │   │       ├── toolkit.ts            # ToolKit 高质量文件操作
 │   │       ├── tool-def.ts           # 声明式工具定义类型
 │   │       ├── builtins-facade.ts    # BuiltinTools 外观类
+│   │       ├── archiver.d.ts          # Archiver v8 ESM 类型声明
 │   │       ├── core/                 # 核心基础设施
 │   │       │   ├── workspace-fs.ts   # 工作区安全文件系统
 │   │       │   ├── workspace-snapshot.ts  # 工作区快照/检查点
 │   │       │   ├── path-utils.ts     # 安全路径工具
-│   │       │   └── constants.ts      # SKIP_DIRS 等常量
+│   │       │   ├── constants.ts      # SKIP_DIRS 等常量
+│   │       │   └── platform/         # 跨平台抽象层
+│   │       │       ├── shell.ts      #   命令翻译（bash→CMD/PowerShell）
+│   │       │       ├── process.ts    #   进程管理 + 清理信号处理
+│   │       │       ├── binary.ts     #   二进制路径解析（跨平台）
+│   │       │       ├── utils.ts      #   平台检测 + 路径工具
+│   │       │       └── types.ts      #   平台类型定义
 │   │       ├── builtins/             # 按领域拆分的工具实现
 │   │       │   ├── index.ts          # 导出所有工具组
 │   │       │   ├── file-tools.ts     # 文件操作工具
@@ -304,6 +315,11 @@ customize-agent/
 ├── pnpm-workspace.yaml               # pnpm workspace 定义
 ├── pnpm-lock.yaml                    # 依赖锁文件
 ├── set-claude-env.sh                 # Claude Code 通过 DeepSeek V4 代理配置
+├── .changeset/                       # Changesets 版本管理配置
+├── .github/workflows/                # CI/CD 流水线 (ci.yml + release.yml)
+├── docs/
+│   └── knowledge-base-design.md      # 本地知识库系统完整设计方案
+├── RELEASE_NOTES.md                  # 发行说明
 └── README.md                         # 本文件
 ```
 
@@ -329,6 +345,7 @@ customize-agent/
 | `TaskState` | 任务状态 `{ status, round, checkpointCount, toolCalls }` |
 | `Checkpoint` | 检查点 `{ id, taskId, round, snapshot, type }` |
 | `BINARY_EXTENSIONS` | 已知二进制扩展名 Set（pdf, png, zip, exe 等） |
+| `AgentError` / `ToolError` / `ProviderError` / 等 | 统一错误类型（含错误码、可重试标记、上下文信息） |
 
 ### @customize-agent/llm
 
