@@ -3,6 +3,7 @@ import * as fs from 'fs/promises';
 import { existsSync } from 'fs';
 import * as path from 'path';
 import { SKIP_DIRS } from '../core/constants.js';
+import { formatErrorForModel } from '@customize-agent/types';
 import { resolveSafe, walk } from '../core/path-utils.js';
 
 export class SearchTools {
@@ -35,15 +36,36 @@ export class SearchTools {
     const files = (await walk(this.cwd, SKIP_DIRS)).filter(f => /\.(ts|tsx|js|jsx|py|go|rs|java|cpp|c|h)$/.test(f));
     const results: string[] = [];
     const re = new RegExp(`(function|class|interface|type|const|let|var|def|struct|enum)\\s+[^\\n]*${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*`, 'i');
+    const skipped: string[] = [];
     for (const rel of files.slice(0, 1000)) {
-      const content = await fs.readFile(resolveSafe(rel, this.cwd), 'utf-8').catch(() => '');
+      let content: string;
+      try {
+        content = await fs.readFile(resolveSafe(rel, this.cwd), 'utf-8');
+      } catch (err) {
+        if (skipped.length < 5) skipped.push(`${rel}: ${(err as Error).message}`);
+        continue;
+      }
       const lines = content.split('\n');
       for (let i = 0; i < lines.length; i++) {
         if (re.test(lines[i]!)) results.push(`${rel}:${i + 1}: ${lines[i]!.trim()}`);
-        if (results.length >= 100) return results.join('\n');
+        if (results.length >= 100) return this.formatSymbolSearchResult(results, skipped);
       }
     }
-    return results.join('\n') || 'No symbols found.';
+    return this.formatSymbolSearchResult(results, skipped);
+  }
+
+  private formatSymbolSearchResult(results: string[], skipped: string[]): string {
+    const body = results.join('\n') || 'No symbols found.';
+    if (skipped.length === 0) return body;
+    const warning = formatErrorForModel({
+      kind: 'tool_warning',
+      source: 'symbol_search',
+      message: `skipped ${skipped.length} unreadable files`,
+      modelVisible: true,
+      userVisible: true,
+      details: { skipped },
+    });
+    return `${warning}\n\n${body}`;
   }
 
   async glob(pattern: string): Promise<string> {

@@ -15,12 +15,28 @@ export {
   type ContextSource, type ContextChunk, type ChunkPriority, type ContextManagerConfig,
 } from './core/context-manager.js';
 export { PlanModeManager, type ExecutionPlan, type PlanStep } from './core/planner.js';
+export {
+  formatErrorForModel,
+  formatToolErrorForModel,
+  formatExecutionErrorForModel,
+  reportNonFatalError,
+  type AgentErrorInfo,
+  type AgentErrorKind,
+} from './core/errors.js';
 export { buildToolDefinitions, runToolLoop, type ToolLoopRunOptions, type ToolLoopRunResult } from './core/tool-loop-runner.js';
 export { SubagentRunner } from './orchestration/subagent/runner.js';
 export { createBuiltinSubagentConfig, getBuiltinPrompt, getRecommendedModel } from './orchestration/subagent/builtins.js';
 export { Orchestrator, type CollaborationMode, type OrchestrationResult } from './orchestration/orchestrator.js';
 export type { SubagentConfig, SubagentResult, SubagentTask } from './orchestration/subagent/types.js';
-export { SafeWorktreeManager, type WorktreeContext } from './orchestration/worktree.js';
+export {
+  GitWorktreeIsolation,
+  SnapshotIsolation,
+  createIsolationManager,
+  createIsolationStrategies,
+  type IsolationStrategy,
+  type IsolationContext,
+  type MergeResult,
+} from './orchestration/isolation.js';
 export { McpServer } from './extensions/mcp-server.js';
 export { McpClient, type McpServerConfig } from './extensions/mcp-client.js';
 export { HooksEngine, type HookEvent, type HookType, type HookConfig, type HookResult } from './extensions/hooks.js';

@@ -5,10 +5,10 @@ import type { ILLMProvider } from '@customize-agent/llm';
 import {
   ToolRegistry,
   Orchestrator,
-  SafeWorktreeManager,
   McpClient,
   createBuiltinSubagentConfig,
   ROLE_CAPABILITY_MAP,
+  createIsolationManager,
   type ToolExecutionContext,
   type CollaborationMode,
   type SubagentRole,
@@ -57,6 +57,10 @@ export async function connectConfiguredMcp(registry: ToolRegistry, root: string)
     }
   }
   return client;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 }
 
 function reg(
@@ -197,7 +201,10 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
   reg(registry, 'search', 'Fast text search across all files using ripgrep. Use for finding any text, patterns, documentation, config values, or code references.', { pattern: { type: 'string', description: 'Text or regex pattern to search for' } }, ['pattern'], ['read_code'], false, async (args, context) => {
     const searcher = new CodeSearcher(root);
     const matches = await searcher.grep(String(args.pattern), { maxResults: 20, signal: context?.signal });
-    return matches.length > 0 ? matches.map(m => `${m.file}:${m.line}: ${m.content}`).join('\n') : `No matches found for "${args.pattern}".`;
+    const warnings = [...new Set(matches.map(m => m.warning).filter((warning): warning is string => Boolean(warning)))];
+    const lines = matches.filter(m => m.file).map(m => `${m.file}:${m.line}: ${m.content}`);
+    const body = lines.length > 0 ? lines.join('\n') : `No matches found for "${args.pattern}".`;
+    return [...warnings, body].join(warnings.length ? '\n\n' : '');
   });
 
   registry.register({
@@ -214,14 +221,19 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
     },
     requiresApproval: true,
     capabilities: ['write_code'],
-    handler: async (args: Record<string, unknown>) => {
+    handler: async (args: Record<string, unknown>, context?: ToolExecutionContext) => {
+      throwIfAborted(context?.signal);
       const filePath = String(args.path);
       const input = String(args.input);
       if (input.includes('<<<<<<< SEARCH')) {
+        throwIfAborted(context?.signal);
         const result = await toolkit.modifyFileWithDiff(filePath, input);
+        throwIfAborted(context?.signal);
         return `${result.preview}\n\nPlease run the build command to validate this change.`;
       }
+      throwIfAborted(context?.signal);
       await toolkit.writeFileWithBackup(filePath, input);
+      throwIfAborted(context?.signal);
       return `File created/updated: ${filePath} (${input.length} chars)`;
     },
   });
@@ -250,12 +262,12 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
   const S = String;
   const N = Number;
   const handlers: Record<string, (args: Record<string, unknown>, context?: ToolExecutionContext) => Promise<string>> = {
-    edit_file:             (a) => builtinTools.editFile(S(a.path), S(a.search), S(a.replace)),
-    multi_edit:            (a) => builtinTools.multiEdit(S(a.path), a.edits as Array<{ search: string; replace: string }>),
-    delete_file:           (a) => builtinTools.deleteFile(S(a.path)),
-    move_file:             (a) => builtinTools.moveFile(S(a.from), S(a.to)),
-    copy_file:             (a) => builtinTools.copyFile(S(a.from), S(a.to)),
-    mkdir:                 (a) => builtinTools.mkdir(S(a.path)),
+    edit_file:             async (a, c) => { throwIfAborted(c?.signal); return builtinTools.editFile(S(a.path), S(a.search), S(a.replace)); },
+    multi_edit:            async (a, c) => { throwIfAborted(c?.signal); return builtinTools.multiEdit(S(a.path), a.edits as Array<{ search: string; replace: string }>); },
+    delete_file:           async (a, c) => { throwIfAborted(c?.signal); return builtinTools.deleteFile(S(a.path)); },
+    move_file:             async (a, c) => { throwIfAborted(c?.signal); return builtinTools.moveFile(S(a.from), S(a.to)); },
+    copy_file:             async (a, c) => { throwIfAborted(c?.signal); return builtinTools.copyFile(S(a.from), S(a.to)); },
+    mkdir:                 async (a, c) => { throwIfAborted(c?.signal); return builtinTools.mkdir(S(a.path)); },
     stat_file:             (a) => builtinTools.statFile(S(a.path)),
     inspect_file:          (a) => builtinTools.inspectFile(S(a.path)),
     tree:                  (a) => builtinTools.tree(S(a.path ?? '.'), N(a.depth ?? 3)),
@@ -267,27 +279,27 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
     web_search:            (a, c) => builtinTools.webSearch(S(a.query), c?.signal),
     web_fetch:             (a, c) => builtinTools.webFetch(S(a.url), c?.signal),
     download_file:         (a, c) => builtinTools.downloadFile(S(a.url), S(a.output), c?.signal),
-    export_markdown:       (a) => builtinTools.exportMarkdown(S(a.output), S(a.content)),
-    export_json:           (a) => builtinTools.exportJson(S(a.output), a.data),
-    export_html:           (a) => builtinTools.exportHtml(S(a.output), S(a.title ?? 'Export'), S(a.content)),
-    export_pdf:            (a) => builtinTools.exportPdf(S(a.output), S(a.title ?? 'Export'), S(a.content)),
-    export_session:        (a) => builtinTools.exportSession(S(a.output), a.data),
-    zip_files:             (a) => builtinTools.zipFiles(S(a.output), a.files as string[]),
+    export_markdown:       async (a, c) => { throwIfAborted(c?.signal); return builtinTools.exportMarkdown(S(a.output), S(a.content)); },
+    export_json:           async (a, c) => { throwIfAborted(c?.signal); return builtinTools.exportJson(S(a.output), a.data); },
+    export_html:           async (a, c) => { throwIfAborted(c?.signal); return builtinTools.exportHtml(S(a.output), S(a.title ?? 'Export'), S(a.content)); },
+    export_pdf:            async (a, c) => { throwIfAborted(c?.signal); return builtinTools.exportPdf(S(a.output), S(a.title ?? 'Export'), S(a.content)); },
+    export_session:        async (a, c) => { throwIfAborted(c?.signal); return builtinTools.exportSession(S(a.output), a.data); },
+    zip_files:             async (a, c) => { throwIfAborted(c?.signal); return builtinTools.zipFiles(S(a.output), a.files as string[]); },
     git_status:            () => builtinTools.git(['status', '--short']),
     git_diff:              () => builtinTools.git(['diff']),
     git_log:               () => builtinTools.git(['log', '--oneline', '-20']),
     git_stash:             () => builtinTools.git(['stash', 'push']),
     git_apply_patch:       (a) => builtinTools.git(['apply', S(a.path)]),
-    git_create_patch:      (a) => builtinTools.exportMarkdown(S(a.output), (async () => await builtinTools.git(['diff']))() as unknown as string),
-    export_patch:           (a) => builtinTools.exportMarkdown(S(a.output), (async () => await builtinTools.git(['diff']))() as unknown as string),
+    git_create_patch:      async (a) => builtinTools.exportMarkdown(S(a.output), await builtinTools.git(['diff'])),
+    export_patch:           async (a) => builtinTools.exportMarkdown(S(a.output), await builtinTools.git(['diff'])),
     run_background:        (a) => builtinTools.runBackground(S(a.command ?? a.input)),
     check_command:         (a) => builtinTools.checkCommand(S(a.id)),
     stop_command:          (a) => builtinTools.stopCommand(S(a.id)),
     open_preview:          (a) => builtinTools.openPreview(S(a.url)),
     browser_open:          (a) => builtinTools.browserOpen(S(a.url)),
-    run_test:              () => builtinTools.runScript('test'),
-    run_build:             () => builtinTools.runScript('build'),
-    run_lint:              () => builtinTools.runScript('lint'),
+    run_test:              (_a, c) => builtinTools.runScript('test', c?.signal),
+    run_build:             (_a, c) => builtinTools.runScript('build', c?.signal),
+    run_lint:              (_a, c) => builtinTools.runScript('lint', c?.signal),
     doctor:                () => builtinTools.doctor(),
     version:               () => builtinTools.version(),
     tool_health:           () => builtinTools.toolHealth(),
@@ -343,13 +355,14 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
       },
       requiresApproval: true,
       capabilities: ['read_code', 'write_code', 'execute_command', 'git_operation'],
-      handler: async args => {
+      handler: async (args) => {
         const tasks = parseOrchestrationTasks(args);
         if (tasks.length === 0) return 'No subagent task provided.';
         const mode = parseCollaborationMode(args.mode);
         const defaultRole = parseSubagentRole(args.role, mode === 'swarm' ? 'implementer' : 'planner');
         const roles = Array.isArray(args.roles) ? args.roles : [];
-        const orchestrator = new Orchestrator(new SafeWorktreeManager(root));
+        const isolation = await createIsolationManager(root);
+        const orchestrator = new Orchestrator(isolation);
         const result = await orchestrator.orchestrate(tasks, (task, index, worktreePath) => {
           const role = parseSubagentRole(roles[index], defaultRole);
           const subRoot = worktreePath ?? root;

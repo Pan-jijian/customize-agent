@@ -8,3 +8,16 @@ export { createSession } from './session.js';
 export type { TaskStateEvent, Checkpoint, RuntimeConfig, TaskResult } from './task.js';
 export { TaskState } from './task.js';
 export { BINARY_EXTENSIONS } from './constants.js';
+export {
+  createToolErrorInfo,
+  createExecutionErrorInfo,
+  formatErrorForModel,
+  formatToolErrorForModel,
+  formatExecutionErrorForModel,
+  reportNonFatalError,
+  type AgentErrorInfo,
+  type AgentErrorKind,
+  type ToolErrorFormatOptions,
+  type ExecutionErrorFormatOptions,
+  type NonFatalErrorOptions,
+} from './errors.js';

@@ -1,6 +1,6 @@
 import type { ILLMProvider } from '@customize-agent/llm';
 import { estimateCostUsd } from '@customize-agent/llm';
-import type { FunctionDefinition, Message, ToolCall } from '@customize-agent/types';
+import { formatToolErrorForModel, type FunctionDefinition, type Message, type ToolCall } from '@customize-agent/types';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { ExecutionController } from './execution-controller.js';
 
@@ -75,7 +75,10 @@ export async function runToolLoop(options: ToolLoopRunOptions): Promise<ToolLoop
         result = await options.registry.dispatch(toolCall.name, toolCall.arguments, { signal: options.signal });
         result = options.truncateResult?.(toolCall.name, result) ?? result;
       } catch (err) {
-        result = `[${toolCall.name} 错误]: ${(err as Error).message}`;
+        if (options.signal?.aborted || (err as Error).name === 'AbortError') {
+          return { messages, finishReason: 'aborted', summary: 'Aborted', totalTokens, totalCostUsd, rounds };
+        }
+        result = formatToolErrorForModel({ toolName: toolCall.name, args: toolCall.arguments, error: err as Error });
       }
 
       controller?.recordToolCall(toolCall.name, toolCall.arguments, result);

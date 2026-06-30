@@ -1,8 +1,8 @@
-import type { Message } from '@customize-agent/types';
+import { reportNonFatalError, type Message } from '@customize-agent/types';
 import { estimateCostUsd } from '@customize-agent/llm';
 import type { SubagentConfig, SubagentResult, SubagentTask } from './subagent/types.js';
 import { SubagentRunner } from './subagent/runner.js';
-import type { SafeWorktreeManager, WorktreeContext } from './worktree.js';
+import type { IsolationStrategy, IsolationContext } from './isolation.js';
 
 // 编排器 — DAG 任务分解 + 动态 Worker 派生
 
@@ -55,10 +55,10 @@ const MAX_CONCURRENT_SUBAGENTS = 4;
 
 export class Orchestrator {
   private runner = new SubagentRunner();
-  private worktreeManager?: SafeWorktreeManager;
+  private isolation?: IsolationStrategy;
 
-  constructor(worktreeManager?: SafeWorktreeManager) {
-    this.worktreeManager = worktreeManager;
+  constructor(isolation?: IsolationStrategy) {
+    this.isolation = isolation;
   }
 
   /**
@@ -109,27 +109,34 @@ export class Orchestrator {
 
       const results = await limitedParallel(ready.map((task, index) => async () => {
         const baseName = `${task.id}-${allResults.length + index + 1}`;
-        let worktree: WorktreeContext | undefined;
-        if (task.expectedFiles.length > 0) {
-          if (!this.worktreeManager) throw new Error(`Task ${task.id} requires isolated worktree but no SafeWorktreeManager is configured`);
-          worktree = await this.worktreeManager.createWorktree(baseName);
+        let isoCtx: IsolationContext | undefined;
+        if (task.expectedFiles.length > 0 && this.isolation) {
+          isoCtx = await this.isolation.create(baseName, task);
         }
-        const config = configFactory(task, allResults.length + index, worktree?.path);
+        const config = configFactory(task, allResults.length + index, isoCtx?.path);
 
         const result = await this.runner.run(config, task.description);
-        if (worktree) {
+        if (isoCtx) {
           try {
-            if (result.success) {
-              const merge = await this.worktreeManager!.safeMerge(worktree);
-              if (!merge.success) {
-                result.success = false;
-                result.summary += `\nWorktree merge conflicts: ${merge.conflicts.join(', ')}`;
-              }
+            const merge = await this.isolation!.merge(isoCtx, result.success);
+            if (!merge.success) {
+              result.success = false;
+              result.summary += `\n[${isoCtx.strategy}] merge conflicts: ${merge.conflicts.join(', ')}`;
             }
-            await this.worktreeManager!.destroyWorktree(worktree, result.success);
           } catch (err) {
             result.success = false;
-            result.summary += `\nWorktree cleanup/merge failed: ${(err as Error).message}`;
+            result.summary += `\n[${isoCtx.strategy}] merge failed: ${(err as Error).message}`;
+          } finally {
+            // Always destroy isolation context — even if merge threw
+            try {
+              await this.isolation!.destroy(isoCtx);
+            } catch (cleanupErr) {
+              reportNonFatalError({
+                source: 'orchestrator.destroy_isolation',
+                error: cleanupErr,
+                details: { strategy: isoCtx.strategy, path: isoCtx.path },
+              });
+            }
           }
         }
         return { task, result };

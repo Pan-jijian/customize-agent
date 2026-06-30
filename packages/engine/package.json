@@ -32,6 +32,7 @@
   ],
   "dependencies": {
     "@customize-agent/llm": "workspace:*",
+    "@customize-agent/tools": "workspace:*",
     "@customize-agent/types": "workspace:*",
     "@types/node": "^25.9.3",
     "execa": "^9.6.1"

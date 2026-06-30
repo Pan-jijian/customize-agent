@@ -1,6 +1,9 @@
 import { execa } from 'execa';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { reportNonFatalError } from '@customize-agent/types';
+import { executeCommand } from '../core/platform/shell.js';
+import { isWindows } from '../core/platform/utils.js';
 
 /** 沙箱模式 */
 export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access' | 'vfs-guard' | 'docker';
@@ -36,7 +39,9 @@ export class SandboxExecutor {
             return 'workspace-write';
           }
         }
-      } catch { /* bwrap 不可用 */ }
+      } catch (err) {
+        reportNonFatalError({ source: 'sandbox.preflight_bwrap', error: err });
+      }
       console.warn('[Sandbox] Bubblewrap unavailable or unprivileged user namespaces not enabled, falling back to VFS-Guard mode');
       console.warn('[Sandbox] Security policy: CWD binding + command intent scanning');
       return 'vfs-guard' as SandboxMode;
@@ -47,7 +52,9 @@ export class SandboxExecutor {
         if (result.exitCode === 0 || result.stderr.includes('usage')) {
           return 'workspace-write';
         }
-      } catch { /* sandbox-exec 不可用 */ }
+      } catch (err) {
+        reportNonFatalError({ source: 'sandbox.preflight_seatbelt', error: err });
+      }
       console.warn('[Sandbox] sandbox-exec unavailable, falling back to VFS-Guard mode');
       return 'vfs-guard' as SandboxMode;
     }
@@ -79,6 +86,21 @@ export class SandboxExecutor {
     return this._executeVfsGuard(command, cwd, approved, signal);
   }
 
+  /**
+   * Convert a host path to a Docker-compatible path.
+   * On Windows, C:\Users\me\project → /c/Users/me/project (Docker Desktop convention)
+   */
+  private _dockerPath(hostPath: string): string {
+    if (!isWindows()) return hostPath;
+    // C:\Users\me\project → /c/Users/me/project
+    const normalized = hostPath.replace(/\\/g, '/');
+    const driveMatch = normalized.match(/^([a-zA-Z]):(.+)/);
+    if (driveMatch) {
+      return `/${driveMatch[1]!.toLowerCase()}${driveMatch[2]}`;
+    }
+    return normalized;
+  }
+
   /** Docker 容器执行（不可用时自动降级 VFS） */
   private async _executeDocker(command: string, cwd?: string, signal?: AbortSignal): Promise<SandboxResult> {
     try {
@@ -89,13 +111,14 @@ export class SandboxExecutor {
       return this._executeVfsGuard(command, cwd, undefined, signal);
     }
     const workspace = cwd ?? this.workspaceRoot;
+    const dockerWorkspace = this._dockerPath(workspace);
     try {
       const result = await execa({
         cwd: workspace,
         reject: false,
         timeout: 60_000,
         cancelSignal: signal,
-      })`docker run --rm -i --network=none --memory=1g --cpus=2 -v ${workspace}:/workspace -w /workspace python:3.11-slim sh -c ${command}`;
+      })`docker run --rm -i --network=none --memory=1g --cpus=2 -v ${dockerWorkspace}:/workspace -w /workspace python:3.11-slim sh -c ${command}`;
       return {
         stdout: result.stdout.slice(0, 10_000),
         stderr: result.stderr,
@@ -147,14 +170,12 @@ export class SandboxExecutor {
     }
 
     try {
-      const result = await execa({
-        shell: true,
+      const result = await executeCommand(command, {
         cwd: safeCwd,
-        reject: false,
+        signal,
         timeout: 120_000,
-        cancelSignal: signal,
-      })`${command}`;
-      return { stdout: result.stdout, stderr: result.stderr, code: result.exitCode ?? 1 };
+      });
+      return { stdout: result.stdout, stderr: result.stderr, code: result.code };
     } catch (err) {
       if (signal?.aborted || (err as Error).name === 'AbortError') throw err;
       return { stdout: '', stderr: (err as Error).message, code: 1 };
@@ -180,7 +201,13 @@ export class SandboxExecutor {
         code: result.exitCode ?? 1,
       };
     } finally {
-      await fs.unlink(profilePath).catch(() => {});
+      await fs.unlink(profilePath).catch(err => {
+        reportNonFatalError({
+          source: 'sandbox_executor.unlink_profile',
+          error: err,
+          details: { profilePath },
+        });
+      });
     }
   }
 

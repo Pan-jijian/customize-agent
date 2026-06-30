@@ -3,6 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { rgPath } from '@vscode/ripgrep';
 import glob from 'fast-glob';
+import { formatErrorForModel } from '@customize-agent/types';
 
 /** 搜索结果条目 */
 export interface SearchMatch {
@@ -12,6 +13,8 @@ export interface SearchMatch {
   line: number;
   /** 匹配行内容 */
   content: string;
+  /** 搜索降级或跳过文件等警告 */
+  warning?: string;
 }
 
 /** 搜索选项 */
@@ -45,7 +48,20 @@ export class CodeSearcher {
       return await this._rgSearch(pattern, options, maxResults);
     } catch (err) {
       if (options.signal?.aborted || (err as Error).name === 'AbortError') throw err;
-      return this._jsSearch(pattern, options, maxResults);
+      const fallbackResults = await this._jsSearch(pattern, options, maxResults);
+      const warning = formatErrorForModel({
+        kind: 'fallback_warning',
+        source: 'search.ripgrep',
+        message: (err as Error).message,
+        modelVisible: true,
+        userVisible: true,
+        details: { fallback: 'JavaScript search', impact: 'results may be slower or less complete' },
+      });
+      if (fallbackResults.length > 0) {
+        fallbackResults[0]!.warning = warning;
+        return fallbackResults;
+      }
+      return [{ file: '', line: 0, content: '', warning }];
     }
   }
 
@@ -125,7 +141,8 @@ export class CodeSearcher {
     });
     if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-    const regex = new RegExp(pattern, options.caseSensitive ? 'g' : 'gi');
+    const regex = new RegExp(pattern, options.caseSensitive ? '' : 'i');
+    const skipped: string[] = [];
 
     for (const file of files) {
       if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -139,9 +156,22 @@ export class CodeSearcher {
             results.push({ file: path.relative(this.cwd, file), line: i + 1, content: line.trim() });
           }
         }
-      } catch {
-        // 跳过无法读取的文件
+      } catch (err) {
+        if (skipped.length < 5) skipped.push(`${path.relative(this.cwd, file)}: ${(err as Error).message}`);
       }
+    }
+
+    if (skipped.length > 0) {
+      const warning = formatErrorForModel({
+        kind: 'tool_warning',
+        source: 'search.javascript',
+        message: `skipped ${skipped.length} unreadable files`,
+        modelVisible: true,
+        userVisible: true,
+        details: { skipped },
+      });
+      if (results.length > 0) results[0]!.warning = results[0]!.warning ? `${results[0]!.warning}\n\n${warning}` : warning;
+      else results.push({ file: '', line: 0, content: '', warning });
     }
 
     return results;
