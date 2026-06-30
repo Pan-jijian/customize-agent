@@ -1,5 +1,11 @@
 # customize-agent
 
+## 1.0.2
+
+### Patch Changes
+
+- 修复 CLI 缺少 shebang 导致 `bin` 入口无法直接执行的问题
+
 ## 1.0.1
 
 ### Patch Changes

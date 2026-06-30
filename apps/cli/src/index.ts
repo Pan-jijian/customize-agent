@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+// ↑ shebang — 必须保留。让操作系统知道用 Node.js 执行此文件，CLI 的 bin 入口依赖它。
 import { Command } from 'commander';
 import { fileURLToPath } from 'url';
 import { readFileSync } from 'fs';
