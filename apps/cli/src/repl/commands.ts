@@ -17,6 +17,7 @@ export function buildDefaultCommands(i18n: I18nManager): ReplCommandInfo[] {
     { name: '/model', desc: i18n.t('help.model') },
     { name: '/provider', desc: i18n.t('help.provider') },
     { name: '/memory', desc: i18n.t('help.memory') },
+    { name: '/kb', desc: 'Knowledge base commands' },
     { name: '/web', desc: i18n.t('help.web') },
     { name: '/export', desc: i18n.t('help.export') },
     { name: '/doctor', desc: i18n.t('help.doctor') },

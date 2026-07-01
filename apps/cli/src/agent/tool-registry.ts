@@ -18,11 +18,13 @@ import {
 import { ToolKit, SandboxExecutor, BuiltinTools } from '@customize-agent/tools';
 import { LSPManager, CodeSearcher } from '@customize-agent/search';
 import { BINARY_EXTENSIONS } from '@customize-agent/types';
+import { MultiProjectManager } from '@customize-agent/knowledge';
 
 type CliMcpConfig = Record<string, { command: string; args?: string[]; cwd?: string; env?: Record<string, string> }>;
 
 export interface BuildRegistryOptions {
   root: string;
+  knowledgeRoot?: string;
   lspManager?: LSPManager;
   provider?: ILLMProvider;
   includeOrchestrator?: boolean;
@@ -115,9 +117,9 @@ function parseOrchestrationTasks(args: Record<string, unknown>): SubagentTask[] 
   return task ? [{ id: 'task-1', description: task, dependsOn: [], expectedFiles: [] }] : [];
 }
 
-function createSubagentToolRegistry(role: SubagentRole, provider: ILLMProvider, root: string, lspManager?: LSPManager): ToolRegistry {
+function createSubagentToolRegistry(role: SubagentRole, provider: ILLMProvider, root: string, knowledgeRoot: string, lspManager?: LSPManager): ToolRegistry {
   const allowed = new Set<string>(ROLE_CAPABILITY_MAP[role]);
-  const baseRegistry = buildRegistry({ root, lspManager, provider, includeOrchestrator: false });
+  const baseRegistry = buildRegistry({ root, knowledgeRoot, lspManager, provider, includeOrchestrator: false });
   const subRegistry = new ToolRegistry();
   for (const tool of baseRegistry.listAll()) {
     if (tool.name === 'orchestrate_agents') continue;
@@ -147,7 +149,7 @@ function formatOrchestrationResult(result: Awaited<ReturnType<Orchestrator['orch
 }
 
 export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
-  const { root, lspManager, provider, includeOrchestrator = true } = options;
+  const { root, knowledgeRoot = root, lspManager, provider, includeOrchestrator = true } = options;
   const registry = new ToolRegistry();
   const toolkit = new ToolKit(root);
   const builtinTools = new BuiltinTools(root);
@@ -205,6 +207,28 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
     const lines = matches.filter(m => m.file).map(m => `${m.file}:${m.line}: ${m.content}`);
     const body = lines.length > 0 ? lines.join('\n') : `No matches found for "${args.pattern}".`;
     return [...warnings, body].join(warnings.length ? '\n\n' : '');
+  });
+
+  reg(registry, 'knowledge_search', 'Search the local knowledge base. Use this for business documents, uploaded files, PDFs, spreadsheets, CAD drawings, and knowledgeBase content instead of reading raw knowledgeBase files.', {
+    query: { type: 'string', description: 'Natural language query or keywords to search in the local knowledge base' },
+    scope: { type: 'string', description: 'Search scope: project, global, or all. Default: all' },
+    limit: { type: 'number', description: 'Maximum number of results. Default: 5' },
+  }, ['query'], ['search_symbol'], false, async args => {
+    const manager = new MultiProjectManager();
+    try {
+      const result = await manager.search(knowledgeRoot, String(args.query), {
+        scope: args.scope === 'project' || args.scope === 'global' || args.scope === 'all' ? args.scope : 'all',
+        limit: typeof args.limit === 'number' ? args.limit : 5,
+      });
+      if (result.results.length === 0) return `No knowledge base results for "${String(args.query)}".`;
+      return result.results.map((item, index) => [
+        `## KB-${index + 1}: ${item.filePath}`,
+        `scope=${item.scope}, score=${item.score.toFixed(3)}, collection=${item.collection}`,
+        item.content,
+      ].join('\n')).join('\n\n');
+    } finally {
+      await manager.shutdown();
+    }
   });
 
   registry.register({
@@ -367,7 +391,7 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
           const role = parseSubagentRole(roles[index], defaultRole);
           const subRoot = worktreePath ?? root;
           const subLsp = worktreePath ? new LSPManager(worktreePath) : lspManager;
-          return createBuiltinSubagentConfig(role, `${role}-${task.id}-${index + 1}`, provider, createSubagentToolRegistry(role, provider, subRoot, subLsp));
+          return createBuiltinSubagentConfig(role, `${role}-${task.id}-${index + 1}`, provider, createSubagentToolRegistry(role, provider, subRoot, knowledgeRoot, subLsp));
         }, mode);
         return formatOrchestrationResult(result);
       },

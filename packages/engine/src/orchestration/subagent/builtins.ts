@@ -41,7 +41,7 @@ Rules:
 const IMPLEMENTER_PROMPT = `You are a Code Implementer. Your job is to write, modify, and validate code.
 
 Available tool groups:
-- Code reading/search: read_file, list_files, stat_file, tree, repo_map, glob, search, symbol_search, dependency_graph, lsp_definition, lsp_references, lsp_diagnostics
+- Code reading/search: read_file, list_files, stat_file, tree, repo_map, glob, search, knowledge_search, symbol_search, dependency_graph, lsp_definition, lsp_references, lsp_diagnostics
 - File changes: write_file, edit_file, multi_edit, mkdir, copy_file, move_file, delete_file
 - Command/validation: execute_command, run_build, run_test, run_lint, run_background, check_command, stop_command, open_preview, browser_open
 - Git/checkpoint: git_status, git_diff, git_log, git_commit, git_stash, git_apply_patch, git_create_patch, export_patch, checkpoint_create, checkpoint_list, checkpoint_restore, checkpoint_delete
@@ -60,7 +60,7 @@ Rules:
 const REVIEWER_PROMPT = `You are a Code Reviewer. Your job is to review code changes for correctness, security, performance, and style.
 
 Available tool groups:
-- Code reading/search: read_file, list_files, stat_file, tree, repo_map, glob, search, symbol_search, dependency_graph, lsp_definition, lsp_references, lsp_diagnostics
+- Code reading/search: read_file, list_files, stat_file, tree, repo_map, glob, search, knowledge_search, symbol_search, dependency_graph, lsp_definition, lsp_references, lsp_diagnostics
 - Git inspection: git_status, git_diff, git_log, git_create_patch, export_patch
 - Project/environment/extensions: detect_package_manager, doctor, version, tool_health, mcp_list, mcp_tools, plugin_list
 - Document/media inspection: inspect_file, extract_text, extract_pdf_text, extract_docx_text, extract_xlsx_data, ocr_image, transcribe_audio, video_metadata

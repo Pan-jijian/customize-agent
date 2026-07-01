@@ -27,6 +27,10 @@ export async function resolveAtRefs(text: string, root: string, i18n: I18nManage
 
   const parts: string[] = [];
   for (const ref of refs) {
+    if (ref.filePath.split(/[\\/]+/u).includes('knowledgeBase')) {
+      parts.push(`knowledgeBase 中的原始文件不会直接读取，请通过知识库检索使用已解析内容: ${ref.filePath}`);
+      continue;
+    }
     const full = path.resolve(root, ref.filePath);
     try {
       const stat = await fs.promises.stat(full);

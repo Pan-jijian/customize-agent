@@ -19,12 +19,17 @@ dist-ssr/
 *.log
 *.log.*
 
+#知识库
+knowledgeBase/
+CUSTOMIZE.md
+
 # 测试
 /coverage
 .nyc_output
 
 # 缓存
 .cache
+.customize-agent/
 *.tsbuildinfo
 
 # SQLite 数据库（不提交）

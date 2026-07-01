@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // ↑ shebang — 必须保留。让操作系统知道用 Node.js 执行此文件，CLI 的 bin 入口依赖它。
 import { Command } from 'commander';
-import { fileURLToPath } from 'url';
 import { readFileSync } from 'fs';
-import { dirname, resolve } from 'path';
+import { resolve } from 'path';
 import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
+import { ensureProjectCustomizeFile, MultiProjectManager, startKnowledgeDashboard } from '@customize-agent/knowledge';
 import { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import { createExecutor } from './bootstrap.js';
 import { Repl } from './repl/repl.js';
@@ -13,10 +13,22 @@ import { t, renderMarkdown } from './tui/renderer.js';
 import { type Message } from '@customize-agent/types';
 import { I18nManager } from './i18n/manager.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const PROJECT_ROOT = resolve(__dirname, '../../..');
+function resolveUserProjectRoot(): string {
+  return resolve(process.env.CUSTOMIZE_PROJECT_ROOT ?? process.env.INIT_CWD ?? process.env.PWD ?? process.cwd());
+}
+
+const PROJECT_ROOT = resolveUserProjectRoot();
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
+
+async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
+  ensureProjectCustomizeFile(projectRoot);
+  const manager = new MultiProjectManager();
+  try {
+    await manager.getProject(projectRoot);
+  } finally {
+    await manager.shutdown();
+  }
+}
 
 const program = new Command();
 const configStore = new ConfigStore();
@@ -28,6 +40,7 @@ program
   .option('--plan', 'Plan mode: read-only exploration (requires -p)');
 
 program.action(async () => {
+  await ensureProjectWorkspace(PROJECT_ROOT);
   const opts = program.opts();
   const modelRegistry = new ModelRegistry(configStore);
   const config = configStore.load();
@@ -81,7 +94,24 @@ program.action(async () => {
     : await createExecutor(PROJECT_ROOT, i18n, undefined, undefined, undefined, lsp);
 
   const memory = new MemoryManager();
+  const kbManager = new MultiProjectManager();
+  let kbStatus = '已初始化';
+  try {
+    const projectKb = await kbManager.getProject(PROJECT_ROOT);
+    await projectKb.incrementalIndex();
+    await kbManager.getGlobalKB();
+  } catch (error) {
+    kbStatus = `初始化失败: ${(error as Error).message}`;
+  }
+  let dashboard;
+  try {
+    dashboard = await startKnowledgeDashboard({ projectRoot: PROJECT_ROOT, port: 17321 });
+  } catch (error) {
+    kbStatus = `${kbStatus}; Dashboard 启动失败: ${(error as Error).message}`;
+  }
+
   const repl = new Repl({
+
     executor,
     projectRoot: PROJECT_ROOT,
     memory,
@@ -89,6 +119,9 @@ program.action(async () => {
     configStore,
     modelRegistry,
     providerDisplay,
+    kbManager,
+    dashboard,
+    kbStatus,
   });
 
   await repl.start();

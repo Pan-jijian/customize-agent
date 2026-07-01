@@ -57,10 +57,17 @@ export class FileTools {
   }
 
   async inspectFile(filePath: string): Promise<string> {
+    this.ensureNotKnowledgeBase(filePath);
     const full = resolveSafe(filePath, this.cwd);
     const stat = await fs.stat(full);
     const buffer = stat.isFile() ? await fs.readFile(full) : Buffer.alloc(0);
     const hash = stat.isFile() ? createHash('sha256').update(buffer).digest('hex') : undefined;
     return JSON.stringify({ path: filePath, size: stat.size, isFile: stat.isFile(), isDirectory: stat.isDirectory(), sha256: hash, modified: stat.mtime.toISOString() }, null, 2);
+  }
+
+  private ensureNotKnowledgeBase(filePath: string): void {
+    if (filePath.split(/[\\/]+/u).includes('knowledgeBase')) {
+      throw new Error('knowledgeBase 是知识库原始文件投放目录，智能体工具不能直接读取；请通过知识库检索或 Web Dashboard 管理');
+    }
   }
 }

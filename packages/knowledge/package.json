@@ -1,0 +1,45 @@
+{
+  "name": "@customize-agent/knowledge",
+  "version": "1.0.1",
+  "description": "Local knowledge base infrastructure for customize-agent",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
+  "license": "MIT",
+  "author": "Pan-jijian",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Pan-jijian/customize-agent.git",
+    "directory": "packages/knowledge"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai-agent",
+    "llm",
+    "customize-agent",
+    "knowledge-base"
+  ],
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "fast-glob": "^3.3.3",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.11.0",
+    "pdf-parse": "^2.4.5",
+    "tesseract.js": "^6.0.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.9.3"
+  }
+}

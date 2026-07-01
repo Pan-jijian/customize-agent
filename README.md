@@ -125,9 +125,50 @@ pnpm start:cli
 - 不修改 vite.config.ts
 ```
 
-Agent 启动时自动读取并注入到系统提示词。不创建则使用默认通用规则。
+Agent 启动时自动读取并注入到系统提示词。首次启动会在用户项目根目录生成示例 `CUSTOMIZE.md`；已有文件不会被覆盖。
 
 **详细规则优先级：** CUSTOMIZE.md 中的规则覆盖内置规则。内置规则管理安全底线的协议和红线，CUSTOMIZE.md 管理角色和领域知识。
+
+### 本地知识库
+
+首次启动会在用户项目根目录生成：
+
+```text
+CUSTOMIZE.md
+knowledgeBase/
+  文档资料/
+  表格数据/
+  图片素材/
+  图纸文件/
+  代码文件/
+  数据文件/
+  网页文件/
+  图表流程/
+  压缩包/
+  其他文件/
+```
+
+你可以通过 Web 页面上传资料，也可以直接把文件放入 `knowledgeBase`。文件管理页和智能体检索会自动增量同步本地变更。
+
+知识库支持解析并向量化：
+
+- PDF、Word、PPT、Office 文档
+- Excel、CSV、TSV 等表格，包含工作表、单元格、公式和合并区域
+- 图片 OCR
+- DXF、STEP、IGES、OBJ、GLTF、STL、3MF、DWG/SolidWorks 等图纸或模型资料
+- JSON、YAML、XML、HTML、Markdown、代码和压缩包清单
+
+主智能体会自动注入相关知识库上下文；子智能体也可以使用 `knowledge_search` 工具检索同一个用户项目知识库。
+
+常用命令：
+
+```bash
+/kb overview          # 查看知识库概览
+/kb list [keyword]    # 查看已解析入库文件
+/kb search <query>    # 搜索本地知识库
+/kb dashboard         # 打开 Web 管理页面
+/kb reindex           # 手动重新同步和索引
+```
 
 ### 语言切换
 
@@ -1304,6 +1345,9 @@ CUSTOMIZE_AGENT_ANTHROPIC_API_KEY=       # Anthropic
 CUSTOMIZE_AGENT_GOOGLE_API_KEY=          # Google Gemini
 CUSTOMIZE_AGENT_OPENROUTER_API_KEY=      # OpenRouter
 CUSTOMIZE_AGENT_OLLAMA_API_KEY=          # Ollama（本地通常不需要）
+
+# 项目根目录
+CUSTOMIZE_PROJECT_ROOT=/path/to/project  # 显式指定用户项目根；未设置时使用 INIT_CWD/PWD/当前目录
 
 # 沙箱
 CUSTOMIZE_AGENT_DANGER_MODE=1            # 启用 danger-full-access 沙箱模式

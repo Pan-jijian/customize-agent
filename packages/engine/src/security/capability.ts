@@ -59,6 +59,7 @@ export const TOOL_CAPABILITY_MAP: Record<string, Capability[]> = {
   check_command: [Capability.READ_CODE],
 
   search: [Capability.SEARCH_SYMBOL],
+  knowledge_search: [Capability.SEARCH_SYMBOL],
   symbol_search: [Capability.SEARCH_SYMBOL],
 
   write_file: [Capability.WRITE_CODE],

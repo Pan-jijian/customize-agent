@@ -26,6 +26,9 @@ const zh: Record<string, string | string[]> = {
   'welcome.no_model': '暂无添加模型',
   'welcome.start_hint': '输入任务开始',
   'welcome.usage_hints': '引用文件   / 命令   ↑↓ 历史',
+  'welcome.kb_status': '知识库: {status}',
+  'welcome.web_dashboard': 'Web 控制台: {url}',
+  'welcome.web_dashboard_stopped': 'Web 控制台: 未启动',
 
   // ── 模式标签 ──
   'mode.agent': 'AGENT',
