@@ -3,7 +3,7 @@ import type { AgentEvent, AgentExecutor } from '../agent/executor.js';
 import { TuiInput } from '../tui/input.js';
 import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded, userMessageBlock, toolCallPending } from '../tui/renderer.js';
 import type { MemoryManager, MemoryType } from '@customize-agent/memory';
-import { MultiProjectManager, type DashboardServerHandle } from '@customize-agent/knowledge';
+import { MultiProjectManager } from '@customize-agent/knowledge';
 import { BuiltinTools, WorkspaceSnapshotService, type WorkspaceSnapshot } from '@customize-agent/tools';
 import type { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import type { I18nManager } from '../i18n/manager.js';
@@ -27,7 +27,7 @@ export interface ReplConfig {
   modelRegistry: ModelRegistry;
   providerDisplay?: string;
   kbManager?: MultiProjectManager;
-  dashboard?: DashboardServerHandle;
+  dashboardUrl?: string;
   kbStatus?: string;
 }
 
@@ -51,7 +51,7 @@ export class Repl {
   private sessionCommands: SessionCommands;
   private kbCommands: KbCommands;
   private kbManager?: MultiProjectManager;
-  private dashboard?: DashboardServerHandle;
+  private dashboardUrl?: string;
   private kbStatus = '未初始化';
   private commands: ReplCommandInfo[] = [];
   private currentTaskAbort?: AbortController;
@@ -71,12 +71,19 @@ export class Repl {
     this.snapshotService = new WorkspaceSnapshotService(config.projectRoot);
     this.providerDisplay = config.providerDisplay;
     this.kbManager = config.kbManager;
-    this.dashboard = config.dashboard;
+    this.dashboardUrl = config.dashboardUrl;
     this.kbStatus = config.kbStatus ?? this.kbStatus;
-    this.modelProviderCommands = new ModelProviderCommands({ configStore: this.configStore, modelRegistry: this.modelRegistry, i18n: this.i18n });
+    this.modelProviderCommands = new ModelProviderCommands({
+      configStore: this.configStore,
+      modelRegistry: this.modelRegistry,
+      i18n: this.i18n,
+      readLine: (prompt: string) => this._readLine(prompt),
+      selectList: <T>(title: string, items: Array<{ label: string; detail?: string; value: T }>) =>
+        this._selectList(title, items),
+    });
     this.history = [{ role: 'system', content: this.executor.getSystemPrompt() }];
     this.toolCommands = new ToolCommands(this.builtinTools, this.i18n, this.history);
-    this.kbCommands = new KbCommands(this.root, this.kbManager, this.dashboard);
+    this.kbCommands = new KbCommands(this.root, this.kbManager, this.dashboardUrl, this.i18n);
     this.sessionCommands = new SessionCommands({
       history: this.history,
       executor: this.executor,
@@ -115,7 +122,6 @@ export class Repl {
       await this._runTaskQueue({ content: enhanced, display: input, rendered: false });
     }
 
-    await this.dashboard?.close();
     await this.kbManager?.shutdown();
     console.log('\n' + this.i18n.t('welcome.goodbye'));
   }
@@ -320,6 +326,22 @@ export class Repl {
       stopToolPreview();
       taskInput.stop();
     }
+  }
+
+  private async _readLine(prompt: string): Promise<string> {
+    this.tui.suspend();
+    const { createInterface } = await import('readline');
+    return new Promise<string>(resolve => {
+      const rl = createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      rl.question(prompt, (answer: string) => {
+        rl.close();
+        this.tui.resume();
+        resolve(answer);
+      });
+    });
   }
 
   private async _selectList<T>(title: string, items: Array<{ label: string; detail?: string; value: T }>): Promise<T | null> {
@@ -609,7 +631,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
       configHint: [
         hasModels ? undefined : this.i18n.t('cmd.first_config'),
         this.i18n.t('welcome.kb_status', { status: this.kbStatus }),
-        this.dashboard ? this.i18n.t('welcome.web_dashboard', { url: this.dashboard.url }) : this.i18n.t('welcome.web_dashboard_stopped'),
+        this.dashboardUrl ? this.i18n.t('welcome.web_dashboard', { url: this.dashboardUrl }) : this.i18n.t('welcome.web_dashboard_stopped'),
       ].filter(Boolean).join('\n'),
     }));
   }

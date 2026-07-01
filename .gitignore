@@ -5,6 +5,8 @@ node_modules/
 # 构建输出
 dist/
 dist-ssr/
+.next/
+out/
 .npm-cache
 # 环境文件
 .env

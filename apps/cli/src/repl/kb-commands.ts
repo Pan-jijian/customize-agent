@@ -1,15 +1,23 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { ChromaHttpClient, ExternalExtractorRegistry, MultiProjectManager, getProjectKbPath, startKnowledgeDashboard, type DashboardServerHandle } from '@customize-agent/knowledge';
+import { ChromaHttpClient, ExternalExtractorRegistry, MultiProjectManager, getProjectKbPath } from '@customize-agent/knowledge';
 import { t } from '../tui/renderer.js';
+import type { I18nManager } from '../i18n/manager.js';
 
 export class KbCommands {
   private manager?: MultiProjectManager;
-  private dashboardHandle?: DashboardServerHandle;
+  private dashboardUrl?: string;
+  private i18n?: I18nManager;
 
-  constructor(private readonly projectRoot: string, manager?: MultiProjectManager, dashboard?: DashboardServerHandle) {
+  constructor(
+    private readonly projectRoot: string,
+    manager?: MultiProjectManager,
+    dashboardUrl?: string,
+    i18n?: I18nManager,
+  ) {
     this.manager = manager;
-    this.dashboardHandle = dashboard;
+    this.dashboardUrl = dashboardUrl;
+    this.i18n = i18n;
   }
 
   private getManager(): MultiProjectManager {
@@ -276,15 +284,18 @@ export class KbCommands {
   }
 
   private async dashboard(tokens: string[]): Promise<void> {
-    if (this.dashboardHandle && tokens.length === 0) {
-      process.stdout.write(t.success(`Knowledge Dashboard: ${this.dashboardHandle.url}\n`));
-      process.stdout.write(t.dim('Dashboard 已在启动时自动开启。\n\n'));
+    if (this.dashboardUrl && tokens.length === 0) {
+      const url = this.i18n?.t('kb.dash_url', { url: this.dashboardUrl }) ?? `Dashboard: ${this.dashboardUrl}`;
+      const hint = this.i18n?.t('kb.dash_auto_started') ?? 'Dashboard was auto-started with the CLI.';
+      process.stdout.write(t.success(`${url}\n`));
+      process.stdout.write(t.dim(`${hint}\n\n`));
       return;
     }
     const port = tokens[0] ? Number(tokens[0]) : 17321;
-    this.dashboardHandle = await startKnowledgeDashboard({ projectRoot: this.projectRoot, port });
-    process.stdout.write(t.success(`Knowledge Dashboard: ${this.dashboardHandle.url}\n`));
-    process.stdout.write(t.dim('当前 REPL 进程退出时 Dashboard 会停止。\n\n'));
+    const url = this.i18n?.t('kb.dash_url', { url: `http://localhost:${port}` }) ?? `Dashboard: http://localhost:${port}`;
+    const hint = this.i18n?.t('kb.dash_manual') ?? 'Start manually: cd apps/customize-agent-server && pnpm dev';
+    process.stdout.write(t.success(`${url}\n`));
+    process.stdout.write(t.dim(`${hint}\n\n`));
   }
 
   private extractScope(tokens: string[]): { scope: 'project' | 'global' | 'all'; rest: string[] } {
