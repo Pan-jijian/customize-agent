@@ -26,6 +26,9 @@ const en: Record<string, string | string[]> = {
   'welcome.no_model': 'No model configured',
   'welcome.start_hint': 'Type a task to begin',
   'welcome.usage_hints': '@ attach files   / commands   ↑↓ history',
+  'welcome.kb_status': 'Knowledge Base: {status}',
+  'welcome.web_dashboard': 'Web Dashboard: {url}',
+  'welcome.web_dashboard_stopped': 'Web Dashboard: stopped',
 
   // ── Mode Labels ──
   'mode.agent': 'AGENT',

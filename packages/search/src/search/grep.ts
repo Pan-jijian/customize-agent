@@ -75,6 +75,7 @@ export class CodeSearcher {
       '-g', '!.git',
       '-g', '!dist',
       '-g', '!.pnpm',
+      '-g', '!knowledgeBase',
     ];
 
     if (!options.caseSensitive) {

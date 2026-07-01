@@ -3,6 +3,7 @@ import type { AgentEvent, AgentExecutor } from '../agent/executor.js';
 import { TuiInput } from '../tui/input.js';
 import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded, userMessageBlock, toolCallPending } from '../tui/renderer.js';
 import type { MemoryManager, MemoryType } from '@customize-agent/memory';
+import { MultiProjectManager, type DashboardServerHandle } from '@customize-agent/knowledge';
 import { BuiltinTools, WorkspaceSnapshotService, type WorkspaceSnapshot } from '@customize-agent/tools';
 import type { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import type { I18nManager } from '../i18n/manager.js';
@@ -13,6 +14,7 @@ import { resolveAtRefs } from './at-file-resolver.js';
 import { selectList } from './select-list.js';
 import { ToolCommands } from './tool-commands.js';
 import { SessionCommands } from './session-commands.js';
+import { KbCommands } from './kb-commands.js';
 
 /** REPL 配置 */
 export interface ReplConfig {
@@ -24,6 +26,9 @@ export interface ReplConfig {
   configStore: ConfigStore;
   modelRegistry: ModelRegistry;
   providerDisplay?: string;
+  kbManager?: MultiProjectManager;
+  dashboard?: DashboardServerHandle;
+  kbStatus?: string;
 }
 
 /**
@@ -44,6 +49,10 @@ export class Repl {
   private modelProviderCommands: ModelProviderCommands;
   private toolCommands: ToolCommands;
   private sessionCommands: SessionCommands;
+  private kbCommands: KbCommands;
+  private kbManager?: MultiProjectManager;
+  private dashboard?: DashboardServerHandle;
+  private kbStatus = '未初始化';
   private commands: ReplCommandInfo[] = [];
   private currentTaskAbort?: AbortController;
   private taskRunning = false;
@@ -61,9 +70,13 @@ export class Repl {
     this.builtinTools = new BuiltinTools(config.projectRoot);
     this.snapshotService = new WorkspaceSnapshotService(config.projectRoot);
     this.providerDisplay = config.providerDisplay;
+    this.kbManager = config.kbManager;
+    this.dashboard = config.dashboard;
+    this.kbStatus = config.kbStatus ?? this.kbStatus;
     this.modelProviderCommands = new ModelProviderCommands({ configStore: this.configStore, modelRegistry: this.modelRegistry, i18n: this.i18n });
     this.history = [{ role: 'system', content: this.executor.getSystemPrompt() }];
     this.toolCommands = new ToolCommands(this.builtinTools, this.i18n, this.history);
+    this.kbCommands = new KbCommands(this.root, this.kbManager, this.dashboard);
     this.sessionCommands = new SessionCommands({
       history: this.history,
       executor: this.executor,
@@ -102,6 +115,8 @@ export class Repl {
       await this._runTaskQueue({ content: enhanced, display: input, rendered: false });
     }
 
+    await this.dashboard?.close();
+    await this.kbManager?.shutdown();
     console.log('\n' + this.i18n.t('welcome.goodbye'));
   }
 
@@ -179,6 +194,23 @@ export class Repl {
     this.taskRunning = false;
   }
 
+  private async _injectKnowledgeContext(enhancedInput: string, query: string): Promise<string> {
+    try {
+      this.kbManager ??= new MultiProjectManager();
+      const result = await this.kbManager.search(this.root, query, { scope: 'all', limit: 5 });
+      if (result.results.length === 0) return enhancedInput;
+      const lines = result.results.map((item, index) => [
+        `### KB-${index + 1}: ${item.filePath}`,
+        `scope=${item.scope}, score=${item.score.toFixed(3)}, collection=${item.collection}`,
+        item.content.slice(0, 1200),
+      ].join('\n'));
+      return `${enhancedInput}\n\n--- 本地知识库相关上下文 ---\n${lines.join('\n\n')}\n--- 知识库上下文结束 ---`;
+    } catch (error) {
+      reportNonFatalError({ source: 'repl.knowledge', error, details: { query: query.slice(0, 120) } });
+      return enhancedInput;
+    }
+  }
+
   private async _execute(input: string, displayInput = input, renderUserMessage = true): Promise<void> {
     // 检查是否配置了模型
     const resolved = this.modelRegistry.resolve('action');
@@ -231,6 +263,8 @@ export class Repl {
         enhancedInput = `${input}\n\n${this.i18n.t('memory.section_header')}\n${memoryLines.join('\n')}\n${this.i18n.t('memory.section_footer')}`;
       }
     }
+
+    enhancedInput = await this._injectKnowledgeContext(enhancedInput, input);
 
     const userIndex = this.history.length;
     try {
@@ -318,6 +352,7 @@ export class Repl {
       }
 
       case '/memory': return this._handleMemoryCommand(args);
+      case '/kb': await this.kbCommands.handle(args); return false;
       case '/model': return this.modelProviderCommands.handleModelCommand(args);
       case '/provider': return this.modelProviderCommands.handleProviderCommand(args);
       case '/rewind': await this.sessionCommands.rewind(args); return false;
@@ -379,6 +414,8 @@ ${s.bold(this.i18n.t('help.title')) + ':'}
   ${t.accent('/language zh|en')} ${t.dim(this.i18n.t('help.language'))}
   ${t.accent('/model [name]')}  ${t.dim(this.i18n.t('help.model'))}
   ${t.accent('/provider <name>')}${t.dim(this.i18n.t('help.provider'))}
+  ${t.accent('/kb status')}      ${t.dim('Knowledge base status')}
+  ${t.accent('/kb search <q>')}  ${t.dim('Search knowledge base')}
   ${t.accent('/web search <q>')} ${t.dim(this.i18n.t('help.web'))}
   ${t.accent('/export pdf <file>')} ${t.dim(this.i18n.t('help.export'))}
   ${t.accent('/checkpoint')}    ${t.dim(this.i18n.t('help.checkpoint'))}
@@ -569,7 +606,11 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
       providerLabel: this.i18n.t('welcome.provider_label'),
       startHint: this.i18n.t('welcome.start_hint'),
       usageHints: this.i18n.t('welcome.usage_hints'),
-      configHint: hasModels ? undefined : this.i18n.t('cmd.first_config'),
+      configHint: [
+        hasModels ? undefined : this.i18n.t('cmd.first_config'),
+        this.i18n.t('welcome.kb_status', { status: this.kbStatus }),
+        this.dashboard ? this.i18n.t('welcome.web_dashboard', { url: this.dashboard.url }) : this.i18n.t('welcome.web_dashboard_stopped'),
+      ].filter(Boolean).join('\n'),
     }));
   }
 
