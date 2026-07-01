@@ -1,6 +1,6 @@
 # Customize Agent
 
-通用终端 AI 助手 — 7 包 + 1 App Monorepo，原生 Function Calling + 双语 TUI + 三级模型分层。支持编程、写作、系统运维、数据分析和文件管理。
+通用终端 AI 助手 — 8 包 + 1 App Monorepo，原生 Function Calling + 双语 TUI + 三级模型分层。支持编程、写作、系统运维、数据分析和文件管理。
 
 通过项目根目录的 `CUSTOMIZE.md` 文件一键切换 Agent 角色和规则，无需修改代码。
 
@@ -16,6 +16,7 @@
   - [@customize-agent/llm](#customize-agentllm)
   - [@customize-agent/tools](#customize-agenttools)
   - [@customize-agent/search](#customize-agentsearch)
+  - [@customize-agent/knowledge](#customize-agentknowledge)
   - [@customize-agent/engine](#customize-agentengine)
   - [@customize-agent/runtime](#customize-agentruntime)
   - [@customize-agent/memory](#customize-agentmemory)
@@ -32,6 +33,7 @@
 - [MCP 协议集成](#mcp-协议集成)
 - [Hooks 系统](#hooks-系统)
 - [跨会话记忆](#跨会话记忆)
+- [本地知识库](#本地知识库)
 - [文件索引与符号搜索](#文件索引与符号搜索)
 - [TUI 界面](#tui-界面)
 - [国际化 (i18n)](#国际化-i18n)
@@ -39,6 +41,7 @@
 - [配置参考](#配置参考)
 - [环境变量](#环境变量)
 - [项目命令](#项目命令)
+- [发包流程](#发包流程)
 - [测试](#测试)
 - [代码风格](#代码风格)
 - [设计决策 (ADR)](#设计决策-adr)
@@ -62,6 +65,7 @@
 - **MCP 协议** — 既可作为 MCP Server 暴露工具，也可作为 MCP Client 接入外部工具
 - **Hooks 系统** — 6 个生命周期事件的命令/提示词钩子
 - **跨会话记忆** — SQLite + FTS5 全文搜索，4 种记忆类型
+- **本地知识库** — PDF/Word/Excel/图片/图纸等多格式文件解析与向量化检索
 - **零启动扫描** — `@file` 首次触发 `git ls-files` 毫秒级扫描
 - **配置持久化** — `~/.customize-agent/config.json`，语言/Provider/模型全持久化，跨会话保留
 - **上下文自动压缩** — 三级水位（60% 警告 → 75% 截断旧工具结果 → 85% LLM 摘要）
@@ -84,7 +88,7 @@
 
 ```bash
 # 1. 克隆项目
-git clone <your-repo-url> customize-agent
+git clone https://github.com/Pan-jijian/customize-agent.git
 cd customize-agent
 
 # 2. 安装依赖
@@ -128,47 +132,6 @@ pnpm start:cli
 Agent 启动时自动读取并注入到系统提示词。首次启动会在用户项目根目录生成示例 `CUSTOMIZE.md`；已有文件不会被覆盖。
 
 **详细规则优先级：** CUSTOMIZE.md 中的规则覆盖内置规则。内置规则管理安全底线的协议和红线，CUSTOMIZE.md 管理角色和领域知识。
-
-### 本地知识库
-
-首次启动会在用户项目根目录生成：
-
-```text
-CUSTOMIZE.md
-knowledgeBase/
-  文档资料/
-  表格数据/
-  图片素材/
-  图纸文件/
-  代码文件/
-  数据文件/
-  网页文件/
-  图表流程/
-  压缩包/
-  其他文件/
-```
-
-你可以通过 Web 页面上传资料，也可以直接把文件放入 `knowledgeBase`。文件管理页和智能体检索会自动增量同步本地变更。
-
-知识库支持解析并向量化：
-
-- PDF、Word、PPT、Office 文档
-- Excel、CSV、TSV 等表格，包含工作表、单元格、公式和合并区域
-- 图片 OCR
-- DXF、STEP、IGES、OBJ、GLTF、STL、3MF、DWG/SolidWorks 等图纸或模型资料
-- JSON、YAML、XML、HTML、Markdown、代码和压缩包清单
-
-主智能体会自动注入相关知识库上下文；子智能体也可以使用 `knowledge_search` 工具检索同一个用户项目知识库。
-
-常用命令：
-
-```bash
-/kb overview          # 查看知识库概览
-/kb list [keyword]    # 查看已解析入库文件
-/kb search <query>    # 搜索本地知识库
-/kb dashboard         # 打开 Web 管理页面
-/kb reindex           # 手动重新同步和索引
-```
 
 ### 语言切换
 
@@ -310,6 +273,41 @@ customize-agent/
 │   │       │   └── semantic.ts       # EmbeddingSearch（语义搜索）
 │   │       └── lsp/                  # LSP 集成
 │   │           └── lsp-manager.ts    # LSPManager（9 种语言服务器）
+│   ├── knowledge/                    # 本地知识库（12 个源文件）
+│   │   └── src/
+│   │       ├── index.ts              # 统一导出
+│   │       ├── types.ts              # 知识库类型定义
+│   │       ├── constants.ts          # 常量（支持的文件类型等）
+│   │       ├── chunking/             # 文本分块
+│   │       │   └── text-chunker.ts   # TextChunker（滑动窗口 + 语义边界）
+│   │       ├── classification/       # 文件分类
+│   │       │   └── classifier.ts     # FileClassifier（MIME 类型 + 扩展名）
+│   │       ├── extraction/           # 内容提取
+│   │       │   ├── content-extractor.ts     # 多格式文本提取
+│   │       │   └── external-extractor.ts    # 外部命令行提取器注册
+│   │       ├── embedding/            # Embedding
+│   │       │   └── embedding-provider.ts    # HashEmbeddingProvider
+│   │       ├── dedup/                # 去重
+│   │       │   ├── dedup-engine.ts          # DedupEngine（MinHash 去重）
+│   │       │   └── relationship-detector.ts # 文件关系检测
+│   │       ├── vector/               # 向量存储
+│   │       │   ├── chroma-store.ts          # ChromaDB 向量存储
+│   │       │   ├── vector-indexer.ts        # VectorIndexer
+│   │       │   ├── collection-manager.ts    # 集合管理（全局/项目级）
+│   │       │   └── types.ts                 # 向量存储类型
+│   │       ├── core/                 # 核心管理
+│   │       │   ├── knowledge-base-manager.ts  # KnowledgeBaseManager
+│   │       │   ├── multi-project-manager.ts   # MultiProjectManager
+│   │       │   ├── file-scanner.ts            # 文件扫描 + 增量同步
+│   │       │   ├── change-tracker.ts          # 变更追踪
+│   │       │   ├── index-state-store.ts       # 索引状态存储（SQLite）
+│   │       │   ├── project-config.ts          # 项目配置管理
+│   │       │   ├── project-id.ts              # 项目 ID 计算
+│   │       │   └── project-registry.ts        # 项目注册表
+│   │       ├── search/               # 联合搜索
+│   │       │   └── federation-search.ts       # FederationSearch
+│   │       └── server/               # Web 管理
+│   │           └── dashboard-server.ts        # 知识库 Dashboard
 │   ├── engine/                       # 核心引擎（19 个源文件）
 │   │   └── src/
 │   │       ├── index.ts              # 统一导出
@@ -357,10 +355,11 @@ customize-agent/
 ├── pnpm-lock.yaml                    # 依赖锁文件
 ├── set-claude-env.sh                 # Claude Code 通过 DeepSeek V4 代理配置
 ├── .changeset/                       # Changesets 版本管理配置
+│   ├── config.json                   # Changesets 配置
+│   └── README.md                     # Changesets 工作流说明
 ├── .github/workflows/                # CI/CD 流水线 (ci.yml + release.yml)
 ├── docs/
 │   └── knowledge-base-design.md      # 本地知识库系统完整设计方案
-├── RELEASE_NOTES.md                  # 发行说明
 └── README.md                         # 本文件
 ```
 
@@ -467,6 +466,66 @@ customize-agent/
 
 **LSP 支持语言：** TypeScript/JavaScript, Python, Go, Rust, Java, C/C++, Ruby, PHP, JSON（9 种语言服务器）。
 
+### @customize-agent/knowledge
+
+**本地知识库 — 多格式文件解析、向量化检索、联合搜索**
+
+为 Agent 提供本地文件的知识检索能力。支持 PDF、Word、Excel、图片、CAD 图纸等多种格式的解析和向量化，通过 ChromaDB 存储向量并支持联合搜索。
+
+| 导出 | 说明 |
+|------|------|
+| `KnowledgeBaseManager` | 知识库管理器（扫描、解析、索引、检索的统一入口） |
+| `MultiProjectManager` | 多项目管理器（支持多个项目独立知识库） |
+| `KnowledgeFileScanner` | 文件扫描器（增量同步，检测新增/修改/删除） |
+| `ChangeTracker` | 变更追踪器（基于 mtime + 哈希的文件变更检测） |
+| `ContentExtractor` | 内容提取器（PDF/Word/Excel/图片 OCR/图纸等多格式） |
+| `ExternalExtractorRegistry` | 外部提取器注册表（支持命令行工具扩展） |
+| `TextChunker` | 文本分块器（滑动窗口 + 语义边界，可配置 chunk 大小） |
+| `FileClassifier` | 文件分类器（MIME 类型识别 + 扩展名映射） |
+| `DedupEngine` | 去重引擎（MinHash + LSH 局部敏感哈希去重） |
+| `RelationshipDetector` | 文件关系检测器（检测文件间的引用和依赖关系） |
+| `HashEmbeddingProvider` | 哈希 Embedding 提供者（轻量级文本向量化） |
+| `ChromaVectorStore` | ChromaDB 向量存储（ChromaDB HTTP 客户端封装） |
+| `VectorIndexer` | 向量索引器（批量文本向量化 + 存储） |
+| `CollectionManager` | 集合管理器（全局集合 + 项目级集合隔离） |
+| `FederationSearch` | 联合搜索引擎（跨项目 + 跨格式统一检索） |
+| `IndexStateStore` | 索引状态存储（SQLite，文件哈希 + chunk 映射） |
+| `ProjectRegistry` | 项目注册表（管理所有已索引项目） |
+| `ProjectConfigManager` | 项目配置管理器（项目级知识库配置） |
+| `startKnowledgeDashboard` | 启动 Web 管理页面（Express 服务器） |
+
+**支持的文件格式：**
+
+| 类别 | 格式 | 解析方式 |
+|------|------|------|
+| 文档 | PDF, Word (.docx), PPT (.pptx) | pdf-parse, mammoth, 内置解析 |
+| 表格 | Excel (.xlsx/.xls), CSV, TSV | xlsx 库，含工作表和公式 |
+| 图片 | PNG, JPG, GIF, BMP, TIFF | Tesseract.js OCR |
+| 图纸 | DXF, STEP, IGES, OBJ, GLTF, STL, 3MF | 文本提取 + 元数据 |
+| 代码 | JS, TS, Python, Rust, Go 等 | 直接文本 + AST 增强 |
+| 数据 | JSON, YAML, XML, HTML | 结构化解析 |
+| 压缩包 | ZIP, TAR, GZ | 清单提取 + 内容递归解析 |
+
+**知识库目录结构：**
+
+首次启动会在用户项目根目录自动生成：
+
+```text
+knowledgeBase/
+  文档资料/
+  表格数据/
+  图片素材/
+  图纸文件/
+  代码文件/
+  数据文件/
+  网页文件/
+  图表流程/
+  压缩包/
+  其他文件/
+```
+
+用户可将文件放入对应目录，Agent 自动增量同步和索引。
+
 ### @customize-agent/engine
 
 **Agent 引擎 — 工具注册、权限控制、执行调度、子智能体编排、MCP、Hooks**
@@ -499,7 +558,7 @@ customize-agent/
 
 ### @customize-agent/runtime
 
-**Agent Runtime — 配置持久化 + 事件总线 + 状态机 + 遥测**
+**Agent Runtime — 配置持久化 + 模型注册 + 遥测**
 
 所有入口点（CLI, MCP Server, 子智能体）复用的统一调度层。
 
@@ -542,6 +601,8 @@ customize-agent/
 ### CLI App
 
 **终端入口应用 — Commander CLI + REPL + 双语 TUI**
+
+`customize-agent` 包（`apps/cli`），npm 包名为 `customize-agent`，安装后暴露 `customize` 二进制命令。
 
 3 种运行模式：
 
@@ -743,6 +804,15 @@ CLI 中注册了 50+ 工具，按功能域分类如下：
 | `checkpoint_list` | 列出所有快照 | 否 |
 | `checkpoint_restore` | 恢复到指定快照 | 是 |
 | `checkpoint_delete` | 删除快照 | 是 |
+
+### 知识库
+
+| 工具 | 功能 | 审批 |
+|------|------|:--:|
+| `knowledge_search` | 搜索本地知识库（向量 + 关键词联合检索） | 否 |
+| `knowledge_overview` | 查看知识库概览 | 否 |
+| `knowledge_list` | 列出已索引文件 | 否 |
+| `knowledge_reindex` | 手动触发重新索引 | 是 |
 
 ### LSP 工具
 
@@ -1132,6 +1202,55 @@ score = 1 / (1 + bm25_rank) × log(1 + access_count)
 
 ---
 
+## 本地知识库
+
+本地知识库由 `@customize-agent/knowledge` 包提供，支持多格式文件解析与向量化检索。
+
+### 知识库目录
+
+首次启动会在用户项目根目录自动生成：
+
+```text
+CUSTOMIZE.md
+knowledgeBase/
+  文档资料/
+  表格数据/
+  图片素材/
+  图纸文件/
+  代码文件/
+  数据文件/
+  网页文件/
+  图表流程/
+  压缩包/
+  其他文件/
+```
+
+你可以通过 Web 页面上传资料，也可以直接把文件放入 `knowledgeBase`。文件管理页和智能体检索会自动增量同步本地变更。
+
+### 支持的文件格式
+
+知识库支持解析并向量化：
+
+- PDF、Word、PPT、Office 文档
+- Excel、CSV、TSV 等表格，包含工作表、单元格、公式和合并区域
+- 图片 OCR
+- DXF、STEP、IGES、OBJ、GLTF、STL、3MF、DWG/SolidWorks 等图纸或模型资料
+- JSON、YAML、XML、HTML、Markdown、代码和压缩包清单
+
+主智能体会自动注入相关知识库上下文；子智能体也可以使用 `knowledge_search` 工具检索同一个用户项目知识库。
+
+### 常用命令
+
+```bash
+/kb overview          # 查看知识库概览
+/kb list [keyword]    # 查看已解析入库文件
+/kb search <query>    # 搜索本地知识库
+/kb dashboard         # 打开 Web 管理页面
+/kb reindex           # 手动重新同步和索引
+```
+
+---
+
 ## 文件索引与符号搜索
 
 ### @ 文件模糊补全
@@ -1255,6 +1374,11 @@ Tab 键 → 自动补全最长公共前缀
 | `/export <format>` | 导出会话结果 |
 | `/git <op>` | Git 操作 |
 | `/checkpoint` | 管理工作区快照 |
+| `/kb overview` | 知识库概览 |
+| `/kb list [keyword]` | 列出已索引文件 |
+| `/kb search <query>` | 搜索知识库 |
+| `/kb dashboard` | 打开知识库 Web 管理页 |
+| `/kb reindex` | 手动重建索引 |
 | `/doctor` | 工具链诊断 |
 | `/help` | 显示完整命令列表 |
 | `/exit` / `/quit` | 退出程序 |
@@ -1393,6 +1517,309 @@ pnpm start:cli -- mcp-server          # 启动 MCP Server
 # 开发
 pnpm run dev                          # 构建 + 启动
 ```
+
+---
+
+## 发包流程
+
+本项目使用 **Changesets** 管理版本和发布，配合 GitHub Actions 实现 CI/CD 自动化发布到 npm。
+
+### 发布包总览
+
+Monorepo 中以下 9 个包独立发布到 npm（均为 `public` 访问）：
+
+| npm 包名 | 源目录 | 当前版本 |
+|------|------|------|
+| `customize-agent` | `apps/cli` | 1.0.5 |
+| `@customize-agent/types` | `packages/types` | 1.0.2 |
+| `@customize-agent/llm` | `packages/llm` | 1.0.2 |
+| `@customize-agent/tools` | `packages/tools` | 1.0.3 |
+| `@customize-agent/search` | `packages/search` | 1.0.3 |
+| `@customize-agent/knowledge` | `packages/knowledge` | 1.0.1 |
+| `@customize-agent/engine` | `packages/engine` | 1.0.3 |
+| `@customize-agent/runtime` | `packages/runtime` | 1.0.2 |
+| `@customize-agent/memory` | `packages/memory` | 1.0.2 |
+
+### 前置条件
+
+1. **npm 账号** — 在 [npmjs.com](https://www.npmjs.com/) 注册账号
+2. **npm Token** — 在 npm 网站生成 Automation Token（用于 CI）或 Publish Token
+3. **GitHub Secrets** — 在仓库 Settings → Secrets and variables → Actions 中添加：
+   - `NPM_TOKEN`：npm 发布 Token
+4. **GitHub Actions 权限** — 确保 Actions 有 Read and write permissions（Settings → Actions → General → Workflow permissions）
+
+### 发包方式一：自动化 CI/CD 发布（推荐）
+
+日常开发使用此方式，合并 PR 到 `master` 分支后自动触发。
+
+#### 完整工作流
+
+```
+1. 开发功能/修复 Bug
+      │
+2. 创建 Changeset（记录变更）
+      │  pnpm changeset
+      │
+3. 提交代码 + Changeset 文件
+      │  git add . && git commit
+      │
+4. 创建 PR → master
+      │  CI 运行 lint + typecheck + test + build
+      │
+5. 合并 PR → master
+      │
+6. Changesets Bot 自动创建/更新 "Version Packages" PR
+      │  （自动计算版本号、生成 CHANGELOG、更新 package.json）
+      │
+7. 合并 "Version Packages" PR → master
+      │
+8. 自动发布到 npm
+      └─ 自动创建 GitHub Release
+```
+
+#### 操作步骤
+
+**第 1 步：创建 Changeset**
+
+当你做了一个需要发布的变更（新功能、Bug 修复、API 变更等），在项目根目录运行：
+
+```bash
+pnpm changeset
+```
+
+交互式 CLI 会依次询问：
+
+1. **选择要发布的包** — 用空格选中（如 `@customize-agent/tools`, `@customize-agent/engine`）
+2. **选择版本类型** — `major` / `minor` / `patch`
+
+| 版本类型 | 何时使用 | 示例 |
+|------|------|------|
+| `major` | 破坏性 API 变更 | 移除/重命名导出函数，变更接口参数签名 |
+| `minor` | 向后兼容的新功能 | 新增工具、新增 Provider、新增 Hook 事件 |
+| `patch` | 向后兼容的 Bug 修复 | 修复死循环误判、修复权限检查逻辑、文档修正 |
+
+3. **输入变更描述** — 会写入 CHANGELOG，按 Enter 确认
+
+这会生成一个随机命名的 `.md` 文件在 `.changeset/` 目录下，内容示例：
+
+```markdown
+---
+"@customize-agent/tools": patch
+"@customize-agent/engine": minor
+---
+
+新增 export_json 工具，修复沙箱权限检查的边界情况。
+```
+
+**第 2 步：提交 Changeset**
+
+```bash
+git add .changeset/
+git commit -m "chore: add changeset for xxx feature"
+```
+
+> **注意：** Changeset 文件必须随代码一起提交到 git。如果变更不需要发布（如仅修改 README、CI 配置），则无需创建 changeset。
+
+**第 3 步：创建 PR 并合并**
+
+```bash
+git push origin your-feature-branch
+# 在 GitHub 创建 PR → master
+```
+
+PR 合并到 `master` 后，CI 流水线自动执行：
+
+1. **CI 检查** (`ci.yml`) — lint → typecheck → test (ubuntu/macos/windows) → build (ubuntu/macos/windows)
+2. **Changesets Bot** (`release.yml`) — 检测 `.changeset/` 目录中的变更文件，自动创建或更新 "Version Packages" PR
+
+**第 4 步：合并 Version Packages PR**
+
+Changesets Bot 创建的 "Version Packages" PR 包含：
+- 更新后的各包 `package.json` 版本号
+- 自动生成的 `CHANGELOG.md`
+- 删除已消费的 `.changeset/*.md` 文件
+
+审查无误后，合并该 PR。
+
+**第 5 步：自动发布到 npm**
+
+合并 "Version Packages" PR 后，`release.yml` 自动执行：
+
+```bash
+pnpm run version-packages    # changeset version（更新版本号）
+pnpm run build               # 全量构建
+pnpm run release             # changeset publish（发布到 npm）
+```
+
+同时自动创建 GitHub Release（tag 格式：`customize-agent-v1.0.5`）。
+
+### 发包方式二：手动本地发布
+
+适用于紧急修复或 CI 不可用的情况。
+
+#### 前置准备
+
+```bash
+# 1. 登录 npm（首次需要）
+npm login
+
+# 2. 验证登录状态
+npm whoami
+
+# 3. 确保工作区干净
+git status
+```
+
+#### 完整命令流程
+
+```bash
+# === 1. 创建 Changeset ===
+pnpm changeset
+# 交互式选择要发布的包和版本类型
+
+# === 2. 提交 Changeset ===
+git add .changeset/
+git commit -m "chore: add changeset for xxx"
+
+# === 3. 消费 Changeset，更新版本号 ===
+pnpm run version-packages
+# 等价于: changeset version
+# 效果: 更新 package.json 版本号、生成 CHANGELOG、删除已消费的 .changeset/*.md
+
+# === 4. 提交版本更新 ===
+git add .
+git commit -m "chore: version packages"
+
+# === 5. 全量构建（必须通过） ===
+pnpm run build
+
+# === 6. 运行测试（必须通过） ===
+pnpm run test
+
+# === 7. 发布到 npm ===
+pnpm run release
+# 等价于: changeset publish
+# 效果: 为每个有变更的包执行 npm publish
+
+# === 8. 推送 tag 和提交到远程 ===
+git push --follow-tags
+```
+
+#### 手动发布单个包（不使用 Changesets）
+
+如果只需要发布某一个包（比如紧急热修复），可以手动操作：
+
+```bash
+# 1. 进入包目录
+cd packages/tools
+
+# 2. 手动更新版本号
+# 编辑 package.json，将 version 从 "1.0.3" 改为 "1.0.4"
+
+# 3. 构建
+pnpm run build
+
+# 4. 发布
+npm publish --access public
+
+# 5. 提交版本更新
+cd ../..
+git add packages/tools/package.json
+git commit -m "chore: bump @customize-agent/tools to 1.0.4"
+git tag @customize-agent/tools@1.0.4
+git push --follow-tags
+```
+
+> **注意：** 手动发布单个包后，记得同步更新依赖该包的其他包的版本号，否则可能导致依赖不一致。
+
+### CI/CD 流水线详解
+
+#### CI 流水线 (`.github/workflows/ci.yml`)
+
+触发条件：PR → `master` 或 Push → `master`
+
+| Job | 运行环境 | 内容 |
+|------|------|------|
+| `lint` | ubuntu-latest | ESLint 全量检查 |
+| `typecheck` | ubuntu-latest | TypeScript 全量类型检查 |
+| `test` | ubuntu / macos / windows | 构建 + Vitest 测试 |
+| `build` | ubuntu / macos / windows | 全量构建验证 |
+
+#### Release 流水线 (`.github/workflows/release.yml`)
+
+触发条件：Push → `master`
+
+```yaml
+步骤:
+  1. Checkout (fetch-depth: 0 获取完整历史)
+  2. 安装 pnpm + Node.js 22
+  3. pnpm install --frozen-lockfile
+  4. pnpm run build
+  5. pnpm run test
+  6. changesets/action@v1:
+     - version: pnpm run version-packages
+     - publish: pnpm run release
+  7. 创建 GitHub Release (softprops/action-gh-release)
+```
+
+### npm Scripts 参考
+
+| 命令 | 底层实现 | 说明 |
+|------|------|------|
+| `pnpm changeset` | `changeset` | 交互式创建 Changeset |
+| `pnpm run version-packages` | `changeset version` | 消费 Changeset → 更新版本号 + 生成 CHANGELOG |
+| `pnpm run release` | `pnpm run build && changeset publish` | 构建所有包 → 发布有变更的包到 npm |
+| `pnpm run build` | `turbo run build` | Turborepo 并行构建（自动处理依赖顺序） |
+| `pnpm run check` | `turbo run typecheck lint && vitest run` | 全量质量检查 |
+
+### 依赖关系与构建顺序
+
+包之间的依赖关系决定构建顺序（Turborepo 通过 `dependsOn: ["^build"]` 自动处理）：
+
+```
+types (零依赖)
+  ├── llm → types
+  ├── tools → types, search
+  ├── search → types
+  ├── knowledge → types
+  ├── engine → types, llm, tools, search
+  ├── runtime → types
+  ├── memory → types
+  └── cli → engine, runtime, llm, tools, search, memory, knowledge, types
+```
+
+### 常见问题
+
+**Q: Changeset 创建后能修改吗？**
+
+可以。在合并到 master 之前，直接编辑 `.changeset/` 目录下对应的 `.md` 文件即可。
+
+**Q: 如何跳过某个包的发布？**
+
+在创建 Changeset 时不要选中该包，或在 `.changeset/config.json` 的 `ignore` 数组中添加包名。
+
+**Q: 发布失败如何回滚？**
+
+npm 包发布后在 72 小时内可以撤销（`npm unpublish <package>@<version>`），但不建议撤销已发布的版本，应发布一个新的 patch 版本来修复。
+
+**Q: 多个 Changeset 如何合并？**
+
+Changesets Bot 会自动将所有未消费的 Changeset 合并到 "Version Packages" PR 中，按最大版本类型升级。
+
+**Q: 如何查看哪些包需要发布？**
+
+```bash
+pnpm changeset status
+# 显示当前所有未消费的 Changeset 和受影响的包
+```
+
+**Q: Changesets Bot 没有创建 PR？**
+
+检查：
+1. `.github/workflows/release.yml` 是否正确配置
+2. GitHub Actions 是否有 Read and write permissions
+3. `NPM_TOKEN` Secret 是否正确设置
+4. Action 的运行日志是否有报错
 
 ---
 
@@ -1581,7 +2008,7 @@ CUSTOMIZE_AGENT_LOG_LEVEL=debug pnpm start:cli
 
 ## 许可证
 
-ISC
+MIT
 
 ---
 
