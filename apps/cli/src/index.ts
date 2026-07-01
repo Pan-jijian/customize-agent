@@ -5,7 +5,7 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
-import { ensureProjectCustomizeFile, MultiProjectManager, startKnowledgeDashboard } from '@customize-agent/knowledge';
+import { ensureProjectCustomizeFile, MultiProjectManager } from '@customize-agent/knowledge';
 import { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import { createExecutor } from './bootstrap.js';
 import { Repl } from './repl/repl.js';
@@ -103,11 +103,65 @@ program.action(async () => {
   } catch (error) {
     kbStatus = `初始化失败: ${(error as Error).message}`;
   }
-  let dashboard;
+  let dashboardUrl: string | undefined;
+  const dashboardPort = 17321;
   try {
-    dashboard = await startKnowledgeDashboard({ projectRoot: PROJECT_ROOT, port: 17321 });
+    const { spawn } = await import('child_process');
+    const { existsSync } = await import('fs');
+    const isWin = process.platform === 'win32';
+    const serverDir = resolve(import.meta.dirname!, '../../../apps/customize-agent-server');
+    const nextBin = resolve(serverDir, 'node_modules', '.bin', isWin ? 'next.cmd' : 'next');
+    const hasBuild = existsSync(resolve(serverDir, '.next', 'BUILD_ID'));
+
+    if (!hasBuild) {
+      kbStatus = `${kbStatus}\n   Dashboard: 未构建，请先运行 pnpm build`;
+    } else {
+      // 检测是否已有服务在运行 → 直接复用，避免多实例端口冲突
+      let alreadyRunning = false;
+      try {
+        const res = await fetch(`http://localhost:${dashboardPort}/api/health`);
+        if (res.ok) alreadyRunning = true;
+      } catch { /* 端口空闲，需要启动 */ }
+
+      if (alreadyRunning) {
+        dashboardUrl = `http://localhost:${dashboardPort}`;
+      } else {
+        const proc = spawn(nextBin, ['start', '-p', String(dashboardPort)], {
+          cwd: serverDir,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, NODE_ENV: 'production' },
+          shell: isWin,
+        });
+        proc.on('error', () => { /* 静默处理 */ });
+
+        let stderrBuf = '';
+        const ready = await new Promise<boolean>((resolve) => {
+          const timeout = setTimeout(() => resolve(false), 10000);
+          const check = (data: string) => {
+            if (data.includes('Ready')) { clearTimeout(timeout); resolve(true); }
+          };
+          proc.stdout?.on('data', (d: Buffer) => check(d.toString()));
+          proc.stderr?.on('data', (d: Buffer) => {
+            const s = d.toString();
+            stderrBuf += s;
+            check(s);
+          });
+          proc.once('close', () => { clearTimeout(timeout); resolve(false); });
+        });
+
+        // EADDRINUSE → 另一个实例刚好抢先启动了，复用即可
+        if (!ready && stderrBuf.includes('EADDRINUSE')) {
+          proc.kill();
+          dashboardUrl = `http://localhost:${dashboardPort}`;
+        } else if (ready) {
+          dashboardUrl = `http://localhost:${dashboardPort}`;
+        } else {
+          dashboardUrl = `http://localhost:${dashboardPort}`;
+        }
+      }
+    }
   } catch (error) {
-    kbStatus = `${kbStatus}; Dashboard 启动失败: ${(error as Error).message}`;
+    kbStatus = `${kbStatus}\n   Dashboard 启动失败: ${(error as Error).message}`;
   }
 
   const repl = new Repl({
@@ -120,7 +174,7 @@ program.action(async () => {
     modelRegistry,
     providerDisplay,
     kbManager,
-    dashboard,
+    dashboardUrl,
     kbStatus,
   });
 

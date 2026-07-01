@@ -1,0 +1,5 @@
+.cardMeta { color: var(--colorTextSecondary); font-size: 12px; }
+.cardName { font-weight: 600; color: var(--colorText); text-transform: capitalize; }
+.cardAction { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+.tierDesc { color: var(--colorTextSecondary); font-size: 12px; display: block; margin-bottom: 8px; }
+.modelTags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }

@@ -23,4 +23,3 @@ export { CollectionManager, globalCollectionName, projectCollectionName } from '
 export type { CollectionClient, VectorCollectionInfo, VectorDocument, VectorSearchQuery, VectorSearchResult, VectorStoreInterface } from './vector/types.js';
 export { VectorIndexer, type VectorIndexResult } from './vector/vector-indexer.js';
 export { FederationSearch, type FederatedQuery, type FederatedResult, type FederatedSearchItem, type SearchFilters, type SearchScope } from './search/federation-search.js';
-export { startKnowledgeDashboard, type DashboardServerHandle, type DashboardServerOptions } from './server/dashboard-server.js';
