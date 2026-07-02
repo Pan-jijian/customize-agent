@@ -1,5 +1,12 @@
 # customize-agent
 
+## 2.1.1
+
+### Patch Changes
+
+- 6218da2: - 优化 bundle-server 脚本，补充 static/public 目录拷贝
+  - 重构 dashboard 启动逻辑，新增日志文件支持与 waitForDashboard 辅助函数
+
 ## 2.1.0
 
 ### Minor Changes
