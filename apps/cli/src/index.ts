@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // ↑ shebang — 必须保留。让操作系统知道用 Node.js 执行此文件，CLI 的 bin 入口依赖它。
+import type { ChildProcess } from 'child_process';
 import { Command } from 'commander';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
@@ -28,6 +29,53 @@ async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
   } finally {
     await manager.shutdown();
   }
+}
+
+function findDashboardServerDir(existsSync: (path: string) => boolean): string | null {
+  const cliDir = import.meta.dirname!;
+  const candidates = [
+    resolve(cliDir, '../../../server'),
+    resolve(cliDir, '../../../apps/server'),
+    resolve(cliDir, '../../server'),
+    resolve(process.cwd(), 'apps/server'),
+  ];
+  return candidates.find(dir => existsSync(resolve(dir, 'package.json'))) ?? null;
+}
+
+async function stopDashboardProcess(port: number, pid?: number): Promise<boolean> {
+  const targetPid = pid ?? await findListeningPid(port);
+  if (!targetPid || targetPid === process.pid) return false;
+  try {
+    process.kill(targetPid, 'SIGTERM');
+  } catch {
+    return false;
+  }
+
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    try {
+      await fetch(`http://localhost:${port}/api/health`);
+    } catch {
+      return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
+  return false;
+}
+
+async function findListeningPid(port: number): Promise<number | undefined> {
+  if (process.platform === 'win32') return undefined;
+  const { execFile } = await import('child_process');
+  return await new Promise(resolve => {
+    execFile('lsof', ['-tiTCP:' + port, '-sTCP:LISTEN'], (error, stdout) => {
+      if (error) {
+        resolve(undefined);
+        return;
+      }
+      const pid = Number(stdout.trim().split('\n')[0]);
+      resolve(Number.isFinite(pid) ? pid : undefined);
+    });
+  });
 }
 
 const program = new Command();
@@ -89,6 +137,7 @@ program.action(async () => {
   const resolved = modelRegistry.resolve('action');
   const providerDisplay = resolved ? `${resolved.provider}/${resolved.name}` : i18n.t('welcome.no_model');
   const providerCfg = resolved ? configStore.getProvider(resolved.provider) : undefined;
+  const executorConfigKey = resolved ? JSON.stringify({ provider: resolved.provider, model: resolved.name, cfg: providerCfg ?? {} }) : undefined;
   const executor = resolved
     ? await createExecutor(PROJECT_ROOT, i18n, resolved.provider, resolved.name, providerCfg, lsp)
     : await createExecutor(PROJECT_ROOT, i18n, undefined, undefined, undefined, lsp);
@@ -107,61 +156,89 @@ program.action(async () => {
   const dashboardPort = 17321;
   try {
     const { spawn } = await import('child_process');
-    const { existsSync } = await import('fs');
+    const { existsSync, readFileSync: readRuntimeFileSync } = await import('fs');
     const isWin = process.platform === 'win32';
-    const serverDir = resolve(import.meta.dirname!, '../../../apps/customize-agent-server');
+    const serverDir = findDashboardServerDir(existsSync);
+    if (!serverDir) {
+      kbStatus = `${kbStatus}\n   Dashboard: 未找到 Web 服务目录`;
+      throw new Error('Dashboard server directory not found');
+    }
     const nextBin = resolve(serverDir, 'node_modules', '.bin', isWin ? 'next.cmd' : 'next');
-    const hasBuild = existsSync(resolve(serverDir, '.next', 'BUILD_ID'));
+    const buildIdPath = resolve(serverDir, '.next', 'BUILD_ID');
+    const routesManifestPath = resolve(serverDir, '.next', 'routes-manifest.json');
+    const localBuildId = existsSync(buildIdPath) ? readRuntimeFileSync(buildIdPath, 'utf-8').trim() : '';
+    const hasBuild = Boolean(localBuildId);
+    const routesManifest = existsSync(routesManifestPath) ? readRuntimeFileSync(routesManifestPath, 'utf-8') : '';
+    const hasConsoleRoutes = ['/overview', '/models', '/settings'].every(route =>
+      routesManifest.includes(`"page":"${route}"`) || routesManifest.includes(`"page": "${route}"`),
+    );
 
-    if (!hasBuild) {
+    if (!hasBuild || !hasConsoleRoutes) {
       kbStatus = `${kbStatus}\n   Dashboard: 未构建，请先运行 pnpm build`;
     } else {
-      // 检测是否已有服务在运行 → 直接复用，避免多实例端口冲突
-      let alreadyRunning = false;
+      let portAvailable = false;
+      let restartedStaleDashboard = false;
+      let stopFailed = false;
       try {
         const res = await fetch(`http://localhost:${dashboardPort}/api/health`);
-        if (res.ok) alreadyRunning = true;
-      } catch { /* 端口空闲，需要启动 */ }
-
-      if (alreadyRunning) {
-        dashboardUrl = `http://localhost:${dashboardPort}`;
-      } else {
-        const proc = spawn(nextBin, ['start', '-p', String(dashboardPort)], {
-          cwd: serverDir,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, NODE_ENV: 'production' },
-          shell: isWin,
-        });
-        proc.on('error', () => { /* 静默处理 */ });
-
-        let stderrBuf = '';
-        const ready = await new Promise<boolean>((resolve) => {
-          const timeout = setTimeout(() => resolve(false), 10000);
-          const check = (data: string) => {
-            if (data.includes('Ready')) { clearTimeout(timeout); resolve(true); }
-          };
-          proc.stdout?.on('data', (d: Buffer) => check(d.toString()));
-          proc.stderr?.on('data', (d: Buffer) => {
-            const s = d.toString();
-            stderrBuf += s;
-            check(s);
-          });
-          proc.once('close', () => { clearTimeout(timeout); resolve(false); });
-        });
-
-        // EADDRINUSE → 另一个实例刚好抢先启动了，复用即可
-        if (!ready && stderrBuf.includes('EADDRINUSE')) {
-          proc.kill();
-          dashboardUrl = `http://localhost:${dashboardPort}`;
-        } else if (ready) {
-          dashboardUrl = `http://localhost:${dashboardPort}`;
-        } else {
-          dashboardUrl = `http://localhost:${dashboardPort}`;
+        if (res.ok) {
+          const health = await res.json() as { buildId?: string | null; pid?: number };
+          if (health.buildId === localBuildId) {
+            dashboardUrl = `http://localhost:${dashboardPort}`;
+          } else {
+            restartedStaleDashboard = await stopDashboardProcess(dashboardPort, health.pid);
+            portAvailable = restartedStaleDashboard;
+            stopFailed = !restartedStaleDashboard;
+          }
         }
+      } catch {
+        portAvailable = true;
+      }
+
+      if (!dashboardUrl && portAvailable) {
+        let proc: ChildProcess | null = null;
+        try {
+          proc = spawn(nextBin, ['start', '-p', String(dashboardPort)], {
+            cwd: serverDir,
+            stdio: 'ignore',
+            env: { ...process.env, NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT },
+            shell: isWin,
+            detached: true,
+          });
+          proc.unref();
+        } catch { /* handled by health check below */ }
+
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline) {
+          try {
+            const res = await fetch(`http://localhost:${dashboardPort}/api/health`);
+            if (res.ok) {
+              const health = await res.json() as { buildId?: string | null };
+              if (health.buildId === localBuildId) {
+                dashboardUrl = `http://localhost:${dashboardPort}`;
+                break;
+              }
+            }
+          } catch { /* wait for server */ }
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+
+        if (!dashboardUrl) {
+          proc?.kill();
+          kbStatus = `${kbStatus}\n   Dashboard: 启动超时`;
+        }
+      }
+
+      if (dashboardUrl && restartedStaleDashboard) {
+        kbStatus = `${kbStatus}\n   Dashboard: 已自动更新控制台服务`;
+      } else if (stopFailed) {
+        kbStatus = `${kbStatus}\n   Dashboard: 控制台正在更新，请关闭旧终端后重新打开`;
       }
     }
   } catch (error) {
-    kbStatus = `${kbStatus}\n   Dashboard 启动失败: ${(error as Error).message}`;
+    if ((error as Error).message !== 'Dashboard server directory not found') {
+      kbStatus = `${kbStatus}\n   Dashboard 启动失败: ${(error as Error).message}`;
+    }
   }
 
   const repl = new Repl({
@@ -173,6 +250,8 @@ program.action(async () => {
     configStore,
     modelRegistry,
     providerDisplay,
+    executorConfigKey,
+    createExecutor: (providerName, modelName, providerConfig) => createExecutor(PROJECT_ROOT, i18n, providerName, modelName, providerConfig, lsp),
     kbManager,
     dashboardUrl,
     kbStatus,

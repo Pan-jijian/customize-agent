@@ -39,7 +39,7 @@ export interface UserConfig {
 // ── 协议自动推断 ──
 
 const PROTOCOL_MAP: Record<string, string> = {
-  deepseek: 'openai', openai: 'openai', openrouter: 'openai', ollama: 'openai',
+  deepseek: 'openai', openai: 'openai', openrouter: 'openai', ollama: 'ollama',
   anthropic: 'anthropic', google: 'google',
 };
 
@@ -61,6 +61,7 @@ const DEFAULT_CONFIG: UserConfig = { language: 'zh', providers: {}, models: { re
 export class ConfigStore {
   private filePath: string;
   private _cache: UserConfig | null = null;
+  private _cacheMtimeMs = 0;
 
   constructor(storagePath?: string) {
     const dir = storagePath ?? path.join(os.homedir(), '.customize-agent');
@@ -69,10 +70,12 @@ export class ConfigStore {
   }
 
   load(): UserConfig {
-    if (this._cache) return this._cache;
     try {
+      const stat = fs.existsSync(this.filePath) ? fs.statSync(this.filePath) : null;
+      if (this._cache && stat && stat.mtimeMs === this._cacheMtimeMs) return this._cache;
       const raw = fs.readFileSync(this.filePath, 'utf-8');
       this._cache = this._parse(JSON.parse(raw));
+      this._cacheMtimeMs = stat?.mtimeMs ?? 0;
     } catch {
       this._cache = { language: 'zh', providers: {}, models: { reader: { ...EMPTY_TIER }, reasoning: { ...EMPTY_TIER }, action: { ...EMPTY_TIER } } };
       this.save(this._cache);
@@ -81,9 +84,11 @@ export class ConfigStore {
   }
 
   save(partial: Partial<UserConfig>): UserConfig {
-    const merged = { ...(this._cache ?? DEFAULT_CONFIG), ...partial };
+    const current = this._readCurrentForSave();
+    const merged = { ...current, ...partial };
     fs.writeFileSync(this.filePath, JSON.stringify(merged, null, 2), 'utf-8');
     this._cache = merged;
+    this._cacheMtimeMs = fs.statSync(this.filePath).mtimeMs;
     return merged;
   }
 
@@ -150,6 +155,17 @@ export class ConfigStore {
   isFirstRun(): boolean {
     const c = this.load();
     return c.models.reader.list.length === 0 && c.models.reasoning.list.length === 0 && c.models.action.list.length === 0;
+  }
+
+  private _readCurrentForSave(): UserConfig {
+    try {
+      if (fs.existsSync(this.filePath)) {
+        return this._parse(JSON.parse(fs.readFileSync(this.filePath, 'utf-8')));
+      }
+    } catch {
+      return this._cache ?? DEFAULT_CONFIG;
+    }
+    return this._cache ?? DEFAULT_CONFIG;
   }
 
   private _parse(raw: Record<string, unknown>): UserConfig {

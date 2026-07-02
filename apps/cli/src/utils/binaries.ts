@@ -7,9 +7,7 @@
  *   - Codex CLI     →  codex-resources/rg
  */
 import { rgPath } from '@vscode/ripgrep';
-import fdFind from 'fd-find';
 
 export const binaries = {
   rg: rgPath,
-  fd: fdFind,
 } as const;

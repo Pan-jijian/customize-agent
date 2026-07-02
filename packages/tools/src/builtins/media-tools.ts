@@ -12,6 +12,7 @@ export class MediaTools {
   constructor(private cwd: string) {}
 
   async extractText(filePath: string): Promise<string> {
+    this.ensureNotKnowledgeBase(filePath);
     const full = resolveSafe(filePath, this.cwd);
     const buffer = await fs.readFile(full);
     const text = [...buffer.toString('utf-8')].filter(ch => {
@@ -68,6 +69,8 @@ export class MediaTools {
   }
 
   async compressImage(input: string, output: string): Promise<string> {
+    this.ensureNotKnowledgeBase(input);
+    this.ensureNotKnowledgeBase(output);
     await sharp(resolveSafe(input, this.cwd)).jpeg({ quality: 80 }).toFile(resolveSafe(output, this.cwd));
     return `Compressed image ${input} -> ${output}`;
   }
@@ -78,6 +81,7 @@ export class MediaTools {
   }
 
   private async mediaProbe(filePath: string): Promise<string> {
+    this.ensureNotKnowledgeBase(filePath);
     const full = resolveSafe(filePath, this.cwd);
     const ffprobe = resolveBinary('ffprobe');
     const res = await execa(ffprobe, ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', full], { reject: false });
@@ -86,5 +90,11 @@ export class MediaTools {
       return JSON.stringify({ path: filePath, size: stat.size, isFile: stat.isFile() });
     }
     return res.stdout || '';
+  }
+
+  private ensureNotKnowledgeBase(filePath: string): void {
+    if (filePath.split(/[\\/]+/u).includes('knowledgeBase')) {
+      throw new Error('knowledgeBase 是知识库原始文件投放目录，智能体工具不能直接读取；请通过知识库检索或 Web Dashboard 管理');
+    }
   }
 }

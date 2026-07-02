@@ -15,6 +15,7 @@ function providerFactoryName(providerName: string, providerConfig?: ProviderConf
   const protocol = resolveProtocol(providerName, providerConfig);
   if (protocol === 'anthropic') return 'anthropic';
   if (protocol === 'google') return 'google';
+  if (protocol === 'ollama') return 'ollama';
   if (protocol === 'openai') {
     return ['deepseek', 'openai', 'openrouter', 'ollama'].includes(providerName) ? providerName : 'openai';
   }

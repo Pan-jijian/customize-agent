@@ -145,6 +145,8 @@ const en: Record<string, string | string[]> = {
   'tool.generate_thumbnail': 'Generate Thumbnail',
   'tool.version': 'Version',
   'tool.tool_health': 'Tool Health',
+  'tool.check_update': 'Check Updates',
+  'tool.update': 'Update Tool',
   'tool.todo_write': 'Write Todo List',
   'tool.mcp_list': 'MCP List',
   'tool.mcp_add': 'Add MCP',
@@ -351,7 +353,7 @@ const en: Record<string, string | string[]> = {
   // ── Knowledge Base Web Dashboard ──
   'kb.dash_url': 'Dashboard: {url}',
   'kb.dash_auto_started': 'Dashboard was auto-started with the CLI.',
-  'kb.dash_manual': 'Start manually: cd apps/customize-agent-server && pnpm dev',
+  'kb.dash_manual': 'Start manually: cd apps/server && pnpm dev',
 
   // ── Common ──
   'common.truncation': '…',

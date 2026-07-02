@@ -17,6 +17,7 @@ export type AgentEvent =
   | { type: 'output'; text: string }
   | { type: 'task_start' }
   | { type: 'task_done' }
+  | { type: 'llm_response'; content: string; usage?: { promptTokens: number; completionTokens: number } }
   | { type: 'user_message'; text: string }
   | { type: 'tool_call_preview'; toolName: string; args: Record<string, unknown>; elapsedMs?: number }
   | { type: 'approval_request'; toolName: string; args: Record<string, unknown> }
@@ -214,6 +215,8 @@ export class AgentExecutor {
         costThisRound = estimateCostUsd(this.provider, response.usage);
       }
 
+      this._emit({ type: 'llm_response', content: response.content, usage: response.usage });
+
       const assistantMsg: Message = { role: 'assistant', content: response.content, toolCalls: response.toolCalls };
       working.push(assistantMsg);
 
@@ -245,7 +248,12 @@ export class AgentExecutor {
 
         if (this.permissionEngine?.check(tc.name, tc.arguments) === 'ask' && this.approvalHandler) {
           this._emit({ type: 'approval_request', toolName: tc.name, args: tc.arguments });
-          const ok = await this.approvalHandler(tc.name, tc.arguments);
+          const approvalPromise = this.approvalHandler(tc.name, tc.arguments, options?.signal);
+          const abortPromise = options?.signal ? new Promise<boolean>((_, reject) => {
+            if (options.signal!.aborted) reject(new DOMException('Aborted', 'AbortError'));
+            else options.signal!.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+          }) : undefined;
+          const ok = await (abortPromise ? Promise.race([approvalPromise, abortPromise]) : approvalPromise);
           this._emit({ type: 'approval_response', toolName: tc.name, approved: ok });
           if (options?.signal?.aborted) break;
           if (!ok) {

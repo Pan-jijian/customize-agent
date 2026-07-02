@@ -5,7 +5,7 @@ import { welcomeBanner, t, s, divider, msg, contextStats, thinkingExpanded, user
 import type { MemoryManager, MemoryType } from '@customize-agent/memory';
 import { MultiProjectManager } from '@customize-agent/knowledge';
 import { BuiltinTools, WorkspaceSnapshotService, type WorkspaceSnapshot } from '@customize-agent/tools';
-import type { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
+import { AuditLogger, type ConfigStore, type ModelRegistry, type ProviderConfig } from '@customize-agent/runtime';
 import type { I18nManager } from '../i18n/manager.js';
 import { buildDefaultCommands, type ReplCommandInfo } from './commands.js';
 import { ModelProviderCommands } from './model-provider-commands.js';
@@ -26,6 +26,8 @@ export interface ReplConfig {
   configStore: ConfigStore;
   modelRegistry: ModelRegistry;
   providerDisplay?: string;
+  createExecutor?: (providerName: string, modelName: string, providerConfig?: ProviderConfig) => Promise<AgentExecutor>;
+  executorConfigKey?: string;
   kbManager?: MultiProjectManager;
   dashboardUrl?: string;
   kbStatus?: string;
@@ -46,6 +48,8 @@ export class Repl {
   private builtinTools: BuiltinTools;
   private snapshotService: WorkspaceSnapshotService;
   private providerDisplay: string | undefined;
+  private createExecutor?: (providerName: string, modelName: string, providerConfig?: ProviderConfig) => Promise<AgentExecutor>;
+  private executorConfigKey?: string;
   private modelProviderCommands: ModelProviderCommands;
   private toolCommands: ToolCommands;
   private sessionCommands: SessionCommands;
@@ -58,6 +62,7 @@ export class Repl {
   private taskRunning = false;
   private pendingInputs: Array<{ content: string; display: string; rendered: boolean }> = [];
   private sessionId = `session-${Date.now()}`;
+  private auditLogger = new AuditLogger(this.sessionId);
   private snapshots = new Map<number, WorkspaceSnapshot>();
 
   constructor(config: ReplConfig) {
@@ -70,6 +75,8 @@ export class Repl {
     this.builtinTools = new BuiltinTools(config.projectRoot);
     this.snapshotService = new WorkspaceSnapshotService(config.projectRoot);
     this.providerDisplay = config.providerDisplay;
+    this.createExecutor = config.createExecutor;
+    this.executorConfigKey = config.executorConfigKey;
     this.kbManager = config.kbManager;
     this.dashboardUrl = config.dashboardUrl;
     this.kbStatus = config.kbStatus ?? this.kbStatus;
@@ -90,7 +97,11 @@ export class Repl {
       i18n: this.i18n,
       selectList: (title, items) => this._selectList(title, items),
       getSessionId: () => this.sessionId,
-      setSessionId: id => { this.sessionId = id; },
+      setSessionId: id => {
+        this.sessionId = id;
+        this.auditLogger = new AuditLogger(id);
+        void this.auditLogger.init();
+      },
       setDraft: text => this.tui.setDraft(text),
       findSnapshotForTurn: index => this._findSnapshotForTurn(index),
       loadSnapshot: id => this.snapshotService.loadSerialized(id),
@@ -101,6 +112,15 @@ export class Repl {
 
   /** 启动 REPL */
   async start(): Promise<void> {
+    await this.auditLogger.init();
+    await this.auditLogger.logSessionMetadata({
+      sessionId: this.sessionId,
+      startTime: new Date().toISOString(),
+      cwd: this.root,
+      task: '',
+      provider: this.providerDisplay ?? '',
+      model: this.providerDisplay ?? '',
+    });
     this._redrawBanner();
 
     while (true) {
@@ -190,6 +210,7 @@ export class Repl {
       await this._execute(next.content, next.display, !next.rendered);
       if (this.currentTaskAbort?.signal.aborted) {
         this.pendingInputs.length = 0;
+        this.currentTaskAbort = undefined;
         break;
       }
       next = this.pendingInputs.shift();
@@ -217,8 +238,11 @@ export class Repl {
     }
   }
 
+  private _modelConfigKey(provider: string, model: string, cfg?: ProviderConfig): string {
+    return JSON.stringify({ provider, model, cfg: cfg ?? {} });
+  }
+
   private async _execute(input: string, displayInput = input, renderUserMessage = true): Promise<void> {
-    // 检查是否配置了模型
     const resolved = this.modelRegistry.resolve('action');
     if (!resolved) {
       process.stdout.write('\n' + t.warning(this.i18n.t('cmd.no_model_configured')) + '\n');
@@ -226,10 +250,22 @@ export class Repl {
       return;
     }
 
+    const providerConfig = this.configStore.getProvider(resolved.provider);
+    const nextExecutorKey = this._modelConfigKey(resolved.provider, resolved.name, providerConfig);
+    if (this.createExecutor && this.executorConfigKey !== nextExecutorKey) {
+      this.executor = await this.createExecutor(resolved.provider, resolved.name, providerConfig);
+      this.executorConfigKey = nextExecutorKey;
+      this.history[0] = { role: 'system', content: this.executor.getSystemPrompt() };
+      this.providerDisplay = this.executor.providerName;
+      this._redrawBanner();
+    }
+
     if (renderUserMessage) this.tui.writeExternal(userMessageBlock(displayInput, this.i18n.t('message.user')));
 
+    const abortController = new AbortController();
+    this.currentTaskAbort = abortController;
     const taskInput = this._captureInputDuringTask(() => {
-      this.currentTaskAbort?.abort();
+      abortController.abort();
       this.pendingInputs.length = 0;
     });
     const drainTaskInput = () => taskInput.drain().map(text => ({ content: text, display: text }));
@@ -271,6 +307,10 @@ export class Repl {
     }
 
     enhancedInput = await this._injectKnowledgeContext(enhancedInput, input);
+    if (abortController.signal.aborted) {
+      taskInput.stop();
+      return;
+    }
 
     const userIndex = this.history.length;
     try {
@@ -280,10 +320,22 @@ export class Repl {
     } catch (err) {
       reportNonFatalError({ source: 'repl.snapshot', error: err, details: { sessionId: this.sessionId } });
     }
+    if (abortController.signal.aborted) {
+      taskInput.stop();
+      return;
+    }
     this.history.push({ role: 'user', content: enhancedInput });
 
-    const abortController = new AbortController();
-    this.currentTaskAbort = abortController;
+    await this.auditLogger.logSessionMetadata({
+      sessionId: this.sessionId,
+      startTime: new Date().toISOString(),
+      cwd: this.root,
+      task: input,
+      provider: this.providerDisplay ?? '',
+      model: this.providerDisplay ?? '',
+    });
+    await this.auditLogger.logTaskStart(input);
+
     try {
       const updated = await this.executor.runTask(this.history, {
         onEvent: event => {
@@ -294,6 +346,9 @@ export class Repl {
           }
           if (event.type === 'approval_request') { stopToolPreview(); taskInput.pause(); return; }
           if (event.type === 'approval_response') { taskInput.resume(); return; }
+          if (event.type === 'llm_response') {
+            void this.auditLogger.logLLMResponse(event.content, event.usage ? { prompt: event.usage.promptTokens, completion: event.usage.completionTokens } : undefined);
+          }
           if (event.type === 'output') { stopToolPreview(); taskInput.writeOutput(event.text); }
           else if (event.type === 'user_message') { stopToolPreview(); taskInput.writeOutput(userMessageBlock(event.text, this.i18n.t('message.user')).replace(/^\n/, '')); }
           else { stopToolPreview(); this._renderAgentEvent(event); }
@@ -307,6 +362,7 @@ export class Repl {
       }
       this.history.length = 0;
       this.history.push(...updated);
+      await this.auditLogger.logTaskFinish('success');
 
       if (this.memory) {
         const lastAssistant = [...updated].reverse().find(m => m.role === 'assistant');
@@ -318,6 +374,8 @@ export class Repl {
       if (abortController.signal.aborted) {
         this.history.pop();
       } else {
+        await this.auditLogger.logError(err as Error, 'task');
+        await this.auditLogger.logTaskFinish('error');
         const errorContent = formatExecutionErrorForModel({ scope: 'task', error: err as Error });
         this.history.push({ role: 'assistant', content: errorContent });
         taskInput.writeOutput(msg.error((err as Error).message));

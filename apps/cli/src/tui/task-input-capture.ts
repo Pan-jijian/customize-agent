@@ -459,6 +459,8 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
       if (!active) return;
       active = false;
       process.stdin.removeListener('keypress', onKeypress);
+      clearStatusLine();
+      clearBuffer();
     },
     resume: () => {
       if (active) return;

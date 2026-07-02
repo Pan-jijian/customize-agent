@@ -49,7 +49,6 @@
     "@vscode/ripgrep": "^1.18.0",
     "commander": "^15.0.0",
     "fast-glob": "^3.3.3",
-    "fd-find": "^1.2.0",
     "figlet": "^1.11.0",
     "marked": "^15.0.12",
     "string-width": "^8.2.1",

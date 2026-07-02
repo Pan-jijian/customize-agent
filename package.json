@@ -16,13 +16,21 @@
     "version-packages": "changeset version",
     "release": "pnpm run build && changeset publish"
   },
-  "keywords": ["ai-agent", "cli", "llm", "customize-agent", "terminal", "tui"],
+  "keywords": [
+    "ai-agent",
+    "cli",
+    "llm",
+    "customize-agent",
+    "terminal",
+    "tui"
+  ],
   "author": "Pan-jijian",
   "license": "MIT",
   "packageManager": "pnpm@10.26.1",
   "devDependencies": {
     "@changesets/cli": "^2.28.1",
     "@eslint/js": "^10.0.1",
+    "@next/eslint-plugin-next": "^16.2.9",
     "@types/node": "^25.9.3",
     "eslint": "^10.5.0",
     "turbo": "^2.9.18",

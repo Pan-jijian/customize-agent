@@ -1,8 +1,3 @@
-declare module 'fd-find' {
-  const fdPath: string;
-  export default fdPath;
-}
-
 declare module '@vscode/ripgrep' {
   export const rgPath: string;
 }

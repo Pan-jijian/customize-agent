@@ -5,10 +5,10 @@ import type { I18nManager } from '../i18n/manager.js';
 
 let keypressInitialized = false;
 
-export type ApprovalHandler = (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+export type ApprovalHandler = (toolName: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<boolean>;
 
 export function createApprovalHandler(i18n: I18nManager): ApprovalHandler {
-  return async (toolName: string, args: Record<string, unknown>) => {
+  return async (toolName: string, args: Record<string, unknown>, signal?: AbortSignal) => {
     const label = i18n.toolLabel(toolName);
     const detail = args.path
       ? i18n.t('approval.file_detail', { path: String(args.path) })
@@ -52,10 +52,12 @@ export function createApprovalHandler(i18n: I18nManager): ApprovalHandler {
         linesDrawn = lines.length;
       };
       let done = false;
+      function onAbort() { finish(false); }
       const cleanup = () => {
         clear();
         process.stdout.write(`\x1b[${approvalLines.length}A\r\x1b[0J`);
         process.stdin.removeListener('keypress', onKeypress);
+        signal?.removeEventListener('abort', onAbort);
         if (raw) try { process.stdin.setRawMode(false); } catch { /* ignore */ }
       };
       const finish = (approved: boolean) => {
@@ -72,7 +74,9 @@ export function createApprovalHandler(i18n: I18nManager): ApprovalHandler {
       };
 
       process.stdin.on('keypress', onKeypress);
-      draw();
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      else draw();
     });
   };
 }
