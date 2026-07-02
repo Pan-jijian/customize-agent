@@ -1,6 +1,14 @@
+export function isInteractiveTerminal(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY && !process.env.CI);
+}
+
 export function supportsAnsi(): boolean {
   if (process.env.NO_COLOR || process.env.TERM === 'dumb') return false;
   return Boolean(process.stdout.isTTY || process.env.FORCE_COLOR);
+}
+
+export function supportsAnimation(): boolean {
+  return isInteractiveTerminal() && supportsAnsi() && process.env.CUSTOMIZE_AGENT_NO_ANIMATION !== '1';
 }
 
 export function supportsUnicode(): boolean {

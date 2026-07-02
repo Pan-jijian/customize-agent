@@ -6,7 +6,7 @@ import stringWidth from 'string-width';
 import wrapAnsi from 'wrap-ansi';
 export { t, s, formatDuration, type Mode, modeAccent, modeBadge } from './colors.js';
 import { t, s, formatDuration } from './colors.js';
-import { normalizeTerminalText, displayWidth as terminalDisplayWidth, supportsAnsi } from './terminal-capabilities.js';
+import { normalizeTerminalText, displayWidth as terminalDisplayWidth, supportsAnsi, supportsAnimation } from './terminal-capabilities.js';
 
 function cb(text: string, fg: number, bg: number): string {
   const value = normalizeTerminalText(text);
@@ -285,6 +285,14 @@ const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '�
 
 /** 基础 spinner（非思考场景使用） */
 export function spinnerStart(label?: string, write: (text: string) => void = process.stdout.write.bind(process.stdout)): { stop: () => void; update: (text: string) => void; tick: () => void } {
+  if (!supportsAnimation()) {
+    let printed = false;
+    return {
+      update: (text: string) => { if (!printed) { write(`${normalizeTerminalText(text)}\n`); printed = true; } },
+      tick: () => {},
+      stop: () => {},
+    };
+  }
   let text = label ?? 'Thinking…';
   let idx = 0;
   const redraw = () => {
@@ -358,6 +366,16 @@ export function thinkingSpinner(tipPool: string[] = [], write: (text: string) =>
   thinkTick: (elapsedMs: number, tokens: number, subtitle: string) => void;
   thinkDone: (elapsedMs: number, tokens: number, expandHint: string) => void;
 } {
+  if (!supportsAnimation()) {
+    return {
+      thinkStart: () => {},
+      thinkTick: () => {},
+      thinkDone: (elapsedMs: number, tokens: number, expandHint: string) => {
+        write(`${normalizeTerminalText(thinkingSummary(formatDuration(elapsedMs), `${tokens}`, expandHint, labels))}\n`);
+      },
+      stop: () => {},
+    };
+  }
   let idx = 0;
   let state: { elapsedMs: number; tokens: number; subtitle: string } = { elapsedMs: 0, tokens: 0, subtitle: '' };
   let interval: ReturnType<typeof setInterval> | null = null;
