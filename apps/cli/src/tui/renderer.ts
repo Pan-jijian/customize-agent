@@ -6,9 +6,12 @@ import stringWidth from 'string-width';
 import wrapAnsi from 'wrap-ansi';
 export { t, s, formatDuration, type Mode, modeAccent, modeBadge } from './colors.js';
 import { t, s, formatDuration } from './colors.js';
+import { normalizeTerminalText, displayWidth as terminalDisplayWidth, supportsAnsi } from './terminal-capabilities.js';
 
 function cb(text: string, fg: number, bg: number): string {
-  return `\x1b[38;5;${fg}m\x1b[48;5;${bg}m${text}\x1b[39;49m`;
+  const value = normalizeTerminalText(text);
+  if (!supportsAnsi()) return value;
+  return `\x1b[38;5;${fg}m\x1b[48;5;${bg}m${value}\x1b[39;49m`;
 }
 
 // ── 框线字符 ──
@@ -637,7 +640,8 @@ export function approvalBox(toolName: string, label: string, detail?: string, la
 
 /** 字符串可见宽度（去除 ANSI 转义序列，CJK/全角字符计为 2 列） */
 function visibleLen(s: string): number {
-  return stringWidth(s);
+  const ansiRe = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[A-Za-z]`, 'g');
+  return terminalDisplayWidth(normalizeTerminalText(s.replace(ansiRe, '')));
 }
 
 function clipAnsiSafe(text: string, maxWidth: number): string {

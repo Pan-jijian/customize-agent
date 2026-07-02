@@ -1,13 +1,14 @@
 import * as readline from 'readline';
+import { supportsAnsi } from './terminal-capabilities.js';
 
 const CSI = '\x1b[';
 
-function color(s: string, code: number): string { return `${CSI}38;5;${code}m${s}${CSI}39m`; }
-function bold(s: string): string { return `${CSI}1m${s}${CSI}22m`; }
+function color(s: string, code: number): string { return supportsAnsi() ? `${CSI}38;5;${code}m${s}${CSI}39m` : s; }
+function bold(s: string): string { return supportsAnsi() ? `${CSI}1m${s}${CSI}22m` : s; }
 const accent = (s: string) => color(s, 117);
 const text = (s: string) => color(s, 146);
 const dim = (s: string) => color(s, 103);
-const selected = (s: string) => `${CSI}7m${s}${CSI}27m`;
+const selected = (s: string) => supportsAnsi() ? `${CSI}7m${s}${CSI}27m` : s;
 
 export type Language = 'zh' | 'en';
 
@@ -34,6 +35,17 @@ export function selectLanguage(texts: SelectorTexts): Promise<Language> {
     { value: 'zh', label: texts.zhLabel },
     { value: 'en', label: texts.enLabel },
   ];
+
+  if (!supportsAnsi()) {
+    return new Promise(resolve => {
+      process.stdout.write(`${texts.title}\n1. ${texts.zhLabel}\n2. ${texts.enLabel}\n> `);
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      rl.question('', answer => {
+        rl.close();
+        resolve(answer.trim() === '2' ? 'en' : 'zh');
+      });
+    });
+  }
 
   return new Promise(resolve => {
     let sel = 0;

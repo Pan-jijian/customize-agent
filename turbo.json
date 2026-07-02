@@ -9,6 +9,10 @@
       "dependsOn": ["^build"],
       "outputs": [".next/**", ".next/static/**", ".next/server/**"]
     },
+    "customize-agent#build": {
+      "dependsOn": ["server#build", "^build"],
+      "outputs": ["dist/**"]
+    },
     "dev": {
       "cache": false,
       "persistent": true

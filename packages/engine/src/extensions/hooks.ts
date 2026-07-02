@@ -1,4 +1,4 @@
-import { execa } from 'execa';
+import { executeCommand } from '@customize-agent/tools';
 
 /** Hook 触发事件 */
 export type HookEvent =
@@ -111,20 +111,7 @@ export class HooksEngine {
 
   /** 执行 shell 命令 */
   private async _executeCommand(command: string, timeout: number): Promise<{ stdout: string; stderr: string; code: number }> {
-    try {
-      const result = await execa({
-        shell: true,
-        reject: false,
-        timeout,
-      })`${command}`;
-      return {
-        stdout: result.stdout,
-        stderr: result.stderr,
-        code: result.exitCode ?? 1,
-      };
-    } catch (err) {
-      return { stdout: '', stderr: (err as Error).message, code: 1 };
-    }
+    return executeCommand(command, { timeout });
   }
 
   /** 简单条件表达式求值（支持 === 和 !== 等基本操作符） */

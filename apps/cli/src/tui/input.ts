@@ -16,6 +16,7 @@ import {
 } from './renderer.js';
 import type { Mode } from './renderer.js';
 import { FileIndex } from './file-index.js';
+import { supportsAnsi } from './terminal-capabilities.js';
 
 // ── 类型定义 ──
 export interface DropdownItem { label: string; detail?: string; data: string; }
@@ -158,9 +159,20 @@ export class TuiInput {
     if (options.redraw) this._activeRender?.();
   }
 
+  private async _readPlain(): Promise<string> {
+    return new Promise<string>(resolve => {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      rl.question('> ', answer => {
+        rl.close();
+        resolve(answer.trim());
+      });
+    });
+  }
+
   // read 读取输入
 
   async read(): Promise<string> {
+    if (!supportsAnsi()) return this._readPlain();
     return new Promise<string>(resolve => {
       if (!_kprInit) { readline.emitKeypressEvents(process.stdin); _kprInit = true; }
 

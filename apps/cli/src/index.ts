@@ -8,6 +8,7 @@ import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
 import { ensureProjectCustomizeFile, MultiProjectManager } from '@customize-agent/knowledge';
 import { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
+import { killByPid } from '@customize-agent/tools';
 import { createExecutor } from './bootstrap.js';
 import { Repl } from './repl/repl.js';
 import { t, renderMarkdown } from './tui/renderer.js';
@@ -34,22 +35,20 @@ async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
 function findDashboardServerDir(existsSync: (path: string) => boolean): string | null {
   const cliDir = import.meta.dirname!;
   const candidates = [
-    resolve(cliDir, '../../../server'),
-    resolve(cliDir, '../../../apps/server'),
-    resolve(cliDir, '../../server'),
-    resolve(process.cwd(), 'apps/server'),
+    // Bundled in npm package: dist/server/
+    { dir: resolve(cliDir, 'server'), marker: '.dashboard-bundled' },
+    // Monorepo dev: apps/server/
+    { dir: resolve(cliDir, '../../../apps/server'), marker: 'package.json' },
+    // Monorepo from project root
+    { dir: resolve(process.cwd(), 'apps/server'), marker: 'package.json' },
   ];
-  return candidates.find(dir => existsSync(resolve(dir, 'package.json'))) ?? null;
+  return candidates.find(c => existsSync(resolve(c.dir, c.marker)))?.dir ?? null;
 }
 
 async function stopDashboardProcess(port: number, pid?: number): Promise<boolean> {
   const targetPid = pid ?? await findListeningPid(port);
   if (!targetPid || targetPid === process.pid) return false;
-  try {
-    process.kill(targetPid, 'SIGTERM');
-  } catch {
-    return false;
-  }
+  await killByPid(targetPid);
 
   const deadline = Date.now() + 3000;
   while (Date.now() < deadline) {
@@ -64,10 +63,13 @@ async function stopDashboardProcess(port: number, pid?: number): Promise<boolean
 }
 
 async function findListeningPid(port: number): Promise<number | undefined> {
-  if (process.platform === 'win32') return undefined;
   const { execFile } = await import('child_process');
+  const command = process.platform === 'win32' ? 'powershell.exe' : 'lsof';
+  const args = process.platform === 'win32'
+    ? ['-NoProfile', '-NonInteractive', '-Command', `(Get-NetTCPConnection -LocalPort ${port} -State Listen | Select-Object -First 1 -ExpandProperty OwningProcess)`]
+    : ['-tiTCP:' + port, '-sTCP:LISTEN'];
   return await new Promise(resolve => {
-    execFile('lsof', ['-tiTCP:' + port, '-sTCP:LISTEN'], (error, stdout) => {
+    execFile(command, args, (error, stdout) => {
       if (error) {
         resolve(undefined);
         return;
@@ -157,15 +159,16 @@ program.action(async () => {
   try {
     const { spawn } = await import('child_process');
     const { existsSync, readFileSync: readRuntimeFileSync } = await import('fs');
-    const isWin = process.platform === 'win32';
     const serverDir = findDashboardServerDir(existsSync);
     if (!serverDir) {
       kbStatus = `${kbStatus}\n   Dashboard: 未找到 Web 服务目录`;
       throw new Error('Dashboard server directory not found');
     }
-    const nextBin = resolve(serverDir, 'node_modules', '.bin', isWin ? 'next.cmd' : 'next');
-    const buildIdPath = resolve(serverDir, '.next', 'BUILD_ID');
-    const routesManifestPath = resolve(serverDir, '.next', 'routes-manifest.json');
+    const isBundled = existsSync(resolve(serverDir, '.dashboard-bundled'));
+    const bundledRoot = isBundled ? resolve(serverDir, 'apps', 'server') : serverDir;
+    const nextCli = isBundled ? '' : resolve(serverDir, 'node_modules', 'next', 'dist', 'bin', 'next');
+    const buildIdPath = resolve(bundledRoot, '.next', 'BUILD_ID');
+    const routesManifestPath = resolve(bundledRoot, '.next', 'routes-manifest.json');
     const localBuildId = existsSync(buildIdPath) ? readRuntimeFileSync(buildIdPath, 'utf-8').trim() : '';
     const hasBuild = Boolean(localBuildId);
     const routesManifest = existsSync(routesManifestPath) ? readRuntimeFileSync(routesManifestPath, 'utf-8') : '';
@@ -198,13 +201,26 @@ program.action(async () => {
       if (!dashboardUrl && portAvailable) {
         let proc: ChildProcess | null = null;
         try {
-          proc = spawn(nextBin, ['start', '-p', String(dashboardPort)], {
-            cwd: serverDir,
-            stdio: 'ignore',
-            env: { ...process.env, NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT },
-            shell: isWin,
-            detached: true,
-          });
+          if (isBundled) {
+            // Bundled standalone — run node server.js directly
+            const serverEntry = resolve(serverDir, 'apps', 'server', 'server.js');
+            proc = spawn(process.execPath, [serverEntry], {
+              cwd: resolve(serverDir, 'apps', 'server'),
+              stdio: 'ignore',
+              env: { ...process.env, PORT: String(dashboardPort), NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT },
+              shell: false,
+              detached: true,
+            });
+          } else {
+            // Monorepo dev — use next start
+            proc = spawn(process.execPath, [nextCli, 'start', '-p', String(dashboardPort)], {
+              cwd: serverDir,
+              stdio: 'ignore',
+              env: { ...process.env, NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT },
+              shell: false,
+              detached: true,
+            });
+          }
           proc.unref();
         } catch { /* handled by health check below */ }
 

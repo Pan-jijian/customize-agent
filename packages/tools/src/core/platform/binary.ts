@@ -44,11 +44,10 @@ export function resolveBinary(command: string): string {
   if (known) return known;
 
   // For PowerShell commands, return as-is
-  if (command === 'powershell' || command === 'pwsh' || command === 'cmd') {
+  if (command === 'powershell' || command === 'powershell.exe' || command === 'pwsh') {
     return command;
   }
 
-  // Default: try .cmd first (most common for Node.js CLIs), then .exe
   return command;
 }
 

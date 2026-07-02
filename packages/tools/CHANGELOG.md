@@ -1,5 +1,17 @@
 # @customize-agent/tools
 
+## 2.0.0
+
+### Major Changes
+
+- 6744afe: 优化、拓展、兼容、新增
+
+### Patch Changes
+
+- Updated dependencies [6744afe]
+  - @customize-agent/search@2.0.0
+  - @customize-agent/types@2.0.0
+
 ## 1.0.3
 
 ### Patch Changes

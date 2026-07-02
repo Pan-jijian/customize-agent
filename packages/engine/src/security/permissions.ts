@@ -125,7 +125,7 @@ const DEFAULT_CONFIG: PermissionConfig = {
         { pattern: 'env**', permission: 'allow' },
         { pattern: 'printenv**', permission: 'allow' },
         // ── allow: 安全只读命令（Windows）──
-        // 注意：短命令名加空格锚定，防止匹配子串（如 md** 误匹配 cmd.exe）
+        // 注意：短命令名加空格锚定，防止匹配子串
         { pattern: 'dir **', permission: 'allow' },
         { pattern: 'type **', permission: 'allow' },
         { pattern: 'findstr **', permission: 'allow' },
@@ -144,6 +144,13 @@ const DEFAULT_CONFIG: PermissionConfig = {
         { pattern: 'hostname **', permission: 'allow' },
         { pattern: 'whoami **', permission: 'allow' },
         { pattern: 'doskey /history**', permission: 'allow' },
+        { pattern: 'Get-Content **', permission: 'allow' },
+        { pattern: 'Select-String **', permission: 'allow' },
+        { pattern: 'Measure-Object **', permission: 'allow' },
+        { pattern: 'Get-Command **', permission: 'allow' },
+        { pattern: 'Get-ChildItem **', permission: 'allow' },
+        { pattern: 'Get-Location**', permission: 'allow' },
+        { pattern: 'Get-Process **', permission: 'allow' },
         // ── allow: Windows 文件写入命令 ──
         { pattern: 'copy **', permission: 'allow' },
         { pattern: 'move **', permission: 'allow' },

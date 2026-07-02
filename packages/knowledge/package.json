@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/knowledge",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "Local knowledge base infrastructure for customize-agent",
   "type": "module",
   "main": "./dist/index.js",
