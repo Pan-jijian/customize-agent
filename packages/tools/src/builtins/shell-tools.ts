@@ -3,10 +3,10 @@ import * as fs from 'fs/promises';
 import { existsSync, createWriteStream } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { execa, execaCommand } from 'execa';
+import { execa } from 'execa';
 import { resolveSafe } from '../core/path-utils.js';
 import { killProcess } from '../core/platform/process.js';
-import { translateCommand } from '../core/platform/shell.js';
+import { getShellConfig, translateCommand } from '../core/platform/shell.js';
 
 type BackgroundProcess = { command: string; child: any; output: string[]; startedAt: string };
 
@@ -22,10 +22,9 @@ export class ShellTools {
 
   async runBackground(command: string): Promise<string> {
     const id = `cmd-${Date.now()}`;
+    const config = await getShellConfig();
     const translated = await translateCommand(command);
-    // execaCommand returns ResultPromise which supports .stdout.on('data') at runtime
-    // even though TypeScript types in execa v9 don't perfectly capture this
-    const child: any = execaCommand(translated, { cwd: this.cwd, shell: true, reject: false });
+    const child: any = execa(config.shell, [...config.shellArgs, translated], { cwd: this.cwd, reject: false });
     const proc: BackgroundProcess = { command, child, output: [], startedAt: new Date().toISOString() };
     child.stdout?.on('data', (chunk: Buffer) => proc.output.push(chunk.toString()));
     child.stderr?.on('data', (chunk: Buffer) => proc.output.push(chunk.toString()));
@@ -54,7 +53,8 @@ export class ShellTools {
     if (!existsSync(pkgPath)) return 'No package.json found.';
     const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf-8')) as { scripts?: Record<string, string> };
     if (!pkg.scripts?.[kind]) return `No ${kind} script found.`;
-    const manager = existsSync(path.join(this.cwd, 'pnpm-lock.yaml')) ? 'pnpm' : existsSync(path.join(this.cwd, 'yarn.lock')) ? 'yarn' : 'npm';
+    const baseManager = existsSync(path.join(this.cwd, 'pnpm-lock.yaml')) ? 'pnpm' : existsSync(path.join(this.cwd, 'yarn.lock')) ? 'yarn' : 'npm';
+    const manager = process.platform === 'win32' ? `${baseManager}.cmd` : baseManager;
     const res = await execa(manager, ['run', kind], { cwd: this.cwd, reject: false, cancelSignal: signal });
     return [res.stdout, res.stderr, `[Exit ${res.exitCode}]`].filter(Boolean).join('\n');
   }
@@ -64,8 +64,8 @@ export class ShellTools {
   }
 
   async browserOpen(url: string): Promise<string> {
-    const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
-    const args = process.platform === 'win32' ? ['/c', 'start', url] : [url];
+    const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'powershell.exe' : 'xdg-open';
+    const args = process.platform === 'win32' ? ['-NoProfile', '-NonInteractive', '-Command', 'Start-Process', url] : [url];
     const res = await execa(opener, args, { reject: false });
     return res.exitCode === 0 ? `Opened ${url}` : `Failed to open ${url}: ${res.stderr}`;
   }
@@ -126,7 +126,8 @@ export class ShellTools {
   }
 
   async update(packageName = 'customize-agent'): Promise<string> {
-    const manager = existsSync(path.join(this.cwd, 'pnpm-lock.yaml')) ? 'pnpm' : 'npm';
+    const baseManager = existsSync(path.join(this.cwd, 'pnpm-lock.yaml')) ? 'pnpm' : 'npm';
+    const manager = process.platform === 'win32' ? `${baseManager}.cmd` : baseManager;
     const res = await execa(manager, ['add', '-g', packageName], { reject: false });
     return [res.stdout, res.stderr, `[Exit ${res.exitCode}]`].filter(Boolean).join('\n');
   }

@@ -7,7 +7,7 @@ export interface ShellConfig {
   /** Shell executable path or name (e.g. 'powershell.exe', '/bin/zsh') */
   shell: string;
   /** Shell type identifier */
-  type: 'pwsh' | 'powershell' | 'cmd' | 'sh' | 'bash' | 'zsh';
+  type: 'pwsh' | 'powershell' | 'sh' | 'bash' | 'zsh';
   /** Whether Unix commands need translation before execution */
   needsTranslation: boolean;
   /** Additional args to pass to the shell (e.g. ['-NoProfile', '-Command'] for PowerShell) */

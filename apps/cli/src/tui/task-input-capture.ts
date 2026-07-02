@@ -6,6 +6,7 @@ import { FileIndex } from './file-index.js';
 import { t, s, modeBadge, modeAccent, renderCommandMenu, renderFileDropdown, hintText, userMessageBlock } from './renderer.js';
 import type { I18nManager } from '../i18n/manager.js';
 import type { ReplCommandInfo } from '../repl/commands.js';
+import { normalizeTerminalText, supportsAnsi } from './terminal-capabilities.js';
 
 export interface CapturedTaskInput {
   drain: () => string[];
@@ -26,6 +27,15 @@ export interface CaptureTaskInputOptions {
 let keypressInitialized = false;
 
 export function captureInputDuringTask(options: CaptureTaskInputOptions): CapturedTaskInput {
+  if (!supportsAnsi()) {
+    return {
+      drain: () => [],
+      writeOutput: (text: string) => { process.stdout.write(normalizeTerminalText(text)); },
+      pause: () => {},
+      resume: () => {},
+      stop: () => {},
+    };
+  }
   if (!keypressInitialized) {
     readline.emitKeypressEvents(process.stdin);
     keypressInitialized = true;

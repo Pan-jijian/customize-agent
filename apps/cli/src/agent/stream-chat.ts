@@ -2,6 +2,7 @@ import type { FunctionDefinition, ILLMProvider, StreamChunk } from '@customize-a
 import type { Message, ToolCall } from '@customize-agent/types';
 import type { I18nManager } from '../i18n/manager.js';
 import { extractThinkingSubtitle, renderInlineMarkdown, renderMarkdown, spinnerStart, t, thinkingSpinner } from '../tui/renderer.js';
+import { supportsAnsi } from '../tui/terminal-capabilities.js';
 
 export interface StreamChatOptions {
   provider: ILLMProvider;
@@ -115,7 +116,8 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
         break;
       case 'reset':
         if (thinkActive) { think.stop(); thinkActive = false; }
-        write('\x1b[1G\x1b[2K');
+        if (supportsAnsi()) write('\x1b[1G\x1b[2K');
+        else write('\n');
         content = '';
         toolCalls.length = 0;
         lineBuf = '';

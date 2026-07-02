@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess, execSync } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import { readFileSync } from 'fs';
 import { execa } from 'execa';
 import type {
@@ -47,39 +47,17 @@ async function crossPlatformKill(proc: ChildProcess | null): Promise<void> {
 
 // ── LSP command resolution (cross-platform) ──
 
-/** Resolve a command name for Windows (try .cmd, .exe suffixes) */
 function resolveLspCommand(command: string, args: string[]): { command: string; args: string[] } {
   if (!IS_WINDOWS) return { command, args };
 
-  // Commands that already have a Windows extension
-  if (/\.(exe|cmd|bat|com)$/i.test(command)) return { command, args };
-
-  // Known Node.js / npm CLI commands → try .cmd
-  const nodeCmds = new Set(['npx', 'tsc', 'tsx', 'node', 'pnpm', 'npm', 'yarn', 'eslint', 'prettier']);
-  if (nodeCmds.has(command)) {
-    return { command: command + '.cmd', args };
-  }
-
-  // Other commands: quick exists check for .cmd then .exe
-  try {
-    execSync(`where ${command}.cmd`, { timeout: 2000, stdio: 'ignore' });
-    return { command: command + '.cmd', args };
-  } catch { /* .cmd not found */ }
-
-  try {
-    execSync(`where ${command}.exe`, { timeout: 2000, stdio: 'ignore' });
-    return { command: command + '.exe', args };
-  } catch { /* .exe not found */ }
-
-  // Convert Unix-style paths in args to backslashes
-  const resolvedArgs = args.map(arg => {
-    if (arg.includes('/') && !arg.startsWith('--') && !arg.startsWith('-')) {
-      return arg.replace(/\//g, '\\');
-    }
-    return arg;
-  });
-
-  return { command, args: resolvedArgs };
+  const nodeCommands = new Set(['npx', 'tsc', 'tsx', 'pnpm', 'npm', 'yarn', 'eslint', 'prettier', 'typescript-language-server', 'vscode-json-languageserver', 'bash-language-server', 'yaml-language-server']);
+  const resolvedCommand = /\.(exe|cmd|bat|com)$/i.test(command)
+    ? command
+    : nodeCommands.has(command)
+      ? `${command}.cmd`
+      : command;
+  const resolvedArgs = args.map(arg => arg.includes('/') && !arg.startsWith('--') && !arg.startsWith('-') ? arg.replace(/\//g, '\\') : arg);
+  return { command: resolvedCommand, args: resolvedArgs };
 }
 
 interface LspServerConfig {

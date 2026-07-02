@@ -3,13 +3,15 @@ import { marked, Renderer } from 'marked';
 import stringWidth from 'string-width';
 import wrapAnsi from 'wrap-ansi';
 import { t, s } from './colors.js';
+import { normalizeTerminalText, supportsAnsi } from './terminal-capabilities.js';
 
 function tw(): number {
   return Math.max(60, Math.min(process.stdout.columns ?? 80, 200));
 }
 
 function cb(text: string, fg: number, bg: number): string {
-  return `\x1b[38;5;${fg}m\x1b[48;5;${bg}m${text}\x1b[39;49m`;
+  const value = normalizeTerminalText(text);
+  return supportsAnsi() ? `\x1b[38;5;${fg}m\x1b[48;5;${bg}m${value}\x1b[39;49m` : value;
 }
 
 type HeadingToken    = Parameters<Renderer['heading']>[0];

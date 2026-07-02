@@ -1,6 +1,7 @@
 // @customize-agent/cli — 工具调用预览 & 折叠追踪
 import type { ToolCall } from '@customize-agent/types';
 import { toolCallFold, toolCallFolding } from '../tui/renderer.js';
+import { supportsAnsi } from '../tui/terminal-capabilities.js';
 import type { AgentEvent } from './executor.js';
 
 /** 管理工具调用预览的去重和发射 */
@@ -86,7 +87,7 @@ export class ToolFoldTracker {
   flush(): void {
     if (this.foldCount === 0) return;
     if (this.stream) {
-      this.write('\r\x1b[2K' + toolCallFold(this.foldType, this.foldCount, this.foldArgs, this.foldTotalMs, this.foldDiff, this.toolLabel(this.foldType), this.toolsLabel) + '\n');
+      this.write((supportsAnsi() ? '\r\x1b[2K' : '') + toolCallFold(this.foldType, this.foldCount, this.foldArgs, this.foldTotalMs, this.foldDiff, this.toolLabel(this.foldType), this.toolsLabel) + '\n');
     }
     this.foldType = ''; this.foldCount = 0; this.foldArgs = []; this.foldTotalMs = 0; this.foldDiff = ''; this.foldStartMs = 0;
   }

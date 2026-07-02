@@ -1,11 +1,24 @@
 import * as readline from 'readline';
 import stringWidth from 'string-width';
 import { t, s } from '../tui/renderer.js';
+import { supportsAnsi } from '../tui/terminal-capabilities.js';
 
 let keypressInitialized = false;
 
 export async function selectList<T>(title: string, items: Array<{ label: string; detail?: string; value: T }>): Promise<T | null> {
   if (!items.length) return null;
+  if (!supportsAnsi()) {
+    process.stdout.write(`${title}\n`);
+    items.slice(0, 12).forEach((item, index) => process.stdout.write(`${index + 1}. ${item.label}${item.detail ? ` - ${item.detail}` : ''}\n`));
+    return new Promise<T | null>(resolve => {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      rl.question('> ', answer => {
+        rl.close();
+        const index = Number(answer.trim()) - 1;
+        resolve(items[index]?.value ?? null);
+      });
+    });
+  }
   if (!keypressInitialized) {
     readline.emitKeypressEvents(process.stdin);
     keypressInitialized = true;

@@ -2,6 +2,7 @@
 import * as readline from 'readline';
 import { t, s } from '../tui/renderer.js';
 import type { I18nManager } from '../i18n/manager.js';
+import { supportsAnsi } from '../tui/terminal-capabilities.js';
 
 let keypressInitialized = false;
 
@@ -22,6 +23,17 @@ export function createApprovalHandler(i18n: I18nManager): ApprovalHandler {
       ...(detail ? [t.dim(detail)] : []),
     ];
     process.stdout.write(approvalLines.join('\n') + '\n');
+
+    if (!supportsAnsi()) {
+      return new Promise<boolean>(resolve => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl.question(`${i18n.t('approval.run')}? (y/N) `, answer => {
+          rl.close();
+          resolve(/^y(es)?$/i.test(answer.trim()));
+        });
+        signal?.addEventListener('abort', () => { rl.close(); resolve(false); }, { once: true });
+      });
+    }
 
     if (!keypressInitialized) {
       readline.emitKeypressEvents(process.stdin);

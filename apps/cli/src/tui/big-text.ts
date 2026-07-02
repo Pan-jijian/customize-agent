@@ -7,6 +7,8 @@
  *   printBanner('HELLO', grad)    → 自定义渐变
  */
 
+import { normalizeTerminalText, supportsAnsi } from './terminal-capabilities.js';
+
 /** 4 列 × 6 行像素字形，仅用 █ 和空格 */
 const BANNER: Record<string, readonly string[]> = {
   A: [' ██ ','█  █','█  █','████','█  █','█  █'],
@@ -40,12 +42,12 @@ const BANNER: Record<string, readonly string[]> = {
 
 /** 默认渐变色: 天蓝 → 紫 */
 const DEFAULT_GRAD = [
-  (s: string) => `\x1b[38;5;81m${s}\x1b[39m`,
-  (s: string) => `\x1b[38;5;75m${s}\x1b[39m`,
-  (s: string) => `\x1b[38;5;69m${s}\x1b[39m`,
-  (s: string) => `\x1b[38;5;111m${s}\x1b[39m`,
-  (s: string) => `\x1b[38;5;177m${s}\x1b[39m`,
-  (s: string) => `\x1b[38;5;183m${s}\x1b[39m`,
+  (s: string) => supportsAnsi() ? `\x1b[38;5;81m${normalizeTerminalText(s)}\x1b[39m` : normalizeTerminalText(s),
+  (s: string) => supportsAnsi() ? `\x1b[38;5;75m${normalizeTerminalText(s)}\x1b[39m` : normalizeTerminalText(s),
+  (s: string) => supportsAnsi() ? `\x1b[38;5;69m${normalizeTerminalText(s)}\x1b[39m` : normalizeTerminalText(s),
+  (s: string) => supportsAnsi() ? `\x1b[38;5;111m${normalizeTerminalText(s)}\x1b[39m` : normalizeTerminalText(s),
+  (s: string) => supportsAnsi() ? `\x1b[38;5;177m${normalizeTerminalText(s)}\x1b[39m` : normalizeTerminalText(s),
+  (s: string) => supportsAnsi() ? `\x1b[38;5;183m${normalizeTerminalText(s)}\x1b[39m` : normalizeTerminalText(s),
 ] as const;
 
 /**

@@ -1,9 +1,10 @@
-// @customize-agent/cli — ANSI 256-color 终端着色
+import { supportsAnsi, normalizeTerminalText } from './terminal-capabilities.js';
 
 const CSI = '\x1b[';
 
-function c(text: string, code: number): string { return `${CSI}38;5;${code}m${text}${CSI}39m`; }
-function cb(text: string, fg: number, bg: number): string { return `${CSI}38;5;${fg}m${CSI}48;5;${bg}m${text}${CSI}39;49m`; }
+function plain(text: string): string { return normalizeTerminalText(text); }
+function c(text: string, code: number): string { const value = plain(text); return supportsAnsi() ? `${CSI}38;5;${code}m${value}${CSI}39m` : value; }
+function cb(text: string, fg: number, bg: number): string { const value = plain(text); return supportsAnsi() ? `${CSI}38;5;${fg}m${CSI}48;5;${bg}m${value}${CSI}39;49m` : value; }
 
 export const t = {
   accent:    (s: string) => c(s, 81),
@@ -23,11 +24,11 @@ export const t = {
 };
 
 export const s = {
-  bold:      (text: string) => `${CSI}1m${text}${CSI}22m`,
-  dim:       (text: string) => `${CSI}2m${text}${CSI}22m`,
-  italic:    (text: string) => `${CSI}3m${text}${CSI}23m`,
-  inverse:   (text: string) => `${CSI}7m${text}${CSI}27m`,
-  underline: (text: string) => `${CSI}4m${text}${CSI}24m`,
+  bold:      (text: string) => supportsAnsi() ? `${CSI}1m${text}${CSI}22m` : plain(text),
+  dim:       (text: string) => supportsAnsi() ? `${CSI}2m${text}${CSI}22m` : plain(text),
+  italic:    (text: string) => supportsAnsi() ? `${CSI}3m${text}${CSI}23m` : plain(text),
+  inverse:   (text: string) => supportsAnsi() ? `${CSI}7m${text}${CSI}27m` : plain(text),
+  underline: (text: string) => supportsAnsi() ? `${CSI}4m${text}${CSI}24m` : plain(text),
 };
 
 export function formatDuration(ms: number): string {
