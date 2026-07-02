@@ -3,7 +3,8 @@
 import type { ChildProcess } from 'child_process';
 import { Command } from 'commander';
 import { readFileSync } from 'fs';
-import { resolve } from 'path';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
 import { ensureProjectCustomizeFile, MultiProjectManager } from '@customize-agent/knowledge';
@@ -19,6 +20,7 @@ function resolveUserProjectRoot(): string {
   return resolve(process.env.CUSTOMIZE_PROJECT_ROOT ?? process.env.INIT_CWD ?? process.env.PWD ?? process.cwd());
 }
 
+const CLI_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolveUserProjectRoot();
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
 
@@ -33,7 +35,7 @@ async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
 }
 
 function findDashboardServerDir(existsSync: (path: string) => boolean): string | null {
-  const cliDir = import.meta.dirname!;
+  const cliDir = CLI_DIR;
   const candidates = [
     // Bundled in npm package: dist/server/
     { dir: resolve(cliDir, 'server'), marker: '.dashboard-bundled' },
@@ -78,6 +80,31 @@ async function findListeningPid(port: number): Promise<number | undefined> {
       resolve(Number.isFinite(pid) ? pid : undefined);
     });
   });
+}
+
+async function dashboardLogFile(port: number) {
+  const { mkdirSync, openSync } = await import('fs');
+  const { join } = await import('path');
+  const { homedir } = await import('os');
+  const logDir = join(homedir(), '.customize-agent', 'logs');
+  mkdirSync(logDir, { recursive: true });
+  const logPath = join(logDir, `dashboard-${port}.log`);
+  return { logPath, fd: openSync(logPath, 'a') };
+}
+
+async function waitForDashboard(port: number, buildId: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://localhost:${port}/api/health`);
+      if (res.ok) {
+        const health = await res.json() as { buildId?: string | null };
+        if (health.buildId === buildId) return true;
+      }
+    } catch { /* wait */ }
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+  return false;
 }
 
 const program = new Command();
@@ -179,73 +206,79 @@ program.action(async () => {
     if (!hasBuild || !hasConsoleRoutes) {
       kbStatus = `${kbStatus}\n   Dashboard: 未构建，请先运行 pnpm build`;
     } else {
-      let portAvailable = false;
       let restartedStaleDashboard = false;
       let stopFailed = false;
-      try {
-        const res = await fetch(`http://localhost:${dashboardPort}/api/health`);
-        if (res.ok) {
-          const health = await res.json() as { buildId?: string | null; pid?: number };
-          if (health.buildId === localBuildId) {
-            dashboardUrl = `http://localhost:${dashboardPort}`;
-          } else {
-            restartedStaleDashboard = await stopDashboardProcess(dashboardPort, health.pid);
-            portAvailable = restartedStaleDashboard;
-            stopFailed = !restartedStaleDashboard;
-          }
-        }
-      } catch {
-        portAvailable = true;
-      }
+      let lastLogPath = '';
+      const candidatePorts = [dashboardPort, dashboardPort + 1, dashboardPort + 2, dashboardPort + 3, dashboardPort + 4];
 
-      if (!dashboardUrl && portAvailable) {
-        let proc: ChildProcess | null = null;
+      for (const port of candidatePorts) {
         try {
+          const res = await fetch(`http://localhost:${port}/api/health`);
+          if (res.ok) {
+            const health = await res.json() as { buildId?: string | null; pid?: number };
+            if (health.buildId === localBuildId) {
+              dashboardUrl = `http://localhost:${port}`;
+              break;
+            }
+            if (port === dashboardPort) {
+              restartedStaleDashboard = await stopDashboardProcess(port, health.pid);
+              stopFailed = !restartedStaleDashboard;
+              if (!restartedStaleDashboard) continue;
+            } else {
+              continue;
+            }
+          }
+        } catch { /* port is available */ }
+
+        let proc: ChildProcess | null = null;
+        let logFile: Awaited<ReturnType<typeof dashboardLogFile>> | undefined;
+        try {
+          logFile = await dashboardLogFile(port);
+          lastLogPath = logFile.logPath;
+          const commonEnv = { ...process.env, PORT: String(port), NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT };
           if (isBundled) {
-            // Bundled standalone — run node server.js directly
             const serverEntry = resolve(serverDir, 'apps', 'server', 'server.js');
             proc = spawn(process.execPath, [serverEntry], {
               cwd: resolve(serverDir, 'apps', 'server'),
-              stdio: 'ignore',
-              env: { ...process.env, PORT: String(dashboardPort), NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT },
+              stdio: ['ignore', logFile.fd, logFile.fd],
+              env: commonEnv,
               shell: false,
               detached: true,
             });
           } else {
-            // Monorepo dev — use next start
-            proc = spawn(process.execPath, [nextCli, 'start', '-p', String(dashboardPort)], {
+            proc = spawn(process.execPath, [nextCli, 'start', '-p', String(port)], {
               cwd: serverDir,
-              stdio: 'ignore',
-              env: { ...process.env, NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT },
+              stdio: ['ignore', logFile.fd, logFile.fd],
+              env: commonEnv,
               shell: false,
               detached: true,
             });
           }
           proc.unref();
-        } catch { /* handled by health check below */ }
-
-        const deadline = Date.now() + 10000;
-        while (Date.now() < deadline) {
-          try {
-            const res = await fetch(`http://localhost:${dashboardPort}/api/health`);
-            if (res.ok) {
-              const health = await res.json() as { buildId?: string | null };
-              if (health.buildId === localBuildId) {
-                dashboardUrl = `http://localhost:${dashboardPort}`;
-                break;
-              }
-            }
-          } catch { /* wait for server */ }
-          await new Promise(resolve => setTimeout(resolve, 300));
+          if (logFile) {
+            const { closeSync } = await import('fs');
+            closeSync(logFile.fd);
+          }
+        } catch (error) {
+          if (logFile) {
+            const { closeSync } = await import('fs');
+            try { closeSync(logFile.fd); } catch { /* ignore */ }
+          }
+          kbStatus = `${kbStatus}\n   Dashboard: 启动失败 ${String((error as Error).message || error)}`;
+          continue;
         }
 
-        if (!dashboardUrl) {
-          proc?.kill();
-          kbStatus = `${kbStatus}\n   Dashboard: 启动超时`;
+        if (await waitForDashboard(port, localBuildId, 30000)) {
+          dashboardUrl = `http://localhost:${port}`;
+          break;
         }
+
+        proc?.kill();
       }
 
-      if (dashboardUrl && restartedStaleDashboard) {
+      if (!dashboardUrl) {
+        kbStatus = `${kbStatus}\n   Dashboard: 启动超时${lastLogPath ? `，日志: ${lastLogPath}` : ''}`;
+      } else if (restartedStaleDashboard) {
         kbStatus = `${kbStatus}\n   Dashboard: 已自动更新控制台服务`;
       } else if (stopFailed) {
         kbStatus = `${kbStatus}\n   Dashboard: 控制台正在更新，请关闭旧终端后重新打开`;

@@ -10,6 +10,7 @@ import type { I18nManager } from '../i18n/manager.js';
 import { buildDefaultCommands, type ReplCommandInfo } from './commands.js';
 import { ModelProviderCommands } from './model-provider-commands.js';
 import { captureInputDuringTask } from '../tui/task-input-capture.js';
+import { supportsAnimation } from '../tui/terminal-capabilities.js';
 import { resolveAtRefs } from './at-file-resolver.js';
 import { selectList } from './select-list.js';
 import { ToolCommands } from './tool-commands.js';
@@ -291,7 +292,7 @@ export class Repl {
       const startMs = Date.now() - (event.elapsedMs ?? 0);
       toolPreview = { toolName: event.toolName, args: event.args, startMs };
       renderToolPreview();
-      if (!toolPreviewTimer) toolPreviewTimer = setInterval(renderToolPreview, 100);
+      if (supportsAnimation() && !toolPreviewTimer) toolPreviewTimer = setInterval(renderToolPreview, 100);
     };
 
     let enhancedInput = input;
@@ -541,7 +542,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         const startToolPreview = (event: Extract<AgentEvent, { type: 'tool_call_preview' }>) => {
           toolPreview = { toolName: event.toolName, args: event.args, startMs: Date.now() - (event.elapsedMs ?? 0) };
           renderToolPreview();
-          if (!toolPreviewTimer) toolPreviewTimer = setInterval(renderToolPreview, 100);
+          if (supportsAnimation() && !toolPreviewTimer) toolPreviewTimer = setInterval(renderToolPreview, 100);
         };
         try {
           const u = await this.executor.runTask(this.history, {

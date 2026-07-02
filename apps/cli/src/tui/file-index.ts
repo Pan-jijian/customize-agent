@@ -2,7 +2,7 @@
  * 按需文件索引 — 首次 @ 触发时 git ls-files 扫描，子串匹配 + 评分排序。
  * 优先 git ls-files（毫秒级），回退 fast-glob。会话期间缓存。
  */
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import glob from 'fast-glob';
 
 export class FileIndex {
@@ -34,7 +34,7 @@ export class FileIndex {
 
   private _scan(): string[] {
     try {
-      const out = execSync('git ls-files --cached --others --exclude-standard', {
+      const out = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], {
         cwd: this.root, encoding: 'utf-8', timeout: 5000, maxBuffer: 10 * 1024 * 1024,
       });
       return out.trim().split('\n').filter(Boolean);
