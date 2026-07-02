@@ -293,7 +293,7 @@ export class KbCommands {
     }
     const port = tokens[0] ? Number(tokens[0]) : 17321;
     const url = this.i18n?.t('kb.dash_url', { url: `http://localhost:${port}` }) ?? `Dashboard: http://localhost:${port}`;
-    const hint = this.i18n?.t('kb.dash_manual') ?? 'Start manually: cd apps/customize-agent-server && pnpm dev';
+    const hint = this.i18n?.t('kb.dash_manual') ?? 'Start manually: cd apps/server && pnpm dev';
     process.stdout.write(t.success(`${url}\n`));
     process.stdout.write(t.dim(`${hint}\n\n`));
   }

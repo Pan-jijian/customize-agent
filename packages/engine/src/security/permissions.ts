@@ -32,6 +32,7 @@ const DEFAULT_CONFIG: PermissionConfig = {
     read_file: 'allow',
     list_files: 'allow',
     search: 'allow',
+    knowledge_search: 'allow',
     write_file: 'ask',
     execute_command: 'ask',
     git_commit: 'ask',
@@ -51,8 +52,8 @@ const DEFAULT_CONFIG: PermissionConfig = {
     video_metadata: 'allow',
   },
   rules: [
-    {
-      toolName: 'read_file',
+    ...['read_file', 'inspect_file', 'extract_text', 'extract_pdf_text', 'extract_docx_text', 'extract_xlsx_data', 'ocr_image', 'transcribe_audio', 'video_metadata', 'stat_file'].map((toolName): NonNullable<PermissionConfig['rules']>[number] => ({
+      toolName,
       pathPatterns: [
         // 安全敏感文件
         { pattern: '.env', permission: 'deny' },
@@ -66,8 +67,12 @@ const DEFAULT_CONFIG: PermissionConfig = {
         { pattern: 'packages/engine/src/security/**', permission: 'deny' },
         { pattern: 'packages/llm/src/providers/**', permission: 'deny' },
         { pattern: 'apps/cli/src/engine/executor.ts', permission: 'deny' },
+        { pattern: 'knowledgeBase', permission: 'deny' },
+        { pattern: 'knowledgeBase/**', permission: 'deny' },
+        { pattern: '**/knowledgeBase', permission: 'deny' },
+        { pattern: '**/knowledgeBase/**', permission: 'deny' },
       ],
-    },
+    })),
     {
       toolName: 'execute_command',
       commandPatterns: [
@@ -80,6 +85,12 @@ const DEFAULT_CONFIG: PermissionConfig = {
         { pattern: 'dd if=*', permission: 'deny' },
         { pattern: 'curl ** | sh', permission: 'deny' },
         { pattern: 'wget ** | sh', permission: 'deny' },
+        { pattern: 'cat **knowledgeBase**', permission: 'deny' },
+        { pattern: 'head **knowledgeBase**', permission: 'deny' },
+        { pattern: 'tail **knowledgeBase**', permission: 'deny' },
+        { pattern: 'grep **knowledgeBase**', permission: 'deny' },
+        { pattern: 'find **knowledgeBase**', permission: 'deny' },
+        { pattern: 'ls **knowledgeBase**', permission: 'deny' },
         // ── deny: 危险命令（Windows） ──
         { pattern: 'format **', permission: 'deny' },
         { pattern: 'diskpart **', permission: 'deny' },

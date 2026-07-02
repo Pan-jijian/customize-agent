@@ -3,6 +3,7 @@ import * as crypto from 'node:crypto';
 export interface MinHashSignature {
   signature: number[];
   shingleCount: number;
+  buckets: string[];
 }
 
 export interface SimilarityMatch {
@@ -11,7 +12,8 @@ export interface SimilarityMatch {
 }
 
 export class DedupEngine {
-  private readonly hashCount = 128;
+  private readonly hashCount = 192;
+  private readonly bandSize = 6;
 
   normalizeText(text: string): string {
     return text
@@ -55,7 +57,16 @@ export class DedupEngine {
       }
     }
 
-    return { signature, shingleCount: shingles.size };
+    return { signature, shingleCount: shingles.size, buckets: this.computeLshBuckets(signature) };
+  }
+
+  computeLshBuckets(signature: number[]): string[] {
+    const buckets: string[] = [];
+    for (let i = 0; i < signature.length; i += this.bandSize) {
+      const band = signature.slice(i, i + this.bandSize);
+      if (band.length === this.bandSize) buckets.push(`${i / this.bandSize}:${this.hashToUint32(band.join('|'))}`);
+    }
+    return buckets;
   }
 
   estimateSimilarity(a: number[], b: number[]): number {

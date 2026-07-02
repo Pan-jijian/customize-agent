@@ -86,6 +86,7 @@ const zh: Record<string, string | string[]> = {
 
   // ── 工具名 ──
   'tool.search': '全文搜索',
+  'tool.knowledge_search': '知识库搜索',
   'tool.read_file': '读取文件',
   'tool.list_files': '列出目录',
   'tool.write_file': '写入文件',
@@ -145,6 +146,8 @@ const zh: Record<string, string | string[]> = {
   'tool.generate_thumbnail': '生成缩略图',
   'tool.version': '版本信息',
   'tool.tool_health': '工具健康检查',
+  'tool.check_update': '检查更新',
+  'tool.update': '更新工具',
   'tool.todo_write': '写入任务列表',
   'tool.mcp_list': 'MCP 列表',
   'tool.mcp_add': '添加 MCP',
@@ -351,7 +354,7 @@ const zh: Record<string, string | string[]> = {
   // ── 知识库 Web 控制台 ──
   'kb.dash_url': '管理控制台: {url}',
   'kb.dash_auto_started': '控制台已在 CLI 启动时自动拉起。',
-  'kb.dash_manual': '请手动启动: cd apps/customize-agent-server && pnpm dev',
+  'kb.dash_manual': '请手动启动: cd apps/server && pnpm dev',
 
   // ── 通用 ──
   'common.truncation': '…',

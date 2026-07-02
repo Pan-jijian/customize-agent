@@ -82,6 +82,12 @@ export class ToolKit {
     }
   }
 
+  private ensureNotKnowledgeBase(relativePath: string): void {
+    if (relativePath.split(/[\\/]+/u).includes('knowledgeBase')) {
+      throw new Error('knowledgeBase 是知识库原始文件投放目录，智能体工具不能直接读取；请通过知识库检索或 Web Dashboard 管理');
+    }
+  }
+
   /** 列出当前目录下的文件 */
   async listFiles(): Promise<string[]> {
     const entries = await fs.readdir(this.cwd, { withFileTypes: true });
@@ -95,6 +101,7 @@ export class ToolKit {
 
   /** 读取文件内容（.gitignore 检查 + 路径安全） */
   async readFile(relativeFilePath: string): Promise<string> {
+    this.ensureNotKnowledgeBase(relativeFilePath);
     this.checkGitignore(relativeFilePath);
     const fullPath = this.resolveSafe(relativeFilePath);
     try {

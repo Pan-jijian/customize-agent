@@ -103,10 +103,28 @@ export class KnowledgeBaseManager {
     for (const file of [...diff.newFiles, ...diff.modifiedFiles]) {
       const hash = tracker.hashFile(file.absolutePath);
       const duplicate = this.store.findExactDuplicate(hash, file.relativePath);
+      const collectionName = this.scope === 'global'
+        ? this.collections.getCollectionName('global', file.category)
+        : this.collections.getCollectionName('project', file.category, this.projectId);
       const extraction = await this.extractor.extract(file);
       if (!this.hasUsableContent(extraction.text, extraction.metadata)) {
-        diff.skippedFiles.push({ file, reason: extraction.warnings[0] ?? '未解析出可用于模型的正文内容，已跳过向量化' });
-        this.store.deleteRecord(file.relativePath);
+        const reason = extraction.warnings[0] ?? '未解析出可用于模型的正文内容，已跳过向量化';
+        diff.skippedFiles.push({ file, reason });
+        this.store.upsertRecord({
+          relativePath: file.relativePath,
+          category: file.category,
+          format: file.format,
+          contentHash: hash,
+          fileSize: file.fileSize,
+          mtime: file.mtime,
+          chunkCount: 0,
+          collectionName,
+          indexedAt: now,
+          lastVerifiedAt: now,
+          status: 'error',
+          errorMessage: reason,
+          metadataJson: JSON.stringify({ mimeType: file.mimeType, warnings: extraction.warnings }),
+        });
         continue;
       }
       const normalizedHash = this.dedup.normalizedHash(extraction.text);
@@ -114,9 +132,6 @@ export class KnowledgeBaseManager {
         ? this.store.findNormalizedDuplicate(normalizedHash, file.relativePath)
         : undefined;
       const chunks = duplicate ? [] : this.chunker.chunk(extraction.text, file, extraction.metadata);
-      const collectionName = this.scope === 'global'
-        ? this.collections.getCollectionName('global', file.category)
-        : this.collections.getCollectionName('project', file.category, this.projectId);
 
       this.store.upsertFileHash({
         contentHash: hash,
@@ -149,7 +164,7 @@ export class KnowledgeBaseManager {
       if (!duplicate && extraction.text.length > 1000) {
         const minHash = this.dedup.computeMinHash(extraction.text);
         if (minHash) {
-          for (const existing of this.store.listMinHashes(file.relativePath)) {
+          for (const existing of this.store.listMinHashesByBuckets(minHash.buckets, file.relativePath)) {
             const similarity = this.dedup.estimateSimilarity(minHash.signature, existing.signature);
             const relationshipType = this.dedup.relationshipForSimilarity(similarity);
             if (relationshipType) {
@@ -167,6 +182,7 @@ export class KnowledgeBaseManager {
             filePath: file.relativePath,
             signature: minHash.signature,
             shingleCount: minHash.shingleCount,
+            buckets: minHash.buckets,
           });
         }
       }
@@ -246,9 +262,13 @@ export class KnowledgeBaseManager {
     return this.incrementalIndex();
   }
 
+  getUploadRelativePath(fileName: string, targetRelativePath?: string): string {
+    return targetRelativePath ?? this.defaultUploadRelativePath(fileName);
+  }
+
   async uploadFile(fileName: string, content: Buffer, targetRelativePath?: string): Promise<DiffResult> {
     this.initialize();
-    const relativePath = targetRelativePath ?? this.defaultUploadRelativePath(fileName);
+    const relativePath = this.getUploadRelativePath(fileName, targetRelativePath);
     const targetPath = this.resolveKbRelativePath(relativePath);
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
     fs.writeFileSync(targetPath, content);

@@ -36,6 +36,7 @@ export interface MinHashRecord {
   filePath: string;
   signature: number[];
   shingleCount: number;
+  buckets: string[];
   createdAt: number;
 }
 
@@ -119,7 +120,7 @@ export class IndexStateStore {
   listRecords(): IndexStateRecord[] {
     const rows = this.db.prepare(`
       SELECT * FROM kb_index_state
-      WHERE status = 'active'
+      WHERE status != 'deleted'
       ORDER BY category, relative_path
     `).all() as Array<Record<string, unknown>>;
     return rows.map(row => this.rowToRecord(row));
@@ -237,14 +238,21 @@ export class IndexStateStore {
   }
 
   upsertMinHash(record: Omit<MinHashRecord, 'createdAt'>): void {
-    this.db.prepare(`
-      INSERT INTO kb_minhash (file_path, signature, shingle_count, created_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(file_path) DO UPDATE SET
-        signature = excluded.signature,
-        shingle_count = excluded.shingle_count,
-        created_at = excluded.created_at
-    `).run(record.filePath, Buffer.from(JSON.stringify(record.signature), 'utf8'), record.shingleCount, Date.now());
+    const now = Date.now();
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO kb_minhash (file_path, signature, shingle_count, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(file_path) DO UPDATE SET
+          signature = excluded.signature,
+          shingle_count = excluded.shingle_count,
+          created_at = excluded.created_at
+      `).run(record.filePath, Buffer.from(JSON.stringify(record.signature), 'utf8'), record.shingleCount, now);
+      this.db.prepare('DELETE FROM kb_lsh_buckets WHERE file_path = ?').run(record.filePath);
+      const insertBucket = this.db.prepare('INSERT OR IGNORE INTO kb_lsh_buckets (bucket_key, file_path, created_at) VALUES (?, ?, ?)');
+      for (const bucket of record.buckets) insertBucket.run(bucket, record.filePath, now);
+    });
+    tx();
   }
 
   listMinHashes(excludePath?: string): MinHashRecord[] {
@@ -252,6 +260,24 @@ export class IndexStateStore {
       ? this.db.prepare('SELECT * FROM kb_minhash WHERE file_path != ?').all(excludePath)
       : this.db.prepare('SELECT * FROM kb_minhash').all();
     return (rows as Array<Record<string, unknown>>).map(row => this.rowToMinHash(row));
+  }
+
+  listMinHashesByBuckets(buckets: string[], excludePath?: string): MinHashRecord[] {
+    if (buckets.length === 0) return [];
+    const placeholders = buckets.map(() => '?').join(',');
+    const params: unknown[] = [...buckets];
+    let sql = `
+      SELECT DISTINCT m.*
+      FROM kb_minhash m
+      INNER JOIN kb_lsh_buckets b ON b.file_path = m.file_path
+      WHERE b.bucket_key IN (${placeholders})
+    `;
+    if (excludePath) {
+      sql += ' AND m.file_path != ?';
+      params.push(excludePath);
+    }
+    const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+    return rows.map(row => this.rowToMinHash(row));
   }
 
   addRelationship(relationship: Omit<FileRelationship, 'id' | 'createdAt'>): void {
@@ -321,6 +347,7 @@ export class IndexStateStore {
     this.db.prepare('DELETE FROM kb_index_state WHERE relative_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_file_hashes WHERE file_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_minhash WHERE file_path = ?').run(relativePath);
+    this.db.prepare('DELETE FROM kb_lsh_buckets WHERE file_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_tags WHERE file_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_relationships WHERE source_file = ? OR target_file = ?').run(relativePath, relativePath);
   }
@@ -336,11 +363,11 @@ export class IndexStateStore {
     const stats = this.db.prepare(`
       SELECT
         COUNT(*) as file_count,
-        COALESCE(SUM(chunk_count), 0) as chunk_count,
+        (SELECT COUNT(*) FROM kb_chunks) as chunk_count,
         COALESCE(SUM(file_size), 0) as total_size_bytes,
         COALESCE(MAX(indexed_at), 0) as last_indexed_at
       FROM kb_index_state
-      WHERE status = 'active'
+      WHERE status != 'deleted'
     `).get() as Record<string, unknown>;
 
     return {
@@ -419,6 +446,15 @@ export class IndexStateStore {
         created_at       INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS kb_lsh_buckets (
+        bucket_key       TEXT NOT NULL,
+        file_path        TEXT NOT NULL,
+        created_at       INTEGER NOT NULL,
+        PRIMARY KEY (bucket_key, file_path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_lsh_bucket ON kb_lsh_buckets(bucket_key);
+      CREATE INDEX IF NOT EXISTS idx_lsh_file ON kb_lsh_buckets(file_path);
+
       CREATE TABLE IF NOT EXISTS kb_relationships (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
         source_file       TEXT NOT NULL,
@@ -460,10 +496,13 @@ export class IndexStateStore {
   private rowToMinHash(row: Record<string, unknown>): MinHashRecord {
     const raw = row.signature;
     const json = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw);
+    const filePath = String(row.file_path);
+    const bucketRows = this.db.prepare('SELECT bucket_key FROM kb_lsh_buckets WHERE file_path = ?').all(filePath) as Array<{ bucket_key: string }>;
     return {
-      filePath: String(row.file_path),
+      filePath,
       signature: JSON.parse(json) as number[],
       shingleCount: Number(row.shingle_count),
+      buckets: bucketRows.map(bucket => bucket.bucket_key),
       createdAt: Number(row.created_at),
     };
   }
