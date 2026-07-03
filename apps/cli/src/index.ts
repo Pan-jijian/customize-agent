@@ -385,7 +385,11 @@ program.action(async () => {
   const dashboardUrl: string | undefined = dashboardReady ? `http://localhost:${dashboardPort}/overview` : undefined;
 
   if (process.env.CUSTOMIZE_AGENT_E2E_DASHBOARD === '1') {
-    console.log(dashboardReady ? `Dashboard ready: ${dashboardUrl}` : 'Dashboard failed to start');
+    if (!dashboardReady) {
+      console.log('Dashboard failed to start');
+      process.exit(1);
+    }
+    console.log(`Dashboard ready: ${dashboardUrl}`);
     await new Promise(() => setInterval(() => undefined, 60_000));
   }
 
