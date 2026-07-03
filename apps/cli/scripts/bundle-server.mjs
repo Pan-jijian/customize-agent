@@ -227,6 +227,20 @@ if (existsSync(publicDir)) {
   cpSync(publicDir, resolve(bundledServerDir, 'public'), { recursive: true, dereference: true });
 }
 
+// Patch server.js: 替换 process.chdir(__dirname) 为 chdir 到项目根目录
+// 避免 Windows 上 server 进程锁定 dist/server/apps/server/ 导致 EBUSY
+const serverEntryPath = resolve(bundledServerDir, 'server.js');
+if (existsSync(serverEntryPath)) {
+  let content = readFileSync(serverEntryPath, 'utf-8');
+  // 移除 process.chdir(__dirname) — 由 spawn 的 cwd 控制工作目录
+  content = content.replace(
+    /process\.chdir\(__dirname\)[;]?/g,
+    '// process.chdir removed by bundle-server to prevent Windows file locking'
+  );
+  writeFileSync(serverEntryPath, content);
+  console.log('[bundle-server] Patched server.js (removed process.chdir for Windows EBUSY fix)');
+}
+
 // Marker 文件供 findDashboardServerDir 检测
 writeFileSync(resolve(destDir, '.dashboard-bundled'), '');
 

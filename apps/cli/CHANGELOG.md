@@ -1,5 +1,48 @@
 # customize-agent
 
+## 2.1.11
+
+### Patch Changes
+
+- ## 🐛 彻底修复 Windows EBUSY — 三层防御
+
+  ### 🔍 问题
+
+  2.1.10 的 `preinstall` 杀进程方案未能完全解决 Windows 升级时的 `EBUSY: resource busy or locked` 错误：
+  - 旧版 server 进程将 **cwd 锁定在** `dist\server\apps\server\` 目录上
+  - `kill-server.cjs` **busy-wait 占满 CPU 100%**，且杀进程后未等待 Windows 释放文件句柄
+  - 仅按端口杀进程不够 — 端口已释放但目录锁仍存在的边缘情况
+
+  ### 🔧 三层防御链
+
+  **① 安装前 — `kill-server.cjs` 彻底重写**
+  - 真实 `sleep()`：用 `timeout /t`（Win）/ `sleep`（Unix）阻塞等待，不再占 CPU
+  - Windows **3 层杀进程策略**：
+    1. `PowerShell Get-NetTCPConnection` — 按端口杀（主力）
+    2. `netstat + taskkill /F` — 兜底（精确端口匹配，避免 17321 误匹配 173210）
+    3. `wmic`/`PowerShell` — **按命令行查杀** `node.exe` 进程（匹配 `server.js` / `customize-agent`），捕获端口断开但进程仍持文件句柄的边缘情况
+  - 重试 **3 轮**，每轮间隔 2s 真实 sleep
+  - **最终 3s 等待**（Windows）— 给系统时间回收 `taskkill /F` 后的文件句柄
+
+  **② 打包时 — `bundle-server.mjs` 移除 `process.chdir`**
+  - 自动 patch Next.js standalone `server.js`：注释掉 `process.chdir(__dirname)`
+  - 新版 server 不再主动 chdir 到 `apps/server/`，避免锁定子目录
+
+  **③ 运行时 — `index.ts` 修改 spawn cwd**
+  - Bundled 模式：cwd 从 `dist/server/apps/server/` → `dist/server/`（父目录）
+  - 配合 patch，server 进程不锁定 `apps/server/` 子目录
+
+  ### 📦 升级体验
+
+  ```
+  升级前                              升级后
+  ─────────────────────────────────────────
+  EBUSY 频繁 → 安装失败              根除 → 安装成功
+  busy-wait 100% CPU                 真实 sleep，零 CPU
+  仅杀端口 → 边缘情况漏网             3 策略层层递进
+  杀后不等待 → 句柄未释放             3s 最终等待
+  ```
+
 ## 2.1.10
 
 ### Patch Changes
