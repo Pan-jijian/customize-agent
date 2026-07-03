@@ -194,9 +194,18 @@ async function chromaCount() {
       const log = fs.readFileSync(cliLog, 'utf8');
       return log.includes('Dashboard ready:') ? true : undefined;
     }, 240000);
+    const startupReindex = await request('POST', `${cliBase}/api/kb/reindex`, { projectRoot: cliProjectRoot });
+    assert(startupReindex.status === 200 && startupReindex.json.success, `CLI startup reindex failed: ${startupReindex.status} ${startupReindex.raw}`);
+    const startupStats = await waitFor('CLI startup knowledge vectors', async () => {
+      const stats = await request('GET', `${cliBase}/api/kb/stats?projectRoot=${encodeURIComponent(cliProjectRoot)}`);
+      if (stats.status !== 200) return undefined;
+      const vector = stats.json.vectorStatus;
+      if (Number(stats.json.chunkCount) > 0 && vector?.status === 'ready' && Number(vector.indexedChunks) >= Number(stats.json.chunkCount)) return stats.json;
+      return undefined;
+    }, 120000);
     const startupVectorCount = await waitFor('CLI startup Chroma vectors', async () => {
       const total = await chromaCount();
-      return total > 0 ? total : undefined;
+      return total >= startupStats.chunkCount ? total : undefined;
     }, 60000);
     try { fs.closeSync(cliOut); } catch {}
     try { cliProcess.kill(); } catch {}
