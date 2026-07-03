@@ -379,6 +379,16 @@ program.action(async () => {
     return;
   }
 
+  registerCleanup();
+  const dashboardPort = 17321;
+  const dashboardReady = await startDashboardInBackground(dashboardPort, chromaClient.baseUrl);
+  const dashboardUrl: string | undefined = dashboardReady ? `http://localhost:${dashboardPort}/overview` : undefined;
+
+  if (process.env.CUSTOMIZE_AGENT_E2E_DASHBOARD === '1') {
+    console.log(dashboardReady ? `Dashboard ready: ${dashboardUrl}` : 'Dashboard failed to start');
+    await new Promise(() => setInterval(() => undefined, 60_000));
+  }
+
   const lsp = new LSPManager(PROJECT_ROOT);
   const resolved = modelRegistry.resolve('action');
   const providerDisplay = resolved ? `${resolved.provider}/${resolved.name}` : i18n.t('welcome.no_model');
@@ -401,18 +411,6 @@ program.action(async () => {
       kbStatus = '已初始化';
     }
   });
-  // 注册 Ctrl+C / 终端关闭时的清理处理器 — 杀掉 dashboard + chroma 子进程
-  registerCleanup();
-
-  const dashboardPort = 17321;
-  const dashboardReady = await startDashboardInBackground(dashboardPort, chromaClient.baseUrl);
-  const dashboardUrl: string | undefined = dashboardReady ? `http://localhost:${dashboardPort}/overview` : undefined;
-
-  if (process.env.CUSTOMIZE_AGENT_E2E_DASHBOARD === '1') {
-    console.log(dashboardReady ? `Dashboard ready: ${dashboardUrl}` : 'Dashboard failed to start');
-    await new Promise(() => setInterval(() => undefined, 60_000));
-  }
-
   const repl = new Repl({
 
     executor,
