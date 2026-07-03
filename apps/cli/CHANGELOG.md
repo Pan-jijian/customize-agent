@@ -1,5 +1,23 @@
 # customize-agent
 
+## 2.1.12
+
+### Patch Changes
+
+- ## 🚑 紧急修复 — 改用 pnpm publish 发布
+
+  ### 🔍 问题
+
+  2.1.11 使用 `npm publish` 发布，导致 `package.json` 中 `workspace:*` 协议未被转换为实际版本号，用户安装报错：
+  ```
+  EUNSUPPORTEDPROTOCOL Unsupported URL Type "workspace:": workspace:*
+  ```
+
+  ### 🔧 修复
+
+  - 改用 `pnpm publish` 发布（pnpm 会自动将 `workspace:*` 转换为实际版本号，如 `^2.1.0`）
+  - 功能变更与 2.1.11 完全相同
+
 ## 2.1.11
 
 ### Patch Changes
