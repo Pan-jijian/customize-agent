@@ -181,10 +181,44 @@ ensureVendorPackage(nodeModulesDir, 'chromadb', rootPnpm);
 // 修复 pdfjs-dist 的 worker 文件
 fixPdfjsWorker(nodeModulesDir);
 
+// 生成 dist/server/package.json，供 postinstall 的 npm rebuild 使用
+// 收集 server + workspace 包的所有外部依赖
+function generateServerPackageJson(destDir) {
+  const serverPkg = JSON.parse(readFileSync(resolve(serverDir, 'package.json'), 'utf-8'));
+  const allDeps = {};
+  const pkgFiles = [
+    resolve(serverDir, 'package.json'),
+    resolve(monorepoRoot, 'packages', 'knowledge', 'package.json'),
+    resolve(monorepoRoot, 'packages', 'search', 'package.json'),
+    resolve(monorepoRoot, 'packages', 'tools', 'package.json'),
+    resolve(monorepoRoot, 'packages', 'llm', 'package.json'),
+    resolve(monorepoRoot, 'packages', 'engine', 'package.json'),
+    resolve(monorepoRoot, 'packages', 'runtime', 'package.json'),
+  ];
+  for (const pkgFile of pkgFiles) {
+    if (!existsSync(pkgFile)) continue;
+    const pkg = JSON.parse(readFileSync(pkgFile, 'utf-8'));
+    for (const [name, version] of Object.entries(pkg.dependencies ?? {})) {
+      if (name.startsWith('@customize-agent/')) continue;
+      if (!allDeps[name]) allDeps[name] = version;
+    }
+  }
+  const serverPackageJson = {
+    name: 'customize-agent-server',
+    private: true,
+    description: 'Bundled server runtime for customize-agent',
+    dependencies: allDeps,
+  };
+  writeFileSync(resolve(destDir, 'package.json'), JSON.stringify(serverPackageJson, null, 2));
+  console.log(`[bundle-server] Generated server package.json with ${Object.keys(allDeps).length} dependencies`);
+}
+generateServerPackageJson(destDir);
+
 // 不再删除 node_modules！保留它让 Node.js 原生 CJS+ESM 解析器都能找到依赖。
 // 之前的 vendor+monkey-patch 方案只对 CJS require() 有效，ESM import 失败。
 // node_modules 位于 dist/server/node_modules/，server.js (cwd=apps/server/)
 // 的 Node.js 向上查找 ../../node_modules/ 即可自然解析。
+// 跨平台: postinstall 执行 npm rebuild 会自动为目标平台重新编译原生模块。
 const bundledServerDir = resolve(destDir, 'apps', 'server');
 if (existsSync(staticDir)) {
   mkdirSync(resolve(bundledServerDir, '.next'), { recursive: true });
