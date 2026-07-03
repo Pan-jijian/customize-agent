@@ -1,5 +1,28 @@
 # customize-agent
 
+## 2.1.15
+
+### Patch Changes
+
+- 架构级修复：Server 移出 npm 包目录 + kill-server 全重写
+
+  ### 根因
+
+  无论 CWD 是 `dist/server/` 还是 `dist/server/apps/server/`，都在 npm 包目录下。
+  Windows 锁定整个路径链 → npm 升级时无法重命名 → EBUSY。
+
+  ### 修复：Server 迁移到 `~/.customize-agent/server/`
+
+  ```
+  旧: C:\Users\...\npm\node_modules\customize-agent\dist\server\  ← EBUSY
+  新: C:\Users\...\.customize-agent\server\                        ← 永不冲突
+  ```
+
+  1. `bundle-server.mjs`: 打包到 `dist/server-bundle/`(种子)
+  2. `setup.js` (postinstall): 按 BUILD_ID 增量复制到 `~/.customize-agent/server/`
+  3. `index.ts`: `findDashboardServerDir` 优先查找 `~/.customize-agent/server/`
+  4. `kill-server.cjs`: 使用 `Get-CimInstance Win32_Process`(最可靠) + `WMIC` fallback + `netstat` + `pgrep`
+
 ## 2.1.14
 
 ### Patch Changes
@@ -21,12 +44,12 @@
   preinstall: kill CLI ✓ → CLI 无法重启 server → kill server ✓ → npm 重命名 → 成功 ✓
   ```
 
-  | 改进项 | 说明 |
-  |--------|------|
-  | 执行顺序 | **先杀 CLI 进程**（`killCLIProcess()`），再杀 server 进程 |
-  | 输出方式 | stderr 输出，npm install 时强制可见 |
-  | 日志内容 | 输出被杀的 PID 和来源（PowerShell/wmic/端口）|
-  | macOS/Linux | 新增 `pkill -f` 匹配命令行杀进程 |
+  | 改进项      | 说明                                                      |
+  | ----------- | --------------------------------------------------------- |
+  | 执行顺序    | **先杀 CLI 进程**（`killCLIProcess()`），再杀 server 进程 |
+  | 输出方式    | stderr 输出，npm install 时强制可见                       |
+  | 日志内容    | 输出被杀的 PID 和来源（PowerShell/wmic/端口）             |
+  | macOS/Linux | 新增 `pkill -f` 匹配命令行杀进程                          |
 
   ### 🔧 修复 ②：index.ts — 退出时清理所有子进程
 
@@ -40,10 +63,12 @@
   ### ⚠️ 升级说明
 
   从旧版本升级时，如果仍有 EBUSY，请先手动关闭终端中的 `customize` CLI：
+
   ```powershell
   taskkill /F /IM node.exe /FI "CMDLINE ne cmd.exe"
   npm i -g customize-agent@latest
   ```
+
   升级到 2.1.14+ 后，此问题不会再出现。
 
 ## 2.1.13
