@@ -15,7 +15,7 @@ async function fetchTextWithTimeout(url, timeoutMs) {
 
 (async () => {
   let last = '';
-  const deadline = Date.now() + 120_000;
+  const deadline = Date.now() + 240_000;
   while (Date.now() < deadline) {
     try {
       const rows = [];
