@@ -16,7 +16,7 @@
     "customize-agent": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc && node scripts/bundle-server.mjs && node -e \"require('fs').mkdirSync('dist/scripts',{recursive:true});require('fs').cpSync('scripts/kill-server.cjs','dist/scripts/kill-server.cjs')\"",
+    "build": "tsc && cargo run --release --manifest-path native/dashboard-runner/Cargo.toml -- bundle --cli-root . --server-root ../server --monorepo-root ../.. && cargo run --release --manifest-path native/dashboard-runner/Cargo.toml -- copy-self --dest dist/bin/dashboard-runner",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "start": "node ./dist/index.js"
@@ -29,8 +29,7 @@
     "directory": "apps/cli"
   },
   "files": [
-    "dist",
-    "scripts/kill-server.cjs"
+    "dist"
   ],
   "publishConfig": {
     "access": "public"

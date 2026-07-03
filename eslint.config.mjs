@@ -60,6 +60,7 @@ export default tseslint.config(
       "**/dist/**",
       "**/node_modules/**",
       "**/fixtures/**",
+      "apps/cli/test/**/*.cjs",
       "**/.turbo/**",
     ],
   },

@@ -13,6 +13,8 @@ out/
 .env.local
 .env.*.local
 .turbo
+.tmp*
+**/target/
 # IDE
 .vscode/
 .idea/
