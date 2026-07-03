@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const packageRoot = path.resolve(process.argv[2] || process.env.PACKAGE_ROOT || '.');
 const installRoot = path.resolve(packageRoot, '..', '..');
@@ -10,20 +10,27 @@ const node = process.execPath;
 const tempRoot = process.env.RUNNER_TEMP || fs.mkdtempSync(path.join(require('os').tmpdir(), 'customize-upload-'));
 const home = path.join(tempRoot, 'upload-home');
 const projectRoot = path.join(tempRoot, 'upload-project');
+const cliProjectRoot = path.join(tempRoot, 'cli-startup-project');
 const chromaDir = path.join(tempRoot, 'chroma');
 const dashboardLog = path.join(tempRoot, 'upload-dashboard.log');
+const cliLog = path.join(tempRoot, 'cli.log');
 const chromaLog = path.join(tempRoot, 'upload-chroma.log');
 const basePort = 18000 + Math.floor(Math.random() * 1000);
 const port = Number(process.env.CUSTOMIZE_UPLOAD_PORT || basePort);
+const cliPort = Number(process.env.CUSTOMIZE_CLI_PORT || (basePort + 2));
 const chromaPort = Number(process.env.CUSTOMIZE_CHROMA_PORT || (basePort + 1));
 const base = `http://127.0.0.1:${port}`;
+const cliBase = `http://127.0.0.1:${cliPort}`;
 const chromaBase = `http://127.0.0.1:${chromaPort}`;
 const marker = `uploadmatrix${Date.now()}`;
 
 fs.rmSync(home, { recursive: true, force: true });
 fs.rmSync(projectRoot, { recursive: true, force: true });
+fs.rmSync(cliProjectRoot, { recursive: true, force: true });
 fs.rmSync(chromaDir, { recursive: true, force: true });
 fs.mkdirSync(projectRoot, { recursive: true });
+fs.mkdirSync(path.join(cliProjectRoot, 'knowledgeBase', '文档资料'), { recursive: true });
+fs.writeFileSync(path.join(cliProjectRoot, 'knowledgeBase', '文档资料', 'startup-seed.txt'), `${marker} cli-startup-incremental searchable content`);
 fs.mkdirSync(chromaDir, { recursive: true });
 
 function b64(content) {
@@ -168,13 +175,34 @@ async function chromaCount() {
   });
 
   let dashboardPid;
+  let cliProcess;
   try {
     await waitFor('Chroma heartbeat', async () => {
       const res = await request('GET', `${chromaBase}/api/v2/heartbeat`);
       return res.status === 200;
     });
 
-    const { spawnSync } = require('child_process');
+    const cliBin = path.join(packageRoot, 'dist', 'index.js');
+    const cliOut = fs.openSync(cliLog, 'a');
+    cliProcess = spawn(node, [cliBin], {
+      cwd: cliProjectRoot,
+      stdio: ['ignore', cliOut, cliOut],
+      env: { ...process.env, HOME: home, CHROMA_URL: chromaBase, CUSTOMIZE_DASHBOARD_PORT: String(cliPort), CUSTOMIZE_AGENT_E2E_DASHBOARD: '1' },
+    });
+    await waitFor('CLI startup knowledge initialization', () => {
+      if (!fs.existsSync(cliLog)) return undefined;
+      const log = fs.readFileSync(cliLog, 'utf8');
+      return log.includes('Dashboard ready:') ? true : undefined;
+    }, 240000);
+    const startupVectorCount = await waitFor('CLI startup Chroma vectors', async () => {
+      const total = await chromaCount();
+      return total > 0 ? total : undefined;
+    }, 60000);
+    try { fs.closeSync(cliOut); } catch {}
+    try { cliProcess.kill(); } catch {}
+    await new Promise(resolve => cliProcess.once('exit', resolve));
+    cliProcess = undefined;
+
     const start = spawnSync(runner, [
       'start', '--bundle', bundle, '--target', path.join(home, '.customize-agent', 'server'), '--port', String(port), '--project-root', projectRoot, '--chroma-url', chromaBase, '--node', node, '--log', dashboardLog, '--timeout-ms', '120000'
     ], { encoding: 'utf8', env: { ...process.env, HOME: home, CHROMA_URL: chromaBase } });
@@ -209,6 +237,16 @@ async function chromaCount() {
       console.log('UPLOAD', sample.kind, sample.name, JSON.stringify({ relativePath, chunks: detail.json.file?.chunkCount, vector: res.json.vectorStatus?.status }));
     }
 
+    const incrementalPath = path.join(projectRoot, 'knowledgeBase', '文档资料', 'incremental-local.txt');
+    fs.mkdirSync(path.dirname(incrementalPath), { recursive: true });
+    fs.writeFileSync(incrementalPath, text('incremental-local'));
+    const reindexAll = await request('POST', `${base}/api/kb/reindex`, { projectRoot });
+    assert(reindexAll.status === 200 && reindexAll.json.success, `incremental reindex failed: ${reindexAll.status} ${reindexAll.raw}`);
+    assert(Number(reindexAll.json.diff?.newFiles) >= 1, `incremental reindex did not detect new file: ${reindexAll.raw}`);
+    const incrementalDetail = await request('GET', `${base}/api/kb/files/detail?projectRoot=${encodeURIComponent(projectRoot)}&relativePath=${encodeURIComponent('文档资料/incremental-local.txt')}`);
+    assert(incrementalDetail.status === 200, `incremental detail failed: ${incrementalDetail.status} ${incrementalDetail.raw}`);
+    assert(Number(incrementalDetail.json.file?.chunkCount) > 0, 'incremental file was not parsed/chunked');
+
     const readyStats = await waitFor('Chroma vector index', async () => {
       const stats = await request('GET', `${base}/api/kb/stats?projectRoot=${encodeURIComponent(projectRoot)}`);
       if (stats.status !== 200) throw new Error(`stats ${stats.status} ${stats.raw}`);
@@ -220,9 +258,10 @@ async function chromaCount() {
       const total = await chromaCount();
       return total >= readyStats.chunkCount ? total : undefined;
     }, 60000);
-    console.log('UPLOAD_VECTOR_MATRIX_OK', JSON.stringify({ files: samples.length, marker, projectRoot, chunkCount: readyStats.chunkCount, indexedChunks: readyStats.vectorStatus.indexedChunks, chromaCount: count }));
+    console.log('UPLOAD_VECTOR_MATRIX_OK', JSON.stringify({ files: samples.length, marker, projectRoot, startupVectors: startupVectorCount, chunkCount: readyStats.chunkCount, indexedChunks: readyStats.vectorStatus.indexedChunks, chromaCount: count }));
     process.exitCode = 0;
   } finally {
+    if (cliProcess) { try { cliProcess.kill(); } catch {} }
     if (dashboardPid) { try { process.kill(dashboardPid); } catch {} }
     try { chroma.kill(); } catch {}
     await new Promise(resolve => {
@@ -234,6 +273,7 @@ async function chromaCount() {
 })().catch(error => {
   console.error(error.stack || String(error));
   if (fs.existsSync(chromaLog)) console.error(fs.readFileSync(chromaLog, 'utf8'));
+  if (fs.existsSync(cliLog)) console.error(fs.readFileSync(cliLog, 'utf8'));
   if (fs.existsSync(dashboardLog)) console.error(fs.readFileSync(dashboardLog, 'utf8'));
   process.exit(1);
 }).finally(() => process.exit(process.exitCode ?? 0));

@@ -69,6 +69,7 @@ jobs:
           name: cli-e2e-logs-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/cli.log
+            ${{ runner.temp }}/upload-home/.customize-agent/logs/**
             ${{ runner.temp }}/dashboard.log
             ${{ runner.temp }}/upload-dashboard.log
             ${{ runner.temp }}/upload-chroma.log
