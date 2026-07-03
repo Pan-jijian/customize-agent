@@ -30,6 +30,40 @@ const CLI_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolveUserProjectRoot();
 const pkg = loadPackageJson();
 
+// 追踪所有由 CLI 启动的子进程（dashboard server、chroma），退出时统一清理
+const spawnedPids = new Set<number>();
+
+function cleanupChildProcesses() {
+  for (const pid of spawnedPids) {
+    try {
+      if (process.platform === 'win32') {
+        const { execSync } = require('child_process');
+        execSync(`taskkill /F /PID ${pid}`, { timeout: 3000, stdio: 'ignore' });
+      } else {
+        process.kill(pid, 'SIGTERM');
+      }
+    } catch { /* process already dead */ }
+  }
+  spawnedPids.clear();
+}
+
+function registerCleanup() {
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    cleanupChildProcesses();
+  };
+
+  // 进程退出时清理子进程（execSync 是同步的，满足 process.on('exit') 的要求）
+  process.on('exit', cleanup);
+
+  // 终端关闭 / kill 信号时也触发清理
+  const signalHandler = () => { cleanup(); process.exit(0); };
+  process.on('SIGHUP', signalHandler);
+  process.on('SIGTERM', signalHandler);
+}
+
 async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
   try {
     ensureProjectCustomizeFile(projectRoot);
@@ -117,10 +151,12 @@ async function startDashboardInBackground(port: number, chromaUrl: string): Prom
       // cwd 设为 dist/server/（而非 apps/server/），避免 Windows 文件锁
       // server.js 内 process.chdir 已在 bundle 时移除
       const proc = spawn(process.execPath, [serverEntry], { cwd: resolve(serverDir), stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true });
+      if (proc.pid) spawnedPids.add(proc.pid);
       proc.unref();
     } else {
       const nextCli = resolve(serverDir, 'node_modules', 'next', 'dist', 'bin', 'next');
       const proc = spawn(process.execPath, [nextCli, 'start', '-p', String(port)], { cwd: serverDir, stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true });
+      if (proc.pid) spawnedPids.add(proc.pid);
       proc.unref();
     }
     closeSync(logFile.fd);
@@ -229,6 +265,7 @@ async function ensureChromaServer(): Promise<{ client: ChromaHttpClient; status:
       env: { ...process.env, CHROMA_URL: client.baseUrl },
       shell: false,
     });
+    if (proc.pid) spawnedPids.add(proc.pid);
     proc.on('error', () => undefined);
     const { closeSync } = await import('fs');
     closeSync(logFile.fd);
@@ -325,6 +362,9 @@ program.action(async () => {
       kbStatus = '已初始化';
     }
   });
+  // 注册 Ctrl+C / 终端关闭时的清理处理器 — 杀掉 dashboard + chroma 子进程
+  registerCleanup();
+
   const dashboardPort = 17321;
   const dashboardReady = await startDashboardInBackground(dashboardPort, chromaClient.baseUrl);
   const dashboardUrl: string | undefined = dashboardReady ? `http://localhost:${dashboardPort}/overview` : undefined;
