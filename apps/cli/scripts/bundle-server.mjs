@@ -132,6 +132,25 @@ if (!existsSync(standaloneDir)) {
 if (existsSync(destDir)) rmSync(destDir, { recursive: true });
 mkdirSync(destDir, { recursive: true });
 cpSync(standaloneDir, destDir, { recursive: true, dereference: true });
+
+// 将 workspace packages/ 目录链接到 node_modules/@customize-agent/ scope
+// Next.js standalone 将 workspace 包放在顶层 packages/ 而非 node_modules scope 下，
+// 导致 require('@customize-agent/knowledge') 找不到包
+function linkWorkspacePackages(destDir) {
+  const packagesDir = resolve(destDir, 'packages');
+  const scopeDir = resolve(destDir, 'node_modules', '@customize-agent');
+  if (!existsSync(packagesDir)) return;
+  mkdirSync(scopeDir, { recursive: true });
+  for (const pkgName of readdirSync(packagesDir)) {
+    const pkgDir = resolve(packagesDir, pkgName);
+    if (!lstatSync(pkgDir).isDirectory()) continue;
+    const destLink = resolve(scopeDir, pkgName);
+    if (existsSync(destLink)) rmSync(destLink, { recursive: true, force: true });
+    cpSync(pkgDir, destLink, { recursive: true, dereference: true });
+    console.log(`[bundle-server] Linked @customize-agent/${pkgName}`);
+  }
+}
+linkWorkspacePackages(destDir);
 materializeSymlinks(resolve(destDir, 'node_modules'));
 
 const vendorDir = resolve(destDir, 'vendor');
