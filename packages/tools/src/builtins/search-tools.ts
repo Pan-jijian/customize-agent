@@ -14,13 +14,17 @@ export class SearchTools {
     const lines: string[] = [];
     const visit = async (current: string, prefix: string, level: number) => {
       if (level > depth) return;
-      const entries = (await fs.readdir(current, { withFileTypes: true }))
-        .filter(e => !e.name.startsWith('.') && !(e.isDirectory() && SKIP_DIRS.has(e.name)))
-        .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
-      for (const [index, entry] of entries.entries()) {
-        const last = index === entries.length - 1;
-        lines.push(`${prefix}${last ? '└──' : '├──'} ${entry.name}${entry.isDirectory() ? '/' : ''}`);
-        if (entry.isDirectory()) await visit(path.join(current, entry.name), prefix + (last ? '    ' : '│   '), level + 1);
+      try {
+        const entries = (await fs.readdir(current, { withFileTypes: true }))
+          .filter(e => !e.name.startsWith('.') && !(e.isDirectory() && SKIP_DIRS.has(e.name)))
+          .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+        for (const [index, entry] of entries.entries()) {
+          const last = index === entries.length - 1;
+          lines.push(`${prefix}${last ? '└──' : '├──'} ${entry.name}${entry.isDirectory() ? '/' : ''}`);
+          if (entry.isDirectory()) await visit(path.join(current, entry.name), prefix + (last ? '    ' : '│   '), level + 1);
+        }
+      } catch {
+        // 跳过无权限访问的目录（跨平台兼容：如 macOS ~/Library/Accounts）
       }
     };
     lines.push(`${dir}/`);

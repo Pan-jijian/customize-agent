@@ -1,5 +1,25 @@
 # @customize-agent/search
 
+## 2.0.2
+
+### Patch Changes
+
+- ## 🐛 紧急修复 — EPERM 崩溃 + tree-sitter peer dependency 警告
+
+  ### 🚨 EPERM 崩溃修复
+
+  - **修复 `search-tools.ts` `visit` 函数**：`fs.readdir` 访问系统保护目录（如 macOS `~/Library/Accounts`）时抛出 `EPERM` 导致 CLI 启动崩溃，现已添加 try-catch 静谧跳过无权限目录
+  - **修复 `path-utils.ts` `walk` 函数**：同样添加 `EPERM`/`EACCES` 异常处理，跨平台兼容（macOS/Linux/Windows）
+
+  ### 🔧 tree-sitter peer dependency 警告修复
+
+  - **降级 `tree-sitter` 版本**：`^0.22.0` → `^0.21.1`，与所有 tree-sitter 语法包（`tree-sitter-c`、`tree-sitter-cpp` 等 `^0.23.0`）的 `peerOptional` 要求一致，消除 npm 安装时的 `ERESOLVE overriding peer dependency` 警告
+
+  ### ✅ 验证结果
+
+  - TypeScript 类型检查：通过
+  - 测试：252/252 全部通过
+
 ## 2.0.1
 
 ### Patch Changes

@@ -41,15 +41,20 @@ export async function walk(
   const stack = [dir];
   while (stack.length > 0) {
     const current = stack.pop()!;
-    const entries = await fs.readdir(current, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue;
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        if (!skipDirs.has(entry.name)) stack.push(fullPath);
-      } else {
-        files.push(fullPath);
+    try {
+      const entries = await fs.readdir(current, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue;
+        const fullPath = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          if (!skipDirs.has(entry.name)) stack.push(fullPath);
+        } else {
+          files.push(fullPath);
+        }
       }
+    } catch {
+      // 跳过无权限访问的目录（跨平台兼容：EPERM/EACCES，如 macOS ~/Library/Accounts）
+      continue;
     }
   }
   return files;

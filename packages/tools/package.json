@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/tools",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Agent 工具 — 文件操作、终端、Git、沙箱、语法验证",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -45,7 +45,7 @@
     "pdf-parse": "^2.4.5",
     "sharp": "^0.35.2",
     "tesseract.js": "^7.0.0",
-    "tree-sitter": "^0.22.0",
+    "tree-sitter": "^0.21.1",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
