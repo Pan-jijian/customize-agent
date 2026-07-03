@@ -141,7 +141,7 @@ async function dashboardLogFile(port: number) {
 
 async function fetchDashboardHealth(port: number): Promise<{ buildId?: string | null; pid?: number } | undefined> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 500);
+  const timeout = setTimeout(() => controller.abort(), 2000);
   try {
     const response = await fetch(`http://localhost:${port}/api/health`, { signal: controller.signal });
     if (!response.ok) return undefined;
@@ -199,10 +199,10 @@ async function startDashboardInBackground(port: number, chromaUrl: string): Prom
       proc.unref();
     }
     closeSync(logFile.fd);
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
       const nextHealth = await fetchDashboardHealth(port);
       if (nextHealth?.buildId === localBuildId) return true;
-      await new Promise(resolve => setTimeout(resolve, 250));
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
     return false;
   } catch {
