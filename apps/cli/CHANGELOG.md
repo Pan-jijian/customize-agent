@@ -1,5 +1,25 @@
 # customize-agent
 
+## 2.1.4
+
+### Patch Changes
+
+- ## 🐛 紧急修复 — 打包后 Web 服务 Internal Server Error
+
+  ### 🔍 根因
+
+  Next.js standalone 模式将 workspace 包（`@customize-agent/knowledge`、`llm`、`runtime`、`types`）输出到 `packages/` 顶层目录，而非 `node_modules/@customize-agent/` scope 下。`bundle-server.mjs` 在打包时未创建 scope 软链接，导致运行时 `require('@customize-agent/knowledge')` 找不到包，所有 API 路由返回 500。
+
+  ### 🔧 修复
+
+  `bundle-server.mjs` 新增 `linkWorkspacePackages()` 函数：将 `packages/{knowledge,llm,runtime,types}` 复制到 `node_modules/@customize-agent/` scope 下，再随 `node_modules` → `vendor` 迁移流程一同打包。
+
+  ### ✅ 验证
+
+  - TypeScript 编译：通过
+  - 测试：252/252 全部通过
+  - 打包后 vendor 目录包含 `@customize-agent/knowledge`、`llm`、`runtime`、`types` 四个包
+
 ## 2.1.3
 
 ### Patch Changes
