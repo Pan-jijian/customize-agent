@@ -1,5 +1,32 @@
 # customize-agent
 
+## 2.1.7
+
+### Patch Changes
+
+- ## 🐛 修复 Windows 跨平台兼容 + i18n 补齐
+
+  ### 🔍 问题
+
+  1. **Windows 所有 API 500**：npm 包中的 `dist/server/node_modules/` 包含 macOS 构建的原生模块（better-sqlite3、tree-sitter 等），Windows 无法加载
+  2. **tree-sitter peer dependency 警告**：语法包版本不统一（部分需 ^0.21.1，部分需 ^0.22.1）
+  3. **知识库搜索侧边栏 i18n 缺失**：`nav.knowledgeSearch` 键未定义
+
+  ### 🔧 修复
+
+  1. **跨平台原生模块**：
+     - 添加 `postinstall` 脚本：`npm rebuild` 在 `dist/server/` 中为目标平台重新编译原生模块
+     - 生成 `dist/server/package.json`（35 个运行时依赖），供 `npm rebuild` 使用
+     - macOS/Windows/Linux 均可正常使用
+  2. **tree-sitter 版本**：使用 `^0.22.0`，配合 `postinstall` 的 `npm rebuild` 确保原生模块正确构建
+  3. **i18n 补齐**：zh-CN.json 和 en-US.json 添加 `nav.knowledgeSearch` 键
+
+  ### ✅ 验证
+
+  - 252 测试全部通过
+  - macOS 本地所有页面 HTTP 200
+  - Windows `npm rebuild` 自动构建原生模块
+
 ## 2.1.6
 
 ### Patch Changes
