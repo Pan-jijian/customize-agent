@@ -1,5 +1,18 @@
 # customize-agent
 
+## 2.1.8
+
+### Patch Changes
+
+- ## ✨ 内容区域自适应宽度 + 响应式断点优化
+
+  ### 变更
+
+  - 移除 `.mainInner` 固定 `max-width: 1480px`，内容填充整个可用宽度
+  - 内边距改用 `clamp(16px, 2.5vw, 40px)` 流式响应
+  - 新增 640px / 860px / 1024px 三档响应式断点
+  - 侧边栏、顶栏、内容区均适配桌面/平板/手机
+
 ## 2.1.7
 
 ### Patch Changes
