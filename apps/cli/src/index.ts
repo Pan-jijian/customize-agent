@@ -304,11 +304,24 @@ program.action(async () => {
   }
 
   registerCleanup();
-  const dashboardPort = 17321;
+  const dashboardPort = Number(process.env.CUSTOMIZE_DASHBOARD_PORT || 17321);
   const dashboardReady = await startDashboardInBackground(dashboardPort, chromaClient.baseUrl);
   const dashboardUrl: string | undefined = dashboardReady ? `http://localhost:${dashboardPort}/overview` : undefined;
+  const kbManager = new MultiProjectManager();
+  let kbStatus = '已初始化';
+  const kbInitialized = chromaReady.then(async () => {
+    try {
+      const projectKb = await kbManager.getProject(PROJECT_ROOT);
+      await projectKb.incrementalIndex();
+      await kbManager.getGlobalKB();
+      kbStatus = '已初始化';
+    } catch {
+      kbStatus = '已初始化';
+    }
+  });
 
   if (process.env.CUSTOMIZE_AGENT_E2E_DASHBOARD === '1') {
+    await kbInitialized;
     console.log(dashboardReady ? `Dashboard ready: ${dashboardUrl}` : 'Dashboard still starting');
     await new Promise(() => setInterval(() => undefined, 60_000));
   }
@@ -323,18 +336,6 @@ program.action(async () => {
     : await createExecutor(PROJECT_ROOT, i18n, undefined, undefined, undefined, lsp);
 
   const memory = new MemoryManager();
-  const kbManager = new MultiProjectManager();
-  let kbStatus = '已初始化';
-  void chromaReady.then(async () => {
-    try {
-      const projectKb = await kbManager.getProject(PROJECT_ROOT);
-      await projectKb.incrementalIndex();
-      await kbManager.getGlobalKB();
-      kbStatus = '已初始化';
-    } catch {
-      kbStatus = '已初始化';
-    }
-  });
   const repl = new Repl({
 
     executor,
