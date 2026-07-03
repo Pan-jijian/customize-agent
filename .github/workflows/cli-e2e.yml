@@ -42,26 +42,7 @@ jobs:
         shell: bash
         run: |
           export HOME="$RUNNER_TEMP/home"
-          CUSTOMIZE_AGENT_E2E_DASHBOARD=1 node "$RUNNER_TEMP/install-root/node_modules/customize-agent/dist/index.js" > "$RUNNER_TEMP/cli.log" 2>&1 &
-          cli_pid=$!
-          if ! node apps/cli/scripts/ci-check-dashboard.cjs; then
-            echo "::group::cli.log"
-            test -f "$RUNNER_TEMP/cli.log" && cat "$RUNNER_TEMP/cli.log" || true
-            echo "::endgroup::"
-            echo "::group::customize-agent logs"
-            for f in "$HOME"/.customize-agent/logs/*.log; do
-              test -f "$f" || continue
-              echo "--- $f ---"
-              cat "$f"
-            done
-            echo "::endgroup::"
-            echo "::group::server files"
-            node -e "const fs=require('fs'),path=require('path');const root=path.join(process.env.HOME,'.customize-agent','server');function walk(d,n=0){if(n>2||!fs.existsSync(d))return;for(const e of fs.readdirSync(d,{withFileTypes:true}).slice(0,200)){console.log('  '.repeat(n)+e.name+(e.isDirectory()?'/':''));if(e.isDirectory())walk(path.join(d,e.name),n+1)}}walk(root)"
-            echo "::endgroup::"
-            kill "$cli_pid" 2>/dev/null || true
-            exit 1
-          fi
-          kill "$cli_pid" 2>/dev/null || true
+          node apps/cli/scripts/ci-run-dashboard-e2e.cjs "$RUNNER_TEMP/install-root/node_modules/customize-agent/dist/index.js"
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
