@@ -157,6 +157,7 @@ for (const depName of Object.keys(serverPkg.dependencies ?? {})) {
   cpSync(src, dest, { recursive: true, dereference: true });
   console.log('[bundle-server] Bundled web runtime dependency ' + depName);
 }
+ensureVendorPackage(bundleVendorModules, 'styled-jsx', resolve(monorepoRoot, 'node_modules', '.pnpm'));
 
 // Generate package.json with all runtime dependencies
 function generateServerPackageJson(destDir) {
