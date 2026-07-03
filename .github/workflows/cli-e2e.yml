@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           export HOME="$RUNNER_TEMP/home"
-          node "$RUNNER_TEMP/install-root/node_modules/customize-agent/dist/index.js" > "$RUNNER_TEMP/cli.log" 2>&1 &
+          CUSTOMIZE_AGENT_E2E_DASHBOARD=1 node "$RUNNER_TEMP/install-root/node_modules/customize-agent/dist/index.js" > "$RUNNER_TEMP/cli.log" 2>&1 &
           cli_pid=$!
           if ! node apps/cli/scripts/ci-check-dashboard.cjs; then
             echo "::group::cli.log"
