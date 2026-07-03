@@ -2,7 +2,7 @@
 // ↑ shebang — 必须保留。让操作系统知道用 Node.js 执行此文件，CLI 的 bin 入口依赖它。
 import { Command } from 'commander';
 import { execSync } from 'child_process';
-import { cpSync, mkdirSync, readFileSync, rmSync } from 'fs';
+import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -79,46 +79,6 @@ async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
   }
 }
 
-function setupDashboardServerIfNeeded(existsSync: (path: string) => boolean): void {
-  const bundleDir = resolve(CLI_DIR, 'server-bundle');
-  const targetDir = join(homedir(), '.customize-agent', 'server');
-  const bundleBuildIdPath = resolve(bundleDir, 'apps', 'server', '.next', 'BUILD_ID');
-  if (!existsSync(resolve(bundleDir, '.dashboard-bundled')) || !existsSync(bundleBuildIdPath)) return;
-  try {
-    const bundleBuildId = readFileSync(bundleBuildIdPath, 'utf8').trim();
-    const targetBuildIdPath = resolve(targetDir, 'apps', 'server', '.next', 'BUILD_ID');
-    const targetBuildId = existsSync(targetBuildIdPath) ? readFileSync(targetBuildIdPath, 'utf8').trim() : '';
-    const runtimeModules = resolve(targetDir, 'node_modules');
-    const runtimeThemeModule = resolve(runtimeModules, 'next-themes', 'package.json');
-    if (bundleBuildId === targetBuildId && existsSync(runtimeThemeModule)) return;
-    if (bundleBuildId !== targetBuildId && existsSync(targetDir)) rmSync(targetDir, { recursive: true, force: true });
-    mkdirSync(targetDir, { recursive: true });
-    cpSync(bundleDir, targetDir, { recursive: true, dereference: true });
-    const vendorModules = resolve(targetDir, 'vendor_modules');
-    if (existsSync(vendorModules)) {
-      cpSync(vendorModules, runtimeModules, { recursive: true, dereference: true, force: true });
-    }
-  } catch {
-    // Dashboard setup must not block CLI startup.
-  }
-}
-
-function findDashboardServerDir(existsSync: (path: string) => boolean): string | null {
-  setupDashboardServerIfNeeded(existsSync);
-
-  // Primary: ~/.customize-agent/server/ (outside npm dir, no EBUSY risk)
-  // Fallback: bundled seed in dist/server-bundle/ (first run before setup)
-  // Fallback: monorepo dev paths
-  const candidates = [
-    { dir: join(homedir(), '.customize-agent', 'server'), marker: '.dashboard-bundled' },
-    { dir: resolve(CLI_DIR, 'server-bundle'), marker: '.dashboard-bundled' },
-    { dir: resolve(CLI_DIR, 'server'), marker: '.dashboard-bundled' },
-    { dir: resolve(CLI_DIR, '../../../apps/server'), marker: 'package.json' },
-    { dir: resolve(process.cwd(), 'apps/server'), marker: 'package.json' },
-  ];
-  return candidates.find(c => existsSync(resolve(c.dir, c.marker)))?.dir ?? null;
-}
-
 async function runtimeLogFile(name: string, port: number) {
   const { mkdirSync, openSync } = await import('fs');
   const { join } = await import('path');
@@ -139,73 +99,38 @@ async function dashboardLogFile(port: number) {
   return runtimeLogFile('dashboard', port);
 }
 
-async function fetchDashboardHealth(port: number): Promise<{ buildId?: string | null; pid?: number } | undefined> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 2000);
-  try {
-    const response = await fetch(`http://localhost:${port}/api/health`, { signal: controller.signal });
-    if (!response.ok) return undefined;
-    return await response.json() as { buildId?: string | null; pid?: number };
-  } catch {
-    return undefined;
-  } finally {
-    clearTimeout(timeout);
-  }
+function dashboardRunnerPath(): string {
+  return resolve(CLI_DIR, 'bin', process.platform === 'win32' ? 'dashboard-runner.exe' : 'dashboard-runner');
 }
 
 async function startDashboardInBackground(port: number, chromaUrl: string): Promise<boolean> {
   try {
-    const { spawn } = await import('child_process');
-    const { existsSync, closeSync, readFileSync } = await import('fs');
-    const serverDir = findDashboardServerDir(existsSync);
-    if (!serverDir) return false;
-    const isBundled = existsSync(resolve(serverDir, '.dashboard-bundled'));
-    const bundledRoot = isBundled ? resolve(serverDir, 'apps', 'server') : serverDir;
-    const buildIdPath = resolve(bundledRoot, '.next', 'BUILD_ID');
-    if (!existsSync(buildIdPath)) return false;
-    const localBuildId = readFileSync(buildIdPath, 'utf8').trim();
-    const health = await fetchDashboardHealth(port);
-    if (health?.buildId === localBuildId) return true;
-    if (health?.pid && health.pid !== process.pid) {
-      try { process.kill(health.pid); } catch { /* ignore stale dashboard */ }
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-    await stopProcessListeningOnPort(port);
-
+    const { execFile } = await import('child_process');
+    const { closeSync, existsSync } = await import('fs');
+    const runner = dashboardRunnerPath();
+    const bundleDir = resolve(CLI_DIR, 'server-bundle');
+    const targetDir = join(homedir(), '.customize-agent', 'server');
+    if (!existsSync(runner) || !existsSync(resolve(bundleDir, '.dashboard-bundled'))) return false;
     const logFile = await dashboardLogFile(port);
-    const cliNodeModules = resolve(CLI_DIR, '..', '..');
-    const serverVendorModules = resolve(serverDir, 'vendor_modules');
-    const nodePathEntries = [serverVendorModules, cliNodeModules];
-    if (process.env.NODE_PATH) nodePathEntries.push(process.env.NODE_PATH);
-    const commonEnv = {
-      ...process.env,
-      PORT: String(port),
-      NODE_ENV: 'production',
-      CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT,
-      CHROMA_URL: chromaUrl,
-      NODE_PATH: nodePathEntries.join(process.platform === 'win32' ? ';' : ':'),
-    };
-    if (isBundled) {
-      const serverEntry = resolve(serverDir, 'apps', 'server', 'server.js');
-      const proc = spawn(process.execPath, [serverEntry], { cwd: resolve(serverDir), stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true });
-      if (proc.pid) spawnedPids.add(proc.pid);
-      proc.unref();
-    } else {
-      const nextCli = resolve(serverDir, 'node_modules', 'next', 'dist', 'bin', 'next');
-      const proc = spawn(process.execPath, [nextCli, 'start', '-p', String(port)], { cwd: serverDir, stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true });
-      if (proc.pid) spawnedPids.add(proc.pid);
-      proc.unref();
-    }
-
     closeSync(logFile.fd);
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      const nextHealth = await fetchDashboardHealth(port);
-      if (nextHealth?.buildId === localBuildId) return true;
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-    return false;
+    return await new Promise(resolveReady => {
+      execFile(runner, [
+        'start',
+        '--bundle', bundleDir,
+        '--target', targetDir,
+        '--port', String(port),
+        '--project-root', PROJECT_ROOT,
+        '--chroma-url', chromaUrl,
+        '--node', process.execPath,
+        '--log', logFile.logPath,
+        '--timeout-ms', '60000',
+      ], (error, stdout) => {
+        const pid = stdout.match(/pid=(\d+)/)?.[1];
+        if (pid) spawnedPids.add(Number(pid));
+        resolveReady(!error);
+      });
+    });
   } catch {
-    // Dashboard startup is a background convenience and must never block the CLI.
     return false;
   }
 }

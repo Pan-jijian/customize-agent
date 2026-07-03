@@ -42,11 +42,33 @@ jobs:
         shell: bash
         run: |
           export HOME="$RUNNER_TEMP/home"
-          node apps/cli/scripts/ci-run-dashboard-e2e.cjs "$RUNNER_TEMP/install-root/node_modules/customize-agent"
+          package_root="$RUNNER_TEMP/install-root/node_modules/customize-agent"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            runner="$package_root/dist/bin/dashboard-runner.exe"
+          else
+            runner="$package_root/dist/bin/dashboard-runner"
+          fi
+          "$runner" run \
+            --bundle "$package_root/dist/server-bundle" \
+            --target "$HOME/.customize-agent/server" \
+            --port 17321 \
+            --project-root "$PWD" \
+            --chroma-url http://127.0.0.1:17322 \
+            --node "$(command -v node)" \
+            --log "$RUNNER_TEMP/dashboard.log" \
+            --timeout-ms 240000
+      - name: Verify upload parsing chunking and Chroma indexing
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          node apps/cli/test/upload-matrix.cjs "$RUNNER_TEMP/install-root/node_modules/customize-agent"
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: cli-e2e-logs-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/cli.log
+            ${{ runner.temp }}/dashboard.log
+            ${{ runner.temp }}/upload-dashboard.log
+            ${{ runner.temp }}/upload-chroma.log
             ${{ runner.temp }}/home/.customize-agent/logs/**
