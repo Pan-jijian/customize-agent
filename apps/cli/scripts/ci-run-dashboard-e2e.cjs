@@ -1,10 +1,10 @@
 const { spawn } = require('child_process');
-const { existsSync, readdirSync, readFileSync } = require('fs');
-const { join } = require('path');
+const { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } = require('fs');
+const { join, resolve } = require('path');
 
-const cliEntry = process.argv[2];
-if (!cliEntry) {
-  console.error('Usage: node ci-run-dashboard-e2e.cjs <cli-entry>');
+const packageRoot = process.argv[2];
+if (!packageRoot) {
+  console.error('Usage: node ci-run-dashboard-e2e.cjs <installed-package-root>');
   process.exit(1);
 }
 
@@ -71,17 +71,35 @@ async function verifyDashboard() {
 
 (async () => {
   const home = process.env.HOME;
-  const cliLog = join(process.env.RUNNER_TEMP || process.cwd(), 'cli.log');
-  const proc = spawn(process.execPath, [cliEntry], {
+  const tempRoot = process.env.RUNNER_TEMP || process.cwd();
+  const serverDir = join(home, '.customize-agent', 'server');
+  const bundleDir = resolve(packageRoot, 'dist', 'server-bundle');
+  const cliLog = join(tempRoot, 'cli.log');
+
+  rmSync(serverDir, { recursive: true, force: true });
+  mkdirSync(serverDir, { recursive: true });
+  cpSync(bundleDir, serverDir, { recursive: true, dereference: true });
+  cpSync(resolve(serverDir, 'vendor_modules'), resolve(serverDir, 'node_modules'), { recursive: true, dereference: true, force: true });
+
+  const proc = spawn(process.execPath, [resolve(serverDir, 'apps', 'server', 'server.js')], {
+    cwd: serverDir,
     stdio: ['ignore', require('fs').openSync(cliLog, 'a'), require('fs').openSync(cliLog, 'a')],
-    env: { ...process.env, CUSTOMIZE_AGENT_E2E_DASHBOARD: '1' },
+    env: {
+      ...process.env,
+      PORT: '17321',
+      NODE_ENV: 'production',
+      CUSTOMIZE_PROJECT_ROOT: process.cwd(),
+      CHROMA_URL: 'http://127.0.0.1:17322',
+      NODE_PATH: resolve(serverDir, 'node_modules'),
+    },
     detached: false,
   });
+
   let exitCode = 1;
   try {
     await Promise.race([
       verifyDashboard(),
-      new Promise((_, reject) => proc.on('exit', (code, signal) => reject(new Error(`CLI exited code=${code} signal=${signal}`)))),
+      new Promise((_, reject) => proc.on('exit', (code, signal) => reject(new Error(`Dashboard exited code=${code} signal=${signal}`)))),
     ]);
     exitCode = 0;
   } catch (error) {
