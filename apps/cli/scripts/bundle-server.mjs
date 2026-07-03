@@ -20,7 +20,13 @@ function materializeSymlinks(dir) {
     const full = resolve(dir, entry);
     const stat = lstatSync(full);
     if (stat.isSymbolicLink()) {
-      const real = realpathSync(full);
+      let real;
+      try {
+        real = realpathSync(full);
+      } catch {
+        rmSync(full, { recursive: true, force: true });
+        continue;
+      }
       rmSync(full, { recursive: true, force: true });
       cpSync(real, full, { recursive: true, dereference: true });
       if (lstatSync(full).isDirectory()) materializeSymlinks(full);
@@ -158,6 +164,7 @@ for (const depName of Object.keys(serverPkg.dependencies ?? {})) {
   console.log('[bundle-server] Bundled web runtime dependency ' + depName);
 }
 ensureVendorPackage(bundleVendorModules, 'styled-jsx', resolve(monorepoRoot, 'node_modules', '.pnpm'));
+materializeSymlinks(bundleVendorModules);
 
 // Generate package.json with all runtime dependencies
 function generateServerPackageJson(destDir) {
