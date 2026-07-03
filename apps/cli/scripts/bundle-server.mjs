@@ -159,11 +159,30 @@ cpSync(resolve(destDir, 'node_modules'), vendorDir, { recursive: true, dereferen
 materializePnpmEntrypoints(vendorDir);
 fixPdfjsWorker(vendorDir);
 
-// Ensure OCR/Canvas packages (only dynamically imported, excluded by Next.js standalone)
+// 自动打包所有 workspace 包的外部依赖（包括动态 import 的）
+// 读取 knowledge/search/tools 包的 package.json，将其所有 dependencies 复制到 vendor
 const monorepoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
 const rootPnpm = resolve(monorepoRoot, 'node_modules', '.pnpm');
-ensureVendorPackage(vendorDir, 'tesseract.js', rootPnpm);
-ensureVendorPackage(vendorDir, '@napi-rs/canvas', rootPnpm);
+
+function ensureWorkspaceDeps(packageDir, vendorDir, rootPnpm) {
+  const pkgJsonPath = resolve(packageDir, 'package.json');
+  if (!existsSync(pkgJsonPath)) return;
+  const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf-8'));
+  const deps = Object.keys(pkg.dependencies ?? {});
+  for (const dep of deps) {
+    // 跳过 workspace 内部包（@customize-agent/*）
+    if (dep.startsWith('@customize-agent/')) continue;
+    ensureVendorPackage(vendorDir, dep, rootPnpm);
+  }
+}
+
+const packagesDir = resolve(monorepoRoot, 'packages');
+ensureWorkspaceDeps(resolve(packagesDir, 'knowledge'), vendorDir, rootPnpm);
+ensureWorkspaceDeps(resolve(packagesDir, 'search'), vendorDir, rootPnpm);
+ensureWorkspaceDeps(resolve(packagesDir, 'tools'), vendorDir, rootPnpm);
+
+// CLI 子进程依赖
+ensureVendorPackage(vendorDir, 'chromadb', rootPnpm);
 
 rmSync(resolve(destDir, 'node_modules'), { recursive: true, force: true });
 

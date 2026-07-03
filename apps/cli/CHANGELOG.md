@@ -1,5 +1,30 @@
 # customize-agent
 
+## 2.1.5
+
+### Patch Changes
+
+- ## 🐛 修复 Web 服务 Internal Server Error — 自动打包所有依赖
+
+  ### 🔍 根因
+
+  `bundle-server.mjs` 只手动复制了 `tesseract.js` 和 `@napi-rs/canvas` 两个动态依赖，遗漏了 knowledge/search/tools 包的其他外部依赖（tree-sitter 系列、mammoth、xlsx、jszip、pdf-parse、chromadb 等 20+ 个包），导致 vendor 目录缺失关键模块，服务端 require 失败。
+
+  ### 🔧 修复
+
+  `bundle-server.mjs` 改为**自动读取 knowledge/search/tools 包的 package.json**，将其所有 `dependencies`（排除 `@customize-agent/*` workspace 内部包）批量复制到 vendor 目录。新增 `ensureWorkspaceDeps()` 函数，未来新增依赖无需手动维护打包脚本。
+
+  ### 📦 vendor 包数量
+
+  - 修复前：27 个包
+  - 修复后：50 个包（新增 23 个缺失依赖）
+
+  ### ✅ 验证
+
+  - 所有 API 端点正常（/api/health、/overview、/api/kb/stats、/api/kb/features、/api/config/providers）
+  - TypeScript 编译通过
+  - 252 测试全部通过
+
 ## 2.1.4
 
 ### Patch Changes
