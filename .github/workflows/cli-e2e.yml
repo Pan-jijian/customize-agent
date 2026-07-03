@@ -24,6 +24,9 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install --frozen-lockfile
+      - name: Build workspace packages
+        shell: bash
+        run: pnpm --filter "./packages/**" build 2>&1 | tee "$RUNNER_TEMP/packages-build.log"
       - name: Build server dashboard
         shell: bash
         run: pnpm --filter server build 2>&1 | tee "$RUNNER_TEMP/server-build.log"
@@ -73,6 +76,7 @@ jobs:
         with:
           name: cli-e2e-logs-${{ matrix.os }}
           path: |
+            ${{ runner.temp }}/packages-build.log
             ${{ runner.temp }}/server-build.log
             ${{ runner.temp }}/cli-build.log
             ${{ runner.temp }}/cli.log
