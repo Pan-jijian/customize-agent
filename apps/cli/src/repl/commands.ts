@@ -12,6 +12,8 @@ export function buildDefaultCommands(i18n: I18nManager): ReplCommandInfo[] {
     { name: '/resume', desc: i18n.t('help.resume') },
     { name: '/clear', desc: i18n.t('help.clear') },
     { name: '/reset', desc: i18n.t('help.clear') },
+    { name: '/compact', desc: i18n.t('help.compact') },
+    { name: '/context', desc: i18n.t('help.context') },
     { name: '/sessions', desc: i18n.t('help.sessions') },
     { name: '/history', desc: i18n.t('help.sessions') },
     { name: '/model', desc: i18n.t('help.model') },

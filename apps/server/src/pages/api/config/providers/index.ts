@@ -3,6 +3,7 @@ import { getConfigStore } from '@/services/configService';
 import { detectProtocol } from '@customize-agent/runtime';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (!['GET', 'POST'].includes(req.method!)) return res.status(405).json({ error: 'Method not allowed' });
   try {
     const store = getConfigStore();
     if (req.method === 'POST') {
@@ -20,5 +21,5 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
     const config = store.load();
     res.status(200).json(Object.entries(config.providers).map(([name, cfg]) => ({ name, apiKey: cfg.apiKey ? '••••' + cfg.apiKey.slice(-4) : undefined, baseUrl: cfg.baseUrl, protocol: cfg.protocol, detectedProtocol: detectProtocol(name), hasApiKey: !!cfg.apiKey })));
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+  } catch (e: unknown) { console.error('[api] config/providers', e); res.status(500).json({ error: 'Internal server error' }); }
 }

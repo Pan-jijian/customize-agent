@@ -6,12 +6,18 @@ const startTime = Date.now();
 const buildIdPath = join(process.cwd(), '.next', 'BUILD_ID');
 const processBuildId = existsSync(buildIdPath) ? readFileSync(buildIdPath, 'utf-8').trim() : null;
 
-export default function handler(_req: NextApiRequest, res: NextApiResponse) {
-  res.status(200).json({
-    status: 'ok',
-    uptime: Date.now() - startTime,
-    timestamp: new Date().toISOString(),
-    buildId: processBuildId,
-    pid: process.pid,
-  });
+export default function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+  try {
+    res.status(200).json({
+      status: 'ok',
+      uptime: Date.now() - startTime,
+      timestamp: new Date().toISOString(),
+      buildId: processBuildId,
+      pid: process.pid,
+    });
+  } catch (e: unknown) {
+    console.error('[api] health', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 }

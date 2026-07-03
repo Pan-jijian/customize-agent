@@ -1,9 +1,15 @@
 {
   "name": "@customize-agent/types",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "跨包类型契约层",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",

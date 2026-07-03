@@ -1,3 +1,4 @@
+// @deprecated — Session types are not currently used by any consumer. Keep for future session management.
 // @customize-agent/types — 会话类型
 
 import type { Message } from './message.js';

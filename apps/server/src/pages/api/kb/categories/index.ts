@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
   try {
     const kb = getMultiProjectManager();
     const projectRoot = (req.query.projectRoot as string) || getProjectRoot();
@@ -17,5 +18,5 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
     const result = Object.entries(cats).map(([category, stats]) => ({ category, ...stats }));
     res.status(200).json(result);
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+  } catch (e: unknown) { console.error('[api] kb/categories', e); res.status(500).json({ error: 'Internal server error' }); }
 }

@@ -20,6 +20,7 @@ export type AgentEvent =
   | { type: 'llm_response'; content: string; usage?: { promptTokens: number; completionTokens: number } }
   | { type: 'user_message'; text: string }
   | { type: 'tool_call_preview'; toolName: string; args: Record<string, unknown>; elapsedMs?: number }
+  | { type: 'tool_preview_end' }
   | { type: 'approval_request'; toolName: string; args: Record<string, unknown> }
   | { type: 'approval_response'; toolName: string; approved: boolean };
 
@@ -27,6 +28,9 @@ export interface RunTaskOptions {
   readonly?: boolean;
   plan?: boolean;
   onWrite?: (text: string) => void;
+  setLiveStatus?: (lines: string | string[]) => void;
+  clearLiveStatus?: () => void;
+  commitStatus?: (lines: string | string[]) => void;
   onEvent?: (event: AgentEvent) => void;
   drainUserInput?: () => Array<string | { content: string; display: string }>;
   signal?: AbortSignal;
@@ -204,7 +208,11 @@ export class AgentExecutor {
       // ── 每轮主动检查上下文 ──
       await this._maybeCompact(working);
 
-      const response = await this._callLLM(working, tools, options?.signal, emitToolCallPreview);
+      const response = await this._callLLM(working, tools, options?.signal, emitToolCallPreview, {
+        setLiveStatus: options?.setLiveStatus,
+        clearLiveStatus: options?.clearLiveStatus,
+        commitStatus: options?.commitStatus,
+      });
       if (options?.signal?.aborted) break;
       // 累加 token（任务结束时统一输出一行汇总）
       let costThisRound = 0;
@@ -234,7 +242,11 @@ export class AgentExecutor {
         name => this.i18n?.toolLabel(name) ?? name,
         this.i18n?.t('tool.count_label') ?? 'tools',
         args => this._formatArg(args),
+        options?.setLiveStatus,
+        options?.commitStatus,
       );
+
+      this._emit({ type: 'tool_preview_end' });
 
       for (const tc of response.toolCalls) {
         if (options?.signal?.aborted) break;
@@ -275,7 +287,7 @@ export class AgentExecutor {
       if (!options?.signal?.aborted) foldTracker.flush();
       if (options?.signal?.aborted) break;
 
-      if (this.controller) {
+      if (this.controller && response.toolCalls && response.toolCalls.length > 0) {
         const lastTc = response.toolCalls[response.toolCalls.length - 1]!;
         const lastResult = working[working.length - 1]?.content ?? '';
         const evalResult = await this.controller.evaluate(
@@ -363,12 +375,14 @@ export class AgentExecutor {
     tools: FunctionDefinition[],
     signal?: AbortSignal,
     onToolCall?: (tc: ToolCall) => void,
+    live?: Pick<RunTaskOptions, 'setLiveStatus' | 'clearLiveStatus' | 'commitStatus'>,
   ): Promise<{ content: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } }> {
     const opts = { tools, signal };
-    if (this.stream) return this._streamChat(messages, tools, signal, onToolCall);
-    const spin = spinnerStart(this.i18n?.t('stream.thinking'), text => this._write(text));
+    if (this.stream) return this._streamChat(messages, tools, signal, onToolCall, live);
+    const spin = spinnerStart(this.i18n?.t('stream.thinking'), text => (live?.setLiveStatus ?? this._write.bind(this))(text));
     const response = await this.provider.chat(messages, { ...opts });
     spin.stop();
+    live?.clearLiveStatus?.();
     const displayContent = response.content.trim();
     if (displayContent) this._write(renderMarkdown(displayContent) + '\n');
     return { content: response.content, toolCalls: response.toolCalls, usage: response.usage };
@@ -379,6 +393,7 @@ export class AgentExecutor {
     tools: FunctionDefinition[],
     signal?: AbortSignal,
     onToolCall?: (tc: ToolCall) => void,
+    live?: Pick<RunTaskOptions, 'setLiveStatus' | 'clearLiveStatus' | 'commitStatus'>,
   ): Promise<{ content: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } }> {
     return streamChat({
       provider: this.provider,
@@ -387,6 +402,9 @@ export class AgentExecutor {
       signal,
       i18n: this.i18n,
       write: text => this._write(text),
+      setLiveStatus: live?.setLiveStatus,
+      clearLiveStatus: live?.clearLiveStatus,
+      commitStatus: live?.commitStatus,
       onToolCall,
       onThinkingContent: content => { this._lastThinkingContent = content; },
     });

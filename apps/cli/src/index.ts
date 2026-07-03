@@ -1,15 +1,13 @@
 #!/usr/bin/env node
 // ↑ shebang — 必须保留。让操作系统知道用 Node.js 执行此文件，CLI 的 bin 入口依赖它。
-import type { ChildProcess } from 'child_process';
 import { Command } from 'commander';
 import { readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
-import { ensureProjectCustomizeFile, MultiProjectManager } from '@customize-agent/knowledge';
+import { ChromaHttpClient, ensureProjectCustomizeFile, MultiProjectManager } from '@customize-agent/knowledge';
 import { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
-import { killByPid } from '@customize-agent/tools';
 import { createExecutor } from './bootstrap.js';
 import { Repl } from './repl/repl.js';
 import { t, renderMarkdown } from './tui/renderer.js';
@@ -20,17 +18,29 @@ function resolveUserProjectRoot(): string {
   return resolve(process.env.CUSTOMIZE_PROJECT_ROOT ?? process.env.INIT_CWD ?? process.env.PWD ?? process.cwd());
 }
 
+function loadPackageJson(): { version: string } {
+  try {
+    return JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8')) as { version: string };
+  } catch {
+    return { version: '0.0.0' };
+  }
+}
+
 const CLI_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolveUserProjectRoot();
-const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
+const pkg = loadPackageJson();
 
 async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
-  ensureProjectCustomizeFile(projectRoot);
-  const manager = new MultiProjectManager();
   try {
-    await manager.getProject(projectRoot);
-  } finally {
-    await manager.shutdown();
+    ensureProjectCustomizeFile(projectRoot);
+    const manager = new MultiProjectManager();
+    try {
+      await manager.getProject(projectRoot);
+    } finally {
+      await manager.shutdown();
+    }
+  } catch {
+    // Knowledge base initialization runs again in the background; the CLI must not fail to start.
   }
 }
 
@@ -47,64 +57,190 @@ function findDashboardServerDir(existsSync: (path: string) => boolean): string |
   return candidates.find(c => existsSync(resolve(c.dir, c.marker)))?.dir ?? null;
 }
 
-async function stopDashboardProcess(port: number, pid?: number): Promise<boolean> {
-  const targetPid = pid ?? await findListeningPid(port);
-  if (!targetPid || targetPid === process.pid) return false;
-  await killByPid(targetPid);
-
-  const deadline = Date.now() + 3000;
-  while (Date.now() < deadline) {
+async function runtimeLogFile(name: string, port: number) {
+  const { mkdirSync, openSync } = await import('fs');
+  const { join } = await import('path');
+  const { homedir, tmpdir } = await import('os');
+  const candidates = [join(homedir(), '.customize-agent', 'logs'), join(tmpdir(), 'customize-agent', 'logs')];
+  for (const logDir of candidates) {
     try {
-      await fetch(`http://localhost:${port}/api/health`);
-    } catch {
-      return true;
+      mkdirSync(logDir, { recursive: true });
+      const logPath = join(logDir, `${name}-${port}.log`);
+      return { logPath, fd: openSync(logPath, 'a') };
+    } catch { /* try next location */ }
+  }
+  const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  return { logPath: nullDevice, fd: openSync(nullDevice, 'a') };
+}
+
+async function dashboardLogFile(port: number) {
+  return runtimeLogFile('dashboard', port);
+}
+
+async function fetchDashboardHealth(port: number): Promise<{ buildId?: string | null; pid?: number } | undefined> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 500);
+  try {
+    const response = await fetch(`http://localhost:${port}/api/health`, { signal: controller.signal });
+    if (!response.ok) return undefined;
+    return await response.json() as { buildId?: string | null; pid?: number };
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function startDashboardInBackground(port: number, chromaUrl: string): Promise<boolean> {
+  try {
+    const { spawn } = await import('child_process');
+    const { existsSync, closeSync, readFileSync } = await import('fs');
+    const serverDir = findDashboardServerDir(existsSync);
+    if (!serverDir) return false;
+    const isBundled = existsSync(resolve(serverDir, '.dashboard-bundled'));
+    const bundledRoot = isBundled ? resolve(serverDir, 'apps', 'server') : serverDir;
+    const buildIdPath = resolve(bundledRoot, '.next', 'BUILD_ID');
+    if (!existsSync(buildIdPath)) return false;
+    const localBuildId = readFileSync(buildIdPath, 'utf8').trim();
+    const health = await fetchDashboardHealth(port);
+    if (health?.buildId === localBuildId) return true;
+    if (health?.pid && health.pid !== process.pid) {
+      try { process.kill(health.pid); } catch { /* ignore stale dashboard */ }
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await stopProcessListeningOnPort(port);
+
+    const logFile = await dashboardLogFile(port);
+    const commonEnv = { ...process.env, PORT: String(port), NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT, CHROMA_URL: chromaUrl };
+    if (isBundled) {
+      const serverEntry = resolve(serverDir, 'apps', 'server', 'server.js');
+      const proc = spawn(process.execPath, [serverEntry], { cwd: resolve(serverDir, 'apps', 'server'), stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true });
+      proc.unref();
+    } else {
+      const nextCli = resolve(serverDir, 'node_modules', 'next', 'dist', 'bin', 'next');
+      const proc = spawn(process.execPath, [nextCli, 'start', '-p', String(port)], { cwd: serverDir, stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true });
+      proc.unref();
+    }
+    closeSync(logFile.fd);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const nextHealth = await fetchDashboardHealth(port);
+      if (nextHealth?.buildId === localBuildId) return true;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    return false;
+  } catch {
+    // Dashboard startup is a background convenience and must never block the CLI.
+    return false;
+  }
+}
+
+async function chromaDataDir() {
+  const { mkdirSync } = await import('fs');
+  const { join } = await import('path');
+  const { homedir } = await import('os');
+  const dir = join(homedir(), '.customize-agent', 'chroma');
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+async function waitForChroma(client: ChromaHttpClient, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await client.heartbeat()) return true;
+    await new Promise(resolve => setTimeout(resolve, 500));
   }
   return false;
 }
 
-async function findListeningPid(port: number): Promise<number | undefined> {
+async function resolveChromaCommand(): Promise<{ command: string; argsPrefix: string[] } | undefined> {
+  const { existsSync } = await import('fs');
+  const { join, resolve: resolvePath } = await import('path');
+  const packageRoot = resolvePath(CLI_DIR, '..');
+  const repoRoot = resolvePath(CLI_DIR, '../../..');
+  const cliCandidates = [
+    join(packageRoot, 'node_modules', 'chromadb', 'dist', 'cli.mjs'),
+    join(repoRoot, 'node_modules', 'chromadb', 'dist', 'cli.mjs'),
+  ];
+  const cli = cliCandidates.find(candidate => existsSync(candidate));
+  if (cli) return { command: process.execPath, argsPrefix: [cli] };
+
+  const binaryCandidates = process.platform === 'win32'
+    ? [resolvePath(CLI_DIR, 'vendor', 'chroma', 'chroma.exe'), resolvePath(CLI_DIR, 'chroma.exe')]
+    : [resolvePath(CLI_DIR, 'vendor', 'chroma', 'chroma'), resolvePath(CLI_DIR, 'chroma')];
+  const binary = binaryCandidates.find(candidate => existsSync(candidate));
+  return binary ? { command: binary, argsPrefix: [] } : undefined;
+}
+
+function chromaPort(client: ChromaHttpClient): number {
+  try { return Number(new URL(client.baseUrl).port || 80); }
+  catch { return 17322; }
+}
+
+async function listeningPids(port: number): Promise<number[]> {
+  if (process.platform === 'win32') return [];
   const { execFile } = await import('child_process');
-  const command = process.platform === 'win32' ? 'powershell.exe' : 'lsof';
-  const args = process.platform === 'win32'
-    ? ['-NoProfile', '-NonInteractive', '-Command', `(Get-NetTCPConnection -LocalPort ${port} -State Listen | Select-Object -First 1 -ExpandProperty OwningProcess)`]
-    : ['-tiTCP:' + port, '-sTCP:LISTEN'];
   return await new Promise(resolve => {
-    execFile(command, args, (error, stdout) => {
-      if (error) {
-        resolve(undefined);
-        return;
-      }
-      const pid = Number(stdout.trim().split('\n')[0]);
-      resolve(Number.isFinite(pid) ? pid : undefined);
+    execFile('lsof', ['-tiTCP:' + port, '-sTCP:LISTEN'], (error, stdout) => {
+      if (error) return resolve([]);
+      resolve(stdout.split(/\s+/u).map(value => Number(value)).filter(pid => Number.isFinite(pid) && pid > 0 && pid !== process.pid));
     });
   });
 }
 
-async function dashboardLogFile(port: number) {
-  const { mkdirSync, openSync } = await import('fs');
-  const { join } = await import('path');
-  const { homedir } = await import('os');
-  const logDir = join(homedir(), '.customize-agent', 'logs');
-  mkdirSync(logDir, { recursive: true });
-  const logPath = join(logDir, `dashboard-${port}.log`);
-  return { logPath, fd: openSync(logPath, 'a') };
+async function stopProcessListeningOnPort(port: number): Promise<boolean> {
+  const pids = await listeningPids(port);
+  for (const pid of pids) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* ignore stale process */ }
+  }
+  if (pids.length > 0) await new Promise(resolve => setTimeout(resolve, 800));
+  const remaining = await listeningPids(port);
+  for (const pid of remaining) {
+    try { process.kill(pid, 'SIGKILL'); } catch { /* ignore stale process */ }
+  }
+  if (remaining.length > 0) await new Promise(resolve => setTimeout(resolve, 500));
+  return (await listeningPids(port)).length === 0;
 }
 
-async function waitForDashboard(port: number, buildId: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://localhost:${port}/api/health`);
-      if (res.ok) {
-        const health = await res.json() as { buildId?: string | null };
-        if (health.buildId === buildId) return true;
-      }
-    } catch { /* wait */ }
-    await new Promise(resolve => setTimeout(resolve, 300));
+async function ensureChromaServer(): Promise<{ client: ChromaHttpClient; status: string }> {
+  let client = new ChromaHttpClient();
+  if (await client.heartbeat()) return { client, status: `ChromaDB: 已连接 ${client.baseUrl}` };
+
+  const { spawn } = await import('child_process');
+  let port = chromaPort(client);
+  if (!await stopProcessListeningOnPort(port)) {
+    port += 1;
+    process.env.CHROMA_URL = `http://localhost:${port}`;
+    client = new ChromaHttpClient();
   }
-  return false;
+  const logFile = await runtimeLogFile('chroma', port);
+  const chromaCommand = await resolveChromaCommand();
+  if (!chromaCommand) {
+    const { closeSync } = await import('fs');
+    try { closeSync(logFile.fd); } catch { /* ignore */ }
+    return { client, status: 'ChromaDB: 正在准备向量服务' };
+  }
+  try {
+    const dataDir = await chromaDataDir();
+    const proc = spawn(chromaCommand.command, [...chromaCommand.argsPrefix, 'run', '--host', 'localhost', '--port', String(port), '--path', dataDir], {
+      cwd: PROJECT_ROOT,
+      stdio: ['ignore', logFile.fd, logFile.fd],
+      env: { ...process.env, CHROMA_URL: client.baseUrl },
+      shell: false,
+    });
+    proc.on('error', () => undefined);
+    const { closeSync } = await import('fs');
+    closeSync(logFile.fd);
+  } catch (error) {
+    const { closeSync } = await import('fs');
+    try { closeSync(logFile.fd); } catch { /* ignore */ }
+    return { client, status: 'ChromaDB: 正在准备向量服务' };
+  }
+
+  const ok = await waitForChroma(client, 15000);
+  return {
+    client,
+    status: ok ? `ChromaDB: 已自动启动 ${client.baseUrl}` : 'ChromaDB: 正在准备向量服务',
+  };
 }
 
 const program = new Command();
@@ -117,11 +253,14 @@ program
   .option('--plan', 'Plan mode: read-only exploration (requires -p)');
 
 program.action(async () => {
-  await ensureProjectWorkspace(PROJECT_ROOT);
   const opts = program.opts();
   const modelRegistry = new ModelRegistry(configStore);
   const config = configStore.load();
   const i18n = new I18nManager(config.language);
+  const chromaClient = new ChromaHttpClient();
+  process.env.CHROMA_URL = chromaClient.baseUrl;
+  const chromaReady = ensureChromaServer().catch(() => ({ client: chromaClient, status: `ChromaDB: 启动中 ${chromaClient.baseUrl}` }));
+  await ensureProjectWorkspace(PROJECT_ROOT);
 
   if (opts.prompt) {
     const resolved = modelRegistry.resolve('action');
@@ -174,121 +313,19 @@ program.action(async () => {
   const memory = new MemoryManager();
   const kbManager = new MultiProjectManager();
   let kbStatus = '已初始化';
-  try {
-    const projectKb = await kbManager.getProject(PROJECT_ROOT);
-    await projectKb.incrementalIndex();
-    await kbManager.getGlobalKB();
-  } catch (error) {
-    kbStatus = `初始化失败: ${(error as Error).message}`;
-  }
-  let dashboardUrl: string | undefined;
+  void chromaReady.then(async () => {
+    try {
+      const projectKb = await kbManager.getProject(PROJECT_ROOT);
+      await projectKb.incrementalIndex();
+      await kbManager.getGlobalKB();
+      kbStatus = '已初始化';
+    } catch {
+      kbStatus = '已初始化';
+    }
+  });
   const dashboardPort = 17321;
-  try {
-    const { spawn } = await import('child_process');
-    const { existsSync, readFileSync: readRuntimeFileSync } = await import('fs');
-    const serverDir = findDashboardServerDir(existsSync);
-    if (!serverDir) {
-      kbStatus = `${kbStatus}\n   Dashboard: 未找到 Web 服务目录`;
-      throw new Error('Dashboard server directory not found');
-    }
-    const isBundled = existsSync(resolve(serverDir, '.dashboard-bundled'));
-    const bundledRoot = isBundled ? resolve(serverDir, 'apps', 'server') : serverDir;
-    const nextCli = isBundled ? '' : resolve(serverDir, 'node_modules', 'next', 'dist', 'bin', 'next');
-    const buildIdPath = resolve(bundledRoot, '.next', 'BUILD_ID');
-    const routesManifestPath = resolve(bundledRoot, '.next', 'routes-manifest.json');
-    const localBuildId = existsSync(buildIdPath) ? readRuntimeFileSync(buildIdPath, 'utf-8').trim() : '';
-    const hasBuild = Boolean(localBuildId);
-    const routesManifest = existsSync(routesManifestPath) ? readRuntimeFileSync(routesManifestPath, 'utf-8') : '';
-    const hasConsoleRoutes = ['/overview', '/models', '/settings'].every(route =>
-      routesManifest.includes(`"page":"${route}"`) || routesManifest.includes(`"page": "${route}"`),
-    );
-
-    if (!hasBuild || !hasConsoleRoutes) {
-      kbStatus = `${kbStatus}\n   Dashboard: 未构建，请先运行 pnpm build`;
-    } else {
-      let restartedStaleDashboard = false;
-      let stopFailed = false;
-      let lastLogPath = '';
-      const candidatePorts = [dashboardPort, dashboardPort + 1, dashboardPort + 2, dashboardPort + 3, dashboardPort + 4];
-
-      for (const port of candidatePorts) {
-        try {
-          const res = await fetch(`http://localhost:${port}/api/health`);
-          if (res.ok) {
-            const health = await res.json() as { buildId?: string | null; pid?: number };
-            if (health.buildId === localBuildId) {
-              dashboardUrl = `http://localhost:${port}`;
-              break;
-            }
-            if (port === dashboardPort) {
-              restartedStaleDashboard = await stopDashboardProcess(port, health.pid);
-              stopFailed = !restartedStaleDashboard;
-              if (!restartedStaleDashboard) continue;
-            } else {
-              continue;
-            }
-          }
-        } catch { /* port is available */ }
-
-        let proc: ChildProcess | null = null;
-        let logFile: Awaited<ReturnType<typeof dashboardLogFile>> | undefined;
-        try {
-          logFile = await dashboardLogFile(port);
-          lastLogPath = logFile.logPath;
-          const commonEnv = { ...process.env, PORT: String(port), NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT };
-          if (isBundled) {
-            const serverEntry = resolve(serverDir, 'apps', 'server', 'server.js');
-            proc = spawn(process.execPath, [serverEntry], {
-              cwd: resolve(serverDir, 'apps', 'server'),
-              stdio: ['ignore', logFile.fd, logFile.fd],
-              env: commonEnv,
-              shell: false,
-              detached: true,
-            });
-          } else {
-            proc = spawn(process.execPath, [nextCli, 'start', '-p', String(port)], {
-              cwd: serverDir,
-              stdio: ['ignore', logFile.fd, logFile.fd],
-              env: commonEnv,
-              shell: false,
-              detached: true,
-            });
-          }
-          proc.unref();
-          if (logFile) {
-            const { closeSync } = await import('fs');
-            closeSync(logFile.fd);
-          }
-        } catch (error) {
-          if (logFile) {
-            const { closeSync } = await import('fs');
-            try { closeSync(logFile.fd); } catch { /* ignore */ }
-          }
-          kbStatus = `${kbStatus}\n   Dashboard: 启动失败 ${String((error as Error).message || error)}`;
-          continue;
-        }
-
-        if (await waitForDashboard(port, localBuildId, 30000)) {
-          dashboardUrl = `http://localhost:${port}`;
-          break;
-        }
-
-        proc?.kill();
-      }
-
-      if (!dashboardUrl) {
-        kbStatus = `${kbStatus}\n   Dashboard: 启动超时${lastLogPath ? `，日志: ${lastLogPath}` : ''}`;
-      } else if (restartedStaleDashboard) {
-        kbStatus = `${kbStatus}\n   Dashboard: 已自动更新控制台服务`;
-      } else if (stopFailed) {
-        kbStatus = `${kbStatus}\n   Dashboard: 控制台正在更新，请关闭旧终端后重新打开`;
-      }
-    }
-  } catch (error) {
-    if ((error as Error).message !== 'Dashboard server directory not found') {
-      kbStatus = `${kbStatus}\n   Dashboard 启动失败: ${(error as Error).message}`;
-    }
-  }
+  const dashboardReady = await startDashboardInBackground(dashboardPort, chromaClient.baseUrl);
+  const dashboardUrl: string | undefined = dashboardReady ? `http://localhost:${dashboardPort}/overview` : undefined;
 
   const repl = new Repl({
 

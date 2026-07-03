@@ -54,6 +54,9 @@ auto-imports.d.ts
 set-claude-env.ps1
 set-claude-env.sh
 
+# Tesseract OCR 语言数据
+*.traineddata
+
 # 不提交 智能体工具 配置文件
 .claude/
 .qoder/

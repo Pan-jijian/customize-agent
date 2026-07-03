@@ -2,7 +2,7 @@ import type { ModelCapabilities } from '../interface.js';
 import { OpenAICompatProvider } from './openai-base.js';
 
 const OPENROUTER_CAPABILITIES: ModelCapabilities = {
-  maxContextTokens: 200_000,
+  maxContextTokens: 1_000_000,
   maxOutputTokens: 16_384,
   supportsStreaming: true,
   supportsFunctionCalling: true,

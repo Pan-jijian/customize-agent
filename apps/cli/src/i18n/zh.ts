@@ -42,6 +42,8 @@ const zh: Record<string, string | string[]> = {
   'help.rewind': '回退最近对话轮次',
   'help.resume': '恢复历史会话',
   'help.clear': '重置当前会话',
+  'help.compact': '压缩上下文节省 token',
+  'help.context': '查看上下文详情',
   'help.sessions': '查看历史会话',
   'help.model': '模型管理',
   'help.provider': 'Provider 管理',

@@ -42,6 +42,8 @@ const en: Record<string, string | string[]> = {
   'help.rewind': 'Rewind recent turns',
   'help.resume': 'Resume a previous session',
   'help.clear': 'Reset session',
+  'help.compact': 'Compact context to save tokens',
+  'help.context': 'View context details',
   'help.sessions': 'View session history',
   'help.model': 'Model management',
   'help.provider': 'Provider config',

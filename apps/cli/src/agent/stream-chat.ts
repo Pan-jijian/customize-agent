@@ -2,7 +2,6 @@ import type { FunctionDefinition, ILLMProvider, StreamChunk } from '@customize-a
 import type { Message, ToolCall } from '@customize-agent/types';
 import type { I18nManager } from '../i18n/manager.js';
 import { extractThinkingSubtitle, renderInlineMarkdown, renderMarkdown, spinnerStart, t, thinkingSpinner } from '../tui/renderer.js';
-import { supportsAnsi } from '../tui/terminal-capabilities.js';
 
 export interface StreamChatOptions {
   provider: ILLMProvider;
@@ -11,6 +10,9 @@ export interface StreamChatOptions {
   signal?: AbortSignal;
   i18n?: I18nManager;
   write: (text: string) => void;
+  setLiveStatus?: (lines: string | string[]) => void;
+  clearLiveStatus?: () => void;
+  commitStatus?: (lines: string | string[]) => void;
   onToolCall?: (tc: ToolCall) => void;
   onThinkingContent?: (content: string) => void;
 }
@@ -22,14 +24,14 @@ export interface StreamChatResult {
 }
 
 export async function streamChat(options: StreamChatOptions): Promise<StreamChatResult> {
-  const { provider, messages, tools, signal, i18n, write, onToolCall, onThinkingContent } = options;
+  const { provider, messages, tools, signal, i18n, write, setLiveStatus, clearLiveStatus, commitStatus, onToolCall, onThinkingContent } = options;
   let content = '';
   const toolCalls: ToolCall[] = [];
-  const spin = spinnerStart(i18n?.t('stream.thinking'), write);
+  const spin = spinnerStart(i18n?.t('stream.thinking'), text => (setLiveStatus ?? write)(text));
   let spinnerStopped = false;
 
   const tips = i18n?.tList('think.tips') ?? [];
-  const think = thinkingSpinner(tips, write, {
+  const think = thinkingSpinner(tips, text => (setLiveStatus ?? write)(text), {
     thinking: i18n?.t('think.thinking') ?? i18n?.t('stream.thinking') ?? 'Thinking…',
     thoughtFor: i18n?.t('think.thought_for') ?? 'Thought for',
     tokens: i18n?.t('think.tokens') ?? 'tokens',
@@ -40,13 +42,23 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
   let thinkingContent = '';
 
   const stopSpin = () => {
-    if (!spinnerStopped) { spin.stop(); spinnerStopped = true; }
+    if (!spinnerStopped) {
+      spin.stop();
+      clearLiveStatus?.();
+      spinnerStopped = true;
+    }
   };
 
   const flushThink = () => {
     if (!thinkActive) return;
     const elapsed = Date.now() - thinkStartMs;
-    think.thinkDone(elapsed, thinkTokens, i18n?.t('think.expand_hint') ?? '(ctrl+o to expand thinking)');
+    think.stop();
+    const summary: string[] = [];
+    const time = elapsed;
+    const tokens = thinkTokens < 1000 ? `${thinkTokens}` : `${(thinkTokens / 1000).toFixed(1)}K`;
+    summary.push(`${t.success('✓')} ${i18n?.t('think.thought_for') ?? 'Thought for'} ${t.dim(`${Math.max(time / 1000, 0.1).toFixed(1)}s`)} ${t.text('·')} ${t.dim(`↓ ${tokens} ${i18n?.t('think.tokens') ?? 'tokens'}`)} ${t.faint(i18n?.t('think.expand_hint') ?? '(ctrl+o to expand thinking)')}`);
+    if (commitStatus) commitStatus(summary);
+    else write(summary.join('\n') + '\n');
     thinkActive = false;
   };
 
@@ -54,6 +66,8 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
   const tableBuf: string[] = [];
   let fenceBuf: string[] | null = null;
   const fenceRe = /^(`{3,}|~{3,})/;
+  const markdownPrefixRe = /^(#{1,6}\s|[-*]\s|\d+\.\s|>\s?|\|)/;
+  const inlineMarkerRe = /[`*_~[\]]/u;
 
   const response = await provider.chatStream(messages, (chunk: StreamChunk) => {
     switch (chunk.type) {
@@ -62,7 +76,13 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
         flushThink();
         content += chunk.text;
         lineBuf += chunk.text;
-
+        if (!lineBuf.includes('\n')) {
+          if (fenceBuf === null && tableBuf.length === 0 && !markdownPrefixRe.test(lineBuf) && !inlineMarkerRe.test(lineBuf) && lineBuf.length >= 160) {
+            write(renderInlineMarkdown(lineBuf + '\n'));
+            lineBuf = '';
+          }
+          break;
+        }
         const lines = lineBuf.split('\n');
         lineBuf = lines.pop() ?? '';
 
@@ -108,16 +128,19 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
         think.thinkTick(Date.now() - thinkStartMs, thinkTokens, extractThinkingSubtitle(thinkingContent));
         break;
       case 'tool_call_preview':
+        stopSpin();
+        flushThink();
         onToolCall?.({ id: chunk.id, name: chunk.name, arguments: {} });
         break;
       case 'tool_call':
+        stopSpin();
+        flushThink();
         toolCalls.push(chunk.call);
         onToolCall?.(chunk.call);
         break;
       case 'reset':
         if (thinkActive) { think.stop(); thinkActive = false; }
-        if (supportsAnsi()) write('\x1b[1G\x1b[2K');
-        else write('\n');
+        write('\n');
         content = '';
         toolCalls.length = 0;
         lineBuf = '';

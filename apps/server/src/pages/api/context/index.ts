@@ -31,5 +31,5 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(200).json({ success: true });
     }
     res.status(405).json({ error: 'Method not allowed' });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+  } catch (e: unknown) { console.error('[api] context', e); res.status(500).json({ error: 'Internal server error' }); }
 }

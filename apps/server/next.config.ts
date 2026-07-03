@@ -10,7 +10,14 @@ const nextConfig: NextConfig = {
     '@customize-agent/llm',
     '@customize-agent/runtime',
     '@customize-agent/types',
+    '@napi-rs/canvas',
     'better-sqlite3',
+    'jszip',
+    'mammoth',
+    'pdf-parse',
+    'pdfjs-dist',
+    'tesseract.js',
+    'xlsx',
   ],
   async headers() {
     return [

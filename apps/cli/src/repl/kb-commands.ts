@@ -263,7 +263,7 @@ export class KbCommands {
     }
     const client = new ChromaHttpClient();
     const ok = await client.heartbeat();
-    process.stdout.write(`${ok ? t.success('ChromaDB Connected') : t.warning('ChromaDB Unavailable')}\n\n`);
+    process.stdout.write(`${ok ? t.success('ChromaDB Connected') : t.warning('ChromaDB Unavailable')} ${t.dim(client.baseUrl)}\n\n`);
   }
 
   private async config(): Promise<void> {

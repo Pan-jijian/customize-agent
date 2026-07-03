@@ -1,9 +1,15 @@
 {
   "name": "@customize-agent/engine",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Agent 引擎 — 工具注册、权限控制、执行调度、子智能体编排",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -34,7 +40,9 @@
     "@customize-agent/llm": "workspace:*",
     "@customize-agent/tools": "workspace:*",
     "@customize-agent/types": "workspace:*",
-    "@types/node": "^25.9.3",
     "execa": "^9.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3"
   }
 }

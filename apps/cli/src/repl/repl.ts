@@ -174,6 +174,12 @@ export class Repl {
     }
   }
 
+  private _renderThinkingContent(): string {
+    const content = this.executor.lastThinkingContent;
+    if (!content) return t.dim(this.i18n.t('think.no_content'));
+    return thinkingExpanded(content, this.i18n.t('think.box_title'));
+  }
+
   private _captureInputDuringTask(onCancel: () => void) {
     return captureInputDuringTask({
       projectRoot: this.root,
@@ -181,6 +187,7 @@ export class Repl {
       i18n: this.i18n,
       tokenStats: () => this.executor.getContextStats(),
       onCancel,
+      onCtrlO: () => this._renderThinkingContent(),
     });
   }
 
@@ -265,16 +272,19 @@ export class Repl {
 
     const abortController = new AbortController();
     this.currentTaskAbort = abortController;
-    const taskInput = this._captureInputDuringTask(() => {
-      abortController.abort();
+    const abortTask = () => {
+      if (!abortController.signal.aborted) abortController.abort();
       this.pendingInputs.length = 0;
-    });
+    };
+    process.once('SIGINT', abortTask);
+    const taskInput = this._captureInputDuringTask(abortTask);
+    taskInput.setLiveStatus(t.faint(this.i18n.t('stream.thinking')));
     const drainTaskInput = () => taskInput.drain().map(text => ({ content: text, display: text }));
     let toolPreviewTimer: ReturnType<typeof setInterval> | null = null;
     let toolPreview: { toolName: string; args: Record<string, unknown>; startMs: number } | null = null;
     const renderToolPreview = () => {
       if (!toolPreview) return;
-      taskInput.writeOutput('\r' + toolCallPending(
+      taskInput.setLiveStatus(toolCallPending(
         toolPreview.toolName,
         1,
         this._fmtArg(toolPreview.args),
@@ -285,14 +295,14 @@ export class Repl {
     const stopToolPreview = () => {
       if (toolPreviewTimer) clearInterval(toolPreviewTimer);
       toolPreviewTimer = null;
-      if (toolPreview) taskInput.writeOutput('\r');
+      if (toolPreview) taskInput.clearLiveStatus();
       toolPreview = null;
     };
     const startToolPreview = (event: Extract<AgentEvent, { type: 'tool_call_preview' }>) => {
       const startMs = Date.now() - (event.elapsedMs ?? 0);
       toolPreview = { toolName: event.toolName, args: event.args, startMs };
       renderToolPreview();
-      if (supportsAnimation() && !toolPreviewTimer) toolPreviewTimer = setInterval(renderToolPreview, 100);
+      if (supportsAnimation() && !toolPreviewTimer) toolPreviewTimer = setInterval(renderToolPreview, 250);
     };
 
     let enhancedInput = input;
@@ -307,7 +317,13 @@ export class Repl {
       }
     }
 
+    const kbStartMs = Date.now();
+    const renderKbSearch = () => taskInput.setLiveStatus(toolCallPending('knowledge_search', 1, input.slice(0, 80), Date.now() - kbStartMs, this.i18n.toolLabel('knowledge_search')).trimEnd());
+    renderKbSearch();
+    const kbTimer = supportsAnimation() ? setInterval(renderKbSearch, 250) : null;
     enhancedInput = await this._injectKnowledgeContext(enhancedInput, input);
+    if (kbTimer) clearInterval(kbTimer);
+    taskInput.clearLiveStatus();
     if (abortController.signal.aborted) {
       taskInput.stop();
       return;
@@ -339,12 +355,17 @@ export class Repl {
 
     try {
       const updated = await this.executor.runTask(this.history, {
+        onWrite: text => taskInput.writeOutput(text),
+        setLiveStatus: lines => taskInput.setLiveStatus(lines),
+        clearLiveStatus: () => taskInput.clearLiveStatus(),
+        commitStatus: lines => taskInput.commitStatus(lines),
         onEvent: event => {
           if (abortController.signal.aborted) return;
           if (event.type === 'tool_call_preview') {
             startToolPreview(event);
             return;
           }
+          if (event.type === 'tool_preview_end') { stopToolPreview(); return; }
           if (event.type === 'approval_request') { stopToolPreview(); taskInput.pause(); return; }
           if (event.type === 'approval_response') { taskInput.resume(); return; }
           if (event.type === 'llm_response') {
@@ -382,8 +403,10 @@ export class Repl {
         taskInput.writeOutput(msg.error((err as Error).message));
       }
     } finally {
+      process.removeListener('SIGINT', abortTask);
       stopToolPreview();
       taskInput.stop();
+      if (abortController.signal.aborted) this.tui.writeExternal(t.faint(this.i18n.t('status.cancelled') + '\n'));
     }
   }
 
@@ -525,7 +548,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         let planSucceeded = false;
         const renderToolPreview = () => {
           if (!toolPreview) return;
-          taskInput.writeOutput('\r' + toolCallPending(
+          taskInput.setLiveStatus(toolCallPending(
             toolPreview.toolName,
             1,
             this._fmtArg(toolPreview.args),
@@ -536,22 +559,26 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         const stopToolPreview = () => {
           if (toolPreviewTimer) clearInterval(toolPreviewTimer);
           toolPreviewTimer = null;
-          if (toolPreview) taskInput.writeOutput('\r');
+          if (toolPreview) taskInput.clearLiveStatus();
           toolPreview = null;
         };
         const startToolPreview = (event: Extract<AgentEvent, { type: 'tool_call_preview' }>) => {
           toolPreview = { toolName: event.toolName, args: event.args, startMs: Date.now() - (event.elapsedMs ?? 0) };
           renderToolPreview();
-          if (supportsAnimation() && !toolPreviewTimer) toolPreviewTimer = setInterval(renderToolPreview, 100);
+          if (supportsAnimation() && !toolPreviewTimer) toolPreviewTimer = setInterval(renderToolPreview, 250);
         };
         try {
           const u = await this.executor.runTask(this.history, {
             readonly: true,
+            setLiveStatus: lines => taskInput.setLiveStatus(lines),
+            clearLiveStatus: () => taskInput.clearLiveStatus(),
+            commitStatus: lines => taskInput.commitStatus(lines),
             onEvent: event => {
               if (event.type === 'tool_call_preview') {
                 startToolPreview(event);
                 return;
               }
+              if (event.type === 'tool_preview_end') { stopToolPreview(); return; }
               if (event.type === 'approval_request') { stopToolPreview(); taskInput.pause(); }
               if (event.type === 'output') { stopToolPreview(); taskInput.writeOutput(event.text); }
               else if (event.type === 'user_message') { stopToolPreview(); taskInput.writeOutput(userMessageBlock(event.text, this.i18n.t('message.user'))); }
@@ -654,13 +681,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         const s = this.executor.getContextStats();
         return s.tokens > 0 ? { used: s.tokens, limit: s.limit } : null;
       },
-      onCtrlO: () => {
-        const content = this.executor.lastThinkingContent;
-        if (!content) {
-          return t.dim(this.i18n.t('think.no_content'));
-        }
-        return thinkingExpanded(content, this.i18n.t('think.box_title'));
-      },
+      onCtrlO: () => this._renderThinkingContent(),
       onCancel: () => {
         if (!this.currentTaskAbort || this.currentTaskAbort.signal.aborted) return false;
         this.currentTaskAbort.abort();

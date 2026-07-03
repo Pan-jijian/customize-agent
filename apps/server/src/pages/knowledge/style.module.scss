@@ -2,3 +2,142 @@
 .featureValue { color: var(--colorText); }
 .filterInput { width: 260px; }
 .filterSelect { width: 140px; }
+
+.statusCard {
+  overflow: hidden;
+}
+
+.statusCard :global(.ant-card-body) {
+  padding-top: 12px;
+  max-height: min(46vh, 420px);
+  overflow: hidden;
+}
+
+.statusEmpty {
+  color: var(--colorTextSecondary);
+  padding: 10px 2px;
+}
+
+.statusList {
+  display: grid;
+  gap: 10px;
+  max-height: calc(min(46vh, 420px) - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+.statusItem {
+  border: 1px solid var(--colorBorderSecondary);
+  border-left: 4px solid var(--colorPrimary);
+  border-radius: 14px;
+  padding: 12px;
+  background: linear-gradient(180deg, var(--colorBgContainer), var(--colorFillAlter));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.04);
+}
+
+.statusHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  min-width: 0;
+}
+
+.statusHeader strong {
+  display: inline-block;
+  max-width: min(58vw, 760px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.statusDesc {
+  color: var(--colorText);
+  font-size: 13px;
+  margin-bottom: 6px;
+  display: -webkit-box;
+  line-clamp: 2;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.statusPath {
+  color: var(--colorTextSecondary);
+  font-size: 12px;
+  background: var(--colorBgContainer);
+  border-radius: 8px;
+  padding: 6px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: 8px;
+}
+
+.statusMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--colorTextSecondary);
+  font-size: 12px;
+}
+
+.statusMeta span {
+  background: var(--colorBgContainer);
+  border: 1px solid var(--colorBorderSecondary);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.searchResultList {
+  display: grid;
+  gap: 12px;
+}
+
+.searchResultItem {
+  border: 1px solid var(--colorBorderSecondary);
+  border-radius: 12px;
+  padding: 14px;
+  background: var(--colorFillAlter);
+}
+
+.searchResultHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.searchContent {
+  margin: 10px 0 !important;
+  white-space: pre-wrap;
+}
+
+.pdfPreviewStrip {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 8px 0;
+}
+
+.pdfPreviewStrip img {
+  width: 220px;
+  max-height: 320px;
+  object-fit: contain;
+  border: 1px solid var(--colorBorderSecondary);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.drawingPreview {
+  min-height: 120px;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px dashed var(--colorBorderSecondary);
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(80, 140, 255, 0.08), rgba(80, 255, 180, 0.06));
+}

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ExternalExtractorRegistry } from './external-extractor.js';
+import { resolveAndImport, resolvePackage, getNodeModulesRoot } from './module-resolver.js';
 import type { ClassifiedFile } from '../types.js';
 
 export interface ExtractionResult {
@@ -147,17 +148,23 @@ export class ContentExtractor {
       const textEntities = this.matchAll(raw, /\n\s*(?:1|3)\s*\n([^\n]+)/gu).slice(0, 500);
       const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).slice(0, 300);
       const entityTypes = this.matchAll(raw, /\n\s*0\s*\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1000);
-      metadata.layerCount = new Set(layers).size;
+      const uniqueLayers = Array.from(new Set(layers));
+      const uniqueBlocks = Array.from(new Set(blocks));
+      const uniqueEntityTypes = Array.from(new Set(entityTypes));
+      metadata.layerCount = uniqueLayers.length;
+      metadata.layerNames = uniqueLayers.slice(0, 80);
       metadata.textEntityCount = textEntities.length;
-      metadata.blockCount = new Set(blocks).size;
-      metadata.entityTypeCount = new Set(entityTypes).size;
+      metadata.blockCount = uniqueBlocks.length;
+      metadata.blockNames = uniqueBlocks.slice(0, 80);
+      metadata.entityTypeCount = uniqueEntityTypes.length;
+      metadata.entityTypes = uniqueEntityTypes.slice(0, 80);
       metadata.contentCoverage = 'dxf_layers_blocks_entities_text';
       return {
         text: [
           this.metadataOnlyText(file),
-          `CAD DXF 图层: ${Array.from(new Set(layers)).join(', ')}`,
-          `CAD DXF 块/符号: ${Array.from(new Set(blocks)).join(', ')}`,
-          `CAD DXF 实体类型: ${Array.from(new Set(entityTypes)).join(', ')}`,
+          `CAD DXF 图层: ${uniqueLayers.join(', ')}`,
+          `CAD DXF 块/符号: ${uniqueBlocks.join(', ')}`,
+          `CAD DXF 实体类型: ${uniqueEntityTypes.join(', ')}`,
           `CAD DXF 标注/文本:\n${textEntities.join('\n')}`,
         ].join('\n'),
         metadata,
@@ -171,16 +178,20 @@ export class ContentExtractor {
       const materials = this.matchAll(raw, /MATERIAL[^']*'([^']+)'/giu).slice(0, 120);
       const entities = this.matchAll(raw, /#\d+\s*=\s*([A-Z0-9_]+)/gu).slice(0, 1000);
       const names = this.matchAll(raw, /'([^']{2,120})'/gu).slice(0, 500);
+      const uniqueStepEntities = Array.from(new Set(entities));
       metadata.productCount = products.length;
+      metadata.productNames = products.slice(0, 80);
       metadata.materialCount = materials.length;
-      metadata.entityTypeCount = new Set(entities).size;
+      metadata.materialNames = materials.slice(0, 80);
+      metadata.entityTypeCount = uniqueStepEntities.length;
+      metadata.entityTypes = uniqueStepEntities.slice(0, 80);
       metadata.contentCoverage = 'step_products_materials_entities_names';
       return {
         text: [
           this.metadataOnlyText(file),
           `STEP 产品/零件:\n${products.join('\n')}`,
           `STEP 材料: ${materials.join(', ')}`,
-          `STEP 实体类型: ${Array.from(new Set(entities)).join(', ')}`,
+          `STEP 实体类型: ${uniqueStepEntities.join(', ')}`,
           `STEP 名称/属性:\n${names.join('\n')}`,
         ].join('\n'),
         metadata,
@@ -192,11 +203,14 @@ export class ContentExtractor {
       const raw = fs.readFileSync(file.absolutePath, 'utf8');
       const names = this.matchAll(raw, /'([^']{2,120})'/gu).slice(0, 500);
       const entityTypes = this.matchAll(raw, /^\s*(\d{3,4})\s*,/gmu).slice(0, 1000);
+      const uniqueIgesTypes = Array.from(new Set(entityTypes));
       metadata.entityNameCount = names.length;
-      metadata.entityTypeCount = new Set(entityTypes).size;
+      metadata.entityNames = names.slice(0, 80);
+      metadata.entityTypeCount = uniqueIgesTypes.length;
+      metadata.entityTypes = uniqueIgesTypes.slice(0, 80);
       metadata.contentCoverage = 'iges_entity_names_types';
       return {
-        text: [this.metadataOnlyText(file), `IGES 实体类型: ${Array.from(new Set(entityTypes)).join(', ')}`, `IGES 实体/名称:\n${names.join('\n')}`].join('\n'),
+        text: [this.metadataOnlyText(file), `IGES 实体类型: ${uniqueIgesTypes.join(', ')}`, `IGES 实体/名称:\n${names.join('\n')}`].join('\n'),
         metadata,
         warnings,
       };
@@ -269,20 +283,32 @@ export class ContentExtractor {
     const metadata: Record<string, unknown> = { extractionMode: 'structured_data', vectorizable: true };
     try {
       if (file.format === 'json') {
-        const lines = path.extname(file.absolutePath).toLowerCase() === '.jsonl'
-          ? raw.split(/\r?\n/u).filter(Boolean).slice(0, 200).flatMap((line, index) => this.flattenJson(JSON.parse(line), `line${index + 1}`))
+        const isJsonl = path.extname(file.absolutePath).toLowerCase() === '.jsonl';
+        const lines = isJsonl
+          ? raw.split(/\r?\n/u).filter(Boolean).slice(0, 500).flatMap((line, index) => this.flattenJson(JSON.parse(line), `line${index + 1}`))
           : this.flattenJson(JSON.parse(raw));
         metadata.fieldCount = lines.length;
-        metadata.contentCoverage = 'json_paths_values';
-        return { text: [this.metadataOnlyText(file), ...lines.slice(0, 1000)].join('\n'), metadata, warnings: [] };
+        metadata.recordCount = isJsonl ? raw.split(/\r?\n/u).filter(Boolean).length : 1;
+        metadata.dataPaths = lines.map(line => line.split(':')[0]).slice(0, 200);
+        metadata.contentCoverage = isJsonl ? 'jsonl_records_paths_values' : 'json_paths_values';
+        return { text: [this.metadataOnlyText(file), ...lines.slice(0, 1500)].join('\n'), metadata, warnings: [] };
       }
     } catch {
       metadata.parseError = true;
     }
 
+    if (file.format === 'yaml') {
+      const pairs = this.matchAll(raw, /^\s*([\w.-]+)\s*:\s*(.{1,300})$/gmu).slice(0, 1500);
+      metadata.fieldCount = pairs.length;
+      metadata.dataPaths = pairs.map(line => (line.split(':')[0] ?? '').trim()).slice(0, 200);
+      metadata.contentCoverage = 'yaml_key_values';
+      return { text: [this.metadataOnlyText(file), ...pairs].join('\n'), metadata, warnings: [] };
+    }
+
     if (file.format === 'xml') {
       const elements = this.matchAll(raw, /<([A-Za-z_][\w:.-]*)\b[^>]*>([^<]{1,200})<\/\1>/gu).slice(0, 1000);
       metadata.elementTextCount = elements.length;
+      metadata.dataPaths = elements.map(line => line.match(/^<([A-Za-z_][\w:.-]*)/u)?.[1]).filter(Boolean).slice(0, 200);
       metadata.contentCoverage = 'xml_element_text';
       return { text: [this.metadataOnlyText(file), ...elements].join('\n'), metadata, warnings: [] };
     }
@@ -362,6 +388,7 @@ export class ContentExtractor {
         delimiter: file.format === 'tsv' ? 'tab' : 'comma',
         rowCount: rows.length,
         columnCount: header.length,
+        columnNames: header.slice(0, 120),
         contentCoverage: 'table_headers_cells_text',
       },
       warnings: [],
@@ -371,14 +398,14 @@ export class ContentExtractor {
   private async extractOfficeDocument(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     if (path.extname(file.absolutePath).toLowerCase() === '.docx') {
       try {
-        const mammoth = await import('mammoth');
+        const mammoth = await resolveAndImport('mammoth') as any;
         const result = await mammoth.extractRawText({ path: file.absolutePath });
         const text = result.value.trim();
         if (text) {
           return {
             text,
             metadata: { extractionMode: 'builtin_mammoth', vectorizable: true, contentCoverage: 'office_full_text' },
-            warnings: result.messages.map(message => message.message),
+            warnings: (result.messages as Array<{ message: string }>).map(m => m.message),
           };
         }
       } catch {
@@ -390,7 +417,7 @@ export class ContentExtractor {
 
   private async extractSpreadsheet(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     try {
-      const XLSX = await import('xlsx');
+      const XLSX = await resolveAndImport('xlsx') as any;
       const workbook = XLSX.readFile(file.absolutePath, { cellDates: true, cellFormula: true, cellNF: true, cellStyles: true });
       const sheetTexts: string[] = [];
       let cellCount = 0;
@@ -425,7 +452,7 @@ export class ContentExtractor {
       if (sheetTexts.length > 0) {
         return {
           text: sheetTexts.join('\n\n'),
-          metadata: { extractionMode: 'builtin_xlsx_structured_cells', vectorizable: true, sheetCount: sheetTexts.length, cellCount, formulaCount, mergeCount, contentCoverage: 'spreadsheet_cells_formulas_merges' },
+          metadata: { extractionMode: 'builtin_xlsx_structured_cells', vectorizable: true, sheetCount: sheetTexts.length, sheetNames: workbook.SheetNames.slice(0, 120), cellCount, formulaCount, mergeCount, contentCoverage: 'spreadsheet_cells_formulas_merges' },
           warnings: [],
         };
       }
@@ -438,8 +465,9 @@ export class ContentExtractor {
   private async extractOfficeZip(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     const metadata: Record<string, unknown> = { extractionMode: 'office_zip_text', vectorizable: true };
     try {
-      const JSZip = (await import('jszip')).default;
-      const zip = await JSZip.loadAsync(fs.readFileSync(file.absolutePath));
+      const jszipMod = await resolveAndImport('jszip');
+      const JSZip = (jszipMod as Record<string, unknown>).default ?? jszipMod;
+      const zip = await (JSZip as { loadAsync: (data: Buffer) => Promise<{ files: Record<string, { dir: boolean; name: string; async: (type: string) => Promise<string> }> }> }).loadAsync(fs.readFileSync(file.absolutePath));
       const texts: string[] = [];
       const xmlEntries = Object.values(zip.files).filter(entry => !entry.dir && /\.(xml|rels)$/iu.test(entry.name)).slice(0, 80);
       for (const entry of xmlEntries) {
@@ -464,8 +492,9 @@ export class ContentExtractor {
       return { text: this.metadataOnlyText(file), metadata, warnings: ['压缩包未提取到正文，未入库；仅 zip 可提取文件清单'] };
     }
     try {
-      const JSZip = (await import('jszip')).default;
-      const zip = await JSZip.loadAsync(fs.readFileSync(file.absolutePath));
+      const jszipMod = await resolveAndImport('jszip');
+      const JSZip = (jszipMod as Record<string, unknown>).default ?? jszipMod;
+      const zip = await (JSZip as { loadAsync: (data: Buffer) => Promise<{ files: Record<string, { dir: boolean; name: string }> }> }).loadAsync(fs.readFileSync(file.absolutePath));
       const entries = Object.values(zip.files).map(entry => `${entry.dir ? '目录' : '文件'}: ${entry.name}`).slice(0, 1_000);
       metadata.entryCount = Object.keys(zip.files).length;
       metadata.contentCoverage = 'zip_manifest';
@@ -485,10 +514,27 @@ export class ContentExtractor {
       return { text: '', metadata, warnings: [`图片文件无效或不完整：${validationError}，未入库`] };
     }
 
+    let tesseractPath: string;
+    try {
+      tesseractPath = resolvePackage('tesseract.js');
+    } catch (e) {
+      metadata.contentCoverage = 'ocr_unavailable';
+      metadata.parseError = (e as Error).message;
+      return { text: '', metadata, warnings: [`内置 OCR 不可用：${(e as Error).message}`] };
+    }
+
+    // 子进程用 createRequire 加载 tesseract.js（兼容打包 Server 的 vendor 目录）
     const result = spawnSync(process.execPath, [
       '--input-type=module',
       '-e',
-      `const { createWorker } = await import('tesseract.js');
+      `import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+const localRequire = createRequire(import.meta.url);
+const tesseractMod = localRequire(${JSON.stringify(tesseractPath)});
+const { createWorker } = tesseractMod;
+
 const worker = await createWorker('chi_sim+eng');
 try {
   const result = await worker.recognize(process.argv[1]);
@@ -497,7 +543,7 @@ try {
   await worker.terminate();
 }`,
       file.absolutePath,
-    ], { encoding: 'utf8', timeout: 60_000, maxBuffer: 10 * 1024 * 1024 });
+    ], { encoding: 'utf8', timeout: 120_000, maxBuffer: 20 * 1024 * 1024 });
 
     if (result.status !== 0 || result.error) {
       const message = result.error?.message || result.stderr.trim() || `OCR 子进程退出码 ${result.status ?? 'unknown'}`;
@@ -508,8 +554,11 @@ try {
 
     const text = result.stdout.trim();
     metadata.contentCoverage = text ? 'ocr_text' : 'metadata_filename';
+    metadata.ocrProvider = 'tesseract.js';
+    metadata.ocrLanguages = 'chi_sim+eng';
+    metadata.ocrTextLength = text.length;
     return {
-      text,
+      text: text ? [this.metadataOnlyText(file), `OCR 识别文本:\n${text}`].join('\n') : '',
       metadata,
       warnings: text ? [] : ['内置 OCR 未识别到文字，未入库'],
     };
@@ -547,54 +596,175 @@ try {
 
   private async extractPdf(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     const metadata: Record<string, unknown> = { extractionMode: 'pdf_text', vectorizable: true };
+    const warnings: string[] = [];
+
+    // Tier 1: pdfjs-dist 文本提取（处理常规 PDF、压缩内容流、CJK 字体等）
     try {
       const raw = fs.readFileSync(file.absolutePath);
       const text = await this.extractPdfText(raw);
       if (text.trim()) {
         metadata.contentCoverage = 'pdf_text_streams';
-        return { text: [this.metadataOnlyText(file), text].join('\n'), metadata, warnings: [] };
+        metadata.pdfExtractor = 'pdfjs-dist';
+        return { text: [this.metadataOnlyText(file), text].join('\n'), metadata, warnings };
       }
     } catch (error) {
+      warnings.push(`PDF 文本提取失败: ${error instanceof Error ? error.message : String(error)}`);
       metadata.parseError = error instanceof Error ? error.message : String(error);
     }
 
+    // Tier 2: OCR（扫描件/图片型 PDF）—— 必须保留并确保可用
+    const ocr = await this.extractScannedPdfOcr(file);
+    if (ocr.text.trim()) return ocr;
+
+    // Tier 3: 仅索引元数据（兜底）
     metadata.extractionMode = 'pdf_metadata_only';
     metadata.contentCoverage = 'metadata_filename';
+    metadata.ocrRecommended = true;
+    metadata.ocrReason = ocr.metadata.ocrReason ?? 'pdf_text_stream_empty_or_unavailable';
+    metadata.pdfPageOcrSupported = true;
     return {
-      text: '',
+      text: this.metadataOnlyText(file),
       metadata,
-      warnings: ['PDF 正文暂未提取到文本，内置解析器未提取到正文，未入库'],
+      warnings: [...warnings, 'PDF 正文暂未提取到文本，已索引文件名、路径和类型元数据', ...ocr.warnings],
     };
   }
 
-  private async extractPdfText(buffer: Buffer): Promise<string> {
+  private pdfOcrPageLimit(): number {
+    const value = Number(process.env.KB_PDF_OCR_PAGE_LIMIT ?? 20);
+    return Number.isFinite(value) ? Math.min(500, Math.max(1, Math.floor(value))) : 20;
+  }
+
+  private async extractScannedPdfOcr(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
+    const metadata: Record<string, unknown> = {
+      extractionMode: 'pdf_page_ocr_embedded',
+      vectorizable: true,
+      pdfPageOcrSupported: true,
+      ocrProvider: 'tesseract.js',
+      ocrLanguages: 'chi_sim+eng',
+      pdfRenderer: 'pdfjs-dist + @napi-rs/canvas',
+      pdfOcrPageLimit: this.pdfOcrPageLimit(),
+    };
+    const pageLimitConfig = this.pdfOcrPageLimit();
+
+    // 解析模块路径 —— 确保在打包 Server 等上下文中子进程也能正确加载
+    let canvasPath: string;
+    let pdfjsPath: string;
+    let tesseractPath: string;
     try {
-      const mod = await import('pdf-parse');
-      const PDFParse = (mod as unknown as { PDFParse?: new (options: { data: Uint8Array }) => { getText(): Promise<{ text: string }>; destroy(): Promise<void> } }).PDFParse;
-      if (PDFParse) {
-        const parser = new PDFParse({ data: new Uint8Array(buffer) });
-        try {
-          const result = await parser.getText();
-          if (result.text.trim()) return result.text.slice(0, 250_000);
-        } finally {
-          await parser.destroy();
-        }
-      }
-    } catch {
-      // fallback to legacy API/raw stream extraction below
+      canvasPath = resolvePackage('@napi-rs/canvas');
+      pdfjsPath = resolvePackage('pdfjs-dist/legacy/build/pdf.mjs');
+      tesseractPath = resolvePackage('tesseract.js');
+    } catch (e) {
+      metadata.ocrRecommended = true;
+      metadata.ocrReason = `OCR 依赖解析失败: ${(e as Error).message}`;
+      return { text: '', metadata, warnings: [`内置扫描 PDF OCR 不可用：${metadata.ocrReason}`] };
     }
 
+    // NODE_PATH 确保子进程能解析 tesseract.js 的依赖
+    const childEnv = { ...process.env };
+    const nmRoot = getNodeModulesRoot();
+    if (nmRoot) childEnv.NODE_PATH = nmRoot;
+
+    const result = spawnSync(process.execPath, [
+      '--input-type=module',
+      '-e',
+      `import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createCanvas } from ${JSON.stringify(canvasPath)};
+import * as pdfjs from ${JSON.stringify(pdfjsPath)};
+import { createWorker } from ${JSON.stringify(tesseractPath)};
+const filePath = process.argv[1];
+const configuredLimit = Math.max(1, Number(process.argv[2] || 5));
+const bytes = new Uint8Array(fs.readFileSync(filePath));
+const doc = await pdfjs.getDocument({ data: bytes, verbosity: 0 }).promise;
+const pageLimit = Math.min(doc.numPages, configuredLimit);
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-pdf-ocr-'));
+const worker = await createWorker('chi_sim+eng');
+const pages = [];
+try {
+  for (let i = 1; i <= pageLimit; i += 1) {
+    const page = await doc.getPage(i);
+    const viewport = page.getViewport({ scale: 2 });
+    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    const context = canvas.getContext('2d');
+    await page.render({ canvasContext: context, viewport }).promise;
+    const imagePath = path.join(tmpDir, 'page-' + i + '.png');
+    fs.writeFileSync(imagePath, canvas.toBuffer('image/png'));
+    const recognized = await worker.recognize(imagePath);
+    const text = (recognized.data.text || '').trim();
+    if (text) pages.push('PDF OCR 第 ' + i + ' 页:\\n' + text);
+  }
+} finally {
+  await worker.terminate();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+}
+process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: pages.join('\\n\\n') }));`,
+      file.absolutePath,
+      String(pageLimitConfig),
+    ], { encoding: 'utf8', timeout: Math.max(120_000, pageLimitConfig * 60_000), maxBuffer: 50 * 1024 * 1024, env: childEnv });
+    if (result.status !== 0 || result.error) {
+      metadata.ocrRecommended = true;
+      metadata.ocrReason = result.error?.message ?? result.stderr.trim() ?? `pdf_page_ocr_exit_${result.status ?? 'unknown'}`;
+      return { text: '', metadata, warnings: [`内置扫描 PDF OCR 失败：${metadata.ocrReason}`] };
+    }
     try {
-      const mod = await import('pdf-parse');
+      const parsed = JSON.parse(result.stdout) as { pageCount?: number; pageLimit?: number; text?: string };
+      const text = parsed.text?.trim() ?? '';
+      metadata.ocrPageCount = parsed.pageCount ?? 0;
+      metadata.pdfOcrPageLimit = parsed.pageLimit ?? 5;
+      metadata.ocrTextLength = text.length;
+      metadata.contentCoverage = text ? 'pdf_page_ocr_text' : 'metadata_filename';
+      return { text: text ? [this.metadataOnlyText(file), text].join('\n') : '', metadata, warnings: text ? [] : ['内置扫描 PDF OCR 未识别到文字'] };
+    } catch {
+      metadata.ocrRecommended = true;
+      metadata.ocrReason = 'pdf_page_ocr_output_parse_failed';
+      return { text: '', metadata, warnings: ['内置扫描 PDF OCR 输出解析失败'] };
+    }
+  }
+
+  private async extractPdfText(buffer: Buffer): Promise<string> {
+    // Tier 1: pdfjs-dist 文本提取（处理压缩内容流、CJK 字体、现代 PDF）
+    try {
+      const mod = await resolveAndImport('pdfjs-dist/legacy/build/pdf.mjs') as any;
+      const loadingTask = mod.getDocument({ data: new Uint8Array(buffer), verbosity: 0 as number });
+      const doc = await loadingTask.promise;
+      const pages: string[] = [];
+      const pageLimit = Math.min(doc.numPages, 200);
+      for (let i = 1; i <= pageLimit; i++) {
+        const page = await doc.getPage(i);
+        const content = await page.getTextContent();
+        const pageText = content.items
+          .map((item: unknown) => {
+            const hasStr = item != null && typeof item === 'object' && 'str' in item;
+            return hasStr ? String((item as Record<string, unknown>).str) : '';
+          })
+          .filter((s: string) => s.trim().length > 0)
+          .join(' ');
+        if (pageText.trim()) pages.push(pageText.trim());
+      }
+      await doc.destroy();
+      if (pages.length > 0) {
+        const combined = pages.join('\n\n');
+        if (combined.trim()) return combined.slice(0, 250_000);
+      }
+    } catch (e) {
+      if (process.env.KB_DEBUG === '1') console.warn('[kb] pdfjs-dist extraction failed:', (e as Error).message);
+    }
+
+    // Tier 2: pdf-parse（兼容旧版 PDF）
+    try {
+      const mod = await resolveAndImport('pdf-parse');
       const pdfParse = (mod as unknown as { default?: (data: Buffer) => Promise<{ text: string }> }).default;
       if (pdfParse) {
         const result = await pdfParse(buffer);
         if (result.text.trim()) return result.text.slice(0, 250_000);
       }
     } catch {
-      // fallback below
+      // fallback to raw regex below
     }
 
+    // Tier 3: raw regex 回退（未压缩的古老 PDF）
     const raw = buffer.toString('latin1');
     const matches = Array.from(raw.matchAll(/\(([^()]{2,500})\)\s*T[jJ]/gu), match => match[1] ?? '')
       .concat(Array.from(raw.matchAll(/\[([^\]]{2,2000})\]\s*TJ/gu), match => match[1] ?? ''));

@@ -20,6 +20,25 @@ export interface StoredChunk {
 
 export interface ChunkSearchResult extends StoredChunk {
   score: number;
+  scoreDetails?: {
+    keywordScore?: number;
+    bm25Score?: number;
+    exactPhraseBoost?: number;
+  };
+}
+
+export interface StoredParentChunk {
+  id: string;
+  relativePath: string;
+  parentId: string;
+  content: string;
+  category: FileCategory;
+  format: string;
+  collectionName: string;
+  sectionTitle?: string;
+  chunkCount: number;
+  metadataJson?: string;
+  createdAt: number;
 }
 
 export interface FileHashRecord {
@@ -53,6 +72,7 @@ export interface FileRelationship {
 
 export class IndexStateStore {
   private readonly db: Database.Database;
+  private ftsEnabled = false;
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -134,6 +154,8 @@ export class IndexStateStore {
     const now = Date.now();
     const transaction = this.db.transaction(() => {
       this.db.prepare('DELETE FROM kb_chunks WHERE relative_path = ?').run(relativePath);
+      this.db.prepare('DELETE FROM kb_parent_chunks WHERE relative_path = ?').run(relativePath);
+      if (this.ftsEnabled) this.db.prepare('DELETE FROM kb_chunks_fts WHERE relative_path = ?').run(relativePath);
       const insert = this.db.prepare(`
         INSERT INTO kb_chunks (
           id, relative_path, chunk_index, content, category, format,
@@ -141,9 +163,44 @@ export class IndexStateStore {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
-      for (const chunk of chunks) {
+      const insertFts = this.ftsEnabled ? this.db.prepare(`
+        INSERT INTO kb_chunks_fts (id, relative_path, category, format, section_title, content)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `) : undefined;
+      const insertParent = this.db.prepare(`
+        INSERT INTO kb_parent_chunks (
+          id, relative_path, parent_id, content, category, format,
+          collection_name, section_title, chunk_count, metadata_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const parentGroups = new Map<string, TextChunk[]>();
+      const groupedChunks = this.splitParentGroups(relativePath, chunks);
+      for (const chunk of groupedChunks) {
+        const parentId = this.metadataString(chunk.metadata.parentId) ?? `${relativePath}#parent-${chunk.index}`;
+        const group = parentGroups.get(parentId) ?? [];
+        group.push(chunk);
+        parentGroups.set(parentId, group);
+      }
+      for (const [parentId, group] of parentGroups.entries()) {
+        insertParent.run(
+          parentId,
+          relativePath,
+          parentId,
+          group.map(chunk => chunk.text).join('\n\n---\n\n'),
+          file.category,
+          file.format,
+          file.collectionName,
+          group.find(chunk => chunk.sectionTitle)?.sectionTitle ?? null,
+          group.length,
+          JSON.stringify({ parentId, splitStrategy: this.metadataString(group[0]?.metadata.splitStrategy), chunkKind: this.metadataString(group[0]?.metadata.chunkKind) }),
+          now,
+        );
+      }
+
+      for (const chunk of groupedChunks) {
+        const chunkId = `${relativePath}#${chunk.index}`;
         insert.run(
-          `${relativePath}#${chunk.index}`,
+          chunkId,
           relativePath,
           chunk.index,
           chunk.text,
@@ -155,6 +212,7 @@ export class IndexStateStore {
           JSON.stringify(chunk.metadata),
           now,
         );
+        insertFts?.run(chunkId, relativePath, file.category, file.format, chunk.sectionTitle ?? '', chunk.text);
       }
     });
     transaction();
@@ -187,10 +245,80 @@ export class IndexStateStore {
     return rows.map(row => this.rowToChunk(row, 0));
   }
 
+  getContextChunks(relativePath: string, chunkIndex: number, window = 1): StoredChunk[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM kb_chunks
+      WHERE relative_path = ? AND chunk_index BETWEEN ? AND ?
+      ORDER BY chunk_index
+    `).all(relativePath, Math.max(0, chunkIndex - window), chunkIndex + window) as Array<Record<string, unknown>>;
+    return rows.map(row => this.rowToChunk(row, 0));
+  }
+
+  listParentChunks(relativePath: string): StoredParentChunk[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM kb_parent_chunks
+      WHERE relative_path = ?
+      ORDER BY parent_id
+    `).all(relativePath) as Array<Record<string, unknown>>;
+    return rows.map(row => this.rowToParentChunk(row));
+  }
+
+  getParentChunk(relativePath: string, parentId: string): StoredParentChunk | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM kb_parent_chunks
+      WHERE relative_path = ? AND parent_id = ?
+      LIMIT 1
+    `).get(relativePath, parentId) as Record<string, unknown> | undefined;
+    return row ? this.rowToParentChunk(row) : undefined;
+  }
+
+  getChunksByParent(relativePath: string, parentId: string, limit = 6): StoredChunk[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM kb_chunks
+      WHERE relative_path = ? AND metadata_json LIKE ?
+      ORDER BY chunk_index
+      LIMIT ?
+    `).all(relativePath, `%"parentId":"${parentId.replace(/[%_]/gu, '')}"%`, limit) as Array<Record<string, unknown>>;
+    return rows.map(row => this.rowToChunk(row, 0));
+  }
+
   searchChunks(query: string, limit = 10): ChunkSearchResult[] {
     const terms = this.expandSearchTerms(query);
     if (terms.length === 0) return [];
+    if (this.ftsEnabled) {
+      const ftsResults = this.searchChunksFts(terms, limit);
+      if (ftsResults.length > 0) return ftsResults;
+    }
+    return this.searchChunksLike(terms, limit);
+  }
 
+  private searchChunksFts(terms: string[], limit: number): ChunkSearchResult[] {
+    try {
+      const matchQuery = this.toFtsQuery(terms);
+      if (!matchQuery) return [];
+      const rows = this.db.prepare(`
+        SELECT c.*, bm25(kb_chunks_fts, 1.2, 0.8, 0.6, 1.0, 2.0) as bm25_score
+        FROM kb_chunks_fts
+        INNER JOIN kb_chunks c ON c.id = kb_chunks_fts.id
+        WHERE kb_chunks_fts MATCH ?
+        ORDER BY bm25_score ASC
+        LIMIT ?
+      `).all(matchQuery, limit * 8) as Array<Record<string, unknown>>;
+      return rows
+        .map(row => {
+          const keyword = this.scoreChunkDetailed(`${String(row.relative_path)}\n${String(row.category)}\n${String(row.format)}\n${String(row.content)}`, terms);
+          const bm25Score = this.bm25ToPositiveScore(Number(row.bm25_score));
+          return this.rowToChunk(row, keyword.keywordScore + bm25Score, { ...keyword, bm25Score });
+        })
+        .filter(row => row.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit);
+    } catch {
+      return [];
+    }
+  }
+
+  private searchChunksLike(terms: string[], limit: number): ChunkSearchResult[] {
     const rows = this.db.prepare(`
       SELECT * FROM kb_chunks
       WHERE ${terms.map(() => '(LOWER(content) LIKE ? OR LOWER(relative_path) LIKE ? OR LOWER(category) LIKE ? OR LOWER(format) LIKE ?)').join(' OR ')}
@@ -199,7 +327,10 @@ export class IndexStateStore {
     `).all(...terms.flatMap(term => [`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`]), limit * 6) as Array<Record<string, unknown>>;
 
     return rows
-      .map(row => this.rowToChunk(row, this.scoreChunk(`${String(row.relative_path)}\n${String(row.category)}\n${String(row.format)}\n${String(row.content)}`, terms)))
+      .map(row => {
+        const keyword = this.scoreChunkDetailed(`${String(row.relative_path)}\n${String(row.category)}\n${String(row.format)}\n${String(row.content)}`, terms);
+        return this.rowToChunk(row, keyword.keywordScore, keyword);
+      })
       .filter(row => row.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
@@ -344,6 +475,8 @@ export class IndexStateStore {
 
   deleteRecord(relativePath: string): void {
     this.db.prepare('DELETE FROM kb_chunks WHERE relative_path = ?').run(relativePath);
+    this.db.prepare('DELETE FROM kb_parent_chunks WHERE relative_path = ?').run(relativePath);
+    if (this.ftsEnabled) this.db.prepare('DELETE FROM kb_chunks_fts WHERE relative_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_index_state WHERE relative_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_file_hashes WHERE file_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_minhash WHERE file_path = ?').run(relativePath);
@@ -357,6 +490,11 @@ export class IndexStateStore {
       INSERT INTO kb_metadata (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(key, value);
+  }
+
+  getMetadata(key: string): string | undefined {
+    const row = this.db.prepare('SELECT value FROM kb_metadata WHERE key = ?').get(key) as { value?: string } | undefined;
+    return row?.value;
   }
 
   getStats(): { fileCount: number; chunkCount: number; totalSizeBytes: number; lastIndexedAt: number } {
@@ -427,6 +565,22 @@ export class IndexStateStore {
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_category ON kb_chunks(category);
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_collection ON kb_chunks(collection_name);
 
+      CREATE TABLE IF NOT EXISTS kb_parent_chunks (
+        id              TEXT PRIMARY KEY,
+        relative_path   TEXT NOT NULL,
+        parent_id       TEXT NOT NULL,
+        content         TEXT NOT NULL,
+        category        TEXT NOT NULL,
+        format          TEXT NOT NULL,
+        collection_name TEXT NOT NULL,
+        section_title   TEXT,
+        chunk_count     INTEGER NOT NULL,
+        metadata_json   TEXT,
+        created_at      INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_parent_path ON kb_parent_chunks(relative_path);
+      CREATE INDEX IF NOT EXISTS idx_kb_parent_id ON kb_parent_chunks(parent_id);
+
       CREATE TABLE IF NOT EXISTS kb_file_hashes (
         content_hash     TEXT NOT NULL,
         file_path        TEXT PRIMARY KEY,
@@ -490,7 +644,38 @@ export class IndexStateStore {
         created_at  INTEGER NOT NULL
       );
     `);
-    this.setMetadata('schema_version', '1');
+    this.initFts();
+    this.setMetadata('schema_version', '2');
+  }
+
+  private initFts(): void {
+    try {
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(
+          id UNINDEXED,
+          relative_path,
+          category,
+          format,
+          section_title,
+          content,
+          tokenize = 'unicode61 remove_diacritics 2'
+        );
+      `);
+      this.ftsEnabled = true;
+      this.rebuildFtsIfNeeded();
+    } catch {
+      this.ftsEnabled = false;
+    }
+  }
+
+  private rebuildFtsIfNeeded(): void {
+    if (!this.ftsEnabled) return;
+    const row = this.db.prepare('SELECT COUNT(*) as count FROM kb_chunks_fts').get() as { count?: number };
+    if (Number(row.count ?? 0) > 0) return;
+    this.db.prepare(`
+      INSERT INTO kb_chunks_fts (id, relative_path, category, format, section_title, content)
+      SELECT id, relative_path, category, format, COALESCE(section_title, ''), content FROM kb_chunks
+    `).run();
   }
 
   private rowToMinHash(row: Record<string, unknown>): MinHashRecord {
@@ -532,7 +717,61 @@ export class IndexStateStore {
     };
   }
 
-  private rowToChunk(row: Record<string, unknown>, score: number): ChunkSearchResult {
+  private rowToParentChunk(row: Record<string, unknown>): StoredParentChunk {
+    return {
+      id: String(row.id),
+      relativePath: String(row.relative_path),
+      parentId: String(row.parent_id),
+      content: String(row.content),
+      category: String(row.category) as FileCategory,
+      format: String(row.format),
+      collectionName: String(row.collection_name),
+      sectionTitle: row.section_title == null ? undefined : String(row.section_title),
+      chunkCount: Number(row.chunk_count),
+      metadataJson: row.metadata_json == null ? undefined : String(row.metadata_json),
+      createdAt: Number(row.created_at),
+    };
+  }
+
+  private splitParentGroups(relativePath: string, chunks: TextChunk[]): TextChunk[] {
+    const maxChildrenPerParent = 12;
+    const maxTokensPerParent = 4_000;
+    const grouped = new Map<string, TextChunk[]>();
+    for (const chunk of chunks) {
+      const parentId = this.metadataString(chunk.metadata.parentId) ?? `${relativePath}#parent-${chunk.index}`;
+      const list = grouped.get(parentId) ?? [];
+      list.push(chunk);
+      grouped.set(parentId, list);
+    }
+
+    const result: TextChunk[] = [];
+    for (const [parentId, list] of grouped.entries()) {
+      let batch: TextChunk[] = [];
+      let tokenCount = 0;
+      let batchIndex = 0;
+      const flush = () => {
+        if (batch.length === 0) return;
+        const nextParentId = list.length <= maxChildrenPerParent && tokenCount <= maxTokensPerParent ? parentId : `${parentId}@${batchIndex + 1}`;
+        result.push(...batch.map(chunk => ({ ...chunk, metadata: { ...chunk.metadata, parentId: nextParentId, parentGroupIndex: batchIndex } })));
+        batch = [];
+        tokenCount = 0;
+        batchIndex += 1;
+      };
+      for (const chunk of list) {
+        if (batch.length > 0 && (batch.length >= maxChildrenPerParent || tokenCount + chunk.tokenCount > maxTokensPerParent)) flush();
+        batch.push(chunk);
+        tokenCount += chunk.tokenCount;
+      }
+      flush();
+    }
+    return result.sort((a, b) => a.index - b.index);
+  }
+
+  private metadataString(value: unknown): string | undefined {
+    return typeof value === 'string' ? value : undefined;
+  }
+
+  private rowToChunk(row: Record<string, unknown>, score: number, scoreDetails?: ChunkSearchResult['scoreDetails']): ChunkSearchResult {
     return {
       id: String(row.id),
       relativePath: String(row.relative_path),
@@ -546,13 +785,14 @@ export class IndexStateStore {
       metadataJson: row.metadata_json == null ? undefined : String(row.metadata_json),
       createdAt: Number(row.created_at),
       score,
+      scoreDetails,
     };
   }
 
   private expandSearchTerms(query: string): string[] {
     const normalized = query.toLowerCase().trim();
-    const terms = new Set(normalized.split(/[\s,，。；;：:、]+/u).filter(Boolean));
-    if (normalized) terms.add(normalized);
+    const terms = new Set(normalized ? [normalized] : []);
+    for (const term of normalized.split(/[\s,，。；;：:、]+/u).filter(Boolean)) terms.add(term);
     const synonyms: Record<string, string[]> = {
       招标: ['招标', '投标', '标书', '招标文件', '投标文件', 'bid', 'tender', 'bidding'],
       投标: ['招标', '投标', '标书', '招标文件', '投标文件', 'bid', 'tender', 'bidding'],
@@ -567,17 +807,44 @@ export class IndexStateStore {
     return [...terms];
   }
 
-  private scoreChunk(content: string, terms: string[]): number {
+  private toFtsQuery(terms: string[]): string {
+    const normalized = terms.map(term => term.replace(/["*^:(){}\]\\[]/gu, ' ').trim()).filter(term => term.length > 0);
+    const exact = normalized[0];
+    const weak = normalized.slice(1).filter(term => term.length >= 2).slice(0, 12);
+    return [exact ? `"${exact}"` : '', ...weak.map(term => `"${term}"`)].filter(Boolean).join(' OR ');
+  }
+
+  private bm25ToPositiveScore(score: number): number {
+    if (!Number.isFinite(score)) return 0;
+    return 1 / (1 + Math.max(0, score));
+  }
+
+  private scoreChunkDetailed(content: string, terms: string[]): Required<Pick<NonNullable<ChunkSearchResult['scoreDetails']>, 'keywordScore' | 'exactPhraseBoost'>> {
     const lower = content.toLowerCase();
-    let score = 0;
+    let raw = 0;
+    let exactPhraseBoost = 0;
+    const exactPhrase = terms[0] ?? '';
+    const exactHits = exactPhrase ? this.countOccurrences(lower, exactPhrase) : 0;
+    if (exactHits > 0) exactPhraseBoost = 1000 + exactHits * 20;
+    raw += exactPhraseBoost;
     for (const term of terms) {
-      let index = lower.indexOf(term);
-      while (index !== -1) {
-        score += 1;
-        index = lower.indexOf(term, index + term.length);
-      }
+      if (term === exactPhrase) continue;
+      raw += this.countOccurrences(lower, term) * 0.2;
     }
-    return score / Math.max(1, content.length / 1000);
+    return {
+      keywordScore: raw / Math.max(1, content.length / 1000),
+      exactPhraseBoost,
+    };
+  }
+
+  private countOccurrences(content: string, term: string): number {
+    let count = 0;
+    let index = content.indexOf(term);
+    while (index !== -1) {
+      count += 1;
+      index = content.indexOf(term, index + term.length);
+    }
+    return count;
   }
 
   private rowToRecord(row: Record<string, unknown>): IndexStateRecord {

@@ -157,7 +157,7 @@ export function renderFileDropdown(
     const labelW = Math.max(8, width - 6 - detailW);
     const clippedLabel = clipAnsiSafe(it.label, labelW);
     const clippedDetail = it.detail ? clipAnsiSafe(it.detail, detailW) : '';
-    const name = it.highlighted ? t.selected(` ${clippedLabel} `) : t.text(` ${clippedLabel} `);
+    const name = it.highlighted ? t.selected(clippedLabel) : t.text(clippedLabel);
     const extra = clippedDetail ? ' ' + t.faint(clippedDetail) : '';
     const rpad = Math.max(0, width - 4 - visibleLen(clippedLabel) - (clippedDetail ? 1 + visibleLen(clippedDetail) : 0));
     out.push(t.subtle(B.v) + ` ${mark} ${name}${extra}${' '.repeat(rpad)} ` + t.subtle(B.v));
@@ -236,7 +236,7 @@ export function toolCallFolding(toolName: string, count: number, latest: string,
   const countText = count > 1 ? ` ${t.subtle(`· ${count} ${toolsLabel}`)}` : '';
   const argsStr = latest ? ` ${t.subtle('·')} ${t.dim(latest.slice(0, 60))}` : '';
   const dur = elapsedMs !== undefined ? t.subtle(` ${formatDuration(elapsedMs)}`) : '';
-  return `\r\x1b[2K${toolTitle(toolName, label)}${countText}${argsStr}${dur}\r`;
+  return `${toolTitle(toolName, label)}${countText}${argsStr}${dur}`;
 }
 
 export function toolCallPending(toolName: string, count: number, latest: string, elapsedMs?: number, label?: string, toolsLabel = 'tools'): string {
@@ -285,27 +285,18 @@ const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '�
 
 /** 基础 spinner（非思考场景使用） */
 export function spinnerStart(label?: string, write: (text: string) => void = process.stdout.write.bind(process.stdout)): { stop: () => void; update: (text: string) => void; tick: () => void } {
-  if (!supportsAnimation()) {
-    let printed = false;
-    return {
-      update: (text: string) => { if (!printed) { write(`${normalizeTerminalText(text)}\n`); printed = true; } },
-      tick: () => {},
-      stop: () => {},
-    };
-  }
   let text = label ?? 'Thinking…';
   let idx = 0;
   const redraw = () => {
-    write('\r' + t.accent(SPIN[idx % SPIN.length]!) + ' ' + t.dim(text));
+    const frame = supportsAnimation() ? SPIN[idx % SPIN.length]! : '…';
+    write(`${t.accent(frame)} ${t.dim(text)}`);
   };
-  const interval = setInterval(() => { idx++; redraw(); }, 100);
+  const interval = supportsAnimation() ? setInterval(() => { idx++; redraw(); }, 100) : null;
+  redraw();
   return {
-    update: (t: string) => { text = t; redraw(); },
-    tick: () => { redraw(); },
-    stop: () => {
-      clearInterval(interval);
-      write('\r\x1b[2K');
-    },
+    update: (next: string) => { text = next; redraw(); },
+    tick: () => { idx++; redraw(); },
+    stop: () => { if (interval) clearInterval(interval); },
   };
 }
 
@@ -371,7 +362,7 @@ export function thinkingSpinner(tipPool: string[] = [], write: (text: string) =>
       thinkStart: () => {},
       thinkTick: () => {},
       thinkDone: (elapsedMs: number, tokens: number, expandHint: string) => {
-        write(`${normalizeTerminalText(thinkingSummary(formatDuration(elapsedMs), `${tokens}`, expandHint, labels))}\n`);
+        write(normalizeTerminalText(thinkingSummary(formatDuration(elapsedMs), `${tokens}`, expandHint, labels)));
       },
       stop: () => {},
     };
@@ -380,7 +371,7 @@ export function thinkingSpinner(tipPool: string[] = [], write: (text: string) =>
   let state: { elapsedMs: number; tokens: number; subtitle: string } = { elapsedMs: 0, tokens: 0, subtitle: '' };
   let interval: ReturnType<typeof setInterval> | null = null;
   let done = false;
-  let linesOnScreen = 0; // 0 或 1
+  let linesOnScreen = 0;
   let currentTip = '';
   let startMs = 0;
 
@@ -396,14 +387,15 @@ export function thinkingSpinner(tipPool: string[] = [], write: (text: string) =>
   };
 
   const redraw = () => {
-    if (done || linesOnScreen === 0) return;
-    const frame = SPIN[idx % SPIN.length]!;
+    if (done) return;
+    const frame = supportsAnimation() ? SPIN[idx % SPIN.length]! : '…';
     const elapsedMs = startMs > 0 ? Date.now() - startMs : state.elapsedMs;
     const elapsed = formatTime(elapsedMs);
     const tok = formatTokens(state.tokens);
     const sub = state.subtitle || currentTip || '';
-    const line = thinkingLive(frame, elapsed, tok, sub, labels).split('\n')[0]!;
-    write(`\r${line}`);
+    const live = thinkingLive(frame, elapsed, tok, sub, labels);
+    write(live);
+    linesOnScreen = live.split('\n').length;
   };
 
   return {
@@ -413,7 +405,7 @@ export function thinkingSpinner(tipPool: string[] = [], write: (text: string) =>
       state = { elapsedMs: 0, tokens: 0, subtitle: '' };
       done = false;
       pickTip();
-      linesOnScreen = 1;
+      linesOnScreen = 0;
       redraw();
       if (!interval) interval = setInterval(() => { idx++; redraw(); }, 100);
     },
@@ -423,19 +415,17 @@ export function thinkingSpinner(tipPool: string[] = [], write: (text: string) =>
     thinkDone: (elapsedMs: number, tokens: number, expandHint: string) => {
       if (interval) { clearInterval(interval); interval = null; }
       done = true;
-      if (linesOnScreen === 0) return;
+      const hadLive = linesOnScreen > 0;
+      linesOnScreen = 0;
+      if (!hadLive) return;
       const time = formatTime(elapsedMs);
       const tok = formatTokens(tokens);
-      write(`\r${thinkingSummary(time, tok, expandHint, labels)}\n`);
-      linesOnScreen = 0;
+      write(thinkingSummary(time, tok, expandHint, labels));
     },
     stop: () => {
       if (interval) { clearInterval(interval); interval = null; }
       done = true;
-      if (linesOnScreen > 0) {
-        write('\r\x1b[2K');
-        linesOnScreen = 0;
-      }
+      linesOnScreen = 0;
     },
   };
 }

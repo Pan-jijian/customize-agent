@@ -133,13 +133,14 @@ async function runAllCleanupHandlers(): Promise<void> {
 }
 
 function registerGlobalCleanup(): void {
-  // Use once listeners to avoid duplicate registration
+  // ⚠️ 清理处理器仅设置 exitCode，不强制 process.exit()
+  // 调用方可在清理完成后自行决定是否退出进程
   process.once('SIGINT', () => {
-    void runAllCleanupHandlers().then(() => process.exit(130));
+    void runAllCleanupHandlers().then(() => { process.exitCode = 130; });
   });
 
   process.once('SIGTERM', () => {
-    void runAllCleanupHandlers().then(() => process.exit(143));
+    void runAllCleanupHandlers().then(() => { process.exitCode = 143; });
   });
 
   // 'exit' event is synchronous — fire handlers but don't block

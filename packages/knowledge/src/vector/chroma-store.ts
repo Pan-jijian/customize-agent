@@ -23,16 +23,17 @@ export class ChromaHttpClient implements CollectionClient {
   readonly baseUrl: string;
   readonly tenant: string;
   readonly database: string;
+  private readonly collectionIds = new Map<string, string>();
 
   constructor(options: ChromaClientOptions = {}) {
-    this.baseUrl = options.baseUrl ?? 'http://localhost:8000';
+    this.baseUrl = options.baseUrl ?? process.env.CHROMA_URL ?? process.env.CHROMA_BASE_URL ?? 'http://localhost:17322';
     this.tenant = options.tenant ?? 'default_tenant';
     this.database = options.database ?? 'default_database';
   }
 
   async heartbeat(): Promise<boolean> {
     try {
-      await this.request('/api/v1/heartbeat');
+      await this.request('/api/v2/heartbeat');
       return true;
     } catch {
       return false;
@@ -40,26 +41,31 @@ export class ChromaHttpClient implements CollectionClient {
   }
 
   async getOrCreateCollection(name: string, metadata: Record<string, unknown> = {}): Promise<VectorCollectionInfo> {
+    const body: Record<string, unknown> = { name, get_or_create: true };
+    if (Object.keys(metadata).length > 0) body.metadata = metadata;
     const response = await this.request<ChromaCollectionResponse>(this.collectionsPath(), {
       method: 'POST',
-      body: JSON.stringify({ name, metadata, get_or_create: true }),
-    });
+      body: JSON.stringify(body),
+    }, 10000);
+    if (response.id) this.collectionIds.set(name, response.id);
     return this.toCollectionInfo(response);
   }
 
   async listCollections(): Promise<VectorCollectionInfo[]> {
-    const response = await this.request<ChromaCollectionResponse[]>(this.collectionsPath());
+    const response = await this.request<ChromaCollectionResponse[]>(this.collectionsPath(), {}, 10000);
+    for (const collection of response) if (collection.id) this.collectionIds.set(collection.name, collection.id);
     return response.map(collection => this.toCollectionInfo(collection));
   }
 
   async deleteCollection(name: string): Promise<void> {
     await this.request(`${this.collectionsPath()}/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    this.collectionIds.delete(name);
   }
 
   async upsert(collectionName: string, documents: VectorDocument[]): Promise<void> {
     if (documents.length === 0) return;
-    await this.getOrCreateCollection(collectionName);
-    await this.request(`${this.collectionsPath()}/${encodeURIComponent(collectionName)}/upsert`, {
+    const collectionId = await this.getCollectionId(collectionName);
+    await this.request(`${this.collectionsPath()}/${encodeURIComponent(collectionId)}/upsert`, {
       method: 'POST',
       body: JSON.stringify({
         ids: documents.map(document => document.id),
@@ -67,18 +73,20 @@ export class ChromaHttpClient implements CollectionClient {
         documents: documents.map(document => document.content),
         metadatas: documents.map(document => document.metadata),
       }),
-    });
+    }, 30000);
   }
 
   async deleteWhere(collectionName: string, where: Record<string, string | number | boolean>): Promise<void> {
-    await this.request(`${this.collectionsPath()}/${encodeURIComponent(collectionName)}/delete`, {
+    const collectionId = await this.getCollectionId(collectionName);
+    await this.request(`${this.collectionsPath()}/${encodeURIComponent(collectionId)}/delete`, {
       method: 'POST',
       body: JSON.stringify({ where }),
-    });
+    }, 10000);
   }
 
   async query(collectionName: string, query: VectorSearchQuery): Promise<ChromaQueryResponse> {
-    return this.request<ChromaQueryResponse>(`${this.collectionsPath()}/${encodeURIComponent(collectionName)}/query`, {
+    const collectionId = await this.getCollectionId(collectionName);
+    return this.request<ChromaQueryResponse>(`${this.collectionsPath()}/${encodeURIComponent(collectionId)}/query`, {
       method: 'POST',
       body: JSON.stringify({
         query_embeddings: [query.queryEmbedding],
@@ -86,21 +94,38 @@ export class ChromaHttpClient implements CollectionClient {
         where: query.where,
         include: ['documents', 'metadatas', 'distances'],
       }),
-    });
+    }, 10000);
+  }
+
+  private async getCollectionId(name: string): Promise<string> {
+    const cached = this.collectionIds.get(name);
+    if (cached) return cached;
+    const collection = await this.getOrCreateCollection(name);
+    if (!collection.id) throw new Error(`ChromaDB collection has no id: ${name}`);
+    this.collectionIds.set(name, collection.id);
+    return collection.id;
   }
 
   private collectionsPath(): string {
-    return `/api/v1/tenants/${encodeURIComponent(this.tenant)}/databases/${encodeURIComponent(this.database)}/collections`;
+    return `/api/v2/tenants/${encodeURIComponent(this.tenant)}/databases/${encodeURIComponent(this.database)}/collections`;
   }
 
-  private async request<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        'content-type': 'application/json',
-        ...init.headers,
-      },
-    });
+  private async request<T = unknown>(path: string, init: RequestInit = {}, timeoutMs = 3000): Promise<T> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${path}`, {
+        ...init,
+        signal: controller.signal,
+        headers: {
+          'content-type': 'application/json',
+          ...(init.headers ?? {}),
+        },
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!response.ok) {
       throw new Error(`ChromaDB request failed: ${response.status} ${response.statusText}`);

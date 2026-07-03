@@ -14,6 +14,11 @@ function cb(text: string, fg: number, bg: number): string {
   return supportsAnsi() ? `\x1b[38;5;${fg}m\x1b[48;5;${bg}m${value}\x1b[39;49m` : value;
 }
 
+function visibleLen(text: string): number {
+  const ansiRe = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[A-Za-z]`, 'g');
+  return stringWidth(text.replace(ansiRe, ''));
+}
+
 type HeadingToken    = Parameters<Renderer['heading']>[0];
 type ParagraphToken  = Parameters<Renderer['paragraph']>[0];
 type BlockquoteToken = Parameters<Renderer['blockquote']>[0];
@@ -118,14 +123,14 @@ class TerminalRenderer extends Renderer {
     const overhead = colCount * (cellPad + 1) + 1;
     const usableW = Math.max(colCount * 4, totalW - overhead);
 
-    const pad = (s: string, w: number): string => { const v = stringWidth(s); return s + ' '.repeat(Math.max(0, w - v)); };
+    const pad = (s: string, w: number): string => { const v = visibleLen(s); return s + ' '.repeat(Math.max(0, w - v)); };
     const renderedHeader = token.header.map(c => this._renderInline(c.tokens));
     const renderedRows = token.rows.map(row => row.map(c => this._renderInline(c.tokens)));
 
     const rawMaxPerCol: number[] = [];
     for (let i = 0; i < colCount; i++) {
-      let maxW = stringWidth(renderedHeader[i]!);
-      for (const row of renderedRows) maxW = Math.max(maxW, stringWidth(row[i]!));
+      let maxW = visibleLen(renderedHeader[i]!);
+      for (const row of renderedRows) maxW = Math.max(maxW, visibleLen(row[i]!));
       rawMaxPerCol.push(maxW);
     }
     const colWidths: number[] = rawMaxPerCol.map(raw => Math.min(raw, usableW));
@@ -148,7 +153,7 @@ class TerminalRenderer extends Renderer {
     }
 
     const wrapCell = (content: string, w: number): string[] =>
-      stringWidth(content) <= w ? [content] : wrapAnsi(content, w, { hard: true, trim: false }).split('\n');
+      visibleLen(content) <= w ? [content] : wrapAnsi(content, w, { hard: true, trim: false }).split('\n');
     const headerWrapped = renderedHeader.map((c, i) => wrapCell(c, colWidths[i]!));
     const rowsWrapped = renderedRows.map(row => row.map((c, i) => wrapCell(c, colWidths[i]!)));
 

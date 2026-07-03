@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { getConfigStore } from '@/services/configService';
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (!['GET', 'PUT'].includes(req.method!)) return res.status(405).json({ error: 'Method not allowed' });
   try {
     const store = getConfigStore();
     if (req.method === 'PUT') {
@@ -24,5 +25,5 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(200).json({ success: true });
     }
     res.status(200).json(store.load().models);
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+  } catch (e: unknown) { console.error('[api] config/models', e); res.status(500).json({ error: 'Internal server error' }); }
 }
