@@ -185,21 +185,18 @@ async function startDashboardInBackground(port: number, chromaUrl: string): Prom
       CHROMA_URL: chromaUrl,
       NODE_PATH: nodePathEntries.join(process.platform === 'win32' ? ';' : ':'),
     };
-    if (isBundled) {
-      const serverEntry = resolve(serverDir, 'apps', 'server', 'server.js');
-      // cwd 设为 dist/server/（而非 apps/server/），避免 Windows 文件锁
-      // server.js 内 process.chdir 已在 bundle 时移除
-      const proc = spawn(process.execPath, [serverEntry], { cwd: resolve(serverDir), stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true });
-      if (proc.pid) spawnedPids.add(proc.pid);
-      proc.unref();
-    } else {
-      const nextCli = resolve(serverDir, 'node_modules', 'next', 'dist', 'bin', 'next');
-      const proc = spawn(process.execPath, [nextCli, 'start', '-p', String(port)], { cwd: serverDir, stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true });
-      if (proc.pid) spawnedPids.add(proc.pid);
-      proc.unref();
-    }
+    const proc = isBundled
+      ? spawn(process.execPath, [resolve(serverDir, 'apps', 'server', 'server.js')], { cwd: resolve(serverDir), stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true })
+      : spawn(process.execPath, [resolve(serverDir, 'node_modules', 'next', 'dist', 'bin', 'next'), 'start', '-p', String(port)], { cwd: serverDir, stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true });
+    let childStopped = false;
+    proc.once('error', () => { childStopped = true; });
+    proc.once('exit', () => { childStopped = true; });
+    if (proc.pid) spawnedPids.add(proc.pid);
+    proc.unref();
+
     closeSync(logFile.fd);
     for (let attempt = 0; attempt < 60; attempt += 1) {
+      if (childStopped) return false;
       const nextHealth = await fetchDashboardHealth(port);
       if (nextHealth?.buildId === localBuildId) return true;
       await new Promise(resolve => setTimeout(resolve, 1000));
