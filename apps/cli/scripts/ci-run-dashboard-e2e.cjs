@@ -77,10 +77,12 @@ async function verifyDashboard() {
     env: { ...process.env, CUSTOMIZE_AGENT_E2E_DASHBOARD: '1' },
     detached: false,
   });
-
   let exitCode = 1;
   try {
-    await verifyDashboard();
+    await Promise.race([
+      verifyDashboard(),
+      new Promise((_, reject) => proc.on('exit', (code, signal) => reject(new Error(`CLI exited code=${code} signal=${signal}`)))),
+    ]);
     exitCode = 0;
   } catch (error) {
     console.error(error && error.stack ? error.stack : String(error));
