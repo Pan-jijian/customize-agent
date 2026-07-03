@@ -1,5 +1,32 @@
 # customize-agent
 
+## 2.1.9
+
+### Patch Changes
+
+- ## 🔧 重构打包策略 — postinstall 安装依赖
+
+  ### 🔍 问题
+
+  - npm 包捆绑 `dist/server/node_modules/`（50 个包含原生模块），tarball 3000+ 文件
+  - Windows 安装 EBUSY：文件锁定 + 大目录 rename 超时
+  - 跨平台：预编译的原生模块不兼容
+
+  ### 🔧 重构
+
+  1. **npm tarball 仅含纯 JS**（455 文件，~6MB，不含 node_modules）
+  2. **postinstall 运行 setup.js**：自动 `npm install` 平台正确的依赖 + 链接 workspace 包
+  3. **`files` 字段排除**：`!dist/server/node_modules` 确保不打包原生模块
+
+  ### 📦 对比
+
+  |                | 重构前     | 重构后   |
+  | -------------- | ---------- | -------- |
+  | tarball 文件数 | ~3000+     | 455      |
+  | 包大小         | ~200MB     | ~6MB     |
+  | Windows EBUSY  | 频繁       | 根除     |
+  | 跨平台兼容     | 需 rebuild | 原生安装 |
+
 ## 2.1.8
 
 ### Patch Changes
