@@ -32,25 +32,25 @@
   border-bottom: 1px solid color-mix(in srgb, var(--borderColor) 48%, transparent);
 }
 
-.sidebarLogoIcon {
-  width: 38px; height: 38px;
-  border-radius: 15px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background:
-    radial-gradient(circle at 28% 22%, rgba(255,255,255,.75), transparent 22%),
-    linear-gradient(145deg, #6dd5ff 0%, #007aff 46%, #5e5ce6 100%);
-  box-shadow: 0 10px 26px rgba(0, 122, 255, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.52);
-}
-
 .sidebarLogoTitle {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 800;
   letter-spacing: -0.035em;
   line-height: 1.15;
-  color: var(--colorText);
+}
+
+.logoGradient {
+  background: linear-gradient(135deg, #007aff 0%, #5856d6 50%, #af52de 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.dark .logoGradient {
+  background: linear-gradient(135deg, #0a84ff 0%, #5e5ce6 50%, #bf5af2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .sidebarLogoSub {
@@ -82,7 +82,7 @@
 
 .sidebarCollapsedSelf .sidebarLogo {
   justify-content: center;
-  padding: 16px 10px;
+  padding: 16px 8px;
 }
 
 .sidebarCollapsedSelf .sidebarLogoTitle,

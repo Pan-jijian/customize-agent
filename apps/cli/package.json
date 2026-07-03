@@ -1,6 +1,6 @@
 {
   "name": "customize-agent",
-  "version": "2.1.9",
+  "version": "2.1.10",
   "description": "通用终端 AI 助手 — 原生 Function Calling + 双语 TUI + 三级模型分层",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,10 +15,11 @@
     "customize": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc && node scripts/bundle-server.mjs",
+    "build": "tsc && node scripts/bundle-server.mjs & node -e \"require('fs').cpSync('scripts/kill-server.cjs','dist/scripts/kill-server.cjs')\"",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "start": "node ./dist/index.js",
+    "preinstall": "node scripts/kill-server.cjs",
     "postinstall": "node dist/server/setup.js"
   },
   "license": "MIT",
@@ -30,7 +31,8 @@
   },
   "files": [
     "dist",
-    "!dist/server/node_modules"
+    "!dist/server/node_modules",
+    "scripts/kill-server.cjs"
   ],
   "publishConfig": {
     "access": "public"
