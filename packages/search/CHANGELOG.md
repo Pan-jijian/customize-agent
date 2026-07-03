@@ -1,5 +1,28 @@
 # @customize-agent/search
 
+## 2.0.3
+
+### Patch Changes
+
+- ## 🐛 修复 Web 服务 Internal Server Error（根因修复）
+
+  ### 🔍 根因
+
+  `bundle-server.mjs` 将 `node_modules` 重命名为 `vendor` 并通过 CJS `Module._resolveFilename` monkey-patch 解析依赖。**这只对 CJS `require()` 有效**，ESM `import`（如 `next-themes`）不走此通道，导致 `ERR_MODULE_NOT_FOUND` → Internal Server Error。
+
+  ### 🔧 修复
+
+  1. **保留 `node_modules` 目录名**：不再重命名为 `vendor`，Node.js 原生 CJS+ESM 解析器从 `dist/server/apps/server/` 向上查找到 `../../node_modules/` 即可自然解析所有依赖
+  2. **移除 CJS monkey-patch**：不再注入 `Module._resolveFilename` 补丁代码到 `server.js`
+  3. **修复 tree-sitter 版本**：`^0.21.1` → `^0.22.0`（新版语法包 `tree-sitter-c@0.23.6` 等已升级 peer dep 范围）
+
+  ### ✅ 验证
+
+  - 所有 Web 页面 HTTP 200：`/overview`、`/knowledge/files`、`/knowledge/manage`、`/models`、`/settings`
+  - API 正常：`/api/health`、`/api/kb/stats`
+  - 252 测试全部通过
+  - 零服务端错误
+
 ## 2.0.2
 
 ### Patch Changes
