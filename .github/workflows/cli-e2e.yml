@@ -38,6 +38,7 @@ jobs:
           test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize.cmd"
           test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent.cmd"
       - name: Start CLI and verify dashboard
+        timeout-minutes: 5
         shell: bash
         run: |
           export HOME="$RUNNER_TEMP/home"
