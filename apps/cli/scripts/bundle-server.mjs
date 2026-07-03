@@ -183,6 +183,67 @@ function generateServerPackageJson(destDir) {
 }
 generateServerPackageJson(destDir);
 
+// 清除所有子 package.json 中的 workspace:* 协议
+// npm 安装时会扫描 tarball 中所有 package.json，遇到 workspace:* 报 EUNSUPPORTEDPROTOCOL
+{
+  const workspaceVersionMap = {};
+  for (const entry of readdirSync(monorepoPackagesDir)) {
+    const pkgJson = resolve(monorepoPackagesDir, entry, 'package.json');
+    if (!existsSync(pkgJson)) continue;
+    try {
+      const pkg = JSON.parse(readFileSync(pkgJson, 'utf-8'));
+      if (pkg.name && pkg.version) workspaceVersionMap[pkg.name] = pkg.version;
+    } catch {}
+  }
+
+  function sanitizeDir(dir) {
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir)) {
+      if (entry === 'node_modules' || entry === '.pnpm') continue;
+      const full = resolve(dir, entry);
+      try {
+        const stat = lstatSync(full);
+        if (stat.isDirectory()) {
+          sanitizeDir(full);
+        } else if (entry === 'package.json') {
+          sanitizeFile(full);
+        }
+      } catch {}
+    }
+  }
+
+  function sanitizeFile(filePath) {
+    try {
+      const pkg = JSON.parse(readFileSync(filePath, 'utf-8'));
+      let modified = false;
+      for (const field of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+        const deps = pkg[field];
+        if (!deps) continue;
+        for (const [name, version] of Object.entries(deps)) {
+          if (typeof version === 'string' && version.startsWith('workspace:')) {
+            const actualVersion = workspaceVersionMap[name];
+            if (actualVersion) {
+              deps[name] = '^' + actualVersion;
+            } else {
+              delete deps[name];
+            }
+            modified = true;
+          }
+        }
+        // 清理空对象
+        if (modified && Object.keys(deps).length === 0) delete pkg[field];
+      }
+      if (modified) {
+        writeFileSync(filePath, JSON.stringify(pkg, null, 2) + '\n');
+        const relPath = filePath.replace(destDir, '');
+        console.log('[bundle-server] Sanitized workspace:* in dist/server' + relPath);
+      }
+    } catch {}
+  }
+
+  sanitizeDir(destDir);
+}
+
 // 生成 setup.js — postinstall 执行，安装依赖并链接 workspace 包
 const setupJs = `
 const { execSync } = require('child_process');
