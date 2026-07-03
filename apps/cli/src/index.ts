@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // ↑ shebang — 必须保留。让操作系统知道用 Node.js 执行此文件，CLI 的 bin 入口依赖它。
 import { Command } from 'commander';
-import { readFileSync } from 'fs';
-import { dirname, resolve } from 'path';
+import { execSync } from 'child_process';
+import { cpSync, mkdirSync, readFileSync, rmSync } from 'fs';
+import { homedir } from 'os';
+import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
@@ -37,7 +39,6 @@ function cleanupChildProcesses() {
   for (const pid of spawnedPids) {
     try {
       if (process.platform === 'win32') {
-        const { execSync } = require('child_process');
         execSync(`taskkill /F /PID ${pid}`, { timeout: 3000, stdio: 'ignore' });
       } else {
         process.kill(pid, 'SIGTERM');
@@ -78,12 +79,35 @@ async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
   }
 }
 
+function setupDashboardServerIfNeeded(existsSync: (path: string) => boolean): void {
+  const bundleDir = resolve(CLI_DIR, 'server-bundle');
+  const targetDir = join(homedir(), '.customize-agent', 'server');
+  const bundleBuildIdPath = resolve(bundleDir, 'apps', 'server', '.next', 'BUILD_ID');
+  if (!existsSync(resolve(bundleDir, '.dashboard-bundled')) || !existsSync(bundleBuildIdPath)) return;
+  try {
+    const bundleBuildId = readFileSync(bundleBuildIdPath, 'utf8').trim();
+    const targetBuildIdPath = resolve(targetDir, 'apps', 'server', '.next', 'BUILD_ID');
+    const targetBuildId = existsSync(targetBuildIdPath) ? readFileSync(targetBuildIdPath, 'utf8').trim() : '';
+    const runtimeModules = resolve(targetDir, 'node_modules');
+    const runtimeThemeModule = resolve(runtimeModules, 'next-themes', 'package.json');
+    if (bundleBuildId === targetBuildId && existsSync(runtimeThemeModule)) return;
+    if (bundleBuildId !== targetBuildId && existsSync(targetDir)) rmSync(targetDir, { recursive: true, force: true });
+    mkdirSync(targetDir, { recursive: true });
+    cpSync(bundleDir, targetDir, { recursive: true, dereference: true });
+    const vendorModules = resolve(targetDir, 'vendor_modules');
+    if (existsSync(vendorModules)) {
+      cpSync(vendorModules, runtimeModules, { recursive: true, dereference: true, force: true });
+    }
+  } catch {
+    // Dashboard setup must not block CLI startup.
+  }
+}
+
 function findDashboardServerDir(existsSync: (path: string) => boolean): string | null {
-  const { homedir } = require('os') as typeof import('os');
-  const { join } = require('path') as typeof import('path');
+  setupDashboardServerIfNeeded(existsSync);
 
   // Primary: ~/.customize-agent/server/ (outside npm dir, no EBUSY risk)
-  // Fallback: bundled seed in dist/server-bundle/ (first install before postinstall)
+  // Fallback: bundled seed in dist/server-bundle/ (first run before setup)
   // Fallback: monorepo dev paths
   const candidates = [
     { dir: join(homedir(), '.customize-agent', 'server'), marker: '.dashboard-bundled' },
@@ -149,7 +173,18 @@ async function startDashboardInBackground(port: number, chromaUrl: string): Prom
     await stopProcessListeningOnPort(port);
 
     const logFile = await dashboardLogFile(port);
-    const commonEnv = { ...process.env, PORT: String(port), NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT, CHROMA_URL: chromaUrl };
+    const cliNodeModules = resolve(CLI_DIR, '..', '..');
+    const serverVendorModules = resolve(serverDir, 'vendor_modules');
+    const nodePathEntries = [serverVendorModules, cliNodeModules];
+    if (process.env.NODE_PATH) nodePathEntries.push(process.env.NODE_PATH);
+    const commonEnv = {
+      ...process.env,
+      PORT: String(port),
+      NODE_ENV: 'production',
+      CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT,
+      CHROMA_URL: chromaUrl,
+      NODE_PATH: nodePathEntries.join(process.platform === 'win32' ? ';' : ':'),
+    };
     if (isBundled) {
       const serverEntry = resolve(serverDir, 'apps', 'server', 'server.js');
       // cwd 设为 dist/server/（而非 apps/server/），避免 Windows 文件锁

@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "private": true,
   "description": "Customize Agent Web 管理控制台",
   "scripts": {

@@ -38,66 +38,144 @@ importers:
 
   apps/cli:
     dependencies:
+      '@ant-design/icons':
+        specifier: ^6.3.2
+        version: 6.3.2(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@customize-agent/engine':
-        specifier: workspace:*
-        version: link:../../packages/engine
+        specifier: ^2.1.5
+        version: 2.1.5(ws@8.21.0)(zod@4.4.3)
       '@customize-agent/knowledge':
-        specifier: workspace:*
-        version: link:../../packages/knowledge
+        specifier: ^2.1.3
+        version: 2.1.3
       '@customize-agent/llm':
-        specifier: workspace:*
-        version: link:../../packages/llm
+        specifier: ^2.0.4
+        version: 2.0.4(ws@8.21.0)(zod@4.4.3)
       '@customize-agent/memory':
-        specifier: workspace:*
-        version: link:../../packages/memory
+        specifier: ^2.0.4
+        version: 2.0.4
       '@customize-agent/runtime':
-        specifier: workspace:*
-        version: link:../../packages/runtime
+        specifier: ^2.0.4
+        version: 2.0.4
       '@customize-agent/search':
-        specifier: workspace:*
-        version: link:../../packages/search
+        specifier: ^2.0.8
+        version: 2.0.8(ws@8.21.0)(zod@4.4.3)
       '@customize-agent/tools':
-        specifier: workspace:*
-        version: link:../../packages/tools
+        specifier: ^2.1.7
+        version: 2.1.7(ws@8.21.0)(zod@4.4.3)
       '@customize-agent/types':
-        specifier: workspace:*
-        version: link:../../packages/types
+        specifier: ^2.0.4
+        version: 2.0.4
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@4.4.3)
       '@napi-rs/canvas':
         specifier: ^0.1.82
         version: 0.1.100
       '@vscode/ripgrep':
         specifier: ^1.18.0
         version: 1.18.0
+      antd:
+        specifier: ^6.5.0
+        version: 6.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      archiver:
+        specifier: ^8.0.0
+        version: 8.0.0
+      better-sqlite3:
+        specifier: ^12.10.0
+        version: 12.10.0
       chromadb:
         specifier: ^3.0.18
         version: 3.5.0
       commander:
         specifier: ^15.0.0
         version: 15.0.0
+      execa:
+        specifier: ^9.6.1
+        version: 9.6.1
       fast-glob:
         specifier: ^3.3.3
         version: 3.3.3
       jszip:
         specifier: ^3.10.1
         version: 3.10.1
+      lucide-react:
+        specifier: ^0.400.0
+        version: 0.400.0(react@19.2.7)
       mammoth:
         specifier: ^1.12.0
         version: 1.12.0
       marked:
         specifier: ^15.0.12
         version: 15.0.12
+      next:
+        specifier: ^15.1.0
+        version: 15.5.19(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(sass@1.101.0)
+      next-themes:
+        specifier: ^0.4.0
+        version: 0.4.6(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      openai:
+        specifier: ^6.42.0
+        version: 6.42.0(ws@8.21.0)(zod@4.4.3)
       pdf-parse:
         specifier: ^2.4.5
         version: 2.4.5
       pdfjs-dist:
         specifier: ^5.4.394
         version: 5.7.284
+      react:
+        specifier: ^19.0.0
+        version: 19.2.7
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.7(react@19.2.7)
+      sharp:
+        specifier: ^0.35.2
+        version: 0.35.2
       string-width:
         specifier: ^8.2.1
         version: 8.2.1
       tesseract.js:
         specifier: ^7.0.0
         version: 7.0.0
+      tree-sitter:
+        specifier: 0.21.1
+        version: 0.21.1
+      tree-sitter-c:
+        specifier: ^0.23.0
+        version: 0.23.6(tree-sitter@0.21.1)
+      tree-sitter-cpp:
+        specifier: ^0.23.0
+        version: 0.23.4(tree-sitter@0.21.1)
+      tree-sitter-go:
+        specifier: ^0.23.0
+        version: 0.23.4(tree-sitter@0.21.1)
+      tree-sitter-java:
+        specifier: ^0.23.0
+        version: 0.23.5(tree-sitter@0.21.1)
+      tree-sitter-javascript:
+        specifier: ^0.23.0
+        version: 0.23.1(tree-sitter@0.21.1)
+      tree-sitter-php:
+        specifier: ^0.23.0
+        version: 0.23.12(tree-sitter@0.21.1)
+      tree-sitter-python:
+        specifier: ^0.23.0
+        version: 0.23.6(tree-sitter@0.21.1)
+      tree-sitter-ruby:
+        specifier: ^0.23.0
+        version: 0.23.1(tree-sitter@0.21.1)
+      tree-sitter-rust:
+        specifier: ^0.23.0
+        version: 0.23.3(tree-sitter@0.21.1)
+      tree-sitter-typescript:
+        specifier: ^0.23.0
+        version: 0.23.2(tree-sitter@0.21.1)
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vscode-languageserver-protocol:
+        specifier: ^3.17.5
+        version: 3.18.0
       wrap-ansi:
         specifier: ^10.0.0
         version: 10.0.0
@@ -285,11 +363,11 @@ importers:
   packages/search:
     dependencies:
       '@customize-agent/llm':
-        specifier: workspace:*
-        version: link:../llm
+        specifier: ^2.0.4
+        version: 2.0.4(ws@8.21.0)(zod@4.4.3)
       '@customize-agent/types':
-        specifier: workspace:*
-        version: link:../types
+        specifier: ^2.0.4
+        version: 2.0.4
       '@vscode/ripgrep':
         specifier: ^1.18.0
         version: 1.18.0
@@ -303,38 +381,38 @@ importers:
         specifier: ^3.3.3
         version: 3.3.3
       tree-sitter:
-        specifier: ^0.22.0
-        version: 0.22.4
+        specifier: 0.21.1
+        version: 0.21.1
       tree-sitter-c:
         specifier: ^0.23.0
-        version: 0.23.6(tree-sitter@0.22.4)
+        version: 0.23.6(tree-sitter@0.21.1)
       tree-sitter-cpp:
         specifier: ^0.23.0
-        version: 0.23.4(tree-sitter@0.22.4)
+        version: 0.23.4(tree-sitter@0.21.1)
       tree-sitter-go:
         specifier: ^0.23.0
-        version: 0.23.4(tree-sitter@0.22.4)
+        version: 0.23.4(tree-sitter@0.21.1)
       tree-sitter-java:
         specifier: ^0.23.0
-        version: 0.23.5(tree-sitter@0.22.4)
+        version: 0.23.5(tree-sitter@0.21.1)
       tree-sitter-javascript:
         specifier: ^0.23.0
-        version: 0.23.1(tree-sitter@0.22.4)
+        version: 0.23.1(tree-sitter@0.21.1)
       tree-sitter-php:
         specifier: ^0.23.0
-        version: 0.23.12(tree-sitter@0.22.4)
+        version: 0.23.12(tree-sitter@0.21.1)
       tree-sitter-python:
         specifier: ^0.23.0
-        version: 0.23.6(tree-sitter@0.22.4)
+        version: 0.23.6(tree-sitter@0.21.1)
       tree-sitter-ruby:
         specifier: ^0.23.0
-        version: 0.23.1(tree-sitter@0.22.4)
+        version: 0.23.1(tree-sitter@0.21.1)
       tree-sitter-rust:
         specifier: ^0.23.0
-        version: 0.23.3(tree-sitter@0.22.4)
+        version: 0.23.3(tree-sitter@0.21.1)
       tree-sitter-typescript:
         specifier: ^0.23.0
-        version: 0.23.2(tree-sitter@0.22.4)
+        version: 0.23.2(tree-sitter@0.21.1)
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -352,11 +430,11 @@ importers:
   packages/tools:
     dependencies:
       '@customize-agent/search':
-        specifier: workspace:*
-        version: link:../search
+        specifier: ^2.0.8
+        version: 2.0.8(ws@8.21.0)(zod@4.4.3)
       '@customize-agent/types':
-        specifier: workspace:*
-        version: link:../types
+        specifier: ^2.0.4
+        version: 2.0.4
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
@@ -379,8 +457,8 @@ importers:
         specifier: ^7.0.0
         version: 7.0.0
       tree-sitter:
-        specifier: ^0.22.0
-        version: 0.22.4
+        specifier: 0.21.1
+        version: 0.21.1
       xlsx:
         specifier: ^0.18.5
         version: 0.18.5
@@ -493,6 +571,36 @@ packages:
 
   '@changesets/write@0.4.0':
     resolution: {integrity: sha512-CdTLvIOPiCNuH71pyDu3rA+Q0n65cmAbXnwWH84rKGiFumFzkmHNT8KHTMEchcxN+Kl8I54xGUhJ7l3E7X396Q==}
+
+  '@customize-agent/engine@2.1.5':
+    resolution: {integrity: sha512-tY/sIO5DcxwPPpwIEC19ACVduRjnvVNej/DCLfDoCAkV+s4P2p3DE96meUbXzG7wQbbypQUhmKNFzLiQqJDhYQ==}
+
+  '@customize-agent/knowledge@2.1.3':
+    resolution: {integrity: sha512-7IDb8Iz2Sb5iAsQ46tKBqXTdp4vPByxLiRj1oSBv8XqBdS2Kev1QZk83vx4B+aC+0K/HurLJl8Mhp0iMKEgdmQ==}
+
+  '@customize-agent/llm@2.0.4':
+    resolution: {integrity: sha512-RJbE5vRkfNgPk5WbswEe87mRh7m8c4qBoVdz/Msushn9vF/s3HDUuIHjF+8cJEL/D/UzCMntmOh4oPrqcRFNww==}
+
+  '@customize-agent/memory@2.0.4':
+    resolution: {integrity: sha512-9TaGwCzyiLf4auBUHdi2eO1pLxKIaUboFR+y5eO8k/qtz5y4h29QrbrMMR3D+rYDE3KnrpaInXmZzN9Cl06AJQ==}
+
+  '@customize-agent/runtime@2.0.4':
+    resolution: {integrity: sha512-jM80ItCihRaP1MJdOMyjjxXH2TBTuoAkEW5xAbT1IF/Hn7FzI28sK7cJq32pLf2nvatFOX0Lf9NwjTbbFzBfZw==}
+
+  '@customize-agent/search@2.0.6':
+    resolution: {integrity: sha512-Ee2B3M5d6ppcCQzdkDMSillKwphgjjfVC4kiaG9aHZqC8dBYvtGe19zUlRGf/tGiduQ/BcbIjREUtbGHxplKmA==}
+
+  '@customize-agent/search@2.0.8':
+    resolution: {integrity: sha512-L/5ymRwTnUwFcTMGyuBxjVaVdCNL3ub20jq8+T0dribxaZwCE3m68OyJIHMap9s31A5bgRY6VZRLoMdIChRJJQ==}
+
+  '@customize-agent/tools@2.1.5':
+    resolution: {integrity: sha512-mT5yFygTrys+BkahDyBi/FNSUng2qDQIypUpfkH85JOulFkumaglKF0hLr+nHWstVNl+H1PbCaxsluUi4M+cSQ==}
+
+  '@customize-agent/tools@2.1.7':
+    resolution: {integrity: sha512-ogcdhOTgSQL3R7qXFnwwyXKmUwXgfamGjxWkSh0XQO4hYcdepmJjyL7hc83s9wnaeHJQg7/+hQzJDa9yhBxISQ==}
+
+  '@customize-agent/types@2.0.4':
+    resolution: {integrity: sha512-Zp9hnR+7wPyfeNaBYBlls7dmo7eY2a2Jh63JMrXMelCOplk0FJZokAWD/GPX4kLNQSbX/WelelOwACv+r+c5uA==}
 
   '@emnapi/core@1.10.0':
     resolution: {integrity: sha512-yq6OkJ4p82CAfPl0u9mQebQHKPJkY7WrIuk205cTYnYe+k2Z8YBh11FrbRG/H6ihirqcacOgl2BIO8oyMQLeXw==}
@@ -3493,6 +3601,9 @@ packages:
       tree-sitter:
         optional: true
 
+  tree-sitter@0.21.1:
+    resolution: {integrity: sha512-7dxoA6kYvtgWw80265MyqJlkRl4yawIjO7S5MigytjELkX43fV2WsAXzsNfO7sBpPPCF5Gp0+XzHk0DwLCq3xQ==}
+
   tree-sitter@0.22.4:
     resolution: {integrity: sha512-usbHZP9/oxNsUY65MQUsduGRqDHQOou1cagUSwjhoSYAmSahjQDAVsh9s+SlZkn8X8+O1FULRGwHu7AFP3kjzg==}
 
@@ -3935,6 +4046,150 @@ snapshots:
       fs-extra: 7.0.1
       human-id: 4.2.0
       prettier: 2.8.8
+
+  '@customize-agent/engine@2.1.5(ws@8.21.0)(zod@4.4.3)':
+    dependencies:
+      '@customize-agent/llm': 2.0.4(ws@8.21.0)(zod@4.4.3)
+      '@customize-agent/tools': 2.1.5(ws@8.21.0)(zod@4.4.3)
+      '@customize-agent/types': 2.0.4
+      execa: 9.6.1
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - bare-abort-controller
+      - bare-buffer
+      - encoding
+      - react-native-b4a
+      - supports-color
+      - ws
+      - zod
+
+  '@customize-agent/knowledge@2.1.3':
+    dependencies:
+      '@napi-rs/canvas': 0.1.100
+      better-sqlite3: 12.10.0
+      fast-glob: 3.3.3
+      jszip: 3.10.1
+      mammoth: 1.12.0
+      pdf-parse: 2.4.5
+      pdfjs-dist: 5.7.284
+      tesseract.js: 7.0.0
+      xlsx: 0.18.5
+    transitivePeerDependencies:
+      - encoding
+
+  '@customize-agent/llm@2.0.4(ws@8.21.0)(zod@4.4.3)':
+    dependencies:
+      '@customize-agent/types': 2.0.4
+      openai: 6.42.0(ws@8.21.0)(zod@4.4.3)
+    transitivePeerDependencies:
+      - ws
+      - zod
+
+  '@customize-agent/memory@2.0.4':
+    dependencies:
+      better-sqlite3: 12.10.0
+
+  '@customize-agent/runtime@2.0.4':
+    dependencies:
+      '@customize-agent/types': 2.0.4
+
+  '@customize-agent/search@2.0.6(ws@8.21.0)(zod@4.4.3)':
+    dependencies:
+      '@customize-agent/llm': 2.0.4(ws@8.21.0)(zod@4.4.3)
+      '@customize-agent/types': 2.0.4
+      '@vscode/ripgrep': 1.18.0
+      better-sqlite3: 12.10.0
+      execa: 9.6.1
+      fast-glob: 3.3.3
+      tree-sitter: 0.22.4
+      tree-sitter-c: 0.23.6(tree-sitter@0.22.4)
+      tree-sitter-cpp: 0.23.4(tree-sitter@0.22.4)
+      tree-sitter-go: 0.23.4(tree-sitter@0.22.4)
+      tree-sitter-java: 0.23.5(tree-sitter@0.22.4)
+      tree-sitter-javascript: 0.23.1(tree-sitter@0.22.4)
+      tree-sitter-php: 0.23.12(tree-sitter@0.22.4)
+      tree-sitter-python: 0.23.6(tree-sitter@0.22.4)
+      tree-sitter-ruby: 0.23.1(tree-sitter@0.22.4)
+      tree-sitter-rust: 0.23.3(tree-sitter@0.22.4)
+      tree-sitter-typescript: 0.23.2(tree-sitter@0.22.4)
+      typescript: 6.0.3
+      vscode-languageserver-protocol: 3.18.0
+    transitivePeerDependencies:
+      - ws
+      - zod
+
+  '@customize-agent/search@2.0.8(ws@8.21.0)(zod@4.4.3)':
+    dependencies:
+      '@customize-agent/llm': 2.0.4(ws@8.21.0)(zod@4.4.3)
+      '@customize-agent/types': 2.0.4
+      '@vscode/ripgrep': 1.18.0
+      better-sqlite3: 12.10.0
+      execa: 9.6.1
+      fast-glob: 3.3.3
+      tree-sitter: 0.21.1
+      tree-sitter-c: 0.23.6(tree-sitter@0.21.1)
+      tree-sitter-cpp: 0.23.4(tree-sitter@0.21.1)
+      tree-sitter-go: 0.23.4(tree-sitter@0.21.1)
+      tree-sitter-java: 0.23.5(tree-sitter@0.21.1)
+      tree-sitter-javascript: 0.23.1(tree-sitter@0.21.1)
+      tree-sitter-php: 0.23.12(tree-sitter@0.21.1)
+      tree-sitter-python: 0.23.6(tree-sitter@0.21.1)
+      tree-sitter-ruby: 0.23.1(tree-sitter@0.21.1)
+      tree-sitter-rust: 0.23.3(tree-sitter@0.21.1)
+      tree-sitter-typescript: 0.23.2(tree-sitter@0.21.1)
+      typescript: 6.0.3
+      vscode-languageserver-protocol: 3.18.0
+    transitivePeerDependencies:
+      - ws
+      - zod
+
+  '@customize-agent/tools@2.1.5(ws@8.21.0)(zod@4.4.3)':
+    dependencies:
+      '@customize-agent/search': 2.0.6(ws@8.21.0)(zod@4.4.3)
+      '@customize-agent/types': 2.0.4
+      '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
+      archiver: 8.0.0
+      execa: 9.6.1
+      mammoth: 1.12.0
+      pdf-parse: 2.4.5
+      sharp: 0.35.2
+      tesseract.js: 7.0.0
+      tree-sitter: 0.22.4
+      xlsx: 0.18.5
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - bare-abort-controller
+      - bare-buffer
+      - encoding
+      - react-native-b4a
+      - supports-color
+      - ws
+      - zod
+
+  '@customize-agent/tools@2.1.7(ws@8.21.0)(zod@4.4.3)':
+    dependencies:
+      '@customize-agent/search': 2.0.8(ws@8.21.0)(zod@4.4.3)
+      '@customize-agent/types': 2.0.4
+      '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
+      archiver: 8.0.0
+      execa: 9.6.1
+      mammoth: 1.12.0
+      pdf-parse: 2.4.5
+      sharp: 0.35.2
+      tesseract.js: 7.0.0
+      tree-sitter: 0.21.1
+      xlsx: 0.18.5
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - bare-abort-controller
+      - bare-buffer
+      - encoding
+      - react-native-b4a
+      - supports-color
+      - ws
+      - zod
+
+  '@customize-agent/types@2.0.4': {}
 
   '@emnapi/core@1.10.0':
     dependencies:
@@ -6781,12 +7036,27 @@ snapshots:
 
   tr46@0.0.3: {}
 
+  tree-sitter-c@0.23.6(tree-sitter@0.21.1):
+    dependencies:
+      node-addon-api: 8.8.0
+      node-gyp-build: 4.8.4
+    optionalDependencies:
+      tree-sitter: 0.21.1
+
   tree-sitter-c@0.23.6(tree-sitter@0.22.4):
     dependencies:
       node-addon-api: 8.8.0
       node-gyp-build: 4.8.4
     optionalDependencies:
       tree-sitter: 0.22.4
+
+  tree-sitter-cpp@0.23.4(tree-sitter@0.21.1):
+    dependencies:
+      node-addon-api: 8.8.0
+      node-gyp-build: 4.8.4
+      tree-sitter-c: 0.23.6(tree-sitter@0.21.1)
+    optionalDependencies:
+      tree-sitter: 0.21.1
 
   tree-sitter-cpp@0.23.4(tree-sitter@0.22.4):
     dependencies:
@@ -6796,12 +7066,26 @@ snapshots:
     optionalDependencies:
       tree-sitter: 0.22.4
 
+  tree-sitter-go@0.23.4(tree-sitter@0.21.1):
+    dependencies:
+      node-addon-api: 8.8.0
+      node-gyp-build: 4.8.4
+    optionalDependencies:
+      tree-sitter: 0.21.1
+
   tree-sitter-go@0.23.4(tree-sitter@0.22.4):
     dependencies:
       node-addon-api: 8.8.0
       node-gyp-build: 4.8.4
     optionalDependencies:
       tree-sitter: 0.22.4
+
+  tree-sitter-java@0.23.5(tree-sitter@0.21.1):
+    dependencies:
+      node-addon-api: 8.8.0
+      node-gyp-build: 4.8.4
+    optionalDependencies:
+      tree-sitter: 0.21.1
 
   tree-sitter-java@0.23.5(tree-sitter@0.22.4):
     dependencies:
@@ -6810,12 +7094,26 @@ snapshots:
     optionalDependencies:
       tree-sitter: 0.22.4
 
+  tree-sitter-javascript@0.23.1(tree-sitter@0.21.1):
+    dependencies:
+      node-addon-api: 8.8.0
+      node-gyp-build: 4.8.4
+    optionalDependencies:
+      tree-sitter: 0.21.1
+
   tree-sitter-javascript@0.23.1(tree-sitter@0.22.4):
     dependencies:
       node-addon-api: 8.8.0
       node-gyp-build: 4.8.4
     optionalDependencies:
       tree-sitter: 0.22.4
+
+  tree-sitter-php@0.23.12(tree-sitter@0.21.1):
+    dependencies:
+      node-addon-api: 8.8.0
+      node-gyp-build: 4.8.4
+    optionalDependencies:
+      tree-sitter: 0.21.1
 
   tree-sitter-php@0.23.12(tree-sitter@0.22.4):
     dependencies:
@@ -6824,12 +7122,26 @@ snapshots:
     optionalDependencies:
       tree-sitter: 0.22.4
 
+  tree-sitter-python@0.23.6(tree-sitter@0.21.1):
+    dependencies:
+      node-addon-api: 8.8.0
+      node-gyp-build: 4.8.4
+    optionalDependencies:
+      tree-sitter: 0.21.1
+
   tree-sitter-python@0.23.6(tree-sitter@0.22.4):
     dependencies:
       node-addon-api: 8.8.0
       node-gyp-build: 4.8.4
     optionalDependencies:
       tree-sitter: 0.22.4
+
+  tree-sitter-ruby@0.23.1(tree-sitter@0.21.1):
+    dependencies:
+      node-addon-api: 8.8.0
+      node-gyp-build: 4.8.4
+    optionalDependencies:
+      tree-sitter: 0.21.1
 
   tree-sitter-ruby@0.23.1(tree-sitter@0.22.4):
     dependencies:
@@ -6838,12 +7150,27 @@ snapshots:
     optionalDependencies:
       tree-sitter: 0.22.4
 
+  tree-sitter-rust@0.23.3(tree-sitter@0.21.1):
+    dependencies:
+      node-addon-api: 8.8.0
+      node-gyp-build: 4.8.4
+    optionalDependencies:
+      tree-sitter: 0.21.1
+
   tree-sitter-rust@0.23.3(tree-sitter@0.22.4):
     dependencies:
       node-addon-api: 8.8.0
       node-gyp-build: 4.8.4
     optionalDependencies:
       tree-sitter: 0.22.4
+
+  tree-sitter-typescript@0.23.2(tree-sitter@0.21.1):
+    dependencies:
+      node-addon-api: 8.8.0
+      node-gyp-build: 4.8.4
+      tree-sitter-javascript: 0.23.1(tree-sitter@0.21.1)
+    optionalDependencies:
+      tree-sitter: 0.21.1
 
   tree-sitter-typescript@0.23.2(tree-sitter@0.22.4):
     dependencies:
@@ -6852,6 +7179,11 @@ snapshots:
       tree-sitter-javascript: 0.23.1(tree-sitter@0.22.4)
     optionalDependencies:
       tree-sitter: 0.22.4
+
+  tree-sitter@0.21.1:
+    dependencies:
+      node-addon-api: 8.8.0
+      node-gyp-build: 4.8.4
 
   tree-sitter@0.22.4:
     dependencies:
