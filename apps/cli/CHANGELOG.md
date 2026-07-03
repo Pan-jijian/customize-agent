@@ -1,5 +1,44 @@
 # customize-agent
 
+## 2.1.13
+
+### Patch Changes
+
+- ## 🐛 彻底修复 Windows EBUSY + workspace:\* 协议错误
+
+  ### 🔍 问题
+
+  2.1.11 / 2.1.12 存在两个阻断性安装问题：
+
+  1. **EBUSY 未根除**：旧版 server 进程将 cwd 锁在 `dist\server\apps\server\`，`kill-server.cjs` busy-wait 占满 CPU 且杀后不等句柄释放
+  2. **EUNSUPPORTEDPROTOCOL**：tarball 中 `dist/server/packages/*/package.json` 和 `dist/server/apps/server/package.json` 残留 `workspace:*` 协议，npm 安装时拒绝处理
+
+  ### 🔧 修复 ①：kill-server.cjs 彻底重写
+
+  | 修复项 | 旧行为 | 新行为 |
+  |-------|-------|-------|
+  | CPU 占用 | busy-wait 100% CPU | `timeout /t` / `sleep` 系统命令，零 CPU |
+  | Windows 杀进程 | 仅 `netstat` + `taskkill` | **3 层策略**：PowerShell → netstat 兜底 → 按命令行查杀 `node.exe` |
+  | 重试 | 单次 | 3 轮，每轮间隔 2s 真实 sleep |
+  | 句柄释放 | 杀完立即退出 | 最终 3s 等待（Windows）|
+
+  ### 🔧 修复 ②：bundle-server.mjs 清除 workspace:\* 残留
+
+  - 自动遍历 `dist/server/` 所有 `package.json`
+  - 将 `workspace:*` 替换为对应 `@customize-agent/*` 包的实际版本号（如 `^2.1.0`）
+  - 同时 patch `server.js` 移除 `process.chdir(__dirname)`（配合 ③ 避免文件锁）
+
+  ### 🔧 修复 ③：index.ts spawn cwd 调整
+
+  - Bundled 模式：cwd `dist/server/apps/server/` → `dist/server/`（不锁定子目录）
+  - Dev 模式：保持 `serverDir` 不变（`next start` 需在此目录找 `.next`）
+
+  ### 📦 已失效版本
+
+  `2.1.11` / `2.1.12` 已损坏，请使用 `2.1.13+`
+
+## 2.1.12
+
 ## 2.1.12
 
 ### Patch Changes
@@ -9,6 +48,7 @@
   ### 🔍 问题
 
   2.1.11 使用 `npm publish` 发布，导致 `package.json` 中 `workspace:*` 协议未被转换为实际版本号，用户安装报错：
+
   ```
   EUNSUPPORTEDPROTOCOL Unsupported URL Type "workspace:": workspace:*
   ```
@@ -27,6 +67,7 @@
   ### 🔍 问题
 
   2.1.10 的 `preinstall` 杀进程方案未能完全解决 Windows 升级时的 `EBUSY: resource busy or locked` 错误：
+
   - 旧版 server 进程将 **cwd 锁定在** `dist\server\apps\server\` 目录上
   - `kill-server.cjs` **busy-wait 占满 CPU 100%**，且杀进程后未等待 Windows 释放文件句柄
   - 仅按端口杀进程不够 — 端口已释放但目录锁仍存在的边缘情况
@@ -34,6 +75,7 @@
   ### 🔧 三层防御链
 
   **① 安装前 — `kill-server.cjs` 彻底重写**
+
   - 真实 `sleep()`：用 `timeout /t`（Win）/ `sleep`（Unix）阻塞等待，不再占 CPU
   - Windows **3 层杀进程策略**：
     1. `PowerShell Get-NetTCPConnection` — 按端口杀（主力）
@@ -43,10 +85,12 @@
   - **最终 3s 等待**（Windows）— 给系统时间回收 `taskkill /F` 后的文件句柄
 
   **② 打包时 — `bundle-server.mjs` 移除 `process.chdir`**
+
   - 自动 patch Next.js standalone `server.js`：注释掉 `process.chdir(__dirname)`
   - 新版 server 不再主动 chdir 到 `apps/server/`，避免锁定子目录
 
   **③ 运行时 — `index.ts` 修改 spawn cwd**
+
   - Bundled 模式：cwd 从 `dist/server/apps/server/` → `dist/server/`（父目录）
   - 配合 patch，server 进程不锁定 `apps/server/` 子目录
 
