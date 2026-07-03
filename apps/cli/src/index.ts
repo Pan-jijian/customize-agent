@@ -408,6 +408,11 @@ program.action(async () => {
   const dashboardReady = await startDashboardInBackground(dashboardPort, chromaClient.baseUrl);
   const dashboardUrl: string | undefined = dashboardReady ? `http://localhost:${dashboardPort}/overview` : undefined;
 
+  if (process.env.CUSTOMIZE_AGENT_E2E_DASHBOARD === '1') {
+    console.log(dashboardReady ? `Dashboard ready: ${dashboardUrl}` : 'Dashboard failed to start');
+    await new Promise(() => undefined);
+  }
+
   const repl = new Repl({
 
     executor,
