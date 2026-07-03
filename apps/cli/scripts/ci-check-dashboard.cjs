@@ -1,11 +1,13 @@
 const paths = ['/api/health', '/overview', '/api/config/providers', '/api/config/models', '/api/kb/features', '/api/system/stats'];
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-async function fetchWithTimeout(url, timeoutMs) {
+async function fetchTextWithTimeout(url, timeoutMs) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { signal: controller.signal });
+    const text = await res.text();
+    return { res, text };
   } finally {
     clearTimeout(timeout);
   }
@@ -18,8 +20,7 @@ async function fetchWithTimeout(url, timeoutMs) {
     try {
       const rows = [];
       for (const path of paths) {
-        const res = await fetchWithTimeout('http://localhost:17321' + path, 5000);
-        const text = await res.text();
+        const { res, text } = await fetchTextWithTimeout('http://localhost:17321' + path, 5000);
         rows.push([path, res.status, text.slice(0, 120).replace(/\n/g, ' ')]);
       }
       for (const row of rows) console.log(row[0], row[1], row[2]);
