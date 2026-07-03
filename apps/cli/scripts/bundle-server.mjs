@@ -1,4 +1,4 @@
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,28 +13,6 @@ const publicDir = resolve(serverDir, 'public');
 // postinstall copies them to ~/.customize-agent/server/ outside the npm package dir
 // This prevents Windows EBUSY: npm upgrades never touch the running server's directory
 const destDir = resolve(cliDir, 'dist', 'server-bundle');
-
-function materializeSymlinks(dir) {
-  if (!existsSync(dir)) return;
-  for (const entry of readdirSync(dir)) {
-    const full = resolve(dir, entry);
-    const stat = lstatSync(full);
-    if (stat.isSymbolicLink()) {
-      let real;
-      try {
-        real = realpathSync(full);
-      } catch {
-        rmSync(full, { recursive: true, force: true });
-        continue;
-      }
-      rmSync(full, { recursive: true, force: true });
-      cpSync(real, full, { recursive: true, dereference: true });
-      if (lstatSync(full).isDirectory()) materializeSymlinks(full);
-      continue;
-    }
-    if (stat.isDirectory()) materializeSymlinks(full);
-  }
-}
 
 function ensureVendorPackage(vendorDir, pkgName, rootPnpmDir) {
   const destDir = resolve(vendorDir, pkgName);
@@ -164,7 +142,7 @@ for (const depName of Object.keys(serverPkg.dependencies ?? {})) {
   console.log('[bundle-server] Bundled web runtime dependency ' + depName);
 }
 ensureVendorPackage(bundleVendorModules, 'styled-jsx', resolve(monorepoRoot, 'node_modules', '.pnpm'));
-materializeSymlinks(bundleVendorModules);
+rmSync(resolve(bundleVendorModules, '@ant-design', 'icons', '.prettierignore'), { force: true });
 
 // Generate package.json with all runtime dependencies
 function generateServerPackageJson(destDir) {
