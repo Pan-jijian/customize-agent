@@ -1,0 +1,54 @@
+name: CLI E2E
+
+on:
+  pull_request:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter customize-agent build
+      - name: Pack CLI
+        shell: bash
+        run: |
+          cd apps/cli
+          npm pack --json > pack.json
+          node -e "const fs=require('fs'),path=require('path');const p=require('./pack.json')[0];fs.writeFileSync(process.env.RUNNER_TEMP+'/tgz.txt',path.resolve(process.cwd(),p.filename))"
+      - name: Install packed CLI
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/install-root"
+          npm install "$(cat "$RUNNER_TEMP/tgz.txt")" --prefix "$RUNNER_TEMP/install-root" --ignore-scripts=false --foreground-scripts
+          test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize.cmd"
+          test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent.cmd"
+      - name: Start CLI and verify dashboard
+        shell: bash
+        run: |
+          export HOME="$RUNNER_TEMP/home"
+          node "$RUNNER_TEMP/install-root/node_modules/customize-agent/dist/index.js" > "$RUNNER_TEMP/cli.log" 2>&1 &
+          node apps/cli/scripts/ci-check-dashboard.cjs
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: cli-e2e-logs-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/cli.log
+            ${{ runner.temp }}/home/.customize-agent/logs/**

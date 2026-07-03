@@ -1,5 +1,32 @@
 # server
 
+## 0.1.5
+
+### Patch Changes
+
+- Updated dependencies
+  - @customize-agent/knowledge@2.1.3
+  - @customize-agent/llm@2.0.4
+  - @customize-agent/runtime@2.0.4
+
+## 0.1.4
+
+### Patch Changes
+
+- Updated dependencies
+  - @customize-agent/knowledge@2.1.2
+  - @customize-agent/llm@2.0.3
+  - @customize-agent/runtime@2.0.3
+
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies
+  - @customize-agent/knowledge@2.1.1
+  - @customize-agent/llm@2.0.2
+  - @customize-agent/runtime@2.0.2
+
 ## 0.1.2
 
 ### Patch Changes

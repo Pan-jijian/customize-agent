@@ -1,5 +1,56 @@
 # @customize-agent/engine
 
+## 2.1.5
+
+### Patch Changes
+
+- Fix Windows EBUSY install error by removing postinstall and delaying server setup
+
+  - Remove postinstall script to avoid npm rename conflicts
+  - Add ensureServerIsInstalled() function to set up server on first run
+  - Enhance kill-server.cjs with more aggressive process killing on Windows
+  - Improve error handling and retry logic for file operations
+
+- Updated dependencies
+  - @customize-agent/llm@2.0.4
+  - @customize-agent/tools@2.1.5
+  - @customize-agent/types@2.0.4
+
+## 2.1.4
+
+### Patch Changes
+
+- SUPER AGGRESSIVE Windows EBUSY fix - completely rewritten kill-server.cjs
+
+  - Complete rewrite of kill-server.cjs with super aggressive cleanup on Windows
+  - Kills all related Node.js processes multiple times
+  - Checks for file locks and waits up to 30 seconds
+  - Double-kill strategy to ensure nothing respawns
+  - Scans all node.exe processes for any reference to customize-agent
+  - Force-kills anything that might be holding file locks
+
+- Updated dependencies
+  - @customize-agent/llm@2.0.3
+  - @customize-agent/tools@2.1.4
+  - @customize-agent/types@2.0.3
+
+## 2.1.3
+
+### Patch Changes
+
+- 修复 Windows 平台的安装和服务器启动问题
+
+  - 增强 kill-server.cjs 脚本，更可靠地终止相关进程并释放文件句柄
+  - 修复服务器启动路径问题，正确设置工作目录
+  - 优化 setup.js，增强日志和重试机制
+  - 改进健康检查 API，更健壮的 BUILD_ID 查找
+  - 优化 process.chdir 处理，避免 Windows 文件锁定问题
+
+- Updated dependencies
+  - @customize-agent/llm@2.0.2
+  - @customize-agent/tools@2.1.3
+  - @customize-agent/types@2.0.2
+
 ## 2.1.2
 
 ### Patch Changes

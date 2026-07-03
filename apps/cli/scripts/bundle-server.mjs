@@ -142,9 +142,21 @@ for (const pkgName of ['knowledge', 'llm', 'runtime', 'types']) {
   console.log('[bundle-server] Packaged @customize-agent/' + pkgName);
 }
 
-// Remove third-party node_modules from bundle (installed by postinstall)
-const destNodeModules = resolve(destDir, 'node_modules');
-if (existsSync(destNodeModules)) rmSync(destNodeModules, { recursive: true, force: true });
+// Keep Next standalone node_modules in the bundle so npm install does not need
+// to run server setup scripts and the copied server can resolve page runtime deps.
+// Next standalone does not always trace page-level UI dependencies, so copy the
+// server package runtime deps into the bundle node_modules as well.
+const bundleVendorModules = resolve(destDir, 'vendor_modules');
+const rootNodeModules = resolve(serverDir, 'node_modules');
+const serverPkg = JSON.parse(readFileSync(resolve(serverDir, 'package.json'), 'utf-8'));
+for (const depName of Object.keys(serverPkg.dependencies ?? {})) {
+  const src = resolve(rootNodeModules, depName);
+  const dest = resolve(bundleVendorModules, depName);
+  if (!existsSync(src) || existsSync(dest)) continue;
+  mkdirSync(dirname(dest), { recursive: true });
+  cpSync(src, dest, { recursive: true, dereference: true });
+  console.log('[bundle-server] Bundled web runtime dependency ' + depName);
+}
 
 // Generate package.json with all runtime dependencies
 function generateServerPackageJson(destDir) {
@@ -239,7 +251,6 @@ generateServerPackageJson(destDir);
 // Copies server bundle to ~/.customize-agent/server/ (outside npm dir, prevents EBUSY)
 // Then installs npm deps and links workspace packages
 const setupJs = [
-  'const { execSync } = require(\'child_process\');',
   'const { existsSync, mkdirSync, cpSync, rmSync, readdirSync, lstatSync, readFileSync } = require(\'fs\');',
   'const { resolve, join } = require(\'path\');',
   'const { homedir } = require(\'os\');',
@@ -270,14 +281,6 @@ const setupJs = [
   '',
   'const packagesDir = resolve(targetDir, \'packages\');',
   'const scopeDir = resolve(targetDir, \'node_modules\', \'@customize-agent\');',
-  '',
-  'console.log(\'[customize-agent] Installing server dependencies...\');',
-  'try {',
-  '  execSync(\'npm install --omit=dev --no-audit --no-fund --legacy-peer-deps\', { cwd: targetDir, stdio: \'inherit\' });',
-  '} catch (e) {',
-  '  console.error(\'[customize-agent] Server dependency installation failed:\', e.message);',
-  '  process.exit(1);',
-  '}',
   '',
   'console.log(\'[customize-agent] Linking workspace packages...\');',
   'if (existsSync(scopeDir)) rmSync(scopeDir, { recursive: true, force: true });',
@@ -321,4 +324,4 @@ if (existsSync(serverEntryPath)) {
 writeFileSync(resolve(destDir, '.dashboard-bundled'), '');
 
 console.log('[bundle-server] Server bundle ready: dist/server-bundle/');
-console.log('[bundle-server] postinstall will install to ~/.customize-agent/server/');
+console.log('[bundle-server] first CLI run will install to ~/.customize-agent/server/');
