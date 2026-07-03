@@ -114,7 +114,9 @@ async function startDashboardInBackground(port: number, chromaUrl: string): Prom
     const commonEnv = { ...process.env, PORT: String(port), NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT, CHROMA_URL: chromaUrl };
     if (isBundled) {
       const serverEntry = resolve(serverDir, 'apps', 'server', 'server.js');
-      const proc = spawn(process.execPath, [serverEntry], { cwd: resolve(serverDir, 'apps', 'server'), stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true });
+      // cwd 设为 dist/server/（而非 apps/server/），避免 Windows 文件锁
+      // server.js 内 process.chdir 已在 bundle 时移除
+      const proc = spawn(process.execPath, [serverEntry], { cwd: resolve(serverDir), stdio: ['ignore', logFile.fd, logFile.fd], env: commonEnv, shell: false, detached: true });
       proc.unref();
     } else {
       const nextCli = resolve(serverDir, 'node_modules', 'next', 'dist', 'bin', 'next');
