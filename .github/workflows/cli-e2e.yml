@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           export HOME="$RUNNER_TEMP/home"
-          node apps/cli/scripts/ci-run-dashboard-e2e.cjs "$RUNNER_TEMP/install-root/node_modules/customize-agent/dist/index.js"
+          node apps/cli/scripts/ci-run-dashboard-e2e.cjs "$RUNNER_TEMP/install-root/node_modules/customize-agent"
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
