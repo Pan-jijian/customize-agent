@@ -26,13 +26,37 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build workspace packages
         shell: bash
-        run: pnpm --filter "./packages/**" build 2>&1 | tee "$RUNNER_TEMP/packages-build.log"
+        run: |
+          set +e
+          pnpm --filter "./packages/**" build 2>&1 | tee "$RUNNER_TEMP/packages-build.log"
+          status=${PIPESTATUS[0]}
+          if [[ "$status" -ne 0 ]]; then
+            tail -n 80 "$RUNNER_TEMP/packages-build.log"
+            echo "::error title=packages build failed::$(tail -n 20 "$RUNNER_TEMP/packages-build.log" | tr '\n' ' ')"
+            exit "$status"
+          fi
       - name: Build server dashboard
         shell: bash
-        run: pnpm --filter server build 2>&1 | tee "$RUNNER_TEMP/server-build.log"
+        run: |
+          set +e
+          pnpm --filter server build 2>&1 | tee "$RUNNER_TEMP/server-build.log"
+          status=${PIPESTATUS[0]}
+          if [[ "$status" -ne 0 ]]; then
+            tail -n 120 "$RUNNER_TEMP/server-build.log"
+            echo "::error title=server build failed::$(tail -n 30 "$RUNNER_TEMP/server-build.log" | tr '\n' ' ')"
+            exit "$status"
+          fi
       - name: Build CLI package
         shell: bash
-        run: pnpm --filter customize-agent build 2>&1 | tee "$RUNNER_TEMP/cli-build.log"
+        run: |
+          set +e
+          pnpm --filter customize-agent build 2>&1 | tee "$RUNNER_TEMP/cli-build.log"
+          status=${PIPESTATUS[0]}
+          if [[ "$status" -ne 0 ]]; then
+            tail -n 120 "$RUNNER_TEMP/cli-build.log"
+            echo "::error title=cli build failed::$(tail -n 30 "$RUNNER_TEMP/cli-build.log" | tr '\n' ' ')"
+            exit "$status"
+          fi
       - name: Pack CLI
         shell: bash
         run: |
