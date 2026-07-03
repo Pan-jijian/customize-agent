@@ -1,5 +1,12 @@
 # @customize-agent/engine
 
+## 2.1.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @customize-agent/tools@2.1.2
+
 ## 2.1.1
 
 ### Patch Changes

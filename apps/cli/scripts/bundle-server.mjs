@@ -153,52 +153,39 @@ function linkWorkspacePackages(destDir) {
 linkWorkspacePackages(destDir);
 materializeSymlinks(resolve(destDir, 'node_modules'));
 
-const vendorDir = resolve(destDir, 'vendor');
-rmSync(vendorDir, { recursive: true, force: true });
-cpSync(resolve(destDir, 'node_modules'), vendorDir, { recursive: true, dereference: true });
-materializePnpmEntrypoints(vendorDir);
-fixPdfjsWorker(vendorDir);
+// 展开 pnpm store 到 node_modules（使 CJS 和 ESM 都能解析）
+materializePnpmEntrypoints(resolve(destDir, 'node_modules'));
 
-// 自动打包所有 workspace 包的外部依赖（包括动态 import 的）
-// 读取 knowledge/search/tools 包的 package.json，将其所有 dependencies 复制到 vendor
+// 自动打包所有 workspace 包的外部依赖（包括 Next.js 静态分析遗漏的动态 import 依赖）
 const monorepoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
 const rootPnpm = resolve(monorepoRoot, 'node_modules', '.pnpm');
 
-function ensureWorkspaceDeps(packageDir, vendorDir, rootPnpm) {
+function ensureWorkspaceDeps(packageDir, nodeModulesDir, rootPnpm) {
   const pkgJsonPath = resolve(packageDir, 'package.json');
   if (!existsSync(pkgJsonPath)) return;
   const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf-8'));
   const deps = Object.keys(pkg.dependencies ?? {});
   for (const dep of deps) {
-    // 跳过 workspace 内部包（@customize-agent/*）
     if (dep.startsWith('@customize-agent/')) continue;
-    ensureVendorPackage(vendorDir, dep, rootPnpm);
+    ensureVendorPackage(nodeModulesDir, dep, rootPnpm);
   }
 }
 
 const packagesDir = resolve(monorepoRoot, 'packages');
-ensureWorkspaceDeps(resolve(packagesDir, 'knowledge'), vendorDir, rootPnpm);
-ensureWorkspaceDeps(resolve(packagesDir, 'search'), vendorDir, rootPnpm);
-ensureWorkspaceDeps(resolve(packagesDir, 'tools'), vendorDir, rootPnpm);
+const nodeModulesDir = resolve(destDir, 'node_modules');
+ensureWorkspaceDeps(resolve(packagesDir, 'knowledge'), nodeModulesDir, rootPnpm);
+ensureWorkspaceDeps(resolve(packagesDir, 'search'), nodeModulesDir, rootPnpm);
+ensureWorkspaceDeps(resolve(packagesDir, 'tools'), nodeModulesDir, rootPnpm);
+ensureVendorPackage(nodeModulesDir, 'chromadb', rootPnpm);
 
-// CLI 子进程依赖
-ensureVendorPackage(vendorDir, 'chromadb', rootPnpm);
+// 修复 pdfjs-dist 的 worker 文件
+fixPdfjsWorker(nodeModulesDir);
 
-rmSync(resolve(destDir, 'node_modules'), { recursive: true, force: true });
-
+// 不再删除 node_modules！保留它让 Node.js 原生 CJS+ESM 解析器都能找到依赖。
+// 之前的 vendor+monkey-patch 方案只对 CJS require() 有效，ESM import 失败。
+// node_modules 位于 dist/server/node_modules/，server.js (cwd=apps/server/)
+// 的 Node.js 向上查找 ../../node_modules/ 即可自然解析。
 const bundledServerDir = resolve(destDir, 'apps', 'server');
-const serverEntry = resolve(bundledServerDir, 'server.js');
-if (existsSync(serverEntry)) {
-  const content = readFileSync(serverEntry, 'utf-8');
-  writeFileSync(serverEntry, `const __caPath = require('path')\nconst __caModule = require('module')\nconst __caVendorNodePath = __caPath.join(__dirname, '..', '..', 'vendor')\nconst __caResolveFilename = __caModule._resolveFilename
-__caModule._resolveFilename = function(request, parent, isMain, options) {
-  if (!request.startsWith('.') && !__caPath.isAbsolute(request)) {
-    try { return __caResolveFilename.call(this, __caPath.join(__caVendorNodePath, request), parent, isMain, options) } catch {}
-  }
-  return __caResolveFilename.call(this, request, parent, isMain, options)
-}
-${content}`);
-}
 if (existsSync(staticDir)) {
   mkdirSync(resolve(bundledServerDir, '.next'), { recursive: true });
   cpSync(staticDir, resolve(bundledServerDir, '.next', 'static'), { recursive: true, dereference: true });
