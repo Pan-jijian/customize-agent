@@ -147,6 +147,10 @@ a {
 .text-\[var\(--colorOk\)\] { color: var(--colorOk); }
 .text-\[var\(--colorDanger\)\] { color: var(--colorDanger); }
 
+@media (max-width: 1024px) {
+  :root { --sidebarWidth: 200px; }
+}
+
 @media (max-width: 860px) {
   :root { --sidebarWidth: 72px; }
   .sidebarLogo { padding: 16px; justify-content: center; }
@@ -158,5 +162,12 @@ a {
   .sidebarSubmenu { padding-left: 0; }
   .sidebarSubItem { padding-left: 11px; }
   .mainInner { padding: 20px; }
-  .topbar { padding: 10px 16px; }
+  .topbar { padding: 10px 16px; margin: 10px 12px 0; }
+}
+
+@media (max-width: 640px) {
+  .sidebar { left: 6px; top: 6px; bottom: 6px; }
+  .mainContent { margin-left: 72px; }
+  .mainInner { padding: 12px; }
+  .topbar { margin: 8px 8px 0; padding: 8px 12px; border-radius: 16px; }
 }
