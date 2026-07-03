@@ -1,4 +1,4 @@
-const paths = ['/api/health', '/overview', '/api/config/providers', '/api/config/models', '/api/kb/features', '/api/system/stats'];
+const paths = ['/api/health', '/overview'];
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function fetchTextWithTimeout(url, timeoutMs) {
