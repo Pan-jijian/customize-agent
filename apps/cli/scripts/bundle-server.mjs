@@ -1,5 +1,5 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -8,7 +8,11 @@ const serverDir = resolve(cliDir, '..', 'server');
 const standaloneDir = resolve(serverDir, '.next', 'standalone');
 const staticDir = resolve(serverDir, '.next', 'static');
 const publicDir = resolve(serverDir, 'public');
-const destDir = resolve(cliDir, 'dist', 'server');
+
+// Bundle server files to dist/server-bundle/ (NOT dist/server/)
+// postinstall copies them to ~/.customize-agent/server/ outside the npm package dir
+// This prevents Windows EBUSY: npm upgrades never touch the running server's directory
+const destDir = resolve(cliDir, 'dist', 'server-bundle');
 
 function materializeSymlinks(dir) {
   if (!existsSync(dir)) return;
@@ -28,9 +32,7 @@ function materializeSymlinks(dir) {
 
 function ensureVendorPackage(vendorDir, pkgName, rootPnpmDir) {
   const destDir = resolve(vendorDir, pkgName);
-  if (existsSync(destDir)) return; // already present
-
-  // Find in root .pnpm (fallback for packages not included by Next.js standalone)
+  if (existsSync(destDir)) return;
   if (!existsSync(rootPnpmDir)) return;
   try {
     for (const entry of readdirSync(rootPnpmDir)) {
@@ -52,7 +54,6 @@ function fixPdfjsWorker(vendorDir) {
   const destFile = resolve(destBuildDir, 'pdf.worker.mjs');
   if (existsSync(destFile)) return;
 
-  // Determine the expected version from vendor .pnpm (there should be exactly one)
   let targetVersion = '';
   if (existsSync(pnpmDir)) {
     for (const entry of readdirSync(pnpmDir)) {
@@ -63,13 +64,11 @@ function fixPdfjsWorker(vendorDir) {
   function tryCopyFrom(pnpmRoot) {
     if (!existsSync(pnpmRoot)) return false;
     try {
-      // Prefer matching version, then any version
       const entries = readdirSync(pnpmRoot).filter(e => e.startsWith('pdfjs-dist@'));
-      // Sort: matching version first, then newest version
       entries.sort((a, b) => {
         if (a === targetVersion) return -1;
         if (b === targetVersion) return 1;
-        return b.localeCompare(a); // newest first
+        return b.localeCompare(a);
       });
       for (const entry of entries) {
         const srcFile = resolve(pnpmRoot, entry, 'node_modules', 'pdfjs-dist', 'legacy', 'build', 'pdf.worker.mjs');
@@ -84,12 +83,8 @@ function fixPdfjsWorker(vendorDir) {
     return false;
   }
 
-  // Search: vendor .pnpm → monorepo root .pnpm
   const monorepoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
-  const candidates = [
-    pnpmDir,  // vendor's own .pnpm
-    resolve(monorepoRoot, 'node_modules', '.pnpm'),
-  ];
+  const candidates = [pnpmDir, resolve(monorepoRoot, 'node_modules', '.pnpm')];
   for (const root of candidates) {
     if (tryCopyFrom(root)) return;
   }
@@ -135,7 +130,7 @@ if (existsSync(destDir)) rmSync(destDir, { recursive: true });
 mkdirSync(destDir, { recursive: true });
 cpSync(standaloneDir, destDir, { recursive: true, dereference: true });
 
-// 保留 workspace 包（纯 JS，跨平台），移到 packages/ 目录
+// Copy workspace packages (pure JS, cross-platform) to packages/
 const monorepoPackagesDir = resolve(monorepoRoot, 'packages');
 const destPackagesDir = resolve(destDir, 'packages');
 if (existsSync(destPackagesDir)) rmSync(destPackagesDir, { recursive: true, force: true });
@@ -144,15 +139,14 @@ for (const pkgName of ['knowledge', 'llm', 'runtime', 'types']) {
   const src = resolve(monorepoPackagesDir, pkgName);
   if (!existsSync(src)) continue;
   cpSync(src, resolve(destPackagesDir, pkgName), { recursive: true, dereference: true });
-  console.log(`[bundle-server] Packaged @customize-agent/${pkgName}`);
+  console.log('[bundle-server] Packaged @customize-agent/' + pkgName);
 }
 
-// 删除第三方 node_modules — 不捆绑平台相关原生模块
-// postinstall 时由 setup.js 通过 npm install 安装平台正确的依赖
+// Remove third-party node_modules from bundle (installed by postinstall)
 const destNodeModules = resolve(destDir, 'node_modules');
 if (existsSync(destNodeModules)) rmSync(destNodeModules, { recursive: true, force: true });
 
-// 生成 dist/server/package.json（所有运行时依赖清单）
+// Generate package.json with all runtime dependencies
 function generateServerPackageJson(destDir) {
   const allDeps = {};
   const pkgFiles = [
@@ -179,12 +173,11 @@ function generateServerPackageJson(destDir) {
     dependencies: allDeps,
   };
   writeFileSync(resolve(destDir, 'package.json'), JSON.stringify(serverPackageJson, null, 2));
-  console.log(`[bundle-server] Generated server package.json with ${Object.keys(allDeps).length} dependencies`);
+  console.log('[bundle-server] Generated server package.json with ' + Object.keys(allDeps).length + ' dependencies');
 }
 generateServerPackageJson(destDir);
 
-// 清除所有子 package.json 中的 workspace:* 协议
-// npm 安装时会扫描 tarball 中所有 package.json，遇到 workspace:* 报 EUNSUPPORTEDPROTOCOL
+// Sanitize workspace:* protocols in all bundled package.json files
 {
   const workspaceVersionMap = {};
   for (const entry of readdirSync(monorepoPackagesDir)) {
@@ -230,13 +223,11 @@ generateServerPackageJson(destDir);
             modified = true;
           }
         }
-        // 清理空对象
         if (modified && Object.keys(deps).length === 0) delete pkg[field];
       }
       if (modified) {
         writeFileSync(filePath, JSON.stringify(pkg, null, 2) + '\n');
-        const relPath = filePath.replace(destDir, '');
-        console.log('[bundle-server] Sanitized workspace:* in dist/server' + relPath);
+        console.log('[bundle-server] Sanitized workspace:* in ' + relative(destDir, filePath));
       }
     } catch {}
   }
@@ -244,41 +235,67 @@ generateServerPackageJson(destDir);
   sanitizeDir(destDir);
 }
 
-// 生成 setup.js — postinstall 执行，安装依赖并链接 workspace 包
-const setupJs = `
-const { execSync } = require('child_process');
-const { existsSync, mkdirSync, cpSync, rmSync, readdirSync, lstatSync } = require('fs');
-const { resolve } = require('path');
+// Generate setup.js for postinstall
+// Copies server bundle to ~/.customize-agent/server/ (outside npm dir, prevents EBUSY)
+// Then installs npm deps and links workspace packages
+const setupJs = [
+  'const { execSync } = require(\'child_process\');',
+  'const { existsSync, mkdirSync, cpSync, rmSync, readdirSync, lstatSync, readFileSync } = require(\'fs\');',
+  'const { resolve, join } = require(\'path\');',
+  'const { homedir } = require(\'os\');',
+  '',
+  'const bundleDir = __dirname;',
+  'const targetDir = join(homedir(), \'.customize-agent\', \'server\');',
+  '',
+  '// Only copy if server version (BUILD_ID) changed',
+  'let needCopy = true;',
+  'try {',
+  '  const bundleBuildId = readFileSync(resolve(bundleDir, \'apps\', \'server\', \'.next\', \'BUILD_ID\'), \'utf8\').trim();',
+  '  const targetBuildIdPath = resolve(targetDir, \'apps\', \'server\', \'.next\', \'BUILD_ID\');',
+  '  if (existsSync(targetBuildIdPath)) {',
+  '    const targetBuildId = readFileSync(targetBuildIdPath, \'utf8\').trim();',
+  '    needCopy = (bundleBuildId !== targetBuildId);',
+  '  }',
+  '} catch {}',
+  '',
+  'if (needCopy) {',
+  '  console.log(\'[customize-agent] Installing server to \' + targetDir + \'...\');',
+  '  if (existsSync(targetDir)) rmSync(targetDir, { recursive: true, force: true });',
+  '  mkdirSync(targetDir, { recursive: true });',
+  '  cpSync(bundleDir, targetDir, { recursive: true, dereference: true });',
+  '  console.log(\'[customize-agent] Server files copied.\');',
+  '} else {',
+  '  console.log(\'[customize-agent] Server already up to date.\');',
+  '}',
+  '',
+  'const packagesDir = resolve(targetDir, \'packages\');',
+  'const scopeDir = resolve(targetDir, \'node_modules\', \'@customize-agent\');',
+  '',
+  'console.log(\'[customize-agent] Installing server dependencies...\');',
+  'try {',
+  '  execSync(\'npm install --omit=dev --no-audit --no-fund --legacy-peer-deps\', { cwd: targetDir, stdio: \'inherit\' });',
+  '} catch (e) {',
+  '  console.error(\'[customize-agent] Server dependency installation failed:\', e.message);',
+  '  process.exit(1);',
+  '}',
+  '',
+  'console.log(\'[customize-agent] Linking workspace packages...\');',
+  'if (existsSync(scopeDir)) rmSync(scopeDir, { recursive: true, force: true });',
+  'mkdirSync(scopeDir, { recursive: true });',
+  'for (const pkgName of readdirSync(packagesDir)) {',
+  '  const src = resolve(packagesDir, pkgName);',
+  '  if (!lstatSync(src).isDirectory()) continue;',
+  '  const dest = resolve(scopeDir, pkgName);',
+  '  cpSync(src, dest, { recursive: true, dereference: true });',
+  '  console.log(\'[customize-agent]   Linked @customize-agent/\' + pkgName);',
+  '}',
+  'console.log(\'[customize-agent] Server setup complete. (\' + targetDir + \')\');',
+].join('\n');
 
-const serverDir = __dirname;
-const packagesDir = resolve(serverDir, 'packages');
-const scopeDir = resolve(serverDir, 'node_modules', '@customize-agent');
-
-console.log('[customize-agent] Installing server dependencies...');
-try {
-  execSync('npm install --omit=dev --no-audit --no-fund --legacy-peer-deps', { cwd: serverDir, stdio: 'inherit' });
-} catch (e) {
-  console.error('[customize-agent] Server dependency installation failed:', e.message);
-  process.exit(1);
-}
-
-// 链接 workspace 包到 node_modules/@customize-agent/
-console.log('[customize-agent] Linking workspace packages...');
-if (existsSync(scopeDir)) rmSync(scopeDir, { recursive: true, force: true });
-mkdirSync(scopeDir, { recursive: true });
-for (const pkgName of readdirSync(packagesDir)) {
-  const src = resolve(packagesDir, pkgName);
-  if (!lstatSync(src).isDirectory()) continue;
-  const dest = resolve(scopeDir, pkgName);
-  cpSync(src, dest, { recursive: true, dereference: true });
-  console.log('[customize-agent]   Linked @customize-agent/' + pkgName);
-}
-console.log('[customize-agent] Server setup complete.');
-`;
 writeFileSync(resolve(destDir, 'setup.js'), setupJs);
-console.log('[bundle-server] Generated setup.js');
+console.log('[bundle-server] Generated setup.js (target: ~/.customize-agent/server/)');
 
-// 复制静态文件和 public 目录
+// Copy static files and public dir
 const bundledServerDir = resolve(destDir, 'apps', 'server');
 if (existsSync(staticDir)) {
   mkdirSync(resolve(bundledServerDir, '.next'), { recursive: true });
@@ -288,21 +305,20 @@ if (existsSync(publicDir)) {
   cpSync(publicDir, resolve(bundledServerDir, 'public'), { recursive: true, dereference: true });
 }
 
-// Patch server.js: 替换 process.chdir(__dirname) 为 chdir 到项目根目录
-// 避免 Windows 上 server 进程锁定 dist/server/apps/server/ 导致 EBUSY
+// Patch server.js: remove process.chdir(__dirname) to prevent file locking
 const serverEntryPath = resolve(bundledServerDir, 'server.js');
 if (existsSync(serverEntryPath)) {
   let content = readFileSync(serverEntryPath, 'utf-8');
-  // 移除 process.chdir(__dirname) — 由 spawn 的 cwd 控制工作目录
   content = content.replace(
     /process\.chdir\(__dirname\)[;]?/g,
-    '// process.chdir removed by bundle-server to prevent Windows file locking'
+    '// process.chdir removed by bundle-server to prevent file locking'
   );
   writeFileSync(serverEntryPath, content);
-  console.log('[bundle-server] Patched server.js (removed process.chdir for Windows EBUSY fix)');
+  console.log('[bundle-server] Patched server.js (removed process.chdir)');
 }
 
-// Marker 文件供 findDashboardServerDir 检测
+// Marker file for findDashboardServerDir detection
 writeFileSync(resolve(destDir, '.dashboard-bundled'), '');
 
-console.log('[bundle-server] Server bundled into dist/server/ (deps installed via postinstall)');
+console.log('[bundle-server] Server bundle ready: dist/server-bundle/');
+console.log('[bundle-server] postinstall will install to ~/.customize-agent/server/');

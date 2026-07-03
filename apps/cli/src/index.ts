@@ -79,13 +79,17 @@ async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
 }
 
 function findDashboardServerDir(existsSync: (path: string) => boolean): string | null {
-  const cliDir = CLI_DIR;
+  const { homedir } = require('os') as typeof import('os');
+  const { join } = require('path') as typeof import('path');
+
+  // Primary: ~/.customize-agent/server/ (outside npm dir, no EBUSY risk)
+  // Fallback: bundled seed in dist/server-bundle/ (first install before postinstall)
+  // Fallback: monorepo dev paths
   const candidates = [
-    // Bundled in npm package: dist/server/
-    { dir: resolve(cliDir, 'server'), marker: '.dashboard-bundled' },
-    // Monorepo dev: apps/server/
-    { dir: resolve(cliDir, '../../../apps/server'), marker: 'package.json' },
-    // Monorepo from project root
+    { dir: join(homedir(), '.customize-agent', 'server'), marker: '.dashboard-bundled' },
+    { dir: resolve(CLI_DIR, 'server-bundle'), marker: '.dashboard-bundled' },
+    { dir: resolve(CLI_DIR, 'server'), marker: '.dashboard-bundled' },
+    { dir: resolve(CLI_DIR, '../../../apps/server'), marker: 'package.json' },
     { dir: resolve(process.cwd(), 'apps/server'), marker: 'package.json' },
   ];
   return candidates.find(c => existsSync(resolve(c.dir, c.marker)))?.dir ?? null;
