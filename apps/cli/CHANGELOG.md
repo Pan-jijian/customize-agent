@@ -1,5 +1,51 @@
 # customize-agent
 
+## 2.1.14
+
+### Patch Changes
+
+- ## 🎯 修复 EBUSY 根因：杀 CLI 进程 + Ctrl+C 清理子进程
+
+  ### 🔍 2.1.13 为什么仍然 EBUSY？
+
+  2.1.13 的 `kill-server.cjs` 只杀 server 进程，但 **CLI 进程仍在运行**。
+  CLI 检测到 server 端口不可达时会自动重启它 → npm 重命名目录时再次 EBUSY。
+
+  ```
+  preinstall: kill server ✓ → CLI 检测 server 挂了 → CLI 重启 server → npm 重命名 → EBUSY ✗
+  ```
+
+  ### 🔧 修复 ①：kill-server.cjs — 先杀 CLI，再杀 server
+
+  ```
+  preinstall: kill CLI ✓ → CLI 无法重启 server → kill server ✓ → npm 重命名 → 成功 ✓
+  ```
+
+  | 改进项 | 说明 |
+  |--------|------|
+  | 执行顺序 | **先杀 CLI 进程**（`killCLIProcess()`），再杀 server 进程 |
+  | 输出方式 | stderr 输出，npm install 时强制可见 |
+  | 日志内容 | 输出被杀的 PID 和来源（PowerShell/wmic/端口）|
+  | macOS/Linux | 新增 `pkill -f` 匹配命令行杀进程 |
+
+  ### 🔧 修复 ②：index.ts — 退出时清理所有子进程
+
+  用户 Ctrl+C / 关闭终端 / `/exit` 时，CLI 自动杀掉 dashboard server + chroma：
+
+  - `spawnedPids` Set 追踪所有子进程 PID
+  - `process.on('exit')` — 正常退出时 `taskkill /F`（Win）或 `process.kill(SIGTERM)`（Unix）
+  - `SIGHUP` / `SIGTERM` — 终端关闭或被 kill 时也触发清理
+  - 双重 Ctrl+C 退出也保证 server 不残留
+
+  ### ⚠️ 升级说明
+
+  从旧版本升级时，如果仍有 EBUSY，请先手动关闭终端中的 `customize` CLI：
+  ```powershell
+  taskkill /F /IM node.exe /FI "CMDLINE ne cmd.exe"
+  npm i -g customize-agent@latest
+  ```
+  升级到 2.1.14+ 后，此问题不会再出现。
+
 ## 2.1.13
 
 ### Patch Changes
@@ -15,12 +61,12 @@
 
   ### 🔧 修复 ①：kill-server.cjs 彻底重写
 
-  | 修复项 | 旧行为 | 新行为 |
-  |-------|-------|-------|
-  | CPU 占用 | busy-wait 100% CPU | `timeout /t` / `sleep` 系统命令，零 CPU |
+  | 修复项         | 旧行为                    | 新行为                                                            |
+  | -------------- | ------------------------- | ----------------------------------------------------------------- |
+  | CPU 占用       | busy-wait 100% CPU        | `timeout /t` / `sleep` 系统命令，零 CPU                           |
   | Windows 杀进程 | 仅 `netstat` + `taskkill` | **3 层策略**：PowerShell → netstat 兜底 → 按命令行查杀 `node.exe` |
-  | 重试 | 单次 | 3 轮，每轮间隔 2s 真实 sleep |
-  | 句柄释放 | 杀完立即退出 | 最终 3s 等待（Windows）|
+  | 重试           | 单次                      | 3 轮，每轮间隔 2s 真实 sleep                                      |
+  | 句柄释放       | 杀完立即退出              | 最终 3s 等待（Windows）                                           |
 
   ### 🔧 修复 ②：bundle-server.mjs 清除 workspace:\* 残留
 
