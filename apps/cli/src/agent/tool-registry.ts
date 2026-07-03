@@ -18,7 +18,7 @@ import {
 import { ToolKit, SandboxExecutor, BuiltinTools } from '@customize-agent/tools';
 import { LSPManager, CodeSearcher } from '@customize-agent/search';
 import { BINARY_EXTENSIONS } from '@customize-agent/types';
-import { MultiProjectManager } from '@customize-agent/knowledge';
+import { MultiProjectManager, type LLMSearchProvider } from '@customize-agent/knowledge';
 
 type CliMcpConfig = Record<string, { command: string; args?: string[]; cwd?: string; env?: Record<string, string> }>;
 
@@ -214,7 +214,8 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
     scope: { type: 'string', description: 'Search scope: project, global, or all. Default: all' },
     limit: { type: 'number', description: 'Maximum number of results. Default: 5' },
   }, ['query'], ['search_symbol'], false, async args => {
-    const manager = new MultiProjectManager();
+    // 将 ILLMProvider 作为 LLMSearchProvider 传入（结构兼容）
+    const manager = new MultiProjectManager(undefined, provider as LLMSearchProvider);
     try {
       const result = await manager.search(knowledgeRoot, String(args.query), {
         scope: args.scope === 'project' || args.scope === 'global' || args.scope === 'all' ? args.scope : 'all',

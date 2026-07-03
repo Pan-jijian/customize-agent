@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (!['GET', 'POST'].includes(req.method!)) return res.status(405).json({ error: 'Method not allowed' });
   try {
     const projectRoot = (req.query.projectRoot as string) || getProjectRoot();
     if (!projectRoot) return res.status(200).json([]);
@@ -12,5 +13,5 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json({ success: true });
     }
     res.status(200).json(project.listIgnoreRules().map((r: any) => r.pattern));
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+  } catch (e: unknown) { console.error('[api] kb/ignore', e); res.status(500).json({ error: 'Internal server error' }); }
 }

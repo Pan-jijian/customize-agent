@@ -5,7 +5,7 @@ import { countTokensFromMessages } from '../utils/tokens.js';
 import { createLLMResponse } from '../utils/response.js';
 
 const ANTHROPIC_CAPABILITIES: ModelCapabilities = {
-  maxContextTokens: 200_000,
+  maxContextTokens: 1_000_000,
   maxOutputTokens: 64_000,
   supportsStreaming: true,
   supportsFunctionCalling: true,

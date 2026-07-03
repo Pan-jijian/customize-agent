@@ -91,7 +91,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
           max_tokens: options?.maxTokens,
           tools: this._buildTools(options?.tools),
           stream: true,
-        });
+        }, { signal: options?.signal });
 
         let content = '';
         this._thinkingContent = '';

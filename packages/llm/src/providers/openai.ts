@@ -3,7 +3,7 @@ import { OpenAICompatProvider } from './openai-base.js';
 import { withRetry } from '../retry.js';
 
 const OPENAI_CAPABILITIES: ModelCapabilities = {
-  maxContextTokens: 200_000,
+  maxContextTokens: 1_000_000,
   maxOutputTokens: 16_384,
   supportsStreaming: true,
   supportsFunctionCalling: true,

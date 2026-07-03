@@ -60,6 +60,7 @@ export class VectorIndexer {
   }
 
   private toVectorDocument(chunk: StoredChunk, embedding: number[]): VectorDocument {
+    const chunkMetadata = this.parseMetadata(chunk.metadataJson);
     return {
       id: chunk.id,
       content: chunk.content,
@@ -71,7 +72,26 @@ export class VectorIndexer {
         format: chunk.format,
         token_count: chunk.tokenCount,
         section_title: chunk.sectionTitle ?? null,
+        parent_id: this.metadataString(chunkMetadata.parentId),
+        parent_index: this.metadataNumber(chunkMetadata.parentIndex),
+        child_index: this.metadataNumber(chunkMetadata.childIndex),
+        chunk_kind: this.metadataString(chunkMetadata.chunkKind),
+        row_range: this.metadataString(chunkMetadata.rowRange),
+        split_strategy: this.metadataString(chunkMetadata.splitStrategy),
       },
     };
+  }
+
+  private parseMetadata(metadataJson?: string): Record<string, unknown> {
+    if (!metadataJson) return {};
+    try { return JSON.parse(metadataJson) as Record<string, unknown>; } catch { return {}; }
+  }
+
+  private metadataString(value: unknown): string | null {
+    return typeof value === 'string' ? value : null;
+  }
+
+  private metadataNumber(value: unknown): number | null {
+    return typeof value === 'number' ? value : null;
   }
 }

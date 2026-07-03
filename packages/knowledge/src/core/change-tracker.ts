@@ -39,6 +39,17 @@ export class ChangeTracker {
         continue;
       }
 
+      const metadata = this.parseMetadata(indexed.metadataJson);
+      const needsReindex = indexed.status === 'error'
+        || indexed.chunkCount === 0
+        || (classified.format === 'pdf' && indexed.chunkCount <= 1)
+        || metadata.contentCoverage === 'metadata_filename'
+        || metadata.extractionMode === 'pdf_metadata_only';
+      if (needsReindex) {
+        modifiedFiles.push(classified);
+        continue;
+      }
+
       if (Math.round(diskStat.mtime) !== Math.round(indexed.mtime) || diskStat.size !== indexed.fileSize) {
         const contentHash = this.hashFile(absolutePath);
         if (contentHash !== indexed.contentHash) {
@@ -72,5 +83,15 @@ export class ChangeTracker {
 
   hashFile(filePath: string): string {
     return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+  }
+
+  private parseMetadata(metadataJson?: string | null): Record<string, unknown> {
+    if (!metadataJson) return {};
+    try {
+      const parsed = JSON.parse(metadataJson);
+      return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+    } catch {
+      return {};
+    }
   }
 }

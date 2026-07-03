@@ -1,9 +1,15 @@
 {
   "name": "@customize-agent/llm",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "AI 模型提供商 + 自动路由网关",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -31,7 +37,9 @@
   ],
   "dependencies": {
     "@customize-agent/types": "workspace:*",
-    "@types/node": "^25.9.3",
     "openai": "^6.42.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3"
   }
 }

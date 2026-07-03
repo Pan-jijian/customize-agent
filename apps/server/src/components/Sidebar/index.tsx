@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { useAppTranslations } from '@/components/Layout';
-import { LayoutDashboard, Database, Cpu, Settings, Sparkles, Brain, MessageSquare, ChevronDown, ChevronRight, FileText, FolderOpen, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { LayoutDashboard, Database, Cpu, Settings, Sparkles, Brain, MessageSquare, ChevronDown, ChevronRight, FileText, FolderOpen, PanelLeftClose, PanelLeftOpen, Search } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 interface SubMenuItem {
@@ -28,6 +28,7 @@ const NAV_ITEMS: NavItem[] = [
     children: [
       { href: '/knowledge/manage', icon: FolderOpen, labelKey: 'nav.knowledgeManage' },
       { href: '/knowledge/files', icon: FileText, labelKey: 'nav.fileManagement' },
+      { href: '/knowledge/search', icon: Search, labelKey: 'nav.knowledgeSearch' },
     ],
   },
   {

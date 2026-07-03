@@ -1,9 +1,15 @@
 {
   "name": "@customize-agent/tools",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Agent 工具 — 文件操作、终端、Git、沙箱、语法验证",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -33,7 +39,6 @@
     "@customize-agent/search": "workspace:*",
     "@customize-agent/types": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@types/node": "^25.9.3",
     "archiver": "^8.0.0",
     "execa": "^9.6.1",
     "mammoth": "^1.12.0",
@@ -44,6 +49,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "@types/archiver": "^8.0.0"
+    "@types/archiver": "^8.0.0",
+    "@types/node": "^25.9.3"
   }
 }

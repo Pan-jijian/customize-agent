@@ -11,6 +11,9 @@ import { normalizeTerminalText, supportsAnsi } from './terminal-capabilities.js'
 export interface CapturedTaskInput {
   drain: () => string[];
   writeOutput: (text: string) => void;
+  setLiveStatus: (lines: string | string[]) => void;
+  clearLiveStatus: () => void;
+  commitStatus: (lines: string | string[]) => void;
   pause: () => void;
   resume: () => void;
   stop: () => void;
@@ -22,6 +25,7 @@ export interface CaptureTaskInputOptions {
   i18n: I18nManager;
   tokenStats: () => { tokens: number; limit: number };
   onCancel: () => void;
+  onCtrlO?: () => string | null;
 }
 
 let keypressInitialized = false;
@@ -31,6 +35,9 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     return {
       drain: () => [],
       writeOutput: (text: string) => { process.stdout.write(normalizeTerminalText(text)); },
+      setLiveStatus: (lines: string | string[]) => { process.stdout.write(normalizeTerminalText(Array.isArray(lines) ? lines.join('\n') : lines) + '\n'); },
+      clearLiveStatus: () => {},
+      commitStatus: (lines: string | string[]) => { process.stdout.write(normalizeTerminalText(Array.isArray(lines) ? lines.join('\n') : lines) + '\n'); },
       pause: () => {},
       resume: () => {},
       stop: () => {},
@@ -58,7 +65,10 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
   let inputLinesOnScreen = 0;
   let inputCursorLineIndex = 0;
   let statusLineActive = false;
+  let statusLineCount = 0;
   let outputLineOpen = false;
+  let ctrlOOpen = false;
+  let ctrlOLines = 0;
   let cancelling = false;
   let bracketedPaste = false;
   let pasteBuffer = '';
@@ -273,11 +283,37 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     inputCursorLineIndex = midIndex;
   };
 
-  const clearStatusLine = () => {
-    if (!statusLineActive) return;
+  const clearCtrlO = () => {
+    if (!ctrlOOpen || ctrlOLines <= 0) return;
     clearInputLine();
-    process.stdout.write('\x1b[1A\r\x1b[2K');
+    process.stdout.write(`\x1b[${ctrlOLines}A\r`);
+    for (let i = 0; i < ctrlOLines; i++) {
+      process.stdout.write('\x1b[2K');
+      if (i < ctrlOLines - 1) process.stdout.write('\x1b[1B\r');
+    }
+    if (ctrlOLines > 1) process.stdout.write(`\x1b[${ctrlOLines - 1}A\r`);
+    ctrlOOpen = false;
+    ctrlOLines = 0;
+  };
+
+  const toStatusLines = (lines: string | string[]) => {
+    const text = Array.isArray(lines) ? lines.join('\n') : lines;
+    return normalizeStatusText(text).replace(/\n+$/g, '').split('\n').filter((line, index, arr) => line.length > 0 || arr.length > 1 || index === 0);
+  };
+
+  const clearStatusLine = () => {
+    if (!statusLineActive || statusLineCount <= 0) return;
+    clearCtrlO();
+    clearInputLine();
+    const lines = statusLineCount;
+    process.stdout.write(`\x1b[${lines}A\r`);
+    for (let i = 0; i < lines; i++) {
+      process.stdout.write('\x1b[2K');
+      if (i < lines - 1) process.stdout.write('\x1b[1B\r');
+    }
+    if (lines > 1) process.stdout.write(`\x1b[${lines - 1}A\r`);
     statusLineActive = false;
+    statusLineCount = 0;
   };
   const clearBuffer = () => {
     if (outputLineOpen) {
@@ -289,26 +325,43 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
   };
   const cursorControlRe = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[ABCDGJK]`, 'g');
   const normalizeStatusText = (text: string) => text.replace(cursorControlRe, '').replace(/^\r+/, '');
-  const writeStatus = (text: string) => {
-    const normalized = normalizeStatusText(text);
-    const isClear = normalized.trim().length === 0;
-    if (statusLineActive) {
-      clearInputLine();
-      process.stdout.write('\x1b[1A\r\x1b[2K');
-    } else {
-      clearBuffer();
-    }
-    if (isClear) {
-      statusLineActive = false;
+  const setLiveStatus = (lines: string | string[]) => {
+    const statusLines = toStatusLines(lines);
+    if (statusLineActive) clearStatusLine();
+    else clearBuffer();
+    if (statusLines.length === 0 || statusLines.every(line => line.trim().length === 0)) {
       renderBuffer();
       return;
     }
-    process.stdout.write(normalized.endsWith('\n') ? normalized : normalized + '\n');
-    statusLineActive = !normalized.endsWith('\n');
+    process.stdout.write(statusLines.join('\n') + '\n');
+    statusLineActive = true;
+    statusLineCount = statusLines.length;
     renderBuffer();
+  };
+
+  const clearLiveStatus = () => {
+    clearStatusLine();
+    renderBuffer();
+  };
+
+  const commitStatus = (lines: string | string[]) => {
+    const statusLines = toStatusLines(lines);
+    if (statusLineActive) clearStatusLine();
+    else clearBuffer();
+    if (statusLines.length > 0 && statusLines.some(line => line.trim().length > 0)) {
+      process.stdout.write(statusLines.join('\n') + '\n');
+    }
+    renderBuffer();
+  };
+
+  const writeStatus = (text: string) => {
+    const normalized = normalizeStatusText(text);
+    if (normalized.trim().length === 0) clearLiveStatus();
+    else setLiveStatus(normalized);
   };
   const writeOutput = (text: string) => {
     if (cancelling) return;
+    clearCtrlO();
     if (text.startsWith('\r')) {
       writeStatus(text);
       return;
@@ -359,15 +412,31 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
       return;
     }
 
-    if (key?.ctrl && key.name === 'c') {
-      if (buffer) {
-        buffer = '';
-        pos = 0;
-        pasteBlocks.length = 0;
-        resetDropdown();
+    if (key?.ctrl && key.name === 'o') {
+      if (!options.onCtrlO) return;
+      if (ctrlOOpen) {
+        clearCtrlO();
         renderBuffer();
         return;
       }
+      const content = options.onCtrlO();
+      if (!content) return;
+      clearStatusLine();
+      clearBuffer();
+      const text = content.endsWith('\n') ? content : content + '\n';
+      process.stdout.write(text);
+      ctrlOLines = text.split('\n').length - 1;
+      ctrlOOpen = true;
+      renderBuffer();
+      return;
+    }
+
+    if (ctrlOOpen) {
+      clearCtrlO();
+      renderBuffer();
+    }
+
+    if (key?.ctrl && key.name === 'c') {
       cancelling = true;
       buffer = '';
       pos = 0;
@@ -465,6 +534,9 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
       return drained;
     },
     writeOutput,
+    setLiveStatus,
+    clearLiveStatus,
+    commitStatus,
     pause: () => {
       if (!active) return;
       active = false;
@@ -481,7 +553,11 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     stop: () => {
       if (active) process.stdin.removeListener('keypress', onKeypress);
       active = false;
+      if (process.stdin.isTTY) {
+        try { process.stdin.setRawMode(false); } catch { /* ignore */ }
+      }
       process.stdout.write('\x1b[?2004l');
+      clearCtrlO();
       clearStatusLine();
       // 清理 task-input-capture 渲染的行，让主 TuiInput 干净接管
       if (inputLinesOnScreen > 0) {

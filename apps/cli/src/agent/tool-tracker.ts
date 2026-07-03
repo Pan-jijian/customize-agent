@@ -1,7 +1,6 @@
 // @customize-agent/cli — 工具调用预览 & 折叠追踪
 import type { ToolCall } from '@customize-agent/types';
 import { toolCallFold, toolCallFolding } from '../tui/renderer.js';
-import { supportsAnsi } from '../tui/terminal-capabilities.js';
 import type { AgentEvent } from './executor.js';
 
 /** 管理工具调用预览的去重和发射 */
@@ -49,6 +48,8 @@ export class ToolFoldTracker {
     private toolLabel: (name: string) => string,
     private toolsLabel: string,
     private formatArg: (args?: Record<string, unknown>) => string,
+    private setLiveStatus?: (lines: string | string[]) => void,
+    private commitStatus?: (lines: string | string[]) => void,
   ) {}
 
   /** 为工具调用推进折叠状态 */
@@ -57,7 +58,9 @@ export class ToolFoldTracker {
       this.foldCount++;
       this.foldArgs.push(this.formatArg(tc.arguments));
       if (this.stream && !skipStartRender) {
-        this.write(toolCallFolding(tc.name, this.foldCount, this.foldArgs[this.foldArgs.length - 1]!, Date.now() - this.foldStartMs, this.toolLabel(tc.name), this.toolsLabel));
+        const line = toolCallFolding(tc.name, this.foldCount, this.foldArgs[this.foldArgs.length - 1]!, Date.now() - this.foldStartMs, this.toolLabel(tc.name), this.toolsLabel);
+        if (this.setLiveStatus) this.setLiveStatus(line);
+        else this.write(line);
       }
     } else {
       this.flush();
@@ -68,7 +71,9 @@ export class ToolFoldTracker {
       this.foldDiff = '';
       this.foldStartMs = Date.now();
       if (this.stream && !skipStartRender) {
-        this.write(toolCallFolding(tc.name, 1, this.foldArgs[0]!, previewElapsedMs, this.toolLabel(tc.name), this.toolsLabel));
+        const line = toolCallFolding(tc.name, 1, this.foldArgs[0]!, previewElapsedMs, this.toolLabel(tc.name), this.toolsLabel);
+        if (this.setLiveStatus) this.setLiveStatus(line);
+        else this.write(line);
       }
     }
   }
@@ -87,7 +92,9 @@ export class ToolFoldTracker {
   flush(): void {
     if (this.foldCount === 0) return;
     if (this.stream) {
-      this.write((supportsAnsi() ? '\r\x1b[2K' : '') + toolCallFold(this.foldType, this.foldCount, this.foldArgs, this.foldTotalMs, this.foldDiff, this.toolLabel(this.foldType), this.toolsLabel) + '\n');
+      const output = toolCallFold(this.foldType, this.foldCount, this.foldArgs, this.foldTotalMs, this.foldDiff, this.toolLabel(this.foldType), this.toolsLabel);
+      if (this.commitStatus) this.commitStatus(output);
+      else this.write(output + '\n');
     }
     this.foldType = ''; this.foldCount = 0; this.foldArgs = []; this.foldTotalMs = 0; this.foldDiff = ''; this.foldStartMs = 0;
   }

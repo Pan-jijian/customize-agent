@@ -118,27 +118,33 @@ function scanLogs(): { tokens: number; models: ModelUsage[]; tasks: { total: num
   };
 }
 
-export default function handler(_req: NextApiRequest, res: NextApiResponse<StatsResponse>) {
-  const memTotal = os.totalmem();
-  const memFree = os.freemem();
-  const procMem = process.memoryUsage();
+export default function handler(req: NextApiRequest, res: NextApiResponse<StatsResponse>) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'Method not allowed' } as any); return; }
+  try {
+    const memTotal = os.totalmem();
+    const memFree = os.freemem();
+    const procMem = process.memoryUsage();
 
-  const stats = scanLogs();
+    const stats = scanLogs();
 
-  res.status(200).json({
-    cpu: {
-      usagePercent: getCpuUsage(),
-      cores: os.cpus().length,
-    },
-    memory: {
-      totalMB: Math.round(memTotal / 1024 / 1024),
-      usedMB: Math.round((memTotal - memFree) / 1024 / 1024),
-      processMB: Math.round(procMem.rss / 1024 / 1024),
-      usagePercent: Math.round(((memTotal - memFree) / memTotal) * 100),
-    },
-    tokens: { total: stats.tokens },
-    models: stats.models,
-    tasks: stats.tasks,
-    uptime: process.uptime(),
-  });
+    res.status(200).json({
+      cpu: {
+        usagePercent: getCpuUsage(),
+        cores: os.cpus().length,
+      },
+      memory: {
+        totalMB: Math.round(memTotal / 1024 / 1024),
+        usedMB: Math.round((memTotal - memFree) / 1024 / 1024),
+        processMB: Math.round(procMem.rss / 1024 / 1024),
+        usagePercent: Math.round(((memTotal - memFree) / memTotal) * 100),
+      },
+      tokens: { total: stats.tokens },
+      models: stats.models,
+      tasks: stats.tasks,
+      uptime: process.uptime(),
+    });
+  } catch (e: unknown) {
+    console.error('[api] system/stats', e);
+    res.status(500).json({ error: 'Internal server error' } as any);
+  }
 }

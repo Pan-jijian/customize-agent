@@ -1,23 +1,26 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { USER_DATA_DIR } from '../constants.js';
-import type { FederatedResult, FederatedSearchItem, SearchFilters, SearchScope } from '../search/federation-search.js';
+import type { FederatedResult, RetrievalWeights, SearchFilters, SearchScope } from '../search/federation-search.js';
 import { FederationSearch } from '../search/federation-search.js';
 import type { CrossProjectDuplicate, ProjectInfo } from '../types.js';
 import { KnowledgeBaseManager } from './knowledge-base-manager.js';
 import { computeProjectId } from './project-id.js';
 import { getProjectKbPath, ProjectConfigManager } from './project-config.js';
 import { ProjectRegistry } from './project-registry.js';
+import type { LLMSearchProvider } from '../llm/llm-search-provider.js';
 
 export class MultiProjectManager {
   private readonly storageRoot: string;
+  private readonly llmProvider?: LLMSearchProvider;
   private readonly registry: ProjectRegistry;
   private readonly configManager = new ProjectConfigManager();
   private readonly projects = new Map<string, KnowledgeBaseManager>();
   private globalKB?: KnowledgeBaseManager;
 
-  constructor(storageRoot = path.join(os.homedir(), USER_DATA_DIR)) {
+  constructor(storageRoot = path.join(os.homedir(), USER_DATA_DIR), llmProvider?: LLMSearchProvider) {
     this.storageRoot = storageRoot;
+    this.llmProvider = llmProvider;
     this.registry = new ProjectRegistry(path.join(storageRoot, 'projects', 'registry.db'));
   }
 
@@ -34,6 +37,7 @@ export class MultiProjectManager {
       projectId,
       kbPath: getProjectKbPath(resolvedRoot),
       storageRoot: this.storageRoot,
+      llmProvider: this.llmProvider,
     });
 
     manager.initialize();
@@ -46,7 +50,7 @@ export class MultiProjectManager {
   async getGlobalKB(): Promise<KnowledgeBaseManager> {
     if (this.globalKB) return this.globalKB;
 
-    const manager = new KnowledgeBaseManager({ scope: 'global', storageRoot: this.storageRoot });
+    const manager = new KnowledgeBaseManager({ scope: 'global', storageRoot: this.storageRoot, llmProvider: this.llmProvider });
     manager.initialize();
     await manager.incrementalIndex();
     this.globalKB = manager;
@@ -57,37 +61,30 @@ export class MultiProjectManager {
     return this.registry.list();
   }
 
-  async search(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope } = {}): Promise<ReturnType<FederationSearch['merge']>> {
+  async search(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope; weights?: RetrievalWeights } = {}): Promise<FederatedResult> {
     const limit = options.limit ?? 10;
     const scope = options.scope ?? 'all';
     const project = await this.getProject(projectRoot);
     await project.incrementalIndex();
-    const items: FederatedSearchItem[] = [];
 
-    if (scope === 'project' || scope === 'all') {
-      items.push(...project.search(query, limit).map(result => ({
-        id: result.id,
-        content: result.content,
-        filePath: result.relativePath,
-        scope: 'project' as const,
-        collection: result.collectionName,
-        score: result.score,
-      })));
-    }
+    if (scope === 'project') return project.hybridSearch(query, { limit, weights: options.weights });
 
-    if (scope === 'global' || scope === 'all') {
+    const projectResults = scope === 'all'
+      ? await project.hybridSearch(query, { limit, weights: options.weights })
+      : { results: [], scopesSearched: [], queryTimeMs: 0 } as FederatedResult;
+
+    if (scope === 'global') {
       const global = await this.getGlobalKB();
-      items.push(...global.search(query, limit).map(result => ({
-        id: result.id,
-        content: result.content,
-        filePath: result.relativePath,
-        scope: 'global' as const,
-        collection: result.collectionName,
-        score: result.score,
-      })));
+      return global.hybridSearch(query, { limit, weights: options.weights });
     }
 
-    return new FederationSearch().merge(items, limit, scope);
+    const global = await this.getGlobalKB();
+    const globalResults = await global.hybridSearch(query, { limit, weights: options.weights });
+    const merged = new FederationSearch().merge([...projectResults.results, ...globalResults.results], limit, 'all');
+    return {
+      ...merged,
+      debug: this.mergeDebug(projectResults.debug, globalResults.debug),
+    };
   }
 
   async semanticSearch(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope; filters?: SearchFilters; collections?: string[] } = {}): Promise<FederatedResult> {
@@ -123,6 +120,7 @@ export class MultiProjectManager {
         projectId: project.projectId,
         kbPath: project.kbPath,
         storageRoot: this.storageRoot,
+        llmProvider: this.llmProvider,
       });
 
       for (const item of manager.store.listContentHashes()) {
@@ -165,6 +163,21 @@ export class MultiProjectManager {
     this.globalKB?.close();
     this.globalKB = undefined;
     this.registry.close();
+  }
+
+  private mergeDebug(projectDebug: FederatedResult['debug'], globalDebug: FederatedResult['debug']): FederatedResult['debug'] {
+    if (!projectDebug && !globalDebug) return undefined;
+    return {
+      originalQuery: projectDebug?.originalQuery ?? globalDebug?.originalQuery,
+      rewrittenQueries: [...new Set([...(projectDebug?.rewrittenQueries ?? []), ...(globalDebug?.rewrittenQueries ?? [])])],
+      weights: projectDebug?.weights ?? globalDebug?.weights,
+      recallCounts: {
+        keyword: (projectDebug?.recallCounts?.keyword ?? 0) + (globalDebug?.recallCounts?.keyword ?? 0),
+        vector: (projectDebug?.recallCounts?.vector ?? 0) + (globalDebug?.recallCounts?.vector ?? 0),
+        merged: (projectDebug?.recallCounts?.merged ?? 0) + (globalDebug?.recallCounts?.merged ?? 0),
+      },
+      reranker: projectDebug?.reranker ?? globalDebug?.reranker,
+    };
   }
 
   private updateRegistry(manager: KnowledgeBaseManager, projectRoot: string, projectName: string | undefined, lastOpenedAt: number): void {

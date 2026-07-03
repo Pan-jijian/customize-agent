@@ -22,7 +22,7 @@ export class HashEmbeddingProvider implements EmbeddingProvider {
 
   private embed(text: string): number[] {
     const vector = Array.from({ length: this.dimensions }, () => 0);
-    const tokens = text.toLowerCase().normalize('NFKC').split(/\s+/u).filter(Boolean);
+    const tokens = this.tokenize(text);
 
     for (const token of tokens) {
       const hash = crypto.createHash('sha256').update(token).digest();
@@ -32,6 +32,20 @@ export class HashEmbeddingProvider implements EmbeddingProvider {
     }
 
     return this.normalize(vector);
+  }
+
+  private tokenize(text: string): string[] {
+    const normalized = text.toLowerCase().normalize('NFKC');
+    const tokens = normalized.match(/[\p{Script=Han}]{1,4}|[\p{Letter}\p{Number}_-]+/gu) ?? [];
+    const grams: string[] = [];
+    for (const token of tokens) {
+      grams.push(token);
+      if (/^[\p{Script=Han}]+$/u.test(token) && token.length > 1) {
+        for (let i = 0; i < token.length - 1; i++) grams.push(token.slice(i, i + 2));
+        for (let i = 0; i < token.length - 2; i++) grams.push(token.slice(i, i + 3));
+      }
+    }
+    return grams.filter(Boolean);
   }
 
   private normalize(vector: number[]): number[] {

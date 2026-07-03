@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { useAppLocale, useAppTranslations } from '@/components/Layout';
-import { Card, Button, Row, Col, Statistic, Table, Tag, App, Segmented } from 'antd';
-import { DatabaseOutlined, FileOutlined, HddOutlined, ClockCircleOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Card, Button, Row, Col, Statistic, Table, Tag, App, Segmented, Space } from 'antd';
+import { DatabaseOutlined, FileOutlined, HddOutlined, ClockCircleOutlined, ReloadOutlined, FolderOutlined, SearchOutlined } from '@ant-design/icons';
 import { useKbStats, useKbFeatures, useReindex } from '@/hooks/useKbData';
 import { getKbFiles } from '@/lib/api';
 import { categoryLabel, formatBytes, formatRelativeTime } from '@/lib/utils';
@@ -11,6 +12,7 @@ const ALL_CATEGORY_KEYS = ['document', 'spreadsheet', 'image', 'cad', 'code', 'd
 export default function KnowledgeManagePage() {
   const t = useAppTranslations();
   const { locale } = useAppLocale();
+  const router = useRouter();
   const { stats, loading, reload } = useKbStats();
   const features = useKbFeatures();
   const { reindexing, reindex } = useReindex();
@@ -44,7 +46,11 @@ export default function KnowledgeManagePage() {
     <div className="space-y-6 animateFadeIn">
       <div className="flex items-center justify-between">
         <div><h1 className="pageTitle">{t('knowledge.manageTitle')}</h1><p className="pageDesc">{t('knowledge.manageDesc')}</p></div>
-        <Button icon={<ReloadOutlined />} loading={reindexing} onClick={() => { void handleReindex(); }}>{t('knowledge.reindex')}</Button>
+        <Space>
+          <Button icon={<FolderOutlined />} onClick={() => router.push('/knowledge/files')}>{t('knowledge.files')}</Button>
+          <Button icon={<SearchOutlined />} onClick={() => router.push('/knowledge/search')}>{t('knowledge.search')}</Button>
+          <Button icon={<ReloadOutlined />} loading={reindexing} onClick={() => { void handleReindex(); }}>{t('knowledge.reindex')}</Button>
+        </Space>
       </div>
 
       <Row gutter={[16, 16]}>

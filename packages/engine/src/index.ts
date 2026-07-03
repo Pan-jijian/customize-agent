@@ -25,7 +25,7 @@ export {
 } from './core/errors.js';
 export { buildToolDefinitions, runToolLoop, type ToolLoopRunOptions, type ToolLoopRunResult } from './core/tool-loop-runner.js';
 export { SubagentRunner } from './orchestration/subagent/runner.js';
-export { createBuiltinSubagentConfig, getBuiltinPrompt, getRecommendedModel } from './orchestration/subagent/builtins.js';
+export { createBuiltinSubagentConfig } from './orchestration/subagent/builtins.js';
 export { Orchestrator, type CollaborationMode, type OrchestrationResult } from './orchestration/orchestrator.js';
 export type { SubagentConfig, SubagentResult, SubagentTask } from './orchestration/subagent/types.js';
 export {
@@ -39,5 +39,3 @@ export {
 } from './orchestration/isolation.js';
 export { McpServer } from './extensions/mcp-server.js';
 export { McpClient, type McpServerConfig } from './extensions/mcp-client.js';
-export { HooksEngine, type HookEvent, type HookType, type HookConfig, type HookResult } from './extensions/hooks.js';
-export { SkillsLoader } from './extensions/skills.js';
