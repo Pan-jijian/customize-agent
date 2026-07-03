@@ -410,7 +410,7 @@ program.action(async () => {
 
   if (process.env.CUSTOMIZE_AGENT_E2E_DASHBOARD === '1') {
     console.log(dashboardReady ? `Dashboard ready: ${dashboardUrl}` : 'Dashboard failed to start');
-    await new Promise(() => undefined);
+    await new Promise(() => setInterval(() => undefined, 60_000));
   }
 
   const repl = new Repl({
