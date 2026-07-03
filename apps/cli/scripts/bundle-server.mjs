@@ -128,63 +128,32 @@ if (!existsSync(standaloneDir)) {
   process.exit(0);
 }
 
-// Clean and copy
+const monorepoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
+
+// Clean and copy standalone output
 if (existsSync(destDir)) rmSync(destDir, { recursive: true });
 mkdirSync(destDir, { recursive: true });
 cpSync(standaloneDir, destDir, { recursive: true, dereference: true });
 
-// 将 workspace packages/ 目录链接到 node_modules/@customize-agent/ scope
-// Next.js standalone 将 workspace 包放在顶层 packages/ 而非 node_modules scope 下，
-// 导致 require('@customize-agent/knowledge') 找不到包
-function linkWorkspacePackages(destDir) {
-  const packagesDir = resolve(destDir, 'packages');
-  const scopeDir = resolve(destDir, 'node_modules', '@customize-agent');
-  if (!existsSync(packagesDir)) return;
-  mkdirSync(scopeDir, { recursive: true });
-  for (const pkgName of readdirSync(packagesDir)) {
-    const pkgDir = resolve(packagesDir, pkgName);
-    if (!lstatSync(pkgDir).isDirectory()) continue;
-    const destLink = resolve(scopeDir, pkgName);
-    if (existsSync(destLink)) rmSync(destLink, { recursive: true, force: true });
-    cpSync(pkgDir, destLink, { recursive: true, dereference: true });
-    console.log(`[bundle-server] Linked @customize-agent/${pkgName}`);
-  }
-}
-linkWorkspacePackages(destDir);
-materializeSymlinks(resolve(destDir, 'node_modules'));
-
-// 展开 pnpm store 到 node_modules（使 CJS 和 ESM 都能解析）
-materializePnpmEntrypoints(resolve(destDir, 'node_modules'));
-
-// 自动打包所有 workspace 包的外部依赖（包括 Next.js 静态分析遗漏的动态 import 依赖）
-const monorepoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
-const rootPnpm = resolve(monorepoRoot, 'node_modules', '.pnpm');
-
-function ensureWorkspaceDeps(packageDir, nodeModulesDir, rootPnpm) {
-  const pkgJsonPath = resolve(packageDir, 'package.json');
-  if (!existsSync(pkgJsonPath)) return;
-  const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf-8'));
-  const deps = Object.keys(pkg.dependencies ?? {});
-  for (const dep of deps) {
-    if (dep.startsWith('@customize-agent/')) continue;
-    ensureVendorPackage(nodeModulesDir, dep, rootPnpm);
-  }
+// 保留 workspace 包（纯 JS，跨平台），移到 packages/ 目录
+const monorepoPackagesDir = resolve(monorepoRoot, 'packages');
+const destPackagesDir = resolve(destDir, 'packages');
+if (existsSync(destPackagesDir)) rmSync(destPackagesDir, { recursive: true, force: true });
+mkdirSync(destPackagesDir, { recursive: true });
+for (const pkgName of ['knowledge', 'llm', 'runtime', 'types']) {
+  const src = resolve(monorepoPackagesDir, pkgName);
+  if (!existsSync(src)) continue;
+  cpSync(src, resolve(destPackagesDir, pkgName), { recursive: true, dereference: true });
+  console.log(`[bundle-server] Packaged @customize-agent/${pkgName}`);
 }
 
-const packagesDir = resolve(monorepoRoot, 'packages');
-const nodeModulesDir = resolve(destDir, 'node_modules');
-ensureWorkspaceDeps(resolve(packagesDir, 'knowledge'), nodeModulesDir, rootPnpm);
-ensureWorkspaceDeps(resolve(packagesDir, 'search'), nodeModulesDir, rootPnpm);
-ensureWorkspaceDeps(resolve(packagesDir, 'tools'), nodeModulesDir, rootPnpm);
-ensureVendorPackage(nodeModulesDir, 'chromadb', rootPnpm);
+// 删除第三方 node_modules — 不捆绑平台相关原生模块
+// postinstall 时由 setup.js 通过 npm install 安装平台正确的依赖
+const destNodeModules = resolve(destDir, 'node_modules');
+if (existsSync(destNodeModules)) rmSync(destNodeModules, { recursive: true, force: true });
 
-// 修复 pdfjs-dist 的 worker 文件
-fixPdfjsWorker(nodeModulesDir);
-
-// 生成 dist/server/package.json，供 postinstall 的 npm rebuild 使用
-// 收集 server + workspace 包的所有外部依赖
+// 生成 dist/server/package.json（所有运行时依赖清单）
 function generateServerPackageJson(destDir) {
-  const serverPkg = JSON.parse(readFileSync(resolve(serverDir, 'package.json'), 'utf-8'));
   const allDeps = {};
   const pkgFiles = [
     resolve(serverDir, 'package.json'),
@@ -214,11 +183,41 @@ function generateServerPackageJson(destDir) {
 }
 generateServerPackageJson(destDir);
 
-// 不再删除 node_modules！保留它让 Node.js 原生 CJS+ESM 解析器都能找到依赖。
-// 之前的 vendor+monkey-patch 方案只对 CJS require() 有效，ESM import 失败。
-// node_modules 位于 dist/server/node_modules/，server.js (cwd=apps/server/)
-// 的 Node.js 向上查找 ../../node_modules/ 即可自然解析。
-// 跨平台: postinstall 执行 npm rebuild 会自动为目标平台重新编译原生模块。
+// 生成 setup.js — postinstall 执行，安装依赖并链接 workspace 包
+const setupJs = `
+const { execSync } = require('child_process');
+const { existsSync, mkdirSync, cpSync, rmSync, readdirSync, lstatSync } = require('fs');
+const { resolve } = require('path');
+
+const serverDir = __dirname;
+const packagesDir = resolve(serverDir, 'packages');
+const scopeDir = resolve(serverDir, 'node_modules', '@customize-agent');
+
+console.log('[customize-agent] Installing server dependencies...');
+try {
+  execSync('npm install --omit=dev --no-audit --no-fund --legacy-peer-deps', { cwd: serverDir, stdio: 'inherit' });
+} catch (e) {
+  console.error('[customize-agent] Server dependency installation failed:', e.message);
+  process.exit(1);
+}
+
+// 链接 workspace 包到 node_modules/@customize-agent/
+console.log('[customize-agent] Linking workspace packages...');
+if (existsSync(scopeDir)) rmSync(scopeDir, { recursive: true, force: true });
+mkdirSync(scopeDir, { recursive: true });
+for (const pkgName of readdirSync(packagesDir)) {
+  const src = resolve(packagesDir, pkgName);
+  if (!lstatSync(src).isDirectory()) continue;
+  const dest = resolve(scopeDir, pkgName);
+  cpSync(src, dest, { recursive: true, dereference: true });
+  console.log('[customize-agent]   Linked @customize-agent/' + pkgName);
+}
+console.log('[customize-agent] Server setup complete.');
+`;
+writeFileSync(resolve(destDir, 'setup.js'), setupJs);
+console.log('[bundle-server] Generated setup.js');
+
+// 复制静态文件和 public 目录
 const bundledServerDir = resolve(destDir, 'apps', 'server');
 if (existsSync(staticDir)) {
   mkdirSync(resolve(bundledServerDir, '.next'), { recursive: true });
@@ -228,7 +227,7 @@ if (existsSync(publicDir)) {
   cpSync(publicDir, resolve(bundledServerDir, 'public'), { recursive: true, dereference: true });
 }
 
-// Create marker file for findDashboardServerDir detection
+// Marker 文件供 findDashboardServerDir 检测
 writeFileSync(resolve(destDir, '.dashboard-bundled'), '');
 
-console.log('[bundle-server] Server bundled into dist/server/');
+console.log('[bundle-server] Server bundled into dist/server/ (deps installed via postinstall)');

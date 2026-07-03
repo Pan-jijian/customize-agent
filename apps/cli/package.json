@@ -1,6 +1,6 @@
 {
   "name": "customize-agent",
-  "version": "2.1.8",
+  "version": "2.1.9",
   "description": "通用终端 AI 助手 — 原生 Function Calling + 双语 TUI + 三级模型分层",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -19,7 +19,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "start": "node ./dist/index.js",
-    "postinstall": "node -e \"try{require('child_process').execSync('npm rebuild',{cwd:require('path').join(__dirname,'dist','server'),stdio:'inherit'})}catch(e){}\""
+    "postinstall": "node dist/server/setup.js"
   },
   "license": "MIT",
   "author": "Pan-jijian",
@@ -29,7 +29,8 @@
     "directory": "apps/cli"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/server/node_modules"
   ],
   "publishConfig": {
     "access": "public"
