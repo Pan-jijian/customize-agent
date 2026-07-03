@@ -1,5 +1,26 @@
 # customize-agent
 
+## 2.1.10
+
+### Patch Changes
+
+- ## 🐛 修复 Windows EBUSY + 美化 Logo
+
+  ### 🔧 EBUSY 修复
+
+  - 新增 `preinstall` 脚本：安装/升级前自动终止旧版 server 进程（端口 17321/17322）
+  - `scripts/kill-server.cjs` 跨平台实现：
+    - Windows: `netstat` + `taskkill /F`
+    - macOS/Linux: `lsof` + `SIGTERM`
+  - 彻底消除 `EBUSY: resource busy or locked` 错误
+
+  ### ✨ UI 美化
+
+  - 移除侧边栏 logo 图标
+  - 标题 "Customize Agent" 改为渐变色：
+    - 浅色主题: `#007aff → #5856d6 → #af52de`
+    - 深色主题: `#0a84ff → #5e5ce6 → #bf5af2`
+
 ## 2.1.9
 
 ### Patch Changes

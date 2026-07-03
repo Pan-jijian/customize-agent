@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { useAppTranslations } from '@/components/Layout';
-import { LayoutDashboard, Database, Cpu, Settings, Sparkles, Brain, MessageSquare, ChevronDown, ChevronRight, FileText, FolderOpen, PanelLeftClose, PanelLeftOpen, Search } from 'lucide-react';
+import { LayoutDashboard, Database, Cpu, Settings, Brain, MessageSquare, ChevronDown, ChevronRight, FileText, FolderOpen, PanelLeftClose, PanelLeftOpen, Search } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 interface SubMenuItem {
@@ -75,11 +75,10 @@ export function Sidebar() {
     <aside className={`sidebar${collapsed ? ' sidebarCollapsedSelf' : ''}`}>
       <Link href="/overview" prefetch={false}>
         <div className="sidebarLogo">
-          <div className="sidebarLogoIcon">
-            <Sparkles size={18} color="#fff" />
-          </div>
           <div>
-            <div className="sidebarLogoTitle">{t('app.title')}</div>
+            <div className="sidebarLogoTitle">
+              <span className="logoGradient">{t('app.title')}</span>
+            </div>
             <div className="sidebarLogoSub">{t('app.subtitle')}</div>
           </div>
         </div>
