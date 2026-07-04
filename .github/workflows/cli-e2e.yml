@@ -83,12 +83,31 @@ jobs:
             echo "::error title=cli build failed::$(tail -n 30 "$RUNNER_TEMP/cli-build.log" | tr '\n' ' ')"
             exit "$status"
           fi
+      - name: Restore registry dependency versions before packing
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const cli = JSON.parse(fs.readFileSync('apps/cli/package.json', 'utf8'));
+          Object.assign(cli.dependencies, {
+            '@customize-agent/engine': '^2.2.0',
+            '@customize-agent/knowledge': '^2.2.1',
+            '@customize-agent/llm': '^2.2.0',
+            '@customize-agent/memory': '^2.2.0',
+            '@customize-agent/runtime': '^2.2.0',
+            '@customize-agent/search': '^2.2.0',
+            '@customize-agent/server': '^2.2.3',
+            '@customize-agent/tools': '^2.2.0',
+            '@customize-agent/types': '^2.2.0',
+          });
+          fs.writeFileSync('apps/cli/package.json', JSON.stringify(cli, null, 2) + '\n');
+          NODE
       - name: Pack CLI
         shell: bash
         run: |
           cd apps/cli
-          npm pack --json > pack.json
-          node -e "const fs=require('fs'),path=require('path');const p=require('./pack.json')[0];fs.writeFileSync(process.env.RUNNER_TEMP+'/tgz.txt',path.resolve(process.cwd(),p.filename))"
+          npm pack --json > "$RUNNER_TEMP/pack.json"
+          node -e "const fs=require('fs'),path=require('path');const p=require(process.env.RUNNER_TEMP+'/pack.json')[0];fs.writeFileSync(process.env.RUNNER_TEMP+'/tgz.txt',path.resolve(process.cwd(),p.filename))"
       - name: Install packed CLI
         shell: bash
         run: |
