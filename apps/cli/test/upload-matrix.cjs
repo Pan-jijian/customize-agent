@@ -1,38 +1,34 @@
 const fs = require('fs');
 const path = require('path');
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 
 const packageRoot = path.resolve(process.argv[2] || process.env.PACKAGE_ROOT || '.');
 const installRoot = path.resolve(packageRoot, '..', '..');
-const runner = path.join(packageRoot, 'dist', 'bin', process.platform === 'win32' ? 'dashboard-runner.exe' : 'dashboard-runner');
-const bundle = path.join(packageRoot, 'dist', 'server-bundle');
 const node = process.execPath;
+const serverPackageJson = require.resolve('@customize-agent/server/package.json', { paths: [packageRoot, installRoot] });
+const serverRoot = path.dirname(serverPackageJson);
+const nextBin = require.resolve('next/dist/bin/next', { paths: [serverRoot, packageRoot, installRoot] });
 const tempRoot = process.env.RUNNER_TEMP || fs.mkdtempSync(path.join(require('os').tmpdir(), 'customize-upload-'));
 const home = path.join(tempRoot, 'upload-home');
 const projectRoot = path.join(tempRoot, 'upload-project');
 const cliProjectRoot = path.join(tempRoot, 'cli-startup-project');
-const qdrantDir = path.join(tempRoot, 'qdrant');
 const dashboardLog = path.join(tempRoot, 'upload-dashboard.log');
 const cliLog = path.join(tempRoot, 'cli.log');
-const qdrantLog = path.join(tempRoot, 'upload-qdrant.log');
 const basePort = 18000 + Math.floor(Math.random() * 1000);
 const port = Number(process.env.CUSTOMIZE_UPLOAD_PORT || basePort);
 const cliPort = Number(process.env.CUSTOMIZE_CLI_PORT || (basePort + 2));
-const qdrantPort = Number(process.env.CUSTOMIZE_QDRANT_PORT || (basePort + 1));
-const qdrantGrpcPort = Number(process.env.CUSTOMIZE_QDRANT_GRPC_PORT || (basePort + 3));
 const base = `http://127.0.0.1:${port}`;
 const cliBase = `http://127.0.0.1:${cliPort}`;
-const qdrantBase = `http://127.0.0.1:${qdrantPort}`;
 const marker = `uploadmatrix${Date.now()}`;
 
 fs.rmSync(home, { recursive: true, force: true });
 fs.rmSync(projectRoot, { recursive: true, force: true });
 fs.rmSync(cliProjectRoot, { recursive: true, force: true });
-fs.rmSync(qdrantDir, { recursive: true, force: true });
+fs.rmSync(cliLog, { force: true });
+fs.rmSync(dashboardLog, { force: true });
 fs.mkdirSync(projectRoot, { recursive: true });
 fs.mkdirSync(path.join(cliProjectRoot, 'knowledgeBase', '文档资料'), { recursive: true });
 fs.writeFileSync(path.join(cliProjectRoot, 'knowledgeBase', '文档资料', 'startup-seed.txt'), `${marker} cli-startup-incremental searchable content`);
-fs.mkdirSync(qdrantDir, { recursive: true });
 
 function b64(content) {
   return Buffer.isBuffer(content) ? content.toString('base64') : Buffer.from(content).toString('base64');
@@ -110,18 +106,6 @@ const samples = [
   { name: 'archive-zip.zip', kind: 'archive/zip', content: zip([['inside.txt', text('zip')]]) },
 ];
 
-function findQdrantBin() {
-  const candidates = [
-    process.env.QDRANT_BIN,
-    process.platform === 'win32' ? 'qdrant.exe' : 'qdrant',
-  ].filter(Boolean);
-  for (const candidate of candidates) {
-    const result = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
-    if (result.status === 0) return candidate;
-  }
-  return undefined;
-}
-
 async function request(method, url, body, timeoutMs = 30000) {
   const init = { method, signal: AbortSignal.timeout(timeoutMs) };
   if (body !== undefined) {
@@ -170,16 +154,30 @@ function assert(ok, message) {
   if (!ok) throw new Error(message);
 }
 
+async function startServer(serverPort, root, logPath) {
+  fs.mkdirSync(path.dirname(logPath), { recursive: true });
+  const out = fs.openSync(logPath, 'a');
+  const child = spawn(node, [nextBin, 'start', '-p', String(serverPort)], {
+    cwd: serverRoot,
+    stdio: ['ignore', out, out],
+    env: { ...process.env, HOME: home, NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: root, CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' },
+  });
+  fs.closeSync(out);
+  await waitFor(`dashboard ${serverPort}`, async () => {
+    const health = await request('GET', `http://127.0.0.1:${serverPort}/api/health`);
+    return health.status < 500 ? true : undefined;
+  }, 120000);
+  return child;
+}
+
 function dumpEnv() {
   console.error('ENV:', {
     NODE_VERSION: process.version,
-    QDRANT_URL: process.env.QDRANT_URL,
     CUSTOMIZE_DASHBOARD_PORT: process.env.CUSTOMIZE_DASHBOARD_PORT,
     packageRoot,
-    runner,
-    bundle,
+    serverRoot,
+    nextBin,
     cliBase,
-    qdrantBase,
   });
 }
 
@@ -195,64 +193,25 @@ async function postWithRetry(label, url, body, retries = 6, delayMs = 2000) {
   return last ?? request('POST', url, body);
 }
 
-async function qdrantCount() {
-  const collections = await request('GET', `${qdrantBase}/collections`);
-  assert(collections.status === 200, `Qdrant collections failed: ${collections.status} ${collections.raw}`);
-  let total = 0;
-  for (const collection of collections.json.result?.collections ?? []) {
-    const count = await request('POST', `${qdrantBase}/collections/${encodeURIComponent(collection.name)}/points/count`, { exact: true });
-    if (count.status === 200) total += Number(count.json.result?.count ?? 0);
-  }
-  return total;
-}
-
 (async () => {
-  const qdrantBin = findQdrantBin();
-  assert(qdrantBin, 'qdrant binary not found; set QDRANT_BIN or install qdrant in PATH');
-  assert(fs.existsSync(runner), `dashboard runner not found: ${runner}`);
-  assert(fs.existsSync(bundle), `server bundle not found: ${bundle}`);
-
-  const qdrantOut = fs.openSync(qdrantLog, 'a');
-  const qdrant = spawn(qdrantBin, [], {
-    stdio: ['ignore', qdrantOut, qdrantOut],
-    env: {
-      ...process.env,
-      QDRANT__SERVICE__HOST: '127.0.0.1',
-      QDRANT__SERVICE__HTTP_PORT: String(qdrantPort),
-      QDRANT__SERVICE__GRPC_PORT: String(qdrantGrpcPort),
-      QDRANT__STORAGE__STORAGE_PATH: qdrantDir,
-    },
-  });
+  assert(fs.existsSync(path.join(serverRoot, '.next', 'BUILD_ID')), `dashboard build not found: ${serverRoot}`);
 
   let dashboardPid;
   let cliDashboardPid;
   let cliProcess;
   try {
-    await waitFor('Qdrant heartbeat', async () => {
-      const res = await request('GET', `${qdrantBase}/collections`);
-      return res.status === 200;
-    });
-
     const cliBin = path.join(packageRoot, 'dist', 'index.js');
     const cliOut = fs.openSync(cliLog, 'a');
     cliProcess = spawn(node, [cliBin], {
       cwd: cliProjectRoot,
       stdio: ['ignore', cliOut, cliOut],
-      env: { ...process.env, HOME: home, QDRANT_URL: qdrantBase, CUSTOMIZE_DASHBOARD_PORT: String(cliPort), CUSTOMIZE_AGENT_E2E_DASHBOARD: '1', CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' },
+      env: { ...process.env, HOME: home, CUSTOMIZE_DASHBOARD_PORT: String(cliPort), CUSTOMIZE_AGENT_E2E_DASHBOARD: '1', CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' },
     });
-    console.log('CLI startup logs:', { cliLog, qdrantLog });
-    const cliStartupLog = await waitForProcessLog('CLI startup knowledge initialization', cliProcess, cliLog, log => log.includes('Dashboard ready:') || log.includes('Dashboard still starting'), 240000);
+    console.log('CLI startup logs:', { cliLog });
+    const cliStartupLog = await waitForProcessLog('CLI startup knowledge initialization', cliProcess, cliLog, log => log.includes(`Dashboard ready: http://localhost:${cliPort}/overview`) || log.includes('Dashboard still starting'), 240000);
     if (cliStartupLog.includes('Dashboard still starting')) {
-      const cliStart = spawnSync(runner, [
-        'start', '--bundle', bundle, '--target', path.join(home, '.customize-agent', 'server'), '--port', String(cliPort), '--project-root', cliProjectRoot, '--qdrant-url', qdrantBase, '--node', node, '--log', path.join(home, '.customize-agent', 'logs', `dashboard-${cliPort}.log`), '--timeout-ms', '120000'
-      ], { encoding: 'utf8', env: { ...process.env, HOME: home, QDRANT_URL: qdrantBase, CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' } });
-      if (cliStart.status !== 0) {
-        console.error(cliStart.stdout);
-        console.error(cliStart.stderr);
-        dumpEnv();
-        throw new Error(`CLI dashboard fallback failed: ${cliStart.status}`);
-      }
-      cliDashboardPid = Number(cliStart.stdout.match(/pid=(\d+)/)?.[1]);
+      const fallback = await startServer(cliPort, cliProjectRoot, path.join(home, '.customize-agent', 'logs', `dashboard-${cliPort}.log`));
+      cliDashboardPid = fallback.pid;
     }
     const startupReindex = await postWithRetry('CLI startup reindex', `${cliBase}/api/kb/reindex`, { projectRoot: cliProjectRoot });
     if (!(startupReindex.status === 200 && startupReindex.json?.success)) {
@@ -267,26 +226,15 @@ async function qdrantCount() {
       if (Number(stats.json.chunkCount) > 0 && vector?.status === 'ready' && Number(vector.indexedChunks) >= Number(stats.json.chunkCount)) return stats.json;
       return undefined;
     }, 120000);
-    const startupVectorCount = await waitFor('CLI startup Qdrant vectors', async () => {
-      const total = await qdrantCount();
-      return total >= startupStats.chunkCount ? total : undefined;
-    }, 60000);
+    const startupVectorCount = startupStats.vectorStatus.indexedChunks;
     try { fs.closeSync(cliOut); } catch {}
     try { cliProcess.kill(); } catch {}
     await new Promise(resolve => cliProcess.once('exit', resolve));
     cliProcess = undefined;
     if (cliDashboardPid) { try { process.kill(cliDashboardPid); } catch {} cliDashboardPid = undefined; }
 
-    const start = spawnSync(runner, [
-      'start', '--bundle', bundle, '--target', path.join(home, '.customize-agent', 'server'), '--port', String(port), '--project-root', projectRoot, '--qdrant-url', qdrantBase, '--node', node, '--log', dashboardLog, '--timeout-ms', '120000'
-    ], { encoding: 'utf8', env: { ...process.env, HOME: home, QDRANT_URL: qdrantBase, CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' } });
-    if (start.status !== 0) {
-      console.error(start.stdout);
-      console.error(start.stderr);
-      if (fs.existsSync(dashboardLog)) console.error(fs.readFileSync(dashboardLog, 'utf8'));
-      process.exit(start.status || 1);
-    }
-    dashboardPid = Number(start.stdout.match(/pid=(\d+)/)?.[1]);
+    const dashboard = await startServer(port, projectRoot, dashboardLog);
+    dashboardPid = dashboard.pid;
 
     for (let i = 0; i < samples.length; i++) {
       const sample = samples[i];
@@ -321,34 +269,24 @@ async function qdrantCount() {
     assert(incrementalDetail.status === 200, `incremental detail failed: ${incrementalDetail.status} ${incrementalDetail.raw}`);
     assert(Number(incrementalDetail.json.file?.chunkCount) > 0, 'incremental file was not parsed/chunked');
 
-    const readyStats = await waitFor('Qdrant vector index', async () => {
+    const readyStats = await waitFor('sqlite-vec vector index', async () => {
       const stats = await request('GET', `${base}/api/kb/stats?projectRoot=${encodeURIComponent(projectRoot)}`);
       if (stats.status !== 200) throw new Error(`stats ${stats.status} ${stats.raw}`);
       const vector = stats.json.vectorStatus;
       if (vector?.status === 'ready' && Number(vector.indexedChunks) >= Number(stats.json.chunkCount) && Number(stats.json.chunkCount) > 0) return stats.json;
       return undefined;
     }, 180000);
-    const count = await waitFor('Qdrant collection count', async () => {
-      const total = await qdrantCount();
-      return total >= readyStats.chunkCount ? total : undefined;
-    }, 60000);
-    console.log('UPLOAD_VECTOR_MATRIX_OK', JSON.stringify({ files: samples.length, marker, projectRoot, startupVectors: startupVectorCount, chunkCount: readyStats.chunkCount, indexedChunks: readyStats.vectorStatus.indexedChunks, qdrantCount: count }));
+    console.log('UPLOAD_VECTOR_MATRIX_OK', JSON.stringify({ files: samples.length, marker, projectRoot, startupVectors: startupVectorCount, chunkCount: readyStats.chunkCount, indexedChunks: readyStats.vectorStatus.indexedChunks }));
     process.exitCode = 0;
   } finally {
     if (cliProcess) { try { cliProcess.kill(); } catch {} }
     if (cliDashboardPid) { try { process.kill(cliDashboardPid); } catch {} }
     if (dashboardPid) { try { process.kill(dashboardPid); } catch {} }
-    try { qdrant.kill(); } catch {}
-    await new Promise(resolve => {
-      const timer = setTimeout(resolve, 3000);
-      qdrant.once('exit', () => { clearTimeout(timer); resolve(); });
-    });
-    try { fs.closeSync(qdrantOut); } catch {}
   }
 })().catch(error => {
   process.exitCode = 1;
   console.error(error.stack || String(error));
-  if (fs.existsSync(qdrantLog)) console.error(fs.readFileSync(qdrantLog, 'utf8'));
+  dumpEnv();
   if (fs.existsSync(cliLog)) console.error(fs.readFileSync(cliLog, 'utf8'));
   if (fs.existsSync(dashboardLog)) console.error(fs.readFileSync(dashboardLog, 'utf8'));
 }).finally(() => process.exit(process.exitCode ?? 0));

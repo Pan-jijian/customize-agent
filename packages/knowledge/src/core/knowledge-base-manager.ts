@@ -13,7 +13,7 @@ import type { LLMSearchProvider } from '../llm/llm-search-provider.js';
 import { FederationSearch, type FederatedResult, type FederatedSearchItem, type RetrievalWeights, type SearchFilters } from '../search/federation-search.js';
 import type { DiffResult, IndexStateRecord, KBScope, KnowledgeBaseStats, ProjectConfig } from '../types.js';
 import { CollectionManager } from '../vector/collection-manager.js';
-import { QdrantHttpClient, QdrantVectorStore } from '../vector/qdrant-store.js';
+import { SQLiteVecClient, SQLiteVecVectorStore } from '../vector/sqlite-vec-store.js';
 import type { VectorStoreInterface } from '../vector/types.js';
 import { VectorIndexer, type VectorIndexResult } from '../vector/vector-indexer.js';
 import { ChangeTracker } from './change-tracker.js';
@@ -53,7 +53,7 @@ export class KnowledgeBaseManager {
   readonly kbPath: string;
   readonly store: IndexStateStore;
 
-  private readonly qdrantClient = new QdrantHttpClient();
+  private readonly sqliteVecClient: SQLiteVecClient;
   private readonly classifier = new FileClassifier();
   private readonly scanner = new KnowledgeFileScanner();
   private readonly collections = new CollectionManager();
@@ -80,16 +80,19 @@ export class KnowledgeBaseManager {
     this.onProgress = options.onProgress;
 
     const storageRoot = options.storageRoot ?? path.join(os.homedir(), USER_DATA_DIR);
+    let dbPath: string;
     if (this.scope === 'global') {
       this.kbPath = options.kbPath ?? path.join(storageRoot, GLOBAL_KNOWLEDGE_DIR);
-      this.store = new IndexStateStore(path.join(storageRoot, 'global-knowledge.db'));
+      dbPath = path.join(storageRoot, 'global-knowledge.db');
     } else {
       if (!options.projectRoot || !options.projectId) {
         throw new Error('project knowledge base requires projectRoot and projectId');
       }
       this.kbPath = options.kbPath ?? getProjectKbPath(options.projectRoot);
-      this.store = new IndexStateStore(path.join(storageRoot, 'projects', options.projectId, 'kb.db'));
+      dbPath = path.join(storageRoot, 'projects', options.projectId, 'kb.db');
     }
+    this.store = new IndexStateStore(dbPath);
+    this.sqliteVecClient = new SQLiteVecClient({ dbPath });
   }
 
   initialize(): void {
@@ -268,7 +271,7 @@ export class KnowledgeBaseManager {
       message: vectorDeferred
         ? '解析、切片和 SQLite 入库已完成，向量入库后台执行'
         : vectorStatus.status === 'error'
-          ? '解析和切片已完成，Qdrant 未连接，向量待入库'
+          ? '解析和切片已完成，sqlite-vec 向量待入库'
           : '知识库索引完成',
       chunkCount: stats.chunkCount,
       vectorStatus,
@@ -425,7 +428,7 @@ export class KnowledgeBaseManager {
     const normalized = this.normalizeRelativePath(relativePath);
     const targetPath = this.resolveKbRelativePath(normalized);
     if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
-    // 同步删除 Qdrant 向量数据，避免孤儿向量污染搜索结果
+    // 同步删除 sqlite-vec 向量数据，避免孤儿向量污染搜索结果
     const record = this.store.listRecords().find(r => r.relativePath === normalized);
     if (record) {
       await this.deleteVectorFile(record.collectionName, normalized);
@@ -458,7 +461,7 @@ export class KnowledgeBaseManager {
   async indexVectors(options: { collectionName?: string; relativePath?: string; limit?: number } = {}): Promise<VectorIndexResult[]> {
     const chunks = this.store.listChunks(options);
     for (const collectionName of new Set(chunks.map(chunk => chunk.collectionName))) this.ensureVectorStore(collectionName);
-    this.reportProgress({ stage: 'vectorizing', percent: 85, message: `正在写入 Qdrant 向量库，共 ${chunks.length} 个切片`, chunkCount: chunks.length });
+    this.reportProgress({ stage: 'vectorizing', percent: 85, message: `正在写入 sqlite-vec 向量库，共 ${chunks.length} 个切片`, chunkCount: chunks.length });
     const indexer = new VectorIndexer(this.embeddingProvider, this.vectorStores);
     try {
       const results = await indexer.indexChunks(chunks);
@@ -474,7 +477,7 @@ export class KnowledgeBaseManager {
       this.store.setMetadata('vector_index_status', 'error');
       this.store.setMetadata('vector_index_error', message);
       this.store.setMetadata('last_vector_index_at', String(Date.now()));
-      this.reportProgress({ stage: 'error', percent: 85, message: 'Qdrant 向量入库失败', chunkCount: chunks.length, vectorStatus: this.getVectorStatus() });
+      this.reportProgress({ stage: 'error', percent: 85, message: 'sqlite-vec 向量入库失败', chunkCount: chunks.length, vectorStatus: this.getVectorStatus() });
       return [];
     }
   }
@@ -501,7 +504,7 @@ export class KnowledgeBaseManager {
       error: this.store.getMetadata('vector_index_error') || undefined,
       indexedChunks: Number(this.store.getMetadata('vector_indexed_chunks') ?? 0),
       lastIndexedAt: Number(this.store.getMetadata('last_vector_index_at') ?? 0),
-      backend: `Qdrant (${this.qdrantClient.baseUrl})`,
+      backend: `SQLite + sqlite-vec (${this.sqliteVecClient.dbPath})`,
     };
   }
 
@@ -724,7 +727,7 @@ ${resultsText}
 
   private ensureVectorStore(collectionName: string): void {
     if (this.vectorStores.has(collectionName)) return;
-    this.vectorStores.set(collectionName, new QdrantVectorStore(this.qdrantClient, collectionName));
+    this.vectorStores.set(collectionName, new SQLiteVecVectorStore(this.sqliteVecClient, collectionName));
   }
 
   private async deleteVectorFile(collectionName: string, relativePath: string): Promise<void> {

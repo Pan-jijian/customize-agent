@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/search",
-  "version": "2.0.3",
+  "version": "2.2.0",
   "description": "代码智能 — tree-sitter 索引、ripgrep 搜索、LSP、语义理解",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -38,8 +38,8 @@
     "lsp"
   ],
   "dependencies": {
-    "@customize-agent/llm": "workspace:*",
-    "@customize-agent/types": "workspace:*",
+    "@customize-agent/llm": "^2.2.0",
+    "@customize-agent/types": "^2.2.0",
     "@vscode/ripgrep": "^1.18.0",
     "better-sqlite3": "^12.10.0",
     "execa": "^9.6.1",
