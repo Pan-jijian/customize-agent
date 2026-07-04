@@ -209,12 +209,16 @@ fn bundle(opts: Options) -> Result<(), String> {
     let packages_dest = dest.join("packages");
     remove_if_exists(&packages_dest)?;
     fs::create_dir_all(&packages_dest).map_err(|e| format!("create packages: {e}"))?;
+    let vendor_modules = dest.join("vendor_modules");
+    let scoped_vendor = vendor_modules.join("@customize-agent");
     for name in ["knowledge", "llm", "runtime", "types"] {
         let src = packages_src.join(name);
-        if src.exists() { copy_dir(&src, &packages_dest.join(name)).map_err(|e| format!("copy package {name}: {e}"))?; }
+        if src.exists() {
+            copy_dir(&src, &packages_dest.join(name)).map_err(|e| format!("copy package {name}: {e}"))?;
+            copy_dir(&src, &scoped_vendor.join(name)).map_err(|e| format!("copy runtime package {name}: {e}"))?;
+        }
     }
 
-    let vendor_modules = dest.join("vendor_modules");
     let pnpm_root = monorepo_root.join("node_modules").join(".pnpm");
     let mut seen = std::collections::HashSet::new();
     for name in [
