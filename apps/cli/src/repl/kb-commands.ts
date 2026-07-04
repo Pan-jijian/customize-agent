@@ -65,6 +65,7 @@ export class KbCommands {
         await this.config();
         return;
       case 'dash':
+      case 'dashboard':
         await this.dashboard(tokens);
         return;
       case 'add':

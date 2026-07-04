@@ -71,9 +71,6 @@ importers:
       '@napi-rs/canvas':
         specifier: ^0.1.82
         version: 0.1.100
-      '@vscode/ripgrep':
-        specifier: ^1.18.0
-        version: 1.18.0
       archiver:
         specifier: ^8.0.0
         version: 8.0.0

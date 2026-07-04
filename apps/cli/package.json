@@ -16,7 +16,7 @@
     "customize-agent": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "start": "node ./dist/index.js"
@@ -56,7 +56,6 @@
     "@customize-agent/types": "^2.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@napi-rs/canvas": "^0.1.82",
-    "@vscode/ripgrep": "^1.18.0",
     "archiver": "^8.0.0",
     "better-sqlite3": "^12.10.0",
     "commander": "^15.0.0",

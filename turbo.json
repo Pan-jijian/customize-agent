@@ -5,22 +5,80 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
-    "server#build": {
-      "dependsOn": ["^build"],
+    "@customize-agent/llm#build": {
+      "dependsOn": ["@customize-agent/types#build"],
+      "outputs": ["dist/**"]
+    },
+    "@customize-agent/runtime#build": {
+      "dependsOn": ["@customize-agent/types#build"],
+      "outputs": ["dist/**"]
+    },
+    "@customize-agent/search#build": {
+      "dependsOn": ["@customize-agent/types#build", "@customize-agent/llm#build"],
+      "outputs": ["dist/**"]
+    },
+    "@customize-agent/tools#build": {
+      "dependsOn": ["@customize-agent/types#build", "@customize-agent/search#build"],
+      "outputs": ["dist/**"]
+    },
+    "@customize-agent/engine#build": {
+      "dependsOn": ["@customize-agent/types#build", "@customize-agent/llm#build", "@customize-agent/tools#build"],
+      "outputs": ["dist/**"]
+    },
+    "@customize-agent/server#build": {
+      "dependsOn": ["@customize-agent/knowledge#build", "@customize-agent/llm#build", "@customize-agent/runtime#build"],
       "outputs": [".next/**", ".next/static/**", ".next/server/**"]
     },
     "customize-agent#build": {
-      "dependsOn": ["server#build", "^build"],
+      "dependsOn": [
+        "@customize-agent/types#build",
+        "@customize-agent/llm#build",
+        "@customize-agent/runtime#build",
+        "@customize-agent/search#build",
+        "@customize-agent/tools#build",
+        "@customize-agent/engine#build",
+        "@customize-agent/knowledge#build",
+        "@customize-agent/memory#build",
+        "@customize-agent/server#build"
+      ],
       "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
+    "@customize-agent/llm#typecheck": {
+      "dependsOn": ["@customize-agent/types#build"]
+    },
+    "@customize-agent/runtime#typecheck": {
+      "dependsOn": ["@customize-agent/types#build"]
+    },
+    "@customize-agent/search#typecheck": {
+      "dependsOn": ["@customize-agent/types#build", "@customize-agent/llm#build"]
+    },
+    "@customize-agent/tools#typecheck": {
+      "dependsOn": ["@customize-agent/types#build", "@customize-agent/search#build"]
+    },
+    "@customize-agent/engine#typecheck": {
+      "dependsOn": ["@customize-agent/types#build", "@customize-agent/llm#build", "@customize-agent/tools#build"]
+    },
+    "customize-agent#typecheck": {
+      "dependsOn": [
+        "@customize-agent/types#build",
+        "@customize-agent/llm#build",
+        "@customize-agent/runtime#build",
+        "@customize-agent/search#build",
+        "@customize-agent/tools#build",
+        "@customize-agent/engine#build",
+        "@customize-agent/knowledge#build",
+        "@customize-agent/memory#build",
+        "@customize-agent/server#build"
+      ]
     },
     "dev": {
       "cache": false,
       "persistent": true
     },
     "test": {
-      "dependsOn": ["^build"]
-    },
-    "typecheck": {
       "dependsOn": ["^build"]
     },
     "lint": {}
