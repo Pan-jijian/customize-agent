@@ -94,7 +94,14 @@ jobs:
         timeout-minutes: 15
         shell: bash
         run: |
-          node apps/cli/test/upload-matrix.cjs "$RUNNER_TEMP/install-root/node_modules/customize-agent"
+          set +e
+          node apps/cli/test/upload-matrix.cjs "$RUNNER_TEMP/install-root/node_modules/customize-agent" 2>&1 | tee "$RUNNER_TEMP/upload-matrix.log"
+          status=${PIPESTATUS[0]}
+          if [[ "$status" -ne 0 ]]; then
+            tail -n 160 "$RUNNER_TEMP/upload-matrix.log"
+            echo "::error title=upload matrix failed::$(tail -n 40 "$RUNNER_TEMP/upload-matrix.log" | tr '\n' ' ')"
+            exit "$status"
+          fi
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
@@ -104,6 +111,7 @@ jobs:
             ${{ runner.temp }}/server-build.log
             ${{ runner.temp }}/cli-build.log
             ${{ runner.temp }}/cli.log
+            ${{ runner.temp }}/upload-matrix.log
             ${{ runner.temp }}/upload-home/.customize-agent/logs/**
             ${{ runner.temp }}/dashboard.log
             ${{ runner.temp }}/upload-dashboard.log
