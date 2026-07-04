@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { execSync } from 'child_process';
 import { readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
+import { createServer } from 'net';
 import { createRequire } from 'module';
 import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
@@ -110,7 +111,29 @@ async function waitForDashboard(port: number, timeoutMs: number): Promise<boolea
   return false;
 }
 
-async function startDashboardInBackground(port: number): Promise<boolean> {
+async function isPortAvailable(port: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const server = createServer();
+    server.once('error', () => resolve(false));
+    server.once('listening', () => server.close(() => resolve(true)));
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+async function resolveDashboardPort(preferredPort: number): Promise<number> {
+  if (process.env.CUSTOMIZE_DASHBOARD_PORT) return preferredPort;
+  for (let port = preferredPort; port < preferredPort + 50; port++) {
+    if (await isPortAvailable(port)) return port;
+  }
+  return preferredPort;
+}
+
+type DashboardStartResult =
+  | { ready: true; port: number; url: string; logPath: string }
+  | { ready: false; port: number; logPath: string; error?: string };
+
+async function startDashboardInBackground(port: number): Promise<DashboardStartResult> {
+  let logPath = '';
   try {
     const { spawn } = await import('child_process');
     const { closeSync } = await import('fs');
@@ -118,7 +141,8 @@ async function startDashboardInBackground(port: number): Promise<boolean> {
     const serverRoot = dirname(serverPackageJson);
     const nextBin = require.resolve('next/dist/bin/next', { paths: [serverRoot] });
     const logFile = await dashboardLogFile(port);
-    const child = spawn(process.execPath, [nextBin, 'start', '-p', String(port)], {
+    logPath = logFile.logPath;
+    const child = spawn(process.execPath, [nextBin, 'start', '-p', String(port), '-H', '127.0.0.1'], {
       cwd: serverRoot,
       detached: false,
       stdio: ['ignore', logFile.fd, logFile.fd],
@@ -131,9 +155,12 @@ async function startDashboardInBackground(port: number): Promise<boolean> {
     if (child.pid) spawnedPids.add(child.pid);
     child.on('exit', () => { if (child.pid) spawnedPids.delete(child.pid); });
     closeSync(logFile.fd);
-    return await waitForDashboard(port, 60000);
-  } catch {
-    return false;
+    if (await waitForDashboard(port, 60000)) {
+      return { ready: true, port, url: `http://localhost:${port}/overview`, logPath };
+    }
+    return { ready: false, port, logPath, error: `dashboard did not become healthy within 60000ms` };
+  } catch (error) {
+    return { ready: false, port, logPath, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -193,9 +220,12 @@ program.action(async () => {
   }
 
   registerCleanup();
-  const dashboardPort = Number(process.env.CUSTOMIZE_DASHBOARD_PORT || 17321);
-  const dashboardReady = await startDashboardInBackground(dashboardPort);
-  const dashboardUrl: string | undefined = dashboardReady ? `http://localhost:${dashboardPort}/overview` : undefined;
+  const dashboardPort = await resolveDashboardPort(Number(process.env.CUSTOMIZE_DASHBOARD_PORT || 17321));
+  const dashboard = await startDashboardInBackground(dashboardPort);
+  const dashboardUrl: string | undefined = dashboard.ready ? dashboard.url : undefined;
+  if (!dashboard.ready) {
+    console.warn(`Web 控制台未启动。日志: ${dashboard.logPath}${dashboard.error ? `；原因: ${dashboard.error}` : ''}`);
+  }
   const kbManager = new MultiProjectManager();
   let kbStatus = '已初始化';
   const kbInitialized = (async () => {
@@ -211,8 +241,13 @@ program.action(async () => {
 
   if (process.env.CUSTOMIZE_AGENT_E2E_DASHBOARD === '1') {
     kbInitialized.catch(() => undefined);
-    console.log(dashboardReady ? `Dashboard ready: ${dashboardUrl}` : 'Dashboard still starting');
-    await new Promise(() => setInterval(() => undefined, 60_000));
+    if (dashboard.ready) {
+      console.log(`Dashboard ready: ${dashboard.url}`);
+      await new Promise(() => setInterval(() => undefined, 60_000));
+    } else {
+      console.error(`Dashboard failed to start on port ${dashboard.port}. Log: ${dashboard.logPath}${dashboard.error ? ` Error: ${dashboard.error}` : ''}`);
+      process.exit(1);
+    }
   }
 
   const lsp = new LSPManager(PROJECT_ROOT);
