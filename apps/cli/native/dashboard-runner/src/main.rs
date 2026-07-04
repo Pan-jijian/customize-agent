@@ -211,6 +211,16 @@ fn bundle(opts: Options) -> Result<(), String> {
     fs::create_dir_all(&packages_dest).map_err(|e| format!("create packages: {e}"))?;
     let vendor_modules = dest.join("vendor_modules");
     let scoped_vendor = vendor_modules.join("@customize-agent");
+    let cli_scoped_modules = cli_root.join("dist").join("node_modules").join("@customize-agent");
+    remove_if_exists(&cli_scoped_modules)?;
+    for name in ["engine", "knowledge", "llm", "memory", "runtime", "search", "tools", "types"] {
+        let src = packages_src.join(name);
+        if src.exists() {
+            let cli_module_dest = cli_scoped_modules.join(name);
+            remove_if_exists(&cli_module_dest)?;
+            copy_dir(&src, &cli_module_dest).map_err(|e| format!("copy cli package {name}: {e}"))?;
+        }
+    }
     for name in ["knowledge", "llm", "runtime", "types"] {
         let src = packages_src.join(name);
         if src.exists() {
