@@ -157,10 +157,10 @@ function assert(ok, message) {
 async function startServer(serverPort, root, logPath) {
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
   const out = fs.openSync(logPath, 'a');
-  const child = spawn(node, [nextBin, 'start', '-p', String(serverPort)], {
+  const child = spawn(node, [nextBin, 'start', '-p', String(serverPort), '-H', '127.0.0.1'], {
     cwd: serverRoot,
     stdio: ['ignore', out, out],
-    env: { ...process.env, HOME: home, NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: root, CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' },
+    env: { ...process.env, HOME: home, CUSTOMIZE_AGENT_HOME: home, NODE_ENV: 'production', CUSTOMIZE_PROJECT_ROOT: root, CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' },
   });
   fs.closeSync(out);
   await waitFor(`dashboard ${serverPort}`, async () => {
@@ -234,7 +234,7 @@ async function postWithRetry(label, url, body, retries = 6, delayMs = 2000) {
     cliProcess = spawn(node, [cliBin], {
       cwd: cliProjectRoot,
       stdio: ['ignore', cliOut, cliOut],
-      env: { ...process.env, HOME: home, CUSTOMIZE_DASHBOARD_PORT: String(cliPort), CUSTOMIZE_AGENT_E2E_DASHBOARD: '1', CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' },
+      env: { ...process.env, HOME: home, CUSTOMIZE_AGENT_HOME: home, CUSTOMIZE_DASHBOARD_PORT: String(cliPort), CUSTOMIZE_AGENT_E2E_DASHBOARD: '1', CUSTOMIZE_AGENT_DISABLE_OCR: '1', CUSTOMIZE_DASHBOARD_START_TIMEOUT_MS: '180000', LOG_LEVEL: 'debug' },
     });
     console.log('CLI startup logs:', { cliLog });
     await waitForProcessLog('CLI startup dashboard', cliProcess, cliLog, log => log.includes(`Dashboard ready: http://localhost:${cliPort}/overview`), 240000);
