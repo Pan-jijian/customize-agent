@@ -38,8 +38,8 @@
     "lsp"
   ],
   "dependencies": {
-    "@customize-agent/llm": "^2.2.0",
-    "@customize-agent/types": "^2.2.0",
+    "@customize-agent/llm": "workspace:^",
+    "@customize-agent/types": "workspace:^",
     "@vscode/ripgrep": "^1.18.0",
     "better-sqlite3": "^12.10.0",
     "execa": "^9.6.1",

@@ -35,9 +35,9 @@
   "dependencies": {
     "@ant-design/icons": "^6.3.2",
     "@napi-rs/canvas": "^0.1.82",
-    "@customize-agent/knowledge": "^2.2.1",
-    "@customize-agent/llm": "^2.2.0",
-    "@customize-agent/runtime": "^2.2.0",
+    "@customize-agent/knowledge": "workspace:^",
+    "@customize-agent/llm": "workspace:^",
+    "@customize-agent/runtime": "workspace:^",
     "antd": "^6.5.0",
     "better-sqlite3": "^12.10.0",
     "jszip": "^3.10.1",

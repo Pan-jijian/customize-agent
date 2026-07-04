@@ -5,15 +5,17 @@
   "description": "Customize Agent — 通用终端 AI 助手 Monorepo",
   "scripts": {
     "build": "turbo run build",
+    "build:watch": "turbo run build --watch",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev": "turbo run build && node apps/cli/dist/index.js",
     "start:cli": "pnpm --filter customize-agent start",
     "check": "turbo run typecheck lint && vitest run",
     "changeset": "changeset",
     "version-packages": "changeset version",
+    "release:version": "changeset version && pnpm install",
+    "release:publish": "pnpm run check && pnpm run build && changeset publish",
     "release": "pnpm run build && changeset publish"
   },
   "keywords": [
