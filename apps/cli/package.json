@@ -1,6 +1,6 @@
 {
   "name": "customize-agent",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "description": "通用终端 AI 助手 — 原生 Function Calling + 双语 TUI + 三级模型分层",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -51,7 +51,7 @@
     "@customize-agent/memory": "^2.2.0",
     "@customize-agent/runtime": "^2.2.0",
     "@customize-agent/search": "^2.2.0",
-    "@customize-agent/server": "^2.2.2",
+    "@customize-agent/server": "^2.2.3",
     "@customize-agent/tools": "^2.2.0",
     "@customize-agent/types": "^2.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",

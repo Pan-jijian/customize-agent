@@ -1,14 +1,11 @@
 import { existsSync, readFileSync } from 'fs';
-import { dirname, join } from 'path';
-import { fileURLToPath } from 'url';
+import { join } from 'path';
 import type { NextApiRequest, NextApiResponse } from 'next';
 
 const startTime = Date.now();
-const moduleDir = dirname(fileURLToPath(import.meta.url));
 const buildIdCandidates = [
   join(process.cwd(), '.next', 'BUILD_ID'),
   join(process.cwd(), 'apps', 'server', '.next', 'BUILD_ID'),
-  join(moduleDir, '..', '..', '..', '..', '..', 'BUILD_ID'),
 ];
 const buildIdPath = buildIdCandidates.find(existsSync);
 const processBuildId = process.env.CUSTOMIZE_DASHBOARD_BUILD_ID ?? (buildIdPath ? readFileSync(buildIdPath, 'utf-8').trim() : null);
