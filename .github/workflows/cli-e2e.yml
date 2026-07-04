@@ -22,7 +22,34 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      - run: pnpm install --frozen-lockfile --config.link-workspace-packages=true
+      - name: Use workspace packages for source build
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const root = process.cwd();
+          const files = [
+            'apps/cli/package.json',
+            'apps/server/package.json',
+            ...fs.readdirSync(path.join(root, 'packages'))
+              .map(name => `packages/${name}/package.json`)
+              .filter(file => fs.existsSync(path.join(root, file))),
+          ];
+          const names = new Set(files.map(file => JSON.parse(fs.readFileSync(path.join(root, file), 'utf8')).name));
+          for (const file of files) {
+            const full = path.join(root, file);
+            const pkg = JSON.parse(fs.readFileSync(full, 'utf8'));
+            for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+              if (!pkg[section]) continue;
+              for (const name of Object.keys(pkg[section])) {
+                if (names.has(name) && name.startsWith('@customize-agent/')) pkg[section][name] = 'workspace:*';
+              }
+            }
+            fs.writeFileSync(full, JSON.stringify(pkg, null, 2) + '\n');
+          }
+          NODE
+      - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true
       - name: Build workspace packages
         shell: bash
         run: |
