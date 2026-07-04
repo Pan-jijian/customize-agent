@@ -70,6 +70,31 @@ jobs:
           npm install "$(cat "$RUNNER_TEMP/tgz.txt")" --prefix "$RUNNER_TEMP/install-root" --ignore-scripts=false --foreground-scripts
           test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize.cmd"
           test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent.cmd"
+      - name: Install Qdrant
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="v1.18.0"
+          mkdir -p "$RUNNER_TEMP/qdrant-bin"
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            macOS-X64) asset="qdrant-x86_64-apple-darwin.tar.gz" ;;
+            macOS-ARM64) asset="qdrant-aarch64-apple-darwin.tar.gz" ;;
+            Windows-X64) asset="qdrant-x86_64-pc-windows-msvc.zip" ;;
+            Linux-X64) asset="qdrant-x86_64-unknown-linux-gnu.tar.gz" ;;
+            *) echo "Unsupported Qdrant platform: $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+          esac
+          url="https://github.com/qdrant/qdrant/releases/download/${version}/${asset}"
+          curl -L "$url" -o "$RUNNER_TEMP/qdrant-asset"
+          if [[ "$asset" == *.zip ]]; then
+            unzip -q "$RUNNER_TEMP/qdrant-asset" -d "$RUNNER_TEMP/qdrant-bin"
+            qdrant_bin="$(find "$RUNNER_TEMP/qdrant-bin" -name qdrant.exe -type f | head -n 1)"
+          else
+            tar -xzf "$RUNNER_TEMP/qdrant-asset" -C "$RUNNER_TEMP/qdrant-bin"
+            qdrant_bin="$(find "$RUNNER_TEMP/qdrant-bin" -name qdrant -type f | head -n 1)"
+            chmod +x "$qdrant_bin"
+          fi
+          test -n "$qdrant_bin"
+          echo "QDRANT_BIN=$qdrant_bin" >> "$GITHUB_ENV"
       - name: Start CLI and verify dashboard
         timeout-minutes: 10
         shell: bash
@@ -86,11 +111,11 @@ jobs:
             --target "$HOME/.customize-agent/server" \
             --port 17321 \
             --project-root "$PWD" \
-            --chroma-url http://127.0.0.1:17322 \
+            --qdrant-url http://127.0.0.1:6333 \
             --node "$(command -v node)" \
             --log "$RUNNER_TEMP/dashboard.log" \
             --timeout-ms 240000
-      - name: Verify upload parsing chunking and Chroma indexing
+      - name: Verify upload parsing chunking and Qdrant indexing
         timeout-minutes: 15
         shell: bash
         run: |
@@ -115,5 +140,5 @@ jobs:
             ${{ runner.temp }}/upload-home/.customize-agent/logs/**
             ${{ runner.temp }}/dashboard.log
             ${{ runner.temp }}/upload-dashboard.log
-            ${{ runner.temp }}/upload-chroma.log
+            ${{ runner.temp }}/upload-qdrant.log
             ${{ runner.temp }}/home/.customize-agent/logs/**

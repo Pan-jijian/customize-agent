@@ -11,27 +11,28 @@ const tempRoot = process.env.RUNNER_TEMP || fs.mkdtempSync(path.join(require('os
 const home = path.join(tempRoot, 'upload-home');
 const projectRoot = path.join(tempRoot, 'upload-project');
 const cliProjectRoot = path.join(tempRoot, 'cli-startup-project');
-const chromaDir = path.join(tempRoot, 'chroma');
+const qdrantDir = path.join(tempRoot, 'qdrant');
 const dashboardLog = path.join(tempRoot, 'upload-dashboard.log');
 const cliLog = path.join(tempRoot, 'cli.log');
-const chromaLog = path.join(tempRoot, 'upload-chroma.log');
+const qdrantLog = path.join(tempRoot, 'upload-qdrant.log');
 const basePort = 18000 + Math.floor(Math.random() * 1000);
 const port = Number(process.env.CUSTOMIZE_UPLOAD_PORT || basePort);
 const cliPort = Number(process.env.CUSTOMIZE_CLI_PORT || (basePort + 2));
-const chromaPort = Number(process.env.CUSTOMIZE_CHROMA_PORT || (basePort + 1));
+const qdrantPort = Number(process.env.CUSTOMIZE_QDRANT_PORT || (basePort + 1));
+const qdrantGrpcPort = Number(process.env.CUSTOMIZE_QDRANT_GRPC_PORT || (basePort + 3));
 const base = `http://127.0.0.1:${port}`;
 const cliBase = `http://127.0.0.1:${cliPort}`;
-const chromaBase = `http://127.0.0.1:${chromaPort}`;
+const qdrantBase = `http://127.0.0.1:${qdrantPort}`;
 const marker = `uploadmatrix${Date.now()}`;
 
 fs.rmSync(home, { recursive: true, force: true });
 fs.rmSync(projectRoot, { recursive: true, force: true });
 fs.rmSync(cliProjectRoot, { recursive: true, force: true });
-fs.rmSync(chromaDir, { recursive: true, force: true });
+fs.rmSync(qdrantDir, { recursive: true, force: true });
 fs.mkdirSync(projectRoot, { recursive: true });
 fs.mkdirSync(path.join(cliProjectRoot, 'knowledgeBase', '文档资料'), { recursive: true });
 fs.writeFileSync(path.join(cliProjectRoot, 'knowledgeBase', '文档资料', 'startup-seed.txt'), `${marker} cli-startup-incremental searchable content`);
-fs.mkdirSync(chromaDir, { recursive: true });
+fs.mkdirSync(qdrantDir, { recursive: true });
 
 function b64(content) {
   return Buffer.isBuffer(content) ? content.toString('base64') : Buffer.from(content).toString('base64');
@@ -109,17 +110,20 @@ const samples = [
   { name: 'archive-zip.zip', kind: 'archive/zip', content: zip([['inside.txt', text('zip')]]) },
 ];
 
-function findChromaCli() {
+function findQdrantBin() {
   const candidates = [
-    path.join(packageRoot, 'node_modules', 'chromadb', 'dist', 'cli.mjs'),
-    path.join(installRoot, 'node_modules', 'chromadb', 'dist', 'cli.mjs'),
-    path.join(process.cwd(), 'node_modules', 'chromadb', 'dist', 'cli.mjs'),
-  ];
-  return candidates.find(file => fs.existsSync(file));
+    process.env.QDRANT_BIN,
+    process.platform === 'win32' ? 'qdrant.exe' : 'qdrant',
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const result = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+    if (result.status === 0) return candidate;
+  }
+  return undefined;
 }
 
-async function request(method, url, body) {
-  const init = { method };
+async function request(method, url, body, timeoutMs = 30000) {
+  const init = { method, signal: AbortSignal.timeout(timeoutMs) };
   if (body !== undefined) {
     init.headers = { 'content-type': 'application/json' };
     init.body = JSON.stringify(body);
@@ -146,39 +150,86 @@ async function waitFor(label, fn, timeoutMs = 120000) {
   throw new Error(`${label} timeout${last ? `: ${last.message || last}` : ''}`);
 }
 
+async function waitForProcessLog(label, child, logPath, predicate, timeoutMs = 120000) {
+  let exit;
+  child.once('exit', (code, signal) => {
+    exit = { code, signal };
+  });
+  return waitFor(label, () => {
+    if (exit) {
+      const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
+      throw new Error(`${label} process exited ${JSON.stringify(exit)}\n${log}`);
+    }
+    if (!fs.existsSync(logPath)) return undefined;
+    const log = fs.readFileSync(logPath, 'utf8');
+    return predicate(log) ? log : undefined;
+  }, timeoutMs);
+}
+
 function assert(ok, message) {
   if (!ok) throw new Error(message);
 }
 
-async function chromaCount() {
-  const collections = await request('GET', `${chromaBase}/api/v2/tenants/default_tenant/databases/default_database/collections`);
-  assert(collections.status === 200, `Chroma collections failed: ${collections.status} ${collections.raw}`);
+function dumpEnv() {
+  console.error('ENV:', {
+    NODE_VERSION: process.version,
+    QDRANT_URL: process.env.QDRANT_URL,
+    CUSTOMIZE_DASHBOARD_PORT: process.env.CUSTOMIZE_DASHBOARD_PORT,
+    packageRoot,
+    runner,
+    bundle,
+    cliBase,
+    qdrantBase,
+  });
+}
+
+async function postWithRetry(label, url, body, retries = 6, delayMs = 2000) {
+  let last;
+  for (let i = 0; i < retries; i++) {
+    const res = await request('POST', url, body);
+    if (res.status === 200 && res.json?.success) return res;
+    last = res;
+    console.warn(`${label} attempt ${i + 1} failed: ${res.status} ${res.raw}`);
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+  return last ?? request('POST', url, body);
+}
+
+async function qdrantCount() {
+  const collections = await request('GET', `${qdrantBase}/collections`);
+  assert(collections.status === 200, `Qdrant collections failed: ${collections.status} ${collections.raw}`);
   let total = 0;
-  for (const collection of collections.json) {
-    const id = collection.id || collection.name;
-    const count = await request('GET', `${chromaBase}/api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(id)}/count`);
-    if (count.status === 200) total += Number(count.json ?? 0);
+  for (const collection of collections.json.result?.collections ?? []) {
+    const count = await request('POST', `${qdrantBase}/collections/${encodeURIComponent(collection.name)}/points/count`, { exact: true });
+    if (count.status === 200) total += Number(count.json.result?.count ?? 0);
   }
   return total;
 }
 
 (async () => {
-  const chromaCli = findChromaCli();
-  assert(chromaCli, 'chromadb CLI not found');
+  const qdrantBin = findQdrantBin();
+  assert(qdrantBin, 'qdrant binary not found; set QDRANT_BIN or install qdrant in PATH');
   assert(fs.existsSync(runner), `dashboard runner not found: ${runner}`);
   assert(fs.existsSync(bundle), `server bundle not found: ${bundle}`);
 
-  const chromaOut = fs.openSync(chromaLog, 'a');
-  const chroma = spawn(node, [chromaCli, 'run', '--host', '127.0.0.1', '--port', String(chromaPort), '--path', chromaDir], {
-    stdio: ['ignore', chromaOut, chromaOut],
-    env: { ...process.env, CHROMA_URL: chromaBase },
+  const qdrantOut = fs.openSync(qdrantLog, 'a');
+  const qdrant = spawn(qdrantBin, [], {
+    stdio: ['ignore', qdrantOut, qdrantOut],
+    env: {
+      ...process.env,
+      QDRANT__SERVICE__HOST: '127.0.0.1',
+      QDRANT__SERVICE__HTTP_PORT: String(qdrantPort),
+      QDRANT__SERVICE__GRPC_PORT: String(qdrantGrpcPort),
+      QDRANT__STORAGE__STORAGE_PATH: qdrantDir,
+    },
   });
 
   let dashboardPid;
+  let cliDashboardPid;
   let cliProcess;
   try {
-    await waitFor('Chroma heartbeat', async () => {
-      const res = await request('GET', `${chromaBase}/api/v2/heartbeat`);
+    await waitFor('Qdrant heartbeat', async () => {
+      const res = await request('GET', `${qdrantBase}/collections`);
       return res.status === 200;
     });
 
@@ -187,15 +238,28 @@ async function chromaCount() {
     cliProcess = spawn(node, [cliBin], {
       cwd: cliProjectRoot,
       stdio: ['ignore', cliOut, cliOut],
-      env: { ...process.env, HOME: home, CHROMA_URL: chromaBase, CUSTOMIZE_DASHBOARD_PORT: String(cliPort), CUSTOMIZE_AGENT_E2E_DASHBOARD: '1' },
+      env: { ...process.env, HOME: home, QDRANT_URL: qdrantBase, CUSTOMIZE_DASHBOARD_PORT: String(cliPort), CUSTOMIZE_AGENT_E2E_DASHBOARD: '1', CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' },
     });
-    await waitFor('CLI startup knowledge initialization', () => {
-      if (!fs.existsSync(cliLog)) return undefined;
-      const log = fs.readFileSync(cliLog, 'utf8');
-      return log.includes('Dashboard ready:') ? true : undefined;
-    }, 240000);
-    const startupReindex = await request('POST', `${cliBase}/api/kb/reindex`, { projectRoot: cliProjectRoot });
-    assert(startupReindex.status === 200 && startupReindex.json.success, `CLI startup reindex failed: ${startupReindex.status} ${startupReindex.raw}`);
+    console.log('CLI startup logs:', { cliLog, qdrantLog });
+    const cliStartupLog = await waitForProcessLog('CLI startup knowledge initialization', cliProcess, cliLog, log => log.includes('Dashboard ready:') || log.includes('Dashboard still starting'), 240000);
+    if (cliStartupLog.includes('Dashboard still starting')) {
+      const cliStart = spawnSync(runner, [
+        'start', '--bundle', bundle, '--target', path.join(home, '.customize-agent', 'server'), '--port', String(cliPort), '--project-root', cliProjectRoot, '--qdrant-url', qdrantBase, '--node', node, '--log', path.join(home, '.customize-agent', 'logs', `dashboard-${cliPort}.log`), '--timeout-ms', '120000'
+      ], { encoding: 'utf8', env: { ...process.env, HOME: home, QDRANT_URL: qdrantBase, CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' } });
+      if (cliStart.status !== 0) {
+        console.error(cliStart.stdout);
+        console.error(cliStart.stderr);
+        dumpEnv();
+        throw new Error(`CLI dashboard fallback failed: ${cliStart.status}`);
+      }
+      cliDashboardPid = Number(cliStart.stdout.match(/pid=(\d+)/)?.[1]);
+    }
+    const startupReindex = await postWithRetry('CLI startup reindex', `${cliBase}/api/kb/reindex`, { projectRoot: cliProjectRoot });
+    if (!(startupReindex.status === 200 && startupReindex.json?.success)) {
+      console.error('startupReindex failed after retries:', { status: startupReindex.status, json: startupReindex.json, raw: startupReindex.raw });
+      dumpEnv();
+      throw new Error(`CLI startup reindex failed: ${startupReindex.status} ${startupReindex.raw}`);
+    }
     const startupStats = await waitFor('CLI startup knowledge vectors', async () => {
       const stats = await request('GET', `${cliBase}/api/kb/stats?projectRoot=${encodeURIComponent(cliProjectRoot)}`);
       if (stats.status !== 200) return undefined;
@@ -203,18 +267,19 @@ async function chromaCount() {
       if (Number(stats.json.chunkCount) > 0 && vector?.status === 'ready' && Number(vector.indexedChunks) >= Number(stats.json.chunkCount)) return stats.json;
       return undefined;
     }, 120000);
-    const startupVectorCount = await waitFor('CLI startup Chroma vectors', async () => {
-      const total = await chromaCount();
+    const startupVectorCount = await waitFor('CLI startup Qdrant vectors', async () => {
+      const total = await qdrantCount();
       return total >= startupStats.chunkCount ? total : undefined;
     }, 60000);
     try { fs.closeSync(cliOut); } catch {}
     try { cliProcess.kill(); } catch {}
     await new Promise(resolve => cliProcess.once('exit', resolve));
     cliProcess = undefined;
+    if (cliDashboardPid) { try { process.kill(cliDashboardPid); } catch {} cliDashboardPid = undefined; }
 
     const start = spawnSync(runner, [
-      'start', '--bundle', bundle, '--target', path.join(home, '.customize-agent', 'server'), '--port', String(port), '--project-root', projectRoot, '--chroma-url', chromaBase, '--node', node, '--log', dashboardLog, '--timeout-ms', '120000'
-    ], { encoding: 'utf8', env: { ...process.env, HOME: home, CHROMA_URL: chromaBase } });
+      'start', '--bundle', bundle, '--target', path.join(home, '.customize-agent', 'server'), '--port', String(port), '--project-root', projectRoot, '--qdrant-url', qdrantBase, '--node', node, '--log', dashboardLog, '--timeout-ms', '120000'
+    ], { encoding: 'utf8', env: { ...process.env, HOME: home, QDRANT_URL: qdrantBase, CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' } });
     if (start.status !== 0) {
       console.error(start.stdout);
       console.error(start.stderr);
@@ -256,33 +321,34 @@ async function chromaCount() {
     assert(incrementalDetail.status === 200, `incremental detail failed: ${incrementalDetail.status} ${incrementalDetail.raw}`);
     assert(Number(incrementalDetail.json.file?.chunkCount) > 0, 'incremental file was not parsed/chunked');
 
-    const readyStats = await waitFor('Chroma vector index', async () => {
+    const readyStats = await waitFor('Qdrant vector index', async () => {
       const stats = await request('GET', `${base}/api/kb/stats?projectRoot=${encodeURIComponent(projectRoot)}`);
       if (stats.status !== 200) throw new Error(`stats ${stats.status} ${stats.raw}`);
       const vector = stats.json.vectorStatus;
       if (vector?.status === 'ready' && Number(vector.indexedChunks) >= Number(stats.json.chunkCount) && Number(stats.json.chunkCount) > 0) return stats.json;
       return undefined;
     }, 180000);
-    const count = await waitFor('Chroma collection count', async () => {
-      const total = await chromaCount();
+    const count = await waitFor('Qdrant collection count', async () => {
+      const total = await qdrantCount();
       return total >= readyStats.chunkCount ? total : undefined;
     }, 60000);
-    console.log('UPLOAD_VECTOR_MATRIX_OK', JSON.stringify({ files: samples.length, marker, projectRoot, startupVectors: startupVectorCount, chunkCount: readyStats.chunkCount, indexedChunks: readyStats.vectorStatus.indexedChunks, chromaCount: count }));
+    console.log('UPLOAD_VECTOR_MATRIX_OK', JSON.stringify({ files: samples.length, marker, projectRoot, startupVectors: startupVectorCount, chunkCount: readyStats.chunkCount, indexedChunks: readyStats.vectorStatus.indexedChunks, qdrantCount: count }));
     process.exitCode = 0;
   } finally {
     if (cliProcess) { try { cliProcess.kill(); } catch {} }
+    if (cliDashboardPid) { try { process.kill(cliDashboardPid); } catch {} }
     if (dashboardPid) { try { process.kill(dashboardPid); } catch {} }
-    try { chroma.kill(); } catch {}
+    try { qdrant.kill(); } catch {}
     await new Promise(resolve => {
       const timer = setTimeout(resolve, 3000);
-      chroma.once('exit', () => { clearTimeout(timer); resolve(); });
+      qdrant.once('exit', () => { clearTimeout(timer); resolve(); });
     });
-    try { fs.closeSync(chromaOut); } catch {}
+    try { fs.closeSync(qdrantOut); } catch {}
   }
 })().catch(error => {
+  process.exitCode = 1;
   console.error(error.stack || String(error));
-  if (fs.existsSync(chromaLog)) console.error(fs.readFileSync(chromaLog, 'utf8'));
+  if (fs.existsSync(qdrantLog)) console.error(fs.readFileSync(qdrantLog, 'utf8'));
   if (fs.existsSync(cliLog)) console.error(fs.readFileSync(cliLog, 'utf8'));
   if (fs.existsSync(dashboardLog)) console.error(fs.readFileSync(dashboardLog, 'utf8'));
-  process.exit(1);
 }).finally(() => process.exit(process.exitCode ?? 0));

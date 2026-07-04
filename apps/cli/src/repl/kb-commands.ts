@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { ChromaHttpClient, ExternalExtractorRegistry, MultiProjectManager, getProjectKbPath } from '@customize-agent/knowledge';
+import { QdrantHttpClient, ExternalExtractorRegistry, MultiProjectManager, getProjectKbPath } from '@customize-agent/knowledge';
 import { t } from '../tui/renderer.js';
 import type { I18nManager } from '../i18n/manager.js';
 
@@ -261,9 +261,9 @@ export class KbCommands {
       process.stdout.write(t.warning('用法: /kb daemon status\n\n'));
       return;
     }
-    const client = new ChromaHttpClient();
+    const client = new QdrantHttpClient();
     const ok = await client.heartbeat();
-    process.stdout.write(`${ok ? t.success('ChromaDB Connected') : t.warning('ChromaDB Unavailable')} ${t.dim(client.baseUrl)}\n\n`);
+    process.stdout.write(`${ok ? t.success('Qdrant Connected') : t.warning('Qdrant Unavailable')} ${t.dim(client.baseUrl)}\n\n`);
   }
 
   private async config(): Promise<void> {
