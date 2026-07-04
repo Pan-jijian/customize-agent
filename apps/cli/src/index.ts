@@ -3,12 +3,11 @@
 import { Command } from 'commander';
 import { execSync } from 'child_process';
 import { readFileSync } from 'fs';
-import { homedir } from 'os';
-import { dirname, join, resolve } from 'path';
-import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
+import { createRequire } from 'module';
 import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
-import { QdrantHttpClient, ensureProjectCustomizeFile, MultiProjectManager } from '@customize-agent/knowledge';
+import { ensureProjectCustomizeFile, MultiProjectManager } from '@customize-agent/knowledge';
 import { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import { createExecutor } from './bootstrap.js';
 import { Repl } from './repl/repl.js';
@@ -28,11 +27,11 @@ function loadPackageJson(): { version: string } {
   }
 }
 
-const CLI_DIR = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 const PROJECT_ROOT = resolveUserProjectRoot();
 const pkg = loadPackageJson();
 
-// 追踪所有由 CLI 启动的子进程（dashboard server、qdrant），退出时统一清理
+// 追踪所有由 CLI 启动的子进程（dashboard server），退出时统一清理
 const spawnedPids = new Set<number>();
 
 function cleanupChildProcesses() {
@@ -99,59 +98,43 @@ async function dashboardLogFile(port: number) {
   return runtimeLogFile('dashboard', port);
 }
 
-function dashboardRunnerPath(): string {
-  return resolve(CLI_DIR, 'bin', process.platform === 'win32' ? 'dashboard-runner.exe' : 'dashboard-runner');
-}
-
-async function startDashboardInBackground(port: number, qdrantUrl: string): Promise<boolean> {
-  try {
-    const { execFile } = await import('child_process');
-    const { closeSync, existsSync } = await import('fs');
-    const runner = dashboardRunnerPath();
-    const bundleDir = resolve(CLI_DIR, 'server-bundle');
-    const targetDir = join(homedir(), '.customize-agent', 'server');
-    if (!existsSync(runner) || !existsSync(resolve(bundleDir, '.dashboard-bundled'))) return false;
-    const logFile = await dashboardLogFile(port);
-    closeSync(logFile.fd);
-    return await new Promise(resolveReady => {
-      execFile(runner, [
-        'start',
-        '--bundle', bundleDir,
-        '--target', targetDir,
-        '--port', String(port),
-        '--project-root', PROJECT_ROOT,
-        '--qdrant-url', qdrantUrl,
-        '--node', process.execPath,
-        '--log', logFile.logPath,
-        '--timeout-ms', '60000',
-      ], (error, stdout) => {
-        const pid = stdout.match(/pid=(\d+)/)?.[1];
-        if (pid) spawnedPids.add(Number(pid));
-        resolveReady(!error);
-      });
-    });
-  } catch {
-    return false;
-  }
-}
-
-async function waitForQdrant(client: QdrantHttpClient, timeoutMs: number): Promise<boolean> {
+async function waitForDashboard(port: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (await client.heartbeat()) return true;
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+      if (response.status < 500) return true;
+    } catch { /* server still starting */ }
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   return false;
 }
 
-async function ensureQdrantServer(): Promise<{ client: QdrantHttpClient; status: string }> {
-  const client = new QdrantHttpClient();
-  process.env.QDRANT_URL = client.baseUrl;
-  const ok = await waitForQdrant(client, 3000);
-  return {
-    client,
-    status: ok ? `Qdrant: 已连接 ${client.baseUrl}` : `Qdrant: 等待向量服务 ${client.baseUrl}`,
-  };
+async function startDashboardInBackground(port: number): Promise<boolean> {
+  try {
+    const { spawn } = await import('child_process');
+    const { closeSync } = await import('fs');
+    const serverPackageJson = require.resolve('@customize-agent/server/package.json');
+    const serverRoot = dirname(serverPackageJson);
+    const nextBin = require.resolve('next/dist/bin/next', { paths: [serverRoot] });
+    const logFile = await dashboardLogFile(port);
+    const child = spawn(process.execPath, [nextBin, 'start', '-p', String(port)], {
+      cwd: serverRoot,
+      detached: false,
+      stdio: ['ignore', logFile.fd, logFile.fd],
+      env: {
+        ...process.env,
+        NODE_ENV: 'production',
+        CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT,
+      },
+    });
+    if (child.pid) spawnedPids.add(child.pid);
+    child.on('exit', () => { if (child.pid) spawnedPids.delete(child.pid); });
+    closeSync(logFile.fd);
+    return await waitForDashboard(port, 60000);
+  } catch {
+    return false;
+  }
 }
 
 const program = new Command();
@@ -168,9 +151,6 @@ program.action(async () => {
   const modelRegistry = new ModelRegistry(configStore);
   const config = configStore.load();
   const i18n = new I18nManager(config.language);
-  const qdrantClient = new QdrantHttpClient();
-  process.env.QDRANT_URL = qdrantClient.baseUrl;
-  const qdrantReady = ensureQdrantServer().catch(() => ({ client: qdrantClient, status: `Qdrant: 启动中 ${qdrantClient.baseUrl}` }));
   await ensureProjectWorkspace(PROJECT_ROOT);
 
   if (opts.prompt) {
@@ -214,11 +194,11 @@ program.action(async () => {
 
   registerCleanup();
   const dashboardPort = Number(process.env.CUSTOMIZE_DASHBOARD_PORT || 17321);
-  const dashboardReady = await startDashboardInBackground(dashboardPort, qdrantClient.baseUrl);
+  const dashboardReady = await startDashboardInBackground(dashboardPort);
   const dashboardUrl: string | undefined = dashboardReady ? `http://localhost:${dashboardPort}/overview` : undefined;
   const kbManager = new MultiProjectManager();
   let kbStatus = '已初始化';
-  const kbInitialized = qdrantReady.then(async () => {
+  const kbInitialized = (async () => {
     try {
       const projectKb = await kbManager.getProject(PROJECT_ROOT);
       await projectKb.incrementalIndex();
@@ -227,7 +207,7 @@ program.action(async () => {
     } catch {
       kbStatus = '已初始化';
     }
-  });
+  })();
 
   if (process.env.CUSTOMIZE_AGENT_E2E_DASHBOARD === '1') {
     kbInitialized.catch(() => undefined);

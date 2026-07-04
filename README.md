@@ -291,7 +291,7 @@ customize-agent/
 │   │       │   ├── dedup-engine.ts          # DedupEngine（MinHash 去重）
 │   │       │   └── relationship-detector.ts # 文件关系检测
 │   │       ├── vector/               # 向量存储
-│   │       │   ├── chroma-store.ts          # ChromaDB 向量存储
+│   │       │   ├── sqlite-vec-store.ts      # SQLite + sqlite-vec 向量存储
 │   │       │   ├── vector-indexer.ts        # VectorIndexer
 │   │       │   ├── collection-manager.ts    # 集合管理（全局/项目级）
 │   │       │   └── types.ts                 # 向量存储类型
@@ -470,7 +470,7 @@ customize-agent/
 
 **本地知识库 — 多格式文件解析、向量化检索、联合搜索**
 
-为 Agent 提供本地文件的知识检索能力。支持 PDF、Word、Excel、图片、CAD 图纸等多种格式的解析和向量化，通过 ChromaDB 存储向量并支持联合搜索。
+为 Agent 提供本地文件的知识检索能力。支持 PDF、Word、Excel、图片、CAD 图纸等多种格式的解析和向量化，通过 SQLite + sqlite-vec 存储向量并支持联合搜索。
 
 | 导出 | 说明 |
 |------|------|
@@ -485,7 +485,7 @@ customize-agent/
 | `DedupEngine` | 去重引擎（MinHash + LSH 局部敏感哈希去重） |
 | `RelationshipDetector` | 文件关系检测器（检测文件间的引用和依赖关系） |
 | `HashEmbeddingProvider` | 哈希 Embedding 提供者（轻量级文本向量化） |
-| `ChromaVectorStore` | ChromaDB 向量存储（ChromaDB HTTP 客户端封装） |
+| `SQLiteVecVectorStore` | SQLite + sqlite-vec 向量存储（本地嵌入式向量索引） |
 | `VectorIndexer` | 向量索引器（批量文本向量化 + 存储） |
 | `CollectionManager` | 集合管理器（全局集合 + 项目级集合隔离） |
 | `FederationSearch` | 联合搜索引擎（跨项目 + 跨格式统一检索） |

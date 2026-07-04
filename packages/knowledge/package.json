@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/knowledge",
-  "version": "2.1.0",
+  "version": "2.2.1",
   "description": "Local knowledge base infrastructure for customize-agent",
   "type": "module",
   "main": "./dist/index.js",
@@ -38,6 +38,7 @@
   ],
   "dependencies": {
     "better-sqlite3": "^12.10.0",
+    "sqlite-vec": "^0.1.9",
     "fast-glob": "^3.3.3",
     "jszip": "^3.10.1",
     "@napi-rs/canvas": "^0.1.82",

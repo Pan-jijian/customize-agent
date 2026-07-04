@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/engine",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "description": "Agent 引擎 — 工具注册、权限控制、执行调度、子智能体编排",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -37,9 +37,9 @@
     "orchestration"
   ],
   "dependencies": {
-    "@customize-agent/llm": "workspace:*",
-    "@customize-agent/tools": "workspace:*",
-    "@customize-agent/types": "workspace:*",
+    "@customize-agent/llm": "^2.2.0",
+    "@customize-agent/tools": "^2.2.0",
+    "@customize-agent/types": "^2.2.0",
     "execa": "^9.6.1"
   },
   "devDependencies": {

@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/llm",
-  "version": "2.0.4",
+  "version": "2.2.0",
   "description": "AI 模型提供商 + 自动路由网关",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -36,7 +36,7 @@
     "provider"
   ],
   "dependencies": {
-    "@customize-agent/types": "workspace:*",
+    "@customize-agent/types": "^2.2.0",
     "openai": "^6.42.0"
   },
   "devDependencies": {

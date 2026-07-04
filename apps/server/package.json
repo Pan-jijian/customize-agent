@@ -1,20 +1,42 @@
 {
-  "name": "server",
-  "version": "0.1.5",
-  "private": true,
+  "name": "@customize-agent/server",
+  "version": "2.2.2",
   "description": "Customize Agent Web 管理控制台",
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "dev": "next dev -p 17321",
-    "build": "next build",
+    "build": "next build && node -e \"require('fs').rmSync('.next/cache', { recursive: true, force: true })\"",
     "start": "next start -p 17321",
     "lint": "eslint src/"
+  },
+  "files": [
+    ".next/BUILD_ID",
+    ".next/app-build-manifest.json",
+    ".next/build-manifest.json",
+    ".next/fallback-build-manifest.json",
+    ".next/server",
+    ".next/static",
+    ".next/required-server-files.json",
+    ".next/routes-manifest.json",
+    ".next/prerender-manifest.json",
+    ".next/images-manifest.json",
+    ".next/react-loadable-manifest.json",
+    "public",
+    "next.config.ts",
+    "package.json"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.2",
     "@napi-rs/canvas": "^0.1.82",
-    "@customize-agent/knowledge": "workspace:*",
-    "@customize-agent/llm": "workspace:*",
-    "@customize-agent/runtime": "workspace:*",
+    "@customize-agent/knowledge": "^2.2.1",
+    "@customize-agent/llm": "^2.2.0",
+    "@customize-agent/runtime": "^2.2.0",
     "antd": "^6.5.0",
     "better-sqlite3": "^12.10.0",
     "jszip": "^3.10.1",
