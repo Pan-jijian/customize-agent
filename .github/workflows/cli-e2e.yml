@@ -69,7 +69,7 @@ jobs:
           npm install "$(cat "$RUNNER_TEMP/tgz.txt")" --prefix "$RUNNER_TEMP/install-root" --ignore-scripts=false --foreground-scripts
           test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize.cmd"
           test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent.cmd"
-      - name: Verify upload parsing chunking and SQLite vector indexing
+      - name: Verify CLI startup web pages APIs upload and SQLite vector indexing
         timeout-minutes: 15
         shell: bash
         run: |

@@ -181,6 +181,36 @@ function dumpEnv() {
   });
 }
 
+const pages = ['/', '/overview', '/knowledge', '/knowledge/files', '/knowledge/manage', '/knowledge/search', '/models', '/prompt', '/settings', '/context/short-term', '/context/long-term'];
+const apiChecks = [
+  { method: 'GET', path: '/api/health' },
+  { method: 'GET', path: '/api/config/models' },
+  { method: 'GET', path: '/api/config/providers' },
+  { method: 'GET', path: '/api/kb/features' },
+  { method: 'GET', path: '/api/kb/categories' },
+  { method: 'GET', path: '/api/kb/tags' },
+  { method: 'GET', path: '/api/kb/files', query: root => `projectRoot=${encodeURIComponent(root)}&limit=10` },
+  { method: 'GET', path: '/api/kb/stats', query: root => `projectRoot=${encodeURIComponent(root)}` },
+  { method: 'GET', path: '/api/kb/search', query: root => `projectRoot=${encodeURIComponent(root)}&q=${encodeURIComponent(marker)}&limit=5` },
+  { method: 'GET', path: '/api/kb/duplicates', query: root => `projectRoot=${encodeURIComponent(root)}` },
+  { method: 'GET', path: '/api/kb/operations', query: root => `projectRoot=${encodeURIComponent(root)}` },
+  { method: 'GET', path: '/api/context' },
+  { method: 'GET', path: '/api/prompt' },
+  { method: 'GET', path: '/api/system/stats' },
+];
+
+async function verifyWebSurface(baseUrl, root, label) {
+  for (const page of pages) {
+    const res = await request('GET', `${baseUrl}${page}`);
+    assert(res.status >= 200 && res.status < 400, `${label} page ${page} failed: ${res.status} ${res.raw.slice(0, 300)}`);
+  }
+  for (const api of apiChecks) {
+    const query = api.query ? `?${api.query(root)}` : '';
+    const res = await request(api.method, `${baseUrl}${api.path}${query}`);
+    assert(res.status >= 200 && res.status < 300, `${label} api ${api.path} failed: ${res.status} ${res.raw.slice(0, 500)}`);
+  }
+}
+
 async function postWithRetry(label, url, body, retries = 6, delayMs = 2000) {
   let last;
   for (let i = 0; i < retries; i++) {
@@ -197,7 +227,6 @@ async function postWithRetry(label, url, body, retries = 6, delayMs = 2000) {
   assert(fs.existsSync(path.join(serverRoot, '.next', 'BUILD_ID')), `dashboard build not found: ${serverRoot}`);
 
   let dashboardPid;
-  let cliDashboardPid;
   let cliProcess;
   try {
     const cliBin = path.join(packageRoot, 'dist', 'index.js');
@@ -208,11 +237,8 @@ async function postWithRetry(label, url, body, retries = 6, delayMs = 2000) {
       env: { ...process.env, HOME: home, CUSTOMIZE_DASHBOARD_PORT: String(cliPort), CUSTOMIZE_AGENT_E2E_DASHBOARD: '1', CUSTOMIZE_AGENT_DISABLE_OCR: '1', LOG_LEVEL: 'debug' },
     });
     console.log('CLI startup logs:', { cliLog });
-    const cliStartupLog = await waitForProcessLog('CLI startup knowledge initialization', cliProcess, cliLog, log => log.includes(`Dashboard ready: http://localhost:${cliPort}/overview`) || log.includes('Dashboard still starting'), 240000);
-    if (cliStartupLog.includes('Dashboard still starting')) {
-      const fallback = await startServer(cliPort, cliProjectRoot, path.join(home, '.customize-agent', 'logs', `dashboard-${cliPort}.log`));
-      cliDashboardPid = fallback.pid;
-    }
+    await waitForProcessLog('CLI startup dashboard', cliProcess, cliLog, log => log.includes(`Dashboard ready: http://localhost:${cliPort}/overview`), 240000);
+    await verifyWebSurface(cliBase, cliProjectRoot, 'CLI startup dashboard');
     const startupReindex = await postWithRetry('CLI startup reindex', `${cliBase}/api/kb/reindex`, { projectRoot: cliProjectRoot });
     if (!(startupReindex.status === 200 && startupReindex.json?.success)) {
       console.error('startupReindex failed after retries:', { status: startupReindex.status, json: startupReindex.json, raw: startupReindex.raw });
@@ -231,10 +257,10 @@ async function postWithRetry(label, url, body, retries = 6, delayMs = 2000) {
     try { cliProcess.kill(); } catch {}
     await new Promise(resolve => cliProcess.once('exit', resolve));
     cliProcess = undefined;
-    if (cliDashboardPid) { try { process.kill(cliDashboardPid); } catch {} cliDashboardPid = undefined; }
 
     const dashboard = await startServer(port, projectRoot, dashboardLog);
     dashboardPid = dashboard.pid;
+    await verifyWebSurface(base, projectRoot, 'direct dashboard');
 
     for (let i = 0; i < samples.length; i++) {
       const sample = samples[i];
@@ -280,7 +306,6 @@ async function postWithRetry(label, url, body, retries = 6, delayMs = 2000) {
     process.exitCode = 0;
   } finally {
     if (cliProcess) { try { cliProcess.kill(); } catch {} }
-    if (cliDashboardPid) { try { process.kill(cliDashboardPid); } catch {} }
     if (dashboardPid) { try { process.kill(dashboardPid); } catch {} }
   }
 })().catch(error => {
