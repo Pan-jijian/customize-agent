@@ -36,7 +36,7 @@
     "runtime"
   ],
   "dependencies": {
-    "@customize-agent/types": "^2.2.0"
+    "@customize-agent/types": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^25.9.3"

@@ -39,31 +39,31 @@ importers:
   apps/cli:
     dependencies:
       '@customize-agent/engine':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../../packages/engine
       '@customize-agent/knowledge':
-        specifier: ^2.2.1
+        specifier: workspace:^
         version: link:../../packages/knowledge
       '@customize-agent/llm':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../../packages/llm
       '@customize-agent/memory':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../../packages/memory
       '@customize-agent/runtime':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../../packages/runtime
       '@customize-agent/search':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../../packages/search
       '@customize-agent/server':
-        specifier: ^2.2.3
+        specifier: workspace:^
         version: link:../server
       '@customize-agent/tools':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../../packages/tools
       '@customize-agent/types':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../../packages/types
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
@@ -168,13 +168,13 @@ importers:
         specifier: ^6.3.2
         version: 6.3.2(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@customize-agent/knowledge':
-        specifier: ^2.2.1
+        specifier: workspace:^
         version: link:../../packages/knowledge
       '@customize-agent/llm':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../../packages/llm
       '@customize-agent/runtime':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../../packages/runtime
       '@napi-rs/canvas':
         specifier: ^0.1.82
@@ -250,13 +250,13 @@ importers:
   packages/engine:
     dependencies:
       '@customize-agent/llm':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../llm
       '@customize-agent/tools':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../tools
       '@customize-agent/types':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../types
       execa:
         specifier: ^9.6.1
@@ -309,7 +309,7 @@ importers:
   packages/llm:
     dependencies:
       '@customize-agent/types':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../types
       openai:
         specifier: ^6.42.0
@@ -335,7 +335,7 @@ importers:
   packages/runtime:
     dependencies:
       '@customize-agent/types':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../types
     devDependencies:
       '@types/node':
@@ -345,10 +345,10 @@ importers:
   packages/search:
     dependencies:
       '@customize-agent/llm':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../llm
       '@customize-agent/types':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../types
       '@vscode/ripgrep':
         specifier: ^1.18.0
@@ -412,10 +412,10 @@ importers:
   packages/tools:
     dependencies:
       '@customize-agent/search':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../search
       '@customize-agent/types':
-        specifier: ^2.2.0
+        specifier: workspace:^
         version: link:../types
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
