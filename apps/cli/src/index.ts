@@ -83,7 +83,12 @@ async function runtimeLogFile(name: string, port: number) {
   const { mkdirSync, openSync } = await import('fs');
   const { join } = await import('path');
   const { homedir, tmpdir } = await import('os');
-  const candidates = [join(homedir(), '.customize-agent', 'logs'), join(tmpdir(), 'customize-agent', 'logs')];
+  const homeOverride = process.env.CUSTOMIZE_AGENT_HOME || process.env.HOME || process.env.USERPROFILE;
+  const candidates = [
+    ...(homeOverride ? [join(homeOverride, '.customize-agent', 'logs')] : []),
+    join(homedir(), '.customize-agent', 'logs'),
+    join(tmpdir(), 'customize-agent', 'logs'),
+  ];
   for (const logDir of candidates) {
     try {
       mkdirSync(logDir, { recursive: true });
@@ -97,6 +102,16 @@ async function runtimeLogFile(name: string, port: number) {
 
 async function dashboardLogFile(port: number) {
   return runtimeLogFile('dashboard', port);
+}
+
+async function readLogTail(logPath: string): Promise<string> {
+  try {
+    const { readFileSync } = await import('fs');
+    const content = readFileSync(logPath, 'utf8');
+    return content.slice(-4000);
+  } catch {
+    return '';
+  }
 }
 
 async function waitForDashboard(port: number, timeoutMs: number): Promise<boolean> {
@@ -155,10 +170,12 @@ async function startDashboardInBackground(port: number): Promise<DashboardStartR
     if (child.pid) spawnedPids.add(child.pid);
     child.on('exit', () => { if (child.pid) spawnedPids.delete(child.pid); });
     closeSync(logFile.fd);
-    if (await waitForDashboard(port, 60000)) {
+    const timeoutMs = Number(process.env.CUSTOMIZE_DASHBOARD_START_TIMEOUT_MS || 180000);
+    if (await waitForDashboard(port, timeoutMs)) {
       return { ready: true, port, url: `http://localhost:${port}/overview`, logPath };
     }
-    return { ready: false, port, logPath, error: `dashboard did not become healthy within 60000ms` };
+    const tail = await readLogTail(logPath);
+    return { ready: false, port, logPath, error: `dashboard did not become healthy within ${timeoutMs}ms${tail ? `\nDashboard log tail:\n${tail}` : ''}` };
   } catch (error) {
     return { ready: false, port, logPath, error: error instanceof Error ? error.message : String(error) };
   }
