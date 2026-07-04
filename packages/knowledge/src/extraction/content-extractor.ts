@@ -507,6 +507,11 @@ export class ContentExtractor {
 
   private async extractRasterImage(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     const metadata: Record<string, unknown> = { extractionMode: 'builtin_tesseract_ocr_isolated', vectorizable: true };
+    if (process.env.CUSTOMIZE_AGENT_DISABLE_OCR === '1') {
+      metadata.extractionMode = 'raster_image_metadata';
+      metadata.contentCoverage = 'metadata_filename';
+      return { text: this.metadataOnlyText(file), metadata, warnings: ['OCR disabled; indexed image metadata only'] };
+    }
     const validationError = this.validateRasterImage(file.absolutePath);
     if (validationError) {
       metadata.contentCoverage = 'invalid_image';

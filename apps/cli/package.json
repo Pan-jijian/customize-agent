@@ -54,7 +54,6 @@
     "@customize-agent/tools": "^2.1.12",
     "@customize-agent/types": "^2.0.4",
     "@vscode/ripgrep": "^1.18.0",
-    "chromadb": "^3.0.18",
     "commander": "^15.0.0",
     "fast-glob": "^3.3.3",
     "marked": "^15.0.12",

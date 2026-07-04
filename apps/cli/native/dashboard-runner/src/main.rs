@@ -26,7 +26,7 @@ struct Options {
     monorepo_root: Option<PathBuf>,
     port: u16,
     project_root: Option<PathBuf>,
-    chroma_url: Option<String>,
+    qdrant_url: Option<String>,
     node: Option<PathBuf>,
     log: Option<PathBuf>,
     timeout_ms: u64,
@@ -47,7 +47,7 @@ fn parse_options(args: &[String]) -> Options {
             "--monorepo-root" => opts.monorepo_root = Some(PathBuf::from(value)),
             "--port" => opts.port = value.parse().unwrap_or_else(|_| usage()),
             "--project-root" => opts.project_root = Some(PathBuf::from(value)),
-            "--chroma-url" => opts.chroma_url = Some(value),
+            "--qdrant-url" => opts.qdrant_url = Some(value),
             "--node" => opts.node = Some(PathBuf::from(value)),
             "--log" => opts.log = Some(PathBuf::from(value)),
             "--timeout-ms" => opts.timeout_ms = value.parse().unwrap_or_else(|_| usage()),
@@ -214,8 +214,15 @@ fn bundle(opts: Options) -> Result<(), String> {
     for name in ["knowledge", "llm", "runtime", "types"] {
         let src = packages_src.join(name);
         if src.exists() {
-            copy_dir(&src, &packages_dest.join(name)).map_err(|e| format!("copy package {name}: {e}"))?;
-            copy_dir(&src, &scoped_vendor.join(name)).map_err(|e| format!("copy runtime package {name}: {e}"))?;
+            let package_dest = packages_dest.join(name);
+            let runtime_dest = scoped_vendor.join(name);
+            let standalone_dest = dest.join("apps").join("server").join("node_modules").join("@customize-agent").join(name);
+            remove_if_exists(&package_dest)?;
+            remove_if_exists(&runtime_dest)?;
+            remove_if_exists(&standalone_dest)?;
+            copy_dir(&src, &package_dest).map_err(|e| format!("copy package {name}: {e}"))?;
+            copy_dir(&src, &runtime_dest).map_err(|e| format!("copy runtime package {name}: {e}"))?;
+            copy_dir(&src, &standalone_dest).map_err(|e| format!("copy standalone package {name}: {e}"))?;
         }
     }
 
@@ -371,9 +378,12 @@ fn spawn_server(opts: &Options) -> Result<Child, String> {
         .env("PORT", opts.port.to_string())
         .env("NODE_ENV", "production")
         .env("CUSTOMIZE_PROJECT_ROOT", opts.project_root.as_ref().unwrap_or(target))
-        .env("CHROMA_URL", opts.chroma_url.as_deref().unwrap_or("http://127.0.0.1:17322"))
-        .env("NODE_PATH", append_node_path(node_path.into_os_string(), path_sep))
-        .stdin(Stdio::null())
+        .env("QDRANT_URL", opts.qdrant_url.as_deref().unwrap_or("http://127.0.0.1:6333"))
+        .env("NODE_PATH", append_node_path(node_path.into_os_string(), path_sep));
+    if let Some(disable_ocr) = env::var_os("CUSTOMIZE_AGENT_DISABLE_OCR") {
+        cmd.env("CUSTOMIZE_AGENT_DISABLE_OCR", disable_ocr);
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
     cmd.spawn().map_err(|e| format!("spawn dashboard: {e}"))

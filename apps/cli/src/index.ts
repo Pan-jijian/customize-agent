@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
-import { ChromaHttpClient, ensureProjectCustomizeFile, MultiProjectManager } from '@customize-agent/knowledge';
+import { QdrantHttpClient, ensureProjectCustomizeFile, MultiProjectManager } from '@customize-agent/knowledge';
 import { ConfigStore, ModelRegistry } from '@customize-agent/runtime';
 import { createExecutor } from './bootstrap.js';
 import { Repl } from './repl/repl.js';
@@ -32,7 +32,7 @@ const CLI_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolveUserProjectRoot();
 const pkg = loadPackageJson();
 
-// 追踪所有由 CLI 启动的子进程（dashboard server、chroma），退出时统一清理
+// 追踪所有由 CLI 启动的子进程（dashboard server、qdrant），退出时统一清理
 const spawnedPids = new Set<number>();
 
 function cleanupChildProcesses() {
@@ -103,7 +103,7 @@ function dashboardRunnerPath(): string {
   return resolve(CLI_DIR, 'bin', process.platform === 'win32' ? 'dashboard-runner.exe' : 'dashboard-runner');
 }
 
-async function startDashboardInBackground(port: number, chromaUrl: string): Promise<boolean> {
+async function startDashboardInBackground(port: number, qdrantUrl: string): Promise<boolean> {
   try {
     const { execFile } = await import('child_process');
     const { closeSync, existsSync } = await import('fs');
@@ -120,7 +120,7 @@ async function startDashboardInBackground(port: number, chromaUrl: string): Prom
         '--target', targetDir,
         '--port', String(port),
         '--project-root', PROJECT_ROOT,
-        '--chroma-url', chromaUrl,
+        '--qdrant-url', qdrantUrl,
         '--node', process.execPath,
         '--log', logFile.logPath,
         '--timeout-ms', '60000',
@@ -135,16 +135,7 @@ async function startDashboardInBackground(port: number, chromaUrl: string): Prom
   }
 }
 
-async function chromaDataDir() {
-  const { mkdirSync } = await import('fs');
-  const { join } = await import('path');
-  const { homedir } = await import('os');
-  const dir = join(homedir(), '.customize-agent', 'chroma');
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-async function waitForChroma(client: ChromaHttpClient, timeoutMs: number): Promise<boolean> {
+async function waitForQdrant(client: QdrantHttpClient, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await client.heartbeat()) return true;
@@ -153,95 +144,13 @@ async function waitForChroma(client: ChromaHttpClient, timeoutMs: number): Promi
   return false;
 }
 
-async function resolveChromaCommand(): Promise<{ command: string; argsPrefix: string[] } | undefined> {
-  const { existsSync } = await import('fs');
-  const { join, resolve: resolvePath } = await import('path');
-  const packageRoot = resolvePath(CLI_DIR, '..');
-  const repoRoot = resolvePath(CLI_DIR, '../../..');
-  const cliCandidates = [
-    join(packageRoot, 'node_modules', 'chromadb', 'dist', 'cli.mjs'),
-    join(repoRoot, 'node_modules', 'chromadb', 'dist', 'cli.mjs'),
-  ];
-  const cli = cliCandidates.find(candidate => existsSync(candidate));
-  if (cli) return { command: process.execPath, argsPrefix: [cli] };
-
-  const binaryCandidates = process.platform === 'win32'
-    ? [resolvePath(CLI_DIR, 'vendor', 'chroma', 'chroma.exe'), resolvePath(CLI_DIR, 'chroma.exe')]
-    : [resolvePath(CLI_DIR, 'vendor', 'chroma', 'chroma'), resolvePath(CLI_DIR, 'chroma')];
-  const binary = binaryCandidates.find(candidate => existsSync(candidate));
-  return binary ? { command: binary, argsPrefix: [] } : undefined;
-}
-
-function chromaPort(client: ChromaHttpClient): number {
-  try { return Number(new URL(client.baseUrl).port || 80); }
-  catch { return 17322; }
-}
-
-async function listeningPids(port: number): Promise<number[]> {
-  if (process.platform === 'win32') return [];
-  const { execFile } = await import('child_process');
-  return await new Promise(resolve => {
-    execFile('lsof', ['-tiTCP:' + port, '-sTCP:LISTEN'], (error, stdout) => {
-      if (error) return resolve([]);
-      resolve(stdout.split(/\s+/u).map(value => Number(value)).filter(pid => Number.isFinite(pid) && pid > 0 && pid !== process.pid));
-    });
-  });
-}
-
-async function stopProcessListeningOnPort(port: number): Promise<boolean> {
-  const pids = await listeningPids(port);
-  for (const pid of pids) {
-    try { process.kill(pid, 'SIGTERM'); } catch { /* ignore stale process */ }
-  }
-  if (pids.length > 0) await new Promise(resolve => setTimeout(resolve, 800));
-  const remaining = await listeningPids(port);
-  for (const pid of remaining) {
-    try { process.kill(pid, 'SIGKILL'); } catch { /* ignore stale process */ }
-  }
-  if (remaining.length > 0) await new Promise(resolve => setTimeout(resolve, 500));
-  return (await listeningPids(port)).length === 0;
-}
-
-async function ensureChromaServer(): Promise<{ client: ChromaHttpClient; status: string }> {
-  let client = new ChromaHttpClient();
-  if (await client.heartbeat()) return { client, status: `ChromaDB: 已连接 ${client.baseUrl}` };
-
-  const { spawn } = await import('child_process');
-  let port = chromaPort(client);
-  if (!await stopProcessListeningOnPort(port)) {
-    port += 1;
-    process.env.CHROMA_URL = `http://localhost:${port}`;
-    client = new ChromaHttpClient();
-  }
-  const logFile = await runtimeLogFile('chroma', port);
-  const chromaCommand = await resolveChromaCommand();
-  if (!chromaCommand) {
-    const { closeSync } = await import('fs');
-    try { closeSync(logFile.fd); } catch { /* ignore */ }
-    return { client, status: 'ChromaDB: 正在准备向量服务' };
-  }
-  try {
-    const dataDir = await chromaDataDir();
-    const proc = spawn(chromaCommand.command, [...chromaCommand.argsPrefix, 'run', '--host', 'localhost', '--port', String(port), '--path', dataDir], {
-      cwd: PROJECT_ROOT,
-      stdio: ['ignore', logFile.fd, logFile.fd],
-      env: { ...process.env, CHROMA_URL: client.baseUrl },
-      shell: false,
-    });
-    if (proc.pid) spawnedPids.add(proc.pid);
-    proc.on('error', () => undefined);
-    const { closeSync } = await import('fs');
-    closeSync(logFile.fd);
-  } catch (error) {
-    const { closeSync } = await import('fs');
-    try { closeSync(logFile.fd); } catch { /* ignore */ }
-    return { client, status: 'ChromaDB: 正在准备向量服务' };
-  }
-
-  const ok = await waitForChroma(client, 15000);
+async function ensureQdrantServer(): Promise<{ client: QdrantHttpClient; status: string }> {
+  const client = new QdrantHttpClient();
+  process.env.QDRANT_URL = client.baseUrl;
+  const ok = await waitForQdrant(client, 3000);
   return {
     client,
-    status: ok ? `ChromaDB: 已自动启动 ${client.baseUrl}` : 'ChromaDB: 正在准备向量服务',
+    status: ok ? `Qdrant: 已连接 ${client.baseUrl}` : `Qdrant: 等待向量服务 ${client.baseUrl}`,
   };
 }
 
@@ -259,9 +168,9 @@ program.action(async () => {
   const modelRegistry = new ModelRegistry(configStore);
   const config = configStore.load();
   const i18n = new I18nManager(config.language);
-  const chromaClient = new ChromaHttpClient();
-  process.env.CHROMA_URL = chromaClient.baseUrl;
-  const chromaReady = ensureChromaServer().catch(() => ({ client: chromaClient, status: `ChromaDB: 启动中 ${chromaClient.baseUrl}` }));
+  const qdrantClient = new QdrantHttpClient();
+  process.env.QDRANT_URL = qdrantClient.baseUrl;
+  const qdrantReady = ensureQdrantServer().catch(() => ({ client: qdrantClient, status: `Qdrant: 启动中 ${qdrantClient.baseUrl}` }));
   await ensureProjectWorkspace(PROJECT_ROOT);
 
   if (opts.prompt) {
@@ -305,11 +214,11 @@ program.action(async () => {
 
   registerCleanup();
   const dashboardPort = Number(process.env.CUSTOMIZE_DASHBOARD_PORT || 17321);
-  const dashboardReady = await startDashboardInBackground(dashboardPort, chromaClient.baseUrl);
+  const dashboardReady = await startDashboardInBackground(dashboardPort, qdrantClient.baseUrl);
   const dashboardUrl: string | undefined = dashboardReady ? `http://localhost:${dashboardPort}/overview` : undefined;
   const kbManager = new MultiProjectManager();
   let kbStatus = '已初始化';
-  const kbInitialized = chromaReady.then(async () => {
+  const kbInitialized = qdrantReady.then(async () => {
     try {
       const projectKb = await kbManager.getProject(PROJECT_ROOT);
       await projectKb.incrementalIndex();
@@ -321,7 +230,7 @@ program.action(async () => {
   });
 
   if (process.env.CUSTOMIZE_AGENT_E2E_DASHBOARD === '1') {
-    await kbInitialized;
+    kbInitialized.catch(() => undefined);
     console.log(dashboardReady ? `Dashboard ready: ${dashboardUrl}` : 'Dashboard still starting');
     await new Promise(() => setInterval(() => undefined, 60_000));
   }
