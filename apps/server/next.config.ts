@@ -1,26 +1,37 @@
 import path from 'node:path';
 import type { NextConfig } from 'next';
 
+const serverExternalPackages = [
+  '@customize-agent/knowledge',
+  '@customize-agent/llm',
+  '@customize-agent/runtime',
+  '@customize-agent/types',
+  '@napi-rs/canvas',
+  'better-sqlite3',
+  'jszip',
+  'mammoth',
+  'pdf-parse',
+  'pdfjs-dist',
+  'tesseract.js',
+  'xlsx',
+];
+
 const nextConfig: NextConfig = {
   output: 'standalone',
   outputFileTracingRoot: path.resolve(process.cwd(), '../..'),
   eslint: {
     ignoreDuringBuilds: true,
   },
-  serverExternalPackages: [
-    '@customize-agent/knowledge',
-    '@customize-agent/llm',
-    '@customize-agent/runtime',
-    '@customize-agent/types',
-    '@napi-rs/canvas',
-    'better-sqlite3',
-    'jszip',
-    'mammoth',
-    'pdf-parse',
-    'pdfjs-dist',
-    'tesseract.js',
-    'xlsx',
-  ],
+  serverExternalPackages,
+  webpack(config, { isServer }) {
+    if (isServer) {
+      config.externals = [
+        ...(Array.isArray(config.externals) ? config.externals : [config.externals].filter(Boolean)),
+        ...serverExternalPackages,
+      ];
+    }
+    return config;
+  },
   async headers() {
     return [
       {
