@@ -1,7 +1,11 @@
 import { Worker } from 'worker_threads';
-import * as path from 'path';
 import * as os from 'os';
+import * as path from 'path';
 import type { WorkerRequest, WorkerResponse } from './types.js';
+
+function getWorkerPath(): string {
+  return path.join(__dirname, 'worker.js');
+}
 
 /** 池中的单个 Worker 封装 */
 interface PoolWorker {
@@ -45,7 +49,7 @@ export class TreeSitterWorkerPool {
 
   /** 初始化线程池：预拉起常热 Worker + 注册消息回调 */
   async init(): Promise<void> {
-    const workerPath = path.join(__dirname, 'tree-sitter-worker.js');
+    const workerPath = getWorkerPath();
 
     for (let i = 0; i < this.poolSize; i++) {
       const worker = new Worker(workerPath);
@@ -88,8 +92,7 @@ export class TreeSitterWorkerPool {
    */
   private recycleWorker(poolWorker: PoolWorker): void {
     poolWorker.worker.terminate().catch(() => {});
-    const workerPath = path.join(__dirname, 'tree-sitter-worker.js');
-    const newWorker = new Worker(workerPath);
+    const newWorker = new Worker(getWorkerPath());
     newWorker.on('message', poolWorker.worker.listeners('message')[0] as (r: WorkerResponse) => void);
     newWorker.on('error', poolWorker.worker.listeners('error')[0] as (e: Error) => void);
     poolWorker.worker = newWorker;

@@ -1,7 +1,3 @@
-declare module '@vscode/ripgrep' {
-  export const rgPath: string;
-}
-
 declare module 'fast-glob' {
   interface GlobOptions {
     cwd?: string;

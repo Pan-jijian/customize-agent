@@ -26,6 +26,7 @@
     ".next/react-loadable-manifest.json",
     "public",
     "next.config.ts",
+    "postcss.config.mjs",
     "package.json"
   ],
   "publishConfig": {
