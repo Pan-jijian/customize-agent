@@ -278,7 +278,6 @@ export class Repl {
     };
     process.once('SIGINT', abortTask);
     const taskInput = this._captureInputDuringTask(abortTask);
-    taskInput.setLiveStatus(t.faint(this.i18n.t('stream.thinking')));
     const drainTaskInput = () => taskInput.drain().map(text => ({ content: text, display: text }));
     let toolPreviewTimer: ReturnType<typeof setInterval> | null = null;
     let toolPreview: { toolName: string; args: Record<string, unknown>; startMs: number } | null = null;
@@ -413,17 +412,20 @@ export class Repl {
   private async _readLine(prompt: string): Promise<string> {
     this.tui.suspend();
     const { createInterface } = await import('readline');
-    return new Promise<string>(resolve => {
-      const rl = createInterface({
-        input: process.stdin,
-        output: process.stdout,
+    try {
+      return await new Promise<string>(resolve => {
+        const rl = createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+        rl.question(prompt, (answer: string) => {
+          rl.close();
+          resolve(answer);
+        });
       });
-      rl.question(prompt, (answer: string) => {
-        rl.close();
-        this.tui.resume();
-        resolve(answer);
-      });
-    });
+    } finally {
+      this.tui.resume();
+    }
   }
 
   private async _selectList<T>(title: string, items: Array<{ label: string; detail?: string; value: T }>): Promise<T | null> {
@@ -496,12 +498,6 @@ export class Repl {
       }
 
       case '/clear':
-        if (this.memory && this.history.length > 2) {
-          // 保存当前会话摘要到长期记忆
-          const msgs = this.history.filter(m => m.role === 'user' || m.role === 'assistant');
-          const summary = msgs.map(m => `[${m.role}] ${(m.content ?? '').slice(0, 200)}`).join('\n');
-          this.memory.remember('pattern', summary.slice(0, 500), '会话摘要');
-        }
         this.history.length = 0;
         this.history.push({ role: 'system', content: this.executor.getSystemPrompt() });
         process.stdout.write(t.success(this.i18n.t('context.session_cleared') + '\n\n'));

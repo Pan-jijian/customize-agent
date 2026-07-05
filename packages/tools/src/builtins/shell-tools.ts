@@ -71,28 +71,36 @@ export class ShellTools {
   }
 
   async zipFiles(output: string, files: string[]): Promise<string> {
+    this.ensureNotKnowledgeBase(output);
+    for (const file of files) this.ensureNotKnowledgeBase(file);
     const out = resolveSafe(output.endsWith('.tar') ? output : `${output}.tar`, this.cwd);
-    await fs.mkdir(path.dirname(out), { recursive: true });
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'customize-agent-archive-'));
+    const tmpOut = path.join(tmpDir, path.basename(out));
 
     // Dynamic import: archiver v8 is ESM-only with named exports
     const { Archiver } = await import('archiver');
 
-    return new Promise((resolve, reject) => {
-      const stream = createWriteStream(out);
-      const archive = new Archiver({ format: 'tar', gzip: false });
-      archive.on('error', (err: Error) => reject(err));
-      stream.on('error', (err: Error) => reject(err));
-      stream.on('close', () => {
-        resolve(`Created archive ${path.relative(this.cwd, out)}`);
-      });
-      archive.pipe(stream);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const stream = createWriteStream(tmpOut);
+        const archive = new Archiver({ format: 'tar', gzip: false });
+        archive.on('error', (err: Error) => reject(err));
+        stream.on('error', (err: Error) => reject(err));
+        stream.on('close', () => resolve());
+        archive.pipe(stream);
 
-      for (const f of files) {
-        const fullPath = resolveSafe(f, this.cwd);
-        archive.file(fullPath, { name: f });
-      }
-      void archive.finalize();
-    });
+        for (const f of files) {
+          const fullPath = resolveSafe(f, this.cwd);
+          archive.file(fullPath, { name: f });
+        }
+        void archive.finalize();
+      });
+      await fs.mkdir(path.dirname(out), { recursive: true });
+      await fs.copyFile(tmpOut, out);
+      return `Created archive ${path.relative(this.cwd, out)}`;
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   }
 
   async doctor(): Promise<string> {
@@ -157,6 +165,12 @@ export class ShellTools {
     const dir = path.join(os.homedir(), '.customize-agent');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(this.pluginConfigFile(), JSON.stringify(config, null, 2), 'utf-8');
+  }
+
+  private ensureNotKnowledgeBase(filePath: string): void {
+    if (filePath.split(/[\\/]+/u).includes('knowledgeBase')) {
+      throw new Error('knowledgeBase 是知识库原始文件投放目录，智能体工具不能直接读写，请通过知识库检索或 Web Dashboard 管理');
+    }
   }
 
   private async versionOf(bin: string, args: string[]): Promise<string> {

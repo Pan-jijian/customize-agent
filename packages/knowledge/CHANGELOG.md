@@ -1,5 +1,29 @@
 # @customize-agent/knowledge
 
+## 3.0.3
+
+### Patch Changes
+
+- Improve legacy Word and CAD document ingestion, add batch file deletion controls, and fix terminal thinking status rendering.
+
+## 3.0.2
+
+### Patch Changes
+
+- Patch release 3.0.2.
+
+## 3.0.1
+
+### Patch Changes
+
+- Patch release 3.0.1.
+
+## 3.0.0
+
+### Major Changes
+
+- Release 3.0.0 with updated CLI, web management, knowledge base, prompt, and tool execution behavior.
+
 ## 2.1.3
 
 ### Patch Changes

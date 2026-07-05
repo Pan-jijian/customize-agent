@@ -1,5 +1,7 @@
 // @customize-agent/tools — 媒体处理工具
 import * as fs from 'fs/promises';
+import * as path from 'path';
+import * as os from 'os';
 import sharp from 'sharp';
 import mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
@@ -23,6 +25,7 @@ export class MediaTools {
   }
 
   async extractPdfText(filePath: string): Promise<string> {
+    this.ensureNotKnowledgeBase(filePath);
     const full = resolveSafe(filePath, this.cwd);
     const mod = await import('pdf-parse');
     const pdfParse = (mod as unknown as { default?: (data: Buffer) => Promise<{ text: string }> }).default ?? (mod as unknown as (data: Buffer) => Promise<{ text: string }>);
@@ -31,11 +34,13 @@ export class MediaTools {
   }
 
   async extractDocxText(filePath: string): Promise<string> {
+    this.ensureNotKnowledgeBase(filePath);
     const result = await mammoth.extractRawText({ path: resolveSafe(filePath, this.cwd) });
     return result.value.slice(0, 60_000) || 'No text found in DOCX.';
   }
 
   async extractXlsxData(filePath: string): Promise<string> {
+    this.ensureNotKnowledgeBase(filePath);
     const workbook = XLSX.readFile(resolveSafe(filePath, this.cwd));
     const sheets: Record<string, unknown[]> = {};
     for (const name of workbook.SheetNames) sheets[name] = XLSX.utils.sheet_to_json(workbook.Sheets[name]!);
@@ -43,6 +48,7 @@ export class MediaTools {
   }
 
   async ocrImage(filePath: string): Promise<string> {
+    this.ensureNotKnowledgeBase(filePath);
     const worker = await createWorker('eng+chi_sim');
     try {
       const result = await worker.recognize(resolveSafe(filePath, this.cwd));
@@ -62,22 +68,53 @@ export class MediaTools {
   }
 
   async convertFile(input: string, output: string): Promise<string> {
+    this.ensureNotKnowledgeBase(input);
+    this.ensureNotKnowledgeBase(output);
     const ffmpeg = resolveBinary('ffmpeg');
-    const res = await execa(ffmpeg, ['-y', '-i', resolveSafe(input, this.cwd), resolveSafe(output, this.cwd)], { reject: false });
-    if (res.exitCode !== 0) throw new Error(res.stderr || 'ffmpeg conversion failed');
-    return `Converted ${input} -> ${output}`;
+    const finalOutput = resolveSafe(output, this.cwd);
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'customize-agent-convert-'));
+    const tmpOutput = path.join(tmpDir, path.basename(finalOutput));
+    try {
+      const res = await execa(ffmpeg, ['-y', '-i', resolveSafe(input, this.cwd), tmpOutput], { reject: false });
+      if (res.exitCode !== 0) throw new Error(res.stderr || 'ffmpeg conversion failed');
+      await fs.mkdir(path.dirname(finalOutput), { recursive: true });
+      await fs.copyFile(tmpOutput, finalOutput);
+      return `Converted ${input} -> ${output}`;
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   }
 
   async compressImage(input: string, output: string): Promise<string> {
     this.ensureNotKnowledgeBase(input);
     this.ensureNotKnowledgeBase(output);
-    await sharp(resolveSafe(input, this.cwd)).jpeg({ quality: 80 }).toFile(resolveSafe(output, this.cwd));
-    return `Compressed image ${input} -> ${output}`;
+    const finalOutput = resolveSafe(output, this.cwd);
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'customize-agent-image-'));
+    const tmpOutput = path.join(tmpDir, path.basename(finalOutput));
+    try {
+      await sharp(resolveSafe(input, this.cwd)).jpeg({ quality: 80 }).toFile(tmpOutput);
+      await fs.mkdir(path.dirname(finalOutput), { recursive: true });
+      await fs.copyFile(tmpOutput, finalOutput);
+      return `Compressed image ${input} -> ${output}`;
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   }
 
   async generateThumbnail(input: string, output: string): Promise<string> {
-    await sharp(resolveSafe(input, this.cwd)).resize(320, 320, { fit: 'inside' }).toFile(resolveSafe(output, this.cwd));
-    return `Generated thumbnail ${input} -> ${output}`;
+    this.ensureNotKnowledgeBase(input);
+    this.ensureNotKnowledgeBase(output);
+    const finalOutput = resolveSafe(output, this.cwd);
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'customize-agent-thumb-'));
+    const tmpOutput = path.join(tmpDir, path.basename(finalOutput));
+    try {
+      await sharp(resolveSafe(input, this.cwd)).resize(320, 320, { fit: 'inside' }).toFile(tmpOutput);
+      await fs.mkdir(path.dirname(finalOutput), { recursive: true });
+      await fs.copyFile(tmpOutput, finalOutput);
+      return `Generated thumbnail ${input} -> ${output}`;
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   }
 
   private async mediaProbe(filePath: string): Promise<string> {

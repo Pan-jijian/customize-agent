@@ -40,11 +40,14 @@ export class ChangeTracker {
       }
 
       const metadata = this.parseMetadata(indexed.metadataJson);
+      const extraction = metadata.extraction && typeof metadata.extraction === 'object' ? metadata.extraction as Record<string, unknown> : {};
+      const contentCoverage = metadata.contentCoverage ?? extraction.contentCoverage;
+      const extractionMode = metadata.extractionMode ?? extraction.extractionMode;
       const needsReindex = indexed.status === 'error'
         || indexed.chunkCount === 0
         || (classified.format === 'pdf' && indexed.chunkCount <= 1)
-        || metadata.contentCoverage === 'metadata_filename'
-        || metadata.extractionMode === 'pdf_metadata_only';
+        || contentCoverage === 'metadata_filename'
+        || extractionMode === 'pdf_metadata_only';
       if (needsReindex) {
         modifiedFiles.push(classified);
         continue;

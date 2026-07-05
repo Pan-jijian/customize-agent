@@ -59,16 +59,32 @@ export async function openKbFileTarget(relativePath: string, target: 'file' | 'd
   });
 }
 
-export async function uploadKbFile(file: File, projectRoot?: string, uploadId?: string) {
-  const base64 = await new Promise<string>((resolve, reject) => {
+async function fileToBase64(file: File) {
+  return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => { const r = reader.result as string; const c = r.indexOf(','); resolve(c >= 0 ? r.slice(c + 1) : r); };
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+export async function uploadKbFile(file: File, projectRoot?: string, uploadId?: string) {
+  const base64 = await fileToBase64(file);
   return fetchJson<{ success: boolean; relativePath?: string; files?: KbFileItem[]; total?: number; vectorStatus?: KbVectorStatus }>('/api/kb/upload', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fileName: file.name, fileData: base64, projectRoot, uploadId }),
+    body: JSON.stringify({ fileName: file.name, fileData: base64, projectRoot, uploadId, relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || undefined }),
+  });
+}
+
+export async function uploadKbFiles(files: File[], projectRoot?: string, uploadId?: string) {
+  const payload = await Promise.all(files.map(async file => ({
+    fileName: file.name,
+    fileData: await fileToBase64(file),
+    relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || undefined,
+  })));
+  return fetchJson<{ success: boolean; relativePath?: string; files?: KbFileItem[]; total?: number; vectorStatus?: KbVectorStatus }>('/api/kb/upload', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files: payload, projectRoot, uploadId }),
   });
 }
 
@@ -83,9 +99,23 @@ export async function getKbOperations(projectRoot?: string) {
 }
 
 export async function deleteKbFile(relativePath: string, projectRoot?: string) {
-  return fetchJson<{ success: boolean }>('/api/kb/files', {
+  return fetchJson<{ success: boolean; deleted?: number }>('/api/kb/files', {
     method: 'DELETE', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ relativePath, projectRoot }),
+  });
+}
+
+export async function deleteKbFiles(relativePaths: string[], projectRoot?: string) {
+  return fetchJson<{ success: boolean; deleted?: number }>('/api/kb/files', {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ relativePaths, projectRoot }),
+  });
+}
+
+export async function deleteAllKbFiles(projectRoot?: string) {
+  return fetchJson<{ success: boolean; deleted?: number }>('/api/kb/files', {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ all: true, projectRoot }),
   });
 }
 
@@ -157,7 +187,7 @@ export interface ProviderInfo { name: string; apiKey?: string; baseUrl?: string;
 export interface ModelsConfig { reader: { active: string; list: { name: string; provider: string }[] }; reasoning: { active: string; list: { name: string; provider: string }[] }; action: { active: string; list: { name: string; provider: string }[] }; }
 
 export async function getProviders() { return fetchJson<ProviderInfo[]>('/api/config/providers'); }
-export async function saveProvider(name: string, cfg: { apiKey?: string; baseUrl?: string; protocol?: string }) {
+export async function saveProvider(name: string, cfg: { apiKey?: string; baseUrl?: string; protocol?: string; oldName?: string }) {
   return fetchJson<{ success: boolean }>('/api/config/providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, ...cfg }) });
 }
 export async function deleteProvider(name: string) { return fetchJson<{ success: boolean }>(`/api/config/providers/${encodeURIComponent(name)}`, { method: 'DELETE' }); }

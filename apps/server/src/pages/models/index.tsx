@@ -85,11 +85,8 @@ export default function ModelsPage() {
   const handleEdit = async () => {
     if (!editModelName.trim()) return; setEditSaving(true);
     try {
-      if (editModelName.trim() !== editTarget) {
-        await deleteProvider(editTarget);
-      }
       const apiKey = editApiKey.includes('•') ? undefined : editApiKey || undefined;
-      await saveProvider(editModelName.trim(), { apiKey, baseUrl: editBaseUrl || undefined, protocol: editProtocol });
+      await saveProvider(editModelName.trim(), { oldName: editTarget, apiKey, baseUrl: editBaseUrl || undefined, protocol: editProtocol });
       setEditOpen(false); setEditTarget(''); setEditModelName(''); setEditApiKey(''); setEditBaseUrl(''); setEditProtocol('openai');
       await load(); message.success(t('common.success'));
     }
@@ -136,13 +133,13 @@ export default function ModelsPage() {
 
       <Card title={t('models.modelList')} size="small" loading={loading}>
         {providers.length === 0 ? <span className={styles.cardMeta}>{t('models.noProviders')}</span> : (
-          <Row gutter={[12, 12]}>
+          <Row gutter={[12, 12]} align="stretch">
             {providers.map((p) => (
-              <Col key={p.name} xs={24} sm={12} lg={8}>
-                <Card size="small">
+              <Col key={p.name} xs={24} sm={12} lg={8} xl={6} className={styles.providerGrid}>
+                <Card size="small" className={styles.providerCard}>
                   <div className={styles.cardAction}>
-                    <div><div className={styles.cardName}>{p.name}</div><div className={styles.cardMeta}><ThunderboltOutlined /> {p.protocol || p.detectedProtocol || 'openai'}</div></div>
-                    <Space>
+                    <div className={styles.cardMain}><div className={styles.cardName} title={p.name}>{p.name}</div><div className={styles.cardMeta}><ThunderboltOutlined /> {p.protocol || p.detectedProtocol || 'openai'}</div></div>
+                    <Space size={2} wrap={false}>
                       <Button size="small" type="text" loading={testing === p.name} onClick={() => { void handleTest(p.name); }}
                         icon={results[p.name] === true ? <CheckCircleFilled className="text-[var(--colorOk)]" /> : results[p.name] === false ? <CloseCircleFilled className="text-[var(--colorDanger)]" /> : <ApiOutlined />} />
                       <Button size="small" type="text" icon={<EditOutlined />} onClick={() => { void openEdit(p); }} />
@@ -153,7 +150,7 @@ export default function ModelsPage() {
                   </div>
                   <div className="flex flex-col gap-0.5">
                     <span className={`${styles.cardMeta} text-xs`}><KeyOutlined /> {p.hasApiKey ? '••••••••' : '—'}</span>
-                    {p.baseUrl && <span className={`${styles.cardMeta} text-xs truncate block`}><GlobalOutlined /> {p.baseUrl}</span>}
+                    {p.baseUrl && <span className={`${styles.cardMeta} ${styles.urlLine} text-xs`} title={p.baseUrl}><GlobalOutlined /> {p.baseUrl}</span>}
                   </div>
                 </Card>
               </Col>

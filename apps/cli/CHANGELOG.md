@@ -1,5 +1,87 @@
 # customize-agent
 
+## 3.0.6
+
+### Patch Changes
+
+- Improve legacy Word and CAD document ingestion, add batch file deletion controls, and fix terminal thinking status rendering.
+- Updated dependencies
+  - @customize-agent/server@3.0.5
+  - @customize-agent/knowledge@3.0.3
+
+## 3.0.5
+
+### Patch Changes
+
+- Fix CUSTOMIZE.md system prompt injection for all task modes and make terminal task status append-only instead of erasing progress.
+- Updated dependencies
+  - @customize-agent/server@3.0.4
+
+## 3.0.4
+
+### Patch Changes
+
+- Fix terminal input recovery after task execution, command prompts, and interrupt handling.
+
+## 3.0.3
+
+### Patch Changes
+
+- Fix packaged dashboard startup by keeping Next.js server output in CommonJS package scope.
+- Updated dependencies
+  - @customize-agent/server@3.0.3
+
+## 3.0.2
+
+### Patch Changes
+
+- Patch release 3.0.2.
+- Updated dependencies
+  - @customize-agent/server@3.0.2
+  - @customize-agent/engine@3.0.2
+  - @customize-agent/knowledge@3.0.2
+  - @customize-agent/llm@3.0.2
+  - @customize-agent/memory@3.0.2
+  - @customize-agent/runtime@3.0.2
+  - @customize-agent/search@3.0.2
+  - @customize-agent/tools@3.0.2
+  - @customize-agent/types@3.0.2
+
+## 3.0.1
+
+### Patch Changes
+
+- Patch release 3.0.1.
+- Updated dependencies
+  - @customize-agent/server@3.0.1
+  - @customize-agent/engine@3.0.1
+  - @customize-agent/knowledge@3.0.1
+  - @customize-agent/llm@3.0.1
+  - @customize-agent/memory@3.0.1
+  - @customize-agent/runtime@3.0.1
+  - @customize-agent/search@3.0.1
+  - @customize-agent/tools@3.0.1
+  - @customize-agent/types@3.0.1
+
+## 3.0.0
+
+### Major Changes
+
+- Release 3.0.0 with updated CLI, web management, knowledge base, prompt, and tool execution behavior.
+
+### Patch Changes
+
+- Updated dependencies
+  - @customize-agent/server@3.0.0
+  - @customize-agent/engine@3.0.0
+  - @customize-agent/knowledge@3.0.0
+  - @customize-agent/llm@3.0.0
+  - @customize-agent/memory@3.0.0
+  - @customize-agent/runtime@3.0.0
+  - @customize-agent/search@3.0.0
+  - @customize-agent/tools@3.0.0
+  - @customize-agent/types@3.0.0
+
 ## 2.1.18
 
 ### Patch Changes

@@ -1,5 +1,9 @@
-.cardMeta { color: var(--colorTextSecondary); font-size: 12px; }
-.cardName { font-weight: 600; color: var(--colorText); text-transform: capitalize; }
-.cardAction { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+.cardMeta { color: var(--colorTextSecondary); font-size: 12px; min-width: 0; }
+.cardName { font-weight: 600; color: var(--colorText); text-transform: capitalize; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cardAction { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 8px; min-width: 0; }
+.cardMain { min-width: 0; flex: 1; }
+.providerCard { height: 100%; }
+.providerGrid :global(.ant-card-body) { height: 100%; }
+.urlLine { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tierDesc { color: var(--colorTextSecondary); font-size: 12px; display: block; margin-bottom: 8px; }
 .modelTags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }

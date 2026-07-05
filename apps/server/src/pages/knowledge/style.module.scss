@@ -3,51 +3,61 @@
 .filterInput { width: 260px; }
 .filterSelect { width: 140px; }
 
-.statusCard {
-  overflow: hidden;
+.statusPanel {
+  border: 1px solid var(--colorBorderSecondary);
+  border-radius: 12px;
+  background: var(--colorBgContainer);
+  padding: 10px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.03);
 }
 
-.statusCard :global(.ant-card-body) {
-  padding-top: 12px;
-  max-height: min(46vh, 420px);
-  overflow: hidden;
+.statusPanelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  color: var(--colorTextSecondary);
+  font-size: 12px;
+  padding: 0 2px 6px;
 }
 
 .statusEmpty {
   color: var(--colorTextSecondary);
-  padding: 10px 2px;
+  padding: 4px 2px;
+  font-size: 12px;
 }
 
 .statusList {
   display: grid;
-  gap: 10px;
-  max-height: calc(min(46vh, 420px) - 24px);
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+  max-height: 220px;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 4px;
 }
 
 .statusItem {
+  min-width: 0;
   border: 1px solid var(--colorBorderSecondary);
-  border-left: 4px solid var(--colorPrimary);
-  border-radius: 14px;
-  padding: 12px;
-  background: linear-gradient(180deg, var(--colorBgContainer), var(--colorFillAlter));
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.04);
+  border-left: 3px solid var(--colorPrimary);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: var(--colorFillAlter);
 }
 
 .statusHeader {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 6px;
+  gap: 6px;
+  margin-bottom: 3px;
   min-width: 0;
 }
 
 .statusHeader strong {
   display: inline-block;
-  max-width: min(58vw, 760px);
+  max-width: 210px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -56,8 +66,8 @@
 
 .statusDesc {
   color: var(--colorText);
-  font-size: 13px;
-  margin-bottom: 6px;
+  font-size: 12px;
+  margin-bottom: 3px;
   display: -webkit-box;
   line-clamp: 2;
   -webkit-line-clamp: 2;
@@ -69,18 +79,18 @@
   color: var(--colorTextSecondary);
   font-size: 12px;
   background: var(--colorBgContainer);
-  border-radius: 8px;
-  padding: 6px 8px;
+  border-radius: 6px;
+  padding: 3px 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
 }
 
 .statusMeta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 4px;
   color: var(--colorTextSecondary);
   font-size: 12px;
 }

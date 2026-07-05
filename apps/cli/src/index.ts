@@ -187,6 +187,7 @@ const configStore = new ConfigStore();
 program
   .name('customize')
   .description(`Customize Agent v${pkg.version} — interactive REPL`)
+  .version(pkg.version)
   .option('-p, --prompt <text>', 'Single-shot execution mode')
   .option('--plan', 'Plan mode: read-only exploration (requires -p)');
 

@@ -1,5 +1,23 @@
 # @customize-agent/memory
 
+## 3.0.2
+
+### Patch Changes
+
+- Patch release 3.0.2.
+
+## 3.0.1
+
+### Patch Changes
+
+- Patch release 3.0.1.
+
+## 3.0.0
+
+### Major Changes
+
+- Release 3.0.0 with updated CLI, web management, knowledge base, prompt, and tool execution behavior.
+
 ## 2.0.4
 
 ### Patch Changes

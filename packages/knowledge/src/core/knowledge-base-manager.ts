@@ -239,6 +239,7 @@ export class KnowledgeBaseManager {
         status: 'active',
         metadataJson: JSON.stringify({
           mimeType: file.mimeType,
+          ...extraction.metadata,
           extraction: extraction.metadata,
           warnings: extraction.warnings,
           extractionTimeMs: extraction.extractionTimeMs,
@@ -412,11 +413,17 @@ export class KnowledgeBaseManager {
   }
 
   async uploadFile(fileName: string, content: Buffer, targetRelativePath?: string, onProgress?: (progress: KnowledgeIndexProgress) => void, options: { vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
+    return this.uploadFiles([{ fileName, content, targetRelativePath }], onProgress, options);
+  }
+
+  async uploadFiles(files: Array<{ fileName: string; content: Buffer; targetRelativePath?: string }>, onProgress?: (progress: KnowledgeIndexProgress) => void, options: { vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
     this.initialize();
-    const relativePath = this.getUploadRelativePath(fileName, targetRelativePath);
-    const targetPath = this.resolveKbRelativePath(relativePath);
-    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-    fs.writeFileSync(targetPath, content);
+    for (const file of files) {
+      const relativePath = this.getUploadRelativePath(file.fileName, file.targetRelativePath);
+      const targetPath = this.resolveKbRelativePath(relativePath);
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.writeFileSync(targetPath, file.content);
+    }
     return this.incrementalIndex({ onProgress, vectorMode: options.vectorMode });
   }
 
@@ -751,7 +758,7 @@ ${resultsText}
 
   private hasUsableContent(text: string, metadata: Record<string, unknown>): boolean {
     const coverage = String(metadata.contentCoverage ?? '');
-    if (coverage === 'metadata') return false;
+    if (['metadata', 'metadata_filename', 'pdf_metadata_only', 'office_zip_empty_text', 'office_zip_failed'].includes(coverage)) return false;
     return text.trim().length > 0;
   }
 

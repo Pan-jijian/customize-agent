@@ -7,15 +7,29 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const store = getConfigStore();
     if (req.method === 'POST') {
-      const { name, apiKey, baseUrl, protocol } = req.body;
+      const { name, apiKey, baseUrl, protocol, oldName } = req.body;
       if (!name) return res.status(400).json({ error: 'Provider name required' });
-      store.ensureProvider(name);
-      if (apiKey !== undefined) store.setProviderKey(name, apiKey);
-      if (baseUrl !== undefined) store.setProviderUrl(name, baseUrl);
-      if (protocol !== undefined) store.setProviderProtocol(name, protocol);
+      const targetName = String(name);
+      const sourceName = oldName ? String(oldName) : targetName;
+      if (sourceName !== targetName) {
+        const config = store.load();
+        const previous = config.providers[sourceName] ?? {};
+        config.providers[targetName] = { ...previous, ...config.providers[targetName] };
+        delete config.providers[sourceName];
+        for (const tier of ['reader', 'reasoning', 'action'] as const) {
+          const t = config.models[tier];
+          t.list = t.list.map(model => model.provider === sourceName ? { ...model, provider: targetName, name: model.name === sourceName ? targetName : model.name } : model);
+          if (t.active === sourceName) t.active = targetName;
+        }
+        store.save(config);
+      }
+      store.ensureProvider(targetName);
+      if (apiKey !== undefined) store.setProviderKey(targetName, apiKey);
+      if (baseUrl !== undefined) store.setProviderUrl(targetName, baseUrl);
+      if (protocol !== undefined) store.setProviderProtocol(targetName, protocol);
       const config = store.load();
-      if (!config.models.action.list.some((model) => model.provider === name && model.name === name)) {
-        store.addModel('action', { provider: name, name });
+      if (!config.models.action.list.some((model) => model.provider === targetName && model.name === targetName)) {
+        store.addModel('action', { provider: targetName, name: targetName });
       }
       return res.status(200).json({ success: true });
     }

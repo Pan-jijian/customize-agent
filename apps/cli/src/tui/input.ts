@@ -102,7 +102,8 @@ export class TuiInput {
   private _activeResize?: () => void;
   private _activeRender?: () => void;
   private _activeClear?: () => void;
-  private _suspended = false;
+  private _activeRaw = false;
+  private _suspendDepth = 0;
   private _pendingBlocks: Array<{ text: string; label: string; variant: 'user' | 'queued' }> = [];
   private _draft = '';
 
@@ -140,22 +141,29 @@ export class TuiInput {
   }
 
   suspend(): void {
-    if (this._suspended) return;
+    this._suspendDepth++;
+    if (this._suspendDepth > 1) return;
     if (this._activeKeypress) process.stdin.removeListener('keypress', this._activeKeypress);
     if (this._activeResize) process.stdout.removeListener('resize', this._activeResize);
     this._activeClear?.();
-    this._suspended = true;
   }
 
   resume(options: { redraw?: boolean } = {}): void {
-    if (!this._suspended) return;
-    if (process.stdin.isTTY) {
+    if (this._suspendDepth <= 0) return;
+    this._suspendDepth--;
+    if (this._suspendDepth > 0) return;
+    if (process.stdin.isTTY && this._activeRaw) {
       try { process.stdin.setRawMode(true); } catch { /* ignore */ }
     }
     process.stdin.resume();
-    if (this._activeKeypress) process.stdin.on('keypress', this._activeKeypress);
-    if (this._activeResize) process.stdout.on('resize', this._activeResize);
-    this._suspended = false;
+    if (this._activeKeypress) {
+      process.stdin.removeListener('keypress', this._activeKeypress);
+      process.stdin.on('keypress', this._activeKeypress);
+    }
+    if (this._activeResize) {
+      process.stdout.removeListener('resize', this._activeResize);
+      process.stdout.on('resize', this._activeResize);
+    }
     if (options.redraw) this._activeRender?.();
   }
 
@@ -175,6 +183,15 @@ export class TuiInput {
     if (!supportsAnsi()) return this._readPlain();
     return new Promise<string>(resolve => {
       if (!_kprInit) { readline.emitKeypressEvents(process.stdin); _kprInit = true; }
+      if (this._activeKeypress) process.stdin.removeListener('keypress', this._activeKeypress);
+      if (this._activeResize) process.stdout.removeListener('resize', this._activeResize);
+      this._activeKeypress = undefined;
+      this._activeResize = undefined;
+      this._activeRender = undefined;
+      this._activeClear = undefined;
+      this._externalWrite = undefined;
+      this._activeRaw = false;
+      this._suspendDepth = 0;
 
       const initialDraft = this._draft;
       this._draft = '';
@@ -189,7 +206,7 @@ export class TuiInput {
       const pasteInlineLimit = 300;
       let resizeDebounce: ReturnType<typeof setTimeout> | undefined;
       if (process.stdin.isTTY) {
-        try { process.stdin.setRawMode(true); raw = true; } catch { /* */ }
+        try { process.stdin.setRawMode(true); raw = true; this._activeRaw = true; } catch { /* */ }
       }
 
       process.stdout.write(CSI + '?25l' + CSI + '?2004h');
@@ -449,6 +466,7 @@ export class TuiInput {
       };
 
       this._activeKeypress = onKP;
+      process.stdin.resume();
       process.stdin.on('keypress', onKP);
 
       let done_ = false;
@@ -462,7 +480,8 @@ export class TuiInput {
         this._activeResize = undefined;
         this._activeRender = undefined;
         this._activeClear = undefined;
-        this._suspended = false;
+        this._activeRaw = false;
+        this._suspendDepth = 0;
         clearCtrlO();
         this._externalWrite = undefined;
         if (raw) try { process.stdin.setRawMode(false); } catch { /* */ }

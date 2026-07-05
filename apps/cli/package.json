@@ -1,6 +1,6 @@
 {
   "name": "customize-agent",
-  "version": "2.2.3",
+  "version": "3.0.6",
   "description": "通用终端 AI 助手 — 原生 Function Calling + 双语 TUI + 三级模型分层",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -22,6 +22,9 @@
     "start": "node ./dist/index.js"
   },
   "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "author": "Pan-jijian",
   "repository": {
     "type": "git",

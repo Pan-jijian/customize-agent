@@ -400,7 +400,7 @@ describe('Classifier extension coverage', () => {
     ['.xls', 'spreadsheet', 'excel'],
     ['.xlsm', 'spreadsheet', 'excel'],
     ['.ods', 'spreadsheet', 'opendoc'],
-    ['.tab', 'spreadsheet', 'csv'],
+    ['.tab', 'spreadsheet', 'tsv'],
     ['.yml', 'data', 'yaml'],
     ['.geojson', 'data', 'json'],
     ['.xsd', 'data', 'xml'],

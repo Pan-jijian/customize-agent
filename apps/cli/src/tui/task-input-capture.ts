@@ -69,7 +69,6 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
   let outputLineOpen = false;
   let ctrlOOpen = false;
   let ctrlOLines = 0;
-  let cancelling = false;
   let bracketedPaste = false;
   let pasteBuffer = '';
   const pasteInlineLimit = 300;
@@ -270,11 +269,11 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
         )) lines.push(ddPrefix + line);
       }
       lines.push(ddPrefix + t.subtle(hintText({
-        tab: options.i18n.t('hint.tab'),
-        navigate: options.i18n.t('hint.navigate'),
-        confirm: options.i18n.t('hint.confirm'),
-        dismiss: options.i18n.t('hint.dismiss'),
-        sep: options.i18n.t('hint.sep'),
+        tab: options.i18n.t('hint.tab_select'),
+        navigate: options.i18n.t('hint.arrow_navigate'),
+        confirm: options.i18n.t('hint.enter_confirm'),
+        dismiss: options.i18n.t('hint.esc_dismiss'),
+        sep: options.i18n.t('hint.separator'),
       })));
     }
     const cursorCol = 2 + prefixWidth + stringWidth(inputRows[caretLoc.line]?.slice(0, caretLoc.col) ?? '');
@@ -327,12 +326,12 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
   const normalizeStatusText = (text: string) => text.replace(cursorControlRe, '').replace(/^\r+/, '');
   const setLiveStatus = (lines: string | string[]) => {
     const statusLines = toStatusLines(lines);
-    if (statusLineActive) clearStatusLine();
-    else clearBuffer();
     if (statusLines.length === 0 || statusLines.every(line => line.trim().length === 0)) {
-      renderBuffer();
+      clearLiveStatus();
       return;
     }
+    if (statusLineActive) clearStatusLine();
+    else clearBuffer();
     process.stdout.write(statusLines.join('\n') + '\n');
     statusLineActive = true;
     statusLineCount = statusLines.length;
@@ -340,7 +339,7 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
   };
 
   const clearLiveStatus = () => {
-    clearStatusLine();
+    if (statusLineActive) clearStatusLine();
     renderBuffer();
   };
 
@@ -360,7 +359,6 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     else setLiveStatus(normalized);
   };
   const writeOutput = (text: string) => {
-    if (cancelling) return;
     clearCtrlO();
     if (text.startsWith('\r')) {
       writeStatus(text);
@@ -382,7 +380,6 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
   renderBuffer();
   const onKeypress = (str: string | undefined, key: readline.Key) => {
     const seq = key?.sequence ?? str ?? '';
-    if (cancelling) return;
     if (bracketedPaste) {
       const end = seq.indexOf('\x1b[201~');
       if (end >= 0) {
@@ -437,7 +434,6 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     }
 
     if (key?.ctrl && key.name === 'c') {
-      cancelling = true;
       buffer = '';
       pos = 0;
       pasteBlocks.length = 0;
@@ -530,7 +526,7 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
   return {
     drain: () => {
       const drained = pending.splice(0, pending.length);
-      if (!cancelling) renderBuffer();
+      renderBuffer();
       return drained;
     },
     writeOutput,
@@ -546,7 +542,12 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     },
     resume: () => {
       if (active) return;
+      if (process.stdin.isTTY) {
+        try { process.stdin.setRawMode(true); } catch { /* ignore */ }
+      }
+      process.stdin.resume();
       active = true;
+      process.stdin.removeListener('keypress', onKeypress);
       process.stdin.on('keypress', onKeypress);
       renderBuffer();
     },
