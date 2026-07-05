@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useAppTranslations } from '@/components/Layout';
-import { Card, Row, Col, Statistic, Progress, Tag, Spin, Space, Button } from 'antd';
+import { Card, Row, Col, Statistic, Progress, Tag, Space, Button } from 'antd';
 import { useRouter } from 'next/router';
 import { CloudServerOutlined, ApiOutlined, ThunderboltOutlined, CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined, FileTextOutlined, HddOutlined } from '@ant-design/icons';
 import { getSystemStats, type SystemStats, getProviders } from '@/lib/api';
@@ -22,8 +22,6 @@ export default function OverviewPage() {
   }, []);
 
   useEffect(() => { void load(); const timer = setInterval(() => { void load(); }, 10000); return () => clearInterval(timer); }, [load]);
-
-  if (loading && !stats) return <div className="flex justify-center py-16"><Spin size="large" /></div>;
 
   const cpuColor = (stats?.cpu.usagePercent ?? 0) > 80 ? 'var(--colorDanger)' : (stats?.cpu.usagePercent ?? 0) > 50 ? 'var(--colorWarning)' : 'var(--colorOk)';
   const memColor = (stats?.memory.usagePercent ?? 0) > 80 ? 'var(--colorDanger)' : (stats?.memory.usagePercent ?? 0) > 50 ? 'var(--colorWarning)' : 'var(--colorOk)';

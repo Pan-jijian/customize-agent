@@ -7,7 +7,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const store = getConfigStore();
     if (req.method === 'POST') {
-      const { name, apiKey, baseUrl, protocol, oldName } = req.body;
+      const { name, apiKey, baseUrl, protocol, capabilities, oldName } = req.body;
       if (!name) return res.status(400).json({ error: 'Provider name required' });
       const targetName = String(name);
       const sourceName = oldName ? String(oldName) : targetName;
@@ -27,6 +27,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (apiKey !== undefined) store.setProviderKey(targetName, apiKey);
       if (baseUrl !== undefined) store.setProviderUrl(targetName, baseUrl);
       if (protocol !== undefined) store.setProviderProtocol(targetName, protocol);
+      if (capabilities !== undefined && typeof capabilities === 'object') store.setProviderCapabilities(targetName, {
+        imageGeneration: capabilities.imageGeneration === true,
+        imageUnderstanding: capabilities.imageUnderstanding === true,
+        fileUnderstanding: capabilities.fileUnderstanding === true,
+        audio: capabilities.audio === true,
+        video: capabilities.video === true,
+      });
       const config = store.load();
       if (!config.models.action.list.some((model) => model.provider === targetName && model.name === targetName)) {
         store.addModel('action', { provider: targetName, name: targetName });
@@ -34,6 +41,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json({ success: true });
     }
     const config = store.load();
-    res.status(200).json(Object.entries(config.providers).map(([name, cfg]) => ({ name, apiKey: cfg.apiKey ? '••••' + cfg.apiKey.slice(-4) : undefined, baseUrl: cfg.baseUrl, protocol: cfg.protocol, detectedProtocol: detectProtocol(name), hasApiKey: !!cfg.apiKey })));
+    res.status(200).json(Object.entries(config.providers).map(([name, cfg]) => ({ name, apiKey: cfg.apiKey ? '••••' + cfg.apiKey.slice(-4) : undefined, baseUrl: cfg.baseUrl, protocol: cfg.protocol, detectedProtocol: detectProtocol(name), hasApiKey: !!cfg.apiKey, capabilities: cfg.capabilities ?? {} })));
   } catch (e: unknown) { console.error('[api] config/providers', e); res.status(500).json({ error: 'Internal server error' }); }
 }

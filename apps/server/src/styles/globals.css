@@ -147,6 +147,32 @@ a {
 .text-\[var\(--colorOk\)\] { color: var(--colorOk); }
 .text-\[var\(--colorDanger\)\] { color: var(--colorDanger); }
 
+.routeProgress {
+  position: fixed;
+  top: 0;
+  left: var(--sidebarWidth);
+  right: 0;
+  height: 3px;
+  z-index: 1000;
+  background: linear-gradient(90deg, var(--colorPrimary), var(--colorAccent));
+  animation: routeProgress 0.9s ease-in-out infinite;
+}
+
+.routeLoadingCard {
+  margin-bottom: 16px;
+  border: 1px solid var(--borderSoft);
+  border-radius: 16px;
+  padding: 14px 16px;
+  color: var(--textSecondary);
+  background: var(--surfaceElevated);
+}
+
+@keyframes routeProgress {
+  0% { transform: scaleX(0.15); transform-origin: left; opacity: 0.65; }
+  50% { transform: scaleX(0.7); transform-origin: left; opacity: 1; }
+  100% { transform: scaleX(1); transform-origin: left; opacity: 0.35; }
+}
+
 @media (max-width: 1024px) {
   :root { --sidebarWidth: 200px; }
 }

@@ -5,7 +5,7 @@ import { getKbStats, getKbFiles, getKbFeatures, reindexKb, type KbStats, type Kb
 
 export function useKbStats() {
   const [stats, setStats] = useState<KbStats | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
     try { setStats(await getKbStats()); } catch { /* */ }
@@ -17,7 +17,7 @@ export function useKbStats() {
 
 export function useKbFiles(category?: string) {
   const [files, setFiles] = useState<KbFileItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
     try { const r = await getKbFiles({ category: category || undefined, limit: 200 }); setFiles(r.files || []); } catch { /* */ }

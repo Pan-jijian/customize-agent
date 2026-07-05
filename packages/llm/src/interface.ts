@@ -22,6 +22,30 @@ export interface ChatOptions {
   signal?: AbortSignal;
 }
 
+export interface ImageGenerationOptions {
+  size?: '1024x1024' | '1024x1536' | '1536x1024' | '1792x1024' | '1024x1792';
+  quality?: 'standard' | 'hd' | 'low' | 'medium' | 'high';
+  format?: 'png' | 'jpeg' | 'webp';
+  signal?: AbortSignal;
+}
+
+export interface ImageGenerationResult {
+  mimeType: string;
+  data: Buffer;
+  revisedPrompt?: string;
+}
+
+export interface FileUnderstandingInput {
+  name: string;
+  mimeType: string;
+  data: Buffer;
+}
+
+export interface FileUnderstandingOptions {
+  signal?: AbortSignal;
+  maxTokens?: number;
+}
+
 /**
  * LLM Provider 统一接口。
  * 所有模型提供商（DeepSeek, OpenAI, Anthropic 等）必须实现此接口。
@@ -52,6 +76,12 @@ export interface ILLMProvider {
 
   /** 单条查询向量化（可选） */
   embedQuery?(query: string): Promise<number[]>;
+
+  /** 图片生成（可选，多模态模型使用） */
+  generateImage?(prompt: string, options?: ImageGenerationOptions): Promise<ImageGenerationResult>;
+
+  /** 文件理解（可选，多模态模型使用） */
+  understandFiles?(files: FileUnderstandingInput[], prompt: string, options?: FileUnderstandingOptions): Promise<LLMResponse>;
 }
 
 /** 默认模型能力（未知 Provider 兜底使用） */

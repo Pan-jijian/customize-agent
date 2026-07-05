@@ -185,6 +185,9 @@ Web 控制台由 `@customize-agent/server` 提供，是 Next.js 应用。CLI 启
 | 模型配置 | `/models` |
 | Prompt 管理 | `/prompt` |
 | 设置 | `/settings` |
+| 生成编辑 | `/documents` |
+| 生成资源 | `/asset-library` |
+| 学习说明 | `/guide` |
 | 短期上下文 | `/context/short-term` |
 | 长期上下文 | `/context/long-term` |
 
@@ -201,6 +204,14 @@ pnpm --filter @customize-agent/server start
 ## 本地知识库
 
 知识库由 `@customize-agent/knowledge` 提供，默认使用本地 SQLite + sqlite-vec，不需要额外启动 Chroma、Qdrant 等外部向量数据库。
+
+文档生成链路支持基于文档规范包、文件角色和提示词角色形成动态事实 schema；文本、PDF/Word、Excel/CSV、图片、地图图纸和其他附件会被整理成结构化资源证据。生成任务以后台任务运行，前端通过 `documentId` 轮询并可恢复状态；生成记录和生成资源保存在：
+
+```text
+~/.customize-agent/projects/{projectId}/generatedDocuments
+```
+
+生成资源默认不进入知识库索引，用户可在 `/asset-library` 手动加入知识库。
 
 首次启动会在用户项目根目录创建：
 

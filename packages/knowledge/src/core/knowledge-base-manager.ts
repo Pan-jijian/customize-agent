@@ -63,7 +63,7 @@ export class KnowledgeBaseManager {
   private readonly relationshipDetector = new RelationshipDetector();
   private readonly embeddingProvider: EmbeddingProvider;
   private readonly vectorStores: Map<string, VectorStoreInterface>;
-  private readonly configManager = new ProjectConfigManager();
+  private readonly configManager: ProjectConfigManager;
   private projectConfig?: ProjectConfig;
   private lastSkippedFiles: DiffResult['skippedFiles'] = [];
   private readonly llmProvider?: LLMSearchProvider;
@@ -80,6 +80,7 @@ export class KnowledgeBaseManager {
     this.onProgress = options.onProgress;
 
     const storageRoot = options.storageRoot ?? path.join(os.homedir(), USER_DATA_DIR);
+    this.configManager = new ProjectConfigManager(storageRoot);
     let dbPath: string;
     if (this.scope === 'global') {
       this.kbPath = options.kbPath ?? path.join(storageRoot, GLOBAL_KNOWLEDGE_DIR);

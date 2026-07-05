@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppLocale, useAppTranslations } from '@/components/Layout';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/router';
 import { Card, Table, Button, Input, Select, Tag, Modal, Space, App, Progress, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { UploadOutlined, SearchOutlined, DeleteOutlined, FileTextOutlined } from '@ant-design/icons';
@@ -26,11 +26,12 @@ export default function FilesPage() {
   const t = useAppTranslations('knowledge');
   const { locale } = useAppLocale();
   const { message } = App.useApp();
-  const searchParams = useSearchParams();
-  const initialCategory = searchParams.get('category') || '';
+  const router = useRouter();
+  const initialCategory = typeof router.query.category === 'string' ? router.query.category : '';
 
   const [files, setFiles] = useState<KbFileItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [category, setCategory] = useState(initialCategory);
   const [uploading, setUploading] = useState(false);
@@ -40,15 +41,25 @@ export default function FilesPage() {
   const categoryRef = useRef(category);
 
   useEffect(() => { categoryRef.current = category; }, [category]);
+  useEffect(() => {
+    const nextCategory = typeof router.query.category === 'string' ? router.query.category : '';
+    setCategory(nextCategory);
+  }, [router.query.category]);
 
   const loadFiles = useCallback(async (cat?: string) => {
     const c = cat ?? categoryRef.current;
     setLoading(true);
+    setLoadError('');
     try {
       const r = await getKbFiles({ category: c || undefined, limit: 200 });
       setFiles(r.files || []);
-    } catch { setFiles([]); }
-    finally { setLoading(false); }
+      if (r.initializing) {
+        window.setTimeout(() => { void loadFiles(c); }, 1500);
+      }
+    } catch (error) {
+      setFiles([]);
+      setLoadError(error instanceof Error ? error.message : '文件列表加载失败');
+    } finally { setLoading(false); }
   }, []);
 
   useEffect(() => { void loadFiles(category); }, [category, loadFiles]);
@@ -190,7 +201,7 @@ export default function FilesPage() {
   const filtered = searchQuery ? files.filter((f) => f.relativePath.toLowerCase().includes(searchQuery.toLowerCase())) : files;
 
   const columns: ColumnsType<KbFileItem> = [
-    { title: t('fileName'), dataIndex: 'relativePath', key: 'name', render: (n: string) => <Space><FileTextOutlined /><Link className="truncate max-w-[400px] inline-block" href={`/knowledge/file-detail?relativePath=${encodeURIComponent(n)}`}>{n}</Link></Space> },
+    { title: t('fileName'), dataIndex: 'relativePath', key: 'name', render: (n: string, r: KbFileItem) => <Space><FileTextOutlined />{r.builtIn && <Tag color="gold">内置</Tag>}<Link className="truncate max-w-[400px] inline-block" href={`/knowledge/file-detail?relativePath=${encodeURIComponent(n)}`}>{n}</Link></Space> },
     { title: t('fileCategory'), dataIndex: 'category', key: 'cat', width: 120, render: (c: string) => <Tag>{categoryLabel(c, locale)}</Tag> },
     { title: t('fileSize'), dataIndex: 'fileSize', key: 'size', width: 100, render: (s: number) => formatBytes(s) },
     { title: '切片', dataIndex: 'chunkCount', key: 'chunks', width: 90, render: (n: number) => <Tag color={n > 1 ? 'green' : 'orange'}>{n}</Tag> },
@@ -243,8 +254,9 @@ export default function FilesPage() {
       </div>
 
       <Card>
+        {loadError && <div className={styles.statusEmpty}>文件列表加载失败：{loadError}</div>}
         <Table rowKey="relativePath" columns={columns} dataSource={filtered} loading={loading} size="middle"
-          locale={{ emptyText: searchQuery ? t('emptySearch') : t('noFiles') }}
+          locale={{ emptyText: loading ? '正在加载文件列表...' : searchQuery ? t('emptySearch') : t('noFiles') }}
           pagination={{ current: page, pageSize: 50, showSizeChanger: false, onChange: setPage }}
           rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }} />
       </Card>

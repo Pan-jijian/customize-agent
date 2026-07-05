@@ -41,10 +41,10 @@ async function createProjectPrompt(projectRoot: string) {
   return res.json();
 }
 
-async function createCustomPrompt() {
+async function createCustomPrompt(name = '自定义提示词') {
   const res = await fetch('/api/prompt', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'createCustom', name: '自定义提示词', content: '# 自定义提示词\n' }),
+    body: JSON.stringify({ action: 'createCustom', name, content: `# ${name}\n` }),
   });
   if (!res.ok) throw new Error('Failed');
   return res.json();
@@ -96,7 +96,11 @@ export default function PromptPage() {
   const handleCreate = async (p?: PromptProject) => {
     try {
       if (p?.projectRoot) await createProjectPrompt(p.projectRoot);
-      else await createCustomPrompt();
+      else {
+        const name = window.prompt('请输入自定义提示词名称', '自定义提示词')?.trim();
+        if (!name) return;
+        await createCustomPrompt(name);
+      }
       message.success(t('common.success'));
       await load();
     } catch { message.error(t('common.error')); }
@@ -149,8 +153,8 @@ export default function PromptPage() {
                   {p.hasFile && <Checkbox checked={p.selected} onChange={e => { void handleSelect(p, e.target.checked); }}>选中</Checkbox>}
                   {!p.hasFile && p.projectRoot && <Button size="small" type="text" icon={<PlusOutlined />} onClick={() => { void handleCreate(p); }} />}
                   {p.hasFile && <Button size="small" type="text" icon={<EditOutlined />} onClick={() => openEdit(p)} />}
-                  <Popconfirm title={p.source === 'custom' ? '删除自定义提示词？' : '删除项目记录及其提示词文件？'} onConfirm={() => { void handleDelete(p); }}>
-                    <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                  <Popconfirm title={p.source === 'custom' ? '删除自定义提示词？' : '删除项目记录及其提示词文件？'} disabled={p.id.startsWith('builtin:')} onConfirm={() => { void handleDelete(p); }}>
+                    <Button size="small" type="text" danger icon={<DeleteOutlined />} disabled={p.id.startsWith('builtin:')} />
                   </Popconfirm>
                 </span>
               }
@@ -164,7 +168,7 @@ export default function PromptPage() {
               <Space wrap>
                 {p.isCurrent && <Tag color="green">当前项目</Tag>}
                 {p.selected && <Tag color="purple">已选中</Tag>}
-                {p.source === 'custom' && <Tag color="cyan">自定义</Tag>}
+                {p.id.startsWith('builtin:') ? <Tag color="gold">内置</Tag> : p.source === 'custom' && <Tag color="cyan">自定义</Tag>}
                 {p.hasFile ? (
                   <Tag color="blue">{t('prompt.hasFile')}</Tag>
                 ) : (
@@ -190,6 +194,7 @@ export default function PromptPage() {
       )}
 
       <Modal
+        maskClosable={false}
         title={`${t('common.edit')} — ${editing?.projectName || ''}`}
         open={editOpen}
         width={800}

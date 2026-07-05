@@ -4,7 +4,6 @@ import { Command } from 'commander';
 import { execSync } from 'child_process';
 import { readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
-import { createServer } from 'net';
 import { createRequire } from 'module';
 import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
@@ -59,10 +58,13 @@ function registerCleanup() {
   // 进程退出时清理子进程（execSync 是同步的，满足 process.on('exit') 的要求）
   process.on('exit', cleanup);
 
-  // 终端关闭 / kill 信号时也触发清理
+  // 终端关闭 / Ctrl+C / kill 信号时也触发清理
   const signalHandler = () => { cleanup(); process.exit(0); };
   process.on('SIGHUP', signalHandler);
+  process.on('SIGINT', signalHandler);
   process.on('SIGTERM', signalHandler);
+  process.on('uncaughtException', error => { cleanup(); throw error; });
+  process.on('unhandledRejection', reason => { cleanup(); throw reason; });
 }
 
 async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
@@ -126,20 +128,7 @@ async function waitForDashboard(port: number, timeoutMs: number): Promise<boolea
   return false;
 }
 
-async function isPortAvailable(port: number): Promise<boolean> {
-  return new Promise(resolve => {
-    const server = createServer();
-    server.once('error', () => resolve(false));
-    server.once('listening', () => server.close(() => resolve(true)));
-    server.listen(port, '127.0.0.1');
-  });
-}
-
 async function resolveDashboardPort(preferredPort: number): Promise<number> {
-  if (process.env.CUSTOMIZE_DASHBOARD_PORT) return preferredPort;
-  for (let port = preferredPort; port < preferredPort + 50; port++) {
-    if (await isPortAvailable(port)) return port;
-  }
   return preferredPort;
 }
 
@@ -149,6 +138,12 @@ type DashboardStartResult =
 
 async function startDashboardInBackground(port: number): Promise<DashboardStartResult> {
   let logPath = '';
+  if (await waitForDashboard(port, 1000)) {
+    const { closeSync } = await import('fs');
+    const logFile = await dashboardLogFile(port);
+    closeSync(logFile.fd);
+    return { ready: true, port, url: `http://localhost:${port}/overview`, logPath: logFile.logPath };
+  }
   try {
     const { spawn } = await import('child_process');
     const { closeSync } = await import('fs');

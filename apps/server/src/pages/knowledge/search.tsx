@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { useState } from 'react';
-import { Card, Input, Button, Space, Tag, Empty, Typography, Spin, Descriptions, InputNumber } from 'antd';
+import { Card, Input, Button, Space, Tag, Empty, Typography, Spin, Descriptions, InputNumber, Alert } from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
 import { searchKb, type KbSearchResult } from '@/lib/api';
 import styles from './style.module.scss';
@@ -24,17 +24,22 @@ export default function KnowledgeSearchPage() {
   const [results, setResults] = useState<KbSearchResult[]>([]);
   const [queryTimeMs, setQueryTimeMs] = useState<number>();
   const [debug, setDebug] = useState<{ originalQuery?: string; rewrittenQueries?: string[]; weights?: Record<string, number>; recallCounts?: Record<string, number>; reranker?: string }>();
+  const [error, setError] = useState('');
   const [weights, setWeights] = useState({ keyword: 1, vector: 0.9, rewrite: 0.72, hybridBonus: 0.35 });
 
   const doSearch = async () => {
     const q = query.trim();
     if (!q) return;
     setLoading(true);
+    setError('');
     try {
       const data = await searchKb(q, { limit: 10, weights });
       setResults(data.results);
       setQueryTimeMs(data.queryTimeMs);
       setDebug(data.debug);
+    } catch (searchError) {
+      setResults([]);
+      setError(searchError instanceof Error ? searchError.message : '搜索失败');
     } finally {
       setLoading(false);
     }
@@ -74,6 +79,7 @@ export default function KnowledgeSearchPage() {
       </Card>}
 
       <Card size="small" title="搜索结果" extra={typeof queryTimeMs === 'number' ? `${queryTimeMs} ms` : undefined}>
+        {error ? <Alert type="error" showIcon message="搜索失败" description={error} className="mb-4" /> : null}
         {loading ? <Spin /> : results.length === 0 ? <Empty description="暂无结果" /> : <div className={styles.searchResultList}>
           {results.map(item => <div key={item.id} className={styles.searchResultItem}>
             <div className={styles.searchResultHeader}>

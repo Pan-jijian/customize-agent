@@ -645,7 +645,11 @@ export class IndexStateStore {
       );
     `);
     this.initFts();
-    this.setMetadata('schema_version', '2');
+    try {
+      if (this.getMetadata('schema_version') !== '2') this.setMetadata('schema_version', '2');
+    } catch {
+      // 受限环境中已有索引库可能以只读方式挂载；运行时元数据不是必需项。
+    }
   }
 
   private initFts(): void {

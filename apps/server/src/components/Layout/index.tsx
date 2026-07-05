@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/router';
 import { ThemeProvider as NextThemesProvider, useTheme } from 'next-themes';
 import { ConfigProvider, App } from 'antd';
 import { getAntdTheme } from '@/lib/antdTheme';
@@ -54,15 +55,30 @@ const MESSAGES: Record<string, Messages> = {
 
 function LayoutShell({ children }: { children: React.ReactNode }) {
   const { resolvedTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
+  const router = useRouter();
   const [locale, setLocaleState] = useState('zh-CN');
+  const [routeLoading, setRouteLoading] = useState(false);
   const isDark = resolvedTheme === 'dark';
   const messages = MESSAGES[locale] ?? MESSAGES['zh-CN'];
 
   useEffect(() => {
     setLocaleState(resolveLocaleFromCookie());
-    setMounted(true);
   }, []);
+
+  useEffect(() => {
+    const handleStart = (url: string) => {
+      if (url !== router.asPath) setRouteLoading(true);
+    };
+    const handleDone = () => setRouteLoading(false);
+    router.events.on('routeChangeStart', handleStart);
+    router.events.on('routeChangeComplete', handleDone);
+    router.events.on('routeChangeError', handleDone);
+    return () => {
+      router.events.off('routeChangeStart', handleStart);
+      router.events.off('routeChangeComplete', handleDone);
+      router.events.off('routeChangeError', handleDone);
+    };
+  }, [router.asPath, router.events]);
 
   const setLocale = useCallback((nextLocale: string) => {
     document.cookie = `NEXT_LOCALE=${nextLocale};path=/;max-age=31536000;samesite=lax`;
@@ -72,18 +88,18 @@ function LayoutShell({ children }: { children: React.ReactNode }) {
   const localeContext = useMemo(() => ({ locale, setLocale, messages }), [locale, setLocale, messages]);
   const theme = useMemo(() => getAntdTheme(isDark), [isDark]);
 
-  if (!mounted) {
-    return <div className="appShellPlaceholder" />;
-  }
-
   return (
     <LocaleContext.Provider value={localeContext}>
       <ConfigProvider theme={theme}>
         <App>
           <Sidebar />
           <div className="mainContent">
+            {routeLoading && <div className="routeProgress" />}
             <Header />
-            <main className="mainInner">{children}</main>
+            <main className="mainInner">
+              {routeLoading && <div className="routeLoadingCard">正在进入页面…</div>}
+              {children}
+            </main>
           </div>
         </App>
       </ConfigProvider>

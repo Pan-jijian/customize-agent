@@ -21,7 +21,7 @@ const stageCards = [
     icon: <RocketOutlined />,
     title: '生成阶段',
     color: 'geekblue',
-    items: ['创建模板', '执行生成', '查看执行状态'],
+    items: ['创建模板', '后台生成轮询', '动态执行状态'],
   },
   {
     icon: <SafetyCertificateOutlined />,
@@ -136,8 +136,9 @@ const operationSections = [
     path: '左侧菜单 → 生成编辑 → 选择模板 → 点击生成',
     steps: [
       '点击生成按钮后，页面会出现“执行状态”卡片。',
-      '执行状态按顺序展示：准备配置、事实抽取、章节生成、严格校验、正式排版、生成完成。',
-      '当前执行节点会高亮显示。',
+      '执行状态会根据当前模板、文档规范包、文件角色、提示词角色和章节自动生成，不是固定工程流程。',
+      '当前执行节点会高亮显示，子状态会展示正在处理的章节、事实字段、文件角色或门禁规则。',
+      '生成任务在后台运行，页面通过 documentId 轮询；切换页面后回到生成编辑仍可恢复状态。',
       '生成完成后，系统会用后端真实 executionStages 回填最终状态。',
       '如果导出门禁未通过，生成完成节点会提示需要检查校验结果。',
     ],
@@ -149,8 +150,8 @@ const operationSections = [
     goal: '确保文档可追溯、可校验、可交付。',
     path: '生成编辑 → 编辑器下方 Tabs → 导出按钮',
     steps: [
-      '查看“结构化事实”，确认工程名称、工期、质量目标、施工范围等是否正确。',
-      '查看“来源”，确认事实来自绑定资料。',
+      '查看“结构化事实”，确认事实字段是否按文档规范包动态 schema 抽取，并检查冲突提示。',
+      '查看“来源”，确认事实来自规范包要求的文件角色和绑定资料。',
       '查看“缺失项”，补齐缺失资料或调整角色配置。',
       '查看“严格校验”，处理 error 级问题。',
       '查看“导出门禁”，全部通过后再导出 PDF。',
@@ -229,6 +230,25 @@ export default function GuidePage() {
         </Card>
       </Col>
     </Row>
+
+    <Card title="动态 schema、证据和执行状态说明">
+      <Row gutter={[16, 16]}>
+        <Col xs={24} md={8}><Card size="small" title="动态事实 schema"><Paragraph>系统不会写死工程字段。文档规范包的事实字段、模板章节 requiredFacts、字段 sourceRoleIds 和 extractionHint 会共同组成抽取 schema，并驱动事实抽取、冲突检测和导出门禁。</Paragraph></Card></Col>
+        <Col xs={24} md={8}><Card size="small" title="结构化资源证据"><Paragraph>文本、PDF/Word、Excel/CSV、图片、地图图纸和其他附件都会被整理成资源证据，包含文件角色、处理类型、正文用途、关联事实和证据片段，模型据此理解资料关系。</Paragraph></Card></Col>
+        <Col xs={24} md={8}><Card size="small" title="动态执行状态"><Paragraph>生成编辑页的执行节点会随模板、规范包、文件角色、提示词角色、章节和门禁规则变化；用户生成不同项目文件时看到的是对应项目的流程，而不是固定示例流程。</Paragraph></Card></Col>
+      </Row>
+    </Card>
+
+    <Card title="文件角色处理类型大白话说明">
+      <Row gutter={[16, 16]}>
+        <Col xs={24} md={12}><Card size="small" title="规则文件"><Paragraph>用来告诉系统“必须怎么写、不能怎么写、按什么标准判断”。适合放评分办法、甲方编制要求、攻略写作要求、输出格式要求。生成时会优先作为约束使用。</Paragraph></Card></Col>
+        <Col xs={24} md={12}><Card size="small" title="项目事实文件"><Paragraph>用来告诉系统“真实情况是什么”。适合放项目概况、合同摘要、招标文件关键信息、游戏角色资料、产品资料。事实字段通常从这里抽取。</Paragraph></Card></Col>
+        <Col xs={24} md={12}><Card size="small" title="表格数据"><Paragraph>用来解析结构化数据。适合放 Excel、CSV、清单、计划表、评分表、推荐指数表。系统会读取 Sheet、表头、行列和来源范围。</Paragraph></Card></Col>
+        <Col xs={24} md={12}><Card size="small" title="图纸文件"><Paragraph>用来表达空间关系、路线、结构、站位或设计说明。可以是图纸目录、设计说明、路线示意、阵型图说明。没有 CAD 时也可以用文字图纸说明。</Paragraph></Card></Col>
+        <Col xs={24} md={12}><Card size="small" title="规范文件"><Paragraph>用来作为专业依据。适合放国家规范、行业标准、企业标准、攻略结构规范、质量标准。校验和生成时会把它当成依据。</Paragraph></Card></Col>
+        <Col xs={24} md={12}><Card size="small" title="参考资料"><Paragraph>只作为辅助阅读材料，不建议放关键事实。适合放图片来源、公开网页链接、背景资料、案例资料。系统可以参考，但不应把它当成强事实。</Paragraph></Card></Col>
+      </Row>
+    </Card>
 
     <Card title="推荐资料清单">
       <Row gutter={[16, 16]}>
