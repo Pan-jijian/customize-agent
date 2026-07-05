@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { tmpdir } from 'node:os';
 import { ExternalExtractorRegistry } from './external-extractor.js';
 import { resolveAndImport, resolvePackage, getNodeModulesRoot } from './module-resolver.js';
 import type { ClassifiedFile } from '../types.js';
@@ -30,12 +31,14 @@ export class ContentExtractor {
     };
 
     const external = this.tryExternalExtractor(file);
-    if (external) {
+    if (external?.text.trim()) {
       text = external.text;
       Object.assign(metadata, external.metadata);
       warnings.push(...external.warnings);
-    } else if (file.category === 'cad') {
-      const result = this.extractCad(file);
+    } else {
+      warnings.push(...(external?.warnings ?? []));
+      if (file.category === 'cad') {
+      const result = await this.extractCad(file);
       text = result.text;
       Object.assign(metadata, result.metadata);
       warnings.push(...result.warnings);
@@ -84,6 +87,11 @@ export class ContentExtractor {
       text = result.text;
       Object.assign(metadata, result.metadata);
       warnings.push(...result.warnings);
+    } else if (file.format === 'text_clipping') {
+      const result = this.extractTextClipping(file);
+      text = result.text;
+      Object.assign(metadata, result.metadata);
+      warnings.push(...result.warnings);
     } else if (this.isTextReadable(file)) {
       text = fs.readFileSync(file.absolutePath, 'utf8');
       metadata.extractionMode = 'plain_text';
@@ -95,6 +103,7 @@ export class ContentExtractor {
       metadata.vectorizable = true;
       metadata.contentCoverage = 'metadata';
       warnings.push(`暂不支持 ${file.category}/${file.format} 内容提取，未解析出正文，未入库`);
+    }
     }
 
     return {
@@ -134,13 +143,74 @@ export class ContentExtractor {
       }
     }
 
-    return undefined;
+    return warnings.length > 0 ? { text: '', metadata: {}, warnings } : undefined;
   }
 
-  private extractCad(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
+  private extractTextClipping(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
+    const buffer = fs.readFileSync(file.absolutePath);
+    const candidates = [
+      buffer.toString('utf16le'),
+      this.swapUtf16Bytes(buffer).toString('utf16le'),
+      buffer.toString('utf8'),
+      ...this.extractBinaryStrings(file.absolutePath),
+    ];
+    const fragments = candidates.flatMap(candidate => this.extractReadableFragments(candidate));
+    const unique = Array.from(new Set(fragments))
+      .filter(fragment => fragment.length >= 2 && !/^bplist\d+/u.test(fragment))
+      .sort((a, b) => this.textScore(b) - this.textScore(a))
+      .slice(0, 50);
+    const text = unique.join('\n');
+    return {
+      text: text ? [this.metadataOnlyText(file), text].join('\n') : this.metadataOnlyText(file),
+      metadata: {
+        extractionMode: 'builtin_text_clipping',
+        vectorizable: true,
+        contentCoverage: text ? 'text_clipping_payload' : 'metadata',
+        fragmentCount: unique.length,
+      },
+      warnings: text ? [] : ['未从 textClipping 中提取到剪贴文本，仅入库元数据'],
+    };
+  }
+
+  private swapUtf16Bytes(buffer: Buffer): Buffer {
+    const swapped = Buffer.from(buffer);
+    for (let i = 0; i + 1 < swapped.length; i += 2) {
+      const first = swapped[i] ?? 0;
+      swapped[i] = swapped[i + 1] ?? 0;
+      swapped[i + 1] = first;
+    }
+    return swapped;
+  }
+
+  private extractReadableFragments(value: string): string[] {
+    return value
+      .replace(/[^\p{L}\p{N}\p{P}\p{S}\s]/gu, '\n')
+      .split(/[\r\n]+/u)
+      .map(line => line.replace(/\s+/gu, ' ').trim())
+      .filter(line => line.length >= 2 && /[\p{L}\p{N}]/u.test(line));
+  }
+
+  private textScore(value: string): number {
+    const cjk = (value.match(/[\p{Script=Han}]/gu) ?? []).length;
+    const alnum = (value.match(/[\p{L}\p{N}]/gu) ?? []).length;
+    return cjk * 4 + alnum + Math.min(value.length, 200) / 20;
+  }
+
+  private async extractCad(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     const metadata: Record<string, unknown> = { extractionMode: 'builtin_cad_structural', vectorizable: true };
     const warnings: string[] = [];
     const ext = path.extname(file.absolutePath).toLowerCase();
+
+    if (ext === '.dxf') return await this.extractDxf(file, fs.readFileSync(file.absolutePath, 'utf8'), metadata);
+    if (ext === '.dwg') {
+      const converted = await this.tryConvertDwgToDxf(file.absolutePath);
+      if (converted?.dxfText) {
+        const parsed = await this.extractDxf(file, converted.dxfText, { ...metadata, extractionMode: converted.tool, convertedFrom: 'dwg' });
+        parsed.warnings.push(...converted.warnings);
+        return parsed;
+      }
+      warnings.push(...(converted?.warnings ?? ['未检测到可用 DWG→DXF 转换器，使用内置图纸可读文本抽取']));
+    }
 
     if (file.format === 'autocad' && ext === '.dxf') {
       const raw = fs.readFileSync(file.absolutePath, 'utf8');
@@ -221,16 +291,87 @@ export class ContentExtractor {
       if (result.text.trim()) return result;
     }
 
-    const binaryStrings = this.extractBinaryStrings(file.absolutePath).slice(0, 500);
-    metadata.extractionMode = 'builtin_cad_binary_strings';
-    metadata.contentCoverage = binaryStrings.length > 0 ? 'cad_binary_strings' : 'metadata';
-    metadata.stringCount = binaryStrings.length;
-    if (binaryStrings.length === 0) warnings.push(`${file.format} 内置 CAD 解析器未提取到可用文本，未入库`);
+    const readable = this.extractBinaryReadableFragments(file.absolutePath).slice(0, 800);
+    metadata.extractionMode = 'builtin_cad_readable_fragments';
+    metadata.contentCoverage = readable.length > 0 ? 'cad_readable_text_fragments' : 'metadata';
+    metadata.stringCount = readable.length;
+    if (readable.length === 0) warnings.push(`${file.format} 内置 CAD 解析器未提取到可用文本，仅记录文件元数据，未生成可检索正文切片`);
+    else warnings.push(`${file.format} 未检测到专业 DWG 转换器，已使用内置可读标注/标题块抽取；如需完整图纸结构，请安装 ODA File Converter 或 LibreDWG 并配置外部解析器`);
     return {
-      text: binaryStrings.length > 0 ? [this.metadataOnlyText(file), `CAD 二进制字符串/标题块:\n${binaryStrings.join('\n')}`].join('\n') : '',
+      text: readable.length > 0 ? [this.metadataOnlyText(file), `CAD 图纸可读标注/标题块/属性:\n${readable.join('\n')}`].join('\n') : this.metadataOnlyText(file),
       metadata,
       warnings,
     };
+  }
+
+  private async extractDxf(file: ClassifiedFile, raw: string, metadata: Record<string, unknown>): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
+    const warnings: string[] = [];
+    let parsed: unknown;
+    try {
+      const mod = await resolveAndImport('dxf-parser') as { default?: new () => { parseSync: (text: string) => unknown } } & (new () => { parseSync: (text: string) => unknown });
+      const Parser = mod.default ?? mod;
+      parsed = new Parser().parseSync(raw);
+    } catch {
+      warnings.push('dxf-parser 解析失败，已使用 DXF 文本结构抽取回退');
+    }
+
+    const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).slice(0, 300);
+    const textEntities = this.matchAll(raw, /\n\s*(?:1|3)\s*\n([^\n]+)/gu).slice(0, 800);
+    const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).slice(0, 300);
+    const entityTypes = this.matchAll(raw, /\n\s*0\s*\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1200);
+    const uniqueLayers = Array.from(new Set(layers));
+    const uniqueBlocks = Array.from(new Set(blocks));
+    const uniqueEntityTypes = Array.from(new Set(entityTypes));
+    metadata.layerCount = uniqueLayers.length;
+    metadata.layerNames = uniqueLayers.slice(0, 80);
+    metadata.textEntityCount = textEntities.length;
+    metadata.blockCount = uniqueBlocks.length;
+    metadata.blockNames = uniqueBlocks.slice(0, 80);
+    metadata.entityTypeCount = uniqueEntityTypes.length;
+    metadata.entityTypes = uniqueEntityTypes.slice(0, 80);
+    metadata.contentCoverage = 'dxf_layers_blocks_entities_text';
+    metadata.parsedByDxfParser = Boolean(parsed);
+    return {
+      text: [
+        this.metadataOnlyText(file),
+        `CAD DXF 图层: ${uniqueLayers.join(', ')}`,
+        `CAD DXF 块/符号: ${uniqueBlocks.join(', ')}`,
+        `CAD DXF 实体类型: ${uniqueEntityTypes.join(', ')}`,
+        `CAD DXF 标注/文本:\n${textEntities.join('\n')}`,
+      ].join('\n'),
+      metadata,
+      warnings,
+    };
+  }
+
+  private async tryConvertDwgToDxf(filePath: string): Promise<{ dxfText?: string; tool: string; warnings: string[] } | undefined> {
+    const tmpDir = fs.mkdtempSync(path.join(this.getTempRoot(), 'customize-dwg-'));
+    const outputPath = path.join(tmpDir, `${path.basename(filePath, path.extname(filePath))}.dxf`);
+    try {
+      const customCmd = process.env.CUSTOMIZE_DWG_TO_DXF_CMD;
+      if (customCmd) {
+        if (/\s/u.test(customCmd)) return { tool: 'external_dwg_to_dxf', warnings: ['CUSTOMIZE_DWG_TO_DXF_CMD 只支持可执行文件路径；参数请使用 CUSTOMIZE_DWG_TO_DXF_ARGS JSON 数组配置'] };
+        let argTemplate: unknown = ['{input}', '{output}'];
+        try { if (process.env.CUSTOMIZE_DWG_TO_DXF_ARGS) argTemplate = JSON.parse(process.env.CUSTOMIZE_DWG_TO_DXF_ARGS) as unknown; }
+        catch { return { tool: 'external_dwg_to_dxf', warnings: ['CUSTOMIZE_DWG_TO_DXF_ARGS 必须是字符串数组 JSON'] }; }
+        if (!Array.isArray(argTemplate) || !argTemplate.every(arg => typeof arg === 'string')) return { tool: 'external_dwg_to_dxf', warnings: ['CUSTOMIZE_DWG_TO_DXF_ARGS 必须是字符串数组 JSON'] };
+        const args = argTemplate.map(arg => arg.replace(/\{input\}/gu, filePath).replace(/\{output\}/gu, outputPath));
+        const result = spawnSync(customCmd, args, { shell: false, encoding: 'utf8', timeout: 120_000 });
+        if (result.status === 0 && fs.existsSync(outputPath)) return { dxfText: fs.readFileSync(outputPath, 'utf8'), tool: 'external_dwg_to_dxf', warnings: [] };
+        return { tool: 'external_dwg_to_dxf', warnings: [`CUSTOMIZE_DWG_TO_DXF_CMD 转换失败: ${result.stderr || result.stdout || result.error?.message || 'unknown error'}`] };
+      }
+
+      const failures: string[] = [];
+      for (const bin of ['dwgread', 'dwg2dxf']) {
+        const result = spawnSync(bin, bin === 'dwgread' ? ['-O', 'DXF', '-o', outputPath, filePath] : [filePath, outputPath], { encoding: 'utf8', timeout: 120_000 });
+        if (result.status === 0 && fs.existsSync(outputPath)) return { dxfText: fs.readFileSync(outputPath, 'utf8'), tool: bin, warnings: [] };
+        if (result.error && 'code' in result.error && result.error.code === 'ENOENT') continue;
+        failures.push(`${bin} 转换失败: ${result.stderr || result.stdout || result.error?.message || `exit ${result.status ?? 'unknown'}`}`);
+      }
+      return { tool: 'builtin_fallback', warnings: [...failures, failures.length ? 'DWG→DXF 转换失败，使用内置图纸可读文本抽取' : '未检测到可用 DWG→DXF 转换器（dwgread/dwg2dxf/CUSTOMIZE_DWG_TO_DXF_CMD），使用内置图纸可读文本抽取'] };
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   }
 
   private extractCadMesh(file: ClassifiedFile, ext: string, metadata: Record<string, unknown>): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
@@ -270,12 +411,26 @@ export class ContentExtractor {
     return { text: binaryStrings.length > 0 ? [this.metadataOnlyText(file), `Mesh 二进制字符串:\n${binaryStrings.join('\n')}`].join('\n') : '', metadata, warnings };
   }
 
-  private extractBinaryStrings(filePath: string): string[] {
+  private getTempRoot(): string {
+    return process.env.CUSTOMIZE_TMPDIR || process.env.TMPDIR || tmpdir();
+  }
+
+  private extractBinaryReadableFragments(filePath: string): string[] {
     const buffer = fs.readFileSync(filePath);
-    const raw = buffer.toString('latin1');
-    return Array.from(raw.matchAll(/[A-Za-z0-9_ .:\-/\\\u4e00-\u9fa5]{4,}/gu), match => match[0].trim())
-      .filter(value => value.length >= 4 && !/^\d+$/u.test(value))
+    const candidates = [
+      buffer.toString('utf8'),
+      buffer.toString('utf16le'),
+      this.swapUtf16Bytes(buffer).toString('utf16le'),
+      buffer.toString('latin1'),
+    ];
+    return Array.from(new Set(candidates.flatMap(candidate => this.extractReadableFragments(candidate))))
+      .filter(value => value.length >= 3 && !/^\d+$/u.test(value))
+      .sort((a, b) => this.textScore(b) - this.textScore(a))
       .slice(0, 2_000);
+  }
+
+  private extractBinaryStrings(filePath: string): string[] {
+    return this.extractBinaryReadableFragments(filePath);
   }
 
   private extractData(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
@@ -396,7 +551,11 @@ export class ContentExtractor {
   }
 
   private async extractOfficeDocument(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
-    if (path.extname(file.absolutePath).toLowerCase() === '.docx') {
+    const ext = path.extname(file.absolutePath).toLowerCase();
+    if (ext === '.rtf') return this.extractRtf(file);
+    if (ext === '.doc') return this.extractLegacyWordDocument(file);
+    if (ext === '.ppt') return this.extractLegacyOfficeBinary(file);
+    if (ext === '.docx') {
       try {
         const mammoth = await resolveAndImport('mammoth') as any;
         const result = await mammoth.extractRawText({ path: file.absolutePath });
@@ -415,7 +574,56 @@ export class ContentExtractor {
     return this.extractOfficeZip(file);
   }
 
+  private extractRtf(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
+    const raw = fs.readFileSync(file.absolutePath, 'utf8');
+    const text = raw
+      .replace(/\\'[0-9a-fA-F]{2}/gu, ' ')
+      .replace(/\\[a-zA-Z]+-?\d* ?/gu, ' ')
+      .replace(/[{}]/gu, ' ')
+      .replace(/\s+/gu, ' ')
+      .trim();
+    return {
+      text,
+      metadata: { extractionMode: 'builtin_rtf_text', vectorizable: true, contentCoverage: 'rtf_text' },
+      warnings: text ? [] : ['RTF 解析未提取到正文，未入库'],
+    };
+  }
+
+  private async extractLegacyWordDocument(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
+    const warnings: string[] = [];
+    try {
+      const mod = await resolveAndImport('word-extractor') as { default?: new () => { extract: (path: string) => Promise<{ getBody: () => string }> } } & (new () => { extract: (path: string) => Promise<{ getBody: () => string }> });
+      const WordExtractor = mod.default ?? mod;
+      const document = await new WordExtractor().extract(file.absolutePath);
+      const text = document.getBody().trim();
+      if (text) {
+        return {
+          text,
+          metadata: { extractionMode: 'builtin_word_extractor', vectorizable: true, contentCoverage: 'legacy_word_full_text', textLength: text.length },
+          warnings: [],
+        };
+      }
+      warnings.push('word-extractor 未提取到正文，已降级为二进制可读文本抽取');
+    } catch (error) {
+      warnings.push(`word-extractor 解析失败，已降级为二进制可读文本抽取: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const fallback = this.extractLegacyOfficeBinary(file);
+    fallback.warnings.unshift(...warnings);
+    return fallback;
+  }
+
+  private extractLegacyOfficeBinary(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
+    const strings = this.extractBinaryStrings(file.absolutePath).slice(0, 1_000);
+    const text = strings.join('\n').trim();
+    return {
+      text,
+      metadata: { extractionMode: 'builtin_legacy_office_binary_strings', vectorizable: true, contentCoverage: 'legacy_office_binary_strings', stringCount: strings.length },
+      warnings: text ? [] : ['旧版 Office 二进制文件未提取到正文，未入库'],
+    };
+  }
+
   private async extractSpreadsheet(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
+    const ext = path.extname(file.absolutePath).toLowerCase();
     try {
       const XLSX = await resolveAndImport('xlsx') as any;
       const workbook = XLSX.readFile(file.absolutePath, { cellDates: true, cellFormula: true, cellNF: true, cellStyles: true });
@@ -457,8 +665,10 @@ export class ContentExtractor {
         };
       }
     } catch {
+      if (ext === '.xls') return this.extractLegacyOfficeBinary(file);
       // fallback below
     }
+    if (ext === '.xls') return this.extractLegacyOfficeBinary(file);
     return this.extractOfficeZip(file);
   }
 
@@ -476,12 +686,13 @@ export class ContentExtractor {
         if (stripped) texts.push(`${entry.name}: ${stripped.slice(0, 8_000)}`);
       }
       metadata.entryCount = Object.keys(zip.files).length;
-      metadata.contentCoverage = texts.length > 0 ? 'office_zip_xml_text' : 'metadata_filename';
-      return { text: [this.metadataOnlyText(file), ...texts].join('\n'), metadata, warnings: texts.length ? [] : ['未从 Office 压缩结构中提取到正文，已跳过入库'] };
+      metadata.contentCoverage = texts.length > 0 ? 'office_zip_xml_text' : 'office_zip_empty_text';
+      return { text: texts.join('\n'), metadata, warnings: texts.length ? [] : ['Office/表格/演示文件未提取到正文，未入库'] };
     } catch (error) {
       metadata.extractionMode = 'office_zip_failed';
       metadata.parseError = error instanceof Error ? error.message : String(error);
-      return { text: '', metadata, warnings: ['Office/表格/演示文件解析失败，内置解析器未提取到正文，未入库'] };
+      metadata.contentCoverage = 'office_zip_failed';
+      return { text: '', metadata, warnings: [`Office/表格/演示文件解析失败: ${metadata.parseError}，未入库`] };
     }
   }
 

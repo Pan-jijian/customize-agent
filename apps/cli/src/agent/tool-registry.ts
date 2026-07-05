@@ -16,6 +16,8 @@ import {
   type McpServerConfig,
 } from '@customize-agent/engine';
 import { ToolKit, SandboxExecutor, BuiltinTools } from '@customize-agent/tools';
+import * as fs from 'node:fs/promises';
+import * as nodePath from 'node:path';
 import { LSPManager, CodeSearcher } from '@customize-agent/search';
 import { BINARY_EXTENSIONS } from '@customize-agent/types';
 import { MultiProjectManager, type LLMSearchProvider } from '@customize-agent/knowledge';
@@ -63,6 +65,22 @@ export async function connectConfiguredMcp(registry: ToolRegistry, root: string)
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+}
+
+async function writeTempCodeFile(command: string, context?: ToolExecutionContext): Promise<string | undefined> {
+  const match = command.match(/^(python3?|node)\s+-[ce]\s+(["'])([\s\S]*)\2\s*$/u);
+  if (!match) return undefined;
+  const runtime = match[1] ?? 'node';
+  const code = match[3] ?? '';
+  const ctx = context as (ToolExecutionContext & { tempDir?: string; tempFiles?: string[] }) | undefined;
+  const dir = ctx?.tempDir ?? await fs.mkdtemp(nodePath.join(os.tmpdir(), 'customize-agent-task-'));
+  if (ctx) ctx.tempDir = dir;
+  await fs.mkdir(dir, { recursive: true });
+  const ext = runtime.startsWith('python') ? 'py' : 'mjs';
+  const filePath = nodePath.join(dir, `inline-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
+  await fs.writeFile(filePath, code, 'utf8');
+  ctx?.tempFiles?.push(filePath);
+  return runtime.startsWith('python') ? `python3 ${JSON.stringify(filePath)}` : `node ${JSON.stringify(filePath)}`;
 }
 
 function reg(
@@ -271,9 +289,11 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
     capabilities: ['execute_command'],
     handler: async (args: Record<string, unknown>, context?: ToolExecutionContext) => {
       const cmd = String(args.input);
-      const isCode = cmd.startsWith('python3 -c') || cmd.startsWith('python -c') || cmd.startsWith('node -e');
+      const tempCommand = await writeTempCodeFile(cmd, context);
+      const commandToRun = tempCommand ?? cmd;
+      const isCode = tempCommand !== undefined;
       const executor = isCode ? new SandboxExecutor('docker', root) : null;
-      const result = executor ? await executor.execute(cmd, undefined, true, context?.signal) : await toolkit.terminal.executeCommand(cmd, true, context?.signal);
+      const result = executor ? await executor.execute(commandToRun, undefined, true, context?.signal) : await toolkit.terminal.executeCommand(commandToRun, true, context?.signal);
       const out: string[] = [];
       if (result.stdout) out.push(result.stdout.trimEnd());
       if (result.stderr) out.push(`[Stderr]\n${result.stderr.trimEnd()}`);

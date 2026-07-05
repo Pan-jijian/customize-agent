@@ -9,6 +9,8 @@ export interface JSONSchema {
 /** 已注册的工具描述 */
 export interface ToolExecutionContext {
   signal?: AbortSignal;
+  tempDir?: string;
+  tempFiles?: string[];
 }
 
 export interface RegisteredTool {

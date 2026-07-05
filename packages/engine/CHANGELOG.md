@@ -1,5 +1,38 @@
 # @customize-agent/engine
 
+## 3.0.2
+
+### Patch Changes
+
+- Patch release 3.0.2.
+- Updated dependencies
+  - @customize-agent/llm@3.0.2
+  - @customize-agent/tools@3.0.2
+  - @customize-agent/types@3.0.2
+
+## 3.0.1
+
+### Patch Changes
+
+- Patch release 3.0.1.
+- Updated dependencies
+  - @customize-agent/llm@3.0.1
+  - @customize-agent/tools@3.0.1
+  - @customize-agent/types@3.0.1
+
+## 3.0.0
+
+### Major Changes
+
+- Release 3.0.0 with updated CLI, web management, knowledge base, prompt, and tool execution behavior.
+
+### Patch Changes
+
+- Updated dependencies
+  - @customize-agent/llm@3.0.0
+  - @customize-agent/tools@3.0.0
+  - @customize-agent/types@3.0.0
+
 ## 2.1.5
 
 ### Patch Changes

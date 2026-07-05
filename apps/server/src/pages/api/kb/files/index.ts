@@ -11,13 +11,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const project = await getMultiProjectManager().getProject(projectRoot);
 
     if (req.method === 'DELETE') {
-      const { relativePath } = req.body;
-      if (!relativePath) return res.status(400).json({ error: 'relativePath is required' });
+      const { relativePath, relativePaths, all } = req.body;
+      const targets = all ? project.listFiles().map(file => file.relativePath) : Array.isArray(relativePaths) ? relativePaths.map(String) : relativePath ? [String(relativePath)] : [];
+      if (targets.length === 0) return res.status(400).json({ error: 'relativePath or relativePaths is required' });
       const operationId = `delete-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      upsertKbOperation(projectRoot, { id: operationId, type: 'delete', title: `删除 ${relativePath}`, stage: 'uploading', status: 'processing', percent: 10, message: '正在删除文件和索引', filePath: relativePath, fileName: String(relativePath).split('/').pop() });
-      await project.removeFile(relativePath);
-      upsertKbOperation(projectRoot, { id: operationId, type: 'delete', title: `删除 ${relativePath}`, stage: 'done', status: 'success', percent: 100, message: '文件和索引已删除', filePath: relativePath, fileName: String(relativePath).split('/').pop() });
-      return res.status(200).json({ success: true });
+      const title = all ? `删除全部 ${targets.length} 个文件` : targets.length === 1 ? `删除 ${targets[0]}` : `批量删除 ${targets.length} 个文件`;
+      upsertKbOperation(projectRoot, { id: operationId, type: 'delete', title, stage: 'uploading', status: 'processing', percent: 10, message: '正在删除文件和索引', filePath: targets[0], fileName: targets[0]?.split('/').pop() });
+      let deleted = 0;
+      for (const target of targets) {
+        await project.removeFile(target);
+        deleted++;
+        upsertKbOperation(projectRoot, { id: operationId, type: 'delete', title, stage: 'uploading', status: 'processing', percent: Math.min(95, Math.round((deleted / targets.length) * 90)), message: `已删除 ${deleted}/${targets.length}`, filePath: target, fileName: target.split('/').pop() });
+      }
+      upsertKbOperation(projectRoot, { id: operationId, type: 'delete', title, stage: 'done', status: 'success', percent: 100, message: `已删除 ${deleted} 个文件和索引`, filePath: targets[0], fileName: targets[0]?.split('/').pop() });
+      return res.status(200).json({ success: true, deleted });
     }
 
     const category = req.query.category as string | undefined;

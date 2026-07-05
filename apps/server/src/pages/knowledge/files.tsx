@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppLocale, useAppTranslations } from '@/components/Layout';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { Card, Table, Button, Input, Select, Tag, Modal, Space, Upload, App, Progress } from 'antd';
+import { Card, Table, Button, Input, Select, Tag, Modal, Space, App, Progress, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { UploadOutlined, SearchOutlined, DeleteOutlined, FileTextOutlined } from '@ant-design/icons';
-import { getKbFiles, getKbOperations, getKbUploadProgress, deleteKbFile, uploadKbFile, reindexKb, type KbFileItem, type KbOperationRecord } from '@/lib/api';
+import { getKbFiles, getKbOperations, getKbUploadProgress, deleteKbFile, deleteKbFiles, deleteAllKbFiles, uploadKbFiles, reindexKb, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
@@ -85,17 +85,19 @@ export default function FilesPage() {
     };
   };
 
-  const handleUpload = async (file: File) => {
+  const handleUpload = async (uploadFilesList: File[]) => {
+    if (uploadFilesList.length === 0) return;
+    const titleName = uploadFilesList.length === 1 ? uploadFilesList[0]!.name : `${uploadFilesList.length} 个文件`;
     setUploading(true);
-    setStatusItems(items => [{ type: 'upload', title: `上传 ${file.name}`, description: '等待上传、解析、切片和入库', status: 'processing', percent: 10 } satisfies StatusItem, ...items].slice(0, 50));
+    setStatusItems(items => [{ type: 'upload', title: `上传 ${titleName}`, description: '等待上传、解析、切片和入库', status: 'processing', percent: 10 } satisfies StatusItem, ...items].slice(0, 50));
     const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const poll = setInterval(() => {
       void getKbUploadProgress(uploadId).then(progress => {
-        setStatusItems(items => [{ type: 'upload', title: `上传 ${file.name}`, description: `${progress.message}${progress.chunkCount ? `，${progress.chunkCount} 个切片` : ''}`, status: progress.stage === 'error' ? 'warning' : 'processing', percent: progress.percent } satisfies StatusItem, ...items.filter(item => item.title !== `上传 ${file.name}`)].slice(0, 50));
+        setStatusItems(items => [{ type: 'upload', title: `上传 ${titleName}`, description: `${progress.message}${progress.chunkCount ? `，${progress.chunkCount} 个切片` : ''}`, status: progress.stage === 'error' ? 'warning' : 'processing', percent: progress.percent } satisfies StatusItem, ...items.filter(item => item.title !== `上传 ${titleName}`)].slice(0, 50));
       }).catch(() => undefined);
     }, 500);
     try {
-      const result = await uploadKbFile(file, undefined, uploadId);
+      const result = await uploadKbFiles(uploadFilesList, undefined, uploadId);
       clearInterval(poll);
       if (result.vectorStatus?.status === 'error') message.info('文件已上传，正在后台入库');
       else message.success('上传成功');
@@ -104,19 +106,19 @@ export default function FilesPage() {
       setSelectedRowKeys([]);
       setPage(1);
       categoryRef.current = '';
-      const uploaded = result.files?.find(item => item.relativePath === result.relativePath);
+      const uploaded = result.files?.find((item: KbFileItem) => item.relativePath === result.relativePath);
       const meta = fileMeta(uploaded);
       await loadOperations();
       setStatusItems(items => [{
         type: 'upload',
-        title: `上传完成 ${file.name}`,
-        description: uploaded ? '解析、分块和入库流程已完成' : '文件已上传',
-        status: uploaded?.chunkCount === 1 ? 'warning' : 'success',
+        title: `上传完成 ${titleName}`,
+        description: '解析、分块和入库流程已完成',
+        status: 'success',
         filePath: uploaded?.relativePath,
         chunkCount: uploaded?.chunkCount,
         textLength: meta.textLength,
         extractionMode: meta.extractionMode,
-      } satisfies StatusItem, ...items.filter(item => item.title !== `上传 ${file.name}`)].slice(0, 50));
+      } satisfies StatusItem, ...items.filter(item => item.title !== `上传 ${titleName}`)].slice(0, 50));
       if (Array.isArray(result.files)) {
         setFiles(result.files);
       } else {
@@ -124,9 +126,8 @@ export default function FilesPage() {
         await loadFiles('');
         await loadOperations();
       }
-    } catch { message.error('上传失败'); setStatusItems(items => [{ type: 'error', title: `上传失败 ${file.name}`, description: '请重试或检查文件格式', status: 'error' } satisfies StatusItem, ...items].slice(0, 50)); }
+    } catch { message.error('上传失败'); setStatusItems(items => [{ type: 'error', title: `上传失败 ${titleName}`, description: '请重试或检查文件格式', status: 'error' } satisfies StatusItem, ...items].slice(0, 50)); }
     finally { clearInterval(poll); setUploading(false); }
-    return false;
   };
 
   const handleDelete = (record: KbFileItem) => {
@@ -139,10 +140,39 @@ export default function FilesPage() {
           await deleteKbFile(record.relativePath);
           message.success('已删除');
           setStatusItems(items => [{ type: 'delete', title: `删除完成 ${record.relativePath}`, description: '文件和索引记录已移除', status: 'success' } satisfies StatusItem, ...items].slice(0, 50));
+          setSelectedRowKeys(keys => keys.filter(key => key !== record.relativePath));
           await loadFiles();
           await loadOperations();
         }
         catch { message.error('删除失败'); setStatusItems(items => [{ type: 'error', title: `删除失败 ${record.relativePath}`, description: '请重试', status: 'error' } satisfies StatusItem, ...items].slice(0, 50)); }
+      },
+    });
+  };
+
+  const handleBulkDelete = (mode: 'selected' | 'filtered' | 'all') => {
+    const targets = mode === 'selected' ? selectedRowKeys.map(String) : mode === 'filtered' ? filtered.map(file => file.relativePath) : [];
+    if (mode !== 'all' && targets.length === 0) return;
+    const title = mode === 'all' ? '删除全部文件？' : mode === 'filtered' ? `删除当前筛选结果 ${targets.length} 个文件？` : `删除已选 ${targets.length} 个文件？`;
+    Modal.confirm({
+      title,
+      content: '将同时删除文件、切片、索引和向量记录。此操作不可撤销。',
+      okText: '确认删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setStatusItems(items => [{ type: 'delete', title, description: '正在批量删除文件和索引', status: 'processing', percent: 10 } satisfies StatusItem, ...items].slice(0, 50));
+        try {
+          const result = mode === 'all' ? await deleteAllKbFiles() : await deleteKbFiles(targets);
+          const deletedCount = result.deleted ?? targets.length;
+          message.success(`已删除 ${deletedCount} 个文件`);
+          setSelectedRowKeys([]);
+          setStatusItems(items => [{ type: 'delete', title: '批量删除完成', description: `已删除 ${deletedCount} 个文件、切片和索引`, status: 'success' } satisfies StatusItem, ...items].slice(0, 50));
+          await loadFiles();
+          await loadOperations();
+        } catch {
+          message.error('批量删除失败');
+          setStatusItems(items => [{ type: 'error', title: '批量删除失败', description: '请重试', status: 'error' } satisfies StatusItem, ...items].slice(0, 50));
+        }
       },
     });
   };
@@ -167,23 +197,31 @@ export default function FilesPage() {
         <Input placeholder={t('searchPlaceholder')} prefix={<SearchOutlined />} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }} allowClear className={styles.filterInput} />
         <Select value={category || undefined} onChange={(v) => { setCategory(v || ''); setPage(1); }} placeholder={t('filterCategory')} allowClear className={styles.filterSelect}
           options={[{ label: t('allCategories'), value: '' }, ...CATEGORIES.map((c) => ({ label: categoryLabel(c, locale), value: c }))]} />
-        <Upload showUploadList={false} beforeUpload={(f) => { void handleUpload(f); return false; }}>
-          <Button type="primary" icon={<UploadOutlined />} loading={uploading}>{uploading ? t('uploading') : t('upload')}</Button>
-        </Upload>
+        <Button type="primary" icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-file-upload-input')?.click()}>{uploading ? t('uploading') : t('upload')}</Button>
+        <Button icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-folder-upload-input')?.click()}>上传文件夹</Button>
+        <Button danger disabled={selectedRowKeys.length === 0} icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')}>删除已选 {selectedRowKeys.length || ''}</Button>
+        <Button danger disabled={filtered.length === 0 || (!searchQuery && !category)} onClick={() => handleBulkDelete('filtered')}>删除筛选结果</Button>
+        <Button danger disabled={files.length === 0} onClick={() => handleBulkDelete('all')}>删除全部</Button>
+        <input id="kb-file-upload-input" type="file" multiple hidden onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
+        <input id="kb-folder-upload-input" type="file" multiple hidden {...{ webkitdirectory: '' }} onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
       </div>
 
-      <Card size="small" className={styles.statusCard} title={<Space><FileTextOutlined />文件任务状态</Space>}>
-        {statusItems.length === 0 ? <div className={styles.statusEmpty}>暂无文件任务。上传、删除、解析、分块和入库结果会显示在这里。</div> : <div className={styles.statusList}>
+      <div className={styles.statusPanel}>
+        <div className={styles.statusPanelHeader}>
+          <Space><FileTextOutlined />文件任务状态</Space>
+          <Button size="small" type="text" disabled={statusItems.length === 0} onClick={() => setStatusItems([])}>清空</Button>
+        </div>
+        {statusItems.length === 0 ? <div className={styles.statusEmpty}>暂无文件任务。</div> : <div className={styles.statusList}>
           {statusItems.map((item, index) => <div key={`${item.title}-${index}`} className={styles.statusItem}>
             <div className={styles.statusHeader}>
               <Space size={8} wrap>
                 <Tag color={item.status === 'success' ? 'green' : item.status === 'error' ? 'red' : item.status === 'warning' ? 'orange' : 'blue'}>{item.type === 'upload' ? '上传' : item.type === 'delete' ? '删除' : item.type === 'reindex' ? '重建' : '失败'}</Tag>
-                <strong>{item.title}</strong>
+                <Tooltip title={item.title}><strong>{item.title}</strong></Tooltip>
               </Space>
               <Tag color={item.status === 'success' ? 'success' : item.status === 'processing' ? 'processing' : item.status === 'warning' ? 'warning' : 'error'}>{item.status === 'success' ? '完成' : item.status === 'processing' ? '处理中' : item.status === 'warning' ? '需关注' : '失败'}</Tag>
             </div>
-            <div className={styles.statusDesc}>{item.description}</div>
-            {item.filePath && <div className={styles.statusPath}>{item.filePath}</div>}
+            <Tooltip title={item.description}><div className={styles.statusDesc}>{item.description}</div></Tooltip>
+            {item.filePath && <Tooltip title={item.filePath}><div className={styles.statusPath}>{item.filePath}</div></Tooltip>}
             <div className={styles.statusMeta}>
               {typeof item.chunkCount === 'number' && <span>切片 <b>{item.chunkCount}</b></span>}
               {typeof item.textLength === 'number' && <span>正文 <b>{item.textLength.toLocaleString(locale)}</b> 字符</span>}
@@ -192,7 +230,7 @@ export default function FilesPage() {
             {typeof item.percent === 'number' && item.status === 'processing' && <Progress percent={item.percent} size="small" />}
           </div>)}
         </div>}
-      </Card>
+      </div>
 
       <Card>
         <Table rowKey="relativePath" columns={columns} dataSource={filtered} loading={loading} size="middle"

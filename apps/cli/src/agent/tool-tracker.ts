@@ -8,7 +8,8 @@ export class ToolPreviewTracker {
   private previewed = new Set<string>();
 
   private keys(tc: ToolCall): string[] {
-    return [tc.name, tc.id].filter(Boolean) as string[];
+    if (tc.id) return [tc.id];
+    return [`${tc.name}:${JSON.stringify(tc.arguments ?? {})}`];
   }
 
   wasPreviewed(tc: ToolCall): boolean {
@@ -54,11 +55,13 @@ export class ToolFoldTracker {
 
   /** 为工具调用推进折叠状态 */
   push(tc: ToolCall, skipStartRender: boolean, previewElapsedMs: number): void {
+    const arg = this.formatArg(tc.arguments);
     if (tc.name === this.foldType) {
+      const lastArg = this.foldArgs[this.foldArgs.length - 1];
       this.foldCount++;
-      this.foldArgs.push(this.formatArg(tc.arguments));
+      if (lastArg !== arg) this.foldArgs.push(arg);
       if (this.stream && !skipStartRender) {
-        const line = toolCallFolding(tc.name, this.foldCount, this.foldArgs[this.foldArgs.length - 1]!, Date.now() - this.foldStartMs, this.toolLabel(tc.name), this.toolsLabel);
+        const line = toolCallFolding(tc.name, this.foldCount, arg, Date.now() - this.foldStartMs, this.toolLabel(tc.name), this.toolsLabel);
         if (this.setLiveStatus) this.setLiveStatus(line);
         else this.write(line);
       }
@@ -66,12 +69,12 @@ export class ToolFoldTracker {
       this.flush();
       this.foldType = tc.name;
       this.foldCount = 1;
-      this.foldArgs = [this.formatArg(tc.arguments)];
+      this.foldArgs = [arg];
       this.foldTotalMs = 0;
       this.foldDiff = '';
       this.foldStartMs = Date.now();
       if (this.stream && !skipStartRender) {
-        const line = toolCallFolding(tc.name, 1, this.foldArgs[0]!, previewElapsedMs, this.toolLabel(tc.name), this.toolsLabel);
+        const line = toolCallFolding(tc.name, 1, arg, previewElapsedMs, this.toolLabel(tc.name), this.toolsLabel);
         if (this.setLiveStatus) this.setLiveStatus(line);
         else this.write(line);
       }

@@ -10,7 +10,9 @@ import { streamChat } from './stream-chat.js';
 import { truncateToolResult } from './tool-result.js';
 import { ToolPreviewTracker, ToolFoldTracker } from './tool-tracker.js';
 import { readFileSync, existsSync } from 'fs';
-import { resolve } from 'path';
+import { rm } from 'node:fs/promises';
+import { resolve, join, normalize } from 'path';
+import { homedir } from 'os';
 import type { ApprovalHandler } from './approval.js';
 
 export type AgentEvent =
@@ -88,9 +90,38 @@ export class AgentExecutor {
   }
 
   getSystemPrompt(): string {
-    const customizePath = resolve(this.projectRoot, 'CUSTOMIZE.md');
-    const content = existsSync(customizePath) ? readFileSync(customizePath, 'utf-8') : undefined;
-    return buildSystemPrompt(content, this.repoMap);
+    const currentCustomizePath = resolve(this.projectRoot, 'CUSTOMIZE.md');
+    const currentId = `file:${normalize(currentCustomizePath)}`;
+    const promptConfigPath = join(homedir(), '.customize-agent', 'prompts.json');
+    const selectedContent = (() => {
+      const parts: string[] = [];
+      const seen = new Set<string>();
+      const addFile = (filePath: string) => {
+        const normalized = normalize(filePath);
+        if (seen.has(`file:${normalized}`) || !existsSync(normalized)) return;
+        seen.add(`file:${normalized}`);
+        parts.push(readFileSync(normalized, 'utf-8'));
+      };
+      try {
+        const config = JSON.parse(readFileSync(promptConfigPath, 'utf-8')) as { selectedIds?: unknown; customPrompts?: Array<{ id?: string; name?: string; content?: string }> };
+        const selectedIds = Array.isArray(config.selectedIds) ? config.selectedIds.map(String) : [currentId];
+        const customPrompts = Array.isArray(config.customPrompts) ? config.customPrompts : [];
+        for (const id of selectedIds) {
+          if (id.startsWith('file:')) addFile(id.slice(5));
+          else if (id.startsWith('custom:') && !seen.has(id)) {
+            const custom = customPrompts.find(item => item.id === id);
+            if (custom?.content?.trim()) {
+              seen.add(id);
+              parts.push(`# ${custom.name || '自定义提示词'}\n\n${custom.content}`);
+            }
+          }
+        }
+      } catch {
+        addFile(currentCustomizePath);
+      }
+      return parts.join('\n\n---\n\n');
+    })();
+    return buildSystemPrompt(selectedContent, this.repoMap);
   }
   get providerName(): string { return `${this.provider.name}/${this.provider.modelName}`; }
 
@@ -125,6 +156,15 @@ export class AgentExecutor {
     this.onEvent?.(event);
   }
 
+  private _ensureSystemPrompt(messages: Message[]): Message[] {
+    const systemPrompt = this.getSystemPrompt();
+    if (messages[0]?.role === 'system') {
+      if (messages[0].content.includes('最高优先级项目规则')) return [{ ...messages[0], content: systemPrompt }, ...messages.slice(1)];
+      return [{ ...messages[0], content: `${systemPrompt}\n\n---\n\n${messages[0].content}` }, ...messages.slice(1)];
+    }
+    return [{ role: 'system', content: systemPrompt }, ...messages];
+  }
+
   /** 最后一次 LLM 调用消耗的 prompt token 数 */
   private _lastPromptTokens = 0;
 
@@ -147,13 +187,20 @@ export class AgentExecutor {
   async runTask(messages: Message[], options?: RunTaskOptions): Promise<Message[]> {
     if (options?.plan) return this._runPlanTask(messages, options);
 
-    const working = [...messages];
+    const working = this._ensureSystemPrompt([...messages]);
     const readonly = options?.readonly ?? false;
     // 临时覆盖 onWrite（options 优先级高于 config）
     const prevOnWrite = this.onWrite;
     const prevOnEvent = this.onEvent;
     if (options?.onWrite) this.onWrite = options.onWrite;
     if (options?.onEvent) this.onEvent = options.onEvent;
+    const tempContext: { tempDir?: string; tempFiles: string[] } = { tempFiles: [] };
+    const cleanupTempFiles = async () => {
+      if (tempContext.tempDir) await rm(tempContext.tempDir, { recursive: true, force: true });
+      else await Promise.all(tempContext.tempFiles.map(file => rm(file, { force: true })));
+      tempContext.tempFiles.length = 0;
+      tempContext.tempDir = undefined;
+    };
     this._emit({ type: 'task_start' });
     try {
 
@@ -162,6 +209,7 @@ export class AgentExecutor {
       ? allTools.filter(tool => !tool.requiresApproval && !tool.capabilities.includes('write_code'))
       : allTools;
 
+    const allowedToolNames = new Set(filteredTools.map(tool => tool.name));
     const tools: FunctionDefinition[] = filteredTools.map(tool => ({
       name: tool.name,
       description: tool.description,
@@ -234,8 +282,7 @@ export class AgentExecutor {
       }
 
       // 同类工具折叠（参考 Claude Code collapseReadSearchGroups）
-      const previewedSnapshot = previewTracker.snapshot();
-      const wasPreviewedBeforeExec = (tc: ToolCall) => previewTracker.wasPreviewed(tc) || previewedSnapshot.has(tc.name) || previewedSnapshot.has(tc.id);
+      const wasPreviewedBeforeExec = (tc: ToolCall) => previewTracker.wasPreviewed(tc);
       const foldTracker = new ToolFoldTracker(
         this.stream,
         text => this._write(text),
@@ -256,9 +303,22 @@ export class AgentExecutor {
         const skipStartRender = wasPreviewed || renderedPreview;
         let preApproved = false;
 
+        if (!allowedToolNames.has(tc.name)) {
+          const msg = readonly ? `Tool "${tc.name}" is not available in readonly mode.` : `Tool "${tc.name}" is not available.`;
+          working.push({ role: 'tool', content: msg, toolCallId: tc.id });
+          continue;
+        }
+
         foldTracker.push(tc, skipStartRender, previewElapsedMs);
 
-        if (this.permissionEngine?.check(tc.name, tc.arguments) === 'ask' && this.approvalHandler) {
+        const permission = this.permissionEngine?.check(tc.name, tc.arguments);
+        if (permission === 'ask' && !this.approvalHandler) {
+          const label = this.i18n?.toolLabel(tc.name) ?? tc.name;
+          const msg = this.i18n?.t('executor.security_policy_deny', { label }) ?? `[Denied] ${label}`;
+          working.push({ role: 'tool', content: msg, toolCallId: tc.id });
+          continue;
+        }
+        if (permission === 'ask' && this.approvalHandler) {
           this._emit({ type: 'approval_request', toolName: tc.name, args: tc.arguments });
           const approvalPromise = this.approvalHandler(tc.name, tc.arguments, options?.signal);
           const abortPromise = options?.signal ? new Promise<boolean>((_, reject) => {
@@ -278,7 +338,7 @@ export class AgentExecutor {
         }
         let result = '';
         let duration = 0;
-        ({ result, duration } = await this._executeTool(tc, options?.signal, preApproved));
+        ({ result, duration } = await this._executeTool(tc, options?.signal, preApproved, tempContext));
         if (options?.signal?.aborted) break;
         foldTracker.addDuration(duration);
         if (tc.name === 'write_file' && result) foldTracker.setDiff(result);
@@ -307,6 +367,7 @@ export class AgentExecutor {
     if (!options?.signal?.aborted) showTokenSummary();
     return working;
   } finally {
+    await cleanupTempFiles().catch(() => undefined);
     this._emit({ type: 'task_done' });
     this.onWrite = prevOnWrite;
     this.onEvent = prevOnEvent;
@@ -322,7 +383,7 @@ export class AgentExecutor {
     try {
       const task = [...messages].reverse().find(m => m.role === 'user')?.content ?? '';
       const working: Message[] = [
-        { role: 'system', content: PlanModeManager.getSystemPrompt() },
+        { role: 'system', content: `${this.getSystemPrompt()}\n\n---\n\n## Plan 模式额外规则\n\n${PlanModeManager.getSystemPrompt()}` },
         { role: 'user', content: task },
       ];
 
@@ -410,7 +471,7 @@ export class AgentExecutor {
     });
   }
 
-  private async _executeTool(tc: ToolCall, signal?: AbortSignal, preApproved = false): Promise<{ result: string; duration: number }> {
+  private async _executeTool(tc: ToolCall, signal?: AbortSignal, preApproved = false, tempContext?: { tempDir?: string; tempFiles: string[] }): Promise<{ result: string; duration: number }> {
     const name = tc.name;
     const args = tc.arguments;
     const label = this.i18n?.toolLabel(name) ?? name;
@@ -422,7 +483,10 @@ export class AgentExecutor {
         const msg = this.i18n?.t('executor.security_policy_deny', { label }) ?? `[Denied] ${label}`;
         return { result: msg, duration: 0 };
       }
-      // 'ask' 不在此处理 — runTask 已预先做 approval 并传 preApproved=true
+      if (perm === 'ask') {
+        const msg = this.i18n?.t('executor.security_policy_deny', { label }) ?? `[Denied] ${label}`;
+        return { result: msg, duration: 0 };
+      }
     }
 
     const toolStart = Date.now();
@@ -432,7 +496,9 @@ export class AgentExecutor {
         if (signal.aborted) reject(new DOMException('Aborted', 'AbortError'));
         else signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
       }) : undefined;
-      const result = await (abortPromise ? Promise.race([this.registry.dispatch(name, args, { signal }), abortPromise]) : this.registry.dispatch(name, args, { signal }));
+      const context = { signal, tempDir: tempContext?.tempDir, tempFiles: tempContext?.tempFiles };
+      const result = await (abortPromise ? Promise.race([this.registry.dispatch(name, args, context), abortPromise]) : this.registry.dispatch(name, args, context));
+      if (tempContext && context.tempDir) tempContext.tempDir = context.tempDir;
       const duration = Date.now() - toolStart;
       this.controller?.recordToolCall(name, args, result);
 

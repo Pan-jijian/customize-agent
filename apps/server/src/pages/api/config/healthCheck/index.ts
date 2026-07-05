@@ -8,6 +8,7 @@ function providerFactoryName(providerName: string, providerConfig?: { protocol?:
   if (protocol === 'anthropic') return 'anthropic';
   if (protocol === 'google') return 'google';
   if (protocol === 'ollama') return 'ollama';
+  if (protocol === 'openrouter') return 'openrouter';
   if (protocol === 'openai') {
     return ['deepseek', 'openai', 'openrouter', 'ollama'].includes(providerName) ? providerName : 'openai';
   }
@@ -23,8 +24,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const start = Date.now();
     try {
       const p = createProvider(providerFactoryName(providerName, cfg), { apiKey: cfg?.apiKey, baseUrl: cfg?.baseUrl, modelName: providerName });
-      const ok = await p.healthCheck();
-      res.status(200).json({ success: ok, message: ok ? '连接成功' : '连接失败', latencyMs: Date.now() - start });
+      await p.chat([{ role: 'user', content: 'ping' }], { maxTokens: 1, temperature: 0 });
+      res.status(200).json({ success: true, message: '连接成功', latencyMs: Date.now() - start });
     } catch (err: unknown) {
       console.error('[api] config/healthCheck (inner)', err);
       res.status(200).json({ success: false, message: 'Health check failed', latencyMs: Date.now() - start });

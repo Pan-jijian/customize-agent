@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/runtime",
-  "version": "2.2.0",
+  "version": "3.0.2",
   "description": "Agent Runtime - unified scheduling layer for all entry points",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

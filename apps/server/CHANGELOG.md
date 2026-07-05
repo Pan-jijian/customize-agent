@@ -1,5 +1,58 @@
 # server
 
+## 3.0.5
+
+### Patch Changes
+
+- Improve legacy Word and CAD document ingestion, add batch file deletion controls, and fix terminal thinking status rendering.
+- Updated dependencies
+  - @customize-agent/knowledge@3.0.3
+
+## 3.0.4
+
+### Patch Changes
+
+- Fix CUSTOMIZE.md system prompt injection for all task modes and make terminal task status append-only instead of erasing progress.
+
+## 3.0.3
+
+### Patch Changes
+
+- Fix packaged dashboard startup by keeping Next.js server output in CommonJS package scope.
+
+## 3.0.2
+
+### Patch Changes
+
+- Patch release 3.0.2.
+- Updated dependencies
+  - @customize-agent/knowledge@3.0.2
+  - @customize-agent/llm@3.0.2
+  - @customize-agent/runtime@3.0.2
+
+## 3.0.1
+
+### Patch Changes
+
+- Patch release 3.0.1.
+- Updated dependencies
+  - @customize-agent/knowledge@3.0.1
+  - @customize-agent/llm@3.0.1
+  - @customize-agent/runtime@3.0.1
+
+## 3.0.0
+
+### Major Changes
+
+- Release 3.0.0 with updated CLI, web management, knowledge base, prompt, and tool execution behavior.
+
+### Patch Changes
+
+- Updated dependencies
+  - @customize-agent/knowledge@3.0.0
+  - @customize-agent/llm@3.0.0
+  - @customize-agent/runtime@3.0.0
+
 ## 0.1.5
 
 ### Patch Changes

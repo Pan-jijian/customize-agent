@@ -59,11 +59,11 @@ export class FileClassifier {
       ['.pdf', 'document', 'pdf'], ['.docx', 'document', 'office'], ['.doc', 'document', 'office'], ['.rtf', 'document', 'office'], ['.odt', 'document', 'office'],
       ['.pptx', 'document', 'presentation'], ['.ppt', 'document', 'presentation'], ['.odp', 'document', 'presentation'],
       ['.md', 'document', 'markdown'], ['.markdown', 'document', 'markdown'], ['.mdx', 'document', 'markdown'],
-      ['.txt', 'document', 'plaintext'], ['.rst', 'document', 'plaintext'], ['.asciidoc', 'document', 'plaintext'], ['.tex', 'document', 'plaintext'],
+      ['.txt', 'document', 'plaintext'], ['.textclipping', 'document', 'text_clipping'], ['.rst', 'document', 'plaintext'], ['.asciidoc', 'document', 'plaintext'], ['.tex', 'document', 'plaintext'],
       ['.epub', 'document', 'ebook'], ['.mobi', 'document', 'ebook'],
 
       ['.xlsx', 'spreadsheet', 'excel'], ['.xls', 'spreadsheet', 'excel'], ['.xlsm', 'spreadsheet', 'excel'],
-      ['.csv', 'spreadsheet', 'csv'], ['.tsv', 'spreadsheet', 'csv'], ['.tab', 'spreadsheet', 'csv'], ['.ods', 'spreadsheet', 'opendoc'],
+      ['.csv', 'spreadsheet', 'csv'], ['.tsv', 'spreadsheet', 'tsv'], ['.tab', 'spreadsheet', 'tsv'], ['.ods', 'spreadsheet', 'opendoc'],
 
       ['.png', 'image', 'raster'], ['.jpg', 'image', 'raster'], ['.jpeg', 'image', 'raster'], ['.gif', 'image', 'raster'], ['.bmp', 'image', 'raster'], ['.webp', 'image', 'raster'], ['.tiff', 'image', 'raster'], ['.tif', 'image', 'raster'],
       ['.svg', 'image', 'vector'], ['.eps', 'image', 'vector'], ['.raw', 'image', 'raw'], ['.cr2', 'image', 'raw'], ['.nef', 'image', 'raw'], ['.dng', 'image', 'raw'],

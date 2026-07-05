@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/knowledge",
-  "version": "2.2.1",
+  "version": "3.0.3",
   "description": "Local knowledge base infrastructure for customize-agent",
   "type": "module",
   "main": "./dist/index.js",
@@ -18,6 +18,9 @@
     "lint": "eslint src/"
   },
   "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "author": "Pan-jijian",
   "repository": {
     "type": "git",
@@ -37,15 +40,17 @@
     "knowledge-base"
   ],
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.82",
     "better-sqlite3": "^12.10.0",
-    "sqlite-vec": "^0.1.9",
+    "dxf-parser": "^1.1.2",
     "fast-glob": "^3.3.3",
     "jszip": "^3.10.1",
-    "@napi-rs/canvas": "^0.1.82",
     "mammoth": "^1.12.0",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^5.4.394",
+    "sqlite-vec": "^0.1.9",
     "tesseract.js": "^7.0.0",
+    "word-extractor": "^1.0.4",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

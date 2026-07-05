@@ -28,6 +28,9 @@
   ],
   "author": "Pan-jijian",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "packageManager": "pnpm@10.26.1",
   "devDependencies": {
     "@changesets/cli": "^2.28.1",
