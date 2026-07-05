@@ -1,13 +1,13 @@
 {
   "name": "@customize-agent/server",
-  "version": "3.0.10",
+  "version": "3.0.15",
   "description": "Customize Agent Web 管理控制台",
   "exports": {
     "./package.json": "./package.json"
   },
   "scripts": {
     "dev": "next dev -p 17321",
-    "build": "next build && node -e \"require('fs').rmSync('.next/cache', { recursive: true, force: true })\"",
+    "build": "node -e \"require('fs').rmSync('.next', { recursive: true, force: true })\" && next build && node -e \"require('fs').rmSync('.next/cache', { recursive: true, force: true })\"",
     "start": "next start -p 17321",
     "lint": "eslint src/"
   },

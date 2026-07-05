@@ -1,5 +1,49 @@
 # server
 
+## 3.0.15
+
+### Patch Changes
+
+- Add generated document persistence, background generation polling, generated asset management, dynamic spec-driven fact extraction, structured resource evidence, and dynamic generation status steps.
+
+## Unreleased
+
+### Patch Changes
+
+- Add generated document persistence under `~/.customize-agent/projects/{projectId}/generatedDocuments`, background generation with polling, generated asset management, dynamic spec-driven fact schema extraction, structured resource evidence, and dynamic generation status steps.
+
+## 3.0.14
+
+### Patch Changes
+
+- Fix document export robustness and page navigation performance by sanitizing binary evidence, adding a PDF fallback, and avoiding unnecessary knowledge-base reindexing on page load.
+- Updated dependencies
+  - @customize-agent/knowledge@3.0.10
+
+## 3.0.13
+
+### Patch Changes
+
+- Make the built-in Delta Force operator guide fully runnable with initialized knowledge-base assets, built-in markers, richer roles/specs, localized spec controls, and verified generation/export flow.
+- Updated dependencies
+  - @customize-agent/knowledge@3.0.9
+
+## 3.0.12
+
+### Patch Changes
+
+- Add a runnable Delta Force operator guide demo, multi-resource role bindings, clearer role/spec explanations, and safer modal behavior.
+- Updated dependencies
+  - @customize-agent/knowledge@3.0.8
+
+## 3.0.11
+
+### Patch Changes
+
+- Add configurable document spec packages, deep spreadsheet parsing, configurable export gates, and Word document export support.
+- Updated dependencies
+  - @customize-agent/knowledge@3.0.7
+
 ## 3.0.10
 
 ### Patch Changes

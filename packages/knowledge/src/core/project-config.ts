@@ -1,13 +1,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { DEFAULT_CATEGORY_DIRS, KNOWLEDGE_BASE_DIR, PROJECT_CONFIG_PATH, USER_DATA_DIR } from '../constants.js';
+import { DEFAULT_CATEGORY_DIRS, KNOWLEDGE_BASE_DIR, USER_DATA_DIR } from '../constants.js';
 import type { ProjectConfig } from '../types.js';
 import { computeProjectId } from './project-id.js';
 
-export function getProjectConfigPath(projectRoot: string): string {
+export function getProjectConfigPath(projectRoot: string, storageRoot = path.join(os.homedir(), USER_DATA_DIR)): string {
   const projectId = computeProjectId(projectRoot);
-  return path.join(os.homedir(), USER_DATA_DIR, 'projects', projectId, ...PROJECT_CONFIG_PATH.slice(1));
+  return path.join(storageRoot, 'projects', projectId, 'project.json');
 }
 
 export function getProjectKbPath(projectRoot: string): string {
@@ -41,16 +41,16 @@ export function ensureProjectCustomizeFile(projectRoot: string): void {
 }
 
 export class ProjectConfigManager {
+  constructor(private readonly storageRoot = path.join(os.homedir(), USER_DATA_DIR)) {}
+
   loadOrCreate(projectRoot: string): ProjectConfig {
     ensureProjectCustomizeFile(projectRoot);
-    const configPath = getProjectConfigPath(projectRoot);
+    const configPath = getProjectConfigPath(projectRoot, this.storageRoot);
     const now = Date.now();
 
     if (fs.existsSync(configPath)) {
       const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as Partial<ProjectConfig>;
-      const config = this.withDefaults(projectRoot, raw, now);
-      this.save(projectRoot, { ...config, lastOpenedAt: now });
-      return { ...config, lastOpenedAt: now };
+      return this.withDefaults(projectRoot, raw, now);
     }
 
     const config = this.withDefaults(projectRoot, {}, now);
@@ -59,7 +59,7 @@ export class ProjectConfigManager {
   }
 
   save(projectRoot: string, config: ProjectConfig): void {
-    const configPath = getProjectConfigPath(projectRoot);
+    const configPath = getProjectConfigPath(projectRoot, this.storageRoot);
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
   }

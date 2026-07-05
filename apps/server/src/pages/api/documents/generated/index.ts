@@ -1,0 +1,33 @@
+import type { NextApiRequest, NextApiResponse } from 'next';
+import { deleteGeneratedDocument, getGeneratedDocument, listGeneratedDocuments, updateGeneratedDocument } from '@/services/generatedDocumentService';
+
+export default function handler(req: NextApiRequest, res: NextApiResponse) {
+  try {
+    if (req.method === 'GET') {
+      const id = typeof req.query.id === 'string' ? req.query.id : undefined;
+      if (id) {
+        const record = getGeneratedDocument(id);
+        if (!record) return res.status(404).json({ error: 'Document not found' });
+        return res.status(200).json({ document: record });
+      }
+      return res.status(200).json({ documents: listGeneratedDocuments() });
+    }
+    if (req.method === 'PUT') {
+      const { id, ...patch } = req.body as { id?: string; [key: string]: unknown };
+      if (!id) return res.status(400).json({ error: 'id required' });
+      const record = updateGeneratedDocument(id, patch);
+      if (!record) return res.status(404).json({ error: 'Document not found' });
+      return res.status(200).json({ document: record });
+    }
+    if (req.method === 'DELETE') {
+      const id = typeof req.query.id === 'string' ? req.query.id : req.body?.id;
+      if (!id) return res.status(400).json({ error: 'id required' });
+      deleteGeneratedDocument(id);
+      return res.status(200).json({ ok: true });
+    }
+    return res.status(405).json({ error: 'Method not allowed' });
+  } catch (e: unknown) {
+    console.error('[api] documents/generated', e);
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Internal server error' });
+  }
+}

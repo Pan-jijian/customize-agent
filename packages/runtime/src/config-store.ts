@@ -23,11 +23,20 @@ export interface ModelsConfig {
 }
 
 /** Provider 配置 */
+export interface ModelCapabilities {
+  imageGeneration?: boolean;
+  imageUnderstanding?: boolean;
+  fileUnderstanding?: boolean;
+  audio?: boolean;
+  video?: boolean;
+}
+
 export interface ProviderConfig {
   apiKey?: string;
   baseUrl?: string;
   /** 协议：空=自动推断, openai, anthropic, google */
   protocol?: string;
+  capabilities?: ModelCapabilities;
 }
 
 export interface EmbeddingConfig {
@@ -49,11 +58,16 @@ export interface UserConfig {
 
 const PROTOCOL_MAP: Record<string, string> = {
   deepseek: 'openai', openai: 'openai', openrouter: 'openai', ollama: 'ollama',
-  anthropic: 'anthropic', google: 'google',
+  anthropic: 'anthropic', google: 'google', gemini: 'google',
 };
 
 export function detectProtocol(providerName: string): string {
-  return PROTOCOL_MAP[providerName] ?? 'openai';
+  const normalized = providerName.toLowerCase();
+  if (PROTOCOL_MAP[normalized]) return PROTOCOL_MAP[normalized];
+  if (normalized.startsWith('gemini-') || normalized.includes('/gemini-')) return 'google';
+  if (normalized.startsWith('claude-') || normalized.includes('/claude-')) return 'anthropic';
+  if (normalized.startsWith('gpt-') || normalized.startsWith('o1') || normalized.startsWith('o3') || normalized.startsWith('o4')) return 'openai';
+  return 'openai';
 }
 
 export function resolveProtocol(providerName: string, config?: ProviderConfig): string {
@@ -135,6 +149,12 @@ export class ConfigStore {
     return this.save(cfg);
   }
 
+  setProviderCapabilities(name: string, capabilities: ModelCapabilities): UserConfig {
+    const cfg = this.load();
+    cfg.providers[name] = { ...cfg.providers[name], capabilities };
+    return this.save(cfg);
+  }
+
   getProvider(name: string): ProviderConfig | undefined {
     return this.load().providers[name];
   }
@@ -191,7 +211,7 @@ export class ConfigStore {
   private _parse(raw: Record<string, unknown>): UserConfig {
     return {
       language: (raw.language === 'zh' || raw.language === 'en') ? raw.language : 'zh',
-      providers: typeof raw.providers === 'object' ? (raw.providers as Record<string, ProviderConfig>) : {},
+      providers: this._pProviders(raw.providers),
       models: {
         reader: this._pTier((raw.models as Record<string, unknown>)?.reader),
         reasoning: this._pTier((raw.models as Record<string, unknown>)?.reasoning),
@@ -199,6 +219,29 @@ export class ConfigStore {
       },
       embedding: this._pEmbedding(raw.embedding),
     };
+  }
+
+  private _pProviders(raw: unknown): Record<string, ProviderConfig> {
+    if (!raw || typeof raw !== 'object') return {};
+    const result: Record<string, ProviderConfig> = {};
+    for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object') continue;
+      const provider = value as Record<string, unknown>;
+      const capabilities = provider.capabilities && typeof provider.capabilities === 'object' ? provider.capabilities as Record<string, unknown> : {};
+      result[name] = {
+        apiKey: typeof provider.apiKey === 'string' ? provider.apiKey : undefined,
+        baseUrl: typeof provider.baseUrl === 'string' ? provider.baseUrl : undefined,
+        protocol: typeof provider.protocol === 'string' ? provider.protocol : undefined,
+        capabilities: {
+          imageGeneration: capabilities.imageGeneration === true,
+          imageUnderstanding: capabilities.imageUnderstanding === true,
+          fileUnderstanding: capabilities.fileUnderstanding === true,
+          audio: capabilities.audio === true,
+          video: capabilities.video === true,
+        },
+      };
+    }
+    return result;
   }
 
   private _pTier(raw: unknown): TierConfig {

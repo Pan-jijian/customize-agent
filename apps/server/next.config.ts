@@ -16,6 +16,9 @@ const serverExternalPackages = [
 ];
 
 const nextConfig: NextConfig = {
+  generateBuildId() {
+    return 'customize-agent-dashboard';
+  },
   eslint: {
     ignoreDuringBuilds: true,
   },
@@ -32,14 +35,20 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
-        source: '/:path((?!_next/static).*)',
-        headers: [{ key: 'Cache-Control', value: 'no-store, max-age=0' }],
-      },
-      {
-        source: '/_next/static/:buildId(_[^/]+)/(.*Manifest.js)',
-        headers: [{ key: 'Cache-Control', value: 'no-store, max-age=0' }],
+        source: '/((?!_next/static|_next/image|favicon.ico).*)',
+        headers: [
+          { key: 'Cache-Control', value: 'no-store, must-revalidate' },
+        ],
       },
     ];
+  },
+  async rewrites() {
+    return {
+      beforeFiles: [
+        { source: '/_next/static/:buildId/_buildManifest.js', destination: '/_next/static/customize-agent-dashboard/_buildManifest.js' },
+        { source: '/_next/static/:buildId/_ssgManifest.js', destination: '/_next/static/customize-agent-dashboard/_ssgManifest.js' },
+      ],
+    };
   },
   async redirects() {
     return [

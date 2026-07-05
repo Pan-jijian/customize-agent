@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import { Button, Card, Checkbox, Descriptions, Empty, Input, message, Space, Spin, Tag, Tabs, Table, Tree, Typography } from 'antd';
+import { Alert, Button, Card, Checkbox, Descriptions, Empty, Input, message, Space, Spin, Tag, Tabs, Table, Tree, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { getKbFileDetail, openKbFileTarget, reindexKbFile, type KbFileDetail, type KbStoredChunk, type KbParentChunk } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
@@ -94,6 +94,7 @@ export default function KnowledgeFileDetailPage() {
   const relativePath = typeof router.query.relativePath === 'string' ? router.query.relativePath : '';
   const [detail, setDetail] = useState<KbFileDetail>();
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const [reindexing, setReindexing] = useState(false);
   const [filter, setFilter] = useState('');
   const [visibleLayers, setVisibleLayers] = useState<string[]>([]);
@@ -101,7 +102,14 @@ export default function KnowledgeFileDetailPage() {
   useEffect(() => {
     if (!relativePath) return;
     setLoading(true);
-    void getKbFileDetail(relativePath).then(setDetail).finally(() => setLoading(false));
+    setLoadError('');
+    void getKbFileDetail(relativePath)
+      .then(setDetail)
+      .catch(error => {
+        setDetail(undefined);
+        setLoadError(error instanceof Error ? error.message : '文件详情加载失败');
+      })
+      .finally(() => setLoading(false));
   }, [relativePath]);
 
   const meta = useMemo(() => extractionMeta(detail), [detail]);
@@ -240,6 +248,7 @@ export default function KnowledgeFileDetailPage() {
   ];
 
   if (loading) return <Spin />;
+  if (loadError) return <Alert type="error" showIcon message="文件详情加载失败" description={loadError} />;
   if (!detail) return <Empty description="请选择文件" />;
 
   return (

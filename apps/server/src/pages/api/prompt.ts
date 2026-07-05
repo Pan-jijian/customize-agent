@@ -18,6 +18,7 @@ function isInternalResidualProject(projectRoot: string): boolean {
   const normalized = normalizePath(projectRoot);
   const homeConfig = normalizePath(path.join(os.homedir(), '.customize-agent'));
   const parts = normalized.split(path.sep);
+  if (normalized === path.resolve(path.join(os.homedir(), '.customize-agent', 'demo-project'))) return false;
   return normalized === homeConfig
     || normalized.endsWith(`${path.sep}apps${path.sep}server`)
     || normalized.endsWith(`${path.sep}apps${path.sep}cli`)
@@ -80,6 +81,15 @@ interface PromptProject {
   source: 'current' | 'project' | 'custom';
 }
 
+const BUILT_IN_PROMPTS = [
+  { id: 'builtin:delta-fact-extraction', name: '内置｜三角洲事实抽取提示词', content: '请从资料中抽取干员名称、定位、技能、推荐指数、上手难度、推荐场景，输出结构化事实，不要编造。' },
+  { id: 'builtin:delta-chapter-generation', name: '内置｜三角洲章节生成提示词', content: '请用新手能看懂的大白话生成攻略，先给结论，再解释原因，最后给实战建议。必须引用表格数据和来源资料。' },
+  { id: 'builtin:delta-validation', name: '内置｜三角洲校验提示词', content: '检查是否覆盖露娜、红狼、牧羊人、蜂医；是否有推荐表格；是否出现缺失资料占位语；是否有来源。' },
+  { id: 'builtin:delta-formatting', name: '内置｜三角洲格式化提示词', content: '整理标题、列表、表格和结尾提醒，让攻略更适合正式导出。' },
+];
+
+const BUILT_IN_PROMPT_IDS = new Set(BUILT_IN_PROMPTS.map(prompt => prompt.id));
+
 interface PromptConfig {
   selectedIds: string[];
   customPrompts: Array<{ id: string; name: string; content: string; createdAt: string; updatedAt: string }>;
@@ -92,7 +102,10 @@ function promptIdFromPath(filePath: string): string {
 function loadPromptConfig(): PromptConfig {
   try {
     const parsed = JSON.parse(fs.readFileSync(promptConfigPath, 'utf-8')) as Partial<PromptConfig>;
-    return { selectedIds: Array.isArray(parsed.selectedIds) ? parsed.selectedIds : [], customPrompts: Array.isArray(parsed.customPrompts) ? parsed.customPrompts as PromptConfig['customPrompts'] : [] };
+    return {
+      selectedIds: Array.isArray(parsed.selectedIds) ? parsed.selectedIds.map(String).filter(id => !BUILT_IN_PROMPT_IDS.has(id)) : [],
+      customPrompts: Array.isArray(parsed.customPrompts) ? parsed.customPrompts as PromptConfig['customPrompts'] : [],
+    };
   } catch {
     return { selectedIds: [], customPrompts: [] };
   }
@@ -100,7 +113,8 @@ function loadPromptConfig(): PromptConfig {
 
 function savePromptConfig(config: PromptConfig): void {
   fs.mkdirSync(path.dirname(promptConfigPath), { recursive: true });
-  fs.writeFileSync(promptConfigPath, JSON.stringify(config, null, 2), 'utf-8');
+  const sanitized = { ...config, selectedIds: config.selectedIds.filter(id => !BUILT_IN_PROMPT_IDS.has(id)) };
+  fs.writeFileSync(promptConfigPath, JSON.stringify(sanitized, null, 2), 'utf-8');
 }
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -111,7 +125,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       const currentRoot = normalizePath(process.env.CUSTOMIZE_PROJECT_ROOT ?? process.env.INIT_CWD ?? process.cwd());
       const config = loadPromptConfig();
       const currentPromptId = promptIdFromPath(path.join(currentRoot, 'CUSTOMIZE.md'));
-      const selectedIds = fs.existsSync(promptConfigPath) ? config.selectedIds : [currentPromptId];
+      const selectedIds = fs.existsSync(promptConfigPath) && config.selectedIds.length > 0 ? config.selectedIds : [currentPromptId];
       const db = openRegistry(true);
       if (db) {
         try {
@@ -161,6 +175,20 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
           source: 'current',
         });
       }
+      for (const builtIn of BUILT_IN_PROMPTS) {
+        projects.push({
+          id: builtIn.id,
+          projectId: builtIn.id,
+          projectName: builtIn.name,
+          customizePath: builtIn.id,
+          content: builtIn.content,
+          mtime: '',
+          hasFile: true,
+          isCurrent: false,
+          selected: selectedIds.includes(builtIn.id),
+          source: 'custom',
+        });
+      }
       for (const custom of config.customPrompts) {
         projects.push({
           id: custom.id,
@@ -186,12 +214,11 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
         const now = new Date().toISOString();
         const id = `custom:${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
         config.customPrompts.push({ id, name: String(name || '自定义提示词'), content: typeof content === 'string' ? content : '', createdAt: now, updatedAt: now });
-        config.selectedIds = Array.from(new Set([...config.selectedIds, id]));
         savePromptConfig(config);
         return res.status(200).json({ success: true, id });
       }
       if (action === 'select') {
-        config.selectedIds = Array.isArray(selectedIds) ? selectedIds.map(String) : [];
+        config.selectedIds = Array.isArray(selectedIds) ? selectedIds.map(String).filter(id => !BUILT_IN_PROMPT_IDS.has(id)) : [];
         savePromptConfig(config);
         return res.status(200).json({ success: true });
       }

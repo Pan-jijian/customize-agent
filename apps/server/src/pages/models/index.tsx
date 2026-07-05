@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useAppTranslations } from '@/components/Layout';
-import { Card, Button, Tag, Modal, Input, Select, Row, Col, Space, Popconfirm, Form, App, InputNumber, Alert } from 'antd';
+import { Card, Button, Tag, Modal, Input, Select, Row, Col, Space, Popconfirm, Form, App, InputNumber, Alert, Checkbox } from 'antd';
 import { PlusOutlined, DeleteOutlined, ApiOutlined, KeyOutlined, GlobalOutlined, EditOutlined, CheckCircleFilled, CloseCircleFilled, ThunderboltOutlined } from '@ant-design/icons';
-import { getProviders, getModels, saveProvider, deleteProvider, saveModels, healthCheck, getProviderDetail, getEmbeddingConfig, saveEmbeddingConfig, embeddingHealthCheck, type ProviderInfo, type ModelsConfig, type EmbeddingConfig } from '@/lib/api';
+import { getProviders, getModels, saveProvider, deleteProvider, saveModels, healthCheck, getProviderDetail, getEmbeddingConfig, saveEmbeddingConfig, embeddingHealthCheck, type ProviderInfo, type ModelsConfig, type EmbeddingConfig, type ModelCapabilities } from '@/lib/api';
 import styles from './style.module.scss';
 
 const PROTOCOL_OPTIONS = [
@@ -17,6 +17,14 @@ const TIERS = [
   { key: 'reasoning', labelKey: 'models.tierReasoning', descKey: 'models.tierReasoningDesc' },
   { key: 'action', labelKey: 'models.tierAction', descKey: 'models.tierActionDesc' },
 ] as const;
+
+const CAPABILITY_OPTIONS: Array<{ key: keyof ModelCapabilities; label: string }> = [
+  { key: 'imageGeneration', label: '图片生成' },
+  { key: 'imageUnderstanding', label: '图片理解' },
+  { key: 'fileUnderstanding', label: '文件理解' },
+  { key: 'audio', label: '音频能力' },
+  { key: 'video', label: '视频能力' },
+];
 
 export default function ModelsPage() {
   const t = useAppTranslations();
@@ -39,6 +47,7 @@ export default function ModelsPage() {
   const [newApiKey, setNewApiKey] = useState('');
   const [newBaseUrl, setNewBaseUrl] = useState('');
   const [newProtocol, setNewProtocol] = useState<string>('openai');
+  const [newCapabilities, setNewCapabilities] = useState<ModelCapabilities>({});
   const [saving, setSaving] = useState(false);
 
   // 编辑弹窗
@@ -48,6 +57,7 @@ export default function ModelsPage() {
   const [editApiKey, setEditApiKey] = useState('');
   const [editBaseUrl, setEditBaseUrl] = useState('');
   const [editProtocol, setEditProtocol] = useState<string>('openai');
+  const [editCapabilities, setEditCapabilities] = useState<ModelCapabilities>({});
   const [editSaving, setEditSaving] = useState(false);
 
   const [testing, setTesting] = useState<string | null>(null);
@@ -67,8 +77,8 @@ export default function ModelsPage() {
   const handleAdd = async () => {
     if (!newModelName.trim()) return; setSaving(true);
     try {
-      await saveProvider(newModelName.trim(), { apiKey: newApiKey || undefined, baseUrl: newBaseUrl || undefined, protocol: newProtocol });
-      setAddOpen(false); setNewModelName(''); setNewApiKey(''); setNewBaseUrl(''); setNewProtocol('openai');
+      await saveProvider(newModelName.trim(), { apiKey: newApiKey || undefined, baseUrl: newBaseUrl || undefined, protocol: newProtocol, capabilities: newCapabilities });
+      setAddOpen(false); setNewModelName(''); setNewApiKey(''); setNewBaseUrl(''); setNewProtocol('openai'); setNewCapabilities({});
       await load(); message.success(t('common.success'));
     }
     catch { message.error(t('common.error')); } finally { setSaving(false); }
@@ -87,9 +97,11 @@ export default function ModelsPage() {
       setEditApiKey(detail.apiKey ? '••••••••' : '');
       setEditBaseUrl(detail.baseUrl || '');
       setEditProtocol(detail.protocol || detail.detectedProtocol || 'openai');
+      setEditCapabilities(detail.capabilities || {});
     } catch {
       setEditBaseUrl(p.baseUrl || '');
       setEditProtocol(p.protocol || p.detectedProtocol || 'openai');
+      setEditCapabilities(p.capabilities || {});
     }
     setEditOpen(true);
   };
@@ -97,8 +109,8 @@ export default function ModelsPage() {
     if (!editModelName.trim()) return; setEditSaving(true);
     try {
       const apiKey = editApiKey.includes('•') ? undefined : editApiKey || undefined;
-      await saveProvider(editModelName.trim(), { oldName: editTarget, apiKey, baseUrl: editBaseUrl || undefined, protocol: editProtocol });
-      setEditOpen(false); setEditTarget(''); setEditModelName(''); setEditApiKey(''); setEditBaseUrl(''); setEditProtocol('openai');
+      await saveProvider(editModelName.trim(), { oldName: editTarget, apiKey, baseUrl: editBaseUrl || undefined, protocol: editProtocol, capabilities: editCapabilities });
+      setEditOpen(false); setEditTarget(''); setEditModelName(''); setEditApiKey(''); setEditBaseUrl(''); setEditProtocol('openai'); setEditCapabilities({});
       await load(); message.success(t('common.success'));
     }
     catch { message.error(t('common.error')); } finally { setEditSaving(false); }
@@ -181,6 +193,9 @@ export default function ModelsPage() {
                   <div className="flex flex-col gap-0.5">
                     <span className={`${styles.cardMeta} text-xs`}><KeyOutlined /> {p.hasApiKey ? '••••••••' : '—'}</span>
                     {p.baseUrl && <span className={`${styles.cardMeta} ${styles.urlLine} text-xs`} title={p.baseUrl}><GlobalOutlined /> {p.baseUrl}</span>}
+                    <Space size={[4, 4]} wrap>
+                      {CAPABILITY_OPTIONS.filter(option => p.capabilities?.[option.key]).map(option => <Tag key={option.key} color="purple">{option.label}</Tag>)}
+                    </Space>
                   </div>
                 </Card>
               </Col>
@@ -281,22 +296,36 @@ export default function ModelsPage() {
       )}
 
       {/* 添加弹窗 */}
-      <Modal title={t('models.addModel')} open={addOpen} onCancel={() => { setAddOpen(false); setNewModelName(''); setNewApiKey(''); setNewBaseUrl(''); setNewProtocol('openai'); }} onOk={() => { void handleAdd(); }} confirmLoading={saving}>
+      <Modal maskClosable={false} title={t('models.addModel')} open={addOpen} onCancel={() => { setAddOpen(false); setNewModelName(''); setNewApiKey(''); setNewBaseUrl(''); setNewProtocol('openai'); }} onOk={() => { void handleAdd(); }} confirmLoading={saving}>
         <Form layout="vertical" size="middle">
           <Form.Item label={t('models.modelName')}><Input value={newModelName} onChange={(e) => setNewModelName(e.target.value)} placeholder={t('models.modelNamePlaceholder')} /></Form.Item>
           <Form.Item label={t('models.apiKey')}><Input.Password value={newApiKey} onChange={(e) => setNewApiKey(e.target.value)} placeholder="sk-..." /></Form.Item>
           <Form.Item label={t('models.baseUrl')}><Input value={newBaseUrl} onChange={(e) => setNewBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" /></Form.Item>
           <Form.Item label={t('models.protocol')}><Select value={newProtocol} onChange={setNewProtocol} options={PROTOCOL_OPTIONS} /></Form.Item>
+          <Form.Item label="多模态能力">
+            <Checkbox.Group
+              value={CAPABILITY_OPTIONS.filter(option => newCapabilities[option.key]).map(option => option.key)}
+              options={CAPABILITY_OPTIONS.map(option => ({ label: option.label, value: option.key }))}
+              onChange={(values) => setNewCapabilities(Object.fromEntries(CAPABILITY_OPTIONS.map(option => [option.key, values.includes(option.key)])))}
+            />
+          </Form.Item>
         </Form>
       </Modal>
 
       {/* 编辑弹窗 */}
-      <Modal title={t('models.editModel')} open={editOpen} onCancel={() => { setEditOpen(false); setEditTarget(''); setEditModelName(''); setEditApiKey(''); setEditBaseUrl(''); setEditProtocol('openai'); }} onOk={() => { void handleEdit(); }} confirmLoading={editSaving}>
+      <Modal maskClosable={false} title={t('models.editModel')} open={editOpen} onCancel={() => { setEditOpen(false); setEditTarget(''); setEditModelName(''); setEditApiKey(''); setEditBaseUrl(''); setEditProtocol('openai'); }} onOk={() => { void handleEdit(); }} confirmLoading={editSaving}>
         <Form layout="vertical" size="middle">
           <Form.Item label={t('models.modelName')}><Input value={editModelName} onChange={(e) => setEditModelName(e.target.value)} placeholder={t('models.modelNamePlaceholder')} /></Form.Item>
           <Form.Item label={t('models.apiKey')} help={t('models.apiKeyEditHint')}><Input.Password value={editApiKey} onFocus={() => { if (editApiKey.includes('•')) setEditApiKey(''); }} onCopy={(e) => e.preventDefault()} onChange={(e) => setEditApiKey(e.target.value)} placeholder={t('models.apiKeyEditPlaceholder')} /></Form.Item>
           <Form.Item label={t('models.baseUrl')}><Input value={editBaseUrl} onChange={(e) => setEditBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" /></Form.Item>
           <Form.Item label={t('models.protocol')}><Select value={editProtocol} onChange={setEditProtocol} options={PROTOCOL_OPTIONS} /></Form.Item>
+          <Form.Item label="多模态能力">
+            <Checkbox.Group
+              value={CAPABILITY_OPTIONS.filter(option => editCapabilities[option.key]).map(option => option.key)}
+              options={CAPABILITY_OPTIONS.map(option => ({ label: option.label, value: option.key }))}
+              onChange={(values) => setEditCapabilities(Object.fromEntries(CAPABILITY_OPTIONS.map(option => [option.key, values.includes(option.key)])))}
+            />
+          </Form.Item>
         </Form>
       </Modal>
     </div>

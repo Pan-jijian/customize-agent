@@ -14,7 +14,7 @@ export class MultiProjectManager {
   private readonly storageRoot: string;
   private readonly llmProvider?: LLMSearchProvider;
   private readonly registry: ProjectRegistry;
-  private readonly configManager = new ProjectConfigManager();
+  private readonly configManager: ProjectConfigManager;
   private readonly projects = new Map<string, KnowledgeBaseManager>();
   private globalKB?: KnowledgeBaseManager;
 
@@ -22,6 +22,7 @@ export class MultiProjectManager {
     this.storageRoot = storageRoot;
     this.llmProvider = llmProvider;
     this.registry = new ProjectRegistry(path.join(storageRoot, 'projects', 'registry.db'));
+    this.configManager = new ProjectConfigManager(storageRoot);
   }
 
   async getProject(projectRoot: string): Promise<KnowledgeBaseManager> {

@@ -29,6 +29,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       protocol: cfg.protocol,
       detectedProtocol: detectProtocol(provider),
       hasApiKey: !!cfg.apiKey,
+      capabilities: cfg.capabilities ?? {},
     });
   } catch (e: unknown) { console.error('[api] config/providers/[provider]', e); res.status(500).json({ error: 'Internal server error' }); }
 }

@@ -1,5 +1,29 @@
 # @customize-agent/knowledge
 
+## 3.0.10
+
+### Patch Changes
+
+- Fix document export robustness and page navigation performance by sanitizing binary evidence, adding a PDF fallback, and avoiding unnecessary knowledge-base reindexing on page load.
+
+## 3.0.9
+
+### Patch Changes
+
+- Make the built-in Delta Force operator guide fully runnable with initialized knowledge-base assets, built-in markers, richer roles/specs, localized spec controls, and verified generation/export flow.
+
+## 3.0.8
+
+### Patch Changes
+
+- Add a runnable Delta Force operator guide demo, multi-resource role bindings, clearer role/spec explanations, and safer modal behavior.
+
+## 3.0.7
+
+### Patch Changes
+
+- Add configurable document spec packages, deep spreadsheet parsing, configurable export gates, and Word document export support.
+
 ## 3.0.6
 
 ### Patch Changes
