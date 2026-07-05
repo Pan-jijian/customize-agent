@@ -7,23 +7,84 @@ function escapeHtml(input: string): string {
   return input.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function simplePdf(text: string): Buffer {
-  const safe = text.replace(/[()\\]/g, '\\$&').split('\n').slice(0, 80);
-  const content = `BT /F1 12 Tf 50 780 Td ${safe.map((line, i) => `${i ? '0 -16 Td ' : ''}(${line}) Tj`).join(' ')} ET`;
-  const objects = [
-    '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
-    '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
-    '3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj',
-    '4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj',
-    `5 0 obj << /Length ${Buffer.byteLength(content)} >> stream\n${content}\nendstream endobj`,
-  ];
-  let pdf = '%PDF-1.4\n';
-  const offsets = [0];
-  for (const obj of objects) { offsets.push(Buffer.byteLength(pdf)); pdf += obj + '\n'; }
-  const xref = Buffer.byteLength(pdf);
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map(o => String(o).padStart(10, '0') + ' 00000 n ').join('\n')}\n`;
-  pdf += `trailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
-  return Buffer.from(pdf);
+function fallbackMarkdownToHtml(input: string): string {
+  return input.split(/\n{2,}/u).map(block => {
+    const trimmed = block.trim();
+    if (!trimmed) return '';
+    if (/^#{1,6}\s/u.test(trimmed)) {
+      const level = Math.min(6, trimmed.match(/^#+/u)?.[0].length ?? 1);
+      return `<h${level}>${escapeHtml(trimmed.replace(/^#{1,6}\s*/u, ''))}</h${level}>`;
+    }
+    return `<p>${escapeHtml(trimmed).replace(/\n/gu, '<br>')}</p>`;
+  }).join('\n');
+}
+
+async function markdownToHtml(input: string): Promise<string> {
+  try {
+    const { marked } = await import('marked');
+    return marked.parse(input, { async: false }) as string;
+  } catch {
+    return fallbackMarkdownToHtml(input);
+  }
+}
+
+function documentHtml(title: string, body: string): string {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(title)}</title>
+  <style>
+    @page { size: A4; margin: 24mm 18mm 22mm; }
+    body {
+      font-family: "PingFang SC", "Songti SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+      color: #111827;
+      line-height: 1.75;
+      font-size: 14px;
+    }
+    h1 { text-align: center; font-size: 26px; margin: 36px 0 28px; page-break-after: avoid; }
+    h2 { font-size: 20px; margin-top: 30px; border-bottom: 1px solid #d1d5db; padding-bottom: 6px; page-break-after: avoid; }
+    h3 { font-size: 17px; margin-top: 22px; page-break-after: avoid; }
+    h4, h5, h6 { page-break-after: avoid; }
+    p { margin: 8px 0; text-align: justify; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; page-break-inside: avoid; }
+    th, td { border: 1px solid #9ca3af; padding: 6px 8px; font-size: 12px; vertical-align: top; }
+    th { background: #f3f4f6; font-weight: 600; }
+    ul, ol { padding-left: 24px; }
+    li { margin: 4px 0; }
+    blockquote { border-left: 4px solid #d1d5db; padding-left: 12px; color: #4b5563; }
+    pre, code { font-family: "SFMono-Regular", Consolas, monospace; background: #f9fafb; }
+    pre { padding: 12px; overflow-wrap: break-word; white-space: pre-wrap; }
+    img { max-width: 100%; page-break-inside: avoid; }
+    .document-title { page-break-after: avoid; }
+  </style>
+</head>
+<body>
+  <article>
+    ${body}
+  </article>
+</body>
+</html>`;
+}
+
+async function renderPdfWithPlaywright(html: string, outputPath: string): Promise<void> {
+  const { chromium } = await import('playwright');
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle' });
+    await page.pdf({
+      path: outputPath,
+      format: 'A4',
+      printBackground: true,
+      margin: { top: '24mm', right: '18mm', bottom: '22mm', left: '18mm' },
+      displayHeaderFooter: true,
+      headerTemplate: '<div></div>',
+      footerTemplate: '<div style="font-size:9px;width:100%;text-align:center;color:#6b7280;">第 <span class="pageNumber"></span> 页 / 共 <span class="totalPages"></span> 页</div>',
+    });
+  } finally {
+    await browser.close();
+  }
 }
 
 export class ExportTools {
@@ -44,7 +105,7 @@ export class ExportTools {
   }
 
   async exportHtml(output: string, title: string, body: string): Promise<string> {
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head><body><pre>${escapeHtml(body)}</pre></body></html>`;
+    const html = documentHtml(title, await markdownToHtml(body));
     const full = resolveSafe(output, this.cwd);
     await fs.mkdir(path.dirname(full), { recursive: true });
     await fs.writeFile(full, html, 'utf-8');
@@ -52,10 +113,12 @@ export class ExportTools {
   }
 
   async exportPdf(output: string, title: string, body: string): Promise<string> {
-    const pdf = simplePdf(`${title}\n\n${body}`);
     const full = resolveSafe(output, this.cwd);
     await fs.mkdir(path.dirname(full), { recursive: true });
-    await fs.writeFile(full, pdf);
+    const html = documentHtml(title, await markdownToHtml(`# ${title}\n\n${body}`));
+    const htmlOutput = `${full.replace(/\.pdf$/iu, '')}.html`;
+    await fs.writeFile(htmlOutput, html, 'utf-8');
+    await renderPdfWithPlaywright(html, full);
     return `Exported PDF: ${output}`;
   }
 

@@ -1,5 +1,55 @@
 # customize-agent
 
+## 3.0.11
+
+### Patch Changes
+
+- Enhance the user guide with rich staged walkthroughs, guided timelines, detailed operation steps, and completion checklists.
+- Updated dependencies
+  - @customize-agent/server@3.0.10
+
+## 3.0.10
+
+### Patch Changes
+
+- Add document generation execution status card and detailed full-flow user guide page.
+- Updated dependencies
+  - @customize-agent/server@3.0.9
+
+## 3.0.9
+
+### Patch Changes
+
+- Add document multi-stage execution engine, LLM JSON fact extraction, structured table parsing, source traceability, and export gate enforcement.
+- Updated dependencies
+  - @customize-agent/server@3.0.8
+  - @customize-agent/llm@3.0.3
+  - @customize-agent/knowledge@3.0.6
+  - @customize-agent/runtime@3.0.5
+  - @customize-agent/tools@3.0.5
+
+## 3.0.8
+
+### Patch Changes
+
+- Add production document workflow capabilities with role execution types, file processing types, structured facts, stricter validation, and formal document layout export.
+- Updated dependencies
+  - @customize-agent/server@3.0.7
+  - @customize-agent/knowledge@3.0.5
+  - @customize-agent/runtime@3.0.4
+  - @customize-agent/tools@3.0.4
+
+## 3.0.7
+
+### Patch Changes
+
+- Release document generation workbench, embedding configuration, PDF export, and knowledge-driven document workflow improvements.
+- Updated dependencies
+  - @customize-agent/server@3.0.6
+  - @customize-agent/runtime@3.0.3
+  - @customize-agent/knowledge@3.0.4
+  - @customize-agent/tools@3.0.3
+
 ## 3.0.6
 
 ### Patch Changes

@@ -1,4 +1,7 @@
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 export interface EmbeddingProvider {
   readonly model: string;
@@ -53,4 +56,86 @@ export class HashEmbeddingProvider implements EmbeddingProvider {
     if (norm === 0) return vector;
     return vector.map(value => value / norm);
   }
+}
+
+export interface OpenAICompatibleEmbeddingOptions {
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  dimensions?: number;
+}
+
+export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
+  readonly model: string;
+  readonly dimensions: number;
+  private readonly baseUrl: string;
+  private readonly apiKey?: string;
+
+  constructor(options: OpenAICompatibleEmbeddingOptions) {
+    this.baseUrl = options.baseUrl.replace(/\/+$/u, '');
+    this.apiKey = options.apiKey;
+    this.model = options.model;
+    this.dimensions = options.dimensions ?? 1024;
+  }
+
+  async embedDocuments(texts: string[]): Promise<number[][]> {
+    return this.embed(texts);
+  }
+
+  async embedQuery(text: string): Promise<number[]> {
+    return (await this.embed([text]))[0] ?? [];
+  }
+
+  private async embed(input: string[]): Promise<number[][]> {
+    const response = await fetch(`${this.baseUrl}/embeddings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+      },
+      body: JSON.stringify({ model: this.model, input }),
+    });
+    if (!response.ok) throw new Error(`Embedding request failed: HTTP ${response.status} ${await response.text()}`);
+    const payload = await response.json() as { data?: Array<{ embedding?: number[] }> };
+    return (payload.data ?? []).map(item => item.embedding ?? []);
+  }
+}
+
+interface StoredEmbeddingConfig {
+  provider?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  model?: string;
+  dimensions?: number;
+}
+
+function readStoredEmbeddingConfig(): StoredEmbeddingConfig | undefined {
+  try {
+    const configPath = path.join(os.homedir(), '.customize-agent', 'config.json');
+    if (!fs.existsSync(configPath)) return undefined;
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { embedding?: StoredEmbeddingConfig };
+    return raw.embedding;
+  } catch {
+    return undefined;
+  }
+}
+
+export function createEmbeddingProviderFromEnvironment(): EmbeddingProvider {
+  const stored = readStoredEmbeddingConfig();
+  const provider = process.env.CUSTOMIZE_EMBEDDING_PROVIDER ?? process.env.KB_EMBEDDING_PROVIDER ?? stored?.provider;
+  if (provider === 'openai-compatible') {
+    const baseUrl = process.env.CUSTOMIZE_EMBEDDING_BASE_URL ?? process.env.KB_EMBEDDING_BASE_URL ?? stored?.baseUrl;
+    const model = process.env.CUSTOMIZE_EMBEDDING_MODEL ?? process.env.KB_EMBEDDING_MODEL ?? stored?.model;
+    if (baseUrl && model) {
+      const rawDimensions = process.env.CUSTOMIZE_EMBEDDING_DIMENSIONS ?? process.env.KB_EMBEDDING_DIMENSIONS;
+      const dimensions = Number(rawDimensions ?? stored?.dimensions ?? 1024);
+      return new OpenAICompatibleEmbeddingProvider({
+        baseUrl,
+        model,
+        apiKey: process.env.CUSTOMIZE_EMBEDDING_API_KEY ?? process.env.KB_EMBEDDING_API_KEY ?? stored?.apiKey,
+        dimensions: Number.isFinite(dimensions) ? dimensions : 1024,
+      });
+    }
+  }
+  return new HashEmbeddingProvider();
 }

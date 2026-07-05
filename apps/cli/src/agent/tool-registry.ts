@@ -166,6 +166,133 @@ function formatOrchestrationResult(result: Awaited<ReturnType<Orchestrator['orch
   return lines.join('\n');
 }
 
+function parseJsonObject(input?: string): Record<string, unknown> {
+  if (!input) return {};
+  try { return JSON.parse(input) as Record<string, unknown>; } catch { return {}; }
+}
+
+function metadataValue(metadata: Record<string, unknown>, key: string): string | number | undefined {
+  const extraction = typeof metadata.extraction === 'object' && metadata.extraction ? metadata.extraction as Record<string, unknown> : metadata;
+  const value = extraction[key] ?? metadata[key];
+  return typeof value === 'string' || typeof value === 'number' ? value : undefined;
+}
+
+function kbInventoryMarkdown(files: Array<{ relativePath: string; category: string; format: string; chunkCount: number; status: string; errorMessage?: string; metadataJson?: string }>): string {
+  const rows = files.map(file => {
+    const metadata = parseJsonObject(file.metadataJson);
+    return {
+      file: file.relativePath,
+      category: file.category,
+      format: file.format,
+      chunks: file.chunkCount,
+      status: file.status,
+      extractionMode: String(metadataValue(metadata, 'extractionMode') ?? 'unknown'),
+      textLength: Number(metadataValue(metadata, 'textLength') ?? 0),
+      warning: file.errorMessage || (Array.isArray(metadata.warnings) ? metadata.warnings.join('; ') : ''),
+    };
+  });
+  const failed = rows.filter(row => row.status !== 'active' || row.chunks === 0);
+  const metadataOnly = rows.filter(row => row.extractionMode.includes('metadata'));
+  const lines = [
+    '# 知识库资料盘点',
+    '',
+    `- 文件总数：${rows.length}`,
+    `- 有效入库文件：${rows.length - failed.length}`,
+    `- 解析失败/无切片文件：${failed.length}`,
+    `- 仅元数据文件：${metadataOnly.length}`,
+    '',
+    '| 文件 | 类型 | 格式 | 切片 | 状态 | 解析方式 | 正文字数 | 备注 |',
+    '|---|---|---:|---:|---|---|---:|---|',
+    ...rows.map(row => `| ${row.file} | ${row.category} | ${row.format} | ${row.chunks} | ${row.status} | ${row.extractionMode} | ${row.textLength} | ${row.warning.replace(/\|/gu, ' ')} |`),
+  ];
+  return lines.join('\n');
+}
+
+const CONSTRUCTION_OUTLINE = [
+  ['basis', '第一章 编制依据', ['招标文件 编制依据 技术规范 标准 图纸 合同', '规范 标准 图纸 招标文件']],
+  ['overview', '第二章 工程概况', ['工程名称 工程地点 建设单位 工程规模 建筑面积 结构类型', '工程概况 招标范围 项目规模']],
+  ['deployment', '第三章 施工部署', ['施工部署 项目组织机构 施工段划分 总体安排', '施工组织 施工顺序 施工流水']],
+  ['schedule', '第四章 施工进度计划及保证措施', ['工期要求 开工 竣工 进度计划 节点工期', '工期 进度 保证措施']],
+  ['preparation', '第五章 施工准备', ['施工准备 技术准备 现场准备 材料准备 机械准备', '临设 水电 进场 准备']],
+  ['methods', '第六章 主要分部分项工程施工方案', ['土方 基础 主体 砌体 装饰 安装 道路 管线 主要施工方法', '分部分项 施工工艺 技术措施']],
+  ['quality', '第七章 质量保证体系及措施', ['质量目标 质量标准 验收规范 质量保证措施', '质量管理 检验 试验']],
+  ['safety', '第八章 安全生产管理体系及措施', ['安全目标 安全文明施工 安全管理 危险源 应急预案', '安全生产 风险 防护']],
+  ['civilized', '第九章 文明施工及环境保护措施', ['文明施工 环境保护 扬尘 噪声 污水 固废', '绿色施工 环保 控制措施']],
+  ['resources', '第十章 劳动力、材料、机械设备投入计划', ['劳动力计划 材料计划 机械设备计划 主要设备 表格', '资源投入 机械 劳动力 材料']],
+  ['layout', '第十一章 施工总平面布置', ['施工平面布置 临时设施 道路 水电 堆场', '总平面布置 临时用地']],
+  ['season', '第十二章 季节性施工措施', ['雨季施工 冬季施工 高温施工 台风 防汛', '季节性施工 措施']],
+  ['emergency', '第十三章 应急预案', ['应急预案 风险 应急组织 救援措施', '事故 应急 响应']],
+  ['appendix', '第十四章 附表及附件', ['附表 计划表 机械表 劳动力表 进度表', '附件 表格 清单 图纸']],
+] as const;
+
+function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter(item => {
+    const value = key(item);
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
+function sourceLine(item: { filePath: string; score: number; content: string }): string {
+  return `- ${item.filePath}（score=${item.score.toFixed(3)}）：${item.content.replace(/\s+/gu, ' ').slice(0, 220)}`;
+}
+
+async function generateConstructionDesignMarkdown(args: { requirement: string; projectRoot: string; manager: MultiProjectManager; provider?: ILLMProvider; maxEvidencePerChapter: number }): Promise<string> {
+  const project = await args.manager.getProject(args.projectRoot);
+  await project.incrementalIndex();
+  const inventory = kbInventoryMarkdown(project.listFiles());
+  const chapterBlocks: string[] = [];
+  const usedSources = new Map<string, number>();
+  const missing: string[] = [];
+
+  for (const [, title, queries] of CONSTRUCTION_OUTLINE) {
+    const evidence = [] as Array<{ filePath: string; score: number; content: string }>;
+    for (const query of queries) {
+      const result = await args.manager.search(args.projectRoot, query, { scope: 'project', limit: args.maxEvidencePerChapter });
+      evidence.push(...result.results.map(item => ({ filePath: item.filePath, score: item.score, content: item.content })));
+    }
+    const selected = uniqueBy(evidence.sort((a, b) => b.score - a.score), item => `${item.filePath}:${item.content.slice(0, 80)}`).slice(0, args.maxEvidencePerChapter);
+    for (const item of selected) usedSources.set(item.filePath, (usedSources.get(item.filePath) ?? 0) + 1);
+    if (selected.length === 0) missing.push(`${title}：未检索到明确资料依据`);
+
+    let content: string;
+    if (args.provider && selected.length > 0) {
+      const response = await args.provider.chat([
+        { role: 'system', content: '你是施工组织设计编制专家。只能根据用户提供的知识库证据编写，不得编造具体工程数据；缺失内容必须写“资料未提供，需进一步确认”。输出 Markdown。' },
+        { role: 'user', content: `用户要求：${args.requirement}\n\n章节：${title}\n\n证据：\n${selected.map(sourceLine).join('\n')}\n\n请编写本章内容，关键数据后标注来源文件名。` },
+      ], { temperature: 0.2, maxTokens: 2400 });
+      content = response.content.trim();
+    } else {
+      content = [`## ${title}`, '', selected.length > 0 ? '本章依据知识库检索到的资料整理如下：' : '资料未提供，需进一步确认。', '', ...selected.map(sourceLine)].join('\n');
+    }
+    chapterBlocks.push(content.startsWith('## ') ? content : `## ${title}\n\n${content}`);
+  }
+
+  return [
+    `# 施工组织设计`,
+    '',
+    `> 生成要求：${args.requirement}`,
+    '',
+    '## 资料盘点',
+    '',
+    inventory.replace(/^# 知识库资料盘点\n\n/u, ''),
+    '',
+    ...chapterBlocks,
+    '',
+    '## 资料来源清单',
+    '',
+    '| 文件 | 引用次数 |',
+    '|---|---:|',
+    ...[...usedSources.entries()].sort((a, b) => b[1] - a[1]).map(([file, count]) => `| ${file} | ${count} |`),
+    '',
+    '## 资料缺失项与需确认事项',
+    '',
+    ...(missing.length > 0 ? missing.map(item => `- ${item}`) : ['- 暂未发现章节级资料完全缺失项；仍建议人工复核工期、质量目标、清单工程量、图纸说明等关键数据。']),
+  ].join('\n');
+}
+
 export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
   const { root, knowledgeRoot = root, lspManager, provider, includeOrchestrator = true } = options;
   const registry = new ToolRegistry();
@@ -227,24 +354,89 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
     return [...warnings, body].join(warnings.length ? '\n\n' : '');
   });
 
-  reg(registry, 'knowledge_search', 'Search the local knowledge base. Use this for business documents, uploaded files, PDFs, spreadsheets, CAD drawings, and knowledgeBase content instead of reading raw knowledgeBase files.', {
+  reg(registry, 'knowledge_search', 'Search the local knowledge base. Use this for business documents, uploaded files, PDFs, spreadsheets, CAD drawings, and knowledgeBase content instead of reading raw knowledgeBase files. For formal document generation, use limit 20-50 and run multiple chapter-specific searches.', {
     query: { type: 'string', description: 'Natural language query or keywords to search in the local knowledge base' },
     scope: { type: 'string', description: 'Search scope: project, global, or all. Default: all' },
-    limit: { type: 'number', description: 'Maximum number of results. Default: 5' },
+    limit: { type: 'number', description: 'Maximum number of results. Default: 10' },
   }, ['query'], ['search_symbol'], false, async args => {
     // 将 ILLMProvider 作为 LLMSearchProvider 传入（结构兼容）
     const manager = new MultiProjectManager(undefined, provider as LLMSearchProvider);
     try {
       const result = await manager.search(knowledgeRoot, String(args.query), {
         scope: args.scope === 'project' || args.scope === 'global' || args.scope === 'all' ? args.scope : 'all',
-        limit: typeof args.limit === 'number' ? args.limit : 5,
+        limit: typeof args.limit === 'number' ? args.limit : 10,
+        weights: { keyword: 0.4, vector: 0.45, rewrite: 0.75, hybridBonus: 0.15 },
       });
       if (result.results.length === 0) return `No knowledge base results for "${String(args.query)}".`;
       return result.results.map((item, index) => [
         `## KB-${index + 1}: ${item.filePath}`,
-        `scope=${item.scope}, score=${item.score.toFixed(3)}, collection=${item.collection}`,
+        `scope=${item.scope}, score=${item.score.toFixed(3)}, collection=${item.collection}, source=${item.source ?? 'unknown'}`,
+        item.sectionTitle ? `section=${item.sectionTitle}` : '',
         item.content,
-      ].join('\n')).join('\n\n');
+      ].filter(Boolean).join('\n')).join('\n\n');
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  reg(registry, 'knowledge_inventory', 'Inventory the local knowledge base files, extraction status, chunk counts, parsing modes, warnings, and failed files. Use before generating formal documents from uploaded materials.', {}, [], ['search_symbol'], false, async () => {
+    const manager = new MultiProjectManager(undefined, provider as LLMSearchProvider);
+    try {
+      const project = await manager.getProject(knowledgeRoot);
+      await project.incrementalIndex();
+      return kbInventoryMarkdown(project.listFiles());
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  reg(registry, 'knowledge_file_detail', 'Read parsed chunks and metadata for a specific knowledge base file after knowledge_search finds a relevant source.', {
+    relativePath: { type: 'string', description: 'Knowledge base relative file path' },
+    maxChunks: { type: 'number', description: 'Maximum chunks to return. Default: 30' },
+  }, ['relativePath'], ['search_symbol'], false, async args => {
+    const manager = new MultiProjectManager(undefined, provider as LLMSearchProvider);
+    try {
+      const project = await manager.getProject(knowledgeRoot);
+      await project.incrementalIndex();
+      const detail = project.getFileDetail(String(args.relativePath));
+      if (!detail) return `No knowledge base file detail found for ${String(args.relativePath)}.`;
+      const maxChunks = typeof args.maxChunks === 'number' ? Math.max(1, Math.min(200, args.maxChunks)) : 30;
+      const metadata = parseJsonObject(detail.file.metadataJson);
+      return [
+        `# ${detail.file.relativePath}`,
+        '',
+        `- category: ${detail.file.category}`,
+        `- format: ${detail.file.format}`,
+        `- status: ${detail.file.status}`,
+        `- chunks: ${detail.file.chunkCount}`,
+        `- extractionMode: ${metadataValue(metadata, 'extractionMode') ?? 'unknown'}`,
+        `- textLength: ${metadataValue(metadata, 'textLength') ?? 0}`,
+        detail.file.errorMessage ? `- error: ${detail.file.errorMessage}` : '',
+        '',
+        '## Parsed chunks',
+        ...detail.chunks.slice(0, maxChunks).map(chunk => `\n### Chunk ${chunk.chunkIndex}${chunk.sectionTitle ? ` — ${chunk.sectionTitle}` : ''}\n${chunk.content}`),
+      ].filter(Boolean).join('\n');
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  reg(registry, 'generate_construction_organization_design', 'Generate a construction organization design Markdown draft from the local knowledge base using inventory, chapter-level retrieval, source citations, and missing-item reporting. Export to PDF separately with export_pdf after reviewing the Markdown.', {
+    requirement: { type: 'string', description: 'User requirement and project generation instruction' },
+    output: { type: 'string', description: 'Markdown output file path' },
+    maxEvidencePerChapter: { type: 'number', description: 'Evidence count per chapter. Default: 12' },
+  }, ['requirement', 'output'], ['search_symbol', 'write_code'], true, async args => {
+    const manager = new MultiProjectManager(undefined, provider as LLMSearchProvider);
+    try {
+      const markdown = await generateConstructionDesignMarkdown({
+        requirement: String(args.requirement),
+        projectRoot: knowledgeRoot,
+        manager,
+        provider,
+        maxEvidencePerChapter: typeof args.maxEvidencePerChapter === 'number' ? Math.max(5, Math.min(30, args.maxEvidencePerChapter)) : 12,
+      });
+      await toolkit.writeFileWithBackup(String(args.output), markdown);
+      return `Construction organization design draft exported: ${String(args.output)}\n\n${markdown.slice(0, 4000)}`;
     } finally {
       await manager.shutdown();
     }

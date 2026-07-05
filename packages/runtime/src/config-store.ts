@@ -30,10 +30,19 @@ export interface ProviderConfig {
   protocol?: string;
 }
 
+export interface EmbeddingConfig {
+  provider: 'hash' | 'openai-compatible';
+  baseUrl?: string;
+  apiKey?: string;
+  model?: string;
+  dimensions?: number;
+}
+
 export interface UserConfig {
   language: 'zh' | 'en';
   providers: Record<string, ProviderConfig>;
   models: ModelsConfig;
+  embedding: EmbeddingConfig;
 }
 
 // ── 协议自动推断 ──
@@ -54,7 +63,8 @@ export function resolveProtocol(providerName: string, config?: ProviderConfig): 
 // ── 默认值 ──
 
 const EMPTY_TIER: TierConfig = { active: '', list: [] };
-const DEFAULT_CONFIG: UserConfig = { language: 'zh', providers: {}, models: { reader: { ...EMPTY_TIER }, reasoning: { ...EMPTY_TIER }, action: { ...EMPTY_TIER } } };
+const DEFAULT_EMBEDDING: EmbeddingConfig = { provider: 'hash' };
+const DEFAULT_CONFIG: UserConfig = { language: 'zh', providers: {}, models: { reader: { ...EMPTY_TIER }, reasoning: { ...EMPTY_TIER }, action: { ...EMPTY_TIER } }, embedding: { ...DEFAULT_EMBEDDING } };
 
 // ── ConfigStore ──
 
@@ -77,7 +87,7 @@ export class ConfigStore {
       this._cache = this._parse(JSON.parse(raw));
       this._cacheMtimeMs = stat?.mtimeMs ?? 0;
     } catch {
-      this._cache = { language: 'zh', providers: {}, models: { reader: { ...EMPTY_TIER }, reasoning: { ...EMPTY_TIER }, action: { ...EMPTY_TIER } } };
+      this._cache = { ...DEFAULT_CONFIG, models: { reader: { ...EMPTY_TIER }, reasoning: { ...EMPTY_TIER }, action: { ...EMPTY_TIER } }, embedding: { ...DEFAULT_EMBEDDING } };
       this.save(this._cache);
     }
     return this._cache;
@@ -129,6 +139,16 @@ export class ConfigStore {
     return this.load().providers[name];
   }
 
+  getEmbedding(): EmbeddingConfig {
+    return this.load().embedding;
+  }
+
+  setEmbedding(embedding: EmbeddingConfig): UserConfig {
+    const cfg = this.load();
+    cfg.embedding = embedding;
+    return this.save(cfg);
+  }
+
   // ── Model ──
 
   getTier(tier: ModelTier): TierConfig { return this.load().models[tier]; }
@@ -177,6 +197,7 @@ export class ConfigStore {
         reasoning: this._pTier((raw.models as Record<string, unknown>)?.reasoning),
         action: this._pTier((raw.models as Record<string, unknown>)?.action),
       },
+      embedding: this._pEmbedding(raw.embedding),
     };
   }
 
@@ -186,6 +207,19 @@ export class ConfigStore {
     return {
       active: typeof r.active === 'string' ? r.active : '',
       list: Array.isArray(r.list) ? (r.list as Array<Record<string, unknown>>).filter(e => typeof e.name === 'string' && typeof e.provider === 'string').map(e => ({ name: e.name as string, provider: e.provider as string })) : [],
+    };
+  }
+
+  private _pEmbedding(raw: unknown): EmbeddingConfig {
+    if (!raw || typeof raw !== 'object') return { ...DEFAULT_EMBEDDING };
+    const r = raw as Record<string, unknown>;
+    const provider = r.provider === 'openai-compatible' ? 'openai-compatible' : 'hash';
+    return {
+      provider,
+      baseUrl: typeof r.baseUrl === 'string' ? r.baseUrl : undefined,
+      apiKey: typeof r.apiKey === 'string' ? r.apiKey : undefined,
+      model: typeof r.model === 'string' ? r.model : undefined,
+      dimensions: typeof r.dimensions === 'number' && Number.isFinite(r.dimensions) ? r.dimensions : undefined,
     };
   }
 }

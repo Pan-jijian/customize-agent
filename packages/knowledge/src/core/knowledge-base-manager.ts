@@ -6,7 +6,7 @@ import { FileClassifier } from '../classification/classifier.js';
 import { ALL_CATEGORIES, DEFAULT_CATEGORY_DIRS, GLOBAL_KNOWLEDGE_DIR, USER_DATA_DIR } from '../constants.js';
 import { DedupEngine } from '../dedup/dedup-engine.js';
 import { RelationshipDetector } from '../dedup/relationship-detector.js';
-import { HashEmbeddingProvider, type EmbeddingProvider } from '../embedding/embedding-provider.js';
+import { createEmbeddingProviderFromEnvironment, type EmbeddingProvider } from '../embedding/embedding-provider.js';
 import { ContentExtractor } from '../extraction/content-extractor.js';
 import type { ExternalExtractorRegistry } from '../extraction/external-extractor.js';
 import type { LLMSearchProvider } from '../llm/llm-search-provider.js';
@@ -73,7 +73,7 @@ export class KnowledgeBaseManager {
     this.scope = options.scope;
     this.projectRoot = options.projectRoot;
     this.projectId = options.projectId;
-    this.embeddingProvider = options.embeddingProvider ?? new HashEmbeddingProvider();
+    this.embeddingProvider = options.embeddingProvider ?? createEmbeddingProviderFromEnvironment();
     this.vectorStores = options.vectorStores ?? new Map();
     this.extractor = new ContentExtractor(options.externalExtractors);
     this.llmProvider = options.llmProvider;

@@ -1,5 +1,23 @@
 # @customize-agent/tools
 
+## 3.0.5
+
+### Patch Changes
+
+- Add document multi-stage execution engine, LLM JSON fact extraction, structured table parsing, source traceability, and export gate enforcement.
+
+## 3.0.4
+
+### Patch Changes
+
+- Add production document workflow capabilities with role execution types, file processing types, structured facts, stricter validation, and formal document layout export.
+
+## 3.0.3
+
+### Patch Changes
+
+- Release document generation workbench, embedding configuration, PDF export, and knowledge-driven document workflow improvements.
+
 ## 3.0.2
 
 ### Patch Changes

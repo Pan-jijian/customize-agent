@@ -98,6 +98,12 @@ export async function getKbOperations(projectRoot?: string) {
   return fetchJson<{ operations: KbOperationRecord[] }>(`/api/kb/operations?${params}`);
 }
 
+export async function clearKbOperations(projectRoot?: string) {
+  const params = new URLSearchParams();
+  if (projectRoot) params.set('projectRoot', projectRoot);
+  return fetchJson<{ success: boolean; deleted: number }>(`/api/kb/operations?${params}`, { method: 'DELETE' });
+}
+
 export async function deleteKbFile(relativePath: string, projectRoot?: string) {
   return fetchJson<{ success: boolean; deleted?: number }>('/api/kb/files', {
     method: 'DELETE', headers: { 'Content-Type': 'application/json' },
@@ -181,10 +187,75 @@ export async function searchKb(query: string, opts?: { projectRoot?: string; cat
   return fetchJson<{ results: KbSearchResult[]; total: number; queryTimeMs?: number; debug?: { originalQuery?: string; rewrittenQueries?: string[]; weights?: Record<string, number>; recallCounts?: Record<string, number>; reranker?: string } }>(`/api/kb/search?${params}`);
 }
 
+// ═══════ Document Workbench ═══════
+
+export interface DocumentTemplateChapter { id: string; title: string; purpose: string; queries: string[]; requiredFacts: string[]; }
+export interface PromptBinding { promptId: string; roleId: string; }
+export interface FileBinding { filePath: string; roleId: string; }
+export type PromptExecutionType = 'fact_extraction' | 'chapter_generation' | 'validation' | 'formatting' | 'reference';
+export type FileProcessingType = 'rule' | 'project_fact' | 'table' | 'drawing' | 'specification' | 'reference';
+export interface DocumentRole { id: string; name: string; description: string; type: 'file' | 'prompt'; resourceId?: string; executionType?: PromptExecutionType; processingType?: FileProcessingType; }
+export interface ProjectRoleItem { roleId: string; order: number; }
+export interface ProjectRoleConfig { id: string; name: string; description: string; fileRoles: ProjectRoleItem[]; promptRoles: ProjectRoleItem[]; }
+export interface DocumentTemplate { id: string; name: string; description: string; category: string; outputTitle: string; chapters: DocumentTemplateChapter[]; projectRoleConfigId?: string; promptIds?: string[]; boundFilePaths?: string[]; promptBindings?: PromptBinding[]; fileBindings?: FileBinding[]; builtIn?: boolean; }
+export interface PromptProject { id: string; projectId: string; projectRoot?: string; projectName: string; customizePath: string; content: string; mtime: string; hasFile: boolean; isCurrent: boolean; selected: boolean; source: 'current' | 'project' | 'custom'; }
+export interface DocumentEvidence { chapterId: string; filePath: string; score: number; content: string; roleId?: string; processingType?: string; sectionTitle?: string; source?: string; }
+export interface DocumentDraftChapter { id: string; title: string; content: string; evidence: DocumentEvidence[]; missingFacts: string[]; }
+export interface FactSourceRef { filePath: string; roleId: string; processingType?: string; sectionTitle?: string; chunkIndex?: number; cellRange?: string; }
+export interface DocumentFact { key: string; value: string; sourceFile: string; roleId: string; processingType?: string; confidence: number; sourceRef?: FactSourceRef; }
+export interface StructuredTableFact { tableType: string; sheet?: string; headers: string[]; rows: string[][]; sourceFile: string; sourceRange?: string; }
+export interface DocumentFactsModel { project: DocumentFact[]; schedule: DocumentFact[]; quality: DocumentFact[]; safety: DocumentFact[]; resources: DocumentFact[]; tables: StructuredTableFact[]; drawings: DocumentFact[]; rules: DocumentFact[]; specifications: DocumentFact[]; missing: string[]; conflicts: string[]; }
+export interface ValidationIssue { level: 'error' | 'warning' | 'info'; message: string; source?: string; suggestion?: string; }
+export interface ExportGateResult { passed: boolean; blockingIssues: ValidationIssue[]; checklist: Array<{ key: string; label: string; passed: boolean; message?: string }>; }
+export interface DocumentExecutionStage { type: 'fact_extraction' | 'chapter_generation' | 'validation' | 'formatting' | 'reference'; roleId: string; promptId?: string; status: 'success' | 'fallback' | 'skipped' | 'failed'; message?: string; }
+export interface GeneratedDocumentDraft { templateId: string; templateName: string; title: string; requirement: string; markdown: string; facts: Record<string, string>; structuredFacts: DocumentFact[]; factsModel: DocumentFactsModel; chapters: DocumentDraftChapter[]; sources: Array<{ filePath: string; count: number }>; missingItems: string[]; validation: { passed: boolean; warnings: string[]; errors: string[] }; validationIssues: ValidationIssue[]; executionStages: DocumentExecutionStage[]; exportGate: ExportGateResult; generatedAt: number; }
+export interface StoredDocumentDraft extends GeneratedDocumentDraft { id: string; updatedAt: number; }
+
+export async function getPromptProjects() { return fetchJson<PromptProject[]>('/api/prompt'); }
+export async function getDocumentRoles(type?: 'file' | 'prompt') { return fetchJson<{ roles: DocumentRole[]; configs: ProjectRoleConfig[] }>(`/api/documents/roles${type ? `?type=${type}` : ''}`); }
+export async function saveDocumentRole(role: DocumentRole) {
+  return fetchJson<{ role: DocumentRole; roles: DocumentRole[]; configs: ProjectRoleConfig[] }>('/api/documents/roles', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(role) });
+}
+export async function deleteDocumentRole(type: 'file' | 'prompt', id: string) {
+  return fetchJson<{ success: boolean; roles: DocumentRole[]; configs: ProjectRoleConfig[] }>(`/api/documents/roles?type=${type}&id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+export async function saveProjectRoleConfig(config: ProjectRoleConfig) {
+  return fetchJson<{ config: ProjectRoleConfig; roles: DocumentRole[]; configs: ProjectRoleConfig[] }>('/api/documents/roles?mode=config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+}
+export async function deleteProjectRoleConfig(id: string) {
+  return fetchJson<{ success: boolean; roles: DocumentRole[]; configs: ProjectRoleConfig[] }>(`/api/documents/roles?mode=config&id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+export async function getDocumentTemplates() { return fetchJson<{ templates: DocumentTemplate[] }>('/api/documents/templates'); }
+export async function saveDocumentTemplate(template: DocumentTemplate) {
+  return fetchJson<{ template: DocumentTemplate; templates: DocumentTemplate[] }>('/api/documents/templates', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(template) });
+}
+export async function deleteDocumentTemplate(templateId: string) {
+  return fetchJson<{ success: boolean; templates: DocumentTemplate[] }>(`/api/documents/templates?templateId=${encodeURIComponent(templateId)}`, { method: 'DELETE' });
+}
+export async function duplicateDocumentTemplate(templateId: string) {
+  return fetchJson<{ template: DocumentTemplate; templates: DocumentTemplate[] }>('/api/documents/templates', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ templateId }) });
+}
+export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string }) {
+  return fetchJson<{ draft: GeneratedDocumentDraft }>('/api/documents/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+}
+export async function regenerateDocumentChapter(input: { templateId: string; chapterId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string }) {
+  return fetchJson<{ chapter: DocumentDraftChapter }>('/api/documents/chapter/regenerate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+}
+export async function getDocumentDrafts() { return fetchJson<{ drafts: StoredDocumentDraft[] }>('/api/documents/drafts'); }
+export async function saveDocumentDraft(draft: GeneratedDocumentDraft, id?: string) {
+  return fetchJson<{ draft: StoredDocumentDraft }>('/api/documents/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft, id }) });
+}
+export async function exportDocument(input: { title: string; markdown: string; format: 'markdown' | 'html' | 'pdf'; enforceGate?: boolean; exportGate?: ExportGateResult }) {
+  const response = await fetch('/api/documents/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+  if (!response.ok) throw new Error(await response.text());
+  return response.blob();
+}
+
 // ═══════ Model Config ═══════
 
 export interface ProviderInfo { name: string; apiKey?: string; baseUrl?: string; protocol?: string; detectedProtocol: string; hasApiKey: boolean; }
 export interface ModelsConfig { reader: { active: string; list: { name: string; provider: string }[] }; reasoning: { active: string; list: { name: string; provider: string }[] }; action: { active: string; list: { name: string; provider: string }[] }; }
+export interface EmbeddingConfig { provider: 'hash' | 'openai-compatible'; baseUrl?: string; apiKey?: string; model?: string; dimensions?: number; hasApiKey?: boolean; }
 
 export async function getProviders() { return fetchJson<ProviderInfo[]>('/api/config/providers'); }
 export async function saveProvider(name: string, cfg: { apiKey?: string; baseUrl?: string; protocol?: string; oldName?: string }) {
@@ -194,6 +265,13 @@ export async function deleteProvider(name: string) { return fetchJson<{ success:
 export async function getModels() { return fetchJson<ModelsConfig>('/api/config/models'); }
 export async function saveModels(models: ModelsConfig) {
   return fetchJson<{ success: boolean }>('/api/config/models', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(models) });
+}
+export async function getEmbeddingConfig() { return fetchJson<EmbeddingConfig>('/api/config/embedding'); }
+export async function saveEmbeddingConfig(config: EmbeddingConfig) {
+  return fetchJson<EmbeddingConfig>('/api/config/embedding', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+}
+export async function embeddingHealthCheck() {
+  return fetchJson<{ success: boolean; message: string; latencyMs?: number }>('/api/config/embedding/healthCheck', { method: 'POST' });
 }
 export async function healthCheck(providerName: string) {
   return fetchJson<{ success: boolean; message: string }>('/api/config/healthCheck', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: providerName }) });
