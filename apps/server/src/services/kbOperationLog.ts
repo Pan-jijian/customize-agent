@@ -74,3 +74,10 @@ export function upsertKbOperation(projectRoot: string, patch: Omit<Partial<KbOpe
 export function listKbOperations(projectRoot: string, limit = 50): KbOperationRecord[] {
   return readAll(projectRoot).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
 }
+
+export function clearKbOperations(projectRoot: string): number {
+  const records = readAll(projectRoot);
+  const file = logPath(projectRoot);
+  if (fs.existsSync(file)) fs.unlinkSync(file);
+  return records.length;
+}

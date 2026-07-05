@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { Card, Table, Button, Input, Select, Tag, Modal, Space, App, Progress, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { UploadOutlined, SearchOutlined, DeleteOutlined, FileTextOutlined } from '@ant-design/icons';
-import { getKbFiles, getKbOperations, getKbUploadProgress, deleteKbFile, deleteKbFiles, deleteAllKbFiles, uploadKbFiles, reindexKb, type KbFileItem, type KbOperationRecord } from '@/lib/api';
+import { getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbFile, deleteKbFiles, deleteAllKbFiles, uploadKbFiles, reindexKb, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
@@ -73,6 +73,16 @@ export default function FilesPage() {
   }, []);
 
   useEffect(() => { void loadOperations(); }, [loadOperations]);
+
+  const handleClearOperations = async () => {
+    try {
+      await clearKbOperations();
+      setStatusItems([]);
+      message.success('任务状态已清空');
+    } catch {
+      message.error('清空任务状态失败');
+    }
+  };
 
   const fileMeta = (item?: KbFileItem) => {
     if (!item) return {};
@@ -209,7 +219,7 @@ export default function FilesPage() {
       <div className={styles.statusPanel}>
         <div className={styles.statusPanelHeader}>
           <Space><FileTextOutlined />文件任务状态</Space>
-          <Button size="small" type="text" disabled={statusItems.length === 0} onClick={() => setStatusItems([])}>清空</Button>
+          <Button size="small" type="text" disabled={statusItems.length === 0} onClick={() => void handleClearOperations()}>清空</Button>
         </div>
         {statusItems.length === 0 ? <div className={styles.statusEmpty}>暂无文件任务。</div> : <div className={styles.statusList}>
           {statusItems.map((item, index) => <div key={`${item.title}-${index}`} className={styles.statusItem}>

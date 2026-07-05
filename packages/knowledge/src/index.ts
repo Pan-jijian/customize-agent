@@ -5,7 +5,7 @@ export { TextChunker, type ChunkConfig, type TextChunk } from './chunking/text-c
 export { FileClassifier } from './classification/classifier.js';
 export { DedupEngine, type MinHashSignature, type SimilarityMatch } from './dedup/dedup-engine.js';
 export { RelationshipDetector } from './dedup/relationship-detector.js';
-export { HashEmbeddingProvider, type EmbeddingProvider } from './embedding/embedding-provider.js';
+export { HashEmbeddingProvider, OpenAICompatibleEmbeddingProvider, createEmbeddingProviderFromEnvironment, type EmbeddingProvider, type OpenAICompatibleEmbeddingOptions } from './embedding/embedding-provider.js';
 export { ContentExtractor, type ExtractionResult } from './extraction/content-extractor.js';
 export { CommandExternalExtractor, ExternalExtractorRegistry, type CommandExternalExtractorOptions, type ExternalExtractionResult, type ExternalExtractor, type ExternalExtractorCapability } from './extraction/external-extractor.js';
 

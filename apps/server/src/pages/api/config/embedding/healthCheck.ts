@@ -1,0 +1,27 @@
+import type { NextApiRequest, NextApiResponse } from 'next';
+import { getConfigStore } from '@/services/configService';
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  const start = Date.now();
+  try {
+    const embedding = getConfigStore().getEmbedding();
+    if (embedding.provider === 'hash') return res.status(200).json({ success: true, message: '本地 Hash Embedding 可用', latencyMs: Date.now() - start });
+    if (!embedding.baseUrl || !embedding.model) return res.status(200).json({ success: false, message: 'Embedding baseUrl/model 未配置', latencyMs: Date.now() - start });
+    const response = await fetch(`${embedding.baseUrl.replace(/\/+$/u, '')}/embeddings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(embedding.apiKey ? { Authorization: `Bearer ${embedding.apiKey}` } : {}),
+      },
+      body: JSON.stringify({ model: embedding.model, input: ['ping'] }),
+    });
+    if (!response.ok) return res.status(200).json({ success: false, message: `HTTP ${response.status}`, latencyMs: Date.now() - start });
+    const payload = await response.json() as { data?: Array<{ embedding?: number[] }> };
+    const vector = payload.data?.[0]?.embedding;
+    return res.status(200).json({ success: Array.isArray(vector) && vector.length > 0, message: Array.isArray(vector) && vector.length > 0 ? '连接成功' : '返回向量为空', latencyMs: Date.now() - start });
+  } catch (e: unknown) {
+    console.error('[api] config/embedding/healthCheck', e);
+    return res.status(200).json({ success: false, message: 'Health check failed', latencyMs: Date.now() - start });
+  }
+}

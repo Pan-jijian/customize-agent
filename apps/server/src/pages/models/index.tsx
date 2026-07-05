@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useAppTranslations } from '@/components/Layout';
-import { Card, Button, Tag, Modal, Input, Select, Row, Col, Space, Popconfirm, Form, App } from 'antd';
+import { Card, Button, Tag, Modal, Input, Select, Row, Col, Space, Popconfirm, Form, App, InputNumber, Alert } from 'antd';
 import { PlusOutlined, DeleteOutlined, ApiOutlined, KeyOutlined, GlobalOutlined, EditOutlined, CheckCircleFilled, CloseCircleFilled, ThunderboltOutlined } from '@ant-design/icons';
-import { getProviders, getModels, saveProvider, deleteProvider, saveModels, healthCheck, getProviderDetail, type ProviderInfo, type ModelsConfig } from '@/lib/api';
+import { getProviders, getModels, saveProvider, deleteProvider, saveModels, healthCheck, getProviderDetail, getEmbeddingConfig, saveEmbeddingConfig, embeddingHealthCheck, type ProviderInfo, type ModelsConfig, type EmbeddingConfig } from '@/lib/api';
 import styles from './style.module.scss';
 
 const PROTOCOL_OPTIONS = [
@@ -21,9 +21,17 @@ const TIERS = [
 export default function ModelsPage() {
   const t = useAppTranslations();
   const { message } = App.useApp();
+  const embeddingProviderOptions = [
+    { label: t('models.embeddingProviderHash'), value: 'hash' },
+    { label: t('models.embeddingProviderOpenAI'), value: 'openai-compatible' },
+  ];
   const [loading, setLoading] = useState(true);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [models, setModels] = useState<ModelsConfig | null>(null);
+  const [embedding, setEmbedding] = useState<EmbeddingConfig>({ provider: 'hash', dimensions: 384 });
+  const [embeddingSaving, setEmbeddingSaving] = useState(false);
+  const [embeddingTesting, setEmbeddingTesting] = useState(false);
+  const [embeddingTestResult, setEmbeddingTestResult] = useState<boolean | null>(null);
 
   // 添加弹窗
   const [addOpen, setAddOpen] = useState(false);
@@ -47,7 +55,10 @@ export default function ModelsPage() {
 
   const load = async () => {
     setLoading(true);
-    try { const [p, m] = await Promise.all([getProviders().catch(() => []), getModels().catch(() => null)]); setProviders(p); setModels(m); }
+    try {
+      const [p, m, e] = await Promise.all([getProviders().catch(() => []), getModels().catch(() => null), getEmbeddingConfig().catch(() => ({ provider: 'hash' as const, dimensions: 384 }))]);
+      setProviders(p); setModels(m); setEmbedding(e);
+    }
     catch { message.error(t('common.error')); } finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, []);
@@ -98,6 +109,25 @@ export default function ModelsPage() {
     setTesting(n);
     try { const r = await healthCheck(n); setResults((p) => ({ ...p, [n]: r.success })); message[r.success ? 'success' : 'error'](r.success ? t('models.connected') : t('models.connectionFailed')); }
     catch { setResults((p) => ({ ...p, [n]: false })); } finally { setTesting(null); }
+  };
+
+  const handleEmbeddingSave = async () => {
+    setEmbeddingSaving(true);
+    try {
+      const saved = await saveEmbeddingConfig(embedding);
+      setEmbedding(saved);
+      setEmbeddingTestResult(null);
+      message.success(t('common.success'));
+    } catch { message.error(t('common.error')); } finally { setEmbeddingSaving(false); }
+  };
+
+  const handleEmbeddingTest = async () => {
+    setEmbeddingTesting(true);
+    try {
+      const result = await embeddingHealthCheck();
+      setEmbeddingTestResult(result.success);
+      message[result.success ? 'success' : 'error'](result.message || (result.success ? t('models.connected') : t('models.connectionFailed')));
+    } catch { setEmbeddingTestResult(false); message.error(t('common.error')); } finally { setEmbeddingTesting(false); }
   };
 
   // ── 层级分配 ──
@@ -157,6 +187,60 @@ export default function ModelsPage() {
             ))}
           </Row>
         )}
+      </Card>
+
+      <Card title={t('models.embeddingConfig')} size="small" loading={loading}>
+        <Alert className="mb-4" type="info" showIcon message={t('models.embeddingHint')} />
+        <Form layout="vertical" size="middle">
+          <Row gutter={[12, 12]}>
+            <Col xs={24} lg={8}>
+              <Form.Item label={t('models.embeddingProvider')}>
+                <Select
+                  value={embedding.provider}
+                  options={embeddingProviderOptions}
+                  onChange={(provider) => setEmbedding(prev => ({ ...prev, provider, dimensions: provider === 'hash' ? 384 : (prev.dimensions || 1024) }))}
+                />
+              </Form.Item>
+            </Col>
+            {embedding.provider === 'openai-compatible' && (
+              <>
+                <Col xs={24} lg={8}>
+                  <Form.Item label="Base URL">
+                    <Input value={embedding.baseUrl} onChange={(e) => setEmbedding(prev => ({ ...prev, baseUrl: e.target.value }))} placeholder="http://localhost:11434/v1" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} lg={8}>
+                  <Form.Item label={t('models.model')}>
+                    <Input value={embedding.model} onChange={(e) => setEmbedding(prev => ({ ...prev, model: e.target.value }))} placeholder="bge-m3" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} lg={8}>
+                  <Form.Item label={t('models.apiKey')} help={embedding.hasApiKey ? t('models.embeddingApiKeyHint') : undefined}>
+                    <Input.Password value={embedding.apiKey} onFocus={() => { if (embedding.apiKey?.includes('•')) setEmbedding(prev => ({ ...prev, apiKey: '' })); }} onChange={(e) => setEmbedding(prev => ({ ...prev, apiKey: e.target.value }))} placeholder={t('models.optional')} />
+                  </Form.Item>
+                </Col>
+              </>
+            )}
+            <Col xs={24} lg={8}>
+              <Form.Item label={t('models.dimensions')}>
+                <InputNumber className="w-full" min={1} value={embedding.dimensions} onChange={(value) => setEmbedding(prev => ({ ...prev, dimensions: Number(value || (prev.provider === 'hash' ? 384 : 1024)) }))} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} lg={8}>
+              <Form.Item label={t('models.status')}>
+                <Space>
+                  <Tag color={embedding.provider === 'hash' ? 'default' : 'blue'}>{embedding.provider === 'hash' ? t('models.localHash') : t('models.openAICompatible')}</Tag>
+                  {embeddingTestResult === true && <Tag color="success">{t('models.connected')}</Tag>}
+                  {embeddingTestResult === false && <Tag color="error">{t('models.connectionFailed')}</Tag>}
+                </Space>
+              </Form.Item>
+            </Col>
+          </Row>
+          <Space>
+            <Button type="primary" loading={embeddingSaving} onClick={() => { void handleEmbeddingSave(); }}>{t('models.saveEmbedding')}</Button>
+            <Button icon={<ApiOutlined />} loading={embeddingTesting} onClick={() => { void handleEmbeddingTest(); }}>{t('models.testEmbedding')}</Button>
+          </Space>
+        </Form>
       </Card>
 
       {models && (
