@@ -1,79 +1,170 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Card, Empty, Image, List, Popconfirm, Space, Tag, Typography } from 'antd';
-import { DeleteOutlined, ExportOutlined, FileOutlined, FolderOpenOutlined, PictureOutlined, CopyOutlined, DatabaseOutlined } from '@ant-design/icons';
+import { App, Button, Card, Col, Dropdown, Empty, Image, Modal, Row, Space, Skeleton, Tag } from 'antd';
+import { DeleteOutlined, ExportOutlined, FileOutlined, FolderOpenOutlined, PictureOutlined, CopyOutlined, DatabaseOutlined, MoreOutlined } from '@ant-design/icons';
+import { useAppTranslations } from '@/components/Layout';
 import { deleteGeneratedAsset, getGeneratedAssets, indexGeneratedAsset, openGeneratedAsset, type GeneratedAssetRecord } from '@/lib/api';
 
-const { Text, Paragraph } = Typography;
+const SOURCE_LABELS: Record<string, string> = { knowledge_base: '知识库', generated: 'AI生成', uploaded: '上传', external_url: '外部URL' };
+const ROLE_COLORS: Record<string, string> = { cover: 'magenta', reference: 'blue', generated: 'purple', attachment: 'cyan', map: 'orange', operator: 'geekblue' };
 
 export default function AssetLibraryPage() {
+  const t = useAppTranslations();
   const { message } = App.useApp();
   const [assets, setAssets] = useState<GeneratedAssetRecord[]>([]);
-  const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
 
   const loadAssets = async () => {
     try { setAssets((await getGeneratedAssets()).assets); } catch { setAssets([]); }
   };
+  useEffect(() => { setLoading(true); void loadAssets().finally(() => setLoading(false)); }, []);
 
-  useEffect(() => { void loadAssets(); }, []);
-
-  const copyPath = async (pathText?: string) => {
-    if (!pathText) return;
-    await navigator.clipboard?.writeText(pathText);
+  const copyPath = async (text?: string) => {
+    if (!text) return;
+    await navigator.clipboard?.writeText(text);
     message.success('已复制路径');
   };
 
-  const runAssetAction = async (id: string, action: 'index' | 'openFile' | 'openDirectory' | 'delete') => {
-    setLoadingId(id);
+  const runAction = async (id: string, action: 'index' | 'openFile' | 'openDirectory' | 'delete') => {
     try {
-      if (action === 'index') setAssets((await indexGeneratedAsset(id)).assets);
-      if (action === 'openFile') await openGeneratedAsset(id, 'file');
-      if (action === 'openDirectory') await openGeneratedAsset(id, 'directory');
-      if (action === 'delete') setAssets((await deleteGeneratedAsset(id)).assets);
-      if (action === 'index') message.success('已加入知识库索引');
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '操作失败');
-    } finally {
-      setLoadingId(null);
-    }
+      if (action === 'index') { setAssets((await indexGeneratedAsset(id)).assets); message.success('已加入知识库索引'); }
+      else if (action === 'openFile') await openGeneratedAsset(id, 'file');
+      else if (action === 'openDirectory') await openGeneratedAsset(id, 'directory');
+      else if (action === 'delete') { setAssets((await deleteGeneratedAsset(id)).assets); setSelectedIds(prev => { const n = new Set(prev); n.delete(id); return n; }); }
+    } catch (error) { message.error(error instanceof Error ? error.message : '操作失败'); }
   };
 
-  const previewSrc = (asset: GeneratedAssetRecord) => asset.type === 'image' && asset.path?.startsWith('generatedDocuments/assets/') ? `/api/assets/generated/preview?id=${encodeURIComponent(asset.id)}` : undefined;
+  const handleBulkDelete = (mode: 'selected' | 'all') => {
+    const targets = mode === 'selected' ? [...selectedIds] : assets.map(a => a.id);
+    if (targets.length === 0) return;
+    Modal.confirm({
+      title: mode === 'all' ? '删除全部资源？' : `删除已选 ${targets.length} 个资源？`,
+      content: '此操作不可撤销。',
+      okText: t('common.confirm'), cancelText: t('common.cancel'),
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setLoading(true);
+        try { await Promise.all(targets.map(id => deleteGeneratedAsset(id))); await loadAssets(); setSelectedIds(new Set()); message.success(`已删除 ${targets.length} 个资源`); }
+        catch { message.error('批量删除失败'); }
+        finally { setLoading(false); }
+      },
+    });
+  };
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  };
+
+  const previewSrc = (asset: GeneratedAssetRecord) =>
+    asset.type === 'image' && asset.path?.startsWith('generatedDocuments/assets/')
+      ? `/api/assets/generated/preview?id=${encodeURIComponent(asset.id)}`
+      : undefined;
+
+  if (loading) return (
+    <div className="space-y-5 animateFadeIn">
+      <Skeleton active title paragraph={{ rows: 1 }} />
+      <Row gutter={[12, 12]}>
+        {Array.from({ length: 6 }).map((_, i) => (
+          <Col xs={24} sm={12} md={8} xl={6} key={i}><Card size="small"><Skeleton active paragraph={{ rows: 3 }} /></Card></Col>
+        ))}
+      </Row>
+    </div>
+  );
 
   return (
-    <div className="page-shell">
-      <div className="mb-4">
-        <h1 className="text-2xl font-semibold">生成资源</h1>
-        <p className="text-[var(--colorTextSecondary)]">管理文档生成产生的本地资源。生成资源默认不进入知识库，可在后续操作中手动加入知识库。</p>
+    <div className="space-y-5 animateFadeIn">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+        <div><h1 className="pageTitle">{t('nav.assetLibrary')}</h1><p className="pageDesc">管理文档生成产生的本地资源。生成资源默认不进入知识库，可在后续操作中手动加入知识库。</p></div>
+        <Space size={8}>
+          <span style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>共 {assets.length} 个资源</span>
+          <Button danger size="small" disabled={selectedIds.size === 0} icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')}>删除已选 {selectedIds.size || ''}</Button>
+          <Button danger size="small" disabled={assets.length === 0} onClick={() => handleBulkDelete('all')}>删除全部</Button>
+        </Space>
       </div>
-      <Card>
-        <List
-          dataSource={assets}
-          locale={{ emptyText: <Empty description="暂无生成资源" /> }}
-          renderItem={(asset, index) => (
-            <List.Item
-              actions={[
-                asset.path ? <Button key="copy" icon={<CopyOutlined />} onClick={() => { void copyPath(asset.path); }}>复制路径</Button> : null,
-                asset.path ? <Button key="open" icon={<ExportOutlined />} loading={loadingId === asset.id} onClick={() => { void runAssetAction(asset.id, 'openFile'); }}>打开</Button> : null,
-                asset.path ? <Button key="folder" icon={<FolderOpenOutlined />} loading={loadingId === asset.id} onClick={() => { void runAssetAction(asset.id, 'openDirectory'); }}>目录</Button> : null,
-                !asset.indexed && asset.path ? <Button key="index" icon={<DatabaseOutlined />} loading={loadingId === asset.id} onClick={() => { void runAssetAction(asset.id, 'index'); }}>加入知识库</Button> : null,
-                <Popconfirm key="delete" title="确认删除该生成资源记录？" onConfirm={() => { void runAssetAction(asset.id, 'delete'); }}><Button danger icon={<DeleteOutlined />} loading={loadingId === asset.id}>删除</Button></Popconfirm>,
-              ]}
-            >
-              <List.Item.Meta
-                avatar={previewSrc(asset) ? <Image width={64} height={40} src={previewSrc(asset)} alt={asset.name} style={{ objectFit: 'cover' }} /> : asset.type === 'image' ? <PictureOutlined /> : <FileOutlined />}
-                title={<Space wrap><Tag>序号 {index + 1}</Tag><span>{asset.name}</span><Tag>{asset.type}</Tag><Tag color={asset.indexed ? 'success' : 'default'}>{asset.indexed ? '已入库' : '未入库'}</Tag><Tag color="blue">{asset.role}</Tag></Space>}
-                description={(
-                  <Space direction="vertical" size={2} className="w-full">
-                    <Text type="secondary">路径：{asset.path || asset.url || '—'}</Text>
-                    <Text type="secondary">来源：{asset.source} · 使用文档：{asset.usedByDocumentIds.length} · 更新时间：{new Date(asset.updatedAt).toLocaleString()}</Text>
-                    {asset.prompt && <Paragraph ellipsis={{ rows: 2, expandable: true }} className="!mb-0">提示词：{asset.prompt}</Paragraph>}
-                  </Space>
-                )}
-              />
-            </List.Item>
-          )}
-        />
-      </Card>
+
+      {assets.length === 0 ? <Empty description="暂无生成资源" /> : (
+        <Row gutter={[12, 12]}>
+          {assets.map((asset, index) => {
+            const src = previewSrc(asset);
+            const isSelected = selectedIds.has(asset.id);
+            const actionItems = [
+              ...(asset.path ? [{ key: 'copy', icon: <CopyOutlined />, label: '复制路径', onClick: () => { void copyPath(asset.path); } }] : []),
+              ...(asset.path ? [{ key: 'open', icon: <ExportOutlined />, label: '打开文件', onClick: () => { void runAction(asset.id, 'openFile'); } }] : []),
+              ...(asset.path ? [{ key: 'folder', icon: <FolderOpenOutlined />, label: '打开目录', onClick: () => { void runAction(asset.id, 'openDirectory'); } }] : []),
+              ...(!asset.indexed && asset.path ? [{ key: 'index', icon: <DatabaseOutlined />, label: '加入知识库', onClick: () => { void runAction(asset.id, 'index'); } }] : []),
+              { type: 'divider' as const },
+              { key: 'delete', icon: <DeleteOutlined />, label: t('common.delete'), danger: true, onClick: () => { void runAction(asset.id, 'delete'); } },
+            ];
+            return (
+              <Col xs={24} sm={12} md={8} xl={6} key={asset.id}>
+                <Card
+                  size="small"
+                  hoverable
+                  styles={{ body: { padding: 12 } }}
+                  style={{ border: isSelected ? '2px solid #1677ff' : undefined, cursor: 'pointer', position: 'relative' }}
+                  onClick={() => toggleSelect(asset.id)}
+                >
+                  {/* Checkbox — top-left, always visible */}
+                  <div
+                    onClick={(e) => { e.stopPropagation(); toggleSelect(asset.id); }}
+                    style={{
+                      position: 'absolute', top: 8, left: 8, zIndex: 2,
+                      width: 22, height: 22, borderRadius: 5,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      cursor: 'pointer', transition: 'all 0.15s',
+                      background: isSelected ? '#1677ff' : 'rgba(0,0,0,0.6)',
+                      color: '#fff',
+                      fontSize: 12, fontWeight: 700,
+                    }}
+                  >
+                    {isSelected ? '✓' : ''}
+                  </div>
+
+                  {/* More button — top-right */}
+                  <Dropdown menu={{ items: actionItems }} trigger={['click']} placement="bottomRight">
+                    <Button type="text" size="small" icon={<MoreOutlined />}
+                      style={{ position: 'absolute', top: 6, right: 6, zIndex: 2, width: 24, height: 24, padding: 0, background: 'var(--colorBgContainer)', borderRadius: 6, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}
+                      onClick={(e) => e.stopPropagation()} />
+                  </Dropdown>
+
+                  {/* Preview image */}
+                  {src && (
+                    <div style={{ margin: '-12px -12px 10px -12px', borderRadius: '10px 10px 0 0', overflow: 'hidden', height: 140, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--colorFillAlter)' }}>
+                      <Image src={src} alt={asset.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} onClick={(e) => e.stopPropagation()} />
+                    </div>
+                  )}
+
+                  {/* Header row */}
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1 }}>
+                      {!src && (asset.type === 'image' ? <PictureOutlined style={{ color: 'var(--colorWarning)', fontSize: 15, flexShrink: 0 }} /> : <FileOutlined style={{ color: 'var(--colorAccent)', fontSize: 15, flexShrink: 0 }} />)}
+                      <span style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{asset.name}</span>
+                    </div>
+                  </div>
+
+                  {/* Tags */}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
+                    <Tag color={asset.indexed ? 'success' : 'default'} style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{asset.indexed ? '已入库' : '未入库'}</Tag>
+                    <Tag color={ROLE_COLORS[asset.role] || 'blue'} style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{asset.role}</Tag>
+                    <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{asset.type}</Tag>
+                  </div>
+
+                  {/* Meta info */}
+                  <div style={{ fontSize: 12, color: 'var(--colorTextSecondary)', lineHeight: 1.5, marginBottom: 6 }}>
+                    {asset.path && (
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 11 }}>
+                        {asset.path}
+                      </div>
+                    )}
+                    <div>{SOURCE_LABELS[asset.source] || asset.source} · {asset.usedByDocumentIds.length} 个文档 · {new Date(asset.updatedAt).toLocaleDateString()}</div>
+                  </div>
+
+                </Card>
+              </Col>
+            );
+          })}
+        </Row>
+      )}
     </div>
   );
 }

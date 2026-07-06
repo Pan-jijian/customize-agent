@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getProjectRoot } from '@/services/kbService';
-import { clearKbOperations, listKbOperations } from '@/services/kbOperationLog';
+import { clearKbOperations, deleteKbOperation, listKbOperations } from '@/services/kbOperationLog';
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
@@ -11,6 +11,11 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(200).json({ operations: listKbOperations(projectRoot, Number.isFinite(limit) ? limit : 50) });
     }
     if (req.method === 'DELETE') {
+      const id = req.query.id as string | undefined;
+      if (id) {
+        const deleted = deleteKbOperation(projectRoot, id);
+        return res.status(200).json({ success: deleted, deleted: deleted ? 1 : 0 });
+      }
       return res.status(200).json({ success: true, deleted: clearKbOperations(projectRoot) });
     }
     return res.status(405).json({ error: 'Method not allowed' });

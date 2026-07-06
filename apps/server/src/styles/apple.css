@@ -5,7 +5,7 @@
 /* ── Sidebar ── */
 .sidebar {
   position: fixed;
-  left: 12px; top: 12px; bottom: 12px;
+  left: 12px; top: 12px; bottom: calc(12px + env(safe-area-inset-bottom, 0px));
   width: calc(var(--sidebarWidth) - 16px);
   display: flex;
   flex-direction: column;
@@ -244,8 +244,15 @@
 .mainInner {
   flex: 1;
   padding: clamp(16px, 2.5vw, 40px);
+  padding-bottom: calc(clamp(16px, 2.5vw, 40px) + env(safe-area-inset-bottom, 0px));
   width: 100%;
   overflow-x: hidden;
+  transition: opacity 0.12s ease;
+}
+
+.mainInner.pageTransitioning {
+  opacity: 0.3;
+  pointer-events: none;
 }
 
 /* ── Apple Pill ── */

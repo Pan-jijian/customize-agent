@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import Head from 'next/head';
 import { useRouter } from 'next/router';
 import { ThemeProvider as NextThemesProvider, useTheme } from 'next-themes';
 import { ConfigProvider, App } from 'antd';
@@ -57,7 +58,7 @@ function LayoutShell({ children }: { children: React.ReactNode }) {
   const { resolvedTheme } = useTheme();
   const router = useRouter();
   const [locale, setLocaleState] = useState('zh-CN');
-  const [routeLoading, setRouteLoading] = useState(false);
+  const [transitioning, setTransitioning] = useState(false);
   const isDark = resolvedTheme === 'dark';
   const messages = MESSAGES[locale] ?? MESSAGES['zh-CN'];
 
@@ -66,19 +67,17 @@ function LayoutShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const handleStart = (url: string) => {
-      if (url !== router.asPath) setRouteLoading(true);
-    };
-    const handleDone = () => setRouteLoading(false);
-    router.events.on('routeChangeStart', handleStart);
-    router.events.on('routeChangeComplete', handleDone);
-    router.events.on('routeChangeError', handleDone);
+    const start = () => setTransitioning(true);
+    const done = () => setTransitioning(false);
+    router.events.on('routeChangeStart', start);
+    router.events.on('routeChangeComplete', done);
+    router.events.on('routeChangeError', done);
     return () => {
-      router.events.off('routeChangeStart', handleStart);
-      router.events.off('routeChangeComplete', handleDone);
-      router.events.off('routeChangeError', handleDone);
+      router.events.off('routeChangeStart', start);
+      router.events.off('routeChangeComplete', done);
+      router.events.off('routeChangeError', done);
     };
-  }, [router.asPath, router.events]);
+  }, [router]);
 
   const setLocale = useCallback((nextLocale: string) => {
     document.cookie = `NEXT_LOCALE=${nextLocale};path=/;max-age=31536000;samesite=lax`;
@@ -92,12 +91,11 @@ function LayoutShell({ children }: { children: React.ReactNode }) {
     <LocaleContext.Provider value={localeContext}>
       <ConfigProvider theme={theme}>
         <App>
+          <Head><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" /></Head>
           <Sidebar />
           <div className="mainContent">
-            {routeLoading && <div className="routeProgress" />}
             <Header />
-            <main className="mainInner">
-              {routeLoading && <div className="routeLoadingCard">正在进入页面…</div>}
+            <main className={`mainInner${transitioning ? ' pageTransitioning' : ''}`}>
               {children}
             </main>
           </div>

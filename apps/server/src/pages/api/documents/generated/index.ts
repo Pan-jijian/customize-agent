@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { deleteGeneratedDocument, getGeneratedDocument, listGeneratedDocuments, updateGeneratedDocument } from '@/services/generatedDocumentService';
+import { abortGeneratedDocument, deleteGeneratedDocument, getGeneratedDocument, listGeneratedDocuments, updateGeneratedDocument } from '@/services/generatedDocumentService';
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
@@ -18,6 +18,15 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       const record = updateGeneratedDocument(id, patch);
       if (!record) return res.status(404).json({ error: 'Document not found' });
       return res.status(200).json({ document: record });
+    }
+    if (req.method === 'POST') {
+      const { action, documentId } = req.body as { action?: string; documentId?: string };
+      if (action === 'abort' && documentId) {
+        const record = abortGeneratedDocument(documentId);
+        if (!record) return res.status(404).json({ error: 'Document not found or not generating' });
+        return res.status(200).json({ document: record });
+      }
+      return res.status(400).json({ error: 'Unknown action' });
     }
     if (req.method === 'DELETE') {
       const id = typeof req.query.id === 'string' ? req.query.id : req.body?.id;

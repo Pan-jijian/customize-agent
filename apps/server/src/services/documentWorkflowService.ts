@@ -1436,7 +1436,7 @@ export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'mar
   ].join('\n');
 }
 
-export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string }): Promise<GeneratedDocumentDraft> {
+export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; onProgress?: (stages: DocumentExecutionStage[]) => void }): Promise<GeneratedDocumentDraft> {
   const template = getDocumentTemplate(input.templateId);
   if (!template) throw new Error('Document template not found');
   const projectRoot = ensureBuiltInKnowledgeBase(input.projectRoot || getProjectRoot());
@@ -1458,8 +1458,14 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const allEvidence: DocumentEvidence[] = [];
   const missingItems: string[] = [];
   const chapterGenerationStages: DocumentExecutionStage[] = [];
+  const progressStages: DocumentExecutionStage[] = [];
+
+  // 第一个进度回调：角色绑定完成
+  progressStages.push({ type: 'role_binding', roleId: template.projectRoleConfigId || 'none', status: 'success', message: `已绑定 ${fileBindings.length} 个文件角色、${promptBindings.length} 个提示词角色` });
+input.onProgress?.([...progressStages]);
 
   for (const chapter of template.chapters) {
+    try {
     const rawEvidence: DocumentEvidence[] = [];
     const queries = chapter.queries.length > 0 ? chapter.queries : [template.name, template.outputTitle, chapter.title, ...fileBindings.map(binding => binding.filePath)];
     for (const query of queries) {
@@ -1506,7 +1512,16 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const missingFacts = chapter.requiredFacts.filter(fact => !evidence.some(item => evidenceMatchesFact(item, fact)));
     if (evidence.length === 0) missingItems.push(`${chapter.title}：未检索到明确资料依据`);
     for (const fact of missingFacts) missingItems.push(`${chapter.title}：${fact} 未检索到明确依据`);
-    const llmContent = await buildLlmChapterContent(template, chapter, evidence, missingFacts, promptTexts, input.requirement);
+    // 证据检索完成 → 立即汇报 progress
+    if (!progressStages.some(s => s.type === 'knowledge_retrieval')) {
+      progressStages.push({ type: 'knowledge_retrieval', roleId: 'knowledge-base', status: (allEvidence.length > 0 ? 'success' : 'fallback'), message: `已检索/绑定 ${allEvidence.length} 条证据` });
+      input.onProgress?.([...progressStages]);
+    }
+
+    const llmContent = await Promise.race([
+      buildLlmChapterContent(template, chapter, evidence, missingFacts, promptTexts, input.requirement),
+      new Promise<null>(resolve => setTimeout(() => resolve(null), 60000)),
+    ]);
     const content = llmContent || buildReadableChapterContent(template.id, chapter, evidence, missingFacts);
     chapterGenerationStages.push({
       type: 'chapter_generation',
@@ -1516,9 +1531,24 @@ export async function generateDocumentDraft(input: { templateId: string; require
       message: llmContent ? `${chapter.title} 已由大模型生成` : `${chapter.title} 使用本地专业兜底生成`,
     });
     chapterDrafts.push({ id: chapter.id, title: chapter.title, content, evidence, missingFacts });
+    } catch (err) {
+      console.error(`[gen] chapter ${chapter.title} failed:`, err);
+      chapterGenerationStages.push({
+        type: 'chapter_generation',
+        roleId: 'chapter_generation',
+        status: 'failed',
+        message: `${chapter.title} 生成失败`,
+      });
+    }
+    // 章节生成完成（成功或失败）→ 汇报进度
+    if (!progressStages.some(s => s.type === 'chapter_generation' && s.message === chapterGenerationStages[chapterGenerationStages.length - 1]?.message)) {
+      progressStages.push(chapterGenerationStages[chapterGenerationStages.length - 1]!);
+    }
+    input.onProgress?.([...progressStages]);
   }
 
-  const fileUnderstanding = await understandReferenceFiles(projectRoot, allEvidence);
+  let fileUnderstanding: { stage: DocumentExecutionStage; notes: string[] } = { stage: { type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '文件理解跳过' }, notes: [] };
+  try { fileUnderstanding = await understandReferenceFiles(projectRoot, allEvidence); } catch (err) { console.error('[gen] fileUnderstanding failed:', err); }
   for (const note of fileUnderstanding.notes) {
     allEvidence.push({
       chapterId: 'multimodal-file-understanding',
@@ -1533,8 +1563,20 @@ export async function generateDocumentDraft(input: { templateId: string; require
 
   const facts = extractFacts(template, allEvidence, documentSpec);
   const localFacts = extractStructuredFacts(allEvidence, template, documentSpec);
-  const llmExtraction = await extractFactsWithLlm(allEvidence, promptTexts, template, documentSpec);
+  let llmExtraction: { facts: DocumentFact[]; stages: DocumentExecutionStage[] } = { facts: [], stages: [] };
+  try { llmExtraction = await extractFactsWithLlm(allEvidence, promptTexts, template, documentSpec); } catch (err) { console.error('[gen] fact extraction failed:', err); }
   const structuredFacts = [...localFacts, ...llmExtraction.facts];
+
+  // 进度回调：文件理解 + 事实抽取完成
+  if (!progressStages.some(s => s.type === fileUnderstanding.stage.type)) {
+    progressStages.push(fileUnderstanding.stage);
+  }
+  for (const stage of llmExtraction.stages) {
+    if (!progressStages.some(s => s.type === stage.type)) {
+      progressStages.push(stage);
+    }
+  }
+  input.onProgress?.([...progressStages]);
   const structuredTables = extractStructuredTables(allEvidence);
   for (const fact of structuredFacts) facts[fact.key] = `${fact.value}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
   const sourceCounts = new Map<string, number>();

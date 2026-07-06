@@ -100,7 +100,7 @@ export default function ShortTermContextPage() {
         <Table rowKey="id" columns={columns} dataSource={data} loading={loading} size="small" pagination={{ pageSize: 15 }} />
       </Card>
 
-      <Modal maskClosable={false} title={t('models.editModel')} open={editOpen} onCancel={() => setEditOpen(false)} onOk={() => { void handleEdit(); }} confirmLoading={saving}>
+      <Modal maskClosable={false} title={t('models.editModel')} open={editOpen} onCancel={() => setEditOpen(false)} onOk={() => { void handleEdit(); }} confirmLoading={saving} okText={t('common.save')} cancelText={t('common.cancel')}>
         <Form layout="vertical" size="middle">
           <Form.Item label={t('context.content')}>
             <Input.TextArea rows={6} value={editContent} onChange={e => setEditContent(e.target.value)} />

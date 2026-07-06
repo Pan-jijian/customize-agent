@@ -55,6 +55,7 @@ export async function reindexKbFile(relativePath: string, projectRoot?: string) 
 export async function openKbFileTarget(relativePath: string, target: 'file' | 'directory', projectRoot?: string) {
   return fetchJson<{ success: boolean }>('/api/kb/files/open', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ relativePath, target, projectRoot }),
   });
 }
@@ -100,6 +101,12 @@ export async function getKbOperations(projectRoot?: string) {
 
 export async function clearKbOperations(projectRoot?: string) {
   const params = new URLSearchParams();
+  if (projectRoot) params.set('projectRoot', projectRoot);
+  return fetchJson<{ success: boolean; deleted: number }>(`/api/kb/operations?${params}`, { method: 'DELETE' });
+}
+
+export async function deleteKbOperation(id: string, projectRoot?: string) {
+  const params = new URLSearchParams({ id });
   if (projectRoot) params.set('projectRoot', projectRoot);
   return fetchJson<{ success: boolean; deleted: number }>(`/api/kb/operations?${params}`, { method: 'DELETE' });
 }
@@ -217,7 +224,7 @@ export interface ExportGateResult { passed: boolean; blockingIssues: ValidationI
 export interface DocumentExecutionStage { type: 'role_binding' | 'knowledge_retrieval' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference'; roleId: string; promptId?: string; status: 'success' | 'fallback' | 'skipped' | 'failed'; message?: string; }
 export interface DocumentAsset { id: string; type: 'image' | 'audio' | 'video' | 'file'; role: 'cover' | 'reference' | 'generated' | 'attachment' | 'map' | 'operator'; path?: string; url?: string; prompt?: string; modelProvider?: string; status: 'generated' | 'prompt_ready' | 'fallback'; message?: string; }
 export interface GeneratedAssetRecord extends DocumentAsset { name: string; source: 'knowledge_base' | 'generated' | 'uploaded' | 'external_url'; indexed: boolean; usedByDocumentIds: string[]; createdAt: number; updatedAt: number; }
-export interface GeneratedDocumentRecord { id: string; taskId?: string; templateId: string; templateName?: string; title: string; requirement: string; markdown: string; editedMarkdown?: string; status: 'generating' | 'completed' | 'warning' | 'failed'; draft?: GeneratedDocumentDraft; assets: DocumentAsset[]; createdAt: number; updatedAt: number; completedAt?: number; error?: string; warningIssues?: string[]; }
+export interface GeneratedDocumentRecord { id: string; taskId?: string; templateId: string; templateName?: string; title: string; requirement: string; markdown: string; editedMarkdown?: string; status: 'generating' | 'completed' | 'warning' | 'failed'; draft?: GeneratedDocumentDraft; executionStages?: GeneratedDocumentDraft['executionStages']; assets: DocumentAsset[]; createdAt: number; updatedAt: number; completedAt?: number; error?: string; warningIssues?: string[]; }
 export interface GeneratedDocumentDraft { templateId: string; templateName: string; title: string; requirement: string; markdown: string; facts: Record<string, string>; structuredFacts: DocumentFact[]; factsModel: DocumentFactsModel; chapters: DocumentDraftChapter[]; sources: Array<{ filePath: string; count: number }>; missingItems: string[]; validation: { passed: boolean; warnings: string[]; errors: string[] }; validationIssues: ValidationIssue[]; executionStages: DocumentExecutionStage[]; exportGate: ExportGateResult; assets?: DocumentAsset[]; generatedAt: number; }
 export interface StoredDocumentDraft extends GeneratedDocumentDraft { id: string; updatedAt: number; }
 
@@ -259,6 +266,7 @@ export async function getGeneratedDocuments() { return fetchJson<{ documents: Ge
 export async function getGeneratedDocument(id: string) { return fetchJson<{ document: GeneratedDocumentRecord }>(`/api/documents/generated/${encodeURIComponent(id)}`); }
 export async function updateGeneratedDocument(id: string, patch: Partial<GeneratedDocumentRecord>) { return fetchJson<{ document: GeneratedDocumentRecord }>(`/api/documents/generated/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); }
 export async function deleteGeneratedDocument(id: string) { return fetchJson<{ ok: boolean }>(`/api/documents/generated/${encodeURIComponent(id)}`, { method: 'DELETE' }); }
+export async function abortGeneratedDocument(documentId: string) { return fetchJson<{ document: GeneratedDocumentRecord }>('/api/documents/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'abort', documentId }) }); }
 export async function getGeneratedAssets() { return fetchJson<{ assets: GeneratedAssetRecord[] }>('/api/assets/generated'); }
 export async function deleteGeneratedAsset(id: string) { return fetchJson<{ ok: boolean; assets: GeneratedAssetRecord[] }>(`/api/assets/generated?id=${encodeURIComponent(id)}`, { method: 'DELETE' }); }
 export async function indexGeneratedAsset(id: string) { return fetchJson<{ asset: GeneratedAssetRecord; assets: GeneratedAssetRecord[] }>('/api/assets/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: 'index' }) }); }

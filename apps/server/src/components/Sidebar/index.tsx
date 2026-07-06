@@ -31,6 +31,12 @@ const NAV_ITEMS: NavItem[] = [
       { href: '/knowledge/search', icon: Search, labelKey: 'nav.knowledgeSearch' },
     ],
   },
+  { href: '/models', icon: Cpu, labelKey: 'nav.models' },
+  { href: '/prompt', icon: MessageSquare, labelKey: 'nav.promptManagement' },
+  { href: '/document-roles', icon: Settings, labelKey: 'nav.documentRoles' },
+  { href: '/document-specs', icon: FileText, labelKey: 'nav.documentSpecs' },
+  { href: '/documents', icon: Files, labelKey: 'nav.documents' },
+  { href: '/asset-library', icon: FolderOpen, labelKey: 'nav.assetLibrary' },
   {
     icon: Brain,
     labelKey: 'nav.contextEngineering',
@@ -39,14 +45,8 @@ const NAV_ITEMS: NavItem[] = [
       { href: '/context/short-term', icon: Database, labelKey: 'nav.shortTermContext' },
     ],
   },
-  { href: '/documents', icon: Files, labelKey: 'nav.documents' },
-  { href: '/asset-library', icon: FolderOpen, labelKey: 'nav.assetLibrary' },
-  { href: '/document-roles', icon: Settings, labelKey: 'nav.documentRoles' },
-  { href: '/document-specs', icon: FileText, labelKey: 'nav.documentSpecs' },
-  { href: '/guide', icon: BookOpen, labelKey: 'nav.guide' },
-  { href: '/models', icon: Cpu, labelKey: 'nav.models' },
-  { href: '/prompt', icon: MessageSquare, labelKey: 'nav.promptManagement' },
   { href: '/system/logs', icon: Bug, labelKey: 'nav.systemLogs' },
+  { href: '/guide', icon: BookOpen, labelKey: 'nav.guide' },
   { href: '/settings', icon: Settings, labelKey: 'nav.settings' },
 ] as const;
 
@@ -81,11 +81,8 @@ export function Sidebar() {
     <aside className={`sidebar${collapsed ? ' sidebarCollapsedSelf' : ''}`}>
       <Link href="/overview" prefetch={false}>
         <div className="sidebarLogo">
-          <div>
-            <div className="sidebarLogoTitle">
-              <span className="logoGradient">{t('app.title')}</span>
-            </div>
-            <div className="sidebarLogoSub">{t('app.subtitle')}</div>
+          <div className="sidebarLogoTitle" style={{ fontSize: 20, fontWeight: 800, letterSpacing: '0.5px' }}>
+            <span className="logoGradient">{t('app.title')}</span>
           </div>
         </div>
       </Link>

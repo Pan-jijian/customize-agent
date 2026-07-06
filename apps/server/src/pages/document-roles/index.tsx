@@ -1,8 +1,45 @@
-import { useEffect, useState } from 'react';
-import { Alert, App, Button, Card, Col, Empty, Form, Input, List, Modal, Popconfirm, Row, Select, Space, Tabs, Tag } from 'antd';
-import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
+import { useEffect, useState, type ReactNode } from 'react';
+import { Alert, App, Button, Card, Col, Drawer, Empty, Form, Input, Popconfirm, Row, Select, Space, Tabs, Tag, Typography } from 'antd';
+import {
+  DeleteOutlined, EditOutlined, PlusOutlined, FileTextOutlined, FormOutlined,
+  AuditOutlined, ProfileOutlined, TableOutlined, PictureOutlined, LinkOutlined,
+  SearchOutlined, EyeOutlined, CheckCircleOutlined, AlignLeftOutlined,
+  DownOutlined, UpOutlined,
+} from '@ant-design/icons';
 import { deleteDocumentRole, deleteProjectRoleConfig, getDocumentRoles, getKbFiles, getPromptProjects, saveDocumentRole, saveProjectRoleConfig, type DocumentRole, type ProjectRoleConfig, type KbFileItem, type PromptProject } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
+
+const { Paragraph } = Typography;
+
+const FILE_TYPE_ICONS: Record<string, ReactNode> = {
+  rule: <AuditOutlined />, project_fact: <ProfileOutlined />, table: <TableOutlined />,
+  drawing: <PictureOutlined />, specification: <FileTextOutlined />, reference: <LinkOutlined />,
+};
+const PROMPT_TYPE_ICONS: Record<string, ReactNode> = {
+  fact_extraction: <SearchOutlined />, chapter_generation: <EditOutlined />, llm_review: <EyeOutlined />,
+  validation: <CheckCircleOutlined />, formatting: <AlignLeftOutlined />, reference: <LinkOutlined />,
+};
+const FILE_TYPE_COLORS: Record<string, string> = { rule: '#fa8c16', project_fact: '#1677ff', table: '#52c41a', drawing: '#722ed1', specification: '#eb2f96', reference: '#13c2c2' };
+const PROMPT_TYPE_COLORS: Record<string, string> = { fact_extraction: '#fa8c16', chapter_generation: '#1677ff', llm_review: '#722ed1', validation: '#52c41a', formatting: '#eb2f96', reference: '#13c2c2' };
+const FILE_TYPE_LABELS: Record<string, string> = { rule: 'roles.ruleFile', project_fact: 'roles.projectFactFile', table: 'roles.tableFile', drawing: 'roles.drawingFile', specification: 'roles.specificationFile', reference: 'roles.reference' };
+const PROMPT_TYPE_LABELS: Record<string, string> = { fact_extraction: 'roles.factExtraction', chapter_generation: 'roles.chapterGeneration', llm_review: 'roles.llmReview', validation: 'roles.validation', formatting: 'roles.formatting', reference: 'roles.reference' };
+
+const tagRender = (props: { label: ReactNode; value: string; closable: boolean; onClose: () => void }) => (
+  <Tag closable={props.closable} onClose={props.onClose} color="blue" style={{ margin: '1px 2px', fontSize: 11, lineHeight: '18px' }}>{props.label}</Tag>
+);
+
+function roleTypeLabel(role: DocumentRole, t: (key: string) => string) {
+  const key = role.type === 'file' ? FILE_TYPE_LABELS[role.processingType ?? ''] : PROMPT_TYPE_LABELS[role.executionType ?? ''];
+  return key ? t(key) : (role.type === 'file' ? role.processingType : role.executionType) ?? '';
+}
+function roleTypeIcon(role: DocumentRole) {
+  if (role.type === 'file') return FILE_TYPE_ICONS[role.processingType ?? ''] ?? <FileTextOutlined />;
+  return PROMPT_TYPE_ICONS[role.executionType ?? ''] ?? <FormOutlined />;
+}
+function roleTypeColor(role: DocumentRole) {
+  if (role.type === 'file') return FILE_TYPE_COLORS[role.processingType ?? ''] ?? 'var(--colorAccent)';
+  return PROMPT_TYPE_COLORS[role.executionType ?? ''] ?? 'var(--colorWarning)';
+}
 
 export default function DocumentRolesPage() {
   const t = useAppTranslations();
@@ -13,107 +50,289 @@ export default function DocumentRolesPage() {
   const [configs, setConfigs] = useState<ProjectRoleConfig[]>([]);
   const [kbFiles, setKbFiles] = useState<KbFileItem[]>([]);
   const [prompts, setPrompts] = useState<PromptProject[]>([]);
-  const [roleOpen, setRoleOpen] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
+  const [roleDrawerOpen, setRoleDrawerOpen] = useState(false);
+  const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
+  const [guideExpanded, setGuideExpanded] = useState(false);
+  const [activeTab, setActiveTab] = useState<string>('file');
 
   const load = async () => {
     const [roleData, fileData, promptData] = await Promise.all([getDocumentRoles(), getKbFiles(), getPromptProjects()]);
-    setRoles(roleData.roles);
-    setConfigs(roleData.configs);
-    setKbFiles(fileData.files);
-    setPrompts(promptData);
+    setRoles(roleData.roles); setConfigs(roleData.configs); setKbFiles(fileData.files); setPrompts(promptData);
   };
-
   useEffect(() => { void load().catch(() => message.error(t('common.error'))); }, [message, t]);
 
-  const fileRoles = roles.filter(role => role.type === 'file');
-  const promptRoles = roles.filter(role => role.type === 'prompt');
+  const fileRoles = roles.filter(r => r.type === 'file');
+  const promptRoles = roles.filter(r => r.type === 'prompt');
 
   const saveRole = async () => {
-    try {
-      const values = await roleForm.validateFields();
-      const result = await saveDocumentRole(values);
-      setRoles(result.roles);
-      setConfigs(result.configs);
-      setRoleOpen(false);
-      message.success(t('common.success'));
-    } catch { message.error(t('common.error')); }
+    try { const v = await roleForm.validateFields(); const r = await saveDocumentRole(v); setRoles(r.roles); setConfigs(r.configs); setRoleDrawerOpen(false); message.success(t('common.success')); }
+    catch { message.error(t('common.error')); }
   };
-
   const saveConfig = async () => {
     try {
-      const values = await configForm.validateFields();
-      const normalize = (items?: Array<{ roleId: string; order?: number }>) => (items ?? []).map((item, index) => ({ roleId: item.roleId, order: Number(item.order ?? index) }));
-      const result = await saveProjectRoleConfig({ ...values, fileRoles: normalize(values.fileRoles), promptRoles: normalize(values.promptRoles) });
-      setRoles(result.roles);
-      setConfigs(result.configs);
-      setConfigOpen(false);
-      message.success(t('common.success'));
+      const v = await configForm.validateFields();
+      const norm = (items?: Array<{ roleId: string; order?: number }>) => (items ?? []).map((item, i) => ({ roleId: item.roleId, order: Number(item.order ?? i) }));
+      const r = await saveProjectRoleConfig({ ...v, fileRoles: norm(v.fileRoles), promptRoles: norm(v.promptRoles) });
+      setRoles(r.roles); setConfigs(r.configs); setConfigDrawerOpen(false); message.success(t('common.success'));
     } catch { message.error(t('common.error')); }
   };
+  const removeRole = async (role: DocumentRole) => { const r = await deleteDocumentRole(role.type, role.id); setRoles(r.roles); setConfigs(r.configs); };
+  const removeConfig = async (id: string) => { const r = await deleteProjectRoleConfig(id); setRoles(r.roles); setConfigs(r.configs); };
 
-  const removeRole = async (role: DocumentRole) => {
-    const result = await deleteDocumentRole(role.type, role.id);
-    setRoles(result.roles); setConfigs(result.configs);
-  };
-
-  const removeConfig = async (id: string) => {
-    const result = await deleteProjectRoleConfig(id);
-    setRoles(result.roles); setConfigs(result.configs);
-  };
-
-  const openRole = (role?: DocumentRole, type: 'file' | 'prompt' = 'file') => {
+  const openRoleDrawer = (role?: DocumentRole, type: 'file' | 'prompt' = 'file') => {
     roleForm.setFieldsValue(role ? { ...role, resourceIds: role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : [] } : { id: `role-${Date.now()}`, name: '', description: '', type, resourceIds: [], executionType: type === 'prompt' ? 'reference' : undefined, processingType: type === 'file' ? 'reference' : undefined });
-    setRoleOpen(true);
+    setRoleDrawerOpen(true);
   };
-
-  const openConfig = (config?: ProjectRoleConfig) => {
+  const openConfigDrawer = (config?: ProjectRoleConfig) => {
     configForm.setFieldsValue(config ?? { id: `config-${Date.now()}`, name: '', description: '', fileRoles: [], promptRoles: [] });
-    setConfigOpen(true);
+    setConfigDrawerOpen(true);
   };
 
-  const roleList = (type: 'file' | 'prompt') => (
-    <List
-      dataSource={roles.filter(role => role.type === type)}
-      locale={{ emptyText: <Empty description={t('common.noData')} /> }}
-      renderItem={(role, index) => <List.Item actions={[<Button key="edit" type="text" icon={<EditOutlined />} onClick={() => openRole(role)} />, <Popconfirm key="delete" title={t('common.confirm')} disabled={role.builtIn} onConfirm={() => { void removeRole(role); }}><Button type="text" danger icon={<DeleteOutlined />} disabled={role.builtIn} /></Popconfirm>]}><List.Item.Meta title={<Space><Tag>序号 {index + 1}</Tag><span>{role.name}</span>{role.builtIn && <Tag color="gold">{t('documents.builtIn')}</Tag>}<Tag>{role.id}</Tag></Space>} description={<Space direction="vertical"><span>{role.description}</span><span>{role.type === 'prompt' ? role.executionType : role.processingType}</span><span>{(role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : []).join('、') || '-'}</span></Space>} /></List.Item>}
-    />
-  );
+  const getRoleById = (id: string) => roles.find(r => r.id === id);
 
-  return <div className="space-y-6 animateFadeIn">
-    <Card className="cardGlass" styles={{ body: { padding: 24 } }}>
-      <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div><h1 className="pageTitle mb-1">{t('roles.title')}</h1><p className="pageDesc mb-0">{t('roles.description')}</p></div>
-        <Space><Button icon={<PlusOutlined />} onClick={() => openRole(undefined, 'file')}>{t('roles.newFileRole')}</Button><Button icon={<PlusOutlined />} onClick={() => openRole(undefined, 'prompt')}>{t('roles.newPromptRole')}</Button><Button type="primary" icon={<PlusOutlined />} onClick={() => openConfig()}>{t('roles.newConfig')}</Button></Space>
+  const roleCardGrid = (list: DocumentRole[], tFn: (key: string) => string) => {
+    if (list.length === 0) return <Empty description={t('common.noData')} />;
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))', gap: 12 }}>
+        {list.map((role, index) => {
+          const resources = (role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : []);
+          const display = resources.slice(0, 3);
+          const remaining = resources.length - display.length;
+          const icon = roleTypeIcon(role);
+          const iconColor = roleTypeColor(role);
+          return (
+            <Card key={role.id} size="small" hoverable style={{ minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1 }}>
+                  <span style={{ color: iconColor, fontSize: 16, flexShrink: 0, lineHeight: 1 }}>{icon}</span>
+                  <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', lineHeight: '20px' }}>{role.name}</span>
+                </div>
+                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                  {role.builtIn && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>内置</Tag>}
+                </div>
+              </div>
+              {role.description && <Paragraph ellipsis={{ rows: 2 }} style={{ fontSize: 12, color: 'var(--colorTextSecondary)', marginBottom: 8 }}>{role.description}</Paragraph>}
+              <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <Tag color={role.type === 'file' ? 'blue' : 'purple'} style={{ margin: 0 }}>{roleTypeLabel(role, tFn)}</Tag>
+                {resources.length > 0 && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>绑定 {resources.length} 个资源</span>}
+              </div>
+              {display.length > 0 && (
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {display.map(r => <Tag key={r} color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis' }}>{r}</Tag>)}
+                    {remaining > 0 && <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>+{remaining}</Tag>}
+                  </div>
+                </div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, paddingTop: 4, borderTop: '1px solid var(--colorBorderSecondary)' }}>
+                <Button size="small" icon={<EditOutlined />} onClick={() => openRoleDrawer(role)}>编辑</Button>
+                <Popconfirm title={t('common.confirm')} disabled={role.builtIn} onConfirm={() => { void removeRole(role); }}>
+                  <Button size="small" danger icon={<DeleteOutlined />} disabled={role.builtIn} />
+                </Popconfirm>
+              </div>
+            </Card>
+          );
+        })}
       </div>
+    );
+  };
+
+  return <div className="space-y-5 animateFadeIn">
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+      <div><h1 className="pageTitle">{t('roles.title')}</h1><p className="pageDesc">{t('roles.description')}</p></div>
+      <Space>
+        <Button icon={<PlusOutlined />} onClick={() => openRoleDrawer(undefined, 'file')}>{t('roles.newFileRole')}</Button>
+        <Button icon={<PlusOutlined />} onClick={() => openRoleDrawer(undefined, 'prompt')}>{t('roles.newPromptRole')}</Button>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => openConfigDrawer()}>{t('roles.newConfig')}</Button>
+      </Space>
+    </div>
+
+    <Alert type="info" showIcon
+      message={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span>{t('roles.plainGuideTitle')}</span>
+        <Button type="link" size="small" icon={guideExpanded ? <UpOutlined /> : <DownOutlined />} onClick={() => setGuideExpanded(!guideExpanded)} style={{ padding: '0 4px' }}>{guideExpanded ? '收起说明' : '展开说明'}</Button>
+      </div>}
+      description={guideExpanded ? t('roles.plainGuideDesc') : undefined}
+    />
+
+    <Card size="small"
+      tabList={[
+        { key: 'file', label: `文件角色 (${fileRoles.length})` },
+        { key: 'prompt', label: `提示词角色 (${promptRoles.length})` },
+        { key: 'configs', label: `项目角色配置 (${configs.length})` },
+      ]}
+      activeTabKey={activeTab} onTabChange={setActiveTab}
+    >
+      {activeTab === 'configs' ? (
+        configs.length === 0 ? <Empty description={t('common.noData')} /> : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
+            {configs.map((config, index) => {
+              const fileItems = config.fileRoles.map(fr => ({ ...fr, role: getRoleById(fr.roleId) })).filter(x => x.role);
+              const promptItems = config.promptRoles.map(pr => ({ ...pr, role: getRoleById(pr.roleId) })).filter(x => x.role);
+              return (
+                <Card key={config.id} size="small" hoverable style={{ minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+                    <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{config.name}</span>
+                    <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                      <Button size="small" icon={<EditOutlined />} onClick={() => openConfigDrawer(config)}>编辑</Button>
+                      <Popconfirm title={t('common.confirm')} onConfirm={() => { void removeConfig(config.id); }}>
+                        <Button size="small" danger icon={<DeleteOutlined />} />
+                      </Popconfirm>
+                    </div>
+                  </div>
+                  {config.description && <Paragraph ellipsis={{ rows: 2 }} style={{ fontSize: 12, color: 'var(--colorTextSecondary)', marginBottom: 8 }}>{config.description}</Paragraph>}
+                  <div style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>
+                    <div style={{ marginBottom: 4 }}>
+                      <span>文件角色 ({config.fileRoles.length}): </span>
+                      {fileItems.length > 0 ? (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
+                          {fileItems.slice(0, 4).map(fr => <Tag key={fr.roleId} color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{fr.role!.name}</Tag>)}
+                          {fileItems.length > 4 && <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>+{fileItems.length - 4}</Tag>}
+                        </div>
+                      ) : <span style={{ color: 'var(--colorTextQuaternary)' }}>无</span>}
+                    </div>
+                    <div>
+                      <span>提示词角色 ({config.promptRoles.length}): </span>
+                      {promptItems.length > 0 ? (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
+                          {promptItems.slice(0, 4).map(pr => <Tag key={pr.roleId} color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{pr.role!.name}</Tag>)}
+                          {promptItems.length > 4 && <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>+{promptItems.length - 4}</Tag>}
+                        </div>
+                      ) : <span style={{ color: 'var(--colorTextQuaternary)' }}>无</span>}
+                    </div>
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+        )
+      ) : (activeTab === 'file' ? roleCardGrid(fileRoles, t) : roleCardGrid(promptRoles, t))}
     </Card>
 
-    <Alert type="info" showIcon message={t('roles.plainGuideTitle')} description={t('roles.plainGuideDesc')} />
-
-    <Row gutter={[16, 16]}>
-      <Col xs={24} lg={12}><Card title={t('roles.fileRoles')}>{roleList('file')}</Card></Col>
-      <Col xs={24} lg={12}><Card title={t('roles.promptRoles')}>{roleList('prompt')}</Card></Col>
-      <Col xs={24}><Card title={t('roles.configs')}><List dataSource={configs} locale={{ emptyText: <Empty description={t('common.noData')} /> }} renderItem={(config, index) => <List.Item actions={[<Button key="edit" type="text" icon={<EditOutlined />} onClick={() => openConfig(config)} />, <Popconfirm key="delete" title={t('common.confirm')} onConfirm={() => { void removeConfig(config.id); }}><Button type="text" danger icon={<DeleteOutlined />} /></Popconfirm>]}><List.Item.Meta title={<Space><Tag>序号 {index + 1}</Tag>{config.name}<Tag>{config.id}</Tag></Space>} description={`${t('roles.fileRoles')}: ${config.fileRoles.length} · ${t('roles.promptRoles')}: ${config.promptRoles.length}`} /></List.Item>} /></Card></Col>
-    </Row>
-
-    <Modal maskClosable={false} title={t('roles.roleEditor')} open={roleOpen} onOk={() => { void saveRole(); }} onCancel={() => setRoleOpen(false)} centered okText={t('common.save')}>
+    {/* Role Editor Drawer */}
+    <Drawer
+      title={t('roles.roleEditor')}
+      open={roleDrawerOpen} onClose={() => setRoleDrawerOpen(false)}
+      width={800} maskClosable={false}
+      style={{ borderRadius: '12px 0 0 12px' }}
+      styles={{ body: { padding: '16px 24px' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
+      extra={<Button type="primary" onClick={() => { void saveRole(); }}>{t('common.save')}</Button>}
+    >
       <Form form={roleForm} layout="vertical">
-        <Form.Item name="type" label={t('roles.roleType')} rules={[{ required: true }]}><Select options={[{ label: t('roles.fileRole'), value: 'file' }, { label: t('roles.promptRole'), value: 'prompt' }]} /></Form.Item>
-        <Form.Item name="id" label="ID" rules={[{ required: true }]}><Input disabled /></Form.Item>
-        <Form.Item name="name" label={t('roles.roleName')} rules={[{ required: true }]}><Input /></Form.Item>
-        <Form.Item name="description" label={t('roles.roleDescription')}><Input /></Form.Item>
-        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.type !== cur.type}>{({ getFieldValue }) => getFieldValue('type') === 'prompt'
-          ? <><Form.Item name="executionType" label={t('roles.executionType')} rules={[{ required: true }]} extra={t('roles.executionTypeHelp')}><Select options={[{ label: t('roles.factExtraction'), value: 'fact_extraction' }, { label: t('roles.chapterGeneration'), value: 'chapter_generation' }, { label: t('roles.validation'), value: 'validation' }, { label: t('roles.formatting'), value: 'formatting' }, { label: t('roles.reference'), value: 'reference' }]} /></Form.Item><Form.Item name="resourceIds" label={t('roles.bindPrompt')} extra={t('roles.multiBindPromptHelp')}><Select mode="multiple" showSearch options={prompts.filter(item => item.hasFile).map(item => ({ label: item.projectName, value: item.id }))} /></Form.Item></>
-          : <><Form.Item name="processingType" label={t('roles.processingType')} rules={[{ required: true }]} extra={t('roles.processingTypeHelp')}><Select options={[{ label: t('roles.ruleFile'), value: 'rule' }, { label: t('roles.projectFactFile'), value: 'project_fact' }, { label: t('roles.tableFile'), value: 'table' }, { label: t('roles.drawingFile'), value: 'drawing' }, { label: t('roles.specificationFile'), value: 'specification' }, { label: t('roles.reference'), value: 'reference' }]} /></Form.Item><Form.Item name="resourceIds" label={t('roles.bindFile')} extra={t('roles.multiBindFileHelp')}><Select mode="multiple" showSearch options={kbFiles.map(item => ({ label: item.relativePath, value: item.relativePath }))} /></Form.Item></>}
-        </Form.Item>
+        <Form.Item name="id" hidden><Input /></Form.Item>
+        <Row gutter={16}>
+          <Col span={12}><Form.Item name="type" label={t('roles.roleType')} rules={[{ required: true }]}><Select options={[{ label: t('roles.fileRole'), value: 'file' }, { label: t('roles.promptRole'), value: 'prompt' }]} /></Form.Item></Col>
+          <Col span={12}><Form.Item name="name" label={t('roles.roleName')} rules={[{ required: true }]}><Input /></Form.Item></Col>
+        </Row>
+        <Form.Item name="description" label={t('roles.roleDescription')}><Input.TextArea rows={2} /></Form.Item>
+        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.type !== cur.type}>{({ getFieldValue }) => {
+          const isPrompt = getFieldValue('type') === 'prompt';
+          return (
+            <Card size="small" title={isPrompt ? '提示词角色配置' : '文件角色配置'} style={{ border: '1px solid var(--colorBorderSecondary)' }}>
+              {isPrompt ? (
+                <>
+                  <Form.Item name="executionType" label={t('roles.executionType')} rules={[{ required: true }]} style={{ marginBottom: 12 }}>
+                    <Select options={[
+                      { label: t('roles.factExtraction'), value: 'fact_extraction' }, { label: t('roles.chapterGeneration'), value: 'chapter_generation' },
+                      { label: t('roles.validation'), value: 'validation' }, { label: t('roles.formatting'), value: 'formatting' }, { label: t('roles.reference'), value: 'reference' },
+                    ]} />
+                  </Form.Item>
+                  <Form.Item name="resourceIds" label={t('roles.bindPrompt')} style={{ marginBottom: 0 }} help={<span style={{ fontSize: 11, color: 'var(--colorTextSecondary)' }}>{t('roles.multiBindPromptHelp')}</span>}>
+                    <Select mode="multiple" showSearch tagRender={tagRender} placeholder="选择提示词" options={prompts.filter(x => x.hasFile).map(x => ({ label: x.projectName, value: x.id }))} />
+                  </Form.Item>
+                </>
+              ) : (
+                <>
+                  <Form.Item name="processingType" label={t('roles.processingType')} rules={[{ required: true }]} style={{ marginBottom: 12 }}>
+                    <Select options={[
+                      { label: t('roles.ruleFile'), value: 'rule' }, { label: t('roles.projectFactFile'), value: 'project_fact' },
+                      { label: t('roles.tableFile'), value: 'table' }, { label: t('roles.drawingFile'), value: 'drawing' },
+                      { label: t('roles.specificationFile'), value: 'specification' }, { label: t('roles.reference'), value: 'reference' },
+                    ]} />
+                  </Form.Item>
+                  <Form.Item name="resourceIds" label={t('roles.bindFile')} style={{ marginBottom: 0 }} help={<span style={{ fontSize: 11, color: 'var(--colorTextSecondary)' }}>{t('roles.multiBindFileHelp')}</span>}>
+                    <Select mode="multiple" showSearch tagRender={tagRender} placeholder="选择知识库文件" options={kbFiles.map(x => ({ label: x.relativePath, value: x.relativePath }))} />
+                  </Form.Item>
+                </>
+              )}
+            </Card>
+          );
+        }}</Form.Item>
       </Form>
-    </Modal>
+    </Drawer>
 
-    <Modal maskClosable={false} title={t('roles.configEditor')} open={configOpen} onOk={() => { void saveConfig(); }} onCancel={() => setConfigOpen(false)} width={820} centered okText={t('common.save')}>
+    {/* Config Editor Drawer */}
+    <Drawer
+      title={t('roles.configEditor')}
+      open={configDrawerOpen} onClose={() => setConfigDrawerOpen(false)}
+      width={800} maskClosable={false}
+      style={{ borderRadius: '12px 0 0 12px' }}
+      styles={{ body: { padding: '16px 24px' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
+      extra={<Button type="primary" onClick={() => { void saveConfig(); }}>{t('common.save')}</Button>}
+    >
       <Form form={configForm} layout="vertical">
-        <Row gutter={12}><Col span={8}><Form.Item name="id" label="ID" rules={[{ required: true }]}><Input disabled /></Form.Item></Col><Col span={8}><Form.Item name="name" label={t('roles.configName')} rules={[{ required: true }]}><Input /></Form.Item></Col><Col span={8}><Form.Item name="description" label={t('roles.configDescription')}><Input /></Form.Item></Col></Row>
-        <Tabs items={[{ key: 'file', label: t('roles.fileRoles'), children: <Form.List name="fileRoles">{(fields, { add, remove }) => <Space direction="vertical" className="w-full">{fields.map((field, index) => <Row key={field.key} gutter={8}><Col span={16}><Form.Item name={[field.name, 'roleId']} rules={[{ required: true }]}><Select options={fileRoles.map(role => ({ label: role.name, value: role.id }))} /></Form.Item></Col><Col span={6}><Form.Item name={[field.name, 'order']} initialValue={index}><Input type="number" /></Form.Item></Col><Col span={2}><Button danger onClick={() => remove(field.name)}>-</Button></Col></Row>)}<Button onClick={() => add({ order: fields.length })}>{t('roles.addRole')}</Button></Space>}</Form.List> }, { key: 'prompt', label: t('roles.promptRoles'), children: <Form.List name="promptRoles">{(fields, { add, remove }) => <Space direction="vertical" className="w-full">{fields.map((field, index) => <Row key={field.key} gutter={8}><Col span={16}><Form.Item name={[field.name, 'roleId']} rules={[{ required: true }]}><Select options={promptRoles.map(role => ({ label: role.name, value: role.id }))} /></Form.Item></Col><Col span={6}><Form.Item name={[field.name, 'order']} initialValue={index}><Input type="number" /></Form.Item></Col><Col span={2}><Button danger onClick={() => remove(field.name)}>-</Button></Col></Row>)}<Button onClick={() => add({ order: fields.length })}>{t('roles.addRole')}</Button></Space>}</Form.List> }]} />
+        <Form.Item name="id" hidden><Input /></Form.Item>
+        <Row gutter={16}>
+          <Col span={12}><Form.Item name="name" label={t('roles.configName')} rules={[{ required: true }]}><Input /></Form.Item></Col>
+          <Col span={12}><Form.Item name="description" label={t('roles.configDescription')}><Input /></Form.Item></Col>
+        </Row>
+        <Tabs destroyInactiveTabPane={false} items={[
+          {
+            key: 'file', label: `文件角色 (${fileRoles.length})`,
+            children: <Form.List name="fileRoles">{(fields, { add, remove }) => (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {fields.length === 0 && <Empty description="暂未添加文件角色" />}
+                {fields.map((field, index) => (
+                  <Card key={field.key} size="small" style={{ border: '1px solid var(--colorBorderSecondary)', position: 'relative' }}>
+                    <div style={{ position: 'absolute', top: -10, left: 12, background: '#1677ff', color: '#fff', fontSize: 11, fontWeight: 700, padding: '1px 8px', borderRadius: 10 }}>#{index + 1}</div>
+                    <Button danger size="small" icon={<DeleteOutlined />} onClick={() => remove(field.name)} style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }} />
+                    <Row gutter={[16, 8]} align="middle" style={{ marginTop: 4 }}>
+                      <Col flex="auto">
+                        <Form.Item name={[field.name, 'roleId']} label="文件角色" rules={[{ required: true }]} style={{ marginBottom: 0 }}>
+                          <Select placeholder="选择文件角色" size="small" options={fileRoles.map(r => ({ label: `${r.name} (${t(FILE_TYPE_LABELS[r.processingType ?? ''] || 'roles.reference')})`, value: r.id }))} />
+                        </Form.Item>
+                      </Col>
+                      <Col style={{ width: 90 }}>
+                        <Form.Item name={[field.name, 'order']} label="排序" initialValue={index} style={{ marginBottom: 0 }}>
+                          <Input type="number" size="small" />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                  </Card>
+                ))}
+                <Button icon={<PlusOutlined />} onClick={() => add({ order: fields.length })}>{t('roles.addRole')}</Button>
+              </div>
+            )}</Form.List>
+          },
+          {
+            key: 'prompt', label: `提示词角色 (${promptRoles.length})`,
+            children: <Form.List name="promptRoles">{(fields, { add, remove }) => (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {fields.length === 0 && <Empty description="暂未添加提示词角色" />}
+                {fields.map((field, index) => (
+                  <Card key={field.key} size="small" style={{ border: '1px solid var(--colorBorderSecondary)', position: 'relative' }}>
+                    <div style={{ position: 'absolute', top: -10, left: 12, background: '#722ed1', color: '#fff', fontSize: 11, fontWeight: 700, padding: '1px 8px', borderRadius: 10 }}>#{index + 1}</div>
+                    <Button danger size="small" icon={<DeleteOutlined />} onClick={() => remove(field.name)} style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }} />
+                    <Row gutter={[16, 8]} align="middle" style={{ marginTop: 4 }}>
+                      <Col flex="auto">
+                        <Form.Item name={[field.name, 'roleId']} label="提示词角色" rules={[{ required: true }]} style={{ marginBottom: 0 }}>
+                          <Select placeholder="选择提示词角色" size="small" options={promptRoles.map(r => ({ label: `${r.name} (${t(PROMPT_TYPE_LABELS[r.executionType ?? ''] || 'roles.reference')})`, value: r.id }))} />
+                        </Form.Item>
+                      </Col>
+                      <Col style={{ width: 90 }}>
+                        <Form.Item name={[field.name, 'order']} label="排序" initialValue={index} style={{ marginBottom: 0 }}>
+                          <Input type="number" size="small" />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                  </Card>
+                ))}
+                <Button icon={<PlusOutlined />} onClick={() => add({ order: fields.length })}>{t('roles.addRole')}</Button>
+              </div>
+            )}</Form.List>
+          },
+        ]} />
       </Form>
-    </Modal>
+    </Drawer>
   </div>;
 }

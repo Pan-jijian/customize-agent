@@ -1,23 +1,39 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useAppTranslations } from '@/components/Layout';
 import { Card, Row, Col, Statistic, Progress, Tag, Space, Button } from 'antd';
-import { useRouter } from 'next/router';
-import { CloudServerOutlined, ApiOutlined, ThunderboltOutlined, CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined, FileTextOutlined, HddOutlined } from '@ant-design/icons';
-import { getSystemStats, type SystemStats, getProviders } from '@/lib/api';
+import { CloudServerOutlined, ApiOutlined, ThunderboltOutlined, CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined, FileTextOutlined, HddOutlined, FormOutlined, SafetyOutlined, LayoutOutlined, NodeIndexOutlined, RobotOutlined } from '@ant-design/icons';
+import { getSystemStats, type SystemStats, getProviders, getDocumentRoles, getDocumentSpecs, getDocumentTemplates, getEmbeddingConfig, type EmbeddingConfig } from '@/lib/api';
 
 export default function OverviewPage() {
   const t = useAppTranslations();
-  const router = useRouter();
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [providerCount, setProviderCount] = useState(0);
+  const [fileRoleCount, setFileRoleCount] = useState(0);
+  const [promptRoleCount, setPromptRoleCount] = useState(0);
+  const [specCount, setSpecCount] = useState(0);
+  const [templateCount, setTemplateCount] = useState(0);
+  const [embeddingConfig, setEmbeddingConfig] = useState<EmbeddingConfig | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, provs] = await Promise.all([getSystemStats(), getProviders().catch(() => [])]);
+      const [s, provs, rolesResult, specsResult, templatesResult, embConfig] = await Promise.all([
+        getSystemStats(),
+        getProviders().catch(() => []),
+        getDocumentRoles().catch(() => ({ roles: [], configs: [] })),
+        getDocumentSpecs().catch(() => ({ specs: [] })),
+        getDocumentTemplates().catch(() => ({ templates: [] })),
+        getEmbeddingConfig().catch(() => null),
+      ]);
       setStats(s);
       setProviderCount(Array.isArray(provs) ? provs.length : 0);
+      const roles = Array.isArray(rolesResult.roles) ? rolesResult.roles : [];
+      setFileRoleCount(roles.filter(r => r.type === 'file').length);
+      setPromptRoleCount(roles.filter(r => r.type === 'prompt').length);
+      setSpecCount(Array.isArray(specsResult.specs) ? specsResult.specs.length : 0);
+      setTemplateCount(Array.isArray(templatesResult.templates) ? templatesResult.templates.length : 0);
+      setEmbeddingConfig(embConfig);
     } catch { /* */ } finally { setLoading(false); }
   }, []);
 
@@ -58,7 +74,7 @@ export default function OverviewPage() {
       {/* Stats */}
       <Row gutter={[16, 16]}>
         <Col xs={12} sm={6}>
-          <Card size="small"><Statistic title={t('overview.providersCount')} value={providerCount} prefix={<ApiOutlined />} /></Card>
+          <Card size="small"><Statistic title="运行时间" value={stats ? Math.floor(stats.uptime / 3600) : 0} suffix="小时" prefix={<ApiOutlined />} /></Card>
         </Col>
         <Col xs={12} sm={6}>
           <Card size="small"><Statistic title={t('overview.tokensUsed')} value={stats?.tokens.total ?? 0} prefix={<ThunderboltOutlined />} /></Card>
@@ -71,10 +87,41 @@ export default function OverviewPage() {
         </Col>
       </Row>
 
+      {/* Resource Status */}
+      <Card size="small" title="资源概览">
+        <Row gutter={[16, 16]}>
+          <Col xs={24} sm={12} md={8} lg={4}>
+            <Card size="small"><Statistic title="文件角色" value={fileRoleCount} prefix={<FileTextOutlined style={{ color: 'var(--colorAccent)' }} />} /></Card>
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={4}>
+            <Card size="small"><Statistic title="提示词角色" value={promptRoleCount} prefix={<FormOutlined style={{ color: 'var(--colorWarning)' }} />} /></Card>
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={4}>
+            <Card size="small"><Statistic title="文档规范包" value={specCount} prefix={<SafetyOutlined style={{ color: 'var(--colorOk)' }} />} /></Card>
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={4}>
+            <Card size="small"><Statistic title="模板" value={templateCount} prefix={<LayoutOutlined style={{ color: 'var(--colorDanger)' }} />} /></Card>
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={4}>
+            <Card size="small">
+              <Statistic
+                title="Embedding"
+                value={embeddingConfig?.provider === 'hash' ? 'Hash' : embeddingConfig?.provider ?? '—'}
+                prefix={<NodeIndexOutlined style={{ color: 'var(--colorAccent)' }} />}
+              />
+              {embeddingConfig?.model && <div className="text-xs mt-1" style={{ color: 'var(--colorTextSecondary)' }}>{embeddingConfig.model}{embeddingConfig.dimensions ? ` · ${embeddingConfig.dimensions}维` : ''}</div>}
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={4}>
+            <Card size="small"><Statistic title="模型供应商" value={providerCount} prefix={<RobotOutlined style={{ color: 'var(--colorAccent)' }} />} /></Card>
+          </Col>
+        </Row>
+      </Card>
+
       {/* Top Model + Task Types */}
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12}>
-          <Card size="small" title={t('overview.topModel')}>
+          <Card size="small" title={t('overview.topModel')} style={{ height: '100%' }}>
             {topModel ? (
               <div className="flex items-center gap-4">
                 <ApiOutlined style={{ fontSize: 24, color: 'var(--colorAccent)' }} />
@@ -89,7 +136,7 @@ export default function OverviewPage() {
           </Card>
         </Col>
         <Col xs={24} sm={12}>
-          <Card size="small" title={t('overview.taskTypes')}>
+          <Card size="small" title={t('overview.taskTypes')} style={{ height: '100%' }}>
             {stats?.tasks.types && Object.keys(stats.tasks.types).length > 0 ? (
               <Space wrap>
                 {Object.entries(stats.tasks.types).map(([taskType, count]) => (
@@ -100,17 +147,6 @@ export default function OverviewPage() {
           </Card>
         </Col>
       </Row>
-
-      {/* Quick Actions */}
-      <Card title={t('overview.quickActions')} size="small">
-        <Space wrap>
-          <Button onClick={() => { void router.push('/knowledge/manage'); }}>{t('overview.goToKnowledge')}</Button>
-          <Button onClick={() => { void router.push('/models'); }}>{t('overview.goToModels')}</Button>
-          <Button onClick={() => { void router.push('/settings'); }}>{t('overview.goToSettings')}</Button>
-          <Button onClick={() => { void router.push('/prompt'); }}>{t('nav.promptManagement')}</Button>
-          <Button onClick={() => { void router.push('/context/long-term'); }}>{t('nav.contextEngineering')}</Button>
-        </Space>
-      </Card>
     </div>
   );
 }

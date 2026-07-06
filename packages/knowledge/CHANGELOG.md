@@ -1,5 +1,17 @@
 # @customize-agent/knowledge
 
+## 4.0.1
+
+### Patch Changes
+
+- 优化 UI 体验：统一页面头部风格，角色配置/规范包/文档生成/生成资源/提示词管理等页面卡片网格布局与抽屉编辑器重构，完善标签国际化，修复热更新与 API 请求问题
+
+## 4.0.0
+
+### Major Changes
+
+- 优化
+
 ## 3.0.13
 
 ### Patch Changes

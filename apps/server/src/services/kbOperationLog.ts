@@ -81,3 +81,11 @@ export function clearKbOperations(projectRoot: string): number {
   if (fs.existsSync(file)) fs.unlinkSync(file);
   return records.length;
 }
+
+export function deleteKbOperation(projectRoot: string, id: string): boolean {
+  const records = readAll(projectRoot);
+  const filtered = records.filter(r => r.id !== id);
+  if (filtered.length === records.length) return false;
+  writeAll(projectRoot, filtered);
+  return true;
+}

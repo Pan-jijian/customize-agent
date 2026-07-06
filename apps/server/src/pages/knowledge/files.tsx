@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppLocale, useAppTranslations } from '@/components/Layout';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { Card, Table, Button, Input, Select, Tag, Modal, Space, App, Progress, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { UploadOutlined, SearchOutlined, DeleteOutlined, FileTextOutlined } from '@ant-design/icons';
-import { getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbFile, deleteKbFiles, deleteAllKbFiles, uploadKbFiles, type KbFileItem, type KbOperationRecord } from '@/lib/api';
+import { UploadOutlined, SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FilePdfOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined } from '@ant-design/icons';
+import { getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbOperation, deleteKbFile, deleteKbFiles, deleteAllKbFiles, uploadKbFiles, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
 const CATEGORIES = ['document', 'spreadsheet', 'image', 'cad', 'code', 'data', 'web', 'diagram', 'archive', 'other'] as const;
 type StatusItem = {
+  id?: string;
   type: 'upload' | 'delete' | 'reindex' | 'error';
   title: string;
   description: string;
@@ -20,6 +21,7 @@ type StatusItem = {
   chunkCount?: number;
   textLength?: number;
   extractionMode?: string;
+  createdAt?: number;
 };
 
 export default function FilesPage() {
@@ -37,7 +39,10 @@ export default function FilesPage() {
   const [uploading, setUploading] = useState(false);
   const [statusItems, setStatusItems] = useState<StatusItem[]>([]);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
-  const [page, setPage] = useState(1);
+  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
+  const [statusFilter, setStatusFilter] = useState<'all' | 'processing' | 'success' | 'error'>('all');
+  const [statusCollapsed, setStatusCollapsed] = useState(true);
+  const [expandedRowKeys, setExpandedRowKeys] = useState<React.Key[]>([]);
   const categoryRef = useRef(category);
 
   useEffect(() => { categoryRef.current = category; }, [category]);
@@ -65,6 +70,7 @@ export default function FilesPage() {
   useEffect(() => { void loadFiles(category); }, [category, loadFiles]);
 
   const mapOperation = (record: KbOperationRecord): StatusItem => ({
+    id: record.id,
     type: record.type,
     title: record.title,
     description: record.message,
@@ -74,6 +80,7 @@ export default function FilesPage() {
     chunkCount: record.chunkCount,
     textLength: record.textLength,
     extractionMode: record.extractionMode,
+    createdAt: record.createdAt,
   });
 
   const loadOperations = useCallback(async () => {
@@ -94,6 +101,54 @@ export default function FilesPage() {
       message.error('清空任务状态失败');
     }
   };
+
+  const toggleExpand = (key: string) => {
+    setExpandedItems(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const dismissItem = async (item: StatusItem, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (item.id) {
+      try { await deleteKbOperation(item.id); } catch { /* ignore */ }
+    }
+    setStatusItems(prev => prev.filter(s => s !== item));
+  };
+
+  const relativeTime = (ts?: number) => {
+    if (!ts) return '';
+    const diff = Date.now() - new Date(ts).getTime();
+    if (diff < 60000) return '刚刚';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`;
+    return '';
+  };
+
+  const statusStats = useMemo(() => {
+    let processing = 0, success = 0, error = 0;
+    for (const item of statusItems) {
+      if (item.status === 'processing') processing++;
+      else if (item.status === 'success') success++;
+      else if (item.status === 'error' || item.status === 'warning') error++;
+    }
+    return { processing, success, error };
+  }, [statusItems]);
+
+  useEffect(() => {
+    if (statusStats.processing > 0) setStatusCollapsed(false);
+  }, [statusStats.processing]);
+
+  const filteredStatusItems = statusFilter === 'all'
+    ? statusItems
+    : statusItems.filter(item => {
+        if (statusFilter === 'processing') return item.status === 'processing';
+        if (statusFilter === 'success') return item.status === 'success';
+        if (statusFilter === 'error') return item.status === 'error' || item.status === 'warning';
+        return true;
+      });
 
   const fileMeta = (item?: KbFileItem) => {
     if (!item) return {};
@@ -125,7 +180,6 @@ export default function FilesPage() {
       setSearchQuery('');
       setCategory('');
       setSelectedRowKeys([]);
-      setPage(1);
       categoryRef.current = '';
       const uploadedFiles = result.uploadedFiles?.length ? result.uploadedFiles : result.files?.filter((item: KbFileItem) => item.relativePath === result.relativePath) ?? [];
       const uploaded = uploadedFiles[0];
@@ -159,7 +213,7 @@ export default function FilesPage() {
 
   const handleDelete = (record: KbFileItem) => {
     Modal.confirm({
-      title: t('delete'), content: t('deleteConfirm'), okText: '确认', cancelText: '取消',
+      title: t('delete'), content: t('deleteConfirm'), okText: t('common.confirm'), cancelText: t('common.cancel'),
       okButtonProps: { danger: true },
       onOk: async () => {
         setStatusItems(items => [{ type: 'delete', title: `删除 ${record.relativePath}`, description: '正在删除文件记录', status: 'processing' } satisfies StatusItem, ...items].slice(0, 50));
@@ -177,14 +231,16 @@ export default function FilesPage() {
   };
 
   const handleBulkDelete = (mode: 'selected' | 'filtered' | 'all') => {
-    const targets = mode === 'selected' ? selectedRowKeys.map(String) : mode === 'filtered' ? filtered.map(file => file.relativePath) : [];
+    const targets = mode === 'selected'
+      ? selectedRowKeys.map(String).filter(k => files.some(f => f.relativePath === k))
+      : mode === 'filtered' ? filtered.map(file => file.relativePath) : [];
     if (mode !== 'all' && targets.length === 0) return;
     const title = mode === 'all' ? '删除全部文件？' : mode === 'filtered' ? `删除当前筛选结果 ${targets.length} 个文件？` : `删除已选 ${targets.length} 个文件？`;
     Modal.confirm({
       title,
       content: '将同时删除文件、切片、索引和向量记录。此操作不可撤销。',
-      okText: '确认删除',
-      cancelText: '取消',
+      okText: t('common.delete'),
+      cancelText: t('common.cancel'),
       okButtonProps: { danger: true },
       onOk: async () => {
         setStatusItems(items => [{ type: 'delete', title, description: '正在批量删除文件和索引', status: 'processing', percent: 10 } satisfies StatusItem, ...items].slice(0, 50));
@@ -206,66 +262,284 @@ export default function FilesPage() {
 
   const filtered = searchQuery ? files.filter((f) => f.relativePath.toLowerCase().includes(searchQuery.toLowerCase())) : files;
 
-  const columns: ColumnsType<KbFileItem> = [
-    { title: '序号', key: 'index', width: 70, render: (_: unknown, __: KbFileItem, index: number) => (page - 1) * 50 + index + 1 },
-    { title: t('fileName'), dataIndex: 'relativePath', key: 'name', render: (n: string, r: KbFileItem) => <Space><FileTextOutlined />{r.builtIn && <Tag color="gold">内置</Tag>}<Link className="truncate max-w-[400px] inline-block" href={`/knowledge/file-detail?relativePath=${encodeURIComponent(n)}`}>{n}</Link></Space> },
-    { title: t('fileCategory'), dataIndex: 'category', key: 'cat', width: 120, render: (c: string) => <Tag>{categoryLabel(c, locale)}</Tag> },
-    { title: t('fileSize'), dataIndex: 'fileSize', key: 'size', width: 100, render: (s: number) => formatBytes(s) },
-    { title: '切片', dataIndex: 'chunkCount', key: 'chunks', width: 90, render: (n: number) => <Tag color={n > 1 ? 'green' : 'orange'}>{n}</Tag> },
-    { title: '解析状态', dataIndex: 'status', key: 'status', width: 110, render: (status: string, r: KbFileItem) => <Tag color={status === 'active' ? 'green' : 'red'}>{r.errorMessage || status}</Tag> },
-    { title: t('fileDate'), dataIndex: 'mtime', key: 'date', width: 140, render: (ts: number) => ts ? new Date(ts).toLocaleDateString(locale) : '—' },
-    { title: '', key: 'act', width: 60, render: (_: unknown, r: KbFileItem) => <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => handleDelete(r)} /> },
+  // ── 树形文件列表 ──
+  interface FileTreeNode {
+    key: string;
+    name: string;
+    isFolder: boolean;
+    fileCount?: number;
+    totalSize?: number;
+    totalChunks?: number;
+    children?: FileTreeNode[];
+    file?: KbFileItem;
+  }
+
+  const treeData = useMemo<FileTreeNode[]>(() => {
+    const root: Record<string, FileTreeNode> = {};
+    const sorted = [...filtered].sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+
+    for (const file of sorted) {
+      const parts = file.relativePath.split('/');
+      let path = '';
+      for (let i = 0; i < parts.length; i++) {
+        const seg = parts[i]!;
+        const parentPath = path;
+        path = path ? `${path}/${seg}` : seg;
+        const isLast = i === parts.length - 1;
+
+        if (!root[path]) {
+          root[path] = {
+            key: path, name: seg, isFolder: !isLast,
+            ...(isLast
+              ? { file, fileCount: 1, totalSize: file.fileSize, totalChunks: file.chunkCount }
+              : { children: [], fileCount: 0, totalSize: 0, totalChunks: 0 }),
+          };
+          if (parentPath && root[parentPath]?.children) {
+            (root[parentPath]!.children as FileTreeNode[]).push(root[path]!);
+          }
+        } else if (!isLast && !root[path]!.isFolder) {
+          // 文件 → 升级为文件夹（发现同名路径下有子文件）
+          root[path]!.isFolder = true;
+          root[path]!.children = [];
+          root[path]!.fileCount = 0;
+          root[path]!.totalSize = 0;
+          root[path]!.totalChunks = 0;
+        } else if (isLast) {
+          root[path]!.isFolder = false;
+          root[path]!.file = file;
+          root[path]!.fileCount = 1;
+          root[path]!.totalSize = file.fileSize;
+          root[path]!.totalChunks = file.chunkCount;
+        }
+      }
+    }
+
+    // 向上聚合文件夹统计
+    const aggregate = (nodes: FileTreeNode[]) => {
+      for (const node of nodes) {
+        if (node.children) {
+          aggregate(node.children);
+          let fc = 0, ts = 0, tc = 0;
+          for (const child of node.children) { fc += child.fileCount ?? 0; ts += child.totalSize ?? 0; tc += child.totalChunks ?? 0; }
+          node.fileCount = fc;
+          node.totalSize = ts;
+          node.totalChunks = tc;
+        }
+      }
+    };
+    const topLevel = Object.values(root).filter(n => !n.key.includes('/'));
+    aggregate(topLevel);
+    return topLevel;
+  }, [filtered]);
+
+  const allTreeKeys = useMemo(() => {
+    const keys: string[] = [];
+    const walk = (nodes: FileTreeNode[]) => {
+      for (const n of nodes) { keys.push(n.key); if (n.children) walk(n.children); }
+    };
+    walk(treeData);
+    return keys;
+  }, [treeData]);
+
+  const defaultExpandedKeys = useMemo(() => {
+    if (searchQuery) return allTreeKeys;
+    return treeData.map(n => n.key);
+  }, [searchQuery, allTreeKeys, treeData]);
+
+  useEffect(() => { setExpandedRowKeys(defaultExpandedKeys); }, [defaultExpandedKeys]);
+
+  const handleExpand = (expanded: boolean, record: FileTreeNode) => {
+    setExpandedRowKeys(prev => expanded ? [...prev, record.key] : prev.filter(k => k !== record.key));
+  };
+
+  const getFileIcon = (file?: KbFileItem) => {
+    if (!file) return <FileOutlined style={{ fontSize: 15 }} />;
+    const cat = file.category;
+    if (cat === 'image') return <FileImageOutlined style={{ color: '#eb2f96', fontSize: 15 }} />;
+    if (cat === 'spreadsheet') return <FileExcelOutlined style={{ color: '#52c41a', fontSize: 15 }} />;
+    if (cat === 'document') return <FileWordOutlined style={{ color: '#1677ff', fontSize: 15 }} />;
+    if (cat === 'code') return <CodeOutlined style={{ color: '#fa8c16', fontSize: 15 }} />;
+    if (cat === 'archive') return <HddOutlined style={{ color: '#8c8c8c', fontSize: 15 }} />;
+    if (cat === 'web') return <GlobalOutlined style={{ color: '#13c2c2', fontSize: 15 }} />;
+    if (cat === 'data') return <DatabaseOutlined style={{ color: '#722ed1', fontSize: 15 }} />;
+    if (cat === 'cad') return <FolderOutlined style={{ color: '#fa541c', fontSize: 15 }} />;
+    if (cat === 'diagram') return <FileImageOutlined style={{ color: '#a0d911', fontSize: 15 }} />;
+    return <FileTextOutlined style={{ fontSize: 15 }} />;
+  };
+
+  const getFolderIcon = (node: FileTreeNode) => {
+    const children = node.children;
+    if (!children || children.length === 0) return <FolderOutlined style={{ color: '#fa8c16', fontSize: 15 }} />;
+    return <FolderOpenOutlined style={{ color: '#fa8c16', fontSize: 15 }} />;
+  };
+
+  const columns: ColumnsType<FileTreeNode> = [
+    {
+      title: t('fileName'), dataIndex: 'name', key: 'name',
+      render: (_: string, r: FileTreeNode) => (
+        <span className={styles.fileNameCell}>
+          {r.isFolder ? (
+            <span style={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); handleExpand(!expandedRowKeys.includes(r.key), r); }}>
+              {getFolderIcon(r)}
+            </span>
+          ) : getFileIcon(r.file)}
+          {r.isFolder ? (
+            <span className={styles.folderName} onClick={(e) => { e.stopPropagation(); handleExpand(!expandedRowKeys.includes(r.key), r); }}>{r.name}</span>
+          ) : (
+            <>
+              {r.file?.builtIn && <Tag color="gold" style={{ fontSize: 11, lineHeight: '18px' }}>内置</Tag>}
+              <Link className="truncate max-w-[380px] inline-block" href={`/knowledge/file-detail?relativePath=${encodeURIComponent(r.key)}`}>{r.name}</Link>
+            </>
+          )}
+        </span>
+      ),
+    },
+    {
+      title: t('fileCategory'), dataIndex: 'category', key: 'cat', width: 110,
+      render: (_: unknown, r: FileTreeNode) => r.isFolder
+        ? <span style={{ color: 'var(--colorTextQuaternary)' }}>—</span>
+        : <Tag>{categoryLabel(r.file?.category ?? '', locale)}</Tag>,
+    },
+    {
+      title: t('fileSize'), dataIndex: 'fileSize', key: 'size', width: 90,
+      render: (_: unknown, r: FileTreeNode) => formatBytes(r.isFolder ? (r.totalSize ?? 0) : (r.file?.fileSize ?? 0)),
+    },
+    {
+      title: '切片', dataIndex: 'chunkCount', key: 'chunks', width: 80,
+      render: (_: unknown, r: FileTreeNode) => {
+        const count = r.isFolder ? (r.totalChunks ?? 0) : (r.file?.chunkCount ?? 0);
+        return <Tag color={count > 1 ? 'green' : 'orange'}>{count}</Tag>;
+      },
+    },
+    {
+      title: '解析状态', dataIndex: 'status', key: 'status', width: 100,
+      render: (_: unknown, r: FileTreeNode) => r.isFolder
+        ? <span style={{ color: 'var(--colorTextQuaternary)' }}>—</span>
+        : <Tag color={r.file?.status === 'active' ? 'green' : 'red'}>{r.file?.errorMessage || r.file?.status || '—'}</Tag>,
+    },
+    {
+      title: t('fileDate'), dataIndex: 'mtime', key: 'date', width: 130,
+      render: (_: unknown, r: FileTreeNode) => r.isFolder
+        ? <span style={{ color: 'var(--colorTextQuaternary)' }}>—</span>
+        : (r.file?.mtime ? new Date(r.file.mtime).toLocaleDateString(locale) : '—'),
+    },
+    {
+      title: '', key: 'act', width: 50,
+      render: (_: unknown, r: FileTreeNode) => r.isFolder ? null : <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => handleDelete(r.file!)} />,
+    },
   ];
 
   return (
     <div className="space-y-5 animateFadeIn">
-      <h2 className="pageTitle">{t('fileList')}</h2>
+      <h2 className="pageTitle">{t('fileManagement')}</h2>
 
       <div className="flex flex-wrap items-end gap-3">
-        <Input placeholder={t('searchPlaceholder')} prefix={<SearchOutlined />} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }} allowClear className={styles.filterInput} />
-        <Select value={category || undefined} onChange={(v) => { setCategory(v || ''); setPage(1); }} placeholder={t('filterCategory')} allowClear className={styles.filterSelect}
+        <Input placeholder={t('searchPlaceholder')} prefix={<SearchOutlined />} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); }} allowClear className={styles.filterInput} />
+        <Select value={category || undefined} onChange={(v) => { setCategory(v || ''); }} placeholder={t('filterCategory')} allowClear className={styles.filterSelect}
           options={[{ label: t('allCategories'), value: '' }, ...CATEGORIES.map((c) => ({ label: categoryLabel(c, locale), value: c }))]} />
         <Button type="primary" icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-file-upload-input')?.click()}>{uploading ? t('uploading') : t('upload')}</Button>
         <Button icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-folder-upload-input')?.click()}>上传文件夹</Button>
-        <Button danger disabled={selectedRowKeys.length === 0} icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')}>删除已选 {selectedRowKeys.length || ''}</Button>
-        <Button danger disabled={filtered.length === 0 || (!searchQuery && !category)} onClick={() => handleBulkDelete('filtered')}>删除筛选结果</Button>
-        <Button danger disabled={files.length === 0} onClick={() => handleBulkDelete('all')}>删除全部</Button>
         <input id="kb-file-upload-input" type="file" multiple hidden onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
         <input id="kb-folder-upload-input" type="file" multiple hidden {...{ webkitdirectory: '' }} onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
       </div>
 
-      <div className={styles.statusPanel}>
-        <div className={styles.statusPanelHeader}>
-          <Space><FileTextOutlined />文件任务状态</Space>
-          <Button size="small" type="text" disabled={statusItems.length === 0} onClick={() => void handleClearOperations()}>清空</Button>
-        </div>
-        {statusItems.length === 0 ? <div className={styles.statusEmpty}>暂无文件任务。</div> : <div className={styles.statusList}>
-          {statusItems.map((item, index) => <div key={`${item.title}-${index}`} className={styles.statusItem}>
-            <div className={styles.statusHeader}>
-              <Space size={8} wrap>
-                <Tag color={item.status === 'success' ? 'green' : item.status === 'error' ? 'red' : item.status === 'warning' ? 'orange' : 'blue'}>{item.type === 'upload' ? '上传' : item.type === 'delete' ? '删除' : item.type === 'reindex' ? '重建' : '失败'}</Tag>
-                <Tooltip title={item.title}><strong>{item.title}</strong></Tooltip>
+      {/* Collapsible Status Card */}
+      <Card size="small" className={styles.statusCard} styles={{ body: { padding: 0 } }}>
+        <div className={styles.statusSummary} onClick={() => setStatusCollapsed(!statusCollapsed)}>
+          <span className={styles.statusSummaryText}>
+            {statusItems.length === 0 ? '暂无文件任务' : (
+              <Space size={6}>
+                {statusStats.processing > 0 && <Tag color="processing" style={{ margin: 0 }} icon={<SyncOutlined spin />}>处理中 {statusStats.processing}</Tag>}
+                <Tag color="success" style={{ margin: 0 }} icon={<CheckCircleOutlined />}>已完成 {statusStats.success}</Tag>
+                <Tag color="error" style={{ margin: 0 }} icon={<CloseCircleOutlined />}>失败 {statusStats.error}</Tag>
               </Space>
-              <Tag color={item.status === 'success' ? 'success' : item.status === 'processing' ? 'processing' : item.status === 'warning' ? 'warning' : 'error'}>{item.status === 'success' ? '完成' : item.status === 'processing' ? '处理中' : item.status === 'warning' ? '需关注' : '失败'}</Tag>
-            </div>
-            <Tooltip title={item.description}><div className={styles.statusDesc}>{item.description}</div></Tooltip>
-            {item.filePath && <Tooltip title={item.filePath}><div className={styles.statusPath}>{item.filePath}</div></Tooltip>}
-            <div className={styles.statusMeta}>
-              {typeof item.chunkCount === 'number' && <span>切片 <b>{item.chunkCount}</b></span>}
-              {typeof item.textLength === 'number' && <span>正文 <b>{item.textLength.toLocaleString(locale)}</b> 字符</span>}
-              {item.extractionMode && <span>解析 <b>{item.extractionMode}</b></span>}
-            </div>
-            {typeof item.percent === 'number' && item.status === 'processing' && <Progress percent={item.percent} size="small" />}
-          </div>)}
-        </div>}
-      </div>
+            )}
+          </span>
+          {statusItems.length > 0 && (
+            <Space size={6}>
+              <Button size="small" className={styles.statusClearBtn} onClick={(e) => { e.stopPropagation(); void handleClearOperations(); }}>清空</Button>
+              <Button size="small" className={styles.statusExpandBtn} onClick={(e) => { e.stopPropagation(); setStatusCollapsed(!statusCollapsed); }}>
+                {statusCollapsed ? '展开' : '收起'}
+              </Button>
+            </Space>
+          )}
+        </div>
 
-      <Card>
+        {!statusCollapsed && statusItems.length > 0 && (
+          <div className={styles.statusPanel}>
+            <div className={styles.statusFilters}>
+              <span className={`${styles.filterPill} ${statusFilter === 'all' ? styles.filterPillActive : ''}`} style={statusFilter === 'all' ? { color: '#1677ff' } : undefined} onClick={() => setStatusFilter('all')}>全部 <b>{statusItems.length}</b></span>
+              <span className={`${styles.filterPill} ${statusFilter === 'processing' ? styles.filterPillActive : ''}`} style={statusFilter === 'processing' ? { color: '#1677ff' } : undefined} onClick={() => setStatusFilter('processing')}><SyncOutlined spin={statusStats.processing > 0} /> 处理中 <b>{statusStats.processing}</b></span>
+              <span className={`${styles.filterPill} ${statusFilter === 'success' ? styles.filterPillActive : ''}`} style={statusFilter === 'success' ? { color: '#52c41a' } : undefined} onClick={() => setStatusFilter('success')}><CheckCircleOutlined /> 已完成 <b>{statusStats.success}</b></span>
+              <span className={`${styles.filterPill} ${statusFilter === 'error' ? styles.filterPillActive : ''}`} style={statusFilter === 'error' ? { color: '#ff4d4f' } : undefined} onClick={() => setStatusFilter('error')}><CloseCircleOutlined /> 失败 <b>{statusStats.error}</b></span>
+            </div>
+            <div className={styles.timelineList}>
+              {filteredStatusItems.length === 0 ? (
+                <div className={styles.statusEmpty}>没有匹配的任务</div>
+              ) : (
+                filteredStatusItems.map((item, idx) => {
+                  const key = `${item.title}-${idx}`;
+                  const expanded = expandedItems.has(key);
+                  return (
+                    <div key={key} className={styles.timelineItem}>
+                      <div className={styles.timelineRow} onClick={() => toggleExpand(key)}>
+                        <span className={styles.timelineStatusIcon}>
+                          {item.status === 'success' ? <CheckCircleOutlined style={{ color: '#52c41a' }} />
+                            : item.status === 'processing' ? <SyncOutlined spin style={{ color: '#1677ff' }} />
+                            : item.status === 'error' ? <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
+                            : <span style={{ color: '#fa8c16', fontWeight: 700 }}>!</span>}
+                        </span>
+                        <span className={styles.timelineTitle}>{item.title}</span>
+                        {typeof item.percent === 'number' && item.status === 'processing' && (
+                          <span className={styles.timelinePercent}>{item.percent}%</span>
+                        )}
+                        <Button type="text" size="small" danger icon={<DeleteOutlined />} style={{ width: 22, height: 22, padding: 0, fontSize: 12 }} onClick={(e) => { void dismissItem(item, e); }} />
+                      </div>
+                      {expanded && (
+                        <div className={styles.timelineDetail}>
+                          {typeof item.percent === 'number' && item.status === 'processing' && <Progress percent={item.percent} size="small" strokeColor="#1677ff" />}
+                          {item.description && <div className={styles.timelineDesc}>{item.description}</div>}
+                          {item.filePath && <Tooltip title={item.filePath}><div className={styles.timelinePath}>{item.filePath}</div></Tooltip>}
+                          <div className={styles.timelineMeta}>
+                            {typeof item.chunkCount === 'number' && <span className={styles.timelineMetaTag}>切片 <b>{item.chunkCount}</b></span>}
+                            {typeof item.textLength === 'number' && <span className={styles.timelineMetaTag}>正文 <b>{item.textLength.toLocaleString(locale)}</b> 字符</span>}
+                            {item.extractionMode && <span className={styles.timelineMetaTag}>解析 <b>{item.extractionMode}</b></span>}
+                          </div>
+                          {item.status === 'error' && <div style={{ color: 'var(--colorError)', fontSize: 12 }}>此任务失败，请重新上传文件或重试操作</div>}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+      </Card>
+
+      <Card
+        title="文件列表"
+        extra={
+          <Space size={8}>
+            <Button danger size="small" disabled={selectedRowKeys.length === 0} icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')}>
+              删除已选 {selectedRowKeys.length || ''}
+            </Button>
+            <Button danger size="small" disabled={files.length === 0} onClick={() => handleBulkDelete('all')}>删除全部</Button>
+          </Space>
+        }
+      >
         {loadError && <div className={styles.statusEmpty}>文件列表加载失败：{loadError}</div>}
-        <Table rowKey="relativePath" columns={columns} dataSource={filtered} loading={loading} size="middle"
+        <Table<FileTreeNode> rowKey="key" columns={columns} dataSource={treeData} loading={loading} size="middle"
+          expandable={{ expandedRowKeys, onExpand: handleExpand, childrenColumnName: 'children' }}
           locale={{ emptyText: loading ? '正在加载文件列表...' : searchQuery ? t('emptySearch') : t('noFiles') }}
-          pagination={{ current: page, pageSize: 50, showSizeChanger: false, onChange: setPage }}
-          rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }} />
+          pagination={false}
+          rowClassName={(r) => r.isFolder ? styles.folderRow : ''}
+          rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys, checkStrictly: false }}
+          footer={() => (
+            <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>
+              共 {filtered.length} 个文件，{treeData.length} 个顶层目录
+            </div>
+          )} />
       </Card>
     </div>
   );

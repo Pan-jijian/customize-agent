@@ -19,6 +19,7 @@ export interface GeneratedDocumentRecord {
   editedMarkdown?: string;
   status: GeneratedDocumentStatus;
   draft?: GeneratedDocumentDraft;
+  executionStages?: GeneratedDocumentDraft['executionStages'];
   assets: DocumentAsset[];
   createdAt: number;
   updatedAt: number;
@@ -89,7 +90,7 @@ export function saveGeneratedDocument(record: GeneratedDocumentRecord, projectRo
   writeJson(draftPath(next.id, projectRoot), next);
   const list = listGeneratedDocuments(projectRoot).filter(item => item.id !== next.id);
   list.unshift(next);
-  writeJson(indexPath(projectRoot), list.map(item => ({ ...item, draft: undefined })));
+  writeJson(indexPath(projectRoot), list.map(item => ({ ...item, draft: undefined, executionStages: item.executionStages })));
   return next;
 }
 
@@ -97,6 +98,19 @@ export function updateGeneratedDocument(id: string, patch: Partial<GeneratedDocu
   const current = getGeneratedDocument(id, projectRoot);
   if (!current) return null;
   return saveGeneratedDocument({ ...current, ...patch, id }, projectRoot);
+}
+
+export function abortGeneratedDocument(id: string, projectRoot = getProjectRoot()) {
+  const current = getGeneratedDocument(id, projectRoot);
+  if (!current || current.status !== 'generating') return null;
+  // 中断 task map 中的 promise（标记为已中止）
+  for (const [key, task] of tasks) {
+    if (task.documentId === id) {
+      tasks.delete(key);
+      break;
+    }
+  }
+  return saveGeneratedDocument({ ...current, status: 'failed', error: '用户中止', updatedAt: Date.now() }, projectRoot);
 }
 
 export function deleteGeneratedDocument(id: string, projectRoot = getProjectRoot()) {
@@ -195,7 +209,16 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     updatedAt: now,
   };
   saveGeneratedDocument(initial, projectRoot);
-  const promise = generateDocumentDraft(input).then(result => {
+  const promise = generateDocumentDraft({ ...input, projectRoot, onProgress: (stages) => {
+    // 增量保存执行阶段到顶层字段，前端轮询实时获取
+    try {
+      const current = getGeneratedDocument(documentId, projectRoot);
+      if (current && current.status === 'generating') {
+        saveGeneratedDocument({ ...current, executionStages: stages }, projectRoot);
+        console.log(`[gen] progress saved: ${stages.length} stages, doc=${documentId}`);
+      }
+    } catch (err) { console.error('[gen] progress save error:', err); }
+  } }).then(result => {
     const warningIssues = result.validationIssues.filter(issue => issue.level === 'error' || issue.level === 'warning').map(issue => issue.suggestion ? `${issue.message}：${issue.suggestion}` : issue.message);
     const record = saveGeneratedDocument({
       ...initial,

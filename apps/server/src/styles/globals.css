@@ -187,13 +187,13 @@ a {
   .sidebarItem { justify-content: center; padding: 11px; }
   .sidebarSubmenu { padding-left: 0; }
   .sidebarSubItem { padding-left: 11px; }
-  .mainInner { padding: 20px; }
+  .mainInner { padding: 20px; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); }
   .topbar { padding: 10px 16px; margin: 10px 12px 0; }
 }
 
 @media (max-width: 640px) {
-  .sidebar { left: 6px; top: 6px; bottom: 6px; }
+  .sidebar { left: 6px; top: 6px; bottom: calc(6px + env(safe-area-inset-bottom, 0px)); }
   .mainContent { margin-left: 72px; }
-  .mainInner { padding: 12px; }
+  .mainInner { padding: 12px; padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
   .topbar { margin: 8px 8px 0; padding: 8px 12px; border-radius: 16px; }
 }
