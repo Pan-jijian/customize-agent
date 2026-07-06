@@ -2,6 +2,8 @@ import * as fs from 'node:fs';
 import JSZip from 'jszip';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getGeneratedDocument } from '@/services/generatedDocumentService';
+import { recordErrorLog } from '@/services/errorLogService';
+import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
 type ExportFormat = 'markdown' | 'html' | 'pdf' | 'docx';
 
@@ -87,9 +89,14 @@ function htmlShell(title: string, body: string) {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:A4;margin:24mm 18mm 22mm 18mm}body{font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif;line-height:1.75;color:#111827;font-size:14px}h1{text-align:center;font-size:28px;margin-top:80px}h2{border-bottom:1px solid #d1d5db;padding-bottom:6px;margin-top:28px;page-break-after:avoid}h3{margin-top:20px}table{width:100%;border-collapse:collapse;page-break-inside:auto}tr{page-break-inside:avoid;page-break-after:auto}th,td{border:1px solid #6b7280;padding:6px 8px;vertical-align:top}th{background:#f3f4f6}pre{white-space:pre-wrap}.document-cover{min-height:720px;display:flex;flex-direction:column;justify-content:center}.document-cover h1{margin-top:0}.page-break{page-break-after:always;height:0}</style></head><body>${body}</body></html>`;
 }
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+function isExportBlockingIssue(issue: { message: string }) {
+  const message = issue.message.trim();
+  if (/^(事实冲突|必需章节缺失)：/u.test(message)) return false;
+  return /出现禁用文本\s*(资料未提供|占位|TODO|TBD)|正文包含.*(资料未提供|占位)|图片、地图或附件引用路径明显无效|无效路径|表格语法错误|临时远程生成 URL|提示词全文|内部错误/iu.test(message);
+}
+
+async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-  try {
     const body = req.body as { documentId?: string; title?: string; markdown?: string; format?: ExportFormat; enforceGate?: boolean; exportGate?: { passed?: boolean; blockingIssues?: Array<{ message: string }> }; wordTemplatePath?: string };
     const record = body.documentId ? getGeneratedDocument(body.documentId) : null;
     if (body.documentId && !record) return res.status(404).json({ error: 'Document not found' });
@@ -97,7 +104,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const markdown = record?.editedMarkdown || record?.markdown || body.markdown || '';
     const format = body.format || 'markdown';
     const exportGate = record?.draft?.exportGate || body.exportGate;
-    if (body.enforceGate && exportGate?.blockingIssues?.length) return res.status(422).json({ error: 'Export gate failed', issues: exportGate.blockingIssues });
+    const blockingIssues = exportGate?.blockingIssues?.filter(isExportBlockingIssue) || [];
+    if (body.enforceGate && blockingIssues.length) return res.status(422).json({ error: 'Export gate failed', issues: blockingIssues });
     const filename = safeFileName(title);
     if (format === 'markdown') {
       res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
@@ -131,14 +139,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       } finally {
         await browser.close();
       }
-    } catch {
+    } catch (error) {
+      recordErrorLog({ level: 'warn', source: 'api/documents/export', functionName: 'pdfExportChromium', error, req, meta: { fallback: 'minimal-pdf' } });
       const pdf = buildFallbackPdf(title, markdown);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.pdf`)}`);
       return res.status(200).send(pdf);
     }
-  } catch (e: unknown) {
-    console.error('[api] documents/export', e);
-    res.status(500).json({ error: e instanceof Error ? e.message : 'Internal server error' });
-  }
 }
+
+export default withApiErrorBoundary('api/documents/export', handler);

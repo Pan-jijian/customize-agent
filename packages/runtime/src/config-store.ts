@@ -36,6 +36,7 @@ export interface ProviderConfig {
   baseUrl?: string;
   /** 协议：空=自动推断, openai, anthropic, google */
   protocol?: string;
+  directEndpoint?: boolean;
   capabilities?: ModelCapabilities;
 }
 
@@ -149,6 +150,12 @@ export class ConfigStore {
     return this.save(cfg);
   }
 
+  setProviderDirectEndpoint(name: string, directEndpoint: boolean): UserConfig {
+    const cfg = this.load();
+    cfg.providers[name] = { ...cfg.providers[name], directEndpoint };
+    return this.save(cfg);
+  }
+
   setProviderCapabilities(name: string, capabilities: ModelCapabilities): UserConfig {
     const cfg = this.load();
     cfg.providers[name] = { ...cfg.providers[name], capabilities };
@@ -232,6 +239,7 @@ export class ConfigStore {
         apiKey: typeof provider.apiKey === 'string' ? provider.apiKey : undefined,
         baseUrl: typeof provider.baseUrl === 'string' ? provider.baseUrl : undefined,
         protocol: typeof provider.protocol === 'string' ? provider.protocol : undefined,
+        directEndpoint: provider.directEndpoint === true,
         capabilities: {
           imageGeneration: capabilities.imageGeneration === true,
           imageUnderstanding: capabilities.imageUnderstanding === true,

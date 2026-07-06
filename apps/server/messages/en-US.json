@@ -19,7 +19,8 @@
     "contextEngineering": "Context Engineering",
     "longTermContext": "Long-term Context",
     "shortTermContext": "Short-term Context",
-    "promptManagement": "Prompt Management"
+    "promptManagement": "Prompt Management",
+    "systemLogs": "System Logs"
   },
   "overview": {
     "title": "System Overview",

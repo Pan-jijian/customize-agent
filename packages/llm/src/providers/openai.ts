@@ -20,11 +20,12 @@ export class OpenAIProvider extends OpenAICompatProvider {
   readonly name = 'openai';
   readonly capabilities = OPENAI_CAPABILITIES;
 
-  constructor(options: { apiKey?: string; baseUrl?: string; modelName?: string } = {}) {
+  constructor(options: { apiKey?: string; baseUrl?: string; modelName?: string; directEndpoint?: boolean } = {}) {
     super({
       apiKey: options.apiKey,
       baseUrl: options.baseUrl,
       modelName: options.modelName,
+      directEndpoint: options.directEndpoint,
       defaultApiKey: process.env.CUSTOMIZE_AGENT_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY,
       defaultBaseUrl: process.env.OPENAI_BASE_URL,
       defaultModel: 'gpt-5.3-codex',

@@ -89,6 +89,7 @@ export default function KnowledgeManagePage() {
               { key: 'chunker', label: t('knowledge.featureChunker'), desc: t('knowledge.featureChunkerDesc'), value: features.chunker },
             ]}
             columns={[
+              { title: '序号', key: 'index', width: 70, render: (_: unknown, __: unknown, index: number) => index + 1 },
               { title: t('knowledge.featureName'), dataIndex: 'label', key: 'label', width: 120 },
               { title: t('knowledge.featureDesc'), dataIndex: 'desc', key: 'desc' },
               { title: t('knowledge.featureValue'), dataIndex: 'value', key: 'value', render: (v: string) => <Tag color="blue">{v}</Tag> },

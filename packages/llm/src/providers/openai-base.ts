@@ -19,6 +19,9 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
   abstract readonly capabilities: ModelCapabilities;
   readonly modelName: string;
   protected client: OpenAI;
+  protected apiKey: string;
+  protected baseUrl?: string;
+  protected directEndpoint: boolean;
 
   constructor(params: {
     apiKey?: string;
@@ -28,10 +31,14 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
     defaultBaseUrl?: string;
     defaultModel: string;
     defaultHeaders?: Record<string, string>;
+    directEndpoint?: boolean;
   }) {
+    this.apiKey = params.apiKey || params.defaultApiKey || 'sk-placeholder';
+    this.baseUrl = params.baseUrl ?? params.defaultBaseUrl;
+    this.directEndpoint = params.directEndpoint === true;
     this.client = new OpenAI({
-      apiKey: params.apiKey || params.defaultApiKey || 'sk-placeholder', // 占位符避免 SDK 崩溃，空串也回退
-      baseURL: params.baseUrl ?? params.defaultBaseUrl,
+      apiKey: this.apiKey, // 占位符避免 SDK 崩溃，空串也回退
+      baseURL: this.baseUrl,
       defaultHeaders: params.defaultHeaders,
     });
     this.modelName = params.modelName ?? params.defaultModel;
@@ -73,38 +80,178 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
   }
 
   async generateImage(prompt: string, options?: ImageGenerationOptions): Promise<ImageGenerationResult> {
-    return withRetry(async () => {
-      const response = await this.client.images.generate({
-        model: this.modelName,
-        prompt,
-        size: options?.size ?? '1536x1024',
-        quality: options?.quality ?? 'high',
-        n: 1,
-      } as OpenAI.Images.ImageGenerateParams, { signal: options?.signal }) as unknown as { data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }> };
-      const image = response.data?.[0];
-      if (!image) throw new Error('Image generation returned empty data');
-      if (image.b64_json) return { mimeType: `image/${options?.format ?? 'png'}`, data: Buffer.from(image.b64_json, 'base64'), revisedPrompt: image.revised_prompt };
-      if (image.url) {
-        const fetched = await fetch(image.url, { signal: options?.signal });
-        if (!fetched.ok) throw new Error(`Failed to download generated image: ${fetched.status}`);
-        const contentType = fetched.headers.get('content-type') || `image/${options?.format ?? 'png'}`;
-        return { mimeType: contentType, data: Buffer.from(await fetched.arrayBuffer()), revisedPrompt: image.revised_prompt };
+    return withRetry(async () => this._generateImageWithOpenAICompatibleEndpoint(prompt, options));
+  }
+
+  private async _generateImageWithOpenAICompatibleEndpoint(prompt: string, options?: ImageGenerationOptions): Promise<ImageGenerationResult> {
+    const standardBody = {
+      model: this.modelName,
+      prompt,
+      size: options?.size ?? '1536x1024',
+      quality: options?.quality ?? 'high',
+      n: 1,
+    };
+    const first = await this._postImageGeneration(standardBody, options);
+    if (first.ok) return first.result;
+    if (!/field messages is required|messages.*required/iu.test(first.error)) throw new Error(first.error);
+    const messagesBody = {
+      model: this.modelName,
+      messages: [{ role: 'user', content: prompt }],
+      size: options?.size ?? '1536x1024',
+      quality: options?.quality ?? 'high',
+      n: 1,
+    };
+    const second = await this._postImageGeneration(messagesBody, options);
+    if (second.ok) return second.result;
+    if (!/Unknown parameter|unknown_parameter/iu.test(second.error)) throw new Error(`${first.error} | ${second.error}`);
+    const minimalMessagesBody = {
+      model: this.modelName,
+      messages: [{ role: 'user', content: prompt }],
+    };
+    const third = await this._postImageGeneration(minimalMessagesBody, options);
+    if (third.ok) return third.result;
+    throw new Error(`${first.error} | ${second.error} | ${third.error}`);
+  }
+
+  private async _postImageGeneration(body: Record<string, unknown>, options?: ImageGenerationOptions): Promise<{ ok: true; result: ImageGenerationResult } | { ok: false; error: string }> {
+    try {
+      const response = await fetch(this._endpoint('/images/generations'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
+        body: JSON.stringify(body),
+        signal: options?.signal,
+      });
+      const text = await response.text();
+      if (!response.ok) return { ok: false, error: `OpenAI-compatible image endpoint error (${response.status}): ${text}` };
+      const data = JSON.parse(text) as unknown;
+      const image = this._findInlineImage(data);
+      if (image) return { ok: true, result: { mimeType: image.mimeType || `image/${options?.format ?? 'png'}`, data: Buffer.from(image.data, 'base64') } };
+      const url = this._findImageUrl(data);
+      if (url) return { ok: true, result: await this._downloadImageUrl(url, options) };
+      const content = this._findTextContent(data);
+      if (content?.trim().startsWith('<svg')) return { ok: true, result: { mimeType: 'image/svg+xml', data: Buffer.from(content) } };
+      return { ok: false, error: content ? `OpenAI-compatible image endpoint returned text instead of image: ${content.slice(0, 240)}` : `OpenAI-compatible image endpoint returned no image: ${text.slice(0, 300)}` };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private _findImageUrl(value: unknown): string | null {
+    if (!value || typeof value !== 'object') return null;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = this._findImageUrl(item);
+        if (found) return found;
       }
-      throw new Error('Image generation returned no URL or base64 data');
+      return null;
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record.url === 'string') return record.url;
+    for (const item of Object.values(record)) {
+      const found = this._findImageUrl(item);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  private async _downloadImageUrl(url: string, options?: ImageGenerationOptions): Promise<ImageGenerationResult> {
+    const dataUrl = /^data:(image\/[^;]+);base64,(.+)$/u.exec(url);
+    if (dataUrl?.[1] && dataUrl[2]) return { mimeType: dataUrl[1], data: Buffer.from(dataUrl[2], 'base64') };
+    const fetched = await fetch(url, { signal: options?.signal });
+    if (!fetched.ok) throw new Error(`Failed to download generated image: ${fetched.status}`);
+    const contentType = fetched.headers.get('content-type') || `image/${options?.format ?? 'png'}`;
+    return { mimeType: contentType, data: Buffer.from(await fetched.arrayBuffer()) };
+  }
+
+  private _findTextContent(value: unknown): string | null {
+    if (!value || typeof value !== 'object') return null;
+    if (Array.isArray(value)) {
+      const texts = value.map(item => this._findTextContent(item)).filter((text): text is string => Boolean(text));
+      return texts.length > 0 ? texts.join('\n') : null;
+    }
+    const record = value as Record<string, unknown>;
+    for (const key of ['content', 'text', 'output_text']) {
+      const field = record[key];
+      if (typeof field === 'string' && field.trim()) return field;
+      const found = this._findTextContent(field);
+      if (found) return found;
+    }
+    const message = record.message;
+    if (message && typeof message === 'object') {
+      const found = this._findTextContent(message);
+      if (found) return found;
+    }
+    const choices = record.choices;
+    if (Array.isArray(choices)) {
+      const found = this._findTextContent(choices);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  private _findInlineImage(value: unknown): { mimeType?: string; data: string } | null {
+    if (!value || typeof value !== 'object') return null;
+    const record = value as Record<string, unknown>;
+    const inline = record.inlineData || record.inline_data;
+    if (inline && typeof inline === 'object') {
+      const inlineRecord = inline as Record<string, unknown>;
+      if (typeof inlineRecord.data === 'string') return { mimeType: typeof inlineRecord.mimeType === 'string' ? inlineRecord.mimeType : typeof inlineRecord.mime_type === 'string' ? inlineRecord.mime_type : undefined, data: inlineRecord.data };
+    }
+    if (typeof record.b64_json === 'string') return { data: record.b64_json };
+    for (const item of Object.values(record)) {
+      if (Array.isArray(item)) {
+        for (const child of item) {
+          const found = this._findInlineImage(child);
+          if (found) return found;
+        }
+      } else {
+        const found = this._findInlineImage(item);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  private _endpoint(suffix: string) {
+    const base = (this.baseUrl || '').replace(/\/$/u, '');
+    return this.directEndpoint ? base : `${base}${suffix}`;
+  }
+
+  private async _postChat(messages: Message[], options?: ChatOptions): Promise<OpenAI.Chat.Completions.ChatCompletion> {
+    const body = {
+      model: this.modelName,
+      messages: toOpenAIMessages(messages),
+      temperature: options?.temperature ?? 0.2,
+      max_tokens: options?.maxTokens,
+      tools: this._buildTools(options?.tools),
+    };
+    if (!this.directEndpoint) return this.client.chat.completions.create(body as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming, { signal: options?.signal });
+    const first = await this._postDirectChat(body, options);
+    if (first.ok) return first.response;
+    if (!/temperature.*default|unsupported.*temperature|Unsupported value: 'temperature'/iu.test(first.error)) throw new Error(first.error);
+    const { temperature: _temperature, ...retryBody } = body;
+    const second = await this._postDirectChat(retryBody, options);
+    if (second.ok) return second.response;
+    throw new Error(`${first.error} | ${second.error}`);
+  }
+
+  private async _postDirectChat(body: Record<string, unknown>, options?: ChatOptions): Promise<{ ok: true; response: OpenAI.Chat.Completions.ChatCompletion } | { ok: false; error: string }> {
+    const response = await fetch(this._endpoint('/chat/completions'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify(body),
+      signal: options?.signal,
     });
+    const text = await response.text();
+    if (!response.ok) return { ok: false, error: `OpenAI-compatible chat endpoint error (${response.status}): ${text}` };
+    return { ok: true, response: JSON.parse(text) as OpenAI.Chat.Completions.ChatCompletion };
   }
 
   // ── chat 模板方法 ──
 
   async chat(messages: Message[], options?: ChatOptions): Promise<LLMResponse> {
     return withRetry(async () => {
-      const response = await this.client.chat.completions.create({
-        model: this.modelName,
-        messages: toOpenAIMessages(messages),
-        temperature: options?.temperature ?? 0.2,
-        max_tokens: options?.maxTokens,
-        tools: this._buildTools(options?.tools),
-      }, { signal: options?.signal });
+      const response = await this._postChat(messages, options);
 
       const choice = response.choices[0];
       if (!choice) throw new Error('LLM returned empty choices');
@@ -129,6 +276,11 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
     onChunk: (chunk: StreamChunk) => void,
     options?: ChatOptions,
   ): Promise<LLMResponse> {
+    if (this.directEndpoint) {
+      const response = await this.chat(messages, options);
+      onChunk({ type: 'content', text: response.content });
+      return response;
+    }
     return withRetry(
       async () => {
         const stream = await this.client.chat.completions.create({

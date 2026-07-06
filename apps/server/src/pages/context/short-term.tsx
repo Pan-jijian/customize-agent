@@ -61,6 +61,7 @@ export default function ShortTermContextPage() {
   };
 
   const columns = [
+    { title: '序号', key: 'index', width: 70, render: (_: unknown, __: ContextEntry, index: number) => index + 1 },
     { title: t('models.modelName'), dataIndex: 'title', ellipsis: true, width: 180 },
     { title: t('context.importance'), dataIndex: 'importance', width: 80, render: (v: string) => <Tag color={IMPORTANCE_COLORS[v] || 'default'}>{v === 'high' ? '高' : v === 'medium' ? '中' : '低'}</Tag> },
     { title: t('context.content'), dataIndex: 'content', ellipsis: true },

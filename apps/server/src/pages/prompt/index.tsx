@@ -143,11 +143,11 @@ export default function PromptPage() {
       <Row gutter={[16, 16]}>
         {loading ? Array.from({ length: 3 }).map((_, index) => (
           <Col key={index} xs={24} sm={12} lg={8}><Card loading size="small" /></Col>
-        )) : projects.map((p) => (
+        )) : projects.map((p, index) => (
           <Col key={p.id} xs={24} sm={12} lg={8}>
             <Card
               size="small"
-              title={<><FileTextOutlined /> {p.projectName}</>}
+              title={<Space size={6}><Tag>序号 {index + 1}</Tag><FileTextOutlined /> {p.projectName}</Space>}
               extra={
                 <span style={{ display: 'flex', gap: 4 }}>
                   {p.hasFile && <Checkbox checked={p.selected} onChange={e => { void handleSelect(p, e.target.checked); }}>选中</Checkbox>}

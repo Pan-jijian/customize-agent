@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/llm",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "description": "AI 模型提供商 + 自动路由网关",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

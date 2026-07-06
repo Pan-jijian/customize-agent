@@ -81,9 +81,10 @@ export default function KnowledgeSearchPage() {
       <Card size="small" title="搜索结果" extra={typeof queryTimeMs === 'number' ? `${queryTimeMs} ms` : undefined}>
         {error ? <Alert type="error" showIcon message="搜索失败" description={error} className="mb-4" /> : null}
         {loading ? <Spin /> : results.length === 0 ? <Empty description="暂无结果" /> : <div className={styles.searchResultList}>
-          {results.map(item => <div key={item.id} className={styles.searchResultItem}>
+          {results.map((item, index) => <div key={item.id} className={styles.searchResultItem}>
             <div className={styles.searchResultHeader}>
               <Space size={8} wrap>
+                <Tag>序号 {index + 1}</Tag>
                 <Tag color={item.source === 'hybrid' ? 'purple' : item.source === 'vector' ? 'blue' : 'green'}>{item.source ?? 'keyword'}</Tag>
                 <Tag>{item.scope}</Tag>
                 {item.chunkKind && <Tag color="geekblue">{item.chunkKind}</Tag>}

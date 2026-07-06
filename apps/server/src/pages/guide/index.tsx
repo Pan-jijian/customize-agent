@@ -147,18 +147,19 @@ const operationSections = [
   },
   {
     title: '第九步：审查结果并导出',
-    goal: '确保文档可追溯、可校验、可交付。',
-    path: '生成编辑 → 编辑器下方 Tabs → 导出按钮',
+    goal: '确保文档可追溯、可校验、可交付，同时能区分阻断问题和可复核 warning。',
+    path: '生成编辑 → 编辑器下方 Tabs → 导出按钮 / 草稿历史',
     steps: [
       '查看“结构化事实”，确认事实字段是否按文档规范包动态 schema 抽取，并检查冲突提示。',
       '查看“来源”，确认事实来自规范包要求的文件角色和绑定资料。',
       '查看“缺失项”，补齐缺失资料或调整角色配置。',
-      '查看“严格校验”，处理 error 级问题。',
-      '查看“导出门禁”，全部通过后再导出 PDF。',
-      '可以先导出 HTML 预览排版，再导出 PDF。',
+      '查看“校验”，优先处理 error；warning 表示可导出但建议复核。',
+      '查看“导出门禁”，真实 blockingIssues 会阻断 PDF/DOCX 导出，普通 warning 不阻断。',
+      '在草稿历史中确认生成状态、warning 原因、整体生成耗时，并可删除不需要的记录。',
+      '可以先导出 HTML 预览排版，再导出 DOCX/PDF。',
     ],
-    checks: ['无阻断错误', '关键事实有来源', '章节有证据', '导出门禁通过'],
-    tips: 'PDF 导出会强制门禁。门禁未通过时，系统会阻止导出，避免问题文档流出。',
+    checks: ['无真实阻断问题', '关键事实有来源', '章节有证据', 'warning 原因已复核', '导出文件可打开'],
+    tips: '导出不是简单放行：真实阻断仍会拦截；生成完成但存在可复核问题时显示 warning，用户可以继续导出并按原因优化资料。',
   },
 ];
 
@@ -239,6 +240,46 @@ export default function GuidePage() {
       </Row>
     </Card>
 
+    <Card title="生成记录、warning 和导出门禁怎么理解">
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={8}>
+          <Card size="small" title="草稿历史记录">
+            <Paragraph>每次后台生成都会写入全局项目目录 <Text code>~/.customize-agent/projects/{'{projectId}'}/generatedDocuments</Text>。记录会保存标题、模板、状态、创建时间、完成时间、生成耗时、正文、结构化结果和资源引用。</Paragraph>
+            <ul className="list-disc pl-5 space-y-1"><li>completed：生成完成且无需要关注的问题。</li><li>warning：生成完成，但存在可复核问题。</li><li>failed：生成失败，需要查看错误原因。</li><li>generating：后台任务仍在执行，可轮询恢复。</li></ul>
+          </Card>
+        </Col>
+        <Col xs={24} lg={8}>
+          <Card size="small" title="warning 不是失败">
+            <Paragraph>warning 用于提醒用户“文档已经生成，但建议复核”。例如必需事实没有在最佳来源角色中抽到、部分来源需要人工确认、格式或内容有优化建议。warning 会显示在草稿历史和校验详情中，并保留导出能力。</Paragraph>
+            <Paragraph>如果是明确阻断问题，例如正文包含临时图片生成 URL、出现“资料未提供”占位、真实 blockingIssues 未解决，则导出门禁仍会阻断 DOCX/PDF。</Paragraph>
+          </Card>
+        </Col>
+        <Col xs={24} lg={8}>
+          <Card size="small" title="导出门禁规则">
+            <Paragraph>门禁分为“真实阻断”和“复核建议”。系统不会因为普通 warning 简单禁止导出，但会在出现阻断级问题时保护交付质量。</Paragraph>
+            <ul className="list-disc pl-5 space-y-1"><li>Markdown/HTML 更适合快速预览和人工调整。</li><li>DOCX/PDF 会启用真实门禁检查。</li><li>草稿历史可保留多个版本，便于对比和再次导出。</li></ul>
+          </Card>
+        </Col>
+      </Row>
+    </Card>
+
+    <Card title="生成资源和知识库的关系">
+      <Row gutter={[16, 16]}>
+        <Col xs={24} md={12}>
+          <Card size="small" title="生成资源默认不入库">
+            <Paragraph>模型生成的图片、封面或后处理资源会保存在 generatedDocuments/assets 下，并登记到生成资源管理页。它们默认不进入知识库索引，避免临时产物污染原始资料。</Paragraph>
+            <Paragraph>如果某个生成资源已经被人工确认可以复用，再到资源管理页手动加入知识库索引。</Paragraph>
+          </Card>
+        </Col>
+        <Col xs={24} md={12}>
+          <Card size="small" title="资源预览和坏图处理">
+            <Paragraph>资源预览会从全局 generatedDocuments 目录解析文件，不依赖当前页面临时路径。图片下载会识别“image is generating”等占位响应，并校验 PNG/JPEG/WebP 字节，避免把占位文本当成图片保存。</Paragraph>
+            <Paragraph>如果预览失败，优先查看资源管理页中的文件路径、资源状态和原始生成记录。</Paragraph>
+          </Card>
+        </Col>
+      </Row>
+    </Card>
+
     <Card title="文件角色处理类型大白话说明">
       <Row gutter={[16, 16]}>
         <Col xs={24} md={12}><Card size="small" title="规则文件"><Paragraph>用来告诉系统“必须怎么写、不能怎么写、按什么标准判断”。适合放评分办法、甲方编制要求、攻略写作要求、输出格式要求。生成时会优先作为约束使用。</Paragraph></Card></Col>
@@ -256,6 +297,24 @@ export default function GuidePage() {
         <Col xs={24} md={8}><Card size="small" title="强烈建议"><ul className="list-disc pl-5"><li>表格数据</li><li>图纸说明</li><li>规范或企业标准</li></ul></Card></Col>
         <Col xs={24} md={8}><Card size="small" title="导出前确认"><ul className="list-disc pl-5"><li>无 error 校验</li><li>事实有来源</li><li>导出门禁通过</li></ul></Card></Col>
       </Row>
+    </Card>
+
+    <Card title="生产级生成前检查清单">
+      <Row gutter={[16, 16]}>
+        <Col xs={24} md={12} xl={6}><Card size="small" title="资料完整性"><ul className="list-disc pl-5 space-y-1"><li>事实源、规则源、表格源、图片/图纸源分开绑定。</li><li>关键事实在知识库检索中可以搜索到。</li><li>表格有清晰表头，图片和图纸有说明文字。</li></ul></Card></Col>
+        <Col xs={24} md={12} xl={6}><Card size="small" title="角色配置"><ul className="list-disc pl-5 space-y-1"><li>文件角色处理类型选对。</li><li>提示词角色执行类型选对。</li><li>项目角色配置排序符合生成流程。</li></ul></Card></Col>
+        <Col xs={24} md={12} xl={6}><Card size="small" title="规范包"><ul className="list-disc pl-5 space-y-1"><li>required fact 不要过度配置。</li><li>sourceRoleIds 只绑定真正应该提供该事实的角色。</li><li>gateRules 区分 error 和 warning。</li></ul></Card></Col>
+        <Col xs={24} md={12} xl={6}><Card size="small" title="交付检查"><ul className="list-disc pl-5 space-y-1"><li>草稿历史记录状态合理。</li><li>warning 原因已经阅读。</li><li>导出文件打开正常，图片和表格可读。</li></ul></Card></Col>
+      </Row>
+    </Card>
+
+    <Card title="常见问题和处理建议">
+      <Collapse items={[
+        { key: 'warning-export', label: '为什么生成完成后显示 warning，但仍然可以导出？', children: <Paragraph>warning 表示文档已生成，但存在建议复核的问题，例如来源角色不完全匹配、某些事实需要人工确认或格式可优化。它不是失败，也不是导出阻断。只有真实 blockingIssues 或 error 级门禁问题才会阻断 DOCX/PDF 导出。</Paragraph> },
+        { key: 'missing-facts', label: '为什么提示必需事实缺失？', children: <Paragraph>优先检查文档规范包中的 factFields、sourceRoleIds、模板章节 requiredFacts 和文件角色绑定。很多情况下不是模型失败，而是资料没有被绑定到正确角色，或字段要求比资料实际内容更严格。</Paragraph> },
+        { key: 'draft-duration', label: '草稿历史里的耗时怎么计算？', children: <Paragraph>耗时使用生成记录的 createdAt 到 completedAt 计算；旧记录或未完成记录会使用 updatedAt 兜底。它用于判断本次生成链路整体成本，包括知识库检索、事实抽取、章节生成、资源处理、校验和格式化。</Paragraph> },
+        { key: 'asset-index', label: '生成资源为什么不自动进入知识库？', children: <Paragraph>生成资源属于输出产物，不是原始知识来源。默认不入库可以避免模型下一次把临时封面、草稿图片或错误资源当成事实来源。确认可复用后，再在生成资源管理页手动加入知识库索引。</Paragraph> },
+      ]} />
     </Card>
 
     <Collapse items={[

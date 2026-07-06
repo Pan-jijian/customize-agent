@@ -27,6 +27,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       apiKey: cfg.apiKey ? '••••' + cfg.apiKey.slice(-4) : undefined,
       baseUrl: cfg.baseUrl,
       protocol: cfg.protocol,
+      directEndpoint: cfg.directEndpoint === true,
       detectedProtocol: detectProtocol(provider),
       hasApiKey: !!cfg.apiKey,
       capabilities: cfg.capabilities ?? {},

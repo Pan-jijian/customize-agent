@@ -47,6 +47,7 @@ export async function createExecutor(
     modelName,
     apiKey: providerConfig?.apiKey,
     baseUrl: providerConfig?.baseUrl,
+    directEndpoint: providerConfig?.directEndpoint,
   });
   const registry = buildRegistry({ root: projectRoot, lspManager, provider });
   await connectConfiguredMcp(registry, projectRoot);

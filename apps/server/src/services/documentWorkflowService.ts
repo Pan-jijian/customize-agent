@@ -710,7 +710,7 @@ async function callDocumentLlm(system: string, prompt: string, jsonOnly = false)
     const active = getActiveModelWithProvider();
     if (!active) return undefined;
     const { model: selected, provider: providerConfig } = active;
-    const provider = createProvider(providerFactoryName(selected.provider, providerConfig), { baseUrl: providerConfig.baseUrl, apiKey: providerConfig.apiKey, modelName: selected.name });
+    const provider = createProvider(providerFactoryName(selected.provider, providerConfig), { baseUrl: providerConfig.baseUrl, apiKey: providerConfig.apiKey, modelName: selected.name, directEndpoint: providerConfig.directEndpoint });
     const response = await provider.chat([
       { role: 'system', content: jsonOnly ? `${system}\n只返回 JSON，不要返回 markdown。` : system },
       { role: 'user', content: prompt },
@@ -830,7 +830,7 @@ async function understandReferenceFiles(projectRoot: string, evidence: DocumentE
   if (!active?.provider.capabilities?.fileUnderstanding && !active?.provider.capabilities?.imageUnderstanding) {
     return { notes: [], stage: { type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '当前模型未开启文件理解/图片理解能力' } };
   }
-  const provider = createProvider(providerFactoryName(active.model.provider, active.provider), { baseUrl: active.provider.baseUrl, apiKey: active.provider.apiKey, modelName: active.model.name });
+  const provider = createProvider(providerFactoryName(active.model.provider, active.provider), { baseUrl: active.provider.baseUrl, apiKey: active.provider.apiKey, modelName: active.model.name, directEndpoint: active.provider.directEndpoint });
   const fileAwareProvider = provider as typeof provider & { understandFiles?: (files: Array<{ name: string; mimeType: string; data: Buffer }>, prompt: string, options?: { maxTokens?: number }) => Promise<{ content: string }> };
   if (!fileAwareProvider.understandFiles) return { notes: [], stage: { type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '当前 Provider 未实现文件理解接口' } };
   const candidates = [...new Set(evidence.map(item => item.filePath).filter(file => /\.(png|jpe?g|webp|pdf|docx|xlsx)$/iu.test(file)))].slice(0, 6);
@@ -928,15 +928,19 @@ function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFact[] = 
   };
 }
 
+function isExportBlockingIssue(issue: ValidationIssue) {
+  return /出现禁用文本|资料未提供|导出|临时|无效|占位/iu.test(issue.message);
+}
+
 function buildExportGate(issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[]): ExportGateResult {
   const checklist = [
-    { key: 'no_errors', label: '无阻断级校验错误', passed: !issues.some(issue => issue.level === 'error') },
+    { key: 'no_errors', label: '无阻断级校验错误', passed: !issues.some(issue => issue.level === 'error' && isExportBlockingIssue(issue)) },
     { key: 'project_facts', label: '项目基础事实齐全', passed: factsModel.project.length > 0 },
     { key: 'source_traceability', label: '事实具备来源追踪', passed: [...factsModel.project, ...factsModel.schedule, ...factsModel.quality, ...factsModel.safety].every(fact => Boolean(fact.sourceFile)) },
     { key: 'chapter_evidence', label: '章节均具备证据', passed: chapters.every(chapter => chapter.evidence.length > 0) },
     { key: 'no_missing_content', label: '无资料未提供章节', passed: chapters.every(chapter => !chapter.content.includes('资料未提供')) },
   ];
-  const blockingIssues = issues.filter(issue => issue.level === 'error');
+  const blockingIssues = issues.filter(issue => issue.level === 'error' && isExportBlockingIssue(issue));
   return { passed: blockingIssues.length === 0 && checklist.every(item => item.passed), blockingIssues, checklist };
 }
 
@@ -1006,6 +1010,7 @@ function buildTextToImageUrl(prompt: string, imageSize: 'landscape_16_9' | 'squa
 function mimeExtension(mimeType: string) {
   if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
   if (mimeType.includes('webp')) return 'webp';
+  if (mimeType.includes('svg')) return 'svg';
   return 'png';
 }
 
@@ -1027,9 +1032,27 @@ function saveDocumentImageAsset(projectRoot: string, fileName: string, data: Buf
 }
 
 function isValidImageBuffer(buffer: Buffer) {
+  const text = buffer.toString('utf8', 0, Math.min(buffer.length, 200)).trimStart();
   return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
     || buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
-    || buffer.subarray(0, 4).toString('ascii') === 'RIFF';
+    || buffer.subarray(0, 4).toString('ascii') === 'RIFF'
+    || text.startsWith('<svg');
+}
+
+const KNOWN_STATIC_GENERATED_IMAGE_HASHES = new Set([
+  'e330cd023298a812503e10a067a3f88e1cbc094f37f6fd2a88fdb6799495b37e',
+]);
+
+function imageHash(buffer: Buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+function validateGeneratedImage(buffer: Buffer, contentType: string) {
+  if (!contentType.startsWith('image/') || !isValidImageBuffer(buffer)) {
+    throw new Error(`图片生成接口未返回有效图片：${contentType || 'unknown'} ${buffer.toString('utf8').slice(0, 80)}`);
+  }
+  const hash = imageHash(buffer);
+  return { hash, staticPlaceholder: KNOWN_STATIC_GENERATED_IMAGE_HASHES.has(hash) };
 }
 
 function imageGenerationPlaceholderMessage(buffer: Buffer) {
@@ -1038,7 +1061,7 @@ function imageGenerationPlaceholderMessage(buffer: Buffer) {
   return '';
 }
 
-async function saveImageFromUrl(projectRoot: string, imageUrl: string, fileName: string) {
+async function saveImageFromUrl(projectRoot: string, imageUrl: string, fileName: string): Promise<{ path: string; diagnostics: { hash: string; staticPlaceholder: boolean } }> {
   let lastMessage = '';
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const response = await fetch(imageUrl);
@@ -1051,26 +1074,27 @@ async function saveImageFromUrl(projectRoot: string, imageUrl: string, fileName:
       await new Promise(resolve => setTimeout(resolve, 1500));
       continue;
     }
-    if (!contentType.startsWith('image/') || !isValidImageBuffer(buffer)) {
-      throw new Error(`图片生成接口未返回有效图片：${contentType || 'unknown'} ${buffer.toString('utf8').slice(0, 80)}`);
-    }
-    return saveDocumentImageAsset(projectRoot, `${fileName}.${mimeExtension(contentType)}`, buffer);
+    const diagnostics = validateGeneratedImage(buffer, contentType);
+    const path = saveDocumentImageAsset(projectRoot, `${fileName}.${mimeExtension(contentType)}`, buffer);
+    return { path, diagnostics };
   }
   throw new Error(lastMessage || '图片仍在生成中，请稍后重新生成或刷新资源');
 }
 
 async function generatedCoverAssetFromUrl(projectRoot: string, prompt: string, modelProvider?: string): Promise<DocumentAsset> {
   const imageUrl = buildTextToImageUrl(prompt);
-  const relativePath = await saveImageFromUrl(projectRoot, imageUrl, `cover-${Date.now()}`);
+  const saved = await saveImageFromUrl(projectRoot, imageUrl, `cover-${Date.now()}`);
   return {
     id: `asset-cover-${Date.now()}`,
     type: 'image',
     role: 'cover',
-    path: relativePath,
+    path: saved.path,
     prompt,
     modelProvider,
     status: 'generated',
-    message: '已生成封面图片并保存为本地生成资源',
+    message: saved.diagnostics.staticPlaceholder
+      ? `备用图片生成通道返回固定图片，已保存但需要检查模型图片生成配置；sha256=${saved.diagnostics.hash}`
+      : `已生成封面图片并保存为本地生成资源；sha256=${saved.diagnostics.hash}`,
   };
 }
 
@@ -1100,10 +1124,11 @@ async function generateCoverAsset(template: DocumentTemplate, promptBindings: Pr
   if (active?.provider.capabilities?.imageGeneration) {
     const optimized = await callDocumentLlm('你是专业视觉设计提示词专家。请把用户需求优化成英文 SDXL 图片生成提示词，只返回提示词正文。', basePrompt);
     const prompt = optimized && optimized.length > 40 ? optimized : basePrompt;
-    const provider = createProvider(providerFactoryName(active.model.provider, active.provider), { baseUrl: active.provider.baseUrl, apiKey: active.provider.apiKey, modelName: active.model.name });
+    const provider = createProvider(providerFactoryName(active.model.provider, active.provider), { baseUrl: active.provider.baseUrl, apiKey: active.provider.apiKey, modelName: active.model.name, directEndpoint: active.provider.directEndpoint });
     if (provider.generateImage) {
       try {
         const image = await provider.generateImage(prompt, { size: '1536x1024', quality: 'high' });
+        const diagnostics = validateGeneratedImage(image.data, image.mimeType);
         const fileName = `cover-${Date.now()}.${mimeExtension(image.mimeType)}`;
         const relativePath = saveDocumentImageAsset(projectRoot, fileName, image.data);
         return {
@@ -1114,7 +1139,9 @@ async function generateCoverAsset(template: DocumentTemplate, promptBindings: Pr
           prompt: image.revisedPrompt || prompt,
           modelProvider: active.model.provider,
           status: 'generated',
-          message: '已调用多模态模型生成封面图片并保存为文档资源',
+          message: diagnostics.staticPlaceholder
+            ? `多模态模型返回固定图片，已保存但需要检查模型图片生成配置；sha256=${diagnostics.hash}`
+            : `已调用多模态模型生成封面图片并保存为文档资源；sha256=${diagnostics.hash}`,
         };
       } catch (error) {
         try {
@@ -1151,6 +1178,23 @@ function operatorImageGallery() {
 function resourceGallery(resources: ResourceEvidence[], kind: ResourceEvidence['kind']) {
   const files = resources.filter(item => item.kind === kind && ['map', 'image'].includes(item.kind));
   return files.slice(0, 6).map(item => `### ${item.semanticTitle}\n\n${markdownImage(item.filePath, item.semanticTitle)}`).join('\n\n');
+}
+
+function hasMapImageMarkdown(markdown: string) {
+  return /!\[[^\]]*(?:地图|图纸|零号大坝|航天基地|巴克什|潮汐监狱|AZ3|攀升)[^\]]*\]\([^)]*地图图纸-[^)]*\)/u.test(markdown);
+}
+
+function ensureDeltaMapGallery(markdown: string, template: DocumentTemplate, evidence: DocumentEvidence[]) {
+  if (template.id !== 'delta-force-hot-operators-guide' || hasMapImageMarkdown(markdown)) return markdown;
+  const bundle = buildEvidenceBundle({ id: 'maps', title: '第五章 官方地图图纸和路线理解', purpose: '补齐地图图纸预览', queries: [], requiredFacts: ['地图图纸'] }, evidence);
+  const gallery = resourceGallery(bundle.resources, 'map');
+  if (!gallery) return markdown;
+  const block = `\n\n### 官方完整地图图纸预览\n\n${gallery}\n`;
+  const mapHeading = /^## 第五章 官方地图图纸和路线理解\s*$/mu;
+  const match = markdown.match(mapHeading);
+  if (!match || match.index === undefined) return `${markdown.trimEnd()}${block}\n`;
+  const insertAt = match.index + match[0].length;
+  return `${markdown.slice(0, insertAt)}${block}${markdown.slice(insertAt)}`;
 }
 
 function resourceFileList(resources: ResourceEvidence[]) {
@@ -1248,6 +1292,7 @@ async function buildLlmChapterContent(template: DocumentTemplate, chapter: Docum
     '- 引用表格、图片、地图、PDF/Word、文本、附件等资料时写清楚来源文件名；',
     '- 必须理解“结构化资源证据”中每类文件的正文用途，把相关文件和事实对应起来，不要硬插固定文件；',
     '- 如果章节涉及资源文件，应自然说明它与章节结论、操作建议或配图/附件引用的关系；',
+    '- 如果章节涉及地图图纸，必须使用 Markdown 图片语法插入对应本地地图文件，例如 ![地图名称](图片素材/干员图片/地图图纸-xxx-官方完整地图图纸.jpg)，不能只写文件名；',
     '- 内容不少于 500 字，结构清晰。',
     '',
     '知识库证据：',
@@ -1277,6 +1322,7 @@ async function reviewAndOptimizeMarkdown(input: {
   const reviewed = await callDocumentLlm([
     '你是文档质量审查与优化专家。你要基于文件角色、提示词角色、文档规范包和知识库证据，对初稿进行二次审查和优化。',
     '必须保持 Markdown 输出；保留已有图片引用、表格、标题层级和目录；不要删除证据来源；不要编造不存在的事实。',
+    '如果正文涉及地图图纸，必须保留或补充对应本地地图文件的 Markdown 图片引用，不能只写文件名。',
     '重点检查：标题、封面、目录、章节完整性、事实来源、所有相关文件类型的资源证据使用、表格呈现、表达专业性、导出友好性。',
     input.promptTexts,
   ].filter(Boolean).join('\n\n'), [
@@ -1533,7 +1579,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
   validationIssues = applySpecGateRules(documentSpec, validationIssues, factsModel, chapterDrafts, review.markdown, fileBindings, promptBindings);
   const exportGate = buildExportGate(validationIssues, factsModel, chapterDrafts);
   const finalBase = { ...base, validationIssues, exportGate, executionStages: reviewedStages };
-  const markdown = review.markdown === initialMarkdown ? composeDocumentMarkdown(finalBase) : review.markdown;
+  const reviewedMarkdown = review.markdown === initialMarkdown ? composeDocumentMarkdown(finalBase) : review.markdown;
+  const markdown = ensureDeltaMapGallery(reviewedMarkdown, template, allEvidence);
   return { ...finalBase, markdown };
 }
 

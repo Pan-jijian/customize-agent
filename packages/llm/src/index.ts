@@ -37,7 +37,7 @@ import type { ILLMProvider } from './interface.js';
 /** 工厂函数：按名称创建 Provider 实例 */
 export function createProvider(name: string, options?: Record<string, unknown>): ILLMProvider {
   const opts = options ?? {};
-  type ProviderOpts = { apiKey?: string; baseUrl?: string; modelName?: string };
+  type ProviderOpts = { apiKey?: string; baseUrl?: string; modelName?: string; directEndpoint?: boolean };
   switch (name) {
     case 'deepseek':
       return new DeepSeekProvider(opts as ProviderOpts);

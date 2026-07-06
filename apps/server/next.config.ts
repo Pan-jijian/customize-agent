@@ -16,9 +16,6 @@ const serverExternalPackages = [
 ];
 
 const nextConfig: NextConfig = {
-  generateBuildId() {
-    return 'customize-agent-dashboard';
-  },
   eslint: {
     ignoreDuringBuilds: true,
   },
@@ -41,14 +38,6 @@ const nextConfig: NextConfig = {
         ],
       },
     ];
-  },
-  async rewrites() {
-    return {
-      beforeFiles: [
-        { source: '/_next/static/:buildId/_buildManifest.js', destination: '/_next/static/customize-agent-dashboard/_buildManifest.js' },
-        { source: '/_next/static/:buildId/_ssgManifest.js', destination: '/_next/static/customize-agent-dashboard/_ssgManifest.js' },
-      ],
-    };
   },
   async redirects() {
     return [

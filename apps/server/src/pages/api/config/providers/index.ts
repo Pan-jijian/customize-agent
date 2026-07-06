@@ -1,13 +1,13 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getConfigStore } from '@/services/configService';
 import { detectProtocol } from '@customize-agent/runtime';
+import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!['GET', 'POST'].includes(req.method!)) return res.status(405).json({ error: 'Method not allowed' });
-  try {
     const store = getConfigStore();
     if (req.method === 'POST') {
-      const { name, apiKey, baseUrl, protocol, capabilities, oldName } = req.body;
+      const { name, apiKey, baseUrl, protocol, directEndpoint, capabilities, oldName } = req.body;
       if (!name) return res.status(400).json({ error: 'Provider name required' });
       const targetName = String(name);
       const sourceName = oldName ? String(oldName) : targetName;
@@ -27,6 +27,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (apiKey !== undefined) store.setProviderKey(targetName, apiKey);
       if (baseUrl !== undefined) store.setProviderUrl(targetName, baseUrl);
       if (protocol !== undefined) store.setProviderProtocol(targetName, protocol);
+      if (directEndpoint !== undefined) store.setProviderDirectEndpoint(targetName, directEndpoint === true);
       if (capabilities !== undefined && typeof capabilities === 'object') store.setProviderCapabilities(targetName, {
         imageGeneration: capabilities.imageGeneration === true,
         imageUnderstanding: capabilities.imageUnderstanding === true,
@@ -41,6 +42,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json({ success: true });
     }
     const config = store.load();
-    res.status(200).json(Object.entries(config.providers).map(([name, cfg]) => ({ name, apiKey: cfg.apiKey ? '••••' + cfg.apiKey.slice(-4) : undefined, baseUrl: cfg.baseUrl, protocol: cfg.protocol, detectedProtocol: detectProtocol(name), hasApiKey: !!cfg.apiKey, capabilities: cfg.capabilities ?? {} })));
-  } catch (e: unknown) { console.error('[api] config/providers', e); res.status(500).json({ error: 'Internal server error' }); }
+    res.status(200).json(Object.entries(config.providers).map(([name, cfg]) => ({ name, apiKey: cfg.apiKey ? '••••' + cfg.apiKey.slice(-4) : undefined, baseUrl: cfg.baseUrl, protocol: cfg.protocol, directEndpoint: cfg.directEndpoint === true, detectedProtocol: detectProtocol(name), hasApiKey: !!cfg.apiKey, capabilities: cfg.capabilities ?? {} })));
 }
+
+export default withApiErrorBoundary('api/config/providers', handler);

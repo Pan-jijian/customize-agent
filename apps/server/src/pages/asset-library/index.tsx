@@ -49,7 +49,7 @@ export default function AssetLibraryPage() {
         <List
           dataSource={assets}
           locale={{ emptyText: <Empty description="暂无生成资源" /> }}
-          renderItem={asset => (
+          renderItem={(asset, index) => (
             <List.Item
               actions={[
                 asset.path ? <Button key="copy" icon={<CopyOutlined />} onClick={() => { void copyPath(asset.path); }}>复制路径</Button> : null,
@@ -61,7 +61,7 @@ export default function AssetLibraryPage() {
             >
               <List.Item.Meta
                 avatar={previewSrc(asset) ? <Image width={64} height={40} src={previewSrc(asset)} alt={asset.name} style={{ objectFit: 'cover' }} /> : asset.type === 'image' ? <PictureOutlined /> : <FileOutlined />}
-                title={<Space wrap><span>{asset.name}</span><Tag>{asset.type}</Tag><Tag color={asset.indexed ? 'success' : 'default'}>{asset.indexed ? '已入库' : '未入库'}</Tag><Tag color="blue">{asset.role}</Tag></Space>}
+                title={<Space wrap><Tag>序号 {index + 1}</Tag><span>{asset.name}</span><Tag>{asset.type}</Tag><Tag color={asset.indexed ? 'success' : 'default'}>{asset.indexed ? '已入库' : '未入库'}</Tag><Tag color="blue">{asset.role}</Tag></Space>}
                 description={(
                   <Space direction="vertical" size={2} className="w-full">
                     <Text type="secondary">路径：{asset.path || asset.url || '—'}</Text>

@@ -229,6 +229,7 @@ export default function KnowledgeFileDetailPage() {
   ];
 
   const chunkColumns: ColumnsType<KbStoredChunk> = [
+    { title: '序号', key: 'index', width: 70, render: (_: unknown, __: KbStoredChunk, index: number) => index + 1 },
     { title: '#', dataIndex: 'chunkIndex', width: 70, render: (value: unknown) => String(value) },
     { title: '类型', width: 110, render: (_, row) => <Tag>{String(parseJson(row.metadataJson).chunkKind ?? row.category)}</Tag> },
     { title: '章节/范围', width: 220, render: (_, row) => {
@@ -241,6 +242,7 @@ export default function KnowledgeFileDetailPage() {
   ];
 
   const parentColumns: ColumnsType<KbParentChunk> = [
+    { title: '序号', key: 'index', width: 70, render: (_: unknown, __: KbParentChunk, index: number) => index + 1 },
     { title: 'Parent', dataIndex: 'parentId', width: 260, render: (value: string) => <span className="break-all">{value}</span> },
     { title: '切片数', dataIndex: 'chunkCount', width: 90 },
     { title: '章节', dataIndex: 'sectionTitle', width: 220 },

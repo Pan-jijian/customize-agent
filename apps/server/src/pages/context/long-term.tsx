@@ -65,6 +65,7 @@ export default function LongTermContextPage() {
   };
 
   const columns = [
+    { title: '序号', key: 'index', width: 70, render: (_: unknown, __: ContextEntry, index: number) => index + 1 },
     { title: t('models.modelName'), dataIndex: 'title', ellipsis: true, width: 180 },
     { title: '类型', dataIndex: 'type', width: 90, render: (v: string) => <Tag>{TYPE_LABELS[v] || v}</Tag> },
     { title: t('context.content'), dataIndex: 'content', ellipsis: true },

@@ -9,8 +9,15 @@ import * as XLSX from 'xlsx';
 let manager: MultiProjectManager | null = null;
 
 function downloadBuffer(url: string) {
-  const script = 'import sys,urllib.request; url=sys.argv[1]; req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0"}); sys.stdout.buffer.write(urllib.request.urlopen(req,timeout=30).read())';
-  return execFileSync('python3', ['-c', script, url], { encoding: 'buffer', maxBuffer: 30 * 1024 * 1024 });
+  const script = `
+const url = process.argv[1];
+(async () => {
+  const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(30000) });
+  if (!response.ok) throw new Error(\`HTTP \${response.status} \${response.statusText}: \${url}\`);
+  process.stdout.write(Buffer.from(await response.arrayBuffer()));
+})().catch(error => { console.error(error); process.exit(1); });
+`;
+  return execFileSync(process.execPath, ['-e', script, url], { encoding: 'buffer', maxBuffer: 30 * 1024 * 1024 });
 }
 
 function writeBufferFile(file: string, data: Buffer, minSize: number, sourceUrl: string) {
@@ -49,7 +56,6 @@ function writeStitchedMapImage(mapName: string, file: string, minSize: number) {
   const script = `
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const fs = require('fs');
-const cp = require('child_process');
 const mapName = process.argv[1];
 const out = process.argv[2];
 const zoom = 2;
@@ -57,13 +63,16 @@ const tileSize = 256;
 const gridSize = 4;
 const canvas = createCanvas(tileSize * gridSize, tileSize * gridSize);
 const ctx = canvas.getContext('2d');
+async function download(url) {
+  const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(30000) });
+  if (!response.ok) throw new Error(\`HTTP \${response.status} \${response.statusText}: \${url}\`);
+  return Buffer.from(await response.arrayBuffer());
+}
 (async () => {
   for (let y = 0; y < gridSize; y++) {
     for (let x = 0; x < gridSize; x++) {
       const url = \`https://game.gtimg.cn/images/dfm/cp/a20240729directory/img/\${mapName}/\${zoom}_\${x}_\${y}.jpg\`;
-      const py = 'import sys,urllib.request; url=sys.argv[1]; req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0"}); sys.stdout.buffer.write(urllib.request.urlopen(req,timeout=30).read())';
-      const data = cp.execFileSync('python3', ['-c', py, url], { encoding: 'buffer', maxBuffer: 30 * 1024 * 1024 });
-      const image = await loadImage(data);
+      const image = await loadImage(await download(url));
       ctx.drawImage(image, x * tileSize, y * tileSize, tileSize, tileSize);
     }
   }
@@ -107,16 +116,24 @@ function writeWorkbookFile(file: string) {
 function writeDocxFile(file: string, title: string, paragraphs: string[]) {
   if (fs.existsSync(file) && fs.statSync(file).size > 1000) return;
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const script = `import sys,zipfile,html
-out=sys.argv[1]; title=sys.argv[2]; ps=sys.argv[3:]
-def p(t): return '<w:p><w:r><w:t>'+html.escape(t)+'</w:t></w:r></w:p>'
-xml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'+p(title)+''.join(p(x) for x in ps)+'<w:sectPr/></w:body></w:document>'
-with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
- z.writestr('[Content_Types].xml','<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
- z.writestr('_rels/.rels','<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
- z.writestr('word/document.xml',xml)
+  const script = `
+const fs = require('fs');
+const JSZip = require('jszip');
+const out = process.argv[1];
+const title = process.argv[2];
+const paragraphs = process.argv.slice(3);
+const escapeXml = text => String(text).replace(/[<>&"']/g, char => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[char]));
+const paragraph = text => '<w:p><w:r><w:t>' + escapeXml(text) + '</w:t></w:r></w:p>';
+const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + paragraph(title) + paragraphs.map(paragraph).join('') + '<w:sectPr/></w:body></w:document>';
+(async () => {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file('word/document.xml', xml);
+  fs.writeFileSync(out, await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+})().catch(error => { console.error(error); process.exit(1); });
 `;
-  execFileSync('python3', ['-c', script, file, title, ...paragraphs], { stdio: 'pipe' });
+  execFileSync(process.execPath, ['-e', script, file, title, ...paragraphs], { stdio: 'pipe' });
 }
 
 function writePdfFile(file: string, title: string) {

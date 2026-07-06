@@ -1,5 +1,11 @@
 # @customize-agent/llm
 
+## 3.0.4
+
+### Patch Changes
+
+- Fix dashboard static assets, direct endpoint provider configuration, error logging, and generated document PDF export.
+
 ## 3.0.3
 
 ### Patch Changes
