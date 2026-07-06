@@ -1,4 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
+import * as fs from 'fs';
+import * as path from 'path';
 import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 import { setKbUploadProgress } from '@/services/kbUploadProgress';
 import { upsertKbOperation, type KbOperationStage } from '@/services/kbOperationLog';
@@ -7,6 +9,35 @@ import type { KnowledgeIndexProgress } from '@customize-agent/knowledge';
 export const config = {
   api: { bodyParser: { sizeLimit: '500mb' }, responseLimit: '500mb' },
 };
+
+function categoryFromRelativePath(relativePath: string) {
+  if (relativePath.includes('表格数据/')) return 'spreadsheet';
+  if (relativePath.includes('图片素材/')) return 'image';
+  if (relativePath.includes('图纸文件/')) return 'cad';
+  if (relativePath.includes('文档资料/')) return 'document';
+  return 'other';
+}
+
+type UploadedFileItem = ReturnType<Awaited<ReturnType<ReturnType<typeof getMultiProjectManager>['getProject']>>['listFiles']>[number];
+
+function fallbackUploadedFile(projectRoot: string, relativePath: string): UploadedFileItem | undefined {
+  const absolutePath = path.join(projectRoot, 'knowledgeBase', relativePath);
+  if (!fs.existsSync(absolutePath)) return undefined;
+  const stat = fs.statSync(absolutePath);
+  return {
+    relativePath,
+    category: categoryFromRelativePath(relativePath),
+    format: path.extname(relativePath).slice(1).toLowerCase() || 'text',
+    contentHash: '',
+    fileSize: stat.size,
+    mtime: stat.mtimeMs,
+    chunkCount: 0,
+    collectionName: '',
+    indexedAt: 0,
+    lastVerifiedAt: Date.now(),
+    status: 'active',
+  };
+}
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -39,9 +70,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       upsertKbOperation(projectRoot, { id: operationId, type: 'upload', title: `上传 ${titleName}`, stage, status: 'processing', percent: progress.percent, message: progress.message, fileName: titleName, filePath: progress.filePath ?? uploadedRelativePath, chunkCount: progress.chunkCount });
     }, { vectorMode: 'defer' });
     const files = project.listFiles();
+    const uploadedPaths = preparedFiles.map(file => file.targetRelativePath).filter(Boolean) as string[];
+    const uploadedFiles = uploadedPaths.flatMap(relativePath => files.find(file => file.relativePath === relativePath) ?? fallbackUploadedFile(projectRoot, relativePath) ?? []);
     const changedPaths = new Set([...diff.newFiles, ...diff.modifiedFiles].map(file => file.relativePath));
     const changedChunkCount = files.filter(file => changedPaths.has(file.relativePath)).reduce((sum, file) => sum + file.chunkCount, 0);
-    const uploaded = files.find(file => file.relativePath === uploadedRelativePath);
+    const uploaded = uploadedFiles.find(file => file.relativePath === uploadedRelativePath);
     const uploadedMeta = uploaded?.metadataJson ? JSON.parse(uploaded.metadataJson) : undefined;
     const vectorStatus = project.getVectorStatus();
     const vectorReady = vectorStatus.status === 'ready';
@@ -75,6 +108,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       added: diff.newFiles.length,
       total: files.length,
       files,
+      uploadedFiles,
       vectorStatus,
     });
   } catch (e: unknown) {

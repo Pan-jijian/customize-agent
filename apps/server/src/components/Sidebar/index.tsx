@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { useAppTranslations } from '@/components/Layout';
-import { LayoutDashboard, Database, Cpu, Settings, Brain, MessageSquare, ChevronDown, ChevronRight, FileText, FolderOpen, PanelLeftClose, PanelLeftOpen, Search, Files, BookOpen } from 'lucide-react';
+import { LayoutDashboard, Database, Cpu, Settings, Brain, MessageSquare, ChevronDown, ChevronRight, FileText, FolderOpen, PanelLeftClose, PanelLeftOpen, Search, Files, BookOpen, Bug } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 interface SubMenuItem {
@@ -46,6 +46,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: '/guide', icon: BookOpen, labelKey: 'nav.guide' },
   { href: '/models', icon: Cpu, labelKey: 'nav.models' },
   { href: '/prompt', icon: MessageSquare, labelKey: 'nav.promptManagement' },
+  { href: '/system/logs', icon: Bug, labelKey: 'nav.systemLogs' },
   { href: '/settings', icon: Settings, labelKey: 'nav.settings' },
 ] as const;
 

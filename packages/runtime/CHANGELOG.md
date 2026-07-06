@@ -1,5 +1,11 @@
 # @customize-agent/runtime
 
+## 3.0.6
+
+### Patch Changes
+
+- Fix dashboard static assets, direct endpoint provider configuration, error logging, and generated document PDF export.
+
 ## 3.0.5
 
 ### Patch Changes

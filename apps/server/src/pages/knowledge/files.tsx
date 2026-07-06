@@ -5,7 +5,7 @@ import { useRouter } from 'next/router';
 import { Card, Table, Button, Input, Select, Tag, Modal, Space, App, Progress, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { UploadOutlined, SearchOutlined, DeleteOutlined, FileTextOutlined } from '@ant-design/icons';
-import { getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbFile, deleteKbFiles, deleteAllKbFiles, uploadKbFiles, reindexKb, type KbFileItem, type KbOperationRecord } from '@/lib/api';
+import { getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbFile, deleteKbFiles, deleteAllKbFiles, uploadKbFiles, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
@@ -127,7 +127,8 @@ export default function FilesPage() {
       setSelectedRowKeys([]);
       setPage(1);
       categoryRef.current = '';
-      const uploaded = result.files?.find((item: KbFileItem) => item.relativePath === result.relativePath);
+      const uploadedFiles = result.uploadedFiles?.length ? result.uploadedFiles : result.files?.filter((item: KbFileItem) => item.relativePath === result.relativePath) ?? [];
+      const uploaded = uploadedFiles[0];
       const meta = fileMeta(uploaded);
       await loadOperations();
       setStatusItems(items => [{
@@ -140,13 +141,14 @@ export default function FilesPage() {
         textLength: meta.textLength,
         extractionMode: meta.extractionMode,
       } satisfies StatusItem, ...items.filter(item => item.title !== `上传 ${titleName}`)].slice(0, 50));
-      if (Array.isArray(result.files)) {
-        setFiles(result.files);
-      } else {
-        await reindexKb();
-        await loadFiles('');
-        await loadOperations();
+      if (uploadedFiles.length > 0) {
+        setFiles(items => {
+          const next = new Map(items.map(item => [item.relativePath, item]));
+          for (const file of uploadedFiles) next.set(file.relativePath, file);
+          return Array.from(next.values()).sort((a, b) => b.mtime - a.mtime);
+        });
       }
+      await loadOperations();
     } catch { message.error('上传失败'); setStatusItems(items => [{ type: 'error', title: `上传失败 ${titleName}`, description: '请重试或检查文件格式', status: 'error' } satisfies StatusItem, ...items].slice(0, 50)); }
     finally { clearInterval(poll); setUploading(false); }
   };
@@ -201,6 +203,7 @@ export default function FilesPage() {
   const filtered = searchQuery ? files.filter((f) => f.relativePath.toLowerCase().includes(searchQuery.toLowerCase())) : files;
 
   const columns: ColumnsType<KbFileItem> = [
+    { title: '序号', key: 'index', width: 70, render: (_: unknown, __: KbFileItem, index: number) => (page - 1) * 50 + index + 1 },
     { title: t('fileName'), dataIndex: 'relativePath', key: 'name', render: (n: string, r: KbFileItem) => <Space><FileTextOutlined />{r.builtIn && <Tag color="gold">内置</Tag>}<Link className="truncate max-w-[400px] inline-block" href={`/knowledge/file-detail?relativePath=${encodeURIComponent(n)}`}>{n}</Link></Space> },
     { title: t('fileCategory'), dataIndex: 'category', key: 'cat', width: 120, render: (c: string) => <Tag>{categoryLabel(c, locale)}</Tag> },
     { title: t('fileSize'), dataIndex: 'fileSize', key: 'size', width: 100, render: (s: number) => formatBytes(s) },

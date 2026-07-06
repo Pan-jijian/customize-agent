@@ -168,6 +168,9 @@ export default function DocumentsPage() {
     return restMinutes ? `${hours} 小时 ${restMinutes} 分` : `${hours} 小时`;
   };
 
+  const draftStatusColor = (status: GeneratedDocumentRecord['status']) => status === 'completed' ? 'success' : status === 'warning' ? 'warning' : status === 'failed' ? 'error' : 'processing';
+  const draftWarningTextColor = (status: GeneratedDocumentRecord['status']) => status === 'failed' ? 'var(--colorError)' : status === 'warning' ? 'var(--colorWarning)' : 'var(--colorTextSecondary)';
+
   const subStepIcon = (status: FlowStepStatus) => {
     if (status === 'process') return <LoadingOutlined />;
     if (status === 'finish') return <CheckCircleOutlined />;
@@ -419,23 +422,38 @@ export default function DocumentsPage() {
     }
   };
 
-  const downloadBlob = (blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob);
+  const downloadBlob = (blob: Blob, filename: string, mimeType: string) => {
+    const safeBlob = new Blob([blob], { type: mimeType });
+    const url = URL.createObjectURL(safeBlob);
     const link = document.createElement('a');
     link.href = url;
     link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
+    link.target = '_self';
+    link.rel = 'noopener';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const handleExport = async (format: 'markdown' | 'html' | 'pdf' | 'docx') => {
     if (!draft) return;
     setExporting(true);
     try {
+      const mimeTypes = {
+        markdown: 'text/markdown;charset=utf-8',
+        html: 'text/html;charset=utf-8',
+        pdf: 'application/pdf',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      };
+      const extension = format === 'markdown' ? 'md' : format;
       const wordTemplatePath = documentSpecs.find(spec => spec.id === currentTemplate?.documentSpecId)?.wordTemplatePath;
-      const blob = await exportDocument({ documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format, enforceGate: format === 'pdf' || format === 'docx', exportGate: draft.exportGate, wordTemplatePath });
-      downloadBlob(blob, `${draft.title}.${format === 'markdown' ? 'md' : format}`);
-    } catch { message.error(t('common.error')); } finally { setExporting(false); }
+      const blob = await exportDocument({ documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format, enforceGate: false, exportGate: draft.exportGate, wordTemplatePath });
+      downloadBlob(blob, `${draft.title}.${extension}`, mimeTypes[format]);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : t('common.error'));
+    } finally { setExporting(false); }
   };
 
   const handleSaveDraft = async () => {
@@ -486,7 +504,7 @@ export default function DocumentsPage() {
             <List
               dataSource={templates}
               locale={{ emptyText: <Empty description={t('common.noData')} /> }}
-              renderItem={item => (
+              renderItem={(item, index) => (
                 <List.Item
                   onClick={() => setTemplateId(item.id)}
                   className="cursor-pointer"
@@ -498,7 +516,7 @@ export default function DocumentsPage() {
                 >
                   <List.Item.Meta
                     avatar={<FileTextOutlined />}
-                    title={<Space><span>{item.name}</span>{item.builtIn && <Tag>{t('documents.builtIn')}</Tag>}{templateId === item.id && <Tag color="blue">{t('documents.selected')}</Tag>}</Space>}
+                    title={<Space><Tag>序号 {index + 1}</Tag><span>{item.name}</span>{item.builtIn && <Tag>{t('documents.builtIn')}</Tag>}{templateId === item.id && <Tag color="blue">{t('documents.selected')}</Tag>}</Space>}
                     description={<Space direction="vertical" size={2}><span>{item.description}</span><Tag>{item.category}</Tag></Space>}
                   />
                 </List.Item>
@@ -506,27 +524,36 @@ export default function DocumentsPage() {
             />
           </Card>
           <Card className="mt-4" size="small" title={t('documents.draftHistory')}>
-            <List
-              size="small"
-              dataSource={drafts.slice(0, 8)}
-              locale={{ emptyText: <Empty description={t('common.noData')} /> }}
-              renderItem={item => (
-                <List.Item
-                  onClick={() => { void (async () => { setCurrentDocumentId(item.id); setTemplateId(item.templateId); const { document } = await getGeneratedDocument(item.id); setDraft(document.draft || null); setContent(document.editedMarkdown || document.markdown); })(); }}
-                  className="cursor-pointer"
-                  actions={[
-                    <Popconfirm key="delete" title="确认删除这条生成记录？" onConfirm={(event) => { event?.stopPropagation(); void handleDeleteDraft(item.id); }}>
-                      <Button size="small" danger icon={<DeleteOutlined />} onClick={(event) => event.stopPropagation()}>删除</Button>
-                    </Popconfirm>,
-                  ]}
-                >
-                  <List.Item.Meta
-                    title={<Space><span>{item.title}</span><Tag color={item.status === 'completed' ? 'success' : item.status === 'warning' ? 'warning' : item.status === 'failed' ? 'error' : 'processing'}>{item.status === 'warning' ? 'warning' : item.status}</Tag></Space>}
-                    description={<Space direction="vertical" size={2} className="w-full min-w-0"><Space size={8} wrap><span>{new Date(item.updatedAt).toLocaleString()}</span><Text type="secondary">耗时：{formatGenerationDuration(item)}</Text></Space>{item.status === 'warning' && <Text type="warning" ellipsis>{item.warningIssues?.[0] || item.draft?.validationIssues.find(issue => issue.level === 'error' || issue.level === 'warning')?.message || '生成完成，但存在需要复核的问题'}</Text>}</Space>}
-                  />
-                </List.Item>
-              )}
-            />
+            {drafts.length === 0 ? <Empty description={t('common.noData')} /> : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {drafts.slice(0, 8).map((item, index) => (
+                  <div
+                    key={item.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => { void (async () => { setCurrentDocumentId(item.id); setTemplateId(item.templateId); const { document } = await getGeneratedDocument(item.id); setDraft(document.draft || null); setContent(document.editedMarkdown || document.markdown); })(); }}
+                    onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.click(); }}
+                    style={{ display: 'flex', gap: 8, alignItems: 'flex-start', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--colorBorderSecondary)', cursor: 'pointer', minWidth: 0 }}
+                  >
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                        <Tag style={{ marginInlineEnd: 0 }}>序号 {index + 1}</Tag>
+                        <span style={{ minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>{item.title}</span>
+                        <Tag style={{ marginInlineEnd: 0 }} color={draftStatusColor(item.status)}>{item.status === 'warning' ? 'warning' : item.status}</Tag>
+                      </div>
+                      <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: '4px 8px', color: 'var(--colorTextSecondary)', fontSize: 12 }}>
+                        <span>{new Date(item.updatedAt).toLocaleString()}</span>
+                        <span>耗时：{formatGenerationDuration(item)}</span>
+                      </div>
+                      {item.status === 'warning' && <div style={{ marginTop: 4, color: draftWarningTextColor(item.status), fontSize: 12, overflow: 'hidden', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflowWrap: 'anywhere', wordBreak: 'break-all' }}>{item.warningIssues?.[0] || item.draft?.validationIssues.find(issue => issue.level === 'error' || issue.level === 'warning')?.message || '生成完成，但存在需要复核的问题'}</div>}
+                    </div>
+                    <Popconfirm title="确认删除这条生成记录？" onConfirm={(event) => { event?.stopPropagation(); void handleDeleteDraft(item.id); }}>
+                      <Button size="small" danger title="删除记录" aria-label="删除记录" icon={<DeleteOutlined />} onClick={(event) => event.stopPropagation()} />
+                    </Popconfirm>
+                  </div>
+                ))}
+              </div>
+            )}
           </Card>
         </Col>
 
@@ -572,13 +599,13 @@ export default function DocumentsPage() {
           <Tabs
             items={[
               { key: 'edit', label: t('documents.edit'), children: <TextArea rows={26} value={content} onChange={event => setContent(event.target.value)} /> },
-              { key: 'chapters', label: t('documents.chapters'), children: <List dataSource={draft.chapters} renderItem={chapter => <List.Item actions={[<Button key="regen" size="small" icon={<ReloadOutlined />} loading={regeneratingChapter === chapter.id} onClick={() => { void handleRegenerateChapter(chapter); }}>{t('documents.regenerateChapter')}</Button>]}><List.Item.Meta title={chapter.title} description={<Space direction="vertical"><span>{t('documents.evidenceCount')}: {chapter.evidence.length}</span><span>{t('documents.missingCount')}: {chapter.missingFacts.length}</span></Space>} /></List.Item>} /> },
-              { key: 'facts', label: t('documents.structuredFacts'), children: <List dataSource={draft.structuredFacts} renderItem={fact => <List.Item><List.Item.Meta title={`${fact.key}: ${fact.value}`} description={`${fact.sourceFile} · ${roles.find(role => role.id === fact.roleId)?.name || fact.roleId}`} /><Tag>{fact.confidence.toFixed(2)}</Tag></List.Item>} /> },
+              { key: 'chapters', label: t('documents.chapters'), children: <List dataSource={draft.chapters} renderItem={(chapter, index) => <List.Item actions={[<Button key="regen" size="small" icon={<ReloadOutlined />} loading={regeneratingChapter === chapter.id} onClick={() => { void handleRegenerateChapter(chapter); }}>{t('documents.regenerateChapter')}</Button>]}><List.Item.Meta title={<Space><Tag>序号 {index + 1}</Tag>{chapter.title}</Space>} description={<Space direction="vertical"><span>{t('documents.evidenceCount')}: {chapter.evidence.length}</span><span>{t('documents.missingCount')}: {chapter.missingFacts.length}</span></Space>} /></List.Item>} /> },
+              { key: 'facts', label: t('documents.structuredFacts'), children: <List dataSource={draft.structuredFacts} renderItem={(fact, index) => <List.Item><List.Item.Meta title={<Space><Tag>序号 {index + 1}</Tag>{`${fact.key}: ${fact.value}`}</Space>} description={`${fact.sourceFile} · ${roles.find(role => role.id === fact.roleId)?.name || fact.roleId}`} /><Tag>{fact.confidence.toFixed(2)}</Tag></List.Item>} /> },
               { key: 'sources', label: t('documents.sources'), children: <List dataSource={draft.sources} renderItem={source => <List.Item><span>{source.filePath}</span><Tag>{source.count}</Tag></List.Item>} /> },
               { key: 'missing', label: t('documents.missingItems'), children: draft.missingItems.length === 0 ? <Empty description={t('common.noData')} /> : <List dataSource={draft.missingItems} renderItem={item => <List.Item>{item}</List.Item>} /> },
-              { key: 'validation', label: t('documents.validation'), children: draft.validationIssues.length === 0 ? <Empty description={t('common.noData')} /> : <Space direction="vertical" className="w-full" size="small">{draft.validationIssues.map(item => <Card key={`${item.level}-${item.message}`} size="small" className="w-full" styles={{ body: { padding: 12 } }}><Space direction="vertical" size={4} className="w-full min-w-0"><Tag className="w-fit" color={item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'blue'}>{item.level}</Tag><Text className="block whitespace-pre-wrap break-words">{item.message}</Text>{item.suggestion && <Text type="secondary" className="block whitespace-pre-wrap break-words">{item.suggestion}</Text>}</Space></Card>)}</Space> },
-              { key: 'gate', label: t('documents.exportGate'), children: <List dataSource={draft.exportGate.checklist} renderItem={item => <List.Item><span>{item.label}</span><Tag color={item.passed ? 'success' : 'error'}>{item.passed ? 'PASS' : 'FAIL'}</Tag></List.Item>} /> },
-              { key: 'stages', label: t('documents.executionStages'), children: <List dataSource={draft.executionStages} renderItem={item => <List.Item><List.Item.Meta avatar={stageIcon(item.type)} title={`${stageTitle(item.type)} · ${item.roleId}`} description={item.message} /><Tag color={item.status === 'success' ? 'success' : item.status === 'failed' ? 'error' : item.status === 'skipped' ? 'default' : 'warning'}>{item.status}</Tag></List.Item>} /> },
+              { key: 'validation', label: t('documents.validation'), children: draft.validationIssues.length === 0 ? <Empty description={t('common.noData')} /> : <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>{draft.validationIssues.map(item => <div key={`${item.level}-${item.message}`} style={{ minWidth: 0, maxWidth: '100%', overflow: 'hidden', border: '1px solid var(--colorBorderSecondary)', borderRadius: 8, padding: 12, background: 'var(--colorBgContainer)' }}><Tag color={item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'blue'}>{item.level}</Tag><div style={{ marginTop: 6, maxWidth: '100%', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-all', lineHeight: 1.6 }}>{item.message}</div>{item.suggestion && <div style={{ marginTop: 6, maxWidth: '100%', color: 'var(--colorTextSecondary)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-all', lineHeight: 1.6 }}>{item.suggestion}</div>}</div>)}</div> },
+              { key: 'gate', label: t('documents.exportGate'), children: <List dataSource={draft.exportGate.checklist} renderItem={item => <List.Item className="min-w-0"><Space direction="vertical" size={2} className="min-w-0 flex-1"><Text className="block max-w-full" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{item.label}</Text>{item.message && <Text type="secondary" className="block max-w-full" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{item.message}</Text>}</Space><Tag color={item.passed ? 'success' : 'error'}>{item.passed ? 'PASS' : 'FAIL'}</Tag></List.Item>} /> },
+              { key: 'stages', label: t('documents.executionStages'), children: <List dataSource={draft.executionStages} renderItem={item => <List.Item className="min-w-0"><List.Item.Meta avatar={stageIcon(item.type)} title={<Text className="block max-w-full" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{`${stageTitle(item.type)} · ${item.roleId}`}</Text>} description={<Text type="secondary" className="block max-w-full whitespace-pre-wrap" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{item.message}</Text>} /><Tag color={item.status === 'success' ? 'success' : item.status === 'failed' ? 'error' : item.status === 'skipped' ? 'default' : 'warning'}>{item.status}</Tag></List.Item>} /> },
             ]}
           />
         )}

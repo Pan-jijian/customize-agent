@@ -1,5 +1,15 @@
 # customize-agent
 
+## 3.0.16
+
+### Patch Changes
+
+- Fix dashboard static assets, direct endpoint provider configuration, error logging, and generated document PDF export.
+- Updated dependencies
+  - @customize-agent/server@3.0.23
+  - @customize-agent/llm@3.0.4
+  - @customize-agent/runtime@3.0.6
+
 ## 3.0.15
 
 ### Patch Changes

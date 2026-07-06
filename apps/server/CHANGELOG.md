@@ -1,5 +1,32 @@
 # server
 
+## 3.0.24
+
+### Patch Changes
+
+- 优化文档生成、知识库文件列表和规范包配置体验。
+
+## 3.0.23
+
+### Patch Changes
+
+- Fix dashboard static assets, direct endpoint provider configuration, error logging, and generated document PDF export.
+- Updated dependencies
+  - @customize-agent/llm@3.0.4
+  - @customize-agent/runtime@3.0.6
+
+## 3.0.22
+
+### Patch Changes
+
+- 修复 Windows 发布包首次访问文件管理页时内置知识库生成依赖 python3 导致 500 的问题，并让文件列表与模型供应商接口返回可诊断错误信息。
+
+## 3.0.21
+
+### Patch Changes
+
+- 细化学习说明页面，补充生成记录、warning 与导出门禁语义、生成资源与知识库关系、生产级生成前检查清单和常见问题处理建议。
+
 ## 3.0.20
 
 ### Patch Changes

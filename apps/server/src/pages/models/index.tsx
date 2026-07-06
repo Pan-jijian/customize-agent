@@ -47,6 +47,7 @@ export default function ModelsPage() {
   const [newApiKey, setNewApiKey] = useState('');
   const [newBaseUrl, setNewBaseUrl] = useState('');
   const [newProtocol, setNewProtocol] = useState<string>('openai');
+  const [newDirectEndpoint, setNewDirectEndpoint] = useState(false);
   const [newCapabilities, setNewCapabilities] = useState<ModelCapabilities>({});
   const [saving, setSaving] = useState(false);
 
@@ -57,6 +58,7 @@ export default function ModelsPage() {
   const [editApiKey, setEditApiKey] = useState('');
   const [editBaseUrl, setEditBaseUrl] = useState('');
   const [editProtocol, setEditProtocol] = useState<string>('openai');
+  const [editDirectEndpoint, setEditDirectEndpoint] = useState(false);
   const [editCapabilities, setEditCapabilities] = useState<ModelCapabilities>({});
   const [editSaving, setEditSaving] = useState(false);
 
@@ -77,8 +79,8 @@ export default function ModelsPage() {
   const handleAdd = async () => {
     if (!newModelName.trim()) return; setSaving(true);
     try {
-      await saveProvider(newModelName.trim(), { apiKey: newApiKey || undefined, baseUrl: newBaseUrl || undefined, protocol: newProtocol, capabilities: newCapabilities });
-      setAddOpen(false); setNewModelName(''); setNewApiKey(''); setNewBaseUrl(''); setNewProtocol('openai'); setNewCapabilities({});
+      await saveProvider(newModelName.trim(), { apiKey: newApiKey || undefined, baseUrl: newBaseUrl || undefined, protocol: newProtocol, directEndpoint: newDirectEndpoint, capabilities: newCapabilities });
+      setAddOpen(false); setNewModelName(''); setNewApiKey(''); setNewBaseUrl(''); setNewProtocol('openai'); setNewDirectEndpoint(false); setNewCapabilities({});
       await load(); message.success(t('common.success'));
     }
     catch { message.error(t('common.error')); } finally { setSaving(false); }
@@ -109,8 +111,8 @@ export default function ModelsPage() {
     if (!editModelName.trim()) return; setEditSaving(true);
     try {
       const apiKey = editApiKey.includes('•') ? undefined : editApiKey || undefined;
-      await saveProvider(editModelName.trim(), { oldName: editTarget, apiKey, baseUrl: editBaseUrl || undefined, protocol: editProtocol, capabilities: editCapabilities });
-      setEditOpen(false); setEditTarget(''); setEditModelName(''); setEditApiKey(''); setEditBaseUrl(''); setEditProtocol('openai'); setEditCapabilities({});
+      await saveProvider(editModelName.trim(), { oldName: editTarget, apiKey, baseUrl: editBaseUrl || undefined, protocol: editProtocol, directEndpoint: editDirectEndpoint, capabilities: editCapabilities });
+      setEditOpen(false); setEditTarget(''); setEditModelName(''); setEditApiKey(''); setEditBaseUrl(''); setEditProtocol('openai'); setEditDirectEndpoint(false); setEditCapabilities({});
       await load(); message.success(t('common.success'));
     }
     catch { message.error(t('common.error')); } finally { setEditSaving(false); }
@@ -176,11 +178,11 @@ export default function ModelsPage() {
       <Card title={t('models.modelList')} size="small" loading={loading}>
         {providers.length === 0 ? <span className={styles.cardMeta}>{t('models.noProviders')}</span> : (
           <Row gutter={[12, 12]} align="stretch">
-            {providers.map((p) => (
+            {providers.map((p, index) => (
               <Col key={p.name} xs={24} sm={12} lg={8} xl={6} className={styles.providerGrid}>
                 <Card size="small" className={styles.providerCard}>
                   <div className={styles.cardAction}>
-                    <div className={styles.cardMain}><div className={styles.cardName} title={p.name}>{p.name}</div><div className={styles.cardMeta}><ThunderboltOutlined /> {p.protocol || p.detectedProtocol || 'openai'}</div></div>
+                    <div className={styles.cardMain}><div className={styles.cardName} title={p.name}><Tag>序号 {index + 1}</Tag>{p.name}</div><div className={styles.cardMeta}><ThunderboltOutlined /> {p.protocol || p.detectedProtocol || 'openai'}</div></div>
                     <Space size={2} wrap={false}>
                       <Button size="small" type="text" loading={testing === p.name} onClick={() => { void handleTest(p.name); }}
                         icon={results[p.name] === true ? <CheckCircleFilled className="text-[var(--colorOk)]" /> : results[p.name] === false ? <CloseCircleFilled className="text-[var(--colorDanger)]" /> : <ApiOutlined />} />
@@ -296,12 +298,13 @@ export default function ModelsPage() {
       )}
 
       {/* 添加弹窗 */}
-      <Modal maskClosable={false} title={t('models.addModel')} open={addOpen} onCancel={() => { setAddOpen(false); setNewModelName(''); setNewApiKey(''); setNewBaseUrl(''); setNewProtocol('openai'); }} onOk={() => { void handleAdd(); }} confirmLoading={saving}>
+      <Modal maskClosable={false} title={t('models.addModel')} open={addOpen} onCancel={() => { setAddOpen(false); setNewModelName(''); setNewApiKey(''); setNewBaseUrl(''); setNewProtocol('openai'); setNewDirectEndpoint(false); }} onOk={() => { void handleAdd(); }} confirmLoading={saving}>
         <Form layout="vertical" size="middle">
           <Form.Item label={t('models.modelName')}><Input value={newModelName} onChange={(e) => setNewModelName(e.target.value)} placeholder={t('models.modelNamePlaceholder')} /></Form.Item>
           <Form.Item label={t('models.apiKey')}><Input.Password value={newApiKey} onChange={(e) => setNewApiKey(e.target.value)} placeholder="sk-..." /></Form.Item>
           <Form.Item label={t('models.baseUrl')}><Input value={newBaseUrl} onChange={(e) => setNewBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" /></Form.Item>
           <Form.Item label={t('models.protocol')}><Select value={newProtocol} onChange={setNewProtocol} options={PROTOCOL_OPTIONS} /></Form.Item>
+          <Form.Item label="直连端点" tooltip="开启后 Base URL 会作为完整请求地址使用，不再自动拼接接口路径。"><Checkbox checked={newDirectEndpoint} onChange={(event) => setNewDirectEndpoint(event.target.checked)}>Base URL 是完整接口地址</Checkbox></Form.Item>
           <Form.Item label="多模态能力">
             <Checkbox.Group
               value={CAPABILITY_OPTIONS.filter(option => newCapabilities[option.key]).map(option => option.key)}
@@ -313,12 +316,13 @@ export default function ModelsPage() {
       </Modal>
 
       {/* 编辑弹窗 */}
-      <Modal maskClosable={false} title={t('models.editModel')} open={editOpen} onCancel={() => { setEditOpen(false); setEditTarget(''); setEditModelName(''); setEditApiKey(''); setEditBaseUrl(''); setEditProtocol('openai'); }} onOk={() => { void handleEdit(); }} confirmLoading={editSaving}>
+      <Modal maskClosable={false} title={t('models.editModel')} open={editOpen} onCancel={() => { setEditOpen(false); setEditTarget(''); setEditModelName(''); setEditApiKey(''); setEditBaseUrl(''); setEditProtocol('openai'); setEditDirectEndpoint(false); }} onOk={() => { void handleEdit(); }} confirmLoading={editSaving}>
         <Form layout="vertical" size="middle">
           <Form.Item label={t('models.modelName')}><Input value={editModelName} onChange={(e) => setEditModelName(e.target.value)} placeholder={t('models.modelNamePlaceholder')} /></Form.Item>
           <Form.Item label={t('models.apiKey')} help={t('models.apiKeyEditHint')}><Input.Password value={editApiKey} onFocus={() => { if (editApiKey.includes('•')) setEditApiKey(''); }} onCopy={(e) => e.preventDefault()} onChange={(e) => setEditApiKey(e.target.value)} placeholder={t('models.apiKeyEditPlaceholder')} /></Form.Item>
           <Form.Item label={t('models.baseUrl')}><Input value={editBaseUrl} onChange={(e) => setEditBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" /></Form.Item>
           <Form.Item label={t('models.protocol')}><Select value={editProtocol} onChange={setEditProtocol} options={PROTOCOL_OPTIONS} /></Form.Item>
+          <Form.Item label="直连端点" tooltip="开启后 Base URL 会作为完整请求地址使用，不再自动拼接接口路径。"><Checkbox checked={editDirectEndpoint} onChange={(event) => setEditDirectEndpoint(event.target.checked)}>Base URL 是完整接口地址</Checkbox></Form.Item>
           <Form.Item label="多模态能力">
             <Checkbox.Group
               value={CAPABILITY_OPTIONS.filter(option => editCapabilities[option.key]).map(option => option.key)}

@@ -19,7 +19,8 @@
     "contextEngineering": "上下文工程",
     "longTermContext": "长期上下文",
     "shortTermContext": "短期上下文",
-    "promptManagement": "提示词管理"
+    "promptManagement": "提示词管理",
+    "systemLogs": "系统日志"
   },
   "overview": {
     "title": "系统总览",

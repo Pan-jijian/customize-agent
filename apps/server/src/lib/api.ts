@@ -70,7 +70,7 @@ async function fileToBase64(file: File) {
 
 export async function uploadKbFile(file: File, projectRoot?: string, uploadId?: string) {
   const base64 = await fileToBase64(file);
-  return fetchJson<{ success: boolean; relativePath?: string; files?: KbFileItem[]; total?: number; vectorStatus?: KbVectorStatus }>('/api/kb/upload', {
+  return fetchJson<{ success: boolean; relativePath?: string; files?: KbFileItem[]; uploadedFiles?: KbFileItem[]; total?: number; vectorStatus?: KbVectorStatus }>('/api/kb/upload', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fileName: file.name, fileData: base64, projectRoot, uploadId, relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || undefined }),
   });
@@ -82,7 +82,7 @@ export async function uploadKbFiles(files: File[], projectRoot?: string, uploadI
     fileData: await fileToBase64(file),
     relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || undefined,
   })));
-  return fetchJson<{ success: boolean; relativePath?: string; files?: KbFileItem[]; total?: number; vectorStatus?: KbVectorStatus }>('/api/kb/upload', {
+  return fetchJson<{ success: boolean; relativePath?: string; files?: KbFileItem[]; uploadedFiles?: KbFileItem[]; total?: number; vectorStatus?: KbVectorStatus }>('/api/kb/upload', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ files: payload, projectRoot, uploadId }),
   });
@@ -271,20 +271,35 @@ export async function saveDocumentDraft(draft: GeneratedDocumentDraft, id?: stri
   return fetchJson<{ draft: StoredDocumentDraft }>('/api/documents/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft, id }) });
 }
 export async function exportDocument(input: { documentId?: string; title?: string; markdown?: string; format: 'markdown' | 'html' | 'pdf' | 'docx'; enforceGate?: boolean; exportGate?: ExportGateResult; wordTemplatePath?: string }) {
-  const response = await fetch('/api/documents/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
-  if (!response.ok) throw new Error(await response.text());
+  const response = await fetch('/api/documents/export', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: input.format === 'pdf' ? 'application/pdf' : '*/*' }, body: JSON.stringify(input) });
+  const contentType = response.headers.get('content-type') || '';
+  const parseExportError = async () => {
+    const text = await response.text();
+    let message = text || '导出失败';
+    try {
+      const parsed = JSON.parse(text) as { error?: string; issues?: Array<{ message?: string }> };
+      const issueText = parsed.issues?.map(issue => issue.message).filter(Boolean).slice(0, 3).join('；');
+      message = issueText ? `${parsed.error || '导出失败'}：${issueText}` : parsed.error || message;
+    } catch {
+      // keep raw response text
+    }
+    throw new Error(message.length > 300 ? `${message.slice(0, 300)}...` : message);
+  };
+  if (!response.ok) await parseExportError();
+  if (input.format === 'pdf' && !contentType.includes('application/pdf')) await parseExportError();
+  if (input.format === 'docx' && !contentType.includes('officedocument.wordprocessingml.document')) await parseExportError();
   return response.blob();
 }
 
 // ═══════ Model Config ═══════
 
 export interface ModelCapabilities { imageGeneration?: boolean; imageUnderstanding?: boolean; fileUnderstanding?: boolean; audio?: boolean; video?: boolean; }
-export interface ProviderInfo { name: string; apiKey?: string; baseUrl?: string; protocol?: string; detectedProtocol: string; hasApiKey: boolean; capabilities?: ModelCapabilities; }
+export interface ProviderInfo { name: string; apiKey?: string; baseUrl?: string; protocol?: string; directEndpoint?: boolean; detectedProtocol: string; hasApiKey: boolean; capabilities?: ModelCapabilities; }
 export interface ModelsConfig { reader: { active: string; list: { name: string; provider: string }[] }; reasoning: { active: string; list: { name: string; provider: string }[] }; action: { active: string; list: { name: string; provider: string }[] }; }
 export interface EmbeddingConfig { provider: 'hash' | 'openai-compatible'; baseUrl?: string; apiKey?: string; model?: string; dimensions?: number; hasApiKey?: boolean; }
 
 export async function getProviders() { return fetchJson<ProviderInfo[]>('/api/config/providers'); }
-export async function saveProvider(name: string, cfg: { apiKey?: string; baseUrl?: string; protocol?: string; capabilities?: ModelCapabilities; oldName?: string }) {
+export async function saveProvider(name: string, cfg: { apiKey?: string; baseUrl?: string; protocol?: string; directEndpoint?: boolean; capabilities?: ModelCapabilities; oldName?: string }) {
   return fetchJson<{ success: boolean }>('/api/config/providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, ...cfg }) });
 }
 export async function deleteProvider(name: string) { return fetchJson<{ success: boolean }>(`/api/config/providers/${encodeURIComponent(name)}`, { method: 'DELETE' }); }
@@ -315,6 +330,21 @@ export interface SystemStats {
   uptime: number;
 }
 export async function getSystemStats() { return fetchJson<SystemStats>('/api/system/stats'); }
+
+export interface ErrorLogEntry {
+  id: string;
+  level: 'error' | 'warn' | 'info';
+  source: string;
+  functionName?: string;
+  message: string;
+  stack?: string;
+  request?: { method?: string; url?: string; query?: unknown };
+  meta?: unknown;
+  createdAt: number;
+}
+
+export async function getErrorLogs(limit = 200) { return fetchJson<{ logs: ErrorLogEntry[] }>(`/api/system/logs?limit=${limit}`); }
+export async function clearErrorLogs() { return fetchJson<{ ok: true }>('/api/system/logs', { method: 'DELETE' }); }
 
 // ═══════ Context ═══════
 

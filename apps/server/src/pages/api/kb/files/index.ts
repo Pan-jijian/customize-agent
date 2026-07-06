@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ensureBuiltInKnowledgeBase, getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 import { upsertKbOperation } from '@/services/kbOperationLog';
+import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
 type FastFile = {
   relativePath: string;
@@ -71,9 +72,16 @@ async function ensureBuiltInIndexed(projectRoot: string) {
   return project.listFiles();
 }
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+function mergeIndexedAndDiskFiles(indexedFiles: FastFile[], projectRoot: string) {
+  const byPath = new Map(indexedFiles.map(file => [file.relativePath, file]));
+  for (const file of scanKnowledgeBaseFiles(projectRoot)) {
+    if (!byPath.has(file.relativePath)) byPath.set(file.relativePath, file);
+  }
+  return Array.from(byPath.values()).sort((a, b) => b.mtime - a.mtime);
+}
+
+async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!['GET', 'DELETE', 'POST'].includes(req.method!)) return res.status(405).json({ error: 'Method not allowed' });
-  try {
     const bodyProjectRoot = typeof req.body?.projectRoot === 'string' ? req.body.projectRoot : undefined;
     const projectRoot = (req.query.projectRoot as string) || bodyProjectRoot || getProjectRoot();
     if (!projectRoot) return res.status(200).json({ files: [], total: 0 });
@@ -83,8 +91,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const page = parseInt((req.query.page as string) || '1', 10);
       const limit = parseInt((req.query.limit as string) || '50', 10);
       const resolvedProjectRoot = ensureBuiltInKnowledgeBase(projectRoot);
-      let files: any[] = await ensureBuiltInIndexed(resolvedProjectRoot);
-      if (files.length === 0) files = scanKnowledgeBaseFiles(resolvedProjectRoot);
+      let files: any[] = mergeIndexedAndDiskFiles(await ensureBuiltInIndexed(resolvedProjectRoot), resolvedProjectRoot);
       if (category) files = files.filter(file => file.category === category);
       const total = files.length;
       const paged = files.slice((page - 1) * limit, page * limit).map(file => ({ ...file, builtIn: true }));
@@ -115,11 +122,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const category = req.query.category as string | undefined;
     const page = parseInt((req.query.page as string) || '1', 10);
     const limit = parseInt((req.query.limit as string) || '50', 10);
-    let files = project.listFiles();
+    let files = mergeIndexedAndDiskFiles(project.listFiles(), projectRoot);
     if (category) files = files.filter((f: { category: string }) => f.category === category);
     const vectorStatus = project.getVectorStatus();
     const total = files.length;
     const paged = files.slice((page - 1) * limit, page * limit).map((file: { relativePath: string }) => ({ ...file, builtIn: true }));
     res.status(200).json({ files: paged, total, page, limit, vectorStatus });
-  } catch (e: unknown) { console.error('[api] kb/files/index', e); res.status(500).json({ error: 'Internal server error' }); }
 }
+
+export default withApiErrorBoundary('api/kb/files', handler);
