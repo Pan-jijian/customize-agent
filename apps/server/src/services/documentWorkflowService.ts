@@ -186,7 +186,7 @@ export interface GeneratedDocumentDraft {
 const DELTA_OPERATOR_GUIDE_TEMPLATE: DocumentTemplate = {
   id: 'delta-force-hot-operators-guide',
   name: '三角洲热门干员攻略',
-  description: '内置全流程示例：基于示例攻略资料、表格、规则和规范包生成热门干员攻略文档。',
+  description: '内置全流程示例：基于示例攻略资料、表格、图纸、图片、模板案例、样式规范、导出门禁和文档规范包生成可复用的热门干员攻略文档。',
   category: '游戏攻略',
   outputTitle: '三角洲热门干员攻略',
   projectRoleConfigId: 'delta-force-demo-config',
@@ -197,7 +197,7 @@ const DELTA_OPERATOR_GUIDE_TEMPLATE: DocumentTemplate = {
     { id: 'loadout', title: '第三章 干员搭配和队伍分工', purpose: '按突击、侦察、支援、工程等职责给出队伍搭配。', requiredFacts: ['队伍分工', '搭配建议'], queries: ['三角洲行动 干员 搭配 队伍 分工 突击 侦察 支援 工程'] },
     { id: 'tables', title: '第四章 数据表和推荐优先级', purpose: '引用表格数据生成优先级和推荐清单。', requiredFacts: ['推荐指数', '上手难度'], queries: ['干员 推荐指数 上手难度 表格 优先级'] },
     { id: 'maps', title: '第五章 官方地图图纸和路线理解', purpose: '引用官方地图工具的地图图纸/底图瓦片，说明热门地图的关键区域和新手路线理解。', requiredFacts: ['地图事实', '地图图纸'], queries: ['三角洲行动 官方地图工具 地图图纸 零号大坝 航天基地 巴克什'] },
-    { id: 'tips', title: '第六章 实战注意事项', purpose: '整理实战打法、误区和复盘建议。', requiredFacts: ['实战技巧', '注意事项'], queries: ['三角洲行动 实战 技巧 注意事项 误区'] },
+    { id: 'style', title: '第六章 模板样式和导出检查', purpose: '说明内置模板案例如何使用模板样式、来源清单和导出门禁形成可复用示例。', requiredFacts: ['模板样式规则', '导出门禁', '实战技巧', '注意事项'], queries: ['模板案例 导出样式 标题层级 表格 图片 来源 门禁 检查'] },
   ],
 };
 
@@ -320,6 +320,60 @@ const BUILT_IN_PROMPTS: Record<string, { name: string; content: string }> = {
 - 如果模型支持图片生成：返回适合 SDXL/多模态图片生成的英文 prompt。
 - 如果模型不支持图片生成：返回完整封面生成提示词，并说明可使用参考图片兜底。
 - prompt 应包含 subject、composition、lighting、style、quality、negative constraints。`,
+  },
+  'builtin:delta-template-style': {
+    name: '内置｜三角洲模板样式规范',
+    content: `你是“模板样式设计师”。你的目标不是重新写事实，而是把生成结果整理成用户一眼能看懂、可复制为自定义模板的优秀示例。
+
+样式目标：
+1. 开头必须有“适用对象 + 使用场景 + 本文结论”的短导语，避免直接进入长正文。
+2. 每章采用稳定结构：本章结论、核心依据、操作建议、引用资料。
+3. 重要建议使用清单、表格或引用块，不要堆长段落。
+4. 图片、地图、表格必须有前置说明和后置解释，说明为什么引用该资源。
+5. 来源清单要区分规则文件、事实文件、表格、图纸、图片、附件和模板案例。
+6. 对用户可学习的地方要明显：哪里来自文档规范包，哪里来自文件角色，哪里来自提示词角色。
+7. 适合导出 DOCX/PDF：标题层级稳定、段落短、表格列宽友好、图片说明完整。
+
+禁止事项：
+- 不要加入没有证据支持的新事实。
+- 不要把提示词全文渲染进正文。
+- 不要让示例看起来像固定模板；要体现“可按角色和规范包自定义”。`,
+  },
+  'builtin:delta-resource-evidence': {
+    name: '内置｜三角洲资源证据使用',
+    content: `你是“资源证据编排专家”。你需要把知识库检索到的不同类型文件转成正文可用的信息，而不是只引用文件名。
+
+资源使用规则：
+1. 文本/Markdown：提炼规则、结论、注意事项和章节依据。
+2. PDF/Word：提炼正式说明、附件依据、队伍搭配、规则解释和可引用来源。
+3. CSV/XLS/XLSX：转成 Markdown 表格，保留字段含义，形成推荐优先级和对比结论。
+4. 图片：说明图片中的对象、用途、与章节结论的关系；仅在需要时作为配图。
+5. 地图图纸：说明区域、路线、点位、撤离/交战路径和队伍分工，不要当装饰图。
+6. 模板案例：学习结构、表达和来源组织方式，不要照抄无关内容。
+7. 导出门禁文件：用于检查完整性，不应作为正文事实。
+
+输出要求：
+- 每次引用资源都要写明“资源类型 + 来源文件 + 用途”。
+- 如果多个来源冲突，必须提示冲突并建议用户确认。
+- 如果资源不足，说明缺口，不要硬插固定文件。`,
+  },
+  'builtin:delta-export-gate': {
+    name: '内置｜三角洲导出门禁',
+    content: `你是“交付前导出门禁审核员”。你需要从 Markdown/HTML/DOCX/PDF 四种导出视角检查文档。
+
+门禁维度：
+1. 结构完整：封面、目录、核心结论、正文章节、表格、图片/地图、来源、缺失说明。
+2. 事实完整：规范包 required facts 已覆盖，且来源角色匹配。
+3. 资源完整：表格可读、图片路径有效、地图图纸不是硬编码、附件来源清楚。
+4. 格式完整：标题不跳级，表格语法正确，图片 alt 文本完整，列表缩进稳定。
+5. 导出安全：正文不包含提示词全文、远程临时生成 URL、内部错误堆栈、空占位符。
+6. 可复核：关键结论能追溯到文件角色、资源证据或章节证据。
+
+输出格式：
+- error：必须阻断导出的问题。
+- warning：可导出但建议优化的问题。
+- info：交付提示。
+- 每个问题都要包含定位、原因和修复建议。`,
   },
   'builtin:delta-review-optimization': {
     name: '内置｜三角洲 LLM 审查优化',
@@ -900,8 +954,8 @@ function applySpecGateRules(spec: DocumentSpecPackage | undefined, issues: Valid
     const schemaFacts = factsModel.schemaFacts[field.id] || [];
     const satisfiedByChapterEvidence = chapters.some(chapter => !chapter.missingFacts.includes(field.name) && chapter.evidence.some(item => evidenceSatisfiesSpecField(item, field)));
     const satisfiedBySourceRole = !field.sourceRoleIds?.length || schemaFacts.some(fact => field.sourceRoleIds?.includes(fact.roleId)) || chapters.some(chapter => chapter.evidence.some(item => evidenceSatisfiesSpecField(item, field)));
-    if (schemaFacts.length === 0 && !factNames.has(field.name) && !satisfiedByChapterEvidence) next.push({ level: 'error', message: `必需事实缺失：${field.name}`, suggestion: field.extractionHint || '请补充资料或调整事实字段配置。' });
-    if (!satisfiedBySourceRole) next.push({ level: 'error', message: `必需事实来源角色不匹配：${field.name}`, suggestion: `请确认该事实来自角色：${field.sourceRoleIds?.join('、')}` });
+    if (schemaFacts.length === 0 && !factNames.has(field.name) && !satisfiedByChapterEvidence) next.push({ level: 'warning', message: `必需事实缺失：${field.name}`, suggestion: field.extractionHint || '请补充资料或调整事实字段配置。' });
+    if (!satisfiedBySourceRole) next.push({ level: 'warning', message: `必需事实来源角色不匹配：${field.name}`, suggestion: `请确认该事实来自角色：${field.sourceRoleIds?.join('、')}` });
   }
   for (const chapter of spec.chapterRules.filter(chapter => chapter.required)) {
     if (!chapterTitles.has(chapter.title)) next.push({ level: 'error', message: `必需章节缺失：${chapter.title}`, suggestion: '请在模板或规范包章节规则中补齐章节。' });
@@ -972,12 +1026,37 @@ function saveDocumentImageAsset(projectRoot: string, fileName: string, data: Buf
   return relativePath;
 }
 
+function isValidImageBuffer(buffer: Buffer) {
+  return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    || buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
+    || buffer.subarray(0, 4).toString('ascii') === 'RIFF';
+}
+
+function imageGenerationPlaceholderMessage(buffer: Buffer) {
+  const text = buffer.toString('utf8').slice(0, 300).trim();
+  if (/image is generating|please refresh|generating/i.test(text)) return text;
+  return '';
+}
+
 async function saveImageFromUrl(projectRoot: string, imageUrl: string, fileName: string) {
-  const response = await fetch(imageUrl);
-  if (!response.ok) throw new Error(`图片下载失败：${response.status}`);
-  const contentType = response.headers.get('content-type') || 'image/png';
-  const buffer = Buffer.from(await response.arrayBuffer());
-  return saveDocumentImageAsset(projectRoot, `${fileName}.${mimeExtension(contentType)}`, buffer);
+  let lastMessage = '';
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const response = await fetch(imageUrl);
+    if (!response.ok) throw new Error(`图片下载失败：${response.status}`);
+    const contentType = response.headers.get('content-type') || '';
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const placeholder = imageGenerationPlaceholderMessage(buffer);
+    if (placeholder) {
+      lastMessage = placeholder;
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      continue;
+    }
+    if (!contentType.startsWith('image/') || !isValidImageBuffer(buffer)) {
+      throw new Error(`图片生成接口未返回有效图片：${contentType || 'unknown'} ${buffer.toString('utf8').slice(0, 80)}`);
+    }
+    return saveDocumentImageAsset(projectRoot, `${fileName}.${mimeExtension(contentType)}`, buffer);
+  }
+  throw new Error(lastMessage || '图片仍在生成中，请稍后重新生成或刷新资源');
 }
 
 async function generatedCoverAssetFromUrl(projectRoot: string, prompt: string, modelProvider?: string): Promise<DocumentAsset> {

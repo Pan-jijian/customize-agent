@@ -97,7 +97,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const markdown = record?.editedMarkdown || record?.markdown || body.markdown || '';
     const format = body.format || 'markdown';
     const exportGate = record?.draft?.exportGate || body.exportGate;
-    if (body.enforceGate && exportGate && !exportGate.passed) return res.status(422).json({ error: 'Export gate failed', issues: exportGate.blockingIssues ?? [] });
+    if (body.enforceGate && exportGate?.blockingIssues?.length) return res.status(422).json({ error: 'Export gate failed', issues: exportGate.blockingIssues });
     const filename = safeFileName(title);
     if (format === 'markdown') {
       res.setHeader('Content-Type', 'text/markdown; charset=utf-8');

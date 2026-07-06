@@ -6,7 +6,7 @@ import type { GeneratedDocumentDraft, DocumentAsset } from './documentWorkflowSe
 import { generateDocumentDraft } from './documentWorkflowService';
 import { getMultiProjectManager, getProjectRoot } from './kbService';
 
-export type GeneratedDocumentStatus = 'generating' | 'completed' | 'failed';
+export type GeneratedDocumentStatus = 'generating' | 'completed' | 'warning' | 'failed';
 
 export interface GeneratedDocumentRecord {
   id: string;
@@ -24,6 +24,7 @@ export interface GeneratedDocumentRecord {
   updatedAt: number;
   completedAt?: number;
   error?: string;
+  warningIssues?: string[];
 }
 
 export interface GeneratedAssetRecord extends DocumentAsset {
@@ -58,7 +59,7 @@ export function generatedRoot(projectRoot = getProjectRoot()) {
 function indexPath(projectRoot = getProjectRoot()) { return path.join(generatedRoot(projectRoot), 'index.json'); }
 function assetsPath(projectRoot = getProjectRoot()) { return path.join(generatedRoot(projectRoot), 'assets.json'); }
 function draftPath(id: string, projectRoot = getProjectRoot()) { return path.join(generatedRoot(projectRoot), 'drafts', `${id}.json`); }
-function generatedAssetAbsolutePath(asset: GeneratedAssetRecord, projectRoot = getProjectRoot()) {
+export function generatedAssetAbsolutePath(asset: Pick<GeneratedAssetRecord, 'path'>, projectRoot = getProjectRoot()) {
   if (!asset.path) return null;
   if (path.isAbsolute(asset.path)) return asset.path;
   if (asset.path.startsWith('generatedDocuments/assets/')) return path.join(generatedRoot(projectRoot), asset.path.replace(/^generatedDocuments\/assets\//u, 'assets/'));
@@ -195,15 +196,17 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
   };
   saveGeneratedDocument(initial, projectRoot);
   const promise = generateDocumentDraft(input).then(result => {
+    const warningIssues = result.validationIssues.filter(issue => issue.level === 'error' || issue.level === 'warning').map(issue => issue.suggestion ? `${issue.message}：${issue.suggestion}` : issue.message);
     const record = saveGeneratedDocument({
       ...initial,
       templateName: result.templateName,
       title: result.title,
       markdown: result.markdown,
-      status: 'completed',
+      status: warningIssues.length > 0 ? 'warning' : 'completed',
       draft: result,
       assets: result.assets || [],
       completedAt: Date.now(),
+      warningIssues,
     }, projectRoot);
     upsertGeneratedAssets(result.assets || [], documentId, projectRoot);
     return record;
