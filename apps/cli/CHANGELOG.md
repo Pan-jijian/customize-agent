@@ -1,5 +1,54 @@
 # customize-agent
 
+## 3.0.22
+
+### Patch Changes
+
+- 更新服务端 PDF/大文件上传入库修复。
+- Updated dependencies
+  - @customize-agent/server@3.0.29
+  - @customize-agent/knowledge@3.0.13
+
+## 3.0.21
+
+### Patch Changes
+
+- 更新服务端知识库重复上传修复。
+- Updated dependencies
+  - @customize-agent/server@3.0.28
+
+## 3.0.20
+
+### Patch Changes
+
+- 发布真实 DWG 样本验证后的知识库上传与转换修复。
+- Updated dependencies
+  - @customize-agent/server@3.0.27
+  - @customize-agent/knowledge@3.0.12
+
+## 3.0.19
+
+### Patch Changes
+
+- 发布知识库上传和内置 DWG 转换修复。
+- Updated dependencies
+  - @customize-agent/server@3.0.26
+  - @customize-agent/knowledge@3.0.11
+
+## 3.0.18
+
+### Patch Changes
+
+- 重新发布 Web 管理控制台和 CLI 安装入口，确保用户安装后启动最新服务。
+- Updated dependencies
+  - @customize-agent/server@3.0.25
+
+## 3.0.17
+
+### Patch Changes
+
+- 更新 CLI 安装入口依赖的 Web 管理控制台版本。
+
 ## 3.0.16
 
 ### Patch Changes

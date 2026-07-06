@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { ExternalExtractorRegistry } from './external-extractor.js';
 import { resolveAndImport, resolvePackage, getNodeModulesRoot } from './module-resolver.js';
 import type { ClassifiedFile } from '../types.js';
@@ -344,10 +345,30 @@ export class ContentExtractor {
     };
   }
 
+  private async tryConvertDwgWithBundledWasm(filePath: string): Promise<{ dxfText?: string; tool: string; warnings: string[] }> {
+    try {
+      const mod = await resolveAndImport('dwgdxf') as { convertDwgToDxf?: (dwg: Uint8Array | ArrayBuffer, options?: { wasmBase?: string }) => Promise<Uint8Array> };
+      if (!mod.convertDwgToDxf) return { tool: 'dwgdxf_wasm', warnings: ['内置 dwgdxf WASM 转换器未导出 convertDwgToDxf'] };
+      const wasmBase = pathToFileURL(path.join(path.dirname(resolvePackage('dwgdxf')), 'wasm')).href;
+      const dxfBytes = await mod.convertDwgToDxf(fs.readFileSync(filePath), { wasmBase });
+      const dxfText = Buffer.from(dxfBytes).toString('utf8');
+      return dxfText.trim()
+        ? { dxfText, tool: 'dwgdxf_wasm', warnings: [] }
+        : { tool: 'dwgdxf_wasm', warnings: ['内置 dwgdxf WASM 转换器未输出 DXF 文本'] };
+    } catch (error) {
+      return { tool: 'dwgdxf_wasm', warnings: [`内置 dwgdxf WASM 转换失败: ${error instanceof Error ? error.message : String(error)}`] };
+    }
+  }
+
   private async tryConvertDwgToDxf(filePath: string): Promise<{ dxfText?: string; tool: string; warnings: string[] } | undefined> {
     const tmpDir = fs.mkdtempSync(path.join(this.getTempRoot(), 'customize-dwg-'));
     const outputPath = path.join(tmpDir, `${path.basename(filePath, path.extname(filePath))}.dxf`);
     try {
+      const failures: string[] = [];
+      const bundled = await this.tryConvertDwgWithBundledWasm(filePath);
+      if (bundled.dxfText) return bundled;
+      failures.push(...bundled.warnings);
+
       const customCmd = process.env.CUSTOMIZE_DWG_TO_DXF_CMD;
       if (customCmd) {
         if (/\s/u.test(customCmd)) return { tool: 'external_dwg_to_dxf', warnings: ['CUSTOMIZE_DWG_TO_DXF_CMD 只支持可执行文件路径；参数请使用 CUSTOMIZE_DWG_TO_DXF_ARGS JSON 数组配置'] };
@@ -361,7 +382,6 @@ export class ContentExtractor {
         return { tool: 'external_dwg_to_dxf', warnings: [`CUSTOMIZE_DWG_TO_DXF_CMD 转换失败: ${result.stderr || result.stdout || result.error?.message || 'unknown error'}`] };
       }
 
-      const failures: string[] = [];
       for (const bin of ['dwgread', 'dwg2dxf']) {
         const result = spawnSync(bin, bin === 'dwgread' ? ['-O', 'DXF', '-o', outputPath, filePath] : [filePath, outputPath], { encoding: 'utf8', timeout: 120_000 });
         if (result.status === 0 && fs.existsSync(outputPath)) return { dxfText: fs.readFileSync(outputPath, 'utf8'), tool: bin, warnings: [] };

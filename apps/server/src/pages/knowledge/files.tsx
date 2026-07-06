@@ -149,7 +149,11 @@ export default function FilesPage() {
         });
       }
       await loadOperations();
-    } catch { message.error('上传失败'); setStatusItems(items => [{ type: 'error', title: `上传失败 ${titleName}`, description: '请重试或检查文件格式', status: 'error' } satisfies StatusItem, ...items].slice(0, 50)); }
+    } catch (error) {
+      const description = error instanceof Error ? error.message : '请重试或检查文件格式';
+      message.error(description || '上传失败');
+      setStatusItems(items => [{ type: 'error', title: `上传失败 ${titleName}`, description, status: 'error' } satisfies StatusItem, ...items].slice(0, 50));
+    }
     finally { clearInterval(poll); setUploading(false); }
   };
 

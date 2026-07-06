@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/knowledge",
-  "version": "3.0.10",
+  "version": "3.0.13",
   "description": "Local knowledge base infrastructure for customize-agent",
   "type": "module",
   "main": "./dist/index.js",
@@ -42,6 +42,7 @@
   "dependencies": {
     "@napi-rs/canvas": "^0.1.82",
     "better-sqlite3": "^12.10.0",
+    "dwgdxf": "^2.0.1",
     "dxf-parser": "^1.1.2",
     "fast-glob": "^3.3.3",
     "jszip": "^3.10.1",

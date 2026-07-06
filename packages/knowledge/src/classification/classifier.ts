@@ -2,6 +2,8 @@ import * as path from 'node:path';
 import type { Stats } from 'node:fs';
 import type { ClassifiedFile, FileCategory } from '../types.js';
 
+const DEFAULT_MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024;
+
 export class FileClassifier {
   private readonly extensionMap: Map<string, [FileCategory, string]>;
 
@@ -41,7 +43,9 @@ export class FileClassifier {
   }
 
   shouldSkip(file: ClassifiedFile): string | null {
-    if (file.fileSize > 50 * 1024 * 1024) return '文件超过 50MB 限制';
+    const maxFileSize = Number(process.env.KB_MAX_FILE_SIZE_BYTES ?? DEFAULT_MAX_FILE_SIZE_BYTES);
+    const maxBytes = Number.isFinite(maxFileSize) && maxFileSize > 0 ? maxFileSize : DEFAULT_MAX_FILE_SIZE_BYTES;
+    if (file.fileSize > maxBytes) return `文件超过 ${Math.floor(maxBytes / 1024 / 1024)}MB 限制`;
     if (file.fileSize === 0) return '空文件';
 
     const ext = path.extname(file.absolutePath).toLowerCase();

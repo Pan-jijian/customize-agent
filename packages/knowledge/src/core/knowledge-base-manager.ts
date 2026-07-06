@@ -410,7 +410,7 @@ export class KnowledgeBaseManager {
   }
 
   getUploadRelativePath(fileName: string, targetRelativePath?: string): string {
-    return targetRelativePath ?? this.defaultUploadRelativePath(fileName);
+    return targetRelativePath ? this.normalizeRelativePath(targetRelativePath) : this.defaultUploadRelativePath(fileName);
   }
 
   async uploadFile(fileName: string, content: Buffer, targetRelativePath?: string, onProgress?: (progress: KnowledgeIndexProgress) => void, options: { vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
@@ -419,11 +419,18 @@ export class KnowledgeBaseManager {
 
   async uploadFiles(files: Array<{ fileName: string; content: Buffer; targetRelativePath?: string }>, onProgress?: (progress: KnowledgeIndexProgress) => void, options: { vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
     this.initialize();
+    const uploadedPaths: string[] = [];
     for (const file of files) {
       const relativePath = this.getUploadRelativePath(file.fileName, file.targetRelativePath);
       const targetPath = this.resolveKbRelativePath(relativePath);
       fs.mkdirSync(path.dirname(targetPath), { recursive: true });
       fs.writeFileSync(targetPath, file.content);
+      uploadedPaths.push(relativePath);
+    }
+    for (const relativePath of uploadedPaths) {
+      const record = this.store.listRecords().find(item => item.relativePath === relativePath);
+      if (record) await this.deleteVectorFile(record.collectionName, relativePath);
+      this.store.deleteRecord(relativePath);
     }
     return this.incrementalIndex({ onProgress, vectorMode: options.vectorMode });
   }

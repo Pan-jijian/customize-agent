@@ -1,5 +1,23 @@
 # @customize-agent/knowledge
 
+## 3.0.13
+
+### Patch Changes
+
+- 修复上传接口与知识库索引器文件大小限制不一致导致大 PDF 写入后被跳过的问题，默认索引上限调整为 500MB，并增加 PDF 上传回归测试。
+
+## 3.0.12
+
+### Patch Changes
+
+- 修复内置 dwgdxf WASM 在 Node 环境下默认 WASM 路径错误的问题，并用真实 DWG 样本覆盖转换、解析、分块、入库回归测试。
+
+## 3.0.11
+
+### Patch Changes
+
+- 修复单文件、批量文件和嵌套文件夹上传后未可靠解析、分块、入库的问题，并内置基于 WASM 的 DWG→DXF 转换器。
+
 ## 3.0.10
 
 ### Patch Changes

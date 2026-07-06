@@ -1,6 +1,4 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import * as fs from 'fs';
-import * as path from 'path';
 import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 import { setKbUploadProgress } from '@/services/kbUploadProgress';
 import { upsertKbOperation, type KbOperationStage } from '@/services/kbOperationLog';
@@ -9,35 +7,6 @@ import type { KnowledgeIndexProgress } from '@customize-agent/knowledge';
 export const config = {
   api: { bodyParser: { sizeLimit: '500mb' }, responseLimit: '500mb' },
 };
-
-function categoryFromRelativePath(relativePath: string) {
-  if (relativePath.includes('表格数据/')) return 'spreadsheet';
-  if (relativePath.includes('图片素材/')) return 'image';
-  if (relativePath.includes('图纸文件/')) return 'cad';
-  if (relativePath.includes('文档资料/')) return 'document';
-  return 'other';
-}
-
-type UploadedFileItem = ReturnType<Awaited<ReturnType<ReturnType<typeof getMultiProjectManager>['getProject']>>['listFiles']>[number];
-
-function fallbackUploadedFile(projectRoot: string, relativePath: string): UploadedFileItem | undefined {
-  const absolutePath = path.join(projectRoot, 'knowledgeBase', relativePath);
-  if (!fs.existsSync(absolutePath)) return undefined;
-  const stat = fs.statSync(absolutePath);
-  return {
-    relativePath,
-    category: categoryFromRelativePath(relativePath),
-    format: path.extname(relativePath).slice(1).toLowerCase() || 'text',
-    contentHash: '',
-    fileSize: stat.size,
-    mtime: stat.mtimeMs,
-    chunkCount: 0,
-    collectionName: '',
-    indexedAt: 0,
-    lastVerifiedAt: Date.now(),
-    status: 'active',
-  };
-}
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -71,11 +40,34 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }, { vectorMode: 'defer' });
     const files = project.listFiles();
     const uploadedPaths = preparedFiles.map(file => file.targetRelativePath).filter(Boolean) as string[];
-    const uploadedFiles = uploadedPaths.flatMap(relativePath => files.find(file => file.relativePath === relativePath) ?? fallbackUploadedFile(projectRoot, relativePath) ?? []);
+    const uploadedFiles = uploadedPaths.flatMap(relativePath => files.find(file => file.relativePath === relativePath) ?? []);
+    const missingUploadedPath = uploadedPaths.find(relativePath => !uploadedFiles.some(file => file.relativePath === relativePath));
+    if (missingUploadedPath) {
+      const skipped = diff.skippedFiles.find(item => item.file.relativePath === missingUploadedPath);
+      const message = skipped?.reason
+        ? `上传文件已写入，但被索引器跳过：${skipped.reason}`
+        : '上传文件已写入，但未成功解析、切片并入库';
+      setKbUploadProgress(operationId, { stage: 'error', percent: 100, message, fileName: titleName });
+      upsertKbOperation(projectRoot, { id: operationId, type: 'upload', title: `上传 ${titleName}`, stage: 'error', status: 'error', percent: 100, message, fileName: titleName, filePath: missingUploadedPath, error: message });
+      return res.status(422).json({ error: message, files, uploadedFiles, missingUploadedPath, skippedFiles: diff.skippedFiles });
+    }
+    const failedUploadedFiles = uploadedFiles.filter(file => file.status !== 'active');
+    if (failedUploadedFiles.length > 0) {
+      const failed = failedUploadedFiles[0]!;
+      const message = failed.errorMessage || '上传文件未成功解析、切片并入库';
+      setKbUploadProgress(operationId, { stage: 'error', percent: 100, message, fileName: titleName, chunkCount: failed.chunkCount });
+      upsertKbOperation(projectRoot, { id: operationId, type: 'upload', title: `上传 ${titleName}`, stage: 'error', status: 'error', percent: 100, message, fileName: titleName, filePath: failed.relativePath, chunkCount: failed.chunkCount, error: message });
+      return res.status(422).json({ error: message, files, uploadedFiles });
+    }
     const changedPaths = new Set([...diff.newFiles, ...diff.modifiedFiles].map(file => file.relativePath));
     const changedChunkCount = files.filter(file => changedPaths.has(file.relativePath)).reduce((sum, file) => sum + file.chunkCount, 0);
     const uploaded = uploadedFiles.find(file => file.relativePath === uploadedRelativePath);
-    const uploadedMeta = uploaded?.metadataJson ? JSON.parse(uploaded.metadataJson) : undefined;
+    let uploadedMeta: { extraction?: { textLength?: number; extractionMode?: string } } | undefined;
+    try {
+      uploadedMeta = uploaded?.metadataJson ? JSON.parse(uploaded.metadataJson) as { extraction?: { textLength?: number; extractionMode?: string } } : undefined;
+    } catch {
+      uploadedMeta = undefined;
+    }
     const vectorStatus = project.getVectorStatus();
     const vectorReady = vectorStatus.status === 'ready';
     setKbUploadProgress(operationId, {
@@ -116,8 +108,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const requestFiles = Array.isArray(req.body?.files) ? req.body.files as Array<{ fileName?: string }> : [];
     const fileName = req.body?.fileName || (requestFiles.length > 1 ? `${requestFiles.length} 个文件` : requestFiles[0]?.fileName);
     const operationId = req.body?.uploadId || `upload-${Date.now()}`;
-    if (projectRoot && fileName) upsertKbOperation(projectRoot, { id: operationId, type: 'upload', title: `上传 ${fileName}`, stage: 'error', status: 'error', percent: 100, message: '上传或索引失败', fileName, error: 'Internal server error' });
+    const message = e instanceof Error ? e.message : '上传或索引失败';
+    if (projectRoot && fileName) upsertKbOperation(projectRoot, { id: operationId, type: 'upload', title: `上传 ${fileName}`, stage: 'error', status: 'error', percent: 100, message, fileName, error: message });
     console.error('[api] kb/upload', e);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: message });
   }
 }

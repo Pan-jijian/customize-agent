@@ -106,12 +106,24 @@ describe('FileClassifier', () => {
     expect(classifier.shouldSkip(file)).toBe('二进制可执行文件，跳过');
   });
 
-  it('skips files above 50MB', () => {
+  it('uses 500MB as the default upload/index size limit', () => {
+    const absPath = path.join(kbDir, 'large.pdf');
+    fs.writeFileSync(absPath, 'x'.repeat(100), 'utf8');
+    const stat = fs.statSync(absPath);
+    const file = { ...classifier.classify(absPath, 'large.pdf', stat), fileSize: 51 * 1024 * 1024 };
+    expect(classifier.shouldSkip(file)).toBeNull();
+  });
+
+  it('supports overriding the upload/index size limit', () => {
+    const previous = process.env.KB_MAX_FILE_SIZE_BYTES;
+    process.env.KB_MAX_FILE_SIZE_BYTES = String(10 * 1024 * 1024);
     const absPath = path.join(kbDir, 'large.txt');
     fs.writeFileSync(absPath, 'x'.repeat(100), 'utf8');
     const stat = fs.statSync(absPath);
-    const file = { ...classifier.classify(absPath, 'large.txt', stat), fileSize: 51 * 1024 * 1024 };
-    expect(classifier.shouldSkip(file)).toBe('文件超过 50MB 限制');
+    const file = { ...classifier.classify(absPath, 'large.txt', stat), fileSize: 11 * 1024 * 1024 };
+    expect(classifier.shouldSkip(file)).toBe('文件超过 10MB 限制');
+    if (previous === undefined) delete process.env.KB_MAX_FILE_SIZE_BYTES;
+    else process.env.KB_MAX_FILE_SIZE_BYTES = previous;
   });
 });
 
@@ -821,7 +833,166 @@ export function validateConfig(config: Config): string[] {
   });
 });
 
-// ─── 6. Edge cases ────────────────────────────────────────────
+// ─── 6. Upload indexing pipeline ──────────────────────────────
+
+describe('KnowledgeBaseManager upload indexing', () => {
+  function createManagerFixture() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-upload-fixture-'));
+    const manager = new KnowledgeBaseManager({
+      scope: 'project',
+      projectRoot: root,
+      projectId: `test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      storageRoot: path.join(root, 'storage'),
+    });
+    return { root, manager };
+  }
+
+  function expectIndexed(manager: KnowledgeBaseManager, relativePath: string, content: string) {
+    const file = manager.listFiles().find(item => item.relativePath === relativePath);
+    expect(file).toBeDefined();
+    expect(file!.status).toBe('active');
+    expect(file!.chunkCount).toBeGreaterThan(0);
+    const chunks = manager.store.listChunks({ relativePath });
+    expect(chunks.length).toBe(file!.chunkCount);
+    expect(chunks.map(chunk => chunk.content).join('\n')).toContain(content);
+  }
+
+  function createMinimalPdf(text: string) {
+    return Buffer.from(`%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
+4 0 obj<</Length ${text.length + 40}>>stream
+BT /F1 24 Tf 72 720 Td (${text}) Tj ET
+endstream
+endobj
+5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000348 00000 n 
+trailer<</Size 6/Root 1 0 R>>
+startxref
+425
+%%EOF
+`);
+  }
+
+  it('uploads one file and completes parsing, chunking, and SQLite indexing', async () => {
+    const { root, manager } = createManagerFixture();
+    try {
+      await manager.uploadFile('single.md', Buffer.from('# 单文件上传\n\n单文件解析分块入库验证内容。'), '文档资料/single.md', undefined, { vectorMode: 'defer' });
+      expectIndexed(manager, '文档资料/single.md', '单文件解析分块入库验证内容');
+    } finally {
+      manager.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('uploads multiple normal files and indexes every uploaded file', async () => {
+    const { root, manager } = createManagerFixture();
+    try {
+      await manager.uploadFiles([
+        { fileName: 'batch-a.md', content: Buffer.from('# 批量 A\n\n普通批量上传 A 的内容。'), targetRelativePath: '文档资料/batch-a.md' },
+        { fileName: 'batch-b.txt', content: Buffer.from('普通批量上传 B 的内容。'), targetRelativePath: '文档资料/batch-b.txt' },
+      ], undefined, { vectorMode: 'defer' });
+      expectIndexed(manager, '文档资料/batch-a.md', '普通批量上传 A 的内容');
+      expectIndexed(manager, '文档资料/batch-b.txt', '普通批量上传 B 的内容');
+    } finally {
+      manager.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('uploads a PDF and completes text extraction, chunking, and indexing', async () => {
+    const { root, manager } = createManagerFixture();
+    try {
+      await manager.uploadFile('upload-test.pdf', createMinimalPdf('PDF upload reindex test content'), '文档资料/upload-test.pdf', undefined, { vectorMode: 'defer' });
+      expectIndexed(manager, '文档资料/upload-test.pdf', 'PDF upload reindex test content');
+      const file = manager.listFiles().find(item => item.relativePath === '文档资料/upload-test.pdf');
+      expect(file!.metadataJson).toContain('pdf_text');
+    } finally {
+      manager.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('uploads nested folder files and preserves recursive relative paths while indexing', async () => {
+    const { root, manager } = createManagerFixture();
+    try {
+      await manager.uploadFiles([
+        { fileName: 'deep-a.md', content: Buffer.from('# 嵌套 A\n\n第一层子目录中的内容。'), targetRelativePath: '主文件夹/子文件夹/deep-a.md' },
+        { fileName: 'deep-b.md', content: Buffer.from('# 嵌套 B\n\n第二层更深子目录中的内容。'), targetRelativePath: '主文件夹/子文件夹/更深/deep-b.md' },
+      ], undefined, { vectorMode: 'defer' });
+      expectIndexed(manager, '主文件夹/子文件夹/deep-a.md', '第一层子目录中的内容');
+      expectIndexed(manager, '主文件夹/子文件夹/更深/deep-b.md', '第二层更深子目录中的内容');
+      expect(fs.existsSync(path.join(root, 'knowledgeBase', '主文件夹', '子文件夹', '更深', 'deep-b.md'))).toBe(true);
+    } finally {
+      manager.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('normalizes Windows-style upload paths and prevents stale chunks after overwrite', async () => {
+    const { root, manager } = createManagerFixture();
+    try {
+      await manager.uploadFile('overwrite.md', Buffer.from('旧内容，应被新内容覆盖。'), '主文件夹\\\\子文件夹\\\\overwrite.md', undefined, { vectorMode: 'defer' });
+      await manager.uploadFile('overwrite.md', Buffer.from('新内容，必须重新解析分块入库。'), '主文件夹\\\\子文件夹\\\\overwrite.md', undefined, { vectorMode: 'defer' });
+      expectIndexed(manager, '主文件夹/子文件夹/overwrite.md', '新内容，必须重新解析分块入库');
+      const chunks = manager.store.listChunks({ relativePath: '主文件夹/子文件夹/overwrite.md' });
+      expect(chunks.map(chunk => chunk.content).join('\n')).not.toContain('旧内容，应被新内容覆盖');
+    } finally {
+      manager.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('uploads an already indexed file path again without failing', async () => {
+    const { root, manager } = createManagerFixture();
+    try {
+      const relativePath = '文档资料/reupload-existing.md';
+      await manager.uploadFile('reupload-existing.md', Buffer.from('# 旧版本\n\n这个文件已经在本地知识库中。'), relativePath, undefined, { vectorMode: 'defer' });
+      await manager.uploadFile('reupload-existing.md', Buffer.from('# 新版本\n\n同一路径再次上传必须成功并重新入库。'), relativePath, undefined, { vectorMode: 'defer' });
+      expectIndexed(manager, relativePath, '同一路径再次上传必须成功并重新入库');
+      const file = manager.listFiles().find(item => item.relativePath === relativePath);
+      expect(file!.status).toBe('active');
+      const chunks = manager.store.listChunks({ relativePath });
+      expect(chunks.map(chunk => chunk.content).join('\n')).not.toContain('这个文件已经在本地知识库中');
+    } finally {
+      manager.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('converts the bundled DWG sample with WASM and indexes parsed CAD content', async () => {
+    const sample = path.resolve(process.cwd(), '2026.06.10高端光学膜A1#综合楼装施装修施工图.dwg');
+    if (!fs.existsSync(sample)) return;
+    const { root, manager } = createManagerFixture();
+    const relativePath = `图纸/${path.basename(sample)}`;
+    try {
+      await manager.uploadFile(path.basename(sample), fs.readFileSync(sample), relativePath, undefined, { vectorMode: 'defer' });
+      const file = manager.listFiles().find(item => item.relativePath === relativePath);
+      expect(file).toBeDefined();
+      expect(file!.status).toBe('active');
+      expect(file!.chunkCount).toBeGreaterThan(0);
+      expect(file!.metadataJson).toContain('dwgdxf_wasm');
+      expect(file!.metadataJson).toContain('dxf_layers_blocks_entities_text');
+      expect(file!.metadataJson).not.toContain('DWG→DXF 转换失败');
+      const chunks = manager.store.listChunks({ relativePath });
+      expect(chunks.length).toBe(file!.chunkCount);
+      expect(chunks.map(chunk => chunk.content).join('\n')).toMatch(/CAD\s+DXF\s+图层/u);
+    } finally {
+      manager.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── 7. Edge cases ────────────────────────────────────────────
 
 describe('Edge cases', () => {
   const extractor = new ContentExtractor();

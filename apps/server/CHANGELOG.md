@@ -1,5 +1,41 @@
 # server
 
+## 3.0.29
+
+### Patch Changes
+
+- 修复 PDF 等大文件上传后因索引器内部限制被跳过并误报“已写入但未入库”的问题，上传错误会透传具体跳过原因。
+- Updated dependencies
+  - @customize-agent/knowledge@3.0.13
+
+## 3.0.28
+
+### Patch Changes
+
+- 修复已存在知识库文件重复上传时被错误判定为上传失败的问题，并让上传失败提示显示真实后端错误。
+
+## 3.0.27
+
+### Patch Changes
+
+- 更新知识库 DWG WASM 转换和上传入库修复。
+- Updated dependencies
+  - @customize-agent/knowledge@3.0.12
+
+## 3.0.26
+
+### Patch Changes
+
+- 修复知识库上传成功但解析分块入库不完整的问题，补充上传结果校验并支持嵌套文件夹上传。
+- Updated dependencies
+  - @customize-agent/knowledge@3.0.11
+
+## 3.0.25
+
+### Patch Changes
+
+- 重新发布 Web 管理控制台和 CLI 安装入口，确保用户安装后启动最新服务。
+
 ## 3.0.24
 
 ### Patch Changes
