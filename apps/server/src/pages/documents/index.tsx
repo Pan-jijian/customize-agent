@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { App, Button, Card, Col, Empty, Form, Input, List, Modal, Popconfirm, Row, Select, Space, Steps, Tabs, Tag, Typography } from 'antd';
 import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, ReloadOutlined, CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, FileDoneOutlined, LoadingOutlined } from '@ant-design/icons';
-import { deleteDocumentTemplate, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentSpecs, getDocumentTemplates, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, type DocumentDraftChapter, type DocumentRole, type DocumentSpecPackage, type DocumentTemplate, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig } from '@/lib/api';
+import { deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentSpecs, getDocumentTemplates, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, type DocumentDraftChapter, type DocumentRole, type DocumentSpecPackage, type DocumentTemplate, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const { TextArea } = Input;
-const { Paragraph } = Typography;
+const { Paragraph, Text } = Typography;
 
-type FlowStepStatus = 'wait' | 'process' | 'finish' | 'error';
+type FlowStepStatus = 'wait' | 'process' | 'finish' | 'warning' | 'error';
 
 interface FlowSubStep {
   key: string;
@@ -156,9 +156,22 @@ export default function DocumentsPage() {
     return titleMap[type] || type;
   };
 
+  const formatGenerationDuration = (item: GeneratedDocumentRecord) => {
+    const endAt = item.completedAt || item.updatedAt;
+    const seconds = Math.max(0, Math.round((endAt - item.createdAt) / 1000));
+    if (seconds < 60) return `${seconds} 秒`;
+    const minutes = Math.floor(seconds / 60);
+    const restSeconds = seconds % 60;
+    if (minutes < 60) return restSeconds ? `${minutes} 分 ${restSeconds} 秒` : `${minutes} 分`;
+    const hours = Math.floor(minutes / 60);
+    const restMinutes = minutes % 60;
+    return restMinutes ? `${hours} 小时 ${restMinutes} 分` : `${hours} 小时`;
+  };
+
   const subStepIcon = (status: FlowStepStatus) => {
     if (status === 'process') return <LoadingOutlined />;
     if (status === 'finish') return <CheckCircleOutlined />;
+    if (status === 'warning') return <SafetyCertificateOutlined className="text-[var(--colorWarning)]" />;
     if (status === 'error') return <DeleteOutlined />;
     return <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--colorTextTertiary)]" />;
   };
@@ -177,7 +190,8 @@ export default function DocumentsPage() {
     </div>
   );
 
-  const flowStepIcon = (step: FlowStep) => step.status === 'process' ? <LoadingOutlined /> : step.icon;
+  const flowStepIcon = (step: FlowStep) => step.status === 'process' ? <LoadingOutlined /> : step.status === 'warning' ? <SafetyCertificateOutlined className="text-[var(--colorWarning)]" /> : step.icon;
+  const antdStepStatus = (status: FlowStepStatus) => status === 'warning' ? 'finish' : status;
 
   const setFlowSnapshot = (steps: FlowStep[], activeKey: string | null, isLoading = loading) => {
     if (activeGenerationTask?.loading) {
@@ -288,6 +302,19 @@ export default function DocumentsPage() {
     } catch { message.error(t('common.error')); }
   };
 
+  const handleDeleteDraft = async (id: string) => {
+    try {
+      await deleteGeneratedDocument(id);
+      if (currentDocumentId === id) {
+        setCurrentDocumentId(null);
+        setDraft(null);
+        setContent('');
+      }
+      await loadDrafts();
+      message.success(t('common.success'));
+    } catch { message.error(t('common.error')); }
+  };
+
   const waitForGeneratedDocument = async (documentId: string) => {
     const pollFlow = [
       { key: 'chapter_generation', message: '后台任务已创建，正在轮询等待 LLM 章节生成完成…' },
@@ -298,7 +325,7 @@ export default function DocumentsPage() {
     let tick = 0;
     for (;;) {
       const { document } = await getGeneratedDocument(documentId);
-      if (document.status === 'completed' && document.draft) return document;
+      if ((document.status === 'completed' || document.status === 'warning') && document.draft) return document;
       if (document.status === 'failed') throw new Error(document.error || '生成失败');
       const current = pollFlow[Math.min(tick, pollFlow.length - 1)]!;
       finishPreviousSteps(current.key);
@@ -349,8 +376,10 @@ export default function DocumentsPage() {
         const stage = resultDraft.executionStages.find(item => item.type === step.key);
         if (step.key === 'prepare') return { ...step, status: 'finish' as const, description: t('documents.flowPrepareDone'), subSteps: updateSubSteps(step, 'finish') };
         if (step.key === 'done') {
-          const status: FlowStepStatus = resultDraft.exportGate.passed ? 'finish' : 'error';
-          return { ...step, status, description: resultDraft.exportGate.passed ? t('documents.flowDoneDesc') : t('documents.flowGateFailed'), subSteps: updateSubSteps(step, status) };
+          const hasIssues = resultDraft.validationIssues.some(item => item.level === 'error' || item.level === 'warning') || !resultDraft.exportGate.passed;
+          const status: FlowStepStatus = hasIssues ? 'warning' : 'finish';
+          const reason = resultDraft.validationIssues.find(item => item.level === 'error' || item.level === 'warning')?.message;
+          return { ...step, status, description: hasIssues ? `生成完成，但需要复核：${reason || t('documents.flowGateFailed')}` : t('documents.flowDoneDesc'), subSteps: updateSubSteps(step, status) };
         }
         if (!stage) return step.status === 'process' ? { ...step, status: 'finish' as const, subSteps: updateSubSteps(step, 'finish') } : step;
         const status: FlowStepStatus = stage.status === 'failed' ? 'error' : 'finish';
@@ -481,7 +510,22 @@ export default function DocumentsPage() {
               size="small"
               dataSource={drafts.slice(0, 8)}
               locale={{ emptyText: <Empty description={t('common.noData')} /> }}
-              renderItem={item => <List.Item onClick={() => { void (async () => { setCurrentDocumentId(item.id); setTemplateId(item.templateId); const { document } = await getGeneratedDocument(item.id); setDraft(document.draft || null); setContent(document.editedMarkdown || document.markdown); })(); }} className="cursor-pointer"><List.Item.Meta title={<Space><span>{item.title}</span><Tag color={item.status === 'completed' ? 'success' : item.status === 'failed' ? 'error' : 'processing'}>{item.status}</Tag></Space>} description={new Date(item.updatedAt).toLocaleString()} /></List.Item>}
+              renderItem={item => (
+                <List.Item
+                  onClick={() => { void (async () => { setCurrentDocumentId(item.id); setTemplateId(item.templateId); const { document } = await getGeneratedDocument(item.id); setDraft(document.draft || null); setContent(document.editedMarkdown || document.markdown); })(); }}
+                  className="cursor-pointer"
+                  actions={[
+                    <Popconfirm key="delete" title="确认删除这条生成记录？" onConfirm={(event) => { event?.stopPropagation(); void handleDeleteDraft(item.id); }}>
+                      <Button size="small" danger icon={<DeleteOutlined />} onClick={(event) => event.stopPropagation()}>删除</Button>
+                    </Popconfirm>,
+                  ]}
+                >
+                  <List.Item.Meta
+                    title={<Space><span>{item.title}</span><Tag color={item.status === 'completed' ? 'success' : item.status === 'warning' ? 'warning' : item.status === 'failed' ? 'error' : 'processing'}>{item.status === 'warning' ? 'warning' : item.status}</Tag></Space>}
+                    description={<Space direction="vertical" size={2} className="w-full min-w-0"><Space size={8} wrap><span>{new Date(item.updatedAt).toLocaleString()}</span><Text type="secondary">耗时：{formatGenerationDuration(item)}</Text></Space>{item.status === 'warning' && <Text type="warning" ellipsis>{item.warningIssues?.[0] || item.draft?.validationIssues.find(issue => issue.level === 'error' || issue.level === 'warning')?.message || '生成完成，但存在需要复核的问题'}</Text>}</Space>}
+                  />
+                </List.Item>
+              )}
             />
           </Card>
         </Col>
@@ -514,7 +558,7 @@ export default function DocumentsPage() {
                     direction="vertical"
                     size="small"
                     current={activeFlowIndex}
-                    items={flowSteps.map(step => ({ title: step.title, description: stepDescription(step), status: step.status, icon: flowStepIcon(step) }))}
+                    items={flowSteps.map(step => ({ title: step.title, description: stepDescription(step), status: antdStepStatus(step.status), icon: flowStepIcon(step) }))}
                   />
                 </Card>
               )}
@@ -532,7 +576,7 @@ export default function DocumentsPage() {
               { key: 'facts', label: t('documents.structuredFacts'), children: <List dataSource={draft.structuredFacts} renderItem={fact => <List.Item><List.Item.Meta title={`${fact.key}: ${fact.value}`} description={`${fact.sourceFile} · ${roles.find(role => role.id === fact.roleId)?.name || fact.roleId}`} /><Tag>{fact.confidence.toFixed(2)}</Tag></List.Item>} /> },
               { key: 'sources', label: t('documents.sources'), children: <List dataSource={draft.sources} renderItem={source => <List.Item><span>{source.filePath}</span><Tag>{source.count}</Tag></List.Item>} /> },
               { key: 'missing', label: t('documents.missingItems'), children: draft.missingItems.length === 0 ? <Empty description={t('common.noData')} /> : <List dataSource={draft.missingItems} renderItem={item => <List.Item>{item}</List.Item>} /> },
-              { key: 'validation', label: t('documents.validation'), children: <Space direction="vertical" className="w-full">{draft.validationIssues.map(item => <Tag key={item.message} color={item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'blue'}>{item.message}{item.suggestion ? `：${item.suggestion}` : ''}</Tag>)}</Space> },
+              { key: 'validation', label: t('documents.validation'), children: draft.validationIssues.length === 0 ? <Empty description={t('common.noData')} /> : <Space direction="vertical" className="w-full" size="small">{draft.validationIssues.map(item => <Card key={`${item.level}-${item.message}`} size="small" className="w-full" styles={{ body: { padding: 12 } }}><Space direction="vertical" size={4} className="w-full min-w-0"><Tag className="w-fit" color={item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'blue'}>{item.level}</Tag><Text className="block whitespace-pre-wrap break-words">{item.message}</Text>{item.suggestion && <Text type="secondary" className="block whitespace-pre-wrap break-words">{item.suggestion}</Text>}</Space></Card>)}</Space> },
               { key: 'gate', label: t('documents.exportGate'), children: <List dataSource={draft.exportGate.checklist} renderItem={item => <List.Item><span>{item.label}</span><Tag color={item.passed ? 'success' : 'error'}>{item.passed ? 'PASS' : 'FAIL'}</Tag></List.Item>} /> },
               { key: 'stages', label: t('documents.executionStages'), children: <List dataSource={draft.executionStages} renderItem={item => <List.Item><List.Item.Meta avatar={stageIcon(item.type)} title={`${stageTitle(item.type)} · ${item.roleId}`} description={item.message} /><Tag color={item.status === 'success' ? 'success' : item.status === 'failed' ? 'error' : item.status === 'skipped' ? 'default' : 'warning'}>{item.status}</Tag></List.Item>} /> },
             ]}

@@ -1,5 +1,35 @@
 # server
 
+## 3.0.20
+
+### Patch Changes
+
+- 优化生成编辑页草稿历史和校验详情展示：草稿历史补充明确删除按钮与整体生成耗时，校验详情改为可换行的卡片列表，避免长文本溢出卡片。
+
+## 3.0.19
+
+### Patch Changes
+
+- Fix export gate semantics so spec-required fact/source-role gaps are review warnings instead of blocking errors, while exports still block on true exportGate blocking issues.
+
+## 3.0.18
+
+### Patch Changes
+
+- Expand built-in prompt management prompts, make generated documents with validation/export gate issues show warning status instead of failed/completed, allow exports with warnings, and display warning reasons in draft history.
+
+## 3.0.17
+
+### Patch Changes
+
+- Fix generated image asset preview by rejecting placeholder responses from image generation, resolving generated asset paths through the global generatedDocuments directory, validating preview image bytes, and add generated draft history deletion in the document editor.
+
+## 3.0.16
+
+### Patch Changes
+
+- Enrich the built-in document generation demo with additional prompt roles, case/style/export file roles, detailed template style guidance, structured resource evidence guidance, export gate guidance, and a more complete document spec package.
+
 ## 3.0.15
 
 ### Patch Changes
@@ -10,6 +40,7 @@
 
 ### Patch Changes
 
+- Enrich built-in document generation demo with more prompt roles, template style guidance, resource evidence guidance, export gate prompts, case reference file roles, style reference file roles, export gate file roles, and a more detailed document spec package.
 - Add generated document persistence under `~/.customize-agent/projects/{projectId}/generatedDocuments`, background generation with polling, generated asset management, dynamic spec-driven fact schema extraction, structured resource evidence, and dynamic generation status steps.
 
 ## 3.0.14
