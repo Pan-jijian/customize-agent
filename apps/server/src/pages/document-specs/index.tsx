@@ -1,21 +1,27 @@
 import { useEffect, useState } from 'react';
-import { Alert, App, Button, Card, Col, Drawer, Empty, Form, Input, InputNumber, List, Popconfirm, Row, Select, Space, Switch, Tabs, Tag } from 'antd';
+import { Alert, App, Button, Card, Col, Drawer, Empty, Form, Input, InputNumber, List, Modal, Popconfirm, Row, Select, Space, Switch, Tabs, Tag } from 'antd';
 import { DeleteOutlined, EditOutlined, PlusOutlined, DownOutlined, UpOutlined } from '@ant-design/icons';
-import { deleteDocumentSpec, getDocumentRoles, getDocumentSpecs, saveDocumentSpec, type DocumentRole, type DocumentSpecPackage } from '@/lib/api';
+import { deleteDocumentGateType, deleteDocumentSpec, getDocumentRoles, getDocumentSpecs, saveDocumentGateType, saveDocumentSpec, type DocumentRole, type DocumentSpecGateType, type DocumentSpecPackage } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const fieldTypeOptions = [
   { label: '文本', value: 'text' }, { label: '数字', value: 'number' }, { label: '日期', value: 'date' },
   { label: '表格', value: 'table' }, { label: '列表', value: 'list' },
 ];
-const gateTypeOptions = [
-  { label: '必需事实', value: 'required_fact' }, { label: '必需章节', value: 'required_chapter' },
-  { label: '必需文件角色', value: 'required_file_role' }, { label: '必需提示词角色', value: 'required_prompt_role' },
-  { label: '事实必须有来源', value: 'source_required' }, { label: '禁止出现文本', value: 'forbidden_text' },
-  { label: '章节最低字数', value: 'min_chapter_length' }, { label: '必须有表格', value: 'table_required' },
-];
 const levelOptions = [
   { label: '错误（阻断）', value: 'error' }, { label: '警告（提醒）', value: 'warning' }, { label: '信息（提示）', value: 'info' },
+];
+const subjectOptions = [
+  { label: '全文', value: 'document' }, { label: '章节', value: 'chapter' }, { label: '事实字段', value: 'fact' },
+  { label: '文件角色', value: 'file_role' }, { label: '提示词角色', value: 'prompt_role' }, { label: '表格', value: 'table' },
+  { label: '图片', value: 'image' }, { label: '来源', value: 'source' },
+];
+const operatorOptions = [
+  { label: '必须存在', value: 'exists' }, { label: '必须包含', value: 'contains' }, { label: '禁止包含', value: 'not_contains' },
+  { label: '正则必须匹配', value: 'regex_match' }, { label: '正则禁止匹配', value: 'regex_not_match' },
+  { label: '数量至少为 N', value: 'min_count' }, { label: '字数至少为 N', value: 'min_length' },
+  { label: '全部必须有来源', value: 'all_have_source' }, { label: '图片必须有说明', value: 'image_caption_required' },
+  { label: '表格必须有说明', value: 'table_explanation_required' },
 ];
 
 const niceTagRender = (props: { label: React.ReactNode; value: string; closable: boolean; onClose: () => void }) => {
@@ -39,20 +45,37 @@ export default function DocumentSpecsPage() {
   const t = useAppTranslations();
   const { message } = App.useApp();
   const [form] = Form.useForm<DocumentSpecPackage>();
+  const [gateTypeForm] = Form.useForm<DocumentSpecGateType>();
   const [specs, setSpecs] = useState<DocumentSpecPackage[]>([]);
+  const [gateTypes, setGateTypes] = useState<DocumentSpecGateType[]>([]);
   const [roles, setRoles] = useState<DocumentRole[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [gateTypeModalOpen, setGateTypeModalOpen] = useState(false);
+  const [editingGateTypeId, setEditingGateTypeId] = useState<string | null>(null);
   const [guideExpanded, setGuideExpanded] = useState(false);
+  const [sourceFilter, setSourceFilter] = useState<'custom' | 'builtIn' | 'all'>('custom');
+  const [activeListTab, setActiveListTab] = useState<'specs' | 'gateTypes'>('specs');
 
   const load = async () => {
     const [specData, roleData] = await Promise.all([getDocumentSpecs(), getDocumentRoles()]);
     setSpecs(specData.specs);
+    setGateTypes(specData.gateTypes);
     setRoles(roleData.roles);
   };
   useEffect(() => { void load().catch(() => message.error(t('common.error'))); }, [message, t]);
 
   const fileRoleOptions = roles.filter(r => r.type === 'file').map(r => ({ label: r.name, value: r.id }));
   const promptRoleOptions = roles.filter(r => r.type === 'prompt').map(r => ({ label: r.name, value: r.id }));
+  const customSpecs = specs.filter(spec => !spec.builtIn);
+  const builtInSpecs = specs.filter(spec => spec.builtIn);
+  const visibleSpecs = sourceFilter === 'all' ? specs : sourceFilter === 'builtIn' ? builtInSpecs : customSpecs;
+  const customGateTypes = gateTypes.filter(type => !type.builtIn);
+  const builtInGateTypes = gateTypes.filter(type => type.builtIn);
+  const visibleGateTypes = sourceFilter === 'all' ? gateTypes : sourceFilter === 'builtIn' ? builtInGateTypes : customGateTypes;
+  const gateTypeSelectOptions = [
+    { label: '系统门禁类型', options: gateTypes.filter(type => type.builtIn).map(type => ({ label: type.name, value: type.id })) },
+    { label: '我的门禁类型', options: gateTypes.filter(type => !type.builtIn).map(type => ({ label: type.name, value: type.id })) },
+  ];
   const [factCount, setFactCount] = useState(0);
   const [chapterCount, setChapterCount] = useState(0);
   const [gateCount, setGateCount] = useState(0);
@@ -69,7 +92,9 @@ export default function DocumentSpecsPage() {
     .map((f: { id: string; name: string }) => ({ label: `${f.name}（${f.id}）`, value: f.id }));
 
   const openEditor = (spec?: DocumentSpecPackage) => {
-    form.setFieldsValue(spec ?? { id: `spec-${Date.now()}`, name: '', description: '', factFields: defaultFactFields(), chapterRules: [], gateRules: [] });
+    const editingSpec = spec?.builtIn ? { ...spec, id: `${spec.id}-copy-${Date.now()}`, name: `${spec.name} Copy`, builtIn: false } : spec;
+    if (spec?.builtIn) message.info('内置规范包不可直接编辑，已为你创建副本');
+    form.setFieldsValue(editingSpec ?? { id: `spec-${Date.now()}`, name: '', description: '', factFields: defaultFactFields(), chapterRules: [], gateRules: [] });
     setDrawerOpen(true);
     window.setTimeout(() => refreshCounts(), 50);
   };
@@ -79,6 +104,7 @@ export default function DocumentSpecsPage() {
       const values = await form.validateFields();
       const result = await saveDocumentSpec(values);
       setSpecs(result.specs);
+      setGateTypes(result.gateTypes);
       setDrawerOpen(false);
       message.success(t('common.success'));
     } catch (error) { if (error instanceof Error) message.error(error.message); }
@@ -87,13 +113,68 @@ export default function DocumentSpecsPage() {
   const remove = async (id: string) => {
     const result = await deleteDocumentSpec(id);
     setSpecs(result.specs);
+    setGateTypes(result.gateTypes);
+  };
+
+  const openGateTypeEditor = (gateType?: DocumentSpecGateType) => {
+    if (gateType?.builtIn) {
+      gateTypeForm.setFieldsValue(gateType);
+      setEditingGateTypeId(gateType.id);
+      setGateTypeModalOpen(true);
+      return;
+    }
+    setEditingGateTypeId(gateType?.id ?? null);
+    gateTypeForm.setFieldsValue(gateType ?? { id: `gate-type-${Date.now()}`, name: '', defaultLevel: 'error', evaluator: { subject: 'document', operator: 'contains' } });
+    setGateTypeModalOpen(true);
+  };
+
+  const saveGateType = async () => {
+    try {
+      const values = await gateTypeForm.validateFields();
+      if (gateTypes.find(type => type.id === values.id)?.builtIn) return;
+      const result = await saveDocumentGateType(values);
+      setGateTypes(result.gateTypes);
+      setGateTypeModalOpen(false);
+      setEditingGateTypeId(null);
+      gateTypeForm.resetFields();
+      message.success(t('common.success'));
+    } catch (error) { if (error instanceof Error) message.error(error.message); }
+  };
+
+  const removeGateType = async (id: string) => {
+    const result = await deleteDocumentGateType(id);
+    setGateTypes(result.gateTypes);
+  };
+
+  const applyGateType = (index: number, typeId: string) => {
+    const gateType = gateTypes.find(item => item.id === typeId);
+    if (!gateType) return;
+    const gateRules = [...(form.getFieldValue('gateRules') ?? [])];
+    gateRules[index] = {
+      ...gateRules[index],
+      type: gateType.id,
+      level: gateRules[index]?.level || gateType.defaultLevel,
+      name: gateRules[index]?.name || gateType.name,
+      evaluator: { ...gateType.evaluator },
+      target: gateRules[index]?.target || gateType.evaluator.target || '',
+      value: gateRules[index]?.value || gateType.evaluator.value || '',
+    };
+    form.setFieldValue('gateRules', gateRules);
   };
 
   return <div className="space-y-5 animateFadeIn">
     {/* Header */}
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
       <div><h1 className="pageTitle">{t('specs.title')}</h1><p className="pageDesc">{t('specs.description')}</p></div>
-      <Button type="primary" icon={<PlusOutlined />} onClick={() => openEditor()}>{t('specs.newSpec')}</Button>
+      <Space wrap>
+        <Select value={sourceFilter} onChange={setSourceFilter} style={{ width: 160 }} options={[
+          { label: `我的 (${customSpecs.length + customGateTypes.length})`, value: 'custom' },
+          { label: `内置示例 (${builtInSpecs.length + builtInGateTypes.length})`, value: 'builtIn' },
+          { label: `全部来源 (${specs.length + gateTypes.length})`, value: 'all' },
+        ]} />
+        {activeListTab === 'gateTypes' && <Button onClick={() => openGateTypeEditor()}>新建门禁类型</Button>}
+        {activeListTab === 'specs' && <Button type="primary" icon={<PlusOutlined />} onClick={() => openEditor()}>{t('specs.newSpec')}</Button>}
+      </Space>
     </div>
 
     {/* Expandable guide */}
@@ -110,40 +191,57 @@ export default function DocumentSpecsPage() {
       description={guideExpanded ? t('specs.plainGuideDesc') : undefined}
     />
 
-    {/* Spec list */}
-    <Card size="small" title={`${t('specs.list')} (${specs.length})`}>
-      {specs.length === 0 ? <Empty description={t('common.noData')} /> : (
-        <List dataSource={specs} renderItem={(spec, index) => (
-          <List.Item style={{ padding: '10px 0' }}
-            actions={[
-              <Button key="edit" size="small" icon={<EditOutlined />} onClick={() => openEditor(spec)}>编辑</Button>,
-              <Popconfirm key="del" title={t('common.confirm')} disabled={spec.builtIn} onConfirm={() => { void remove(spec.id); }}>
-                <Button size="small" danger icon={<DeleteOutlined />} disabled={spec.builtIn} />
-              </Popconfirm>,
-            ]}
-          >
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, minWidth: 0, flex: 1 }}>
-              <div style={{ width: 28, height: 28, borderRadius: 8, background: 'var(--colorFillSecondary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, color: 'var(--colorTextSecondary)', flexShrink: 0 }}>
-                {index + 1}
-              </div>
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-                  <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{spec.name}</span>
-                  {spec.builtIn && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>内置</Tag>}
+    <Card size="small">
+      <Tabs activeKey={activeListTab} onChange={(key) => setActiveListTab(key as 'specs' | 'gateTypes')} items={[
+        {
+          key: 'specs', label: `规范包列表 (${visibleSpecs.length})`, children: visibleSpecs.length === 0 ? <Empty description={t('common.noData')} /> : (
+            <List dataSource={visibleSpecs} renderItem={(spec, index) => (
+              <List.Item style={{ padding: '10px 0' }} actions={[
+                <Button key="edit" size="small" icon={<EditOutlined />} onClick={() => openEditor(spec)}>{spec.builtIn ? '复制' : '编辑'}</Button>,
+                <Popconfirm key="del" title={t('common.confirm')} disabled={spec.builtIn} onConfirm={() => { void remove(spec.id); }}><Button size="small" danger icon={<DeleteOutlined />} disabled={spec.builtIn} /></Popconfirm>,
+              ]}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, minWidth: 0, flex: 1 }}>
+                  <div style={{ width: 28, height: 28, borderRadius: 8, background: 'var(--colorFillSecondary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, color: 'var(--colorTextSecondary)', flexShrink: 0 }}>{index + 1}</div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                      <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{spec.name}</span>
+                      {spec.builtIn ? <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>内置示例</Tag> : <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>我的规范包</Tag>}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      {spec.description && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>{spec.description}</span>}
+                      <Space size={4}><Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>事实 {spec.factFields.length}</Tag><Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>章节 {spec.chapterRules.length}</Tag><Tag color="orange" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>门禁 {spec.gateRules.length}</Tag></Space>
+                    </div>
+                  </div>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  {spec.description && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>{spec.description}</span>}
-                  <Space size={4}>
-                    <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>事实 {spec.factFields.length}</Tag>
-                    <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>章节 {spec.chapterRules.length}</Tag>
-                    <Tag color="orange" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>门禁 {spec.gateRules.length}</Tag>
-                  </Space>
+              </List.Item>
+            )} />
+          ),
+        },
+        {
+          key: 'gateTypes', label: `门禁类型列表 (${visibleGateTypes.length})`, children: visibleGateTypes.length === 0 ? <Empty description={t('common.noData')} /> : (
+            <List dataSource={visibleGateTypes} renderItem={(type, index) => (
+              <List.Item style={{ padding: '10px 0' }} actions={[
+                <Button key="edit" size="small" icon={<EditOutlined />} onClick={() => openGateTypeEditor(type)}>{type.builtIn ? '查看' : '编辑'}</Button>,
+                <Popconfirm key="del" title={t('common.confirm')} disabled={type.builtIn} onConfirm={() => { void removeGateType(type.id); }}><Button size="small" danger icon={<DeleteOutlined />} disabled={type.builtIn} /></Popconfirm>,
+              ]}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, minWidth: 0, flex: 1 }}>
+                  <div style={{ width: 28, height: 28, borderRadius: 8, background: 'var(--colorFillSecondary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, color: 'var(--colorTextSecondary)', flexShrink: 0 }}>{index + 1}</div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                      <span style={{ fontWeight: 600 }}>{type.name}</span>
+                      {type.builtIn ? <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>系统门禁</Tag> : <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>我的门禁</Tag>}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      {type.description && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>{type.description}</span>}
+                      <Space size={4}><Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{subjectOptions.find(item => item.value === type.evaluator.subject)?.label}</Tag><Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{operatorOptions.find(item => item.value === type.evaluator.operator)?.label}</Tag></Space>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
-          </List.Item>
-        )} />
-      )}
+              </List.Item>
+            )} />
+          ),
+        },
+      ]} />
     </Card>
 
     {/* Drawer: Spec Editor */}
@@ -220,19 +318,49 @@ export default function DocumentSpecsPage() {
                     <Form.Item name={[field.name, 'id']} hidden><Input /></Form.Item>
                     <Row gutter={[12, 8]} align="middle">
                       <Col xs={24} sm={6}><Form.Item name={[field.name, 'name']} label="名称" rules={[{ required: true }]} style={{ marginBottom: 0 }}><Input placeholder={t('specs.gateName')} size="small" /></Form.Item></Col>
-                      <Col xs={12} sm={6}><Form.Item name={[field.name, 'type']} label="类型" style={{ marginBottom: 0 }}><Select options={gateTypeOptions} size="small" /></Form.Item></Col>
+                      <Col xs={12} sm={6}><Form.Item name={[field.name, 'type']} label="类型" rules={[{ required: true }]} style={{ marginBottom: 0 }}><Select options={gateTypeSelectOptions} size="small" onChange={(value) => applyGateType(idx, value)} /></Form.Item></Col>
                       <Col xs={12} sm={3}><Form.Item name={[field.name, 'level']} label="级别" style={{ marginBottom: 0 }}><Select options={levelOptions} size="small" /></Form.Item></Col>
-                      <Col xs={12} sm={4}><Form.Item name={[field.name, 'target']} label="目标" style={{ marginBottom: 0 }}><Input placeholder="target" size="small" /></Form.Item></Col>
-                      <Col xs={12} sm={5}><Form.Item name={[field.name, 'value']} label="值" style={{ marginBottom: 0 }}><Input placeholder="value" size="small" /></Form.Item></Col>
+                      <Col xs={12} sm={4}><Form.Item name={[field.name, 'target']} label="目标" style={{ marginBottom: 0 }}><Input placeholder="章节/事实/角色" size="small" /></Form.Item></Col>
+                      <Col xs={12} sm={5}><Form.Item name={[field.name, 'value']} label="值" style={{ marginBottom: 0 }}><Input placeholder="关键词/正则/数值" size="small" /></Form.Item></Col>
+                      <Col xs={12} sm={5}><Form.Item name={[field.name, 'evaluator', 'subject']} label="校验对象" rules={[{ required: true }]} style={{ marginBottom: 0 }}><Select options={subjectOptions} size="small" /></Form.Item></Col>
+                      <Col xs={12} sm={6}><Form.Item name={[field.name, 'evaluator', 'operator']} label="校验方式" rules={[{ required: true }]} style={{ marginBottom: 0 }}><Select options={operatorOptions} size="small" /></Form.Item></Col>
+                      <Col xs={12} sm={5}><Form.Item name={[field.name, 'evaluator', 'target']} label="执行目标" style={{ marginBottom: 0 }}><Input placeholder="默认取目标" size="small" /></Form.Item></Col>
+                      <Col xs={12} sm={5}><Form.Item name={[field.name, 'evaluator', 'value']} label="执行值" style={{ marginBottom: 0 }}><Input placeholder="默认取值" size="small" /></Form.Item></Col>
+                      <Col xs={12} sm={3}><Form.Item name={[field.name, 'evaluator', 'min']} label="N" style={{ marginBottom: 0 }}><InputNumber min={1} size="small" style={{ width: '100%' }} /></Form.Item></Col>
                     </Row>
                   </Card>
                 ))}
-                <Button icon={<PlusOutlined />} onClick={() => add({ id: `gate-${Date.now()}`, type: 'required_fact', level: 'error' })}>{t('specs.addGate')}</Button>
+                <Button icon={<PlusOutlined />} onClick={() => add({ id: `gate-${Date.now()}`, type: 'required_fact', level: 'error', evaluator: { subject: 'fact', operator: 'exists' } })}>{t('specs.addGate')}</Button>
               </div>
             )}</Form.List>
           },
         ]} />
       </Form>
     </Drawer>
+
+    <Modal
+      title={gateTypes.find(type => type.id === editingGateTypeId)?.builtIn ? '查看系统门禁类型' : editingGateTypeId ? '编辑门禁类型' : '新建门禁类型'}
+      open={gateTypeModalOpen}
+      onOk={() => { void saveGateType(); }}
+      onCancel={() => { setGateTypeModalOpen(false); setEditingGateTypeId(null); }}
+      okText={t('common.save')}
+      cancelText={t('common.cancel')}
+      okButtonProps={{ disabled: Boolean(gateTypes.find(type => type.id === editingGateTypeId)?.builtIn) }}
+    >
+      <Form form={gateTypeForm} layout="vertical" disabled={Boolean(gateTypes.find(type => type.id === editingGateTypeId)?.builtIn)}>
+        <Row gutter={12}>
+          <Form.Item name="id" hidden><Input /></Form.Item>
+          <Col span={12}><Form.Item name="name" label="类型名称" rules={[{ required: true }]}><Input placeholder="必须包含风险提示" /></Form.Item></Col>
+          <Col span={12}><Form.Item name="description" label="说明"><Input placeholder="告诉用户这类门禁检查什么" /></Form.Item></Col>
+          <Col span={12}><Form.Item name="defaultLevel" label="默认级别" rules={[{ required: true }]}><Select options={levelOptions} /></Form.Item></Col>
+          <Col span={12}><Form.Item name={["evaluator", "subject"]} label="校验对象" rules={[{ required: true }]}><Select options={subjectOptions} /></Form.Item></Col>
+          <Col span={12}><Form.Item name={["evaluator", "operator"]} label="校验方式" rules={[{ required: true }]}><Select options={operatorOptions} /></Form.Item></Col>
+          <Col span={12}><Form.Item name={["evaluator", "target"]} label="默认目标"><Input placeholder="章节/事实/角色，可为空" /></Form.Item></Col>
+          <Col span={12}><Form.Item name={["evaluator", "value"]} label="默认值"><Input placeholder="关键词/正则，可为空" /></Form.Item></Col>
+          <Col span={12}><Form.Item name={["evaluator", "min"]} label="默认 N"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item></Col>
+        </Row>
+      </Form>
+
+    </Modal>
   </div>;
 }

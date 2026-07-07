@@ -8,7 +8,7 @@ import { resolveProtocol } from '@customize-agent/runtime';
 import { ensureBuiltInKnowledgeBase, getMultiProjectManager, getProjectRoot } from './kbService';
 import { getConfigStore } from '@/services/configService';
 import { getProjectRoleConfig, listDocumentRoles } from './documentRoleService';
-import { getDocumentSpec, type DocumentSpecPackage } from './documentSpecService';
+import { getDocumentSpec, type DocumentSpecGateRule, type DocumentSpecPackage, type GateRuleEvaluator } from './documentSpecService';
 import type { KbSearchResult } from '@/lib/api';
 
 export interface DocumentTemplateChapter {
@@ -944,6 +944,36 @@ function buildExportGate(issues: ValidationIssue[], factsModel: DocumentFactsMod
   return { passed: blockingIssues.length === 0 && checklist.every(item => item.passed), blockingIssues, checklist };
 }
 
+function fallbackEvaluatorForRule(rule: DocumentSpecGateRule): GateRuleEvaluator {
+  if (rule.evaluator) return rule.evaluator;
+  if (rule.type === 'required_fact') return { subject: 'fact', operator: 'exists', target: rule.target };
+  if (rule.type === 'required_chapter') return { subject: 'chapter', operator: 'exists', target: rule.target };
+  if (rule.type === 'required_file_role') return { subject: 'file_role', operator: 'exists', target: rule.target };
+  if (rule.type === 'required_prompt_role') return { subject: 'prompt_role', operator: 'exists', target: rule.target };
+  if (rule.type === 'source_required') return { subject: 'source', operator: 'all_have_source' };
+  if (rule.type === 'forbidden_text') return { subject: 'document', operator: 'not_contains', value: rule.value };
+  if (rule.type === 'min_chapter_length') return { subject: 'chapter', operator: 'min_length', target: rule.target, min: Number(rule.value) || undefined };
+  if (rule.type === 'table_required') return { subject: 'table', operator: 'min_count', min: 1 };
+  return { subject: 'document', operator: 'contains', value: rule.value || rule.target };
+}
+
+function markdownTables(markdown: string) {
+  return markdown.split(/\n{2,}/u).filter(block => /\|.+\|/u.test(block) && /\n\s*\|?\s*:?-{3,}:?/u.test(block));
+}
+
+function markdownImages(markdown: string) {
+  const matches = [...markdown.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/gu)];
+  return matches.map(match => ({ alt: match[1] || '', url: match[2] || '', index: match.index ?? 0 }));
+}
+
+function safeRegex(value: string) {
+  try { return new RegExp(value, 'iu'); } catch { return undefined; }
+}
+
+function issueMessage(rule: DocumentSpecGateRule, detail: string) {
+  return `${rule.name}：${detail}`;
+}
+
 function applySpecGateRules(spec: DocumentSpecPackage | undefined, issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[], markdown: string, fileBindings: FileBinding[], promptBindings: PromptBinding[]) {
   if (!spec) return issues;
   const next = [...issues];
@@ -966,15 +996,35 @@ function applySpecGateRules(spec: DocumentSpecPackage | undefined, issues: Valid
     const draft = chapters.find(item => item.title === chapter.title);
     if (draft && chapter.minWords && draft.content.length < chapter.minWords) next.push({ level: 'warning', message: `章节内容低于最低字数：${chapter.title}`, suggestion: `建议不少于 ${chapter.minWords} 字。` });
   }
+  const tableBlocks = markdownTables(markdown);
+  const imageRefs = markdownImages(markdown);
   for (const rule of spec.gateRules) {
     const level = rule.level;
-    if (rule.type === 'required_fact' && rule.target && !factNames.has(rule.target)) next.push({ level, message: `${rule.name}：缺少事实 ${rule.target}` });
-    if (rule.type === 'required_chapter' && rule.target && !chapterTitles.has(rule.target)) next.push({ level, message: `${rule.name}：缺少章节 ${rule.target}` });
-    if (rule.type === 'required_file_role' && rule.target && !fileBindings.some(binding => binding.roleId === rule.target)) next.push({ level, message: `${rule.name}：缺少文件角色 ${rule.target}` });
-    if (rule.type === 'required_prompt_role' && rule.target && !promptBindings.some(binding => binding.roleId === rule.target)) next.push({ level, message: `${rule.name}：缺少提示词角色 ${rule.target}` });
-    if (rule.type === 'forbidden_text' && rule.value && markdown.includes(rule.value)) next.push({ level, message: `${rule.name}：出现禁用文本 ${rule.value}` });
-    if (rule.type === 'table_required' && factsModel.tables.length === 0) next.push({ level, message: `${rule.name}：缺少结构化表格` });
-    if (rule.type === 'source_required' && [...factsModel.project, ...factsModel.schedule, ...factsModel.quality, ...factsModel.safety].some(fact => !fact.sourceFile)) next.push({ level, message: `${rule.name}：存在无来源事实` });
+    const evaluator = fallbackEvaluatorForRule(rule);
+    const target = evaluator.target || rule.target || '';
+    const value = evaluator.value || rule.value || target;
+    const min = evaluator.min || Number(rule.value) || 1;
+    const chapter = chapters.find(item => item.title === target);
+    const textScope = evaluator.subject === 'chapter' && chapter ? chapter.content : markdown;
+    const regex = value ? safeRegex(value) : undefined;
+
+    if (evaluator.subject === 'fact' && evaluator.operator === 'exists' && target && !factNames.has(target)) next.push({ level, message: issueMessage(rule, `缺少事实 ${target}`) });
+    if (evaluator.subject === 'chapter' && evaluator.operator === 'exists' && target && !chapterTitles.has(target)) next.push({ level, message: issueMessage(rule, `缺少章节 ${target}`) });
+    if (evaluator.subject === 'file_role' && evaluator.operator === 'exists' && target && !fileBindings.some(binding => binding.roleId === target)) next.push({ level, message: issueMessage(rule, `缺少文件角色 ${target}`) });
+    if (evaluator.subject === 'prompt_role' && evaluator.operator === 'exists' && target && !promptBindings.some(binding => binding.roleId === target)) next.push({ level, message: issueMessage(rule, `缺少提示词角色 ${target}`) });
+    if (evaluator.subject === 'document' && evaluator.operator === 'contains' && value && !markdown.includes(value)) next.push({ level, message: issueMessage(rule, `全文必须包含 ${value}`) });
+    if (evaluator.subject === 'document' && evaluator.operator === 'not_contains' && value && markdown.includes(value)) next.push({ level, message: issueMessage(rule, `出现禁用文本 ${value}`) });
+    if ((evaluator.subject === 'document' || evaluator.subject === 'chapter') && evaluator.operator === 'regex_match' && value && (!regex || !regex.test(textScope))) next.push({ level, message: issueMessage(rule, `未匹配正则 ${value}`) });
+    if ((evaluator.subject === 'document' || evaluator.subject === 'chapter') && evaluator.operator === 'regex_not_match' && regex?.test(textScope)) next.push({ level, message: issueMessage(rule, `匹配到禁止正则 ${value}`) });
+    if (evaluator.subject === 'chapter' && evaluator.operator === 'contains' && target && value && (!chapter || !chapter.content.includes(value))) next.push({ level, message: issueMessage(rule, `章节 ${target} 必须包含 ${value}`) });
+    if (evaluator.subject === 'chapter' && evaluator.operator === 'not_contains' && chapter?.content.includes(value)) next.push({ level, message: issueMessage(rule, `章节 ${target} 出现禁用文本 ${value}`) });
+    if (evaluator.subject === 'chapter' && evaluator.operator === 'min_length' && target && (!chapter || chapter.content.length < min)) next.push({ level, message: issueMessage(rule, `章节 ${target} 低于 ${min} 字`) });
+    if (evaluator.subject === 'table' && evaluator.operator === 'min_count' && factsModel.tables.length + tableBlocks.length < min) next.push({ level, message: issueMessage(rule, `表格数量少于 ${min}`) });
+    if (evaluator.subject === 'table' && evaluator.operator === 'table_explanation_required' && tableBlocks.some(block => markdown.indexOf(block) >= 0 && markdown.slice(markdown.indexOf(block) + block.length, markdown.indexOf(block) + block.length + 120).trim().length < 10)) next.push({ level, message: issueMessage(rule, '存在缺少说明文字的表格') });
+    if (evaluator.subject === 'image' && evaluator.operator === 'min_count' && imageRefs.length < min) next.push({ level, message: issueMessage(rule, `图片数量少于 ${min}`) });
+    if (evaluator.subject === 'image' && evaluator.operator === 'image_caption_required' && imageRefs.some(image => !image.alt && markdown.slice(image.index + image.url.length, image.index + image.url.length + 120).trim().length < 10)) next.push({ level, message: issueMessage(rule, '存在缺少说明文字的图片') });
+    if (evaluator.subject === 'source' && evaluator.operator === 'all_have_source' && allFacts.some(fact => !fact.sourceFile)) next.push({ level, message: issueMessage(rule, '存在无来源事实') });
+    if (evaluator.subject === 'source' && evaluator.operator === 'min_count' && new Set(allFacts.map(fact => fact.sourceFile).filter(Boolean)).size < min) next.push({ level, message: issueMessage(rule, `来源数量少于 ${min}`) });
   }
   return next;
 }

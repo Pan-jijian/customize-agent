@@ -28,6 +28,7 @@ export interface ProjectRoleConfig {
   description: string;
   fileRoles: ProjectRoleItem[];
   promptRoles: ProjectRoleItem[];
+  builtIn?: boolean;
 }
 
 interface RoleStore {
@@ -62,6 +63,7 @@ const DEMO_CONFIG: ProjectRoleConfig = {
   id: 'delta-force-demo-config',
   name: '三角洲热门干员攻略项目配置',
   description: '内置示例配置：文件角色和提示词角色已排好顺序，用户可直接选择内置模板生成。',
+  builtIn: true,
   fileRoles: [
     { roleId: 'delta-rule-files', order: 0 },
     { roleId: 'delta-fact-files', order: 1 },
@@ -125,6 +127,7 @@ function sanitizeConfig(config: ProjectRoleConfig): ProjectRoleConfig {
     id: safeId(config.id),
     name: config.name || '未命名配置',
     description: config.description || '',
+    builtIn: Boolean(config.builtIn),
     fileRoles: Array.isArray(config.fileRoles) ? config.fileRoles.filter(item => item.roleId).map((item, index) => ({ roleId: item.roleId, order: Number.isFinite(item.order) ? item.order : index })) : [],
     promptRoles: Array.isArray(config.promptRoles) ? config.promptRoles.filter(item => item.roleId).map((item, index) => ({ roleId: item.roleId, order: Number.isFinite(item.order) ? item.order : index })) : [],
   };
@@ -158,6 +161,7 @@ export function listDocumentRoles(type?: DocumentRoleType): DocumentRole[] {
 
 export function saveDocumentRole(role: DocumentRole): DocumentRole {
   const sanitized = sanitizeRole(role);
+  if (DEMO_ROLES.some(item => item.id === sanitized.id && item.type === sanitized.type)) throw new Error('Built-in demo role cannot be overwritten');
   const store = readStore();
   store.roles = store.roles.filter(item => !(item.id === sanitized.id && item.type === sanitized.type));
   store.roles.push(sanitized);
@@ -189,7 +193,8 @@ export function getProjectRoleConfig(id: string): ProjectRoleConfig | undefined 
 }
 
 export function saveProjectRoleConfig(config: ProjectRoleConfig): ProjectRoleConfig {
-  const sanitized = sanitizeConfig(config);
+  const sanitized = { ...sanitizeConfig(config), builtIn: false };
+  if (sanitized.id === DEMO_CONFIG.id) throw new Error('Built-in demo config cannot be overwritten');
   const store = readStore();
   store.configs = store.configs.filter(item => item.id !== sanitized.id);
   store.configs.push(sanitized);

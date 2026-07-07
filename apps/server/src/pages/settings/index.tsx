@@ -92,7 +92,7 @@ export default function SettingsPage() {
           <Card size="small" style={{ flex: 1 }} styles={{ body: { padding: '14px 18px' } }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
               {iconBadge(<Server size={16} />, 'rgba(22,119,255,0.1)', '#1677ff')}
-              <div><div style={{ fontWeight: 600, fontSize: 14 }}>服务状态</div><div style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>运行监控与资源占用</div></div>
+              <div><div style={{ fontWeight: 600, fontSize: 14 }}>服务运行状态</div><div style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>查看当前服务是否正常，以及本机资源占用情况。</div></div>
             </div>
             <Row gutter={[12, 12]}>
               <Col span={12}>
@@ -130,7 +130,7 @@ export default function SettingsPage() {
           <Card size="small" style={{ flex: 1 }} styles={{ body: { padding: '14px 18px' } }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
               {iconBadge(<Database size={16} />, 'rgba(82,196,26,0.1)', '#52c41a')}
-              <div><div style={{ fontWeight: 600, fontSize: 14 }}>Embedding</div><div style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>向量化配置信息</div></div>
+              <div><div style={{ fontWeight: 600, fontSize: 14 }}>知识库向量配置</div><div style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>用于知识库检索。修改模型或维度后，建议重新索引知识库。</div></div>
             </div>
             <Row gutter={[12, 12]}>
               <Col span={12}>
@@ -141,7 +141,7 @@ export default function SettingsPage() {
               </Col>
               <Col span={12}>
                 <div style={{ background: 'var(--colorFillAlter)', borderRadius: 8, padding: '10px 12px', textAlign: 'left' }}>
-                  <div style={{ fontSize: 11, color: 'var(--colorTextSecondary)', marginBottom: 4 }}>API Key</div>
+                  <div style={{ fontSize: 11, color: 'var(--colorTextSecondary)', marginBottom: 4 }}>密钥状态</div>
                   {embConfig?.hasApiKey ? <Tag color="success" style={{ margin: 0 }}>已配置</Tag> : <Tag color="default" style={{ margin: 0 }}>未配置</Tag>}
                 </div>
               </Col>
@@ -166,18 +166,18 @@ export default function SettingsPage() {
           <Card size="small" styles={{ body: { padding: '14px 18px' } }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
               {iconBadge(<Info size={16} />, 'rgba(114,46,209,0.1)', '#722ed1')}
-              <div><div style={{ fontWeight: 600, fontSize: 14 }}>{t('about')}</div><div style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>环境信息与版本号</div></div>
+              <div><div style={{ fontWeight: 600, fontSize: 14 }}>本地数据与使用概况</div><div style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>用户数据保存在本机，包含知识库、提示词、角色配置、规范包、生成记录和日志。</div></div>
             </div>
             <Row gutter={[8, 8]}>
               {[
-                { label: '应用版本', value: 'v4.0.1' },
-                { label: '端口', value: '17321' },
-                { label: 'Next.js', value: '15.5' },
-                { label: 'Ant Design', value: '6.x' },
-                { label: '数据目录', value: '~/.customize-agent/', mono: true },
-                { label: '任务数', value: stats ? stats.tasks.total.toLocaleString() : '—' },
+                { label: '用户数据目录', value: '~/.customize-agent/', mono: true },
+                { label: '知识库数据', value: '本地索引与向量库' },
+                { label: '生成记录', value: '草稿、导出和资源' },
+                { label: '配置数据', value: '提示词、角色、规范包' },
+                { label: '累计任务', value: stats ? stats.tasks.total.toLocaleString() : '—' },
                 { label: 'Token 用量', value: stats ? stats.tokens.total.toLocaleString() : '—' },
-                { label: '包管理器', value: 'pnpm' },
+                { label: '日志', value: '本地运行日志' },
+                { label: '数据范围', value: '仅保存在本机' },
               ].map(item => (
                 <Col xs={12} sm={6} key={item.label}>
                   <div style={{ background: 'var(--colorFillAlter)', borderRadius: 8, padding: '8px 12px' }}>

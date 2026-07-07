@@ -7,7 +7,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const start = Date.now();
   try {
     const embedding = getConfigStore().getEmbedding();
-    if (embedding.provider === 'hash') return res.status(200).json({ success: true, message: '本地 Hash Embedding 可用', latencyMs: Date.now() - start });
     if (embedding.provider === 'transformers-local') {
       const provider = new LocalTransformersEmbeddingProvider({ model: embedding.model, dimensions: embedding.dimensions });
       const vector = await provider.embedQuery('ping');

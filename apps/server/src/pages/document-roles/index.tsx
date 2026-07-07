@@ -54,6 +54,7 @@ export default function DocumentRolesPage() {
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
   const [guideExpanded, setGuideExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('file');
+  const [sourceFilter, setSourceFilter] = useState<'custom' | 'builtin' | 'all'>('custom');
 
   const load = async () => {
     const [roleData, fileData, promptData] = await Promise.all([getDocumentRoles(), getKbFiles(), getPromptProjects()]);
@@ -61,8 +62,17 @@ export default function DocumentRolesPage() {
   };
   useEffect(() => { void load().catch(() => message.error(t('common.error'))); }, [message, t]);
 
-  const fileRoles = roles.filter(r => r.type === 'file');
-  const promptRoles = roles.filter(r => r.type === 'prompt');
+  const customRoles = roles.filter(role => !role.builtIn);
+  const builtInRoles = roles.filter(role => role.builtIn);
+  const customConfigs = configs.filter(config => !config.builtIn);
+  const builtInConfigs = configs.filter(config => config.builtIn);
+  const sourceMatches = (item: { builtIn?: boolean }) => sourceFilter === 'all' || (sourceFilter === 'builtin' ? item.builtIn : !item.builtIn);
+  const visibleRoles = roles.filter(sourceMatches);
+  const visibleConfigs = configs.filter(sourceMatches);
+  const fileRoles = visibleRoles.filter(r => r.type === 'file');
+  const promptRoles = visibleRoles.filter(r => r.type === 'prompt');
+  const allFileRoles = roles.filter(r => r.type === 'file');
+  const allPromptRoles = roles.filter(r => r.type === 'prompt');
 
   const saveRole = async () => {
     try { const v = await roleForm.validateFields(); const r = await saveDocumentRole(v); setRoles(r.roles); setConfigs(r.configs); setRoleDrawerOpen(false); message.success(t('common.success')); }
@@ -80,11 +90,15 @@ export default function DocumentRolesPage() {
   const removeConfig = async (id: string) => { const r = await deleteProjectRoleConfig(id); setRoles(r.roles); setConfigs(r.configs); };
 
   const openRoleDrawer = (role?: DocumentRole, type: 'file' | 'prompt' = 'file') => {
-    roleForm.setFieldsValue(role ? { ...role, resourceIds: role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : [] } : { id: `role-${Date.now()}`, name: '', description: '', type, resourceIds: [], executionType: type === 'prompt' ? 'reference' : undefined, processingType: type === 'file' ? 'reference' : undefined });
+    const editingRole = role?.builtIn ? { ...role, id: `${role.id}-copy-${Date.now()}`, name: `${role.name} Copy`, builtIn: false } : role;
+    if (role?.builtIn) message.info('内置角色不可直接编辑，已为你创建副本');
+    roleForm.setFieldsValue(editingRole ? { ...editingRole, resourceIds: editingRole.resourceIds?.length ? editingRole.resourceIds : editingRole.resourceId ? [editingRole.resourceId] : [] } : { id: `role-${Date.now()}`, name: '', description: '', type, resourceIds: [], executionType: type === 'prompt' ? 'reference' : undefined, processingType: type === 'file' ? 'reference' : undefined });
     setRoleDrawerOpen(true);
   };
   const openConfigDrawer = (config?: ProjectRoleConfig) => {
-    configForm.setFieldsValue(config ?? { id: `config-${Date.now()}`, name: '', description: '', fileRoles: [], promptRoles: [] });
+    const editingConfig = config?.builtIn ? { ...config, id: `${config.id}-copy-${Date.now()}`, name: `${config.name} Copy`, builtIn: false } : config;
+    if (config?.builtIn) message.info('内置项目配置不可直接编辑，已为你创建副本');
+    configForm.setFieldsValue(editingConfig ?? { id: `config-${Date.now()}`, name: '', description: '', fileRoles: [], promptRoles: [], builtIn: false });
     setConfigDrawerOpen(true);
   };
 
@@ -108,7 +122,7 @@ export default function DocumentRolesPage() {
                   <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', lineHeight: '20px' }}>{role.name}</span>
                 </div>
                 <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                  {role.builtIn && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>内置</Tag>}
+                  {role.builtIn ? <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>内置示例</Tag> : <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>我的角色</Tag>}
                 </div>
               </div>
               {role.description && <Paragraph ellipsis={{ rows: 2 }} style={{ fontSize: 12, color: 'var(--colorTextSecondary)', marginBottom: 8 }}>{role.description}</Paragraph>}
@@ -125,7 +139,7 @@ export default function DocumentRolesPage() {
                 </div>
               )}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, paddingTop: 4, borderTop: '1px solid var(--colorBorderSecondary)' }}>
-                <Button size="small" icon={<EditOutlined />} onClick={() => openRoleDrawer(role)}>编辑</Button>
+                <Button size="small" icon={<EditOutlined />} onClick={() => openRoleDrawer(role)}>{role.builtIn ? '复制' : '编辑'}</Button>
                 <Popconfirm title={t('common.confirm')} disabled={role.builtIn} onConfirm={() => { void removeRole(role); }}>
                   <Button size="small" danger icon={<DeleteOutlined />} disabled={role.builtIn} />
                 </Popconfirm>
@@ -141,6 +155,11 @@ export default function DocumentRolesPage() {
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
       <div><h1 className="pageTitle">{t('roles.title')}</h1><p className="pageDesc">{t('roles.description')}</p></div>
       <Space>
+        <Select value={sourceFilter} onChange={setSourceFilter} style={{ width: 170 }} options={[
+          { label: `我的配置 (${customRoles.length + customConfigs.length})`, value: 'custom' },
+          { label: `内置示例 (${builtInRoles.length + builtInConfigs.length})`, value: 'builtin' },
+          { label: `全部来源 (${roles.length + configs.length})`, value: 'all' },
+        ]} />
         <Button icon={<PlusOutlined />} onClick={() => openRoleDrawer(undefined, 'file')}>{t('roles.newFileRole')}</Button>
         <Button icon={<PlusOutlined />} onClick={() => openRoleDrawer(undefined, 'prompt')}>{t('roles.newPromptRole')}</Button>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => openConfigDrawer()}>{t('roles.newConfig')}</Button>
@@ -159,24 +178,25 @@ export default function DocumentRolesPage() {
       tabList={[
         { key: 'file', label: `文件角色 (${fileRoles.length})` },
         { key: 'prompt', label: `提示词角色 (${promptRoles.length})` },
-        { key: 'configs', label: `项目角色配置 (${configs.length})` },
+        { key: 'configs', label: `项目角色配置 (${visibleConfigs.length})` },
       ]}
       activeTabKey={activeTab} onTabChange={setActiveTab}
     >
       {activeTab === 'configs' ? (
-        configs.length === 0 ? <Empty description={t('common.noData')} /> : (
+        visibleConfigs.length === 0 ? <Empty description={t('common.noData')} /> : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
-            {configs.map((config, index) => {
+            {visibleConfigs.map((config) => {
               const fileItems = config.fileRoles.map(fr => ({ ...fr, role: getRoleById(fr.roleId) })).filter(x => x.role);
               const promptItems = config.promptRoles.map(pr => ({ ...pr, role: getRoleById(pr.roleId) })).filter(x => x.role);
               return (
                 <Card key={config.id} size="small" hoverable style={{ minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
                     <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{config.name}</span>
+                    {config.builtIn ? <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>内置示例</Tag> : <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>我的配置</Tag>}
                     <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                      <Button size="small" icon={<EditOutlined />} onClick={() => openConfigDrawer(config)}>编辑</Button>
-                      <Popconfirm title={t('common.confirm')} onConfirm={() => { void removeConfig(config.id); }}>
-                        <Button size="small" danger icon={<DeleteOutlined />} />
+                      <Button size="small" icon={<EditOutlined />} onClick={() => openConfigDrawer(config)}>{config.builtIn ? '复制' : '编辑'}</Button>
+                      <Popconfirm title={t('common.confirm')} disabled={config.builtIn} onConfirm={() => { void removeConfig(config.id); }}>
+                        <Button size="small" danger icon={<DeleteOutlined />} disabled={config.builtIn} />
                       </Popconfirm>
                     </div>
                   </div>
@@ -289,7 +309,7 @@ export default function DocumentRolesPage() {
                     <Row gutter={[16, 8]} align="middle" style={{ marginTop: 4 }}>
                       <Col flex="auto">
                         <Form.Item name={[field.name, 'roleId']} label="文件角色" rules={[{ required: true }]} style={{ marginBottom: 0 }}>
-                          <Select placeholder="选择文件角色" size="small" options={fileRoles.map(r => ({ label: `${r.name} (${t(FILE_TYPE_LABELS[r.processingType ?? ''] || 'roles.reference')})`, value: r.id }))} />
+                          <Select placeholder="选择文件角色" size="small" options={allFileRoles.map(r => ({ label: `${r.name} (${t(FILE_TYPE_LABELS[r.processingType ?? ''] || 'roles.reference')})`, value: r.id }))} />
                         </Form.Item>
                       </Col>
                       <Col style={{ width: 90 }}>
@@ -305,7 +325,7 @@ export default function DocumentRolesPage() {
             )}</Form.List>
           },
           {
-            key: 'prompt', label: `提示词角色 (${promptRoles.length})`,
+            key: 'prompt', label: `提示词角色 (${allPromptRoles.length})`,
             children: <Form.List name="promptRoles">{(fields, { add, remove }) => (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {fields.length === 0 && <Empty description="暂未添加提示词角色" />}
@@ -316,7 +336,7 @@ export default function DocumentRolesPage() {
                     <Row gutter={[16, 8]} align="middle" style={{ marginTop: 4 }}>
                       <Col flex="auto">
                         <Form.Item name={[field.name, 'roleId']} label="提示词角色" rules={[{ required: true }]} style={{ marginBottom: 0 }}>
-                          <Select placeholder="选择提示词角色" size="small" options={promptRoles.map(r => ({ label: `${r.name} (${t(PROMPT_TYPE_LABELS[r.executionType ?? ''] || 'roles.reference')})`, value: r.id }))} />
+                          <Select placeholder="选择提示词角色" size="small" options={allPromptRoles.map(r => ({ label: `${r.name} (${t(PROMPT_TYPE_LABELS[r.executionType ?? ''] || 'roles.reference')})`, value: r.id }))} />
                         </Form.Item>
                       </Col>
                       <Col style={{ width: 90 }}>

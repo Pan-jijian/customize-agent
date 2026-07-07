@@ -45,7 +45,7 @@
     "marked": "^15.0.12",
     "pdf-parse": "^2.4.5",
     "playwright": "^1.57.0",
-    "sharp": "^0.35.2",
+    "sharp": "0.34.5",
     "tesseract.js": "^7.0.0",
     "tree-sitter": "^0.22.0",
     "xlsx": "^0.18.5"

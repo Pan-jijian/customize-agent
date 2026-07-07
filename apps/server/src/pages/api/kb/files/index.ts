@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import * as fs from 'fs';
 import * as path from 'path';
-import { ensureBuiltInKnowledgeBase, getMultiProjectManager, getProjectRoot } from '@/services/kbService';
+import { ensureBuiltInKnowledgeBase, getMultiProjectManager, getProjectRoot, isBuiltInKnowledgeFile } from '@/services/kbService';
 import { upsertKbOperation } from '@/services/kbOperationLog';
 import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
@@ -77,7 +77,11 @@ function mergeIndexedAndDiskFiles(indexedFiles: FastFile[], projectRoot: string)
   for (const file of scanKnowledgeBaseFiles(projectRoot)) {
     if (!byPath.has(file.relativePath)) byPath.set(file.relativePath, file);
   }
-  return Array.from(byPath.values()).sort((a, b) => b.mtime - a.mtime);
+  return Array.from(byPath.values()).sort((a, b) => Number(isBuiltInKnowledgeFile(a.relativePath)) - Number(isBuiltInKnowledgeFile(b.relativePath)) || b.mtime - a.mtime);
+}
+
+function withBuiltInFlag<T extends { relativePath: string }>(file: T): T & { builtIn: boolean } {
+  return { ...file, builtIn: isBuiltInKnowledgeFile(file.relativePath) };
 }
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -91,11 +95,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       const page = parseInt((req.query.page as string) || '1', 10);
       const limit = parseInt((req.query.limit as string) || '50', 10);
       const resolvedProjectRoot = ensureBuiltInKnowledgeBase(projectRoot);
+      const project = await getMultiProjectManager().getProject(resolvedProjectRoot);
       let files: any[] = mergeIndexedAndDiskFiles(await ensureBuiltInIndexed(resolvedProjectRoot), resolvedProjectRoot);
       if (category) files = files.filter(file => file.category === category);
+      const vectorStatus = project.getVectorStatus();
       const total = files.length;
-      const paged = files.slice((page - 1) * limit, page * limit).map(file => ({ ...file, builtIn: true }));
-      res.status(200).json({ files: paged, total, page, limit, initializing: false });
+      const paged = files.slice((page - 1) * limit, page * limit).map(withBuiltInFlag);
+      res.status(200).json({ files: paged, total, page, limit, vectorStatus, initializing: false });
       return;
     }
 
@@ -103,11 +109,20 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (req.method === 'POST' || req.query.reindex === '1') await project.incrementalIndex();
 
     if (req.method === 'DELETE') {
-      const { relativePath, relativePaths, all } = req.body;
-      const targets = all ? project.listFiles().map(file => file.relativePath) : Array.isArray(relativePaths) ? relativePaths.map(String) : relativePath ? [String(relativePath)] : [];
-      if (targets.length === 0) return res.status(400).json({ error: 'relativePath or relativePaths is required' });
+      const { relativePath, relativePaths, folderPath, folderPaths, all } = req.body;
+      const listedFiles = project.listFiles();
+      const requestedFileTargets = all ? listedFiles.map(file => file.relativePath) : Array.isArray(relativePaths) ? relativePaths.map(String) : relativePath ? [String(relativePath)] : [];
+      const requestedFolders = Array.isArray(folderPaths) ? folderPaths.map(String) : folderPath ? [String(folderPath)] : [];
+      const folderTargets = requestedFolders.flatMap(folder => {
+        const prefix = folder.replace(/^\/+|\/+$/gu, '');
+        return listedFiles.filter(file => file.relativePath === prefix || file.relativePath.startsWith(`${prefix}/`)).map(file => file.relativePath);
+      });
+      const requestedTargets = Array.from(new Set([...requestedFileTargets, ...folderTargets]));
+      if (requestedTargets.length === 0) return res.status(400).json({ error: 'relativePath, relativePaths or folderPaths is required' });
+      const targets = requestedTargets.filter(target => !isBuiltInKnowledgeFile(target));
+      if (targets.length === 0) return res.status(400).json({ error: '内置示例资料不可删除' });
       const operationId = `delete-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const title = all ? `删除全部 ${targets.length} 个文件` : targets.length === 1 ? `删除 ${targets[0]}` : `批量删除 ${targets.length} 个文件`;
+      const title = all ? `删除全部用户文件 ${targets.length} 个` : targets.length === 1 ? `删除 ${targets[0]}` : `批量删除 ${targets.length} 个文件`;
       upsertKbOperation(projectRoot, { id: operationId, type: 'delete', title, stage: 'uploading', status: 'processing', percent: 10, message: '正在删除文件和索引', filePath: targets[0], fileName: targets[0]?.split('/').pop() });
       let deleted = 0;
       for (const target of targets) {
@@ -126,7 +141,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (category) files = files.filter((f: { category: string }) => f.category === category);
     const vectorStatus = project.getVectorStatus();
     const total = files.length;
-    const paged = files.slice((page - 1) * limit, page * limit).map((file: { relativePath: string }) => ({ ...file, builtIn: true }));
+    const paged = files.slice((page - 1) * limit, page * limit).map(withBuiltInFlag);
     res.status(200).json({ files: paged, total, page, limit, vectorStatus });
 }
 

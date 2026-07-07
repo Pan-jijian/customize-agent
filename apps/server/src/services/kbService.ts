@@ -143,6 +143,41 @@ function writePdfFile(file: string, title: string) {
   fs.writeFileSync(file, content, 'binary');
 }
 
+const BUILT_IN_KNOWLEDGE_FILES = new Set([
+  '文档资料/规则文件-攻略写作要求.md',
+  '文档资料/项目事实-热门干员资料.md',
+  '表格数据/表格数据-热门干员推荐.csv',
+  '表格数据/表格数据-热门干员推荐.xlsx',
+  '表格数据/表格数据-热门干员推荐.xls',
+  '文档资料/规范文件-攻略结构规范.md',
+  '文档资料/模板案例-热门干员攻略示例.md',
+  '文档资料/模板案例-导出样式参考.md',
+  '文档资料/模板样式-攻略文档排版规范.md',
+  '文档资料/导出门禁-攻略文档检查清单.md',
+  '文档资料/Word资料-队伍搭配说明.doc',
+  '文档资料/Word资料-队伍搭配说明.docx',
+  '文档资料/PDF资料-官方攻略摘录.pdf',
+  '图片素材/图片文件-干员图片来源.md',
+  '图片素材/干员图片/露娜.png',
+  '图片素材/干员图片/红狼.png',
+  '图片素材/干员图片/牧羊人.png',
+  '图片素材/干员图片/蜂医.png',
+  '图片素材/干员图片/地图图纸-零号大坝-官方完整地图图纸.jpg',
+  '图片素材/干员图片/地图图纸-航天基地-官方完整地图图纸.jpg',
+  '图片素材/干员图片/地图图纸-巴克什-官方完整地图图纸.jpg',
+  '图片素材/干员图片/地图图纸-潮汐监狱-官方完整地图图纸.jpg',
+  '图片素材/干员图片/地图图纸-AZ3-官方完整地图图纸.jpg',
+  '图片素材/干员图片/地图图纸-全面战场-攀升官方完整地图图纸.jpg',
+  '图纸文件/图纸文件-官方地图图纸来源.md',
+]);
+
+export function isBuiltInKnowledgeFile(relativePath: string): boolean {
+  const normalized = relativePath.split(path.sep).join('/');
+  return BUILT_IN_KNOWLEDGE_FILES.has(normalized)
+    || normalized.startsWith('图片素材/干员图片/')
+    || normalized.startsWith('图纸文件/图纸文件-官方地图图纸来源.md');
+}
+
 export function ensureBuiltInKnowledgeBase(projectRoot = getProjectRoot()): string {
   const root = path.resolve(projectRoot);
   const kbRoot = path.join(root, 'knowledgeBase');

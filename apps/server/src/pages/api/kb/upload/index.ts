@@ -2,7 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 import { setKbUploadProgress } from '@/services/kbUploadProgress';
 import { upsertKbOperation, type KbOperationStage } from '@/services/kbOperationLog';
-import { startKnowledgeIndex } from '@/services/kbIndexWorkerService';
+import { enqueueKnowledgeIndex } from '@/services/kbIndexWorkerService';
 import type { KnowledgeIndexProgress } from '@customize-agent/knowledge';
 
 export const config = {
@@ -69,9 +69,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     } catch {
       uploadedMeta = undefined;
     }
-    startKnowledgeIndex({ id: `${operationId}-vector`, projectRoot, vectorMode: 'sync' });
+    const vectorResult = await enqueueKnowledgeIndex({ id: `${operationId}-vector`, projectRoot, vectorMode: 'sync' });
     const vectorStatus = project.getVectorStatus();
-    const vectorReady = vectorStatus.status === 'ready';
+    const vectorReady = vectorResult.success && vectorStatus.status === 'ready';
+    if (!vectorReady) {
+      const message = vectorResult.error || vectorStatus.error || '向量入库失败';
+      setKbUploadProgress(operationId, { stage: 'error', percent: 100, message, fileName: titleName, chunkCount: uploadFiles.length === 1 ? uploaded?.chunkCount : changedChunkCount, vectorStatus, error: message });
+      upsertKbOperation(projectRoot, { id: operationId, type: 'upload', title: `上传 ${titleName}`, stage: 'error', status: 'error', percent: 100, message, fileName: titleName, filePath: uploadFiles.length === 1 ? (uploaded?.relativePath ?? uploadedRelativePath) : undefined, chunkCount: uploadFiles.length === 1 ? uploaded?.chunkCount : changedChunkCount, error: message });
+      return res.status(500).json({ error: message, files, uploadedFiles, vectorStatus });
+    }
     setKbUploadProgress(operationId, {
       stage: 'done',
       percent: 100,

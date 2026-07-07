@@ -23,12 +23,12 @@ export class VectorIndexer {
       const store = this.vectorStores.get(collectionName);
       if (!store) continue;
 
+      const texts = collectionChunks.map(chunk => chunk.content);
+      const embeddings = await this.embedDocuments(texts);
       await store.ensureCollection({
         embedding_model: this.embeddingProvider.model,
         embedding_dimension: this.embeddingProvider.dimensions,
       });
-
-      const embeddings = await this.embeddingProvider.embedDocuments(collectionChunks.map(chunk => chunk.content));
       const documents = collectionChunks.map((chunk, index) => this.toVectorDocument(chunk, embeddings[index] ?? []));
       await store.upsert(documents);
 
@@ -47,6 +47,18 @@ export class VectorIndexer {
     const store = this.vectorStores.get(collectionName);
     if (!store) return;
     await store.deleteByFilePath(filePath);
+  }
+
+  private async embedDocuments(texts: string[]): Promise<number[][]> {
+    const embeddings = await this.embeddingProvider.embedDocuments(texts);
+    if (!this.isValidEmbeddings(embeddings, texts.length, this.embeddingProvider.dimensions)) {
+      throw new Error(`Embedding 结果异常：期望 ${texts.length} 条 ${this.embeddingProvider.dimensions} 维向量，实际返回 ${embeddings.length} 条`);
+    }
+    return embeddings;
+  }
+
+  private isValidEmbeddings(embeddings: number[][], count: number, dimensions: number): boolean {
+    return embeddings.length === count && embeddings.every(vector => vector.length === dimensions && vector.every(value => Number.isFinite(value)));
   }
 
   private groupByCollection(chunks: StoredChunk[]): Map<string, StoredChunk[]> {

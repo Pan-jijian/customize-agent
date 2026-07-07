@@ -106,7 +106,7 @@ export default function OverviewPage() {
             <Card size="small">
               <Statistic
                 title="Embedding"
-                value={embeddingConfig?.provider === 'hash' ? 'Hash' : embeddingConfig?.provider ?? '—'}
+                value={embeddingConfig?.provider === 'openai-compatible' ? '外部 Embedding' : embeddingConfig ? '本地语义模型' : '—'}
                 prefix={<NodeIndexOutlined style={{ color: 'var(--colorAccent)' }} />}
               />
               {embeddingConfig?.model && <div className="text-xs mt-1" style={{ color: 'var(--colorTextSecondary)' }}>{embeddingConfig.model}{embeddingConfig.dimensions ? ` · ${embeddingConfig.dimensions}维` : ''}</div>}

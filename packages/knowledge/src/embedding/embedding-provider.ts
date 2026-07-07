@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface EmbeddingProvider {
   readonly model: string;
@@ -104,18 +105,33 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
 export interface LocalTransformersEmbeddingOptions {
   model?: string;
   dimensions?: number;
+  modelPath?: string;
 }
 
 type FeatureExtractionPipeline = (input: string | string[], options?: Record<string, unknown>) => Promise<unknown>;
 
+function resolveBundledBgeModelPath(): string | undefined {
+  const currentDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    process.env.CUSTOMIZE_BGE_MODEL_PATH,
+    process.env.KB_BGE_MODEL_PATH,
+    path.resolve(process.cwd(), 'models', 'bge-small-zh-v1.5'),
+    path.resolve(process.cwd(), 'packages', 'knowledge', 'models', 'bge-small-zh-v1.5'),
+    path.resolve(currentDir, '..', '..', 'models', 'bge-small-zh-v1.5'),
+  ].filter(Boolean) as string[];
+  return candidates.find(candidate => fs.existsSync(path.join(candidate, 'config.json')) && fs.existsSync(path.join(candidate, 'tokenizer.json')));
+}
+
 export class LocalTransformersEmbeddingProvider implements EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
+  private readonly modelPath?: string;
   private static pipelines = new Map<string, Promise<FeatureExtractionPipeline>>();
 
   constructor(options: LocalTransformersEmbeddingOptions = {}) {
     this.model = options.model?.trim() || 'BAAI/bge-small-zh-v1.5';
     this.dimensions = options.dimensions ?? 512;
+    this.modelPath = options.modelPath || resolveBundledBgeModelPath();
   }
 
   async embedDocuments(texts: string[]): Promise<number[][]> {
@@ -142,10 +158,22 @@ export class LocalTransformersEmbeddingProvider implements EmbeddingProvider {
   }
 
   private async createPipeline(): Promise<FeatureExtractionPipeline> {
-    const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<{ pipeline?: (task: string, model: string) => Promise<FeatureExtractionPipeline> }>;
-    const mod = await dynamicImport('@huggingface/transformers').catch(async () => dynamicImport('@xenova/transformers'));
+    const modelPath = this.modelPath;
+    if (!modelPath) {
+      throw new Error('本地 bge-small-zh-v1.5 模型资源缺失：请将模型文件放到 packages/knowledge/models/bge-small-zh-v1.5，或通过 CUSTOMIZE_BGE_MODEL_PATH 指定本地模型目录。');
+    }
+    const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<{ pipeline?: (task: string, model: string, options?: Record<string, unknown>) => Promise<FeatureExtractionPipeline>; env?: { allowRemoteModels?: boolean; allowLocalModels?: boolean; localModelPath?: string } }>;
+    const mod = await dynamicImport('@huggingface/transformers').catch(error => {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`本地语义模型运行依赖 @huggingface/transformers 未安装或无法解析：${message}`);
+    });
     if (!mod.pipeline) throw new Error('Transformers.js pipeline is unavailable');
-    return mod.pipeline('feature-extraction', this.model);
+    if (mod.env) {
+      mod.env.allowRemoteModels = false;
+      mod.env.allowLocalModels = true;
+      mod.env.localModelPath = path.dirname(modelPath);
+    }
+    return mod.pipeline('feature-extraction', modelPath, { dtype: 'q8' });
   }
 
   private parseVectors(output: unknown, count: number): number[][] {
@@ -216,7 +244,7 @@ function readStoredEmbeddingConfig(): StoredEmbeddingConfig | undefined {
 
 export function createEmbeddingProviderFromEnvironment(): EmbeddingProvider {
   const stored = readStoredEmbeddingConfig();
-  const provider = process.env.CUSTOMIZE_EMBEDDING_PROVIDER ?? process.env.KB_EMBEDDING_PROVIDER ?? stored?.provider;
+  const provider = process.env.CUSTOMIZE_EMBEDDING_PROVIDER ?? process.env.KB_EMBEDDING_PROVIDER ?? stored?.provider ?? 'transformers-local';
   if (provider === 'openai-compatible') {
     const baseUrl = process.env.CUSTOMIZE_EMBEDDING_BASE_URL ?? process.env.KB_EMBEDDING_BASE_URL ?? stored?.baseUrl;
     const model = process.env.CUSTOMIZE_EMBEDDING_MODEL ?? process.env.KB_EMBEDDING_MODEL ?? stored?.model;
@@ -231,13 +259,10 @@ export function createEmbeddingProviderFromEnvironment(): EmbeddingProvider {
       });
     }
   }
-  if (provider === 'transformers-local') {
-    const rawDimensions = process.env.CUSTOMIZE_EMBEDDING_DIMENSIONS ?? process.env.KB_EMBEDDING_DIMENSIONS;
-    const dimensions = Number(rawDimensions ?? stored?.dimensions ?? 512);
-    return new LocalTransformersEmbeddingProvider({
-      model: process.env.CUSTOMIZE_EMBEDDING_MODEL ?? process.env.KB_EMBEDDING_MODEL ?? stored?.model,
-      dimensions: Number.isFinite(dimensions) ? dimensions : 512,
-    });
-  }
-  return new HashEmbeddingProvider();
+  const rawDimensions = process.env.CUSTOMIZE_EMBEDDING_DIMENSIONS ?? process.env.KB_EMBEDDING_DIMENSIONS;
+  const dimensions = Number(rawDimensions ?? (stored?.provider === 'transformers-local' ? stored.dimensions : undefined) ?? 512);
+  return new LocalTransformersEmbeddingProvider({
+    model: process.env.CUSTOMIZE_EMBEDDING_MODEL ?? process.env.KB_EMBEDDING_MODEL ?? (stored?.provider === 'transformers-local' ? stored.model : undefined) ?? 'BAAI/bge-small-zh-v1.5',
+    dimensions: Number.isFinite(dimensions) ? dimensions : 512,
+  });
 }

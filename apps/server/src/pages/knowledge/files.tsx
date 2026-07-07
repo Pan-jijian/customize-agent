@@ -4,8 +4,8 @@ import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { Card, Table, Button, Input, Select, Tag, Modal, Space, App, Progress, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { UploadOutlined, SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FilePdfOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined } from '@ant-design/icons';
-import { getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbOperation, deleteKbFile, deleteKbFiles, deleteAllKbFiles, uploadKbFiles, type KbFileItem, type KbOperationRecord } from '@/lib/api';
+import { UploadOutlined, SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined } from '@ant-design/icons';
+import { getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbOperation, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
@@ -21,6 +21,7 @@ type StatusItem = {
   chunkCount?: number;
   textLength?: number;
   extractionMode?: string;
+  error?: string;
   createdAt?: number;
 };
 
@@ -41,6 +42,7 @@ export default function FilesPage() {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [statusFilter, setStatusFilter] = useState<'all' | 'processing' | 'success' | 'error'>('all');
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'user' | 'builtIn'>('user');
   const [statusCollapsed, setStatusCollapsed] = useState(true);
   const [expandedRowKeys, setExpandedRowKeys] = useState<React.Key[]>([]);
   const categoryRef = useRef(category);
@@ -80,6 +82,7 @@ export default function FilesPage() {
     chunkCount: record.chunkCount,
     textLength: record.textLength,
     extractionMode: record.extractionMode,
+    error: record.error,
     createdAt: record.createdAt,
   });
 
@@ -118,15 +121,6 @@ export default function FilesPage() {
     setStatusItems(prev => prev.filter(s => s !== item));
   };
 
-  const relativeTime = (ts?: number) => {
-    if (!ts) return '';
-    const diff = Date.now() - new Date(ts).getTime();
-    if (diff < 60000) return '刚刚';
-    if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`;
-    return '';
-  };
-
   const statusStats = useMemo(() => {
     let processing = 0, success = 0, error = 0;
     for (const item of statusItems) {
@@ -140,6 +134,11 @@ export default function FilesPage() {
   useEffect(() => {
     if (statusStats.processing > 0) setStatusCollapsed(false);
   }, [statusStats.processing]);
+  useEffect(() => {
+    if (statusStats.processing === 0) return;
+    const timer = window.setInterval(() => { void loadOperations(); }, 1000);
+    return () => window.clearInterval(timer);
+  }, [loadOperations, statusStats.processing]);
 
   const filteredStatusItems = statusFilter === 'all'
     ? statusItems
@@ -175,8 +174,8 @@ export default function FilesPage() {
     try {
       const result = await uploadKbFiles(uploadFilesList, undefined, uploadId);
       clearInterval(poll);
-      if (result.vectorStatus?.status === 'error') message.info('文件已上传，正在后台入库');
-      else message.success('上传成功');
+      if (result.vectorStatus?.status === 'ready') message.success('上传成功，向量入库已完成');
+      else message.info('文件已上传并完成解析，正在后台写入向量库');
       setSearchQuery('');
       setCategory('');
       setSelectedRowKeys([]);
@@ -188,7 +187,7 @@ export default function FilesPage() {
       setStatusItems(items => [{
         type: 'upload',
         title: `上传完成 ${titleName}`,
-        description: '解析、分块和入库流程已完成',
+        description: result.vectorStatus?.status === 'ready' ? '解析、切片和向量入库已完成' : '解析和切片已完成，正在后台写入向量库',
         status: 'success',
         filePath: uploaded?.relativePath,
         chunkCount: uploaded?.chunkCount,
@@ -212,8 +211,15 @@ export default function FilesPage() {
   };
 
   const handleDelete = (record: KbFileItem) => {
+    if (record.builtIn) {
+      message.info('内置示例资料不可删除');
+      return;
+    }
     Modal.confirm({
-      title: t('delete'), content: t('deleteConfirm'), okText: t('common.confirm'), cancelText: t('common.cancel'),
+      title: t('delete'),
+      content: t('deleteConfirm'),
+      okText: t('common.confirm'),
+      cancelText: t('common.cancel'),
       okButtonProps: { danger: true },
       onOk: async () => {
         setStatusItems(items => [{ type: 'delete', title: `删除 ${record.relativePath}`, description: '正在删除文件记录', status: 'processing' } satisfies StatusItem, ...items].slice(0, 50));
@@ -232,10 +238,12 @@ export default function FilesPage() {
 
   const handleBulkDelete = (mode: 'selected' | 'filtered' | 'all') => {
     const targets = mode === 'selected'
-      ? selectedRowKeys.map(String).filter(k => files.some(f => f.relativePath === k))
-      : mode === 'filtered' ? filtered.map(file => file.relativePath) : [];
-    if (mode !== 'all' && targets.length === 0) return;
-    const title = mode === 'all' ? '删除全部文件？' : mode === 'filtered' ? `删除当前筛选结果 ${targets.length} 个文件？` : `删除已选 ${targets.length} 个文件？`;
+      ? selectedUserTargets
+      : mode === 'filtered' ? filtered.filter(file => !file.builtIn).map(file => file.relativePath) : [];
+    const userFileCount = files.filter(file => !file.builtIn).length;
+    if (mode !== 'all' && targets.length === 0) { message.info('没有可删除的用户文件'); return; }
+    if (mode === 'all' && userFileCount === 0) { message.info('没有可删除的用户文件'); return; }
+    const title = mode === 'all' ? `删除全部用户文件 ${userFileCount} 个？` : mode === 'filtered' ? `删除当前筛选结果中的用户文件 ${targets.length} 个？` : `删除已选用户文件 ${targets.length} 个？`;
     Modal.confirm({
       title,
       content: '将同时删除文件、切片、索引和向量记录。此操作不可撤销。',
@@ -245,8 +253,8 @@ export default function FilesPage() {
       onOk: async () => {
         setStatusItems(items => [{ type: 'delete', title, description: '正在批量删除文件和索引', status: 'processing', percent: 10 } satisfies StatusItem, ...items].slice(0, 50));
         try {
-          const result = mode === 'all' ? await deleteAllKbFiles() : await deleteKbFiles(targets);
-          const deletedCount = result.deleted ?? targets.length;
+          const result = mode === 'all' ? await deleteAllKbFiles() : mode === 'selected' ? await deleteKbSelection(selectedFilePaths, selectedFolderPaths) : await deleteKbFiles(targets);
+          const deletedCount = result.deleted ?? (mode === 'all' ? userFileCount : targets.length);
           message.success(`已删除 ${deletedCount} 个文件`);
           setSelectedRowKeys([]);
           setStatusItems(items => [{ type: 'delete', title: '批量删除完成', description: `已删除 ${deletedCount} 个文件、切片和索引`, status: 'success' } satisfies StatusItem, ...items].slice(0, 50));
@@ -260,7 +268,17 @@ export default function FilesPage() {
     });
   };
 
-  const filtered = searchQuery ? files.filter((f) => f.relativePath.toLowerCase().includes(searchQuery.toLowerCase())) : files;
+  const sourceFiltered = useMemo(() => sourceFilter === 'all'
+    ? files
+    : files.filter(file => sourceFilter === 'builtIn' ? file.builtIn : !file.builtIn), [files, sourceFilter]);
+  const filtered = useMemo(() => searchQuery
+    ? sourceFiltered.filter((f) => f.relativePath.toLowerCase().includes(searchQuery.toLowerCase()))
+    : sourceFiltered, [searchQuery, sourceFiltered]);
+  const userFiles = useMemo(() => files.filter(file => !file.builtIn), [files]);
+  const builtInFiles = useMemo(() => files.filter(file => file.builtIn), [files]);
+  const filteredUserFiles = useMemo(() => filtered.filter(file => !file.builtIn), [filtered]);
+  const filteredBuiltInFiles = useMemo(() => filtered.filter(file => file.builtIn), [filtered]);
+  const visibleFileKeys = useMemo(() => new Set(filtered.map(file => file.relativePath)), [filtered]);
 
   // ── 树形文件列表 ──
   interface FileTreeNode {
@@ -268,6 +286,7 @@ export default function FilesPage() {
     name: string;
     isFolder: boolean;
     fileCount?: number;
+    userFileCount?: number;
     totalSize?: number;
     totalChunks?: number;
     children?: FileTreeNode[];
@@ -291,8 +310,8 @@ export default function FilesPage() {
           root[path] = {
             key: path, name: seg, isFolder: !isLast,
             ...(isLast
-              ? { file, fileCount: 1, totalSize: file.fileSize, totalChunks: file.chunkCount }
-              : { children: [], fileCount: 0, totalSize: 0, totalChunks: 0 }),
+              ? { file, fileCount: 1, userFileCount: file.builtIn ? 0 : 1, totalSize: file.fileSize, totalChunks: file.chunkCount }
+              : { children: [], fileCount: 0, userFileCount: 0, totalSize: 0, totalChunks: 0 }),
           };
           if (parentPath && root[parentPath]?.children) {
             (root[parentPath]!.children as FileTreeNode[]).push(root[path]!);
@@ -302,12 +321,14 @@ export default function FilesPage() {
           root[path]!.isFolder = true;
           root[path]!.children = [];
           root[path]!.fileCount = 0;
+          root[path]!.userFileCount = 0;
           root[path]!.totalSize = 0;
           root[path]!.totalChunks = 0;
         } else if (isLast) {
           root[path]!.isFolder = false;
           root[path]!.file = file;
           root[path]!.fileCount = 1;
+          root[path]!.userFileCount = file.builtIn ? 0 : 1;
           root[path]!.totalSize = file.fileSize;
           root[path]!.totalChunks = file.chunkCount;
         }
@@ -319,17 +340,21 @@ export default function FilesPage() {
       for (const node of nodes) {
         if (node.children) {
           aggregate(node.children);
-          let fc = 0, ts = 0, tc = 0;
-          for (const child of node.children) { fc += child.fileCount ?? 0; ts += child.totalSize ?? 0; tc += child.totalChunks ?? 0; }
+          let fc = 0, ufc = 0, ts = 0, tc = 0;
+          for (const child of node.children) { fc += child.fileCount ?? 0; ufc += child.userFileCount ?? 0; ts += child.totalSize ?? 0; tc += child.totalChunks ?? 0; }
           node.fileCount = fc;
+          node.userFileCount = ufc;
           node.totalSize = ts;
           node.totalChunks = tc;
         }
       }
     };
+    const pruneEmptyFolders = (nodes: FileTreeNode[]): FileTreeNode[] => nodes
+      .map(node => node.children ? { ...node, children: pruneEmptyFolders(node.children) } : node)
+      .filter(node => !node.isFolder || ((node.fileCount ?? 0) > 0 && (node.children?.length ?? 0) > 0));
     const topLevel = Object.values(root).filter(n => !n.key.includes('/'));
     aggregate(topLevel);
-    return topLevel;
+    return pruneEmptyFolders(topLevel);
   }, [filtered]);
 
   const allTreeKeys = useMemo(() => {
@@ -340,6 +365,28 @@ export default function FilesPage() {
     walk(treeData);
     return keys;
   }, [treeData]);
+  const visibleItemKeys = useMemo(() => new Set([...visibleFileKeys, ...allTreeKeys]), [allTreeKeys, visibleFileKeys]);
+  const selectedFolderPaths = useMemo(() => selectedRowKeys.map(String).filter(key => !visibleFileKeys.has(key) && allTreeKeys.includes(key)), [allTreeKeys, selectedRowKeys, visibleFileKeys]);
+  const selectedFilePaths = useMemo(() => selectedRowKeys.map(String).filter(key => visibleFileKeys.has(key)), [selectedRowKeys, visibleFileKeys]);
+  const selectedUserTargets = useMemo(() => {
+    const targets = new Set<string>();
+    for (const key of selectedFilePaths) {
+      const file = files.find(item => item.relativePath === key);
+      if (file && !file.builtIn) targets.add(file.relativePath);
+    }
+    for (const folder of selectedFolderPaths) {
+      const prefix = `${folder}/`;
+      for (const file of files) {
+        if (!file.builtIn && file.relativePath.startsWith(prefix)) targets.add(file.relativePath);
+      }
+    }
+    return Array.from(targets);
+  }, [files, selectedFilePaths, selectedFolderPaths]);
+  const selectedUserCount = selectedUserTargets.length;
+
+  useEffect(() => {
+    setSelectedRowKeys(keys => keys.filter(key => visibleItemKeys.has(String(key))));
+  }, [visibleItemKeys]);
 
   const defaultExpandedKeys = useMemo(() => {
     if (searchQuery) return allTreeKeys;
@@ -424,19 +471,27 @@ export default function FilesPage() {
         : (r.file?.mtime ? new Date(r.file.mtime).toLocaleDateString(locale) : '—'),
     },
     {
+      title: '来源', key: 'source', width: 100,
+      render: (_: unknown, r: FileTreeNode) => r.isFolder
+        ? <span style={{ color: 'var(--colorTextQuaternary)' }}>—</span>
+        : r.file?.builtIn ? <Tag color="gold">内置示例</Tag> : <Tag color="cyan">我的文件</Tag>,
+    },
+    {
       title: '', key: 'act', width: 50,
-      render: (_: unknown, r: FileTreeNode) => r.isFolder ? null : <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => handleDelete(r.file!)} />,
+      render: (_: unknown, r: FileTreeNode) => r.isFolder ? null : <Button type="text" danger size="small" disabled={r.file?.builtIn} icon={<DeleteOutlined />} onClick={() => handleDelete(r.file!)} />,
     },
   ];
 
   return (
     <div className="space-y-5 animateFadeIn">
-      <h2 className="pageTitle">{t('fileManagement')}</h2>
+      <h2 className="pageTitle">{t('files')}</h2>
 
       <div className="flex flex-wrap items-end gap-3">
         <Input placeholder={t('searchPlaceholder')} prefix={<SearchOutlined />} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); }} allowClear className={styles.filterInput} />
         <Select value={category || undefined} onChange={(v) => { setCategory(v || ''); }} placeholder={t('filterCategory')} allowClear className={styles.filterSelect}
           options={[{ label: t('allCategories'), value: '' }, ...CATEGORIES.map((c) => ({ label: categoryLabel(c, locale), value: c }))]} />
+        <Select value={sourceFilter} onChange={setSourceFilter} className={styles.filterSelect}
+          options={[{ label: `全部来源 (${files.length})`, value: 'all' }, { label: `我的文件 (${userFiles.length})`, value: 'user' }, { label: `内置示例 (${builtInFiles.length})`, value: 'builtIn' }]} />
         <Button type="primary" icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-file-upload-input')?.click()}>{uploading ? t('uploading') : t('upload')}</Button>
         <Button icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-folder-upload-input')?.click()}>上传文件夹</Button>
         <input id="kb-file-upload-input" type="file" multiple hidden onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
@@ -499,6 +554,7 @@ export default function FilesPage() {
                         <div className={styles.timelineDetail}>
                           {typeof item.percent === 'number' && item.status === 'processing' && <Progress percent={item.percent} size="small" strokeColor="#1677ff" />}
                           {item.description && <div className={styles.timelineDesc}>{item.description}</div>}
+                          {item.error && <div style={{ color: 'var(--colorError)', fontSize: 12, wordBreak: 'break-word' }}>{item.error}</div>}
                           {item.filePath && <Tooltip title={item.filePath}><div className={styles.timelinePath}>{item.filePath}</div></Tooltip>}
                           <div className={styles.timelineMeta}>
                             {typeof item.chunkCount === 'number' && <span className={styles.timelineMetaTag}>切片 <b>{item.chunkCount}</b></span>}
@@ -521,10 +577,10 @@ export default function FilesPage() {
         title="文件列表"
         extra={
           <Space size={8}>
-            <Button danger size="small" disabled={selectedRowKeys.length === 0} icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')}>
-              删除已选 {selectedRowKeys.length || ''}
+            <Button danger size="small" disabled={selectedUserCount === 0} icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')}>
+              删除已选 {selectedUserCount || ''}
             </Button>
-            <Button danger size="small" disabled={files.length === 0} onClick={() => handleBulkDelete('all')}>删除全部</Button>
+            <Button danger size="small" disabled={userFiles.length === 0} onClick={() => handleBulkDelete('all')}>删除全部用户文件</Button>
           </Space>
         }
       >
@@ -534,10 +590,15 @@ export default function FilesPage() {
           locale={{ emptyText: loading ? '正在加载文件列表...' : searchQuery ? t('emptySearch') : t('noFiles') }}
           pagination={false}
           rowClassName={(r) => r.isFolder ? styles.folderRow : ''}
-          rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys, checkStrictly: false }}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: setSelectedRowKeys,
+            checkStrictly: false,
+            getCheckboxProps: (record) => ({ disabled: record.isFolder ? (record.userFileCount ?? 0) === 0 : Boolean(record.file?.builtIn) }),
+          }}
           footer={() => (
             <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>
-              共 {filtered.length} 个文件，{treeData.length} 个顶层目录
+              当前展示 {filtered.length} 个文件，其中我的文件 {filteredUserFiles.length} 个、内置示例 {filteredBuiltInFiles.length} 个；全部我的文件 {userFiles.length} 个、内置示例 {builtInFiles.length} 个；{treeData.length} 个顶层目录
             </div>
           )} />
       </Card>

@@ -232,6 +232,14 @@ export default function GuidePage() {
       </Col>
     </Row>
 
+    <Card title="我的数据、内置示例和门禁规则说明">
+      <Row gutter={[16, 16]}>
+        <Col xs={24} md={8}><Card size="small" title="默认优先看我的数据"><Paragraph>文件、提示词、角色配置和规范包默认优先展示用户自己创建的内容。内置示例只用于学习，不能直接覆盖或删除，需要使用时请先复制。</Paragraph></Card></Col>
+        <Col xs={24} md={8}><Card size="small" title="自定义门禁类型会执行"><Paragraph>用户在文档规范包中创建的门禁类型，需要选择校验对象和校验方式。保存后它会和系统门禁类型一样参与生成校验，不只是备注说明。</Paragraph></Card></Col>
+        <Col xs={24} md={8}><Card size="small" title="上传后关注索引状态"><Paragraph>文件上传完成后，知识库索引会继续在后台写入。请在文件管理页查看状态，如果失败，页面会展示原因，方便重新配置模型或重试。</Paragraph></Card></Col>
+      </Row>
+    </Card>
+
     <Card title="动态 schema、证据和执行状态说明">
       <Row gutter={[16, 16]}>
         <Col xs={24} md={8}><Card size="small" title="动态事实 schema"><Paragraph>系统不会写死工程字段。文档规范包的事实字段、模板章节 requiredFacts、字段 sourceRoleIds 和 extractionHint 会共同组成抽取 schema，并驱动事实抽取、冲突检测和导出门禁。</Paragraph></Card></Col>

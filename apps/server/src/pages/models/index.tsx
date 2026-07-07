@@ -24,7 +24,7 @@ export default function ModelsPage() {
   const [loading, setLoading] = useState(true);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [models, setModels] = useState<ModelsConfig | null>(null);
-  const [embedding, setEmbedding] = useState<EmbeddingConfig>({ provider: 'hash', dimensions: 384 });
+  const [embedding, setEmbedding] = useState<EmbeddingConfig>({ provider: 'transformers-local', model: 'BAAI/bge-small-zh-v1.5', dimensions: 512 });
   const [embeddingSaving, setEmbeddingSaving] = useState(false);
   const [embeddingTesting, setEmbeddingTesting] = useState(false);
   const [embeddingTestResult, setEmbeddingTestResult] = useState<boolean | null>(null);
@@ -48,7 +48,7 @@ export default function ModelsPage() {
     try {
       const [p, m, e] = await Promise.all([
         getProviders().catch(() => []), getModels().catch(() => null),
-        getEmbeddingConfig().catch(() => ({ provider: 'hash' as const, dimensions: 384 })),
+        getEmbeddingConfig().catch(() => ({ provider: 'transformers-local' as const, model: 'BAAI/bge-small-zh-v1.5', dimensions: 512 })),
       ]);
       setProviders(p); setModels(m); setEmbedding(e);
     } catch { message.error(t('common.error')); } finally { setLoading(false); }
@@ -161,8 +161,8 @@ export default function ModelsPage() {
           <Col xs={24} sm={8}>
             <div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.embeddingProvider')}</div>
             <Select value={embedding.provider} style={{ width: '100%' }}
-              options={[{ label: t('models.embeddingProviderHash'), value: 'hash' }, { label: '本地语义模型', value: 'transformers-local' }, { label: t('models.embeddingProviderOpenAI'), value: 'openai-compatible' }]}
-              onChange={v => setEmbedding(prev => ({ ...prev, provider: v as EmbeddingConfig['provider'], model: v === 'transformers-local' ? (prev.model || 'BAAI/bge-small-zh-v1.5') : prev.model, dimensions: v === 'hash' ? 384 : v === 'transformers-local' ? 512 : (prev.dimensions || 1024) }))} />
+              options={[{ label: '本地语义模型（推荐）', value: 'transformers-local' }, { label: '外部 Embedding（高级）', value: 'openai-compatible' }]}
+              onChange={v => setEmbedding(prev => ({ ...prev, provider: v as EmbeddingConfig['provider'], model: v === 'transformers-local' ? (prev.model || 'BAAI/bge-small-zh-v1.5') : prev.model, dimensions: v === 'transformers-local' ? 512 : (prev.dimensions || 1024) }))} />
           </Col>
           {embedding.provider === 'openai-compatible' && (
             <>
@@ -180,12 +180,12 @@ export default function ModelsPage() {
           )}
           <Col xs={24} sm={8}>
             <div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.dimensions')}</div>
-            <InputNumber style={{ width: '100%' }} min={1} value={embedding.dimensions} onChange={v => setEmbedding(p => ({ ...p, dimensions: Number(v || (p.provider === 'hash' ? 384 : 1024)) }))} />
+            <InputNumber style={{ width: '100%' }} min={1} value={embedding.dimensions} onChange={v => setEmbedding(p => ({ ...p, dimensions: Number(v || (p.provider === 'transformers-local' ? 512 : 1024)) }))} />
           </Col>
           <Col xs={24} sm={8}>
             <div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.status')}</div>
             <Space>
-              <Tag color={embedding.provider === 'hash' ? 'default' : 'blue'}>{embedding.provider === 'hash' ? t('models.localHash') : embedding.provider === 'transformers-local' ? '本地语义模型' : t('models.openAICompatible')}</Tag>
+              <Tag color="blue">{embedding.provider === 'transformers-local' ? '本地语义模型' : t('models.openAICompatible')}</Tag>
               {embeddingTestResult === true && <Tag color="success">{t('models.connected')}</Tag>}
               {embeddingTestResult === false && <Tag color="error">{t('models.connectionFailed')}</Tag>}
             </Space>

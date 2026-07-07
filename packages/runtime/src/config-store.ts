@@ -41,7 +41,7 @@ export interface ProviderConfig {
 }
 
 export interface EmbeddingConfig {
-  provider: 'hash' | 'openai-compatible' | 'transformers-local';
+  provider: 'openai-compatible' | 'transformers-local';
   baseUrl?: string;
   apiKey?: string;
   model?: string;
@@ -78,7 +78,7 @@ export function resolveProtocol(providerName: string, config?: ProviderConfig): 
 // ── 默认值 ──
 
 const EMPTY_TIER: TierConfig = { active: '', list: [] };
-const DEFAULT_EMBEDDING: EmbeddingConfig = { provider: 'hash' };
+const DEFAULT_EMBEDDING: EmbeddingConfig = { provider: 'transformers-local', model: 'BAAI/bge-small-zh-v1.5', dimensions: 512 };
 const DEFAULT_CONFIG: UserConfig = { language: 'zh', providers: {}, models: { reader: { ...EMPTY_TIER }, reasoning: { ...EMPTY_TIER }, action: { ...EMPTY_TIER } }, embedding: { ...DEFAULT_EMBEDDING } };
 
 // ── ConfigStore ──
@@ -264,13 +264,13 @@ export class ConfigStore {
   private _pEmbedding(raw: unknown): EmbeddingConfig {
     if (!raw || typeof raw !== 'object') return { ...DEFAULT_EMBEDDING };
     const r = raw as Record<string, unknown>;
-    const provider = r.provider === 'openai-compatible' ? 'openai-compatible' : 'hash';
+    const provider = r.provider === 'openai-compatible' ? 'openai-compatible' : 'transformers-local';
     return {
       provider,
-      baseUrl: typeof r.baseUrl === 'string' ? r.baseUrl : undefined,
-      apiKey: typeof r.apiKey === 'string' ? r.apiKey : undefined,
-      model: typeof r.model === 'string' ? r.model : undefined,
-      dimensions: typeof r.dimensions === 'number' && Number.isFinite(r.dimensions) ? r.dimensions : undefined,
+      baseUrl: provider === 'openai-compatible' && typeof r.baseUrl === 'string' ? r.baseUrl : undefined,
+      apiKey: provider === 'openai-compatible' && typeof r.apiKey === 'string' ? r.apiKey : undefined,
+      model: provider === 'transformers-local' ? 'BAAI/bge-small-zh-v1.5' : typeof r.model === 'string' && r.model ? r.model : undefined,
+      dimensions: provider === 'transformers-local' ? 512 : typeof r.dimensions === 'number' && Number.isFinite(r.dimensions) ? r.dimensions : undefined,
     };
   }
 }

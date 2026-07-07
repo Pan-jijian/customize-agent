@@ -28,7 +28,8 @@
     "directory": "packages/knowledge"
   },
   "files": [
-    "dist"
+    "dist",
+    "models"
   ],
   "publishConfig": {
     "access": "public"

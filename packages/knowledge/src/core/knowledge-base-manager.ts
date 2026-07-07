@@ -454,6 +454,11 @@ export class KnowledgeBaseManager {
       await this.deleteVectorFile(record.collectionName, normalized);
     }
     this.store.deleteRecord(normalized);
+    const stats = this.getStats();
+    this.store.setMetadata('total_chunks', String(stats.chunkCount));
+    this.store.setMetadata('total_files_indexed', String(stats.fileCount));
+    this.store.setMetadata('vector_indexed_chunks', String(stats.chunkCount));
+    this.store.setMetadata('last_vector_index_at', String(Date.now()));
   }
 
   tagFile(relativePath: string, tags: string[]): void {
@@ -485,8 +490,10 @@ export class KnowledgeBaseManager {
     const indexer = new VectorIndexer(this.embeddingProvider, this.vectorStores);
     try {
       const results = await indexer.indexChunks(chunks);
-      this.store.setMetadata('embedding_model', this.embeddingProvider.model);
-      this.store.setMetadata('embedding_dimension', String(this.embeddingProvider.dimensions));
+      const actualModel = results[0]?.embeddingModel ?? this.embeddingProvider.model;
+      const actualDimension = results[0]?.embeddingDimension ?? this.embeddingProvider.dimensions;
+      this.store.setMetadata('embedding_model', actualModel);
+      this.store.setMetadata('embedding_dimension', String(actualDimension));
       this.store.setMetadata('vector_indexed_chunks', String(chunks.length));
       this.store.setMetadata('vector_index_status', 'ready');
       this.store.setMetadata('vector_index_error', '');
@@ -802,9 +809,8 @@ ${resultsText}
   private async ensureVectorIndexFresh(chunkCount: number, force = false): Promise<void> {
     if (chunkCount === 0) return;
     const indexedChunks = Number(this.store.getMetadata('vector_indexed_chunks') ?? 0);
-    const model = this.store.getMetadata('embedding_model');
-    const dimension = this.store.getMetadata('embedding_dimension');
-    if (!force && indexedChunks === chunkCount && model === this.embeddingProvider.model && dimension === String(this.embeddingProvider.dimensions)) return;
+    const status = this.store.getMetadata('vector_index_status');
+    if (!force && indexedChunks === chunkCount && status === 'ready') return;
     await this.indexVectors();
   }
 

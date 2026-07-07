@@ -3,8 +3,27 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 export type FactFieldType = 'text' | 'number' | 'date' | 'table' | 'list';
-export type GateRuleType = 'required_fact' | 'required_chapter' | 'required_file_role' | 'required_prompt_role' | 'source_required' | 'forbidden_text' | 'min_chapter_length' | 'table_required';
+export type GateRuleType = string;
 export type GateRuleLevel = 'error' | 'warning' | 'info';
+export type GateRuleSubject = 'document' | 'chapter' | 'fact' | 'file_role' | 'prompt_role' | 'table' | 'image' | 'source';
+export type GateRuleOperator = 'exists' | 'contains' | 'not_contains' | 'regex_match' | 'regex_not_match' | 'min_count' | 'min_length' | 'all_have_source' | 'image_caption_required' | 'table_explanation_required';
+
+export interface GateRuleEvaluator {
+  subject: GateRuleSubject;
+  operator: GateRuleOperator;
+  target?: string;
+  value?: string;
+  min?: number;
+}
+
+export interface DocumentSpecGateType {
+  id: string;
+  name: string;
+  description?: string;
+  builtIn?: boolean;
+  defaultLevel: GateRuleLevel;
+  evaluator: GateRuleEvaluator;
+}
 
 export interface DocumentSpecFactField {
   id: string;
@@ -35,6 +54,7 @@ export interface DocumentSpecGateRule {
   level: GateRuleLevel;
   target?: string;
   value?: string;
+  evaluator?: GateRuleEvaluator;
 }
 
 export interface DocumentSpecPackage {
@@ -47,6 +67,21 @@ export interface DocumentSpecPackage {
   wordTemplatePath?: string;
   builtIn?: boolean;
 }
+
+export const BUILT_IN_GATE_TYPES: DocumentSpecGateType[] = [
+  { id: 'required_fact', name: '必需事实', description: '检查指定事实字段是否存在。', builtIn: true, defaultLevel: 'warning', evaluator: { subject: 'fact', operator: 'exists' } },
+  { id: 'required_chapter', name: '必需章节', description: '检查指定章节是否存在。', builtIn: true, defaultLevel: 'error', evaluator: { subject: 'chapter', operator: 'exists' } },
+  { id: 'required_file_role', name: '必需文件角色', description: '检查项目角色配置是否绑定指定文件角色。', builtIn: true, defaultLevel: 'error', evaluator: { subject: 'file_role', operator: 'exists' } },
+  { id: 'required_prompt_role', name: '必需提示词角色', description: '检查项目角色配置是否绑定指定提示词角色。', builtIn: true, defaultLevel: 'warning', evaluator: { subject: 'prompt_role', operator: 'exists' } },
+  { id: 'source_required', name: '事实必须有来源', description: '检查结构化事实是否都有资料来源。', builtIn: true, defaultLevel: 'warning', evaluator: { subject: 'source', operator: 'all_have_source' } },
+  { id: 'forbidden_text', name: '禁止出现文本', description: '检查全文是否出现禁用文本。', builtIn: true, defaultLevel: 'error', evaluator: { subject: 'document', operator: 'not_contains' } },
+  { id: 'min_chapter_length', name: '章节最低字数', description: '检查指定章节是否达到最低字数。', builtIn: true, defaultLevel: 'warning', evaluator: { subject: 'chapter', operator: 'min_length' } },
+  { id: 'table_required', name: '必须有表格', description: '检查文档是否包含结构化表格。', builtIn: true, defaultLevel: 'warning', evaluator: { subject: 'table', operator: 'min_count', min: 1 } },
+];
+
+const BUILT_IN_GATE_TYPE_MAP = new Map(BUILT_IN_GATE_TYPES.map(type => [type.id, type]));
+const VALID_GATE_SUBJECTS: GateRuleSubject[] = ['document', 'chapter', 'fact', 'file_role', 'prompt_role', 'table', 'image', 'source'];
+const VALID_GATE_OPERATORS: GateRuleOperator[] = ['exists', 'contains', 'not_contains', 'regex_match', 'regex_not_match', 'min_count', 'min_length', 'all_have_source', 'image_caption_required', 'table_explanation_required'];
 
 const DEMO_SPEC: DocumentSpecPackage = {
   id: 'delta-force-demo-spec',
@@ -89,14 +124,57 @@ const DEMO_SPEC: DocumentSpecPackage = {
   builtIn: true,
 };
 
-function storePath() {
+function dataDir() {
   const dir = path.join(os.homedir(), '.customize-agent');
   fs.mkdirSync(dir, { recursive: true });
-  return path.join(dir, 'document-specs.json');
+  return dir;
+}
+
+function storePath() {
+  return path.join(dataDir(), 'document-specs.json');
+}
+
+function gateTypesPath() {
+  return path.join(dataDir(), 'document-gate-types.json');
 }
 
 function safeId(input?: string) {
   return (input || `spec-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/gu, '-').slice(0, 80);
+}
+
+function normalizeText(input?: string, fallback = '') {
+  return String(input || fallback).trim().slice(0, 500);
+}
+
+function sanitizeEvaluator(evaluator?: GateRuleEvaluator, fallback?: GateRuleEvaluator): GateRuleEvaluator {
+  const source = evaluator || fallback || { subject: 'document' as const, operator: 'contains' as const };
+  const subject = VALID_GATE_SUBJECTS.includes(source.subject) ? source.subject : 'document';
+  const operator = VALID_GATE_OPERATORS.includes(source.operator) ? source.operator : 'contains';
+  const min = Number(source.min);
+  return {
+    subject,
+    operator,
+    target: normalizeText(source.target),
+    value: normalizeText(source.value),
+    min: Number.isFinite(min) && min > 0 ? min : undefined,
+  };
+}
+
+function evaluatorForRule(rule: DocumentSpecGateRule): GateRuleEvaluator {
+  return sanitizeEvaluator(rule.evaluator, BUILT_IN_GATE_TYPE_MAP.get(rule.type)?.evaluator);
+}
+
+function sanitizeGateType(type: DocumentSpecGateType): DocumentSpecGateType {
+  const id = safeId(type.id || type.name || `gate-type-${Date.now()}`);
+  if (BUILT_IN_GATE_TYPE_MAP.has(id)) throw new Error('不能覆盖系统内置门禁类型');
+  return {
+    id,
+    name: normalizeText(type.name, '自定义门禁类型'),
+    description: normalizeText(type.description),
+    builtIn: false,
+    defaultLevel: type.defaultLevel === 'warning' || type.defaultLevel === 'info' ? type.defaultLevel : 'error',
+    evaluator: sanitizeEvaluator(type.evaluator),
+  };
 }
 
 function sanitizeSpec(spec: DocumentSpecPackage): DocumentSpecPackage {
@@ -124,14 +202,18 @@ function sanitizeSpec(spec: DocumentSpecPackage): DocumentSpecPackage {
       requiredPromptRoleIds: Array.isArray(item.requiredPromptRoleIds) ? item.requiredPromptRoleIds.filter(Boolean) : [],
       generationHint: item.generationHint || '',
     })) : [],
-    gateRules: Array.isArray(spec.gateRules) ? spec.gateRules.filter(item => item.name).map(item => ({
-      id: safeId(item.id),
-      name: item.name,
-      type: ['required_fact', 'required_chapter', 'required_file_role', 'required_prompt_role', 'source_required', 'forbidden_text', 'min_chapter_length', 'table_required'].includes(item.type) ? item.type : 'required_fact',
-      level: item.level === 'warning' || item.level === 'info' ? item.level : 'error',
-      target: item.target || '',
-      value: item.value || '',
-    })) : [],
+    gateRules: Array.isArray(spec.gateRules) ? spec.gateRules.filter(item => item.name).map(item => {
+      const type = safeId(item.type || item.name || 'custom_gate');
+      return {
+        id: safeId(item.id),
+        name: item.name,
+        type,
+        level: item.level === 'warning' || item.level === 'info' ? item.level : 'error',
+        target: item.target || '',
+        value: item.value || '',
+        evaluator: evaluatorForRule({ ...item, type }),
+      };
+    }) : [],
     wordTemplatePath: spec.wordTemplatePath || '',
     builtIn: Boolean(spec.builtIn),
   };
@@ -151,20 +233,54 @@ function writeSpecs(specs: DocumentSpecPackage[]) {
   fs.writeFileSync(storePath(), JSON.stringify(specs.map(sanitizeSpec), null, 2), 'utf-8');
 }
 
+function readCustomGateTypes(): DocumentSpecGateType[] {
+  try {
+    const file = gateTypesPath();
+    if (!fs.existsSync(file)) return [];
+    return (JSON.parse(fs.readFileSync(file, 'utf-8')) as DocumentSpecGateType[]).map(sanitizeGateType);
+  } catch {
+    return [];
+  }
+}
+
+function writeCustomGateTypes(types: DocumentSpecGateType[]) {
+  fs.writeFileSync(gateTypesPath(), JSON.stringify(types.map(sanitizeGateType), null, 2), 'utf-8');
+}
+
+export function listDocumentGateTypes() {
+  const customTypes = readCustomGateTypes();
+  const typeMap = new Map([...BUILT_IN_GATE_TYPES, ...customTypes].map(type => [type.id, type]));
+  return [...typeMap.values()];
+}
+
+export function saveDocumentGateType(type: DocumentSpecGateType) {
+  const sanitized = sanitizeGateType(type);
+  const customTypes = readCustomGateTypes().filter(item => item.id !== sanitized.id);
+  customTypes.push(sanitized);
+  writeCustomGateTypes(customTypes);
+  return sanitized;
+}
+
+export function deleteDocumentGateType(id: string) {
+  if (BUILT_IN_GATE_TYPE_MAP.has(id)) throw new Error('系统内置门禁类型不可删除');
+  writeCustomGateTypes(readCustomGateTypes().filter(item => item.id !== id));
+}
+
 export function listDocumentSpecs() {
   const customSpecs = readSpecs();
-  const specMap = new Map([DEMO_SPEC, ...customSpecs].map(spec => [spec.id, spec]));
+  const specMap = new Map([sanitizeSpec(DEMO_SPEC), ...customSpecs].map(spec => [spec.id, spec]));
   return [...specMap.values()];
 }
 
 export function getDocumentSpec(id?: string) {
   if (!id) return undefined;
-  if (id === DEMO_SPEC.id) return DEMO_SPEC;
+  if (id === DEMO_SPEC.id) return sanitizeSpec(DEMO_SPEC);
   return readSpecs().find(spec => spec.id === id);
 }
 
 export function saveDocumentSpec(spec: DocumentSpecPackage) {
   const sanitized = sanitizeSpec(spec);
+  if (sanitized.id === DEMO_SPEC.id) throw new Error('Built-in demo spec cannot be overwritten');
   const specs = readSpecs().filter(item => item.id !== sanitized.id);
   specs.push(sanitized);
   writeSpecs(specs);

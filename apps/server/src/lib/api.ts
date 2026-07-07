@@ -125,6 +125,20 @@ export async function deleteKbFiles(relativePaths: string[], projectRoot?: strin
   });
 }
 
+export async function deleteKbFolders(folderPaths: string[], projectRoot?: string) {
+  return fetchJson<{ success: boolean; deleted?: number }>('/api/kb/files', {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folderPaths, projectRoot }),
+  });
+}
+
+export async function deleteKbSelection(relativePaths: string[], folderPaths: string[], projectRoot?: string) {
+  return fetchJson<{ success: boolean; deleted?: number }>('/api/kb/files', {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ relativePaths, folderPaths, projectRoot }),
+  });
+}
+
 export async function deleteAllKbFiles(projectRoot?: string) {
   return fetchJson<{ success: boolean; deleted?: number }>('/api/kb/files', {
     method: 'DELETE', headers: { 'Content-Type': 'application/json' },
@@ -203,13 +217,17 @@ export type PromptExecutionType = 'fact_extraction' | 'chapter_generation' | 'll
 export type FileProcessingType = 'rule' | 'project_fact' | 'table' | 'drawing' | 'specification' | 'reference';
 export interface DocumentRole { id: string; name: string; description: string; type: 'file' | 'prompt'; resourceId?: string; resourceIds?: string[]; builtIn?: boolean; executionType?: PromptExecutionType; processingType?: FileProcessingType; }
 export interface ProjectRoleItem { roleId: string; order: number; }
-export interface ProjectRoleConfig { id: string; name: string; description: string; fileRoles: ProjectRoleItem[]; promptRoles: ProjectRoleItem[]; }
+export interface ProjectRoleConfig { id: string; name: string; description: string; fileRoles: ProjectRoleItem[]; promptRoles: ProjectRoleItem[]; builtIn?: boolean; }
 export type FactFieldType = 'text' | 'number' | 'date' | 'table' | 'list';
-export type GateRuleType = 'required_fact' | 'required_chapter' | 'required_file_role' | 'required_prompt_role' | 'source_required' | 'forbidden_text' | 'min_chapter_length' | 'table_required';
+export type GateRuleType = string;
 export type GateRuleLevel = 'error' | 'warning' | 'info';
+export type GateRuleSubject = 'document' | 'chapter' | 'fact' | 'file_role' | 'prompt_role' | 'table' | 'image' | 'source';
+export type GateRuleOperator = 'exists' | 'contains' | 'not_contains' | 'regex_match' | 'regex_not_match' | 'min_count' | 'min_length' | 'all_have_source' | 'image_caption_required' | 'table_explanation_required';
+export interface GateRuleEvaluator { subject: GateRuleSubject; operator: GateRuleOperator; target?: string; value?: string; min?: number; }
+export interface DocumentSpecGateType { id: string; name: string; description?: string; builtIn?: boolean; defaultLevel: GateRuleLevel; evaluator: GateRuleEvaluator; }
 export interface DocumentSpecFactField { id: string; name: string; type: FactFieldType; required: boolean; sourceRoleIds?: string[]; extractionHint?: string; validationHint?: string; }
 export interface DocumentSpecChapterRule { id: string; title: string; required: boolean; order: number; minWords?: number; requiredFactIds?: string[]; requiredFileRoleIds?: string[]; requiredPromptRoleIds?: string[]; generationHint?: string; }
-export interface DocumentSpecGateRule { id: string; name: string; type: GateRuleType; level: GateRuleLevel; target?: string; value?: string; }
+export interface DocumentSpecGateRule { id: string; name: string; type: GateRuleType; level: GateRuleLevel; target?: string; value?: string; evaluator?: GateRuleEvaluator; }
 export interface DocumentSpecPackage { id: string; name: string; description: string; factFields: DocumentSpecFactField[]; chapterRules: DocumentSpecChapterRule[]; gateRules: DocumentSpecGateRule[]; wordTemplatePath?: string; builtIn?: boolean; }
 export interface DocumentTemplate { id: string; name: string; description: string; category: string; outputTitle: string; chapters: DocumentTemplateChapter[]; projectRoleConfigId?: string; documentSpecId?: string; promptIds?: string[]; boundFilePaths?: string[]; promptBindings?: PromptBinding[]; fileBindings?: FileBinding[]; builtIn?: boolean; }
 export interface PromptProject { id: string; projectId: string; projectRoot?: string; projectName: string; customizePath: string; content: string; mtime: string; hasFile: boolean; isCurrent: boolean; selected: boolean; source: 'current' | 'project' | 'custom'; }
@@ -242,12 +260,18 @@ export async function saveProjectRoleConfig(config: ProjectRoleConfig) {
 export async function deleteProjectRoleConfig(id: string) {
   return fetchJson<{ success: boolean; roles: DocumentRole[]; configs: ProjectRoleConfig[] }>(`/api/documents/roles?mode=config&id=${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
-export async function getDocumentSpecs() { return fetchJson<{ specs: DocumentSpecPackage[] }>('/api/documents/specs'); }
+export async function getDocumentSpecs() { return fetchJson<{ specs: DocumentSpecPackage[]; gateTypes: DocumentSpecGateType[] }>('/api/documents/specs'); }
 export async function saveDocumentSpec(spec: DocumentSpecPackage) {
-  return fetchJson<{ spec: DocumentSpecPackage; specs: DocumentSpecPackage[] }>('/api/documents/specs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(spec) });
+  return fetchJson<{ spec: DocumentSpecPackage; specs: DocumentSpecPackage[]; gateTypes: DocumentSpecGateType[] }>('/api/documents/specs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(spec) });
 }
 export async function deleteDocumentSpec(id: string) {
-  return fetchJson<{ success: boolean; specs: DocumentSpecPackage[] }>(`/api/documents/specs?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+  return fetchJson<{ success: boolean; specs: DocumentSpecPackage[]; gateTypes: DocumentSpecGateType[] }>(`/api/documents/specs?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+export async function saveDocumentGateType(gateType: DocumentSpecGateType) {
+  return fetchJson<{ gateType: DocumentSpecGateType; specs: DocumentSpecPackage[]; gateTypes: DocumentSpecGateType[] }>('/api/documents/specs?mode=gate-type', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(gateType) });
+}
+export async function deleteDocumentGateType(id: string) {
+  return fetchJson<{ success: boolean; specs: DocumentSpecPackage[]; gateTypes: DocumentSpecGateType[] }>(`/api/documents/specs?mode=gate-type&id=${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 export async function getDocumentTemplates() { return fetchJson<{ templates: DocumentTemplate[] }>('/api/documents/templates'); }
 export async function saveDocumentTemplate(template: DocumentTemplate) {
@@ -304,7 +328,7 @@ export async function exportDocument(input: { documentId?: string; title?: strin
 export interface ModelCapabilities { imageGeneration?: boolean; imageUnderstanding?: boolean; fileUnderstanding?: boolean; audio?: boolean; video?: boolean; }
 export interface ProviderInfo { name: string; apiKey?: string; baseUrl?: string; protocol?: string; directEndpoint?: boolean; detectedProtocol: string; hasApiKey: boolean; capabilities?: ModelCapabilities; }
 export interface ModelsConfig { reader: { active: string; list: { name: string; provider: string }[] }; reasoning: { active: string; list: { name: string; provider: string }[] }; action: { active: string; list: { name: string; provider: string }[] }; }
-export interface EmbeddingConfig { provider: 'hash' | 'openai-compatible' | 'transformers-local'; baseUrl?: string; apiKey?: string; model?: string; dimensions?: number; hasApiKey?: boolean; }
+export interface EmbeddingConfig { provider: 'openai-compatible' | 'transformers-local'; baseUrl?: string; apiKey?: string; model?: string; dimensions?: number; hasApiKey?: boolean; }
 
 export async function getProviders() { return fetchJson<ProviderInfo[]>('/api/config/providers'); }
 export async function saveProvider(name: string, cfg: { apiKey?: string; baseUrl?: string; protocol?: string; directEndpoint?: boolean; capabilities?: ModelCapabilities; oldName?: string }) {

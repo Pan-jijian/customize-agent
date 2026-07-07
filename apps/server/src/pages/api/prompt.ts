@@ -204,7 +204,7 @@ function loadPromptConfig(): PromptConfig {
   try {
     const parsed = JSON.parse(fs.readFileSync(promptConfigPath, 'utf-8')) as Partial<PromptConfig>;
     return {
-      selectedIds: Array.isArray(parsed.selectedIds) ? parsed.selectedIds.map(String).filter(id => !BUILT_IN_PROMPT_IDS.has(id)) : [],
+      selectedIds: Array.isArray(parsed.selectedIds) ? parsed.selectedIds.map(String) : [],
       customPrompts: Array.isArray(parsed.customPrompts) ? parsed.customPrompts as PromptConfig['customPrompts'] : [],
     };
   } catch {
@@ -214,8 +214,11 @@ function loadPromptConfig(): PromptConfig {
 
 function savePromptConfig(config: PromptConfig): void {
   fs.mkdirSync(path.dirname(promptConfigPath), { recursive: true });
-  const sanitized = { ...config, selectedIds: config.selectedIds.filter(id => !BUILT_IN_PROMPT_IDS.has(id)) };
-  fs.writeFileSync(promptConfigPath, JSON.stringify(sanitized, null, 2), 'utf-8');
+  fs.writeFileSync(promptConfigPath, JSON.stringify(config, null, 2), 'utf-8');
+}
+
+function validPromptIds(config: PromptConfig): Set<string> {
+  return new Set([...BUILT_IN_PROMPT_IDS, ...config.customPrompts.map(prompt => prompt.id)]);
 }
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -314,12 +317,13 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       if (action === 'createCustom') {
         const now = new Date().toISOString();
         const id = `custom:${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-        config.customPrompts.push({ id, name: String(name || '自定义提示词'), content: typeof content === 'string' ? content : '', createdAt: now, updatedAt: now });
+        config.customPrompts.push({ id, name: String(name || '自定义提示词').trim() || '自定义提示词', content: typeof content === 'string' ? content : '', createdAt: now, updatedAt: now });
         savePromptConfig(config);
         return res.status(200).json({ success: true, id });
       }
       if (action === 'select') {
-        config.selectedIds = Array.isArray(selectedIds) ? selectedIds.map(String).filter(id => !BUILT_IN_PROMPT_IDS.has(id)) : [];
+        const validIds = validPromptIds(config);
+        config.selectedIds = Array.isArray(selectedIds) ? selectedIds.map(String).filter(id => validIds.has(id) || id.startsWith('file:')) : [];
         savePromptConfig(config);
         return res.status(200).json({ success: true });
       }
@@ -339,6 +343,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       const { filePath, content, name } = req.body;
       if (!filePath || typeof content !== 'string') return res.status(400).json({ error: 'filePath and content required' });
       const idOrPath = String(filePath);
+      if (BUILT_IN_PROMPT_IDS.has(idOrPath)) return res.status(403).json({ error: 'Built-in prompt cannot be edited' });
       if (idOrPath.startsWith('custom:')) {
         const config = loadPromptConfig();
         const custom = config.customPrompts.find(item => item.id === idOrPath);
@@ -362,6 +367,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       if (!filePath) return res.status(400).json({ error: 'filePath required' });
       const idOrPath = String(filePath);
       const config = loadPromptConfig();
+      if (BUILT_IN_PROMPT_IDS.has(idOrPath)) return res.status(403).json({ error: 'Built-in prompt cannot be deleted' });
       if (idOrPath.startsWith('custom:')) {
         config.customPrompts = config.customPrompts.filter(item => item.id !== idOrPath);
         config.selectedIds = config.selectedIds.filter(id => id !== idOrPath);

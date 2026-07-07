@@ -5,6 +5,8 @@ import Head from 'next/head';
 import { useRouter } from 'next/router';
 import { ThemeProvider as NextThemesProvider, useTheme } from 'next-themes';
 import { ConfigProvider, App } from 'antd';
+import zhCN from 'antd/locale/zh_CN';
+import enUS from 'antd/locale/en_US';
 import { getAntdTheme } from '@/lib/antdTheme';
 import { Sidebar } from '@/components/Sidebar';
 import { Header } from '@/components/Header';
@@ -40,7 +42,11 @@ function readNested(messages: Messages, key: TranslationKey): string {
 
 export function useAppTranslations(namespace?: string) {
   const { messages } = useAppLocale();
-  return useCallback((key: TranslationKey) => readNested(messages, namespace ? `${namespace}.${key}` : key), [messages, namespace]);
+  return useCallback((key: TranslationKey) => {
+    if (!namespace || key.includes('.')) return readNested(messages, key);
+    const scoped = readNested(messages, `${namespace}.${key}`);
+    return scoped === `${namespace}.${key}` ? readNested(messages, key) : scoped;
+  }, [messages, namespace]);
 }
 
 function resolveLocaleFromCookie(): string {
@@ -86,10 +92,11 @@ function LayoutShell({ children }: { children: React.ReactNode }) {
 
   const localeContext = useMemo(() => ({ locale, setLocale, messages }), [locale, setLocale, messages]);
   const theme = useMemo(() => getAntdTheme(isDark), [isDark]);
+  const antdLocale = locale === 'en-US' ? enUS : zhCN;
 
   return (
     <LocaleContext.Provider value={localeContext}>
-      <ConfigProvider theme={theme}>
+      <ConfigProvider theme={theme} locale={antdLocale}>
         <App>
           <Head><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" /></Head>
           <Sidebar />
