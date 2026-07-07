@@ -5,6 +5,7 @@ import { Alert, Button, Card, Checkbox, Descriptions, Empty, Input, message, Ske
 import { ArrowLeftOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { getKbFileDetail, openKbFileTarget, reindexKbFile, type KbFileDetail, type KbStoredChunk, type KbParentChunk } from '@/lib/api';
+import { useAppTranslations } from '@/components/Layout';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
@@ -90,6 +91,7 @@ function pathTree(paths: string[]) {
 }
 
 export default function KnowledgeFileDetailPage() {
+  const t = useAppTranslations();
   const router = useRouter();
   const relativePath = typeof router.query.relativePath === 'string' ? router.query.relativePath : '';
   const [detail, setDetail] = useState<KbFileDetail>();
@@ -265,23 +267,23 @@ export default function KnowledgeFileDetailPage() {
 
   const chunkColumns: ColumnsType<KbStoredChunk> = [
     { title: '序号', key: 'index', width: 70, render: (_: unknown, __: KbStoredChunk, index: number) => index + 1 },
-    { title: '#', dataIndex: 'chunkIndex', width: 70, render: (value: unknown) => String(value) },
-    { title: '类型', width: 110, render: (_, row) => <Tag>{String(parseJson(row.metadataJson).chunkKind ?? row.category)}</Tag> },
-    { title: '章节/范围', width: 220, render: (_, row) => {
+    { title: t('knowledge.chunkIndex'), dataIndex: 'chunkIndex', width: 90, render: (value: unknown) => String(value) },
+    { title: t('knowledge.chunkType'), width: 110, render: (_, row) => <Tag>{String(parseJson(row.metadataJson).chunkKind ?? row.category)}</Tag> },
+    { title: t('knowledge.sectionOrRange'), width: 220, render: (_, row) => {
       const m = parseJson(row.metadataJson);
       const rowRange = typeof m.rowRange === 'string' ? m.rowRange : undefined;
       return <Space wrap>{row.sectionTitle ? <Tag color="cyan">{row.sectionTitle}</Tag> : null}{rowRange ? <Tag color="gold">行 {rowRange}</Tag> : null}</Space>;
     } },
     { title: 'Token', dataIndex: 'tokenCount', width: 90 },
-    { title: '内容', render: (_, row) => <Paragraph ellipsis={{ rows: 3, expandable: true, symbol: '展开' }} className={styles.searchContent}>{highlight(row.content, filter)}</Paragraph> },
+    { title: t('knowledge.chunkContent'), render: (_, row) => <Paragraph ellipsis={{ rows: 3, expandable: true, symbol: '展开' }} className={styles.searchContent}>{highlight(row.content, filter)}</Paragraph> },
   ];
 
   const parentColumns: ColumnsType<KbParentChunk> = [
     { title: '序号', key: 'index', width: 70, render: (_: unknown, __: KbParentChunk, index: number) => index + 1 },
-    { title: 'Parent', dataIndex: 'parentId', width: 260, render: (value: string) => <span className="break-all">{value}</span> },
+    { title: t('knowledge.parentChunkId'), dataIndex: 'parentId', width: 260, render: (value: string) => <span className="break-all">{value}</span> },
     { title: '切片数', dataIndex: 'chunkCount', width: 90 },
     { title: '章节', dataIndex: 'sectionTitle', width: 220 },
-    { title: '内容', render: (_, row) => <Paragraph ellipsis={{ rows: 3, expandable: true, symbol: '展开' }} className={styles.searchContent}>{highlight(row.content, filter)}</Paragraph> },
+    { title: t('knowledge.chunkContent'), render: (_, row) => <Paragraph ellipsis={{ rows: 3, expandable: true, symbol: '展开' }} className={styles.searchContent}>{highlight(row.content, filter)}</Paragraph> },
   ];
 
   if (loading) return (
@@ -339,18 +341,19 @@ export default function KnowledgeFileDetailPage() {
         <Space direction="vertical" className="w-full">
           <Input allowClear value={filter} onChange={event => setFilter(event.target.value)} placeholder="筛选 rowRange、图层、实体、data path、section、chunk 内容" />
           {filter ? <Space wrap>
-            <Tag color="blue">Parent 命中 {filteredParents.length}</Tag>
-            <Tag color="green">Child 命中 {filteredChunks.length}</Tag>
-            <Tag color="purple">筛选词 {filter}</Tag>
+            <Tag color="blue">{t('knowledge.parentMatches')} {filteredParents.length}</Tag>
+            <Tag color="green">{t('knowledge.childMatches')} {filteredChunks.length}</Tag>
+            <Tag color="purple">{t('knowledge.filterTerm')} {filter}</Tag>
           </Space> : null}
         </Space>
       </Card>
 
-      <Card size="small" title={`Parent Chunks (${filteredParents.length}/${detail.parents.length})`}>
+      <Card size="small" title={`${t('knowledge.parentChunks')} (${filteredParents.length}/${detail.parents.length})`}>
+        <Alert type="info" showIcon message={t('knowledge.parentChunkHint')} style={{ marginBottom: 12 }} />
         <Table rowKey="id" columns={parentColumns} dataSource={filteredParents} pagination={{ pageSize: 10 }} size="small" />
       </Card>
 
-      <Card size="small" title={`Child Chunks (${filteredChunks.length}/${detail.chunks.length})`}>
+      <Card size="small" title={`${t('knowledge.childChunks')} (${filteredChunks.length}/${detail.chunks.length})`}>
         <Table rowKey="id" columns={chunkColumns} dataSource={filteredChunks} pagination={{ pageSize: 20 }} size="small" />
       </Card>
     </div>

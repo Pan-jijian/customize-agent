@@ -16,6 +16,7 @@ export class MultiProjectManager {
   private readonly registry: ProjectRegistry;
   private readonly configManager: ProjectConfigManager;
   private readonly projects = new Map<string, KnowledgeBaseManager>();
+  private readonly lastSearchIndexCheck = new Map<string, number>();
   private globalKB?: KnowledgeBaseManager;
 
   constructor(storageRoot = path.join(os.homedir(), USER_DATA_DIR), llmProvider?: LLMSearchProvider) {
@@ -66,7 +67,7 @@ export class MultiProjectManager {
     const limit = options.limit ?? 10;
     const scope = options.scope ?? 'all';
     const project = await this.getProject(projectRoot);
-    await project.incrementalIndex();
+    await this.ensureFreshForSearch(projectRoot, project);
 
     if (scope === 'project') return project.hybridSearch(query, { limit, weights: options.weights });
 
@@ -91,7 +92,7 @@ export class MultiProjectManager {
   async semanticSearch(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope; filters?: SearchFilters; collections?: string[] } = {}): Promise<FederatedResult> {
     const scope = options.scope ?? 'all';
     const project = await this.getProject(projectRoot);
-    await project.incrementalIndex();
+    await this.ensureFreshForSearch(projectRoot, project);
     if (scope === 'project') {
       return project.semanticSearch(query, options);
     }
@@ -164,6 +165,16 @@ export class MultiProjectManager {
     this.globalKB?.close();
     this.globalKB = undefined;
     this.registry.close();
+  }
+
+  private async ensureFreshForSearch(projectRoot: string, project: KnowledgeBaseManager): Promise<void> {
+    const now = Date.now();
+    const key = path.resolve(projectRoot);
+    const ttlMs = Number(process.env.KB_SEARCH_INDEX_TTL_MS ?? 30000);
+    const last = this.lastSearchIndexCheck.get(key) ?? 0;
+    if (now - last < ttlMs) return;
+    this.lastSearchIndexCheck.set(key, now);
+    await project.incrementalIndex({ vectorMode: 'defer' });
   }
 
   private mergeDebug(projectDebug: FederatedResult['debug'], globalDebug: FederatedResult['debug']): FederatedResult['debug'] {

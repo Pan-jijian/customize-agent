@@ -1436,7 +1436,12 @@ export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'mar
   ].join('\n');
 }
 
-export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; onProgress?: (stages: DocumentExecutionStage[]) => void }): Promise<GeneratedDocumentDraft> {
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw new Error('用户中止');
+}
+
+export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; signal?: AbortSignal; onProgress?: (stages: DocumentExecutionStage[]) => void }): Promise<GeneratedDocumentDraft> {
+  throwIfAborted(input.signal);
   const template = getDocumentTemplate(input.templateId);
   if (!template) throw new Error('Document template not found');
   const projectRoot = ensureBuiltInKnowledgeBase(input.projectRoot || getProjectRoot());
@@ -1454,6 +1459,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const fileProcessingByPath = new Map(fileBindings.flatMap(binding => fileBindingKeys(binding.filePath).map(key => [key, allFileRoles.find(role => role.id === binding.roleId)?.processingType || 'reference'] as const)));
   const project = await manager.getProject(projectRoot);
   await project.incrementalIndex();
+  throwIfAborted(input.signal);
   const chapterDrafts: DocumentDraftChapter[] = [];
   const allEvidence: DocumentEvidence[] = [];
   const missingItems: string[] = [];
@@ -1465,6 +1471,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
 input.onProgress?.([...progressStages]);
 
   for (const chapter of template.chapters) {
+    throwIfAborted(input.signal);
     try {
     const rawEvidence: DocumentEvidence[] = [];
     const queries = chapter.queries.length > 0 ? chapter.queries : [template.name, template.outputTitle, chapter.title, ...fileBindings.map(binding => binding.filePath)];
@@ -1518,10 +1525,12 @@ input.onProgress?.([...progressStages]);
       input.onProgress?.([...progressStages]);
     }
 
+    throwIfAborted(input.signal);
     const llmContent = await Promise.race([
       buildLlmChapterContent(template, chapter, evidence, missingFacts, promptTexts, input.requirement),
       new Promise<null>(resolve => setTimeout(() => resolve(null), 60000)),
     ]);
+    throwIfAborted(input.signal);
     const content = llmContent || buildReadableChapterContent(template.id, chapter, evidence, missingFacts);
     chapterGenerationStages.push({
       type: 'chapter_generation',
@@ -1532,6 +1541,7 @@ input.onProgress?.([...progressStages]);
     });
     chapterDrafts.push({ id: chapter.id, title: chapter.title, content, evidence, missingFacts });
     } catch (err) {
+      if (input.signal?.aborted) throw err;
       console.error(`[gen] chapter ${chapter.title} failed:`, err);
       chapterGenerationStages.push({
         type: 'chapter_generation',
@@ -1547,8 +1557,10 @@ input.onProgress?.([...progressStages]);
     input.onProgress?.([...progressStages]);
   }
 
+  throwIfAborted(input.signal);
   let fileUnderstanding: { stage: DocumentExecutionStage; notes: string[] } = { stage: { type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '文件理解跳过' }, notes: [] };
-  try { fileUnderstanding = await understandReferenceFiles(projectRoot, allEvidence); } catch (err) { console.error('[gen] fileUnderstanding failed:', err); }
+  try { fileUnderstanding = await understandReferenceFiles(projectRoot, allEvidence); } catch (err) { if (input.signal?.aborted) throw err; console.error('[gen] fileUnderstanding failed:', err); }
+  throwIfAborted(input.signal);
   for (const note of fileUnderstanding.notes) {
     allEvidence.push({
       chapterId: 'multimodal-file-understanding',
@@ -1564,7 +1576,8 @@ input.onProgress?.([...progressStages]);
   const facts = extractFacts(template, allEvidence, documentSpec);
   const localFacts = extractStructuredFacts(allEvidence, template, documentSpec);
   let llmExtraction: { facts: DocumentFact[]; stages: DocumentExecutionStage[] } = { facts: [], stages: [] };
-  try { llmExtraction = await extractFactsWithLlm(allEvidence, promptTexts, template, documentSpec); } catch (err) { console.error('[gen] fact extraction failed:', err); }
+  try { llmExtraction = await extractFactsWithLlm(allEvidence, promptTexts, template, documentSpec); } catch (err) { if (input.signal?.aborted) throw err; console.error('[gen] fact extraction failed:', err); }
+  throwIfAborted(input.signal);
   const structuredFacts = [...localFacts, ...llmExtraction.facts];
 
   // 进度回调：文件理解 + 事实抽取完成
@@ -1616,7 +1629,9 @@ input.onProgress?.([...progressStages]);
     generatedAt: Date.now(),
   };
   const initialMarkdown = composeDocumentMarkdown(base);
+  throwIfAborted(input.signal);
   const review = await reviewAndOptimizeMarkdown({ template, spec: documentSpec, markdown: initialMarkdown, evidence: allEvidence, promptTexts, requirement: input.requirement });
+  throwIfAborted(input.signal);
   const reviewedStages = [...executionStages, review.stage];
   validationIssues = applySpecGateRules(documentSpec, validationIssues, factsModel, chapterDrafts, review.markdown, fileBindings, promptBindings);
   const exportGate = buildExportGate(validationIssues, factsModel, chapterDrafts);

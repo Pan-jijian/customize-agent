@@ -100,7 +100,18 @@
     "projectSearch": "项目搜索",
     "autoIndex": "自动索引",
     "enabled": "已启用",
-    "disabled": "已禁用"
+    "disabled": "已禁用",
+    "parentChunks": "父级切片",
+    "childChunks": "子级切片",
+    "parentChunkId": "父级 ID",
+    "chunkIndex": "切片序号",
+    "chunkType": "类型",
+    "sectionOrRange": "章节/范围",
+    "chunkContent": "内容",
+    "parentChunkHint": "父级切片是同一 parentId 下子级切片的上下文合集；当一个父级只包含一个子级时，两处内容相同是正常现象。",
+    "parentMatches": "父级命中",
+    "childMatches": "子级命中",
+    "filterTerm": "筛选词"
   },
   "models": {
     "title": "模型配置",

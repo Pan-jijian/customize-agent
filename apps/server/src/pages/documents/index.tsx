@@ -15,7 +15,7 @@ interface GenerationTaskState {
   id: number; templateId: string; loading: boolean;
   flowSteps: FlowStep[]; activeFlowKey: string | null;
   promise: Promise<{ draft?: GeneratedDocumentDraft; taskId?: string; documentId?: string; record?: GeneratedDocumentRecord }>;
-  draft?: GeneratedDocumentDraft; content?: string; error?: string;
+  documentId?: string; draft?: GeneratedDocumentDraft; content?: string; error?: string;
   listeners: Set<() => void>;
 }
 
@@ -83,11 +83,13 @@ export default function DocumentsPage() {
       if (!activeGenerationTask) return;
       setFlowSteps(activeGenerationTask.flowSteps); setActiveFlowKey(activeGenerationTask.activeFlowKey);
       setLoading(activeGenerationTask.loading);
+      if (activeGenerationTask.documentId) setCurrentDocumentId(activeGenerationTask.documentId);
       if (activeGenerationTask.draft) setDraft(activeGenerationTask.draft);
       if (activeGenerationTask.content !== undefined) setContent(activeGenerationTask.content);
     };
-    activeGenerationTask?.listeners.add(sync); sync();
-    return () => { activeGenerationTask?.listeners.delete(sync); };
+    const task = activeGenerationTask;
+    task?.listeners.add(sync); sync();
+    return () => { task?.listeners.delete(sync); };
   }, []);
 
   useEffect(() => {
@@ -107,15 +109,15 @@ export default function DocumentsPage() {
     if (!savedDocId) return;
     const match = drafts.find(d => d.id === savedDocId && d.status === 'generating');
     if (!match) { localStorage.removeItem('activeGenDocId'); return; }
-    // 后台轻量轮询：只刷新列表状态
+    // 后台轻量轮询：刷新生成记录列表，保持刷新后生成中状态同步
     const poll = setInterval(() => {
       void (async () => {
         try {
           const { document: d } = await getGeneratedDocument(savedDocId);
+          await loadDrafts();
           if (d.status !== 'generating') {
             localStorage.removeItem('activeGenDocId');
             clearInterval(poll);
-            await loadDrafts();
           }
         } catch { clearInterval(poll); }
       })();
@@ -129,100 +131,27 @@ export default function DocumentsPage() {
   const activeFlowIndex = Math.max(0, flowSteps.findIndex(s => s.key === activeFlowKey));
 
   const openDrawerForWorkflow = (id: string) => {
-    setTemplateId(id); setDrawerMode('workflow'); setDrawerOpen(true); setLeftTab('drafts');
+    setTemplateId(id); setCurrentDocumentId(null); setDraft(null); setContent('');
+    setDrawerMode('workflow'); setDrawerOpen(true); setLeftTab('drafts');
   };
   const openDrawerForEditor = async (item: GeneratedDocumentRecord) => {
     setCurrentDocumentId(item.id); setTemplateId(item.templateId);
     const isGenerating = isDraftGenerating(item.status);
-
-    // 如果记录正在生成中 + 有活跃任务 → 直接复用实时步骤
-    if (isGenerating && activeGenerationTask?.loading) {
-      genStarted.current = true;
-      setDrawerMode('workflow'); setDrawerOpen(true);
-      return;
-    }
-
-    // 正在生成 或 失败 → 构建完整框架 + 标记状态
     if (isGenerating || item.status === 'failed') {
       genStarted.current = true;
-      setDraft(null); setContent('');
+      setDraft(null); setContent(''); setLoading(isGenerating);
       setDrawerMode('workflow'); setDrawerOpen(true);
-
-      // 用模板构建完整步骤框架
-      const tpl = templates.find(t => t.id === item.templateId);
-      const framework = createInitialFlowSteps(tpl);
-
-      // 从后端读取已保存的执行阶段
       try {
-        const { document: d } = await getGeneratedDocument(item.id);
-        const stages = d.executionStages || d.draft?.executionStages || [];
-        const stageTypes = stages.map((s: any) => s.type);
-
-        // 在框架中标记状态：匹配到的 → finish/error，遍历找到第一个 wait → process
-        let foundProcess = false;
-        const steps = framework.map(step => {
-          const matched = stages.find((s: any) => s.type === step.key);
-          if (matched) {
-            const st: FlowStepStatus = matched.status === 'failed' ? 'error' : 'finish';
-            return { ...step, status: st, description: matched.message || step.description };
-          }
-          if (!foundProcess && item.status === 'generating') {
-            foundProcess = true;
-            return { ...step, status: 'process' as FlowStepStatus };
-          }
-          return step; // wait
-        });
-        setFlowSteps(steps);
-
-        // 如果有错误，标记 error 来源步骤
-        if (item.status === 'failed') {
-          const failedIdx = steps.findIndex(s => s.status !== 'finish');
-          if (failedIdx >= 0) {
-            setFlowSteps(prev => prev.map((s, i) => i === failedIdx ? { ...s, status: 'error' as FlowStepStatus } : s));
-            setActiveFlowKey(steps[failedIdx]?.key || null);
-          }
-        }
-      } catch { setFlowSteps(framework); }
-
-      // 如果正在生成，开启轮询只更新状态
-      if (isGenerating) {
-        if (recoveryPollRef.current) clearInterval(recoveryPollRef.current);
-        recoveryPollRef.current = setInterval(() => {
-          void (async () => {
-            try {
-              const { document: d } = await getGeneratedDocument(item.id);
-              // 完成了 → 切 editor
-              if (d.status !== 'generating') {
-                if (recoveryPollRef.current) clearInterval(recoveryPollRef.current);
-                if (d.draft) { setDraft(d.draft); setContent(d.editedMarkdown || d.markdown); setDrawerMode('editor'); setFlowSteps([]); }
-                if (d.status === 'failed') setDrawerMode('workflow');
-                localStorage.removeItem('activeGenDocId');
-                await loadDrafts();
-                return;
-              }
-              // 仍在生成 → 更新状态标记
-              const stages = d.executionStages || d.draft?.executionStages || [];
-              if (stages.length > 0) {
-                const stageTypes = stages.map((s: any) => s.type);
-                setFlowSteps(prev => {
-                  let foundProcess = false;
-                  return prev.map(step => {
-                    const matched = stages.find((s: any) => s.type === step.key);
-                    if (matched) return { ...step, status: (matched.status === 'failed' ? 'error' as FlowStepStatus : 'finish' as FlowStepStatus), description: matched.message || step.description };
-                    if (!foundProcess) { foundProcess = true; return { ...step, status: 'process' as FlowStepStatus }; }
-                    return step;
-                  });
-                });
-                setActiveFlowKey(stageTypes[stageTypes.length - 1] || null);
-              }
-            } catch { /* ignore */ }
-          })();
-        }, 2000);
+        const { document } = await getGeneratedDocument(item.id);
+        applyGeneratedRecordToWorkflow(document);
+        if (isDraftGenerating(document.status)) startRecoveredGenerationPolling(document.id);
+        else await loadDrafts();
+      } catch {
+        applyGeneratedRecordToWorkflow(item);
       }
       return;
     }
 
-    // 已完成 → 加载编辑数据
     setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null);
     try {
       const { document } = await getGeneratedDocument(item.id);
@@ -294,6 +223,64 @@ export default function DocumentsPage() {
     const first = step.subSteps.findIndex(s => s.status === 'wait');
     return step.subSteps.map((s, i) => i < first || first === -1 ? { ...s, status: 'finish' as const } : i === first ? { ...s, status: 'process' as const } : s);
   };
+  const stageToFlowStatus = (status: GeneratedDocumentDraft['executionStages'][number]['status']): FlowStepStatus => status === 'failed' ? 'error' : status === 'fallback' ? 'warning' : 'finish';
+  const buildFlowStepsFromRecord = (record: GeneratedDocumentRecord): { steps: FlowStep[]; activeKey: string | null } => {
+    const tpl = templates.find(x => x.id === record.templateId) || currentTemplate;
+    const stages = record.executionStages || record.draft?.executionStages || [];
+    const stageByType = new Map(stages.map(stage => [stage.type, stage]));
+    const framework = createInitialFlowSteps(tpl);
+    const steps = framework.map(step => {
+      if (step.key === 'prepare') {
+        const status: FlowStepStatus = stages.length > 0 ? 'finish' : record.status === 'generating' ? 'process' : 'finish';
+        return { ...step, status, subSteps: updSubs(step, status) };
+      }
+      if (step.key === 'done') {
+        const status: FlowStepStatus = record.status === 'completed' ? 'finish' : record.status === 'warning' ? 'warning' : 'wait';
+        return { ...step, status, subSteps: updSubs(step, status) };
+      }
+      const matched = stageByType.get(step.key as GeneratedDocumentDraft['executionStages'][number]['type']);
+      if (!matched) return step;
+      const status = stageToFlowStatus(matched.status);
+      return { ...step, status, description: matched.message || step.description, subSteps: updSubs(step, status) };
+    });
+    let activeKey: string | null;
+    if (record.status === 'generating') {
+      const lastStageIndex = Math.max(-1, ...stages.map(stage => steps.findIndex(step => step.key === stage.type)).filter(index => index >= 0));
+      const next = steps.slice(lastStageIndex + 1).find(step => step.key !== 'done' && step.status === 'wait') || steps.find(step => step.status === 'process') || steps.find(step => step.key === 'done');
+      activeKey = next?.key || 'prepare';
+      for (const step of steps) if (step.key === activeKey && step.status === 'wait') { step.status = 'process'; step.subSteps = updSubs(step, 'process'); }
+    } else if (record.status === 'failed') {
+      activeKey = steps.find(step => step.status === 'error')?.key || stages.at(-1)?.type || 'prepare';
+    } else {
+      activeKey = 'done';
+    }
+    return { steps, activeKey };
+  };
+  const applyGeneratedRecordToWorkflow = (record: GeneratedDocumentRecord) => {
+    const { steps, activeKey } = buildFlowStepsFromRecord(record);
+    setFlowSteps(steps); setActiveFlowKey(activeKey); setLoading(isDraftGenerating(record.status));
+    if (record.status === 'failed') setDrawerMode('workflow');
+    if ((record.status === 'completed' || record.status === 'warning') && record.draft) {
+      setDraft(record.draft); setContent(record.editedMarkdown || record.markdown); setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null);
+    }
+  };
+  const startRecoveredGenerationPolling = (documentId: string) => {
+    if (recoveryPollRef.current) clearInterval(recoveryPollRef.current);
+    recoveryPollRef.current = setInterval(() => {
+      void (async () => {
+        try {
+          const { document } = await getGeneratedDocument(documentId);
+          applyGeneratedRecordToWorkflow(document);
+          await loadDrafts();
+          if (!isDraftGenerating(document.status)) {
+            if (recoveryPollRef.current) clearInterval(recoveryPollRef.current);
+            recoveryPollRef.current = null;
+            localStorage.removeItem('activeGenDocId');
+          }
+        } catch { /* ignore */ }
+      })();
+    }, 2000);
+  };
   const updFlow = (key: string, st: FlowStepStatus, desc?: string) => { setActiveFlowKey(key); setFlowSteps(prev => { const n = prev.map(s => s.key === key ? { ...s, status: st, description: desc || s.description, subSteps: updSubs(s, st) } : s); setSnap(n, key); return n; }); };
   useEffect(() => {
     if (!loading || !activeFlowKey) return undefined;
@@ -316,9 +303,12 @@ export default function DocumentsPage() {
     let tick = 0;
     for (;;) {
       const { document } = await getGeneratedDocument(docId);
+      applyGeneratedRecordToWorkflow(document);
       if ((document.status === 'completed' || document.status === 'warning') && document.draft) return document;
       if (document.status === 'failed') throw new Error(document.error || '生成失败');
-      const c = pf[Math.min(tick, pf.length - 1)]!; finishPrev(c.k); updFlow(c.k, 'process', c.m);
+      if ((document.executionStages || document.draft?.executionStages || []).length === 0) {
+        const c = pf[Math.min(tick, pf.length - 1)]!; finishPrev(c.k); updFlow(c.k, 'process', c.m);
+      }
       tick++; await new Promise(r => window.setTimeout(r, 1500));
     }
   };
@@ -336,7 +326,7 @@ export default function DocumentsPage() {
     const timers = preview.map((x, i) => window.setTimeout(() => { finishPrev(x.k); updFlow(x.k, 'process', x.m); }, 600 + i * 900));
     try {
       const started = await promise;
-      if (started.documentId) localStorage.setItem('activeGenDocId', started.documentId);
+      if (started.documentId) { localStorage.setItem('activeGenDocId', started.documentId); setCurrentDocumentId(started.documentId); if (activeGenerationTask?.promise === promise) activeGenerationTask.documentId = started.documentId; }
       await loadDrafts(); // 立即刷新列表，展示"生成中"记录
       const doc = started.documentId ? await waitForDoc(started.documentId) : undefined;
       const result = started.draft || doc?.draft;
@@ -376,15 +366,21 @@ export default function DocumentsPage() {
   const genStarted = useRef(false);
 
   const handleAbortGeneration = () => {
-    if (activeGenerationTask) {
-      activeGenerationTask.loading = false;
-      activeGenerationTask.error = '用户中止';
-      notifyGenerationTask();
-      activeGenerationTask = null;
-    }
-    setLoading(false); setFlowSteps([]); setActiveFlowKey(null);
-    setDrawerOpen(false);
-    message.info('已中止生成任务');
+    void (async () => {
+      if (currentDocumentId) await abortGeneratedDocument(currentDocumentId).catch(() => undefined);
+      if (activeGenerationTask) {
+        activeGenerationTask.loading = false;
+        activeGenerationTask.error = '用户中止';
+        notifyGenerationTask();
+        activeGenerationTask = null;
+      }
+      localStorage.removeItem('activeGenDocId');
+      if (recoveryPollRef.current) { clearInterval(recoveryPollRef.current); recoveryPollRef.current = null; }
+      setLoading(false); setFlowSteps([]); setActiveFlowKey(null);
+      setDrawerOpen(false);
+      await loadDrafts();
+      message.info('已中止生成任务');
+    })();
   };
 
   const handleAbortDraft = async (item: GeneratedDocumentRecord) => {
@@ -396,6 +392,7 @@ export default function DocumentsPage() {
       setLoading(false);
     }
     localStorage.removeItem('activeGenDocId');
+    if (recoveryPollRef.current) { clearInterval(recoveryPollRef.current); recoveryPollRef.current = null; }
     try {
       await abortGeneratedDocument(item.id);
       await loadDrafts();

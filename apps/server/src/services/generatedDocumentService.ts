@@ -41,6 +41,7 @@ interface GenerateTask {
   id: string;
   documentId: string;
   status: GeneratedDocumentStatus;
+  controller: AbortController;
   promise: Promise<GeneratedDocumentRecord>;
 }
 
@@ -103,9 +104,9 @@ export function updateGeneratedDocument(id: string, patch: Partial<GeneratedDocu
 export function abortGeneratedDocument(id: string, projectRoot = getProjectRoot()) {
   const current = getGeneratedDocument(id, projectRoot);
   if (!current || current.status !== 'generating') return null;
-  // 中断 task map 中的 promise（标记为已中止）
   for (const [key, task] of tasks) {
     if (task.documentId === id) {
+      task.controller.abort();
       tasks.delete(key);
       break;
     }
@@ -209,7 +210,8 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     updatedAt: now,
   };
   saveGeneratedDocument(initial, projectRoot);
-  const promise = generateDocumentDraft({ ...input, projectRoot, onProgress: (stages) => {
+  const controller = new AbortController();
+  const promise = generateDocumentDraft({ ...input, projectRoot, signal: controller.signal, onProgress: (stages) => {
     // 增量保存执行阶段到顶层字段，前端轮询实时获取
     try {
       const current = getGeneratedDocument(documentId, projectRoot);
@@ -219,14 +221,17 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       }
     } catch (err) { console.error('[gen] progress save error:', err); }
   } }).then(result => {
+    const current = getGeneratedDocument(documentId, projectRoot);
+    if (!current || current.status !== 'generating') return current ?? initial;
     const warningIssues = result.validationIssues.filter(issue => issue.level === 'error' || issue.level === 'warning').map(issue => issue.suggestion ? `${issue.message}：${issue.suggestion}` : issue.message);
     const record = saveGeneratedDocument({
-      ...initial,
+      ...current,
       templateName: result.templateName,
       title: result.title,
       markdown: result.markdown,
       status: warningIssues.length > 0 ? 'warning' : 'completed',
       draft: result,
+      executionStages: result.executionStages,
       assets: result.assets || [],
       completedAt: Date.now(),
       warningIssues,
@@ -234,13 +239,14 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     upsertGeneratedAssets(result.assets || [], documentId, projectRoot);
     return record;
   }).catch(error => {
-    const record = saveGeneratedDocument({ ...initial, status: 'failed', error: error instanceof Error ? error.message : String(error) }, projectRoot);
+    const current = getGeneratedDocument(documentId, projectRoot);
+    if (!current || current.status !== 'generating') return current ?? initial;
+    const record = saveGeneratedDocument({ ...current, status: 'failed', error: error instanceof Error ? error.message : String(error) }, projectRoot);
     return record;
   }).finally(() => {
-    const task = tasks.get(taskId);
-    if (task) task.status = getGeneratedDocument(documentId, projectRoot)?.status || task.status;
+    tasks.delete(taskId);
   });
-  const task: GenerateTask = { id: taskId, documentId, status: 'generating', promise };
+  const task: GenerateTask = { id: taskId, documentId, status: 'generating', controller, promise };
   tasks.set(taskId, task);
   return { taskId, documentId, record: initial };
 }

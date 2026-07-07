@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 import { setKbUploadProgress } from '@/services/kbUploadProgress';
 import { upsertKbOperation, type KbOperationStage } from '@/services/kbOperationLog';
+import { startKnowledgeIndex } from '@/services/kbIndexWorkerService';
 import type { KnowledgeIndexProgress } from '@customize-agent/knowledge';
 
 export const config = {
@@ -68,6 +69,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     } catch {
       uploadedMeta = undefined;
     }
+    startKnowledgeIndex({ id: `${operationId}-vector`, projectRoot, vectorMode: 'sync' });
     const vectorStatus = project.getVectorStatus();
     const vectorReady = vectorStatus.status === 'ready';
     setKbUploadProgress(operationId, {

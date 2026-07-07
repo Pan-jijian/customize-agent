@@ -257,11 +257,12 @@ export class KnowledgeBaseManager {
     this.store.setMetadata('last_incremental_index_at', String(now));
     this.store.setMetadata('total_chunks', String(stats.chunkCount));
     this.store.setMetadata('total_files_indexed', String(stats.fileCount));
+    const hasIndexChanges = diff.newFiles.length + diff.modifiedFiles.length + diff.deletedFiles.length > 0;
     if (options.vectorMode === 'defer') {
+      if (hasIndexChanges) this.store.setMetadata('vector_index_status', 'pending');
       this.reportProgress({ stage: 'vectorizing', percent: 85, message: '解析和切片已完成，向量入库转入后台/稍后执行', chunkCount: stats.chunkCount, vectorStatus: this.getVectorStatus() });
-      void this.ensureVectorIndexFresh(stats.chunkCount, diff.newFiles.length + diff.modifiedFiles.length + diff.deletedFiles.length > 0).catch(() => undefined);
     } else {
-      await this.ensureVectorIndexFresh(stats.chunkCount, diff.newFiles.length + diff.modifiedFiles.length + diff.deletedFiles.length > 0);
+      await this.ensureVectorIndexFresh(stats.chunkCount, hasIndexChanges);
     }
     this.lastSkippedFiles = diff.skippedFiles;
 
@@ -321,14 +322,18 @@ export class KnowledgeBaseManager {
     const start = Date.now();
     const weights = this.retrievalWeights(options.weights);
     const rewrittenQueries = await this.rewriteQueries(query);
-    const keywordItems = rewrittenQueries.flatMap((rewritten, index) => this.keywordSearchItems(rewritten, limit * 2).map(item => ({ ...item, score: item.score * (index === 0 ? 1 : (weights.rewrite ?? 0.72)) })));
-    const vectorItems: FederatedSearchItem[] = [];
-    for (const rewritten of rewrittenQueries.slice(0, 3)) {
-      try {
-        vectorItems.push(...(await this.semanticSearch(rewritten, { ...options, limit: limit * 2 })).results);
-      } catch { /* vector search is optional in hybrid search */ }
+    const rankedLists: Array<{ source: 'keyword' | 'vector'; items: FederatedSearchItem[]; queryIndex: number }> = [];
+    for (const [queryIndex, rewritten] of rewrittenQueries.entries()) {
+      rankedLists.push({ source: 'keyword', items: this.keywordSearchItems(rewritten, limit * 3), queryIndex });
+      if (queryIndex < 3) {
+        try {
+          rankedLists.push({ source: 'vector', items: (await this.semanticSearch(rewritten, { ...options, limit: limit * 3 })).results, queryIndex });
+        } catch { /* vector search is optional in hybrid search */ }
+      }
     }
-    const merged = this.mergeHybridItems([...keywordItems, ...vectorItems], limit * 2, weights).map(item => this.expandContext(item));
+    const keywordItems = rankedLists.filter(list => list.source === 'keyword').flatMap(list => list.items);
+    const vectorItems = rankedLists.filter(list => list.source === 'vector').flatMap(list => list.items);
+    const merged = this.mergeContexts(this.mergeHybridRankedLists(rankedLists, limit * 4, weights).map(item => this.expandContext(item)), limit * 2);
     const useLLMRerank = !!this.llmProvider;
     const preReranked = useLLMRerank ? merged : this.heuristicRerank(query, merged);
     const reranked = useLLMRerank ? (await this.llmRerank(query, preReranked)) : preReranked;
@@ -673,30 +678,69 @@ ${resultsText}
     };
   }
 
-  private mergeHybridItems(items: FederatedSearchItem[], limit: number, weights = this.retrievalWeights()): FederatedSearchItem[] {
+  private mergeHybridRankedLists(lists: Array<{ source: 'keyword' | 'vector'; items: FederatedSearchItem[]; queryIndex: number }>, limit: number, weights = this.retrievalWeights()): FederatedSearchItem[] {
+    const k = Number(process.env.KB_RETRIEVAL_RRF_K ?? 60);
+    const byKey = new Map<string, FederatedSearchItem & { seenSources?: Set<'keyword' | 'vector'> }>();
+    for (const list of lists) {
+      const sourceWeight = list.source === 'vector' ? (weights.vector ?? 0.9) : (weights.keyword ?? 1);
+      const rewriteWeight = list.queryIndex === 0 ? 1 : (weights.rewrite ?? 0.72);
+      list.items.forEach((item, index) => {
+        const key = this.contextKey(item);
+        const rankScore = sourceWeight * rewriteWeight / (k + index + 1);
+        const existing = byKey.get(key);
+        if (!existing) {
+          byKey.set(key, {
+            ...item,
+            score: rankScore,
+            source: list.source,
+            scoreDetails: { ...item.scoreDetails, hybridScore: rankScore },
+            seenSources: new Set([list.source]),
+          });
+          return;
+        }
+        existing.score += rankScore;
+        existing.seenSources?.add(list.source);
+        existing.source = existing.seenSources && existing.seenSources.size > 1 ? 'hybrid' : existing.source;
+        existing.scoreDetails = { ...existing.scoreDetails, ...item.scoreDetails, hybridScore: existing.score };
+        if (item.score > (existing.scoreDetails?.keywordScore ?? existing.scoreDetails?.vectorScore ?? 0)) {
+          existing.content = item.content;
+          existing.sectionTitle = item.sectionTitle ?? existing.sectionTitle;
+          existing.chunkIndex = item.chunkIndex ?? existing.chunkIndex;
+          existing.parentId = item.parentId ?? existing.parentId;
+        }
+      });
+    }
+    const hybridBonus = weights.hybridBonus ?? 0.35;
+    return [...byKey.values()].map(item => {
+      const bonus = item.seenSources && item.seenSources.size > 1 ? item.score * hybridBonus : 0;
+      const { seenSources: _seenSources, ...result } = item;
+      return { ...result, score: result.score + bonus, scoreDetails: { ...result.scoreDetails, hybridScore: result.score + bonus } };
+    }).sort((a, b) => b.score - a.score).slice(0, limit);
+  }
+
+  private mergeContexts(items: FederatedSearchItem[], limit: number): FederatedSearchItem[] {
     const byKey = new Map<string, FederatedSearchItem>();
     for (const item of items) {
-      const key = `${item.scope}:${item.filePath}:${item.parentId ?? item.chunkIndex ?? item.id}`;
-      const sourceWeight = item.source === 'vector' ? (weights.vector ?? 0.9) : item.source === 'keyword' ? (weights.keyword ?? 1) : 1.1;
-      const weighted = { ...item, score: item.score * sourceWeight, scoreDetails: { ...item.scoreDetails, hybridScore: item.score * sourceWeight } };
+      const key = this.contextKey(item);
       const existing = byKey.get(key);
       if (!existing) {
-        byKey.set(key, weighted);
-      } else {
-        const score = Math.max(existing.score, weighted.score) + Math.min(existing.score, weighted.score) * (weights.hybridBonus ?? 0.35);
-        byKey.set(key, {
-          ...existing,
-          score,
-          source: existing.source === weighted.source ? existing.source : 'hybrid',
-          scoreDetails: {
-            ...existing.scoreDetails,
-            ...weighted.scoreDetails,
-            hybridScore: score,
-          },
-        });
+        byKey.set(key, item);
+        continue;
       }
+      const score = Math.max(existing.score, item.score);
+      byKey.set(key, {
+        ...existing,
+        score,
+        source: existing.source === item.source ? existing.source : 'hybrid',
+        content: existing.content.length >= item.content.length ? existing.content : item.content,
+        scoreDetails: { ...existing.scoreDetails, ...item.scoreDetails, hybridScore: score },
+      });
     }
     return [...byKey.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+  }
+
+  private contextKey(item: FederatedSearchItem): string {
+    return `${item.scope}:${item.filePath}:${item.parentId ?? item.chunkIndex ?? item.id}`;
   }
 
   private parseChunkIndex(id: string): number {

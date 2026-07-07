@@ -161,8 +161,8 @@ export default function ModelsPage() {
           <Col xs={24} sm={8}>
             <div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.embeddingProvider')}</div>
             <Select value={embedding.provider} style={{ width: '100%' }}
-              options={[{ label: t('models.embeddingProviderHash'), value: 'hash' }, { label: t('models.embeddingProviderOpenAI'), value: 'openai-compatible' }]}
-              onChange={v => setEmbedding(prev => ({ ...prev, provider: v as 'hash' | 'openai-compatible', dimensions: v === 'hash' ? 384 : (prev.dimensions || 1024) }))} />
+              options={[{ label: t('models.embeddingProviderHash'), value: 'hash' }, { label: '本地语义模型', value: 'transformers-local' }, { label: t('models.embeddingProviderOpenAI'), value: 'openai-compatible' }]}
+              onChange={v => setEmbedding(prev => ({ ...prev, provider: v as EmbeddingConfig['provider'], model: v === 'transformers-local' ? (prev.model || 'BAAI/bge-small-zh-v1.5') : prev.model, dimensions: v === 'hash' ? 384 : v === 'transformers-local' ? 512 : (prev.dimensions || 1024) }))} />
           </Col>
           {embedding.provider === 'openai-compatible' && (
             <>
@@ -175,6 +175,9 @@ export default function ModelsPage() {
               </Col>
             </>
           )}
+          {embedding.provider === 'transformers-local' && (
+            <Col xs={24} sm={8}><div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.model')}</div><Input value={embedding.model} onChange={e => setEmbedding(p => ({ ...p, model: e.target.value }))} placeholder="BAAI/bge-small-zh-v1.5" /></Col>
+          )}
           <Col xs={24} sm={8}>
             <div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.dimensions')}</div>
             <InputNumber style={{ width: '100%' }} min={1} value={embedding.dimensions} onChange={v => setEmbedding(p => ({ ...p, dimensions: Number(v || (p.provider === 'hash' ? 384 : 1024)) }))} />
@@ -182,7 +185,7 @@ export default function ModelsPage() {
           <Col xs={24} sm={8}>
             <div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.status')}</div>
             <Space>
-              <Tag color={embedding.provider === 'hash' ? 'default' : 'blue'}>{embedding.provider === 'hash' ? t('models.localHash') : t('models.openAICompatible')}</Tag>
+              <Tag color={embedding.provider === 'hash' ? 'default' : 'blue'}>{embedding.provider === 'hash' ? t('models.localHash') : embedding.provider === 'transformers-local' ? '本地语义模型' : t('models.openAICompatible')}</Tag>
               {embeddingTestResult === true && <Tag color="success">{t('models.connected')}</Tag>}
               {embeddingTestResult === false && <Tag color="error">{t('models.connectionFailed')}</Tag>}
             </Space>

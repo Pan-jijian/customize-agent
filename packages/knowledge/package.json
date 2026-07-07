@@ -40,6 +40,7 @@
     "knowledge-base"
   ],
   "dependencies": {
+    "@huggingface/transformers": "^3.8.0",
     "@napi-rs/canvas": "^0.1.82",
     "better-sqlite3": "^12.10.0",
     "dwgdxf": "^2.0.1",

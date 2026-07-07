@@ -100,7 +100,18 @@
     "projectSearch": "Project Search",
     "autoIndex": "Auto Index",
     "enabled": "Enabled",
-    "disabled": "Disabled"
+    "disabled": "Disabled",
+    "parentChunks": "Parent Chunks",
+    "childChunks": "Child Chunks",
+    "parentChunkId": "Parent ID",
+    "chunkIndex": "Chunk Index",
+    "chunkType": "Type",
+    "sectionOrRange": "Section / Range",
+    "chunkContent": "Content",
+    "parentChunkHint": "A parent chunk is the context bundle of child chunks with the same parentId. If a parent contains only one child, identical content in both tables is expected.",
+    "parentMatches": "Parent Matches",
+    "childMatches": "Child Matches",
+    "filterTerm": "Filter"
   },
   "models": {
     "title": "Model Configuration",

@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getConfigStore } from '@/services/configService';
+import { LocalTransformersEmbeddingProvider } from '@customize-agent/knowledge';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -7,6 +8,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const embedding = getConfigStore().getEmbedding();
     if (embedding.provider === 'hash') return res.status(200).json({ success: true, message: '本地 Hash Embedding 可用', latencyMs: Date.now() - start });
+    if (embedding.provider === 'transformers-local') {
+      const provider = new LocalTransformersEmbeddingProvider({ model: embedding.model, dimensions: embedding.dimensions });
+      const vector = await provider.embedQuery('ping');
+      return res.status(200).json({ success: vector.length > 0, message: vector.length > 0 ? '本地语义 Embedding 可用' : '返回向量为空', latencyMs: Date.now() - start });
+    }
     if (!embedding.baseUrl || !embedding.model) return res.status(200).json({ success: false, message: 'Embedding baseUrl/model 未配置', latencyMs: Date.now() - start });
     const response = await fetch(`${embedding.baseUrl.replace(/\/+$/u, '')}/embeddings`, {
       method: 'POST',

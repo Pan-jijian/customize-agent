@@ -62,9 +62,12 @@ export class SQLiteVecClient implements CollectionClient {
 
   async getOrCreateCollection(name: string, metadata: Record<string, unknown> = {}): Promise<VectorCollectionInfo> {
     const existing = this.getCollection(name);
-    if (existing) return { name: existing.name, metadata: this.parseMetadata(existing.metadata_json) };
-
     const dimension = Number(metadata.embedding_dimension ?? 384);
+    if (existing) {
+      if (Number(existing.dimension) === dimension) return { name: existing.name, metadata: this.parseMetadata(existing.metadata_json) };
+      await this.deleteCollection(name);
+    }
+
     const tableName = this.tableName(name);
     this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ${tableName} USING vec0(embedding float[${dimension}])`);
     this.db.prepare(`

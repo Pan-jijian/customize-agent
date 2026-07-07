@@ -285,11 +285,11 @@ export class IndexStateStore {
   searchChunks(query: string, limit = 10): ChunkSearchResult[] {
     const terms = this.expandSearchTerms(query);
     if (terms.length === 0) return [];
-    if (this.ftsEnabled) {
-      const ftsResults = this.searchChunksFts(terms, limit);
-      if (ftsResults.length > 0) return ftsResults;
-    }
-    return this.searchChunksLike(terms, limit);
+    const results = [
+      ...(this.ftsEnabled ? this.searchChunksFts(terms, limit) : []),
+      ...this.searchChunksLike(terms, limit),
+    ];
+    return this.mergeKeywordResults(results, limit);
   }
 
   private searchChunksFts(terms: string[], limit: number): ChunkSearchResult[] {
@@ -796,7 +796,11 @@ export class IndexStateStore {
   private expandSearchTerms(query: string): string[] {
     const normalized = query.toLowerCase().trim();
     const terms = new Set(normalized ? [normalized] : []);
-    for (const term of normalized.split(/[\s,，。；;：:、]+/u).filter(Boolean)) terms.add(term);
+    for (const term of normalized.split(/[\s,，。；;：:、]+/u).filter(Boolean)) {
+      terms.add(term);
+      for (const gram of this.chineseNgrams(term)) terms.add(gram);
+    }
+    for (const gram of this.chineseNgrams(normalized)) terms.add(gram);
     const synonyms: Record<string, string[]> = {
       招标: ['招标', '投标', '标书', '招标文件', '投标文件', 'bid', 'tender', 'bidding'],
       投标: ['招标', '投标', '标书', '招标文件', '投标文件', 'bid', 'tender', 'bidding'],
@@ -808,7 +812,7 @@ export class IndexStateStore {
     for (const [key, values] of Object.entries(synonyms)) {
       if (normalized.includes(key)) for (const value of values) terms.add(value.toLowerCase());
     }
-    return [...terms];
+    return [...terms].filter(term => term.length > 0).slice(0, 40);
   }
 
   private toFtsQuery(terms: string[]): string {
@@ -818,9 +822,30 @@ export class IndexStateStore {
     return [exact ? `"${exact}"` : '', ...weak.map(term => `"${term}"`)].filter(Boolean).join(' OR ');
   }
 
+  private mergeKeywordResults(results: ChunkSearchResult[], limit: number): ChunkSearchResult[] {
+    const byId = new Map<string, ChunkSearchResult>();
+    for (const result of results) {
+      const existing = byId.get(result.id);
+      if (!existing || result.score > existing.score) byId.set(result.id, result);
+    }
+    return [...byId.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+  }
+
+  private chineseNgrams(text: string): string[] {
+    const han = text.match(/[\p{Script=Han}]+/gu) ?? [];
+    const grams: string[] = [];
+    for (const token of han) {
+      for (let size = 2; size <= 3; size++) {
+        if (token.length <= size) continue;
+        for (let index = 0; index <= token.length - size; index++) grams.push(token.slice(index, index + size));
+      }
+    }
+    return grams;
+  }
+
   private bm25ToPositiveScore(score: number): number {
     if (!Number.isFinite(score)) return 0;
-    return 1 / (1 + Math.max(0, score));
+    return score < 0 ? -score : 1 / (1 + score);
   }
 
   private scoreChunkDetailed(content: string, terms: string[]): Required<Pick<NonNullable<ChunkSearchResult['scoreDetails']>, 'keywordScore' | 'exactPhraseBoost'>> {

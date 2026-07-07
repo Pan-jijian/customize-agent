@@ -41,7 +41,7 @@ export interface ProviderConfig {
 }
 
 export interface EmbeddingConfig {
-  provider: 'hash' | 'openai-compatible';
+  provider: 'hash' | 'openai-compatible' | 'transformers-local';
   baseUrl?: string;
   apiKey?: string;
   model?: string;
