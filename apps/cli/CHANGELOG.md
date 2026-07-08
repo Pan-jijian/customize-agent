@@ -1,5 +1,11 @@
 # customize-agent
 
+## 4.0.3
+
+### Patch Changes
+
+- Fix the interactive CLI banner to display the published package version instead of a stale hardcoded version.
+
 ## 4.0.2
 
 ### Patch Changes

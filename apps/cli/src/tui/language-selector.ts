@@ -23,6 +23,7 @@ export interface SelectorTexts {
   prompt: string;
   zhLabel: string;
   enLabel: string;
+  version: string;
 }
 
 /**
@@ -63,7 +64,7 @@ export function selectLanguage(texts: SelectorTexts): Promise<Language> {
       const pad = '  ';
       const w = 40;
       lines.push('');
-      lines.push(pad + accent(bold('◆')) + ' ' + text(bold('Customize Agent')) + ' ' + dim('v0.0.3'));
+      lines.push(pad + accent(bold('◆')) + ' ' + text(bold('Customize Agent')) + ' ' + dim(`v${texts.version}`));
       lines.push('');
       lines.push(pad + bold(texts.title));
       lines.push(pad + '┌' + '─'.repeat(w - 2) + '┐');

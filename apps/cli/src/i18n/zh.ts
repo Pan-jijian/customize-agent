@@ -9,12 +9,12 @@ const zh: Record<string, string | string[]> = {
   'lang.select.en': 'English',
 
   // ── CLI ──
-  'cli.description': 'Customize Agent v0.0.3 — 交互式 REPL',
+  'cli.description': 'Customize Agent — 交互式 REPL',
   'cli.prompt_desc': '单次执行模式',
   'cli.plan_desc': 'Plan 模式：只读探索（须配合 -p）',
   'cli.mcp_server_desc': '启动 MCP Server (stdio JSON-RPC)',
   'cli.mcp_server_start': '[MCP Server] 启动 stdio JSON-RPC 2.0...',
-  'cli.single_shot_header': '🚀 Customize Agent v0.0.3 [{provider}]',
+  'cli.single_shot_header': '🚀 Customize Agent [{provider}]',
   'cli.task_label': '任务',
   'cli.result_label': '📋 结果',
 

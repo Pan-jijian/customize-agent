@@ -287,6 +287,7 @@ program.action(async () => {
     kbManager,
     dashboardUrl,
     kbStatus,
+    version: pkg.version,
   });
 
   await repl.start();

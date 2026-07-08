@@ -9,12 +9,12 @@ const en: Record<string, string | string[]> = {
   'lang.select.en': 'English',
 
   // ── CLI ──
-  'cli.description': 'Customize Agent v0.0.3 — interactive REPL',
+  'cli.description': 'Customize Agent — interactive REPL',
   'cli.prompt_desc': 'Single-shot execution mode',
   'cli.plan_desc': 'Plan mode: read-only exploration (requires -p)',
   'cli.mcp_server_desc': 'Start MCP Server (stdio JSON-RPC)',
   'cli.mcp_server_start': '[MCP Server] Starting stdio JSON-RPC 2.0...',
-  'cli.single_shot_header': '🚀 Customize Agent v0.0.3 [{provider}]',
+  'cli.single_shot_header': '🚀 Customize Agent [{provider}]',
   'cli.task_label': 'Task',
   'cli.result_label': '📋 Result',
 

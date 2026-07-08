@@ -32,6 +32,7 @@ export interface ReplConfig {
   kbManager?: MultiProjectManager;
   dashboardUrl?: string;
   kbStatus?: string;
+  version: string;
 }
 
 /**
@@ -58,6 +59,7 @@ export class Repl {
   private kbManager?: MultiProjectManager;
   private dashboardUrl?: string;
   private kbStatus = '未初始化';
+  private version: string;
   private commands: ReplCommandInfo[] = [];
   private currentTaskAbort?: AbortController;
   private taskRunning = false;
@@ -81,6 +83,7 @@ export class Repl {
     this.kbManager = config.kbManager;
     this.dashboardUrl = config.dashboardUrl;
     this.kbStatus = config.kbStatus ?? this.kbStatus;
+    this.version = config.version;
     this.modelProviderCommands = new ModelProviderCommands({
       configStore: this.configStore,
       modelRegistry: this.modelRegistry,
@@ -648,6 +651,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
         prompt: this.i18n.t('lang.select.prompt'),
         zhLabel: this.i18n.t('lang.select.zh'),
         enLabel: this.i18n.t('lang.select.en'),
+        version: this.version,
       });
       this._switchLanguage(lang);
     } catch {
@@ -699,7 +703,7 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
   private _redrawBanner(): void {
     const cfg = this.configStore.load();
     const hasModels = cfg.models.reader.list.length > 0 || cfg.models.reasoning.list.length > 0 || cfg.models.action.list.length > 0;
-    process.stdout.write(welcomeBanner('0.0.3', this.providerDisplay ?? this.executor.providerName, {
+    process.stdout.write(welcomeBanner(this.version, this.providerDisplay ?? this.executor.providerName, {
       title: this.i18n.t('welcome.title'),
       providerLabel: this.i18n.t('welcome.provider_label'),
       startHint: this.i18n.t('welcome.start_hint'),
