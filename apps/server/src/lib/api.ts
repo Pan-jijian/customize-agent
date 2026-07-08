@@ -212,7 +212,7 @@ export async function searchKb(query: string, opts?: { projectRoot?: string; cat
 
 // ═══════ 文档工作台 ═══════
 
-export interface DocumentTemplateChapter { id: string; title: string; purpose: string; queries: string[]; requiredFacts: string[]; }
+export interface DocumentTemplateChapter { id: string; title: string; purpose: string; queries: string[]; requiredFacts: string[]; pinnedEvidenceFilePaths?: string[]; }
 export interface PromptBinding { promptId: string; roleId: string; }
 export interface FileBinding { filePath: string; roleId: string; }
 export type PromptExecutionType = 'fact_extraction' | 'chapter_generation' | 'llm_review' | 'validation' | 'formatting' | 'reference';
@@ -242,7 +242,7 @@ export interface StructuredTableFact { tableType: string; sheet?: string; header
 export interface DocumentFactsModel { project: DocumentFact[]; schedule: DocumentFact[]; quality: DocumentFact[]; safety: DocumentFact[]; resources: DocumentFact[]; tables: StructuredTableFact[]; drawings: DocumentFact[]; rules: DocumentFact[]; specifications: DocumentFact[]; schemaFacts: Record<string, DocumentFact[]>; missing: string[]; conflicts: string[]; }
 export interface ValidationIssue { level: 'error' | 'warning' | 'info'; message: string; source?: string; suggestion?: string; }
 export interface ExportGateResult { passed: boolean; blockingIssues: ValidationIssue[]; checklist: Array<{ key: string; label: string; passed: boolean; message?: string }>; }
-export interface DocumentExecutionStage { type: 'role_binding' | 'knowledge_retrieval' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference'; roleId: string; promptId?: string; status: 'success' | 'fallback' | 'skipped' | 'failed'; message?: string; }
+export interface DocumentExecutionStage { type: 'role_binding' | 'knowledge_retrieval' | 'context_recall' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference'; roleId: string; promptId?: string; status: 'success' | 'fallback' | 'skipped' | 'failed'; message?: string; }
 export interface DocumentAsset { id: string; type: 'image' | 'audio' | 'video' | 'file'; role: 'cover' | 'reference' | 'generated' | 'attachment' | 'map' | 'operator'; path?: string; url?: string; prompt?: string; modelProvider?: string; status: 'generated' | 'prompt_ready' | 'fallback'; message?: string; }
 export interface GeneratedAssetRecord extends DocumentAsset { name: string; source: 'knowledge_base' | 'generated' | 'uploaded' | 'external_url'; indexed: boolean; usedByDocumentIds: string[]; createdAt: number; updatedAt: number; }
 export interface GeneratedDocumentRecord { id: string; taskId?: string; templateId: string; templateName?: string; title: string; requirement: string; markdown: string; editedMarkdown?: string; status: 'generating' | 'completed' | 'warning' | 'failed'; draft?: GeneratedDocumentDraft; executionStages?: GeneratedDocumentDraft['executionStages']; assets: DocumentAsset[]; createdAt: number; updatedAt: number; completedAt?: number; error?: string; warningIssues?: string[]; }

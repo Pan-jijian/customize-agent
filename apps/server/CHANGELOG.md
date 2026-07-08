@@ -1,5 +1,11 @@
 # server
 
+## 4.0.3
+
+### Patch Changes
+
+- Internationalize knowledge base search labels and improve document workflow guidance.
+
 ## 4.0.2
 
 ### Patch Changes

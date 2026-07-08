@@ -111,7 +111,53 @@
     "parentChunkHint": "A parent chunk is the context bundle of child chunks with the same parentId. If a parent contains only one child, identical content in both tables is expected.",
     "parentMatches": "Parent Matches",
     "childMatches": "Child Matches",
-    "filterTerm": "Filter"
+    "filterTerm": "Filter",
+    "searchTitle": "Knowledge Base Search",
+    "searchDesc": "Inspect hybrid retrieval, parent backfill, chunk sources, and score details. The document workspace uses the same retrieval pipeline to automatically recall chapter evidence.",
+    "goToDocuments": "Open Document Workspace",
+    "autoSearchFirst": "Automatic retrieval first, manual confirmation second",
+    "autoSearchFirstDesc": "The document workspace automatically retrieves evidence by chapter. Copy file paths as advanced priority evidence only when official documents, drawings, or tables must be specified.",
+    "searchContentPlaceholder": "Enter knowledge base content to search",
+    "searchAction": "Search",
+    "searchFailed": "Search failed",
+    "recallWeightTuning": "Recall Weight Tuning",
+    "debugPanel": "Retrieval Debug Panel",
+    "originalQuery": "Original Query",
+    "reranker": "Reranker",
+    "rewrittenQueries": "Query Rewrites",
+    "recallCounts": "Recall Counts",
+    "recallWeights": "Recall Weights",
+    "searchResults": "Search Results",
+    "noSearchResults": "No results",
+    "resultIndex": "No.",
+    "rowRange": "Rows",
+    "copyAsPriorityEvidence": "Copy as Priority Evidence",
+    "copyPriorityEvidenceSuccess": "File path copied. Paste it into advanced priority evidence only when manual evidence selection is required.",
+    "expand": "Expand",
+    "weights": {
+      "keyword": "Keyword Weight",
+      "vector": "Vector Weight",
+      "rewrite": "Rewrite Weight",
+      "hybridBonus": "Hybrid Bonus"
+    },
+    "recallSources": {
+      "keyword": "Keyword Retrieval",
+      "vector": "Vector Retrieval",
+      "rewrite": "Query Rewrite",
+      "hybrid": "Hybrid Retrieval",
+      "rerank": "Rerank"
+    },
+    "scopes": {
+      "project": "Current Project",
+      "global": "Global"
+    },
+    "scoreDetails": {
+      "keywordScore": "Keyword Score",
+      "bm25Score": "BM25 Score",
+      "vectorScore": "Vector Score",
+      "rerankBoost": "Rerank Boost",
+      "hybridScore": "Hybrid Score"
+    }
   },
   "models": {
     "title": "Model Configuration",

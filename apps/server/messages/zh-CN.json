@@ -111,7 +111,53 @@
     "parentChunkHint": "父级切片是同一 parentId 下子级切片的上下文合集；当一个父级只包含一个子级时，两处内容相同是正常现象。",
     "parentMatches": "父级命中",
     "childMatches": "子级命中",
-    "filterTerm": "筛选词"
+    "filterTerm": "筛选词",
+    "searchTitle": "知识库搜索",
+    "searchDesc": "查看混合检索、父级回填、分块来源和评分明细；文档工作台会使用同一套检索链路按章节自动召回证据。",
+    "goToDocuments": "进入文档工作台",
+    "autoSearchFirst": "自动检索为主，人工确认为辅",
+    "autoSearchFirstDesc": "文档工作台会自动按章节检索证据；只有当必须指定官方资料、图纸或表格时，才需要复制文件路径作为高级优先证据。",
+    "searchContentPlaceholder": "输入要搜索的知识库内容",
+    "searchAction": "搜索",
+    "searchFailed": "搜索失败",
+    "recallWeightTuning": "召回权重调节",
+    "debugPanel": "检索调试面板",
+    "originalQuery": "原始查询",
+    "reranker": "重排器",
+    "rewrittenQueries": "查询改写",
+    "recallCounts": "召回数量",
+    "recallWeights": "召回权重",
+    "searchResults": "搜索结果",
+    "noSearchResults": "暂无结果",
+    "resultIndex": "序号",
+    "rowRange": "行",
+    "copyAsPriorityEvidence": "复制为高级优先证据",
+    "copyPriorityEvidenceSuccess": "已复制文件路径；仅在需要人工指定证据时粘贴到章节的高级优先证据中",
+    "expand": "展开",
+    "weights": {
+      "keyword": "关键词权重",
+      "vector": "向量权重",
+      "rewrite": "改写权重",
+      "hybridBonus": "混合加成"
+    },
+    "recallSources": {
+      "keyword": "关键词检索",
+      "vector": "向量检索",
+      "rewrite": "查询改写",
+      "hybrid": "混合检索",
+      "rerank": "重排"
+    },
+    "scopes": {
+      "project": "当前项目",
+      "global": "全局"
+    },
+    "scoreDetails": {
+      "keywordScore": "关键词分",
+      "bm25Score": "BM25 分",
+      "vectorScore": "向量分",
+      "rerankBoost": "重排加成",
+      "hybridScore": "混合分"
+    }
   },
   "models": {
     "title": "模型配置",

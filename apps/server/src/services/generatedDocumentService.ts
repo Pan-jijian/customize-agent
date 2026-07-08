@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { GeneratedDocumentDraft, DocumentAsset } from './documentWorkflowService';
 import { generateDocumentDraft } from './documentWorkflowService';
+import { rememberDocumentContext } from './contextService';
 import { getMultiProjectManager, getProjectRoot } from './kbService';
 
 export type GeneratedDocumentStatus = 'generating' | 'completed' | 'warning' | 'failed';
@@ -207,6 +208,16 @@ export function openGeneratedAssetTarget(id: string, target: 'file' | 'directory
   return target === 'directory' ? path.dirname(absolutePath) : absolutePath;
 }
 
+function rememberGeneratedDocument(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
+  const sourceFiles = record.draft?.sources.slice(0, 8).map(item => item.filePath).join('、') || '无明确来源';
+  const warningText = record.warningIssues?.slice(0, 5).join('；') || '无阻断问题';
+  rememberDocumentContext(
+    'project_fact',
+    `文档《${record.title}》已基于模板“${record.templateName || record.templateId}”生成。用户要求：${record.requirement || '未填写'}。主要资料来源：${sourceFiles}。校验结果：${warningText}。`,
+    `Project: ${path.resolve(projectRoot)} | Generated document: ${record.id}`,
+  );
+}
+
 /** 启动异步文档生成任务，包含进度回调持久化、结果入库、资源管理，返回任务 ID 和文档 ID */
 export function startGenerateDocumentTask(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number }, projectRoot = getProjectRoot()) {
   const now = Date.now();
@@ -251,6 +262,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       completedAt: Date.now(),
       warningIssues,
     }, projectRoot);
+    rememberGeneratedDocument(record, projectRoot);
     const assets = upsertGeneratedAssets(result.assets || [], documentId, projectRoot);
     await indexGeneratedDocumentRecord(record, projectRoot).catch(error => console.warn('[generated-documents] 自动入库生成文档失败', error));
     for (const asset of assets.filter(item => item.usedByDocumentIds.includes(documentId) && !item.indexed)) {

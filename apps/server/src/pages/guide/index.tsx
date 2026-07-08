@@ -21,7 +21,7 @@ const stageCards = [
     icon: <RocketOutlined />,
     title: '生成阶段',
     color: 'geekblue',
-    items: ['创建模板', '后台生成轮询', '动态执行状态'],
+    items: ['创建模板', '上下文召回', '知识库证据增强', '动态执行状态'],
   },
   {
     icon: <SafetyCertificateOutlined />,
@@ -125,6 +125,8 @@ const operationSections = [
       '填写模板名称，例如“施工组织设计”“技术标文件”“专项施工方案”。',
       '填写分类、输出标题和模板说明。',
       '选择第六步创建的项目角色配置。',
+      '为章节填写查询词和必需事实；系统会自动按章节检索知识库证据。',
+      '高级优先证据通常无需填写；只有必须指定某份官方资料、图纸或表格时才使用。',
       '保存模板。',
     ],
     checks: ['模板名称清晰', '输出标题正确', '已绑定项目角色配置'],
@@ -136,8 +138,10 @@ const operationSections = [
     path: '左侧菜单 → 生成编辑 → 选择模板 → 点击生成',
     steps: [
       '点击生成按钮后，页面会出现“执行状态”卡片。',
-      '执行状态会根据当前模板、文档规范包、文件角色、提示词角色和章节自动生成，不是固定工程流程。',
-      '当前执行节点会高亮显示，子状态会展示正在处理的章节、事实字段、文件角色或门禁规则。',
+      '系统会先绑定文件角色和提示词角色，再按当前项目召回短期/长期上下文；上下文只作为偏好和历史纠偏参考，不覆盖知识库事实。',
+      '系统会按章节自动检索知识库证据；只有在必须指定官方资料、图纸或表格时，才需要使用高级优先证据。',
+      '执行状态会根据当前模板、文档规范包、文件角色、提示词角色、上下文召回、证据增强和章节自动生成，不是固定工程流程。',
+      '当前执行节点会高亮显示，子状态会展示正在处理的章节、事实字段、文件角色、增强贡献或门禁规则。',
       '生成任务在后台运行，页面通过 documentId 轮询；切换页面后回到生成编辑仍可恢复状态。',
       '生成完成后，系统会用后端真实 executionStages 回填最终状态。',
       '如果导出门禁未通过，生成完成节点会提示需要检查校验结果。',
@@ -232,11 +236,52 @@ export default function GuidePage() {
       </Col>
     </Row>
 
+    <Card title="文件角色和提示词角色案例：它们在模板生成中到底起什么作用">
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={12}>
+          <Card size="small" title="案例 A：创建文件角色“招标文件事实源”">
+            <Paragraph><Text strong>怎么创建：</Text>类型选择 file，处理类型选择“项目事实文件”，绑定招标文件、合同摘要或项目概况。</Paragraph>
+            <Paragraph><Text strong>生成时的作用：</Text>系统会从这个角色绑定的文件里抽取工程名称、建设地点、工期、质量目标、范围边界等事实，并把来源带入结构化事实和章节证据。</Paragraph>
+            <Paragraph><Text strong>带来的提升：</Text>模型不再凭空补项目事实；章节生成和导出校验都会追踪“这句话来自哪个文件角色、哪个文件”。</Paragraph>
+          </Card>
+        </Col>
+        <Col xs={24} lg={12}>
+          <Card size="small" title="案例 B：创建文件角色“工程量清单表格”">
+            <Paragraph><Text strong>怎么创建：</Text>类型选择 file，处理类型选择“表格数据”，绑定 Excel、CSV、清单表或计划表。</Paragraph>
+            <Paragraph><Text strong>生成时的作用：</Text>系统会读取 Sheet、表头、行列和来源范围，把表格数据转换成可引用的结构化资源证据。</Paragraph>
+            <Paragraph><Text strong>带来的提升：</Text>章节中涉及数量、清单、计划、资源配置时，优先引用表格来源，减少数字编造和漏项。</Paragraph>
+          </Card>
+        </Col>
+        <Col xs={24} lg={12}>
+          <Card size="small" title="案例 C：创建提示词角色“章节生成规则”">
+            <Paragraph><Text strong>怎么创建：</Text>先在提示词管理中写好生成规则，例如“必须引用来源、不要写无来源数据、输出正式报告语气”；再创建 prompt 角色，执行类型选择“章节生成”。</Paragraph>
+            <Paragraph><Text strong>生成时的作用：</Text>系统生成每个章节时会把这个提示词加入 LLM 上下文，用它约束语气、结构、引用方式和禁止事项。</Paragraph>
+            <Paragraph><Text strong>带来的提升：</Text>同一套资料可以生成更稳定的文档风格；不同模板只需替换提示词角色，就能调整写法而不改知识库文件。</Paragraph>
+          </Card>
+        </Col>
+        <Col xs={24} lg={12}>
+          <Card size="small" title="案例 D：创建提示词角色“导出前校验规则”">
+            <Paragraph><Text strong>怎么创建：</Text>提示词内容写清楚必须检查的交付要求，例如“不能出现资料未提供、图片引用必须可访问、关键事实必须有来源”；prompt 角色执行类型选择“校验”或“格式化”。</Paragraph>
+            <Paragraph><Text strong>生成时的作用：</Text>生成完成后，系统会结合文档规范包、证据来源和导出门禁检查文档是否可交付。</Paragraph>
+            <Paragraph><Text strong>带来的提升：</Text>把人工审稿经验前置到生成流程，降低导出后才发现缺来源、缺图片、格式不合格的概率。</Paragraph>
+          </Card>
+        </Col>
+      </Row>
+    </Card>
+
     <Card title="我的数据、内置示例和门禁规则说明">
       <Row gutter={[16, 16]}>
         <Col xs={24} md={8}><Card size="small" title="默认优先看我的数据"><Paragraph>文件、提示词、角色配置和规范包默认优先展示用户自己创建的内容。内置示例只用于学习，不能直接覆盖或删除，需要使用时请先复制。</Paragraph></Card></Col>
         <Col xs={24} md={8}><Card size="small" title="自定义门禁类型会执行"><Paragraph>用户在文档规范包中创建的门禁类型，需要选择校验对象和校验方式。保存后它会和系统门禁类型一样参与生成校验，不只是备注说明。</Paragraph></Card></Col>
         <Col xs={24} md={8}><Card size="small" title="上传后关注索引状态"><Paragraph>文件上传完成后，知识库索引会继续在后台写入。请在文件管理页查看状态，如果失败，页面会展示原因，方便重新配置模型或重试。</Paragraph></Card></Col>
+      </Row>
+    </Card>
+
+    <Card title="上下文、知识库证据和增强贡献说明">
+      <Row gutter={[16, 16]}>
+        <Col xs={24} md={8}><Card size="small" title="上下文召回不是事实来源"><Paragraph>生成前会按当前项目召回短期/长期上下文，但它只用于用户偏好、历史纠偏和连续性参考。如果上下文与知识库证据冲突，系统提示词会要求以知识库证据、模板要求和规范包为准。</Paragraph></Card></Col>
+        <Col xs={24} md={8}><Card size="small" title="自动检索为主"><Paragraph>模板章节的查询词、章节目的和必需事实会驱动系统自动检索知识库证据。高级优先证据只是兜底能力，用于必须指定官方资料、图纸或表格的场景，不是日常必填项。</Paragraph></Card></Col>
+        <Col xs={24} md={8}><Card size="small" title="增强贡献可追踪"><Paragraph>生成流程会展示知识库证据、人工确认/固定证据、项目上下文和自动检索证据的数量，帮助判断本次增强是否真的参与生成，而不是增加用户维护成本。</Paragraph></Card></Col>
       </Row>
     </Card>
 
@@ -309,8 +354,8 @@ export default function GuidePage() {
 
     <Card title="生产级生成前检查清单">
       <Row gutter={[16, 16]}>
-        <Col xs={24} md={12} xl={6}><Card size="small" title="资料完整性"><ul className="list-disc pl-5 space-y-1"><li>事实源、规则源、表格源、图片/图纸源分开绑定。</li><li>关键事实在知识库检索中可以搜索到。</li><li>表格有清晰表头，图片和图纸有说明文字。</li></ul></Card></Col>
-        <Col xs={24} md={12} xl={6}><Card size="small" title="角色配置"><ul className="list-disc pl-5 space-y-1"><li>文件角色处理类型选对。</li><li>提示词角色执行类型选对。</li><li>项目角色配置排序符合生成流程。</li></ul></Card></Col>
+        <Col xs={24} md={12} xl={6}><Card size="small" title="资料完整性"><ul className="list-disc pl-5 space-y-1"><li>事实源、规则源、表格源、图片/图纸源分开绑定。</li><li>关键事实在知识库检索中可以搜索到。</li><li>表格有清晰表头，图片和图纸有说明文字。</li><li>只有必须指定资料时才维护高级优先证据。</li></ul></Card></Col>
+        <Col xs={24} md={12} xl={6}><Card size="small" title="角色配置"><ul className="list-disc pl-5 space-y-1"><li>文件角色处理类型选对。</li><li>提示词角色执行类型选对。</li><li>项目角色配置排序符合生成流程。</li><li>生成后查看增强贡献，确认上下文和证据是否真实参与。</li></ul></Card></Col>
         <Col xs={24} md={12} xl={6}><Card size="small" title="规范包"><ul className="list-disc pl-5 space-y-1"><li>required fact 不要过度配置。</li><li>sourceRoleIds 只绑定真正应该提供该事实的角色。</li><li>gateRules 区分 error 和 warning。</li></ul></Card></Col>
         <Col xs={24} md={12} xl={6}><Card size="small" title="交付检查"><ul className="list-disc pl-5 space-y-1"><li>草稿历史记录状态合理。</li><li>warning 原因已经阅读。</li><li>导出文件打开正常，图片和表格可读。</li></ul></Card></Col>
       </Row>
@@ -322,6 +367,8 @@ export default function GuidePage() {
         { key: 'missing-facts', label: '为什么提示必需事实缺失？', children: <Paragraph>优先检查文档规范包中的 factFields、sourceRoleIds、模板章节 requiredFacts 和文件角色绑定。很多情况下不是模型失败，而是资料没有被绑定到正确角色，或字段要求比资料实际内容更严格。</Paragraph> },
         { key: 'draft-duration', label: '草稿历史里的耗时怎么计算？', children: <Paragraph>耗时使用生成记录的 createdAt 到 completedAt 计算；旧记录或未完成记录会使用 updatedAt 兜底。它用于判断本次生成链路整体成本，包括知识库检索、事实抽取、章节生成、资源处理、校验和格式化。</Paragraph> },
         { key: 'asset-index', label: '生成资源会如何进入知识库？', children: <Paragraph>生成资源完成后会自动回流到 knowledgeBase/生成资源 并建立索引，便于后续模板继续复用。资源管理页会展示入库状态，错误资源可以删除后重新生成。</Paragraph> },
+        { key: 'context-accuracy', label: '上下文召回会不会影响准确度？', children: <Paragraph>上下文只作为当前项目的偏好、历史纠偏和连续性参考，不作为事实来源。生成和审查提示词都要求：如果上下文与知识库证据、模板要求或规范包冲突，以知识库证据和规范包为准。</Paragraph> },
+        { key: 'priority-evidence', label: '什么时候需要维护高级优先证据？', children: <Paragraph>日常不需要维护。只有当某章必须引用指定官方资料、图纸、表格，或自动检索结果不稳定时，才从知识库搜索页复制文件路径并填入章节高级优先证据。</Paragraph> },
       ]} />
     </Card>
 

@@ -77,6 +77,77 @@ export function listShortTermContexts(search?: string): ContextEntry[] {
   } finally { db.close(); }
 }
 
+export function recallDocumentContexts(query: string, limit = 8, projectRoot?: string): ContextEntry[] {
+  const db = openMemoryDb();
+  if (!db) return [];
+  try {
+    const terms = query.split(/[\s,，。；;:：、/\\|]+/u).map(item => item.trim()).filter(item => item.length >= 2).slice(0, 8);
+    const projectLike = projectRoot ? `%Project: ${path.resolve(projectRoot)}%` : undefined;
+    if (terms.length === 0) {
+      const rows = projectLike
+        ? db.prepare(`SELECT * FROM memories WHERE context LIKE ? ORDER BY access_count DESC, updated_at DESC LIMIT ?`).all(projectLike, limit)
+        : db.prepare(`SELECT * FROM memories ORDER BY access_count DESC, updated_at DESC LIMIT ?`).all(limit);
+      return (rows as Array<Record<string, unknown>>).map(rowToEntry);
+    }
+    const clauses = terms.map(() => '(content LIKE ? OR context LIKE ?)').join(' OR ');
+    const params = terms.flatMap(term => [`%${term}%`, `%${term}%`]);
+    const rows = projectLike
+      ? db.prepare(`
+        SELECT * FROM memories
+        WHERE context LIKE ? AND (${clauses})
+        ORDER BY access_count DESC, updated_at DESC
+        LIMIT ?
+      `).all(projectLike, ...params, limit)
+      : db.prepare(`
+        SELECT * FROM memories
+        WHERE ${clauses}
+        ORDER BY access_count DESC, updated_at DESC
+        LIMIT ?
+      `).all(...params, limit);
+    return (rows as Array<Record<string, unknown>>).map(rowToEntry);
+  } finally { db.close(); }
+}
+
+function hashMemory(content: string) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < content.length; i++) {
+    h ^= content.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function ensureMemorySchema(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memories (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL CHECK(type IN ('project_fact', 'user_preference', 'feedback', 'pattern')),
+      content TEXT NOT NULL,
+      context TEXT NOT NULL DEFAULT '',
+      access_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+}
+
+export function rememberDocumentContext(type: 'project_fact' | 'user_preference' | 'feedback' | 'pattern', content: string, context = ''): string | null {
+  const normalized = content.replace(/\s+/gu, ' ').trim();
+  if (!normalized) return null;
+  const dbPath = path.join(os.homedir(), '.customize-agent', 'memory.db');
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  try {
+    ensureMemorySchema(db);
+    const id = hashMemory(`${context}\n${normalized.slice(0, 200)}`);
+    db.prepare(`
+      INSERT INTO memories (id, type, content, context) VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET access_count = access_count + 1, updated_at = datetime('now'), context = ?
+    `).run(id, type, normalized, context, context);
+    return id;
+  } finally { db.close(); }
+}
+
 // ── 删除记忆 ──
 
 export function deleteMemory(id: string): boolean {

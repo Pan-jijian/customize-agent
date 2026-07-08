@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import { createProvider } from '@customize-agent/llm';
 import { resolveProtocol } from '@customize-agent/runtime';
 import { ensureBuiltInKnowledgeBase, getMultiProjectManager, getProjectRoot } from './kbService';
+import { recallDocumentContexts } from './contextService';
 import { getConfigStore } from '@/services/configService';
 import { getProjectRoleConfig, listDocumentRoles } from './documentRoleService';
 import { getDocumentSpec, type DocumentSpecGateRule, type DocumentSpecPackage, type GateRuleEvaluator } from './documentSpecService';
@@ -17,6 +18,7 @@ export interface DocumentTemplateChapter {
   purpose: string;
   queries: string[];
   requiredFacts: string[];
+  pinnedEvidenceFilePaths?: string[];
 }
 
 export interface PromptBinding {
@@ -144,7 +146,7 @@ export interface ExportGateResult {
 }
 
 export interface DocumentExecutionStage {
-  type: 'role_binding' | 'knowledge_retrieval' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference';
+  type: 'role_binding' | 'knowledge_retrieval' | 'context_recall' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference';
   roleId: string;
   promptId?: string;
   status: 'success' | 'fallback' | 'skipped' | 'failed';
@@ -235,6 +237,7 @@ function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
       purpose: chapter.purpose || '',
       queries: Array.isArray(chapter.queries) ? chapter.queries.filter(Boolean) : [],
       requiredFacts: Array.isArray(chapter.requiredFacts) ? chapter.requiredFacts.filter(Boolean) : [],
+      pinnedEvidenceFilePaths: Array.isArray(chapter.pinnedEvidenceFilePaths) ? chapter.pinnedEvidenceFilePaths.filter(Boolean) : [],
     })) : [{ id: 'document', title: template.outputTitle || template.name || '业务文档', purpose: template.description || '', queries: [], requiredFacts: [] }],
     promptIds: Array.isArray(template.promptIds) ? template.promptIds.filter(Boolean) : [],
     boundFilePaths: Array.isArray(template.boundFilePaths) ? template.boundFilePaths.filter(Boolean) : [],
@@ -1373,12 +1376,14 @@ function buildDeltaReadableChapter(chapter: DocumentTemplate['chapters'][number]
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, requirement?: string) {
+async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   const evidenceText = evidenceBundlePrompt(bundle);
   if (!evidenceText.trim()) return undefined;
   const system = [
     '你是专业项目文档生成专家，必须严格使用知识库证据、文件角色、提示词角色和文档规范包生成正式文档章节。',
+    '准确性优先级：文档规范包/模板要求 > 已绑定或人工确认的知识库证据 > 自动检索知识库证据 > 项目上下文/历史记忆。',
+    '项目上下文/历史记忆只能作为用户偏好、历史纠偏和连续性参考；不得覆盖、替代或改写知识库证据中的事实。',
     '不要编造资料；可以基于证据做合理归纳；输出 Markdown；不要输出代码块；不要输出“资料不足”等调试话术。',
     promptTexts,
   ].filter(Boolean).join('\n\n');
@@ -1387,6 +1392,7 @@ async function buildLlmChapterContent(template: DocumentTemplate, chapter: Docum
     `章节标题：${chapter.title}`,
     `章节目的：${chapter.purpose}`,
     requirement ? `用户要求：${requirement}` : '',
+    projectContext ? `项目上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${projectContext}` : '',
     missingFacts.length ? `需要特别补足的事实：${missingFacts.join('、')}` : '',
     '请生成一个专业、丰富、可直接导出的章节，要求：',
     '- 保留章节二级标题；',
@@ -1412,6 +1418,7 @@ async function reviewAndOptimizeMarkdown(input: {
   markdown: string;
   evidence: DocumentEvidence[];
   promptTexts: string;
+  projectContext: string;
   requirement?: string;
 }): Promise<{ markdown: string; stage: DocumentExecutionStage }> {
   const reviewBundle = buildEvidenceBundle({ id: 'review', title: '全文审查', purpose: '审查全文证据和资源关系', queries: [], requiredFacts: [] }, input.evidence);
@@ -1424,6 +1431,8 @@ async function reviewAndOptimizeMarkdown(input: {
   ].join('\n') : '未绑定文档规范包。';
   const reviewed = await callDocumentLlm([
     '你是文档质量审查与优化专家。你要基于文件角色、提示词角色、文档规范包和知识库证据，对初稿进行二次审查和优化。',
+    '准确性优先级：文档规范包/模板要求 > 已绑定或人工确认的知识库证据 > 自动检索知识库证据 > 项目上下文/历史记忆。',
+    '项目上下文/历史记忆只能用于风格偏好、历史纠偏和连续性检查；如果与知识库证据冲突，必须以知识库证据为准。',
     '必须保持 Markdown 输出；保留已有图片引用、表格、标题层级和目录；不要删除证据来源；不要编造不存在的事实。',
     '如果正文涉及地图图纸，必须保留或补充对应本地地图文件的 Markdown 图片引用，不能只写文件名。',
     '重点检查：标题、封面、目录、章节完整性、事实来源、所有相关文件类型的资源证据使用、表格呈现、表达专业性、导出友好性。',
@@ -1431,6 +1440,7 @@ async function reviewAndOptimizeMarkdown(input: {
   ].filter(Boolean).join('\n\n'), [
     `模板：${input.template.name}`,
     input.requirement ? `用户要求：${input.requirement}` : '',
+    input.projectContext ? `项目上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${input.projectContext}` : '',
     specDigest,
     '',
     '知识库证据摘要：',
@@ -1445,6 +1455,12 @@ async function reviewAndOptimizeMarkdown(input: {
     return { markdown: input.markdown, stage: { type: 'llm_review', roleId: 'llm-review', status: 'skipped', message: '无可用模型或审查结果不可用，保留生成初稿' } };
   }
   return { markdown: reviewed, stage: { type: 'llm_review', roleId: 'llm-review', status: 'success', message: '已完成 LLM 二次审查与优化' } };
+}
+
+function formatContextEntries(entries: ReturnType<typeof recallDocumentContexts>) {
+  return entries.length > 0
+    ? entries.map((entry, index) => `${index + 1}. [${entry.type}/${entry.importance}] ${entry.content}${entry.source ? `（来源：${entry.source}）` : ''}`).join('\n')
+    : '';
 }
 
 function buildReadableChapterContent(templateId: string, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[]) {
@@ -1569,10 +1585,20 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const missingItems: string[] = [];
   const chapterGenerationStages: DocumentExecutionStage[] = [];
   const progressStages: DocumentExecutionStage[] = [];
+  const contextQuery = [template.name, template.outputTitle, input.requirement, ...template.chapters.flatMap(chapter => [chapter.title, chapter.purpose])].filter(Boolean).join(' ');
+  const projectContextEntries = recallDocumentContexts(contextQuery, 8, projectRoot);
+  const projectContext = formatContextEntries(projectContextEntries);
+  const contextStage: DocumentExecutionStage = {
+    type: 'context_recall',
+    roleId: 'project-memory',
+    status: projectContextEntries.length > 0 ? 'success' : 'skipped',
+    message: projectContextEntries.length > 0 ? `已注入 ${projectContextEntries.length} 条短期/长期上下文` : '未召回可用项目上下文',
+  };
 
   // 第一个进度回调：角色绑定完成
   progressStages.push({ type: 'role_binding', roleId: template.projectRoleConfigId || 'none', status: 'success', message: `已绑定 ${fileBindings.length} 个文件角色、${promptBindings.length} 个提示词角色` });
-input.onProgress?.([...progressStages]);
+  progressStages.push(contextStage);
+  input.onProgress?.([...progressStages]);
 
   for (const chapter of template.chapters) {
     throwIfAborted(input.signal);
@@ -1598,10 +1624,13 @@ input.onProgress?.([...progressStages]);
           source: item.source,
         })));
     }
-    for (const relativePath of boundFilePaths) {
+    const pinnedEvidencePaths = new Set(chapter.pinnedEvidenceFilePaths || []);
+    const chapterPinnedPaths = new Set([...pinnedEvidencePaths, ...boundFilePaths]);
+    for (const relativePath of chapterPinnedPaths) {
+      const isPinnedEvidence = pinnedEvidencePaths.has(relativePath);
       const detail = project.getFileDetail(relativePath);
       if (!detail) {
-        rawEvidence.push(...evidenceFromBoundFile(relativePath, fileRoleByPath.get(relativePath), fileProcessingByPath.get(relativePath), chapter.id, projectRoot));
+        rawEvidence.push(...evidenceFromBoundFile(relativePath, fileRoleByPath.get(relativePath), fileProcessingByPath.get(relativePath), chapter.id, projectRoot).map(item => ({ ...item, source: isPinnedEvidence ? 'pinned-evidence' : item.source })));
         continue;
       }
       rawEvidence.push(...detail.chunks.slice(0, Math.max(maxEvidence, 20)).map(chunk => ({
@@ -1612,7 +1641,7 @@ input.onProgress?.([...progressStages]);
         roleId: fileRoleByPath.get(detail.file.relativePath),
         processingType: fileProcessingByPath.get(detail.file.relativePath),
         sectionTitle: chunk.sectionTitle,
-        source: 'bound-file',
+        source: isPinnedEvidence ? 'pinned-evidence' : 'bound-file',
       })));
     }
     for (const binding of fileBindings) {
@@ -1631,7 +1660,7 @@ input.onProgress?.([...progressStages]);
 
     throwIfAborted(input.signal);
     const llmContent = await Promise.race([
-      buildLlmChapterContent(template, chapter, evidence, missingFacts, promptTexts, input.requirement),
+      buildLlmChapterContent(template, chapter, evidence, missingFacts, promptTexts, projectContext, input.requirement),
       new Promise<null>(resolve => setTimeout(() => resolve(null), 60000)),
     ]);
     throwIfAborted(input.signal);
@@ -1695,6 +1724,16 @@ input.onProgress?.([...progressStages]);
   }
   input.onProgress?.([...progressStages]);
   const structuredTables = extractStructuredTables(allEvidence);
+  const pinnedEvidenceCount = allEvidence.filter(item => item.source === 'pinned-evidence').length;
+  const autoEvidenceCount = allEvidence.filter(item => item.source !== 'pinned-evidence' && item.source !== 'bound-file').length;
+  const enhancementStage: DocumentExecutionStage = {
+    type: 'reference',
+    roleId: 'quality-enhancement',
+    status: allEvidence.length > 0 ? 'success' : 'skipped',
+    message: `增强贡献：知识库证据 ${allEvidence.length} 条，人工确认/固定证据 ${pinnedEvidenceCount} 条，项目上下文 ${projectContextEntries.length} 条，自动检索证据 ${autoEvidenceCount} 条`,
+  };
+  progressStages.push(enhancementStage);
+  input.onProgress?.([...progressStages]);
   for (const fact of structuredFacts) facts[fact.key] = `${fact.value}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
   const sourceCounts = new Map<string, number>();
   for (const item of allEvidence) sourceCounts.set(item.filePath, (sourceCounts.get(item.filePath) ?? 0) + 1);
@@ -1705,7 +1744,9 @@ input.onProgress?.([...progressStages]);
   const assets = template.id === 'delta-force-hot-operators-guide' ? [await generateCoverAsset(template, promptBindings, allEvidence, projectRoot)] : [];
   const executionStages: DocumentExecutionStage[] = [
     { type: 'role_binding', roleId: template.projectRoleConfigId || 'none', status: fileBindings.length > 0 ? 'success' : 'fallback', message: `已绑定 ${fileBindings.length} 个文件角色、${promptBindings.length} 个提示词角色` },
+    contextStage,
     { type: 'knowledge_retrieval', roleId: 'knowledge-base', status: allEvidence.length > 0 ? 'success' : 'fallback', message: `已检索/绑定 ${allEvidence.length} 条证据` },
+    enhancementStage,
     fileUnderstanding.stage,
     ...llmExtraction.stages,
     ...chapterGenerationStages,
@@ -1734,7 +1775,7 @@ input.onProgress?.([...progressStages]);
   };
   const initialMarkdown = composeDocumentMarkdown(base);
   throwIfAborted(input.signal);
-  const review = await reviewAndOptimizeMarkdown({ template, spec: documentSpec, markdown: initialMarkdown, evidence: allEvidence, promptTexts, requirement: input.requirement });
+  const review = await reviewAndOptimizeMarkdown({ template, spec: documentSpec, markdown: initialMarkdown, evidence: allEvidence, promptTexts, projectContext, requirement: input.requirement });
   throwIfAborted(input.signal);
   const reviewedStages = [...executionStages, review.stage];
   validationIssues = applySpecGateRules(documentSpec, validationIssues, factsModel, chapterDrafts, review.markdown, fileBindings, promptBindings);

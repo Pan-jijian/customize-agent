@@ -23,7 +23,7 @@ let activeGenerationTask: GenerationTaskState | null = null;
 function notifyGenerationTask() { activeGenerationTask?.listeners.forEach(l => l()); }
 
 const STAGE_ICONS: Record<string, ReactNode> = {
-  role_binding: <ApartmentOutlined />, knowledge_retrieval: <DatabaseOutlined />, file_understanding: <EyeOutlined />,
+  role_binding: <ApartmentOutlined />, context_recall: <BulbOutlined />, knowledge_retrieval: <DatabaseOutlined />, file_understanding: <EyeOutlined />,
   fact_extraction: <BulbOutlined />, chapter_generation: <FormOutlined />, asset_generation: <PictureOutlined />,
   validation: <SafetyCertificateOutlined />, formatting: <CheckCircleOutlined />, llm_review: <ThunderboltOutlined />,
   export_ready: <FileDoneOutlined />, reference: <PictureOutlined />,
@@ -42,7 +42,7 @@ function templateIcon(category: string, isActive: boolean) {
 }
 
 const STAGE_TITLES: Record<string, string> = {
-  role_binding: '角色配置绑定', knowledge_retrieval: '知识库检索', file_understanding: '多模态文件理解',
+  role_binding: '角色配置绑定', context_recall: '上下文召回', knowledge_retrieval: '知识库检索', file_understanding: '多模态文件理解',
   fact_extraction: 'LLM 事实抽取', chapter_generation: 'LLM 章节生成', asset_generation: '多模态资源生成',
   validation: '规则校验', formatting: '格式化排版', llm_review: 'LLM 审查优化',
   export_ready: '导出就绪', reference: '参考资源处理',
@@ -173,6 +173,7 @@ export default function DocumentsPage() {
     return [
       { key: 'prepare', title: t('documents.flowPrepare'), description: `读取"${tpl?.name || '当前模板'}"并创建后台生成任务`, status: 'process', icon: <FileTextOutlined />, subSteps: subSteps(['读取模板参数', tpl?.documentSpecId ? `加载规范包：${spec?.name || tpl.documentSpecId}` : '未绑定规范包，使用模板章节要求', '创建后台生成任务']) },
       { key: 'role_binding', title: '动态角色配置绑定', description: `绑定 ${fns.length} 个文件角色、${pns.length} 个提示词角色`, status: 'wait', icon: <ApartmentOutlined />, subSteps: subSteps([...(fns.length ? fns.map(n => `文件角色：${n}`) : ['没有文件角色，使用模板绑定文件']), ...(pns.length ? pns.map(n => `提示词角色：${n}`) : ['没有提示词角色，使用默认生成策略'])].slice(0, 10)) },
+      { key: 'context_recall', title: '短期/长期上下文召回', description: '从项目记忆中召回用户偏好、历史纠偏和已生成文档摘要，并注入生成提示词', status: 'wait', icon: <BulbOutlined />, subSteps: subSteps(['召回相关项目记忆', '注入章节生成提示词', '生成完成后沉淀新记忆']) },
       { key: 'knowledge_retrieval', title: '知识库证据检索', description: `按 ${chs.length} 个章节检索文本、文档、表格、图片、图纸和附件`, status: 'wait', icon: <DatabaseOutlined />, subSteps: subSteps(chs.length ? chs.slice(0, 10).map(n => `检索章节：${n}`) : ['按模板标题检索证据']) },
       { key: 'file_understanding', title: '多类型文件理解', description: '按文件角色处理文本、PDF/Word、表格、图片、图纸和附件', status: 'wait', icon: <EyeOutlined />, subSteps: subSteps(['识别文件类型和角色', '构建结构化资源证据包', '必要时调用多模态文件理解']) },
       { key: 'fact_extraction', title: '动态 schema 事实抽取', description: `按 ${facts.length} 个规范/章节事实字段抽取并检测冲突`, status: 'wait', icon: <BulbOutlined />, subSteps: subSteps(facts.length ? facts.slice(0, 10).map(n => `抽取事实：${n}`) : ['抽取模板要求的事实', '合并来源和角色', '检测事实冲突']) },
@@ -295,13 +296,13 @@ export default function DocumentsPage() {
 
   const openEditor = (tpl?: DocumentTemplate) => {
     const value = tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, documentSpecId: undefined, chapters: [] };
-    form.setFieldsValue({ ...value, chapters: value.chapters.map(chapter => ({ ...chapter, queriesText: chapter.queries.join('\n'), requiredFactsText: chapter.requiredFacts.join('\n') })) });
+    form.setFieldsValue({ ...value, chapters: value.chapters.map(chapter => ({ ...chapter, queriesText: chapter.queries.join('\n'), requiredFactsText: chapter.requiredFacts.join('\n'), pinnedEvidenceText: (chapter.pinnedEvidenceFilePaths || []).join('\n') })) });
     setTemplateModalOpen(true);
   };
   const saveTpl = async () => {
     try {
       const v = await form.validateFields();
-      const template = { ...v, chapters: (v.chapters || []).map((chapter: DocumentTemplate['chapters'][number] & { queriesText?: string; requiredFactsText?: string }) => ({ ...chapter, queries: String(chapter.queriesText || '').split(/\r?\n/u).map(item => item.trim()).filter(Boolean), requiredFacts: String(chapter.requiredFactsText || '').split(/\r?\n/u).map(item => item.trim()).filter(Boolean), queriesText: undefined, requiredFactsText: undefined })) } as DocumentTemplate;
+      const template = { ...v, chapters: (v.chapters || []).map((chapter: DocumentTemplate['chapters'][number] & { queriesText?: string; requiredFactsText?: string; pinnedEvidenceText?: string }) => ({ ...chapter, queries: String(chapter.queriesText || '').split(/\r?\n/u).map(item => item.trim()).filter(Boolean), requiredFacts: String(chapter.requiredFactsText || '').split(/\r?\n/u).map(item => item.trim()).filter(Boolean), pinnedEvidenceFilePaths: String(chapter.pinnedEvidenceText || '').split(/\r?\n/u).map(item => item.trim()).filter(Boolean), queriesText: undefined, requiredFactsText: undefined, pinnedEvidenceText: undefined })) } as DocumentTemplate;
       const r = await saveDocumentTemplate(template);
       setTemplates(r.templates); setTemplateId(r.template.id); setTemplateModalOpen(false); await loadDrafts(); message.success(t('common.success'));
     } catch (e) { if (e instanceof Error) message.error(e.message); }
@@ -706,6 +707,7 @@ export default function DocumentsPage() {
                       <Col span={2}><Button danger size="small" onClick={() => remove(field.name)}>删除</Button></Col>
                       <Col span={12}><Form.Item name={[field.name, 'queriesText']} label="查询词（每行一个）"><TextArea rows={3} /></Form.Item></Col>
                       <Col span={12}><Form.Item name={[field.name, 'requiredFactsText']} label="必需事实（每行一个）"><TextArea rows={3} /></Form.Item></Col>
+                      <Col span={24}><Form.Item name={[field.name, 'pinnedEvidenceText']} label="高级可选：人工确认优先证据"><TextArea rows={2} placeholder="通常无需手动填写。仅当系统自动检索不稳定或必须指定官方资料时，每行填写一个 knowledgeBase 相对路径" /></Form.Item></Col>
                     </Row>
                   </Card>
                 ))}
