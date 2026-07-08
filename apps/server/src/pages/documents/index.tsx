@@ -65,7 +65,7 @@ export default function DocumentsPage() {
   const [content, setContent] = useState('');
   const [drafts, setDrafts] = useState<GeneratedDocumentRecord[]>([]);
   const [currentDocumentId, setCurrentDocumentId] = useState<string | null>(null);
-  const [exporting, setExporting] = useState(false);
+  const [exporting, setExporting] = useState<string | null>(null);
   const [regeneratingChapter, setRegeneratingChapter] = useState<string | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [templateValidations, setTemplateValidations] = useState<Record<string, DocumentTemplateValidation>>({});
@@ -446,14 +446,14 @@ export default function DocumentsPage() {
     window.setTimeout(() => URL.revokeObjectURL(u), 1000);
   };
   const doExport = async (fmt: 'markdown' | 'html' | 'pdf' | 'docx') => {
-    if (!draft) return; setExporting(true);
+    if (!draft) return; setExporting(fmt);
     try {
       const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
       const ext = fmt === 'markdown' ? 'md' : fmt;
       const wp = documentSpecs.find(s => s.id === currentTemplate?.documentSpecId)?.wordTemplatePath;
       const blob = await exportDocument({ documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, wordTemplatePath: wp });
       dl(blob, `${draft.title}.${ext}`, mimes[fmt]);
-    } catch (e) { message.error(e instanceof Error ? e.message : t('common.error')); } finally { setExporting(false); }
+    } catch (e) { message.error(e instanceof Error ? e.message : t('common.error')); } finally { setExporting(null); }
   };
   const saveDraft = async () => {
     if (!draft) return;
@@ -590,19 +590,17 @@ export default function DocumentsPage() {
         styles={{ body: { padding: '16px 24px' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
         extra={draft ? <Space wrap>
           <Button icon={<SaveOutlined />} onClick={() => { void saveDraft(); }}>{t('documents.saveDraft')}</Button>
-          <Button icon={<DownloadOutlined />} loading={exporting} onClick={() => { void doExport('markdown'); }}>MD</Button>
-          <Button loading={exporting} onClick={() => { void doExport('html'); }}>HTML</Button>
-          <Button loading={exporting} onClick={() => { void doExport('docx'); }}>DOCX</Button>
-          <Button type="primary" loading={exporting} onClick={() => { void doExport('pdf'); }}>PDF</Button>
+          <Button icon={<DownloadOutlined />} loading={exporting === 'markdown'} onClick={() => { void doExport('markdown'); }}>MD</Button>
+          <Button loading={exporting === 'html'} onClick={() => { void doExport('html'); }}>HTML</Button>
+          <Button loading={exporting === 'docx'} onClick={() => { void doExport('docx'); }}>DOCX</Button>
+          <Button type="primary" loading={exporting === 'pdf'} onClick={() => { void doExport('pdf'); }}>PDF</Button>
         </Space> : (loading && drawerMode === 'workflow') ? <Button danger onClick={handleAbortGeneration}>中止任务</Button> : undefined}
       >
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
           {/* Workflow mode: execution steps */}
           {drawerMode === 'workflow' && flowSteps.length > 0 && (
-            <Card size="small" type="inner" title={t('documents.executionStatus')} style={{ maxHeight: 360, overflow: 'auto' }}>
-              <Steps direction="vertical" size="small" current={activeFlowIndex}
-                items={flowSteps.map(s => ({ title: s.title, description: stepDesc(s), status: antdStatus(s.status), icon: flowIcon(s) }))} />
-            </Card>
+            <Steps direction="vertical" size="small" current={activeFlowIndex}
+              items={flowSteps.map(s => ({ title: s.title, description: stepDesc(s), status: antdStatus(s.status), icon: flowIcon(s) }))} />
           )}
 
           {/* Workflow mode: loading spinner before steps appear */}
@@ -613,12 +611,11 @@ export default function DocumentsPage() {
           {/* Both modes: editor (after generation or from draft) */}
           {draft && (
             <div ref={editorRef}>
-              <Card size="small" title="编辑器">
-                <Tabs items={[
-                  { key: 'edit', label: t('documents.edit'), children: <TextArea rows={22} value={content} onChange={e => setContent(e.target.value)} /> },
+              <Tabs items={[
+                  { key: 'edit', label: t('documents.edit'), children: <TextArea rows={35} value={content} onChange={e => setContent(e.target.value)} /> },
                   {
                     key: 'chapters-facts', label: '章节与事实',
-                    children: <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxHeight: 500, overflow: 'auto' }}>
+                    children: <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                       {draft.chapters.length > 0 && <div>
                         <Text strong style={{ fontSize: 13, marginBottom: 8, display: 'block' }}>章节 ({draft.chapters.length})</Text>
                         <List size="small" dataSource={draft.chapters} renderItem={c => (
@@ -649,7 +646,7 @@ export default function DocumentsPage() {
                   {
                     key: 'validation', label: `校验 (${draft.validationIssues.length})`,
                     children: draft.validationIssues.length === 0 ? <Empty description="校验通过" /> : (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 500, overflow: 'auto' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                         {draft.validationIssues.map(item => (
                           <div key={`${item.level}-${item.message}`} style={{ border: '1px solid var(--colorBorderSecondary)', borderRadius: 8, padding: 12 }}>
                             <Tag color={item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'blue'}>{item.level}</Tag>
@@ -676,7 +673,6 @@ export default function DocumentsPage() {
                     )} />
                   },
                 ]} />
-              </Card>
             </div>
           )}
         </Space>

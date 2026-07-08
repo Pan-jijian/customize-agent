@@ -91,29 +91,34 @@ export default function OverviewPage() {
       <Card size="small" title="资源概览">
         <Row gutter={[16, 16]}>
           <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small"><Statistic title="文件角色" value={fileRoleCount} prefix={<FileTextOutlined style={{ color: 'var(--colorAccent)' }} />} /></Card>
+            <Card size="small" style={{ height: '100%' }}><Statistic title="文件角色" value={fileRoleCount} prefix={<FileTextOutlined style={{ color: 'var(--colorAccent)' }} />} /></Card>
           </Col>
           <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small"><Statistic title="提示词角色" value={promptRoleCount} prefix={<FormOutlined style={{ color: 'var(--colorWarning)' }} />} /></Card>
+            <Card size="small" style={{ height: '100%' }}><Statistic title="提示词角色" value={promptRoleCount} prefix={<FormOutlined style={{ color: 'var(--colorWarning)' }} />} /></Card>
           </Col>
           <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small"><Statistic title="文档规范包" value={specCount} prefix={<SafetyOutlined style={{ color: 'var(--colorOk)' }} />} /></Card>
+            <Card size="small" style={{ height: '100%' }}><Statistic title="文档规范包" value={specCount} prefix={<SafetyOutlined style={{ color: 'var(--colorOk)' }} />} /></Card>
           </Col>
           <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small"><Statistic title="模板" value={templateCount} prefix={<LayoutOutlined style={{ color: 'var(--colorDanger)' }} />} /></Card>
+            <Card size="small" style={{ height: '100%' }}><Statistic title="模板" value={templateCount} prefix={<LayoutOutlined style={{ color: 'var(--colorDanger)' }} />} /></Card>
           </Col>
           <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small">
+            <Card size="small" style={{ height: '100%', overflow: 'hidden' }}>
               <Statistic
-                title="Embedding"
+                title="语义模型"
                 value={embeddingConfig?.provider === 'openai-compatible' ? '外部 Embedding' : embeddingConfig ? '本地语义模型' : '—'}
                 prefix={<NodeIndexOutlined style={{ color: 'var(--colorAccent)' }} />}
+                valueStyle={{ fontSize: 18, whiteSpace: 'nowrap' }}
               />
-              {embeddingConfig?.model && <div className="text-xs mt-1" style={{ color: 'var(--colorTextSecondary)' }}>{embeddingConfig.model}{embeddingConfig.dimensions ? ` · ${embeddingConfig.dimensions}维` : ''}</div>}
+              {embeddingConfig?.model && (
+                <div className="text-xs mt-1" style={{ color: 'var(--colorTextSecondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`${embeddingConfig.model}${embeddingConfig.dimensions ? ` · ${embeddingConfig.dimensions}维` : ''}`}>
+                  {embeddingConfig.model}{embeddingConfig.dimensions ? ` · ${embeddingConfig.dimensions}维` : ''}
+                </div>
+              )}
             </Card>
           </Col>
           <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small"><Statistic title="模型供应商" value={providerCount} prefix={<RobotOutlined style={{ color: 'var(--colorAccent)' }} />} /></Card>
+            <Card size="small" style={{ height: '100%' }}><Statistic title="模型供应商" value={providerCount} prefix={<RobotOutlined style={{ color: 'var(--colorAccent)' }} />} /></Card>
           </Col>
         </Row>
       </Card>

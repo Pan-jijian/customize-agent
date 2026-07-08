@@ -205,25 +205,42 @@ export default function ModelsPage() {
               const tier = models[key as keyof ModelsConfig];
               const tierOpts = tier.list.map(m => ({ label: `${m.provider} / ${m.name}`, value: `${m.provider}:${m.name}` }));
               const newOpts = providers.filter(p => !tier.list.some(m => m.provider === p.name)).map(p => ({ label: p.name, value: `${p.name}:${p.name}` }));
+              const activeModel = tier.active ? tier.list.find(m => m.name === tier.active) : null;
               return (
                 <Col key={key} xs={24} lg={8}>
-                  <Card size="small" title={<span style={{ fontSize: 13 }}>{t(labelKey)}</span>}>
-                    <div style={{ fontSize: 12, color: 'var(--colorTextSecondary)', marginBottom: 8 }}>{t(descKey)}</div>
-                    <Select value={tier.active ? `${tier.list.find(m => m.name === tier.active)?.provider || ''}:${tier.active}` : undefined}
+                  <Card size="small" title={<span style={{ fontSize: 14 }}>{t(labelKey)}</span>} style={{ height: '100%' }}>
+                    <div style={{ fontSize: 12, color: 'var(--colorTextSecondary)', marginBottom: 8, lineHeight: 1.5 }}>{t(descKey)}</div>
+                    <Select value={tier.active ? `${activeModel?.provider || ''}:${tier.active}` : undefined}
                       onChange={v => { void handleModelChange(key, v); }} allowClear placeholder={t('models.selectModelPlaceholder')}
                       style={{ width: '100%' }} options={[...tierOpts, ...newOpts]} />
-                    {tier.list.length > 0 && (
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
-                        {tier.list.map(m => (
-                          <Tag key={`${m.provider}:${m.name}`} color={m.name === tier.active ? 'blue' : undefined} closable onClose={() => {
-                            const u = { ...models }; const tc = u[key as keyof ModelsConfig];
-                            tc.list = tc.list.filter(x => !(x.name === m.name && x.provider === m.provider));
-                            if (tc.active === m.name) tc.active = tc.list[0]?.name ?? '';
-                            setModels(u); saveModels(u).catch(() => message.error(t('common.error')));
-                          }} style={{ margin: 0, fontSize: 11 }}>{m.provider}/{m.name}</Tag>
-                        ))}
-                      </div>
-                    )}
+                    {activeModel && (() => {
+                      const prov = providers.find(p => p.name === activeModel.provider);
+                      return (
+                        <div style={{
+                          marginTop: 12,
+                          padding: '8px 12px',
+                          background: 'var(--colorBgElevated)',
+                          borderRadius: 6,
+                          border: '1px solid var(--colorBorderSecondary)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                        }}>
+                          <ApiOutlined style={{ color: 'var(--colorAccent)', fontSize: 14, flexShrink: 0 }} />
+                          <span style={{ fontSize: 12, fontWeight: 500, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {activeModel.provider}
+                          </span>
+                          {prov?.capabilities && CAPABILITY_OPTIONS.filter(o => prov.capabilities![o.key]).length > 0 && (
+                            <Space size={4} wrap style={{ flexShrink: 0 }}>
+                              {CAPABILITY_OPTIONS.filter(o => prov.capabilities![o.key]).slice(0, 2).map(o => (
+                                <Tag key={o.key} color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{o.label}</Tag>
+                              ))}
+                            </Space>
+                          )}
+                          <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '18px', flexShrink: 0 }}>激活</Tag>
+                        </div>
+                      );
+                    })()}
                   </Card>
                 </Col>
               );
