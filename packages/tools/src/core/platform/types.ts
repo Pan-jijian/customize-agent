@@ -1,31 +1,31 @@
-// @customize-agent/tools — Platform abstraction types
+// @customize-agent/tools — 平台抽象类型定义
 
 export type Platform = 'win32' | 'darwin' | 'linux';
 
-/** Shell detection result */
+/** Shell 检测结果 */
 export interface ShellConfig {
-  /** Shell executable path or name (e.g. 'powershell.exe', '/bin/zsh') */
+  /** Shell 可执行文件路径或名称（如 'powershell.exe'、'/bin/zsh'） */
   shell: string;
-  /** Shell type identifier */
+  /** Shell 类型标识 */
   type: 'pwsh' | 'powershell' | 'sh' | 'bash' | 'zsh';
-  /** Whether Unix commands need translation before execution */
+  /** Unix 命令是否需要在执行前翻译 */
   needsTranslation: boolean;
-  /** Additional args to pass to the shell (e.g. ['-NoProfile', '-Command'] for PowerShell) */
+  /** 传给 Shell 的额外参数（如 PowerShell 的 ['-NoProfile', '-Command']） */
   shellArgs: string[];
-  /** Command separator (&& on cmd/pwsh, ; on Unix) */
+  /** 命令分隔符（cmd/pwsh 用 &&，Unix 用 ;） */
   cmdSep: string;
-  /** Path separator for this platform (: on Unix, ; on Windows) */
+  /** 当前平台的路径分隔符（Unix :，Windows ;） */
   pathSep: string;
 }
 
-/** Result of executing a command through the shell abstraction */
+/** 通过 Shell 抽象执行命令的结果 */
 export interface ShellResult {
   stdout: string;
   stderr: string;
   code: number;
 }
 
-/** Minimal process reference for cross-platform kill */
+/** 最小化进程引用，用于跨平台进程终止 */
 export interface ProcessReference {
   pid?: number;
   // eslint-disable-next-line @typescript-eslint/no-unsafe-function-type

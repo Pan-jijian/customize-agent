@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { getKbUploadProgress } from '@/services/kbUploadProgress';
 import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 
+/** 将索引任务状态映射为前端展示阶段 */
 function mapJobStage(status: string) {
   if (status === 'PARSING') return 'parsing';
   if (status === 'CHUNKING') return 'chunking';

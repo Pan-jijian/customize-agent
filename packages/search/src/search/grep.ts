@@ -65,6 +65,7 @@ export class CodeSearcher {
     }
   }
 
+  /** 使用 ripgrep 二进制进行文本搜索 */
   private async _rgSearch(pattern: string, options: SearchOptions, maxResults: number): Promise<SearchMatch[]> {
     const args: string[] = [
       '--no-heading', '--with-filename', '--line-number',
@@ -107,6 +108,7 @@ export class CodeSearcher {
     return this._parseRgOutput(result.stdout);
   }
 
+  /** 解析 ripgrep 输出结果（格式: file:line:content） */
   private _parseRgOutput(stdout: string): SearchMatch[] {
     const results: SearchMatch[] = [];
     for (const line of stdout.split('\n')) {
@@ -127,6 +129,7 @@ export class CodeSearcher {
     return results;
   }
 
+  /** JS 降级搜索：fast-glob + 逐行正则匹配（ripgrep 不可用时自动回退） */
   private async _jsSearch(pattern: string, options: SearchOptions, maxResults: number): Promise<SearchMatch[]> {
     const results: SearchMatch[] = [];
     const searchBase = options.path ? path.resolve(this.cwd, options.path) : this.cwd;

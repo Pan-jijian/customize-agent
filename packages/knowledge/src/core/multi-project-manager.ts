@@ -10,6 +10,7 @@ import { getProjectKbPath, ProjectConfigManager } from './project-config.js';
 import { ProjectRegistry } from './project-registry.js';
 import type { LLMSearchProvider } from '../llm/llm-search-provider.js';
 
+/** 多项目管理器，管理多个项目的知识库并支持跨项目搜索 */
 export class MultiProjectManager {
   private readonly storageRoot: string;
   private readonly llmProvider?: LLMSearchProvider;
@@ -26,6 +27,10 @@ export class MultiProjectManager {
     this.configManager = new ProjectConfigManager(storageRoot);
   }
 
+  /**
+   * 获取或创建指定项目的知识库管理器
+   * @param projectRoot 项目根目录
+   */
   async getProject(projectRoot: string): Promise<KnowledgeBaseManager> {
     const resolvedRoot = path.resolve(projectRoot);
     const projectId = computeProjectId(resolvedRoot);
@@ -49,6 +54,9 @@ export class MultiProjectManager {
     return manager;
   }
 
+  /**
+   * 获取或初始化全局知识库
+   */
   async getGlobalKB(): Promise<KnowledgeBaseManager> {
     if (this.globalKB) return this.globalKB;
 

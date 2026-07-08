@@ -5,11 +5,13 @@ import { DEFAULT_CATEGORY_DIRS, KNOWLEDGE_BASE_DIR, USER_DATA_DIR } from '../con
 import type { ProjectConfig } from '../types.js';
 import { computeProjectId } from './project-id.js';
 
+/** 获取项目配置文件路径 */
 export function getProjectConfigPath(projectRoot: string, storageRoot = path.join(os.homedir(), USER_DATA_DIR)): string {
   const projectId = computeProjectId(projectRoot);
   return path.join(storageRoot, 'projects', projectId, 'project.json');
 }
 
+/** 获取项目知识库目录路径 */
 export function getProjectKbPath(projectRoot: string): string {
   return path.join(projectRoot, KNOWLEDGE_BASE_DIR);
 }
@@ -32,6 +34,7 @@ const DEFAULT_CUSTOMIZE_MD = `# Customize Agent 配置示例
 - 重要改动完成后运行必要的类型检查或构建检查。
 `;
 
+/** 确保项目存在 CUSTOMIZE.md 文件（如不存在则创建默认模板） */
 export function ensureProjectCustomizeFile(projectRoot: string): void {
   const filePath = path.join(projectRoot, 'CUSTOMIZE.md');
   if (!fs.existsSync(filePath)) {
@@ -40,6 +43,7 @@ export function ensureProjectCustomizeFile(projectRoot: string): void {
   }
 }
 
+/** 项目配置管理器，负责加载和保存项目配置 */
 export class ProjectConfigManager {
   constructor(private readonly storageRoot = path.join(os.homedir(), USER_DATA_DIR)) {}
 

@@ -1,6 +1,13 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { deleteDocumentTemplate, duplicateDocumentTemplate, listDocumentTemplates, saveDocumentTemplate, validateDocumentTemplateRun, type DocumentTemplate } from '@/services/documentWorkflowService';
 
+/**
+ * 文档模板 API 处理器
+ * GET: 获取模板列表或验证模板
+ * POST/PUT: 创建/更新模板
+ * DELETE: 删除模板
+ * PATCH: 复制模板
+ */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     if (req.method === 'GET') {

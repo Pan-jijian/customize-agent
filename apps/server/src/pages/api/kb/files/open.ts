@@ -5,6 +5,7 @@ import * as path from 'path';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 
+/** 根据操作系统调用系统命令打开文件或目录 */
 function openPath(targetPath: string) {
   const os = platform();
   if (os === 'darwin') return spawn('open', [targetPath], { detached: true, stdio: 'ignore' });

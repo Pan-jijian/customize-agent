@@ -2,6 +2,11 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { listDocumentDrafts, saveDocumentDraft } from '@/services/documentStoreService';
 import type { GeneratedDocumentDraft } from '@/services/documentWorkflowService';
 
+/**
+ * 文档草稿 API 处理器
+ * GET: 获取所有草稿列表
+ * POST: 保存/更新草稿
+ */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     if (req.method === 'GET') return res.status(200).json({ drafts: listDocumentDrafts() });

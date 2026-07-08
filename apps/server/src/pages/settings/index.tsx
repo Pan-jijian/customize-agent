@@ -59,7 +59,7 @@ export default function SettingsPage() {
       </div>
 
       <Row gutter={[16, 16]}>
-        {/* Language + Theme */}
+        {/* 语言 + 主题 */}
         <Col xs={24} md={12} style={{ display: 'flex' }}>
           <Card size="small" style={{ flex: 1 }} styles={{ body: { padding: '14px 18px' } }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
@@ -87,7 +87,7 @@ export default function SettingsPage() {
           </Card>
         </Col>
 
-        {/* Service Stats */}
+        {/* 服务状态 */}
         <Col xs={24} md={12} style={{ display: 'flex' }}>
           <Card size="small" style={{ flex: 1 }} styles={{ body: { padding: '14px 18px' } }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
@@ -125,7 +125,7 @@ export default function SettingsPage() {
           </Card>
         </Col>
 
-        {/* Embedding */}
+        {/* 嵌入配置 */}
         <Col xs={24} md={12} style={{ display: 'flex' }}>
           <Card size="small" style={{ flex: 1 }} styles={{ body: { padding: '14px 18px' } }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
@@ -161,7 +161,7 @@ export default function SettingsPage() {
           </Card>
         </Col>
 
-        {/* About */}
+        {/* 关于 */}
         <Col xs={24}>
           <Card size="small" styles={{ body: { padding: '14px 18px' } }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>

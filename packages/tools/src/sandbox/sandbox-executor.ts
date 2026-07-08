@@ -87,12 +87,12 @@ export class SandboxExecutor {
   }
 
   /**
-   * Convert a host path to a Docker-compatible path.
-   * On Windows, C:\Users\me\project → /c/Users/me/project (Docker Desktop convention)
+   * 将宿主机路径转换为 Docker 兼容路径。
+   * Windows 上，C:\Users\me\project → /c/Users/me/project（Docker Desktop 规则）
    */
   private _dockerPath(hostPath: string): string {
     if (!isWindows()) return hostPath;
-    // C:\Users\me\project → /c/Users/me/project
+    // C:\Users\me\project → /c/Users/me/project（Docker Desktop 规则）
     const normalized = hostPath.replace(/\\/g, '/');
     const driveMatch = normalized.match(/^([a-zA-Z]):(.+)/);
     if (driveMatch) {

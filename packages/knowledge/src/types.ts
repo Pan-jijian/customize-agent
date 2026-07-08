@@ -1,5 +1,7 @@
+/** 知识库作用域：项目级、全局级或会话级 */
 export type KBScope = 'project' | 'global' | 'session';
 
+/** 文件分类枚举 */
 export type FileCategory =
   | 'document'
   | 'spreadsheet'
@@ -12,8 +14,10 @@ export type FileCategory =
   | 'archive'
   | 'other';
 
+/** 项目状态：活跃、空闲或错误 */
 export type ProjectStatus = 'active' | 'idle' | 'error';
 
+/** 项目信息 */
 export interface ProjectInfo {
   projectId: string;
   projectRoot: string;
@@ -27,6 +31,7 @@ export interface ProjectInfo {
   status: ProjectStatus;
 }
 
+/** 项目配置 */
 export interface ProjectConfig {
   projectId: string;
   projectName?: string;
@@ -42,6 +47,7 @@ export interface ProjectConfig {
   lastOpenedAt: number;
 }
 
+/** 已分类的文件信息 */
 export interface ClassifiedFile {
   absolutePath: string;
   relativePath: string;
@@ -52,6 +58,7 @@ export interface ClassifiedFile {
   mimeType: string;
 }
 
+/** 索引状态记录 */
 export interface IndexStateRecord {
   relativePath: string;
   category: FileCategory;
@@ -68,6 +75,7 @@ export interface IndexStateRecord {
   metadataJson?: string;
 }
 
+/** 文件差异对比结果 */
 export interface DiffResult {
   newFiles: ClassifiedFile[];
   modifiedFiles: ClassifiedFile[];
@@ -79,6 +87,7 @@ export interface DiffResult {
   diffTimeMs: number;
 }
 
+/** 知识库统计信息 */
 export interface KnowledgeBaseStats {
   scope: Exclude<KBScope, 'session'>;
   projectId?: string;
@@ -88,6 +97,7 @@ export interface KnowledgeBaseStats {
   lastIndexedAt: number;
 }
 
+/** 跨项目重复文件检测结果 */
 export interface CrossProjectDuplicate {
   contentHash: string;
   files: Array<{

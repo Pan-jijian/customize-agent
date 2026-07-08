@@ -38,10 +38,10 @@ const MAX_FILE_SIZE = 1_000_000;
  *   - 文件熔断：> 1MB 文件跳过，> 100KB 文件异步解析，小文件主线程同步处理
  */
 export class TreeSitterWorkerPool {
-  private workers: PoolWorker[] = [];
-  private queue: QueuedTask[] = [];
-  private nextId = 0;
-  private poolSize: number;
+  private workers: PoolWorker[] = [];  // Worker 线程数组
+  private queue: QueuedTask[] = [];  // 待处理任务队列
+  private nextId = 0;  // 任务 ID 自增计数器
+  private poolSize: number;  // 线程池大小
 
   constructor(poolSize?: number) {
     this.poolSize = poolSize ?? Math.max(2, os.cpus().length - 1);

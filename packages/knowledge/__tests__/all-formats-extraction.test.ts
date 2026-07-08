@@ -8,7 +8,7 @@ import { FileClassifier } from '../src/classification/classifier.js';
 import { resolvePackage, resolveAndImport } from '../src/extraction/module-resolver.js';
 import type { ClassifiedFile } from '../src/types.js';
 
-// ─── Setup ────────────────────────────────────────────────────
+// ─── 设置 ────────────────────────────────────────────────────
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-formats-'));
 const classifier = new FileClassifier();
@@ -25,14 +25,14 @@ function makeFile(relPath: string, content: string | Buffer): ClassifiedFile {
 }
 
 afterAll(() => {
-  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* cleanup */ }
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 清理 */ }
 });
 
-// ─── Helper: verify extraction is healthy ─────────────────────
+// ─── 辅助函数：验证提取是否健康 ─────────────────────
 
 async function assertExtractionOk(file: ClassifiedFile, desc: string) {
   const result = await extractor.extract(file);
-  // Every extraction should return something
+  // 每次提取都应返回结果
   expect(result, `${desc}: result should exist`).toBeDefined();
   expect(result.metadata, `${desc}: metadata should exist`).toBeDefined();
 
@@ -41,11 +41,11 @@ async function assertExtractionOk(file: ClassifiedFile, desc: string) {
 
   console.log(`  ${desc}: mode=${mode}, coverage=${coverage}, textLen=${result.text.length}, warnings=${result.warnings.length}`);
 
-  // Record extraction mode for analysis
+  // 记录提取模式以便分析
   return { mode, coverage, textLen: result.text.length, warnings: result.warnings, text: result.text };
 }
 
-// ─── 1. Module resolution ─────────────────────────────────────
+// ─── 1. 模块解析 ─────────────────────────────────────
 
 describe('Module resolution (resolveAndImport)', () => {
   it('resolves pdfjs-dist', () => {
@@ -99,7 +99,7 @@ describe('Module resolution (resolveAndImport)', () => {
   });
 });
 
-// ─── 2. Document formats ──────────────────────────────────────
+// ─── 2. 文档格式 ──────────────────────────────────────
 
 describe('Document extraction', () => {
   it('plain text (.txt)', async () => {
@@ -133,7 +133,7 @@ describe('Document extraction', () => {
   });
 });
 
-// ─── 3. Code formats ──────────────────────────────────────────
+// ─── 3. 代码格式 ──────────────────────────────────────────
 
 describe('Code extraction', () => {
   const codeCases: Array<[string, string, string]> = [
@@ -162,13 +162,13 @@ describe('Code extraction', () => {
   });
 });
 
-// ─── 4. Data formats ──────────────────────────────────────────
+// ─── 4. 数据格式 ──────────────────────────────────────────
 
 describe('Data extraction', () => {
   it('json5 (.json5)', async () => {
     const file = makeFile('data/test.json5', '{ name: "test", // comment\n  value: 42 }');
     const r = await assertExtractionOk(file, '.json5');
-    // Falls back to plain structured text since json5 may not parse as JSON
+    // 回退为纯结构化文本，因为 json5 可能无法按 JSON 解析
     expect(r.mode).toBeTruthy();
   });
 
@@ -194,7 +194,7 @@ Bob\t25\tShanghai`;
   });
 });
 
-// ─── 5. Web formats ───────────────────────────────────────────
+// ─── 5. 网页格式 ───────────────────────────────────────────
 
 describe('Web extraction', () => {
   it('SCSS (.scss)', async () => {
@@ -216,7 +216,7 @@ describe('Web extraction', () => {
   });
 });
 
-// ─── 6. Diagram formats ───────────────────────────────────────
+// ─── 6. 图表格式 ───────────────────────────────────────
 
 describe('Diagram extraction', () => {
   it('PlantUML (.puml)', async () => {
@@ -228,7 +228,7 @@ DB --> User: Result
 @enduml`;
     const file = makeFile('diagrams/test.puml', puml);
     const r = await assertExtractionOk(file, '.puml');
-    // Falls into diagram structural path (raw text)
+    // 落入图表结构提取路径（原始文本）
     expect(r.mode).toBe('diagram_structural');
   });
 
@@ -257,7 +257,7 @@ DB --> User: Result
   });
 });
 
-// ─── 7. Archive formats ───────────────────────────────────────
+// ─── 7. 归档格式 ───────────────────────────────────────
 
 describe('Archive extraction', () => {
   it('ZIP (.zip) — no longer parsed as archive manifest', async () => {
@@ -269,7 +269,7 @@ describe('Archive extraction', () => {
   });
 });
 
-// ─── 8. CAD formats ───────────────────────────────────────────
+// ─── 8. CAD 格式 ───────────────────────────────────────────
 
 describe('CAD extraction', () => {
   it('STEP (.step) — product/material/entity extraction', async () => {
@@ -317,11 +317,11 @@ f 1 2 3 4`;
   });
 
   it('STL (.stl) — header extraction', async () => {
-    // Binary STL header: 80 bytes + 4 byte count
+    // 二进制 STL 头部：80 字节 + 4 字节计数
     const header = Buffer.alloc(84);
     header.write('solid TestModel', 0, 'ascii');
     header.writeUInt32LE(1, 80); // 1 triangle
-    // Minimal triangle data (50 bytes)
+    // 最小三角形数据（50 字节）
     const tri = Buffer.alloc(50);
     const stl = Buffer.concat([header, tri]);
     const file = makeFile('cad/test.stl', stl);
@@ -330,7 +330,7 @@ f 1 2 3 4`;
   });
 });
 
-// ─── 9. Full pipeline for each category ───────────────────────
+// ─── 9. 各类别的完整流水线 ───────────────────────
 
 describe('Full extraction → chunk → verify', () => {
   const cases: Array<[string, string, string, string]> = [
@@ -351,16 +351,16 @@ describe('Full extraction → chunk → verify', () => {
     expect(result.text.length).toBeGreaterThan(0);
     expect(result.metadata.extractionMode).toBeTruthy();
 
-    // Verify contentCoverage is not metadata-only (unless it's truly unparseable)
+    // 验证 contentCoverage 不是 metadata_only（除非确实无法解析）
     const coverage = String(result.metadata.contentCoverage ?? '');
     const mode = String(result.metadata.extractionMode ?? '');
-    // These are the "good" indicators
+    // 这些是"良好"的指示器
     const hasRealContent = mode !== 'metadata_only' && coverage !== 'metadata_filename' && coverage !== 'metadata';
     if (content.length > 20) {
       expect(hasRealContent, `${_name}: should extract real content, got mode=${mode}, coverage=${coverage}`).toBe(true);
     }
 
-    // Chunk and verify
+    // 分块并验证
     const chunks = chunker.chunk(result.text, file);
     expect(chunks.length).toBeGreaterThan(0);
     chunks.forEach(c => {
@@ -370,7 +370,7 @@ describe('Full extraction → chunk → verify', () => {
   });
 });
 
-// ─── 10. Classification coverage ──────────────────────────────
+// ─── 10. 分类覆盖 ──────────────────────────────
 
 describe('Classifier extension coverage', () => {
   const extCases: Array<[string, string, string]> = [
@@ -455,31 +455,31 @@ describe('Classifier extension coverage', () => {
   });
 });
 
-// ─── Helper: create minimal zip ────────────────────────────────
+// ─── 辅助函数：创建最小 ZIP ────────────────────────────────
 
 async function createMinimalZip(): Promise<Buffer> {
-  // Create a minimal ZIP file manually
-  // ZIP format: Local File Header + File Data + Central Directory + EOCD
+  // 手动创建一个最小的 ZIP 文件
+  // ZIP 格式：本地文件头 + 文件数据 + 中央目录 + EOCD
   const fileName = Buffer.from('test.txt', 'ascii');
   const fileContent = Buffer.from('hello', 'ascii');
 
-  // Local file header
+  // 本地文件头
   const lfh = Buffer.alloc(30 + fileName.length);
-  lfh.writeUInt32LE(0x04034b50, 0); // signature
-  lfh.writeUInt16LE(20, 4);          // version needed
-  lfh.writeUInt16LE(0, 6);           // flags
-  lfh.writeUInt16LE(0, 8);           // compression (stored)
-  lfh.writeUInt16LE(0, 10);          // mod time
-  lfh.writeUInt16LE(0, 12);          // mod date
-  // CRC32 placeholder
+  lfh.writeUInt32LE(0x04034b50, 0); // 签名
+  lfh.writeUInt16LE(20, 4);          // 所需版本
+  lfh.writeUInt16LE(0, 6);           // 标志位
+  lfh.writeUInt16LE(0, 8);           // 压缩方式（存储）
+  lfh.writeUInt16LE(0, 10);          // 修改时间
+  lfh.writeUInt16LE(0, 12);          // 修改日期
+  // CRC32 占位符
   lfh.writeUInt32LE(0, 14);
-  lfh.writeUInt32LE(fileContent.length, 18); // compressed size
-  lfh.writeUInt32LE(fileContent.length, 22); // uncompressed size
-  lfh.writeUInt16LE(fileName.length, 26);    // filename length
-  lfh.writeUInt16LE(0, 28);                  // extra field length
+  lfh.writeUInt32LE(fileContent.length, 18); // 压缩后大小
+  lfh.writeUInt32LE(fileContent.length, 22); // 未压缩大小
+  lfh.writeUInt16LE(fileName.length, 26);    // 文件名长度
+  lfh.writeUInt16LE(0, 28);                  // 扩展字段长度
   fileName.copy(lfh, 30);
 
-  // Central directory
+  // 中央目录
   const cd = Buffer.alloc(46 + fileName.length);
   cd.writeUInt32LE(0x02014b50, 0);
   cd.writeUInt16LE(20, 4);
@@ -491,20 +491,20 @@ async function createMinimalZip(): Promise<Buffer> {
   cd.writeUInt32LE(fileContent.length, 20);
   cd.writeUInt32LE(fileContent.length, 24);
   cd.writeUInt16LE(fileName.length, 28);
-  cd.writeUInt16LE(0, 30);            // extra
-  cd.writeUInt16LE(0, 32);            // comment
-  cd.writeUInt16LE(0, 34);            // disk
-  cd.writeUInt16LE(0, 36);            // internal attrs
-  cd.writeUInt32LE(0, 38);            // external attrs
-  cd.writeUInt32LE(0, 42);            // offset
+  cd.writeUInt16LE(0, 30);            // 扩展
+  cd.writeUInt16LE(0, 32);            // 注释
+  cd.writeUInt16LE(0, 34);            // 磁盘
+  cd.writeUInt16LE(0, 36);            // 内部属性
+  cd.writeUInt32LE(0, 38);            // 外部属性
+  cd.writeUInt32LE(0, 42);            // 偏移量
   fileName.copy(cd, 46);
 
-  // EOCD
+  // EOCD（中央目录结尾记录）
   const eocd = Buffer.alloc(22);
   eocd.writeUInt32LE(0x06054b50, 0);
   eocd.writeUInt16LE(0, 4);
   eocd.writeUInt16LE(0, 6);
-  eocd.writeUInt16LE(1, 8);           // 1 entry
+  eocd.writeUInt16LE(1, 8);           // 1 个条目
   eocd.writeUInt16LE(1, 10);
   eocd.writeUInt32LE(cd.length, 12);
   eocd.writeUInt32LE(lfh.length + fileContent.length, 16);

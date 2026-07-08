@@ -1,68 +1,67 @@
-// @customize-agent/tools — Cross-platform process manager
+// @customize-agent/tools — 跨平台进程管理
 //
-// Provides unified process termination and cleanup signal handling
-// that works across Windows, macOS, and Linux.
+// 提供统一的进程终止和清理信号处理，兼容 Windows、macOS 和 Linux。
 //
-// Windows: uses taskkill /T /F (tree kill)
-// Unix:    uses SIGTERM with 3s timeout fallback to SIGKILL
+// Windows：使用 taskkill /T /F（进程树终止）
+// Unix：使用 SIGTERM + 3 秒超时降级为 SIGKILL
 
 import { execa } from 'execa';
 import { isWindows } from './utils.js';
 import type { ProcessReference } from './types.js';
 
 /**
- * Cross-platform process termination.
+ * 跨平台进程终止。
  *
- * @param proc - A process-like object with optional pid and kill method.
- *   Works with both Node.js ChildProcess and simple {pid} objects.
+ * @param proc - 类进程对象，可选 pid 和 kill 方法。
+ *   同时支持 Node.js ChildProcess 和简单 {pid} 对象。
  */
 export async function killProcess(proc: ProcessReference | null | undefined): Promise<void> {
   if (!proc) return;
 
-  // If we have a PID, prefer platform-specific termination
+  // 如果有 PID，优先使用平台特定终止方式
   if (proc.pid) {
     await killByPid(proc.pid);
     return;
   }
 
-  // Fallback: use the kill method if available (works for ChildProcess)
+  // 回退：使用 kill 方法（适用于 ChildProcess）
   if (proc.kill && typeof proc.kill === 'function') {
     try {
       (proc.kill as () => boolean)();
     } catch {
-      // On Windows, .kill() without signal works
-      // On Unix, SIGTERM is the default
+      // Windows 上 .kill() 不带信号即可工作
+      // Unix 上默认发送 SIGTERM
     }
   }
 }
 
 /**
- * Kill a process tree by root PID.
- * On Windows: uses taskkill /T /F to kill the entire process tree
- * On Unix: uses SIGTERM with a 3s timeout fallback to SIGKILL
+ * 按根 PID 终止进程树。
+ * Windows：使用 taskkill /T /F 终止整个进程树
+ * Unix：使用 SIGTERM + 3 秒超时降级为 SIGKILL
  */
 export async function killByPid(pid: number): Promise<void> {
   if (isWindows()) {
-    // Windows: taskkill with /T (tree) and /F (force)
+    // Windows：taskkill 带 /T（进程树）和 /F（强制）
     try {
       await execa('taskkill', ['/T', '/F', '/PID', String(pid)], { reject: false });
     } catch {
-      // Process may have already exited — ignore
+      // 进程可能已退出 — 忽略
     }
     return;
   }
 
-  // Unix: SIGTERM first, then SIGKILL after timeout
+  // Unix：先 SIGTERM，超时后 SIGKILL
   try {
     process.kill(pid, 'SIGTERM');
 
-    // Wait up to 3 seconds for graceful shutdown
+    // 最多等待 3 秒优雅退出
     await new Promise<void>((resolve) => {
       const checkInterval = setInterval(() => {
         try {
-          process.kill(pid, 0); // Check if process exists
+          process.kill(pid, 0); // 检查进程是否存在
         } catch {
-          // Process no longer exists
+          // 进程已不存在
           clearInterval(checkInterval);
           resolve();
         }
@@ -74,18 +73,18 @@ export async function killByPid(pid: number): Promise<void> {
       }, 3_000);
     });
 
-    // Force kill if still running
+    // 强制终止（如仍运行中）
     try {
       process.kill(pid, 'SIGKILL');
     } catch {
-      // Process already exited — ok
+      // 进程已退出 — 正常
     }
   } catch {
-    // Process already exited or invalid PID — ok
+    // 进程已退出或 PID 无效 — 正常
   }
 }
 
-// ── Cleanup Signal Management ──────────────────────────────────────────────
+// ── 清理信号管理 ───────────────────────────────────────────────────────────
 
 type CleanupHandler = () => void | Promise<void>;
 
@@ -93,14 +92,14 @@ const cleanupHandlers = new Set<CleanupHandler>();
 let cleanupRegistered = false;
 
 /**
- * Register a cleanup handler that fires on process termination signals.
+ * 注册进程终止信号触发的清理处理器。
  *
- * Supported signals:
- *   - SIGINT (Ctrl+C) — all platforms
- *   - SIGTERM — all platforms (emulated on Windows by Node.js)
- *   - exit — all platforms (fires on process.exit())
+ * 支持的信号：
+ *   - SIGINT（Ctrl+C）— 所有平台
+ *   - SIGTERM — 所有平台（Windows 上由 Node.js 模拟）
+ *   - exit — 所有平台（process.exit() 触发）
  *
- * Handlers are deduplicated — registering the same function twice is a no-op.
+ * 处理器自动去重 — 注册同一函数两次不会重复执行。
  */
 export function onCleanup(handler: CleanupHandler): void {
   cleanupHandlers.add(handler);
@@ -111,7 +110,7 @@ export function onCleanup(handler: CleanupHandler): void {
 }
 
 /**
- * Remove a previously registered cleanup handler.
+ * 移除之前注册的清理处理器。
  */
 export function offCleanup(handler: CleanupHandler): void {
   cleanupHandlers.delete(handler);
@@ -127,7 +126,7 @@ async function runAllCleanupHandlers(): Promise<void> {
     try {
       await handler();
     } catch {
-      // Best-effort cleanup — don't let one handler block others
+      // 尽力清理 — 不让一个处理器阻塞其他处理器
     }
   }
 }
@@ -143,23 +142,23 @@ function registerGlobalCleanup(): void {
     void runAllCleanupHandlers().then(() => { process.exitCode = 143; });
   });
 
-  // 'exit' event is synchronous — fire handlers but don't block
+  // 'exit' 事件是同步的 — 触发处理器但不阻塞退出
   process.on('exit', () => {
     for (const handler of cleanupHandlers) {
       try {
         void handler();
-        // If handler returns a promise, we can't await it in 'exit'
-        // Best-effort: execute synchronously and hope it resolves in time
+        // 如果处理器返回 Promise，无法在 'exit' 中 await
+        // 尽力同步执行，希望及时完成
       } catch {
-        // Best-effort
+        // 尽力执行
       }
     }
   });
 }
 
 /**
- * Shut down all processes immediately and run cleanup handlers.
- * Call this before programmatic process.exit().
+ * 立即关闭所有进程并运行清理处理器。
+ * 在程序化调用 process.exit() 前调用。
  */
 export async function shutdown(): Promise<void> {
   await runAllCleanupHandlers();

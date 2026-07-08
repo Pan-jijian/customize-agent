@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 
+/** 忽略规则 API：GET 获取规则列表，POST 新增忽略规则 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!['GET', 'POST'].includes(req.method!)) return res.status(405).json({ error: 'Method not allowed' });
   try {

@@ -18,12 +18,12 @@ export function resolveSafe(relativePath: string, root: string): string {
   const normalizedRoot = path.normalize(root) + path.sep;
   const normalizedAbsolute = path.normalize(absolute);
 
-  // Windows: case-insensitive comparison
+  // Windows：大小写不敏感比较
   const rootCompare = IS_WINDOWS ? normalizedRoot.toLowerCase() : normalizedRoot;
   const absCompare = IS_WINDOWS ? normalizedAbsolute.toLowerCase() : normalizedAbsolute;
 
-  // Must either be exactly the root, or start with root + separator
-  // Using normalize + sep ensures "C:\project" doesn't match "C:\project-other"
+  // 必须精确匹配根目录或以其 + 分隔符开头
+  // normalize + sep 的使用确保 "C:\project" 不会匹配 "C:\project-other"
   if (!(absCompare === rootCompare.slice(0, -path.sep.length) || absCompare.startsWith(rootCompare))) {
     throw new Error(`Path traversal detected: "${relativePath}" escapes workspace "${root}"`);
   }

@@ -2,14 +2,17 @@ import { ALL_CATEGORIES, COLLECTION_CATEGORY_NAMES } from '../constants.js';
 import type { FileCategory } from '../types.js';
 import type { CollectionClient } from './types.js';
 
+/** 生成项目级 Collection 名称 */
 export function projectCollectionName(projectId: string, category: FileCategory): string {
   return `proj_${projectId}_kb_${COLLECTION_CATEGORY_NAMES[category]}`;
 }
 
+/** 生成全局 Collection 名称 */
 export function globalCollectionName(category: FileCategory): string {
   return `global_kb_${COLLECTION_CATEGORY_NAMES[category]}`;
 }
 
+/** Collection 管理器，负责 Vector Collection 的创建和管理 */
 export class CollectionManager {
   constructor(private readonly client?: CollectionClient) {}
 

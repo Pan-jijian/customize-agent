@@ -53,6 +53,7 @@ const NAV_ITEMS: NavItem[] = [
 export function Sidebar() {
   const pathname = usePathname();
   const t = useAppTranslations();
+  /** 根据当前路径确定默认展开的导航分组，确保激活的子菜单可见 */
   const defaultExpanded = useMemo(() => {
     const next: Record<string, boolean> = {};
     for (const item of NAV_ITEMS) {
@@ -74,6 +75,7 @@ export function Sidebar() {
     setExpanded(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
+  /** 判断导航项的子菜单中是否有处于激活状态的项 */
   const isChildActive = (children?: SubMenuItem[]) =>
     children?.some(c => pathname === c.href || pathname.startsWith(c.href + '/'));
 

@@ -20,6 +20,10 @@ export interface SessionCommandDeps {
   restoreSnapshot: (snapshot: WorkspaceSnapshot) => Promise<void>;
 }
 
+/**
+ * 会话管理命令：回退（rewind）、恢复（resume）、查看历史会话。
+ * 支持仅回退对话或同时恢复工作区快照。
+ */
 export class SessionCommands {
   constructor(private deps: SessionCommandDeps) {}
 

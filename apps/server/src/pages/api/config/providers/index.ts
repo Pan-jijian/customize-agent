@@ -3,6 +3,11 @@ import { getConfigStore } from '@/services/configService';
 import { detectProtocol } from '@customize-agent/runtime';
 import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
+/**
+ * Provider（AI 提供商）配置 API 处理器
+ * GET: 获取所有提供商配置列表
+ * POST: 创建/更新提供商配置，支持重命名和更新 API Key、Base URL、协议、能力等
+ */
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!['GET', 'POST'].includes(req.method!)) return res.status(405).json({ error: 'Method not allowed' });
     const store = getConfigStore();
@@ -11,6 +16,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       if (!name) return res.status(400).json({ error: 'Provider name required' });
       const targetName = String(name);
       const sourceName = oldName ? String(oldName) : targetName;
+      // 处理提供商重命名：迁移配置和模型引用
       if (sourceName !== targetName) {
         const config = store.load();
         const previous = config.providers[sourceName] ?? {};

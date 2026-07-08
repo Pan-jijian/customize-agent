@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ProjectInfo, ProjectStatus } from '../types.js';
 
+/** 项目注册表，使用 SQLite 管理已注册项目的元数据 */
 export class ProjectRegistry {
   private readonly db: Database.Database;
 

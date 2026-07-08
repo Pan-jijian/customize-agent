@@ -17,11 +17,11 @@ export interface EmbeddingSearchResult {
 }
 
 interface CodeChunk {
-  text: string;
-  file: string;
-  startLine: number;
-  endLine: number;
-  embedding: number[];
+  text: string;  // 代码块文本
+  file: string;  // 所属文件路径
+  startLine: number;  // 起始行号
+  endLine: number;  // 结束行号
+  embedding: number[];  // 向量化后的 embedding 数组
 }
 
 /**
@@ -68,6 +68,7 @@ class CodeChunker {
     return chunks;
   }
 
+  /** 使用 tree-sitter AST 查找代码块切分边界，兜底返回文件首尾 */
   private _findBoundaries(filePath: string, content: string, totalLines: number): number[] {
     const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
     const lang = getLanguageConfig(ext);
@@ -274,7 +275,6 @@ export class EmbeddingSearch {
     }
   }
 
-  /** 标记文件为脏（modify_file 修改后调用，跳过旧向量） */
   /** 从 DB 恢复持久化的 embedding 向量 */
   private _loadFromDB(): void {
     if (!this.db) return;
@@ -297,6 +297,7 @@ export class EmbeddingSearch {
     }
   }
 
+  /** 标记文件为脏（modify_file 修改后调用，跳过旧向量） */
   markDirty(filePath: string): void { this.dirtyFiles.add(filePath); }
 
   /** 获取已索引文件数 */

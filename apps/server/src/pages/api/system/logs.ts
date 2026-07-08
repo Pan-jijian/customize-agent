@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { clearErrorLogs, listErrorLogs } from '@/services/errorLogService';
 import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
+/** 错误日志 API：GET 获取日志列表，DELETE 清空所有错误日志 */
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'GET') {
     const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 200) || 200));

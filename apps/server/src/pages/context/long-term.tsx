@@ -24,6 +24,7 @@ export default function LongTermContextPage() {
   const [editContext, setEditContext] = useState('');
   const [saving, setSaving] = useState(false);
 
+  /** 加载长期上下文列表及统计信息 */
   const load = async (s?: string) => {
     setLoading(true);
     try {
@@ -34,18 +35,22 @@ export default function LongTermContextPage() {
   };
   useEffect(() => { void load(); }, []);
 
+  /** 删除指定上下文条目 */
   const handleDelete = async (id: string) => {
     try { await deleteContextById(id); message.success(t('common.success')); await load(search); } catch { message.error(t('common.error')); }
   };
 
+  /** 压缩长期上下文 */
   const handleCompress = async () => {
     try { await compressContexts('long_term'); message.success(t('common.success')); await load(search); } catch { message.error(t('common.error')); }
   };
 
+  /** 清空所有长期上下文 */
   const handleClear = async () => {
     try { await clearContexts('long_term'); message.success(t('common.success')); await load(search); } catch { message.error(t('common.error')); }
   };
 
+  /** 打开编辑对话框，填充当前条目内容 */
   const openEdit = (entry: ContextEntry) => {
     setEditing(entry);
     setEditContent(entry.content);
@@ -53,6 +58,7 @@ export default function LongTermContextPage() {
     setEditOpen(true);
   };
 
+  /** 保存编辑后的上下文内容 */
   const handleEdit = async () => {
     if (!editing || !editContent.trim()) return;
     setSaving(true);

@@ -4,6 +4,7 @@ import type { ClassifiedFile, FileCategory } from '../types.js';
 
 const DEFAULT_MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024;
 
+/** 文件分类器，根据扩展名将文件归类到预定义的分类体系 */
 export class FileClassifier {
   private readonly extensionMap: Map<string, [FileCategory, string]>;
 

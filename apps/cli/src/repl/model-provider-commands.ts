@@ -111,24 +111,24 @@ export class ModelProviderCommands {
     this.write('\n' + s.bold(this.deps.i18n.t('model.add_wizard_title')) + '\n');
     this.write(t.dim(this.deps.i18n.t('model.add_wizard_desc')) + '\n\n');
 
-    // Step 1: 模型名称
+    // 步骤 1：模型名称
     const modelName = await readLine(t.accent('① ' + this.deps.i18n.t('model.add_step_name') + ': '));
     if (!modelName.trim()) {
       this.write(t.warning(this.deps.i18n.t('model.add_cancelled') + '\n\n'));
       return;
     }
 
-    // Step 2: API Key
+    // 步骤 2：API Key
     const apiKey = await readLine(t.accent('② ' + this.deps.i18n.t('model.add_step_key') + ': '));
     if (!apiKey.trim()) {
       this.write(t.warning(this.deps.i18n.t('model.add_cancelled') + '\n\n'));
       return;
     }
 
-    // Step 3: Base URL（可选）
+    // 步骤 3：Base URL（可选）
     const baseUrl = await readLine(t.accent('③ ' + this.deps.i18n.t('model.add_step_url') + ' ' + t.dim('(' + this.deps.i18n.t('model.optional') + ')') + ': '));
 
-    // Step 4: 协议选择面板
+    // 步骤 4：协议选择面板
     const protocol = await selectList(
       this.deps.i18n.t('model.add_step_protocol'),
       PROTOCOL_OPTIONS,
@@ -138,7 +138,7 @@ export class ModelProviderCommands {
       return;
     }
 
-    // Step 5: 层级选择面板
+    // 步骤 5：层级选择面板
     const tier = await selectList(
       this.deps.i18n.t('model.add_step_tier'),
       TIER_OPTIONS,

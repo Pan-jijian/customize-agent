@@ -2,8 +2,10 @@ import { ALL_CATEGORIES } from '../constants.js';
 import { globalCollectionName, projectCollectionName } from '../vector/collection-manager.js';
 import type { VectorSearchResult, VectorStoreInterface } from '../vector/types.js';
 
+/** 搜索范围：项目级、全局级或全部 */
 export type SearchScope = 'project' | 'global' | 'all';
 
+/** 联合搜索结果项 */
 export interface FederatedSearchItem {
   id: string;
   rowid?: number;
@@ -31,6 +33,7 @@ export interface FederatedSearchItem {
   facets?: Record<string, string | number | string[]>;
 }
 
+/** 联合搜索结果 */
 export interface FederatedResult {
   results: FederatedSearchItem[];
   scopesSearched: Array<'project' | 'global'>;
@@ -44,11 +47,13 @@ export interface FederatedResult {
   };
 }
 
+/** 搜索过滤器 */
 export interface SearchFilters {
   category?: string;
   filePath?: string;
 }
 
+/** 各检索方式权重配置 */
 export interface RetrievalWeights {
   keyword?: number;
   vector?: number;
@@ -56,6 +61,7 @@ export interface RetrievalWeights {
   hybridBonus?: number;
 }
 
+/** 联合搜索查询参数 */
 export interface FederatedQuery {
   query: string;
   queryEmbedding: number[];
@@ -66,6 +72,7 @@ export interface FederatedQuery {
   filters?: SearchFilters;
 }
 
+/** 联合搜索器，支持跨向量存储的分布式搜索和结果合并 */
 export class FederationSearch {
   static readonly SCOPE_WEIGHTS: Record<'project' | 'global', number> = {
     project: 1.0,

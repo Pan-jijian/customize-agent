@@ -10,12 +10,12 @@ import { reportNonFatalError, type LifecycleAware } from '@customize-agent/types
 
 const IS_WINDOWS = process.platform === 'win32';
 
-// ── Cross-platform process kill (inline — search cannot depend on tools) ──
+// ── 跨平台进程终止（内联实现 — search 模块不可依赖 tools 包）──
 
 /**
- * Kill a process tree in a cross-platform manner.
- * Windows: uses taskkill /T /F (tree kill + force)
- * Unix:    uses SIGTERM with 3s timeout fallback to SIGKILL
+ * 跨平台终止进程树。
+ * Windows: 使用 taskkill /T /F（强制终止进程树）
+ * Unix:    使用 SIGTERM，3 秒超时后降级为 SIGKILL
  */
 async function crossPlatformKill(proc: ChildProcess | null): Promise<void> {
   if (!proc) return;
@@ -27,10 +27,10 @@ async function crossPlatformKill(proc: ChildProcess | null): Promise<void> {
       reportNonFatalError({ source: 'lsp.taskkill', error: err, details: { pid: proc.pid } });
     }
   }
-  // Unix: SIGTERM → wait → SIGKILL
+  // Unix: 先发 SIGTERM → 等待优雅退出 → 超时后 SIGKILL
   try {
     proc.kill(); // SIGTERM
-    // Wait up to 3s for graceful shutdown
+    // 最多等待 3 秒，等待进程优雅退出
     await new Promise<void>(resolve => {
       const check = setInterval(() => {
         if (proc.exitCode !== null || proc.killed) { clearInterval(check); resolve(); }
@@ -41,12 +41,13 @@ async function crossPlatformKill(proc: ChildProcess | null): Promise<void> {
       proc.kill('SIGKILL');
     }
   } catch {
-    // Process already exited — ok
+    // 进程已退出，无需处理
   }
 }
 
-// ── LSP command resolution (cross-platform) ──
+// ── LSP 命令解析（跨平台）──
 
+/** 解析 LSP 命令路径（Windows 下 .cmd 后缀补全和路径反斜杠转换） */
 function resolveLspCommand(command: string, args: string[]): { command: string; args: string[] } {
   if (!IS_WINDOWS) return { command, args };
 
@@ -145,7 +146,7 @@ const BUILTIN_SERVERS: LspServerConfig[] = [
   },
 ];
 
-const TTL_IDLE_MS = 5 * 60 * 1000; // 5 minutes
+const TTL_IDLE_MS = 5 * 60 * 1000; // 5 分钟空闲超时
 const MAX_RECONNECT = 3;
 const INITIALIZE_PARAMS = {
   processId: process.pid,
@@ -162,24 +163,24 @@ const INITIALIZE_PARAMS = {
 };
 
 interface LspConnection {
-  config: LspServerConfig;
-  process: ChildProcess | null;
-  initialized: boolean;
-  lastUsed: number;
-  reconnectAttempts: number;
-  available: boolean;
-  requestId: number;
-  pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
-  /** Accumulated buffer for stdout */
+  config: LspServerConfig;  // LSP Server 配置
+  process: ChildProcess | null;  // 子进程引用
+  initialized: boolean;  // 是否已完成初始化握手
+  lastUsed: number;  // 最后一次使用的时间戳
+  reconnectAttempts: number;  // 已重连次数
+  available: boolean;  // 连接是否可用
+  requestId: number;  // JSON-RPC 请求 ID 计数器
+  pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;  // 待响应请求的 Map
+  /** stdout 累积缓冲区 */
   stdoutBuffer: string;
-  /** Content-Length header value being parsed */
+  /** 正在解析的 Content-Length header 值 */
   contentLength: number;
-  /** Whether we're reading headers */
+  /** 是否正在读取 headers */
   readingHeaders: boolean;
-  headerBuffer: string;
-  /** Diagnostics cache: uri → Diagnostic[] */
+  headerBuffer: string;  // 未完成的 header 数据缓冲区
+  /** 诊断缓存：uri → Diagnostic[] */
   diagnostics: Map<string, Diagnostic[]>;
-  timeoutId?: ReturnType<typeof setTimeout>;
+  timeoutId?: ReturnType<typeof setTimeout>;  // 空闲超时计时器
 }
 
 /**
@@ -247,6 +248,7 @@ export class LSPManager implements LifecycleAware {
     return this.createConnection(config);
   }
 
+  /** 创建 LSP Server 连接：启动进程 → 注册消息回调 → 初始化握手 */
   private async createConnection(config: LspServerConfig): Promise<LspConnection | null> {
     try {
       const { command: resolvedCmd, args: resolvedArgs } = resolveLspCommand(config.command, config.args);
@@ -366,6 +368,7 @@ export class LSPManager implements LifecycleAware {
     }
   }
 
+  /** 发送 JSON-RPC 请求，返回 Promise 等待响应 */
   private async sendRequest(conn: LspConnection, method: string, params: unknown): Promise<unknown> {
     const id = ++conn.requestId;
     const content = JSON.stringify({ jsonrpc: '2.0', id, method, params });
@@ -377,6 +380,7 @@ export class LSPManager implements LifecycleAware {
     });
   }
 
+  /** 发送 JSON-RPC 通知（无需等待响应） */
   private async sendNotification(conn: LspConnection, method: string, params: unknown): Promise<void> {
     const content = JSON.stringify({ jsonrpc: '2.0', method, params });
     const header = `Content-Length: ${Buffer.byteLength(content)}\r\n\r\n`;
@@ -460,6 +464,7 @@ export class LSPManager implements LifecycleAware {
 
   // === 连接管理 ===
 
+  /** 重置空闲超时计时器：每次请求后延后 TTL */
   private resetTTL(conn: LspConnection): void {
     if (conn.timeoutId) clearTimeout(conn.timeoutId);
     conn.timeoutId = setTimeout(() => {
@@ -467,6 +472,7 @@ export class LSPManager implements LifecycleAware {
     }, TTL_IDLE_MS);
   }
 
+  /** 关闭单个 LSP 连接：发送 shutdown → 终止进程 → 清理状态 */
   private closeConnection(conn: LspConnection): void {
     try {
       void this.sendNotification(conn, 'shutdown', {});

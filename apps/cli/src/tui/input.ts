@@ -754,7 +754,7 @@ export class TuiInput {
     return { line, col };
   }
 
-  // file size cache 文件大小缓存
+  // 文件大小缓存
 
   private _sz(rel: string): string {
     const c = this.sz.get(rel);

@@ -3,6 +3,7 @@ import { installProcessErrorHandlers, recordErrorLog } from './errorLogService';
 
 installProcessErrorHandlers();
 
+/** API 错误边界装饰器：捕获 handler 执行过程中的异常，记录错误日志并返回统一错误响应 */
 export function withApiErrorBoundary(source: string, handler: (req: NextApiRequest, res: NextApiResponse) => unknown | Promise<unknown>) {
   return async function apiErrorBoundary(req: NextApiRequest, res: NextApiResponse) {
     try {

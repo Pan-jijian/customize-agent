@@ -1,10 +1,10 @@
-// @customize-agent/tools — Platform utility functions (zero-dependency)
+// @customize-agent/tools — 平台工具函数（零依赖）
 
 import * as os from 'os';
 import * as path from 'path';
 import type { Platform } from './types.js';
 
-/** Current platform identifier */
+/** 当前平台标识 */
 export function platform(): Platform {
   return process.platform as Platform;
 }
@@ -21,20 +21,20 @@ export function isLinux(): boolean {
   return process.platform === 'linux';
 }
 
-/** Get home directory, respecting USERPROFILE on Windows */
+/** 获取家目录（Windows 上优先使用 USERPROFILE） */
 export function getHomeDir(): string {
   return os.homedir();
 }
 
-/** Get temp directory, respecting TEMP/TMP on Windows */
+/** 获取临时目录（Windows 上优先使用 TEMP/TMP） */
 export function getTempDir(): string {
   return os.tmpdir();
 }
 
 /**
- * Normalize path separators to the current platform.
- * On Windows, converts forward slashes to backslashes.
- * On Unix, converts backslashes to forward slashes.
+ * 将路径分隔符规范化为当前平台格式。
+ * Windows：正斜杠转为反斜杠
+ * Unix：反斜杠转为正斜杠
  */
 export function normalizePath(input: string): string {
   if (isWindows()) {
@@ -44,7 +44,7 @@ export function normalizePath(input: string): string {
 }
 
 /**
- * Check if a path is absolute, accounting for Windows drive letters.
+ * 检查路径是否为绝对路径（考虑 Windows 驱动器号）。
  */
 export function isAbsolutePath(input: string): boolean {
   if (isWindows()) {
@@ -54,35 +54,35 @@ export function isAbsolutePath(input: string): boolean {
 }
 
 /**
- * Resolve a command name to include the appropriate extension on Windows.
- * e.g. 'npx' → 'npx.cmd', 'python' → 'python.exe' if needed.
+ * 解析命令名，在 Windows 上包含合适的扩展名。
+ * 例如：'npx' → 'npx.cmd'、'python' → 'python.exe'（如有需要）。
  */
 export function resolveWindowsCommand(command: string): string {
   if (!isWindows()) return command;
-  // Commands that already have an extension
+  // 已有扩展名的命令直接返回
   if (/\.(exe|cmd|bat|ps1)$/i.test(command)) return command;
-  // Node-based CLIs are typically .cmd files
+  // 基于 Node 的 CLI 通常为 .cmd 文件
   const nodeCmds = new Set(['npx', 'tsc', 'tsx', 'pnpm', 'npm', 'yarn']);
   if (nodeCmds.has(command)) return command + '.cmd';
   return command;
 }
 
-/** Get the platform-appropriate null device path */
+/** 获取当前平台的空设备路径 */
 export function nullDevice(): string {
   return isWindows() ? 'NUL' : '/dev/null';
 }
 
 /**
- * Escape a string for safe use in a shell command.
- * Different shells have different escaping rules — this provides a conservative base.
+ * 转义字符串以安全用于 shell 命令。
+ * 不同的 Shell 有不同的转义规则 — 此函数提供保守的基准实现。
  */
 export function shellEscape(arg: string): string {
-  // Wrap in double quotes, escape internal double quotes
+  // 用双引号包裹，转义内部双引号
   const escaped = arg.replace(/"/g, '""');
   return `"${escaped}"`;
 }
 
-/** Generate the env sep command for current platform (e.g. '&&' vs ';') */
+/** 生成当前平台的环境变量分隔命令（如 '&&' vs ';'） */
 export function commandSeparator(): string {
   return isWindows() ? '&&' : ';';
 }

@@ -207,6 +207,7 @@ export function openGeneratedAssetTarget(id: string, target: 'file' | 'directory
   return target === 'directory' ? path.dirname(absolutePath) : absolutePath;
 }
 
+/** 启动异步文档生成任务，包含进度回调持久化、结果入库、资源管理，返回任务 ID 和文档 ID */
 export function startGenerateDocumentTask(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number }, projectRoot = getProjectRoot()) {
   const now = Date.now();
   const documentId = `doc-${now}-${crypto.randomBytes(4).toString('hex')}`;

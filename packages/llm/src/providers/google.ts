@@ -234,7 +234,7 @@ export class GoogleProvider implements ILLMProvider {
         const data = await response.json() as { totalTokens: number };
         return data.totalTokens;
       }
-    } catch { /* fallback */ }
+    } catch { /* 回退到估算 */ }
     const text = messages.map(m => m.content).join('\n');
     return Math.ceil(text.length / 4);
   }

@@ -28,14 +28,17 @@ const tagRender = (props: { label: ReactNode; value: string; closable: boolean; 
   <Tag closable={props.closable} onClose={props.onClose} color="blue" style={{ margin: '1px 2px', fontSize: 11, lineHeight: '18px' }}>{props.label}</Tag>
 );
 
+/** 获取角色类型的国际化标签文本 */
 function roleTypeLabel(role: DocumentRole, t: (key: string) => string) {
   const key = role.type === 'file' ? FILE_TYPE_LABELS[role.processingType ?? ''] : PROMPT_TYPE_LABELS[role.executionType ?? ''];
   return key ? t(key) : (role.type === 'file' ? role.processingType : role.executionType) ?? '';
 }
+/** 获取角色类型的图标 */
 function roleTypeIcon(role: DocumentRole) {
   if (role.type === 'file') return FILE_TYPE_ICONS[role.processingType ?? ''] ?? <FileTextOutlined />;
   return PROMPT_TYPE_ICONS[role.executionType ?? ''] ?? <FormOutlined />;
 }
+/** 获取角色类型的颜色 */
 function roleTypeColor(role: DocumentRole) {
   if (role.type === 'file') return FILE_TYPE_COLORS[role.processingType ?? ''] ?? 'var(--colorAccent)';
   return PROMPT_TYPE_COLORS[role.executionType ?? ''] ?? 'var(--colorWarning)';
@@ -74,10 +77,12 @@ export default function DocumentRolesPage() {
   const allFileRoles = roles.filter(r => r.type === 'file');
   const allPromptRoles = roles.filter(r => r.type === 'prompt');
 
+  /** 保存角色信息 */
   const saveRole = async () => {
     try { const v = await roleForm.validateFields(); const r = await saveDocumentRole(v); setRoles(r.roles); setConfigs(r.configs); setRoleDrawerOpen(false); message.success(t('common.success')); }
     catch { message.error(t('common.error')); }
   };
+  /** 保存项目角色配置（规范化排序参数） */
   const saveConfig = async () => {
     try {
       const v = await configForm.validateFields();
@@ -86,15 +91,19 @@ export default function DocumentRolesPage() {
       setRoles(r.roles); setConfigs(r.configs); setConfigDrawerOpen(false); message.success(t('common.success'));
     } catch { message.error(t('common.error')); }
   };
+  /** 删除指定角色 */
   const removeRole = async (role: DocumentRole) => { const r = await deleteDocumentRole(role.type, role.id); setRoles(r.roles); setConfigs(r.configs); };
+  /** 删除指定项目配置 */
   const removeConfig = async (id: string) => { const r = await deleteProjectRoleConfig(id); setRoles(r.roles); setConfigs(r.configs); };
 
+  /** 打开角色编辑抽屉，内置角色自动创建副本 */
   const openRoleDrawer = (role?: DocumentRole, type: 'file' | 'prompt' = 'file') => {
     const editingRole = role?.builtIn ? { ...role, id: `${role.id}-copy-${Date.now()}`, name: `${role.name} Copy`, builtIn: false } : role;
     if (role?.builtIn) message.info('内置角色不可直接编辑，已为你创建副本');
     roleForm.setFieldsValue(editingRole ? { ...editingRole, resourceIds: editingRole.resourceIds?.length ? editingRole.resourceIds : editingRole.resourceId ? [editingRole.resourceId] : [] } : { id: `role-${Date.now()}`, name: '', description: '', type, resourceIds: [], executionType: type === 'prompt' ? 'reference' : undefined, processingType: type === 'file' ? 'reference' : undefined });
     setRoleDrawerOpen(true);
   };
+  /** 打开配置编辑抽屉，内置配置自动创建副本 */
   const openConfigDrawer = (config?: ProjectRoleConfig) => {
     const editingConfig = config?.builtIn ? { ...config, id: `${config.id}-copy-${Date.now()}`, name: `${config.name} Copy`, builtIn: false } : config;
     if (config?.builtIn) message.info('内置项目配置不可直接编辑，已为你创建副本');
@@ -229,7 +238,7 @@ export default function DocumentRolesPage() {
       ) : (activeTab === 'file' ? roleCardGrid(fileRoles, t) : roleCardGrid(promptRoles, t))}
     </Card>
 
-    {/* Role Editor Drawer */}
+    {/* 角色编辑器抽屉 */}
     <Drawer
       title={t('roles.roleEditor')}
       open={roleDrawerOpen} onClose={() => setRoleDrawerOpen(false)}
@@ -281,7 +290,7 @@ export default function DocumentRolesPage() {
       </Form>
     </Drawer>
 
-    {/* Config Editor Drawer */}
+    {/* 配置编辑器抽屉 */}
     <Drawer
       title={t('roles.configEditor')}
       open={configDrawerOpen} onClose={() => setConfigDrawerOpen(false)}

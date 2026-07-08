@@ -4,6 +4,7 @@ import { useTheme } from 'next-themes';
 import { useAppLocale, useAppTranslations } from '@/components/Layout';
 import { Sun, Moon, Languages } from 'lucide-react';
 
+/** 顶部导航栏：主题切换与语言切换按钮 */
 export function Header() {
   const { resolvedTheme, setTheme } = useTheme();
   const { locale, setLocale } = useAppLocale();

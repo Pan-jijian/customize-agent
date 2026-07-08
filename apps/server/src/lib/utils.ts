@@ -1,3 +1,4 @@
+/** 将字节数转换为可读的存储单位字符串（B/KB/MB/GB/TB） */
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -6,6 +7,7 @@ export function formatBytes(bytes: number): string {
   return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/** 将时间戳转换为相对时间描述（如「3 分钟前」「2d ago」），支持中英文 */
 export function formatRelativeTime(timestamp: number, locale = 'zh-CN'): string {
   if (!timestamp || timestamp <= 0) return locale === 'en-US' ? 'Never' : '从未';
   const now = Date.now();
@@ -39,6 +41,7 @@ const CATEGORY_LABELS_EN: Record<string, string> = {
   archive: 'Archive', other: 'Other',
 };
 
+/** 根据区域设置获取文件分类的中文或英文标签 */
 export function categoryLabel(category: string, locale = 'zh-CN'): string {
   const map = locale === 'en-US' ? CATEGORY_LABELS_EN : CATEGORY_LABELS_ZH;
   return map[category] ?? category;

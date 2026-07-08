@@ -3,6 +3,10 @@ import type { BuiltinTools } from '@customize-agent/tools';
 import { t } from '../tui/renderer.js';
 import type { I18nManager } from '../i18n/manager.js';
 
+/**
+ * 快捷工具命令：调用 BuiltinTools 中的常用功能。
+ * 包括 /web、/export、/checkpoint、/git、/preview、/file、/mcp、/plugin、/zip 等。
+ */
 export class ToolCommands {
   constructor(private builtinTools: BuiltinTools, private i18n: I18nManager, private history: Message[]) {}
 

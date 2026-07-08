@@ -1,19 +1,19 @@
-// @customize-agent/tools — Shell abstraction layer
+// @customize-agent/tools — Shell 抽象层
 //
-// Detects the best available shell on each platform and provides a unified
-// command execution interface. On Windows, PowerShell/pwsh is the supported shell.
+// 检测各平台最佳可用 Shell，提供统一的命令执行接口。
+// Windows 上支持 PowerShell/pwsh。
 
 import { reportNonFatalError } from '@customize-agent/types';
 import { execa } from 'execa';
 import { isWindows, isMacOS } from './utils.js';
 import type { ShellConfig, ShellResult } from './types.js';
 
-// ── Shell Detection ──────────────────────────────────────────────────────────
+// ── Shell 检测 ────────────────────────────────────────────────────────────────
 
-/** Detect the best available shell on the current platform */
+/** 检测当前平台的最佳可用 Shell */
 export async function detectShell(): Promise<ShellConfig> {
   if (isMacOS()) {
-    // macOS: try zsh (default since Catalina), fallback to bash
+    // macOS：先试 zsh（Catalina 起默认），回退到 bash
     const zsh = await tryShell('/bin/zsh', ['-c']);
     if (zsh) return zsh;
     return { shell: '/bin/bash', type: 'bash', needsTranslation: false, shellArgs: ['-c'], cmdSep: ';', pathSep: ':' };
@@ -29,7 +29,7 @@ export async function detectShell(): Promise<ShellConfig> {
     throw new Error('PowerShell is required on Windows. Please install PowerShell 7 or enable Windows PowerShell.');
   }
 
-  // Linux: bash → sh
+  // Linux：bash → sh 回退
   const bash = await tryShell('/bin/bash', ['-c']);
   if (bash) return bash;
   return { shell: '/bin/sh', type: 'sh', needsTranslation: false, shellArgs: ['-c'], cmdSep: ';', pathSep: ':' };
@@ -59,10 +59,10 @@ async function tryShell(binary: string, args: string[]): Promise<ShellConfig | n
   return null;
 }
 
-// ── Command Translation ──────────────────────────────────────────────────────
+// ── 命令翻译 ───────────────────────────────────────────────────────────────────
 
 /**
- * Translate common Unix-style commands and flags into PowerShell equivalents.
+ * 将常见 Unix 风格命令和参数翻译为 PowerShell 等效命令。
  */
 export function translateForPowerShell(command: string): string {
   const trimmed = command.trim();
@@ -156,11 +156,11 @@ export function translateForPowerShell(command: string): string {
   }
 }
 
-// ── Shell Abstraction ────────────────────────────────────────────────────────
+// ── Shell 抽象 ────────────────────────────────────────────────────────────────
 
 let _cachedShellConfig: ShellConfig | null = null;
 
-/** Get the detected shell config (cached after first call) */
+/** 获取已检测的 Shell 配置（首次调用后缓存） */
 export async function getShellConfig(): Promise<ShellConfig> {
   if (!_cachedShellConfig) {
     _cachedShellConfig = await detectShell();
@@ -168,14 +168,14 @@ export async function getShellConfig(): Promise<ShellConfig> {
   return _cachedShellConfig;
 }
 
-/** Reset cached shell config (useful for testing) */
+/** 重置缓存的 Shell 配置（用于测试） */
 export function resetShellConfig(): void {
   _cachedShellConfig = null;
 }
 
 /**
- * Translate a command for the current shell environment.
- * Returns the command as-is if no translation is needed.
+ * 将命令翻译为当前 Shell 环境的格式。
+ * 无需翻译时直接返回原命令。
  */
 export async function translateCommand(command: string): Promise<string> {
   const config = await getShellConfig();
@@ -189,8 +189,8 @@ export async function translateCommand(command: string): Promise<string> {
 }
 
 /**
- * Execute a command with the platform-appropriate shell.
- * Automatically translates Unix commands on Windows.
+ * 使用平台适配的 Shell 执行命令。
+ * 在 Windows 上自动翻译 Unix 命令。
  */
 export async function executeCommand(
   command: string,
@@ -205,8 +205,8 @@ export async function executeCommand(
   const translatedCmd = await translateCommand(command);
 
   try {
-    // execa does NOT accept separate `shell` + `shellArgs` options.
-    // We must pass the shell as the executable and args as first arguments.
+    // execa 不接受分开的 `shell` + `shellArgs` 选项。
+    // 必须将 shell 作为可执行文件传递，参数作为第一个参数。
     const result = await execa(config.shell, [...config.shellArgs, translatedCmd], {
       cwd: options?.cwd,
       reject: false,
@@ -236,8 +236,8 @@ export async function executeCommand(
 }
 
 /**
- * Spawn a background process with the default platform shell.
- * Returns the child process for the caller to manage.
+ * 使用默认平台 Shell 生成后台进程。
+ * 返回子进程供调用方管理。
  */
 export async function spawnBackground(
   command: string,

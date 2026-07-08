@@ -3,10 +3,12 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { resolveSafe } from '../core/path-utils.js';
 
+/** HTML 转义：将 &、<、> 转为实体引用 */
 function escapeHtml(input: string): string {
   return input.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/** Markdown 转 HTML 的降级实现（当 marked 库不可用时使用） */
 function fallbackMarkdownToHtml(input: string): string {
   return input.split(/\n{2,}/u).map(block => {
     const trimmed = block.trim();
@@ -19,6 +21,7 @@ function fallbackMarkdownToHtml(input: string): string {
   }).join('\n');
 }
 
+/** 使用 marked 库将 Markdown 转为 HTML，不可用时降级为 fallback 实现 */
 async function markdownToHtml(input: string): Promise<string> {
   try {
     const { marked } = await import('marked');
@@ -28,6 +31,7 @@ async function markdownToHtml(input: string): Promise<string> {
   }
 }
 
+/** 构建完整 HTML 文档（含中文字体排版样式） */
 function documentHtml(title: string, body: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -67,6 +71,7 @@ function documentHtml(title: string, body: string): string {
 </html>`;
 }
 
+/** 使用 Playwright 将 HTML 渲染为 PDF（A4 格式，含页眉页脚） */
 async function renderPdfWithPlaywright(html: string, outputPath: string): Promise<void> {
   const { chromium } = await import('playwright');
   const browser = await chromium.launch({ headless: true });

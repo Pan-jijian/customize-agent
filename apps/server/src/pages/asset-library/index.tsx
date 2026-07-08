@@ -25,6 +25,7 @@ export default function AssetLibraryPage() {
     message.success('已复制路径');
   };
 
+  /** 执行资源操作：加入知识库索引、打开文件、打开目录、删除 */
   const runAction = async (id: string, action: 'index' | 'openFile' | 'openDirectory' | 'delete') => {
     try {
       if (action === 'index') { setAssets((await indexGeneratedAsset(id)).assets); message.success('已加入知识库索引'); }
@@ -34,6 +35,7 @@ export default function AssetLibraryPage() {
     } catch (error) { message.error(error instanceof Error ? error.message : '操作失败'); }
   };
 
+  /** 批量删除资源：删除已选或全部 */
   const handleBulkDelete = (mode: 'selected' | 'all') => {
     const targets = mode === 'selected' ? [...selectedIds] : assets.map(a => a.id);
     if (targets.length === 0) return;
@@ -51,10 +53,12 @@ export default function AssetLibraryPage() {
     });
   };
 
+  /** 切换资源选中状态 */
   const toggleSelect = (id: string) => {
     setSelectedIds(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   };
 
+  /** 获取图片资源的预览 URL */
   const previewSrc = (asset: GeneratedAssetRecord) =>
     asset.type === 'image' && asset.path
       ? `/api/assets/generated/preview?id=${encodeURIComponent(asset.id)}`
@@ -104,7 +108,7 @@ export default function AssetLibraryPage() {
                   style={{ border: isSelected ? '2px solid #1677ff' : undefined, cursor: 'pointer', position: 'relative' }}
                   onClick={() => toggleSelect(asset.id)}
                 >
-                  {/* Checkbox — top-left, always visible */}
+                  {/* 复选框 — 左上角，始终可见 */}
                   <div
                     onClick={(e) => { e.stopPropagation(); toggleSelect(asset.id); }}
                     style={{
@@ -120,21 +124,21 @@ export default function AssetLibraryPage() {
                     {isSelected ? '✓' : ''}
                   </div>
 
-                  {/* More button — top-right */}
+                  {/* 更多按钮 — 右上角 */}
                   <Dropdown menu={{ items: actionItems }} trigger={['click']} placement="bottomRight">
                     <Button type="text" size="small" icon={<MoreOutlined />}
                       style={{ position: 'absolute', top: 6, right: 6, zIndex: 2, width: 24, height: 24, padding: 0, background: 'var(--colorBgContainer)', borderRadius: 6, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}
                       onClick={(e) => e.stopPropagation()} />
                   </Dropdown>
 
-                  {/* Preview image */}
+                  {/* 预览图片 */}
                   {src && (
                     <div style={{ margin: '-12px -12px 10px -12px', borderRadius: '10px 10px 0 0', overflow: 'hidden', height: 140, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--colorFillAlter)' }}>
                       <Image src={src} alt={asset.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} onClick={(e) => e.stopPropagation()} />
                     </div>
                   )}
 
-                  {/* Header row */}
+                  {/* 标题行 */}
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 6 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1 }}>
                       {!src && (asset.type === 'image' ? <PictureOutlined style={{ color: 'var(--colorWarning)', fontSize: 15, flexShrink: 0 }} /> : <FileOutlined style={{ color: 'var(--colorAccent)', fontSize: 15, flexShrink: 0 }} />)}
@@ -142,14 +146,14 @@ export default function AssetLibraryPage() {
                     </div>
                   </div>
 
-                  {/* Tags */}
+                  {/* 标签 */}
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
                     <Tag color={asset.indexed ? 'success' : 'default'} style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{asset.indexed ? '已入库' : '未入库'}</Tag>
                     <Tag color={ROLE_COLORS[asset.role] || 'blue'} style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{asset.role}</Tag>
                     <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{asset.type}</Tag>
                   </div>
 
-                  {/* Meta info */}
+                  {/* 元信息 */}
                   <div style={{ fontSize: 12, color: 'var(--colorTextSecondary)', lineHeight: 1.5, marginBottom: 6 }}>
                     {asset.path && (
                       <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 11 }}>

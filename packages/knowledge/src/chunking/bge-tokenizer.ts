@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 type TokenizerJson = { model?: { vocab?: Record<string, number>; unk_token?: string } };
 
+/** BGE Tokenizer，使用 tokenizer.json 执行 BGE 模型的真实 Token 化 */
 export class BgeTokenizer {
   private readonly vocab: Set<string>;
   private readonly unkToken: string;
@@ -16,6 +17,7 @@ export class BgeTokenizer {
     if (this.vocab.size === 0) throw new Error('BGE tokenizer vocab 为空，无法执行真实 Token 计数');
   }
 
+  /** 统计文本的 Token 数量 */
   countTokens(text: string): number {
     return this.encode(text).length;
   }

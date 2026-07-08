@@ -8,6 +8,7 @@ import { resolveSafe } from '../core/path-utils.js';
 import { killProcess } from '../core/platform/process.js';
 import { getShellConfig, translateCommand } from '../core/platform/shell.js';
 
+/** 后台进程跟踪记录 */
 type BackgroundProcess = { command: string; child: any; output: string[]; startedAt: string };
 
 export class ShellTools {
@@ -77,7 +78,7 @@ export class ShellTools {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'customize-agent-archive-'));
     const tmpOut = path.join(tmpDir, path.basename(out));
 
-    // Dynamic import: archiver v8 is ESM-only with named exports
+    // 动态导入：archiver v8 是 ESM-only，使用具名导出
     const { Archiver } = await import('archiver');
 
     try {

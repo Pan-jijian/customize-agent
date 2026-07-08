@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 
+/** 根据相对路径中的中文目录名推断文件分类 */
 function categoryFromRelativePath(relativePath: string) {
   if (relativePath.includes('表格数据/')) return 'spreadsheet';
   if (relativePath.includes('图片素材/')) return 'image';
@@ -11,12 +12,14 @@ function categoryFromRelativePath(relativePath: string) {
   return 'other';
 }
 
+/** 读取文件预览内容，图片文件返回描述文本，文本文件直接读取原文 */
 function readPreviewContent(file: string, relativePath: string) {
   const ext = path.extname(relativePath).toLowerCase();
   if (['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) return `图片文件：${relativePath}\n大小：${fs.statSync(file).size} 字节\n说明：该文件为内置知识库真实图片资源，可在文件路径中打开查看。`;
   return fs.readFileSync(file, 'utf-8');
 }
 
+/** 当文件未索引时，从磁盘读取文件信息作为降级返回 */
 function fallbackFileDetail(projectRoot: string, relativePath: string) {
   const kbRoot = path.join(projectRoot, 'knowledgeBase');
   const absolutePath = path.join(kbRoot, relativePath);

@@ -42,7 +42,7 @@ export class AnthropicProvider implements ILLMProvider {
   }
 
   private _buildBody(messages: Message[], options?: ChatOptions) {
-    // Convert to Anthropic messages format (system as top-level param)
+    // 转换为 Anthropic 消息格式（system 作为顶层参数）
     const systemMessage = messages.find(m => m.role === 'system');
     const conversationMessages = messages.filter(m => m.role !== 'system').map(m => ({
       role: m.role as 'user' | 'assistant',
@@ -107,7 +107,7 @@ export class AnthropicProvider implements ILLMProvider {
         if (block.type === 'text' && block.text) {
           textContent += block.text;
         } else if (block.type === 'thinking' && block.thinking) {
-          // thinking blocks are handled separately
+          // thinking 块单独处理（不加入文本内容）
         } else if (block.type === 'tool_use' && block.id) {
           toolCalls.push({
             id: block.id,
@@ -248,7 +248,7 @@ export class AnthropicProvider implements ILLMProvider {
                 }
               }
             } catch {
-              // Skip unparseable SSE lines
+              // 跳过无法解析的 SSE 行
             }
           }
         }

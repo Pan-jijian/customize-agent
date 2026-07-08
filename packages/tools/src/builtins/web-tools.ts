@@ -3,6 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { resolveSafe } from '../core/path-utils.js';
 
+/** 去除 HTML 标签并解码常见 HTML 实体 */
 function decodeHtml(input: string): string {
   return input.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 }

@@ -97,6 +97,7 @@ export interface FileRelationship {
   createdAt: number;
 }
 
+/** 索引状态存储器，使用 SQLite 管理知识库索引的持久化状态 */
 export class IndexStateStore {
   private readonly db: Database.Database;
   private ftsEnabled = false;
@@ -108,6 +109,7 @@ export class IndexStateStore {
     this.initTables();
   }
 
+  /** 加载所有活跃的索引记录 */
   loadActiveRecords(): Map<string, IndexStateRecord> {
     const rows = this.db.prepare(`
       SELECT * FROM kb_index_state
@@ -120,6 +122,7 @@ export class IndexStateStore {
     }));
   }
 
+  /** 插入或更新索引记录 */
   upsertRecord(record: IndexStateRecord): void {
     this.db.prepare(`
       INSERT INTO kb_index_state (
@@ -156,6 +159,7 @@ export class IndexStateStore {
     );
   }
 
+  /** 更新已验证文件的时间戳和状态 */
   updateVerified(relativePath: string, mtime: number): void {
     this.db.prepare(`
       UPDATE kb_index_state
@@ -231,6 +235,12 @@ export class IndexStateStore {
     return rows.map(row => this.rowToJob(row));
   }
 
+  /**
+   * 替换指定文件的切片数据（使用事务批量更新）
+   * @param relativePath 文件相对路径
+   * @param chunks 文本切片列表
+   * @param file 文件分类信息
+   */
   replaceChunks(
     relativePath: string,
     chunks: TextChunk[],
@@ -411,6 +421,12 @@ export class IndexStateStore {
     return rows.map(row => this.rowToChunk(row, 0));
   }
 
+  /**
+   * 使用关键词搜索切片（支持 FTS5 全文搜索和 LIKE 模糊匹配）
+   * @param query 搜索查询
+   * @param limit 返回结果数量上限
+   * @returns 搜索结果列表（按相关性得分排序）
+   */
   searchChunks(query: string, limit = 10): ChunkSearchResult[] {
     const terms = this.expandSearchTerms(query);
     if (terms.length === 0) return [];
@@ -602,6 +618,10 @@ export class IndexStateStore {
     }));
   }
 
+  /**
+   * 删除指定文件的全部索引数据（含切片、哈希、MinHash、标签、关系等）
+   * @param relativePath 文件相对路径
+   */
   deleteRecord(relativePath: string): void {
     this.db.prepare('DELETE FROM kb_chunks WHERE relative_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_parent_chunks WHERE relative_path = ?').run(relativePath);

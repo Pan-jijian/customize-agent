@@ -9,9 +9,9 @@ import { IndexStateStore } from '../src/core/index-state-store.js';
 import { KnowledgeBaseManager } from '../src/core/knowledge-base-manager.js';
 import type { ClassifiedFile } from '../src/types.js';
 
-// ─── Test helpers ─────────────────────────────────────────────
+// ─── 测试辅助函数 ─────────────────────────────────────────────
 
-// Initialize at module level so describe blocks have access
+// 在模块级别初始化，以便 describe 块能够访问
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-test-'));
 const kbDir = path.join(tmpDir, 'knowledgeBase');
 const storageRoot = path.join(tmpDir, 'storage');
@@ -43,10 +43,10 @@ function makeClassifiedFile(overrides: Partial<ClassifiedFile> & { absolutePath:
 }
 
 afterAll(() => {
-  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* cleanup best-effort */ }
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
 });
 
-// ─── 1. FileClassifier tests ──────────────────────────────────
+// ─── 1. FileClassifier 测试 ──────────────────────────────────
 
 describe('FileClassifier', () => {
   const classifier = new FileClassifier();
@@ -127,7 +127,7 @@ describe('FileClassifier', () => {
   });
 });
 
-// ─── 2. ContentExtractor tests ────────────────────────────────
+// ─── 2. ContentExtractor 测试 ────────────────────────────────
 
 describe('ContentExtractor', () => {
   const extractor = new ContentExtractor();
@@ -199,8 +199,8 @@ database:
     const file = makeClassifiedFile({ absolutePath: absPath, relativePath: 'data/test.yaml', category: 'data', format: 'yaml', mimeType: 'application/x-yaml' });
     const result = await extractor.extract(file);
     expect(result.metadata.extractionMode).toBe('structured_data');
-    // YAML regex \s* can match newlines, so parent keys consume child lines
-    // Results look like: "server | host: localhost", "port | 8080"
+    // YAML 正则 \s* 可以匹配换行符，因此父键会消耗子行
+    // 结果类似于："server | host: localhost", "port | 8080"
     expect(result.text).toContain('host: localhost');
     expect(result.text).toContain('8080');
     expect(result.text).toContain('url: postgres://db');
@@ -290,7 +290,7 @@ export function getUser(id: number): User {
   });
 
   it('extracts DXF CAD data correctly', async () => {
-    // Minimal DXF with a layer and text entity
+    // 最小 DXF，包含一个图层和文本实体
     const dxf = `0
 SECTION
 2
@@ -353,7 +353,7 @@ EOF`;
   });
 
   it('includes metadata-only text for unsupported file types', async () => {
-    // For unsupported binary formats that fall through to metadataOnlyText
+    // 对于不支持的二进制格式，回退到 metadataOnlyText
     const absPath = createTestFile('other/meta-test.bin', Buffer.from([0x00, 0x01, 0x02, 0x03]));
     const file = makeClassifiedFile({ absolutePath: absPath, relativePath: 'other/meta-test.bin', category: 'other', format: 'unknown', mimeType: 'application/octet-stream', fileSize: 4 });
     const result = await extractor.extract(file);
@@ -367,7 +367,7 @@ EOF`;
     const absPath = createTestFile('documents/empty.txt', '');
     const file = makeClassifiedFile({ absolutePath: absPath, relativePath: 'documents/empty.txt', category: 'document', format: 'plaintext', mimeType: 'text/plain' });
     const result = await extractor.extract(file);
-    // Empty plain text file: read as utf8 → empty string, then trimmed → ''
+    // 空纯文本文件：以 utf8 读取 → 空字符串，经 trim 后 → ''
     expect(result.text).toBe('');
     expect(result.warnings).toEqual([]);
     expect(result.extractionTimeMs).toBeGreaterThanOrEqual(0);
@@ -381,7 +381,7 @@ EOF`;
   });
 });
 
-// ─── 3. TextChunker tests ─────────────────────────────────────
+// ─── 3. TextChunker 测试 ─────────────────────────────────────
 
 describe('TextChunker', () => {
   const chunker = new TextChunker();
@@ -398,7 +398,7 @@ describe('TextChunker', () => {
     const chunks = chunker.chunk('A'.repeat(5000), file);
     expect(chunks.length).toBeGreaterThan(1);
     for (const chunk of chunks) {
-      expect(chunk.tokenCount).toBeLessThanOrEqual(1000); // document maxChunkSize
+      expect(chunk.tokenCount).toBeLessThanOrEqual(1000); // 文档最大分块大小
     }
   });
 
@@ -413,7 +413,7 @@ Content for section two. `.repeat(30);
     const file = { ...classify(absPath, 'tmp-chunk-md.md'), category: 'document' as const, format: 'markdown' as const };
     const chunks = chunker.chunk(text, file);
     expect(chunks.length).toBeGreaterThan(0);
-    // Section titles should be preserved
+    // 章节标题应被保留
     const sectionTitles = chunks.filter(c => c.sectionTitle);
     expect(sectionTitles.length).toBeGreaterThan(0);
   });
@@ -499,13 +499,13 @@ Charlie,35,Shenzhen`;
   it('respects category-specific maxChunkSize', () => {
     const text = 'x'.repeat(5000);
 
-    // document: 800 tokens (~3200 chars) → should split
+    // 文档：800 tokens（约 3200 字符）→ 应该会拆分
     const absPath1 = createTestFile('tmp-doc.txt', 'placeholder');
     const docFile = { ...classify(absPath1, 'tmp-doc.txt'), category: 'document' as const };
     const docChunks = chunker.chunk(text, docFile);
-    for (const c of docChunks) expect(c.tokenCount).toBeLessThanOrEqual(850); // ~800 + some margin
+    for (const c of docChunks) expect(c.tokenCount).toBeLessThanOrEqual(850); // ~800 + 一定余量
 
-    // code: 1000 tokens (~4000 chars) → may not split as much
+    // 代码：1000 tokens（约 4000 字符）→ 可能不会拆分成太多块
     const absPath2 = createTestFile('tmp-code2.ts', 'placeholder');
     const codeFile = { ...classify(absPath2, 'tmp-code2.ts'), category: 'code' as const, format: 'typescript' as const };
     const codeChunks = chunker.chunk(text, codeFile);
@@ -513,7 +513,7 @@ Charlie,35,Shenzhen`;
   });
 });
 
-// ─── 4. IndexStateStore tests ─────────────────────────────────
+// ─── 4. IndexStateStore 测试 ─────────────────────────────────
 
 describe('IndexStateStore', () => {
   let store: IndexStateStore;
@@ -658,7 +658,7 @@ describe('IndexStateStore', () => {
   });
 });
 
-// ─── 5. Full pipeline: ContentExtractor → TextChunker → Store ─
+// ─── 5. 完整流水线：ContentExtractor → TextChunker → Store ─
 
 describe('Full upload pipeline (extract → chunk → store)', () => {
   const extractor = new ContentExtractor();
@@ -777,19 +777,19 @@ export function validateConfig(config: Config): string[] {
     const stat = fs.statSync(absPath);
     const file = classifier.classify(absPath, `${dir}/${fileName}`, stat);
 
-    // Step 1: Classify
+    // 步骤 1：分类
     expect(file.category).toBe(category);
 
-    // Step 2: Extract
+    // 步骤 2：提取
     const extraction = await extractor.extract(file);
     expect(extraction.text.length).toBeGreaterThan(0);
     expect(extraction.warnings.length).toBe(0);
 
-    // Step 3: Chunk
+    // 步骤 3：分块
     const chunks = chunker.chunk(extraction.text, file, { textLength: extraction.text.length });
     expect(chunks.length).toBeGreaterThan(0);
 
-    // Step 4: Store
+    // 步骤 4：存储
     const uniqueId = `${dir}/${fileName}`;
     store.upsertRecord({
       relativePath: uniqueId,
@@ -816,24 +816,24 @@ export function validateConfig(config: Config): string[] {
       collectionName: `test-${category}`,
     });
 
-    // Verify stored data
+    // 验证存储的数据
     const storedChunks = store.listChunks({ relativePath: uniqueId });
     expect(storedChunks.length).toBe(chunks.length);
     expect(storedChunks[0].content.length).toBeGreaterThan(0);
 
-    // Verify searchability
+    // 验证可搜索性
     const searchTerms = content.slice(0, 20).split(/\s+/).filter(w => w.length > 2);
     if (searchTerms.length > 0) {
       const searchResults = store.searchChunks(searchTerms[0], 3);
       expect(searchResults.length).toBeGreaterThan(0);
     }
 
-    // Cleanup
+    // 清理
     store.deleteRecord(uniqueId);
   });
 });
 
-// ─── 6. Upload indexing pipeline ──────────────────────────────
+// ─── 6. 上传索引流水线 ──────────────────────────────
 
 describe('KnowledgeBaseManager upload indexing', () => {
   function createManagerFixture() {
@@ -992,7 +992,7 @@ startxref
   });
 });
 
-// ─── 7. Edge cases ────────────────────────────────────────────
+// ─── 7. 边界情况 ────────────────────────────────────────────
 
 describe('Edge cases', () => {
   const extractor = new ContentExtractor();
@@ -1006,7 +1006,7 @@ describe('Edge cases', () => {
     const extraction = await extractor.extract(file);
     const chunks = chunker.chunk(extraction.text, file);
     expect(chunks.length).toBeGreaterThan(5);
-    // Each chunk should have valid indices
+    // 每个块应有有效的索引
     expect(chunks.every(c => c.index >= 0)).toBe(true);
   });
 
@@ -1026,24 +1026,24 @@ describe('Edge cases', () => {
     const absPath = createTestFile('documents/whitespace.txt', whitespaceText);
     const file = makeClassifiedFile({ absolutePath: absPath, relativePath: 'documents/whitespace.txt', category: 'document', format: 'plaintext', mimeType: 'text/plain' });
     const extraction = await extractor.extract(file);
-    // trim() should make whitespace-only text empty
+    // trim() 应将纯空格文本变为空
     const chunks = chunker.chunk(extraction.text, file);
-    // After trim, empty text produces 0 chunks
+    // trim 后，空文本产生 0 个块
     expect(chunks.length).toBe(0);
   });
 
   it('handles binary-like content in text files', async () => {
-    // Text with null bytes and control characters
+    // 含空字节和控制字符的文本
     const mixedText = 'Normal text\n\x00Null byte here\x00\nMore normal text\n\x01\x02Control chars';
     const absPath = createTestFile('documents/binary-like.txt', mixedText);
     const file = makeClassifiedFile({ absolutePath: absPath, relativePath: 'documents/binary-like.txt', category: 'document', format: 'plaintext', mimeType: 'text/plain' });
-    // Reading as utf8 may fail or produce replacement chars
-    // Just verify it doesn't crash
+    // 以 utf8 读取可能会失败或产生替换字符
+    // 仅验证不会崩溃
     try {
       const extraction = await extractor.extract(file);
       expect(extraction).toBeDefined();
     } catch {
-      // Graceful degradation is acceptable
+      // 优雅降级是可接受的
     }
   });
 
@@ -1092,14 +1092,14 @@ Line 4: This is the fourth line of text for testing.`;
     const file = classifier.classify(absPath, 'tmp-consistency.txt', fs.statSync(absPath));
     const chunks = chunker.chunk(text, file);
 
-    // Chunker prepends a header via withHeader(), so positions reference header+text
+    // Chunker 通过 withHeader() 预置了头部，因此位置引用的是头部+文本
     const fullText = `文件: ${file.relativePath}\n类型: ${file.category}/${file.format}\n\n${text}`;
 
     for (const chunk of chunks) {
       expect(chunk.startChar).toBeGreaterThanOrEqual(0);
       expect(chunk.endChar).toBeGreaterThan(chunk.startChar);
       expect(chunk.endChar).toBeLessThanOrEqual(fullText.length);
-      // Verify the text slice matches
+      // 验证文本切片匹配
       const slice = fullText.slice(chunk.startChar, chunk.endChar);
       expect(chunk.text).toContain(slice.trim().slice(0, 40));
     }
@@ -1109,7 +1109,7 @@ Line 4: This is the fourth line of text for testing.`;
     const absPath = createTestFile('other/unknown.xyz', Buffer.from([0x00, 0x01, 0x02, 0x03, 0x04]));
     const file = makeClassifiedFile({ absolutePath: absPath, relativePath: 'other/unknown.xyz', category: 'other', format: 'unknown', mimeType: 'application/octet-stream', fileSize: 5 });
     const result = await extractor.extract(file);
-    // Should not crash, should produce metadata or fallback
+    // 不应崩溃，应产生元数据或回退内容
     expect(result).toBeDefined();
     expect(result.metadata).toBeDefined();
   });

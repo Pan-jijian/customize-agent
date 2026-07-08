@@ -21,6 +21,7 @@ type FastFile = {
   metadataJson?: string;
 };
 
+/** 根据相对路径中的中文目录名推断文件分类 */
 function categoryFromRelativePath(relativePath: string) {
   if (relativePath.includes('表格数据/')) return 'spreadsheet';
   if (relativePath.includes('图片素材/')) return 'image';
@@ -33,6 +34,7 @@ function formatFromFile(filePath: string) {
   return path.extname(filePath).slice(1).toLowerCase() || 'text';
 }
 
+/** 扫描知识库目录下所有文件，返回磁盘上实际的文件列表 */
 function scanKnowledgeBaseFiles(projectRoot: string): FastFile[] {
   const kbRoot = path.join(projectRoot, 'knowledgeBase');
   if (!fs.existsSync(kbRoot)) return [];
@@ -72,6 +74,7 @@ async function ensureBuiltInIndexed(projectRoot: string) {
   return project.listFiles();
 }
 
+/** 合并已索引文件和磁盘文件，磁盘上新增文件以 pending 状态加入 */
 function mergeIndexedAndDiskFiles(indexedFiles: FastFile[], projectRoot: string) {
   const byPath = new Map(indexedFiles.map(file => [file.relativePath, file]));
   for (const file of scanKnowledgeBaseFiles(projectRoot)) {
@@ -80,10 +83,12 @@ function mergeIndexedAndDiskFiles(indexedFiles: FastFile[], projectRoot: string)
   return Array.from(byPath.values()).sort((a, b) => Number(isBuiltInKnowledgeFile(a.relativePath)) - Number(isBuiltInKnowledgeFile(b.relativePath)) || b.mtime - a.mtime);
 }
 
+/** 标记文件是否为内置示例文件 */
 function withBuiltInFlag<T extends { relativePath: string }>(file: T): T & { builtIn: boolean } {
   return { ...file, builtIn: isBuiltInKnowledgeFile(file.relativePath) };
 }
 
+/** 处理 KB 文件列表的获取、增量索引和批量删除操作 */
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!['GET', 'DELETE', 'POST'].includes(req.method!)) return res.status(405).json({ error: 'Method not allowed' });
     const bodyProjectRoot = typeof req.body?.projectRoot === 'string' ? req.body.projectRoot : undefined;
@@ -145,4 +150,5 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     res.status(200).json({ files: paged, total, page, limit, vectorStatus });
 }
 
+/** 知识库文件 API：支持 GET 获取文件列表、POST 增量索引、DELETE 删除文件 */
 export default withApiErrorBoundary('api/kb/files', handler);

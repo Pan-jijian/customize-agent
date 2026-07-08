@@ -370,7 +370,7 @@ export class KnowledgeBaseManager {
       if (queryIndex < 3) {
         try {
           rankedLists.push({ source: 'vector', items: (await this.semanticSearch(rewritten, { ...options, limit: limit * 3 })).results, queryIndex });
-        } catch { /* vector search is optional in hybrid search */ }
+        } catch { /* 向量搜索在混合搜索中是可选的 */ }
       }
     }
     const keywordItems = rankedLists.filter(list => list.source === 'keyword').flatMap(list => list.items);

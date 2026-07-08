@@ -3,6 +3,7 @@ import { platform } from 'node:os';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { deleteGeneratedAsset, indexGeneratedAsset, listGeneratedAssets, openGeneratedAssetTarget } from '@/services/generatedDocumentService';
 
+/** 根据操作系统调用系统命令打开文件或目录 */
 function openPath(targetPath: string) {
   const os = platform();
   if (os === 'darwin') return spawn('open', [targetPath], { detached: true, stdio: 'ignore' });
@@ -10,6 +11,7 @@ function openPath(targetPath: string) {
   return spawn('xdg-open', [targetPath], { detached: true, stdio: 'ignore' });
 }
 
+/** 生成资产 API：GET 列表，DELETE 删除，POST 支持索引和打开操作 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     if (req.method === 'GET') return res.status(200).json({ assets: listGeneratedAssets() });

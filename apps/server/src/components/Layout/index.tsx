@@ -30,6 +30,7 @@ export function useAppLocale() {
   return ctx;
 }
 
+/** 递归读取嵌套消息对象中的翻译值，支持点分隔路径（如 "nav.overview"） */
 function readNested(messages: Messages, key: TranslationKey): string {
   const value = key.split('.').reduce<unknown>((current, part) => {
     if (current && typeof current === 'object' && part in current) {
@@ -49,6 +50,7 @@ export function useAppTranslations(namespace?: string) {
   }, [messages, namespace]);
 }
 
+/** 从 Cookie 中解析前端区域设置，默认返回 zh-CN */
 function resolveLocaleFromCookie(): string {
   if (typeof document === 'undefined') return 'zh-CN';
   const match = document.cookie.match(/NEXT_LOCALE=([^;]+)/);
@@ -60,6 +62,7 @@ const MESSAGES: Record<string, Messages> = {
   'en-US': enMessages,
 };
 
+/** 应用主布局外壳，提供主题、区域设置、Antd 配置，并管理路由过渡状态 */
 function LayoutShell({ children }: { children: React.ReactNode }) {
   const { resolvedTheme } = useTheme();
   const router = useRouter();
@@ -112,6 +115,7 @@ function LayoutShell({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** 顶层布局组件，包裹 NextThemesProvider 以支持系统主题跟随 */
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
     <NextThemesProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>

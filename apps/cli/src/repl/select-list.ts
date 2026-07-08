@@ -5,6 +5,10 @@ import { supportsAnsi } from '../tui/terminal-capabilities.js';
 
 let keypressInitialized = false;
 
+/**
+ * 从列表中选择一项的交互式面板。
+ * 支持 ANSI 终端用方向键选择、回车确认；非 ANSI 回退到标准输入数字选择。
+ */
 export async function selectList<T>(title: string, items: Array<{ label: string; detail?: string; value: T }>): Promise<T | null> {
   if (!items.length) return null;
   if (!supportsAnsi()) {
@@ -25,7 +29,7 @@ export async function selectList<T>(title: string, items: Array<{ label: string;
   }
   let raw = false;
   if (process.stdin.isTTY) {
-    try { process.stdin.setRawMode(true); raw = true; } catch { /* ignore */ }
+    try { process.stdin.setRawMode(true); raw = true; } catch { /* 忽略 */ }
   }
   process.stdin.resume();
   let sel = 0;
@@ -63,7 +67,7 @@ export async function selectList<T>(title: string, items: Array<{ label: string;
     const finish = (value: T | null) => {
       clear();
       process.stdin.removeListener('keypress', onKey);
-      if (raw) try { process.stdin.setRawMode(false); } catch { /* ignore */ }
+      if (raw) try { process.stdin.setRawMode(false); } catch { /* 忽略 */ }
       resolve(value);
     };
     const onKey = (_str: string | undefined, key: readline.Key) => {

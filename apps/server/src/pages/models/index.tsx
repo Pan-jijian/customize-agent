@@ -31,7 +31,7 @@ export default function ModelsPage() {
   const [testing, setTesting] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, boolean | null>>({});
 
-  // Shared Drawer
+  // 共享抽屉
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editTarget, setEditTarget] = useState('');
@@ -119,7 +119,7 @@ export default function ModelsPage() {
         <Button type="primary" icon={<PlusOutlined />} onClick={openAddDrawer}>{t('models.addModel')}</Button>
       </div>
 
-      {/* Provider List */}
+      {/* 供应商列表 */}
       <Card size="small" title={`${t('models.modelList')} (${providers.length})`}>
         {providers.length === 0 ? <span style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>{t('models.noProviders')}</span> : (
           <Row gutter={[12, 12]}>
@@ -154,7 +154,7 @@ export default function ModelsPage() {
         )}
       </Card>
 
-      {/* Embedding */}
+      {/* 嵌入配置 */}
       <Card size="small" title={t('models.embeddingConfig')}>
         <Alert type="info" showIcon message={t('models.embeddingHint')} style={{ marginBottom: 16 }} />
         <Row gutter={[12, 12]}>
@@ -197,7 +197,7 @@ export default function ModelsPage() {
         </Space>
       </Card>
 
-      {/* Model Tiers */}
+      {/* 模型层级 */}
       {models && (
         <Card size="small" title={t('models.modelTiers')}>
           <Row gutter={[12, 12]}>
@@ -249,7 +249,7 @@ export default function ModelsPage() {
         </Card>
       )}
 
-      {/* Provider Drawer (Add / Edit) */}
+      {/* 供应商抽屉（添加 / 编辑） */}
       <Drawer
         title={isEditing ? t('models.editModel') : t('models.addModel')}
         open={drawerOpen} onClose={() => setDrawerOpen(false)} width={800} maskClosable={false}

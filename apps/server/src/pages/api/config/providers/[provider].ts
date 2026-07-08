@@ -2,6 +2,11 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { getConfigStore } from '@/services/configService';
 import { detectProtocol } from '@customize-agent/runtime';
 
+/**
+ * 单个 Provider API 处理器
+ * GET: 获取指定提供商详情（API Key 部分遮盖）
+ * DELETE: 删除指定提供商及其模型引用
+ */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!['GET', 'DELETE'].includes(req.method!)) return res.status(405).json({ error: 'Method not allowed' });
   try {

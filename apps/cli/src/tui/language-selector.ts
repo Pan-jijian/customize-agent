@@ -54,7 +54,7 @@ export function selectLanguage(texts: SelectorTexts): Promise<Language> {
     if (process.stdin.isTTY) {
       try { process.stdin.setRawMode(true); } catch { /* */ }
     }
-    try { readline.emitKeypressEvents(process.stdin); } catch { /* already initialized */ }
+    try { readline.emitKeypressEvents(process.stdin); } catch { /* 已初始化 */ }
     process.stdout.write(CSI + '?25l\n');
 
     let firstDraw = true;
@@ -132,7 +132,7 @@ function visibleLen(s: string): number {
   let w = 0;
   for (const ch of s) {
     const cp = ch.codePointAt(0) ?? 0;
-    // 2-column ranges: CJK + Fullwidth + arrows + misc symbols
+    // 2 列宽字符范围: CJK + 全角 + 箭头 + 杂项符号
     if (cp >= 0x2E80 && cp <= 0x9FFF) { w += 2; }
     else if (cp >= 0x3400 && cp <= 0x4DBF) { w += 2; }
     else if (cp >= 0xFF00 && cp <= 0xFFEF) { w += 2; }

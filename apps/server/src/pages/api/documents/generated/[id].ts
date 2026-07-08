@@ -1,6 +1,12 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { deleteGeneratedDocument, getGeneratedDocument, updateGeneratedDocument } from '@/services/generatedDocumentService';
 
+/**
+ * 单个生成文档 API 处理器
+ * GET: 获取指定文档
+ * PUT: 更新指定文档
+ * DELETE: 删除指定文档
+ */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     const id = String(req.query.id || '');

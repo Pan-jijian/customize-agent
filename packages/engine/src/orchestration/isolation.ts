@@ -67,6 +67,7 @@ export class GitWorktreeIsolation implements IsolationStrategy {
     return new Promise<void>(resolve => { this.pendingLocks.push(resolve); });
   }
 
+  /** 释放 FIFO 互斥锁 */
   private _releaseLock(): void {
     const next = this.pendingLocks.shift();
     if (next) { next(); } else { this.locked = false; }

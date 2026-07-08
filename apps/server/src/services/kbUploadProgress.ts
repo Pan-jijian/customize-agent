@@ -14,6 +14,7 @@ export interface KbUploadProgress {
 
 const uploads = new Map<string, KbUploadProgress>();
 
+/** 设置知识库文件上传进度（内存缓存），供前端轮询查询当前上传/解析/向量化状态 */
 export function setKbUploadProgress(id: string | undefined, progress: Omit<KbUploadProgress, 'id' | 'updatedAt'>): void {
   if (!id) return;
   uploads.set(id, { id, ...progress, updatedAt: Date.now() });

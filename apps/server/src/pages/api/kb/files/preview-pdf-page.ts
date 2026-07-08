@@ -3,6 +3,7 @@ import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
 
 export const config = { api: { responseLimit: false } };
 
+/** PDF 页面预览 API：使用 pdfjs 渲染指定 PDF 页面并返回 PNG 图片 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
   try {

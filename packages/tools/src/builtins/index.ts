@@ -1,4 +1,4 @@
-// @customize-agent/tools — BuiltinTools barrel
+// @customize-agent/tools — BuiltinTools 统一导出
 export { FileTools } from './file-tools.js';
 export { SearchTools } from './search-tools.js';
 export { ShellTools } from './shell-tools.js';

@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+/** Embedding Provider 接口，负责将文本转换为向量 */
 export interface EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
@@ -11,6 +12,7 @@ export interface EmbeddingProvider {
   embedQuery(text: string): Promise<number[]>;
 }
 
+/** 基于哈希的本地 Embedding Provider（无需模型，使用哈希算法生成特征向量） */
 export class HashEmbeddingProvider implements EmbeddingProvider {
   readonly model = 'hash-embedding-local';
 
@@ -66,6 +68,7 @@ export interface OpenAICompatibleEmbeddingOptions {
   dimensions?: number;
 }
 
+/** OpenAI 兼容的 Embedding Provider，支持任何兼容 OpenAI API 的嵌入服务 */
 export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
@@ -122,6 +125,7 @@ function resolveBundledBgeModelPath(): string | undefined {
   return candidates.find(candidate => fs.existsSync(path.join(candidate, 'config.json')) && fs.existsSync(path.join(candidate, 'tokenizer.json')));
 }
 
+/** 本地 Transformers.js 模型 Embedding Provider，使用 BGE 小模型生成向量 */
 export class LocalTransformersEmbeddingProvider implements EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
@@ -242,6 +246,10 @@ function readStoredEmbeddingConfig(): StoredEmbeddingConfig | undefined {
   }
 }
 
+/**
+ * 根据环境变量或配置文件自动创建 Embedding Provider
+ * 优先级：环境变量 > 配置文件 > 本地 Transformers.js 默认
+ */
 export function createEmbeddingProviderFromEnvironment(): EmbeddingProvider {
   const stored = readStoredEmbeddingConfig();
   const provider = process.env.CUSTOMIZE_EMBEDDING_PROVIDER ?? process.env.KB_EMBEDDING_PROVIDER ?? stored?.provider ?? 'transformers-local';

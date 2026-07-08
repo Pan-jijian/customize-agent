@@ -1,16 +1,19 @@
 import * as crypto from 'node:crypto';
 
+/** MinHash 签名结果 */
 export interface MinHashSignature {
   signature: number[];
   shingleCount: number;
   buckets: string[];
 }
 
+/** 相似度匹配结果 */
 export interface SimilarityMatch {
   filePath: string;
   similarity: number;
 }
 
+/** 去重引擎，支持归一化哈希、MinHash 相似度计算和 LSH 分桶 */
 export class DedupEngine {
   private readonly hashCount = 192;
   private readonly bandSize = 6;

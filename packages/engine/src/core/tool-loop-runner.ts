@@ -4,6 +4,7 @@ import { formatToolErrorForModel, type FunctionDefinition, type Message, type To
 import type { ToolRegistry } from '../tools/registry.js';
 import type { ExecutionController } from './execution-controller.js';
 
+/** Tool Loop 运行选项 */
 export interface ToolLoopRunOptions {
   provider: ILLMProvider;
   registry: ToolRegistry;
@@ -19,6 +20,7 @@ export interface ToolLoopRunOptions {
   onToolResult?: (toolCall: ToolCall, result: string, round: number) => void;
 }
 
+/** Tool Loop 运行结果 */
 export interface ToolLoopRunResult {
   messages: Message[];
   finishReason: 'completed' | 'max_loops' | 'stopped' | 'aborted';
@@ -28,6 +30,7 @@ export interface ToolLoopRunResult {
   rounds: number;
 }
 
+/** 从 ToolRegistry 构建 Function Definition 列表 */
 export function buildToolDefinitions(registry: ToolRegistry): FunctionDefinition[] {
   return registry.listAll().map(tool => ({
     name: tool.name,
@@ -36,6 +39,7 @@ export function buildToolDefinitions(registry: ToolRegistry): FunctionDefinition
   }));
 }
 
+/** 运行 Tool Loop — 循环调用 LLM 并执行返回的 Tool Call，直到完成或达到上限 */
 export async function runToolLoop(options: ToolLoopRunOptions): Promise<ToolLoopRunResult> {
   const messages = options.messages;
   const tools = options.tools ?? buildToolDefinitions(options.registry);

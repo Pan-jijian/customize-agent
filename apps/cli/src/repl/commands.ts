@@ -5,6 +5,10 @@ export interface ReplCommandInfo {
   desc: string;
 }
 
+/**
+ * 构建默认的 REPL 斜杠命令列表。
+ * 每个命令包括名称和描述，描述从 I18nManager 获取翻译。
+ */
 export function buildDefaultCommands(i18n: I18nManager): ReplCommandInfo[] {
   return [
     { name: '/plan', desc: i18n.t('help.plan') },

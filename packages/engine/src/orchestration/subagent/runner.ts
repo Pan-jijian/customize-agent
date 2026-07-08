@@ -74,6 +74,7 @@ export class SubagentRunner {
     }
   }
 
+  /** 提取 <task_finish> 标签中的任务完成摘要 */
   private _extractTaskFinish(content: string): string | undefined {
     const match = content.match(/<task_finish>([\s\S]*?)<\/task_finish>/);
     return match?.[1]?.trim();

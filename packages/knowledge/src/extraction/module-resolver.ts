@@ -38,7 +38,7 @@ function findInPnpm(packageName: string): string | null {
             if (fs.existsSync(pkgDir)) return pkgDir;
           }
         }
-      } catch { /* continue upward */ }
+      } catch { /* 继续向上遍历 */ }
     }
     const parent = path.dirname(dir);
     if (parent === dir) break;
@@ -54,7 +54,7 @@ function findInPnpm(packageName: string): string | null {
 export function resolvePackage(specifier: string): string {
   try {
     return localRequire.resolve(specifier);
-  } catch { /* fall through */ }
+  } catch { /* 继续尝试后续回退方式 */ }
 
   const parts = specifier.split('/');
   let packageName: string;

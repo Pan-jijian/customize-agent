@@ -6,9 +6,17 @@ import type { DiffResult } from '../types.js';
 import type { DiskFileStat } from './file-scanner.js';
 import type { IndexStateStore } from './index-state-store.js';
 
+/** 文件变更追踪器，用于比对磁盘文件与索引状态之间的差异 */
 export class ChangeTracker {
   constructor(private readonly store: IndexStateStore) {}
 
+  /**
+   * 计算磁盘文件与索引状态之间的差异
+   * @param diskFiles 磁盘上的文件列表
+   * @param classifier 文件分类器
+   * @param kbPath 知识库路径
+   * @returns 文件差异对比结果
+   */
   async computeDiff(
     diskFiles: Map<string, DiskFileStat>,
     classifier: FileClassifier,
@@ -84,6 +92,11 @@ export class ChangeTracker {
     };
   }
 
+  /**
+   * 计算文件的 SHA-256 哈希值
+   * @param filePath 文件路径
+   * @returns SHA-256 哈希字符串
+   */
   hashFile(filePath: string): string {
     return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
   }

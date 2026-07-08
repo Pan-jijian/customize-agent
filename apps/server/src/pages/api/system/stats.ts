@@ -22,6 +22,7 @@ interface StatsResponse {
 let lastCpu = process.cpuUsage();
 let lastTime = Date.now();
 
+/** 计算两次调用之间的 CPU 使用率百分比 */
 function getCpuUsage(): number {
   const now = Date.now();
   const elapsed = now - lastTime;
@@ -34,6 +35,7 @@ function getCpuUsage(): number {
   return Math.min(100, Math.round(percent * 10) / 10);
 }
 
+/** 根据任务描述关键词推断任务类型（修复/开发/优化/审查/对话） */
 function classifyTask(task: string): string {
   const text = task.toLowerCase();
   if (/修复|fix|bug|错误|报错|失败/u.test(text)) return '修复问题';
@@ -43,6 +45,7 @@ function classifyTask(task: string): string {
   return '对话任务';
 }
 
+/** 累加模型使用次数到统计 Map 中 */
 function addModelUsage(modelMap: Map<string, ModelUsage>, provider: string, model: string): void {
   const key = `${provider || '?'}/${model || '?'}`;
   const entry = modelMap.get(key) || { provider: provider || '?', model: model || '?', count: 0 };
@@ -50,6 +53,7 @@ function addModelUsage(modelMap: Map<string, ModelUsage>, provider: string, mode
   modelMap.set(key, entry);
 }
 
+/** 当日志中无模型调用记录时，从配置中读取当前启用的模型作为降级展示 */
 function configuredModelsFallback(): ModelUsage[] {
   try {
     const models = getConfigStore().load().models;
@@ -66,6 +70,7 @@ function configuredModelsFallback(): ModelUsage[] {
   }
 }
 
+/** 扫描日志目录，统计 Token 消耗、模型使用次数、任务完成情况 */
 function scanLogs(): { tokens: number; models: ModelUsage[]; tasks: { total: number; success: number; failed: number; types: Record<string, number> } } {
   const logDir = path.join(os.homedir(), '.customize-agent', 'logs');
   let tokens = 0;
@@ -105,10 +110,10 @@ function scanLogs(): { tokens: number; models: ModelUsage[]; tasks: { total: num
             else if (summary.includes('fail') || summary.includes('error') || summary.includes('失败')) failed++;
             else success++;
           }
-        } catch { /* skip bad lines */ }
+        } catch { /* 跳过格式错误的行 */ }
       }
     }
-  } catch { /* no logs yet */ }
+  } catch { /* 尚无日志，跳过 */ }
 
   const models = [...modelMap.values()].sort((a, b) => b.count - a.count).slice(0, 10);
   return {

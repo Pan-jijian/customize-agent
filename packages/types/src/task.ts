@@ -1,6 +1,6 @@
 // @customize-agent/types — 任务状态 & Checkpoint 类型
-// NOTE: TaskStateEvent, Checkpoint, RuntimeConfig, TaskResult are not externally imported.
-// Only TaskState is used by consumers. Keep the others for future use.
+// NOTE: TaskStateEvent、Checkpoint、RuntimeConfig、TaskResult 未被外部导入。
+// 仅 TaskState 被消费者使用，其余保留供未来使用。
 
 import type { Message } from './message.js';
 

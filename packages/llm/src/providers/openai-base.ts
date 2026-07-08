@@ -391,7 +391,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
           name: func.name,
           arguments: JSON.parse(func.arguments ?? '{}') as Record<string, unknown>,
         });
-      } catch { /* skip malformed */ }
+      } catch { /* 跳过格式错误的工具调用 */ }
     }
     return result.length > 0 ? result : undefined;
   }

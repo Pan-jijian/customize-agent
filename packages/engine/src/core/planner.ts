@@ -109,7 +109,7 @@ export class PlanModeManager {
     if (!Array.isArray(plan.steps) || plan.steps.length === 0) errors.push('steps 必须是非空数组');
     if (!Array.isArray(plan.risks)) errors.push('risks 必须是数组');
 
-    // Validate each step
+    // 验证每个步骤
     if (Array.isArray(plan.steps)) {
       for (const step of plan.steps as Array<Record<string, unknown>>) {
         if (typeof step.id !== 'number') errors.push(`步骤 ${JSON.stringify(step)} 缺少 id`);

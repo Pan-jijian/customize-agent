@@ -2,12 +2,14 @@ import { spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import type { ClassifiedFile, FileCategory } from '../types.js';
 
+/** 外部解析器提取结果 */
 export interface ExternalExtractionResult {
   text: string;
   metadata?: Record<string, unknown>;
   warnings?: string[];
 }
 
+/** 外部解析器接口 */
 export interface ExternalExtractor {
   readonly id: string;
   readonly name: string;
@@ -20,6 +22,7 @@ export interface ExternalExtractor {
   describe(): ExternalExtractorCapability;
 }
 
+/** 外部解析器能力描述 */
 export interface ExternalExtractorCapability {
   id: string;
   name: string;
@@ -30,6 +33,7 @@ export interface ExternalExtractorCapability {
   kind: 'command';
 }
 
+/** 命令行外部解析器配置选项 */
 export interface CommandExternalExtractorOptions {
   id: string;
   name: string;
@@ -41,6 +45,7 @@ export interface CommandExternalExtractorOptions {
   timeoutMs?: number;
 }
 
+/** 命令行外部解析器，通过调用外部命令提取文件内容 */
 export class CommandExternalExtractor implements ExternalExtractor {
   readonly id: string;
   readonly name: string;
@@ -135,9 +140,14 @@ export class CommandExternalExtractor implements ExternalExtractor {
 
 type CommandCandidate = string | { command: string; args?: string[] };
 
+/** 外部解析器注册表，管理所有已注册的外部解析器 */
 export class ExternalExtractorRegistry {
   private readonly extractors: ExternalExtractor[] = [];
 
+  /**
+   * 根据环境变量自动注册可用解析器
+   * @param env 环境变量（默认 process.env）
+   */
   static fromEnvironment(env: NodeJS.ProcessEnv = process.env): ExternalExtractorRegistry {
     const registry = new ExternalExtractorRegistry();
     registry.registerConfiguredOrAuto('cad-dwg', 'DWG Advanced Parser', env.CUSTOMIZE_AGENT_DWG_PARSER, [{ command: 'dwg-parser' }, { command: 'oda-dwg-parser' }], { category: 'cad', formats: ['autocad'], extensions: ['.dwg', '.dwt'] });

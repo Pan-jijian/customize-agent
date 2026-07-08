@@ -38,7 +38,7 @@ function rotateIfNeeded() {
     if (stat.size <= MAX_LOG_BYTES) return;
     fs.renameSync(ERROR_LOG_FILE, path.join(LOG_DIR, `errors-${Date.now()}.jsonl`));
   } catch {
-    // no log file yet
+    // 日志文件尚不存在
   }
 }
 
@@ -75,7 +75,7 @@ export function listErrorLogs(limit = 200): ErrorLogEntry[] {
 }
 
 export function clearErrorLogs() {
-  try { fs.rmSync(ERROR_LOG_FILE, { force: true }); } catch { /* ignore */ }
+  try { fs.rmSync(ERROR_LOG_FILE, { force: true }); } catch { /* 忽略 */ }
 }
 
 let processHandlersInstalled = false;

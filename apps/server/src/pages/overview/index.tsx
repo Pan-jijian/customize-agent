@@ -51,7 +51,7 @@ export default function OverviewPage() {
         <Button icon={<ReloadOutlined spin={loading} />} loading={loading} onClick={() => { void load(); }}>{t('common.retry')}</Button>
       </div>
 
-      {/* CPU + Memory */}
+      {/* CPU + 内存 */}
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12}>
           <Card size="small" title={<><CloudServerOutlined /> CPU</>}>
@@ -71,7 +71,7 @@ export default function OverviewPage() {
         </Col>
       </Row>
 
-      {/* Stats */}
+      {/* 统计信息 */}
       <Row gutter={[16, 16]}>
         <Col xs={12} sm={6}>
           <Card size="small"><Statistic title="运行时间" value={stats ? Math.floor(stats.uptime / 3600) : 0} suffix="小时" prefix={<ApiOutlined />} /></Card>
@@ -87,7 +87,7 @@ export default function OverviewPage() {
         </Col>
       </Row>
 
-      {/* Resource Status */}
+      {/* 资源状态 */}
       <Card size="small" title="资源概览">
         <Row gutter={[16, 16]}>
           <Col xs={24} sm={12} md={8} lg={4}>
@@ -123,7 +123,7 @@ export default function OverviewPage() {
         </Row>
       </Card>
 
-      {/* Top Model + Task Types */}
+      {/* 热门模型 + 任务类型 */}
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12}>
           <Card size="small" title={t('overview.topModel')} style={{ height: '100%' }}>

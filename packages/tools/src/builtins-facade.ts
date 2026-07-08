@@ -52,7 +52,7 @@ export class BuiltinTools {
   dependencyGraph = () => this._search.dependencyGraph();
   detectPackageManager = () => this._search.detectPackageManager();
 
-  // Shell & Git
+  // Shell 和 Git 工具
   git = (args: string[]) => this._shell.git(args);
   runBackground = (command: string) => this._shell.runBackground(command);
   checkCommand = (id: string) => this._shell.checkCommand(id);
@@ -128,17 +128,17 @@ export class BuiltinTools {
     { name: 'glob', description: 'Find files matching a glob pattern.', params: { pattern: { type: 'string', description: 'Glob pattern (supports * and **)' } }, required: ['pattern'], capabilities: ['read_code'], needsApproval: false },
     { name: 'dependency_graph', description: 'Show dependency graph from package.json.', params: {}, required: [], capabilities: ['read_code'], needsApproval: false },
     { name: 'detect_package_manager', description: 'Detect the package manager used in the project.', params: {}, required: [], capabilities: ['read_code'], needsApproval: false },
-    // Web
+    // Web 工具
     { name: 'web_search', description: 'Search the web using DuckDuckGo.', params: { query: { type: 'string', description: 'Search query' } }, required: ['query'], capabilities: ['network'], needsApproval: false },
     { name: 'web_fetch', description: 'Fetch content from a URL.', params: { url: { type: 'string', description: 'URL to fetch' }, max_length: { type: 'number', description: 'Max response length' } }, required: ['url'], capabilities: ['network'], needsApproval: false },
     { name: 'download_file', description: 'Download a file from a URL.', params: { url: { type: 'string', description: 'Download URL' }, output: { type: 'string', description: 'Output file path' } }, required: ['url', 'output'], capabilities: ['network', 'write_code'], needsApproval: true },
-    // 导出
+    // 导出工具
     { name: 'export_markdown', description: 'Export content as a markdown file.', params: { output: { type: 'string', description: 'Output file path' }, content: { type: 'string', description: 'Markdown content' } }, required: ['output', 'content'], capabilities: ['write_code'], needsApproval: true },
     { name: 'export_json', description: 'Export data as a JSON file.', params: { output: { type: 'string', description: 'Output file path' }, data: { type: 'string', description: 'JSON content' } }, required: ['output', 'data'], capabilities: ['write_code'], needsApproval: true },
     { name: 'export_html', description: 'Export content as an HTML file.', params: { output: { type: 'string', description: 'Output file path' }, title: { type: 'string', description: 'Page title' }, body: { type: 'string', description: 'HTML body content' } }, required: ['output', 'title', 'body'], capabilities: ['write_code'], needsApproval: true },
     { name: 'export_pdf', description: 'Export text content as a PDF file.', params: { output: { type: 'string', description: 'Output file path' }, title: { type: 'string', description: 'Document title' }, body: { type: 'string', description: 'Document body' } }, required: ['output', 'title', 'body'], capabilities: ['write_code'], needsApproval: true },
     { name: 'export_session', description: 'Export the current session as JSON.', params: { output: { type: 'string', description: 'Output file path' } }, required: ['output'], capabilities: ['write_code'], needsApproval: true },
-    // Shell & Git
+    // Shell 和 Git 工具
     { name: 'zip_files', description: 'Create a tar archive of files.', params: { output: { type: 'string', description: 'Output archive path' }, files: { type: 'array', description: 'File paths to include' } }, required: ['output', 'files'], capabilities: ['write_code', 'execute_command'], needsApproval: true },
     { name: 'git_status', description: 'Show git working tree status.', params: {}, required: [], capabilities: ['git_operation'], needsApproval: false },
     { name: 'git_diff', description: 'Show git diff of changes.', params: {}, required: [], capabilities: ['git_operation'], needsApproval: false },
@@ -173,7 +173,7 @@ export class BuiltinTools {
     { name: 'convert_file', description: 'Convert media file format using ffmpeg.', params: { input: { type: 'string', description: 'Input file path' }, output: { type: 'string', description: 'Output file path' } }, required: ['input', 'output'], capabilities: ['execute_command', 'write_code'], needsApproval: true },
     { name: 'compress_image', description: 'Compress an image to JPEG.', params: { input: { type: 'string', description: 'Input image path' }, output: { type: 'string', description: 'Output image path' } }, required: ['input', 'output'], capabilities: ['write_code'], needsApproval: true },
     { name: 'generate_thumbnail', description: 'Generate a thumbnail from an image.', params: { input: { type: 'string', description: 'Input image path' }, output: { type: 'string', description: 'Output thumbnail path' } }, required: ['input', 'output'], capabilities: ['write_code'], needsApproval: true },
-    // MCP
+    // MCP 工具
     { name: 'mcp_list', description: 'List configured MCP servers.', params: {}, required: [], capabilities: ['mcp_external'], needsApproval: false },
     { name: 'mcp_add', description: 'Add a new MCP server.', params: { name: { type: 'string', description: 'Server name' }, command: { type: 'string', description: 'Launch command' } }, required: ['name', 'command'], capabilities: ['mcp_external'], needsApproval: true },
     { name: 'mcp_remove', description: 'Remove an MCP server.', params: { name: { type: 'string', description: 'Server name' } }, required: ['name'], capabilities: ['mcp_external'], needsApproval: true },

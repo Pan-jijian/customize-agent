@@ -1,3 +1,4 @@
+/** 封装的 JSON 请求函数，自动将非 2xx 响应解析为错误信息并抛出 */
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, options);
   if (!res.ok) {
@@ -6,13 +7,13 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
     try {
       const parsed = JSON.parse(body) as { error?: string; message?: string };
       message = parsed.error || parsed.message || message;
-    } catch { /* keep raw body */ }
+    } catch { /* 保留原始响应体 */ }
     throw new Error(message);
   }
   return res.json();
 }
 
-// ═══════ Knowledge Base ═══════
+// ═══════ 知识库 ═══════
 
 export interface KbVectorStatus { status: string; error?: string; indexedChunks: number; lastIndexedAt: number; backend: string; }
 export interface KbStats { scope: string; projectId?: string; fileCount: number; chunkCount: number; totalSizeBytes: number; lastIndexedAt: number; vectorStatus?: KbVectorStatus; }
@@ -60,6 +61,7 @@ export async function openKbFileTarget(relativePath: string, target: 'file' | 'd
   });
 }
 
+/** 将 File 对象转换为 Base64 编码字符串 */
 async function fileToBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -208,7 +210,7 @@ export async function searchKb(query: string, opts?: { projectRoot?: string; cat
   return fetchJson<{ results: KbSearchResult[]; total: number; queryTimeMs?: number; debug?: { originalQuery?: string; rewrittenQueries?: string[]; weights?: Record<string, number>; recallCounts?: Record<string, number>; reranker?: string } }>(`/api/kb/search?${params}`);
 }
 
-// ═══════ Document Workbench ═══════
+// ═══════ 文档工作台 ═══════
 
 export interface DocumentTemplateChapter { id: string; title: string; purpose: string; queries: string[]; requiredFacts: string[]; }
 export interface PromptBinding { promptId: string; roleId: string; }
@@ -315,7 +317,7 @@ export async function exportDocument(input: { documentId?: string; title?: strin
       const issueText = parsed.issues?.map(issue => issue.message).filter(Boolean).slice(0, 3).join('；');
       message = issueText ? `${parsed.error || '导出失败'}：${issueText}` : parsed.error || message;
     } catch {
-      // keep raw response text
+      // 保留原始响应文本
     }
     throw new Error(message.length > 300 ? `${message.slice(0, 300)}...` : message);
   };
@@ -325,7 +327,7 @@ export async function exportDocument(input: { documentId?: string; title?: strin
   return response.blob();
 }
 
-// ═══════ Model Config ═══════
+// ═══════ 模型配置 ═══════
 
 export interface ModelCapabilities { imageGeneration?: boolean; imageUnderstanding?: boolean; fileUnderstanding?: boolean; audio?: boolean; video?: boolean; }
 export interface ProviderInfo { name: string; apiKey?: string; baseUrl?: string; protocol?: string; directEndpoint?: boolean; detectedProtocol: string; hasApiKey: boolean; capabilities?: ModelCapabilities; }
@@ -353,7 +355,7 @@ export async function healthCheck(providerName: string) {
 }
 export async function getHealth() { return fetchJson<{ status: string; uptime: number }>('/api/health'); }
 
-// ═══════ System Stats ═══════
+// ═══════ 系统统计 ═══════
 
 export interface SystemStats {
   cpu: { usagePercent: number; cores: number };
@@ -380,7 +382,7 @@ export interface ErrorLogEntry {
 export async function getErrorLogs(limit = 200) { return fetchJson<{ logs: ErrorLogEntry[] }>(`/api/system/logs?limit=${limit}`); }
 export async function clearErrorLogs() { return fetchJson<{ ok: true }>('/api/system/logs', { method: 'DELETE' }); }
 
-// ═══════ Context ═══════
+// ═══════ 上下文 ═══════
 
 export interface ContextEntry {
   id: string; type: string; title: string; content: string;
@@ -407,10 +409,10 @@ export async function updateContextById(id: string, data: { content: string; con
   return fetchJson<{ success: boolean }>('/api/context', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, ...data }) });
 }
 
-// ═══════ Prompt ═══════
-// (card-based API used directly in prompt page via fetch)
+// ═══════ 提示词 ═══════
+// (卡片式 API，直接在 prompt 页面中通过 fetch 使用)
 
-// ═══════ KB Category Stats ═══════
+// ═══════ 知识库分类统计 ═══════
 
 export interface KbCategoryStats {
   category: string; fileCount: number; totalSize: number;
@@ -420,7 +422,7 @@ export async function getKbCategoryStats(projectRoot?: string) {
   return fetchJson<KbCategoryStats[]>(`/api/kb/categories${p}`);
 }
 
-// ═══════ Provider Detail ═══════
+// ═══════ 供应商详情 ═══════
 export async function getProviderDetail(name: string) {
   return fetchJson<ProviderInfo>(`/api/config/providers/${encodeURIComponent(name)}`);
 }

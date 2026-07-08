@@ -15,6 +15,7 @@ type HierarchicalNSW = {
 type HnswModule = { HierarchicalNSW: new (space: string, dimensions: number) => HierarchicalNSW };
 const require = createRequire(import.meta.url);
 
+/** HNSW（分层可导航小世界图）向量存储，基于 hnswlib-node 实现的高效近似最近邻搜索 */
 export class HNSWVectorStore implements VectorStoreInterface {
   private index?: HierarchicalNSW;
   private deletedSinceRebuild = 0;
@@ -61,7 +62,7 @@ export class HNSWVectorStore implements VectorStoreInterface {
     await this.ensureCollection();
     for (const [rowid, document] of this.documents.entries()) {
       if (document.metadata.file_path === filePath) {
-        try { this.index!.markDelete(rowid); this.deletedSinceRebuild += 1; } catch { /* ignore missing labels */ }
+        try { this.index!.markDelete(rowid); this.deletedSinceRebuild += 1; } catch { /* 忽略缺失的标签 */ }
         this.documents.delete(rowid);
       }
     }

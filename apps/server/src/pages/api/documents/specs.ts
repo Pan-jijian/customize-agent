@@ -1,6 +1,12 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { deleteDocumentGateType, deleteDocumentSpec, listDocumentGateTypes, listDocumentSpecs, saveDocumentGateType, saveDocumentSpec, type DocumentSpecGateType, type DocumentSpecPackage } from '@/services/documentSpecService';
 
+/**
+ * 文档规格 API 处理器（文档规范和关卡类型管理）
+ * GET: 获取所有规格和关卡类型列表
+ * POST/PUT: 创建/更新规格或关卡类型
+ * DELETE: 删除规格或关卡类型
+ */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     const mode = String(req.query.mode || 'spec');

@@ -129,6 +129,7 @@ export function clearContexts(type: string): number {
   } finally { db.close(); }
 }
 
+/** 对指定类型的上下文记忆进行长度压缩，将超过 1200 字符的内容截断为前后摘要，减少存储空间 */
 export function compressContexts(type: string): { changed: number; beforeBytes: number; afterBytes: number } {
   const dbPath = path.join(os.homedir(), '.customize-agent', 'memory.db');
   if (!fs.existsSync(dbPath)) return { changed: 0, beforeBytes: 0, afterBytes: 0 };

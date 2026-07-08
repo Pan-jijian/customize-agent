@@ -1,5 +1,6 @@
 import type { NextConfig } from 'next';
 
+/** 需要在服务端而非客户端打包的外部依赖（原生模块/大型库） */
 const serverExternalPackages = [
   '@customize-agent/knowledge',
   '@customize-agent/llm',
@@ -32,6 +33,7 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
+        // 对所有非静态资源路由设置禁止缓存，确保内容实时更新
         source: '/((?!_next/static|_next/image|favicon.ico).*)',
         headers: [
           { key: 'Cache-Control', value: 'no-store, must-revalidate' },
@@ -41,6 +43,7 @@ const nextConfig: NextConfig = {
   },
   async redirects() {
     return [
+      // 将多个入口路径统一重定向到 /overview
       { source: '/', destination: '/overview', permanent: false },
       { source: '/dashboard', destination: '/overview', permanent: false },
       { source: '/console', destination: '/overview', permanent: false },

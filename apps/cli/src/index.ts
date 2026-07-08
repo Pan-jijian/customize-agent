@@ -42,7 +42,7 @@ function cleanupChildProcesses() {
       } else {
         process.kill(pid, 'SIGTERM');
       }
-    } catch { /* process already dead */ }
+    } catch { /* 进程已退出 */ }
   }
   spawnedPids.clear();
 }
@@ -77,7 +77,7 @@ async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
       await manager.shutdown();
     }
   } catch {
-    // Knowledge base initialization runs again in the background; the CLI must not fail to start.
+    // 知识库初始化会在后台再次运行；CLI 不能因此启动失败。
   }
 }
 
@@ -96,7 +96,7 @@ async function runtimeLogFile(name: string, port: number) {
       mkdirSync(logDir, { recursive: true });
       const logPath = join(logDir, `${name}-${port}.log`);
       return { logPath, fd: openSync(logPath, 'a') };
-    } catch { /* try next location */ }
+    } catch { /* 尝试下一个位置 */ }
   }
   const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
   return { logPath: nullDevice, fd: openSync(nullDevice, 'a') };
@@ -122,7 +122,7 @@ async function waitForDashboard(port: number, timeoutMs: number): Promise<boolea
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/health`);
       if (response.status < 500) return true;
-    } catch { /* server still starting */ }
+    } catch { /* 服务器仍在启动 */ }
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   return false;

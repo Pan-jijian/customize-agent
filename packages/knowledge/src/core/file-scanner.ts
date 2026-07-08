@@ -2,12 +2,20 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import fg from 'fast-glob';
 
+/** 磁盘文件信息 */
 export interface DiskFileStat {
   size: number;
   mtime: number;
 }
 
+/** 知识库文件扫描器，用于扫描和加载知识库目录中的文件 */
 export class KnowledgeFileScanner {
+  /**
+   * 扫描知识库目录中的所有文件
+   * @param kbPath 知识库路径
+   * @param ignorePatterns 忽略模式列表
+   * @returns 文件相对路径到文件信息的映射
+   */
   async scan(kbPath: string, ignorePatterns: string[] = []): Promise<Map<string, DiskFileStat>> {
     if (!fs.existsSync(kbPath)) return new Map();
 
@@ -28,6 +36,11 @@ export class KnowledgeFileScanner {
     return files;
   }
 
+  /**
+   * 加载 .kbignore 忽略规则文件
+   * @param kbPath 知识库路径
+   * @returns 忽略规则列表
+   */
   loadKbIgnore(kbPath: string): string[] {
     const ignorePath = path.join(kbPath, '.kbignore');
     if (!fs.existsSync(ignorePath)) return [];

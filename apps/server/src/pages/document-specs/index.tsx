@@ -33,6 +33,7 @@ const niceTagRender = (props: { label: React.ReactNode; value: string; closable:
   );
 };
 
+/** 创建默认的事实字段列表（用于新规范包的初始值） */
 function defaultFactFields(): DocumentSpecPackage['factFields'] {
   return [
     { id: 'document-goal', name: '文档目标', type: 'text', required: true },
@@ -80,6 +81,7 @@ export default function DocumentSpecsPage() {
   const [chapterCount, setChapterCount] = useState(0);
   const [gateCount, setGateCount] = useState(0);
 
+  /** 刷新事实字段、章节规则和门禁规则的计数 */
   const refreshCounts = () => {
     setFactCount((form.getFieldValue('factFields') ?? []).length);
     setChapterCount((form.getFieldValue('chapterRules') ?? []).length);
@@ -91,6 +93,7 @@ export default function DocumentSpecsPage() {
     .filter((f: { id?: string; name?: string }) => f.id && f.name)
     .map((f: { id: string; name: string }) => ({ label: `${f.name}（${f.id}）`, value: f.id }));
 
+  /** 打开规范包编辑器，内置规范包自动创建副本 */
   const openEditor = (spec?: DocumentSpecPackage) => {
     const editingSpec = spec?.builtIn ? { ...spec, id: `${spec.id}-copy-${Date.now()}`, name: `${spec.name} Copy`, builtIn: false } : spec;
     if (spec?.builtIn) message.info('内置规范包不可直接编辑，已为你创建副本');
@@ -99,6 +102,7 @@ export default function DocumentSpecsPage() {
     window.setTimeout(() => refreshCounts(), 50);
   };
 
+  /** 保存规范包 */
   const save = async () => {
     try {
       const values = await form.validateFields();
@@ -110,12 +114,14 @@ export default function DocumentSpecsPage() {
     } catch (error) { if (error instanceof Error) message.error(error.message); }
   };
 
+  /** 删除指定规范包 */
   const remove = async (id: string) => {
     const result = await deleteDocumentSpec(id);
     setSpecs(result.specs);
     setGateTypes(result.gateTypes);
   };
 
+  /** 打开门禁类型编辑器，内置类型仅可查看 */
   const openGateTypeEditor = (gateType?: DocumentSpecGateType) => {
     if (gateType?.builtIn) {
       gateTypeForm.setFieldsValue(gateType);
@@ -128,6 +134,7 @@ export default function DocumentSpecsPage() {
     setGateTypeModalOpen(true);
   };
 
+  /** 保存门禁类型 */
   const saveGateType = async () => {
     try {
       const values = await gateTypeForm.validateFields();
@@ -141,11 +148,13 @@ export default function DocumentSpecsPage() {
     } catch (error) { if (error instanceof Error) message.error(error.message); }
   };
 
+  /** 删除指定门禁类型 */
   const removeGateType = async (id: string) => {
     const result = await deleteDocumentGateType(id);
     setGateTypes(result.gateTypes);
   };
 
+  /** 应用门禁类型的默认配置到指定门禁规则 */
   const applyGateType = (index: number, typeId: string) => {
     const gateType = gateTypes.find(item => item.id === typeId);
     if (!gateType) return;
@@ -163,7 +172,7 @@ export default function DocumentSpecsPage() {
   };
 
   return <div className="space-y-5 animateFadeIn">
-    {/* Header */}
+    {/* 页面头部 */}
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
       <div><h1 className="pageTitle">{t('specs.title')}</h1><p className="pageDesc">{t('specs.description')}</p></div>
       <Space wrap>
@@ -177,7 +186,7 @@ export default function DocumentSpecsPage() {
       </Space>
     </div>
 
-    {/* Expandable guide */}
+    {/* 可展开的使用说明 */}
     <Alert type="info" showIcon
       message={
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -244,7 +253,7 @@ export default function DocumentSpecsPage() {
       ]} />
     </Card>
 
-    {/* Drawer: Spec Editor */}
+    {/* 抽屉：规范包编辑器 */}
     <Drawer
       title={t('specs.editor')}
       open={drawerOpen}

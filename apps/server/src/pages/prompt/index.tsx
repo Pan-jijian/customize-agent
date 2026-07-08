@@ -160,7 +160,7 @@ export default function PromptPage() {
             const excerpt = p.hasFile && p.content ? p.content.replace(/^#.*$/gm, '').replace(/\n{3,}/g, '\n\n').trim() : '';
             return (
             <Card key={p.id} size="small" hoverable styles={{ body: { display: 'flex', flexDirection: 'column', height: '100%' } }}>
-              {/* Header */}
+              {/* 标题 */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
                 <FileTextOutlined style={{ color: p.isCurrent ? 'var(--colorOk)' : 'var(--colorAccent)', fontSize: 14, flexShrink: 0 }} />
                 <span style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{p.projectName}</span>
@@ -169,14 +169,14 @@ export default function PromptPage() {
                 )}
               </div>
 
-              {/* Meta */}
+              {/* 元信息 */}
               {p.projectRoot && (
                 <div style={{ fontSize: 11, color: 'var(--colorTextSecondary)', marginBottom: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   <FolderOutlined style={{ marginRight: 4 }} />{p.projectRoot}
                 </div>
               )}
 
-              {/* Tags */}
+              {/* 标签 */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
                 {p.isCurrent && <Tag color="green" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>当前项目</Tag>}
                 {isBuiltInPrompt(p) && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>内置示例</Tag>}
@@ -186,14 +186,14 @@ export default function PromptPage() {
                 {p.hasFile ? <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>有文件</Tag> : <Tag color="default" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>无文件</Tag>}
               </div>
 
-              {/* Content preview — only render if has non-empty content */}
+              {/* 内容预览 — 仅在有非空内容时渲染 */}
               {excerpt && (
                 <div style={{ padding: 8, background: 'var(--colorFillAlter)', borderRadius: 6, fontSize: 11, maxHeight: 80, overflow: 'hidden', color: 'var(--colorTextSecondary)', whiteSpace: 'pre-wrap', fontFamily: 'monospace', marginBottom: 8, lineHeight: 1.5 }}>
                   {excerpt.slice(0, 180)}{excerpt.length > 180 ? '...' : ''}
                 </div>
               )}
 
-              {/* Actions — pinned to bottom */}
+              {/* 操作 — 固定在底部 */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 4, paddingTop: 8, borderTop: '1px solid var(--colorBorderSecondary)', marginTop: 'auto' }}>
                 {p.hasFile ? <Checkbox checked={p.selected} onChange={e => { void handleSelect(p, e.target.checked); }} style={{ fontSize: 12 }}>选中</Checkbox> : <span />}
                 <div style={{ flex: 1 }} />

@@ -393,7 +393,7 @@ export default function DocumentsPage() {
     } finally { timers.forEach(x => window.clearTimeout(x)); setLoading(false); if (activeGenerationTask?.promise === promise) { activeGenerationTask.loading = false; notifyGenerationTask(); } }
   };
 
-  // Auto-start generation when drawer opens in workflow mode
+  // 当抽屉以工作流模式打开时自动启动生成
   const genStarted = useRef(false);
 
   const handleAbortGeneration = () => {
@@ -597,18 +597,18 @@ export default function DocumentsPage() {
         </Space> : (loading && drawerMode === 'workflow') ? <Button danger onClick={handleAbortGeneration}>中止任务</Button> : undefined}
       >
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
-          {/* Workflow mode: execution steps */}
+          {/* 工作流模式：执行步骤 */}
           {drawerMode === 'workflow' && flowSteps.length > 0 && (
             <Steps direction="vertical" size="small" current={activeFlowIndex}
               items={flowSteps.map(s => ({ title: s.title, description: stepDesc(s), status: antdStatus(s.status), icon: flowIcon(s) }))} />
           )}
 
-          {/* Workflow mode: loading spinner before steps appear */}
+          {/* 工作流模式：步骤出现前的加载动画 */}
           {drawerMode === 'workflow' && loading && flowSteps.length === 0 && (
             <div style={{ textAlign: 'center', padding: 40 }}><Spin tip="正在准备生成…" /></div>
           )}
 
-          {/* Both modes: editor (after generation or from draft) */}
+          {/* 两种模式：编辑器（生成后或从草稿打开） */}
           {draft && (
             <div ref={editorRef}>
               <Tabs items={[

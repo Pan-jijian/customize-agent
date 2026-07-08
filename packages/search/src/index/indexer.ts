@@ -18,8 +18,8 @@ export interface IndexOptions {
  * 小文件（< 100KB）主线程同步解析，大文件交 Worker Pool 异步解析。
  */
 export class RepositoryIndexer {
-  private dbManager: StorageManager;
-  private workerPool?: TreeSitterWorkerPool;
+  private dbManager: StorageManager;  // SQLite 存储管理器
+  private workerPool?: TreeSitterWorkerPool;  // Worker 线程池（大文件异步解析）
 
   constructor(dbManager: StorageManager, options?: IndexOptions) {
     this.dbManager = dbManager;

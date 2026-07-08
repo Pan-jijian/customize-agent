@@ -6,6 +6,11 @@ import type { I18nManager } from '../i18n/manager.js';
 const RE_AT = /(?:^|\s)@([^\s@]+(?::\d+(?:-\d+)?)?)/g;
 const MAX_INLINE_SIZE = 500_000;
 
+/**
+ * 解析输入中的 @ 文件引用。
+ * 将 @filepath 和 @filepath:10-30 替换为实际文件内容片段。
+ * 支持行范围引用，二进制/大文件自动跳过。
+ */
 export async function resolveAtRefs(text: string, root: string, i18n: I18nManager): Promise<string> {
   const refs: Array<{ raw: string; filePath: string; startLine?: number; endLine?: number }> = [];
 

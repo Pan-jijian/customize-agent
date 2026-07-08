@@ -1,5 +1,5 @@
 /**
- * TUI 渲染 — ANSI + Unicode 框线。Modern 256-color palette.
+ * TUI 渲染 — ANSI + Unicode 框线。256 色调色板。
  */
 import { bannerText } from './big-text.js';
 import stringWidth from 'string-width';
@@ -96,19 +96,19 @@ export function welcomeBanner(version: string, provider: string, opts?: {
     return '  ' + ' '.repeat(Math.max(0, left)) + s;
   };
 
-  // ═══ top border ═══
+  // ═══ 顶部边框 ═══
   const topB = t.dim('╭' + '─'.repeat(W - 4) + '╮');
 
   const out: string[] = [];
   out.push(topB);
 
-  // title: 4×6 pixel banner with gradient
+  // 标题: 4×6 像素字标，带渐变色
   for (const row of bannerText(title)) {
     out.push(center(row));
   }
   out.push('');
 
-  // version
+  // 版本
   out.push(center(s.bold(t.faint(version))));
   out.push(pad(''));
 
@@ -130,7 +130,7 @@ export function welcomeBanner(version: string, provider: string, opts?: {
   out.push(center(`${t.success('▶')}  ${s.bold(t.text(startHint))}   ${t.accent('@')} ${s.bold(t.dim(usageHints))}`));
   out.push('');
 
-  // bottom border
+  // 底部边框
   out.push(t.dim('╰' + '─'.repeat(W - 4) + '╯'));
 
   return '\n' + out.join('\n') + '\n';

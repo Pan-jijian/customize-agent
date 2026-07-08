@@ -1,4 +1,4 @@
-// Type declarations for archiver v8 (ESM-only, named exports)
+// archiver v8 类型声明（ESM-only，具名导出）
 declare module 'archiver' {
   interface ArchiverOptions {
     format?: 'tar' | 'zip' | 'json';

@@ -34,6 +34,7 @@ function toOperationStage(stage: string): KbOperationStage {
   return 'vectorizing';
 }
 
+/** 将知识库索引任务加入队列执行，包含扫描变更、解析分块、向量化等阶段，并通过操作日志实时汇报进度 */
 export function enqueueKnowledgeIndex(job: IndexJob): Promise<WorkerResult> {
   const existing = activeJobs.get(job.projectRoot);
   if (existing) return existing;

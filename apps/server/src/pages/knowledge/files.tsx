@@ -547,7 +547,7 @@ export default function FilesPage() {
         <input id="kb-folder-upload-input" type="file" multiple hidden {...{ webkitdirectory: '' }} onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
       </div>
 
-      {/* Collapsible Status Card */}
+      {/* 可折叠的状态卡片 */}
       <Card size="small" className={styles.statusCard} styles={{ body: { padding: 0 } }}>
         <div className={styles.statusSummary} onClick={() => setStatusCollapsed(!statusCollapsed)}>
           <span className={styles.statusSummaryText}>

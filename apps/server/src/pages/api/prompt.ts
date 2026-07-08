@@ -10,10 +10,12 @@ const agentHome = path.join(os.homedir(), '.customize-agent');
 const registryPath = path.join(agentHome, 'projects', 'registry.db');
 const promptConfigPath = path.join(agentHome, 'prompts.json');
 
+/** 规范化路径为绝对路径 */
 function normalizePath(value: string): string {
   return path.resolve(value);
 }
 
+/** 判断项目根目录是否为内部残留项目（非用户项目，应隐藏） */
 function isInternalResidualProject(projectRoot: string): boolean {
   const normalized = normalizePath(projectRoot);
   const homeConfig = normalizePath(path.join(os.homedir(), '.customize-agent'));
@@ -25,10 +27,12 @@ function isInternalResidualProject(projectRoot: string): boolean {
     || parts.includes('.customize-agent');
 }
 
+/** 打开项目注册表数据库 */
 function openRegistry(readonly: boolean) {
   return fs.existsSync(registryPath) ? new Database(registryPath, { readonly }) : null;
 }
 
+/** 获取所有允许访问的项目根目录集合（排除内部残留项目） */
 function allowedProjectRoots(): Set<string> {
   const roots = new Set<string>();
   const currentRoot = normalizePath(process.env.CUSTOMIZE_PROJECT_ROOT ?? process.env.INIT_CWD ?? process.cwd());
@@ -47,12 +51,14 @@ function allowedProjectRoots(): Set<string> {
   return roots;
 }
 
+/** 判断文件路径是否为允许访问的 CUSTOMIZE.md 提示词文件 */
 function isAllowedPromptFile(filePath: string): boolean {
   const normalized = normalizePath(filePath);
   if (path.basename(normalized) !== 'CUSTOMIZE.md') return false;
   return allowedProjectRoots().has(normalizePath(path.dirname(normalized)));
 }
 
+/** 从注册表中清理已不再存在的内部残留项目记录 */
 function cleanupResidualProjects(projectIds: string[]): void {
   if (projectIds.length === 0) return;
   const db = openRegistry(false);
@@ -81,6 +87,7 @@ interface PromptProject {
   source: 'current' | 'project' | 'custom';
 }
 
+/** 内置提示词列表，包含三角洲行动相关的各个角色提示词 */
 const BUILT_IN_PROMPTS = [
   { id: 'builtin:delta-fact-extraction', name: '内置｜三角洲事实抽取提示词', content: `你是“结构化事实抽取专家”。请从知识库资料中抽取可追溯事实，并严格服务于文档规范包。
 
@@ -200,6 +207,7 @@ function promptIdFromPath(filePath: string): string {
   return `file:${normalizePath(filePath)}`;
 }
 
+/** 从磁盘加载提示词配置文件 */
 function loadPromptConfig(): PromptConfig {
   try {
     const parsed = JSON.parse(fs.readFileSync(promptConfigPath, 'utf-8')) as Partial<PromptConfig>;
@@ -212,15 +220,18 @@ function loadPromptConfig(): PromptConfig {
   }
 }
 
+/** 将提示词配置保存到磁盘 */
 function savePromptConfig(config: PromptConfig): void {
   fs.mkdirSync(path.dirname(promptConfigPath), { recursive: true });
   fs.writeFileSync(promptConfigPath, JSON.stringify(config, null, 2), 'utf-8');
 }
 
+/** 获取所有有效的提示词 ID 集合（内置 + 自定义） */
 function validPromptIds(config: PromptConfig): Set<string> {
   return new Set([...BUILT_IN_PROMPT_IDS, ...config.customPrompts.map(prompt => prompt.id)]);
 }
 
+/** 提示词管理 API：支持内置/项目/自定义提示词的增删改查和选择配置 */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     if (req.method === 'GET') {

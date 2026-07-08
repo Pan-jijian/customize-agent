@@ -8,6 +8,7 @@ export const config = {
   api: { bodyParser: { sizeLimit: '500mb' }, responseLimit: '500mb' },
 };
 
+/** 文件上传 API：接收 base64 编码文件，落盘后启动后台索引任务 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   try {

@@ -2,7 +2,14 @@ import * as path from 'node:path';
 import type { ClassifiedFile, IndexStateRecord } from '../types.js';
 import type { FileRelationship } from '../core/index-state-store.js';
 
+/** 文件关系检测器，自动识别版本链、翻译关系和互补关系 */
 export class RelationshipDetector {
+  /**
+   * 检测文件与已有索引记录之间的关系
+   * @param file 当前处理的文件
+   * @param indexedRecords 已有索引记录列表
+   * @returns 检测到的关系列表
+   */
   detect(file: ClassifiedFile, indexedRecords: IndexStateRecord[]): Array<Omit<FileRelationship, 'id' | 'createdAt'>> {
     const relationships: Array<Omit<FileRelationship, 'id' | 'createdAt'>> = [];
 

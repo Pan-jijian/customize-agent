@@ -1,5 +1,5 @@
-// Types and constants from types.ts and constants.ts are not exported
-// as they are only used internally within the knowledge package.
+// types.ts 和 constants.ts 中的类型和常量不对外导出
+// 它们仅在 knowledge 包内部使用。
 
 export { TextChunker, type ChunkConfig, type TextChunk } from './chunking/text-chunker.js';
 export { FileClassifier } from './classification/classifier.js';

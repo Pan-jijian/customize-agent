@@ -43,7 +43,7 @@ export function createApprovalHandler(i18n: I18nManager): ApprovalHandler {
     return new Promise<boolean>(resolve => {
       let raw = false;
       if (process.stdin.isTTY) {
-        try { process.stdin.setRawMode(true); raw = true; } catch { /* ignore */ }
+        try { process.stdin.setRawMode(true); raw = true; } catch { /* 忽略 */ }
       }
       process.stdin.resume();
       const choices = [
@@ -70,7 +70,7 @@ export function createApprovalHandler(i18n: I18nManager): ApprovalHandler {
         process.stdout.write(`\x1b[${approvalLines.length}A\r\x1b[0J`);
         process.stdin.removeListener('keypress', onKeypress);
         signal?.removeEventListener('abort', onAbort);
-        if (raw) try { process.stdin.setRawMode(false); } catch { /* ignore */ }
+        if (raw) try { process.stdin.setRawMode(false); } catch { /* 忽略 */ }
       };
       const finish = (approved: boolean) => {
         if (done) return;

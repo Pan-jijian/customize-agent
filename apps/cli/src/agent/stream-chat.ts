@@ -23,6 +23,11 @@ export interface StreamChatResult {
   usage?: { promptTokens: number; completionTokens: number };
 }
 
+/**
+ * 流式聊天主函数。
+ * 调用 LLM 的流式 API，实时渲染 Markdown、thinking 链和工具调用预览。
+ * 支持内联 Markdown 优化（长行直接渲染）、表格/代码块缓冲、思考链实时展示。
+ */
 export async function streamChat(options: StreamChatOptions): Promise<StreamChatResult> {
   const { provider, messages, tools, signal, i18n, write, setLiveStatus, clearLiveStatus, commitStatus, onToolCall, onThinkingContent } = options;
   let content = '';

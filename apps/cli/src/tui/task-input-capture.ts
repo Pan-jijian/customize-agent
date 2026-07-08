@@ -48,7 +48,7 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     keypressInitialized = true;
   }
   if (process.stdin.isTTY) {
-    try { process.stdin.setRawMode(true); } catch { /* ignore */ }
+    try { process.stdin.setRawMode(true); } catch { /* 忽略 */ }
   }
   process.stdin.resume();
   process.stdout.write('\x1b[?2004h');
@@ -543,7 +543,7 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
     resume: () => {
       if (active) return;
       if (process.stdin.isTTY) {
-        try { process.stdin.setRawMode(true); } catch { /* ignore */ }
+        try { process.stdin.setRawMode(true); } catch { /* 忽略 */ }
       }
       process.stdin.resume();
       active = true;
@@ -555,7 +555,7 @@ export function captureInputDuringTask(options: CaptureTaskInputOptions): Captur
       if (active) process.stdin.removeListener('keypress', onKeypress);
       active = false;
       if (process.stdin.isTTY) {
-        try { process.stdin.setRawMode(false); } catch { /* ignore */ }
+        try { process.stdin.setRawMode(false); } catch { /* 忽略 */ }
       }
       process.stdout.write('\x1b[?2004l');
       clearCtrlO();

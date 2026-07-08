@@ -60,7 +60,7 @@ export class I18nManager {
     const pack = TRANSLATIONS[this._lang];
     const val = pack[key];
     if (Array.isArray(val)) return val;
-    // fallback to zh
+    // 回退到中文
     const zhVal = TRANSLATIONS['zh'][key];
     if (Array.isArray(zhVal)) return zhVal;
     return [];

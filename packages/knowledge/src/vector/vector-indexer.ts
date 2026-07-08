@@ -2,6 +2,7 @@ import type { EmbeddingProvider } from '../embedding/embedding-provider.js';
 import type { StoredChunk } from '../core/index-state-store.js';
 import type { VectorDocument, VectorStoreInterface } from './types.js';
 
+/** 向量索引结果 */
 export interface VectorIndexResult {
   collectionName: string;
   chunkCount: number;
@@ -9,6 +10,7 @@ export interface VectorIndexResult {
   embeddingDimension: number;
 }
 
+/** 向量索引器，负责将文本切片生成 Embedding 并写入向量存储 */
 export class VectorIndexer {
   constructor(
     private readonly embeddingProvider: EmbeddingProvider,

@@ -7,6 +7,7 @@ import { ExternalExtractorRegistry } from './external-extractor.js';
 import { resolveAndImport, resolvePackage, getNodeModulesRoot } from './module-resolver.js';
 import type { ClassifiedFile } from '../types.js';
 
+/** 文件内容提取结果 */
 export interface ExtractionResult {
   text: string;
   metadata: Record<string, unknown>;
@@ -20,6 +21,7 @@ type SpreadsheetSheet = Record<string, SpreadsheetCell | unknown> & { '!ref'?: s
 type PdfTextItem = { str: string; x: number; y: number; width: number; height: number; fontName?: string };
 type CadAnnotation = { text: string; x?: number; y?: number; layer?: string; block?: string; entityType?: string };
 
+/** 文件内容提取器，支持文档、表格、图片、CAD 等多种文件格式的内容抽取 */
 export class ContentExtractor {
   constructor(private readonly externalExtractors = ExternalExtractorRegistry.fromEnvironment()) {}
 
@@ -710,7 +712,7 @@ export class ContentExtractor {
           };
         }
       } catch {
-        // fallback below
+        // 降级到下方 Office ZIP 解析
       }
     }
     return this.extractOfficeZip(file);
@@ -821,7 +823,7 @@ export class ContentExtractor {
       }
     } catch {
       if (ext === '.xls') return this.extractLegacyOfficeBinary(file);
-      // fallback below
+      // 降级到下方 ZIP 文件内容提取
     }
     if (ext === '.xls') return this.extractLegacyOfficeBinary(file);
     return this.extractOfficeZip(file);
@@ -1048,7 +1050,7 @@ try {
     const metadata: Record<string, unknown> = { extractionMode: 'pdf_text', vectorizable: true };
     const warnings: string[] = [];
 
-    // Tier 1: pdfjs-dist 文本提取（处理常规 PDF、压缩内容流、CJK 字体等）
+    // 第一层：pdfjs-dist 文本提取（处理常规 PDF、压缩内容流、CJK 字体等）
     try {
       const raw = fs.readFileSync(file.absolutePath);
       const text = await this.extractPdfText(raw);
@@ -1062,11 +1064,11 @@ try {
       metadata.parseError = error instanceof Error ? error.message : String(error);
     }
 
-    // Tier 2: OCR（扫描件/图片型 PDF）—— 必须保留并确保可用
+    // 第二层：OCR（扫描件/图片型 PDF）—— 必须保留并确保可用
     const ocr = await this.extractScannedPdfOcr(file);
     if (ocr.text.trim()) return ocr;
 
-    // Tier 3: 仅索引元数据（兜底）
+    // 第三层：仅索引元数据（兜底）
     metadata.extractionMode = 'pdf_metadata_only';
     metadata.contentCoverage = 'metadata_filename';
     metadata.ocrRecommended = true;
@@ -1167,7 +1169,7 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
   }
 
   private async extractPdfText(buffer: Buffer): Promise<string> {
-    // Tier 1: pdfjs-dist 文本提取（处理压缩内容流、CJK 字体、现代 PDF）
+    // 第一层：pdfjs-dist 文本提取（处理压缩内容流、CJK 字体、现代 PDF）
     try {
       const mod = await resolveAndImport('pdfjs-dist/legacy/build/pdf.mjs') as any;
       const loadingTask = mod.getDocument({ data: new Uint8Array(buffer), verbosity: 0 as number });
@@ -1192,7 +1194,7 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
       if (process.env.KB_DEBUG === '1') console.warn('[kb] pdfjs-dist extraction failed:', (e as Error).message);
     }
 
-    // Tier 2: pdf-parse（兼容旧版 PDF）
+    // 第二层：pdf-parse（兼容旧版 PDF）
     try {
       const mod = await resolveAndImport('pdf-parse');
       const pdfParse = (mod as unknown as { default?: (data: Buffer) => Promise<{ text: string }> }).default;
@@ -1201,10 +1203,10 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
         if (result.text.trim()) return result.text.slice(0, 250_000);
       }
     } catch {
-      // fallback to raw regex below
+      // 降级到下方纯正则提取
     }
 
-    // Tier 3: raw regex 回退（未压缩的古老 PDF）
+    // 第三层：raw regex 回退（未压缩的古老 PDF）
     const raw = buffer.toString('latin1');
     const matches = Array.from(raw.matchAll(/\(([^()]{2,500})\)\s*T[jJ]/gu), match => match[1] ?? '')
       .concat(Array.from(raw.matchAll(/\[([^\]]{2,2000})\]\s*TJ/gu), match => match[1] ?? ''));

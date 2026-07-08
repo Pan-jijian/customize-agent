@@ -83,6 +83,10 @@ const DEFAULT_CONFIG: UserConfig = { language: 'zh', providers: {}, models: { re
 
 // ── ConfigStore ──
 
+/**
+ * 配置存储管理器 — 将用户配置持久化至 JSON 文件。
+ * 支持 Provider、Model 分层配置的读写与验证。
+ */
 export class ConfigStore {
   private filePath: string;
   private _cache: UserConfig | null = null;
@@ -94,6 +98,7 @@ export class ConfigStore {
     this.filePath = path.join(dir, 'config.json');
   }
 
+  /** 加载用户配置（带缓存：mtime 未变时返回缓存副本） */
   load(): UserConfig {
     try {
       const stat = fs.existsSync(this.filePath) ? fs.statSync(this.filePath) : null;
@@ -108,6 +113,7 @@ export class ConfigStore {
     return this._cache;
   }
 
+  /** 保存部分配置（合并后写盘） */
   save(partial: Partial<UserConfig>): UserConfig {
     const current = this._readCurrentForSave();
     const merged = { ...current, ...partial };
@@ -178,12 +184,15 @@ export class ConfigStore {
 
   // ── Model ──
 
+  /** 获取指定层级的模型配置 */
   getTier(tier: ModelTier): TierConfig { return this.load().models[tier]; }
 
+  /** 设置指定层级当前激活的模型 */
   setActiveModel(tier: ModelTier, name: string): UserConfig {
     const c = this.load(); c.models[tier].active = name; return this.save(c);
   }
 
+  /** 向指定层级添加模型（自动去重，首个添加时自动激活） */
   addModel(tier: ModelTier, entry: ModelEntry): UserConfig {
     const c = this.load(); const t = c.models[tier];
     if (!t.list.some(m => m.name === entry.name && m.provider === entry.provider)) t.list.push(entry);
@@ -192,6 +201,7 @@ export class ConfigStore {
     return this.save(c);
   }
 
+  /** 从指定层级移除模型（若移除的是当前激活模型则自动切换） */
   removeModel(tier: ModelTier, name: string): UserConfig {
     const c = this.load(); const t = c.models[tier];
     t.list = t.list.filter(m => m.name !== name);
@@ -199,6 +209,7 @@ export class ConfigStore {
     return this.save(c);
   }
 
+  /** 检查是否为首次运行（所有层级均无模型配置） */
   isFirstRun(): boolean {
     const c = this.load();
     return c.models.reader.list.length === 0 && c.models.reasoning.list.length === 0 && c.models.action.list.length === 0;
@@ -277,11 +288,16 @@ export class ConfigStore {
 
 // ── ModelRegistry ──
 
+/**
+ * 模型注册中心 — 根据层级和 Fallback 链解析模型配置。
+ * resolve → resolveAll → getFallbackChain 形成完整的模型解析体系。
+ */
 export class ModelRegistry {
   private config: ConfigStore;
 
   constructor(configStore: ConfigStore) { this.config = configStore; }
 
+  /** 解析指定层级的模型，若该层级无配置则按 reader→reasoning→action 顺序 Fallback */
   resolve(tier: ModelTier): ModelEntry | null {
     const c = this.config.load();
     const entry = this._r(c.models[tier]);
@@ -294,10 +310,12 @@ export class ModelRegistry {
     return null;
   }
 
+  /** 解析所有层级的模型（各自独立 Fallback） */
   resolveAll(): Record<ModelTier, ModelEntry | null> {
     return { reader: this.resolve('reader'), reasoning: this.resolve('reasoning'), action: this.resolve('action') };
   }
 
+  /** 获取模型 Fallback 链（包含来源层级信息） */
   getFallbackChain(tier: ModelTier): { model: ModelEntry; from: ModelTier }[] {
     const c = this.config.load();
     const d = this._r(c.models[tier]);

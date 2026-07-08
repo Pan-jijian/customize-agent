@@ -7,6 +7,7 @@ import { clearErrorLogs, getErrorLogs, type ErrorLogEntry } from '@/lib/api';
 
 const { Text, Paragraph } = Typography;
 
+/** 根据日志级别返回对应的标签颜色 */
 function levelColor(level: ErrorLogEntry['level']) {
   if (level === 'error') return 'error';
   if (level === 'warn') return 'warning';
@@ -20,6 +21,7 @@ export default function SystemLogsPage() {
   const [keyword, setKeyword] = useState('');
   const [guideExpanded, setGuideExpanded] = useState(false);
 
+  /** 加载最近的错误日志 */
   const load = async () => {
     setLoading(true);
     try { setLogs((await getErrorLogs(500)).logs); }

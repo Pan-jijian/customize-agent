@@ -619,6 +619,7 @@ function emptyEvidenceByKind(): Record<ResourceEvidence['kind'], ResourceEvidenc
   return { map: [], image: [], table: [], document: [], spreadsheet: [], text: [], attachment: [] };
 }
 
+/** 构建章节证据包，将原始证据分类为文本片段和结构化资源（图片、表格、文档、地图等） */
 function buildEvidenceBundle(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[]): EvidenceBundle {
   const textEvidence = evidence.slice(0, 16);
   const resourceMap = new Map<string, ResourceEvidence>();
@@ -697,6 +698,7 @@ function evidenceSatisfiesSpecField(item: DocumentEvidence, field: { name: strin
   return roleMatched && evidenceMatchesFact(item, field.name);
 }
 
+/** 从证据中抽取事实字段，按规范包中的事实定义进行匹配 */
 function extractFacts(template: DocumentTemplate, evidence: DocumentEvidence[], spec?: DocumentSpecPackage): Record<string, string> {
   const facts: Record<string, string> = {};
   for (const field of specFactTargets(template, spec)) {
@@ -751,6 +753,7 @@ function getActiveModelWithProvider() {
   return { model: selected, provider: providerConfig };
 }
 
+/** 调用底层 LLM 进行文档生成，支持文本模式和 JSON 模式 */
 async function callDocumentLlm(system: string, prompt: string, jsonOnly = false): Promise<string | undefined> {
   try {
     const active = getActiveModelWithProvider();
@@ -767,6 +770,7 @@ async function callDocumentLlm(system: string, prompt: string, jsonOnly = false)
   }
 }
 
+/** 调用 LLM 并以 JSON 格式解析返回结果 */
 async function callDocumentLlmJson<T>(system: string, prompt: string): Promise<T | undefined> {
   const response = await callDocumentLlm(system, prompt, true);
   if (!response) return undefined;
@@ -804,7 +808,7 @@ function extractStructuredTables(evidence: DocumentEvidence[]): StructuredTableF
         }
         continue;
       } catch {
-        // fall back to text parsing
+        // 回退到文本解析
       }
     }
     const lines = item.content.split('\n').map(line => line.trim()).filter(Boolean);
@@ -1298,6 +1302,7 @@ function resourceFileList(resources: ResourceEvidence[]) {
   return resources.slice(0, 12).map(item => `- ${item.semanticTitle}（${item.kind}）：${item.filePath}；用途：${item.contentUse}`).join('\n');
 }
 
+/** 构建三角洲攻略内置模板的可读章节内容（带预设模板文案和资源引用） */
 function buildDeltaReadableChapter(chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[]) {
   const table = operatorTable(evidence);
   const bundle = buildEvidenceBundle(chapter, evidence);
@@ -1367,6 +1372,7 @@ function buildDeltaReadableChapter(chapter: DocumentTemplate['chapters'][number]
   return content.join('\n');
 }
 
+/** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
 async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, requirement?: string) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   const evidenceText = evidenceBundlePrompt(bundle);
@@ -1399,6 +1405,7 @@ async function buildLlmChapterContent(template: DocumentTemplate, chapter: Docum
   return content.startsWith('## ') ? content : `## ${chapter.title}\n\n${content}`;
 }
 
+/** 对生成的 Markdown 进行 LLM 二次审查和优化，检查结构、证据使用和导出合规性 */
 async function reviewAndOptimizeMarkdown(input: {
   template: DocumentTemplate;
   spec?: DocumentSpecPackage;
@@ -1536,6 +1543,7 @@ function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw new Error('用户中止');
 }
 
+/** 文档生成主入口：依次执行角色绑定、知识检索、文件理解、事实抽取、章节生成、封面生成、LLM 审查和导出校验，返回完整文档草稿 */
 export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; signal?: AbortSignal; onProgress?: (stages: DocumentExecutionStage[]) => void }): Promise<GeneratedDocumentDraft> {
   throwIfAborted(input.signal);
   const template = getDocumentTemplate(input.templateId);
@@ -1615,7 +1623,7 @@ input.onProgress?.([...progressStages]);
     const missingFacts = chapter.requiredFacts.filter(fact => !evidence.some(item => evidenceMatchesFact(item, fact)));
     if (evidence.length === 0) missingItems.push(`${chapter.title}：未检索到明确资料依据`);
     for (const fact of missingFacts) missingItems.push(`${chapter.title}：${fact} 未检索到明确依据`);
-    // 证据检索完成 → 立即汇报 progress
+    // 证据检索完成 → 立即汇报进度
     if (!progressStages.some(s => s.type === 'knowledge_retrieval')) {
       progressStages.push({ type: 'knowledge_retrieval', roleId: 'knowledge-base', status: (allEvidence.length > 0 ? 'success' : 'fallback'), message: `已检索/绑定 ${allEvidence.length} 条证据` });
       input.onProgress?.([...progressStages]);

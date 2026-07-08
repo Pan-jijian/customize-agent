@@ -1,6 +1,7 @@
 import { BgeTokenizer } from './bge-tokenizer.js';
 import type { ClassifiedFile, FileCategory } from '../types.js';
 
+/** 文本切片结果 */
 export interface TextChunk {
   index: number;
   text: string;
@@ -11,6 +12,7 @@ export interface TextChunk {
   metadata: Record<string, unknown>;
 }
 
+/** 切片配置参数 */
 export interface ChunkConfig {
   maxChunkSize: number;
   overlap: number;
@@ -70,9 +72,17 @@ const LANGUAGE_ROUTER: Record<string, CodeLanguageConfig> = {
   c: { delimiters: /\n(?=(?:struct|enum)\s|[\w*]+\s+\w+\s*\()/u, blockStart: /\{\s*$/u, indentSensitive: false },
 };
 
+/** 文本切片器，支持文档、表格、代码等多类型文件的递归式切片 */
 export class TextChunker {
   private readonly tokenizer = new BgeTokenizer();
 
+  /**
+   * 将文本内容按类型和配置分割为切片
+   * @param text 原始文本内容
+   * @param file 已分类的文件信息
+   * @param metadata 额外元数据
+   * @returns 切片列表
+   */
   chunk(text: string, file: ClassifiedFile, metadata: Record<string, unknown> = {}): TextChunk[] {
     const source = text.trim();
     if (source.length === 0) return [];

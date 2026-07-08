@@ -1,4 +1,4 @@
-// ⚠️ DEPRECATED — 这些工具函数是 `@customize-agent/types` 的纯转发。
+// ⚠️ 已弃用 — 这些工具函数是 `@customize-agent/types` 的纯转发。
 // 请直接从 `@customize-agent/types` 导入，未来版本将移除此文件。
 export {
   createToolErrorInfo,

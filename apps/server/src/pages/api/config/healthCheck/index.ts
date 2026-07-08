@@ -5,6 +5,7 @@ import { resolveProtocol } from '@customize-agent/runtime';
 import { recordErrorLog } from '@/services/errorLogService';
 import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
+/** 根据协议类型映射 Provider 工厂名称 */
 function providerFactoryName(providerName: string, providerConfig?: { protocol?: string }): string {
   const protocol = resolveProtocol(providerName, providerConfig);
   if (protocol === 'anthropic') return 'anthropic';
@@ -17,7 +18,12 @@ function providerFactoryName(providerName: string, providerConfig?: { protocol?:
   return providerName;
 }
 
+/**
+ * Provider 健康检查 API 处理器
+ * 向指定 AI 提供商发送 ping 消息测试连通性
+ */
 async function handler(req: NextApiRequest, res: NextApiResponse) {
+  // 仅允许 POST 请求
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   const { provider: providerName } = req.body;
   if (!providerName) return res.status(400).json({ success: false, message: 'Provider name required' });

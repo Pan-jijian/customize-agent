@@ -36,7 +36,7 @@ export class McpClient {
   private connections = new Map<string, McpConnection>();
 
   constructor(private registry: ToolRegistry) {
-    // Use cross-platform cleanup handler (SIGINT+SIGTERM+exit — works on Windows too)
+    // 使用跨平台清理处理器（SIGINT+SIGTERM+exit — 在 Windows 上同样有效）
     onCleanup(() => this.disconnectAll());
   }
 
@@ -102,16 +102,19 @@ export class McpClient {
     }
   }
 
+  /** 调用 MCP Server 上的工具 */
   private async callTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<unknown> {
     const conn = this.connections.get(serverName);
     if (!conn) throw new Error(`MCP Server "${serverName}" not connected`);
     return this.sendRequest(conn, 'tools/call', { name: toolName, arguments: args });
   }
 
+  /** 发送 JSON-RPC Notification（无需响应） */
   private sendNotification(conn: McpConnection, method: string, params: unknown): void {
     conn.process.stdin?.write(this.frame(JSON.stringify({ jsonrpc: '2.0', method, params })));
   }
 
+  /** 发送 JSON-RPC Request 并等待响应 */
   private async sendRequest(conn: McpConnection, method: string, params: unknown): Promise<unknown> {
     const id = ++conn.requestId;
     const content = jsonRpcSerialize(method, params, id);
@@ -121,10 +124,12 @@ export class McpClient {
     });
   }
 
+  /** 添加 MCP 帧头（Content-Length） */
   private frame(content: string): string {
     return `Content-Length: ${Buffer.byteLength(content, 'utf-8')}\r\n\r\n${content}`;
   }
 
+  /** 处理接收缓冲，提取完整的 MCP 消息 */
   private processBuffer(conn: McpConnection): void {
     while (true) {
       const headerEnd = conn.buffer.indexOf('\r\n\r\n');
@@ -149,6 +154,7 @@ export class McpClient {
     }
   }
 
+  /** 处理单条 MCP 消息（匹配 pending 请求） */
   private handleMessage(conn: McpConnection, raw: string): void {
     try {
       const msg = JSON.parse(raw) as JsonRpcResponse;
@@ -159,10 +165,11 @@ export class McpClient {
       if (msg.error) pending.reject(new Error(msg.error.message));
       else pending.resolve(msg.result);
     } catch {
-      // ignore malformed server logs
+      // 忽略格式异常的服务器日志
     }
   }
 
+  /** 断开指定 MCP Server 连接 */
   disconnect(serverName: string): void {
     const conn = this.connections.get(serverName);
     if (!conn) return;
@@ -170,10 +177,12 @@ export class McpClient {
     this.connections.delete(serverName);
   }
 
+  /** 断开所有 MCP Server 连接 */
   disconnectAll(): void {
     for (const name of this.connections.keys()) this.disconnect(name);
   }
 
+  /** 列出所有已连接的 MCP Server 名称 */
   listServers(): string[] {
     return Array.from(this.connections.keys());
   }

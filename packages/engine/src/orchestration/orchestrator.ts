@@ -127,7 +127,7 @@ export class Orchestrator {
             result.success = false;
             result.summary += `\n[${isoCtx.strategy}] merge failed: ${(err as Error).message}`;
           } finally {
-            // Always destroy isolation context — even if merge threw
+            // 始终销毁隔离上下文 — 即使 merge 抛出异常
             try {
               await this.isolation!.destroy(isoCtx);
             } catch (cleanupErr) {

@@ -139,7 +139,7 @@ export class MemoryManager {
         LIMIT ?
       `).all(safeQuery, limit) as Array<Record<string, unknown>>;
     } catch (err: unknown) {
-      // FTS5 syntax error → fallback to LIKE (only for expected FTS errors, re-throw unexpected)
+      // FTS5 语法错误 → 回退至 LIKE 查询（仅对预期的 FTS 错误，非预期则重新抛出）
       if (err instanceof Error && !(err as { code?: string }).code?.startsWith('SQLITE_')) {
         throw err;
       }

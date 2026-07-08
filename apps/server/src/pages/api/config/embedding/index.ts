@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { getConfigStore } from '@/services/configService';
 import type { EmbeddingConfig } from '@customize-agent/runtime';
 
+/** 脱敏处理 Embedding 配置中的 API Key */
 function publicEmbedding(config: EmbeddingConfig) {
   return {
     ...config,
@@ -10,6 +11,11 @@ function publicEmbedding(config: EmbeddingConfig) {
   };
 }
 
+/**
+ * Embedding 配置 API 处理器
+ * GET: 获取当前 Embedding 配置
+ * PUT: 更新 Embedding 配置（支持 two-spin 本地模型和 OpenAI 兼容 API 两种模式）
+ */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!['GET', 'PUT'].includes(req.method!)) return res.status(405).json({ error: 'Method not allowed' });
   try {
@@ -19,6 +25,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       const previous = store.getEmbedding();
       const provider = body.provider === 'openai-compatible' ? 'openai-compatible' : 'transformers-local';
       const dimensions = Number(body.dimensions ?? (provider === 'transformers-local' ? 512 : 1024));
+      // 根据提供商类型构建配置：transformers-local 固定模型，openai-compatible 可自定义
       const embedding: EmbeddingConfig = provider === 'transformers-local'
         ? {
           provider: 'transformers-local',
