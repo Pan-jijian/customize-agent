@@ -44,9 +44,10 @@ function readNested(messages: Messages, key: TranslationKey): string {
 export function useAppTranslations(namespace?: string) {
   const { messages } = useAppLocale();
   return useCallback((key: TranslationKey) => {
-    if (!namespace || key.includes('.')) return readNested(messages, key);
-    const scoped = readNested(messages, `${namespace}.${key}`);
-    return scoped === `${namespace}.${key}` ? readNested(messages, key) : scoped;
+    if (!namespace) return readNested(messages, key);
+    const scopedKey = `${namespace}.${key}`;
+    const scoped = readNested(messages, scopedKey);
+    return scoped === scopedKey ? readNested(messages, key) : scoped;
   }, [messages, namespace]);
 }
 

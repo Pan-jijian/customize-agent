@@ -1,5 +1,11 @@
 # server
 
+## 4.0.4
+
+### Patch Changes
+
+- Fix namespaced nested translation keys in the server UI.
+
 ## 4.0.3
 
 ### Patch Changes

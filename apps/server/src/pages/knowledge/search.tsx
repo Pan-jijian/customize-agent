@@ -15,6 +15,11 @@ function score(value?: number) {
   return typeof value === 'number' ? value.toFixed(2) : '-';
 }
 
+function translatedValue(t: (key: string) => string, key: string, fallback: string) {
+  const value = t(key);
+  return value === key ? fallback : value;
+}
+
 function highlight(text: string, query: string) {
   const terms = [query.trim(), ...query.split(/[\s,，。；;：:、]+/u)].filter(Boolean).sort((a, b) => b.length - a.length);
   if (terms.length === 0) return text;
@@ -77,7 +82,7 @@ export default function KnowledgeSearchPage() {
 
       <Card size="small" title={t('recallWeightTuning')}>
         <Space wrap>
-          {WEIGHT_KEYS.map(key => <span key={key}>{t(`weights.${key}`)} <InputNumber min={0} max={key === 'hybridBonus' ? 2 : 5} step={key === 'hybridBonus' ? 0.05 : 0.1} value={weights[key]} onChange={value => setWeights(prev => ({ ...prev, [key]: Number(value ?? prev[key]) }))} /></span>)}
+          {WEIGHT_KEYS.map(key => <span key={key}>{translatedValue(t, `weights.${key}`, key)} <InputNumber min={0} max={key === 'hybridBonus' ? 2 : 5} step={key === 'hybridBonus' ? 0.05 : 0.1} value={weights[key]} onChange={value => setWeights(prev => ({ ...prev, [key]: Number(value ?? prev[key]) }))} /></span>)}
         </Space>
       </Card>
 
@@ -86,8 +91,8 @@ export default function KnowledgeSearchPage() {
           <Descriptions.Item label={t('originalQuery')}>{debug.originalQuery}</Descriptions.Item>
           <Descriptions.Item label={t('reranker')}>{debug.reranker}</Descriptions.Item>
           <Descriptions.Item label={t('rewrittenQueries')} span={2}><Space wrap>{debug.rewrittenQueries?.map(item => <Tag key={item}>{item}</Tag>)}</Space></Descriptions.Item>
-          <Descriptions.Item label={t('recallCounts')} span={2}><Space wrap>{Object.entries(debug.recallCounts ?? {}).map(([key, value]) => <Tag key={key}>{t(`recallSources.${key}`)}: {value}</Tag>)}</Space></Descriptions.Item>
-          <Descriptions.Item label={t('recallWeights')} span={2}><Space wrap>{Object.entries(debug.weights ?? {}).map(([key, value]) => <Tag key={key}>{t(`weights.${key}`)}: {value}</Tag>)}</Space></Descriptions.Item>
+          <Descriptions.Item label={t('recallCounts')} span={2}><Space wrap>{Object.entries(debug.recallCounts ?? {}).map(([key, value]) => <Tag key={key}>{translatedValue(t, `recallSources.${key}`, key)}: {value}</Tag>)}</Space></Descriptions.Item>
+          <Descriptions.Item label={t('recallWeights')} span={2}><Space wrap>{Object.entries(debug.weights ?? {}).map(([key, value]) => <Tag key={key}>{translatedValue(t, `weights.${key}`, key)}: {value}</Tag>)}</Space></Descriptions.Item>
         </Descriptions>
       </Card>}
 
@@ -98,8 +103,8 @@ export default function KnowledgeSearchPage() {
             <div className={styles.searchResultHeader}>
               <Space size={8} wrap>
                 <Tag>{t('resultIndex')} {index + 1}</Tag>
-                <Tag color={item.source === 'hybrid' ? 'purple' : item.source === 'vector' ? 'blue' : 'green'}>{t(`recallSources.${item.source ?? 'keyword'}`)}</Tag>
-                <Tag>{t(`scopes.${item.scope}`)}</Tag>
+                <Tag color={item.source === 'hybrid' ? 'purple' : item.source === 'vector' ? 'blue' : 'green'}>{translatedValue(t, `recallSources.${item.source ?? 'keyword'}`, item.source ?? 'keyword')}</Tag>
+                <Tag>{translatedValue(t, `scopes.${item.scope}`, item.scope)}</Tag>
                 {item.chunkKind && <Tag color="geekblue">{item.chunkKind}</Tag>}
                 {item.rowRange && <Tag color="gold">{t('rowRange')} {item.rowRange}</Tag>}
                 {item.sectionTitle && <Tag color="cyan">{item.sectionTitle}</Tag>}
@@ -117,7 +122,7 @@ export default function KnowledgeSearchPage() {
               {Object.entries(item.facets).slice(0, 8).map(([key, value]) => <span key={key}>{key} <b>{Array.isArray(value) ? value.join(', ') : String(value)}</b></span>)}
             </div>}
             <div className={styles.statusMeta}>
-              {SCORE_KEYS.map(key => <span key={key}>{t(`scoreDetails.${key}`)} <b>{score(item.scoreDetails?.[key])}</b></span>)}
+              {SCORE_KEYS.map(key => <span key={key}>{translatedValue(t, `scoreDetails.${key}`, key)} <b>{score(item.scoreDetails?.[key])}</b></span>)}
             </div>
           </div>)}
         </div>}
