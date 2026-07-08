@@ -1,9 +1,13 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { deleteDocumentTemplate, duplicateDocumentTemplate, listDocumentTemplates, saveDocumentTemplate, type DocumentTemplate } from '@/services/documentWorkflowService';
+import { deleteDocumentTemplate, duplicateDocumentTemplate, listDocumentTemplates, saveDocumentTemplate, validateDocumentTemplateRun, type DocumentTemplate } from '@/services/documentWorkflowService';
 
-export default function handler(req: NextApiRequest, res: NextApiResponse) {
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    if (req.method === 'GET') return res.status(200).json({ templates: listDocumentTemplates() });
+    if (req.method === 'GET') {
+      const validateId = String(req.query.validate || '');
+      if (validateId) return res.status(200).json({ validation: await validateDocumentTemplateRun(validateId, typeof req.query.projectRoot === 'string' && req.query.projectRoot ? req.query.projectRoot : undefined) });
+      return res.status(200).json({ templates: listDocumentTemplates() });
+    }
     if (req.method === 'POST' || req.method === 'PUT') {
       const template = req.body as DocumentTemplate;
       if (!template?.id || !template.name) return res.status(400).json({ error: 'template id and name required' });

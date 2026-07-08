@@ -1,7 +1,9 @@
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import JSZip from 'jszip';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getGeneratedDocument } from '@/services/generatedDocumentService';
+import { generatedRoot, getGeneratedDocument } from '@/services/generatedDocumentService';
+import { getProjectRoot } from '@/services/kbService';
 import { recordErrorLog } from '@/services/errorLogService';
 import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
@@ -13,6 +15,59 @@ function safeFileName(input: string) {
 
 function escapeXml(input: string) {
   return input.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;');
+}
+
+const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_INLINE_IMAGE_BYTES = 32 * 1024 * 1024;
+const IMAGE_MIME_BY_EXT: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml' };
+
+function imageMime(filePath: string) {
+  return IMAGE_MIME_BY_EXT[path.extname(filePath).toLowerCase()] || '';
+}
+
+function isInsidePath(filePath: string, root: string) {
+  const relative = path.relative(root, filePath);
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function safeDecodeUriPath(src: string) {
+  try { return decodeURIComponent(src.split(/[?#]/u)[0] || src); }
+  catch { return ''; }
+}
+
+function resolveLocalImagePath(src: string, projectRoot = getProjectRoot()) {
+  if (!src || /^(?:https?:|data:|file:|blob:|#)/iu.test(src)) return null;
+  const clean = safeDecodeUriPath(src);
+  if (!clean || path.isAbsolute(clean)) return null;
+  const knowledgeRoot = path.resolve(projectRoot, 'knowledgeBase');
+  const assetRoot = path.resolve(generatedRoot(projectRoot), 'assets');
+  const candidates = [
+    clean.startsWith('generatedDocuments/assets/') ? path.resolve(assetRoot, clean.replace(/^generatedDocuments\/assets\//u, '')) : '',
+    path.resolve(knowledgeRoot, clean),
+  ].filter(Boolean);
+  return candidates.find(candidate => {
+    const resolved = path.resolve(candidate);
+    const allowed = isInsidePath(resolved, knowledgeRoot) || isInsidePath(resolved, assetRoot);
+    return allowed && Boolean(imageMime(resolved)) && fs.existsSync(resolved) && fs.statSync(resolved).isFile();
+  }) || null;
+}
+
+function inlineLocalImages(html: string, projectRoot = getProjectRoot()) {
+  const cache = new Map<string, string>();
+  let totalBytes = 0;
+  return html.replace(/<img\b([^>]*?)\bsrc=["']([^"']+)["']([^>]*)>/giu, (match, before: string, src: string, after: string) => {
+    const localPath = resolveLocalImagePath(src, projectRoot);
+    if (!localPath) return match;
+    const stat = fs.statSync(localPath);
+    if (stat.size > MAX_INLINE_IMAGE_BYTES || totalBytes + stat.size > MAX_TOTAL_INLINE_IMAGE_BYTES) return match;
+    let dataUrl = cache.get(localPath);
+    if (!dataUrl) {
+      dataUrl = `data:${imageMime(localPath)};base64,${fs.readFileSync(localPath).toString('base64')}`;
+      cache.set(localPath, dataUrl);
+      totalBytes += stat.size;
+    }
+    return `<img${before}src="${dataUrl}"${after}>`;
+  });
 }
 
 function markdownToDocxText(markdown: string) {
@@ -86,7 +141,7 @@ function buildFallbackPdf(title: string, markdown: string) {
 }
 
 function htmlShell(title: string, body: string) {
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:A4;margin:24mm 18mm 22mm 18mm}body{font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif;line-height:1.75;color:#111827;font-size:14px}h1{text-align:center;font-size:28px;margin-top:80px}h2{border-bottom:1px solid #d1d5db;padding-bottom:6px;margin-top:28px;page-break-after:avoid}h3{margin-top:20px}table{width:100%;border-collapse:collapse;page-break-inside:auto}tr{page-break-inside:avoid;page-break-after:auto}th,td{border:1px solid #6b7280;padding:6px 8px;vertical-align:top}th{background:#f3f4f6}pre{white-space:pre-wrap}.document-cover{min-height:720px;display:flex;flex-direction:column;justify-content:center}.document-cover h1{margin-top:0}.page-break{page-break-after:always;height:0}</style></head><body>${body}</body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:A4;margin:24mm 18mm 22mm 18mm}body{font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif;line-height:1.75;color:#111827;font-size:14px}h1{text-align:center;font-size:28px;margin-top:80px}h2{border-bottom:1px solid #d1d5db;padding-bottom:6px;margin-top:28px;page-break-after:avoid}h3{margin-top:20px}img{display:block;max-width:100%;max-height:520px;object-fit:contain;margin:12px auto;page-break-inside:avoid}table{width:100%;border-collapse:collapse;page-break-inside:auto}tr{page-break-inside:avoid;page-break-after:auto}th,td{border:1px solid #6b7280;padding:6px 8px;vertical-align:top}th{background:#f3f4f6}pre{white-space:pre-wrap}.document-cover{min-height:720px;display:flex;flex-direction:column;justify-content:center}.document-cover h1{margin-top:0}.page-break{page-break-after:always;height:0}</style></head><body>${body}</body></html>`;
 }
 
 function isExportBlockingIssue(issue: { message: string }) {
@@ -100,8 +155,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const body = req.body as { documentId?: string; title?: string; markdown?: string; format?: ExportFormat; enforceGate?: boolean; exportGate?: { passed?: boolean; blockingIssues?: Array<{ message: string }> }; wordTemplatePath?: string };
     const record = body.documentId ? getGeneratedDocument(body.documentId) : null;
     if (body.documentId && !record) return res.status(404).json({ error: 'Document not found' });
-    const title = record?.title || body.title || 'document';
-    const markdown = record?.editedMarkdown || record?.markdown || body.markdown || '';
+    const title = body.title || record?.title || 'document';
+    const markdown = typeof body.markdown === 'string' ? body.markdown : record?.editedMarkdown || record?.markdown || '';
     const format = body.format || 'markdown';
     const exportGate = record?.draft?.exportGate || body.exportGate;
     const blockingIssues = exportGate?.blockingIssues?.filter(isExportBlockingIssue) || [];
@@ -119,7 +174,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(200).send(docx);
     }
     const { marked } = await import('marked');
-    const html = htmlShell(title, marked.parse(markdown, { async: false }) as string);
+    const projectRoot = getProjectRoot();
+    const html = inlineLocalImages(htmlShell(title, marked.parse(markdown, { async: false }) as string), projectRoot);
     if (format === 'html') {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.html`)}`);
@@ -131,6 +187,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       try {
         const page = await browser.newPage({ locale: 'zh-CN' });
         await page.setContent(html, { waitUntil: 'load' });
+        await page.waitForFunction(() => Array.from(document.images).every(img => img.complete && img.naturalWidth > 0), undefined, { timeout: 10_000 }).catch(() => undefined);
         await page.emulateMedia({ media: 'print' });
         const pdf = await page.pdf({ format: 'A4', printBackground: true, preferCSSPageSize: true, margin: { top: '24mm', right: '18mm', bottom: '22mm', left: '18mm' }, displayHeaderFooter: true, headerTemplate: '<div></div>', footerTemplate: '<div style="font-size:9px;width:100%;text-align:center;color:#666;">第 <span class="pageNumber"></span> 页 / 共 <span class="totalPages"></span> 页</div>' });
         res.setHeader('Content-Type', 'application/pdf');
@@ -147,5 +204,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(200).send(pdf);
     }
 }
+
+export const __documentExportTest__ = { inlineLocalImages, resolveLocalImagePath };
 
 export default withApiErrorBoundary('api/documents/export', handler);

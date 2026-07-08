@@ -6,6 +6,7 @@ export type SearchScope = 'project' | 'global' | 'all';
 
 export interface FederatedSearchItem {
   id: string;
+  rowid?: number;
   content: string;
   filePath: string;
   scope: 'project' | 'global';
@@ -142,6 +143,7 @@ export class FederationSearch {
   private toFederatedItem(result: VectorSearchResult, scope: 'project' | 'global'): FederatedSearchItem {
     return {
       id: result.document.id,
+      rowid: typeof result.document.metadata.sqlite_rowid === 'number' ? result.document.metadata.sqlite_rowid : undefined,
       content: result.document.content,
       filePath: String(result.document.metadata.file_path ?? ''),
       scope,

@@ -18,7 +18,7 @@ export { computeProjectId } from './core/project-id.js';
 export { ensureProjectCustomizeFile, getProjectConfigPath, getProjectKbPath, ProjectConfigManager } from './core/project-config.js';
 export { ProjectRegistry } from './core/project-registry.js';
 
-export { SQLiteVecClient, SQLiteVecVectorStore, type SQLiteVecClientOptions } from './vector/sqlite-vec-store.js';
+export { HNSWVectorStore } from './vector/hnsw-vector-store.js';
 export { CollectionManager, globalCollectionName, projectCollectionName } from './vector/collection-manager.js';
 export type { CollectionClient, VectorCollectionInfo, VectorDocument, VectorSearchQuery, VectorSearchResult, VectorStoreInterface } from './vector/types.js';
 export { VectorIndexer, type VectorIndexResult } from './vector/vector-indexer.js';

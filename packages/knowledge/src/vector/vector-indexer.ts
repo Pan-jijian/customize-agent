@@ -78,6 +78,7 @@ export class VectorIndexer {
       content: chunk.content,
       embedding,
       metadata: {
+        sqlite_rowid: chunk.rowid,
         file_path: chunk.relativePath,
         chunk_index: chunk.chunkIndex,
         category: chunk.category,

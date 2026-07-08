@@ -94,7 +94,6 @@ export class FileClassifier {
 
       ['.drawio', 'diagram', 'drawio'], ['.dio', 'diagram', 'drawio'], ['.vsdx', 'diagram', 'visio'], ['.vdx', 'diagram', 'visio'], ['.puml', 'diagram', 'plantuml'], ['.plantuml', 'diagram', 'plantuml'], ['.mmd', 'diagram', 'mermaid'], ['.mermaid', 'diagram', 'mermaid'], ['.excalidraw', 'diagram', 'excalidraw'],
 
-      ['.zip', 'archive', 'zip'], ['.jar', 'archive', 'zip'], ['.war', 'archive', 'zip'], ['.apk', 'archive', 'zip'], ['.tar', 'archive', 'tar'], ['.gz', 'archive', 'other'], ['.tgz', 'archive', 'tar'], ['.bz2', 'archive', 'other'], ['.rar', 'archive', 'other'], ['.7z', 'archive', 'other'],
     ];
 
     return new Map(entries.map(([ext, category, format]) => [ext, [category, format]]));

@@ -169,6 +169,20 @@ export function deleteGeneratedAsset(id: string, projectRoot = getProjectRoot())
   return true;
 }
 
+function safeKnowledgeFileName(name: string) {
+  return name.replace(/[\\/:*?"<>|]/gu, '_').slice(0, 120) || 'generated-document';
+}
+
+export async function indexGeneratedDocumentRecord(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
+  const kbRelativePath = path.join('生成文档', `${safeKnowledgeFileName(record.title)}-${record.id}.md`).split(path.sep).join('/');
+  const kbAbsolutePath = path.join(projectRoot, 'knowledgeBase', kbRelativePath);
+  fs.mkdirSync(path.dirname(kbAbsolutePath), { recursive: true });
+  fs.writeFileSync(kbAbsolutePath, record.editedMarkdown || record.markdown, 'utf8');
+  const project = await getMultiProjectManager().getProject(projectRoot);
+  await project.reindexFile(kbRelativePath);
+  return kbRelativePath;
+}
+
 export async function indexGeneratedAsset(id: string, projectRoot = getProjectRoot()) {
   const asset = getGeneratedAsset(id, projectRoot);
   if (!asset?.path) return null;
@@ -220,7 +234,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
         console.log(`[gen] progress saved: ${stages.length} stages, doc=${documentId}`);
       }
     } catch (err) { console.error('[gen] progress save error:', err); }
-  } }).then(result => {
+  } }).then(async result => {
     const current = getGeneratedDocument(documentId, projectRoot);
     if (!current || current.status !== 'generating') return current ?? initial;
     const warningIssues = result.validationIssues.filter(issue => issue.level === 'error' || issue.level === 'warning').map(issue => issue.suggestion ? `${issue.message}：${issue.suggestion}` : issue.message);
@@ -236,7 +250,11 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       completedAt: Date.now(),
       warningIssues,
     }, projectRoot);
-    upsertGeneratedAssets(result.assets || [], documentId, projectRoot);
+    const assets = upsertGeneratedAssets(result.assets || [], documentId, projectRoot);
+    await indexGeneratedDocumentRecord(record, projectRoot).catch(error => console.warn('[generated-documents] 自动入库生成文档失败', error));
+    for (const asset of assets.filter(item => item.usedByDocumentIds.includes(documentId) && !item.indexed)) {
+      await indexGeneratedAsset(asset.id, projectRoot).catch(error => console.warn('[generated-documents] 自动入库生成资源失败', asset.id, error));
+    }
     return record;
   }).catch(error => {
     const current = getGeneratedDocument(documentId, projectRoot);

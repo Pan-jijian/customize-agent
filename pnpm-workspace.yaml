@@ -19,3 +19,6 @@ onlyBuiltDependencies:
   - tree-sitter-ruby
   - tree-sitter-php
   - better-sqlite3
+  - hnswlib-node
+  - sharp
+  - '@napi-rs/canvas'

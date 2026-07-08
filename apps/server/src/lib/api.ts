@@ -147,7 +147,7 @@ export async function deleteAllKbFiles(projectRoot?: string) {
 }
 
 export async function reindexKb(projectRoot?: string) {
-  return fetchJson<{ success: boolean; stats?: KbStats }>('/api/kb/reindex', {
+  return fetchJson<{ success: boolean; accepted?: boolean; operationId?: string; stats?: KbStats }>('/api/kb/reindex', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ projectRoot }),
   });
@@ -230,6 +230,7 @@ export interface DocumentSpecChapterRule { id: string; title: string; required: 
 export interface DocumentSpecGateRule { id: string; name: string; type: GateRuleType; level: GateRuleLevel; target?: string; value?: string; evaluator?: GateRuleEvaluator; }
 export interface DocumentSpecPackage { id: string; name: string; description: string; factFields: DocumentSpecFactField[]; chapterRules: DocumentSpecChapterRule[]; gateRules: DocumentSpecGateRule[]; wordTemplatePath?: string; builtIn?: boolean; }
 export interface DocumentTemplate { id: string; name: string; description: string; category: string; outputTitle: string; chapters: DocumentTemplateChapter[]; projectRoleConfigId?: string; documentSpecId?: string; promptIds?: string[]; boundFilePaths?: string[]; promptBindings?: PromptBinding[]; fileBindings?: FileBinding[]; builtIn?: boolean; }
+export interface DocumentTemplateValidation { templateId: string; fileDiagnostics: Array<FileBinding & { roleName?: string; exists: boolean; indexed: boolean; chunkCount: number; vectorReady: boolean }>; promptDiagnostics: Array<PromptBinding & { roleName?: string; promptTitle?: string; exists: boolean; contentLength: number }>; spec?: { id: string; name: string; factFields: number; gateRules: number }; issues: Array<{ level: 'error' | 'warning'; message: string }> }
 export interface PromptProject { id: string; projectId: string; projectRoot?: string; projectName: string; customizePath: string; content: string; mtime: string; hasFile: boolean; isCurrent: boolean; selected: boolean; source: 'current' | 'project' | 'custom'; }
 export interface DocumentEvidence { chapterId: string; filePath: string; score: number; content: string; roleId?: string; processingType?: string; sectionTitle?: string; source?: string; }
 export interface DocumentDraftChapter { id: string; title: string; content: string; evidence: DocumentEvidence[]; missingFacts: string[]; }
@@ -274,6 +275,7 @@ export async function deleteDocumentGateType(id: string) {
   return fetchJson<{ success: boolean; specs: DocumentSpecPackage[]; gateTypes: DocumentSpecGateType[] }>(`/api/documents/specs?mode=gate-type&id=${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 export async function getDocumentTemplates() { return fetchJson<{ templates: DocumentTemplate[] }>('/api/documents/templates'); }
+export async function validateDocumentTemplate(templateId: string) { return fetchJson<{ validation: DocumentTemplateValidation }>(`/api/documents/templates?validate=${encodeURIComponent(templateId)}`); }
 export async function saveDocumentTemplate(template: DocumentTemplate) {
   return fetchJson<{ template: DocumentTemplate; templates: DocumentTemplate[] }>('/api/documents/templates', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(template) });
 }
@@ -283,7 +285,7 @@ export async function deleteDocumentTemplate(templateId: string) {
 export async function duplicateDocumentTemplate(templateId: string) {
   return fetchJson<{ template: DocumentTemplate; templates: DocumentTemplate[] }>('/api/documents/templates', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ templateId }) });
 }
-export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; sync?: boolean }) {
+export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string }) {
   return fetchJson<{ draft?: GeneratedDocumentDraft; taskId?: string; documentId?: string; record?: GeneratedDocumentRecord }>('/api/documents/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
 }
 export async function getGeneratedDocuments() { return fetchJson<{ documents: GeneratedDocumentRecord[] }>('/api/documents/generated'); }
@@ -295,7 +297,7 @@ export async function getGeneratedAssets() { return fetchJson<{ assets: Generate
 export async function deleteGeneratedAsset(id: string) { return fetchJson<{ ok: boolean; assets: GeneratedAssetRecord[] }>(`/api/assets/generated?id=${encodeURIComponent(id)}`, { method: 'DELETE' }); }
 export async function indexGeneratedAsset(id: string) { return fetchJson<{ asset: GeneratedAssetRecord; assets: GeneratedAssetRecord[] }>('/api/assets/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: 'index' }) }); }
 export async function openGeneratedAsset(id: string, target: 'file' | 'directory') { return fetchJson<{ ok: boolean }>('/api/assets/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: 'open', target }) }); }
-export async function regenerateDocumentChapter(input: { templateId: string; chapterId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string }) {
+export async function regenerateDocumentChapter(input: { templateId: string; chapterId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; documentId?: string; currentMarkdown?: string; existingFacts?: string[] }) {
   return fetchJson<{ chapter: DocumentDraftChapter }>('/api/documents/chapter/regenerate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
 }
 export async function getDocumentDrafts() { return fetchJson<{ drafts: StoredDocumentDraft[] }>('/api/documents/drafts'); }

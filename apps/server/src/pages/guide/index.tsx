@@ -274,9 +274,9 @@ export default function GuidePage() {
     <Card title="生成资源和知识库的关系">
       <Row gutter={[16, 16]}>
         <Col xs={24} md={12}>
-          <Card size="small" title="生成资源默认不入库">
-            <Paragraph>模型生成的图片、封面或后处理资源会保存在 generatedDocuments/assets 下，并登记到生成资源管理页。它们默认不进入知识库索引，避免临时产物污染原始资料。</Paragraph>
-            <Paragraph>如果某个生成资源已经被人工确认可以复用，再到资源管理页手动加入知识库索引。</Paragraph>
+          <Card size="small" title="生成资源自动回流知识库">
+            <Paragraph>模型生成的图片、封面或后处理资源会登记到生成资源管理页，并自动回流到 knowledgeBase/生成资源 下完成索引。</Paragraph>
+            <Paragraph>后续文档可以继续检索和复用这些已生成资源，资源管理页也会展示入库状态。</Paragraph>
           </Card>
         </Col>
         <Col xs={24} md={12}>
@@ -321,7 +321,7 @@ export default function GuidePage() {
         { key: 'warning-export', label: '为什么生成完成后显示 warning，但仍然可以导出？', children: <Paragraph>warning 表示文档已生成，但存在建议复核的问题，例如来源角色不完全匹配、某些事实需要人工确认或格式可优化。它不是失败，也不是导出阻断。只有真实 blockingIssues 或 error 级门禁问题才会阻断 DOCX/PDF 导出。</Paragraph> },
         { key: 'missing-facts', label: '为什么提示必需事实缺失？', children: <Paragraph>优先检查文档规范包中的 factFields、sourceRoleIds、模板章节 requiredFacts 和文件角色绑定。很多情况下不是模型失败，而是资料没有被绑定到正确角色，或字段要求比资料实际内容更严格。</Paragraph> },
         { key: 'draft-duration', label: '草稿历史里的耗时怎么计算？', children: <Paragraph>耗时使用生成记录的 createdAt 到 completedAt 计算；旧记录或未完成记录会使用 updatedAt 兜底。它用于判断本次生成链路整体成本，包括知识库检索、事实抽取、章节生成、资源处理、校验和格式化。</Paragraph> },
-        { key: 'asset-index', label: '生成资源为什么不自动进入知识库？', children: <Paragraph>生成资源属于输出产物，不是原始知识来源。默认不入库可以避免模型下一次把临时封面、草稿图片或错误资源当成事实来源。确认可复用后，再在生成资源管理页手动加入知识库索引。</Paragraph> },
+        { key: 'asset-index', label: '生成资源会如何进入知识库？', children: <Paragraph>生成资源完成后会自动回流到 knowledgeBase/生成资源 并建立索引，便于后续模板继续复用。资源管理页会展示入库状态，错误资源可以删除后重新生成。</Paragraph> },
       ]} />
     </Card>
 

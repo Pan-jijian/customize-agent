@@ -1,3 +1,4 @@
+import { BgeTokenizer } from './bge-tokenizer.js';
 import type { ClassifiedFile, FileCategory } from '../types.js';
 
 export interface TextChunk {
@@ -30,6 +31,12 @@ type ChunkCandidate = {
   rowRange?: string;
 };
 
+type CodeLanguageConfig = {
+  delimiters: RegExp;
+  blockStart: RegExp;
+  indentSensitive: boolean;
+};
+
 const DEFAULT_CONFIGS: Record<FileCategory, ChunkConfig> = {
   document: { maxChunkSize: 800, overlap: 100, headerInjection: true },
   spreadsheet: { maxChunkSize: 1000, overlap: 120, headerInjection: true },
@@ -52,7 +59,20 @@ const RECURSIVE_SEPARATORS = [
   /\s+/u,
 ] as const;
 
+const LANGUAGE_ROUTER: Record<string, CodeLanguageConfig> = {
+  typescript: { delimiters: /\n(?=(?:export\s+)?(?:async\s+)?(?:class|function|interface|type|const|let)\s)/u, blockStart: /\{\s*$/u, indentSensitive: false },
+  javascript: { delimiters: /\n(?=(?:export\s+)?(?:async\s+)?(?:class|function|const|let)\s)/u, blockStart: /\{\s*$/u, indentSensitive: false },
+  python: { delimiters: /\n(?=(?:class|def)\s)/u, blockStart: /:\s*$/u, indentSensitive: true },
+  go: { delimiters: /\n(?=(?:func|type|struct|interface)\s)/u, blockStart: /\{\s*$/u, indentSensitive: false },
+  java: { delimiters: /\n(?=(?:public|protected|private|static|final|abstract|\s)*(?:class|interface|enum|(?:\w|<|>|\[|\])+\s+\w+\s*\())/u, blockStart: /\{\s*$/u, indentSensitive: false },
+  csharp: { delimiters: /\n(?=(?:public|protected|private|internal|static|sealed|abstract|\s)*(?:class|interface|enum|(?:\w|<|>|\[|\])+\s+\w+\s*\())/u, blockStart: /\{\s*$/u, indentSensitive: false },
+  cpp: { delimiters: /\n(?=(?:class|struct|namespace|template)\s|[\w:*&<>]+\s+\w+\s*\()/u, blockStart: /\{\s*$/u, indentSensitive: false },
+  c: { delimiters: /\n(?=(?:struct|enum)\s|[\w*]+\s+\w+\s*\()/u, blockStart: /\{\s*$/u, indentSensitive: false },
+};
+
 export class TextChunker {
+  private readonly tokenizer = new BgeTokenizer();
+
   chunk(text: string, file: ClassifiedFile, metadata: Record<string, unknown> = {}): TextChunk[] {
     const source = text.trim();
     if (source.length === 0) return [];
@@ -67,7 +87,7 @@ export class TextChunker {
   private createCandidates(text: string, file: ClassifiedFile, config: ChunkConfig): ChunkCandidate[] {
     if (file.category === 'spreadsheet') return this.createTableCandidates(text, config);
     if (file.category === 'data') return this.createDataCandidates(text, config);
-    if (file.category === 'code') return this.createCodeCandidates(text, config);
+    if (file.category === 'code') return this.createCodeCandidates(text, file, config);
     return this.createTextCandidates(text, file.category, config);
   }
 
@@ -99,44 +119,23 @@ export class TextChunker {
   }
 
   private createTableCandidates(text: string, config: ChunkConfig): ChunkCandidate[] {
-    const lines = text.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
-    const headerLines = lines.filter(line => /^(文件|类型|Sheet|表格|列|Columns?)[:：]/iu.test(line));
-    const dataLines = lines.filter(line => !headerLines.includes(line));
-    if (dataLines.length === 0) return this.createTextCandidates(text, 'spreadsheet', config);
-
-    const header = headerLines.join('\n');
-    const candidates: ChunkCandidate[] = [];
-    let rowStart = 0;
-    let parentIndex = 0;
-
-    while (rowStart < dataLines.length) {
-      const rows: string[] = [];
-      while (rowStart + rows.length < dataLines.length) {
-        const nextLine = dataLines[rowStart + rows.length];
-        if (!nextLine) break;
-        const nextRows = [...rows, nextLine];
-        const candidate = [header, `行范围: ${rowStart + 1}-${rowStart + nextRows.length}`, ...nextRows].filter(Boolean).join('\n');
-        if (rows.length > 0 && this.estimateTokens(candidate) > config.maxChunkSize) break;
-        rows.push(nextLine);
-      }
-
-      const textChunk = [header, `行范围: ${rowStart + 1}-${rowStart + rows.length}`, ...rows].filter(Boolean).join('\n');
-      candidates.push({
-        text: textChunk,
-        startChar: text.indexOf(rows[0] ?? ''),
-        endChar: text.indexOf(rows.at(-1) ?? '') + (rows.at(-1)?.length ?? 0),
-        sectionTitle: '表格数据',
-        kind: 'table',
-        parentId: `table-${parentIndex}`,
-        parentIndex,
-        childIndex: 0,
-        rowRange: `${rowStart + 1}-${rowStart + rows.length}`,
+    if (this.isMarkdownTable(text)) {
+      return this.splitMarkdownTable(text, config.maxChunkSize).map((part, index) => {
+        const startChar = Math.max(0, text.indexOf(part.slice(0, 40)));
+        return {
+          text: part,
+          startChar,
+          endChar: startChar + part.length,
+          sectionTitle: this.extractSectionTitle(part) ?? '表格数据',
+          kind: 'table',
+          parentId: `table-${index}`,
+          parentIndex: index,
+          childIndex: 0,
+          rowRange: this.extractMarkdownTableRowRange(part),
+        };
       });
-      rowStart += Math.max(1, rows.length);
-      parentIndex += 1;
     }
-
-    return candidates;
+    return this.createTextCandidates(text, 'spreadsheet', config);
   }
 
   private createDataCandidates(text: string, config: ChunkConfig): ChunkCandidate[] {
@@ -154,19 +153,89 @@ export class TextChunker {
     }));
   }
 
-  private createCodeCandidates(text: string, config: ChunkConfig): ChunkCandidate[] {
-    const blocks = text.split(/\n(?=(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|var)\s)/u).map(part => part.trim()).filter(Boolean);
+  private createCodeCandidates(text: string, file: ClassifiedFile, config: ChunkConfig): ChunkCandidate[] {
+    const language = this.normalizeCodeLanguage(file.format);
+    const languageConfig = LANGUAGE_ROUTER[language];
+    const blocks = languageConfig
+      ? this.splitCodeByLanguage(text, languageConfig)
+      : this.splitCodeByStructuralFallback(text);
     const parts = blocks.length > 1 ? blocks : this.recursiveSplit(text, config.maxChunkSize);
-    return this.mergeParts(parts, config.maxChunkSize, config.overlap).map((part, index) => ({
-      text: part,
-      startChar: Math.max(0, text.indexOf(part.slice(0, 40))),
-      endChar: Math.max(0, text.indexOf(part.slice(0, 40))) + part.length,
-      sectionTitle: this.extractSectionTitle(part),
-      kind: 'code',
-      parentId: `code-${index}`,
-      parentIndex: index,
-      childIndex: 0,
-    }));
+    return this.mergeParts(parts, config.maxChunkSize, config.overlap).map((part, index) => {
+      const startChar = Math.max(0, text.indexOf(part.slice(0, 40)));
+      return {
+        text: part,
+        startChar,
+        endChar: startChar + part.length,
+        sectionTitle: this.extractSectionTitle(part),
+        kind: 'code',
+        parentId: `code-${language}-${index}`,
+        parentIndex: index,
+        childIndex: 0,
+      };
+    });
+  }
+
+  private normalizeCodeLanguage(format: string): string {
+    const aliases: Record<string, string> = {
+      ts: 'typescript', tsx: 'typescript', typescript: 'typescript',
+      js: 'javascript', jsx: 'javascript', javascript: 'javascript',
+      py: 'python', python: 'python',
+      golang: 'go', go: 'go',
+      java: 'java', cs: 'csharp', csharp: 'csharp',
+      cpp: 'cpp', cxx: 'cpp', cc: 'cpp', hpp: 'cpp',
+      c: 'c', h: 'c',
+    };
+    return aliases[format.toLowerCase()] ?? format.toLowerCase();
+  }
+
+  private splitCodeByLanguage(text: string, config: CodeLanguageConfig): string[] {
+    const raw = text.split(config.delimiters).map(part => part.trim()).filter(Boolean);
+    if (raw.length <= 1) return raw;
+    return raw.flatMap(block => config.indentSensitive ? this.collectIndentSensitiveBlocks(block, config) : this.collectBraceBalancedBlocks(block, config));
+  }
+
+  private collectIndentSensitiveBlocks(block: string, config: CodeLanguageConfig): string[] {
+    const lines = block.split(/\r?\n/u);
+    const result: string[] = [];
+    let current: string[] = [];
+    let baseIndent: number | undefined;
+    for (const line of lines) {
+      const indent = line.match(/^\s*/u)?.[0].length ?? 0;
+      if (current.length > 0 && baseIndent != null && indent <= baseIndent && config.blockStart.test(current[0] ?? '') && line.trim()) {
+        result.push(current.join('\n').trim());
+        current = [];
+        baseIndent = undefined;
+      }
+      if (current.length === 0) baseIndent = indent;
+      current.push(line);
+    }
+    if (current.length > 0) result.push(current.join('\n').trim());
+    return result.filter(Boolean);
+  }
+
+  private collectBraceBalancedBlocks(block: string, _config: CodeLanguageConfig): string[] {
+    const lines = block.split(/\r?\n/u);
+    const result: string[] = [];
+    let current: string[] = [];
+    let depth = 0;
+    for (const line of lines) {
+      current.push(line);
+      depth += (line.match(/\{/gu) ?? []).length;
+      depth -= (line.match(/\}/gu) ?? []).length;
+      if (current.length > 1 && depth <= 0) {
+        result.push(current.join('\n').trim());
+        current = [];
+        depth = 0;
+      }
+    }
+    if (current.length > 0) result.push(current.join('\n').trim());
+    return result.filter(Boolean);
+  }
+
+  private splitCodeByStructuralFallback(text: string): string[] {
+    const blocks = this.collectBraceBalancedBlocks(text, { delimiters: /\n/u, blockStart: /\{\s*$/u, indentSensitive: false });
+    if (blocks.length > 1) return blocks;
+    return text.split(/\n(?=\S)/u).map(part => part.trim()).filter(Boolean);
   }
 
   private splitIntoSections(text: string, category: FileCategory): Array<{ text: string; startChar: number; title?: string }> {
@@ -193,10 +262,11 @@ export class TextChunker {
 
   private recursiveSplit(text: string, maxTokens: number, separatorIndex = 0): string[] {
     if (this.estimateTokens(text) <= maxTokens) return [text.trim()].filter(Boolean);
-    if (separatorIndex >= RECURSIVE_SEPARATORS.length) return this.splitByWindow(text, maxTokens);
+    if (this.isMarkdownTable(text)) return this.splitMarkdownTable(text, maxTokens);
+    if (separatorIndex >= RECURSIVE_SEPARATORS.length) return this.splitBySentenceBoundary(text, maxTokens);
 
     const separator = RECURSIVE_SEPARATORS[separatorIndex];
-    if (!separator) return this.splitByWindow(text, maxTokens);
+    if (!separator) return this.splitBySentenceBoundary(text, maxTokens);
     const parts = text.split(separator).map(part => part.trim()).filter(Boolean);
     if (parts.length <= 1) return this.recursiveSplit(text, maxTokens, separatorIndex + 1);
 
@@ -223,8 +293,10 @@ export class TextChunker {
   }
 
   private splitByWindow(text: string, maxTokens: number, overlapTokens = 0): string[] {
-    const maxChars = Math.max(200, maxTokens * 4);
-    const overlapChars = Math.max(0, overlapTokens * 4);
+    const tokens = this.tokenizer.encode(text);
+    if (tokens.length <= maxTokens) return [text.trim()].filter(Boolean);
+    const maxChars = Math.max(200, Math.ceil(text.length * (maxTokens / Math.max(1, tokens.length))));
+    const overlapChars = Math.max(0, Math.ceil(text.length * (overlapTokens / Math.max(1, tokens.length))));
     const step = Math.max(1, maxChars - overlapChars);
     const chunks: string[] = [];
     for (let start = 0; start < text.length; start += step) {
@@ -232,6 +304,44 @@ export class TextChunker {
       if (start + maxChars >= text.length) break;
     }
     return chunks.filter(Boolean);
+  }
+
+  private splitBySentenceBoundary(text: string, maxTokens: number): string[] {
+    const units = text.split(/(?<=[。？！；;.!?])\s+|(?<=[。？！；;.!?])/u).map(part => part.trim()).filter(Boolean);
+    if (units.length <= 1) return this.splitByWindow(text, maxTokens);
+    return this.mergeParts(units, maxTokens, 0);
+  }
+
+  private isMarkdownTable(text: string): boolean {
+    const lines = text.trim().split(/\r?\n/u);
+    return lines.length >= 3 && lines.some(line => /^\s*\|?\s*:?-{3,}:?\s*\|/u.test(line));
+  }
+
+  private extractMarkdownTableRowRange(text: string): string | undefined {
+    const lines = text.trim().split(/\r?\n/u).filter(line => /^\s*\|/u.test(line));
+    const rowCount = Math.max(0, lines.length - 2);
+    return rowCount > 0 ? `1-${rowCount}` : undefined;
+  }
+
+  private splitMarkdownTable(text: string, maxTokens: number): string[] {
+    const lines = text.trim().split(/\r?\n/u).filter(Boolean);
+    const separatorIndex = lines.findIndex(line => /^\s*\|?\s*:?-{3,}:?\s*\|/u.test(line));
+    if (separatorIndex <= 0) return this.splitBySentenceBoundary(text, maxTokens);
+    const header = lines.slice(0, separatorIndex + 1);
+    const rows = lines.slice(separatorIndex + 1);
+    const chunks: string[] = [];
+    let current: string[] = [];
+    for (const row of rows) {
+      const candidate = [...header, ...current, row].join('\n');
+      if (current.length > 0 && this.estimateTokens(candidate) > maxTokens) {
+        chunks.push([...header, ...current].join('\n'));
+        current = [row];
+      } else {
+        current.push(row);
+      }
+    }
+    if (current.length > 0) chunks.push([...header, ...current].join('\n'));
+    return chunks.flatMap(chunk => this.estimateTokens(chunk) > maxTokens ? this.splitByWindow(chunk, maxTokens) : [chunk]);
   }
 
   private enforceCandidateLimit(candidates: ChunkCandidate[], config: ChunkConfig): ChunkCandidate[] {
@@ -300,6 +410,6 @@ export class TextChunker {
   }
 
   private estimateTokens(text: string): number {
-    return Math.max(1, Math.ceil(text.length / 4));
+    return Math.max(1, this.tokenizer.countTokens(text));
   }
 }

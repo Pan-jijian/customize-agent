@@ -13,7 +13,7 @@ import type { LLMSearchProvider } from '../llm/llm-search-provider.js';
 import { FederationSearch, type FederatedResult, type FederatedSearchItem, type RetrievalWeights, type SearchFilters } from '../search/federation-search.js';
 import type { DiffResult, IndexStateRecord, KBScope, KnowledgeBaseStats, ProjectConfig } from '../types.js';
 import { CollectionManager } from '../vector/collection-manager.js';
-import { SQLiteVecClient, SQLiteVecVectorStore } from '../vector/sqlite-vec-store.js';
+import { HNSWVectorStore } from '../vector/hnsw-vector-store.js';
 import type { VectorStoreInterface } from '../vector/types.js';
 import { VectorIndexer, type VectorIndexResult } from '../vector/vector-indexer.js';
 import { ChangeTracker } from './change-tracker.js';
@@ -53,7 +53,7 @@ export class KnowledgeBaseManager {
   readonly kbPath: string;
   readonly store: IndexStateStore;
 
-  private readonly sqliteVecClient: SQLiteVecClient;
+  private readonly vectorRoot: string;
   private readonly classifier = new FileClassifier();
   private readonly scanner = new KnowledgeFileScanner();
   private readonly collections = new CollectionManager();
@@ -93,7 +93,7 @@ export class KnowledgeBaseManager {
       dbPath = path.join(storageRoot, 'projects', options.projectId, 'kb.db');
     }
     this.store = new IndexStateStore(dbPath);
-    this.sqliteVecClient = new SQLiteVecClient({ dbPath });
+    this.vectorRoot = path.join(path.dirname(dbPath), 'hnsw');
   }
 
   initialize(): void {
@@ -110,7 +110,24 @@ export class KnowledgeBaseManager {
     }
   }
 
-  async incrementalIndex(options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
+  async forceReindexAll(options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
+    this.initialize();
+    const records = this.store.listRecords();
+    for (const record of records) {
+      await this.deleteVectorFile(record.collectionName, record.relativePath);
+      this.store.deleteRecord(record.relativePath);
+    }
+    return this.incrementalIndex(options);
+  }
+
+  async consumePendingIndexJobs(options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer'; limit?: number } = {}): Promise<DiffResult> {
+    this.initialize();
+    const jobs = this.store.listPendingIndexJobs(options.limit ?? 50);
+    if (jobs.length === 0) return this.incrementalIndex(options);
+    return this.incrementalIndex({ ...options, onlyRelativePaths: jobs.map(job => job.relativePath) });
+  }
+
+  async incrementalIndex(options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer'; onlyRelativePaths?: string[] } = {}): Promise<DiffResult> {
     this.initialize();
     const previousOnProgress = this.onProgress;
     if (options.onProgress) this.onProgress = options.onProgress;
@@ -122,10 +139,22 @@ export class KnowledgeBaseManager {
     const diskFiles = await this.scanner.scan(this.kbPath, [...kbIgnore, ...configIgnore]);
     const tracker = new ChangeTracker(this.store);
     const diff = await tracker.computeDiff(diskFiles, this.classifier, this.kbPath);
+    const onlyRelativePaths = options.onlyRelativePaths ? new Set(options.onlyRelativePaths) : undefined;
+    if (onlyRelativePaths) {
+      diff.newFiles = diff.newFiles.filter(file => onlyRelativePaths.has(file.relativePath));
+      diff.modifiedFiles = diff.modifiedFiles.filter(file => onlyRelativePaths.has(file.relativePath));
+      diff.deletedFiles = diff.deletedFiles.filter(file => onlyRelativePaths.has(file.relativePath));
+      diff.hasChanges = diff.newFiles.length + diff.modifiedFiles.length + diff.deletedFiles.length > 0;
+      for (const relativePath of onlyRelativePaths) {
+        const exists = diff.newFiles.some(file => file.relativePath === relativePath) || diff.modifiedFiles.some(file => file.relativePath === relativePath) || diff.deletedFiles.some(file => file.relativePath === relativePath);
+        if (!exists) this.updateJobsForFile(relativePath, 'ERROR', 100, '待索引文件不存在或未发生变化', '待索引文件不存在或未发生变化');
+      }
+    }
 
     for (const deleted of diff.deletedFiles) {
       await this.deleteVectorFile(deleted.collectionName, deleted.relativePath);
       this.store.deleteRecord(deleted.relativePath);
+      this.updateJobsForFile(deleted.relativePath, 'SUCCESS', 100, '文件已删除，索引记录和向量已清理');
     }
 
     const now = Date.now();
@@ -138,12 +167,14 @@ export class KnowledgeBaseManager {
         ? this.collections.getCollectionName('global', file.category)
         : this.collections.getCollectionName('project', file.category, this.projectId);
       const basePercent = filesToIndex.length === 0 ? 40 : 20 + Math.round((index / filesToIndex.length) * 45);
+      this.updateJobsForFile(file.relativePath, 'PARSING', basePercent, `正在解析 ${file.relativePath}`);
       this.reportProgress({ stage: 'parsing', percent: basePercent, message: `正在解析 ${file.relativePath}`, filePath: file.relativePath });
       const extraction = await this.extractor.extract(file);
       extraction.metadata.textLength = extraction.text.length;
       if (!this.hasUsableContent(extraction.text, extraction.metadata)) {
         const reason = extraction.warnings[0] ?? '未解析出可用于模型的正文内容，已跳过向量化';
         diff.skippedFiles.push({ file, reason });
+        this.updateJobsForFile(file.relativePath, 'ERROR', 100, reason, reason);
         this.store.upsertRecord({
           relativePath: file.relativePath,
           category: file.category,
@@ -165,6 +196,7 @@ export class KnowledgeBaseManager {
       const normalizedDuplicate = !duplicate && normalizedHash
         ? this.store.findNormalizedDuplicate(normalizedHash, file.relativePath)
         : undefined;
+      this.updateJobsForFile(file.relativePath, 'CHUNKING', Math.min(80, basePercent + 10), `正在切片 ${file.relativePath}`);
       this.reportProgress({ stage: 'chunking', percent: Math.min(80, basePercent + 10), message: `正在切片 ${file.relativePath}`, filePath: file.relativePath });
       const chunks = this.chunker.chunk(extraction.text, file, extraction.metadata);
       this.reportProgress({ stage: 'chunking', percent: Math.min(84, basePercent + 14), message: `切片完成：${chunks.length} 块`, filePath: file.relativePath, chunkCount: chunks.length });
@@ -251,6 +283,7 @@ export class KnowledgeBaseManager {
         format: file.format,
         collectionName,
       });
+      this.updateJobsForFile(file.relativePath, options.vectorMode === 'defer' ? 'SUCCESS' : 'INDEXING', options.vectorMode === 'defer' ? 100 : 85, options.vectorMode === 'defer' ? '解析和切片已完成' : '等待向量入库');
     }
 
     const stats = this.getStats();
@@ -267,6 +300,12 @@ export class KnowledgeBaseManager {
     this.lastSkippedFiles = diff.skippedFiles;
 
     const vectorStatus = this.getVectorStatus();
+    if (options.vectorMode !== 'defer') {
+      for (const file of filesToIndex) {
+        if (vectorStatus.status === 'error') this.updateJobsForFile(file.relativePath, 'ERROR', 100, 'HNSWLib 向量入库失败', vectorStatus.error);
+        else this.updateJobsForFile(file.relativePath, 'SUCCESS', 100, '解析、切片和向量索引完成');
+      }
+    }
     const vectorDeferred = options.vectorMode === 'defer';
     this.reportProgress({
       stage: vectorDeferred || vectorStatus.status !== 'error' ? 'done' : 'error',
@@ -274,7 +313,7 @@ export class KnowledgeBaseManager {
       message: vectorDeferred
         ? '解析、切片和 SQLite 入库已完成，向量入库后台执行'
         : vectorStatus.status === 'error'
-          ? '解析和切片已完成，sqlite-vec 向量待入库'
+          ? '解析和切片已完成，HNSWLib 向量待入库'
           : '知识库索引完成',
       chunkCount: stats.chunkCount,
       vectorStatus,
@@ -307,7 +346,10 @@ export class KnowledgeBaseManager {
     }
     const parentChunks = item.parentId ? this.store.getChunksByParent(item.filePath, item.parentId, 6) : [];
     const chunks = parentChunks.length > 0 ? parentChunks : this.store.getContextChunks(item.filePath, chunkIndex, 1);
-    if (chunks.length === 0) return item;
+    if (chunks.length === 0) {
+      const document = this.store.getDocumentChunk(item.filePath);
+      return document ? { ...item, content: document.content, sectionTitle: item.sectionTitle ?? 'Document Parent' } : item;
+    }
     return {
       ...item,
       content: chunks.map(chunk => chunk.content).join('\n\n---\n\n'),
@@ -356,7 +398,7 @@ export class KnowledgeBaseManager {
     const queryEmbedding = await this.embeddingProvider.embedQuery(query);
     const search = new FederationSearch(this.vectorStores);
     try {
-      return await search.search({
+      const result = await search.search({
         query,
         queryEmbedding,
         topK: options.limit ?? 10,
@@ -365,6 +407,7 @@ export class KnowledgeBaseManager {
         collections: options.collections,
         filters: options.filters,
       });
+      return { ...result, results: this.hydrateVectorResultsFromSqlite(result.results) };
     } catch {
       return { results: [], scopesSearched: this.scope === 'global' ? ['global'] : ['project'], queryTimeMs: 0 };
     }
@@ -422,21 +465,25 @@ export class KnowledgeBaseManager {
     return this.uploadFiles([{ fileName, content, targetRelativePath }], onProgress, options);
   }
 
-  async uploadFiles(files: Array<{ fileName: string; content: Buffer; targetRelativePath?: string }>, onProgress?: (progress: KnowledgeIndexProgress) => void, options: { vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
+  async stageUploadedFiles(files: Array<{ fileName: string; content: Buffer; targetRelativePath?: string }>, operationId = `upload-${Date.now()}`) {
     this.initialize();
-    const uploadedPaths: string[] = [];
-    for (const file of files) {
+    const jobs = [];
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index]!;
       const relativePath = this.getUploadRelativePath(file.fileName, file.targetRelativePath);
       const targetPath = this.resolveKbRelativePath(relativePath);
       fs.mkdirSync(path.dirname(targetPath), { recursive: true });
       fs.writeFileSync(targetPath, file.content);
-      uploadedPaths.push(relativePath);
-    }
-    for (const relativePath of uploadedPaths) {
       const record = this.store.listRecords().find(item => item.relativePath === relativePath);
       if (record) await this.deleteVectorFile(record.collectionName, relativePath);
       this.store.deleteRecord(relativePath);
+      jobs.push(this.store.enqueueIndexJob({ id: `${operationId}-${index}`, relativePath, message: '文件已落盘，等待后台解析' }));
     }
+    return jobs;
+  }
+
+  async uploadFiles(files: Array<{ fileName: string; content: Buffer; targetRelativePath?: string }>, onProgress?: (progress: KnowledgeIndexProgress) => void, options: { vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
+    await this.stageUploadedFiles(files);
     return this.incrementalIndex({ onProgress, vectorMode: options.vectorMode });
   }
 
@@ -448,7 +495,7 @@ export class KnowledgeBaseManager {
     const normalized = this.normalizeRelativePath(relativePath);
     const targetPath = this.resolveKbRelativePath(normalized);
     if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
-    // 同步删除 sqlite-vec 向量数据，避免孤儿向量污染搜索结果
+    // 同步删除 HNSWLib 向量数据，避免孤儿向量污染搜索结果
     const record = this.store.listRecords().find(r => r.relativePath === normalized);
     if (record) {
       await this.deleteVectorFile(record.collectionName, normalized);
@@ -485,8 +532,14 @@ export class KnowledgeBaseManager {
 
   async indexVectors(options: { collectionName?: string; relativePath?: string; limit?: number } = {}): Promise<VectorIndexResult[]> {
     const chunks = this.store.listChunks(options);
-    for (const collectionName of new Set(chunks.map(chunk => chunk.collectionName))) this.ensureVectorStore(collectionName);
-    this.reportProgress({ stage: 'vectorizing', percent: 85, message: `正在写入 sqlite-vec 向量库，共 ${chunks.length} 个切片`, chunkCount: chunks.length });
+    const collectionNames = new Set(chunks.map(chunk => chunk.collectionName));
+    for (const collectionName of collectionNames) this.ensureVectorStore(collectionName);
+    if (!options.relativePath) {
+      for (const collectionName of collectionNames) await this.vectorStores.get(collectionName)?.clearCollection?.();
+    } else {
+      for (const collectionName of collectionNames) await this.vectorStores.get(collectionName)?.deleteByFilePath(options.relativePath);
+    }
+    this.reportProgress({ stage: 'vectorizing', percent: 85, message: `正在写入 HNSWLib 向量库，共 ${chunks.length} 个切片`, chunkCount: chunks.length });
     const indexer = new VectorIndexer(this.embeddingProvider, this.vectorStores);
     try {
       const results = await indexer.indexChunks(chunks);
@@ -498,13 +551,15 @@ export class KnowledgeBaseManager {
       this.store.setMetadata('vector_index_status', 'ready');
       this.store.setMetadata('vector_index_error', '');
       this.store.setMetadata('last_vector_index_at', String(Date.now()));
+      if (options.relativePath) this.updateJobsForFile(options.relativePath, 'SUCCESS', 100, '解析、切片和向量索引完成');
       return results;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.store.setMetadata('vector_index_status', 'error');
       this.store.setMetadata('vector_index_error', message);
       this.store.setMetadata('last_vector_index_at', String(Date.now()));
-      this.reportProgress({ stage: 'error', percent: 85, message: 'sqlite-vec 向量入库失败', chunkCount: chunks.length, vectorStatus: this.getVectorStatus() });
+      this.reportProgress({ stage: 'error', percent: 85, message: 'HNSWLib 向量入库失败', chunkCount: chunks.length, vectorStatus: this.getVectorStatus() });
+      if (options.relativePath) this.updateJobsForFile(options.relativePath, 'ERROR', 100, 'HNSWLib 向量入库失败', message);
       return [];
     }
   }
@@ -525,13 +580,25 @@ export class KnowledgeBaseManager {
     };
   }
 
+  listIndexJobsByPrefix(prefix: string) {
+    return this.store.listIndexJobsByPrefix(prefix);
+  }
+
+  countPendingIndexJobs(): number {
+    return this.store.countPendingIndexJobs();
+  }
+
+  failPendingIndexJobs(message: string): void {
+    for (const job of this.store.listPendingIndexJobs(1_000)) this.store.updateIndexJob(job.id, { status: 'ERROR', percent: 100, message, errorMessage: message });
+  }
+
   getVectorStatus(): { status: string; error?: string; indexedChunks: number; lastIndexedAt: number; backend: string } {
     return {
       status: this.store.getMetadata('vector_index_status') ?? 'pending',
       error: this.store.getMetadata('vector_index_error') || undefined,
       indexedChunks: Number(this.store.getMetadata('vector_indexed_chunks') ?? 0),
       lastIndexedAt: Number(this.store.getMetadata('last_vector_index_at') ?? 0),
-      backend: `SQLite + sqlite-vec (${this.sqliteVecClient.dbPath})`,
+      backend: `SQLite + HNSWLib (${this.vectorRoot})`, 
     };
   }
 
@@ -665,10 +732,21 @@ ${resultsText}
     }
   }
 
+  private hydrateVectorResultsFromSqlite(items: FederatedSearchItem[]): FederatedSearchItem[] {
+    return items.map(item => {
+      if (!item.rowid) return item;
+      const chunk = this.store.getChunkByRowid(item.rowid);
+      if (!chunk) return item;
+      const hydrated = this.toFederatedItem({ ...chunk, score: item.score, scoreDetails: item.scoreDetails }, 'vector');
+      return { ...hydrated, score: item.score, scoreDetails: item.scoreDetails };
+    });
+  }
+
   private toFederatedItem(result: ChunkSearchResult, source: 'keyword' | 'vector' | 'hybrid'): FederatedSearchItem {
     const metadata = this.parseMetadata(result.metadataJson);
     return {
       id: result.id,
+      rowid: result.rowid,
       content: result.content,
       filePath: result.relativePath,
       scope: this.scope === 'global' ? 'global' : 'project',
@@ -747,6 +825,7 @@ ${resultsText}
   }
 
   private contextKey(item: FederatedSearchItem): string {
+    if (item.rowid) return `${item.scope}:rowid:${item.rowid}`;
     return `${item.scope}:${item.filePath}:${item.parentId ?? item.chunkIndex ?? item.id}`;
   }
 
@@ -791,9 +870,16 @@ ${resultsText}
     this.onProgress?.(progress);
   }
 
+  private updateJobsForFile(relativePath: string, status: 'PARSING' | 'CHUNKING' | 'INDEXING' | 'SUCCESS' | 'ERROR', percent: number, message: string, errorMessage?: string): void {
+    for (const job of this.store.listActiveIndexJobsByPath(relativePath)) {
+      this.store.updateIndexJob(job.id, { status, percent, message, errorMessage });
+    }
+  }
+
   private ensureVectorStore(collectionName: string): void {
     if (this.vectorStores.has(collectionName)) return;
-    this.vectorStores.set(collectionName, new SQLiteVecVectorStore(this.sqliteVecClient, collectionName));
+    const safeName = collectionName.replace(/[^a-zA-Z0-9_.-]/gu, '_');
+    this.vectorStores.set(collectionName, new HNSWVectorStore(collectionName, path.join(this.vectorRoot, `${safeName}.hnsw`), this.embeddingProvider.dimensions));
   }
 
   private async deleteVectorFile(collectionName: string, relativePath: string): Promise<void> {
@@ -808,6 +894,11 @@ ${resultsText}
 
   private async ensureVectorIndexFresh(chunkCount: number, force = false): Promise<void> {
     if (chunkCount === 0) return;
+    for (const record of this.store.listRecords()) this.ensureVectorStore(record.collectionName);
+    if ([...this.vectorStores.values()].some(store => store.needsRebuild?.())) {
+      await this.indexVectors();
+      return;
+    }
     const indexedChunks = Number(this.store.getMetadata('vector_indexed_chunks') ?? 0);
     const status = this.store.getMetadata('vector_index_status');
     if (!force && indexedChunks === chunkCount && status === 'ready') return;

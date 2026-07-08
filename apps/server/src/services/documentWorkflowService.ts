@@ -194,7 +194,7 @@ const DELTA_OPERATOR_GUIDE_TEMPLATE: DocumentTemplate = {
   chapters: [
     { id: 'overview', title: '第一章 攻略目标和适用人群', purpose: '说明攻略面向的新手/进阶玩家和使用场景。', requiredFacts: ['攻略目标', '适用人群'], queries: ['三角洲行动 干员 攻略 适用 新手 进阶'] },
     { id: 'operators', title: '第二章 热门干员定位速览', purpose: '汇总热门干员定位、技能和推荐场景。', requiredFacts: ['干员名称', '定位', '技能'], queries: ['三角洲行动 干员 定位 技能 露娜 红狼 牧羊人 蜂医'] },
-    { id: 'loadout', title: '第三章 干员搭配和队伍分工', purpose: '按突击、侦察、支援、工程等职责给出队伍搭配。', requiredFacts: ['队伍分工', '搭配建议'], queries: ['三角洲行动 干员 搭配 队伍 分工 突击 侦察 支援 工程'] },
+    { id: 'team', title: '第三章 队伍搭配和实战打法', purpose: '按突击、侦察、支援、工程等职责给出队伍搭配。', requiredFacts: ['队伍分工', '搭配建议'], queries: ['三角洲行动 干员 搭配 队伍 分工 突击 侦察 支援 工程'] },
     { id: 'tables', title: '第四章 数据表和推荐优先级', purpose: '引用表格数据生成优先级和推荐清单。', requiredFacts: ['推荐指数', '上手难度'], queries: ['干员 推荐指数 上手难度 表格 优先级'] },
     { id: 'maps', title: '第五章 官方地图图纸和路线理解', purpose: '引用官方地图工具的地图图纸/底图瓦片，说明热门地图的关键区域和新手路线理解。', requiredFacts: ['地图事实', '地图图纸'], queries: ['三角洲行动 官方地图工具 地图图纸 零号大坝 航天基地 巴克什'] },
     { id: 'style', title: '第六章 模板样式和导出检查', purpose: '说明内置模板案例如何使用模板样式、来源清单和导出门禁形成可复用示例。', requiredFacts: ['模板样式规则', '导出门禁', '实战技巧', '注意事项'], queries: ['模板案例 导出样式 标题层级 表格 图片 来源 门禁 检查'] },
@@ -471,6 +471,52 @@ export function saveDocumentTemplate(template: DocumentTemplate): DocumentTempla
   templates.push(sanitized);
   writeCustomTemplates(templates);
   return sanitized;
+}
+
+export async function validateDocumentTemplateRun(templateId: string, projectRoot = getProjectRoot()) {
+  const template = getDocumentTemplate(templateId);
+  if (!template) throw new Error('Document template not found');
+  const issues: Array<{ level: 'error' | 'warning'; message: string }> = [];
+  const promptRoles = listDocumentRoles('prompt');
+  const fileRoles = listDocumentRoles('file');
+  const config = template.projectRoleConfigId ? getProjectRoleConfig(template.projectRoleConfigId) : undefined;
+  if (!template.projectRoleConfigId) issues.push({ level: 'error', message: '模板未绑定项目角色配置' });
+  if (template.projectRoleConfigId && !config) issues.push({ level: 'error', message: '项目角色配置不存在或已删除' });
+  const promptBindings = templatePromptBindings(template);
+  const fileBindings = templateFileBindings(template);
+  if (promptBindings.length === 0) issues.push({ level: 'warning', message: '模板未绑定提示词角色，生成会缺少说明提示词约束' });
+  if (fileBindings.length === 0) issues.push({ level: 'error', message: '模板未绑定知识库文件角色' });
+  const spec = template.documentSpecId ? getDocumentSpec(template.documentSpecId) : undefined;
+  if (template.documentSpecId && !spec) issues.push({ level: 'error', message: '文档规范包不存在或已删除' });
+  if (spec) {
+    const chapterIds = new Set(template.chapters.map(chapter => chapter.id));
+    const chapterTitles = new Set(template.chapters.map(chapter => chapter.title));
+    for (const rule of spec.chapterRules.filter(rule => rule.required)) {
+      if (!chapterIds.has(rule.id) && !chapterTitles.has(rule.title)) issues.push({ level: 'error', message: `模板章节不满足规范包要求：${rule.title}` });
+    }
+  }
+  const resolvedProjectRoot = ensureBuiltInKnowledgeBase(projectRoot);
+  const project = await getMultiProjectManager().getProject(resolvedProjectRoot);
+  if (template.builtIn) await project.incrementalIndex();
+  const files = project.listFiles();
+  const fileMap = new Map(files.map(file => [file.relativePath, file]));
+  const fileDiagnostics = fileBindings.map(binding => {
+    const role = fileRoles.find(item => item.id === binding.roleId);
+    const file = fileMap.get(binding.filePath);
+    if (!role) issues.push({ level: 'error', message: `文件角色不存在：${binding.roleId}` });
+    if (!file) issues.push({ level: 'error', message: `知识库文件不存在或未索引：${binding.filePath}` });
+    return { ...binding, roleName: role?.name, exists: Boolean(file), indexed: Boolean(file), chunkCount: file?.chunkCount ?? 0, vectorReady: Boolean(file && file.chunkCount > 0) };
+  });
+  const resolvedPrompts = readPromptContents(promptBindings);
+  const promptDiagnostics = promptBindings.map(binding => {
+    const role = promptRoles.find(item => item.id === binding.roleId);
+    const prompt = resolvedPrompts.find(item => item.id === binding.promptId);
+    if (!role) issues.push({ level: 'error', message: `提示词角色不存在：${binding.roleId}` });
+    if (!prompt) issues.push({ level: 'error', message: `提示词不存在：${binding.promptId}` });
+    if (prompt && !prompt.content.trim()) issues.push({ level: 'warning', message: `提示词为空：${prompt.name}` });
+    return { ...binding, roleName: role?.name, promptTitle: prompt?.name, exists: Boolean(prompt), contentLength: prompt?.content.length ?? 0 };
+  });
+  return { templateId, projectRoleConfigId: template.projectRoleConfigId, documentSpecId: template.documentSpecId, fileDiagnostics, promptDiagnostics, spec: spec ? { id: spec.id, name: spec.name, factFields: spec.factFields.length, gateRules: spec.gateRules.length } : undefined, issues };
 }
 
 export function deleteDocumentTemplate(templateId: string) {
@@ -1691,7 +1737,7 @@ input.onProgress?.([...progressStages]);
   return { ...finalBase, markdown };
 }
 
-export async function regenerateDocumentChapter(input: { templateId: string; chapterId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string }): Promise<DocumentDraftChapter> {
+export async function regenerateDocumentChapter(input: { templateId: string; chapterId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; documentId?: string; currentMarkdown?: string; existingFacts?: string[] }): Promise<DocumentDraftChapter> {
   const template = getDocumentTemplate(input.templateId);
   if (!template) throw new Error('Document template not found');
   const chapter = template.chapters.find(item => item.id === input.chapterId);
@@ -1717,12 +1763,15 @@ export async function regenerateDocumentChapter(input: { templateId: string; cha
     })));
   }
   const evidence = uniqueEvidence(rawEvidence, maxEvidence);
-  const missingFacts = chapter.requiredFacts.filter(fact => !evidence.some(item => evidenceMatchesFact(item, fact)));
+  const existingContext = input.currentMarkdown ? input.currentMarkdown.slice(0, 4_000) : '';
+  const existingFactSet = new Set(input.existingFacts ?? []);
+  const missingFacts = chapter.requiredFacts.filter(fact => !existingFactSet.has(fact) && !evidence.some(item => evidenceMatchesFact(item, fact)));
   const content = [
     `## ${chapter.title}`,
     '',
     input.requirement ? `> 生成要求：${input.requirement}` : '',
-    evidence.length > 0 ? `本章根据知识库资料围绕“${chapter.purpose}”重新整理。` : '建议补充更多资料后复核。',
+    existingContext ? `> 当前文档上下文摘要：${existingContext.replace(/\s+/gu, ' ').slice(0, 800)}` : '',
+    evidence.length > 0 ? `本章根据知识库资料围绕“${chapter.purpose}”重新整理，并与当前文档上下文保持一致。` : '建议补充更多资料后复核。',
     '',
     evidence.length > 0 ? '### 资料依据' : '',
     ...evidence.map(evidenceLine),

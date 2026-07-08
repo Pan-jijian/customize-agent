@@ -4,7 +4,21 @@ import * as path from 'node:path';
 import type { TextChunk } from '../chunking/text-chunker.js';
 import type { FileCategory, IndexStateRecord } from '../types.js';
 
+export type KnowledgeJobStatus = 'PENDING' | 'PARSING' | 'CHUNKING' | 'INDEXING' | 'SUCCESS' | 'ERROR';
+
+export interface KnowledgeIndexJob {
+  id: string;
+  relativePath: string;
+  status: KnowledgeJobStatus;
+  percent: number;
+  message: string;
+  errorMessage?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface StoredChunk {
+  rowid: number;
   id: string;
   relativePath: string;
   chunkIndex: number;
@@ -36,6 +50,19 @@ export interface StoredParentChunk {
   format: string;
   collectionName: string;
   sectionTitle?: string;
+  chunkCount: number;
+  metadataJson?: string;
+  createdAt: number;
+}
+
+export interface StoredDocumentChunk {
+  id: string;
+  relativePath: string;
+  content: string;
+  category: FileCategory;
+  format: string;
+  collectionName: string;
+  parentCount: number;
   chunkCount: number;
   metadataJson?: string;
   createdAt: number;
@@ -146,6 +173,64 @@ export class IndexStateStore {
     return rows.map(row => this.rowToRecord(row));
   }
 
+  enqueueIndexJob(job: { id: string; relativePath: string; message?: string }): KnowledgeIndexJob {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO kb_index_jobs (id, relative_path, status, percent, message, created_at, updated_at)
+      VALUES (?, ?, 'PENDING', 0, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET status = 'PENDING', percent = 0, message = excluded.message, error_message = NULL, updated_at = excluded.updated_at
+    `).run(job.id, job.relativePath, job.message ?? '等待后台索引', now, now);
+    return this.getIndexJob(job.id)!;
+  }
+
+  updateIndexJob(id: string, patch: { status?: KnowledgeJobStatus; percent?: number; message?: string; errorMessage?: string }): void {
+    const current = this.getIndexJob(id);
+    if (!current) return;
+    this.db.prepare(`
+      UPDATE kb_index_jobs
+      SET status = ?, percent = ?, message = ?, error_message = ?, updated_at = ?
+      WHERE id = ?
+    `).run(patch.status ?? current.status, patch.percent ?? current.percent, patch.message ?? current.message, patch.errorMessage ?? null, Date.now(), id);
+  }
+
+  getIndexJob(id: string): KnowledgeIndexJob | undefined {
+    const row = this.db.prepare('SELECT * FROM kb_index_jobs WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? this.rowToJob(row) : undefined;
+  }
+
+  listPendingIndexJobs(limit = 20): KnowledgeIndexJob[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM kb_index_jobs
+      WHERE status = 'PENDING'
+      ORDER BY created_at ASC
+      LIMIT ?
+    `).all(limit) as Array<Record<string, unknown>>;
+    return rows.map(row => this.rowToJob(row));
+  }
+
+  countPendingIndexJobs(): number {
+    const row = this.db.prepare("SELECT COUNT(*) as count FROM kb_index_jobs WHERE status = 'PENDING'").get() as { count?: number } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
+  listActiveIndexJobsByPath(relativePath: string): KnowledgeIndexJob[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM kb_index_jobs
+      WHERE relative_path = ? AND status IN ('PENDING', 'PARSING', 'CHUNKING', 'INDEXING')
+      ORDER BY created_at ASC
+    `).all(relativePath) as Array<Record<string, unknown>>;
+    return rows.map(row => this.rowToJob(row));
+  }
+
+  listIndexJobsByPrefix(prefix: string): KnowledgeIndexJob[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM kb_index_jobs
+      WHERE id LIKE ?
+      ORDER BY created_at ASC
+    `).all(`${prefix}%`) as Array<Record<string, unknown>>;
+    return rows.map(row => this.rowToJob(row));
+  }
+
   replaceChunks(
     relativePath: string,
     chunks: TextChunk[],
@@ -155,6 +240,7 @@ export class IndexStateStore {
     const transaction = this.db.transaction(() => {
       this.db.prepare('DELETE FROM kb_chunks WHERE relative_path = ?').run(relativePath);
       this.db.prepare('DELETE FROM kb_parent_chunks WHERE relative_path = ?').run(relativePath);
+      this.db.prepare('DELETE FROM kb_document_chunks WHERE relative_path = ?').run(relativePath);
       if (this.ftsEnabled) this.db.prepare('DELETE FROM kb_chunks_fts WHERE relative_path = ?').run(relativePath);
       const insert = this.db.prepare(`
         INSERT INTO kb_chunks (
@@ -173,6 +259,12 @@ export class IndexStateStore {
           collection_name, section_title, chunk_count, metadata_json, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
+      const insertDocument = this.db.prepare(`
+        INSERT INTO kb_document_chunks (
+          id, relative_path, content, category, format,
+          collection_name, parent_count, chunk_count, metadata_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
       const parentGroups = new Map<string, TextChunk[]>();
       const groupedChunks = this.splitParentGroups(relativePath, chunks);
       for (const chunk of groupedChunks) {
@@ -181,12 +273,15 @@ export class IndexStateStore {
         group.push(chunk);
         parentGroups.set(parentId, group);
       }
+      const parentContents: string[] = [];
       for (const [parentId, group] of parentGroups.entries()) {
+        const parentContent = group.map(chunk => chunk.text).join('\n\n---\n\n');
+        parentContents.push(parentContent);
         insertParent.run(
           parentId,
           relativePath,
           parentId,
-          group.map(chunk => chunk.text).join('\n\n---\n\n'),
+          parentContent,
           file.category,
           file.format,
           file.collectionName,
@@ -196,6 +291,18 @@ export class IndexStateStore {
           now,
         );
       }
+      insertDocument.run(
+        `${relativePath}#document`,
+        relativePath,
+        parentContents.join('\n\n=== SECTION ===\n\n'),
+        file.category,
+        file.format,
+        file.collectionName,
+        parentGroups.size,
+        groupedChunks.length,
+        JSON.stringify({ parentType: 'document', splitStrategy: 'document_section_child_v1' }),
+        now,
+      );
 
       for (const chunk of groupedChunks) {
         const chunkId = `${relativePath}#${chunk.index}`;
@@ -236,7 +343,7 @@ export class IndexStateStore {
     if (options.limit) params.push(options.limit);
 
     const rows = this.db.prepare(`
-      SELECT * FROM kb_chunks
+      SELECT rowid, * FROM kb_chunks
       ${where}
       ORDER BY relative_path, chunk_index
       ${limit}
@@ -245,9 +352,22 @@ export class IndexStateStore {
     return rows.map(row => this.rowToChunk(row, 0));
   }
 
+  getChunkByRowid(rowid: number): StoredChunk | undefined {
+    const row = this.db.prepare('SELECT rowid, * FROM kb_chunks WHERE rowid = ?').get(rowid) as Record<string, unknown> | undefined;
+    return row ? this.rowToChunk(row, 0) : undefined;
+  }
+
+  getChunksByRowids(rowids: number[]): StoredChunk[] {
+    if (rowids.length === 0) return [];
+    const placeholders = rowids.map(() => '?').join(',');
+    const rows = this.db.prepare(`SELECT rowid, * FROM kb_chunks WHERE rowid IN (${placeholders})`).all(...rowids) as Array<Record<string, unknown>>;
+    const byRowid = new Map(rows.map(row => [Number(row.rowid), this.rowToChunk(row, 0)]));
+    return rowids.flatMap(rowid => byRowid.get(rowid) ?? []);
+  }
+
   getContextChunks(relativePath: string, chunkIndex: number, window = 1): StoredChunk[] {
     const rows = this.db.prepare(`
-      SELECT * FROM kb_chunks
+      SELECT rowid, * FROM kb_chunks
       WHERE relative_path = ? AND chunk_index BETWEEN ? AND ?
       ORDER BY chunk_index
     `).all(relativePath, Math.max(0, chunkIndex - window), chunkIndex + window) as Array<Record<string, unknown>>;
@@ -272,9 +392,18 @@ export class IndexStateStore {
     return row ? this.rowToParentChunk(row) : undefined;
   }
 
+  getDocumentChunk(relativePath: string): StoredDocumentChunk | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM kb_document_chunks
+      WHERE relative_path = ?
+      LIMIT 1
+    `).get(relativePath) as Record<string, unknown> | undefined;
+    return row ? this.rowToDocumentChunk(row) : undefined;
+  }
+
   getChunksByParent(relativePath: string, parentId: string, limit = 6): StoredChunk[] {
     const rows = this.db.prepare(`
-      SELECT * FROM kb_chunks
+      SELECT rowid, * FROM kb_chunks
       WHERE relative_path = ? AND metadata_json LIKE ?
       ORDER BY chunk_index
       LIMIT ?
@@ -297,7 +426,7 @@ export class IndexStateStore {
       const matchQuery = this.toFtsQuery(terms);
       if (!matchQuery) return [];
       const rows = this.db.prepare(`
-        SELECT c.*, bm25(kb_chunks_fts, 1.2, 0.8, 0.6, 1.0, 2.0) as bm25_score
+        SELECT c.rowid, c.*, bm25(kb_chunks_fts, 1.2, 0.8, 0.6, 1.0, 2.0) as bm25_score
         FROM kb_chunks_fts
         INNER JOIN kb_chunks c ON c.id = kb_chunks_fts.id
         WHERE kb_chunks_fts MATCH ?
@@ -320,7 +449,7 @@ export class IndexStateStore {
 
   private searchChunksLike(terms: string[], limit: number): ChunkSearchResult[] {
     const rows = this.db.prepare(`
-      SELECT * FROM kb_chunks
+      SELECT rowid, * FROM kb_chunks
       WHERE ${terms.map(() => '(LOWER(content) LIKE ? OR LOWER(relative_path) LIKE ? OR LOWER(category) LIKE ? OR LOWER(format) LIKE ?)').join(' OR ')}
       ORDER BY created_at DESC
       LIMIT ?
@@ -476,6 +605,7 @@ export class IndexStateStore {
   deleteRecord(relativePath: string): void {
     this.db.prepare('DELETE FROM kb_chunks WHERE relative_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_parent_chunks WHERE relative_path = ?').run(relativePath);
+    this.db.prepare('DELETE FROM kb_document_chunks WHERE relative_path = ?').run(relativePath);
     if (this.ftsEnabled) this.db.prepare('DELETE FROM kb_chunks_fts WHERE relative_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_index_state WHERE relative_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_file_hashes WHERE file_path = ?').run(relativePath);
@@ -549,7 +679,8 @@ export class IndexStateStore {
       CREATE INDEX IF NOT EXISTS idx_kb_state_collection ON kb_index_state(collection_name);
 
       CREATE TABLE IF NOT EXISTS kb_chunks (
-        id              TEXT PRIMARY KEY,
+        rowid           INTEGER PRIMARY KEY AUTOINCREMENT,
+        id              TEXT NOT NULL UNIQUE,
         relative_path   TEXT NOT NULL,
         chunk_index     INTEGER NOT NULL,
         content         TEXT NOT NULL,
@@ -580,6 +711,20 @@ export class IndexStateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_kb_parent_path ON kb_parent_chunks(relative_path);
       CREATE INDEX IF NOT EXISTS idx_kb_parent_id ON kb_parent_chunks(parent_id);
+
+      CREATE TABLE IF NOT EXISTS kb_document_chunks (
+        id              TEXT PRIMARY KEY,
+        relative_path   TEXT NOT NULL,
+        content         TEXT NOT NULL,
+        category        TEXT NOT NULL,
+        format          TEXT NOT NULL,
+        collection_name TEXT NOT NULL,
+        parent_count    INTEGER NOT NULL,
+        chunk_count     INTEGER NOT NULL,
+        metadata_json   TEXT,
+        created_at      INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_document_path ON kb_document_chunks(relative_path);
 
       CREATE TABLE IF NOT EXISTS kb_file_hashes (
         content_hash     TEXT NOT NULL,
@@ -631,6 +776,19 @@ export class IndexStateStore {
         PRIMARY KEY (file_path, tag)
       );
       CREATE INDEX IF NOT EXISTS idx_tags_tag ON kb_tags(tag);
+
+      CREATE TABLE IF NOT EXISTS kb_index_jobs (
+        id             TEXT PRIMARY KEY,
+        relative_path  TEXT NOT NULL,
+        status         TEXT NOT NULL,
+        percent        INTEGER NOT NULL DEFAULT 0,
+        message        TEXT NOT NULL DEFAULT '',
+        error_message  TEXT,
+        created_at     INTEGER NOT NULL,
+        updated_at     INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_jobs_status ON kb_index_jobs(status);
+      CREATE INDEX IF NOT EXISTS idx_kb_jobs_path ON kb_index_jobs(relative_path);
 
       CREATE TABLE IF NOT EXISTS kb_metadata (
         key   TEXT PRIMARY KEY,
@@ -727,7 +885,7 @@ export class IndexStateStore {
       relativePath: String(row.relative_path),
       parentId: String(row.parent_id),
       content: String(row.content),
-      category: String(row.category) as FileCategory,
+      category: row.category as FileCategory,
       format: String(row.format),
       collectionName: String(row.collection_name),
       sectionTitle: row.section_title == null ? undefined : String(row.section_title),
@@ -737,38 +895,36 @@ export class IndexStateStore {
     };
   }
 
-  private splitParentGroups(relativePath: string, chunks: TextChunk[]): TextChunk[] {
-    const maxChildrenPerParent = 12;
-    const maxTokensPerParent = 4_000;
-    const grouped = new Map<string, TextChunk[]>();
-    for (const chunk of chunks) {
-      const parentId = this.metadataString(chunk.metadata.parentId) ?? `${relativePath}#parent-${chunk.index}`;
-      const list = grouped.get(parentId) ?? [];
-      list.push(chunk);
-      grouped.set(parentId, list);
-    }
+  private rowToDocumentChunk(row: Record<string, unknown>): StoredDocumentChunk {
+    return {
+      id: String(row.id),
+      relativePath: String(row.relative_path),
+      content: String(row.content),
+      category: row.category as FileCategory,
+      format: String(row.format),
+      collectionName: String(row.collection_name),
+      parentCount: Number(row.parent_count),
+      chunkCount: Number(row.chunk_count),
+      metadataJson: row.metadata_json == null ? undefined : String(row.metadata_json),
+      createdAt: Number(row.created_at),
+    };
+  }
 
-    const result: TextChunk[] = [];
-    for (const [parentId, list] of grouped.entries()) {
-      let batch: TextChunk[] = [];
-      let tokenCount = 0;
-      let batchIndex = 0;
-      const flush = () => {
-        if (batch.length === 0) return;
-        const nextParentId = list.length <= maxChildrenPerParent && tokenCount <= maxTokensPerParent ? parentId : `${parentId}@${batchIndex + 1}`;
-        result.push(...batch.map(chunk => ({ ...chunk, metadata: { ...chunk.metadata, parentId: nextParentId, parentGroupIndex: batchIndex } })));
-        batch = [];
-        tokenCount = 0;
-        batchIndex += 1;
-      };
-      for (const chunk of list) {
-        if (batch.length > 0 && (batch.length >= maxChildrenPerParent || tokenCount + chunk.tokenCount > maxTokensPerParent)) flush();
-        batch.push(chunk);
-        tokenCount += chunk.tokenCount;
-      }
-      flush();
-    }
-    return result.sort((a, b) => a.index - b.index);
+  private splitParentGroups(_relativePath: string, chunks: TextChunk[]): TextChunk[] {
+    return chunks;
+  }
+
+  private rowToJob(row: Record<string, unknown>): KnowledgeIndexJob {
+    return {
+      id: String(row.id),
+      relativePath: String(row.relative_path),
+      status: String(row.status) as KnowledgeJobStatus,
+      percent: Number(row.percent),
+      message: String(row.message ?? ''),
+      errorMessage: row.error_message == null ? undefined : String(row.error_message),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
   }
 
   private metadataString(value: unknown): string | undefined {
@@ -777,6 +933,7 @@ export class IndexStateStore {
 
   private rowToChunk(row: Record<string, unknown>, score: number, scoreDetails?: ChunkSearchResult['scoreDetails']): ChunkSearchResult {
     return {
+      rowid: Number(row.rowid ?? 0),
       id: String(row.id),
       relativePath: String(row.relative_path),
       chunkIndex: Number(row.chunk_index),

@@ -1,5 +1,18 @@
 # @customize-agent/knowledge
 
+## 4.0.2
+
+### Patch Changes
+
+- Stabilize the local knowledge base and document workflow release path.
+
+  - Replace the sqlite-vec vector store with a mandatory HNSWLib vector store and install-time native validation.
+  - Fix archive upload handling, upload/reindex progress state, and forced reindex behavior.
+  - Ensure built-in workflow templates pass preflight validation with seeded knowledge base content.
+  - Add workflow template validation, inline diagnostics, editable chapter structure, and generated document/resource knowledge-base backflow.
+  - Fix PDF/HTML export image rendering for local knowledge-base resources and harden local image path resolution.
+  - Remove production test routes, stale sqlite-vec dependency residue, and stale dist artifacts from package tarballs.
+
 ## 4.0.1
 
 ### Patch Changes

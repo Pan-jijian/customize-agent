@@ -295,7 +295,7 @@ async function postWithRetry(label, url, body, retries = 6, delayMs = 2000) {
     assert(incrementalDetail.status === 200, `incremental detail failed: ${incrementalDetail.status} ${incrementalDetail.raw}`);
     assert(Number(incrementalDetail.json.file?.chunkCount) > 0, 'incremental file was not parsed/chunked');
 
-    const readyStats = await waitFor('sqlite-vec vector index', async () => {
+    const readyStats = await waitFor('HNSWLib vector index', async () => {
       const stats = await request('GET', `${base}/api/kb/stats?projectRoot=${encodeURIComponent(projectRoot)}`);
       if (stats.status !== 200) throw new Error(`stats ${stats.status} ${stats.raw}`);
       const vector = stats.json.vectorStatus;

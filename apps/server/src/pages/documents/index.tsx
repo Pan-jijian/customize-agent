@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, ReloadOutlined, CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined } from '@ant-design/icons';
-import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentSpecs, getDocumentTemplates, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, type DocumentDraftChapter, type DocumentRole, type DocumentSpecPackage, type DocumentTemplate, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig } from '@/lib/api';
+import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentSpecs, getDocumentTemplates, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentDraftChapter, type DocumentRole, type DocumentSpecPackage, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const { TextArea } = Input;
@@ -68,6 +68,7 @@ export default function DocumentsPage() {
   const [exporting, setExporting] = useState(false);
   const [regeneratingChapter, setRegeneratingChapter] = useState<string | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [templateValidations, setTemplateValidations] = useState<Record<string, DocumentTemplateValidation>>({});
   const [flowSteps, setFlowSteps] = useState<FlowStep[]>([]);
   const [activeFlowKey, setActiveFlowKey] = useState<string | null>(null);
   const [leftTab, setLeftTab] = useState<string>('templates');
@@ -292,10 +293,40 @@ export default function DocumentsPage() {
   }, [activeFlowKey, loading]);
   const finishPrev = (key: string) => { setFlowSteps(prev => { const idx = prev.findIndex(s => s.key === key); const n = prev.map((s, i) => i < idx && s.status !== 'error' ? { ...s, status: 'finish' as const, subSteps: updSubs(s, 'finish') } : s); setSnap(n, key); return n; }); };
 
-  const openEditor = (tpl?: DocumentTemplate) => { form.setFieldsValue(tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, documentSpecId: undefined, chapters: [] }); setTemplateModalOpen(true); };
-  const saveTpl = async () => { try { const v = await form.validateFields(); const r = await saveDocumentTemplate(v); setTemplates(r.templates); setTemplateId(r.template.id); setTemplateModalOpen(false); await loadDrafts(); message.success(t('common.success')); } catch (e) { if (e instanceof Error) message.error(e.message); } };
+  const openEditor = (tpl?: DocumentTemplate) => {
+    const value = tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, documentSpecId: undefined, chapters: [] };
+    form.setFieldsValue({ ...value, chapters: value.chapters.map(chapter => ({ ...chapter, queriesText: chapter.queries.join('\n'), requiredFactsText: chapter.requiredFacts.join('\n') })) });
+    setTemplateModalOpen(true);
+  };
+  const saveTpl = async () => {
+    try {
+      const v = await form.validateFields();
+      const template = { ...v, chapters: (v.chapters || []).map((chapter: DocumentTemplate['chapters'][number] & { queriesText?: string; requiredFactsText?: string }) => ({ ...chapter, queries: String(chapter.queriesText || '').split(/\r?\n/u).map(item => item.trim()).filter(Boolean), requiredFacts: String(chapter.requiredFactsText || '').split(/\r?\n/u).map(item => item.trim()).filter(Boolean), queriesText: undefined, requiredFactsText: undefined })) } as DocumentTemplate;
+      const r = await saveDocumentTemplate(template);
+      setTemplates(r.templates); setTemplateId(r.template.id); setTemplateModalOpen(false); await loadDrafts(); message.success(t('common.success'));
+    } catch (e) { if (e instanceof Error) message.error(e.message); }
+  };
   const dupTpl = async (id: string) => { try { const r = await duplicateDocumentTemplate(id); setTemplates(r.templates); setTemplateId(r.template.id); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
   const delTpl = async (id: string) => { try { const r = await deleteDocumentTemplate(id); setTemplates(r.templates); setTemplateId(r.templates[0]?.id ?? ''); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
+  const runTemplateWithValidation = async (id: string) => {
+    try {
+      const { validation } = await validateDocumentTemplate(id);
+      setTemplateValidations(prev => ({ ...prev, [id]: validation }));
+      const errors = validation.issues.filter(issue => issue.level === 'error');
+      setTemplateId(id);
+      if (errors.length > 0) {
+        message.warning('模板运行前检查未通过，请先处理阻断项');
+        return;
+      }
+      if (validation.issues.length > 0) {
+        message.warning('模板存在警告，可在检查面板确认后继续运行');
+        return;
+      }
+      openDrawerForWorkflow(id);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '模板运行前检查失败');
+    }
+  };
   const delDraft = async (id: string) => { try { await deleteGeneratedDocument(id); if (currentDocumentId === id) { setCurrentDocumentId(null); setDraft(null); setContent(''); } await loadDrafts(); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
 
   const waitForDoc = async (docId: string) => {
@@ -431,7 +462,7 @@ export default function DocumentsPage() {
   const replaceCh = (old: DocumentDraftChapter, nw: DocumentDraftChapter) => { setContent(prev => prev.includes(old.content) ? prev.replace(old.content, nw.content) : `${prev}\n\n${nw.content}`); };
   const regenCh = async (ch: DocumentDraftChapter) => {
     if (!draft) return; setRegeneratingChapter(ch.id);
-    try { const r = await regenerateDocumentChapter({ templateId: draft.templateId, chapterId: ch.id }); setDraft({ ...draft, chapters: draft.chapters.map(c => c.id === ch.id ? r.chapter : c) }); replaceCh(ch, r.chapter); message.success(t('common.success')); } catch { message.error(t('common.error')); } finally { setRegeneratingChapter(null); }
+    try { const r = await regenerateDocumentChapter({ templateId: draft.templateId, chapterId: ch.id, documentId: currentDocumentId || undefined, currentMarkdown: content, existingFacts: draft.structuredFacts?.map(fact => fact.value) }); setDraft({ ...draft, chapters: draft.chapters.map(c => c.id === ch.id ? r.chapter : c) }); replaceCh(ch, r.chapter); message.success(t('common.success')); } catch { message.error(t('common.error')); } finally { setRegeneratingChapter(null); }
   };
 
   if (pageLoading) return (
@@ -466,7 +497,7 @@ export default function DocumentsPage() {
               <List.Item style={{ cursor: 'pointer', padding: '10px 0' }}
                 actions={[
                   <Button key="cfg" size="small" icon={<SettingOutlined />} onClick={(e) => { e.stopPropagation(); openEditor(item); }}>配置</Button>,
-                  <Button key="run" size="small" type="primary" icon={<PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); openDrawerForWorkflow(item.id); }} disabled={!item.projectRoleConfigId}>运行</Button>,
+                  <Button key="run" size="small" type="primary" icon={<PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void runTemplateWithValidation(item.id); }}>运行</Button>,
                   <Button key="copy" size="small" icon={<CopyOutlined />} onClick={(e) => { e.stopPropagation(); void dupTpl(item.id); }} />,
                   <Popconfirm key="del" title={t('documents.deleteTemplateConfirm')} disabled={item.builtIn} onConfirm={(e) => { e?.stopPropagation(); void delTpl(item.id); }}>
                     <Button size="small" danger icon={<DeleteOutlined />} disabled={item.builtIn} onClick={(e) => e.stopPropagation()} />
@@ -482,8 +513,25 @@ export default function DocumentsPage() {
                       {item.builtIn && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>内置</Tag>}
                       {templateId === item.id && <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>当前</Tag>}
                       <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>{item.category}</Tag>
+                      {templateValidations[item.id] && <Tag color={templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'error' : templateValidations[item.id]!.issues.length ? 'warning' : 'success'} style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>检查 {templateValidations[item.id]!.fileDiagnostics.length} 文件 / {templateValidations[item.id]!.promptDiagnostics.length} 提示词</Tag>}
                     </div>
                     {item.description && <Text type="secondary" style={{ fontSize: 12, lineHeight: '18px' }}>{item.description}</Text>}
+                    {templateValidations[item.id] && (
+                      <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 8, padding: 10, border: `1px solid ${templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'var(--colorErrorBorder)' : templateValidations[item.id]!.issues.length ? 'var(--colorWarningBorder)' : 'var(--colorSuccessBorder)'}`, borderRadius: 10, background: templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'var(--colorErrorBg)' : templateValidations[item.id]!.issues.length ? 'var(--colorWarningBg)' : 'var(--colorSuccessBg)' }}>
+                        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                          <Space wrap>
+                            <Text strong>{templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? '运行前检查未通过' : templateValidations[item.id]!.issues.length ? '运行前检查存在警告' : '运行前检查通过'}</Text>
+                            <Tag color="blue">文件角色 {templateValidations[item.id]!.fileDiagnostics.length}</Tag>
+                            <Tag color="purple">提示词角色 {templateValidations[item.id]!.promptDiagnostics.length}</Tag>
+                            {templateValidations[item.id]!.spec && <Tag color="cyan">规范包 {templateValidations[item.id]!.spec!.name}</Tag>}
+                          </Space>
+                          {templateValidations[item.id]!.issues.length > 0 ? templateValidations[item.id]!.issues.map(issue => <Alert key={issue.message} type={issue.level === 'error' ? 'error' : 'warning'} message={issue.message} showIcon />) : <Alert type="success" message="文件角色、提示词角色和规范包检查通过，可以运行。" showIcon />}
+                          {!templateValidations[item.id]!.issues.some(issue => issue.level === 'error') && templateValidations[item.id]!.issues.length > 0 && (
+                            <div><Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => openDrawerForWorkflow(item.id)}>忽略警告并继续运行</Button></div>
+                          )}
+                        </Space>
+                      </div>
+                    )}
                   </div>
                 </div>
               </List.Item>
@@ -649,6 +697,25 @@ export default function DocumentsPage() {
           <Form.Item name="documentSpecId" label={t('documents.documentSpec')}>
             <Select allowClear showSearch placeholder={t('documents.documentSpecPlaceholder')} options={documentSpecOptions} />
           </Form.Item>
+          <Form.List name="chapters">
+            {(fields, { add, remove }) => (
+              <div>
+                <Space style={{ marginBottom: 8 }}><Text strong>章节结构</Text><Button size="small" icon={<PlusOutlined />} onClick={() => add({ id: `chapter-${Date.now()}`, title: '', purpose: '', queries: [], requiredFacts: [] })}>添加章节</Button></Space>
+                {fields.map(field => (
+                  <Card key={field.key} size="small" style={{ marginBottom: 8 }}>
+                    <Row gutter={8}>
+                      <Col span={6}><Form.Item name={[field.name, 'id']} label="章节 ID" rules={[{ required: true }]}><Input /></Form.Item></Col>
+                      <Col span={8}><Form.Item name={[field.name, 'title']} label="标题" rules={[{ required: true }]}><Input /></Form.Item></Col>
+                      <Col span={8}><Form.Item name={[field.name, 'purpose']} label="目的"><Input /></Form.Item></Col>
+                      <Col span={2}><Button danger size="small" onClick={() => remove(field.name)}>删除</Button></Col>
+                      <Col span={12}><Form.Item name={[field.name, 'queriesText']} label="查询词（每行一个）"><TextArea rows={3} /></Form.Item></Col>
+                      <Col span={12}><Form.Item name={[field.name, 'requiredFactsText']} label="必需事实（每行一个）"><TextArea rows={3} /></Form.Item></Col>
+                    </Row>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </Form.List>
         </Form>
       </Modal>
     </div>

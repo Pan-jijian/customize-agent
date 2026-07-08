@@ -9,6 +9,6 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     const embeddingProvider = provider === 'openai-compatible'
       ? `OpenAICompatibleEmbeddingProvider (${embedding.model || 'unconfigured'})`
       : `LocalTransformersEmbeddingProvider (${embedding.model || 'BAAI/bge-small-zh-v1.5'})`;
-    res.status(200).json({ vectorStore: 'SQLite + sqlite-vec', embeddingProvider, externalExtractors: ['DWG', 'Visio', 'OCR', 'PDF', 'Office', 'Spreadsheet'], dedupEngine: 'MinHash + SHA-256', chunker: 'TextChunker' });
+    res.status(200).json({ vectorStore: 'SQLite + HNSWLib', embeddingProvider, externalExtractors: ['DWG', 'Visio', 'OCR', 'PDF', 'Office', 'Spreadsheet'], dedupEngine: 'MinHash + SHA-256', chunker: 'BGE WordPiece TextChunker' });
   } catch (e: unknown) { console.error('[api] kb/features', e); res.status(500).json({ error: 'Internal server error' }); }
 }

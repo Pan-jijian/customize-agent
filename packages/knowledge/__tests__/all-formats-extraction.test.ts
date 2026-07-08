@@ -260,13 +260,12 @@ DB --> User: Result
 // ─── 7. Archive formats ───────────────────────────────────────
 
 describe('Archive extraction', () => {
-  it('ZIP (.zip) — manifest listing', async () => {
-    // Create a minimal zip file in-memory
+  it('ZIP (.zip) — no longer parsed as archive manifest', async () => {
     const zipBuf = await createMinimalZip();
     const file = makeFile('archives/test.zip', zipBuf);
     const r = await assertExtractionOk(file, '.zip');
-    expect(r.mode).toBe('archive_manifest');
-    expect(r.text).toContain('test.txt');
+    expect(file.category).toBe('other');
+    expect(r.mode).toBe('metadata_only');
   });
 });
 
@@ -438,15 +437,15 @@ describe('Classifier extension coverage', () => {
     ['.vdx', 'diagram', 'visio'],
     ['.plantuml', 'diagram', 'plantuml'],
     ['.mermaid', 'diagram', 'mermaid'],
-    ['.jar', 'archive', 'zip'],
-    ['.war', 'archive', 'zip'],
-    ['.apk', 'archive', 'zip'],
-    ['.tar', 'archive', 'tar'],
-    ['.gz', 'archive', 'other'],
-    ['.tgz', 'archive', 'tar'],
-    ['.bz2', 'archive', 'other'],
-    ['.rar', 'archive', 'other'],
-    ['.7z', 'archive', 'other'],
+    ['.jar', 'other', 'unknown'],
+    ['.war', 'other', 'unknown'],
+    ['.apk', 'other', 'unknown'],
+    ['.tar', 'other', 'unknown'],
+    ['.gz', 'other', 'unknown'],
+    ['.tgz', 'other', 'unknown'],
+    ['.bz2', 'other', 'unknown'],
+    ['.rar', 'other', 'unknown'],
+    ['.7z', 'other', 'unknown'],
   ];
 
   it.each(extCases)('%s → %s/%s', (ext, expectedCategory, expectedFormat) => {

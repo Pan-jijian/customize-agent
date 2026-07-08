@@ -56,7 +56,7 @@ export default function AssetLibraryPage() {
   };
 
   const previewSrc = (asset: GeneratedAssetRecord) =>
-    asset.type === 'image' && asset.path?.startsWith('generatedDocuments/assets/')
+    asset.type === 'image' && asset.path
       ? `/api/assets/generated/preview?id=${encodeURIComponent(asset.id)}`
       : undefined;
 
@@ -74,7 +74,7 @@ export default function AssetLibraryPage() {
   return (
     <div className="space-y-5 animateFadeIn">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-        <div><h1 className="pageTitle">{t('nav.assetLibrary')}</h1><p className="pageDesc">管理文档生成产生的本地资源。生成资源默认不进入知识库，可在后续操作中手动加入知识库。</p></div>
+        <div><h1 className="pageTitle">{t('nav.assetLibrary')}</h1><p className="pageDesc">管理文档生成产生的本地资源。生成完成后资源会自动回流知识库，后续文档可继续检索复用。</p></div>
         <Space size={8}>
           <span style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>共 {assets.length} 个资源</span>
           <Button danger size="small" disabled={selectedIds.size === 0} icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')}>删除已选 {selectedIds.size || ''}</Button>

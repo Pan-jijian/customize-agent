@@ -28,6 +28,8 @@ export interface VectorStoreInterface {
   ensureCollection(metadata?: Record<string, unknown>): Promise<void>;
   upsert(documents: VectorDocument[]): Promise<void>;
   deleteByFilePath(filePath: string): Promise<void>;
+  clearCollection?(): Promise<void>;
+  needsRebuild?(): boolean;
   search(query: VectorSearchQuery): Promise<VectorSearchResult[]>;
 }
 

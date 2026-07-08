@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/knowledge",
-  "version": "4.0.1",
+  "version": "4.0.2",
   "description": "Local knowledge base infrastructure for customize-agent",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,9 +13,12 @@
     }
   },
   "scripts": {
+    "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "postinstall": "node scripts/install-hnsw.cjs",
+    "doctor:hnsw": "node scripts/install-hnsw.cjs"
   },
   "license": "MIT",
   "engines": {
@@ -29,7 +32,8 @@
   },
   "files": [
     "dist",
-    "models"
+    "models",
+    "scripts"
   ],
   "publishConfig": {
     "access": "public"
@@ -51,7 +55,8 @@
     "mammoth": "^1.12.0",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^5.4.394",
-    "sqlite-vec": "^0.1.9",
+    "hnswlib-node": "^3.0.0",
+    "node-gyp": "^12.1.0",
     "tesseract.js": "^7.0.0",
     "word-extractor": "^1.0.4",
     "xlsx": "^0.18.5"

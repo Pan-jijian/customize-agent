@@ -5,11 +5,12 @@ import { useRouter } from 'next/router';
 import { Card, Table, Button, Input, Select, Tag, Modal, Space, App, Progress, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { UploadOutlined, SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined } from '@ant-design/icons';
-import { getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbOperation, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, type KbFileItem, type KbOperationRecord } from '@/lib/api';
+import { getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbOperation, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
-const CATEGORIES = ['document', 'spreadsheet', 'image', 'cad', 'code', 'data', 'web', 'diagram', 'archive', 'other'] as const;
+const CATEGORIES = ['document', 'spreadsheet', 'image', 'cad', 'code', 'data', 'web', 'diagram', 'other'] as const;
+const ARCHIVE_FILE_PATTERN = /\.(zip|jar|war|apk|tar|gz|tgz|bz2|rar|7z)$/iu;
 type StatusItem = {
   id?: string;
   type: 'upload' | 'delete' | 'reindex' | 'error';
@@ -38,6 +39,7 @@ export default function FilesPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [category, setCategory] = useState(initialCategory);
   const [uploading, setUploading] = useState(false);
+  const [reindexingAll, setReindexingAll] = useState(false);
   const [statusItems, setStatusItems] = useState<StatusItem[]>([]);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
@@ -89,8 +91,25 @@ export default function FilesPage() {
   const loadOperations = useCallback(async () => {
     try {
       const result = await getKbOperations();
-      setStatusItems(result.operations.map(mapOperation));
+      const operationItems = result.operations.map(mapOperation);
+      setStatusItems(items => {
+        const operationIds = new Set(operationItems.map(item => item.id).filter(Boolean));
+        const localItems = items.filter(item => item.id && !operationIds.has(item.id) && item.status === 'processing');
+        return [...operationItems, ...localItems].slice(0, 50);
+      });
     } catch { /* ignore operation log load failure */ }
+  }, []);
+
+  const upsertStatusItem = useCallback((next: StatusItem, aliases: string[] = []) => {
+    setStatusItems(items => {
+      const index = items.findIndex(item => (next.id && item.id === next.id) || aliases.includes(item.title));
+      if (index >= 0) {
+        const updated = [...items];
+        updated[index] = { ...items[index], ...next, createdAt: items[index]!.createdAt ?? next.createdAt };
+        return updated;
+      }
+      return [next, ...items].slice(0, 50);
+    });
   }, []);
 
   useEffect(() => { void loadOperations(); }, [loadOperations]);
@@ -161,53 +180,82 @@ export default function FilesPage() {
   };
 
   const handleUpload = async (uploadFilesList: File[]) => {
-    if (uploadFilesList.length === 0) return;
-    const titleName = uploadFilesList.length === 1 ? uploadFilesList[0]!.name : `${uploadFilesList.length} 个文件`;
+    const allowedFiles = uploadFilesList.filter(file => !ARCHIVE_FILE_PATTERN.test(file.name));
+    const skippedCount = uploadFilesList.length - allowedFiles.length;
+    if (skippedCount > 0) message.warning(`已跳过 ${skippedCount} 个压缩包，请解压后上传内部文件`);
+    if (allowedFiles.length === 0) return;
+    const titleName = allowedFiles.length === 1 ? allowedFiles[0]!.name : `${allowedFiles.length} 个文件`;
     setUploading(true);
-    setStatusItems(items => [{ type: 'upload', title: `上传 ${titleName}`, description: '等待上传、解析、切片和入库', status: 'processing', percent: 10 } satisfies StatusItem, ...items].slice(0, 50));
     const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const poll = setInterval(() => {
-      void getKbUploadProgress(uploadId).then(progress => {
-        setStatusItems(items => [{ type: 'upload', title: `上传 ${titleName}`, description: `${progress.message}${progress.chunkCount ? `，${progress.chunkCount} 个切片` : ''}`, status: progress.stage === 'error' ? 'warning' : 'processing', percent: progress.percent } satisfies StatusItem, ...items.filter(item => item.title !== `上传 ${titleName}`)].slice(0, 50));
-      }).catch(() => undefined);
-    }, 500);
+    upsertStatusItem({ id: uploadId, type: 'upload', title: `上传 ${titleName}`, description: '等待上传、解析、切片和入库', status: 'processing', percent: 5 });
+    let done = false;
+    let progressFailureCount = 0;
+    const refreshProgress = async () => {
+      const progress = await getKbUploadProgress(uploadId);
+      progressFailureCount = 0;
+      const status = progress.stage === 'error' ? 'error' : progress.stage === 'done' ? 'success' : 'processing';
+      upsertStatusItem({ id: uploadId, type: status === 'error' ? 'error' : 'upload', title: status === 'success' ? `上传完成 ${titleName}` : `上传 ${titleName}`, description: `${progress.message}${progress.chunkCount ? `，${progress.chunkCount} 个切片` : ''}`, status, percent: progress.percent });
+      if (progress.stage === 'done' || progress.stage === 'error') done = true;
+      return progress;
+    };
+    const handleProgressError = (error: unknown) => {
+      progressFailureCount += 1;
+      if (progressFailureCount >= 5) {
+        done = true;
+        const description = error instanceof Error ? error.message : '进度查询失败';
+        upsertStatusItem({ id: uploadId, type: 'error', title: `上传失败 ${titleName}`, description, status: 'error', percent: 100 });
+      }
+    };
+    const poll = setInterval(() => { void refreshProgress().catch(handleProgressError); }, 700);
     try {
-      const result = await uploadKbFiles(uploadFilesList, undefined, uploadId);
-      clearInterval(poll);
-      if (result.vectorStatus?.status === 'ready') message.success('上传成功，向量入库已完成');
-      else message.info('文件已上传并完成解析，正在后台写入向量库');
+      await uploadKbFiles(allowedFiles, undefined, uploadId);
+      message.info('文件已上传，正在后台解析、切片和入库');
+      for (let i = 0; i < 240 && !done; i++) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await refreshProgress().catch(handleProgressError);
+      }
       setSearchQuery('');
       setCategory('');
       setSelectedRowKeys([]);
       categoryRef.current = '';
-      const uploadedFiles = result.uploadedFiles?.length ? result.uploadedFiles : result.files?.filter((item: KbFileItem) => item.relativePath === result.relativePath) ?? [];
-      const uploaded = uploadedFiles[0];
-      const meta = fileMeta(uploaded);
+      await loadFiles();
       await loadOperations();
-      setStatusItems(items => [{
-        type: 'upload',
-        title: `上传完成 ${titleName}`,
-        description: result.vectorStatus?.status === 'ready' ? '解析、切片和向量入库已完成' : '解析和切片已完成，正在后台写入向量库',
-        status: 'success',
-        filePath: uploaded?.relativePath,
-        chunkCount: uploaded?.chunkCount,
-        textLength: meta.textLength,
-        extractionMode: meta.extractionMode,
-      } satisfies StatusItem, ...items.filter(item => item.title !== `上传 ${titleName}`)].slice(0, 50));
-      if (uploadedFiles.length > 0) {
-        setFiles(items => {
-          const next = new Map(items.map(item => [item.relativePath, item]));
-          for (const file of uploadedFiles) next.set(file.relativePath, file);
-          return Array.from(next.values()).sort((a, b) => b.mtime - a.mtime);
-        });
-      }
-      await loadOperations();
+      if (done) message.success('上传索引流程已完成');
     } catch (error) {
       const description = error instanceof Error ? error.message : '请重试或检查文件格式';
       message.error(description || '上传失败');
-      setStatusItems(items => [{ type: 'error', title: `上传失败 ${titleName}`, description, status: 'error' } satisfies StatusItem, ...items].slice(0, 50));
+      upsertStatusItem({ id: uploadId, type: 'error', title: `上传失败 ${titleName}`, description, status: 'error', percent: 100 });
     }
     finally { clearInterval(poll); setUploading(false); }
+  };
+
+  const handleReindexAll = async () => {
+    setReindexingAll(true);
+    const localReindexId = `reindex-ui-${Date.now()}`;
+    upsertStatusItem({ id: localReindexId, type: 'reindex', title: '重新解析入库', description: '已提交全量重新解析、切片和入库任务', status: 'processing', percent: 10 });
+    try {
+      const result = await reindexKb();
+      const reindexId = result.operationId || localReindexId;
+      message.success('已提交重新解析入库任务');
+      upsertStatusItem({ id: reindexId, type: 'reindex', title: '重新解析入库', description: '后台将重新扫描文件、解析、切片并重建索引', status: 'processing', percent: 20 }, ['重新解析入库']);
+      for (let i = 0; i < 180; i++) {
+        const operations = await getKbOperations();
+        const current = operations.operations.find(item => item.id === result.operationId);
+        if (current) {
+          upsertStatusItem({ id: reindexId, type: current.status === 'error' ? 'error' : 'reindex', title: current.status === 'success' ? '重新解析入库完成' : current.status === 'error' ? '重新解析入库失败' : '重新解析入库', description: current.message, status: current.status, percent: current.percent });
+          if (current.status === 'success' || current.status === 'error') break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      await loadFiles();
+      await loadOperations();
+    } catch (error) {
+      const description = error instanceof Error ? error.message : '重新解析入库失败';
+      message.error(description);
+      upsertStatusItem({ id: localReindexId, type: 'error', title: '重新解析入库失败', description, status: 'error', percent: 100 }, ['重新解析入库', '重新解析入库完成', '重新解析入库失败']);
+    } finally {
+      setReindexingAll(false);
+    }
   };
 
   const handleDelete = (record: KbFileItem) => {
@@ -494,7 +542,8 @@ export default function FilesPage() {
           options={[{ label: `全部来源 (${files.length})`, value: 'all' }, { label: `我的文件 (${userFiles.length})`, value: 'user' }, { label: `内置示例 (${builtInFiles.length})`, value: 'builtIn' }]} />
         <Button type="primary" icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-file-upload-input')?.click()}>{uploading ? t('uploading') : t('upload')}</Button>
         <Button icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-folder-upload-input')?.click()}>上传文件夹</Button>
-        <input id="kb-file-upload-input" type="file" multiple hidden onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
+        <Button icon={<SyncOutlined />} loading={reindexingAll} onClick={() => { void handleReindexAll(); }}>重新解析入库</Button>
+        <input id="kb-file-upload-input" type="file" multiple hidden accept=".pdf,.doc,.docx,.txt,.md,.csv,.tsv,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.svg,.dwg,.dxf,.step,.stp,.iges,.igs,.js,.ts,.tsx,.jsx,.py,.go,.java,.cs,.cpp,.c,.h,.json,.jsonl,.yaml,.yml,.xml,.html,.htm,.drawio,.dio,.vsdx,.vdx,.puml,.plantuml,.mmd,.mermaid,.excalidraw" onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
         <input id="kb-folder-upload-input" type="file" multiple hidden {...{ webkitdirectory: '' }} onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
       </div>
 
@@ -533,7 +582,7 @@ export default function FilesPage() {
                 <div className={styles.statusEmpty}>没有匹配的任务</div>
               ) : (
                 filteredStatusItems.map((item, idx) => {
-                  const key = `${item.title}-${idx}`;
+                  const key = item.id || `${item.type}-${item.createdAt ?? item.title}-${idx}`;
                   const expanded = expandedItems.has(key);
                   return (
                     <div key={key} className={styles.timelineItem}>

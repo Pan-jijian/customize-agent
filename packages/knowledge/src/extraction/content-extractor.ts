@@ -17,6 +17,8 @@ export interface ExtractionResult {
 type SpreadsheetCell = { v?: unknown; w?: string; f?: string; t?: string };
 type SpreadsheetRange = { s: { r: number; c: number }; e: { r: number; c: number } };
 type SpreadsheetSheet = Record<string, SpreadsheetCell | unknown> & { '!ref'?: string; '!merges'?: SpreadsheetRange[] };
+type PdfTextItem = { str: string; x: number; y: number; width: number; height: number; fontName?: string };
+type CadAnnotation = { text: string; x?: number; y?: number; layer?: string; block?: string; entityType?: string };
 
 export class ContentExtractor {
   constructor(private readonly externalExtractors = ExternalExtractorRegistry.fromEnvironment()) {}
@@ -73,11 +75,7 @@ export class ContentExtractor {
       text = result.text;
       Object.assign(metadata, result.metadata);
       warnings.push(...result.warnings);
-    } else if (file.category === 'archive') {
-      const result = await this.extractArchive(file);
-      text = result.text;
-      Object.assign(metadata, result.metadata);
-      warnings.push(...result.warnings);
+
     } else if (file.category === 'image' && file.format !== 'vector') {
       const result = await this.extractRasterImage(file);
       text = result.text;
@@ -216,7 +214,7 @@ export class ContentExtractor {
     if (file.format === 'autocad' && ext === '.dxf') {
       const raw = fs.readFileSync(file.absolutePath, 'utf8');
       const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).slice(0, 300);
-      const textEntities = this.matchAll(raw, /\n\s*(?:1|3)\s*\n([^\n]+)/gu).slice(0, 500);
+      const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 500);
       const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).slice(0, 300);
       const entityTypes = this.matchAll(raw, /\n\s*0\s*\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1000);
       const uniqueLayers = Array.from(new Set(layers));
@@ -229,14 +227,16 @@ export class ContentExtractor {
       metadata.blockNames = uniqueBlocks.slice(0, 80);
       metadata.entityTypeCount = uniqueEntityTypes.length;
       metadata.entityTypes = uniqueEntityTypes.slice(0, 80);
-      metadata.contentCoverage = 'dxf_layers_blocks_entities_text';
+      metadata.contentCoverage = 'dxf_semantic_layer_block_annotations';
+      const semanticNodes = this.buildCadSemanticNodes(file, uniqueLayers, uniqueBlocks, uniqueEntityTypes, textEntities);
       return {
         text: [
           this.metadataOnlyText(file),
           `CAD DXF 图层: ${uniqueLayers.join(', ')}`,
           `CAD DXF 块/符号: ${uniqueBlocks.join(', ')}`,
           `CAD DXF 实体类型: ${uniqueEntityTypes.join(', ')}`,
-          `CAD DXF 标注/文本:\n${textEntities.join('\n')}`,
+          'CAD 语义图纸节点:',
+          ...semanticNodes,
         ].join('\n'),
         metadata,
         warnings,
@@ -317,7 +317,7 @@ export class ContentExtractor {
     }
 
     const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).slice(0, 300);
-    const textEntities = this.matchAll(raw, /\n\s*(?:1|3)\s*\n([^\n]+)/gu).slice(0, 800);
+    const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 800);
     const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).slice(0, 300);
     const entityTypes = this.matchAll(raw, /\n\s*0\s*\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1200);
     const uniqueLayers = Array.from(new Set(layers));
@@ -330,19 +330,69 @@ export class ContentExtractor {
     metadata.blockNames = uniqueBlocks.slice(0, 80);
     metadata.entityTypeCount = uniqueEntityTypes.length;
     metadata.entityTypes = uniqueEntityTypes.slice(0, 80);
-    metadata.contentCoverage = 'dxf_layers_blocks_entities_text';
+    metadata.contentCoverage = 'dxf_semantic_layer_block_annotations';
     metadata.parsedByDxfParser = Boolean(parsed);
+    const semanticNodes = this.buildCadSemanticNodes(file, uniqueLayers, uniqueBlocks, uniqueEntityTypes, textEntities);
     return {
       text: [
         this.metadataOnlyText(file),
         `CAD DXF 图层: ${uniqueLayers.join(', ')}`,
         `CAD DXF 块/符号: ${uniqueBlocks.join(', ')}`,
         `CAD DXF 实体类型: ${uniqueEntityTypes.join(', ')}`,
-        `CAD DXF 标注/文本:\n${textEntities.join('\n')}`,
+        'CAD 语义图纸节点:',
+        ...semanticNodes,
       ].join('\n'),
       metadata,
       warnings,
     };
+  }
+
+  private buildCadSemanticNodes(file: ClassifiedFile, layers: string[], blocks: string[], entityTypes: string[], texts: CadAnnotation[]): string[] {
+    const fileName = path.basename(file.relativePath);
+    const defaultLayer = layers[0] ?? '未命名图层';
+    const defaultBlock = blocks[0] ?? '全局模型空间';
+    const defaultEntity = entityTypes.find(type => /DIMENSION|TEXT|MTEXT|LEADER/u.test(type)) ?? entityTypes[0] ?? 'UNKNOWN';
+    const annotations = texts.length > 0 ? texts : [{ text: '未提取到文字标注', layer: defaultLayer, block: defaultBlock, entityType: defaultEntity }];
+    return annotations.map((annotation, index) => {
+      const nearest = this.findNearestCadAnnotation(annotation, annotations);
+      const layer = annotation.layer ?? layers[index % Math.max(1, layers.length)] ?? defaultLayer;
+      const block = annotation.block ?? blocks[index % Math.max(1, blocks.length)] ?? defaultBlock;
+      const entity = annotation.entityType ?? this.inferCadEntityType(annotation.text, defaultEntity);
+      const status = /关键|critical|尺寸|dim|mm|cm|m\b|°|φ|Φ|R\d/iu.test(annotation.text) ? '关键尺寸/约束候选' : '普通标注';
+      const position = annotation.x != null && annotation.y != null ? ` | 坐标: (${annotation.x.toFixed(2)}, ${annotation.y.toFixed(2)})` : '';
+      return [`图纸节点: ${fileName} | 图层: ${layer} | 块: ${block} | 实体类型: ${entity}${position}`, `└── 标注文本: ${annotation.text} | 关联对象: ${nearest ? `邻近标注 ${nearest.text}` : '空间邻近候选'} | 状态: ${status}`].join('\n');
+    });
+  }
+
+  private extractDxfTextAnnotations(raw: string): CadAnnotation[] {
+    const entities = raw.split(/\n\s*0\s*\n/u).filter(section => /^(?:TEXT|MTEXT|DIMENSION|LEADER)/u.test(section.trim()));
+    return entities.flatMap(section => {
+      const text = /\n\s*(?:1|3)\s*\n([^\n]+)/u.exec(section)?.[1]?.trim();
+      if (!text) return [];
+      return [{
+        text,
+        layer: /\n\s*8\s*\n([^\n]+)/u.exec(section)?.[1]?.trim(),
+        block: /\n\s*2\s*\n([^\n]+)/u.exec(section)?.[1]?.trim(),
+        entityType: section.trim().split(/\s+/u)[0],
+        x: Number(/\n\s*10\s*\n([^\n]+)/u.exec(section)?.[1]),
+        y: Number(/\n\s*20\s*\n([^\n]+)/u.exec(section)?.[1]),
+      }].map(item => ({ ...item, x: Number.isFinite(item.x) ? item.x : undefined, y: Number.isFinite(item.y) ? item.y : undefined }));
+    });
+  }
+
+  private findNearestCadAnnotation(target: CadAnnotation, annotations: CadAnnotation[]): CadAnnotation | undefined {
+    if (target.x == null || target.y == null) return undefined;
+    return annotations
+      .filter(item => item !== target && item.x != null && item.y != null)
+      .map(item => ({ item, distance: Math.hypot((item.x ?? 0) - target.x!, (item.y ?? 0) - target.y!) }))
+      .sort((a, b) => a.distance - b.distance)[0]?.item;
+  }
+
+  private inferCadEntityType(text: string, fallback: string): string {
+    if (/\b\d+(?:\.\d+)?\s*(?:mm|cm|m)\b|φ|Φ|R\d/iu.test(text)) return '线性尺寸/半径尺寸';
+    if (/°|angle|角度/iu.test(text)) return '角度尺寸';
+    if (/note|说明|备注/iu.test(text)) return '文字说明';
+    return fallback;
   }
 
   private async tryConvertDwgWithBundledWasm(filePath: string): Promise<{ dxfText?: string; tool: string; warnings: string[] }> {
@@ -455,37 +505,40 @@ export class ContentExtractor {
 
   private extractData(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
     const raw = fs.readFileSync(file.absolutePath, 'utf8');
-    const metadata: Record<string, unknown> = { extractionMode: 'structured_data', vectorizable: true };
+    const metadata: Record<string, unknown> = { extractionMode: 'structured_data', semanticExtractionMode: 'structured_data_semantic_paths', vectorizable: true };
     try {
       if (file.format === 'json') {
         const isJsonl = path.extname(file.absolutePath).toLowerCase() === '.jsonl';
-        const lines = isJsonl
-          ? raw.split(/\r?\n/u).filter(Boolean).slice(0, 500).flatMap((line, index) => this.flattenJson(JSON.parse(line), `line${index + 1}`))
-          : this.flattenJson(JSON.parse(raw));
+        const records = isJsonl
+          ? raw.split(/\r?\n/u).filter(Boolean).map((line, index) => ({ path: `line${index + 1}`, value: JSON.parse(line) }))
+          : [{ path: '$', value: JSON.parse(raw) }];
+        const lines = records.flatMap(record => this.flattenJson(record.value, record.path));
+        const objects = records.flatMap(record => this.atomicJsonObjects(record.value, record.path));
         metadata.fieldCount = lines.length;
-        metadata.recordCount = isJsonl ? raw.split(/\r?\n/u).filter(Boolean).length : 1;
+        metadata.recordCount = records.length;
+        metadata.objectCount = objects.length;
         metadata.dataPaths = lines.map(line => line.split(':')[0]).slice(0, 200);
-        metadata.contentCoverage = isJsonl ? 'jsonl_records_paths_values' : 'json_paths_values';
-        return { text: [this.metadataOnlyText(file), ...lines.slice(0, 1500)].join('\n'), metadata, warnings: [] };
+        metadata.contentCoverage = isJsonl ? 'jsonl_atomic_objects_paths_values' : 'json_atomic_objects_paths_values';
+        return { text: [this.metadataOnlyText(file), '## 路径声明', ...lines, '## 原子对象', ...objects].join('\n'), metadata, warnings: [] };
       }
     } catch {
       metadata.parseError = true;
     }
 
     if (file.format === 'yaml') {
-      const pairs = this.matchAll(raw, /^\s*([\w.-]+)\s*:\s*(.{1,300})$/gmu).slice(0, 1500);
-      metadata.fieldCount = pairs.length;
-      metadata.dataPaths = pairs.map(line => (line.split(':')[0] ?? '').trim()).slice(0, 200);
-      metadata.contentCoverage = 'yaml_key_values';
-      return { text: [this.metadataOnlyText(file), ...pairs].join('\n'), metadata, warnings: [] };
+      const lines = this.flattenYamlByIndent(raw).slice(0, 3000);
+      metadata.fieldCount = lines.length;
+      metadata.dataPaths = lines.map(line => (line.split(':')[0] ?? '').trim()).slice(0, 200);
+      metadata.contentCoverage = 'yaml_indented_paths_values';
+      return { text: [this.metadataOnlyText(file), '## YAML 路径声明', ...lines].join('\n'), metadata, warnings: [] };
     }
 
     if (file.format === 'xml') {
-      const elements = this.matchAll(raw, /<([A-Za-z_][\w:.-]*)\b[^>]*>([^<]{1,200})<\/\1>/gu).slice(0, 1000);
+      const elements = this.flattenXmlPaths(raw).slice(0, 3000);
       metadata.elementTextCount = elements.length;
-      metadata.dataPaths = elements.map(line => line.match(/^<([A-Za-z_][\w:.-]*)/u)?.[1]).filter(Boolean).slice(0, 200);
-      metadata.contentCoverage = 'xml_element_text';
-      return { text: [this.metadataOnlyText(file), ...elements].join('\n'), metadata, warnings: [] };
+      metadata.dataPaths = elements.map(line => (line.split(':')[0] ?? '').trim()).slice(0, 200);
+      metadata.contentCoverage = 'xml_paths_values';
+      return { text: [this.metadataOnlyText(file), '## XML 路径声明', ...elements].join('\n'), metadata, warnings: [] };
     }
 
     metadata.contentCoverage = 'plain_structured_text';
@@ -497,19 +550,20 @@ export class ContentExtractor {
     const metadata: Record<string, unknown> = { extractionMode: 'diagram_structural', vectorizable: true };
 
     if (file.format === 'drawio') {
-      const labels = this.matchAll(raw, /(?:value|label)="([^"]+)"/gu).map(value => this.stripXml(value)).slice(0, 300);
-      metadata.nodeTextCount = labels.length;
-      metadata.contentCoverage = 'drawio_labels';
-      return { text: [this.metadataOnlyText(file), `Draw.io 节点/连线文本:\n${labels.join('\n')}`].join('\n'), metadata, warnings: [] };
+      const graph = this.extractDrawioGraph(raw);
+      metadata.nodeTextCount = graph.nodes.length;
+      metadata.edgeCount = graph.edges.length;
+      metadata.contentCoverage = 'drawio_graph_links';
+      return { text: [this.metadataOnlyText(file), 'Draw.io 图链路:', ...graph.links, 'Draw.io 节点:', ...graph.nodes.map(node => `[${node.id}] ${node.label}`)].join('\n'), metadata, warnings: [] };
     }
 
     if (file.format === 'excalidraw') {
       try {
-        const parsed = JSON.parse(raw) as { elements?: Array<{ type?: string; text?: string }> };
-        const texts = (parsed.elements ?? []).filter(element => element.text).map(element => `${element.type ?? 'shape'}: ${element.text}`).slice(0, 300);
-        metadata.elementTextCount = texts.length;
-        metadata.contentCoverage = 'excalidraw_text_elements';
-        return { text: [this.metadataOnlyText(file), `Excalidraw 图形文本:\n${texts.join('\n')}`].join('\n'), metadata, warnings: [] };
+        const graph = this.extractExcalidrawGraph(raw);
+        metadata.elementTextCount = graph.nodes.length;
+        metadata.edgeCount = graph.links.length;
+        metadata.contentCoverage = 'excalidraw_graph_links';
+        return { text: [this.metadataOnlyText(file), 'Excalidraw 图链路:', ...graph.links, 'Excalidraw 节点:', ...graph.nodes].join('\n'), metadata, warnings: [] };
       } catch {
         metadata.parseError = true;
       }
@@ -517,6 +571,55 @@ export class ContentExtractor {
 
     metadata.contentCoverage = 'diagram_source_text';
     return { text: [this.metadataOnlyText(file), raw].join('\n'), metadata, warnings: [] };
+  }
+
+  private extractDrawioGraph(raw: string): { nodes: Array<{ id: string; label: string }>; edges: string[]; links: string[] } {
+    const cells = Array.from(raw.matchAll(/<mxCell\b([^>]*)>/gu), match => this.parseXmlAttributes(match[1] ?? ''));
+    const nodes = cells
+      .filter(cell => cell.value || cell.label || cell.id)
+      .map((cell, index) => ({ id: String(cell.id ?? `node-${index + 1}`), label: this.stripXml(String(cell.value || cell.label || cell.id)) }))
+      .filter(node => node.label);
+    const nodeById = new Map(nodes.map(node => [node.id, node.label]));
+    const edges = cells.filter(cell => cell.edge === '1' && cell.source && cell.target);
+    const links = edges.map(edge => {
+      const source = nodeById.get(String(edge.source)) ?? String(edge.source);
+      const target = nodeById.get(String(edge.target)) ?? String(edge.target);
+      const label = this.stripXml(String(edge.value || edge.label || '关系'));
+      return `[${source}] ──> (${label}) ──> [${target}]`;
+    });
+    return { nodes, edges: edges.map(edge => String(edge.id ?? 'edge')), links };
+  }
+
+  private extractExcalidrawGraph(raw: string): { nodes: string[]; links: string[] } {
+    type ExcalidrawElement = { id?: string; type?: string; text?: string; x?: number; y?: number; width?: number; height?: number; startBinding?: { elementId?: string }; endBinding?: { elementId?: string } };
+    const parsed = JSON.parse(raw) as { elements?: ExcalidrawElement[] };
+    const elements = parsed.elements ?? [];
+    const textById = new Map(elements.filter(element => element.text).map(element => [String(element.id), String(element.text)]));
+    const shapeLabels = elements
+      .filter(element => element.type !== 'arrow' && element.type !== 'line')
+      .map((element, index) => {
+        const id = String(element.id ?? `node-${index + 1}`);
+        const own = element.text ?? textById.get(id);
+        const nested = elements.find(candidate => candidate.text && this.isPointInside(candidate, element));
+        return { id, label: own ?? nested?.text ?? element.type ?? '节点' };
+      });
+    const labelById = new Map(shapeLabels.map(node => [node.id, node.label]));
+    const links = elements
+      .filter(element => element.type === 'arrow' && element.startBinding?.elementId && element.endBinding?.elementId)
+      .map(element => `[${labelById.get(element.startBinding!.elementId!) ?? element.startBinding!.elementId}] ──> (箭头) ──> [${labelById.get(element.endBinding!.elementId!) ?? element.endBinding!.elementId}]`);
+    const nodes = shapeLabels.map(node => `[${node.id}] ${node.label}`);
+    return { nodes, links };
+  }
+
+  private isPointInside(point: { x?: number; y?: number }, box: { x?: number; y?: number; width?: number; height?: number }): boolean {
+    if (point.x == null || point.y == null || box.x == null || box.y == null || box.width == null || box.height == null) return false;
+    return point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height;
+  }
+
+  private parseXmlAttributes(input: string): Record<string, string> {
+    const attrs: Record<string, string> = {};
+    for (const match of input.matchAll(/([\w:-]+)="([^"]*)"/gu)) attrs[match[1]!] = this.stripXml(match[2] ?? '');
+    return attrs;
   }
 
   private parseDelimitedLine(line: string, delimiter: string): string[] {
@@ -543,28 +646,39 @@ export class ContentExtractor {
     return values;
   }
 
+  private toMarkdownTable(header: string[], rows: string[][]): string {
+    const width = Math.max(header.length, ...rows.map(row => row.length), 1);
+    const normalizedHeader = Array.from({ length: width }, (_, index) => header[index] || `COL${index + 1}`);
+    const escape = (value: unknown) => String(value ?? '').replace(/\|/gu, '\\|').replace(/\r?\n/gu, ' ').trim();
+    return [
+      `| ${normalizedHeader.map(escape).join(' | ')} |`,
+      `| ${normalizedHeader.map(() => '---').join(' | ')} |`,
+      ...rows.map(row => `| ${Array.from({ length: width }, (_, index) => escape(row[index] ?? '')).join(' | ')} |`),
+    ].join('\n');
+  }
+
   private extractDelimitedText(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
     const raw = fs.readFileSync(file.absolutePath, 'utf8');
     const delimiter = file.format === 'tsv' ? '\t' : ',';
     const rows = raw.split(/\r?\n/u).filter(line => line.trim().length > 0);
     const header = rows[0] ? this.parseDelimitedLine(rows[0], delimiter) : [];
-    const structured = rows.slice(1, 501).flatMap((line, rowIndex) => {
-      const values = this.parseDelimitedLine(line, delimiter);
-      return values.map((value, colIndex) => {
-        const column = header[colIndex] || `COL${colIndex + 1}`;
-        return `R${rowIndex + 2}C${colIndex + 1} ${column}: ${value}`;
-      });
-    });
+    const tableRows = rows.slice(1).map(line => this.parseDelimitedLine(line, delimiter));
+    const markdown = this.toMarkdownTable(header, tableRows);
+    const legacyKv = tableRows.flatMap((values, rowIndex) => values.map((value, colIndex) => {
+      const column = header[colIndex] || `COL${colIndex + 1}`;
+      return `R${rowIndex + 2}C${colIndex + 1} ${column}: ${value}`;
+    }));
     return {
-      text: [this.metadataOnlyText(file), `表头: ${header.join(' | ')}`, ...structured, raw].join('\n'),
+      text: [this.metadataOnlyText(file), '### 工作表: 默认', markdown, '### 表格路径声明', ...legacyKv].join('\n\n'),
       metadata: {
         extractionMode: 'delimited_text_structured',
+        semanticExtractionMode: 'delimited_markdown_table',
         vectorizable: true,
         delimiter: file.format === 'tsv' ? 'tab' : 'comma',
         rowCount: rows.length,
         columnCount: header.length,
         columnNames: header.slice(0, 120),
-        contentCoverage: 'table_headers_cells_text',
+        contentCoverage: 'markdown_table',
       },
       warnings: [],
     };
@@ -577,13 +691,21 @@ export class ContentExtractor {
     if (ext === '.ppt') return this.extractLegacyOfficeBinary(file);
     if (ext === '.docx') {
       try {
+        const styledMarkdown = await this.extractDocxStyleTreeMarkdown(file.absolutePath);
+        if (styledMarkdown.trim()) {
+          return {
+            text: styledMarkdown,
+            metadata: { extractionMode: 'docx_xml_style_tree_markdown', vectorizable: true, contentCoverage: 'office_style_tree_markdown' },
+            warnings: [],
+          };
+        }
         const mammoth = await resolveAndImport('mammoth') as any;
-        const result = await mammoth.extractRawText({ path: file.absolutePath });
-        const text = result.value.trim();
+        const result = await mammoth.convertToMarkdown({ path: file.absolutePath });
+        const text = String(result.value ?? '').trim();
         if (text) {
           return {
-            text,
-            metadata: { extractionMode: 'builtin_mammoth', vectorizable: true, contentCoverage: 'office_full_text' },
+            text: this.normalizeMarkdownHeadings(text),
+            metadata: { extractionMode: 'builtin_mammoth_markdown', vectorizable: true, contentCoverage: 'office_markdown_structure' },
             warnings: (result.messages as Array<{ message: string }>).map(m => m.message),
           };
         }
@@ -642,6 +764,14 @@ export class ContentExtractor {
     };
   }
 
+  private findMergedCellValue(sheet: SpreadsheetSheet, merges: SpreadsheetRange[], row: number, col: number, XLSX: any): string | undefined {
+    const merge = merges.find(item => row >= item.s.r && row <= item.e.r && col >= item.s.c && col <= item.e.c);
+    if (!merge) return undefined;
+    const originAddress = XLSX.utils.encode_cell({ r: merge.s.r, c: merge.s.c });
+    const origin = sheet[originAddress] as SpreadsheetCell | undefined;
+    return origin?.w ?? (origin?.v == null ? undefined : String(origin.v));
+  }
+
   private async extractSpreadsheet(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     const ext = path.extname(file.absolutePath).toLowerCase();
     try {
@@ -656,25 +786,30 @@ export class ContentExtractor {
         const sheet = workbook.Sheets[name] as SpreadsheetSheet | undefined;
         if (!sheet || !sheet['!ref']) continue;
         const range = XLSX.utils.decode_range(sheet['!ref']);
-        const lines: string[] = [`工作表: ${name}`, `范围: ${sheet['!ref']}`];
         const merges = sheet['!merges'] ?? [];
         mergeCount += merges.length;
-        if (merges.length > 0) {
-          lines.push(`合并单元格: ${merges.map(item => `${XLSX.utils.encode_cell(item.s)}:${XLSX.utils.encode_cell(item.e)}`).join(', ')}`);
-        }
+        const matrix: string[][] = [];
         for (let row = range.s.r; row <= range.e.r; row++) {
+          const values: string[] = [];
           for (let col = range.s.c; col <= range.e.c; col++) {
             const address = XLSX.utils.encode_cell({ r: row, c: col });
             const cell = sheet[address] as SpreadsheetCell | undefined;
-            if (!cell || (cell.v == null && !cell.f)) continue;
-            cellCount++;
-            if (cell.f) formulaCount++;
-            const display = cell.w ?? String(cell.v ?? '');
-            const formula = cell.f ? ` 公式=${cell.f}` : '';
-            lines.push(`${address}: ${display}${formula}`);
+            const mergedValue = cell ? undefined : this.findMergedCellValue(sheet, merges, row, col, XLSX);
+            if (cell) {
+              cellCount++;
+              if (cell.f) formulaCount++;
+            }
+            const display = cell?.w ?? String(cell?.v ?? mergedValue ?? '');
+            const formula = cell?.f ? ` 公式=${cell.f}` : '';
+            values.push(`${display}${formula}`.trim());
           }
+          if (values.some(Boolean)) matrix.push(values);
         }
-        if (lines.length > 2) sheetTexts.push(lines.slice(0, 5_000).join('\n'));
+        if (matrix.length > 0) {
+          const header = matrix[0] ?? [];
+          const rows = matrix.slice(1);
+          sheetTexts.push([`### 工作表: ${name}`, this.toMarkdownTable(header, rows)].join('\n\n'));
+        }
       }
 
       if (sheetTexts.length > 0) {
@@ -690,6 +825,37 @@ export class ContentExtractor {
     }
     if (ext === '.xls') return this.extractLegacyOfficeBinary(file);
     return this.extractOfficeZip(file);
+  }
+
+  private async extractDocxStyleTreeMarkdown(filePath: string): Promise<string> {
+    const jszipMod = await resolveAndImport('jszip');
+    const JSZip = (jszipMod as Record<string, unknown>).default ?? jszipMod;
+    const zip = await (JSZip as { loadAsync: (data: Buffer) => Promise<{ files: Record<string, { async: (type: string) => Promise<string> }> }> }).loadAsync(fs.readFileSync(filePath));
+    const docXml = await zip.files['word/document.xml']?.async('string');
+    if (!docXml) return '';
+    const paragraphs = Array.from(docXml.matchAll(/<w:p[\s\S]*?<\/w:p>/gu), match => match[0]);
+    const lines: string[] = [];
+    for (const paragraph of paragraphs) {
+      const texts = Array.from(paragraph.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/gu), match => this.stripXml(match[1] ?? '')).join('');
+      if (!texts.trim()) continue;
+      const style = /<w:pStyle\s+w:val="([^"]+)"/u.exec(paragraph)?.[1] ?? '';
+      const bold = /<w:b\b/u.test(paragraph);
+      const size = Number(/<w:sz\s+w:val="(\d+)"/u.exec(paragraph)?.[1] ?? 0);
+      const level = this.docxHeadingLevel(style, bold, size, texts);
+      lines.push(`${level > 0 ? `${'#'.repeat(level)} ` : ''}${texts.trim()}`);
+    }
+    return lines.join('\n\n');
+  }
+
+  private docxHeadingLevel(style: string, bold: boolean, size: number, text: string): number {
+    const normalized = style.toLowerCase();
+    const heading = /heading(\d)|标题(\d)|h(\d)/iu.exec(normalized);
+    const styleLevel = Number(heading?.[1] ?? heading?.[2] ?? heading?.[3] ?? 0);
+    if (styleLevel >= 1 && styleLevel <= 6) return styleLevel;
+    if (text.length <= 100 && size >= 32) return 1;
+    if (text.length <= 100 && size >= 28) return 2;
+    if (text.length <= 100 && (size >= 24 || bold)) return 3;
+    return 0;
   }
 
   private async extractOfficeZip(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
@@ -716,25 +882,6 @@ export class ContentExtractor {
     }
   }
 
-  private async extractArchive(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
-    const metadata: Record<string, unknown> = { extractionMode: 'archive_manifest', vectorizable: true };
-    if (path.extname(file.absolutePath).toLowerCase() !== '.zip') {
-      metadata.contentCoverage = 'metadata_filename';
-      return { text: this.metadataOnlyText(file), metadata, warnings: ['压缩包未提取到正文，未入库；仅 zip 可提取文件清单'] };
-    }
-    try {
-      const jszipMod = await resolveAndImport('jszip');
-      const JSZip = (jszipMod as Record<string, unknown>).default ?? jszipMod;
-      const zip = await (JSZip as { loadAsync: (data: Buffer) => Promise<{ files: Record<string, { dir: boolean; name: string }> }> }).loadAsync(fs.readFileSync(file.absolutePath));
-      const entries = Object.values(zip.files).map(entry => `${entry.dir ? '目录' : '文件'}: ${entry.name}`).slice(0, 1_000);
-      metadata.entryCount = Object.keys(zip.files).length;
-      metadata.contentCoverage = 'zip_manifest';
-      return { text: [this.metadataOnlyText(file), '压缩包文件清单:', ...entries].join('\n'), metadata, warnings: [] };
-    } catch (error) {
-      metadata.parseError = error instanceof Error ? error.message : String(error);
-      return { text: '', metadata, warnings: ['压缩包解析失败，内置解析器未提取到文件清单，未入库'] };
-    }
-  }
 
   private async extractRasterImage(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     const metadata: Record<string, unknown> = { extractionMode: 'builtin_tesseract_ocr_isolated', vectorizable: true };
@@ -748,6 +895,14 @@ export class ContentExtractor {
       metadata.contentCoverage = 'invalid_image';
       metadata.parseError = validationError;
       return { text: '', metadata, warnings: [`图片文件无效或不完整：${validationError}，未入库`] };
+    }
+
+    const paddle = await this.tryPaddleOcrLayout(file.absolutePath);
+    if (paddle) {
+      metadata.contentCoverage = 'paddleocr_layout_regions';
+      metadata.ocrProvider = 'paddleocr';
+      metadata.ocrRegionCount = paddle.regionCount;
+      return { text: [this.metadataOnlyText(file), paddle.text].join('\n'), metadata, warnings: [] };
     }
 
     let tesseractPath: string;
@@ -774,7 +929,12 @@ const { createWorker } = tesseractMod;
 const worker = await createWorker('chi_sim+eng');
 try {
   const result = await worker.recognize(process.argv[1]);
-  process.stdout.write(result.data.text || '');
+  const lines = (result.data.lines || []).map((line, index) => ({
+    index: index + 1,
+    text: line.text || '',
+    bbox: line.bbox || line.baseline || null,
+  })).filter(line => line.text.trim());
+  process.stdout.write(JSON.stringify({ text: result.data.text || '', lines }));
 } finally {
   await worker.terminate();
 }`,
@@ -788,16 +948,70 @@ try {
       return { text: '', metadata, warnings: [`内置 OCR 解析失败：${message}，未入库`] };
     }
 
-    const text = result.stdout.trim();
-    metadata.contentCoverage = text ? 'ocr_text' : 'metadata_filename';
+    const parsed = this.parseOcrJson(result.stdout);
+    const text = parsed.text.trim();
+    const regions = this.formatOcrRegions(parsed.lines);
+    metadata.contentCoverage = text ? 'ocr_text_bounding_boxes' : 'metadata_filename';
     metadata.ocrProvider = 'tesseract.js';
     metadata.ocrLanguages = 'chi_sim+eng';
     metadata.ocrTextLength = text.length;
+    metadata.ocrLineCount = parsed.lines.length;
     return {
-      text: text ? [this.metadataOnlyText(file), `OCR 识别文本:\n${text}`].join('\n') : '',
+      text: text ? [this.metadataOnlyText(file), 'OCR 区域文本:', ...regions, `OCR 完整文本:\n${text}`].join('\n') : '',
       metadata,
       warnings: text ? [] : ['内置 OCR 未识别到文字，未入库'],
     };
+  }
+
+  private async tryPaddleOcrLayout(filePath: string): Promise<{ text: string; regionCount: number } | undefined> {
+    const command = process.env.CUSTOMIZE_PADDLE_OCR_CMD || process.env.PADDLE_OCR_CMD;
+    if (!command) return undefined;
+    const result = spawnSync(command, [filePath], { encoding: 'utf8', timeout: 0, maxBuffer: 50 * 1024 * 1024, shell: true });
+    if (result.status !== 0 || !result.stdout.trim()) return undefined;
+    try {
+      const parsed = JSON.parse(result.stdout) as Array<{ type?: string; text?: string; bbox?: unknown }>;
+      const lines = parsed.map((region, index) => `区域 ${index + 1} [${region.type ?? 'text'}] ${this.formatBoundingBox(region.bbox)}: ${region.text ?? ''}`);
+      return { text: ['OCR 版面分析区域:', ...lines].join('\n'), regionCount: lines.length };
+    } catch {
+      const lines = result.stdout.split(/\r?\n/u).filter(Boolean);
+      return { text: ['OCR 版面分析区域:', ...lines].join('\n'), regionCount: lines.length };
+    }
+  }
+
+  private parseOcrJson(raw: string): { text: string; lines: Array<{ index: number; text: string; bbox?: unknown }> } {
+    try {
+      const parsed = JSON.parse(raw) as { text?: string; lines?: Array<{ index?: number; text?: string; bbox?: unknown }> };
+      return {
+        text: parsed.text ?? raw,
+        lines: (parsed.lines ?? []).map((line, index) => ({ index: line.index ?? index + 1, text: line.text ?? '', bbox: line.bbox })).filter(line => line.text.trim()),
+      };
+    } catch {
+      return { text: raw, lines: raw.split(/\r?\n/u).map((text, index) => ({ index: index + 1, text })).filter(line => line.text.trim()) };
+    }
+  }
+
+  private formatOcrRegions(lines: Array<{ index: number; text: string; bbox?: unknown }>): string[] {
+    return lines.map(line => {
+      const bbox = this.formatBoundingBox(line.bbox);
+      const type = this.classifyOcrRegion(line.text);
+      return `区域 ${line.index} [${type}]${bbox ? ` ${bbox}` : ''}: ${line.text}`;
+    });
+  }
+
+  private classifyOcrRegion(text: string): 'table' | 'text' | 'image-caption' {
+    if (/\|/.test(text) || /\s{2,}/u.test(text) || /表\s*\d|合计|小计/u.test(text)) return 'table';
+    if (/图\s*\d|figure|image|示意图/iu.test(text)) return 'image-caption';
+    return 'text';
+  }
+
+  private formatBoundingBox(value: unknown): string {
+    if (!value || typeof value !== 'object') return '';
+    const record = value as Record<string, unknown>;
+    const x0 = record.x0 ?? record.left ?? record.x;
+    const y0 = record.y0 ?? record.top ?? record.y;
+    const x1 = record.x1 ?? record.right;
+    const y1 = record.y1 ?? record.bottom;
+    return [x0, y0, x1, y1].some(item => item != null) ? `[bbox x0=${x0 ?? ''}, y0=${y0 ?? ''}, x1=${x1 ?? ''}, y1=${y1 ?? ''}]` : '';
   }
 
   private validateRasterImage(filePath: string): string | undefined {
@@ -839,9 +1053,9 @@ try {
       const raw = fs.readFileSync(file.absolutePath);
       const text = await this.extractPdfText(raw);
       if (text.trim()) {
-        metadata.contentCoverage = 'pdf_text_streams';
+        metadata.contentCoverage = 'pdf_text_streams_layout_markdown';
         metadata.pdfExtractor = 'pdfjs-dist';
-        return { text: [this.metadataOnlyText(file), text].join('\n'), metadata, warnings };
+        return { text: [this.metadataOnlyText(file), this.toMarkdownDocument(text)].join('\n\n'), metadata, warnings };
       }
     } catch (error) {
       warnings.push(`PDF 文本提取失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -865,11 +1079,6 @@ try {
     };
   }
 
-  private pdfOcrPageLimit(): number {
-    const value = Number(process.env.KB_PDF_OCR_PAGE_LIMIT ?? 20);
-    return Number.isFinite(value) ? Math.min(500, Math.max(1, Math.floor(value))) : 20;
-  }
-
   private async extractScannedPdfOcr(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     const metadata: Record<string, unknown> = {
       extractionMode: 'pdf_page_ocr_embedded',
@@ -878,9 +1087,8 @@ try {
       ocrProvider: 'tesseract.js',
       ocrLanguages: 'chi_sim+eng',
       pdfRenderer: 'pdfjs-dist + @napi-rs/canvas',
-      pdfOcrPageLimit: this.pdfOcrPageLimit(),
+      pdfOcrPageLimit: 'all',
     };
-    const pageLimitConfig = this.pdfOcrPageLimit();
 
     // 解析模块路径 —— 确保在打包 Server 等上下文中子进程也能正确加载
     let canvasPath: string;
@@ -911,10 +1119,9 @@ import { createCanvas } from ${JSON.stringify(canvasPath)};
 import * as pdfjs from ${JSON.stringify(pdfjsPath)};
 import { createWorker } from ${JSON.stringify(tesseractPath)};
 const filePath = process.argv[1];
-const configuredLimit = Math.max(1, Number(process.argv[2] || 5));
 const bytes = new Uint8Array(fs.readFileSync(filePath));
 const doc = await pdfjs.getDocument({ data: bytes, verbosity: 0 }).promise;
-const pageLimit = Math.min(doc.numPages, configuredLimit);
+const pageLimit = doc.numPages;
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-pdf-ocr-'));
 const worker = await createWorker('chi_sim+eng');
 const pages = [];
@@ -929,7 +1136,8 @@ try {
     fs.writeFileSync(imagePath, canvas.toBuffer('image/png'));
     const recognized = await worker.recognize(imagePath);
     const text = (recognized.data.text || '').trim();
-    if (text) pages.push('PDF OCR 第 ' + i + ' 页:\\n' + text);
+    const lines = (recognized.data.lines || []).map((line, index) => ({ index: index + 1, text: line.text || '', bbox: line.bbox || null })).filter(line => line.text.trim());
+    if (text) pages.push('PDF OCR 第 ' + i + ' 页:\\n' + lines.map(line => '区域 ' + line.index + ' ' + JSON.stringify(line.bbox || {}) + ': ' + line.text).join('\\n') + '\\n\\n完整文本:\\n' + text);
   }
 } finally {
   await worker.terminate();
@@ -937,8 +1145,7 @@ try {
 }
 process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: pages.join('\\n\\n') }));`,
       file.absolutePath,
-      String(pageLimitConfig),
-    ], { encoding: 'utf8', timeout: Math.max(120_000, pageLimitConfig * 60_000), maxBuffer: 50 * 1024 * 1024, env: childEnv });
+    ], { encoding: 'utf8', timeout: 0, maxBuffer: 50 * 1024 * 1024, env: childEnv });
     if (result.status !== 0 || result.error) {
       metadata.ocrRecommended = true;
       metadata.ocrReason = result.error?.message ?? result.stderr.trim() ?? `pdf_page_ocr_exit_${result.status ?? 'unknown'}`;
@@ -948,7 +1155,7 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
       const parsed = JSON.parse(result.stdout) as { pageCount?: number; pageLimit?: number; text?: string };
       const text = parsed.text?.trim() ?? '';
       metadata.ocrPageCount = parsed.pageCount ?? 0;
-      metadata.pdfOcrPageLimit = parsed.pageLimit ?? 5;
+      metadata.pdfOcrPageLimit = parsed.pageLimit ?? 'all';
       metadata.ocrTextLength = text.length;
       metadata.contentCoverage = text ? 'pdf_page_ocr_text' : 'metadata_filename';
       return { text: text ? [this.metadataOnlyText(file), text].join('\n') : '', metadata, warnings: text ? [] : ['内置扫描 PDF OCR 未识别到文字'] };
@@ -966,17 +1173,14 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
       const loadingTask = mod.getDocument({ data: new Uint8Array(buffer), verbosity: 0 as number });
       const doc = await loadingTask.promise;
       const pages: string[] = [];
-      const pageLimit = Math.min(doc.numPages, 200);
+      const pageLimit = doc.numPages;
       for (let i = 1; i <= pageLimit; i++) {
         const page = await doc.getPage(i);
         const content = await page.getTextContent();
-        const pageText = content.items
-          .map((item: unknown) => {
-            const hasStr = item != null && typeof item === 'object' && 'str' in item;
-            return hasStr ? String((item as Record<string, unknown>).str) : '';
-          })
-          .filter((s: string) => s.trim().length > 0)
-          .join(' ');
+        const items = content.items
+          .map((item: unknown) => this.toPdfTextItem(item))
+          .filter((item: PdfTextItem | undefined): item is PdfTextItem => !!item && item.str.trim().length > 0);
+        const pageText = this.layoutPdfTextItems(items, i);
         if (pageText.trim()) pages.push(pageText.trim());
       }
       await doc.destroy();
@@ -1016,15 +1220,156 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
       .trim();
   }
 
+  private toPdfTextItem(item: unknown): PdfTextItem | undefined {
+    if (!item || typeof item !== 'object' || !('str' in item)) return undefined;
+    const record = item as Record<string, unknown>;
+    const transform = Array.isArray(record.transform) ? record.transform as number[] : [];
+    return {
+      str: String(record.str ?? ''),
+      x: Number(transform[4] ?? 0),
+      y: Number(transform[5] ?? 0),
+      width: Number(record.width ?? 0),
+      height: Number(record.height ?? Math.abs(Number(transform[3] ?? 0))),
+      fontName: typeof record.fontName === 'string' ? record.fontName : undefined,
+    };
+  }
+
+  private layoutPdfTextItems(items: PdfTextItem[], pageNumber: number): string {
+    if (items.length === 0) return '';
+    const rows = this.groupPdfItemsIntoRows(items);
+    const columnSplit = this.detectPdfColumnSplit(rows);
+    const orderedRows = columnSplit == null
+      ? rows.sort((a, b) => b.y - a.y || a.x - b.x)
+      : [
+          ...rows.filter(row => row.x < columnSplit).sort((a, b) => b.y - a.y || a.x - b.x),
+          ...rows.filter(row => row.x >= columnSplit).sort((a, b) => b.y - a.y || a.x - b.x),
+        ];
+    const markdown = this.rowsToPdfMarkdownWithTables(orderedRows);
+    return [`## PDF 第 ${pageNumber} 页`, markdown].join('\n\n');
+  }
+
+  private groupPdfItemsIntoRows(items: PdfTextItem[]): Array<{ text: string; x: number; y: number; height: number }> {
+    const sorted = [...items].sort((a, b) => b.y - a.y || a.x - b.x);
+    const rows: Array<{ items: PdfTextItem[]; y: number }> = [];
+    for (const item of sorted) {
+      const row = rows.find(candidate => Math.abs(candidate.y - item.y) <= Math.max(2, item.height * 0.55));
+      if (row) row.items.push(item);
+      else rows.push({ y: item.y, items: [item] });
+    }
+    return rows.map(row => {
+      const rowItems = row.items.sort((a, b) => a.x - b.x);
+      return {
+        text: rowItems.map(item => item.str.trim()).filter(Boolean).join(' ').replace(/\s+/gu, ' '),
+        x: Math.min(...rowItems.map(item => item.x)),
+        y: row.y,
+        height: Math.max(...rowItems.map(item => item.height || 0)),
+      };
+    }).filter(row => row.text);
+  }
+
+  private detectPdfColumnSplit(rows: Array<{ x: number; text: string }>): number | undefined {
+    if (rows.length < 8) return undefined;
+    const xs = rows.map(row => row.x).sort((a, b) => a - b);
+    const gaps = xs.slice(1).map((x, index) => ({ gap: x - xs[index]!, left: xs[index]!, right: x })).sort((a, b) => b.gap - a.gap);
+    const largest = gaps[0];
+    if (!largest || largest.gap < 80) return undefined;
+    const leftCount = rows.filter(row => row.x <= largest.left).length;
+    const rightCount = rows.filter(row => row.x >= largest.right).length;
+    return leftCount >= 3 && rightCount >= 3 ? (largest.left + largest.right) / 2 : undefined;
+  }
+
+  private rowsToPdfMarkdownWithTables(rows: Array<{ text: string; height: number }>): string {
+    const output: string[] = [];
+    let index = 0;
+    while (index < rows.length) {
+      const tableRows: string[][] = [];
+      let cursor = index;
+      while (cursor < rows.length) {
+        const cells = this.splitLikelyTableRow(rows[cursor]!.text);
+        if (cells.length < 2) break;
+        tableRows.push(cells);
+        cursor += 1;
+      }
+      if (tableRows.length >= 2) {
+        output.push('### PDF 表格区域');
+        output.push(this.toMarkdownTable(tableRows[0]!, tableRows.slice(1)));
+        index = cursor;
+        continue;
+      }
+      output.push(this.pdfRowToMarkdown(rows[index]!.text, rows[index]!.height, index));
+      index += 1;
+    }
+    return output.join('\n');
+  }
+
+  private splitLikelyTableRow(text: string): string[] {
+    const byLargeSpaces = text.split(/\s{2,}/u).map(cell => cell.trim()).filter(Boolean);
+    if (byLargeSpaces.length >= 2) return byLargeSpaces;
+    const byPipes = text.split('|').map(cell => cell.trim()).filter(Boolean);
+    return byPipes.length >= 2 ? byPipes : [];
+  }
+
+  private pdfRowToMarkdown(text: string, height: number, index: number): string {
+    if (index === 0 && text.length <= 100) return `# ${text}`;
+    if (height >= 14 && text.length <= 120) return `## ${text}`;
+    if (/^(第[一二三四五六七八九十\d]+[章节]|\d+(?:\.\d+)*\s+)/u.test(text) && text.length <= 120) return `### ${text}`;
+    return text;
+  }
+
+  private toMarkdownDocument(text: string): string {
+    const lines = text.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+    return lines.map((line, index) => {
+      if (/^#{1,6}\s/u.test(line) || /^\|/u.test(line)) return line;
+      if (line.length <= 80 && !/[。！？.!?]$/u.test(line)) {
+        if (index === 0) return `# ${line}`;
+        if (/^(第[一二三四五六七八九十\d]+[章节]|\d+(?:\.\d+)*\s+)/u.test(line)) return `## ${line}`;
+        return `### ${line}`;
+      }
+      return line;
+    }).join('\n\n');
+  }
+
+  private normalizeMarkdownHeadings(text: string): string {
+    return text
+      .split(/\r?\n/u)
+      .map(line => {
+        const trimmed = line.trim();
+        if (!trimmed) return '';
+        if (/^#{1,6}\s/u.test(trimmed) || /^\|/u.test(trimmed)) return trimmed;
+        if (trimmed.length <= 80 && /^(第[一二三四五六七八九十\d]+[章节]|\d+(?:\.\d+)*\s+)/u.test(trimmed)) return `## ${trimmed}`;
+        return trimmed;
+      })
+      .join('\n');
+  }
+
   private extractSvg(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
     const raw = fs.readFileSync(file.absolutePath, 'utf8');
-    const texts = this.matchAll(raw, /<text\b[^>]*>([\s\S]*?)<\/text>/giu).map(value => this.stripXml(value)).slice(0, 300);
-    const titles = this.matchAll(raw, /<(?:title|desc)\b[^>]*>([\s\S]*?)<\/(?:title|desc)>/giu).map(value => this.stripXml(value)).slice(0, 100);
+    const nodes = this.extractSvgSemanticNodes(raw);
     return {
-      text: [this.metadataOnlyText(file), `SVG 标题/描述:\n${titles.join('\n')}`, `SVG 文本节点:\n${texts.join('\n')}`].join('\n'),
-      metadata: { extractionMode: 'svg_text_nodes', vectorizable: true, textNodeCount: texts.length, contentCoverage: 'svg_text_title_desc' },
+      text: [this.metadataOnlyText(file), 'SVG 层级语义节点:', ...nodes].join('\n'),
+      metadata: { extractionMode: 'svg_text_nodes', semanticExtractionMode: 'svg_semantic_tree_nodes', vectorizable: true, textNodeCount: nodes.length, contentCoverage: 'svg_hierarchical_text_title_desc' },
       warnings: [],
     };
+  }
+
+  private extractSvgSemanticNodes(raw: string): string[] {
+    const nodes: string[] = [];
+    const stack: string[] = [];
+    const tokenPattern = /<\/?([A-Za-z_][\w:.-]*)\b([^>]*)>|([^<>]+)/gu;
+    for (const match of raw.matchAll(tokenPattern)) {
+      const tag = match[1];
+      const attrs = match[2] ?? '';
+      const text = match[3]?.replace(/\s+/gu, ' ').trim();
+      const token = match[0];
+      if (tag && token.startsWith('</')) stack.pop();
+      else if (tag && !token.endsWith('/>')) {
+        const id = /\bid="([^"]+)"/u.exec(attrs)?.[1];
+        stack.push(id ? `${tag}#${id}` : tag);
+      } else if (text && ['text', 'title', 'desc'].includes(stack.at(-1)?.split('#')[0] ?? '')) {
+        nodes.push(`${stack.join(' > ')}: ${this.stripXml(text)}`);
+      }
+    }
+    return nodes;
   }
 
   private isTextReadable(file: ClassifiedFile): boolean {
@@ -1061,12 +1406,54 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
       return [`${prefix || 'value'}: ${String(value)}`];
     }
     if (Array.isArray(value)) {
-      return value.slice(0, 50).flatMap((item, index) => this.flattenJson(item, `${prefix}[${index}]`));
+      return value.flatMap((item, index) => this.flattenJson(item, `${prefix}[${index}]`));
     }
     if (typeof value === 'object') {
       return Object.entries(value as Record<string, unknown>).flatMap(([key, item]) => this.flattenJson(item, prefix ? `${prefix}.${key}` : key));
     }
     return [];
+  }
+
+  private atomicJsonObjects(value: unknown, prefix = '$'): string[] {
+    if (value == null || typeof value !== 'object') return [];
+    if (Array.isArray(value)) return value.flatMap((item, index) => this.atomicJsonObjects(item, `${prefix}[${index}]`));
+    const entries = Object.entries(value as Record<string, unknown>);
+    const current = `${prefix}: ${JSON.stringify(value)}`;
+    const children = entries.flatMap(([key, item]) => this.atomicJsonObjects(item, `${prefix}.${key}`));
+    return [current, ...children];
+  }
+
+  private flattenYamlByIndent(raw: string): string[] {
+    const stack: Array<{ indent: number; key: string }> = [];
+    const lines: string[] = [];
+    for (const line of raw.split(/\r?\n/u)) {
+      if (!line.trim() || /^\s*#/u.test(line)) continue;
+      const match = /^(\s*)([-\w.]+)\s*:\s*(.*)$/u.exec(line);
+      if (!match) continue;
+      const indent = match[1]!.length;
+      const key = match[2]!;
+      const value = match[3]!.trim();
+      while (stack.length > 0 && stack.at(-1)!.indent >= indent) stack.pop();
+      const pathName = [...stack.map(item => item.key), key].join('.');
+      if (value) lines.push(`${pathName}: ${value}`);
+      stack.push({ indent, key });
+    }
+    return lines;
+  }
+
+  private flattenXmlPaths(raw: string): string[] {
+    const lines: string[] = [];
+    const stack: string[] = [];
+    const tokenPattern = /<\/?([A-Za-z_][\w:.-]*)\b[^>]*>|([^<>]+)/gu;
+    for (const match of raw.matchAll(tokenPattern)) {
+      const tag = match[1];
+      const text = match[2]?.replace(/\s+/gu, ' ').trim();
+      const token = match[0];
+      if (tag && token.startsWith('</')) stack.pop();
+      else if (tag && !token.endsWith('/>')) stack.push(tag);
+      else if (text && stack.length > 0) lines.push(`${stack.join('.')}: ${this.stripXml(text)}`);
+    }
+    return lines.filter(line => !line.endsWith(':'));
   }
 
   private metadataOnlyText(file: ClassifiedFile): string {

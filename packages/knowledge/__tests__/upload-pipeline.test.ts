@@ -75,7 +75,7 @@ describe('FileClassifier', () => {
     ['.dxf', 'cad', 'autocad'],
     ['.step', 'cad', 'step'],
     ['.drawio', 'diagram', 'drawio'],
-    ['.zip', 'archive', 'zip'],
+    ['.zip', 'other', 'unknown'],
     ['.sh', 'code', 'shell'],
     ['.sql', 'code', 'sql'],
   ];

@@ -10,13 +10,14 @@
     "lint": "turbo run lint",
     "test": "vitest run",
     "test:watch": "vitest",
+    "doctor:hnsw": "node packages/knowledge/scripts/install-hnsw.cjs",
     "start:cli": "pnpm --filter customize-agent start",
     "check": "turbo run typecheck lint && vitest run",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release:version": "changeset version && pnpm install",
-    "release:publish": "pnpm run check && pnpm run build && changeset publish",
-    "release": "pnpm run build && changeset publish"
+    "release:publish": "pnpm run release",
+    "release": "pnpm run check && pnpm run build && changeset publish"
   },
   "keywords": [
     "ai-agent",
@@ -38,6 +39,7 @@
     "@next/eslint-plugin-next": "^16.2.9",
     "@types/node": "^25.9.3",
     "eslint": "^10.5.0",
+    "node-gyp": "^13.0.1",
     "turbo": "^2.9.18",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.61.0",
