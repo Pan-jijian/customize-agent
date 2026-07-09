@@ -30,19 +30,55 @@ jobs:
       - name: Pack and install CLI
         shell: bash
         run: |
-          cd apps/cli
-          npm pack --json > pack.json
-          TGZ=$(node -e "const p=require('./pack.json')[0];console.log(require('path').resolve(process.cwd(),p.filename))")
+          rm -f "$RUNNER_TEMP"/customize-agent-*.tgz "$RUNNER_TEMP"/customize-agent-server-*.tgz
+          pnpm --filter customize-agent pack --pack-destination "$RUNNER_TEMP"
+          pnpm --filter @customize-agent/server pack --pack-destination "$RUNNER_TEMP"
+          TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-.*\\.tgz$/.test(name) && !name.startsWith('customize-agent-server-'));if(!file) throw new Error('customize-agent tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
+          SERVER_TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-server-.*\\.tgz$/.test(name));if(!file) throw new Error('customize-agent server tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
           mkdir -p "$RUNNER_TEMP/install-root"
-          npm install "$TGZ" --prefix "$RUNNER_TEMP/install-root" --ignore-scripts=false --foreground-scripts
+          npm install "$TGZ" "$SERVER_TGZ" --prefix "$RUNNER_TEMP/install-root" --ignore-scripts=false --foreground-scripts
           test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize.cmd"
           test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent.cmd"
-      - name: Start CLI and verify dashboard
+          node -e "const root=process.env.RUNNER_TEMP + '/install-root'; const path=require('path'); const serverPkg=require(require.resolve('@customize-agent/server/package.json',{paths:[root]})); const nextPkg=require(require.resolve('next/package.json',{paths:[path.dirname(require.resolve('@customize-agent/server/package.json',{paths:[root]}))]})); if (nextPkg.version !== '15.5.19') throw new Error('unexpected next version ' + nextPkg.version); console.log('Installed server/next:', serverPkg.version, nextPkg.version)"
+      - name: Start installed CLI and verify dashboard
         shell: bash
         run: |
           export HOME="$RUNNER_TEMP/home"
+          export CUSTOMIZE_AGENT_HOME="$RUNNER_TEMP/home"
+          export CUSTOMIZE_DASHBOARD_PORT=17331
+          export CUSTOMIZE_AGENT_E2E_DASHBOARD=1
+          export CUSTOMIZE_DASHBOARD_START_TIMEOUT_MS=180000
           node "$RUNNER_TEMP/install-root/node_modules/customize-agent/dist/index.js" > "$RUNNER_TEMP/cli.log" 2>&1 &
-          node apps/cli/scripts/ci-check-dashboard.cjs
+          CLI_PID=$!
+          node <<'NODE'
+          const fs = require('node:fs');
+          const logPath = `${process.env.RUNNER_TEMP}/cli.log`;
+          const base = `http://127.0.0.1:${process.env.CUSTOMIZE_DASHBOARD_PORT}`;
+          const deadline = Date.now() + 180000;
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function waitForReady() {
+            while (Date.now() < deadline) {
+              const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
+              if (/Dashboard ready:/.test(log)) return;
+              await sleep(1000);
+            }
+            throw new Error(`CLI dashboard did not report ready. Log:\n${fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : ''}`);
+          }
+          async function expectOk(path) {
+            const response = await fetch(`${base}${path}`);
+            if (!response.ok) throw new Error(`${path} returned ${response.status}: ${await response.text()}`);
+          }
+          (async () => {
+            await waitForReady();
+            await expectOk('/api/health');
+            await expectOk('/overview');
+            console.log('Installed CLI dashboard smoke test passed');
+          })().catch(error => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
+          kill "$CLI_PID" || true
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
@@ -81,6 +117,54 @@ jobs:
       - run: pnpm run build
 
       - run: pnpm run test
+
+      - name: Verify packed CLI dashboard before publish
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP"/customize-agent-*.tgz "$RUNNER_TEMP"/customize-agent-server-*.tgz
+          pnpm --filter customize-agent pack --pack-destination "$RUNNER_TEMP"
+          pnpm --filter @customize-agent/server pack --pack-destination "$RUNNER_TEMP"
+          TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-.*\\.tgz$/.test(name) && !name.startsWith('customize-agent-server-'));if(!file) throw new Error('customize-agent tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
+          SERVER_TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-server-.*\\.tgz$/.test(name));if(!file) throw new Error('customize-agent server tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
+          mkdir -p "$RUNNER_TEMP/release-install-root"
+          npm install "$TGZ" "$SERVER_TGZ" --prefix "$RUNNER_TEMP/release-install-root" --ignore-scripts=false --foreground-scripts
+          node -e "const root=process.env.RUNNER_TEMP + '/release-install-root'; const path=require('path'); const serverPkg=require(require.resolve('@customize-agent/server/package.json',{paths:[root]})); const nextPkg=require(require.resolve('next/package.json',{paths:[path.dirname(require.resolve('@customize-agent/server/package.json',{paths:[root]}))]})); if (nextPkg.version !== '15.5.19') throw new Error('unexpected next version ' + nextPkg.version); console.log('Installed server/next:', serverPkg.version, nextPkg.version)"
+          export HOME="$RUNNER_TEMP/release-home"
+          export CUSTOMIZE_AGENT_HOME="$RUNNER_TEMP/release-home"
+          export CUSTOMIZE_DASHBOARD_PORT=17332
+          export CUSTOMIZE_AGENT_E2E_DASHBOARD=1
+          export CUSTOMIZE_DASHBOARD_START_TIMEOUT_MS=180000
+          node "$RUNNER_TEMP/release-install-root/node_modules/customize-agent/dist/index.js" > "$RUNNER_TEMP/release-cli.log" 2>&1 &
+          CLI_PID=$!
+          node <<'NODE'
+          const fs = require('node:fs');
+          const logPath = `${process.env.RUNNER_TEMP}/release-cli.log`;
+          const base = `http://127.0.0.1:${process.env.CUSTOMIZE_DASHBOARD_PORT}`;
+          const deadline = Date.now() + 180000;
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function waitForReady() {
+            while (Date.now() < deadline) {
+              const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
+              if (/Dashboard ready:/.test(log)) return;
+              await sleep(1000);
+            }
+            throw new Error(`Release dashboard did not report ready. Log:\n${fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : ''}`);
+          }
+          async function expectOk(path) {
+            const response = await fetch(`${base}${path}`);
+            if (!response.ok) throw new Error(`${path} returned ${response.status}: ${await response.text()}`);
+          }
+          (async () => {
+            await waitForReady();
+            await expectOk('/api/health');
+            await expectOk('/overview');
+            console.log('Release packed CLI dashboard smoke test passed');
+          })().catch(error => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
+          kill "$CLI_PID" || true
 
       - name: Create Release PR or Publish to npm
         id: changesets

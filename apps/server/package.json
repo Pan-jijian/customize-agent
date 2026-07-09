@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/server",
-  "version": "4.0.4",
+  "version": "4.0.5",
   "description": "Customize Agent Web 管理控制台",
   "exports": {
     "./package.json": "./package.json"
@@ -48,13 +48,13 @@
     "lucide-react": "^0.400.0",
     "mammoth": "^1.12.0",
     "marked": "^15.0.12",
-    "next": "^15.1.0",
+    "next": "15.5.19",
     "next-themes": "^0.4.0",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^5.4.394",
     "playwright": "^1.57.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
     "tesseract.js": "^7.0.0",
     "xlsx": "^0.18.5"
   },
