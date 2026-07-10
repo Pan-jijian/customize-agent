@@ -2,7 +2,6 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import { getConfigStore } from '@/services/configService';
 
 interface ModelUsage {
   provider: string;
@@ -13,9 +12,10 @@ interface ModelUsage {
 interface StatsResponse {
   cpu: { usagePercent: number; cores: number };
   memory: { totalMB: number; usedMB: number; processMB: number; usagePercent: number };
-  tokens: { total: number };
+  tokens: { total: number; prompt: number; completion: number };
   models: ModelUsage[];
-  tasks: { total: number; success: number; failed: number; types: Record<string, number> };
+  tasks: { total: number; success: number; failed: number; running: number; types: Record<string, number> };
+  logs: { files: number; events: number; latestAt?: string; scannedDirs: string[] };
   uptime: number;
 }
 
@@ -53,73 +53,104 @@ function addModelUsage(modelMap: Map<string, ModelUsage>, provider: string, mode
   modelMap.set(key, entry);
 }
 
-/** 当日志中无模型调用记录时，从配置中读取当前启用的模型作为降级展示 */
-function configuredModelsFallback(): ModelUsage[] {
-  try {
-    const models = getConfigStore().load().models;
-    const result: ModelUsage[] = [];
-    for (const tier of ['action', 'reasoning', 'reader'] as const) {
-      const active = models[tier].list.find(model => model.name === models[tier].active) ?? models[tier].list[0];
-      if (active && !result.some(item => item.provider === active.provider && item.model === active.name)) {
-        result.push({ provider: active.provider, model: active.name, count: 0 });
-      }
-    }
-    return result;
-  } catch {
-    return [];
-  }
+function candidateLogDirs(): string[] {
+  const dirs = [
+    process.env.CUSTOMIZE_AGENT_HOME ? path.join(process.env.CUSTOMIZE_AGENT_HOME, '.customize-agent', 'logs') : undefined,
+    process.env.HOME ? path.join(process.env.HOME, '.customize-agent', 'logs') : undefined,
+    process.env.USERPROFILE ? path.join(process.env.USERPROFILE, '.customize-agent', 'logs') : undefined,
+    path.join(os.homedir(), '.customize-agent', 'logs'),
+    path.join(os.tmpdir(), 'customize-agent', 'logs'),
+  ].filter(Boolean) as string[];
+  return [...new Set(dirs.map(dir => path.resolve(dir)))];
+}
+
+function parseModelLabel(provider: string, model: string): { provider: string; model: string } {
+  const p = provider.trim();
+  const m = model.trim();
+  if (p && m && p !== m) return { provider: p.split('/')[0] || p, model: m.split('/').pop() || m };
+  const label = m || p;
+  if (!label) return { provider: '?', model: '?' };
+  const parts = label.split('/').filter(Boolean);
+  if (parts.length >= 2) return { provider: parts[0], model: parts.slice(1).join('/') };
+  return { provider: '?', model: label };
 }
 
 /** 扫描日志目录，统计 Token 消耗、模型使用次数、任务完成情况 */
-function scanLogs(): { tokens: number; models: ModelUsage[]; tasks: { total: number; success: number; failed: number; types: Record<string, number> } } {
-  const logDir = path.join(os.homedir(), '.customize-agent', 'logs');
-  let tokens = 0;
+function scanLogs(): { tokens: { total: number; prompt: number; completion: number }; models: ModelUsage[]; tasks: { total: number; success: number; failed: number; running: number; types: Record<string, number> }; logs: { files: number; events: number; latestAt?: string; scannedDirs: string[] } } {
+  let promptTokens = 0;
+  let completionTokens = 0;
   const modelMap = new Map<string, ModelUsage>();
   const taskTypes: Record<string, number> = {};
-  let total = 0;
-  let success = 0;
-  let failed = 0;
+  const taskState = new Map<string, { started: number; finished: number; failed: number }>();
+  let latestAt = '';
+  let events = 0;
+  const files: string[] = [];
+  const scannedDirs = candidateLogDirs();
 
-  try {
-    const files = fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl'));
-    for (const file of files) {
-      const content = fs.readFileSync(path.join(logDir, file), 'utf-8');
+  for (const logDir of scannedDirs) {
+    try {
+      for (const file of fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl'))) {
+        files.push(path.join(logDir, file));
+      }
+    } catch { /* 日志目录不存在 */ }
+  }
+
+  for (const filePath of [...new Set(files)].sort()) {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
       let sessionProvider = '';
       let sessionModel = '';
       for (const line of content.split('\n').filter(Boolean)) {
         try {
           const evt = JSON.parse(line);
+          events++;
+          if (typeof evt.timestamp === 'string' && evt.timestamp > latestAt) latestAt = evt.timestamp;
+          const sessionId = String(evt.sessionId || path.basename(filePath, '.jsonl'));
+          const state = taskState.get(sessionId) || { started: 0, finished: 0, failed: 0 };
           if (evt.event === 'session_metadata' && evt.payload) {
-            sessionProvider = String(evt.payload.provider || '').split('/')[0] || String(evt.payload.provider || '');
-            sessionModel = String(evt.payload.model || '').split('/').pop() || String(evt.payload.model || '');
+            sessionProvider = String(evt.payload.provider || '');
+            sessionModel = String(evt.payload.model || '');
           }
           if (evt.event === 'llm_response' && evt.payload) {
             const prompt = Number(evt.payload.prompt ?? evt.payload.promptTokens) || 0;
             const completion = Number(evt.payload.completion ?? evt.payload.completionTokens) || 0;
-            tokens += prompt + completion;
-            addModelUsage(modelMap, sessionProvider, sessionModel);
+            promptTokens += prompt;
+            completionTokens += completion;
+            const parsed = parseModelLabel(sessionProvider, sessionModel);
+            addModelUsage(modelMap, parsed.provider, parsed.model);
           }
           if (evt.event === 'task_start' && evt.payload) {
-            total++;
-            const t = classifyTask(String(evt.payload.task || 'chat'));
-            taskTypes[t] = (taskTypes[t] || 0) + 1;
+            state.started++;
+            const taskType = classifyTask(String(evt.payload.task || 'chat'));
+            taskTypes[taskType] = (taskTypes[taskType] || 0) + 1;
           }
           if (evt.event === 'task_finish') {
-            const summary = String(evt.payload?.summary || '');
-            if (summary.includes('success') || summary.includes('成功')) success++;
-            else if (summary.includes('fail') || summary.includes('error') || summary.includes('失败')) failed++;
-            else success++;
+            state.finished++;
+            const summary = String(evt.payload?.summary || '').toLowerCase();
+            if (summary.includes('fail') || summary.includes('error') || summary.includes('失败')) state.failed++;
           }
+          if (evt.event === 'error') state.failed++;
+          taskState.set(sessionId, state);
         } catch { /* 跳过格式错误的行 */ }
       }
-    }
-  } catch { /* 尚无日志，跳过 */ }
+    } catch { /* 跳过不可读文件 */ }
+  }
 
+  let total = 0;
+  let failed = 0;
+  let running = 0;
+  for (const state of taskState.values()) {
+    total += state.started;
+    failed += Math.min(state.started, state.failed);
+    running += Math.max(0, state.started - state.finished);
+  }
+  const success = Math.max(0, total - failed - running);
   const models = [...modelMap.values()].sort((a, b) => b.count - a.count).slice(0, 10);
   return {
-    tokens,
-    models: models.length > 0 ? models : configuredModelsFallback(),
-    tasks: { total, success, failed, types: taskTypes },
+    tokens: { total: promptTokens + completionTokens, prompt: promptTokens, completion: completionTokens },
+    models,
+    tasks: { total, success, failed, running, types: taskTypes },
+    logs: { files: new Set(files).size, events, latestAt: latestAt || undefined, scannedDirs },
   };
 }
 
@@ -143,9 +174,10 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<StatsR
         processMB: Math.round(procMem.rss / 1024 / 1024),
         usagePercent: Math.round(((memTotal - memFree) / memTotal) * 100),
       },
-      tokens: { total: stats.tokens },
+      tokens: stats.tokens,
       models: stats.models,
       tasks: stats.tasks,
+      logs: stats.logs,
       uptime: process.uptime(),
     });
   } catch (e: unknown) {

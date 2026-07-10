@@ -379,9 +379,10 @@ export async function getHealth() { return fetchJson<{ status: string; uptime: n
 export interface SystemStats {
   cpu: { usagePercent: number; cores: number };
   memory: { totalMB: number; usedMB: number; processMB: number; usagePercent: number };
-  tokens: { total: number };
+  tokens: { total: number; prompt: number; completion: number };
   models: { provider: string; model: string; count: number }[];
-  tasks: { total: number; success: number; failed: number; types: Record<string, number> };
+  tasks: { total: number; success: number; failed: number; running: number; types: Record<string, number> };
+  logs: { files: number; events: number; latestAt?: string; scannedDirs: string[] };
   uptime: number;
 }
 export async function getSystemStats() { return fetchJson<SystemStats>('/api/system/stats'); }

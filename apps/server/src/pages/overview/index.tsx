@@ -43,12 +43,16 @@ export default function OverviewPage() {
   const memColor = (stats?.memory.usagePercent ?? 0) > 80 ? 'var(--colorDanger)' : (stats?.memory.usagePercent ?? 0) > 50 ? 'var(--colorWarning)' : 'var(--colorOk)';
   const successRate = stats?.tasks.total ? Math.round((stats.tasks.success / stats.tasks.total) * 100) : 0;
   const topModel = stats?.models?.[0];
+  const latestLogTime = stats?.logs.latestAt ? new Date(stats.logs.latestAt).toLocaleString() : '暂无日志';
 
   return (
     <div className="space-y-6 animateFadeIn">
       <div className="flex items-center justify-between">
         <div><h1 className="pageTitle">{t('overview.title')}</h1><p className="pageDesc">{t('overview.description')}</p></div>
-        <Button icon={<ReloadOutlined spin={loading} />} loading={loading} onClick={() => { void load(); }}>{t('common.retry')}</Button>
+        <Space>
+          <span style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>统计更新：{latestLogTime}</span>
+          <Button icon={<ReloadOutlined spin={loading} />} loading={loading} onClick={() => { void load(); }}>{t('common.retry')}</Button>
+        </Space>
       </div>
 
       {/* CPU + 内存 */}
@@ -77,10 +81,16 @@ export default function OverviewPage() {
           <Card size="small"><Statistic title="运行时间" value={stats ? Math.floor(stats.uptime / 3600) : 0} suffix="小时" prefix={<ApiOutlined />} /></Card>
         </Col>
         <Col xs={12} sm={6}>
-          <Card size="small"><Statistic title={t('overview.tokensUsed')} value={stats?.tokens.total ?? 0} prefix={<ThunderboltOutlined />} /></Card>
+          <Card size="small">
+            <Statistic title={t('overview.tokensUsed')} value={stats?.tokens.total ?? 0} prefix={<ThunderboltOutlined />} />
+            <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>Prompt {stats?.tokens.prompt ?? 0} / Completion {stats?.tokens.completion ?? 0}</div>
+          </Card>
         </Col>
         <Col xs={12} sm={6}>
-          <Card size="small"><Statistic title={t('overview.tasksTotal')} value={stats?.tasks.total ?? 0} prefix={<FileTextOutlined />} /></Card>
+          <Card size="small">
+            <Statistic title={t('overview.tasksTotal')} value={stats?.tasks.total ?? 0} prefix={<FileTextOutlined />} />
+            <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>成功 {stats?.tasks.success ?? 0} / 失败 {stats?.tasks.failed ?? 0} / 运行中 {stats?.tasks.running ?? 0}</div>
+          </Card>
         </Col>
         <Col xs={12} sm={6}>
           <Card size="small"><Statistic title={t('overview.successRate')} value={successRate} suffix="%" prefix={successRate > 80 ? <CheckCircleOutlined style={{ color: 'var(--colorOk)' }} /> : <CloseCircleOutlined style={{ color: 'var(--colorDanger)' }} />} /></Card>
@@ -120,6 +130,9 @@ export default function OverviewPage() {
           <Col xs={24} sm={12} md={8} lg={4}>
             <Card size="small" style={{ height: '100%' }}><Statistic title="模型供应商" value={providerCount} prefix={<RobotOutlined style={{ color: 'var(--colorAccent)' }} />} /></Card>
           </Col>
+          <Col xs={24} sm={12} md={8} lg={4}>
+            <Card size="small" style={{ height: '100%' }}><Statistic title="审计日志" value={stats?.logs.events ?? 0} suffix="条" prefix={<ApiOutlined style={{ color: 'var(--colorOk)' }} />} /></Card>
+          </Col>
         </Row>
       </Card>
 
@@ -137,14 +150,14 @@ export default function OverviewPage() {
                   </div>
                 </div>
               </div>
-            ) : <span style={{ color: 'var(--colorTextSecondary)' }}>{t('common.noData')}</span>}
+            ) : <span style={{ color: 'var(--colorTextSecondary)' }}>暂无真实模型调用日志</span>}
           </Card>
         </Col>
         <Col xs={24} sm={12}>
           <Card size="small" title={t('overview.taskTypes')} style={{ height: '100%' }}>
             {stats?.tasks.types && Object.keys(stats.tasks.types).length > 0 ? (
               <Space wrap>
-                {Object.entries(stats.tasks.types).map(([taskType, count]) => (
+                {Object.entries(stats.tasks.types).sort((a, b) => b[1] - a[1]).map(([taskType, count]) => (
                   <Tag key={taskType}>{taskType.slice(0, 30)}: {count}</Tag>
                 ))}
               </Space>
