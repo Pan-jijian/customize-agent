@@ -10,6 +10,24 @@ export interface VectorIndexResult {
   embeddingDimension: number;
 }
 
+export interface VectorIndexProgress {
+  collectionName: string;
+  processedChunks: number;
+  totalChunks: number;
+  batchSize: number;
+}
+
+export interface VectorIndexOptions {
+  batchSize?: number;
+  onProgress?: (progress: VectorIndexProgress) => void;
+}
+
+function resolveVectorIndexBatchSize(configured?: number): number {
+  const raw = configured ?? Number(process.env.CUSTOMIZE_VECTOR_INDEX_BATCH_SIZE ?? process.env.KB_VECTOR_INDEX_BATCH_SIZE);
+  if (!Number.isFinite(raw) || raw <= 0) return 32;
+  return Math.max(1, Math.min(256, Math.floor(raw)));
+}
+
 /** 向量索引器，负责将文本切片生成 Embedding 并写入向量存储 */
 export class VectorIndexer {
   constructor(
@@ -17,26 +35,37 @@ export class VectorIndexer {
     private readonly vectorStores: Map<string, VectorStoreInterface>,
   ) {}
 
-  async indexChunks(chunks: StoredChunk[]): Promise<VectorIndexResult[]> {
+  async indexChunks(chunks: StoredChunk[], options: VectorIndexOptions = {}): Promise<VectorIndexResult[]> {
     const byCollection = this.groupByCollection(chunks);
     const results: VectorIndexResult[] = [];
+    const totalChunks = chunks.length;
+    let processedTotalChunks = 0;
 
     for (const [collectionName, collectionChunks] of byCollection) {
       const store = this.vectorStores.get(collectionName);
       if (!store) continue;
 
-      const texts = collectionChunks.map(chunk => chunk.content);
-      const embeddings = await this.embedDocuments(texts);
       await store.ensureCollection({
         embedding_model: this.embeddingProvider.model,
         embedding_dimension: this.embeddingProvider.dimensions,
       });
-      const documents = collectionChunks.map((chunk, index) => this.toVectorDocument(chunk, embeddings[index] ?? []));
-      await store.upsert(documents);
+
+      const batchSize = resolveVectorIndexBatchSize(options.batchSize);
+      let processedChunks = 0;
+      for (let offset = 0; offset < collectionChunks.length; offset += batchSize) {
+        const batchChunks = collectionChunks.slice(offset, offset + batchSize);
+        const texts = batchChunks.map(chunk => chunk.content);
+        const embeddings = await this.embedDocuments(texts);
+        const documents = batchChunks.map((chunk, index) => this.toVectorDocument(chunk, embeddings[index] ?? []));
+        await store.upsert(documents);
+        processedChunks += documents.length;
+        processedTotalChunks += documents.length;
+        options.onProgress?.({ collectionName, processedChunks: processedTotalChunks, totalChunks, batchSize: documents.length });
+      }
 
       results.push({
         collectionName,
-        chunkCount: documents.length,
+        chunkCount: processedChunks,
         embeddingModel: this.embeddingProvider.model,
         embeddingDimension: this.embeddingProvider.dimensions,
       });

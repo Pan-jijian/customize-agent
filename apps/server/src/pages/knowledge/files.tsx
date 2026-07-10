@@ -5,7 +5,7 @@ import { useRouter } from 'next/router';
 import { Card, Table, Button, Input, Select, Tag, Modal, Space, App, Progress, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { UploadOutlined, SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined } from '@ant-design/icons';
-import { getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbOperation, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, type KbFileItem, type KbOperationRecord } from '@/lib/api';
+import { getJob, getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbOperation, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, reindexKbFile, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
@@ -47,6 +47,7 @@ export default function FilesPage() {
   const [sourceFilter, setSourceFilter] = useState<'all' | 'user' | 'builtIn'>('user');
   const [statusCollapsed, setStatusCollapsed] = useState(true);
   const [expandedRowKeys, setExpandedRowKeys] = useState<React.Key[]>([]);
+  const [reindexingFiles, setReindexingFiles] = useState<Set<string>>(new Set());
   const categoryRef = useRef(category);
 
   useEffect(() => { categoryRef.current = category; }, [category]);
@@ -155,9 +156,12 @@ export default function FilesPage() {
   }, [statusStats.processing]);
   useEffect(() => {
     if (statusStats.processing === 0) return;
-    const timer = window.setInterval(() => { void loadOperations(); }, 1000);
+    const timer = window.setInterval(() => {
+      void loadOperations();
+      void loadFiles();
+    }, 1500);
     return () => window.clearInterval(timer);
-  }, [loadOperations, statusStats.processing]);
+  }, [loadFiles, loadOperations, statusStats.processing]);
 
   const filteredStatusItems = statusFilter === 'all'
     ? statusItems
@@ -232,18 +236,45 @@ export default function FilesPage() {
   const handleReindexAll = async () => {
     setReindexingAll(true);
     const localReindexId = `reindex-ui-${Date.now()}`;
-    upsertStatusItem({ id: localReindexId, type: 'reindex', title: '重新解析入库', description: '已提交全量重新解析、切片和入库任务', status: 'processing', percent: 10 });
+    upsertStatusItem({ id: localReindexId, type: 'reindex', title: '重新解析入库', description: '正在提交后台任务', status: 'processing', percent: 5 });
     try {
       const result = await reindexKb();
       const reindexId = result.operationId || localReindexId;
-      message.success('已提交重新解析入库任务');
-      upsertStatusItem({ id: reindexId, type: 'reindex', title: '重新解析入库', description: '后台将重新扫描文件、解析、切片并重建索引', status: 'processing', percent: 20 }, ['重新解析入库']);
-      for (let i = 0; i < 180; i++) {
-        const operations = await getKbOperations();
-        const current = operations.operations.find(item => item.id === result.operationId);
+      const initialJob = result.job;
+      message.info(result.alreadyRunning ? '已有重新解析任务正在后台执行' : '已提交重新解析入库任务，可在顶部“后台任务”查看进度');
+      upsertStatusItem({
+        id: reindexId,
+        type: 'reindex',
+        title: initialJob?.title || '重新解析入库',
+        description: initialJob?.message || '后台将重新扫描文件、解析、切片并重建索引',
+        status: initialJob?.status || 'processing',
+        percent: initialJob?.percent ?? 10,
+        error: initialJob?.error,
+      }, ['重新解析入库']);
+
+      for (let i = 0; i < 360; i++) {
+        const current = await getJob(reindexId).then(response => response.job).catch(async () => {
+          const operations = await getKbOperations();
+          return operations.operations.find(item => item.id === reindexId);
+        });
         if (current) {
-          upsertStatusItem({ id: reindexId, type: current.status === 'error' ? 'error' : 'reindex', title: current.status === 'success' ? '重新解析入库完成' : current.status === 'error' ? '重新解析入库失败' : '重新解析入库', description: current.message, status: current.status, percent: current.percent });
-          if (current.status === 'success' || current.status === 'error') break;
+          const done = current.status === 'success' || current.status === 'error';
+          upsertStatusItem({
+            id: reindexId,
+            type: current.status === 'error' ? 'error' : 'reindex',
+            title: current.status === 'success' ? '重新解析入库完成' : current.status === 'error' ? '重新解析入库失败' : current.title,
+            description: current.error || current.message,
+            status: current.status,
+            percent: current.percent,
+            filePath: current.filePath,
+            chunkCount: current.chunkCount,
+            error: current.error,
+          });
+          if (done) {
+            if (current.status === 'success') message.success(current.message || '重新解析入库完成');
+            else message.error(current.error || current.message || '重新解析入库失败');
+            break;
+          }
         }
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
@@ -255,6 +286,73 @@ export default function FilesPage() {
       upsertStatusItem({ id: localReindexId, type: 'error', title: '重新解析入库失败', description, status: 'error', percent: 100 }, ['重新解析入库', '重新解析入库完成', '重新解析入库失败']);
     } finally {
       setReindexingAll(false);
+    }
+  };
+
+  const handleReindexFile = async (record: KbFileItem) => {
+    if (record.builtIn) {
+      message.info('内置示例资料不可重新解析');
+      return;
+    }
+    const localId = `file-reindex-ui-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setReindexingFiles(prev => new Set(prev).add(record.relativePath));
+    upsertStatusItem({ id: localId, type: 'reindex', title: `重新解析 ${record.relativePath}`, description: '正在提交单文件后台任务', status: 'processing', percent: 5, filePath: record.relativePath });
+    try {
+      const result = await reindexKbFile(record.relativePath);
+      const operationId = result.operationId || localId;
+      const initialJob = result.job;
+      message.info(result.alreadyRunning ? '已有知识库任务正在后台执行' : '已提交单文件重新解析任务');
+      upsertStatusItem({
+        id: operationId,
+        type: 'reindex',
+        title: initialJob?.title || `重新解析 ${record.relativePath}`,
+        description: initialJob?.message || '后台将重新解析、分块并入库该文件',
+        status: initialJob?.status || 'processing',
+        percent: initialJob?.percent ?? 10,
+        filePath: initialJob?.filePath || record.relativePath,
+        chunkCount: initialJob?.chunkCount,
+        error: initialJob?.error,
+      }, [`重新解析 ${record.relativePath}`]);
+
+      for (let i = 0; i < 240; i++) {
+        const current = await getJob(operationId).then(response => response.job).catch(async () => {
+          const operations = await getKbOperations();
+          return operations.operations.find(item => item.id === operationId);
+        });
+        if (current) {
+          const done = current.status === 'success' || current.status === 'error';
+          upsertStatusItem({
+            id: operationId,
+            type: current.status === 'error' ? 'error' : 'reindex',
+            title: current.status === 'success' ? `重新解析完成 ${record.relativePath}` : current.status === 'error' ? `重新解析失败 ${record.relativePath}` : current.title,
+            description: current.error || current.message,
+            status: current.status,
+            percent: current.percent,
+            filePath: current.filePath || record.relativePath,
+            chunkCount: current.chunkCount,
+            error: current.error,
+          });
+          await loadFiles();
+          if (done) {
+            if (current.status === 'success') message.success(current.message || '单文件重新解析完成');
+            else message.error(current.error || current.message || '单文件重新解析失败');
+            break;
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      await loadFiles();
+      await loadOperations();
+    } catch (error) {
+      const description = error instanceof Error ? error.message : '单文件重新解析失败';
+      message.error(description);
+      upsertStatusItem({ id: localId, type: 'error', title: `重新解析失败 ${record.relativePath}`, description, status: 'error', percent: 100, filePath: record.relativePath }, [`重新解析 ${record.relativePath}`]);
+    } finally {
+      setReindexingFiles(prev => {
+        const next = new Set(prev);
+        next.delete(record.relativePath);
+        return next;
+      });
     }
   };
 
@@ -525,8 +623,15 @@ export default function FilesPage() {
         : r.file?.builtIn ? <Tag color="gold">内置示例</Tag> : <Tag color="cyan">我的文件</Tag>,
     },
     {
-      title: '', key: 'act', width: 50,
-      render: (_: unknown, r: FileTreeNode) => r.isFolder ? null : <Button type="text" danger size="small" disabled={r.file?.builtIn} icon={<DeleteOutlined />} onClick={() => handleDelete(r.file!)} />,
+      title: '', key: 'act', width: 100,
+      render: (_: unknown, r: FileTreeNode) => r.isFolder ? null : (
+        <Space size={4}>
+          <Tooltip title="重新解析、分块并入库">
+            <Button type="text" size="small" disabled={r.file?.builtIn} loading={Boolean(r.file && reindexingFiles.has(r.file.relativePath))} icon={<SyncOutlined />} onClick={() => { void handleReindexFile(r.file!); }} />
+          </Tooltip>
+          <Button type="text" danger size="small" disabled={r.file?.builtIn} icon={<DeleteOutlined />} onClick={() => handleDelete(r.file!)} />
+        </Space>
+      ),
     },
   ];
 

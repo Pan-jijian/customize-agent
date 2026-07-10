@@ -3,6 +3,7 @@
 import { useTheme } from 'next-themes';
 import { useAppLocale, useAppTranslations } from '@/components/Layout';
 import { Sun, Moon, Languages } from 'lucide-react';
+import { JobStatus } from '@/components/JobStatus';
 
 /** 顶部导航栏：主题切换与语言切换按钮 */
 export function Header() {
@@ -20,6 +21,7 @@ export function Header() {
   return (
     <header className="topbar">
       <div className="flex-1" />
+      <JobStatus />
       <button onClick={toggleTheme} className="topbarBtn">
         {isDark ? <Sun size={14} /> : <Moon size={14} />}
         <span>{isDark ? t('light') : t('dark')}</span>

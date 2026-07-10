@@ -1,7 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
-import { ensureBuiltInKnowledgeBase, getMultiProjectManager, getProjectRoot, isBuiltInKnowledgeFile } from '@/services/kbService';
+import { computeProjectId, IndexStateStore } from '@customize-agent/knowledge';
+import { getMultiProjectManager, getProjectRoot, isBuiltInKnowledgeFile } from '@/services/kbService';
 import { upsertKbOperation } from '@/services/kbOperationLog';
 import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
@@ -68,17 +70,23 @@ function scanKnowledgeBaseFiles(projectRoot: string): FastFile[] {
   return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath, 'zh-CN'));
 }
 
-async function ensureBuiltInIndexed(projectRoot: string) {
-  const project = await getMultiProjectManager().getProject(projectRoot);
-  await project.incrementalIndex();
-  return project.listFiles();
+function readIndexedFiles(projectRoot: string): FastFile[] {
+  const dbPath = path.join(os.homedir(), '.customize-agent', 'projects', computeProjectId(path.resolve(projectRoot)), 'kb.db');
+  if (!fs.existsSync(dbPath)) return [];
+  const store = new IndexStateStore(dbPath);
+  try {
+    return store.listRecords() as FastFile[];
+  } finally {
+    store.close();
+  }
 }
 
 /** 合并已索引文件和磁盘文件，磁盘上新增文件以 pending 状态加入 */
 function mergeIndexedAndDiskFiles(indexedFiles: FastFile[], projectRoot: string) {
   const byPath = new Map(indexedFiles.map(file => [file.relativePath, file]));
   for (const file of scanKnowledgeBaseFiles(projectRoot)) {
-    if (!byPath.has(file.relativePath)) byPath.set(file.relativePath, file);
+    const indexed = byPath.get(file.relativePath);
+    byPath.set(file.relativePath, indexed ? { ...indexed, fileSize: file.fileSize, mtime: file.mtime } : file);
   }
   return Array.from(byPath.values()).sort((a, b) => Number(isBuiltInKnowledgeFile(a.relativePath)) - Number(isBuiltInKnowledgeFile(b.relativePath)) || b.mtime - a.mtime);
 }
@@ -99,16 +107,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       const category = req.query.category as string | undefined;
       const page = parseInt((req.query.page as string) || '1', 10);
       const limit = parseInt((req.query.limit as string) || '50', 10);
-      const resolvedProjectRoot = ensureBuiltInKnowledgeBase(projectRoot);
-      const project = await getMultiProjectManager().getProject(resolvedProjectRoot);
-      let files: any[] = mergeIndexedAndDiskFiles(await ensureBuiltInIndexed(resolvedProjectRoot), resolvedProjectRoot);
+      let files: any[] = mergeIndexedAndDiskFiles(readIndexedFiles(projectRoot), projectRoot);
       if (category) files = files.filter(file => file.category === category);
-      const vectorStatus = project.getVectorStatus();
       const total = files.length;
       const paged = files.slice((page - 1) * limit, page * limit).map(withBuiltInFlag);
-      res.status(200).json({ files: paged, total, page, limit, vectorStatus, initializing: false });
+      res.status(200).json({ files: paged, total, page, limit, vectorStatus: { enabled: false, dimension: 0, count: 0 }, initializing: false });
       return;
     }
+
+    if (req.method === 'POST' && req.query.reindex !== '1') return res.status(400).json({ error: 'reindex=1 is required' });
 
     const project = await getMultiProjectManager().getProject(projectRoot);
     if (req.method === 'POST' || req.query.reindex === '1') await project.incrementalIndex();

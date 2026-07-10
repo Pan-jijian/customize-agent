@@ -30,16 +30,18 @@ jobs:
       - name: Pack and install CLI
         shell: bash
         run: |
-          rm -f "$RUNNER_TEMP"/customize-agent-*.tgz "$RUNNER_TEMP"/customize-agent-server-*.tgz
+          rm -f "$RUNNER_TEMP"/customize-agent-*.tgz "$RUNNER_TEMP"/customize-agent-server-*.tgz "$RUNNER_TEMP"/customize-agent-tools-*.tgz
           pnpm --filter customize-agent pack --pack-destination "$RUNNER_TEMP"
           pnpm --filter @customize-agent/server pack --pack-destination "$RUNNER_TEMP"
-          TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-.*\\.tgz$/.test(name) && !name.startsWith('customize-agent-server-'));if(!file) throw new Error('customize-agent tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
+          pnpm --filter @customize-agent/tools pack --pack-destination "$RUNNER_TEMP"
+          TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-.*\\.tgz$/.test(name) && !name.startsWith('customize-agent-server-') && !name.startsWith('customize-agent-tools-'));if(!file) throw new Error('customize-agent tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
           SERVER_TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-server-.*\\.tgz$/.test(name));if(!file) throw new Error('customize-agent server tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
+          TOOLS_TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-tools-.*\\.tgz$/.test(name));if(!file) throw new Error('customize-agent tools tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
           mkdir -p "$RUNNER_TEMP/install-root"
-          npm install "$TGZ" "$SERVER_TGZ" --prefix "$RUNNER_TEMP/install-root" --ignore-scripts=false --foreground-scripts
+          npm install "$TGZ" "$SERVER_TGZ" "$TOOLS_TGZ" --prefix "$RUNNER_TEMP/install-root" --ignore-scripts=false --foreground-scripts
           test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize.cmd"
           test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent" || test -f "$RUNNER_TEMP/install-root/node_modules/.bin/customize-agent.cmd"
-          node -e "const root=process.env.RUNNER_TEMP + '/install-root'; const path=require('path'); const serverPkg=require(require.resolve('@customize-agent/server/package.json',{paths:[root]})); const nextPkg=require(require.resolve('next/package.json',{paths:[path.dirname(require.resolve('@customize-agent/server/package.json',{paths:[root]}))]})); if (nextPkg.version !== '15.5.19') throw new Error('unexpected next version ' + nextPkg.version); console.log('Installed server/next:', serverPkg.version, nextPkg.version)"
+          node -e "const root=process.env.RUNNER_TEMP + '/install-root'; const path=require('path'); const serverPkg=require(require.resolve('@customize-agent/server/package.json',{paths:[root]})); const toolsPkg=require(path.join(root,'node_modules/@customize-agent/tools/package.json')); const nextPkg=require(require.resolve('next/package.json',{paths:[path.dirname(require.resolve('@customize-agent/server/package.json',{paths:[root]}))]})); const sharpPkg=require(require.resolve('sharp/package.json',{paths:[root]})); if (nextPkg.version !== '15.5.19') throw new Error('unexpected next version ' + nextPkg.version); if (sharpPkg.version !== '0.34.5') throw new Error('unexpected sharp version ' + sharpPkg.version); console.log('Installed server/tools/next/sharp:', serverPkg.version, toolsPkg.version, nextPkg.version, sharpPkg.version)"
       - name: Start installed CLI and verify dashboard
         shell: bash
         run: |
@@ -72,7 +74,13 @@ jobs:
             await waitForReady();
             await expectOk('/api/health');
             await expectOk('/overview');
-            console.log('Installed CLI dashboard smoke test passed');
+            const reindex = await fetch(`${base}/api/kb/reindex`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+            if (reindex.status !== 202) throw new Error(`POST /api/kb/reindex returned ${reindex.status}: ${await reindex.text()}`);
+            const payload = await reindex.json();
+            if (!payload.operationId) throw new Error('POST /api/kb/reindex did not return operationId');
+            await expectOk('/api/jobs');
+            await expectOk(`/api/jobs/${encodeURIComponent(payload.operationId)}`);
+            console.log('Installed CLI dashboard and jobs smoke test passed');
           })().catch(error => {
             console.error(error);
             process.exit(1);
@@ -121,14 +129,16 @@ jobs:
       - name: Verify packed CLI dashboard before publish
         shell: bash
         run: |
-          rm -f "$RUNNER_TEMP"/customize-agent-*.tgz "$RUNNER_TEMP"/customize-agent-server-*.tgz
+          rm -f "$RUNNER_TEMP"/customize-agent-*.tgz "$RUNNER_TEMP"/customize-agent-server-*.tgz "$RUNNER_TEMP"/customize-agent-tools-*.tgz
           pnpm --filter customize-agent pack --pack-destination "$RUNNER_TEMP"
           pnpm --filter @customize-agent/server pack --pack-destination "$RUNNER_TEMP"
-          TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-.*\\.tgz$/.test(name) && !name.startsWith('customize-agent-server-'));if(!file) throw new Error('customize-agent tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
+          pnpm --filter @customize-agent/tools pack --pack-destination "$RUNNER_TEMP"
+          TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-.*\\.tgz$/.test(name) && !name.startsWith('customize-agent-server-') && !name.startsWith('customize-agent-tools-'));if(!file) throw new Error('customize-agent tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
           SERVER_TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-server-.*\\.tgz$/.test(name));if(!file) throw new Error('customize-agent server tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
+          TOOLS_TGZ=$(node -e "const fs=require('fs'),path=require('path');const file=fs.readdirSync(process.env.RUNNER_TEMP).find(name=>/^customize-agent-tools-.*\\.tgz$/.test(name));if(!file) throw new Error('customize-agent tools tarball not found');console.log(path.join(process.env.RUNNER_TEMP,file))")
           mkdir -p "$RUNNER_TEMP/release-install-root"
-          npm install "$TGZ" "$SERVER_TGZ" --prefix "$RUNNER_TEMP/release-install-root" --ignore-scripts=false --foreground-scripts
-          node -e "const root=process.env.RUNNER_TEMP + '/release-install-root'; const path=require('path'); const serverPkg=require(require.resolve('@customize-agent/server/package.json',{paths:[root]})); const nextPkg=require(require.resolve('next/package.json',{paths:[path.dirname(require.resolve('@customize-agent/server/package.json',{paths:[root]}))]})); if (nextPkg.version !== '15.5.19') throw new Error('unexpected next version ' + nextPkg.version); console.log('Installed server/next:', serverPkg.version, nextPkg.version)"
+          npm install "$TGZ" "$SERVER_TGZ" "$TOOLS_TGZ" --prefix "$RUNNER_TEMP/release-install-root" --ignore-scripts=false --foreground-scripts
+          node -e "const root=process.env.RUNNER_TEMP + '/release-install-root'; const path=require('path'); const serverPkg=require(require.resolve('@customize-agent/server/package.json',{paths:[root]})); const toolsPkg=require(path.join(root,'node_modules/@customize-agent/tools/package.json')); const nextPkg=require(require.resolve('next/package.json',{paths:[path.dirname(require.resolve('@customize-agent/server/package.json',{paths:[root]}))]})); const sharpPkg=require(require.resolve('sharp/package.json',{paths:[root]})); if (nextPkg.version !== '15.5.19') throw new Error('unexpected next version ' + nextPkg.version); if (sharpPkg.version !== '0.34.5') throw new Error('unexpected sharp version ' + sharpPkg.version); console.log('Installed server/tools/next/sharp:', serverPkg.version, toolsPkg.version, nextPkg.version, sharpPkg.version)"
           export HOME="$RUNNER_TEMP/release-home"
           export CUSTOMIZE_AGENT_HOME="$RUNNER_TEMP/release-home"
           export CUSTOMIZE_DASHBOARD_PORT=17332
@@ -158,7 +168,13 @@ jobs:
             await waitForReady();
             await expectOk('/api/health');
             await expectOk('/overview');
-            console.log('Release packed CLI dashboard smoke test passed');
+            const reindex = await fetch(`${base}/api/kb/reindex`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+            if (reindex.status !== 202) throw new Error(`POST /api/kb/reindex returned ${reindex.status}: ${await reindex.text()}`);
+            const payload = await reindex.json();
+            if (!payload.operationId) throw new Error('POST /api/kb/reindex did not return operationId');
+            await expectOk('/api/jobs');
+            await expectOk(`/api/jobs/${encodeURIComponent(payload.operationId)}`);
+            console.log('Release packed CLI dashboard and jobs smoke test passed');
           })().catch(error => {
             console.error(error);
             process.exit(1);

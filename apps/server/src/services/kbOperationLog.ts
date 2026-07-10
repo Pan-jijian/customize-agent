@@ -75,6 +75,22 @@ export function listKbOperations(projectRoot: string, limit = 50): KbOperationRe
   return readAll(projectRoot).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
 }
 
+export function getKbOperation(projectRoot: string, id: string): KbOperationRecord | undefined {
+  return readAll(projectRoot).find(record => record.id === id);
+}
+
+export function getLatestKbOperation(projectRoot: string, type?: KbOperationType): KbOperationRecord | undefined {
+  return readAll(projectRoot)
+    .filter(record => !type || record.type === type)
+    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+}
+
+export function listActiveKbOperations(projectRoot: string): KbOperationRecord[] {
+  return readAll(projectRoot)
+    .filter(record => record.status === 'processing')
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
 export function clearKbOperations(projectRoot: string): number {
   const records = readAll(projectRoot);
   const file = logPath(projectRoot);

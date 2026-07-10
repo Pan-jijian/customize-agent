@@ -1,17 +1,42 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getProjectRoot } from '@/services/kbService';
-import { startKnowledgeIndex } from '@/services/kbIndexWorkerService';
-import { upsertKbOperation } from '@/services/kbOperationLog';
+import { getActiveKnowledgeIndex, startKnowledgeIndex } from '@/services/kbIndexWorkerService';
+import { getKbOperation, getLatestKbOperation, upsertKbOperation } from '@/services/kbOperationLog';
 
-/** 全量重新索引 API：触发全部文件重新解析和向量化入库 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   try {
-    const projectRoot = (req.body?.projectRoot as string) || getProjectRoot();
+    const projectRoot = ((req.method === 'GET' ? req.query.projectRoot : req.body?.projectRoot) as string | undefined) || getProjectRoot();
     if (!projectRoot) return res.status(400).json({ error: 'Project root is required' });
+
+    if (req.method === 'GET') {
+      const active = getActiveKnowledgeIndex(projectRoot);
+      const activeJob = active ? getKbOperation(projectRoot, active.operationId) : undefined;
+      const latest = getLatestKbOperation(projectRoot, 'reindex');
+      return res.status(200).json({ running: Boolean(active), active, job: activeJob || latest || null });
+    }
+
+    if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+    const active = getActiveKnowledgeIndex(projectRoot);
+    if (active) {
+      const job = getKbOperation(projectRoot, active.operationId);
+      return res.status(202).json({ success: true, accepted: true, alreadyRunning: true, operationId: active.operationId, job });
+    }
+
     const operationId = `reindex-${Date.now()}`;
-    upsertKbOperation(projectRoot, { id: operationId, type: 'reindex', title: '重新解析入库', stage: 'uploading', status: 'processing', percent: 5, message: '重新解析入库任务已提交' });
+    const job = upsertKbOperation(projectRoot, {
+      id: operationId,
+      type: 'reindex',
+      title: '重新解析入库',
+      stage: 'uploading',
+      status: 'processing',
+      percent: 5,
+      message: '重新解析入库任务已提交，正在后台排队执行',
+    });
     startKnowledgeIndex({ id: operationId, projectRoot, forceReindexAll: true });
-    res.status(202).json({ success: true, accepted: true, operationId });
-  } catch (e: unknown) { console.error('[api] kb/reindex', e); res.status(500).json({ error: 'Internal server error' }); }
+    return res.status(202).json({ success: true, accepted: true, operationId, job });
+  } catch (error) {
+    console.error('[api] kb/reindex', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 }

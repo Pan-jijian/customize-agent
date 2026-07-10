@@ -109,9 +109,17 @@ export interface LocalTransformersEmbeddingOptions {
   model?: string;
   dimensions?: number;
   modelPath?: string;
+  batchSize?: number;
 }
 
 type FeatureExtractionPipeline = (input: string | string[], options?: Record<string, unknown>) => Promise<unknown>;
+
+function resolveLocalEmbeddingBatchSize(configured?: number): number {
+  const raw = configured ?? Number(process.env.CUSTOMIZE_EMBEDDING_BATCH_SIZE ?? process.env.KB_EMBEDDING_BATCH_SIZE);
+  const fallback = process.platform === 'win32' ? 8 : 16;
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  return Math.max(1, Math.min(128, Math.floor(raw)));
+}
 
 function resolveBundledBgeModelPath(): string | undefined {
   const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -130,12 +138,14 @@ export class LocalTransformersEmbeddingProvider implements EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
   private readonly modelPath?: string;
+  private readonly batchSize: number;
   private static pipelines = new Map<string, Promise<FeatureExtractionPipeline>>();
 
   constructor(options: LocalTransformersEmbeddingOptions = {}) {
     this.model = options.model?.trim() || 'BAAI/bge-small-zh-v1.5';
     this.dimensions = options.dimensions ?? 512;
     this.modelPath = options.modelPath || resolveBundledBgeModelPath();
+    this.batchSize = resolveLocalEmbeddingBatchSize(options.batchSize);
   }
 
   async embedDocuments(texts: string[]): Promise<number[][]> {
@@ -148,9 +158,13 @@ export class LocalTransformersEmbeddingProvider implements EmbeddingProvider {
 
   private async embed(input: string[]): Promise<number[][]> {
     const extractor = await this.getPipeline();
-    const output = await extractor(input, { pooling: 'mean', normalize: true });
-    const vectors = this.parseVectors(output, input.length);
-    return vectors.map(vector => this.resizeVector(vector));
+    const vectors: number[][] = [];
+    for (let offset = 0; offset < input.length; offset += this.batchSize) {
+      const batch = input.slice(offset, offset + this.batchSize);
+      const output = await extractor(batch, { pooling: 'mean', normalize: true });
+      vectors.push(...this.parseVectors(output, batch.length).map(vector => this.resizeVector(vector)));
+    }
+    return vectors;
   }
 
   private getPipeline(): Promise<FeatureExtractionPipeline> {

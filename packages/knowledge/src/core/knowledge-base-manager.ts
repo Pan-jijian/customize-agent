@@ -437,14 +437,14 @@ export class KnowledgeBaseManager {
     };
   }
 
-  async reindexFile(relativePath: string): Promise<DiffResult> {
+  async reindexFile(relativePath: string, options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
     const normalized = this.normalizeRelativePath(relativePath);
     const record = this.store.listRecords().find(item => item.relativePath === normalized);
     const targetPath = this.resolveKbRelativePath(normalized);
     if (!fs.existsSync(targetPath)) throw new Error('file not found');
     if (record) await this.deleteVectorFile(record.collectionName, normalized);
     this.store.deleteRecord(normalized);
-    return this.incrementalIndex();
+    return this.incrementalIndex({ ...options, onlyRelativePaths: [normalized] });
   }
 
   async addFile(sourcePath: string, targetRelativePath?: string): Promise<DiffResult> {
@@ -542,7 +542,14 @@ export class KnowledgeBaseManager {
     this.reportProgress({ stage: 'vectorizing', percent: 85, message: `正在写入 HNSWLib 向量库，共 ${chunks.length} 个切片`, chunkCount: chunks.length });
     const indexer = new VectorIndexer(this.embeddingProvider, this.vectorStores);
     try {
-      const results = await indexer.indexChunks(chunks);
+      const results = await indexer.indexChunks(chunks, {
+        onProgress: progress => {
+          const percent = 85 + Math.round((progress.processedChunks / Math.max(1, progress.totalChunks)) * 14);
+          const message = `正在分批向量化并写入：${progress.processedChunks}/${progress.totalChunks} 个切片`;
+          this.reportProgress({ stage: 'vectorizing', percent, message, chunkCount: progress.totalChunks });
+          if (options.relativePath) this.updateJobsForFile(options.relativePath, 'INDEXING', percent, message);
+        },
+      });
       const actualModel = results[0]?.embeddingModel ?? this.embeddingProvider.model;
       const actualDimension = results[0]?.embeddingDimension ?? this.embeddingProvider.dimensions;
       this.store.setMetadata('embedding_model', actualModel);

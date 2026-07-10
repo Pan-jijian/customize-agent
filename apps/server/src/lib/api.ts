@@ -46,7 +46,7 @@ export async function getKbFileDetail(relativePath: string, projectRoot?: string
 }
 
 export async function reindexKbFile(relativePath: string, projectRoot?: string) {
-  return fetchJson<{ detail?: KbFileDetail }>('/api/kb/files/reindex', {
+  return fetchJson<{ success: boolean; accepted?: boolean; alreadyRunning?: boolean; operationId?: string; job?: KbOperationRecord; detail?: KbFileDetail }>('/api/kb/files/reindex', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ relativePath, projectRoot }),
@@ -101,6 +101,19 @@ export async function getKbOperations(projectRoot?: string) {
   return fetchJson<{ operations: KbOperationRecord[] }>(`/api/kb/operations?${params}`);
 }
 
+export async function getJobs(opts?: { projectRoot?: string; active?: boolean; limit?: number }) {
+  const params = new URLSearchParams({ limit: String(opts?.limit ?? 50) });
+  if (opts?.projectRoot) params.set('projectRoot', opts.projectRoot);
+  if (opts?.active) params.set('active', '1');
+  return fetchJson<{ jobs: KbOperationRecord[] }>(`/api/jobs?${params}`);
+}
+
+export async function getJob(id: string, projectRoot?: string) {
+  const params = new URLSearchParams();
+  if (projectRoot) params.set('projectRoot', projectRoot);
+  return fetchJson<{ job: KbOperationRecord }>(`/api/jobs/${encodeURIComponent(id)}?${params}`);
+}
+
 export async function clearKbOperations(projectRoot?: string) {
   const params = new URLSearchParams();
   if (projectRoot) params.set('projectRoot', projectRoot);
@@ -149,10 +162,16 @@ export async function deleteAllKbFiles(projectRoot?: string) {
 }
 
 export async function reindexKb(projectRoot?: string) {
-  return fetchJson<{ success: boolean; accepted?: boolean; operationId?: string; stats?: KbStats }>('/api/kb/reindex', {
+  return fetchJson<{ success: boolean; accepted?: boolean; alreadyRunning?: boolean; operationId?: string; job?: KbOperationRecord; stats?: KbStats }>('/api/kb/reindex', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ projectRoot }),
   });
+}
+
+export async function getReindexStatus(projectRoot?: string) {
+  const params = new URLSearchParams();
+  if (projectRoot) params.set('projectRoot', projectRoot);
+  return fetchJson<{ running: boolean; active?: { operationId: string; startedAt: number }; job: KbOperationRecord | null }>(`/api/kb/reindex?${params}`);
 }
 
 export async function getKbTags(projectRoot?: string) {

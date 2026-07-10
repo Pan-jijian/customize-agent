@@ -44,5 +44,15 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.61.0",
     "vitest": "^4.1.9"
-  }
+  },
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pan-jijian/customize-agent.git"
+  },
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Pan-jijian/customize-agent/issues"
+  },
+  "homepage": "https://github.com/Pan-jijian/customize-agent#readme"
 }
