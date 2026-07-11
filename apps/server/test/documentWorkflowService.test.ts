@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { validateDocumentTemplateRun } from '../src/services/documentWorkflowService';
+import { listDocumentTemplates, validateDocumentTemplateRun } from '../src/services/documentWorkflowService';
 
-describe('built-in document workflow templates', () => {
-  it('allows the official built-in template to pass preflight validation', async () => {
+describe('document workflow templates', () => {
+  it('does not expose built-in demo templates', async () => {
+    expect(listDocumentTemplates().some(template => template.builtIn)).toBe(false);
     const validation = await validateDocumentTemplateRun('delta-force-hot-operators-guide');
-    expect(validation.fileDiagnostics.length).toBeGreaterThan(0);
-    expect(validation.promptDiagnostics.length).toBeGreaterThan(0);
-    expect(validation.issues.filter(issue => issue.level === 'error')).toEqual([]);
+    expect(validation.issues.some(issue => issue.level === 'error')).toBe(true);
   });
 });

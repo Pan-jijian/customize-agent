@@ -76,9 +76,16 @@ async function runInProcess(job: IndexJob, operationId: string, operationType: '
       ? await project.reindexFile(job.relativePath, { vectorMode: job.vectorMode, onProgress })
       : job.forceReindexAll
         ? await project.forceReindexAll({ vectorMode: job.vectorMode, onProgress })
-        : await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress });
-    while (!job.relativePath && project.countPendingIndexJobs() > 0) {
-      const nextDiff = await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress });
+        : await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
+    let idleChecks = 0;
+    while (!job.relativePath && (project.countPendingIndexJobs() > 0 || (job.uploadOperationId && project.uploadSessionIsOpen(job.uploadOperationId) && idleChecks < 120))) {
+      if (project.countPendingIndexJobs() === 0) {
+        idleChecks += 1;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
+      idleChecks = 0;
+      const nextDiff = await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
       diff = { newFiles: [...diff.newFiles, ...nextDiff.newFiles], modifiedFiles: [...diff.modifiedFiles, ...nextDiff.modifiedFiles], deletedFiles: [...diff.deletedFiles, ...nextDiff.deletedFiles], unchangedCount: diff.unchangedCount + nextDiff.unchangedCount, mtimeOnlyCount: diff.mtimeOnlyCount + nextDiff.mtimeOnlyCount, skippedFiles: [...diff.skippedFiles, ...nextDiff.skippedFiles], hasChanges: diff.hasChanges || nextDiff.hasChanges, diffTimeMs: diff.diffTimeMs + nextDiff.diffTimeMs };
     }
     const vectorStatus = project.getVectorStatus();

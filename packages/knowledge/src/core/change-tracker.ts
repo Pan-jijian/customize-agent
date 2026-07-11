@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
+import { createReadStream } from 'node:fs';
 import * as path from 'node:path';
 import type { FileClassifier } from '../classification/classifier.js';
 import type { DiffResult } from '../types.js';
@@ -62,7 +63,7 @@ export class ChangeTracker {
       }
 
       if (Math.round(diskStat.mtime) !== Math.round(indexed.mtime) || diskStat.size !== indexed.fileSize) {
-        const contentHash = this.hashFile(absolutePath);
+        const contentHash = await this.hashFile(absolutePath);
         if (contentHash !== indexed.contentHash) {
           modifiedFiles.push(classified);
         } else {
@@ -97,8 +98,15 @@ export class ChangeTracker {
    * @param filePath 文件路径
    * @returns SHA-256 哈希字符串
    */
-  hashFile(filePath: string): string {
-    return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+  async hashFile(filePath: string): Promise<string> {
+    const hash = crypto.createHash('sha256');
+    await new Promise<void>((resolve, reject) => {
+      const stream = createReadStream(filePath);
+      stream.on('data', chunk => hash.update(chunk));
+      stream.on('error', reject);
+      stream.on('end', resolve);
+    });
+    return hash.digest('hex');
   }
 
   private parseMetadata(metadataJson?: string | null): Record<string, unknown> {

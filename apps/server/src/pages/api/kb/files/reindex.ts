@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import * as fs from 'fs';
 import * as path from 'path';
-import { getProjectRoot, isBuiltInKnowledgeFile } from '@/services/kbService';
+import { getProjectRoot } from '@/services/kbService';
 import { getActiveKnowledgeIndex, startKnowledgeIndex } from '@/services/kbIndexWorkerService';
 import { getKbOperation, upsertKbOperation } from '@/services/kbOperationLog';
 
@@ -12,7 +12,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const projectRoot = (req.body?.projectRoot as string) || getProjectRoot();
     const relativePath = req.body?.relativePath as string | undefined;
     if (!projectRoot || !relativePath) return res.status(400).json({ error: 'projectRoot and relativePath are required' });
-    if (isBuiltInKnowledgeFile(relativePath)) return res.status(400).json({ error: '内置示例资料不可重新解析' });
 
     const kbRoot = path.join(projectRoot, 'knowledgeBase');
     const targetPath = path.resolve(kbRoot, relativePath);

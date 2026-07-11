@@ -11,7 +11,7 @@ interface PromptProject {
 interface PromptChatMessage { role: 'user' | 'assistant'; content: string; }
 interface KnowledgeFile { relativePath: string; category: string; format: string; fileSize: number; status: string; chunkCount?: number; score?: number; matchedBy?: 'path' | 'metadata' | 'content' | 'disk'; }
 interface ReferencedKnowledgeFile { relativePath: string; content: string; }
-type SourceFilter = 'all' | 'custom' | 'current' | 'project' | 'builtin';
+type SourceFilter = 'all' | 'custom' | 'current' | 'project';
 type StatusFilter = 'all' | 'selected' | 'unselected' | 'hasFile' | 'missingFile';
 type SortMode = 'mtime' | 'name' | 'source' | 'selected';
 type ViewMode = 'list' | 'card';
@@ -87,19 +87,17 @@ function downloadText(filename: string, content: string) {
   URL.revokeObjectURL(url);
 }
 
-function isBuiltInPrompt(p: PromptProject): boolean { return p.id.startsWith('builtin:'); }
 function isCustomPrompt(p: PromptProject): boolean { return p.id.startsWith('custom:'); }
 function getPromptSource(p: PromptProject): SourceFilter {
-  if (isBuiltInPrompt(p)) return 'builtin';
   if (isCustomPrompt(p)) return 'custom';
   if (p.isCurrent) return 'current';
   return 'project';
 }
 function sourceLabel(source: SourceFilter) {
-  return source === 'custom' ? '我的提示词' : source === 'current' ? '当前项目' : source === 'project' ? '其他项目' : source === 'builtin' ? '内置示例' : '全部';
+  return source === 'custom' ? '我的提示词' : source === 'current' ? '当前项目' : source === 'project' ? '其他项目' : '全部';
 }
 function sourceColor(source: SourceFilter) {
-  return source === 'custom' ? 'cyan' : source === 'current' ? 'green' : source === 'project' ? 'blue' : source === 'builtin' ? 'gold' : 'default';
+  return source === 'custom' ? 'cyan' : source === 'current' ? 'green' : source === 'project' ? 'blue' : 'default';
 }
 function promptChatStorageKey(p: PromptProject | null, name: string, draftId?: string) {
   if (p) return `customize-agent:prompt-chat:${p.id}:${p.customizePath || p.projectName}`;
@@ -241,7 +239,6 @@ export default function PromptPage() {
     custom: projects.filter(p => getPromptSource(p) === 'custom').length,
     current: projects.filter(p => getPromptSource(p) === 'current').length,
     project: projects.filter(p => getPromptSource(p) === 'project').length,
-    builtin: projects.filter(p => getPromptSource(p) === 'builtin').length,
     selected: projects.filter(p => p.selected).length,
     unselected: projects.filter(p => !p.selected).length,
     hasFile: projects.filter(p => p.hasFile).length,
@@ -259,7 +256,7 @@ export default function PromptPage() {
     return true;
   }).sort((a, b) => {
     if (sortMode === 'name') return a.projectName.localeCompare(b.projectName);
-    if (sortMode === 'source') return ['custom', 'current', 'project', 'builtin'].indexOf(getPromptSource(a)) - ['custom', 'current', 'project', 'builtin'].indexOf(getPromptSource(b));
+    if (sortMode === 'source') return ['custom', 'current', 'project'].indexOf(getPromptSource(a)) - ['custom', 'current', 'project'].indexOf(getPromptSource(b));
     if (sortMode === 'selected') return Number(b.selected) - Number(a.selected) || Date.parse(b.mtime || '') - Date.parse(a.mtime || '');
     return Date.parse(b.mtime || '') - Date.parse(a.mtime || '');
   });
@@ -284,17 +281,6 @@ export default function PromptPage() {
   };
 
   const openEdit = (p: PromptProject) => {
-    if (isBuiltInPrompt(p)) {
-      const copyName = p.projectName.replace(/^内置｜/, '') + ' Copy';
-      const nextDraftId = `copy:${p.id}:${p.customizePath || p.projectName}`;
-      setEditing(null); setIsCreating(true);
-      setEditName(copyName);
-      setEditContent(p.content || '');
-      loadPromptChatHistory(null, copyName, nextDraftId);
-      setDrawerOpen(true);
-      message.info('内置提示词不可直接编辑，已为你创建副本');
-      return;
-    }
     setEditing(p); setIsCreating(false);
     setEditName(p.projectName);
     setEditContent(p.content || '');
@@ -441,9 +427,9 @@ export default function PromptPage() {
   const promptActions = (p: PromptProject) => <Space size={6}>
     {p.hasFile && <Checkbox checked={p.selected} onChange={e => { void handleSelect(p, e.target.checked); }}>选中</Checkbox>}
     {!p.hasFile && p.projectRoot && <Button size="small" icon={<PlusOutlined />} onClick={() => openCreate(p)}>创建</Button>}
-    {p.hasFile && <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(p)}>{isBuiltInPrompt(p) ? '复制' : '编辑'}</Button>}
-    <Popconfirm title={isBuiltInPrompt(p) ? '删除内置提示词？' : isCustomPrompt(p) ? '删除自定义提示词？' : '删除项目记录及文件？'} disabled={isBuiltInPrompt(p)} onConfirm={() => { void handleDelete(p); }}>
-      <Button size="small" danger icon={<DeleteOutlined />} disabled={isBuiltInPrompt(p)} />
+    {p.hasFile && <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(p)}>编辑</Button>}
+    <Popconfirm title={isCustomPrompt(p) ? '删除自定义提示词？' : '删除项目记录及文件？'} onConfirm={() => { void handleDelete(p); }}>
+      <Button size="small" danger icon={<DeleteOutlined />} />
     </Popconfirm>
   </Space>;
 
@@ -515,7 +501,6 @@ export default function PromptPage() {
           { label: `我的提示词 (${promptStats.custom})`, value: 'custom' },
           { label: `当前项目 (${promptStats.current})`, value: 'current' },
           { label: `其他项目 (${promptStats.project})`, value: 'project' },
-          { label: `内置示例 (${promptStats.builtin})`, value: 'builtin' },
         ]} />
         <Select<StatusFilter> value={statusFilter} onChange={setStatusFilter} style={{ width: 130 }} options={[
           { label: '全部状态', value: 'all' },
@@ -535,24 +520,40 @@ export default function PromptPage() {
         <span style={{ color: 'var(--colorTextSecondary)', fontSize: 13 }}>已显示 {filteredProjects.length} / {projects.length}</span>
       </Card>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '190px minmax(0, 1fr) 300px', gap: 14, alignItems: 'start' }}>
-        <Card size="small" title="分组导航" styles={{ body: { padding: 8 } }}>
-          {([
-            ['all', '全部', promptStats.all], ['custom', '我的提示词', promptStats.custom], ['current', '当前项目', promptStats.current], ['project', '其他项目', promptStats.project], ['builtin', '内置示例', promptStats.builtin],
-          ] as Array<[SourceFilter, string, number]>).map(([key, label, count]) => (
-            <button key={key} onClick={() => setSourceFilter(key)} style={{ width: '100%', border: 'none', background: sourceFilter === key ? 'var(--colorFillSecondary)' : 'transparent', color: 'var(--colorText)', padding: '9px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between', cursor: 'pointer', fontWeight: sourceFilter === key ? 700 : 400 }}>
-              <span>{label}</span><span>{count}</span>
-            </button>
-          ))}
-          <Divider style={{ margin: '8px 0' }} />
-          {([
-            ['selected', '已选中', promptStats.selected], ['unselected', '未选中', promptStats.unselected],
-          ] as Array<[StatusFilter, string, number]>).map(([key, label, count]) => (
-            <button key={key} onClick={() => setStatusFilter(statusFilter === key ? 'all' : key)} style={{ width: '100%', border: 'none', background: statusFilter === key ? 'var(--colorFillSecondary)' : 'transparent', color: 'var(--colorText)', padding: '9px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between', cursor: 'pointer', fontWeight: statusFilter === key ? 700 : 400 }}>
-              <span>{label}</span><span>{count}</span>
-            </button>
-          ))}
-        </Card>
+      <div style={{ display: 'grid', gridTemplateColumns: '260px minmax(0, 1fr)', gap: 14, alignItems: 'start' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <Card size="small" title="分组导航" styles={{ body: { padding: 8 } }}>
+            {([
+              ['all', '全部', promptStats.all], ['custom', '我的提示词', promptStats.custom], ['current', '当前项目', promptStats.current], ['project', '其他项目', promptStats.project],
+            ] as Array<[SourceFilter, string, number]>).map(([key, label, count]) => (
+              <button key={key} onClick={() => setSourceFilter(key)} style={{ width: '100%', border: 'none', background: sourceFilter === key ? 'var(--colorFillSecondary)' : 'transparent', color: 'var(--colorText)', padding: '9px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between', cursor: 'pointer', fontWeight: sourceFilter === key ? 700 : 400 }}>
+                <span>{label}</span><span>{count}</span>
+              </button>
+            ))}
+            <Divider style={{ margin: '8px 0' }} />
+            {([
+              ['selected', '已选中', promptStats.selected], ['unselected', '未选中', promptStats.unselected],
+            ] as Array<[StatusFilter, string, number]>).map(([key, label, count]) => (
+              <button key={key} onClick={() => setStatusFilter(statusFilter === key ? 'all' : key)} style={{ width: '100%', border: 'none', background: statusFilter === key ? 'var(--colorFillSecondary)' : 'transparent', color: 'var(--colorText)', padding: '9px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between', cursor: 'pointer', fontWeight: statusFilter === key ? 700 : 400 }}>
+                <span>{label}</span><span>{count}</span>
+              </button>
+            ))}
+          </Card>
+
+          <Card size="small" title="详情预览" styles={{ body: { height: 300, display: 'flex', flexDirection: 'column', gap: 10, overflow: 'hidden' } }}>
+            {!activePrompt ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择一个提示词" /> : <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}><FileTextOutlined style={{ color: 'var(--colorAccent)', flexShrink: 0 }} /><strong style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{activePrompt.projectName}</strong></div>
+              <div style={{ minWidth: 0, overflow: 'hidden' }}>{promptTags(activePrompt)}</div>
+              <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12, lineHeight: 1.7, minWidth: 0 }}>
+                <div>更新时间：{formatDate(activePrompt.mtime)}</div>
+                <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>文件路径：{activePrompt.customizePath || '-'}</div>
+                <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>项目路径：{activePrompt.projectRoot || '-'}</div>
+              </div>
+              <div style={{ flex: 1, minHeight: 0, padding: 10, borderRadius: 8, background: 'var(--colorFillAlter)', color: 'var(--colorTextSecondary)', fontSize: 12, lineHeight: 1.7, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{promptExcerpt(activePrompt, 800) || '暂无内容预览'}</div>
+              <div>{promptActions(activePrompt)}</div>
+            </>}
+          </Card>
+        </div>
 
         <div style={{ minWidth: 0 }}>
           {visibleCheckedIds.length > 0 && (
@@ -572,20 +573,6 @@ export default function PromptPage() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>{filteredProjects.map(renderPromptCard)}</div>
           )}
         </div>
-
-        <Card size="small" title="详情预览" styles={{ body: { display: 'flex', flexDirection: 'column', gap: 10 } }}>
-          {!activePrompt ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择一个提示词" /> : <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><FileTextOutlined style={{ color: 'var(--colorAccent)' }} /><strong style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{activePrompt.projectName}</strong></div>
-            <div>{promptTags(activePrompt)}</div>
-            <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12, lineHeight: 1.7 }}>
-              <div>更新时间：{formatDate(activePrompt.mtime)}</div>
-              <div>文件路径：{activePrompt.customizePath || '-'}</div>
-              <div>项目路径：{activePrompt.projectRoot || '-'}</div>
-            </div>
-            <div style={{ padding: 10, borderRadius: 8, background: 'var(--colorFillAlter)', color: 'var(--colorTextSecondary)', fontSize: 12, lineHeight: 1.7, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{promptExcerpt(activePrompt, 1200) || '暂无内容预览'}</div>
-            <div>{promptActions(activePrompt)}</div>
-          </>}
-        </Card>
       </div>
 
       <Drawer

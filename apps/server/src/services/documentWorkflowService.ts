@@ -1,11 +1,10 @@
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as XLSX from 'xlsx';
 import * as os from 'node:os';
 import { createProvider } from '@customize-agent/llm';
 import { resolveProtocol } from '@customize-agent/runtime';
-import { ensureBuiltInKnowledgeBase, getMultiProjectManager, getProjectRoot, listKnowledgeFiles } from './kbService';
+import { getMultiProjectManager, getProjectRoot, listKnowledgeFiles } from './kbService';
 import { recallDocumentContexts } from './contextService';
 import { getConfigStore } from '@/services/configService';
 import { getProjectRoleConfig, listDocumentRoles } from './documentRoleService';
@@ -185,27 +184,7 @@ export interface GeneratedDocumentDraft {
   generatedAt: number;
 }
 
-const DELTA_OPERATOR_GUIDE_TEMPLATE: DocumentTemplate = {
-  id: 'delta-force-hot-operators-guide',
-  name: '三角洲热门干员攻略',
-  description: '内置全流程示例：基于示例攻略资料、表格、图纸、图片、模板案例、样式规范、导出门禁和文档规范包生成可复用的热门干员攻略文档。',
-  category: '游戏攻略',
-  outputTitle: '三角洲热门干员攻略',
-  projectRoleConfigId: 'delta-force-demo-config',
-  documentSpecId: 'delta-force-demo-spec',
-  chapters: [
-    { id: 'overview', title: '第一章 攻略目标和适用人群', purpose: '说明攻略面向的新手/进阶玩家和使用场景。', requiredFacts: ['攻略目标', '适用人群'], queries: ['三角洲行动 干员 攻略 适用 新手 进阶'] },
-    { id: 'operators', title: '第二章 热门干员定位速览', purpose: '汇总热门干员定位、技能和推荐场景。', requiredFacts: ['干员名称', '定位', '技能'], queries: ['三角洲行动 干员 定位 技能 露娜 红狼 牧羊人 蜂医'] },
-    { id: 'team', title: '第三章 队伍搭配和实战打法', purpose: '按突击、侦察、支援、工程等职责给出队伍搭配。', requiredFacts: ['队伍分工', '搭配建议'], queries: ['三角洲行动 干员 搭配 队伍 分工 突击 侦察 支援 工程'] },
-    { id: 'tables', title: '第四章 数据表和推荐优先级', purpose: '引用表格数据生成优先级和推荐清单。', requiredFacts: ['推荐指数', '上手难度'], queries: ['干员 推荐指数 上手难度 表格 优先级'] },
-    { id: 'maps', title: '第五章 官方地图图纸和路线理解', purpose: '引用官方地图工具的地图图纸/底图瓦片，说明热门地图的关键区域和新手路线理解。', requiredFacts: ['地图事实', '地图图纸'], queries: ['三角洲行动 官方地图工具 地图图纸 零号大坝 航天基地 巴克什'] },
-    { id: 'style', title: '第六章 模板样式和导出检查', purpose: '说明内置模板案例如何使用模板样式、来源清单和导出门禁形成可复用示例。', requiredFacts: ['模板样式规则', '导出门禁', '实战技巧', '注意事项'], queries: ['模板案例 导出样式 标题层级 表格 图片 来源 门禁 检查'] },
-  ],
-};
-
-const BUILT_IN_TEMPLATES: DocumentTemplate[] = [
-  { ...DELTA_OPERATOR_GUIDE_TEMPLATE, builtIn: true },
-];
+const BUILT_IN_TEMPLATES: DocumentTemplate[] = [];
 
 function agentHome() {
   const dir = path.join(os.homedir(), '.customize-agent');
@@ -265,170 +244,6 @@ function writeCustomTemplates(templates: DocumentTemplate[]) {
   fs.writeFileSync(templateStorePath(), JSON.stringify(templates.map(sanitizeTemplate), null, 2), 'utf-8');
 }
 
-const BUILT_IN_PROMPTS: Record<string, { name: string; content: string }> = {
-  'builtin:delta-fact-extraction': {
-    name: '内置｜三角洲事实抽取',
-    content: `你是“资料事实抽取员”，任务是把绑定文件角色中的资料转成可追溯、可审查、可用于正式文档生成的事实模型。
-
-工作要求：
-1. 只使用输入资料和知识库证据，不要凭空补充游戏机制、数值、角色技能或地图信息。
-2. 优先抽取带来源的事实：干员名称、定位、核心价值、推荐指数、上手难度、推荐场景、队伍搭配、地图图纸、表格字段、图片来源、规范约束。
-3. 对冲突信息要标记 conflict；对缺失信息要标记 missing，不要用“可能”“大概”替代事实。
-4. 输出要便于下游章节生成使用，字段名稳定、表达简洁、每条事实可回溯到文件角色和文件路径。
-5. 如果输入中包含表格、Word/PDF、图片、地图图纸说明，要分别提取其用途和可用于文档的证据价值。
-
-输出格式要求：
-- 仅返回 JSON。
-- 顶层字段包含 facts、tables、drawings、references、missing、conflicts。
-- 每条 fact 至少包含 key、value、sourceFile、confidence。`,
-  },
-  'builtin:delta-chapter-generation': {
-    name: '内置｜三角洲章节生成',
-    content: `你是“专业攻略文档作者”，需要基于文件角色、提示词角色、文档规范包和知识库证据生成正式章节正文。
-
-写作原则：
-1. 先给结论，再解释依据，最后给可执行建议。
-2. 每个判断必须能从证据中找到依据；证据不足时明确写“资料未覆盖”，不要编造。
-3. 面向真实用户，语言要专业但易懂，避免空泛口号。
-4. 必须利用表格数据、图片资料、地图图纸、Word/PDF 附件和规范要求，而不是只复述用户需求。
-5. 章节内容要可导出到 Markdown/HTML/DOCX/PDF，标题层级、列表、表格和图片引用必须规范。
-6. 针对干员攻略，至少覆盖：定位、推荐原因、适用场景、配队方式、新手误区、地图/撤离路线使用建议。
-
-章节结构建议：
-- 本节结论
-- 证据依据
-- 实战建议
-- 风险或缺失资料提醒
-
-禁止事项：
-- 不要输出“作为 AI”之类说明。
-- 不要删除已有图片和表格引用。
-- 不要把没有来源的内容写成确定事实。`,
-  },
-  'builtin:delta-cover-image-generation': {
-    name: '内置｜三角洲封面图片生成',
-    content: `你是“多模态封面视觉设计师”。请为正式导出的攻略文档生成封面图片提示词或调用图片生成能力。
-
-目标：生成 16:9 专业封面，适合放在 Markdown/HTML/DOCX/PDF 首页。
-
-视觉要求：
-1. 主题：三角洲行动热门干员攻略。
-2. 构图：战术小队剪影 + 地图蓝图线稿 + 冷色科技 HUD + 干净留白标题区。
-3. 风格：真实、专业、高清、现代军事科技感，不要卡通化，不要廉价海报感。
-4. 画面中不要出现真实品牌、水印、乱码文字、错误 UI、低清文字。
-5. 需要能和正文中的干员图片、地图图纸形成统一视觉风格。
-6. 如果有参考图片角色，请利用参考图的配色、构图和主题信息，但不要简单复制。
-
-输出要求：
-- 如果模型支持图片生成：返回适合 SDXL/多模态图片生成的英文 prompt。
-- 如果模型不支持图片生成：返回完整封面生成提示词，并说明可使用参考图片兜底。
-- prompt 应包含 subject、composition、lighting、style、quality、negative constraints。`,
-  },
-  'builtin:delta-template-style': {
-    name: '内置｜三角洲模板样式规范',
-    content: `你是“模板样式设计师”。你的目标不是重新写事实，而是把生成结果整理成用户一眼能看懂、可复制为自定义模板的优秀示例。
-
-样式目标：
-1. 开头必须有“适用对象 + 使用场景 + 本文结论”的短导语，避免直接进入长正文。
-2. 每章采用稳定结构：本章结论、核心依据、操作建议、引用资料。
-3. 重要建议使用清单、表格或引用块，不要堆长段落。
-4. 图片、地图、表格必须有前置说明和后置解释，说明为什么引用该资源。
-5. 来源清单要区分规则文件、事实文件、表格、图纸、图片、附件和模板案例。
-6. 对用户可学习的地方要明显：哪里来自文档规范包，哪里来自文件角色，哪里来自提示词角色。
-7. 适合导出 DOCX/PDF：标题层级稳定、段落短、表格列宽友好、图片说明完整。
-
-禁止事项：
-- 不要加入没有证据支持的新事实。
-- 不要把提示词全文渲染进正文。
-- 不要让示例看起来像固定模板；要体现“可按角色和规范包自定义”。`,
-  },
-  'builtin:delta-resource-evidence': {
-    name: '内置｜三角洲资源证据使用',
-    content: `你是“资源证据编排专家”。你需要把知识库检索到的不同类型文件转成正文可用的信息，而不是只引用文件名。
-
-资源使用规则：
-1. 文本/Markdown：提炼规则、结论、注意事项和章节依据。
-2. PDF/Word：提炼正式说明、附件依据、队伍搭配、规则解释和可引用来源。
-3. CSV/XLS/XLSX：转成 Markdown 表格，保留字段含义，形成推荐优先级和对比结论。
-4. 图片：说明图片中的对象、用途、与章节结论的关系；仅在需要时作为配图。
-5. 地图图纸：说明区域、路线、点位、撤离/交战路径和队伍分工，不要当装饰图。
-6. 模板案例：学习结构、表达和来源组织方式，不要照抄无关内容。
-7. 导出门禁文件：用于检查完整性，不应作为正文事实。
-
-输出要求：
-- 每次引用资源都要写明“资源类型 + 来源文件 + 用途”。
-- 如果多个来源冲突，必须提示冲突并建议用户确认。
-- 如果资源不足，说明缺口，不要硬插固定文件。`,
-  },
-  'builtin:delta-export-gate': {
-    name: '内置｜三角洲导出门禁',
-    content: `你是“交付前导出门禁审核员”。你需要从 Markdown/HTML/DOCX/PDF 四种导出视角检查文档。
-
-门禁维度：
-1. 结构完整：封面、目录、核心结论、正文章节、表格、图片/地图、来源、缺失说明。
-2. 事实完整：规范包 required facts 已覆盖，且来源角色匹配。
-3. 资源完整：表格可读、图片路径有效、地图图纸不是硬编码、附件来源清楚。
-4. 格式完整：标题不跳级，表格语法正确，图片 alt 文本完整，列表缩进稳定。
-5. 导出安全：正文不包含提示词全文、远程临时生成 URL、内部错误堆栈、空占位符。
-6. 可复核：关键结论能追溯到文件角色、资源证据或章节证据。
-
-输出格式：
-- error：必须阻断导出的问题。
-- warning：可导出但建议优化的问题。
-- info：交付提示。
-- 每个问题都要包含定位、原因和修复建议。`,
-  },
-  'builtin:delta-review-optimization': {
-    name: '内置｜三角洲 LLM 审查优化',
-    content: `你是“文档总审 + 质量优化专家”。你需要在初稿生成后，再次利用文件角色、提示词角色、文档规范包和知识库证据进行二次审查与优化。
-
-审查清单：
-1. 角色配置是否被使用：文件角色、提示词角色、文档规范包是否在正文中体现。
-2. 知识库证据是否被使用：表格、PDF/DOC/DOCX、XLS/XLSX、图片、地图图纸是否转化为内容价值。
-3. 结构是否完整：封面、标题、目录、核心结论、正文章节、表格、图片、地图、来源、导出门禁。
-4. 事实是否可靠：是否存在无来源断言、夸大描述、冲突信息未处理。
-5. 表达是否专业：是否有重复、空泛、口语过度、章节衔接差的问题。
-6. 导出是否友好：Markdown 标题层级、表格、图片链接、列表、引用块是否规范。
-
-优化要求：
-- 直接返回优化后的完整 Markdown。
-- 保留已有图片引用、表格和来源信息。
-- 对证据不足的地方，用“资料未覆盖/建议补充”标注，不要编造。
-- 增强章节过渡、总结和行动建议，让文档更像正式交付成果。`,
-  },
-  'builtin:delta-validation': {
-    name: '内置｜三角洲攻略校验',
-    content: `你是“导出前质量门禁检查员”。请检查文档是否达到可导出、可交付、可复核标准。
-
-必须检查：
-1. 是否覆盖核心干员：露娜、红狼、牧羊人、蜂医。
-2. 是否包含推荐表格，且表格列名清晰。
-3. 是否包含封面图、干员图片、地图图纸或其引用说明。
-4. 是否有目录和稳定的 Markdown 标题层级。
-5. 是否说明事实来源或资料依据。
-6. 是否存在明显占位符、空章节、重复章节、无来源断言。
-7. 是否满足文档规范包中的必填事实和章节规则。
-
-输出要求：
-- 给出 error、warning、info 三类问题。
-- error 代表阻断导出；warning 代表可导出但建议优化；info 代表提示信息。
-- 每个问题都要给出修复建议。`,
-  },
-  'builtin:delta-formatting': {
-    name: '内置｜三角洲攻略格式化',
-    content: `你是“Markdown 排版编辑”。请把攻略整理成适合 Markdown/HTML/DOCX/PDF 导出的正式结构。
-
-排版要求：
-1. 使用清晰的一级、二级、三级标题，不跳级。
-2. 重要结论使用列表或引用块突出。
-3. 表格必须使用标准 Markdown 表格语法。
-4. 图片必须保留 alt 文本，图片前后要有说明。
-5. 长段落要拆分，避免一段超过 5 行。
-6. 结尾应包含来源说明、适用范围和资料缺失提醒。
-7. 不要改变事实含义，不要新增没有来源的内容。`,
-  },
-};
-
 function readPromptContents(promptBindings: PromptBinding[] = []): Array<{ id: string; roleId: string; name: string; content: string }> {
   if (promptBindings.length === 0) return [];
   const prompts: Array<{ id: string; roleId: string; name: string; content: string }> = [];
@@ -441,11 +256,6 @@ function readPromptContents(promptBindings: PromptBinding[] = []): Array<{ id: s
   }
   for (const binding of promptBindings) {
     const id = binding.promptId;
-    if (id.startsWith('builtin:')) {
-      const builtIn = BUILT_IN_PROMPTS[id];
-      if (builtIn) prompts.push({ id, roleId: binding.roleId, name: builtIn.name, content: builtIn.content });
-      continue;
-    }
     if (id.startsWith('custom:')) {
       const custom = customPrompts.find(item => item.id === id);
       if (custom) prompts.push({ id, roleId: binding.roleId, name: custom.name, content: custom.content });
@@ -501,7 +311,7 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
   if (spec?.chapterMode === 'dynamic' && spec.dynamicChapterRule.maxChapters && spec.dynamicChapterRule.minChapters && spec.dynamicChapterRule.maxChapters < spec.dynamicChapterRule.minChapters) {
     issues.push({ level: 'error', message: '动态章节规则的最多章节不能小于最少章节' });
   }
-  const resolvedProjectRoot = ensureBuiltInKnowledgeBase(projectRoot);
+  const resolvedProjectRoot = path.resolve(projectRoot);
   const project = await getMultiProjectManager().getProject(resolvedProjectRoot);
   if (template.builtIn) await project.incrementalIndex();
   const files = listKnowledgeFiles(resolvedProjectRoot);
@@ -571,7 +381,7 @@ function evidenceFromBoundFile(filePath: string, roleId: string | undefined, pro
   const absolute = path.isAbsolute(filePath) ? filePath : fs.existsSync(path.join(projectRoot, 'knowledgeBase', filePath)) ? path.join(projectRoot, 'knowledgeBase', filePath) : path.join(projectRoot, filePath);
   if (!fs.existsSync(absolute) || fs.statSync(absolute).isDirectory()) return [];
   const ext = path.extname(absolute).toLowerCase();
-  const content = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.webp'].includes(ext) ? `内置示例资料文件：${path.basename(filePath)}，用于三角洲热门干员攻略生成，文件类型：${ext}。` : fs.readFileSync(absolute, 'utf-8');
+  const content = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.webp'].includes(ext) ? `资料文件：${path.basename(filePath)}，文件类型：${ext}。` : fs.readFileSync(absolute, 'utf-8');
   const chunks = content.match(/[\s\S]{1,1800}/gu) || [];
   return chunks.slice(0, 12).map((chunk, index) => ({
     chapterId,
@@ -615,9 +425,9 @@ function relatedFactsForResource(item: DocumentEvidence, chapter?: DocumentTempl
   return [...new Set(candidates.filter(fact => evidenceMatchesFact(item, fact) || haystack.includes(fact)))];
 }
 
-function resourceContentUse(kind: ResourceEvidence['kind'], item: DocumentEvidence) {
+function resourceContentUse(kind: ResourceEvidence['kind']) {
   if (kind === 'map') return '作为地图/图纸证据，用于说明区域、路线、点位、撤离/交战路径和队伍分工。';
-  if (kind === 'image') return item.roleId?.includes('operator') || /干员|露娜|红狼|牧羊人|蜂医/u.test(item.filePath) ? '作为干员或对象图片证据，用于对应角色形象、定位和正文配图。' : '作为图片证据，用于视觉说明、参考图或章节配图。';
+  if (kind === 'image') return '作为图片证据，用于视觉说明、参考图或章节配图。';
   if (kind === 'spreadsheet' || kind === 'table') return '作为表格/数据证据，用于字段对比、优先级、清单和结构化结论。';
   if (kind === 'document') return '作为 PDF/Word 文档证据，用于提取规范、事实、说明、约束和附件来源。';
   if (kind === 'attachment') return '作为附件证据，用于提供补充来源、文件级约束或可追溯引用。';
@@ -642,7 +452,7 @@ function buildEvidenceBundle(chapter: DocumentTemplateChapter, evidence: Documen
       processingType: item.processingType,
       score: item.score,
       semanticTitle: semanticResourceTitle(item.filePath, kind),
-      contentUse: resourceContentUse(kind, item),
+      contentUse: resourceContentUse(kind),
       relatedFacts: [],
       relatedChapters: [],
       snippets: [],
@@ -1053,8 +863,7 @@ function buildRoleChapterContext(artifacts: RoleNodeArtifact[], chapter: Documen
   return [planText ? `【本章章节计划】\n${planText}` : '', factsText ? `【角色节点结构化产物】\n${factsText}` : ''].filter(Boolean).join('\n\n');
 }
 
-function shouldForbidDrawingImages(artifacts: RoleNodeArtifact[], template: DocumentTemplate) {
-  if (template.id === 'delta-force-hot-operators-guide') return false;
+function shouldForbidDrawingImages(artifacts: RoleNodeArtifact[], _template: DocumentTemplate) {
   return artifacts.some(item => item.forbidImageInsertion || item.node.outputType === 'drawing_facts');
 }
 
@@ -1233,21 +1042,6 @@ function fieldExtractionPattern(name: string) {
 }
 
 function extractStructuredFacts(evidence: DocumentEvidence[], template: DocumentTemplate, spec?: DocumentSpecPackage): DocumentFact[] {
-  const fixedPatterns: Array<[string, RegExp]> = [
-    ['工程名称', /工程名称[：:\s]+([^\n，。；;]+)/u],
-    ['工程地点', /(?:工程地点|建设地点)[：:\s]+([^\n，。；;]+)/u],
-    ['建设单位', /建设单位[：:\s]+([^\n，。；;]+)/u],
-    ['工期要求', /(?:工期|计划工期)[：:\s]+([^\n，。；;]+)/u],
-    ['质量目标', /质量目标[：:\s]+([^\n，。；;]+)/u],
-    ['安全目标', /安全目标[：:\s]+([^\n，。；;]+)/u],
-    ['施工范围', /(?:施工范围|招标范围)[：:\s]+([^\n]+)/u],
-    ['攻略目标', /攻略目标[：:\s]+([^\n]+)/u],
-    ['适用人群', /适用人群[：:\s]+([^\n]+)/u],
-    ['干员名称', /(?:热门干员|干员)[：:\s\n-]+([^\n]+)/u],
-    ['定位', /(?:定位|职责)[：:\s]+([^\n，。；;]+)/u],
-    ['推荐指数', /推荐指数[：:\s,，]+([^\n，。；;]+)/u],
-    ['实战技巧', /实战技巧[：:\s]+([^\n]+)/u],
-  ];
   const dynamicPatterns = specFactTargets(template, spec).map(field => ({ field, pattern: fieldExtractionPattern(field.name) }));
   const facts: DocumentFact[] = [];
   for (const item of evidence) {
@@ -1257,12 +1051,6 @@ function extractStructuredFacts(evidence: DocumentEvidence[], template: Document
       const value = match?.[1]?.trim();
       if (value && !facts.some(fact => fact.fieldId === field.id && fact.value === value)) {
         facts.push({ key: field.name, fieldId: field.id, fieldName: field.name, value: value.slice(0, 300), sourceFile: item.filePath, roleId: item.roleId || 'unknown', processingType: item.processingType, confidence: item.score, sourceRef: { filePath: item.filePath, roleId: item.roleId || 'unknown', processingType: item.processingType, sectionTitle: item.sectionTitle } });
-      }
-    }
-    for (const [key, pattern] of fixedPatterns) {
-      const match = item.content.match(pattern);
-      if (match?.[1] && !facts.some(fact => fact.key === key && fact.value === match[1].trim())) {
-        facts.push({ key, value: match[1].trim().slice(0, 300), sourceFile: item.filePath, roleId: item.roleId || 'unknown', processingType: item.processingType, confidence: item.score, sourceRef: { filePath: item.filePath, roleId: item.roleId || 'unknown', processingType: item.processingType, sectionTitle: item.sectionTitle } });
       }
     }
   }
@@ -1368,7 +1156,7 @@ function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFact[] = 
   const byKeys = (keys: string[]) => facts.filter(fact => keys.some(key => fact.key.includes(key)));
   const byProcessing = (type: string) => facts.filter(fact => fact.processingType === type || fact.roleId.includes(type));
   return {
-    project: byKeys(['工程名称', '工程地点', '建设单位', '施工范围', '攻略目标', '适用人群', '干员名称', '定位', '推荐指数']),
+    project: facts,
     schedule: byKeys(['工期', '开工', '竣工', '节点']),
     quality: byKeys(['质量']),
     safety: byKeys(['安全']),
@@ -1495,297 +1283,14 @@ function applySpecGateRules(spec: DocumentSpecPackage | undefined, issues: Valid
   return next;
 }
 
-function buildValidationIssues(validation: { warnings: string[]; errors: string[] }, factsModel: DocumentFactsModel, draftChapters: DocumentDraftChapter[], template?: DocumentTemplate): ValidationIssue[] {
+function buildValidationIssues(validation: { warnings: string[]; errors: string[] }, factsModel: DocumentFactsModel, draftChapters: DocumentDraftChapter[]): ValidationIssue[] {
   const issues: ValidationIssue[] = [
     ...validation.errors.map(message => ({ level: 'error' as const, message, suggestion: '请补充配置或资料后重新生成。' })),
     ...validation.warnings.map(message => ({ level: 'warning' as const, message, suggestion: '建议人工确认或补充对应资料。' })),
   ];
-  if (!template?.documentSpecId && factsModel.project.length === 0) issues.push({ level: 'error', message: '项目基础事实缺失', suggestion: '请在项目事实文件角色中绑定包含工程概况的资料。' });
   if (draftChapters.some(chapter => chapter.content.includes('资料未提供'))) issues.push({ level: 'warning', message: '存在资料未提供章节', suggestion: '请检查项目角色配置中的文件绑定和顺序。' });
   if (factsModel.conflicts.length > 0) issues.push(...factsModel.conflicts.map(message => ({ level: 'error' as const, message })));
   return issues;
-}
-
-function operatorTable(evidence: DocumentEvidence[]) {
-  const table = evidence.find(item => item.filePath.endsWith('.csv') && item.content.includes('干员名称'));
-  if (!table) return '';
-  const lines = table.content.trim().split(/\r?\n/u).filter(Boolean);
-  if (lines.length < 2) return '';
-  const rows = lines.slice(1).map(line => line.split(',').map(cell => cell.trim()));
-  return ['| 干员 | 定位 | 推荐指数 | 上手难度 | 推荐场景 |', '|---|---|---:|---|---|', ...rows.map(row => `| ${row[0] || ''} | ${row[1] || ''} | ${row[2] || ''} | ${row[3] || ''} | ${row[4] || ''} |`)].join('\n');
-}
-
-function getPromptContentById(promptBindings: PromptBinding[], promptId: string) {
-  return readPromptContents(promptBindings).find(prompt => prompt.id === promptId)?.content || '';
-}
-
-function buildTextToImageUrl(prompt: string, imageSize: 'landscape_16_9' | 'square_hd' = 'landscape_16_9') {
-  return `https://coresg-normal.trae.ai/api/ide/v1/text_to_image?prompt=${encodeURIComponent(prompt)}&image_size=${imageSize}`;
-}
-
-function mimeExtension(mimeType: string) {
-  if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
-  if (mimeType.includes('webp')) return 'webp';
-  if (mimeType.includes('svg')) return 'svg';
-  return 'png';
-}
-
-function documentAssetRelativePath(fileName: string) {
-  return path.join('generatedDocuments', 'assets', fileName).split(path.sep).join('/');
-}
-
-function projectIdForGeneratedAssets(projectRoot: string) {
-  return crypto.createHash('sha1').update(path.resolve(projectRoot)).digest('hex').slice(0, 12);
-}
-
-function saveDocumentImageAsset(projectRoot: string, fileName: string, data: Buffer) {
-  const root = path.join(os.homedir(), '.customize-agent', 'projects', projectIdForGeneratedAssets(projectRoot), 'generatedDocuments');
-  const relativePath = documentAssetRelativePath(fileName);
-  const absolutePath = path.join(root, 'assets', fileName);
-  fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-  fs.writeFileSync(absolutePath, data);
-  return relativePath;
-}
-
-function isValidImageBuffer(buffer: Buffer) {
-  const text = buffer.toString('utf8', 0, Math.min(buffer.length, 200)).trimStart();
-  return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
-    || buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
-    || buffer.subarray(0, 4).toString('ascii') === 'RIFF'
-    || text.startsWith('<svg');
-}
-
-const KNOWN_STATIC_GENERATED_IMAGE_HASHES = new Set([
-  'e330cd023298a812503e10a067a3f88e1cbc094f37f6fd2a88fdb6799495b37e',
-]);
-
-function imageHash(buffer: Buffer) {
-  return crypto.createHash('sha256').update(buffer).digest('hex');
-}
-
-function validateGeneratedImage(buffer: Buffer, contentType: string) {
-  if (!contentType.startsWith('image/') || !isValidImageBuffer(buffer)) {
-    throw new Error(`图片生成接口未返回有效图片：${contentType || 'unknown'} ${buffer.toString('utf8').slice(0, 80)}`);
-  }
-  const hash = imageHash(buffer);
-  return { hash, staticPlaceholder: KNOWN_STATIC_GENERATED_IMAGE_HASHES.has(hash) };
-}
-
-function imageGenerationPlaceholderMessage(buffer: Buffer) {
-  const text = buffer.toString('utf8').slice(0, 300).trim();
-  if (/image is generating|please refresh|generating/i.test(text)) return text;
-  return '';
-}
-
-async function saveImageFromUrl(projectRoot: string, imageUrl: string, fileName: string): Promise<{ path: string; diagnostics: { hash: string; staticPlaceholder: boolean } }> {
-  let lastMessage = '';
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    const response = await fetch(imageUrl);
-    if (!response.ok) throw new Error(`图片下载失败：${response.status}`);
-    const contentType = response.headers.get('content-type') || '';
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const placeholder = imageGenerationPlaceholderMessage(buffer);
-    if (placeholder) {
-      lastMessage = placeholder;
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      continue;
-    }
-    const diagnostics = validateGeneratedImage(buffer, contentType);
-    const path = saveDocumentImageAsset(projectRoot, `${fileName}.${mimeExtension(contentType)}`, buffer);
-    return { path, diagnostics };
-  }
-  throw new Error(lastMessage || '图片仍在生成中，请稍后重新生成或刷新资源');
-}
-
-async function generatedCoverAssetFromUrl(projectRoot: string, prompt: string, modelProvider?: string): Promise<DocumentAsset> {
-  const imageUrl = buildTextToImageUrl(prompt);
-  const saved = await saveImageFromUrl(projectRoot, imageUrl, `cover-${Date.now()}`);
-  return {
-    id: `asset-cover-${Date.now()}`,
-    type: 'image',
-    role: 'cover',
-    path: saved.path,
-    prompt,
-    modelProvider,
-    status: 'generated',
-    message: saved.diagnostics.staticPlaceholder
-      ? `备用图片生成通道返回固定图片，已保存但需要检查模型图片生成配置；sha256=${saved.diagnostics.hash}`
-      : `已生成封面图片并保存为本地生成资源；sha256=${saved.diagnostics.hash}`,
-  };
-}
-
-function fallbackCoverAsset(prompt: string, message = '封面图片生成失败，使用本地参考图兜底并仅在资源元数据保留提示词'): DocumentAsset {
-  return {
-    id: `asset-cover-${Date.now()}`,
-    type: 'image',
-    role: 'cover',
-    path: '图片素材/干员图片/露娜.png',
-    prompt,
-    status: 'fallback',
-    message,
-  };
-}
-
-async function generateCoverAsset(template: DocumentTemplate, promptBindings: PromptBinding[], evidence: DocumentEvidence[], projectRoot: string): Promise<DocumentAsset> {
-  const active = getActiveModelWithProvider();
-  const coverPromptRole = promptBindings.find(binding => binding.roleId === 'delta-cover-image-prompt');
-  const configuredPrompt = coverPromptRole ? getPromptContentById(promptBindings, coverPromptRole.promptId) : BUILT_IN_PROMPTS['builtin:delta-cover-image-generation'].content;
-  const referenceFiles = [...new Set(evidence.map(item => item.filePath).filter(file => /\.(png|jpe?g|webp)$/iu.test(file)))].slice(0, 6);
-  const basePrompt = [
-    configuredPrompt,
-    `文档标题：${template.outputTitle}`,
-    referenceFiles.length ? `参考图片文件：${referenceFiles.join('、')}` : '',
-    '画面要求：真实网站/正式文档封面可用，战术小队剪影，地图蓝图线稿，冷色科技 HUD，专业、干净、高清、16:9，预留标题区域。',
-  ].filter(Boolean).join('\n');
-  if (active?.provider.capabilities?.imageGeneration) {
-    const optimized = await callDocumentLlm('你是专业视觉设计提示词专家。请把用户需求优化成英文 SDXL 图片生成提示词，只返回提示词正文。', basePrompt);
-    const prompt = optimized && optimized.length > 40 ? optimized : basePrompt;
-    const provider = createProvider(providerFactoryName(active.model.provider, active.provider), { baseUrl: active.provider.baseUrl, apiKey: active.provider.apiKey, modelName: active.model.name, directEndpoint: active.provider.directEndpoint });
-    if (provider.generateImage) {
-      try {
-        const image = await provider.generateImage(prompt, { size: '1536x1024', quality: 'high' });
-        const diagnostics = validateGeneratedImage(image.data, image.mimeType);
-        const fileName = `cover-${Date.now()}.${mimeExtension(image.mimeType)}`;
-        const relativePath = saveDocumentImageAsset(projectRoot, fileName, image.data);
-        return {
-          id: `asset-cover-${Date.now()}`,
-          type: 'image',
-          role: 'cover',
-          path: relativePath,
-          prompt: image.revisedPrompt || prompt,
-          modelProvider: active.model.provider,
-          status: 'generated',
-          message: diagnostics.staticPlaceholder
-            ? `多模态模型返回固定图片，已保存但需要检查模型图片生成配置；sha256=${diagnostics.hash}`
-            : `已调用多模态模型生成封面图片并保存为文档资源；sha256=${diagnostics.hash}`,
-        };
-      } catch (error) {
-        try {
-          return await generatedCoverAssetFromUrl(projectRoot, prompt, active.model.provider);
-        } catch (fallbackError) {
-          return fallbackCoverAsset(prompt, `图片生成失败，且本地化备用生成失败：${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}；原始错误：${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-    }
-    try {
-      return await generatedCoverAssetFromUrl(projectRoot, prompt, active.model.provider);
-    } catch (error) {
-      return fallbackCoverAsset(prompt, `图片生成备用通道失败：${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return fallbackCoverAsset(basePrompt, '当前模型未开启图片生成能力，使用本地参考图兜底并仅在资源元数据保留提示词');
-}
-
-function markdownImage(filePath: string, alt: string) {
-  const normalized = filePath.split(path.sep).join('/');
-  return `![${alt}](${encodeURI(normalized)})`;
-}
-
-function operatorImageGallery() {
-  const items = [
-    ['露娜', '图片素材/干员图片/露娜.png'],
-    ['红狼', '图片素材/干员图片/红狼.png'],
-    ['牧羊人', '图片素材/干员图片/牧羊人.png'],
-    ['蜂医', '图片素材/干员图片/蜂医.png'],
-  ];
-  return items.map(([name, file]) => `### ${name}\n\n${markdownImage(file, `${name}干员形象`)}`).join('\n\n');
-}
-
-function resourceGallery(resources: ResourceEvidence[], kind: ResourceEvidence['kind']) {
-  const files = resources.filter(item => item.kind === kind && ['map', 'image'].includes(item.kind));
-  return files.slice(0, 6).map(item => `### ${item.semanticTitle}\n\n${markdownImage(item.filePath, item.semanticTitle)}`).join('\n\n');
-}
-
-function hasMapImageMarkdown(markdown: string) {
-  return /!\[[^\]]*(?:地图|图纸|零号大坝|航天基地|巴克什|潮汐监狱|AZ3|攀升)[^\]]*\]\([^)]*地图图纸-[^)]*\)/u.test(markdown);
-}
-
-function ensureDeltaMapGallery(markdown: string, template: DocumentTemplate, evidence: DocumentEvidence[]) {
-  if (template.id !== 'delta-force-hot-operators-guide' || hasMapImageMarkdown(markdown)) return markdown;
-  const bundle = buildEvidenceBundle({ id: 'maps', title: '第五章 官方地图图纸和路线理解', purpose: '补齐地图图纸预览', queries: [], requiredFacts: ['地图图纸'] }, evidence);
-  const gallery = resourceGallery(bundle.resources, 'map');
-  if (!gallery) return markdown;
-  const block = `\n\n### 官方完整地图图纸预览\n\n${gallery}\n`;
-  const mapHeading = /^## 第五章 官方地图图纸和路线理解\s*$/mu;
-  const match = markdown.match(mapHeading);
-  if (!match || match.index === undefined) return `${markdown.trimEnd()}${block}\n`;
-  const insertAt = match.index + match[0].length;
-  return `${markdown.slice(0, insertAt)}${block}${markdown.slice(insertAt)}`;
-}
-
-function resourceFileList(resources: ResourceEvidence[]) {
-  if (resources.length === 0) return '- 未从知识库检索到可引用资源。';
-  return resources.slice(0, 12).map(item => `- ${item.semanticTitle}（${item.kind}）：${item.filePath}；用途：${item.contentUse}`).join('\n');
-}
-
-/** 构建三角洲攻略内置模板的可读章节内容（带预设模板文案和资源引用） */
-function buildDeltaReadableChapter(chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[]) {
-  const table = operatorTable(evidence);
-  const bundle = buildEvidenceBundle(chapter, evidence);
-  const resourceList = resourceFileList(bundle.resources);
-  const mapGallery = resourceGallery(bundle.resources, 'map');
-  const imageGallery = resourceGallery(bundle.resources, 'image');
-  const sections: Record<string, string[]> = {
-    overview: [
-      `## ${chapter.title}`,
-      '',
-      '这份攻略面向刚开始接触《三角洲行动》的玩家，以及想快速理解队伍分工的进阶玩家。核心目标是：先知道热门干员各自负责什么，再根据地图和队伍需求选择合适组合。',
-      '',
-      '建议阅读方式：先看推荐表，再看队伍搭配，最后结合官方完整地图图纸理解路线。',
-    ],
-    operators: [
-      `## ${chapter.title}`,
-      '',
-      table || '| 干员 | 定位 | 推荐场景 |\n|---|---|---|\n| 露娜 | 侦察 | 信息侦察和路线判断 |\n| 红狼 | 突击 | 突破和正面交火 |\n| 牧羊人 | 工程 | 防守控场和区域封锁 |\n| 蜂医 | 支援 | 治疗救援和续航 |',
-      '',
-      '### 干员配图',
-      '',
-      imageGallery || operatorImageGallery(),
-      '',
-      '- 露娜：适合先手获取信息，帮队伍判断推进方向。',
-      '- 红狼：适合打开突破口，但不要脱离队伍单人深入。',
-      '- 牧羊人：适合守点、卡入口和限制敌方推进。',
-      '- 蜂医：适合新手优先练习，能显著提高队伍容错。',
-    ],
-    loadout: [
-      `## ${chapter.title}`,
-      '',
-      '推荐新手队伍至少包含一名侦察和一名支援。侦察负责信息，支援负责救援和续航。需要主动进攻时加入红狼，需要防守或卡点时加入牧羊人。',
-      '',
-      '常见组合：露娜 + 蜂医 + 红狼，适合主动推进；露娜 + 蜂医 + 牧羊人，适合稳扎稳打和守关键区域。',
-    ],
-    tables: [
-      `## ${chapter.title}`,
-      '',
-      table || '推荐表暂未生成，请检查表格数据。',
-      '',
-      '推荐指数用于新手决策参考，不代表绝对强度。实际选择还要结合地图、队友位置和任务目标。',
-    ],
-    maps: [
-      `## ${chapter.title}`,
-      '',
-      '本章不会硬插固定地图，而是根据知识库检索到的地图、图片、表格、文档附件等资源证据组织内容。',
-      '',
-      resourceList,
-      '',
-      mapGallery ? '### 官方完整地图图纸预览' : '',
-      '',
-      mapGallery,
-      '',
-      '使用建议：先在完整地图上确认主要区域和撤离/交战路线，再决定侦察位观察点、突击位推进线、工程位控场点和支援位救援路线。',
-    ],
-    tips: [
-      `## ${chapter.title}`,
-      '',
-      '- 不要只看干员强度，先看队伍缺什么位置。',
-      '- 新手优先保证“侦察信息 + 支援续航”，再考虑高风险突破。',
-      '- 推进前先用地图确认路线，避免全队挤在同一入口。',
-      '- 防守时让工程位处理关键入口，支援位保持在能救人的安全距离。',
-    ],
-  };
-  const content = sections[chapter.id] || [`## ${chapter.title}`, '', evidence.length ? `本章根据已绑定知识库资料整理：${chapter.purpose}` : '本章缺少明确资料。'];
-  if (missingFacts.length > 0) content.push('', '### 需人工复核', ...missingFacts.map(item => `- ${item}`));
-  return content.join('\n');
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
@@ -1849,7 +1354,7 @@ async function reviewAndOptimizeMarkdown(input: {
     '准确性优先级：文档规范包/模板要求 > 已绑定或人工确认的知识库证据 > 自动检索知识库证据 > 项目上下文/历史记忆。',
     '项目上下文/历史记忆只能用于风格偏好、历史纠偏和连续性检查；如果与知识库证据冲突，必须以知识库证据为准。',
     '必须保持 Markdown 输出；保留已有表格、标题层级、目录和证据来源；不要编造不存在的事实。',
-    input.template.id === 'delta-force-hot-operators-guide' ? '如果正文涉及地图图纸，必须保留或补充对应本地地图文件的 Markdown 图片引用，不能只写文件名。' : '图纸资料默认只作为文本事实依据，除非用户明确要求插图，否则不要插入图纸图片或 Markdown 图片语法。',
+    '图纸资料默认只作为文本事实依据，除非用户明确要求插图，否则不要插入图纸图片或 Markdown 图片语法。',
     '重点检查：标题、封面、目录、章节完整性、事实来源、所有相关文件类型的资源证据使用、表格呈现、表达专业性、导出友好性。',
     input.promptTexts,
   ].filter(Boolean).join('\n\n'), [
@@ -1878,8 +1383,7 @@ function formatContextEntries(entries: ReturnType<typeof recallDocumentContexts>
     : '';
 }
 
-function buildReadableChapterContent(templateId: string, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[]) {
-  if (templateId === 'delta-force-hot-operators-guide') return buildDeltaReadableChapter(chapter, evidence, missingFacts);
+function buildReadableChapterContent(_templateId: string, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[]) {
   return [
     `## ${chapter.title}`,
     '',
@@ -1890,17 +1394,12 @@ function buildReadableChapterContent(templateId: string, chapter: DocumentTempla
   ].join('\n');
 }
 
-function validateDraft(chapters: DocumentDraftChapter[], facts: Record<string, string>, structuredFacts: DocumentFact[] = [], template?: DocumentTemplate) {
+function validateDraft(chapters: DocumentDraftChapter[], structuredFacts: DocumentFact[] = [], template?: DocumentTemplate) {
   const warnings: string[] = [];
   const errors: string[] = [];
   for (const chapter of chapters) {
     if (chapter.evidence.length === 0) warnings.push(`${chapter.title} 未检索到资料证据`);
     if (chapter.content.length < 80) warnings.push(`${chapter.title} 内容较短，建议人工补充或重新生成`);
-  }
-  if (!template?.documentSpecId) {
-    for (const key of ['工程名称', '工期要求', '质量目标', '施工范围']) {
-      if (!facts[key] && !structuredFacts.some(fact => fact.key === key)) warnings.push(`${key} 未形成明确事实，请人工确认`);
-    }
   }
   if (template && templateFileBindings(template).length === 0) errors.push('模板未绑定任何知识库文件');
   if (template && templatePromptBindings(template).length === 0) errors.push('模板未绑定任何提示词');
@@ -1911,22 +1410,14 @@ function validateDraft(chapters: DocumentDraftChapter[], facts: Record<string, s
   return { passed: errors.length === 0, warnings, errors };
 }
 
-function coverAssetMarkdown(asset?: DocumentAsset) {
-  const imageRef = asset?.path || '图片素材/干员图片/露娜.png';
-  return markdownImage(imageRef, '三角洲行动攻略封面图');
-}
-
 export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'markdown'>): string {
-  const coverAsset = draft.assets?.find(asset => asset.role === 'cover' && asset.type === 'image');
   return [
     `<div class="document-cover">`,
     `# ${draft.title}`,
     '',
-    draft.templateId === 'delta-force-hot-operators-guide' ? coverAssetMarkdown(coverAsset) : '',
-    '',
     `**文档版本**：V1.0  `,
     `**生成时间**：${new Date(draft.generatedAt).toLocaleString('zh-CN')}  `,
-    `**文档类型**：内置模板生成的生产级示例文档  `,
+    `**文档类型**：模板生成文档  `,
     draft.requirement ? `**生成要求**：${draft.requirement}  ` : '',
     `</div>`,
     '',
@@ -1940,11 +1431,9 @@ export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'mar
     '',
     '## 核心结论',
     '',
-    draft.templateId === 'delta-force-hot-operators-guide'
-      ? ['- 新手优先选择“露娜 + 蜂医”建立信息和续航基础。', '- 需要主动突破时加入红狼，需要稳守关键点时加入牧羊人。', '- 地图章节使用官方完整地图图纸，不使用单个瓦片截图。'].join('\n')
-      : Object.keys(draft.facts).length > 0
-        ? ['| 事实项 | 依据 |', '|---|---|', ...Object.entries(draft.facts).slice(0, 12).map(([key, value]) => `| ${key} | ${value.replace(/\|/gu, ' ').slice(0, 160)} |`)].join('\n')
-        : '未抽取到明确事实，需人工确认。',
+    Object.keys(draft.facts).length > 0
+      ? ['| 事实项 | 依据 |', '|---|---|', ...Object.entries(draft.facts).slice(0, 12).map(([key, value]) => `| ${key} | ${value.replace(/\|/gu, ' ').slice(0, 160)} |`)].join('\n')
+      : '未抽取到明确事实，需人工确认。',
     '',
     ...draft.chapters.flatMap(chapter => [chapter.content, '']),
     '## 资料来源清单',
@@ -1953,20 +1442,18 @@ export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'mar
     '|---|---:|',
     ...draft.sources.map(source => `| ${source.filePath} | ${source.count} |`),
     '',
-    ...(draft.templateId === 'delta-force-hot-operators-guide' ? [] : [
-      '## 缺失项与需确认事项',
-      '',
-      ...(draft.missingItems.length > 0 ? draft.missingItems.map(item => `- ${item}`) : ['- 暂未发现完全缺失章节；仍需人工复核关键数据。']),
-      '',
-      '## 校验结果',
-      '',
-      ...draft.validation.warnings.map(item => `- 警告：${item}`),
-      ...draft.validation.errors.map(item => `- 错误：${item}`),
-      '',
-      '## 严格校验清单',
-      '',
-      ...draft.validationIssues.map(issue => `- ${issue.level.toUpperCase()}：${issue.message}${issue.suggestion ? `（建议：${issue.suggestion}）` : ''}`),
-    ]),
+    '## 缺失项与需确认事项',
+    '',
+    ...(draft.missingItems.length > 0 ? draft.missingItems.map(item => `- ${item}`) : ['- 暂未发现完全缺失章节；仍需人工复核关键数据。']),
+    '',
+    '## 校验结果',
+    '',
+    ...draft.validation.warnings.map(item => `- 警告：${item}`),
+    ...draft.validation.errors.map(item => `- 错误：${item}`),
+    '',
+    '## 严格校验清单',
+    '',
+    ...draft.validationIssues.map(issue => `- ${issue.level.toUpperCase()}：${issue.message}${issue.suggestion ? `（建议：${issue.suggestion}）` : ''}`),
   ].join('\n');
 }
 
@@ -1979,7 +1466,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   throwIfAborted(input.signal);
   const template = getDocumentTemplate(input.templateId);
   if (!template) throw new Error('Document template not found');
-  const projectRoot = ensureBuiltInKnowledgeBase(input.projectRoot || getProjectRoot());
+  const projectRoot = path.resolve(input.projectRoot || getProjectRoot());
   if (!projectRoot) throw new Error('No knowledge base project found');
   const manager = getMultiProjectManager();
   const maxEvidence = Math.max(5, Math.min(30, input.maxEvidencePerChapter ?? 12));
@@ -2185,9 +1672,9 @@ export async function generateDocumentDraft(input: { templateId: string; require
   for (const item of allEvidence) sourceCounts.set(item.filePath, (sourceCounts.get(item.filePath) ?? 0) + 1);
   const sources = [...sourceCounts.entries()].sort((a, b) => b[1] - a[1]).map(([filePath, count]) => ({ filePath, count }));
   const factsModel = buildFactsModel(structuredFacts, structuredTables, missingItems, documentSpec);
-  const validation = validateDraft(chapterDrafts, facts, structuredFacts, template);
-  let validationIssues = buildValidationIssues(validation, factsModel, chapterDrafts, template);
-  const assets = template.id === 'delta-force-hot-operators-guide' ? [await generateCoverAsset(template, promptBindings, allEvidence, projectRoot)] : [];
+  const validation = validateDraft(chapterDrafts, structuredFacts, template);
+  let validationIssues = buildValidationIssues(validation, factsModel, chapterDrafts);
+  const assets: DocumentAsset[] = [];
   const executionStages: DocumentExecutionStage[] = [
     { type: 'role_binding', roleId: template.projectRoleConfigId || 'none', status: fileBindings.length > 0 ? 'success' : 'fallback', message: `已绑定 ${fileBindings.length} 个文件角色、${promptBindings.length} 个提示词角色` },
     contextStage,
@@ -2196,7 +1683,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     fileUnderstanding.stage,
     ...llmExtraction.stages,
     ...chapterGenerationStages,
-    ...assets.map(asset => ({ type: 'asset_generation' as const, roleId: 'delta-cover-image-prompt', status: asset.status === 'fallback' ? 'fallback' as const : 'success' as const, message: asset.message })),
+
     { type: 'validation', roleId: 'document-workflow', status: validation.errors.length > 0 ? 'failed' : 'success', message: `错误 ${validation.errors.length}，警告 ${validation.warnings.length}` },
     { type: 'formatting', roleId: 'document-workflow', status: 'success', message: '已生成正式排版 Markdown' },
     { type: 'export_ready', roleId: 'document-workflow', status: validation.errors.length > 0 ? 'failed' : 'success', message: validation.errors.length > 0 ? '导出门禁存在阻断项' : '已准备好导出 Markdown/HTML/DOCX/PDF' },
@@ -2232,7 +1719,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   validationIssues = applySpecGateRules(documentSpec, [...validationIssues, ...qualityIssues.map(message => ({ level: 'warning' as const, message }))], factsModel, chapterDrafts, repair.markdown, fileBindings, promptBindings);
   const exportGate = buildExportGate(validationIssues, factsModel, chapterDrafts);
   const finalBase = { ...base, validationIssues, exportGate, executionStages: reviewedStages };
-  const markdown = template.id === 'delta-force-hot-operators-guide' ? ensureDeltaMapGallery(repair.markdown, template, allEvidence) : removeUnwantedDrawingImages(repair.markdown, forbidDrawingImages);
+  const markdown = removeUnwantedDrawingImages(repair.markdown, forbidDrawingImages);
   return { ...finalBase, markdown };
 }
 

@@ -120,10 +120,13 @@ export class KnowledgeBaseManager {
     return this.incrementalIndex(options);
   }
 
-  async consumePendingIndexJobs(options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer'; limit?: number } = {}): Promise<DiffResult> {
+  async consumePendingIndexJobs(options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer'; limit?: number; waitForUploadId?: string } = {}): Promise<DiffResult> {
     this.initialize();
-    const jobs = this.store.listPendingIndexJobs(options.limit ?? 50);
-    if (jobs.length === 0) return this.incrementalIndex(options);
+    const jobs = this.store.listPendingIndexJobs(options.limit ?? 500);
+    if (jobs.length === 0) {
+      if (options.waitForUploadId && this.uploadSessionIsOpen(options.waitForUploadId)) return this.emptyDiff();
+      return this.incrementalIndex(options);
+    }
     return this.incrementalIndex({ ...options, onlyRelativePaths: jobs.map(job => job.relativePath) });
   }
 
@@ -136,10 +139,11 @@ export class KnowledgeBaseManager {
 
     const kbIgnore = this.scanner.loadKbIgnore(this.kbPath);
     const configIgnore = this.projectConfig?.kbignore ?? [];
-    const diskFiles = await this.scanner.scan(this.kbPath, [...kbIgnore, ...configIgnore]);
+    const onlyRelativePaths = options.onlyRelativePaths ? new Set(options.onlyRelativePaths) : undefined;
+    const diskFiles = onlyRelativePaths ? this.statRelativePaths([...onlyRelativePaths]) : await this.scanner.scan(this.kbPath, [...kbIgnore, ...configIgnore]);
     const tracker = new ChangeTracker(this.store);
     const diff = await tracker.computeDiff(diskFiles, this.classifier, this.kbPath);
-    const onlyRelativePaths = options.onlyRelativePaths ? new Set(options.onlyRelativePaths) : undefined;
+
     let vectorDeletesApplied = 0;
     if (onlyRelativePaths) {
       diff.newFiles = diff.newFiles.filter(file => onlyRelativePaths.has(file.relativePath));
@@ -165,7 +169,7 @@ export class KnowledgeBaseManager {
     const vectorRelativePaths: string[] = [];
     const changedCollectionNames = new Set<string>();
     for (const [index, file] of filesToIndex.entries()) {
-      const hash = tracker.hashFile(file.absolutePath);
+      const hash = await tracker.hashFile(file.absolutePath);
       const duplicate = this.store.findExactDuplicate(hash, file.relativePath);
       const collectionName = this.scope === 'global'
         ? this.collections.getCollectionName('global', file.category)
@@ -490,15 +494,16 @@ export class KnowledgeBaseManager {
     return jobs;
   }
 
-  async stageUploadedFilePaths(files: Array<{ fileName: string; sourcePath: string; targetRelativePath?: string }>, operationId = `upload-${Date.now()}`, offset = 0) {
+  async stageUploadedFilePaths(files: Array<{ fileName: string; sourcePath: string; targetRelativePath?: string }>, operationId = `upload-${Date.now()}`, offset = 0, uploadComplete = true) {
     this.initialize();
+    this.store.setMetadata(`upload_session:${operationId}`, uploadComplete ? 'complete' : 'open');
     const jobs = [];
     for (let index = 0; index < files.length; index++) {
       const file = files[index]!;
       const relativePath = this.getUploadRelativePath(file.fileName, file.targetRelativePath);
       const targetPath = this.resolveKbRelativePath(relativePath);
       fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-      fs.copyFileSync(file.sourcePath, targetPath);
+      this.moveUploadedFile(file.sourcePath, targetPath);
       const record = this.store.listRecords().find(item => item.relativePath === relativePath);
       if (record) await this.deleteVectorFile(record.collectionName, relativePath);
       this.store.deleteRecord(relativePath);
@@ -968,6 +973,38 @@ ${resultsText}
     }
     if (indexedChunks === chunkCount && status === 'ready') return;
     await this.indexVectors({ rebuild: true });
+  }
+
+  uploadSessionIsOpen(operationId: string): boolean {
+    return this.store.getMetadata(`upload_session:${operationId}`) === 'open';
+  }
+
+  private emptyDiff(): DiffResult {
+    return { newFiles: [], modifiedFiles: [], deletedFiles: [], unchangedCount: 0, mtimeOnlyCount: 0, skippedFiles: [], hasChanges: false, diffTimeMs: 0 };
+  }
+
+  private statRelativePaths(relativePaths: string[]): Map<string, { size: number; mtime: number }> {
+    const files = new Map<string, { size: number; mtime: number }>();
+    for (const relativePath of relativePaths) {
+      const normalized = this.normalizeRelativePath(relativePath);
+      const absolutePath = this.resolveKbRelativePath(normalized);
+      if (!fs.existsSync(absolutePath)) continue;
+      const stat = fs.statSync(absolutePath);
+      if (stat.isFile()) files.set(normalized, { size: stat.size, mtime: stat.mtimeMs });
+    }
+    return files;
+  }
+
+  private moveUploadedFile(sourcePath: string, targetPath: string): void {
+    if (fs.existsSync(targetPath)) fs.rmSync(targetPath, { force: true });
+    try {
+      fs.renameSync(sourcePath, targetPath);
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code) : '';
+      if (code !== 'EXDEV') throw error;
+      fs.copyFileSync(sourcePath, targetPath);
+      fs.rmSync(sourcePath, { force: true });
+    }
   }
 
   private hasUsableContent(text: string, metadata: Record<string, unknown>): boolean {

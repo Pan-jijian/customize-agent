@@ -116,19 +116,66 @@ async function readLogTail(logPath: string): Promise<string> {
   }
 }
 
+async function pageResourcesAreHealthy(port: number, pagePath: string): Promise<boolean> {
+  const base = `http://127.0.0.1:${port}`;
+  const page = await fetch(`${base}${pagePath}`, { redirect: 'manual' });
+  if (page.status !== 200) return false;
+  const html = await page.text();
+  const resources = [...html.matchAll(/(?:src|href)="([^"]+)"/g)]
+    .map(match => match[1])
+    .filter((url): url is string => Boolean(url))
+    .filter(url => !url.startsWith('data:') && !url.startsWith('#') && !url.startsWith('mailto:'))
+    .map(url => new URL(url, `${base}${pagePath}`))
+    .filter(url => url.origin === base)
+    .map(url => `${url.pathname}${url.search}`);
+  const uniqueResources = [...new Set(resources)];
+  const checks = await Promise.all(uniqueResources.map(async resource => {
+    const response = await fetch(`${base}${resource}`, { redirect: 'manual' });
+    return response.status < 400;
+  }));
+  return checks.every(Boolean);
+}
+
+async function dashboardIsHealthy(port: number): Promise<boolean> {
+  const [root, overview, health] = await Promise.all([
+    pageResourcesAreHealthy(port, '/'),
+    pageResourcesAreHealthy(port, '/overview'),
+    fetch(`http://127.0.0.1:${port}/api/health`, { redirect: 'manual' }).then(response => response.status === 200),
+  ]);
+  return root && overview && health;
+}
+
 async function waitForDashboard(port: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
-      if (response.status < 500) return true;
+      if (await dashboardIsHealthy(port)) return true;
     } catch { /* 服务器仍在启动 */ }
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   return false;
 }
 
+async function portHasHealthyDashboard(port: number): Promise<boolean> {
+  try { return await dashboardIsHealthy(port); } catch { return false; }
+}
+
+async function portIsAvailable(port: number): Promise<boolean> {
+  const { createServer } = await import('net');
+  return new Promise(resolve => {
+    const server = createServer();
+    server.once('error', () => resolve(false));
+    server.once('listening', () => server.close(() => resolve(true)));
+    server.listen(port, '127.0.0.1');
+  });
+}
+
 async function resolveDashboardPort(preferredPort: number): Promise<number> {
+  if (await portHasHealthyDashboard(preferredPort)) return preferredPort;
+  if (await portIsAvailable(preferredPort)) return preferredPort;
+  for (let port = preferredPort + 1; port <= preferredPort + 50; port += 1) {
+    if (await portIsAvailable(port)) return port;
+  }
   return preferredPort;
 }
 

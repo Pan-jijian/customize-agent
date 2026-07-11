@@ -6,7 +6,7 @@ import { upsertKbOperation } from '@/services/kbOperationLog';
 import { startKnowledgeIndex } from '@/services/kbIndexWorkerService';
 
 export const config = {
-  api: { bodyParser: false, responseLimit: '500mb' },
+  api: { bodyParser: false, responseLimit: false },
 };
 
 type MultipartFields = {
@@ -16,6 +16,7 @@ type MultipartFields = {
   batchIndex: number;
   totalBatches: number;
   startIndex: boolean;
+  uploadComplete: boolean;
   fileOffset: number;
 };
 
@@ -38,7 +39,8 @@ function parseIntField(value: string | undefined, fallback: number): number {
 }
 
 function parseMultipart(req: NextApiRequest): Promise<{ fields: MultipartFields; files: FormidableFile[] }> {
-  const form = formidable({ multiples: true, maxFileSize: 500 * 1024 * 1024, maxTotalFileSize: 500 * 1024 * 1024, keepExtensions: true });
+  const maxUploadBytes = Number(process.env.CUSTOMIZE_KB_UPLOAD_MAX_BYTES || 4 * 1024 * 1024 * 1024);
+  const form = formidable({ multiples: true, maxFileSize: maxUploadBytes, maxTotalFileSize: maxUploadBytes, keepExtensions: true });
   return new Promise((resolve, reject) => {
     form.parse(req, (error, rawFields, rawFiles) => {
       if (error) {
@@ -55,7 +57,8 @@ function parseMultipart(req: NextApiRequest): Promise<{ fields: MultipartFields;
           relativePaths: fieldArray(rawFields.relativePaths),
           batchIndex,
           totalBatches,
-          startIndex: parseBool(firstField(rawFields.startIndex)) || batchIndex >= totalBatches - 1,
+          startIndex: parseBool(firstField(rawFields.startIndex)) || batchIndex === 0,
+          uploadComplete: parseBool(firstField(rawFields.uploadComplete)) || batchIndex >= totalBatches - 1,
           fileOffset: Math.max(0, parseIntField(firstField(rawFields.fileOffset), batchIndex * 1000)),
         },
         files: fileValues,
@@ -68,7 +71,7 @@ function uploadedFileName(file: FormidableFile): string {
   return file.originalFilename || file.newFilename || 'uploaded-file';
 }
 
-/** 文件上传 API：接收 multipart 文件，落盘后按最后批次启动后台索引任务 */
+/** 文件上传 API：接收 multipart 文件，首批落盘后即启动后台索引任务，后续批次持续入队 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   let operationId = `upload-${Date.now()}`;
@@ -90,7 +93,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       targetRelativePath: parsed.fields.relativePaths[index],
     }));
 
-    const jobs = await project.stageUploadedFilePaths(preparedFiles, operationId, parsed.fields.fileOffset);
+    const jobs = await project.stageUploadedFilePaths(preparedFiles, operationId, parsed.fields.fileOffset, parsed.fields.uploadComplete);
     const uploadedRelativePath = jobs[0]?.relativePath;
     const percent = parsed.fields.startIndex ? 5 : Math.min(4, Math.max(1, Math.round(((parsed.fields.batchIndex + 1) / parsed.fields.totalBatches) * 4)));
     const message = parsed.fields.startIndex

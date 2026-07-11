@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, ReloadOutlined, CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined } from '@ant-design/icons';
 import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentSpecs, getDocumentTemplates, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentDraftChapter, type DocumentRole, type DocumentSpecPackage, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
@@ -500,8 +500,8 @@ export default function DocumentsPage() {
                   <Button key="cfg" size="small" icon={<SettingOutlined />} onClick={(e) => { e.stopPropagation(); openEditor(item); }}>配置</Button>,
                   <Button key="run" size="small" type="primary" icon={<PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void runTemplateWithValidation(item.id); }}>运行</Button>,
                   <Button key="copy" size="small" icon={<CopyOutlined />} onClick={(e) => { e.stopPropagation(); void dupTpl(item.id); }} />,
-                  <Popconfirm key="del" title={t('documents.deleteTemplateConfirm')} disabled={item.builtIn} onConfirm={(e) => { e?.stopPropagation(); void delTpl(item.id); }}>
-                    <Button size="small" danger icon={<DeleteOutlined />} disabled={item.builtIn} onClick={(e) => e.stopPropagation()} />
+                  <Popconfirm key="del" title={t('documents.deleteTemplateConfirm')} onConfirm={(e) => { e?.stopPropagation(); void delTpl(item.id); }}>
+                    <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} />
                   </Popconfirm>,
                 ]}
                 onClick={() => setTemplateId(item.id)}
@@ -511,7 +511,6 @@ export default function DocumentsPage() {
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
                       <span style={{ fontWeight: templateId === item.id ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</span>
-                      {item.builtIn && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>内置</Tag>}
                       {templateId === item.id && <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>当前</Tag>}
                       <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>{item.category}</Tag>
                       {templateValidations[item.id] && <Tag color={templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'error' : templateValidations[item.id]!.issues.length ? 'warning' : 'success'} style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>检查 {templateValidations[item.id]!.fileDiagnostics.length} 文件 / {templateValidations[item.id]!.promptDiagnostics.length} 提示词</Tag>}
@@ -679,7 +678,20 @@ export default function DocumentsPage() {
         </Space>
       </Drawer>
 
-      <Modal maskClosable={false} title={t('documents.templateEditor')} open={templateModalOpen} onOk={() => { void saveTpl(); }} onCancel={() => setTemplateModalOpen(false)} width={760} centered okText={t('common.save')} cancelText={t('common.cancel')}>
+      <Drawer
+        title={t('documents.templateEditor')}
+        open={templateModalOpen}
+        onClose={() => setTemplateModalOpen(false)}
+        width={860}
+        maskClosable={false}
+        styles={{ body: { padding: 20, overflow: 'auto' }, header: { borderBottom: '1px solid var(--colorBorderSecondary)' } }}
+        extra={
+          <Space>
+            <Button onClick={() => setTemplateModalOpen(false)}>{t('common.cancel')}</Button>
+            <Button type="primary" onClick={() => { void saveTpl(); }}>{t('common.save')}</Button>
+          </Space>
+        }
+      >
         <Form form={form} layout="vertical" requiredMark="optional">
           <Row gutter={12}>
             <Form.Item name="id" hidden><Input /></Form.Item>
@@ -715,7 +727,7 @@ export default function DocumentsPage() {
             )}
           </Form.List>
         </Form>
-      </Modal>
+      </Drawer>
     </div>
   );
 }

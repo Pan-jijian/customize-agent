@@ -17,7 +17,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 
 export interface KbVectorStatus { status: string; error?: string; indexedChunks: number; lastIndexedAt: number; backend: string; }
 export interface KbStats { scope: string; projectId?: string; fileCount: number; chunkCount: number; totalSizeBytes: number; lastIndexedAt: number; vectorStatus?: KbVectorStatus; }
-export interface KbFileItem { relativePath: string; category: string; format: string; fileSize: number; mtime: number; chunkCount: number; indexedAt: number; status: string; errorMessage?: string; metadataJson?: string; builtIn?: boolean; matchedBy?: 'path' | 'metadata' | 'content' | 'disk'; score?: number; }
+export interface KbFileItem { relativePath: string; category: string; format: string; fileSize: number; mtime: number; chunkCount: number; indexedAt: number; status: string; errorMessage?: string; metadataJson?: string; matchedBy?: 'path' | 'metadata' | 'content' | 'disk'; score?: number; }
 export interface KbFeatures { vectorStore: string; embeddingProvider: string; externalExtractors: string[]; dedupEngine: string; chunker: string; }
 export interface KbUploadProgress { id: string; stage: string; percent: number; message: string; fileName?: string; chunkCount?: number; vectorStatus?: KbVectorStatus; error?: string; updatedAt: number; }
 export interface KbOperationRecord { id: string; type: 'upload' | 'delete' | 'reindex'; stage: string; status: 'processing' | 'success' | 'warning' | 'error'; title: string; message: string; percent: number; fileName?: string; filePath?: string; chunkCount?: number; textLength?: number; extractionMode?: string; error?: string; createdAt: number; updatedAt: number; }
@@ -85,6 +85,7 @@ function appendUploadForm(files: File[], opts: { projectRoot?: string; uploadId?
   form.append('totalBatches', String(opts.totalBatches));
   form.append('fileOffset', String(opts.fileOffset));
   form.append('startIndex', opts.startIndex ? '1' : '0');
+  form.append('uploadComplete', opts.batchIndex === opts.totalBatches - 1 ? '1' : '0');
   for (const file of files) {
     form.append('files', file, file.name);
     form.append('relativePaths', fileRelativePath(file));
@@ -100,8 +101,8 @@ export async function uploadKbFile(file: File, projectRoot?: string, uploadId?: 
 }
 
 export async function uploadKbFiles(files: File[], projectRoot?: string, uploadId?: string, onBatchProgress?: (progress: { uploadedFiles: number; totalFiles: number; batchIndex: number; totalBatches: number }) => void) {
-  const maxFilesPerBatch = 50;
-  const maxBytesPerBatch = 30 * 1024 * 1024;
+  const maxFilesPerBatch = Number(process.env.NEXT_PUBLIC_CUSTOMIZE_KB_UPLOAD_BATCH_FILES || 1000);
+  const maxBytesPerBatch = Number(process.env.NEXT_PUBLIC_CUSTOMIZE_KB_UPLOAD_BATCH_BYTES || 1024 * 1024 * 1024);
   const batches: File[][] = [];
   let current: File[] = [];
   let currentBytes = 0;
@@ -128,7 +129,7 @@ export async function uploadKbFiles(files: File[], projectRoot?: string, uploadI
         batchIndex,
         totalBatches: batches.length,
         fileOffset: uploadedFiles,
-        startIndex: batchIndex === batches.length - 1,
+        startIndex: batchIndex === 0,
       }),
     });
     results.push(result);

@@ -58,7 +58,7 @@ export default function DocumentRolesPage() {
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
   const [guideExpanded, setGuideExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('file');
-  const [sourceFilter, setSourceFilter] = useState<'custom' | 'builtin' | 'all'>('custom');
+  const [sourceFilter, setSourceFilter] = useState<'custom' | 'all'>('custom');
 
   const load = async () => {
     const [roleData, fileData, promptData] = await Promise.all([getDocumentRoles(), searchKbFiles({ limit: 200, includeContent: false }), getPromptProjects()]);
@@ -66,11 +66,9 @@ export default function DocumentRolesPage() {
   };
   useEffect(() => { void load().catch(() => message.error(t('common.error'))); }, [message, t]);
 
-  const customRoles = roles.filter(role => !role.builtIn);
-  const builtInRoles = roles.filter(role => role.builtIn);
-  const customConfigs = configs.filter(config => !config.builtIn);
-  const builtInConfigs = configs.filter(config => config.builtIn);
-  const sourceMatches = (item: { builtIn?: boolean }) => sourceFilter === 'all' || (sourceFilter === 'builtin' ? item.builtIn : !item.builtIn);
+  const customRoles = roles;
+  const customConfigs = configs;
+  const sourceMatches = () => sourceFilter === 'all' || sourceFilter === 'custom';
   const visibleRoles = roles.filter(sourceMatches);
   const visibleConfigs = configs.filter(sourceMatches);
   const fileRoles = visibleRoles.filter(r => r.type === 'file');
@@ -97,18 +95,14 @@ export default function DocumentRolesPage() {
   /** 删除指定项目配置 */
   const removeConfig = async (id: string) => { const r = await deleteProjectRoleConfig(id); setRoles(r.roles); setConfigs(r.configs); };
 
-  /** 打开角色编辑抽屉，内置角色自动创建副本 */
+  /** 打开角色编辑抽屉 */
   const openRoleDrawer = (role?: DocumentRole, type: 'file' | 'prompt' = 'file') => {
-    const editingRole = role?.builtIn ? { ...role, id: `${role.id}-copy-${Date.now()}`, name: `${role.name} Copy`, builtIn: false } : role;
-    if (role?.builtIn) message.info('内置角色不可直接编辑，已为你创建副本');
-    roleForm.setFieldsValue(editingRole ? { ...editingRole, resourceIds: editingRole.resourceIds?.length ? editingRole.resourceIds : editingRole.resourceId ? [editingRole.resourceId] : [] } : { id: `role-${Date.now()}`, name: '', description: '', type, resourceIds: [], executionType: type === 'prompt' ? 'reference' : undefined, processingType: type === 'file' ? 'reference' : undefined });
+    roleForm.setFieldsValue(role ? { ...role, resourceIds: role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : [] } : { id: `role-${Date.now()}`, name: '', description: '', type, resourceIds: [], executionType: type === 'prompt' ? 'reference' : undefined, processingType: type === 'file' ? 'reference' : undefined });
     setRoleDrawerOpen(true);
   };
-  /** 打开配置编辑抽屉，内置配置自动创建副本 */
+  /** 打开配置编辑抽屉 */
   const openConfigDrawer = (config?: ProjectRoleConfig) => {
-    const editingConfig = config?.builtIn ? { ...config, id: `${config.id}-copy-${Date.now()}`, name: `${config.name} Copy`, builtIn: false } : config;
-    if (config?.builtIn) message.info('内置项目配置不可直接编辑，已为你创建副本');
-    configForm.setFieldsValue(editingConfig ?? { id: `config-${Date.now()}`, name: '', description: '', fileRoles: [], promptRoles: [], builtIn: false });
+    configForm.setFieldsValue(config ?? { id: `config-${Date.now()}`, name: '', description: '', fileRoles: [], promptRoles: [], builtIn: false });
     setConfigDrawerOpen(true);
   };
 
@@ -155,7 +149,7 @@ export default function DocumentRolesPage() {
                   <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', lineHeight: '20px' }}>{role.name}</span>
                 </div>
                 <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                  {role.builtIn ? <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>内置示例</Tag> : <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>我的角色</Tag>}
+                  <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>我的角色</Tag>
                 </div>
               </div>
               {role.description && <Paragraph ellipsis={{ rows: 2 }} style={{ fontSize: 12, color: 'var(--colorTextSecondary)', marginBottom: 8 }}>{role.description}</Paragraph>}
@@ -172,9 +166,9 @@ export default function DocumentRolesPage() {
                 </div>
               )}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, paddingTop: 4, borderTop: '1px solid var(--colorBorderSecondary)' }}>
-                <Button size="small" icon={<EditOutlined />} onClick={() => openRoleDrawer(role)}>{role.builtIn ? '复制' : '编辑'}</Button>
-                <Popconfirm title={t('common.confirm')} disabled={role.builtIn} onConfirm={() => { void removeRole(role); }}>
-                  <Button size="small" danger icon={<DeleteOutlined />} disabled={role.builtIn} />
+                <Button size="small" icon={<EditOutlined />} onClick={() => openRoleDrawer(role)}>编辑</Button>
+                <Popconfirm title={t('common.confirm')} onConfirm={() => { void removeRole(role); }}>
+                  <Button size="small" danger icon={<DeleteOutlined />} />
                 </Popconfirm>
               </div>
             </Card>
@@ -190,7 +184,6 @@ export default function DocumentRolesPage() {
       <Space>
         <Select value={sourceFilter} onChange={setSourceFilter} style={{ width: 170 }} options={[
           { label: `我的配置 (${customRoles.length + customConfigs.length})`, value: 'custom' },
-          { label: `内置示例 (${builtInRoles.length + builtInConfigs.length})`, value: 'builtin' },
           { label: `全部来源 (${roles.length + configs.length})`, value: 'all' },
         ]} />
         <Button icon={<PlusOutlined />} onClick={() => openRoleDrawer(undefined, 'file')}>{t('roles.newFileRole')}</Button>
@@ -225,11 +218,11 @@ export default function DocumentRolesPage() {
                 <Card key={config.id} size="small" hoverable style={{ minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
                     <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{config.name}</span>
-                    {config.builtIn ? <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>内置示例</Tag> : <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>我的配置</Tag>}
+                    <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>我的配置</Tag>
                     <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                      <Button size="small" icon={<EditOutlined />} onClick={() => openConfigDrawer(config)}>{config.builtIn ? '复制' : '编辑'}</Button>
-                      <Popconfirm title={t('common.confirm')} disabled={config.builtIn} onConfirm={() => { void removeConfig(config.id); }}>
-                        <Button size="small" danger icon={<DeleteOutlined />} disabled={config.builtIn} />
+                      <Button size="small" icon={<EditOutlined />} onClick={() => openConfigDrawer(config)}>编辑</Button>
+                      <Popconfirm title={t('common.confirm')} onConfirm={() => { void removeConfig(config.id); }}>
+                        <Button size="small" danger icon={<DeleteOutlined />} />
                       </Popconfirm>
                     </div>
                   </div>

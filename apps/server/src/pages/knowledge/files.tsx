@@ -44,7 +44,6 @@ export default function FilesPage() {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [statusFilter, setStatusFilter] = useState<'all' | 'processing' | 'success' | 'error'>('all');
-  const [sourceFilter, setSourceFilter] = useState<'all' | 'user' | 'builtIn'>('user');
   const [statusCollapsed, setStatusCollapsed] = useState(true);
   const [expandedRowKeys, setExpandedRowKeys] = useState<React.Key[]>([]);
   const [reindexingFiles, setReindexingFiles] = useState<Set<string>>(new Set());
@@ -183,17 +182,6 @@ export default function FilesPage() {
         return true;
       });
 
-  const fileMeta = (item?: KbFileItem) => {
-    if (!item) return {};
-    let meta: Record<string, unknown> = {};
-    try { meta = item.metadataJson ? JSON.parse(item.metadataJson) as Record<string, unknown> : {}; } catch { /* ignore */ }
-    const extraction = typeof meta.extraction === 'object' && meta.extraction ? meta.extraction as Record<string, unknown> : meta;
-    return {
-      textLength: typeof extraction.textLength === 'number' ? extraction.textLength : undefined,
-      extractionMode: typeof extraction.extractionMode === 'string' ? extraction.extractionMode : undefined,
-    };
-  };
-
   const handleUpload = async (uploadFilesList: File[]) => {
     const allowedFiles = uploadFilesList.filter(file => !ARCHIVE_FILE_PATTERN.test(file.name));
     const skippedCount = uploadFilesList.length - allowedFiles.length;
@@ -287,10 +275,6 @@ export default function FilesPage() {
   };
 
   const handleReindexFile = async (record: KbFileItem) => {
-    if (record.builtIn) {
-      message.info('内置示例资料不可重新解析');
-      return;
-    }
     const localId = `file-reindex-ui-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setReindexingFiles(prev => new Set(prev).add(record.relativePath));
     upsertStatusItem({ id: localId, type: 'reindex', title: `重新解析 ${record.relativePath}`, description: '正在提交单文件后台任务', status: 'processing', percent: 5, filePath: record.relativePath });
@@ -354,10 +338,6 @@ export default function FilesPage() {
   };
 
   const handleDelete = (record: KbFileItem) => {
-    if (record.builtIn) {
-      message.info('内置示例资料不可删除');
-      return;
-    }
     Modal.confirm({
       title: t('delete'),
       content: t('deleteConfirm'),
@@ -381,12 +361,12 @@ export default function FilesPage() {
 
   const handleBulkDelete = (mode: 'selected' | 'filtered' | 'all') => {
     const targets = mode === 'selected'
-      ? selectedUserTargets
-      : mode === 'filtered' ? filtered.filter(file => !file.builtIn).map(file => file.relativePath) : [];
-    const userFileCount = files.filter(file => !file.builtIn).length;
-    if (mode !== 'all' && targets.length === 0) { message.info('没有可删除的用户文件'); return; }
-    if (mode === 'all' && userFileCount === 0) { message.info('没有可删除的用户文件'); return; }
-    const title = mode === 'all' ? `删除全部用户文件 ${userFileCount} 个？` : mode === 'filtered' ? `删除当前筛选结果中的用户文件 ${targets.length} 个？` : `删除已选用户文件 ${targets.length} 个？`;
+      ? selectedFileTargets
+      : mode === 'filtered' ? filtered.map(file => file.relativePath) : [];
+    const fileCount = files.length;
+    if (mode !== 'all' && targets.length === 0) { message.info('没有可删除的文件'); return; }
+    if (mode === 'all' && fileCount === 0) { message.info('没有可删除的文件'); return; }
+    const title = mode === 'all' ? `删除全部文件 ${fileCount} 个？` : mode === 'filtered' ? `删除当前筛选结果中的文件 ${targets.length} 个？` : `删除已选文件 ${targets.length} 个？`;
     Modal.confirm({
       title,
       content: '将同时删除文件、切片、索引和向量记录。此操作不可撤销。',
@@ -397,7 +377,7 @@ export default function FilesPage() {
         setStatusItems(items => [{ type: 'delete', title, description: '正在批量删除文件和索引', status: 'processing', percent: 10 } satisfies StatusItem, ...items].slice(0, 50));
         try {
           const result = mode === 'all' ? await deleteAllKbFiles() : mode === 'selected' ? await deleteKbSelection(selectedFilePaths, selectedFolderPaths) : await deleteKbFiles(targets);
-          const deletedCount = result.deleted ?? (mode === 'all' ? userFileCount : targets.length);
+          const deletedCount = result.deleted ?? (mode === 'all' ? fileCount : targets.length);
           message.success(`已删除 ${deletedCount} 个文件`);
           setSelectedRowKeys([]);
           setStatusItems(items => [{ type: 'delete', title: '批量删除完成', description: `已删除 ${deletedCount} 个文件、切片和索引`, status: 'success' } satisfies StatusItem, ...items].slice(0, 50));
@@ -411,16 +391,9 @@ export default function FilesPage() {
     });
   };
 
-  const sourceFiltered = useMemo(() => sourceFilter === 'all'
-    ? files
-    : files.filter(file => sourceFilter === 'builtIn' ? file.builtIn : !file.builtIn), [files, sourceFilter]);
   const filtered = useMemo(() => searchQuery
-    ? sourceFiltered.filter((f) => f.relativePath.toLowerCase().includes(searchQuery.toLowerCase()))
-    : sourceFiltered, [searchQuery, sourceFiltered]);
-  const userFiles = useMemo(() => files.filter(file => !file.builtIn), [files]);
-  const builtInFiles = useMemo(() => files.filter(file => file.builtIn), [files]);
-  const filteredUserFiles = useMemo(() => filtered.filter(file => !file.builtIn), [filtered]);
-  const filteredBuiltInFiles = useMemo(() => filtered.filter(file => file.builtIn), [filtered]);
+    ? files.filter((f) => f.relativePath.toLowerCase().includes(searchQuery.toLowerCase()))
+    : files, [searchQuery, files]);
   const visibleFileKeys = useMemo(() => new Set(filtered.map(file => file.relativePath)), [filtered]);
 
   // ── 树形文件列表 ──
@@ -429,7 +402,6 @@ export default function FilesPage() {
     name: string;
     isFolder: boolean;
     fileCount?: number;
-    userFileCount?: number;
     totalSize?: number;
     totalChunks?: number;
     children?: FileTreeNode[];
@@ -453,8 +425,8 @@ export default function FilesPage() {
           root[path] = {
             key: path, name: seg, isFolder: !isLast,
             ...(isLast
-              ? { file, fileCount: 1, userFileCount: file.builtIn ? 0 : 1, totalSize: file.fileSize, totalChunks: file.chunkCount }
-              : { children: [], fileCount: 0, userFileCount: 0, totalSize: 0, totalChunks: 0 }),
+              ? { file, fileCount: 1, totalSize: file.fileSize, totalChunks: file.chunkCount }
+              : { children: [], fileCount: 0, totalSize: 0, totalChunks: 0 }),
           };
           if (parentPath && root[parentPath]?.children) {
             (root[parentPath]!.children as FileTreeNode[]).push(root[path]!);
@@ -464,14 +436,12 @@ export default function FilesPage() {
           root[path]!.isFolder = true;
           root[path]!.children = [];
           root[path]!.fileCount = 0;
-          root[path]!.userFileCount = 0;
           root[path]!.totalSize = 0;
           root[path]!.totalChunks = 0;
         } else if (isLast) {
           root[path]!.isFolder = false;
           root[path]!.file = file;
           root[path]!.fileCount = 1;
-          root[path]!.userFileCount = file.builtIn ? 0 : 1;
           root[path]!.totalSize = file.fileSize;
           root[path]!.totalChunks = file.chunkCount;
         }
@@ -483,10 +453,9 @@ export default function FilesPage() {
       for (const node of nodes) {
         if (node.children) {
           aggregate(node.children);
-          let fc = 0, ufc = 0, ts = 0, tc = 0;
-          for (const child of node.children) { fc += child.fileCount ?? 0; ufc += child.userFileCount ?? 0; ts += child.totalSize ?? 0; tc += child.totalChunks ?? 0; }
+          let fc = 0, ts = 0, tc = 0;
+          for (const child of node.children) { fc += child.fileCount ?? 0; ts += child.totalSize ?? 0; tc += child.totalChunks ?? 0; }
           node.fileCount = fc;
-          node.userFileCount = ufc;
           node.totalSize = ts;
           node.totalChunks = tc;
         }
@@ -511,21 +480,21 @@ export default function FilesPage() {
   const visibleItemKeys = useMemo(() => new Set([...visibleFileKeys, ...allTreeKeys]), [allTreeKeys, visibleFileKeys]);
   const selectedFolderPaths = useMemo(() => selectedRowKeys.map(String).filter(key => !visibleFileKeys.has(key) && allTreeKeys.includes(key)), [allTreeKeys, selectedRowKeys, visibleFileKeys]);
   const selectedFilePaths = useMemo(() => selectedRowKeys.map(String).filter(key => visibleFileKeys.has(key)), [selectedRowKeys, visibleFileKeys]);
-  const selectedUserTargets = useMemo(() => {
+  const selectedFileTargets = useMemo(() => {
     const targets = new Set<string>();
     for (const key of selectedFilePaths) {
       const file = files.find(item => item.relativePath === key);
-      if (file && !file.builtIn) targets.add(file.relativePath);
+      if (file) targets.add(file.relativePath);
     }
     for (const folder of selectedFolderPaths) {
       const prefix = `${folder}/`;
       for (const file of files) {
-        if (!file.builtIn && file.relativePath.startsWith(prefix)) targets.add(file.relativePath);
+        if (file.relativePath.startsWith(prefix)) targets.add(file.relativePath);
       }
     }
     return Array.from(targets);
   }, [files, selectedFilePaths, selectedFolderPaths]);
-  const selectedUserCount = selectedUserTargets.length;
+  const selectedFileCount = selectedFileTargets.length;
 
   useEffect(() => {
     setSelectedRowKeys(keys => keys.filter(key => visibleItemKeys.has(String(key))));
@@ -584,7 +553,7 @@ export default function FilesPage() {
             <span className={styles.folderName} onClick={(e) => { e.stopPropagation(); handleExpand(!expandedRowKeys.includes(r.key), r); }}>{r.name}</span>
           ) : (
             <>
-              {r.file?.builtIn && <Tag color="gold" style={{ fontSize: 11, lineHeight: '18px' }}>内置</Tag>}
+
               <Link className="truncate max-w-[380px] inline-block" href={`/knowledge/file-detail?relativePath=${encodeURIComponent(r.key)}`}>{r.name}</Link>
             </>
           )}
@@ -624,16 +593,16 @@ export default function FilesPage() {
       title: '来源', key: 'source', width: 100,
       render: (_: unknown, r: FileTreeNode) => r.isFolder
         ? <span style={{ color: 'var(--colorTextQuaternary)' }}>—</span>
-        : r.file?.builtIn ? <Tag color="gold">内置示例</Tag> : <Tag color="cyan">我的文件</Tag>,
+        : <Tag color="cyan">文件</Tag>,
     },
     {
       title: '', key: 'act', width: 100,
       render: (_: unknown, r: FileTreeNode) => r.isFolder ? null : (
         <Space size={4}>
           <Tooltip title="重新解析、分块并入库">
-            <Button type="text" size="small" disabled={r.file?.builtIn} loading={Boolean(r.file && reindexingFiles.has(r.file.relativePath))} icon={<SyncOutlined />} onClick={() => { void handleReindexFile(r.file!); }} />
+            <Button type="text" size="small" loading={Boolean(r.file && reindexingFiles.has(r.file.relativePath))} icon={<SyncOutlined />} onClick={() => { void handleReindexFile(r.file!); }} />
           </Tooltip>
-          <Button type="text" danger size="small" disabled={r.file?.builtIn} icon={<DeleteOutlined />} onClick={() => handleDelete(r.file!)} />
+          <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => handleDelete(r.file!)} />
         </Space>
       ),
     },
@@ -647,8 +616,6 @@ export default function FilesPage() {
         <Input placeholder={t('searchPlaceholder')} prefix={<SearchOutlined />} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); }} allowClear className={styles.filterInput} />
         <Select value={category || undefined} onChange={(v) => { setCategory(v || ''); }} placeholder={t('filterCategory')} allowClear className={styles.filterSelect}
           options={[{ label: t('allCategories'), value: '' }, ...CATEGORIES.map((c) => ({ label: categoryLabel(c, locale), value: c }))]} />
-        <Select value={sourceFilter} onChange={setSourceFilter} className={styles.filterSelect}
-          options={[{ label: `全部来源 (${files.length})`, value: 'all' }, { label: `我的文件 (${userFiles.length})`, value: 'user' }, { label: `内置示例 (${builtInFiles.length})`, value: 'builtIn' }]} />
         <Button type="primary" icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-file-upload-input')?.click()}>{uploading ? t('uploading') : t('upload')}</Button>
         <Button icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-folder-upload-input')?.click()}>上传文件夹</Button>
         <Button icon={<SyncOutlined />} loading={reindexingAll} onClick={() => { void handleReindexAll(); }}>重新解析入库</Button>
@@ -735,10 +702,10 @@ export default function FilesPage() {
         title="文件列表"
         extra={
           <Space size={8}>
-            <Button danger size="small" disabled={selectedUserCount === 0} icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')}>
-              删除已选 {selectedUserCount || ''}
+            <Button danger size="small" disabled={selectedFileCount === 0} icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')}>
+              删除已选 {selectedFileCount || ''}
             </Button>
-            <Button danger size="small" disabled={userFiles.length === 0} onClick={() => handleBulkDelete('all')}>删除全部用户文件</Button>
+            <Button danger size="small" disabled={files.length === 0} onClick={() => handleBulkDelete('all')}>删除全部文件</Button>
           </Space>
         }
       >
@@ -752,11 +719,11 @@ export default function FilesPage() {
             selectedRowKeys,
             onChange: setSelectedRowKeys,
             checkStrictly: false,
-            getCheckboxProps: (record) => ({ disabled: record.isFolder ? (record.userFileCount ?? 0) === 0 : Boolean(record.file?.builtIn) }),
+            getCheckboxProps: (record) => ({ disabled: record.isFolder ? (record.fileCount ?? 0) === 0 : false }),
           }}
           footer={() => (
             <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>
-              当前展示 {filtered.length} 个文件，其中我的文件 {filteredUserFiles.length} 个、内置示例 {filteredBuiltInFiles.length} 个；全部我的文件 {userFiles.length} 个、内置示例 {builtInFiles.length} 个；{treeData.length} 个顶层目录
+              当前展示 {filtered.length} 个文件；全部文件 {files.length} 个；{treeData.length} 个顶层目录
             </div>
           )} />
       </Card>

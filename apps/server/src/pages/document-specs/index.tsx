@@ -67,7 +67,7 @@ export default function DocumentSpecsPage() {
   const [gateTypeModalOpen, setGateTypeModalOpen] = useState(false);
   const [editingGateTypeId, setEditingGateTypeId] = useState<string | null>(null);
   const [guideExpanded, setGuideExpanded] = useState(false);
-  const [sourceFilter, setSourceFilter] = useState<'custom' | 'builtIn' | 'all'>('custom');
+  const [sourceFilter, setSourceFilter] = useState<'custom' | 'all'>('custom');
   const [activeListTab, setActiveListTab] = useState<'specs' | 'gateTypes'>('specs');
 
   const load = async () => {
@@ -80,12 +80,10 @@ export default function DocumentSpecsPage() {
 
   const fileRoleOptions = roles.filter(r => r.type === 'file').map(r => ({ label: r.name, value: r.id }));
   const promptRoleOptions = roles.filter(r => r.type === 'prompt').map(r => ({ label: r.name, value: r.id }));
-  const customSpecs = specs.filter(spec => !spec.builtIn);
-  const builtInSpecs = specs.filter(spec => spec.builtIn);
-  const visibleSpecs = sourceFilter === 'all' ? specs : sourceFilter === 'builtIn' ? builtInSpecs : customSpecs;
+  const customSpecs = specs;
   const customGateTypes = gateTypes.filter(type => !type.builtIn);
-  const builtInGateTypes = gateTypes.filter(type => type.builtIn);
-  const visibleGateTypes = sourceFilter === 'all' ? gateTypes : sourceFilter === 'builtIn' ? builtInGateTypes : customGateTypes;
+  const visibleSpecs = specs;
+  const visibleGateTypes = sourceFilter === 'all' ? gateTypes : customGateTypes;
   const gateTypeSelectOptions = [
     { label: '系统门禁类型', options: gateTypes.filter(type => type.builtIn).map(type => ({ label: type.name, value: type.id })) },
     { label: '我的门禁类型', options: gateTypes.filter(type => !type.builtIn).map(type => ({ label: type.name, value: type.id })) },
@@ -106,11 +104,9 @@ export default function DocumentSpecsPage() {
     .filter((f: { id?: string; name?: string }) => f.id && f.name)
     .map((f: { id: string; name: string }) => ({ label: `${f.name}（${f.id}）`, value: f.id }));
 
-  /** 打开规范包编辑器，内置规范包自动创建副本 */
+  /** 打开规范包编辑器 */
   const openEditor = (spec?: DocumentSpecPackage) => {
-    const editingSpec = spec?.builtIn ? { ...spec, id: `${spec.id}-copy-${Date.now()}`, name: `${spec.name} Copy`, builtIn: false } : spec;
-    if (spec?.builtIn) message.info('内置规范包不可直接编辑，已为你创建副本');
-    form.setFieldsValue(editingSpec ?? { id: `spec-${Date.now()}`, name: '', description: '', factFields: defaultFactFields(), chapterMode: 'dynamic', chapterRules: [], dynamicChapterRule: { source: 'ai_plan', titleStrategy: 'ai_summary' }, gateRules: [] });
+    form.setFieldsValue(spec ?? { id: `spec-${Date.now()}`, name: '', description: '', factFields: defaultFactFields(), chapterMode: 'dynamic', chapterRules: [], dynamicChapterRule: { source: 'ai_plan', titleStrategy: 'ai_summary' }, gateRules: [] });
     setDrawerOpen(true);
     window.setTimeout(() => refreshCounts(), 50);
   };
@@ -191,7 +187,6 @@ export default function DocumentSpecsPage() {
       <Space wrap>
         <Select value={sourceFilter} onChange={setSourceFilter} style={{ width: 160 }} options={[
           { label: `我的 (${customSpecs.length + customGateTypes.length})`, value: 'custom' },
-          { label: `内置示例 (${builtInSpecs.length + builtInGateTypes.length})`, value: 'builtIn' },
           { label: `全部来源 (${specs.length + gateTypes.length})`, value: 'all' },
         ]} />
         {activeListTab === 'gateTypes' && <Button onClick={() => openGateTypeEditor()}>新建门禁类型</Button>}
@@ -219,15 +214,15 @@ export default function DocumentSpecsPage() {
           key: 'specs', label: `规范包列表 (${visibleSpecs.length})`, children: visibleSpecs.length === 0 ? <Empty description={t('common.noData')} /> : (
             <List dataSource={visibleSpecs} renderItem={(spec, index) => (
               <List.Item style={{ padding: '10px 0' }} actions={[
-                <Button key="edit" size="small" icon={<EditOutlined />} onClick={() => openEditor(spec)}>{spec.builtIn ? '复制' : '编辑'}</Button>,
-                <Popconfirm key="del" title={t('common.confirm')} disabled={spec.builtIn} onConfirm={() => { void remove(spec.id); }}><Button size="small" danger icon={<DeleteOutlined />} disabled={spec.builtIn} /></Popconfirm>,
+                <Button key="edit" size="small" icon={<EditOutlined />} onClick={() => openEditor(spec)}>编辑</Button>,
+                <Popconfirm key="del" title={t('common.confirm')} onConfirm={() => { void remove(spec.id); }}><Button size="small" danger icon={<DeleteOutlined />} /></Popconfirm>,
               ]}>
                 <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, minWidth: 0, flex: 1 }}>
                   <div style={{ width: 28, height: 28, borderRadius: 8, background: 'var(--colorFillSecondary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, color: 'var(--colorTextSecondary)', flexShrink: 0 }}>{index + 1}</div>
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
                       <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{spec.name}</span>
-                      {spec.builtIn ? <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>内置示例</Tag> : <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>我的规范包</Tag>}
+                      <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>我的规范包</Tag>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       {spec.description && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>{spec.description}</span>}

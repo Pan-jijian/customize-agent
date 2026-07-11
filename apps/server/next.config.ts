@@ -41,15 +41,6 @@ const nextConfig: NextConfig = {
       },
     ];
   },
-  async redirects() {
-    return [
-      // 将多个入口路径统一重定向到 /overview
-      { source: '/', destination: '/overview', permanent: false },
-      { source: '/dashboard', destination: '/overview', permanent: false },
-      { source: '/console', destination: '/overview', permanent: false },
-      { source: '/admin', destination: '/overview', permanent: false },
-    ];
-  },
 };
 
 export default nextConfig;

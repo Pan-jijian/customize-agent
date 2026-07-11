@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getMultiProjectManager, getProjectRoot, isBuiltInKnowledgeFile, listKnowledgeFiles } from '@/services/kbService';
+import { getMultiProjectManager, getProjectRoot, listKnowledgeFiles } from '@/services/kbService';
 import { upsertKbOperation } from '@/services/kbOperationLog';
 import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
@@ -35,8 +35,7 @@ async function kbFilesIndexHandler(req: NextApiRequest, res: NextApiResponse) {
     });
     const requestedTargets = Array.from(new Set([...requestedFileTargets, ...folderTargets]));
     if (requestedTargets.length === 0) return res.status(400).json({ error: 'relativePath, relativePaths or folderPaths is required' });
-    const targets = requestedTargets.filter(target => !isBuiltInKnowledgeFile(target));
-    if (targets.length === 0) return res.status(400).json({ error: '内置示例资料不可删除' });
+    const targets = requestedTargets;
     const operationId = `delete-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const title = all ? `删除全部用户文件 ${targets.length} 个` : targets.length === 1 ? `删除 ${targets[0]}` : `批量删除 ${targets.length} 个文件`;
     upsertKbOperation(projectRoot, { id: operationId, type: 'delete', title, stage: 'uploading', status: 'processing', percent: 10, message: '正在删除文件和索引', filePath: targets[0], fileName: targets[0]?.split('/').pop() });

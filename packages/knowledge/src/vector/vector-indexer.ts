@@ -25,8 +25,8 @@ export interface VectorIndexOptions {
 
 function resolveVectorIndexBatchSize(configured?: number): number {
   const raw = configured ?? Number(process.env.CUSTOMIZE_VECTOR_INDEX_BATCH_SIZE ?? process.env.KB_VECTOR_INDEX_BATCH_SIZE);
-  if (!Number.isFinite(raw) || raw <= 0) return 128;
-  return Math.max(1, Math.min(512, Math.floor(raw)));
+  if (!Number.isFinite(raw) || raw <= 0) return 256;
+  return Math.max(1, Math.min(1024, Math.floor(raw)));
 }
 
 /** 向量索引器，负责将文本切片生成 Embedding 并写入向量存储 */
