@@ -19,13 +19,14 @@ export interface VectorIndexProgress {
 
 export interface VectorIndexOptions {
   batchSize?: number;
+  persistEachBatch?: boolean;
   onProgress?: (progress: VectorIndexProgress) => void;
 }
 
 function resolveVectorIndexBatchSize(configured?: number): number {
   const raw = configured ?? Number(process.env.CUSTOMIZE_VECTOR_INDEX_BATCH_SIZE ?? process.env.KB_VECTOR_INDEX_BATCH_SIZE);
-  if (!Number.isFinite(raw) || raw <= 0) return 32;
-  return Math.max(1, Math.min(256, Math.floor(raw)));
+  if (!Number.isFinite(raw) || raw <= 0) return 128;
+  return Math.max(1, Math.min(512, Math.floor(raw)));
 }
 
 /** 向量索引器，负责将文本切片生成 Embedding 并写入向量存储 */
@@ -57,11 +58,12 @@ export class VectorIndexer {
         const texts = batchChunks.map(chunk => chunk.content);
         const embeddings = await this.embedDocuments(texts);
         const documents = batchChunks.map((chunk, index) => this.toVectorDocument(chunk, embeddings[index] ?? []));
-        await store.upsert(documents);
+        await store.upsert(documents, { persist: options.persistEachBatch === true });
         processedChunks += documents.length;
         processedTotalChunks += documents.length;
         options.onProgress?.({ collectionName, processedChunks: processedTotalChunks, totalChunks, batchSize: documents.length });
       }
+      await store.flush?.();
 
       results.push({
         collectionName,

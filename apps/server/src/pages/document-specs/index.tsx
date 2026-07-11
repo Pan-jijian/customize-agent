@@ -4,9 +4,22 @@ import { DeleteOutlined, EditOutlined, PlusOutlined, DownOutlined, UpOutlined } 
 import { deleteDocumentGateType, deleteDocumentSpec, getDocumentRoles, getDocumentSpecs, saveDocumentGateType, saveDocumentSpec, type DocumentRole, type DocumentSpecGateType, type DocumentSpecPackage } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
-const fieldTypeOptions = [
-  { label: '文本', value: 'text' }, { label: '数字', value: 'number' }, { label: '日期', value: 'date' },
-  { label: '表格', value: 'table' }, { label: '列表', value: 'list' },
+const chapterModeOptions = [
+  { label: '动态章节', value: 'dynamic' },
+  { label: '固定章节', value: 'fixed' },
+];
+const dynamicChapterSourceOptions = [
+  { label: 'AI 根据资料自动规划', value: 'ai_plan' },
+  { label: '从文件目录/标题识别', value: 'file_outline' },
+  { label: '从指定文件角色识别', value: 'file_role' },
+  { label: '按事实字段分组', value: 'fact_group' },
+  { label: '按表格行生成', value: 'table_rows' },
+];
+const titleStrategyOptions = [
+  { label: 'AI 摘要标题', value: 'ai_summary' },
+  { label: '使用来源标题', value: 'source_title' },
+  { label: '使用字段值', value: 'field_value' },
+  { label: '标题模板', value: 'template' },
 ];
 const levelOptions = [
   { label: '错误（阻断）', value: 'error' }, { label: '警告（提醒）', value: 'warning' }, { label: '信息（提示）', value: 'info' },
@@ -36,9 +49,9 @@ const niceTagRender = (props: { label: React.ReactNode; value: string; closable:
 /** 创建默认的事实字段列表（用于新规范包的初始值） */
 function defaultFactFields(): DocumentSpecPackage['factFields'] {
   return [
-    { id: 'document-goal', name: '文档目标', type: 'text', required: true },
-    { id: 'target-audience', name: '目标读者', type: 'text', required: false },
-    { id: 'key-conclusion', name: '关键结论', type: 'list', required: true },
+    { id: 'document-goal', name: '文档目标', type: 'auto', required: true },
+    { id: 'target-audience', name: '目标读者', type: 'auto', required: false },
+    { id: 'key-conclusion', name: '关键结论', type: 'auto', required: true },
   ];
 }
 
@@ -97,7 +110,7 @@ export default function DocumentSpecsPage() {
   const openEditor = (spec?: DocumentSpecPackage) => {
     const editingSpec = spec?.builtIn ? { ...spec, id: `${spec.id}-copy-${Date.now()}`, name: `${spec.name} Copy`, builtIn: false } : spec;
     if (spec?.builtIn) message.info('内置规范包不可直接编辑，已为你创建副本');
-    form.setFieldsValue(editingSpec ?? { id: `spec-${Date.now()}`, name: '', description: '', factFields: defaultFactFields(), chapterRules: [], gateRules: [] });
+    form.setFieldsValue(editingSpec ?? { id: `spec-${Date.now()}`, name: '', description: '', factFields: defaultFactFields(), chapterMode: 'dynamic', chapterRules: [], dynamicChapterRule: { source: 'ai_plan', titleStrategy: 'ai_summary' }, gateRules: [] });
     setDrawerOpen(true);
     window.setTimeout(() => refreshCounts(), 50);
   };
@@ -218,7 +231,7 @@ export default function DocumentSpecsPage() {
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       {spec.description && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>{spec.description}</span>}
-                      <Space size={4}><Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>事实 {spec.factFields.length}</Tag><Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>章节 {spec.chapterRules.length}</Tag><Tag color="orange" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>门禁 {spec.gateRules.length}</Tag></Space>
+                      <Space size={4}><Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>事实 {spec.factFields.length}</Tag><Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{spec.chapterMode === 'dynamic' ? '动态章节' : `章节 ${spec.chapterRules.length}`}</Tag><Tag color="orange" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>门禁 {spec.gateRules.length}</Tag></Space>
                     </div>
                   </div>
                 </div>
@@ -280,42 +293,65 @@ export default function DocumentSpecsPage() {
                     <Button danger size="small" icon={<DeleteOutlined />} onClick={() => remove(field.name)} style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }} />
                     <Form.Item name={[field.name, 'id']} hidden><Input /></Form.Item>
                     <Row gutter={[14, 8]}>
-                      <Col xs={24} sm={7}><Form.Item name={[field.name, 'name']} label={t('specs.factName')} rules={[{ required: true }]} style={{ marginBottom: 0 }}><Input size="small" /></Form.Item></Col>
-                      <Col xs={12} sm={5}><Form.Item name={[field.name, 'type']} label={t('specs.factType')} style={{ marginBottom: 0 }}><Select options={fieldTypeOptions} size="small" /></Form.Item></Col>
+                      <Form.Item name={[field.name, 'type']} initialValue="auto" hidden><Input /></Form.Item>
+                      <Col xs={24} sm={8}><Form.Item name={[field.name, 'name']} label={t('specs.factName')} rules={[{ required: true }]} style={{ marginBottom: 0 }}><Input size="small" /></Form.Item></Col>
                       <Col xs={12} sm={4}><Form.Item name={[field.name, 'required']} label={t('specs.required')} valuePropName="checked" style={{ marginBottom: 0 }}><Switch /></Form.Item></Col>
-                      <Col xs={24} sm={8}><Form.Item name={[field.name, 'sourceRoleIds']} label={t('specs.sourceRoles')} style={{ marginBottom: 0 }}><Select mode="multiple" showSearch options={fileRoleOptions} tagRender={niceTagRender} placeholder="选择文件角色" size="small" /></Form.Item></Col>
+                      <Col xs={24} sm={12}><Form.Item name={[field.name, 'sourceRoleIds']} label={t('specs.sourceRoles')} style={{ marginBottom: 0 }}><Select mode="multiple" showSearch options={fileRoleOptions} tagRender={niceTagRender} placeholder="选择文件角色" size="small" /></Form.Item></Col>
                       <Col xs={24} sm={12}><Form.Item name={[field.name, 'extractionHint']} label={t('specs.extractionHint')} style={{ marginBottom: 0 }}><Input size="small" /></Form.Item></Col>
                       <Col xs={24} sm={12}><Form.Item name={[field.name, 'validationHint']} label={t('specs.validationHint')} style={{ marginBottom: 0 }}><Input size="small" /></Form.Item></Col>
                     </Row>
                   </Card>
                 ))}
-                <Button icon={<PlusOutlined />} onClick={() => add({ id: `fact-${Date.now()}`, type: 'text', required: true })}>{t('specs.addFact')}</Button>
+                <Button icon={<PlusOutlined />} onClick={() => add({ id: `fact-${Date.now()}`, type: 'auto', required: true })}>{t('specs.addFact')}</Button>
               </div>
             )}</Form.List>
           },
           {
             key: 'chapters', label: `${t('specs.chapters')} (${chapterCount})`,
-            children: <Form.List name="chapterRules">{(fields, { add, remove }) => (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                {fields.map((field, idx) => (
-                  <Card key={field.key} size="small" style={{ border: '1px solid var(--colorBorderSecondary)', position: 'relative' }}>
-                    <Button danger size="small" icon={<DeleteOutlined />} onClick={() => remove(field.name)} style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }} />
-                    <Form.Item name={[field.name, 'id']} hidden><Input /></Form.Item>
-                    <Row gutter={[14, 8]}>
-                      <Col xs={24} sm={7}><Form.Item name={[field.name, 'title']} label={t('specs.chapterTitle')} rules={[{ required: true }]} style={{ marginBottom: 0 }}><Input size="small" /></Form.Item></Col>
-                      <Col xs={8} sm={3}><Form.Item name={[field.name, 'order']} label={t('specs.order')} initialValue={idx} style={{ marginBottom: 0 }}><InputNumber size="small" style={{ width: '100%' }} /></Form.Item></Col>
-                      <Col xs={8} sm={3}><Form.Item name={[field.name, 'minWords']} label={t('specs.minWords')} style={{ marginBottom: 0 }}><InputNumber size="small" style={{ width: '100%' }} /></Form.Item></Col>
-                      <Col xs={8} sm={3}><Form.Item name={[field.name, 'required']} label={t('specs.required')} valuePropName="checked" style={{ marginBottom: 0 }}><Switch /></Form.Item></Col>
-                      <Col xs={24} sm={8}><Form.Item name={[field.name, 'requiredFactIds']} label={t('specs.requiredFacts')} style={{ marginBottom: 0 }}><Select mode="multiple" showSearch optionFilterProp="label" placeholder="选择事实字段" options={factOptions} tagRender={niceTagRender} size="small" /></Form.Item></Col>
-                      <Col xs={24} sm={12}><Form.Item name={[field.name, 'requiredFileRoleIds']} label={t('specs.requiredFileRoles')} style={{ marginBottom: 0 }}><Select mode="multiple" showSearch options={fileRoleOptions} tagRender={niceTagRender} placeholder="选择文件角色" size="small" /></Form.Item></Col>
-                      <Col xs={24} sm={12}><Form.Item name={[field.name, 'requiredPromptRoleIds']} label={t('specs.requiredPromptRoles')} style={{ marginBottom: 0 }}><Select mode="multiple" showSearch options={promptRoleOptions} tagRender={niceTagRender} placeholder="选择提示词角色" size="small" /></Form.Item></Col>
-                      <Col xs={24}><Form.Item name={[field.name, 'generationHint']} label={t('specs.generationHint')} style={{ marginBottom: 0 }}><Input size="small" /></Form.Item></Col>
-                    </Row>
-                  </Card>
-                ))}
-                <Button icon={<PlusOutlined />} onClick={() => add({ id: `chapter-${Date.now()}`, order: fields.length, required: true })}>{t('specs.addChapter')}</Button>
-              </div>
-            )}</Form.List>
+            children: <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <Form.Item name="chapterMode" label="章节生成方式" initialValue="dynamic">
+                <Select options={chapterModeOptions} />
+              </Form.Item>
+              <Form.Item noStyle shouldUpdate={(prev, next) => prev.chapterMode !== next.chapterMode}>
+                {({ getFieldValue }) => getFieldValue('chapterMode') === 'fixed' ? <Form.List name="chapterRules">{(fields, { add, remove }) => (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <Alert type="info" showIcon message="固定章节模式" description="适合合同、标准报告等已明确章节数量和标题的文档。" />
+                    {fields.map((field, idx) => (
+                      <Card key={field.key} size="small" style={{ border: '1px solid var(--colorBorderSecondary)', position: 'relative' }}>
+                        <Button danger size="small" icon={<DeleteOutlined />} onClick={() => remove(field.name)} style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }} />
+                        <Form.Item name={[field.name, 'id']} hidden><Input /></Form.Item>
+                        <Row gutter={[14, 8]}>
+                          <Col xs={24} sm={7}><Form.Item name={[field.name, 'title']} label={t('specs.chapterTitle')} rules={[{ required: true }]} style={{ marginBottom: 0 }}><Input size="small" /></Form.Item></Col>
+                          <Col xs={8} sm={3}><Form.Item name={[field.name, 'order']} label={t('specs.order')} initialValue={idx} style={{ marginBottom: 0 }}><InputNumber size="small" style={{ width: '100%' }} /></Form.Item></Col>
+                          <Col xs={8} sm={3}><Form.Item name={[field.name, 'minWords']} label={t('specs.minWords')} style={{ marginBottom: 0 }}><InputNumber size="small" style={{ width: '100%' }} /></Form.Item></Col>
+                          <Col xs={8} sm={3}><Form.Item name={[field.name, 'required']} label={t('specs.required')} valuePropName="checked" style={{ marginBottom: 0 }}><Switch /></Form.Item></Col>
+                          <Col xs={24} sm={8}><Form.Item name={[field.name, 'requiredFactIds']} label={t('specs.requiredFacts')} style={{ marginBottom: 0 }}><Select mode="multiple" showSearch optionFilterProp="label" placeholder="选择事实字段" options={factOptions} tagRender={niceTagRender} size="small" /></Form.Item></Col>
+                          <Col xs={24} sm={12}><Form.Item name={[field.name, 'requiredFileRoleIds']} label={t('specs.requiredFileRoles')} style={{ marginBottom: 0 }}><Select mode="multiple" showSearch options={fileRoleOptions} tagRender={niceTagRender} placeholder="选择文件角色" size="small" /></Form.Item></Col>
+                          <Col xs={24} sm={12}><Form.Item name={[field.name, 'requiredPromptRoleIds']} label={t('specs.requiredPromptRoles')} style={{ marginBottom: 0 }}><Select mode="multiple" showSearch options={promptRoleOptions} tagRender={niceTagRender} placeholder="选择提示词角色" size="small" /></Form.Item></Col>
+                          <Col xs={24}><Form.Item name={[field.name, 'generationHint']} label={t('specs.generationHint')} style={{ marginBottom: 0 }}><Input size="small" /></Form.Item></Col>
+                        </Row>
+                      </Card>
+                    ))}
+                    <Button icon={<PlusOutlined />} onClick={() => add({ id: `chapter-${Date.now()}`, order: fields.length, required: true })}>{t('specs.addChapter')}</Button>
+                  </div>
+                )}</Form.List> : <Card size="small" title="动态章节规则" style={{ border: '1px solid var(--colorBorderSecondary)' }}>
+                  <Alert type="info" showIcon style={{ marginBottom: 12 }} message="动态章节模式" description="适合从资料目录、文件角色、表格行或 AI 规划中动态决定章节数量和标题。" />
+                  <Row gutter={[14, 8]}>
+                    <Col xs={24} sm={12}><Form.Item name={["dynamicChapterRule", "source"]} label="章节来源" initialValue="ai_plan"><Select options={dynamicChapterSourceOptions} /></Form.Item></Col>
+                    <Col xs={24} sm={12}><Form.Item name={["dynamicChapterRule", "sourceRoleIds"]} label="来源文件角色"><Select mode="multiple" showSearch options={fileRoleOptions} tagRender={niceTagRender} placeholder="可选，限定从哪些文件角色规划章节" /></Form.Item></Col>
+                    <Col xs={12} sm={6}><Form.Item name={["dynamicChapterRule", "minChapters"]} label="最少章节"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item></Col>
+                    <Col xs={12} sm={6}><Form.Item name={["dynamicChapterRule", "maxChapters"]} label="最多章节"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item></Col>
+                    <Col xs={12} sm={6}><Form.Item name={["dynamicChapterRule", "minWordsPerChapter"]} label="每章最低字数"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item></Col>
+                    <Col xs={12} sm={6}><Form.Item name={["dynamicChapterRule", "titleStrategy"]} label="标题方式" initialValue="ai_summary"><Select options={titleStrategyOptions} /></Form.Item></Col>
+                    <Col xs={24} sm={12}><Form.Item name={["dynamicChapterRule", "requiredFactIds"]} label="每章优先使用事实"><Select mode="multiple" showSearch optionFilterProp="label" options={factOptions} tagRender={niceTagRender} placeholder="可选" /></Form.Item></Col>
+                    <Col xs={24} sm={12}><Form.Item name={["dynamicChapterRule", "requiredPromptRoleIds"]} label="每章提示词角色"><Select mode="multiple" showSearch options={promptRoleOptions} tagRender={niceTagRender} placeholder="可选" /></Form.Item></Col>
+                    <Col xs={24} sm={12}><Form.Item name={["dynamicChapterRule", "titleTemplate"]} label="标题模板"><Input placeholder="例如：第{{index}}章 {{sourceTitle}}" /></Form.Item></Col>
+                    <Col xs={24} sm={12}><Form.Item name={["dynamicChapterRule", "requiredFileRoleIds"]} label="每章必须参考文件角色"><Select mode="multiple" showSearch options={fileRoleOptions} tagRender={niceTagRender} placeholder="可选" /></Form.Item></Col>
+                    <Col xs={24}><Form.Item name={["dynamicChapterRule", "generationHint"]} label="动态章节生成说明"><Input.TextArea autoSize={{ minRows: 2, maxRows: 5 }} placeholder="例如：请按招标文件目录生成章节，保留原始编号和标题层级。" /></Form.Item></Col>
+                  </Row>
+                </Card>}
+              </Form.Item>
+            </div>
           },
           {
             key: 'gates', label: `${t('specs.gates')} (${gateCount})`,

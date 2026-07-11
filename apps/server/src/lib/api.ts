@@ -17,7 +17,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 
 export interface KbVectorStatus { status: string; error?: string; indexedChunks: number; lastIndexedAt: number; backend: string; }
 export interface KbStats { scope: string; projectId?: string; fileCount: number; chunkCount: number; totalSizeBytes: number; lastIndexedAt: number; vectorStatus?: KbVectorStatus; }
-export interface KbFileItem { relativePath: string; category: string; format: string; fileSize: number; mtime: number; chunkCount: number; indexedAt: number; status: string; errorMessage?: string; metadataJson?: string; builtIn?: boolean; }
+export interface KbFileItem { relativePath: string; category: string; format: string; fileSize: number; mtime: number; chunkCount: number; indexedAt: number; status: string; errorMessage?: string; metadataJson?: string; builtIn?: boolean; matchedBy?: 'path' | 'metadata' | 'content' | 'disk'; score?: number; }
 export interface KbFeatures { vectorStore: string; embeddingProvider: string; externalExtractors: string[]; dedupEngine: string; chunker: string; }
 export interface KbUploadProgress { id: string; stage: string; percent: number; message: string; fileName?: string; chunkCount?: number; vectorStatus?: KbVectorStatus; error?: string; updatedAt: number; }
 export interface KbOperationRecord { id: string; type: 'upload' | 'delete' | 'reindex'; stage: string; status: 'processing' | 'success' | 'warning' | 'error'; title: string; message: string; percent: number; fileName?: string; filePath?: string; chunkCount?: number; textLength?: number; extractionMode?: string; error?: string; createdAt: number; updatedAt: number; }
@@ -37,6 +37,16 @@ export async function getKbFiles(opts?: { projectRoot?: string; category?: strin
   if (opts?.page) params.set('page', String(opts.page ?? 1));
   if (opts?.limit) params.set('limit', String(opts.limit ?? 50));
   return fetchJson<{ files: KbFileItem[]; total: number; vectorStatus?: KbVectorStatus; initializing?: boolean }>(`/api/kb/files?${params}`);
+}
+
+export async function searchKbFiles(opts?: { query?: string; projectRoot?: string; category?: string; limit?: number; includeContent?: boolean }) {
+  const params = new URLSearchParams();
+  if (opts?.query) params.set('q', opts.query);
+  if (opts?.projectRoot) params.set('projectRoot', opts.projectRoot);
+  if (opts?.category) params.set('category', opts.category);
+  if (opts?.limit) params.set('limit', String(opts.limit));
+  if (opts?.includeContent === false) params.set('includeContent', '0');
+  return fetchJson<{ files: KbFileItem[]; total: number }>(`/api/kb/files/search?${params}`);
 }
 
 export async function getKbFileDetail(relativePath: string, projectRoot?: string) {
@@ -61,34 +71,71 @@ export async function openKbFileTarget(relativePath: string, target: 'file' | 'd
   });
 }
 
-/** 将 File 对象转换为 Base64 编码字符串 */
-async function fileToBase64(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => { const r = reader.result as string; const c = r.indexOf(','); resolve(c >= 0 ? r.slice(c + 1) : r); };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
+export interface KbUploadBatchResult { success: boolean; accepted?: boolean; operationId?: string; relativePath?: string; jobs?: Array<{ id: string; relativePath: string; status: string }>; batchIndex?: number; totalBatches?: number; indexingStarted?: boolean; }
+
+function fileRelativePath(file: File) {
+  return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+}
+
+function appendUploadForm(files: File[], opts: { projectRoot?: string; uploadId?: string; batchIndex: number; totalBatches: number; fileOffset: number; startIndex: boolean }) {
+  const form = new FormData();
+  if (opts.projectRoot) form.append('projectRoot', opts.projectRoot);
+  if (opts.uploadId) form.append('uploadId', opts.uploadId);
+  form.append('batchIndex', String(opts.batchIndex));
+  form.append('totalBatches', String(opts.totalBatches));
+  form.append('fileOffset', String(opts.fileOffset));
+  form.append('startIndex', opts.startIndex ? '1' : '0');
+  for (const file of files) {
+    form.append('files', file, file.name);
+    form.append('relativePaths', fileRelativePath(file));
+  }
+  return form;
 }
 
 export async function uploadKbFile(file: File, projectRoot?: string, uploadId?: string) {
-  const base64 = await fileToBase64(file);
-  return fetchJson<{ success: boolean; relativePath?: string; files?: KbFileItem[]; uploadedFiles?: KbFileItem[]; total?: number; vectorStatus?: KbVectorStatus }>('/api/kb/upload', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fileName: file.name, fileData: base64, projectRoot, uploadId, relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || undefined }),
+  return fetchJson<KbUploadBatchResult>('/api/kb/upload', {
+    method: 'POST',
+    body: appendUploadForm([file], { projectRoot, uploadId, batchIndex: 0, totalBatches: 1, fileOffset: 0, startIndex: true }),
   });
 }
 
-export async function uploadKbFiles(files: File[], projectRoot?: string, uploadId?: string) {
-  const payload = await Promise.all(files.map(async file => ({
-    fileName: file.name,
-    fileData: await fileToBase64(file),
-    relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || undefined,
-  })));
-  return fetchJson<{ success: boolean; relativePath?: string; files?: KbFileItem[]; uploadedFiles?: KbFileItem[]; total?: number; vectorStatus?: KbVectorStatus }>('/api/kb/upload', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ files: payload, projectRoot, uploadId }),
-  });
+export async function uploadKbFiles(files: File[], projectRoot?: string, uploadId?: string, onBatchProgress?: (progress: { uploadedFiles: number; totalFiles: number; batchIndex: number; totalBatches: number }) => void) {
+  const maxFilesPerBatch = 50;
+  const maxBytesPerBatch = 30 * 1024 * 1024;
+  const batches: File[][] = [];
+  let current: File[] = [];
+  let currentBytes = 0;
+  for (const file of files) {
+    if (current.length > 0 && (current.length >= maxFilesPerBatch || currentBytes + file.size > maxBytesPerBatch)) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(file);
+    currentBytes += file.size;
+  }
+  if (current.length > 0) batches.push(current);
+
+  const results: KbUploadBatchResult[] = [];
+  let uploadedFiles = 0;
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+    const batch = batches[batchIndex]!;
+    const result = await fetchJson<KbUploadBatchResult>('/api/kb/upload', {
+      method: 'POST',
+      body: appendUploadForm(batch, {
+        projectRoot,
+        uploadId,
+        batchIndex,
+        totalBatches: batches.length,
+        fileOffset: uploadedFiles,
+        startIndex: batchIndex === batches.length - 1,
+      }),
+    });
+    results.push(result);
+    uploadedFiles += batch.length;
+    onBatchProgress?.({ uploadedFiles, totalFiles: files.length, batchIndex, totalBatches: batches.length });
+  }
+  return results[results.length - 1] ?? { success: true };
 }
 
 export async function getKbUploadProgress(uploadId: string) {
@@ -239,7 +286,9 @@ export type FileProcessingType = 'rule' | 'project_fact' | 'table' | 'drawing' |
 export interface DocumentRole { id: string; name: string; description: string; type: 'file' | 'prompt'; resourceId?: string; resourceIds?: string[]; builtIn?: boolean; executionType?: PromptExecutionType; processingType?: FileProcessingType; }
 export interface ProjectRoleItem { roleId: string; order: number; }
 export interface ProjectRoleConfig { id: string; name: string; description: string; fileRoles: ProjectRoleItem[]; promptRoles: ProjectRoleItem[]; builtIn?: boolean; }
-export type FactFieldType = 'text' | 'number' | 'date' | 'table' | 'list';
+export type FactFieldType = 'auto';
+export type ChapterRuleMode = 'fixed' | 'dynamic';
+export interface DynamicChapterRule { source: 'file_outline' | 'file_role' | 'fact_group' | 'table_rows' | 'ai_plan'; sourceRoleIds?: string[]; minChapters?: number; maxChapters?: number; titleStrategy?: 'source_title' | 'field_value' | 'ai_summary' | 'template'; titleTemplate?: string; minWordsPerChapter?: number; requiredFactIds?: string[]; requiredFileRoleIds?: string[]; requiredPromptRoleIds?: string[]; generationHint?: string; }
 export type GateRuleType = string;
 export type GateRuleLevel = 'error' | 'warning' | 'info';
 export type GateRuleSubject = 'document' | 'chapter' | 'fact' | 'file_role' | 'prompt_role' | 'table' | 'image' | 'source';
@@ -249,7 +298,7 @@ export interface DocumentSpecGateType { id: string; name: string; description?: 
 export interface DocumentSpecFactField { id: string; name: string; type: FactFieldType; required: boolean; sourceRoleIds?: string[]; extractionHint?: string; validationHint?: string; }
 export interface DocumentSpecChapterRule { id: string; title: string; required: boolean; order: number; minWords?: number; requiredFactIds?: string[]; requiredFileRoleIds?: string[]; requiredPromptRoleIds?: string[]; generationHint?: string; }
 export interface DocumentSpecGateRule { id: string; name: string; type: GateRuleType; level: GateRuleLevel; target?: string; value?: string; evaluator?: GateRuleEvaluator; }
-export interface DocumentSpecPackage { id: string; name: string; description: string; factFields: DocumentSpecFactField[]; chapterRules: DocumentSpecChapterRule[]; gateRules: DocumentSpecGateRule[]; wordTemplatePath?: string; builtIn?: boolean; }
+export interface DocumentSpecPackage { id: string; name: string; description: string; factFields: DocumentSpecFactField[]; chapterMode: ChapterRuleMode; chapterRules: DocumentSpecChapterRule[]; dynamicChapterRule: DynamicChapterRule; gateRules: DocumentSpecGateRule[]; wordTemplatePath?: string; builtIn?: boolean; }
 export interface DocumentTemplate { id: string; name: string; description: string; category: string; outputTitle: string; chapters: DocumentTemplateChapter[]; projectRoleConfigId?: string; documentSpecId?: string; promptIds?: string[]; boundFilePaths?: string[]; promptBindings?: PromptBinding[]; fileBindings?: FileBinding[]; builtIn?: boolean; }
 export interface DocumentTemplateValidation { templateId: string; fileDiagnostics: Array<FileBinding & { roleName?: string; exists: boolean; indexed: boolean; chunkCount: number; vectorReady: boolean }>; promptDiagnostics: Array<PromptBinding & { roleName?: string; promptTitle?: string; exists: boolean; contentLength: number }>; spec?: { id: string; name: string; factFields: number; gateRules: number }; issues: Array<{ level: 'error' | 'warning'; message: string }> }
 export interface PromptProject { id: string; projectId: string; projectRoot?: string; projectName: string; customizePath: string; content: string; mtime: string; hasFile: boolean; isCurrent: boolean; selected: boolean; source: 'current' | 'project' | 'custom'; }

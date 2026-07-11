@@ -6,7 +6,7 @@ import {
   SearchOutlined, EyeOutlined, CheckCircleOutlined, AlignLeftOutlined,
   DownOutlined, UpOutlined,
 } from '@ant-design/icons';
-import { deleteDocumentRole, deleteProjectRoleConfig, getDocumentRoles, getKbFiles, getPromptProjects, saveDocumentRole, saveProjectRoleConfig, type DocumentRole, type ProjectRoleConfig, type KbFileItem, type PromptProject } from '@/lib/api';
+import { deleteDocumentRole, deleteProjectRoleConfig, getDocumentRoles, getPromptProjects, saveDocumentRole, saveProjectRoleConfig, searchKbFiles, type DocumentRole, type ProjectRoleConfig, type KbFileItem, type PromptProject } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const { Paragraph } = Typography;
@@ -52,6 +52,7 @@ export default function DocumentRolesPage() {
   const [roles, setRoles] = useState<DocumentRole[]>([]);
   const [configs, setConfigs] = useState<ProjectRoleConfig[]>([]);
   const [kbFiles, setKbFiles] = useState<KbFileItem[]>([]);
+  const [fileSearching, setFileSearching] = useState(false);
   const [prompts, setPrompts] = useState<PromptProject[]>([]);
   const [roleDrawerOpen, setRoleDrawerOpen] = useState(false);
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
@@ -60,7 +61,7 @@ export default function DocumentRolesPage() {
   const [sourceFilter, setSourceFilter] = useState<'custom' | 'builtin' | 'all'>('custom');
 
   const load = async () => {
-    const [roleData, fileData, promptData] = await Promise.all([getDocumentRoles(), getKbFiles(), getPromptProjects()]);
+    const [roleData, fileData, promptData] = await Promise.all([getDocumentRoles(), searchKbFiles({ limit: 200, includeContent: false }), getPromptProjects()]);
     setRoles(roleData.roles); setConfigs(roleData.configs); setKbFiles(fileData.files); setPrompts(promptData);
   };
   useEffect(() => { void load().catch(() => message.error(t('common.error'))); }, [message, t]);
@@ -112,6 +113,29 @@ export default function DocumentRolesPage() {
   };
 
   const getRoleById = (id: string) => roles.find(r => r.id === id);
+  const searchRoleFiles = async (query: string) => {
+    setFileSearching(true);
+    try {
+      const result = await searchKbFiles({ query, limit: 80, includeContent: Boolean(query.trim()) });
+      setKbFiles(result.files);
+    } catch {
+      message.error('知识库文件检索失败');
+    } finally {
+      setFileSearching(false);
+    }
+  };
+  const fileOptions = kbFiles.map(file => ({
+    label: (
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.relativePath}</span>
+        <Space size={4}>
+          <Tag color={file.matchedBy === 'content' ? 'purple' : file.matchedBy === 'disk' ? 'orange' : 'blue'} style={{ margin: 0 }}>{file.matchedBy === 'content' ? '内容' : file.matchedBy === 'disk' ? '磁盘' : '文件'}</Tag>
+          <Tag style={{ margin: 0 }}>{file.status}</Tag>
+        </Space>
+      </div>
+    ),
+    value: file.relativePath,
+  }));
 
   const roleCardGrid = (list: DocumentRole[], tFn: (key: string) => string) => {
     if (list.length === 0) return <Empty description={t('common.noData')} />;
@@ -280,7 +304,7 @@ export default function DocumentRolesPage() {
                     ]} />
                   </Form.Item>
                   <Form.Item name="resourceIds" label={t('roles.bindFile')} style={{ marginBottom: 0 }} help={<span style={{ fontSize: 11, color: 'var(--colorTextSecondary)' }}>{t('roles.multiBindFileHelp')}</span>}>
-                    <Select mode="multiple" showSearch tagRender={tagRender} placeholder="选择知识库文件" options={kbFiles.map(x => ({ label: x.relativePath, value: x.relativePath }))} />
+                    <Select mode="multiple" showSearch filterOption={false} loading={fileSearching} onSearch={value => { void searchRoleFiles(value); }} onFocus={() => { void searchRoleFiles(''); }} tagRender={tagRender} placeholder="输入关键词搜索知识库文件" options={fileOptions} optionLabelProp="value" />
                   </Form.Item>
                 </>
               )}

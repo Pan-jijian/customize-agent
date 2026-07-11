@@ -5,7 +5,7 @@ import { useRouter } from 'next/router';
 import { Card, Table, Button, Input, Select, Tag, Modal, Space, App, Progress, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { UploadOutlined, SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined } from '@ant-design/icons';
-import { getJob, getKbFiles, getKbOperations, getKbUploadProgress, clearKbOperations, deleteKbOperation, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, reindexKbFile, type KbFileItem, type KbOperationRecord } from '@/lib/api';
+import { getJob, getKbFiles, getKbOperations, clearKbOperations, deleteKbOperation, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, reindexKbFile, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
@@ -56,20 +56,26 @@ export default function FilesPage() {
     setCategory(nextCategory);
   }, [router.query.category]);
 
-  const loadFiles = useCallback(async (cat?: string) => {
+  const loadFiles = useCallback(async (cat?: string, opts?: { silent?: boolean }) => {
     const c = cat ?? categoryRef.current;
-    setLoading(true);
-    setLoadError('');
+    if (!opts?.silent) {
+      setLoading(true);
+      setLoadError('');
+    }
     try {
       const r = await getKbFiles({ category: c || undefined, limit: 200 });
       setFiles(r.files || []);
       if (r.initializing) {
-        window.setTimeout(() => { void loadFiles(c); }, 1500);
+        window.setTimeout(() => { void loadFiles(c, { silent: true }); }, 3000);
       }
     } catch (error) {
-      setFiles([]);
-      setLoadError(error instanceof Error ? error.message : '文件列表加载失败');
-    } finally { setLoading(false); }
+      if (!opts?.silent) {
+        setFiles([]);
+        setLoadError(error instanceof Error ? error.message : '文件列表加载失败');
+      }
+    } finally {
+      if (!opts?.silent) setLoading(false);
+    }
   }, []);
 
   useEffect(() => { void loadFiles(category); }, [category, loadFiles]);
@@ -95,8 +101,12 @@ export default function FilesPage() {
       const operationItems = result.operations.map(mapOperation);
       setStatusItems(items => {
         const operationIds = new Set(operationItems.map(item => item.id).filter(Boolean));
+        const mergedOperations = operationItems.map(item => {
+          const existing = items.find(current => current.id === item.id);
+          return existing ? { ...existing, ...item, createdAt: existing.createdAt ?? item.createdAt } : item;
+        });
         const localItems = items.filter(item => item.id && !operationIds.has(item.id) && item.status === 'processing');
-        return [...operationItems, ...localItems].slice(0, 50);
+        return [...mergedOperations, ...localItems].slice(0, 50);
       });
     } catch { /* ignore operation log load failure */ }
   }, []);
@@ -156,11 +166,12 @@ export default function FilesPage() {
   }, [statusStats.processing]);
   useEffect(() => {
     if (statusStats.processing === 0) return;
-    const timer = window.setInterval(() => {
-      void loadOperations();
-      void loadFiles();
-    }, 1500);
-    return () => window.clearInterval(timer);
+    const operationsTimer = window.setInterval(() => { void loadOperations(); }, 2000);
+    const filesTimer = window.setInterval(() => { void loadFiles(undefined, { silent: true }); }, 8000);
+    return () => {
+      window.clearInterval(operationsTimer);
+      window.clearInterval(filesTimer);
+    };
   }, [loadFiles, loadOperations, statusStats.processing]);
 
   const filteredStatusItems = statusFilter === 'all'
@@ -192,45 +203,31 @@ export default function FilesPage() {
     setUploading(true);
     const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     upsertStatusItem({ id: uploadId, type: 'upload', title: `上传 ${titleName}`, description: '等待上传、解析、切片和入库', status: 'processing', percent: 5 });
-    let done = false;
-    let progressFailureCount = 0;
-    const refreshProgress = async () => {
-      const progress = await getKbUploadProgress(uploadId);
-      progressFailureCount = 0;
-      const status = progress.stage === 'error' ? 'error' : progress.stage === 'done' ? 'success' : 'processing';
-      upsertStatusItem({ id: uploadId, type: status === 'error' ? 'error' : 'upload', title: status === 'success' ? `上传完成 ${titleName}` : `上传 ${titleName}`, description: `${progress.message}${progress.chunkCount ? `，${progress.chunkCount} 个切片` : ''}`, status, percent: progress.percent });
-      if (progress.stage === 'done' || progress.stage === 'error') done = true;
-      return progress;
-    };
-    const handleProgressError = (error: unknown) => {
-      progressFailureCount += 1;
-      if (progressFailureCount >= 5) {
-        done = true;
-        const description = error instanceof Error ? error.message : '进度查询失败';
-        upsertStatusItem({ id: uploadId, type: 'error', title: `上传失败 ${titleName}`, description, status: 'error', percent: 100 });
-      }
-    };
-    const poll = setInterval(() => { void refreshProgress().catch(handleProgressError); }, 700);
     try {
-      await uploadKbFiles(allowedFiles, undefined, uploadId);
-      message.info('文件已上传，正在后台解析、切片和入库');
-      for (let i = 0; i < 240 && !done; i++) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        await refreshProgress().catch(handleProgressError);
-      }
+      await uploadKbFiles(allowedFiles, undefined, uploadId, progress => {
+        upsertStatusItem({
+          id: uploadId,
+          type: 'upload',
+          title: `上传 ${titleName}`,
+          description: `正在上传文件：${progress.uploadedFiles}/${progress.totalFiles}，批次 ${progress.batchIndex + 1}/${progress.totalBatches}`,
+          status: 'processing',
+          percent: Math.min(5, Math.max(1, Math.round((progress.uploadedFiles / Math.max(1, progress.totalFiles)) * 5))),
+        });
+      });
+      message.info('文件已上传，正在后台解析、切片和入库，可在顶部“后台任务”查看进度');
       setSearchQuery('');
       setCategory('');
       setSelectedRowKeys([]);
       categoryRef.current = '';
-      await loadFiles();
       await loadOperations();
-      if (done) message.success('上传索引流程已完成');
+      window.setTimeout(() => { void loadFiles(undefined, { silent: true }); }, 2000);
     } catch (error) {
       const description = error instanceof Error ? error.message : '请重试或检查文件格式';
       message.error(description || '上传失败');
       upsertStatusItem({ id: uploadId, type: 'error', title: `上传失败 ${titleName}`, description, status: 'error', percent: 100 });
+    } finally {
+      setUploading(false);
     }
-    finally { clearInterval(poll); setUploading(false); }
   };
 
   const handleReindexAll = async () => {
@@ -566,6 +563,13 @@ export default function FilesPage() {
     return <FolderOpenOutlined style={{ color: '#fa8c16', fontSize: 15 }} />;
   };
 
+  const statusTagColor = (status?: string) => {
+    if (status === 'active') return 'green';
+    if (status === 'processing' || status === 'indexing') return 'blue';
+    if (status === 'error') return 'red';
+    return 'orange';
+  };
+
   const columns: ColumnsType<FileTreeNode> = [
     {
       title: t('fileName'), dataIndex: 'name', key: 'name',
@@ -608,7 +612,7 @@ export default function FilesPage() {
       title: '解析状态', dataIndex: 'status', key: 'status', width: 100,
       render: (_: unknown, r: FileTreeNode) => r.isFolder
         ? <span style={{ color: 'var(--colorTextQuaternary)' }}>—</span>
-        : <Tag color={r.file?.status === 'active' ? 'green' : 'red'}>{r.file?.errorMessage || r.file?.status || '—'}</Tag>,
+        : <Tag color={statusTagColor(r.file?.status)}>{r.file?.errorMessage || r.file?.status || '—'}</Tag>,
     },
     {
       title: t('fileDate'), dataIndex: 'mtime', key: 'date', width: 130,

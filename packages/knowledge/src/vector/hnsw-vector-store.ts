@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
-import type { VectorDocument, VectorSearchQuery, VectorSearchResult, VectorStoreInterface } from './types.js';
+import type { VectorDocument, VectorSearchQuery, VectorSearchResult, VectorStoreInterface, VectorWriteOptions } from './types.js';
 
 type HierarchicalNSW = {
   initIndex(maxElements: number, m?: number, efConstruction?: number, randomSeed?: number, allowReplaceDeleted?: boolean): void;
@@ -13,13 +13,15 @@ type HierarchicalNSW = {
 };
 
 type HnswModule = { HierarchicalNSW: new (space: string, dimensions: number) => HierarchicalNSW };
+type StoredVectorDocument = Omit<VectorDocument, 'embedding'> & { embedding?: number[] };
 const require = createRequire(import.meta.url);
 
 /** HNSW（分层可导航小世界图）向量存储，基于 hnswlib-node 实现的高效近似最近邻搜索 */
 export class HNSWVectorStore implements VectorStoreInterface {
   private index?: HierarchicalNSW;
   private deletedSinceRebuild = 0;
-  private readonly documents = new Map<number, VectorDocument>();
+  private dirty = false;
+  private readonly documents = new Map<number, StoredVectorDocument>();
 
   constructor(
     readonly collectionName: string,
@@ -38,15 +40,16 @@ export class HNSWVectorStore implements VectorStoreInterface {
     else this.index.initIndex(this.maxElements, 16, 200, 100, true);
   }
 
-  async upsert(documents: VectorDocument[]): Promise<void> {
+  async upsert(documents: VectorDocument[], options: VectorWriteOptions = {}): Promise<void> {
     await this.ensureCollection();
     for (const document of documents) {
       const rowid = Number(document.metadata.sqlite_rowid);
       if (!Number.isFinite(rowid) || rowid <= 0) throw new Error(`HNSW 向量写入缺少有效 sqlite_rowid: ${document.id}`);
       this.index!.addPoint(document.embedding, rowid, true);
-      this.documents.set(rowid, document);
+      this.documents.set(rowid, this.toStoredDocument(document));
+      this.dirty = true;
     }
-    this.persist();
+    if (options.persist !== false) this.persist();
   }
 
   async clearCollection(): Promise<void> {
@@ -54,19 +57,26 @@ export class HNSWVectorStore implements VectorStoreInterface {
     if (fs.existsSync(this.metadataPath())) fs.rmSync(this.metadataPath(), { force: true });
     this.documents.clear();
     this.deletedSinceRebuild = 0;
+    this.dirty = false;
     this.index = undefined;
     await this.ensureCollection();
   }
 
-  async deleteByFilePath(filePath: string): Promise<void> {
+  async deleteByFilePath(filePath: string, options: VectorWriteOptions = {}): Promise<void> {
     await this.ensureCollection();
     for (const [rowid, document] of this.documents.entries()) {
       if (document.metadata.file_path === filePath) {
         try { this.index!.markDelete(rowid); this.deletedSinceRebuild += 1; } catch { /* 忽略缺失的标签 */ }
         this.documents.delete(rowid);
+        this.dirty = true;
       }
     }
-    this.persist();
+    if (options.persist !== false) this.persist();
+  }
+
+  async flush(): Promise<void> {
+    await this.ensureCollection();
+    if (this.dirty) this.persist();
   }
 
   needsRebuild(): boolean {
@@ -90,17 +100,26 @@ export class HNSWVectorStore implements VectorStoreInterface {
   private persist(): void {
     this.index!.writeIndexSync(this.indexPath);
     fs.writeFileSync(this.metadataPath(), JSON.stringify({ deletedSinceRebuild: this.deletedSinceRebuild, documents: [...this.documents.entries()] }), 'utf8');
+    this.dirty = false;
+  }
+
+  private toStoredDocument(document: VectorDocument): StoredVectorDocument {
+    return {
+      id: document.id,
+      content: '',
+      metadata: document.metadata,
+    };
   }
 
   private loadDocuments(): void {
     const file = this.metadataPath();
     if (!fs.existsSync(file)) return;
     try {
-      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { deletedSinceRebuild?: number; documents?: Array<[number, VectorDocument]> } | Array<[number, VectorDocument]>;
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { deletedSinceRebuild?: number; documents?: Array<[number, StoredVectorDocument]> } | Array<[number, StoredVectorDocument]>;
       const entries = Array.isArray(parsed) ? parsed : parsed.documents ?? [];
       this.deletedSinceRebuild = Array.isArray(parsed) ? 0 : Number(parsed.deletedSinceRebuild ?? 0);
       this.documents.clear();
-      for (const [rowid, document] of entries) this.documents.set(Number(rowid), document);
+      for (const [rowid, document] of entries) this.documents.set(Number(rowid), { id: document.id, content: document.content ?? '', metadata: document.metadata });
     } catch {
       this.documents.clear();
     }

@@ -140,6 +140,7 @@ export class KnowledgeBaseManager {
     const tracker = new ChangeTracker(this.store);
     const diff = await tracker.computeDiff(diskFiles, this.classifier, this.kbPath);
     const onlyRelativePaths = options.onlyRelativePaths ? new Set(options.onlyRelativePaths) : undefined;
+    let vectorDeletesApplied = 0;
     if (onlyRelativePaths) {
       diff.newFiles = diff.newFiles.filter(file => onlyRelativePaths.has(file.relativePath));
       diff.modifiedFiles = diff.modifiedFiles.filter(file => onlyRelativePaths.has(file.relativePath));
@@ -153,6 +154,7 @@ export class KnowledgeBaseManager {
 
     for (const deleted of diff.deletedFiles) {
       await this.deleteVectorFile(deleted.collectionName, deleted.relativePath);
+      vectorDeletesApplied += 1;
       this.store.deleteRecord(deleted.relativePath);
       this.updateJobsForFile(deleted.relativePath, 'SUCCESS', 100, '文件已删除，索引记录和向量已清理');
     }
@@ -160,12 +162,16 @@ export class KnowledgeBaseManager {
     const now = Date.now();
     const indexedBefore = [...this.store.loadActiveRecords().values()];
     const filesToIndex = [...diff.newFiles, ...diff.modifiedFiles];
+    const vectorRelativePaths: string[] = [];
+    const changedCollectionNames = new Set<string>();
     for (const [index, file] of filesToIndex.entries()) {
       const hash = tracker.hashFile(file.absolutePath);
       const duplicate = this.store.findExactDuplicate(hash, file.relativePath);
       const collectionName = this.scope === 'global'
         ? this.collections.getCollectionName('global', file.category)
         : this.collections.getCollectionName('project', file.category, this.projectId);
+      const previousRecord = indexedBefore.find(record => record.relativePath === file.relativePath);
+      if (previousRecord?.collectionName) changedCollectionNames.add(previousRecord.collectionName);
       const basePercent = filesToIndex.length === 0 ? 40 : 20 + Math.round((index / filesToIndex.length) * 45);
       this.updateJobsForFile(file.relativePath, 'PARSING', basePercent, `正在解析 ${file.relativePath}`);
       this.reportProgress({ stage: 'parsing', percent: basePercent, message: `正在解析 ${file.relativePath}`, filePath: file.relativePath });
@@ -283,6 +289,8 @@ export class KnowledgeBaseManager {
         format: file.format,
         collectionName,
       });
+      vectorRelativePaths.push(file.relativePath);
+      changedCollectionNames.add(collectionName);
       this.updateJobsForFile(file.relativePath, options.vectorMode === 'defer' ? 'SUCCESS' : 'INDEXING', options.vectorMode === 'defer' ? 100 : 85, options.vectorMode === 'defer' ? '解析和切片已完成' : '等待向量入库');
     }
 
@@ -295,7 +303,7 @@ export class KnowledgeBaseManager {
       if (hasIndexChanges) this.store.setMetadata('vector_index_status', 'pending');
       this.reportProgress({ stage: 'vectorizing', percent: 85, message: '解析和切片已完成，向量入库转入后台/稍后执行', chunkCount: stats.chunkCount, vectorStatus: this.getVectorStatus() });
     } else {
-      await this.ensureVectorIndexFresh(stats.chunkCount, hasIndexChanges);
+      await this.ensureVectorIndexFresh(stats.chunkCount, { changedRelativePaths: vectorRelativePaths, changedCollectionNames, deletesApplied: vectorDeletesApplied });
     }
     this.lastSkippedFiles = diff.skippedFiles;
 
@@ -458,7 +466,7 @@ export class KnowledgeBaseManager {
   }
 
   getUploadRelativePath(fileName: string, targetRelativePath?: string): string {
-    return targetRelativePath ? this.normalizeRelativePath(targetRelativePath) : this.defaultUploadRelativePath(fileName);
+    return this.validateUploadRelativePath(targetRelativePath ? this.normalizeRelativePath(targetRelativePath) : this.defaultUploadRelativePath(fileName));
   }
 
   async uploadFile(fileName: string, content: Buffer, targetRelativePath?: string, onProgress?: (progress: KnowledgeIndexProgress) => void, options: { vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
@@ -478,6 +486,23 @@ export class KnowledgeBaseManager {
       if (record) await this.deleteVectorFile(record.collectionName, relativePath);
       this.store.deleteRecord(relativePath);
       jobs.push(this.store.enqueueIndexJob({ id: `${operationId}-${index}`, relativePath, message: '文件已落盘，等待后台解析' }));
+    }
+    return jobs;
+  }
+
+  async stageUploadedFilePaths(files: Array<{ fileName: string; sourcePath: string; targetRelativePath?: string }>, operationId = `upload-${Date.now()}`, offset = 0) {
+    this.initialize();
+    const jobs = [];
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index]!;
+      const relativePath = this.getUploadRelativePath(file.fileName, file.targetRelativePath);
+      const targetPath = this.resolveKbRelativePath(relativePath);
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.copyFileSync(file.sourcePath, targetPath);
+      const record = this.store.listRecords().find(item => item.relativePath === relativePath);
+      if (record) await this.deleteVectorFile(record.collectionName, relativePath);
+      this.store.deleteRecord(relativePath);
+      jobs.push(this.store.enqueueIndexJob({ id: `${operationId}-${offset + index}`, relativePath, message: '文件已落盘，等待后台解析' }));
     }
     return jobs;
   }
@@ -530,21 +555,40 @@ export class KnowledgeBaseManager {
     return this.store.listIgnoreRules();
   }
 
-  async indexVectors(options: { collectionName?: string; relativePath?: string; limit?: number } = {}): Promise<VectorIndexResult[]> {
-    const chunks = this.store.listChunks(options);
+  async indexVectors(options: { collectionName?: string; relativePath?: string; relativePaths?: string[]; cleanupCollectionNames?: Iterable<string>; limit?: number; rebuild?: boolean } = {}): Promise<VectorIndexResult[]> {
+    const chunks = options.relativePaths?.length
+      ? options.relativePaths.flatMap(relativePath => this.store.listChunks({ collectionName: options.collectionName, relativePath }))
+      : this.store.listChunks(options);
     const collectionNames = new Set(chunks.map(chunk => chunk.collectionName));
-    for (const collectionName of collectionNames) this.ensureVectorStore(collectionName);
-    if (!options.relativePath) {
+    const cleanupCollectionNames = new Set([...collectionNames, ...(options.cleanupCollectionNames ?? [])]);
+    for (const collectionName of cleanupCollectionNames) this.ensureVectorStore(collectionName);
+    if (options.rebuild || (!options.relativePath && !options.relativePaths?.length)) {
       for (const collectionName of collectionNames) await this.vectorStores.get(collectionName)?.clearCollection?.();
     } else {
-      for (const collectionName of collectionNames) await this.vectorStores.get(collectionName)?.deleteByFilePath(options.relativePath);
+      for (const relativePath of options.relativePaths ?? [options.relativePath].filter(Boolean) as string[]) {
+        for (const collectionName of cleanupCollectionNames) await this.vectorStores.get(collectionName)?.deleteByFilePath(relativePath, { persist: false });
+      }
+      if (chunks.length === 0) {
+        for (const collectionName of cleanupCollectionNames) await this.vectorStores.get(collectionName)?.flush?.();
+      }
     }
     this.reportProgress({ stage: 'vectorizing', percent: 85, message: `正在写入 HNSWLib 向量库，共 ${chunks.length} 个切片`, chunkCount: chunks.length });
+    if (chunks.length === 0) {
+      const totalChunks = this.getStats().chunkCount;
+      this.store.setMetadata('vector_indexed_chunks', String(totalChunks));
+      this.store.setMetadata('vector_index_status', 'ready');
+      this.store.setMetadata('vector_index_error', '');
+      this.store.setMetadata('last_vector_index_at', String(Date.now()));
+      return [];
+    }
     const indexer = new VectorIndexer(this.embeddingProvider, this.vectorStores);
+    let lastVectorPercent = -1;
     try {
       const results = await indexer.indexChunks(chunks, {
         onProgress: progress => {
           const percent = 85 + Math.round((progress.processedChunks / Math.max(1, progress.totalChunks)) * 14);
+          if (percent === lastVectorPercent && progress.processedChunks < progress.totalChunks) return;
+          lastVectorPercent = percent;
           const message = `正在分批向量化并写入：${progress.processedChunks}/${progress.totalChunks} 个切片`;
           this.reportProgress({ stage: 'vectorizing', percent, message, chunkCount: progress.totalChunks });
           if (options.relativePath) this.updateJobsForFile(options.relativePath, 'INDEXING', percent, message);
@@ -552,9 +596,10 @@ export class KnowledgeBaseManager {
       });
       const actualModel = results[0]?.embeddingModel ?? this.embeddingProvider.model;
       const actualDimension = results[0]?.embeddingDimension ?? this.embeddingProvider.dimensions;
+      const totalChunks = this.getStats().chunkCount;
       this.store.setMetadata('embedding_model', actualModel);
       this.store.setMetadata('embedding_dimension', String(actualDimension));
-      this.store.setMetadata('vector_indexed_chunks', String(chunks.length));
+      this.store.setMetadata('vector_indexed_chunks', String(totalChunks));
       this.store.setMetadata('vector_index_status', 'ready');
       this.store.setMetadata('vector_index_error', '');
       this.store.setMetadata('last_vector_index_at', String(Date.now()));
@@ -899,17 +944,30 @@ ${resultsText}
     }
   }
 
-  private async ensureVectorIndexFresh(chunkCount: number, force = false): Promise<void> {
+  private async ensureVectorIndexFresh(chunkCount: number, options: { changedRelativePaths?: string[]; changedCollectionNames?: Set<string>; deletesApplied?: number; rebuild?: boolean } = {}): Promise<void> {
     if (chunkCount === 0) return;
     for (const record of this.store.listRecords()) this.ensureVectorStore(record.collectionName);
-    if ([...this.vectorStores.values()].some(store => store.needsRebuild?.())) {
-      await this.indexVectors();
+    if (options.rebuild || [...this.vectorStores.values()].some(store => store.needsRebuild?.())) {
+      await this.indexVectors({ rebuild: true });
       return;
     }
     const indexedChunks = Number(this.store.getMetadata('vector_indexed_chunks') ?? 0);
     const status = this.store.getMetadata('vector_index_status');
-    if (!force && indexedChunks === chunkCount && status === 'ready') return;
-    await this.indexVectors();
+    const changedRelativePaths = [...new Set(options.changedRelativePaths ?? [])];
+    if (changedRelativePaths.length === 0 && options.deletesApplied && status === 'ready') {
+      this.store.setMetadata('vector_indexed_chunks', String(chunkCount));
+      this.store.setMetadata('vector_index_status', 'ready');
+      this.store.setMetadata('vector_index_error', '');
+      this.store.setMetadata('last_vector_index_at', String(Date.now()));
+      return;
+    }
+    if (changedRelativePaths.length > 0 && status === 'ready') {
+      for (const collectionName of options.changedCollectionNames ?? []) this.ensureVectorStore(collectionName);
+      await this.indexVectors({ relativePaths: changedRelativePaths, cleanupCollectionNames: options.changedCollectionNames });
+      return;
+    }
+    if (indexedChunks === chunkCount && status === 'ready') return;
+    await this.indexVectors({ rebuild: true });
   }
 
   private hasUsableContent(text: string, metadata: Record<string, unknown>): boolean {
@@ -923,6 +981,17 @@ ${resultsText}
     const configDirs = this.projectConfig?.categoryDirs ?? DEFAULT_CATEGORY_DIRS;
     const dir = configDirs[classification.category] ?? DEFAULT_CATEGORY_DIRS[classification.category];
     return `${dir}/${path.basename(fileName)}`;
+  }
+
+  private validateUploadRelativePath(relativePath: string): string {
+    const normalized = this.normalizeRelativePath(relativePath);
+    if (!normalized || normalized === '.') throw new Error('上传文件路径无效');
+    if (normalized.length > 1000) throw new Error('上传文件路径过长，请缩短文件夹层级或文件名');
+    if (normalized.includes('\0')) throw new Error('上传文件路径包含非法字符');
+    const parts = normalized.split('/');
+    if (parts.some(part => !part || part === '..')) throw new Error('上传文件路径无效');
+    if (parts.some(part => part.length > 255)) throw new Error('上传文件名过长，请缩短文件名后重试');
+    return normalized;
   }
 
   private resolveKbRelativePath(relativePath: string): string {

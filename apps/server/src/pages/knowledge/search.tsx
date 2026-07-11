@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { App, Card, Input, Button, Space, Tag, Empty, Typography, Spin, Descriptions, InputNumber, Alert } from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
 import { useAppTranslations } from '@/components/Layout';
-import { searchKb, type KbSearchResult } from '@/lib/api';
+import { searchKb, searchKbFiles, type KbFileItem, type KbSearchResult } from '@/lib/api';
 import styles from './style.module.scss';
 
 const { Paragraph } = Typography;
@@ -33,6 +33,7 @@ export default function KnowledgeSearchPage() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<KbSearchResult[]>([]);
+  const [fileResults, setFileResults] = useState<KbFileItem[]>([]);
   const [queryTimeMs, setQueryTimeMs] = useState<number>();
   const [debug, setDebug] = useState<{ originalQuery?: string; rewrittenQueries?: string[]; weights?: Record<string, number>; recallCounts?: Record<string, number>; reranker?: string }>();
   const [error, setError] = useState('');
@@ -49,12 +50,17 @@ export default function KnowledgeSearchPage() {
     setLoading(true);
     setError('');
     try {
-      const data = await searchKb(q, { limit: 10, weights });
+      const [data, fileData] = await Promise.all([
+        searchKb(q, { limit: 10, weights }),
+        searchKbFiles({ query: q, limit: 20, includeContent: true }),
+      ]);
       setResults(data.results);
+      setFileResults(fileData.files);
       setQueryTimeMs(data.queryTimeMs);
       setDebug(data.debug);
     } catch (searchError) {
       setResults([]);
+      setFileResults([]);
       setError(searchError instanceof Error ? searchError.message : t('searchFailed'));
     } finally {
       setLoading(false);
@@ -85,6 +91,23 @@ export default function KnowledgeSearchPage() {
           {WEIGHT_KEYS.map(key => <span key={key}>{translatedValue(t, `weights.${key}`, key)} <InputNumber min={0} max={key === 'hybridBonus' ? 2 : 5} step={key === 'hybridBonus' ? 0.05 : 0.1} value={weights[key]} onChange={value => setWeights(prev => ({ ...prev, [key]: Number(value ?? prev[key]) }))} /></span>)}
         </Space>
       </Card>
+
+      {fileResults.length > 0 && <Card size="small" title="匹配文件" extra={`${fileResults.length} 个`}>
+        <div style={{ display: 'grid', gap: 8 }}>
+          {fileResults.map(file => <div key={file.relativePath} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 12, alignItems: 'center', padding: '10px 12px', border: '1px solid var(--colorBorderSecondary)', borderRadius: 10 }}>
+            <div style={{ minWidth: 0 }}>
+              <Space size={8} wrap>
+                <Link href={`/knowledge/file-detail?relativePath=${encodeURIComponent(file.relativePath)}`}>{highlight(file.relativePath, query)}</Link>
+                <Tag color={file.matchedBy === 'content' ? 'purple' : file.matchedBy === 'disk' ? 'orange' : 'blue'}>{file.matchedBy === 'content' ? '内容匹配' : file.matchedBy === 'disk' ? '磁盘文件' : '文件匹配'}</Tag>
+                <Tag>{file.status}</Tag>
+                {file.chunkCount === 0 && <Tag color="warning">未切片</Tag>}
+              </Space>
+              <div style={{ marginTop: 4, color: 'var(--colorTextSecondary)', fontSize: 12 }}>{file.category || '未分类'} · {file.format || '未知格式'} · {Math.round((file.fileSize || 0) / 1024)} KB</div>
+            </div>
+            <Button size="small" onClick={() => { void copyEvidencePath(file.relativePath); }}>{t('copyAsPriorityEvidence')}</Button>
+          </div>)}
+        </div>
+      </Card>}
 
       {debug && <Card size="small" title={t('debugPanel')}>
         <Descriptions size="small" column={2} bordered>

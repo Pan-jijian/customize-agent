@@ -5,7 +5,7 @@ import * as XLSX from 'xlsx';
 import * as os from 'node:os';
 import { createProvider } from '@customize-agent/llm';
 import { resolveProtocol } from '@customize-agent/runtime';
-import { ensureBuiltInKnowledgeBase, getMultiProjectManager, getProjectRoot } from './kbService';
+import { ensureBuiltInKnowledgeBase, getMultiProjectManager, getProjectRoot, listKnowledgeFiles } from './kbService';
 import { recallDocumentContexts } from './contextService';
 import { getConfigStore } from '@/services/configService';
 import { getProjectRoleConfig, listDocumentRoles } from './documentRoleService';
@@ -491,24 +491,30 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
   if (fileBindings.length === 0) issues.push({ level: 'error', message: '模板未绑定知识库文件角色' });
   const spec = template.documentSpecId ? getDocumentSpec(template.documentSpecId) : undefined;
   if (template.documentSpecId && !spec) issues.push({ level: 'error', message: '文档规范包不存在或已删除' });
-  if (spec) {
+  if (spec?.chapterMode === 'fixed') {
     const chapterIds = new Set(template.chapters.map(chapter => chapter.id));
     const chapterTitles = new Set(template.chapters.map(chapter => chapter.title));
     for (const rule of spec.chapterRules.filter(rule => rule.required)) {
       if (!chapterIds.has(rule.id) && !chapterTitles.has(rule.title)) issues.push({ level: 'error', message: `模板章节不满足规范包要求：${rule.title}` });
     }
   }
+  if (spec?.chapterMode === 'dynamic' && spec.dynamicChapterRule.maxChapters && spec.dynamicChapterRule.minChapters && spec.dynamicChapterRule.maxChapters < spec.dynamicChapterRule.minChapters) {
+    issues.push({ level: 'error', message: '动态章节规则的最多章节不能小于最少章节' });
+  }
   const resolvedProjectRoot = ensureBuiltInKnowledgeBase(projectRoot);
   const project = await getMultiProjectManager().getProject(resolvedProjectRoot);
   if (template.builtIn) await project.incrementalIndex();
-  const files = project.listFiles();
+  const files = listKnowledgeFiles(resolvedProjectRoot);
   const fileMap = new Map(files.map(file => [file.relativePath, file]));
   const fileDiagnostics = fileBindings.map(binding => {
     const role = fileRoles.find(item => item.id === binding.roleId);
     const file = fileMap.get(binding.filePath);
     if (!role) issues.push({ level: 'error', message: `文件角色不存在：${binding.roleId}` });
-    if (!file) issues.push({ level: 'error', message: `知识库文件不存在或未索引：${binding.filePath}` });
-    return { ...binding, roleName: role?.name, exists: Boolean(file), indexed: Boolean(file), chunkCount: file?.chunkCount ?? 0, vectorReady: Boolean(file && file.chunkCount > 0) };
+    if (!file) issues.push({ level: 'error', message: `知识库文件不存在：${binding.filePath}` });
+    if (file && (file.status === 'disk' || file.indexedAt === 0)) issues.push({ level: 'warning', message: `知识库文件存在但尚未完成索引：${binding.filePath}` });
+    if (file?.status === 'error') issues.push({ level: 'warning', message: `知识库文件索引失败：${binding.filePath}${file.errorMessage ? `，${file.errorMessage}` : ''}` });
+    if (file && file.chunkCount === 0) issues.push({ level: 'warning', message: `知识库文件暂无可检索内容切片：${binding.filePath}` });
+    return { ...binding, roleName: role?.name, exists: Boolean(file), indexed: Boolean(file && file.indexedAt > 0 && file.status !== 'disk'), chunkCount: file?.chunkCount ?? 0, vectorReady: Boolean(file && file.chunkCount > 0) };
   });
   const resolvedPrompts = readPromptContents(promptBindings);
   const promptDiagnostics = promptBindings.map(binding => {
@@ -674,6 +680,64 @@ function evidenceBundlePrompt(bundle: EvidenceBundle) {
   return [bundle.summary, resourceLines ? `结构化资源证据：\n${resourceLines}` : '', textLines ? `文本/附件片段证据：\n${textLines}` : ''].filter(Boolean).join('\n\n');
 }
 
+function dynamicChapterTitleFromEvidence(item: DocumentEvidence, index: number, titleTemplate?: string) {
+  const sourceTitle = (item.sectionTitle || path.basename(item.filePath).replace(/\.[^.]+$/u, '') || `资料片段 ${index + 1}`).replace(/\s+/gu, ' ').slice(0, 60);
+  if (titleTemplate) return titleTemplate.replaceAll('{{index}}', String(index + 1)).replaceAll('{{sourceTitle}}', sourceTitle);
+  return sourceTitle;
+}
+
+function effectiveTemplateChapters(template: DocumentTemplate, spec?: DocumentSpecPackage, seedEvidence: DocumentEvidence[] = []): DocumentTemplateChapter[] {
+  if (!spec) return template.chapters;
+  if (spec.chapterMode === 'fixed') {
+    return spec.chapterRules.length > 0 ? [...spec.chapterRules].sort((a, b) => a.order - b.order).map(rule => ({
+      id: rule.id,
+      title: rule.title,
+      purpose: rule.generationHint || rule.title,
+      requiredFacts: rule.requiredFactIds || [],
+      queries: [rule.title, rule.generationHint || '', ...(rule.requiredFactIds || [])].filter(Boolean),
+      pinnedEvidenceFilePaths: [],
+    })) : template.chapters;
+  }
+  const rule = spec.dynamicChapterRule;
+  const min = Math.max(1, Math.min(20, rule.minChapters || 3));
+  const max = Math.max(min, Math.min(30, rule.maxChapters || Math.max(min, 8)));
+  const sourceRoles = new Set([...(rule.sourceRoleIds || []), ...(rule.requiredFileRoleIds || [])]);
+  const candidates = seedEvidence
+    .filter(item => sourceRoles.size === 0 || (item.roleId && sourceRoles.has(item.roleId)))
+    .filter((item, index, arr) => arr.findIndex(other => `${other.filePath}:${other.sectionTitle || ''}` === `${item.filePath}:${item.sectionTitle || ''}`) === index)
+    .slice(0, max);
+  const chapters = candidates.map((item, index) => {
+    const title = dynamicChapterTitleFromEvidence(item, index, rule.titleTemplate);
+    return {
+      id: `dynamic-${index + 1}`,
+      title,
+      purpose: rule.generationHint || `根据 ${item.filePath} 动态生成章节`,
+      requiredFacts: rule.requiredFactIds || [],
+      queries: [title, item.filePath, item.sectionTitle || '', rule.generationHint || ''].filter(Boolean),
+      pinnedEvidenceFilePaths: [item.filePath],
+    } satisfies DocumentTemplateChapter;
+  });
+  if (chapters.length >= min) return chapters;
+  const fallbackTitles = template.chapters.length > 0 ? template.chapters.map(chapter => chapter.title) : ['背景与目标', '资料分析', '结论与建议'];
+  while (chapters.length < min) {
+    const index = chapters.length;
+    const title = fallbackTitles[index] || `动态章节 ${index + 1}`;
+    chapters.push({
+      id: `dynamic-${index + 1}`,
+      title,
+      purpose: rule.generationHint || title,
+      requiredFacts: rule.requiredFactIds || [],
+      queries: [title, rule.generationHint || '', inputSafeJoin(rule.sourceRoleIds || [])].filter(Boolean),
+      pinnedEvidenceFilePaths: [],
+    });
+  }
+  return chapters;
+}
+
+function inputSafeJoin(items: string[]) {
+  return items.filter(Boolean).join(' ');
+}
+
 function factAliases(fact: string) {
   const aliases: Record<string, string[]> = {
     定位: ['侦察', '突击', '工程', '支援', '干员定位'],
@@ -689,7 +753,8 @@ function evidenceMatchesFact(item: DocumentEvidence, fact: string) {
 }
 
 function specFactTargets(template: DocumentTemplate, spec?: DocumentSpecPackage) {
-  const chapterFacts = template.chapters.flatMap(chapter => chapter.requiredFacts).map(name => ({ id: name, name, required: true, sourceRoleIds: [] as string[], extractionHint: '' }));
+  const chapters = effectiveTemplateChapters(template, spec, []);
+  const chapterFacts = chapters.flatMap(chapter => chapter.requiredFacts).map(name => ({ id: name, name, required: true, sourceRoleIds: [] as string[], extractionHint: '' }));
   const specFacts = spec?.factFields.map(field => ({ id: field.id, name: field.name, required: field.required, sourceRoleIds: field.sourceRoleIds || [], extractionHint: field.extractionHint || '' })) || [];
   const map = new Map<string, { id: string; name: string; required: boolean; sourceRoleIds: string[]; extractionHint: string }>();
   for (const item of [...chapterFacts, ...specFacts]) map.set(item.id, { ...(map.get(item.id) || item), ...item, required: item.required || map.get(item.id)?.required || false });
@@ -699,6 +764,343 @@ function specFactTargets(template: DocumentTemplate, spec?: DocumentSpecPackage)
 function evidenceSatisfiesSpecField(item: DocumentEvidence, field: { name: string; sourceRoleIds?: string[] }) {
   const roleMatched = !field.sourceRoleIds?.length || Boolean(item.roleId && field.sourceRoleIds.includes(item.roleId));
   return roleMatched && evidenceMatchesFact(item, field.name);
+}
+
+interface RoleExecutionNode {
+  id: string;
+  fileRoleId: string;
+  fileRoleName: string;
+  filePaths: string[];
+  processingType?: string;
+  promptRoleIds: string[];
+  promptTexts: string[];
+  outputType: 'template_requirements' | 'bill_facts' | 'drawing_facts' | 'technical_facts' | 'project_facts' | 'reference_facts';
+}
+
+interface TenderPlanRequirement {
+  id: string;
+  title: string;
+  requirementText: string;
+  requiredContents: string[];
+  writingRules: string[];
+  evidenceNeeds: string[];
+  preferredSourceRoleIds: string[];
+}
+
+interface TenderPlanChapter {
+  id: string;
+  title: string;
+  order: number;
+  sourceRequirement: string;
+  requiredContents: string[];
+  writingRules: string[];
+  evidenceNeeds: string[];
+  minWords?: number;
+  requirements: TenderPlanRequirement[];
+}
+
+interface RoleNodeFact {
+  key: string;
+  value: string;
+  sourceFile: string;
+  roleId: string;
+  processingType?: string;
+  relatedChapterHints: string[];
+}
+
+interface RoleNodeArtifact {
+  node: RoleExecutionNode;
+  evidence: DocumentEvidence[];
+  chapters: TenderPlanChapter[];
+  facts: RoleNodeFact[];
+  outputRequirements: string[];
+  warnings: string[];
+  forbidImageInsertion: boolean;
+}
+
+function normalizeRoleText(value: string) {
+  return value.toLowerCase();
+}
+
+function inferRoleOutputType(role: { id: string; name: string; processingType?: string }, promptTexts: string[] = []): RoleExecutionNode['outputType'] {
+  const text = normalizeRoleText(`${role.id} ${role.name} ${role.processingType || ''} ${promptTexts.join(' ')}`);
+  if (/示范文本|招标文件|章节|目录|输出要求|编制要求|template|tender/u.test(text)) return 'template_requirements';
+  if (/清单|工程量|bill|boq|quantity/u.test(text)) return 'bill_facts';
+  if (/图纸|drawing|cad|设计图|图纸解析/u.test(text)) return 'drawing_facts';
+  if (/规范|标准|spec|technical/u.test(text)) return 'technical_facts';
+  if (/项目|工程概况|事实|fact/u.test(text)) return 'project_facts';
+  return 'reference_facts';
+}
+
+function promptExecutionScore(promptRoleId: string, fileRole: { id: string; name: string; processingType?: string }, promptTexts: string[]) {
+  const text = normalizeRoleText(`${promptRoleId} ${promptTexts.join(' ')}`);
+  let score = 0;
+  if (/fact|抽取|读取|提取|理解|reference/u.test(text)) score += 5;
+  if (/chapter_generation|章节生成|正文生成/u.test(text)) score += 1;
+  for (const token of [fileRole.id, fileRole.name, fileRole.processingType || ''].filter(Boolean)) {
+    if (text.includes(normalizeRoleText(token))) score += 4;
+  }
+  if (/示范文本|招标文件|章节|目录|输出要求/u.test(`${fileRole.name} ${promptTexts.join(' ')}`) && /示范文本|章节|目录|输出要求|编制要求/u.test(text)) score += 6;
+  if (/清单|工程量/u.test(`${fileRole.name} ${promptTexts.join(' ')}`) && /清单|工程量|项目特征/u.test(text)) score += 6;
+  if (/图纸|drawing|cad/u.test(`${fileRole.name} ${promptTexts.join(' ')}`) && /图纸|drawing|cad|文本|标注/u.test(text)) score += 6;
+  return score;
+}
+
+function safePlanId(input: string, fallback: string) {
+  return (input || fallback).replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/gu, '-').slice(0, 80) || fallback;
+}
+
+function evidenceForRoleFiles(project: any, node: RoleExecutionNode, projectRoot: string): DocumentEvidence[] {
+  const evidence: DocumentEvidence[] = [];
+  for (const filePath of node.filePaths) {
+    const detail = project.getFileDetail(filePath);
+    if (detail) {
+      evidence.push(...detail.chunks.slice(0, 120).map((chunk: { content: string; sectionTitle?: string }) => ({
+        chapterId: node.id,
+        filePath: detail.file.relativePath,
+        score: 1,
+        content: chunk.content,
+        roleId: node.fileRoleId,
+        processingType: node.processingType,
+        sectionTitle: chunk.sectionTitle,
+        source: 'role-node',
+      })));
+      continue;
+    }
+    evidence.push(...evidenceFromBoundFile(filePath, node.fileRoleId, node.processingType, node.id, projectRoot));
+  }
+  return uniqueEvidence(evidence, 120);
+}
+
+function buildRoleExecutionNodes(template: DocumentTemplate, promptBindings: PromptBinding[]): RoleExecutionNode[] {
+  const fileRoles = listDocumentRoles('file');
+  const promptRoles = listDocumentRoles('prompt');
+  const promptContents = readPromptContents(promptBindings);
+  const fileBindings = templateFileBindings(template);
+  const byRole = new Map<string, string[]>();
+  for (const binding of fileBindings) byRole.set(binding.roleId, [...(byRole.get(binding.roleId) || []), binding.filePath]);
+  const orderedFileRoles = fileRoles.filter(role => byRole.has(role.id));
+  const orderedPromptRoles = promptRoles.filter(role => promptContents.some(prompt => prompt.roleId === role.id));
+  return orderedFileRoles.map((role, index) => {
+    const scored = orderedPromptRoles.map(promptRole => {
+      const texts = promptContents.filter(prompt => prompt.roleId === promptRole.id).map(prompt => prompt.content);
+      return { promptRole, texts, score: promptExecutionScore(promptRole.id, role, texts) };
+    }).sort((a, b) => b.score - a.score);
+    const matched = scored.filter(item => item.score >= 5).slice(0, 2);
+    const fallback = scored[index] || scored[0];
+    const selected = matched.length > 0 ? matched : fallback ? [fallback] : [];
+    const promptRoleIds = selected.map(item => item.promptRole.id);
+    const promptTexts = selected.flatMap(item => item.texts);
+    return {
+      id: `node-${role.id}`,
+      fileRoleId: role.id,
+      fileRoleName: role.name,
+      filePaths: byRole.get(role.id) || [],
+      processingType: role.processingType,
+      promptRoleIds,
+      promptTexts,
+      outputType: inferRoleOutputType(role, promptTexts),
+    };
+  });
+}
+
+function fallbackChaptersFromEvidence(node: RoleExecutionNode, evidence: DocumentEvidence[]): TenderPlanChapter[] {
+  if (node.outputType !== 'template_requirements') return [];
+  const headings: TenderPlanChapter[] = [];
+  const seen = new Set<string>();
+  for (const item of evidence) {
+    const lines = item.content.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+    for (const line of lines) {
+      if (!/^(?:第[一二三四五六七八九十百千万\d]+[章节]|[一二三四五六七八九十]+、|\d+(?:\.\d+)*[、.．])/.test(line)) continue;
+      const title = line.replace(/^\d+(?:\.\d+)*[、.．]\s*/u, '').slice(0, 80);
+      if (title.length < 4 || seen.has(title)) continue;
+      seen.add(title);
+      headings.push({
+        id: safePlanId(title, `chapter-${headings.length + 1}`),
+        title,
+        order: headings.length,
+        sourceRequirement: item.content.replace(/\s+/gu, ' ').slice(0, 500),
+        requiredContents: [],
+        writingRules: [],
+        evidenceNeeds: [],
+        minWords: 1200,
+        requirements: [],
+      });
+      if (headings.length >= 18) break;
+    }
+    if (headings.length >= 18) break;
+  }
+  return headings;
+}
+
+function fallbackFactsFromEvidence(node: RoleExecutionNode, evidence: DocumentEvidence[]): RoleNodeFact[] {
+  return evidence.slice(0, 20).map((item, index) => ({
+    key: `${node.fileRoleName}事实${index + 1}`,
+    value: item.content.replace(/\s+/gu, ' ').slice(0, 360),
+    sourceFile: item.filePath,
+    roleId: node.fileRoleId,
+    processingType: node.processingType,
+    relatedChapterHints: item.sectionTitle ? [item.sectionTitle] : [],
+  })).filter(item => item.value.length > 20);
+}
+
+async function executeRoleExtractionNode(node: RoleExecutionNode, evidence: DocumentEvidence[]): Promise<RoleNodeArtifact> {
+  const sample = evidence.slice(0, 36).map(item => `文件:${item.filePath}\n片段:${item.sectionTitle || ''}\n内容:${item.content.slice(0, 1200)}`).join('\n\n---\n\n');
+  const promptText = node.promptTexts.join('\n\n') || '请读取绑定文件角色，抽取可用于文档生成的结构化信息。';
+  const llm = sample.trim() ? await callDocumentLlmJson<{
+    chapters?: Array<{ title: string; sourceRequirement?: string; requiredContents?: string[]; writingRules?: string[]; evidenceNeeds?: string[]; minWords?: number; requirements?: Array<{ title?: string; requirementText?: string; requiredContents?: string[]; writingRules?: string[]; evidenceNeeds?: string[]; preferredSourceRoleIds?: string[] }> }>;
+    facts?: Array<{ key: string; value: string; sourceFile?: string; relatedChapterHints?: string[] }>;
+    outputRequirements?: string[];
+    warnings?: string[];
+    forbidImageInsertion?: boolean;
+  }>(
+    promptText,
+    `你正在执行一个“文件角色 × 提示词角色”的读取节点。\n节点类型：${node.outputType}\n文件角色：${node.fileRoleName}（${node.fileRoleId}）\n要求：严格按该节点绑定的提示词读取该文件角色的内容，不要读取其他角色。\n\n请返回 JSON，字段包括 chapters、facts、outputRequirements、forbidImageInsertion、warnings。chapters 中每项包含 title、sourceRequirement、requiredContents、writingRules、evidenceNeeds、minWords、requirements；requirements 中每项包含 title、requirementText、requiredContents、writingRules、evidenceNeeds、preferredSourceRoleIds；facts 中每项包含 key、value、sourceFile、relatedChapterHints。\n\n绑定文件片段：\n${sample}`,
+  ) : undefined;
+  const chapters = (llm?.chapters || []).filter(item => item.title).map((item, index) => ({
+    id: safePlanId(item.title, `chapter-${index + 1}`),
+    title: item.title,
+    order: index,
+    sourceRequirement: item.sourceRequirement || item.title,
+    requiredContents: Array.isArray(item.requiredContents) ? item.requiredContents.filter(Boolean) : [],
+    writingRules: Array.isArray(item.writingRules) ? item.writingRules.filter(Boolean) : [],
+    evidenceNeeds: Array.isArray(item.evidenceNeeds) ? item.evidenceNeeds.filter(Boolean) : [],
+    minWords: Math.max(800, Math.min(3500, Number(item.minWords) || 1200)),
+    requirements: Array.isArray(item.requirements) ? item.requirements.map((requirement, reqIndex) => ({
+      id: safePlanId(`${item.title}-${requirement.title || reqIndex + 1}`, `req-${index + 1}-${reqIndex + 1}`),
+      title: requirement.title || `要求 ${reqIndex + 1}`,
+      requirementText: requirement.requirementText || requirement.title || '',
+      requiredContents: Array.isArray(requirement.requiredContents) ? requirement.requiredContents.filter(Boolean) : [],
+      writingRules: Array.isArray(requirement.writingRules) ? requirement.writingRules.filter(Boolean) : [],
+      evidenceNeeds: Array.isArray(requirement.evidenceNeeds) ? requirement.evidenceNeeds.filter(Boolean) : [],
+      preferredSourceRoleIds: Array.isArray(requirement.preferredSourceRoleIds) ? requirement.preferredSourceRoleIds.filter(Boolean) : [],
+    })) : [],
+  }));
+  const facts = (llm?.facts || []).filter(item => item.key && item.value).map(item => ({
+    key: item.key,
+    value: item.value,
+    sourceFile: item.sourceFile || evidence.find(e => e.filePath)?.filePath || '',
+    roleId: node.fileRoleId,
+    processingType: node.processingType,
+    relatedChapterHints: Array.isArray(item.relatedChapterHints) ? item.relatedChapterHints.filter(Boolean) : [],
+  }));
+  return {
+    node,
+    evidence,
+    chapters: chapters.length > 0 ? chapters : fallbackChaptersFromEvidence(node, evidence),
+    facts: facts.length > 0 ? facts : fallbackFactsFromEvidence(node, evidence),
+    outputRequirements: Array.isArray(llm?.outputRequirements) ? llm.outputRequirements.filter(Boolean) : [],
+    warnings: Array.isArray(llm?.warnings) ? llm.warnings.filter(Boolean) : [],
+    forbidImageInsertion: llm?.forbidImageInsertion ?? node.outputType === 'drawing_facts',
+  };
+}
+
+function roleArtifactsDigest(artifacts: RoleNodeArtifact[]) {
+  return artifacts.map(artifact => {
+    const chapterLines = artifact.chapters.slice(0, 18).map(chapter => `- ${chapter.title}：${chapter.requiredContents.join('、') || chapter.sourceRequirement.slice(0, 120)}`).join('\n');
+    const factLines = artifact.facts.slice(0, 30).map(fact => `- ${fact.key}：${fact.value.slice(0, 220)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`).join('\n');
+    return [`## ${artifact.node.fileRoleName} / ${artifact.node.outputType}`, chapterLines ? `章节/要求：\n${chapterLines}` : '', factLines ? `事实：\n${factLines}` : '', artifact.outputRequirements.length ? `输出要求：${artifact.outputRequirements.join('；')}` : ''].filter(Boolean).join('\n');
+  }).join('\n\n');
+}
+
+function tenderPlanChaptersFromArtifacts(artifacts: RoleNodeArtifact[]): TenderPlanChapter[] {
+  const chapters = artifacts.filter(item => item.node.outputType === 'template_requirements').flatMap(item => item.chapters);
+  const byTitle = new Map<string, TenderPlanChapter>();
+  for (const chapter of chapters.sort((a, b) => a.order - b.order)) {
+    if (!byTitle.has(chapter.title)) byTitle.set(chapter.title, chapter);
+  }
+  return [...byTitle.values()];
+}
+
+function chaptersFromTenderPlan(plan: TenderPlanChapter[]): DocumentTemplateChapter[] {
+  return plan.map((chapter, index) => ({
+    id: safePlanId(chapter.id, `dynamic-${index + 1}`),
+    title: chapter.title,
+    purpose: [chapter.sourceRequirement, ...chapter.writingRules].filter(Boolean).join('\n').slice(0, 1200),
+    requiredFacts: [...new Set([...chapter.requiredContents, ...chapter.evidenceNeeds])],
+    queries: [...new Set([chapter.title, ...chapter.requiredContents, ...chapter.evidenceNeeds, ...chapter.requirements.flatMap(item => [item.title, item.requirementText, ...item.evidenceNeeds])].filter(Boolean))],
+    pinnedEvidenceFilePaths: [],
+  }));
+}
+
+function chapterPlanFor(chapter: DocumentTemplateChapter, plan: TenderPlanChapter[]) {
+  return plan.find(item => item.id === chapter.id || item.title === chapter.title);
+}
+
+function roleFactsForChapter(artifacts: RoleNodeArtifact[], chapter: DocumentTemplateChapter, plan?: TenderPlanChapter) {
+  const hints = [chapter.title, ...(chapter.requiredFacts || []), ...(plan?.requiredContents || []), ...(plan?.evidenceNeeds || []), ...(plan?.requirements.flatMap(item => [item.title, ...item.requiredContents, ...item.evidenceNeeds]) || [])].filter(Boolean);
+  return artifacts.flatMap(artifact => artifact.facts.map(fact => ({ artifact, fact }))).filter(({ fact }) => {
+    const text = `${fact.key}\n${fact.value}\n${fact.relatedChapterHints.join('\n')}`;
+    return hints.length === 0 || hints.some(hint => text.includes(hint) || hint.includes(fact.key));
+  }).slice(0, 80);
+}
+
+function buildRoleChapterContext(artifacts: RoleNodeArtifact[], chapter: DocumentTemplateChapter, plan?: TenderPlanChapter) {
+  const matchedFacts = roleFactsForChapter(artifacts, chapter, plan);
+  const planText = plan ? [
+    `章节来源要求：${plan.sourceRequirement}`,
+    plan.requiredContents.length ? `必须包含：${plan.requiredContents.join('、')}` : '',
+    plan.writingRules.length ? `写作规范：${plan.writingRules.join('、')}` : '',
+    plan.evidenceNeeds.length ? `需要证据：${plan.evidenceNeeds.join('、')}` : '',
+    plan.requirements.length ? `要求项：\n${plan.requirements.map(item => `- ${item.title}：${item.requirementText || item.requiredContents.join('、')}`).join('\n')}` : '',
+  ].filter(Boolean).join('\n') : '';
+  const factGroups = new Map<string, string[]>();
+  for (const { artifact, fact } of matchedFacts) {
+    const key = `${artifact.node.fileRoleName}（${artifact.node.outputType}）`;
+    factGroups.set(key, [...(factGroups.get(key) || []), `- ${fact.key}：${fact.value}（来源：${fact.sourceFile}）`]);
+  }
+  const factsText = [...factGroups.entries()].map(([key, lines]) => `### ${key}\n${lines.slice(0, 18).join('\n')}`).join('\n\n');
+  return [planText ? `【本章章节计划】\n${planText}` : '', factsText ? `【角色节点结构化产物】\n${factsText}` : ''].filter(Boolean).join('\n\n');
+}
+
+function shouldForbidDrawingImages(artifacts: RoleNodeArtifact[], template: DocumentTemplate) {
+  if (template.id === 'delta-force-hot-operators-guide') return false;
+  return artifacts.some(item => item.forbidImageInsertion || item.node.outputType === 'drawing_facts');
+}
+
+function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
+  if (!forbid) return markdown;
+  return markdown.replace(/^!\[[^\]]*(?:图纸|drawing|cad|地图|平面|剖面|立面)[^\]]*\]\([^)]*\)\s*$/gimu, '').replace(/\n{3,}/gu, '\n\n');
+}
+
+function tenderQualityIssues(markdown: string, chapters: DocumentDraftChapter[], plan: TenderPlanChapter[], artifacts: RoleNodeArtifact[], forbidDrawingImages: boolean) {
+  const issues: string[] = [];
+  for (const chapter of plan) {
+    if (!markdown.includes(chapter.title)) issues.push(`缺少动态章节：${chapter.title}`);
+    for (const item of chapter.requiredContents.slice(0, 12)) if (item && !markdown.includes(item)) issues.push(`${chapter.title} 未覆盖必写内容：${item}`);
+  }
+  for (const chapter of chapters) {
+    const planItem = plan.find(item => item.title === chapter.title);
+    const min = planItem?.minWords || 1000;
+    if (chapter.content.length < min) issues.push(`${chapter.title} 内容深度不足：${chapter.content.length}/${min}`);
+  }
+  if (artifacts.some(item => item.node.outputType === 'bill_facts') && !/清单|工程量|项目特征|数量|单位/u.test(markdown)) issues.push('未体现清单文件读取结果');
+  if (artifacts.some(item => item.node.outputType === 'drawing_facts') && !/图纸|设计|标注|材料|规格|位置|系统|构件/u.test(markdown)) issues.push('未体现图纸文本事实');
+  if (forbidDrawingImages && /!\[[^\]]*(?:图纸|drawing|cad|地图|平面|剖面|立面)[^\]]*\]\([^)]*\)/iu.test(markdown)) issues.push('正文包含不应插入的图纸图片');
+  return [...new Set(issues)].slice(0, 40);
+}
+
+async function repairMarkdownByQuality(input: { markdown: string; template: DocumentTemplate; plan: TenderPlanChapter[]; artifacts: RoleNodeArtifact[]; promptTexts: string; requirement?: string; issues: string[]; forbidDrawingImages: boolean }) {
+  if (input.issues.length === 0) return { markdown: input.markdown, stage: undefined as DocumentExecutionStage | undefined };
+  const repaired = await callDocumentLlm([
+    '你是招标文件质量补写和纠偏专家。必须严格按照示范文本节点产出的章节计划补齐内容，使用清单、图纸文本事实和项目资料事实，禁止编造。',
+    input.forbidDrawingImages ? '图纸资料只作为文本事实来源，禁止插入图纸图片或 Markdown 图片语法。' : '',
+    '保持 Markdown 标题层级、目录和已有来源信息；直接返回修复后的完整 Markdown。',
+    input.promptTexts,
+  ].filter(Boolean).join('\n\n'), [
+    `模板：${input.template.name}`,
+    input.requirement ? `用户要求：${input.requirement}` : '',
+    `需要修复的问题：\n${input.issues.map(item => `- ${item}`).join('\n')}`,
+    `章节计划：\n${input.plan.map(chapter => `- ${chapter.title}：${chapter.requiredContents.join('、')}；要求=${chapter.sourceRequirement.slice(0, 200)}`).join('\n')}`,
+    '角色节点产物摘要：',
+    roleArtifactsDigest(input.artifacts),
+    '待修复 Markdown：',
+    input.markdown,
+  ].filter(Boolean).join('\n\n'));
+  if (!repaired || repaired.length < input.markdown.length * 0.85 || !repaired.includes('#')) {
+    return { markdown: input.markdown, stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'fallback' as const, message: `质量补写未返回有效结果：${input.issues.slice(0, 5).join('；')}` } };
+  }
+  return { markdown: removeUnwantedDrawingImages(repaired, input.forbidDrawingImages), stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'success' as const, message: `已按角色节点和章节计划完成质量补写，修复 ${input.issues.length} 项` } };
 }
 
 /** 从证据中抽取事实字段，按规范包中的事实定义进行匹配 */
@@ -906,7 +1308,7 @@ async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: st
   const sample = evidence.slice(0, 24).map(item => `文件:${item.filePath}\n角色:${item.roleId || ''}\n处理:${item.processingType || ''}\n内容:${item.content.slice(0, 1200)}`).join('\n\n---\n\n');
   if (!sample.trim()) return { facts: [], stages };
   const targets = specFactTargets(template, spec);
-  const schemaText = targets.map(field => `- id=${field.id} name=${field.name} required=${field.required} sourceRoleIds=${field.sourceRoleIds.join(',') || '不限'} hint=${field.extractionHint || '无'}`).join('\n');
+  const schemaText = targets.map(field => `- id=${field.id} name=${field.name} type=auto required=${field.required} sourceRoleIds=${field.sourceRoleIds.join(',') || '不限'} hint=${field.extractionHint || '无'}`).join('\n');
   const llm = await callDocumentLlmJson<{ facts?: Array<{ fieldId?: string; fieldName?: string; key: string; value: string; sourceFile?: string; roleId?: string; processingType?: string; confidence?: number }> }>(
     promptTexts || '你是文档事实抽取器。',
     `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色。返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","sourceFile":"...","roleId":"...","processingType":"project_fact","confidence":0.8}]}。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`,
@@ -1044,10 +1446,21 @@ function applySpecGateRules(spec: DocumentSpecPackage | undefined, issues: Valid
     if (schemaFacts.length === 0 && !factNames.has(field.name) && !satisfiedByChapterEvidence) next.push({ level: 'warning', message: `必需事实缺失：${field.name}`, suggestion: field.extractionHint || '请补充资料或调整事实字段配置。' });
     if (!satisfiedBySourceRole) next.push({ level: 'warning', message: `必需事实来源角色不匹配：${field.name}`, suggestion: `请确认该事实来自角色：${field.sourceRoleIds?.join('、')}` });
   }
-  for (const chapter of spec.chapterRules.filter(chapter => chapter.required)) {
-    if (!chapterTitles.has(chapter.title)) next.push({ level: 'error', message: `必需章节缺失：${chapter.title}`, suggestion: '请在模板或规范包章节规则中补齐章节。' });
-    const draft = chapters.find(item => item.title === chapter.title);
-    if (draft && chapter.minWords && draft.content.length < chapter.minWords) next.push({ level: 'warning', message: `章节内容低于最低字数：${chapter.title}`, suggestion: `建议不少于 ${chapter.minWords} 字。` });
+  if (spec.chapterMode === 'fixed') {
+    for (const chapter of spec.chapterRules.filter(chapter => chapter.required)) {
+      if (!chapterTitles.has(chapter.title)) next.push({ level: 'error', message: `必需章节缺失：${chapter.title}`, suggestion: '请在模板或规范包章节规则中补齐章节。' });
+      const draft = chapters.find(item => item.title === chapter.title);
+      if (draft && chapter.minWords && draft.content.length < chapter.minWords) next.push({ level: 'warning', message: `章节内容低于最低字数：${chapter.title}`, suggestion: `建议不少于 ${chapter.minWords} 字。` });
+    }
+  } else {
+    const rule = spec.dynamicChapterRule;
+    if (rule.minChapters && chapters.length < rule.minChapters) next.push({ level: 'warning', message: `动态章节数量低于最少章节：${chapters.length}/${rule.minChapters}`, suggestion: '请补充资料或降低最少章节数。' });
+    if (rule.maxChapters && chapters.length > rule.maxChapters) next.push({ level: 'warning', message: `动态章节数量超过最多章节：${chapters.length}/${rule.maxChapters}`, suggestion: '请收紧来源文件角色或降低召回范围。' });
+    if (rule.minWordsPerChapter) {
+      for (const chapter of chapters) {
+        if (chapter.content.length < rule.minWordsPerChapter) next.push({ level: 'warning', message: `动态章节内容低于最低字数：${chapter.title}`, suggestion: `建议不少于 ${rule.minWordsPerChapter} 字。` });
+      }
+    }
   }
   const tableBlocks = markdownTables(markdown);
   const imageRefs = markdownImages(markdown);
@@ -1376,14 +1789,15 @@ function buildDeltaReadableChapter(chapter: DocumentTemplate['chapters'][number]
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string) {
+async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   const evidenceText = evidenceBundlePrompt(bundle);
-  if (!evidenceText.trim()) return undefined;
+  if (!evidenceText.trim() && !roleContext.trim()) return undefined;
   const system = [
-    '你是专业项目文档生成专家，必须严格使用知识库证据、文件角色、提示词角色和文档规范包生成正式文档章节。',
-    '准确性优先级：文档规范包/模板要求 > 已绑定或人工确认的知识库证据 > 自动检索知识库证据 > 项目上下文/历史记忆。',
+    '你是专业项目文档生成专家，必须严格使用知识库证据、文件角色、提示词角色、角色节点结构化产物和文档规范包生成正式文档章节。',
+    '准确性优先级：章节计划/示范文本节点产物 > 规范包事实字段 > 角色节点结构化事实 > 知识库证据 > 项目上下文/历史记忆。',
     '项目上下文/历史记忆只能作为用户偏好、历史纠偏和连续性参考；不得覆盖、替代或改写知识库证据中的事实。',
+    options.forbidDrawingImages ? '图纸资料只作为文本、标注、规格、位置、材料、数量等事实依据；禁止插入图纸图片或 Markdown 图片语法。' : '',
     '不要编造资料；可以基于证据做合理归纳；输出 Markdown；不要输出代码块；不要输出“资料不足”等调试话术。',
     promptTexts,
   ].filter(Boolean).join('\n\n');
@@ -1393,22 +1807,23 @@ async function buildLlmChapterContent(template: DocumentTemplate, chapter: Docum
     `章节目的：${chapter.purpose}`,
     requirement ? `用户要求：${requirement}` : '',
     projectContext ? `项目上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${projectContext}` : '',
+    roleContext ? roleContext : '',
     missingFacts.length ? `需要特别补足的事实：${missingFacts.join('、')}` : '',
-    '请生成一个专业、丰富、可直接导出的章节，要求：',
-    '- 保留章节二级标题；',
-    '- 有结论、依据、操作建议/使用建议；',
-    '- 引用表格、图片、地图、PDF/Word、文本、附件等资料时写清楚来源文件名；',
-    '- 必须理解“结构化资源证据”中每类文件的正文用途，把相关文件和事实对应起来，不要硬插固定文件；',
-    '- 如果章节涉及资源文件，应自然说明它与章节结论、操作建议或配图/附件引用的关系；',
-    '- 如果章节涉及地图图纸，必须使用 Markdown 图片语法插入对应本地地图文件，例如 ![地图名称](图片素材/干员图片/地图图纸-xxx-官方完整地图图纸.jpg)，不能只写文件名；',
-    '- 内容不少于 500 字，结构清晰。',
+    '请生成一个专业、充实、可直接导出的招标文件章节，要求：',
+    '- 保留章节二级标题，并按章节计划逐项响应；',
+    '- 必须使用示范文本节点提取的章节要求和输出规范；',
+    '- 必须结合清单、图纸文本事实、项目事实、技术规范等角色节点产物；',
+    '- 图纸默认只作为文本事实来源，不要插入图纸图片；',
+    '- 有编制依据、项目适配分析、具体措施、实施要点、风险与注意事项；',
+    '- 引用表格、PDF/Word、文本、附件等资料时写清楚来源文件名；',
+    `- 内容不少于 ${options.minWords || 1000} 字，避免空泛口号。`,
     '',
-    '知识库证据：',
+    evidenceText ? '知识库证据：' : '',
     evidenceText,
   ].filter(Boolean).join('\n');
   const content = await callDocumentLlm(system, prompt);
   if (!content || content.length < 120) return undefined;
-  return content.startsWith('## ') ? content : `## ${chapter.title}\n\n${content}`;
+  return removeUnwantedDrawingImages(content.startsWith('## ') ? content : `## ${chapter.title}\n\n${content}`, Boolean(options.forbidDrawingImages));
 }
 
 /** 对生成的 Markdown 进行 LLM 二次审查和优化，检查结构、证据使用和导出合规性 */
@@ -1426,15 +1841,15 @@ async function reviewAndOptimizeMarkdown(input: {
   const specDigest = input.spec ? [
     `规范包：${input.spec.name}`,
     `事实字段：${input.spec.factFields.map(field => `${field.name}${field.required ? '(必需)' : ''}`).join('、')}`,
-    `章节规则：${input.spec.chapterRules.map(rule => `${rule.title}${rule.minWords ? `≥${rule.minWords}字` : ''}`).join('、')}`,
+    input.spec.chapterMode === 'dynamic' ? `章节规则：动态章节｜来源=${input.spec.dynamicChapterRule.source}｜标题=${input.spec.dynamicChapterRule.titleStrategy || 'ai_summary'}｜${input.spec.dynamicChapterRule.generationHint || '由资料自动规划'}` : `章节规则：${input.spec.chapterRules.map(rule => `${rule.title}${rule.minWords ? `≥${rule.minWords}字` : ''}`).join('、')}`,
     `门禁规则：${input.spec.gateRules.map(rule => `${rule.name}:${rule.type}`).join('、')}`,
   ].join('\n') : '未绑定文档规范包。';
   const reviewed = await callDocumentLlm([
     '你是文档质量审查与优化专家。你要基于文件角色、提示词角色、文档规范包和知识库证据，对初稿进行二次审查和优化。',
     '准确性优先级：文档规范包/模板要求 > 已绑定或人工确认的知识库证据 > 自动检索知识库证据 > 项目上下文/历史记忆。',
     '项目上下文/历史记忆只能用于风格偏好、历史纠偏和连续性检查；如果与知识库证据冲突，必须以知识库证据为准。',
-    '必须保持 Markdown 输出；保留已有图片引用、表格、标题层级和目录；不要删除证据来源；不要编造不存在的事实。',
-    '如果正文涉及地图图纸，必须保留或补充对应本地地图文件的 Markdown 图片引用，不能只写文件名。',
+    '必须保持 Markdown 输出；保留已有表格、标题层级、目录和证据来源；不要编造不存在的事实。',
+    input.template.id === 'delta-force-hot-operators-guide' ? '如果正文涉及地图图纸，必须保留或补充对应本地地图文件的 Markdown 图片引用，不能只写文件名。' : '图纸资料默认只作为文本事实依据，除非用户明确要求插图，否则不要插入图纸图片或 Markdown 图片语法。',
     '重点检查：标题、封面、目录、章节完整性、事实来源、所有相关文件类型的资源证据使用、表格呈现、表达专业性、导出友好性。',
     input.promptTexts,
   ].filter(Boolean).join('\n\n'), [
@@ -1585,7 +2000,31 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const missingItems: string[] = [];
   const chapterGenerationStages: DocumentExecutionStage[] = [];
   const progressStages: DocumentExecutionStage[] = [];
-  const contextQuery = [template.name, template.outputTitle, input.requirement, ...template.chapters.flatMap(chapter => [chapter.title, chapter.purpose])].filter(Boolean).join(' ');
+  const roleNodes = buildRoleExecutionNodes(template, promptBindings);
+  const roleArtifacts: RoleNodeArtifact[] = [];
+  for (const node of roleNodes) {
+    throwIfAborted(input.signal);
+    const nodeEvidence = evidenceForRoleFiles(project, node, projectRoot);
+    allEvidence.push(...nodeEvidence);
+    const artifact = await executeRoleExtractionNode(node, nodeEvidence);
+    roleArtifacts.push(artifact);
+    progressStages.push({ type: 'file_understanding', roleId: node.fileRoleId, promptId: node.promptRoleIds[0], status: nodeEvidence.length > 0 ? 'success' : 'fallback', message: `${node.fileRoleName} 节点已按绑定提示词读取，产出章节 ${artifact.chapters.length} 个、事实 ${artifact.facts.length} 条` });
+    input.onProgress?.([...progressStages]);
+  }
+  const tenderPlan = tenderPlanChaptersFromArtifacts(roleArtifacts);
+  const dynamicSeedQuery = [template.name, template.outputTitle, input.requirement, documentSpec?.dynamicChapterRule?.generationHint, ...(documentSpec?.dynamicChapterRule?.sourceRoleIds || [])].filter(Boolean).join(' ');
+  const dynamicSeedEvidence = documentSpec?.chapterMode === 'dynamic' && tenderPlan.length === 0 ? (await manager.search(projectRoot, dynamicSeedQuery || template.name, { scope: 'project', limit: 20, weights: { keyword: 0.45, vector: 0.35, rewrite: 0.65, hybridBonus: 0.1 } })).results.map((item: KbSearchResult) => ({
+    chapterId: 'dynamic-planning',
+    filePath: item.filePath,
+    score: item.score,
+    content: item.content,
+    roleId: fileRoleByPath.get(item.filePath),
+    processingType: fileProcessingByPath.get(item.filePath),
+    sectionTitle: item.sectionTitle,
+    source: item.source,
+  } as DocumentEvidence)) : [];
+  const effectiveChapters = documentSpec?.chapterMode === 'dynamic' && tenderPlan.length > 0 ? chaptersFromTenderPlan(tenderPlan) : effectiveTemplateChapters(template, documentSpec, dynamicSeedEvidence);
+  const contextQuery = [template.name, template.outputTitle, input.requirement, ...effectiveChapters.flatMap(chapter => [chapter.title, chapter.purpose])].filter(Boolean).join(' ');
   const projectContextEntries = recallDocumentContexts(contextQuery, 8, projectRoot);
   const projectContext = formatContextEntries(projectContextEntries);
   const contextStage: DocumentExecutionStage = {
@@ -1600,11 +2039,13 @@ export async function generateDocumentDraft(input: { templateId: string; require
   progressStages.push(contextStage);
   input.onProgress?.([...progressStages]);
 
-  for (const chapter of template.chapters) {
+  for (const chapter of effectiveChapters) {
     throwIfAborted(input.signal);
     try {
     const rawEvidence: DocumentEvidence[] = [];
-    const queries = chapter.queries.length > 0 ? chapter.queries : [template.name, template.outputTitle, chapter.title, ...fileBindings.map(binding => binding.filePath)];
+    const plan = chapterPlanFor(chapter, tenderPlan);
+    const planQueries = plan ? [plan.title, ...plan.requiredContents, ...plan.evidenceNeeds, ...plan.requirements.flatMap(item => [item.title, item.requirementText, ...item.requiredContents, ...item.evidenceNeeds])].filter(Boolean) : [];
+    const queries = [...new Set([...(chapter.queries.length > 0 ? chapter.queries : [template.name, template.outputTitle, chapter.title]), ...planQueries])];
     for (const query of queries) {
       const result = await manager.search(projectRoot, query, {
         scope: 'project',
@@ -1625,7 +2066,9 @@ export async function generateDocumentDraft(input: { templateId: string; require
         })));
     }
     const pinnedEvidencePaths = new Set(chapter.pinnedEvidenceFilePaths || []);
-    const chapterPinnedPaths = new Set([...pinnedEvidencePaths, ...boundFilePaths]);
+    const matchedRoleContexts = roleFactsForChapter(roleArtifacts, chapter, plan);
+    rawEvidence.push(...matchedRoleContexts.flatMap(({ artifact }) => artifact.evidence.slice(0, 8).map(item => ({ ...item, chapterId: chapter.id, source: 'role-node' }))));
+    const chapterPinnedPaths = new Set([...pinnedEvidencePaths]);
     for (const relativePath of chapterPinnedPaths) {
       const isPinnedEvidence = pinnedEvidencePaths.has(relativePath);
       const detail = project.getFileDetail(relativePath);
@@ -1644,9 +2087,6 @@ export async function generateDocumentDraft(input: { templateId: string; require
         source: isPinnedEvidence ? 'pinned-evidence' : 'bound-file',
       })));
     }
-    for (const binding of fileBindings) {
-      rawEvidence.push(...evidenceFromBoundFile(binding.filePath, binding.roleId, allFileRoles.find(role => role.id === binding.roleId)?.processingType || 'reference', chapter.id, projectRoot));
-    }
     const evidence = uniqueEvidence(rawEvidence, maxEvidence);
     allEvidence.push(...evidence);
     const missingFacts = chapter.requiredFacts.filter(fact => !evidence.some(item => evidenceMatchesFact(item, fact)));
@@ -1659,8 +2099,10 @@ export async function generateDocumentDraft(input: { templateId: string; require
     }
 
     throwIfAborted(input.signal);
+    const forbidDrawingImages = shouldForbidDrawingImages(roleArtifacts, template);
+    const roleContext = buildRoleChapterContext(roleArtifacts, chapter, plan);
     const llmContent = await Promise.race([
-      buildLlmChapterContent(template, chapter, evidence, missingFacts, promptTexts, projectContext, input.requirement),
+      buildLlmChapterContent(template, chapter, evidence, missingFacts, promptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords: plan?.minWords || 1200 }),
       new Promise<null>(resolve => setTimeout(() => resolve(null), 60000)),
     ]);
     throwIfAborted(input.signal);
@@ -1707,11 +2149,15 @@ export async function generateDocumentDraft(input: { templateId: string; require
   }
 
   const facts = extractFacts(template, allEvidence, documentSpec);
+  for (const artifact of roleArtifacts) {
+    for (const fact of artifact.facts) facts[fact.key] = `${fact.value}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
+  }
   const localFacts = extractStructuredFacts(allEvidence, template, documentSpec);
   let llmExtraction: { facts: DocumentFact[]; stages: DocumentExecutionStage[] } = { facts: [], stages: [] };
   try { llmExtraction = await extractFactsWithLlm(allEvidence, promptTexts, template, documentSpec); } catch (err) { if (input.signal?.aborted) throw err; console.error('[gen] fact extraction failed:', err); }
   throwIfAborted(input.signal);
-  const structuredFacts = [...localFacts, ...llmExtraction.facts];
+  const roleStructuredFacts: DocumentFact[] = roleArtifacts.flatMap(artifact => artifact.facts.map(fact => ({ key: fact.key, value: fact.value, sourceFile: fact.sourceFile, roleId: fact.roleId, confidence: 0.9 })));
+  const structuredFacts = [...roleStructuredFacts, ...localFacts, ...llmExtraction.facts];
 
   // 进度回调：文件理解 + 事实抽取完成
   if (!progressStages.some(s => s.type === fileUnderstanding.stage.type)) {
@@ -1777,12 +2223,16 @@ export async function generateDocumentDraft(input: { templateId: string; require
   throwIfAborted(input.signal);
   const review = await reviewAndOptimizeMarkdown({ template, spec: documentSpec, markdown: initialMarkdown, evidence: allEvidence, promptTexts, projectContext, requirement: input.requirement });
   throwIfAborted(input.signal);
-  const reviewedStages = [...executionStages, review.stage];
-  validationIssues = applySpecGateRules(documentSpec, validationIssues, factsModel, chapterDrafts, review.markdown, fileBindings, promptBindings);
+  const forbidDrawingImages = shouldForbidDrawingImages(roleArtifacts, template);
+  const reviewedMarkdownBase = removeUnwantedDrawingImages(review.markdown === initialMarkdown ? composeDocumentMarkdown({ ...base, validationIssues, exportGate: base.exportGate, executionStages }) : review.markdown, forbidDrawingImages);
+  const qualityIssues = tenderQualityIssues(reviewedMarkdownBase, chapterDrafts, tenderPlan, roleArtifacts, forbidDrawingImages);
+  const repair = await repairMarkdownByQuality({ markdown: reviewedMarkdownBase, template, plan: tenderPlan, artifacts: roleArtifacts, promptTexts, requirement: input.requirement, issues: qualityIssues, forbidDrawingImages });
+  throwIfAborted(input.signal);
+  const reviewedStages = repair.stage ? [...executionStages, review.stage, repair.stage] : [...executionStages, review.stage];
+  validationIssues = applySpecGateRules(documentSpec, [...validationIssues, ...qualityIssues.map(message => ({ level: 'warning' as const, message }))], factsModel, chapterDrafts, repair.markdown, fileBindings, promptBindings);
   const exportGate = buildExportGate(validationIssues, factsModel, chapterDrafts);
   const finalBase = { ...base, validationIssues, exportGate, executionStages: reviewedStages };
-  const reviewedMarkdown = review.markdown === initialMarkdown ? composeDocumentMarkdown(finalBase) : review.markdown;
-  const markdown = ensureDeltaMapGallery(reviewedMarkdown, template, allEvidence);
+  const markdown = template.id === 'delta-force-hot-operators-guide' ? ensureDeltaMapGallery(repair.markdown, template, allEvidence) : removeUnwantedDrawingImages(repair.markdown, forbidDrawingImages);
   return { ...finalBase, markdown };
 }
 

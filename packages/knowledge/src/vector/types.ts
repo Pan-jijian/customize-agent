@@ -28,11 +28,16 @@ export interface VectorCollectionInfo {
 }
 
 /** 向量存储接口，定义所有向量存储实现必须支持的方法 */
+export interface VectorWriteOptions {
+  persist?: boolean;
+}
+
 export interface VectorStoreInterface {
   readonly collectionName: string;
   ensureCollection(metadata?: Record<string, unknown>): Promise<void>;
-  upsert(documents: VectorDocument[]): Promise<void>;
-  deleteByFilePath(filePath: string): Promise<void>;
+  upsert(documents: VectorDocument[], options?: VectorWriteOptions): Promise<void>;
+  deleteByFilePath(filePath: string, options?: VectorWriteOptions): Promise<void>;
+  flush?(): Promise<void>;
   clearCollection?(): Promise<void>;
   needsRebuild?(): boolean;
   search(query: VectorSearchQuery): Promise<VectorSearchResult[]>;

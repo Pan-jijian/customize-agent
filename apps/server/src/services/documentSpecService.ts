@@ -2,7 +2,21 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-export type FactFieldType = 'text' | 'number' | 'date' | 'table' | 'list';
+export type FactFieldType = 'auto';
+export type ChapterRuleMode = 'fixed' | 'dynamic';
+export interface DynamicChapterRule {
+  source: 'file_outline' | 'file_role' | 'fact_group' | 'table_rows' | 'ai_plan';
+  sourceRoleIds?: string[];
+  minChapters?: number;
+  maxChapters?: number;
+  titleStrategy?: 'source_title' | 'field_value' | 'ai_summary' | 'template';
+  titleTemplate?: string;
+  minWordsPerChapter?: number;
+  requiredFactIds?: string[];
+  requiredFileRoleIds?: string[];
+  requiredPromptRoleIds?: string[];
+  generationHint?: string;
+}
 export type GateRuleType = string;
 export type GateRuleLevel = 'error' | 'warning' | 'info';
 export type GateRuleSubject = 'document' | 'chapter' | 'fact' | 'file_role' | 'prompt_role' | 'table' | 'image' | 'source';
@@ -62,7 +76,9 @@ export interface DocumentSpecPackage {
   name: string;
   description: string;
   factFields: DocumentSpecFactField[];
+  chapterMode: ChapterRuleMode;
   chapterRules: DocumentSpecChapterRule[];
+  dynamicChapterRule: DynamicChapterRule;
   gateRules: DocumentSpecGateRule[];
   wordTemplatePath?: string;
   builtIn?: boolean;
@@ -88,18 +104,19 @@ const DEMO_SPEC: DocumentSpecPackage = {
   name: '三角洲热门干员攻略规范包',
   description: '内置示例规范包：演示如何用事实字段、章节规则、文件角色、提示词角色和导出门禁共同约束一篇可交付攻略文档。',
   factFields: [
-    { id: 'guide-goal', name: '攻略目标', type: 'text', required: true, sourceRoleIds: ['delta-fact-files', 'delta-case-reference-files'], extractionHint: '抽取本文解决的问题、适用对象和最终交付目标。', validationHint: '正文导语必须能回答“给谁看、解决什么问题”。' },
-    { id: 'operator-name', name: '干员名称', type: 'list', required: true, sourceRoleIds: ['delta-fact-files'], extractionHint: '抽取露娜、红狼、牧羊人、蜂医等干员名称。', validationHint: '至少覆盖内置事实文件中的四名热门干员。' },
-    { id: 'operator-role', name: '定位', type: 'text', required: true, sourceRoleIds: ['delta-fact-files'], extractionHint: '抽取干员定位，例如侦察、突击、工程、支援。', validationHint: '定位必须和干员名称一一对应。' },
-    { id: 'operator-value', name: '核心价值', type: 'text', required: true, sourceRoleIds: ['delta-fact-files', 'delta-doc-files'], extractionHint: '抽取每名干员在队伍中的核心价值和使用场景。' },
-    { id: 'recommend-score', name: '推荐指数', type: 'table', required: true, sourceRoleIds: ['delta-table-files'], extractionHint: '从表格中抽取推荐指数、上手难度和推荐场景。', validationHint: '推荐指数应以表格形式呈现。' },
-    { id: 'team-composition', name: '队伍搭配', type: 'table', required: true, sourceRoleIds: ['delta-fact-files', 'delta-doc-files'], extractionHint: '抽取新手稳健队、突破压制队、控图防守队等组合和使用要点。' },
-    { id: 'map-drawing', name: '地图图纸', type: 'list', required: true, sourceRoleIds: ['delta-drawing-files'], extractionHint: '抽取官方地图工具来源、地图名称和地图图纸文件。', validationHint: '地图图纸必须来自知识库检索资源，不能硬插固定文件。' },
-    { id: 'image-reference', name: '图片资源', type: 'list', required: false, sourceRoleIds: ['delta-image-files', 'delta-reference-image-files'], extractionHint: '抽取干员图片、参考图片和可用作配图的本地资源。' },
-    { id: 'template-case', name: '模板案例参考', type: 'text', required: true, sourceRoleIds: ['delta-case-reference-files'], extractionHint: '抽取模板案例中的结构、来源清单和示例表达方式。' },
-    { id: 'style-rule', name: '模板样式规则', type: 'text', required: true, sourceRoleIds: ['delta-style-reference-files'], extractionHint: '抽取标题层级、章节结构、表格、图片说明和导出排版规则。' },
-    { id: 'export-gate', name: '导出门禁', type: 'list', required: true, sourceRoleIds: ['delta-export-gate-files'], extractionHint: '抽取阻断项、警告项和导出通过标准。' },
+    { id: 'guide-goal', name: '攻略目标', type: 'auto', required: true, sourceRoleIds: ['delta-fact-files', 'delta-case-reference-files'], extractionHint: '抽取本文解决的问题、适用对象和最终交付目标。', validationHint: '正文导语必须能回答“给谁看、解决什么问题”。' },
+    { id: 'operator-name', name: '干员名称', type: 'auto', required: true, sourceRoleIds: ['delta-fact-files'], extractionHint: '抽取露娜、红狼、牧羊人、蜂医等干员名称。', validationHint: '至少覆盖内置事实文件中的四名热门干员。' },
+    { id: 'operator-role', name: '定位', type: 'auto', required: true, sourceRoleIds: ['delta-fact-files'], extractionHint: '抽取干员定位，例如侦察、突击、工程、支援。', validationHint: '定位必须和干员名称一一对应。' },
+    { id: 'operator-value', name: '核心价值', type: 'auto', required: true, sourceRoleIds: ['delta-fact-files', 'delta-doc-files'], extractionHint: '抽取每名干员在队伍中的核心价值和使用场景。' },
+    { id: 'recommend-score', name: '推荐指数', type: 'auto', required: true, sourceRoleIds: ['delta-table-files'], extractionHint: '从表格中抽取推荐指数、上手难度和推荐场景。', validationHint: '推荐指数应以表格形式呈现。' },
+    { id: 'team-composition', name: '队伍搭配', type: 'auto', required: true, sourceRoleIds: ['delta-fact-files', 'delta-doc-files'], extractionHint: '抽取新手稳健队、突破压制队、控图防守队等组合和使用要点。' },
+    { id: 'map-drawing', name: '地图图纸', type: 'auto', required: true, sourceRoleIds: ['delta-drawing-files'], extractionHint: '抽取官方地图工具来源、地图名称和地图图纸文件。', validationHint: '地图图纸必须来自知识库检索资源，不能硬插固定文件。' },
+    { id: 'image-reference', name: '图片资源', type: 'auto', required: false, sourceRoleIds: ['delta-image-files', 'delta-reference-image-files'], extractionHint: '抽取干员图片、参考图片和可用作配图的本地资源。' },
+    { id: 'template-case', name: '模板案例参考', type: 'auto', required: true, sourceRoleIds: ['delta-case-reference-files'], extractionHint: '抽取模板案例中的结构、来源清单和示例表达方式。' },
+    { id: 'style-rule', name: '模板样式规则', type: 'auto', required: true, sourceRoleIds: ['delta-style-reference-files'], extractionHint: '抽取标题层级、章节结构、表格、图片说明和导出排版规则。' },
+    { id: 'export-gate', name: '导出门禁', type: 'auto', required: true, sourceRoleIds: ['delta-export-gate-files'], extractionHint: '抽取阻断项、警告项和导出通过标准。' },
   ],
+  chapterMode: 'fixed',
   chapterRules: [
     { id: 'overview', title: '第一章 攻略目标和适用人群', required: true, order: 0, minWords: 120, requiredFactIds: ['guide-goal', 'template-case'], requiredFileRoleIds: ['delta-case-reference-files'], requiredPromptRoleIds: ['delta-template-style-prompt'], generationHint: '必须让用户看出这是一个可学习、可复制的内置模板案例。' },
     { id: 'operators', title: '第二章 热门干员定位速览', required: true, order: 1, minWords: 180, requiredFactIds: ['operator-name', 'operator-role', 'operator-value'], requiredFileRoleIds: ['delta-fact-files'], generationHint: '使用表格或分组清单展示干员、定位、核心价值和适合场景。' },
@@ -108,6 +125,7 @@ const DEMO_SPEC: DocumentSpecPackage = {
     { id: 'maps', title: '第五章 官方地图图纸和路线理解', required: true, order: 4, minWords: 160, requiredFactIds: ['map-drawing'], requiredFileRoleIds: ['delta-drawing-files'], requiredPromptRoleIds: ['delta-resource-evidence-prompt'], generationHint: '必须说明官方地图工具来源，并解释地图图纸与路线、点位或撤离/交战路径的关系。' },
     { id: 'style', title: '第六章 模板样式和导出检查', required: true, order: 5, minWords: 140, requiredFactIds: ['style-rule', 'export-gate'], requiredFileRoleIds: ['delta-style-reference-files', 'delta-export-gate-files'], requiredPromptRoleIds: ['delta-export-gate-prompt'], generationHint: '说明本模板如何通过规范包、文件角色、提示词角色和导出门禁形成可复用案例。' },
   ],
+  dynamicChapterRule: { source: 'ai_plan', titleStrategy: 'ai_summary', generationHint: '' },
   gateRules: [
     { id: 'gate-guide-goal', name: '必须说明攻略目标和适用对象', type: 'required_fact', level: 'warning', target: '攻略目标' },
     { id: 'gate-operator-fact', name: '必须抽取干员名称', type: 'required_fact', level: 'warning', target: '干员名称' },
@@ -185,12 +203,13 @@ function sanitizeSpec(spec: DocumentSpecPackage): DocumentSpecPackage {
     factFields: Array.isArray(spec.factFields) ? spec.factFields.filter(item => item.name).map(item => ({
       id: safeId(item.id),
       name: item.name,
-      type: ['text', 'number', 'date', 'table', 'list'].includes(item.type) ? item.type : 'text',
+      type: 'auto' as const,
       required: Boolean(item.required),
       sourceRoleIds: Array.isArray(item.sourceRoleIds) ? item.sourceRoleIds.filter(Boolean) : [],
       extractionHint: item.extractionHint || '',
       validationHint: item.validationHint || '',
     })) : [],
+    chapterMode: spec.chapterMode === 'fixed' ? 'fixed' : 'dynamic',
     chapterRules: Array.isArray(spec.chapterRules) ? spec.chapterRules.filter(item => item.title).map((item, index) => ({
       id: safeId(item.id),
       title: item.title,
@@ -202,6 +221,19 @@ function sanitizeSpec(spec: DocumentSpecPackage): DocumentSpecPackage {
       requiredPromptRoleIds: Array.isArray(item.requiredPromptRoleIds) ? item.requiredPromptRoleIds.filter(Boolean) : [],
       generationHint: item.generationHint || '',
     })) : [],
+    dynamicChapterRule: {
+      source: ['file_outline', 'file_role', 'fact_group', 'table_rows'].includes(spec.dynamicChapterRule?.source) ? spec.dynamicChapterRule.source : 'ai_plan',
+      sourceRoleIds: Array.isArray(spec.dynamicChapterRule?.sourceRoleIds) ? spec.dynamicChapterRule.sourceRoleIds.filter(Boolean) : [],
+      minChapters: Number.isFinite(spec.dynamicChapterRule?.minChapters) ? spec.dynamicChapterRule.minChapters : undefined,
+      maxChapters: Number.isFinite(spec.dynamicChapterRule?.maxChapters) ? spec.dynamicChapterRule.maxChapters : undefined,
+      titleStrategy: ['source_title', 'field_value', 'template'].includes(spec.dynamicChapterRule?.titleStrategy || '') ? spec.dynamicChapterRule?.titleStrategy : 'ai_summary',
+      titleTemplate: spec.dynamicChapterRule?.titleTemplate || '',
+      minWordsPerChapter: Number.isFinite(spec.dynamicChapterRule?.minWordsPerChapter) ? spec.dynamicChapterRule.minWordsPerChapter : undefined,
+      requiredFactIds: Array.isArray(spec.dynamicChapterRule?.requiredFactIds) ? spec.dynamicChapterRule.requiredFactIds.filter(Boolean) : [],
+      requiredFileRoleIds: Array.isArray(spec.dynamicChapterRule?.requiredFileRoleIds) ? spec.dynamicChapterRule.requiredFileRoleIds.filter(Boolean) : [],
+      requiredPromptRoleIds: Array.isArray(spec.dynamicChapterRule?.requiredPromptRoleIds) ? spec.dynamicChapterRule.requiredPromptRoleIds.filter(Boolean) : [],
+      generationHint: spec.dynamicChapterRule?.generationHint || '',
+    },
     gateRules: Array.isArray(spec.gateRules) ? spec.gateRules.filter(item => item.name).map(item => {
       const type = safeId(item.type || item.name || 'custom_gate');
       return {

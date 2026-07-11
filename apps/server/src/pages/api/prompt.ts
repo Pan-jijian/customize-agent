@@ -87,6 +87,18 @@ interface PromptProject {
   source: 'current' | 'project' | 'custom';
 }
 
+interface PromptImportItem {
+  name?: string;
+  content?: string;
+  selected?: boolean;
+}
+
+interface PromptExportFile {
+  version: 1;
+  exportedAt: string;
+  prompts: Array<{ name: string; content: string; selected: boolean }>;
+}
+
 /** 内置提示词列表，包含三角洲行动相关的各个角色提示词 */
 const BUILT_IN_PROMPTS = [
   { id: 'builtin:delta-fact-extraction', name: '内置｜三角洲事实抽取提示词', content: `你是“结构化事实抽取专家”。请从知识库资料中抽取可追溯事实，并严格服务于文档规范包。
@@ -231,6 +243,26 @@ function validPromptIds(config: PromptConfig): Set<string> {
   return new Set([...BUILT_IN_PROMPT_IDS, ...config.customPrompts.map(prompt => prompt.id)]);
 }
 
+function sanitizePromptName(value: unknown): string {
+  const name = typeof value === 'string' ? value.trim() : '';
+  return name.slice(0, 120) || '导入提示词';
+}
+
+function sanitizePromptContent(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function normalizeImportPrompts(value: unknown): PromptImportItem[] {
+  const raw = Array.isArray(value)
+    ? value
+    : value && typeof value === 'object' && Array.isArray((value as { prompts?: unknown }).prompts)
+      ? (value as { prompts: unknown[] }).prompts
+      : [];
+  return raw
+    .filter((item): item is PromptImportItem => Boolean(item) && typeof item === 'object')
+    .filter(item => Boolean(sanitizePromptContent(item.content).trim()));
+}
+
 /** 提示词管理 API：支持内置/项目/自定义提示词的增删改查和选择配置 */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
@@ -241,6 +273,17 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       const config = loadPromptConfig();
       const currentPromptId = promptIdFromPath(path.join(currentRoot, 'CUSTOMIZE.md'));
       const selectedIds = fs.existsSync(promptConfigPath) && config.selectedIds.length > 0 ? config.selectedIds : [currentPromptId];
+      if (req.query.mode === 'export') {
+        const selectedSet = new Set(selectedIds);
+        const payload: PromptExportFile = {
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          prompts: config.customPrompts.map(prompt => ({ name: prompt.name, content: prompt.content, selected: selectedSet.has(prompt.id) })),
+        };
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="customize-prompts-${new Date().toISOString().slice(0, 10)}.json"`);
+        return res.status(200).json(payload);
+      }
       const db = openRegistry(true);
       if (db) {
         try {
@@ -323,8 +366,23 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 
     if (req.method === 'POST') {
-      const { action, projectRoot, content, name, selectedIds } = req.body;
+      const { action, projectRoot, content, name, selectedIds, prompts, mode } = req.body;
       const config = loadPromptConfig();
+      if (action === 'import' || mode === 'import') {
+        const items = normalizeImportPrompts(prompts ?? req.body);
+        if (items.length === 0) return res.status(400).json({ error: '没有可导入的提示词' });
+        const now = new Date().toISOString();
+        const importedIds: string[] = [];
+        for (const item of items) {
+          const id = `custom:${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+          config.customPrompts.push({ id, name: sanitizePromptName(item.name), content: sanitizePromptContent(item.content), createdAt: now, updatedAt: now });
+          importedIds.push(id);
+        }
+        const selectedImportedIds = items.map((item, index) => item.selected ? importedIds[index] : undefined).filter(Boolean) as string[];
+        if (selectedImportedIds.length > 0) config.selectedIds = Array.from(new Set([...config.selectedIds, ...selectedImportedIds]));
+        savePromptConfig(config);
+        return res.status(200).json({ success: true, imported: importedIds.length, ids: importedIds });
+      }
       if (action === 'createCustom') {
         const now = new Date().toISOString();
         const id = `custom:${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;

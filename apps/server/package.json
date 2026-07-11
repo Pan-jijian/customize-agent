@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/server",
-  "version": "4.0.10",
+  "version": "4.0.24",
   "description": "Customize Agent Web 管理控制台",
   "exports": {
     "./package.json": "./package.json"
@@ -44,6 +44,7 @@
     "@customize-agent/runtime": "workspace:^",
     "antd": "^6.5.0",
     "better-sqlite3": "^12.10.0",
+    "formidable": "^3.5.4",
     "jszip": "^3.10.1",
     "lucide-react": "^0.400.0",
     "mammoth": "^1.12.0",
@@ -56,17 +57,18 @@
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "tesseract.js": "^7.0.0",
+    "typescript": "^6.0.3",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.2",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/formidable": "^3.4.6",
     "@types/node": "^25.9.3",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "postcss": "^8.4.49",
     "sass": "^1.101.0",
-    "tailwindcss": "^4.3.2",
-    "typescript": "^6.0.3"
+    "tailwindcss": "^4.3.2"
   }
 }
