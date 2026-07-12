@@ -1,5 +1,11 @@
 # @customize-agent/knowledge
 
+## 4.0.8
+
+### Patch Changes
+
+- Normalize repeated Windows-style upload path separators before validating uploaded knowledge-base paths.
+
 ## 4.0.2
 
 ### Patch Changes

@@ -21,6 +21,9 @@ type SpreadsheetSheet = Record<string, SpreadsheetCell | unknown> & { '!ref'?: s
 type PdfTextItem = { str: string; x: number; y: number; width: number; height: number; fontName?: string };
 type CadAnnotation = { text: string; x?: number; y?: number; layer?: string; block?: string; entityType?: string };
 
+const CAD_INTERNAL_TOKEN_RE = /\b(?:TDbPipe|TDbPipeValve|TDbPipeFitting|TDbWellh|AcDb\w+|Dwg\w+|ObjectId|Handle|ByLayer|Continuous|Model|Layout\d*)\b/giu;
+const CAD_INTERNAL_LINE_RE = /^(?:TDb\w+|AcDb\w+|[A-F0-9]{8,}|\d+|Model|Layout\d*|ByLayer|Continuous)$/iu;
+
 /** 文件内容提取器，支持文档、表格、图片、CAD 等多种文件格式的内容抽取 */
 export class ContentExtractor {
   constructor(private readonly externalExtractors = ExternalExtractorRegistry.fromEnvironment()) {}
@@ -108,7 +111,7 @@ export class ContentExtractor {
     }
 
     return {
-      text: text.trim(),
+      text: this.cleanExtractedText(text, file).trim(),
       metadata,
       warnings,
       extractionTimeMs: Date.now() - start,
@@ -187,8 +190,37 @@ export class ContentExtractor {
     return value
       .replace(/[^\p{L}\p{N}\p{P}\p{S}\s]/gu, '\n')
       .split(/[\r\n]+/u)
-      .map(line => line.replace(/\s+/gu, ' ').trim())
+      .map(line => this.cleanCadReadableText(line))
       .filter(line => line.length >= 2 && /[\p{L}\p{N}]/u.test(line));
+  }
+
+  private cleanCadReadableText(value: string): string {
+    return value
+      .replace(CAD_INTERNAL_TOKEN_RE, '')
+      .replace(/\b(?:LINE|LWPOLYLINE|POLYLINE|INSERT|HATCH|CIRCLE|ARC|DIMENSION|TEXT|MTEXT)\b/giu, '')
+      .replace(/\s+/gu, ' ')
+      .trim();
+  }
+
+  private isReadableCadValue(value: string): boolean {
+    const cleaned = this.cleanCadReadableText(value);
+    return cleaned.length >= 2 && !CAD_INTERNAL_LINE_RE.test(cleaned) && /[\p{Script=Han}\d]/u.test(cleaned);
+  }
+
+  private cleanExtractedText(value: string, file: ClassifiedFile): string {
+    const normalized = [...value]
+      .filter(char => {
+        const code = char.charCodeAt(0);
+        return code === 9 || code === 10 || code === 13 || code >= 32;
+      })
+      .join('');
+    if (file.category !== 'cad') return normalized.replace(/\n{3,}/gu, '\n\n');
+    return normalized
+      .split(/\r?\n/u)
+      .map(line => this.cleanCadReadableText(line))
+      .filter(line => line && !CAD_INTERNAL_LINE_RE.test(line))
+      .join('\n')
+      .replace(/\n{3,}/gu, '\n\n');
   }
 
   private textScore(value: string): number {
@@ -215,9 +247,9 @@ export class ContentExtractor {
 
     if (file.format === 'autocad' && ext === '.dxf') {
       const raw = fs.readFileSync(file.absolutePath, 'utf8');
-      const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).slice(0, 300);
+      const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
       const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 500);
-      const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).slice(0, 300);
+      const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
       const entityTypes = this.matchAll(raw, /\n\s*0\s*\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1000);
       const uniqueLayers = Array.from(new Set(layers));
       const uniqueBlocks = Array.from(new Set(blocks));
@@ -294,7 +326,7 @@ export class ContentExtractor {
       if (result.text.trim()) return result;
     }
 
-    const readable = this.extractBinaryReadableFragments(file.absolutePath).slice(0, 800);
+    const readable = this.extractBinaryReadableFragments(file.absolutePath).filter(value => this.isReadableCadValue(value)).slice(0, 5000);
     metadata.extractionMode = 'builtin_cad_readable_fragments';
     metadata.contentCoverage = readable.length > 0 ? 'cad_readable_text_fragments' : 'metadata';
     metadata.stringCount = readable.length;
@@ -318,9 +350,9 @@ export class ContentExtractor {
       warnings.push('dxf-parser 解析失败，已使用 DXF 文本结构抽取回退');
     }
 
-    const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).slice(0, 300);
-    const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 800);
-    const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).slice(0, 300);
+    const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
+    const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 5000);
+    const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
     const entityTypes = this.matchAll(raw, /\n\s*0\s*\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1200);
     const uniqueLayers = Array.from(new Set(layers));
     const uniqueBlocks = Array.from(new Set(blocks));
@@ -369,8 +401,8 @@ export class ContentExtractor {
   private extractDxfTextAnnotations(raw: string): CadAnnotation[] {
     const entities = raw.split(/\n\s*0\s*\n/u).filter(section => /^(?:TEXT|MTEXT|DIMENSION|LEADER)/u.test(section.trim()));
     return entities.flatMap(section => {
-      const text = /\n\s*(?:1|3)\s*\n([^\n]+)/u.exec(section)?.[1]?.trim();
-      if (!text) return [];
+      const text = this.cleanCadReadableText(/\n\s*(?:1|3)\s*\n([^\n]+)/u.exec(section)?.[1] ?? '');
+      if (!text || !this.isReadableCadValue(text)) return [];
       return [{
         text,
         layer: /\n\s*8\s*\n([^\n]+)/u.exec(section)?.[1]?.trim(),
@@ -1188,7 +1220,7 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
       await doc.destroy();
       if (pages.length > 0) {
         const combined = pages.join('\n\n');
-        if (combined.trim()) return combined.slice(0, 250_000);
+        if (combined.trim()) return combined;
       }
     } catch (e) {
       if (process.env.KB_DEBUG === '1') console.warn('[kb] pdfjs-dist extraction failed:', (e as Error).message);
@@ -1200,7 +1232,7 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
       const pdfParse = (mod as unknown as { default?: (data: Buffer) => Promise<{ text: string }> }).default;
       if (pdfParse) {
         const result = await pdfParse(buffer);
-        if (result.text.trim()) return result.text.slice(0, 250_000);
+        if (result.text.trim()) return result.text;
       }
     } catch {
       // 降级到下方纯正则提取
@@ -1459,15 +1491,8 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
   }
 
   private metadataOnlyText(file: ClassifiedFile): string {
-    const fileName = path.basename(file.relativePath);
-    const directory = path.dirname(file.relativePath);
-    const searchableName = fileName.replace(/[_\-.]+/gu, ' ');
     return [
-      `文件名: ${fileName}`,
-      `文件路径: ${file.relativePath}`,
-      `所在目录: ${directory === '.' ? 'knowledgeBase' : directory}`,
-      `可搜索名称: ${searchableName}`,
-      `文件类型: ${file.category}/${file.format}`,
+      `资料类型: ${file.category}/${file.format}`,
       `MIME: ${file.mimeType}`,
       `文件大小: ${file.fileSize} bytes`,
     ].join('\n');

@@ -1,5 +1,11 @@
 # server
 
+## 4.0.25
+
+### Patch Changes
+
+- Fix document workflow generation when extracted fact values are arrays or objects, and keep formal document output free of internal evidence sections.
+
 ## 4.0.4
 
 ### Patch Changes

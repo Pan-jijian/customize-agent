@@ -451,7 +451,7 @@ export class IndexStateStore {
       `).all(matchQuery, limit * 8) as Array<Record<string, unknown>>;
       return rows
         .map(row => {
-          const keyword = this.scoreChunkDetailed(`${String(row.relative_path)}\n${String(row.category)}\n${String(row.format)}\n${String(row.content)}`, terms);
+          const keyword = this.scoreChunkDetailed(`${String(row.section_title ?? '')}\n${String(row.category)}\n${String(row.format)}\n${String(row.content)}`, terms);
           const bm25Score = this.bm25ToPositiveScore(Number(row.bm25_score));
           return this.rowToChunk(row, keyword.keywordScore + bm25Score, { ...keyword, bm25Score });
         })
@@ -473,7 +473,7 @@ export class IndexStateStore {
 
     return rows
       .map(row => {
-        const keyword = this.scoreChunkDetailed(`${String(row.relative_path)}\n${String(row.category)}\n${String(row.format)}\n${String(row.content)}`, terms);
+        const keyword = this.scoreChunkDetailed(`${String(row.section_title ?? '')}\n${String(row.category)}\n${String(row.format)}\n${String(row.content)}`, terms);
         return this.rowToChunk(row, keyword.keywordScore, keyword);
       })
       .filter(row => row.score > 0)

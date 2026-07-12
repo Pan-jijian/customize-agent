@@ -370,7 +370,7 @@ export class TextChunker {
 
   private withHeader(text: string, file: ClassifiedFile, config: ChunkConfig): string {
     if (!config.headerInjection) return text;
-    return `文件: ${file.relativePath}\n类型: ${file.category}/${file.format}\n\n${text}`;
+    return `资料类型: ${file.category}/${file.format}\n\n${text}`;
   }
 
   private createChunk(index: number, candidate: ChunkCandidate, file: ClassifiedFile, metadata: Record<string, unknown>): TextChunk {

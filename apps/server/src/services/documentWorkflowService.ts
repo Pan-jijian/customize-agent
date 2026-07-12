@@ -288,8 +288,16 @@ export function saveDocumentTemplate(template: DocumentTemplate): DocumentTempla
 
 export async function validateDocumentTemplateRun(templateId: string, projectRoot = getProjectRoot()) {
   const template = getDocumentTemplate(templateId);
-  if (!template) throw new Error('Document template not found');
   const issues: Array<{ level: 'error' | 'warning'; message: string }> = [];
+  if (!template) {
+    return {
+      issues: [{ level: 'error' as const, message: '文档模板不存在或已删除' }],
+      fileDiagnostics: [],
+      promptDiagnostics: [],
+      spec: undefined,
+      config: undefined,
+    };
+  }
   const promptRoles = listDocumentRoles('prompt');
   const fileRoles = listDocumentRoles('file');
   const config = template.projectRoleConfigId ? getProjectRoleConfig(template.projectRoleConfigId) : undefined;
@@ -353,15 +361,40 @@ export function duplicateDocumentTemplate(templateId: string): DocumentTemplate 
   return duplicated;
 }
 
+const CAD_ENTITY_TOKEN_RE = /\b(?:TDbPipe|TDbPipeValve|TDbPipeFitting|TDbWellh|AcDb\w+|Dwg\w+|Polyline|Hatch|Layer|BlockReference)\b/giu;
+const FILE_NAME_RE = /[\w\u4e00-\u9fa5（）()\-—_+\s]+\.(?:pdf|dwg|docx?|xlsx?|xls|csv|png|jpe?g|webp)\b/giu;
+
+function readableSourceLabel(item: Pick<DocumentEvidence, 'roleId' | 'processingType' | 'sectionTitle'>, index = 0) {
+  const role = item.processingType === 'drawing' || item.roleId?.includes('drawing') ? '图纸资料'
+    : item.processingType === 'table' || item.roleId?.includes('bill') ? '清单资料'
+      : item.processingType === 'rule' || item.roleId?.includes('tender') ? '招标资料'
+        : '项目资料';
+  return `${role}片段${index + 1}${item.sectionTitle ? `（${item.sectionTitle.replace(FILE_NAME_RE, '').slice(0, 40)}）` : ''}`;
+}
+
+function cleanEvidenceText(content: string) {
+  return [...content]
+    .filter(char => {
+      const code = char.charCodeAt(0);
+      return code === 9 || code === 10 || code === 13 || code >= 32;
+    })
+    .join('')
+    .replace(CAD_ENTITY_TOKEN_RE, '')
+    .replace(FILE_NAME_RE, '')
+    .replace(/\b(?:Model|Layout\d*|Entity|Handle|ObjectId|ByLayer|Continuous)\b/giu, '')
+    .replace(/[\t ]{2,}/gu, ' ')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim();
+}
+
 function sanitizeEvidenceContent(filePath: string, content: string) {
   const ext = path.extname(filePath).toLowerCase();
-  if (['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
-    return `资料文件：${path.basename(filePath)}，文件类型：${ext}。该文件作为来源附件参与生成，正文只引用其文件名、类型和角色，不直接混入二进制内容。`;
+  const cleaned = cleanEvidenceText(content);
+  if (cleaned.length > 20) return cleaned.slice(0, 4000);
+  if (['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.webp', '.dwg'].includes(ext)) {
+    return `该资料为${ext.replace('.', '').toUpperCase()}格式附件，仅作为内部事实提取依据；正式正文不得引用文件名。`;
   }
-  return [...content].filter(char => {
-    const code = char.charCodeAt(0);
-    return code === 9 || code === 10 || code === 13 || code >= 32;
-  }).join('').slice(0, 4000);
+  return cleaned.slice(0, 4000);
 }
 
 function uniqueEvidence(items: DocumentEvidence[], limit: number): DocumentEvidence[] {
@@ -395,8 +428,8 @@ function evidenceFromBoundFile(filePath: string, roleId: string | undefined, pro
   }));
 }
 
-function evidenceLine(item: DocumentEvidence): string {
-  return `- ${item.filePath}（score=${item.score.toFixed(3)}）：${item.content.replace(/\s+/gu, ' ').slice(0, 260)}`;
+function evidenceLine(item: DocumentEvidence, index = 0): string {
+  return `- ${readableSourceLabel(item, index)}：${cleanEvidenceText(item.content).replace(/\s+/gu, ' ').slice(0, 260)}`;
 }
 
 function resourceKind(filePath: string, processingType?: string): ResourceEvidence['kind'] {
@@ -412,7 +445,7 @@ function resourceKind(filePath: string, processingType?: string): ResourceEviden
 
 function semanticResourceTitle(filePath: string, kind: ResourceEvidence['kind']) {
   const name = path.basename(filePath).replace(/\.[^.]+$/u, '');
-  if (kind === 'map') return name.replace(/^地图图纸-/u, '').replace(/-官方完整地图图纸$/u, '官方完整地图图纸');
+  if (kind === 'map') return name.replace(/^地图图纸-/u, '').replace(/-完整地图图纸$/u, '完整地图图纸');
   if (kind === 'image') return name.replace(/-/gu, ' ');
   if (kind === 'spreadsheet') return `${name}（结构化表格）`;
   if (kind === 'document') return `${name}（文档附件）`;
@@ -421,14 +454,14 @@ function semanticResourceTitle(filePath: string, kind: ResourceEvidence['kind'])
 
 function relatedFactsForResource(item: DocumentEvidence, chapter?: DocumentTemplateChapter) {
   const haystack = `${item.filePath}\n${item.content}`;
-  const candidates = [...(chapter?.requiredFacts || []), '地图图纸', '官方地图工具', '路线理解', '干员图片', '表格数据', '规范要求', '项目事实', '附件资料', '队伍搭配', '推荐指数'];
+  const candidates = [...(chapter?.requiredFacts || []), '表格数据', '规范要求', '项目事实', '附件资料', '图纸资料', '图片资料'];
   return [...new Set(candidates.filter(fact => evidenceMatchesFact(item, fact) || haystack.includes(fact)))];
 }
 
 function resourceContentUse(kind: ResourceEvidence['kind']) {
-  if (kind === 'map') return '作为地图/图纸证据，用于说明区域、路线、点位、撤离/交战路径和队伍分工。';
+  if (kind === 'map') return '作为地图/图纸证据，用于说明空间关系、区域划分、点位、路线或专业布置。';
   if (kind === 'image') return '作为图片证据，用于视觉说明、参考图或章节配图。';
-  if (kind === 'spreadsheet' || kind === 'table') return '作为表格/数据证据，用于字段对比、优先级、清单和结构化结论。';
+  if (kind === 'spreadsheet' || kind === 'table') return '作为表格/数据证据，用于字段对比、清单、数量和结构化结论。';
   if (kind === 'document') return '作为 PDF/Word 文档证据，用于提取规范、事实、说明、约束和附件来源。';
   if (kind === 'attachment') return '作为附件证据，用于提供补充来源、文件级约束或可追溯引用。';
   return '作为文本证据，用于事实抽取、章节论据和来源引用。';
@@ -468,26 +501,23 @@ function buildEvidenceBundle(chapter: DocumentTemplateChapter, evidence: Documen
   const byKind = emptyEvidenceByKind();
   for (const resource of resources) byKind[resource.kind].push(resource);
   const summary = [
-    `本章证据包：文本片段 ${textEvidence.length} 条、资源文件 ${resources.length} 个。`,
-    `资源类型分布：文本 ${byKind.text.length}、文档 ${byKind.document.length}、表格 ${byKind.spreadsheet.length + byKind.table.length}、图片 ${byKind.image.length}、地图图纸 ${byKind.map.length}、其他附件 ${byKind.attachment.length}。`,
-    resources.length ? `关键资源：${resources.slice(0, 10).map(item => `${item.semanticTitle}（${item.kind}：${item.filePath}）`).join('；')}` : '',
+    `内部资料包：文本片段 ${textEvidence.length} 条、结构化资料 ${resources.length} 个。`,
+    `资料类型分布：文本 ${byKind.text.length}、文档 ${byKind.document.length}、表格/清单 ${byKind.spreadsheet.length + byKind.table.length}、图片 ${byKind.image.length}、图纸 ${byKind.map.length}、其他 ${byKind.attachment.length}。`,
+    '正文必须只写资料中的工程事实、参数、数量、做法和控制措施，不得出现文件名、来源清单或后台证据描述。',
   ].filter(Boolean).join('\n');
   return { chapterId: chapter.id, textEvidence, resources, byKind, summary };
 }
 
 function evidenceBundlePrompt(bundle: EvidenceBundle) {
-  const resourceLines = bundle.resources.slice(0, 20).map(item => [
-    `- 文件：${item.filePath}`,
-    `  资源类型：${item.kind}`,
-    `  语义标题：${item.semanticTitle}`,
-    item.roleId ? `  文件角色：${item.roleId}` : '',
-    item.processingType ? `  处理类型：${item.processingType}` : '',
+  const resourceLines = bundle.resources.slice(0, 20).map((item, index) => [
+    `- 资料：${readableSourceLabel(item, index)}`,
+    `  资料类型：${item.kind}`,
     `  正文用途：${item.contentUse}`,
-    item.relatedFacts.length ? `  关联事实：${item.relatedFacts.join('、')}` : '',
-    item.snippets.length ? `  证据片段：${item.snippets.join(' / ')}` : '',
+    item.relatedFacts.length ? `  可用事实方向：${item.relatedFacts.join('、')}` : '',
+    item.snippets.length ? `  可用内容：${item.snippets.map(cleanEvidenceText).filter(Boolean).join(' / ')}` : '',
   ].filter(Boolean).join('\n')).join('\n');
-  const textLines = bundle.textEvidence.map(item => `文件：${item.filePath}\n角色：${item.roleId || '未标注'}\n类型：${item.processingType || 'reference'}\n章节/片段：${item.sectionTitle || '未标注'}\n内容：${item.content.replace(/\s+/gu, ' ').slice(0, 900)}`).join('\n\n---\n\n');
-  return [bundle.summary, resourceLines ? `结构化资源证据：\n${resourceLines}` : '', textLines ? `文本/附件片段证据：\n${textLines}` : ''].filter(Boolean).join('\n\n');
+  const textLines = bundle.textEvidence.map((item, index) => `${readableSourceLabel(item, index)}\n类型：${item.processingType || 'reference'}\n章节/片段：${item.sectionTitle?.replace(FILE_NAME_RE, '') || '资料片段'}\n内容：${cleanEvidenceText(item.content).replace(/\s+/gu, ' ').slice(0, 900)}`).join('\n\n---\n\n');
+  return [bundle.summary, resourceLines ? `结构化资料：\n${resourceLines}` : '', textLines ? `文本/附件片段：\n${textLines}` : ''].filter(Boolean).join('\n\n');
 }
 
 function dynamicChapterTitleFromEvidence(item: DocumentEvidence, index: number, titleTemplate?: string) {
@@ -548,18 +578,14 @@ function inputSafeJoin(items: string[]) {
   return items.filter(Boolean).join(' ');
 }
 
-function factAliases(fact: string) {
-  const aliases: Record<string, string[]> = {
-    定位: ['侦察', '突击', '工程', '支援', '干员定位'],
-    地图图纸: ['官方地图工具', '地图图纸', '完整地图图纸', '地图底图', '零号大坝', '航天基地', '巴克什'],
-    搭配建议: ['队伍建议', '常见组合', '队伍搭配', '搭配', '分工'],
-  };
-  return [fact, fact.replace(/要求|计划|目标|标准/gu, ''), ...(aliases[fact] ?? [])].filter(Boolean);
+function factSearchTerms(fact: string) {
+  const normalized = fact.replace(/要求|计划|目标|标准|内容|信息|事实|依据|参数|范围|要点/gu, '');
+  return [fact, normalized].filter(Boolean);
 }
 
 function evidenceMatchesFact(item: DocumentEvidence, fact: string) {
   const haystack = `${item.filePath}\n${item.content}`;
-  return factAliases(fact).some(alias => haystack.includes(alias));
+  return factSearchTerms(fact).some(term => haystack.includes(term));
 }
 
 function specFactTargets(template: DocumentTemplate, spec?: DocumentSpecPackage) {
@@ -743,6 +769,19 @@ function fallbackChaptersFromEvidence(node: RoleExecutionNode, evidence: Documen
   return headings;
 }
 
+function stringifyFactValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  if (Array.isArray(value)) return value.map(item => stringifyFactValue(item)).filter(Boolean).join('；');
+  if (typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => `${key}：${stringifyFactValue(item)}`)
+      .filter(Boolean)
+      .join('；');
+  }
+  return String(value);
+}
+
 function fallbackFactsFromEvidence(node: RoleExecutionNode, evidence: DocumentEvidence[]): RoleNodeFact[] {
   return evidence.slice(0, 20).map((item, index) => ({
     key: `${node.fileRoleName}事实${index + 1}`,
@@ -788,7 +827,7 @@ async function executeRoleExtractionNode(node: RoleExecutionNode, evidence: Docu
   }));
   const facts = (llm?.facts || []).filter(item => item.key && item.value).map(item => ({
     key: item.key,
-    value: item.value,
+    value: cleanEvidenceText(stringifyFactValue(item.value)),
     sourceFile: item.sourceFile || evidence.find(e => e.filePath)?.filePath || '',
     roleId: node.fileRoleId,
     processingType: node.processingType,
@@ -808,7 +847,7 @@ async function executeRoleExtractionNode(node: RoleExecutionNode, evidence: Docu
 function roleArtifactsDigest(artifacts: RoleNodeArtifact[]) {
   return artifacts.map(artifact => {
     const chapterLines = artifact.chapters.slice(0, 18).map(chapter => `- ${chapter.title}：${chapter.requiredContents.join('、') || chapter.sourceRequirement.slice(0, 120)}`).join('\n');
-    const factLines = artifact.facts.slice(0, 30).map(fact => `- ${fact.key}：${fact.value.slice(0, 220)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`).join('\n');
+    const factLines = artifact.facts.slice(0, 30).map(fact => `- ${fact.key}：${stringifyFactValue(fact.value).slice(0, 220)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`).join('\n');
     return [`## ${artifact.node.fileRoleName} / ${artifact.node.outputType}`, chapterLines ? `章节/要求：\n${chapterLines}` : '', factLines ? `事实：\n${factLines}` : '', artifact.outputRequirements.length ? `输出要求：${artifact.outputRequirements.join('；')}` : ''].filter(Boolean).join('\n');
   }).join('\n\n');
 }
@@ -840,7 +879,7 @@ function chapterPlanFor(chapter: DocumentTemplateChapter, plan: TenderPlanChapte
 function roleFactsForChapter(artifacts: RoleNodeArtifact[], chapter: DocumentTemplateChapter, plan?: TenderPlanChapter) {
   const hints = [chapter.title, ...(chapter.requiredFacts || []), ...(plan?.requiredContents || []), ...(plan?.evidenceNeeds || []), ...(plan?.requirements.flatMap(item => [item.title, ...item.requiredContents, ...item.evidenceNeeds]) || [])].filter(Boolean);
   return artifacts.flatMap(artifact => artifact.facts.map(fact => ({ artifact, fact }))).filter(({ fact }) => {
-    const text = `${fact.key}\n${fact.value}\n${fact.relatedChapterHints.join('\n')}`;
+    const text = `${fact.key}\n${stringifyFactValue(fact.value)}\n${fact.relatedChapterHints.join('\n')}`;
     return hints.length === 0 || hints.some(hint => text.includes(hint) || hint.includes(fact.key));
   }).slice(0, 80);
 }
@@ -857,9 +896,9 @@ function buildRoleChapterContext(artifacts: RoleNodeArtifact[], chapter: Documen
   const factGroups = new Map<string, string[]>();
   for (const { artifact, fact } of matchedFacts) {
     const key = `${artifact.node.fileRoleName}（${artifact.node.outputType}）`;
-    factGroups.set(key, [...(factGroups.get(key) || []), `- ${fact.key}：${fact.value}（来源：${fact.sourceFile}）`]);
+    factGroups.set(key, [...(factGroups.get(key) || []), `- ${fact.key}：${cleanEvidenceText(stringifyFactValue(fact.value))}`]);
   }
-  const factsText = [...factGroups.entries()].map(([key, lines]) => `### ${key}\n${lines.slice(0, 18).join('\n')}`).join('\n\n');
+  const factsText = [...factGroups.entries()].map(([key, lines]) => `### ${key}\n${lines.slice(0, 18).map(line => line.replace(FILE_NAME_RE, '').replace(CAD_ENTITY_TOKEN_RE, '')).join('\n')}`).join('\n\n');
   return [planText ? `【本章章节计划】\n${planText}` : '', factsText ? `【角色节点结构化产物】\n${factsText}` : ''].filter(Boolean).join('\n\n');
 }
 
@@ -871,6 +910,40 @@ function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
   if (!forbid) return markdown;
   return markdown.replace(/^!\[[^\]]*(?:图纸|drawing|cad|地图|平面|剖面|立面)[^\]]*\]\([^)]*\)\s*$/gimu, '').replace(/\n{3,}/gu, '\n\n');
 }
+
+const FORMAL_FORBIDDEN_SECTION_RE = /^##\s*(?:编制依据与证据来源|资料来源清单|缺失项与需确认事项|校验结果|严格校验清单|项目基础信息与响应原则|工程概况与图纸依据|输入资料概览|清单关键信息提取总表|施工组织设计重难点清单|设备\/材料\/参数\/标准专项响应表|技术标章节编制建议表|图纸文件基础识别|图纸专业信息与图框信息提取|给排水及厨房设备相关图纸线索提取|施工组织设计可用信息转化要求)[\s\S]*?(?=^##\s|$(?![\s\S]))/gmu;
+const WORKFLOW_PHRASE_RE = /.*(?:本章小结|本章补充|动态章节|知识库证据|文件角色|提示词角色|文档规范包|规范包|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|输入资料概览|表\d+：|图纸文件基础识别|图纸专业信息与图框信息提取|给排水及厨房设备相关图纸线索提取|施工组织设计可用信息转化要求).*(?:\n|$)/gu;
+const ASCII_FLOW_LINE_RE = /^\s*(?:[│┃┆┊┌┐└┘├┤┬┴┼─━╭╮╰╯]|[↓↑→←⇒⇨➡])+\s*$/gmu;
+
+function sanitizeFormalMarkdown(markdown: string) {
+  return markdown
+    .replace(FORMAL_FORBIDDEN_SECTION_RE, '')
+    .replace(WORKFLOW_PHRASE_RE, '')
+    .replace(ASCII_FLOW_LINE_RE, '')
+    .replace(FILE_NAME_RE, '')
+    .replace(CAD_ENTITY_TOKEN_RE, '')
+    .replace(/第\s*\d+\s*页\s*\/\s*共\s*\d+\s*页/gu, '')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim();
+}
+
+const SOURCE_PRECEDENCE_RULES = [
+  '清单与图纸描述同一工程对象时，图纸文本标注、设计说明、系统图和节点详图中的规格、尺寸、材质、系统参数、位置和施工做法优先；清单主要用于工程量、单位、项目特征和计价范围补充。',
+  '如清单参数与图纸参数不一致，必须以图纸可读文本事实为准；不得把清单中与图纸冲突的规格、材质、尺寸、系统参数写成最终事实。',
+  '若只有清单有工程量、单位或项目特征而图纸未给出对应数据，可采用清单数据；若只有图纸有设计参数而清单未列明，采用图纸参数。',
+  '对同一工程对象应合并表达为“图纸参数 + 清单工程量/单位/项目特征”的完整事实，禁止分别罗列为来源对照表。',
+].join('\n');
+
+const FORMAL_WRITING_RULES = [
+  '你正在生成正式施工组织设计正文，不是分析报告、证据报告或系统调试报告。',
+  '禁止出现“知识库、证据、来源清单、检索、文件角色、提示词角色、规范包、事实字段、动态章节、缺失项、校验结果、资料未提供、未检索到、本章补充、本章小结”等系统或模板话术。',
+  '禁止输出“表1：清单关键信息提取总表、表2：施工组织设计重难点清单、表3：设备/材料/参数/标准专项响应表、表4：技术标章节编制建议表、图纸文件基础识别、图纸专业信息与图框信息提取、给排水及厨房设备相关图纸线索提取、施工组织设计可用信息转化要求”等中间分析产物标题。',
+  '所有招标文件、清单、图纸信息必须内化为正式投标文件表达，不单列资料来源、证据来源或校验清单，不引用 PDF、DWG、Excel 等文件名。',
+  '清单与图纸必须作为一体化工程事实使用，正文应优先写入项目特征、工程量、单位、规格、尺寸、材质、功率、电压、系统参数、做法和验收标准等可读数据，不得写入 CAD 内部对象名或语义化占位词。',
+  SOURCE_PRECEDENCE_RULES,
+  '组织机构、职责分工、关键线路、流程、资源配置、风险控制必须优先使用 Markdown 表格，不得使用由 │、─、↓、→ 等字符组成的文本图或箭头流程链。',
+  '语言应正式、专业、克制，可直接用于投标技术标正文。',
+].join('\n');
 
 function tenderQualityIssues(markdown: string, chapters: DocumentDraftChapter[], plan: TenderPlanChapter[], artifacts: RoleNodeArtifact[], forbidDrawingImages: boolean) {
   const issues: string[] = [];
@@ -892,7 +965,7 @@ function tenderQualityIssues(markdown: string, chapters: DocumentDraftChapter[],
 async function repairMarkdownByQuality(input: { markdown: string; template: DocumentTemplate; plan: TenderPlanChapter[]; artifacts: RoleNodeArtifact[]; promptTexts: string; requirement?: string; issues: string[]; forbidDrawingImages: boolean }) {
   if (input.issues.length === 0) return { markdown: input.markdown, stage: undefined as DocumentExecutionStage | undefined };
   const repaired = await callDocumentLlm([
-    '你是招标文件质量补写和纠偏专家。必须严格按照示范文本节点产出的章节计划补齐内容，使用清单、图纸文本事实和项目资料事实，禁止编造。',
+    '你是招标文件质量补写和纠偏专家。必须严格按照示范文本节点产出的章节计划补齐内容，使用清单、图纸文本事实和项目资料事实，禁止编造；同一工程对象中清单与图纸参数不一致时，以图纸文本事实为准。',
     input.forbidDrawingImages ? '图纸资料只作为文本事实来源，禁止插入图纸图片或 Markdown 图片语法。' : '',
     '保持 Markdown 标题层级、目录和已有来源信息；直接返回修复后的完整 Markdown。',
     input.promptTexts,
@@ -1099,7 +1172,7 @@ async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: st
   const schemaText = targets.map(field => `- id=${field.id} name=${field.name} type=auto required=${field.required} sourceRoleIds=${field.sourceRoleIds.join(',') || '不限'} hint=${field.extractionHint || '无'}`).join('\n');
   const llm = await callDocumentLlmJson<{ facts?: Array<{ fieldId?: string; fieldName?: string; key: string; value: string; sourceFile?: string; roleId?: string; processingType?: string; confidence?: number }> }>(
     promptTexts || '你是文档事实抽取器。',
-    `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色。返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","sourceFile":"...","roleId":"...","processingType":"project_fact","confidence":0.8}]}。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`,
+    `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色。${SOURCE_PRECEDENCE_RULES}\n返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","sourceFile":"...","roleId":"...","processingType":"project_fact","confidence":0.8}]}。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`,
   );
   if (!llm?.facts?.length) return { facts: [], stages };
   return {
@@ -1109,7 +1182,7 @@ async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: st
         key: field?.name || item.key,
         fieldId: field?.id || item.fieldId,
         fieldName: field?.name || item.fieldName,
-        value: item.value,
+        value: stringifyFactValue(item.value),
         sourceFile: item.sourceFile || '',
         roleId: item.roleId || 'llm',
         processingType: item.processingType,
@@ -1121,8 +1194,8 @@ async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: st
   };
 }
 
-function normalizedFactValue(value: string) {
-  return value.replace(/\s+/gu, '').replace(/[，。,.;；：:]/gu, '').toLowerCase();
+function normalizedFactValue(value: unknown) {
+  return stringifyFactValue(value).replace(/\s+/gu, '').replace(/[，。,.;；：:]/gu, '').toLowerCase();
 }
 
 function detectFactConflicts(facts: DocumentFact[], spec?: DocumentSpecPackage) {
@@ -1299,11 +1372,12 @@ async function buildLlmChapterContent(template: DocumentTemplate, chapter: Docum
   const evidenceText = evidenceBundlePrompt(bundle);
   if (!evidenceText.trim() && !roleContext.trim()) return undefined;
   const system = [
-    '你是专业项目文档生成专家，必须严格使用知识库证据、文件角色、提示词角色、角色节点结构化产物和文档规范包生成正式文档章节。',
-    '准确性优先级：章节计划/示范文本节点产物 > 规范包事实字段 > 角色节点结构化事实 > 知识库证据 > 项目上下文/历史记忆。',
+    '你是专业项目文档生成专家，必须严格使用已提供的内部资料生成正式文档章节。',
+    FORMAL_WRITING_RULES,
+    '准确性优先级：章节计划/示范文本节点产物 > 规范包事实字段 > 角色节点结构化事实 > 知识库证据 > 项目上下文/历史记忆。内部优先级只用于判断事实，不得写入正文。',
     '项目上下文/历史记忆只能作为用户偏好、历史纠偏和连续性参考；不得覆盖、替代或改写知识库证据中的事实。',
     options.forbidDrawingImages ? '图纸资料只作为文本、标注、规格、位置、材料、数量等事实依据；禁止插入图纸图片或 Markdown 图片语法。' : '',
-    '不要编造资料；可以基于证据做合理归纳；输出 Markdown；不要输出代码块；不要输出“资料不足”等调试话术。',
+    '不要编造资料；可以基于证据做合理归纳；输出 Markdown；不要输出代码块。',
     promptTexts,
   ].filter(Boolean).join('\n\n');
   const prompt = [
@@ -1314,21 +1388,24 @@ async function buildLlmChapterContent(template: DocumentTemplate, chapter: Docum
     projectContext ? `项目上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${projectContext}` : '',
     roleContext ? roleContext : '',
     missingFacts.length ? `需要特别补足的事实：${missingFacts.join('、')}` : '',
-    '请生成一个专业、充实、可直接导出的招标文件章节，要求：',
+    '请生成一个专业、充实、可直接导出的正式施工组织设计章节，要求：',
     '- 保留章节二级标题，并按章节计划逐项响应；',
     '- 必须使用示范文本节点提取的章节要求和输出规范；',
-    '- 必须结合清单、图纸文本事实、项目事实、技术规范等角色节点产物；',
-    '- 图纸默认只作为文本事实来源，不要插入图纸图片；',
-    '- 有编制依据、项目适配分析、具体措施、实施要点、风险与注意事项；',
-    '- 引用表格、PDF/Word、文本、附件等资料时写清楚来源文件名；',
+    '- 必须结合清单、图纸文本事实、项目事实、技术规范等内部资料；',
+    '- 清单与图纸按同一工程对象综合使用，优先写入准确的工程量、单位、项目特征、规格尺寸、材质、功率、电压、系统参数、施工做法和验收标准；',
+    '- 同一工程对象中清单与图纸参数不一致时，以图纸文本标注、设计说明、系统图和节点详图为准；清单用于补充工程量、单位、项目特征和计价范围；',
+    '- 图纸默认只作为文本事实来源，不要插入图纸图片，不引用 PDF/DWG 文件名，不写 CAD 内部对象名；',
+    '- 将项目概况、施工范围、图纸和清单要点自然融入施工措施，不单列证据或来源章节；',
+    '- 小节层级保持适度，禁止设置“本章小结”，禁止输出表1至表4等分析表标题；',
+    '- 组织架构、关键线路、施工流程、职责分工、资源配置、重难点分析必须优先表格化表达；',
     `- 内容不少于 ${options.minWords || 1000} 字，避免空泛口号。`,
     '',
-    evidenceText ? '知识库证据：' : '',
+    evidenceText ? '内部资料：' : '',
     evidenceText,
   ].filter(Boolean).join('\n');
   const content = await callDocumentLlm(system, prompt);
   if (!content || content.length < 120) return undefined;
-  return removeUnwantedDrawingImages(content.startsWith('## ') ? content : `## ${chapter.title}\n\n${content}`, Boolean(options.forbidDrawingImages));
+  return sanitizeFormalMarkdown(removeUnwantedDrawingImages(content.startsWith('## ') ? content : `## ${chapter.title}\n\n${content}`, Boolean(options.forbidDrawingImages)));
 }
 
 /** 对生成的 Markdown 进行 LLM 二次审查和优化，检查结构、证据使用和导出合规性 */
@@ -1350,12 +1427,14 @@ async function reviewAndOptimizeMarkdown(input: {
     `门禁规则：${input.spec.gateRules.map(rule => `${rule.name}:${rule.type}`).join('、')}`,
   ].join('\n') : '未绑定文档规范包。';
   const reviewed = await callDocumentLlm([
-    '你是文档质量审查与优化专家。你要基于文件角色、提示词角色、文档规范包和知识库证据，对初稿进行二次审查和优化。',
-    '准确性优先级：文档规范包/模板要求 > 已绑定或人工确认的知识库证据 > 自动检索知识库证据 > 项目上下文/历史记忆。',
+    '你是文档质量审查与优化专家。你要基于内部资料对初稿进行二次审查和优化，使其成为正式施工组织设计正文。',
+    FORMAL_WRITING_RULES,
+    '准确性优先级：文档规范包/模板要求 > 已绑定或人工确认的知识库证据 > 自动检索知识库证据 > 项目上下文/历史记忆。内部优先级只用于判断事实，不得写入正文。',
     '项目上下文/历史记忆只能用于风格偏好、历史纠偏和连续性检查；如果与知识库证据冲突，必须以知识库证据为准。',
-    '必须保持 Markdown 输出；保留已有表格、标题层级、目录和证据来源；不要编造不存在的事实。',
-    '图纸资料默认只作为文本事实依据，除非用户明确要求插图，否则不要插入图纸图片或 Markdown 图片语法。',
-    '重点检查：标题、封面、目录、章节完整性、事实来源、所有相关文件类型的资源证据使用、表格呈现、表达专业性、导出友好性。',
+    '必须保持 Markdown 输出；保留已有正式标题层级和表格；不得保留或新增证据来源、资料来源、缺失项、校验结果等后台信息。',
+    '图纸资料默认只作为文本事实依据，除非用户明确要求插图，否则不要插入图纸图片或 Markdown 图片语法；不得引用 PDF/DWG/Excel 文件名。',
+    '重点检查：正式章节完整性、清单和图纸事实内化使用、参数数字准确性、清单与图纸冲突时是否按图纸为准、CAD 内部对象名清理、表格呈现、表达专业性、导出友好性。',
+    '删除“本章小结”和表1至表4、图纸文件基础识别、图纸专业信息与图框信息提取、给排水及厨房设备相关图纸线索提取、施工组织设计可用信息转化要求等中间产物标题。',
     input.promptTexts,
   ].filter(Boolean).join('\n\n'), [
     `模板：${input.template.name}`,
@@ -1369,12 +1448,12 @@ async function reviewAndOptimizeMarkdown(input: {
     '待审查初稿：',
     input.markdown,
     '',
-    '请直接返回优化后的完整 Markdown。',
+    '请直接返回优化后的完整正式 Markdown，不要附加解释。',
   ].filter(Boolean).join('\n'));
   if (!reviewed || reviewed.length < input.markdown.length * 0.7 || !reviewed.includes('#')) {
     return { markdown: input.markdown, stage: { type: 'llm_review', roleId: 'llm-review', status: 'skipped', message: '无可用模型或审查结果不可用，保留生成初稿' } };
   }
-  return { markdown: reviewed, stage: { type: 'llm_review', roleId: 'llm-review', status: 'success', message: '已完成 LLM 二次审查与优化' } };
+  return { markdown: sanitizeFormalMarkdown(reviewed), stage: { type: 'llm_review', roleId: 'llm-review', status: 'success', message: '已完成 LLM 二次审查与优化' } };
 }
 
 function formatContextEntries(entries: ReturnType<typeof recallDocumentContexts>) {
@@ -1383,15 +1462,19 @@ function formatContextEntries(entries: ReturnType<typeof recallDocumentContexts>
     : '';
 }
 
-function buildReadableChapterContent(_templateId: string, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[]) {
-  return [
+function buildReadableChapterContent(_templateId: string, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], _missingFacts: string[]) {
+  const tableRows = evidence.slice(0, 8).map((item, index) => `| ${index + 1} | ${item.content.replace(/\s+/gu, ' ').replace(/\|/gu, ' ').slice(0, 160)} | ${item.processingType || '文本资料'} |`);
+  return sanitizeFormalMarkdown([
     `## ${chapter.title}`,
     '',
-    evidence.length > 0 ? `本章根据知识库资料整理：${chapter.purpose}` : '模板绑定资料未检索到明确内容，需进一步确认。',
+    `本章围绕${chapter.purpose || chapter.title}展开，结合工程范围、专业施工条件和现场组织要求，形成可执行的施工组织安排。`,
     '',
-    ...evidence.slice(0, 5).map(item => `- ${item.filePath}：${item.content.replace(/\s+/gu, ' ').slice(0, 180)}`),
-    ...(missingFacts.length > 0 ? ['', '### 待确认事项', ...missingFacts.map(item => `- ${item}：建议人工复核或补充更明确资料。`)] : []),
-  ].join('\n');
+    tableRows.length ? '| 序号 | 施工组织要点 | 适用类型 |' : '',
+    tableRows.length ? '|---:|---|---|' : '',
+    ...tableRows,
+    '',
+    '施工过程中，项目部将按照招标文件要求和经审批的施工方案组织实施，强化技术交底、过程检查、工序验收和整改闭环，确保各专业施工内容衔接有序、质量安全受控。',
+  ].filter(Boolean).join('\n'));
 }
 
 function validateDraft(chapters: DocumentDraftChapter[], structuredFacts: DocumentFact[] = [], template?: DocumentTemplate) {
@@ -1411,14 +1494,15 @@ function validateDraft(chapters: DocumentDraftChapter[], structuredFacts: Docume
 }
 
 export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'markdown'>): string {
-  return [
+  const chapterMarkdown = draft.chapters
+    .map(chapter => sanitizeFormalMarkdown(chapter.content))
+    .filter(Boolean)
+    .join('\n\n');
+
+  return sanitizeFormalMarkdown([
     `<div class="document-cover">`,
     `# ${draft.title}`,
     '',
-    `**文档版本**：V1.0  `,
-    `**生成时间**：${new Date(draft.generatedAt).toLocaleString('zh-CN')}  `,
-    `**文档类型**：模板生成文档  `,
-    draft.requirement ? `**生成要求**：${draft.requirement}  ` : '',
     `</div>`,
     '',
     '<div class="page-break"></div>',
@@ -1429,32 +1513,8 @@ export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'mar
     '',
     '<div class="page-break"></div>',
     '',
-    '## 核心结论',
-    '',
-    Object.keys(draft.facts).length > 0
-      ? ['| 事实项 | 依据 |', '|---|---|', ...Object.entries(draft.facts).slice(0, 12).map(([key, value]) => `| ${key} | ${value.replace(/\|/gu, ' ').slice(0, 160)} |`)].join('\n')
-      : '未抽取到明确事实，需人工确认。',
-    '',
-    ...draft.chapters.flatMap(chapter => [chapter.content, '']),
-    '## 资料来源清单',
-    '',
-    '| 文件 | 引用次数 |',
-    '|---|---:|',
-    ...draft.sources.map(source => `| ${source.filePath} | ${source.count} |`),
-    '',
-    '## 缺失项与需确认事项',
-    '',
-    ...(draft.missingItems.length > 0 ? draft.missingItems.map(item => `- ${item}`) : ['- 暂未发现完全缺失章节；仍需人工复核关键数据。']),
-    '',
-    '## 校验结果',
-    '',
-    ...draft.validation.warnings.map(item => `- 警告：${item}`),
-    ...draft.validation.errors.map(item => `- 错误：${item}`),
-    '',
-    '## 严格校验清单',
-    '',
-    ...draft.validationIssues.map(issue => `- ${issue.level.toUpperCase()}：${issue.message}${issue.suggestion ? `（建议：${issue.suggestion}）` : ''}`),
-  ].join('\n');
+    chapterMarkdown,
+  ].join('\n'));
 }
 
 function throwIfAborted(signal?: AbortSignal) {
@@ -1637,13 +1697,13 @@ export async function generateDocumentDraft(input: { templateId: string; require
 
   const facts = extractFacts(template, allEvidence, documentSpec);
   for (const artifact of roleArtifacts) {
-    for (const fact of artifact.facts) facts[fact.key] = `${fact.value}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
+    for (const fact of artifact.facts) facts[fact.key] = `${stringifyFactValue(fact.value)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
   }
   const localFacts = extractStructuredFacts(allEvidence, template, documentSpec);
   let llmExtraction: { facts: DocumentFact[]; stages: DocumentExecutionStage[] } = { facts: [], stages: [] };
   try { llmExtraction = await extractFactsWithLlm(allEvidence, promptTexts, template, documentSpec); } catch (err) { if (input.signal?.aborted) throw err; console.error('[gen] fact extraction failed:', err); }
   throwIfAborted(input.signal);
-  const roleStructuredFacts: DocumentFact[] = roleArtifacts.flatMap(artifact => artifact.facts.map(fact => ({ key: fact.key, value: fact.value, sourceFile: fact.sourceFile, roleId: fact.roleId, confidence: 0.9 })));
+  const roleStructuredFacts: DocumentFact[] = roleArtifacts.flatMap(artifact => artifact.facts.map(fact => ({ key: fact.key, value: stringifyFactValue(fact.value), sourceFile: fact.sourceFile, roleId: fact.roleId, confidence: 0.9 })));
   const structuredFacts = [...roleStructuredFacts, ...localFacts, ...llmExtraction.facts];
 
   // 进度回调：文件理解 + 事实抽取完成
@@ -1667,7 +1727,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   };
   progressStages.push(enhancementStage);
   input.onProgress?.([...progressStages]);
-  for (const fact of structuredFacts) facts[fact.key] = `${fact.value}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
+  for (const fact of structuredFacts) facts[fact.key] = `${stringifyFactValue(fact.value)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
   const sourceCounts = new Map<string, number>();
   for (const item of allEvidence) sourceCounts.set(item.filePath, (sourceCounts.get(item.filePath) ?? 0) + 1);
   const sources = [...sourceCounts.entries()].sort((a, b) => b[1] - a[1]).map(([filePath, count]) => ({ filePath, count }));

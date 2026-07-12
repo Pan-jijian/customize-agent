@@ -1042,6 +1042,6 @@ ${resultsText}
   }
 
   private normalizeRelativePath(relativePath: string): string {
-    return relativePath.replace(/\\/gu, '/').split(path.sep).join('/').replace(/^\/+/, '');
+    return relativePath.replace(/\\/gu, '/').split(path.sep).join('/').replace(/^\/+/, '').replace(/\/+/gu, '/');
   }
 }
