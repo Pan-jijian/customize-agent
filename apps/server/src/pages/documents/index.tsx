@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, ReloadOutlined, CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined } from '@ant-design/icons';
-import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentSpecs, getDocumentTemplates, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentDraftChapter, type DocumentRole, type DocumentSpecPackage, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig } from '@/lib/api';
+import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentDraftChapter, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const { TextArea } = Input;
@@ -58,7 +58,6 @@ export default function DocumentsPage() {
   const [templateId, setTemplateId] = useState('construction-organization-design');
   const [roles, setRoles] = useState<DocumentRole[]>([]);
   const [roleConfigs, setRoleConfigs] = useState<ProjectRoleConfig[]>([]);
-  const [documentSpecs, setDocumentSpecs] = useState<DocumentSpecPackage[]>([]);
   const [pageLoading, setPageLoading] = useState(true);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState<GeneratedDocumentDraft | null>(null);
@@ -98,7 +97,6 @@ export default function DocumentsPage() {
     Promise.all([
       getDocumentTemplates().then(d => { setTemplates(d.templates); setTemplateId(d.templates[0]?.id ?? 'construction-organization-design'); }),
       getDocumentRoles().then(d => { setRoles(d.roles); setRoleConfigs(d.configs); }),
-      getDocumentSpecs().then(d => setDocumentSpecs(d.specs)),
       loadDrafts(),
     ]).catch(() => message.error(t('common.error'))).finally(() => setPageLoading(false));
   }, [message, t]);
@@ -128,7 +126,6 @@ export default function DocumentsPage() {
 
   const currentTemplate = useMemo(() => templates.find(t => t.id === templateId), [templates, templateId]);
   const roleConfigOptions = roleConfigs.map(c => ({ label: c.name, value: c.id }));
-  const documentSpecOptions = documentSpecs.map(s => ({ label: s.name, value: s.id }));
   const activeFlowIndex = Math.max(0, flowSteps.findIndex(s => s.key === activeFlowKey));
 
   const openDrawerForWorkflow = (id: string) => {
@@ -163,23 +160,22 @@ export default function DocumentsPage() {
 
   const subSteps = (items: string[]): FlowSubStep[] => items.map((t, i) => ({ key: `sub-${i}`, title: t, status: 'wait' as FlowStepStatus }));
   const createInitialFlowSteps = (tpl = currentTemplate): FlowStep[] => {
-    const spec = documentSpecs.find(s => s.id === tpl?.documentSpecId);
     const cfg = roleConfigs.find(c => c.id === tpl?.projectRoleConfigId);
     const fns = (cfg?.fileRoles || []).map(r => roles.find(x => x.id === r.roleId)?.name || r.roleId);
     const pns = (cfg?.promptRoles || []).map(r => roles.find(x => x.id === r.roleId)?.name || r.roleId);
-    const facts = spec?.factFields.map(f => f.name) || tpl?.chapters.flatMap(c => c.requiredFacts) || [];
+    const facts = tpl?.chapters.flatMap(c => c.requiredFacts) || [];
     const chs = tpl?.chapters.map(c => c.title) || [];
     const hasAsset = pns.some(n => /封面|图片|资源|cover|image/iu.test(n));
     return [
-      { key: 'prepare', title: t('documents.flowPrepare'), description: `读取"${tpl?.name || '当前模板'}"并创建后台生成任务`, status: 'process', icon: <FileTextOutlined />, subSteps: subSteps(['读取模板参数', tpl?.documentSpecId ? `加载规范包：${spec?.name || tpl.documentSpecId}` : '未绑定规范包，使用模板章节要求', '创建后台生成任务']) },
+      { key: 'prepare', title: t('documents.flowPrepare'), description: `读取"${tpl?.name || '当前模板'}"并创建后台生成任务`, status: 'process', icon: <FileTextOutlined />, subSteps: subSteps(['读取模板参数', '后台自动生成文档规范', '创建后台生成任务']) },
       { key: 'role_binding', title: '动态角色配置绑定', description: `绑定 ${fns.length} 个文件角色、${pns.length} 个提示词角色`, status: 'wait', icon: <ApartmentOutlined />, subSteps: subSteps([...(fns.length ? fns.map(n => `文件角色：${n}`) : ['没有文件角色，使用模板绑定文件']), ...(pns.length ? pns.map(n => `提示词角色：${n}`) : ['没有提示词角色，使用默认生成策略'])].slice(0, 10)) },
       { key: 'context_recall', title: '短期/长期上下文召回', description: '从项目记忆中召回用户偏好、历史纠偏和已生成文档摘要，并注入生成提示词', status: 'wait', icon: <BulbOutlined />, subSteps: subSteps(['召回相关项目记忆', '注入章节生成提示词', '生成完成后沉淀新记忆']) },
-      { key: 'knowledge_retrieval', title: '知识库证据检索', description: `按 ${chs.length || '动态'} 个规范章节检索文本、文档、表格、图片、图纸和附件`, status: 'wait', icon: <DatabaseOutlined />, subSteps: subSteps(chs.length ? chs.slice(0, 10).map(n => `检索章节：${n}`) : ['按规范包动态章节规则检索证据']) },
+      { key: 'knowledge_retrieval', title: '知识库证据检索', description: `按 ${chs.length || '动态'} 个模板章节检索文本、文档、表格、图片、图纸和附件`, status: 'wait', icon: <DatabaseOutlined />, subSteps: subSteps(chs.length ? chs.slice(0, 10).map(n => `检索章节：${n}`) : ['按后台自动规范检索证据']) },
       { key: 'file_understanding', title: '多类型文件理解', description: '按文件角色处理文本、PDF/Word、表格、图片、图纸和附件', status: 'wait', icon: <EyeOutlined />, subSteps: subSteps(['识别文件类型和角色', '构建结构化资源证据包', '必要时调用多模态文件理解']) },
       { key: 'fact_extraction', title: '动态 schema 事实抽取', description: `按 ${facts.length} 个规范/章节事实字段抽取并检测冲突`, status: 'wait', icon: <BulbOutlined />, subSteps: subSteps(facts.length ? facts.slice(0, 10).map(n => `抽取事实：${n}`) : ['抽取模板要求的事实', '合并来源和角色', '检测事实冲突']) },
-      { key: 'chapter_generation', title: '章节生成', description: spec?.chapterMode === 'fixed' ? `按 ${chs.length} 个规范章节逐章生成` : '按规范包动态章节规则生成', status: 'wait', icon: <FormOutlined />, subSteps: subSteps(chs.length ? chs.slice(0, 10).map(n => `生成：${n}`) : ['构造动态章节提示词', '等待 LLM 生成', '整理章节证据']) },
+      { key: 'chapter_generation', title: '章节生成', description: chs.length ? `按 ${chs.length} 个模板章节逐章生成` : '按后台自动规范生成', status: 'wait', icon: <FormOutlined />, subSteps: subSteps(chs.length ? chs.slice(0, 10).map(n => `生成：${n}`) : ['构造动态章节提示词', '等待 LLM 生成', '整理章节证据']) },
       ...(hasAsset ? [{ key: 'asset_generation' as const, title: '生成资源处理', description: '根据资源/图片提示词生成或登记本地资源', status: 'wait' as const, icon: <PictureOutlined />, subSteps: subSteps(['生成资源提示词', '保存到 generatedDocuments/assets', '登记资源元数据']) }] : []),
-      { key: 'validation', title: '规范包与门禁校验', description: spec ? `执行 ${spec.gateRules.length} 条门禁规则` : '执行模板基础校验', status: 'wait', icon: <SafetyCertificateOutlined />, subSteps: subSteps([...(spec?.factFields.filter(f => f.required).map(f => `必填事实：${f.name}`) || []), ...(spec?.gateRules.map(r => `门禁：${r.name}`) || ['检查章节证据', '检查缺失项', '检查导出门禁'])].slice(0, 10)) },
+      { key: 'validation', title: '后台规范与门禁校验', description: '执行后台自动规范、资料满足率和导出门禁校验', status: 'wait', icon: <SafetyCertificateOutlined />, subSteps: subSteps(['检查项目资料摘要', '检查模板角色满足率', '检查章节证据', '检查导出门禁']) },
       { key: 'formatting', title: t('documents.flowFormatting'), description: '整理标题、表格、图片、附件引用和正式 Markdown', status: 'wait', icon: <CheckCircleOutlined />, subSteps: subSteps(['整理标题层级', '整理多类型资源引用', '生成正式 Markdown']) },
       { key: 'llm_review', title: 'LLM 审查优化', description: '再次使用动态 schema、角色和结构化证据审查优化初稿', status: 'wait', icon: <ThunderboltOutlined />, subSteps: subSteps(['构造审查提示词', '检查事实来源和冲突', '回填优化后的 Markdown']) },
       { key: 'export_ready', title: '导出就绪', description: '确认 Markdown/HTML/DOCX/PDF 可导出', status: 'wait', icon: <FileDoneOutlined />, subSteps: subSteps(['生成导出检查清单', '确认阻断项', '准备导出格式']) },
@@ -295,7 +291,7 @@ export default function DocumentsPage() {
   const finishPrev = (key: string) => { setFlowSteps(prev => { const idx = prev.findIndex(s => s.key === key); const n = prev.map((s, i) => i < idx && s.status !== 'error' ? { ...s, status: 'finish' as const, subSteps: updSubs(s, 'finish') } : s); setSnap(n, key); return n; }); };
 
   const openEditor = (tpl?: DocumentTemplate) => {
-    const value = tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, documentSpecId: undefined, chapters: [] };
+    const value = tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, chapters: [] };
     form.resetFields();
     form.setFieldsValue(value);
     setTemplateModalOpen(true);
@@ -355,7 +351,7 @@ export default function DocumentsPage() {
     const promise = generateDocumentDraft({ templateId });
     activeGenerationTask = { id: Date.now(), templateId, loading: true, flowSteps: initial, activeFlowKey: 'prepare', promise, listeners: new Set() };
     setFlowSteps(initial); setActiveFlowKey('prepare');
-    const preview = [{ k: 'role_binding', m: '正在读取模板、文件角色、提示词角色和文档规范包…' }, { k: 'knowledge_retrieval', m: '正在从知识库检索章节证据、表格、图片和附件…' }, { k: 'file_understanding', m: '正在准备多模态文件理解…' }, { k: 'fact_extraction', m: '正在等待 LLM 事实抽取和后续章节生成结果…' }];
+    const preview = [{ k: 'role_binding', m: '正在读取模板、文件角色、提示词角色并生成后台文档规范…' }, { k: 'knowledge_retrieval', m: '正在从知识库检索章节证据、表格、图片和附件…' }, { k: 'file_understanding', m: '正在准备多模态文件理解…' }, { k: 'fact_extraction', m: '正在等待 LLM 事实抽取和后续章节生成结果…' }];
     const timers = preview.map((x, i) => window.setTimeout(() => { finishPrev(x.k); updFlow(x.k, 'process', x.m); }, 600 + i * 900));
     try {
       const started = await promise;
@@ -452,8 +448,7 @@ export default function DocumentsPage() {
     try {
       const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
       const ext = fmt === 'markdown' ? 'md' : fmt;
-      const wp = documentSpecs.find(s => s.id === currentTemplate?.documentSpecId)?.wordTemplatePath;
-      const payload = currentDocumentId ? { documentId: currentDocumentId, title: draft.title, format: fmt, enforceGate: false, exportGate: draft.exportGate, wordTemplatePath: wp } : { title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, wordTemplatePath: wp, useClientMarkdown: true };
+      const payload = currentDocumentId ? { documentId: currentDocumentId, title: draft.title, format: fmt, enforceGate: false, exportGate: draft.exportGate } : { title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, useClientMarkdown: true };
       const blob = await exportDocument(payload);
       dl(blob, `${draft.title}.${ext}`, mimes[fmt]);
     } catch (e) { message.error(e instanceof Error ? e.message : t('common.error')); } finally { setExporting(null); }
@@ -525,9 +520,8 @@ export default function DocumentsPage() {
                             <Text strong>{templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? '运行前检查未通过' : templateValidations[item.id]!.issues.length ? '运行前检查存在警告' : '运行前检查通过'}</Text>
                             <Tag color="blue">文件角色 {templateValidations[item.id]!.fileDiagnostics.length}</Tag>
                             <Tag color="purple">提示词角色 {templateValidations[item.id]!.promptDiagnostics.length}</Tag>
-                            {templateValidations[item.id]!.spec && <Tag color="cyan">规范包 {templateValidations[item.id]!.spec!.name}</Tag>}
                           </Space>
-                          {templateValidations[item.id]!.issues.length > 0 ? templateValidations[item.id]!.issues.map(issue => <Alert key={issue.message} type={issue.level === 'error' ? 'error' : 'warning'} message={issue.message} showIcon />) : <Alert type="success" message="文件角色、提示词角色和规范包检查通过，可以运行。" showIcon />}
+                          {templateValidations[item.id]!.issues.length > 0 ? templateValidations[item.id]!.issues.map(issue => <Alert key={issue.message} type={issue.level === 'error' ? 'error' : 'warning'} message={issue.message} showIcon />) : <Alert type="success" message="文件角色、提示词角色和后台自动规范检查通过，可以运行。" showIcon />}
                           {!templateValidations[item.id]!.issues.some(issue => issue.level === 'error') && templateValidations[item.id]!.issues.length > 0 && (
                             <div><Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => openDrawerForWorkflow(item.id)}>忽略警告并继续运行</Button></div>
                           )}
@@ -705,10 +699,7 @@ export default function DocumentsPage() {
           <Form.Item name="projectRoleConfigId" label={t('documents.projectRoleConfig')} rules={[{ required: true, message: t('documents.projectRoleConfigRequired') }]}>
             <Select showSearch placeholder={t('documents.projectRoleConfigRequired')} options={roleConfigOptions} />
           </Form.Item>
-          <Form.Item name="documentSpecId" label={t('documents.documentSpec')} rules={[{ required: true, message: t('documents.documentSpecPlaceholder') }]}>
-            <Select showSearch placeholder={t('documents.documentSpecPlaceholder')} options={documentSpecOptions} />
-          </Form.Item>
-          <Alert type="info" showIcon message="章节、事实字段和门禁规则统一由文档规范包管理。" />
+          <Alert type="info" showIcon message="文档规范由后台根据模板、提示词和角色绑定自动生成，无需手动维护规范包。" />
         </Form>
       </Drawer>
     </div>

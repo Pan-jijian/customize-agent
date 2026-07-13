@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useAppTranslations } from '@/components/Layout';
 import { Card, Row, Col, Statistic, Progress, Tag, Space, Button } from 'antd';
-import { CloudServerOutlined, ApiOutlined, ThunderboltOutlined, CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined, FileTextOutlined, HddOutlined, FormOutlined, SafetyOutlined, LayoutOutlined, NodeIndexOutlined, RobotOutlined } from '@ant-design/icons';
-import { getSystemStats, type SystemStats, getProviders, getDocumentRoles, getDocumentSpecs, getDocumentTemplates, getEmbeddingConfig, type EmbeddingConfig } from '@/lib/api';
+import { CloudServerOutlined, ApiOutlined, ThunderboltOutlined, CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined, FileTextOutlined, HddOutlined, FormOutlined, LayoutOutlined, NodeIndexOutlined, RobotOutlined } from '@ant-design/icons';
+import { getSystemStats, type SystemStats, getProviders, getDocumentRoles, getDocumentTemplates, getEmbeddingConfig, type EmbeddingConfig } from '@/lib/api';
 
 export default function OverviewPage() {
   const t = useAppTranslations();
@@ -11,18 +11,16 @@ export default function OverviewPage() {
   const [providerCount, setProviderCount] = useState(0);
   const [fileRoleCount, setFileRoleCount] = useState(0);
   const [promptRoleCount, setPromptRoleCount] = useState(0);
-  const [specCount, setSpecCount] = useState(0);
   const [templateCount, setTemplateCount] = useState(0);
   const [embeddingConfig, setEmbeddingConfig] = useState<EmbeddingConfig | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, provs, rolesResult, specsResult, templatesResult, embConfig] = await Promise.all([
+      const [s, provs, rolesResult, templatesResult, embConfig] = await Promise.all([
         getSystemStats(),
         getProviders().catch(() => []),
         getDocumentRoles().catch(() => ({ roles: [], configs: [] })),
-        getDocumentSpecs().catch(() => ({ specs: [] })),
         getDocumentTemplates().catch(() => ({ templates: [] })),
         getEmbeddingConfig().catch(() => null),
       ]);
@@ -31,7 +29,6 @@ export default function OverviewPage() {
       const roles = Array.isArray(rolesResult.roles) ? rolesResult.roles : [];
       setFileRoleCount(roles.filter(r => r.type === 'file').length);
       setPromptRoleCount(roles.filter(r => r.type === 'prompt').length);
-      setSpecCount(Array.isArray(specsResult.specs) ? specsResult.specs.length : 0);
       setTemplateCount(Array.isArray(templatesResult.templates) ? templatesResult.templates.length : 0);
       setEmbeddingConfig(embConfig);
     } catch { /* */ } finally { setLoading(false); }
@@ -105,9 +102,6 @@ export default function OverviewPage() {
           </Col>
           <Col xs={24} sm={12} md={8} lg={4}>
             <Card size="small" style={{ height: '100%' }}><Statistic title="提示词角色" value={promptRoleCount} prefix={<FormOutlined style={{ color: 'var(--colorWarning)' }} />} /></Card>
-          </Col>
-          <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small" style={{ height: '100%' }}><Statistic title="文档规范包" value={specCount} prefix={<SafetyOutlined style={{ color: 'var(--colorOk)' }} />} /></Card>
           </Col>
           <Col xs={24} sm={12} md={8} lg={4}>
             <Card size="small" style={{ height: '100%' }}><Statistic title="模板" value={templateCount} prefix={<LayoutOutlined style={{ color: 'var(--colorDanger)' }} />} /></Card>

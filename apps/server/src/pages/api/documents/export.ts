@@ -97,8 +97,23 @@ function inlineLocalImages(html: string, projectRoot = getProjectRoot()) {
   });
 }
 
+function normalizeExportUnits(input: string) {
+  const normalizePower = (value: string) => value
+    .replace(/m\s*<sup>\s*2\s*<\/sup>/giu, 'm²')
+    .replace(/m\s*<sup>\s*3\s*<\/sup>/giu, 'm³')
+    .replace(/m\s*\^\s*2/giu, 'm²')
+    .replace(/m\s*\^\s*3/giu, 'm³')
+    .replace(/㎡/gu, 'm²')
+    .replace(/㎥/gu, 'm³')
+    .replace(/(?<=\d)m\s*2(?![\p{L}\p{N}_])/giu, 'm²')
+    .replace(/(?<=\d)m\s*3(?![\p{L}\p{N}_])/giu, 'm³')
+    .replace(/(?<![\p{L}\p{N}_])m\s*2(?![\p{L}\p{N}_])/giu, 'm²')
+    .replace(/(?<![\p{L}\p{N}_])m\s*3(?![\p{L}\p{N}_])/giu, 'm³');
+  return normalizePower(input);
+}
+
 function stripInlineMarkdown(input: string) {
-  return input
+  return normalizeExportUnits(input)
     .replace(/!\[[^\]]*\]\([^)]*\)/gu, '')
     .replace(/\[([^\]]+)\]\([^)]*\)/gu, '$1')
     .replace(/[*_`]/gu, '')
@@ -107,12 +122,16 @@ function stripInlineMarkdown(input: string) {
     .trim();
 }
 
-function pointsToHalfPoints(value: string | undefined, fallback: number) {
+function pointsValue(value: string | undefined, fallback: number) {
   const match = /([\d.]+)\s*(pt|px)?/iu.exec(value || '');
-  if (!match) return fallback * 2;
+  if (!match) return fallback;
   const number = Number(match[1]);
-  if (!Number.isFinite(number)) return fallback * 2;
-  return Math.round((match[2]?.toLowerCase() === 'px' ? number * 0.75 : number) * 2);
+  if (!Number.isFinite(number)) return fallback;
+  return match[2]?.toLowerCase() === 'px' ? number * 0.75 : number;
+}
+
+function pointsCss(value: string | undefined, fallback: number) {
+  return `${pointsValue(value, fallback)}pt`;
 }
 
 function lengthToTwips(value: string | undefined, fallbackCm: number) {
@@ -127,14 +146,41 @@ function lengthToTwips(value: string | undefined, fallbackCm: number) {
   return Math.round(number * 567);
 }
 
-function docxRun(text: string, options: { bold?: boolean; size?: number } = {}) {
-  const props = [options.bold ? '<w:b/>' : '', options.size ? `<w:sz w:val="${options.size}"/><w:szCs w:val="${options.size}"/>` : ''].filter(Boolean).join('');
-  return `<w:r>${props ? `<w:rPr>${props}</w:rPr>` : ''}<w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`;
+function resolveExportStyle(settings?: DocumentExportSettings) {
+  const raw = exportStyle(settings);
+  const bodyPt = pointsValue(raw.bodySize, 14);
+  const titlePt = pointsValue(raw.titleSize, 16);
+  const linePt = pointsValue(raw.lineHeight, 22);
+  return {
+    ...raw,
+    bodyPt,
+    titlePt,
+    linePt,
+    bodyHalfPoints: Math.round(bodyPt * 2),
+    titleHalfPoints: Math.round(titlePt * 2),
+    lineTwips: Math.round(linePt * 20),
+    fontEastAsia: '宋体',
+    fontAscii: 'SimSun',
+    bodyCss: `${bodyPt}pt`,
+    titleCss: `${titlePt}pt`,
+    lineCss: `${linePt}pt`,
+  };
 }
 
-function docxParagraph(text: string, options: { bold?: boolean; size?: number; align?: 'center'; spacingAfter?: number; pageBreak?: boolean } = {}) {
+function docxRun(text: string, options: { bold?: boolean; size?: number; fontEastAsia?: string; fontAscii?: string } = {}) {
+  const fontEastAsia = options.fontEastAsia || '宋体';
+  const fontAscii = options.fontAscii || 'SimSun';
+  const props = [
+    `<w:rFonts w:ascii="${escapeXml(fontAscii)}" w:hAnsi="${escapeXml(fontAscii)}" w:eastAsia="${escapeXml(fontEastAsia)}" w:cs="${escapeXml(fontAscii)}"/>`,
+    options.bold ? '<w:b/>' : '',
+    options.size ? `<w:sz w:val="${options.size}"/><w:szCs w:val="${options.size}"/>` : '',
+  ].filter(Boolean).join('');
+  return `<w:r><w:rPr>${props}</w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`;
+}
+
+function docxParagraph(text: string, options: { bold?: boolean; size?: number; align?: 'center'; spacingAfter?: number; pageBreak?: boolean; line?: number; fontEastAsia?: string; fontAscii?: string; indentLeft?: number } = {}) {
   if (options.pageBreak) return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
-  const pPr = [options.align ? `<w:jc w:val="${options.align}"/>` : '', `<w:spacing w:line="440" w:lineRule="exact" w:after="${options.spacingAfter ?? 120}"/>`].filter(Boolean).join('');
+  const pPr = [options.align ? `<w:jc w:val="${options.align}"/>` : '', options.indentLeft ? `<w:ind w:left="${options.indentLeft}"/>` : '', `<w:spacing w:line="${options.line ?? 440}" w:lineRule="exact" w:after="${options.spacingAfter ?? 120}"/>`].filter(Boolean).join('');
   return `<w:p><w:pPr>${pPr}</w:pPr>${docxRun(text, options)}</w:p>`;
 }
 
@@ -149,29 +195,51 @@ function parseMarkdownTable(lines: string[], start: number) {
   return { rows, next: index };
 }
 
-function docxTable(rows: string[][], bodySize: number) {
-  const cells = (row: string[]) => row.map(cell => `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>${docxParagraph(cell, { size: bodySize })}</w:tc>`).join('');
+function docxTable(rows: string[][], style: ReturnType<typeof resolveExportStyle>) {
+  const cells = (row: string[]) => row.map(cell => `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/><w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tcMar></w:tcPr>${docxParagraph(cell, { size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingAfter: 0 })}</w:tc>`).join('');
   return `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders><w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders></w:tblPr>${rows.map(row => `<w:tr>${cells(row)}</w:tr>`).join('')}</w:tbl>`;
 }
 
+function isTocSectionLine(line: string) {
+  return /^\d+\.\d+\s+\S/u.test(line);
+}
+
+function docxTocParagraph(line: string, style: ReturnType<typeof resolveExportStyle>) {
+  const sectionLine = isTocSectionLine(line);
+  return docxParagraph(stripInlineMarkdown(line), { bold: !sectionLine, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingAfter: sectionLine ? 40 : 80, indentLeft: sectionLine ? 420 : 0 });
+}
+
 function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings) {
-  const style = exportStyle(settings);
-  const titleSize = pointsToHalfPoints(style.titleSize, 16);
-  const bodySize = pointsToHalfPoints(style.bodySize, 14);
-  const lines = markdown.replace(/<div class="page-break"><\/div>/gu, '\n[[PAGE_BREAK]]\n').split('\n');
+  const style = resolveExportStyle(settings);
+  const titleSize = style.titleHalfPoints;
+  const bodySize = style.bodyHalfPoints;
+  const normalizedMarkdown = normalizeExportUnits(markdown);
+  const lines = normalizedMarkdown.replace(/<div class="page-break"><\/div>/gu, '\n[[PAGE_BREAK]]\n').split('\n');
   const blocks: string[] = [];
+  let inToc = false;
   for (let index = 0; index < lines.length;) {
     const line = lines[index].trim();
     if (!line) { index += 1; continue; }
-    if (line === '[[PAGE_BREAK]]') { blocks.push(docxParagraph('', { pageBreak: true })); index += 1; continue; }
+    if (line === '[[PAGE_BREAK]]') { inToc = false; blocks.push(docxParagraph('', { pageBreak: true })); index += 1; continue; }
     const table = parseMarkdownTable(lines, index);
-    if (table) { blocks.push(docxTable(table.rows, bodySize)); index = table.next; continue; }
+    if (table) { blocks.push(docxTable(table.rows, style)); index = table.next; continue; }
     const heading = /^(#{1,3})\s+(.+)$/u.exec(line);
-    if (heading) { blocks.push(docxParagraph(stripInlineMarkdown(heading[2]), { bold: true, size: titleSize, align: heading[1].length === 1 ? 'center' : undefined, spacingAfter: 160 })); index += 1; continue; }
-    blocks.push(docxParagraph(stripInlineMarkdown(line), { size: bodySize }));
+    if (heading) {
+      const headingText = stripInlineMarkdown(heading[2]);
+      inToc = headingText === '目录';
+      blocks.push(docxParagraph(headingText, { bold: true, size: titleSize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: heading[1].length === 1 ? 'center' : undefined, spacingAfter: 160 }));
+      index += 1;
+      continue;
+    }
+    blocks.push(inToc ? docxTocParagraph(line, style) : docxParagraph(stripInlineMarkdown(line), { size: bodySize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii }));
     index += 1;
   }
   return blocks.join('');
+}
+
+function docxStylesXml(settings?: DocumentExportSettings) {
+  const style = resolveExportStyle(settings);
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="${escapeXml(style.fontAscii)}" w:hAnsi="${escapeXml(style.fontAscii)}" w:eastAsia="${escapeXml(style.fontEastAsia)}" w:cs="${escapeXml(style.fontAscii)}"/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="${escapeXml(style.fontAscii)}" w:hAnsi="${escapeXml(style.fontAscii)}" w:eastAsia="${escapeXml(style.fontEastAsia)}" w:cs="${escapeXml(style.fontAscii)}"/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:qFormat/><w:rPr><w:b/><w:rFonts w:ascii="${escapeXml(style.fontAscii)}" w:hAnsi="${escapeXml(style.fontAscii)}" w:eastAsia="${escapeXml(style.fontEastAsia)}" w:cs="${escapeXml(style.fontAscii)}"/><w:sz w:val="${style.titleHalfPoints}"/><w:szCs w:val="${style.titleHalfPoints}"/></w:rPr><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="160"/></w:pPr></w:style></w:styles>`;
 }
 
 async function buildDocx(title: string, markdown: string, settings?: DocumentExportSettings, templatePath?: string) {
@@ -182,15 +250,35 @@ async function buildDocx(title: string, markdown: string, settings?: DocumentExp
     if (documentFile) {
       const xml = await documentFile.async('string');
       zip.file('word/document.xml', xml.replace(/\{\{title\}\}/gu, escapeXml(title)).replace(/\{\{content\}\}/gu, contentXml));
+      zip.file('word/styles.xml', docxStylesXml(settings));
+      const relsPath = 'word/_rels/document.xml.rels';
+      const relsFile = zip.file(relsPath);
+      if (relsFile) {
+        const rels = await relsFile.async('string');
+        if (!rels.includes('officeDocument/2006/relationships/styles')) {
+          zip.file(relsPath, rels.replace('</Relationships>', '<Relationship Id="rStyle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'));
+        }
+      } else {
+        zip.folder('word')?.folder('_rels')?.file('document.xml.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rStyle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+      }
+      const contentTypesFile = zip.file('[Content_Types].xml');
+      if (contentTypesFile) {
+        const contentTypes = await contentTypesFile.async('string');
+        if (!contentTypes.includes('/word/styles.xml')) {
+          zip.file('[Content_Types].xml', contentTypes.replace('</Types>', '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>'));
+        }
+      }
       return zip.generateAsync({ type: 'nodebuffer' });
     }
   }
   const page = settings?.page || {};
   const zip = new JSZip();
-  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  const style = resolveExportStyle(settings);
+  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
   zip.folder('_rels')?.file('.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
-  zip.folder('word')?.folder('_rels')?.file('document.xml.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>');
-  zip.folder('word')?.file('document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${docxParagraph(title, { bold: true, size: pointsToHalfPoints(settings?.typography?.titleSize, 16), align: 'center', spacingAfter: 240 })}${contentXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="${lengthToTwips(page.marginTop, 2.5)}" w:right="${lengthToTwips(page.marginRight, 2)}" w:bottom="${lengthToTwips(page.marginBottom, 2)}" w:left="${lengthToTwips(page.marginLeft, 2)}"/></w:sectPr></w:body></w:document>`);
+  zip.folder('word')?.folder('_rels')?.file('document.xml.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rStyle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+  zip.folder('word')?.file('styles.xml', docxStylesXml(settings));
+  zip.folder('word')?.file('document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${docxParagraph(title, { bold: true, size: style.titleHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: 'center', spacingAfter: 240 })}${contentXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="${lengthToTwips(page.marginTop, 2.5)}" w:right="${lengthToTwips(page.marginRight, 2)}" w:bottom="${lengthToTwips(page.marginBottom, 2)}" w:left="${lengthToTwips(page.marginLeft, 2)}"/></w:sectPr></w:body></w:document>`);
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
@@ -207,16 +295,27 @@ function exportStyle(settings?: DocumentExportSettings) {
   const marginRight = cssValue(page.marginRight, '18mm');
   const marginBottom = cssValue(page.marginBottom, '22mm');
   const marginLeft = cssValue(page.marginLeft, '18mm');
-  const fontFamily = cssValue(typography.fontFamily, '"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif');
-  const lineHeight = cssValue(typography.lineHeight, '1.75');
-  const titleSize = cssValue(typography.titleSize, '28px');
-  const bodySize = cssValue(typography.bodySize, '14px');
+  const fontFamily = cssValue(typography.fontFamily, 'SimSun, 宋体, serif');
+  const lineHeight = pointsCss(typography.lineHeight, 22);
+  const titleSize = pointsCss(typography.titleSize, 16);
+  const bodySize = pointsCss(typography.bodySize, 14);
   return { paper, marginTop, marginRight, marginBottom, marginLeft, fontFamily, lineHeight, titleSize, bodySize };
 }
 
+function enhanceTocHtml(body: string) {
+  return body.replace(/(<h2[^>]*>\s*目录\s*<\/h2>)([\s\S]*?)(<div class="page-break"><\/div>)/u, (_match, heading: string, content: string, pageBreak: string) => {
+    const normalized = content.replace(/<ol>\s*([\s\S]*?)\s*<\/ol>/u, (_ol, listContent: string) => listContent)
+      .replace(/<li>\s*([^<]+?)\s*<\/li>/gu, '<p>$1</p>')
+      .replace(/<p>\s*(\d+\.\d+\s+[^<]+)<\/p>/gu, '<p class="toc-section">$1</p>')
+      .replace(/<p>\s*((?:第[一二三四五六七八九十百千万]+章|\d+\.\s*第[一二三四五六七八九十百千万]+章)[^<]*)<\/p>/gu, '<p class="toc-chapter">$1</p>');
+    return `<section class="document-toc">${heading}${normalized}</section>${pageBreak}`;
+  });
+}
+
 function htmlShell(title: string, body: string, settings?: DocumentExportSettings) {
-  const style = exportStyle(settings);
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:${style.paper};margin:${style.marginTop} ${style.marginRight} ${style.marginBottom} ${style.marginLeft}}body{font-family:${style.fontFamily};line-height:${style.lineHeight};color:#111827;font-size:${style.bodySize}}h1{text-align:center;font-size:${style.titleSize};margin-top:80px}h2{font-size:${style.titleSize};border-bottom:1px solid #d1d5db;padding-bottom:6px;margin-top:28px;page-break-after:avoid}h3{font-size:${style.titleSize};margin-top:20px}img{display:block;max-width:100%;max-height:520px;object-fit:contain;margin:12px auto;page-break-inside:avoid}table{width:100%;border-collapse:collapse;page-break-inside:auto}tr{page-break-inside:avoid;page-break-after:auto}th,td{border:1px solid #6b7280;padding:6px 8px;vertical-align:top}th{background:#f3f4f6}pre{white-space:pre-wrap}.document-cover{min-height:720px;display:flex;flex-direction:column;justify-content:center}.document-cover h1{margin-top:0}.page-break{page-break-after:always;height:0}</style></head><body>${body}</body></html>`;
+  const style = resolveExportStyle(settings);
+  const enhancedBody = enhanceTocHtml(body);
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:${style.paper};margin:${style.marginTop} ${style.marginRight} ${style.marginBottom} ${style.marginLeft}}html,body{margin:0;padding:0}body,p,div,li,td,th,span,section,article{font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};color:#111827}body{font-variant-east-asian:normal;text-rendering:geometricPrecision}p{margin:0 0 8pt 0;text-align:justify;text-justify:inter-ideograph}ul,ol{margin:0 0 8pt 2em;padding:0}h1,h2,h3{font-family:${style.fontFamily};font-size:${style.titleCss};line-height:${style.lineCss};font-weight:700;color:#111827;page-break-after:avoid}h1{text-align:center;margin:80px 0 28pt 0}h2{border-bottom:1px solid #d1d5db;padding-bottom:6px;margin:22pt 0 12pt 0}h3{margin:16pt 0 8pt 0}.document-toc p{margin:0 0 4pt 0;text-align:left}.document-toc .toc-chapter{font-weight:700;margin-top:8pt}.document-toc .toc-section{margin-left:2em}img{display:block;max-width:100%;max-height:520px;object-fit:contain;margin:12px auto;page-break-inside:avoid}table{width:100%;border-collapse:collapse;page-break-inside:auto;margin:8pt 0}tr{page-break-inside:avoid;page-break-after:auto}th,td{font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};border:1px solid #6b7280;padding:4pt 6pt;vertical-align:top}th{background:#f3f4f6;font-weight:700}pre{white-space:pre-wrap;font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss}}.document-cover{min-height:720px;display:flex;flex-direction:column;justify-content:center}.document-cover h1{margin-top:0}.page-break{page-break-after:always;height:0}</style></head><body>${enhancedBody}</body></html>`;
 }
 
 /** 判断问题是否为阻止导出的严重问题（非警告类问题） */
@@ -324,8 +423,8 @@ async function renderPdfBuffer(html: string, settings?: DocumentExportSettings) 
         await page.setContent(html, { waitUntil: 'load' });
         await page.waitForFunction(() => Array.from(document.images).every(img => img.complete), undefined, { timeout: 10_000 }).catch(() => undefined);
         await page.emulateMedia({ media: 'print' });
-        const style = exportStyle(settings);
-        const pdf = await page.pdf({ format: style.paper as 'A4', printBackground: true, preferCSSPageSize: true, margin: { top: style.marginTop, right: style.marginRight, bottom: style.marginBottom, left: style.marginLeft }, displayHeaderFooter: true, headerTemplate: '<div></div>', footerTemplate: '<div style="font-size:9px;width:100%;text-align:center;color:#666;">第 <span class="pageNumber"></span> 页 / 共 <span class="totalPages"></span> 页</div>' });
+        const style = resolveExportStyle(settings);
+        const pdf = await page.pdf({ format: style.paper as 'A4', printBackground: true, preferCSSPageSize: true, margin: { top: style.marginTop, right: style.marginRight, bottom: style.marginBottom, left: style.marginLeft }, displayHeaderFooter: true, headerTemplate: '<div></div>', footerTemplate: `<div style="font-family:${style.fontFamily};font-size:10.5pt;line-height:12pt;width:100%;text-align:center;color:#666;">第 <span class="pageNumber"></span> 页 / 共 <span class="totalPages"></span> 页</div>` });
         return Buffer.from(pdf);
       } finally {
         await browser.close();
@@ -357,9 +456,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (body.documentId && !record) return res.status(404).json({ error: 'Document not found' });
     const title = body.title || record?.title || 'document';
     const recordMarkdown = record?.editedMarkdown || record?.markdown || record?.draft?.markdown || '';
-    const markdown = body.useClientMarkdown && typeof body.markdown === 'string' ? body.markdown : recordMarkdown || body.markdown || '';
+    const rawMarkdown = body.useClientMarkdown && typeof body.markdown === 'string' ? body.markdown : recordMarkdown || body.markdown || '';
+    const markdown = normalizeExportUnits(rawMarkdown);
     const format = body.format || 'markdown';
-    const exportIssues = validateExportMarkdown(markdown, record?.draft?.markdown || record?.markdown);
+    const exportIssues = validateExportMarkdown(markdown, normalizeExportUnits(record?.draft?.markdown || record?.markdown || ''));
     if (exportIssues.length) return res.status(422).json({ error: 'EXPORT_CONTENT_INVALID', issues: exportIssues });
     const exportGate = record?.draft?.exportGate || body.exportGate;
     // 过滤并检查导出关卡
@@ -400,6 +500,6 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 }
 
-export const __documentExportTest__ = { inlineLocalImages, resolveLocalImagePath };
+export const __documentExportTest__ = { inlineLocalImages, resolveLocalImagePath, normalizeExportUnits, stripInlineMarkdown, enhanceTocHtml };
 
 export default withApiErrorBoundary('api/documents/export', handler);

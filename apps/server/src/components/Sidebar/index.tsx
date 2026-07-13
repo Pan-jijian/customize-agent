@@ -34,7 +34,6 @@ const NAV_ITEMS: NavItem[] = [
   { href: '/models', icon: Cpu, labelKey: 'nav.models' },
   { href: '/prompt', icon: MessageSquare, labelKey: 'nav.promptManagement' },
   { href: '/document-roles', icon: Settings, labelKey: 'nav.documentRoles' },
-  { href: '/document-specs', icon: FileText, labelKey: 'nav.documentSpecs' },
   { href: '/documents', icon: Files, labelKey: 'nav.documents' },
   { href: '/asset-library', icon: FolderOpen, labelKey: 'nav.assetLibrary' },
   {

@@ -16,7 +16,9 @@ async function kbFilesIndexHandler(req: NextApiRequest, res: NextApiResponse) {
     const files = listKnowledgeFiles(projectRoot, { category });
     const total = files.length;
     const paged = files.slice((page - 1) * limit, page * limit);
-    return res.status(200).json({ files: paged, total, page, limit, vectorStatus: { enabled: false, dimension: 0, count: 0 }, initializing: false });
+    const project = await getMultiProjectManager().getProject(projectRoot);
+    const vectorStatus = project.getVectorStatus();
+    return res.status(200).json({ files: paged, total, page, limit, vectorStatus, initializing: false });
   }
 
   if (req.method === 'POST' && req.query.reindex !== '1') return res.status(400).json({ error: 'reindex=1 is required' });

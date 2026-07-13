@@ -287,23 +287,10 @@ export type FileProcessingType = 'rule' | 'project_fact' | 'table' | 'drawing' |
 export interface DocumentRole { id: string; name: string; description: string; type: 'file' | 'prompt'; resourceId?: string; resourceIds?: string[]; builtIn?: boolean; executionType?: PromptExecutionType; processingType?: FileProcessingType; }
 export interface ProjectRoleItem { roleId: string; order: number; }
 export interface ProjectRoleConfig { id: string; name: string; description: string; fileRoles: ProjectRoleItem[]; promptRoles: ProjectRoleItem[]; builtIn?: boolean; }
-export type FactFieldType = 'auto';
-export type ChapterRuleMode = 'fixed' | 'dynamic';
-export interface DynamicChapterRule { source: 'file_outline' | 'file_role' | 'fact_group' | 'table_rows' | 'ai_plan'; sourceRoleIds?: string[]; minChapters?: number; maxChapters?: number; titleStrategy?: 'source_title' | 'field_value' | 'ai_summary' | 'template'; titleTemplate?: string; minWordsPerChapter?: number; requiredFactIds?: string[]; requiredFileRoleIds?: string[]; requiredPromptRoleIds?: string[]; generationHint?: string; }
-export type GateRuleType = string;
-export type GateRuleLevel = 'error' | 'warning' | 'info';
-export type GateRuleSubject = 'document' | 'chapter' | 'fact' | 'file_role' | 'prompt_role' | 'table' | 'image' | 'source';
-export type GateRuleOperator = 'exists' | 'contains' | 'not_contains' | 'regex_match' | 'regex_not_match' | 'min_count' | 'min_length' | 'all_have_source' | 'image_caption_required' | 'table_explanation_required';
-export interface GateRuleEvaluator { subject: GateRuleSubject; operator: GateRuleOperator; target?: string; value?: string; min?: number; }
-export interface DocumentSpecGateType { id: string; name: string; description?: string; builtIn?: boolean; defaultLevel: GateRuleLevel; evaluator: GateRuleEvaluator; }
-export interface DocumentSpecFactField { id: string; name: string; type: FactFieldType; required: boolean; sourceRoleIds?: string[]; extractionHint?: string; validationHint?: string; }
-export interface DocumentSpecChapterRule { id: string; title: string; required: boolean; order: number; minWords?: number; requiredFactIds?: string[]; requiredFileRoleIds?: string[]; requiredPromptRoleIds?: string[]; generationHint?: string; }
-export interface DocumentSpecGateRule { id: string; name: string; type: GateRuleType; level: GateRuleLevel; target?: string; value?: string; evaluator?: GateRuleEvaluator; }
-export interface DocumentSpecPackage { id: string; name: string; description: string; factFields: DocumentSpecFactField[]; chapterMode: ChapterRuleMode; chapterRules: DocumentSpecChapterRule[]; dynamicChapterRule: DynamicChapterRule; gateRules: DocumentSpecGateRule[]; wordTemplatePath?: string; builtIn?: boolean; }
 export interface DocumentExportSettings { page?: { paper?: string; marginTop?: string; marginRight?: string; marginBottom?: string; marginLeft?: string }; typography?: { fontFamily?: string; lineHeight?: string; titleSize?: string; bodySize?: string }; targetPages?: { min?: number; target?: number; max?: number }; }
 export interface DocumentGenerationSettings { targetPages?: { min?: number; target?: number; max?: number }; }
-export interface DocumentTemplate { id: string; name: string; description: string; category: string; outputTitle: string; chapters: DocumentTemplateChapter[]; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; projectRoleConfigId?: string; documentSpecId?: string; promptIds?: string[]; boundFilePaths?: string[]; promptBindings?: PromptBinding[]; fileBindings?: FileBinding[]; builtIn?: boolean; }
-export interface DocumentTemplateValidation { templateId: string; fileDiagnostics: Array<FileBinding & { roleName?: string; exists: boolean; indexed: boolean; chunkCount: number; vectorReady: boolean }>; promptDiagnostics: Array<PromptBinding & { roleName?: string; promptTitle?: string; exists: boolean; contentLength: number }>; spec?: { id: string; name: string; factFields: number; gateRules: number }; issues: Array<{ level: 'error' | 'warning'; message: string }> }
+export interface DocumentTemplate { id: string; name: string; description: string; category: string; outputTitle: string; chapters: DocumentTemplateChapter[]; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; projectRoleConfigId?: string; promptIds?: string[]; boundFilePaths?: string[]; promptBindings?: PromptBinding[]; fileBindings?: FileBinding[]; builtIn?: boolean; }
+export interface DocumentTemplateValidation { templateId: string; fileDiagnostics: Array<FileBinding & { roleName?: string; exists: boolean; indexed: boolean; chunkCount: number; vectorReady: boolean }>; promptDiagnostics: Array<PromptBinding & { roleName?: string; promptTitle?: string; exists: boolean; contentLength: number }>; issues: Array<{ level: 'error' | 'warning'; message: string }> }
 export interface PromptProject { id: string; projectId: string; projectRoot?: string; projectName: string; customizePath: string; content: string; mtime: string; hasFile: boolean; isCurrent: boolean; selected: boolean; source: 'current' | 'project' | 'custom'; }
 export interface DocumentEvidence { chapterId: string; filePath: string; score: number; content: string; roleId?: string; processingType?: string; sectionTitle?: string; source?: string; }
 export interface DocumentDraftChapter { id: string; title: string; content: string; evidence: DocumentEvidence[]; missingFacts: string[]; sections?: string[]; }
@@ -333,19 +320,6 @@ export async function saveProjectRoleConfig(config: ProjectRoleConfig) {
 }
 export async function deleteProjectRoleConfig(id: string) {
   return fetchJson<{ success: boolean; roles: DocumentRole[]; configs: ProjectRoleConfig[] }>(`/api/documents/roles?mode=config&id=${encodeURIComponent(id)}`, { method: 'DELETE' });
-}
-export async function getDocumentSpecs() { return fetchJson<{ specs: DocumentSpecPackage[]; gateTypes: DocumentSpecGateType[] }>('/api/documents/specs'); }
-export async function saveDocumentSpec(spec: DocumentSpecPackage) {
-  return fetchJson<{ spec: DocumentSpecPackage; specs: DocumentSpecPackage[]; gateTypes: DocumentSpecGateType[] }>('/api/documents/specs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(spec) });
-}
-export async function deleteDocumentSpec(id: string) {
-  return fetchJson<{ success: boolean; specs: DocumentSpecPackage[]; gateTypes: DocumentSpecGateType[] }>(`/api/documents/specs?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
-}
-export async function saveDocumentGateType(gateType: DocumentSpecGateType) {
-  return fetchJson<{ gateType: DocumentSpecGateType; specs: DocumentSpecPackage[]; gateTypes: DocumentSpecGateType[] }>('/api/documents/specs?mode=gate-type', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(gateType) });
-}
-export async function deleteDocumentGateType(id: string) {
-  return fetchJson<{ success: boolean; specs: DocumentSpecPackage[]; gateTypes: DocumentSpecGateType[] }>(`/api/documents/specs?mode=gate-type&id=${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 export async function getDocumentTemplates() { return fetchJson<{ templates: DocumentTemplate[] }>('/api/documents/templates'); }
 export async function validateDocumentTemplate(templateId: string) { return fetchJson<{ validation: DocumentTemplateValidation }>(`/api/documents/templates?validate=${encodeURIComponent(templateId)}`); }

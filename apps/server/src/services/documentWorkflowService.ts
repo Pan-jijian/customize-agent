@@ -8,7 +8,15 @@ import { getMultiProjectManager, getProjectRoot, listKnowledgeFiles } from './kb
 import { recallDocumentContexts } from './contextService';
 import { getConfigStore } from '@/services/configService';
 import { getProjectRoleConfig, listDocumentRoles } from './documentRoleService';
-import { getDocumentSpec, type DocumentSpecGateRule, type DocumentSpecPackage, type GateRuleEvaluator } from './documentSpecService';
+import type { AutoDocumentSpecGateRule, AutoDocumentSpecPackage, GateRuleEvaluator } from './autoDocumentSpecTypes';
+import { autoSpecPrompt, getOrCreateAutoDocumentSpec } from './autoDocumentSpecService';
+import { buildProjectMaterialSummary, projectMaterialPrompt } from './projectMaterialService';
+import { resolveTemplateMaterialRoles } from './materialRoleResolver';
+import { evaluateDocumentReadiness, readinessPrompt } from './documentReadinessService';
+import { validateDraftWithAutoSpec } from './documentValidationService';
+import { validateEngineeringSpecialty, validateProjectContamination } from './engineeringDocumentValidationService';
+import { chapterReadinessIssues, evaluateChapterReadiness } from './chapterReadinessService';
+import { validateFactConsistency } from './factConsistencyService';
 import type { KbSearchResult } from '@/lib/api';
 
 export interface DocumentTemplateChapter {
@@ -72,7 +80,6 @@ export interface DocumentTemplate {
   exportSettings?: DocumentExportSettings;
   generationSettings?: DocumentGenerationSettings;
   projectRoleConfigId?: string;
-  documentSpecId?: string;
   promptIds?: string[];
   boundFilePaths?: string[];
   promptBindings?: PromptBinding[];
@@ -246,7 +253,6 @@ function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
     category: template.category || '自定义',
     outputTitle: template.outputTitle || template.name || '业务文档',
     projectRoleConfigId: template.projectRoleConfigId || undefined,
-    documentSpecId: template.documentSpecId || undefined,
     chapters: Array.isArray(template.chapters) && template.chapters.length > 0 ? template.chapters.map((chapter, index) => ({
       id: (chapter.id || `chapter-${index + 1}`).replace(/[^a-zA-Z0-9_-]/gu, '-').slice(0, 80),
       title: chapter.title || `第 ${index + 1} 章`,
@@ -257,7 +263,7 @@ function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
       tableSections: Array.isArray(chapter.tableSections) ? chapter.tableSections.filter(Boolean) : [],
       tableRequirements: Array.isArray(chapter.tableRequirements) ? chapter.tableRequirements.filter(Boolean) : [],
       pinnedEvidenceFilePaths: Array.isArray(chapter.pinnedEvidenceFilePaths) ? chapter.pinnedEvidenceFilePaths.filter(Boolean) : [],
-    })) : template.documentSpecId ? [] : [{ id: 'document', title: template.outputTitle || template.name || '业务文档', purpose: template.description || '', queries: [], requiredFacts: [] }],
+    })) : [{ id: 'document', title: template.outputTitle || template.name || '业务文档', purpose: template.description || '', queries: [], requiredFacts: [] }],
     exportSettings: template.exportSettings,
     generationSettings: template.generationSettings,
     promptIds: Array.isArray(template.promptIds) ? template.promptIds.filter(Boolean) : [],
@@ -336,7 +342,6 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
       issues: [{ level: 'error' as const, message: '文档模板不存在或已删除' }],
       fileDiagnostics: [],
       promptDiagnostics: [],
-      spec: undefined,
       config: undefined,
     };
   }
@@ -349,14 +354,13 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
   const fileBindings = templateFileBindings(template);
   if (promptBindings.length === 0) issues.push({ level: 'warning', message: '模板未绑定提示词角色，生成会缺少说明提示词约束' });
   if (fileBindings.length === 0) issues.push({ level: 'error', message: '模板未绑定知识库文件角色' });
-  const spec = template.documentSpecId ? getDocumentSpec(template.documentSpecId) : undefined;
-  if (template.documentSpecId && !spec) issues.push({ level: 'error', message: '文档规范包不存在或已删除' });
-  if (!template.documentSpecId) issues.push({ level: 'error', message: '模板未绑定文档规范包' });
-  if (spec?.chapterMode === 'fixed' && spec.chapterRules.filter(rule => rule.required).length === 0) {
-    issues.push({ level: 'warning', message: '固定章节模式未配置必需章节规则' });
+  const autoSpec = getOrCreateAutoDocumentSpec(template);
+  const spec = autoSpec.spec;
+  if (spec.chapterMode === 'fixed' && spec.chapterRules.filter(rule => rule.required).length === 0) {
+    issues.push({ level: 'warning', message: '后台自动规范未形成必需章节规则' });
   }
-  if (spec?.chapterMode === 'dynamic' && spec.dynamicChapterRule.maxChapters && spec.dynamicChapterRule.minChapters && spec.dynamicChapterRule.maxChapters < spec.dynamicChapterRule.minChapters) {
-    issues.push({ level: 'error', message: '动态章节规则的最多章节不能小于最少章节' });
+  if (spec.chapterMode === 'dynamic' && spec.dynamicChapterRule.maxChapters && spec.dynamicChapterRule.minChapters && spec.dynamicChapterRule.maxChapters < spec.dynamicChapterRule.minChapters) {
+    issues.push({ level: 'error', message: '后台自动规范动态章节规则异常' });
   }
   const resolvedProjectRoot = path.resolve(projectRoot);
   const project = await getMultiProjectManager().getProject(resolvedProjectRoot);
@@ -382,7 +386,7 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
     if (prompt && !prompt.content.trim()) issues.push({ level: 'warning', message: `提示词为空：${prompt.name}` });
     return { ...binding, roleName: role?.name, promptTitle: prompt?.name, exists: Boolean(prompt), contentLength: prompt?.content.length ?? 0 };
   });
-  return { templateId, projectRoleConfigId: template.projectRoleConfigId, documentSpecId: template.documentSpecId, fileDiagnostics, promptDiagnostics, spec: spec ? { id: spec.id, name: spec.name, factFields: spec.factFields.length, gateRules: spec.gateRules.length } : undefined, issues };
+  return { templateId, projectRoleConfigId: template.projectRoleConfigId, fileDiagnostics, promptDiagnostics, issues };
 }
 
 export function deleteDocumentTemplate(templateId: string) {
@@ -565,7 +569,7 @@ function dynamicChapterTitleFromEvidence(item: DocumentEvidence, index: number, 
   return sourceTitle;
 }
 
-function effectiveTemplateChapters(template: DocumentTemplate, spec?: DocumentSpecPackage, seedEvidence: DocumentEvidence[] = []): DocumentTemplateChapter[] {
+function effectiveTemplateChapters(template: DocumentTemplate, spec?: AutoDocumentSpecPackage, seedEvidence: DocumentEvidence[] = []): DocumentTemplateChapter[] {
   if (!spec) return template.chapters;
   if (spec.chapterMode === 'fixed') {
     return spec.chapterRules.length > 0 ? [...spec.chapterRules].sort((a, b) => a.order - b.order).map(rule => {
@@ -631,7 +635,7 @@ function evidenceMatchesFact(item: DocumentEvidence, fact: string) {
   return factSearchTerms(fact).some(term => haystack.includes(term));
 }
 
-function specFactTargets(template: DocumentTemplate, spec?: DocumentSpecPackage) {
+function specFactTargets(template: DocumentTemplate, spec?: AutoDocumentSpecPackage) {
   const chapters = effectiveTemplateChapters(template, spec, []);
   const chapterFacts = chapters.flatMap(chapter => chapter.requiredFacts).map(name => ({ id: name, name, required: true, sourceRoleIds: [] as string[], extractionHint: '' }));
   const specFacts = spec?.factFields.map(field => ({ id: field.id, name: field.name, required: field.required, sourceRoleIds: field.sourceRoleIds || [], extractionHint: field.extractionHint || '' })) || [];
@@ -1025,7 +1029,7 @@ function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
   return markdown.replace(/^!\[[^\]]*(?:图纸|drawing|cad|地图|平面|剖面|立面)[^\]]*\]\([^)]*\)\s*$/gimu, '').replace(/\n{3,}/gu, '\n\n');
 }
 
-const WORKFLOW_PHRASE_RE = /.*(?:知识库证据|文件角色|提示词角色|文档规范包|规范包|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|校验结果).*(?:\n|$)/gu;
+const WORKFLOW_PHRASE_RE = /.*(?:知识库证据|文件角色|提示词角色|后台自动规范|规范包|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|校验结果).*(?:\n|$)/gu;
 const RAW_SOURCE_LINE_RE = /^\s*(?:#{1,6}\s*)?(?:PDF\s*第\s*\d+\s*页|rule\b|文件[:：]|片段[:：]|来源[:：]).*$/gimu;
 const ASCII_FLOW_LINE_RE = /^\s*(?:[│┃┆┊┌┐└┘├┤┬┴┼─━╭╮╰╯]|[↓↑→←⇒⇨➡])+\s*$/gmu;
 
@@ -1059,8 +1063,8 @@ function sanitizeFormalMarkdown(markdown: string) {
 const FORMAL_WRITING_RULES = [
   '你正在生成可直接交付的正式业务文档，不是分析报告、证据报告或系统调试报告。',
   '不得把“知识库、检索、文件角色、提示词角色、规范包、事实字段、动态章节、缺失项、校验结果、资料未提供、未检索到”等后台流程话术写入正文。',
-  '文档结构、禁用标题、必需章节、事实取舍和行业表达必须优先遵循用户绑定的提示词角色、项目角色配置和文档规范包；通用生成链路不得擅自发明业务规则。',
-  '资料信息应内化为正式正文表达；除非规范包或用户要求来源追溯章节，否则不要单列系统证据清单。',
+  '文档结构、禁用标题、必需章节、事实取舍和行业表达必须优先遵循用户绑定的提示词角色、项目角色配置和后台自动规范；通用生成链路不得擅自发明业务规则。',
+  '资料信息应内化为正式正文表达；除非后台自动规范或用户要求来源追溯章节，否则不要单列系统证据清单。',
   '表格、标题和公式必须使用 Markdown/导出友好的写法，避免 ASCII 流程图和容易导致导出异常的符号组合。',
   '语言应正式、专业、克制，适合直接导出交付。',
 ].join('\n');
@@ -1089,7 +1093,7 @@ async function repairMarkdownByQuality(input: { markdown: string; template: Docu
   if (input.issues.length === 0) return { markdown: input.markdown, stage: undefined as DocumentExecutionStage | undefined };
   const configuredStructure = configuredStructurePrompt(input.template);
   const repaired = await callDocumentLlm([
-    '你是文档质量补写和纠偏专家。必须严格按照模板、章节计划、规范包、提示词角色和已提供资料补齐内容，禁止编造。',
+    '你是文档质量补写和纠偏专家。必须严格按照模板、章节计划、后台自动规范、提示词角色和已提供资料补齐内容，禁止编造。',
     input.forbidDrawingImages ? '图片/图纸类资料只作为文本事实来源，禁止插入图片或 Markdown 图片语法。' : '',
     '保持 Markdown 标题层级；直接返回修复后的完整 Markdown。',
     '必须保留模板配置的章节和二级小节；配置要求使用表格的小节，应由已提供资料和正文内容归纳生成正式 Markdown 表格，不得输出证据摘录表。',
@@ -1112,7 +1116,7 @@ async function repairMarkdownByQuality(input: { markdown: string; template: Docu
 }
 
 /** 从证据中抽取事实字段，按规范包中的事实定义进行匹配 */
-function extractFacts(template: DocumentTemplate, evidence: DocumentEvidence[], spec?: DocumentSpecPackage): Record<string, string> {
+function extractFacts(template: DocumentTemplate, evidence: DocumentEvidence[], spec?: AutoDocumentSpecPackage): Record<string, string> {
   const facts: Record<string, string> = {};
   for (const field of specFactTargets(template, spec)) {
     const hit = evidence.find(item => evidenceSatisfiesSpecField(item, field));
@@ -1249,7 +1253,7 @@ function fieldExtractionPattern(name: string) {
   return new RegExp(`${escaped}[：:\\s]+([^\\n，。；;]+)`, 'u');
 }
 
-function extractStructuredFacts(evidence: DocumentEvidence[], template: DocumentTemplate, spec?: DocumentSpecPackage): DocumentFact[] {
+function extractStructuredFacts(evidence: DocumentEvidence[], template: DocumentTemplate, spec?: AutoDocumentSpecPackage): DocumentFact[] {
   const dynamicPatterns = specFactTargets(template, spec).map(field => ({ field, pattern: fieldExtractionPattern(field.name) }));
   const facts: DocumentFact[] = [];
   for (const item of evidence) {
@@ -1299,7 +1303,7 @@ async function understandReferenceFiles(projectRoot: string, evidence: DocumentE
   }
 }
 
-async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: string, template: DocumentTemplate, spec?: DocumentSpecPackage): Promise<{ facts: DocumentFact[]; stages: DocumentExecutionStage[] }> {
+async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: string, template: DocumentTemplate, spec?: AutoDocumentSpecPackage): Promise<{ facts: DocumentFact[]; stages: DocumentExecutionStage[] }> {
   const stages: DocumentExecutionStage[] = [{ type: 'fact_extraction', roleId: 'llm-json', status: 'skipped', message: 'LLM JSON 抽取未启用或无可用模型' }];
   const sample = evidence.slice(0, 24).map(item => `文件:${item.filePath}\n角色:${item.roleId || ''}\n处理:${item.processingType || ''}\n内容:${item.content.slice(0, 1200)}`).join('\n\n---\n\n');
   if (!sample.trim()) return { facts: [], stages };
@@ -1333,7 +1337,7 @@ function normalizedFactValue(value: unknown) {
   return stringifyFactValue(value).replace(/\s+/gu, '').replace(/[，。,.;；：:]/gu, '').toLowerCase();
 }
 
-function detectFactConflicts(facts: DocumentFact[], spec?: DocumentSpecPackage) {
+function detectFactConflicts(facts: DocumentFact[], spec?: AutoDocumentSpecPackage) {
   const conflictKeys = spec?.factFields.map(field => field.name) || [...new Set(facts.map(fact => fact.key))];
   const conflicts: string[] = [];
   for (const key of conflictKeys) {
@@ -1352,7 +1356,7 @@ function detectFactConflicts(facts: DocumentFact[], spec?: DocumentSpecPackage) 
   return conflicts;
 }
 
-function buildSchemaFacts(facts: DocumentFact[], spec?: DocumentSpecPackage) {
+function buildSchemaFacts(facts: DocumentFact[], spec?: AutoDocumentSpecPackage) {
   const schemaFacts: Record<string, DocumentFact[]> = {};
   for (const field of spec?.factFields || []) {
     schemaFacts[field.id] = facts.filter(fact => fact.fieldId === field.id || fact.key === field.name || fact.fieldName === field.name);
@@ -1360,7 +1364,7 @@ function buildSchemaFacts(facts: DocumentFact[], spec?: DocumentSpecPackage) {
   return schemaFacts;
 }
 
-function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFact[] = [], missingItems: string[] = [], spec?: DocumentSpecPackage): DocumentFactsModel {
+function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFact[] = [], missingItems: string[] = [], spec?: AutoDocumentSpecPackage): DocumentFactsModel {
   const byKeys = (keys: string[]) => facts.filter(fact => keys.some(key => fact.key.includes(key)));
   const byProcessing = (type: string) => facts.filter(fact => fact.processingType === type || fact.roleId.includes(type));
   return {
@@ -1380,14 +1384,17 @@ function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFact[] = 
 }
 
 function isExportBlockingIssue(issue: ValidationIssue) {
-  return /出现禁用文本|资料未提供|导出|临时|无效|占位|生成未完成|低于目标页数|缺少配置小节|缺少必要的正式表格|正文缺少章节标题/iu.test(issue.message);
+  return /出现禁用文本|资料未提供|导出|临时|无效|占位|生成未完成|低于目标页数|兜底|章节生成失败|大模型未能|重新生成|缺少配置小节|缺少必要的正式表格|正文缺少章节标题|其他项目|项目编号|项目名称|事实一致性冲突|工程专项资料角色缺失|章节缺少证据/iu.test(issue.message);
 }
 
 function pageTargetIssues(settings: DocumentGenerationSettings | DocumentExportSettings | undefined, markdown: string): ValidationIssue[] {
   const target = settings?.targetPages;
   if (!target?.min && !target?.target && !target?.max) return [];
   const textLength = markdown.replace(/<[^>]+>/gu, '').replace(/\s+/gu, '').length;
-  const estimatedPages = Math.ceil(textLength / 800);
+  const bodyFontSize = Number(String(settings && 'typography' in settings ? settings.typography?.bodySize || '' : '').replace(/[^\d.]/gu, '')) || 14;
+  const lineHeight = Number(String(settings && 'typography' in settings ? settings.typography?.lineHeight || '' : '').replace(/[^\d.]/gu, '')) || 22;
+  const charsPerPage = bodyFontSize >= 14 && lineHeight >= 22 ? 620 : 800;
+  const estimatedPages = Math.ceil(textLength / charsPerPage);
   const min = target.min || target.target;
   const max = target.max || target.target;
   const issues: ValidationIssue[] = [];
@@ -1403,12 +1410,13 @@ function buildExportGate(issues: ValidationIssue[], factsModel: DocumentFactsMod
     { key: 'source_traceability', label: '事实具备来源追踪', passed: [...factsModel.project, ...factsModel.schedule, ...factsModel.quality, ...factsModel.safety].every(fact => Boolean(fact.sourceFile)) },
     { key: 'chapter_evidence', label: '章节均具备证据', passed: chapters.every(chapter => chapter.evidence.length > 0) },
     { key: 'no_missing_content', label: '无资料未提供章节', passed: chapters.every(chapter => !chapter.content.includes('资料未提供')) },
+    { key: 'no_project_contamination', label: '无项目污染和事实一致性阻断', passed: !issues.some(issue => issue.level === 'error' && /其他项目|项目编号|项目名称|事实一致性冲突/iu.test(issue.message)) },
   ];
   const blockingIssues = issues.filter(issue => issue.level === 'error' && isExportBlockingIssue(issue));
   return { passed: blockingIssues.length === 0 && checklist.every(item => item.passed), blockingIssues, checklist };
 }
 
-function fallbackEvaluatorForRule(rule: DocumentSpecGateRule): GateRuleEvaluator {
+function fallbackEvaluatorForRule(rule: AutoDocumentSpecGateRule): GateRuleEvaluator {
   if (rule.evaluator) return rule.evaluator;
   if (rule.type === 'required_fact') return { subject: 'fact', operator: 'exists', target: rule.target };
   if (rule.type === 'required_chapter') return { subject: 'chapter', operator: 'exists', target: rule.target };
@@ -1434,11 +1442,11 @@ function safeRegex(value: string) {
   try { return new RegExp(value, 'iu'); } catch { return undefined; }
 }
 
-function issueMessage(rule: DocumentSpecGateRule, detail: string) {
+function issueMessage(rule: AutoDocumentSpecGateRule, detail: string) {
   return `${rule.name}：${detail}`;
 }
 
-function applySpecGateRules(spec: DocumentSpecPackage | undefined, issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[], markdown: string, fileBindings: FileBinding[], promptBindings: PromptBinding[]) {
+function applySpecGateRules(spec: AutoDocumentSpecPackage | undefined, issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[], markdown: string, fileBindings: FileBinding[], promptBindings: PromptBinding[]) {
   if (!spec) return issues;
   const next = [...issues];
   const allFacts = [...factsModel.project, ...factsModel.schedule, ...factsModel.quality, ...factsModel.safety, ...factsModel.resources, ...Object.values(factsModel.schemaFacts).flat()];
@@ -1544,7 +1552,7 @@ async function buildLlmChapterContent(template: DocumentTemplate, chapter: Docum
     '- 必须使用模板节点提取的章节要求和输出规范；',
     '- 必须结合项目事实、表格数据、技术规范等内部资料；',
     '- 对同一对象的事实应综合表达，优先写入准确的数量、单位、规格、参数、做法和标准；',
-    '- 存在事实冲突时，按规范包、文件角色、提示词角色和用户要求指定的优先级处理；',
+    '- 存在事实冲突时，按后台自动规范、文件角色、提示词角色和用户要求指定的优先级处理；',
     '- 默认不要引用原始文件名，不写解析器内部对象名；',
     '- 将资料要点自然融入正文，不单列系统证据或来源章节；',
     '- 小节层级保持适度，除非规范包或提示词要求，不要输出中间分析产物标题；',
@@ -1562,7 +1570,7 @@ async function buildLlmChapterContent(template: DocumentTemplate, chapter: Docum
 /** 对生成的 Markdown 进行 LLM 二次审查和优化，检查结构、证据使用和导出合规性 */
 async function reviewAndOptimizeMarkdown(input: {
   template: DocumentTemplate;
-  spec?: DocumentSpecPackage;
+  spec?: AutoDocumentSpecPackage;
   markdown: string;
   evidence: DocumentEvidence[];
   promptTexts: string;
@@ -1576,16 +1584,16 @@ async function reviewAndOptimizeMarkdown(input: {
     `事实字段：${input.spec.factFields.map(field => `${field.name}${field.required ? '(必需)' : ''}`).join('、')}`,
     input.spec.chapterMode === 'dynamic' ? `章节规则：动态章节｜来源=${input.spec.dynamicChapterRule.source}｜标题=${input.spec.dynamicChapterRule.titleStrategy || 'ai_summary'}｜${input.spec.dynamicChapterRule.generationHint || '由资料自动规划'}` : `章节规则：${input.spec.chapterRules.map(rule => `${rule.title}${rule.minWords ? `≥${rule.minWords}字` : ''}`).join('、')}`,
     `门禁规则：${input.spec.gateRules.map(rule => `${rule.name}:${rule.type}`).join('、')}`,
-  ].join('\n') : '未绑定文档规范包。';
+  ].join('\n') : '后台自动规范未生成。';
   const reviewed = await callDocumentLlm([
-    '你是文档质量审查与优化专家。你要基于模板、规范包、提示词角色和内部资料对初稿进行二次审查和优化，使其成为正式业务文档。',
+    '你是文档质量审查与优化专家。你要基于模板、后台自动规范、提示词角色和内部资料对初稿进行二次审查和优化，使其成为正式业务文档。',
     FORMAL_WRITING_RULES,
-    '准确性优先级：文档规范包/模板要求 > 已绑定或人工确认的知识库证据 > 自动检索知识库证据 > 项目上下文/历史记忆。内部优先级只用于判断事实，不得写入正文。',
+    '准确性优先级：后台自动规范/模板要求 > 已绑定或人工确认的知识库证据 > 自动检索知识库证据 > 项目上下文/历史记忆。内部优先级只用于判断事实，不得写入正文。',
     '项目上下文/历史记忆只能用于风格偏好、历史纠偏和连续性检查；如果与知识库证据冲突，必须以知识库证据为准。',
     '必须保持 Markdown 输出；保留已有正式标题层级和表格；不得保留或新增证据来源、资料来源、缺失项、校验结果等后台信息。',
     '图片/图纸类资料默认只作为文本事实依据，除非用户明确要求插图，否则不要插入图片或 Markdown 图片语法；不得引用 PDF/DWG/Excel 文件名。',
     '重点检查：正式章节完整性、资料事实内化使用、参数数字准确性、冲突事实是否按配置优先级处理、解析器内部对象名清理、表格呈现、表达专业性、导出友好性。',
-    '除非规范包或提示词明确要求，删除中间分析产物标题和后台流程说明。',
+    '除非后台自动规范或提示词明确要求，删除中间分析产物标题和后台流程说明。',
     input.promptTexts,
   ].filter(Boolean).join('\n\n'), [
     `模板：${input.template.name}`,
@@ -1637,8 +1645,8 @@ function validateDraft(chapters: DocumentDraftChapter[], structuredFacts: Docume
   for (const chapter of chapters) {
     if (chapter.evidence.length === 0) warnings.push(`${chapter.title} 未检索到资料证据`);
     if (chapter.content.length < 80) warnings.push(`${chapter.title} 内容较短，建议人工补充或重新生成`);
-    if (chapter.content.includes('本章应依据已绑定资料生成正式正文')) errors.push(`${chapter.title} 章节生成未完成，禁止作为正式文件导出`);
   }
+  if (template && chapters.length < template.chapters.length) errors.push(`章节生成不完整：已生成 ${chapters.length}/${template.chapters.length} 章`);
   if (template && templateFileBindings(template).length === 0) errors.push('模板未绑定任何知识库文件');
   if (template && templatePromptBindings(template).length === 0) errors.push('模板未绑定任何提示词');
   const roleIds = new Set(structuredFacts.map(fact => fact.roleId));
@@ -1654,6 +1662,14 @@ function hasSectionNumber(section: string) {
 
 function tocSectionTitle(chapterIndex: number, sectionIndex: number, section: string) {
   return hasSectionNumber(section) ? section : `${chapterIndex + 1}.${sectionIndex + 1} ${section}`;
+}
+
+function composeTocLines(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections'>>) {
+  const lines = chapters.flatMap((chapter, index) => {
+    const sections = chapter.sections || [];
+    return [chapter.title, ...sections.map((section, sectionIndex) => tocSectionTitle(index, sectionIndex, section))];
+  });
+  return lines.flatMap(line => [line, '']);
 }
 
 function escapedRegExp(value: string) {
@@ -1706,10 +1722,7 @@ export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'mar
     .map(chapter => sanitizeFormalMarkdown(chapter.content))
     .filter(Boolean)
     .join('\n\n');
-  const tocLines = draft.chapters.flatMap((chapter, index) => {
-    const sections = chapter.sections || [];
-    return [`${index + 1}. ${chapter.title}`, ...sections.map((section, sectionIndex) => `   ${tocSectionTitle(index, sectionIndex, section)}`)];
-  });
+  const tocLines = composeTocLines(draft.chapters);
 
   return sanitizeFormalMarkdown([
     `<div class="document-cover">`,
@@ -1744,12 +1757,20 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const maxEvidence = Math.max(5, Math.min(30, input.maxEvidencePerChapter ?? 12));
   const promptBindings = templatePromptBindings(template);
   const fileBindings = templateFileBindings(template);
-  const documentSpec = getDocumentSpec(template.documentSpecId);
-  const promptTexts = promptTextsForExecution(promptBindings, ['chapter_generation', 'formatting', 'reference']);
-  const factExtractionPromptTexts = promptTextsForExecution(promptBindings, ['fact_extraction', 'reference']);
-  const reviewPromptTexts = promptTextsForExecution(promptBindings, ['validation', 'llm_review', 'formatting', 'reference']);
+  const autoSpec = getOrCreateAutoDocumentSpec(template);
+  const documentSpec = autoSpec.spec;
+  const projectMaterialSummary = buildProjectMaterialSummary(projectRoot, { requirement: input.requirement, boundFilePaths: fileBindings.map(binding => binding.filePath) });
+  const resolvedMaterialRoles = resolveTemplateMaterialRoles(template, projectMaterialSummary);
+  const readiness = evaluateDocumentReadiness({ template, spec: documentSpec, summary: projectMaterialSummary, resolvedRoles: resolvedMaterialRoles });
+  if (!readiness.ready) throw new Error(`生成准备度不足：${readiness.blockingIssues.join('；')}`);
+  const backgroundControlPrompt = [projectMaterialPrompt(projectMaterialSummary), autoSpecPrompt(documentSpec, autoSpec.sourceHash), readinessPrompt(readiness)].join('\n\n');
+  const promptTexts = [backgroundControlPrompt, promptTextsForExecution(promptBindings, ['chapter_generation', 'formatting', 'reference'])].filter(Boolean).join('\n\n');
+  const factExtractionPromptTexts = [backgroundControlPrompt, promptTextsForExecution(promptBindings, ['fact_extraction', 'reference'])].filter(Boolean).join('\n\n');
+  const reviewPromptTexts = [backgroundControlPrompt, promptTextsForExecution(promptBindings, ['validation', 'llm_review', 'formatting', 'reference'])].filter(Boolean).join('\n\n');
   const fileBindingKeys = (filePath: string) => [filePath, path.isAbsolute(filePath) ? path.relative(projectRoot, filePath) : path.join(projectRoot, filePath)];
   const boundFilePaths = new Set(fileBindings.flatMap(binding => fileBindingKeys(binding.filePath)));
+  const materialFilePaths = new Set(projectMaterialSummary.materialInventory.project_overview.flatMap(file => fileBindingKeys(file.filePath)));
+  const evidenceScopePaths = boundFilePaths.size > 0 ? boundFilePaths : materialFilePaths;
   const allFileRoles = listDocumentRoles('file');
   const fileRoleByPath = new Map(fileBindings.flatMap(binding => fileBindingKeys(binding.filePath).map(key => [key, binding.roleId] as const)));
   const fileProcessingByPath = new Map(fileBindings.flatMap(binding => fileBindingKeys(binding.filePath).map(key => [key, allFileRoles.find(role => role.id === binding.roleId)?.processingType || 'reference'] as const)));
@@ -1796,7 +1817,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
   };
 
   // 第一个进度回调：角色绑定完成
-  progressStages.push({ type: 'role_binding', roleId: template.projectRoleConfigId || 'none', status: 'success', message: `已绑定 ${fileBindings.length} 个文件角色、${promptBindings.length} 个提示词角色` });
+  progressStages.push({ type: 'role_binding', roleId: template.projectRoleConfigId || 'none', status: 'success', message: `已绑定 ${fileBindings.length} 个文件角色、${promptBindings.length} 个提示词角色；后台自动规范 ${documentSpec.factFields.length} 个事实字段；资料覆盖率 ${Math.round(readiness.materialCoverageRate * 100)}%` });
+  progressStages.push({ type: 'validation', roleId: 'document-readiness', status: readiness.ready ? 'success' : 'failed', message: `生成准备度：资料 ${Math.round(readiness.materialCoverageRate * 100)}%，角色 ${Math.round(readiness.roleSatisfactionRate * 100)}%，规范 ${Math.round(readiness.specCompletenessRate * 100)}%；${projectMaterialSummary.source.selectionReason}` });
   progressStages.push(contextStage);
   input.onProgress?.([...progressStages]);
 
@@ -1810,11 +1832,11 @@ export async function generateDocumentDraft(input: { templateId: string; require
     for (const query of queries) {
       const result = await manager.search(projectRoot, query, {
         scope: 'project',
-        limit: Math.max(maxEvidence, boundFilePaths.size > 0 ? 30 : maxEvidence),
+        limit: Math.max(maxEvidence, evidenceScopePaths.size > 0 ? 30 : maxEvidence),
         weights: { keyword: 0.4, vector: 0.45, rewrite: 0.75, hybridBonus: 0.15 },
       });
       rawEvidence.push(...result.results
-        .filter((item: KbSearchResult) => boundFilePaths.size === 0 || boundFilePaths.has(item.filePath))
+        .filter((item: KbSearchResult) => evidenceScopePaths.size === 0 || evidenceScopePaths.has(item.filePath))
         .map((item: KbSearchResult) => ({
           chapterId: chapter.id,
           filePath: item.filePath,
@@ -1948,11 +1970,21 @@ export async function generateDocumentDraft(input: { templateId: string; require
   for (const item of allEvidence) sourceCounts.set(item.filePath, (sourceCounts.get(item.filePath) ?? 0) + 1);
   const sources = [...sourceCounts.entries()].sort((a, b) => b[1] - a[1]).map(([filePath, count]) => ({ filePath, count }));
   const factsModel = buildFactsModel(structuredFacts, structuredTables, missingItems, documentSpec);
+  const chapterReadiness = evaluateChapterReadiness(chapterDrafts, documentSpec);
   const validation = validateDraft(chapterDrafts, structuredFacts, template);
+  validation.warnings.push(...readiness.warnings);
+  validation.errors.push(...readiness.blockingIssues);
   let validationIssues = buildValidationIssues(validation, factsModel, chapterDrafts);
+  validationIssues.push(...chapterReadinessIssues(chapterReadiness));
+  const fallbackChapterCount = chapterGenerationStages.filter(stage => stage.type === 'chapter_generation' && stage.status === 'fallback').length;
+  const failedChapterCount = chapterGenerationStages.filter(stage => stage.type === 'chapter_generation' && stage.status === 'failed').length;
+  if (fallbackChapterCount > 0) validationIssues.push({ level: 'error', message: `章节生成存在兜底：${fallbackChapterCount} 章`, suggestion: '请检查模型调用、提示词长度或证据负载后重新生成。' });
+  if (failedChapterCount > 0) validationIssues.push({ level: 'error', message: `章节生成失败：${failedChapterCount} 章`, suggestion: '请检查模型调用或资料配置后重新生成。' });
+  const initialBlockingCount = validationIssues.filter(issue => issue.level === 'error' && isExportBlockingIssue(issue)).length;
   const assets: DocumentAsset[] = [];
   const executionStages: DocumentExecutionStage[] = [
-    { type: 'role_binding', roleId: template.projectRoleConfigId || 'none', status: fileBindings.length > 0 ? 'success' : 'fallback', message: `已绑定 ${fileBindings.length} 个文件角色、${promptBindings.length} 个提示词角色` },
+    { type: 'role_binding', roleId: template.projectRoleConfigId || 'none', status: fileBindings.length > 0 ? 'success' : 'fallback', message: `已绑定 ${fileBindings.length} 个文件角色、${promptBindings.length} 个提示词角色；后台自动规范 ${documentSpec.factFields.length} 个事实字段` },
+    { type: 'validation', roleId: 'document-readiness', status: readiness.ready ? 'success' : 'failed', message: `生成准备度：资料 ${Math.round(readiness.materialCoverageRate * 100)}%，角色 ${Math.round(readiness.roleSatisfactionRate * 100)}%，规范 ${Math.round(readiness.specCompletenessRate * 100)}%；${projectMaterialSummary.source.selectionReason}` },
     contextStage,
     { type: 'knowledge_retrieval', roleId: 'knowledge-base', status: allEvidence.length > 0 ? 'success' : 'fallback', message: `已检索/绑定 ${allEvidence.length} 条证据` },
     enhancementStage,
@@ -1960,9 +1992,9 @@ export async function generateDocumentDraft(input: { templateId: string; require
     ...llmExtraction.stages,
     ...chapterGenerationStages,
 
-    { type: 'validation', roleId: 'document-workflow', status: validation.errors.length > 0 ? 'failed' : 'success', message: `错误 ${validation.errors.length}，警告 ${validation.warnings.length}` },
+    { type: 'validation', roleId: 'document-workflow', status: initialBlockingCount > 0 ? 'failed' : 'success', message: `阻断 ${initialBlockingCount}，错误 ${validation.errors.length}，警告 ${validation.warnings.length}` },
     { type: 'formatting', roleId: 'document-workflow', status: 'success', message: '已生成正式排版 Markdown' },
-    { type: 'export_ready', roleId: 'document-workflow', status: validation.errors.length > 0 ? 'failed' : 'success', message: validation.errors.length > 0 ? '导出门禁存在阻断项' : '已准备好导出 Markdown/HTML/DOCX/PDF' },
+    { type: 'export_ready', roleId: 'document-workflow', status: initialBlockingCount > 0 ? 'failed' : 'success', message: initialBlockingCount > 0 ? '导出门禁存在阻断项' : '已准备好导出 Markdown/HTML/DOCX/PDF' },
   ];
   const base = {
     templateId: template.id,
@@ -1997,10 +2029,20 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const reviewedStages = repair.stage ? [...executionStages, review.stage, repair.stage] : [...executionStages, review.stage];
   const finalMarkdown = sanitizeFormalMarkdown(removeUnwantedDrawingImages(repair.markdown, forbidDrawingImages));
   validationIssues = applySpecGateRules(documentSpec, [...validationIssues, ...qualityIssues.map(message => ({ level: 'warning' as const, message }))], factsModel, chapterDrafts, finalMarkdown, fileBindings, promptBindings);
+  validationIssues.push(...validateDraftWithAutoSpec({ markdown: finalMarkdown, spec: documentSpec, summary: projectMaterialSummary }));
+  validationIssues.push(...validateFactConsistency({ markdown: finalMarkdown, facts: structuredFacts, summary: projectMaterialSummary }));
+  validationIssues.push(...validateProjectContamination(finalMarkdown, projectMaterialSummary));
+  validationIssues.push(...validateEngineeringSpecialty({ markdown: finalMarkdown, chapters: chapterDrafts, summary: projectMaterialSummary, roles: resolvedMaterialRoles }));
   validationIssues.push(...pageTargetIssues(template.generationSettings || template.exportSettings, finalMarkdown));
   validationIssues.push(...configuredStructureIssues(finalMarkdown, template));
   const finalExportGate = buildExportGate(validationIssues, factsModel, chapterDrafts);
-  const finalBase = { ...base, validationIssues, exportGate: finalExportGate, executionStages: reviewedStages };
+  const blockingCount = finalExportGate.blockingIssues.length;
+  const finalStages: DocumentExecutionStage[] = reviewedStages.map(stage => {
+    if (stage.type === 'validation') return { ...stage, status: blockingCount > 0 ? 'failed' : 'success', message: `阻断 ${blockingCount}，问题 ${validationIssues.length}` };
+    if (stage.type === 'export_ready') return { ...stage, status: finalExportGate.passed ? 'success' : 'failed', message: finalExportGate.passed ? '已准备好导出 Markdown/HTML/DOCX/PDF' : '导出门禁存在阻断项' };
+    return stage;
+  });
+  const finalBase = { ...base, validationIssues, exportGate: finalExportGate, executionStages: finalStages };
   return { ...finalBase, markdown: finalMarkdown };
 }
 

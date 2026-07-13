@@ -1,5 +1,11 @@
 # server
 
+## 4.0.31
+
+### Patch Changes
+
+- Fix construction document export typography and complete recommended brand prompt binding flow.
+
 ## 4.0.29
 
 ### Patch Changes

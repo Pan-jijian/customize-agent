@@ -140,7 +140,7 @@ const operationSections = [
       '点击生成按钮后，页面会出现“执行状态”卡片。',
       '系统会先绑定文件角色和提示词角色，再按当前项目召回短期/长期上下文；上下文只作为偏好和历史纠偏参考，不覆盖知识库事实。',
       '系统会按章节自动检索知识库证据；只有在必须指定官方资料、图纸或表格时，才需要使用高级优先证据。',
-      '执行状态会根据当前模板、文档规范包、文件角色、提示词角色、上下文召回、证据增强和章节自动生成，不是固定工程流程。',
+      '执行状态会根据当前模板、后台自动规范、文件角色、提示词角色、上下文召回、证据增强和章节自动生成，不是固定工程流程。',
       '当前执行节点会高亮显示，子状态会展示正在处理的章节、事实字段、文件角色、增强贡献或门禁规则。',
       '生成任务在后台运行，页面通过 documentId 轮询；切换页面后回到生成编辑仍可恢复状态。',
       '生成完成后，系统会用后端真实 executionStages 回填最终状态。',
@@ -154,8 +154,8 @@ const operationSections = [
     goal: '确保文档可追溯、可校验、可交付，同时能区分阻断问题和可复核 warning。',
     path: '生成编辑 → 编辑器下方 Tabs → 导出按钮 / 草稿历史',
     steps: [
-      '查看“结构化事实”，确认事实字段是否按文档规范包动态 schema 抽取，并检查冲突提示。',
-      '查看“来源”，确认事实来自规范包要求的文件角色和绑定资料。',
+      '查看“结构化事实”，确认事实字段是否按后台自动规范动态 schema 抽取，并检查冲突提示。',
+      '查看“来源”，确认事实来自后台自动规范要求的文件角色和绑定资料。',
       '查看“缺失项”，补齐缺失资料或调整角色配置。',
       '查看“校验”，优先处理 error；warning 表示可导出但建议复核。',
       '查看“导出门禁”，真实 blockingIssues 会阻断 PDF/DOCX 导出，普通 warning 不阻断。',
@@ -262,7 +262,7 @@ export default function GuidePage() {
         <Col xs={24} lg={12}>
           <Card size="small" title="案例 D：创建提示词角色“导出前校验规则”">
             <Paragraph><Text strong>怎么创建：</Text>提示词内容写清楚必须检查的交付要求，例如“不能出现资料未提供、图片引用必须可访问、关键事实必须有来源”；prompt 角色执行类型选择“校验”或“格式化”。</Paragraph>
-            <Paragraph><Text strong>生成时的作用：</Text>生成完成后，系统会结合文档规范包、证据来源和导出门禁检查文档是否可交付。</Paragraph>
+            <Paragraph><Text strong>生成时的作用：</Text>生成完成后，系统会结合后台自动规范、证据来源和导出门禁检查文档是否可交付。</Paragraph>
             <Paragraph><Text strong>带来的提升：</Text>把人工审稿经验前置到生成流程，降低导出后才发现缺来源、缺图片、格式不合格的概率。</Paragraph>
           </Card>
         </Col>
@@ -272,7 +272,7 @@ export default function GuidePage() {
     <Card title="我的数据和门禁规则说明">
       <Row gutter={[16, 16]}>
         <Col xs={24} md={8}><Card size="small" title="使用自己的数据"><Paragraph>文件、提示词、角色配置和规范包都来自用户自己创建或上传的内容，生成流程会按当前项目配置读取并参与校验。</Paragraph></Card></Col>
-        <Col xs={24} md={8}><Card size="small" title="自定义门禁类型会执行"><Paragraph>用户在文档规范包中创建的门禁类型，需要选择校验对象和校验方式。保存后它会和系统门禁类型一样参与生成校验，不只是备注说明。</Paragraph></Card></Col>
+        <Col xs={24} md={8}><Card size="small" title="自定义门禁类型会执行"><Paragraph>门禁规则由后台根据模板、提示词和角色绑定自动形成，并与系统门禁一起参与生成校验，不需要用户手动维护规范包。</Paragraph></Card></Col>
         <Col xs={24} md={8}><Card size="small" title="上传后关注索引状态"><Paragraph>文件上传完成后，知识库索引会继续在后台写入。请在文件管理页查看状态，如果失败，页面会展示原因，方便重新配置模型或重试。</Paragraph></Card></Col>
       </Row>
     </Card>
@@ -287,7 +287,7 @@ export default function GuidePage() {
 
     <Card title="动态 schema、证据和执行状态说明">
       <Row gutter={[16, 16]}>
-        <Col xs={24} md={8}><Card size="small" title="动态事实 schema"><Paragraph>系统不会写死工程字段。文档规范包的事实字段、模板章节 requiredFacts、字段 sourceRoleIds 和 extractionHint 会共同组成抽取 schema，并驱动事实抽取、冲突检测和导出门禁。</Paragraph></Card></Col>
+        <Col xs={24} md={8}><Card size="small" title="动态事实 schema"><Paragraph>系统不会写死工程字段。后台自动规范会结合模板章节 requiredFacts、角色绑定和提示词形成抽取 schema，并驱动事实抽取、冲突检测和导出门禁。</Paragraph></Card></Col>
         <Col xs={24} md={8}><Card size="small" title="结构化资源证据"><Paragraph>文本、PDF/Word、Excel/CSV、图片、地图图纸和其他附件都会被整理成资源证据，包含文件角色、处理类型、正文用途、关联事实和证据片段，模型据此理解资料关系。</Paragraph></Card></Col>
         <Col xs={24} md={8}><Card size="small" title="动态执行状态"><Paragraph>生成编辑页的执行节点会随模板、规范包、文件角色、提示词角色、章节和门禁规则变化；用户生成不同项目文件时看到的是对应项目的流程，而不是固定示例流程。</Paragraph></Card></Col>
       </Row>
@@ -364,10 +364,10 @@ export default function GuidePage() {
     <Card title="常见问题和处理建议">
       <Collapse items={[
         { key: 'warning-export', label: '为什么生成完成后显示 warning，但仍然可以导出？', children: <Paragraph>warning 表示文档已生成，但存在建议复核的问题，例如来源角色不完全匹配、某些事实需要人工确认或格式可优化。它不是失败，也不是导出阻断。只有真实 blockingIssues 或 error 级门禁问题才会阻断 DOCX/PDF 导出。</Paragraph> },
-        { key: 'missing-facts', label: '为什么提示必需事实缺失？', children: <Paragraph>优先检查文档规范包中的 factFields、sourceRoleIds、模板章节 requiredFacts 和文件角色绑定。很多情况下不是模型失败，而是资料没有被绑定到正确角色，或字段要求比资料实际内容更严格。</Paragraph> },
+        { key: 'missing-facts', label: '为什么提示必需事实缺失？', children: <Paragraph>优先检查后台自动规范生成的事实字段、模板章节 requiredFacts 和文件角色绑定。很多情况下不是模型失败，而是资料没有被绑定到正确角色，或字段要求比资料实际内容更严格。</Paragraph> },
         { key: 'draft-duration', label: '草稿历史里的耗时怎么计算？', children: <Paragraph>耗时使用生成记录的 createdAt 到 completedAt 计算；旧记录或未完成记录会使用 updatedAt 兜底。它用于判断本次生成链路整体成本，包括知识库检索、事实抽取、章节生成、资源处理、校验和格式化。</Paragraph> },
         { key: 'asset-index', label: '生成资源会如何进入知识库？', children: <Paragraph>生成资源完成后会自动回流到 knowledgeBase/生成资源 并建立索引，便于后续模板继续复用。资源管理页会展示入库状态，错误资源可以删除后重新生成。</Paragraph> },
-        { key: 'context-accuracy', label: '上下文召回会不会影响准确度？', children: <Paragraph>上下文只作为当前项目的偏好、历史纠偏和连续性参考，不作为事实来源。生成和审查提示词都要求：如果上下文与知识库证据、模板要求或规范包冲突，以知识库证据和规范包为准。</Paragraph> },
+        { key: 'context-accuracy', label: '上下文召回会不会影响准确度？', children: <Paragraph>上下文只作为当前项目的偏好、历史纠偏和连续性参考，不作为事实来源。生成和审查提示词都要求：如果上下文与知识库证据、模板要求或后台自动规范冲突，以知识库证据和后台自动规范为准。</Paragraph> },
         { key: 'priority-evidence', label: '什么时候需要维护高级优先证据？', children: <Paragraph>日常不需要维护。只有当某章必须引用指定官方资料、图纸、表格，或自动检索结果不稳定时，才从知识库搜索页复制文件路径并填入章节高级优先证据。</Paragraph> },
       ]} />
     </Card>
