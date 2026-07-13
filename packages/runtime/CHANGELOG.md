@@ -1,5 +1,21 @@
 # @customize-agent/runtime
 
+## 3.0.8
+
+### Patch Changes
+
+- Release formal patch version.
+- Updated dependencies
+  - @customize-agent/types@3.0.4
+
+## 3.0.7
+
+### Patch Changes
+
+- Release workflow, document generation, and knowledge extraction improvements.
+- Updated dependencies
+  - @customize-agent/types@3.0.3
+
 ## 3.0.6
 
 ### Patch Changes

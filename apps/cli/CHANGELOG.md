@@ -1,5 +1,43 @@
 # customize-agent
 
+## 4.0.25
+
+### Patch Changes
+
+- Release formal patch version.
+- Updated dependencies
+  - @customize-agent/server@4.0.29
+  - @customize-agent/engine@3.0.4
+  - @customize-agent/knowledge@4.0.12
+  - @customize-agent/llm@3.0.6
+  - @customize-agent/memory@3.0.4
+  - @customize-agent/runtime@3.0.8
+  - @customize-agent/search@3.0.4
+  - @customize-agent/tools@3.0.12
+  - @customize-agent/types@3.0.4
+
+## 4.0.24
+
+### Patch Changes
+
+- Improve CLI startup visibility and avoid long silent waits when the Web dashboard health check fails.
+
+## 4.0.23
+
+### Patch Changes
+
+- Release workflow, document generation, and knowledge extraction improvements.
+- Updated dependencies
+  - @customize-agent/server@4.0.26
+  - @customize-agent/knowledge@4.0.9
+  - @customize-agent/tools@3.0.11
+  - @customize-agent/types@3.0.3
+  - @customize-agent/search@3.0.3
+  - @customize-agent/memory@3.0.3
+  - @customize-agent/runtime@3.0.7
+  - @customize-agent/llm@3.0.5
+  - @customize-agent/engine@3.0.3
+
 ## 4.0.3
 
 ### Patch Changes

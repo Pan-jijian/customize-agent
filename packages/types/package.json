@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/types",
-  "version": "3.0.2",
+  "version": "3.0.4",
   "description": "跨包类型契约层",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -86,15 +86,21 @@ export class HNSWVectorStore implements VectorStoreInterface {
 
   async search(query: VectorSearchQuery): Promise<VectorSearchResult[]> {
     await this.ensureCollection();
-    const result = this.index!.searchKnn(query.queryEmbedding, query.topK);
+    const hasFilter = !!query.where && Object.keys(query.where).length > 0;
+    const candidateK = hasFilter ? Math.min(this.documents.size, Math.max(query.topK * 10, query.topK + 50)) : query.topK;
+    const result = this.index!.searchKnn(query.queryEmbedding, candidateK);
     return result.neighbors.flatMap((rowid, index) => {
       const document = this.documents.get(rowid);
-      if (!document) return [];
-      if (typeof query.where?.file_path === 'string' && document.metadata.file_path !== query.where.file_path) return [];
+      if (!document || !this.matchesWhere(document, query.where)) return [];
       const { embedding: _embedding, ...stored } = document;
       const distance = result.distances[index] ?? 0;
       return [{ collection: this.collectionName, document: stored, score: 1 / (1 + distance) }];
-    });
+    }).slice(0, query.topK);
+  }
+
+  private matchesWhere(document: StoredVectorDocument, where?: Record<string, string | number | boolean>): boolean {
+    if (!where) return true;
+    return Object.entries(where).every(([key, value]) => document.metadata[key] === value);
   }
 
   private persist(): void {

@@ -1,9 +1,14 @@
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import JSZip from 'jszip';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { generatedRoot, getGeneratedDocument } from '@/services/generatedDocumentService';
 import { getProjectRoot } from '@/services/kbService';
+import type { DocumentExportSettings } from '@/services/documentWorkflowService';
 import { recordErrorLog } from '@/services/errorLogService';
 import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
@@ -21,6 +26,7 @@ function escapeXml(input: string) {
   return input.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;');
 }
 
+const execFileAsync = promisify(execFile);
 const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_INLINE_IMAGE_BYTES = 32 * 1024 * 1024;
 const IMAGE_MIME_BY_EXT: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml' };
@@ -91,98 +97,126 @@ function inlineLocalImages(html: string, projectRoot = getProjectRoot()) {
   });
 }
 
-/** 将 Markdown 文本转换为 DOCX 兼容的 XML 段落格式 */
-/** 将 Markdown 文本转换为 DOCX 兼容的 XML 段落格式 */
-function markdownToDocxText(markdown: string) {
-  return markdown
+function stripInlineMarkdown(input: string) {
+  return input
+    .replace(/!\[[^\]]*\]\([^)]*\)/gu, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/gu, '$1')
+    .replace(/[*_`]/gu, '')
+    .replace(/<br\s*\/?>/giu, '\n')
     .replace(/<[^>]+>/gu, '')
-    .split('\n')
-    .map(line => `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>`)
-    .join('');
+    .trim();
 }
 
-/**
- * 构建 DOCX 文档
- * 如果提供了模板路径，则基于模板替换标题和内容占位符
- * 否则从头创建标准 DOCX 文档
- */
-async function buildDocx(title: string, markdown: string, templatePath?: string) {
+function pointsToHalfPoints(value: string | undefined, fallback: number) {
+  const match = /([\d.]+)\s*(pt|px)?/iu.exec(value || '');
+  if (!match) return fallback * 2;
+  const number = Number(match[1]);
+  if (!Number.isFinite(number)) return fallback * 2;
+  return Math.round((match[2]?.toLowerCase() === 'px' ? number * 0.75 : number) * 2);
+}
+
+function lengthToTwips(value: string | undefined, fallbackCm: number) {
+  const match = /([\d.]+)\s*(cm|mm|in|pt)?/iu.exec(value || '');
+  if (!match) return Math.round(fallbackCm * 567);
+  const number = Number(match[1]);
+  if (!Number.isFinite(number)) return Math.round(fallbackCm * 567);
+  const unit = (match[2] || 'cm').toLowerCase();
+  if (unit === 'mm') return Math.round(number * 56.7);
+  if (unit === 'in') return Math.round(number * 1440);
+  if (unit === 'pt') return Math.round(number * 20);
+  return Math.round(number * 567);
+}
+
+function docxRun(text: string, options: { bold?: boolean; size?: number } = {}) {
+  const props = [options.bold ? '<w:b/>' : '', options.size ? `<w:sz w:val="${options.size}"/><w:szCs w:val="${options.size}"/>` : ''].filter(Boolean).join('');
+  return `<w:r>${props ? `<w:rPr>${props}</w:rPr>` : ''}<w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`;
+}
+
+function docxParagraph(text: string, options: { bold?: boolean; size?: number; align?: 'center'; spacingAfter?: number; pageBreak?: boolean } = {}) {
+  if (options.pageBreak) return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+  const pPr = [options.align ? `<w:jc w:val="${options.align}"/>` : '', `<w:spacing w:line="440" w:lineRule="exact" w:after="${options.spacingAfter ?? 120}"/>`].filter(Boolean).join('');
+  return `<w:p><w:pPr>${pPr}</w:pPr>${docxRun(text, options)}</w:p>`;
+}
+
+function parseMarkdownTable(lines: string[], start: number) {
+  if (start + 1 >= lines.length || !/^\s*\|?.+\|\s*$/u.test(lines[start]) || !/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/u.test(lines[start + 1])) return null;
+  const rows: string[][] = [];
+  let index = start;
+  while (index < lines.length && /^\s*\|?.+\|\s*$/u.test(lines[index])) {
+    if (index !== start + 1) rows.push(lines[index].trim().replace(/^\|/u, '').replace(/\|$/u, '').split('|').map(cell => stripInlineMarkdown(cell)));
+    index += 1;
+  }
+  return { rows, next: index };
+}
+
+function docxTable(rows: string[][], bodySize: number) {
+  const cells = (row: string[]) => row.map(cell => `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>${docxParagraph(cell, { size: bodySize })}</w:tc>`).join('');
+  return `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders><w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders></w:tblPr>${rows.map(row => `<w:tr>${cells(row)}</w:tr>`).join('')}</w:tbl>`;
+}
+
+function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings) {
+  const style = exportStyle(settings);
+  const titleSize = pointsToHalfPoints(style.titleSize, 16);
+  const bodySize = pointsToHalfPoints(style.bodySize, 14);
+  const lines = markdown.replace(/<div class="page-break"><\/div>/gu, '\n[[PAGE_BREAK]]\n').split('\n');
+  const blocks: string[] = [];
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index].trim();
+    if (!line) { index += 1; continue; }
+    if (line === '[[PAGE_BREAK]]') { blocks.push(docxParagraph('', { pageBreak: true })); index += 1; continue; }
+    const table = parseMarkdownTable(lines, index);
+    if (table) { blocks.push(docxTable(table.rows, bodySize)); index = table.next; continue; }
+    const heading = /^(#{1,3})\s+(.+)$/u.exec(line);
+    if (heading) { blocks.push(docxParagraph(stripInlineMarkdown(heading[2]), { bold: true, size: titleSize, align: heading[1].length === 1 ? 'center' : undefined, spacingAfter: 160 })); index += 1; continue; }
+    blocks.push(docxParagraph(stripInlineMarkdown(line), { size: bodySize }));
+    index += 1;
+  }
+  return blocks.join('');
+}
+
+async function buildDocx(title: string, markdown: string, settings?: DocumentExportSettings, templatePath?: string) {
+  const contentXml = markdownToDocxXml(markdown, settings);
   if (templatePath && fs.existsSync(templatePath)) {
-    // 使用 DOCX 模板：加载并替换占位符
     const zip = await JSZip.loadAsync(fs.readFileSync(templatePath));
     const documentFile = zip.file('word/document.xml');
     if (documentFile) {
       const xml = await documentFile.async('string');
-      zip.file('word/document.xml', xml.replace(/\{\{title\}\}/gu, escapeXml(title)).replace(/\{\{content\}\}/gu, markdownToDocxText(markdown)));
+      zip.file('word/document.xml', xml.replace(/\{\{title\}\}/gu, escapeXml(title)).replace(/\{\{content\}\}/gu, contentXml));
       return zip.generateAsync({ type: 'nodebuffer' });
     }
   }
-  // 从头创建 DOCX：生成内容类型、关系和文档 XML
+  const page = settings?.page || {};
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.folder('_rels')?.file('.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
   zip.folder('word')?.folder('_rels')?.file('document.xml.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>');
-  zip.folder('word')?.file('document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${escapeXml(title)}</w:t></w:r></w:p>${markdownToDocxText(markdown)}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`);
+  zip.folder('word')?.file('document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${docxParagraph(title, { bold: true, size: pointsToHalfPoints(settings?.typography?.titleSize, 16), align: 'center', spacingAfter: 240 })}${contentXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="${lengthToTwips(page.marginTop, 2.5)}" w:right="${lengthToTwips(page.marginRight, 2)}" w:bottom="${lengthToTwips(page.marginBottom, 2)}" w:left="${lengthToTwips(page.marginLeft, 2)}"/></w:sectPr></w:body></w:document>`);
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
-function plainText(markdown: string) {
-  return markdown
-    .replace(/<[^>]+>/gu, '')
-    .replace(/!\[[^\]]*\]\([^)]*\)/gu, '')
-    .replace(/\[([^\]]+)\]\([^)]*\)/gu, '$1')
-    .replace(/[#*_`>|-]/gu, '')
-    .replace(/\n{3,}/gu, '\n\n')
-    .trim();
+/** 生成 HTML 文档外壳，包含可配置打印样式和中文排版优化 */
+function cssValue(value: string | undefined, fallback: string) {
+  return value && /^[\w\s\u4e00-\u9fa5,"'().-]+$/u.test(value) ? value : fallback;
 }
 
-/** 将字符串转为 UTF-16 BE 十六进制编码（用于 PDF 嵌入中文字体） */
-/** 将字符串转为 UTF-16 BE 十六进制编码（用于 PDF 嵌入中文字体） */
-function utf16Hex(input: string) {
-  return Buffer.from(`\uFEFF${input}`, 'utf16le').swap16().toString('hex').toUpperCase();
+function exportStyle(settings?: DocumentExportSettings) {
+  const page = settings?.page || {};
+  const typography = settings?.typography || {};
+  const paper = cssValue(page.paper, 'A4');
+  const marginTop = cssValue(page.marginTop, '24mm');
+  const marginRight = cssValue(page.marginRight, '18mm');
+  const marginBottom = cssValue(page.marginBottom, '22mm');
+  const marginLeft = cssValue(page.marginLeft, '18mm');
+  const fontFamily = cssValue(typography.fontFamily, '"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif');
+  const lineHeight = cssValue(typography.lineHeight, '1.75');
+  const titleSize = cssValue(typography.titleSize, '28px');
+  const bodySize = cssValue(typography.bodySize, '14px');
+  return { paper, marginTop, marginRight, marginBottom, marginLeft, fontFamily, lineHeight, titleSize, bodySize };
 }
 
-/**
- * 备用的纯文本 PDF 生成方案（当 Playwright 不可用时使用）
- * 手动构造 PDF-1.4 格式，支持中文显示（使用 STSong-Light CID 字体）
- */
-function buildFallbackPdf(title: string, markdown: string) {
-  // 将文本分行并限制每行 34 字符，最多 900 行
-  const lines = [title, '', ...plainText(markdown).split('\n')]
-    .flatMap(line => line.length > 34 ? line.match(/.{1,34}/gu) || [] : [line])
-    .slice(0, 900);
-  // 每页 34 行进行分页
-  const pages: string[][] = [];
-  for (let i = 0; i < lines.length; i += 34) pages.push(lines.slice(i, i + 34));
-  const objects: string[] = [];
-  const add = (content: string) => { objects.push(content); return objects.length; };
-  const catalogId = add('');
-  const pagesId = add('');
-  const fontId = add('<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light /Encoding /UniGB-UCS2-H /DescendantFonts [<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> >>] >>');
-  const pageIds: number[] = [];
-  // 逐页生成 PDF 内容流和页面定义
-  for (const pageLines of pages) {
-    const textOps = pageLines.map((line, index) => `BT /F1 ${index === 0 ? 18 : 11} Tf 50 ${790 - index * 22} Td <${utf16Hex(line)}> Tj ET`).join('\n');
-    const contentId = add(`<< /Length ${Buffer.byteLength(textOps)} >>\nstream\n${textOps}\nendstream`);
-    pageIds.push(add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`));
-  }
-  objects[catalogId - 1] = `<< /Type /Catalog /Pages ${pagesId} 0 R >>`;
-  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageIds.map(id => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`;
-  // 组装 PDF 文件：对象定义 + 交叉引用表
-  let pdf = '%PDF-1.4\n';
-  const offsets = [0];
-  objects.forEach((object, index) => {
-    offsets.push(Buffer.byteLength(pdf));
-    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
-  });
-  const xref = Buffer.byteLength(pdf);
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map(offset => `${String(offset).padStart(10, '0')} 00000 n `).join('\n')}\ntrailer << /Root ${catalogId} 0 R /Size ${objects.length + 1} >>\nstartxref\n${xref}\n%%EOF`;
-  return Buffer.from(pdf, 'binary');
-}
-
-/** 生成 HTML 文档外壳，包含 A4 打印样式和中文排版优化 */
-function htmlShell(title: string, body: string) {
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:A4;margin:24mm 18mm 22mm 18mm}body{font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif;line-height:1.75;color:#111827;font-size:14px}h1{text-align:center;font-size:28px;margin-top:80px}h2{border-bottom:1px solid #d1d5db;padding-bottom:6px;margin-top:28px;page-break-after:avoid}h3{margin-top:20px}img{display:block;max-width:100%;max-height:520px;object-fit:contain;margin:12px auto;page-break-inside:avoid}table{width:100%;border-collapse:collapse;page-break-inside:auto}tr{page-break-inside:avoid;page-break-after:auto}th,td{border:1px solid #6b7280;padding:6px 8px;vertical-align:top}th{background:#f3f4f6}pre{white-space:pre-wrap}.document-cover{min-height:720px;display:flex;flex-direction:column;justify-content:center}.document-cover h1{margin-top:0}.page-break{page-break-after:always;height:0}</style></head><body>${body}</body></html>`;
+function htmlShell(title: string, body: string, settings?: DocumentExportSettings) {
+  const style = exportStyle(settings);
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:${style.paper};margin:${style.marginTop} ${style.marginRight} ${style.marginBottom} ${style.marginLeft}}body{font-family:${style.fontFamily};line-height:${style.lineHeight};color:#111827;font-size:${style.bodySize}}h1{text-align:center;font-size:${style.titleSize};margin-top:80px}h2{font-size:${style.titleSize};border-bottom:1px solid #d1d5db;padding-bottom:6px;margin-top:28px;page-break-after:avoid}h3{font-size:${style.titleSize};margin-top:20px}img{display:block;max-width:100%;max-height:520px;object-fit:contain;margin:12px auto;page-break-inside:avoid}table{width:100%;border-collapse:collapse;page-break-inside:auto}tr{page-break-inside:avoid;page-break-after:auto}th,td{border:1px solid #6b7280;padding:6px 8px;vertical-align:top}th{background:#f3f4f6}pre{white-space:pre-wrap}.document-cover{min-height:720px;display:flex;flex-direction:column;justify-content:center}.document-cover h1{margin-top:0}.page-break{page-break-after:always;height:0}</style></head><body>${body}</body></html>`;
 }
 
 /** 判断问题是否为阻止导出的严重问题（非警告类问题） */
@@ -190,23 +224,143 @@ function isExportBlockingIssue(issue: { message: string }) {
   const message = issue.message.trim();
   // 事实冲突和必需章节缺失属于警告，不阻止导出
   if (/^(事实冲突|必需章节缺失)：/u.test(message)) return false;
-  return /出现禁用文本\s*(资料未提供|占位|TODO|TBD)|正文包含.*(资料未提供|占位)|图片、地图或附件引用路径明显无效|无效路径|表格语法错误|临时远程生成 URL|提示词全文|内部错误/iu.test(message);
+  return /出现禁用文本\s*(资料未提供|占位|TODO|TBD)|正文包含.*(资料未提供|占位)|图片、地图或附件引用路径明显无效|无效路径|表格语法错误|临时远程生成 URL|提示词全文|内部错误|生成未完成|低于目标页数|缺少配置小节|缺少必要的正式表格|正文缺少章节标题/iu.test(message);
+}
+
+function markdownStats(markdown: string) {
+  return {
+    chars: markdown.trim().length,
+    h2: (markdown.match(/^##\s+/gmu) || []).length,
+    h3: (markdown.match(/^###\s+/gmu) || []).length,
+    tables: (markdown.match(/\n\s*\|\s*:?-{3,}/gu) || []).length,
+  };
+}
+
+function validateExportMarkdown(markdown: string, baseline?: string) {
+  const stats = markdownStats(markdown);
+  const baseStats = baseline ? markdownStats(baseline) : undefined;
+  const issues: string[] = [];
+  if (stats.chars < 200) issues.push('导出内容为空或过短');
+  if (baseStats && baseStats.chars > 1000 && stats.chars < baseStats.chars * 0.8) issues.push('导出内容明显少于服务端生成记录');
+  if (baseStats && baseStats.h3 > 0 && stats.h3 === 0) issues.push('导出内容缺少服务端生成记录中的二级小节');
+  if (baseStats && baseStats.tables > 0 && stats.tables === 0) issues.push('导出内容缺少服务端生成记录中的表格');
+  return issues;
+}
+
+function existingBrowserPaths() {
+  const envPaths = [process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH, process.env.CHROME_PATH].filter(Boolean) as string[];
+  const home = os.homedir();
+  const candidates = process.platform === 'darwin' ? [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+    path.join(home, 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+    path.join(home, 'Applications/Chromium.app/Contents/MacOS/Chromium'),
+  ] : process.platform === 'win32' ? [
+    path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Google/Chrome/Application/chrome.exe'),
+    path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google/Chrome/Application/chrome.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Google/Chrome/Application/chrome.exe'),
+    path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Microsoft/Edge/Application/msedge.exe'),
+  ] : [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    '/usr/bin/microsoft-edge',
+  ];
+  return [...new Set([...envPaths, ...candidates].filter(file => file && fs.existsSync(file)))];
+}
+
+async function renderPdfWithBrowserCommand(html: string, browserPath: string, settings?: DocumentExportSettings) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'customize-agent-pdf-'));
+  const htmlPath = path.join(tmpDir, 'document.html');
+  const pdfPath = path.join(tmpDir, 'document.pdf');
+  const profileDir = path.join(tmpDir, 'profile');
+  fs.writeFileSync(htmlPath, html, 'utf-8');
+  try {
+    const style = exportStyle(settings);
+    const fileUrl = pathToFileURL(htmlPath).href;
+    const commonArgs = [
+      '--disable-gpu',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      `--user-data-dir=${profileDir}`,
+      `--print-to-pdf=${pdfPath}`,
+      `--print-to-pdf-page-size=${style.paper}`,
+      fileUrl,
+    ];
+    const errors: string[] = [];
+    for (const headlessArg of ['--headless=new', '--headless']) {
+      try {
+        await execFileAsync(browserPath, [headlessArg, ...commonArgs], { timeout: 30_000, maxBuffer: 1024 * 1024 });
+        if (fs.existsSync(pdfPath) && fs.statSync(pdfPath).size >= 1024) return fs.readFileSync(pdfPath);
+        errors.push(`${headlessArg}: browser command did not produce a valid PDF`);
+      } catch (error) {
+        errors.push(`${headlessArg}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    throw new Error(errors.join('\n'));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+async function renderPdfBuffer(html: string, settings?: DocumentExportSettings) {
+  const { chromium } = await import('playwright');
+  const attempts: Array<{ label: string; options: Parameters<typeof chromium.launch>[0] }> = [
+    { label: 'playwright-bundled-chromium', options: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] } },
+    { label: 'system-chrome-channel', options: { channel: 'chrome', headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] } },
+    { label: 'system-msedge-channel', options: { channel: 'msedge', headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] } },
+    ...existingBrowserPaths().map(executablePath => ({ label: executablePath, options: { executablePath, headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] } })),
+  ];
+  const errors: string[] = [];
+  for (const attempt of attempts) {
+    try {
+      const browser = await chromium.launch(attempt.options);
+      try {
+        const page = await browser.newPage({ locale: 'zh-CN' });
+        await page.setContent(html, { waitUntil: 'load' });
+        await page.waitForFunction(() => Array.from(document.images).every(img => img.complete), undefined, { timeout: 10_000 }).catch(() => undefined);
+        await page.emulateMedia({ media: 'print' });
+        const style = exportStyle(settings);
+        const pdf = await page.pdf({ format: style.paper as 'A4', printBackground: true, preferCSSPageSize: true, margin: { top: style.marginTop, right: style.marginRight, bottom: style.marginBottom, left: style.marginLeft }, displayHeaderFooter: true, headerTemplate: '<div></div>', footerTemplate: '<div style="font-size:9px;width:100%;text-align:center;color:#666;">第 <span class="pageNumber"></span> 页 / 共 <span class="totalPages"></span> 页</div>' });
+        return Buffer.from(pdf);
+      } finally {
+        await browser.close();
+      }
+    } catch (error) {
+      errors.push(`${attempt.label}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  for (const browserPath of existingBrowserPaths()) {
+    try {
+      return await renderPdfWithBrowserCommand(html, browserPath, settings);
+    } catch (error) {
+      errors.push(`browser-command ${browserPath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(errors.join('\n'));
 }
 
 /**
  * 文档导出 API 处理器
  * 支持导出为 Markdown、HTML、DOCX、PDF 四种格式
- * PDF 导出优先使用 Playwright，失败时回退到备用生成方案
+ * PDF 导出优先使用 Playwright 内置 Chromium，失败时自动尝试系统浏览器
  */
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   // 仅允许 POST 请求
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-    const body = req.body as { documentId?: string; title?: string; markdown?: string; format?: ExportFormat; enforceGate?: boolean; exportGate?: { passed?: boolean; blockingIssues?: Array<{ message: string }> }; wordTemplatePath?: string };
+    const body = req.body as { documentId?: string; title?: string; markdown?: string; format?: ExportFormat; enforceGate?: boolean; useClientMarkdown?: boolean; exportGate?: { passed?: boolean; blockingIssues?: Array<{ message: string }> }; wordTemplatePath?: string };
     const record = body.documentId ? getGeneratedDocument(body.documentId) : null;
     if (body.documentId && !record) return res.status(404).json({ error: 'Document not found' });
     const title = body.title || record?.title || 'document';
-    const markdown = typeof body.markdown === 'string' ? body.markdown : record?.editedMarkdown || record?.markdown || '';
+    const recordMarkdown = record?.editedMarkdown || record?.markdown || record?.draft?.markdown || '';
+    const markdown = body.useClientMarkdown && typeof body.markdown === 'string' ? body.markdown : recordMarkdown || body.markdown || '';
     const format = body.format || 'markdown';
+    const exportIssues = validateExportMarkdown(markdown, record?.draft?.markdown || record?.markdown);
+    if (exportIssues.length) return res.status(422).json({ error: 'EXPORT_CONTENT_INVALID', issues: exportIssues });
     const exportGate = record?.draft?.exportGate || body.exportGate;
     // 过滤并检查导出关卡
     const blockingIssues = exportGate?.blockingIssues?.filter(isExportBlockingIssue) || [];
@@ -220,7 +374,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
     // DOCX 格式
     if (format === 'docx') {
-      const docx = await buildDocx(title, markdown, body.wordTemplatePath);
+      const docx = await buildDocx(title, markdown, record?.draft?.exportSettings, body.wordTemplatePath);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.docx`)}`);
       return res.status(200).send(docx);
@@ -228,36 +382,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // HTML 和 PDF 需要将 Markdown 渲染为 HTML
     const { marked } = await import('marked');
     const projectRoot = getProjectRoot();
-    const html = inlineLocalImages(htmlShell(title, marked.parse(markdown, { async: false }) as string), projectRoot);
+    const exportSettings = record?.draft?.exportSettings;
+    const html = inlineLocalImages(htmlShell(title, marked.parse(markdown, { async: false }) as string, exportSettings), projectRoot);
     if (format === 'html') {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.html`)}`);
       return res.status(200).send(html);
     }
-    // PDF 导出：优先使用 Playwright 渲染
     try {
-      const { chromium } = await import('playwright');
-      const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-      try {
-        const page = await browser.newPage({ locale: 'zh-CN' });
-        await page.setContent(html, { waitUntil: 'load' });
-        // 等待所有图片加载完成
-        await page.waitForFunction(() => Array.from(document.images).every(img => img.complete && img.naturalWidth > 0), undefined, { timeout: 10_000 }).catch(() => undefined);
-        await page.emulateMedia({ media: 'print' });
-        const pdf = await page.pdf({ format: 'A4', printBackground: true, preferCSSPageSize: true, margin: { top: '24mm', right: '18mm', bottom: '22mm', left: '18mm' }, displayHeaderFooter: true, headerTemplate: '<div></div>', footerTemplate: '<div style="font-size:9px;width:100%;text-align:center;color:#666;">第 <span class="pageNumber"></span> 页 / 共 <span class="totalPages"></span> 页</div>' });
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.pdf`)}`);
-        return res.status(200).send(Buffer.from(pdf));
-      } finally {
-        await browser.close();
-      }
-    } catch (error) {
-      // Playwright 失败时记录日志并使用备用方案
-      recordErrorLog({ level: 'warn', source: 'api/documents/export', functionName: 'pdfExportChromium', error, req, meta: { fallback: 'minimal-pdf' } });
-      const pdf = buildFallbackPdf(title, markdown);
+      const pdf = await renderPdfBuffer(html, exportSettings);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.pdf`)}`);
       return res.status(200).send(pdf);
+    } catch (error) {
+      recordErrorLog({ level: 'error', source: 'api/documents/export', functionName: 'pdfExportChromium', error, req, meta: { fallback: 'system-browser-attempted' } });
+      return res.status(500).json({ error: 'PDF_RENDER_FAILED', message: 'PDF 渲染失败：未找到或无法启动可用的 Chrome/Chromium/Edge。请安装 Chrome，或设置 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH 后重试。' });
     }
 }
 

@@ -1,5 +1,17 @@
 # @customize-agent/types
 
+## 3.0.4
+
+### Patch Changes
+
+- Release formal patch version.
+
+## 3.0.3
+
+### Patch Changes
+
+- Release workflow, document generation, and knowledge extraction improvements.
+
 ## 3.0.2
 
 ### Patch Changes

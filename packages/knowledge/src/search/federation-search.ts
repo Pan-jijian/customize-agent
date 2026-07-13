@@ -19,8 +19,11 @@ export interface FederatedSearchItem {
   parentId?: string;
   source?: 'keyword' | 'vector' | 'hybrid';
   sectionTitle?: string;
+  titlePath?: string;
   rowRange?: string;
   chunkKind?: string;
+  startChar?: number;
+  endChar?: number;
   scoreDetails?: {
     keywordScore?: number;
     bm25Score?: number;
@@ -161,8 +164,11 @@ export class FederationSearch {
       parentId: typeof result.document.metadata.parent_id === 'string' ? result.document.metadata.parent_id : undefined,
       source: 'vector',
       sectionTitle: typeof result.document.metadata.section_title === 'string' ? result.document.metadata.section_title : undefined,
+      titlePath: typeof result.document.metadata.title_path === 'string' ? result.document.metadata.title_path : undefined,
       rowRange: typeof result.document.metadata.row_range === 'string' ? result.document.metadata.row_range : undefined,
       chunkKind: typeof result.document.metadata.chunk_kind === 'string' ? result.document.metadata.chunk_kind : undefined,
+      startChar: typeof result.document.metadata.start_char === 'number' ? result.document.metadata.start_char : undefined,
+      endChar: typeof result.document.metadata.end_char === 'number' ? result.document.metadata.end_char : undefined,
       scoreDetails: { vectorScore: result.score },
     };
   }

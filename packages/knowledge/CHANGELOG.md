@@ -1,5 +1,29 @@
 # @customize-agent/knowledge
 
+## 4.0.12
+
+### Patch Changes
+
+- Release formal patch version.
+
+## 4.0.11
+
+### Patch Changes
+
+- Fix PDF extraction fallback so valid pdfjs text is not replaced by raw binary text, add OCR augmentation for low-quality PDF text layers, and harden chunking for small sections and long unbroken text.
+
+## 4.0.10
+
+### Patch Changes
+
+- Enhance PDF text extraction, chunk structure preservation, SQLite search schema, FTS coverage, vector indexing context, and hybrid retrieval ranking for more accurate knowledge-base usage.
+
+## 4.0.9
+
+### Patch Changes
+
+- Release workflow, document generation, and knowledge extraction improvements.
+
 ## 4.0.8
 
 ### Patch Changes

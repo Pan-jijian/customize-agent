@@ -50,6 +50,19 @@ function sanitizeExecutionType(value: unknown): PromptExecutionType {
   return value === 'fact_extraction' || value === 'chapter_generation' || value === 'llm_review' || value === 'validation' || value === 'formatting' || value === 'reference' ? value : 'reference';
 }
 
+function uniqueStrings(values: string[] = []) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function uniqueRoleItems(items: ProjectRoleItem[] = []) {
+  const seen = new Set<string>();
+  return items.filter(item => {
+    if (!item.roleId || seen.has(item.roleId)) return false;
+    seen.add(item.roleId);
+    return true;
+  });
+}
+
 function sanitizeProcessingType(value: unknown): FileProcessingType {
   return value === 'rule' || value === 'project_fact' || value === 'table' || value === 'drawing' || value === 'specification' || value === 'reference' ? value : 'reference';
 }
@@ -62,7 +75,7 @@ function sanitizeRole(role: DocumentRole): DocumentRole {
     description: role.description || '',
     type,
     resourceId: role.resourceId || role.resourceIds?.[0] || undefined,
-    resourceIds: Array.isArray(role.resourceIds) && role.resourceIds.length > 0 ? role.resourceIds.filter(Boolean) : role.resourceId ? [role.resourceId] : [],
+    resourceIds: uniqueStrings(Array.isArray(role.resourceIds) && role.resourceIds.length > 0 ? role.resourceIds : role.resourceId ? [role.resourceId] : []),
     executionType: type === 'prompt' ? sanitizeExecutionType(role.executionType) : undefined,
     processingType: type === 'file' ? sanitizeProcessingType(role.processingType) : undefined,
   };
@@ -74,8 +87,8 @@ function sanitizeConfig(config: ProjectRoleConfig): ProjectRoleConfig {
     name: config.name || '未命名配置',
     description: config.description || '',
     builtIn: Boolean(config.builtIn),
-    fileRoles: Array.isArray(config.fileRoles) ? config.fileRoles.filter(item => item.roleId).map((item, index) => ({ roleId: item.roleId, order: Number.isFinite(item.order) ? item.order : index })) : [],
-    promptRoles: Array.isArray(config.promptRoles) ? config.promptRoles.filter(item => item.roleId).map((item, index) => ({ roleId: item.roleId, order: Number.isFinite(item.order) ? item.order : index })) : [],
+    fileRoles: uniqueRoleItems(Array.isArray(config.fileRoles) ? config.fileRoles.filter(item => item.roleId).map((item, index) => ({ roleId: item.roleId, order: Number.isFinite(item.order) ? item.order : index })) : []),
+    promptRoles: uniqueRoleItems(Array.isArray(config.promptRoles) ? config.promptRoles.filter(item => item.roleId).map((item, index) => ({ roleId: item.roleId, order: Number.isFinite(item.order) ? item.order : index })) : []),
   };
 }
 

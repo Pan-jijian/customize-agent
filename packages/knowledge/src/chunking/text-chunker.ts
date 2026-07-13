@@ -26,6 +26,7 @@ type ChunkCandidate = {
   startChar: number;
   endChar: number;
   sectionTitle?: string;
+  titlePath?: string;
   kind: ChunkKind;
   parentId: string;
   parentIndex: number;
@@ -56,8 +57,8 @@ const RECURSIVE_SEPARATORS = [
   /\n(?=#{1,6}\s)/u,
   /\n{2,}/u,
   /\n(?=(?:第[一二三四五六七八九十百千万\d]+[章节条]|[一二三四五六七八九十]+、|\d+[.)、]))/u,
-  /(?<=[。！？；])\s*/u,
-  /(?<=[，、])\s*/u,
+  /(?<=[。！？；])\s+/u,
+  /(?<=[，、])\s+/u,
   /\s+/u,
 ] as const;
 
@@ -89,7 +90,8 @@ export class TextChunker {
 
     const config = DEFAULT_CONFIGS[file.category];
     const normalized = this.withHeader(source, file, config);
-    const candidates = this.enforceCandidateLimit(this.createCandidates(normalized, file, config), config);
+    const rawCandidates = this.createCandidates(normalized, file, config);
+    const candidates = this.enforceCandidateLimit(rawCandidates, config);
 
     return candidates.map((candidate, index) => this.createChunk(index, candidate, file, metadata));
   }
@@ -102,8 +104,9 @@ export class TextChunker {
   }
 
   private createTextCandidates(text: string, category: FileCategory, config: ChunkConfig): ChunkCandidate[] {
-    const sections = this.splitIntoSections(text, category);
+    const sections = this.mergeSmallSections(this.splitIntoSections(text, category), config);
     const candidates: ChunkCandidate[] = [];
+    const titlePaths = this.buildTitlePaths(sections);
 
     sections.forEach((section, parentIndex) => {
       const parentId = `p${parentIndex}`;
@@ -117,6 +120,7 @@ export class TextChunker {
           startChar,
           endChar: startChar + part.length,
           sectionTitle: section.title,
+          titlePath: titlePaths[parentIndex],
           kind: this.kindForCategory(category),
           parentId,
           parentIndex,
@@ -137,6 +141,7 @@ export class TextChunker {
           startChar,
           endChar: startChar + part.length,
           sectionTitle: this.extractSectionTitle(part) ?? '表格数据',
+          titlePath: this.extractSectionTitle(part) ?? '表格数据',
           kind: 'table',
           parentId: `table-${index}`,
           parentIndex: index,
@@ -156,6 +161,7 @@ export class TextChunker {
       startChar: Math.max(0, text.indexOf(part.slice(0, 40))),
       endChar: Math.max(0, text.indexOf(part.slice(0, 40))) + part.length,
       sectionTitle: this.extractSectionTitle(part),
+      titlePath: this.extractSectionTitle(part),
       kind: 'data',
       parentId: `data-${index}`,
       parentIndex: index,
@@ -177,6 +183,7 @@ export class TextChunker {
         startChar,
         endChar: startChar + part.length,
         sectionTitle: this.extractSectionTitle(part),
+        titlePath: this.extractSectionTitle(part),
         kind: 'code',
         parentId: `code-${language}-${index}`,
         parentIndex: index,
@@ -261,6 +268,29 @@ export class TextChunker {
     });
   }
 
+  private mergeSmallSections(sections: Array<{ text: string; startChar: number; title?: string }>, config: ChunkConfig): Array<{ text: string; startChar: number; title?: string }> {
+    const merged: Array<{ text: string; startChar: number; title?: string }> = [];
+    let current: { text: string; startChar: number; title?: string } | undefined;
+    const targetTokens = Math.max(80, Math.floor(config.maxChunkSize * 0.75));
+
+    for (const section of sections) {
+      if (!current) {
+        current = { ...section };
+        continue;
+      }
+      const candidateText = `${current.text}\n\n${section.text}`;
+      const currentTokens = this.estimateTokens(current.text);
+      if (currentTokens < targetTokens && this.estimateTokens(candidateText) <= config.maxChunkSize) {
+        current = { ...current, text: candidateText, title: current.title ?? section.title };
+      } else {
+        merged.push(current);
+        current = { ...section };
+      }
+    }
+    if (current) merged.push(current);
+    return merged;
+  }
+
   private mergeLeadingHeader(sections: string[]): string[] {
     if (sections.length < 2) return sections;
     const first = sections[0];
@@ -278,7 +308,7 @@ export class TextChunker {
     const separator = RECURSIVE_SEPARATORS[separatorIndex];
     if (!separator) return this.splitBySentenceBoundary(text, maxTokens);
     const parts = text.split(separator).map(part => part.trim()).filter(Boolean);
-    if (parts.length <= 1) return this.recursiveSplit(text, maxTokens, separatorIndex + 1);
+    if (parts.length <= 1 || parts.some(part => part === text)) return this.recursiveSplit(text, maxTokens, separatorIndex + 1);
 
     return parts.flatMap(part => this.recursiveSplit(part, maxTokens, separatorIndex + 1));
   }
@@ -368,6 +398,23 @@ export class TextChunker {
     });
   }
 
+  private buildTitlePaths(sections: Array<{ text: string; title?: string }>): Array<string | undefined> {
+    const stack: Array<{ level: number; title: string }> = [];
+    return sections.map(section => {
+      const firstLine = section.text.trim().split(/\r?\n/u)[0] ?? '';
+      const heading = firstLine.match(/^(#{1,6})\s+(.+)$/u);
+      if (heading?.[1] && heading[2]) {
+        const level = heading[1].length;
+        const title = heading[2].trim();
+        while (stack.length > 0 && stack[stack.length - 1]!.level >= level) stack.pop();
+        stack.push({ level, title });
+      } else if (section.title && stack.length === 0) {
+        stack.push({ level: 1, title: section.title });
+      }
+      return stack.map(item => item.title).join(' > ') || section.title;
+    });
+  }
+
   private withHeader(text: string, file: ClassifiedFile, config: ChunkConfig): string {
     if (!config.headerInjection) return text;
     return `资料类型: ${file.category}/${file.format}\n\n${text}`;
@@ -391,9 +438,10 @@ export class TextChunker {
         childIndex: candidate.childIndex,
         rowRange: candidate.rowRange,
         sectionTitle: candidate.sectionTitle ?? this.extractSectionTitle(text),
+        titlePath: candidate.titlePath ?? candidate.sectionTitle ?? this.extractSectionTitle(text),
         startChar: candidate.startChar,
         endChar: candidate.endChar,
-        splitStrategy: 'recursive_parent_child_v1',
+        splitStrategy: 'recursive_parent_child_v2',
       },
     };
   }

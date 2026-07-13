@@ -174,10 +174,10 @@ export default function DocumentsPage() {
       { key: 'prepare', title: t('documents.flowPrepare'), description: `读取"${tpl?.name || '当前模板'}"并创建后台生成任务`, status: 'process', icon: <FileTextOutlined />, subSteps: subSteps(['读取模板参数', tpl?.documentSpecId ? `加载规范包：${spec?.name || tpl.documentSpecId}` : '未绑定规范包，使用模板章节要求', '创建后台生成任务']) },
       { key: 'role_binding', title: '动态角色配置绑定', description: `绑定 ${fns.length} 个文件角色、${pns.length} 个提示词角色`, status: 'wait', icon: <ApartmentOutlined />, subSteps: subSteps([...(fns.length ? fns.map(n => `文件角色：${n}`) : ['没有文件角色，使用模板绑定文件']), ...(pns.length ? pns.map(n => `提示词角色：${n}`) : ['没有提示词角色，使用默认生成策略'])].slice(0, 10)) },
       { key: 'context_recall', title: '短期/长期上下文召回', description: '从项目记忆中召回用户偏好、历史纠偏和已生成文档摘要，并注入生成提示词', status: 'wait', icon: <BulbOutlined />, subSteps: subSteps(['召回相关项目记忆', '注入章节生成提示词', '生成完成后沉淀新记忆']) },
-      { key: 'knowledge_retrieval', title: '知识库证据检索', description: `按 ${chs.length} 个章节检索文本、文档、表格、图片、图纸和附件`, status: 'wait', icon: <DatabaseOutlined />, subSteps: subSteps(chs.length ? chs.slice(0, 10).map(n => `检索章节：${n}`) : ['按模板标题检索证据']) },
+      { key: 'knowledge_retrieval', title: '知识库证据检索', description: `按 ${chs.length || '动态'} 个规范章节检索文本、文档、表格、图片、图纸和附件`, status: 'wait', icon: <DatabaseOutlined />, subSteps: subSteps(chs.length ? chs.slice(0, 10).map(n => `检索章节：${n}`) : ['按规范包动态章节规则检索证据']) },
       { key: 'file_understanding', title: '多类型文件理解', description: '按文件角色处理文本、PDF/Word、表格、图片、图纸和附件', status: 'wait', icon: <EyeOutlined />, subSteps: subSteps(['识别文件类型和角色', '构建结构化资源证据包', '必要时调用多模态文件理解']) },
       { key: 'fact_extraction', title: '动态 schema 事实抽取', description: `按 ${facts.length} 个规范/章节事实字段抽取并检测冲突`, status: 'wait', icon: <BulbOutlined />, subSteps: subSteps(facts.length ? facts.slice(0, 10).map(n => `抽取事实：${n}`) : ['抽取模板要求的事实', '合并来源和角色', '检测事实冲突']) },
-      { key: 'chapter_generation', title: '章节生成', description: `按 ${chs.length} 个模板章节逐章生成`, status: 'wait', icon: <FormOutlined />, subSteps: subSteps(chs.length ? chs.slice(0, 10).map(n => `生成：${n}`) : ['构造章节提示词', '等待 LLM 生成', '整理章节证据']) },
+      { key: 'chapter_generation', title: '章节生成', description: spec?.chapterMode === 'fixed' ? `按 ${chs.length} 个规范章节逐章生成` : '按规范包动态章节规则生成', status: 'wait', icon: <FormOutlined />, subSteps: subSteps(chs.length ? chs.slice(0, 10).map(n => `生成：${n}`) : ['构造动态章节提示词', '等待 LLM 生成', '整理章节证据']) },
       ...(hasAsset ? [{ key: 'asset_generation' as const, title: '生成资源处理', description: '根据资源/图片提示词生成或登记本地资源', status: 'wait' as const, icon: <PictureOutlined />, subSteps: subSteps(['生成资源提示词', '保存到 generatedDocuments/assets', '登记资源元数据']) }] : []),
       { key: 'validation', title: '规范包与门禁校验', description: spec ? `执行 ${spec.gateRules.length} 条门禁规则` : '执行模板基础校验', status: 'wait', icon: <SafetyCertificateOutlined />, subSteps: subSteps([...(spec?.factFields.filter(f => f.required).map(f => `必填事实：${f.name}`) || []), ...(spec?.gateRules.map(r => `门禁：${r.name}`) || ['检查章节证据', '检查缺失项', '检查导出门禁'])].slice(0, 10)) },
       { key: 'formatting', title: t('documents.flowFormatting'), description: '整理标题、表格、图片、附件引用和正式 Markdown', status: 'wait', icon: <CheckCircleOutlined />, subSteps: subSteps(['整理标题层级', '整理多类型资源引用', '生成正式 Markdown']) },
@@ -296,13 +296,14 @@ export default function DocumentsPage() {
 
   const openEditor = (tpl?: DocumentTemplate) => {
     const value = tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, documentSpecId: undefined, chapters: [] };
-    form.setFieldsValue({ ...value, chapters: value.chapters.map(chapter => ({ ...chapter, queriesText: chapter.queries.join('\n'), requiredFactsText: chapter.requiredFacts.join('\n'), pinnedEvidenceText: (chapter.pinnedEvidenceFilePaths || []).join('\n') })) });
+    form.resetFields();
+    form.setFieldsValue(value);
     setTemplateModalOpen(true);
   };
   const saveTpl = async () => {
     try {
       const v = await form.validateFields();
-      const template = { ...v, chapters: (v.chapters || []).map((chapter: DocumentTemplate['chapters'][number] & { queriesText?: string; requiredFactsText?: string; pinnedEvidenceText?: string }) => ({ ...chapter, queries: String(chapter.queriesText || '').split(/\r?\n/u).map(item => item.trim()).filter(Boolean), requiredFacts: String(chapter.requiredFactsText || '').split(/\r?\n/u).map(item => item.trim()).filter(Boolean), pinnedEvidenceFilePaths: String(chapter.pinnedEvidenceText || '').split(/\r?\n/u).map(item => item.trim()).filter(Boolean), queriesText: undefined, requiredFactsText: undefined, pinnedEvidenceText: undefined })) } as DocumentTemplate;
+      const template = { ...v, chapters: [] } as DocumentTemplate;
       const r = await saveDocumentTemplate(template);
       setTemplates(r.templates); setTemplateId(r.template.id); setTemplateModalOpen(false); await loadDrafts(); message.success(t('common.success'));
     } catch (e) { if (e instanceof Error) message.error(e.message); }
@@ -452,7 +453,8 @@ export default function DocumentsPage() {
       const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
       const ext = fmt === 'markdown' ? 'md' : fmt;
       const wp = documentSpecs.find(s => s.id === currentTemplate?.documentSpecId)?.wordTemplatePath;
-      const blob = await exportDocument({ documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, wordTemplatePath: wp });
+      const payload = currentDocumentId ? { documentId: currentDocumentId, title: draft.title, format: fmt, enforceGate: false, exportGate: draft.exportGate, wordTemplatePath: wp } : { title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, wordTemplatePath: wp, useClientMarkdown: true };
+      const blob = await exportDocument(payload);
       dl(blob, `${draft.title}.${ext}`, mimes[fmt]);
     } catch (e) { message.error(e instanceof Error ? e.message : t('common.error')); } finally { setExporting(null); }
   };
@@ -703,29 +705,10 @@ export default function DocumentsPage() {
           <Form.Item name="projectRoleConfigId" label={t('documents.projectRoleConfig')} rules={[{ required: true, message: t('documents.projectRoleConfigRequired') }]}>
             <Select showSearch placeholder={t('documents.projectRoleConfigRequired')} options={roleConfigOptions} />
           </Form.Item>
-          <Form.Item name="documentSpecId" label={t('documents.documentSpec')}>
-            <Select allowClear showSearch placeholder={t('documents.documentSpecPlaceholder')} options={documentSpecOptions} />
+          <Form.Item name="documentSpecId" label={t('documents.documentSpec')} rules={[{ required: true, message: t('documents.documentSpecPlaceholder') }]}>
+            <Select showSearch placeholder={t('documents.documentSpecPlaceholder')} options={documentSpecOptions} />
           </Form.Item>
-          <Form.List name="chapters">
-            {(fields, { add, remove }) => (
-              <div>
-                <Space style={{ marginBottom: 8 }}><Text strong>章节结构</Text><Button size="small" icon={<PlusOutlined />} onClick={() => add({ id: `chapter-${Date.now()}`, title: '', purpose: '', queries: [], requiredFacts: [] })}>添加章节</Button></Space>
-                {fields.map(field => (
-                  <Card key={field.key} size="small" style={{ marginBottom: 8 }}>
-                    <Row gutter={8}>
-                      <Col span={6}><Form.Item name={[field.name, 'id']} label="章节 ID" rules={[{ required: true }]}><Input /></Form.Item></Col>
-                      <Col span={8}><Form.Item name={[field.name, 'title']} label="标题" rules={[{ required: true }]}><Input /></Form.Item></Col>
-                      <Col span={8}><Form.Item name={[field.name, 'purpose']} label="目的"><Input /></Form.Item></Col>
-                      <Col span={2}><Button danger size="small" onClick={() => remove(field.name)}>删除</Button></Col>
-                      <Col span={12}><Form.Item name={[field.name, 'queriesText']} label="查询词（每行一个）"><TextArea rows={3} /></Form.Item></Col>
-                      <Col span={12}><Form.Item name={[field.name, 'requiredFactsText']} label="必需事实（每行一个）"><TextArea rows={3} /></Form.Item></Col>
-                      <Col span={24}><Form.Item name={[field.name, 'pinnedEvidenceText']} label="高级可选：人工确认优先证据"><TextArea rows={2} placeholder="通常无需手动填写。仅当系统自动检索不稳定或必须指定官方资料时，每行填写一个 knowledgeBase 相对路径" /></Form.Item></Col>
-                    </Row>
-                  </Card>
-                ))}
-              </div>
-            )}
-          </Form.List>
+          <Alert type="info" showIcon message="章节、事实字段和门禁规则统一由文档规范包管理。" />
         </Form>
       </Drawer>
     </div>

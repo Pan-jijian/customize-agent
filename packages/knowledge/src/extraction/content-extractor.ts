@@ -204,7 +204,7 @@ export class ContentExtractor {
 
   private isReadableCadValue(value: string): boolean {
     const cleaned = this.cleanCadReadableText(value);
-    return cleaned.length >= 2 && !CAD_INTERNAL_LINE_RE.test(cleaned) && /[\p{Script=Han}\d]/u.test(cleaned);
+    return cleaned.length >= 2 && !CAD_INTERNAL_LINE_RE.test(cleaned) && /[\p{Script=Han}\p{Letter}\d]/u.test(cleaned);
   }
 
   private cleanExtractedText(value: string, file: ClassifiedFile): string {
@@ -350,10 +350,10 @@ export class ContentExtractor {
       warnings.push('dxf-parser 解析失败，已使用 DXF 文本结构抽取回退');
     }
 
-    const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
+    const layers = this.matchAll(raw, /(?:^|\r?\n)\s*8\s*\r?\n([^\r\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
     const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 5000);
-    const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
-    const entityTypes = this.matchAll(raw, /\n\s*0\s*\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1200);
+    const blocks = this.matchAll(raw, /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
+    const entityTypes = this.matchAll(raw, /(?:^|\r?\n)\s*0\s*\r?\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1200);
     const uniqueLayers = Array.from(new Set(layers));
     const uniqueBlocks = Array.from(new Set(blocks));
     const uniqueEntityTypes = Array.from(new Set(entityTypes));
@@ -399,17 +399,17 @@ export class ContentExtractor {
   }
 
   private extractDxfTextAnnotations(raw: string): CadAnnotation[] {
-    const entities = raw.split(/\n\s*0\s*\n/u).filter(section => /^(?:TEXT|MTEXT|DIMENSION|LEADER)/u.test(section.trim()));
+    const entities = raw.split(/(?:^|\r?\n)\s*0\s*\r?\n/u).filter(section => /^(?:TEXT|MTEXT|DIMENSION|LEADER)/u.test(section.trim()));
     return entities.flatMap(section => {
-      const text = this.cleanCadReadableText(/\n\s*(?:1|3)\s*\n([^\n]+)/u.exec(section)?.[1] ?? '');
+      const text = this.cleanCadReadableText(/(?:^|\r?\n)\s*(?:1|3)\s*\r?\n([^\r\n]+)/u.exec(section)?.[1] ?? '');
       if (!text || !this.isReadableCadValue(text)) return [];
       return [{
         text,
-        layer: /\n\s*8\s*\n([^\n]+)/u.exec(section)?.[1]?.trim(),
-        block: /\n\s*2\s*\n([^\n]+)/u.exec(section)?.[1]?.trim(),
+        layer: /(?:^|\r?\n)\s*8\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim(),
+        block: /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim(),
         entityType: section.trim().split(/\s+/u)[0],
-        x: Number(/\n\s*10\s*\n([^\n]+)/u.exec(section)?.[1]),
-        y: Number(/\n\s*20\s*\n([^\n]+)/u.exec(section)?.[1]),
+        x: Number(/(?:^|\r?\n)\s*10\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]),
+        y: Number(/(?:^|\r?\n)\s*20\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]),
       }].map(item => ({ ...item, x: Number.isFinite(item.x) ? item.x : undefined, y: Number.isFinite(item.y) ? item.y : undefined }));
     });
   }
@@ -703,7 +703,7 @@ export class ContentExtractor {
       return `R${rowIndex + 2}C${colIndex + 1} ${column}: ${value}`;
     }));
     return {
-      text: [this.metadataOnlyText(file), '### 工作表: 默认', markdown, '### 表格路径声明', ...legacyKv].join('\n\n'),
+      text: [this.metadataOnlyText(file), '工作表：默认', markdown, '表格路径声明', ...legacyKv].join('\n\n'),
       metadata: {
         extractionMode: 'delimited_text_structured',
         semanticExtractionMode: 'delimited_markdown_table',
@@ -842,7 +842,7 @@ export class ContentExtractor {
         if (matrix.length > 0) {
           const header = matrix[0] ?? [];
           const rows = matrix.slice(1);
-          sheetTexts.push([`### 工作表: ${name}`, this.toMarkdownTable(header, rows)].join('\n\n'));
+          sheetTexts.push([`工作表：${name}`, this.toMarkdownTable(header, rows)].join('\n\n'));
         }
       }
 
@@ -1089,7 +1089,15 @@ try {
       if (text.trim()) {
         metadata.contentCoverage = 'pdf_text_streams_layout_markdown';
         metadata.pdfExtractor = 'pdfjs-dist';
-        return { text: [this.metadataOnlyText(file), this.toMarkdownDocument(text)].join('\n\n'), metadata, warnings };
+        const markdownText = this.toMarkdownDocument(text);
+        if (!this.shouldAugmentPdfWithOcr(markdownText)) return { text: [this.metadataOnlyText(file), markdownText].join('\n\n'), metadata, warnings };
+        const ocr = await this.extractScannedPdfOcr(file);
+        if (ocr.text.trim()) {
+          metadata.contentCoverage = 'pdf_text_streams_plus_ocr';
+          metadata.ocrAugmented = true;
+          return { text: [this.metadataOnlyText(file), markdownText, '## PDF OCR 备用识别文本', ocr.text].join('\n\n'), metadata: { ...metadata, ocr: ocr.metadata }, warnings: [...warnings, ...ocr.warnings] };
+        }
+        return { text: [this.metadataOnlyText(file), markdownText].join('\n\n'), metadata: { ...metadata, ocrRecommended: true, ocrReason: ocr.metadata.ocrReason ?? 'pdf_text_low_quality' }, warnings: [...warnings, ...ocr.warnings] };
       }
     } catch (error) {
       warnings.push(`PDF 文本提取失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -1111,6 +1119,16 @@ try {
       metadata,
       warnings: [...warnings, 'PDF 正文暂未提取到文本，已索引文件名、路径和类型元数据', ...ocr.warnings],
     };
+  }
+
+  private shouldAugmentPdfWithOcr(text: string): boolean {
+    const normalizedLength = this.normalizedTextLength(text);
+    if (normalizedLength < 1200) return true;
+    const lines = text.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+    if (lines.length === 0) return true;
+    const shortLineRatio = lines.filter(line => line.length <= 12).length / lines.length;
+    const cjkCount = (text.match(/[\p{Script=Han}]/gu) ?? []).length;
+    return shortLineRatio > 0.65 && cjkCount < 1200;
   }
 
   private async extractScannedPdfOcr(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
@@ -1201,6 +1219,7 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
   }
 
   private async extractPdfText(buffer: Buffer): Promise<string> {
+    let pdfjsText = '';
     // 第一层：pdfjs-dist 文本提取（处理压缩内容流、CJK 字体、现代 PDF）
     try {
       const mod = await resolveAndImport('pdfjs-dist/legacy/build/pdf.mjs') as any;
@@ -1210,33 +1229,38 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
       const pageLimit = doc.numPages;
       for (let i = 1; i <= pageLimit; i++) {
         const page = await doc.getPage(i);
-        const content = await page.getTextContent();
+        const content = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: true });
         const items = content.items
           .map((item: unknown) => this.toPdfTextItem(item))
           .filter((item: PdfTextItem | undefined): item is PdfTextItem => !!item && item.str.trim().length > 0);
         const pageText = this.layoutPdfTextItems(items, i);
+
         if (pageText.trim()) pages.push(pageText.trim());
       }
       await doc.destroy();
-      if (pages.length > 0) {
-        const combined = pages.join('\n\n');
-        if (combined.trim()) return combined;
-      }
+      pdfjsText = pages.join('\n\n').trim();
+
     } catch (e) {
       if (process.env.KB_DEBUG === '1') console.warn('[kb] pdfjs-dist extraction failed:', (e as Error).message);
     }
 
-    // 第二层：pdf-parse（兼容旧版 PDF）
+    // 第二层：pdf-parse（兼容旧版 PDF），与 pdfjs 结果互补，避免单一解析器漏字
     try {
       const mod = await resolveAndImport('pdf-parse');
-      const pdfParse = (mod as unknown as { default?: (data: Buffer) => Promise<{ text: string }> }).default;
+      const pdfParse = typeof mod === 'function'
+        ? mod as (data: Buffer) => Promise<{ text: string }>
+        : (mod as unknown as { default?: (data: Buffer) => Promise<{ text: string }> }).default;
       if (pdfParse) {
         const result = await pdfParse(buffer);
-        if (result.text.trim()) return result.text;
+        const parseText = result.text.trim();
+        if (pdfjsText && parseText && this.normalizedTextLength(parseText) > this.normalizedTextLength(pdfjsText) * 1.08) return [pdfjsText, '## PDF 备用解析文本', parseText].join('\n\n');
+        if (parseText && !pdfjsText) return parseText;
       }
     } catch {
-      // 降级到下方纯正则提取
+      // pdfjs 结果已可用时忽略备用解析器失败
     }
+
+    if (pdfjsText) return pdfjsText;
 
     // 第三层：raw regex 回退（未压缩的古老 PDF）
     const raw = buffer.toString('latin1');
@@ -1252,6 +1276,10 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
       })
       .join('')
       .trim();
+  }
+
+  private normalizedTextLength(value: string): number {
+    return value.replace(/\s+/gu, '').length;
   }
 
   private toPdfTextItem(item: unknown): PdfTextItem | undefined {
@@ -1282,6 +1310,24 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
     return [`## PDF 第 ${pageNumber} 页`, markdown].join('\n\n');
   }
 
+  private joinPdfRowText(items: PdfTextItem[]): string {
+    let output = '';
+    let previous: PdfTextItem | undefined;
+    for (const item of items) {
+      const text = item.str.trim();
+      if (!text) continue;
+      if (!previous) {
+        output += text;
+      } else {
+        const gap = item.x - (previous.x + previous.width);
+        const cjkJoin = /[\p{Script=Han}（(《“‘]$/u.test(output) || /^[\p{Script=Han}）)》”’、，。；：！？]/u.test(text);
+        output += gap > Math.max(3, previous.height * 0.35) && !cjkJoin ? ` ${text}` : text;
+      }
+      previous = item;
+    }
+    return output.replace(/\s+/gu, ' ').trim();
+  }
+
   private groupPdfItemsIntoRows(items: PdfTextItem[]): Array<{ text: string; x: number; y: number; height: number }> {
     const sorted = [...items].sort((a, b) => b.y - a.y || a.x - b.x);
     const rows: Array<{ items: PdfTextItem[]; y: number }> = [];
@@ -1293,7 +1339,7 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
     return rows.map(row => {
       const rowItems = row.items.sort((a, b) => a.x - b.x);
       return {
-        text: rowItems.map(item => item.str.trim()).filter(Boolean).join(' ').replace(/\s+/gu, ' '),
+        text: this.joinPdfRowText(rowItems),
         x: Math.min(...rowItems.map(item => item.x)),
         y: row.y,
         height: Math.max(...rowItems.map(item => item.height || 0)),

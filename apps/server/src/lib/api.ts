@@ -279,7 +279,7 @@ export async function searchKb(query: string, opts?: { projectRoot?: string; cat
 
 // ═══════ 文档工作台 ═══════
 
-export interface DocumentTemplateChapter { id: string; title: string; purpose: string; queries: string[]; requiredFacts: string[]; pinnedEvidenceFilePaths?: string[]; }
+export interface DocumentTemplateChapter { id: string; title: string; purpose: string; queries: string[]; requiredFacts: string[]; sections?: string[]; tableSections?: string[]; tableRequirements?: string[]; pinnedEvidenceFilePaths?: string[]; }
 export interface PromptBinding { promptId: string; roleId: string; }
 export interface FileBinding { filePath: string; roleId: string; }
 export type PromptExecutionType = 'fact_extraction' | 'chapter_generation' | 'llm_review' | 'validation' | 'formatting' | 'reference';
@@ -300,11 +300,13 @@ export interface DocumentSpecFactField { id: string; name: string; type: FactFie
 export interface DocumentSpecChapterRule { id: string; title: string; required: boolean; order: number; minWords?: number; requiredFactIds?: string[]; requiredFileRoleIds?: string[]; requiredPromptRoleIds?: string[]; generationHint?: string; }
 export interface DocumentSpecGateRule { id: string; name: string; type: GateRuleType; level: GateRuleLevel; target?: string; value?: string; evaluator?: GateRuleEvaluator; }
 export interface DocumentSpecPackage { id: string; name: string; description: string; factFields: DocumentSpecFactField[]; chapterMode: ChapterRuleMode; chapterRules: DocumentSpecChapterRule[]; dynamicChapterRule: DynamicChapterRule; gateRules: DocumentSpecGateRule[]; wordTemplatePath?: string; builtIn?: boolean; }
-export interface DocumentTemplate { id: string; name: string; description: string; category: string; outputTitle: string; chapters: DocumentTemplateChapter[]; projectRoleConfigId?: string; documentSpecId?: string; promptIds?: string[]; boundFilePaths?: string[]; promptBindings?: PromptBinding[]; fileBindings?: FileBinding[]; builtIn?: boolean; }
+export interface DocumentExportSettings { page?: { paper?: string; marginTop?: string; marginRight?: string; marginBottom?: string; marginLeft?: string }; typography?: { fontFamily?: string; lineHeight?: string; titleSize?: string; bodySize?: string }; targetPages?: { min?: number; target?: number; max?: number }; }
+export interface DocumentGenerationSettings { targetPages?: { min?: number; target?: number; max?: number }; }
+export interface DocumentTemplate { id: string; name: string; description: string; category: string; outputTitle: string; chapters: DocumentTemplateChapter[]; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; projectRoleConfigId?: string; documentSpecId?: string; promptIds?: string[]; boundFilePaths?: string[]; promptBindings?: PromptBinding[]; fileBindings?: FileBinding[]; builtIn?: boolean; }
 export interface DocumentTemplateValidation { templateId: string; fileDiagnostics: Array<FileBinding & { roleName?: string; exists: boolean; indexed: boolean; chunkCount: number; vectorReady: boolean }>; promptDiagnostics: Array<PromptBinding & { roleName?: string; promptTitle?: string; exists: boolean; contentLength: number }>; spec?: { id: string; name: string; factFields: number; gateRules: number }; issues: Array<{ level: 'error' | 'warning'; message: string }> }
 export interface PromptProject { id: string; projectId: string; projectRoot?: string; projectName: string; customizePath: string; content: string; mtime: string; hasFile: boolean; isCurrent: boolean; selected: boolean; source: 'current' | 'project' | 'custom'; }
 export interface DocumentEvidence { chapterId: string; filePath: string; score: number; content: string; roleId?: string; processingType?: string; sectionTitle?: string; source?: string; }
-export interface DocumentDraftChapter { id: string; title: string; content: string; evidence: DocumentEvidence[]; missingFacts: string[]; }
+export interface DocumentDraftChapter { id: string; title: string; content: string; evidence: DocumentEvidence[]; missingFacts: string[]; sections?: string[]; }
 export interface FactSourceRef { filePath: string; roleId: string; processingType?: string; sectionTitle?: string; chunkIndex?: number; cellRange?: string; }
 export interface DocumentFact { key: string; value: string; sourceFile: string; roleId: string; processingType?: string; confidence: number; fieldId?: string; fieldName?: string; sourceRef?: FactSourceRef; }
 export interface StructuredTableFact { tableType: string; sheet?: string; headers: string[]; rows: string[][]; sourceFile: string; sourceRange?: string; }
@@ -315,7 +317,7 @@ export interface DocumentExecutionStage { type: 'role_binding' | 'knowledge_retr
 export interface DocumentAsset { id: string; type: 'image' | 'audio' | 'video' | 'file'; role: 'cover' | 'reference' | 'generated' | 'attachment' | 'map' | 'operator'; path?: string; url?: string; prompt?: string; modelProvider?: string; status: 'generated' | 'prompt_ready' | 'fallback'; message?: string; }
 export interface GeneratedAssetRecord extends DocumentAsset { name: string; source: 'knowledge_base' | 'generated' | 'uploaded' | 'external_url'; indexed: boolean; usedByDocumentIds: string[]; createdAt: number; updatedAt: number; }
 export interface GeneratedDocumentRecord { id: string; taskId?: string; templateId: string; templateName?: string; title: string; requirement: string; markdown: string; editedMarkdown?: string; status: 'generating' | 'completed' | 'warning' | 'failed'; draft?: GeneratedDocumentDraft; executionStages?: GeneratedDocumentDraft['executionStages']; assets: DocumentAsset[]; createdAt: number; updatedAt: number; completedAt?: number; error?: string; warningIssues?: string[]; }
-export interface GeneratedDocumentDraft { templateId: string; templateName: string; title: string; requirement: string; markdown: string; facts: Record<string, string>; structuredFacts: DocumentFact[]; factsModel: DocumentFactsModel; chapters: DocumentDraftChapter[]; sources: Array<{ filePath: string; count: number }>; missingItems: string[]; validation: { passed: boolean; warnings: string[]; errors: string[] }; validationIssues: ValidationIssue[]; executionStages: DocumentExecutionStage[]; exportGate: ExportGateResult; assets?: DocumentAsset[]; generatedAt: number; }
+export interface GeneratedDocumentDraft { templateId: string; templateName: string; title: string; requirement: string; markdown: string; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; facts: Record<string, string>; structuredFacts: DocumentFact[]; factsModel: DocumentFactsModel; chapters: DocumentDraftChapter[]; sources: Array<{ filePath: string; count: number }>; missingItems: string[]; validation: { passed: boolean; warnings: string[]; errors: string[] }; validationIssues: ValidationIssue[]; executionStages: DocumentExecutionStage[]; exportGate: ExportGateResult; assets?: DocumentAsset[]; generatedAt: number; }
 export interface StoredDocumentDraft extends GeneratedDocumentDraft { id: string; updatedAt: number; }
 
 export async function getPromptProjects() { return fetchJson<PromptProject[]>('/api/prompt'); }
@@ -382,9 +384,9 @@ export async function exportDocument(input: { documentId?: string; title?: strin
     const text = await response.text();
     let message = text || '导出失败';
     try {
-      const parsed = JSON.parse(text) as { error?: string; issues?: Array<{ message?: string }> };
+      const parsed = JSON.parse(text) as { error?: string; message?: string; issues?: Array<{ message?: string }> };
       const issueText = parsed.issues?.map(issue => issue.message).filter(Boolean).slice(0, 3).join('；');
-      message = issueText ? `${parsed.error || '导出失败'}：${issueText}` : parsed.error || message;
+      message = issueText ? `${parsed.error || '导出失败'}：${issueText}` : parsed.message || parsed.error || message;
     } catch {
       // 保留原始响应文本
     }

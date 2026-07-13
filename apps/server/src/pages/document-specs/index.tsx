@@ -69,6 +69,7 @@ export default function DocumentSpecsPage() {
   const [guideExpanded, setGuideExpanded] = useState(false);
   const [sourceFilter, setSourceFilter] = useState<'custom' | 'all'>('custom');
   const [activeListTab, setActiveListTab] = useState<'specs' | 'gateTypes'>('specs');
+  const [editingSpec, setEditingSpec] = useState<DocumentSpecPackage | null>(null);
 
   const load = async () => {
     const [specData, roleData] = await Promise.all([getDocumentSpecs(), getDocumentRoles()]);
@@ -106,7 +107,10 @@ export default function DocumentSpecsPage() {
 
   /** 打开规范包编辑器 */
   const openEditor = (spec?: DocumentSpecPackage) => {
-    form.setFieldsValue(spec ?? { id: `spec-${Date.now()}`, name: '', description: '', factFields: defaultFactFields(), chapterMode: 'dynamic', chapterRules: [], dynamicChapterRule: { source: 'ai_plan', titleStrategy: 'ai_summary' }, gateRules: [] });
+    const value = spec ?? { id: `spec-${Date.now()}`, name: '', description: '', factFields: defaultFactFields(), chapterMode: 'dynamic', chapterRules: [], dynamicChapterRule: { source: 'ai_plan', titleStrategy: 'ai_summary' }, gateRules: [] };
+    setEditingSpec(value);
+    form.resetFields();
+    form.setFieldsValue(value);
     setDrawerOpen(true);
     window.setTimeout(() => refreshCounts(), 50);
   };
@@ -115,7 +119,14 @@ export default function DocumentSpecsPage() {
   const save = async () => {
     try {
       const values = await form.validateFields();
-      const result = await saveDocumentSpec(values);
+      const result = await saveDocumentSpec({
+        ...(editingSpec ?? {}),
+        ...values,
+        factFields: values.factFields ?? editingSpec?.factFields ?? [],
+        chapterRules: values.chapterRules ?? editingSpec?.chapterRules ?? [],
+        dynamicChapterRule: values.dynamicChapterRule ?? editingSpec?.dynamicChapterRule ?? { source: 'ai_plan', titleStrategy: 'ai_summary' },
+        gateRules: values.gateRules ?? editingSpec?.gateRules ?? [],
+      } as DocumentSpecPackage);
       setSpecs(result.specs);
       setGateTypes(result.gateTypes);
       setDrawerOpen(false);

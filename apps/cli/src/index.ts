@@ -137,12 +137,13 @@ async function pageResourcesAreHealthy(port: number, pagePath: string): Promise<
 }
 
 async function dashboardIsHealthy(port: number): Promise<boolean> {
-  const [root, overview, health] = await Promise.all([
+  const health = await fetch(`http://127.0.0.1:${port}/api/health`, { redirect: 'manual' }).then(response => response.status === 200);
+  if (!health) return false;
+  const [root, overview] = await Promise.all([
     pageResourcesAreHealthy(port, '/'),
     pageResourcesAreHealthy(port, '/overview'),
-    fetch(`http://127.0.0.1:${port}/api/health`, { redirect: 'manual' }).then(response => response.status === 200),
   ]);
-  return root && overview && health;
+  return root && overview;
 }
 
 async function waitForDashboard(port: number, timeoutMs: number): Promise<boolean> {
@@ -212,7 +213,7 @@ async function startDashboardInBackground(port: number): Promise<DashboardStartR
     if (child.pid) spawnedPids.add(child.pid);
     child.on('exit', () => { if (child.pid) spawnedPids.delete(child.pid); });
     closeSync(logFile.fd);
-    const timeoutMs = Number(process.env.CUSTOMIZE_DASHBOARD_START_TIMEOUT_MS || 180000);
+    const timeoutMs = Number(process.env.CUSTOMIZE_DASHBOARD_START_TIMEOUT_MS || 15000);
     if (await waitForDashboard(port, timeoutMs)) {
       return { ready: true, port, url: `http://localhost:${port}/overview`, logPath };
     }
@@ -281,10 +282,13 @@ program.action(async () => {
 
   registerCleanup();
   const dashboardPort = await resolveDashboardPort(Number(process.env.CUSTOMIZE_DASHBOARD_PORT || 17321));
+  console.log(`正在启动 Web 控制台: http://localhost:${dashboardPort}/overview`);
   const dashboard = await startDashboardInBackground(dashboardPort);
   const dashboardUrl: string | undefined = dashboard.ready ? dashboard.url : undefined;
-  if (!dashboard.ready) {
-    console.warn(`Web 控制台未启动。日志: ${dashboard.logPath}${dashboard.error ? `；原因: ${dashboard.error}` : ''}`);
+  if (dashboard.ready) {
+    console.log(`Web 控制台已启动: ${dashboard.url}`);
+  } else {
+    console.warn(`Web 控制台未启动，CLI 将继续启动。日志: ${dashboard.logPath}${dashboard.error ? `；原因: ${dashboard.error}` : ''}`);
   }
   const kbManager = new MultiProjectManager();
   let kbStatus = '已初始化';

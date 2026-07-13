@@ -305,6 +305,10 @@ ENTITIES
 TEXT
 8
 MyLayer
+10
+100
+20
+200
 1
 Hello DXF
 0
@@ -357,9 +361,9 @@ EOF`;
     const absPath = createTestFile('other/meta-test.bin', Buffer.from([0x00, 0x01, 0x02, 0x03]));
     const file = makeClassifiedFile({ absolutePath: absPath, relativePath: 'other/meta-test.bin', category: 'other', format: 'unknown', mimeType: 'application/octet-stream', fileSize: 4 });
     const result = await extractor.extract(file);
-    expect(result.text).toContain('文件名: meta-test.bin');
-    expect(result.text).toContain('文件路径: other/meta-test.bin');
-    expect(result.text).toContain('文件类型: other/unknown');
+    expect(result.text).not.toContain('文件名: meta-test.bin');
+    expect(result.text).not.toContain('文件路径: other/meta-test.bin');
+    expect(result.text).toContain('资料类型: other/unknown');
     expect(result.text).toContain('MIME: application/octet-stream');
   });
 
@@ -455,8 +459,8 @@ export class MyClass {
     const file = classify(absPath, 'code/test-header.ts');
     const chunks = chunker.chunk(text, file);
     expect(chunks.length).toBeGreaterThan(0);
-    expect(chunks[0].text).toContain('文件: code/test-header.ts');
-    expect(chunks[0].text).toContain('类型: code/typescript');
+    expect(chunks[0].text).not.toContain('文件: code/test-header.ts');
+    expect(chunks[0].text).toContain('资料类型: code/typescript');
   });
 
   it('handles empty text gracefully', () => {
@@ -1092,8 +1096,8 @@ Line 4: This is the fourth line of text for testing.`;
     const file = classifier.classify(absPath, 'tmp-consistency.txt', fs.statSync(absPath));
     const chunks = chunker.chunk(text, file);
 
-    // Chunker 通过 withHeader() 预置了头部，因此位置引用的是头部+文本
-    const fullText = `文件: ${file.relativePath}\n类型: ${file.category}/${file.format}\n\n${text}`;
+    // Chunker 通过 withHeader() 预置了资料类型头部，因此位置引用的是头部+文本
+    const fullText = `资料类型: ${file.category}/${file.format}\n\n${text}`;
 
     for (const chunk of chunks) {
       expect(chunk.startChar).toBeGreaterThanOrEqual(0);

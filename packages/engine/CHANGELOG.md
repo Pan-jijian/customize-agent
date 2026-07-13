@@ -1,5 +1,25 @@
 # @customize-agent/engine
 
+## 3.0.4
+
+### Patch Changes
+
+- Release formal patch version.
+- Updated dependencies
+  - @customize-agent/llm@3.0.6
+  - @customize-agent/tools@3.0.12
+  - @customize-agent/types@3.0.4
+
+## 3.0.3
+
+### Patch Changes
+
+- Release workflow, document generation, and knowledge extraction improvements.
+- Updated dependencies
+  - @customize-agent/tools@3.0.11
+  - @customize-agent/types@3.0.3
+  - @customize-agent/llm@3.0.5
+
 ## 3.0.2
 
 ### Patch Changes

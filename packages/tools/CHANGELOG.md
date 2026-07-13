@@ -1,5 +1,23 @@
 # @customize-agent/tools
 
+## 3.0.12
+
+### Patch Changes
+
+- Release formal patch version.
+- Updated dependencies
+  - @customize-agent/search@3.0.4
+  - @customize-agent/types@3.0.4
+
+## 3.0.11
+
+### Patch Changes
+
+- Release workflow, document generation, and knowledge extraction improvements.
+- Updated dependencies
+  - @customize-agent/types@3.0.3
+  - @customize-agent/search@3.0.3
+
 ## 3.0.9
 
 ### Patch Changes

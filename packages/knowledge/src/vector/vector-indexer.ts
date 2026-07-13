@@ -55,7 +55,7 @@ export class VectorIndexer {
       let processedChunks = 0;
       for (let offset = 0; offset < collectionChunks.length; offset += batchSize) {
         const batchChunks = collectionChunks.slice(offset, offset + batchSize);
-        const texts = batchChunks.map(chunk => chunk.content);
+        const texts = batchChunks.map(chunk => this.embeddingText(chunk));
         const embeddings = await this.embedDocuments(texts);
         const documents = batchChunks.map((chunk, index) => this.toVectorDocument(chunk, embeddings[index] ?? []));
         await store.upsert(documents, { persist: options.persistEachBatch === true });
@@ -104,6 +104,18 @@ export class VectorIndexer {
     return grouped;
   }
 
+  private embeddingText(chunk: StoredChunk): string {
+    return chunk.searchContent ?? [
+      `文件路径: ${chunk.relativePath}`,
+      `资料类型: ${chunk.category}/${chunk.format}`,
+      chunk.titlePath ? `标题路径: ${chunk.titlePath}` : '',
+      chunk.sectionTitle ? `章节标题: ${chunk.sectionTitle}` : '',
+      chunk.chunkKind ? `切片类型: ${chunk.chunkKind}` : '',
+      chunk.rowRange ? `表格行范围: ${chunk.rowRange}` : '',
+      chunk.content,
+    ].filter(Boolean).join('\n');
+  }
+
   private toVectorDocument(chunk: StoredChunk, embedding: number[]): VectorDocument {
     const chunkMetadata = this.parseMetadata(chunk.metadataJson);
     return {
@@ -118,11 +130,14 @@ export class VectorIndexer {
         format: chunk.format,
         token_count: chunk.tokenCount,
         section_title: chunk.sectionTitle ?? null,
-        parent_id: this.metadataString(chunkMetadata.parentId),
+        title_path: chunk.titlePath ?? this.metadataString(chunkMetadata.titlePath),
+        parent_id: chunk.parentId ?? this.metadataString(chunkMetadata.parentId),
         parent_index: this.metadataNumber(chunkMetadata.parentIndex),
         child_index: this.metadataNumber(chunkMetadata.childIndex),
-        chunk_kind: this.metadataString(chunkMetadata.chunkKind),
-        row_range: this.metadataString(chunkMetadata.rowRange),
+        chunk_kind: chunk.chunkKind ?? this.metadataString(chunkMetadata.chunkKind),
+        row_range: chunk.rowRange ?? this.metadataString(chunkMetadata.rowRange),
+        start_char: chunk.startChar ?? this.metadataNumber(chunkMetadata.startChar),
+        end_char: chunk.endChar ?? this.metadataNumber(chunkMetadata.endChar),
         split_strategy: this.metadataString(chunkMetadata.splitStrategy),
       },
     };

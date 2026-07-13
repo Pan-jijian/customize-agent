@@ -121,6 +121,10 @@ function normalizeText(input?: string, fallback = '') {
   return String(input || fallback).trim().slice(0, 500);
 }
 
+function uniqueStrings(values: string[] = []) {
+  return [...new Set(values.filter(Boolean))];
+}
+
 function sanitizeEvaluator(evaluator?: GateRuleEvaluator, fallback?: GateRuleEvaluator): GateRuleEvaluator {
   const source = evaluator || fallback || { subject: 'document' as const, operator: 'contains' as const };
   const subject = VALID_GATE_SUBJECTS.includes(source.subject) ? source.subject : 'document';
@@ -162,7 +166,7 @@ function sanitizeSpec(spec: DocumentSpecPackage): DocumentSpecPackage {
       name: item.name,
       type: 'auto' as const,
       required: Boolean(item.required),
-      sourceRoleIds: Array.isArray(item.sourceRoleIds) ? item.sourceRoleIds.filter(Boolean) : [],
+      sourceRoleIds: uniqueStrings(Array.isArray(item.sourceRoleIds) ? item.sourceRoleIds : []),
       extractionHint: item.extractionHint || '',
       validationHint: item.validationHint || '',
     })) : [],
@@ -173,22 +177,22 @@ function sanitizeSpec(spec: DocumentSpecPackage): DocumentSpecPackage {
       required: Boolean(item.required),
       order: Number.isFinite(item.order) ? item.order : index,
       minWords: Number.isFinite(item.minWords) ? item.minWords : 0,
-      requiredFactIds: Array.isArray(item.requiredFactIds) ? item.requiredFactIds.filter(Boolean) : [],
-      requiredFileRoleIds: Array.isArray(item.requiredFileRoleIds) ? item.requiredFileRoleIds.filter(Boolean) : [],
-      requiredPromptRoleIds: Array.isArray(item.requiredPromptRoleIds) ? item.requiredPromptRoleIds.filter(Boolean) : [],
+      requiredFactIds: uniqueStrings(Array.isArray(item.requiredFactIds) ? item.requiredFactIds : []),
+      requiredFileRoleIds: uniqueStrings(Array.isArray(item.requiredFileRoleIds) ? item.requiredFileRoleIds : []),
+      requiredPromptRoleIds: uniqueStrings(Array.isArray(item.requiredPromptRoleIds) ? item.requiredPromptRoleIds : []),
       generationHint: item.generationHint || '',
     })) : [],
     dynamicChapterRule: {
       source: ['file_outline', 'file_role', 'fact_group', 'table_rows'].includes(spec.dynamicChapterRule?.source) ? spec.dynamicChapterRule.source : 'ai_plan',
-      sourceRoleIds: Array.isArray(spec.dynamicChapterRule?.sourceRoleIds) ? spec.dynamicChapterRule.sourceRoleIds.filter(Boolean) : [],
+      sourceRoleIds: uniqueStrings(Array.isArray(spec.dynamicChapterRule?.sourceRoleIds) ? spec.dynamicChapterRule.sourceRoleIds : []),
       minChapters: Number.isFinite(spec.dynamicChapterRule?.minChapters) ? spec.dynamicChapterRule.minChapters : undefined,
       maxChapters: Number.isFinite(spec.dynamicChapterRule?.maxChapters) ? spec.dynamicChapterRule.maxChapters : undefined,
       titleStrategy: ['source_title', 'field_value', 'template'].includes(spec.dynamicChapterRule?.titleStrategy || '') ? spec.dynamicChapterRule?.titleStrategy : 'ai_summary',
       titleTemplate: spec.dynamicChapterRule?.titleTemplate || '',
       minWordsPerChapter: Number.isFinite(spec.dynamicChapterRule?.minWordsPerChapter) ? spec.dynamicChapterRule.minWordsPerChapter : undefined,
-      requiredFactIds: Array.isArray(spec.dynamicChapterRule?.requiredFactIds) ? spec.dynamicChapterRule.requiredFactIds.filter(Boolean) : [],
-      requiredFileRoleIds: Array.isArray(spec.dynamicChapterRule?.requiredFileRoleIds) ? spec.dynamicChapterRule.requiredFileRoleIds.filter(Boolean) : [],
-      requiredPromptRoleIds: Array.isArray(spec.dynamicChapterRule?.requiredPromptRoleIds) ? spec.dynamicChapterRule.requiredPromptRoleIds.filter(Boolean) : [],
+      requiredFactIds: uniqueStrings(Array.isArray(spec.dynamicChapterRule?.requiredFactIds) ? spec.dynamicChapterRule.requiredFactIds : []),
+      requiredFileRoleIds: uniqueStrings(Array.isArray(spec.dynamicChapterRule?.requiredFileRoleIds) ? spec.dynamicChapterRule.requiredFileRoleIds : []),
+      requiredPromptRoleIds: uniqueStrings(Array.isArray(spec.dynamicChapterRule?.requiredPromptRoleIds) ? spec.dynamicChapterRule.requiredPromptRoleIds : []),
       generationHint: spec.dynamicChapterRule?.generationHint || '',
     },
     gateRules: Array.isArray(spec.gateRules) ? spec.gateRules.filter(item => item.name).map(item => {

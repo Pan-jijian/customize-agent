@@ -1,5 +1,41 @@
 # server
 
+## 4.0.29
+
+### Patch Changes
+
+- Release formal patch version.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.12
+  - @customize-agent/llm@3.0.6
+  - @customize-agent/runtime@3.0.8
+
+## 4.0.28
+
+### Patch Changes
+
+- Publish the knowledge-base extraction and chunking fixes used by document role/template validation.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.11
+
+## 4.0.27
+
+### Patch Changes
+
+- Improve document generation cleanup and make formal-output constraints configurable while using the enhanced knowledge-base parsing and retrieval pipeline.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.10
+
+## 4.0.26
+
+### Patch Changes
+
+- Release workflow, document generation, and knowledge extraction improvements.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.9
+  - @customize-agent/runtime@3.0.7
+  - @customize-agent/llm@3.0.5
+
 ## 4.0.25
 
 ### Patch Changes

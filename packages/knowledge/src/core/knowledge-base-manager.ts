@@ -354,6 +354,7 @@ export class KnowledgeBaseManager {
         chunkIndex,
         parentId: parent.parentId,
         sectionTitle: parent.sectionTitle ?? item.sectionTitle,
+        titlePath: item.titlePath ?? this.parseMetadataString(parent.metadataJson, 'titlePath'),
       };
     }
     const parentChunks = item.parentId ? this.store.getChunksByParent(item.filePath, item.parentId, 6) : [];
@@ -367,6 +368,7 @@ export class KnowledgeBaseManager {
       content: chunks.map(chunk => chunk.content).join('\n\n---\n\n'),
       chunkIndex,
       parentId: item.parentId ?? this.parseMetadataString(chunks[0]?.metadataJson, 'parentId'),
+      titlePath: item.titlePath ?? chunks.map(chunk => this.parseMetadataString(chunk.metadataJson, 'titlePath')).find(Boolean),
       sectionTitle: item.sectionTitle ?? chunks.find(chunk => chunk.sectionTitle)?.sectionTitle,
     };
   }
@@ -381,7 +383,7 @@ export class KnowledgeBaseManager {
       rankedLists.push({ source: 'keyword', items: this.keywordSearchItems(rewritten, limit * 3), queryIndex });
       if (queryIndex < 3) {
         try {
-          rankedLists.push({ source: 'vector', items: (await this.semanticSearch(rewritten, { ...options, limit: limit * 3 })).results, queryIndex });
+          rankedLists.push({ source: 'vector', items: (await this.semanticSearch(rewritten, { ...options, limit: limit * 6 })).results.slice(0, limit * 3), queryIndex });
         } catch { /* 向量搜索在混合搜索中是可选的 */ }
       }
     }
@@ -714,11 +716,16 @@ export class KnowledgeBaseManager {
     const terms = query.toLowerCase().split(/[\s,，。；;：:、]+/u).filter(Boolean);
     const phrase = query.toLowerCase().trim();
     return items.map(item => {
-      const content = `${item.filePath}\n${item.sectionTitle ?? ''}\n${item.content}`.toLowerCase();
+      const content = `${item.filePath}\n${item.titlePath ?? ''}\n${item.sectionTitle ?? ''}\n${item.chunkKind ?? ''}\n${item.content}`.toLowerCase();
       let rerankBoost = 0;
       if (phrase && content.includes(phrase)) rerankBoost += 120;
-      for (const term of terms) if (term && content.includes(term)) rerankBoost += 8;
-      if (item.chunkKind === 'table' && /表|行|列|金额|数量|报价|评分/u.test(query)) rerankBoost += 30;
+      const titleText = `${item.titlePath ?? ''}\n${item.sectionTitle ?? ''}`.toLowerCase();
+      for (const term of terms) {
+        if (!term) continue;
+        if (content.includes(term)) rerankBoost += 8;
+        if (titleText.includes(term)) rerankBoost += 18;
+      }
+      if (item.chunkKind === 'table' && /表|行|列|金额|数量|报价|评分|清单|明细|统计|数据/u.test(query)) rerankBoost += 40;
       if (item.chunkKind === 'metadata' && /图纸|图层|轴网|标注|块|实体|cad|dxf|step|iges|模型/u.test(query)) rerankBoost += 60;
       if (item.chunkKind === 'data' && /json|xml|yaml|字段|配置|数据|路径|price|id|name/u.test(query)) rerankBoost += 30;
       const score = item.score + rerankBoost;
@@ -740,7 +747,7 @@ export class KnowledgeBaseManager {
     const candidates = items.slice(0, 20);
     const resultsText = candidates.map((item, index) => {
       const contentPreview = item.content.slice(0, 300).replace(/[\n\r]+/g, ' ');
-      return `[DOC_${index}] 路径: ${item.filePath} | 类型: ${item.chunkKind ?? 'text'}\n  内容: ${contentPreview}`;
+      return `[DOC_${index}] 路径: ${item.filePath} | 标题路径: ${item.titlePath ?? item.sectionTitle ?? ''} | 类型: ${item.chunkKind ?? 'text'}\n  内容: ${contentPreview}`;
     }).join('\n\n');
 
     const prompt = `你是一个文档相关性评估器。根据用户查询，为以下文档片段打分（1-10）。
@@ -813,8 +820,11 @@ ${resultsText}
       parentId: this.metadataString(metadata.parentId),
       source,
       sectionTitle: result.sectionTitle,
-      rowRange: this.metadataString(metadata.rowRange),
-      chunkKind: this.metadataString(metadata.chunkKind),
+      titlePath: result.titlePath ?? this.metadataString(metadata.titlePath),
+      rowRange: result.rowRange ?? this.metadataString(metadata.rowRange),
+      chunkKind: result.chunkKind ?? this.metadataString(metadata.chunkKind),
+      startChar: result.startChar,
+      endChar: result.endChar,
       scoreDetails: result.scoreDetails,
       facets: this.metadataFacets(metadata),
     };
@@ -847,8 +857,11 @@ ${resultsText}
         if (item.score > (existing.scoreDetails?.keywordScore ?? existing.scoreDetails?.vectorScore ?? 0)) {
           existing.content = item.content;
           existing.sectionTitle = item.sectionTitle ?? existing.sectionTitle;
+          existing.titlePath = item.titlePath ?? existing.titlePath;
           existing.chunkIndex = item.chunkIndex ?? existing.chunkIndex;
           existing.parentId = item.parentId ?? existing.parentId;
+          existing.chunkKind = item.chunkKind ?? existing.chunkKind;
+          existing.rowRange = item.rowRange ?? existing.rowRange;
         }
       });
     }
@@ -905,7 +918,7 @@ ${resultsText}
   }
 
   private metadataFacets(metadata: Record<string, unknown>): Record<string, string | number | string[]> {
-    const keys = ['sheetNames', 'columnNames', 'rowCount', 'columnCount', 'dataPaths', 'layerNames', 'blockNames', 'entityTypes', 'productNames', 'materialNames', 'ocrRecommended', 'ocrReason'];
+    const keys = ['titlePath', 'sectionTitle', 'chunkKind', 'rowRange', 'sheetNames', 'columnNames', 'rowCount', 'columnCount', 'dataPaths', 'layerNames', 'blockNames', 'entityTypes', 'productNames', 'materialNames', 'ocrRecommended', 'ocrReason'];
     const facets: Record<string, string | number | string[]> = {};
     for (const key of keys) {
       const value = metadata[key];

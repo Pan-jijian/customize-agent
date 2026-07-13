@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import type { TextChunk } from '../chunking/text-chunker.js';
 import type { FileCategory, IndexStateRecord } from '../types.js';
 
+
 export type KnowledgeJobStatus = 'PENDING' | 'PARSING' | 'CHUNKING' | 'INDEXING' | 'SUCCESS' | 'ERROR';
 
 export interface KnowledgeIndexJob {
@@ -23,11 +24,18 @@ export interface StoredChunk {
   relativePath: string;
   chunkIndex: number;
   content: string;
+  searchContent?: string;
   category: FileCategory;
   format: string;
   collectionName: string;
   tokenCount: number;
   sectionTitle?: string;
+  titlePath?: string;
+  parentId?: string;
+  chunkKind?: string;
+  rowRange?: string;
+  startChar?: number;
+  endChar?: number;
   metadataJson?: string;
   createdAt: number;
 }
@@ -254,14 +262,15 @@ export class IndexStateStore {
       if (this.ftsEnabled) this.db.prepare('DELETE FROM kb_chunks_fts WHERE relative_path = ?').run(relativePath);
       const insert = this.db.prepare(`
         INSERT INTO kb_chunks (
-          id, relative_path, chunk_index, content, category, format,
-          collection_name, token_count, section_title, metadata_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          id, relative_path, chunk_index, content, search_content, category, format,
+          collection_name, token_count, section_title, title_path, parent_id, chunk_kind,
+          row_range, start_char, end_char, metadata_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const insertFts = this.ftsEnabled ? this.db.prepare(`
-        INSERT INTO kb_chunks_fts (id, relative_path, category, format, section_title, content)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO kb_chunks_fts (id, relative_path, category, format, section_title, title_path, chunk_kind, content)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `) : undefined;
       const insertParent = this.db.prepare(`
         INSERT INTO kb_parent_chunks (
@@ -297,7 +306,7 @@ export class IndexStateStore {
           file.collectionName,
           group.find(chunk => chunk.sectionTitle)?.sectionTitle ?? null,
           group.length,
-          JSON.stringify({ parentId, splitStrategy: this.metadataString(group[0]?.metadata.splitStrategy), chunkKind: this.metadataString(group[0]?.metadata.chunkKind) }),
+          JSON.stringify({ parentId, splitStrategy: this.metadataString(group[0]?.metadata.splitStrategy), chunkKind: this.metadataString(group[0]?.metadata.chunkKind), titlePath: this.metadataString(group[0]?.metadata.titlePath) }),
           now,
         );
       }
@@ -316,20 +325,32 @@ export class IndexStateStore {
 
       for (const chunk of groupedChunks) {
         const chunkId = `${relativePath}#${chunk.index}`;
+        const titlePath = this.metadataString(chunk.metadata.titlePath) ?? chunk.sectionTitle ?? '';
+        const parentId = this.metadataString(chunk.metadata.parentId) ?? null;
+        const chunkKind = this.metadataString(chunk.metadata.chunkKind) ?? null;
+        const rowRange = this.metadataString(chunk.metadata.rowRange) ?? null;
+        const searchContent = this.buildChunkSearchContent(relativePath, file, chunk, titlePath);
         insert.run(
           chunkId,
           relativePath,
           chunk.index,
           chunk.text,
+          searchContent,
           file.category,
           file.format,
           file.collectionName,
           chunk.tokenCount,
           chunk.sectionTitle ?? null,
+          titlePath || null,
+          parentId,
+          chunkKind,
+          rowRange,
+          Number(chunk.metadata.startChar ?? chunk.startChar),
+          Number(chunk.metadata.endChar ?? chunk.endChar),
           JSON.stringify(chunk.metadata),
           now,
         );
-        insertFts?.run(chunkId, relativePath, file.category, file.format, chunk.sectionTitle ?? '', chunk.text);
+        insertFts?.run(chunkId, relativePath, file.category, file.format, chunk.sectionTitle ?? '', titlePath, chunkKind ?? '', searchContent);
       }
     });
     transaction();
@@ -451,7 +472,7 @@ export class IndexStateStore {
       `).all(matchQuery, limit * 8) as Array<Record<string, unknown>>;
       return rows
         .map(row => {
-          const keyword = this.scoreChunkDetailed(`${String(row.section_title ?? '')}\n${String(row.category)}\n${String(row.format)}\n${String(row.content)}`, terms);
+          const keyword = this.scoreChunkDetailed(this.searchableRowText(row), terms);
           const bm25Score = this.bm25ToPositiveScore(Number(row.bm25_score));
           return this.rowToChunk(row, keyword.keywordScore + bm25Score, { ...keyword, bm25Score });
         })
@@ -466,14 +487,14 @@ export class IndexStateStore {
   private searchChunksLike(terms: string[], limit: number): ChunkSearchResult[] {
     const rows = this.db.prepare(`
       SELECT rowid, * FROM kb_chunks
-      WHERE ${terms.map(() => '(LOWER(content) LIKE ? OR LOWER(relative_path) LIKE ? OR LOWER(category) LIKE ? OR LOWER(format) LIKE ?)').join(' OR ')}
+      WHERE ${terms.map(() => '(LOWER(search_content) LIKE ? OR LOWER(content) LIKE ? OR LOWER(relative_path) LIKE ? OR LOWER(category) LIKE ? OR LOWER(format) LIKE ? OR LOWER(COALESCE(title_path, \'\')) LIKE ? OR LOWER(COALESCE(chunk_kind, \'\')) LIKE ?)').join(' OR ')}
       ORDER BY created_at DESC
       LIMIT ?
-    `).all(...terms.flatMap(term => [`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`]), limit * 6) as Array<Record<string, unknown>>;
+    `).all(...terms.flatMap(term => [`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`]), limit * 6) as Array<Record<string, unknown>>;
 
     return rows
       .map(row => {
-        const keyword = this.scoreChunkDetailed(`${String(row.section_title ?? '')}\n${String(row.category)}\n${String(row.format)}\n${String(row.content)}`, terms);
+        const keyword = this.scoreChunkDetailed(this.searchableRowText(row), terms);
         return this.rowToChunk(row, keyword.keywordScore, keyword);
       })
       .filter(row => row.score > 0)
@@ -677,7 +698,22 @@ export class IndexStateStore {
     this.db.close();
   }
 
+  private resetLegacyChunkSchemaIfNeeded(): void {
+    const table = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'kb_chunks'").get();
+    if (!table) return;
+    const columns = this.db.prepare('PRAGMA table_info(kb_chunks)').all() as Array<{ name: string }>;
+    const names = new Set(columns.map(column => column.name));
+    if (names.has('search_content') && names.has('title_path') && names.has('chunk_kind')) return;
+    this.db.exec(`
+      DROP TABLE IF EXISTS kb_chunks_fts;
+      DROP TABLE IF EXISTS kb_chunks;
+      DROP TABLE IF EXISTS kb_parent_chunks;
+      DROP TABLE IF EXISTS kb_document_chunks;
+    `);
+  }
+
   private initTables(): void {
+    this.resetLegacyChunkSchemaIfNeeded();
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS kb_index_state (
         relative_path     TEXT PRIMARY KEY,
@@ -704,17 +740,27 @@ export class IndexStateStore {
         relative_path   TEXT NOT NULL,
         chunk_index     INTEGER NOT NULL,
         content         TEXT NOT NULL,
+        search_content  TEXT NOT NULL,
         category        TEXT NOT NULL,
         format          TEXT NOT NULL,
         collection_name TEXT NOT NULL,
         token_count     INTEGER NOT NULL,
         section_title   TEXT,
+        title_path      TEXT,
+        parent_id       TEXT,
+        chunk_kind      TEXT,
+        row_range       TEXT,
+        start_char      INTEGER,
+        end_char        INTEGER,
         metadata_json   TEXT,
         created_at      INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_path ON kb_chunks(relative_path);
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_category ON kb_chunks(category);
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_collection ON kb_chunks(collection_name);
+      CREATE INDEX IF NOT EXISTS idx_kb_chunks_parent ON kb_chunks(relative_path, parent_id);
+      CREATE INDEX IF NOT EXISTS idx_kb_chunks_kind ON kb_chunks(chunk_kind);
+      CREATE INDEX IF NOT EXISTS idx_kb_chunks_title_path ON kb_chunks(title_path);
 
       CREATE TABLE IF NOT EXISTS kb_parent_chunks (
         id              TEXT PRIMARY KEY,
@@ -824,7 +870,7 @@ export class IndexStateStore {
     `);
     this.initFts();
     try {
-      if (this.getMetadata('schema_version') !== '2') this.setMetadata('schema_version', '2');
+      if (this.getMetadata('schema_version') !== '3') this.setMetadata('schema_version', '3');
     } catch {
       // 受限环境中已有索引库可能以只读方式挂载；运行时元数据不是必需项。
     }
@@ -839,6 +885,8 @@ export class IndexStateStore {
           category,
           format,
           section_title,
+          title_path,
+          chunk_kind,
           content,
           tokenize = 'unicode61 remove_diacritics 2'
         );
@@ -855,8 +903,8 @@ export class IndexStateStore {
     const row = this.db.prepare('SELECT COUNT(*) as count FROM kb_chunks_fts').get() as { count?: number };
     if (Number(row.count ?? 0) > 0) return;
     this.db.prepare(`
-      INSERT INTO kb_chunks_fts (id, relative_path, category, format, section_title, content)
-      SELECT id, relative_path, category, format, COALESCE(section_title, ''), content FROM kb_chunks
+      INSERT INTO kb_chunks_fts (id, relative_path, category, format, section_title, title_path, chunk_kind, content)
+      SELECT id, relative_path, category, format, COALESCE(section_title, ''), COALESCE(title_path, ''), COALESCE(chunk_kind, ''), COALESCE(search_content, content) FROM kb_chunks
     `).run();
   }
 
@@ -951,6 +999,34 @@ export class IndexStateStore {
     return typeof value === 'string' ? value : undefined;
   }
 
+  private buildChunkSearchContent(relativePath: string, file: { category: FileCategory; format: string }, chunk: TextChunk, titlePath: string): string {
+    const metadata = chunk.metadata;
+    const fields = [
+      `文件路径: ${relativePath}`,
+      `资料类型: ${file.category}/${file.format}`,
+      chunk.sectionTitle ? `章节标题: ${chunk.sectionTitle}` : '',
+      titlePath ? `标题路径: ${titlePath}` : '',
+      this.metadataString(metadata.chunkKind) ? `切片类型: ${this.metadataString(metadata.chunkKind)}` : '',
+      this.metadataString(metadata.rowRange) ? `表格行范围: ${this.metadataString(metadata.rowRange)}` : '',
+      chunk.text,
+    ];
+    return fields.filter(Boolean).join('\n');
+  }
+
+  private searchableRowText(row: Record<string, unknown>): string {
+    return [
+      row.relative_path,
+      row.category,
+      row.format,
+      row.section_title,
+      row.title_path,
+      row.chunk_kind,
+      row.row_range,
+      row.search_content,
+      row.content,
+    ].map(value => value == null ? '' : String(value)).join('\n');
+  }
+
   private rowToChunk(row: Record<string, unknown>, score: number, scoreDetails?: ChunkSearchResult['scoreDetails']): ChunkSearchResult {
     return {
       rowid: Number(row.rowid ?? 0),
@@ -958,11 +1034,18 @@ export class IndexStateStore {
       relativePath: String(row.relative_path),
       chunkIndex: Number(row.chunk_index),
       content: String(row.content),
+      searchContent: row.search_content == null ? undefined : String(row.search_content),
       category: String(row.category) as FileCategory,
       format: String(row.format),
       collectionName: String(row.collection_name),
       tokenCount: Number(row.token_count),
       sectionTitle: row.section_title == null ? undefined : String(row.section_title),
+      titlePath: row.title_path == null ? undefined : String(row.title_path),
+      parentId: row.parent_id == null ? undefined : String(row.parent_id),
+      chunkKind: row.chunk_kind == null ? undefined : String(row.chunk_kind),
+      rowRange: row.row_range == null ? undefined : String(row.row_range),
+      startChar: row.start_char == null ? undefined : Number(row.start_char),
+      endChar: row.end_char == null ? undefined : Number(row.end_char),
       metadataJson: row.metadata_json == null ? undefined : String(row.metadata_json),
       createdAt: Number(row.created_at),
       score,
