@@ -77,8 +77,8 @@ async function chatWithPrompt(payload: { name: string; content: string; message:
   }
   return res.json() as Promise<{ content: string }>;
 }
-function downloadText(filename: string, content: string) {
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+function downloadJson(filename: string, payload: unknown) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -130,16 +130,20 @@ function formatDate(value: string) {
   return Number.isNaN(time) ? '-' : new Date(time).toLocaleString();
 }
 function formatPromptExport(prompts: PromptProject[]) {
-  return prompts.map(p => [
-    `# Prompt: ${p.projectName}`,
-    `Source: ${sourceLabel(getPromptSource(p))}`,
-    `Path: ${p.customizePath || '-'}`,
-    `Project: ${p.projectRoot || '-'}`,
-    `Selected: ${p.selected ? 'true' : 'false'}`,
-    `Updated: ${formatDate(p.mtime)}`,
-    '',
-    p.content || '',
-  ].join('\n')).join('\n\n---\n\n');
+  return {
+    type: 'customize-agent.prompts',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    prompts: prompts.map(p => ({
+      name: p.projectName,
+      content: p.content || '',
+      selected: p.selected,
+      source: getPromptSource(p),
+    })),
+  };
+}
+function safeFilename(value: string) {
+  return value.trim().replace(/[\\/:*?"<>|]/g, '-').slice(0, 80) || 'untitled';
 }
 function matchesPrompt(p: PromptProject, keyword: string) {
   const text = `${p.projectName}\n${p.projectRoot || ''}\n${p.customizePath || ''}\n${p.content || ''}`.toLowerCase();
@@ -394,8 +398,13 @@ export default function PromptPage() {
 
   const handleExport = (scope: 'custom' | 'filtered' | 'checked' = 'custom') => {
     const prompts = scope === 'checked' ? projects.filter(p => visibleCheckedIds.includes(p.id)) : scope === 'filtered' ? filteredProjects : customPrompts;
-    downloadText(`customize-prompts-${new Date().toISOString().slice(0, 10)}.txt`, formatPromptExport(prompts));
+    downloadJson(`customize-prompts-${new Date().toISOString().slice(0, 10)}.json`, formatPromptExport(prompts));
     message.success(`已导出 ${prompts.length} 条提示词`);
+  };
+
+  const handleExportOne = (p: PromptProject) => {
+    downloadJson(`customize-prompt-${safeFilename(p.projectName)}-${new Date().toISOString().slice(0, 10)}.json`, formatPromptExport([p]));
+    message.success('已导出 1 条提示词');
   };
 
   const handleImportFile = async (file?: File) => {
@@ -428,6 +437,7 @@ export default function PromptPage() {
     {p.hasFile && <Checkbox checked={p.selected} onChange={e => { void handleSelect(p, e.target.checked); }}>选中</Checkbox>}
     {!p.hasFile && p.projectRoot && <Button size="small" icon={<PlusOutlined />} onClick={() => openCreate(p)}>创建</Button>}
     {p.hasFile && <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(p)}>编辑</Button>}
+    {p.hasFile && <Button size="small" icon={<ExportOutlined />} onClick={() => handleExportOne(p)}>导出</Button>}
     <Popconfirm title={isCustomPrompt(p) ? '删除自定义提示词？' : '删除项目记录及文件？'} onConfirm={() => { void handleDelete(p); }}>
       <Button size="small" danger icon={<DeleteOutlined />} />
     </Popconfirm>

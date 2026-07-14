@@ -38,6 +38,14 @@ interface RoleStore {
   configs: ProjectRoleConfig[];
 }
 
+export interface DocumentRolesExportFile {
+  type: 'customize-agent.documentRoles';
+  version: 1;
+  exportedAt: string;
+  roles: DocumentRole[];
+  configs: ProjectRoleConfig[];
+}
+
 function storePath() {
   const dir = path.join(os.homedir(), '.customize-agent');
   fs.mkdirSync(dir, { recursive: true });
@@ -174,4 +182,72 @@ export function deleteProjectRoleConfig(id: string) {
   const store = readStore();
   store.configs = store.configs.filter(item => item.id !== id);
   writeStore(store);
+}
+
+function uniqueImportedId(baseId: string, existing: Set<string>) {
+  let id = safeId(baseId);
+  if (!existing.has(id)) {
+    existing.add(id);
+    return id;
+  }
+  do {
+    id = safeId(`${baseId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`);
+  } while (existing.has(id));
+  existing.add(id);
+  return id;
+}
+
+function normalizeRoleItemsWithMap(items: ProjectRoleItem[] = [], idMap: Map<string, string>) {
+  return items.map((item, index) => ({ roleId: idMap.get(item.roleId) || item.roleId, order: Number.isFinite(item.order) ? item.order : index }));
+}
+
+export function exportDocumentRolesPayload(input?: { roleIds?: string[]; configIds?: string[] }): DocumentRolesExportFile {
+  const roleIdSet = input?.roleIds ? new Set(input.roleIds) : null;
+  const configIdSet = input?.configIds ? new Set(input.configIds) : null;
+  const store = readStore();
+  return {
+    type: 'customize-agent.documentRoles',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    roles: store.roles.filter(role => !roleIdSet || roleIdSet.has(role.id)).map(sanitizeRole),
+    configs: store.configs.filter(config => !configIdSet || configIdSet.has(config.id)).map(sanitizeConfig),
+  };
+}
+
+export function importDocumentRolesPayload(payload: unknown): { importedRoles: number; importedConfigs: number } {
+  const source = payload && typeof payload === 'object' ? payload as Partial<DocumentRolesExportFile> : {};
+  const rawRoles = Array.isArray(source.roles) ? source.roles : [];
+  const rawConfigs = Array.isArray(source.configs) ? source.configs : [];
+  if (rawRoles.length === 0 && rawConfigs.length === 0) throw new Error('没有可导入的角色配置');
+
+  const store = readStore();
+  const existingRoleIds = new Set([...configuredRoles().map(role => role.id), ...store.roles.map(role => role.id)]);
+  const existingConfigIds = new Set([...configuredRoleConfigs().map(config => config.id), ...store.configs.map(config => config.id)]);
+  const roleIdMap = new Map<string, string>();
+  const importedRoles: DocumentRole[] = [];
+
+  for (const rawRole of rawRoles) {
+    const role = sanitizeRole(rawRole as DocumentRole);
+    const nextId = uniqueImportedId(role.id, existingRoleIds);
+    roleIdMap.set(role.id, nextId);
+    importedRoles.push({ ...role, id: nextId, builtIn: false });
+  }
+
+  const allRoleIds = new Set([...configuredRoles().map(role => role.id), ...store.roles.map(role => role.id), ...importedRoles.map(role => role.id)]);
+  const importedConfigs = rawConfigs.map(rawConfig => {
+    const config = sanitizeConfig(rawConfig as ProjectRoleConfig);
+    const id = uniqueImportedId(config.id, existingConfigIds);
+    return sanitizeConfig({
+      ...config,
+      id,
+      builtIn: false,
+      fileRoles: normalizeRoleItemsWithMap(config.fileRoles, roleIdMap).filter(item => allRoleIds.has(item.roleId)),
+      promptRoles: normalizeRoleItemsWithMap(config.promptRoles, roleIdMap).filter(item => allRoleIds.has(item.roleId)),
+    });
+  });
+
+  store.roles.push(...importedRoles);
+  store.configs.push(...importedConfigs);
+  writeStore(store);
+  return { importedRoles: importedRoles.length, importedConfigs: importedConfigs.length };
 }

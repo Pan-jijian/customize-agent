@@ -1,10 +1,10 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Alert, App, Button, Card, Col, Drawer, Empty, Form, Input, Popconfirm, Row, Select, Space, Tabs, Tag, Typography } from 'antd';
 import {
   DeleteOutlined, EditOutlined, PlusOutlined, FileTextOutlined, FormOutlined,
   AuditOutlined, ProfileOutlined, TableOutlined, PictureOutlined, LinkOutlined,
   SearchOutlined, EyeOutlined, CheckCircleOutlined, AlignLeftOutlined,
-  DownOutlined, UpOutlined,
+  DownOutlined, UpOutlined, ImportOutlined, ExportOutlined,
 } from '@ant-design/icons';
 import { deleteDocumentRole, deleteProjectRoleConfig, getDocumentRoles, getPromptProjects, saveDocumentRole, saveProjectRoleConfig, searchKbFiles, type DocumentRole, type ProjectRoleConfig, type KbFileItem, type PromptProject } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
@@ -43,6 +43,21 @@ function roleTypeColor(role: DocumentRole) {
   if (role.type === 'file') return FILE_TYPE_COLORS[role.processingType ?? ''] ?? 'var(--colorAccent)';
   return PROMPT_TYPE_COLORS[role.executionType ?? ''] ?? 'var(--colorWarning)';
 }
+function downloadJson(filename: string, payload: unknown) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+function safeFilename(value: string) {
+  return value.trim().replace(/[\\/:*?"<>|]/g, '-').slice(0, 80) || 'untitled';
+}
+function formatRolesExport(roles: DocumentRole[], configs: ProjectRoleConfig[]) {
+  return { type: 'customize-agent.documentRoles', version: 1, exportedAt: new Date().toISOString(), roles, configs };
+}
 
 export default function DocumentRolesPage() {
   const t = useAppTranslations();
@@ -59,6 +74,8 @@ export default function DocumentRolesPage() {
   const [guideExpanded, setGuideExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('file');
   const [sourceFilter, setSourceFilter] = useState<'custom' | 'all'>('custom');
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = async () => {
     const [roleData, fileData, promptData] = await Promise.all([getDocumentRoles(), searchKbFiles({ limit: 200, includeContent: false }), getPromptProjects()]);
@@ -94,6 +111,37 @@ export default function DocumentRolesPage() {
   const removeRole = async (role: DocumentRole) => { const r = await deleteDocumentRole(role.type, role.id); setRoles(r.roles); setConfigs(r.configs); };
   /** 删除指定项目配置 */
   const removeConfig = async (id: string) => { const r = await deleteProjectRoleConfig(id); setRoles(r.roles); setConfigs(r.configs); };
+
+  const exportAllCustom = () => {
+    downloadJson(`customize-document-roles-${new Date().toISOString().slice(0, 10)}.json`, formatRolesExport(customRoles, customConfigs));
+    message.success(`已导出 ${customRoles.length} 个角色、${customConfigs.length} 个配置`);
+  };
+  const exportRole = (role: DocumentRole) => {
+    downloadJson(`customize-role-${safeFilename(role.name)}-${new Date().toISOString().slice(0, 10)}.json`, formatRolesExport([role], []));
+    message.success('已导出 1 个角色');
+  };
+  const exportConfig = (config: ProjectRoleConfig) => {
+    const roleIds = new Set([...config.fileRoles.map(item => item.roleId), ...config.promptRoles.map(item => item.roleId)]);
+    downloadJson(`customize-role-config-${safeFilename(config.name)}-${new Date().toISOString().slice(0, 10)}.json`, formatRolesExport(roles.filter(role => roleIds.has(role.id) && !role.builtIn), [config]));
+    message.success('已导出 1 个配置');
+  };
+  const importRolesFile = async (file?: File) => {
+    if (!file) return;
+    setImporting(true);
+    try {
+      const payload = JSON.parse(await file.text()) as unknown;
+      const res = await fetch('/api/documents/roles?mode=import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { roles: DocumentRole[]; configs: ProjectRoleConfig[]; importedRoles: number; importedConfigs: number };
+      setRoles(data.roles); setConfigs(data.configs);
+      message.success(`已导入 ${data.importedRoles} 个角色、${data.importedConfigs} 个配置`);
+    } catch {
+      message.error('导入失败，请确认 JSON 文件格式正确');
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
 
   /** 打开角色编辑抽屉 */
   const openRoleDrawer = (role?: DocumentRole, type: 'file' | 'prompt' = 'file') => {
@@ -167,6 +215,7 @@ export default function DocumentRolesPage() {
               )}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, paddingTop: 4, borderTop: '1px solid var(--colorBorderSecondary)' }}>
                 <Button size="small" icon={<EditOutlined />} onClick={() => openRoleDrawer(role)}>编辑</Button>
+                {!role.builtIn && <Button size="small" icon={<ExportOutlined />} onClick={() => exportRole(role)}>导出</Button>}
                 <Popconfirm title={t('common.confirm')} onConfirm={() => { void removeRole(role); }}>
                   <Button size="small" danger icon={<DeleteOutlined />} />
                 </Popconfirm>
@@ -186,6 +235,9 @@ export default function DocumentRolesPage() {
           { label: `我的配置 (${customRoles.length + customConfigs.length})`, value: 'custom' },
           { label: `全部来源 (${roles.length + configs.length})`, value: 'all' },
         ]} />
+        <input ref={fileInputRef} type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={e => { void importRolesFile(e.target.files?.[0]); }} />
+        <Button icon={<ImportOutlined />} loading={importing} onClick={() => fileInputRef.current?.click()}>导入</Button>
+        <Button icon={<ExportOutlined />} disabled={customRoles.length + customConfigs.length === 0} onClick={exportAllCustom}>导出全部</Button>
         <Button icon={<PlusOutlined />} onClick={() => openRoleDrawer(undefined, 'file')}>{t('roles.newFileRole')}</Button>
         <Button icon={<PlusOutlined />} onClick={() => openRoleDrawer(undefined, 'prompt')}>{t('roles.newPromptRole')}</Button>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => openConfigDrawer()}>{t('roles.newConfig')}</Button>
@@ -221,6 +273,7 @@ export default function DocumentRolesPage() {
                     <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>我的配置</Tag>
                     <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
                       <Button size="small" icon={<EditOutlined />} onClick={() => openConfigDrawer(config)}>编辑</Button>
+                      {!config.builtIn && <Button size="small" icon={<ExportOutlined />} onClick={() => exportConfig(config)}>导出</Button>}
                       <Popconfirm title={t('common.confirm')} onConfirm={() => { void removeConfig(config.id); }}>
                         <Button size="small" danger icon={<DeleteOutlined />} />
                       </Popconfirm>

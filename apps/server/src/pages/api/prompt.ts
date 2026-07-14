@@ -94,9 +94,10 @@ interface PromptImportItem {
 }
 
 interface PromptExportFile {
+  type: 'customize-agent.prompts';
   version: 1;
   exportedAt: string;
-  prompts: Array<{ name: string; content: string; selected: boolean }>;
+  prompts: Array<{ name: string; content: string; selected: boolean; source?: string }>;
 }
 
 interface PromptConfig {
@@ -165,9 +166,10 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       if (req.query.mode === 'export') {
         const selectedSet = new Set(selectedIds);
         const payload: PromptExportFile = {
+          type: 'customize-agent.prompts',
           version: 1,
           exportedAt: new Date().toISOString(),
-          prompts: config.customPrompts.map(prompt => ({ name: prompt.name, content: prompt.content, selected: selectedSet.has(prompt.id) })),
+          prompts: config.customPrompts.map(prompt => ({ name: prompt.name, content: prompt.content, selected: selectedSet.has(prompt.id), source: 'custom' })),
         };
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         res.setHeader('Content-Disposition', `attachment; filename="customize-prompts-${new Date().toISOString().slice(0, 10)}.json"`);

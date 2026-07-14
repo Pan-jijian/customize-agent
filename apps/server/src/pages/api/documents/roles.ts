@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { deleteDocumentRole, deleteProjectRoleConfig, listDocumentRoles, listProjectRoleConfigs, saveDocumentRole, saveProjectRoleConfig, type DocumentRole, type DocumentRoleType, type ProjectRoleConfig } from '@/services/documentRoleService';
+import { deleteDocumentRole, deleteProjectRoleConfig, exportDocumentRolesPayload, importDocumentRolesPayload, listDocumentRoles, listProjectRoleConfigs, saveDocumentRole, saveProjectRoleConfig, type DocumentRole, type DocumentRoleType, type ProjectRoleConfig } from '@/services/documentRoleService';
 
 /** 验证并解析角色类型参数 */
 function parseType(value: unknown): DocumentRoleType | undefined {
@@ -14,9 +14,20 @@ function parseType(value: unknown): DocumentRoleType | undefined {
  */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    if (req.method === 'GET') return res.status(200).json({ roles: listDocumentRoles(parseType(req.query.type)), configs: listProjectRoleConfigs() });
+    if (req.method === 'GET') {
+      if (req.query.mode === 'export') {
+        const roleIds = typeof req.query.roleIds === 'string' && req.query.roleIds ? req.query.roleIds.split(',') : undefined;
+        const configIds = typeof req.query.configIds === 'string' && req.query.configIds ? req.query.configIds.split(',') : undefined;
+        return res.status(200).json(exportDocumentRolesPayload({ roleIds, configIds }));
+      }
+      return res.status(200).json({ roles: listDocumentRoles(parseType(req.query.type)), configs: listProjectRoleConfigs() });
+    }
     if (req.method === 'POST' || req.method === 'PUT') {
-      const mode = req.query.mode === 'config' ? 'config' : 'role';
+      const mode = req.query.mode === 'import' ? 'import' : req.query.mode === 'config' ? 'config' : 'role';
+      if (mode === 'import') {
+        const result = importDocumentRolesPayload(req.body);
+        return res.status(200).json({ success: true, ...result, roles: listDocumentRoles(), configs: listProjectRoleConfigs() });
+      }
       if (mode === 'config') {
         const config = req.body as ProjectRoleConfig;
         if (!config?.id || !config.name) return res.status(400).json({ error: 'config id and name required' });
