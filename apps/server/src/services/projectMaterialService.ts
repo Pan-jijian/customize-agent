@@ -184,13 +184,16 @@ function selectMaterialFiles(files: KnowledgeFileDiscoveryItem[], options?: { re
   return { files: active, reason: groups.length > 1 ? `未指定资料组，检测到 ${groups.length} 个资料组，已阻断生成避免跨项目污染` : '未检测到资料组，使用全部资料', ambiguous: groups.length > 1 };
 }
 
-export function buildProjectMaterialSummary(projectRoot: string, options?: { requirement?: string; boundFilePaths?: string[] }): ProjectMaterialSummary {
+export function buildProjectMaterialSummary(projectRoot: string, options?: { requirement?: string; boundFilePaths?: string[]; boundFileRoles?: Array<{ filePath: string; roles: MaterialRole[] }> }): ProjectMaterialSummary {
   const allFiles = listKnowledgeFiles(projectRoot);
   const selection = selectMaterialFiles(allFiles, options);
   const files = selection.files;
   const inventory = emptyInventory();
+  const boundRoleMap = new Map((options?.boundFileRoles || []).map(item => [normalizePathKey(item.filePath), item.roles]));
   for (const file of files) {
-    for (const role of roleForFile(file.relativePath)) {
+    const pathKey = normalizePathKey(file.relativePath);
+    const boundRoles = [...boundRoleMap.entries()].filter(([key]) => pathKey.endsWith(key) || key.endsWith(pathKey)).flatMap(([, roles]) => roles);
+    for (const role of [...new Set([...roleForFile(file.relativePath), ...boundRoles])]) {
       inventory[role].push({ filePath: file.relativePath, fileName: path.basename(file.relativePath), role, chunkCount: file.chunkCount });
     }
   }

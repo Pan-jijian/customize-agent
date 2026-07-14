@@ -9,7 +9,7 @@ const { Paragraph, Text } = Typography;
 
 type FlowStepStatus = 'wait' | 'process' | 'finish' | 'warning' | 'error';
 interface FlowSubStep { key: string; title: string; status: FlowStepStatus; }
-interface FlowStep { key: string; title: string; description: string; status: FlowStepStatus; icon: ReactNode; subSteps: FlowSubStep[]; }
+interface FlowStep { key: string; title: string; description: string; status: FlowStepStatus; icon: ReactNode; subSteps: FlowSubStep[]; subtitle?: string; }
 
 interface GenerationTaskState {
   id: number; templateId: string; loading: boolean;
@@ -231,7 +231,9 @@ export default function DocumentsPage() {
     return <span style={{ display: 'inline-block', height: 6, width: 6, borderRadius: '50%', background: 'var(--colorTextTertiary)' }} />;
   };
   const stepDesc = (step: FlowStep) => (
-    <div><div>{step.description}</div>
+    <div>
+      {step.subtitle && <div style={{ marginBottom: 4 }}><Tag>{step.subtitle}</Tag></div>}
+      <div>{step.description}</div>
       <div style={{ marginTop: 4 }}>{step.subSteps.map(item => <div key={item.key} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--colorTextSecondary)' }}>{subIcon(item.status)}<span>{item.title}</span></div>)}</div>
     </div>
   );
@@ -249,41 +251,46 @@ export default function DocumentsPage() {
     return step.subSteps.map((s, i) => i < first || first === -1 ? { ...s, status: 'finish' as const } : i === first ? { ...s, status: 'process' as const } : s);
   };
   const stageToFlowStatus = (status: GeneratedDocumentDraft['executionStages'][number]['status']): FlowStepStatus => status === 'failed' ? 'error' : status === 'fallback' ? 'warning' : 'finish';
+  const stageIcon = (type: GeneratedDocumentDraft['executionStages'][number]['type']) => {
+    if (type === 'role_binding') return <ApartmentOutlined />;
+    if (type === 'knowledge_retrieval') return <DatabaseOutlined />;
+    if (type === 'context_recall') return <BulbOutlined />;
+    if (type === 'file_understanding') return <EyeOutlined />;
+    if (type === 'fact_extraction') return <BulbOutlined />;
+    if (type === 'chapter_generation') return <FormOutlined />;
+    if (type === 'llm_review') return <ThunderboltOutlined />;
+    if (type === 'validation') return <SafetyCertificateOutlined />;
+    if (type === 'formatting') return <CheckCircleOutlined />;
+    if (type === 'export_ready') return <FileDoneOutlined />;
+    return <FileTextOutlined />;
+  };
   const buildFlowStepsFromRecord = (record: GeneratedDocumentRecord): { steps: FlowStep[]; activeKey: string | null } => {
     const tpl = templates.find(x => x.id === record.templateId) || currentTemplate;
     const stages = record.executionStages || record.draft?.executionStages || [];
-    const stageByType = new Map(stages.map(stage => [stage.type, stage]));
-    const framework = createInitialFlowSteps(tpl);
-    const steps = framework.map(step => {
-      if (step.key === 'prepare') {
-        const status: FlowStepStatus = stages.length > 0 ? 'finish' : record.status === 'generating' ? 'process' : 'finish';
-        return { ...step, status, subSteps: updSubs(step, status) };
-      }
-      if (step.key === 'done') {
-        const status: FlowStepStatus = record.status === 'completed' ? 'finish' : record.status === 'warning' ? 'warning' : 'wait';
-        return { ...step, status, subSteps: updSubs(step, status) };
-      }
-      const matched = stageByType.get(step.key as GeneratedDocumentDraft['executionStages'][number]['type']);
-      if (!matched) return step;
-      const status = stageToFlowStatus(matched.status);
-      return { ...step, status, description: matched.message || step.description, subSteps: updSubs(step, status) };
-    });
-    let activeKey: string | null;
-    if (record.status === 'generating') {
-      const lastStageIndex = Math.max(-1, ...stages.map(stage => steps.findIndex(step => step.key === stage.type)).filter(index => index >= 0));
-      const next = steps.slice(lastStageIndex + 1).find(step => step.key !== 'done' && step.status === 'wait') || steps.find(step => step.status === 'process') || steps.find(step => step.key === 'done');
-      activeKey = next?.key || 'prepare';
-      for (const step of steps) if (step.key === activeKey && step.status === 'wait') { step.status = 'process'; step.subSteps = updSubs(step, 'process'); }
-    } else if (record.status === 'failed') {
-      activeKey = steps.find(step => step.status === 'error')?.key || stages.at(-1)?.type || 'prepare';
-    } else {
-      activeKey = 'done';
+    if (stages.length > 0) {
+      const steps = stages.map((stage, index) => {
+        const status = stageToFlowStatus(stage.status);
+        return {
+          key: `${stage.type}-${index}`,
+          title: stage.title || stage.type,
+          subtitle: stage.subtitle || stage.roleName || stage.roleId,
+          description: stage.message || '',
+          status,
+          icon: stageIcon(stage.type),
+          subSteps: [{ key: `stage-${index}`, title: stage.promptName ? `提示词：${stage.promptName}` : stage.promptId ? `提示词：${stage.promptId}` : stage.roleId, status }],
+        } satisfies FlowStep;
+      });
+      if (record.status === 'generating' && steps.length > 0 && steps.at(-1)?.status === 'finish') steps[steps.length - 1] = { ...steps[steps.length - 1], status: 'process' as const };
+      const activeKey = record.status === 'generating' ? steps.at(-1)?.key || 'prepare' : record.status === 'failed' ? steps.find(step => step.status === 'error')?.key || steps.at(-1)?.key || 'prepare' : 'done';
+      return { steps, activeKey };
     }
-    return { steps, activeKey };
+    const framework = createInitialFlowSteps(tpl);
+    const steps = framework.map(step => step.key === 'prepare' ? { ...step, status: record.status === 'generating' ? 'process' as const : 'finish' as const, subSteps: updSubs(step, record.status === 'generating' ? 'process' : 'finish') } : step);
+    return { steps, activeKey: record.status === 'generating' ? 'prepare' : 'done' };
   };
   const applyGeneratedRecordToWorkflow = (record: GeneratedDocumentRecord) => {
     const { steps, activeKey } = buildFlowStepsFromRecord(record);
-    setFlowSteps(steps); setActiveFlowKey(activeKey); setLoading(isDraftGenerating(record.status));
+    setFlowSteps(steps); setActiveFlowKey(activeKey); setLoading(isDraftGenerating(record.status)); setSnap(steps, activeKey, isDraftGenerating(record.status));
     if (record.status === 'failed') setDrawerMode('workflow');
     if ((record.status === 'completed' || record.status === 'warning') && record.draft) {
       setDraft(record.draft); setContent(record.editedMarkdown || record.markdown); setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null);
@@ -306,7 +313,6 @@ export default function DocumentsPage() {
       })();
     }, 2000);
   };
-  const updFlow = (key: string, st: FlowStepStatus, desc?: string) => { setActiveFlowKey(key); setFlowSteps(prev => { const n = prev.map(s => s.key === key ? { ...s, status: st, description: desc || s.description, subSteps: updSubs(s, st) } : s); setSnap(n, key); return n; }); };
   useEffect(() => {
     if (!loading || !activeFlowKey) return undefined;
     const t = window.setInterval(() => setFlowSteps(prev => {
@@ -315,7 +321,6 @@ export default function DocumentsPage() {
     }), 1400);
     return () => window.clearInterval(t);
   }, [activeFlowKey, loading]);
-  const finishPrev = (key: string) => { setFlowSteps(prev => { const idx = prev.findIndex(s => s.key === key); const n = prev.map((s, i) => i < idx && s.status !== 'error' ? { ...s, status: 'finish' as const, subSteps: updSubs(s, 'finish') } : s); setSnap(n, key); return n; }); };
 
   const searchTemplateFiles = async (query: string) => {
     setFileSearching(true);
@@ -371,17 +376,12 @@ export default function DocumentsPage() {
   const delDraft = async (id: string) => { try { await deleteGeneratedDocument(id); if (currentDocumentId === id) { setCurrentDocumentId(null); setDraft(null); setContent(''); } await loadDrafts(); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
 
   const waitForDoc = async (docId: string) => {
-    const pf = [{ k: 'chapter_generation', m: '后台任务已创建，正在轮询等待 LLM 章节生成完成…' }, { k: 'asset_generation', m: '正在轮询等待封面和生成资源写入本地记录…' }, { k: 'validation', m: '正在轮询等待校验、导出门禁和格式化完成…' }, { k: 'llm_review', m: '正在轮询等待 LLM 审查优化完成…' }];
-    let tick = 0;
     for (;;) {
       const { document } = await getGeneratedDocument(docId);
       applyGeneratedRecordToWorkflow(document);
       if ((document.status === 'completed' || document.status === 'warning') && document.draft) return document;
       if (document.status === 'failed') throw new Error(document.error || '生成失败');
-      if ((document.executionStages || document.draft?.executionStages || []).length === 0) {
-        const c = pf[Math.min(tick, pf.length - 1)]!; finishPrev(c.k); updFlow(c.k, 'process', c.m);
-      }
-      tick++; await new Promise(r => window.setTimeout(r, 1500));
+      await new Promise(r => window.setTimeout(r, 1500));
     }
   };
 
@@ -390,12 +390,11 @@ export default function DocumentsPage() {
     if (activeGenerationTask?.loading) { setFlowSteps(activeGenerationTask.flowSteps); setActiveFlowKey(activeGenerationTask.activeFlowKey); setLoading(true); return; }
     setLoading(true);
     const tpl = templates.find(x => x.id === templateId) || currentTemplate;
-    const initial = createInitialFlowSteps(tpl);
+    const initial = createInitialFlowSteps(tpl).slice(0, 1);
     const promise = generateDocumentDraft({ templateId });
     activeGenerationTask = { id: Date.now(), templateId, loading: true, flowSteps: initial, activeFlowKey: 'prepare', promise, listeners: new Set() };
     setFlowSteps(initial); setActiveFlowKey('prepare');
-    const preview = [{ k: 'role_binding', m: '正在读取模板、文件角色、提示词角色并生成后台文档规范…' }, { k: 'knowledge_retrieval', m: '正在从知识库检索章节证据、表格、图片和附件…' }, { k: 'file_understanding', m: '正在准备多模态文件理解…' }, { k: 'fact_extraction', m: '正在等待 LLM 事实抽取和后续章节生成结果…' }];
-    const timers = preview.map((x, i) => window.setTimeout(() => { finishPrev(x.k); updFlow(x.k, 'process', x.m); }, 600 + i * 900));
+    const timers: number[] = [];
     try {
       const started = await promise;
       if (started.documentId) { localStorage.setItem('activeGenDocId', started.documentId); setCurrentDocumentId(started.documentId); if (activeGenerationTask?.promise === promise) activeGenerationTask.documentId = started.documentId; }
@@ -405,20 +404,12 @@ export default function DocumentsPage() {
       if (!result) throw new Error('生成结果为空');
       if (started.documentId || doc?.id) setCurrentDocumentId(started.documentId || doc!.id);
       timers.forEach(x => window.clearTimeout(x));
-      finishPrev('done');
       setDraft(result); setContent(doc?.editedMarkdown || doc?.markdown || result.markdown);
       if (activeGenerationTask?.promise === promise) { activeGenerationTask.draft = result; activeGenerationTask.content = doc?.editedMarkdown || doc?.markdown || result.markdown; }
-      setFlowSteps(prev => {
-        const n = prev.map(s => {
-          const stage = result.executionStages.find(x => x.type === s.key);
-          if (s.key === 'prepare') return { ...s, status: 'finish' as const, description: t('documents.flowPrepareDone'), subSteps: updSubs(s, 'finish') };
-          if (s.key === 'done') { const has = result.validationIssues.some(x => x.level === 'error' || x.level === 'warning') || !result.exportGate.passed; const st: FlowStepStatus = has ? 'warning' : 'finish'; const reason = result.validationIssues.find(x => x.level === 'error' || x.level === 'warning')?.message; return { ...s, status: st, description: has ? `生成完成，但需复核：${reason || t('documents.flowGateFailed')}` : t('documents.flowDoneDesc'), subSteps: updSubs(s, st) }; }
-          if (!stage) return s.status === 'process' ? { ...s, status: 'finish' as const, subSteps: updSubs(s, 'finish') } : s;
-          const st: FlowStepStatus = stage.status === 'failed' ? 'error' : 'finish';
-          return { ...s, status: st, description: `${stage.status.toUpperCase()}：${stage.message || s.description}`, subSteps: updSubs(s, st) };
-        });
-        setSnap(n, 'done', false); return n;
-      });
+      const recordForFlow = doc || { id: started.documentId || `draft-${Date.now()}`, templateId, title: result.title, requirement: result.requirement, markdown: result.markdown, status: result.validationIssues.some(x => x.level === 'error' || x.level === 'warning') || !result.exportGate.passed ? 'warning' as const : 'completed' as const, draft: result, executionStages: result.executionStages, assets: result.assets || [], createdAt: result.generatedAt, updatedAt: Date.now() };
+      const { steps: finalSteps } = buildFlowStepsFromRecord(recordForFlow);
+      setFlowSteps(finalSteps);
+      setSnap(finalSteps, 'done', false);
       setActiveFlowKey('done');
       if (activeGenerationTask?.promise === promise) { activeGenerationTask.activeFlowKey = 'done'; activeGenerationTask.loading = false; notifyGenerationTask(); }
       localStorage.removeItem('activeGenDocId');

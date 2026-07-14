@@ -1,7 +1,7 @@
 import type { DocumentDraftChapter, DocumentEvidence, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from './documentWorkflowService';
 import { readEngineeringDocumentConfig } from './engineeringDocumentConfigService';
 
-export type EngineeringFactCategory = 'technical_parameter' | 'engineering_quantity' | 'schedule_milestone' | 'cost_commitment' | 'resource_allocation' | 'inspection_ratio' | 'management_frequency' | 'risk_response' | 'standard_requirement';
+export type EngineeringFactCategory = 'technical_parameter' | 'engineering_quantity' | 'schedule_milestone' | 'cost_commitment' | 'resource_allocation' | 'inspection_ratio' | 'management_frequency' | 'risk_response' | 'standard_requirement' | 'subdivision_work' | 'dangerous_work';
 
 export interface EngineeringTechnicalFact {
   id: string;
@@ -60,6 +60,8 @@ const PROCESS_WORDS = ['施工准备', '基层处理', '测量放线', '弹线',
 const INSPECTION_WORDS = ['验收', '检测', '试验', '复试', '闭水', '蓄水', '打压', '水压', '通球', '绝缘', '接地', '联动', '允许偏差', '合格'];
 const QUALITY_WORDS = ['质量控制', '饱满度', '平整度', '垂直度', '偏差', '强度', '厚度', '间距', '标高', '坡度', '密封', '防渗', '防火'];
 const RISK_WORDS = ['安全', '临电', '动火', '高处', '交叉作业', '防护', '扬尘', '噪声', '应急', '消防', '有限空间'];
+const DANGEROUS_WORK_WORDS = ['危大工程', '危险性较大', '专项施工方案', '专家论证', '有限空间', '高处作业', '动火作业', '临时用电', '拆除工程', '起重吊装', '脚手架', '深基坑', '模板支撑'];
+const SUBDIVISION_WORDS = ['分部分项', '分项工程', '拆除', '砌筑', '防水', '装饰', '吊顶', '涂料', '给排水', '电气', '消防', '暖通', '排烟', '厨房设备', '明厨亮灶', '隔油池'];
 const DEFAULT_GENERIC_PHRASES = ['严格按照规范', '满足设计要求', '加强质量控制', '做好安全管理', '确保施工质量', '按要求验收', '结合现场情况', '加强协调', '做好成品保护', '相关要求', '规范要求'];
 
 function cleanText(text: string) {
@@ -104,10 +106,12 @@ function workItemOf(text: string, discipline: string) {
 }
 
 function shouldKeepFact(text: string) {
-  return [PARAMETER_RE, QUANTITY_RE, SCHEDULE_RE, COST_RE, FREQUENCY_RE, RESOURCE_RE, STANDARD_RE].some(pattern => hasMatch(text, pattern)) || [...PROCESS_WORDS, ...INSPECTION_WORDS, ...QUALITY_WORDS].some(word => text.includes(word));
+  return [PARAMETER_RE, QUANTITY_RE, SCHEDULE_RE, COST_RE, FREQUENCY_RE, RESOURCE_RE, STANDARD_RE].some(pattern => hasMatch(text, pattern)) || [...PROCESS_WORDS, ...INSPECTION_WORDS, ...QUALITY_WORDS, ...RISK_WORDS, ...DANGEROUS_WORK_WORDS, ...SUBDIVISION_WORDS].some(word => text.includes(word));
 }
 
-function factCategory(input: { parameters: string[]; quantities: string[]; scheduleValues: string[]; costValues: string[]; frequencyValues: string[]; resourceValues: string[]; standards: string[]; inspection: string[]; riskControl: string[] }): EngineeringFactCategory {
+function factCategory(input: { text: string; parameters: string[]; quantities: string[]; scheduleValues: string[]; costValues: string[]; frequencyValues: string[]; resourceValues: string[]; standards: string[]; inspection: string[]; riskControl: string[] }): EngineeringFactCategory {
+  if (DANGEROUS_WORK_WORDS.some(word => input.text.includes(word))) return 'dangerous_work';
+  if (SUBDIVISION_WORDS.some(word => input.text.includes(word))) return 'subdivision_work';
   if (input.costValues.length) return 'cost_commitment';
   if (input.scheduleValues.length) return input.riskControl.length ? 'risk_response' : 'schedule_milestone';
   if (input.frequencyValues.length) return input.inspection.length ? 'inspection_ratio' : 'management_frequency';
@@ -139,7 +143,7 @@ export function extractEngineeringTechnicalFacts(evidence: DocumentEvidence[], l
       const inspection = extractWords(text, INSPECTION_WORDS);
       const qualityControl = extractWords(text, QUALITY_WORDS);
       const riskControl = extractWords(text, RISK_WORDS);
-      const category = factCategory({ parameters, quantities, scheduleValues, costValues, frequencyValues, resourceValues, standards, inspection, riskControl });
+      const category = factCategory({ text, parameters, quantities, scheduleValues, costValues, frequencyValues, resourceValues, standards, inspection, riskControl });
       facts.push({
         id: `tech-${facts.length + 1}`,
         category,
@@ -171,10 +175,10 @@ export function extractEngineeringTechnicalFacts(evidence: DocumentEvidence[], l
 
 function factMatchesChapter(fact: EngineeringTechnicalFact, chapter: DocumentTemplateChapter) {
   const haystack = `${chapter.title} ${chapter.purpose} ${(chapter.sections || []).join(' ')} ${(chapter.requiredFacts || []).join(' ')} ${(chapter.queries || []).join(' ')}`;
-  if (/施工方法|主要.*方法|工艺/u.test(haystack)) return /土建|砌筑|防水|装饰|给排水|电气|消防|暖通|厨房|设备|排烟/u.test(fact.discipline + fact.workItem) || fact.category === 'technical_parameter';
+  if (/施工方法|主要.*方法|工艺|分项|分部分项/u.test(haystack)) return /土建|砌筑|防水|装饰|给排水|电气|消防|暖通|厨房|设备|排烟/u.test(fact.discipline + fact.workItem) || ['technical_parameter', 'subdivision_work', 'dangerous_work'].includes(fact.category);
   if (/质量|工期|进度/u.test(haystack)) return fact.qualityControl?.length || fact.inspection?.length || fact.standard?.length || ['schedule_milestone', 'inspection_ratio', 'management_frequency', 'cost_commitment'].includes(fact.category);
   if (/人.*材.*机|资源|材料|机械/u.test(haystack)) return ['resource_allocation', 'engineering_quantity'].includes(fact.category) || /材料|设备|机械|厨房设备|暖通|电气|给排水/u.test(fact.discipline + fact.workItem + fact.text);
-  if (/安全|文明|应急|危大/u.test(haystack)) return fact.riskControl?.length || ['risk_response', 'management_frequency', 'cost_commitment'].includes(fact.category) || /临时用电|动火|高处|消防|应急|扬尘/u.test(fact.text);
+  if (/安全|文明|应急|危大|危险性较大|专项/u.test(haystack)) return fact.riskControl?.length || ['risk_response', 'management_frequency', 'cost_commitment', 'dangerous_work'].includes(fact.category) || /临时用电|动火|高处|消防|应急|扬尘|有限空间|拆除/u.test(fact.text);
   if (/重点|难点/u.test(haystack)) return fact.confidence >= 0.65;
   return [fact.discipline, fact.workItem].some(value => haystack.includes(value));
 }
@@ -205,6 +209,7 @@ export function technicalFactsPrompt(assignment: TechnicalFactAssignment) {
     '- 本章事实表中出现的工程数量、涉及学校数量、工期节点、检查频次、人员资源、设备数量、金额/违约承诺、数字、单位、强度、厚度、管径、试验时间、验收指标和规范编号，应自然写入正文。',
     '- 如果资料中已有具体参数，禁止只写“满足设计要求”“按规范施工”。',
     '- 每个主要分项至少写出施工动作、检查动作和验收动作。',
+    '- 识别到分部分项、危大工程、危险性较大工程、有限空间、动火、高处、临电、拆除等风险线索时，必须写入对应章节的风险识别、专项方案、交底、旁站检查、验收放行和应急闭环。',
   ].join('\n');
 }
 

@@ -97,6 +97,12 @@ function inlineLocalImages(html: string, projectRoot = getProjectRoot()) {
   });
 }
 
+function stripMarkdownDocumentFence(input: string) {
+  const trimmed = input.trim();
+  const match = /^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/iu.exec(trimmed);
+  return match ? match[1].trim() : input;
+}
+
 function normalizeExportUnits(input: string) {
   const normalizePower = (value: string) => value
     .replace(/m\s*<sup>\s*2\s*<\/sup>/giu, 'm²')
@@ -109,7 +115,7 @@ function normalizeExportUnits(input: string) {
     .replace(/(?<=\d)m\s*3(?![\p{L}\p{N}_])/giu, 'm³')
     .replace(/(?<![\p{L}\p{N}_])m\s*2(?![\p{L}\p{N}_])/giu, 'm²')
     .replace(/(?<![\p{L}\p{N}_])m\s*3(?![\p{L}\p{N}_])/giu, 'm³');
-  return normalizePower(input);
+  return normalizePower(stripMarkdownDocumentFence(input));
 }
 
 function stripInlineMarkdown(input: string) {
@@ -178,9 +184,15 @@ function docxRun(text: string, options: { bold?: boolean; size?: number; fontEas
   return `<w:r><w:rPr>${props}</w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`;
 }
 
-function docxParagraph(text: string, options: { bold?: boolean; size?: number; align?: 'center'; spacingAfter?: number; pageBreak?: boolean; line?: number; fontEastAsia?: string; fontAscii?: string; indentLeft?: number } = {}) {
+function docxParagraph(text: string, options: { bold?: boolean; size?: number; align?: 'left' | 'center' | 'right'; spacingBefore?: number; spacingAfter?: number; pageBreak?: boolean; line?: number; fontEastAsia?: string; fontAscii?: string; indentLeft?: number; firstLine?: number; keepNext?: boolean } = {}) {
   if (options.pageBreak) return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
-  const pPr = [options.align ? `<w:jc w:val="${options.align}"/>` : '', options.indentLeft ? `<w:ind w:left="${options.indentLeft}"/>` : '', `<w:spacing w:line="${options.line ?? 440}" w:lineRule="exact" w:after="${options.spacingAfter ?? 120}"/>`].filter(Boolean).join('');
+  const indent = [options.indentLeft ? `w:left="${options.indentLeft}"` : '', options.firstLine ? `w:firstLine="${options.firstLine}"` : ''].filter(Boolean).join(' ');
+  const pPr = [
+    options.keepNext ? '<w:keepNext/>' : '',
+    options.align ? `<w:jc w:val="${options.align}"/>` : '',
+    indent ? `<w:ind ${indent}/>` : '',
+    `<w:spacing w:line="${options.line ?? 440}" w:lineRule="exact" w:before="${options.spacingBefore ?? 0}" w:after="${options.spacingAfter ?? 120}"/>`,
+  ].filter(Boolean).join('');
   return `<w:p><w:pPr>${pPr}</w:pPr>${docxRun(text, options)}</w:p>`;
 }
 
@@ -196,17 +208,23 @@ function parseMarkdownTable(lines: string[], start: number) {
 }
 
 function docxTable(rows: string[][], style: ReturnType<typeof resolveExportStyle>) {
-  const cells = (row: string[]) => row.map(cell => `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/><w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tcMar></w:tcPr>${docxParagraph(cell, { size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingAfter: 0 })}</w:tc>`).join('');
-  return `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders><w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders></w:tblPr>${rows.map(row => `<w:tr>${cells(row)}</w:tr>`).join('')}</w:tbl>`;
+  const cells = (row: string[], rowIndex: number) => row.map(cell => `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/><w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tcMar>${rowIndex === 0 ? '<w:shd w:fill="F3F4F6"/>' : ''}</w:tcPr>${docxParagraph(cell, { bold: rowIndex === 0, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingAfter: 0, align: rowIndex === 0 ? 'center' : undefined })}</w:tc>`).join('');
+  return `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblLook w:firstRow="1" w:noHBand="0"/><w:tblBorders><w:top w:val="single" w:sz="6" w:color="666666"/><w:left w:val="single" w:sz="6" w:color="666666"/><w:bottom w:val="single" w:sz="6" w:color="666666"/><w:right w:val="single" w:sz="6" w:color="666666"/><w:insideH w:val="single" w:sz="4" w:color="666666"/><w:insideV w:val="single" w:sz="4" w:color="666666"/></w:tblBorders></w:tblPr>${rows.map((row, rowIndex) => `<w:tr>${cells(row, rowIndex)}</w:tr>`).join('')}</w:tbl>`;
 }
 
 function isTocSectionLine(line: string) {
-  return /^\d+\.\d+\s+\S/u.test(line);
+  return /^\s*\d+\.\d+\s+\S/u.test(line);
 }
 
 function docxTocParagraph(line: string, style: ReturnType<typeof resolveExportStyle>) {
   const sectionLine = isTocSectionLine(line);
-  return docxParagraph(stripInlineMarkdown(line), { bold: !sectionLine, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingAfter: sectionLine ? 40 : 80, indentLeft: sectionLine ? 420 : 0 });
+  return docxParagraph(stripInlineMarkdown(line), { bold: !sectionLine, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingAfter: sectionLine ? 30 : 80, indentLeft: sectionLine ? 420 : 0, align: 'left' });
+}
+
+function docxHeadingParagraph(level: number, text: string, style: ReturnType<typeof resolveExportStyle>) {
+  if (level === 2) return docxParagraph(text, { bold: true, size: Math.max(style.titleHalfPoints + 4, 36), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: 'center', spacingBefore: 260, spacingAfter: 180, keepNext: true });
+  if (level === 3) return docxParagraph(text, { bold: true, size: Math.max(style.titleHalfPoints, 32), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingBefore: 180, spacingAfter: 100, keepNext: true });
+  return docxParagraph(text, { bold: true, size: Math.max(style.bodyHalfPoints, 28), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingBefore: 120, spacingAfter: 80, keepNext: true });
 }
 
 function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings) {
@@ -217,21 +235,32 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings) 
   const lines = normalizedMarkdown.replace(/<div class="page-break"><\/div>/gu, '\n[[PAGE_BREAK]]\n').split('\n');
   const blocks: string[] = [];
   let inToc = false;
+  let inCover = false;
   for (let index = 0; index < lines.length;) {
     const line = lines[index].trim();
     if (!line) { index += 1; continue; }
-    if (line === '[[PAGE_BREAK]]') { inToc = false; blocks.push(docxParagraph('', { pageBreak: true })); index += 1; continue; }
-    const table = parseMarkdownTable(lines, index);
-    if (table) { blocks.push(docxTable(table.rows, style)); index = table.next; continue; }
-    const heading = /^(#{1,3})\s+(.+)$/u.exec(line);
-    if (heading) {
-      const headingText = stripInlineMarkdown(heading[2]);
-      inToc = headingText === '目录';
-      blocks.push(docxParagraph(headingText, { bold: true, size: titleSize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: heading[1].length === 1 ? 'center' : undefined, spacingAfter: 160 }));
+    if (/<div\s+class=["']document-cover["']\s*>/iu.test(line)) { inCover = true; index += 1; continue; }
+    if (inCover && /^<\/div>$/iu.test(line)) { inCover = false; index += 1; continue; }
+    if (line === '[[PAGE_BREAK]]') { inToc = false; inCover = false; blocks.push(docxParagraph('', { pageBreak: true })); index += 1; continue; }
+    if (inCover) {
+      const coverText = stripInlineMarkdown(line.replace(/^#\s+/u, ''));
+      if (coverText) blocks.push(docxParagraph(coverText, { bold: true, size: Math.max(titleSize + 8, 44), line: Math.round(style.lineTwips * 1.15), fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: 'center', spacingBefore: 360, spacingAfter: 220 }));
       index += 1;
       continue;
     }
-    blocks.push(inToc ? docxTocParagraph(line, style) : docxParagraph(stripInlineMarkdown(line), { size: bodySize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii }));
+    const table = parseMarkdownTable(lines, index);
+    if (table) { blocks.push(docxTable(table.rows, style), docxParagraph('', { spacingAfter: 80, line: style.lineTwips })); index = table.next; continue; }
+    const heading = /^(#{1,4})\s+(.+)$/u.exec(line);
+    if (heading) {
+      const headingText = stripInlineMarkdown(heading[2]);
+      inToc = headingText === '目录';
+      blocks.push(docxHeadingParagraph(heading[1].length, headingText, style));
+      index += 1;
+      continue;
+    }
+    const plainLine = stripInlineMarkdown(line);
+    const boldLine = /^\*\*[^*]+\*\*\s*[:：]?\s*$/u.test(line) || /^（[一二三四五六七八九十]+）/u.test(plainLine) || /^[一二三四五六七八九十]+、/u.test(plainLine);
+    blocks.push(inToc ? docxTocParagraph(line, style) : docxParagraph(plainLine, { bold: boldLine, size: bodySize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, firstLine: boldLine ? 0 : 560, spacingBefore: boldLine ? 80 : 0 }));
     index += 1;
   }
   return blocks.join('');
@@ -273,12 +302,11 @@ async function buildDocx(title: string, markdown: string, settings?: DocumentExp
   }
   const page = settings?.page || {};
   const zip = new JSZip();
-  const style = resolveExportStyle(settings);
   zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
   zip.folder('_rels')?.file('.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
   zip.folder('word')?.folder('_rels')?.file('document.xml.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rStyle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
   zip.folder('word')?.file('styles.xml', docxStylesXml(settings));
-  zip.folder('word')?.file('document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${docxParagraph(title, { bold: true, size: style.titleHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: 'center', spacingAfter: 240 })}${contentXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="${lengthToTwips(page.marginTop, 2.5)}" w:right="${lengthToTwips(page.marginRight, 2)}" w:bottom="${lengthToTwips(page.marginBottom, 2)}" w:left="${lengthToTwips(page.marginLeft, 2)}"/></w:sectPr></w:body></w:document>`);
+  zip.folder('word')?.file('document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${contentXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="${lengthToTwips(page.marginTop, 2.5)}" w:right="${lengthToTwips(page.marginRight, 2)}" w:bottom="${lengthToTwips(page.marginBottom, 2)}" w:left="${lengthToTwips(page.marginLeft, 2)}"/></w:sectPr></w:body></w:document>`);
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
@@ -306,8 +334,8 @@ function enhanceTocHtml(body: string) {
   return body.replace(/(<h2[^>]*>\s*目录\s*<\/h2>)([\s\S]*?)(<div class="page-break"><\/div>)/u, (_match, heading: string, content: string, pageBreak: string) => {
     const normalized = content.replace(/<ol>\s*([\s\S]*?)\s*<\/ol>/u, (_ol, listContent: string) => listContent)
       .replace(/<li>\s*([^<]+?)\s*<\/li>/gu, '<p>$1</p>')
-      .replace(/<p>\s*(\d+\.\d+\s+[^<]+)<\/p>/gu, '<p class="toc-section">$1</p>')
-      .replace(/<p>\s*((?:第[一二三四五六七八九十百千万]+章|\d+\.\s*第[一二三四五六七八九十百千万]+章)[^<]*)<\/p>/gu, '<p class="toc-chapter">$1</p>');
+      .replace(/<p>(?:\s|&nbsp;|&#160;)*(\d+\.\d+\s+[^<]+)<\/p>/giu, '<p class="toc-section">$1</p>')
+      .replace(/<p>(?!(?:\s|&nbsp;|&#160;)*<\/p>|(?:\s|&nbsp;|&#160;)*\d+\.\d+\s)([\s\S]*?)<\/p>/giu, '<p class="toc-chapter">$1</p>');
     return `<section class="document-toc">${heading}${normalized}</section>${pageBreak}`;
   });
 }
@@ -315,7 +343,7 @@ function enhanceTocHtml(body: string) {
 function htmlShell(title: string, body: string, settings?: DocumentExportSettings) {
   const style = resolveExportStyle(settings);
   const enhancedBody = enhanceTocHtml(body);
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:${style.paper};margin:${style.marginTop} ${style.marginRight} ${style.marginBottom} ${style.marginLeft}}html,body{margin:0;padding:0}body,p,div,li,td,th,span,section,article{font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};color:#111827}body{font-variant-east-asian:normal;text-rendering:geometricPrecision}p{margin:0 0 8pt 0;text-align:justify;text-justify:inter-ideograph}ul,ol{margin:0 0 8pt 2em;padding:0}h1,h2,h3{font-family:${style.fontFamily};font-size:${style.titleCss};line-height:${style.lineCss};font-weight:700;color:#111827;page-break-after:avoid}h1{text-align:center;margin:80px 0 28pt 0}h2{border-bottom:1px solid #d1d5db;padding-bottom:6px;margin:22pt 0 12pt 0}h3{margin:16pt 0 8pt 0}.document-toc p{margin:0 0 4pt 0;text-align:left}.document-toc .toc-chapter{font-weight:700;margin-top:8pt}.document-toc .toc-section{margin-left:2em}img{display:block;max-width:100%;max-height:520px;object-fit:contain;margin:12px auto;page-break-inside:avoid}table{width:100%;border-collapse:collapse;page-break-inside:auto;margin:8pt 0}tr{page-break-inside:avoid;page-break-after:auto}th,td{font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};border:1px solid #6b7280;padding:4pt 6pt;vertical-align:top}th{background:#f3f4f6;font-weight:700}pre{white-space:pre-wrap;font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss}}.document-cover{min-height:720px;display:flex;flex-direction:column;justify-content:center}.document-cover h1{margin-top:0}.page-break{page-break-after:always;height:0}</style></head><body>${enhancedBody}</body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:${style.paper};margin:${style.marginTop} ${style.marginRight} ${style.marginBottom} ${style.marginLeft}}html,body{margin:0;padding:0}body,p,div,li,td,th,span,section,article{font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};color:#111827}body{font-variant-east-asian:normal;text-rendering:geometricPrecision}p{margin:0 0 8pt 0;text-align:justify;text-justify:inter-ideograph;text-indent:2em}strong{font-weight:700}ul,ol{margin:0 0 8pt 2em;padding:0}li{margin:0 0 4pt 0;text-align:justify}h1,h2,h3,h4{font-family:${style.fontFamily};line-height:${style.lineCss};font-weight:700;color:#111827;page-break-after:avoid;break-after:avoid}h1{text-align:center;font-size:${Math.max(style.titlePt + 6, 22)}pt;margin:90pt 0 28pt 0}h2{text-align:center;font-size:${Math.max(style.titlePt + 2, 18)}pt;border:0;padding:0;margin:26pt 0 16pt 0}h3{font-size:${style.titleCss};margin:18pt 0 8pt 0}h4{font-size:${style.bodyCss};margin:12pt 0 6pt 0}.document-toc h2{text-align:center;margin-top:0}.document-toc p{margin:0 0 4pt 0;text-align:left;text-indent:0}.document-toc .toc-chapter{font-weight:700;margin-top:8pt}.document-toc .toc-section{margin-left:2em}.document-cover{min-height:calc(100vh - ${style.marginTop} - ${style.marginBottom});display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-size:${Math.max(style.titlePt + 8, 24)}pt;line-height:${Math.max(style.linePt + 10, 34)}pt;font-weight:700}.document-cover h1,.document-cover p{font-size:${Math.max(style.titlePt + 8, 24)}pt;line-height:${Math.max(style.linePt + 10, 34)}pt;font-weight:700;text-align:center;text-indent:0;margin:0 0 18pt 0}img{display:block;max-width:100%;max-height:520px;object-fit:contain;margin:12px auto;page-break-inside:avoid}table{width:100%;border-collapse:collapse;page-break-inside:auto;margin:10pt 0}tr{page-break-inside:avoid;page-break-after:auto}th,td{font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};border:1px solid #666;padding:4pt 6pt;vertical-align:middle;text-indent:0;text-align:left}th{background:#f3f4f6;font-weight:700;text-align:center}pre{white-space:pre-wrap;font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss}}.page-break{page-break-after:always;break-after:page;height:0}</style></head><body>${enhancedBody}</body></html>`;
 }
 
 /** 判断问题是否为阻止导出的严重问题（非警告类问题） */
@@ -458,7 +486,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const recordMarkdown = record?.editedMarkdown || record?.markdown || record?.draft?.markdown || '';
     const rawMarkdown = body.useClientMarkdown && typeof body.markdown === 'string' ? body.markdown : recordMarkdown || body.markdown || '';
     const markdown = normalizeExportUnits(rawMarkdown);
-    const format = body.format || 'markdown';
+    const format = body.format;
+    if (!format || !['markdown', 'html', 'pdf', 'docx'].includes(format)) return res.status(400).json({ error: 'INVALID_EXPORT_FORMAT', message: '请选择有效的导出格式。' });
     const exportIssues = validateExportMarkdown(markdown, normalizeExportUnits(record?.draft?.markdown || record?.markdown || ''));
     if (exportIssues.length) return res.status(422).json({ error: 'EXPORT_CONTENT_INVALID', issues: exportIssues });
     const exportGate = record?.draft?.exportGate || body.exportGate;
