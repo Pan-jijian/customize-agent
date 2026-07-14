@@ -17,8 +17,8 @@ export interface DynamicChapterRule {
 
 export type GateRuleType = string;
 export type GateRuleLevel = 'error' | 'warning' | 'info';
-export type GateRuleSubject = 'document' | 'chapter' | 'fact' | 'file_role' | 'prompt_role' | 'table' | 'image' | 'source';
-export type GateRuleOperator = 'exists' | 'contains' | 'not_contains' | 'regex_match' | 'regex_not_match' | 'min_count' | 'min_length' | 'all_have_source' | 'image_caption_required' | 'table_explanation_required';
+export type GateRuleSubject = 'document' | 'chapter' | 'fact' | 'file_role' | 'prompt_role' | 'table' | 'image' | 'source' | 'page';
+export type GateRuleOperator = 'exists' | 'contains' | 'not_contains' | 'regex_match' | 'regex_not_match' | 'min_count' | 'max_count' | 'min_length' | 'all_have_source' | 'image_caption_required' | 'table_explanation_required';
 
 export interface GateRuleEvaluator {
   subject: GateRuleSubject;

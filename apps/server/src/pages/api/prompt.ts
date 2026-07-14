@@ -99,8 +99,6 @@ interface PromptExportFile {
   prompts: Array<{ name: string; content: string; selected: boolean }>;
 }
 
-const BUILT_IN_PROMPT_IDS = new Set<string>();
-
 interface PromptConfig {
   selectedIds: string[];
   customPrompts: Array<{ id: string; name: string; content: string; createdAt: string; updatedAt: string }>;
@@ -129,9 +127,9 @@ function savePromptConfig(config: PromptConfig): void {
   fs.writeFileSync(promptConfigPath, JSON.stringify(config, null, 2), 'utf-8');
 }
 
-/** 获取所有有效的提示词 ID 集合（内置 + 自定义） */
+/** 获取所有有效的提示词 ID 集合（自定义） */
 function validPromptIds(config: PromptConfig): Set<string> {
-  return new Set([...BUILT_IN_PROMPT_IDS, ...config.customPrompts.map(prompt => prompt.id)]);
+  return new Set(config.customPrompts.map(prompt => prompt.id));
 }
 
 function sanitizePromptName(value: unknown): string {
@@ -289,7 +287,6 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       const { filePath, content, name } = req.body;
       if (!filePath || typeof content !== 'string') return res.status(400).json({ error: 'filePath and content required' });
       const idOrPath = String(filePath);
-      if (BUILT_IN_PROMPT_IDS.has(idOrPath)) return res.status(403).json({ error: 'Built-in prompt cannot be edited' });
       if (idOrPath.startsWith('custom:')) {
         const config = loadPromptConfig();
         const custom = config.customPrompts.find(item => item.id === idOrPath);
@@ -313,7 +310,6 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       if (!filePath) return res.status(400).json({ error: 'filePath required' });
       const idOrPath = String(filePath);
       const config = loadPromptConfig();
-      if (BUILT_IN_PROMPT_IDS.has(idOrPath)) return res.status(403).json({ error: 'Built-in prompt cannot be deleted' });
       if (idOrPath.startsWith('custom:')) {
         config.customPrompts = config.customPrompts.filter(item => item.id !== idOrPath);
         config.selectedIds = config.selectedIds.filter(id => id !== idOrPath);

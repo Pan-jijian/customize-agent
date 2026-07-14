@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { readEngineeringDocumentConfig } from './engineeringDocumentConfigService';
+
 export type DocumentRoleType = 'file' | 'prompt';
 export type PromptExecutionType = 'fact_extraction' | 'chapter_generation' | 'llm_review' | 'validation' | 'formatting' | 'reference';
 export type FileProcessingType = 'rule' | 'project_fact' | 'table' | 'drawing' | 'specification' | 'reference';
@@ -74,6 +76,7 @@ function sanitizeRole(role: DocumentRole): DocumentRole {
     name: role.name || '未命名角色',
     description: role.description || '',
     type,
+    builtIn: Boolean(role.builtIn),
     resourceId: role.resourceId || role.resourceIds?.[0] || undefined,
     resourceIds: uniqueStrings(Array.isArray(role.resourceIds) && role.resourceIds.length > 0 ? role.resourceIds : role.resourceId ? [role.resourceId] : []),
     executionType: type === 'prompt' ? sanitizeExecutionType(role.executionType) : undefined,
@@ -111,8 +114,18 @@ function writeStore(store: RoleStore) {
   fs.writeFileSync(storePath(), JSON.stringify({ roles: store.roles.map(sanitizeRole), configs: store.configs.map(sanitizeConfig) }, null, 2), 'utf-8');
 }
 
+function configuredRoles() {
+  return readEngineeringDocumentConfig().roles.map(role => sanitizeRole({ ...role, builtIn: true }));
+}
+
+function configuredRoleConfigs() {
+  return readEngineeringDocumentConfig().roleConfigs.map(config => sanitizeConfig({ ...config, builtIn: true }));
+}
+
 export function listDocumentRoles(type?: DocumentRoleType): DocumentRole[] {
-  const roles = readStore().roles;
+  const configRoles = configuredRoles();
+  const customRoles = readStore().roles.filter(role => !configRoles.some(item => item.id === role.id && item.type === role.type));
+  const roles = [...configRoles, ...customRoles];
   return type ? roles.filter(role => role.type === type) : roles;
 }
 
@@ -126,6 +139,7 @@ export function saveDocumentRole(role: DocumentRole): DocumentRole {
 }
 
 export function deleteDocumentRole(type: DocumentRoleType, id: string) {
+  if (configuredRoles().some(role => role.id === id && role.type === type)) throw new Error('Configured role cannot be deleted');
   const store = readStore();
   store.roles = store.roles.filter(item => !(item.id === id && item.type === type));
   store.configs = store.configs.map(config => ({
@@ -137,11 +151,13 @@ export function deleteDocumentRole(type: DocumentRoleType, id: string) {
 }
 
 export function listProjectRoleConfigs(): ProjectRoleConfig[] {
-  return readStore().configs;
+  const configConfigs = configuredRoleConfigs();
+  const customConfigs = readStore().configs.filter(config => !configConfigs.some(item => item.id === config.id));
+  return [...configConfigs, ...customConfigs];
 }
 
 export function getProjectRoleConfig(id: string): ProjectRoleConfig | undefined {
-  return readStore().configs.find(config => config.id === id);
+  return listProjectRoleConfigs().find(config => config.id === id);
 }
 
 export function saveProjectRoleConfig(config: ProjectRoleConfig): ProjectRoleConfig {
@@ -154,6 +170,7 @@ export function saveProjectRoleConfig(config: ProjectRoleConfig): ProjectRoleCon
 }
 
 export function deleteProjectRoleConfig(id: string) {
+  if (configuredRoleConfigs().some(config => config.id === id)) throw new Error('Configured role config cannot be deleted');
   const store = readStore();
   store.configs = store.configs.filter(item => item.id !== id);
   writeStore(store);

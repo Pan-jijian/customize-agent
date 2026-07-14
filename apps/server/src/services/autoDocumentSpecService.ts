@@ -1,9 +1,11 @@
 import * as crypto from 'node:crypto';
 import type { DocumentTemplate } from './documentWorkflowService';
-import type { AutoDocumentSpecPackage } from './autoDocumentSpecTypes';
+import type { AutoSpecGateConfig } from './engineeringDocumentConfigService';
+import { readEngineeringDocumentConfig } from './engineeringDocumentConfigService';
+import type { AutoDocumentSpecGateRule, AutoDocumentSpecPackage } from './autoDocumentSpecTypes';
 import { applyKeywordRules, CHAPTER_FACT_RULES, DOCUMENT_TYPE_RULES, FACT_RULES, firstKeywordRuleOutput } from './documentSemanticRules';
 
-function hashTemplate(template: DocumentTemplate) {
+function hashTemplate(template: DocumentTemplate, requirement = '') {
   return crypto.createHash('sha1').update(JSON.stringify({
     id: template.id,
     name: template.name,
@@ -13,6 +15,7 @@ function hashTemplate(template: DocumentTemplate) {
     promptBindings: template.promptBindings,
     fileBindings: template.fileBindings,
     projectRoleConfigId: template.projectRoleConfigId,
+    requirement,
   })).digest('hex').slice(0, 12);
 }
 
@@ -23,6 +26,77 @@ function factId(name: string) {
 function inferDocumentType(template: DocumentTemplate) {
   const text = `${template.name} ${template.category} ${template.outputTitle} ${template.description}`;
   return firstKeywordRuleOutput(text, DOCUMENT_TYPE_RULES) || template.category || '业务文档';
+}
+
+function quotedTexts(text: string) {
+  const quotePattern = new RegExp('[“”"\'‘’「」『』《》](.{2,80}?)[“”"\'‘’「」『』《》]', 'gu');
+  return [...text.matchAll(quotePattern)].map(match => match[1].trim()).filter(Boolean);
+}
+
+function splitRequirementItems(text: string) {
+  return text.split(/[\n；;。]/u).map(item => item.trim()).filter(item => item.length >= 2);
+}
+
+function requirementPageTarget(requirement = '') {
+  const match = requirement.match(/(?:大概|约|左右|不少于|至少|控制在|不超过|最多)?\s*(\d{1,3})\s*(?:页|page)/iu);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  if (/不少于|至少/iu.test(requirement)) return { min: value };
+  if (/不超过|最多|以内|控制在/iu.test(requirement)) return { max: value };
+  return { target: value, min: Math.max(1, Math.floor(value * 0.85)), max: Math.ceil(value * 1.15) };
+}
+
+function requirementChapters(requirement = '') {
+  const chapters = new Set<string>();
+  const patterns = [/(?:必须|需要|要求|增加|包含|包括|补充|设置|新增).{0,12}?(?:章节|章|节|小节)[：:为是]?\s*([^。；;\n]{2,80})/giu, /(?:章节|目录).{0,8}?(?:包括|包含|为|是)[：:]?\s*([^。；;\n]{2,120})/giu];
+  for (const pattern of patterns) {
+    for (const match of requirement.matchAll(pattern)) {
+      for (const item of match[1].split(/[、,，/]/u).map(value => value.trim()).filter(Boolean)) {
+        if (!/不要|禁止|不得|不能/iu.test(item) && item.length <= 40) chapters.add(item.replace(/[。；;：:]+$/u, ''));
+      }
+    }
+  }
+  return [...chapters];
+}
+
+function requirementForbiddenTexts(requirement = '') {
+  const forbidden = new Set<string>();
+  for (const item of splitRequirementItems(requirement).filter(item => /不要|禁止|不得|不能|不允许|严禁/iu.test(item))) {
+    for (const text of quotedTexts(item)) forbidden.add(text);
+    const match = item.match(/(?:不要|禁止|不得|不能|不允许|严禁)(?:出现|输出|写|包含)?\s*([^。；;\n]{2,40})/iu);
+    if (match) forbidden.add(match[1].replace(/^(这些|以下|内容|词语|文字)[:：]?/u, '').trim());
+  }
+  return [...forbidden].filter(text => text && !/章节|页|表格/u.test(text)).slice(0, 30);
+}
+
+function requirementRequiredTexts(requirement = '') {
+  const required = new Set<string>();
+  for (const item of splitRequirementItems(requirement).filter(item => /必须|需要|要求|一定要|务必|包含|包括|输出|写明/iu.test(item) && !/章节|章|节|小节/iu.test(item))) {
+    for (const text of quotedTexts(item)) required.add(text);
+    const match = item.match(/(?:必须|需要|要求|一定要|务必|包含|包括|输出|写明)\s*([^。；;\n]{2,60})/iu);
+    if (match) required.add(match[1].trim());
+  }
+  return [...required].filter(text => text && !/不要|禁止|不得|不能/u.test(text)).slice(0, 30);
+}
+
+function requirementTableMin(requirement = '') {
+  const explicit = requirement.match(/(?:至少|不少于)?\s*(\d{1,2})\s*(?:个|张)?\s*表格/iu);
+  if (explicit) return Number(explicit[1]);
+  return /表格化|用表格|表格形式|表格表达/iu.test(requirement) ? 1 : undefined;
+}
+
+function templateTextForSpec(template: DocumentTemplate, documentType = '') {
+  return `${documentType} ${template.name} ${template.category} ${template.outputTitle} ${template.description}`;
+}
+
+function matchesPattern(text: string, pattern: string) {
+  try { return new RegExp(pattern, 'iu').test(text); } catch { return text.includes(pattern); }
+}
+
+function configuredAutoSpecGates(template: DocumentTemplate, documentType = ''): AutoSpecGateConfig[] {
+  const text = templateTextForSpec(template, documentType);
+  return readEngineeringDocumentConfig().autoSpecGates.filter(gate => gate.templateMatchers.some(pattern => matchesPattern(text, pattern)));
 }
 
 function inferFactNames(template: DocumentTemplate, documentType: string) {
@@ -39,8 +113,10 @@ function inferFactNames(template: DocumentTemplate, documentType: string) {
     '项目资料范围',
   ]);
   for (const name of applyKeywordRules(templateText, FACT_RULES)) facts.add(name);
-  if (documentType === '施工组织设计') {
+  const autoSpecGates = configuredAutoSpecGates(template, documentType);
+  if (documentType === '施工组织设计' || autoSpecGates.length > 0) {
     for (const name of applyKeywordRules('招标 施工 工程 清单 图纸 质量 工期 安全 文明 材料 重点 难点', FACT_RULES)) facts.add(name);
+    for (const name of autoSpecGates.flatMap(gate => gate.requiredFacts)) facts.add(name);
   }
   return [...facts].filter(Boolean);
 }
@@ -51,10 +127,17 @@ export interface AutoDocumentSpecResult {
   managedBy: 'system';
 }
 
-export function getOrCreateAutoDocumentSpec(template: DocumentTemplate): AutoDocumentSpecResult {
-  const sourceHash = hashTemplate(template);
+export function getOrCreateAutoDocumentSpec(template: DocumentTemplate, requirement = ''): AutoDocumentSpecResult {
+  const sourceHash = hashTemplate(template, requirement);
   const documentType = inferDocumentType(template);
   const factNames = inferFactNames(template, documentType);
+  const requiredChapters = requirementChapters(requirement);
+  const requiredTexts = requirementRequiredTexts(requirement);
+  const forbiddenTexts = requirementForbiddenTexts(requirement);
+  const pageTarget = requirementPageTarget(requirement);
+  const autoSpecGates = configuredAutoSpecGates(template, documentType);
+  const configuredMinTables = Math.max(0, ...autoSpecGates.map(gate => gate.minTables || 0));
+  const minTables = Math.max(requirementTableMin(requirement) || 0, configuredMinTables) || undefined;
   const chapterRules = template.chapters.map((chapter, index) => {
     const chapterText = [chapter.title, chapter.purpose, ...(chapter.sections || []), ...(chapter.requiredFacts || []), ...(chapter.queries || [])].join('\n');
     const chapterFactNames = new Set(chapter.requiredFacts || []);
@@ -72,36 +155,60 @@ export function getOrCreateAutoDocumentSpec(template: DocumentTemplate): AutoDoc
       generationHint: [chapter.purpose, chapter.sections?.length ? `必须包含小节：${chapter.sections.join('、')}` : '', chapterFactNames.size ? `重点覆盖事实：${[...chapterFactNames].join('、')}` : ''].filter(Boolean).join('\n'),
     };
   });
+  const userChapterRules = requiredChapters
+    .filter(title => !chapterRules.some(rule => rule.title.includes(title) || title.includes(rule.title)))
+    .map((title, index) => ({
+      id: `user-chapter-${factId(title)}`,
+      title,
+      required: true,
+      order: chapterRules.length + index,
+      minWords: 600,
+      requiredFactIds: [],
+      requiredFileRoleIds: [],
+      requiredPromptRoleIds: [],
+      generationHint: `用户明确要求包含该章节：${title}`,
+    }));
+  const gateRules = [
+    { id: 'auto-source-required', name: '事实必须有来源', type: 'source_required', level: 'warning' as const, evaluator: { subject: 'source' as const, operator: 'all_have_source' as const } },
+    { id: 'auto-min-source', name: '至少使用项目资料来源', type: 'source_required', level: 'warning' as const, evaluator: { subject: 'source' as const, operator: 'min_count' as const, min: 2 } },
+    { id: 'auto-no-debug-text', name: '不得输出后台流程话术', type: 'forbidden_text', level: 'error' as const, value: '知识库证据', evaluator: { subject: 'document' as const, operator: 'not_contains' as const, value: '知识库证据' } },
+    ...autoSpecGates.flatMap(gate => gate.requiredTexts.map(text => ({ id: `configured-required-${factId(text)}`, name: `配置要求必须包含：${text}`, type: 'configured_required_text', level: 'error' as const, value: text, evaluator: { subject: 'document' as const, operator: 'contains' as const, value: text } }))),
+    ...autoSpecGates.flatMap(gate => gate.forbiddenTexts.map(text => ({ id: `configured-forbidden-${factId(text)}`, name: `配置要求不得包含：${text}`, type: 'configured_forbidden_text', level: 'error' as const, value: text, evaluator: { subject: 'document' as const, operator: 'not_contains' as const, value: text } }))),
+    ...(configuredMinTables ? [{ id: 'configured-min-table-count', name: `配置要求正式表格不少于 ${configuredMinTables} 个`, type: 'configured_table_density', level: 'error' as const, evaluator: { subject: 'table' as const, operator: 'min_count' as const, min: configuredMinTables } }] : []),
+    ...requiredChapters.map(title => ({ id: `user-required-chapter-${factId(title)}`, name: `用户要求章节：${title}`, type: 'user_required_chapter', level: 'error' as const, target: title, evaluator: { subject: 'chapter' as const, operator: 'exists' as const, target: title } })),
+    ...requiredTexts.map(text => ({ id: `user-required-text-${factId(text)}`, name: `用户要求必须包含：${text}`, type: 'user_required_text', level: 'error' as const, value: text, evaluator: { subject: 'document' as const, operator: 'contains' as const, value: text } })),
+    ...forbiddenTexts.map(text => ({ id: `user-forbidden-text-${factId(text)}`, name: `用户要求不得包含：${text}`, type: 'user_forbidden_text', level: 'error' as const, value: text, evaluator: { subject: 'document' as const, operator: 'not_contains' as const, value: text } })),
+    ...(minTables ? [{ id: 'user-min-table-count', name: `用户要求表格数量不少于 ${minTables}`, type: 'user_format_table', level: 'error' as const, evaluator: { subject: 'table' as const, operator: 'min_count' as const, min: minTables } }] : []),
+    ...(pageTarget?.min ? [{ id: 'user-min-page-count', name: `用户要求页数不少于 ${pageTarget.min}`, type: 'user_page_target', level: 'error' as const, evaluator: { subject: 'page' as const, operator: 'min_count' as const, min: pageTarget.min } }] : []),
+    ...(pageTarget?.max ? [{ id: 'user-max-page-count', name: `用户要求页数不超过 ${pageTarget.max}`, type: 'user_page_target', level: 'warning' as const, evaluator: { subject: 'page' as const, operator: 'max_count' as const, min: pageTarget.max } }] : []),
+  ];
+  const finalChapterRules = [...chapterRules, ...userChapterRules];
   return {
     sourceHash,
     managedBy: 'system',
     spec: {
       id: `auto-${template.id}-${sourceHash}`.replace(/[^a-zA-Z0-9_-]/gu, '-').slice(0, 80),
       name: `后台自动规范 - ${template.name}`,
-      description: `${documentType}后台自动规范，由模板、提示词和角色绑定静默生成。`,
+      description: `${documentType}后台自动规范，由模板、提示词、角色绑定和用户临时要求静默生成。`,
       factFields: factNames.map(name => ({
         id: factId(name),
         name,
         type: 'auto' as const,
-        required: !/材料|品牌|重点|难点|约束/iu.test(name),
+        required: autoSpecGates.some(gate => gate.requiredFacts.includes(name)) || !/材料|品牌|重点|难点|约束/iu.test(name),
         extractionHint: `从项目资料摘要、角色绑定证据和知识库证据中抽取“${name}”。`,
         validationHint: `生成内容涉及“${name}”时必须与项目资料一致，不得引入其他项目事实。`,
       })),
-      chapterMode: chapterRules.length > 0 ? 'fixed' : 'dynamic',
-      chapterRules,
+      chapterMode: finalChapterRules.length > 0 ? 'fixed' : 'dynamic',
+      chapterRules: finalChapterRules,
       dynamicChapterRule: {
         source: 'ai_plan',
-        minChapters: Math.max(1, template.chapters.length || 1),
-        maxChapters: Math.max(8, template.chapters.length || 8),
+        minChapters: Math.max(1, finalChapterRules.length || 1),
+        maxChapters: Math.max(8, finalChapterRules.length || 8),
         titleStrategy: 'template',
         minWordsPerChapter: 900,
         generationHint: `按${documentType}正式文件要求，根据项目资料摘要和模板提示词自动规划章节。`,
       },
-      gateRules: [
-        { id: 'auto-source-required', name: '事实必须有来源', type: 'source_required', level: 'warning', evaluator: { subject: 'source', operator: 'all_have_source' } },
-        { id: 'auto-min-source', name: '至少使用项目资料来源', type: 'source_required', level: 'warning', evaluator: { subject: 'source', operator: 'min_count', min: 2 } },
-        { id: 'auto-no-debug-text', name: '不得输出后台流程话术', type: 'forbidden_text', level: 'error', value: '知识库证据', evaluator: { subject: 'document', operator: 'not_contains', value: '知识库证据' } },
-      ],
+      gateRules,
       builtIn: true,
     },
   };

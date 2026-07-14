@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, ReloadOutlined, CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined } from '@ant-design/icons';
-import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentDraftChapter, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig } from '@/lib/api';
+import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, searchKbFiles, updateGeneratedDocument, validateDocumentTemplate, type DocumentDraftChapter, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const { TextArea } = Input;
@@ -41,6 +41,21 @@ function templateIcon(category: string, isActive: boolean) {
   return <span style={{ color: isActive ? 'var(--colorAccent)' : 'var(--colorTextSecondary)', fontSize: 16, marginTop: 2, flexShrink: 0 }}>{icon}</span>;
 }
 
+type TemplateFileBinding = NonNullable<DocumentTemplate['fileBindings']>[number];
+type TemplateEditorForm = DocumentTemplate & { fileBindingGroups?: Record<string, string[]> };
+
+function uniqueValues(values: string[]) {
+  return [...new Set(values.map(value => value.trim()).filter(Boolean))];
+}
+
+function groupFileBindings(bindings: TemplateFileBinding[] = []) {
+  return bindings.reduce<Record<string, string[]>>((groups, binding) => {
+    if (!binding.roleId || !binding.filePath) return groups;
+    groups[binding.roleId] = uniqueValues([...(groups[binding.roleId] || []), binding.filePath]);
+    return groups;
+  }, {});
+}
+
 const STAGE_TITLES: Record<string, string> = {
   role_binding: '角色配置绑定', context_recall: '上下文召回', knowledge_retrieval: '知识库检索', file_understanding: '多模态文件理解',
   fact_extraction: 'LLM 事实抽取', chapter_generation: 'LLM 章节生成', asset_generation: '多模态资源生成',
@@ -51,13 +66,15 @@ const STAGE_TITLES: Record<string, string> = {
 export default function DocumentsPage() {
   const t = useAppTranslations();
   const { message } = App.useApp();
-  const [form] = Form.useForm<DocumentTemplate>();
+  const [form] = Form.useForm<TemplateEditorForm>();
   const editorRef = useRef<HTMLDivElement>(null);
 
   const [templates, setTemplates] = useState<DocumentTemplate[]>([]);
   const [templateId, setTemplateId] = useState('construction-organization-design');
   const [roles, setRoles] = useState<DocumentRole[]>([]);
   const [roleConfigs, setRoleConfigs] = useState<ProjectRoleConfig[]>([]);
+  const [kbFiles, setKbFiles] = useState<KbFileItem[]>([]);
+  const [fileSearching, setFileSearching] = useState(false);
   const [pageLoading, setPageLoading] = useState(true);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState<GeneratedDocumentDraft | null>(null);
@@ -68,6 +85,16 @@ export default function DocumentsPage() {
   const [regeneratingChapter, setRegeneratingChapter] = useState<string | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [templateValidations, setTemplateValidations] = useState<Record<string, DocumentTemplateValidation>>({});
+  const fileRoleOptions = roles.filter(role => role.type === 'file').map(role => ({ label: role.name, value: role.id }));
+  const selectedGroups = (form.getFieldValue('fileBindingGroups') || {}) as Record<string, string[]>;
+  const selectedFilePaths = uniqueValues(Object.values(selectedGroups).flat());
+  const kbFileOptions = uniqueValues([...selectedFilePaths, ...kbFiles.map(file => file.relativePath)]).map(path => {
+    const file = kbFiles.find(item => item.relativePath === path);
+    return {
+      label: <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{path}</span>{file && <Tag style={{ margin: 0 }}>{file.status}</Tag>}</div>,
+      value: path,
+    };
+  });
   const [flowSteps, setFlowSteps] = useState<FlowStep[]>([]);
   const [activeFlowKey, setActiveFlowKey] = useState<string | null>(null);
   const [leftTab, setLeftTab] = useState<string>('templates');
@@ -290,16 +317,32 @@ export default function DocumentsPage() {
   }, [activeFlowKey, loading]);
   const finishPrev = (key: string) => { setFlowSteps(prev => { const idx = prev.findIndex(s => s.key === key); const n = prev.map((s, i) => i < idx && s.status !== 'error' ? { ...s, status: 'finish' as const, subSteps: updSubs(s, 'finish') } : s); setSnap(n, key); return n; }); };
 
+  const searchTemplateFiles = async (query: string) => {
+    setFileSearching(true);
+    try {
+      const result = await searchKbFiles({ query, limit: 120, includeContent: Boolean(query.trim()) });
+      setKbFiles(result.files);
+    } catch {
+      message.error('知识库文件检索失败');
+    } finally {
+      setFileSearching(false);
+    }
+  };
+
   const openEditor = (tpl?: DocumentTemplate) => {
-    const value = tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, chapters: [] };
+    const value = tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, chapters: [], fileBindings: [] };
     form.resetFields();
-    form.setFieldsValue(value);
+    form.setFieldsValue({ ...value, fileBindingGroups: groupFileBindings(value.fileBindings) });
+    void searchTemplateFiles('');
     setTemplateModalOpen(true);
   };
   const saveTpl = async () => {
     try {
       const v = await form.validateFields();
-      const template = { ...v, chapters: [] } as DocumentTemplate;
+      const groupValues = (v as TemplateEditorForm).fileBindingGroups || {};
+      const fileBindings = Object.entries(groupValues).flatMap(([roleId, paths]) => uniqueValues(paths || []).map(filePath => ({ roleId, filePath })));
+      const { fileBindingGroups: _fileBindingGroups, ...templateValues } = v as TemplateEditorForm;
+      const template = { ...templateValues, chapters: [], fileBindings } as DocumentTemplate;
       const r = await saveDocumentTemplate(template);
       setTemplates(r.templates); setTemplateId(r.template.id); setTemplateModalOpen(false); await loadDrafts(); message.success(t('common.success'));
     } catch (e) { if (e instanceof Error) message.error(e.message); }
@@ -699,6 +742,20 @@ export default function DocumentsPage() {
           <Form.Item name="projectRoleConfigId" label={t('documents.projectRoleConfig')} rules={[{ required: true, message: t('documents.projectRoleConfigRequired') }]}>
             <Select showSearch placeholder={t('documents.projectRoleConfigRequired')} options={roleConfigOptions} />
           </Form.Item>
+          <div style={{ marginBottom: 16 }}>
+            <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 8 }}>
+              <Text strong>项目文件绑定</Text>
+              <Tag color="blue">按文件角色多选</Tag>
+            </Space>
+            <Alert type="info" showIcon style={{ marginBottom: 12 }} message="每个文件角色下多选对应的知识库文件。用户换项目时，只需要在这里重新选择对应项目资料。" />
+            {fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可用文件角色" /> : fileRoleOptions.map(option => (
+              <Card key={option.value} size="small" style={{ marginBottom: 12 }} title={<Space><Text>{option.label}</Text><Tag>{option.value}</Tag></Space>}>
+                <Form.Item name={['fileBindingGroups', option.value]}>
+                  <Select mode="multiple" showSearch filterOption={false} loading={fileSearching} onSearch={value => { void searchTemplateFiles(value); }} onFocus={() => { void searchTemplateFiles(''); }} placeholder="输入关键词搜索知识库文件" options={kbFileOptions} optionLabelProp="value" />
+                </Form.Item>
+              </Card>
+            ))}
+          </div>
           <Alert type="info" showIcon message="文档规范由后台根据模板、提示词和角色绑定自动生成，无需手动维护规范包。" />
         </Form>
       </Drawer>
