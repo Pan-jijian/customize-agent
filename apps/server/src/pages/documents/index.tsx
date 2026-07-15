@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Tooltip, Typography } from 'antd';
-import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, ReloadOutlined, CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined } from '@ant-design/icons';
-import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, searchKbFiles, updateGeneratedDocument, validateDocumentTemplate, type DocumentDraftChapter, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig } from '@/lib/api';
+import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Typography } from 'antd';
+import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, ReloadOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined } from '@ant-design/icons';
+import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getPromptProjects, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, searchKbFiles, updateGeneratedDocument, validateDocumentTemplate, type DocumentDraftChapter, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig, type PromptProject } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const { TextArea } = Input;
-const { Paragraph, Text } = Typography;
+const { Text } = Typography;
 
 type FlowStepStatus = 'wait' | 'process' | 'finish' | 'warning' | 'error';
 interface FlowSubStep { key: string; title: string; status: FlowStepStatus; }
@@ -47,6 +47,9 @@ type TemplateEditorForm = DocumentTemplate & { fileBindingGroups?: Record<string
 function uniqueValues(values: string[]) {
   return [...new Set(values.map(value => value.trim()).filter(Boolean))];
 }
+function fileDisplayName(value?: string) {
+  return value ? value.split(/[\\/]/u).pop() || value : '';
+}
 
 function groupFileBindings(bindings: TemplateFileBinding[] = []) {
   return bindings.reduce<Record<string, string[]>>((groups, binding) => {
@@ -62,6 +65,10 @@ const STAGE_TITLES: Record<string, string> = {
   validation: '规则校验', formatting: '格式化排版', llm_review: 'LLM 审查优化',
   export_ready: '导出就绪', reference: '参考资源处理',
 };
+const STAGE_ROLE_NAMES: Record<string, string> = {
+  'knowledge-base': '知识库', 'document-readiness': '生成准备度检查', 'quality-repair': '质量补写', 'export-gate': '导出门禁',
+  'context-memory': '项目上下文', 'final-format': '正式排版', 'multimodal-files': '多模态文件理解', 'tender_announcement': '招标公告',
+};
 
 export default function DocumentsPage() {
   const t = useAppTranslations();
@@ -73,6 +80,7 @@ export default function DocumentsPage() {
   const [templateId, setTemplateId] = useState('construction-organization-design');
   const [roles, setRoles] = useState<DocumentRole[]>([]);
   const [roleConfigs, setRoleConfigs] = useState<ProjectRoleConfig[]>([]);
+  const [prompts, setPrompts] = useState<PromptProject[]>([]);
   const [kbFiles, setKbFiles] = useState<KbFileItem[]>([]);
   const [fileSearching, setFileSearching] = useState(false);
   const [pageLoading, setPageLoading] = useState(true);
@@ -91,7 +99,7 @@ export default function DocumentsPage() {
   const kbFileOptions = uniqueValues([...selectedFilePaths, ...kbFiles.map(file => file.relativePath)]).map(path => {
     const file = kbFiles.find(item => item.relativePath === path);
     return {
-      label: <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{path}</span>{file && <Tag style={{ margin: 0 }}>{file.status}</Tag>}</div>,
+      label: <div title={path} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fileDisplayName(path)}</span>{file && <Tag style={{ margin: 0 }}>{file.status}</Tag>}</div>,
       value: path,
     };
   });
@@ -124,6 +132,7 @@ export default function DocumentsPage() {
     Promise.all([
       getDocumentTemplates().then(d => { setTemplates(d.templates); setTemplateId(d.templates[0]?.id ?? 'construction-organization-design'); }),
       getDocumentRoles().then(d => { setRoles(d.roles); setRoleConfigs(d.configs); }),
+      getPromptProjects().then(items => setPrompts(items)),
       loadDrafts(),
     ]).catch(() => message.error(t('common.error'))).finally(() => setPageLoading(false));
   }, [message, t]);
@@ -154,6 +163,11 @@ export default function DocumentsPage() {
   const currentTemplate = useMemo(() => templates.find(t => t.id === templateId), [templates, templateId]);
   const roleConfigOptions = roleConfigs.map(c => ({ label: c.name, value: c.id }));
   const activeFlowIndex = Math.max(0, flowSteps.findIndex(s => s.key === activeFlowKey));
+  const roleDisplayName = (roleId?: string) => roleId ? roles.find(role => role.id === roleId)?.name || STAGE_ROLE_NAMES[roleId] || '未知角色' : '';
+  const promptDisplayName = (promptId?: string) => promptId ? prompts.find(prompt => prompt.id === promptId)?.projectName || roles.find(role => role.id === promptId)?.name || STAGE_ROLE_NAMES[promptId] || '未知提示词' : '';
+  const stageActorName = (stage: GeneratedDocumentDraft['executionStages'][number]) => stage.subtitle || stage.roleName || roleDisplayName(stage.roleId) || STAGE_TITLES[stage.type] || stage.type;
+  const stagePromptName = (stage: GeneratedDocumentDraft['executionStages'][number]) => stage.promptName || promptDisplayName(stage.promptId);
+  const templateFileTagRender = (props: { label: ReactNode; value: string; closable: boolean; onClose: () => void }) => <Tag closable={props.closable} onClose={props.onClose} color="blue" title={props.value} style={{ margin: '1px 2px', fontSize: 11, lineHeight: '18px', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{fileDisplayName(props.value)}</Tag>;
 
   const openDrawerForWorkflow = (id: string) => {
     setTemplateId(id); setCurrentDocumentId(null); setDraft(null); setContent('');
@@ -183,31 +197,6 @@ export default function DocumentsPage() {
       setDraft(document.draft || null); setContent(document.editedMarkdown || document.markdown);
     } catch { message.error(t('common.error')); }
     setDrawerOpen(true);
-  };
-
-  const subSteps = (items: string[]): FlowSubStep[] => items.map((t, i) => ({ key: `sub-${i}`, title: t, status: 'wait' as FlowStepStatus }));
-  const createInitialFlowSteps = (tpl = currentTemplate): FlowStep[] => {
-    const cfg = roleConfigs.find(c => c.id === tpl?.projectRoleConfigId);
-    const fns = (cfg?.fileRoles || []).map(r => roles.find(x => x.id === r.roleId)?.name || r.roleId);
-    const pns = (cfg?.promptRoles || []).map(r => roles.find(x => x.id === r.roleId)?.name || r.roleId);
-    const facts = tpl?.chapters.flatMap(c => c.requiredFacts) || [];
-    const chs = tpl?.chapters.map(c => c.title) || [];
-    const hasAsset = pns.some(n => /封面|图片|资源|cover|image/iu.test(n));
-    return [
-      { key: 'prepare', title: t('documents.flowPrepare'), description: `读取"${tpl?.name || '当前模板'}"并创建后台生成任务`, status: 'process', icon: <FileTextOutlined />, subSteps: subSteps(['读取模板参数', '后台自动生成文档规范', '创建后台生成任务']) },
-      { key: 'role_binding', title: '动态角色配置绑定', description: `绑定 ${fns.length} 个文件角色、${pns.length} 个提示词角色`, status: 'wait', icon: <ApartmentOutlined />, subSteps: subSteps([...(fns.length ? fns.map(n => `文件角色：${n}`) : ['没有文件角色，使用模板绑定文件']), ...(pns.length ? pns.map(n => `提示词角色：${n}`) : ['没有提示词角色，使用默认生成策略'])].slice(0, 10)) },
-      { key: 'context_recall', title: '短期/长期上下文召回', description: '从项目记忆中召回用户偏好、历史纠偏和已生成文档摘要，并注入生成提示词', status: 'wait', icon: <BulbOutlined />, subSteps: subSteps(['召回相关项目记忆', '注入章节生成提示词', '生成完成后沉淀新记忆']) },
-      { key: 'knowledge_retrieval', title: '知识库证据检索', description: `按 ${chs.length || '动态'} 个模板章节检索文本、文档、表格、图片、图纸和附件`, status: 'wait', icon: <DatabaseOutlined />, subSteps: subSteps(chs.length ? chs.slice(0, 10).map(n => `检索章节：${n}`) : ['按后台自动规范检索证据']) },
-      { key: 'file_understanding', title: '多类型文件理解', description: '按文件角色处理文本、PDF/Word、表格、图片、图纸和附件', status: 'wait', icon: <EyeOutlined />, subSteps: subSteps(['识别文件类型和角色', '构建结构化资源证据包', '必要时调用多模态文件理解']) },
-      { key: 'fact_extraction', title: '动态 schema 事实抽取', description: `按 ${facts.length} 个规范/章节事实字段抽取并检测冲突`, status: 'wait', icon: <BulbOutlined />, subSteps: subSteps(facts.length ? facts.slice(0, 10).map(n => `抽取事实：${n}`) : ['抽取模板要求的事实', '合并来源和角色', '检测事实冲突']) },
-      { key: 'chapter_generation', title: '章节生成', description: chs.length ? `按 ${chs.length} 个模板章节逐章生成` : '按后台自动规范生成', status: 'wait', icon: <FormOutlined />, subSteps: subSteps(chs.length ? chs.slice(0, 10).map(n => `生成：${n}`) : ['构造动态章节提示词', '等待 LLM 生成', '整理章节证据']) },
-      ...(hasAsset ? [{ key: 'asset_generation' as const, title: '生成资源处理', description: '根据资源/图片提示词生成或登记本地资源', status: 'wait' as const, icon: <PictureOutlined />, subSteps: subSteps(['生成资源提示词', '保存到 generatedDocuments/assets', '登记资源元数据']) }] : []),
-      { key: 'validation', title: '后台规范与门禁校验', description: '执行后台自动规范、资料满足率和导出门禁校验', status: 'wait', icon: <SafetyCertificateOutlined />, subSteps: subSteps(['检查项目资料摘要', '检查模板角色满足率', '检查章节证据', '检查导出门禁']) },
-      { key: 'formatting', title: t('documents.flowFormatting'), description: '整理标题、表格、图片、附件引用和正式 Markdown', status: 'wait', icon: <CheckCircleOutlined />, subSteps: subSteps(['整理标题层级', '整理多类型资源引用', '生成正式 Markdown']) },
-      { key: 'llm_review', title: 'LLM 审查优化', description: '再次使用动态 schema、角色和结构化证据审查优化初稿', status: 'wait', icon: <ThunderboltOutlined />, subSteps: subSteps(['构造审查提示词', '检查事实来源和冲突', '回填优化后的 Markdown']) },
-      { key: 'export_ready', title: '导出就绪', description: '确认 Markdown/HTML/DOCX/PDF 可导出', status: 'wait', icon: <FileDoneOutlined />, subSteps: subSteps(['生成导出检查清单', '确认阻断项', '准备导出格式']) },
-      { key: 'done', title: t('documents.flowDone'), description: t('documents.flowDoneDesc'), status: 'wait', icon: <DownloadOutlined />, subSteps: subSteps(['展示生成结果', '允许编辑正文', '允许导出文件']) },
-    ];
   };
 
   const fmtDuration = (item: GeneratedDocumentRecord) => {
@@ -265,28 +254,25 @@ export default function DocumentsPage() {
     return <FileTextOutlined />;
   };
   const buildFlowStepsFromRecord = (record: GeneratedDocumentRecord): { steps: FlowStep[]; activeKey: string | null } => {
-    const tpl = templates.find(x => x.id === record.templateId) || currentTemplate;
     const stages = record.executionStages || record.draft?.executionStages || [];
     if (stages.length > 0) {
       const steps = stages.map((stage, index) => {
         const status = stageToFlowStatus(stage.status);
         return {
           key: `${stage.type}-${index}`,
-          title: stage.title || stage.type,
-          subtitle: stage.subtitle || stage.roleName || stage.roleId,
+          title: stage.title || STAGE_TITLES[stage.type] || stage.type,
+          subtitle: stageActorName(stage),
           description: stage.message || '',
           status,
           icon: stageIcon(stage.type),
-          subSteps: [{ key: `stage-${index}`, title: stage.promptName ? `提示词：${stage.promptName}` : stage.promptId ? `提示词：${stage.promptId}` : stage.roleId, status }],
+          subSteps: [{ key: `stage-${index}`, title: stagePromptName(stage) ? `提示词：${stagePromptName(stage)}` : stageActorName(stage), status }],
         } satisfies FlowStep;
       });
       if (record.status === 'generating' && steps.length > 0 && steps.at(-1)?.status === 'finish') steps[steps.length - 1] = { ...steps[steps.length - 1], status: 'process' as const };
       const activeKey = record.status === 'generating' ? steps.at(-1)?.key || 'prepare' : record.status === 'failed' ? steps.find(step => step.status === 'error')?.key || steps.at(-1)?.key || 'prepare' : 'done';
       return { steps, activeKey };
     }
-    const framework = createInitialFlowSteps(tpl);
-    const steps = framework.map(step => step.key === 'prepare' ? { ...step, status: record.status === 'generating' ? 'process' as const : 'finish' as const, subSteps: updSubs(step, record.status === 'generating' ? 'process' : 'finish') } : step);
-    return { steps, activeKey: record.status === 'generating' ? 'prepare' : 'done' };
+    return { steps: [], activeKey: null };
   };
   const applyGeneratedRecordToWorkflow = (record: GeneratedDocumentRecord) => {
     const { steps, activeKey } = buildFlowStepsFromRecord(record);
@@ -301,7 +287,7 @@ export default function DocumentsPage() {
     recoveryPollRef.current = setInterval(() => {
       void (async () => {
         try {
-          const { document } = await getGeneratedDocument(documentId);
+          const { document } = await getGeneratedDocument(documentId, true);
           applyGeneratedRecordToWorkflow(document);
           await loadDrafts();
           if (!isDraftGenerating(document.status)) {
@@ -377,7 +363,7 @@ export default function DocumentsPage() {
 
   const waitForDoc = async (docId: string) => {
     for (;;) {
-      const { document } = await getGeneratedDocument(docId);
+      const { document } = await getGeneratedDocument(docId, true);
       applyGeneratedRecordToWorkflow(document);
       if ((document.status === 'completed' || document.status === 'warning') && document.draft) return document;
       if (document.status === 'failed') throw new Error(document.error || '生成失败');
@@ -389,11 +375,9 @@ export default function DocumentsPage() {
     if (!templateId) return;
     if (activeGenerationTask?.loading) { setFlowSteps(activeGenerationTask.flowSteps); setActiveFlowKey(activeGenerationTask.activeFlowKey); setLoading(true); return; }
     setLoading(true);
-    const tpl = templates.find(x => x.id === templateId) || currentTemplate;
-    const initial = createInitialFlowSteps(tpl).slice(0, 1);
     const promise = generateDocumentDraft({ templateId });
-    activeGenerationTask = { id: Date.now(), templateId, loading: true, flowSteps: initial, activeFlowKey: 'prepare', promise, listeners: new Set() };
-    setFlowSteps(initial); setActiveFlowKey('prepare');
+    activeGenerationTask = { id: Date.now(), templateId, loading: true, flowSteps: [], activeFlowKey: null, promise, listeners: new Set() };
+    setFlowSteps([]); setActiveFlowKey(null);
     const timers: number[] = [];
     try {
       const started = await promise;
@@ -525,7 +509,7 @@ export default function DocumentsPage() {
       >
         {leftTab === 'templates' ? (
           templates.length === 0 ? <Empty description={t('common.noData')} /> : (
-            <List dataSource={templates} renderItem={(item, index) => (
+            <List dataSource={templates} renderItem={(item) => (
               <List.Item style={{ cursor: 'pointer', padding: '10px 0' }}
                 actions={[
                   <Button key="cfg" size="small" icon={<SettingOutlined />} onClick={(e) => { e.stopPropagation(); openEditor(item); }}>配置</Button>,
@@ -696,7 +680,7 @@ export default function DocumentsPage() {
                     children: <List size="small" dataSource={draft.executionStages} renderItem={s => (
                       <List.Item>
                         <List.Item.Meta avatar={STAGE_ICONS[s.type] || <FileTextOutlined />}
-                          title={<Text style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{`${STAGE_TITLES[s.type] || s.type} · ${s.roleId}`}</Text>}
+                          title={<Text title={s.roleId} style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{`${STAGE_TITLES[s.type] || s.type} · ${s.roleName || roleDisplayName(s.roleId)}`}</Text>}
                           description={<Text type="secondary" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{s.message}</Text>} />
                         <Tag color={s.status === 'success' ? 'success' : s.status === 'failed' ? 'error' : s.status === 'skipped' ? 'default' : 'warning'}>{s.status}</Tag>
                       </List.Item>
@@ -740,9 +724,9 @@ export default function DocumentsPage() {
             </Space>
             <Alert type="info" showIcon style={{ marginBottom: 12 }} message="每个文件角色下多选对应的知识库文件。用户换项目时，只需要在这里重新选择对应项目资料。" />
             {fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可用文件角色" /> : fileRoleOptions.map(option => (
-              <Card key={option.value} size="small" style={{ marginBottom: 12 }} title={<Space><Text>{option.label}</Text><Tag>{option.value}</Tag></Space>}>
+              <Card key={option.value} size="small" style={{ marginBottom: 12 }} title={<Space><Text>{option.label}</Text></Space>}>
                 <Form.Item name={['fileBindingGroups', option.value]}>
-                  <Select mode="multiple" showSearch filterOption={false} loading={fileSearching} onSearch={value => { void searchTemplateFiles(value); }} onFocus={() => { void searchTemplateFiles(''); }} placeholder="输入关键词搜索知识库文件" options={kbFileOptions} optionLabelProp="value" />
+                  <Select mode="multiple" showSearch filterOption={false} loading={fileSearching} onSearch={value => { void searchTemplateFiles(value); }} onFocus={() => { void searchTemplateFiles(''); }} tagRender={templateFileTagRender} placeholder="输入关键词搜索知识库文件" options={kbFileOptions} />
                 </Form.Item>
               </Card>
             ))}

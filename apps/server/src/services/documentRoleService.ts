@@ -85,8 +85,8 @@ function sanitizeRole(role: DocumentRole): DocumentRole {
     description: role.description || '',
     type,
     builtIn: Boolean(role.builtIn),
-    resourceId: role.resourceId || role.resourceIds?.[0] || undefined,
-    resourceIds: uniqueStrings(Array.isArray(role.resourceIds) && role.resourceIds.length > 0 ? role.resourceIds : role.resourceId ? [role.resourceId] : []),
+    resourceId: type === 'prompt' ? role.resourceId || role.resourceIds?.[0] || undefined : undefined,
+    resourceIds: type === 'prompt' ? uniqueStrings(Array.isArray(role.resourceIds) && role.resourceIds.length > 0 ? role.resourceIds : role.resourceId ? [role.resourceId] : []) : [],
     executionType: type === 'prompt' ? sanitizeExecutionType(role.executionType) : undefined,
     processingType: type === 'file' ? sanitizeProcessingType(role.processingType) : undefined,
   };

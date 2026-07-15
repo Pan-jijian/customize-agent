@@ -6,7 +6,7 @@ import {
   SearchOutlined, EyeOutlined, CheckCircleOutlined, AlignLeftOutlined,
   DownOutlined, UpOutlined, ImportOutlined, ExportOutlined,
 } from '@ant-design/icons';
-import { deleteDocumentRole, deleteProjectRoleConfig, getDocumentRoles, getPromptProjects, saveDocumentRole, saveProjectRoleConfig, searchKbFiles, type DocumentRole, type ProjectRoleConfig, type KbFileItem, type PromptProject } from '@/lib/api';
+import { deleteDocumentRole, deleteProjectRoleConfig, getDocumentRoles, getPromptProjects, saveDocumentRole, saveProjectRoleConfig, type DocumentRole, type ProjectRoleConfig, type PromptProject } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const { Paragraph } = Typography;
@@ -23,10 +23,6 @@ const FILE_TYPE_COLORS: Record<string, string> = { rule: '#fa8c16', project_fact
 const PROMPT_TYPE_COLORS: Record<string, string> = { fact_extraction: '#fa8c16', chapter_generation: '#1677ff', llm_review: '#722ed1', validation: '#52c41a', formatting: '#eb2f96', reference: '#13c2c2' };
 const FILE_TYPE_LABELS: Record<string, string> = { rule: 'roles.ruleFile', project_fact: 'roles.projectFactFile', table: 'roles.tableFile', drawing: 'roles.drawingFile', specification: 'roles.specificationFile', reference: 'roles.reference' };
 const PROMPT_TYPE_LABELS: Record<string, string> = { fact_extraction: 'roles.factExtraction', chapter_generation: 'roles.chapterGeneration', llm_review: 'roles.llmReview', validation: 'roles.validation', formatting: 'roles.formatting', reference: 'roles.reference' };
-
-const tagRender = (props: { label: ReactNode; value: string; closable: boolean; onClose: () => void }) => (
-  <Tag closable={props.closable} onClose={props.onClose} color="blue" style={{ margin: '1px 2px', fontSize: 11, lineHeight: '18px' }}>{props.label}</Tag>
-);
 
 /** 获取角色类型的国际化标签文本 */
 function roleTypeLabel(role: DocumentRole, t: (key: string) => string) {
@@ -66,8 +62,6 @@ export default function DocumentRolesPage() {
   const [configForm] = Form.useForm<ProjectRoleConfig>();
   const [roles, setRoles] = useState<DocumentRole[]>([]);
   const [configs, setConfigs] = useState<ProjectRoleConfig[]>([]);
-  const [kbFiles, setKbFiles] = useState<KbFileItem[]>([]);
-  const [fileSearching, setFileSearching] = useState(false);
   const [prompts, setPrompts] = useState<PromptProject[]>([]);
   const [roleDrawerOpen, setRoleDrawerOpen] = useState(false);
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
@@ -78,8 +72,8 @@ export default function DocumentRolesPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = async () => {
-    const [roleData, fileData, promptData] = await Promise.all([getDocumentRoles(), searchKbFiles({ limit: 200, includeContent: false }), getPromptProjects()]);
-    setRoles(roleData.roles); setConfigs(roleData.configs); setKbFiles(fileData.files); setPrompts(promptData);
+    const [roleData, promptData] = await Promise.all([getDocumentRoles(), getPromptProjects()]);
+    setRoles(roleData.roles); setConfigs(roleData.configs); setPrompts(promptData);
   };
   useEffect(() => { void load().catch(() => message.error(t('common.error'))); }, [message, t]);
 
@@ -95,7 +89,7 @@ export default function DocumentRolesPage() {
 
   /** 保存角色信息 */
   const saveRole = async () => {
-    try { const v = await roleForm.validateFields(); const r = await saveDocumentRole(v); setRoles(r.roles); setConfigs(r.configs); setRoleDrawerOpen(false); message.success(t('common.success')); }
+    try { const v = await roleForm.validateFields(); const payload = v.type === 'file' ? { ...v, resourceId: undefined, resourceIds: [] } : v; const r = await saveDocumentRole(payload); setRoles(r.roles); setConfigs(r.configs); setRoleDrawerOpen(false); message.success(t('common.success')); }
     catch { message.error(t('common.error')); }
   };
   /** 保存项目角色配置（规范化排序参数） */
@@ -155,36 +149,49 @@ export default function DocumentRolesPage() {
   };
 
   const getRoleById = (id: string) => roles.find(r => r.id === id);
-  const searchRoleFiles = async (query: string) => {
-    setFileSearching(true);
-    try {
-      const result = await searchKbFiles({ query, limit: 80, includeContent: Boolean(query.trim()) });
-      setKbFiles(result.files);
-    } catch {
-      message.error('知识库文件检索失败');
-    } finally {
-      setFileSearching(false);
-    }
+  const roleResources = (role?: DocumentRole) => role?.type === 'prompt' ? (role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : []) : [];
+  const promptDisplayName = (value: string) => prompts.find(prompt => prompt.id === value)?.projectName || value;
+  const promptTagRender = (props: { label: ReactNode; value: string; closable: boolean; onClose: () => void }) => <Tag closable={props.closable} onClose={props.onClose} color="purple" title={props.value} style={{ margin: '1px 2px', fontSize: 11, lineHeight: '18px' }}>{promptDisplayName(props.value)}</Tag>;
+  const selectedRoleSummary = (items: Array<{ roleId: string; order?: number }>, type: 'file' | 'prompt') => {
+    const color = type === 'file' ? 'blue' : 'purple';
+    const labelMap = type === 'file' ? FILE_TYPE_LABELS : PROMPT_TYPE_LABELS;
+    const selected = [...items]
+      .sort((a, b) => Number(a.order ?? 0) - Number(b.order ?? 0))
+      .map(item => getRoleById(item.roleId))
+      .filter((role): role is DocumentRole => Boolean(role));
+    if (selected.length === 0) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={type === 'file' ? '暂未选择文件角色' : '暂未选择提示词角色'} />;
+    return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {selected.map((role, index) => {
+        const resources = roleResources(role);
+        const typeKey = role.type === 'file' ? role.processingType ?? '' : role.executionType ?? '';
+        return <div key={role.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 8, background: 'var(--colorBgContainer)', border: '1px solid var(--colorBorderSecondary)' }}>
+          <Tag color={color} style={{ margin: 0 }}>#{index + 1}</Tag>
+          <span style={{ fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{role.name}</span>
+          <Tag style={{ margin: 0 }}>{t(labelMap[typeKey] || 'roles.reference')}</Tag>
+          {role.type === 'prompt' && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>绑定 {resources.length} 个提示词</span>}
+        </div>;
+      })}
+    </div>;
   };
-  const fileOptions = kbFiles.map(file => ({
-    label: (
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.relativePath}</span>
-        <Space size={4}>
-          <Tag color={file.matchedBy === 'content' ? 'purple' : file.matchedBy === 'disk' ? 'orange' : 'blue'} style={{ margin: 0 }}>{file.matchedBy === 'content' ? '内容' : file.matchedBy === 'disk' ? '磁盘' : '文件'}</Tag>
-          <Tag style={{ margin: 0 }}>{file.status}</Tag>
-        </Space>
-      </div>
-    ),
-    value: file.relativePath,
-  }));
+  const roleDetail = (role?: DocumentRole) => {
+    if (!role) return null;
+    const resources = roleResources(role);
+    return <div style={{ marginTop: 8, padding: 8, borderRadius: 8, background: 'var(--colorFillQuaternary)', fontSize: 12, color: 'var(--colorTextSecondary)' }}>
+      {role.description && <div style={{ marginBottom: role.type === 'prompt' ? 4 : 0 }}>{role.description}</div>}
+      {role.type === 'prompt' && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {resources.slice(0, 4).map(resource => <Tag key={resource} title={resource} style={{ margin: 0, fontSize: 10, lineHeight: '16px', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis' }}>{promptDisplayName(resource)}</Tag>)}
+        {resources.length > 4 && <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>+{resources.length - 4}</Tag>}
+        {resources.length === 0 && <span>未绑定提示词</span>}
+      </div>}
+    </div>;
+  };
 
   const roleCardGrid = (list: DocumentRole[], tFn: (key: string) => string) => {
     if (list.length === 0) return <Empty description={t('common.noData')} />;
     return (
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))', gap: 12 }}>
-        {list.map((role, index) => {
-          const resources = (role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : []);
+        {list.map((role) => {
+          const resources = role.type === 'prompt' ? (role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : []) : [];
           const display = resources.slice(0, 3);
           const remaining = resources.length - display.length;
           const icon = roleTypeIcon(role);
@@ -203,12 +210,12 @@ export default function DocumentRolesPage() {
               {role.description && <Paragraph ellipsis={{ rows: 2 }} style={{ fontSize: 12, color: 'var(--colorTextSecondary)', marginBottom: 8 }}>{role.description}</Paragraph>}
               <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 <Tag color={role.type === 'file' ? 'blue' : 'purple'} style={{ margin: 0 }}>{roleTypeLabel(role, tFn)}</Tag>
-                {resources.length > 0 && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>绑定 {resources.length} 个资源</span>}
+                {resources.length > 0 && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>绑定 {resources.length} 个提示词</span>}
               </div>
               {display.length > 0 && (
                 <div style={{ marginBottom: 10 }}>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                    {display.map(r => <Tag key={r} color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis' }}>{r}</Tag>)}
+                    {display.map(r => <Tag key={r} color="purple" title={r} style={{ margin: 0, fontSize: 10, lineHeight: '16px', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis' }}>{promptDisplayName(r)}</Tag>)}
                     {remaining > 0 && <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>+{remaining}</Tag>}
                   </div>
                 </div>
@@ -337,7 +344,7 @@ export default function DocumentRolesPage() {
                     ]} />
                   </Form.Item>
                   <Form.Item name="resourceIds" label={t('roles.bindPrompt')} style={{ marginBottom: 0 }} help={<span style={{ fontSize: 11, color: 'var(--colorTextSecondary)' }}>{t('roles.multiBindPromptHelp')}</span>}>
-                    <Select mode="multiple" showSearch tagRender={tagRender} placeholder="选择提示词" options={prompts.filter(x => x.hasFile).map(x => ({ label: x.projectName, value: x.id }))} />
+                    <Select mode="multiple" showSearch tagRender={promptTagRender} placeholder="选择提示词" options={prompts.filter(x => x.hasFile).map(x => ({ label: x.projectName, value: x.id }))} />
                   </Form.Item>
                 </>
               ) : (
@@ -349,9 +356,7 @@ export default function DocumentRolesPage() {
                       { label: t('roles.specificationFile'), value: 'specification' }, { label: t('roles.reference'), value: 'reference' },
                     ]} />
                   </Form.Item>
-                  <Form.Item name="resourceIds" label={t('roles.bindFile')} style={{ marginBottom: 0 }} help={<span style={{ fontSize: 11, color: 'var(--colorTextSecondary)' }}>{t('roles.multiBindFileHelp')}</span>}>
-                    <Select mode="multiple" showSearch filterOption={false} loading={fileSearching} onSearch={value => { void searchRoleFiles(value); }} onFocus={() => { void searchRoleFiles(''); }} tagRender={tagRender} placeholder="输入关键词搜索知识库文件" options={fileOptions} optionLabelProp="value" />
-                  </Form.Item>
+                  <Alert type="info" showIcon message="文件角色只定义处理类型" description="具体项目文件由生成流程自动识别，或在模板的高级固定绑定资料中手动覆盖；这里不再绑定知识库文件，避免角色复用时混入其他项目资料。" />
                 </>
               )}
             </Card>
@@ -375,11 +380,15 @@ export default function DocumentRolesPage() {
           <Col span={12}><Form.Item name="name" label={t('roles.configName')} rules={[{ required: true }]}><Input /></Form.Item></Col>
           <Col span={12}><Form.Item name="description" label={t('roles.configDescription')}><Input /></Form.Item></Col>
         </Row>
-        <Tabs destroyInactiveTabPane={false} items={[
+        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.fileRoles !== cur.fileRoles || prev.promptRoles !== cur.promptRoles}>{({ getFieldValue }) => {
+          const selectedFileRoles = (getFieldValue('fileRoles') || []) as Array<{ roleId: string; order?: number }>;
+          const selectedPromptRoles = (getFieldValue('promptRoles') || []) as Array<{ roleId: string; order?: number }>;
+          return <Tabs destroyInactiveTabPane={false} items={[
           {
-            key: 'file', label: `文件角色 (${fileRoles.length})`,
+            key: 'file', label: `文件角色 (${selectedFileRoles.length}/${allFileRoles.length})`,
             children: <Form.List name="fileRoles">{(fields, { add, remove }) => (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <Card size="small" title="已选文件角色" style={{ background: 'var(--colorFillQuaternary)' }}>{selectedRoleSummary(selectedFileRoles, 'file')}</Card>
                 {fields.length === 0 && <Empty description="暂未添加文件角色" />}
                 {fields.map((field, index) => (
                   <Card key={field.key} size="small" style={{ border: '1px solid var(--colorBorderSecondary)', position: 'relative' }}>
@@ -390,6 +399,7 @@ export default function DocumentRolesPage() {
                         <Form.Item name={[field.name, 'roleId']} label="文件角色" rules={[{ required: true }]} style={{ marginBottom: 0 }}>
                           <Select placeholder="选择文件角色" size="small" options={allFileRoles.map(r => ({ label: `${r.name} (${t(FILE_TYPE_LABELS[r.processingType ?? ''] || 'roles.reference')})`, value: r.id }))} />
                         </Form.Item>
+                        <Form.Item noStyle shouldUpdate>{({ getFieldValue }) => roleDetail(getRoleById(getFieldValue(['fileRoles', field.name, 'roleId'])))}</Form.Item>
                       </Col>
                       <Col style={{ width: 90 }}>
                         <Form.Item name={[field.name, 'order']} label="排序" initialValue={index} style={{ marginBottom: 0 }}>
@@ -404,9 +414,10 @@ export default function DocumentRolesPage() {
             )}</Form.List>
           },
           {
-            key: 'prompt', label: `提示词角色 (${allPromptRoles.length})`,
+            key: 'prompt', label: `提示词角色 (${selectedPromptRoles.length}/${allPromptRoles.length})`,
             children: <Form.List name="promptRoles">{(fields, { add, remove }) => (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <Card size="small" title="已选提示词角色" style={{ background: 'var(--colorFillQuaternary)' }}>{selectedRoleSummary(selectedPromptRoles, 'prompt')}</Card>
                 {fields.length === 0 && <Empty description="暂未添加提示词角色" />}
                 {fields.map((field, index) => (
                   <Card key={field.key} size="small" style={{ border: '1px solid var(--colorBorderSecondary)', position: 'relative' }}>
@@ -417,6 +428,7 @@ export default function DocumentRolesPage() {
                         <Form.Item name={[field.name, 'roleId']} label="提示词角色" rules={[{ required: true }]} style={{ marginBottom: 0 }}>
                           <Select placeholder="选择提示词角色" size="small" options={allPromptRoles.map(r => ({ label: `${r.name} (${t(PROMPT_TYPE_LABELS[r.executionType ?? ''] || 'roles.reference')})`, value: r.id }))} />
                         </Form.Item>
+                        <Form.Item noStyle shouldUpdate>{({ getFieldValue }) => roleDetail(getRoleById(getFieldValue(['promptRoles', field.name, 'roleId'])))}</Form.Item>
                       </Col>
                       <Col style={{ width: 90 }}>
                         <Form.Item name={[field.name, 'order']} label="排序" initialValue={index} style={{ marginBottom: 0 }}>
@@ -430,7 +442,8 @@ export default function DocumentRolesPage() {
               </div>
             )}</Form.List>
           },
-        ]} />
+        ]} />;
+        }}</Form.Item>
       </Form>
     </Drawer>
   </div>;

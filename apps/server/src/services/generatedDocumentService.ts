@@ -208,6 +208,12 @@ export function openGeneratedAssetTarget(id: string, target: 'file' | 'directory
   return target === 'directory' ? path.dirname(absolutePath) : absolutePath;
 }
 
+function trimEvidenceContent<T extends GeneratedDocumentRecord>(record: T): T {
+  const trimEvidence = (item: GeneratedDocumentDraft['chapters'][number]['evidence'][number]) => ({ ...item, content: item.content.slice(0, 500) });
+  const draft = record.draft ? { ...record.draft, chapters: record.draft.chapters.map(chapter => ({ ...chapter, evidence: chapter.evidence.map(trimEvidence) })) } : record.draft;
+  return { ...record, draft };
+}
+
 function rememberGeneratedDocument(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
   const sourceFiles = record.draft?.sources.slice(0, 8).map(item => item.filePath).join('、') || '无明确来源';
   const warningText = record.warningIssues?.slice(0, 5).join('；') || '无阻断问题';
@@ -250,7 +256,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     const current = getGeneratedDocument(documentId, projectRoot);
     if (!current || current.status !== 'generating') return current ?? initial;
     const warningIssues = result.validationIssues.filter(issue => issue.level === 'error' || issue.level === 'warning').map(issue => issue.suggestion ? `${issue.message}：${issue.suggestion}` : issue.message);
-    const record = saveGeneratedDocument({
+    const record = saveGeneratedDocument(trimEvidenceContent({
       ...current,
       templateName: result.templateName,
       title: result.title,
@@ -261,7 +267,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       assets: result.assets || [],
       completedAt: Date.now(),
       warningIssues,
-    }, projectRoot);
+    }), projectRoot);
     rememberGeneratedDocument(record, projectRoot);
     const assets = upsertGeneratedAssets(result.assets || [], documentId, projectRoot);
     await indexGeneratedDocumentRecord(record, projectRoot).catch(error => console.warn('[generated-documents] 自动入库生成文档失败', error));

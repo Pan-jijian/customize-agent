@@ -336,7 +336,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   return fetchJson<{ draft?: GeneratedDocumentDraft; taskId?: string; documentId?: string; record?: GeneratedDocumentRecord }>('/api/documents/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
 }
 export async function getGeneratedDocuments() { return fetchJson<{ documents: GeneratedDocumentRecord[] }>('/api/documents/generated'); }
-export async function getGeneratedDocument(id: string) { return fetchJson<{ document: GeneratedDocumentRecord }>(`/api/documents/generated/${encodeURIComponent(id)}`); }
+export async function getGeneratedDocument(id: string, lite = false) { return fetchJson<{ document: GeneratedDocumentRecord }>(`/api/documents/generated/${encodeURIComponent(id)}${lite ? '?lite=1' : ''}`); }
 export async function updateGeneratedDocument(id: string, patch: Partial<GeneratedDocumentRecord>) { return fetchJson<{ document: GeneratedDocumentRecord }>(`/api/documents/generated/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); }
 export async function deleteGeneratedDocument(id: string) { return fetchJson<{ ok: boolean }>(`/api/documents/generated/${encodeURIComponent(id)}`, { method: 'DELETE' }); }
 export async function abortGeneratedDocument(documentId: string) { return fetchJson<{ document: GeneratedDocumentRecord }>('/api/documents/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'abort', documentId }) }); }

@@ -225,6 +225,67 @@ function textTokens(text: string) {
   ].map(item => item.replace(/\s+/gu, '')));
 }
 
+function factCoverageLabel(fact: EngineeringTechnicalFact) {
+  return [fact.location, fact.workItem, fact.material, fact.equipment, fact.discipline].filter(Boolean).join(' / ');
+}
+
+function quantifiableFacts(facts: EngineeringTechnicalFact[]) {
+  return facts.filter(fact => [
+    ...(fact.quantities || []),
+    ...(fact.scheduleValues || []),
+    ...(fact.frequencyValues || []),
+    ...(fact.resourceValues || []),
+    ...(fact.costValues || []),
+  ].length > 0);
+}
+
+export function engineeringCoverageMatrixPrompt(assignment: TechnicalFactAssignment) {
+  const facts = quantifiableFacts(assignment.facts).slice(0, 18);
+  if (facts.length === 0) return '';
+  const rows = facts.map((fact, index) => {
+    const quantities = [...(fact.quantities || []), ...(fact.scheduleValues || []), ...(fact.frequencyValues || []), ...(fact.resourceValues || []), ...(fact.costValues || [])].join('、');
+    return `| ${index + 1} | ${factCoverageLabel(fact)} | ${quantities} | ${fact.parameter || fact.specification || ''} | ${fact.sourceRole || ''} | ${fact.sourceFile || ''} | ${fact.text.replace(/\|/gu, '，').slice(0, 180)} |`;
+  });
+  return [
+    '## 本章量化事实覆盖矩阵',
+    '以下对象、部位、工程量、工期、频次、资源或金额来自项目资料。正文必须逐项覆盖；同一施工方案涉及多处对象时，不得只写其中一处或把多个工程量合并成一个笼统数量。',
+    '| 序号 | 施工对象/部位/分项 | 量化值 | 参数/规格 | 来源角色 | 来源文件 | 原始事实 |',
+    '|---|---|---|---|---|---|---|',
+    ...rows,
+    '',
+    '覆盖要求：',
+    '- 日期、数量、规格、工程量、资源数量和工期节点只能使用资料中的值或由资料明确推导的值；没有依据时不得编造。',
+    '- 如果同一工艺适用于多个部位、区域、学校、片区或分项，应使用表格或分项段落分别说明适用范围、工程量和控制要点。',
+    '- 资料中存在多个来源值或口径不一致时，应保持审慎表述并提示需按招标文件、答疑、图纸或清单优先级复核，不得随意选择一个数值。',
+  ].join('\n');
+}
+
+export function validateQuantifiedCoverage(input: { assignments: TechnicalFactAssignment[]; markdown: string }): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const normalized = input.markdown.replace(/\s+/gu, '');
+  for (const assignment of input.assignments) {
+    const facts = quantifiableFacts(assignment.facts);
+    if (facts.length < 3) continue;
+    const labels = unique(facts.map(factCoverageLabel).filter(label => label.length >= 2)).slice(0, 18);
+    const values = unique(facts.flatMap(fact => [
+      ...(fact.quantities || []),
+      ...(fact.scheduleValues || []),
+      ...(fact.frequencyValues || []),
+      ...(fact.resourceValues || []),
+      ...(fact.costValues || []),
+    ]).map(value => value.replace(/\s+/gu, ''))).slice(0, 30);
+    const usedLabels = labels.filter(label => normalized.includes(label.replace(/\s+/gu, '')));
+    const usedValues = values.filter(value => normalized.includes(value));
+    if (labels.length >= 3 && usedLabels.length / labels.length < 0.45) {
+      issues.push({ level: 'warning', message: `${assignment.chapterTitle} 量化对象覆盖不足：${usedLabels.length}/${labels.length}`, suggestion: '请按施工对象、部位、片区、学校或分项逐项补齐适用范围、工程量、工期/资源和控制要点，避免只写一个笼统数量。' });
+    }
+    if (values.length >= 5 && usedValues.length / values.length < 0.35) {
+      issues.push({ level: 'warning', message: `${assignment.chapterTitle} 量化数值使用不足：${usedValues.length}/${values.length}`, suggestion: '请把资料中的日期、数量、单位、规格、工期节点、频次、资源数量写入对应章节；无依据不得编造。' });
+    }
+  }
+  return issues.slice(0, 12);
+}
+
 export function validateEngineeringDetailGate(input: { template: DocumentTemplate; chapters: DocumentDraftChapter[]; assignments: TechnicalFactAssignment[]; finalMarkdown?: string }): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const gate = readEngineeringDocumentConfig().technicalDetailGate;

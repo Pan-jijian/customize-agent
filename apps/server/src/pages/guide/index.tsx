@@ -1,5 +1,5 @@
 import { Card, Col, Collapse, Divider, Row, Steps, Tag, Timeline, Typography } from 'antd';
-import { CheckCircleOutlined, FileSearchOutlined, FormOutlined, RocketOutlined, SafetyCertificateOutlined, SettingOutlined } from '@ant-design/icons';
+import { CheckCircleOutlined, FormOutlined, RocketOutlined, SafetyCertificateOutlined, SettingOutlined } from '@ant-design/icons';
 import { useAppTranslations } from '@/components/Layout';
 
 const { Paragraph, Title, Text } = Typography;
@@ -85,7 +85,7 @@ const operationSections = [
       '保存角色。',
       '按文件用途创建多个文件角色，不建议把不同用途资料混在一个角色里。',
     ],
-    checks: ['文件角色有名称', '已选择处理类型', '已绑定知识库文件'],
+    checks: ['文件角色有名称', '已选择处理类型', '具体项目文件由生成流程自动识别'],
     tips: '处理类型很重要：系统会根据它决定是否进行表格解析、事实抽取、规则引用或来源追踪。',
   },
   {
