@@ -918,7 +918,8 @@ startxref
       await manager.uploadFile('upload-test.pdf', createMinimalPdf('PDF upload reindex test content'), '文档资料/upload-test.pdf', undefined, { vectorMode: 'defer' });
       expectIndexed(manager, '文档资料/upload-test.pdf', 'PDF upload reindex test content');
       const file = manager.listFiles().find(item => item.relativePath === '文档资料/upload-test.pdf');
-      expect(file!.metadataJson).toContain('pdf_text');
+      const metadata = JSON.parse(file!.metadataJson) as { extractionMode?: string };
+      expect(['pdf_text', 'pdf_hybrid_pages']).toContain(metadata.extractionMode);
     } finally {
       manager.close();
       fs.rmSync(root, { recursive: true, force: true });

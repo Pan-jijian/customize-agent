@@ -18,7 +18,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 export interface KbVectorStatus { status: string; error?: string; indexedChunks: number; lastIndexedAt: number; backend: string; }
 export interface KbStats { scope: string; projectId?: string; fileCount: number; chunkCount: number; totalSizeBytes: number; lastIndexedAt: number; vectorStatus?: KbVectorStatus; }
 export interface KbFileItem { relativePath: string; category: string; format: string; fileSize: number; mtime: number; chunkCount: number; indexedAt: number; status: string; errorMessage?: string; metadataJson?: string; matchedBy?: 'path' | 'metadata' | 'content' | 'disk'; score?: number; }
-export interface KbFeatures { vectorStore: string; embeddingProvider: string; externalExtractors: string[]; dedupEngine: string; chunker: string; }
+export interface KbFeatures { vectorStore: string; embeddingProvider: string; builtinExtractors: string[]; dedupEngine: string; chunker: string; }
 export interface KbUploadProgress { id: string; stage: string; percent: number; message: string; fileName?: string; chunkCount?: number; vectorStatus?: KbVectorStatus; error?: string; updatedAt: number; }
 export interface KbOperationRecord { id: string; type: 'upload' | 'delete' | 'reindex'; stage: string; status: 'processing' | 'success' | 'warning' | 'error'; title: string; message: string; percent: number; fileName?: string; filePath?: string; chunkCount?: number; textLength?: number; extractionMode?: string; error?: string; createdAt: number; updatedAt: number; }
 export interface KbStoredChunk { id: string; relativePath: string; chunkIndex: number; content: string; category: string; format: string; tokenCount: number; sectionTitle?: string; metadataJson?: string; createdAt: number; }
@@ -347,11 +347,14 @@ export async function openGeneratedAsset(id: string, target: 'file' | 'directory
 export async function regenerateDocumentChapter(input: { templateId: string; chapterId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; documentId?: string; currentMarkdown?: string; existingFacts?: string[] }) {
   return fetchJson<{ chapter: DocumentDraftChapter }>('/api/documents/chapter/regenerate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
 }
+export async function refineGeneratedDocument(input: { title: string; markdown: string; instruction: string; facts?: string[]; chapters?: string[] }) {
+  return fetchJson<{ markdown: string }>('/api/documents/refine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+}
 export async function getDocumentDrafts() { return fetchJson<{ drafts: StoredDocumentDraft[] }>('/api/documents/drafts'); }
 export async function saveDocumentDraft(draft: GeneratedDocumentDraft, id?: string) {
   return fetchJson<{ draft: StoredDocumentDraft }>('/api/documents/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft, id }) });
 }
-export async function exportDocument(input: { documentId?: string; title?: string; markdown?: string; format: 'markdown' | 'html' | 'pdf' | 'docx'; enforceGate?: boolean; exportGate?: ExportGateResult; wordTemplatePath?: string }) {
+export async function exportDocument(input: { documentId?: string; title?: string; markdown?: string; format: 'markdown' | 'html' | 'pdf' | 'docx'; enforceGate?: boolean; useClientMarkdown?: boolean; exportGate?: ExportGateResult; wordTemplatePath?: string }) {
   const response = await fetch('/api/documents/export', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: input.format === 'pdf' ? 'application/pdf' : '*/*' }, body: JSON.stringify(input) });
   const contentType = response.headers.get('content-type') || '';
   const parseExportError = async () => {

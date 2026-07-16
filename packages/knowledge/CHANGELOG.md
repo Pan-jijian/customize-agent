@@ -1,5 +1,11 @@
 # @customize-agent/knowledge
 
+## 4.0.15
+
+### Patch Changes
+
+- Improve document editing workflow and knowledge extraction support.
+
 ## 4.0.12
 
 ### Patch Changes

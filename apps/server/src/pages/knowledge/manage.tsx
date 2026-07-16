@@ -98,9 +98,9 @@ export default function KnowledgeManagePage() {
               <Tag color="orange">{features.chunker}</Tag>
               <div className="text-xs" style={{ color: 'var(--colorTextSecondary)', marginTop: 2 }}>{t('knowledge.featureChunkerDesc')}</div>
             </Descriptions.Item>
-            {features.externalExtractors?.length > 0 && (
-              <Descriptions.Item label="外部提取器" span={2}>
-                <Space wrap>{features.externalExtractors.map(e => <Tag key={e} color="cyan">{e}</Tag>)}</Space>
+            {features.builtinExtractors?.length > 0 && (
+              <Descriptions.Item label="内置提取器" span={2}>
+                <Space wrap>{features.builtinExtractors.map(e => <Tag key={e} color="cyan">{e}</Tag>)}</Space>
               </Descriptions.Item>
             )}
           </Descriptions>

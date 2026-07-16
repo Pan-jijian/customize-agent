@@ -2207,14 +2207,15 @@ function composeTocMarkdown(chapters: Array<Pick<DocumentDraftChapter, 'title' |
 }
 
 function inferChapterSectionsFromMarkdown(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections'>>) {
+  const normalizedMarkdown = normalizeFormalChapterHeadings(removeDuplicateTocBlocks(markdown), chapters);
   return chapters.map((chapter, index) => {
-    if (chapter.sections?.length) return chapter.sections;
-    const start = markdown.search(new RegExp(`^##\\s+${escapedRegExp(formalChapterTitle(index, chapter.title))}\\s*$`, 'mu'));
-    if (start < 0) return [];
-    const rest = markdown.slice(start);
+    const start = normalizedMarkdown.search(new RegExp(`^##\\s+${escapedRegExp(formalChapterTitle(index, chapter.title))}\\s*$`, 'mu'));
+    if (start < 0) return chapter.sections || [];
+    const rest = normalizedMarkdown.slice(start);
     const next = rest.slice(1).search(/^##\s+/mu);
     const block = next >= 0 ? rest.slice(0, next + 1) : rest;
-    return extractGeneratedSections(block);
+    const extracted = extractGeneratedSections(block);
+    return extracted.length > 0 ? extracted : chapter.sections || [];
   });
 }
 
@@ -2224,8 +2225,19 @@ function normalizeChapterDraftContent(chapter: Pick<DocumentDraftChapter, 'title
   return /^##\s+.+$/mu.test(cleaned) ? cleaned.replace(/^##\s+.+$/mu, targetHeading) : `${targetHeading}\n\n${cleaned}`;
 }
 
+function removeDuplicateTocBlocks(markdown: string) {
+  let seenToc = false;
+  return markdown.replace(/^##\s+目录\s*$[\s\S]*?(?=\n<div class="page-break"><\/div>|\n##\s+)/gmu, match => {
+    if (!seenToc) {
+      seenToc = true;
+      return match;
+    }
+    return '';
+  }).replace(/\n{3,}/gu, '\n\n').trim();
+}
+
 function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections'>>) {
-  let result = markdown;
+  let result = removeDuplicateTocBlocks(markdown);
   chapters.forEach((chapter, index) => {
     const clean = displayChapterTitle(chapter.title);
     const re = new RegExp(`^##\\s+(?:第[一二三四五六七八九十百千万\\d]+章\\s*)?${escapedRegExp(clean)}\\s*$`, 'mu');
@@ -2235,12 +2247,18 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
   let chapterIndex = -1;
   let sectionIndex = 0;
   return lines.map(line => {
-    if (/^##\s+第[一二三四五六七八九十百千万\d]+章\s+/u.test(line.trim())) {
+    const trimmed = line.trim();
+    if (/^##\s+第[一二三四五六七八九十百千万\d]+章\s+/u.test(trimmed)) {
       chapterIndex += 1;
       sectionIndex = 0;
       return line;
     }
-    const section = /^###\s+(?:(\d+)\.(\d+)\s+)?(.+)$/u.exec(line.trim());
+    const h2NumberedSection = /^##\s+(\d+)\.(\d+)\s+(.+)$/u.exec(trimmed);
+    if (chapterIndex >= 0 && h2NumberedSection) {
+      sectionIndex = Number(h2NumberedSection[2]) || sectionIndex + 1;
+      return `### ${chapterIndex + 1}.${sectionIndex} ${displayChapterTitle(h2NumberedSection[3] || '')}`;
+    }
+    const section = /^###\s+(?:(\d+)\.(\d+)\s+)?(.+)$/u.exec(trimmed);
     if (chapterIndex >= 0 && section) {
       sectionIndex += 1;
       return `### ${chapterIndex + 1}.${sectionIndex} ${displayChapterTitle(section[3] || '')}`;

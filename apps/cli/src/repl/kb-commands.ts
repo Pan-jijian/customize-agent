@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { ExternalExtractorRegistry, MultiProjectManager, getProjectKbPath } from '@customize-agent/knowledge';
+import { MultiProjectManager, getProjectKbPath } from '@customize-agent/knowledge';
 import { t } from '../tui/renderer.js';
 import type { I18nManager } from '../i18n/manager.js';
 
@@ -271,14 +271,9 @@ export class KbCommands {
     process.stdout.write(`\n${t.accent('KB Config')}\n`);
     process.stdout.write(`  projectId: ${project.projectId ?? ''}\n`);
     process.stdout.write(`  kbPath: ${project.kbPath}\n`);
-    const extractors = ExternalExtractorRegistry.fromEnvironment().listCapabilities();
-    process.stdout.write('  externalExtractors:\n');
-    if (extractors.length === 0) {
-      process.stdout.write(t.dim('    未配置。可设置 CUSTOMIZE_AGENT_DWG_PARSER / CUSTOMIZE_AGENT_VISIO_PARSER / CUSTOMIZE_AGENT_SOLIDWORKS_PARSER 等环境变量。\n\n'));
-      return;
-    }
-    for (const extractor of extractors) {
-      process.stdout.write(`    ${extractor.name}: ${extractor.available ? 'available' : 'unavailable'}\n`);
+    process.stdout.write('  builtinExtractors:\n');
+    for (const extractor of ['PDF/OCR', 'Office', 'Spreadsheet', 'Image OCR', 'CAD', 'Diagram', 'Structured Data']) {
+      process.stdout.write(`    ${extractor}: builtin\n`);
     }
     process.stdout.write('\n');
   }

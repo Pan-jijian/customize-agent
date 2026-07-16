@@ -2,9 +2,9 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
-import { pathToFileURL } from 'node:url';
-import { ExternalExtractorRegistry } from './external-extractor.js';
-import { resolveAndImport, resolvePackage, getNodeModulesRoot } from './module-resolver.js';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolveAndImport, resolvePackage } from './module-resolver.js';
+import { createOcrProvider, type OcrProvider } from './ocr-providers.js';
 import type { ClassifiedFile } from '../types.js';
 
 /** 文件内容提取结果 */
@@ -26,8 +26,6 @@ const CAD_INTERNAL_LINE_RE = /^(?:TDb\w+|AcDb\w+|[A-F0-9]{8,}|\d+|Model|Layout\d
 
 /** 文件内容提取器，支持文档、表格、图片、CAD 等多种文件格式的内容抽取 */
 export class ContentExtractor {
-  constructor(private readonly externalExtractors = ExternalExtractorRegistry.fromEnvironment()) {}
-
   async extract(file: ClassifiedFile): Promise<ExtractionResult> {
     const start = Date.now();
     const warnings: string[] = [];
@@ -38,14 +36,7 @@ export class ContentExtractor {
       format: file.format,
     };
 
-    const external = this.tryExternalExtractor(file);
-    if (external?.text.trim()) {
-      text = external.text;
-      Object.assign(metadata, external.metadata);
-      warnings.push(...external.warnings);
-    } else {
-      warnings.push(...(external?.warnings ?? []));
-      if (file.category === 'cad') {
+    if (file.category === 'cad') {
       const result = await this.extractCad(file);
       text = result.text;
       Object.assign(metadata, result.metadata);
@@ -108,7 +99,6 @@ export class ContentExtractor {
       metadata.contentCoverage = 'metadata';
       warnings.push(`暂不支持 ${file.category}/${file.format} 内容提取，未解析出正文，未入库`);
     }
-    }
 
     return {
       text: this.cleanExtractedText(text, file).trim(),
@@ -118,37 +108,6 @@ export class ContentExtractor {
     };
   }
 
-  private tryExternalExtractor(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } | undefined {
-    const extractors = this.externalExtractors.findAll(file);
-    if (extractors.length === 0) return undefined;
-
-    const warnings: string[] = [];
-    for (const extractor of extractors) {
-      try {
-        const result = extractor.extract(file);
-        const text = result.text.trim();
-        if (!text) {
-          warnings.push(`外部解析器 ${extractor.name} 未提取到正文`);
-          continue;
-        }
-        return {
-          text,
-          metadata: {
-            extractionMode: 'external_advanced_plugin',
-            vectorizable: true,
-            contentCoverage: 'external_full_text',
-            externalExtractor: extractor.id,
-            ...(result.metadata ?? {}),
-          },
-          warnings: [...warnings, ...(result.warnings ?? [])],
-        };
-      } catch (error) {
-        warnings.push(`外部解析器 ${extractor.name} 失败: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-
-    return warnings.length > 0 ? { text: '', metadata: {}, warnings } : undefined;
-  }
 
   private extractTextClipping(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
     const buffer = fs.readFileSync(file.absolutePath);
@@ -918,12 +877,15 @@ export class ContentExtractor {
 
 
   private async extractRasterImage(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
-    const metadata: Record<string, unknown> = { extractionMode: 'builtin_tesseract_ocr_isolated', vectorizable: true };
+    const metadata: Record<string, unknown> = { extractionMode: 'ocr_provider', vectorizable: true };
+    const warnings: string[] = [];
+
     if (process.env.CUSTOMIZE_AGENT_DISABLE_OCR === '1') {
       metadata.extractionMode = 'raster_image_metadata';
       metadata.contentCoverage = 'metadata_filename';
       return { text: this.metadataOnlyText(file), metadata, warnings: ['OCR disabled; indexed image metadata only'] };
     }
+
     const validationError = this.validateRasterImage(file.absolutePath);
     if (validationError) {
       metadata.contentCoverage = 'invalid_image';
@@ -931,70 +893,62 @@ export class ContentExtractor {
       return { text: '', metadata, warnings: [`图片文件无效或不完整：${validationError}，未入库`] };
     }
 
-    const paddle = await this.tryPaddleOcrLayout(file.absolutePath);
-    if (paddle) {
+    // 1. 尝试外部 PaddleOCR 命令（CUSTOMIZE_PADDLE_OCR_CMD）
+    const paddleExternal = await this.tryPaddleOcrLayout(file.absolutePath);
+    if (paddleExternal) {
       metadata.contentCoverage = 'paddleocr_layout_regions';
-      metadata.ocrProvider = 'paddleocr';
-      metadata.ocrRegionCount = paddle.regionCount;
-      return { text: [this.metadataOnlyText(file), paddle.text].join('\n'), metadata, warnings: [] };
+      metadata.ocrProvider = 'paddleocr-external';
+      metadata.ocrRegionCount = paddleExternal.regionCount;
+      return { text: [this.metadataOnlyText(file), paddleExternal.text].join('\n'), metadata, warnings };
     }
 
-    let tesseractPath: string;
+    // 2. 加载图片像素数据
+    let imageData: { data: Uint8Array; width: number; height: number };
     try {
-      tesseractPath = resolvePackage('tesseract.js');
+      imageData = await this.loadImagePixels(file.absolutePath);
     } catch (e) {
-      metadata.contentCoverage = 'ocr_unavailable';
+      metadata.contentCoverage = 'image_decode_failed';
       metadata.parseError = (e as Error).message;
-      return { text: '', metadata, warnings: [`内置 OCR 不可用：${(e as Error).message}`] };
+      return { text: '', metadata, warnings: [`图片解码失败：${(e as Error).message}，未入库`] };
     }
 
-    // 子进程用 createRequire 加载 tesseract.js（兼容打包 Server 的 vendor 目录）
-    const result = spawnSync(process.execPath, [
-      '--input-type=module',
-      '-e',
-      `import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
+    // 3. OCR Provider（PaddleOCR ONNX → Tesseract CLI → Tesseract.js）
+    let provider: OcrProvider | null = null;
+    try {
+      provider = await createOcrProvider();
+      metadata.ocrProvider = provider.id;
 
-const localRequire = createRequire(import.meta.url);
-const tesseractMod = localRequire(${JSON.stringify(tesseractPath)});
-const { createWorker } = tesseractMod;
+      const ocrResult = await provider.recognize(imageData);
+      const text = ocrResult.text.trim();
 
-const worker = await createWorker('chi_sim+eng');
-try {
-  const result = await worker.recognize(process.argv[1]);
-  const lines = (result.data.lines || []).map((line, index) => ({
-    index: index + 1,
-    text: line.text || '',
-    bbox: line.bbox || line.baseline || null,
-  })).filter(line => line.text.trim());
-  process.stdout.write(JSON.stringify({ text: result.data.text || '', lines }));
-} finally {
-  await worker.terminate();
-}`,
-      file.absolutePath,
-    ], { encoding: 'utf8', timeout: 120_000, maxBuffer: 20 * 1024 * 1024 });
+      if (text) {
+        metadata.contentCoverage = 'ocr_provider_text';
+        metadata.ocrTextLength = text.length;
+        metadata.ocrConfidence = ocrResult.confidence;
+        metadata.ocrRegionCount = ocrResult.regions.length;
 
-    if (result.status !== 0 || result.error) {
-      const message = result.error?.message || result.stderr.trim() || `OCR 子进程退出码 ${result.status ?? 'unknown'}`;
+        const regionLines = ocrResult.regions.map((r, i) =>
+          `区域 ${i + 1} [置信度 ${r.confidence.toFixed(2)}] [bbox x0=${r.box.x}, y0=${r.box.y}, x1=${r.box.x + r.box.width}, y1=${r.box.y + r.box.height}]: ${r.text}`,
+        );
+
+        return {
+          text: [this.metadataOnlyText(file), 'OCR 区域文本:', ...regionLines, `OCR 完整文本:\n${text}`].join('\n'),
+          metadata,
+          warnings,
+        };
+      }
+
+      metadata.contentCoverage = 'ocr_no_text';
+      warnings.push(`${metadata.ocrProvider} 未识别到文字，未入库`);
+      return { text: '', metadata, warnings };
+    } catch (e) {
       metadata.contentCoverage = 'ocr_failed';
-      metadata.parseError = message;
-      return { text: '', metadata, warnings: [`内置 OCR 解析失败：${message}，未入库`] };
+      metadata.parseError = (e as Error).message;
+      warnings.push(`OCR 识别失败（${metadata.ocrProvider ?? 'unknown'}）：${(e as Error).message}，未入库`);
+      return { text: '', metadata, warnings };
+    } finally {
+      await provider?.dispose();
     }
-
-    const parsed = this.parseOcrJson(result.stdout);
-    const text = parsed.text.trim();
-    const regions = this.formatOcrRegions(parsed.lines);
-    metadata.contentCoverage = text ? 'ocr_text_bounding_boxes' : 'metadata_filename';
-    metadata.ocrProvider = 'tesseract.js';
-    metadata.ocrLanguages = 'chi_sim+eng';
-    metadata.ocrTextLength = text.length;
-    metadata.ocrLineCount = parsed.lines.length;
-    return {
-      text: text ? [this.metadataOnlyText(file), 'OCR 区域文本:', ...regions, `OCR 完整文本:\n${text}`].join('\n') : '',
-      metadata,
-      warnings: text ? [] : ['内置 OCR 未识别到文字，未入库'],
-    };
   }
 
   private async tryPaddleOcrLayout(filePath: string): Promise<{ text: string; regionCount: number } | undefined> {
@@ -1010,32 +964,6 @@ try {
       const lines = result.stdout.split(/\r?\n/u).filter(Boolean);
       return { text: ['OCR 版面分析区域:', ...lines].join('\n'), regionCount: lines.length };
     }
-  }
-
-  private parseOcrJson(raw: string): { text: string; lines: Array<{ index: number; text: string; bbox?: unknown }> } {
-    try {
-      const parsed = JSON.parse(raw) as { text?: string; lines?: Array<{ index?: number; text?: string; bbox?: unknown }> };
-      return {
-        text: parsed.text ?? raw,
-        lines: (parsed.lines ?? []).map((line, index) => ({ index: line.index ?? index + 1, text: line.text ?? '', bbox: line.bbox })).filter(line => line.text.trim()),
-      };
-    } catch {
-      return { text: raw, lines: raw.split(/\r?\n/u).map((text, index) => ({ index: index + 1, text })).filter(line => line.text.trim()) };
-    }
-  }
-
-  private formatOcrRegions(lines: Array<{ index: number; text: string; bbox?: unknown }>): string[] {
-    return lines.map(line => {
-      const bbox = this.formatBoundingBox(line.bbox);
-      const type = this.classifyOcrRegion(line.text);
-      return `区域 ${line.index} [${type}]${bbox ? ` ${bbox}` : ''}: ${line.text}`;
-    });
-  }
-
-  private classifyOcrRegion(text: string): 'table' | 'text' | 'image-caption' {
-    if (/\|/.test(text) || /\s{2,}/u.test(text) || /表\s*\d|合计|小计/u.test(text)) return 'table';
-    if (/图\s*\d|figure|image|示意图/iu.test(text)) return 'image-caption';
-    return 'text';
   }
 
   private formatBoundingBox(value: unknown): string {
@@ -1079,143 +1007,207 @@ try {
   }
 
   private async extractPdf(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
-    const metadata: Record<string, unknown> = { extractionMode: 'pdf_text', vectorizable: true };
-    const warnings: string[] = [];
+    const hybrid = await this.extractPdfHybridPages(file);
+    if (hybrid.text.trim()) return hybrid;
 
-    // 第一层：pdfjs-dist 文本提取（处理常规 PDF、压缩内容流、CJK 字体等）
+    const metadata: Record<string, unknown> = { extractionMode: 'pdf_text', vectorizable: true };
+    const warnings = [...hybrid.warnings];
+
     try {
       const raw = fs.readFileSync(file.absolutePath);
       const text = await this.extractPdfText(raw);
       if (text.trim()) {
         metadata.contentCoverage = 'pdf_text_streams_layout_markdown';
         metadata.pdfExtractor = 'pdfjs-dist';
-        const markdownText = this.toMarkdownDocument(text);
-        if (!this.shouldAugmentPdfWithOcr(markdownText)) return { text: [this.metadataOnlyText(file), markdownText].join('\n\n'), metadata, warnings };
-        const ocr = await this.extractScannedPdfOcr(file);
-        if (ocr.text.trim()) {
-          metadata.contentCoverage = 'pdf_text_streams_plus_ocr';
-          metadata.ocrAugmented = true;
-          return { text: [this.metadataOnlyText(file), markdownText, '## PDF OCR 备用识别文本', ocr.text].join('\n\n'), metadata: { ...metadata, ocr: ocr.metadata }, warnings: [...warnings, ...ocr.warnings] };
-        }
-        return { text: [this.metadataOnlyText(file), markdownText].join('\n\n'), metadata: { ...metadata, ocrRecommended: true, ocrReason: ocr.metadata.ocrReason ?? 'pdf_text_low_quality' }, warnings: [...warnings, ...ocr.warnings] };
+        return { text: [this.metadataOnlyText(file), this.toMarkdownDocument(text)].join('\n\n'), metadata, warnings };
       }
     } catch (error) {
       warnings.push(`PDF 文本提取失败: ${error instanceof Error ? error.message : String(error)}`);
       metadata.parseError = error instanceof Error ? error.message : String(error);
     }
 
-    // 第二层：OCR（扫描件/图片型 PDF）—— 必须保留并确保可用
-    const ocr = await this.extractScannedPdfOcr(file);
-    if (ocr.text.trim()) return ocr;
-
-    // 第三层：仅索引元数据（兜底）
     metadata.extractionMode = 'pdf_metadata_only';
     metadata.contentCoverage = 'metadata_filename';
     metadata.ocrRecommended = true;
-    metadata.ocrReason = ocr.metadata.ocrReason ?? 'pdf_text_stream_empty_or_unavailable';
+    metadata.ocrReason = hybrid.metadata.ocrReason ?? 'pdf_text_stream_empty_or_unavailable';
     metadata.pdfPageOcrSupported = true;
     return {
       text: this.metadataOnlyText(file),
       metadata,
-      warnings: [...warnings, 'PDF 正文暂未提取到文本，已索引文件名、路径和类型元数据', ...ocr.warnings],
+      warnings: [...warnings, 'PDF 正文暂未提取到文本，已索引文件名、路径和类型元数据'],
     };
   }
 
-  private shouldAugmentPdfWithOcr(text: string): boolean {
-    const normalizedLength = this.normalizedTextLength(text);
-    if (normalizedLength < 1200) return true;
-    const lines = text.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
-    if (lines.length === 0) return true;
-    const shortLineRatio = lines.filter(line => line.length <= 12).length / lines.length;
-    const cjkCount = (text.match(/[\p{Script=Han}]/gu) ?? []).length;
-    return shortLineRatio > 0.65 && cjkCount < 1200;
-  }
 
-  private async extractScannedPdfOcr(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
+  private async extractPdfHybridPages(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     const metadata: Record<string, unknown> = {
-      extractionMode: 'pdf_page_ocr_embedded',
+      extractionMode: 'pdf_hybrid_pages',
       vectorizable: true,
-      pdfPageOcrSupported: true,
-      ocrProvider: 'tesseract.js',
-      ocrLanguages: 'chi_sim+eng',
-      pdfRenderer: 'pdfjs-dist + @napi-rs/canvas',
-      pdfOcrPageLimit: 'all',
+      contentCoverage: 'pdf_page_text_plus_selective_ocr',
+    };
+    const warnings: string[] = [];
+
+    // OCR Provider
+    let ocrProvider: OcrProvider | null | undefined = null;
+    const getOcrProvider = async (): Promise<OcrProvider> => {
+      if (!ocrProvider) ocrProvider = await createOcrProvider();
+      return ocrProvider;
     };
 
-    // 解析模块路径 —— 确保在打包 Server 等上下文中子进程也能正确加载
-    let canvasPath: string;
-    let pdfjsPath: string;
-    let tesseractPath: string;
+    const failedPages: Array<{ page: number; reason: string }> = [];
+    const ocrPages: number[] = [];
+    const ocrStrategies: Array<{ page: number; strategy: string; score: number }> = [];
+
+    // 尝试 PyMuPDF 渲染（高质量）或降级到 pdfjs-dist
+    let pageImages: string[] | null;
+    let pageCount = 0;
+    let renderer = 'unknown';
+    const tmpDir = fs.mkdtempSync(path.join(this.getTempRoot(), 'kb-pdf-'));
+
     try {
-      canvasPath = resolvePackage('@napi-rs/canvas');
-      pdfjsPath = resolvePackage('pdfjs-dist/legacy/build/pdf.mjs');
-      tesseractPath = resolvePackage('tesseract.js');
+      // ── 方法1: PyMuPDF（300 DPI 原生渲染，质量最高） ──
+      pageImages = this.tryRenderWithPyMuPDF(file.absolutePath, tmpDir);
+      if (pageImages && pageImages.length > 0) {
+        renderer = 'PyMuPDF';
+        pageCount = pageImages.length;
+      } else {
+        // ── 方法2: pdfjs-dist + canvas ──
+        const jsImages = await this.tryRenderWithPdfJs(file, tmpDir);
+        if (jsImages && jsImages.length > 0) {
+          renderer = 'pdfjs-dist';
+          pageCount = jsImages.length;
+          pageImages = jsImages;
+        }
+      }
     } catch (e) {
       metadata.ocrRecommended = true;
-      metadata.ocrReason = `OCR 依赖解析失败: ${(e as Error).message}`;
-      return { text: '', metadata, warnings: [`内置扫描 PDF OCR 不可用：${metadata.ocrReason}`] };
+      metadata.ocrReason = `PDF 渲染失败: ${(e as Error).message}`;
+      return { text: '', metadata, warnings: [`PDF 渲染失败：${metadata.ocrReason}`] };
     }
 
-    // NODE_PATH 确保子进程能解析 tesseract.js 的依赖
-    const childEnv = { ...process.env };
-    const nmRoot = getNodeModulesRoot();
-    if (nmRoot) childEnv.NODE_PATH = nmRoot;
+    metadata.pdfPageCount = pageCount;
+    metadata.pdfRenderer = renderer;
 
-    const result = spawnSync(process.execPath, [
-      '--input-type=module',
-      '-e',
-      `import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { createCanvas } from ${JSON.stringify(canvasPath)};
-import * as pdfjs from ${JSON.stringify(pdfjsPath)};
-import { createWorker } from ${JSON.stringify(tesseractPath)};
-const filePath = process.argv[1];
-const bytes = new Uint8Array(fs.readFileSync(filePath));
-const doc = await pdfjs.getDocument({ data: bytes, verbosity: 0 }).promise;
-const pageLimit = doc.numPages;
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-pdf-ocr-'));
-const worker = await createWorker('chi_sim+eng');
-const pages = [];
-try {
-  for (let i = 1; i <= pageLimit; i += 1) {
-    const page = await doc.getPage(i);
-    const viewport = page.getViewport({ scale: 2 });
-    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-    const context = canvas.getContext('2d');
-    await page.render({ canvasContext: context, viewport }).promise;
-    const imagePath = path.join(tmpDir, 'page-' + i + '.png');
-    fs.writeFileSync(imagePath, canvas.toBuffer('image/png'));
-    const recognized = await worker.recognize(imagePath);
-    const text = (recognized.data.text || '').trim();
-    const lines = (recognized.data.lines || []).map((line, index) => ({ index: index + 1, text: line.text || '', bbox: line.bbox || null })).filter(line => line.text.trim());
-    if (text) pages.push('PDF OCR 第 ' + i + ' 页:\\n' + lines.map(line => '区域 ' + line.index + ' ' + JSON.stringify(line.bbox || {}) + ': ' + line.text).join('\\n') + '\\n\\n完整文本:\\n' + text);
+    if (!pageImages || pageImages.length === 0) {
+      metadata.ocrRecommended = true;
+      metadata.ocrReason = '无法渲染PDF页面';
+      return { text: '', metadata, warnings: ['无法渲染PDF页面'] };
+    }
+
+    // 逐页 OCR
+    const pageTexts: string[] = [];
+    for (let i = 0; i < pageImages.length; i++) {
+      const imgPath = pageImages[i]!;
+      try {
+        const provider = await getOcrProvider();
+        const ocrResult = await provider.recognize({
+          data: new Uint8Array(0),
+          width: 0, height: 0, channels: 0,
+          filePath: imgPath,
+        });
+
+        const ocrText = ocrResult.text.trim();
+        if (ocrText) {
+          ocrPages.push(i + 1);
+          ocrStrategies.push({ page: i + 1, strategy: renderer, score: this.scoreOcrText(ocrText) });
+          pageTexts.push(`## PDF 第 ${i + 1} 页（OCR）\n\n${ocrText}`);
+        } else {
+          failedPages.push({ page: i + 1, reason: 'empty_ocr' });
+        }
+      } catch (error) {
+        failedPages.push({ page: i + 1, reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    // 清理临时文件
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { warnings.push('PDF OCR 临时文件清理失败'); }
+
+    metadata.ocrAugmented = ocrPages.length > 0;
+    metadata.ocrPages = ocrPages;
+    metadata.ocrStrategies = ocrStrategies;
+    metadata.failedPages = failedPages;
+    metadata.ocrProvider = (ocrProvider as OcrProvider | null)?.id ?? 'unknown';
+
+    if (failedPages.length > 0) {
+      warnings.push(`PDF 部分页解析失败: ${failedPages.map((p) => `${p.page}:${p.reason}`).join('; ')}`);
+    }
+
+    const combined = pageTexts.join('\n\n').trim();
+    return {
+      text: combined ? [this.metadataOnlyText(file), combined].join('\n\n') : '',
+      metadata,
+      warnings,
+    };
   }
-} finally {
-  await worker.terminate();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-}
-process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: pages.join('\\n\\n') }));`,
-      file.absolutePath,
-    ], { encoding: 'utf8', timeout: 0, maxBuffer: 50 * 1024 * 1024, env: childEnv });
-    if (result.status !== 0 || result.error) {
-      metadata.ocrRecommended = true;
-      metadata.ocrReason = result.error?.message ?? result.stderr.trim() ?? `pdf_page_ocr_exit_${result.status ?? 'unknown'}`;
-      return { text: '', metadata, warnings: [`内置扫描 PDF OCR 失败：${metadata.ocrReason}`] };
-    }
+
+  /** PyMuPDF 渲染（300 DPI 原生提取，质量远高于 pdfjs-dist） */
+  private tryRenderWithPyMuPDF(pdfPath: string, outputDir: string): string[] | null {
     try {
-      const parsed = JSON.parse(result.stdout) as { pageCount?: number; pageLimit?: number; text?: string };
-      const text = parsed.text?.trim() ?? '';
-      metadata.ocrPageCount = parsed.pageCount ?? 0;
-      metadata.pdfOcrPageLimit = parsed.pageLimit ?? 'all';
-      metadata.ocrTextLength = text.length;
-      metadata.contentCoverage = text ? 'pdf_page_ocr_text' : 'metadata_filename';
-      return { text: text ? [this.metadataOnlyText(file), text].join('\n') : '', metadata, warnings: text ? [] : ['内置扫描 PDF OCR 未识别到文字'] };
+      const workerScript = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'render_pdf_pages.py');
+      spawnSync('python3', [workerScript, pdfPath, outputDir, '300'], {
+        encoding: 'utf-8', timeout: 60_000, maxBuffer: 1024 * 1024,
+      });
+      // 检查输出文件（即使 Python 非零退出码也可能已渲染部分页面）
+      const images: string[] = [];
+      for (let i = 1; i <= 999; i++) {
+        const p = path.join(outputDir, `page-${i}.png`);
+        if (fs.existsSync(p) && fs.statSync(p).size > 100) images.push(p);
+        else break;
+      }
+      return images.length > 0 ? images : null;
     } catch {
-      metadata.ocrRecommended = true;
-      metadata.ocrReason = 'pdf_page_ocr_output_parse_failed';
-      return { text: '', metadata, warnings: ['内置扫描 PDF OCR 输出解析失败'] };
+      return null;
     }
+  }
+
+  /** pdfjs-dist + canvas 渲染（降级方案） */
+  private async tryRenderWithPdfJs(file: ClassifiedFile, outputDir: string): Promise<string[] | null> {
+    try {
+      const canvasMod: any = await resolveAndImport('@napi-rs/canvas');
+      const pdfjsLib: any = await resolveAndImport('pdfjs-dist/legacy/build/pdf.mjs');
+      const sharpMod = await resolveAndImport('sharp');
+      const createCanvas = (canvasMod as any).createCanvas ?? (canvasMod as any).default?.createCanvas;
+      const sharpFn = (sharpMod as any).default ?? sharpMod;
+      if (!createCanvas || !sharpFn) return null;
+
+      const raw = fs.readFileSync(file.absolutePath);
+      const doc = await pdfjsLib.getDocument({ data: new Uint8Array(raw), verbosity: 0 }).promise;
+      const pageCount = doc.numPages;
+      const images: string[] = [];
+
+      for (let i = 1; i <= pageCount; i++) {
+        const page = await doc.getPage(i);
+        const viewport = page.getViewport({ scale: 4 });
+        const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+        const ctx = canvas.getContext('2d');
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        const pngPath = path.join(outputDir, `page-${i}.png`);
+        await sharpFn(canvas.toBuffer('image/png'))
+          .removeAlpha().normalize().linear(3.0, -150)
+          .withMetadata({ density: 288 }).png().toFile(pngPath);
+        images.push(pngPath);
+      }
+      await doc.destroy();
+      return images.length > 0 ? images : null;
+    } catch { return null; }
+  }
+
+  private scoreOcrText(value: string): number {
+    const text = String(value ?? '').trim();
+    const normalizedLength = this.normalizedTextLength(text);
+    const cjkCount = (text.match(/[\p{Script=Han}]/gu) ?? []).length;
+    const latinCount = (text.match(/[A-Za-z]/g) ?? []).length;
+    const replacementCount = (text.match(/[�□]/gu) ?? []).length;
+    return cjkCount * 8 + normalizedLength - latinCount * 0.8 - replacementCount * 10;
+  }
+
+  /** 加载图片像素数据（依赖 sharp） */
+  private async loadImagePixels(filePath: string): Promise<{ data: Uint8Array; width: number; height: number }> {
+    const sharpMod: any = await resolveAndImport('sharp');
+    const sharpFn = sharpMod.default ?? sharpMod;
+    const { data, info } = await sharpFn(filePath).raw().toBuffer({ resolveWithObject: true });
+    return { data: new Uint8Array(data as Buffer), width: info.width as number, height: info.height as number };
   }
 
   private async extractPdfText(buffer: Buffer): Promise<string> {
@@ -1244,15 +1236,28 @@ process.stdout.write(JSON.stringify({ pageCount: doc.numPages, pageLimit, text: 
       if (process.env.KB_DEBUG === '1') console.warn('[kb] pdfjs-dist extraction failed:', (e as Error).message);
     }
 
-    // 第二层：pdf-parse（兼容旧版 PDF），与 pdfjs 结果互补，避免单一解析器漏字
+    // 第二层：pdf-parse（兼容旧版 PDF），适配 v1.x 函数导出 和 v2.x 类导出
     try {
       const mod = await resolveAndImport('pdf-parse');
-      const pdfParse = typeof mod === 'function'
-        ? mod as (data: Buffer) => Promise<{ text: string }>
-        : (mod as unknown as { default?: (data: Buffer) => Promise<{ text: string }> }).default;
+      let pdfParse: ((data: Buffer) => Promise<{ text: string }>) | undefined;
+
+      // v1.x: module.exports = function(buffer) { ... }
+      if (typeof mod === 'function') {
+        pdfParse = mod as (data: Buffer) => Promise<{ text: string }>;
+      }
+      // v1.x ESM: { default: function(buffer) { ... } }
+      else if (mod && typeof (mod as Record<string, unknown>).default === 'function') {
+        pdfParse = (mod as Record<string, unknown>).default as (data: Buffer) => Promise<{ text: string }>;
+      }
+      // v2.x: { PDFParse: class { parse(buffer) { ... } } }
+      else if (mod && typeof (mod as Record<string, unknown>).PDFParse === 'function') {
+        const PDFParse = (mod as Record<string, unknown>).PDFParse as new () => { parse: (data: Buffer) => Promise<{ text: string }> };
+        pdfParse = (buf: Buffer) => new PDFParse().parse(buf);
+      }
+
       if (pdfParse) {
         const result = await pdfParse(buffer);
-        const parseText = result.text.trim();
+        const parseText = (result?.text ?? '').trim();
         if (pdfjsText && parseText && this.normalizedTextLength(parseText) > this.normalizedTextLength(pdfjsText) * 1.08) return [pdfjsText, '## PDF 备用解析文本', parseText].join('\n\n');
         if (parseText && !pdfjsText) return parseText;
       }

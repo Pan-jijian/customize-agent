@@ -8,7 +8,6 @@ import { DedupEngine } from '../dedup/dedup-engine.js';
 import { RelationshipDetector } from '../dedup/relationship-detector.js';
 import { createEmbeddingProviderFromEnvironment, type EmbeddingProvider } from '../embedding/embedding-provider.js';
 import { ContentExtractor } from '../extraction/content-extractor.js';
-import type { ExternalExtractorRegistry } from '../extraction/external-extractor.js';
 import type { LLMSearchProvider } from '../llm/llm-search-provider.js';
 import { FederationSearch, type FederatedResult, type FederatedSearchItem, type RetrievalWeights, type SearchFilters } from '../search/federation-search.js';
 import type { DiffResult, IndexStateRecord, KBScope, KnowledgeBaseStats, ProjectConfig } from '../types.js';
@@ -40,7 +39,6 @@ export interface KnowledgeBaseManagerOptions {
   storageRoot?: string;
   embeddingProvider?: EmbeddingProvider;
   vectorStores?: Map<string, VectorStoreInterface>;
-  externalExtractors?: ExternalExtractorRegistry;
   onProgress?: (progress: KnowledgeIndexProgress) => void;
   /** 可选的 LLM Provider，用于查询扩展和语义重排序 */
   llmProvider?: LLMSearchProvider;
@@ -75,7 +73,7 @@ export class KnowledgeBaseManager {
     this.projectId = options.projectId;
     this.embeddingProvider = options.embeddingProvider ?? createEmbeddingProviderFromEnvironment();
     this.vectorStores = options.vectorStores ?? new Map();
-    this.extractor = new ContentExtractor(options.externalExtractors);
+    this.extractor = new ContentExtractor();
     this.llmProvider = options.llmProvider;
     this.onProgress = options.onProgress;
 

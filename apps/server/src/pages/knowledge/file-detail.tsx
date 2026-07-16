@@ -236,7 +236,23 @@ export default function KnowledgeFileDetailPage() {
     }
 
     // ── OCR/PDF ──
-    const ocrDescHasData = meta.ocrRecommended != null || meta.ocrReason != null || meta.ocrProvider != null || meta.ocrLanguages != null || meta.ocrTextLength != null || meta.pdfPageOcrSupported != null || meta.ocrPageCount != null || meta.pdfOcrPageLimit != null || meta.pdfRenderer != null;
+    const ocrDescHasData = [
+      meta.ocrRecommended,
+      meta.ocrReason,
+      meta.ocrProvider,
+      meta.ocrLanguages,
+      meta.ocrTextLength,
+      meta.pdfPageOcrSupported,
+      meta.ocrPageCount,
+      meta.pdfOcrPageLimit,
+      meta.pdfRenderer,
+      meta.pdfPageCount,
+      meta.textPages,
+      meta.ocrAugmented,
+      meta.ocrPages,
+      meta.failedPages,
+      meta.imagePreprocessor,
+    ].some(value => value != null);
     const ocrRows = ocrPageRows(detail);
     const isPdf = detail?.file.format === 'pdf';
     if (ocrDescHasData || isPdf || ocrRows.length > 0) {
@@ -249,13 +265,19 @@ export default function KnowledgeFileDetailPage() {
             {metaItem('OCR 引擎', meta.ocrProvider)}
             {metaItem('OCR 语言', meta.ocrLanguages)}
             {metaItem('OCR 文本长度', meta.ocrTextLength)}
+            {metaItem('PDF 总页数', meta.pdfPageCount)}
+            {metaItem('PDF 文本页数', meta.textPages)}
+            {metaItem('PDF 已 OCR 增强', meta.ocrAugmented)}
+            {metaItem('PDF OCR 页码', Array.isArray(meta.ocrPages) ? meta.ocrPages.join(', ') : meta.ocrPages)}
+            {metaItem('PDF 失败页', Array.isArray(meta.failedPages) ? meta.failedPages.map((item: unknown) => JSON.stringify(item)).join('; ') : meta.failedPages)}
             {metaItem('PDF 页面 OCR 支持', meta.pdfPageOcrSupported)}
             {metaItem('PDF OCR 页数', meta.ocrPageCount)}
             {metaItem('PDF OCR 页数上限', meta.pdfOcrPageLimit)}
             {metaItem('PDF 渲染器', meta.pdfRenderer)}
+            {metaItem('图像预处理', meta.imagePreprocessor)}
           </Descriptions>}
           {isPdf && <div className={styles.pdfPreviewStrip}>
-            {Array.from({ length: Math.min(Number(meta.ocrPageCount ?? 1) || 1, 6) }, (_, index) => <Image key={index} width={220} height={320} src={`/api/kb/files/preview-pdf-page?relativePath=${encodeURIComponent(detail.file.relativePath)}&page=${index + 1}`} alt={`PDF 第 ${index + 1} 页`} unoptimized />)}
+            {Array.from({ length: Math.min(Number(meta.pdfPageCount ?? meta.ocrPageCount ?? 1) || 1, 6) }, (_, index) => <Image key={index} width={220} height={320} src={`/api/kb/files/preview-pdf-page?relativePath=${encodeURIComponent(detail.file.relativePath)}&page=${index + 1}`} alt={`PDF 第 ${index + 1} 页`} unoptimized />)}
           </div>}
           {ocrRows.length > 0 && <Table size="small" rowKey="key" dataSource={ocrRows} pagination={{ pageSize: 10 }} columns={[{ title: '页码', dataIndex: 'page', width: 90 }, { title: 'OCR 文本', dataIndex: 'text', render: (value: unknown) => <Paragraph ellipsis={{ rows: 4, expandable: true, symbol: '展开' }}>{String(value)}</Paragraph> }]} />}
         </Space>,

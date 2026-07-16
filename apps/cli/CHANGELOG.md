@@ -1,5 +1,22 @@
 # customize-agent
 
+## 4.0.35
+
+### Patch Changes
+
+- Improve document editing workflow and knowledge extraction support.
+- Updated dependencies
+  - @customize-agent/server@4.0.44
+  - @customize-agent/knowledge@4.0.15
+
+## 4.0.33
+
+### Patch Changes
+
+- Fix generated document navigation consistency and strengthen construction document output quality.
+- Updated dependencies
+  - @customize-agent/server@4.0.42
+
 ## 4.0.25
 
 ### Patch Changes

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Typography } from 'antd';
-import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, ReloadOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined } from '@ant-design/icons';
-import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getPromptProjects, regenerateDocumentChapter, saveDocumentDraft, saveDocumentTemplate, searchKbFiles, updateGeneratedDocument, validateDocumentTemplate, type DocumentDraftChapter, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig, type PromptProject } from '@/lib/api';
+import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined, HistoryOutlined } from '@ant-design/icons';
+import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getPromptProjects, refineGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, searchKbFiles, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig, type PromptProject } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const { TextArea } = Input;
@@ -18,6 +18,8 @@ interface GenerationTaskState {
   documentId?: string; draft?: GeneratedDocumentDraft; content?: string; error?: string;
   listeners: Set<() => void>;
 }
+
+interface EditHistoryItem { id: string; content: string; prompt: string; createdAt: number; }
 
 let activeGenerationTask: GenerationTaskState | null = null;
 function notifyGenerationTask() { activeGenerationTask?.listeners.forEach(l => l()); }
@@ -90,7 +92,10 @@ export default function DocumentsPage() {
   const [drafts, setDrafts] = useState<GeneratedDocumentRecord[]>([]);
   const [currentDocumentId, setCurrentDocumentId] = useState<string | null>(null);
   const [exporting, setExporting] = useState<string | null>(null);
-  const [regeneratingChapter, setRegeneratingChapter] = useState<string | null>(null);
+  const [refinePrompt, setRefinePrompt] = useState('');
+  const [refining, setRefining] = useState(false);
+  const [editHistory, setEditHistory] = useState<EditHistoryItem[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [templateValidations, setTemplateValidations] = useState<Record<string, DocumentTemplateValidation>>({});
   const fileRoleOptions = roles.filter(role => role.type === 'file').map(role => ({ label: role.name, value: role.id }));
@@ -110,6 +115,7 @@ export default function DocumentsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerMode, setDrawerMode] = useState<'workflow' | 'editor'>('workflow');
   const recoveryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const refineRequestRef = useRef(0);
 
   const loadDrafts = async () => { try { setDrafts((await getGeneratedDocuments()).documents); } catch { setDrafts([]); } };
 
@@ -169,8 +175,12 @@ export default function DocumentsPage() {
   const stagePromptName = (stage: GeneratedDocumentDraft['executionStages'][number]) => stage.promptName || promptDisplayName(stage.promptId);
   const templateFileTagRender = (props: { label: ReactNode; value: string; closable: boolean; onClose: () => void }) => <Tag closable={props.closable} onClose={props.onClose} color="blue" title={props.value} style={{ margin: '1px 2px', fontSize: 11, lineHeight: '18px', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{fileDisplayName(props.value)}</Tag>;
 
+  const resetEditAssist = () => {
+    refineRequestRef.current += 1;
+    setRefinePrompt(''); setEditHistory([]); setHistoryOpen(false); setRefining(false);
+  };
   const openDrawerForWorkflow = (id: string) => {
-    setTemplateId(id); setCurrentDocumentId(null); setDraft(null); setContent('');
+    setTemplateId(id); setCurrentDocumentId(null); setDraft(null); setContent(''); resetEditAssist();
     setDrawerMode('workflow'); setDrawerOpen(true); setLeftTab('drafts');
   };
   const openDrawerForEditor = async (item: GeneratedDocumentRecord) => {
@@ -178,6 +188,7 @@ export default function DocumentsPage() {
     const isGenerating = isDraftGenerating(item.status);
     if (isGenerating || item.status === 'failed') {
       genStarted.current = true;
+      resetEditAssist();
       setDraft(null); setContent(''); setLoading(isGenerating);
       setDrawerMode('workflow'); setDrawerOpen(true);
       try {
@@ -191,7 +202,7 @@ export default function DocumentsPage() {
       return;
     }
 
-    setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null);
+    setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null); resetEditAssist();
     try {
       const { document } = await getGeneratedDocument(item.id);
       setDraft(document.draft || null); setContent(document.editedMarkdown || document.markdown);
@@ -466,7 +477,7 @@ export default function DocumentsPage() {
     try {
       const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
       const ext = fmt === 'markdown' ? 'md' : fmt;
-      const payload = currentDocumentId ? { documentId: currentDocumentId, title: draft.title, format: fmt, enforceGate: false, exportGate: draft.exportGate } : { title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, useClientMarkdown: true };
+      const payload = { documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, useClientMarkdown: true };
       const blob = await exportDocument(payload);
       dl(blob, `${draft.title}.${ext}`, mimes[fmt]);
     } catch (e) { message.error(e instanceof Error ? e.message : t('common.error')); } finally { setExporting(null); }
@@ -475,10 +486,30 @@ export default function DocumentsPage() {
     if (!draft) return;
     try { if (currentDocumentId) await updateGeneratedDocument(currentDocumentId, { editedMarkdown: content, markdown: content }); else { const r = await saveDocumentDraft({ ...draft, markdown: content }); setDraft(r.draft); } await loadDrafts(); message.success(t('common.success')); } catch { message.error(t('common.error')); }
   };
-  const replaceCh = (old: DocumentDraftChapter, nw: DocumentDraftChapter) => { setContent(prev => prev.includes(old.content) ? prev.replace(old.content, nw.content) : `${prev}\n\n${nw.content}`); };
-  const regenCh = async (ch: DocumentDraftChapter) => {
-    if (!draft) return; setRegeneratingChapter(ch.id);
-    try { const r = await regenerateDocumentChapter({ templateId: draft.templateId, chapterId: ch.id, documentId: currentDocumentId || undefined, currentMarkdown: content, existingFacts: draft.structuredFacts?.map(fact => fact.value) }); setDraft({ ...draft, chapters: draft.chapters.map(c => c.id === ch.id ? r.chapter : c) }); replaceCh(ch, r.chapter); message.success(t('common.success')); } catch { message.error(t('common.error')); } finally { setRegeneratingChapter(null); }
+  const pushHistory = (value: string, prompt: string) => {
+    setEditHistory(prev => [{ id: `${Date.now()}`, content: value, prompt, createdAt: Date.now() }, ...prev].slice(0, 12));
+  };
+  const applyRefine = async () => {
+    const prompt = refinePrompt.trim();
+    if (!draft || !prompt || refining) return;
+    const requestId = refineRequestRef.current + 1;
+    refineRequestRef.current = requestId;
+    setRefining(true);
+    try {
+      const before = content;
+      const documentId = currentDocumentId;
+      const result = await refineGeneratedDocument({ title: draft.title, markdown: before, instruction: prompt, facts: draft.structuredFacts?.map(fact => `${fact.key}: ${fact.value}`), chapters: draft.chapters?.map(chapter => chapter.title) });
+      if (refineRequestRef.current !== requestId || documentId !== currentDocumentId) return;
+      pushHistory(before, prompt);
+      setContent(result.markdown);
+      setRefinePrompt('');
+      message.success('已按提示完成精准修改');
+    } catch (e) { if (refineRequestRef.current === requestId) message.error(e instanceof Error ? e.message : t('common.error')); } finally { if (refineRequestRef.current === requestId) setRefining(false); }
+  };
+  const restoreHistory = (item: EditHistoryItem) => {
+    pushHistory(content, '恢复前版本');
+    setContent(item.content);
+    message.success('已恢复历史版本');
   };
 
   if (pageLoading) return (
@@ -603,11 +634,11 @@ export default function DocumentsPage() {
         style={{ borderRadius: '12px 0 0 12px' }}
         styles={{ body: { padding: '16px 24px' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
         extra={draft ? <Space wrap>
-          <Button icon={<SaveOutlined />} onClick={() => { void saveDraft(); }}>{t('documents.saveDraft')}</Button>
-          <Button icon={<DownloadOutlined />} loading={exporting === 'markdown'} onClick={() => { void doExport('markdown'); }}>MD</Button>
-          <Button loading={exporting === 'html'} onClick={() => { void doExport('html'); }}>HTML</Button>
-          <Button loading={exporting === 'docx'} onClick={() => { void doExport('docx'); }}>DOCX</Button>
-          <Button type="primary" loading={exporting === 'pdf'} onClick={() => { void doExport('pdf'); }}>PDF</Button>
+          <Button icon={<SaveOutlined />} disabled={refining} onClick={() => { void saveDraft(); }}>{t('documents.saveDraft')}</Button>
+          <Button icon={<DownloadOutlined />} disabled={refining} loading={exporting === 'markdown'} onClick={() => { void doExport('markdown'); }}>MD</Button>
+          <Button disabled={refining} loading={exporting === 'html'} onClick={() => { void doExport('html'); }}>HTML</Button>
+          <Button disabled={refining} loading={exporting === 'docx'} onClick={() => { void doExport('docx'); }}>DOCX</Button>
+          <Button type="primary" disabled={refining} loading={exporting === 'pdf'} onClick={() => { void doExport('pdf'); }}>PDF</Button>
         </Space> : (loading && drawerMode === 'workflow') ? <Button danger onClick={handleAbortGeneration}>中止任务</Button> : undefined}
       >
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
@@ -626,14 +657,45 @@ export default function DocumentsPage() {
           {draft && (
             <div ref={editorRef}>
               <Tabs items={[
-                  { key: 'edit', label: t('documents.edit'), children: <TextArea rows={35} value={content} onChange={e => setContent(e.target.value)} /> },
+                  { key: 'edit', label: t('documents.edit'), children: (
+                    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                      <TextArea rows={28} value={content} disabled={refining} onChange={e => setContent(e.target.value)} />
+                      <Card size="small" style={{ borderRadius: 12, background: 'linear-gradient(135deg, var(--colorFillAlter), var(--colorBgContainer))' }}>
+                        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                          <Space align="start" style={{ width: '100%', justifyContent: 'space-between' }}>
+                            <div>
+                              <Space size={6}><ThunderboltOutlined style={{ color: 'var(--colorAccent)' }} /><Text strong>精准修改</Text><Tag color="blue">AI 辅助</Tag></Space>
+                              <div style={{ marginTop: 4, color: 'var(--colorTextSecondary)', fontSize: 12 }}>针对当前编辑内容补充更具体的要求，AI 会保留文档结构并按你的提示细化修改。</div>
+                            </div>
+                            <Button size="small" icon={<HistoryOutlined />} onClick={() => setHistoryOpen(v => !v)} disabled={editHistory.length === 0}>历史版本 {editHistory.length > 0 ? editHistory.length : ''}</Button>
+                          </Space>
+                          <TextArea rows={4} value={refinePrompt} disabled={refining} onChange={e => setRefinePrompt(e.target.value)} placeholder="例如：把第三章语气改得更专业，补充工期风险应对；或压缩全文到 3000 字以内，并保留关键事实。" />
+                          <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
+                            <Space wrap>
+                              {['更专业', '更简洁', '强化细节', '优化结构'].map(text => <Button key={text} size="small" disabled={refining} onClick={() => setRefinePrompt(prev => prev ? `${prev}；${text}` : text)}>{text}</Button>)}
+                            </Space>
+                            <Button type="primary" icon={<ThunderboltOutlined />} loading={refining} disabled={!refinePrompt.trim()} onClick={() => { void applyRefine(); }}>应用修改</Button>
+                          </Space>
+                          {historyOpen && (
+                            <div style={{ borderTop: '1px solid var(--colorBorderSecondary)', paddingTop: 12 }}>
+                              <List size="small" dataSource={editHistory} locale={{ emptyText: '暂无历史版本' }} renderItem={item => (
+                                <List.Item actions={[<Button key="restore" size="small" disabled={refining} onClick={() => restoreHistory(item)}>恢复</Button>]}>
+                                  <List.Item.Meta title={<Space><Text>{new Date(item.createdAt).toLocaleString()}</Text><Tag>{item.prompt}</Tag></Space>} description={<Text type="secondary" ellipsis>{item.content.replace(/\s+/gu, ' ').slice(0, 120)}</Text>} />
+                                </List.Item>
+                              )} />
+                            </div>
+                          )}
+                        </Space>
+                      </Card>
+                    </Space>
+                  ) },
                   {
                     key: 'chapters-facts', label: '章节与事实',
                     children: <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                       {draft.chapters.length > 0 && <div>
                         <Text strong style={{ fontSize: 13, marginBottom: 8, display: 'block' }}>章节 ({draft.chapters.length})</Text>
                         <List size="small" dataSource={draft.chapters} renderItem={c => (
-                          <List.Item actions={[<Button key="regen" size="small" icon={<ReloadOutlined />} loading={regeneratingChapter === c.id} onClick={() => { void regenCh(c); }}>重新生成</Button>]}>
+                          <List.Item>
                             <List.Item.Meta title={c.title} description={`证据: ${c.evidence.length} · 缺失: ${c.missingFacts.length}`} />
                           </List.Item>
                         )} />
