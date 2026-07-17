@@ -1,5 +1,11 @@
 # server
 
+## 4.0.45
+
+### Patch Changes
+
+- Release scanned PDF OCR stability fix through the CLI and server packages.
+
 ## 4.0.44
 
 ### Patch Changes

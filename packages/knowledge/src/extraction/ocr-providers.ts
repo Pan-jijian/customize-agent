@@ -21,12 +21,14 @@ export interface OcrResult {
   text: string;
   confidence: number;
   regions: OcrRegion[];
+  warnings?: string[];
 }
 
 export interface OcrProvider {
   readonly id: string;
   readonly available: boolean;
   recognize(input: { data: Uint8Array; width: number; height: number; channels?: number; filePath?: string }): Promise<OcrResult>;
+  getWarnings?(): string[];
   dispose(): Promise<void>;
 }
 
@@ -46,6 +48,9 @@ function tessdataDir(): string {
 export class TesseractJsProvider implements OcrProvider {
   readonly id = 'tesseract.js';
   private _available: boolean | null = null;
+  private worker: { recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> } | null = null;
+  private workerPromise: Promise<{ recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> }> | null = null;
+  private warnings: string[] = [];
 
   get available(): boolean {
     if (this._available !== null) return this._available;
@@ -62,9 +67,6 @@ export class TesseractJsProvider implements OcrProvider {
   }
 
   async recognize(input: { data: Uint8Array; width: number; height: number; channels?: number; filePath?: string }): Promise<OcrResult> {
-    const tessMod = await resolveAndImport('tesseract.js');
-    const { createWorker } = tessMod as any;
-
     let pngPath: string;
     let tmpDir: string | null = null;
 
@@ -87,43 +89,69 @@ export class TesseractJsProvider implements OcrProvider {
     }
 
     try {
-      // tesseract.js worker（数组形式 languages）
-      const worker = await createWorker(['chi_sim', 'eng'], 1, {
-        langPath: tessdataDir(),
-        gzip: false,
-      });
+      const worker = await this.getWorker();
+      const result = await worker.recognize(pngPath);
+      const text = (result.data.text ?? '').trim();
+      const lines = (result.data.lines ?? []) as Array<{
+        text?: string; confidence?: number;
+        bbox?: { x0: number; y0: number; x1: number; y1: number };
+      }>;
 
-      try {
-        const result = await worker.recognize(pngPath);
-        const text = (result.data.text ?? '').trim();
-        const lines = (result.data.lines ?? []) as Array<{
-          text?: string; confidence?: number;
-          bbox?: { x0: number; y0: number; x1: number; y1: number };
-        }>;
+      const regions: OcrRegion[] = lines
+        .filter((l) => l.text?.trim())
+        .map((l) => ({
+          text: l.text!.trim(),
+          confidence: l.confidence ?? 0,
+          box: {
+            x: l.bbox?.x0 ?? 0,
+            y: l.bbox?.y0 ?? 0,
+            width: (l.bbox?.x1 ?? 0) - (l.bbox?.x0 ?? 0),
+            height: (l.bbox?.y1 ?? 0) - (l.bbox?.y0 ?? 0),
+          },
+        }));
 
-        const regions: OcrRegion[] = lines
-          .filter((l) => l.text?.trim())
-          .map((l) => ({
-            text: l.text!.trim(),
-            confidence: l.confidence ?? 0,
-            box: {
-              x: l.bbox?.x0 ?? 0,
-              y: l.bbox?.y0 ?? 0,
-              width: (l.bbox?.x1 ?? 0) - (l.bbox?.x0 ?? 0),
-              height: (l.bbox?.y1 ?? 0) - (l.bbox?.y0 ?? 0),
-            },
-          }));
-
-        return { text, confidence: result.data.confidence ?? 0, regions };
-      } finally {
-        await worker.terminate();
-      }
+      return { text, confidence: result.data.confidence ?? 0, regions, warnings: this.getWarnings() };
     } finally {
       if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   }
 
-  async dispose(): Promise<void> {}
+  getWarnings(): string[] {
+    return [...new Set(this.warnings)].slice(-20);
+  }
+
+  private async getWorker(): Promise<{ recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> }> {
+    if (this.worker) return this.worker;
+    if (!this.workerPromise) this.workerPromise = this.createReusableWorker();
+    this.worker = await this.workerPromise;
+    return this.worker;
+  }
+
+  private async createReusableWorker(): Promise<{ recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> }> {
+    const tessMod = await resolveAndImport('tesseract.js');
+    const { createWorker, OEM, setLogging } = tessMod as any;
+    if (typeof setLogging === 'function') setLogging(false);
+    const worker = await createWorker('chi_sim', OEM?.LSTM_ONLY ?? 1, {
+      langPath: tessdataDir(),
+      gzip: false,
+      logger: () => undefined,
+      errorHandler: (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.trim()) this.warnings.push(message.trim());
+      },
+    }) as { recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> };
+    if (typeof worker.setParameters === 'function') {
+      await worker.setParameters({ preserve_interword_spaces: '0', user_defined_dpi: '300' });
+    }
+    return worker;
+  }
+
+
+  async dispose(): Promise<void> {
+    if (this.worker) await this.worker.terminate();
+    this.worker = null;
+    this.workerPromise = null;
+  }
 }
 
 // ─── 工厂 ───────────────────────────────────────────────────────

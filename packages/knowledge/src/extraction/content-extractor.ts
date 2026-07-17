@@ -1106,7 +1106,8 @@ export class ContentExtractor {
           filePath: imgPath,
         });
 
-        const ocrText = ocrResult.text.trim();
+        const ocrText = this.cleanOcrText(ocrResult.text);
+        if (ocrResult.warnings?.length) warnings.push(...ocrResult.warnings.map(item => `OCR 警告: ${item}`));
         if (ocrText) {
           ocrPages.push(i + 1);
           ocrStrategies.push({ page: i + 1, strategy: renderer, score: this.scoreOcrText(ocrText) });
@@ -1118,6 +1119,8 @@ export class ContentExtractor {
         failedPages.push({ page: i + 1, reason: error instanceof Error ? error.message : String(error) });
       }
     }
+
+    if (ocrProvider) await (ocrProvider as OcrProvider).dispose();
 
     // 清理临时文件
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { warnings.push('PDF OCR 临时文件清理失败'); }
@@ -1200,6 +1203,16 @@ export class ContentExtractor {
     const latinCount = (text.match(/[A-Za-z]/g) ?? []).length;
     const replacementCount = (text.match(/[�□]/gu) ?? []).length;
     return cjkCount * 8 + normalizedLength - latinCount * 0.8 - replacementCount * 10;
+  }
+
+  private cleanOcrText(value: string): string {
+    return String(value ?? '')
+      .replace(/[ \t]+/gu, ' ')
+      .replace(/([\p{Script=Han}])\s+([\p{Script=Han}])/gu, '$1$2')
+      .replace(/([\p{Script=Han}])\s+([，。；：！？、）】》])/gu, '$1$2')
+      .replace(/([（【《])\s+([\p{Script=Han}])/gu, '$1$2')
+      .replace(/\n{3,}/gu, '\n\n')
+      .trim();
   }
 
   /** 加载图片像素数据（依赖 sharp） */

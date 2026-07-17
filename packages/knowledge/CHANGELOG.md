@@ -1,5 +1,11 @@
 # @customize-agent/knowledge
 
+## 4.0.16
+
+### Patch Changes
+
+- Improve scanned PDF OCR stability and clean up Tesseract worker logging.
+
 ## 4.0.15
 
 ### Patch Changes

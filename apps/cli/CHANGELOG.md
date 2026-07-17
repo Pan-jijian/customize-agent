@@ -1,5 +1,13 @@
 # customize-agent
 
+## 4.0.36
+
+### Patch Changes
+
+- Release scanned PDF OCR stability fix through the CLI and server packages.
+- Updated dependencies
+  - @customize-agent/server@4.0.45
+
 ## 4.0.35
 
 ### Patch Changes
