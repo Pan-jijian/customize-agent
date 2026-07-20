@@ -69,10 +69,15 @@ export class TesseractJsProvider implements OcrProvider {
   async recognize(input: { data: Uint8Array; width: number; height: number; channels?: number; filePath?: string }): Promise<OcrResult> {
     let pngPath: string;
     let tmpDir: string | null = null;
+    let width = input.width;
+    let height = input.height;
 
     // 如果传了 filePath，直接使用；否则 raw pixels → PNG
     if (input.filePath && fs.existsSync(input.filePath)) {
       pngPath = input.filePath;
+      const dimensions = await this.readImageDimensions(pngPath);
+      width = dimensions?.width ?? width;
+      height = dimensions?.height ?? height;
     } else {
       const sharpMod = await resolveAndImport('sharp');
       const sharpFn = (sharpMod as any).default ?? sharpMod;
@@ -86,6 +91,10 @@ export class TesseractJsProvider implements OcrProvider {
         .removeAlpha().normalize().linear(3.0, -150)
         .withMetadata({ density: 288 })
         .png().toFile(pngPath);
+    }
+
+    if (this.isTooSmallForOcr(width, height)) {
+      return { text: '', confidence: 0, regions: [], warnings: [`image too small for OCR: ${width}x${height}`] };
     }
 
     try {
@@ -118,6 +127,23 @@ export class TesseractJsProvider implements OcrProvider {
 
   getWarnings(): string[] {
     return [...new Set(this.warnings)].slice(-20);
+  }
+
+  private async readImageDimensions(filePath: string): Promise<{ width: number; height: number } | undefined> {
+    try {
+      const sharpMod = await resolveAndImport('sharp');
+      const sharpFn = (sharpMod as any).default ?? sharpMod;
+      const metadata = await sharpFn(filePath).metadata();
+      const width = Number(metadata.width ?? 0);
+      const height = Number(metadata.height ?? 0);
+      return width > 0 && height > 0 ? { width, height } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private isTooSmallForOcr(width: number, height: number): boolean {
+    return width < 8 || height < 8 || width * height < 128;
   }
 
   private async getWorker(): Promise<{ recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> }> {

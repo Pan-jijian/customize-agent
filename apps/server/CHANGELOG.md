@@ -1,5 +1,67 @@
 # server
 
+## 4.0.56
+
+### Patch Changes
+
+- 允许文档在存在导出风险提示时继续导出，并保留复核提示。
+
+## 4.0.55
+
+### Patch Changes
+
+- 完善文档生成进度状态收敛、共享证据复用，以及长连续文本切片稳定性。
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.21
+
+## 4.0.54
+
+### Patch Changes
+
+- 加固文档生成进度状态、共享证据去重与长连续文本切片边界。
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.20
+
+## 4.0.53
+
+### Patch Changes
+
+- 修复文档工作流生成前置阶段进度反馈、共享资料证据池复用，以及图片 OCR 小图/无文字处理噪声。
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.19
+
+## 4.0.52
+
+### Patch Changes
+
+- Fix dashboard production startup, template-bound material readiness, and stale dashboard health checks.
+
+## 4.0.51
+
+### Patch Changes
+
+- Prevent tiny images from entering OCR during knowledge indexing and publish the fix through the server and CLI packages.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.18
+
+## 4.0.50
+
+### Patch Changes
+
+- Improve folder upload resilience and knowledge file listing visibility.
+
+## 4.0.49
+
+### Patch Changes
+
+- Strengthen document budget generation and export gate enforcement.
+
+## 4.0.48
+
+### Patch Changes
+
+- Relax outline title validation for explicit outline input.
+
 ## 4.0.47
 
 ### Patch Changes

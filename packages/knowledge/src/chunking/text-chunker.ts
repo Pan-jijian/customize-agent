@@ -345,6 +345,17 @@ export class TextChunker {
   }
 
   private splitByWindow(text: string, maxTokens: number, overlapTokens = 0): string[] {
+    if (this.hasLongUnbrokenSegment(text) && text.length > Math.max(2000, maxTokens * 3)) {
+      const maxChars = Math.max(1, maxTokens);
+      const overlapChars = Math.max(0, Math.min(Math.floor(maxChars / 2), overlapTokens));
+      const step = Math.max(1, maxChars - overlapChars);
+      const chunks: string[] = [];
+      for (let start = 0; start < text.length; start += step) {
+        chunks.push(text.slice(start, start + maxChars).trim());
+        if (start + maxChars >= text.length) break;
+      }
+      return chunks.filter(Boolean);
+    }
     const tokens = this.tokenizer.encode(text);
     if (tokens.length <= maxTokens) return [text.trim()].filter(Boolean);
     const maxChars = Math.max(200, Math.ceil(text.length * (maxTokens / Math.max(1, tokens.length))));
@@ -490,7 +501,7 @@ export class TextChunker {
         startChar: candidate.startChar,
         endChar: candidate.endChar,
         splitStrategy: 'recursive_parent_child_v2',
-        parentText: candidate.parentText, // <=== 原始父块内容
+        parentText: candidate.childIndex === 0 ? candidate.parentText : undefined,
       },
     };
   }
@@ -516,7 +527,12 @@ export class TextChunker {
     return text.slice(Math.max(0, text.length - chars));
   }
 
+  private hasLongUnbrokenSegment(text: string): boolean {
+    return /[^\s\n\r\t。？！；;.!?，、]{2001,}/u.test(text);
+  }
+
   private estimateTokens(text: string): number {
+    if (this.hasLongUnbrokenSegment(text)) return text.length;
     return Math.max(1, this.tokenizer.countTokens(text));
   }
 }

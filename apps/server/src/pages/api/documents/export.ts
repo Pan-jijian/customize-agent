@@ -379,7 +379,7 @@ function isExportBlockingIssue(issue: { message: string }) {
   const message = issue.message.trim();
   // 事实冲突和必需章节缺失属于警告，不阻止导出
   if (/^(事实冲突|必需章节缺失)：/u.test(message)) return false;
-  return /出现禁用文本\s*(资料未提供|占位|TODO|TBD)|正文包含.*(资料未提供|占位)|图片、地图或附件引用路径明显无效|无效路径|表格语法错误|临时远程生成 URL|提示词全文|内部错误|生成未完成|低于目标页数|缺少配置小节|缺少必要的正式表格|正文缺少章节标题/iu.test(message);
+  return /出现禁用文本\s*(资料未提供|占位|TODO|TBD)|正文包含.*(资料未提供|占位)|图片、地图或附件引用路径明显无效|无效路径|表格语法错误|临时远程生成 URL|提示词全文|内部错误|生成未完成|低于目标页数|低于目标字数|文档预算未达成|正文篇幅低于目标|缺少配置小节|缺少必要的正式表格|正文缺少章节标题/iu.test(message);
 }
 
 function markdownStats(markdown: string) {
@@ -523,11 +523,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const format = body.format;
     if (!format || !['markdown', 'html', 'pdf', 'docx'].includes(format)) return res.status(400).json({ error: 'INVALID_EXPORT_FORMAT', message: '请选择有效的导出格式。' });
     const exportIssues = validateExportMarkdown(markdown, normalizeExportUnits(record?.draft?.markdown || record?.markdown || ''));
-    if (exportIssues.length) return res.status(422).json({ error: 'EXPORT_CONTENT_INVALID', issues: exportIssues });
+    if (exportIssues.length > 0) res.setHeader('X-Export-Content-Issues', encodeURIComponent(JSON.stringify(exportIssues.slice(0, 20))));
     const exportGate = record?.draft?.exportGate || body.exportGate;
-    // 过滤并检查导出关卡
+    // 导出门禁仅作为风险提示，不阻断用户导出
     const blockingIssues = exportGate?.blockingIssues?.filter(isExportBlockingIssue) || [];
-    if (body.enforceGate && blockingIssues.length) return res.status(422).json({ error: 'Export gate failed', issues: blockingIssues });
+    const failedChecklist = exportGate?.passed === false && blockingIssues.length === 0 ? [{ message: '导出门禁未通过：存在未完成的检查项' }] : [];
+    const gateIssues = [...blockingIssues, ...failedChecklist];
+    res.setHeader('X-Export-Gate-Passed', gateIssues.length === 0 ? 'true' : 'false');
+    if (gateIssues.length > 0) res.setHeader('X-Export-Gate-Issues', encodeURIComponent(JSON.stringify(gateIssues.map(item => item.message).slice(0, 20))));
     const filename = safeFileName(title);
     // Markdown 格式直接返回文本
     if (format === 'markdown') {

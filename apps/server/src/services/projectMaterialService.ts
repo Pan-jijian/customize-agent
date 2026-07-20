@@ -153,15 +153,11 @@ function topLevelGroup(relativePath: string) {
 function selectMaterialFiles(files: KnowledgeFileDiscoveryItem[], options?: { requirement?: string; boundFilePaths?: string[] }) {
   const active = files.filter(file => file.status !== 'error');
   const boundKeys = new Set((options?.boundFilePaths || []).map(normalizePathKey));
-  const boundFiles = active.filter(file => {
-    const key = normalizePathKey(file.relativePath);
-    return boundKeys.has(key) || [...boundKeys].some(bound => key.endsWith(bound) || bound.endsWith(key));
-  });
+  const boundFiles = active.filter(file => boundKeys.has(normalizePathKey(file.relativePath)));
   if (boundFiles.length > 0) {
     const groups = [...new Set(boundFiles.map(file => topLevelGroup(file.relativePath)).filter(Boolean))];
     const selectedGroup = groups.length === 1 ? groups[0] : undefined;
-    const selected = selectedGroup ? active.filter(file => topLevelGroup(file.relativePath) === selectedGroup) : boundFiles;
-    return { files: selected, reason: selectedGroup ? `模板绑定文件定位到资料组：${selectedGroup}` : '使用模板绑定文件作为资料范围', ambiguous: groups.length > 1 };
+    return { files: boundFiles, reason: selectedGroup ? `模板绑定文件定位到资料组：${selectedGroup}` : '使用模板显式绑定文件作为资料范围', ambiguous: false };
   }
   const requirement = (options?.requirement || '').trim();
   if (requirement) {

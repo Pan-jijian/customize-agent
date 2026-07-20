@@ -94,15 +94,19 @@ function appendUploadForm(files: File[], opts: { projectRoot?: string; uploadId?
 }
 
 export async function uploadKbFile(file: File, projectRoot?: string, uploadId?: string) {
-  return fetchJson<KbUploadBatchResult>('/api/kb/upload', {
+  const params = new URLSearchParams();
+  if (uploadId) params.set('uploadId', uploadId);
+  params.set('batchIndex', '0');
+  params.set('totalBatches', '1');
+  return fetchJson<KbUploadBatchResult>(`/api/kb/upload?${params}`, {
     method: 'POST',
     body: appendUploadForm([file], { projectRoot, uploadId, batchIndex: 0, totalBatches: 1, fileOffset: 0, startIndex: true }),
   });
 }
 
 export async function uploadKbFiles(files: File[], projectRoot?: string, uploadId?: string, onBatchProgress?: (progress: { uploadedFiles: number; totalFiles: number; batchIndex: number; totalBatches: number }) => void) {
-  const maxFilesPerBatch = Number(process.env.NEXT_PUBLIC_CUSTOMIZE_KB_UPLOAD_BATCH_FILES || 1000);
-  const maxBytesPerBatch = Number(process.env.NEXT_PUBLIC_CUSTOMIZE_KB_UPLOAD_BATCH_BYTES || 1024 * 1024 * 1024);
+  const maxFilesPerBatch = Number(process.env.NEXT_PUBLIC_CUSTOMIZE_KB_UPLOAD_BATCH_FILES || 500);
+  const maxBytesPerBatch = Number(process.env.NEXT_PUBLIC_CUSTOMIZE_KB_UPLOAD_BATCH_BYTES || 128 * 1024 * 1024);
   const batches: File[][] = [];
   let current: File[] = [];
   let currentBytes = 0;
@@ -121,7 +125,9 @@ export async function uploadKbFiles(files: File[], projectRoot?: string, uploadI
   let uploadedFiles = 0;
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
     const batch = batches[batchIndex]!;
-    const result = await fetchJson<KbUploadBatchResult>('/api/kb/upload', {
+    const params = new URLSearchParams({ batchIndex: String(batchIndex), totalBatches: String(batches.length) });
+    if (uploadId) params.set('uploadId', uploadId);
+    const result = await fetchJson<KbUploadBatchResult>(`/api/kb/upload?${params}`, {
       method: 'POST',
       body: appendUploadForm(batch, {
         projectRoot,
@@ -300,7 +306,7 @@ export interface StructuredTableFact { tableType: string; sheet?: string; header
 export interface DocumentFactsModel { project: DocumentFact[]; schedule: DocumentFact[]; quality: DocumentFact[]; safety: DocumentFact[]; resources: DocumentFact[]; tables: StructuredTableFact[]; drawings: DocumentFact[]; rules: DocumentFact[]; specifications: DocumentFact[]; schemaFacts: Record<string, DocumentFact[]>; missing: string[]; conflicts: string[]; }
 export interface ValidationIssue { level: 'error' | 'warning' | 'info'; message: string; source?: string; suggestion?: string; }
 export interface ExportGateResult { passed: boolean; blockingIssues: ValidationIssue[]; checklist: Array<{ key: string; label: string; passed: boolean; message?: string }>; }
-export interface DocumentExecutionStage { type: 'role_binding' | 'knowledge_retrieval' | 'context_recall' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference'; roleId: string; promptId?: string; status: 'success' | 'fallback' | 'skipped' | 'failed'; message?: string; title?: string; subtitle?: string; roleName?: string; promptName?: string; group?: string; order?: number; executionVersion?: 2; }
+export interface DocumentExecutionStage { type: 'role_binding' | 'knowledge_retrieval' | 'context_recall' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference'; roleId: string; promptId?: string; status: 'running' | 'success' | 'fallback' | 'skipped' | 'failed'; message?: string; title?: string; subtitle?: string; roleName?: string; promptName?: string; group?: string; order?: number; executionVersion?: 2; }
 export interface DocumentAsset { id: string; type: 'image' | 'audio' | 'video' | 'file'; role: 'cover' | 'reference' | 'generated' | 'attachment' | 'map' | 'operator'; path?: string; url?: string; prompt?: string; modelProvider?: string; status: 'generated' | 'prompt_ready' | 'fallback'; message?: string; }
 export interface GeneratedAssetRecord extends DocumentAsset { name: string; source: 'knowledge_base' | 'generated' | 'uploaded' | 'external_url'; indexed: boolean; usedByDocumentIds: string[]; createdAt: number; updatedAt: number; }
 export interface GeneratedDocumentRecord { id: string; taskId?: string; templateId: string; templateName?: string; title: string; requirement: string; markdown: string; editedMarkdown?: string; status: 'generating' | 'completed' | 'warning' | 'failed'; draft?: GeneratedDocumentDraft; executionStages?: GeneratedDocumentDraft['executionStages']; assets: DocumentAsset[]; createdAt: number; updatedAt: number; completedAt?: number; error?: string; warningIssues?: string[]; }

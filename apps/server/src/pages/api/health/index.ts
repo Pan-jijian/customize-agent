@@ -8,7 +8,14 @@ const buildIdCandidates = [
   join(process.cwd(), 'apps', 'server', '.next', 'BUILD_ID'),
 ];
 const buildIdPath = buildIdCandidates.find(existsSync);
-const processBuildId = process.env.CUSTOMIZE_DASHBOARD_BUILD_ID ?? (buildIdPath ? readFileSync(buildIdPath, 'utf-8').trim() : null);
+let processBuildId: string | null = process.env.CUSTOMIZE_DASHBOARD_BUILD_ID ?? null;
+if (!processBuildId && buildIdPath) {
+  try {
+    processBuildId = readFileSync(buildIdPath, 'utf-8').trim();
+  } catch {
+    processBuildId = null;
+  }
+}
 
 /** 健康检查 API：返回服务运行状态、启动时间和构建信息 */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {

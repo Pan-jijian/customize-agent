@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Typography } from 'antd';
-import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined, HistoryOutlined } from '@ant-design/icons';
-import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getPromptProjects, refineGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, searchKbFiles, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig, type PromptProject } from '@/lib/api';
+import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Tree, Typography } from 'antd';
+import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined, HistoryOutlined, FolderOutlined } from '@ant-design/icons';
+import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFiles, getPromptProjects, refineGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig, type PromptProject } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const { TextArea } = Input;
@@ -45,6 +45,14 @@ function templateIcon(category: string, isActive: boolean) {
 
 type TemplateFileBinding = NonNullable<DocumentTemplate['fileBindings']>[number];
 type TemplateEditorForm = DocumentTemplate & { fileBindingGroups?: Record<string, string[]> };
+interface TemplateFileTreeNode {
+  key: string;
+  title: ReactNode;
+  rawTitle: string;
+  isFolder: boolean;
+  fileCount: number;
+  children?: TemplateFileTreeNode[];
+}
 
 function uniqueValues(values: string[]) {
   return [...new Set(values.map(value => value.trim()).filter(Boolean))];
@@ -59,6 +67,69 @@ function groupFileBindings(bindings: TemplateFileBinding[] = []) {
     groups[binding.roleId] = uniqueValues([...(groups[binding.roleId] || []), binding.filePath]);
     return groups;
   }, {});
+}
+
+function buildTemplateFileTree(files: KbFileItem[]): TemplateFileTreeNode[] {
+  const root: Record<string, TemplateFileTreeNode> = {};
+  for (const file of [...files].sort((a, b) => a.relativePath.localeCompare(b.relativePath, 'zh-CN'))) {
+    const parts = file.relativePath.split('/').filter(Boolean);
+    let currentPath = '';
+    for (let index = 0; index < parts.length; index++) {
+      const name = parts[index]!;
+      const parentPath = currentPath;
+      currentPath = currentPath ? `${currentPath}/${name}` : name;
+      const isLast = index === parts.length - 1;
+      if (!root[currentPath]) {
+        root[currentPath] = {
+          key: currentPath,
+          rawTitle: name,
+          title: isLast ? <span title={file.relativePath}>{name}</span> : <Space size={4}><FolderOutlined style={{ color: '#faad14' }} /><span>{name}</span></Space>,
+          isFolder: !isLast,
+          fileCount: isLast ? 1 : 0,
+          ...(isLast ? {} : { children: [] }),
+        };
+        if (parentPath && root[parentPath]?.children) root[parentPath]!.children!.push(root[currentPath]!);
+      }
+      if (isLast) root[currentPath]!.fileCount = 1;
+    }
+  }
+  const aggregate = (nodes: TemplateFileTreeNode[]) => {
+    for (const node of nodes) {
+      if (!node.children?.length) continue;
+      aggregate(node.children);
+      node.fileCount = node.children.reduce((sum, child) => sum + child.fileCount, 0);
+      node.title = <Space size={4}><FolderOutlined style={{ color: '#faad14' }} /><span>{node.rawTitle}</span><Tag style={{ margin: 0 }}>{node.fileCount}</Tag></Space>;
+    }
+  };
+  const topLevel = Object.values(root).filter(node => !node.key.includes('/'));
+  aggregate(topLevel);
+  return topLevel.filter(node => !node.isFolder || node.fileCount > 0);
+}
+
+function filterTemplateFileTree(nodes: TemplateFileTreeNode[], query: string): TemplateFileTreeNode[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return nodes;
+  return nodes.flatMap(node => {
+    const children = node.children ? filterTemplateFileTree(node.children, q) : undefined;
+    const matched = node.key.toLowerCase().includes(q) || node.rawTitle.toLowerCase().includes(q);
+    if (matched || children?.length) return [{ ...node, children }];
+    return [];
+  });
+}
+
+function collectTemplateFileKeys(nodes: TemplateFileTreeNode[]) {
+  const keys: string[] = [];
+  const walk = (items: TemplateFileTreeNode[]) => {
+    for (const item of items) {
+      if (item.isFolder) {
+        if (item.children) walk(item.children);
+      } else {
+        keys.push(item.key);
+      }
+    }
+  };
+  walk(nodes);
+  return keys;
 }
 
 const STAGE_TITLES: Record<string, string> = {
@@ -85,6 +156,8 @@ export default function DocumentsPage() {
   const [prompts, setPrompts] = useState<PromptProject[]>([]);
   const [kbFiles, setKbFiles] = useState<KbFileItem[]>([]);
   const [fileSearching, setFileSearching] = useState(false);
+  const [templateFileQuery, setTemplateFileQuery] = useState('');
+  const [expandedTemplateFileKeys, setExpandedTemplateFileKeys] = useState<React.Key[]>([]);
   const [pageLoading, setPageLoading] = useState(true);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState<GeneratedDocumentDraft | null>(null);
@@ -99,15 +172,18 @@ export default function DocumentsPage() {
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [templateValidations, setTemplateValidations] = useState<Record<string, DocumentTemplateValidation>>({});
   const fileRoleOptions = roles.filter(role => role.type === 'file').map(role => ({ label: role.name, value: role.id }));
-  const selectedGroups = (form.getFieldValue('fileBindingGroups') || {}) as Record<string, string[]>;
-  const selectedFilePaths = uniqueValues(Object.values(selectedGroups).flat());
-  const kbFileOptions = uniqueValues([...selectedFilePaths, ...kbFiles.map(file => file.relativePath)]).map(path => {
-    const file = kbFiles.find(item => item.relativePath === path);
-    return {
-      label: <div title={path} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fileDisplayName(path)}</span>{file && <Tag style={{ margin: 0 }}>{file.status}</Tag>}</div>,
-      value: path,
+  const selectedGroups = (Form.useWatch('fileBindingGroups', form) || {}) as Record<string, string[]>;
+  const templateFileTree = useMemo(() => buildTemplateFileTree(kbFiles), [kbFiles]);
+  const filteredTemplateFileTree = useMemo(() => filterTemplateFileTree(templateFileTree, templateFileQuery), [templateFileTree, templateFileQuery]);
+  const allTemplateFileKeys = useMemo(() => collectTemplateFileKeys(templateFileTree), [templateFileTree]);
+  const allTemplateTreeKeys = useMemo(() => {
+    const keys: string[] = [];
+    const walk = (nodes: TemplateFileTreeNode[]) => {
+      for (const node of nodes) { keys.push(node.key); if (node.children) walk(node.children); }
     };
-  });
+    walk(templateFileTree);
+    return keys;
+  }, [templateFileTree]);
   const [flowSteps, setFlowSteps] = useState<FlowStep[]>([]);
   const [activeFlowKey, setActiveFlowKey] = useState<string | null>(null);
   const [leftTab, setLeftTab] = useState<string>('templates');
@@ -173,7 +249,6 @@ export default function DocumentsPage() {
   const promptDisplayName = (promptId?: string) => promptId ? prompts.find(prompt => prompt.id === promptId)?.projectName || roles.find(role => role.id === promptId)?.name || STAGE_ROLE_NAMES[promptId] || '未知提示词' : '';
   const stageActorName = (stage: GeneratedDocumentDraft['executionStages'][number]) => stage.subtitle || stage.roleName || roleDisplayName(stage.roleId) || STAGE_TITLES[stage.type] || stage.type;
   const stagePromptName = (stage: GeneratedDocumentDraft['executionStages'][number]) => stage.promptName || promptDisplayName(stage.promptId);
-  const templateFileTagRender = (props: { label: ReactNode; value: string; closable: boolean; onClose: () => void }) => <Tag closable={props.closable} onClose={props.onClose} color="blue" title={props.value} style={{ margin: '1px 2px', fontSize: 11, lineHeight: '18px', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{fileDisplayName(props.value)}</Tag>;
 
   const resetEditAssist = () => {
     refineRequestRef.current += 1;
@@ -250,7 +325,7 @@ export default function DocumentsPage() {
     const first = step.subSteps.findIndex(s => s.status === 'wait');
     return step.subSteps.map((s, i) => i < first || first === -1 ? { ...s, status: 'finish' as const } : i === first ? { ...s, status: 'process' as const } : s);
   };
-  const stageToFlowStatus = (status: GeneratedDocumentDraft['executionStages'][number]['status']): FlowStepStatus => status === 'failed' ? 'error' : status === 'fallback' ? 'warning' : 'finish';
+  const stageToFlowStatus = (status: GeneratedDocumentDraft['executionStages'][number]['status']): FlowStepStatus => status === 'failed' ? 'error' : status === 'running' ? 'process' : status === 'fallback' ? 'warning' : 'finish';
   const stageIcon = (type: GeneratedDocumentDraft['executionStages'][number]['type']) => {
     if (type === 'role_binding') return <ApartmentOutlined />;
     if (type === 'knowledge_retrieval') return <DatabaseOutlined />;
@@ -268,7 +343,7 @@ export default function DocumentsPage() {
     const stages = record.executionStages || record.draft?.executionStages || [];
     if (stages.length > 0) {
       const steps = stages.map((stage, index) => {
-        const status = stageToFlowStatus(stage.status);
+        const status = record.status === 'failed' && stage.status === 'running' ? 'error' : stageToFlowStatus(stage.status);
         return {
           key: `${stage.type}-${index}`,
           title: stage.title || STAGE_TITLES[stage.type] || stage.type,
@@ -319,13 +394,13 @@ export default function DocumentsPage() {
     return () => window.clearInterval(t);
   }, [activeFlowKey, loading]);
 
-  const searchTemplateFiles = async (query: string) => {
+  const loadTemplateFiles = async () => {
     setFileSearching(true);
     try {
-      const result = await searchKbFiles({ query, limit: 120, includeContent: Boolean(query.trim()) });
+      const result = await getKbFiles({ limit: 5000 });
       setKbFiles(result.files);
     } catch {
-      message.error('知识库文件检索失败');
+      message.error('知识库文件加载失败');
     } finally {
       setFileSearching(false);
     }
@@ -335,13 +410,20 @@ export default function DocumentsPage() {
     const value = tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, chapters: [], fileBindings: [] };
     form.resetFields();
     form.setFieldsValue({ ...value, fileBindingGroups: groupFileBindings(value.fileBindings) });
-    void searchTemplateFiles('');
+    setTemplateFileQuery('');
+    void loadTemplateFiles();
     setTemplateModalOpen(true);
   };
+  const updateTemplateFileBinding = (roleId: string, paths: string[]) => {
+    const groups = (form.getFieldValue('fileBindingGroups') || {}) as Record<string, string[]>;
+    form.setFieldValue('fileBindingGroups', { ...groups, [roleId]: uniqueValues(paths) });
+  };
+
   const saveTpl = async () => {
     try {
-      const v = await form.validateFields();
-      const groupValues = (v as TemplateEditorForm).fileBindingGroups || {};
+      await form.validateFields();
+      const v = form.getFieldsValue(true) as TemplateEditorForm;
+      const groupValues = v.fileBindingGroups || {};
       const fileBindings = Object.entries(groupValues).flatMap(([roleId, paths]) => uniqueValues(paths || []).map(filePath => ({ roleId, filePath })));
       const { fileBindingGroups: _fileBindingGroups, ...templateValues } = v as TemplateEditorForm;
       const template = { ...templateValues, chapters: [], fileBindings } as DocumentTemplate;
@@ -477,6 +559,7 @@ export default function DocumentsPage() {
     try {
       const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
       const ext = fmt === 'markdown' ? 'md' : fmt;
+      if (!draft.exportGate.passed) message.warning('导出门禁存在风险项，已允许导出，请下载后人工复核。');
       const payload = { documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, useClientMarkdown: true };
       const blob = await exportDocument(payload);
       dl(blob, `${draft.title}.${ext}`, mimes[fmt]);
@@ -784,14 +867,37 @@ export default function DocumentsPage() {
               <Text strong>项目文件绑定</Text>
               <Tag color="blue">按文件角色多选</Tag>
             </Space>
-            <Alert type="info" showIcon style={{ marginBottom: 12 }} message="每个文件角色下多选对应的知识库文件。用户换项目时，只需要在这里重新选择对应项目资料。" />
-            {fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可用文件角色" /> : fileRoleOptions.map(option => (
-              <Card key={option.value} size="small" style={{ marginBottom: 12 }} title={<Space><Text>{option.label}</Text></Space>}>
-                <Form.Item name={['fileBindingGroups', option.value]}>
-                  <Select mode="multiple" showSearch filterOption={false} loading={fileSearching} onSearch={value => { void searchTemplateFiles(value); }} onFocus={() => { void searchTemplateFiles(''); }} tagRender={templateFileTagRender} placeholder="输入关键词搜索知识库文件" options={kbFileOptions} />
-                </Form.Item>
-              </Card>
-            ))}
+            <Alert type="info" showIcon style={{ marginBottom: 12 }} message="每个文件角色可直接勾选文件或文件夹；勾选文件夹会自动绑定该文件夹下所有文件。保存时仍按具体文件路径绑定，兼容现有模板和生成流程。" />
+            <Input.Search allowClear placeholder="搜索文件或文件夹" value={templateFileQuery} onChange={e => setTemplateFileQuery(e.target.value)} style={{ marginBottom: 12 }} />
+            {fileSearching ? <div style={{ textAlign: 'center', padding: 24 }}><Spin tip="正在加载知识库文件…" /></div> : fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可用文件角色" /> : templateFileTree.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无知识库文件" /> : fileRoleOptions.map(option => {
+              const checkedPaths = uniqueValues(selectedGroups[option.value] || []).filter(path => allTemplateFileKeys.includes(path));
+              const visibleFileKeys = new Set(collectTemplateFileKeys(filteredTemplateFileTree));
+              return (
+                <Card key={option.value} size="small" style={{ marginBottom: 12 }} title={<Space><Text>{option.label}</Text><Tag color="blue">已选 {checkedPaths.length}</Tag></Space>} extra={<Button size="small" disabled={checkedPaths.length === 0} onClick={() => updateTemplateFileBinding(option.value, [])}>清空</Button>}>
+                  <Form.Item name={['fileBindingGroups', option.value]} hidden><Input /></Form.Item>
+                  <div style={{ marginBottom: 8, color: 'var(--colorTextSecondary)', fontSize: 12 }}>
+                    {checkedPaths.length > 0 ? checkedPaths.slice(0, 3).map(fileDisplayName).join('、') + (checkedPaths.length > 3 ? ` 等 ${checkedPaths.length} 个文件` : '') : '未选择文件'}
+                  </div>
+                  <Tree
+                    checkable
+                    blockNode
+                    height={320}
+                    treeData={filteredTemplateFileTree}
+                    checkedKeys={checkedPaths}
+                    expandedKeys={templateFileQuery.trim() ? allTemplateTreeKeys : expandedTemplateFileKeys}
+                    onExpand={keys => setExpandedTemplateFileKeys(keys)}
+                    onCheck={(_, info) => {
+                      const selected = new Set(checkedPaths.filter(path => !visibleFileKeys.has(path)));
+                      for (const node of info.checkedNodes as TemplateFileTreeNode[]) {
+                        if (node.isFolder) collectTemplateFileKeys([node]).forEach(path => selected.add(path));
+                        else selected.add(node.key);
+                      }
+                      updateTemplateFileBinding(option.value, Array.from(selected));
+                    }}
+                  />
+                </Card>
+              );
+            })}
           </div>
           <Alert type="info" showIcon message="文档规范由后台根据模板、提示词和角色绑定自动生成，无需手动维护规范包。" />
         </Form>

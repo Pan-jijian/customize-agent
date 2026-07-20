@@ -3,7 +3,7 @@
 import { Command } from 'commander';
 import { execSync } from 'child_process';
 import { readFileSync } from 'fs';
-import { dirname, resolve } from 'path';
+import { dirname, join, resolve } from 'path';
 import { createRequire } from 'module';
 import { LSPManager } from '@customize-agent/search';
 import { MemoryManager } from '@customize-agent/memory';
@@ -81,7 +81,7 @@ async function ensureProjectWorkspace(projectRoot: string): Promise<void> {
   }
 }
 
-async function runtimeLogFile(name: string, port: number) {
+async function runtimeLogFile(name: string, port: number, mode: 'append' | 'replace' = 'append') {
   const { mkdirSync, openSync } = await import('fs');
   const { join } = await import('path');
   const { homedir, tmpdir } = await import('os');
@@ -95,15 +95,24 @@ async function runtimeLogFile(name: string, port: number) {
     try {
       mkdirSync(logDir, { recursive: true });
       const logPath = join(logDir, `${name}-${port}.log`);
-      return { logPath, fd: openSync(logPath, 'a') };
+      return { logPath, fd: openSync(logPath, mode === 'replace' ? 'w' : 'a') };
     } catch { /* 尝试下一个位置 */ }
   }
   const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
-  return { logPath: nullDevice, fd: openSync(nullDevice, 'a') };
+  return { logPath: nullDevice, fd: openSync(nullDevice, mode === 'replace' ? 'w' : 'a') };
 }
 
-async function dashboardLogFile(port: number) {
-  return runtimeLogFile('dashboard', port);
+async function dashboardLogFile(port: number, mode: 'append' | 'replace' = 'append') {
+  return runtimeLogFile('dashboard', port, mode);
+}
+
+function expectedDashboardBuildId(): string | null {
+  try {
+    const serverPackageJson = require.resolve('@customize-agent/server/package.json');
+    return readFileSync(join(dirname(serverPackageJson), '.next', 'BUILD_ID'), 'utf8').trim();
+  } catch {
+    return null;
+  }
 }
 
 async function readLogTail(logPath: string): Promise<string> {
@@ -116,34 +125,14 @@ async function readLogTail(logPath: string): Promise<string> {
   }
 }
 
-async function pageResourcesAreHealthy(port: number, pagePath: string): Promise<boolean> {
-  const base = `http://127.0.0.1:${port}`;
-  const page = await fetch(`${base}${pagePath}`, { redirect: 'manual' });
-  if (page.status !== 200) return false;
-  const html = await page.text();
-  const resources = [...html.matchAll(/(?:src|href)="([^"]+)"/g)]
-    .map(match => match[1])
-    .filter((url): url is string => Boolean(url))
-    .filter(url => !url.startsWith('data:') && !url.startsWith('#') && !url.startsWith('mailto:'))
-    .map(url => new URL(url, `${base}${pagePath}`))
-    .filter(url => url.origin === base)
-    .map(url => `${url.pathname}${url.search}`);
-  const uniqueResources = [...new Set(resources)];
-  const checks = await Promise.all(uniqueResources.map(async resource => {
-    const response = await fetch(`${base}${resource}`, { redirect: 'manual' });
-    return response.status < 400;
-  }));
-  return checks.every(Boolean);
-}
-
 async function dashboardIsHealthy(port: number): Promise<boolean> {
-  const health = await fetch(`http://127.0.0.1:${port}/api/health`, { redirect: 'manual' }).then(response => response.status === 200);
-  if (!health) return false;
-  const [root, overview] = await Promise.all([
-    pageResourcesAreHealthy(port, '/'),
-    pageResourcesAreHealthy(port, '/overview'),
-  ]);
-  return root && overview;
+  const health = await fetch(`http://127.0.0.1:${port}/api/health`, { redirect: 'manual' });
+  if (health.status !== 200) return false;
+  const data = await health.json().catch(() => null) as { buildId?: string } | null;
+  const expectedBuildId = expectedDashboardBuildId();
+  if (expectedBuildId && data?.buildId && data.buildId !== expectedBuildId) return false;
+  const overview = await fetch(`http://127.0.0.1:${port}/overview`, { redirect: 'manual' });
+  return overview.status === 200;
 }
 
 async function waitForDashboard(port: number, timeoutMs: number): Promise<boolean> {
@@ -167,7 +156,7 @@ async function portIsAvailable(port: number): Promise<boolean> {
     const server = createServer();
     server.once('error', () => resolve(false));
     server.once('listening', () => server.close(() => resolve(true)));
-    server.listen(port, '127.0.0.1');
+    server.listen(port);
   });
 }
 
@@ -194,11 +183,17 @@ async function startDashboardInBackground(port: number): Promise<DashboardStartR
   }
   try {
     const { spawn } = await import('child_process');
-    const { closeSync } = await import('fs');
+    const { closeSync, existsSync } = await import('fs');
     const serverPackageJson = require.resolve('@customize-agent/server/package.json');
     const serverRoot = dirname(serverPackageJson);
+    const verifyScript = join(serverRoot, 'scripts', 'verify-next-static.js');
+    if (existsSync(verifyScript)) {
+      const verify = spawn(process.execPath, [verifyScript], { cwd: serverRoot, stdio: ['ignore', 'ignore', 'ignore'] });
+      const code = await new Promise<number | null>(resolve => verify.on('exit', resolve));
+      if (code !== 0) throw new Error('dashboard build artifacts are incomplete');
+    }
     const nextBin = require.resolve('next/dist/bin/next', { paths: [serverRoot] });
-    const logFile = await dashboardLogFile(port);
+    const logFile = await dashboardLogFile(port, 'replace');
     logPath = logFile.logPath;
     const child = spawn(process.execPath, [nextBin, 'start', '-p', String(port), '-H', '127.0.0.1'], {
       cwd: serverRoot,

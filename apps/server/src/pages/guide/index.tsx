@@ -158,7 +158,7 @@ const operationSections = [
       '查看“来源”，确认事实来自后台自动规范要求的文件角色和绑定资料。',
       '查看“缺失项”，补齐缺失资料或调整角色配置。',
       '查看“校验”，优先处理 error；warning 表示可导出但建议复核。',
-      '查看“导出门禁”，真实 blockingIssues 会阻断 PDF/DOCX 导出，普通 warning 不阻断。',
+      '查看“导出门禁”，真实 blockingIssues 会作为风险提示保留，但不阻断用户导出。',
       '在草稿历史中确认生成状态、warning 原因、整体生成耗时，并可删除不需要的记录。',
       '可以先导出 HTML 预览排版，再导出 DOCX/PDF。',
     ],
@@ -304,12 +304,12 @@ export default function GuidePage() {
         <Col xs={24} lg={8}>
           <Card size="small" title="warning 不是失败">
             <Paragraph>warning 用于提醒用户“文档已经生成，但建议复核”。例如必需事实没有在最佳来源角色中抽到、部分来源需要人工确认、格式或内容有优化建议。warning 会显示在草稿历史和校验详情中，并保留导出能力。</Paragraph>
-            <Paragraph>如果是明确阻断问题，例如正文包含临时图片生成 URL、出现“资料未提供”占位、真实 blockingIssues 未解决，则导出门禁仍会阻断 DOCX/PDF。</Paragraph>
+            <Paragraph>如果存在明确风险问题，例如正文包含临时图片生成 URL、出现“资料未提供”占位、真实 blockingIssues 未解决，导出门禁会提示风险，但仍保留 DOCX/PDF 导出能力。</Paragraph>
           </Card>
         </Col>
         <Col xs={24} lg={8}>
           <Card size="small" title="导出门禁规则">
-            <Paragraph>门禁分为“真实阻断”和“复核建议”。系统不会因为普通 warning 简单禁止导出，但会在出现阻断级问题时保护交付质量。</Paragraph>
+            <Paragraph>门禁分为“高风险提示”和“复核建议”。系统不会禁止导出，但会在出现高风险问题时提醒用户复核交付质量。</Paragraph>
             <ul className="list-disc pl-5 space-y-1"><li>Markdown/HTML 更适合快速预览和人工调整。</li><li>DOCX/PDF 会启用真实门禁检查。</li><li>草稿历史可保留多个版本，便于对比和再次导出。</li></ul>
           </Card>
         </Col>
@@ -363,7 +363,7 @@ export default function GuidePage() {
 
     <Card title="常见问题和处理建议">
       <Collapse items={[
-        { key: 'warning-export', label: '为什么生成完成后显示 warning，但仍然可以导出？', children: <Paragraph>warning 表示文档已生成，但存在建议复核的问题，例如来源角色不完全匹配、某些事实需要人工确认或格式可优化。它不是失败，也不是导出阻断。只有真实 blockingIssues 或 error 级门禁问题才会阻断 DOCX/PDF 导出。</Paragraph> },
+        { key: 'warning-export', label: '为什么生成完成后显示 warning，但仍然可以导出？', children: <Paragraph>warning 表示文档已生成，但存在建议复核的问题，例如来源角色不完全匹配、某些事实需要人工确认或格式可优化。它不是失败，也不会阻断导出；真实 blockingIssues 或 error 级门禁问题会作为高风险提示展示，导出后请人工复核。</Paragraph> },
         { key: 'missing-facts', label: '为什么提示必需事实缺失？', children: <Paragraph>优先检查后台自动规范生成的事实字段、模板章节 requiredFacts 和文件角色绑定。很多情况下不是模型失败，而是资料没有被绑定到正确角色，或字段要求比资料实际内容更严格。</Paragraph> },
         { key: 'draft-duration', label: '草稿历史里的耗时怎么计算？', children: <Paragraph>耗时使用生成记录的 createdAt 到 completedAt 计算；旧记录或未完成记录会使用 updatedAt 兜底。它用于判断本次生成链路整体成本，包括知识库检索、事实抽取、章节生成、资源处理、校验和格式化。</Paragraph> },
         { key: 'asset-index', label: '生成资源会如何进入知识库？', children: <Paragraph>生成资源完成后会自动回流到 knowledgeBase/生成资源 并建立索引，便于后续模板继续复用。资源管理页会展示入库状态，错误资源可以删除后重新生成。</Paragraph> },

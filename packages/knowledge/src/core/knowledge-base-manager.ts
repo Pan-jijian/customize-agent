@@ -11,7 +11,7 @@ import { LocalReranker } from '../embedding/local-reranker.js';
 import { ContentExtractor } from '../extraction/content-extractor.js';
 import type { LLMSearchProvider } from '../llm/llm-search-provider.js';
 import { FederationSearch, type FederatedResult, type FederatedSearchItem, type RetrievalWeights, type SearchFilters } from '../search/federation-search.js';
-import type { DiffResult, IndexStateRecord, KBScope, KnowledgeBaseStats, ProjectConfig } from '../types.js';
+import type { ClassifiedFile, DiffResult, IndexStateRecord, KBScope, KnowledgeBaseStats, ProjectConfig } from '../types.js';
 import { CollectionManager } from '../vector/collection-manager.js';
 import { HNSWVectorStore } from '../vector/hnsw-vector-store.js';
 import type { VectorStoreInterface } from '../vector/types.js';
@@ -182,8 +182,9 @@ export class KnowledgeBaseManager {
       extraction.metadata.textLength = extraction.text.length;
       if (!this.hasUsableContent(extraction.text, extraction.metadata)) {
         const reason = extraction.warnings[0] ?? '未解析出可用于模型的正文内容，已跳过向量化';
+        const metadataOnly = this.isMetadataOnlyNonBlocking(file, extraction.metadata);
         diff.skippedFiles.push({ file, reason });
-        this.updateJobsForFile(file.relativePath, 'ERROR', 100, reason, reason);
+        this.updateJobsForFile(file.relativePath, metadataOnly ? 'SUCCESS' : 'ERROR', 100, reason, metadataOnly ? undefined : reason);
         this.store.upsertRecord({
           relativePath: file.relativePath,
           category: file.category,
@@ -195,9 +196,9 @@ export class KnowledgeBaseManager {
           collectionName,
           indexedAt: now,
           lastVerifiedAt: now,
-          status: 'error',
-          errorMessage: reason,
-          metadataJson: JSON.stringify({ mimeType: file.mimeType, warnings: extraction.warnings }),
+          status: metadataOnly ? 'active' : 'error',
+          errorMessage: metadataOnly ? undefined : reason,
+          metadataJson: JSON.stringify({ mimeType: file.mimeType, ...extraction.metadata, warnings: extraction.warnings, metadataOnly }),
         });
         continue;
       }
@@ -1014,6 +1015,11 @@ export class KnowledgeBaseManager {
     const coverage = String(metadata.contentCoverage ?? '');
     if (['metadata', 'metadata_filename', 'pdf_metadata_only', 'office_zip_empty_text', 'office_zip_failed'].includes(coverage)) return false;
     return text.trim().length > 0;
+  }
+
+  private isMetadataOnlyNonBlocking(file: ClassifiedFile, metadata: Record<string, unknown>): boolean {
+    const coverage = String(metadata.contentCoverage ?? '');
+    return file.category === 'image' && ['image_too_small_for_ocr', 'ocr_no_text'].includes(coverage);
   }
 
   private defaultUploadRelativePath(fileName: string): string {

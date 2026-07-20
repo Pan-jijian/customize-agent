@@ -29,6 +29,10 @@ export interface GeneratedDocumentRecord {
   warningIssues?: string[];
 }
 
+function failRunningStages(stages: GeneratedDocumentRecord['executionStages'], message: string): GeneratedDocumentRecord['executionStages'] {
+  return stages?.map(stage => stage.status === 'running' ? { ...stage, status: 'failed' as const, message } : stage);
+}
+
 export interface GeneratedAssetRecord extends DocumentAsset {
   name: string;
   source: 'knowledge_base' | 'generated' | 'uploaded' | 'external_url';
@@ -112,7 +116,7 @@ export function abortGeneratedDocument(id: string, projectRoot = getProjectRoot(
       break;
     }
   }
-  return saveGeneratedDocument({ ...current, status: 'failed', error: '用户中止', updatedAt: Date.now() }, projectRoot);
+  return saveGeneratedDocument({ ...current, status: 'failed', error: '用户中止', executionStages: failRunningStages(current.executionStages, '用户中止'), updatedAt: Date.now() }, projectRoot);
 }
 
 export function deleteGeneratedDocument(id: string, projectRoot = getProjectRoot()) {
@@ -256,6 +260,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     const current = getGeneratedDocument(documentId, projectRoot);
     if (!current || current.status !== 'generating') return current ?? initial;
     const warningIssues = result.validationIssues.filter(issue => issue.level === 'error' || issue.level === 'warning').map(issue => issue.suggestion ? `${issue.message}：${issue.suggestion}` : issue.message);
+    if (!result.exportGate.passed && warningIssues.length === 0) warningIssues.push('导出门禁未通过：存在未完成的检查项');
     const record = saveGeneratedDocument(trimEvidenceContent({
       ...current,
       templateName: result.templateName,
@@ -278,7 +283,8 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
   }).catch(error => {
     const current = getGeneratedDocument(documentId, projectRoot);
     if (!current || current.status !== 'generating') return current ?? initial;
-    const record = saveGeneratedDocument({ ...current, status: 'failed', error: error instanceof Error ? error.message : String(error) }, projectRoot);
+    const message = error instanceof Error ? error.message : String(error);
+    const record = saveGeneratedDocument({ ...current, status: 'failed', error: message, executionStages: failRunningStages(current.executionStages, message) }, projectRoot);
     return record;
   }).finally(() => {
     tasks.delete(taskId);

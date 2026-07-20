@@ -11,6 +11,7 @@ import styles from './style.module.scss';
 
 const CATEGORIES = ['document', 'spreadsheet', 'image', 'cad', 'code', 'data', 'web', 'diagram', 'other'] as const;
 const ARCHIVE_FILE_PATTERN = /\.(zip|jar|war|apk|tar|gz|tgz|bz2|rar|7z)$/iu;
+const SKIPPED_UPLOAD_FILE_PATTERN = /(^|\/)\.DS_Store$|(^|\/)Thumbs\.db$|(^|\/)__MACOSX\/|\.bak$/iu;
 type StatusItem = {
   id?: string;
   type: 'upload' | 'delete' | 'reindex' | 'error';
@@ -62,7 +63,7 @@ export default function FilesPage() {
       setLoadError('');
     }
     try {
-      const r = await getKbFiles({ category: c || undefined, limit: 200 });
+      const r = await getKbFiles({ category: c || undefined, limit: 5000 });
       setFiles(r.files || []);
       if (r.initializing) {
         window.setTimeout(() => { void loadFiles(c, { silent: true }); }, 3000);
@@ -183,14 +184,17 @@ export default function FilesPage() {
       });
 
   const handleUpload = async (uploadFilesList: File[]) => {
-    const allowedFiles = uploadFilesList.filter(file => !ARCHIVE_FILE_PATTERN.test(file.name));
+    const allowedFiles = uploadFilesList.filter(file => {
+      const filePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+      return file.size > 0 && !ARCHIVE_FILE_PATTERN.test(file.name) && !SKIPPED_UPLOAD_FILE_PATTERN.test(filePath);
+    });
     const skippedCount = uploadFilesList.length - allowedFiles.length;
-    if (skippedCount > 0) message.warning(`已跳过 ${skippedCount} 个压缩包，请解压后上传内部文件`);
+    if (skippedCount > 0) message.warning(`已跳过 ${skippedCount} 个空文件、系统文件、备份文件或压缩包`);
     if (allowedFiles.length === 0) return;
     const titleName = allowedFiles.length === 1 ? allowedFiles[0]!.name : `${allowedFiles.length} 个文件`;
     setUploading(true);
     const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    upsertStatusItem({ id: uploadId, type: 'upload', title: `上传 ${titleName}`, description: '等待上传、解析、切片和入库', status: 'processing', percent: 5 });
+    upsertStatusItem({ id: uploadId, type: 'upload', title: `上传 ${titleName}`, description: '等待上传、解析、切片和入库；同路径文件会更新，其他已有文件不会清除', status: 'processing', percent: 5 });
     try {
       await uploadKbFiles(allowedFiles, undefined, uploadId, progress => {
         upsertStatusItem({
@@ -202,7 +206,7 @@ export default function FilesPage() {
           percent: Math.min(5, Math.max(1, Math.round((progress.uploadedFiles / Math.max(1, progress.totalFiles)) * 5))),
         });
       });
-      message.info('文件已上传，正在后台解析、切片和入库，可在顶部“后台任务”查看进度');
+      message.info('文件已上传，正在后台解析、切片和入库；同路径文件会更新，其他已有文件不会清除，可在顶部“后台任务”查看进度');
       setSearchQuery('');
       setCategory('');
       setSelectedRowKeys([]);

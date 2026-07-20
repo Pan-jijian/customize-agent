@@ -36,6 +36,14 @@ interface IndexJob {
 
 const activeJobs = new Map<string, ActiveIndexJob>();
 
+function normalizeWorkerOutput(chunk: unknown): string {
+  return String(chunk)
+    .split(/\r?\n/u)
+    .map(line => line.trim())
+    .filter(line => line && !/^Image too small to scale!!/u.test(line) && line !== 'Line cannot be recognized!!')
+    .join('\n');
+}
+
 function toOperationStage(stage: string): KbOperationStage {
   if (stage === 'parsing' || stage === 'chunking' || stage === 'vectorizing' || stage === 'done' || stage === 'error') return stage;
   if (stage === 'indexing') return 'chunking';
@@ -48,8 +56,16 @@ function runInChildProcess(job: IndexJob, operationId: string, operationType: 'u
   return new Promise(resolve => {
     const child = fork(workerPath, [JSON.stringify({ ...job, operationId })], {
       cwd: process.cwd(),
-      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: process.env,
+    });
+    child.stdout?.on('data', chunk => {
+      const message = normalizeWorkerOutput(chunk);
+      if (message) upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'parsing', status: 'processing', percent: 5, message: `后台索引输出：${message.slice(-1000)}` });
+    });
+    child.stderr?.on('data', chunk => {
+      const message = normalizeWorkerOutput(chunk);
+      if (message) upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'parsing', status: 'processing', percent: 5, message: `后台索引错误输出：${message.slice(-1000)}` });
     });
     child.on('error', error => {
       const message = error instanceof Error ? error.message : String(error);

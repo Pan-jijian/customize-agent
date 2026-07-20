@@ -13,9 +13,17 @@ const required = [
 
 for (const item of required) {
   if (!fs.existsSync(item)) {
-    console.error(`Missing Next build asset: ${path.relative(root, item)}`);
+    console.error(`[server] Missing Next build artifact: ${path.relative(root, item)}`);
+    console.error('[server] Run `pnpm build` in apps/server before `pnpm start`.');
     process.exit(1);
   }
+}
+
+const apiRuntime = path.join(nextDir, 'server', 'webpack-api-runtime.js');
+if (fs.existsSync(apiRuntime)) {
+  const runtime = fs.readFileSync(apiRuntime, 'utf8');
+  const patched = runtime.replace(/\.\/chunks\/vendor-chunks\//gu, './vendor-chunks/');
+  if (patched !== runtime) fs.writeFileSync(apiRuntime, patched);
 }
 
 const manifest = JSON.parse(fs.readFileSync(path.join(nextDir, 'build-manifest.json'), 'utf8'));

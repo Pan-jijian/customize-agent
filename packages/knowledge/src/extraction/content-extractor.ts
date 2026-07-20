@@ -930,6 +930,16 @@ export class ContentExtractor {
       return { text: '', metadata, warnings: [`图片文件无效或不完整：${validationError}，未入库`] };
     }
 
+    const dimensions = await this.readImageDimensions(file.absolutePath);
+    if (dimensions) {
+      metadata.imageWidth = dimensions.width;
+      metadata.imageHeight = dimensions.height;
+      if (this.isTooSmallForOcr(dimensions.width, dimensions.height)) {
+        metadata.contentCoverage = 'image_too_small_for_ocr';
+        return { text: this.metadataOnlyText(file), metadata, warnings: [`图片尺寸过小（${dimensions.width}x${dimensions.height}），已跳过 OCR 并仅索引元数据`] };
+      }
+    }
+
     // 1. 尝试外部 PaddleOCR 命令（CUSTOMIZE_PADDLE_OCR_CMD）
     const paddleExternal = await this.tryPaddleOcrLayout(file.absolutePath);
     if (paddleExternal) {
@@ -943,6 +953,12 @@ export class ContentExtractor {
     let imageData: { data: Uint8Array; width: number; height: number };
     try {
       imageData = await this.loadImagePixels(file.absolutePath);
+      metadata.imageWidth = imageData.width;
+      metadata.imageHeight = imageData.height;
+      if (this.isTooSmallForOcr(imageData.width, imageData.height)) {
+        metadata.contentCoverage = 'image_too_small_for_ocr';
+        return { text: this.metadataOnlyText(file), metadata, warnings: [`图片尺寸过小（${imageData.width}x${imageData.height}），已跳过 OCR 并仅索引元数据`] };
+      }
     } catch (e) {
       metadata.contentCoverage = 'image_decode_failed';
       metadata.parseError = (e as Error).message;
@@ -976,7 +992,7 @@ export class ContentExtractor {
       }
 
       metadata.contentCoverage = 'ocr_no_text';
-      warnings.push(`${metadata.ocrProvider} 未识别到文字，未入库`);
+      warnings.push(`${metadata.ocrProvider} 未识别到文字，未生成可检索文本切片`);
       return { text: '', metadata, warnings };
     } catch (e) {
       metadata.contentCoverage = 'ocr_failed';
@@ -1136,10 +1152,21 @@ export class ContentExtractor {
     for (let i = 0; i < pageImages.length; i++) {
       const imgPath = pageImages[i]!;
       try {
+        const dimensions = await this.readImageDimensions(imgPath);
+        if (!dimensions) {
+          failedPages.push({ page: i + 1, reason: 'image_dimensions_unavailable' });
+          warnings.push(`PDF 第 ${i + 1} 页渲染图片无法读取尺寸，已跳过 OCR`);
+          continue;
+        }
+        if (this.isTooSmallForOcr(dimensions.width, dimensions.height)) {
+          failedPages.push({ page: i + 1, reason: `image_too_small_for_ocr_${dimensions.width}x${dimensions.height}` });
+          warnings.push(`PDF 第 ${i + 1} 页渲染图片尺寸过小（${dimensions.width}x${dimensions.height}），已跳过 OCR`);
+          continue;
+        }
         const provider = await getOcrProvider();
         const ocrResult = await provider.recognize({
           data: new Uint8Array(0),
-          width: 0, height: 0, channels: 0,
+          width: dimensions.width, height: dimensions.height, channels: 0,
           filePath: imgPath,
         });
 
@@ -1258,6 +1285,23 @@ export class ContentExtractor {
     const sharpFn = sharpMod.default ?? sharpMod;
     const { data, info } = await sharpFn(filePath).raw().toBuffer({ resolveWithObject: true });
     return { data: new Uint8Array(data as Buffer), width: info.width as number, height: info.height as number };
+  }
+
+  private async readImageDimensions(filePath: string): Promise<{ width: number; height: number } | undefined> {
+    try {
+      const sharpMod: any = await resolveAndImport('sharp');
+      const sharpFn = sharpMod.default ?? sharpMod;
+      const metadata = await sharpFn(filePath).metadata();
+      const width = Number(metadata.width ?? 0);
+      const height = Number(metadata.height ?? 0);
+      return width > 0 && height > 0 ? { width, height } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private isTooSmallForOcr(width: number, height: number): boolean {
+    return width < 8 || height < 8 || width * height < 128;
   }
 
   private async extractPdfText(buffer: Buffer): Promise<string> {
