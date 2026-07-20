@@ -2,7 +2,7 @@ import * as crypto from 'node:crypto';
 import type { DocumentTemplate } from './documentWorkflowService';
 import type { AutoSpecGateConfig } from './engineeringDocumentConfigService';
 import { readEngineeringDocumentConfig } from './engineeringDocumentConfigService';
-import type { AutoDocumentSpecGateRule, AutoDocumentSpecPackage } from './autoDocumentSpecTypes';
+import type { AutoDocumentSpecPackage } from './autoDocumentSpecTypes';
 import { applyKeywordRules, CHAPTER_FACT_RULES, DOCUMENT_TYPE_RULES, FACT_RULES, firstKeywordRuleOutput } from './documentSemanticRules';
 
 function hashTemplate(template: DocumentTemplate, requirement = '') {
@@ -172,14 +172,14 @@ export function getOrCreateAutoDocumentSpec(template: DocumentTemplate, requirem
     { id: 'auto-source-required', name: '事实必须有来源', type: 'source_required', level: 'warning' as const, evaluator: { subject: 'source' as const, operator: 'all_have_source' as const } },
     { id: 'auto-min-source', name: '至少使用项目资料来源', type: 'source_required', level: 'warning' as const, evaluator: { subject: 'source' as const, operator: 'min_count' as const, min: 2 } },
     { id: 'auto-no-debug-text', name: '不得输出后台流程话术', type: 'forbidden_text', level: 'error' as const, value: '知识库证据', evaluator: { subject: 'document' as const, operator: 'not_contains' as const, value: '知识库证据' } },
-    ...autoSpecGates.flatMap(gate => gate.requiredTexts.map(text => ({ id: `configured-required-${factId(text)}`, name: `配置要求必须包含：${text}`, type: 'configured_required_text', level: 'error' as const, value: text, evaluator: { subject: 'document' as const, operator: 'contains' as const, value: text } }))),
-    ...autoSpecGates.flatMap(gate => gate.forbiddenTexts.map(text => ({ id: `configured-forbidden-${factId(text)}`, name: `配置要求不得包含：${text}`, type: 'configured_forbidden_text', level: 'error' as const, value: text, evaluator: { subject: 'document' as const, operator: 'not_contains' as const, value: text } }))),
-    ...(configuredMinTables ? [{ id: 'configured-min-table-count', name: `配置要求正式表格不少于 ${configuredMinTables} 个`, type: 'configured_table_density', level: 'error' as const, evaluator: { subject: 'table' as const, operator: 'min_count' as const, min: configuredMinTables } }] : []),
-    ...requiredChapters.map(title => ({ id: `user-required-chapter-${factId(title)}`, name: `用户要求章节：${title}`, type: 'user_required_chapter', level: 'error' as const, target: title, evaluator: { subject: 'chapter' as const, operator: 'exists' as const, target: title } })),
-    ...requiredTexts.map(text => ({ id: `user-required-text-${factId(text)}`, name: `用户要求必须包含：${text}`, type: 'user_required_text', level: 'error' as const, value: text, evaluator: { subject: 'document' as const, operator: 'contains' as const, value: text } })),
+    ...autoSpecGates.flatMap(gate => gate.requiredTexts.map(text => ({ id: `configured-required-${factId(text)}`, name: `配置建议包含：${text}`, type: 'configured_required_text', level: 'warning' as const, value: text, evaluator: { subject: 'document' as const, operator: 'contains' as const, value: text } }))),
+    ...autoSpecGates.flatMap(gate => gate.forbiddenTexts.map(text => ({ id: `configured-forbidden-${factId(text)}`, name: `配置建议避免：${text}`, type: 'configured_forbidden_text', level: 'warning' as const, value: text, evaluator: { subject: 'document' as const, operator: 'not_contains' as const, value: text } }))),
+    ...(configuredMinTables ? [{ id: 'configured-min-table-count', name: `配置建议正式表格不少于 ${configuredMinTables} 个`, type: 'configured_table_density', level: 'warning' as const, evaluator: { subject: 'table' as const, operator: 'min_count' as const, min: configuredMinTables } }] : []),
+    ...requiredChapters.map(title => ({ id: `user-required-chapter-${factId(title)}`, name: `用户提到章节：${title}`, type: 'user_required_chapter', level: 'warning' as const, target: title, evaluator: { subject: 'chapter' as const, operator: 'exists' as const, target: title } })),
+    ...requiredTexts.map(text => ({ id: `user-required-text-${factId(text)}`, name: `用户提到应包含：${text}`, type: 'user_required_text', level: 'warning' as const, value: text, evaluator: { subject: 'document' as const, operator: 'contains' as const, value: text } })),
     ...forbiddenTexts.map(text => ({ id: `user-forbidden-text-${factId(text)}`, name: `用户要求不得包含：${text}`, type: 'user_forbidden_text', level: 'error' as const, value: text, evaluator: { subject: 'document' as const, operator: 'not_contains' as const, value: text } })),
-    ...(minTables ? [{ id: 'user-min-table-count', name: `用户要求表格数量不少于 ${minTables}`, type: 'user_format_table', level: 'error' as const, evaluator: { subject: 'table' as const, operator: 'min_count' as const, min: minTables } }] : []),
-    ...(pageTarget?.min ? [{ id: 'user-min-page-count', name: `用户要求页数不少于 ${pageTarget.min}`, type: 'user_page_target', level: 'error' as const, evaluator: { subject: 'page' as const, operator: 'min_count' as const, min: pageTarget.min } }] : []),
+    ...(minTables ? [{ id: 'user-min-table-count', name: `用户提到表格数量不少于 ${minTables}`, type: 'user_format_table', level: 'warning' as const, evaluator: { subject: 'table' as const, operator: 'min_count' as const, min: minTables } }] : []),
+    ...(pageTarget?.min ? [{ id: 'user-min-page-count', name: `用户提到页数不少于 ${pageTarget.min}`, type: 'user_page_target', level: 'warning' as const, evaluator: { subject: 'page' as const, operator: 'min_count' as const, min: pageTarget.min } }] : []),
     ...(pageTarget?.max ? [{ id: 'user-max-page-count', name: `用户要求页数不超过 ${pageTarget.max}`, type: 'user_page_target', level: 'warning' as const, evaluator: { subject: 'page' as const, operator: 'max_count' as const, min: pageTarget.max } }] : []),
   ];
   const finalChapterRules = [...chapterRules, ...userChapterRules];
@@ -188,8 +188,8 @@ export function getOrCreateAutoDocumentSpec(template: DocumentTemplate, requirem
     managedBy: 'system',
     spec: {
       id: `auto-${template.id}-${sourceHash}`.replace(/[^a-zA-Z0-9_-]/gu, '-').slice(0, 80),
-      name: `后台自动规范 - ${template.name}`,
-      description: `${documentType}后台自动规范，由模板、提示词、角色绑定和用户临时要求静默生成。`,
+      name: `后台优化建议 - ${template.name}`,
+      description: `${documentType}后台优化建议，由模板、提示词、角色绑定和用户临时要求静默生成，仅用于提升内容完整性，不接管章节结构。`,
       factFields: factNames.map(name => ({
         id: factId(name),
         name,
@@ -198,15 +198,15 @@ export function getOrCreateAutoDocumentSpec(template: DocumentTemplate, requirem
         extractionHint: `从项目资料摘要、角色绑定证据和知识库证据中抽取“${name}”。`,
         validationHint: `生成内容涉及“${name}”时必须与项目资料一致，不得引入其他项目事实。`,
       })),
-      chapterMode: finalChapterRules.length > 0 ? 'fixed' : 'dynamic',
+      chapterMode: 'fixed',
       chapterRules: finalChapterRules,
       dynamicChapterRule: {
         source: 'ai_plan',
         minChapters: 0,
-        maxChapters: 2,
+        maxChapters: 0,
         titleStrategy: 'template',
-        minWordsPerChapter: 900,
-        generationHint: `按${documentType}正式文件要求，在评审标准或模板章节基础上最多动态补充 2 章，不得重新规划整份目录。`,
+        minWordsPerChapter: 0,
+        generationHint: `不自动规划或补充章节；仅按${documentType}正式文件要求提供内容完整性建议。`,
       },
       gateRules,
       builtIn: true,
@@ -216,11 +216,12 @@ export function getOrCreateAutoDocumentSpec(template: DocumentTemplate, requirem
 
 export function autoSpecPrompt(spec: AutoDocumentSpecPackage, sourceHash: string) {
   return [
-    '## 后台自动文档规范',
-    `规范：${spec.name}`,
+    '## 后台内容优化建议',
+    `建议包：${spec.name}`,
     `版本标识：${sourceHash}`,
-    `事实字段：${spec.factFields.map(field => `${field.name}${field.required ? '(必需)' : ''}`).join('、')}`,
-    `章节规则：${spec.chapterMode === 'fixed' ? spec.chapterRules.map(rule => rule.title).join('、') : spec.dynamicChapterRule.generationHint}`,
-    `校验规则：${spec.gateRules.map(rule => rule.name).join('、')}`,
+    '说明：以下内容仅用于提升事实覆盖、检索命中和质量检查，不得新增、删除、重排用户或模板章节。',
+    `建议关注事实：${spec.factFields.map(field => field.name).join('、')}`,
+    `章节内容建议：${spec.chapterRules.map(rule => `${rule.title}${rule.generationHint ? `：${rule.generationHint.replace(/\s+/gu, ' ').slice(0, 120)}` : ''}`).join('；') || '以当前模板章节为准'}`,
+    `质量提醒：${spec.gateRules.map(rule => rule.name).join('、')}`,
   ].join('\n');
 }

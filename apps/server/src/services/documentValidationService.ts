@@ -11,7 +11,7 @@ export function validateDraftWithAutoSpec(input: {
   const markdown = input.markdown || '';
   for (const field of input.spec.factFields.filter(field => field.required)) {
     if (!markdown.includes(field.name) && field.name.length >= 3) {
-      issues.push({ level: 'warning', message: `后台自动规范提示：正文可能未显式覆盖“${field.name}”`, suggestion: '建议检查对应章节是否已自然表达该事实。' });
+      issues.push({ level: 'warning', message: `后台优化建议：正文可能未显式覆盖“${field.name}”`, suggestion: '建议检查对应章节是否已自然表达该事实。' });
     }
   }
   const projectName = input.summary.facts.projectName;
@@ -22,7 +22,7 @@ export function validateDraftWithAutoSpec(input: {
   if (tenderNo && !markdown.includes(tenderNo)) {
     issues.push({ level: 'info', message: '正文未体现招标/项目编号', suggestion: '如正式文件需要编号，请在工程概况中补充。' });
   }
-  const forbidden = ['知识库证据', '文件角色', '提示词角色', '文档规范包', '规范包', '后台自动规范', '资料未提供', '未检索到'];
+  const forbidden = ['知识库证据', '文件角色', '提示词角色', '文档规范包', '规范包', '后台自动规范', '后台优化建议', '项目基础事实候选', '资料未提供', '未检索到'];
   for (const text of forbidden) {
     if (markdown.includes(text)) issues.push({ level: 'error', message: `正文包含后台流程话术：${text}`, suggestion: '请重新生成或在审查阶段删除后台流程描述。' });
   }

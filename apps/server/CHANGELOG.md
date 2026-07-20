@@ -1,5 +1,19 @@
 # server
 
+## 4.0.47
+
+### Patch Changes
+
+- Improve document generation length handling, PDF export formatting, and targeted chapter-level repair without full-document rewrites.
+
+## 4.0.46
+
+### Patch Changes
+
+- Improve knowledge parsing, chunking, retrieval reranking, and document generation guardrails.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.17
+
 ## 4.0.45
 
 ### Patch Changes

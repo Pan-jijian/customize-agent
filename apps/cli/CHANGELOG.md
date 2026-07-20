@@ -1,5 +1,19 @@
 # customize-agent
 
+## 4.0.38
+
+### Patch Changes
+
+- Improve document generation length handling, PDF export formatting, and targeted chapter-level repair without full-document rewrites.
+- Updated dependencies
+  - @customize-agent/server@4.0.47
+
+## 4.0.37
+
+### Patch Changes
+
+- Update bundled workspace dependency resolution for the latest knowledge and server packages.
+
 ## 4.0.36
 
 ### Patch Changes

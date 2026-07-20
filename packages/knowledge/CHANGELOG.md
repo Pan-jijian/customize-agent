@@ -1,5 +1,11 @@
 # @customize-agent/knowledge
 
+## 4.0.17
+
+### Patch Changes
+
+- Improve knowledge parsing, chunking, retrieval reranking, and document generation guardrails.
+
 ## 4.0.16
 
 ### Patch Changes

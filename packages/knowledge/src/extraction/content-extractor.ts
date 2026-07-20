@@ -800,8 +800,13 @@ export class ContentExtractor {
         }
         if (matrix.length > 0) {
           const header = matrix[0] ?? [];
-          const rows = matrix.slice(1);
-          sheetTexts.push([`工作表：${name}`, this.toMarkdownTable(header, rows)].join('\n\n'));
+          // 表格分页：为了防止超大 Excel 导致单块过大，将其每 500 行分为一个独立的 Markdown Table。
+          const chunkSize = 500;
+          for (let i = 1; i < matrix.length; i += chunkSize) {
+            const rows = matrix.slice(i, i + chunkSize);
+            const sheetSuffix = matrix.length > chunkSize ? ` (第 ${Math.floor(i/chunkSize) + 1} 部分)` : '';
+            sheetTexts.push([`工作表：${name}${sheetSuffix}`, this.toMarkdownTable(header, rows)].join('\n\n'));
+          }
         }
       }
 
@@ -826,17 +831,49 @@ export class ContentExtractor {
     const zip = await (JSZip as { loadAsync: (data: Buffer) => Promise<{ files: Record<string, { async: (type: string) => Promise<string> }> }> }).loadAsync(fs.readFileSync(filePath));
     const docXml = await zip.files['word/document.xml']?.async('string');
     if (!docXml) return '';
-    const paragraphs = Array.from(docXml.matchAll(/<w:p[\s\S]*?<\/w:p>/gu), match => match[0]);
+    
+    // 我们需要按出现顺序提取 paragraph 和 table
+    // 在 xml 中 w:body 的一级子节点通常是 w:p 和 w:tbl
+    const elements = Array.from(docXml.matchAll(/<(w:p|w:tbl)[\s>][\s\S]*?<\/\1>/gu), match => ({ tag: match[1], xml: match[0] }));
     const lines: string[] = [];
-    for (const paragraph of paragraphs) {
-      const texts = Array.from(paragraph.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/gu), match => this.stripXml(match[1] ?? '')).join('');
-      if (!texts.trim()) continue;
-      const style = /<w:pStyle\s+w:val="([^"]+)"/u.exec(paragraph)?.[1] ?? '';
-      const bold = /<w:b\b/u.test(paragraph);
-      const size = Number(/<w:sz\s+w:val="(\d+)"/u.exec(paragraph)?.[1] ?? 0);
-      const level = this.docxHeadingLevel(style, bold, size, texts);
-      lines.push(`${level > 0 ? `${'#'.repeat(level)} ` : ''}${texts.trim()}`);
+    
+    for (const { tag, xml } of elements) {
+      if (tag === 'w:p') {
+        const texts = Array.from(xml.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/gu), match => this.stripXml(match[1] ?? '')).join('');
+        if (!texts.trim()) continue;
+        const style = /<w:pStyle\s+w:val="([^"]+)"/u.exec(xml)?.[1] ?? '';
+        const bold = /<w:b\b/u.test(xml);
+        const size = Number(/<w:sz\s+w:val="(\d+)"/u.exec(xml)?.[1] ?? 0);
+        const level = this.docxHeadingLevel(style, bold, size, texts);
+        lines.push(`${level > 0 ? `${'#'.repeat(level)} ` : ''}${texts.trim()}`);
+      } else if (tag === 'w:tbl') {
+        const trList = Array.from(xml.matchAll(/<w:tr[\s>][\s\S]*?<\/w:tr>/gu), match => match[0]);
+        const rows: string[][] = [];
+        for (const tr of trList) {
+          const tcList = Array.from(tr.matchAll(/<w:tc[\s>][\s\S]*?<\/w:tc>/gu), match => match[0]);
+          const cols: string[] = [];
+          for (const tc of tcList) {
+            const tcText = Array.from(tc.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/gu), match => this.stripXml(match[1] ?? '')).join('');
+            cols.push(tcText.trim().replace(/\r?\n/gu, ' '));
+          }
+          rows.push(cols);
+        }
+        if (rows.length > 0) {
+          const maxCols = Math.max(...rows.map(r => r.length));
+          // 补齐列数
+          rows.forEach(r => { while (r.length < maxCols) r.push(''); });
+          
+          const header = rows[0] || Array(maxCols).fill('');
+          const mdTable = [
+            `| ${header.join(' | ')} |`,
+            `| ${header.map(() => '---').join(' | ')} |`,
+            ...rows.slice(1).map(row => `| ${row.join(' | ')} |`)
+          ].join('\n');
+          lines.push(mdTable);
+        }
+      }
     }
+    
     return lines.join('\n\n');
   }
 

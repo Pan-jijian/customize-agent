@@ -32,6 +32,7 @@ type ChunkCandidate = {
   parentIndex: number;
   childIndex: number;
   rowRange?: string;
+  parentText?: string;
 };
 
 type CodeLanguageConfig = {
@@ -125,6 +126,7 @@ export class TextChunker {
           parentId,
           parentIndex,
           childIndex,
+          parentText: section.text, // <=== 记录原始完整的 Section 文本
         });
       });
     });
@@ -134,21 +136,29 @@ export class TextChunker {
 
   private createTableCandidates(text: string, config: ChunkConfig): ChunkCandidate[] {
     if (this.isMarkdownTable(text)) {
-      return this.splitMarkdownTable(text, config.maxChunkSize).map((part, index) => {
-        const startChar = Math.max(0, text.indexOf(part.slice(0, 40)));
-        return {
-          text: part,
-          startChar,
-          endChar: startChar + part.length,
-          sectionTitle: this.extractSectionTitle(part) ?? '表格数据',
-          titlePath: this.extractSectionTitle(part) ?? '表格数据',
-          kind: 'table',
-          parentId: `table-${index}`,
-          parentIndex: index,
-          childIndex: 0,
-          rowRange: this.extractMarkdownTableRowRange(part),
-        };
-      });
+      const tableBlocks = this.extractMarkdownTableBlocks(text);
+      if (tableBlocks.length > 0) {
+        return tableBlocks.flatMap((block, parentIndex) => {
+          const sectionTitle = this.extractSectionTitle(block.text) ?? '表格数据';
+          return this.splitMarkdownTable(block.text, config.maxChunkSize).map((part, childIndex) => {
+            const localStart = Math.max(0, block.text.indexOf(part.slice(0, 40)));
+            const startChar = block.startChar + localStart;
+            return {
+              text: part,
+              startChar,
+              endChar: startChar + part.length,
+              sectionTitle,
+              titlePath: sectionTitle,
+              kind: 'table',
+              parentId: `table-${parentIndex}`,
+              parentIndex,
+              childIndex,
+              rowRange: this.extractMarkdownTableRowRange(part),
+              parentText: block.text,
+            };
+          });
+        });
+      }
     }
     return this.createTextCandidates(text, 'spreadsheet', config);
   }
@@ -163,9 +173,10 @@ export class TextChunker {
       sectionTitle: this.extractSectionTitle(part),
       titlePath: this.extractSectionTitle(part),
       kind: 'data',
-      parentId: `data-${index}`,
-      parentIndex: index,
-      childIndex: 0,
+      parentId: `data-0`,
+      parentIndex: 0,
+      childIndex: index,
+      parentText: text,
     }));
   }
 
@@ -185,9 +196,10 @@ export class TextChunker {
         sectionTitle: this.extractSectionTitle(part),
         titlePath: this.extractSectionTitle(part),
         kind: 'code',
-        parentId: `code-${language}-${index}`,
-        parentIndex: index,
-        childIndex: 0,
+        parentId: `code-${language}-0`,
+        parentIndex: 0,
+        childIndex: index,
+        parentText: text,
       };
     });
   }
@@ -357,6 +369,42 @@ export class TextChunker {
     return lines.length >= 3 && lines.some(line => /^\s*\|?\s*:?-{3,}:?\s*\|/u.test(line));
   }
 
+  private extractMarkdownTableBlocks(text: string): Array<{ text: string; startChar: number }> {
+    const lines = text.split(/\r?\n/u);
+    const lineStarts: number[] = [];
+    let cursor = 0;
+    for (const line of lines) {
+      lineStarts.push(cursor);
+      cursor += line.length + 1;
+    }
+
+    const blocks: Array<{ text: string; startChar: number }> = [];
+    let index = 0;
+    while (index < lines.length) {
+      const separatorIndex = lines.findIndex((line, lineIndex) => lineIndex >= index && /^\s*\|?\s*:?-{3,}:?\s*\|/u.test(line));
+      if (separatorIndex <= index) break;
+
+      const headerIndex = separatorIndex - 1;
+      let startLine = headerIndex;
+      const titleIndex = headerIndex - 1;
+      if (titleIndex >= 0 && lines[titleIndex]?.trim() === '' && titleIndex - 1 >= 0) {
+        const title = lines[titleIndex - 1]?.trim() ?? '';
+        if (title && title.length <= 120 && !/^\s*\|/u.test(title)) startLine = titleIndex - 1;
+      }
+
+      let endLine = separatorIndex + 1;
+      while (endLine < lines.length && /^\s*\|/u.test(lines[endLine] ?? '')) endLine += 1;
+
+      const startChar = lineStarts[startLine] ?? 0;
+      const endChar = endLine < lineStarts.length ? (lineStarts[endLine] ?? text.length) : text.length;
+      const blockText = text.slice(startChar, endChar).trim();
+      if (blockText) blocks.push({ text: blockText, startChar });
+      index = endLine;
+    }
+
+    return blocks;
+  }
+
   private extractMarkdownTableRowRange(text: string): string | undefined {
     const lines = text.trim().split(/\r?\n/u).filter(line => /^\s*\|/u.test(line));
     const rowCount = Math.max(0, lines.length - 2);
@@ -442,6 +490,7 @@ export class TextChunker {
         startChar: candidate.startChar,
         endChar: candidate.endChar,
         splitStrategy: 'recursive_parent_child_v2',
+        parentText: candidate.parentText, // <=== 原始父块内容
       },
     };
   }

@@ -340,10 +340,38 @@ function enhanceTocHtml(body: string) {
   });
 }
 
+function buildPrintCss(style: ReturnType<typeof resolveExportStyle>) {
+  return `
+@page{size:${style.paper};margin:${style.marginTop} ${style.marginRight} ${style.marginBottom} ${style.marginLeft}}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:#fff}
+body,p,div,li,td,th,span,section,article{font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};color:#111827}
+body{font-variant-east-asian:normal;text-rendering:geometricPrecision;word-break:break-word;overflow-wrap:anywhere}
+p{margin:0 0 7pt 0;text-align:justify;text-justify:inter-ideograph;text-indent:2em;orphans:2;widows:2}
+strong{font-weight:700}
+ul,ol{margin:0 0 8pt 2em;padding:0}li{margin:0 0 4pt 0;text-align:justify;break-inside:avoid}
+h1,h2,h3,h4{font-family:${style.fontFamily};line-height:${style.lineCss};font-weight:700;color:#111827;page-break-after:avoid;break-after:avoid;break-inside:avoid}
+h1{text-align:center;font-size:${Math.max(style.titlePt + 6, 22)}pt;margin:80pt 0 28pt 0}
+h2{text-align:center;font-size:${Math.max(style.titlePt + 2, 18)}pt;border:0;padding:0;margin:24pt 0 14pt 0;break-before:auto}
+h2:not(:first-child){page-break-before:always;break-before:page}
+h3{font-size:${style.titleCss};margin:16pt 0 7pt 0}
+h4{font-size:${style.bodyCss};margin:10pt 0 5pt 0}
+.document-toc{page-break-after:always;break-after:page}.document-toc h2{text-align:center;margin-top:0;page-break-before:auto;break-before:auto}.document-toc p{margin:0 0 4pt 0;text-align:left;text-indent:0}.document-toc .toc-chapter{font-weight:700;margin-top:8pt}.document-toc .toc-section{margin-left:2em}
+.document-cover{height:calc(100vh - ${style.marginTop} - ${style.marginBottom});page-break-after:always;break-after:page;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-size:${Math.max(style.titlePt + 8, 24)}pt;line-height:${Math.max(style.linePt + 10, 34)}pt;font-weight:700}.document-cover h1,.document-cover p{font-size:${Math.max(style.titlePt + 8, 24)}pt;line-height:${Math.max(style.linePt + 10, 34)}pt;font-weight:700;text-align:center;text-indent:0;margin:0 0 18pt 0}
+img{display:block;max-width:100%;max-height:500px;object-fit:contain;margin:10pt auto;page-break-inside:avoid;break-inside:avoid}
+table{width:100%;border-collapse:collapse;table-layout:fixed;page-break-inside:auto;break-inside:auto;margin:8pt 0 10pt 0}
+thead{display:table-header-group}tfoot{display:table-footer-group}tr{page-break-inside:avoid;break-inside:avoid;page-break-after:auto}
+th,td{font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};border:1px solid #666;padding:3pt 5pt;vertical-align:top;text-indent:0;text-align:left;word-break:break-word;overflow-wrap:anywhere}
+th{background:#f3f4f6;font-weight:700;text-align:center}
+pre{white-space:pre-wrap;font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};page-break-inside:avoid;break-inside:avoid}.page-break{page-break-after:always;break-after:page;height:0}
+@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}a{text-decoration:none;color:#111827}}
+`;
+}
+
 function htmlShell(title: string, body: string, settings?: DocumentExportSettings) {
   const style = resolveExportStyle(settings);
   const enhancedBody = enhanceTocHtml(body);
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:${style.paper};margin:${style.marginTop} ${style.marginRight} ${style.marginBottom} ${style.marginLeft}}html,body{margin:0;padding:0}body,p,div,li,td,th,span,section,article{font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};color:#111827}body{font-variant-east-asian:normal;text-rendering:geometricPrecision}p{margin:0 0 8pt 0;text-align:justify;text-justify:inter-ideograph;text-indent:2em}strong{font-weight:700}ul,ol{margin:0 0 8pt 2em;padding:0}li{margin:0 0 4pt 0;text-align:justify}h1,h2,h3,h4{font-family:${style.fontFamily};line-height:${style.lineCss};font-weight:700;color:#111827;page-break-after:avoid;break-after:avoid}h1{text-align:center;font-size:${Math.max(style.titlePt + 6, 22)}pt;margin:90pt 0 28pt 0}h2{text-align:center;font-size:${Math.max(style.titlePt + 2, 18)}pt;border:0;padding:0;margin:26pt 0 16pt 0}h3{font-size:${style.titleCss};margin:18pt 0 8pt 0}h4{font-size:${style.bodyCss};margin:12pt 0 6pt 0}.document-toc h2{text-align:center;margin-top:0}.document-toc p{margin:0 0 4pt 0;text-align:left;text-indent:0}.document-toc .toc-chapter{font-weight:700;margin-top:8pt}.document-toc .toc-section{margin-left:2em}.document-cover{min-height:calc(100vh - ${style.marginTop} - ${style.marginBottom});display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-size:${Math.max(style.titlePt + 8, 24)}pt;line-height:${Math.max(style.linePt + 10, 34)}pt;font-weight:700}.document-cover h1,.document-cover p{font-size:${Math.max(style.titlePt + 8, 24)}pt;line-height:${Math.max(style.linePt + 10, 34)}pt;font-weight:700;text-align:center;text-indent:0;margin:0 0 18pt 0}img{display:block;max-width:100%;max-height:520px;object-fit:contain;margin:12px auto;page-break-inside:avoid}table{width:100%;border-collapse:collapse;page-break-inside:auto;margin:10pt 0}tr{page-break-inside:avoid;page-break-after:auto}th,td{font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};border:1px solid #666;padding:4pt 6pt;vertical-align:middle;text-indent:0;text-align:left}th{background:#f3f4f6;font-weight:700;text-align:center}pre{white-space:pre-wrap;font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss}}.page-break{page-break-after:always;break-after:page;height:0}</style></head><body>${enhancedBody}</body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>${buildPrintCss(style)}</style></head><body>${enhancedBody}</body></html>`;
 }
 
 /** 判断问题是否为阻止导出的严重问题（非警告类问题） */
@@ -434,6 +462,12 @@ async function renderPdfWithBrowserCommand(html: string, browserPath: string, se
   }
 }
 
+function pdfPageCount(buffer: Buffer) {
+  const text = buffer.toString('latin1');
+  const matches = text.match(/\/Type\s*\/Page\b/gu);
+  return matches?.length || undefined;
+}
+
 async function renderPdfBuffer(html: string, settings?: DocumentExportSettings) {
   const { chromium } = await import('playwright');
   const attempts: Array<{ label: string; options: Parameters<typeof chromium.launch>[0] }> = [
@@ -520,7 +554,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
     try {
       const pdf = await renderPdfBuffer(html, exportSettings);
+      const pages = pdfPageCount(pdf);
       res.setHeader('Content-Type', 'application/pdf');
+      if (pages) res.setHeader('X-PDF-Page-Count', String(pages));
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.pdf`)}`);
       return res.status(200).send(pdf);
     } catch (error) {

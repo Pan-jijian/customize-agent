@@ -294,8 +294,15 @@ export class IndexStateStore {
       }
       const parentContents: string[] = [];
       for (const [parentId, group] of parentGroups.entries()) {
-        const parentContent = group.map(chunk => chunk.text).join('\n\n---\n\n');
+        const firstChunkMeta = group[0]?.metadata;
+        const parentContent = this.metadataString(firstChunkMeta?.parentText) || group.map(chunk => chunk.text).join('\n\n---\n\n');
         parentContents.push(parentContent);
+        
+        // 我们不想把一整个大文本冗余在每个切片的 metadata 里，所以存完 parent 之后清理一下
+        for (const chunk of group) {
+            delete chunk.metadata.parentText;
+        }
+
         insertParent.run(
           parentId,
           relativePath,
@@ -306,7 +313,7 @@ export class IndexStateStore {
           file.collectionName,
           group.find(chunk => chunk.sectionTitle)?.sectionTitle ?? null,
           group.length,
-          JSON.stringify({ parentId, splitStrategy: this.metadataString(group[0]?.metadata.splitStrategy), chunkKind: this.metadataString(group[0]?.metadata.chunkKind), titlePath: this.metadataString(group[0]?.metadata.titlePath) }),
+          JSON.stringify({ parentId, splitStrategy: this.metadataString(firstChunkMeta?.splitStrategy), chunkKind: this.metadataString(firstChunkMeta?.chunkKind), titlePath: this.metadataString(firstChunkMeta?.titlePath) }),
           now,
         );
       }

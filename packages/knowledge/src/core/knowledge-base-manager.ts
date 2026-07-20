@@ -7,6 +7,7 @@ import { ALL_CATEGORIES, DEFAULT_CATEGORY_DIRS, GLOBAL_KNOWLEDGE_DIR, USER_DATA_
 import { DedupEngine } from '../dedup/dedup-engine.js';
 import { RelationshipDetector } from '../dedup/relationship-detector.js';
 import { createEmbeddingProviderFromEnvironment, type EmbeddingProvider } from '../embedding/embedding-provider.js';
+import { LocalReranker } from '../embedding/local-reranker.js';
 import { ContentExtractor } from '../extraction/content-extractor.js';
 import type { LLMSearchProvider } from '../llm/llm-search-provider.js';
 import { FederationSearch, type FederatedResult, type FederatedSearchItem, type RetrievalWeights, type SearchFilters } from '../search/federation-search.js';
@@ -387,20 +388,49 @@ export class KnowledgeBaseManager {
     }
     const keywordItems = rankedLists.filter(list => list.source === 'keyword').flatMap(list => list.items);
     const vectorItems = rankedLists.filter(list => list.source === 'vector').flatMap(list => list.items);
-    const merged = this.mergeContexts(this.mergeHybridRankedLists(rankedLists, limit * 4, weights).map(item => this.expandContext(item)), limit * 2);
-    const useLLMRerank = !!this.llmProvider;
-    const preReranked = useLLMRerank ? merged : this.heuristicRerank(query, merged);
-    const reranked = useLLMRerank ? (await this.llmRerank(query, preReranked)) : preReranked;
+    
+    // 1. 先进行初筛合并，合并相同的子块并计算混合初始分（不获取大片段，保留子块自身用于精确打分）
+    const mergedChildChunks = this.mergeContexts(this.mergeHybridRankedLists(rankedLists, limit * 4, weights), limit * 4);
+    
+    // 2. 对这些子块进行交叉编码器重排（Cross-Encoder Rerank）
+    let reranked = mergedChildChunks;
+    let rerankerName = 'local-heuristic-fallback';
+    if (mergedChildChunks.length > 0) {
+      const candidates = mergedChildChunks.slice(0, Math.min(30, limit * 4));
+      // 这里使用的是子块自身内容，通常在 500 tokens 左右，不仅相关性判断最准，而且不会超出 Reranker 的 max_length
+      const textsToRerank = candidates.map(item => `${item.titlePath ?? item.sectionTitle ?? ''}\n${item.content}`);
+      try {
+        const scores = await LocalReranker.rerank(query, textsToRerank);
+        const usableScores = scores.length === candidates.length && scores.some(score => Number.isFinite(score) && score > 0);
+        if (usableScores) {
+          reranked = candidates.map((item, i) => ({
+            ...item,
+            score: scores[i] ?? item.score,
+            scoreDetails: { ...item.scoreDetails, crossEncoderScore: scores[i] ?? 0 }
+          })).sort((a, b) => b.score - a.score);
+          rerankerName = 'bge-reranker-base';
+        } else {
+          reranked = this.heuristicRerank(query, mergedChildChunks);
+          rerankerName = 'local-heuristic-fallback-empty-rerank';
+        }
+      } catch {
+        reranked = this.heuristicRerank(query, mergedChildChunks);
+      }
+    }
+
+    // 3. 拿到精确打分后的 Top 结果，此时再进行 expandContext 向上追溯到完整的父块大片段
+    const finalExpandedResults = this.mergeExpandedContexts(reranked.map(item => this.expandContext(item)), limit);
+
     return {
-      results: reranked.slice(0, limit),
+      results: finalExpandedResults,
       scopesSearched: this.scope === 'global' ? ['global'] : ['project'],
       queryTimeMs: Date.now() - start,
       debug: {
         originalQuery: query,
         rewrittenQueries,
         weights,
-        recallCounts: { keyword: keywordItems.length, vector: vectorItems.length, merged: merged.length },
-        reranker: useLLMRerank ? 'llm-semantic-reranker-v1' : 'local-statistical-reranker-v1',
+        recallCounts: { keyword: keywordItems.length, vector: vectorItems.length, merged: mergedChildChunks.length },
+        reranker: rerankerName,
       },
     };
   }
@@ -739,60 +769,7 @@ export class KnowledgeBaseManager {
     }).sort((a, b) => b.score - a.score);
   }
 
-  private async llmRerank(query: string, items: FederatedSearchItem[]): Promise<FederatedSearchItem[]> {
-    if (!this.llmProvider || items.length === 0) return this.heuristicRerank(query, items);
 
-    const candidates = items.slice(0, 20);
-    const resultsText = candidates.map((item, index) => {
-      const contentPreview = item.content.slice(0, 300).replace(/[\n\r]+/g, ' ');
-      return `[DOC_${index}] 路径: ${item.filePath} | 标题路径: ${item.titlePath ?? item.sectionTitle ?? ''} | 类型: ${item.chunkKind ?? 'text'}\n  内容: ${contentPreview}`;
-    }).join('\n\n');
-
-    const prompt = `你是一个文档相关性评估器。根据用户查询，为以下文档片段打分（1-10）。
-1=完全不相关，10=高度相关。
-输出格式：每行 "DOC_ID:分数"，如 "DOC_0:8"
-
-查询：${query}
-
-${resultsText}
-
-相关性评分：`;
-
-    try {
-      const response = await this.llmProvider.chat([
-        { role: 'system', content: '你是一个精确的文档相关性评估器。只输出 DOC_ID:分数的列表。' },
-        { role: 'user', content: prompt },
-      ], { temperature: 0.1, maxTokens: 600 });
-
-      const scoreMap = new Map<number, number>();
-      for (const line of response.content.split('\n')) {
-        const match = line.match(/DOC[_\s]*(\d+)[^\d]*(\d+)/i);
-        if (match) scoreMap.set(Number(match[1]), Math.min(10, Math.max(1, Number(match[2]))));
-      }
-
-      if (scoreMap.size === 0) return this.heuristicRerank(query, items);
-
-      return items.map((item, index) => {
-        const llmScore = scoreMap.get(index);
-        if (llmScore == null || llmScore === undefined) return item;
-        // LLM 分数 (1-10) 映射为权重因子：10→2.0x, 5→1.0x, 1→0.2x
-        const llmFactor = 0.2 + (llmScore / 10) * 1.8;
-        const newScore = item.score * llmFactor;
-        return {
-          ...item,
-          score: newScore,
-          scoreDetails: {
-            ...item.scoreDetails,
-            rerankBoost: newScore - (item.scoreDetails?.hybridScore ?? item.score),
-            llmRelevanceScore: llmScore,
-            hybridScore: newScore,
-          },
-        };
-      }).sort((a, b) => b.score - a.score);
-    } catch {
-      return this.heuristicRerank(query, items);
-    }
-  }
 
   private hydrateVectorResultsFromSqlite(items: FederatedSearchItem[]): FederatedSearchItem[] {
     return items.map(item => {
@@ -888,6 +865,21 @@ ${resultsText}
         content: existing.content.length >= item.content.length ? existing.content : item.content,
         scoreDetails: { ...existing.scoreDetails, ...item.scoreDetails, hybridScore: score },
       });
+    }
+    return [...byKey.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+  }
+
+  private mergeExpandedContexts(items: FederatedSearchItem[], limit: number): FederatedSearchItem[] {
+    const byKey = new Map<string, FederatedSearchItem>();
+    for (const item of items) {
+      const key = `${item.scope}:${item.filePath}:${item.parentId ?? item.chunkIndex ?? item.id}`;
+      const existing = byKey.get(key);
+      if (!existing || item.score > existing.score) {
+        byKey.set(key, item);
+        continue;
+      }
+      existing.source = existing.source === item.source ? existing.source : 'hybrid';
+      existing.scoreDetails = { ...existing.scoreDetails, ...item.scoreDetails, hybridScore: existing.score };
     }
     return [...byKey.values()].sort((a, b) => b.score - a.score).slice(0, limit);
   }
