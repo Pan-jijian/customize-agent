@@ -1,5 +1,17 @@
 # @customize-agent/tools
 
+## 3.0.15
+
+### Patch Changes
+
+- Improve document refine interaction to preserve user prompts and strengthen local edit safety.
+
+## 3.0.14
+
+### Patch Changes
+
+- Fix document export body limits, improve document refine local editing, and suppress OCR native noise.
+
 ## 3.0.12
 
 ### Patch Changes

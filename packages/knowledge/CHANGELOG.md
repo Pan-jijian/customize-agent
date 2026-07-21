@@ -1,5 +1,17 @@
 # @customize-agent/knowledge
 
+## 4.0.23
+
+### Patch Changes
+
+- Improve document refine interaction to preserve user prompts and strengthen local edit safety.
+
+## 4.0.22
+
+### Patch Changes
+
+- Fix document export body limits, improve document refine local editing, and suppress OCR native noise.
+
 ## 4.0.21
 
 ### Patch Changes

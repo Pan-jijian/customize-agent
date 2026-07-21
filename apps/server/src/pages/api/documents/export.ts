@@ -12,6 +12,10 @@ import type { DocumentExportSettings } from '@/services/documentWorkflowService'
 import { recordErrorLog } from '@/services/errorLogService';
 import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
 
+export const config = {
+  api: { bodyParser: { sizeLimit: '50mb' }, responseLimit: false },
+};
+
 type ExportFormat = 'markdown' | 'html' | 'pdf' | 'docx';
 
 /** 将文件名中的非法字符替换为连字符，限制长度 80 字符 */

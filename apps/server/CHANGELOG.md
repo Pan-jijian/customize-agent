@@ -1,5 +1,27 @@
 # server
 
+## 4.0.59
+
+### Patch Changes
+
+- Improve document refine interaction to preserve user prompts and strengthen local edit safety.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.23
+
+## 4.0.58
+
+### Patch Changes
+
+- Fix document export body limits, improve document refine local editing, and suppress OCR native noise.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.22
+
+## 4.0.57
+
+### Patch Changes
+
+- Optimize document workflow generation quality and performance.
+
 ## 4.0.56
 
 ### Patch Changes

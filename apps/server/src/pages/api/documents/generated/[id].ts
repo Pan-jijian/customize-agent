@@ -1,6 +1,10 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { deleteGeneratedDocument, getGeneratedDocument, updateGeneratedDocument } from '@/services/generatedDocumentService';
 
+export const config = {
+  api: { bodyParser: { sizeLimit: '50mb' } },
+};
+
 /**
  * 单个生成文档 API 处理器
  * GET: 获取指定文档

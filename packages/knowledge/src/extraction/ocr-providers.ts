@@ -35,12 +35,58 @@ export interface OcrProvider {
 // ─── 路径工具 ───────────────────────────────────────────────────
 
 const knowledgeDir = path.dirname(fileURLToPath(import.meta.url));
+const OCR_NATIVE_NOISE_PATTERNS = [/^Image too small to scale!!/u, /^Line cannot be recognized!!$/u];
+const OCR_NOISE_SUPPRESSION_KEY = Symbol.for('customize-agent.ocr-noise-suppression');
+type OcrNoiseSuppressionState = { depth: number; stdout?: typeof process.stdout.write; stderr?: typeof process.stderr.write };
+
+function ocrNoiseSuppressionState() {
+  const globalState = globalThis as typeof globalThis & { [OCR_NOISE_SUPPRESSION_KEY]?: OcrNoiseSuppressionState };
+  globalState[OCR_NOISE_SUPPRESSION_KEY] ??= { depth: 0 };
+  return globalState[OCR_NOISE_SUPPRESSION_KEY];
+}
 
 function tessdataDir(): string {
   if (process.env.TESSDATA_PREFIX) return process.env.TESSDATA_PREFIX;
   const pkg = path.resolve(knowledgeDir, '..', '..', 'models', 'tessdata');
   if (fs.existsSync(pkg)) return pkg;
   return pkg;
+}
+
+function isNativeOcrNoise(chunk: unknown): boolean {
+  const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf8') : typeof chunk === 'string' ? chunk : '';
+  if (!text) return false;
+  const lines = text.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+  return lines.length > 0 && lines.every(line => OCR_NATIVE_NOISE_PATTERNS.some(pattern => pattern.test(line)));
+}
+
+async function suppressNativeOcrNoise<T>(operation: () => Promise<T>): Promise<T> {
+  const state = ocrNoiseSuppressionState();
+  if (state.depth === 0) {
+    state.stdout = process.stdout.write;
+    state.stderr = process.stderr.write;
+    const filter = (original: typeof process.stdout.write) => function write(this: NodeJS.WriteStream, chunk: unknown, ...args: unknown[]) {
+      if (isNativeOcrNoise(chunk)) {
+        const callback = args.find((arg): arg is () => void => typeof arg === 'function');
+        if (callback) process.nextTick(callback);
+        return true;
+      }
+      return (original as any).call(this, chunk, ...args);
+    } as typeof process.stdout.write;
+    process.stdout.write = filter(state.stdout);
+    process.stderr.write = filter(state.stderr);
+  }
+  state.depth += 1;
+  try {
+    return await operation();
+  } finally {
+    state.depth -= 1;
+    if (state.depth === 0 && state.stdout && state.stderr) {
+      process.stdout.write = state.stdout;
+      process.stderr.write = state.stderr;
+      state.stdout = undefined;
+      state.stderr = undefined;
+    }
+  }
 }
 
 // ─── Tesseract.js Provider（主 OCR 引擎，跨平台） ──────────────
@@ -99,7 +145,7 @@ export class TesseractJsProvider implements OcrProvider {
 
     try {
       const worker = await this.getWorker();
-      const result = await worker.recognize(pngPath);
+      const result = await suppressNativeOcrNoise(() => worker.recognize(pngPath));
       const text = (result.data.text ?? '').trim();
       const lines = (result.data.lines ?? []) as Array<{
         text?: string; confidence?: number;

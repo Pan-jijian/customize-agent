@@ -5,10 +5,57 @@ import * as os from 'os';
 import sharp from 'sharp';
 import mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
-import { createWorker } from 'tesseract.js';
+import * as Tesseract from 'tesseract.js';
 import { execa } from 'execa';
 import { resolveSafe } from '../core/path-utils.js';
 import { resolveBinary } from '../core/platform/binary.js';
+
+const OCR_NATIVE_NOISE_PATTERNS = [/^Image too small to scale!!/u, /^Line cannot be recognized!!$/u];
+const OCR_NOISE_SUPPRESSION_KEY = Symbol.for('customize-agent.ocr-noise-suppression');
+type OcrNoiseSuppressionState = { depth: number; stdout?: typeof process.stdout.write; stderr?: typeof process.stderr.write };
+
+function ocrNoiseSuppressionState() {
+  const globalState = globalThis as typeof globalThis & { [OCR_NOISE_SUPPRESSION_KEY]?: OcrNoiseSuppressionState };
+  globalState[OCR_NOISE_SUPPRESSION_KEY] ??= { depth: 0 };
+  return globalState[OCR_NOISE_SUPPRESSION_KEY];
+}
+
+function isNativeOcrNoise(chunk: unknown): boolean {
+  const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf8') : typeof chunk === 'string' ? chunk : '';
+  if (!text) return false;
+  const lines = text.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+  return lines.length > 0 && lines.every(line => OCR_NATIVE_NOISE_PATTERNS.some(pattern => pattern.test(line)));
+}
+
+async function suppressNativeOcrNoise<T>(operation: () => Promise<T>): Promise<T> {
+  const state = ocrNoiseSuppressionState();
+  if (state.depth === 0) {
+    state.stdout = process.stdout.write;
+    state.stderr = process.stderr.write;
+    const filter = (original: typeof process.stdout.write) => function write(this: NodeJS.WriteStream, chunk: unknown, ...args: unknown[]) {
+      if (isNativeOcrNoise(chunk)) {
+        const callback = args.find((arg): arg is () => void => typeof arg === 'function');
+        if (callback) process.nextTick(callback);
+        return true;
+      }
+      return (original as any).call(this, chunk, ...args);
+    } as typeof process.stdout.write;
+    process.stdout.write = filter(state.stdout);
+    process.stderr.write = filter(state.stderr);
+  }
+  state.depth += 1;
+  try {
+    return await operation();
+  } finally {
+    state.depth -= 1;
+    if (state.depth === 0 && state.stdout && state.stderr) {
+      process.stdout.write = state.stdout;
+      process.stderr.write = state.stderr;
+      state.stdout = undefined;
+      state.stderr = undefined;
+    }
+  }
+}
 
 export class MediaTools {
   constructor(private cwd: string) {}
@@ -49,9 +96,10 @@ export class MediaTools {
 
   async ocrImage(filePath: string): Promise<string> {
     this.ensureNotKnowledgeBase(filePath);
-    const worker = await createWorker('eng+chi_sim');
+    if (typeof Tesseract.setLogging === 'function') Tesseract.setLogging(false);
+    const worker = await Tesseract.createWorker('eng+chi_sim', undefined, { logger: () => undefined });
     try {
-      const result = await worker.recognize(resolveSafe(filePath, this.cwd));
+      const result = await suppressNativeOcrNoise(() => worker.recognize(resolveSafe(filePath, this.cwd)));
       return result.data.text.trim() || 'No text recognized.';
     } finally {
       await worker.terminate();

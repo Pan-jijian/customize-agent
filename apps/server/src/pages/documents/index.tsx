@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Tree, Typography } from 'antd';
 import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined, HistoryOutlined, FolderOutlined } from '@ant-design/icons';
-import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFiles, getPromptProjects, refineGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig, type PromptProject } from '@/lib/api';
+import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFiles, getPromptProjects, refineGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig, type PromptProject, type RefinePlan, type RefineSelection } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const { TextArea } = Input;
@@ -20,6 +20,7 @@ interface GenerationTaskState {
 }
 
 interface EditHistoryItem { id: string; content: string; prompt: string; createdAt: number; }
+interface RefinePreview { plan: RefinePlan; markdown: string; beforeSnippet?: string; afterSnippet?: string; summary?: string; changedChars?: number; prompt: string; before: string; }
 
 let activeGenerationTask: GenerationTaskState | null = null;
 function notifyGenerationTask() { activeGenerationTask?.listeners.forEach(l => l()); }
@@ -167,6 +168,10 @@ export default function DocumentsPage() {
   const [exporting, setExporting] = useState<string | null>(null);
   const [refinePrompt, setRefinePrompt] = useState('');
   const [refining, setRefining] = useState(false);
+  const [refineStep, setRefineStep] = useState<'idle' | 'planning' | 'applying'>('idle');
+  const [refinePlan, setRefinePlan] = useState<RefinePlan | null>(null);
+  const [refinePreview, setRefinePreview] = useState<RefinePreview | null>(null);
+  const [refineCursor, setRefineCursor] = useState<{ start: number; end: number }>({ start: 0, end: 0 });
   const [editHistory, setEditHistory] = useState<EditHistoryItem[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
@@ -252,7 +257,7 @@ export default function DocumentsPage() {
 
   const resetEditAssist = () => {
     refineRequestRef.current += 1;
-    setRefinePrompt(''); setEditHistory([]); setHistoryOpen(false); setRefining(false);
+    setRefinePrompt(''); setRefinePlan(null); setRefinePreview(null); setEditHistory([]); setHistoryOpen(false); setRefining(false); setRefineStep('idle');
   };
   const openDrawerForWorkflow = (id: string) => {
     setTemplateId(id); setCurrentDocumentId(null); setDraft(null); setContent(''); resetEditAssist();
@@ -572,26 +577,65 @@ export default function DocumentsPage() {
   const pushHistory = (value: string, prompt: string) => {
     setEditHistory(prev => [{ id: `${Date.now()}`, content: value, prompt, createdAt: Date.now() }, ...prev].slice(0, 12));
   };
-  const applyRefine = async () => {
+  const resetRefineState = (clearPrompt = false) => {
+    if (clearPrompt) setRefinePrompt('');
+    setRefinePlan(null);
+    setRefinePreview(null);
+    setRefineCursor({ start: 0, end: 0 });
+  };
+  const currentRefineSelection = (): { selection?: RefineSelection; cursorOffset?: number } => {
+    const start = refineCursor.start;
+    const end = refineCursor.end;
+    return end > start ? { selection: { start, end, text: content.slice(start, end) }, cursorOffset: start } : { cursorOffset: start };
+  };
+  const baseRefinePayload = (prompt: string, before: string) => ({
+    title: draft?.title || '未命名文档',
+    markdown: before,
+    instruction: prompt,
+    facts: draft?.structuredFacts?.map(fact => `${fact.key}: ${fact.value}`),
+    chapters: draft?.chapters?.map(chapter => chapter.title),
+    ...currentRefineSelection(),
+  });
+  const planRefine = async () => {
     const prompt = refinePrompt.trim();
     if (!draft || !prompt || refining) return;
     const requestId = refineRequestRef.current + 1;
     refineRequestRef.current = requestId;
-    setRefining(true);
+    setRefining(true); setRefineStep('planning'); setRefinePreview(null);
+    try {
+      const documentId = currentDocumentId;
+      const result = await refineGeneratedDocument({ mode: 'plan', ...baseRefinePayload(prompt, content) });
+      if (refineRequestRef.current !== requestId || documentId !== currentDocumentId) return;
+      if (!result.plan) throw new Error('AI 未返回修改计划');
+      setRefinePlan(result.plan);
+    } catch (e) { if (refineRequestRef.current === requestId) message.error(e instanceof Error ? e.message : t('common.error')); } finally { if (refineRequestRef.current === requestId) { setRefining(false); setRefineStep('idle'); } }
+  };
+  const generateRefinePreview = async (plan: RefinePlan) => {
+    const prompt = refinePrompt.trim();
+    if (!draft || !prompt || refining) return;
+    const requestId = refineRequestRef.current + 1;
+    refineRequestRef.current = requestId;
+    setRefining(true); setRefineStep('applying');
     try {
       const before = content;
       const documentId = currentDocumentId;
-      const result = await refineGeneratedDocument({ title: draft.title, markdown: before, instruction: prompt, facts: draft.structuredFacts?.map(fact => `${fact.key}: ${fact.value}`), chapters: draft.chapters?.map(chapter => chapter.title) });
+      const result = await refineGeneratedDocument({ mode: 'apply', ...baseRefinePayload(prompt, before), plan });
       if (refineRequestRef.current !== requestId || documentId !== currentDocumentId) return;
-      pushHistory(before, prompt);
-      setContent(result.markdown);
-      setRefinePrompt('');
-      message.success('已按提示完成精准修改');
-    } catch (e) { if (refineRequestRef.current === requestId) message.error(e instanceof Error ? e.message : t('common.error')); } finally { if (refineRequestRef.current === requestId) setRefining(false); }
+      if (!result.markdown) throw new Error('AI 未返回修改结果');
+      setRefinePreview({ plan: result.plan || plan, markdown: result.markdown, beforeSnippet: result.beforeSnippet, afterSnippet: result.afterSnippet, summary: result.summary, changedChars: result.changedChars, prompt, before });
+    } catch (e) { if (refineRequestRef.current === requestId) message.error(e instanceof Error ? e.message : t('common.error')); } finally { if (refineRequestRef.current === requestId) { setRefining(false); setRefineStep('idle'); } }
+  };
+  const applyRefinePreview = () => {
+    if (!refinePreview) return;
+    pushHistory(refinePreview.before, refinePreview.prompt);
+    setContent(refinePreview.markdown);
+    resetRefineState(true);
+    message.success('已应用精准修改');
   };
   const restoreHistory = (item: EditHistoryItem) => {
     pushHistory(content, '恢复前版本');
     setContent(item.content);
+    resetRefineState(true);
     message.success('已恢复历史版本');
   };
 
@@ -742,7 +786,7 @@ export default function DocumentsPage() {
               <Tabs items={[
                   { key: 'edit', label: t('documents.edit'), children: (
                     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                      <TextArea rows={28} value={content} disabled={refining} onChange={e => setContent(e.target.value)} />
+                      <TextArea rows={28} value={content} disabled={refining} onSelect={e => setRefineCursor({ start: e.currentTarget.selectionStart ?? 0, end: e.currentTarget.selectionEnd ?? e.currentTarget.selectionStart ?? 0 })} onChange={e => { setContent(e.target.value); setRefinePlan(null); setRefinePreview(null); setRefineCursor({ start: e.target.selectionStart ?? 0, end: e.target.selectionEnd ?? e.target.selectionStart ?? 0 }); }} />
                       <Card size="small" style={{ borderRadius: 12, background: 'linear-gradient(135deg, var(--colorFillAlter), var(--colorBgContainer))' }}>
                         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                           <Space align="start" style={{ width: '100%', justifyContent: 'space-between' }}>
@@ -752,13 +796,36 @@ export default function DocumentsPage() {
                             </div>
                             <Button size="small" icon={<HistoryOutlined />} onClick={() => setHistoryOpen(v => !v)} disabled={editHistory.length === 0}>历史版本 {editHistory.length > 0 ? editHistory.length : ''}</Button>
                           </Space>
-                          <TextArea rows={4} value={refinePrompt} disabled={refining} onChange={e => setRefinePrompt(e.target.value)} placeholder="例如：把第三章语气改得更专业，补充工期风险应对；或压缩全文到 3000 字以内，并保留关键事实。" />
+                          <Alert type="info" showIcon message="系统只负责识别修改范围，不改写你的提示词；选中文字后优先只改选区，没有选区时按光标所在小节/章节定位。" />
+                          <TextArea rows={4} value={refinePrompt} disabled={refining} onChange={e => { setRefinePrompt(e.target.value); setRefinePlan(null); setRefinePreview(null); }} placeholder="例如：写细一点；润色这段；第七章补充高处作业和临电安全措施；把安全检查频次改成每周一次。" />
                           <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
                             <Space wrap>
-                              {['更专业', '更简洁', '强化细节', '优化结构'].map(text => <Button key={text} size="small" disabled={refining} onClick={() => setRefinePrompt(prev => prev ? `${prev}；${text}` : text)}>{text}</Button>)}
+                              {['写细一点', '更专业', '只润色选区', '补充可执行措施'].map(text => <Button key={text} size="small" disabled={refining} onClick={() => setRefinePrompt(prev => prev ? `${prev}；${text}` : text)}>{text}</Button>)}
                             </Space>
-                            <Button type="primary" icon={<ThunderboltOutlined />} loading={refining} disabled={!refinePrompt.trim()} onClick={() => { void applyRefine(); }}>应用修改</Button>
+                            <Button type="primary" icon={<ThunderboltOutlined />} loading={refining && refineStep === 'planning'} disabled={!refinePrompt.trim() || refining} onClick={() => { void planRefine(); }}>识别修改范围</Button>
                           </Space>
+                          {refinePlan && !refinePreview && (
+                            <Card size="small" style={{ borderRadius: 10, borderColor: 'var(--colorAccent)' }}>
+                              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                                <Space wrap><Tag color="purple">{refinePlan.scope}</Tag><Tag color="blue">{refinePlan.action}</Tag><Tag color={refinePlan.confidence >= 0.8 ? 'green' : 'orange'}>置信度 {Math.round(refinePlan.confidence * 100)}%</Tag>{refinePlan.targetTitle && <Text strong>{refinePlan.targetTitle}</Text>}</Space>
+                                <Text>{refinePlan.summary}</Text>
+                                <Text type="secondary" style={{ fontSize: 12 }}>将按你的原始提示词执行，不添加额外编辑任务。</Text>
+                                <Space><Button type="primary" loading={refining && refineStep === 'applying'} onClick={() => { void generateRefinePreview(refinePlan); }}>执行并预览</Button><Button disabled={refining} onClick={() => setRefinePlan(null)}>取消</Button></Space>
+                              </Space>
+                            </Card>
+                          )}
+                          {refinePreview && (
+                            <Card size="small" style={{ borderRadius: 10, borderColor: 'var(--colorSuccess)' }}>
+                              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                                <Space wrap><Tag color="green">修改预览</Tag><Text>{refinePreview.summary || refinePreview.plan.summary}</Text><Tag>{refinePreview.changedChars && refinePreview.changedChars > 0 ? `+${refinePreview.changedChars}` : refinePreview.changedChars} 字符</Tag></Space>
+                                <Row gutter={12}>
+                                  <Col span={12}><Text strong>修改前</Text><div style={{ marginTop: 6, maxHeight: 180, overflow: 'auto', padding: 10, borderRadius: 8, background: 'var(--colorFillAlter)', whiteSpace: 'pre-wrap', fontSize: 12 }}>{refinePreview.beforeSnippet || '无片段预览'}</div></Col>
+                                  <Col span={12}><Text strong>修改后</Text><div style={{ marginTop: 6, maxHeight: 180, overflow: 'auto', padding: 10, borderRadius: 8, background: 'var(--colorFillAlter)', whiteSpace: 'pre-wrap', fontSize: 12 }}>{refinePreview.afterSnippet || '无片段预览'}</div></Col>
+                                </Row>
+                                <Space><Button type="primary" onClick={applyRefinePreview}>应用到文档</Button><Button onClick={() => setRefinePreview(null)}>返回计划</Button><Button danger onClick={() => { setRefinePlan(null); setRefinePreview(null); }}>放弃</Button></Space>
+                              </Space>
+                            </Card>
+                          )}
                           {historyOpen && (
                             <div style={{ borderTop: '1px solid var(--colorBorderSecondary)', paddingTop: 12 }}>
                               <List size="small" dataSource={editHistory} locale={{ emptyText: '暂无历史版本' }} renderItem={item => (

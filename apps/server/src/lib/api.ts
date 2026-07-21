@@ -353,8 +353,21 @@ export async function openGeneratedAsset(id: string, target: 'file' | 'directory
 export async function regenerateDocumentChapter(input: { templateId: string; chapterId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; documentId?: string; currentMarkdown?: string; existingFacts?: string[] }) {
   return fetchJson<{ chapter: DocumentDraftChapter }>('/api/documents/chapter/regenerate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
 }
-export async function refineGeneratedDocument(input: { title: string; markdown: string; instruction: string; facts?: string[]; chapters?: string[] }) {
-  return fetchJson<{ markdown: string }>('/api/documents/refine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+export interface RefineSelection { start: number; end: number; text?: string; }
+export interface RefinePlan {
+  scope: 'selection' | 'section' | 'chapter' | 'document';
+  action: 'polish' | 'expand' | 'summarize' | 'replace' | 'delete' | 'add' | 'restructure' | 'table';
+  targetTitle?: string;
+  targetRange?: { start: number; end: number };
+  baseMarkdownHash?: string;
+  targetTextHash?: string;
+  confidence: number;
+  summary: string;
+  needsConfirmation: boolean;
+}
+export interface RefineResult { markdown?: string; plan?: RefinePlan; summary?: string; beforeSnippet?: string; afterSnippet?: string; changedChars?: number; }
+export async function refineGeneratedDocument(input: { mode?: 'plan' | 'apply'; title: string; markdown: string; instruction: string; facts?: string[]; chapters?: string[]; selection?: RefineSelection; cursorOffset?: number; plan?: RefinePlan }) {
+  return fetchJson<RefineResult>('/api/documents/refine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
 }
 export async function getDocumentDrafts() { return fetchJson<{ drafts: StoredDocumentDraft[] }>('/api/documents/drafts'); }
 export async function saveDocumentDraft(draft: GeneratedDocumentDraft, id?: string) {

@@ -1,5 +1,33 @@
 # customize-agent
 
+## 4.0.50
+
+### Patch Changes
+
+- Improve document refine interaction to preserve user prompts and strengthen local edit safety.
+- Updated dependencies
+  - @customize-agent/server@4.0.59
+  - @customize-agent/knowledge@4.0.23
+  - @customize-agent/tools@3.0.15
+
+## 4.0.49
+
+### Patch Changes
+
+- Fix document export body limits, improve document refine local editing, and suppress OCR native noise.
+- Updated dependencies
+  - @customize-agent/server@4.0.58
+  - @customize-agent/knowledge@4.0.22
+  - @customize-agent/tools@3.0.14
+
+## 4.0.48
+
+### Patch Changes
+
+- Optimize document workflow generation quality and performance.
+- Updated dependencies
+  - @customize-agent/server@4.0.57
+
 ## 4.0.47
 
 ### Patch Changes
