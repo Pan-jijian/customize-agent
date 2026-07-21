@@ -4,12 +4,18 @@ export interface RetryOptions {
   maxRetries?: number;
   /** 基础退避延迟 ms（默认 1000） */
   baseDelayMs?: number;
+  /** 外部中止信号 */
+  signal?: AbortSignal;
   /** 每次重试时的回调（流式模式可通过 onRetry 发送 type:'reset' chunk 实现回滚） */
   onRetry?: (attempt: number, error: Error) => void;
 }
 
 /** 可重试的 HTTP 状态码 */
 const RETRYABLE_STATUSES = new Set([429, 408, 500, 502, 503, 504]);
+
+function abortError() {
+  return new Error('用户中止');
+}
 
 /** 判断错误是否可重试（5xx / 网络错误 / rate limit） */
 export function isRetryableError(err: unknown): boolean {
@@ -47,11 +53,13 @@ export async function withRetry<T>(
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (options.signal?.aborted) throw abortError();
     try {
       return await fn();
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
 
+      if (options.signal?.aborted) throw abortError();
       if (attempt === maxRetries || !isRetryableError(lastError)) {
         throw lastError;
       }
@@ -61,7 +69,21 @@ export async function withRetry<T>(
       // 指数退避 + 随机抖动
       const jitter = Math.floor(Math.random() * 1000);
       const delay = baseDelayMs * Math.pow(2, attempt) + jitter;
-      await new Promise(resolve => setTimeout(resolve, delay));
+      await new Promise<void>((resolve, reject) => {
+        if (options.signal?.aborted) {
+          reject(abortError());
+          return;
+        }
+        const timer = setTimeout(() => {
+          options.signal?.removeEventListener('abort', abort);
+          resolve();
+        }, delay);
+        const abort = () => {
+          clearTimeout(timer);
+          reject(abortError());
+        };
+        options.signal?.addEventListener('abort', abort, { once: true });
+      });
     }
   }
 

@@ -7,7 +7,7 @@ import { generateDocumentDraft } from './documentWorkflowService';
 import { rememberDocumentContext } from './contextService';
 import { getMultiProjectManager, getProjectRoot } from './kbService';
 
-export type GeneratedDocumentStatus = 'generating' | 'completed' | 'warning' | 'failed';
+export type GeneratedDocumentStatus = 'generating' | 'completed' | 'warning' | 'failed' | 'aborted';
 
 export interface GeneratedDocumentRecord {
   id: string;
@@ -31,6 +31,10 @@ export interface GeneratedDocumentRecord {
 
 function failRunningStages(stages: GeneratedDocumentRecord['executionStages'], message: string): GeneratedDocumentRecord['executionStages'] {
   return stages?.map(stage => stage.status === 'running' ? { ...stage, status: 'failed' as const, message } : stage);
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && /用户中止|aborted|abort/i.test(error.message);
 }
 
 export interface GeneratedAssetRecord extends DocumentAsset {
@@ -108,7 +112,8 @@ export function updateGeneratedDocument(id: string, patch: Partial<GeneratedDocu
 
 export function abortGeneratedDocument(id: string, projectRoot = getProjectRoot()) {
   const current = getGeneratedDocument(id, projectRoot);
-  if (!current || current.status !== 'generating') return null;
+  if (!current) return null;
+  if (current.status !== 'generating') return current;
   for (const [key, task] of tasks) {
     if (task.documentId === id) {
       task.controller.abort();
@@ -116,7 +121,7 @@ export function abortGeneratedDocument(id: string, projectRoot = getProjectRoot(
       break;
     }
   }
-  return saveGeneratedDocument({ ...current, status: 'failed', error: '用户中止', executionStages: failRunningStages(current.executionStages, '用户中止'), updatedAt: Date.now() }, projectRoot);
+  return saveGeneratedDocument({ ...current, status: 'aborted', error: '用户中止', executionStages: failRunningStages(current.executionStages, '用户中止'), updatedAt: Date.now(), completedAt: Date.now() }, projectRoot);
 }
 
 export function deleteGeneratedDocument(id: string, projectRoot = getProjectRoot()) {
@@ -284,7 +289,8 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     const current = getGeneratedDocument(documentId, projectRoot);
     if (!current || current.status !== 'generating') return current ?? initial;
     const message = error instanceof Error ? error.message : String(error);
-    const record = saveGeneratedDocument({ ...current, status: 'failed', error: message, executionStages: failRunningStages(current.executionStages, message) }, projectRoot);
+    const status: GeneratedDocumentStatus = isAbortError(error) ? 'aborted' : 'failed';
+    const record = saveGeneratedDocument({ ...current, status, error: message, executionStages: failRunningStages(current.executionStages, message), completedAt: Date.now() }, projectRoot);
     return record;
   }).finally(() => {
     tasks.delete(taskId);

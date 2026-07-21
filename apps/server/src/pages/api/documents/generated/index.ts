@@ -30,7 +30,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       const { action, documentId } = req.body as { action?: string; documentId?: string };
       if (action === 'abort' && documentId) {
         const record = abortGeneratedDocument(documentId);
-        if (!record) return res.status(404).json({ error: 'Document not found or not generating' });
+        if (!record) return res.status(409).json({ error: 'Document not found or not generating' });
         return res.status(200).json({ document: record });
       }
       return res.status(400).json({ error: 'Unknown action' });

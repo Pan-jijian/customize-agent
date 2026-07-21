@@ -1500,7 +1500,8 @@ function issuesForChapter(chapter: DocumentDraftChapter, issues: string[]) {
   return actionableIssues.filter(issue => issue.includes(chapter.title) || [...sectionHits].some(section => issue.includes(section)) || /图片|三级小节|目录|表格|量化|数值|单位|事实/u.test(issue) && /!\[|####|\*\*|\||按设计要求|按规范要求|m\s*[²2]|mm2|cm2|km2/u.test(text));
 }
 
-async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean }) {
+async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; signal?: AbortSignal }) {
+  throwIfAborted(input.signal);
   const repaired = await callDocumentLlm([
     '你是章节局部修复专家。只修复给定章节中明确存在的问题，不得改写其他章节，不得压缩正文，不得改变用户/模板结构。',
     FORMAL_WRITING_RULES,
@@ -1516,12 +1517,13 @@ async function repairChapterByQuality(input: { template: DocumentTemplate; chapt
     input.chapter.evidence.length ? `本章证据摘要：\n${evidenceBundlePrompt(buildEvidenceBundle({ id: input.chapter.id, title: input.chapter.title, purpose: input.chapter.title, queries: [], requiredFacts: [] }, input.chapter.evidence))}` : '',
     '当前章节 Markdown：',
     input.chapter.content,
-  ].filter(Boolean).join('\n\n'), false, { maxTokens: Math.min(12000, Math.max(4000, Math.ceil(documentTextLength(input.chapter.content) * 1.4))), temperature: 0.2 });
+  ].filter(Boolean).join('\n\n'), false, { maxTokens: Math.min(12000, Math.max(4000, Math.ceil(documentTextLength(input.chapter.content) * 1.4))), temperature: 0.2, signal: input.signal });
+  throwIfAborted(input.signal);
   if (!repaired || repaired.length < input.chapter.content.length * 0.75 || !repaired.includes(input.chapter.title.replace(/^第[一二三四五六七八九十百千万]+章\s*/u, '').slice(0, 6))) return input.chapter.content;
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(repaired, input.forbidDrawingImages));
 }
 
-async function repairMarkdownByQuality(input: { markdown: string; template: DocumentTemplate; chapters: DocumentDraftChapter[]; promptTexts: string; requirement?: string; issues: string[]; forbidDrawingImages: boolean }) {
+async function repairMarkdownByQuality(input: { markdown: string; template: DocumentTemplate; chapters: DocumentDraftChapter[]; promptTexts: string; requirement?: string; issues: string[]; forbidDrawingImages: boolean; signal?: AbortSignal }) {
   const repairableIssues = input.issues.filter(repairableQualityIssue);
   if (repairableIssues.length === 0) return { markdown: input.markdown, chapters: input.chapters, stage: undefined as DocumentExecutionStage | undefined };
   let repairedCount = 0;
@@ -1529,13 +1531,14 @@ async function repairMarkdownByQuality(input: { markdown: string; template: Docu
   let repairAttempts = 0;
   const maxRepairAttempts = 5;
   for (const chapter of input.chapters) {
+    throwIfAborted(input.signal);
     const chapterIssues = issuesForChapter(chapter, repairableIssues);
     if (chapterIssues.length === 0 || repairAttempts >= maxRepairAttempts) {
       repairedChapters.push(chapter);
       continue;
     }
     repairAttempts += 1;
-    const content = await repairChapterByQuality({ template: input.template, chapter, issues: chapterIssues.slice(0, 6), promptTexts: input.promptTexts, requirement: input.requirement, forbidDrawingImages: input.forbidDrawingImages });
+    const content = await repairChapterByQuality({ template: input.template, chapter, issues: chapterIssues.slice(0, 6), promptTexts: input.promptTexts, requirement: input.requirement, forbidDrawingImages: input.forbidDrawingImages, signal: input.signal });
     if (content !== chapter.content) repairedCount += 1;
     repairedChapters.push({ ...chapter, content });
   }
@@ -1691,7 +1694,8 @@ async function callDocumentLlm(system: string, prompt: string, jsonOnly = false,
       { role: 'user', content: prompt },
     ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: options.maxTokens, signal: options.signal });
     return response.content.trim();
-  } catch {
+  } catch (error) {
+    if (options.signal?.aborted) throw new Error('用户中止', { cause: error });
     return undefined;
   }
 }
@@ -1719,8 +1723,8 @@ async function callWithTimeout<T>(run: (signal: AbortSignal) => Promise<T>, time
 }
 
 /** 调用 LLM 并以 JSON 格式解析返回结果 */
-async function callDocumentLlmJson<T>(system: string, prompt: string): Promise<T | undefined> {
-  const response = await callDocumentLlm(system, prompt, true);
+async function callDocumentLlmJson<T>(system: string, prompt: string, options: { signal?: AbortSignal } = {}): Promise<T | undefined> {
+  const response = await callDocumentLlm(system, prompt, true, { signal: options.signal });
   if (!response) return undefined;
   try {
     const raw = response.replace(/^```json\s*/u, '').replace(/^```\s*/u, '').replace(/```$/u, '').trim();
@@ -1802,13 +1806,14 @@ function mimeTypeFromPath(filePath: string) {
   return 'application/octet-stream';
 }
 
-async function understandReferenceFiles(projectRoot: string, evidence: DocumentEvidence[]): Promise<{ notes: string[]; stage: DocumentExecutionStage }> {
+async function understandReferenceFiles(projectRoot: string, evidence: DocumentEvidence[], signal?: AbortSignal): Promise<{ notes: string[]; stage: DocumentExecutionStage }> {
   const active = getActiveModelWithProvider();
   if (!active?.provider.capabilities?.fileUnderstanding && !active?.provider.capabilities?.imageUnderstanding) {
     return { notes: [], stage: { type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '当前模型未开启文件理解/图片理解能力' } };
   }
+  throwIfAborted(signal);
   const provider = createProvider(providerFactoryName(active.model.provider, active.provider), { baseUrl: active.provider.baseUrl, apiKey: active.provider.apiKey, modelName: active.model.name, directEndpoint: active.provider.directEndpoint });
-  const fileAwareProvider = provider as typeof provider & { understandFiles?: (files: Array<{ name: string; mimeType: string; data: Buffer }>, prompt: string, options?: { maxTokens?: number }) => Promise<{ content: string }> };
+  const fileAwareProvider = provider as typeof provider & { understandFiles?: (files: Array<{ name: string; mimeType: string; data: Buffer }>, prompt: string, options?: { maxTokens?: number; signal?: AbortSignal }) => Promise<{ content: string }> };
   if (!fileAwareProvider.understandFiles) return { notes: [], stage: { type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '当前 Provider 未实现文件理解接口' } };
   const candidates = [...new Set(evidence.map(item => item.filePath).filter(file => /\.(png|jpe?g|webp|pdf|docx|xlsx)$/iu.test(file)))].slice(0, 6);
   const files = candidates.map(filePath => {
@@ -1817,7 +1822,9 @@ async function understandReferenceFiles(projectRoot: string, evidence: DocumentE
   }).filter(Boolean) as Array<{ name: string; mimeType: string; data: Buffer }>;
   if (files.length === 0) return { notes: [], stage: { type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '没有可发送给多模态模型的参考文件' } };
   try {
-    const response = await fileAwareProvider.understandFiles(files, '请阅读这些参考图片/文件，提炼可用于文档生成和审查的事实、视觉要点、地图信息和封面设计建议。请用中文要点输出。', { maxTokens: 1200 });
+    throwIfAborted(signal);
+    const response = await fileAwareProvider.understandFiles(files, '请阅读这些参考图片/文件，提炼可用于文档生成和审查的事实、视觉要点、地图信息和封面设计建议。请用中文要点输出。', { maxTokens: 1200, signal });
+    throwIfAborted(signal);
     const note = response.content.trim();
     return { notes: note ? [note] : [], stage: { type: 'file_understanding', roleId: 'multimodal-files', status: note ? 'success' : 'fallback', message: note ? `已理解 ${files.length} 个多模态参考文件` : '多模态模型未返回有效文件理解结果' } };
   } catch {
@@ -1843,16 +1850,19 @@ function shouldRunLlmFactExtraction(existingFacts: DocumentFact[], template: Doc
   return covered / targets.length < 0.9;
 }
 
-async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: string, template: DocumentTemplate, spec?: AutoDocumentSpecPackage): Promise<{ facts: DocumentFact[]; stages: DocumentExecutionStage[] }> {
+async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: string, template: DocumentTemplate, spec?: AutoDocumentSpecPackage, signal?: AbortSignal): Promise<{ facts: DocumentFact[]; stages: DocumentExecutionStage[] }> {
   const stages: DocumentExecutionStage[] = [{ type: 'fact_extraction', roleId: 'llm-json', status: 'skipped', message: 'LLM JSON 抽取未启用或无可用模型' }];
   const sample = evidence.slice(0, 24).map(item => `文件:${item.filePath}\n角色:${item.roleId || ''}\n处理:${item.processingType || ''}\n内容:${item.content.slice(0, 1200)}`).join('\n\n---\n\n');
   if (!sample.trim()) return { facts: [], stages };
+  throwIfAborted(signal);
   const targets = specFactTargets(template, spec);
   const schemaText = targets.map(field => `- id=${field.id} name=${field.name} type=auto required=${field.required} sourceRoleIds=${field.sourceRoleIds.join(',') || '不限'} hint=${field.extractionHint || '无'}`).join('\n');
   const llm = await callDocumentLlmJson<{ facts?: Array<{ fieldId?: string; fieldName?: string; key: string; value: string; sourceFile?: string; roleId?: string; processingType?: string; confidence?: number }> }>(
     promptTexts || '你是文档事实抽取器。',
-    `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色；事实取舍和冲突处理遵循规范包字段说明、文件角色和提示词角色配置。\n返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","sourceFile":"...","roleId":"...","processingType":"project_fact","confidence":0.8}]}。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`, 
+    `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色；事实取舍和冲突处理遵循规范包字段说明、文件角色和提示词角色配置。\n返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","sourceFile":"...","roleId":"...","processingType":"project_fact","confidence":0.8}]}。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`,
+    { signal },
   );
+  throwIfAborted(signal);
   if (!llm?.facts?.length) return { facts: [], stages };
   return {
     facts: llm.facts.filter(item => item.key && item.value).map(item => {
@@ -2561,7 +2571,9 @@ async function reviewAndOptimizeMarkdown(input: {
   promptTexts: string;
   projectContext: string;
   requirement?: string;
+  signal?: AbortSignal;
 }): Promise<{ markdown: string; stage: DocumentExecutionStage }> {
+  throwIfAborted(input.signal);
   const reviewBundle = buildEvidenceBundle({ id: 'review', title: '全文审查', purpose: '审查全文证据和资源关系', queries: [], requiredFacts: [] }, input.evidence);
   const evidenceDigest = evidenceBundlePrompt(reviewBundle);
   const specDigest = input.spec ? [
@@ -2587,7 +2599,8 @@ async function reviewAndOptimizeMarkdown(input: {
     '待审查初稿：',
     input.markdown.slice(0, 24000),
     '请只返回审查问题清单，不要返回全文。',
-  ].filter(Boolean).join('\n'), false, { maxTokens: 2000, temperature: 0 });
+  ].filter(Boolean).join('\n'), false, { maxTokens: 2000, temperature: 0, signal: input.signal });
+  throwIfAborted(input.signal);
   return {
     markdown: input.markdown,
     stage: {
@@ -3120,7 +3133,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     llmContent = await supplementShortSections({ template, chapter, content: llmContent, evidence, missingFacts, promptTexts, projectContext, requirement: input.requirement, roleContext, targetWords, forbidDrawingImages, factCoverageContext, signal: input.signal });
     const localIssues = lightweightChapterIssues({ chapter, content: llmContent, missingFacts, targetWords });
     if (localIssues.length > 0) {
-      llmContent = await repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: llmContent, evidence, missingFacts, sections: chapter.sections || [] }, issues: localIssues.slice(0, 5), promptTexts, requirement: input.requirement, forbidDrawingImages });
+      llmContent = await repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: llmContent, evidence, missingFacts, sections: chapter.sections || [] }, issues: localIssues.slice(0, 5), promptTexts, requirement: input.requirement, forbidDrawingImages, signal: input.signal });
       throwIfAborted(input.signal);
     }
     const expandedChapter = await expandChapterToTarget({ template, chapter, content: llmContent, evidence, promptTexts, requirement: input.requirement, roleContext, targetChars: Math.floor(targetWords * 0.95), forbidDrawingImages, maxTokens: generationMaxTokens, signal: input.signal });
@@ -3162,7 +3175,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
 
   throwIfAborted(input.signal);
   let fileUnderstanding: { stage: DocumentExecutionStage; notes: string[] } = { stage: { type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '文件理解跳过' }, notes: [] };
-  try { fileUnderstanding = await understandReferenceFiles(projectRoot, allEvidence); } catch (err) { if (input.signal?.aborted) throw err; console.error('[gen] fileUnderstanding failed:', err); }
+  try { fileUnderstanding = await understandReferenceFiles(projectRoot, allEvidence, input.signal); } catch (err) { if (input.signal?.aborted) throw err; console.error('[gen] fileUnderstanding failed:', err); }
   throwIfAborted(input.signal);
   for (const note of fileUnderstanding.notes) {
     allEvidence.push({
@@ -3186,7 +3199,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const preLlmFacts = [...projectBasicStructuredFacts, ...roleStructuredFacts, ...localFacts];
   let llmExtraction: { facts: DocumentFact[]; stages: DocumentExecutionStage[] } = { facts: [], stages: [{ type: 'fact_extraction', roleId: 'llm-json', status: 'skipped', message: '已有本地/角色事实覆盖主要必需字段，跳过 LLM 全量事实抽取' }] };
   if (shouldRunLlmFactExtraction(preLlmFacts, template, documentSpec)) {
-    try { llmExtraction = await extractFactsWithLlm(allEvidence, factExtractionPromptTexts, template, documentSpec); } catch (err) { if (input.signal?.aborted) throw err; console.error('[gen] fact extraction failed:', err); }
+    try { llmExtraction = await extractFactsWithLlm(allEvidence, factExtractionPromptTexts, template, documentSpec, input.signal); } catch (err) { if (input.signal?.aborted) throw err; console.error('[gen] fact extraction failed:', err); }
   }
   throwIfAborted(input.signal);
   const structuredFacts = [...projectBasicStructuredFacts, ...roleStructuredFacts, ...localFacts, ...llmExtraction.facts];
@@ -3267,7 +3280,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const forceFullReview = initialBlockingCount > 0 || validationIssues.some(issue => /事实一致性|项目污染|章节生成存在兜底|章节生成失败|阻断/u.test(issue.message));
   const shouldFullReview = forceFullReview || riskChapters.length > Math.max(3, Math.floor(chapterDrafts.length * 0.35));
   const review = shouldFullReview
-    ? await reviewAndOptimizeMarkdown({ template, spec: documentSpec, markdown: initialMarkdown, evidence: allEvidence, promptTexts: reviewPromptTexts || promptTexts, projectContext, requirement: input.requirement })
+    ? await reviewAndOptimizeMarkdown({ template, spec: documentSpec, markdown: initialMarkdown, evidence: allEvidence, promptTexts: reviewPromptTexts || promptTexts, projectContext, requirement: input.requirement, signal: input.signal })
     : { markdown: initialMarkdown, stage: { type: 'llm_review' as const, roleId: 'llm-review', status: riskChapters.length > 0 ? 'skipped' as const : 'success' as const, message: riskChapters.length > 0 ? `本地风险扫描发现 ${riskChapters.length} 个低/中风险章节，已在章节阶段完成局部自检修复，跳过全文审查` : '本地风险扫描未发现需要 LLM 深度审查的章节，跳过全文审查' } };
   throwIfAborted(input.signal);
   const reviewedMarkdownBase = normalizeTertiaryHeadings(removeUnwantedDrawingImages(review.markdown === initialMarkdown ? composeDocumentMarkdown({ ...base, validationIssues, exportGate: base.exportGate, executionStages }) : review.markdown, forbidDrawingImages));
@@ -3282,7 +3295,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const minSectionMessages = minChapterSectionIssues(chapterDrafts).map(issue => `${issue.message}${issue.suggestion ? `：${issue.suggestion}` : ''}`);
   const tertiaryHeadingMessages = tertiaryHeadingIssues(reviewedMarkdownBase).map(issue => `${issue.message}${issue.suggestion ? `：${issue.suggestion}` : ''}`);
   const qualityIssues = [...tenderQualityIssues(reviewedMarkdownBase, chapterDrafts, tenderPlan, roleArtifacts, forbidDrawingImages), ...structureIssueMessages, ...placeholderIssueMessages, ...gateIssueMessages, ...preciseIssueMessages, ...quantifiedCoverageMessages, ...tocIssueMessages, ...duplicateBasicInfoMessages, ...formalStyleMessages, ...minSectionMessages, ...tertiaryHeadingMessages];
-  const repair = await repairMarkdownByQuality({ markdown: reviewedMarkdownBase, template, chapters: chapterDrafts, promptTexts, requirement: input.requirement, issues: qualityIssues, forbidDrawingImages });
+  const repair = await repairMarkdownByQuality({ markdown: reviewedMarkdownBase, template, chapters: chapterDrafts, promptTexts, requirement: input.requirement, issues: qualityIssues, forbidDrawingImages, signal: input.signal });
   throwIfAborted(input.signal);
   const reviewedStages = repair.stage ? [...executionStages, review.stage, repair.stage] : [...executionStages, review.stage];
   let repairedChapterDrafts = repair.chapters;

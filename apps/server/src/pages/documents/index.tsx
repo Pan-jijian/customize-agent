@@ -266,7 +266,7 @@ export default function DocumentsPage() {
   const openDrawerForEditor = async (item: GeneratedDocumentRecord) => {
     setCurrentDocumentId(item.id); setTemplateId(item.templateId);
     const isGenerating = isDraftGenerating(item.status);
-    if (isGenerating || item.status === 'failed') {
+    if (isGenerating || item.status === 'failed' || item.status === 'aborted') {
       genStarted.current = true;
       resetEditAssist();
       setDraft(null); setContent(''); setLoading(isGenerating);
@@ -299,9 +299,9 @@ export default function DocumentsPage() {
     const h = Math.floor(m / 60), rm = m % 60;
     return rm ? `${h} 小时 ${rm} 分` : `${h} 小时`;
   };
-  const draftStatusColor = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? 'success' : s === 'warning' ? 'warning' : s === 'failed' ? 'error' : 'processing';
-  const draftStatusText = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? '已完成' : s === 'warning' ? '需复核' : s === 'failed' ? '失败' : '生成中';
-  const isDraftGenerating = (s: GeneratedDocumentRecord['status']) => s !== 'completed' && s !== 'warning' && s !== 'failed';
+  const draftStatusColor = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? 'success' : s === 'warning' ? 'warning' : s === 'failed' ? 'error' : s === 'aborted' ? 'default' : 'processing';
+  const draftStatusText = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? '已完成' : s === 'warning' ? '需复核' : s === 'failed' ? '失败' : s === 'aborted' ? '已中止' : '生成中';
+  const isDraftGenerating = (s: GeneratedDocumentRecord['status']) => s !== 'completed' && s !== 'warning' && s !== 'failed' && s !== 'aborted';
 
   const subIcon = (s: FlowStepStatus) => {
     if (s === 'process') return <LoadingOutlined />;
@@ -348,7 +348,7 @@ export default function DocumentsPage() {
     const stages = record.executionStages || record.draft?.executionStages || [];
     if (stages.length > 0) {
       const steps = stages.map((stage, index) => {
-        const status = record.status === 'failed' && stage.status === 'running' ? 'error' : stageToFlowStatus(stage.status);
+        const status = (record.status === 'failed' || record.status === 'aborted') && stage.status === 'running' ? 'error' : stageToFlowStatus(stage.status);
         return {
           key: `${stage.type}-${index}`,
           title: stage.title || STAGE_TITLES[stage.type] || stage.type,
@@ -360,7 +360,7 @@ export default function DocumentsPage() {
         } satisfies FlowStep;
       });
       if (record.status === 'generating' && steps.length > 0 && steps.at(-1)?.status === 'finish') steps[steps.length - 1] = { ...steps[steps.length - 1], status: 'process' as const };
-      const activeKey = record.status === 'generating' ? steps.at(-1)?.key || 'prepare' : record.status === 'failed' ? steps.find(step => step.status === 'error')?.key || steps.at(-1)?.key || 'prepare' : 'done';
+      const activeKey = record.status === 'generating' ? steps.at(-1)?.key || 'prepare' : (record.status === 'failed' || record.status === 'aborted') ? steps.find(step => step.status === 'error')?.key || steps.at(-1)?.key || 'prepare' : 'done';
       return { steps, activeKey };
     }
     return { steps: [], activeKey: null };
@@ -368,7 +368,7 @@ export default function DocumentsPage() {
   const applyGeneratedRecordToWorkflow = (record: GeneratedDocumentRecord) => {
     const { steps, activeKey } = buildFlowStepsFromRecord(record);
     setFlowSteps(steps); setActiveFlowKey(activeKey); setLoading(isDraftGenerating(record.status)); setSnap(steps, activeKey, isDraftGenerating(record.status));
-    if (record.status === 'failed') setDrawerMode('workflow');
+    if (record.status === 'failed' || record.status === 'aborted') setDrawerMode('workflow');
     if ((record.status === 'completed' || record.status === 'warning') && record.draft) {
       setDraft(record.draft); setContent(record.editedMarkdown || record.markdown); setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null);
     }
@@ -464,7 +464,7 @@ export default function DocumentsPage() {
       const { document } = await getGeneratedDocument(docId, true);
       applyGeneratedRecordToWorkflow(document);
       if ((document.status === 'completed' || document.status === 'warning') && document.draft) return document;
-      if (document.status === 'failed') throw new Error(document.error || '生成失败');
+      if (document.status === 'failed' || document.status === 'aborted') throw new Error(document.error || (document.status === 'aborted' ? '生成已中止' : '生成失败'));
       await new Promise(r => window.setTimeout(r, 1500));
     }
   };
@@ -502,7 +502,8 @@ export default function DocumentsPage() {
       localStorage.removeItem('activeGenDocId');
       const msg = error instanceof Error ? error.message : t('common.error');
       setFlowSteps(prev => { const n = prev.map(s => s.status === 'process' ? { ...s, status: 'error' as const, description: msg, subSteps: updSubs(s, 'error') } : s); setSnap(n, activeFlowKey, false); return n; });
-      if (activeGenerationTask?.promise === promise) { activeGenerationTask.loading = false; activeGenerationTask.error = msg; notifyGenerationTask(); }
+      if (activeGenerationTask?.promise === promise) { activeGenerationTask.loading = false; activeGenerationTask.error = msg; notifyGenerationTask(); activeGenerationTask = null; }
+      await loadDrafts().catch(() => undefined);
       message.error(msg);
     } finally { timers.forEach(x => window.clearTimeout(x)); setLoading(false); if (activeGenerationTask?.promise === promise) { activeGenerationTask.loading = false; notifyGenerationTask(); } }
   };
@@ -540,10 +541,13 @@ export default function DocumentsPage() {
     if (recoveryPollRef.current) { clearInterval(recoveryPollRef.current); recoveryPollRef.current = null; }
     try {
       await abortGeneratedDocument(item.id);
+      message.success('已中止生成任务');
+    } catch {
+      message.info('任务已不在运行，已刷新状态');
+    } finally {
       await loadDrafts();
       if (currentDocumentId === item.id) { setCurrentDocumentId(null); setDraft(null); setContent(''); }
-      message.success('已中止生成任务');
-    } catch { message.error(t('common.error')); }
+    }
   };
   useEffect(() => {
     if (drawerOpen && drawerMode === 'workflow' && !genStarted.current && !activeGenerationTask?.loading && currentTemplate?.projectRoleConfigId) {
@@ -718,7 +722,7 @@ export default function DocumentsPage() {
                   onClick={() => { void openDrawerForEditor(item); }}
                 >
                   {item.status === 'completed' ? <CheckCircleOutlined style={{ fontSize: 18, color: 'var(--colorOk)', flexShrink: 0, marginTop: 2 }} />
-                    : item.status === 'failed' ? <CloseCircleOutlined style={{ fontSize: 18, color: 'var(--colorDanger)', flexShrink: 0, marginTop: 2 }} />
+                    : item.status === 'failed' || item.status === 'aborted' ? <CloseCircleOutlined style={{ fontSize: 18, color: 'var(--colorDanger)', flexShrink: 0, marginTop: 2 }} />
                     : item.status === 'warning' ? <SafetyCertificateOutlined style={{ fontSize: 18, color: 'var(--colorWarning)', flexShrink: 0, marginTop: 2 }} />
                     : <SyncOutlined spin style={{ fontSize: 18, color: '#1677ff', flexShrink: 0, marginTop: 2 }} />}
                   <div style={{ minWidth: 0, flex: 1 }}>
@@ -727,9 +731,9 @@ export default function DocumentsPage() {
                       <span>{new Date(item.updatedAt).toLocaleString()}</span>
                       <span>耗时 {fmtDuration(item)}</span>
                     </div>
-                    {(item.status === 'warning' || item.status === 'failed') && (
-                      <div style={{ marginTop: 3, color: item.status === 'failed' ? 'var(--colorError)' : 'var(--colorWarning)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {item.warningIssues?.[0] || item.draft?.validationIssues.find(x => x.level === 'error' || x.level === 'warning')?.message || '需复核'}
+                    {(item.status === 'warning' || item.status === 'failed' || item.status === 'aborted') && (
+                      <div style={{ marginTop: 3, color: item.status === 'failed' || item.status === 'aborted' ? 'var(--colorError)' : 'var(--colorWarning)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {item.error || item.warningIssues?.[0] || item.draft?.validationIssues.find(x => x.level === 'error' || x.level === 'warning')?.message || '需复核'}
                       </div>
                     )}
                   </div>

@@ -55,6 +55,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
   }
 
   async understandFiles(files: FileUnderstandingInput[], prompt: string, options?: FileUnderstandingOptions): Promise<LLMResponse> {
+    if (options?.signal?.aborted) throw new Error('File understanding request was aborted');
     return withRetry(async () => {
       const content: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = [{ type: 'text', text: prompt }];
       for (const file of files) {
@@ -76,11 +77,11 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
         content: choice?.message?.content ?? '',
         usage: response.usage ? { promptTokens: response.usage.prompt_tokens, completionTokens: response.usage.completion_tokens } : undefined,
       });
-    });
+    }, { signal: options?.signal });
   }
 
   async generateImage(prompt: string, options?: ImageGenerationOptions): Promise<ImageGenerationResult> {
-    return withRetry(async () => this._generateImageWithOpenAICompatibleEndpoint(prompt, options));
+    return withRetry(async () => this._generateImageWithOpenAICompatibleEndpoint(prompt, options), { signal: options?.signal });
   }
 
   private async _generateImageWithOpenAICompatibleEndpoint(prompt: string, options?: ImageGenerationOptions): Promise<ImageGenerationResult> {
@@ -266,7 +267,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
           completionTokens: response.usage.completion_tokens,
         } : undefined,
       });
-    });
+    }, { signal: options?.signal });
   }
 
   // ── chatStream 模板方法 ──
@@ -300,6 +301,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
         let completionTokens = 0;
 
         for await (const chunk of stream) {
+          if (options?.signal?.aborted) throw new Error('Chat stream request was aborted');
           const delta = chunk.choices[0]?.delta as Record<string, unknown> | undefined;
           if (!delta) continue;
 
@@ -361,7 +363,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
           usage: { promptTokens, completionTokens },
         });
       },
-      { onRetry: () => { onChunk({ type: 'reset' }); } },
+      { signal: options?.signal, onRetry: () => { onChunk({ type: 'reset' }); } },
     );
   }
 

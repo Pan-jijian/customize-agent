@@ -23,6 +23,7 @@ type CadAnnotation = { text: string; x?: number; y?: number; layer?: string; blo
 
 const CAD_INTERNAL_TOKEN_RE = /\b(?:TDbPipe|TDbPipeValve|TDbPipeFitting|TDbWellh|AcDb\w+|Dwg\w+|ObjectId|Handle|ByLayer|Continuous|Model|Layout\d*)\b/giu;
 const CAD_INTERNAL_LINE_RE = /^(?:TDb\w+|AcDb\w+|[A-F0-9]{8,}|\d+|Model|Layout\d*|ByLayer|Continuous)$/iu;
+const OCR_NATIVE_NOISE_PATTERNS = [/^Image too small to scale!!/u, /^Line cannot be recognized!!$/u];
 
 /** 文件内容提取器，支持文档、表格、图片、CAD 等多种文件格式的内容抽取 */
 export class ContentExtractor {
@@ -1008,15 +1009,20 @@ export class ContentExtractor {
     const command = process.env.CUSTOMIZE_PADDLE_OCR_CMD || process.env.PADDLE_OCR_CMD;
     if (!command) return undefined;
     const result = spawnSync(command, [filePath], { encoding: 'utf8', timeout: 0, maxBuffer: 50 * 1024 * 1024, shell: true });
-    if (result.status !== 0 || !result.stdout.trim()) return undefined;
+    const stdout = this.filterOcrNativeNoise(result.stdout || '');
+    if (result.status !== 0 || !stdout.trim()) return undefined;
     try {
-      const parsed = JSON.parse(result.stdout) as Array<{ type?: string; text?: string; bbox?: unknown }>;
+      const parsed = JSON.parse(stdout) as Array<{ type?: string; text?: string; bbox?: unknown }>;
       const lines = parsed.map((region, index) => `区域 ${index + 1} [${region.type ?? 'text'}] ${this.formatBoundingBox(region.bbox)}: ${region.text ?? ''}`);
       return { text: ['OCR 版面分析区域:', ...lines].join('\n'), regionCount: lines.length };
     } catch {
-      const lines = result.stdout.split(/\r?\n/u).filter(Boolean);
+      const lines = stdout.split(/\r?\n/u).filter(Boolean);
       return { text: ['OCR 版面分析区域:', ...lines].join('\n'), regionCount: lines.length };
     }
+  }
+
+  private filterOcrNativeNoise(value: string): string {
+    return value.split(/\r?\n/u).map(line => line.trim()).filter(line => line && !OCR_NATIVE_NOISE_PATTERNS.some(pattern => pattern.test(line))).join('\n');
   }
 
   private formatBoundingBox(value: unknown): string {
