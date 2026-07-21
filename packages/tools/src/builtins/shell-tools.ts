@@ -11,6 +11,24 @@ import { getShellConfig, translateCommand } from '../core/platform/shell.js';
 /** 后台进程跟踪记录 */
 type BackgroundProcess = { command: string; child: any; output: string[]; startedAt: string };
 
+const MAX_BACKGROUND_OUTPUT_CHARS = 20_000;
+
+function appendBackgroundOutput(proc: BackgroundProcess, chunk: string): void {
+  proc.output.push(chunk);
+  let total = proc.output.reduce((sum, item) => sum + item.length, 0);
+  while (total > MAX_BACKGROUND_OUTPUT_CHARS && proc.output.length > 0) {
+    const overflow = total - MAX_BACKGROUND_OUTPUT_CHARS;
+    const first = proc.output[0]!;
+    if (first.length <= overflow) {
+      total -= first.length;
+      proc.output.shift();
+    } else {
+      proc.output[0] = first.slice(overflow);
+      total = MAX_BACKGROUND_OUTPUT_CHARS;
+    }
+  }
+}
+
 export class ShellTools {
   private static background = new Map<string, BackgroundProcess>();
 
@@ -27,9 +45,9 @@ export class ShellTools {
     const translated = await translateCommand(command);
     const child: any = execa(config.shell, [...config.shellArgs, translated], { cwd: this.cwd, reject: false });
     const proc: BackgroundProcess = { command, child, output: [], startedAt: new Date().toISOString() };
-    child.stdout?.on('data', (chunk: Buffer) => proc.output.push(chunk.toString()));
-    child.stderr?.on('data', (chunk: Buffer) => proc.output.push(chunk.toString()));
-    child.catch((err: Error) => proc.output.push(err.message));
+    child.stdout?.on('data', (chunk: Buffer) => appendBackgroundOutput(proc, chunk.toString()));
+    child.stderr?.on('data', (chunk: Buffer) => appendBackgroundOutput(proc, chunk.toString()));
+    child.catch((err: Error) => appendBackgroundOutput(proc, err.message));
     ShellTools.background.set(id, proc);
     return `Started ${id}: ${command}`;
   }
@@ -38,13 +56,14 @@ export class ShellTools {
     const proc = ShellTools.background.get(id);
     if (!proc) return `Unknown command: ${id}`;
     const done = proc.child.exitCode !== undefined && proc.child.exitCode !== null;
-    return JSON.stringify({ id, command: proc.command, startedAt: proc.startedAt, running: !done, exitCode: proc.child.exitCode, output: proc.output.join('').slice(-20_000) }, null, 2);
+    return JSON.stringify({ id, command: proc.command, startedAt: proc.startedAt, running: !done, exitCode: proc.child.exitCode, output: proc.output.join('') }, null, 2);
   }
 
   async stopCommand(id: string): Promise<string> {
     const proc = ShellTools.background.get(id);
     if (!proc) return `Unknown command: ${id}`;
     await killProcess(proc.child);
+    ShellTools.background.delete(id);
     return `Stopped ${id}`;
   }
 

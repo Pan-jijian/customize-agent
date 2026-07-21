@@ -1,5 +1,11 @@
 # @customize-agent/llm
 
+## 3.0.9
+
+### Patch Changes
+
+- Fix streaming tool call propagation, abort handling, background command output retention, and server package assets.
+
 ## 3.0.6
 
 ### Patch Changes

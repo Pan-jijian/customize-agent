@@ -1,5 +1,11 @@
 # @customize-agent/tools
 
+## 3.0.16
+
+### Patch Changes
+
+- Fix streaming tool call propagation, abort handling, background command output retention, and server package assets.
+
 ## 3.0.15
 
 ### Patch Changes

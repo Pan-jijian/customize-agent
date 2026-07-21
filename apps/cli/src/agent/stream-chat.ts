@@ -175,5 +175,9 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
     }
   }, { tools, signal });
 
-  return { content, toolCalls: toolCalls.length > 0 ? toolCalls : undefined, usage: response.usage };
+  const callsById = new Map(toolCalls.map(call => [call.id, call]));
+  for (const call of response.toolCalls ?? []) callsById.set(call.id, call);
+  const mergedToolCalls = [...callsById.values()];
+
+  return { content, toolCalls: mergedToolCalls.length > 0 ? mergedToolCalls : undefined, usage: response.usage };
 }

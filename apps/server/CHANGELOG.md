@@ -1,5 +1,13 @@
 # server
 
+## 4.0.61
+
+### Patch Changes
+
+- Fix streaming tool call propagation, abort handling, background command output retention, and server package assets.
+- Updated dependencies
+  - @customize-agent/llm@3.0.9
+
 ## 4.0.59
 
 ### Patch Changes

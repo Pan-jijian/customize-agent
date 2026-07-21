@@ -43,18 +43,19 @@ export class GoogleProvider implements ILLMProvider {
 
   private _convertMessages(messages: Message[]): GeminiContent[] {
     const contents: GeminiContent[] = [];
+    const toolCallNames = new Map<string, string>();
     for (const m of messages) {
       if (m.role === 'system') {
         contents.push({ role: 'user', parts: [{ text: `[System Instruction]: ${m.content}` }] });
         contents.push({ role: 'model', parts: [{ text: 'Understood.' }] });
       } else if (m.role === 'tool') {
-        // tool 消息转为 Gemini functionResponse 格式
-        contents.push({ role: 'function', parts: [{ functionResponse: { name: m.toolCallId ?? '', response: { result: m.content } } } as unknown as { text?: string }] });
+        const name = m.toolCallId ? toolCallNames.get(m.toolCallId) : undefined;
+        contents.push({ role: 'function', parts: [{ functionResponse: { name: name ?? m.toolCallId ?? '', response: { result: m.content } } }] });
       } else if (m.role === 'assistant' && m.toolCalls?.length) {
-        // assistant 中的 tool_calls 转为 Gemini functionCall 格式
-        const parts: Array<{ text?: string; functionCall?: { name: string; args: Record<string, unknown> } }> = [];
+        const parts: GeminiPart[] = [];
         if (m.content) parts.push({ text: m.content });
         for (const tc of m.toolCalls) {
+          toolCallNames.set(tc.id, tc.name);
           parts.push({ functionCall: { name: tc.name, args: tc.arguments } });
         }
         contents.push({ role: 'model', parts });

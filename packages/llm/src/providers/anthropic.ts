@@ -125,7 +125,7 @@ export class AnthropicProvider implements ILLMProvider {
           completionTokens: data.usage.output_tokens,
         } : undefined,
       });
-    });
+    }, { signal: options?.signal });
   }
 
   async chatStream(
@@ -146,6 +146,7 @@ export class AnthropicProvider implements ILLMProvider {
             'anthropic-version': '2023-06-01',
           },
           body: JSON.stringify(body),
+          signal: options?.signal,
         });
 
         if (!response.ok) {
@@ -227,6 +228,7 @@ export class AnthropicProvider implements ILLMProvider {
                       try { lastTc.arguments = JSON.parse(raw); } catch { /* 保持空对象 */ }
                       delete (lastTc as unknown as Record<string, unknown>)._rawArgs;
                     }
+                    onChunk({ type: 'tool_call', call: lastTc });
                   }
                   break;
                 }
@@ -262,7 +264,7 @@ export class AnthropicProvider implements ILLMProvider {
           usage: { promptTokens, completionTokens },
         });
       },
-      { onRetry: () => { onChunk({ type: 'reset' }); } },
+      { signal: options?.signal, onRetry: () => { onChunk({ type: 'reset' }); } },
     );
   }
 

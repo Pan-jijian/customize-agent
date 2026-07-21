@@ -279,7 +279,9 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
   ): Promise<LLMResponse> {
     if (this.directEndpoint) {
       const response = await this.chat(messages, options);
-      onChunk({ type: 'content', text: response.content });
+      if (response.content) onChunk({ type: 'content', text: response.content });
+      for (const call of response.toolCalls ?? []) onChunk({ type: 'tool_call', call });
+      onChunk({ type: 'done' });
       return response;
     }
     return withRetry(
