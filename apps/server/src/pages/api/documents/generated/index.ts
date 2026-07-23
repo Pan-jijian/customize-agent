@@ -10,26 +10,29 @@ import { abortGeneratedDocument, deleteGeneratedDocument, getGeneratedDocument, 
  */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
+    const queryProjectRoot = typeof req.query.projectRoot === 'string' ? req.query.projectRoot : undefined;
+    const bodyProjectRoot = typeof req.body?.projectRoot === 'string' ? req.body.projectRoot : undefined;
+    const projectRoot = queryProjectRoot || bodyProjectRoot;
     if (req.method === 'GET') {
       const id = typeof req.query.id === 'string' ? req.query.id : undefined;
       if (id) {
-        const record = getGeneratedDocument(id);
+        const record = getGeneratedDocument(id, projectRoot);
         if (!record) return res.status(404).json({ error: 'Document not found' });
         return res.status(200).json({ document: record });
       }
-      return res.status(200).json({ documents: listGeneratedDocuments() });
+      return res.status(200).json({ documents: listGeneratedDocuments(projectRoot) });
     }
     if (req.method === 'PUT') {
       const { id, ...patch } = req.body as { id?: string; [key: string]: unknown };
       if (!id) return res.status(400).json({ error: 'id required' });
-      const record = updateGeneratedDocument(id, patch);
+      const record = updateGeneratedDocument(id, patch, projectRoot);
       if (!record) return res.status(404).json({ error: 'Document not found' });
       return res.status(200).json({ document: record });
     }
     if (req.method === 'POST') {
       const { action, documentId } = req.body as { action?: string; documentId?: string };
       if (action === 'abort' && documentId) {
-        const record = abortGeneratedDocument(documentId);
+        const record = abortGeneratedDocument(documentId, projectRoot);
         if (!record) return res.status(409).json({ error: 'Document not found or not generating' });
         return res.status(200).json({ document: record });
       }
@@ -38,7 +41,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     if (req.method === 'DELETE') {
       const id = typeof req.query.id === 'string' ? req.query.id : req.body?.id;
       if (!id) return res.status(400).json({ error: 'id required' });
-      deleteGeneratedDocument(id);
+      deleteGeneratedDocument(id, projectRoot);
       return res.status(200).json({ ok: true });
     }
     return res.status(405).json({ error: 'Method not allowed' });

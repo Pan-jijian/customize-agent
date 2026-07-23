@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import type { GeneratedDocumentDraft, DocumentAsset } from './documentWorkflowService';
 import { generateDocumentDraft } from './documentWorkflowService';
 import { rememberDocumentContext } from './contextService';
+import { computeProjectId } from '@customize-agent/knowledge';
 import { getMultiProjectManager, getProjectRoot } from './kbService';
 
 export type GeneratedDocumentStatus = 'generating' | 'completed' | 'warning' | 'failed' | 'aborted';
@@ -16,6 +17,9 @@ export interface GeneratedDocumentRecord {
   templateName?: string;
   title: string;
   requirement: string;
+  projectRoot?: string;
+  projectId?: string;
+  knowledgeBasePath?: string;
   markdown: string;
   editedMarkdown?: string;
   status: GeneratedDocumentStatus;
@@ -56,12 +60,12 @@ interface GenerateTask {
 
 const tasks = new Map<string, GenerateTask>();
 
-function projectId(projectRoot = getProjectRoot()) {
-  return crypto.createHash('sha1').update(path.resolve(projectRoot)).digest('hex').slice(0, 12);
+function generatedProjectId(projectRoot = getProjectRoot()) {
+  return computeProjectId(path.resolve(projectRoot));
 }
 
 export function generatedRoot(projectRoot = getProjectRoot()) {
-  const root = path.join(os.homedir(), '.customize-agent', 'projects', projectId(projectRoot), 'generatedDocuments');
+  const root = path.join(os.homedir(), '.customize-agent', 'projects', generatedProjectId(projectRoot), 'generatedDocuments');
   fs.mkdirSync(path.join(root, 'drafts'), { recursive: true });
   fs.mkdirSync(path.join(root, 'assets'), { recursive: true });
   return root;
@@ -235,6 +239,8 @@ function rememberGeneratedDocument(record: GeneratedDocumentRecord, projectRoot 
 
 /** 启动异步文档生成任务，包含进度回调持久化、结果入库、资源管理，返回任务 ID 和文档 ID */
 export function startGenerateDocumentTask(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number }, projectRoot = getProjectRoot()) {
+  const resolvedProjectRoot = path.resolve(projectRoot);
+  const currentProjectId = computeProjectId(resolvedProjectRoot);
   const now = Date.now();
   const documentId = `doc-${now}-${crypto.randomBytes(4).toString('hex')}`;
   const taskId = `task-${now}-${crypto.randomBytes(4).toString('hex')}`;
@@ -244,25 +250,28 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     templateId: input.templateId,
     title: '生成中',
     requirement: input.requirement || '',
+    projectRoot: resolvedProjectRoot,
+    projectId: currentProjectId,
+    knowledgeBasePath: path.join(resolvedProjectRoot, 'knowledgeBase'),
     markdown: '',
     status: 'generating',
     assets: [],
     createdAt: now,
     updatedAt: now,
   };
-  saveGeneratedDocument(initial, projectRoot);
+  saveGeneratedDocument(initial, resolvedProjectRoot);
   const controller = new AbortController();
-  const promise = generateDocumentDraft({ ...input, projectRoot, signal: controller.signal, onProgress: (stages) => {
+  const promise = generateDocumentDraft({ ...input, projectRoot: resolvedProjectRoot, signal: controller.signal, onProgress: (stages) => {
     // 增量保存执行阶段到顶层字段，前端轮询实时获取
     try {
-      const current = getGeneratedDocument(documentId, projectRoot);
+      const current = getGeneratedDocument(documentId, resolvedProjectRoot);
       if (current && current.status === 'generating') {
-        saveGeneratedDocument({ ...current, executionStages: stages }, projectRoot);
+        saveGeneratedDocument({ ...current, executionStages: stages }, resolvedProjectRoot);
         console.log(`[gen] progress saved: ${stages.length} stages, doc=${documentId}`);
       }
     } catch (err) { console.error('[gen] progress save error:', err); }
   } }).then(async result => {
-    const current = getGeneratedDocument(documentId, projectRoot);
+    const current = getGeneratedDocument(documentId, resolvedProjectRoot);
     if (!current || current.status !== 'generating') return current ?? initial;
     const warningIssues = result.validationIssues.filter(issue => issue.level === 'error' || issue.level === 'warning').map(issue => issue.suggestion ? `${issue.message}：${issue.suggestion}` : issue.message);
     if (!result.exportGate.passed && warningIssues.length === 0) warningIssues.push('导出门禁未通过：存在未完成的检查项');
@@ -277,20 +286,20 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       assets: result.assets || [],
       completedAt: Date.now(),
       warningIssues,
-    }), projectRoot);
-    rememberGeneratedDocument(record, projectRoot);
-    const assets = upsertGeneratedAssets(result.assets || [], documentId, projectRoot);
-    await indexGeneratedDocumentRecord(record, projectRoot).catch(error => console.warn('[generated-documents] 自动入库生成文档失败', error));
+    }), resolvedProjectRoot);
+    rememberGeneratedDocument(record, resolvedProjectRoot);
+    const assets = upsertGeneratedAssets(result.assets || [], documentId, resolvedProjectRoot);
+    await indexGeneratedDocumentRecord(record, resolvedProjectRoot).catch(error => console.warn('[generated-documents] 自动入库生成文档失败', error));
     for (const asset of assets.filter(item => item.usedByDocumentIds.includes(documentId) && !item.indexed)) {
-      await indexGeneratedAsset(asset.id, projectRoot).catch(error => console.warn('[generated-documents] 自动入库生成资源失败', asset.id, error));
+      await indexGeneratedAsset(asset.id, resolvedProjectRoot).catch(error => console.warn('[generated-documents] 自动入库生成资源失败', asset.id, error));
     }
     return record;
   }).catch(error => {
-    const current = getGeneratedDocument(documentId, projectRoot);
+    const current = getGeneratedDocument(documentId, resolvedProjectRoot);
     if (!current || current.status !== 'generating') return current ?? initial;
     const message = error instanceof Error ? error.message : String(error);
     const status: GeneratedDocumentStatus = isAbortError(error) ? 'aborted' : 'failed';
-    const record = saveGeneratedDocument({ ...current, status, error: message, executionStages: failRunningStages(current.executionStages, message), completedAt: Date.now() }, projectRoot);
+    const record = saveGeneratedDocument({ ...current, status, error: message, executionStages: failRunningStages(current.executionStages, message), completedAt: Date.now() }, resolvedProjectRoot);
     return record;
   }).finally(() => {
     tasks.delete(taskId);

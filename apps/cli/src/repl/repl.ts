@@ -235,7 +235,7 @@ export class Repl {
   private async _injectKnowledgeContext(enhancedInput: string, query: string): Promise<string> {
     try {
       this.kbManager ??= new MultiProjectManager();
-      const result = await this.kbManager.search(this.root, query, { scope: 'all', limit: 5 });
+      const result = await this.kbManager.search(this.root, query, { scope: 'project', limit: 5 });
       if (result.results.length === 0) return enhancedInput;
       const lines = result.results.map((item, index) => [
         `### KB-${index + 1}: ${item.filePath}`,

@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { generatedAssetAbsolutePath, getGeneratedAsset } from '@/services/generatedDocumentService';
-import { getProjectRoot } from '@/services/kbService';
+
 
 /** 根据文件扩展名返回对应 MIME 类型 */
 function contentType(filePath: string) {
@@ -23,7 +23,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     const id = typeof req.query.id === 'string' ? req.query.id : '';
     if (!id) return res.status(400).json({ error: 'id required' });
-    const projectRoot = getProjectRoot();
+    const projectRoot = typeof req.query.projectRoot === 'string' ? req.query.projectRoot : undefined;
     const asset = getGeneratedAsset(id, projectRoot);
     if (!asset?.path) return res.status(404).json({ error: 'asset not found' });
     const filePath = generatedAssetAbsolutePath(asset, projectRoot);

@@ -35,15 +35,22 @@ export interface OcrProvider {
 // ─── 路径工具 ───────────────────────────────────────────────────
 
 const knowledgeDir = path.dirname(fileURLToPath(import.meta.url));
-const OCR_NATIVE_NOISE_PATTERNS = [/^Image too small to scale!!/u, /^Line cannot be recognized!!$/u];
 const OCR_NOISE_SUPPRESSION_KEY = Symbol.for('customize-agent.ocr-noise-suppression');
-type OcrNoiseSuppressionState = { depth: number; stdout?: typeof process.stdout.write; stderr?: typeof process.stderr.write };
+const OCR_NATIVE_NOISE_PATTERNS = [
+  /^Image too small to scale!!(?:\s*\([^)]*\))?$/u,
+  /^Line cannot be recognized!!$/u,
+  /^empty image$/iu,
+];
+type OcrNoiseSuppressionState = {
+  stdout?: typeof process.stdout.write;
+  stderr?: typeof process.stderr.write;
+  log?: typeof console.log;
+  warn?: typeof console.warn;
+  error?: typeof console.error;
+  installed?: boolean;
+};
 
-function ocrNoiseSuppressionState() {
-  const globalState = globalThis as typeof globalThis & { [OCR_NOISE_SUPPRESSION_KEY]?: OcrNoiseSuppressionState };
-  globalState[OCR_NOISE_SUPPRESSION_KEY] ??= { depth: 0 };
-  return globalState[OCR_NOISE_SUPPRESSION_KEY];
-}
+
 
 function tessdataDir(): string {
   if (process.env.TESSDATA_PREFIX) return process.env.TESSDATA_PREFIX;
@@ -52,50 +59,73 @@ function tessdataDir(): string {
   return pkg;
 }
 
-function isNativeOcrNoise(chunk: unknown): boolean {
-  const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf8') : typeof chunk === 'string' ? chunk : '';
-  if (!text) return false;
-  const lines = text.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
-  return lines.length > 0 && lines.every(line => OCR_NATIVE_NOISE_PATTERNS.some(pattern => pattern.test(line)));
+function ocrNoiseSuppressionState() {
+  const globalState = globalThis as typeof globalThis & { [OCR_NOISE_SUPPRESSION_KEY]?: OcrNoiseSuppressionState };
+  globalState[OCR_NOISE_SUPPRESSION_KEY] ??= {};
+  return globalState[OCR_NOISE_SUPPRESSION_KEY]!;
 }
 
-async function suppressNativeOcrNoise<T>(operation: () => Promise<T>): Promise<T> {
+function textFromChunk(chunk: unknown) {
+  return Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf8') : typeof chunk === 'string' ? chunk : '';
+}
+
+function isOcrNoiseLine(line: string) {
+  const text = line.trim();
+  return !!text && OCR_NATIVE_NOISE_PATTERNS.some(pattern => pattern.test(text));
+}
+
+function filterNativeOcrNoiseText(text: string) {
+  const hasTrailingNewline = /\r?\n$/u.test(text);
+  const lines = text.split(/\r?\n/u);
+  const nonEmptyLines = lines.filter(line => line.trim());
+  if (nonEmptyLines.length > 0 && nonEmptyLines.every(isOcrNoiseLine)) return '';
+  const kept = lines.filter(line => !isOcrNoiseLine(line));
+  return kept.join('\n') + (hasTrailingNewline && kept.length > 0 ? '\n' : '');
+}
+
+function ensureOcrNoiseSuppressed() {
   const state = ocrNoiseSuppressionState();
-  if (state.depth === 0) {
-    state.stdout = process.stdout.write;
-    state.stderr = process.stderr.write;
-    const filter = (original: typeof process.stdout.write) => function write(this: NodeJS.WriteStream, chunk: unknown, ...args: unknown[]) {
-      if (isNativeOcrNoise(chunk)) {
-        const callback = args.find((arg): arg is () => void => typeof arg === 'function');
-        if (callback) process.nextTick(callback);
-        return true;
-      }
-      return (original as any).call(this, chunk, ...args);
-    } as typeof process.stdout.write;
-    process.stdout.write = filter(state.stdout);
-    process.stderr.write = filter(state.stderr);
-  }
-  state.depth += 1;
-  try {
-    return await operation();
-  } finally {
-    state.depth -= 1;
-    if (state.depth === 0 && state.stdout && state.stderr) {
-      process.stdout.write = state.stdout;
-      process.stderr.write = state.stderr;
-      state.stdout = undefined;
-      state.stderr = undefined;
+  if (state.installed) return;
+  state.installed = true;
+  state.stdout = process.stdout.write;
+  state.stderr = process.stderr.write;
+  state.log = console.log;
+  state.warn = console.warn;
+  state.error = console.error;
+
+  const filterWrite = (original: typeof process.stdout.write) => function write(this: NodeJS.WriteStream, chunk: unknown, ...args: unknown[]) {
+    const text = textFromChunk(chunk);
+    if (!text) return (original as any).call(this, chunk, ...args);
+    const filtered = filterNativeOcrNoiseText(text);
+    if (!filtered) {
+      const callback = args.find((arg): arg is () => void => typeof arg === 'function');
+      if (callback) process.nextTick(callback);
+      return true;
     }
-  }
+    const nextChunk = typeof chunk === 'string' ? filtered : Buffer.from(filtered, 'utf8');
+    return (original as any).call(this, nextChunk, ...args);
+  } as typeof process.stdout.write;
+
+  const filterConsole = (original: (...args: any[]) => void) => (...args: any[]) => {
+    if (args.length === 1 && typeof args[0] === 'string' && isOcrNoiseLine(args[0])) return;
+    original(...args);
+  };
+
+  process.stdout.write = filterWrite(state.stdout);
+  process.stderr.write = filterWrite(state.stderr);
+  console.log = filterConsole(state.log);
+  console.warn = filterConsole(state.warn);
+  console.error = filterConsole(state.error);
 }
 
-// ─── Tesseract.js Provider（主 OCR 引擎，跨平台） ──────────────
+type TesseractWorker = { recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> };
 
 export class TesseractJsProvider implements OcrProvider {
   readonly id = 'tesseract.js';
   private _available: boolean | null = null;
-  private worker: { recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> } | null = null;
-  private workerPromise: Promise<{ recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> }> | null = null;
+  private worker: TesseractWorker | null = null;
+  private workerPromise: Promise<TesseractWorker> | null = null;
+  private workerLock: Promise<void> = Promise.resolve();
   private warnings: string[] = [];
 
   get available(): boolean {
@@ -144,8 +174,21 @@ export class TesseractJsProvider implements OcrProvider {
     }
 
     try {
-      const worker = await this.getWorker();
-      const result = await suppressNativeOcrNoise(() => worker.recognize(pngPath));
+      ensureOcrNoiseSuppressed();
+      let unlock!: () => void;
+      const nextLock = new Promise<void>(resolve => { unlock = resolve; });
+      const currentLock = this.workerLock;
+      this.workerLock = currentLock.then(() => nextLock).catch(() => nextLock);
+      await currentLock;
+      
+      let result;
+      try {
+        const worker = await this.getWorker();
+        result = await this.recognizeWithTimeout(worker, pngPath);
+      } finally {
+        unlock();
+      }
+
       const text = (result.data.text ?? '').trim();
       const lines = (result.data.lines ?? []) as Array<{
         text?: string; confidence?: number;
@@ -175,6 +218,38 @@ export class TesseractJsProvider implements OcrProvider {
     return [...new Set(this.warnings)].slice(-20);
   }
 
+  private pushWarning(message: string) {
+    const text = message.trim();
+    if (!text || isOcrNoiseLine(text)) return;
+    this.warnings.push(text);
+    if (this.warnings.length > 50) this.warnings = this.warnings.slice(-50);
+  }
+
+  private async recognizeWithTimeout(worker: TesseractWorker, imagePath: string) {
+    const timeoutMs = 120_000;
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        worker.recognize(imagePath),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(`OCR recognition timed out after ${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
+    } catch (error) {
+      await this.resetWorker().catch(() => undefined);
+      throw error;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  private async resetWorker() {
+    const worker = this.worker;
+    this.worker = null;
+    this.workerPromise = null;
+    if (worker) await worker.terminate();
+  }
+
   private async readImageDimensions(filePath: string): Promise<{ width: number; height: number } | undefined> {
     try {
       const sharpMod = await resolveAndImport('sharp');
@@ -192,14 +267,19 @@ export class TesseractJsProvider implements OcrProvider {
     return width < 8 || height < 8 || width * height < 128;
   }
 
-  private async getWorker(): Promise<{ recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> }> {
+  private async getWorker(): Promise<TesseractWorker> {
     if (this.worker) return this.worker;
-    if (!this.workerPromise) this.workerPromise = this.createReusableWorker();
+    if (!this.workerPromise) {
+      this.workerPromise = this.createReusableWorker().catch(error => {
+        this.workerPromise = null;
+        throw error;
+      });
+    }
     this.worker = await this.workerPromise;
     return this.worker;
   }
 
-  private async createReusableWorker(): Promise<{ recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> }> {
+  private async createReusableWorker(): Promise<TesseractWorker> {
     const tessMod = await resolveAndImport('tesseract.js');
     const { createWorker, OEM, setLogging } = tessMod as any;
     if (typeof setLogging === 'function') setLogging(false);
@@ -208,10 +288,11 @@ export class TesseractJsProvider implements OcrProvider {
       gzip: false,
       logger: () => undefined,
       errorHandler: (error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        if (message.trim()) this.warnings.push(message.trim());
+        let message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+        if (!message) { try { message = JSON.stringify(error); } catch { message = String(error); } }
+        this.pushWarning(message);
       },
-    }) as { recognize: (image: string) => Promise<any>; terminate: () => Promise<unknown>; setParameters?: (params: Record<string, string>) => Promise<unknown> };
+    }) as TesseractWorker;
     if (typeof worker.setParameters === 'function') {
       await worker.setParameters({ preserve_interword_spaces: '0', user_defined_dpi: '300' });
     }
@@ -220,9 +301,16 @@ export class TesseractJsProvider implements OcrProvider {
 
 
   async dispose(): Promise<void> {
-    if (this.worker) await this.worker.terminate();
-    this.worker = null;
-    this.workerPromise = null;
+    let unlock!: () => void;
+    const nextLock = new Promise<void>(resolve => { unlock = resolve; });
+    const currentLock = this.workerLock;
+    this.workerLock = currentLock.then(() => nextLock).catch(() => nextLock);
+    await currentLock;
+    try {
+      await this.resetWorker();
+    } finally {
+      unlock();
+    }
   }
 }
 

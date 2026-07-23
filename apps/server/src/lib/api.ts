@@ -309,8 +309,8 @@ export interface ExportGateResult { passed: boolean; blockingIssues: ValidationI
 export interface DocumentExecutionStage { type: 'role_binding' | 'knowledge_retrieval' | 'context_recall' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference'; roleId: string; promptId?: string; status: 'running' | 'success' | 'fallback' | 'skipped' | 'failed'; message?: string; title?: string; subtitle?: string; roleName?: string; promptName?: string; group?: string; order?: number; executionVersion?: 2; }
 export interface DocumentAsset { id: string; type: 'image' | 'audio' | 'video' | 'file'; role: 'cover' | 'reference' | 'generated' | 'attachment' | 'map' | 'operator'; path?: string; url?: string; prompt?: string; modelProvider?: string; status: 'generated' | 'prompt_ready' | 'fallback'; message?: string; }
 export interface GeneratedAssetRecord extends DocumentAsset { name: string; source: 'knowledge_base' | 'generated' | 'uploaded' | 'external_url'; indexed: boolean; usedByDocumentIds: string[]; createdAt: number; updatedAt: number; }
-export interface GeneratedDocumentRecord { id: string; taskId?: string; templateId: string; templateName?: string; title: string; requirement: string; markdown: string; editedMarkdown?: string; status: 'generating' | 'completed' | 'warning' | 'failed' | 'aborted'; draft?: GeneratedDocumentDraft; executionStages?: GeneratedDocumentDraft['executionStages']; assets: DocumentAsset[]; createdAt: number; updatedAt: number; completedAt?: number; error?: string; warningIssues?: string[]; }
-export interface GeneratedDocumentDraft { templateId: string; templateName: string; title: string; requirement: string; markdown: string; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; facts: Record<string, string>; structuredFacts: DocumentFact[]; factsModel: DocumentFactsModel; chapters: DocumentDraftChapter[]; sources: Array<{ filePath: string; count: number }>; missingItems: string[]; validation: { passed: boolean; warnings: string[]; errors: string[] }; validationIssues: ValidationIssue[]; executionStages: DocumentExecutionStage[]; exportGate: ExportGateResult; assets?: DocumentAsset[]; generatedAt: number; }
+export interface GeneratedDocumentRecord { id: string; taskId?: string; templateId: string; templateName?: string; title: string; requirement: string; projectRoot?: string; projectId?: string; knowledgeBasePath?: string; markdown: string; editedMarkdown?: string; status: 'generating' | 'completed' | 'warning' | 'failed' | 'aborted'; draft?: GeneratedDocumentDraft; executionStages?: GeneratedDocumentDraft['executionStages']; assets: DocumentAsset[]; createdAt: number; updatedAt: number; completedAt?: number; error?: string; warningIssues?: string[]; }
+export interface GeneratedDocumentDraft { templateId: string; templateName: string; title: string; requirement: string; projectRoot?: string; projectId?: string; markdown: string; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; facts: Record<string, string>; structuredFacts: DocumentFact[]; factsModel: DocumentFactsModel; chapters: DocumentDraftChapter[]; sources: Array<{ filePath: string; count: number }>; missingItems: string[]; validation: { passed: boolean; warnings: string[]; errors: string[] }; validationIssues: ValidationIssue[]; executionStages: DocumentExecutionStage[]; exportGate: ExportGateResult; assets?: DocumentAsset[]; generatedAt: number; }
 export interface StoredDocumentDraft extends GeneratedDocumentDraft { id: string; updatedAt: number; }
 
 export async function getPromptProjects() { return fetchJson<PromptProject[]>('/api/prompt'); }
@@ -328,7 +328,10 @@ export async function deleteProjectRoleConfig(id: string) {
   return fetchJson<{ success: boolean; roles: DocumentRole[]; configs: ProjectRoleConfig[] }>(`/api/documents/roles?mode=config&id=${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 export async function getDocumentTemplates() { return fetchJson<{ templates: DocumentTemplate[] }>('/api/documents/templates'); }
-export async function validateDocumentTemplate(templateId: string) { return fetchJson<{ validation: DocumentTemplateValidation }>(`/api/documents/templates?validate=${encodeURIComponent(templateId)}`); }
+export async function validateDocumentTemplate(templateId: string, projectRoot?: string) {
+  const p = projectRoot ? `&projectRoot=${encodeURIComponent(projectRoot)}` : '';
+  return fetchJson<{ validation: DocumentTemplateValidation }>(`/api/documents/templates?validate=${encodeURIComponent(templateId)}${p}`);
+}
 export async function saveDocumentTemplate(template: DocumentTemplate) {
   return fetchJson<{ template: DocumentTemplate; templates: DocumentTemplate[] }>('/api/documents/templates', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(template) });
 }
@@ -341,15 +344,36 @@ export async function duplicateDocumentTemplate(templateId: string) {
 export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string }) {
   return fetchJson<{ draft?: GeneratedDocumentDraft; taskId?: string; documentId?: string; record?: GeneratedDocumentRecord }>('/api/documents/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
 }
-export async function getGeneratedDocuments() { return fetchJson<{ documents: GeneratedDocumentRecord[] }>('/api/documents/generated'); }
-export async function getGeneratedDocument(id: string, lite = false) { return fetchJson<{ document: GeneratedDocumentRecord }>(`/api/documents/generated/${encodeURIComponent(id)}${lite ? '?lite=1' : ''}`); }
-export async function updateGeneratedDocument(id: string, patch: Partial<GeneratedDocumentRecord>) { return fetchJson<{ document: GeneratedDocumentRecord }>(`/api/documents/generated/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); }
-export async function deleteGeneratedDocument(id: string) { return fetchJson<{ ok: boolean }>(`/api/documents/generated/${encodeURIComponent(id)}`, { method: 'DELETE' }); }
-export async function abortGeneratedDocument(documentId: string) { return fetchJson<{ document: GeneratedDocumentRecord }>('/api/documents/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'abort', documentId }) }); }
-export async function getGeneratedAssets() { return fetchJson<{ assets: GeneratedAssetRecord[] }>('/api/assets/generated'); }
-export async function deleteGeneratedAsset(id: string) { return fetchJson<{ ok: boolean; assets: GeneratedAssetRecord[] }>(`/api/assets/generated?id=${encodeURIComponent(id)}`, { method: 'DELETE' }); }
-export async function indexGeneratedAsset(id: string) { return fetchJson<{ asset: GeneratedAssetRecord; assets: GeneratedAssetRecord[] }>('/api/assets/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: 'index' }) }); }
-export async function openGeneratedAsset(id: string, target: 'file' | 'directory') { return fetchJson<{ ok: boolean }>('/api/assets/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: 'open', target }) }); }
+export async function getGeneratedDocuments(projectRoot?: string) {
+  const p = projectRoot ? `?projectRoot=${encodeURIComponent(projectRoot)}` : '';
+  return fetchJson<{ documents: GeneratedDocumentRecord[] }>(`/api/documents/generated${p}`);
+}
+export async function getGeneratedDocument(id: string, lite = false, projectRoot?: string) {
+  const params = new URLSearchParams();
+  if (lite) params.set('lite', '1');
+  if (projectRoot) params.set('projectRoot', projectRoot);
+  const query = params.toString() ? `?${params.toString()}` : '';
+  return fetchJson<{ document: GeneratedDocumentRecord }>(`/api/documents/generated/${encodeURIComponent(id)}${query}`);
+}
+export async function updateGeneratedDocument(id: string, patch: Partial<GeneratedDocumentRecord>, projectRoot?: string) {
+  const p = projectRoot ? `?projectRoot=${encodeURIComponent(projectRoot)}` : '';
+  return fetchJson<{ document: GeneratedDocumentRecord }>(`/api/documents/generated/${encodeURIComponent(id)}${p}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+}
+export async function deleteGeneratedDocument(id: string, projectRoot?: string) {
+  const p = projectRoot ? `?projectRoot=${encodeURIComponent(projectRoot)}` : '';
+  return fetchJson<{ ok: boolean }>(`/api/documents/generated/${encodeURIComponent(id)}${p}`, { method: 'DELETE' });
+}
+export async function abortGeneratedDocument(documentId: string, projectRoot?: string) { return fetchJson<{ document: GeneratedDocumentRecord }>('/api/documents/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'abort', documentId, projectRoot }) }); }
+export async function getGeneratedAssets(projectRoot?: string) {
+  const p = projectRoot ? `?projectRoot=${encodeURIComponent(projectRoot)}` : '';
+  return fetchJson<{ assets: GeneratedAssetRecord[] }>(`/api/assets/generated${p}`);
+}
+export async function deleteGeneratedAsset(id: string, projectRoot?: string) {
+  const p = projectRoot ? `&projectRoot=${encodeURIComponent(projectRoot)}` : '';
+  return fetchJson<{ ok: boolean; assets: GeneratedAssetRecord[] }>(`/api/assets/generated?id=${encodeURIComponent(id)}${p}`, { method: 'DELETE' });
+}
+export async function indexGeneratedAsset(id: string, projectRoot?: string) { return fetchJson<{ asset: GeneratedAssetRecord; assets: GeneratedAssetRecord[] }>('/api/assets/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: 'index', projectRoot }) }); }
+export async function openGeneratedAsset(id: string, target: 'file' | 'directory', projectRoot?: string) { return fetchJson<{ ok: boolean }>('/api/assets/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: 'open', target, projectRoot }) }); }
 export async function regenerateDocumentChapter(input: { templateId: string; chapterId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; documentId?: string; currentMarkdown?: string; existingFacts?: string[] }) {
   return fetchJson<{ chapter: DocumentDraftChapter }>('/api/documents/chapter/regenerate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
 }

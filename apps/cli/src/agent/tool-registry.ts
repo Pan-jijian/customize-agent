@@ -239,6 +239,16 @@ function sourceLine(item: { filePath: string; score: number; content: string }):
   return `- ${item.filePath}（score=${item.score.toFixed(3)}）：${item.content.replace(/\s+/gu, ' ').slice(0, 220)}`;
 }
 
+function outlineFromRequirement(requirement: string) {
+  const match = requirement.match(/<OUTLINE>([\s\S]*?)<\/OUTLINE>/iu);
+  const block = match?.[1] || '';
+  if (!block) return [] as Array<readonly [string, string, readonly string[]]>;
+  return block.split(/\r?\n/u)
+    .map(line => line.trim().replace(/^[-*+\d.、）)\s]+/u, '').trim())
+    .filter(Boolean)
+    .map((title, index) => [`user-outline-${index + 1}`, title, [title]] as const);
+}
+
 async function generateConstructionDesignMarkdown(args: { requirement: string; projectRoot: string; manager: MultiProjectManager; provider?: ILLMProvider; maxEvidencePerChapter: number }): Promise<string> {
   const project = await args.manager.getProject(args.projectRoot);
   await project.incrementalIndex();
@@ -246,8 +256,10 @@ async function generateConstructionDesignMarkdown(args: { requirement: string; p
   const chapterBlocks: string[] = [];
   const usedSources = new Map<string, number>();
   const missing: string[] = [];
+  const outline = outlineFromRequirement(args.requirement);
+  const chapters = outline.length > 0 ? outline : CONSTRUCTION_OUTLINE;
 
-  for (const [, title, queries] of CONSTRUCTION_OUTLINE) {
+  for (const [, title, queries] of chapters) {
     const evidence = [] as Array<{ filePath: string; score: number; content: string }>;
     for (const query of queries) {
       const result = await args.manager.search(args.projectRoot, query, { scope: 'project', limit: args.maxEvidencePerChapter });
@@ -363,12 +375,14 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
     const manager = new MultiProjectManager(undefined, provider as LLMSearchProvider);
     try {
       const result = await manager.search(knowledgeRoot, String(args.query), {
-        scope: args.scope === 'project' || args.scope === 'global' || args.scope === 'all' ? args.scope : 'all',
+        scope: args.scope === 'project' || args.scope === 'global' || args.scope === 'all' ? args.scope : 'project',
         limit: typeof args.limit === 'number' ? args.limit : 10,
         weights: { keyword: 0.4, vector: 0.45, rewrite: 0.75, hybridBonus: 0.15 },
       });
       if (result.results.length === 0) return `No knowledge base results for "${String(args.query)}".`;
-      return result.results.map((item, index) => [
+      const scope = args.scope === 'project' || args.scope === 'global' || args.scope === 'all' ? args.scope : 'project';
+      const warning = scope === 'project' ? '' : '注意：以下结果包含全局/跨项目资料，不能直接作为当前项目事实。\n\n';
+      return warning + result.results.map((item, index) => [
         `## KB-${index + 1}: ${item.filePath}`,
         `scope=${item.scope}, score=${item.score.toFixed(3)}, collection=${item.collection}, source=${item.source ?? 'unknown'}`,
         item.sectionTitle ? `section=${item.sectionTitle}` : '',

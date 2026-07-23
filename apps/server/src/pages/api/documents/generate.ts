@@ -12,6 +12,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const { templateId, requirement, maxEvidencePerChapter, projectRoot } = req.body as { templateId?: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string };
   // 校验必填参数
   if (!templateId) return res.status(400).json({ error: 'templateId required' });
+  if (!projectRoot) return res.status(400).json({ error: 'projectRoot required' });
   // 启动异步生成任务并返回任务信息
   const task = startGenerateDocumentTask({ templateId, requirement, maxEvidencePerChapter }, projectRoot);
   res.status(202).json(task);

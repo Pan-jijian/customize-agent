@@ -14,23 +14,26 @@ function openPath(targetPath: string) {
 /** 生成资产 API：GET 列表，DELETE 删除，POST 支持索引和打开操作 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    if (req.method === 'GET') return res.status(200).json({ assets: listGeneratedAssets() });
+    const queryProjectRoot = typeof req.query.projectRoot === 'string' ? req.query.projectRoot : undefined;
+    const bodyProjectRoot = typeof req.body?.projectRoot === 'string' ? req.body.projectRoot : undefined;
+    const projectRoot = queryProjectRoot || bodyProjectRoot;
+    if (req.method === 'GET') return res.status(200).json({ assets: listGeneratedAssets(projectRoot) });
     if (req.method === 'DELETE') {
       const id = typeof req.query.id === 'string' ? req.query.id : req.body?.id;
       if (!id) return res.status(400).json({ error: 'id required' });
-      deleteGeneratedAsset(id);
-      return res.status(200).json({ ok: true, assets: listGeneratedAssets() });
+      deleteGeneratedAsset(id, projectRoot);
+      return res.status(200).json({ ok: true, assets: listGeneratedAssets(projectRoot) });
     }
     if (req.method === 'POST') {
       const { id, action, target = 'file' } = req.body as { id?: string; action?: 'index' | 'open'; target?: 'file' | 'directory' };
       if (!id || !action) return res.status(400).json({ error: 'id and action required' });
       if (action === 'index') {
-        const asset = await indexGeneratedAsset(id);
+        const asset = await indexGeneratedAsset(id, projectRoot);
         if (!asset) return res.status(404).json({ error: 'asset not found' });
-        return res.status(200).json({ asset, assets: listGeneratedAssets() });
+        return res.status(200).json({ asset, assets: listGeneratedAssets(projectRoot) });
       }
       if (action === 'open') {
-        const targetPath = openGeneratedAssetTarget(id, target);
+        const targetPath = openGeneratedAssetTarget(id, target, projectRoot);
         if (!targetPath) return res.status(404).json({ error: 'asset file not found' });
         openPath(targetPath).unref();
         return res.status(200).json({ ok: true });

@@ -1,5 +1,31 @@
 # @customize-agent/knowledge
 
+## 4.0.28
+
+### Patch Changes
+
+- Harden OCR noise suppression and worker lifecycle, improve workflow abort propagation, and prevent stale workflow auto-start or recovery state from restarting old records.
+
+## 4.0.27
+
+### Patch Changes
+
+- Removed redundant explicit outline input prompt from workflow drawer to allow templates to launch automatically.
+  Fixed background Tesseract C++ crashes (mutex locks) during high-concurrency image extractions by implementing a sequential queue lock.
+  Hardened C++ log interception to completely silence irrelevant OCR warnings.
+
+## 4.0.26
+
+### Patch Changes
+
+- Resolve uncaught C++ mutex locking issues with Tesseract.js in multi-threaded workflows by enforcing a strictly sequential worker execution queue, and successfully suppress remaining underlying WASM OCR noise patterns in the console output.
+
+## 4.0.25
+
+### Patch Changes
+
+- Strengthen project and bound-file isolation for document generation, prevent prompt examples from leaking into generated content, and keep CLI knowledge searches scoped to the current project by default.
+
 ## 4.0.23
 
 ### Patch Changes

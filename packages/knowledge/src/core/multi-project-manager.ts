@@ -73,7 +73,7 @@ export class MultiProjectManager {
 
   async search(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope; weights?: RetrievalWeights } = {}): Promise<FederatedResult> {
     const limit = options.limit ?? 10;
-    const scope = options.scope ?? 'all';
+    const scope = options.scope ?? 'project';
     const project = await this.getProject(projectRoot);
     await this.ensureFreshForSearch(projectRoot, project);
 
@@ -98,7 +98,7 @@ export class MultiProjectManager {
   }
 
   async semanticSearch(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope; filters?: SearchFilters; collections?: string[] } = {}): Promise<FederatedResult> {
-    const scope = options.scope ?? 'all';
+    const scope = options.scope ?? 'project';
     const project = await this.getProject(projectRoot);
     await this.ensureFreshForSearch(projectRoot, project);
     if (scope === 'project') {

@@ -181,6 +181,7 @@ export default function DocumentsPage() {
   const templateFileTree = useMemo(() => buildTemplateFileTree(kbFiles), [kbFiles]);
   const filteredTemplateFileTree = useMemo(() => filterTemplateFileTree(templateFileTree, templateFileQuery), [templateFileTree, templateFileQuery]);
   const allTemplateFileKeys = useMemo(() => collectTemplateFileKeys(templateFileTree), [templateFileTree]);
+  const currentProjectRoot = useMemo(() => prompts.find(item => item.selected)?.projectRoot || prompts.find(item => item.isCurrent)?.projectRoot || prompts[0]?.projectRoot || '', [prompts]);
   const allTemplateTreeKeys = useMemo(() => {
     const keys: string[] = [];
     const walk = (nodes: TemplateFileTreeNode[]) => {
@@ -196,9 +197,11 @@ export default function DocumentsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerMode, setDrawerMode] = useState<'workflow' | 'editor'>('workflow');
   const recoveryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refineRequestRef = useRef(0);
+  const activeGenStorageKey = useMemo(() => `activeGenDocId:${currentProjectRoot || 'default'}`, [currentProjectRoot]);
 
-  const loadDrafts = async () => { try { setDrafts((await getGeneratedDocuments()).documents); } catch { setDrafts([]); } };
+  const loadDrafts = async () => { try { setDrafts((await getGeneratedDocuments(currentProjectRoot || undefined)).documents); } catch { setDrafts([]); } };
 
   useEffect(() => {
     const sync = () => {
@@ -220,25 +223,31 @@ export default function DocumentsPage() {
       getDocumentTemplates().then(d => { setTemplates(d.templates); setTemplateId(d.templates[0]?.id ?? 'construction-organization-design'); }),
       getDocumentRoles().then(d => { setRoles(d.roles); setRoleConfigs(d.configs); }),
       getPromptProjects().then(items => setPrompts(items)),
-      loadDrafts(),
     ]).catch(() => message.error(t('common.error'))).finally(() => setPageLoading(false));
   }, [message, t]);
+
+  useEffect(() => {
+    if (!currentProjectRoot) return;
+    localStorage.removeItem('activeGenDocId');
+    void loadDrafts();
+  }, [currentProjectRoot]);
 
   // 页面刷新恢复：检查是否有未完成的生成任务
   useEffect(() => {
     if (drafts.length === 0) return;
-    const savedDocId = localStorage.getItem('activeGenDocId');
+    const storageKey = activeGenStorageKey;
+    const savedDocId = localStorage.getItem(storageKey);
     if (!savedDocId) return;
     const match = drafts.find(d => d.id === savedDocId && d.status === 'generating');
-    if (!match) { localStorage.removeItem('activeGenDocId'); return; }
+    if (!match) { localStorage.removeItem(storageKey); return; }
     // 后台轻量轮询：刷新生成记录列表，保持刷新后生成中状态同步
     const poll = setInterval(() => {
       void (async () => {
         try {
-          const { document: d } = await getGeneratedDocument(savedDocId);
+          const { document: d } = await getGeneratedDocument(savedDocId, false, currentProjectRoot || undefined);
           await loadDrafts();
           if (d.status !== 'generating') {
-            localStorage.removeItem('activeGenDocId');
+            localStorage.removeItem(storageKey);
             clearInterval(poll);
           }
         } catch { clearInterval(poll); }
@@ -267,14 +276,13 @@ export default function DocumentsPage() {
     setCurrentDocumentId(item.id); setTemplateId(item.templateId);
     const isGenerating = isDraftGenerating(item.status);
     if (isGenerating || item.status === 'failed' || item.status === 'aborted') {
-      genStarted.current = true;
       resetEditAssist();
       setDraft(null); setContent(''); setLoading(isGenerating);
       setDrawerMode('workflow'); setDrawerOpen(true);
       try {
-        const { document } = await getGeneratedDocument(item.id);
+        const { document } = await getGeneratedDocument(item.id, false, item.projectRoot || currentProjectRoot || undefined);
         applyGeneratedRecordToWorkflow(document);
-        if (isDraftGenerating(document.status)) startRecoveredGenerationPolling(document.id);
+        if (isDraftGenerating(document.status)) startRecoveredGenerationPolling(document.id, document.projectRoot || item.projectRoot || currentProjectRoot || undefined);
         else await loadDrafts();
       } catch {
         applyGeneratedRecordToWorkflow(item);
@@ -284,7 +292,7 @@ export default function DocumentsPage() {
 
     setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null); resetEditAssist();
     try {
-      const { document } = await getGeneratedDocument(item.id);
+      const { document } = await getGeneratedDocument(item.id, false, item.projectRoot || currentProjectRoot || undefined);
       setDraft(document.draft || null); setContent(document.editedMarkdown || document.markdown);
     } catch { message.error(t('common.error')); }
     setDrawerOpen(true);
@@ -373,23 +381,33 @@ export default function DocumentsPage() {
       setDraft(record.draft); setContent(record.editedMarkdown || record.markdown); setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null);
     }
   };
-  const startRecoveredGenerationPolling = (documentId: string) => {
+  const startRecoveredGenerationPolling = (documentId: string, projectRoot?: string) => {
     if (recoveryPollRef.current) clearInterval(recoveryPollRef.current);
     recoveryPollRef.current = setInterval(() => {
       void (async () => {
         try {
-          const { document } = await getGeneratedDocument(documentId, true);
+          const { document } = await getGeneratedDocument(documentId, true, projectRoot || currentProjectRoot || undefined);
           applyGeneratedRecordToWorkflow(document);
           await loadDrafts();
           if (!isDraftGenerating(document.status)) {
             if (recoveryPollRef.current) clearInterval(recoveryPollRef.current);
             recoveryPollRef.current = null;
-            localStorage.removeItem('activeGenDocId');
+            localStorage.removeItem(activeGenStorageKey);
           }
         } catch { /* ignore */ }
       })();
     }, 2000);
   };
+  useEffect(() => () => {
+    if (recoveryPollRef.current) {
+      clearInterval(recoveryPollRef.current);
+      recoveryPollRef.current = null;
+    }
+    if (autoStartTimerRef.current) {
+      clearTimeout(autoStartTimerRef.current);
+      autoStartTimerRef.current = null;
+    }
+  }, []);
   useEffect(() => {
     if (!loading || !activeFlowKey) return undefined;
     const t = window.setInterval(() => setFlowSteps(prev => {
@@ -402,7 +420,7 @@ export default function DocumentsPage() {
   const loadTemplateFiles = async () => {
     setFileSearching(true);
     try {
-      const result = await getKbFiles({ limit: 5000 });
+      const result = await getKbFiles({ limit: 5000, projectRoot: currentProjectRoot || undefined });
       setKbFiles(result.files);
     } catch {
       message.error('知识库文件加载失败');
@@ -440,7 +458,7 @@ export default function DocumentsPage() {
   const delTpl = async (id: string) => { try { const r = await deleteDocumentTemplate(id); setTemplates(r.templates); setTemplateId(r.templates[0]?.id ?? ''); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
   const runTemplateWithValidation = async (id: string) => {
     try {
-      const { validation } = await validateDocumentTemplate(id);
+      const { validation } = await validateDocumentTemplate(id, currentProjectRoot || undefined);
       setTemplateValidations(prev => ({ ...prev, [id]: validation }));
       const errors = validation.issues.filter(issue => issue.level === 'error');
       setTemplateId(id);
@@ -457,11 +475,11 @@ export default function DocumentsPage() {
       message.error(error instanceof Error ? error.message : '模板运行前检查失败');
     }
   };
-  const delDraft = async (id: string) => { try { await deleteGeneratedDocument(id); if (currentDocumentId === id) { setCurrentDocumentId(null); setDraft(null); setContent(''); } await loadDrafts(); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
+  const delDraft = async (item: GeneratedDocumentRecord) => { try { await deleteGeneratedDocument(item.id, item.projectRoot || currentProjectRoot || undefined); if (currentDocumentId === item.id) { setCurrentDocumentId(null); setDraft(null); setContent(''); } await loadDrafts(); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
 
   const waitForDoc = async (docId: string) => {
     for (;;) {
-      const { document } = await getGeneratedDocument(docId, true);
+      const { document } = await getGeneratedDocument(docId, true, currentProjectRoot || undefined);
       applyGeneratedRecordToWorkflow(document);
       if ((document.status === 'completed' || document.status === 'warning') && document.draft) return document;
       if (document.status === 'failed' || document.status === 'aborted') throw new Error(document.error || (document.status === 'aborted' ? '生成已中止' : '生成失败'));
@@ -472,14 +490,15 @@ export default function DocumentsPage() {
   const handleGenerate = async () => {
     if (!templateId) return;
     if (activeGenerationTask?.loading) { setFlowSteps(activeGenerationTask.flowSteps); setActiveFlowKey(activeGenerationTask.activeFlowKey); setLoading(true); return; }
+    if (!currentProjectRoot) { message.error('未识别当前项目，请先选择或打开项目后再生成文件'); return; }
     setLoading(true);
-    const promise = generateDocumentDraft({ templateId });
+    const promise = generateDocumentDraft({ templateId, projectRoot: currentProjectRoot });
     activeGenerationTask = { id: Date.now(), templateId, loading: true, flowSteps: [], activeFlowKey: null, promise, listeners: new Set() };
     setFlowSteps([]); setActiveFlowKey(null);
     const timers: number[] = [];
     try {
       const started = await promise;
-      if (started.documentId) { localStorage.setItem('activeGenDocId', started.documentId); setCurrentDocumentId(started.documentId); if (activeGenerationTask?.promise === promise) activeGenerationTask.documentId = started.documentId; }
+      if (started.documentId) { localStorage.setItem(activeGenStorageKey, started.documentId); setCurrentDocumentId(started.documentId); if (activeGenerationTask?.promise === promise) activeGenerationTask.documentId = started.documentId; }
       await loadDrafts(); // 立即刷新列表，展示"生成中"记录
       const doc = started.documentId ? await waitForDoc(started.documentId) : undefined;
       const result = started.draft || doc?.draft;
@@ -488,18 +507,18 @@ export default function DocumentsPage() {
       timers.forEach(x => window.clearTimeout(x));
       setDraft(result); setContent(doc?.editedMarkdown || doc?.markdown || result.markdown);
       if (activeGenerationTask?.promise === promise) { activeGenerationTask.draft = result; activeGenerationTask.content = doc?.editedMarkdown || doc?.markdown || result.markdown; }
-      const recordForFlow = doc || { id: started.documentId || `draft-${Date.now()}`, templateId, title: result.title, requirement: result.requirement, markdown: result.markdown, status: result.validationIssues.some(x => x.level === 'error' || x.level === 'warning') || !result.exportGate.passed ? 'warning' as const : 'completed' as const, draft: result, executionStages: result.executionStages, assets: result.assets || [], createdAt: result.generatedAt, updatedAt: Date.now() };
+      const recordForFlow = doc || { id: started.documentId || `draft-${Date.now()}`, templateId, title: result.title, requirement: result.requirement, projectRoot: result.projectRoot || currentProjectRoot, projectId: result.projectId, markdown: result.markdown, status: result.validationIssues.some(x => x.level === 'error' || x.level === 'warning') || !result.exportGate.passed ? 'warning' as const : 'completed' as const, draft: result, executionStages: result.executionStages, assets: result.assets || [], createdAt: result.generatedAt, updatedAt: Date.now() };
       const { steps: finalSteps } = buildFlowStepsFromRecord(recordForFlow);
       setFlowSteps(finalSteps);
       setSnap(finalSteps, 'done', false);
       setActiveFlowKey('done');
-      if (activeGenerationTask?.promise === promise) { activeGenerationTask.activeFlowKey = 'done'; activeGenerationTask.loading = false; notifyGenerationTask(); }
-      localStorage.removeItem('activeGenDocId');
+      if (activeGenerationTask?.promise === promise) { activeGenerationTask.activeFlowKey = 'done'; activeGenerationTask.loading = false; notifyGenerationTask(); activeGenerationTask = null; }
+      localStorage.removeItem(activeGenStorageKey);
       await loadDrafts();
       message.success(t('common.success'));
       window.setTimeout(() => editorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200);
     } catch (error) {
-      localStorage.removeItem('activeGenDocId');
+      localStorage.removeItem(activeGenStorageKey);
       const msg = error instanceof Error ? error.message : t('common.error');
       setFlowSteps(prev => { const n = prev.map(s => s.status === 'process' ? { ...s, status: 'error' as const, description: msg, subSteps: updSubs(s, 'error') } : s); setSnap(n, activeFlowKey, false); return n; });
       if (activeGenerationTask?.promise === promise) { activeGenerationTask.loading = false; activeGenerationTask.error = msg; notifyGenerationTask(); activeGenerationTask = null; }
@@ -508,19 +527,42 @@ export default function DocumentsPage() {
     } finally { timers.forEach(x => window.clearTimeout(x)); setLoading(false); if (activeGenerationTask?.promise === promise) { activeGenerationTask.loading = false; notifyGenerationTask(); } }
   };
 
-  // 当抽屉以工作流模式打开时自动启动生成
   const genStarted = useRef(false);
+  useEffect(() => {
+    if (autoStartTimerRef.current) {
+      clearTimeout(autoStartTimerRef.current);
+      autoStartTimerRef.current = null;
+    }
+    if (drawerOpen && drawerMode === 'workflow' && !currentDocumentId && !genStarted.current && !activeGenerationTask?.loading && currentTemplate?.projectRoleConfigId) {
+      const startTemplateId = templateId;
+      genStarted.current = true;
+      autoStartTimerRef.current = setTimeout(() => {
+        autoStartTimerRef.current = null;
+        if (!drawerOpen || drawerMode !== 'workflow' || currentDocumentId || templateId !== startTemplateId) return;
+        void handleGenerate();
+      }, 300);
+    }
+    if (!drawerOpen) {
+      genStarted.current = false;
+    }
+    return () => {
+      if (autoStartTimerRef.current) {
+        clearTimeout(autoStartTimerRef.current);
+        autoStartTimerRef.current = null;
+      }
+    };
+  }, [drawerOpen, drawerMode, currentDocumentId, currentTemplate, templateId]);
 
   const handleAbortGeneration = () => {
     void (async () => {
-      if (currentDocumentId) await abortGeneratedDocument(currentDocumentId).catch(() => undefined);
+      if (currentDocumentId) await abortGeneratedDocument(currentDocumentId, currentProjectRoot || undefined).catch(() => undefined);
       if (activeGenerationTask) {
         activeGenerationTask.loading = false;
         activeGenerationTask.error = '用户中止';
         notifyGenerationTask();
         activeGenerationTask = null;
       }
-      localStorage.removeItem('activeGenDocId');
+      localStorage.removeItem(activeGenStorageKey);
       if (recoveryPollRef.current) { clearInterval(recoveryPollRef.current); recoveryPollRef.current = null; }
       setLoading(false); setFlowSteps([]); setActiveFlowKey(null);
       setDrawerOpen(false);
@@ -530,17 +572,17 @@ export default function DocumentsPage() {
   };
 
   const handleAbortDraft = async (item: GeneratedDocumentRecord) => {
-    if (activeGenerationTask?.loading) {
+    if (activeGenerationTask?.loading && activeGenerationTask.documentId === item.id) {
       activeGenerationTask.loading = false;
       activeGenerationTask.error = '用户中止';
       notifyGenerationTask();
       activeGenerationTask = null;
       setLoading(false);
     }
-    localStorage.removeItem('activeGenDocId');
+    localStorage.removeItem(activeGenStorageKey);
     if (recoveryPollRef.current) { clearInterval(recoveryPollRef.current); recoveryPollRef.current = null; }
     try {
-      await abortGeneratedDocument(item.id);
+      await abortGeneratedDocument(item.id, item.projectRoot || currentProjectRoot || undefined);
       message.success('已中止生成任务');
     } catch {
       message.info('任务已不在运行，已刷新状态');
@@ -549,14 +591,6 @@ export default function DocumentsPage() {
       if (currentDocumentId === item.id) { setCurrentDocumentId(null); setDraft(null); setContent(''); }
     }
   };
-  useEffect(() => {
-    if (drawerOpen && drawerMode === 'workflow' && !genStarted.current && !activeGenerationTask?.loading && currentTemplate?.projectRoleConfigId) {
-      genStarted.current = true;
-      window.setTimeout(() => { void handleGenerate(); }, 300);
-    }
-    if (!drawerOpen) genStarted.current = false;
-  }, [drawerOpen, drawerMode]);
-
   const dl = (blob: Blob, name: string, mime: string) => {
     const b = new Blob([blob], { type: mime }); const u = URL.createObjectURL(b); const a = document.createElement('a');
     a.href = u; a.download = name; a.target = '_self'; a.rel = 'noopener'; a.style.display = 'none';
@@ -576,7 +610,7 @@ export default function DocumentsPage() {
   };
   const saveDraft = async () => {
     if (!draft) return;
-    try { if (currentDocumentId) await updateGeneratedDocument(currentDocumentId, { editedMarkdown: content, markdown: content }); else { const r = await saveDocumentDraft({ ...draft, markdown: content }); setDraft(r.draft); } await loadDrafts(); message.success(t('common.success')); } catch { message.error(t('common.error')); }
+    try { if (currentDocumentId) await updateGeneratedDocument(currentDocumentId, { editedMarkdown: content, markdown: content }, draft.projectRoot || currentProjectRoot || undefined); else { const r = await saveDocumentDraft({ ...draft, markdown: content }); setDraft(r.draft); } await loadDrafts(); message.success(t('common.success')); } catch { message.error(t('common.error')); }
   };
   const pushHistory = (value: string, prompt: string) => {
     setEditHistory(prev => [{ id: `${Date.now()}`, content: value, prompt, createdAt: Date.now() }, ...prev].slice(0, 12));
@@ -740,7 +774,7 @@ export default function DocumentsPage() {
                   <Space size={4} align="center">
                     <Tag color={draftStatusColor(item.status)} style={{ margin: 0, fontSize: 10, lineHeight: '18px' }}>{draftStatusText(item.status)}</Tag>
                     <Tag style={{ margin: 0, fontSize: 10, lineHeight: '18px' }}>#{index + 1}</Tag>
-                    <Popconfirm title="确认删除？" onConfirm={(e) => { e?.stopPropagation(); void delDraft(item.id); }}>
+                    <Popconfirm title="确认删除？" onConfirm={(e) => { e?.stopPropagation(); void delDraft(item); }}>
                       <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} />
                     </Popconfirm>
                     {isDraftGenerating(item.status) && (

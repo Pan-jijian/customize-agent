@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { App, Button, Card, Col, Dropdown, Empty, Image, Modal, Row, Space, Skeleton, Tag } from 'antd';
 import { DeleteOutlined, ExportOutlined, FileOutlined, FolderOpenOutlined, PictureOutlined, CopyOutlined, DatabaseOutlined, MoreOutlined } from '@ant-design/icons';
 import { useAppTranslations } from '@/components/Layout';
-import { deleteGeneratedAsset, getGeneratedAssets, indexGeneratedAsset, openGeneratedAsset, type GeneratedAssetRecord } from '@/lib/api';
+import { deleteGeneratedAsset, getGeneratedAssets, getPromptProjects, indexGeneratedAsset, openGeneratedAsset, type GeneratedAssetRecord } from '@/lib/api';
 
 const SOURCE_LABELS: Record<string, string> = { knowledge_base: '知识库', generated: 'AI生成', uploaded: '上传', external_url: '外部URL' };
 const ROLE_COLORS: Record<string, string> = { cover: 'magenta', reference: 'blue', generated: 'purple', attachment: 'cyan', map: 'orange', operator: 'geekblue' };
@@ -13,11 +13,24 @@ export default function AssetLibraryPage() {
   const [assets, setAssets] = useState<GeneratedAssetRecord[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const [projectRoot, setProjectRoot] = useState('');
 
-  const loadAssets = async () => {
-    try { setAssets((await getGeneratedAssets()).assets); } catch { setAssets([]); }
+  const loadAssets = async (root = projectRoot) => {
+    try { setAssets((await getGeneratedAssets(root || undefined)).assets); } catch { setAssets([]); }
   };
-  useEffect(() => { setLoading(true); void loadAssets().finally(() => setLoading(false)); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    void getPromptProjects()
+      .then(projects => {
+        if (cancelled) return;
+        const root = projects.find(item => item.selected)?.projectRoot || projects.find(item => item.isCurrent)?.projectRoot || projects[0]?.projectRoot || '';
+        setProjectRoot(root);
+        return loadAssets(root);
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
 
   const copyPath = async (text?: string) => {
     if (!text) return;
@@ -28,10 +41,10 @@ export default function AssetLibraryPage() {
   /** 执行资源操作：加入知识库索引、打开文件、打开目录、删除 */
   const runAction = async (id: string, action: 'index' | 'openFile' | 'openDirectory' | 'delete') => {
     try {
-      if (action === 'index') { setAssets((await indexGeneratedAsset(id)).assets); message.success('已加入知识库索引'); }
-      else if (action === 'openFile') await openGeneratedAsset(id, 'file');
-      else if (action === 'openDirectory') await openGeneratedAsset(id, 'directory');
-      else if (action === 'delete') { setAssets((await deleteGeneratedAsset(id)).assets); setSelectedIds(prev => { const n = new Set(prev); n.delete(id); return n; }); }
+      if (action === 'index') { setAssets((await indexGeneratedAsset(id, projectRoot || undefined)).assets); message.success('已加入知识库索引'); }
+      else if (action === 'openFile') await openGeneratedAsset(id, 'file', projectRoot || undefined);
+      else if (action === 'openDirectory') await openGeneratedAsset(id, 'directory', projectRoot || undefined);
+      else if (action === 'delete') { setAssets((await deleteGeneratedAsset(id, projectRoot || undefined)).assets); setSelectedIds(prev => { const n = new Set(prev); n.delete(id); return n; }); }
     } catch (error) { message.error(error instanceof Error ? error.message : '操作失败'); }
   };
 
@@ -46,7 +59,7 @@ export default function AssetLibraryPage() {
       okButtonProps: { danger: true },
       onOk: async () => {
         setLoading(true);
-        try { await Promise.all(targets.map(id => deleteGeneratedAsset(id))); await loadAssets(); setSelectedIds(new Set()); message.success(`已删除 ${targets.length} 个资源`); }
+        try { await Promise.all(targets.map(id => deleteGeneratedAsset(id, projectRoot || undefined))); await loadAssets(); setSelectedIds(new Set()); message.success(`已删除 ${targets.length} 个资源`); }
         catch { message.error('批量删除失败'); }
         finally { setLoading(false); }
       },
@@ -61,7 +74,7 @@ export default function AssetLibraryPage() {
   /** 获取图片资源的预览 URL */
   const previewSrc = (asset: GeneratedAssetRecord) =>
     asset.type === 'image' && asset.path
-      ? `/api/assets/generated/preview?id=${encodeURIComponent(asset.id)}`
+      ? `/api/assets/generated/preview?id=${encodeURIComponent(asset.id)}${projectRoot ? `&projectRoot=${encodeURIComponent(projectRoot)}` : ''}`
       : undefined;
 
   if (loading) return (

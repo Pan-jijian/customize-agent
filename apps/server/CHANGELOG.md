@@ -1,5 +1,57 @@
 # server
 
+## 4.0.68
+
+### Patch Changes
+
+- Harden OCR noise suppression and worker lifecycle, improve workflow abort propagation, and prevent stale workflow auto-start or recovery state from restarting old records.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.28
+
+## 4.0.67
+
+### Patch Changes
+
+- Removed redundant explicit outline input prompt from workflow drawer to allow templates to launch automatically.
+  Fixed background Tesseract C++ crashes (mutex locks) during high-concurrency image extractions by implementing a sequential queue lock.
+  Hardened C++ log interception to completely silence irrelevant OCR warnings.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.27
+
+## 4.0.66
+
+### Patch Changes
+
+- Resolve uncaught C++ mutex locking issues with Tesseract.js in multi-threaded workflows by enforcing a strictly sequential worker execution queue, and successfully suppress remaining underlying WASM OCR noise patterns in the console output.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.26
+
+## 4.0.65
+
+### Patch Changes
+
+- Remove redundant manual requirement input prompt when running workflows, automatically start the generation process upon running a template, ensuring a smoother user experience.
+
+## 4.0.64
+
+### Patch Changes
+
+- Apply explicit chapter configurations and fallback matchers for project basic facts, and properly restore configured chapter forbidden filters for user explicit outline protection.
+
+## 4.0.63
+
+### Patch Changes
+
+- Fix OUTLINE parsing regression to correctly incorporate strict outline blocks from prompt roles, improve outline formatting compatibility, and ensure missing chapters throw hard errors.
+
+## 4.0.62
+
+### Patch Changes
+
+- Strengthen project and bound-file isolation for document generation, prevent prompt examples from leaking into generated content, and keep CLI knowledge searches scoped to the current project by default.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.25
+
 ## 4.0.61
 
 ### Patch Changes
