@@ -22,3 +22,4 @@ onlyBuiltDependencies:
   - hnswlib-node
   - sharp
   - '@napi-rs/canvas'
+  - onnxruntime-node

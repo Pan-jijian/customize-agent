@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { abortGeneratedDocument, deleteGeneratedDocument, getGeneratedDocument, listGeneratedDocuments, updateGeneratedDocument } from '@/services/generatedDocumentService';
+import { abortGeneratedDocument, deleteGeneratedDocument, getGeneratedDocument, listGeneratedDocuments, startGenerateDocumentTask, updateGeneratedDocument } from '@/services/generatedDocumentService';
 
 /**
  * 生成文档列表 API 处理器
@@ -35,6 +35,12 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
         const record = abortGeneratedDocument(documentId, projectRoot);
         if (!record) return res.status(409).json({ error: 'Document not found or not generating' });
         return res.status(200).json({ document: record });
+      }
+      if (action === 'resume' && documentId) {
+        const record = getGeneratedDocument(documentId, projectRoot);
+        if (!record) return res.status(404).json({ error: 'Document not found' });
+        const task = startGenerateDocumentTask({ templateId: record.templateId, requirement: record.requirement, resumeDocumentId: documentId }, record.projectRoot || projectRoot);
+        return res.status(202).json(task);
       }
       return res.status(400).json({ error: 'Unknown action' });
     }

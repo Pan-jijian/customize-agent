@@ -4,7 +4,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { GeneratedDocumentDraft, DocumentAsset } from './documentWorkflowService';
 import { generateDocumentDraft } from './documentWorkflowService';
-import { rememberDocumentContext } from './contextService';
 import { computeProjectId } from '@customize-agent/knowledge';
 import { getMultiProjectManager, getProjectRoot } from './kbService';
 
@@ -25,6 +24,8 @@ export interface GeneratedDocumentRecord {
   status: GeneratedDocumentStatus;
   draft?: GeneratedDocumentDraft;
   executionStages?: GeneratedDocumentDraft['executionStages'];
+  partialChapters?: GeneratedDocumentDraft['partialChapters'];
+  reviewMetadata?: GeneratedDocumentDraft['reviewMetadata'];
   assets: DocumentAsset[];
   createdAt: number;
   updatedAt: number;
@@ -56,9 +57,16 @@ interface GenerateTask {
   status: GeneratedDocumentStatus;
   controller: AbortController;
   promise: Promise<GeneratedDocumentRecord>;
+  startedAt: number;
+  lastProgressAt: number;
+  timeoutTimer?: NodeJS.Timeout;
+  progressTimer?: NodeJS.Timeout;
 }
 
 const tasks = new Map<string, GenerateTask>();
+const DOCUMENT_TASK_TIMEOUT_MS = Math.max(10 * 60_000, Number(process.env.DOCUMENT_TASK_TIMEOUT_MS ?? 120 * 60_000));
+const DOCUMENT_TASK_STALE_MS = Math.max(60_000, Number(process.env.DOCUMENT_TASK_STALE_MS ?? 5 * 60_000));
+const DOCUMENT_TASK_NO_PROGRESS_MS = Math.max(5 * 60_000, Number(process.env.DOCUMENT_TASK_NO_PROGRESS_MS ?? 15 * 60_000));
 
 function generatedProjectId(projectRoot = getProjectRoot()) {
   return computeProjectId(path.resolve(projectRoot));
@@ -81,6 +89,10 @@ export function generatedAssetAbsolutePath(asset: Pick<GeneratedAssetRecord, 'pa
   return path.join(projectRoot, 'knowledgeBase', asset.path);
 }
 
+function autoIndexGeneratedEnabled() {
+  return process.env.DOCUMENT_AUTO_INDEX_GENERATED === '1';
+}
+
 function readJson<T>(file: string, fallback: T): T {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')) as T; } catch { return fallback; }
 }
@@ -90,21 +102,43 @@ function writeJson(file: string, data: unknown) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
+function getActiveTaskByDocumentId(documentId: string) {
+  for (const task of tasks.values()) if (task.documentId === documentId) return task;
+  return null;
+}
+
+function markStaleGeneratingRecord(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
+  if (record.status !== 'generating') return record;
+  if (getActiveTaskByDocumentId(record.id)) return record;
+  if (Date.now() - record.updatedAt < DOCUMENT_TASK_STALE_MS) return record;
+  const completedAt = Date.now();
+  return saveGeneratedDocument({
+    ...record,
+    status: 'failed',
+    error: '生成任务已失联，请点击继续生成或重新生成',
+    executionStages: failRunningStages(record.executionStages, '生成任务已失联'),
+    completedAt,
+  }, projectRoot);
+}
+
 export function listGeneratedDocuments(projectRoot = getProjectRoot()) {
-  return readJson<GeneratedDocumentRecord[]>(indexPath(projectRoot), []).sort((a, b) => b.updatedAt - a.updatedAt);
+  return readJson<GeneratedDocumentRecord[]>(indexPath(projectRoot), [])
+    .map(item => markStaleGeneratingRecord(item, projectRoot))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export function getGeneratedDocument(id: string, projectRoot = getProjectRoot()) {
-  return readJson<GeneratedDocumentRecord | null>(draftPath(id, projectRoot), null);
+  const record = readJson<GeneratedDocumentRecord | null>(draftPath(id, projectRoot), null);
+  return record ? markStaleGeneratingRecord(record, projectRoot) : null;
 }
 
 export function saveGeneratedDocument(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
   const now = Date.now();
   const next = { ...record, updatedAt: now };
   writeJson(draftPath(next.id, projectRoot), next);
-  const list = listGeneratedDocuments(projectRoot).filter(item => item.id !== next.id);
+  const list = readJson<GeneratedDocumentRecord[]>(indexPath(projectRoot), []).filter(item => item.id !== next.id);
   list.unshift(next);
-  writeJson(indexPath(projectRoot), list.map(item => ({ ...item, draft: undefined, executionStages: item.executionStages })));
+  writeJson(indexPath(projectRoot), list.map(item => ({ ...item, draft: undefined, executionStages: item.executionStages, partialChapters: item.partialChapters, reviewMetadata: item.reviewMetadata })));
   return next;
 }
 
@@ -120,12 +154,13 @@ export function abortGeneratedDocument(id: string, projectRoot = getProjectRoot(
   if (current.status !== 'generating') return current;
   for (const [key, task] of tasks) {
     if (task.documentId === id) {
+      task.status = 'aborted';
       task.controller.abort();
+      clearGenerateTaskTimers(task);
       tasks.delete(key);
-      break;
     }
   }
-  return saveGeneratedDocument({ ...current, status: 'aborted', error: '用户中止', executionStages: failRunningStages(current.executionStages, '用户中止'), updatedAt: Date.now(), completedAt: Date.now() }, projectRoot);
+  return saveGeneratedDocument({ ...current, status: 'aborted', error: '用户中止', executionStages: failRunningStages(current.executionStages, '用户中止'), completedAt: Date.now() }, projectRoot);
 }
 
 export function deleteGeneratedDocument(id: string, projectRoot = getProjectRoot()) {
@@ -162,6 +197,27 @@ export function upsertGeneratedAssets(assets: DocumentAsset[], documentId: strin
   }
   writeJson(assetsPath(projectRoot), next);
   return next;
+}
+
+function generatedDocumentAssetPath(record: Pick<GeneratedDocumentRecord, 'id' | 'title'>) {
+  return `generatedDocuments/assets/${safeKnowledgeFileName(record.title)}-${record.id}.md`;
+}
+
+export function upsertGeneratedDocumentAsset(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
+  const now = Date.now();
+  const relativePath = generatedDocumentAssetPath(record);
+  const absolutePath = path.join(generatedRoot(projectRoot), relativePath.replace(/^generatedDocuments\//u, ''));
+  fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+  fs.writeFileSync(absolutePath, record.editedMarkdown || record.markdown, 'utf8');
+  const asset: DocumentAsset = {
+    id: `document-${record.id}`,
+    type: 'file',
+    role: 'generated',
+    path: relativePath,
+    status: 'generated',
+    message: '模板运行生成的 Markdown 文档，默认仅登记到生成资源，需手动加入知识库',
+  };
+  return upsertGeneratedAssets([asset], record.id, projectRoot).find(item => item.id === asset.id) || null;
 }
 
 export function getGeneratedAsset(id: string, projectRoot = getProjectRoot()) {
@@ -227,24 +283,51 @@ function trimEvidenceContent<T extends GeneratedDocumentRecord>(record: T): T {
   return { ...record, draft };
 }
 
-function rememberGeneratedDocument(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
-  const sourceFiles = record.draft?.sources.slice(0, 8).map(item => item.filePath).join('、') || '无明确来源';
-  const warningText = record.warningIssues?.slice(0, 5).join('；') || '无阻断问题';
-  rememberDocumentContext(
-    'project_fact',
-    `文档《${record.title}》已基于模板“${record.templateName || record.templateId}”生成。用户要求：${record.requirement || '未填写'}。主要资料来源：${sourceFiles}。校验结果：${warningText}。`,
-    `Project: ${path.resolve(projectRoot)} | Generated document: ${record.id}`,
-  );
+function clearGenerateTaskTimers(task: GenerateTask) {
+  if (task.timeoutTimer) clearTimeout(task.timeoutTimer);
+  if (task.progressTimer) clearInterval(task.progressTimer);
+}
+
+function failGeneratingDocument(documentId: string, projectRoot: string, message: string) {
+  const current = getGeneratedDocument(documentId, projectRoot);
+  if (!current || current.status !== 'generating') return current;
+  return saveGeneratedDocument({ ...current, status: 'failed', error: message, executionStages: failRunningStages(current.executionStages, message), completedAt: Date.now() }, projectRoot);
+}
+
+function activeTaskResponse(task: GenerateTask, projectRoot: string) {
+  const record = getGeneratedDocument(task.documentId, projectRoot);
+  if (!record || record.status !== 'generating') return null;
+  return { taskId: task.id, documentId: task.documentId, record };
 }
 
 /** 启动异步文档生成任务，包含进度回调持久化、结果入库、资源管理，返回任务 ID 和文档 ID */
-export function startGenerateDocumentTask(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number }, projectRoot = getProjectRoot()) {
+export function startGenerateDocumentTask(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; resumeDocumentId?: string }, projectRoot = getProjectRoot()) {
   const resolvedProjectRoot = path.resolve(projectRoot);
   const currentProjectId = computeProjectId(resolvedProjectRoot);
   const now = Date.now();
-  const documentId = `doc-${now}-${crypto.randomBytes(4).toString('hex')}`;
+  const existing = input.resumeDocumentId ? getGeneratedDocument(input.resumeDocumentId, resolvedProjectRoot) : null;
+  if (existing) {
+    const active = getActiveTaskByDocumentId(existing.id);
+    const activeResponse = active ? activeTaskResponse(active, resolvedProjectRoot) : null;
+    if (activeResponse) return activeResponse;
+  }
+  if (!existing) {
+    for (const task of tasks.values()) {
+      const active = activeTaskResponse(task, resolvedProjectRoot);
+      if (active && active.record.templateId === input.templateId && active.record.projectRoot === resolvedProjectRoot) return active;
+    }
+  }
+  const documentId = existing?.id || `doc-${now}-${crypto.randomBytes(4).toString('hex')}`;
   const taskId = `task-${now}-${crypto.randomBytes(4).toString('hex')}`;
-  const initial: GeneratedDocumentRecord = {
+  const initial: GeneratedDocumentRecord = existing ? {
+    ...existing,
+    taskId,
+    status: 'generating',
+    error: undefined,
+    completedAt: undefined,
+    executionStages: [...(existing.executionStages || []), { type: 'validation', roleId: 'resume-generation', status: 'running', message: '已从上次结果继续生成，系统将自动复用可用章节缓存和进度数据' }],
+    updatedAt: now,
+  } : {
     id: documentId,
     taskId,
     templateId: input.templateId,
@@ -261,9 +344,16 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
   };
   saveGeneratedDocument(initial, resolvedProjectRoot);
   const controller = new AbortController();
-  const promise = generateDocumentDraft({ ...input, projectRoot: resolvedProjectRoot, signal: controller.signal, onProgress: (stages) => {
-    // 增量保存执行阶段到顶层字段，前端轮询实时获取
+  const taskRef: { current?: GenerateTask } = {};
+  const failAndStop = (message: string) => {
+    controller.abort();
+    if (taskRef.current) clearGenerateTaskTimers(taskRef.current);
+    failGeneratingDocument(documentId, resolvedProjectRoot, message);
+    tasks.delete(taskId);
+  };
+  const promise = generateDocumentDraft({ ...input, projectRoot: resolvedProjectRoot, resumeChapters: existing?.draft?.chapters || [], signal: controller.signal, onProgress: (stages) => {
     try {
+      if (taskRef.current) taskRef.current.lastProgressAt = Date.now();
       const current = getGeneratedDocument(documentId, resolvedProjectRoot);
       if (current && current.status === 'generating') {
         saveGeneratedDocument({ ...current, executionStages: stages }, resolvedProjectRoot);
@@ -283,15 +373,19 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       status: warningIssues.length > 0 ? 'warning' : 'completed',
       draft: result,
       executionStages: result.executionStages,
+      partialChapters: result.partialChapters,
+      reviewMetadata: result.reviewMetadata,
       assets: result.assets || [],
       completedAt: Date.now(),
       warningIssues,
     }), resolvedProjectRoot);
-    rememberGeneratedDocument(record, resolvedProjectRoot);
+    upsertGeneratedDocumentAsset(record, resolvedProjectRoot);
     const assets = upsertGeneratedAssets(result.assets || [], documentId, resolvedProjectRoot);
-    await indexGeneratedDocumentRecord(record, resolvedProjectRoot).catch(error => console.warn('[generated-documents] 自动入库生成文档失败', error));
-    for (const asset of assets.filter(item => item.usedByDocumentIds.includes(documentId) && !item.indexed)) {
-      await indexGeneratedAsset(asset.id, resolvedProjectRoot).catch(error => console.warn('[generated-documents] 自动入库生成资源失败', asset.id, error));
+    if (autoIndexGeneratedEnabled()) {
+      await indexGeneratedDocumentRecord(record, resolvedProjectRoot).catch(error => console.warn('[generated-documents] 自动入库生成文档失败', error));
+      for (const asset of assets.filter(item => item.usedByDocumentIds.includes(documentId) && !item.indexed)) {
+        await indexGeneratedAsset(asset.id, resolvedProjectRoot).catch(error => console.warn('[generated-documents] 自动入库生成资源失败', asset.id, error));
+      }
     }
     return record;
   }).catch(error => {
@@ -302,9 +396,15 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     const record = saveGeneratedDocument({ ...current, status, error: message, executionStages: failRunningStages(current.executionStages, message), completedAt: Date.now() }, resolvedProjectRoot);
     return record;
   }).finally(() => {
+    if (taskRef.current) clearGenerateTaskTimers(taskRef.current);
     tasks.delete(taskId);
   });
-  const task: GenerateTask = { id: taskId, documentId, status: 'generating', controller, promise };
+  const task: GenerateTask = { id: taskId, documentId, status: 'generating', controller, promise, startedAt: now, lastProgressAt: now };
+  taskRef.current = task;
+  task.timeoutTimer = setTimeout(() => failAndStop('生成任务超时，请点击继续生成或重新生成'), DOCUMENT_TASK_TIMEOUT_MS);
+  task.progressTimer = setInterval(() => {
+    if (Date.now() - task.lastProgressAt > DOCUMENT_TASK_NO_PROGRESS_MS) failAndStop('生成任务长时间无进度，请点击继续生成或重新生成');
+  }, Math.min(60_000, DOCUMENT_TASK_NO_PROGRESS_MS));
   tasks.set(taskId, task);
   return { taskId, documentId, record: initial };
 }

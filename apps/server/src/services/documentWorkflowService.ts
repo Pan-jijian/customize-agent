@@ -12,7 +12,7 @@ import { getConfigStore } from '@/services/configService';
 import { getProjectRoleConfig, listDocumentRoles } from './documentRoleService';
 import type { AutoDocumentSpecGateRule, AutoDocumentSpecPackage, GateRuleEvaluator } from './autoDocumentSpecTypes';
 import { autoSpecPrompt, getOrCreateAutoDocumentSpec } from './autoDocumentSpecService';
-import { buildProjectMaterialSummary, projectMaterialPrompt, type ProjectMaterialSummary, type MaterialRole } from './projectMaterialService';
+import { buildProjectMaterialSummary, projectMaterialPrompt, type MaterialRole } from './projectMaterialService';
 import { resolveTemplateMaterialRoles } from './materialRoleResolver';
 import { evaluateDocumentReadiness, readinessPrompt } from './documentReadinessService';
 import { validateDraftWithAutoSpec } from './documentValidationService';
@@ -220,6 +220,12 @@ export interface DocumentAsset {
   message?: string;
 }
 
+export interface DocumentReviewMetadata {
+  chapterSummaries: ChapterReviewSummary[];
+  globalIssues: string[];
+  diagnostics: DocumentGenerationDiagnostics;
+}
+
 export interface GeneratedDocumentDraft {
   templateId: string;
   templateName: string;
@@ -241,6 +247,8 @@ export interface GeneratedDocumentDraft {
   executionStages: DocumentExecutionStage[];
   exportGate: ExportGateResult;
   assets?: DocumentAsset[];
+  partialChapters?: Array<{ id: string; title: string; chars: number; status: 'completed' | 'cached' | 'failed'; updatedAt: number }>;
+  reviewMetadata?: DocumentReviewMetadata;
   generatedAt: number;
 }
 
@@ -440,14 +448,34 @@ function cleanEvidenceText(content: string) {
     .trim();
 }
 
+function evidenceQualityScore(content: string) {
+  const text = cleanEvidenceText(content);
+  const chars = Math.max(1, text.length);
+  const chinese = (text.match(/[\u4e00-\u9fa5]/gu) || []).length;
+  const digits = (text.match(/\d/gu) || []).length;
+  const engineeringTerms = (text.match(/工程|施工|质量|安全|工期|验收|材料|设备|清单|图纸|桩|管|钢筋|混凝土|土方|道路|排水|安装|规范/gu) || []).length;
+  const noiseHits = (text.match(/CAD|AcDb|Polyline|ByLayer|ObjectId|Handle|Model|Layout|图层|页码|第\s*\d+\s*页|打印|版权所有|^[\s\W\d_]+$/gimu) || []).length;
+  const repeatedHeaders = (text.match(/(?:序号|项目名称|单位|数量|综合单价|合价|备注)/gu) || []).length;
+  const factDensity = Math.min(1, (chinese / chars) * 0.7 + Math.min(0.3, (digits + engineeringTerms * 3) / 120));
+  const noiseScore = Math.min(1, noiseHits * 0.18 + Math.max(0, repeatedHeaders - 8) * 0.04 + (chinese / chars < 0.25 ? 0.35 : 0));
+  return { noiseScore, factDensity, shouldUse: text.length >= 30 && noiseScore < 0.72 && factDensity > 0.08 };
+}
+
 function sanitizeEvidenceContent(filePath: string, content: string) {
   const ext = path.extname(filePath).toLowerCase();
-  const cleaned = cleanEvidenceText(content);
-  if (cleaned.length > 20) return cleaned.slice(0, 4000);
+  const cleaned = cleanEvidenceText(content)
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line && !/^(?:序号\s*)?(?:项目名称|单位|数量|综合单价|合价|备注)(?:\s+|$)/u.test(line))
+    .filter(line => !/^第\s*\d+\s*页\s*(?:共\s*\d+\s*页)?$/u.test(line))
+    .join('\n');
+  const quality = evidenceQualityScore(cleaned);
+  if (cleaned.length > 20 && quality.shouldUse) return cleaned.slice(0, 4000);
+  if (cleaned.length > 80 && quality.noiseScore < 0.9) return cleaned.slice(0, 1600);
   if (['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.webp', '.dwg'].includes(ext)) {
     return `该资料为${ext.replace('.', '').toUpperCase()}格式附件，仅作为内部事实提取依据；正式正文不得引用文件名。`;
   }
-  return cleaned.slice(0, 4000);
+  return cleaned.slice(0, 1200);
 }
 
 function evidenceDedupeKey(item: DocumentEvidence): string {
@@ -455,17 +483,33 @@ function evidenceDedupeKey(item: DocumentEvidence): string {
   return `${item.filePath}:${item.sectionTitle || ''}:${createHash('sha1').update(normalized).digest('hex')}`;
 }
 
-function uniqueEvidence(items: DocumentEvidence[], limit: number): DocumentEvidence[] {
+function uniqueEvidence(items: DocumentEvidence[], limit: number, diagnostics?: DocumentGenerationDiagnostics): DocumentEvidence[] {
   const seen = new Set<string>();
-  return items.map(item => ({ ...item, content: sanitizeEvidenceContent(item.filePath, item.content) }))
-    .sort((a, b) => b.score - a.score)
-    .filter(item => {
-      const key = evidenceDedupeKey(item);
+  const scored = items.map(item => {
+    const content = sanitizeEvidenceContent(item.filePath, item.content);
+    const quality = evidenceQualityScore(content);
+    return { item: { ...item, content, score: item.score * (1 + quality.factDensity) * (1 - quality.noiseScore * 0.45) }, quality };
+  });
+  const usable = scored.filter(entry => entry.quality.shouldUse || /附件，仅作为内部事实提取依据/u.test(entry.item.content));
+  const selected = (usable.length >= Math.min(3, items.length) ? usable : scored)
+    .sort((a, b) => b.item.score - a.item.score)
+    .filter(entry => {
+      const key = evidenceDedupeKey(entry.item);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     })
     .slice(0, limit);
+  if (diagnostics) {
+    const totalNoise = scored.reduce((sum, entry) => sum + entry.quality.noiseScore, 0);
+    const totalDensity = scored.reduce((sum, entry) => sum + entry.quality.factDensity, 0);
+    diagnostics.evidence.raw += items.length;
+    diagnostics.evidence.used += selected.length;
+    diagnostics.evidence.filteredNoise += Math.max(0, scored.length - usable.length);
+    diagnostics.evidence.avgNoiseScore = scored.length ? Number((totalNoise / scored.length).toFixed(3)) : 0;
+    diagnostics.evidence.avgFactDensity = scored.length ? Number((totalDensity / scored.length).toFixed(3)) : 0;
+  }
+  return selected.map(entry => entry.item);
 }
 
 function evidenceFromBoundFile(filePath: string, roleId: string | undefined, processingType: string | undefined, chapterId: string, projectRoot: string): DocumentEvidence[] {
@@ -825,8 +869,43 @@ interface RoleNodeArtifact {
 
 const ROLE_ARTIFACT_CACHE = new Map<string, RoleNodeArtifact>();
 const CHAPTER_SEARCH_CACHE = new Map<string, KbSearchResult[]>();
+interface DocumentGenerationStrategy {
+  mode: 'fast' | 'balanced' | 'longform' | 'strict';
+  enableChapterCache: boolean;
+  enableChapterReview: boolean;
+  enableGlobalReview: boolean;
+  enableTypedRepair: boolean;
+  maxChapterReviewConcurrency: number;
+  targetLlmConcurrency: number;
+}
+
+interface DocumentPerformanceMetric {
+  name: string;
+  startedAt: number;
+  endedAt: number;
+  durationMs: number;
+  meta?: Record<string, string | number | boolean>;
+}
+
+interface DocumentGenerationDiagnostics {
+  strategy: DocumentGenerationStrategy;
+  metrics: DocumentPerformanceMetric[];
+  cache: { chapterHits: number; chapterMisses: number; chapterWrites: number; sectionHits: number; sectionMisses: number; sectionWrites: number; prunedItems: number; rejectedHits: number };
+  llm: { calls: number; failures: number; throttledWaits: number; maxActive: number; currentLimit: number; limitAdjustments: number };
+  evidence: { raw: number; used: number; filteredNoise: number; avgNoiseScore: number; avgFactDensity: number };
+  quality: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number; reusedChapterCount: number; reusedSectionCount: number };
+}
+
+const CHAPTER_DRAFT_CACHE = new Map<string, { value: DocumentDraftChapter; updatedAt: number; hits: number }>();
+const SECTION_DRAFT_CACHE = new Map<string, { value: string; updatedAt: number; hits: number }>();
 const DOCUMENT_LLM_PROVIDER_CACHE = new Map<string, ReturnType<typeof createProvider>>();
 const MAX_DOCUMENT_CACHE_ITEMS = 800;
+const DOCUMENT_CACHE_TTL_MS = Math.max(1, Number(process.env.DOCUMENT_CACHE_TTL_DAYS ?? 14)) * 24 * 60 * 60 * 1000;
+let activeDocumentLlmCalls = 0;
+let adaptiveDocumentLlmLimit = Math.max(1, Math.min(12, Number(process.env.DOCUMENT_LLM_CONCURRENCY ?? 6)));
+let documentLlmFailureStreak = 0;
+interface PendingDocumentLlmWaiter { resolve: () => void; reject: (error: Error) => void; active: boolean; onAbort?: () => void; signal?: AbortSignal }
+const pendingDocumentLlmResolvers: PendingDocumentLlmWaiter[] = [];
 
 function stableHash(value: unknown) {
   return createHash('sha1').update(JSON.stringify(value)).digest('hex');
@@ -837,8 +916,81 @@ function setLimitedCache<T>(cache: Map<string, T>, key: string, value: T) {
   cache.set(key, value);
 }
 
+function selectDocumentGenerationStrategy(input: { template: DocumentTemplate; targetWords: number; requirement?: string }): DocumentGenerationStrategy {
+  const chapterCount = input.template.chapters.length;
+  const text = `${input.template.name}\n${input.template.category || ''}\n${input.requirement || ''}`;
+  const strict = /投标|招标|施工|专项|安全|质量|验收|监理|合同|合规/u.test(text);
+  const longform = input.targetWords >= 30000 || chapterCount >= 10;
+  const fast = input.targetWords <= 6000 && chapterCount <= 4 && !strict;
+  const mode: DocumentGenerationStrategy['mode'] = strict ? 'strict' : longform ? 'longform' : fast ? 'fast' : 'balanced';
+  return {
+    mode,
+    enableChapterCache: !fast,
+    enableChapterReview: !fast,
+    enableGlobalReview: strict || longform,
+    enableTypedRepair: true,
+    maxChapterReviewConcurrency: mode === 'strict' ? 2 : mode === 'longform' ? 3 : 2,
+    targetLlmConcurrency: mode === 'strict' ? 4 : mode === 'longform' ? 6 : fast ? 3 : 5,
+  };
+}
+
+function createGenerationDiagnostics(strategy: DocumentGenerationStrategy): DocumentGenerationDiagnostics {
+  return {
+    strategy,
+    metrics: [],
+    cache: { chapterHits: 0, chapterMisses: 0, chapterWrites: 0, sectionHits: 0, sectionMisses: 0, sectionWrites: 0, prunedItems: 0, rejectedHits: 0 },
+    llm: { calls: 0, failures: 0, throttledWaits: 0, maxActive: 0, currentLimit: adaptiveDocumentLlmLimit, limitAdjustments: 0 },
+    evidence: { raw: 0, used: 0, filteredNoise: 0, avgNoiseScore: 0, avgFactDensity: 0 },
+    quality: { blockingCount: 0, importantCount: 0, minorCount: 0, repairedCount: 0, reusedChapterCount: 0, reusedSectionCount: 0 },
+  };
+}
+
+async function measureGenerationStep<T>(diagnostics: DocumentGenerationDiagnostics, name: string, run: () => Promise<T>, meta?: Record<string, string | number | boolean>) {
+  const startedAt = Date.now();
+  try {
+    return await run();
+  } finally {
+    const endedAt = Date.now();
+    diagnostics.metrics.push({ name, startedAt, endedAt, durationMs: endedAt - startedAt, meta });
+  }
+}
+
+function pruneChapterDraftCache(diagnostics?: DocumentGenerationDiagnostics) {
+  const now = Date.now();
+  let pruned = 0;
+  for (const [key, item] of CHAPTER_DRAFT_CACHE.entries()) {
+    if (now - item.updatedAt > DOCUMENT_CACHE_TTL_MS) {
+      CHAPTER_DRAFT_CACHE.delete(key);
+      pruned += 1;
+    }
+  }
+  while (CHAPTER_DRAFT_CACHE.size > MAX_DOCUMENT_CACHE_ITEMS) {
+    const oldest = [...CHAPTER_DRAFT_CACHE.entries()].sort((a, b) => (a[1].updatedAt + a[1].hits * 60000) - (b[1].updatedAt + b[1].hits * 60000))[0]?.[0];
+    if (!oldest) break;
+    CHAPTER_DRAFT_CACHE.delete(oldest);
+    pruned += 1;
+  }
+  if (diagnostics) diagnostics.cache.prunedItems += pruned;
+}
+
+function tuneDocumentLlmConcurrency(success: boolean, diagnostics?: DocumentGenerationDiagnostics) {
+  const configured = Math.max(1, Math.min(12, Number(process.env.DOCUMENT_LLM_CONCURRENCY ?? 6)));
+  const before = adaptiveDocumentLlmLimit;
+  if (!success) {
+    documentLlmFailureStreak += 1;
+    if (documentLlmFailureStreak >= 2) adaptiveDocumentLlmLimit = Math.max(1, adaptiveDocumentLlmLimit - 1);
+  } else {
+    documentLlmFailureStreak = 0;
+    if (pendingDocumentLlmResolvers.length === 0 && adaptiveDocumentLlmLimit < configured) adaptiveDocumentLlmLimit += 1;
+  }
+  if (diagnostics) {
+    diagnostics.llm.currentLimit = adaptiveDocumentLlmLimit;
+    if (before !== adaptiveDocumentLlmLimit) diagnostics.llm.limitAdjustments += 1;
+  }
+}
+
 function persistentCacheEnabled() {
-  return process.env.DOCUMENT_PERSISTENT_FACT_CACHE === '1';
+  return process.env.DOCUMENT_PERSISTENT_FACT_CACHE !== '0';
 }
 
 function persistentDocumentCachePath(projectRoot: string, kind: string, key: string) {
@@ -1049,6 +1201,105 @@ async function cachedChapterSearch(input: { manager: ReturnType<typeof getMultiP
   setLimitedCache(CHAPTER_SEARCH_CACHE, key, result.results);
   writePersistentJson(input.projectRoot, 'chapter-search', key, result.results);
   return result.results;
+}
+
+function chapterDraftCacheKey(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; requirement?: string; projectRoot: string; modelName?: string; targetWords: number; fileRolesHash: string }) {
+  return stableHash({
+    type: 'chapter-draft-v1',
+    projectRoot: input.projectRoot,
+    projectId: computeProjectId(input.projectRoot),
+    templateId: input.template.id,
+    chapterId: input.chapter.id,
+    chapterTitle: input.chapter.title,
+    requirement: input.requirement || '',
+    promptTexts: input.promptTexts,
+    modelName: input.modelName || '',
+    targetWords: input.targetWords,
+    fileRolesHash: input.fileRolesHash,
+    missingFacts: input.missingFacts,
+    evidence: input.evidence.map(item => ({ filePath: item.filePath, score: Math.round(item.score * 1000) / 1000, roleId: item.roleId, processingType: item.processingType, source: item.source, digest: stableHash(item.content.slice(0, 3000)) })),
+  });
+}
+
+function blockingChapterCacheIssues(issues: string[]) {
+  return issues.filter(issue => /正文缺少章节标题|缺少配置小节|正文篇幅明显低于目标|后台流程话术/u.test(issue));
+}
+
+function readChapterDraftCache(input: Parameters<typeof chapterDraftCacheKey>[0], diagnostics?: DocumentGenerationDiagnostics) {
+  pruneChapterDraftCache(diagnostics);
+  const key = chapterDraftCacheKey(input);
+  const memory = CHAPTER_DRAFT_CACHE.get(key);
+  const cached = memory?.value || readPersistentJson<DocumentDraftChapter>(input.projectRoot, 'chapter-draft', key);
+  if (!cached) {
+    if (diagnostics) diagnostics.cache.chapterMisses += 1;
+    return undefined;
+  }
+  if (cached.id !== input.chapter.id || !cached.content?.trim()) {
+    if (diagnostics) diagnostics.cache.rejectedHits += 1;
+    return undefined;
+  }
+  const targetIssues = lightweightChapterIssues({ chapter: input.chapter, content: cached.content, missingFacts: cached.missingFacts || input.missingFacts, targetWords: input.targetWords });
+  if (blockingChapterCacheIssues(targetIssues).length > 0) {
+    if (diagnostics) diagnostics.cache.rejectedHits += 1;
+    return undefined;
+  }
+  if (memory) memory.hits += 1;
+  setLimitedCache(CHAPTER_DRAFT_CACHE, key, { value: cached, updatedAt: Date.now(), hits: (memory?.hits || 0) + 1 });
+  if (diagnostics) diagnostics.cache.chapterHits += 1;
+  return cached;
+}
+
+function writeChapterDraftCache(input: Parameters<typeof chapterDraftCacheKey>[0], chapter: DocumentDraftChapter, diagnostics?: DocumentGenerationDiagnostics) {
+  const key = chapterDraftCacheKey(input);
+  setLimitedCache(CHAPTER_DRAFT_CACHE, key, { value: chapter, updatedAt: Date.now(), hits: 0 });
+  writePersistentJson(input.projectRoot, 'chapter-draft', key, chapter);
+  if (diagnostics) diagnostics.cache.chapterWrites += 1;
+  pruneChapterDraftCache(diagnostics);
+}
+
+function sectionDraftCacheKey(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; promptTexts: string; requirement?: string; projectRoot: string; modelName?: string; targetWords: number; fileRolesHash: string }) {
+  return stableHash({
+    type: 'section-draft-v1',
+    projectRoot: input.projectRoot,
+    projectId: computeProjectId(input.projectRoot),
+    templateId: input.template.id,
+    chapterId: input.chapter.id,
+    sectionTitle: input.sectionTitle,
+    requirement: input.requirement || '',
+    promptTexts: stableHash(input.promptTexts.slice(0, 12000)),
+    modelName: input.modelName || '',
+    targetWords: input.targetWords,
+    fileRolesHash: input.fileRolesHash,
+    evidence: input.evidence.map(item => ({ filePath: item.filePath, roleId: item.roleId, digest: stableHash(item.content.slice(0, 2000)) })),
+  });
+}
+
+function readSectionDraftCache(input: Parameters<typeof sectionDraftCacheKey>[0], diagnostics?: DocumentGenerationDiagnostics) {
+  const key = sectionDraftCacheKey(input);
+  const memory = SECTION_DRAFT_CACHE.get(key);
+  const cached = memory?.value || readPersistentJson<string>(input.projectRoot, 'section-draft', key);
+  if (!cached?.trim()) {
+    if (diagnostics) diagnostics.cache.sectionMisses += 1;
+    return undefined;
+  }
+  if (/后台流程话术|提示词|占位|TODO|待补充/iu.test(cached) || documentTextLength(cached) < Math.max(120, Math.floor(input.targetWords * 0.45))) {
+    if (diagnostics) diagnostics.cache.rejectedHits += 1;
+    return undefined;
+  }
+  setLimitedCache(SECTION_DRAFT_CACHE, key, { value: cached, updatedAt: Date.now(), hits: (memory?.hits || 0) + 1 });
+  if (diagnostics) {
+    diagnostics.cache.sectionHits += 1;
+    diagnostics.quality.reusedSectionCount += 1;
+  }
+  return cached;
+}
+
+function writeSectionDraftCache(input: Parameters<typeof sectionDraftCacheKey>[0], content: string, diagnostics?: DocumentGenerationDiagnostics) {
+  if (!content.trim() || /后台流程话术|提示词|占位|TODO|待补充/iu.test(content)) return;
+  const key = sectionDraftCacheKey(input);
+  setLimitedCache(SECTION_DRAFT_CACHE, key, { value: content, updatedAt: Date.now(), hits: 0 });
+  writePersistentJson(input.projectRoot, 'section-draft', key, content);
+  if (diagnostics) diagnostics.cache.sectionWrites += 1;
 }
 
 function buildRoleExecutionNodes(_template: DocumentTemplate, promptBindings: PromptBinding[], fileBindings: FileBinding[]): RoleExecutionNode[] {
@@ -1533,10 +1784,37 @@ function issuesForChapter(chapter: DocumentDraftChapter, issues: string[]) {
   return actionableIssues.filter(issue => issue.includes(chapter.title) || [...sectionHits].some(section => issue.includes(section)) || /图片|三级小节|目录|表格|量化|数值|单位|事实/u.test(issue) && /!\[|####|\*\*|\||按设计要求|按规范要求|m\s*[²2]|mm2|cm2|km2/u.test(text));
 }
 
-async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; signal?: AbortSignal }) {
+type QualityRepairType = 'missing_structure' | 'loop_closure' | 'fact_conflict' | 'terminology' | 'table_numeric' | 'placeholder' | 'generic';
+
+function classifyQualityRepairType(issues: string[]): QualityRepairType {
+  const text = issues.join('\n');
+  if (/缺少配置小节|二级小节少于|三级小节|目录|章节|结构/u.test(text)) return 'missing_structure';
+  if (/闭环|责任|检查|验收|整改|风险|安全|质量|进度/u.test(text)) return 'loop_closure';
+  if (/事实一致性|其他项目|项目编号|项目名称|冲突|污染|requiredFacts/u.test(text)) return 'fact_conflict';
+  if (/术语|名称不一致|前后不一致/u.test(text)) return 'terminology';
+  if (/表格|量化|数值|单位|清单|图纸|参数/u.test(text)) return 'table_numeric';
+  if (/占位|空泛|后台流程|提示词|泄露|图片/u.test(text)) return 'placeholder';
+  return 'generic';
+}
+
+function repairTypeInstruction(type: QualityRepairType) {
+  switch (type) {
+    case 'missing_structure': return '修复重点：补齐缺失小节、修正标题层级和目录相关结构；只在相关位置追加必要正文，不重排一级章节。';
+    case 'loop_closure': return '修复重点：补齐对象、责任、措施、检查、验收、整改和记录闭环；不得编造具体数据。';
+    case 'fact_conflict': return '修复重点：删除或改正与证据冲突的项目名称、编号、范围、参数；不确定内容改为基于资料的表述，不得新增无来源事实。';
+    case 'terminology': return '修复重点：统一同一对象的术语、简称和称谓，保持前后一致，不改变事实含义。';
+    case 'table_numeric': return '修复重点：补足表格前后说明、单位、参数来源和量化表达；资料不足时不得编造精确数值。';
+    case 'placeholder': return '修复重点：移除占位话术、后台流程话术、提示词痕迹和不允许的图片语法，替换为正式业务表述。';
+    default: return '修复重点：仅针对列出问题做最小必要修改，避免全文重写。';
+  }
+}
+
+async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; signal?: AbortSignal }) {
   throwIfAborted(input.signal);
+  const repairType = input.repairType || classifyQualityRepairType(input.issues);
   const repaired = await callDocumentLlm([
     '你是章节局部修复专家。只修复给定章节中明确存在的问题，不得改写其他章节，不得压缩正文，不得改变用户/模板结构。',
+    repairTypeInstruction(repairType),
     FORMAL_WRITING_RULES,
     input.forbidDrawingImages ? '图片/图纸类资料只作为文本事实来源，禁止插入图片或 Markdown 图片语法。' : '',
     '必须保留本章节标题和已有小节；如确需补充，只能在相关小节内追加或替换有问题的局部段落。',
@@ -1556,27 +1834,43 @@ async function repairChapterByQuality(input: { template: DocumentTemplate; chapt
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(repaired, input.forbidDrawingImages));
 }
 
-async function repairMarkdownByQuality(input: { markdown: string; template: DocumentTemplate; chapters: DocumentDraftChapter[]; promptTexts: string; requirement?: string; issues: string[]; forbidDrawingImages: boolean; signal?: AbortSignal }) {
-  const repairableIssues = input.issues.filter(repairableQualityIssue);
+async function repairMarkdownByQuality(input: { markdown: string; template: DocumentTemplate; chapters: DocumentDraftChapter[]; promptTexts: string; requirement?: string; issues: string[]; forbidDrawingImages: boolean; strategy?: DocumentGenerationStrategy; signal?: AbortSignal }) {
+  const repairableIssues = input.issues.filter(issue => classifyQualitySeverity(issue) !== 'minor').filter(repairableQualityIssue);
   if (repairableIssues.length === 0) return { markdown: input.markdown, chapters: input.chapters, stage: undefined as DocumentExecutionStage | undefined };
-  let repairedCount = 0;
-  const repairedChapters: DocumentDraftChapter[] = [];
-  let repairAttempts = 0;
-  const maxRepairAttempts = 5;
-  for (const chapter of input.chapters) {
-    throwIfAborted(input.signal);
-    const chapterIssues = issuesForChapter(chapter, repairableIssues);
-    if (chapterIssues.length === 0 || repairAttempts >= maxRepairAttempts) {
-      repairedChapters.push(chapter);
-      continue;
-    }
-    repairAttempts += 1;
-    const content = await repairChapterByQuality({ template: input.template, chapter, issues: chapterIssues.slice(0, 6), promptTexts: input.promptTexts, requirement: input.requirement, forbidDrawingImages: input.forbidDrawingImages, signal: input.signal });
-    if (content !== chapter.content) repairedCount += 1;
-    repairedChapters.push({ ...chapter, content });
+  const maxRepairAttempts = Math.max(0, Math.min(5, Number(process.env.DOCUMENT_MAX_REPAIR_CHAPTERS ?? 2)));
+  const maxIssuesPerChapter = Math.max(1, Math.min(6, Number(process.env.DOCUMENT_MAX_REPAIR_ISSUES_PER_CHAPTER ?? 3)));
+  const candidates = input.chapters
+    .map(chapter => ({ chapter, issues: issuesForChapter(chapter, repairableIssues).slice(0, maxIssuesPerChapter) }))
+    .filter(item => item.issues.length > 0)
+    .slice(0, maxRepairAttempts);
+  if (candidates.length === 0) {
+    return {
+      markdown: input.markdown,
+      chapters: input.chapters,
+      stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'success' as const, message: `已完成质量检查，未定位到可安全局部修复的阻断问题：${repairableIssues.slice(0, 5).join('；')}` },
+    };
   }
+  const concurrency = Math.max(1, Math.min(3, Number(process.env.DOCUMENT_REPAIR_CONCURRENCY ?? 2)));
+  const repairedById = new Map<string, string>();
+  for (let offset = 0; offset < candidates.length; offset += concurrency) {
+    throwIfAborted(input.signal);
+    const batch = candidates.slice(offset, offset + concurrency);
+    const results = await Promise.all(batch.map(async item => {
+      const repairType = input.strategy?.enableTypedRepair === false ? 'generic' : classifyQualityRepairType(item.issues);
+      const content = await repairChapterByQuality({ template: input.template, chapter: item.chapter, issues: item.issues, promptTexts: input.promptTexts, requirement: input.requirement, forbidDrawingImages: input.forbidDrawingImages, repairType, signal: input.signal });
+      return { id: item.chapter.id, content, repairType };
+    }));
+    for (const result of results) repairedById.set(result.id, result.content);
+  }
+  let repairedCount = 0;
+  const repairedChapters = input.chapters.map(chapter => {
+    const content = repairedById.get(chapter.id);
+    if (!content || content === chapter.content) return chapter;
+    repairedCount += 1;
+    return { ...chapter, content };
+  });
   const message = repairedCount > 0
-    ? `已精准修复 ${repairedCount} 个存在阻断/结构/事实问题的章节，未进行全文重写`
+    ? `已并发精准修复 ${repairedCount} 个存在阻断/结构/事实问题的章节，未进行全文重写`
     : `已完成质量检查，未定位到可安全局部修复的阻断问题：${repairableIssues.slice(0, 5).join('；')}`;
   return {
     markdown: input.markdown,
@@ -1746,8 +2040,52 @@ function getActiveModelWithProvider() {
   return { model: selected, provider: providerConfig };
 }
 
+function wakeNextDocumentLlmWaiter() {
+  while (pendingDocumentLlmResolvers.length > 0) {
+    const waiter = pendingDocumentLlmResolvers.shift();
+    if (!waiter?.active) continue;
+    waiter.active = false;
+    waiter.signal?.removeEventListener('abort', waiter.onAbort || (() => undefined));
+    waiter.resolve();
+    break;
+  }
+}
+
+async function withDocumentLlmSlot<T>(run: () => Promise<T>, signal?: AbortSignal, diagnostics?: DocumentGenerationDiagnostics) {
+  while (activeDocumentLlmCalls >= Math.max(1, Math.min(12, adaptiveDocumentLlmLimit))) {
+    if (diagnostics) diagnostics.llm.throttledWaits += 1;
+    if (signal?.aborted) throw new Error('用户中止');
+    await new Promise<void>((resolve, reject) => {
+      const waiter: PendingDocumentLlmWaiter = { resolve, reject, active: true, signal };
+      waiter.onAbort = () => {
+        if (!waiter.active) return;
+        waiter.active = false;
+        const index = pendingDocumentLlmResolvers.indexOf(waiter);
+        if (index >= 0) pendingDocumentLlmResolvers.splice(index, 1);
+        reject(new Error('用户中止'));
+      };
+      signal?.addEventListener('abort', waiter.onAbort, { once: true });
+      pendingDocumentLlmResolvers.push(waiter);
+    });
+  }
+  activeDocumentLlmCalls += 1;
+  if (diagnostics) diagnostics.llm.maxActive = Math.max(diagnostics.llm.maxActive, activeDocumentLlmCalls);
+  try {
+    const result = await run();
+    tuneDocumentLlmConcurrency(true, diagnostics);
+    return result;
+  } catch (error) {
+    tuneDocumentLlmConcurrency(false, diagnostics);
+    throw error;
+  } finally {
+    activeDocumentLlmCalls = Math.max(0, activeDocumentLlmCalls - 1);
+    wakeNextDocumentLlmWaiter();
+  }
+}
+
 /** 调用底层 LLM 进行文档生成，支持文本模式和 JSON 模式 */
-async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal } = {}): Promise<string | undefined> {
+async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {}): Promise<string | undefined> {
+  if (options.diagnostics) options.diagnostics.llm.calls += 1;
   try {
     const active = getActiveModelWithProvider();
     if (!active) return undefined;
@@ -1758,12 +2096,35 @@ async function callDocumentLlm(system: string, prompt: string, jsonOnly = false,
       provider = createProvider(providerFactoryName(selected.provider, providerConfig), { baseUrl: providerConfig.baseUrl, apiKey: providerConfig.apiKey, modelName: selected.name, directEndpoint: providerConfig.directEndpoint });
       DOCUMENT_LLM_PROVIDER_CACHE.set(providerKey, provider);
     }
-    const response = await provider.chat([
-      { role: 'system', content: jsonOnly ? `${system}\n只返回 JSON，不要返回 markdown。` : system },
-      { role: 'user', content: prompt },
-    ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: options.maxTokens, signal: options.signal });
+    const hardTimeoutMs = Math.max(30_000, Number(process.env.DOCUMENT_LLM_CALL_TIMEOUT_MS ?? 300_000));
+    const response = await withDocumentLlmSlot(() => {
+      let timer: NodeJS.Timeout | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('LLM 调用超时')), hardTimeoutMs);
+      });
+      let abortListener: (() => void) | undefined;
+      const raceItems: Array<Promise<Awaited<ReturnType<typeof provider.chat>>>> = [
+        provider.chat([
+          { role: 'system', content: jsonOnly ? `${system}\n只返回 JSON，不要返回 markdown。` : system },
+          { role: 'user', content: prompt },
+        ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: options.maxTokens, signal: options.signal }),
+        timeoutPromise,
+      ];
+      if (options.signal) {
+        raceItems.push(new Promise<never>((_, reject) => {
+          if (options.signal?.aborted) { reject(new Error('用户中止')); return; }
+          abortListener = () => reject(new Error('用户中止'));
+          options.signal?.addEventListener('abort', abortListener, { once: true });
+        }));
+      }
+      return Promise.race(raceItems).finally(() => {
+        if (timer) clearTimeout(timer);
+        if (abortListener) options.signal?.removeEventListener('abort', abortListener);
+      });
+    }, options.signal, options.diagnostics);
     return response.content.trim();
   } catch (error) {
+    if (options.diagnostics) options.diagnostics.llm.failures += 1;
     if (options.signal?.aborted) throw new Error('用户中止', { cause: error });
     return undefined;
   }
@@ -1771,22 +2132,30 @@ async function callDocumentLlm(system: string, prompt: string, jsonOnly = false,
 
 async function callWithTimeout<T>(run: (signal: AbortSignal) => Promise<T>, timeoutMs: number, parentSignal?: AbortSignal): Promise<T | null> {
   const controller = new AbortController();
-  let timedOut = false;
-  const abort = () => controller.abort();
   if (parentSignal?.aborted) throw new Error('用户中止');
+  const abort = () => controller.abort();
   parentSignal?.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  let timer: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(null);
+    }, timeoutMs);
+  });
+  const raceItems: Array<Promise<T | null>> = [Promise.resolve().then(() => run(controller.signal)), timeoutPromise];
+  if (parentSignal) {
+    raceItems.push(new Promise<never>((_, reject) => {
+      controller.signal.addEventListener('abort', () => {
+        if (parentSignal.aborted) reject(new Error('用户中止'));
+      }, { once: true });
+    }));
+  }
   try {
-    const result = await run(controller.signal);
+    const result = await Promise.race(raceItems);
     if (parentSignal?.aborted) throw new Error('用户中止');
-    if (controller.signal.aborted && timedOut) return null;
     return result;
-  } catch (error) {
-    if (parentSignal?.aborted) throw new Error('用户中止', { cause: error });
-    if (controller.signal.aborted && timedOut) return null;
-    throw error;
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     parentSignal?.removeEventListener('abort', abort);
   }
 }
@@ -2008,6 +2377,23 @@ function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFact[] = 
 
 function isExportBlockingIssue(issue: ValidationIssue) {
   return /用户要求|出现禁用文本|资料未提供|导出|临时|无效|占位|示例|样例|生成未完成|低于目标页数|低于目标字数|文档预算未达成|正文篇幅低于目标|兜底|章节生成失败|大模型未能|重新生成|缺少配置小节|缺少必要的正式表格|正文缺少章节标题|其他项目|项目编号|项目名称|事实一致性冲突|工程专项资料角色缺失|章节缺少证据|文档质量基准评分未达标/iu.test(issue.message);
+}
+
+type QualitySeverity = 'blocking' | 'important' | 'minor';
+
+function classifyQualitySeverity(issue: string | ValidationIssue): QualitySeverity {
+  const message = typeof issue === 'string' ? issue : issue.message;
+  const level = typeof issue === 'string' ? undefined : issue.level;
+  if (level === 'error' || /阻断|缺少配置小节|缺少必要的正式表格|正文缺少章节标题|正文篇幅低于目标|低于目标字数|低于目标页数|章节生成失败|兜底|事实一致性冲突|其他项目|项目编号|项目名称|后台流程|提示词|资料未提供|占位|文档质量基准评分未达标/iu.test(message)) return 'blocking';
+  if (/量化|数值|单位|清单|图纸|事实|requiredFacts|专业闭环|安全|质量|工期|表格|三级小节|目录|术语|不一致/iu.test(message)) return 'important';
+  return 'minor';
+}
+
+function qualitySeveritySummary(issues: Array<string | ValidationIssue>) {
+  return issues.reduce((summary, issue) => {
+    summary[classifyQualitySeverity(issue)] += 1;
+    return summary;
+  }, { blocking: 0, important: 0, minor: 0 });
 }
 
 function estimateDocumentPages(markdown: string, settings?: DocumentGenerationSettings | DocumentExportSettings) {
@@ -2376,6 +2762,7 @@ async function buildLlmChapterContent(template: DocumentTemplate, chapter: Docum
     : (promptIntent.explicitStructure || promptIntent.explicitSections || promptIntent.lengthLimit || promptIntent.wantsConcise)
       ? '本章未预设二级小节；请优先遵循用户提示词和模板结构组织内容，不得因系统增强自行扩展小节。'
       : '本章未预设二级小节；必须根据章节主题、项目资料和专业写作需要生成 3-6 个正式二级小节，不得新增、删除或重排一级章节。';
+  const sectionBudgetInstruction = buildSectionBudgetInstruction(chapter, options.targetWords || options.minWords || 0);
   const system = [
     '你是专业项目文档生成专家，必须严格使用已提供的内部资料生成正式文档章节。',
     FORMAL_WRITING_RULES,
@@ -2391,6 +2778,7 @@ async function buildLlmChapterContent(template: DocumentTemplate, chapter: Docum
     `章节标题：${chapter.title}`,
     `章节目的：${chapter.purpose}`,
     sectionInstruction,
+    sectionBudgetInstruction,
     requirement ? `用户要求：${requirement}` : '',
     projectContext ? `项目上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${projectContext}` : '',
     options.projectBasicFactContext || '',
@@ -2435,6 +2823,15 @@ function sectionTargets(chapter: DocumentTemplateChapter, targetWords: number) {
   if (sections.length === 0) return [];
   const base = Math.max(700, Math.floor(targetWords / sections.length));
   return sections.map(section => ({ title: section, targetWords: base }));
+}
+
+function buildSectionBudgetInstruction(chapter: DocumentTemplateChapter, targetWords: number) {
+  const targets = sectionTargets(chapter, targetWords);
+  if (targets.length === 0) return '';
+  return [
+    '本章小节篇幅计划（首轮生成应尽量一次达成，避免后续补写）：',
+    ...targets.map(item => `- ${item.title}：约 ${item.targetWords} 字，至少达到 ${Math.floor(item.targetWords * 0.8)} 字，并覆盖对象/范围、依据/关键事实、处理要求、控制措施和结果闭环。`),
+  ].join('\n');
 }
 
 function tokenizeForRelevance(text: string) {
@@ -2482,15 +2879,47 @@ async function buildLlmSectionContent(input: { template: DocumentTemplate; chapt
   return normalized.replace(/^##\s+.*\n+/u, '').trim();
 }
 
-async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; forbidDrawingImages: boolean; factCoverageContext?: string; signal?: AbortSignal }) {
+async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; fileRolesHash?: string; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   const targets = sectionTargets(input.chapter, input.targetWords);
   if (targets.length < 2 || input.targetWords < 6000) return undefined;
   const concurrency = Math.max(1, Math.min(4, Number(process.env.DOCUMENT_SECTION_CONCURRENCY ?? 4)));
   const results: Array<string | undefined> = new Array(targets.length);
+  const runSection = async (item: { title: string; targetWords: number }, compact = false) => {
+    const cacheInput = input.projectRoot && input.fileRolesHash ? { template: input.template, chapter: input.chapter, sectionTitle: item.title, evidence: compact ? input.evidence.slice(0, 80) : input.evidence, promptTexts: input.promptTexts, requirement: input.requirement, projectRoot: input.projectRoot, modelName: input.modelName, targetWords: item.targetWords, fileRolesHash: input.fileRolesHash } : undefined;
+    if (!compact && cacheInput) {
+      const cached = readSectionDraftCache(cacheInput, input.diagnostics);
+      if (cached) return cached;
+    }
+    try {
+      const content = await buildLlmSectionContent({
+        ...input,
+        evidence: compact ? input.evidence.slice(0, 80) : input.evidence,
+        projectContext: compact ? input.projectContext.slice(0, 8000) : input.projectContext,
+        roleContext: compact ? input.roleContext.slice(0, 12000) : input.roleContext,
+        factCoverageContext: compact ? input.factCoverageContext?.slice(0, 8000) : input.factCoverageContext,
+        sectionTitle: item.title,
+        targetWords: item.targetWords,
+      });
+      if (content && cacheInput) writeSectionDraftCache(cacheInput, content, input.diagnostics);
+      return content;
+    } catch (error) {
+      console.warn(`[document-workflow] 小节生成失败：${input.chapter.title} / ${item.title}`, error);
+      return undefined;
+    }
+  };
   for (let offset = 0; offset < targets.length; offset += concurrency) {
+    throwIfAborted(input.signal);
     const batch = targets.slice(offset, offset + concurrency);
-    const batchResults = await Promise.all(batch.map(item => buildLlmSectionContent({ ...input, sectionTitle: item.title, targetWords: item.targetWords })));
+    const batchResults = await Promise.all(batch.map(item => runSection(item)));
     batchResults.forEach((content, index) => { results[offset + index] = content; });
+  }
+  const retryLimit = Math.max(0, Math.min(targets.length, Number(process.env.DOCUMENT_SECTION_RETRY_LIMIT ?? 4)));
+  const missingIndexes = results.map((content, index) => content ? -1 : index).filter(index => index >= 0).slice(0, retryLimit);
+  for (let offset = 0; offset < missingIndexes.length; offset += concurrency) {
+    throwIfAborted(input.signal);
+    const batchIndexes = missingIndexes.slice(offset, offset + concurrency);
+    const batchResults = await Promise.all(batchIndexes.map(index => runSection(targets[index], true)));
+    batchResults.forEach((content, index) => { if (content) results[batchIndexes[index]] = content; });
   }
   if (results.some(item => !item)) return undefined;
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(`## ${input.chapter.title}\n\n${results.filter(Boolean).join('\n\n')}`, input.forbidDrawingImages));
@@ -2520,7 +2949,7 @@ function acceptExpandedChapter(previous: string, next: string, chapterTitle: str
   const titleToken = displayChapterTitle(chapterTitle).slice(0, 6);
   const remaining = Math.max(0, targetChars - beforeLength);
   const minimumGrowth = Math.min(300, Math.max(80, Math.floor(remaining * 0.2)));
-  if (afterLength < beforeLength + minimumGrowth && afterLength < Math.floor(targetChars * 0.92)) return false;
+  if (remaining > 0 && afterLength < beforeLength + minimumGrowth) return false;
   if (afterLength < beforeLength * 0.98) return false;
   if (titleToken && !next.includes(titleToken)) return false;
   return true;
@@ -2555,11 +2984,30 @@ async function expandChapterContent(input: { template: DocumentTemplate; chapter
   return acceptExpandedChapter(input.currentContent, normalized, input.chapter.title, input.targetChars) ? normalized : input.currentContent;
 }
 
+function mergeSectionSupplementBody(currentBody: string, replacementBody: string) {
+  const current = currentBody.trim();
+  const replacement = replacementBody.trim();
+  if (!replacement) return '';
+  if (!current) return replacement;
+  if (current.includes(replacement)) return '';
+  if (replacement.includes(current)) return replacement.slice(replacement.indexOf(current) + current.length).trim();
+  const currentTail = current.slice(-240);
+  const overlapAt = currentTail.length >= 80 ? replacement.indexOf(currentTail) : -1;
+  if (overlapAt >= 0) return replacement.slice(overlapAt + currentTail.length).trim();
+  return replacement;
+}
+
 function replaceSectionContent(markdown: string, sectionTitle: string, replacement: string) {
   const escaped = sectionTitle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   const pattern = new RegExp(`(^###\\s+${escaped}\\s*\\n)([\\s\\S]*?)(?=^###\\s+|$)`, 'mu');
-  if (pattern.test(markdown)) return markdown.replace(pattern, replacement.trim() + '\n\n');
-  return `${markdown.trim()}\n\n${replacement.trim()}`;
+  const normalizedReplacement = replacement.trim().replace(/^###\s+[^\n]+\n+/u, '').trim();
+  if (pattern.test(markdown)) {
+    return markdown.replace(pattern, (_match, heading: string, body: string) => {
+      const supplement = mergeSectionSupplementBody(body, normalizedReplacement);
+      return supplement ? `${heading}${body.trim()}\n\n${supplement}\n\n` : `${heading}${body.trim()}\n\n`;
+    });
+  }
+  return normalizedReplacement ? `${markdown.trim()}\n\n### ${sectionTitle}\n\n${normalizedReplacement}` : markdown;
 }
 
 async function supplementShortSections(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; content: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; forbidDrawingImages: boolean; factCoverageContext?: string; signal?: AbortSignal }) {
@@ -2587,9 +3035,9 @@ async function supplementShortSections(input: { template: DocumentTemplate; chap
 
 async function expandChapterToTarget(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; content: string; evidence: DocumentEvidence[]; promptTexts: string; requirement?: string; roleContext: string; targetChars: number; forbidDrawingImages: boolean; maxTokens?: number; signal?: AbortSignal }) {
   let content = input.content;
-  const maxRounds = expansionRoundsForDeficit(input.targetChars - documentTextLength(content));
   let rounds = 0;
-  for (; rounds < maxRounds && documentTextLength(content) < Math.floor(input.targetChars * 0.92); rounds += 1) {
+  const maxRounds = expansionRoundsForDeficit(input.targetChars - documentTextLength(content));
+  for (; rounds < maxRounds && documentTextLength(content) < input.targetChars; rounds += 1) {
     throwIfAborted(input.signal);
     const before = content;
     const expanded = await callWithTimeout(
@@ -2626,6 +3074,8 @@ async function expandDocumentToBudget(input: { template: DocumentTemplate; chapt
   let chapters = input.chapters;
   let totalChars = documentTextLength(chapters.map(chapter => chapter.content).join('\n\n'));
   const maxDocumentRounds = Math.min(2, expansionRoundsForDeficit(input.budget.minChars - totalChars));
+  const concurrency = Math.max(1, Math.min(4, Number(process.env.DOCUMENT_BUDGET_EXPAND_CONCURRENCY ?? 2)));
+  const lowGrowthChapterIds = new Set<string>();
   for (let round = 0; round < maxDocumentRounds && totalChars < input.budget.minChars; round += 1) {
     throwIfAborted(input.signal);
     const roundStartChars = totalChars;
@@ -2635,18 +3085,99 @@ async function expandDocumentToBudget(input: { template: DocumentTemplate; chapt
         const current = documentTextLength(chapter.content);
         return { chapter, target, current, deficit: target - current };
       })
-      .filter(item => item.deficit > 500)
+      .filter(item => item.deficit > 500 && !lowGrowthChapterIds.has(item.chapter.id))
       .sort((a, b) => b.deficit - a.deficit);
     if (deficits.length === 0) break;
-    for (const item of deficits) {
-      const expanded = await expandChapterToTarget({ template: input.template, chapter: { id: item.chapter.id, title: item.chapter.title, purpose: item.chapter.title, queries: [], requiredFacts: [], sections: item.chapter.sections }, content: item.chapter.content, evidence: item.chapter.evidence, promptTexts: input.promptTexts, requirement: input.requirement, roleContext: '', targetChars: item.target, forbidDrawingImages: input.forbidDrawingImages, maxTokens: outputTokensForChapter(item.current, item.target), signal: input.signal });
-      chapters = chapters.map(chapter => chapter.id === item.chapter.id ? { ...chapter, content: expanded.content } : chapter);
+    for (let offset = 0; offset < deficits.length && totalChars < input.budget.minChars; offset += concurrency) {
+      throwIfAborted(input.signal);
+      const batch = deficits.slice(offset, offset + concurrency);
+      const results = await Promise.all(batch.map(async item => {
+        const expanded = await expandChapterToTarget({ template: input.template, chapter: { id: item.chapter.id, title: item.chapter.title, purpose: item.chapter.title, queries: [], requiredFacts: [], sections: item.chapter.sections }, content: item.chapter.content, evidence: item.chapter.evidence, promptTexts: input.promptTexts, requirement: input.requirement, roleContext: '', targetChars: item.target, forbidDrawingImages: input.forbidDrawingImages, maxTokens: outputTokensForChapter(item.current, item.target), signal: input.signal });
+        return { id: item.chapter.id, beforeChars: item.current, content: expanded.content };
+      }));
+      for (const result of results) {
+        const afterChars = documentTextLength(result.content);
+        if (afterChars <= result.beforeChars + 300) lowGrowthChapterIds.add(result.id);
+        chapters = chapters.map(chapter => chapter.id === result.id ? { ...chapter, content: result.content } : chapter);
+      }
       totalChars = documentTextLength(chapters.map(chapter => chapter.content).join('\n\n'));
-      if (totalChars >= input.budget.minChars) break;
     }
-    if (totalChars <= roundStartChars + 200) break;
+    if (totalChars <= roundStartChars + 300) break;
   }
   return chapters;
+}
+
+interface ChapterReviewSummary {
+  chapterId: string;
+  title: string;
+  status: 'pass' | 'warn' | 'fail';
+  issues: string[];
+  suggestions: string[];
+  chars: number;
+}
+
+async function reviewChapterSummaries(input: { template: DocumentTemplate; chapters: DocumentDraftChapter[]; budget: DocumentBudget; promptTexts: string; requirement?: string; strategy: DocumentGenerationStrategy; diagnostics: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
+  const startedAt = Date.now();
+  const concurrency = Math.max(1, Math.min(input.strategy.maxChapterReviewConcurrency, Number(process.env.DOCUMENT_CHAPTER_REVIEW_CONCURRENCY ?? input.strategy.maxChapterReviewConcurrency)));
+  const summaries: ChapterReviewSummary[] = new Array(input.chapters.length);
+  for (let offset = 0; offset < input.chapters.length; offset += concurrency) {
+    throwIfAborted(input.signal);
+    const batch = input.chapters.slice(offset, offset + concurrency);
+    const results = await Promise.all(batch.map(async chapter => {
+      const target = input.budget.chapterTargets.get(chapter.id) || 1200;
+      const localIssues = lightweightChapterIssues({ chapter: input.template.chapters.find(item => item.id === chapter.id) || { id: chapter.id, title: chapter.title, purpose: '', queries: [], requiredFacts: [], sections: chapter.sections }, content: chapter.content, missingFacts: chapter.missingFacts, targetWords: target });
+      const reviewed = await callDocumentLlm([
+        '你是章节质量审查员。只输出 JSON，不重写正文。',
+        '检查维度：章节是否围绕标题、必需事实是否覆盖、是否有占位符/提示词泄露、是否存在重复标题、是否缺少专业闭环、是否明显低于目标深度。',
+        input.promptTexts,
+      ].filter(Boolean).join('\n\n'), [
+        `章节：${chapter.title}`,
+        `目标深度：约 ${target} 字；当前 ${documentTextLength(chapter.content)} 字。`,
+        input.requirement ? `用户要求：${input.requirement}` : '',
+        chapter.missingFacts.length ? `未覆盖事实：${chapter.missingFacts.join('、')}` : '',
+        localIssues.length ? `本地检查问题：${localIssues.join('；')}` : '',
+        '章节正文：',
+        chapter.content.slice(0, 18000),
+        '请返回 JSON：{"status":"pass|warn|fail","issues":["..."],"suggestions":["..."]}',
+      ].filter(Boolean).join('\n'), true, { maxTokens: 1200, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
+      let parsed: { status?: string; issues?: string[]; suggestions?: string[] } | undefined;
+      try { parsed = reviewed ? JSON.parse(reviewed.replace(/^```json\s*/u, '').replace(/^```\s*/u, '').replace(/```$/u, '').trim()) as typeof parsed : undefined; } catch { parsed = undefined; }
+      const issues = [...localIssues, ...(Array.isArray(parsed?.issues) ? parsed!.issues!.filter(Boolean).slice(0, 6) : [])];
+      const status = parsed?.status === 'fail' || localIssues.some(issue => /缺失|占位|泄露|不足/u.test(issue)) ? 'fail' : parsed?.status === 'warn' || issues.length > 0 ? 'warn' : 'pass';
+      return { chapterId: chapter.id, title: chapter.title, status, issues: [...new Set(issues)].slice(0, 8), suggestions: Array.isArray(parsed?.suggestions) ? parsed!.suggestions!.filter(Boolean).slice(0, 5) : [], chars: documentTextLength(chapter.content) } as ChapterReviewSummary;
+    }));
+    results.forEach((summary, index) => { summaries[offset + index] = summary; });
+  }
+  const failCount = summaries.filter(item => item.status === 'fail').length;
+  const warnCount = summaries.filter(item => item.status === 'warn').length;
+  return {
+    summaries,
+    stage: displayStage({ type: 'llm_review' as const, roleId: 'chapter-review', status: failCount > 0 ? 'fallback' : 'success', message: elapsedMessage(`章节级质量审查完成：通过 ${summaries.length - failCount - warnCount} 章，警告 ${warnCount} 章，失败 ${failCount} 章`, startedAt) }, { subtitle: '章节级质量审查' }),
+  };
+}
+
+async function reviewGlobalConsistency(input: { template: DocumentTemplate; chapters: DocumentDraftChapter[]; chapterReviews: ChapterReviewSummary[]; promptTexts: string; requirement?: string; projectContext?: string; diagnostics: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
+  const startedAt = Date.now();
+  const outline = input.chapters.map(chapter => `- ${chapter.title}：${documentTextLength(chapter.content)} 字；审查=${input.chapterReviews.find(item => item.chapterId === chapter.id)?.status || 'unknown'}；问题=${(input.chapterReviews.find(item => item.chapterId === chapter.id)?.issues || []).slice(0, 3).join('；') || '无'}`).join('\n');
+  const reviewed = await callDocumentLlm([
+    '你是长文档全局一致性审查专家。只检查跨章节问题，不重写正文。',
+    '重点检查：章节之间项目信息冲突、术语不一致、重复堆砌、目录层级异常、风险/质量/安全/进度闭环缺失、前后矛盾。',
+    input.promptTexts,
+  ].filter(Boolean).join('\n\n'), [
+    `模板：${input.template.name}`,
+    input.requirement ? `用户要求：${input.requirement}` : '',
+    input.projectContext ? `项目上下文摘要：\n${input.projectContext.slice(0, 8000)}` : '',
+    '章节审查摘要：',
+    outline,
+    '章节摘录：',
+    input.chapters.map(chapter => `## ${chapter.title}\n${chapter.content.slice(0, 2500)}\n...\n${chapter.content.slice(-1200)}`).join('\n\n---\n\n'),
+    '请只返回跨章节问题清单和建议，不要返回全文。',
+  ].filter(Boolean).join('\n'), false, { maxTokens: 1800, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
+  const issues = (reviewed || '').split('\n').map(line => line.replace(/^[-*\d.、\s]+/u, '').trim()).filter(line => line.length > 6).slice(0, 10);
+  return {
+    issues,
+    stage: displayStage({ type: 'llm_review' as const, roleId: 'global-consistency-review', status: issues.length > 0 ? 'fallback' : 'success', message: elapsedMessage(issues.length > 0 ? `全局一致性审查发现 ${issues.length} 个需关注问题` : '全局一致性审查未发现明显跨章节冲突', startedAt) }, { subtitle: '全局一致性审查' }),
+  };
 }
 
 /** 对生成的 Markdown 进行非重写式审查，只产出质量状态，不接管正文。 */
@@ -2985,7 +3516,7 @@ function elapsedMessage(message: string, startedAt: number) {
 }
 
 /** 文档生成主入口：依次执行角色绑定、知识检索、文件理解、事实抽取、章节生成、封面生成、LLM 审查和导出校验，返回完整文档草稿 */
-export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; signal?: AbortSignal; onProgress?: (stages: DocumentExecutionStage[]) => void }): Promise<GeneratedDocumentDraft> {
+export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; resumeChapters?: DocumentDraftChapter[]; signal?: AbortSignal; onProgress?: (stages: DocumentExecutionStage[]) => void }): Promise<GeneratedDocumentDraft> {
   throwIfAborted(input.signal);
   const baseTemplate = getDocumentTemplate(input.templateId);
   if (!baseTemplate) throw new Error('Document template not found');
@@ -3021,7 +3552,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const readiness = evaluateDocumentReadiness({ template, spec: documentSpec, summary: projectMaterialSummary, resolvedRoles: resolvedMaterialRoles });
   if (!readiness.ready) throw new Error(`生成准备度不足：${readiness.blockingIssues.join('；')}`);
   const backgroundControlPrompt = [projectMaterialPrompt(projectMaterialSummary), autoSpecPrompt(documentSpec, autoSpec.sourceHash), readinessPrompt(readiness)].filter(Boolean).join('\n\n');
-  const promptTexts = [backgroundControlPrompt, promptTextsForExecution(promptBindings, ['chapter_generation', 'formatting', 'reference'])].filter(Boolean).join('\n\n');
+  const promptTexts = [backgroundControlPrompt, `模板配置章节结构：\n${configuredStructurePrompt(template)}`, promptTextsForExecution(promptBindings, ['chapter_generation', 'formatting', 'reference'])].filter(Boolean).join('\n\n');
   const promptIntent = analyzePromptIntent([promptTexts, input.requirement || ''].filter(Boolean).join('\n\n'));
   const factExtractionPromptTexts = [backgroundControlPrompt, promptTextsForExecution(promptBindings, ['fact_extraction', 'reference'])].filter(Boolean).join('\n\n');
   const reviewPromptTexts = [backgroundControlPrompt, promptTextsForExecution(promptBindings, ['validation', 'llm_review', 'formatting', 'reference'])].filter(Boolean).join('\n\n');
@@ -3090,9 +3621,17 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const effectiveChapters = effectiveTemplateChapters(template, documentSpec, { preserveExplicitOutline: hasExplicitOutline });
   const contextQuery = [template.name, template.outputTitle, input.requirement, ...effectiveChapters.flatMap(chapter => [chapter.title, chapter.purpose])].filter(Boolean).join(' ');
   const projectContextEntries = recallDocumentContexts(contextQuery, 8, projectRoot);
-  const projectContext = formatContextEntries(projectContextEntries);
   const projectBasicFacts = extractProjectBasicFacts(roleArtifacts.flatMap(artifact => artifact.evidence));
+  const projectContext = [formatContextEntries(projectContextEntries), roleArtifactsDigest(roleArtifacts, projectBasicFacts)].filter(Boolean).join('\n\n').slice(0, 24000);
   const documentBudget = buildDocumentBudget({ requirement: input.requirement, promptTexts, template, chapters: effectiveChapters, spec: documentSpec });
+  const resumeChapterById = new Map((input.resumeChapters || [])
+    .filter(chapter => chapter.id && chapter.content?.trim())
+    .map(chapter => [chapter.id, chapter] as const));
+  const generationStrategy = selectDocumentGenerationStrategy({ template, targetWords: documentBudget.targetChars || [...documentBudget.chapterTargets.values()].reduce((sum, value) => sum + value, 0), requirement: input.requirement });
+  adaptiveDocumentLlmLimit = Math.min(adaptiveDocumentLlmLimit, generationStrategy.targetLlmConcurrency);
+  const generationDiagnostics = createGenerationDiagnostics(generationStrategy);
+  pruneChapterDraftCache(generationDiagnostics);
+  upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-strategy', status: 'success', message: `已自动选择 ${generationStrategy.mode} 生成策略：章节缓存 ${generationStrategy.enableChapterCache ? '启用' : '跳过'}、章节审查 ${generationStrategy.enableChapterReview ? '启用' : '跳过'}、全局审查 ${generationStrategy.enableGlobalReview ? '启用' : '跳过'}；LLM 并发上限 ${generationStrategy.targetLlmConcurrency}` }, { subtitle: '后台自动策略' }));
   const contextStage: DocumentExecutionStage = displayStage({
     type: 'context_recall',
     roleId: 'project-memory',
@@ -3162,8 +3701,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
       })));
     }
     const scopedEvidence = rawEvidence.filter(item => evidenceInScope(projectRoot, item.filePath, evidenceScopePaths));
-    const evidence = uniqueEvidence(scopedEvidence, maxEvidence);
-    const technicalFactEvidence = uniqueEvidence(scopedEvidence, 120);
+    const evidence = uniqueEvidence(scopedEvidence, maxEvidence, generationDiagnostics);
+    const technicalFactEvidence = uniqueEvidence(scopedEvidence, 120, generationDiagnostics);
     allEvidence.push(...evidence);
     const technicalFacts = extractEngineeringTechnicalFacts(technicalFactEvidence, 160);
     const technicalFactAssignment = assignTechnicalFactsToChapter(chapter, technicalFacts);
@@ -3192,38 +3731,90 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const budgetTarget = documentBudget.chapterTargets.get(chapter.id) || 1200;
     const minWords = Math.max(plan?.minWords || 0, specChapterRule?.minWords || 0, documentSpec?.dynamicChapterRule.minWordsPerChapter || 0, Math.floor(budgetTarget * 0.82), 1200);
     const targetWords = budgetTarget;
+    const resumedChapter = resumeChapterById.get(chapter.id);
+    if (resumedChapter) {
+      const resumedIssues = lightweightChapterIssues({ chapter, content: resumedChapter.content, missingFacts, targetWords });
+      if (blockingChapterCacheIssues(resumedIssues).length === 0) {
+        const chapterChars = documentTextLength(resumedChapter.content);
+        const reusableChapter: DocumentDraftChapter = { ...resumedChapter, title: chapter.title, evidence: resumedChapter.evidence?.length ? resumedChapter.evidence : evidence, missingFacts, sections: resumedChapter.sections?.length ? resumedChapter.sections : (chapter.sections || extractGeneratedSections(resumedChapter.content)) };
+        chapterDrafts.push(reusableChapter);
+        generationDiagnostics.cache.chapterHits += 1;
+        generationDiagnostics.quality.reusedChapterCount += 1;
+        chapterGenerationStages.push(displayStage({
+          type: 'chapter_generation',
+          roleId: 'chapter_generation',
+          promptId: promptBindings.find(binding => binding.roleId === 'chapter_generation')?.promptId,
+          status: 'success',
+          message: elapsedMessage(`${displayChapterTitle(chapter.title)} 已复用上次完成章节：当前 ${chapterChars} 字 / 目标 ${Math.floor(targetWords * 0.95)} 字`, chapterStartedAt),
+        }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder }));
+        progressStages.push(chapterGenerationStages[chapterGenerationStages.length - 1]!);
+        input.onProgress?.([...progressStages]);
+        return;
+      }
+      generationDiagnostics.cache.rejectedHits += 1;
+    }
+    const chapterCacheInput = { template, chapter, evidence, missingFacts, promptTexts, requirement: input.requirement, projectRoot, modelName: activeModelName, targetWords, fileRolesHash };
+    const cachedChapter = generationStrategy.enableChapterCache ? readChapterDraftCache(chapterCacheInput, generationDiagnostics) : undefined;
+    if (cachedChapter) {
+      const chapterChars = documentTextLength(cachedChapter.content);
+      chapterGenerationStages.push(displayStage({
+        type: 'chapter_generation',
+        roleId: 'chapter_generation',
+        promptId: promptBindings.find(binding => binding.roleId === 'chapter_generation')?.promptId,
+        status: 'success',
+        message: elapsedMessage(`${displayChapterTitle(chapter.title)} 已复用章节缓存：当前 ${chapterChars} 字 / 目标 ${Math.floor(targetWords * 0.95)} 字`, chapterStartedAt),
+      }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder }));
+      chapterDrafts.push(cachedChapter);
+      progressStages.push(chapterGenerationStages[chapterGenerationStages.length - 1]!);
+      input.onProgress?.([...progressStages]);
+      return;
+    }
     const generationMaxTokens = outputTokensForChapter(minWords, targetWords);
-    let llmContent = await callWithTimeout(
-      signal => buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts, projectContext, requirement: input.requirement, roleContext, targetWords, forbidDrawingImages, factCoverageContext, signal }),
+    let llmContent = await measureGenerationStep(generationDiagnostics, `chapter-draft:${chapter.id}`, () => callWithTimeout(
+      signal => buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts, projectContext, requirement: input.requirement, roleContext, targetWords, forbidDrawingImages, factCoverageContext, projectRoot, modelName: activeModelName, fileRolesHash, diagnostics: generationDiagnostics, signal }),
       timeoutMsForChapter(targetWords),
       input.signal,
-    );
+    ));
     if (!llmContent) {
-      llmContent = await callWithTimeout(
+      llmContent = await measureGenerationStep(generationDiagnostics, `chapter-draft-fallback:${chapter.id}`, () => callWithTimeout(
         signal => buildLlmChapterContent(template, chapter, evidence, missingFacts, promptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords, targetWords, maxTokens: generationMaxTokens, technicalFactContext, coverageMatrixContext, projectBasicFactContext, factCoverageContext, signal }),
         timeoutMsForChapter(targetWords),
         input.signal,
-      );
+      ));
     }
     throwIfAborted(input.signal);
     if (!llmContent) {
       const compactEvidence = evidence.slice(0, 80);
       const compactRoleContext = roleContext.slice(0, 12000);
-      llmContent = await callWithTimeout(
+      llmContent = await measureGenerationStep(generationDiagnostics, `chapter-draft-compact-fallback:${chapter.id}`, () => callWithTimeout(
         signal => buildLlmChapterContent(template, chapter, compactEvidence, missingFacts, promptTexts, projectContext, input.requirement, compactRoleContext, { forbidDrawingImages, minWords: Math.max(900, Math.floor(minWords * 0.75)), targetWords, maxTokens: generationMaxTokens, technicalFactContext: technicalFactContext.slice(0, 12000), coverageMatrixContext: coverageMatrixContext.slice(0, 8000), projectBasicFactContext: projectBasicFactContext.slice(0, 8000), factCoverageContext: factCoverageContext.slice(0, 10000), signal }),
         timeoutMsForChapter(targetWords),
         input.signal,
-      );
+      ));
     }
     throwIfAborted(input.signal);
     if (!llmContent) throw new Error(`${chapter.title} 大模型未返回有效章节正文`);
-    llmContent = await supplementShortSections({ template, chapter, content: llmContent, evidence, missingFacts, promptTexts, projectContext, requirement: input.requirement, roleContext, targetWords, forbidDrawingImages, factCoverageContext, signal: input.signal });
+    const initialChapterContent = llmContent;
+    llmContent = await measureGenerationStep(generationDiagnostics, `chapter-supplement:${chapter.id}`, () =>
+      supplementShortSections({ template, chapter, content: initialChapterContent, evidence, missingFacts, promptTexts, projectContext, requirement: input.requirement, roleContext, targetWords, forbidDrawingImages, factCoverageContext, signal: input.signal })
+    );
     const localIssues = lightweightChapterIssues({ chapter, content: llmContent, missingFacts, targetWords });
-    if (localIssues.length > 0) {
-      llmContent = await repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: llmContent, evidence, missingFacts, sections: chapter.sections || [] }, issues: localIssues.slice(0, 5), promptTexts, requirement: input.requirement, forbidDrawingImages, signal: input.signal });
+    const localSeverity = qualitySeveritySummary(localIssues);
+    generationDiagnostics.quality.blockingCount += localSeverity.blocking;
+    generationDiagnostics.quality.importantCount += localSeverity.important;
+    generationDiagnostics.quality.minorCount += localSeverity.minor;
+    const blockingIssues = blockingChapterCacheIssues(localIssues);
+    if (blockingIssues.length > 0) {
+      const contentBeforeRepair = llmContent;
+      llmContent = await measureGenerationStep(generationDiagnostics, `chapter-repair:${chapter.id}`, () =>
+        repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: contentBeforeRepair, evidence, missingFacts, sections: chapter.sections || [] }, issues: blockingIssues.slice(0, 3), promptTexts, requirement: input.requirement, forbidDrawingImages, signal: input.signal })
+      );
+      generationDiagnostics.quality.repairedCount += 1;
       throwIfAborted(input.signal);
     }
-    const expandedChapter = await expandChapterToTarget({ template, chapter, content: llmContent, evidence, promptTexts, requirement: input.requirement, roleContext, targetChars: Math.floor(targetWords * 0.95), forbidDrawingImages, maxTokens: generationMaxTokens, signal: input.signal });
+    const expandedChapter = await measureGenerationStep(generationDiagnostics, `chapter-expand:${chapter.id}`, () =>
+      expandChapterToTarget({ template, chapter, content: llmContent, evidence, promptTexts, requirement: input.requirement, roleContext, targetChars: Math.floor(targetWords * 0.95), forbidDrawingImages, maxTokens: generationMaxTokens, signal: input.signal })
+    );
     const content = expandedChapter.content;
     const chapterChars = documentTextLength(content);
     const sections = chapter.sections?.length ? chapter.sections : extractGeneratedSections(content);
@@ -3234,7 +3825,14 @@ export async function generateDocumentDraft(input: { templateId: string; require
       status: 'success',
       message: elapsedMessage(`${displayChapterTitle(chapter.title)} 已由大模型生成${expandedChapter.rounds > 0 ? `并扩写 ${expandedChapter.rounds} 轮` : ''}：当前 ${chapterChars} 字 / 目标 ${Math.floor(targetWords * 0.95)} 字`, chapterStartedAt),
     }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder }));
-    chapterDrafts.push({ id: chapter.id, title: chapter.title, content, evidence, missingFacts, sections });
+    const draftChapter = { id: chapter.id, title: chapter.title, content, evidence, missingFacts, sections };
+    chapterDrafts.push(draftChapter);
+    const finalIssues = lightweightChapterIssues({ chapter, content, missingFacts, targetWords });
+    const finalSeverity = qualitySeveritySummary(finalIssues);
+    generationDiagnostics.quality.blockingCount += finalSeverity.blocking;
+    generationDiagnostics.quality.importantCount += finalSeverity.important;
+    generationDiagnostics.quality.minorCount += finalSeverity.minor;
+    if (generationStrategy.enableChapterCache && blockingChapterCacheIssues(finalIssues).length === 0) writeChapterDraftCache(chapterCacheInput, draftChapter, generationDiagnostics);
     } catch (err) {
       if (input.signal?.aborted) throw err;
       console.error(`[gen] chapter ${chapter.title} failed:`, err);
@@ -3323,6 +3921,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
   let validationIssues = buildValidationIssues(validation, factsModel, chapterDrafts);
   validationIssues.push(...chapterReadinessIssues(chapterReadiness));
   const forbidDrawingImages = shouldForbidDrawingImages(roleArtifacts, template);
+  const budgetStartedAt = Date.now();
+  const budgetBeforeChars = documentTextLength(chapterDrafts.map(chapter => chapter.content).join('\n\n'));
   const budgetExpandedChapters = await expandDocumentToBudget({ template, chapters: chapterDrafts, budget: documentBudget, promptTexts, requirement: input.requirement, forbidDrawingImages, signal: input.signal });
   chapterDrafts.splice(0, chapterDrafts.length, ...budgetExpandedChapters);
   const budgetDraftMarkdown = chapterDrafts.map(chapter => chapter.content).join('\n\n');
@@ -3331,7 +3931,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     documentBudget.targetChars ? `目标 ${documentBudget.targetChars} 字` : undefined,
     documentBudget.targetPages ? `目标 ${documentBudget.targetPages} 页` : undefined,
   ].filter(Boolean).join(' / ') || '默认章节深度';
-  const budgetStage = displayStage({ type: 'validation', roleId: 'document-budget', status: documentBudget.minChars && budgetStatus.currentChars < documentBudget.minChars ? 'fallback' : 'success', message: `文档预算：当前 ${budgetStatus.currentChars} 字，预计 ${budgetStatus.estimatedPages} 页；${budgetTargetText}` }, { subtitle: '文档预算' });
+  const budgetStage = displayStage({ type: 'validation', roleId: 'document-budget', status: documentBudget.minChars && budgetStatus.currentChars < documentBudget.minChars ? 'fallback' : 'success', message: elapsedMessage(`文档预算：当前 ${budgetStatus.currentChars} 字，新增 ${Math.max(0, budgetStatus.currentChars - budgetBeforeChars)} 字，预计 ${budgetStatus.estimatedPages} 页；${budgetTargetText}`, budgetStartedAt) }, { subtitle: '文档预算' });
   progressStages.push(budgetStage);
   input.onProgress?.([...progressStages]);
   const fallbackChapterCount = chapterGenerationStages.filter(stage => stage.type === 'chapter_generation' && stage.status === 'fallback').length;
@@ -3364,16 +3964,32 @@ export async function generateDocumentDraft(input: { templateId: string; require
     executionStages,
     exportGate: { passed: true, blockingIssues: [], checklist: [] },
     assets,
+    partialChapters: chapterDrafts.map(chapter => ({ id: chapter.id, title: chapter.title, chars: documentTextLength(chapter.content), status: 'completed' as const, updatedAt: Date.now() })),
     generatedAt: Date.now(),
   };
   const initialMarkdown = composeDocumentMarkdown(base);
   throwIfAborted(input.signal);
-  const riskChapters = chapterDrafts.filter(chapter => chapter.evidence.length === 0 || chapter.missingFacts.length > 0 || documentTextLength(chapter.content) < Math.floor((documentBudget.chapterTargets.get(chapter.id) || 1200) * 0.7) || lightweightChapterIssues({ chapter: effectiveChapters.find(item => item.id === chapter.id) || { id: chapter.id, title: chapter.title, purpose: '', queries: [], requiredFacts: [], sections: chapter.sections }, content: chapter.content, missingFacts: chapter.missingFacts, targetWords: documentBudget.chapterTargets.get(chapter.id) || 1200 }).length > 0);
-  const forceFullReview = initialBlockingCount > 0 || validationIssues.some(issue => /事实一致性|项目污染|章节生成存在兜底|章节生成失败|阻断/u.test(issue.message));
+  const chapterReview = generationStrategy.enableChapterReview
+    ? await measureGenerationStep(generationDiagnostics, 'chapter-review', () => reviewChapterSummaries({ template, chapters: chapterDrafts, budget: documentBudget, promptTexts: reviewPromptTexts || promptTexts, requirement: input.requirement, strategy: generationStrategy, diagnostics: generationDiagnostics, signal: input.signal }), { chapters: chapterDrafts.length })
+    : { summaries: chapterDrafts.map(chapter => ({ chapterId: chapter.id, title: chapter.title, status: 'pass' as const, issues: [], suggestions: [], chars: documentTextLength(chapter.content) })), stage: displayStage({ type: 'llm_review' as const, roleId: 'chapter-review', status: 'success', message: '短文档策略已跳过章节级 LLM 审查' }, { subtitle: '章节级质量审查' }) };
+  executionStages.push(chapterReview.stage);
+  for (const summary of chapterReview.summaries.filter(item => item.status !== 'pass')) {
+    validationIssues.push({ level: summary.status === 'fail' ? 'error' : 'warning', message: `${summary.title} 章节审查：${summary.issues.slice(0, 4).join('；') || '存在质量风险'}`, suggestion: summary.suggestions.slice(0, 3).join('；') || '请复核章节事实覆盖、结构完整性和专业闭环。' });
+  }
+  const globalReview = generationStrategy.enableGlobalReview
+    ? await measureGenerationStep(generationDiagnostics, 'global-consistency-review', () => reviewGlobalConsistency({ template, chapters: chapterDrafts, chapterReviews: chapterReview.summaries, promptTexts: reviewPromptTexts || promptTexts, requirement: input.requirement, projectContext, diagnostics: generationDiagnostics, signal: input.signal }), { chapters: chapterDrafts.length })
+    : { issues: [] as string[], stage: displayStage({ type: 'llm_review' as const, roleId: 'global-consistency-review', status: 'success', message: '当前策略已跳过全局 LLM 一致性审查' }, { subtitle: '全局一致性审查' }) };
+  executionStages.push(globalReview.stage);
+  for (const issue of globalReview.issues) validationIssues.push({ level: 'warning', message: `全局一致性审查：${issue}`, suggestion: '请复核跨章节术语、项目参数、范围边界和闭环关系。' });
+  input.onProgress?.([...executionStages]);
+  const riskChapters = chapterDrafts.filter(chapter => chapter.evidence.length === 0 || chapter.missingFacts.length > 0 || documentTextLength(chapter.content) < Math.floor((documentBudget.chapterTargets.get(chapter.id) || 1200) * 0.7) || chapterReview.summaries.some(summary => summary.chapterId === chapter.id && summary.status !== 'pass') || lightweightChapterIssues({ chapter: effectiveChapters.find(item => item.id === chapter.id) || { id: chapter.id, title: chapter.title, purpose: '', queries: [], requiredFacts: [], sections: chapter.sections }, content: chapter.content, missingFacts: chapter.missingFacts, targetWords: documentBudget.chapterTargets.get(chapter.id) || 1200 }).length > 0);
+  const forceFullReview = initialBlockingCount > 0 || globalReview.issues.length > 0 || chapterReview.summaries.some(summary => summary.status === 'fail') || validationIssues.some(issue => /事实一致性|项目污染|章节生成存在兜底|章节生成失败|阻断/u.test(issue.message));
   const shouldFullReview = forceFullReview || riskChapters.length > Math.max(3, Math.floor(chapterDrafts.length * 0.35));
+  const reviewStartedAt = Date.now();
   const review = shouldFullReview
     ? await reviewAndOptimizeMarkdown({ template, spec: documentSpec, markdown: initialMarkdown, evidence: allEvidence, promptTexts: reviewPromptTexts || promptTexts, projectContext, requirement: input.requirement, signal: input.signal })
     : { markdown: initialMarkdown, stage: { type: 'llm_review' as const, roleId: 'llm-review', status: riskChapters.length > 0 ? 'skipped' as const : 'success' as const, message: riskChapters.length > 0 ? `本地风险扫描发现 ${riskChapters.length} 个低/中风险章节，已在章节阶段完成局部自检修复，跳过全文审查` : '本地风险扫描未发现需要 LLM 深度审查的章节，跳过全文审查' } };
+  review.stage.message = elapsedMessage(review.stage.message || 'LLM 审查完成', reviewStartedAt);
   throwIfAborted(input.signal);
   const reviewedMarkdownBase = normalizeTertiaryHeadings(removeUnwantedDrawingImages(review.markdown === initialMarkdown ? composeDocumentMarkdown({ ...base, validationIssues, exportGate: base.exportGate, executionStages }) : review.markdown, forbidDrawingImages));
   const structureIssueMessages = configuredStructureIssues(reviewedMarkdownBase, template).map(issue => issue.message);
@@ -3387,13 +4003,19 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const minSectionMessages = minChapterSectionIssues(chapterDrafts).map(issue => `${issue.message}${issue.suggestion ? `：${issue.suggestion}` : ''}`);
   const tertiaryHeadingMessages = tertiaryHeadingIssues(reviewedMarkdownBase).map(issue => `${issue.message}${issue.suggestion ? `：${issue.suggestion}` : ''}`);
   const qualityIssues = [...tenderQualityIssues(reviewedMarkdownBase, chapterDrafts, tenderPlan, roleArtifacts, forbidDrawingImages), ...structureIssueMessages, ...placeholderIssueMessages, ...gateIssueMessages, ...preciseIssueMessages, ...quantifiedCoverageMessages, ...tocIssueMessages, ...duplicateBasicInfoMessages, ...formalStyleMessages, ...minSectionMessages, ...tertiaryHeadingMessages];
-  const repair = await repairMarkdownByQuality({ markdown: reviewedMarkdownBase, template, chapters: chapterDrafts, promptTexts, requirement: input.requirement, issues: qualityIssues, forbidDrawingImages, signal: input.signal });
+  const repairStartedAt = Date.now();
+  const repair = await measureGenerationStep(generationDiagnostics, 'typed-quality-repair', () => repairMarkdownByQuality({ markdown: reviewedMarkdownBase, template, chapters: chapterDrafts, promptTexts, requirement: input.requirement, issues: qualityIssues, forbidDrawingImages, strategy: generationStrategy, signal: input.signal }), { issues: qualityIssues.length });
+  if (repair.stage) repair.stage.message = elapsedMessage(repair.stage.message || '质量修复完成', repairStartedAt);
   throwIfAborted(input.signal);
   const reviewedStages = repair.stage ? [...executionStages, review.stage, repair.stage] : [...executionStages, review.stage];
   let repairedChapterDrafts = repair.chapters;
   const repairedBudgetStatus = documentBudgetStatus(documentBudget, repairedChapterDrafts.map(chapter => chapter.content).join('\n\n'));
   if (documentBudget.minChars && repairedBudgetStatus.currentChars < Math.floor(documentBudget.minChars * 0.9)) {
+    const postRepairBudgetStartedAt = Date.now();
+    const postRepairBeforeChars = repairedBudgetStatus.currentChars;
     repairedChapterDrafts = await expandDocumentToBudget({ template, chapters: repairedChapterDrafts, budget: documentBudget, promptTexts, requirement: input.requirement, forbidDrawingImages, signal: input.signal });
+    const postRepairBudgetStatus = documentBudgetStatus(documentBudget, repairedChapterDrafts.map(chapter => chapter.content).join('\n\n'));
+    reviewedStages.push(displayStage({ type: 'validation', roleId: 'document-budget-repair', status: documentBudget.minChars && postRepairBudgetStatus.currentChars < documentBudget.minChars ? 'fallback' : 'success', message: elapsedMessage(`修复后预算补齐：当前 ${postRepairBudgetStatus.currentChars} 字，新增 ${Math.max(0, postRepairBudgetStatus.currentChars - postRepairBeforeChars)} 字，预计 ${postRepairBudgetStatus.estimatedPages} 页`, postRepairBudgetStartedAt) }, { subtitle: '修复后预算补齐' }));
   }
   const repairedMarkdown = composeDocumentMarkdown({ ...base, chapters: repairedChapterDrafts, validationIssues, exportGate: base.exportGate, executionStages });
   const finalSections = inferChapterSectionsFromMarkdown(repairedMarkdown, repairedChapterDrafts);
@@ -3424,12 +4046,26 @@ export async function generateDocumentDraft(input: { templateId: string; require
   validationIssues.push(...configuredStructureIssues(finalMarkdown, template));
   const finalExportGate = buildExportGate(validationIssues, factsModel, finalChapterDrafts);
   const blockingCount = finalExportGate.blockingIssues.length;
+  const finalQualitySummary = qualitySeveritySummary(validationIssues);
+  generationDiagnostics.quality.blockingCount += finalQualitySummary.blocking;
+  generationDiagnostics.quality.importantCount += finalQualitySummary.important;
+  generationDiagnostics.quality.minorCount += finalQualitySummary.minor;
   const finalStages: DocumentExecutionStage[] = reviewedStages.map(stage => {
     if (stage.type === 'validation' && stage.roleId === 'document-workflow') return { ...stage, status: blockingCount > 0 ? 'failed' : 'success', message: `阻断 ${blockingCount}，问题 ${validationIssues.length}` };
     if (stage.type === 'export_ready') return { ...stage, status: finalExportGate.passed ? 'success' : 'fallback', message: finalExportGate.passed ? '已准备好导出 Markdown/HTML/DOCX/PDF' : '导出存在风险项，仍可导出，请人工复核' };
     return stage;
   });
-  const finalBase = { ...base, chapters: finalChapterDrafts, validationIssues, exportGate: finalExportGate, executionStages: finalStages };
+  generationDiagnostics.llm.currentLimit = adaptiveDocumentLlmLimit;
+  finalStages.push(displayStage({ type: 'validation', roleId: 'document-diagnostics', status: 'success', message: `性能统计：LLM ${generationDiagnostics.llm.calls} 次，失败 ${generationDiagnostics.llm.failures} 次，缓存命中 ${generationDiagnostics.cache.chapterHits} 章/${generationDiagnostics.cache.sectionHits} 小节，写入 ${generationDiagnostics.cache.chapterWrites} 章/${generationDiagnostics.cache.sectionWrites} 小节，噪声过滤 ${generationDiagnostics.evidence.filteredNoise} 条，质量问题 阻断${generationDiagnostics.quality.blockingCount}/重要${generationDiagnostics.quality.importantCount}/轻微${generationDiagnostics.quality.minorCount}，自动限流调整 ${generationDiagnostics.llm.limitAdjustments} 次` }, { subtitle: '后台诊断' }));
+  const finalBase = {
+    ...base,
+    chapters: finalChapterDrafts,
+    validationIssues,
+    exportGate: finalExportGate,
+    executionStages: finalStages,
+    partialChapters: finalChapterDrafts.map(chapter => ({ id: chapter.id, title: chapter.title, chars: documentTextLength(chapter.content), status: 'completed' as const, updatedAt: Date.now() })),
+    reviewMetadata: { chapterSummaries: chapterReview.summaries, globalIssues: globalReview.issues, diagnostics: generationDiagnostics },
+  };
   return { ...finalBase, markdown: finalMarkdown };
 }
 

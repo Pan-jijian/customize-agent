@@ -319,9 +319,9 @@ export default function GuidePage() {
     <Card title="生成资源和知识库的关系">
       <Row gutter={[16, 16]}>
         <Col xs={24} md={12}>
-          <Card size="small" title="生成资源自动回流知识库">
-            <Paragraph>模型生成的图片、封面或后处理资源会登记到生成资源管理页，并自动回流到 knowledgeBase/生成资源 下完成索引。</Paragraph>
-            <Paragraph>后续文档可以继续检索和复用这些已生成资源，资源管理页也会展示入库状态。</Paragraph>
+          <Card size="small" title="生成资源手动加入知识库">
+            <Paragraph>模板运行生成的文档、图片、封面或后处理资源会登记到生成资源管理页，默认不会自动回流知识库，避免模型产物污染事实来源。</Paragraph>
+            <Paragraph>确认资源可复用后，可在资源管理页点击“加入知识库”，再写入 knowledgeBase/生成资源 并完成索引。</Paragraph>
           </Card>
         </Col>
         <Col xs={24} md={12}>
@@ -366,7 +366,7 @@ export default function GuidePage() {
         { key: 'warning-export', label: '为什么生成完成后显示 warning，但仍然可以导出？', children: <Paragraph>warning 表示文档已生成，但存在建议复核的问题，例如来源角色不完全匹配、某些事实需要人工确认或格式可优化。它不是失败，也不会阻断导出；真实 blockingIssues 或 error 级门禁问题会作为高风险提示展示，导出后请人工复核。</Paragraph> },
         { key: 'missing-facts', label: '为什么提示必需事实缺失？', children: <Paragraph>优先检查后台自动规范生成的事实字段、模板章节 requiredFacts 和文件角色绑定。很多情况下不是模型失败，而是资料没有被绑定到正确角色，或字段要求比资料实际内容更严格。</Paragraph> },
         { key: 'draft-duration', label: '草稿历史里的耗时怎么计算？', children: <Paragraph>耗时使用生成记录的 createdAt 到 completedAt 计算；旧记录或未完成记录会使用 updatedAt 兜底。它用于判断本次生成链路整体成本，包括知识库检索、事实抽取、章节生成、资源处理、校验和格式化。</Paragraph> },
-        { key: 'asset-index', label: '生成资源会如何进入知识库？', children: <Paragraph>生成资源完成后会自动回流到 knowledgeBase/生成资源 并建立索引，便于后续模板继续复用。资源管理页会展示入库状态，错误资源可以删除后重新生成。</Paragraph> },
+        { key: 'asset-index', label: '生成资源会如何进入知识库？', children: <Paragraph>生成资源完成后会先进入生成资源管理页，默认不自动入库，避免生成内容再次被当作事实证据召回。确认需要复用时，可在资源管理页手动点击“加入知识库”，系统会写入 knowledgeBase/生成资源 并建立索引。</Paragraph> },
         { key: 'context-accuracy', label: '上下文召回会不会影响准确度？', children: <Paragraph>上下文只作为当前项目的偏好、历史纠偏和连续性参考，不作为事实来源。生成和审查提示词都要求：如果上下文与知识库证据、模板要求或后台自动规范冲突，以知识库证据和后台自动规范为准。</Paragraph> },
         { key: 'priority-evidence', label: '什么时候需要维护高级优先证据？', children: <Paragraph>日常不需要维护。只有当某章必须引用指定官方资料、图纸、表格，或自动检索结果不稳定时，才从知识库搜索页复制文件路径并填入章节高级优先证据。</Paragraph> },
       ]} />

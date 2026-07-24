@@ -20,7 +20,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       const record = getGeneratedDocument(id, projectRoot);
       if (!record) return res.status(404).json({ error: 'Document not found' });
       if (req.query.lite === '1' && record.status === 'generating') {
-        return res.status(200).json({ document: { id: record.id, taskId: record.taskId, templateId: record.templateId, templateName: record.templateName, title: record.title, requirement: record.requirement, projectRoot: record.projectRoot, projectId: record.projectId, knowledgeBasePath: record.knowledgeBasePath, markdown: '', status: record.status, executionStages: record.executionStages, assets: [], createdAt: record.createdAt, updatedAt: record.updatedAt, error: record.error, warningIssues: record.warningIssues } });
+        return res.status(200).json({ document: { id: record.id, taskId: record.taskId, templateId: record.templateId, templateName: record.templateName, title: record.title, requirement: record.requirement, projectRoot: record.projectRoot, projectId: record.projectId, knowledgeBasePath: record.knowledgeBasePath, markdown: '', status: record.status, executionStages: record.executionStages, partialChapters: record.partialChapters, reviewMetadata: record.reviewMetadata, assets: [], createdAt: record.createdAt, updatedAt: record.updatedAt, error: record.error, warningIssues: record.warningIssues } });
       }
       return res.status(200).json({ document: record });
     }

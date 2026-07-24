@@ -1,5 +1,13 @@
 # customize-agent
 
+## 4.0.60
+
+### Patch Changes
+
+- 优化文档生成稳定性与生成资源管理：修复生成卡死、中止清理、LLM 超时和轮询取消问题，并将模板生成结果默认登记到生成资源而非自动写入知识库。
+- Updated dependencies
+  - @customize-agent/server@4.0.69
+
 ## 4.0.59
 
 ### Patch Changes

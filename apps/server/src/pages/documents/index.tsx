@@ -1,11 +1,22 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Steps, Tabs, Tag, Tree, Typography } from 'antd';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Tabs, Tag, Tree, Typography } from 'antd';
 import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined, HistoryOutlined, FolderOutlined } from '@ant-design/icons';
-import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFiles, getPromptProjects, refineGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig, type PromptProject, type RefinePlan, type RefineSelection } from '@/lib/api';
+import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFiles, getPromptProjects, refineGeneratedDocument, resumeGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig, type PromptProject, type RefinePlan, type RefineSelection } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 
 const { TextArea } = Input;
 const { Text } = Typography;
+
+type NoticeType = 'info' | 'success' | 'warning' | 'error';
+function NoticeBox({ type = 'info', title, children, style }: { type?: NoticeType; title?: ReactNode; children?: ReactNode; style?: CSSProperties }) {
+  const color = type === 'error' ? 'var(--colorError)' : type === 'warning' ? 'var(--colorWarning)' : type === 'success' ? 'var(--colorSuccess)' : 'var(--colorInfo)';
+  const background = type === 'error' ? 'var(--colorErrorBg)' : type === 'warning' ? 'var(--colorWarningBg)' : type === 'success' ? 'var(--colorSuccessBg)' : 'var(--colorInfoBg)';
+  return <div style={{ border: `1px solid ${color}`, background, borderRadius: 8, padding: '9px 12px', ...style }}><Text strong style={{ color }}>{title}</Text>{children && <div style={{ marginTop: 4, color: 'var(--colorTextSecondary)', fontSize: 12 }}>{children}</div>}</div>;
+}
+
+function VerticalStack({ children, gap = 12, style }: { children: ReactNode; gap?: number; style?: CSSProperties }) {
+  return <div style={{ display: 'flex', flexDirection: 'column', gap, ...style }}>{children}</div>;
+}
 
 type FlowStepStatus = 'wait' | 'process' | 'finish' | 'warning' | 'error';
 interface FlowSubStep { key: string; title: string; status: FlowStepStatus; }
@@ -15,7 +26,8 @@ interface GenerationTaskState {
   id: number; templateId: string; loading: boolean;
   flowSteps: FlowStep[]; activeFlowKey: string | null;
   promise: Promise<{ draft?: GeneratedDocumentDraft; taskId?: string; documentId?: string; record?: GeneratedDocumentRecord }>;
-  documentId?: string; draft?: GeneratedDocumentDraft; content?: string; error?: string;
+  documentId?: string; draft?: GeneratedDocumentDraft; content?: string; error?: string; aborted?: boolean;
+  pollController?: AbortController;
   listeners: Set<() => void>;
 }
 
@@ -192,6 +204,7 @@ export default function DocumentsPage() {
   }, [templateFileTree]);
   const [flowSteps, setFlowSteps] = useState<FlowStep[]>([]);
   const [activeFlowKey, setActiveFlowKey] = useState<string | null>(null);
+  const [workflowRecord, setWorkflowRecord] = useState<GeneratedDocumentRecord | null>(null);
   const [leftTab, setLeftTab] = useState<string>('templates');
 
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -277,7 +290,7 @@ export default function DocumentsPage() {
     const isGenerating = isDraftGenerating(item.status);
     if (isGenerating || item.status === 'failed' || item.status === 'aborted') {
       resetEditAssist();
-      setDraft(null); setContent(''); setLoading(isGenerating);
+      setWorkflowRecord(item); setDraft(null); setContent(''); setLoading(isGenerating);
       setDrawerMode('workflow'); setDrawerOpen(true);
       try {
         const { document } = await getGeneratedDocument(item.id, false, item.projectRoot || currentProjectRoot || undefined);
@@ -374,6 +387,7 @@ export default function DocumentsPage() {
     return { steps: [], activeKey: null };
   };
   const applyGeneratedRecordToWorkflow = (record: GeneratedDocumentRecord) => {
+    setWorkflowRecord(record);
     const { steps, activeKey } = buildFlowStepsFromRecord(record);
     setFlowSteps(steps); setActiveFlowKey(activeKey); setLoading(isDraftGenerating(record.status)); setSnap(steps, activeKey, isDraftGenerating(record.status));
     if (record.status === 'failed' || record.status === 'aborted') setDrawerMode('workflow');
@@ -477,18 +491,34 @@ export default function DocumentsPage() {
   };
   const delDraft = async (item: GeneratedDocumentRecord) => { try { await deleteGeneratedDocument(item.id, item.projectRoot || currentProjectRoot || undefined); if (currentDocumentId === item.id) { setCurrentDocumentId(null); setDraft(null); setContent(''); } await loadDrafts(); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
 
-  const waitForDoc = async (docId: string) => {
+  const waitForDoc = async (docId: string, task?: GenerationTaskState) => {
+    const startedAt = Date.now();
+    let lastUpdatedAt = 0;
+    let lastChangedAt = Date.now();
+    const maxWaitMs = 125 * 60 * 1000;
+    const maxNoProgressMs = 16 * 60 * 1000;
     for (;;) {
-      const { document } = await getGeneratedDocument(docId, true, currentProjectRoot || undefined);
+      if (task?.aborted) throw new Error('用户中止');
+      const controller = new AbortController();
+      if (task) task.pollController = controller;
+      let document: GeneratedDocumentRecord;
+      try {
+        ({ document } = await getGeneratedDocument(docId, true, currentProjectRoot || undefined, controller.signal));
+      } finally {
+        if (task?.pollController === controller) task.pollController = undefined;
+      }
       applyGeneratedRecordToWorkflow(document);
+      if (document.updatedAt !== lastUpdatedAt) { lastUpdatedAt = document.updatedAt; lastChangedAt = Date.now(); }
       if ((document.status === 'completed' || document.status === 'warning') && document.draft) return document;
       if (document.status === 'failed' || document.status === 'aborted') throw new Error(document.error || (document.status === 'aborted' ? '生成已中止' : '生成失败'));
+      if (Date.now() - startedAt > maxWaitMs || Date.now() - lastChangedAt > maxNoProgressMs) throw new Error('生成任务疑似卡住，请点击继续生成或重新生成');
       await new Promise(r => window.setTimeout(r, 1500));
     }
   };
 
   const handleGenerate = async () => {
     if (!templateId) return;
+    if (activeGenerationTask?.aborted) activeGenerationTask = null;
     if (activeGenerationTask?.loading) { setFlowSteps(activeGenerationTask.flowSteps); setActiveFlowKey(activeGenerationTask.activeFlowKey); setLoading(true); return; }
     if (!currentProjectRoot) { message.error('未识别当前项目，请先选择或打开项目后再生成文件'); return; }
     setLoading(true);
@@ -500,7 +530,7 @@ export default function DocumentsPage() {
       const started = await promise;
       if (started.documentId) { localStorage.setItem(activeGenStorageKey, started.documentId); setCurrentDocumentId(started.documentId); if (activeGenerationTask?.promise === promise) activeGenerationTask.documentId = started.documentId; }
       await loadDrafts(); // 立即刷新列表，展示"生成中"记录
-      const doc = started.documentId ? await waitForDoc(started.documentId) : undefined;
+      const doc = started.documentId ? await waitForDoc(started.documentId, activeGenerationTask?.promise === promise ? activeGenerationTask : undefined) : undefined;
       const result = started.draft || doc?.draft;
       if (!result) throw new Error('生成结果为空');
       if (started.documentId || doc?.id) setCurrentDocumentId(started.documentId || doc!.id);
@@ -520,10 +550,11 @@ export default function DocumentsPage() {
     } catch (error) {
       localStorage.removeItem(activeGenStorageKey);
       const msg = error instanceof Error ? error.message : t('common.error');
-      setFlowSteps(prev => { const n = prev.map(s => s.status === 'process' ? { ...s, status: 'error' as const, description: msg, subSteps: updSubs(s, 'error') } : s); setSnap(n, activeFlowKey, false); return n; });
+      const aborted = /用户中止|abort|aborted/i.test(msg);
+      if (!aborted) setFlowSteps(prev => { const n = prev.map(s => s.status === 'process' ? { ...s, status: 'error' as const, description: msg, subSteps: updSubs(s, 'error') } : s); setSnap(n, activeFlowKey, false); return n; });
       if (activeGenerationTask?.promise === promise) { activeGenerationTask.loading = false; activeGenerationTask.error = msg; notifyGenerationTask(); activeGenerationTask = null; }
       await loadDrafts().catch(() => undefined);
-      message.error(msg);
+      if (!aborted) message.error(msg);
     } finally { timers.forEach(x => window.clearTimeout(x)); setLoading(false); if (activeGenerationTask?.promise === promise) { activeGenerationTask.loading = false; notifyGenerationTask(); } }
   };
 
@@ -557,6 +588,8 @@ export default function DocumentsPage() {
     void (async () => {
       if (currentDocumentId) await abortGeneratedDocument(currentDocumentId, currentProjectRoot || undefined).catch(() => undefined);
       if (activeGenerationTask) {
+        activeGenerationTask.aborted = true;
+        activeGenerationTask.pollController?.abort();
         activeGenerationTask.loading = false;
         activeGenerationTask.error = '用户中止';
         notifyGenerationTask();
@@ -571,8 +604,36 @@ export default function DocumentsPage() {
     })();
   };
 
+  const handleResumeDraft = async (item: GeneratedDocumentRecord) => {
+    try {
+      setCurrentDocumentId(item.id);
+      setTemplateId(item.templateId);
+      setDrawerMode('workflow');
+      setDrawerOpen(true);
+      setLoading(true);
+      const started = await resumeGeneratedDocument(item.id, item.projectRoot || currentProjectRoot || undefined);
+      localStorage.setItem(activeGenStorageKey, started.documentId);
+      await loadDrafts();
+      const doc = await waitForDoc(started.documentId);
+      if (doc.draft) {
+        setDraft(doc.draft);
+        setContent(doc.editedMarkdown || doc.markdown || doc.draft.markdown);
+        setDrawerMode('editor');
+      }
+      localStorage.removeItem(activeGenStorageKey);
+      await loadDrafts();
+      message.success('已继续生成并完成');
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '继续生成失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleAbortDraft = async (item: GeneratedDocumentRecord) => {
     if (activeGenerationTask?.loading && activeGenerationTask.documentId === item.id) {
+      activeGenerationTask.aborted = true;
+      activeGenerationTask.pollController?.abort();
       activeGenerationTask.loading = false;
       activeGenerationTask.error = '用户中止';
       notifyGenerationTask();
@@ -588,7 +649,7 @@ export default function DocumentsPage() {
       message.info('任务已不在运行，已刷新状态');
     } finally {
       await loadDrafts();
-      if (currentDocumentId === item.id) { setCurrentDocumentId(null); setDraft(null); setContent(''); }
+      if (currentDocumentId === item.id) { setCurrentDocumentId(null); setWorkflowRecord(null); setDraft(null); setContent(''); }
     }
   };
   const dl = (blob: Blob, name: string, mime: string) => {
@@ -729,17 +790,17 @@ export default function DocumentsPage() {
                     {item.description && <Text type="secondary" style={{ fontSize: 12, lineHeight: '18px' }}>{item.description}</Text>}
                     {templateValidations[item.id] && (
                       <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 8, padding: 10, border: `1px solid ${templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'var(--colorErrorBorder)' : templateValidations[item.id]!.issues.length ? 'var(--colorWarningBorder)' : 'var(--colorSuccessBorder)'}`, borderRadius: 10, background: templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'var(--colorErrorBg)' : templateValidations[item.id]!.issues.length ? 'var(--colorWarningBg)' : 'var(--colorSuccessBg)' }}>
-                        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                        <VerticalStack gap={6} style={{ width: '100%' }}>
                           <Space wrap>
                             <Text strong>{templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? '运行前检查未通过' : templateValidations[item.id]!.issues.length ? '运行前检查存在警告' : '运行前检查通过'}</Text>
                             <Tag color="blue">文件角色 {templateValidations[item.id]!.fileDiagnostics.length}</Tag>
                             <Tag color="purple">提示词角色 {templateValidations[item.id]!.promptDiagnostics.length}</Tag>
                           </Space>
-                          {templateValidations[item.id]!.issues.length > 0 ? templateValidations[item.id]!.issues.map(issue => <Alert key={issue.message} type={issue.level === 'error' ? 'error' : 'warning'} message={issue.message} showIcon />) : <Alert type="success" message="文件角色、提示词角色和后台自动规范检查通过，可以运行。" showIcon />}
+                          {templateValidations[item.id]!.issues.length > 0 ? templateValidations[item.id]!.issues.map(issue => <NoticeBox key={issue.message} type={issue.level === 'error' ? 'error' : 'warning'} title={issue.message} />) : <NoticeBox type="success" title="文件角色、提示词角色和后台自动规范检查通过，可以运行。" />}
                           {!templateValidations[item.id]!.issues.some(issue => issue.level === 'error') && templateValidations[item.id]!.issues.length > 0 && (
                             <div><Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => openDrawerForWorkflow(item.id)}>忽略警告并继续运行</Button></div>
                           )}
-                        </Space>
+                        </VerticalStack>
                       </div>
                     )}
                   </div>
@@ -765,6 +826,11 @@ export default function DocumentsPage() {
                       <span>{new Date(item.updatedAt).toLocaleString()}</span>
                       <span>耗时 {fmtDuration(item)}</span>
                     </div>
+                    {item.partialChapters && item.partialChapters.length > 0 && (
+                      <div style={{ marginTop: 3, fontSize: 11, color: 'var(--colorTextSecondary)' }}>
+                        已完成章节 {item.partialChapters.filter(chapter => chapter.status === 'completed' || chapter.status === 'cached').length}/{item.partialChapters.length} · {item.partialChapters.reduce((sum, chapter) => sum + chapter.chars, 0).toLocaleString()} 字
+                      </div>
+                    )}
                     {(item.status === 'warning' || item.status === 'failed' || item.status === 'aborted') && (
                       <div style={{ marginTop: 3, color: item.status === 'failed' || item.status === 'aborted' ? 'var(--colorError)' : 'var(--colorWarning)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {item.error || item.warningIssues?.[0] || item.draft?.validationIssues.find(x => x.level === 'error' || x.level === 'warning')?.message || '需复核'}
@@ -782,6 +848,9 @@ export default function DocumentsPage() {
                         <Button size="small" danger onClick={(e) => e.stopPropagation()}>中止</Button>
                       </Popconfirm>
                     )}
+                    {(item.status === 'failed' || item.status === 'aborted') && (
+                      <Button size="small" onClick={(e) => { e.stopPropagation(); void handleResumeDraft(item); }}>继续</Button>
+                    )}
                     <Button size="small" type="primary" icon={isDraftGenerating(item.status) ? <SyncOutlined spin /> : <PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void openDrawerForEditor(item); }}>打开</Button>
                   </Space>
                 </div>
@@ -795,7 +864,7 @@ export default function DocumentsPage() {
         title={drawerTitle}
         open={drawerOpen}
         onClose={() => { setDrawerOpen(false); if (recoveryPollRef.current) { clearInterval(recoveryPollRef.current); recoveryPollRef.current = null; } }}
-        width={800} maskClosable={false}
+        size={800} mask={{ closable: false }}
         style={{ borderRadius: '12px 0 0 12px' }}
         styles={{ body: { padding: '16px 24px' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
         extra={draft ? <Space wrap>
@@ -806,16 +875,43 @@ export default function DocumentsPage() {
           <Button type="primary" disabled={refining} loading={exporting === 'pdf'} onClick={() => { void doExport('pdf'); }}>PDF</Button>
         </Space> : (loading && drawerMode === 'workflow') ? <Button danger onClick={handleAbortGeneration}>中止任务</Button> : undefined}
       >
-        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+        <VerticalStack style={{ width: '100%' }} gap={16}>
           {/* 工作流模式：执行步骤 */}
           {drawerMode === 'workflow' && flowSteps.length > 0 && (
-            <Steps direction="vertical" size="small" current={activeFlowIndex}
-              items={flowSteps.map(s => ({ title: s.title, description: stepDesc(s), status: antdStatus(s.status), icon: flowIcon(s) }))} />
+            <VerticalStack gap={10}>
+              {flowSteps.map((s, index) => (
+                <div key={s.key} style={{ display: 'flex', gap: 10, padding: 10, border: '1px solid var(--colorBorderSecondary)', borderRadius: 10, background: index === activeFlowIndex ? 'var(--colorFillAlter)' : 'var(--colorBgContainer)' }}>
+                  <span>{flowIcon(s)}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <Space wrap><Text strong>{s.title}</Text><Tag color={s.status === 'finish' ? 'success' : s.status === 'error' ? 'error' : s.status === 'warning' ? 'warning' : s.status === 'process' ? 'processing' : 'default'}>{antdStatus(s.status)}</Tag></Space>
+                    <div style={{ marginTop: 4, color: 'var(--colorTextSecondary)', fontSize: 12, whiteSpace: 'pre-wrap' }}>{stepDesc(s)}</div>
+                  </div>
+                </div>
+              ))}
+            </VerticalStack>
+          )}
+
+          {drawerMode === 'workflow' && workflowRecord?.partialChapters && workflowRecord.partialChapters.length > 0 && (
+            <Card size="small" title="章节进度" extra={<Tag color="blue">{workflowRecord.partialChapters.filter(chapter => chapter.status === 'completed' || chapter.status === 'cached').length}/{workflowRecord.partialChapters.length}</Tag>}>
+              <VerticalStack gap={6} style={{ width: '100%' }}>
+                {workflowRecord.partialChapters.slice(0, 12).map(chapter => (
+                  <div key={chapter.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12 }}>
+                    <Text ellipsis style={{ maxWidth: 480 }}>{chapter.title}</Text>
+                    <Space size={6}><Tag color={chapter.status === 'cached' ? 'purple' : chapter.status === 'failed' ? 'error' : 'success'}>{chapter.status === 'cached' ? '缓存' : chapter.status === 'failed' ? '失败' : '完成'}</Tag><Text type="secondary">{chapter.chars.toLocaleString()} 字</Text></Space>
+                  </div>
+                ))}
+                {workflowRecord.partialChapters.length > 12 && <Text type="secondary" style={{ fontSize: 12 }}>其余 {workflowRecord.partialChapters.length - 12} 个章节将在完成后汇总展示</Text>}
+              </VerticalStack>
+            </Card>
+          )}
+
+          {drawerMode === 'workflow' && workflowRecord?.reviewMetadata?.diagnostics && (
+            <NoticeBox type="info" title="后台自动优化">{`策略：${workflowRecord.reviewMetadata.diagnostics.strategy.mode}；LLM 调用 ${workflowRecord.reviewMetadata.diagnostics.llm.calls} 次；缓存命中 ${workflowRecord.reviewMetadata.diagnostics.cache.chapterHits} 章/${workflowRecord.reviewMetadata.diagnostics.cache.sectionHits || 0} 小节；噪声过滤 ${workflowRecord.reviewMetadata.diagnostics.evidence?.filteredNoise || 0} 条；质量门禁 阻断${workflowRecord.reviewMetadata.diagnostics.quality?.blockingCount || 0}/重要${workflowRecord.reviewMetadata.diagnostics.quality?.importantCount || 0}/轻微${workflowRecord.reviewMetadata.diagnostics.quality?.minorCount || 0}；自动限流调整 ${workflowRecord.reviewMetadata.diagnostics.llm.limitAdjustments} 次。审查与诊断信息仅用于系统修复，不会写入正文或导出文件。`}</NoticeBox>
           )}
 
           {/* 工作流模式：步骤出现前的加载动画 */}
           {drawerMode === 'workflow' && loading && flowSteps.length === 0 && (
-            <div style={{ textAlign: 'center', padding: 40 }}><Spin tip="正在准备生成…" /></div>
+            <div style={{ textAlign: 'center', padding: 40 }}><Spin /><div style={{ marginTop: 12, color: 'var(--colorTextSecondary)' }}>正在准备生成…</div></div>
           )}
 
           {/* 两种模式：编辑器（生成后或从草稿打开） */}
@@ -823,10 +919,10 @@ export default function DocumentsPage() {
             <div ref={editorRef}>
               <Tabs items={[
                   { key: 'edit', label: t('documents.edit'), children: (
-                    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                    <VerticalStack gap={16} style={{ width: '100%' }}>
                       <TextArea rows={28} value={content} disabled={refining} onSelect={e => setRefineCursor({ start: e.currentTarget.selectionStart ?? 0, end: e.currentTarget.selectionEnd ?? e.currentTarget.selectionStart ?? 0 })} onChange={e => { setContent(e.target.value); setRefinePlan(null); setRefinePreview(null); setRefineCursor({ start: e.target.selectionStart ?? 0, end: e.target.selectionEnd ?? e.target.selectionStart ?? 0 }); }} />
                       <Card size="small" style={{ borderRadius: 12, background: 'linear-gradient(135deg, var(--colorFillAlter), var(--colorBgContainer))' }}>
-                        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                        <VerticalStack gap={16} style={{ width: '100%' }}>
                           <Space align="start" style={{ width: '100%', justifyContent: 'space-between' }}>
                             <div>
                               <Space size={6}><ThunderboltOutlined style={{ color: 'var(--colorAccent)' }} /><Text strong>精准修改</Text><Tag color="blue">AI 辅助</Tag></Space>
@@ -834,7 +930,7 @@ export default function DocumentsPage() {
                             </div>
                             <Button size="small" icon={<HistoryOutlined />} onClick={() => setHistoryOpen(v => !v)} disabled={editHistory.length === 0}>历史版本 {editHistory.length > 0 ? editHistory.length : ''}</Button>
                           </Space>
-                          <Alert type="info" showIcon message="系统只负责识别修改范围，不改写你的提示词；选中文字后优先只改选区，没有选区时按光标所在小节/章节定位。" />
+                          <NoticeBox type="info" title="系统只负责识别修改范围，不改写你的提示词；选中文字后优先只改选区，没有选区时按光标所在小节/章节定位。" />
                           <TextArea rows={4} value={refinePrompt} disabled={refining} onChange={e => { setRefinePrompt(e.target.value); setRefinePlan(null); setRefinePreview(null); }} placeholder="例如：写细一点；润色这段；第七章补充高处作业和临电安全措施；把安全检查频次改成每周一次。" />
                           <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
                             <Space wrap>
@@ -844,24 +940,24 @@ export default function DocumentsPage() {
                           </Space>
                           {refinePlan && !refinePreview && (
                             <Card size="small" style={{ borderRadius: 10, borderColor: 'var(--colorAccent)' }}>
-                              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                              <VerticalStack gap={8} style={{ width: '100%' }}>
                                 <Space wrap><Tag color="purple">{refinePlan.scope}</Tag><Tag color="blue">{refinePlan.action}</Tag><Tag color={refinePlan.confidence >= 0.8 ? 'green' : 'orange'}>置信度 {Math.round(refinePlan.confidence * 100)}%</Tag>{refinePlan.targetTitle && <Text strong>{refinePlan.targetTitle}</Text>}</Space>
                                 <Text>{refinePlan.summary}</Text>
                                 <Text type="secondary" style={{ fontSize: 12 }}>将按你的原始提示词执行，不添加额外编辑任务。</Text>
                                 <Space><Button type="primary" loading={refining && refineStep === 'applying'} onClick={() => { void generateRefinePreview(refinePlan); }}>执行并预览</Button><Button disabled={refining} onClick={() => setRefinePlan(null)}>取消</Button></Space>
-                              </Space>
+                              </VerticalStack>
                             </Card>
                           )}
                           {refinePreview && (
                             <Card size="small" style={{ borderRadius: 10, borderColor: 'var(--colorSuccess)' }}>
-                              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                              <VerticalStack gap={8} style={{ width: '100%' }}>
                                 <Space wrap><Tag color="green">修改预览</Tag><Text>{refinePreview.summary || refinePreview.plan.summary}</Text><Tag>{refinePreview.changedChars && refinePreview.changedChars > 0 ? `+${refinePreview.changedChars}` : refinePreview.changedChars} 字符</Tag></Space>
                                 <Row gutter={12}>
                                   <Col span={12}><Text strong>修改前</Text><div style={{ marginTop: 6, maxHeight: 180, overflow: 'auto', padding: 10, borderRadius: 8, background: 'var(--colorFillAlter)', whiteSpace: 'pre-wrap', fontSize: 12 }}>{refinePreview.beforeSnippet || '无片段预览'}</div></Col>
                                   <Col span={12}><Text strong>修改后</Text><div style={{ marginTop: 6, maxHeight: 180, overflow: 'auto', padding: 10, borderRadius: 8, background: 'var(--colorFillAlter)', whiteSpace: 'pre-wrap', fontSize: 12 }}>{refinePreview.afterSnippet || '无片段预览'}</div></Col>
                                 </Row>
                                 <Space><Button type="primary" onClick={applyRefinePreview}>应用到文档</Button><Button onClick={() => setRefinePreview(null)}>返回计划</Button><Button danger onClick={() => { setRefinePlan(null); setRefinePreview(null); }}>放弃</Button></Space>
-                              </Space>
+                              </VerticalStack>
                             </Card>
                           )}
                           {historyOpen && (
@@ -873,9 +969,9 @@ export default function DocumentsPage() {
                               )} />
                             </div>
                           )}
-                        </Space>
+                        </VerticalStack>
                       </Card>
-                    </Space>
+                    </VerticalStack>
                   ) },
                   {
                     key: 'chapters-facts', label: '章节与事实',
@@ -939,15 +1035,15 @@ export default function DocumentsPage() {
                 ]} />
             </div>
           )}
-        </Space>
+        </VerticalStack>
       </Drawer>
 
       <Drawer
         title={t('documents.templateEditor')}
         open={templateModalOpen}
         onClose={() => setTemplateModalOpen(false)}
-        width={860}
-        maskClosable={false}
+        size={860}
+        mask={{ closable: false }}
         styles={{ body: { padding: 20, overflow: 'auto' }, header: { borderBottom: '1px solid var(--colorBorderSecondary)' } }}
         extra={
           <Space>
@@ -972,9 +1068,9 @@ export default function DocumentsPage() {
               <Text strong>项目文件绑定</Text>
               <Tag color="blue">按文件角色多选</Tag>
             </Space>
-            <Alert type="info" showIcon style={{ marginBottom: 12 }} message="每个文件角色可直接勾选文件或文件夹；勾选文件夹会自动绑定该文件夹下所有文件。保存时仍按具体文件路径绑定，兼容现有模板和生成流程。" />
+            <NoticeBox type="info" title="每个文件角色可直接勾选文件或文件夹；勾选文件夹会自动绑定该文件夹下所有文件。保存时仍按具体文件路径绑定，兼容现有模板和生成流程。" style={{ marginBottom: 12 }} />
             <Input.Search allowClear placeholder="搜索文件或文件夹" value={templateFileQuery} onChange={e => setTemplateFileQuery(e.target.value)} style={{ marginBottom: 12 }} />
-            {fileSearching ? <div style={{ textAlign: 'center', padding: 24 }}><Spin tip="正在加载知识库文件…" /></div> : fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可用文件角色" /> : templateFileTree.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无知识库文件" /> : fileRoleOptions.map(option => {
+            {fileSearching ? <div style={{ textAlign: 'center', padding: 24 }}><Spin /><div style={{ marginTop: 12, color: 'var(--colorTextSecondary)' }}>正在加载知识库文件…</div></div> : fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可用文件角色" /> : templateFileTree.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无知识库文件" /> : fileRoleOptions.map(option => {
               const checkedPaths = uniqueValues(selectedGroups[option.value] || []).filter(path => allTemplateFileKeys.includes(path));
               const visibleFileKeys = new Set(collectTemplateFileKeys(filteredTemplateFileTree));
               return (
@@ -1004,7 +1100,7 @@ export default function DocumentsPage() {
               );
             })}
           </div>
-          <Alert type="info" showIcon message="文档规范由后台根据模板、提示词和角色绑定自动生成，无需手动维护规范包。" />
+          <NoticeBox type="info" title="文档规范由后台根据模板、提示词和角色绑定自动生成，无需手动维护规范包。" />
         </Form>
       </Drawer>
     </div>

@@ -54,10 +54,5 @@
   "bugs": {
     "url": "https://github.com/Pan-jijian/customize-agent/issues"
   },
-  "homepage": "https://github.com/Pan-jijian/customize-agent#readme",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "onnxruntime-node"
-    ]
-  }
+  "homepage": "https://github.com/Pan-jijian/customize-agent#readme"
 }
