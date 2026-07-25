@@ -1,9 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getConfigStore } from '@/services/configService';
+import { getConfigStore } from '@/services/common/configService';
 import { createProvider } from '@customize-agent/llm';
 import { resolveProtocol } from '@customize-agent/runtime';
-import { recordErrorLog } from '@/services/errorLogService';
-import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
+import { recordErrorLog } from '@/services/common/errorLogService';
+import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
 
 /** 根据协议类型映射 Provider 工厂名称 */
 function providerFactoryName(providerName: string, providerConfig?: { protocol?: string }): string {

@@ -1,0 +1,185 @@
+import * as path from 'node:path';
+import { createHash } from 'node:crypto';
+import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplateChapter, EvidenceBundle, ResourceEvidence } from './types';
+import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
+import { evidenceMatchesFact } from './factMatching';
+
+export function readableSourceLabel(item: Pick<DocumentEvidence, 'roleId' | 'processingType' | 'sectionTitle'>, index = 0) {
+  const role = item.processingType === 'drawing' || item.roleId?.includes('drawing') ? '视觉资料'
+    : item.processingType === 'table' || item.roleId?.includes('bill') ? '表格资料'
+      : item.processingType === 'rule' || item.roleId?.includes('tender') ? '规则资料'
+        : '项目资料';
+  return `${role}片段${index + 1}${item.sectionTitle ? `（${item.sectionTitle.replace(FILE_NAME_RE, '').slice(0, 40)}）` : ''}`;
+}
+
+export function cleanEvidenceText(content: string) {
+  return [...content]
+    .filter(char => {
+      const code = char.charCodeAt(0);
+      return code === 9 || code === 10 || code === 13 || code >= 32;
+    })
+    .join('')
+    .replace(CAD_ENTITY_TOKEN_RE, '')
+    .replace(FILE_NAME_RE, '')
+    .replace(/\b(?:Model|Layout\d*|Entity|Handle|ObjectId|ByLayer|Continuous)\b/giu, '')
+    .replace(/[\t ]{2,}/gu, ' ')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim();
+}
+
+export function evidenceQualityScore(content: string) {
+  const text = cleanEvidenceText(content);
+  const chars = Math.max(1, text.length);
+  const chinese = (text.match(/[\u4e00-\u9fa5]/gu) || []).length;
+  const digits = (text.match(/\d/gu) || []).length;
+  const semanticTerms = (text.match(/项目|任务|质量|安全|周期|验收|材料|设备|表格|数据|参数|规范|标准|流程|资源|风险/gu) || []).length;
+  const noiseHits = (text.match(/CAD|AcDb|Polyline|ByLayer|ObjectId|Handle|Model|Layout|图层|页码|第\s*\d+\s*页|打印|版权所有|^[\s\W\d_]+$/gimu) || []).length;
+  const repeatedHeaders = (text.match(/(?:序号|项目名称|事项|单位|数量|单价|金额|备注)/gu) || []).length;
+  const factDensity = Math.min(1, (chinese / chars) * 0.7 + Math.min(0.3, (digits + semanticTerms * 3) / 120));
+  const noiseScore = Math.min(1, noiseHits * 0.18 + Math.max(0, repeatedHeaders - 8) * 0.04 + (chinese / chars < 0.25 ? 0.35 : 0));
+  return { noiseScore, factDensity, shouldUse: text.length >= 30 && noiseScore < 0.72 && factDensity > 0.08 };
+}
+
+export function sanitizeEvidenceContent(filePath: string, content: string) {
+  const ext = path.extname(filePath).toLowerCase();
+  const cleaned = cleanEvidenceText(content)
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line && !/^(?:序号\s*)?(?:项目名称|单位|数量|综合单价|合价|备注)(?:\s+|$)/u.test(line))
+    .filter(line => !/^第\s*\d+\s*页\s*(?:共\s*\d+\s*页)?$/u.test(line))
+    .join('\n');
+  const quality = evidenceQualityScore(cleaned);
+  if (cleaned.length > 20 && quality.shouldUse) return cleaned.slice(0, 4000);
+  if (cleaned.length > 80 && quality.noiseScore < 0.9) return cleaned.slice(0, 1600);
+  if (['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.webp', '.dwg'].includes(ext)) {
+    return `该资料为${ext.replace('.', '').toUpperCase()}格式附件，仅作为内部事实提取依据；正式正文不得引用文件名。`;
+  }
+  return cleaned.slice(0, 1200);
+}
+
+function evidenceDedupeKey(item: DocumentEvidence): string {
+  const normalized = item.content.replace(/\s+/gu, ' ').trim();
+  return `${item.filePath}:${item.sectionTitle || ''}:${createHash('sha1').update(normalized).digest('hex')}`;
+}
+
+export function uniqueEvidence(items: DocumentEvidence[], limit: number, diagnostics?: DocumentGenerationDiagnostics): DocumentEvidence[] {
+  const seen = new Set<string>();
+  const scored = items.map(item => {
+    const content = sanitizeEvidenceContent(item.filePath, item.content);
+    const quality = evidenceQualityScore(content);
+    return { item: { ...item, content, score: item.score * (1 + quality.factDensity) * (1 - quality.noiseScore * 0.45) }, quality };
+  });
+  const usable = scored.filter(entry => entry.quality.shouldUse || /附件，仅作为内部事实提取依据/u.test(entry.item.content));
+  const selected = (usable.length >= Math.min(3, items.length) ? usable : scored)
+    .sort((a, b) => b.item.score - a.item.score)
+    .filter(entry => {
+      const key = evidenceDedupeKey(entry.item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, limit);
+  if (diagnostics) {
+    const totalNoise = scored.reduce((sum, entry) => sum + entry.quality.noiseScore, 0);
+    const totalDensity = scored.reduce((sum, entry) => sum + entry.quality.factDensity, 0);
+    diagnostics.evidence.raw += items.length;
+    diagnostics.evidence.used += selected.length;
+    diagnostics.evidence.filteredNoise += Math.max(0, scored.length - usable.length);
+    diagnostics.evidence.avgNoiseScore = scored.length ? Number((totalNoise / scored.length).toFixed(3)) : 0;
+    diagnostics.evidence.avgFactDensity = scored.length ? Number((totalDensity / scored.length).toFixed(3)) : 0;
+  }
+  return selected.map(entry => entry.item);
+}
+
+
+export function evidenceLine(item: DocumentEvidence, index = 0): string {
+  return `- ${readableSourceLabel(item, index)}：${cleanEvidenceText(item.content).replace(/\s+/gu, ' ').slice(0, 260)}`;
+}
+
+function resourceKind(filePath: string, processingType?: string): ResourceEvidence['kind'] {
+  const ext = path.extname(filePath).toLowerCase();
+  if (processingType === 'drawing' || /地图|map|drawing|design/iu.test(filePath)) return 'map';
+  if (['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) return 'image';
+  if (processingType === 'table') return 'table';
+  if (['.xls', '.xlsx', '.csv'].includes(ext)) return 'spreadsheet';
+  if (['.pdf', '.doc', '.docx'].includes(ext)) return 'document';
+  if (ext && !['.md', '.txt'].includes(ext)) return 'attachment';
+  return 'text';
+}
+
+function semanticResourceTitle(filePath: string, kind: ResourceEvidence['kind']) {
+  const name = path.basename(filePath).replace(/\.[^.]+$/u, '');
+  if (kind === 'map') return name.replace(/^地图-/u, '').replace(/-完整地图$/u, '完整地图');
+  if (kind === 'image') return name.replace(/-/gu, ' ');
+  if (kind === 'spreadsheet') return `${name}（结构化表格）`;
+  if (kind === 'document') return `${name}（文档附件）`;
+  return name;
+}
+
+function relatedFactsForResource(item: DocumentEvidence, chapter?: DocumentTemplateChapter) {
+  const haystack = `${item.filePath}\n${item.content}`;
+  const candidates = [...(chapter?.requiredFacts || []), '表格数据', '规范要求', '项目事实', '附件资料', '视觉资料', '图片资料'];
+  return [...new Set(candidates.filter(fact => evidenceMatchesFact(item, fact) || haystack.includes(fact)))];
+}
+
+function resourceContentUse(kind: ResourceEvidence['kind']) {
+  if (kind === 'map') return '作为视觉/地图证据，用于说明空间关系、区域划分、点位、路线或布局。';
+  if (kind === 'image') return '作为图片证据，用于视觉说明、参考图或章节配图。';
+  if (kind === 'spreadsheet' || kind === 'table') return '作为表格/数据证据，用于字段对比、明细、数量和结构化结论。';
+  if (kind === 'document') return '作为 PDF/Word 文档证据，用于提取规范、事实、说明、约束和附件来源。';
+  if (kind === 'attachment') return '作为附件证据，用于提供补充来源、文件级约束或可追溯引用。';
+  return '作为文本证据，用于事实抽取、章节论据和来源引用。';
+}
+
+function emptyEvidenceByKind(): Record<ResourceEvidence['kind'], ResourceEvidence[]> {
+  return { map: [], image: [], table: [], document: [], spreadsheet: [], text: [], attachment: [] };
+}
+
+/** 构建章节证据包，将原始证据分类为文本片段和结构化资源（图片、表格、文档、地图等） */
+export function buildEvidenceBundle(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[]): EvidenceBundle {
+  const textEvidence = evidence.slice(0, 16);
+  const resourceMap = new Map<string, ResourceEvidence>();
+  for (const item of evidence) {
+    const kind = resourceKind(item.filePath, item.processingType);
+    const existing = resourceMap.get(item.filePath);
+    const resource: ResourceEvidence = existing || {
+      filePath: item.filePath,
+      kind,
+      roleId: item.roleId,
+      processingType: item.processingType,
+      score: item.score,
+      semanticTitle: semanticResourceTitle(item.filePath, kind),
+      contentUse: resourceContentUse(kind),
+      relatedFacts: [],
+      relatedChapters: [],
+      snippets: [],
+    };
+    resource.score = Math.max(resource.score, item.score);
+    resource.relatedFacts = [...new Set([...resource.relatedFacts, ...relatedFactsForResource(item, chapter)])];
+    resource.relatedChapters = [...new Set([...resource.relatedChapters, chapter.title])];
+    const snippet = item.content.replace(/\s+/gu, ' ').slice(0, 320);
+    if (snippet && resource.snippets.length < 3 && !resource.snippets.includes(snippet)) resource.snippets.push(snippet);
+    resourceMap.set(item.filePath, resource);
+  }
+  const resources = [...resourceMap.values()].sort((a, b) => b.score - a.score);
+  const byKind = emptyEvidenceByKind();
+  for (const resource of resources) byKind[resource.kind].push(resource);
+  const summary = [
+    `内部资料包：文本片段 ${textEvidence.length} 条、结构化资料 ${resources.length} 个。`,
+    `资料类型分布：文本 ${byKind.text.length}、文档 ${byKind.document.length}、表格/数据 ${byKind.spreadsheet.length + byKind.table.length}、图片 ${byKind.image.length}、视觉/地图 ${byKind.map.length}、其他 ${byKind.attachment.length}。`,
+    '正文必须只写资料中的事实、参数、数量、做法和控制措施，不得出现文件名、来源清单或后台证据描述。',
+  ].filter(Boolean).join('\n');
+  return { chapterId: chapter.id, textEvidence, resources, byKind, summary };
+}
+
+export function evidenceBundlePrompt(bundle: EvidenceBundle) {
+  const resourceLines = bundle.resources.slice(0, 20).map((item, index) => [
+    `- 资料：${readableSourceLabel(item, index)}`,
+    `  资料类型：${item.kind}`,
+    `  正文用途：${item.contentUse}`,
+    item.relatedFacts.length ? `  可用事实方向：${item.relatedFacts.join('、')}` : '',
+    item.snippets.length ? `  可用内容：${item.snippets.map(cleanEvidenceText).filter(Boolean).join(' / ')}` : '',
+  ].filter(Boolean).join('\n')).join('\n');
+  const textLines = bundle.textEvidence.map((item, index) => `${readableSourceLabel(item, index)}\n类型：${item.processingType || 'reference'}\n章节/片段：${item.sectionTitle?.replace(FILE_NAME_RE, '') || '资料片段'}\n内容：${cleanEvidenceText(item.content).replace(/\s+/gu, ' ').slice(0, 900)}`).join('\n\n---\n\n');
+  return [bundle.summary, resourceLines ? `结构化资料：\n${resourceLines}` : '', textLines ? `文本/附件片段：\n${textLines}` : ''].filter(Boolean).join('\n\n');
+}

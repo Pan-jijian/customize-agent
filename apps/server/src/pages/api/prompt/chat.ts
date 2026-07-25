@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createProvider } from '@customize-agent/llm';
 import { resolveProtocol } from '@customize-agent/runtime';
-import { getConfigStore } from '@/services/configService';
+import { getConfigStore } from '@/services/common/configService';
 
 type LlmMessage = { role: 'system' | 'user' | 'assistant' | 'tool'; content: string };
 type PromptChatRole = 'user' | 'assistant';

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createProvider } from '@customize-agent/llm';
 import { resolveProtocol } from '@customize-agent/runtime';
-import { getConfigStore } from '@/services/configService';
+import { getConfigStore } from '@/services/common/configService';
 
 export const config = {
   api: { bodyParser: { sizeLimit: '20mb' } },

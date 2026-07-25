@@ -3,7 +3,7 @@ import { platform } from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
+import { getMultiProjectManager, getProjectRoot } from '@/services/knowledge/kbService';
 
 /** 根据操作系统调用系统命令打开文件或目录 */
 function openPath(targetPath: string) {

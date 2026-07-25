@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { startGenerateDocumentTask } from '@/services/generatedDocumentService';
-import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
+import { startGenerateDocumentTask } from '@/services/document-core/generatedDocumentService';
+import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
 
 /**
  * 生成文档 API 处理器

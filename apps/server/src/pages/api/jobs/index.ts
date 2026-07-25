@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getProjectRoot } from '@/services/kbService';
-import { listActiveKbOperations, listKbOperations } from '@/services/kbOperationLog';
+import { getProjectRoot } from '@/services/knowledge/kbService';
+import { listActiveKbOperations, listKbOperations } from '@/services/knowledge/kbOperationLog';
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });

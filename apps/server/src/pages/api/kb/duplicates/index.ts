@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
+import { getMultiProjectManager, getProjectRoot } from '@/services/knowledge/kbService';
 
 /** 查重 API：按 contentHash 分组，返回存在多个副本的文件列表 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {

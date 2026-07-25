@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { discoverKnowledgeFiles, getProjectRoot } from '@/services/kbService';
-import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
+import { discoverKnowledgeFiles, getProjectRoot } from '@/services/knowledge/kbService';
+import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });

@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { deleteGeneratedDocument, getGeneratedDocument, updateGeneratedDocument } from '@/services/generatedDocumentService';
+import { deleteGeneratedDocument, getGeneratedDocument, updateGeneratedDocument } from '@/services/document-core/generatedDocumentService';
 
 export const config = {
   api: { bodyParser: { sizeLimit: '50mb' } },

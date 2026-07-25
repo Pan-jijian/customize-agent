@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getMultiProjectManager, getProjectRoot, listKnowledgeFiles } from '@/services/kbService';
-import { upsertKbOperation } from '@/services/kbOperationLog';
-import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
+import { getMultiProjectManager, getProjectRoot, listKnowledgeFiles } from '@/services/knowledge/kbService';
+import { upsertKbOperation } from '@/services/knowledge/kbOperationLog';
+import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
 
 async function kbFilesIndexHandler(req: NextApiRequest, res: NextApiResponse) {
   if (!['GET', 'DELETE', 'POST'].includes(req.method!)) return res.status(405).json({ error: 'Method not allowed' });
@@ -24,7 +24,19 @@ async function kbFilesIndexHandler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'POST' && req.query.reindex !== '1') return res.status(400).json({ error: 'reindex=1 is required' });
 
   const project = await getMultiProjectManager().getProject(projectRoot);
-  if (req.method === 'POST' || req.query.reindex === '1') await project.incrementalIndex();
+
+  if (req.method === 'POST' || req.query.reindex === '1') {
+    if (req.query.reindex !== '1') return res.status(400).json({ error: 'reindex=1 is required' });
+    await project.incrementalIndex();
+    const category = req.query.category as string | undefined;
+    const page = parseInt((req.query.page as string) || '1', 10);
+    const limit = parseInt((req.query.limit as string) || '50', 10);
+    const files = listKnowledgeFiles(projectRoot, { category });
+    const vectorStatus = project.getVectorStatus();
+    const total = files.length;
+    const paged = files.slice((page - 1) * limit, page * limit);
+    return res.status(200).json({ files: paged, total, page, limit, vectorStatus });
+  }
 
   if (req.method === 'DELETE') {
     const { relativePath, relativePaths, folderPath, folderPaths, all } = req.body;

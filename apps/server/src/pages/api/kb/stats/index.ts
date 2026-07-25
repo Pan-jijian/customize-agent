@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
+import { getMultiProjectManager, getProjectRoot } from '@/services/knowledge/kbService';
 
 /** 知识库统计 API：返回文件统计和向量引擎状态 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {

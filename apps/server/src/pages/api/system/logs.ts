@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { clearErrorLogs, listErrorLogs } from '@/services/errorLogService';
-import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
+import { clearErrorLogs, listErrorLogs } from '@/services/common/errorLogService';
+import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
 
 /** 错误日志 API：GET 获取日志列表，DELETE 清空所有错误日志 */
 async function handler(req: NextApiRequest, res: NextApiResponse) {

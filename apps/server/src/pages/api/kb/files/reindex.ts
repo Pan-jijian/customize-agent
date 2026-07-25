@@ -1,9 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import * as fs from 'fs';
 import * as path from 'path';
-import { getProjectRoot } from '@/services/kbService';
-import { getActiveKnowledgeIndex, startKnowledgeIndex } from '@/services/kbIndexWorkerService';
-import { getKbOperation, upsertKbOperation } from '@/services/kbOperationLog';
+import { getProjectRoot } from '@/services/knowledge/kbService';
+import { getActiveKnowledgeIndex, startKnowledgeIndex } from '@/services/knowledge/kbIndexWorkerService';
+import { getKbOperation, upsertKbOperation } from '@/services/knowledge/kbOperationLog';
 
 /** 单个文件重索引 API：提交后台任务，对指定文件重新解析、分块和入库 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {

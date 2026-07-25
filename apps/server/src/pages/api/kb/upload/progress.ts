@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getKbUploadProgress } from '@/services/kbUploadProgress';
-import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
+import { getKbUploadProgress } from '@/services/knowledge/kbUploadProgress';
+import { getMultiProjectManager, getProjectRoot } from '@/services/knowledge/kbService';
 
 /** 将索引任务状态映射为前端展示阶段 */
 function mapJobStage(status: string) {

@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getConfigStore } from '@/services/configService';
+import { getConfigStore } from '@/services/common/configService';
 import { detectProtocol } from '@customize-agent/runtime';
-import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
+import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
 
 /**
  * Provider（AI 提供商）配置 API 处理器

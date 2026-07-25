@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { deleteDocumentTemplate, duplicateDocumentTemplate, listDocumentTemplates, saveDocumentTemplate, validateDocumentTemplateRun, type DocumentTemplate } from '@/services/documentWorkflowService';
+import { deleteDocumentTemplate, duplicateDocumentTemplate, listDocumentTemplates, saveDocumentTemplate, validateDocumentTemplateRun, type DocumentTemplate } from '@/services/document-workflow';
 
 /**
  * 文档模板 API 处理器

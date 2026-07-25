@@ -335,7 +335,7 @@ export default function DocumentsPage() {
     <div>
       {step.subtitle && <div style={{ marginBottom: 4 }}><Tag>{step.subtitle}</Tag></div>}
       <div>{step.description}</div>
-      <div style={{ marginTop: 4 }}>{step.subSteps.map(item => <div key={item.key} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--colorTextSecondary)' }}>{subIcon(item.status)}<span>{item.title}</span></div>)}</div>
+      <div style={{ marginTop: 4 }}>{step.subSteps.map(item => <div key={item.key} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: item.status === 'process' ? 'var(--colorPrimary)' : 'var(--colorTextSecondary)' }}>{subIcon(item.status)}<span>{item.title}</span></div>)}</div>
     </div>
   );
   const flowIcon = (s: FlowStep) => s.status === 'process' ? <LoadingOutlined /> : s.status === 'warning' ? <SafetyCertificateOutlined style={{ color: 'var(--colorWarning)' }} /> : s.icon;
@@ -352,6 +352,17 @@ export default function DocumentsPage() {
     return step.subSteps.map((s, i) => i < first || first === -1 ? { ...s, status: 'finish' as const } : i === first ? { ...s, status: 'process' as const } : s);
   };
   const stageToFlowStatus = (status: GeneratedDocumentDraft['executionStages'][number]['status']): FlowStepStatus => status === 'failed' ? 'error' : status === 'running' ? 'process' : status === 'fallback' ? 'warning' : 'finish';
+  const stageDetailsToSubSteps = (stage: GeneratedDocumentDraft['executionStages'][number], status: FlowStepStatus, index: number): FlowSubStep[] => {
+    const details = Array.isArray(stage.details) ? stage.details.filter(Boolean) : [];
+    const progressText = stage.progress ? `${stage.progress.label || '进度'}：${stage.progress.current}/${stage.progress.total}` : '';
+    const items = [...(progressText ? [progressText] : []), ...details];
+    if (items.length === 0) return [{ key: `stage-${index}`, title: stagePromptName(stage) ? `提示词：${stagePromptName(stage)}` : stageActorName(stage), status }];
+    return items.slice(0, 8).map((title, itemIndex) => ({
+      key: `stage-${index}-${itemIndex}`,
+      title,
+      status: status === 'process' && itemIndex === 0 ? 'process' : status === 'error' && itemIndex === 0 ? 'error' : status === 'warning' ? 'warning' : status === 'process' ? 'finish' : status,
+    }));
+  };
   const stageIcon = (type: GeneratedDocumentDraft['executionStages'][number]['type']) => {
     if (type === 'role_binding') return <ApartmentOutlined />;
     if (type === 'knowledge_retrieval') return <DatabaseOutlined />;
@@ -377,7 +388,7 @@ export default function DocumentsPage() {
           description: stage.message || '',
           status,
           icon: stageIcon(stage.type),
-          subSteps: [{ key: `stage-${index}`, title: stagePromptName(stage) ? `提示词：${stagePromptName(stage)}` : stageActorName(stage), status }],
+          subSteps: stageDetailsToSubSteps(stage, status, index),
         } satisfies FlowStep;
       });
       if (record.status === 'generating' && steps.length > 0 && steps.at(-1)?.status === 'finish') steps[steps.length - 1] = { ...steps[steps.length - 1], status: 'process' as const };

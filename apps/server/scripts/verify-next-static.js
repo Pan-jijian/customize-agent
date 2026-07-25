@@ -38,4 +38,23 @@ for (const file of files) {
   }
 }
 
-console.log(`Next static assets verified: ${files.size} chunks`);
+const pagesManifestPath = path.join(nextDir, 'server', 'pages-manifest.json');
+if (!fs.existsSync(pagesManifestPath)) {
+  console.error('[server] Missing Next pages manifest: .next/server/pages-manifest.json');
+  console.error('[server] Run `pnpm build` in apps/server before `pnpm start`.');
+  process.exit(1);
+}
+const pagesManifest = JSON.parse(fs.readFileSync(pagesManifestPath, 'utf8'));
+for (const [route, file] of Object.entries(pagesManifest)) {
+  const pagePath = path.join(nextDir, 'server', file);
+  if (!fs.existsSync(pagePath)) {
+    console.error(`Missing page artifact for ${route}: .next/server/${file}`);
+    process.exit(1);
+  }
+}
+if (!pagesManifest['/overview']) {
+  console.error('[server] Missing required dashboard page in pages manifest: /overview');
+  process.exit(1);
+}
+
+console.log(`Next static assets verified: ${files.size} chunks, ${Object.keys(pagesManifest).length} pages`);

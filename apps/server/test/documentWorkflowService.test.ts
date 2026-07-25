@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { listDocumentTemplates, validateDocumentTemplateRun } from '../src/services/documentWorkflowService';
+import { listDocumentTemplates, validateDocumentTemplateRun } from '../src/services/document-workflow';
 
 describe('document workflow templates', () => {
   it('does not expose built-in demo templates', async () => {

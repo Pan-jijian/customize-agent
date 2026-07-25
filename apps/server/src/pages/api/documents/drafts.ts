@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { listDocumentDrafts, saveDocumentDraft } from '@/services/documentStoreService';
-import type { GeneratedDocumentDraft } from '@/services/documentWorkflowService';
+import { listDocumentDrafts, saveDocumentDraft } from '@/services/document-core/documentStoreService';
+import type { GeneratedDocumentDraft } from '@/services/document-workflow';
 
 /**
  * 文档草稿 API 处理器

@@ -122,10 +122,7 @@ export class KnowledgeBaseManager {
   async consumePendingIndexJobs(options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer'; limit?: number; waitForUploadId?: string } = {}): Promise<DiffResult> {
     this.initialize();
     const jobs = this.store.listPendingIndexJobs(options.limit ?? 500);
-    if (jobs.length === 0) {
-      if (options.waitForUploadId && this.uploadSessionIsOpen(options.waitForUploadId)) return this.emptyDiff();
-      return this.incrementalIndex(options);
-    }
+    if (jobs.length === 0) return this.emptyDiff();
     return this.incrementalIndex({ ...options, onlyRelativePaths: jobs.map(job => job.relativePath) });
   }
 
@@ -336,12 +333,12 @@ export class KnowledgeBaseManager {
     }
   }
 
-  search(query: string, limit = 10): ChunkSearchResult[] {
-    return this.store.searchChunks(query, limit);
+  search(query: string, limit = 10, filters?: SearchFilters): ChunkSearchResult[] {
+    return this.store.searchChunks(query, limit, { filePaths: filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined) });
   }
 
-  keywordSearchItems(query: string, limit = 10): FederatedSearchItem[] {
-    return this.store.searchChunks(query, limit).map(result => this.toFederatedItem(result, 'keyword'));
+  keywordSearchItems(query: string, limit = 10, filters?: SearchFilters): FederatedSearchItem[] {
+    return this.store.searchChunks(query, limit, { filePaths: filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined) }).map(result => this.toFederatedItem(result, 'keyword'));
   }
 
   expandContext(item: FederatedSearchItem): FederatedSearchItem {
@@ -373,17 +370,20 @@ export class KnowledgeBaseManager {
     };
   }
 
-  async hybridSearch(query: string, options: { limit?: number; filters?: SearchFilters; collections?: string[]; weights?: RetrievalWeights } = {}): Promise<FederatedResult> {
+  async hybridSearch(query: string, options: { limit?: number; filters?: SearchFilters; collections?: string[]; weights?: RetrievalWeights; generationMode?: boolean } = {}): Promise<FederatedResult> {
     const limit = options.limit ?? 10;
     const start = Date.now();
     const weights = this.retrievalWeights(options.weights);
-    const rewrittenQueries = await this.rewriteQueries(query);
+    const rewrittenQueries = options.generationMode ? [query.trim()].filter(Boolean) : await this.rewriteQueries(query);
     const rankedLists: Array<{ source: 'keyword' | 'vector'; items: FederatedSearchItem[]; queryIndex: number }> = [];
+    const keywordMultiplier = options.generationMode ? 2 : 3;
+    const vectorMultiplier = options.generationMode ? 3 : 6;
+    const vectorQueryLimit = options.generationMode ? 1 : 3;
     for (const [queryIndex, rewritten] of rewrittenQueries.entries()) {
-      rankedLists.push({ source: 'keyword', items: this.keywordSearchItems(rewritten, limit * 3), queryIndex });
-      if (queryIndex < 3) {
+      rankedLists.push({ source: 'keyword', items: this.keywordSearchItems(rewritten, limit * keywordMultiplier, options.filters), queryIndex });
+      if (queryIndex < vectorQueryLimit) {
         try {
-          rankedLists.push({ source: 'vector', items: (await this.semanticSearch(rewritten, { ...options, limit: limit * 6 })).results.slice(0, limit * 3), queryIndex });
+          rankedLists.push({ source: 'vector', items: (await this.semanticSearch(rewritten, { ...options, limit: limit * vectorMultiplier })).results.slice(0, limit * keywordMultiplier), queryIndex });
         } catch { /* 向量搜索在混合搜索中是可选的 */ }
       }
     }
@@ -497,7 +497,7 @@ export class KnowledgeBaseManager {
     const targetPath = this.resolveKbRelativePath(relativePath);
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
     fs.copyFileSync(resolvedSource, targetPath);
-    return this.incrementalIndex();
+    return this.incrementalIndex({ onlyRelativePaths: [relativePath] });
   }
 
   getUploadRelativePath(fileName: string, targetRelativePath?: string): string {
@@ -544,8 +544,8 @@ export class KnowledgeBaseManager {
   }
 
   async uploadFiles(files: Array<{ fileName: string; content: Buffer; targetRelativePath?: string }>, onProgress?: (progress: KnowledgeIndexProgress) => void, options: { vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
-    await this.stageUploadedFiles(files);
-    return this.incrementalIndex({ onProgress, vectorMode: options.vectorMode });
+    const jobs = await this.stageUploadedFiles(files);
+    return this.incrementalIndex({ onProgress, vectorMode: options.vectorMode, onlyRelativePaths: jobs.map(job => job.relativePath) });
   }
 
   listFailedFiles(): DiffResult['skippedFiles'] {

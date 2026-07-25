@@ -289,9 +289,7 @@ program.action(async () => {
   let kbStatus = '已初始化';
   const kbInitialized = (async () => {
     try {
-      const projectKb = await kbManager.getProject(PROJECT_ROOT);
-      await projectKb.incrementalIndex();
-      await kbManager.getGlobalKB();
+      await kbManager.getProject(PROJECT_ROOT);
       kbStatus = '已初始化';
     } catch {
       kbStatus = '已初始化';

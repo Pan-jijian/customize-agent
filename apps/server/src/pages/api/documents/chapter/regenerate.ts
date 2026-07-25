@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { regenerateDocumentChapter } from '@/services/documentWorkflowService';
+import { regenerateDocumentChapter } from '@/services/document-workflow';
 
 /**
  * 文档章节重新生成 API 处理器

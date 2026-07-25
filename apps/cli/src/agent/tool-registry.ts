@@ -251,7 +251,6 @@ function outlineFromRequirement(requirement: string) {
 
 async function generateConstructionDesignMarkdown(args: { requirement: string; projectRoot: string; manager: MultiProjectManager; provider?: ILLMProvider; maxEvidencePerChapter: number }): Promise<string> {
   const project = await args.manager.getProject(args.projectRoot);
-  await project.incrementalIndex();
   const inventory = kbInventoryMarkdown(project.listFiles());
   const chapterBlocks: string[] = [];
   const usedSources = new Map<string, number>();
@@ -397,7 +396,6 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
     const manager = new MultiProjectManager(undefined, provider as LLMSearchProvider);
     try {
       const project = await manager.getProject(knowledgeRoot);
-      await project.incrementalIndex();
       return kbInventoryMarkdown(project.listFiles());
     } finally {
       await manager.shutdown();
@@ -411,7 +409,6 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
     const manager = new MultiProjectManager(undefined, provider as LLMSearchProvider);
     try {
       const project = await manager.getProject(knowledgeRoot);
-      await project.incrementalIndex();
       const detail = project.getFileDetail(String(args.relativePath));
       if (!detail) return `No knowledge base file detail found for ${String(args.relativePath)}.`;
       const maxChunks = typeof args.maxChunks === 'number' ? Math.max(1, Math.min(200, args.maxChunks)) : 30;

@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getConfigStore } from '@/services/configService';
+import { getConfigStore } from '@/services/common/configService';
 import type { EmbeddingConfig } from '@customize-agent/runtime';
 
 /** 脱敏处理 Embedding 配置中的 API Key */

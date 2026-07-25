@@ -1,6 +1,6 @@
 import { ALL_CATEGORIES } from '../constants.js';
 import { globalCollectionName, projectCollectionName } from '../vector/collection-manager.js';
-import type { VectorSearchResult, VectorStoreInterface } from '../vector/types.js';
+import type { VectorFilterValue, VectorSearchResult, VectorStoreInterface } from '../vector/types.js';
 
 /** 搜索范围：项目级、全局级或全部 */
 export type SearchScope = 'project' | 'global' | 'all';
@@ -54,6 +54,7 @@ export interface FederatedResult {
 export interface SearchFilters {
   category?: string;
   filePath?: string;
+  filePaths?: string[];
 }
 
 /** 各检索方式权重配置 */
@@ -142,11 +143,13 @@ export class FederationSearch {
     return query.collections ? names.filter(name => query.collections?.includes(name)) : names;
   }
 
-  private buildFilter(filters?: SearchFilters): Record<string, string | number | boolean> | undefined {
+  private buildFilter(filters?: SearchFilters): Record<string, VectorFilterValue> | undefined {
     if (!filters) return undefined;
-    const where: Record<string, string | number | boolean> = {};
+    const where: Record<string, VectorFilterValue> = {};
+    const filePaths = filters.filePaths?.filter(Boolean);
     if (filters.category) where.category = filters.category;
-    if (filters.filePath) where.file_path = filters.filePath;
+    if (filePaths?.length) where.file_path = filePaths;
+    else if (filters.filePath) where.file_path = filters.filePath;
     return Object.keys(where).length > 0 ? where : undefined;
   }
 

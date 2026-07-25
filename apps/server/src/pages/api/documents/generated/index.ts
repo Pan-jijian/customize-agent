@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { abortGeneratedDocument, deleteGeneratedDocument, getGeneratedDocument, listGeneratedDocuments, startGenerateDocumentTask, updateGeneratedDocument } from '@/services/generatedDocumentService';
+import { abortGeneratedDocument, deleteGeneratedDocument, getGeneratedDocument, listGeneratedDocuments, startGenerateDocumentTask, updateGeneratedDocument } from '@/services/document-core/generatedDocumentService';
 
 /**
  * 生成文档列表 API 处理器

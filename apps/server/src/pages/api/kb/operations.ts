@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getProjectRoot } from '@/services/kbService';
-import { clearKbOperations, deleteKbOperation, listKbOperations } from '@/services/kbOperationLog';
+import { getProjectRoot } from '@/services/knowledge/kbService';
+import { clearKbOperations, deleteKbOperation, listKbOperations } from '@/services/knowledge/kbOperationLog';
 
 /** 操作记录 API：GET 获取操作历史，DELETE 删除单条或清空所有记录 */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {

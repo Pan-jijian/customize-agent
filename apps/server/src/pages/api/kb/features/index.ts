@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getConfigStore } from '@/services/configService';
+import { getConfigStore } from '@/services/common/configService';
 
 /** 知识库功能特性 API：返回当前使用的向量引擎、嵌入模型和解析器配置 */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {

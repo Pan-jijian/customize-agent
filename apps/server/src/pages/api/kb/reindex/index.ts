@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getProjectRoot } from '@/services/kbService';
-import { getActiveKnowledgeIndex, startKnowledgeIndex } from '@/services/kbIndexWorkerService';
-import { getKbOperation, getLatestKbOperation, upsertKbOperation } from '@/services/kbOperationLog';
+import { getProjectRoot } from '@/services/knowledge/kbService';
+import { getActiveKnowledgeIndex, startKnowledgeIndex } from '@/services/knowledge/kbIndexWorkerService';
+import { getKbOperation, getLatestKbOperation, upsertKbOperation } from '@/services/knowledge/kbOperationLog';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {

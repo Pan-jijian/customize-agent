@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import * as fs from 'fs';
 import * as path from 'path';
-import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
+import { getMultiProjectManager, getProjectRoot } from '@/services/knowledge/kbService';
 
 /** 根据相对路径中的中文目录名推断文件分类 */
 function categoryFromRelativePath(relativePath: string) {

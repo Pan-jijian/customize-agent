@@ -1,5 +1,23 @@
 # @customize-agent/knowledge
 
+## 4.0.31
+
+### Patch Changes
+
+- Fix npm install compatibility and block degenerate repeated-token document output.
+
+## 4.0.30
+
+### Patch Changes
+
+- Harden document generation and knowledge-base boundaries: remove implicit indexing during generation/search flows, restrict document evidence retrieval to template-bound indexed files, remove generated-content knowledge-base ingestion paths, and improve workflow concurrency behavior.
+
+## 4.0.29
+
+### Patch Changes
+
+- Add generation-mode knowledge search options to reduce query rewriting overhead and allow workflow searches to skip redundant freshness checks when appropriate.
+
 ## 4.0.28
 
 ### Patch Changes

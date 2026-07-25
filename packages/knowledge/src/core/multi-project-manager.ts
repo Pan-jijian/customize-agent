@@ -17,7 +17,6 @@ export class MultiProjectManager {
   private readonly registry: ProjectRegistry;
   private readonly configManager: ProjectConfigManager;
   private readonly projects = new Map<string, KnowledgeBaseManager>();
-  private readonly lastSearchIndexCheck = new Map<string, number>();
   private globalKB?: KnowledgeBaseManager;
 
   constructor(storageRoot = path.join(os.homedir(), USER_DATA_DIR), llmProvider?: LLMSearchProvider) {
@@ -62,7 +61,6 @@ export class MultiProjectManager {
 
     const manager = new KnowledgeBaseManager({ scope: 'global', storageRoot: this.storageRoot, llmProvider: this.llmProvider });
     manager.initialize();
-    await manager.incrementalIndex();
     this.globalKB = manager;
     return manager;
   }
@@ -71,25 +69,24 @@ export class MultiProjectManager {
     return this.registry.list();
   }
 
-  async search(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope; weights?: RetrievalWeights } = {}): Promise<FederatedResult> {
+  async search(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope; filters?: SearchFilters; weights?: RetrievalWeights; generationMode?: boolean } = {}): Promise<FederatedResult> {
     const limit = options.limit ?? 10;
     const scope = options.scope ?? 'project';
     const project = await this.getProject(projectRoot);
-    await this.ensureFreshForSearch(projectRoot, project);
 
-    if (scope === 'project') return project.hybridSearch(query, { limit, weights: options.weights });
+    if (scope === 'project') return project.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode });
 
     const projectResults = scope === 'all'
-      ? await project.hybridSearch(query, { limit, weights: options.weights })
+      ? await project.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode })
       : { results: [], scopesSearched: [], queryTimeMs: 0 } as FederatedResult;
 
     if (scope === 'global') {
       const global = await this.getGlobalKB();
-      return global.hybridSearch(query, { limit, weights: options.weights });
+      return global.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode });
     }
 
     const global = await this.getGlobalKB();
-    const globalResults = await global.hybridSearch(query, { limit, weights: options.weights });
+    const globalResults = await global.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode });
     const merged = new FederationSearch().merge([...projectResults.results, ...globalResults.results], limit, 'all');
     return {
       ...merged,
@@ -100,7 +97,6 @@ export class MultiProjectManager {
   async semanticSearch(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope; filters?: SearchFilters; collections?: string[] } = {}): Promise<FederatedResult> {
     const scope = options.scope ?? 'project';
     const project = await this.getProject(projectRoot);
-    await this.ensureFreshForSearch(projectRoot, project);
     if (scope === 'project') {
       return project.semanticSearch(query, options);
     }
@@ -175,15 +171,6 @@ export class MultiProjectManager {
     this.registry.close();
   }
 
-  private async ensureFreshForSearch(projectRoot: string, project: KnowledgeBaseManager): Promise<void> {
-    const now = Date.now();
-    const key = path.resolve(projectRoot);
-    const ttlMs = Number(process.env.KB_SEARCH_INDEX_TTL_MS ?? 30000);
-    const last = this.lastSearchIndexCheck.get(key) ?? 0;
-    if (now - last < ttlMs) return;
-    this.lastSearchIndexCheck.set(key, now);
-    await project.incrementalIndex({ vectorMode: 'defer' });
-  }
 
   private mergeDebug(projectDebug: FederatedResult['debug'], globalDebug: FederatedResult['debug']): FederatedResult['debug'] {
     if (!projectDebug && !globalDebug) return undefined;

@@ -1,5 +1,54 @@
 # server
 
+## 4.0.76
+
+### Patch Changes
+
+- Fix npm install compatibility and block degenerate repeated-token document output.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.31
+
+## 4.0.75
+
+### Patch Changes
+
+- Fix npm package metadata by publishing workspace dependencies as resolved semver ranges.
+
+## 4.0.74
+
+### Patch Changes
+
+- Optimize document generation budget controls and release updated server and CLI packages.
+
+## 4.0.73
+
+### Patch Changes
+
+- Optimize document generation quality workflow with deterministic local patch repair, structured final review, stronger JSON parsing, diagnostics linkage, and LLM concurrency/performance safeguards.
+
+## 4.0.72
+
+### Patch Changes
+
+- Harden document generation and knowledge-base boundaries: remove implicit indexing during generation/search flows, restrict document evidence retrieval to template-bound indexed files, remove generated-content knowledge-base ingestion paths, and improve workflow concurrency behavior.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.30
+
+## 4.0.71
+
+### Patch Changes
+
+- Improve document workflow generation by moving explicit outline subsection planning to LLM-driven preplanning, preserving user-provided primary chapters without hardcoded domain structures.
+- Add detailed workflow progress metadata and frontend sub-step rendering so long-running document generation stages show dynamic status, details, and per-chapter progress.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.29
+
+## 4.0.70
+
+### Patch Changes
+
+- Refactor server services into modular domains, centralize shared types and constants, and generalize document generation quality rules to avoid domain-specific pollution.
+
 ## 4.0.69
 
 ### Patch Changes

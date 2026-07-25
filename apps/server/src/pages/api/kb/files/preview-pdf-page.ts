@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
+import { getMultiProjectManager, getProjectRoot } from '@/services/knowledge/kbService';
 
 export const config = { api: { responseLimit: false } };
 

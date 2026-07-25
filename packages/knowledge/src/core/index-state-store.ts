@@ -455,17 +455,22 @@ export class IndexStateStore {
    * @param limit 返回结果数量上限
    * @returns 搜索结果列表（按相关性得分排序）
    */
-  searchChunks(query: string, limit = 10): ChunkSearchResult[] {
+  searchChunks(query: string, limit = 10, filters: { filePaths?: string[] } = {}): ChunkSearchResult[] {
     const terms = this.expandSearchTerms(query);
     if (terms.length === 0) return [];
+    const filePaths = [...new Set((filters.filePaths ?? []).filter(Boolean))];
     const results = [
-      ...(this.ftsEnabled ? this.searchChunksFts(terms, limit) : []),
-      ...this.searchChunksLike(terms, limit),
+      ...(this.ftsEnabled ? this.searchChunksFts(terms, limit, filePaths) : []),
+      ...this.searchChunksLike(terms, limit, filePaths),
     ];
     return this.mergeKeywordResults(results, limit);
   }
 
-  private searchChunksFts(terms: string[], limit: number): ChunkSearchResult[] {
+  private filePathFilterClause(filePaths: string[], column = 'relative_path') {
+    return filePaths.length > 0 ? ` AND ${column} IN (${filePaths.map(() => '?').join(', ')})` : '';
+  }
+
+  private searchChunksFts(terms: string[], limit: number, filePaths: string[]): ChunkSearchResult[] {
     try {
       const matchQuery = this.toFtsQuery(terms);
       if (!matchQuery) return [];
@@ -473,10 +478,10 @@ export class IndexStateStore {
         SELECT c.rowid, c.*, bm25(kb_chunks_fts, 1.2, 0.8, 0.6, 1.0, 2.0) as bm25_score
         FROM kb_chunks_fts
         INNER JOIN kb_chunks c ON c.id = kb_chunks_fts.id
-        WHERE kb_chunks_fts MATCH ?
+        WHERE kb_chunks_fts MATCH ?${this.filePathFilterClause(filePaths, 'c.relative_path')}
         ORDER BY bm25_score ASC
         LIMIT ?
-      `).all(matchQuery, limit * 8) as Array<Record<string, unknown>>;
+      `).all(matchQuery, ...filePaths, limit * 8) as Array<Record<string, unknown>>;
       return rows
         .map(row => {
           const keyword = this.scoreChunkDetailed(this.searchableRowText(row), terms);
@@ -491,13 +496,13 @@ export class IndexStateStore {
     }
   }
 
-  private searchChunksLike(terms: string[], limit: number): ChunkSearchResult[] {
+  private searchChunksLike(terms: string[], limit: number, filePaths: string[]): ChunkSearchResult[] {
     const rows = this.db.prepare(`
       SELECT rowid, * FROM kb_chunks
-      WHERE ${terms.map(() => '(LOWER(search_content) LIKE ? OR LOWER(content) LIKE ? OR LOWER(relative_path) LIKE ? OR LOWER(category) LIKE ? OR LOWER(format) LIKE ? OR LOWER(COALESCE(title_path, \'\')) LIKE ? OR LOWER(COALESCE(chunk_kind, \'\')) LIKE ?)').join(' OR ')}
+      WHERE (${terms.map(() => '(LOWER(search_content) LIKE ? OR LOWER(content) LIKE ? OR LOWER(relative_path) LIKE ? OR LOWER(category) LIKE ? OR LOWER(format) LIKE ? OR LOWER(COALESCE(title_path, \'\')) LIKE ? OR LOWER(COALESCE(chunk_kind, \'\')) LIKE ?)').join(' OR ')})${this.filePathFilterClause(filePaths)}
       ORDER BY created_at DESC
       LIMIT ?
-    `).all(...terms.flatMap(term => [`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`]), limit * 6) as Array<Record<string, unknown>>;
+    `).all(...terms.flatMap(term => [`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`]), ...filePaths, limit * 6) as Array<Record<string, unknown>>;
 
     return rows
       .map(row => {

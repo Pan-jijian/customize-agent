@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
+import { getMultiProjectManager, getProjectRoot } from '@/services/knowledge/kbService';
 
 /** 忽略规则 API：GET 获取规则列表，POST 新增忽略规则 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {

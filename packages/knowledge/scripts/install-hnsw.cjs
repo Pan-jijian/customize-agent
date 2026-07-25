@@ -13,6 +13,33 @@ function run(command, args, cwd) {
   if (result.status !== 0) process.exit(result.status || 1);
 }
 
+function markerPath(hnswDir) {
+  return path.join(hnswDir, 'build', '.customize-agent-hnsw-ok');
+}
+
+function findNativeBinding(hnswDir) {
+  const candidates = [
+    path.join(hnswDir, 'build', 'Release', 'addon.node'),
+    path.join(hnswDir, 'prebuilds', `${process.platform}-${process.arch}`, 'node.napi.node'),
+  ];
+  return candidates.find(candidate => fs.existsSync(candidate));
+}
+
+function isMarkerFresh(hnswDir) {
+  const marker = markerPath(hnswDir);
+  const binding = findNativeBinding(hnswDir);
+  if (!fs.existsSync(marker) || !binding) return false;
+  const markerStat = fs.statSync(marker);
+  const bindingStat = fs.statSync(binding);
+  return markerStat.mtimeMs >= bindingStat.mtimeMs;
+}
+
+function writeMarker(hnswDir) {
+  const marker = markerPath(hnswDir);
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, JSON.stringify({ node: process.version, platform: process.platform, arch: process.arch, updatedAt: Date.now() }));
+}
+
 function verify(hnswDir) {
   const hnsw = require(path.join(hnswDir, 'lib/index.js'));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hnsw-doctor-'));
@@ -35,10 +62,20 @@ function verify(hnswDir) {
 
 try {
   const hnswDir = packageDir('hnswlib-node');
+  if (isMarkerFresh(hnswDir)) {
+    try {
+      verify(hnswDir);
+      console.log('[hnsw] hnswlib-node 已可用，跳过 native rebuild');
+      process.exit(0);
+    } catch {
+      // 标记存在但运行验证失败，继续 rebuild。
+    }
+  }
   const nodeGypBin = require.resolve('node-gyp/bin/node-gyp.js', { paths: [process.cwd(), __dirname] });
   console.log(`[hnsw] 构建 hnswlib-node native binding: ${hnswDir}`);
   run(process.execPath, [nodeGypBin, 'rebuild'], hnswDir);
   verify(hnswDir);
+  writeMarker(hnswDir);
   console.log('[hnsw] hnswlib-node 安装和运行验证通过');
 } catch (error) {
   console.error('[hnsw] hnswlib-node 安装或运行验证失败。请确认当前平台已安装 native 编译工具链。');

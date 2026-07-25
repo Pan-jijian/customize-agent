@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { generatedAssetAbsolutePath, getGeneratedAsset } from '@/services/generatedDocumentService';
+import { generatedAssetAbsolutePath, getGeneratedAsset } from '@/services/document-core/generatedDocumentService';
 
 
 /** 根据文件扩展名返回对应 MIME 类型 */

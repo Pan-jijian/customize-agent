@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { deleteDocumentRole, deleteProjectRoleConfig, exportDocumentRolesPayload, importDocumentRolesPayload, listDocumentRoles, listProjectRoleConfigs, saveDocumentRole, saveProjectRoleConfig, type DocumentRole, type DocumentRoleType, type ProjectRoleConfig } from '@/services/documentRoleService';
+import { deleteDocumentRole, deleteProjectRoleConfig, exportDocumentRolesPayload, importDocumentRolesPayload, listDocumentRoles, listProjectRoleConfigs, saveDocumentRole, saveProjectRoleConfig, type DocumentRole, type DocumentRoleType, type ProjectRoleConfig } from '@/services/document-core/documentRoleService';
 
 /** 验证并解析角色类型参数 */
 function parseType(value: unknown): DocumentRoleType | undefined {

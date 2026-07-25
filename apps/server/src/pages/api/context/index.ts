@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { listLongTermContexts, listShortTermContexts, deleteMemory, updateMemory, getContextStats, clearContexts, compressContexts } from '@/services/contextService';
+import { listLongTermContexts, listShortTermContexts, deleteMemory, updateMemory, getContextStats, clearContexts, compressContexts } from '@/services/context/contextService';
 
 /** 上下文管理 API：支持记忆的增删改查、压缩和清空操作 */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {

@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
-import type { VectorDocument, VectorSearchQuery, VectorSearchResult, VectorStoreInterface, VectorWriteOptions } from './types.js';
+import type { VectorDocument, VectorFilterValue, VectorSearchQuery, VectorSearchResult, VectorStoreInterface, VectorWriteOptions } from './types.js';
 
 type HierarchicalNSW = {
   initIndex(maxElements: number, m?: number, efConstruction?: number, randomSeed?: number, allowReplaceDeleted?: boolean): void;
@@ -98,9 +98,12 @@ export class HNSWVectorStore implements VectorStoreInterface {
     }).slice(0, query.topK);
   }
 
-  private matchesWhere(document: StoredVectorDocument, where?: Record<string, string | number | boolean>): boolean {
+  private matchesWhere(document: StoredVectorDocument, where?: Record<string, VectorFilterValue>): boolean {
     if (!where) return true;
-    return Object.entries(where).every(([key, value]) => document.metadata[key] === value);
+    return Object.entries(where).every(([key, value]) => {
+      const actual = document.metadata[key];
+      return Array.isArray(value) ? value.includes(actual as string | number | boolean) : actual === value;
+    });
   }
 
   private persist(): void {

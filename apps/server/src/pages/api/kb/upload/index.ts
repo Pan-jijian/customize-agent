@@ -1,9 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import formidable, { type File as FormidableFile } from 'formidable';
-import { getMultiProjectManager, getProjectRoot } from '@/services/kbService';
-import { setKbUploadProgress } from '@/services/kbUploadProgress';
-import { upsertKbOperation } from '@/services/kbOperationLog';
-import { startKnowledgeIndex } from '@/services/kbIndexWorkerService';
+import { getMultiProjectManager, getProjectRoot } from '@/services/knowledge/kbService';
+import { setKbUploadProgress } from '@/services/knowledge/kbUploadProgress';
+import { upsertKbOperation } from '@/services/knowledge/kbOperationLog';
+import { startKnowledgeIndex } from '@/services/knowledge/kbIndexWorkerService';
 
 export const config = {
   api: { bodyParser: false, responseLimit: false },

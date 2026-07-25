@@ -108,7 +108,6 @@ export class KbCommands {
     }
 
     const project = await this.getManager().getProject(this.projectRoot);
-    await project.incrementalIndex();
     const files = project.listFiles()
       .map(file => file.relativePath)
       .filter(file => !pattern || file.includes(pattern));

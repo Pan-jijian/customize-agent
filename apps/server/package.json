@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/server",
-  "version": "4.0.69",
+  "version": "4.0.76",
   "description": "Customize Agent Web 管理控制台",
   "exports": {
     "./package.json": "./package.json"
@@ -35,7 +35,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=20.19.0"
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.2",

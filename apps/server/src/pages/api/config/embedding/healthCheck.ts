@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getConfigStore } from '@/services/configService';
+import { getConfigStore } from '@/services/common/configService';
 import { LocalTransformersEmbeddingProvider } from '@customize-agent/knowledge';
 
 /**

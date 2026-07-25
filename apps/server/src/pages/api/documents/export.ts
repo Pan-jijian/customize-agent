@@ -6,11 +6,11 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import JSZip from 'jszip';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { generatedRoot, getGeneratedDocument } from '@/services/generatedDocumentService';
-import { getProjectRoot } from '@/services/kbService';
-import type { DocumentExportSettings } from '@/services/documentWorkflowService';
-import { recordErrorLog } from '@/services/errorLogService';
-import { withApiErrorBoundary } from '@/services/apiErrorBoundary';
+import { generatedRoot, getGeneratedDocument } from '@/services/document-core/generatedDocumentService';
+import { getProjectRoot } from '@/services/knowledge/kbService';
+import type { DocumentExportSettings } from '@/services/document-workflow';
+import { recordErrorLog } from '@/services/common/errorLogService';
+import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
 
 export const config = {
   api: { bodyParser: { sizeLimit: '50mb' }, responseLimit: false },

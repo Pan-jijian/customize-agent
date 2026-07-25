@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { App, Button, Card, Col, Dropdown, Empty, Image, Modal, Row, Space, Skeleton, Tag } from 'antd';
-import { DeleteOutlined, ExportOutlined, FileOutlined, FolderOpenOutlined, PictureOutlined, CopyOutlined, DatabaseOutlined, MoreOutlined } from '@ant-design/icons';
+import { DeleteOutlined, ExportOutlined, FileOutlined, FolderOpenOutlined, PictureOutlined, CopyOutlined, MoreOutlined } from '@ant-design/icons';
 import { useAppTranslations } from '@/components/Layout';
-import { deleteGeneratedAsset, getGeneratedAssets, getPromptProjects, indexGeneratedAsset, openGeneratedAsset, type GeneratedAssetRecord } from '@/lib/api';
+import { deleteGeneratedAsset, getGeneratedAssets, getPromptProjects, openGeneratedAsset, type GeneratedAssetRecord } from '@/lib/api';
 
 const SOURCE_LABELS: Record<string, string> = { knowledge_base: '知识库', generated: 'AI生成', uploaded: '上传', external_url: '外部URL' };
 const ROLE_COLORS: Record<string, string> = { cover: 'magenta', reference: 'blue', generated: 'purple', attachment: 'cyan', map: 'orange', operator: 'geekblue' };
@@ -38,11 +38,10 @@ export default function AssetLibraryPage() {
     message.success('已复制路径');
   };
 
-  /** 执行资源操作：加入知识库索引、打开文件、打开目录、删除 */
-  const runAction = async (id: string, action: 'index' | 'openFile' | 'openDirectory' | 'delete') => {
+  /** 执行资源操作：打开文件、打开目录、删除 */
+  const runAction = async (id: string, action: 'openFile' | 'openDirectory' | 'delete') => {
     try {
-      if (action === 'index') { setAssets((await indexGeneratedAsset(id, projectRoot || undefined)).assets); message.success('已加入知识库索引'); }
-      else if (action === 'openFile') await openGeneratedAsset(id, 'file', projectRoot || undefined);
+      if (action === 'openFile') await openGeneratedAsset(id, 'file', projectRoot || undefined);
       else if (action === 'openDirectory') await openGeneratedAsset(id, 'directory', projectRoot || undefined);
       else if (action === 'delete') { setAssets((await deleteGeneratedAsset(id, projectRoot || undefined)).assets); setSelectedIds(prev => { const n = new Set(prev); n.delete(id); return n; }); }
     } catch (error) { message.error(error instanceof Error ? error.message : '操作失败'); }
@@ -91,7 +90,7 @@ export default function AssetLibraryPage() {
   return (
     <div className="space-y-5 animateFadeIn">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-        <div><h1 className="pageTitle">{t('nav.assetLibrary')}</h1><p className="pageDesc">管理模板运行生成的文档、图片和附件。生成结果默认不进入知识库，需要复用时可手动加入知识库。</p></div>
+        <div><h1 className="pageTitle">{t('nav.assetLibrary')}</h1><p className="pageDesc">管理模板运行生成的文档、图片和附件。生成结果仅保存在生成资源中，不进入知识库。</p></div>
         <Space size={8}>
           <span style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>共 {assets.length} 个资源</span>
           <Button danger size="small" disabled={selectedIds.size === 0} icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')}>删除已选 {selectedIds.size || ''}</Button>
@@ -108,7 +107,6 @@ export default function AssetLibraryPage() {
               ...(asset.path ? [{ key: 'copy', icon: <CopyOutlined />, label: '复制路径', onClick: () => { void copyPath(asset.path); } }] : []),
               ...(asset.path ? [{ key: 'open', icon: <ExportOutlined />, label: '打开文件', onClick: () => { void runAction(asset.id, 'openFile'); } }] : []),
               ...(asset.path ? [{ key: 'folder', icon: <FolderOpenOutlined />, label: '打开目录', onClick: () => { void runAction(asset.id, 'openDirectory'); } }] : []),
-              ...(!asset.indexed && asset.path ? [{ key: 'index', icon: <DatabaseOutlined />, label: '加入知识库', onClick: () => { void runAction(asset.id, 'index'); } }] : []),
               { type: 'divider' as const },
               { key: 'delete', icon: <DeleteOutlined />, label: t('common.delete'), danger: true, onClick: () => { void runAction(asset.id, 'delete'); } },
             ];
@@ -161,7 +159,6 @@ export default function AssetLibraryPage() {
 
                   {/* 标签 */}
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
-                    <Tag color={asset.indexed ? 'success' : 'default'} style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{asset.indexed ? '已入库' : '未入库'}</Tag>
                     <Tag color={ROLE_COLORS[asset.role] || 'blue'} style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{asset.role}</Tag>
                     <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{asset.type}</Tag>
                   </div>

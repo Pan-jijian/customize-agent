@@ -7,10 +7,12 @@ export interface VectorDocument {
 }
 
 /** 向量搜索查询参数 */
+export type VectorFilterValue = string | number | boolean | Array<string | number | boolean>;
+
 export interface VectorSearchQuery {
   queryEmbedding: number[];
   topK: number;
-  where?: Record<string, string | number | boolean>;
+  where?: Record<string, VectorFilterValue>;
 }
 
 /** 向量搜索结果 */
