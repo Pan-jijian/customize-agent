@@ -1,5 +1,11 @@
 # server
 
+## 4.0.79
+
+### Patch Changes
+
+- Fix document workflow tertiary heading normalization to renumber generated subsections by the current secondary section and collapse accidental fifth-level headings before DOCX export.
+
 ## 4.0.78
 
 ### Patch Changes

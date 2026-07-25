@@ -103,15 +103,16 @@ export function normalizeTertiaryHeadings(markdown: string) {
       tertiaryIndex = 0;
       return line;
     }
-    if (!currentSectionNumber) return line;
-    const heading = /^####\s+(.+)$/u.exec(line.trim());
+    const heading = /^(#{4,5})\s+(.+)$/u.exec(line.trim());
     if (heading) {
-      const rawTitle = (heading[1] || '').trim();
-      if (/^\d+\.\d+\.\d+\s+\S/u.test(rawTitle)) return line;
-      const title = displayChapterTitle(rawTitle);
+      if (!currentSectionNumber) return heading[1] === '#####' ? line.replace(/^\s*#####/u, '####') : line;
+      const rawTitle = (heading[2] || '').trim();
+      const title = displayChapterTitle(rawTitle.replace(/^\d+\.\d+\.\d+\s+/u, ''));
+      if (!title) return line;
       tertiaryIndex += 1;
       return `#### ${currentSectionNumber}.${tertiaryIndex} ${title}`;
     }
+    if (!currentSectionNumber) return line;
     const boldTitle = standaloneBoldTitle(line);
     if (boldTitle) {
       tertiaryIndex += 1;

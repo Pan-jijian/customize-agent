@@ -1,5 +1,13 @@
 # customize-agent
 
+## 4.0.70
+
+### Patch Changes
+
+- Fix document workflow tertiary heading normalization to renumber generated subsections by the current secondary section and collapse accidental fifth-level headings before DOCX export.
+- Updated dependencies
+  - @customize-agent/server@4.0.79
+
 ## 4.0.69
 
 ### Patch Changes
