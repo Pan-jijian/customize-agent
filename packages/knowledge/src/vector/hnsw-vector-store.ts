@@ -22,6 +22,7 @@ export class HNSWVectorStore implements VectorStoreInterface {
   private deletedSinceRebuild = 0;
   private dirty = false;
   private readonly documents = new Map<number, StoredVectorDocument>();
+  private readonly rowidsByFilePath = new Map<string, Set<number>>();
 
   constructor(
     readonly collectionName: string,
@@ -45,8 +46,12 @@ export class HNSWVectorStore implements VectorStoreInterface {
     for (const document of documents) {
       const rowid = Number(document.metadata.sqlite_rowid);
       if (!Number.isFinite(rowid) || rowid <= 0) throw new Error(`HNSW 向量写入缺少有效 sqlite_rowid: ${document.id}`);
+      const existing = this.documents.get(rowid);
+      if (existing) this.untrackDocumentFilePath(rowid, existing);
       this.index!.addPoint(document.embedding, rowid, true);
-      this.documents.set(rowid, this.toStoredDocument(document));
+      const stored = this.toStoredDocument(document);
+      this.documents.set(rowid, stored);
+      this.trackDocumentFilePath(rowid, stored);
       this.dirty = true;
     }
     if (options.persist !== false) this.persist();
@@ -56,6 +61,7 @@ export class HNSWVectorStore implements VectorStoreInterface {
     if (fs.existsSync(this.indexPath)) fs.rmSync(this.indexPath, { force: true });
     if (fs.existsSync(this.metadataPath())) fs.rmSync(this.metadataPath(), { force: true });
     this.documents.clear();
+    this.rowidsByFilePath.clear();
     this.deletedSinceRebuild = 0;
     this.dirty = false;
     this.index = undefined;
@@ -63,13 +69,31 @@ export class HNSWVectorStore implements VectorStoreInterface {
   }
 
   async deleteByFilePath(filePath: string, options: VectorWriteOptions = {}): Promise<void> {
+    await this.deleteByFilePaths([filePath], options);
+  }
+
+  async deleteByFilePaths(filePaths: string[], options: VectorWriteOptions = {}): Promise<void> {
     await this.ensureCollection();
-    for (const [rowid, document] of this.documents.entries()) {
-      if (document.metadata.file_path === filePath) {
-        try { this.index!.markDelete(rowid); this.deletedSinceRebuild += 1; } catch { /* 忽略缺失的标签 */ }
-        this.documents.delete(rowid);
-        this.dirty = true;
+    const rowids = new Set<number>();
+    for (const filePath of filePaths) {
+      const tracked = this.rowidsByFilePath.get(filePath);
+      if (tracked) {
+        for (const rowid of tracked) rowids.add(rowid);
       }
+    }
+
+    if (rowids.size === 0) {
+      if (options.persist !== false && this.dirty) this.persist();
+      return;
+    }
+
+    for (const rowid of rowids) {
+      const document = this.documents.get(rowid);
+      if (!document) continue;
+      try { this.index!.markDelete(rowid); this.deletedSinceRebuild += 1; } catch { /* 忽略缺失的标签 */ }
+      this.documents.delete(rowid);
+      this.untrackDocumentFilePath(rowid, document);
+      this.dirty = true;
     }
     if (options.persist !== false) this.persist();
   }
@@ -128,10 +152,37 @@ export class HNSWVectorStore implements VectorStoreInterface {
       const entries = Array.isArray(parsed) ? parsed : parsed.documents ?? [];
       this.deletedSinceRebuild = Array.isArray(parsed) ? 0 : Number(parsed.deletedSinceRebuild ?? 0);
       this.documents.clear();
-      for (const [rowid, document] of entries) this.documents.set(Number(rowid), { id: document.id, content: document.content ?? '', metadata: document.metadata });
+      this.rowidsByFilePath.clear();
+      for (const [rowid, document] of entries) {
+        const numericRowid = Number(rowid);
+        const stored = { id: document.id, content: document.content ?? '', metadata: document.metadata };
+        this.documents.set(numericRowid, stored);
+        this.trackDocumentFilePath(numericRowid, stored);
+      }
     } catch {
       this.documents.clear();
+      this.rowidsByFilePath.clear();
     }
+  }
+
+  private trackDocumentFilePath(rowid: number, document: StoredVectorDocument): void {
+    const filePath = document.metadata.file_path;
+    if (typeof filePath !== 'string' || !filePath) return;
+    let rowids = this.rowidsByFilePath.get(filePath);
+    if (!rowids) {
+      rowids = new Set<number>();
+      this.rowidsByFilePath.set(filePath, rowids);
+    }
+    rowids.add(rowid);
+  }
+
+  private untrackDocumentFilePath(rowid: number, document: StoredVectorDocument): void {
+    const filePath = document.metadata.file_path;
+    if (typeof filePath !== 'string' || !filePath) return;
+    const rowids = this.rowidsByFilePath.get(filePath);
+    if (!rowids) return;
+    rowids.delete(rowid);
+    if (rowids.size === 0) this.rowidsByFilePath.delete(filePath);
   }
 
   private metadataPath(): string {

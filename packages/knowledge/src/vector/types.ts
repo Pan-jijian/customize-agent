@@ -39,6 +39,7 @@ export interface VectorStoreInterface {
   ensureCollection(metadata?: Record<string, unknown>): Promise<void>;
   upsert(documents: VectorDocument[], options?: VectorWriteOptions): Promise<void>;
   deleteByFilePath(filePath: string, options?: VectorWriteOptions): Promise<void>;
+  deleteByFilePaths?(filePaths: string[], options?: VectorWriteOptions): Promise<void>;
   flush?(): Promise<void>;
   clearCollection?(): Promise<void>;
   needsRebuild?(): boolean;

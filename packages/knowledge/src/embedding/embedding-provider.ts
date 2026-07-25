@@ -116,7 +116,7 @@ type FeatureExtractionPipeline = (input: string | string[], options?: Record<str
 
 function resolveLocalEmbeddingBatchSize(configured?: number): number {
   const raw = configured ?? Number(process.env.CUSTOMIZE_EMBEDDING_BATCH_SIZE ?? process.env.KB_EMBEDDING_BATCH_SIZE);
-  const fallback = process.platform === 'win32' ? 8 : 16;
+  const fallback = process.platform === 'win32' ? 8 : 32;
   if (!Number.isFinite(raw) || raw <= 0) return fallback;
   return Math.max(1, Math.min(128, Math.floor(raw)));
 }

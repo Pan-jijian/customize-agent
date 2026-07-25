@@ -919,7 +919,7 @@ startxref
       expectIndexed(manager, '文档资料/upload-test.pdf', 'PDF upload reindex test content');
       const file = manager.listFiles().find(item => item.relativePath === '文档资料/upload-test.pdf');
       const metadata = JSON.parse(file!.metadataJson) as { extractionMode?: string };
-      expect(['pdf_text', 'pdf_hybrid_pages']).toContain(metadata.extractionMode);
+      expect(['pdf_text_first', 'pdf_text', 'pdf_hybrid_pages']).toContain(metadata.extractionMode);
     } finally {
       manager.close();
       fs.rmSync(root, { recursive: true, force: true });

@@ -123,7 +123,15 @@ export class KnowledgeBaseManager {
     this.initialize();
     const jobs = this.store.listPendingIndexJobs(options.limit ?? 500);
     if (jobs.length === 0) return this.emptyDiff();
-    return this.incrementalIndex({ ...options, onlyRelativePaths: jobs.map(job => job.relativePath) });
+    const lightweightJobs: typeof jobs = [];
+    const heavyJobs: typeof jobs = [];
+    for (const job of jobs) {
+      const ext = path.extname(job.relativePath).toLowerCase();
+      if (/\.(pdf|png|jpe?g|webp|gif|bmp|tiff?|xlsx?|xlsm|docx?|pptx?)$/iu.test(ext)) heavyJobs.push(job);
+      else lightweightJobs.push(job);
+    }
+    const selectedJobs = [...lightweightJobs, ...heavyJobs].slice(0, options.limit ?? 500);
+    return this.incrementalIndex({ ...options, onlyRelativePaths: selectedJobs.map(job => job.relativePath) });
   }
 
   async incrementalIndex(options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer'; onlyRelativePaths?: string[] } = {}): Promise<DiffResult> {
@@ -145,11 +153,22 @@ export class KnowledgeBaseManager {
       diff.newFiles = diff.newFiles.filter(file => onlyRelativePaths.has(file.relativePath));
       diff.modifiedFiles = diff.modifiedFiles.filter(file => onlyRelativePaths.has(file.relativePath));
       diff.deletedFiles = diff.deletedFiles.filter(file => onlyRelativePaths.has(file.relativePath));
-      diff.hasChanges = diff.newFiles.length + diff.modifiedFiles.length + diff.deletedFiles.length > 0;
       for (const relativePath of onlyRelativePaths) {
         const exists = diff.newFiles.some(file => file.relativePath === relativePath) || diff.modifiedFiles.some(file => file.relativePath === relativePath) || diff.deletedFiles.some(file => file.relativePath === relativePath);
-        if (!exists) this.updateJobsForFile(relativePath, 'ERROR', 100, '待索引文件不存在或未发生变化', '待索引文件不存在或未发生变化');
+        if (exists) continue;
+        const diskStat = diskFiles.get(relativePath);
+        if (!diskStat) {
+          this.updateJobsForFile(relativePath, 'ERROR', 100, '待索引文件不存在', '待索引文件不存在');
+          continue;
+        }
+        const absolutePath = this.resolveKbRelativePath(relativePath);
+        const stat = fs.statSync(absolutePath);
+        const classified = this.classifier.classify(absolutePath, relativePath, stat);
+        const skipReason = this.classifier.shouldSkip(classified);
+        if (skipReason) this.updateJobsForFile(relativePath, 'ERROR', 100, skipReason, skipReason);
+        else diff.modifiedFiles.push(classified);
       }
+      diff.hasChanges = diff.newFiles.length + diff.modifiedFiles.length + diff.deletedFiles.length > 0;
     }
 
     for (const deleted of diff.deletedFiles) {
@@ -301,7 +320,12 @@ export class KnowledgeBaseManager {
     this.store.setMetadata('total_files_indexed', String(stats.fileCount));
     const hasIndexChanges = diff.newFiles.length + diff.modifiedFiles.length + diff.deletedFiles.length > 0;
     if (options.vectorMode === 'defer') {
-      if (hasIndexChanges) this.store.setMetadata('vector_index_status', 'pending');
+      if (hasIndexChanges) {
+        this.store.setMetadata('vector_index_status', 'pending');
+        const pending = new Set(this.consumePendingVectorRelativePaths());
+        for (const relativePath of vectorRelativePaths) pending.add(relativePath);
+        this.store.setMetadata('vector_pending_relative_paths', JSON.stringify([...pending]));
+      }
       this.reportProgress({ stage: 'vectorizing', percent: 85, message: '解析和切片已完成，向量入库转入后台/稍后执行', chunkCount: stats.chunkCount, vectorStatus: this.getVectorStatus() });
     } else {
       await this.ensureVectorIndexFresh(stats.chunkCount, { changedRelativePaths: vectorRelativePaths, changedCollectionNames, deletesApplied: vectorDeletesApplied });
@@ -517,9 +541,6 @@ export class KnowledgeBaseManager {
       const targetPath = this.resolveKbRelativePath(relativePath);
       fs.mkdirSync(path.dirname(targetPath), { recursive: true });
       fs.writeFileSync(targetPath, file.content);
-      const record = this.store.listRecords().find(item => item.relativePath === relativePath);
-      if (record) await this.deleteVectorFile(record.collectionName, relativePath);
-      this.store.deleteRecord(relativePath);
       jobs.push(this.store.enqueueIndexJob({ id: `${operationId}-${index}`, relativePath, message: '文件已落盘，等待后台解析' }));
     }
     return jobs;
@@ -535,9 +556,6 @@ export class KnowledgeBaseManager {
       const targetPath = this.resolveKbRelativePath(relativePath);
       fs.mkdirSync(path.dirname(targetPath), { recursive: true });
       this.moveUploadedFile(file.sourcePath, targetPath);
-      const record = this.store.listRecords().find(item => item.relativePath === relativePath);
-      if (record) await this.deleteVectorFile(record.collectionName, relativePath);
-      this.store.deleteRecord(relativePath);
       jobs.push(this.store.enqueueIndexJob({ id: `${operationId}-${offset + index}`, relativePath, message: '文件已落盘，等待后台解析' }));
     }
     return jobs;
@@ -592,6 +610,10 @@ export class KnowledgeBaseManager {
   }
 
   async indexVectors(options: { collectionName?: string; relativePath?: string; relativePaths?: string[]; cleanupCollectionNames?: Iterable<string>; limit?: number; rebuild?: boolean } = {}): Promise<VectorIndexResult[]> {
+    const pendingRelativePaths = !options.rebuild && !options.relativePath && !options.relativePaths?.length
+      ? this.consumePendingVectorRelativePaths()
+      : [];
+    if (pendingRelativePaths.length > 0) options = { ...options, relativePaths: pendingRelativePaths };
     const chunks = options.relativePaths?.length
       ? options.relativePaths.flatMap(relativePath => this.store.listChunks({ collectionName: options.collectionName, relativePath }))
       : this.store.listChunks(options);
@@ -601,8 +623,13 @@ export class KnowledgeBaseManager {
     if (options.rebuild || (!options.relativePath && !options.relativePaths?.length)) {
       for (const collectionName of collectionNames) await this.vectorStores.get(collectionName)?.clearCollection?.();
     } else {
-      for (const relativePath of options.relativePaths ?? [options.relativePath].filter(Boolean) as string[]) {
-        for (const collectionName of cleanupCollectionNames) await this.vectorStores.get(collectionName)?.deleteByFilePath(relativePath, { persist: false });
+      const cleanupRelativePaths = options.relativePaths ?? ([options.relativePath].filter(Boolean) as string[]);
+      for (const collectionName of cleanupCollectionNames) {
+        const vectorStore = this.vectorStores.get(collectionName);
+        if (vectorStore?.deleteByFilePaths) await vectorStore.deleteByFilePaths(cleanupRelativePaths, { persist: false });
+        else {
+          for (const relativePath of cleanupRelativePaths) await vectorStore?.deleteByFilePath(relativePath, { persist: false });
+        }
       }
       if (chunks.length === 0) {
         for (const collectionName of cleanupCollectionNames) await this.vectorStores.get(collectionName)?.flush?.();
@@ -953,6 +980,20 @@ export class KnowledgeBaseManager {
     }
   }
 
+  private consumePendingVectorRelativePaths(): string[] {
+    const raw = this.store.getMetadata('vector_pending_relative_paths');
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      this.store.setMetadata('vector_pending_relative_paths', '');
+      return [...new Set(parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0))];
+    } catch {
+      this.store.setMetadata('vector_pending_relative_paths', '');
+      return [];
+    }
+  }
+
   private async ensureVectorIndexFresh(chunkCount: number, options: { changedRelativePaths?: string[]; changedCollectionNames?: Set<string>; deletesApplied?: number; rebuild?: boolean } = {}): Promise<void> {
     if (chunkCount === 0) return;
     for (const record of this.store.listRecords()) this.ensureVectorStore(record.collectionName);
@@ -970,12 +1011,13 @@ export class KnowledgeBaseManager {
       this.store.setMetadata('last_vector_index_at', String(Date.now()));
       return;
     }
-    if (changedRelativePaths.length > 0 && status === 'ready') {
+    if (changedRelativePaths.length > 0) {
       for (const collectionName of options.changedCollectionNames ?? []) this.ensureVectorStore(collectionName);
       await this.indexVectors({ relativePaths: changedRelativePaths, cleanupCollectionNames: options.changedCollectionNames });
       return;
     }
     if (indexedChunks === chunkCount && status === 'ready') return;
+    if (status === 'pending' || status === 'partial') return;
     await this.indexVectors({ rebuild: true });
   }
 

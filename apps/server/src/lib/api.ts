@@ -77,7 +77,7 @@ function fileRelativePath(file: File) {
   return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
 }
 
-function appendUploadForm(files: File[], opts: { projectRoot?: string; uploadId?: string; batchIndex: number; totalBatches: number; fileOffset: number; startIndex: boolean }) {
+function appendUploadForm(files: File[], opts: { projectRoot?: string; uploadId?: string; batchIndex: number; totalBatches: number; fileOffset: number; startIndex: boolean; uploadComplete?: boolean }) {
   const form = new FormData();
   if (opts.projectRoot) form.append('projectRoot', opts.projectRoot);
   if (opts.uploadId) form.append('uploadId', opts.uploadId);
@@ -85,7 +85,7 @@ function appendUploadForm(files: File[], opts: { projectRoot?: string; uploadId?
   form.append('totalBatches', String(opts.totalBatches));
   form.append('fileOffset', String(opts.fileOffset));
   form.append('startIndex', opts.startIndex ? '1' : '0');
-  form.append('uploadComplete', opts.batchIndex === opts.totalBatches - 1 ? '1' : '0');
+  form.append('uploadComplete', (opts.uploadComplete ?? opts.batchIndex === opts.totalBatches - 1) ? '1' : '0');
   for (const file of files) {
     form.append('files', file, file.name);
     form.append('relativePaths', fileRelativePath(file));
@@ -107,42 +107,64 @@ export async function uploadKbFile(file: File, projectRoot?: string, uploadId?: 
 export async function uploadKbFiles(files: File[], projectRoot?: string, uploadId?: string, onBatchProgress?: (progress: { uploadedFiles: number; totalFiles: number; batchIndex: number; totalBatches: number }) => void) {
   const maxFilesPerBatch = Number(process.env.NEXT_PUBLIC_CUSTOMIZE_KB_UPLOAD_BATCH_FILES || 500);
   const maxBytesPerBatch = Number(process.env.NEXT_PUBLIC_CUSTOMIZE_KB_UPLOAD_BATCH_BYTES || 128 * 1024 * 1024);
-  const batches: File[][] = [];
+  const maxConcurrentBatches = Math.max(1, Math.min(4, Number(process.env.NEXT_PUBLIC_CUSTOMIZE_KB_UPLOAD_CONCURRENCY || 2)));
+  const batches: Array<{ files: File[]; offset: number }> = [];
   let current: File[] = [];
   let currentBytes = 0;
+  let currentOffset = 0;
+  let nextOffset = 0;
   for (const file of files) {
     if (current.length > 0 && (current.length >= maxFilesPerBatch || currentBytes + file.size > maxBytesPerBatch)) {
-      batches.push(current);
+      batches.push({ files: current, offset: currentOffset });
       current = [];
       currentBytes = 0;
+      currentOffset = nextOffset;
     }
     current.push(file);
     currentBytes += file.size;
+    nextOffset += 1;
   }
-  if (current.length > 0) batches.push(current);
+  if (current.length > 0) batches.push({ files: current, offset: currentOffset });
 
   const results: KbUploadBatchResult[] = [];
-  let uploadedFiles = 0;
-  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+  let completedFiles = 0;
+  let cursor = 0;
+  async function uploadBatch(batchIndex: number) {
     const batch = batches[batchIndex]!;
     const params = new URLSearchParams({ batchIndex: String(batchIndex), totalBatches: String(batches.length) });
     if (uploadId) params.set('uploadId', uploadId);
     const result = await fetchJson<KbUploadBatchResult>(`/api/kb/upload?${params}`, {
       method: 'POST',
-      body: appendUploadForm(batch, {
+      body: appendUploadForm(batch.files, {
         projectRoot,
         uploadId,
         batchIndex,
         totalBatches: batches.length,
-        fileOffset: uploadedFiles,
+        fileOffset: batch.offset,
         startIndex: batchIndex === 0,
+        uploadComplete: batches.length === 1,
       }),
     });
-    results.push(result);
-    uploadedFiles += batch.length;
-    onBatchProgress?.({ uploadedFiles, totalFiles: files.length, batchIndex, totalBatches: batches.length });
+    results[batchIndex] = result;
+    completedFiles += batch.files.length;
+    onBatchProgress?.({ uploadedFiles: completedFiles, totalFiles: files.length, batchIndex, totalBatches: batches.length });
   }
-  return results[results.length - 1] ?? { success: true };
+  const workers = Array.from({ length: Math.min(maxConcurrentBatches, batches.length) }, async () => {
+    while (cursor < batches.length) {
+      const batchIndex = cursor++;
+      await uploadBatch(batchIndex);
+    }
+  });
+  await Promise.all(workers);
+  if (batches.length > 1) {
+    const result = await fetchJson<KbUploadBatchResult>(`/api/kb/upload/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectRoot, uploadId }),
+    });
+    results.push(result);
+  }
+  return results.filter(Boolean).at(-1) ?? { success: true };
 }
 
 export async function getKbUploadProgress(uploadId: string) {

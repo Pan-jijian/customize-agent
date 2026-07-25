@@ -138,7 +138,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
 
     if (parsed.fields.startIndex) {
-      startKnowledgeIndex({ id: `${operationId}-worker`, projectRoot, vectorMode: 'sync', uploadOperationId: operationId, uploadTitle: titleName });
+      startKnowledgeIndex({ id: `${operationId}-worker`, projectRoot, vectorMode: 'defer', uploadOperationId: operationId, uploadTitle: titleName });
     }
 
     return res.status(202).json({

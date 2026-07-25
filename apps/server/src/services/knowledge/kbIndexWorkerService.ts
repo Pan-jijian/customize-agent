@@ -104,7 +104,11 @@ async function runInProcess(job: IndexJob, operationId: string, operationType: '
       const nextDiff = await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
       diff = { newFiles: [...diff.newFiles, ...nextDiff.newFiles], modifiedFiles: [...diff.modifiedFiles, ...nextDiff.modifiedFiles], deletedFiles: [...diff.deletedFiles, ...nextDiff.deletedFiles], unchangedCount: diff.unchangedCount + nextDiff.unchangedCount, mtimeOnlyCount: diff.mtimeOnlyCount + nextDiff.mtimeOnlyCount, skippedFiles: [...diff.skippedFiles, ...nextDiff.skippedFiles], hasChanges: diff.hasChanges || nextDiff.hasChanges, diffTimeMs: diff.diffTimeMs + nextDiff.diffTimeMs };
     }
-    const vectorStatus = project.getVectorStatus();
+    let vectorStatus = project.getVectorStatus();
+    if (job.vectorMode === 'defer' && vectorStatus.status === 'pending') {
+      await project.indexVectors();
+      vectorStatus = project.getVectorStatus();
+    }
     if (vectorStatus.status === 'error') {
       const error = vectorStatus.error || 'HNSWLib 向量入库失败';
       upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'error', status: 'error', percent: 100, message: error, error });

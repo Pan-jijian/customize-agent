@@ -1066,24 +1066,26 @@ export class ContentExtractor {
   }
 
   private async extractPdf(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
-    const hybrid = await this.extractPdfHybridPages(file);
-    if (hybrid.text.trim()) return hybrid;
-
-    const metadata: Record<string, unknown> = { extractionMode: 'pdf_text', vectorizable: true };
-    const warnings = [...hybrid.warnings];
+    const metadata: Record<string, unknown> = { extractionMode: 'pdf_text_first', vectorizable: true };
+    const warnings: string[] = [];
 
     try {
       const raw = fs.readFileSync(file.absolutePath);
       const text = await this.extractPdfText(raw);
-      if (text.trim()) {
+      if (this.hasUsablePdfText(text)) {
         metadata.contentCoverage = 'pdf_text_streams_layout_markdown';
         metadata.pdfExtractor = 'pdfjs-dist';
+        metadata.ocrSkippedReason = 'pdf_text_stream_quality_sufficient';
         return { text: [this.metadataOnlyText(file), this.toMarkdownDocument(text)].join('\n\n'), metadata, warnings };
       }
+      if (text.trim()) warnings.push('PDF 文本层质量不足，已尝试选择性 OCR 增强');
     } catch (error) {
       warnings.push(`PDF 文本提取失败: ${error instanceof Error ? error.message : String(error)}`);
       metadata.parseError = error instanceof Error ? error.message : String(error);
     }
+
+    const hybrid = await this.extractPdfHybridPages(file);
+    if (hybrid.text.trim()) return { text: hybrid.text, metadata: { ...metadata, ...hybrid.metadata }, warnings: [...warnings, ...hybrid.warnings] };
 
     metadata.extractionMode = 'pdf_metadata_only';
     metadata.contentCoverage = 'metadata_filename';
@@ -1093,8 +1095,16 @@ export class ContentExtractor {
     return {
       text: this.metadataOnlyText(file),
       metadata,
-      warnings: [...warnings, 'PDF 正文暂未提取到文本，已索引文件名、路径和类型元数据'],
+      warnings: [...warnings, ...hybrid.warnings, 'PDF 正文暂未提取到文本，已索引文件名、路径和类型元数据'],
     };
+  }
+
+  private hasUsablePdfText(text: string): boolean {
+    const normalized = text.replace(/\s+/gu, ' ').trim();
+    if (normalized.length < Number(process.env.CUSTOMIZE_KB_PDF_TEXT_MIN_CHARS || 80)) return false;
+    const replacementRatio = (normalized.match(/[\uFFFD�]/gu)?.length ?? 0) / normalized.length;
+    const visibleRatio = (normalized.match(/[\p{L}\p{N}\p{Script=Han}]/gu)?.length ?? 0) / normalized.length;
+    return replacementRatio < 0.02 && visibleRatio > 0.35;
   }
 
 
@@ -1115,19 +1125,37 @@ export class ContentExtractor {
 
     const failedPages: Array<{ page: number; reason: string }> = [];
     const ocrPages: number[] = [];
+    const ocrRetryPages: number[] = [];
     const ocrStrategies: Array<{ page: number; strategy: string; score: number }> = [];
 
-    // 尝试 PyMuPDF 渲染（高质量）或降级到 pdfjs-dist
+    // 尝试 PyMuPDF 渲染（默认 200 DPI），低质量页自动升到 300 DPI 重试
     let pageImages: string[] | null;
+    let highDpiImages: string[] | null = null;
     let pageCount = 0;
     let renderer = 'unknown';
+    const initialDpi = this.getPdfOcrDpi();
+    const retryDpi = this.getPdfOcrRetryDpi(initialDpi);
     const tmpDir = fs.mkdtempSync(path.join(this.getTempRoot(), 'kb-pdf-'));
+    metadata.pdfOcrInitialDpi = initialDpi;
+    if (retryDpi > initialDpi) metadata.pdfOcrRetryDpi = retryDpi;
+
+    const getHighDpiImage = (pageIndex: number): { imagePath: string; strategy: string } | undefined => {
+      if (retryDpi <= initialDpi) return undefined;
+      if (!highDpiImages) {
+        const retryDir = path.join(tmpDir, `retry-${retryDpi}dpi`);
+        fs.mkdirSync(retryDir, { recursive: true });
+        highDpiImages = this.tryRenderWithPyMuPDF(file.absolutePath, retryDir, retryDpi);
+        if (!highDpiImages?.length) warnings.push(`PDF 高质量 OCR 重试渲染失败（${retryDpi} DPI）`);
+      }
+      const imagePath = highDpiImages?.[pageIndex];
+      return imagePath ? { imagePath, strategy: `PyMuPDF-${retryDpi}dpi` } : undefined;
+    };
 
     try {
-      // ── 方法1: PyMuPDF（300 DPI 原生渲染，质量最高） ──
-      pageImages = this.tryRenderWithPyMuPDF(file.absolutePath, tmpDir);
+      // ── 方法1: PyMuPDF（默认 200 DPI，低质量页再自适应升到 300 DPI） ──
+      pageImages = this.tryRenderWithPyMuPDF(file.absolutePath, tmpDir, initialDpi);
       if (pageImages && pageImages.length > 0) {
-        renderer = 'PyMuPDF';
+        renderer = `PyMuPDF-${initialDpi}dpi`;
         pageCount = pageImages.length;
       } else {
         // ── 方法2: pdfjs-dist + canvas ──
@@ -1176,11 +1204,37 @@ export class ContentExtractor {
           filePath: imgPath,
         });
 
-        const ocrText = this.cleanOcrText(ocrResult.text);
+        let ocrText = this.cleanOcrText(ocrResult.text);
+        let ocrScore = this.scoreOcrText(ocrText);
+        let strategy = renderer;
         if (ocrResult.warnings?.length) warnings.push(...ocrResult.warnings.map(item => `OCR 警告: ${item}`));
+
+        if (this.shouldRetryPdfOcrAtHigherDpi(ocrText, ocrScore)) {
+          const retry = getHighDpiImage(i);
+          if (retry) {
+            const retryDimensions = await this.readImageDimensions(retry.imagePath);
+            if (retryDimensions && !this.isTooSmallForOcr(retryDimensions.width, retryDimensions.height)) {
+              const retryResult = await provider.recognize({
+                data: new Uint8Array(0),
+                width: retryDimensions.width, height: retryDimensions.height, channels: 0,
+                filePath: retry.imagePath,
+              });
+              const retryText = this.cleanOcrText(retryResult.text);
+              const retryScore = this.scoreOcrText(retryText);
+              if (retryResult.warnings?.length) warnings.push(...retryResult.warnings.map(item => `OCR 重试警告: ${item}`));
+              if (retryScore > ocrScore || (!ocrText && retryText)) {
+                ocrText = retryText;
+                ocrScore = retryScore;
+                strategy = retry.strategy;
+                ocrRetryPages.push(i + 1);
+              }
+            }
+          }
+        }
+
         if (ocrText) {
           ocrPages.push(i + 1);
-          ocrStrategies.push({ page: i + 1, strategy: renderer, score: this.scoreOcrText(ocrText) });
+          ocrStrategies.push({ page: i + 1, strategy, score: ocrScore });
           pageTexts.push(`## PDF 第 ${i + 1} 页（OCR）\n\n${ocrText}`);
         } else {
           failedPages.push({ page: i + 1, reason: 'empty_ocr' });
@@ -1197,6 +1251,7 @@ export class ContentExtractor {
 
     metadata.ocrAugmented = ocrPages.length > 0;
     metadata.ocrPages = ocrPages;
+    metadata.ocrRetryPages = ocrRetryPages;
     metadata.ocrStrategies = ocrStrategies;
     metadata.failedPages = failedPages;
     metadata.ocrProvider = (ocrProvider as OcrProvider | null)?.id ?? 'unknown';
@@ -1213,11 +1268,11 @@ export class ContentExtractor {
     };
   }
 
-  /** PyMuPDF 渲染（300 DPI 原生提取，质量远高于 pdfjs-dist） */
-  private tryRenderWithPyMuPDF(pdfPath: string, outputDir: string): string[] | null {
+  /** PyMuPDF 渲染（默认 200 DPI，低质量页可自适应提高） */
+  private tryRenderWithPyMuPDF(pdfPath: string, outputDir: string, dpi = this.getPdfOcrDpi()): string[] | null {
     try {
       const workerScript = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'render_pdf_pages.py');
-      spawnSync('python3', [workerScript, pdfPath, outputDir, '300'], {
+      spawnSync('python3', [workerScript, pdfPath, outputDir, String(dpi)], {
         encoding: 'utf-8', timeout: 60_000, maxBuffer: 1024 * 1024,
       });
       // 检查输出文件（即使 Python 非零退出码也可能已渲染部分页面）
@@ -1264,6 +1319,23 @@ export class ContentExtractor {
       await doc.destroy();
       return images.length > 0 ? images : null;
     } catch { return null; }
+  }
+
+  private getPdfOcrDpi(): number {
+    return Math.max(120, Math.min(300, Number(process.env.CUSTOMIZE_KB_PDF_OCR_DPI || 200)));
+  }
+
+  private getPdfOcrRetryDpi(initialDpi: number): number {
+    const configured = Number(process.env.CUSTOMIZE_KB_PDF_OCR_RETRY_DPI || 300);
+    return Math.max(initialDpi, Math.min(300, Math.max(120, configured)));
+  }
+
+  private shouldRetryPdfOcrAtHigherDpi(text: string, score: number): boolean {
+    const normalizedLength = this.normalizedTextLength(text);
+    if (normalizedLength === 0) return true;
+    const threshold = Number(process.env.CUSTOMIZE_KB_PDF_OCR_RETRY_MIN_SCORE || 120);
+    const replacementRatio = (text.match(/[�□]/gu)?.length ?? 0) / Math.max(1, text.length);
+    return score < threshold || replacementRatio > 0.02;
   }
 
   private scoreOcrText(value: string): number {

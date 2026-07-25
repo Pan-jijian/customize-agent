@@ -113,7 +113,11 @@ async function main() {
     };
   }
 
-  const vectorStatus = project.getVectorStatus();
+  let vectorStatus = project.getVectorStatus();
+  if (job.vectorMode === 'defer' && vectorStatus.status === 'pending') {
+    await project.indexVectors();
+    vectorStatus = project.getVectorStatus();
+  }
   if (vectorStatus.status === 'error') {
     const error = vectorStatus.error || 'HNSWLib 向量入库失败';
     upsert(projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'error', status: 'error', percent: 100, message: error, error });

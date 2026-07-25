@@ -1,5 +1,21 @@
 # customize-agent
 
+## 4.0.69
+
+### Patch Changes
+
+- Optimize local knowledge-base upload indexing performance while preserving extraction and retrieval quality.
+
+  - Decouple upload staging from synchronous vector indexing.
+  - Add explicit upload completion signaling for concurrent batches.
+  - Prefer PDF text-layer extraction before OCR and add adaptive high-DPI OCR retry for low-quality pages.
+  - Improve deferred incremental vector indexing and batch HNSW cleanup.
+  - Increase local embedding batch throughput.
+
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.33
+  - @customize-agent/server@4.0.78
+
 ## 4.0.68
 
 ### Patch Changes
