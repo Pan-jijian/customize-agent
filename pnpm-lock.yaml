@@ -499,6 +499,12 @@ importers:
 
   packages/types: {}
 
+  tmp-pnpm-main-install.6voKV1:
+    dependencies:
+      customize-agent:
+        specifier: workspace:^
+        version: link:../apps/cli
+
 packages:
 
   '@alloc/quick-lru@5.2.0':

@@ -1,5 +1,14 @@
 # customize-agent
 
+## 4.0.68
+
+### Patch Changes
+
+- Make the native hnswlib-node vector index dependency optional so npm install does not fail on machines without native build toolchains.
+- Updated dependencies
+  - @customize-agent/server@4.0.77
+  - @customize-agent/knowledge@4.0.32
+
 ## 4.0.67
 
 ### Patch Changes

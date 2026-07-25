@@ -10,7 +10,7 @@ function packageDir(name) {
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell: false });
-  if (result.status !== 0) process.exit(result.status || 1);
+  if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} exited with ${result.status || 1}`);
 }
 
 function markerPath(hnswDir) {
@@ -61,7 +61,14 @@ function verify(hnswDir) {
 }
 
 try {
-  const hnswDir = packageDir('hnswlib-node');
+  let hnswDir;
+  try {
+    hnswDir = packageDir('hnswlib-node');
+  } catch {
+    console.log('[hnsw] 未安装可选依赖 hnswlib-node，跳过 native 初始化。');
+    process.exit(0);
+  }
+
   if (isMarkerFresh(hnswDir)) {
     try {
       verify(hnswDir);
@@ -78,7 +85,11 @@ try {
   writeMarker(hnswDir);
   console.log('[hnsw] hnswlib-node 安装和运行验证通过');
 } catch (error) {
-  console.error('[hnsw] hnswlib-node 安装或运行验证失败。请确认当前平台已安装 native 编译工具链。');
-  console.error(error && error.stack ? error.stack : error);
-  process.exit(1);
+  console.warn('[hnsw] hnswlib-node 当前不可用，已跳过可选向量索引 native 初始化，不影响主包安装。');
+  console.warn('[hnsw] 如需启用本地向量索引，请安装 native 编译工具链后运行 npm rebuild hnswlib-node 或在源码仓库执行 pnpm doctor:hnsw。');
+  if (process.env.CUSTOMIZE_AGENT_HNSW_STRICT === '1') {
+    console.warn(error && error.stack ? error.stack : error);
+    process.exit(1);
+  }
+  process.exit(0);
 }
