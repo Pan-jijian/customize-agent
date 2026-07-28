@@ -3,28 +3,22 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { computeProjectId } from '@customize-agent/knowledge';
 import type { getMultiProjectManager } from '../knowledge/kbService';
-import { BLOCKING_CHAPTER_CACHE_ISSUE_RE, DOCUMENT_CACHE_TTL_MS, PROJECT_BASIC_FACT_FIELDS, PROMPT_EXECUTION_SCORE_RULES, QUALITY_REPAIR_INSTRUCTIONS, QUALITY_REPAIR_TYPE_RULES, REPAIRABLE_QUALITY_ISSUE_RE, ROLE_OUTPUT_TYPE_RULES } from '../constants';
+import { BLOCKING_CHAPTER_ISSUE_RE, PROMPT_EXECUTION_SCORE_RULES, QUALITY_REPAIR_INSTRUCTIONS, QUALITY_REPAIR_TYPE_RULES, REPAIRABLE_QUALITY_ISSUE_RE, ROLE_OUTPUT_TYPE_RULES } from '../constants';
 import { listDocumentRoles } from '../document-core/documentRoleService';
 import type { KbSearchResult } from '@/lib/api';
-import type { ChapterDraftCacheValue, ProjectBasicFact, PromptIntentProfile, QualityRepairType, RoleEvidencePool, RoleExecutionNode, RoleExtractionChapterInput, RoleExtractionFactInput, RoleExtractionLlmResult, RoleExtractionRequirementInput, RoleNodeArtifact, RoleNodeFact, SectionDraftCacheValue, TenderPlanChapter } from '../types';
+import type { QualityRepairType, RoleEvidencePool, RoleExecutionNode, RoleExtractionChapterInput, RoleExtractionFactInput, RoleExtractionLlmResult, RoleExtractionRequirementInput, RoleNodeArtifact, RoleNodeFact, TenderPlanChapter } from '../types';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplate, DocumentTemplateChapter, FileBinding, PromptBinding } from './types';
 
-export type { ProjectBasicFact, PromptIntentProfile, QualityRepairType, RoleEvidencePool, RoleExecutionNode, RoleExtractionChapterInput, RoleExtractionFactInput, RoleExtractionLlmResult, RoleExtractionRequirementInput, RoleNodeArtifact, RoleNodeFact, TenderPlanChapter } from '../types';
+export type { QualityRepairType, RoleEvidencePool, RoleExecutionNode, RoleExtractionChapterInput, RoleExtractionFactInput, RoleExtractionLlmResult, RoleExtractionRequirementInput, RoleNodeArtifact, RoleNodeFact, TenderPlanChapter } from '../types';
 import { readPromptContents, violatesConfiguredChapterTitleFilter } from './templateStore';
-import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, uniqueEvidence } from './evidence';
+import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget, selectEvidenceByBudget, uniqueEvidence } from './evidence';
 import { hasExplicitOutlineBlock, isExplicitOutlineClosingLine, isExplicitOutlineOpeningLine, isValidGeneratedChapterTitle, normalizeGeneratedChapterTitle } from './outline';
-import { CAD_ENTITY_TOKEN_RE, CN_NUMERAL_RE, FILE_NAME_RE, MAX_DOCUMENT_CACHE_ITEMS, MAX_FALLBACK_CHAPTERS } from './constants';
+import { CAD_ENTITY_TOKEN_RE, CN_NUMERAL_RE, FILE_NAME_RE } from './constants';
 import { FORMAL_WRITING_RULES, WORKFLOW_PHRASE_RE, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentTextLength } from './budget';
 import { classifyQualitySeverity, degenerateContentIssues } from './qualityValidation';
 import { callDocumentLlm, callDocumentLlmJson, getAdaptiveDocumentLlmLimit } from './llmClient';
-import { asObjectArray, asStringArray, safePlanId, setLimitedCache, stableHash, stringifyFactValue, throwIfAborted } from './utils';
-
-const ROLE_ARTIFACT_CACHE = new Map<string, RoleNodeArtifact>();
-const CHAPTER_SEARCH_CACHE = new Map<string, KbSearchResult[]>();
-
-const CHAPTER_DRAFT_CACHE = new Map<string, ChapterDraftCacheValue>();
-const SECTION_DRAFT_CACHE = new Map<string, SectionDraftCacheValue>();
+import { asObjectArray, asStringArray, safePlanId, stableHash, stringifyFactValue, throwIfAborted } from './utils';
 
 
 export function selectDocumentGenerationStrategy(input: { template: DocumentTemplate; targetWords: number; requirement?: string }): DocumentGenerationStrategy {
@@ -36,12 +30,13 @@ export function selectDocumentGenerationStrategy(input: { template: DocumentTemp
   const compact = input.targetWords <= 6000 && chapterCount <= 4 && !strict;
   const mode: DocumentGenerationStrategy['mode'] = strict ? 'strict' : longform ? 'longform' : compact ? 'fast' : 'balanced';
   const targetLlmConcurrency = Number(process.env.DOCUMENT_TARGET_LLM_CONCURRENCY ?? 0);
-  const maxChapterConcurrency = Math.max(1, Math.floor(Number(process.env.DOCUMENT_CHAPTER_CONCURRENCY ?? chapterCount)));
-  const maxSectionConcurrency = Math.max(1, Math.floor(Number(process.env.DOCUMENT_SECTION_CONCURRENCY ?? 999)));
-  const maxChapterReviewConcurrency = Math.max(1, Math.floor(Number(process.env.DOCUMENT_CHAPTER_REVIEW_CONCURRENCY ?? chapterCount)));
+  const defaultChapterConcurrency = Math.max(1, chapterCount);
+  const defaultSectionConcurrency = strict ? 1 : (longform ? 2 : 3);
+  const maxChapterConcurrency = Math.max(1, Math.min(chapterCount || 1, Math.floor(Number(process.env.DOCUMENT_CHAPTER_CONCURRENCY ?? defaultChapterConcurrency))));
+  const maxSectionConcurrency = Math.max(1, Math.min(3, Math.floor(Number(process.env.DOCUMENT_SECTION_CONCURRENCY ?? defaultSectionConcurrency))));
+  const maxChapterReviewConcurrency = Math.max(1, Math.min(2, Math.floor(Number(process.env.DOCUMENT_CHAPTER_REVIEW_CONCURRENCY ?? defaultChapterConcurrency))));
   return {
     mode,
-    enableChapterCache: true,
     enableChapterReview: true,
     enableGlobalReview: true,
     enableDocumentBudgetExpansion: true,
@@ -57,10 +52,9 @@ export function createGenerationDiagnostics(strategy: DocumentGenerationStrategy
   return {
     strategy,
     metrics: [],
-    cache: { chapterHits: 0, chapterMisses: 0, chapterWrites: 0, sectionHits: 0, sectionMisses: 0, sectionWrites: 0, prunedItems: 0, rejectedHits: 0 },
     llm: { calls: 0, failures: 0, throttledWaits: 0, throttledWaitMs: 0, maxActive: 0, currentLimit: getAdaptiveDocumentLlmLimit(), limitAdjustments: 0 },
     evidence: { raw: 0, used: 0, filteredNoise: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0 },
-    quality: { blockingCount: 0, importantCount: 0, minorCount: 0, repairedCount: 0, reusedChapterCount: 0, reusedSectionCount: 0 },
+    quality: { blockingCount: 0, importantCount: 0, minorCount: 0, repairedCount: 0 },
   };
 }
 
@@ -71,54 +65,6 @@ export async function measureGenerationStep<T>(diagnostics: DocumentGenerationDi
   } finally {
     const endedAt = Date.now();
     diagnostics.metrics.push({ name, startedAt, endedAt, durationMs: endedAt - startedAt, meta });
-  }
-}
-
-export function pruneChapterDraftCache(diagnostics?: DocumentGenerationDiagnostics) {
-  const now = Date.now();
-  let pruned = 0;
-  for (const [key, item] of CHAPTER_DRAFT_CACHE.entries()) {
-    if (now - item.updatedAt > DOCUMENT_CACHE_TTL_MS) {
-      CHAPTER_DRAFT_CACHE.delete(key);
-      pruned += 1;
-    }
-  }
-  while (CHAPTER_DRAFT_CACHE.size > MAX_DOCUMENT_CACHE_ITEMS) {
-    const oldest = [...CHAPTER_DRAFT_CACHE.entries()].sort((a, b) => (a[1].updatedAt + a[1].hits * 60000) - (b[1].updatedAt + b[1].hits * 60000))[0]?.[0];
-    if (!oldest) break;
-    CHAPTER_DRAFT_CACHE.delete(oldest);
-    pruned += 1;
-  }
-  if (diagnostics) diagnostics.cache.prunedItems += pruned;
-}
-
-export function persistentCacheEnabled() {
-  return process.env.DOCUMENT_PERSISTENT_FACT_CACHE !== '0';
-}
-
-export function persistentDocumentCachePath(projectRoot: string, kind: string, key: string) {
-  return path.join(os.homedir(), '.customize-agent', 'document-cache', stableHash(projectRoot), kind, `${key}.json`);
-}
-
-export function readPersistentJson<T>(projectRoot: string, kind: string, key: string): T | undefined {
-  if (!persistentCacheEnabled()) return undefined;
-  try {
-    const filePath = persistentDocumentCachePath(projectRoot, kind, key);
-    if (!fs.existsSync(filePath)) return undefined;
-    return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T;
-  } catch {
-    return undefined;
-  }
-}
-
-export function writePersistentJson(projectRoot: string, kind: string, key: string, value: unknown) {
-  if (!persistentCacheEnabled()) return;
-  try {
-    const filePath = persistentDocumentCachePath(projectRoot, kind, key);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(value));
-  } catch {
-    // 持久化缓存仅用于提速，失败不影响生成主流程。
   }
 }
 
@@ -162,26 +108,27 @@ export function evidencePoolKey(projectRoot: string, filePath: string) {
   return path.relative(projectRoot, path.isAbsolute(filePath) ? filePath : path.join(projectRoot, filePath));
 }
 
-function chunkHashes(chunks: Array<{ content: string; sectionTitle?: string }>, limit = 200) {
-  const hashes: string[] = [];
-  for (const chunk of chunks) {
-    hashes.push(stableHash(`${chunk.sectionTitle || ''}\n${chunk.content}`));
-    if (hashes.length >= limit) break;
-  }
-  return hashes;
-}
-
 export function projectEvidenceVersionHash(project: any, projectRoot: string, scopePaths: Set<string>) {
+  const records = typeof project.listFiles === 'function' ? project.listFiles() as Array<Record<string, unknown>> : [];
+  const byPath = new Map(records.map(record => [String(record.relativePath || ''), record]));
   const entries: Array<Record<string, unknown>> = [];
   for (const filePath of [...scopePaths].sort()) {
-    const detail = project.getFileDetail(filePath) || project.getFileDetail(path.join(projectRoot, filePath));
-    if (!detail) {
-      entries.push({ filePath, missing: true });
+    const relativePath = evidencePoolKey(projectRoot, filePath);
+    const record = byPath.get(filePath) || byPath.get(relativePath);
+    if (!record) {
+      entries.push({ filePath: relativePath, missing: true });
       continue;
     }
-    entries.push({ filePath: detail.file?.relativePath || filePath, chunkCount: detail.chunks?.length || 0, chunks: chunkHashes(detail.chunks || []) });
+    entries.push({
+      filePath: record.relativePath || relativePath,
+      contentHash: record.contentHash,
+      fileSize: record.fileSize,
+      mtime: record.mtime,
+      chunkCount: record.chunkCount,
+      indexedAt: record.indexedAt,
+    });
   }
-  return stableHash({ type: 'project-evidence-version-v1', entries });
+  return stableHash({ type: 'project-evidence-version-v2', entries });
 }
 
 function uniqueNodeFilePaths(nodes: RoleExecutionNode[]) {
@@ -199,34 +146,48 @@ function uniqueNodeFilePaths(nodes: RoleExecutionNode[]) {
   return { filePaths, bindingCount };
 }
 
-function evidenceFromProjectDetail(detail: any) {
+function evidenceFromProjectDetail(detail: any, maxChars?: number) {
   const evidence: DocumentEvidence[] = [];
-  for (const chunk of (detail.chunks || []).slice(0, 120) as Array<{ content: string; sectionTitle?: string }>) {
+  let usedChars = 0;
+  const chunks = (detail.chunks || []) as Array<{ content: string; sectionTitle?: string }>;
+  const totalChunks = Number.isFinite(detail.totalChunkCount) ? Number(detail.totalChunkCount) : chunks.length;
+  for (const chunk of chunks) {
+    const content = cleanEvidenceText(chunk.content);
+    if (!content) continue;
+    if (Number.isFinite(maxChars) && maxChars! > 0 && usedChars + content.length > maxChars! && evidence.length > 0) break;
     evidence.push({
       chapterId: 'role-evidence-pool',
       filePath: detail.file.relativePath,
       score: 1,
-      content: chunk.content,
+      content,
       sectionTitle: chunk.sectionTitle,
       source: 'role-node',
     });
+    usedChars += content.length;
   }
-  return evidence;
+  return { evidence, totalChunks, omittedChunks: Math.max(0, totalChunks - chunks.length) };
 }
 
-export function buildRoleEvidencePool(project: any, nodes: RoleExecutionNode[], projectRoot: string): RoleEvidencePool {
+export function buildRoleEvidencePool(project: any, nodes: RoleExecutionNode[], projectRoot: string, maxCharsPerFile?: number): RoleEvidencePool {
   const files = new Map<string, DocumentEvidence[]>();
   const scoped = uniqueNodeFilePaths(nodes);
+  let totalChunkCount = 0;
+  let loadedChunkCount = 0;
+  let omittedChunkCount = 0;
   for (const filePath of scoped.filePaths) {
     const key = evidencePoolKey(projectRoot, filePath);
-    const detail = project.getFileDetail(filePath);
+    const detail = project.getFileDetail(filePath, Number.isFinite(maxCharsPerFile) && maxCharsPerFile! > 0 ? { maxChunkContentChars: maxCharsPerFile } : undefined);
     if (detail && detail.chunks.length > 0) {
-      files.set(key, evidenceFromProjectDetail(detail));
+      const loaded = evidenceFromProjectDetail(detail, maxCharsPerFile);
+      files.set(key, loaded.evidence);
+      totalChunkCount += loaded.totalChunks;
+      loadedChunkCount += loaded.evidence.length;
+      omittedChunkCount += loaded.omittedChunks;
       continue;
     }
     files.set(key, []);
   }
-  return { files, uniqueFileCount: files.size, bindingCount: scoped.bindingCount };
+  return { files, uniqueFileCount: files.size, bindingCount: scoped.bindingCount, totalChunkCount, loadedChunkCount, omittedChunkCount };
 }
 
 export function evidenceForRoleFiles(pool: RoleEvidencePool, node: RoleExecutionNode, projectRoot: string): DocumentEvidence[] {
@@ -235,176 +196,18 @@ export function evidenceForRoleFiles(pool: RoleEvidencePool, node: RoleExecution
     const fileEvidence = pool.files.get(evidencePoolKey(projectRoot, filePath)) || [];
     for (const item of fileEvidence) evidence.push({ ...item, chapterId: node.id, roleId: node.fileRoleId, processingType: node.processingType });
   }
-  return uniqueEvidence(evidence, 120);
+  const maxItems = Math.max(8, Math.floor(Number(process.env.DOCUMENT_ROLE_EVIDENCE_MAX_ITEMS ?? 36)));
+  const maxChars = Math.max(12000, Math.floor(Number(process.env.DOCUMENT_ROLE_EVIDENCE_MAX_CHARS ?? 42000)));
+  return selectEvidenceByBudget(evidence, { maxItems, maxChars, preservePinned: true });
 }
 
-export function roleArtifactCacheKey(input: { template: DocumentTemplate; node: RoleExecutionNode; evidence: DocumentEvidence[]; promptTexts: string; projectRoot: string; modelName?: string }) {
-  return stableHash({
-    type: 'role-artifact-v1',
-    projectRoot: input.projectRoot,
-    projectId: computeProjectId(input.projectRoot),
-    templateId: input.template.id,
-    templateName: input.template.name,
-    node: {
-      id: input.node.id,
-      fileRoleId: input.node.fileRoleId,
-      promptRoleIds: input.node.promptRoleIds,
-      filePaths: input.node.filePaths,
-      outputType: input.node.outputType,
-    },
-    promptTexts: input.promptTexts,
-    modelName: input.modelName,
-    evidence: input.evidence.map(item => ({ filePath: item.filePath, sectionTitle: item.sectionTitle, contentHash: stableHash(item.content) })),
-  });
-}
-
-export async function executeRoleExtractionNodeCached(input: { template: DocumentTemplate; node: RoleExecutionNode; evidence: DocumentEvidence[]; promptTexts: string; projectRoot: string; modelName?: string; signal?: AbortSignal }) {
-  throwIfAborted(input.signal);
-  const key = roleArtifactCacheKey(input);
-  const cached = ROLE_ARTIFACT_CACHE.get(key);
-  if (cached) return { artifact: cached, cached: true };
-  const artifact = await executeRoleExtractionNode(input.template, input.node, input.evidence, input.signal);
-  throwIfAborted(input.signal);
-  setLimitedCache(ROLE_ARTIFACT_CACHE, key, artifact);
-  return { artifact, cached: false };
-}
-
-export function chapterSearchCacheKey(input: { projectRoot: string; query: string; evidenceScopePaths: Set<string>; maxEvidence: number; fileRolesHash: string; generationMode?: boolean }) {
-  return stableHash({
-    type: 'chapter-search-v2',
-    projectRoot: input.projectRoot,
-    projectId: computeProjectId(input.projectRoot),
-    query: input.query,
-    maxEvidence: input.maxEvidence,
-    fileRolesHash: input.fileRolesHash,
-    generationMode: Boolean(input.generationMode),
-    scope: [...input.evidenceScopePaths].sort(),
-  });
-}
-
-export async function cachedChapterSearch(input: { manager: ReturnType<typeof getMultiProjectManager>; projectRoot: string; query: string; evidenceScopePaths: Set<string>; maxEvidence: number; fileRolesHash: string; generationMode?: boolean }) {
-  const key = chapterSearchCacheKey(input);
-  const cached = CHAPTER_SEARCH_CACHE.get(key) || readPersistentJson<KbSearchResult[]>(input.projectRoot, 'chapter-search', key);
-  if (cached) {
-    setLimitedCache(CHAPTER_SEARCH_CACHE, key, cached);
-    return cached;
-  }
-  const scopedFilePaths = [...input.evidenceScopePaths].filter(Boolean).sort();
-  if (scopedFilePaths.length === 0) return [];
-  const result = await input.manager.search(input.projectRoot, input.query, {
-    scope: 'project',
-    filters: { filePaths: scopedFilePaths },
-    limit: input.generationMode ? input.maxEvidence : Math.max(input.maxEvidence, 30),
-    weights: input.generationMode ? { keyword: 0.55, vector: 0.4, rewrite: 0, hybridBonus: 0.08 } : { keyword: 0.4, vector: 0.45, rewrite: 0.75, hybridBonus: 0.15 },
-    generationMode: input.generationMode,
-  });
-  setLimitedCache(CHAPTER_SEARCH_CACHE, key, result.results);
-  writePersistentJson(input.projectRoot, 'chapter-search', key, result.results);
-  return result.results;
-}
-
-export function chapterDraftCacheKey(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; requirement?: string; projectRoot: string; modelName?: string; targetWords: number; fileRolesHash: string }) {
-  return stableHash({
-    type: 'chapter-draft-v1',
-    projectRoot: input.projectRoot,
-    projectId: computeProjectId(input.projectRoot),
-    templateId: input.template.id,
-    chapterId: input.chapter.id,
-    chapterTitle: input.chapter.title,
-    requirement: input.requirement || '',
-    promptTexts: input.promptTexts,
-    modelName: input.modelName || '',
-    targetWords: input.targetWords,
-    fileRolesHash: input.fileRolesHash,
-    missingFacts: input.missingFacts,
-    evidence: input.evidence.map(item => ({ filePath: item.filePath, score: Math.round(item.score * 1000) / 1000, roleId: item.roleId, processingType: item.processingType, source: item.source, digest: stableHash(item.content.slice(0, 3000)) })),
-  });
-}
-
-export function blockingChapterCacheIssues(issues: string[]) {
+export function blockingChapterIssues(issues: string[]) {
   const blocking: string[] = [];
   for (const issue of issues) {
-    BLOCKING_CHAPTER_CACHE_ISSUE_RE.lastIndex = 0;
-    if (BLOCKING_CHAPTER_CACHE_ISSUE_RE.test(issue)) blocking.push(issue);
+    BLOCKING_CHAPTER_ISSUE_RE.lastIndex = 0;
+    if (BLOCKING_CHAPTER_ISSUE_RE.test(issue)) blocking.push(issue);
   }
   return blocking;
-}
-
-export function readChapterDraftCache(input: Parameters<typeof chapterDraftCacheKey>[0], diagnostics?: DocumentGenerationDiagnostics) {
-  pruneChapterDraftCache(diagnostics);
-  const key = chapterDraftCacheKey(input);
-  const memory = CHAPTER_DRAFT_CACHE.get(key);
-  const cached = memory?.value || readPersistentJson<DocumentDraftChapter>(input.projectRoot, 'chapter-draft', key);
-  if (!cached) {
-    if (diagnostics) diagnostics.cache.chapterMisses += 1;
-    return undefined;
-  }
-  if (cached.id !== input.chapter.id || !cached.content?.trim()) {
-    if (diagnostics) diagnostics.cache.rejectedHits += 1;
-    return undefined;
-  }
-  const targetIssues = lightweightChapterIssues({ chapter: input.chapter, content: cached.content, missingFacts: cached.missingFacts || input.missingFacts, targetWords: input.targetWords });
-  if (blockingChapterCacheIssues(targetIssues).length > 0) {
-    if (diagnostics) diagnostics.cache.rejectedHits += 1;
-    return undefined;
-  }
-  if (memory) memory.hits += 1;
-  setLimitedCache(CHAPTER_DRAFT_CACHE, key, { value: cached, updatedAt: Date.now(), hits: (memory?.hits || 0) + 1 });
-  if (diagnostics) diagnostics.cache.chapterHits += 1;
-  return cached;
-}
-
-export function writeChapterDraftCache(input: Parameters<typeof chapterDraftCacheKey>[0], chapter: DocumentDraftChapter, diagnostics?: DocumentGenerationDiagnostics) {
-  const key = chapterDraftCacheKey(input);
-  setLimitedCache(CHAPTER_DRAFT_CACHE, key, { value: chapter, updatedAt: Date.now(), hits: 0 });
-  writePersistentJson(input.projectRoot, 'chapter-draft', key, chapter);
-  if (diagnostics) diagnostics.cache.chapterWrites += 1;
-  pruneChapterDraftCache(diagnostics);
-}
-
-export function sectionDraftCacheKey(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; promptTexts: string; requirement?: string; projectRoot: string; modelName?: string; targetWords: number; fileRolesHash: string }) {
-  return stableHash({
-    type: 'section-draft-v1',
-    projectRoot: input.projectRoot,
-    projectId: computeProjectId(input.projectRoot),
-    templateId: input.template.id,
-    chapterId: input.chapter.id,
-    sectionTitle: input.sectionTitle,
-    requirement: input.requirement || '',
-    promptTexts: stableHash(input.promptTexts.slice(0, 12000)),
-    modelName: input.modelName || '',
-    targetWords: input.targetWords,
-    fileRolesHash: input.fileRolesHash,
-    evidence: input.evidence.map(item => ({ filePath: item.filePath, roleId: item.roleId, digest: stableHash(item.content.slice(0, 2000)) })),
-  });
-}
-
-export function readSectionDraftCache(input: Parameters<typeof sectionDraftCacheKey>[0], diagnostics?: DocumentGenerationDiagnostics) {
-  const key = sectionDraftCacheKey(input);
-  const memory = SECTION_DRAFT_CACHE.get(key);
-  const cached = memory?.value || readPersistentJson<string>(input.projectRoot, 'section-draft', key);
-  if (!cached?.trim()) {
-    if (diagnostics) diagnostics.cache.sectionMisses += 1;
-    return undefined;
-  }
-  if (/后台流程话术|提示词|占位|TODO|待补充/iu.test(cached) || documentTextLength(cached) < Math.max(120, Math.floor(input.targetWords * 0.45))) {
-    if (diagnostics) diagnostics.cache.rejectedHits += 1;
-    return undefined;
-  }
-  setLimitedCache(SECTION_DRAFT_CACHE, key, { value: cached, updatedAt: Date.now(), hits: (memory?.hits || 0) + 1 });
-  if (diagnostics) {
-    diagnostics.cache.sectionHits += 1;
-    diagnostics.quality.reusedSectionCount += 1;
-  }
-  return cached;
-}
-
-export function writeSectionDraftCache(input: Parameters<typeof sectionDraftCacheKey>[0], content: string, diagnostics?: DocumentGenerationDiagnostics) {
-  if (!content.trim() || /后台流程话术|提示词|占位|TODO|待补充/iu.test(content)) return;
-  const key = sectionDraftCacheKey(input);
-  setLimitedCache(SECTION_DRAFT_CACHE, key, { value: content, updatedAt: Date.now(), hits: 0 });
-  writePersistentJson(input.projectRoot, 'section-draft', key, content);
-  if (diagnostics) diagnostics.cache.sectionWrites += 1;
 }
 
 function groupFileBindingsByRole(bindings: FileBinding[]) {
@@ -445,7 +248,7 @@ function selectPromptMatches(role: ReturnType<typeof listDocumentRoles>[number],
     scored.push({ promptRole, texts, score: promptExecutionScore(promptRole.id, role, texts) });
   }
   scored.sort((a, b) => b.score - a.score);
-  const matched = scored.filter(item => item.score > 5).slice(0, 2);
+  const matched = scored.filter(item => item.score > 5);
   if (matched.length > 0) return matched;
   const fallback = scored.find(item => {
     const type = item.promptRole.executionType || 'reference';
@@ -508,16 +311,14 @@ export function fallbackChaptersFromEvidence(template: DocumentTemplate, node: R
         id: safePlanId(title, `chapter-${headings.length + 1}`),
         title,
         order: headings.length,
-        sourceRequirement: item.content.replace(/\s+/gu, ' ').slice(0, 500),
+        sourceRequirement: item.content.replace(/\s+/gu, ' '),
         requiredContents: [],
         writingRules: [],
         evidenceNeeds: [],
         minWords: 1200,
         requirements: [],
       });
-      if (headings.length >= MAX_FALLBACK_CHAPTERS) break;
     }
-    if (headings.length >= MAX_FALLBACK_CHAPTERS) break;
   }
   return headings;
 }
@@ -531,7 +332,7 @@ export function roleExtractionNeedsRepair(llm?: RoleExtractionLlmResult) {
 export function fallbackFactsFromEvidence(node: RoleExecutionNode, evidence: DocumentEvidence[]): RoleNodeFact[] {
   const facts: RoleNodeFact[] = [];
   for (const item of evidence) {
-    const value = item.content.replace(/\s+/gu, ' ').slice(0, 360);
+    const value = item.content.replace(/\s+/gu, ' ');
     if (value.length <= 20) continue;
     facts.push({
       key: `${node.fileRoleName}事实${facts.length + 1}`,
@@ -541,14 +342,19 @@ export function fallbackFactsFromEvidence(node: RoleExecutionNode, evidence: Doc
       processingType: node.processingType,
       relatedChapterHints: item.sectionTitle ? [item.sectionTitle] : [],
     });
-    if (facts.length >= 20) break;
   }
   return facts;
 }
 
 export async function executeRoleExtractionNode(template: DocumentTemplate, node: RoleExecutionNode, evidence: DocumentEvidence[], signal?: AbortSignal): Promise<RoleNodeArtifact> {
-  const sample = evidence.slice(0, 36).map(item => `文件:${item.filePath}\n片段:${item.sectionTitle || ''}\n内容:${item.content.slice(0, 1200)}`).join('\n\n---\n\n');
   const promptText = node.promptTexts.join('\n\n') || '请读取绑定文件角色，抽取可用于文档生成的结构化信息。';
+  const sample = evidenceBundlePrompt({
+    chapterId: node.id,
+    textEvidence: evidence,
+    resources: [],
+    byKind: { map: [], image: [], table: [], document: [], spreadsheet: [], text: [], attachment: [] },
+    summary: '',
+  }, { maxChars: evidencePromptBudgetForTarget(1800, 8000, Math.max(14000, getAdaptiveDocumentLlmLimit() * 3500)) });
   const extractionPrompt = `你正在执行一个“文件角色 × 提示词角色”的读取节点。\n节点类型：${node.outputType}\n文件角色：${node.fileRoleName}（${node.fileRoleId}）\n要求：严格按该节点绑定的提示词读取该文件角色的内容，不要读取其他角色。提示词角色只提供规则和格式约束，其中的示例、样例、占位项目名、编号、日期、数量和示例正文不得作为事实抽取来源。\n\n请返回 JSON，字段包括 chapters、facts、outputRequirements、forbidImageInsertion、warnings。chapters 只提取当前模板和规范包需要的正式章节；requirements 只保留可合并写入正文的核心要求，避免无依据地拆成过细子节点。facts 必须只来自下面的绑定文件片段，优先抽取对象、范围、区域、阶段、数量、日期、周期、规格、单位、资源数量、检查频次和来源口径；同类对象不得合并丢失，计量单位保持原文含义，必要时使用导出友好的正式写法。\n\n绑定文件片段：\n${sample}`;
   const warnings: string[] = [];
   throwIfAborted(signal);
@@ -558,7 +364,7 @@ export async function executeRoleExtractionNode(template: DocumentTemplate, node
     warnings.push(`${node.fileRoleName} 结构化读取返回格式异常，已尝试修复 JSON schema。`);
     const repaired = await callDocumentLlmJson<RoleExtractionLlmResult>(
       '你是 JSON schema 修复器。只根据输入 JSON 重新整理字段类型，不新增事实，不改写事实含义。',
-      `请把下面 JSON 修复为严格结构：{"chapters":[],"facts":[],"outputRequirements":[],"warnings":[],"forbidImageInsertion":false}。chapters 和 facts 必须是数组；如果原值是对象，请转为数组；如果无法转换，使用空数组。只返回 JSON。\n\n原始 JSON：\n${JSON.stringify(llm).slice(0, 12000)}`,
+      `请把下面 JSON 修复为严格结构：{"chapters":[],"facts":[],"outputRequirements":[],"warnings":[],"forbidImageInsertion":false}。chapters 和 facts 必须是数组；如果原值是对象，请转为数组；如果无法转换，使用空数组。只返回 JSON。\n\n原始 JSON：\n${JSON.stringify(llm)}`,
       { signal },
     );
     if (repaired && !roleExtractionNeedsRepair(repaired)) llm = repaired;
@@ -605,99 +411,39 @@ export async function executeRoleExtractionNode(template: DocumentTemplate, node
       relatedChapterHints: asStringArray(item.relatedChapterHints),
     });
   });
-  const usedFallback = chapters.length === 0 || facts.length === 0;
-  if (usedFallback) warnings.push(`${node.fileRoleName} 部分结构化结果不足，已补充使用证据片段兜底。`);
+  const fallbackChapters = chapters.length > 0 ? [] : fallbackChaptersFromEvidence(template, node, evidence);
+  const fallbackFacts = facts.length > 0 ? [] : fallbackFactsFromEvidence(node, evidence);
+  if (chapters.length === 0 && fallbackChapters.length > 0) warnings.push(`${node.fileRoleName} 结构化章节读取不足，已补充使用证据标题兜底。`);
+  if (facts.length === 0 && fallbackFacts.length > 0) warnings.push(`${node.fileRoleName} 结构化事实读取不足，已补充使用证据片段兜底。`);
+  const artifactEvidence = uniqueEvidence(evidence, undefined);
   return {
     node,
-    evidence,
-    chapters: chapters.length > 0 ? chapters : fallbackChaptersFromEvidence(template, node, evidence),
-    facts: facts.length > 0 ? facts : fallbackFactsFromEvidence(node, evidence),
+    evidence: artifactEvidence,
+    chapters: chapters.length > 0 ? chapters : fallbackChapters,
+    facts: facts.length > 0 ? facts : fallbackFacts,
     outputRequirements: asStringArray(llm?.outputRequirements),
     warnings: [...warnings, ...asStringArray(llm?.warnings)],
     forbidImageInsertion: llm?.forbidImageInsertion ?? node.outputType === 'drawing_facts',
   };
 }
 
-export function extractProjectBasicFacts(evidence: DocumentEvidence[]): ProjectBasicFact[] {
-  const facts: ProjectBasicFact[] = [];
-  const seen = new Set<string>();
-
-  for (const item of evidence) {
-    for (const { key, patterns } of PROJECT_BASIC_FACT_FIELDS) {
-      if (facts.some(fact => fact.key === key)) continue;
-      for (const pattern of patterns) {
-        const value = pattern.exec(item.content)?.[1]?.replace(/\s+/gu, ' ').trim();
-        if (!value || /见(?:公告|文件|资料|附件)|详见|按.*要求/u.test(value)) continue;
-        const dedupeKey = `${key}:${value}`;
-        if (seen.has(dedupeKey)) continue;
-        seen.add(dedupeKey);
-        facts.push({ key, value: value.slice(0, 300), sourceFile: item.filePath });
-        break;
-      }
-    }
-  }
-  return facts;
-}
-
-export function analyzePromptIntent(text: string): PromptIntentProfile {
-  // 防止超大文本导致正则表达式性能灾难，提取头部和尾部各 5000 字符进行意图判断（指令通常在开头或结尾）
-  const safeText = text.length > 10000 ? `${text.slice(0, 5000)}\n\n${text.slice(-5000)}` : text;
-  const normalized = safeText.replace(/\s+/gu, ' ');
-  return {
-    explicitStructure: /(?:目录|大纲|章节|结构|框架|按以下|如下结构|不要新增|不得新增|只写|仅写)/u.test(normalized),
-    explicitSections: /(?:小节|二级标题|三级标题|一级标题|##|###|第[一二三四五六七八九十]+章|\d+[.、]\s*[^\s])/u.test(safeText),
-    lengthLimit: /(?:\d+\s*(?:字|页|段)|控制在|不超过|不少于|篇幅|字数|页数)/u.test(normalized),
-    wantsConcise: /(?:简洁|精简|简要|不要展开|无需展开|概述|摘要|少写|控制篇幅)/u.test(normalized),
-    detailedInstructions: normalized.length >= 900 || /(?:必须包含|重点写|详细说明|逐项|分别说明|表格|列表|明细|流程|步骤|标准|责任|频次|验收)/u.test(normalized),
-    explicitFacts: /(?:\d+\s*(?:天|日|个月|万元|元|%|㎡|m2|米|m|人|台|套)|项目名称|周期|质量标准|地点|预算|编号)/u.test(normalized),
-    styleConstraint: /(?:口吻|语气|风格|措辞|正式|承诺|汇报|方案|不要使用|禁止使用)/u.test(normalized),
-  };
-}
-
-export function shouldInjectProjectBasicFacts(profile: PromptIntentProfile) {
-  return !(profile.explicitStructure || profile.explicitSections || profile.lengthLimit || profile.wantsConcise || profile.detailedInstructions || profile.explicitFacts || profile.styleConstraint);
-}
-
-export function projectBasicFactsPrompt(facts: ProjectBasicFact[], chapter: DocumentTemplateChapter, profile: PromptIntentProfile) {
-  if (facts.length === 0 || !shouldInjectProjectBasicFacts(profile)) return '';
-  const text = [chapter.title, chapter.purpose, ...(chapter.sections || []), ...(chapter.queries || [])].join('\n');
-  const matched = facts.filter(fact => {
-    const field = PROJECT_BASIC_FACT_FIELDS.find(item => item.key === fact.key);
-    return !field || field.chapterHint.test(text) || /概况|总述|说明|背景/u.test(text);
-  });
-  if (matched.length === 0) return '';
-  return [
-    '## 项目基础事实候选',
-    '以下事实来自已进入本章证据范围的绑定资料，仅在与本章主题相关时自然吸收进正文；不得新增章节、不得强制生成表格、不得输出本提示标题。',
-    ...matched.slice(0, 12).map(fact => `- ${fact.key}：${fact.value}`),
-  ].join('\n');
-}
-
-function formatBasicFactsDigest(facts: ProjectBasicFact[]) {
-  if (facts.length === 0) return '';
-  const lines = ['## 项目基础事实候选'];
-  for (const fact of facts) lines.push(`- ${fact.key}：${fact.value}`);
-  return lines.join('\n');
-}
-
 function formatArtifactDigest(artifact: RoleNodeArtifact) {
   const lines = [`## ${artifact.node.fileRoleName} / ${artifact.node.outputType}`];
+  const chapterLimit = Math.max(8, Math.min(24, Number(process.env.DOCUMENT_ROLE_DIGEST_CHAPTER_LIMIT ?? 18)));
+  const factLimit = Math.max(16, Math.min(60, Number(process.env.DOCUMENT_ROLE_DIGEST_FACT_LIMIT ?? 30)));
   const chapterLines: string[] = [];
-  for (const chapter of artifact.chapters.slice(0, 18)) chapterLines.push(`- ${chapter.title}：${chapter.requiredContents.join('、') || chapter.sourceRequirement.slice(0, 120)}`);
+  for (const chapter of artifact.chapters.slice(0, chapterLimit)) chapterLines.push(`- ${chapter.title}：${(chapter.requiredContents.join('、') || chapter.sourceRequirement).slice(0, 180)}`);
   if (chapterLines.length > 0) lines.push(`章节/要求：\n${chapterLines.join('\n')}`);
   const factLines: string[] = [];
-  for (const fact of artifact.facts.slice(0, 30)) factLines.push(`- ${fact.key}：${stringifyFactValue(fact.value).slice(0, 220)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`);
+  for (const fact of artifact.facts.slice(0, factLimit)) factLines.push(`- ${fact.key}：${stringifyFactValue(fact.value).slice(0, 260)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`);
   if (factLines.length > 0) lines.push(`事实：\n${factLines.join('\n')}`);
   if (artifact.outputRequirements.length > 0) lines.push(`输出要求：${artifact.outputRequirements.join('；')}`);
   return lines.join('\n');
 }
 
-export function roleArtifactsDigest(artifacts: RoleNodeArtifact[], basicFacts: ProjectBasicFact[] = []) {
-  const blocks: string[] = [];
-  const tenderDigest = formatBasicFactsDigest(basicFacts);
-  if (tenderDigest) blocks.push(tenderDigest);
-  for (const artifact of artifacts) blocks.push(formatArtifactDigest(artifact));
-  return blocks.join('\n\n');
+export function roleArtifactsDigest(artifacts: RoleNodeArtifact[]) {
+  const artifactLimit = Math.max(4, Math.min(12, Number(process.env.DOCUMENT_ROLE_DIGEST_ARTIFACT_LIMIT ?? 8)));
+  return artifacts.slice(0, artifactLimit).map(artifact => formatArtifactDigest(artifact)).join('\n\n');
 }
 
 export function tenderPlanChaptersFromArtifacts(template: DocumentTemplate, artifacts: RoleNodeArtifact[]): TenderPlanChapter[] {
@@ -746,11 +492,12 @@ function factMatchesHints(fact: RoleNodeFact, hints: string[]) {
 export function roleFactsForChapter(artifacts: RoleNodeArtifact[], chapter: DocumentTemplateChapter, plan?: TenderPlanChapter) {
   const hints = chapterFactHints(chapter, plan);
   const matched: Array<{ artifact: RoleNodeArtifact; fact: RoleNodeFact }> = [];
+  const maxFacts = Math.max(40, Math.min(120, Number(process.env.DOCUMENT_ROLE_FACTS_PER_CHAPTER ?? 80)));
   for (const artifact of artifacts) {
     for (const fact of artifact.facts) {
       if (!factMatchesHints(fact, hints)) continue;
       matched.push({ artifact, fact });
-      if (matched.length >= 80) return matched;
+      if (matched.length >= maxFacts) return matched;
     }
   }
   return matched;
@@ -770,37 +517,13 @@ export function buildRoleChapterContext(artifacts: RoleNodeArtifact[], chapter: 
     const key = `${artifact.node.fileRoleName}（${artifact.node.outputType}）`;
     factGroups.set(key, [...(factGroups.get(key) || []), `- ${fact.key}：${cleanEvidenceText(stringifyFactValue(fact.value))}`]);
   }
-  const factsText = [...factGroups.entries()].map(([key, lines]) => `### ${key}\n${lines.slice(0, 18).map(line => line.replace(FILE_NAME_RE, '').replace(CAD_ENTITY_TOKEN_RE, '')).join('\n')}`).join('\n\n');
+  const maxGroupLines = Math.max(8, Math.min(24, Number(process.env.DOCUMENT_ROLE_FACT_LINES_PER_GROUP ?? 18)));
+  const factsText = [...factGroups.entries()].map(([key, lines]) => `### ${key}\n${lines.slice(0, maxGroupLines).map(line => line.replace(FILE_NAME_RE, '').replace(CAD_ENTITY_TOKEN_RE, '').slice(0, 320)).join('\n')}`).join('\n\n');
   return [planText ? `【本章章节计划】\n${planText}` : '', factsText ? `【角色节点结构化产物】\n${factsText}` : ''].filter(Boolean).join('\n\n');
 }
 
 export function shouldForbidDrawingImages(artifacts: RoleNodeArtifact[], _template: DocumentTemplate) {
   return artifacts.some(item => item.forbidImageInsertion || item.node.outputType === 'drawing_facts');
-}
-
-
-export function tenderQualityIssues(markdown: string, chapters: DocumentDraftChapter[], plan: TenderPlanChapter[], artifacts: RoleNodeArtifact[], forbidDrawingImages: boolean) {
-  const issues: string[] = [];
-  for (const chapter of plan) {
-    if (!markdown.includes(chapter.title)) issues.push(`章节计划建议未体现：${chapter.title}`);
-    for (const item of chapter.requiredContents.slice(0, 12)) if (item && !markdown.includes(item)) issues.push(`${chapter.title} 未覆盖必写内容：${item}`);
-  }
-  for (const chapter of chapters) {
-    const planItem = plan.find(item => item.title === chapter.title);
-    const min = planItem?.minWords || 1000;
-    if (chapter.content.length < min) issues.push(`${chapter.title} 内容深度不足：${chapter.content.length}/${min}`);
-    if ((chapter.sections || []).length < 3) issues.push(`${chapter.title} 二级小节少于 3 个，必须由模型结合章节主题和项目资料补齐 3-6 个正式二级小节`);
-    for (const section of chapter.sections || []) {
-      if (section && !markdown.includes(section)) issues.push(`${chapter.title} 缺少目录小节：${section}`);
-    }
-  }
-  for (const artifact of artifacts) {
-    const importantFacts = artifact.facts.slice(0, 5).map(fact => stringifyFactValue(fact.value).slice(0, 24)).filter(value => value.length >= 6);
-    if (importantFacts.length > 0 && !importantFacts.some(value => markdown.includes(value))) issues.push(`未体现 ${artifact.node.fileRoleName} 的关键读取结果`);
-  }
-  if (forbidDrawingImages && /!\[[^\]]*\]\([^)]*\)/iu.test(markdown)) issues.push('正文包含不应插入的图片');
-  if (/\b(?:m\s*[²2]|m\s*[³3]|mm2|cm2|km2)\b/iu.test(markdown)) issues.push('正文包含导出不友好的计量单位写法');
-  return [...new Set(issues)].slice(0, 40);
 }
 
 export function repairableQualityIssue(issue: string) {
@@ -816,25 +539,27 @@ export function lightweightChapterIssues(input: { chapter: DocumentTemplateChapt
   }
   for (const section of input.chapter.sections || []) {
     const escaped = section.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-    const match = input.content.match(new RegExp(`^#{3,4}\\s+(?:\\d+(?:\\.\\d+)*\\s+)?${escaped}\\s*\\n([\\s\\S]*?)(?=^#{3,4}\\s+|^##\\s+|$)`, 'mu'));
-    if (!match) issues.push(`缺少配置小节：${section}`);
-    else if (documentTextLength(match[1]) < 180) issues.push(`配置小节正文过短：${section}`);
+    const match = input.content.match(new RegExp(`^#{3,4}\\s+(?:\\d+(?:\\.\\d+)*[.．、]?\\s+)?${escaped}\\s*\\n([\\s\\S]*?)(?=^###\\s+|^##\\s+|$)`, 'mu'));
+    if (!match) issues.push(`缺少规划小节：${section}`);
+    else if (documentTextLength(match[1]) < 180) issues.push(`规划小节正文过短：${section}`);
   }
   if (documentTextLength(input.content) < Math.floor(input.targetWords * 0.85)) issues.push('正文篇幅明显低于目标');
   WORKFLOW_PHRASE_RE.lastIndex = 0;
   if (WORKFLOW_PHRASE_RE.test(input.content) || /知识库|检索|角色节点|事实字段|校验结果/u.test(input.content)) issues.push('正文包含后台流程话术');
-  if (/资料未提供|满足相关要求|结合实际情况|按(?:相关|有关|规范|规定|设计)要求/u.test(input.content)) issues.push('正文存在空泛占位表达');
+  if (/资料未提供|满足相关要求|结合实际情况|根据实际情况|视情况|待明确|待确认/u.test(input.content)) issues.push('正文存在空泛占位表达');
   for (const fact of input.missingFacts.slice(0, 8)) {
     if (fact && !input.content.includes(fact)) issues.push(`requiredFacts 未明显覆盖：${fact}`);
   }
-  return [...new Set(issues)].slice(0, 10);
+  return [...new Set(issues)].slice(0, 12);
 }
 
 export function issuesForChapter(chapter: DocumentDraftChapter, issues: string[]) {
   const actionableIssues = issues.filter(repairableQualityIssue);
   const sectionHits = new Set(chapter.sections || []);
-  const text = `${chapter.title}\n${chapter.sections?.join('\n') || ''}\n${chapter.content.slice(0, 4000)}`;
-  return actionableIssues.filter(issue => issue.includes(chapter.title) || [...sectionHits].some(section => issue.includes(section)) || /图片|三级小节|目录|表格|量化|数值|单位|事实/u.test(issue) && /!\[|####|\*\*|\||按设计要求|按规范要求|m\s*[²2]|mm2|cm2|km2/u.test(text));
+  const text = `${chapter.title}\n${chapter.sections?.join('\n') || ''}\n${chapter.content.slice(0, 8000)}`;
+  return actionableIssues
+    .filter(issue => issue.includes(chapter.title) || [...sectionHits].some(section => issue.includes(section)) || /图片|三级小节|目录|表格|量化|数值|单位|事实/u.test(issue) && /!\[|####|\*\*|\||m\s*[²2]|mm2|cm2|km2/u.test(text))
+    .slice(0, 6);
 }
 
 export function classifyQualityRepairType(issues: string[]): QualityRepairType {
@@ -872,18 +597,23 @@ function uniqueTextRange(content: string, patch: ChapterMarkdownPatch) {
   return content.indexOf(range) === content.lastIndexOf(range) ? range : undefined;
 }
 
+function patchLengthBudget(content: string) {
+  return Math.max(2600, Math.min(16000, Math.ceil(documentTextLength(content) * 0.45)));
+}
+
 function markdownStructureValid(content: string, title: string) {
   const codeFenceCount = (content.match(/```/gu) || []).length;
-  const normalizedTitle = title.replace(/^第[一二三四五六七八九十百千万]+章\s*/u, '').slice(0, 6);
-  return codeFenceCount % 2 === 0 && content.includes(normalizedTitle) && !/^\s*$/u.test(content);
+  const normalizedTitle = title.replace(/^第[一二三四五六七八九十百千万]+章\s*/u, '').trim();
+  return codeFenceCount % 2 === 0 && (!normalizedTitle || content.includes(normalizedTitle)) && !/^\s*$/u.test(content);
 }
 
 function applyChapterPatch(input: { content: string; patch: ChapterMarkdownPatch; title: string; forbidDrawingImages: boolean }) {
   const replacement = input.patch.replacement?.trim();
-  if (!replacement || replacement.length > 2600) return { content: input.content, applied: false };
+  const budget = patchLengthBudget(input.content);
+  if (!replacement || replacement.length > budget) return { content: input.content, applied: false };
   if (input.forbidDrawingImages && /!\[[^\]]*\]\([^)]*\)/iu.test(replacement)) return { content: input.content, applied: false };
   const range = uniqueTextRange(input.content, input.patch);
-  if (!range || range.length > 3200) return { content: input.content, applied: false };
+  if (!range || range.length > budget) return { content: input.content, applied: false };
   const next = sanitizeFormalMarkdown(removeUnwantedDrawingImages(input.content.replace(range, replacement), input.forbidDrawingImages));
   if (!markdownStructureValid(next, input.title)) return { content: input.content, applied: false };
   if (documentTextLength(next) < Math.floor(documentTextLength(input.content) * 0.65)) return { content: input.content, applied: false };
@@ -907,14 +637,15 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     `章节：${input.chapter.title}`,
     input.requirement ? `用户要求：${input.requirement}` : '',
     `需要局部修复的问题：\n${input.issues.map(item => `- ${item}`).join('\n')}`,
-    input.chapter.evidence.length ? `本章证据摘要：\n${evidenceBundlePrompt(buildEvidenceBundle({ id: input.chapter.id, title: input.chapter.title, purpose: input.chapter.title, queries: [], requiredFacts: [] }, input.chapter.evidence))}` : '',
+    input.chapter.evidence.length ? `本章证据摘要：\n${evidenceBundlePrompt(buildEvidenceBundle({ id: input.chapter.id, title: input.chapter.title, purpose: input.chapter.title, queries: [], requiredFacts: [] }, input.chapter.evidence), { maxChars: evidencePromptBudgetForTarget(documentTextLength(input.chapter.content), 5000, 14000) })}` : '',
     '当前章节 Markdown：',
     input.chapter.content,
   ].filter(Boolean).join('\n\n'), { maxTokens: 2200, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
   throwIfAborted(input.signal);
   let content = input.chapter.content;
   let appliedCount = 0;
-  for (const patch of (Array.isArray(result?.patches) ? result!.patches! : []).slice(0, 3)) {
+  const patches = Array.isArray(result?.patches) ? result!.patches! : [];
+  for (const patch of patches) {
     const applied = applyChapterPatch({ content, patch, title: input.chapter.title, forbidDrawingImages: input.forbidDrawingImages });
     content = applied.content;
     if (applied.applied) appliedCount += 1;
@@ -926,13 +657,13 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
   const repairableIssues = input.issues.filter(issue => classifyQualitySeverity(issue) !== 'minor').filter(repairableQualityIssue);
   if (repairableIssues.length === 0) return { markdown: input.markdown, chapters: input.chapters, stage: undefined as DocumentExecutionStage | undefined };
   const candidates = input.chapters
-    .map(chapter => ({ chapter, issues: issuesForChapter(chapter, repairableIssues).slice(0, 3) }))
+    .map(chapter => ({ chapter, issues: issuesForChapter(chapter, repairableIssues) }))
     .filter(item => item.issues.length > 0);
   if (candidates.length === 0) {
     return {
       markdown: input.markdown,
       chapters: input.chapters,
-      stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'success' as const, message: `已完成质量检查，未定位到可安全局部修复的阻断问题：${repairableIssues.slice(0, 5).join('；')}` },
+      stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'success' as const, message: `已完成质量检查，未定位到可安全局部修复的阻断问题：共 ${repairableIssues.length} 个；${repairableIssues.slice(0, 8).join('；')}` },
     };
   }
   const configuredRepairConcurrency = Number(process.env.DOCUMENT_REPAIR_CONCURRENCY ?? input.strategy?.maxChapterReviewConcurrency ?? candidates.length);
@@ -958,7 +689,7 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
   });
   const message = repairedCount > 0
     ? `已应用 ${patchCount} 个局部质量 patch，修复 ${repairedCount} 个章节；未进行整章或全文重写`
-    : `已完成质量检查，未生成可唯一定位且通过校验的局部 patch：${repairableIssues.slice(0, 5).join('；')}`;
+    : `已完成质量检查，未生成可唯一定位且通过校验的局部 patch：共 ${repairableIssues.length} 个；${repairableIssues.slice(0, 8).join('；')}`;
   return {
     markdown: input.markdown,
     chapters: repairedChapters,
@@ -998,7 +729,7 @@ export function buildBoundEvidenceScope(projectRoot: string, bindings: FileBindi
 }
 
 export function sanitizePromptForExecution(content: string) {
-  const lines = content.replace(/```[\s\S]*?```/gu, '\n【示例代码块已省略：仅作为格式参考，不作为项目事实】\n').split(/\r?\n/u);
+  const lines = content.replace(/```[\s\S]*?```/gu, '\n【示例代码块已省略：仅作为格式参考，不作为当前文档事实】\n').split(/\r?\n/u);
   const result: string[] = [];
   let skippingExample = false;
   let inOutline = false;
@@ -1013,7 +744,7 @@ export function sanitizePromptForExecution(content: string) {
     const startsExample = /^(?:#+\s*)?(?:示例|样例|范例|例如|参考示例|示例数据|示例正文|示例目录|example|sample)\s*[:：]?/iu.test(trimmed);
     const startsRule = /(?:不得|禁止|必须|应当|要求|规则|格式|输出|保留|只返回|不要)/u.test(trimmed);
     if (startsExample && !startsRule) {
-      if (!result.at(-1)?.includes('示例内容已省略')) result.push('【示例内容已省略：仅作为格式参考，不作为项目事实】');
+      if (!result.at(-1)?.includes('示例内容已省略')) result.push('【示例内容已省略：仅作为格式参考，不作为当前文档事实】');
       skippingExample = true;
       continue;
     }

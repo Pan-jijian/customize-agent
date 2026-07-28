@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 
 /** 记忆类型 */
-export type MemoryType = 'project_fact' | 'user_preference' | 'feedback' | 'pattern';
+export type MemoryType = 'user_preference' | 'feedback' | 'pattern';
 
 /** 记忆条目 */
 export interface MemoryEntry {
@@ -27,8 +27,7 @@ export interface ScoredMemory {
  * 跨会话记忆管理器。
  * 存储: ~/.customize-agent/memory.db (SQLite + FTS5)
  *
- * 4 种记忆类型:
- *   - project_fact:    项目架构、模块依存、构建系统
+ * 3 种记忆类型:
  *   - user_preference: 编码风格、命名约定、工具偏好
  *   - feedback:        用户纠正记录（"不要改 package-lock.json"等）
  *   - pattern:         常见问题解决模式
@@ -50,7 +49,7 @@ export class MemoryManager {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS memories (
         id TEXT PRIMARY KEY,
-        type TEXT NOT NULL CHECK(type IN ('project_fact', 'user_preference', 'feedback', 'pattern')),
+        type TEXT NOT NULL CHECK(type IN ('user_preference', 'feedback', 'pattern')),
         content TEXT NOT NULL,
         context TEXT NOT NULL DEFAULT '',
         access_count INTEGER NOT NULL DEFAULT 0,
@@ -236,7 +235,6 @@ export class MemoryManager {
   /** 记忆类型的中文标签（供外部 i18n 覆盖） */
   typeLabel(type: MemoryType): string {
     const labels: Record<MemoryType, string> = {
-      project_fact: '项目知识',
       user_preference: '用户偏好',
       feedback: '历史纠偏',
       pattern: '解决方案',

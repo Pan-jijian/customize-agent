@@ -26,7 +26,7 @@ export const FACT_RULES: KeywordRule[] = [
 ];
 
 export const CHAPTER_FACT_RULES: KeywordRule[] = [
-  { id: 'overview', label: '概况章节', patterns: [/概况|背景|理解|说明|总则|摘要/iu], output: ['项目名称', '项目资料范围', '实施范围'] },
+  { id: 'overview', label: '概况章节', patterns: [/概况|背景|理解|说明|总则|摘要/iu], output: ['对象名称', '材料范围', '实施范围'] },
   { id: 'implementation', label: '实施章节', patterns: [/方法|部署|实施|范围|组织|流程|步骤/iu], output: ['实施范围', '对象范围', '结构化数据范围'] },
   { id: 'controls', label: '控制章节', patterns: [/质量|周期|进度|安全|合规|验收|审核|评价/iu], output: ['质量要求', '周期要求', '安全合规要求'] },
   { id: 'resources', label: '资源章节', patterns: [/资源|人员|设备|材料|品牌|采购|供应|配置/iu], output: ['资源配置要求'] },

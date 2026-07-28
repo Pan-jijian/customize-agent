@@ -1,5 +1,27 @@
 # server
 
+## 4.0.84
+
+### Patch Changes
+
+- Improve document generation quality boundaries, diagnostics, and release packaging.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.36
+
+## 4.0.83
+
+### Patch Changes
+
+- Improve generated construction document quality gates, resume handling, export reliability, and knowledge/memory workflow stability.
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.35
+
+## 4.0.80
+
+### Patch Changes
+
+- 发布文档生成质量、结构归一、导出稳定性和长期记忆类型清理相关正式版本。
+
 ## 4.0.79
 
 ### Patch Changes

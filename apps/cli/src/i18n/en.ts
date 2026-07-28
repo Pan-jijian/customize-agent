@@ -231,13 +231,12 @@ const en: Record<string, string | string[]> = {
   // ── Memory ──
   'memory.feedback': 'Feedback',
   'memory.user_preference': 'Preference',
-  'memory.project_fact': 'Project Knowledge',
   'memory.pattern': 'Solution Pattern',
   'memory.section_header': '--- Related Memory ---',
   'memory.section_footer': '--- End Memory ---',
   'memory.count': '{count} memories',
   'memory.cleared': '✓ Memories cleared',
-  'memory.clear_usage': 'Usage: /memory clear [feedback|project_fact|user_preference|pattern]',
+  'memory.clear_usage': 'Usage: /memory clear [feedback|user_preference|pattern]',
 
   // ── Model Management ──
   'model.add_usage': 'Usage: /model add <reader|reasoning|action> <provider> <model-name>',

@@ -70,7 +70,7 @@ export class MultiProjectManager {
   }
 
   async search(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope; filters?: SearchFilters; weights?: RetrievalWeights; generationMode?: boolean } = {}): Promise<FederatedResult> {
-    const limit = options.limit ?? 10;
+    const limit = Number.isFinite(options.limit) && options.limit! > 0 ? Math.ceil(options.limit!) : undefined;
     const scope = options.scope ?? 'project';
     const project = await this.getProject(projectRoot);
 
@@ -87,7 +87,8 @@ export class MultiProjectManager {
 
     const global = await this.getGlobalKB();
     const globalResults = await global.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode });
-    const merged = new FederationSearch().merge([...projectResults.results, ...globalResults.results], limit, 'all');
+    const mergeLimit = limit ?? (projectResults.results.length + globalResults.results.length);
+    const merged = new FederationSearch().merge([...projectResults.results, ...globalResults.results], mergeLimit, 'all');
     return {
       ...merged,
       debug: this.mergeDebug(projectResults.debug, globalResults.debug),
@@ -112,7 +113,8 @@ export class MultiProjectManager {
 
     const global = await this.getGlobalKB();
     const globalResults = await global.semanticSearch(query, options);
-    return new FederationSearch().merge([...projectResults.results, ...globalResults.results], options.limit ?? 10, 'all');
+    const mergeLimit = Number.isFinite(options.limit) && options.limit! > 0 ? Math.ceil(options.limit!) : projectResults.results.length + globalResults.results.length;
+    return new FederationSearch().merge([...projectResults.results, ...globalResults.results], mergeLimit, 'all');
   }
 
   async findCrossProjectDuplicates(): Promise<CrossProjectDuplicate[]> {

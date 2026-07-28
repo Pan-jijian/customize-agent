@@ -232,13 +232,12 @@ const zh: Record<string, string | string[]> = {
   // ── 记忆 ──
   'memory.feedback': '历史纠偏',
   'memory.user_preference': '用户偏好',
-  'memory.project_fact': '项目知识',
   'memory.pattern': '解决方案',
   'memory.section_header': '--- 相关历史记忆 ---',
   'memory.section_footer': '--- 记忆结束 ---',
   'memory.count': '{count} 条记忆',
   'memory.cleared': '✓ 记忆已清除',
-  'memory.clear_usage': '用法: /memory clear [feedback|project_fact|user_preference|pattern]',
+  'memory.clear_usage': '用法: /memory clear [feedback|user_preference|pattern]',
 
   // ── 模型管理 ──
   'model.add_usage': '用法: /model add <reader|reasoning|action> <provider> <model-name>',

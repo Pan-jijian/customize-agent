@@ -357,12 +357,26 @@ export class KnowledgeBaseManager {
     }
   }
 
-  search(query: string, limit = 10, filters?: SearchFilters): ChunkSearchResult[] {
-    return this.store.searchChunks(query, limit, { filePaths: filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined) });
+  search(query: string, limit?: number, filters?: SearchFilters): ChunkSearchResult[] {
+    return this.store.searchChunks(query, this.resolveSearchLimit(limit, filters), { filePaths: filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined) });
   }
 
-  keywordSearchItems(query: string, limit = 10, filters?: SearchFilters): FederatedSearchItem[] {
-    return this.store.searchChunks(query, limit, { filePaths: filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined) }).map(result => this.toFederatedItem(result, 'keyword'));
+  keywordSearchItems(query: string, limit?: number, filters?: SearchFilters): FederatedSearchItem[] {
+    return this.store.searchChunks(query, this.resolveSearchLimit(limit, filters), { filePaths: filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined) }).map(result => this.toFederatedItem(result, 'keyword'));
+  }
+
+  private resolveSearchLimit(limit: number | undefined, filters?: SearchFilters): number {
+    if (Number.isFinite(limit) && limit! > 0) return Math.ceil(limit!);
+    return this.searchCorpusSize(filters);
+  }
+
+  private searchCorpusSize(filters?: SearchFilters): number {
+    const paths = filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined);
+    const pathSet = new Set(paths?.filter(Boolean));
+    const total = this.store.listRecords()
+      .filter(record => pathSet.size === 0 || pathSet.has(record.relativePath))
+      .reduce((sum, record) => sum + Math.max(0, Math.ceil(Number(record.chunkCount) || 0)), 0);
+    return Math.max(1, total);
   }
 
   expandContext(item: FederatedSearchItem): FederatedSearchItem {
@@ -395,7 +409,9 @@ export class KnowledgeBaseManager {
   }
 
   async hybridSearch(query: string, options: { limit?: number; filters?: SearchFilters; collections?: string[]; weights?: RetrievalWeights; generationMode?: boolean } = {}): Promise<FederatedResult> {
-    const limit = options.limit ?? 10;
+    const requestedLimit = Number.isFinite(options.limit) && options.limit! > 0 ? Math.ceil(options.limit!) : undefined;
+    const corpusSize = this.searchCorpusSize(options.filters);
+    const effectiveLimit = requestedLimit ?? corpusSize;
     const start = Date.now();
     const weights = this.retrievalWeights(options.weights);
     const rewrittenQueries = options.generationMode ? [query.trim()].filter(Boolean) : await this.rewriteQueries(query);
@@ -404,10 +420,12 @@ export class KnowledgeBaseManager {
     const vectorMultiplier = options.generationMode ? 3 : 6;
     const vectorQueryLimit = options.generationMode ? 1 : 3;
     for (const [queryIndex, rewritten] of rewrittenQueries.entries()) {
-      rankedLists.push({ source: 'keyword', items: this.keywordSearchItems(rewritten, limit * keywordMultiplier, options.filters), queryIndex });
+      rankedLists.push({ source: 'keyword', items: this.keywordSearchItems(rewritten, effectiveLimit * keywordMultiplier, options.filters), queryIndex });
       if (queryIndex < vectorQueryLimit) {
         try {
-          rankedLists.push({ source: 'vector', items: (await this.semanticSearch(rewritten, { ...options, limit: limit * vectorMultiplier })).results.slice(0, limit * keywordMultiplier), queryIndex });
+          const vectorLimit = effectiveLimit * vectorMultiplier;
+          const keywordLimit = effectiveLimit * keywordMultiplier;
+          rankedLists.push({ source: 'vector', items: (await this.semanticSearch(rewritten, { ...options, limit: vectorLimit })).results.slice(0, keywordLimit), queryIndex });
         } catch { /* 向量搜索在混合搜索中是可选的 */ }
       }
     }
@@ -415,13 +433,15 @@ export class KnowledgeBaseManager {
     const vectorItems = rankedLists.filter(list => list.source === 'vector').flatMap(list => list.items);
     
     // 1. 先进行初筛合并，合并相同的子块并计算混合初始分（不获取大片段，保留子块自身用于精确打分）
-    const mergedChildChunks = this.mergeContexts(this.mergeHybridRankedLists(rankedLists, limit * 4, weights), limit * 4);
+    const mergeLimit = effectiveLimit * 4;
+    const mergedChildChunks = this.mergeContexts(this.mergeHybridRankedLists(rankedLists, mergeLimit, weights), mergeLimit);
     
     // 2. 对这些子块进行交叉编码器重排（Cross-Encoder Rerank）
     let reranked = mergedChildChunks;
     let rerankerName = 'local-heuristic-fallback';
     if (mergedChildChunks.length > 0) {
-      const candidates = mergedChildChunks.slice(0, Math.min(30, limit * 4));
+      const rerankLimit = requestedLimit ? Math.min(30, mergeLimit) : mergedChildChunks.length;
+      const candidates = mergedChildChunks.slice(0, rerankLimit);
       // 这里使用的是子块自身内容，通常在 500 tokens 左右，不仅相关性判断最准，而且不会超出 Reranker 的 max_length
       const textsToRerank = candidates.map(item => `${item.titlePath ?? item.sectionTitle ?? ''}\n${item.content}`);
       try {
@@ -443,8 +463,8 @@ export class KnowledgeBaseManager {
       }
     }
 
-    // 3. 拿到精确打分后的 Top 结果，此时再进行 expandContext 向上追溯到完整的父块大片段
-    const finalExpandedResults = this.mergeExpandedContexts(reranked.map(item => this.expandContext(item)), limit);
+    // 3. 拿到精确打分后的结果，此时再进行 expandContext 向上追溯到完整的父块大片段
+    const finalExpandedResults = this.mergeExpandedContexts(reranked.map(item => this.expandContext(item)), effectiveLimit);
 
     return {
       results: finalExpandedResults,
@@ -468,7 +488,7 @@ export class KnowledgeBaseManager {
       const result = await search.search({
         query,
         queryEmbedding,
-        topK: options.limit ?? 10,
+        topK: this.resolveSearchLimit(options.limit, options.filters),
         scope: this.scope,
         projectId: this.projectId,
         collections: options.collections,
@@ -488,16 +508,20 @@ export class KnowledgeBaseManager {
     return this.store.listRecords();
   }
 
-  getFileDetail(relativePath: string) {
+  getFileDetail(relativePath: string, options: { maxChunkContentChars?: number } = {}) {
     const normalized = this.normalizeRelativePath(relativePath);
     const file = this.store.listRecords().find(record => record.relativePath === normalized);
     if (!file) return undefined;
     const absolutePath = this.resolveKbRelativePath(normalized);
+    const chunks = options.maxChunkContentChars
+      ? this.store.listChunksByContentBudget({ relativePath: normalized, maxContentChars: options.maxChunkContentChars })
+      : this.store.listChunks({ relativePath: normalized });
     return {
       file,
       absolutePath,
       directory: path.dirname(absolutePath),
-      chunks: this.store.listChunks({ relativePath: normalized, limit: 500 }),
+      chunks,
+      totalChunkCount: this.store.countChunks({ relativePath: normalized }),
       parents: this.store.listParentChunks(normalized),
       relationships: this.store.listRelationships(normalized),
       tags: this.store.listTags(normalized),

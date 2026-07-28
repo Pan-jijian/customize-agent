@@ -132,7 +132,9 @@ export function documentBudgetIssues(budget: DocumentBudget, markdown: string): 
   if (budget.minChars && currentChars < budget.minChars) {
     issues.push({ level: 'error', message: `正文篇幅低于目标字数：当前 ${currentChars} 字，目标不少于 ${budget.minChars} 字`, suggestion: '请继续扩写缺口章节，或降低目标字数/页数后重新生成。' });
   }
-  if (budget.maxChars && currentChars > budget.maxChars) {
+  if (budget.maxChars && currentChars > Math.ceil(budget.maxChars * 1.12)) {
+    issues.push({ level: 'error', message: `正文篇幅超过目标字数区间：当前 ${currentChars} 字，建议不超过 ${budget.maxChars} 字`, suggestion: '请压缩重复段落、过细小节或过度展开内容后再导出。' });
+  } else if (budget.maxChars && currentChars > budget.maxChars) {
     issues.push({ level: 'warning', message: `正文篇幅超过目标字数区间：当前 ${currentChars} 字，建议不超过 ${budget.maxChars} 字`, suggestion: '建议减少重复段落、过细小节或过度展开内容。' });
   }
   if (budget.minPages && estimatedPages < budget.minPages) {

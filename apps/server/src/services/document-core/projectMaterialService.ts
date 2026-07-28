@@ -136,7 +136,6 @@ function extractProjectNameCandidates(files: Array<{ relativePath: string }>) {
     if (!/项目|任务|文档|合同|计划|方案/iu.test(normalized) || normalized.length < 6 || seen.has(normalized)) continue;
     seen.add(normalized);
     candidates.push(normalized);
-    if (candidates.length >= 12) break;
   }
   return candidates;
 }
@@ -154,21 +153,16 @@ function buildFingerprint(selectedFiles: Array<{ relativePath: string }>, allFil
       fileGroups,
       confidence: confidenceParts.filter(Boolean).length / confidenceParts.length,
     },
-    contaminationCandidates: allProjectNames.filter(name => !selectedProjectNames.includes(name)).slice(0, 20),
+    contaminationCandidates: allProjectNames.filter(name => !selectedProjectNames.includes(name)),
   };
 }
 
 function summarizeFiles(files: MaterialEvidenceRef[], fallback: string) {
   if (files.length === 0) return fallback;
-  const names: string[] = [];
-  for (const file of files) {
-    names.push(stripKnownExtension(file.fileName));
-    if (names.length >= 8) break;
-  }
-  return names.join('、');
+  return files.map(file => stripKnownExtension(file.fileName)).join('、');
 }
 
-function collectMatches(text: string, pattern: RegExp, groupIndex: 0 | 1, limit = 8) {
+function collectMatches(text: string, pattern: RegExp, groupIndex: 0 | 1) {
   pattern.lastIndex = 0;
   const seen = new Set<string>();
   const values: string[] = [];
@@ -177,7 +171,6 @@ function collectMatches(text: string, pattern: RegExp, groupIndex: 0 | 1, limit 
     if (!value || seen.has(value)) continue;
     seen.add(value);
     values.push(value);
-    if (values.length >= limit) break;
   }
   pattern.lastIndex = 0;
   return values;
@@ -277,8 +270,8 @@ export function buildProjectMaterialSummary(projectRoot: string, options?: { req
     facts: {
       projectName,
       documentNo,
-      scopeDescriptions: inventory.scope_description.slice(0, 12).map(file => file.fileName.replace(/\.(?:pdf|docx?|xlsx?|xls|dwg)$/iu, '')),
-      professionalScopes: [...new Set(inventory.scope_description.concat(inventory.design_specification, inventory.structured_data).slice(0, 16).map(file => file.fileName.replace(/\.(?:pdf|docx?|xlsx?|xls|dwg)$/iu, '')))],
+      scopeDescriptions: inventory.scope_description.map(file => file.fileName.replace(/\.(?:pdf|docx?|xlsx?|xls|dwg)$/iu, '')),
+      professionalScopes: [...new Set(inventory.scope_description.concat(inventory.design_specification, inventory.structured_data).map(file => file.fileName.replace(/\.(?:pdf|docx?|xlsx?|xls|dwg)$/iu, '')))],
       scheduleRequirement: inventory.schedule_quality_safety.length ? '已识别周期、质量、安全或合规相关资料，生成时应以需求文件、变更说明和技术要求为准。' : undefined,
       qualityRequirement: inventory.schedule_quality_safety.length ? '已识别质量或评价相关资料。' : undefined,
       safetyRequirement: inventory.schedule_quality_safety.length ? '已识别安全或合规相关资料。' : undefined,
@@ -290,7 +283,7 @@ export function buildProjectMaterialSummary(projectRoot: string, options?: { req
     },
     materialInventory: inventory,
     extractedSections: {
-      projectOverview: `项目资料组：${projectName}${documentNo ? `，项目/任务编号：${documentNo}` : ''}。`,
+      projectOverview: `绑定材料组：${projectName}${documentNo ? `，文档/任务编号：${documentNo}` : ''}。`,
       scopeSummary: `范围资料：${summarizeFiles(inventory.scope_description, '未识别到明确范围资料')}。`,
       designSummary: `设计/方案/说明资料：${summarizeFiles(inventory.design_specification, '未识别到设计、方案或说明资料')}。`,
       structuredDataSummary: `结构化数据资料：${summarizeFiles(inventory.structured_data, '未识别到表格、列表或明细资料')}。`,
@@ -308,9 +301,9 @@ export function buildProjectMaterialSummary(projectRoot: string, options?: { req
 
 export function projectMaterialPrompt(summary: ProjectMaterialSummary) {
   return [
-    '## 后台项目资料摘要',
+    '## 后台绑定材料摘要',
     summary.extractedSections.projectOverview,
-    `项目指纹：项目名候选 ${summary.fingerprint.projectNames.join('、') || '无'}；编号 ${summary.fingerprint.documentNos.join('、') || '无'}；资料组 ${summary.fingerprint.fileGroups.join('、') || '无'}；置信度 ${Math.round(summary.fingerprint.confidence * 100)}%。`,
+    `材料指纹：对象名候选 ${summary.fingerprint.projectNames.join('、') || '无'}；编号 ${summary.fingerprint.documentNos.join('、') || '无'}；资料组 ${summary.fingerprint.fileGroups.join('、') || '无'}；置信度 ${Math.round(summary.fingerprint.confidence * 100)}%。`,
     `内容级事实候选：责任主体 ${summary.facts.ownerNames?.join('、') || '无'}；地点 ${summary.facts.locationNames?.join('、') || '无'}；周期 ${summary.facts.scheduleValues?.join('、') || '无'}；质量 ${summary.facts.qualityTargets?.join('、') || '无'}。`,
     summary.extractedSections.scopeSummary,
     summary.extractedSections.structuredDataSummary,

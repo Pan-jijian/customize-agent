@@ -25,7 +25,7 @@ function factId(name: string) {
 
 function inferDocumentType(template: DocumentTemplate) {
   const text = `${template.name} ${template.category} ${template.outputTitle} ${template.description}`;
-  return firstKeywordRuleOutput(text, DOCUMENT_TYPE_RULES) || template.category || '业务文档';
+  return firstKeywordRuleOutput(text, DOCUMENT_TYPE_RULES) || template.category || '文档';
 }
 
 function quotedTexts(text: string) {
@@ -67,17 +67,17 @@ function requirementForbiddenTexts(requirement = '') {
     const match = item.match(/(?:不要|禁止|不得|不能|不允许|严禁)(?:出现|输出|写|包含)?\s*([^。；;\n]{2,40})/iu);
     if (match) forbidden.add(match[1].replace(/^(这些|以下|内容|词语|文字)[:：]?/u, '').trim());
   }
-  return [...forbidden].filter(text => text && !/章节|页|表格/u.test(text)).slice(0, 30);
+  return [...forbidden].filter(text => text && !/章节|页|表格/u.test(text));
 }
 
 function requirementRequiredTexts(requirement = '') {
   const required = new Set<string>();
-  for (const item of splitRequirementItems(requirement).filter(item => /必须|需要|要求|一定要|务必|包含|包括|输出|写明/iu.test(item) && !/章节|章|节|小节/iu.test(item))) {
+  for (const item of splitRequirementItems(requirement).filter(item => /必须|一定要|务必|输出|写明/iu.test(item) && !/章节|章|节|小节/iu.test(item))) {
     for (const text of quotedTexts(item)) required.add(text);
-    const match = item.match(/(?:必须|需要|要求|一定要|务必|包含|包括|输出|写明)\s*([^。；;\n]{2,60})/iu);
+    const match = item.match(/(?:输出|写明)\s*([^。；;\n]{2,30})/iu);
     if (match) required.add(match[1].trim());
   }
-  return [...required].filter(text => text && !/不要|禁止|不得|不能/u.test(text)).slice(0, 30);
+  return [...required].filter(text => text && text.length <= 30 && !/不要|禁止|不得|不能|生成|要求内容|专业|结构完整|直接用于/u.test(text));
 }
 
 function requirementTableMin(requirement = '') {
@@ -107,7 +107,7 @@ function inferFactNames(template: DocumentTemplate, documentType: string) {
     for (const fact of chapter.requiredFacts || []) requiredFacts.push(fact);
   }
   const templateText = templateParts.filter(Boolean).join('\n');
-  const facts = new Set<string>([...requiredFacts, '项目名称', '项目资料范围']);
+  const facts = new Set<string>(requiredFacts);
   for (const name of applyKeywordRules(templateText, FACT_RULES)) facts.add(name);
   const autoSpecGates = configuredAutoSpecGates(template, documentType);
   for (const gate of autoSpecGates) {
@@ -165,7 +165,7 @@ export function getOrCreateAutoDocumentSpec(template: DocumentTemplate, requirem
     }));
   const gateRules = [
     { id: 'auto-source-required', name: '事实必须有来源', type: 'source_required', level: 'warning' as const, evaluator: { subject: 'source' as const, operator: 'all_have_source' as const } },
-    { id: 'auto-min-source', name: '至少使用项目资料来源', type: 'source_required', level: 'warning' as const, evaluator: { subject: 'source' as const, operator: 'min_count' as const, min: 2 } },
+    { id: 'auto-min-source', name: '至少使用绑定材料来源', type: 'source_required', level: 'warning' as const, evaluator: { subject: 'source' as const, operator: 'min_count' as const, min: 2 } },
     { id: 'auto-no-debug-text', name: '不得输出后台流程话术', type: 'forbidden_text', level: 'error' as const, value: '知识库证据', evaluator: { subject: 'document' as const, operator: 'not_contains' as const, value: '知识库证据' } },
     ...autoSpecGates.flatMap(gate => gate.requiredTexts.map(text => ({ id: `configured-required-${factId(text)}`, name: `配置建议包含：${text}`, type: 'configured_required_text', level: 'warning' as const, value: text, evaluator: { subject: 'document' as const, operator: 'contains' as const, value: text } }))),
     ...autoSpecGates.flatMap(gate => gate.forbiddenTexts.map(text => ({ id: `configured-forbidden-${factId(text)}`, name: `配置建议避免：${text}`, type: 'configured_forbidden_text', level: 'warning' as const, value: text, evaluator: { subject: 'document' as const, operator: 'not_contains' as const, value: text } }))),
@@ -190,8 +190,8 @@ export function getOrCreateAutoDocumentSpec(template: DocumentTemplate, requirem
         name,
         type: 'auto' as const,
         required: autoSpecGates.some(gate => gate.requiredFacts.includes(name)) || !/资源|品牌|重点|难点|约束/iu.test(name),
-        extractionHint: `从项目资料摘要、角色绑定证据和知识库证据中抽取“${name}”。`,
-        validationHint: `生成内容涉及“${name}”时必须与项目资料一致，不得引入其他项目事实。`,
+        extractionHint: `从绑定材料摘要、角色绑定证据和知识库证据中抽取“${name}”。`,
+        validationHint: `生成内容涉及“${name}”时必须与绑定材料一致，不得引入无关事实。`,
       })),
       chapterMode: 'fixed',
       chapterRules: finalChapterRules,
@@ -211,12 +211,12 @@ export function getOrCreateAutoDocumentSpec(template: DocumentTemplate, requirem
 
 export function autoSpecPrompt(spec: AutoDocumentSpecPackage, sourceHash: string) {
   return [
-    '## 后台内容优化建议',
-    `建议包：${spec.name}`,
+    '## 结构化检查摘要',
+    `摘要名称：${spec.name}`,
     `版本标识：${sourceHash}`,
-    '说明：以下内容仅用于提升事实覆盖、检索命中和质量检查，不得新增、删除、重排用户或模板章节。',
+    '说明：以下内容仅用于事实覆盖、检索命中和质量检查，不得新增、删除、重排用户或模板章节。',
     `建议关注事实：${spec.factFields.map(field => field.name).join('、')}`,
-    `章节内容建议：${spec.chapterRules.map(rule => `${rule.title}${rule.generationHint ? `：${rule.generationHint.replace(/\s+/gu, ' ').slice(0, 120)}` : ''}`).join('；') || '以当前模板章节为准'}`,
+    `章节内容建议：${spec.chapterRules.map(rule => `${rule.title}${rule.generationHint ? `：${rule.generationHint.replace(/\s+/gu, ' ')}` : ''}`).join('；') || '以当前模板章节为准'}`,
     `质量提醒：${spec.gateRules.map(rule => rule.name).join('、')}`,
   ].join('\n');
 }

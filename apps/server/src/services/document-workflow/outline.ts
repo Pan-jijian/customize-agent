@@ -1,6 +1,6 @@
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
 import type { DocumentTemplate, DocumentTemplateChapter } from './types';
-import { MAX_EXPLICIT_OUTLINE_CHAPTERS, MAX_FALLBACK_CHAPTERS, CN_NUMERAL_RE } from './constants';
+import { CN_NUMERAL_RE } from './constants';
 import { violatesConfiguredChapterTitleFilter, violatesConfiguredChapterTitleForbiddenFilter } from './templateStore';
 
 function cleanOutlineTitle(title: string) {
@@ -84,7 +84,7 @@ function extractExplicitOutlineFromText(text: string, source: string, options?: 
       });
     }
   }
-  return chapters.filter(chapter => !isInvalidOutlineTitle(chapter.title)).slice(0, MAX_EXPLICIT_OUTLINE_CHAPTERS);
+  return chapters.filter(chapter => !isInvalidOutlineTitle(chapter.title));
 }
 
 export function extractExplicitOutlineFromSources(sources: Array<{ text?: string; source: string; strict?: boolean }>) {
@@ -96,7 +96,17 @@ export function extractExplicitOutlineFromSources(sources: Array<{ text?: string
 }
 
 export function displayChapterTitle(title: string) {
-  return title.replace(/^#+\s*/u, '').replace(/^第[一二三四五六七八九十百千万\d]+[章节]\s*/u, '').replace(/^\d+(?:\.\d+)*[、.．\s]*/u, '').trim();
+  let cleaned = title.replace(/^#+\s*/u, '').trim();
+  let prev = '';
+  while (cleaned && cleaned !== prev) {
+    prev = cleaned;
+    cleaned = cleaned
+      .replace(/^第[一二三四五六七八九十百千万\d]+[章节]\s*/u, '')
+      .replace(/^\d+(?:\.\d+)*[、.．\s]+/u, '')
+      .replace(/^[（(]?[一二三四五六七八九十]+[)）、.．\s]+/u, '')
+      .trim();
+  }
+  return cleaned;
 }
 
 export function normalizeGeneratedChapterTitle(title: string) {

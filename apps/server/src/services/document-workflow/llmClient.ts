@@ -114,7 +114,7 @@ async function withDocumentLlmSlot<T>(run: () => Promise<T>, signal?: AbortSigna
   }
 }
 
-export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {}): Promise<string | undefined> {
+export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number } = {}): Promise<string | undefined> {
   if (options.diagnostics) options.diagnostics.llm.calls += 1;
   try {
     const active = getActiveModelWithProvider();
@@ -126,7 +126,7 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
       provider = createProvider(providerFactoryName(selected.provider, providerConfig), { baseUrl: providerConfig.baseUrl, apiKey: providerConfig.apiKey, modelName: selected.name, directEndpoint: providerConfig.directEndpoint });
       DOCUMENT_LLM_PROVIDER_CACHE.set(providerKey, provider);
     }
-    const hardTimeoutMs = Math.max(30_000, Number(process.env.DOCUMENT_LLM_CALL_TIMEOUT_MS ?? 300_000));
+    const hardTimeoutMs = Math.max(30_000, Number(options.timeoutMs ?? process.env.DOCUMENT_LLM_CALL_TIMEOUT_MS ?? 300_000));
     const response = await withDocumentLlmSlot(() => {
       let timer: NodeJS.Timeout | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -206,8 +206,8 @@ function extractJsonPayload(response: string) {
   return trimmed;
 }
 
-export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {}): Promise<T | undefined> {
-  const response = await callDocumentLlm(system, prompt, true, { maxTokens: options.maxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics });
+export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number } = {}): Promise<T | undefined> {
+  const response = await callDocumentLlm(system, prompt, true, { maxTokens: options.maxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, timeoutMs: options.timeoutMs });
   if (!response) return undefined;
   try {
     return JSON.parse(extractJsonPayload(response)) as T;

@@ -2,18 +2,18 @@ import type { AutoDocumentSpecGateRule, GateRuleEvaluator } from '../document-co
 import type { QualitySeverity, SpecGateRuleHandler } from '../types/qualityValidationTypes';
 
 /** 导出阻断类校验问题匹配规则。 */
-export const EXPORT_BLOCKING_ISSUE_RE = /用户要求|出现禁用文本|资料未提供|导出|临时|无效|占位|示例|样例|生成未完成|低于目标页数|低于目标字数|文档预算未达成|正文篇幅低于目标|兜底|章节生成失败|大模型未能|重新生成|缺少配置小节|缺少必要的正式表格|正文缺少章节标题|重复 token|退化输出|其他项目|项目编号|项目名称|事实一致性冲突|必需资料角色缺失|章节缺少证据|文档质量基准评分未达标/iu;
+export const EXPORT_BLOCKING_ISSUE_RE = /用户要求不得|出现禁用文本|资料未提供|材料未提供|生成未完成|低于目标页数|低于目标字数|文档预算未达成|正文篇幅低于目标|章节生成失败|大模型未能|重新生成|缺少规划小节|空小节|小节只有标题|只有标题或表格无正文|缺少必要表格|正文缺少章节标题|重复 token|退化输出|其他对象|其他文档|文档编号|事实一致性冲突|必需材料角色缺失|章节缺少证据|文档质量基准评分未达标/iu;
 
 /** 导出门禁中用于判断结构化精确参数缺失的问题规则。 */
 export const EXPORT_GATE_PRECISION_ISSUE_RE = /结构化精确参数使用不足/u;
 
 /** 导出门禁中用于判断项目污染和事实冲突的问题规则。 */
-export const EXPORT_GATE_PROJECT_CONTAMINATION_RE = /其他项目|项目编号|项目名称|事实一致性冲突/iu;
+export const EXPORT_GATE_PROJECT_CONTAMINATION_RE = /其他对象|其他文档|文档编号|对象名称|事实一致性冲突/iu;
 
 /** 质量问题严重程度规则，按顺序命中。 */
 export const QUALITY_SEVERITY_RULES: Array<{ severity: QualitySeverity; pattern: RegExp }> = [
-  { severity: 'blocking', pattern: /阻断|缺少配置小节|缺少必要的正式表格|正文缺少章节标题|正文篇幅低于目标|低于目标字数|低于目标页数|章节生成失败|兜底|事实一致性冲突|其他项目|项目编号|项目名称|后台流程|提示词|资料未提供|占位|文档质量基准评分未达标/iu },
-  { severity: 'important', pattern: /量化|数值|单位|事实|requiredFacts|专业闭环|安全|质量|工期|表格|三级小节|目录|术语|不一致/iu },
+  { severity: 'blocking', pattern: /阻断|缺少规划小节|空小节|小节只有标题|只有标题或表格无正文|规划小节正文过短|缺少必要表格|正文缺少章节标题|正文篇幅低于目标|低于目标字数|低于目标页数|章节生成失败|兜底|事实一致性冲突|其他对象|其他文档|文档编号|对象名称|后台流程|提示词|资料未提供|材料未提供|占位|文档质量基准评分未达标/iu },
+  { severity: 'important', pattern: /量化|数值|单位|事实|requiredFacts|闭环|安全|质量|工期|表格|三级小节|目录|术语|不一致/iu },
 ];
 
 /** AutoSpec 旧规则类型到声明式 evaluator 的兼容映射。 */
@@ -66,17 +66,17 @@ export const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/gu;
 /** Markdown 正文章节标题识别规则。 */
 export const CHAPTER_HEADING_RE = /^##\s+第[一二三四五六七八九十百]+章\s+.+$/gmu;
 
-/** 项目基本信息重复块识别规则。 */
-export const PROJECT_BASIC_INFO_BLOCK_RE = /项目基本信息表|资料项目基本信息|^###\s*项目基本信息\s*$/mu;
+/** 基础信息重复块识别规则。 */
+export const DOCUMENT_BASIC_INFO_BLOCK_RE = /(?:文档|任务|对象)?基本信息表|资料(?:文档|任务|对象)?基本信息|^###\s*(?:文档|任务|对象)?基本信息\s*$/mu;
 
-/** 项目基本信息表位置识别规则。 */
-export const PROJECT_BASIC_INFO_TABLE_RE = /项目基本信息表|资料项目基本信息|\|\s*(?:字段|项目|内容)\s*\|/u;
+/** 基础信息表位置识别规则。 */
+export const DOCUMENT_BASIC_INFO_TABLE_RE = /(?:文档|任务|对象)?基本信息表|资料(?:文档|任务|对象)?基本信息|\|\s*(?:字段|文档|任务|对象|内容)\s*\|/u;
 
 /** Markdown 二级、三级标题清理规则。 */
 export const MARKDOWN_SECTION_HEADING_RE = /^##\s+.+$|^###\s+.+$/gmu;
 
-/** 项目基础信息表前不应重复逐项叙述的字段。 */
-export const PROJECT_BASIC_INFO_FIELDS = ['项目名称', '项目编号', '任务名称', '任务编号', '实施地点', '服务地点', '责任主体', '实施范围', '服务范围', '周期要求', '计划周期', '质量标准'] as const;
+/** 基础信息表前不应重复逐项叙述的字段。 */
+export const DOCUMENT_BASIC_INFO_FIELDS = ['对象名称', '对象编号', '文档名称', '文档编号', '任务名称', '任务编号', '地点', '责任主体', '范围', '周期要求', '计划周期', '质量标准'] as const;
 
 /** 正文中应避免的模板化前缀和套话。 */
 export const FORMAL_STYLE_FORBIDDEN_PHRASES = ['本节', '本章将', '以下从', '以下内容', '综上所述'] as const;
@@ -105,9 +105,6 @@ export const PRECISE_FACT_SOURCE_RE = /drawing|table|bill|boq|draw|data|sheet|sp
 /** 结构化资料中的精确参数 token 抽取规则。 */
 export const PRECISE_FACT_TOKEN_RE = /(?:[A-Z]{1,8}[\w.-]*\d[\w.-]*|\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|页|份|人|小时|分钟|天|周|月|年|万元|元)|\d+\s*[×xX]\s*\d+(?:\s*[×xX]\s*\d+)?|\b(?:GB|GB\/T|ISO|IEC|IEEE|RFC|API|DB\d*|T\/[A-Z]+)\s*[\w.-]+\b)/giu;
 
-/** 精确参数 token 单次校验最大采样数量。 */
-export const PRECISE_FACT_TOKEN_LIMIT = 160;
-
 /** 触发精确参数覆盖率校验的最小 token 数。 */
 export const PRECISE_FACT_MIN_TOKEN_COUNT = 20;
 
@@ -133,12 +130,6 @@ export const MARKDOWN_TOP_HEADING_RE = /^#\s+/mu;
 
 /** 提示词示例片段抽取规则，用于发现样例泄露。 */
 export const PROMPT_EXAMPLE_BLOCK_RE = /(?:示例|样例|范例|例如|参考示例|示例数据|示例正文|示例目录|example|sample)\s*[:：]?\s*([\s\S]{20,800}?)(?=\n\s*\n|$)/giu;
-
-/** 提示词示例泄露检查的最大样例块数量。 */
-export const PROMPT_EXAMPLE_CHECK_LIMIT = 20;
-
-/** 提示词示例泄露检查的探测片段长度。 */
-export const PROMPT_EXAMPLE_PROBE_LENGTH = 80;
 
 function hasMissingTableExplanation(markdown: string, tableBlocks: string[]) {
   for (const block of tableBlocks) {

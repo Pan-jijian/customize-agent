@@ -42,47 +42,9 @@ export const FACT_DEDUPE_NUMBER_RE = /\d+/gu;
 /** Markdown 表格竖线转义规则。 */
 export const MARKDOWN_TABLE_PIPE_RE = /\|/gu;
 
-/** 默认结构化事实抽取上限。 */
-export const DEFAULT_TECHNICAL_FACT_LIMIT = 220;
-
-/** 单条结构化事实正文最大长度。 */
-export const TECHNICAL_FACT_TEXT_MAX_LENGTH = 420;
-
-/** 结构化事实去重 key 最大长度。 */
-export const TECHNICAL_FACT_DEDUPE_KEY_MAX_LENGTH = 180;
-
-/** 单个事实字段最大抽取数量。 */
-export const TECHNICAL_FACT_FIELD_LIMITS = {
-  parameters: 8,
-  quantities: 8,
-  scheduleValues: 8,
-  costValues: 6,
-  frequencyValues: 8,
-  resourceValues: 8,
-  standards: 5,
-  commitmentValues: 10,
-} as const;
-
-/** 章节事实分配默认上限。 */
-export const DEFAULT_CHAPTER_FACT_ASSIGNMENT_LIMIT = 24;
-
-/** 事实覆盖矩阵展示上限。 */
-export const ENGINEERING_COVERAGE_MATRIX_LIMIT = 18;
 
 /** 覆盖校验对象标签最小长度。 */
 export const COVERAGE_LABEL_MIN_LENGTH = 2;
-
-/** 覆盖校验标签采样上限。 */
-export const COVERAGE_LABEL_LIMIT = 18;
-
-/** 覆盖校验数值采样上限。 */
-export const COVERAGE_VALUE_LIMIT = 30;
-
-/** 覆盖校验输出问题上限。 */
-export const COVERAGE_ISSUE_LIMIT = 12;
-
-/** 技术/结构化事实使用率 token 采样上限。 */
-export const TECHNICAL_FACT_USAGE_TOKEN_LIMIT = 120;
 
 /** 默认不启用任何行业模板匹配；是否启用由配置文件 technicalDetailGate.templateMatchers 决定。 */
 export const DEFAULT_ENGINEERING_TEMPLATE_MATCHERS: string[] = [];

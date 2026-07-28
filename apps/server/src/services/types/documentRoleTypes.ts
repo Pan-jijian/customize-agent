@@ -5,7 +5,7 @@ export type DocumentRoleType = 'file' | 'prompt';
 export type PromptExecutionType = 'fact_extraction' | 'chapter_generation' | 'llm_review' | 'validation' | 'formatting' | 'reference';
 
 /** 文件角色在资料理解阶段的处理策略。 */
-export type FileProcessingType = 'rule' | 'project_fact' | 'table' | 'drawing' | 'specification' | 'reference';
+export type FileProcessingType = 'rule' | 'table' | 'drawing' | 'specification' | 'reference';
 
 /** 可被模板或项目配置引用的文档角色。 */
 export interface DocumentRole {

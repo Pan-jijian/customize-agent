@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Badge, Button, Drawer, Empty, List, Progress, Space, Tag, Typography } from 'antd';
 import { ClockCircleOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined } from '@ant-design/icons';
 import { getJobs, type KbOperationRecord } from '@/lib/api';
@@ -23,15 +23,36 @@ export function JobStatus() {
   const [open, setOpen] = useState(false);
   const [jobs, setJobs] = useState<KbOperationRecord[]>([]);
 
+  const failureCountRef = useRef(0);
+  const timerRef = useRef<number | null>(null);
+
   const loadJobs = async () => {
     const result = await getJobs({ limit: 50 });
+    failureCountRef.current = 0;
     setJobs(result.jobs || []);
   };
 
   useEffect(() => {
-    void loadJobs().catch(() => {});
-    const timer = window.setInterval(() => { void loadJobs().catch(() => {}); }, 2000);
-    return () => window.clearInterval(timer);
+    let disposed = false;
+    const schedule = (delay: number) => {
+      if (timerRef.current != null) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => { void poll(); }, delay);
+    };
+    const poll = async () => {
+      try {
+        await loadJobs();
+        if (!disposed) schedule(2000);
+      } catch {
+        failureCountRef.current += 1;
+        const delay = Math.min(30000, 2000 * 2 ** Math.min(4, failureCountRef.current));
+        if (!disposed) schedule(delay);
+      }
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    };
   }, []);
 
   const activeCount = useMemo(() => jobs.filter(job => job.status === 'processing').length, [jobs]);

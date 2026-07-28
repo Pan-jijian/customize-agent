@@ -6,8 +6,7 @@ import { getContexts, deleteContextById, updateContextById, getContextStats, com
 import { formatBytes } from '@/lib/utils';
 
 const TYPE_LABELS: Record<string, string> = {
-  project_fact: '项目知识', user_preference: '用户偏好',
-  feedback: '历史纠偏', pattern: '解决方案',
+  user_preference: '用户偏好', feedback: '历史纠偏', pattern: '解决方案',
 };
 const IMPORTANCE_COLORS: Record<string, string> = { high: 'red', medium: 'orange', low: 'default' };
 

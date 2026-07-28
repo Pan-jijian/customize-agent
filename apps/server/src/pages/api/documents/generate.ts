@@ -9,12 +9,12 @@ import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   // 仅允许 POST 请求
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-  const { templateId, requirement, maxEvidencePerChapter, projectRoot } = req.body as { templateId?: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string };
+  const { templateId, requirement, maxEvidencePerChapter, projectRoot, resumeDocumentId } = req.body as { templateId?: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; resumeDocumentId?: string };
   // 校验必填参数
   if (!templateId) return res.status(400).json({ error: 'templateId required' });
   if (!projectRoot) return res.status(400).json({ error: 'projectRoot required' });
   // 启动异步生成任务并返回任务信息
-  const task = startGenerateDocumentTask({ templateId, requirement, maxEvidencePerChapter }, projectRoot);
+  const task = startGenerateDocumentTask({ templateId, requirement, maxEvidencePerChapter, resumeDocumentId }, projectRoot);
   res.status(202).json(task);
 }
 

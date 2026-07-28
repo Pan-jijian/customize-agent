@@ -363,7 +363,7 @@ export class IndexStateStore {
     transaction();
   }
 
-  listChunks(options: { collectionName?: string; relativePath?: string; limit?: number } = {}): StoredChunk[] {
+  private chunkQueryParts(options: { collectionName?: string; relativePath?: string; limit?: number } = {}) {
     const conditions: string[] = [];
     const params: Array<string | number> = [];
 
@@ -377,17 +377,50 @@ export class IndexStateStore {
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    return { where, params };
+  }
+
+  listChunks(options: { collectionName?: string; relativePath?: string; limit?: number } = {}): StoredChunk[] {
+    const { where, params } = this.chunkQueryParts(options);
     const limit = options.limit ? 'LIMIT ?' : '';
-    if (options.limit) params.push(options.limit);
+    const queryParams = options.limit ? [...params, options.limit] : params;
 
     const rows = this.db.prepare(`
       SELECT rowid, * FROM kb_chunks
       ${where}
       ORDER BY relative_path, chunk_index
       ${limit}
-    `).all(...params) as Array<Record<string, unknown>>;
+    `).all(...queryParams) as Array<Record<string, unknown>>;
 
     return rows.map(row => this.rowToChunk(row, 0));
+  }
+
+  countChunks(options: { collectionName?: string; relativePath?: string } = {}): number {
+    const { where, params } = this.chunkQueryParts(options);
+    const row = this.db.prepare(`SELECT COUNT(*) AS count FROM kb_chunks ${where}`).get(...params) as { count?: number } | undefined;
+    return Number(row?.count || 0);
+  }
+
+  listChunksByContentBudget(options: { collectionName?: string; relativePath?: string; maxContentChars?: number } = {}): StoredChunk[] {
+    const maxContentChars = Number(options.maxContentChars);
+    if (!Number.isFinite(maxContentChars) || maxContentChars <= 0) return this.listChunks(options);
+
+    const { where, params } = this.chunkQueryParts(options);
+    const rows = this.db.prepare(`
+      SELECT rowid, * FROM kb_chunks
+      ${where}
+      ORDER BY relative_path, chunk_index
+    `).iterate(...params) as IterableIterator<Record<string, unknown>>;
+    const chunks: StoredChunk[] = [];
+    let usedChars = 0;
+    for (const row of rows) {
+      const chunk = this.rowToChunk(row, 0);
+      const length = chunk.content?.length || 0;
+      if (chunks.length > 0 && usedChars + length > maxContentChars) break;
+      chunks.push(chunk);
+      usedChars += length;
+    }
+    return chunks;
   }
 
   getChunkByRowid(rowid: number): StoredChunk | undefined {
@@ -455,19 +488,27 @@ export class IndexStateStore {
    * @param limit 返回结果数量上限
    * @returns 搜索结果列表（按相关性得分排序）
    */
-  searchChunks(query: string, limit = 10, filters: { filePaths?: string[] } = {}): ChunkSearchResult[] {
+  searchChunks(query: string, limit?: number, filters: { filePaths?: string[] } = {}): ChunkSearchResult[] {
     const terms = this.expandSearchTerms(query);
     if (terms.length === 0) return [];
     const filePaths = [...new Set((filters.filePaths ?? []).filter(Boolean))];
+    const effectiveLimit = this.resolveChunkSearchLimit(limit, filePaths);
     const results = [
-      ...(this.ftsEnabled ? this.searchChunksFts(terms, limit, filePaths) : []),
-      ...this.searchChunksLike(terms, limit, filePaths),
+      ...(this.ftsEnabled ? this.searchChunksFts(terms, effectiveLimit, filePaths) : []),
+      ...this.searchChunksLike(terms, effectiveLimit, filePaths),
     ];
-    return this.mergeKeywordResults(results, limit);
+    return this.mergeKeywordResults(results, effectiveLimit);
   }
 
   private filePathFilterClause(filePaths: string[], column = 'relative_path') {
     return filePaths.length > 0 ? ` AND ${column} IN (${filePaths.map(() => '?').join(', ')})` : '';
+  }
+
+  private resolveChunkSearchLimit(limit: number | undefined, filePaths: string[]): number {
+    if (Number.isFinite(limit) && limit! > 0) return Math.ceil(limit!);
+    const row = this.db.prepare(`SELECT COUNT(*) as count FROM kb_chunks WHERE 1 = 1${this.filePathFilterClause(filePaths)}`)
+      .get(...filePaths) as { count?: number } | undefined;
+    return Math.max(1, Math.ceil(Number(row?.count) || 0));
   }
 
   private searchChunksFts(terms: string[], limit: number, filePaths: string[]): ChunkSearchResult[] {

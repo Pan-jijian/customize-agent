@@ -28,7 +28,7 @@ function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
     name: template.name || '未命名模板',
     description: template.description || '',
     category: template.category || '自定义',
-    outputTitle: template.outputTitle || template.name || '业务文档',
+    outputTitle: template.outputTitle || template.name || '文档',
     projectRoleConfigId: template.projectRoleConfigId || undefined,
     chapters: Array.isArray(template.chapters) && template.chapters.length > 0 ? template.chapters.map((chapter, index) => ({
       id: (chapter.id || `chapter-${index + 1}`).replace(/[^a-zA-Z0-9_-]/gu, '-').slice(0, 80),
@@ -40,7 +40,7 @@ function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
       tableSections: Array.isArray(chapter.tableSections) ? chapter.tableSections.filter(Boolean) : [],
       tableRequirements: Array.isArray(chapter.tableRequirements) ? chapter.tableRequirements.filter(Boolean) : [],
       pinnedEvidenceFilePaths: Array.isArray(chapter.pinnedEvidenceFilePaths) ? chapter.pinnedEvidenceFilePaths.filter(Boolean) : [],
-    })) : [{ id: 'document', title: template.outputTitle || template.name || '业务文档', purpose: template.description || '', queries: [], requiredFacts: [] }],
+    })) : [{ id: 'document', title: template.outputTitle || template.name || '文档', purpose: template.description || '', queries: [], requiredFacts: [] }],
     exportSettings: template.exportSettings,
     generationSettings: template.generationSettings,
     promptIds: Array.isArray(template.promptIds) ? template.promptIds.filter(Boolean) : [],
@@ -50,7 +50,7 @@ function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
       : (Array.isArray(template.promptIds) ? template.promptIds.filter(Boolean).map(promptId => ({ promptId, roleId: 'chapter_generation' })) : []),
     fileBindings: Array.isArray(template.fileBindings)
       ? template.fileBindings.filter(item => item.filePath && item.roleId)
-      : (Array.isArray(template.boundFilePaths) ? template.boundFilePaths.filter(Boolean).map(filePath => ({ filePath, roleId: 'project_fact' })) : []),
+      : (Array.isArray(template.boundFilePaths) ? template.boundFilePaths.filter(Boolean).map(filePath => ({ filePath, roleId: 'reference' })) : []),
     builtIn: false,
   };
 }
@@ -202,9 +202,7 @@ export function violatesConfiguredChapterTitleFilter(title: string, template: Do
 }
 
 export function defaultProjectRoleConfigIdForTemplate(template: DocumentTemplate) {
-  if (template.projectRoleConfigId) return template.projectRoleConfigId;
-  if (templateMatchesConfiguredReviewChapters(template)) return 'construction-bid-sgzsj-professional';
-  return undefined;
+  return template.projectRoleConfigId || undefined;
 }
 
 export function projectRoleConfigForTemplate(template: DocumentTemplate) {
@@ -245,12 +243,5 @@ export function templatePromptBindings(template: DocumentTemplate): PromptBindin
 }
 
 export function templateFileBindings(template: DocumentTemplate): FileBinding[] {
-  return template.fileBindings?.length ? template.fileBindings : (template.boundFilePaths ?? []).map(filePath => ({ filePath, roleId: 'project_fact' }));
-}
-
-function templateMatchesConfiguredReviewChapters(template: DocumentTemplate) {
-  const matchers = readEngineeringDocumentConfig().reviewChapterTemplateMatchers;
-  if (matchers.length === 0) return false;
-  const text = `${template.name} ${template.category} ${template.outputTitle}`;
-  return matchers.some(pattern => new RegExp(pattern, 'iu').test(text));
+  return template.fileBindings?.length ? template.fileBindings : (template.boundFilePaths ?? []).map(filePath => ({ filePath, roleId: 'reference' }));
 }

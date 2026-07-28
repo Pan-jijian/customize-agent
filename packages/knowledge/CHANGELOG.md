@@ -1,5 +1,17 @@
 # @customize-agent/knowledge
 
+## 4.0.36
+
+### Patch Changes
+
+- Improve document generation quality boundaries, diagnostics, and release packaging.
+
+## 4.0.35
+
+### Patch Changes
+
+- Improve generated construction document quality gates, resume handling, export reliability, and knowledge/memory workflow stability.
+
 ## 4.0.33
 
 ### Patch Changes

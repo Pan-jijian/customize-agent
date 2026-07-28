@@ -16,13 +16,13 @@ export function validateDraftWithAutoSpec(input: {
   }
   const projectName = input.summary.facts.projectName;
   if (projectName && projectName !== '当前知识库项目' && !markdown.includes(projectName)) {
-    issues.push({ level: 'warning', message: '正文未明显体现项目名称', suggestion: '建议在概况、背景或首页标题中体现当前项目名称。' });
+    issues.push({ level: 'warning', message: '正文未明显体现关键对象名称', suggestion: '建议在概况、背景或首页标题中体现当前文档的关键对象名称。' });
   }
   const documentNo = input.summary.facts.documentNo;
   if (documentNo && !markdown.includes(documentNo)) {
-    issues.push({ level: 'info', message: '正文未体现项目/任务编号', suggestion: '如正式文件需要编号，请在概况、背景或首页信息中补充。' });
+    issues.push({ level: 'info', message: '正文未体现文档/任务编号', suggestion: '如文档需要编号，请在概况、背景或首页信息中补充。' });
   }
-  const forbidden = ['知识库证据', '文件角色', '提示词角色', '文档规范包', '规范包', '后台自动规范', '后台优化建议', '项目基础事实候选', '资料未提供', '未检索到'];
+  const forbidden = ['知识库证据', '文件角色', '提示词角色', '文档规范包', '规范包', '后台自动规范', '后台优化建议', '基础事实候选', '材料未提供', '未检索到'];
   for (const text of forbidden) {
     if (markdown.includes(text)) issues.push({ level: 'error', message: `正文包含后台流程话术：${text}`, suggestion: '请重新生成或在审查阶段删除后台流程描述。' });
   }

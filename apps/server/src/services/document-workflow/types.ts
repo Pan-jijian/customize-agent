@@ -208,7 +208,6 @@ export interface ChapterReviewSummary {
 
 export interface DocumentGenerationStrategy {
   mode: 'fast' | 'balanced' | 'longform' | 'strict';
-  enableChapterCache: boolean;
   enableChapterReview: boolean;
   enableGlobalReview: boolean;
   enableDocumentBudgetExpansion: boolean;
@@ -230,10 +229,9 @@ export interface DocumentPerformanceMetric {
 export interface DocumentGenerationDiagnostics {
   strategy: DocumentGenerationStrategy;
   metrics: DocumentPerformanceMetric[];
-  cache: { chapterHits: number; chapterMisses: number; chapterWrites: number; sectionHits: number; sectionMisses: number; sectionWrites: number; prunedItems: number; rejectedHits: number };
   llm: { calls: number; failures: number; throttledWaits: number; throttledWaitMs: number; maxActive: number; currentLimit: number; limitAdjustments: number };
   evidence: { raw: number; used: number; filteredNoise: number; avgNoiseScore: number; avgFactDensity: number; searchQueries: number; searchMs: number; contextChars: number };
-  quality: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number; reusedChapterCount: number; reusedSectionCount: number };
+  quality: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number };
 }
 
 export interface DocumentReviewMetadata {
@@ -263,7 +261,7 @@ export interface GeneratedDocumentDraft {
   executionStages: DocumentExecutionStage[];
   exportGate: ExportGateResult;
   assets?: DocumentAsset[];
-  partialChapters?: Array<{ id: string; title: string; chars: number; status: 'completed' | 'cached' | 'failed'; updatedAt: number }>;
+  partialChapters?: Array<{ id: string; title: string; chars: number; status: 'completed' | 'failed'; updatedAt: number }>;
   checkpointChapters?: DocumentDraftChapter[];
   reviewMetadata?: DocumentReviewMetadata;
   generatedAt: number;

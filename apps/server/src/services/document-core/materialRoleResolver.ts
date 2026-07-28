@@ -41,7 +41,7 @@ export function resolveTemplateMaterialRoles(template: DocumentTemplate, summary
       satisfied,
       weak,
       evidenceCount: files.length,
-      filePaths: files.slice(0, 20).map(file => file.filePath),
+      filePaths: files.map(file => file.filePath),
       reason: satisfied ? `已匹配 ${files.length} 个资料文件` : required ? '必需资料角色缺失' : '可选资料角色缺失',
     };
   });

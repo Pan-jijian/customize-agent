@@ -19,12 +19,10 @@ export const config = {
 type ExportFormat = 'markdown' | 'html' | 'pdf' | 'docx';
 
 /** 将文件名中的非法字符替换为连字符，限制长度 80 字符 */
-/** 将文件名中的非法字符替换为连字符，限制长度 80 字符 */
 function safeFileName(input: string) {
   return input.replace(/[\\/:*?"<>|]/gu, '-').slice(0, 80) || 'document';
 }
 
-/** 转义 XML 特殊字符 */
 /** 转义 XML 特殊字符 */
 function escapeXml(input: string) {
   return input.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;');
@@ -36,19 +34,16 @@ const MAX_TOTAL_INLINE_IMAGE_BYTES = 32 * 1024 * 1024;
 const IMAGE_MIME_BY_EXT: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml' };
 
 /** 根据文件扩展名获取 MIME 类型 */
-/** 根据文件扩展名获取 MIME 类型 */
 function imageMime(filePath: string) {
   return IMAGE_MIME_BY_EXT[path.extname(filePath).toLowerCase()] || '';
 }
 
-/** 检查文件路径是否在指定根目录之内（防止路径穿越） */
 /** 检查文件路径是否在指定根目录之内（防止路径穿越） */
 function isInsidePath(filePath: string, root: string) {
   const relative = path.relative(root, filePath);
   return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
-/** 安全解码 URI 路径，忽略查询参数和片段 */
 /** 安全解码 URI 路径，忽略查询参数和片段 */
 function safeDecodeUriPath(src: string) {
   try { return decodeURIComponent(src.split(/[?#]/u)[0] || src); }
@@ -107,6 +102,59 @@ function stripMarkdownDocumentFence(input: string) {
   return match ? match[1].trim() : input;
 }
 
+function isMarkdownTableSeparator(line: string) {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/u.test(line.trim());
+}
+
+function looksLikeMarkdownTableRow(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed || /^#{1,6}\s+/u.test(trimmed) || isMarkdownTableSeparator(trimmed)) return false;
+  const pipeCount = (trimmed.match(/\|/gu) || []).length;
+  return pipeCount >= 2 || pipeCount >= 1 && /^\s*\|/u.test(trimmed) || pipeCount >= 1 && /\|\s*$/u.test(trimmed);
+}
+
+function splitMarkdownTableRow(line: string) {
+  const trimmed = line.trim().replace(/^\|/u, '').replace(/\|$/u, '').trim();
+  return trimmed.split('|').map(cell => cell.trim());
+}
+
+function normalizeMarkdownTableRow(cells: string[], columns: number) {
+  const normalized = cells.slice(0, columns);
+  while (normalized.length < columns) normalized.push('');
+  return `| ${normalized.join(' | ')} |`;
+}
+
+function normalizeLooseMarkdownTables(input: string) {
+  const lines = input.replace(/\r?\n/gu, '\n').split('\n');
+  const output: string[] = [];
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index] || '';
+    const compactLine = line.replace(/([^|\n])\|\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/u, '$1');
+    const nextIndex = lines[index + 1]?.trim() === '' ? index + 2 : index + 1;
+    const separator = lines[nextIndex];
+    if (looksLikeMarkdownTableRow(line) && separator !== undefined && isMarkdownTableSeparator(separator)) {
+      const header = splitMarkdownTableRow(line);
+      const separatorColumns = splitMarkdownTableRow(separator).length;
+      const columns = Math.max(2, header.length, separatorColumns);
+      if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
+      output.push(normalizeMarkdownTableRow(header, columns));
+      output.push(`| ${Array.from({ length: columns }, () => '---').join(' | ')} |`);
+      index = nextIndex + 1;
+      while (index < lines.length) {
+        const row = lines[index] || '';
+        if (!looksLikeMarkdownTableRow(row)) break;
+        output.push(normalizeMarkdownTableRow(splitMarkdownTableRow(row), columns));
+        index += 1;
+      }
+      if (index < lines.length && lines[index]?.trim()) output.push('');
+      continue;
+    }
+    output.push(compactLine);
+    index += 1;
+  }
+  return output.join('\n').replace(/\n{3,}/gu, '\n\n');
+}
+
 function normalizeExportUnits(input: string) {
   const normalizePower = (value: string) => value
     .replace(/m\s*<sup>\s*2\s*<\/sup>/giu, 'm²')
@@ -119,7 +167,7 @@ function normalizeExportUnits(input: string) {
     .replace(/(?<=\d)m\s*3(?![\p{L}\p{N}_])/giu, 'm³')
     .replace(/(?<![\p{L}\p{N}_])m\s*2(?![\p{L}\p{N}_])/giu, 'm²')
     .replace(/(?<![\p{L}\p{N}_])m\s*3(?![\p{L}\p{N}_])/giu, 'm³');
-  return normalizePower(stripMarkdownDocumentFence(input));
+  return normalizeLooseMarkdownTables(normalizePower(stripMarkdownDocumentFence(input)));
 }
 
 function stripInlineMarkdown(input: string) {
@@ -177,6 +225,40 @@ function resolveExportStyle(settings?: DocumentExportSettings) {
   };
 }
 
+type DocxParagraphOptions = {
+  bold?: boolean;
+  size?: number;
+  align?: 'left' | 'center' | 'right' | 'both';
+  spacingBefore?: number;
+  spacingAfter?: number;
+  pageBreak?: boolean;
+  line?: number;
+  fontEastAsia?: string;
+  fontAscii?: string;
+  indentLeft?: number;
+  firstLine?: number;
+  hanging?: number;
+  keepNext?: boolean;
+  styleId?: string;
+  outlineLevel?: number;
+  numbering?: { numId: number; level: number };
+};
+
+type DocxImageItem = {
+  relationshipId: string;
+  fileName: string;
+  buffer: Buffer;
+  contentType: string;
+  widthEmu: number;
+  heightEmu: number;
+  altText: string;
+};
+
+type DocxBuildContext = {
+  projectRoot: string;
+  images: DocxImageItem[];
+};
+
 function docxRun(text: string, options: { bold?: boolean; size?: number; fontEastAsia?: string; fontAscii?: string } = {}) {
   const fontEastAsia = options.fontEastAsia || '宋体';
   const fontAscii = options.fontAscii || 'SimSun';
@@ -188,36 +270,101 @@ function docxRun(text: string, options: { bold?: boolean; size?: number; fontEas
   return `<w:r><w:rPr>${props}</w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`;
 }
 
-function docxParagraph(text: string, options: { bold?: boolean; size?: number; align?: 'left' | 'center' | 'right'; spacingBefore?: number; spacingAfter?: number; pageBreak?: boolean; line?: number; fontEastAsia?: string; fontAscii?: string; indentLeft?: number; firstLine?: number; keepNext?: boolean } = {}) {
+function docxParagraph(text: string, options: DocxParagraphOptions = {}) {
   if (options.pageBreak) return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
-  const indent = [options.indentLeft ? `w:left="${options.indentLeft}"` : '', options.firstLine ? `w:firstLine="${options.firstLine}"` : ''].filter(Boolean).join(' ');
+  const indent = [
+    options.indentLeft ? `w:left="${options.indentLeft}"` : '',
+    options.firstLine ? `w:firstLine="${options.firstLine}"` : '',
+    options.hanging ? `w:hanging="${options.hanging}"` : '',
+  ].filter(Boolean).join(' ');
   const pPr = [
+    options.styleId ? `<w:pStyle w:val="${escapeXml(options.styleId)}"/>` : '',
+    options.numbering ? `<w:numPr><w:ilvl w:val="${options.numbering.level}"/><w:numId w:val="${options.numbering.numId}"/></w:numPr>` : '',
     options.keepNext ? '<w:keepNext/>' : '',
-    options.align ? `<w:jc w:val="${options.align}"/>` : '',
-    indent ? `<w:ind ${indent}/>` : '',
     `<w:spacing w:line="${options.line ?? 440}" w:lineRule="exact" w:before="${options.spacingBefore ?? 0}" w:after="${options.spacingAfter ?? 120}"/>`,
+    indent ? `<w:ind ${indent}/>` : '',
+    options.align ? `<w:jc w:val="${options.align}"/>` : '',
+    typeof options.outlineLevel === 'number' ? `<w:outlineLvl w:val="${options.outlineLevel}"/>` : '',
   ].filter(Boolean).join('');
   return `<w:p><w:pPr>${pPr}</w:pPr>${docxRun(text, options)}</w:p>`;
 }
 
+function imageSizePixels(buffer: Buffer, contentType: string) {
+  if (contentType === 'image/png' && buffer.length >= 24 && buffer.toString('ascii', 1, 4) === 'PNG') return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  if (contentType === 'image/jpeg') {
+    let offset = 2;
+    while (offset + 9 < buffer.length) {
+      if (buffer[offset] !== 0xff) break;
+      const marker = buffer[offset + 1];
+      const length = buffer.readUInt16BE(offset + 2);
+      if (marker >= 0xc0 && marker <= 0xc3) return { height: buffer.readUInt16BE(offset + 5), width: buffer.readUInt16BE(offset + 7) };
+      offset += 2 + length;
+    }
+  }
+  return { width: 640, height: 360 };
+}
+
+function docxImageParagraph(image: DocxImageItem) {
+  return `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:after="120"/></w:pPr><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="${image.widthEmu}" cy="${image.heightEmu}"/><wp:docPr id="${image.relationshipId.replace(/\D/gu, '') || '1'}" name="${escapeXml(image.altText || image.fileName)}"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="0" name="${escapeXml(image.fileName)}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${image.relationshipId}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${image.widthEmu}" cy="${image.heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+}
+
+function docxImageFromMarkdown(line: string, context: DocxBuildContext) {
+  const match = /!\[([^\]]*)\]\(([^)]+)\)/u.exec(line);
+  if (!match) return null;
+  const localPath = resolveLocalImagePath(match[2].trim(), context.projectRoot);
+  if (!localPath) return null;
+  const buffer = fs.readFileSync(localPath);
+  const contentType = imageMime(localPath);
+  if (!contentType || contentType === 'image/svg+xml' || buffer.length > MAX_INLINE_IMAGE_BYTES) return null;
+  const imageNumber = context.images.length + 1;
+  const ext = path.extname(localPath).toLowerCase() || '.png';
+  const size = imageSizePixels(buffer, contentType);
+  const maxWidthPx = 620;
+  const scale = Math.min(1, maxWidthPx / Math.max(size.width, 1));
+  const widthEmu = Math.round(size.width * scale * 9525);
+  const heightEmu = Math.round(size.height * scale * 9525);
+  const image: DocxImageItem = { relationshipId: `rImage${imageNumber}`, fileName: `image${imageNumber}${ext}`, buffer, contentType, widthEmu, heightEmu, altText: match[1] || `image${imageNumber}` };
+  context.images.push(image);
+  return image;
+}
+
 function parseMarkdownTable(lines: string[], start: number) {
-  if (start + 1 >= lines.length || !/^\s*\|?.+\|\s*$/u.test(lines[start]) || !/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/u.test(lines[start + 1])) return null;
-  const rows: string[][] = [];
-  let index = start;
-  while (index < lines.length && /^\s*\|?.+\|\s*$/u.test(lines[index])) {
-    if (index !== start + 1) rows.push(lines[index].trim().replace(/^\|/u, '').replace(/\|$/u, '').split('|').map(cell => stripInlineMarkdown(cell)));
+  const separatorIndex = lines[start + 1]?.trim() === '' ? start + 2 : start + 1;
+  if (separatorIndex >= lines.length || !looksLikeMarkdownTableRow(lines[start] || '') || !isMarkdownTableSeparator(lines[separatorIndex] || '')) return null;
+  const header = splitMarkdownTableRow(lines[start] || '').map(cell => stripInlineMarkdown(cell));
+  const separatorColumns = splitMarkdownTableRow(lines[separatorIndex] || '').length;
+  const columns = Math.max(2, header.length, separatorColumns);
+  const rows: string[][] = [header];
+  let index = separatorIndex + 1;
+  while (index < lines.length && looksLikeMarkdownTableRow(lines[index] || '')) {
+    const row = splitMarkdownTableRow(lines[index] || '').map(cell => stripInlineMarkdown(cell));
+    const normalized = row.slice(0, columns);
+    while (normalized.length < columns) normalized.push('');
+    rows.push(normalized);
     index += 1;
   }
   return { rows, next: index };
 }
 
 function docxTable(rows: string[][], style: ReturnType<typeof resolveExportStyle>) {
-  const cells = (row: string[], rowIndex: number) => row.map(cell => `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/><w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tcMar>${rowIndex === 0 ? '<w:shd w:fill="F3F4F6"/>' : ''}</w:tcPr>${docxParagraph(cell, { bold: rowIndex === 0, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingAfter: 0, align: rowIndex === 0 ? 'center' : undefined })}</w:tc>`).join('');
-  return `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblLook w:firstRow="1" w:noHBand="0"/><w:tblBorders><w:top w:val="single" w:sz="6" w:color="666666"/><w:left w:val="single" w:sz="6" w:color="666666"/><w:bottom w:val="single" w:sz="6" w:color="666666"/><w:right w:val="single" w:sz="6" w:color="666666"/><w:insideH w:val="single" w:sz="4" w:color="666666"/><w:insideV w:val="single" w:sz="4" w:color="666666"/></w:tblBorders></w:tblPr>${rows.map((row, rowIndex) => `<w:tr>${cells(row, rowIndex)}</w:tr>`).join('')}</w:tbl>`;
+  const maxColumns = Math.max(1, ...rows.map(row => row.length));
+  const tableWidth = 9638;
+  const baseColumnWidth = Math.floor(tableWidth / maxColumns);
+  const columnWidths = Array.from({ length: maxColumns }, (_item, index) => index === maxColumns - 1 ? tableWidth - baseColumnWidth * (maxColumns - 1) : baseColumnWidth);
+  const grid = `<w:tblGrid>${columnWidths.map(width => `<w:gridCol w:w="${width}"/>`).join('')}</w:tblGrid>`;
+  const cells = (row: string[], rowIndex: number) => columnWidths.map((width, columnIndex) => {
+    const cell = row[columnIndex] || '';
+    return `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/><w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="120" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tcMar>${rowIndex === 0 ? '<w:shd w:val="clear" w:fill="F3F4F6"/>' : ''}</w:tcPr>${docxParagraph(cell, { bold: rowIndex === 0, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingAfter: 0, align: rowIndex === 0 ? 'center' : 'left' })}</w:tc>`;
+  }).join('');
+  return `<w:tbl><w:tblPr><w:tblW w:w="${tableWidth}" w:type="dxa"/><w:tblLook w:firstRow="1" w:noHBand="0"/><w:tblBorders><w:top w:val="single" w:sz="6" w:color="666666"/><w:left w:val="single" w:sz="6" w:color="666666"/><w:bottom w:val="single" w:sz="6" w:color="666666"/><w:right w:val="single" w:sz="6" w:color="666666"/><w:insideH w:val="single" w:sz="4" w:color="666666"/><w:insideV w:val="single" w:sz="4" w:color="666666"/></w:tblBorders></w:tblPr>${grid}${rows.map((row, rowIndex) => `<w:tr>${cells(row, rowIndex)}</w:tr>`).join('')}</w:tbl>`;
 }
 
 function isTocSectionLine(line: string) {
   return /^\s*\d+\.\d+\s+\S/u.test(line);
+}
+
+function docxTocFieldParagraph(style: ReturnType<typeof resolveExportStyle>) {
+  return `<w:p><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">TOC \\o &quot;1-3&quot; \\h \\z \\u</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>请在 Word 中右键更新目录</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`;
 }
 
 function docxTocParagraph(line: string, style: ReturnType<typeof resolveExportStyle>) {
@@ -226,12 +373,24 @@ function docxTocParagraph(line: string, style: ReturnType<typeof resolveExportSt
 }
 
 function docxHeadingParagraph(level: number, text: string, style: ReturnType<typeof resolveExportStyle>) {
-  if (level === 2) return docxParagraph(text, { bold: true, size: Math.max(style.titleHalfPoints + 4, 36), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: 'center', spacingBefore: 260, spacingAfter: 180, keepNext: true });
-  if (level === 3) return docxParagraph(text, { bold: true, size: Math.max(style.titleHalfPoints, 32), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingBefore: 180, spacingAfter: 100, keepNext: true });
-  return docxParagraph(text, { bold: true, size: Math.max(style.bodyHalfPoints, 28), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingBefore: 120, spacingAfter: 80, keepNext: true });
+  if (level === 2) return docxParagraph(text, { styleId: 'Heading1', outlineLevel: 0, bold: true, size: Math.max(style.titleHalfPoints + 4, 36), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: 'center', spacingBefore: 260, spacingAfter: 180, keepNext: true });
+  if (level === 3) return docxParagraph(text, { styleId: 'Heading2', outlineLevel: 1, bold: true, size: Math.max(style.titleHalfPoints, 32), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingBefore: 180, spacingAfter: 100, keepNext: true });
+  return docxParagraph(text, { styleId: 'Heading3', outlineLevel: 2, bold: true, size: Math.max(style.bodyHalfPoints, 28), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingBefore: 120, spacingAfter: 80, keepNext: true });
 }
 
-function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings) {
+function orderedListMatch(line: string) {
+  const match = /^\s*(\d+(?:\.\d+){0,2})([.、])\s+(.+)$/u.exec(line);
+  if (!match) return null;
+  const level = Math.min(match[1].split('.').length - 1, 2);
+  return { level, marker: `${match[1]}${match[2]}`, text: stripInlineMarkdown(match[3]) };
+}
+
+function unorderedListMatch(line: string) {
+  const match = /^\s*[-*+]\s+(.+)$/u.exec(line);
+  return match ? stripInlineMarkdown(match[1]) : null;
+}
+
+function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, context?: DocxBuildContext) {
   const style = resolveExportStyle(settings);
   const titleSize = style.titleHalfPoints;
   const bodySize = style.bodyHalfPoints;
@@ -240,6 +399,7 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings) 
   const blocks: string[] = [];
   let inToc = false;
   let inCover = false;
+  let tocFieldInserted = false;
   for (let index = 0; index < lines.length;) {
     const line = lines[index].trim();
     if (!line) { index += 1; continue; }
@@ -252,6 +412,8 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings) 
       index += 1;
       continue;
     }
+    const image = context ? docxImageFromMarkdown(line, context) : null;
+    if (image) { blocks.push(docxImageParagraph(image)); index += 1; continue; }
     const table = parseMarkdownTable(lines, index);
     if (table) { blocks.push(docxTable(table.rows, style), docxParagraph('', { spacingAfter: 80, line: style.lineTwips })); index = table.next; continue; }
     const heading = /^(#{1,4})\s+(.+)$/u.exec(line);
@@ -259,12 +421,30 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings) 
       const headingText = stripInlineMarkdown(heading[2]);
       inToc = headingText === '目录';
       blocks.push(docxHeadingParagraph(heading[1].length, headingText, style));
+      if (inToc && !tocFieldInserted) {
+        blocks.push(docxTocFieldParagraph(style));
+        tocFieldInserted = true;
+      }
       index += 1;
       continue;
     }
     const plainLine = stripInlineMarkdown(line);
+    const orderedList = orderedListMatch(line);
+    const unorderedList = unorderedListMatch(line);
+    if (!inToc && orderedList) {
+      const indentLeft = orderedList.level === 0 ? 720 : orderedList.level === 1 ? 1080 : 1440;
+      const hanging = orderedList.level === 0 ? 360 : orderedList.level === 1 ? 420 : 480;
+      blocks.push(docxParagraph(`${orderedList.marker} ${orderedList.text}`, { styleId: 'ListParagraph', numbering: { numId: 1, level: orderedList.level }, size: bodySize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, indentLeft, hanging, spacingAfter: 60 }));
+      index += 1;
+      continue;
+    }
+    if (!inToc && unorderedList) {
+      blocks.push(docxParagraph(`• ${unorderedList}`, { styleId: 'ListParagraph', size: bodySize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, indentLeft: 720, hanging: 360, spacingAfter: 60 }));
+      index += 1;
+      continue;
+    }
     const boldLine = /^\*\*[^*]+\*\*\s*[:：]?\s*$/u.test(line) || /^（[一二三四五六七八九十]+）/u.test(plainLine) || /^[一二三四五六七八九十]+、/u.test(plainLine);
-    blocks.push(inToc ? docxTocParagraph(line, style) : docxParagraph(plainLine, { bold: boldLine, size: bodySize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, firstLine: boldLine ? 0 : 560, spacingBefore: boldLine ? 80 : 0 }));
+    blocks.push(inToc ? docxTocParagraph(line, style) : docxParagraph(plainLine, { bold: boldLine, size: bodySize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: 'both', firstLine: boldLine ? 0 : 560, spacingBefore: boldLine ? 80 : 0 }));
     index += 1;
   }
   return blocks.join('');
@@ -272,45 +452,109 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings) 
 
 function docxStylesXml(settings?: DocumentExportSettings) {
   const style = resolveExportStyle(settings);
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="${escapeXml(style.fontAscii)}" w:hAnsi="${escapeXml(style.fontAscii)}" w:eastAsia="${escapeXml(style.fontEastAsia)}" w:cs="${escapeXml(style.fontAscii)}"/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="${escapeXml(style.fontAscii)}" w:hAnsi="${escapeXml(style.fontAscii)}" w:eastAsia="${escapeXml(style.fontEastAsia)}" w:cs="${escapeXml(style.fontAscii)}"/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:qFormat/><w:rPr><w:b/><w:rFonts w:ascii="${escapeXml(style.fontAscii)}" w:hAnsi="${escapeXml(style.fontAscii)}" w:eastAsia="${escapeXml(style.fontEastAsia)}" w:cs="${escapeXml(style.fontAscii)}"/><w:sz w:val="${style.titleHalfPoints}"/><w:szCs w:val="${style.titleHalfPoints}"/></w:rPr><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="160"/></w:pPr></w:style></w:styles>`;
+  const fontAttrs = `w:ascii="${escapeXml(style.fontAscii)}" w:hAnsi="${escapeXml(style.fontAscii)}" w:eastAsia="${escapeXml(style.fontEastAsia)}" w:cs="${escapeXml(style.fontAscii)}"`;
+  const headingStyle = (id: string, name: string, size: number, level: number, before: number, after: number, align?: string) => `<w:style w:type="paragraph" w:styleId="${id}"><w:name w:val="${name}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="${9 + level}"/><w:qFormat/><w:rPr><w:b/><w:rFonts ${fontAttrs}/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr><w:pPr><w:keepNext/><w:keepLines/><w:outlineLvl w:val="${level}"/><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:before="${before}" w:after="${after}"/>${align ? `<w:jc w:val="${align}"/>` : ''}</w:pPr></w:style>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:style>${headingStyle('Heading1', 'heading 1', Math.max(style.titleHalfPoints + 4, 36), 0, 260, 180, 'center')}${headingStyle('Heading2', 'heading 2', Math.max(style.titleHalfPoints, 32), 1, 180, 100)}${headingStyle('Heading3', 'heading 3', Math.max(style.bodyHalfPoints, 28), 2, 120, 80)}<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:uiPriority w:val="34"/><w:qFormat/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:style></w:styles>`;
 }
 
-async function buildDocx(title: string, markdown: string, settings?: DocumentExportSettings, templatePath?: string) {
-  const contentXml = markdownToDocxXml(markdown, settings);
+function docxNumberingXml() {
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="1"><w:multiLevelType w:val="hybridMultilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1080" w:hanging="420"/></w:pPr></w:lvl><w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2.%3"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="480"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>';
+}
+
+function docxSettingsXml() {
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:updateFields w:val="true"/><w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>';
+}
+
+function docxFontTableXml(settings?: DocumentExportSettings) {
+  const style = resolveExportStyle(settings);
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:font w:name="${escapeXml(style.fontEastAsia)}"><w:charset w:val="86"/><w:family w:val="roman"/></w:font><w:font w:name="${escapeXml(style.fontAscii)}"><w:family w:val="roman"/></w:font></w:fonts>`;
+}
+
+function docxCorePropertiesXml(title: string) {
+  const now = new Date().toISOString();
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${escapeXml(title)}</dc:title><dc:creator>Customize Agent</dc:creator><cp:lastModifiedBy>Customize Agent</cp:lastModifiedBy><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`;
+}
+
+function docxAppPropertiesXml() {
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Customize Agent</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company></Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>1.0</AppVersion></Properties>';
+}
+
+function appendBeforeClose(xml: string, closeTag: string, fragment: string) {
+  return xml.includes(fragment) ? xml : xml.replace(closeTag, `${fragment}${closeTag}`);
+}
+
+async function ensureDocxPackageParts(zip: JSZip, title: string, settings?: DocumentExportSettings, images: DocxImageItem[] = []) {
+  zip.folder('word')?.file('styles.xml', docxStylesXml(settings));
+  zip.folder('word')?.file('numbering.xml', docxNumberingXml());
+  zip.folder('word')?.file('settings.xml', docxSettingsXml());
+  zip.folder('word')?.file('fontTable.xml', docxFontTableXml(settings));
+  zip.folder('docProps')?.file('core.xml', docxCorePropertiesXml(title));
+  zip.folder('docProps')?.file('app.xml', docxAppPropertiesXml());
+  const mediaFolder = zip.folder('word')?.folder('media');
+  for (const image of images) mediaFolder?.file(image.fileName, image.buffer);
+
+  const relsPath = 'word/_rels/document.xml.rels';
+  const relsFile = zip.file(relsPath);
+  let rels = relsFile ? await relsFile.async('string') : '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+  const documentRelationships = [
+    ['rStyle', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles', 'styles.xml'],
+    ['rNumbering', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering', 'numbering.xml'],
+    ['rSettings', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings', 'settings.xml'],
+    ['rFontTable', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable', 'fontTable.xml'],
+  ];
+  for (const [id, type, target] of documentRelationships) {
+    if (!rels.includes(type)) rels = rels.replace('</Relationships>', `<Relationship Id="${id}" Type="${type}" Target="${target}"/></Relationships>`);
+  }
+  for (const image of images) {
+    if (!rels.includes(`Id="${image.relationshipId}"`)) rels = rels.replace('</Relationships>', `<Relationship Id="${image.relationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${image.fileName}"/></Relationships>`);
+  }
+  zip.folder('word')?.folder('_rels')?.file('document.xml.rels', rels);
+
+  const packageRelsPath = '_rels/.rels';
+  const packageRelsFile = zip.file(packageRelsPath);
+  let packageRels = packageRelsFile ? await packageRelsFile.async('string') : '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>';
+  if (!packageRels.includes('metadata/core-properties')) packageRels = packageRels.replace('</Relationships>', '<Relationship Id="rCore" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>');
+  if (!packageRels.includes('extended-properties')) packageRels = packageRels.replace('</Relationships>', '<Relationship Id="rApp" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>');
+  zip.folder('_rels')?.file('.rels', packageRels);
+
+  const contentTypesFile = zip.file('[Content_Types].xml');
+  let contentTypes = contentTypesFile ? await contentTypesFile.async('string') : '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>';
+  const defaults = new Set(images.map(image => path.extname(image.fileName).slice(1).toLowerCase()).filter(Boolean));
+  for (const extension of defaults) {
+    const contentType = extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'png' ? 'image/png' : extension === 'gif' ? 'image/gif' : extension === 'webp' ? 'image/webp' : undefined;
+    if (contentType && !contentTypes.includes(`Extension="${extension}"`)) contentTypes = contentTypes.replace('</Types>', `<Default Extension="${extension}" ContentType="${contentType}"/></Types>`);
+  }
+  const overrides = [
+    ['/word/styles.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml'],
+    ['/word/numbering.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml'],
+    ['/word/settings.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml'],
+    ['/word/fontTable.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml'],
+    ['/docProps/core.xml', 'application/vnd.openxmlformats-package.core-properties+xml'],
+    ['/docProps/app.xml', 'application/vnd.openxmlformats-officedocument.extended-properties+xml'],
+  ];
+  for (const [partName, contentType] of overrides) {
+    if (!contentTypes.includes(`PartName="${partName}"`)) contentTypes = contentTypes.replace('</Types>', `<Override PartName="${partName}" ContentType="${contentType}"/></Types>`);
+  }
+  zip.file('[Content_Types].xml', contentTypes);
+}
+
+async function buildDocx(title: string, markdown: string, settings?: DocumentExportSettings, templatePath?: string, projectRoot = process.cwd()) {
+  const context: DocxBuildContext = { projectRoot, images: [] };
+  const contentXml = markdownToDocxXml(markdown, settings, context);
   if (templatePath && fs.existsSync(templatePath)) {
     const zip = await JSZip.loadAsync(fs.readFileSync(templatePath));
     const documentFile = zip.file('word/document.xml');
     if (documentFile) {
       const xml = await documentFile.async('string');
       zip.file('word/document.xml', xml.replace(/\{\{title\}\}/gu, escapeXml(title)).replace(/\{\{content\}\}/gu, contentXml));
-      zip.file('word/styles.xml', docxStylesXml(settings));
-      const relsPath = 'word/_rels/document.xml.rels';
-      const relsFile = zip.file(relsPath);
-      if (relsFile) {
-        const rels = await relsFile.async('string');
-        if (!rels.includes('officeDocument/2006/relationships/styles')) {
-          zip.file(relsPath, rels.replace('</Relationships>', '<Relationship Id="rStyle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'));
-        }
-      } else {
-        zip.folder('word')?.folder('_rels')?.file('document.xml.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rStyle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
-      }
-      const contentTypesFile = zip.file('[Content_Types].xml');
-      if (contentTypesFile) {
-        const contentTypes = await contentTypesFile.async('string');
-        if (!contentTypes.includes('/word/styles.xml')) {
-          zip.file('[Content_Types].xml', contentTypes.replace('</Types>', '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>'));
-        }
-      }
+      await ensureDocxPackageParts(zip, title, settings, context.images);
       return zip.generateAsync({ type: 'nodebuffer' });
     }
   }
   const page = settings?.page || {};
   const zip = new JSZip();
-  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
-  zip.folder('_rels')?.file('.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
-  zip.folder('word')?.folder('_rels')?.file('document.xml.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rStyle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
-  zip.folder('word')?.file('styles.xml', docxStylesXml(settings));
   zip.folder('word')?.file('document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${contentXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="${lengthToTwips(page.marginTop, 2.5)}" w:right="${lengthToTwips(page.marginRight, 2)}" w:bottom="${lengthToTwips(page.marginBottom, 2)}" w:left="${lengthToTwips(page.marginLeft, 2)}"/></w:sectPr></w:body></w:document>`);
+  await ensureDocxPackageParts(zip, title, settings, context.images);
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
@@ -383,7 +627,7 @@ function isExportBlockingIssue(issue: { message: string }) {
   const message = issue.message.trim();
   // 事实冲突和必需章节缺失属于警告，不阻止导出
   if (/^(事实冲突|必需章节缺失)：/u.test(message)) return false;
-  return /出现禁用文本\s*(资料未提供|占位|TODO|TBD)|正文包含.*(资料未提供|占位)|图片、地图或附件引用路径明显无效|无效路径|表格语法错误|临时远程生成 URL|提示词全文|内部错误|生成未完成|低于目标页数|低于目标字数|文档预算未达成|正文篇幅低于目标|缺少配置小节|缺少必要的正式表格|正文缺少章节标题/iu.test(message);
+  return /出现禁用文本\s*(资料未提供|占位|TODO|TBD)|正文包含.*(资料未提供|占位)|图片、地图或附件引用路径明显无效|无效路径|表格语法错误|临时远程生成 URL|提示词全文|内部错误|生成未完成|低于目标页数|低于目标字数|文档预算未达成|正文篇幅低于目标|缺少规划小节|缺少必要的正式表格|正文缺少章节标题/iu.test(message);
 }
 
 function markdownStats(markdown: string) {
@@ -395,6 +639,33 @@ function markdownStats(markdown: string) {
   };
 }
 
+function markdownHeadings(markdown: string) {
+  return markdown.split(/\r?\n/u)
+    .map(line => /^(#{2,4})\s+(.+)$/u.exec(line.trim()))
+    .filter((match): match is RegExpExecArray => Boolean(match))
+    .map(match => ({ level: match[1].length, title: stripInlineMarkdown(match[2]) }))
+    .filter(heading => heading.title && heading.title !== '目录');
+}
+
+function normalizeHeadingTitle(title: string) {
+  return title.replace(/^第[一二三四五六七八九十百]+章\s*/u, '')
+    .replace(/^\d+(?:\.\d+)*\s*/u, '')
+    .replace(/[\s:：.。]+$/gu, '')
+    .trim();
+}
+
+function repeatedParagraphWarnings(markdown: string) {
+  const seen = new Map<string, number>();
+  const repeated: string[] = [];
+  for (const paragraph of markdown.split(/\n{2,}/u).map(item => stripInlineMarkdown(item)).filter(item => item.length >= 45 && !/^#+\s/u.test(item))) {
+    const key = paragraph.replace(/\s+/gu, '').slice(0, 90);
+    const count = (seen.get(key) || 0) + 1;
+    seen.set(key, count);
+    if (count === 2) repeated.push(paragraph.slice(0, 60));
+  }
+  return repeated;
+}
+
 function validateExportMarkdown(markdown: string, baseline?: string) {
   const stats = markdownStats(markdown);
   const baseStats = baseline ? markdownStats(baseline) : undefined;
@@ -403,7 +674,37 @@ function validateExportMarkdown(markdown: string, baseline?: string) {
   if (baseStats && baseStats.chars > 1000 && stats.chars < baseStats.chars * 0.8) issues.push('导出内容明显少于服务端生成记录');
   if (baseStats && baseStats.h3 > 0 && stats.h3 === 0) issues.push('导出内容缺少服务端生成记录中的二级小节');
   if (baseStats && baseStats.tables > 0 && stats.tables === 0) issues.push('导出内容缺少服务端生成记录中的表格');
+
+  const headings = markdownHeadings(markdown);
+  if (headings.length === 0) issues.push('正文缺少章节标题');
+  if (headings.some((heading, index) => index > 0 && heading.level - headings[index - 1].level > 1)) issues.push('标题层级存在跳级，可能影响导出目录和导航');
+  const duplicateHeadings = headings.map(heading => normalizeHeadingTitle(heading.title)).filter(Boolean)
+    .filter((title, index, array) => array.indexOf(title) !== index);
+  if (duplicateHeadings.length > 0) issues.push(`存在重复标题：${[...new Set(duplicateHeadings)].slice(0, 3).join('、')}`);
+
+  const suspiciousLines = markdown.split(/\r?\n/u).map(line => stripInlineMarkdown(line)).filter(line => line.length > 0 && !/^#+\s/u.test(line));
+  if (suspiciousLines.some(line => line.length <= 1)) issues.push('正文存在孤立字或残缺段落');
+  if (suspiciousLines.some(line => /[，、；：和与在为对将]$/u.test(line) || /(通过|包括|如下|主要包括)$/u.test(line))) issues.push('正文存在疑似截断句或未完结段落');
+  if (suspiciousLines.some(line => line.length > 380)) issues.push('正文存在过长段落，建议拆分以改善导出版式');
+
+  const repeated = repeatedParagraphWarnings(markdown);
+  if (repeated.length > 0) issues.push(`正文存在重复段落：${repeated.slice(0, 2).join('；')}`);
   return issues;
+}
+
+function prepareExportMarkdown(rawMarkdown: string, baseline?: string) {
+  const markdown = normalizeExportUnits(rawMarkdown);
+  const baselineMarkdown = normalizeExportUnits(baseline || '');
+  return {
+    markdown,
+    baselineMarkdown,
+    issues: validateExportMarkdown(markdown, baselineMarkdown),
+  };
+}
+
+async function buildExportHtml(title: string, markdown: string, settings: DocumentExportSettings | undefined, projectRoot: string) {
+  const { marked } = await import('marked');
+  return inlineLocalImages(htmlShell(title, marked.parse(markdown, { async: false }) as string, settings), projectRoot);
 }
 
 function existingBrowserPaths() {
@@ -517,17 +818,19 @@ async function renderPdfBuffer(html: string, settings?: DocumentExportSettings) 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   // 仅允许 POST 请求
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-    const body = req.body as { documentId?: string; title?: string; markdown?: string; format?: ExportFormat; enforceGate?: boolean; useClientMarkdown?: boolean; exportGate?: { passed?: boolean; blockingIssues?: Array<{ message: string }> }; wordTemplatePath?: string };
-    const record = body.documentId ? getGeneratedDocument(body.documentId) : null;
+    const body = req.body as { documentId?: string; title?: string; markdown?: string; format?: ExportFormat; enforceGate?: boolean; useClientMarkdown?: boolean; exportGate?: { passed?: boolean; blockingIssues?: Array<{ message: string }> }; wordTemplatePath?: string; projectRoot?: string };
+    const projectRoot = body.projectRoot || getProjectRoot();
+    const record = body.documentId ? getGeneratedDocument(body.documentId, projectRoot) : null;
     if (body.documentId && !record) return res.status(404).json({ error: 'Document not found' });
     const title = body.title || record?.title || 'document';
+    const exportSettings = record?.draft?.exportSettings;
     const recordMarkdown = record?.editedMarkdown || record?.markdown || record?.draft?.markdown || '';
     const rawMarkdown = body.useClientMarkdown && typeof body.markdown === 'string' ? body.markdown : recordMarkdown || body.markdown || '';
-    const markdown = normalizeExportUnits(rawMarkdown);
+    const preparedExport = prepareExportMarkdown(rawMarkdown, record?.draft?.markdown || record?.markdown || '');
+    const { markdown } = preparedExport;
     const format = body.format;
     if (!format || !['markdown', 'html', 'pdf', 'docx'].includes(format)) return res.status(400).json({ error: 'INVALID_EXPORT_FORMAT', message: '请选择有效的导出格式。' });
-    const exportIssues = validateExportMarkdown(markdown, normalizeExportUnits(record?.draft?.markdown || record?.markdown || ''));
-    if (exportIssues.length > 0) res.setHeader('X-Export-Content-Issues', encodeURIComponent(JSON.stringify(exportIssues.slice(0, 20))));
+    if (preparedExport.issues.length > 0) res.setHeader('X-Export-Content-Issues', encodeURIComponent(JSON.stringify(preparedExport.issues.slice(0, 20))));
     const exportGate = record?.draft?.exportGate || body.exportGate;
     // 导出门禁仅作为风险提示，不阻断用户导出
     const blockingIssues = exportGate?.blockingIssues?.filter(isExportBlockingIssue) || [];
@@ -544,16 +847,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
     // DOCX 格式
     if (format === 'docx') {
-      const docx = await buildDocx(title, markdown, record?.draft?.exportSettings, body.wordTemplatePath);
+      const docx = await buildDocx(title, markdown, exportSettings, body.wordTemplatePath, projectRoot);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.docx`)}`);
       return res.status(200).send(docx);
     }
     // HTML 和 PDF 需要将 Markdown 渲染为 HTML
-    const { marked } = await import('marked');
-    const projectRoot = getProjectRoot();
-    const exportSettings = record?.draft?.exportSettings;
-    const html = inlineLocalImages(htmlShell(title, marked.parse(markdown, { async: false }) as string, exportSettings), projectRoot);
+    const html = await buildExportHtml(title, markdown, exportSettings, projectRoot);
     if (format === 'html') {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.html`)}`);
@@ -572,6 +872,6 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 }
 
-export const __documentExportTest__ = { inlineLocalImages, resolveLocalImagePath, normalizeExportUnits, stripInlineMarkdown, enhanceTocHtml };
+export const __documentExportTest__ = { inlineLocalImages, resolveLocalImagePath, normalizeExportUnits, prepareExportMarkdown, stripInlineMarkdown, enhanceTocHtml, buildExportHtml, buildDocx, validateExportMarkdown };
 
 export default withApiErrorBoundary('api/documents/export', handler);

@@ -1,5 +1,34 @@
 # customize-agent
 
+## 4.0.75
+
+### Patch Changes
+
+- Improve document generation quality boundaries, diagnostics, and release packaging.
+- Updated dependencies
+  - @customize-agent/server@4.0.84
+  - @customize-agent/knowledge@4.0.36
+  - @customize-agent/memory@3.0.9
+
+## 4.0.74
+
+### Patch Changes
+
+- Improve generated construction document quality gates, resume handling, export reliability, and knowledge/memory workflow stability.
+- Updated dependencies
+  - @customize-agent/server@4.0.83
+  - @customize-agent/knowledge@4.0.35
+  - @customize-agent/memory@3.0.8
+
+## 4.0.71
+
+### Patch Changes
+
+- 发布文档生成质量、结构归一、导出稳定性和长期记忆类型清理相关正式版本。
+- Updated dependencies
+  - @customize-agent/server@4.0.80
+  - @customize-agent/memory@3.0.6
+
 ## 4.0.70
 
 ### Patch Changes

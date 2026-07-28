@@ -391,7 +391,7 @@ export class Repl {
       if (this.memory) {
         const lastAssistant = [...updated].reverse().find(m => m.role === 'assistant');
         if (lastAssistant?.content) {
-          this.memory.remember('project_fact', lastAssistant.content.slice(0, 500), `Task: ${input.slice(0, 200)}`);
+          this.memory.remember('pattern', lastAssistant.content.slice(0, 500), `Task: ${input.slice(0, 200)}`);
         }
       }
     } catch (err) {

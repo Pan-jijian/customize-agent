@@ -3,6 +3,7 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
+    "declaration": true,
     "types": ["node"],
     "paths": {
       "@customize-agent/knowledge": ["../../packages/knowledge/dist/index.d.ts"],

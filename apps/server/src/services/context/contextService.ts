@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
-import { CONTEXT_TYPE_LABELS, MAX_CONTEXT_QUERY_TERMS, MIN_CONTEXT_QUERY_TERM_LENGTH } from '../constants';
+import { CONTEXT_TYPE_LABELS, MIN_CONTEXT_QUERY_TERM_LENGTH } from '../constants';
 import type { ContextEntry, Importance } from '../types';
 
 export type { ContextEntry, Importance } from '../types';
@@ -25,7 +25,7 @@ function rowToEntry(r: Record<string, unknown>): ContextEntry {
     id: String(r.id),
     title: String(r.content || '').slice(0, 80),
     content: String(r.content || ''),
-    type: String(r.type || 'project_fact'),
+    type: String(r.type || 'pattern'),
     importance: importanceFromCount(accessCount),
     tags: [CONTEXT_TYPE_LABELS[String(r.type)] || String(r.type)],
     source: String(r.context || '').slice(0, 100),
@@ -68,9 +68,8 @@ function tokenizeContextQuery(query: string) {
     const term = raw.trim();
     if (term.length < MIN_CONTEXT_QUERY_TERM_LENGTH) continue;
     terms.push(term);
-    if (terms.length >= MAX_CONTEXT_QUERY_TERMS) break;
   }
-  return terms;
+  return [...new Set(terms)];
 }
 
 function buildContextSearchParams(terms: string[]) {
@@ -89,16 +88,19 @@ function mapRowsToEntries(rows: unknown[]) {
   return entries;
 }
 
-export function recallDocumentContexts(query: string, limit = 8, projectRoot?: string): ContextEntry[] {
+export function recallDocumentContexts(query: string, limit?: number, projectRoot?: string): ContextEntry[] {
   const db = openMemoryDb();
   if (!db) return [];
   try {
     const terms = tokenizeContextQuery(query);
     const projectLike = projectRoot ? `%Project: ${path.resolve(projectRoot)}%` : undefined;
+    const resolvedLimit = Number.isFinite(limit) && limit! > 0 ? Math.ceil(limit!) : undefined;
+    const limitSql = resolvedLimit ? 'LIMIT ?' : '';
+    const limitParam = resolvedLimit ? [resolvedLimit] : [];
     if (terms.length === 0) {
       const rows = projectLike
-        ? db.prepare(`SELECT * FROM memories WHERE context LIKE ? ORDER BY access_count DESC, updated_at DESC LIMIT ?`).all(projectLike, limit)
-        : db.prepare(`SELECT * FROM memories ORDER BY access_count DESC, updated_at DESC LIMIT ?`).all(limit);
+        ? db.prepare(`SELECT * FROM memories WHERE context LIKE ? ORDER BY access_count DESC, updated_at DESC ${limitSql}`).all(projectLike, ...limitParam)
+        : db.prepare(`SELECT * FROM memories ORDER BY access_count DESC, updated_at DESC ${limitSql}`).all(...limitParam);
       return mapRowsToEntries(rows);
     }
     const search = buildContextSearchParams(terms);
@@ -107,14 +109,14 @@ export function recallDocumentContexts(query: string, limit = 8, projectRoot?: s
         SELECT * FROM memories
         WHERE context LIKE ? AND (${search.clauses})
         ORDER BY access_count DESC, updated_at DESC
-        LIMIT ?
-      `).all(projectLike, ...search.params, limit)
+        ${limitSql}
+      `).all(projectLike, ...search.params, ...limitParam)
       : db.prepare(`
         SELECT * FROM memories
         WHERE ${search.clauses}
         ORDER BY access_count DESC, updated_at DESC
-        LIMIT ?
-      `).all(...search.params, limit);
+        ${limitSql}
+      `).all(...search.params, ...limitParam);
     return mapRowsToEntries(rows);
   } finally { db.close(); }
 }
@@ -132,7 +134,7 @@ function ensureMemorySchema(db: Database.Database) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS memories (
       id TEXT PRIMARY KEY,
-      type TEXT NOT NULL CHECK(type IN ('project_fact', 'user_preference', 'feedback', 'pattern')),
+      type TEXT NOT NULL CHECK(type IN ('user_preference', 'feedback', 'pattern')),
       content TEXT NOT NULL,
       context TEXT NOT NULL DEFAULT '',
       access_count INTEGER NOT NULL DEFAULT 0,
@@ -142,7 +144,7 @@ function ensureMemorySchema(db: Database.Database) {
   `);
 }
 
-export function rememberDocumentContext(type: 'project_fact' | 'user_preference' | 'feedback' | 'pattern', content: string, context = ''): string | null {
+export function rememberDocumentContext(type: 'user_preference' | 'feedback' | 'pattern', content: string, context = ''): string | null {
   const normalized = content.replace(/\s+/gu, ' ').trim();
   if (!normalized) return null;
   const dbPath = path.join(os.homedir(), '.customize-agent', 'memory.db');

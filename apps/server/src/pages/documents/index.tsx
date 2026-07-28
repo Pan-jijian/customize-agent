@@ -675,7 +675,7 @@ export default function DocumentsPage() {
       const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
       const ext = fmt === 'markdown' ? 'md' : fmt;
       if (!draft.exportGate.passed) message.warning('导出门禁存在风险项，已允许导出，请下载后人工复核。');
-      const payload = { documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, useClientMarkdown: true };
+      const payload = { documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, useClientMarkdown: true, projectRoot: draft.projectRoot || currentProjectRoot || undefined };
       const blob = await exportDocument(payload);
       dl(blob, `${draft.title}.${ext}`, mimes[fmt]);
     } catch (e) { message.error(e instanceof Error ? e.message : t('common.error')); } finally { setExporting(null); }
@@ -839,7 +839,7 @@ export default function DocumentsPage() {
                     </div>
                     {item.partialChapters && item.partialChapters.length > 0 && (
                       <div style={{ marginTop: 3, fontSize: 11, color: 'var(--colorTextSecondary)' }}>
-                        已完成章节 {item.partialChapters.filter(chapter => chapter.status === 'completed' || chapter.status === 'cached').length}/{item.partialChapters.length} · {item.partialChapters.reduce((sum, chapter) => sum + chapter.chars, 0).toLocaleString()} 字
+                        已完成章节 {item.partialChapters.filter(chapter => chapter.status === 'completed').length}/{item.partialChapters.length} · {item.partialChapters.reduce((sum, chapter) => sum + chapter.chars, 0).toLocaleString()} 字
                       </div>
                     )}
                     {(item.status === 'warning' || item.status === 'failed' || item.status === 'aborted') && (
@@ -859,7 +859,7 @@ export default function DocumentsPage() {
                         <Button size="small" danger onClick={(e) => e.stopPropagation()}>中止</Button>
                       </Popconfirm>
                     )}
-                    {(item.status === 'failed' || item.status === 'aborted') && (
+                    {((item.status === 'failed' || item.status === 'aborted') || (item.status === 'warning' && Boolean(item.checkpointChapters?.length) && /继续生成|重新生成|中断|卡住|未完成/u.test(item.error || item.warningIssues?.join('；') || ''))) && (
                       <Button size="small" onClick={(e) => { e.stopPropagation(); void handleResumeDraft(item); }}>继续</Button>
                     )}
                     <Button size="small" type="primary" icon={isDraftGenerating(item.status) ? <SyncOutlined spin /> : <PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void openDrawerForEditor(item); }}>打开</Button>
@@ -903,21 +903,20 @@ export default function DocumentsPage() {
           )}
 
           {drawerMode === 'workflow' && workflowRecord?.partialChapters && workflowRecord.partialChapters.length > 0 && (
-            <Card size="small" title="章节进度" extra={<Tag color="blue">{workflowRecord.partialChapters.filter(chapter => chapter.status === 'completed' || chapter.status === 'cached').length}/{workflowRecord.partialChapters.length}</Tag>}>
+            <Card size="small" title="章节进度" extra={<Tag color="blue">{workflowRecord.partialChapters.filter(chapter => chapter.status === 'completed').length}/{workflowRecord.partialChapters.length}</Tag>}>
               <VerticalStack gap={6} style={{ width: '100%' }}>
-                {workflowRecord.partialChapters.slice(0, 12).map(chapter => (
+                {workflowRecord.partialChapters.map(chapter => (
                   <div key={chapter.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12 }}>
                     <Text ellipsis style={{ maxWidth: 480 }}>{chapter.title}</Text>
-                    <Space size={6}><Tag color={chapter.status === 'cached' ? 'purple' : chapter.status === 'failed' ? 'error' : 'success'}>{chapter.status === 'cached' ? '缓存' : chapter.status === 'failed' ? '失败' : '完成'}</Tag><Text type="secondary">{chapter.chars.toLocaleString()} 字</Text></Space>
+                    <Space size={6}><Tag color={chapter.status === 'failed' ? 'error' : 'success'}>{chapter.status === 'failed' ? '失败' : '完成'}</Tag><Text type="secondary">{chapter.chars.toLocaleString()} 字</Text></Space>
                   </div>
                 ))}
-                {workflowRecord.partialChapters.length > 12 && <Text type="secondary" style={{ fontSize: 12 }}>其余 {workflowRecord.partialChapters.length - 12} 个章节将在完成后汇总展示</Text>}
               </VerticalStack>
             </Card>
           )}
 
           {drawerMode === 'workflow' && workflowRecord?.reviewMetadata?.diagnostics && (
-            <NoticeBox type="info" title="后台自动优化">{`策略：${workflowRecord.reviewMetadata.diagnostics.strategy.mode}；LLM 调用 ${workflowRecord.reviewMetadata.diagnostics.llm.calls} 次；缓存命中 ${workflowRecord.reviewMetadata.diagnostics.cache.chapterHits} 章/${workflowRecord.reviewMetadata.diagnostics.cache.sectionHits || 0} 小节；噪声过滤 ${workflowRecord.reviewMetadata.diagnostics.evidence?.filteredNoise || 0} 条；质量门禁 阻断${workflowRecord.reviewMetadata.diagnostics.quality?.blockingCount || 0}/重要${workflowRecord.reviewMetadata.diagnostics.quality?.importantCount || 0}/轻微${workflowRecord.reviewMetadata.diagnostics.quality?.minorCount || 0}；自动限流调整 ${workflowRecord.reviewMetadata.diagnostics.llm.limitAdjustments} 次。审查与诊断信息仅用于系统修复，不会写入正文或导出文件。`}</NoticeBox>
+            <NoticeBox type="info" title="后台自动优化">{`策略：${workflowRecord.reviewMetadata.diagnostics.strategy.mode}；LLM 调用 ${workflowRecord.reviewMetadata.diagnostics.llm.calls} 次；噪声过滤 ${workflowRecord.reviewMetadata.diagnostics.evidence?.filteredNoise || 0} 条；质量门禁 阻断${workflowRecord.reviewMetadata.diagnostics.quality?.blockingCount || 0}/重要${workflowRecord.reviewMetadata.diagnostics.quality?.importantCount || 0}/轻微${workflowRecord.reviewMetadata.diagnostics.quality?.minorCount || 0}；自动限流调整 ${workflowRecord.reviewMetadata.diagnostics.llm.limitAdjustments} 次。审查与诊断信息仅用于系统修复，不会写入正文或导出文件。`}</NoticeBox>
           )}
 
           {/* 工作流模式：步骤出现前的加载动画 */}

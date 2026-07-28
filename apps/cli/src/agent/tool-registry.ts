@@ -208,22 +208,16 @@ function kbInventoryMarkdown(files: Array<{ relativePath: string; category: stri
   return lines.join('\n');
 }
 
-const CONSTRUCTION_OUTLINE = [
-  ['basis', '第一章 编制依据', ['招标文件 编制依据 技术规范 标准 图纸 合同', '规范 标准 图纸 招标文件']],
-  ['overview', '第二章 工程概况', ['工程名称 工程地点 建设单位 工程规模 建筑面积 结构类型', '工程概况 招标范围 项目规模']],
-  ['deployment', '第三章 施工部署', ['施工部署 项目组织机构 施工段划分 总体安排', '施工组织 施工顺序 施工流水']],
-  ['schedule', '第四章 施工进度计划及保证措施', ['工期要求 开工 竣工 进度计划 节点工期', '工期 进度 保证措施']],
-  ['preparation', '第五章 施工准备', ['施工准备 技术准备 现场准备 材料准备 机械准备', '临设 水电 进场 准备']],
-  ['methods', '第六章 主要分部分项工程施工方案', ['土方 基础 主体 砌体 装饰 安装 道路 管线 主要施工方法', '分部分项 施工工艺 技术措施']],
-  ['quality', '第七章 质量保证体系及措施', ['质量目标 质量标准 验收规范 质量保证措施', '质量管理 检验 试验']],
-  ['safety', '第八章 安全生产管理体系及措施', ['安全目标 安全文明施工 安全管理 危险源 应急预案', '安全生产 风险 防护']],
-  ['civilized', '第九章 文明施工及环境保护措施', ['文明施工 环境保护 扬尘 噪声 污水 固废', '绿色施工 环保 控制措施']],
-  ['resources', '第十章 劳动力、材料、机械设备投入计划', ['劳动力计划 材料计划 机械设备计划 主要设备 表格', '资源投入 机械 劳动力 材料']],
-  ['layout', '第十一章 施工总平面布置', ['施工平面布置 临时设施 道路 水电 堆场', '总平面布置 临时用地']],
-  ['season', '第十二章 季节性施工措施', ['雨季施工 冬季施工 高温施工 台风 防汛', '季节性施工 措施']],
-  ['emergency', '第十三章 应急预案', ['应急预案 风险 应急组织 救援措施', '事故 应急 响应']],
-  ['appendix', '第十四章 附表及附件', ['附表 计划表 机械表 劳动力表 进度表', '附件 表格 清单 图纸']],
-] as const;
+type KnowledgeDocumentChapter = { id: string; title: string; queries: string[] };
+
+function normalizeChapterTitle(title: string) {
+  return title.replace(/^\s*(?:#{1,6}|[-*+]|\d+[、.)）．]|第[一二三四五六七八九十百千万\d]+[章节])\s*/u, '').trim();
+}
+
+function requirementTitle(requirement: string) {
+  const explicit = requirement.match(/(?:标题|题目|名称)\s*[：:]\s*([^\n]+)/u)?.[1]?.trim();
+  return explicit ? normalizeChapterTitle(explicit).slice(0, 80) || '知识库文档' : '知识库文档';
+}
 
 function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
   const seen = new Set<string>();
@@ -239,26 +233,32 @@ function sourceLine(item: { filePath: string; score: number; content: string }):
   return `- ${item.filePath}（score=${item.score.toFixed(3)}）：${item.content.replace(/\s+/gu, ' ').slice(0, 220)}`;
 }
 
-function outlineFromRequirement(requirement: string) {
+function outlineFromRequirement(requirement: string): KnowledgeDocumentChapter[] {
   const match = requirement.match(/<OUTLINE>([\s\S]*?)<\/OUTLINE>/iu);
   const block = match?.[1] || '';
-  if (!block) return [] as Array<readonly [string, string, readonly string[]]>;
+  if (!block) return [];
   return block.split(/\r?\n/u)
-    .map(line => line.trim().replace(/^[-*+\d.、）)\s]+/u, '').trim())
+    .map(line => normalizeChapterTitle(line.trim().replace(/^[-*+\d.、）)\s]+/u, '').trim()))
     .filter(Boolean)
-    .map((title, index) => [`user-outline-${index + 1}`, title, [title]] as const);
+    .map((title, index) => ({ id: `user-outline-${index + 1}`, title, queries: [title] }));
 }
 
-async function generateConstructionDesignMarkdown(args: { requirement: string; projectRoot: string; manager: MultiProjectManager; provider?: ILLMProvider; maxEvidencePerChapter: number }): Promise<string> {
+function planKnowledgeDocumentChapters(args: { requirement: string }): { title: string; chapters: KnowledgeDocumentChapter[] } {
+  const outline = outlineFromRequirement(args.requirement);
+  const title = requirementTitle(args.requirement);
+  if (outline.length > 0) return { title, chapters: outline };
+  return { title, chapters: [{ id: 'content', title: '正文', queries: [args.requirement].filter(Boolean) }] };
+}
+
+async function generateKnowledgeDocumentMarkdown(args: { requirement: string; projectRoot: string; manager: MultiProjectManager; provider?: ILLMProvider; maxEvidencePerChapter: number }): Promise<string> {
   const project = await args.manager.getProject(args.projectRoot);
   const inventory = kbInventoryMarkdown(project.listFiles());
   const chapterBlocks: string[] = [];
   const usedSources = new Map<string, number>();
   const missing: string[] = [];
-  const outline = outlineFromRequirement(args.requirement);
-  const chapters = outline.length > 0 ? outline : CONSTRUCTION_OUTLINE;
+  const plan = planKnowledgeDocumentChapters({ requirement: args.requirement });
 
-  for (const [, title, queries] of chapters) {
+  for (const { title, queries } of plan.chapters) {
     const evidence = [] as Array<{ filePath: string; score: number; content: string }>;
     for (const query of queries) {
       const result = await args.manager.search(args.projectRoot, query, { scope: 'project', limit: args.maxEvidencePerChapter });
@@ -266,23 +266,23 @@ async function generateConstructionDesignMarkdown(args: { requirement: string; p
     }
     const selected = uniqueBy(evidence.sort((a, b) => b.score - a.score), item => `${item.filePath}:${item.content.slice(0, 80)}`).slice(0, args.maxEvidencePerChapter);
     for (const item of selected) usedSources.set(item.filePath, (usedSources.get(item.filePath) ?? 0) + 1);
-    if (selected.length === 0) missing.push(`${title}：未检索到明确资料依据`);
+    if (selected.length === 0) missing.push(`${title}：未检索到明确材料依据`);
 
     let content: string;
     if (args.provider && selected.length > 0) {
       const response = await args.provider.chat([
-        { role: 'system', content: '你是施工组织设计编制专家。只能根据用户提供的知识库证据编写，不得编造具体工程数据；缺失内容必须写“资料未提供，需进一步确认”。输出 Markdown。' },
+        { role: 'system', content: '你是通用专业文档写作助手。只能根据用户提供的知识库证据编写，不得编造具体数据；缺失内容必须写“材料未提供，需进一步确认”。输出 Markdown。' },
         { role: 'user', content: `用户要求：${args.requirement}\n\n章节：${title}\n\n证据：\n${selected.map(sourceLine).join('\n')}\n\n请编写本章内容，关键数据后标注来源文件名。` },
       ], { temperature: 0.2, maxTokens: 2400 });
       content = response.content.trim();
     } else {
-      content = [`## ${title}`, '', selected.length > 0 ? '本章依据知识库检索到的资料整理如下：' : '资料未提供，需进一步确认。', '', ...selected.map(sourceLine)].join('\n');
+      content = [`## ${title}`, '', selected.length > 0 ? '本章依据知识库检索到的材料整理如下：' : '材料未提供，需进一步确认。', '', ...selected.map(sourceLine)].join('\n');
     }
     chapterBlocks.push(content.startsWith('## ') ? content : `## ${title}\n\n${content}`);
   }
 
   return [
-    `# 施工组织设计`,
+    `# ${plan.title}`,
     '',
     `> 生成要求：${args.requirement}`,
     '',
@@ -298,9 +298,9 @@ async function generateConstructionDesignMarkdown(args: { requirement: string; p
     '|---|---:|',
     ...[...usedSources.entries()].sort((a, b) => b[1] - a[1]).map(([file, count]) => `| ${file} | ${count} |`),
     '',
-    '## 资料缺失项与需确认事项',
+    '## 材料缺失项与需确认事项',
     '',
-    ...(missing.length > 0 ? missing.map(item => `- ${item}`) : ['- 暂未发现章节级资料完全缺失项；仍建议人工复核工期、质量目标、清单工程量、图纸说明等关键数据。']),
+    ...(missing.length > 0 ? missing.map(item => `- ${item}`) : ['- 暂未发现章节级材料完全缺失项；仍建议人工复核关键数据和重要结论。']),
   ].join('\n');
 }
 
@@ -380,7 +380,7 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
       });
       if (result.results.length === 0) return `No knowledge base results for "${String(args.query)}".`;
       const scope = args.scope === 'project' || args.scope === 'global' || args.scope === 'all' ? args.scope : 'project';
-      const warning = scope === 'project' ? '' : '注意：以下结果包含全局/跨项目资料，不能直接作为当前项目事实。\n\n';
+      const warning = scope === 'project' ? '' : '注意：以下结果包含全局/跨知识库材料，不能直接作为当前文档事实。\n\n';
       return warning + result.results.map((item, index) => [
         `## KB-${index + 1}: ${item.filePath}`,
         `scope=${item.scope}, score=${item.score.toFixed(3)}, collection=${item.collection}, source=${item.source ?? 'unknown'}`,
@@ -432,14 +432,14 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
     }
   });
 
-  reg(registry, 'generate_construction_organization_design', 'Generate a construction organization design Markdown draft from the local knowledge base using inventory, chapter-level retrieval, source citations, and missing-item reporting. Export to PDF separately with export_pdf after reviewing the Markdown.', {
-    requirement: { type: 'string', description: 'User requirement and project generation instruction' },
+  reg(registry, 'generate_knowledge_document', 'Generate a Markdown draft from the local knowledge base using inventory, dynamic chapter planning, chapter-level retrieval, source citations, and missing-item reporting. Export to PDF separately after reviewing the Markdown.', {
+    requirement: { type: 'string', description: 'User requirement and document generation instruction' },
     output: { type: 'string', description: 'Markdown output file path' },
     maxEvidencePerChapter: { type: 'number', description: 'Evidence count per chapter. Default: 12' },
   }, ['requirement', 'output'], ['search_symbol', 'write_code'], true, async args => {
     const manager = new MultiProjectManager(undefined, provider as LLMSearchProvider);
     try {
-      const markdown = await generateConstructionDesignMarkdown({
+      const markdown = await generateKnowledgeDocumentMarkdown({
         requirement: String(args.requirement),
         projectRoot: knowledgeRoot,
         manager,
@@ -447,7 +447,7 @@ export function buildRegistry(options: BuildRegistryOptions): ToolRegistry {
         maxEvidencePerChapter: typeof args.maxEvidencePerChapter === 'number' ? Math.max(5, Math.min(30, args.maxEvidencePerChapter)) : 12,
       });
       await toolkit.writeFileWithBackup(String(args.output), markdown);
-      return `Construction organization design draft exported: ${String(args.output)}\n\n${markdown.slice(0, 4000)}`;
+      return `Knowledge document draft exported: ${String(args.output)}\n\n${markdown.slice(0, 4000)}`;
     } finally {
       await manager.shutdown();
     }

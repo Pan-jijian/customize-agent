@@ -1,5 +1,23 @@
 # @customize-agent/memory
 
+## 3.0.9
+
+### Patch Changes
+
+- Improve document generation quality boundaries, diagnostics, and release packaging.
+
+## 3.0.8
+
+### Patch Changes
+
+- Improve generated construction document quality gates, resume handling, export reliability, and knowledge/memory workflow stability.
+
+## 3.0.6
+
+### Patch Changes
+
+- 发布文档生成质量、结构归一、导出稳定性和长期记忆类型清理相关正式版本。
+
 ## 3.0.4
 
 ### Patch Changes

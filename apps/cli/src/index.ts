@@ -14,6 +14,7 @@ import { Repl } from './repl/repl.js';
 import { t, renderMarkdown } from './tui/renderer.js';
 import { type Message } from '@customize-agent/types';
 import { I18nManager } from './i18n/manager.js';
+import type { Server as HttpServer } from 'http';
 
 function resolveUserProjectRoot(): string {
   return resolve(process.env.CUSTOMIZE_PROJECT_ROOT ?? process.env.INIT_CWD ?? process.env.PWD ?? process.cwd());
@@ -33,8 +34,15 @@ const pkg = loadPackageJson();
 
 // 追踪所有由 CLI 启动的子进程（dashboard server），退出时统一清理
 const spawnedPids = new Set<number>();
+const dashboardAliasServers = new Set<HttpServer>();
+let dashboardCleanupInProgress = false;
 
 function cleanupChildProcesses() {
+  dashboardCleanupInProgress = true;
+  for (const server of dashboardAliasServers) {
+    try { server.close(); } catch { /* 已关闭 */ }
+  }
+  dashboardAliasServers.clear();
   for (const pid of spawnedPids) {
     try {
       if (process.platform === 'win32') {
@@ -169,6 +177,34 @@ async function resolveDashboardPort(preferredPort: number): Promise<number> {
   return preferredPort;
 }
 
+async function startDashboardAliasPort(aliasPort: number, targetPort: number): Promise<void> {
+  if (aliasPort === targetPort) return;
+  if (!(await portIsAvailable(aliasPort))) return;
+  const { createServer, request } = await import('http');
+  const server = createServer((req, res) => {
+    const upstream = request({
+      hostname: '127.0.0.1',
+      port: targetPort,
+      path: req.url || '/',
+      method: req.method,
+      headers: { ...req.headers, host: `127.0.0.1:${targetPort}` },
+    }, upstreamRes => {
+      res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+      upstreamRes.pipe(res);
+    });
+    upstream.on('error', () => {
+      res.statusCode = 502;
+      res.end('Dashboard is not available');
+    });
+    req.pipe(upstream);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(aliasPort, resolve);
+  });
+  dashboardAliasServers.add(server);
+}
+
 type DashboardStartResult =
   | { ready: true; port: number; url: string; logPath: string }
   | { ready: false; port: number; logPath: string; error?: string };
@@ -193,21 +229,29 @@ async function startDashboardInBackground(port: number): Promise<DashboardStartR
       if (code !== 0) throw new Error('dashboard build artifacts are incomplete');
     }
     const nextBin = require.resolve('next/dist/bin/next', { paths: [serverRoot] });
-    const logFile = await dashboardLogFile(port, 'replace');
-    logPath = logFile.logPath;
-    const child = spawn(process.execPath, [nextBin, 'start', '-p', String(port), '-H', '127.0.0.1'], {
-      cwd: serverRoot,
-      detached: false,
-      stdio: ['ignore', logFile.fd, logFile.fd],
-      env: {
-        ...process.env,
-        NODE_ENV: 'production',
-        CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT,
-      },
-    });
-    if (child.pid) spawnedPids.add(child.pid);
-    child.on('exit', () => { if (child.pid) spawnedPids.delete(child.pid); });
-    closeSync(logFile.fd);
+    const spawnDashboard = async (mode: 'append' | 'replace') => {
+      const logFile = await dashboardLogFile(port, mode);
+      logPath = logFile.logPath;
+      const child = spawn(process.execPath, [nextBin, 'start', '-p', String(port), '-H', '127.0.0.1'], {
+        cwd: serverRoot,
+        detached: false,
+        stdio: ['ignore', logFile.fd, logFile.fd],
+        env: {
+          ...process.env,
+          NODE_ENV: 'production',
+          CUSTOMIZE_PROJECT_ROOT: PROJECT_ROOT,
+        },
+      });
+      if (child.pid) spawnedPids.add(child.pid);
+      child.on('exit', () => {
+        if (child.pid) spawnedPids.delete(child.pid);
+        if (dashboardCleanupInProgress) return;
+        setTimeout(() => { void spawnDashboard('append'); }, 1000);
+      });
+      closeSync(logFile.fd);
+      return child;
+    };
+    await spawnDashboard('replace');
     const timeoutMs = Number(process.env.CUSTOMIZE_DASHBOARD_START_TIMEOUT_MS || 15000);
     if (await waitForDashboard(port, timeoutMs)) {
       return { ready: true, port, url: `http://localhost:${port}/overview`, logPath };
@@ -276,11 +320,13 @@ program.action(async () => {
   }
 
   registerCleanup();
-  const dashboardPort = await resolveDashboardPort(Number(process.env.CUSTOMIZE_DASHBOARD_PORT || 17321));
+  const preferredDashboardPort = Number(process.env.CUSTOMIZE_DASHBOARD_PORT || 17321);
+  const dashboardPort = await resolveDashboardPort(preferredDashboardPort);
   console.log(`正在启动 Web 控制台: http://localhost:${dashboardPort}/overview`);
   const dashboard = await startDashboardInBackground(dashboardPort);
   const dashboardUrl: string | undefined = dashboard.ready ? dashboard.url : undefined;
   if (dashboard.ready) {
+    await startDashboardAliasPort(preferredDashboardPort + 1, dashboard.port).catch(() => undefined);
     console.log(`Web 控制台已启动: ${dashboard.url}`);
   } else {
     console.warn(`Web 控制台未启动，CLI 将继续启动。日志: ${dashboard.logPath}${dashboard.error ? `；原因: ${dashboard.error}` : ''}`);

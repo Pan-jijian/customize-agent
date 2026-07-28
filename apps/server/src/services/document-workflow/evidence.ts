@@ -8,8 +8,8 @@ export function readableSourceLabel(item: Pick<DocumentEvidence, 'roleId' | 'pro
   const role = item.processingType === 'drawing' || item.roleId?.includes('drawing') ? '视觉资料'
     : item.processingType === 'table' || item.roleId?.includes('bill') ? '表格资料'
       : item.processingType === 'rule' || item.roleId?.includes('tender') ? '规则资料'
-        : '项目资料';
-  return `${role}片段${index + 1}${item.sectionTitle ? `（${item.sectionTitle.replace(FILE_NAME_RE, '').slice(0, 40)}）` : ''}`;
+        : '文本资料';
+  return `${role}片段${index + 1}${item.sectionTitle ? `（${item.sectionTitle.replace(FILE_NAME_RE, '')}）` : ''}`;
 }
 
 export function cleanEvidenceText(content: string) {
@@ -49,12 +49,12 @@ export function sanitizeEvidenceContent(filePath: string, content: string) {
     .filter(line => !/^第\s*\d+\s*页\s*(?:共\s*\d+\s*页)?$/u.test(line))
     .join('\n');
   const quality = evidenceQualityScore(cleaned);
-  if (cleaned.length > 20 && quality.shouldUse) return cleaned.slice(0, 4000);
-  if (cleaned.length > 80 && quality.noiseScore < 0.9) return cleaned.slice(0, 1600);
+  if (cleaned.length > 20 && quality.shouldUse) return cleaned;
+  if (cleaned.length > 80 && quality.noiseScore < 0.9) return cleaned;
   if (['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.webp', '.dwg'].includes(ext)) {
     return `该资料为${ext.replace('.', '').toUpperCase()}格式附件，仅作为内部事实提取依据；正式正文不得引用文件名。`;
   }
-  return cleaned.slice(0, 1200);
+  return cleaned;
 }
 
 function evidenceDedupeKey(item: DocumentEvidence): string {
@@ -62,7 +62,7 @@ function evidenceDedupeKey(item: DocumentEvidence): string {
   return `${item.filePath}:${item.sectionTitle || ''}:${createHash('sha1').update(normalized).digest('hex')}`;
 }
 
-export function uniqueEvidence(items: DocumentEvidence[], limit: number, diagnostics?: DocumentGenerationDiagnostics): DocumentEvidence[] {
+export function uniqueEvidence(items: DocumentEvidence[], limit?: number, diagnostics?: DocumentGenerationDiagnostics): DocumentEvidence[] {
   const seen = new Set<string>();
   const scored = items.map(item => {
     const content = sanitizeEvidenceContent(item.filePath, item.content);
@@ -70,15 +70,16 @@ export function uniqueEvidence(items: DocumentEvidence[], limit: number, diagnos
     return { item: { ...item, content, score: item.score * (1 + quality.factDensity) * (1 - quality.noiseScore * 0.45) }, quality };
   });
   const usable = scored.filter(entry => entry.quality.shouldUse || /附件，仅作为内部事实提取依据/u.test(entry.item.content));
-  const selected = (usable.length >= Math.min(3, items.length) ? usable : scored)
+  const resolvedLimit = Number.isFinite(limit) && limit! > 0 ? Math.ceil(limit!) : undefined;
+  const deduped = (usable.length >= Math.min(3, items.length) ? usable : scored)
     .sort((a, b) => b.item.score - a.item.score)
     .filter(entry => {
       const key = evidenceDedupeKey(entry.item);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    })
-    .slice(0, limit);
+    });
+  const selected = resolvedLimit ? deduped.slice(0, resolvedLimit) : deduped;
   if (diagnostics) {
     const totalNoise = scored.reduce((sum, entry) => sum + entry.quality.noiseScore, 0);
     const totalDensity = scored.reduce((sum, entry) => sum + entry.quality.factDensity, 0);
@@ -89,6 +90,31 @@ export function uniqueEvidence(items: DocumentEvidence[], limit: number, diagnos
     diagnostics.evidence.avgFactDensity = scored.length ? Number((totalDensity / scored.length).toFixed(3)) : 0;
   }
   return selected.map(entry => entry.item);
+}
+
+export function selectEvidenceByBudget(items: DocumentEvidence[], options: { maxItems?: number; maxChars?: number; preservePinned?: boolean } = {}, diagnostics?: DocumentGenerationDiagnostics): DocumentEvidence[] {
+  const maxItems = Number.isFinite(options.maxItems) && options.maxItems! > 0 ? Math.floor(options.maxItems!) : undefined;
+  const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.floor(options.maxChars!) : undefined;
+  const ranked = uniqueEvidence(items, undefined, diagnostics);
+  const pinned = options.preservePinned ? ranked.filter(item => item.source === 'pinned-evidence' || item.source === 'bound-file') : [];
+  const normal = ranked.filter(item => !pinned.includes(item));
+  const selected: DocumentEvidence[] = [];
+  const perFileCounts = new Map<string, number>();
+  let chars = 0;
+  const tryPush = (item: DocumentEvidence, priority = false) => {
+    if (maxItems && selected.length >= maxItems) return;
+    const fileCount = perFileCounts.get(item.filePath) || 0;
+    if (!priority && fileCount >= 4) return;
+    const content = cleanEvidenceText(item.content);
+    const nextChars = chars + content.length;
+    if (maxChars && selected.length > 0 && nextChars > maxChars) return;
+    selected.push({ ...item, content });
+    perFileCounts.set(item.filePath, fileCount + 1);
+    chars = nextChars;
+  };
+  for (const item of pinned) tryPush(item, true);
+  for (const item of normal) tryPush(item);
+  return selected;
 }
 
 
@@ -118,7 +144,7 @@ function semanticResourceTitle(filePath: string, kind: ResourceEvidence['kind'])
 
 function relatedFactsForResource(item: DocumentEvidence, chapter?: DocumentTemplateChapter) {
   const haystack = `${item.filePath}\n${item.content}`;
-  const candidates = [...(chapter?.requiredFacts || []), '表格数据', '规范要求', '项目事实', '附件资料', '视觉资料', '图片资料'];
+  const candidates = [...(chapter?.requiredFacts || []), '表格数据', '规范要求', '基础事实', '附件资料', '视觉资料', '图片资料'];
   return [...new Set(candidates.filter(fact => evidenceMatchesFact(item, fact) || haystack.includes(fact)))];
 }
 
@@ -137,7 +163,7 @@ function emptyEvidenceByKind(): Record<ResourceEvidence['kind'], ResourceEvidenc
 
 /** 构建章节证据包，将原始证据分类为文本片段和结构化资源（图片、表格、文档、地图等） */
 export function buildEvidenceBundle(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[]): EvidenceBundle {
-  const textEvidence = evidence.slice(0, 16);
+  const textEvidence = evidence;
   const resourceMap = new Map<string, ResourceEvidence>();
   for (const item of evidence) {
     const kind = resourceKind(item.filePath, item.processingType);
@@ -165,21 +191,68 @@ export function buildEvidenceBundle(chapter: DocumentTemplateChapter, evidence: 
   const byKind = emptyEvidenceByKind();
   for (const resource of resources) byKind[resource.kind].push(resource);
   const summary = [
-    `内部资料包：文本片段 ${textEvidence.length} 条、结构化资料 ${resources.length} 个。`,
-    `资料类型分布：文本 ${byKind.text.length}、文档 ${byKind.document.length}、表格/数据 ${byKind.spreadsheet.length + byKind.table.length}、图片 ${byKind.image.length}、视觉/地图 ${byKind.map.length}、其他 ${byKind.attachment.length}。`,
-    '正文必须只写资料中的事实、参数、数量、做法和控制措施，不得出现文件名、来源清单或后台证据描述。',
+    `绑定材料包：文本片段 ${textEvidence.length} 条、结构化材料 ${resources.length} 个。`,
+    `材料类型分布：文本 ${byKind.text.length}、文档 ${byKind.document.length}、表格/数据 ${byKind.spreadsheet.length + byKind.table.length}、图片 ${byKind.image.length}、视觉/地图 ${byKind.map.length}、其他 ${byKind.attachment.length}。`,
+    '正文必须只写材料中的事实、参数、数量、做法和要求，不得出现文件名、来源清单或后台证据描述。',
   ].filter(Boolean).join('\n');
   return { chapterId: chapter.id, textEvidence, resources, byKind, summary };
 }
 
-export function evidenceBundlePrompt(bundle: EvidenceBundle) {
-  const resourceLines = bundle.resources.slice(0, 20).map((item, index) => [
+export interface EvidencePromptOptions {
+  maxChars?: number;
+}
+
+export function evidencePromptBudgetForTarget(targetWords?: number, floorChars = 6000, ceilingChars = 18000) {
+  const words = Number.isFinite(targetWords) && targetWords! > 0 ? Math.ceil(targetWords!) : 1200;
+  const dynamic = Math.ceil(words * 5.5);
+  return Math.max(floorChars, Math.min(ceilingChars, dynamic));
+}
+
+function appendWithinBudget(parts: string[], next: string, state: { chars: number; omitted: number }, maxChars?: number) {
+  const normalized = next.trim();
+  if (!normalized) return;
+  if (!Number.isFinite(maxChars) || !maxChars || state.chars + normalized.length <= maxChars) {
+    parts.push(normalized);
+    state.chars += normalized.length;
+    return;
+  }
+  state.omitted += 1;
+}
+
+function selectEvidenceForPrompt<T extends { filePath: string; score: number }>(items: T[], maxChars: number | undefined, render: (item: T, index: number) => string) {
+  const state = { chars: 0, omitted: 0 };
+  const selected: string[] = [];
+  const selectedItems = new Set<T>();
+  const byFile = new Set<string>();
+  const ranked = [...items].sort((a, b) => b.score - a.score);
+  for (const item of ranked) {
+    if (byFile.has(item.filePath)) continue;
+    const before = selected.length;
+    appendWithinBudget(selected, render(item, selected.length), state, maxChars);
+    if (selected.length > before) {
+      byFile.add(item.filePath);
+      selectedItems.add(item);
+    }
+  }
+  for (const item of ranked) {
+    if (selectedItems.has(item)) continue;
+    appendWithinBudget(selected, render(item, selected.length), state, maxChars);
+  }
+  return { lines: selected, omitted: state.omitted };
+}
+
+export function evidenceBundlePrompt(bundle: EvidenceBundle, options: EvidencePromptOptions = {}) {
+  const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.ceil(options.maxChars!) : undefined;
+  const resourcePrompt = selectEvidenceForPrompt(bundle.resources, maxChars ? Math.floor(maxChars * 0.35) : undefined, (item, index) => [
     `- 资料：${readableSourceLabel(item, index)}`,
     `  资料类型：${item.kind}`,
     `  正文用途：${item.contentUse}`,
     item.relatedFacts.length ? `  可用事实方向：${item.relatedFacts.join('、')}` : '',
     item.snippets.length ? `  可用内容：${item.snippets.map(cleanEvidenceText).filter(Boolean).join(' / ')}` : '',
-  ].filter(Boolean).join('\n')).join('\n');
-  const textLines = bundle.textEvidence.map((item, index) => `${readableSourceLabel(item, index)}\n类型：${item.processingType || 'reference'}\n章节/片段：${item.sectionTitle?.replace(FILE_NAME_RE, '') || '资料片段'}\n内容：${cleanEvidenceText(item.content).replace(/\s+/gu, ' ').slice(0, 900)}`).join('\n\n---\n\n');
-  return [bundle.summary, resourceLines ? `结构化资料：\n${resourceLines}` : '', textLines ? `文本/附件片段：\n${textLines}` : ''].filter(Boolean).join('\n\n');
+  ].filter(Boolean).join('\n'));
+  const textPrompt = selectEvidenceForPrompt(bundle.textEvidence, maxChars ? Math.floor(maxChars * 0.65) : undefined, (item, index) => `${readableSourceLabel(item, index)}\n类型：${item.processingType || 'reference'}\n章节/片段：${item.sectionTitle?.replace(FILE_NAME_RE, '') || '资料片段'}\n内容：${cleanEvidenceText(item.content).replace(/\s+/gu, ' ')}`);
+  const omittedNote = resourcePrompt.omitted + textPrompt.omitted > 0
+    ? `提示：完整证据池仍保留 ${bundle.textEvidence.length} 条文本片段、${bundle.resources.length} 个结构化材料；为控制单次模型输入，本次只发送预算内高相关且覆盖多来源的证据，未发送片段将在章节/小节相关检索和质量校验中继续参与。`
+    : '';
+  return [bundle.summary, omittedNote, resourcePrompt.lines.length ? `结构化资料：\n${resourcePrompt.lines.join('\n')}` : '', textPrompt.lines.length ? `文本/附件片段：\n${textPrompt.lines.join('\n\n---\n\n')}` : ''].filter(Boolean).join('\n\n');
 }

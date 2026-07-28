@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Alert, App, Button, Card, Col, Drawer, Empty, Form, Input, Popconfirm, Row, Select, Space, Tabs, Tag, Typography } from 'antd';
 import {
   DeleteOutlined, EditOutlined, PlusOutlined, FileTextOutlined, FormOutlined,
-  AuditOutlined, ProfileOutlined, TableOutlined, PictureOutlined, LinkOutlined,
+  AuditOutlined, TableOutlined, PictureOutlined, LinkOutlined,
   SearchOutlined, EyeOutlined, CheckCircleOutlined, AlignLeftOutlined,
   DownOutlined, UpOutlined, ImportOutlined, ExportOutlined,
 } from '@ant-design/icons';
@@ -12,16 +12,16 @@ import { useAppTranslations } from '@/components/Layout';
 const { Paragraph } = Typography;
 
 const FILE_TYPE_ICONS: Record<string, ReactNode> = {
-  rule: <AuditOutlined />, project_fact: <ProfileOutlined />, table: <TableOutlined />,
+  rule: <AuditOutlined />, table: <TableOutlined />,
   drawing: <PictureOutlined />, specification: <FileTextOutlined />, reference: <LinkOutlined />,
 };
 const PROMPT_TYPE_ICONS: Record<string, ReactNode> = {
   fact_extraction: <SearchOutlined />, chapter_generation: <EditOutlined />, llm_review: <EyeOutlined />,
   validation: <CheckCircleOutlined />, formatting: <AlignLeftOutlined />, reference: <LinkOutlined />,
 };
-const FILE_TYPE_COLORS: Record<string, string> = { rule: '#fa8c16', project_fact: '#1677ff', table: '#52c41a', drawing: '#722ed1', specification: '#eb2f96', reference: '#13c2c2' };
+const FILE_TYPE_COLORS: Record<string, string> = { rule: '#fa8c16', table: '#52c41a', drawing: '#722ed1', specification: '#eb2f96', reference: '#13c2c2' };
 const PROMPT_TYPE_COLORS: Record<string, string> = { fact_extraction: '#fa8c16', chapter_generation: '#1677ff', llm_review: '#722ed1', validation: '#52c41a', formatting: '#eb2f96', reference: '#13c2c2' };
-const FILE_TYPE_LABELS: Record<string, string> = { rule: 'roles.ruleFile', project_fact: 'roles.projectFactFile', table: 'roles.tableFile', drawing: 'roles.drawingFile', specification: 'roles.specificationFile', reference: 'roles.reference' };
+const FILE_TYPE_LABELS: Record<string, string> = { rule: 'roles.ruleFile', table: 'roles.tableFile', drawing: 'roles.drawingFile', specification: 'roles.specificationFile', reference: 'roles.reference' };
 const PROMPT_TYPE_LABELS: Record<string, string> = { fact_extraction: 'roles.factExtraction', chapter_generation: 'roles.chapterGeneration', llm_review: 'roles.llmReview', validation: 'roles.validation', formatting: 'roles.formatting', reference: 'roles.reference' };
 
 /** 获取角色类型的国际化标签文本 */
@@ -351,7 +351,7 @@ export default function DocumentRolesPage() {
                 <>
                   <Form.Item name="processingType" label={t('roles.processingType')} rules={[{ required: true }]} style={{ marginBottom: 12 }}>
                     <Select options={[
-                      { label: t('roles.ruleFile'), value: 'rule' }, { label: t('roles.projectFactFile'), value: 'project_fact' },
+                      { label: t('roles.ruleFile'), value: 'rule' },
                       { label: t('roles.tableFile'), value: 'table' }, { label: t('roles.drawingFile'), value: 'drawing' },
                       { label: t('roles.specificationFile'), value: 'specification' }, { label: t('roles.reference'), value: 'reference' },
                     ]} />

@@ -1,6 +1,6 @@
 import type { AutoDocumentSpecGateRule, AutoDocumentSpecPackage, GateRuleEvaluator } from '../document-core/autoDocumentSpecTypes';
 import { readEngineeringDocumentConfig } from '../document-validation/engineeringDocumentConfigService';
-import { CHAPTER_HEADING_RE, EXPORT_BLOCKING_ISSUE_RE, EXPORT_GATE_PRECISION_ISSUE_RE, EXPORT_GATE_PROJECT_CONTAMINATION_RE, FALLBACK_GATE_EVALUATORS, FORMAL_PLACEHOLDER_PATTERNS, FORMAL_STYLE_FORBIDDEN_PHRASES, LINE_SPLIT_RE, MARKDOWN_IMAGE_RE, MARKDOWN_SECTION_HEADING_RE, MARKDOWN_TABLE_BLOCK_SPLIT_RE, MARKDOWN_TABLE_DIVIDER_RE, MARKDOWN_TABLE_ROW_RE, MARKDOWN_TOP_HEADING_RE, NON_BLANK_RE, PRECISE_FACT_MIN_TOKEN_COUNT, PRECISE_FACT_MIN_USAGE_RATE, PRECISE_FACT_SOURCE_RE, PRECISE_FACT_TOKEN_LIMIT, PRECISE_FACT_TOKEN_RE, PROJECT_BASIC_INFO_BLOCK_RE, PROJECT_BASIC_INFO_FIELDS, PROJECT_BASIC_INFO_TABLE_RE, PROMPT_EXAMPLE_BLOCK_RE, PROMPT_EXAMPLE_CHECK_LIMIT, PROMPT_EXAMPLE_PROBE_LENGTH, QUALITY_SEVERITY_RULES, SPEC_GATE_RULE_HANDLERS, SPECIFICATION_CONTENT_RE, STRUCTURED_DATA_CONTENT_RE, TOC_BLOCK_RE, TOC_INDENTED_SECTION_LINE_RE, TOC_SECTION_LINE_RE, WHITESPACE_RE } from '../constants';
+import { CHAPTER_HEADING_RE, EXPORT_BLOCKING_ISSUE_RE, EXPORT_GATE_PRECISION_ISSUE_RE, EXPORT_GATE_PROJECT_CONTAMINATION_RE, FALLBACK_GATE_EVALUATORS, FORMAL_PLACEHOLDER_PATTERNS, FORMAL_STYLE_FORBIDDEN_PHRASES, LINE_SPLIT_RE, MARKDOWN_IMAGE_RE, MARKDOWN_SECTION_HEADING_RE, MARKDOWN_TABLE_BLOCK_SPLIT_RE, MARKDOWN_TABLE_DIVIDER_RE, MARKDOWN_TABLE_ROW_RE, MARKDOWN_TOP_HEADING_RE, NON_BLANK_RE, PRECISE_FACT_MIN_TOKEN_COUNT, PRECISE_FACT_MIN_USAGE_RATE, PRECISE_FACT_SOURCE_RE, PRECISE_FACT_TOKEN_RE, DOCUMENT_BASIC_INFO_BLOCK_RE, DOCUMENT_BASIC_INFO_FIELDS, DOCUMENT_BASIC_INFO_TABLE_RE, PROMPT_EXAMPLE_BLOCK_RE, QUALITY_SEVERITY_RULES, SPEC_GATE_RULE_HANDLERS, SPECIFICATION_CONTENT_RE, STRUCTURED_DATA_CONTENT_RE, TOC_BLOCK_RE, TOC_INDENTED_SECTION_LINE_RE, TOC_SECTION_LINE_RE, WHITESPACE_RE } from '../constants';
 import type { QualitySeverity, QualitySeveritySummary, SpecGateRuleContext } from '../types';
 import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentTemplate, ExportGateResult, FileBinding, PromptBinding, ValidationIssue } from './types';
 import { estimateDocumentPages } from './budget';
@@ -61,20 +61,26 @@ export function degenerateContentIssues(markdown: string, chapters: DocumentDraf
       if (sectionIssue) issues.push(sectionIssue);
     }
   }
-  return issues.slice(0, 20);
+  return issues;
+}
+
+function isHardExportBlockingIssue(issue: ValidationIssue) {
+  if (!isExportBlockingIssue(issue)) return false;
+  if (/章节审查|最终质量审查|规划小节正文过短|正文存在空泛占位表达/u.test(issue.message)) return false;
+  return true;
 }
 
 export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[]): ExportGateResult {
   const checklist = [
-    { key: 'no_errors', label: '无阻断级校验错误', passed: !issues.some(issue => issue.level === 'error' && isExportBlockingIssue(issue)) },
-    { key: 'project_facts', label: '项目基础事实齐全', passed: factsModel.project.length > 0 },
+    { key: 'no_errors', label: '无阻断级校验错误', passed: !issues.some(issue => issue.level === 'error' && isHardExportBlockingIssue(issue)) },
+    { key: 'basic_facts', label: '基础事实齐全', passed: factsModel.project.length > 0 },
     { key: 'source_traceability', label: '事实具备来源追踪', passed: [...factsModel.project, ...factsModel.schedule, ...factsModel.quality, ...factsModel.safety].every(fact => Boolean(fact.sourceFile)) },
     { key: 'structured_precision', label: '结构化精确参数已使用', passed: factsModel.preciseFacts.length < PRECISE_FACT_MIN_TOKEN_COUNT || issues.every(issue => !EXPORT_GATE_PRECISION_ISSUE_RE.test(issue.message)) },
     { key: 'chapter_evidence', label: '章节均具备证据', passed: chapters.every(chapter => chapter.evidence.length > 0) },
     { key: 'no_missing_content', label: '无资料未提供章节', passed: chapters.every(chapter => !chapter.content.includes('资料未提供')) },
-    { key: 'no_project_contamination', label: '无项目污染和事实一致性阻断', passed: !issues.some(issue => issue.level === 'error' && EXPORT_GATE_PROJECT_CONTAMINATION_RE.test(issue.message)) },
+    { key: 'no_project_contamination', label: '无项目污染和事实一致性阻断', passed: !issues.some(issue => issue.level === 'error' && EXPORT_GATE_PROJECT_CONTAMINATION_RE.test(issue.message) && isHardExportBlockingIssue(issue)) },
   ];
-  const blockingIssues = issues.filter(issue => issue.level === 'error' && isExportBlockingIssue(issue));
+  const blockingIssues = issues.filter(issue => issue.level === 'error' && isHardExportBlockingIssue(issue));
   return { passed: blockingIssues.length === 0 && checklist.every(item => item.passed), blockingIssues, checklist };
 }
 
@@ -107,29 +113,29 @@ export function issueMessage(rule: AutoDocumentSpecGateRule, detail: string) {
   return `${rule.name}：${detail}`;
 }
 
-export function duplicateProjectBasicInfoIssues(markdown: string): ValidationIssue[] {
+export function duplicateBasicInfoIssues(markdown: string): ValidationIssue[] {
   const chapterMatches = [...markdown.matchAll(CHAPTER_HEADING_RE)];
   const issues: ValidationIssue[] = [];
   for (let index = 1; index < chapterMatches.length; index += 1) {
     const start = chapterMatches[index].index || 0;
     const end = chapterMatches[index + 1]?.index ?? markdown.length;
     const content = markdown.slice(start, end);
-    if (PROJECT_BASIC_INFO_BLOCK_RE.test(content)) {
-      issues.push({ level: 'warning', message: `第 ${index + 1} 章可能重复出现项目基本信息`, suggestion: '如该信息与本章主题无关，建议合并到更合适的概况类章节，避免重复铺陈。' });
+    if (DOCUMENT_BASIC_INFO_BLOCK_RE.test(content)) {
+      issues.push({ level: 'warning', message: `第 ${index + 1} 章可能重复出现基础信息`, suggestion: '如该信息与本章主题无关，建议合并到更合适的概况类章节，避免重复铺陈。' });
     }
   }
   if (chapterMatches.length === 0) return issues;
   const firstStart = chapterMatches[0].index || 0;
   const firstEnd = chapterMatches[1]?.index ?? markdown.length;
   const firstChapter = markdown.slice(firstStart, firstEnd);
-  const tableIndex = firstChapter.search(PROJECT_BASIC_INFO_TABLE_RE);
+  const tableIndex = firstChapter.search(DOCUMENT_BASIC_INFO_TABLE_RE);
   if (tableIndex <= 0) return issues;
   const beforeTable = firstChapter.slice(0, tableIndex).replace(MARKDOWN_SECTION_HEADING_RE, '');
   const repeatedFields: string[] = [];
-  for (const field of PROJECT_BASIC_INFO_FIELDS) {
+  for (const field of DOCUMENT_BASIC_INFO_FIELDS) {
     if (new RegExp(`${field}\\s*[：:]`, 'u').test(beforeTable)) repeatedFields.push(field);
   }
-  if (repeatedFields.length >= 3) issues.push({ level: 'warning', message: `项目基本信息表前重复叙述字段：${repeatedFields.join('、')}`, suggestion: '项目基本信息已表格化时，表格前只保留一句引导语，不要重复逐项叙述项目名称、编号、地点、工期、质量等字段。' });
+  if (repeatedFields.length >= 3) issues.push({ level: 'warning', message: `基础信息表前重复叙述字段：${repeatedFields.join('、')}`, suggestion: '基础信息已表格化时，表格前只保留一句引导语，不要重复逐项叙述名称、编号、范围、周期、质量等字段。' });
   return issues;
 }
 
@@ -145,7 +151,9 @@ export function formalStyleIssues(markdown: string): ValidationIssue[] {
 export function minChapterSectionIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections'>>): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   for (const chapter of chapters) {
-    if ((chapter.sections || []).length < 3) issues.push({ level: 'error', message: `${chapter.title} 二级小节少于 3 个`, suggestion: '请由模型结合章节主题、项目资料和专业写作需要补齐 3-6 个正式二级小节，不得使用代码默认小节。' });
+    const sections = (chapter.sections || []).filter(Boolean);
+    const duplicates = sections.filter((section, index) => sections.indexOf(section) !== index);
+    if (duplicates.length > 0) issues.push({ level: 'warning', message: `${chapter.title} 存在重复小节：${[...new Set(duplicates)].join('、')}`, suggestion: '请保留用户需求、模板或显式大纲中真实需要的小节，删除重复项。' });
   }
   return issues;
 }
@@ -166,14 +174,168 @@ export function tocHierarchyIssues(markdown: string): ValidationIssue[] {
   return [];
 }
 
+function normalizeStructureTitle(title: string) {
+  return title
+    .replace(/^#+\s*/u, '')
+    .replace(/^第[一二三四五六七八九十百千万\d]+章\s*/u, '')
+    .replace(/^\d+(?:\.\d+)+[.．、]?\s*/u, '')
+    .replace(/^\d+[.．、]\s*/u, '')
+    .replace(/[\s:：.。]+$/gu, '')
+    .trim();
+}
+
+function collectTocSectionTitles(markdown: string) {
+  const match = TOC_BLOCK_RE.exec(markdown);
+  if (!match) return [];
+  return match[1].split(LINE_SPLIT_RE)
+    .map(line => /^\s*\d+\.\d+\s+(.+)$/u.exec(line.trim()))
+    .filter((matchItem): matchItem is RegExpExecArray => Boolean(matchItem))
+    .map(matchItem => normalizeStructureTitle(matchItem[1] || ''))
+    .filter(Boolean);
+}
+
+function collectBodySectionTitles(markdown: string) {
+  return [...markdown.matchAll(/^###\s+(.+)$/gmu)]
+    .map(match => normalizeStructureTitle(match[1] || ''))
+    .filter(Boolean);
+}
+
+export function tocBodyConsistencyIssues(markdown: string): ValidationIssue[] {
+  const tocSections = collectTocSectionTitles(markdown);
+  const bodySections = collectBodySectionTitles(markdown);
+  if (tocSections.length === 0 || bodySections.length === 0) return [];
+  const bodySet = new Set(bodySections);
+  const tocSet = new Set(tocSections);
+  const missingInBody = tocSections.filter(title => !bodySet.has(title));
+  const missingInToc = bodySections.filter(title => !tocSet.has(title));
+  const issues: ValidationIssue[] = [];
+  if (missingInBody.length > 0) issues.push({ level: 'warning', message: `目录小节未在正文中找到：${[...new Set(missingInBody)].join('、')}`, suggestion: '请以用户 outline 抽取出的章节为准，修正文目录与正文二级小节编号及标题。' });
+  if (missingInToc.length > 0) issues.push({ level: 'warning', message: `正文小节未进入目录：${[...new Set(missingInToc)].join('、')}`, suggestion: '请重新生成目录，确保只收录正文二级小节，不收录三级小节。' });
+  return issues;
+}
+
+export function formalContentIntegrityIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const lines = markdown.split(LINE_SPLIT_RE)
+    .map(line => line.trim())
+    .filter(line => line && !/^#{1,6}\s+/u.test(line) && !/^\s*\|/u.test(line) && !/^<div\b/iu.test(line));
+  const orphan = lines.find(line => normalizeStructureTitle(line).length <= 1);
+  if (orphan) issues.push({ level: 'warning', message: `正文存在孤立字或残缺段落：${orphan}`, suggestion: '请删除残缺行或重新生成所在小节。' });
+  const unfinished = lines.find(line => /[，、；：和与在为对将]$/u.test(line) || /(通过|包括|如下|主要包括)$/u.test(line));
+  if (unfinished) issues.push({ level: 'warning', message: `正文存在疑似截断句：${unfinished}`, suggestion: '请补完整该段落，避免以连接词、逗号或冒号结尾。' });
+  const longLine = lines.find(line => line.length > 380);
+  if (longLine) issues.push({ level: 'warning', message: `正文存在过长段落：${longLine}`, suggestion: '请拆分为多段或表格，改善导出版式和可读性。' });
+  return issues;
+}
+
+function sectionBodyTextLength(body: string) {
+  const text = body.split(LINE_SPLIT_RE)
+    .filter(line => !/^#{1,6}\s+/u.test(line.trim()))
+    .filter(line => !/^\s*\|/u.test(line))
+    .filter(line => !/^\s*:?-{3,}:?/u.test(line))
+    .filter(line => !/^<\/?div\b/iu.test(line.trim()))
+    .join('\n');
+  return text.replace(/[|*_`<>-]/gu, '').replace(WHITESPACE_RE, '').length;
+}
+
+type MarkdownSectionGapReason = 'missing_planned_section' | 'empty' | 'table_only' | 'too_short';
+
+export interface MarkdownSectionContentGap {
+  chapterTitle: string;
+  sectionTitle: string;
+  level: 3 | 4;
+  bodyLength: number;
+  reason: MarkdownSectionGapReason;
+  planned: boolean;
+  message: string;
+}
+
+function normalizeSectionTitleForGap(title: string) {
+  return normalizeStructureTitle(title);
+}
+
+function sameSectionTitle(left: string, right: string) {
+  const leftKey = normalizeSectionTitleForGap(left);
+  const rightKey = normalizeSectionTitleForGap(right);
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+function collectActualSections(source: string) {
+  const matches = [...source.matchAll(/^(#{3,4})\s+(.+)$/gmu)];
+  return matches.map((match, index) => {
+    const level = match[1].length as 3 | 4;
+    const start = (match.index || 0) + match[0].length;
+    const nextMatch = matches.slice(index + 1).find(item => item[1].length <= level);
+    const end = nextMatch?.index ?? source.length;
+    const rawTitle = (match[2] || '').trim();
+    return { rawTitle, title: normalizeSectionTitleForGap(rawTitle), level, body: source.slice(start, end) };
+  }).filter(item => item.title && (item.level === 3 || item.level === 4));
+}
+
+function sectionBodyForTitle(markdown: string, section: string) {
+  return collectActualSections(markdown).find(item => sameSectionTitle(item.rawTitle, section));
+}
+
+function gapForSection(chapterTitle: string, sectionTitle: string, level: 3 | 4, body: string, planned: boolean): MarkdownSectionContentGap | undefined {
+  const bodyLength = sectionBodyTextLength(body);
+  const hasTable = MARKDOWN_TABLE_ROW_RE.test(body) && MARKDOWN_TABLE_DIVIDER_RE.test(body);
+  const bodyWithoutTables = body.split('\n').filter(line => !MARKDOWN_TABLE_ROW_RE.test(line) && !MARKDOWN_TABLE_DIVIDER_RE.test(line)).join('\n');
+  const nonTableLength = sectionBodyTextLength(bodyWithoutTables);
+  const hasOnlyHeadingsOrTable = bodyLength < 80 && /^####\s+/mu.test(bodyWithoutTables);
+  if (hasOnlyHeadingsOrTable || (hasTable && nonTableLength < 20)) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'table_only', planned, message: `${chapterTitle} 小节只有标题或表格无正文：${sectionTitle}` };
+  if (bodyLength >= 80 && nonTableLength >= 20) return undefined;
+  if (bodyLength === 0) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: `${chapterTitle} 空小节：${sectionTitle}` };
+  if (bodyLength < 180) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'too_short', planned, message: `${chapterTitle} ${planned ? '规划小节' : '正文小节'}正文过短：${sectionTitle}` };
+  return undefined;
+}
+
+export function collectSectionContentGaps(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content' | 'sections'>>): MarkdownSectionContentGap[] {
+  const gaps: MarkdownSectionContentGap[] = [];
+  const seen = new Set<string>();
+  for (const chapter of chapters) {
+    const source = chapter.content?.trim() ? chapter.content : markdown;
+    for (const section of chapter.sections || []) {
+      const normalized = normalizeSectionTitleForGap(section);
+      const found = sectionBodyForTitle(source, section);
+      const key = `${chapter.title}|${normalized}|planned`;
+      if (!found) {
+        gaps.push({ chapterTitle: chapter.title, sectionTitle: section, level: 3, bodyLength: 0, reason: 'missing_planned_section', planned: true, message: `${chapter.title} 缺少规划小节：${section}` });
+        seen.add(key);
+        continue;
+      }
+      const gap = gapForSection(chapter.title, normalized || section, found.level, found.body, true);
+      if (gap) gaps.push(gap);
+      seen.add(key);
+    }
+    for (const section of collectActualSections(source)) {
+      const key = `${chapter.title}|${section.title}|actual`;
+      const plannedKey = `${chapter.title}|${section.title}|planned`;
+      if (seen.has(key) || seen.has(plannedKey)) continue;
+      const gap = gapForSection(chapter.title, section.title, section.level, section.body, false);
+      if (gap && (gap.reason === 'empty' || gap.reason === 'table_only')) gaps.push(gap);
+      seen.add(key);
+    }
+  }
+  return gaps;
+}
+
+export function sectionContentIntegrityIssues(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content' | 'sections'>>): ValidationIssue[] {
+  return collectSectionContentGaps(markdown, chapters).map(gap => ({
+    level: 'error' as const,
+    message: gap.message,
+    suggestion: gap.reason === 'missing_planned_section'
+      ? '请补写该二级小节，不能只在目录中出现。'
+      : gap.reason === 'table_only'
+        ? '请在表格前后补充来源、适用范围、结论和执行要求。'
+        : '请补充与该小节相关的材料事实、适用边界和必要说明。',
+  }));
+}
+
 function collectPreciseFactTokens(factsModel: DocumentFactsModel) {
   const tokens = new Set<string>();
   for (const fact of factsModel.preciseFacts) {
     if (!PRECISE_FACT_SOURCE_RE.test(`${fact.processingType || ''} ${fact.roleId} ${fact.sourceFile}`)) continue;
-    for (const match of `${fact.key} ${fact.value}`.matchAll(PRECISE_FACT_TOKEN_RE)) {
-      tokens.add(match[0]);
-      if (tokens.size >= PRECISE_FACT_TOKEN_LIMIT) return [...tokens];
-    }
+    for (const match of `${fact.key} ${fact.value}`.matchAll(PRECISE_FACT_TOKEN_RE)) tokens.add(match[0]);
   }
   return [...tokens];
 }
@@ -216,7 +378,7 @@ function templateMatchesAutoSpecGate(text: string, matchers: string[]) {
   return false;
 }
 
-export function configuredAutoSpecGateIssues(markdown: string, template: DocumentTemplate): ValidationIssue[] {
+export function plannedAutoSpecGateIssues(markdown: string, template: DocumentTemplate): ValidationIssue[] {
   const text = `${template.name} ${template.category} ${template.outputTitle} ${template.description}`;
   const gates = [];
   for (const gate of readEngineeringDocumentConfig().autoSpecGates) {
@@ -337,14 +499,10 @@ export function promptExampleLeakIssues(markdown: string, promptBindings: Prompt
   const promptText = promptBindingContents(promptBindings);
   if (!promptText.trim()) return [];
   const normalizedMarkdown = markdown.replace(WHITESPACE_RE, ' ');
-  let checked = 0;
   for (const match of promptText.matchAll(PROMPT_EXAMPLE_BLOCK_RE)) {
     const block = (match[1] || '').replace(WHITESPACE_RE, ' ').trim();
-    if (block.length < PROMPT_EXAMPLE_CHECK_LIMIT) continue;
-    checked += 1;
-    const probe = block.slice(0, PROMPT_EXAMPLE_PROBE_LENGTH);
-    if (probe.length >= PROMPT_EXAMPLE_CHECK_LIMIT && normalizedMarkdown.includes(probe)) return [{ level: 'error', message: '正文疑似包含提示词示例内容', suggestion: '请删除提示词样例数据，仅保留基于当前项目资料生成的正式正文。' }];
-    if (checked >= PROMPT_EXAMPLE_CHECK_LIMIT) break;
+    if (!block) continue;
+    if (normalizedMarkdown.includes(block)) return [{ level: 'error', message: '正文疑似包含提示词示例内容', suggestion: '请删除提示词样例数据，仅保留基于当前绑定材料生成的正文。' }];
   }
   return [];
 }
