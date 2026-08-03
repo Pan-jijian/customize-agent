@@ -40,16 +40,29 @@ export function evidenceQualityScore(content: string) {
   return { noiseScore, factDensity, shouldUse: text.length >= 30 && noiseScore < 0.72 && factDensity > 0.08 };
 }
 
+function extractParameterLines(content: string) {
+  const lines = cleanEvidenceText(content).split('\n').map(line => line.trim()).filter(Boolean);
+  const parameterLines = lines.filter(line => {
+    const isProjectBasicValue = /计划工期|合同工期|工期|合同估算价|合同估算价格|投资估算|估算价格|工程估算价|最高投标限价|招标控制价|建设地点|建设规模|质量标准/u.test(line);
+    if (!isProjectBasicValue && /综合单价|合价|报价明细|投标报价|税率|增值税|利润|预留金|暂列金额|结算/u.test(line)) return false;
+    const hasParameter = /\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年)|DN\s*\d+|Φ\s*\d+|φ\s*\d+|C\d{2,}|HRB\d+|GB\/?T?\s*[\w.-]+|JGJ\s*[\w.-]+|\d+\s*[×xX]\s*\d+/iu.test(line);
+    const hasContext = /项目|工程|工期|合同|估算|价格|地点|规模|清单|图纸|设计|规格|型号|数量|单位|材料|设备|管|线|电缆|混凝土|钢筋|砌体|门窗|防水|标准|规范|验收|做法|参数|尺寸|标高|厚度|强度|等级|系统|安装/u.test(line);
+    return isProjectBasicValue || hasParameter || (hasContext && /\d/u.test(line) && line.length <= 260);
+  });
+  return [...new Set(parameterLines)].slice(0, 80).join('\n');
+}
+
 export function sanitizeEvidenceContent(filePath: string, content: string) {
   const ext = path.extname(filePath).toLowerCase();
   const cleaned = cleanEvidenceText(content)
     .split('\n')
     .map(line => line.trim())
-    .filter(line => line && !/^(?:序号\s*)?(?:项目名称|单位|数量|综合单价|合价|备注)(?:\s+|$)/u.test(line))
-    .filter(line => !/^第\s*\d+\s*页\s*(?:共\s*\d+\s*页)?$/u.test(line))
+    .filter(line => line && !/^第\s*\d+\s*页\s*(?:共\s*\d+\s*页)?$/u.test(line))
     .join('\n');
   const quality = evidenceQualityScore(cleaned);
   if (cleaned.length > 20 && quality.shouldUse) return cleaned;
+  const parameterSummary = extractParameterLines(cleaned);
+  if (parameterSummary.length > 20) return `资料参数行摘要：\n${parameterSummary}`;
   if (cleaned.length > 80 && quality.noiseScore < 0.9) return cleaned;
   if (['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.webp', '.dwg'].includes(ext)) {
     return `该资料为${ext.replace('.', '').toUpperCase()}格式附件，仅作为内部事实提取依据；正式正文不得引用文件名。`;

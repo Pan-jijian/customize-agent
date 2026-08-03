@@ -77,7 +77,7 @@ function extractExplicitOutlineFromText(text: string, source: string, options?: 
       chapters.push({
         id: `explicit-${source}-${chapters.length + 1}`,
         title,
-        purpose: `按照${source}中 <OUTLINE> 块明确指定的章节生成：${title}；如需二级小节，应由大模型结合提示词、需求和资料上下文动态规划。`,
+        purpose: `根据显式大纲章节生成正式正文：${title}`,
         requiredFacts: [],
         sections: [],
         queries: [title],

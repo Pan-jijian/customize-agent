@@ -1,3 +1,26 @@
+export interface PromptRequiredSectionRule {
+  title: string;
+  aliases?: string[];
+  order?: number;
+  required?: boolean;
+  source?: string;
+}
+
+export interface PromptChapterStructuralRule {
+  chapterIndex?: number;
+  chapterTitle?: string;
+  requiredSections: PromptRequiredSectionRule[];
+  source?: string;
+}
+
+export interface PromptDocumentRuleSet {
+  forbidCover?: boolean;
+  forbidToc?: boolean;
+  forbiddenTerms: string[];
+  preferredTerms: Array<{ from: string; to: string }>;
+  requiredTables: string[];
+}
+
 export interface DocumentTemplateChapter {
   id: string;
   title: string;
@@ -137,6 +160,34 @@ export interface StructuredTableFact {
   sourceRange?: string;
 }
 
+export interface EvidenceFactIndex {
+  reliableFacts: DocumentFact[];
+  parameterFacts: DocumentFact[];
+  tableFacts: DocumentFact[];
+  drawingFacts: DocumentFact[];
+  billFacts: DocumentFact[];
+  diagnostics: DocumentFact[];
+}
+
+export interface ChapterFactNeed {
+  id: string;
+  label: string;
+  category: string;
+  required: boolean;
+  queries: string[];
+  acceptablePatterns?: string[];
+  forbiddenPatterns?: string[];
+  source: 'template' | 'spec' | 'profile' | 'prompt' | 'chapter' | 'section' | 'plan' | 'requirement';
+  fieldId?: string;
+}
+
+export interface ResolvedFactNeed {
+  need: ChapterFactNeed;
+  facts: DocumentFact[];
+  status: 'satisfied' | 'missing' | 'low_confidence' | 'conflict';
+  evidence?: DocumentEvidence[];
+}
+
 export interface DocumentFactsModel {
   project: DocumentFact[];
   schedule: DocumentFact[];
@@ -150,6 +201,7 @@ export interface DocumentFactsModel {
   rules: DocumentFact[];
   specifications: DocumentFact[];
   schemaFacts: Record<string, DocumentFact[]>;
+  factIndex: EvidenceFactIndex;
   missing: string[];
   conflicts: string[];
 }

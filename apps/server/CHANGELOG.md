@@ -1,5 +1,65 @@
 # server
 
+## 4.0.94
+
+### Patch Changes
+
+- Improve document generation table governance and export normalization.
+
+## 4.0.93
+
+### Patch Changes
+
+- Improve project basic fact extraction and section-level quantitative evidence placement.
+
+## 4.0.92
+
+### Patch Changes
+
+- Enforce structural section rules parsed from document prompt roles during section planning and drafting.
+
+## 4.0.91
+
+### Patch Changes
+
+- Improve document generation prompt execution, section-first drafting completeness, long-form budget reliability, and export readiness diagnostics.
+
+## 4.0.90
+
+### Patch Changes
+
+- Restore prompt role execution control and improve longform generation stability.
+
+## 4.0.89
+
+### Patch Changes
+
+- Release document generation fact coverage updates.
+
+## 4.0.88
+
+### Patch Changes
+
+- Refine document generation prompt flow and skip multimodal understanding by default.
+
+## 4.0.87
+
+### Patch Changes
+
+- Optimize document generation with generic chapter fact needs coverage.
+
+## 4.0.86
+
+### Patch Changes
+
+- Improve professional document generation with long-form budget planning, prompt role binding, role configuration persistence, validation noise reduction, and reliable parameter coverage.
+
+## 4.0.85
+
+### Patch Changes
+
+- Fix model provider health checks to use configured model names and avoid GPT gateway stalls caused by tiny max token limits.
+
 ## 4.0.84
 
 ### Patch Changes

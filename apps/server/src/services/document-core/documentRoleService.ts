@@ -84,23 +84,30 @@ function sanitizeConfig(config: ProjectRoleConfig): ProjectRoleConfig {
   };
 }
 
-function readStore(): RoleStore {
+function readStore(): RoleStore & { deletedRoleIds?: string[]; deletedConfigIds?: string[] } {
   try {
     const file = storePath();
-    if (!fs.existsSync(file)) return { roles: [], configs: [] };
-    const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as Partial<RoleStore> | DocumentRole[];
-    if (Array.isArray(raw)) return { roles: raw.map(sanitizeRole), configs: [] };
+    if (!fs.existsSync(file)) return { roles: [], configs: [], deletedRoleIds: [], deletedConfigIds: [] };
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as (Partial<RoleStore> & { deletedRoleIds?: string[]; deletedConfigIds?: string[] }) | DocumentRole[];
+    if (Array.isArray(raw)) return { roles: raw.map(sanitizeRole), configs: [], deletedRoleIds: [], deletedConfigIds: [] };
     return {
       roles: Array.isArray(raw.roles) ? raw.roles.map(sanitizeRole) : [],
       configs: Array.isArray(raw.configs) ? raw.configs.map(sanitizeConfig) : [],
+      deletedRoleIds: uniqueStrings(raw.deletedRoleIds || []),
+      deletedConfigIds: uniqueStrings(raw.deletedConfigIds || []),
     };
   } catch {
-    return { roles: [], configs: [] };
+    return { roles: [], configs: [], deletedRoleIds: [], deletedConfigIds: [] };
   }
 }
 
-function writeStore(store: RoleStore) {
-  fs.writeFileSync(storePath(), JSON.stringify({ roles: store.roles.map(sanitizeRole), configs: store.configs.map(sanitizeConfig) }, null, 2), 'utf-8');
+function writeStore(store: RoleStore & { deletedRoleIds?: string[]; deletedConfigIds?: string[] }) {
+  fs.writeFileSync(storePath(), JSON.stringify({
+    roles: store.roles.map(sanitizeRole),
+    configs: store.configs.map(sanitizeConfig),
+    deletedRoleIds: uniqueStrings(store.deletedRoleIds || []),
+    deletedConfigIds: uniqueStrings(store.deletedConfigIds || []),
+  }, null, 2), 'utf-8');
 }
 
 function configuredRoles() {
@@ -112,8 +119,10 @@ function configuredRoleConfigs() {
 }
 
 export function listDocumentRoles(type?: DocumentRoleType): DocumentRole[] {
-  const configRoles = configuredRoles();
-  const customRoles = readStore().roles.filter(role => !configRoles.some(item => item.id === role.id && item.type === role.type));
+  const store = readStore();
+  const deletedRoleIds = new Set(store.deletedRoleIds || []);
+  const configRoles = configuredRoles().filter(role => !deletedRoleIds.has(`${role.type}:${role.id}`));
+  const customRoles = store.roles.filter(role => !configRoles.some(item => item.id === role.id && item.type === role.type) && !deletedRoleIds.has(`${role.type}:${role.id}`));
   const roles = [...configRoles, ...customRoles];
   return type ? roles.filter(role => role.type === type) : roles;
 }
@@ -121,6 +130,7 @@ export function listDocumentRoles(type?: DocumentRoleType): DocumentRole[] {
 export function saveDocumentRole(role: DocumentRole): DocumentRole {
   const sanitized = sanitizeRole(role);
   const store = readStore();
+  store.deletedRoleIds = (store.deletedRoleIds || []).filter(key => key !== `${sanitized.type}:${sanitized.id}`);
   store.roles = store.roles.filter(item => !(item.id === sanitized.id && item.type === sanitized.type));
   store.roles.push(sanitized);
   writeStore(store);
@@ -128,21 +138,30 @@ export function saveDocumentRole(role: DocumentRole): DocumentRole {
 }
 
 export function deleteDocumentRole(type: DocumentRoleType, id: string) {
-  if (configuredRoles().some(role => role.id === id && role.type === type)) throw new Error('Configured role cannot be deleted');
   const store = readStore();
+  const key = `${type}:${id}`;
+  if (configuredRoles().some(role => role.id === id && role.type === type)) store.deletedRoleIds = uniqueStrings([...(store.deletedRoleIds || []), key]);
   store.roles = store.roles.filter(item => !(item.id === id && item.type === type));
   store.configs = store.configs.map(config => ({
     ...config,
-    fileRoles: config.fileRoles.filter(item => item.roleId !== id),
-    promptRoles: config.promptRoles.filter(item => item.roleId !== id),
+    fileRoles: config.fileRoles.filter(item => !(type === 'file' && item.roleId === id)),
+    promptRoles: config.promptRoles.filter(item => !(type === 'prompt' && item.roleId === id)),
   }));
   writeStore(store);
 }
 
 export function listProjectRoleConfigs(): ProjectRoleConfig[] {
-  const configConfigs = configuredRoleConfigs();
-  const customConfigs = readStore().configs.filter(config => !configConfigs.some(item => item.id === config.id));
-  return [...configConfigs, ...customConfigs];
+  const store = readStore();
+  const deletedConfigIds = new Set(store.deletedConfigIds || []);
+  const deletedRoleIds = new Set(store.deletedRoleIds || []);
+  const customConfigs = store.configs.filter(config => !deletedConfigIds.has(config.id));
+  const customConfigIds = new Set(customConfigs.map(config => config.id));
+  const configConfigs = configuredRoleConfigs().filter(config => !deletedConfigIds.has(config.id) && !customConfigIds.has(config.id));
+  return [...configConfigs, ...customConfigs].map(config => ({
+    ...config,
+    fileRoles: config.fileRoles.filter(item => !deletedRoleIds.has(`file:${item.roleId}`)),
+    promptRoles: config.promptRoles.filter(item => !deletedRoleIds.has(`prompt:${item.roleId}`)),
+  }));
 }
 
 export function getProjectRoleConfig(id: string): ProjectRoleConfig | undefined {
@@ -152,6 +171,7 @@ export function getProjectRoleConfig(id: string): ProjectRoleConfig | undefined 
 export function saveProjectRoleConfig(config: ProjectRoleConfig): ProjectRoleConfig {
   const sanitized = { ...sanitizeConfig(config), builtIn: false };
   const store = readStore();
+  store.deletedConfigIds = (store.deletedConfigIds || []).filter(item => item !== sanitized.id);
   store.configs = store.configs.filter(item => item.id !== sanitized.id);
   store.configs.push(sanitized);
   writeStore(store);
@@ -159,8 +179,8 @@ export function saveProjectRoleConfig(config: ProjectRoleConfig): ProjectRoleCon
 }
 
 export function deleteProjectRoleConfig(id: string) {
-  if (configuredRoleConfigs().some(config => config.id === id)) throw new Error('Configured role config cannot be deleted');
   const store = readStore();
+  if (configuredRoleConfigs().some(config => config.id === id)) store.deletedConfigIds = uniqueStrings([...(store.deletedConfigIds || []), id]);
   store.configs = store.configs.filter(item => item.id !== id);
   writeStore(store);
 }

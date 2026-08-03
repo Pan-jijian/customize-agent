@@ -4,7 +4,7 @@ import { createProvider } from '@customize-agent/llm';
 import type { recallDocumentContexts } from '../context/contextService';
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
 import type { MarkdownSectionContentGap } from './qualityValidation';
-import type { ChapterReviewSummary, DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from './types';
+import type { ChapterReviewSummary, DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplate, DocumentTemplateChapter, PromptChapterStructuralRule, PromptDocumentRuleSet, ResolvedFactNeed, ValidationIssue } from './types';
 import type { DocumentBudget } from './budget';
 import { documentTextLength } from './budget';
 import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
@@ -166,9 +166,13 @@ export async function understandReferenceFiles(projectRoot: string, evidence: Do
   if (files.length === 0) return { notes: [], stage: { type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: skipped.length ? `参考文件过大，已跳过 ${skipped.length} 个多模态文件理解` : '没有可发送给多模态模型的参考文件' } };
   try {
     throwIfAborted(signal);
-    const response = await fileAwareProvider.understandFiles(files, '请阅读这些参考图片/文件，提炼可用于文档生成和审查的事实、视觉要点、地图信息和封面设计建议。请用中文要点输出。', { maxTokens: 1200, signal });
+    const response = await callWithTimeout(
+      localSignal => fileAwareProvider.understandFiles!(files, '请阅读这些参考图片/文件，提炼可用于文档生成和审查的事实、视觉要点、地图信息和封面设计建议。请用中文要点输出。', { maxTokens: 1200, signal: localSignal }),
+      Math.max(30000, Math.min(90000, Number(process.env.DOCUMENT_FILE_UNDERSTANDING_TIMEOUT_MS ?? 60000))),
+      signal,
+    );
     throwIfAborted(signal);
-    const note = response.content.trim();
+    const note = response?.content.trim() || '';
     return { notes: note ? [note] : [], stage: { type: 'file_understanding', roleId: 'multimodal-files', status: note ? 'success' : 'fallback', message: note ? `已理解 ${files.length} 个多模态参考文件` : '多模态模型未返回有效文件理解结果' } };
   } catch {
     return { notes: [], stage: { type: 'file_understanding', roleId: 'multimodal-files', status: 'fallback', message: '文件理解调用失败，继续使用本地解析内容' } };
@@ -190,7 +194,20 @@ export function buildValidationIssues(validation: { warnings: string[]; errors: 
   return issues;
 }
 
-export function buildChapterFactCoverageContext(input: { chapter: DocumentTemplateChapter; plan?: TenderPlanChapter; spec?: AutoDocumentSpecPackage; roleFacts: Array<{ fact: RoleNodeFact }>; evidence: DocumentEvidence[]; missingFacts: string[] }) {
+function extractChapterPreciseTokens(evidence: DocumentEvidence[]) {
+  const tokens = new Set<string>();
+  const tokenRe = /(?:\b[A-Z]{1,8}[\w./-]*\d[\w./-]*\b|\b\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年|万元|元)\b|\b\d+\s*[×xX]\s*\d+(?:\s*[×xX]\s*\d+)?\b|\b(?:GB|GB\/T|ISO|IEC|IEEE|RFC|API|DB\d*|T\/[A-Z]+)\s*[\w.-]+\b)/giu;
+  for (const item of evidence) {
+    const content = stringifyFactValue(item.content).replace(/\s+/gu, ' ');
+    if (/报价明细|投标报价|单价|合价|综合单价|预留金|税率|增值税|利润|结算/u.test(content) && !/合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价/u.test(content)) continue;
+    if (/OCR|识别错误|乱码|无法确认|疑似|不确定|语义断裂/u.test(content)) continue;
+    for (const match of content.matchAll(tokenRe)) tokens.add(match[0].trim());
+    if (tokens.size >= 40) break;
+  }
+  return [...tokens].slice(0, 40);
+}
+
+export function buildChapterFactCoverageContext(input: { chapter: DocumentTemplateChapter; plan?: TenderPlanChapter; spec?: AutoDocumentSpecPackage; roleFacts: Array<{ fact: RoleNodeFact }>; evidence: DocumentEvidence[]; missingFacts: string[]; indexedFacts?: DocumentFact[]; resolvedFactNeeds?: ResolvedFactNeed[]; factNeedsPrompt?: string }) {
   const specRule = input.spec?.chapterRules.find(rule => rule.id === input.chapter.id || rule.title === input.chapter.title);
   const specFactNames = (specRule?.requiredFactIds || [])
     .map(id => input.spec?.factFields.find(field => field.id === id)?.name)
@@ -200,15 +217,31 @@ export function buildChapterFactCoverageContext(input: { chapter: DocumentTempla
     ...specFactNames,
     ...(input.plan?.requiredContents || []),
     ...(input.plan?.evidenceNeeds || []),
+    ...(input.resolvedFactNeeds || []).filter(item => item.need.required).map(item => item.need.label),
   ].filter(Boolean))];
   const roleFactLines = input.roleFacts.map(({ fact }) => `- ${fact.key}：${cleanEvidenceText(stringifyFactValue(fact.value))}`);
-  const evidenceSourceCount = new Set(input.evidence.map(item => item.filePath)).size;
+  const resolvedFacts = (input.resolvedFactNeeds || []).flatMap(item => item.facts);
+  const indexedFactLines = resolvedFacts.length > 0
+    ? []
+    : (input.indexedFacts || []).slice(0, 40).map(fact => `- ${fact.key || fact.fieldName || '资料事实'}：${cleanEvidenceText(stringifyFactValue(fact.value)).slice(0, 180)}${fact.sourceFile ? `（来源：${fact.sourceFile.split('/').pop()}）` : ''}`);
+  const projectBasicFacts = [...resolvedFacts, ...(input.indexedFacts || [])]
+    .filter(fact => /建设地点|建设规模|招标范围|计划工期|合同工期|周期要求|质量标准|合同估算|投资估算|最高投标限价|招标控制价/u.test(`${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`))
+    .filter((fact, index, array) => array.findIndex(item => `${item.key || item.fieldName}:${stringifyFactValue(item.value)}` === `${fact.key || fact.fieldName}:${stringifyFactValue(fact.value)}`) === index)
+    .slice(0, 12);
+  const preciseTokens = [...new Set([...extractChapterPreciseTokens(input.evidence), ...resolvedFacts.map(fact => stringifyFactValue(fact.value)).filter(value => /\d|DN|φ|Φ|mm|cm|m²|m3|m³|MPa|kPa|℃|%|GB|JGJ|ISO|台|套|个|项|批|次|份|人|㎡|日历天|万元|元/iu.test(value)).slice(0, 80), ...(input.indexedFacts || []).map(fact => stringifyFactValue(fact.value)).filter(value => /\d|DN|φ|Φ|mm|cm|m²|m3|m³|MPa|kPa|℃|%|GB|JGJ|ISO|台|套|个|项|批|次|份|人|㎡|日历天|万元|元/iu.test(value)).slice(0, 40)])].slice(0, 100);
+  const evidenceSourceCount = new Set([...input.evidence.map(item => item.filePath), ...resolvedFacts.map(item => item.sourceFile), ...(input.indexedFacts || []).map(item => item.sourceFile)]).size;
+  const unresolvedNeeds = (input.resolvedFactNeeds || []).filter(item => item.status !== 'satisfied' && item.need.required).map(item => item.need.label);
   return [
-    '【本章事实覆盖反馈】',
+    '【本章事实覆盖与参数落位要求】',
     requiredFacts.length ? `必须优先覆盖的事实/要求：\n${requiredFacts.map(item => `- ${item}`).join('\n')}` : '',
     roleFactLines.length ? `角色节点已抽取事实：\n${roleFactLines.join('\n')}` : '',
-    input.missingFacts.length ? `当前检索未充分命中的事实：${input.missingFacts.join('、')}。如材料未明确提供，不得编造具体数值，应写成需要复核的条件、假设或说明。` : '',
-    `本章可用材料来源约 ${evidenceSourceCount} 个文件，正文必须把可用事实内化到对应小节，不得单列后台资料清单。`,
+    projectBasicFacts.length ? `项目基础事实卡片（资料已明确，项目概况、项目基本信息表、进度和质量相关内容必须优先使用，不得写“资料未明确”）：\n${projectBasicFacts.map(fact => `- ${fact.key || fact.fieldName}：${cleanEvidenceText(stringifyFactValue(fact.value)).slice(0, 220)}${fact.sourceFile ? `（来源：${fact.sourceFile.split('/').pop()}）` : ''}`).join('\n')}\n项目基本信息表必须使用固定表头：| 信息项 | 内容 |，不得使用“序号｜项目名称｜内容参数”表头，不得输出后台溯源列。` : '',
+    input.factNeedsPrompt || '',
+    indexedFactLines.length ? `全局资料事实索引匹配到的本章可写事实：\n${indexedFactLines.join('\n')}` : '',
+    preciseTokens.length ? `本章资料中可直接使用的可靠精确参数/编号：${preciseTokens.join('、')}。这些参数来自绑定资料，不属于编造；涉及对应对象、部位、工序、材料、设备、项目概况、质量验收或安全控制时必须自然写入正文，并保持原样或等价专业表达。项目基础事实中的合同估算价、计划工期可用于项目概况；不得写入报价明细、单价、税率、预留金。` : '',
+    unresolvedNeeds.length ? `当前事实需求仍未充分确认：${unresolvedNeeds.join('、')}。未确认项不得编造；但已满足事实需求中的资料事实必须写入对应小节。` : '',
+    input.missingFacts.length ? `模板显式要求中当前检索未充分命中的项：${input.missingFacts.join('、')}。未命中项不得编造，但不得因此省略上方已经明确的可靠参数。` : '',
+    `本章可用材料来源约 ${evidenceSourceCount} 个文件，正文必须按事实需求把可用事实内化到对应小节，不得单列后台资料清单。`,
   ].filter(Boolean).join('\n');
 }
 
@@ -257,7 +290,7 @@ export function sectionTargets(chapter: DocumentTemplateChapter, targetWords: nu
   const sections = chapter.sections?.filter(Boolean) || [];
   if (sections.length === 0) return [];
   const rawBase = Math.floor(targetWords / sections.length);
-  const minimum = targetWords >= sections.length * 700 ? 700 : Math.max(280, Math.floor(rawBase * 0.85));
+  const minimum = targetWords >= sections.length * 900 ? 900 : Math.max(520, Math.floor(rawBase * 0.9));
   const base = Math.max(minimum, rawBase);
   return sections.map(section => ({ title: section, targetWords: base }));
 }
@@ -277,11 +310,16 @@ export function tokenizeForRelevance(text: string) {
 
 export function evidenceForSection(sectionTitle: string, chapter: DocumentTemplateChapter, evidence: DocumentEvidence[]) {
   const tokens = tokenizeForRelevance([sectionTitle, chapter.title, ...(chapter.requiredFacts || [])].join(' '));
+  const basicFactSection = /项目概况|工程概况|总体|部署|施工方案|工期|进度|质量|安全|资源|材料|设备/u.test(sectionTitle);
   const scored = evidence.map((item, index) => {
-    const text = `${item.sectionTitle || ''}\n${item.content}`.toLowerCase();
+    const text = `${item.filePath}\n${item.sectionTitle || ''}\n${item.content}`.toLowerCase();
+    const rawText = `${item.filePath}\n${item.sectionTitle || ''}\n${item.content}`;
     const hitScore = tokens.reduce((score, token) => score + (text.includes(token) ? 1 : 0), 0);
-    const sectionScore = item.sectionTitle && sectionTitle.includes(item.sectionTitle) || item.sectionTitle && item.sectionTitle.includes(sectionTitle) ? 4 : 0;
-    return { item, score: hitScore + sectionScore + item.score * 0.1 - index * 0.001 };
+    const sectionScore = item.sectionTitle && (sectionTitle.includes(item.sectionTitle) || item.sectionTitle.includes(sectionTitle)) ? 4 : 0;
+    const parameterScore = /\d|DN|φ|Φ|mm|cm|m²|m3|m³|MPa|kPa|℃|%|GB|JGJ|ISO|台|套|个|项|批|次|份|人|㎡|日历天|万元|元|规格|型号|数量|合同估算价|合同估算价格|计划工期/iu.test(rawText) ? 1.5 : 0;
+    const basicFactScore = basicFactSection && /计划工期|合同工期|合同估算价|合同估算价格|投资估算|建设地点|建设规模|质量标准|招标范围/u.test(rawText) ? 5 : 0;
+    const typeScore = /table|sheet|bill|data|drawing|图纸|表格|清单|参数|数据|说明/u.test(`${item.roleId || ''} ${item.processingType || ''} ${item.filePath}`) ? 0.8 : 0;
+    return { item, score: hitScore + sectionScore + parameterScore + basicFactScore + typeScore + item.score * 0.1 - index * 0.001 };
   }).sort((a, b) => b.score - a.score);
   const selected = scored.filter(item => item.score > 0).map(item => item.item);
   return selected.length > 0 ? selected : evidence;
@@ -290,40 +328,278 @@ export function evidenceForSection(sectionTitle: string, chapter: DocumentTempla
 function normalizePlannedSectionTitle(title: string) {
   return displayChapterTitle(title)
     .replace(/^第[一二三四五六七八九十百千万\d]+[章节篇部分、.．\s-]*/u, '')
-    .replace(/^\d+(?:\.\d+)*[.．、]?\s*/u, '')
+    .replace(/^\d+(?:\.\d+)*(?:[.．、]|\s)+/u, '')
+    .replace(/[<>]/gu, '')
     .replace(/[：:。；;,.，]+$/gu, '')
     .trim();
 }
 
-export async function planChapterSectionsWithLlm(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics }) {
+function isInvalidPlannedSectionTitle(title: string, chapterTitle: string) {
+  const normalized = normalizePlannedSectionTitle(title);
+  const normalizedChapter = normalizePlannedSectionTitle(chapterTitle);
+  if (normalized.length < 4 || normalized.length > 60) return true;
+  if (normalized === normalizedChapter) return true;
+  if (/^(?:目标与范围|资料依据|实施内容|质量控制|概述|总体要求)$/u.test(normalized)) return true;
+  if (/如需|应由|大模型|提示词|上下文|动态规划|OUTLINE|章节生成|按照.*明确指定|需求和资料|JSON|小节标题/u.test(normalized)) return true;
+  if (/(.)\1/u.test(normalized)) return true;
+  const tail = normalizedChapter.match(/[\p{L}\p{N}]{2,6}$/u)?.[0] || '';
+  if (tail.length >= 2 && /^.{2,8}\p{L}$/u.test(normalized) && normalized.endsWith(tail.slice(-1)) && !normalized.includes(tail)) return true;
+  return false;
+}
+
+function chineseOrdinalToNumber(value: string) {
+  const digits: Record<string, number> = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (/^\d+$/u.test(value)) return Number(value);
+  if (digits[value] !== undefined) return digits[value];
+  if (value === '十') return 10;
+  const tenMatch = /^(?:(一|二|两|三|四|五|六|七|八|九)?)十(?:(一|二|两|三|四|五|六|七|八|九))?$/u.exec(value);
+  if (!tenMatch) return undefined;
+  const tens = tenMatch[1] ? digits[tenMatch[1]] : 1;
+  const ones = tenMatch[2] ? digits[tenMatch[2]] : 0;
+  return tens * 10 + ones;
+}
+
+function sectionTitleEquivalent(a: string, b: string) {
+  const left = normalizePlannedSectionTitle(a).replace(/[\s()（）:：.。；;,，、-]/gu, '');
+  const right = normalizePlannedSectionTitle(b).replace(/[\s()（）:：.。；;,，、-]/gu, '');
+  if (!left || !right) return false;
+  return left === right || left.includes(right) || right.includes(left);
+}
+
+function cleanParsedSectionTitles(titles: string[]) {
+  return Array.from(new Set(titles.map(normalizePlannedSectionTitle).filter(title => title.length >= 2 && title.length <= 30 && !/必须|强制|排序|设置|输出|独立|之后|之前|小节|其他必要/u.test(title))));
+}
+
+function parseSectionListFromRuleText(text: string) {
+  const topList = /(?:以下小节设置和排序|强制小节|必须小节)[：:]\s*([\s\S]*?)(?:\n\s*#{2,6}\s|\n\s*第[一二两三四五六七八九十\d]+章|$)/u.exec(text)?.[1];
+  if (topList) {
+    const titles = [...topList.matchAll(/(?:^|\n)\s*\d+[.．、]\s*([^——\-—：:。；;\n]{2,30})(?:[——\-—：:]|，|,|。|；|;|\n|$)/gu)].map(match => match[1]);
+    const cleaned = cleanParsedSectionTitles(titles);
+    if (cleaned.length > 0) return cleaned;
+  }
+
+  const titles: string[] = [];
+  const afterRequiredPattern = /第[一二两三四五六七八九十\d]+章[^。；;\n]{0,50}(?:强制)?(?:包含|设置|输出|排序|挂靠)[^：:。；;\n]{0,20}[：:]\s*([^。；;\n]{2,120})/gu;
+  for (const match of text.matchAll(afterRequiredPattern)) {
+    for (const item of match[1].split(/[、,，/／及和与]/u)) titles.push(item);
+  }
+  const quotedSectionPattern = /[“"]([^”"]{2,30})[”"]\s*(?:二级)?小节/gu;
+  for (const match of text.matchAll(quotedSectionPattern)) titles.push(match[1]);
+  const namedPattern = /([\p{Script=Han}A-Za-z0-9（）()]{2,30})(?:——|—|-|：|:)\s*(?:独立的)?(?:二级)?小节/gu;
+  for (const match of text.matchAll(namedPattern)) titles.push(match[1]);
+  const afterSectionLabelPattern = /(?:必须|应当|需|需要|包含|设置|输出)[^。；;\n]{0,30}(?:独立的)?(?:二级)?小节[：:]\s*([^。；;\n]{2,80})/gu;
+  for (const match of text.matchAll(afterSectionLabelPattern)) {
+    for (const item of match[1].split(/[、,，/／及和与]/u)) titles.push(item);
+  }
+  return cleanParsedSectionTitles(titles);
+}
+
+export function extractPromptDocumentRules(promptTexts: string): PromptDocumentRuleSet {
+  const normalizedText = promptTexts.replace(/\\n/gu, '\n');
+  const requiredTables = new Set<string>();
+  const tableLine = /全文必须输出[：:]\s*([^。；;\n]+)/u.exec(normalizedText)?.[1] || /必须输出(?:的)?表格[：:]\s*([^。；;\n]+)/u.exec(normalizedText)?.[1] || '';
+  for (const part of tableLine.split(/[、,，]/u)) {
+    const title = /([\p{Script=Han}A-Za-z0-9（）()]{2,30}表)$/u.exec(part.trim())?.[1];
+    if (title && title.length >= 4 && title.length <= 30) requiredTables.add(title);
+  }
+  if (/项目基本信息表/u.test(normalizedText)) requiredTables.add('项目基本信息表');
+  const forbiddenTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台', '绑定片段', '兜底'];
+  if (/杜绝|禁止|不得|严禁/u.test(normalizedText)) forbiddenTerms.push('施工方', '投标人', '高度重视', '重中之重');
+  if (/商务|报价|单价|税率|利润|造价/u.test(normalizedText)) forbiddenTerms.push('综合单价', '报价明细', '税率', '增值税', '利润', '预留金');
+  return {
+    forbidCover: /严禁生成封面|不输出封面|禁止封面/u.test(normalizedText),
+    forbidToc: /严禁生成[^\n。；;]*目录|不输出[^\n。；;]*目录|禁止[^\n。；;]*目录/u.test(normalizedText),
+    forbiddenTerms: [...new Set(forbiddenTerms)],
+    preferredTerms: [{ from: '施工方', to: '我公司' }, { from: '投标人', to: '我公司' }, { from: '高度重视', to: '严格落实' }, { from: '重中之重', to: '关键控制事项' }],
+    requiredTables: [...requiredTables],
+  };
+}
+
+export function extractPromptStructuralRules(promptTexts: string, chapters?: DocumentTemplateChapter[]): PromptChapterStructuralRule[] {
+  const normalizedText = promptTexts.replace(/\\n/gu, '\n');
+  const chapterRulePattern = /第([一二两三四五六七八九十\d]+)章[^\n。；;]{0,80}(?:强制|必须|挂靠|小节|排序|最先|之后|之前)/gu;
+  const grouped = new Map<number, { blocks: string[]; titles: string[] }>();
+  const matches = [...normalizedText.matchAll(chapterRulePattern)];
+  for (const match of matches) {
+    const chapterNumber = chineseOrdinalToNumber(match[1]);
+    if (!chapterNumber) continue;
+    const start = Math.max(0, match.index || 0);
+    const next = matches.find(item => (item.index || 0) > start)?.index;
+    const block = normalizedText.slice(start, Math.min(normalizedText.length, next ?? start + 1400));
+    const titles = parseSectionListFromRuleText(block);
+    if (titles.length === 0) continue;
+    const item = grouped.get(chapterNumber) || { blocks: [], titles: [] };
+    item.blocks.push(block);
+    for (const title of titles) {
+      if (!item.titles.some(existing => sectionTitleEquivalent(existing, title))) item.titles.push(title);
+    }
+    grouped.set(chapterNumber, item);
+  }
+  return [...grouped.entries()].map(([chapterNumber, item]) => {
+    const chapter = chapters?.[chapterNumber - 1];
+    return {
+      chapterIndex: chapterNumber - 1,
+      chapterTitle: chapter?.title,
+      source: item.blocks[0]?.split('\n').find(line => line.trim())?.trim().slice(0, 120),
+      requiredSections: item.titles.map((title, index) => ({ title, order: index + 1, required: true, source: item.blocks[0]?.slice(0, 240) })),
+    };
+  });
+}
+
+function structuralRulesForChapter(rules: PromptChapterStructuralRule[] | undefined, chapter: DocumentTemplateChapter, chapterIndex?: number) {
+  return (rules || []).filter(rule => {
+    if (rule.chapterIndex !== undefined && chapterIndex !== undefined && rule.chapterIndex === chapterIndex) return true;
+    if (rule.chapterTitle && sectionTitleEquivalent(rule.chapterTitle, chapter.title)) return true;
+    return false;
+  });
+}
+
+function applyPromptStructuralRules(sections: string[], chapterTitle: string, rules: PromptChapterStructuralRule[]) {
+  const locked = rules.flatMap(rule => rule.requiredSections).sort((a, b) => (a.order || 0) - (b.order || 0));
+  if (locked.length === 0) return sections;
+  const result: string[] = [];
+  for (const rule of locked) {
+    const title = normalizePlannedSectionTitle(rule.title);
+    if (title && title.length >= 2 && title.length <= 60 && !result.some(item => sectionTitleEquivalent(item, title))) result.push(title);
+  }
+  for (const section of sections) {
+    const title = normalizePlannedSectionTitle(section);
+    if (!title || isInvalidPlannedSectionTitle(title, chapterTitle)) continue;
+    if (!result.some(item => sectionTitleEquivalent(item, title))) result.push(title);
+  }
+  return result;
+}
+
+function compoundSectionSeeds(chapterTitle: string) {
+  const title = normalizePlannedSectionTitle(chapterTitle);
+  const seeds: string[] = [];
+  const completeClause = /体系|措施|管理|保障|方案|要求|计划|控制|配置/u;
+  const addAndGroup = (value: string) => {
+    const match = /^(.*?)([^与和及、,，；;]+(?:[与和及][^与和及、,，；;]+)+)(的.+)$/u.exec(value);
+    if (!match) return false;
+    const prefix = match[1] || '';
+    const suffix = match[3] || '';
+    for (const item of match[2].split(/[与和及]/u)) seeds.push(normalizePlannedSectionTitle(`${prefix}${item}${suffix}`));
+    return true;
+  };
+  const addCommaGroup = (value: string) => {
+    const parts = value.split(/[、,，]/u).map(normalizePlannedSectionTitle).filter(Boolean);
+    if (parts.length > 1 && parts.every(part => part.length >= 4 && completeClause.test(part))) {
+      for (const part of parts) {
+        if (!addAndGroup(part)) seeds.push(part);
+      }
+      return true;
+    }
+    const match = /^(.*?)([^、,，；;]+(?:[、,，][^、,，；;]+)+)(的.+)$/u.exec(value);
+    if (!match) return false;
+    const prefix = match[1] || '';
+    const suffix = match[3] || '';
+    for (const item of match[2].split(/[、,，]/u)) seeds.push(normalizePlannedSectionTitle(`${prefix}${item}${suffix}`));
+    return true;
+  };
+  for (const part of title.split(/[；;]/u)) {
+    if (addCommaGroup(part) || addAndGroup(part)) continue;
+    const cleaned = normalizePlannedSectionTitle(part);
+    if (cleaned && cleaned !== title) seeds.push(cleaned);
+  }
+  return Array.from(new Set(seeds)).filter(item => item.length >= 4 && item.length <= 60 && item !== title && !isInvalidPlannedSectionTitle(item, chapterTitle));
+}
+
+function evidenceParameterDensity(evidence: DocumentEvidence[]) {
+  const text = evidence.map(item => `${item.sectionTitle || ''}\n${item.content}`).join('\n').slice(0, 30000);
+  const matches = text.match(/\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年|万元|元)|DN\s*\d+|Φ\s*\d+|φ\s*\d+|C\d{2,}|HRB\d+|GB\/?T?\s*[\w.-]+|JGJ\s*[\w.-]+/giu) || [];
+  return new Set(matches.map(item => item.replace(/\s+/gu, ''))).size;
+}
+
+function minimumSectionCount(chapter: DocumentTemplateChapter, targetWords: number, evidence: DocumentEvidence[], lockedCount: number) {
+  const title = chapter.title;
+  const coreChapter = /质量|安全|工期|进度|物资|材料|机械|设备|劳动力|危大|专项|文明|总平面|施工方法|施工方案/u.test(title);
+  let minimum = targetWords >= 14000 ? 8 : targetWords >= 8000 ? 6 : targetWords >= 5000 ? 5 : targetWords >= 3000 ? 4 : 3;
+  if (coreChapter) minimum = Math.max(minimum, 4);
+  const density = evidenceParameterDensity(evidence);
+  if (density >= 20) minimum = Math.max(minimum, 6);
+  else if (density >= 10) minimum = Math.max(minimum, 5);
+  return Math.max(minimum, lockedCount);
+}
+
+function fallbackSectionsForChapter(chapterTitle: string) {
+  if (/质量/u.test(chapterTitle)) return ['质量目标与质量管理体系', '关键工序质量控制措施', '材料设备进场验收与检验', '质量检查试验与验收程序', '质量通病防治与整改闭环', '成品保护与资料管理'];
+  if (/安全/u.test(chapterTitle)) return ['安全生产管理体系', '危险源辨识与分级管控', '现场安全防护措施', '临时用电与机械设备安全管理', '应急处置与安全检查整改', '安全教育培训与交底'];
+  if (/工期|进度/u.test(chapterTitle)) return ['总工期目标与节点安排', '施工进度计划编制原则', '关键线路与工序穿插安排', '资源投入与工期保障措施', '进度偏差纠偏与动态调整', '工期风险识别与应对措施'];
+  if (/物资|材料/u.test(chapterTitle)) return ['主要材料设备需求分析', '材料采购与进场计划', '材料验收复试与保管', '周转材料配置与使用管理', '材料供应风险与保障措施'];
+  if (/机械|设备/u.test(chapterTitle)) return ['主要机械设备配置原则', '机械设备进退场计划', '机械设备调度与运行管理', '机械设备维护保养与安全检查', '关键设备保障措施'];
+  if (/劳动力/u.test(chapterTitle)) return ['劳动力配置原则', '各阶段劳动力投入计划', '专业工种与特种作业人员配置', '劳动力动态调配措施', '劳务管理与教育交底'];
+  if (/文明|环保/u.test(chapterTitle)) return ['现场封闭与场容场貌管理', '环境保护与污染防治措施', '材料设备定置化管理', '职业健康与消防文明管理', '文明施工检查与整改'];
+  if (/总平面|平面布置/u.test(chapterTitle)) return ['施工总平面布置原则', '临时道路与材料堆场布置', '临时用水用电及排水布置', '办公生活与加工区域布置', '总平面动态调整与管理'];
+  if (/危大|专项/u.test(chapterTitle)) return ['危大工程识别与清单管理', '专项施工方案编制与审批', '专家论证与技术交底', '现场实施监测与旁站管理', '应急处置与验收销项'];
+  if (/施工方法|施工方案|主要/u.test(chapterTitle)) return ['总体施工部署与流程安排', '主要分部分项施工方法', '关键工序技术控制要点', '资源配置与穿插组织', '质量安全与成品保护措施'];
+  return ['总体部署与责任分工', '实施流程与关键控制', '资源配置与资料依据', '质量安全与风险控制', '检查验收与闭环管理', '资料记录与成果移交'];
+}
+
+export async function planChapterSectionsWithLlm(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; chapterIndex?: number; evidence: DocumentEvidence[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; structuralRules?: PromptChapterStructuralRule[]; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics }) {
   const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, input.evidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 5000, 12000) });
+  const chapterStructuralRules = structuralRulesForChapter(input.structuralRules, input.chapter, input.chapterIndex);
+  const lockedSections = chapterStructuralRules.flatMap(rule => rule.requiredSections).sort((a, b) => (a.order || 0) - (b.order || 0)).map(rule => rule.title);
+  const minSections = minimumSectionCount(input.chapter, input.targetWords, input.evidence, lockedSections.length);
+  const maxSections = Math.max(minSections + 2, input.targetWords >= 14000 ? 10 : input.targetWords >= 8000 ? 8 : 7);
   const result = await callDocumentLlmJson<{ sections?: string[] }>([
     '你是专业文档结构规划专家。',
     '只根据用户提示词、章节标题和真实绑定资料规划本章二级小节；不得使用“目标与范围、资料依据、实施内容、质量控制”等通用占位小节凑数。',
+    '施工组织、技术措施、资源配置、质量、安全、工期、材料、设备、劳动力、危大工程等核心章节必须拆成足够的专业工作面，不得只输出两个泛化小节。',
     '只返回 JSON。',
   ].join('\n'), [
     `文档模板：${input.template.name}`,
     `章节标题：${input.chapter.title}`,
-    `章节目的：${input.chapter.purpose}`,
+    input.chapter.purpose && !isInvalidPlannedSectionTitle(input.chapter.purpose, input.chapter.title) ? `章节目的：${input.chapter.purpose}` : '',
     input.requirement ? `用户要求：${input.requirement}` : '',
     input.projectContext ? `上下文：\n${input.projectContext}` : '',
     input.roleContext,
-    input.promptTexts ? `提示词角色要求：\n${input.promptTexts}` : '',
+    input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
+    lockedSections.length ? `系统已从提示词解析出本章强制二级小节，必须按此顺序置于本章小节最前，不得删除、改名或重排：${lockedSections.join('、')}` : '',
     evidenceText ? `真实绑定资料：\n${evidenceText}` : '',
-    '请输出 2-5 个适合直接成稿的二级小节标题。标题必须具体、业务相关、能承载真实资料；如果章节本身已经是单一主题，只拆成必要工作面/技术点/管理点，不要为了凑结构增加小节。',
+    `请输出 ${minSections}-${maxSections} 个适合直接成稿的二级小节标题。标题必须具体、业务相关、能承载真实资料；每个小节应对应不同工作面、技术点、管理点或资料类别，避免多个小节表达同一内容。核心章节不得只输出“总体部署与责任分工、实施流程与关键控制”两个泛化小节。`,
     'JSON 格式：{"sections":["小节标题1","小节标题2"]}',
-  ].filter(Boolean).join('\n\n'), { maxTokens: 1200, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics, timeoutMs: 120000 });
-  const generic = /^(?:目标与范围|资料依据|实施内容|质量控制|概述|总体要求)$/u;
-  const sections = Array.from(new Set((result?.sections || [])
+  ].filter(Boolean).join('\n\n'), { maxTokens: 1600, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics, timeoutMs: 120000 });
+  const sections = Array.from(new Set(compoundSectionSeeds(input.chapter.title)));
+  for (const title of (result?.sections || []).map(normalizePlannedSectionTitle).filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title))) {
+    if (!sections.some(section => section.includes(title) || title.includes(section))) sections.push(title);
+  }
+  const fallbackSeeds = [input.chapter.title, ...(input.chapter.requiredFacts || []), ...(input.chapter.queries || [])]
+    .flatMap(item => String(item || '').split(/[；;。\n]/u))
     .map(normalizePlannedSectionTitle)
-    .filter(title => title.length >= 4 && title.length <= 60)
-    .filter(title => title !== normalizePlannedSectionTitle(input.chapter.title))
-    .filter(title => !generic.test(title))));
-  return sections.slice(0, 5);
+    .filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title));
+  const typedSeeds = fallbackSectionsForChapter(input.chapter.title)
+    .filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title));
+  for (const seed of [...fallbackSeeds, ...typedSeeds]) {
+    if (sections.length >= minSections) break;
+    if (!sections.some(section => section.includes(seed) || seed.includes(section))) sections.push(seed);
+  }
+  return applyPromptStructuralRules(sections, input.chapter.title, chapterStructuralRules);
+}
+
+function buildSectionFactCard(sectionTitle: string, evidence: DocumentEvidence[]) {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  const importantLineRe = /计划工期|合同工期|合同估算价|合同估算价格|投资估算|估算价格|工程估算价|最高投标限价|招标控制价|建设地点|建设规模|质量标准|招标范围|\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年)/iu;
+  for (const item of evidence) {
+    for (const rawLine of stringifyFactValue(item.content).split(/\r?\n/u)) {
+      const line = rawLine.replace(/\s+/gu, ' ').trim();
+      if (line.length < 4 || line.length > 260 || !importantLineRe.test(line)) continue;
+      if (/报价明细|综合单价|税率|增值税|利润|结算/u.test(line) && !/合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价/u.test(line)) continue;
+      const key = line.replace(/[\s，。,.;；:：]/gu, '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push(`- ${line}`);
+      if (lines.length >= 12) break;
+    }
+    if (lines.length >= 12) break;
+  }
+  return lines.length ? `【当前小节可直接落位的资料事实】\n${lines.join('\n')}\n上述事实均来自本小节相关绑定资料；与“${sectionTitle}”相关时必须自然写入正文，不得改写数值。` : '';
 }
 
 export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number }) {
   const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
+  const sectionFactCard = buildSectionFactCard(input.sectionTitle, sectionEvidence);
   const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 3500, 9000) });
   const prompt = [
     `文档模板：${input.template.name}`,
@@ -332,10 +608,12 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     input.requirement ? `用户要求：${input.requirement}` : '',
     input.projectContext ? `上下文：\n${input.projectContext}` : '',
     input.factCoverageContext || '',
+    sectionFactCard,
     input.roleContext,
     input.missingFacts.length ? `需要特别补足的信息：${input.missingFacts.join('、')}` : '',
     input.qualityFeedback ? `上轮小节未通过质量检查，必须修正：${input.qualityFeedback}` : '',
     `请只生成当前二级小节正文，使用“### ${input.sectionTitle}”作为小节标题，目标约 ${input.targetWords} 字${input.maxWords ? `，最多不超过 ${input.maxWords} 字` : ''}。`,
+    '本章二级小节结构已由系统按模板和提示词锁定；不得删除、重命名、合并或重排当前小节标题。',
     SECTION_GENERATION_SAFETY_RULES,
     evidenceText ? `绑定材料：\n${evidenceText}` : '',
   ].filter(Boolean).join('\n\n');
@@ -355,7 +633,106 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   return normalized.replace(/^##\s+.*\n+/u, '').trim();
 }
 
-export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; fileRolesHash?: string; allowPartialResult?: boolean; maxSectionConcurrency?: number; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry' }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
+interface SectionWritingTask {
+  sectionTitle: string;
+  taskTitle: string;
+  targetWords: number;
+  index: number;
+  total: number;
+}
+
+function writingTopicTitle(sectionTitle: string, index: number, total: number) {
+  const lower = sectionTitle.toLowerCase();
+  const generic = ['资料依据与适用范围', '对象范围与关键参数', '实施方法与组织安排', '质量安全控制要求', '检查验收与闭环管理'];
+  const resource = ['资源配置依据', '材料设备规格与数量', '进场组织与保管要求', '使用调配与过程核验', '验收记录与动态调整'];
+  const technical = ['施工准备与技术依据', '主要工艺流程', '材料设备与参数控制', '质量验收要点', '成品保护与问题处置'];
+  const safety = ['风险识别与控制边界', '防护设施与作业条件', '人员设备安全管理', '检查频次与整改闭环', '应急响应与资料留存'];
+  const quality = ['质量目标与验收依据', '过程控制点', '材料设备复核', '检验批与验收资料', '问题整改与成品保护'];
+  const topics = /资源|材料|设备|人材机/u.test(sectionTitle) ? resource
+    : /施工|工艺|技术|安装|土建|结构|给排水|电气/u.test(sectionTitle) || /method|technical/u.test(lower) ? technical
+      : /安全|文明|危大|风险/u.test(sectionTitle) ? safety
+        : /质量|验收|标准/u.test(sectionTitle) ? quality
+          : generic;
+  return total <= 1 ? sectionTitle : `${sectionTitle}：${topics[index % topics.length]}`;
+}
+
+function writingTasksForSection(sectionTitle: string, targetWords: number): SectionWritingTask[] {
+  const maxTaskWords = Math.max(900, Math.floor(Number(process.env.DOCUMENT_WRITING_TASK_MAX_WORDS ?? 1800)));
+  const taskCount = targetWords >= 1400 ? Math.max(2, Math.ceil(targetWords / maxTaskWords)) : targetWords > maxTaskWords * 1.2 ? Math.ceil(targetWords / maxTaskWords) : 1;
+  const perTask = Math.max(650, Math.ceil(targetWords / taskCount));
+  if (taskCount <= 1) return [{ sectionTitle, taskTitle: sectionTitle, targetWords, index: 1, total: 1 }];
+  return Array.from({ length: taskCount }, (_, index) => ({
+    sectionTitle,
+    taskTitle: writingTopicTitle(sectionTitle, index, taskCount),
+    targetWords: perTask,
+    index: index + 1,
+    total: taskCount,
+  }));
+}
+
+function sectionContentBody(content: string) {
+  return content.replace(/^#{3,4}\s+.*\n+/u, '').trim();
+}
+
+async function supplementSectionContent(input: Parameters<typeof buildLlmSectionContent>[0] & { currentContent: string; targetWords: number }) {
+  const currentLength = documentTextLength(input.currentContent);
+  const missing = input.targetWords - currentLength;
+  if (missing <= Math.max(260, Math.floor(input.targetWords * 0.12))) return input.currentContent;
+  const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
+  const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(Math.min(input.targetWords, 2600), 3500, 9000) });
+  const patchTarget = Math.min(Math.max(500, missing), Math.max(900, Math.floor(input.targetWords * 0.45)));
+  const patch = await callWithTimeout(signal => callDocumentLlm([
+    '你是专业文档小节补写专家。只做补写，不重写全文。',
+    FORMAL_WRITING_RULES,
+    '必须保留已有正文中的事实、参数、编号和结构；只补充缺口段落，不删除、不压缩已有内容。',
+    SECTION_GENERATION_SAFETY_RULES,
+    input.promptTexts,
+  ].filter(Boolean).join('\n\n'), [
+    `章节标题：${input.chapter.title}`,
+    `当前小节：${input.sectionTitle}`,
+    input.requirement ? `用户要求：${input.requirement}` : '',
+    input.factCoverageContext || '',
+    `当前小节约 ${currentLength} 字，目标约 ${input.targetWords} 字，本轮补充约 ${patchTarget} 字。`,
+    '请输出可直接追加或插入到本小节的补充段落；不要重复小节标题，不要解释生成过程。',
+    evidenceText ? `绑定材料：\n${evidenceText}` : '',
+    `已有小节正文：\n${sectionContentBody(input.currentContent).slice(0, 12000)}`,
+  ].filter(Boolean).join('\n\n'), false, { maxTokens: outputTokensForChapter(patchTarget), temperature: 0.25, signal }), Math.max(90000, Math.min(180000, timeoutMsForChapter(patchTarget))), input.signal);
+  const normalizedPatch = sanitizeFormalMarkdown(removeUnwantedDrawingImages(patch || '', input.forbidDrawingImages)).replace(/^#{3,4}\s+.*\n+/u, '').trim();
+  return normalizedPatch ? `${input.currentContent.trim()}\n\n${normalizedPatch}` : input.currentContent;
+}
+
+function fallbackPlannedSectionContent(sectionTitle: string) {
+  return `### ${sectionTitle}\n\n${sectionTitle}应作为本章首轮成稿的独立控制单元组织实施。编制和执行过程中，应围绕已确认的项目资料、设计文件、清单信息、技术标准、施工边界、资源配置、质量安全要求和验收记录形成闭环；资料中已经明确的规格、数量、标准编号、工艺参数、检查频次和验收指标应在对应工作面中直接采用，资料未明确的工程实体参数不得擅自确定，应按审批程序复核确认后实施。`;
+}
+
+function ensureNonEmptySectionContent(content: string, sectionTitle: string) {
+  const normalized = sanitizeFormalMarkdown(content || '').trim();
+  const body = normalized.replace(/^#{3,4}\s+.+$/gmu, '').trim();
+  if (documentTextLength(body) >= 80) return normalized;
+  return fallbackPlannedSectionContent(sectionTitle);
+}
+
+async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSectionContent>[0]) {
+  const tasks = writingTasksForSection(input.sectionTitle, input.targetWords);
+  const parts: string[] = [];
+  for (const task of tasks) {
+    throwIfAborted(input.signal);
+    const taskContent = await buildLlmSectionContent({
+      ...input,
+      sectionTitle: task.sectionTitle,
+      targetWords: task.targetWords,
+      maxWords: Math.ceil(task.targetWords * 1.18),
+      qualityFeedback: task.total > 1 ? `这是首轮生成的主题任务 ${task.index}/${task.total}，只聚焦“${task.taskTitle}”。不得重复同小节其他主题的通用表述；优先写入与本主题相关的资料事实、规格、数量、标准、检查要求和执行动作。` : input.qualityFeedback,
+    });
+    if (taskContent) parts.push(sectionContentBody(taskContent));
+  }
+  if (parts.length === 0) return undefined;
+  let merged = `### ${input.sectionTitle}\n\n${parts.join('\n\n')}`;
+  merged = await supplementSectionContent({ ...input, currentContent: merged, targetWords: input.targetWords });
+  return sanitizeFormalMarkdown(removeUnwantedDrawingImages(merged, input.forbidDrawingImages));
+}
+
+export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; fileRolesHash?: string; allowPartialResult?: boolean; maxSectionConcurrency?: number; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry' }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   const targets = sectionTargets(input.chapter, input.targetWords);
   if (targets.length < 2) return undefined;
   const configuredConcurrency = Number(process.env.DOCUMENT_SECTION_CONCURRENCY ?? input.maxSectionConcurrency ?? 1);
@@ -365,17 +742,20 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
   const runSection = async (item: { title: string; targetWords: number }, compact = false) => {
     input.onSectionProgress?.({ completed: completedCount, total: targets.length, sectionTitle: item.title, phase: compact ? 'retry' : 'start' });
     try {
-      const content = await buildQualifiedSectionSupplement({
+      const sectionInput = {
         ...input,
         evidence: input.evidence,
         projectContext: input.projectContext,
-        roleContext: input.roleContext,
+        roleContext: input.roleContext || '',
         factCoverageContext: input.factCoverageContext,
         sectionTitle: item.title,
         targetWords: item.targetWords,
         maxWords: input.maxWords ? Math.max(item.targetWords, Math.ceil(input.maxWords / targets.length)) : Math.ceil(item.targetWords * 1.12),
         timeoutMs: Math.max(120000, Math.min(300000, Math.ceil(timeoutMsForChapter(item.targetWords) * 0.55))),
-      }, sectionSupplementAttempts(targets.length));
+      };
+      const content = item.targetWords >= 1400
+        ? await buildTaskBasedSectionContent(sectionInput)
+        : await buildQualifiedSectionSupplement(sectionInput, sectionSupplementAttempts(targets.length));
       if (content) {
         completedCount += 1;
         input.onSectionProgress?.({ completed: completedCount, total: targets.length, sectionTitle: item.title, phase: 'complete' });
@@ -392,17 +772,22 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
     const batchResults = await Promise.all(batch.map(item => runSection(item)));
     batchResults.forEach((content, index) => { results[offset + index] = content; });
   }
-  const missingIndexes = results.map((content, index) => content ? -1 : index).filter(index => index >= 0);
+  let missingIndexes = results.map((content, index) => content ? -1 : index).filter(index => index >= 0);
   for (let offset = 0; offset < missingIndexes.length; offset += concurrency) {
     throwIfAborted(input.signal);
     const batchIndexes = missingIndexes.slice(offset, offset + concurrency);
     const batchResults = await Promise.all(batchIndexes.map(index => runSection(targets[index], true)));
     batchResults.forEach((content, index) => { if (content) results[batchIndexes[index]] = content; });
   }
-  if (results.some(item => !item) && !input.allowPartialResult) return undefined;
-  const completedSections = results.filter(Boolean);
-  if (completedSections.length === 0) return undefined;
-  return sanitizeFormalMarkdown(removeUnwantedDrawingImages(`## ${input.chapter.title}\n\n${completedSections.join('\n\n')}`, input.forbidDrawingImages));
+  missingIndexes = results.map((content, index) => content ? -1 : index).filter(index => index >= 0);
+  for (const index of missingIndexes) {
+    throwIfAborted(input.signal);
+    const target = targets[index];
+    const content = await runSection({ ...target, targetWords: Math.max(target.targetWords, 900) }, true);
+    if (content) results[index] = content;
+  }
+  const sectionContents = results.map((content, index) => ensureNonEmptySectionContent(content || fallbackPlannedSectionContent(targets[index].title), targets[index].title));
+  return sanitizeFormalMarkdown(removeUnwantedDrawingImages(`## ${input.chapter.title}\n\n${sectionContents.join('\n\n')}`, input.forbidDrawingImages));
 }
 
 export function outputTokensForChapter(minWords: number, targetWords?: number) {
@@ -412,10 +797,10 @@ export function outputTokensForChapter(minWords: number, targetWords?: number) {
 
 export function timeoutMsForChapter(targetWords?: number) {
   const words = targetWords || 1200;
-  if (words >= 8000) return 900000;
-  if (words >= 5000) return 600000;
-  if (words >= 3000) return 420000;
-  return 300000;
+  if (words >= 8000) return 360000;
+  if (words >= 5000) return 300000;
+  if (words >= 3000) return 240000;
+  return 180000;
 }
 
 export function expansionRoundsForDeficit(deficitChars: number) {
@@ -499,7 +884,7 @@ function sectionSupplementQualityIssue(sectionTitle: string, content: string) {
     .filter(line => !/^\s*\|?\s*:?-{3,}:?/u.test(line))
     .join('\n');
   const effectiveLength = documentTextLength(body);
-  if (effectiveLength < 180) return `正文有效内容不足：${sectionTitle} 当前约 ${effectiveLength} 字`;
+  if (effectiveLength < 360) return `正文有效内容不足：${sectionTitle} 当前约 ${effectiveLength} 字`;
   if (/资料未提供|信息有限|无法确定|待补充|建议补充更多资料|以下是|本文档|本小节围绕/u.test(body)) return `存在空泛或说明性话术：${sectionTitle}`;
   return undefined;
 }
@@ -544,23 +929,31 @@ export async function supplementShortSections(input: { template: DocumentTemplat
     const isEmptyOrNearlyEmpty = currentWords < 80;
     const forced = forcedTitleSet.has(target.title);
     return { ...target, currentWords, priority: forced ? 0 : isEmptyOrNearlyEmpty ? 1 : 2, forced };
-  }).filter(target => target.forced || target.currentWords < 80)
+  }).filter(target => target.forced || target.currentWords < Math.max(360, Math.floor(target.targetWords * 0.7)))
     .sort((a, b) => a.priority - b.priority || a.currentWords - b.currentWords);
   const supplements = new Map<string, string | undefined>();
-  const configuredConcurrency = Number(process.env.DOCUMENT_SECTION_SUPPLEMENT_CONCURRENCY ?? process.env.DOCUMENT_SECTION_CONCURRENCY ?? input.maxSectionConcurrency ?? 1);
-  const concurrency = Math.max(1, Math.min(supplementTargets.length || 1, 3, Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : 1));
+  const configuredConcurrency = Number(process.env.DOCUMENT_SECTION_SUPPLEMENT_CONCURRENCY ?? process.env.DOCUMENT_SECTION_CONCURRENCY ?? input.maxSectionConcurrency ?? 2);
+  const concurrency = Math.max(1, Math.min(supplementTargets.length || 1, 2, Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : 2));
   for (let offset = 0; offset < supplementTargets.length; offset += concurrency) {
     const batch = supplementTargets.slice(offset, offset + concurrency);
     const remainingRoom = input.maxWords ? Math.max(0, input.maxWords - documentTextLength(content)) : Number.POSITIVE_INFINITY;
     const perSectionRoom = Number.isFinite(remainingRoom) && remainingRoom > 200 ? Math.max(260, Math.floor(remainingRoom / batch.length)) : undefined;
     const attempts = sectionSupplementAttempts(supplementTargets.length);
-    const batchResults = await Promise.all(batch.map(target => buildQualifiedSectionSupplement({
-      ...input,
-      sectionTitle: target.title,
-      targetWords: Math.max(350, target.targetWords - target.currentWords),
-      maxWords: perSectionRoom,
-      timeoutMs: Math.max(120000, Math.min(300000, Math.ceil(timeoutMsForChapter(Math.max(350, target.targetWords - target.currentWords)) * 0.55))),
-    }, attempts)));
+    const batchResults = await Promise.all(batch.map(async target => {
+      try {
+        const targetWords = Math.max(350, Math.min(target.targetWords - target.currentWords, 900));
+        return await buildQualifiedSectionSupplement({
+          ...input,
+          evidence: input.evidence,
+          sectionTitle: target.title,
+          targetWords,
+          maxWords: perSectionRoom ? Math.min(perSectionRoom, 1200) : 1200,
+          timeoutMs: Math.max(90000, Math.min(150000, Math.ceil(timeoutMsForChapter(targetWords) * 0.45))),
+        }, attempts);
+      } catch {
+        return undefined;
+      }
+    }));
     batch.forEach((target, index) => { supplements.set(target.title, batchResults[index]); });
   }
   for (const target of supplementTargets) {
@@ -570,34 +963,40 @@ export async function supplementShortSections(input: { template: DocumentTemplat
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(content, input.forbidDrawingImages));
 }
 
-export async function expandChapterToTarget(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; content: string; evidence: DocumentEvidence[]; promptTexts: string; requirement?: string; roleContext: string; targetChars: number; maxChars?: number; forbidDrawingImages: boolean; maxTokens?: number; signal?: AbortSignal }) {
+export async function expandChapterToTarget(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; content: string; evidence: DocumentEvidence[]; promptTexts: string; requirement?: string; roleContext: string; targetChars: number; maxChars?: number; forbidDrawingImages: boolean; maxTokens?: number; signal?: AbortSignal; strictBudget?: boolean }) {
   let content = input.content;
   let rounds = 0;
-  const maxRounds = expansionRoundsForDeficit(input.targetChars - documentTextLength(content));
+  const maxRounds = input.strictBudget ? expansionRoundsForDeficit(input.targetChars - documentTextLength(content)) : Math.min(1, expansionRoundsForDeficit(input.targetChars - documentTextLength(content)));
   const maxChars = input.maxChars ?? Math.ceil(input.targetChars * 1.12);
   for (; rounds < maxRounds && documentTextLength(content) < input.targetChars && documentTextLength(content) < maxChars; rounds += 1) {
     throwIfAborted(input.signal);
     const before = content;
-    const expanded = await callWithTimeout(
-      signal => expandChapterContent({
-        template: input.template,
-        chapter: input.chapter,
-        currentContent: content,
-        evidence: input.evidence,
-        promptTexts: input.promptTexts,
-        requirement: input.requirement,
-        roleContext: input.roleContext,
-        targetChars: input.targetChars,
-        maxChars,
-        forbidDrawingImages: input.forbidDrawingImages,
-        maxTokens: input.maxTokens,
-        signal,
-      }),
-      timeoutMsForChapter(input.targetChars),
-      input.signal,
-    );
-    if (!expanded || expanded === before) break;
-    content = expanded;
+    try {
+      const currentChars = documentTextLength(content);
+      const incrementalTarget = Math.min(input.targetChars, currentChars + (input.strictBudget ? 5600 : 3200));
+      const expanded = await callWithTimeout(
+        signal => expandChapterContent({
+          template: input.template,
+          chapter: input.chapter,
+          currentContent: content,
+          evidence: input.evidence,
+          promptTexts: input.promptTexts,
+          requirement: input.requirement,
+          roleContext: input.roleContext,
+          targetChars: incrementalTarget,
+          maxChars: Math.min(maxChars, currentChars + (input.strictBudget ? 7000 : 4200)),
+          forbidDrawingImages: input.forbidDrawingImages,
+          maxTokens: Math.min(input.maxTokens ?? outputTokensForChapter(currentChars, incrementalTarget), outputTokensForChapter(currentChars, incrementalTarget)),
+          signal,
+        }),
+        120000,
+        input.signal,
+      );
+      if (!expanded || expanded === before) break;
+      content = expanded;
+    } catch {
+      break;
+    }
   }
   return { content, rounds };
 }
@@ -607,9 +1006,9 @@ export async function expandDocumentToBudget(input: { template: DocumentTemplate
   if (!input.budget.minChars) return input.chapters;
   let chapters = input.chapters;
   let totalChars = documentTextLength(chapters.map(chapter => chapter.content).join('\n\n'));
-  const maxDocumentRounds = expansionRoundsForDeficit(input.budget.minChars - totalChars);
-  const configuredConcurrency = Number(process.env.DOCUMENT_BUDGET_EXPAND_CONCURRENCY ?? 1);
-  const concurrency = Math.max(1, Math.min(input.chapters.length || 1, 2, Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : 1));
+  const maxDocumentRounds = Math.min(input.budget.longformStrict ? 3 : 1, expansionRoundsForDeficit(input.budget.minChars - totalChars));
+  const configuredConcurrency = Number(process.env.DOCUMENT_BUDGET_EXPAND_CONCURRENCY ?? 2);
+  const concurrency = Math.max(1, Math.min(input.chapters.length || 1, input.budget.longformStrict ? 3 : 2, Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : 2));
   const lowGrowthChapterIds = new Set<string>();
   const documentMaxChars = input.budget.maxChars;
   for (let round = 0; round < maxDocumentRounds && totalChars < input.budget.minChars && (!documentMaxChars || totalChars < documentMaxChars); round += 1) {
@@ -632,9 +1031,14 @@ export async function expandDocumentToBudget(input: { template: DocumentTemplate
       const batch = deficits.slice(offset, offset + batchSize);
       const perChapterRoom = Number.isFinite(remainingDocumentRoom) ? Math.max(500, Math.floor(remainingDocumentRoom / batch.length)) : undefined;
       const results = await Promise.all(batch.map(async item => {
-        const maxChars = perChapterRoom ? Math.min(Math.ceil(item.target * 1.12), item.current + perChapterRoom) : Math.ceil(item.target * 1.12);
-        const expanded = await expandChapterToTarget({ template: input.template, chapter: { id: item.chapter.id, title: item.chapter.title, purpose: item.chapter.title, queries: [], requiredFacts: [], sections: item.chapter.sections }, content: item.chapter.content, evidence: item.chapter.evidence, promptTexts: input.promptTexts, requirement: input.requirement, roleContext: '', targetChars: item.target, maxChars, forbidDrawingImages: input.forbidDrawingImages, maxTokens: outputTokensForChapter(item.current, item.target), signal: input.signal });
-        return { id: item.chapter.id, beforeChars: item.current, content: expanded.content };
+        try {
+          const incrementalTarget = Math.min(item.target, item.current + Math.max(input.budget.longformStrict ? 3600 : 1200, Math.min(item.deficit, input.budget.longformStrict ? 7600 : 3200)));
+          const maxChars = perChapterRoom ? Math.min(Math.ceil(incrementalTarget * 1.12), item.current + perChapterRoom) : Math.ceil(incrementalTarget * 1.12);
+          const expanded = await expandChapterToTarget({ template: input.template, chapter: { id: item.chapter.id, title: item.chapter.title, purpose: item.chapter.title, queries: [], requiredFacts: [], sections: item.chapter.sections }, content: item.chapter.content, evidence: item.chapter.evidence, promptTexts: input.promptTexts, requirement: input.requirement, roleContext: '', targetChars: incrementalTarget, maxChars, forbidDrawingImages: input.forbidDrawingImages, maxTokens: outputTokensForChapter(item.current, incrementalTarget), signal: input.signal, strictBudget: input.budget.longformStrict });
+          return { id: item.chapter.id, beforeChars: item.current, content: expanded.content };
+        } catch {
+          return { id: item.chapter.id, beforeChars: item.current, content: item.chapter.content };
+        }
       }));
       for (const result of results) {
         const afterChars = documentTextLength(result.content);
@@ -643,7 +1047,7 @@ export async function expandDocumentToBudget(input: { template: DocumentTemplate
       }
       totalChars = documentTextLength(chapters.map(chapter => chapter.content).join('\n\n'));
     }
-    if (totalChars <= roundStartChars + 300) break;
+    if (totalChars <= roundStartChars + (input.budget.longformStrict ? 80 : 300)) break;
   }
   return chapters;
 }

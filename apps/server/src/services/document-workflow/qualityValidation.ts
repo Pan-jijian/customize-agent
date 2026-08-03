@@ -66,7 +66,8 @@ export function degenerateContentIssues(markdown: string, chapters: DocumentDraf
 
 function isHardExportBlockingIssue(issue: ValidationIssue) {
   if (!isExportBlockingIssue(issue)) return false;
-  if (/章节审查|最终质量审查|规划小节正文过短|正文存在空泛占位表达/u.test(issue.message)) return false;
+  if (/章节审查|最终质量审查|规划小节正文过短|正文篇幅明显低于目标|正文缺少规划小节|缺少规划小节|小节内容补写未完成|正文存在空泛占位表达|结构化事实读取不足|正文可能未显式覆盖|仅包含文件类型和占位符|不在本次招标范围内/u.test(issue.message)) return false;
+  if (/空小节|小节只有标题|只有标题或表格无正文/u.test(issue.message) && !/全文|整篇|生成未完成|章节生成失败/u.test(issue.message)) return false;
   return true;
 }
 
@@ -75,13 +76,13 @@ export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentF
     { key: 'no_errors', label: '无阻断级校验错误', passed: !issues.some(issue => issue.level === 'error' && isHardExportBlockingIssue(issue)) },
     { key: 'basic_facts', label: '基础事实齐全', passed: factsModel.project.length > 0 },
     { key: 'source_traceability', label: '事实具备来源追踪', passed: [...factsModel.project, ...factsModel.schedule, ...factsModel.quality, ...factsModel.safety].every(fact => Boolean(fact.sourceFile)) },
-    { key: 'structured_precision', label: '结构化精确参数已使用', passed: factsModel.preciseFacts.length < PRECISE_FACT_MIN_TOKEN_COUNT || issues.every(issue => !EXPORT_GATE_PRECISION_ISSUE_RE.test(issue.message)) },
+    { key: 'structured_precision', label: '结构化精确参数已使用', passed: factsModel.preciseFacts.length < PRECISE_FACT_MIN_TOKEN_COUNT || issues.every(issue => issue.level !== 'error' || !EXPORT_GATE_PRECISION_ISSUE_RE.test(issue.message)) },
     { key: 'chapter_evidence', label: '章节均具备证据', passed: chapters.every(chapter => chapter.evidence.length > 0) },
     { key: 'no_missing_content', label: '无资料未提供章节', passed: chapters.every(chapter => !chapter.content.includes('资料未提供')) },
     { key: 'no_project_contamination', label: '无项目污染和事实一致性阻断', passed: !issues.some(issue => issue.level === 'error' && EXPORT_GATE_PROJECT_CONTAMINATION_RE.test(issue.message) && isHardExportBlockingIssue(issue)) },
   ];
   const blockingIssues = issues.filter(issue => issue.level === 'error' && isHardExportBlockingIssue(issue));
-  return { passed: blockingIssues.length === 0 && checklist.every(item => item.passed), blockingIssues, checklist };
+  return { passed: blockingIssues.length === 0, blockingIssues, checklist };
 }
 
 export function fallbackEvaluatorForRule(rule: AutoDocumentSpecGateRule): GateRuleEvaluator {
@@ -140,12 +141,15 @@ export function duplicateBasicInfoIssues(markdown: string): ValidationIssue[] {
 }
 
 export function formalStyleIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
   const hit: string[] = [];
   for (const item of FORMAL_STYLE_FORBIDDEN_PHRASES) {
     if (markdown.includes(item)) hit.push(item);
   }
-  if (hit.length === 0) return [];
-  return [{ level: 'warning', message: `存在模板化前缀或套话：${hit.join('、')}`, suggestion: '请删除“本节/本章将/以下从”等前缀，标题后直接进入对象、动作、措施、检查和闭环。' }];
+  if (hit.length > 0) issues.push({ level: 'warning', message: `存在模板化前缀或套话：${hit.join('、')}`, suggestion: '请删除“本节/本章将/以下从”等前缀，标题后直接进入对象、动作、措施、检查和闭环。' });
+  const backstage = markdown.match(/OCR|知识库|提示词|绑定片段|兜底|后台|文件路径|PDF|DWG|Excel|识别错误/giu);
+  if (backstage?.length) issues.push({ level: 'error', message: `正文包含后台或资料处理话术：${[...new Set(backstage)].join('、')}`, suggestion: '请改为正式文档语言，例如“资料文字不清”“资料口径不一致”“项目资料”，不得暴露后台处理过程。' });
+  return issues;
 }
 
 export function minChapterSectionIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections'>>): ValidationIssue[] {
@@ -177,10 +181,12 @@ export function tocHierarchyIssues(markdown: string): ValidationIssue[] {
 function normalizeStructureTitle(title: string) {
   return title
     .replace(/^#+\s*/u, '')
-    .replace(/^第[一二三四五六七八九十百千万\d]+章\s*/u, '')
-    .replace(/^\d+(?:\.\d+)+[.．、]?\s*/u, '')
-    .replace(/^\d+[.．、]\s*/u, '')
-    .replace(/[\s:：.。]+$/gu, '')
+    .replace(/^第[一二三四五六七八九十百千万\d]+[章节篇部分]\s*/u, '')
+    .replace(/^\d+(?:\.\d+)*(?:[.．、]|\s)+/u, '')
+    .replace(/[（）]/gu, match => match === '（' ? '(' : ')')
+    .replace(/[\s:：.。；;,，、]+$/gu, '')
+    .replace(/的(?=保障体系|管理体系|控制体系|措施|方案|计划|要求)/gu, '')
+    .replace(/[\s()（）:：.。；;,，、-]/gu, '')
     .trim();
 }
 
@@ -280,9 +286,9 @@ function gapForSection(chapterTitle: string, sectionTitle: string, level: 3 | 4,
   const bodyLength = sectionBodyTextLength(body);
   const hasTable = MARKDOWN_TABLE_ROW_RE.test(body) && MARKDOWN_TABLE_DIVIDER_RE.test(body);
   const bodyWithoutTables = body.split('\n').filter(line => !MARKDOWN_TABLE_ROW_RE.test(line) && !MARKDOWN_TABLE_DIVIDER_RE.test(line)).join('\n');
-  const nonTableLength = sectionBodyTextLength(bodyWithoutTables);
-  const hasOnlyHeadingsOrTable = bodyLength < 80 && /^####\s+/mu.test(bodyWithoutTables);
-  if (hasOnlyHeadingsOrTable || (hasTable && nonTableLength < 20)) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'table_only', planned, message: `${chapterTitle} 小节只有标题或表格无正文：${sectionTitle}` };
+  const nonTableBody = bodyWithoutTables.replace(/^#{1,6}\s+.+$/gmu, '');
+  const nonTableLength = sectionBodyTextLength(nonTableBody);
+  if (hasTable && nonTableLength < 20) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'table_only', planned, message: `${chapterTitle} 小节只有标题或表格无正文：${sectionTitle}` };
   if (bodyLength >= 80 && nonTableLength >= 20) return undefined;
   if (bodyLength === 0) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: `${chapterTitle} 空小节：${sectionTitle}` };
   if (bodyLength < 180) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'too_short', planned, message: `${chapterTitle} ${planned ? '规划小节' : '正文小节'}正文过短：${sectionTitle}` };
@@ -321,21 +327,33 @@ export function collectSectionContentGaps(markdown: string, chapters: Array<Pick
 
 export function sectionContentIntegrityIssues(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content' | 'sections'>>): ValidationIssue[] {
   return collectSectionContentGaps(markdown, chapters).map(gap => ({
-    level: 'error' as const,
+    level: gap.reason === 'empty' ? 'error' as const : 'warning' as const,
     message: gap.message,
     suggestion: gap.reason === 'missing_planned_section'
-      ? '请补写该二级小节，不能只在目录中出现。'
+      ? '建议补写该二级小节；如正文已在相邻小节覆盖，可作为质量优化项处理。'
       : gap.reason === 'table_only'
         ? '请在表格前后补充来源、适用范围、结论和执行要求。'
-        : '请补充与该小节相关的材料事实、适用边界和必要说明。',
+        : '建议补充与该小节相关的材料事实、适用边界和必要说明。',
   }));
+}
+
+function shouldIgnorePreciseToken(token: string, context: string) {
+  if (/万元|元|报价|单价|合价|综合单价|预留金|税率|增值税|利润|结算/u.test(`${token} ${context}`)) return true;
+  if (/OCR|识别错误|乱码|无法确认|疑似|不确定|语义断裂|页码|目录/u.test(context)) return true;
+  if (/^\d+$/.test(token) && Number(token) < 10) return true;
+  return false;
 }
 
 function collectPreciseFactTokens(factsModel: DocumentFactsModel) {
   const tokens = new Set<string>();
   for (const fact of factsModel.preciseFacts) {
-    if (!PRECISE_FACT_SOURCE_RE.test(`${fact.processingType || ''} ${fact.roleId} ${fact.sourceFile}`)) continue;
-    for (const match of `${fact.key} ${fact.value}`.matchAll(PRECISE_FACT_TOKEN_RE)) tokens.add(match[0]);
+    const source = `${fact.processingType || ''} ${fact.roleId} ${fact.sourceFile}`;
+    if (!PRECISE_FACT_SOURCE_RE.test(source) && fact.roleId !== 'precise_fact') continue;
+    const context = `${fact.key} ${fact.fieldName || ''} ${fact.value}`;
+    for (const match of context.matchAll(PRECISE_FACT_TOKEN_RE)) {
+      const token = match[0].trim();
+      if (!shouldIgnorePreciseToken(token, context)) tokens.add(token);
+    }
   }
   return [...tokens];
 }
@@ -353,7 +371,7 @@ export function preciseFactUsageIssues(markdown: string, factsModel: DocumentFac
   const normalized = markdown.replace(WHITESPACE_RE, '');
   const tokens = collectPreciseFactTokens(factsModel);
   const used = countUsedPreciseTokens(tokens, normalized);
-  if (tokens.length >= PRECISE_FACT_MIN_TOKEN_COUNT && used / tokens.length < PRECISE_FACT_MIN_USAGE_RATE) issues.push({ level: 'error', message: `结构化精确参数使用不足：${used}/${tokens.length}`, suggestion: '请把资料中的规格、参数、数量、时间、资源、金额、比例和标准编号写入对应章节，禁止泛化概括。' });
+  if (tokens.length >= PRECISE_FACT_MIN_TOKEN_COUNT && used / tokens.length < PRECISE_FACT_MIN_USAGE_RATE) issues.push({ level: 'warning', message: `可靠精确参数使用不足：${used}/${tokens.length}`, suggestion: '请将资料中可靠的规格、参数、数量、时间、比例和标准编号写入对应章节；商务金额、单价、税率、预留金不得写入正文。' });
   if (factsModel.bills.length > 0 && !STRUCTURED_DATA_CONTENT_RE.test(markdown)) issues.push({ level: 'error', message: '正文未体现结构化数据资料', suggestion: '请从表格、列表或明细中提取对象、单位、数量、规格和关键参数补入对应章节。' });
   if (factsModel.drawings.length > 0 && !SPECIFICATION_CONTENT_RE.test(markdown)) issues.push({ level: 'error', message: '正文未体现设计/方案/说明类资料', suggestion: '请从设计、方案或说明资料中提取对象、流程、节点、做法、配置、规则和标准要求。' });
   return issues;
@@ -390,7 +408,7 @@ export function plannedAutoSpecGateIssues(markdown: string, template: DocumentTe
   let minTables = 0;
   for (const gate of gates) {
     minTables = Math.max(minTables, gate.minTables || 0);
-    for (const item of gate.requiredTexts) if (!markdown.includes(item)) issues.push({ level: 'error', message: `配置要求缺少必要内容：${item}`, suggestion: '请按当前模板匹配的专业规则补齐必要内容。' });
+    for (const item of gate.requiredTexts) if (!markdown.includes(item)) issues.push({ level: 'warning', message: `配置要求缺少必要内容：${item}`, suggestion: '请按当前模板匹配的专业规则补齐必要内容。' });
     for (const item of gate.forbiddenTexts) if (markdown.includes(item)) issues.push({ level: 'error', message: `配置要求不得出现：${item}`, suggestion: '请根据当前模板匹配的专业规则清理正文污染内容。' });
   }
   if (MARKDOWN_TOP_HEADING_RE.test(markdown)) issues.push({ level: 'error', message: '正式正文存在 Markdown 标题符号 #', suggestion: '导出正文应去除 Markdown 标题符号，保留正式标题文字。' });

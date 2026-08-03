@@ -26,6 +26,8 @@ export interface DocumentBudget {
   charsPerPage: number;
   chapterTargets: Map<string, number>;
   source: 'explicit' | 'template' | 'spec' | 'default';
+  mode: ExplicitLengthMode;
+  longformStrict: boolean;
 }
 
 export function parseChineseNumber(value: string) {
@@ -38,7 +40,7 @@ export function parseChineseNumber(value: string) {
   return undefined;
 }
 
-type ExplicitLengthMode = 'minimum' | 'approximate' | 'exact';
+export type ExplicitLengthMode = 'minimum' | 'approximate' | 'exact';
 
 function explicitLengthMode(prefix = '', suffix = ''): ExplicitLengthMode {
   const text = `${prefix}${suffix}`;
@@ -111,7 +113,9 @@ export function buildDocumentBudget(input: { requirement?: string; promptTexts: 
     const fallback = Math.floor(Math.max(specMinimum, dynamicFallback) * targetScale);
     chapterTargets.set(chapter.id, Math.max(fallback, target));
   }
-  return { targetPages, minPages, maxPages, targetChars, minChars, maxChars, charsPerPage, chapterTargets, source };
+  const mode = charMode;
+  const longformStrict = Boolean(hasExplicitTarget && (explicitMinimum || mode === 'exact') && (targetChars || minChars || 0) >= 40000);
+  return { targetPages, minPages, maxPages, targetChars, minChars, maxChars, charsPerPage, chapterTargets, source, mode, longformStrict };
 }
 
 export function pageTargetIssues(settings: DocumentGenerationSettings | DocumentExportSettings | undefined, markdown: string): ValidationIssue[] {

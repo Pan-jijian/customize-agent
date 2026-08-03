@@ -170,6 +170,7 @@ export default function DocumentsPage() {
   const [kbFiles, setKbFiles] = useState<KbFileItem[]>([]);
   const [fileSearching, setFileSearching] = useState(false);
   const [templateFileQuery, setTemplateFileQuery] = useState('');
+  const [activeTemplateFileRoleId, setActiveTemplateFileRoleId] = useState<string>();
   const [expandedTemplateFileKeys, setExpandedTemplateFileKeys] = useState<React.Key[]>([]);
   const [pageLoading, setPageLoading] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -188,7 +189,14 @@ export default function DocumentsPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [templateValidations, setTemplateValidations] = useState<Record<string, DocumentTemplateValidation>>({});
-  const fileRoleOptions = roles.filter(role => role.type === 'file').map(role => ({ label: role.name, value: role.id }));
+  const selectedProjectRoleConfigId = Form.useWatch('projectRoleConfigId', form);
+  const selectedProjectRoleConfig = useMemo(() => roleConfigs.find(config => config.id === selectedProjectRoleConfigId), [roleConfigs, selectedProjectRoleConfigId]);
+  const scopedFileRoleIds = useMemo(() => new Set((selectedProjectRoleConfig?.fileRoles || []).map(item => item.roleId)), [selectedProjectRoleConfig]);
+  const fileRoleOptions = useMemo(() => {
+    const fileRoles = roles.filter(role => role.type === 'file' && (!selectedProjectRoleConfigId || scopedFileRoleIds.has(role.id)));
+    return fileRoles.map(role => ({ label: role.name, value: role.id }));
+  }, [roles, scopedFileRoleIds, selectedProjectRoleConfigId]);
+  const activeTemplateFileRole = useMemo(() => fileRoleOptions.find(option => option.value === activeTemplateFileRoleId) || fileRoleOptions[0], [activeTemplateFileRoleId, fileRoleOptions]);
   const selectedGroups = (Form.useWatch('fileBindingGroups', form) || {}) as Record<string, string[]>;
   const templateFileTree = useMemo(() => buildTemplateFileTree(kbFiles), [kbFiles]);
   const filteredTemplateFileTree = useMemo(() => filterTemplateFileTree(templateFileTree, templateFileQuery), [templateFileTree, templateFileQuery]);
@@ -202,6 +210,17 @@ export default function DocumentsPage() {
     walk(templateFileTree);
     return keys;
   }, [templateFileTree]);
+  useEffect(() => {
+    if (!templateModalOpen || !selectedProjectRoleConfigId) return;
+    const groups = (form.getFieldValue('fileBindingGroups') || {}) as Record<string, string[]>;
+    const nextGroups = Object.fromEntries(Object.entries(groups).filter(([roleId]) => scopedFileRoleIds.has(roleId)));
+    if (Object.keys(nextGroups).length !== Object.keys(groups).length) form.setFieldValue('fileBindingGroups', nextGroups);
+  }, [form, scopedFileRoleIds, selectedProjectRoleConfigId, templateModalOpen]);
+  useEffect(() => {
+    if (!templateModalOpen) return;
+    if (fileRoleOptions.length === 0) { setActiveTemplateFileRoleId(undefined); return; }
+    if (!activeTemplateFileRoleId || !fileRoleOptions.some(option => option.value === activeTemplateFileRoleId)) setActiveTemplateFileRoleId(fileRoleOptions[0].value);
+  }, [activeTemplateFileRoleId, fileRoleOptions, templateModalOpen]);
   const [flowSteps, setFlowSteps] = useState<FlowStep[]>([]);
   const [activeFlowKey, setActiveFlowKey] = useState<string | null>(null);
   const [workflowRecord, setWorkflowRecord] = useState<GeneratedDocumentRecord | null>(null);
@@ -458,6 +477,8 @@ export default function DocumentsPage() {
     const value = tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, chapters: [], fileBindings: [] };
     form.resetFields();
     form.setFieldsValue({ ...value, fileBindingGroups: groupFileBindings(value.fileBindings) });
+    const configFileRoleId = roleConfigs.find(config => config.id === value.projectRoleConfigId)?.fileRoles?.[0]?.roleId;
+    setActiveTemplateFileRoleId(configFileRoleId);
     setTemplateFileQuery('');
     void loadTemplateFiles();
     setTemplateModalOpen(true);
@@ -471,8 +492,11 @@ export default function DocumentsPage() {
     try {
       await form.validateFields();
       const v = form.getFieldsValue(true) as TemplateEditorForm;
+      const allowedRoleIds = new Set((roleConfigs.find(config => config.id === v.projectRoleConfigId)?.fileRoles || []).map(item => item.roleId));
       const groupValues = v.fileBindingGroups || {};
-      const fileBindings = Object.entries(groupValues).flatMap(([roleId, paths]) => uniqueValues(paths || []).map(filePath => ({ roleId, filePath })));
+      const fileBindings = Object.entries(groupValues)
+        .filter(([roleId]) => allowedRoleIds.size === 0 || allowedRoleIds.has(roleId))
+        .flatMap(([roleId, paths]) => uniqueValues(paths || []).map(filePath => ({ roleId, filePath })));
       const { fileBindingGroups: _fileBindingGroups, ...templateValues } = v as TemplateEditorForm;
       const template = { ...templateValues, chapters: [], fileBindings } as DocumentTemplate;
       const r = await saveDocumentTemplate(template);
@@ -1080,35 +1104,53 @@ export default function DocumentsPage() {
             </Space>
             <NoticeBox type="info" title="每个文件角色可直接勾选文件或文件夹；勾选文件夹会自动绑定该文件夹下所有文件。保存时仍按具体文件路径绑定，兼容现有模板和生成流程。" style={{ marginBottom: 12 }} />
             <Input.Search allowClear placeholder="搜索文件或文件夹" value={templateFileQuery} onChange={e => setTemplateFileQuery(e.target.value)} style={{ marginBottom: 12 }} />
-            {fileSearching ? <div style={{ textAlign: 'center', padding: 24 }}><Spin /><div style={{ marginTop: 12, color: 'var(--colorTextSecondary)' }}>正在加载知识库文件…</div></div> : fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可用文件角色" /> : templateFileTree.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无知识库文件" /> : fileRoleOptions.map(option => {
-              const checkedPaths = uniqueValues(selectedGroups[option.value] || []).filter(path => allTemplateFileKeys.includes(path));
+            {fileSearching ? <div style={{ textAlign: 'center', padding: 24 }}><Spin /><div style={{ marginTop: 12, color: 'var(--colorTextSecondary)' }}>正在加载知识库文件…</div></div> : fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={selectedProjectRoleConfigId ? '当前项目角色未配置文件角色' : '请先选择项目角色'} /> : templateFileTree.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无知识库文件" /> : (() => {
+              const activeRoleId = activeTemplateFileRole?.value;
+              const checkedPaths = activeRoleId ? uniqueValues(selectedGroups[activeRoleId] || []).filter(path => allTemplateFileKeys.includes(path)) : [];
               const visibleFileKeys = new Set(collectTemplateFileKeys(filteredTemplateFileTree));
               return (
-                <Card key={option.value} size="small" style={{ marginBottom: 12 }} title={<Space><Text>{option.label}</Text><Tag color="blue">已选 {checkedPaths.length}</Tag></Space>} extra={<Button size="small" disabled={checkedPaths.length === 0} onClick={() => updateTemplateFileBinding(option.value, [])}>清空</Button>}>
-                  <Form.Item name={['fileBindingGroups', option.value]} hidden><Input /></Form.Item>
-                  <div style={{ marginBottom: 8, color: 'var(--colorTextSecondary)', fontSize: 12 }}>
-                    {checkedPaths.length > 0 ? checkedPaths.slice(0, 3).map(fileDisplayName).join('、') + (checkedPaths.length > 3 ? ` 等 ${checkedPaths.length} 个文件` : '') : '未选择文件'}
-                  </div>
-                  <Tree
-                    checkable
-                    blockNode
-                    height={320}
-                    treeData={filteredTemplateFileTree}
-                    checkedKeys={checkedPaths}
-                    expandedKeys={templateFileQuery.trim() ? allTemplateTreeKeys : expandedTemplateFileKeys}
-                    onExpand={keys => setExpandedTemplateFileKeys(keys)}
-                    onCheck={(_, info) => {
-                      const selected = new Set(checkedPaths.filter(path => !visibleFileKeys.has(path)));
-                      for (const node of info.checkedNodes as TemplateFileTreeNode[]) {
-                        if (node.isFolder) collectTemplateFileKeys([node]).forEach(path => selected.add(path));
-                        else selected.add(node.key);
-                      }
-                      updateTemplateFileBinding(option.value, Array.from(selected));
-                    }}
-                  />
-                </Card>
+                <Row gutter={12}>
+                  <Col xs={24} md={7}>
+                    <Card size="small" title="文件角色" bodyStyle={{ padding: 8, maxHeight: 360, overflow: 'auto' }}>
+                      <Space direction="vertical" style={{ width: '100%' }} size={6}>
+                        {fileRoleOptions.map(option => {
+                          const count = uniqueValues(selectedGroups[option.value] || []).filter(path => allTemplateFileKeys.includes(path)).length;
+                          return <Button key={option.value} block type={option.value === activeRoleId ? 'primary' : 'default'} onClick={() => setActiveTemplateFileRoleId(option.value)} style={{ textAlign: 'left', height: 'auto', padding: '6px 8px' }}>
+                            <Space style={{ width: '100%', justifyContent: 'space-between' }}><span>{option.label}</span><Tag color={count > 0 ? 'blue' : 'default'}>{count}</Tag></Space>
+                          </Button>;
+                        })}
+                      </Space>
+                    </Card>
+                  </Col>
+                  <Col xs={24} md={17}>
+                    <Card size="small" title={<Space><Text>{activeTemplateFileRole?.label}</Text><Tag color="blue">已选 {checkedPaths.length}</Tag></Space>} extra={<Button size="small" disabled={!activeRoleId || checkedPaths.length === 0} onClick={() => activeRoleId && updateTemplateFileBinding(activeRoleId, [])}>清空</Button>}>
+                      {activeRoleId && <Form.Item name={['fileBindingGroups', activeRoleId]} hidden><Input /></Form.Item>}
+                      <div style={{ marginBottom: 8, color: 'var(--colorTextSecondary)', fontSize: 12 }}>
+                        {checkedPaths.length > 0 ? checkedPaths.slice(0, 4).map(fileDisplayName).join('、') + (checkedPaths.length > 4 ? ` 等 ${checkedPaths.length} 个文件` : '') : '未选择文件'}
+                      </div>
+                      <Tree
+                        checkable
+                        blockNode
+                        height={360}
+                        treeData={filteredTemplateFileTree}
+                        checkedKeys={checkedPaths}
+                        expandedKeys={templateFileQuery.trim() ? allTemplateTreeKeys : expandedTemplateFileKeys}
+                        onExpand={keys => setExpandedTemplateFileKeys(keys)}
+                        onCheck={(_, info) => {
+                          if (!activeRoleId) return;
+                          const selected = new Set(checkedPaths.filter(path => !visibleFileKeys.has(path)));
+                          for (const node of info.checkedNodes as TemplateFileTreeNode[]) {
+                            if (node.isFolder) collectTemplateFileKeys([node]).forEach(path => selected.add(path));
+                            else selected.add(node.key);
+                          }
+                          updateTemplateFileBinding(activeRoleId, Array.from(selected));
+                        }}
+                      />
+                    </Card>
+                  </Col>
+                </Row>
               );
-            })}
+            })()}
           </div>
           <NoticeBox type="info" title="文档规范由后台根据模板、提示词和角色绑定自动生成，无需手动维护规范包。" />
         </Form>

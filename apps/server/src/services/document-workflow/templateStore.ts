@@ -7,6 +7,32 @@ import { readEngineeringDocumentConfig } from '../document-validation/engineerin
 import type { MaterialRole } from '../document-core/projectMaterialService';
 import type { DocumentTemplate, FileBinding, PromptBinding } from './types';
 
+export type PromptExecutionCategory = 'writer' | 'chapter' | 'extraction' | 'validation' | 'formatting' | 'reference';
+
+export interface ResolvedPromptContent {
+  id: string;
+  roleId: string;
+  name: string;
+  content: string;
+  executionType: string;
+  category: PromptExecutionCategory;
+  bindingSource: 'template' | 'projectRole' | 'fallback' | 'runtimeRequired';
+}
+
+export interface PromptBindingPlan {
+  bindings: PromptBinding[];
+  prompts: ResolvedPromptContent[];
+  writerPrompts: ResolvedPromptContent[];
+  chapterPrompts: ResolvedPromptContent[];
+  extractionPrompts: ResolvedPromptContent[];
+  validationPrompts: ResolvedPromptContent[];
+  formattingPrompts: ResolvedPromptContent[];
+  referencePrompts: ResolvedPromptContent[];
+  unresolvedRoles: string[];
+  fallbackBindings: Array<{ roleId: string; promptId: string; reason: string }>;
+  runtimeRequiredBindings: Array<{ roleId: string; promptId: string; reason: string }>;
+}
+
 function agentHome() {
   const dir = path.join(os.homedir(), '.customize-agent');
   fs.mkdirSync(dir, { recursive: true });
@@ -69,29 +95,111 @@ function writeCustomTemplates(templates: DocumentTemplate[]) {
   fs.writeFileSync(templateStorePath(), JSON.stringify(templates.map(sanitizeTemplate), null, 2), 'utf-8');
 }
 
+function readCustomPromptItems(): Array<{ id: string; name: string; content: string }> {
+  try {
+    const config = JSON.parse(fs.readFileSync(promptConfigPath(), 'utf-8')) as { customPrompts?: Array<{ id: string; name: string; content: string }> };
+    return Array.isArray(config.customPrompts) ? config.customPrompts : [];
+  } catch {
+    return [];
+  }
+}
+
+function readPromptById(id: string) {
+  const customPrompts = readCustomPromptItems();
+  if (id.startsWith('custom:')) {
+    const custom = customPrompts.find(item => item.id === id);
+    return custom ? { id, name: custom.name, content: custom.content } : undefined;
+  }
+  if (id.startsWith('file:')) {
+    const filePath = id.slice('file:'.length);
+    if (fs.existsSync(filePath)) return { id, name: path.basename(path.dirname(filePath)) || filePath, content: fs.readFileSync(filePath, 'utf-8') };
+  }
+  return undefined;
+}
+
 export function readPromptContents(promptBindings: PromptBinding[] = []): Array<{ id: string; roleId: string; name: string; content: string }> {
   if (promptBindings.length === 0) return [];
   const prompts: Array<{ id: string; roleId: string; name: string; content: string }> = [];
-  let customPrompts: Array<{ id: string; name: string; content: string }>;
-  try {
-    const config = JSON.parse(fs.readFileSync(promptConfigPath(), 'utf-8')) as { customPrompts?: Array<{ id: string; name: string; content: string }> };
-    customPrompts = Array.isArray(config.customPrompts) ? config.customPrompts : [];
-  } catch {
-    customPrompts = [];
-  }
   for (const binding of promptBindings) {
-    const id = binding.promptId;
-    if (id.startsWith('custom:')) {
-      const custom = customPrompts.find(item => item.id === id);
-      if (custom) prompts.push({ id, roleId: binding.roleId, name: custom.name, content: custom.content });
-      continue;
-    }
-    if (id.startsWith('file:')) {
-      const filePath = id.slice('file:'.length);
-      if (fs.existsSync(filePath)) prompts.push({ id, roleId: binding.roleId, name: path.basename(path.dirname(filePath)) || filePath, content: fs.readFileSync(filePath, 'utf-8') });
-    }
+    const prompt = readPromptById(binding.promptId);
+    if (prompt) prompts.push({ ...prompt, roleId: binding.roleId });
   }
   return prompts;
+}
+
+function categoryForPrompt(roleId: string, executionType: string, promptName = ''): PromptExecutionCategory {
+  const text = `${roleId} ${executionType} ${promptName}`;
+  if (/validation|校验|审查|审核|标准/u.test(text)) return 'validation';
+  if (/extract|extraction|抽取|清单|图纸|品牌|识别/u.test(text)) return 'extraction';
+  if (/format|排版/u.test(text)) return 'formatting';
+  if (/总控|writer|施工组织设计总控|写作主控/u.test(text)) return 'writer';
+  if (/chapter_generation|method|schedule|quality|resource|safety|dangerous|施工|进度|质量|资源|安全|危大/u.test(text)) return 'chapter';
+  return 'reference';
+}
+
+function findPromptIdsByName(pattern: RegExp) {
+  return readCustomPromptItems().filter(prompt => pattern.test(prompt.name || '')).map(prompt => prompt.id);
+}
+
+function isConstructionOrganizationTemplate(template: DocumentTemplate) {
+  return /施工组织设计|施工方案|危大工程|安全文明施工/u.test(`${template.name} ${template.category} ${template.outputTitle} ${template.description}`);
+}
+
+export function buildPromptBindingPlan(template: DocumentTemplate): PromptBindingPlan {
+  const projectConfig = projectRoleConfigForTemplate(template);
+  const roles = listDocumentRoles('prompt');
+  const rawBindings = templatePromptBindings(template);
+  const fallbackBindings: PromptBindingPlan['fallbackBindings'] = [];
+  const runtimeRequiredBindings: PromptBindingPlan['runtimeRequiredBindings'] = [];
+  const unresolvedRoles: string[] = [];
+  if (projectConfig) {
+    for (const item of projectConfig.promptRoles) {
+      const role = roles.find(candidate => candidate.id === item.roleId);
+      if (!role) unresolvedRoles.push(item.roleId);
+      const hasBinding = rawBindings.some(binding => binding.roleId === item.roleId || binding.roleId === promptExecutionTypeFromRoleId(item.roleId));
+      if (!hasBinding) fallbackBindings.push({ roleId: item.roleId, promptId: '', reason: '项目角色提示词未解析到可用提示词资源' });
+    }
+  }
+  const bindings = [...rawBindings];
+  if (isConstructionOrganizationTemplate(template)) {
+    const hasWriter = readPromptContents(bindings).some(prompt => categoryForPrompt(prompt.roleId, roles.find(role => role.id === prompt.roleId)?.executionType || promptRoleExecutionTypeFromId(prompt.roleId), prompt.name) === 'writer');
+    if (!hasWriter) {
+      for (const promptId of findPromptIdsByName(/施工组织设计总控|总控|施工组织/u).slice(0, 1)) {
+        bindings.push({ promptId, roleId: 'runtime-construction-writer' });
+        runtimeRequiredBindings.push({ roleId: 'runtime-construction-writer', promptId, reason: '施工组织设计运行时必需写作总控提示词' });
+      }
+    }
+  }
+  const uniqueBindings = uniquePromptBindings(bindings);
+  const prompts: ResolvedPromptContent[] = [];
+  for (const binding of uniqueBindings) {
+    const prompt = readPromptById(binding.promptId);
+    if (!prompt) continue;
+    const role = roles.find(candidate => candidate.id === binding.roleId);
+    const executionType = role?.executionType || promptRoleExecutionTypeFromId(binding.roleId);
+    const category = categoryForPrompt(binding.roleId, executionType, prompt.name);
+    const bindingSource = runtimeRequiredBindings.some(item => item.roleId === binding.roleId && item.promptId === binding.promptId)
+      ? 'runtimeRequired' as const
+      : projectConfig ? 'projectRole' as const : 'template' as const;
+    prompts.push({ ...prompt, roleId: binding.roleId, executionType, category, bindingSource });
+  }
+  return {
+    bindings: uniqueBindings,
+    prompts,
+    writerPrompts: prompts.filter(prompt => prompt.category === 'writer'),
+    chapterPrompts: prompts.filter(prompt => prompt.category === 'chapter'),
+    extractionPrompts: prompts.filter(prompt => prompt.category === 'extraction'),
+    validationPrompts: prompts.filter(prompt => prompt.category === 'validation'),
+    formattingPrompts: prompts.filter(prompt => prompt.category === 'formatting'),
+    referencePrompts: prompts.filter(prompt => prompt.category === 'reference'),
+    unresolvedRoles: [...new Set(unresolvedRoles)],
+    fallbackBindings,
+    runtimeRequiredBindings,
+  };
+}
+
+function promptRoleExecutionTypeFromId(roleId: string) {
+  return promptExecutionTypeFromRoleId(roleId);
 }
 
 export function listDocumentTemplates(): DocumentTemplate[] {
@@ -229,15 +337,57 @@ export function boundFileRolesForMaterialSummary(bindings: FileBinding[]) {
   return [...grouped.entries()].map(([filePath, roles]) => ({ filePath, roles }));
 }
 
+function promptExecutionTypeFromRoleId(roleId: string) {
+  if (/extract|extraction|抽取|清单|图纸|品牌/u.test(roleId)) return 'fact_extraction';
+  if (/validation|校验|审查|审核/u.test(roleId)) return 'validation';
+  if (/format|排版/u.test(roleId)) return 'formatting';
+  if (/writer|method|schedule|quality|resource|safety|dangerous|施工|进度|质量|资源|安全|危大/u.test(roleId)) return 'chapter_generation';
+  return 'reference';
+}
+
+function fallbackPromptIdsForRole(roleId: string, roleName = '') {
+  const prompts = readCustomPromptItems();
+  const text = `${roleId} ${roleName}`;
+  const candidates = prompts.filter(prompt => {
+    const name = prompt.name || '';
+    if (/validation|校验|审查|审核/u.test(text)) return /校验|审查|审核|标准/u.test(name);
+    if (/writer|施工组织|construction-organization/u.test(text)) return /施工组织设计总控|总控|施工组织/u.test(name);
+    if (/method|施工方法/u.test(text)) return /施工方法|主要施工/u.test(name);
+    if (/schedule|quality|进度|工期|质量/u.test(text)) return /工期|进度|质量/u.test(name);
+    if (/resource|人材机|资源/u.test(text)) return /人材机|资源|材料|设备/u.test(name);
+    if (/safety|文明|安全/u.test(text)) return /安全|文明/u.test(name);
+    if (/dangerous|危大/u.test(text)) return /危大|危险性/u.test(name);
+    if (/extract|extraction|抽取|清单|图纸|品牌/u.test(text)) return /抽取|识别|清单|图纸|品牌|总控/u.test(name);
+    return false;
+  });
+  return candidates.slice(0, 2).map(prompt => prompt.id);
+}
+
+function uniquePromptBindings(bindings: PromptBinding[]) {
+  const seen = new Set<string>();
+  const result: PromptBinding[] = [];
+  for (const binding of bindings) {
+    const key = `${binding.roleId}:${binding.promptId}`;
+    if (!binding.promptId || !binding.roleId || seen.has(key)) continue;
+    seen.add(key);
+    result.push(binding);
+  }
+  return result;
+}
+
 export function templatePromptBindings(template: DocumentTemplate): PromptBinding[] {
   const config = projectRoleConfigForTemplate(template);
   if (config) {
     const roles = listDocumentRoles('prompt');
-    return [...config.promptRoles]
-      .sort((a, b) => a.order - b.order)
-      .map(item => roles.find(role => role.id === item.roleId))
-      .filter((role): role is NonNullable<typeof role> => !!role)
-      .flatMap(role => (role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : []).map(promptId => ({ promptId, roleId: role.id })));
+    const bindings: PromptBinding[] = [];
+    for (const item of [...config.promptRoles].sort((a, b) => a.order - b.order)) {
+      const role = roles.find(candidate => candidate.id === item.roleId);
+      const resourceIds = role ? (role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : []) : [];
+      const promptIds = resourceIds.length > 0 ? resourceIds : fallbackPromptIdsForRole(item.roleId, role?.name);
+      const runtimeRoleId = role?.id || promptExecutionTypeFromRoleId(item.roleId);
+      bindings.push(...promptIds.map(promptId => ({ promptId, roleId: runtimeRoleId })));
+    }
+    if (bindings.length > 0) return uniquePromptBindings(bindings);
   }
   return template.promptBindings?.length ? template.promptBindings : (template.promptIds ?? []).map(promptId => ({ promptId, roleId: 'chapter_generation' }));
 }

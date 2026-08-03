@@ -86,8 +86,16 @@ export default function ModelsPage() {
   const handleDelete = async (n: string) => { try { await deleteProvider(n); await load(); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
   const handleTest = async (n: string) => {
     setTesting(n);
-    try { const r = await healthCheck(n); setResults(p => ({ ...p, [n]: r.success })); message[r.success ? 'success' : 'error'](r.success ? t('models.connected') : t('models.connectionFailed')); }
-    catch { setResults(p => ({ ...p, [n]: false })); } finally { setTesting(null); }
+    try {
+      const r = await healthCheck(n);
+      setResults(p => ({ ...p, [n]: r.success }));
+      const detail = r.success ? t('models.connected') : `${t('models.connectionFailed')}${r.message ? `：${r.message}` : ''}${r.requestId ? ` (${r.requestId})` : ''}`;
+      message[r.success ? 'success' : 'error'](detail);
+    }
+    catch (error) {
+      setResults(p => ({ ...p, [n]: false }));
+      message.error(error instanceof Error ? error.message : t('models.connectionFailed'));
+    } finally { setTesting(null); }
   };
   const handleModelChange = async (tier: string, val: string | undefined) => {
     if (!models) return;

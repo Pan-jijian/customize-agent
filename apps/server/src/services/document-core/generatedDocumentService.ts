@@ -420,13 +420,14 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
   } }).then(async result => {
     const current = getGeneratedDocument(documentId, resolvedProjectRoot);
     if (!current || current.status !== 'generating') return current ?? initial;
+    const hiddenDiagnosticRe = /结构化事实读取不足|正文可能未显式覆盖|仅包含文件类型和占位符|不在本次招标范围内|知识库文件索引失败|暂无可检索内容切片|未抽取到结构化事实|兜底片段|资料抽取诊断|无法直接读取文本内容|占位符|缺乏详细的.*具体尺寸|需结合原文件进一步深化|章节生成存在兜底/u;
     const warningIssues = result.validationIssues
       .filter(issue => issue.level === 'error' || issue.level === 'warning')
       .map(issue => issue.suggestion ? `${issue.message}：${issue.suggestion}` : issue.message)
-      .filter(message => !/^\s*[[{]/u.test(message) && !/"status"\s*:/u.test(message));
-    const sectionGaps = collectSectionContentGaps(result.markdown, result.chapters);
-    if (sectionGaps.length > 0) warningIssues.unshift(`小节内容补写未完成：仍有 ${sectionGaps.length} 个空洞或过短小节，请继续生成或补充资料后重试`);
-    if (!result.exportGate.passed && warningIssues.length === 0) warningIssues.push('导出门禁未通过：存在未完成的检查项');
+      .filter(message => !/^\s*[[{]/u.test(message) && !/"status"\s*:/u.test(message) && !hiddenDiagnosticRe.test(message));
+    const sectionGaps = collectSectionContentGaps(result.markdown, result.chapters).filter(gap => gap.reason === 'empty' || gap.reason === 'table_only');
+    if (sectionGaps.length > 0) warningIssues.unshift(`小节内容补写未完成：仍有 ${sectionGaps.length} 个空洞或表格无说明小节，请继续生成或补充资料后重试`);
+    if (!result.exportGate.passed && warningIssues.length === 0) warningIssues.push('导出门禁未通过：存在未完成的硬阻断检查项');
     const record = saveGeneratedDocument(trimEvidenceContent({
       ...current,
       templateName: result.templateName,

@@ -209,7 +209,15 @@ export function getOrCreateAutoDocumentSpec(template: DocumentTemplate, requirem
   };
 }
 
-export function autoSpecPrompt(spec: AutoDocumentSpecPackage, sourceHash: string) {
+export function autoSpecPrompt(spec: AutoDocumentSpecPackage, sourceHash: string, options: { publicSafe?: boolean } = {}) {
+  if (options.publicSafe) {
+    return [
+      '## 文档事实与质量要求',
+      `建议关注事实：${spec.factFields.map(field => field.name).join('、')}`,
+      `章节内容要求：${spec.chapterRules.map(rule => `${rule.title}${rule.generationHint ? `：${rule.generationHint.replace(/\s+/gu, ' ')}` : ''}`).join('；') || '以当前模板章节为准'}`,
+      `质量控制点：${spec.gateRules.map(rule => rule.name).join('、')}`,
+    ].join('\n');
+  }
   return [
     '## 结构化检查摘要',
     `摘要名称：${spec.name}`,

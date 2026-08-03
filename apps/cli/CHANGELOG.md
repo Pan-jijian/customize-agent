@@ -1,5 +1,85 @@
 # customize-agent
 
+## 4.0.85
+
+### Patch Changes
+
+- Improve document generation table governance and export normalization.
+- Updated dependencies
+  - @customize-agent/server@4.0.94
+
+## 4.0.84
+
+### Patch Changes
+
+- Improve project basic fact extraction and section-level quantitative evidence placement.
+- Updated dependencies
+  - @customize-agent/server@4.0.93
+
+## 4.0.83
+
+### Patch Changes
+
+- Enforce structural section rules parsed from document prompt roles during section planning and drafting.
+- Updated dependencies
+  - @customize-agent/server@4.0.92
+
+## 4.0.82
+
+### Patch Changes
+
+- Improve document generation prompt execution, section-first drafting completeness, long-form budget reliability, and export readiness diagnostics.
+- Updated dependencies
+  - @customize-agent/server@4.0.91
+
+## 4.0.81
+
+### Patch Changes
+
+- Restore prompt role execution control and improve longform generation stability.
+- Updated dependencies
+  - @customize-agent/server@4.0.90
+
+## 4.0.80
+
+### Patch Changes
+
+- Release document generation fact coverage updates.
+- Updated dependencies
+  - @customize-agent/server@4.0.89
+
+## 4.0.79
+
+### Patch Changes
+
+- Refine document generation prompt flow and skip multimodal understanding by default.
+- Updated dependencies
+  - @customize-agent/server@4.0.88
+
+## 4.0.78
+
+### Patch Changes
+
+- Optimize document generation with generic chapter fact needs coverage.
+- Updated dependencies
+  - @customize-agent/server@4.0.87
+
+## 4.0.77
+
+### Patch Changes
+
+- Improve professional document generation with long-form budget planning, prompt role binding, role configuration persistence, validation noise reduction, and reliable parameter coverage.
+- Updated dependencies
+  - @customize-agent/server@4.0.86
+
+## 4.0.76
+
+### Patch Changes
+
+- Fix model provider health checks to use configured model names and avoid GPT gateway stalls caused by tiny max token limits.
+- Updated dependencies
+  - @customize-agent/server@4.0.85
+
 ## 4.0.75
 
 ### Patch Changes

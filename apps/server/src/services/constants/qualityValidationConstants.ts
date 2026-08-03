@@ -2,17 +2,17 @@ import type { AutoDocumentSpecGateRule, GateRuleEvaluator } from '../document-co
 import type { QualitySeverity, SpecGateRuleHandler } from '../types/qualityValidationTypes';
 
 /** 导出阻断类校验问题匹配规则。 */
-export const EXPORT_BLOCKING_ISSUE_RE = /用户要求不得|出现禁用文本|资料未提供|材料未提供|生成未完成|低于目标页数|低于目标字数|文档预算未达成|正文篇幅低于目标|章节生成失败|大模型未能|重新生成|缺少规划小节|空小节|小节只有标题|只有标题或表格无正文|缺少必要表格|正文缺少章节标题|重复 token|退化输出|其他对象|其他文档|文档编号|事实一致性冲突|必需材料角色缺失|章节缺少证据|文档质量基准评分未达标/iu;
+export const EXPORT_BLOCKING_ISSUE_RE = /用户要求不得|出现禁用文本|生成未完成|章节生成失败|大模型未能|重新生成|空小节|小节只有标题|只有标题或表格无正文|缺少必要表格|正文缺少章节标题|重复 token|退化输出|其他对象|其他文档|文档编号|明确事实污染|明确无来源编造|必需材料角色缺失|章节缺少证据|文档质量基准评分未达标/iu;
 
 /** 导出门禁中用于判断结构化精确参数缺失的问题规则。 */
-export const EXPORT_GATE_PRECISION_ISSUE_RE = /结构化精确参数使用不足/u;
+export const EXPORT_GATE_PRECISION_ISSUE_RE = /可靠精确参数使用不足/u;
 
 /** 导出门禁中用于判断项目污染和事实冲突的问题规则。 */
 export const EXPORT_GATE_PROJECT_CONTAMINATION_RE = /其他对象|其他文档|文档编号|对象名称|事实一致性冲突/iu;
 
 /** 质量问题严重程度规则，按顺序命中。 */
 export const QUALITY_SEVERITY_RULES: Array<{ severity: QualitySeverity; pattern: RegExp }> = [
-  { severity: 'blocking', pattern: /阻断|缺少规划小节|空小节|小节只有标题|只有标题或表格无正文|规划小节正文过短|缺少必要表格|正文缺少章节标题|正文篇幅低于目标|低于目标字数|低于目标页数|章节生成失败|兜底|事实一致性冲突|其他对象|其他文档|文档编号|对象名称|后台流程|提示词|资料未提供|材料未提供|占位|文档质量基准评分未达标/iu },
+  { severity: 'blocking', pattern: /阻断|空小节|小节只有标题|只有标题或表格无正文|缺少必要表格|正文缺少章节标题|章节生成失败|其他对象|其他文档|文档编号|后台流程|提示词|文档质量基准评分未达标/iu },
   { severity: 'important', pattern: /量化|数值|单位|事实|requiredFacts|闭环|安全|质量|工期|表格|三级小节|目录|术语|不一致/iu },
 ];
 

@@ -465,7 +465,7 @@ export async function embeddingHealthCheck() {
   return fetchJson<{ success: boolean; message: string; latencyMs?: number }>('/api/config/embedding/healthCheck', { method: 'POST' });
 }
 export async function healthCheck(providerName: string) {
-  return fetchJson<{ success: boolean; message: string }>('/api/config/healthCheck', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: providerName }) });
+  return fetchJson<{ success: boolean; message: string; requestId?: string; modelName?: string }>('/api/config/healthCheck', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: providerName }) });
 }
 export async function getHealth() { return fetchJson<{ status: string; uptime: number }>('/api/health'); }
 

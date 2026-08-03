@@ -124,6 +124,35 @@ function normalizeMarkdownTableRow(cells: string[], columns: number) {
   return `| ${normalized.join(' | ')} |`;
 }
 
+function defaultTableHeaders(columns: number) {
+  if (columns === 2) return ['信息项', '内容'];
+  const headers = ['项目', '内容', '备注', '说明'];
+  return Array.from({ length: columns }, (_item, index) => headers[index] || `列${index + 1}`);
+}
+
+function collectBareTableRows(lines: string[], start: number) {
+  const rows: string[] = [];
+  let index = start;
+  while (index < lines.length && looksLikeMarkdownTableRow(lines[index] || '')) {
+    rows.push(lines[index] || '');
+    index += 1;
+  }
+  const columnCounts = rows.map(row => splitMarkdownTableRow(row).length);
+  const columns = columnCounts[0] || 0;
+  if (rows.length < 2 || columns < 2 || columnCounts.some(count => count !== columns)) return null;
+  return { rows, columns, next: index };
+}
+
+function collectLooseTableRows(lines: string[], start: number) {
+  const rows: string[] = [];
+  let index = start;
+  while (index < lines.length && looksLikeMarkdownTableRow(lines[index] || '')) {
+    rows.push(lines[index] || '');
+    index += 1;
+  }
+  return { rows, next: index };
+}
+
 function normalizeLooseMarkdownTables(input: string) {
   const lines = input.replace(/\r?\n/gu, '\n').split('\n');
   const output: string[] = [];
@@ -148,6 +177,29 @@ function normalizeLooseMarkdownTables(input: string) {
       }
       if (index < lines.length && lines[index]?.trim()) output.push('');
       continue;
+    }
+    const bare = looksLikeMarkdownTableRow(line) ? collectBareTableRows(lines, index) : null;
+    if (bare) {
+      if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
+      output.push(normalizeMarkdownTableRow(defaultTableHeaders(bare.columns), bare.columns));
+      output.push(`| ${Array.from({ length: bare.columns }, () => '---').join(' | ')} |`);
+      for (const row of bare.rows) output.push(normalizeMarkdownTableRow(splitMarkdownTableRow(row), bare.columns));
+      index = bare.next;
+      if (index < lines.length && lines[index]?.trim()) output.push('');
+      continue;
+    }
+    if (isMarkdownTableSeparator(line)) {
+      const loose = collectLooseTableRows(lines, index + 1);
+      if (loose.rows.length > 0) {
+        const columns = Math.max(2, splitMarkdownTableRow(line).length, ...loose.rows.map(row => splitMarkdownTableRow(row).length));
+        if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
+        output.push(normalizeMarkdownTableRow(defaultTableHeaders(columns), columns));
+        output.push(`| ${Array.from({ length: columns }, () => '---').join(' | ')} |`);
+        for (const row of loose.rows) output.push(normalizeMarkdownTableRow(splitMarkdownTableRow(row), columns));
+        index = loose.next;
+        if (index < lines.length && lines[index]?.trim()) output.push('');
+        continue;
+      }
     }
     output.push(compactLine);
     index += 1;

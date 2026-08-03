@@ -95,14 +95,34 @@ function pathSegments(files: Array<{ relativePath: string }>) {
   return segments;
 }
 
+function looksLikePathBundleName(value: string) {
+  return /--|延期到|资料|附件|扫描|目录|汇总|打包|备份|\d{1,2}\.\d{1,2}/u.test(value);
+}
+
+function cleanProjectNameCandidate(value: string) {
+  return stripKnownExtension(value)
+    .replace(/^\d+(?:\.\d+)?[-_\s]*/u, '')
+    .replace(/^(?:延期到\d+(?:\.\d+)?[-_—–\s]*)+/u, '')
+    .trim();
+}
+
 function inferProjectName(files: Array<{ relativePath: string }>) {
   let fileLike: string | undefined;
+  let pathLike: string | undefined;
   for (const candidate of pathSegments(files)) {
-    if (!/项目/iu.test(candidate) || candidate.length < 6) continue;
-    if (!/\.\w+$/u.test(candidate)) return candidate;
-    fileLike ||= candidate;
+    const cleaned = cleanProjectNameCandidate(candidate);
+    if (!/项目|工程/iu.test(cleaned) || cleaned.length < 6) continue;
+    if (/\.\w+$/u.test(candidate)) {
+      fileLike ||= cleaned;
+      continue;
+    }
+    if (looksLikePathBundleName(cleaned)) {
+      pathLike ||= cleaned.split(/--/u).filter(part => /项目|工程/u.test(part)).sort((a, b) => a.length - b.length)[0] || cleaned;
+      continue;
+    }
+    return cleaned;
   }
-  return fileLike?.replace(/\.(?:pdf|docx?|xlsx?|xls|dwg)$/iu, '') || '当前知识库项目';
+  return fileLike || pathLike || '当前知识库项目';
 }
 
 function inferDocumentNo(files: Array<{ relativePath: string }>) {
@@ -132,8 +152,9 @@ function extractProjectNameCandidates(files: Array<{ relativePath: string }>) {
   const seen = new Set<string>();
   const candidates: string[] = [];
   for (const segment of pathSegments(files)) {
-    const normalized = stripKnownExtension(segment);
-    if (!/项目|任务|文档|合同|计划|方案/iu.test(normalized) || normalized.length < 6 || seen.has(normalized)) continue;
+    const normalized = cleanProjectNameCandidate(segment);
+    if (!/项目|任务|文档|合同|计划|方案|工程/iu.test(normalized) || normalized.length < 6 || seen.has(normalized)) continue;
+    if (looksLikePathBundleName(normalized) && !/\.\w+$/u.test(segment)) continue;
     seen.add(normalized);
     candidates.push(normalized);
   }
@@ -299,7 +320,27 @@ export function buildProjectMaterialSummary(projectRoot: string, options?: { req
   };
 }
 
-export function projectMaterialPrompt(summary: ProjectMaterialSummary) {
+function sanitizePublicPromptText(value: string) {
+  return value
+    .replace(/OCR|识别错误|乱码/giu, '资料文字不清')
+    .replace(/知识库|提示词|后台|绑定片段|兜底/gu, '项目资料')
+    .replace(/PDF|DWG|Excel|XLSX?|DOCX?/giu, '资料文件');
+}
+
+export function projectMaterialPrompt(summary: ProjectMaterialSummary, options: { publicSafe?: boolean } = {}) {
+  if (options.publicSafe) {
+    return [
+      '## 项目资料事实边界',
+      sanitizePublicPromptText(summary.extractedSections.projectOverview),
+      `明确事实：责任主体 ${summary.facts.ownerNames?.join('、') || '资料未明确'}；地点 ${summary.facts.locationNames?.join('、') || '资料未明确'}；周期 ${summary.facts.scheduleValues?.join('、') || '资料未明确'}；质量 ${summary.facts.qualityTargets?.join('、') || '资料未明确'}。`,
+      sanitizePublicPromptText(summary.extractedSections.scopeSummary),
+      sanitizePublicPromptText(summary.extractedSections.structuredDataSummary),
+      sanitizePublicPromptText(summary.extractedSections.designSummary),
+      sanitizePublicPromptText(summary.extractedSections.scheduleQualitySafetySummary),
+      sanitizePublicPromptText(summary.extractedSections.constraintsAndRisks),
+      '仅使用资料中明确、可信的事实；资料未明确的工程实体事实不得推导，允许推导的计划配置类数据须明确标注为计划配置值。',
+    ].filter(Boolean).join('\n');
+  }
   return [
     '## 后台绑定材料摘要',
     summary.extractedSections.projectOverview,

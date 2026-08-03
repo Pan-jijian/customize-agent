@@ -10,7 +10,7 @@ import type { QualityRepairType, RoleEvidencePool, RoleExecutionNode, RoleExtrac
 import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplate, DocumentTemplateChapter, FileBinding, PromptBinding } from './types';
 
 export type { QualityRepairType, RoleEvidencePool, RoleExecutionNode, RoleExtractionChapterInput, RoleExtractionFactInput, RoleExtractionLlmResult, RoleExtractionRequirementInput, RoleNodeArtifact, RoleNodeFact, TenderPlanChapter } from '../types';
-import { readPromptContents, violatesConfiguredChapterTitleFilter } from './templateStore';
+import { readPromptContents, type ResolvedPromptContent, violatesConfiguredChapterTitleFilter } from './templateStore';
 import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget, selectEvidenceByBudget, uniqueEvidence } from './evidence';
 import { hasExplicitOutlineBlock, isExplicitOutlineClosingLine, isExplicitOutlineOpeningLine, isValidGeneratedChapterTitle, normalizeGeneratedChapterTitle } from './outline';
 import { CAD_ENTITY_TOKEN_RE, CN_NUMERAL_RE, FILE_NAME_RE } from './constants';
@@ -763,8 +763,13 @@ export function sanitizePromptForExecution(content: string) {
 
 function promptRoleExecutionTypes() {
   const roleTypes = new Map<string, string>();
+  for (const type of ['fact_extraction', 'chapter_generation', 'llm_review', 'validation', 'formatting', 'reference']) roleTypes.set(type, type);
   for (const role of listDocumentRoles('prompt')) roleTypes.set(role.id, role.executionType || 'reference');
   return roleTypes;
+}
+
+export function promptTextsForResolvedPrompts(prompts: ResolvedPromptContent[]) {
+  return prompts.map(prompt => `## [${prompt.roleId}/${prompt.category}] ${prompt.name}\n${sanitizePromptForExecution(prompt.content)}`).join('\n\n');
 }
 
 export function promptTextsForExecution(promptBindings: PromptBinding[], executionTypes: string[]) {

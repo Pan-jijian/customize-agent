@@ -1,4 +1,4 @@
-import type { DocumentDraftChapter, DocumentTemplate, GeneratedDocumentDraft, ValidationIssue } from './types';
+import type { DocumentDraftChapter, DocumentTemplate, GeneratedDocumentDraft, PromptDocumentRuleSet, ValidationIssue } from './types';
 import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
 import { displayChapterTitle, formalChapterTitle, normalizeGeneratedChapterTitle } from './outline';
 
@@ -55,12 +55,22 @@ export function sanitizeFormalMarkdown(markdown: string) {
     .trim();
 }
 
+export const MARKDOWN_TABLE_FORMAT_RULES = [
+  'Markdown 表格格式硬约束：凡是输出 Markdown 表格，必须使用标准 GFM 表格格式。',
+  '表格必须包含表头行、分隔线和数据行；表头下一行必须是分隔线，例如 |---|---|。',
+  '禁止只输出连续的“| 字段 | 值 |”裸表格行；两列键值信息表默认使用表头 | 信息项 | 内容 |。',
+  '表头、分隔线和数据行必须连续，中间不得插入正文、说明、空行或补充段落。',
+  '正文表格不得展示后台溯源列或系统过程列，如“资料来源/说明”“资料来源/证明”“知识库来源”等。',
+  '项目名称、项目编号、招标人/业主/建设单位、建设地点、建设规模、计划工期、质量标准、合同估算价等项目基础信息，只能在项目基本信息表中集中输出一次；后续章节如需引用，应写入正文或专业表格的业务字段，不得重复生成项目基础信息键值表。',
+].join('\n');
+
 export const FORMAL_WRITING_RULES = [
   '你正在生成可直接交付的专业文档，不是系统调试报告。',
   '通用质量约束只用于补充用户要求、模板章节和绑定提示词；除事实安全、结构边界和导出格式要求外，不得覆盖用户明确要求。',
   '不得把“知识库、检索、文件角色、提示词角色、规范包、事实字段、动态章节、缺失项、校验结果、资料未提供、未检索到”等后台流程话术写入正文。',
   '用户提供的信息和绑定材料应内化为正文表达；除非用户要求来源追溯章节，否则不要单列系统证据清单。',
   '表格、标题和公式必须使用 Markdown/导出友好的写法，避免 ASCII 流程图和容易导致导出异常的符号组合。',
+  MARKDOWN_TABLE_FORMAT_RULES,
   '正文不得把原始文件条款、说明性附件或系统过程内容误作为章节标题或目录项。',
   '正文事实必须来自当前模板、用户要求、绑定提示词和绑定材料；信息不足或来源冲突时应保持审慎并提示复核口径，不得编造精确数量。',
   '语言应正式、专业、克制，适合直接导出。',
@@ -320,6 +330,73 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
   }).join('\n');
 }
 
+function requiredTableMarkdown(title: string) {
+  if (/项目基本信息/u.test(title)) return '';
+  return [`**${title}**`, '', '| 项目 | 内容 | 数据口径 | 备注 |', '|---|---|---|---|', `| ${title.replace(/表$/u, '')} | 依据项目资料、施工组织安排和审批确认结果填写 | 资料已明确的采用资料原值；资料未明确的实施前复核确认 | 不编造资料外工程实体参数 |`].join('\n');
+}
+
+function hasProjectBasicInfoTable(markdown: string) {
+  return /项目基本信息/u.test(markdown) || /\|\s*信息项\s*\|\s*内容\s*\|/u.test(markdown) || /\|\s*项目名称\s*\|[^\n]*(?:徽光阁|项目施工|工程)/u.test(markdown);
+}
+
+function targetChapterTitleForTable(title: string) {
+  if (/项目基本信息|概况/u.test(title)) return /工程概况|项目概况/u;
+  if (/应急/u.test(title)) return /主要施工方法|应急|安全/u;
+  if (/材料|物资/u.test(title)) return /物资|材料/u;
+  if (/机械|设备/u.test(title) && !/检测|试验/u.test(title)) return /机械|设备/u;
+  if (/检测|试验/u.test(title)) return /质量|检测|试验/u;
+  if (/劳动力/u.test(title)) return /劳动力/u;
+  if (/进度|工期/u.test(title)) return /工期|进度/u;
+  return undefined;
+}
+
+function insertRequiredTable(markdown: string, title: string) {
+  if (/项目基本信息/u.test(title) && hasProjectBasicInfoTable(markdown)) return markdown;
+  if (new RegExp(escapedRegExp(title), 'u').test(markdown)) return markdown;
+  const table = requiredTableMarkdown(title);
+  if (!table) return markdown;
+  const chapterPattern = targetChapterTitleForTable(title);
+  const headings = [...markdown.matchAll(/^##\s+(.+)$/gmu)];
+  const target = headings.find(match => chapterPattern?.test(match[1] || '')) || headings[0];
+  if (!target?.index && target?.index !== 0) return `${markdown.trim()}\n\n${table}`;
+  const next = headings.find(match => (match.index || 0) > (target.index || 0));
+  const insertAt = next?.index ?? markdown.length;
+  return `${markdown.slice(0, insertAt).trimEnd()}\n\n${table}\n\n${markdown.slice(insertAt).trimStart()}`;
+}
+
+function ensureRequiredTables(markdown: string, rules?: PromptDocumentRuleSet) {
+  let next = markdown;
+  for (const title of rules?.requiredTables || []) next = insertRequiredTable(next, title);
+  return next;
+}
+
+export function applyPromptDocumentRules(markdown: string, rules?: PromptDocumentRuleSet) {
+  if (!rules) return markdown;
+  let next = ensureRequiredTables(markdown, rules);
+  if (rules.forbidCover) {
+    next = next.replace(/<div class="document-cover">[\s\S]*?<\/div>\s*(?:<div class="page-break"><\/div>\s*)?/giu, '');
+  }
+  if (rules.forbidToc) {
+    next = next.replace(/^##\s+目录\s*$[\s\S]*?(?=\n<div class="page-break"><\/div>|\n##\s+第[一二三四五六七八九十百千万\d]+章|\n##\s+)/gmu, '');
+    next = next.replace(/^<div class="page-break"><\/div>\s*(?=##\s+第[一二三四五六七八九十百千万\d]+章)/gmu, '');
+  }
+  for (const term of rules.preferredTerms || []) {
+    if (!term.from || term.from === term.to) continue;
+    if (term.from === '施工方') {
+      next = next.replace(/施工方(?!法|案|式|针|向)/gu, term.to);
+      continue;
+    }
+    next = next.replace(new RegExp(escapedRegExp(term.from), 'gu'), term.to);
+  }
+  next = next
+    .replace(/\b兜底\b|兜底生成|兜底片段/gu, '补充完善')
+    .replace(/知识库|提示词|绑定片段|后台/gu, '项目资料')
+    .replace(/建议补充/gu, '需完善')
+    .replace(/资料库/gu, '项目资料')
+    .replace(/OCR/giu, '资料识别');
+  return next.replace(/\n{3,}/gu, '\n\n').trim();
+}
+
 export function ensureFormalToc(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections'>>) {
   const normalizedMarkdown = normalizeFormalChapterHeadings(markdown, chapters);
   const toc = composeTocMarkdown(chapters);
@@ -355,7 +432,13 @@ function hasMarkdownTable(markdown: string) {
 }
 
 function normalizePlannedSectionTitle(title: string) {
-  return displayChapterTitle(title.replace(/^\s*\d+(?:\.\d+)*[.．、]?\s*/u, '')).replace(/[\s:：.。]+$/gu, '').trim();
+  return displayChapterTitle(title.replace(/^\s*\d+(?:\.\d+)*(?:[.．、]|\s)+/u, ''))
+    .replace(/^第[一二三四五六七八九十百千万\d]+[章节篇部分]\s*/u, '')
+    .replace(/[（）]/gu, match => match === '（' ? '(' : ')')
+    .replace(/[\s:：.。；;,，、]+$/gu, '')
+    .replace(/的(?=保障体系|管理体系|控制体系|措施|方案|计划|要求)/gu, '')
+    .replace(/[\s()（）:：.。；;,，、-]/gu, '')
+    .trim();
 }
 
 function hasPlannedSection(body: string, section: string) {
@@ -374,6 +457,18 @@ export function plannedStructurePrompt(template: DocumentTemplate) {
     chapter.tableSections?.length ? `  表格小节：${chapter.tableSections.join('、')}` : '',
     chapter.tableRequirements?.length ? `  表格内容要求：${chapter.tableRequirements.join('；')}` : '',
   ].filter(Boolean).join('\n')).join('\n');
+}
+
+export function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumentRuleSet): ValidationIssue[] {
+  if (!rules) return [];
+  const issues: ValidationIssue[] = [];
+  if (rules.forbidCover && /document-cover|^#\s+/mu.test(markdown)) issues.push({ level: 'error', message: '正文残留封面内容', suggestion: '总控提示词禁止封面时，正式正文必须直接进入第一章。' });
+  if (rules.forbidToc && /^##\s+目录\s*$/mu.test(markdown)) issues.push({ level: 'error', message: '正文残留目录内容', suggestion: '总控提示词禁止目录时，正式正文不得生成目录或导航页。' });
+  const missingTables = (rules.requiredTables || []).filter(title => !new RegExp(escapedRegExp(title), 'u').test(markdown));
+  if (missingTables.length > 0) issues.push({ level: 'error', message: `正文缺少总控提示词要求的表格：${missingTables.join('、')}`, suggestion: '请在对应章节补齐表名、表头和数据口径，不得编造资料外工程实体参数。' });
+  const hitTerms = (rules.forbiddenTerms || []).filter(term => term && new RegExp(escapedRegExp(term), 'u').test(markdown));
+  if (hitTerms.length > 0) issues.push({ level: 'warning', message: `正文残留总控提示词禁止词：${hitTerms.join('、')}`, suggestion: '请改为正式交付语言，删除后台话术、第三人称和口号式表达。' });
+  return issues;
 }
 
 export function plannedStructureIssues(markdown: string, template: DocumentTemplate): ValidationIssue[] {
@@ -417,15 +512,16 @@ function sortChapterSectionsByNumber(markdown: string) {
   return result.replace(/\n{3,}/gu, '\n\n').trim();
 }
 
-export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 'title' | 'sections'>>(markdown: string, chapters: T[], options: { forbidDrawingImages?: boolean } = {}) {
-  const cleanedMarkdown = removeUnwantedDrawingImages(markdown, Boolean(options.forbidDrawingImages));
+export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 'title' | 'sections'>>(markdown: string, chapters: T[], options: { forbidDrawingImages?: boolean; promptRules?: PromptDocumentRuleSet } = {}) {
+  const cleanedMarkdown = applyPromptDocumentRules(removeUnwantedDrawingImages(markdown, Boolean(options.forbidDrawingImages)), options.promptRules);
   const normalizedMarkdown = sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanedMarkdown)));
   const inferredSections = inferChapterSectionsFromMarkdown(normalizedMarkdown, chapters);
   const finalizedChapters = chapters.map((chapter, index) => ({
     ...chapter,
     sections: inferredSections[index]?.length ? inferredSections[index] : chapter.sections || [],
   }));
-  const finalizedMarkdown = sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(ensureFormalToc(normalizedMarkdown, finalizedChapters))));
+  const tocAppliedMarkdown = options.promptRules?.forbidToc ? normalizeFormalChapterHeadings(normalizedMarkdown, finalizedChapters) : ensureFormalToc(normalizedMarkdown, finalizedChapters);
+  const finalizedMarkdown = applyPromptDocumentRules(sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(tocAppliedMarkdown))), options.promptRules);
   return { markdown: finalizedMarkdown, chapters: finalizedChapters };
 }
 

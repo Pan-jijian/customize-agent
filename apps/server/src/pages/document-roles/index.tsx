@@ -102,9 +102,25 @@ export default function DocumentRolesPage() {
     } catch { message.error(t('common.error')); }
   };
   /** 删除指定角色 */
-  const removeRole = async (role: DocumentRole) => { const r = await deleteDocumentRole(role.type, role.id); setRoles(r.roles); setConfigs(r.configs); };
+  const removeRole = async (role: DocumentRole) => {
+    try {
+      const r = await deleteDocumentRole(role.type, role.id);
+      setRoles(r.roles); setConfigs(r.configs);
+      message.success('角色已删除');
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '角色删除失败');
+    }
+  };
   /** 删除指定项目配置 */
-  const removeConfig = async (id: string) => { const r = await deleteProjectRoleConfig(id); setRoles(r.roles); setConfigs(r.configs); };
+  const removeConfig = async (id: string) => {
+    try {
+      const r = await deleteProjectRoleConfig(id);
+      setRoles(r.roles); setConfigs(r.configs);
+      message.success('项目角色配置已删除');
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '项目角色配置删除失败');
+    }
+  };
 
   const exportAllCustom = () => {
     downloadJson(`customize-document-roles-${new Date().toISOString().slice(0, 10)}.json`, formatRolesExport(customRoles, customConfigs));

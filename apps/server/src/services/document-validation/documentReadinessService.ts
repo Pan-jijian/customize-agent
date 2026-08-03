@@ -44,7 +44,15 @@ export function evaluateDocumentReadiness(input: {
   };
 }
 
-export function readinessPrompt(readiness: DocumentGenerationReadiness) {
+export function readinessPrompt(readiness: DocumentGenerationReadiness, options: { publicSafe?: boolean } = {}) {
+  if (options.publicSafe) {
+    return [
+      '## 生成事实使用边界',
+      `资料覆盖程度：${Math.round(readiness.materialCoverageRate * 100)}%`,
+      `资料角色满足程度：${Math.round(readiness.roleSatisfactionRate * 100)}%`,
+      '资料不足的事实不得编造；仅施工组织、计划安排、资源配置类数据可在文档要求允许时进行计划推导并标注。',
+    ].join('\n');
+  }
   return [
     '## 后台生成准备度',
     `可生成：${readiness.ready ? '是' : '否'}`,
