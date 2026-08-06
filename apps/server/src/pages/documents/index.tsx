@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Tabs, Tag, Tree, Typography } from 'antd';
+import { App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Tabs, Tag, TreeSelect, Typography, Alert } from 'antd';
 import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined, HistoryOutlined, FolderOutlined } from '@ant-design/icons';
-import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFiles, getPromptProjects, refineGeneratedDocument, resumeGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type KbFileItem, type ProjectRoleConfig, type PromptProject, type RefinePlan, type RefineSelection } from '@/lib/api';
+import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFilesTree, getPromptProjects, refineGeneratedDocument, resumeGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig, type PromptProject, type RefinePlan, type RefineSelection } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
+export interface TreeApiResponseNode {
+  key: string;
+  title: string;
+  isFolder: boolean;
+  isLeaf: boolean;
+  fileCount?: number;
+}
 
 const { TextArea } = Input;
 const { Text } = Typography;
@@ -38,7 +45,7 @@ let activeGenerationTask: GenerationTaskState | null = null;
 function notifyGenerationTask() { activeGenerationTask?.listeners.forEach(l => l()); }
 
 const STAGE_ICONS: Record<string, ReactNode> = {
-  role_binding: <ApartmentOutlined />, context_recall: <BulbOutlined />, knowledge_retrieval: <DatabaseOutlined />, file_understanding: <EyeOutlined />,
+  role_binding: <ApartmentOutlined />, knowledge_retrieval: <DatabaseOutlined />, file_understanding: <EyeOutlined />,
   fact_extraction: <BulbOutlined />, chapter_generation: <FormOutlined />, asset_generation: <PictureOutlined />,
   validation: <SafetyCertificateOutlined />, formatting: <CheckCircleOutlined />, llm_review: <ThunderboltOutlined />,
   export_ready: <FileDoneOutlined />, reference: <PictureOutlined />,
@@ -60,9 +67,11 @@ type TemplateFileBinding = NonNullable<DocumentTemplate['fileBindings']>[number]
 type TemplateEditorForm = DocumentTemplate & { fileBindingGroups?: Record<string, string[]> };
 interface TemplateFileTreeNode {
   key: string;
+  value: string;
   title: ReactNode;
   rawTitle: string;
   isFolder: boolean;
+  isLeaf: boolean;
   fileCount: number;
   children?: TemplateFileTreeNode[];
 }
@@ -82,71 +91,22 @@ function groupFileBindings(bindings: TemplateFileBinding[] = []) {
   }, {});
 }
 
-function buildTemplateFileTree(files: KbFileItem[]): TemplateFileTreeNode[] {
-  const root: Record<string, TemplateFileTreeNode> = {};
-  for (const file of [...files].sort((a, b) => a.relativePath.localeCompare(b.relativePath, 'zh-CN'))) {
-    const parts = file.relativePath.split('/').filter(Boolean);
-    let currentPath = '';
-    for (let index = 0; index < parts.length; index++) {
-      const name = parts[index]!;
-      const parentPath = currentPath;
-      currentPath = currentPath ? `${currentPath}/${name}` : name;
-      const isLast = index === parts.length - 1;
-      if (!root[currentPath]) {
-        root[currentPath] = {
-          key: currentPath,
-          rawTitle: name,
-          title: isLast ? <span title={file.relativePath}>{name}</span> : <Space size={4}><FolderOutlined style={{ color: '#faad14' }} /><span>{name}</span></Space>,
-          isFolder: !isLast,
-          fileCount: isLast ? 1 : 0,
-          ...(isLast ? {} : { children: [] }),
-        };
-        if (parentPath && root[parentPath]?.children) root[parentPath]!.children!.push(root[currentPath]!);
-      }
-      if (isLast) root[currentPath]!.fileCount = 1;
-    }
-  }
-  const aggregate = (nodes: TemplateFileTreeNode[]) => {
-    for (const node of nodes) {
-      if (!node.children?.length) continue;
-      aggregate(node.children);
-      node.fileCount = node.children.reduce((sum, child) => sum + child.fileCount, 0);
-      node.title = <Space size={4}><FolderOutlined style={{ color: '#faad14' }} /><span>{node.rawTitle}</span><Tag style={{ margin: 0 }}>{node.fileCount}</Tag></Space>;
-    }
-  };
-  const topLevel = Object.values(root).filter(node => !node.key.includes('/'));
-  aggregate(topLevel);
-  return topLevel.filter(node => !node.isFolder || node.fileCount > 0);
-}
-
-function filterTemplateFileTree(nodes: TemplateFileTreeNode[], query: string): TemplateFileTreeNode[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return nodes;
-  return nodes.flatMap(node => {
-    const children = node.children ? filterTemplateFileTree(node.children, q) : undefined;
-    const matched = node.key.toLowerCase().includes(q) || node.rawTitle.toLowerCase().includes(q);
-    if (matched || children?.length) return [{ ...node, children }];
-    return [];
-  });
-}
-
-function collectTemplateFileKeys(nodes: TemplateFileTreeNode[]) {
-  const keys: string[] = [];
-  const walk = (items: TemplateFileTreeNode[]) => {
-    for (const item of items) {
-      if (item.isFolder) {
-        if (item.children) walk(item.children);
-      } else {
-        keys.push(item.key);
-      }
-    }
-  };
-  walk(nodes);
-  return keys;
+function buildTemplateFileTree(nodes: TreeApiResponseNode[]): TemplateFileTreeNode[] {
+  return nodes.map(node => ({
+    key: node.key,
+    value: node.key,
+    rawTitle: node.title,
+    title: node.isFolder 
+      ? <div className="flex items-center justify-between w-full pr-4"><Space size={4}><FolderOutlined style={{ color: '#faad14' }} /><span>{node.title}</span></Space><span className="text-xs text-[var(--colorTextTertiary)]">{node.fileCount || 0} 项</span></div> 
+      : <span title={node.key}>{node.title}</span>,
+    isFolder: node.isFolder,
+    fileCount: node.fileCount || (node.isFolder ? 0 : 1),
+    isLeaf: node.isLeaf,
+  }));
 }
 
 const STAGE_TITLES: Record<string, string> = {
-  role_binding: '角色配置绑定', context_recall: '上下文召回', knowledge_retrieval: '知识库检索', file_understanding: '多模态文件理解',
+  role_binding: '角色配置绑定', knowledge_retrieval: '知识库检索', file_understanding: '多模态文件理解',
   fact_extraction: 'LLM 事实抽取', chapter_generation: 'LLM 章节生成', asset_generation: '多模态资源生成',
   validation: '规则校验', formatting: '格式化排版', llm_review: 'LLM 审查优化',
   export_ready: '导出就绪', reference: '参考资源处理',
@@ -167,11 +127,9 @@ export default function DocumentsPage() {
   const [roles, setRoles] = useState<DocumentRole[]>([]);
   const [roleConfigs, setRoleConfigs] = useState<ProjectRoleConfig[]>([]);
   const [prompts, setPrompts] = useState<PromptProject[]>([]);
-  const [kbFiles, setKbFiles] = useState<KbFileItem[]>([]);
+  const [templateFileTree, setTemplateFileTree] = useState<TemplateFileTreeNode[]>([]);
   const [fileSearching, setFileSearching] = useState(false);
-  const [templateFileQuery, setTemplateFileQuery] = useState('');
   const [activeTemplateFileRoleId, setActiveTemplateFileRoleId] = useState<string>();
-  const [expandedTemplateFileKeys, setExpandedTemplateFileKeys] = useState<React.Key[]>([]);
   const [pageLoading, setPageLoading] = useState(true);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState<GeneratedDocumentDraft | null>(null);
@@ -196,20 +154,8 @@ export default function DocumentsPage() {
     const fileRoles = roles.filter(role => role.type === 'file' && (!selectedProjectRoleConfigId || scopedFileRoleIds.has(role.id)));
     return fileRoles.map(role => ({ label: role.name, value: role.id }));
   }, [roles, scopedFileRoleIds, selectedProjectRoleConfigId]);
-  const activeTemplateFileRole = useMemo(() => fileRoleOptions.find(option => option.value === activeTemplateFileRoleId) || fileRoleOptions[0], [activeTemplateFileRoleId, fileRoleOptions]);
   const selectedGroups = (Form.useWatch('fileBindingGroups', form) || {}) as Record<string, string[]>;
-  const templateFileTree = useMemo(() => buildTemplateFileTree(kbFiles), [kbFiles]);
-  const filteredTemplateFileTree = useMemo(() => filterTemplateFileTree(templateFileTree, templateFileQuery), [templateFileTree, templateFileQuery]);
-  const allTemplateFileKeys = useMemo(() => collectTemplateFileKeys(templateFileTree), [templateFileTree]);
   const currentProjectRoot = useMemo(() => prompts.find(item => item.selected)?.projectRoot || prompts.find(item => item.isCurrent)?.projectRoot || prompts[0]?.projectRoot || '', [prompts]);
-  const allTemplateTreeKeys = useMemo(() => {
-    const keys: string[] = [];
-    const walk = (nodes: TemplateFileTreeNode[]) => {
-      for (const node of nodes) { keys.push(node.key); if (node.children) walk(node.children); }
-    };
-    walk(templateFileTree);
-    return keys;
-  }, [templateFileTree]);
   useEffect(() => {
     if (!templateModalOpen || !selectedProjectRoleConfigId) return;
     const groups = (form.getFieldValue('fileBindingGroups') || {}) as Record<string, string[]>;
@@ -385,7 +331,6 @@ export default function DocumentsPage() {
   const stageIcon = (type: GeneratedDocumentDraft['executionStages'][number]['type']) => {
     if (type === 'role_binding') return <ApartmentOutlined />;
     if (type === 'knowledge_retrieval') return <DatabaseOutlined />;
-    if (type === 'context_recall') return <BulbOutlined />;
     if (type === 'file_understanding') return <EyeOutlined />;
     if (type === 'fact_extraction') return <BulbOutlined />;
     if (type === 'chapter_generation') return <FormOutlined />;
@@ -461,15 +406,40 @@ export default function DocumentsPage() {
     return () => window.clearInterval(t);
   }, [activeFlowKey, loading]);
 
-  const loadTemplateFiles = async () => {
+  const loadTemplateFiles = async (parentPath: string = '') => {
     setFileSearching(true);
     try {
-      const result = await getKbFiles({ limit: 5000, projectRoot: currentProjectRoot || undefined });
-      setKbFiles(result.files);
+      const result = await getKbFilesTree(parentPath, currentProjectRoot || undefined);
+      setTemplateFileTree(buildTemplateFileTree(result.nodes));
     } catch {
       message.error('知识库文件加载失败');
     } finally {
       setFileSearching(false);
+    }
+  };
+
+  const onLoadData = async (node: { key?: React.Key }) => {
+    const key = String(node.key ?? '');
+    if (!key) return;
+    try {
+      const result = await getKbFilesTree(key, currentProjectRoot || undefined);
+      const newNodes = buildTemplateFileTree(result.nodes);
+      
+      const updateTree = (nodes: TemplateFileTreeNode[]): TemplateFileTreeNode[] => {
+        return nodes.map(node => {
+          if (node.key === key) {
+            return { ...node, children: newNodes };
+          }
+          if (node.children) {
+            return { ...node, children: updateTree(node.children) };
+          }
+          return node;
+        });
+      };
+      
+      setTemplateFileTree(prev => updateTree(prev));
+    } catch {
+      message.error('加载子文件夹失败');
     }
   };
 
@@ -479,7 +449,6 @@ export default function DocumentsPage() {
     form.setFieldsValue({ ...value, fileBindingGroups: groupFileBindings(value.fileBindings) });
     const configFileRoleId = roleConfigs.find(config => config.id === value.projectRoleConfigId)?.fileRoles?.[0]?.roleId;
     setActiveTemplateFileRoleId(configFileRoleId);
-    setTemplateFileQuery('');
     void loadTemplateFiles();
     setTemplateModalOpen(true);
   };
@@ -516,8 +485,7 @@ export default function DocumentsPage() {
         return;
       }
       if (validation.issues.length > 0) {
-        message.warning('模板存在警告，可在检查面板确认后继续运行');
-        return;
+        message.warning('模板存在非阻断警告，已继续运行');
       }
       openDrawerForWorkflow(id);
     } catch (error) {
@@ -787,113 +755,154 @@ export default function DocumentsPage() {
 
   return (
     <div className="space-y-5 animateFadeIn">
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-        <div><h1 className="pageTitle">{t('documents.title')}</h1><p className="pageDesc">{t('documents.description')}</p></div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => openEditor()}>{t('documents.newTemplate')}</Button>
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-6 mb-2">
+        <div>
+            <h1 className="text-3xl font-extrabold tracking-tight text-[var(--colorText)] mb-2.5 flex items-center gap-2">
+                <ApartmentOutlined className="text-[var(--colorAccent)]" />
+                {t('documents.title')}
+            </h1>
+            <p className="text-sm text-[var(--colorTextSecondary)]">{t('documents.description')}</p>
+        </div>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => openEditor()} className="shadow-none rounded-lg">{t('documents.newTemplate')}</Button>
       </div>
 
-      <Card size="small"
-        tabList={[
-          { key: 'templates', label: `模板库 (${templates.length})` },
-          { key: 'drafts', label: `生成记录 (${drafts.length})` },
-        ]}
-        activeTabKey={leftTab} onTabChange={setLeftTab}
-      >
-        {leftTab === 'templates' ? (
-          templates.length === 0 ? <Empty description={t('common.noData')} /> : (
-            <List dataSource={templates} renderItem={(item) => (
-              <List.Item style={{ cursor: 'pointer', padding: '10px 0' }}
-                actions={[
-                  <Button key="cfg" size="small" icon={<SettingOutlined />} onClick={(e) => { e.stopPropagation(); openEditor(item); }}>配置</Button>,
-                  <Button key="run" size="small" type="primary" icon={<PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void runTemplateWithValidation(item.id); }}>运行</Button>,
-                  <Button key="copy" size="small" icon={<CopyOutlined />} onClick={(e) => { e.stopPropagation(); void dupTpl(item.id); }} />,
-                  <Popconfirm key="del" title={t('documents.deleteTemplateConfirm')} onConfirm={(e) => { e?.stopPropagation(); void delTpl(item.id); }}>
-                    <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} />
-                  </Popconfirm>,
-                ]}
-                onClick={() => setTemplateId(item.id)}
-              >
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, minWidth: 0, flex: 1 }}>
-                  {templateIcon(item.category, templateId === item.id)}
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-                      <span style={{ fontWeight: templateId === item.id ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</span>
-                      {templateId === item.id && <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>当前</Tag>}
-                      <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>{item.category}</Tag>
-                      {templateValidations[item.id] && <Tag color={templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'error' : templateValidations[item.id]!.issues.length ? 'warning' : 'success'} style={{ margin: 0, fontSize: 10, lineHeight: '16px', flexShrink: 0 }}>检查 {templateValidations[item.id]!.fileDiagnostics.length} 文件 / {templateValidations[item.id]!.promptDiagnostics.length} 提示词</Tag>}
+      <div className="bg-[var(--colorBgContainer)] rounded-2xl shadow-sm overflow-hidden">
+        <Tabs
+          items={[
+            { key: 'templates', label: <span className="px-4">模板库 <Tag className="ml-2 border-0 bg-[var(--colorFillAlter)]">{templates.length}</Tag></span> },
+            { key: 'drafts', label: <span className="px-4">生成记录 <Tag className="ml-2 border-0 bg-[var(--colorFillAlter)]">{drafts.length}</Tag></span> },
+          ]}
+          activeKey={leftTab} onChange={setLeftTab}
+          className="documents-tabs"
+          size="large"
+          tabBarStyle={{ margin: 0, padding: '0 16px', background: 'var(--colorBgHover)', borderBottom: '1px solid var(--borderColor)' }}
+        />
+        <div className="p-4 bg-[var(--colorFillAlter)] min-h-[500px]">
+          {leftTab === 'templates' ? (
+          templates.length === 0 ? (
+            <div className="py-32 text-center border border-dashed border-[var(--borderColor)] rounded-2xl bg-[var(--colorBgContainer)]">
+                <Empty description={<span className="text-[var(--colorTextSecondary)]">{t('common.noData')}</span>} />
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4">
+              {templates.map(item => (
+                <div key={item.id} 
+                     className={`group flex items-center p-4 rounded-2xl transition-all cursor-pointer ${templateId === item.id ? 'bg-[var(--colorBgSelected)] shadow-md' : 'bg-[var(--colorBgContainer)] hover:bg-[var(--colorBgHover)] shadow-sm hover:shadow-md'}`}
+                     onClick={() => setTemplateId(item.id)}>
+                  <div className="flex-1 min-w-0 pr-4">
+                    <div className="flex items-center gap-3 mb-2 min-w-0">
+                      {templateIcon(item.category, templateId === item.id)}
+                      <span className="font-bold text-base text-[var(--colorText)] truncate">{item.name}</span>
+                      {templateId === item.id && <Tag color="blue" className="border-0 m-0 shrink-0">当前选中</Tag>}
+                      <Tag className="border-0 bg-[var(--colorFillSecondary)] m-0 shrink-0">{item.category}</Tag>
                     </div>
-                    {item.description && <Text type="secondary" style={{ fontSize: 12, lineHeight: '18px' }}>{item.description}</Text>}
-                    {templateValidations[item.id] && (
-                      <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 8, padding: 10, border: `1px solid ${templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'var(--colorErrorBorder)' : templateValidations[item.id]!.issues.length ? 'var(--colorWarningBorder)' : 'var(--colorSuccessBorder)'}`, borderRadius: 10, background: templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'var(--colorErrorBg)' : templateValidations[item.id]!.issues.length ? 'var(--colorWarningBg)' : 'var(--colorSuccessBg)' }}>
-                        <VerticalStack gap={6} style={{ width: '100%' }}>
-                          <Space wrap>
-                            <Text strong>{templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? '运行前检查未通过' : templateValidations[item.id]!.issues.length ? '运行前检查存在警告' : '运行前检查通过'}</Text>
-                            <Tag color="blue">文件角色 {templateValidations[item.id]!.fileDiagnostics.length}</Tag>
-                            <Tag color="purple">提示词角色 {templateValidations[item.id]!.promptDiagnostics.length}</Tag>
-                          </Space>
-                          {templateValidations[item.id]!.issues.length > 0 ? templateValidations[item.id]!.issues.map(issue => <NoticeBox key={issue.message} type={issue.level === 'error' ? 'error' : 'warning'} title={issue.message} />) : <NoticeBox type="success" title="文件角色、提示词角色和后台自动规范检查通过，可以运行。" />}
-                          {!templateValidations[item.id]!.issues.some(issue => issue.level === 'error') && templateValidations[item.id]!.issues.length > 0 && (
-                            <div><Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => openDrawerForWorkflow(item.id)}>忽略警告并继续运行</Button></div>
-                          )}
-                        </VerticalStack>
-                      </div>
+                    
+                    {item.description && (
+                        <div className="text-sm text-[var(--colorTextSecondary)] line-clamp-2 leading-relaxed mb-3">
+                            {item.description}
+                        </div>
                     )}
+
+                    {templateValidations[item.id] && (
+                        <div onClick={(e) => e.stopPropagation()} className={`inline-flex items-center gap-2 p-1.5 px-3 rounded-lg border text-xs ${templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'border-red-200 bg-red-50/50' : templateValidations[item.id]!.issues.length ? 'border-yellow-200 bg-yellow-50/50' : 'border-green-200 bg-green-50/50'}`}>
+                            <span className="font-medium">{templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? '检查未通过' : templateValidations[item.id]!.issues.length ? '存在警告' : '检查通过'}</span>
+                            <span className="text-[var(--colorTextTertiary)]">|</span>
+                            <span>文件角色 {templateValidations[item.id]!.fileDiagnostics.length}</span>
+                            <span>提示词 {templateValidations[item.id]!.promptDiagnostics.length}</span>
+                            {!templateValidations[item.id]!.issues.some(issue => issue.level === 'error') && templateValidations[item.id]!.issues.length > 0 && (
+                                <>
+                                  <span className="text-[var(--colorTextTertiary)]">|</span>
+                                  <span className="text-blue-500 cursor-pointer hover:underline" onClick={() => openDrawerForWorkflow(item.id)}>忽略警告</span>
+                                </>
+                            )}
+                        </div>
+                    )}
+                  </div>
+
+                  <div className={`flex items-center gap-2 shrink-0 transition-opacity ${templateId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} onClick={e => e.stopPropagation()}>
+                      <Button size="small" onClick={(e) => { e.stopPropagation(); openEditor(item); }} className="rounded-md">配置</Button>
+                      <Button size="small" icon={<CopyOutlined />} onClick={(e) => { e.stopPropagation(); void dupTpl(item.id); }} className="rounded-md" />
+                      <Popconfirm title={t('documents.deleteTemplateConfirm')} onConfirm={(e) => { e?.stopPropagation(); void delTpl(item.id); }}>
+                          <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} className="rounded-md" />
+                      </Popconfirm>
+                      <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void runTemplateWithValidation(item.id); }} className="rounded-md justify-center">运行</Button>
                   </div>
                 </div>
-              </List.Item>
-            )} />
+              ))}
+            </div>
           )
         ) : (
-          drafts.length === 0 ? <Empty description={t('common.noData')} /> : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          drafts.length === 0 ? (
+            <div className="py-32 text-center border border-dashed border-[var(--borderColor)] rounded-2xl bg-[var(--colorBgContainer)]">
+                <Empty description={<span className="text-[var(--colorTextSecondary)]">{t('common.noData')}</span>} />
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4">
               {drafts.slice(0, 15).map((item, index) => (
                 <div key={item.id}
-                  style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px', border: '1px solid var(--colorBorderSecondary)', borderRadius: 10, cursor: 'pointer', background: currentDocumentId === item.id ? 'var(--colorFillAlter)' : undefined, minWidth: 0 }}
+                  className={`group flex items-center gap-4 p-4 rounded-2xl transition-all cursor-pointer ${currentDocumentId === item.id ? 'bg-[var(--colorBgSelected)] shadow-md' : 'bg-[var(--colorBgContainer)] hover:bg-[var(--colorBgHover)] shadow-sm hover:shadow-md'}`}
                   onClick={() => { void openDrawerForEditor(item); }}
                 >
-                  {item.status === 'completed' ? <CheckCircleOutlined style={{ fontSize: 18, color: 'var(--colorOk)', flexShrink: 0, marginTop: 2 }} />
-                    : item.status === 'failed' || item.status === 'aborted' ? <CloseCircleOutlined style={{ fontSize: 18, color: 'var(--colorDanger)', flexShrink: 0, marginTop: 2 }} />
-                    : item.status === 'warning' ? <SafetyCertificateOutlined style={{ fontSize: 18, color: 'var(--colorWarning)', flexShrink: 0, marginTop: 2 }} />
-                    : <SyncOutlined spin style={{ fontSize: 18, color: '#1677ff', flexShrink: 0, marginTop: 2 }} />}
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 3 }}>{item.title}</div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px', color: 'var(--colorTextSecondary)', fontSize: 11 }}>
-                      <span>{new Date(item.updatedAt).toLocaleString()}</span>
-                      <span>耗时 {fmtDuration(item)}</span>
+                  <div className="mt-1">
+                      {item.status === 'completed' ? <CheckCircleOutlined className="text-xl text-[var(--colorOk)]" />
+                        : item.status === 'failed' || item.status === 'aborted' ? <CloseCircleOutlined className="text-xl text-[var(--colorDanger)]" />
+                        : item.status === 'warning' ? <SafetyCertificateOutlined className="text-xl text-[var(--colorWarning)]" />
+                        : <SyncOutlined spin className="text-xl text-blue-500" />}
+                  </div>
+
+                  <div className="flex-1 min-w-0 pr-4">
+                    <div className="flex items-center gap-3 mb-2">
+                        <span className="font-bold text-base text-[var(--colorText)] truncate">{item.title}</span>
+                        <Tag className="border-0 bg-[var(--colorFillSecondary)] m-0 shrink-0">#{index + 1}</Tag>
+                        <Tag color={draftStatusColor(item.status)} className="border-0 m-0 shrink-0">{draftStatusText(item.status)}</Tag>
                     </div>
-                    {item.partialChapters && item.partialChapters.length > 0 && (
-                      <div style={{ marginTop: 3, fontSize: 11, color: 'var(--colorTextSecondary)' }}>
-                        已完成章节 {item.partialChapters.filter(chapter => chapter.status === 'completed').length}/{item.partialChapters.length} · {item.partialChapters.reduce((sum, chapter) => sum + chapter.chars, 0).toLocaleString()} 字
-                      </div>
-                    )}
+
+                    <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-[var(--colorTextSecondary)] mb-3">
+                      <span className="flex items-center gap-1.5"><HistoryOutlined /> {new Date(item.updatedAt).toLocaleString()}</span>
+                      <span className="text-[var(--colorTextTertiary)]">|</span>
+                      <span>耗时 {fmtDuration(item)}</span>
+                      {item.partialChapters && item.partialChapters.length > 0 && (
+                          <>
+                              <span className="text-[var(--colorTextTertiary)]">|</span>
+                              <span>进度 {item.partialChapters.filter(chapter => chapter.status === 'completed').length}/{item.partialChapters.length} 章</span>
+                              <span className="text-[var(--colorTextTertiary)]">|</span>
+                              <span>共 {item.partialChapters.reduce((sum, chapter) => sum + chapter.chars, 0).toLocaleString()} 字</span>
+                          </>
+                      )}
+                    </div>
+
                     {(item.status === 'warning' || item.status === 'failed' || item.status === 'aborted') && (
-                      <div style={{ marginTop: 3, color: item.status === 'failed' || item.status === 'aborted' ? 'var(--colorError)' : 'var(--colorWarning)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {item.error || item.warningIssues?.[0] || item.draft?.validationIssues.find(x => x.level === 'error' || x.level === 'warning')?.message || '需复核'}
+                      <div className={`inline-flex items-center gap-2 p-1.5 px-3 rounded-lg border text-xs ${item.status === 'failed' || item.status === 'aborted' ? 'border-red-200 bg-red-50/50' : 'border-yellow-200 bg-yellow-50/50'}`}>
+                        <span className="font-medium">{item.status === 'failed' ? '生成失败' : item.status === 'aborted' ? '已中止' : '需复核'}</span>
+                        <span className="text-[var(--colorTextTertiary)]">|</span>
+                        <span className="truncate max-w-[400px]">{item.error || item.warningIssues?.[0] || item.draft?.validationIssues.find(x => x.level === 'error' || x.level === 'warning')?.message || '需复核'}</span>
                       </div>
                     )}
                   </div>
-                  <Space size={4} align="center">
-                    <Tag color={draftStatusColor(item.status)} style={{ margin: 0, fontSize: 10, lineHeight: '18px' }}>{draftStatusText(item.status)}</Tag>
-                    <Tag style={{ margin: 0, fontSize: 10, lineHeight: '18px' }}>#{index + 1}</Tag>
-                    <Popconfirm title="确认删除？" onConfirm={(e) => { e?.stopPropagation(); void delDraft(item); }}>
-                      <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} />
-                    </Popconfirm>
-                    {isDraftGenerating(item.status) && (
-                      <Popconfirm title="确定中止此生成任务？" onConfirm={(e) => { e?.stopPropagation(); void handleAbortDraft(item); }}>
-                        <Button size="small" danger onClick={(e) => e.stopPropagation()}>中止</Button>
-                      </Popconfirm>
-                    )}
-                    {((item.status === 'failed' || item.status === 'aborted') || (item.status === 'warning' && Boolean(item.checkpointChapters?.length) && /继续生成|重新生成|中断|卡住|未完成/u.test(item.error || item.warningIssues?.join('；') || ''))) && (
-                      <Button size="small" onClick={(e) => { e.stopPropagation(); void handleResumeDraft(item); }}>继续</Button>
-                    )}
-                    <Button size="small" type="primary" icon={isDraftGenerating(item.status) ? <SyncOutlined spin /> : <PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void openDrawerForEditor(item); }}>打开</Button>
-                  </Space>
+
+                  <div className={`flex flex-col gap-2 shrink-0 transition-opacity ${currentDocumentId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} onClick={e => e.stopPropagation()}>
+                      <Button size="small" type="primary" icon={isDraftGenerating(item.status) ? <SyncOutlined spin /> : <PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void openDrawerForEditor(item); }} className="rounded-md w-full justify-center">打开</Button>
+                      <div className="flex gap-2 justify-end">
+                        {isDraftGenerating(item.status) && (
+                          <Popconfirm title="确定中止此生成任务？" onConfirm={(e) => { e?.stopPropagation(); void handleAbortDraft(item); }}>
+                            <Button size="small" danger onClick={(e) => e.stopPropagation()} className="rounded-md flex-1">中止</Button>
+                          </Popconfirm>
+                        )}
+                        {((item.status === 'failed' || item.status === 'aborted') || (item.status === 'warning' && Boolean(item.checkpointChapters?.length) && /继续生成|重新生成|中断|卡住|未完成/u.test(item.error || item.warningIssues?.join('；') || ''))) && (
+                          <Button size="small" onClick={(e) => { e.stopPropagation(); void handleResumeDraft(item); }} className="rounded-md flex-1">继续</Button>
+                        )}
+                        <Popconfirm title="确认删除？" onConfirm={(e) => { e?.stopPropagation(); void delDraft(item); }}>
+                          <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} className="rounded-md" />
+                        </Popconfirm>
+                      </div>
+                  </div>
                 </div>
               ))}
             </div>
           )
         )}
-      </Card>
+        </div>
+      </div>
 
       <Drawer
         title={drawerTitle}
@@ -1097,62 +1106,54 @@ export default function DocumentsPage() {
           <Form.Item name="projectRoleConfigId" label={t('documents.projectRoleConfig')} rules={[{ required: true, message: t('documents.projectRoleConfigRequired') }]}>
             <Select showSearch placeholder={t('documents.projectRoleConfigRequired')} options={roleConfigOptions} />
           </Form.Item>
-          <div style={{ marginBottom: 16 }}>
-            <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 8 }}>
-              <Text strong>项目文件绑定</Text>
-              <Tag color="blue">按文件角色多选</Tag>
-            </Space>
-            <NoticeBox type="info" title="每个文件角色可直接勾选文件或文件夹；勾选文件夹会自动绑定该文件夹下所有文件。保存时仍按具体文件路径绑定，兼容现有模板和生成流程。" style={{ marginBottom: 12 }} />
-            <Input.Search allowClear placeholder="搜索文件或文件夹" value={templateFileQuery} onChange={e => setTemplateFileQuery(e.target.value)} style={{ marginBottom: 12 }} />
-            {fileSearching ? <div style={{ textAlign: 'center', padding: 24 }}><Spin /><div style={{ marginTop: 12, color: 'var(--colorTextSecondary)' }}>正在加载知识库文件…</div></div> : fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={selectedProjectRoleConfigId ? '当前项目角色未配置文件角色' : '请先选择项目角色'} /> : templateFileTree.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无知识库文件" /> : (() => {
-              const activeRoleId = activeTemplateFileRole?.value;
-              const checkedPaths = activeRoleId ? uniqueValues(selectedGroups[activeRoleId] || []).filter(path => allTemplateFileKeys.includes(path)) : [];
-              const visibleFileKeys = new Set(collectTemplateFileKeys(filteredTemplateFileTree));
-              return (
-                <Row gutter={12}>
-                  <Col xs={24} md={7}>
-                    <Card size="small" title="文件角色" bodyStyle={{ padding: 8, maxHeight: 360, overflow: 'auto' }}>
-                      <Space direction="vertical" style={{ width: '100%' }} size={6}>
-                        {fileRoleOptions.map(option => {
-                          const count = uniqueValues(selectedGroups[option.value] || []).filter(path => allTemplateFileKeys.includes(path)).length;
-                          return <Button key={option.value} block type={option.value === activeRoleId ? 'primary' : 'default'} onClick={() => setActiveTemplateFileRoleId(option.value)} style={{ textAlign: 'left', height: 'auto', padding: '6px 8px' }}>
-                            <Space style={{ width: '100%', justifyContent: 'space-between' }}><span>{option.label}</span><Tag color={count > 0 ? 'blue' : 'default'}>{count}</Tag></Space>
-                          </Button>;
-                        })}
-                      </Space>
-                    </Card>
-                  </Col>
-                  <Col xs={24} md={17}>
-                    <Card size="small" title={<Space><Text>{activeTemplateFileRole?.label}</Text><Tag color="blue">已选 {checkedPaths.length}</Tag></Space>} extra={<Button size="small" disabled={!activeRoleId || checkedPaths.length === 0} onClick={() => activeRoleId && updateTemplateFileBinding(activeRoleId, [])}>清空</Button>}>
-                      {activeRoleId && <Form.Item name={['fileBindingGroups', activeRoleId]} hidden><Input /></Form.Item>}
-                      <div style={{ marginBottom: 8, color: 'var(--colorTextSecondary)', fontSize: 12 }}>
-                        {checkedPaths.length > 0 ? checkedPaths.slice(0, 4).map(fileDisplayName).join('、') + (checkedPaths.length > 4 ? ` 等 ${checkedPaths.length} 个文件` : '') : '未选择文件'}
+          <div className="mb-6">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <Text strong className="text-base text-[var(--colorText)] block mb-1">项目文件绑定</Text>
+                <div className="text-xs text-[var(--colorTextSecondary)]">每个文件角色可直接从下拉树形列表中多选文件或文件夹。</div>
+              </div>
+              <Tag color="blue" bordered={false}>按文件角色多选</Tag>
+            </div>
+            
+            {fileSearching ? <div className="text-center py-8"><Spin /><div className="mt-3 text-[var(--colorTextSecondary)] text-xs">正在加载知识库文件…</div></div> : fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={selectedProjectRoleConfigId ? '当前项目角色未配置文件角色' : '请先选择项目角色'} /> : templateFileTree.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无知识库文件" /> : (
+              <div className="flex flex-col gap-4">
+                {fileRoleOptions.map(option => {
+                  const activeRoleId = option.value;
+                  const checkedPaths = activeRoleId ? uniqueValues(selectedGroups[activeRoleId] || []) : [];
+                  
+                  return (
+                    <div key={option.value} className="flex flex-col gap-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-sm text-[var(--colorText)]">{option.label}</span>
+                        <Button type="link" size="small" danger disabled={checkedPaths.length === 0} onClick={() => updateTemplateFileBinding(activeRoleId, [])} className="p-0 h-auto">清空</Button>
                       </div>
-                      <Tree
-                        checkable
-                        blockNode
-                        height={360}
-                        treeData={filteredTemplateFileTree}
-                        checkedKeys={checkedPaths}
-                        expandedKeys={templateFileQuery.trim() ? allTemplateTreeKeys : expandedTemplateFileKeys}
-                        onExpand={keys => setExpandedTemplateFileKeys(keys)}
-                        onCheck={(_, info) => {
-                          if (!activeRoleId) return;
-                          const selected = new Set(checkedPaths.filter(path => !visibleFileKeys.has(path)));
-                          for (const node of info.checkedNodes as TemplateFileTreeNode[]) {
-                            if (node.isFolder) collectTemplateFileKeys([node]).forEach(path => selected.add(path));
-                            else selected.add(node.key);
-                          }
-                          updateTemplateFileBinding(activeRoleId, Array.from(selected));
+                      
+                      <Form.Item name={['fileBindingGroups', activeRoleId]} hidden><Input /></Form.Item>
+                      
+                      <TreeSelect
+                        treeData={templateFileTree}
+                        loadData={onLoadData}
+                        value={checkedPaths}
+                        onChange={(value: string[]) => {
+                          const selectedPaths = value.map(item => String(item));
+                          updateTemplateFileBinding(activeRoleId, selectedPaths);
                         }}
+                        treeCheckable={true}
+                        showCheckedStrategy={TreeSelect.SHOW_PARENT}
+                        placeholder="点击这里搜索或选择文件..."
+                        style={{ width: '100%' }}
+                        listHeight={300}
+                        treeNodeFilterProp="rawTitle"
+                        showSearch
+                        maxTagCount="responsive"
+                        size="large"
                       />
-                    </Card>
-                  </Col>
-                </Row>
-              );
-            })()}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
-          <NoticeBox type="info" title="文档规范由后台根据模板、提示词和角色绑定自动生成，无需手动维护规范包。" />
         </Form>
       </Drawer>
     </div>

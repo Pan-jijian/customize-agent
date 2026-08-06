@@ -109,10 +109,10 @@ export default function KnowledgeFileDetailPage() {
       .then(setDetail)
       .catch(error => {
         setDetail(undefined);
-        setLoadError(error instanceof Error ? error.message : '文件详情加载失败');
+        setLoadError(error instanceof Error ? error.message : t('knowledge.fileDetailLoadFailed'));
       })
       .finally(() => setLoading(false));
-  }, [relativePath]);
+  }, [relativePath, t]);
 
   const meta = useMemo(() => extractionMeta(detail), [detail]);
   const layerNames = asList(meta.layerNames);
@@ -140,7 +140,7 @@ export default function KnowledgeFileDetailPage() {
     try {
       const result = await reindexKbFile(relativePath);
       if (result.detail) setDetail(result.detail);
-      message.success('文件索引已重建');
+      message.success(t('knowledge.fileReindexed'));
     } finally {
       setReindexing(false);
     }
@@ -149,13 +149,13 @@ export default function KnowledgeFileDetailPage() {
   const copyText = async (text?: string) => {
     if (!text) return;
     await navigator.clipboard.writeText(text);
-    message.success('已复制');
+    message.success(t('knowledge.copied'));
   };
 
   const openTarget = async (target: 'file' | 'directory') => {
     if (!relativePath) return;
     await openKbFileTarget(relativePath, target);
-    message.success(target === 'file' ? '已请求打开文件' : '已请求打开目录');
+    message.success(target === 'file' ? t('knowledge.openFileRequested') : t('knowledge.openDirectoryRequested'));
   };
 
   const structuredItems = useMemo(() => {
@@ -178,48 +178,48 @@ export default function KnowledgeFileDetailPage() {
     const gridRows = tableGridRows(detail);
     if (tableDescHasData || columnTableRows.length > 0 || rangeRows.length > 0 || gridRows.length > 0) {
       items.push({
-        key: 'table', label: '表格',
-        children: <Space direction="vertical" className="w-full">
+        key: 'table', label: t('knowledge.table'),
+        children: <div className="flex flex-col w-full gap-4">
           {tableDescHasData && <Descriptions size="small" column={2} bordered>
-            {metaItem('Sheet', sheetNames, setFilter)}
-            {metaItem('表头', columnNames, setFilter)}
-            {metaItem('行数', meta.rowCount)}
-            {metaItem('列数', meta.columnCount)}
-            {metaItem('公式数', meta.formulaCount)}
-            {metaItem('合并单元格', meta.mergeCount)}
+            {metaItem(t('knowledge.sheet'), sheetNames, setFilter)}
+            {metaItem(t('knowledge.header'), columnNames, setFilter)}
+            {metaItem(t('knowledge.rows'), meta.rowCount)}
+            {metaItem(t('knowledge.columns'), meta.columnCount)}
+            {metaItem(t('knowledge.formulaCount'), meta.formulaCount)}
+            {metaItem(t('knowledge.mergeCount'), meta.mergeCount)}
           </Descriptions>}
-          {columnTableRows.length > 0 && <Table size="small" pagination={false} rowKey="key" dataSource={columnTableRows} columns={[{ title: '列名', dataIndex: 'name', render: (value: unknown) => <Tag className="cursor-pointer" onClick={() => setFilter(String(value))}>{String(value)}</Tag> }]} />}
-          {rangeRows.length > 0 && <Table size="small" pagination={false} rowKey="key" dataSource={rangeRows} columns={[{ title: '行范围', dataIndex: 'name', render: (value: unknown) => <Tag color="gold" className="cursor-pointer" onClick={() => setFilter(String(value))}>行 {String(value)}</Tag> }]} />}
-          {gridRows.length > 0 && <Table size="small" rowKey="key" dataSource={gridRows} pagination={{ pageSize: 10 }} columns={[{ title: '表格网格预览', dataIndex: 'cells', render: (cells: unknown) => <Space wrap>{(cells as string[]).map((cell, index) => <Tag key={`${cell}-${index}`}>{cell}</Tag>)}</Space> }]} />}
-        </Space>,
+          {columnTableRows.length > 0 && <Table size="small" pagination={false} rowKey="key" dataSource={columnTableRows} columns={[{ title: t('knowledge.columnName'), dataIndex: 'name', render: (value: unknown) => <Tag className="cursor-pointer m-0 border-0 bg-[var(--colorFillSecondary)] hover:bg-[var(--colorFillAlter)]" onClick={() => setFilter(String(value))}>{String(value)}</Tag> }]} className="custom-table border border-[var(--borderColor)] rounded-xl overflow-hidden" />}
+          {rangeRows.length > 0 && <Table size="small" pagination={false} rowKey="key" dataSource={rangeRows} columns={[{ title: t('knowledge.rowRange'), dataIndex: 'name', render: (value: unknown) => <Tag color="gold" className="cursor-pointer m-0 border-0" onClick={() => setFilter(String(value))}>{t('knowledge.rowPrefix')} {String(value)}</Tag> }]} className="custom-table border border-[var(--borderColor)] rounded-xl overflow-hidden" />}
+          {gridRows.length > 0 && <Table size="small" rowKey="key" dataSource={gridRows} pagination={{ pageSize: 10 }} columns={[{ title: t('knowledge.tableGridPreview'), dataIndex: 'cells', render: (cells: unknown) => <Space wrap>{(cells as string[]).map((cell, index) => <Tag key={`${cell}-${index}`} className="m-0 border-0 bg-[var(--colorFillSecondary)]">{cell}</Tag>)}</Space> }]} className="custom-table border border-[var(--borderColor)] rounded-xl overflow-hidden" />}
+        </div>,
       });
     }
 
     // ── 图纸 ──
     const drawDescHasData = layerNamesList.length > 0 || blockNames.length > 0 || entityTypes.length > 0 || productNames.length > 0 || materialNames.length > 0 || entityNames.length > 0;
     const combinedDrawRows = [
-      ...kvRows(layerNamesList, 'layer').map(row => ({ ...row, type: '图层' as const })),
-      ...kvRows(entityTypes, 'entity').map(row => ({ ...row, type: '实体类型' as const })),
-      ...kvRows(blockNames, 'block').map(row => ({ ...row, type: '块/符号' as const })),
+      ...kvRows(layerNamesList, 'layer').map(row => ({ ...row, type: t('knowledge.layer') })),
+      ...kvRows(entityTypes, 'entity').map(row => ({ ...row, type: t('knowledge.entityType') })),
+      ...kvRows(blockNames, 'block').map(row => ({ ...row, type: t('knowledge.blockSymbol') })),
     ];
     if (drawDescHasData || layerNamesList.length > 0 || combinedDrawRows.length > 0) {
       items.push({
-        key: 'drawing', label: '图纸',
-        children: <Space direction="vertical" className="w-full">
+        key: 'drawing', label: t('knowledge.drawing'),
+        children: <div className="flex flex-col w-full gap-4">
           {drawDescHasData && <Descriptions size="small" column={2} bordered>
-            {metaItem('图层', layerNamesList, setFilter)}
-            {metaItem('块/符号', blockNames, setFilter)}
-            {metaItem('实体类型', entityTypes, setFilter)}
-            {metaItem('产品/零件', productNames, setFilter)}
-            {metaItem('材料', materialNames, setFilter)}
-            {metaItem('实体名称', entityNames, setFilter)}
+            {metaItem(t('knowledge.layer'), layerNamesList, setFilter)}
+            {metaItem(t('knowledge.blockSymbol'), blockNames, setFilter)}
+            {metaItem(t('knowledge.entityType'), entityTypes, setFilter)}
+            {metaItem(t('knowledge.productPart'), productNames, setFilter)}
+            {metaItem(t('knowledge.material'), materialNames, setFilter)}
+            {metaItem(t('knowledge.entityName'), entityNames, setFilter)}
           </Descriptions>}
-          {layerNamesList.length > 0 && <Card size="small" title="图层开关 / 图纸预览">
+          {layerNamesList.length > 0 && <Card size="small" title={t('knowledge.layerTogglePreview')} className="rounded-xl border-[var(--borderColor)]">
             <Checkbox.Group value={visibleLayers} options={layerNamesList.map(layer => ({ label: layer, value: layer }))} onChange={values => setVisibleLayers(values.map(String))} />
             <div className={styles.drawingPreview}>{visibleLayers.map(layer => <Tag key={layer} color="blue">{layer}</Tag>)}</div>
           </Card>}
-          {combinedDrawRows.length > 0 && <Table size="small" pagination={false} rowKey="key" dataSource={combinedDrawRows} columns={[{ title: '类型', dataIndex: 'type', width: 120 }, { title: '名称', dataIndex: 'name', render: (value: unknown) => <Tag className="cursor-pointer" onClick={() => setFilter(String(value))}>{String(value)}</Tag> }]} />}
-        </Space>,
+          {combinedDrawRows.length > 0 && <Table size="small" pagination={false} rowKey="key" dataSource={combinedDrawRows} columns={[{ title: t('knowledge.type'), dataIndex: 'type', width: 120 }, { title: t('knowledge.name'), dataIndex: 'name', render: (value: unknown) => <Tag className="cursor-pointer" onClick={() => setFilter(String(value))}>{String(value)}</Tag> }]} className="custom-table border border-[var(--borderColor)] rounded-xl overflow-hidden" />}
+        </div>,
       });
     }
 
@@ -227,11 +227,11 @@ export default function KnowledgeFileDetailPage() {
     const dpRows = dataPreviewRows(detail);
     if (dataPaths.length > 0 || dpRows.length > 0) {
       items.push({
-        key: 'data', label: '数据路径',
-        children: <Space direction="vertical" className="w-full">
-          {dataPaths.length > 0 && <Tree defaultExpandAll treeData={pathTree(dataPaths)} onSelect={keys => setFilter(String(keys[0] ?? ''))} />}
-          {dpRows.length > 0 && <Table size="small" rowKey="key" dataSource={dpRows} pagination={{ pageSize: 20 }} columns={[{ title: 'Path', dataIndex: 'path', width: 260, render: (value: unknown) => <Tag className="cursor-pointer" onClick={() => setFilter(String(value))}>{String(value)}</Tag> }, { title: 'Value', dataIndex: 'value', render: (value: unknown) => <span className="break-all">{String(value)}</span> }]} />}
-        </Space>,
+        key: 'data', label: t('knowledge.dataPath'),
+        children: <div className="flex flex-col w-full gap-4">
+          {dataPaths.length > 0 && <div className="bg-[var(--colorFillAlter)] border border-[var(--colorBorderSecondary)] rounded-xl p-3"><Tree defaultExpandAll treeData={pathTree(dataPaths)} onSelect={keys => setFilter(String(keys[0] ?? ''))} className="bg-transparent" /></div>}
+          {dpRows.length > 0 && <Table size="small" rowKey="key" dataSource={dpRows} pagination={{ pageSize: 20 }} columns={[{ title: t('knowledge.path'), dataIndex: 'path', width: 260, render: (value: unknown) => <Tag className="cursor-pointer" onClick={() => setFilter(String(value))}>{String(value)}</Tag> }, { title: t('knowledge.value'), dataIndex: 'value', render: (value: unknown) => <span className="break-all">{String(value)}</span> }]} className="custom-table border border-[var(--borderColor)] rounded-xl overflow-hidden" />}
+        </div>,
       });
     }
 
@@ -257,30 +257,30 @@ export default function KnowledgeFileDetailPage() {
     const isPdf = detail?.file.format === 'pdf';
     if (ocrDescHasData || isPdf || ocrRows.length > 0) {
       items.push({
-        key: 'ocr', label: 'OCR/PDF',
-        children: <Space direction="vertical" className="w-full">
+        key: 'ocr', label: t('knowledge.ocrPdf'),
+        children: <div className="flex flex-col w-full gap-4">
           {ocrDescHasData && <Descriptions size="small" column={2} bordered>
-            {metaItem('OCR 建议', meta.ocrRecommended)}
-            {metaItem('OCR 原因', meta.ocrReason)}
-            {metaItem('OCR 引擎', meta.ocrProvider)}
-            {metaItem('OCR 语言', meta.ocrLanguages)}
-            {metaItem('OCR 文本长度', meta.ocrTextLength)}
-            {metaItem('PDF 总页数', meta.pdfPageCount)}
-            {metaItem('PDF 文本页数', meta.textPages)}
-            {metaItem('PDF 已 OCR 增强', meta.ocrAugmented)}
-            {metaItem('PDF OCR 页码', Array.isArray(meta.ocrPages) ? meta.ocrPages.join(', ') : meta.ocrPages)}
-            {metaItem('PDF 失败页', Array.isArray(meta.failedPages) ? meta.failedPages.map((item: unknown) => JSON.stringify(item)).join('; ') : meta.failedPages)}
-            {metaItem('PDF 页面 OCR 支持', meta.pdfPageOcrSupported)}
-            {metaItem('PDF OCR 页数', meta.ocrPageCount)}
-            {metaItem('PDF OCR 页数上限', meta.pdfOcrPageLimit)}
-            {metaItem('PDF 渲染器', meta.pdfRenderer)}
-            {metaItem('图像预处理', meta.imagePreprocessor)}
+            {metaItem(t('knowledge.ocrRecommended'), meta.ocrRecommended)}
+            {metaItem(t('knowledge.ocrReason'), meta.ocrReason)}
+            {metaItem(t('knowledge.ocrProvider'), meta.ocrProvider)}
+            {metaItem(t('knowledge.ocrLanguages'), meta.ocrLanguages)}
+            {metaItem(t('knowledge.ocrTextLength'), meta.ocrTextLength)}
+            {metaItem(t('knowledge.pdfPageCount'), meta.pdfPageCount)}
+            {metaItem(t('knowledge.pdfTextPages'), meta.textPages)}
+            {metaItem(t('knowledge.pdfOcrAugmented'), meta.ocrAugmented)}
+            {metaItem(t('knowledge.pdfOcrPages'), Array.isArray(meta.ocrPages) ? meta.ocrPages.join(', ') : meta.ocrPages)}
+            {metaItem(t('knowledge.pdfFailedPages'), Array.isArray(meta.failedPages) ? meta.failedPages.map((item: unknown) => JSON.stringify(item)).join('; ') : meta.failedPages)}
+            {metaItem(t('knowledge.pdfPageOcrSupported'), meta.pdfPageOcrSupported)}
+            {metaItem(t('knowledge.pdfOcrPageCount'), meta.ocrPageCount)}
+            {metaItem(t('knowledge.pdfOcrPageLimit'), meta.pdfOcrPageLimit)}
+            {metaItem(t('knowledge.pdfRenderer'), meta.pdfRenderer)}
+            {metaItem(t('knowledge.imagePreprocessor'), meta.imagePreprocessor)}
           </Descriptions>}
           {isPdf && <div className={styles.pdfPreviewStrip}>
-            {Array.from({ length: Math.min(Number(meta.pdfPageCount ?? meta.ocrPageCount ?? 1) || 1, 6) }, (_, index) => <Image key={index} width={220} height={320} src={`/api/kb/files/preview-pdf-page?relativePath=${encodeURIComponent(detail.file.relativePath)}&page=${index + 1}`} alt={`PDF 第 ${index + 1} 页`} unoptimized />)}
+            {Array.from({ length: Math.min(Number(meta.pdfPageCount ?? meta.ocrPageCount ?? 1) || 1, 6) }, (_, index) => <Image key={index} width={220} height={320} src={`/api/kb/files/preview-pdf-page?relativePath=${encodeURIComponent(detail.file.relativePath)}&page=${index + 1}`} alt={`PDF ${t('knowledge.pageNumber')} ${index + 1}`} unoptimized className="border border-[var(--borderColor)] rounded object-cover" />)}
           </div>}
-          {ocrRows.length > 0 && <Table size="small" rowKey="key" dataSource={ocrRows} pagination={{ pageSize: 10 }} columns={[{ title: '页码', dataIndex: 'page', width: 90 }, { title: 'OCR 文本', dataIndex: 'text', render: (value: unknown) => <Paragraph ellipsis={{ rows: 4, expandable: true, symbol: '展开' }}>{String(value)}</Paragraph> }]} />}
-        </Space>,
+          {ocrRows.length > 0 && <Table size="small" rowKey="key" dataSource={ocrRows} pagination={{ pageSize: 10 }} columns={[{ title: t('knowledge.pageNumber'), dataIndex: 'page', width: 90 }, { title: t('knowledge.ocrText'), dataIndex: 'text', render: (value: unknown) => <Paragraph ellipsis={{ rows: 4, expandable: true, symbol: t('knowledge.openExpand') }}>{String(value)}</Paragraph> }]} className="custom-table border border-[var(--borderColor)] rounded-xl overflow-hidden" />}
+        </div>,
       });
     }
 
@@ -288,24 +288,24 @@ export default function KnowledgeFileDetailPage() {
   }, [meta, detail, visibleLayers]);
 
   const chunkColumns: ColumnsType<KbStoredChunk> = [
-    { title: '序号', key: 'index', width: 70, render: (_: unknown, __: KbStoredChunk, index: number) => index + 1 },
+    { title: t('knowledge.index'), key: 'index', width: 70, render: (_: unknown, __: KbStoredChunk, index: number) => index + 1 },
     { title: t('knowledge.chunkIndex'), dataIndex: 'chunkIndex', width: 90, render: (value: unknown) => String(value) },
     { title: t('knowledge.chunkType'), width: 110, render: (_, row) => <Tag>{String(parseJson(row.metadataJson).chunkKind ?? row.category)}</Tag> },
     { title: t('knowledge.sectionOrRange'), width: 220, render: (_, row) => {
       const m = parseJson(row.metadataJson);
       const rowRange = typeof m.rowRange === 'string' ? m.rowRange : undefined;
-      return <Space wrap>{row.sectionTitle ? <Tag color="cyan">{row.sectionTitle}</Tag> : null}{rowRange ? <Tag color="gold">行 {rowRange}</Tag> : null}</Space>;
+      return <Space wrap>{row.sectionTitle ? <Tag color="cyan">{row.sectionTitle}</Tag> : null}{rowRange ? <Tag color="gold">{t('knowledge.rowPrefix')} {rowRange}</Tag> : null}</Space>;
     } },
-    { title: 'Token', dataIndex: 'tokenCount', width: 90 },
-    { title: t('knowledge.chunkContent'), render: (_, row) => <Paragraph ellipsis={{ rows: 3, expandable: true, symbol: '展开' }} className={styles.searchContent}>{highlight(row.content, filter)}</Paragraph> },
+    { title: t('knowledge.tokens'), dataIndex: 'tokenCount', width: 90 },
+    { title: t('knowledge.chunkContent'), render: (_, row) => <Paragraph ellipsis={{ rows: 3, expandable: true, symbol: t('knowledge.openExpand') }} className={styles.searchContent}>{highlight(row.content, filter)}</Paragraph> },
   ];
 
   const parentColumns: ColumnsType<KbParentChunk> = [
-    { title: '序号', key: 'index', width: 70, render: (_: unknown, __: KbParentChunk, index: number) => index + 1 },
+    { title: t('knowledge.index'), key: 'index', width: 70, render: (_: unknown, __: KbParentChunk, index: number) => index + 1 },
     { title: t('knowledge.parentChunkId'), dataIndex: 'parentId', width: 260, render: (value: string) => <span className="break-all">{value}</span> },
-    { title: '切片数', dataIndex: 'chunkCount', width: 90 },
-    { title: '章节', dataIndex: 'sectionTitle', width: 220 },
-    { title: t('knowledge.chunkContent'), render: (_, row) => <Paragraph ellipsis={{ rows: 3, expandable: true, symbol: '展开' }} className={styles.searchContent}>{highlight(row.content, filter)}</Paragraph> },
+    { title: t('knowledge.chunkCount'), dataIndex: 'chunkCount', width: 90 },
+    { title: t('knowledge.section'), dataIndex: 'sectionTitle', width: 220 },
+    { title: t('knowledge.chunkContent'), render: (_, row) => <Paragraph ellipsis={{ rows: 3, expandable: true, symbol: t('knowledge.openExpand') }} className={styles.searchContent}>{highlight(row.content, filter)}</Paragraph> },
   ];
 
   if (loading) return (
@@ -315,68 +315,72 @@ export default function KnowledgeFileDetailPage() {
       <Card size="small"><Skeleton active paragraph={{ rows: 4 }} /></Card>
     </div>
   );
-  if (loadError) return <Alert type="error" showIcon message="文件详情加载失败" description={loadError} />;
-  if (!detail) return <Empty description="请选择文件" />;
+  if (loadError) return <Alert type="error" showIcon message={t('knowledge.fileDetailLoadFailed')} description={loadError} />;
+  if (!detail) return <Empty description={t('knowledge.selectFile')} />;
 
   return (
     <div className="space-y-5 animateFadeIn">
-      <div>
-        <Button icon={<ArrowLeftOutlined />} href="/knowledge/files" size="small" style={{ marginBottom: 12 }}>返回文件列表</Button>
-        <div className={styles.searchResultHeader}>
-          <div>
-            <h1 className="pageTitle">文件详情</h1>
-            <p className="pageDesc">查看解析结果、图纸/表格/数据结构化字段、parent chunk 和 child chunk。</p>
+      <div className="bg-[var(--colorBgContainer)] rounded-2xl overflow-hidden border border-[var(--borderColor)] p-6 mb-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+          <div className="flex items-center">
+            <Button icon={<ArrowLeftOutlined />} href="/knowledge/files" type="link" className="p-0 mr-4 text-[var(--colorTextSecondary)] hover:text-[var(--colorText)] flex items-center h-auto">{t('knowledge.backToFileList')}</Button>
+            <div>
+              <h1 className="text-2xl font-bold text-[var(--colorText)] mb-1 flex items-center gap-2">{t('knowledge.fileDetailTitle')}</h1>
+              <p className="text-sm text-[var(--colorTextSecondary)] m-0">{t('knowledge.fileDetailDesc')}</p>
+            </div>
           </div>
-          <Space>
-            <Button onClick={() => { void copyText(detail?.absolutePath); }}>复制原文件路径</Button>
-            <Button onClick={() => { void copyText(detail?.directory); }}>复制所在目录</Button>
-            <Button onClick={() => { void openTarget('file'); }}>打开文件</Button>
-            <Button onClick={() => { void openTarget('directory'); }}>打开目录</Button>
-            {detail.file.format === 'pdf' ? <Button loading={reindexing} onClick={() => { void doReindex(); }}>重新 OCR</Button> : null}
-            <Button type="primary" loading={reindexing} onClick={() => { void doReindex(); }}>重建该文件索引</Button>
+          <Space wrap className="shrink-0">
+            <Button size="small" onClick={() => { void copyText(detail?.absolutePath); }}>{t('knowledge.copySourcePath')}</Button>
+            <Button size="small" onClick={() => { void copyText(detail?.directory); }}>{t('knowledge.copyDirectory')}</Button>
+            <Button size="small" onClick={() => { void openTarget('file'); }}>{t('assets.openFile')}</Button>
+            <Button size="small" onClick={() => { void openTarget('directory'); }}>{t('assets.openDirectory')}</Button>
+            {detail.file.format === 'pdf' ? <Button size="small" loading={reindexing} onClick={() => { void doReindex(); }}>{t('knowledge.reOcr')}</Button> : null}
+            <Button size="small" type="primary" loading={reindexing} onClick={() => { void doReindex(); }}>{t('knowledge.reindexFile')}</Button>
           </Space>
         </div>
       </div>
 
-      <Card size="small" title="基础信息">
-        <Descriptions size="small" column={2} bordered>
-          <Descriptions.Item label="路径">{detail.file.relativePath}</Descriptions.Item>
-          <Descriptions.Item label="原文件">{detail.absolutePath ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="所在目录">{detail.directory ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="分类"><Tag>{categoryLabel(detail.file.category)}</Tag> <Tag>{detail.file.format}</Tag></Descriptions.Item>
-          <Descriptions.Item label="大小">{formatBytes(detail.file.fileSize)}</Descriptions.Item>
-          <Descriptions.Item label="切片数">{detail.file.chunkCount}</Descriptions.Item>
-          <Descriptions.Item label="状态">{detail.file.status}</Descriptions.Item>
-          <Descriptions.Item label="解析模式">{String(meta.extractionMode ?? '-')}</Descriptions.Item>
-          <Descriptions.Item label="覆盖范围">{String(meta.contentCoverage ?? '-')}</Descriptions.Item>
-          <Descriptions.Item label="正文长度">{String(meta.textLength ?? '-')}</Descriptions.Item>
+      <Card size="small" className="rounded-2xl border-[var(--borderColor)]" title={<span className="font-semibold">{t('knowledge.basicInfo')}</span>}>
+        <Descriptions size="small" column={{ xxl: 3, xl: 2, lg: 2, md: 1, sm: 1, xs: 1 }} bordered labelStyle={{ width: '120px', background: 'var(--colorFillAlter)', color: 'var(--colorTextSecondary)' }}>
+          <Descriptions.Item label={t('knowledge.path')} span={3}><span className="break-all">{detail.file.relativePath}</span></Descriptions.Item>
+          <Descriptions.Item label={t('knowledge.originalFile')} span={3}><span className="break-all">{detail.absolutePath ?? '-'}</span></Descriptions.Item>
+          <Descriptions.Item label={t('knowledge.directory')} span={3}><span className="break-all">{detail.directory ?? '-'}</span></Descriptions.Item>
+          <Descriptions.Item label={t('knowledge.fileCategory')}><Space size={4}><Tag className="m-0 border-0 bg-[var(--colorFillSecondary)]">{categoryLabel(detail.file.category)}</Tag> <Tag className="m-0 border-0 bg-[var(--colorFillSecondary)]">{detail.file.format}</Tag></Space></Descriptions.Item>
+          <Descriptions.Item label={t('knowledge.fileSize')}>{formatBytes(detail.file.fileSize)}</Descriptions.Item>
+          <Descriptions.Item label={t('knowledge.chunkCount')}>{detail.file.chunkCount}</Descriptions.Item>
+          <Descriptions.Item label={t('knowledge.status')}><Tag color={detail.file.status === 'completed' ? 'success' : detail.file.status === 'failed' ? 'error' : 'processing'} className="m-0">{detail.file.status}</Tag></Descriptions.Item>
+          <Descriptions.Item label={t('knowledge.extractionMode')}>{String(meta.extractionMode ?? '-')}</Descriptions.Item>
+          <Descriptions.Item label={t('knowledge.contentCoverage')}>{String(meta.contentCoverage ?? '-')}</Descriptions.Item>
+          <Descriptions.Item label={t('knowledge.textLength')}>{String(meta.textLength ?? '-')}</Descriptions.Item>
         </Descriptions>
       </Card>
 
       {structuredItems.length > 0 && (
-        <Card size="small" title="结构化信息">
-          <Tabs items={structuredItems} />
+        <Card size="small" className="rounded-2xl border-[var(--borderColor)]" title={<span className="font-semibold">{t('knowledge.structuredInfo')}</span>}>
+          <Tabs items={structuredItems} className="documents-tabs" />
         </Card>
       )}
 
-      <Card size="small" title="详情筛选">
-        <Space direction="vertical" className="w-full">
-          <Input allowClear value={filter} onChange={event => setFilter(event.target.value)} placeholder="筛选 rowRange、图层、实体、data path、section、chunk 内容" />
-          {filter ? <Space wrap>
-            <Tag color="blue">{t('knowledge.parentMatches')} {filteredParents.length}</Tag>
-            <Tag color="green">{t('knowledge.childMatches')} {filteredChunks.length}</Tag>
-            <Tag color="purple">{t('knowledge.filterTerm')} {filter}</Tag>
-          </Space> : null}
-        </Space>
+      <Card size="small" className="rounded-2xl border-[var(--borderColor)]" title={<span className="font-semibold">{t('knowledge.detailFilter')}</span>}>
+        <div className="flex flex-col w-full gap-4">
+          <Input allowClear size="large" value={filter} onChange={event => setFilter(event.target.value)} placeholder={t('knowledge.detailFilterPlaceholder')} className="rounded-xl bg-[var(--colorBgHover)] border-[var(--borderColor)] focus:bg-[var(--colorBgContainer)] hover:bg-[var(--colorBgContainer)] w-full" />
+          {filter ? <div className="flex flex-wrap gap-2 items-center bg-[var(--colorFillAlter)] p-3 rounded-xl border border-[var(--colorBorderSecondary)]">
+            <span className="text-sm font-medium text-[var(--colorTextSecondary)] mr-2">过滤结果：</span>
+            <Tag color="blue" className="m-0 border-0">{t('knowledge.parentMatches')} {filteredParents.length}</Tag>
+            <Tag color="green" className="m-0 border-0">{t('knowledge.childMatches')} {filteredChunks.length}</Tag>
+            <div className="w-[1px] h-3 bg-[var(--colorBorderSecondary)] mx-1"></div>
+            <span className="text-xs text-[var(--colorTextTertiary)]">{t('knowledge.filterTerm')} <strong className="text-[var(--colorText)]">{filter}</strong></span>
+          </div> : null}
+        </div>
       </Card>
 
-      <Card size="small" title={`${t('knowledge.parentChunks')} (${filteredParents.length}/${detail.parents.length})`}>
-        <Alert type="info" showIcon message={t('knowledge.parentChunkHint')} style={{ marginBottom: 12 }} />
-        <Table rowKey="id" columns={parentColumns} dataSource={filteredParents} pagination={{ pageSize: 10 }} size="small" />
+      <Card size="small" className="rounded-2xl border-[var(--borderColor)]" title={<span className="font-semibold">{t('knowledge.parentChunks')} <Tag className="ml-2 border-0 bg-[var(--colorFillSecondary)] text-xs font-normal">{filteredParents.length} / {detail.parents.length}</Tag></span>}>
+        <Alert type="info" showIcon message={t('knowledge.parentChunkHint')} className="mb-4 rounded-xl border-blue-200 bg-blue-50/50" />
+        <Table rowKey="id" columns={parentColumns} dataSource={filteredParents} pagination={{ pageSize: 10 }} size="small" className="custom-table" />
       </Card>
 
-      <Card size="small" title={`${t('knowledge.childChunks')} (${filteredChunks.length}/${detail.chunks.length})`}>
-        <Table rowKey="id" columns={chunkColumns} dataSource={filteredChunks} pagination={{ pageSize: 20 }} size="small" />
+      <Card size="small" className="rounded-2xl border-[var(--borderColor)]" title={<span className="font-semibold">{t('knowledge.childChunks')} <Tag className="ml-2 border-0 bg-[var(--colorFillSecondary)] text-xs font-normal">{filteredChunks.length} / {detail.chunks.length}</Tag></span>}>
+        <Table rowKey="id" columns={chunkColumns} dataSource={filteredChunks} pagination={{ pageSize: 20 }} size="small" className="custom-table" />
       </Card>
     </div>
   );

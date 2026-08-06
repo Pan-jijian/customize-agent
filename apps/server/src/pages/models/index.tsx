@@ -1,22 +1,25 @@
+// cSpell:ignore BAAI Popconfirm hoverable
 import { useEffect, useState } from 'react';
 import { useAppTranslations } from '@/components/Layout';
-import { Card, Button, Tag, Drawer, Input, Select, Row, Col, Space, Popconfirm, Form, App, InputNumber, Alert, Checkbox, Skeleton } from 'antd';
-import { PlusOutlined, DeleteOutlined, ApiOutlined, KeyOutlined, GlobalOutlined, EditOutlined, CheckCircleFilled, CloseCircleFilled, ThunderboltOutlined } from '@ant-design/icons';
-import { getProviders, getModels, saveProvider, deleteProvider, saveModels, healthCheck, getProviderDetail, getEmbeddingConfig, saveEmbeddingConfig, embeddingHealthCheck, type ProviderInfo, type ModelsConfig, type EmbeddingConfig, type ModelCapabilities } from '@/lib/api';
+import { PageHeader } from '@/components/PageHeader';
+import { Button, Tag, Drawer, Input, Select, Space, Popconfirm, Form, App, InputNumber, Checkbox, Skeleton, Switch } from 'antd';
+import { PlusOutlined, DeleteOutlined, ApiOutlined, KeyOutlined, GlobalOutlined, EditOutlined, CheckCircleFilled, CloseCircleFilled, ThunderboltOutlined, SettingOutlined } from '@ant-design/icons';
+import { getProviders, getModels, saveProvider, deleteProvider, saveModels, healthCheck, getProviderDetail, getEmbeddingConfig, saveEmbeddingConfig, embeddingHealthCheck, getWebAccessConfig, saveWebAccessConfig, type ProviderInfo, type ModelsConfig, type EmbeddingConfig, type ModelCapabilities, type WebAccessConfig } from '@/lib/api';
 
 const PROTOCOL_OPTIONS = [
-  { label: 'OpenAI 兼容', value: 'openai' }, { label: 'Anthropic', value: 'anthropic' }, { label: 'Google', value: 'google' },
-  { label: 'Ollama', value: 'ollama' }, { label: 'OpenRouter', value: 'openrouter' },
+  { labelKey: 'models.openAICompatible', value: 'openai' }, { labelKey: 'models.anthropic', value: 'anthropic' }, { labelKey: 'models.google', value: 'google' },
+  { labelKey: 'models.ollama', value: 'ollama' }, { labelKey: 'models.openRouter', value: 'openrouter' },
 ];
 const TIERS = [
   { key: 'reader', labelKey: 'models.tierReader', descKey: 'models.tierReaderDesc' },
   { key: 'reasoning', labelKey: 'models.tierReasoning', descKey: 'models.tierReasoningDesc' },
   { key: 'action', labelKey: 'models.tierAction', descKey: 'models.tierActionDesc' },
 ] as const;
-const CAPABILITY_OPTIONS: Array<{ key: keyof ModelCapabilities; label: string }> = [
-  { key: 'imageGeneration', label: '图片生成' }, { key: 'imageUnderstanding', label: '图片理解' },
-  { key: 'fileUnderstanding', label: '文件理解' }, { key: 'audio', label: '音频能力' }, { key: 'video', label: '视频能力' },
+const CAPABILITY_OPTIONS: Array<{ key: keyof ModelCapabilities; labelKey: string }> = [
+  { key: 'imageGeneration', labelKey: 'models.imageGeneration' }, { key: 'imageUnderstanding', labelKey: 'models.imageUnderstanding' },
+  { key: 'fileUnderstanding', labelKey: 'models.fileUnderstanding' }, { key: 'audio', labelKey: 'models.audioCapability' }, { key: 'video', labelKey: 'models.videoCapability' },
 ];
+const DEFAULT_WEB_ACCESS: WebAccessConfig = { enabled: false, allowProjectFacts: false, maxQueriesPerChapter: 2, maxResultsPerQuery: 3, trustedDomains: [] };
 
 export default function ModelsPage() {
   const t = useAppTranslations();
@@ -25,6 +28,8 @@ export default function ModelsPage() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [models, setModels] = useState<ModelsConfig | null>(null);
   const [embedding, setEmbedding] = useState<EmbeddingConfig>({ provider: 'transformers-local', model: 'BAAI/bge-small-zh-v1.5', dimensions: 512 });
+  const [webAccess, setWebAccess] = useState<WebAccessConfig>(DEFAULT_WEB_ACCESS);
+  const [webAccessSaving, setWebAccessSaving] = useState(false);
   const [embeddingSaving, setEmbeddingSaving] = useState(false);
   const [embeddingTesting, setEmbeddingTesting] = useState(false);
   const [embeddingTestResult, setEmbeddingTestResult] = useState<boolean | null>(null);
@@ -41,16 +46,18 @@ export default function ModelsPage() {
   const [formProtocol, setFormProtocol] = useState('openai');
   const [formDirect, setFormDirect] = useState(false);
   const [formCapabilities, setFormCapabilities] = useState<ModelCapabilities>({});
+  const [formWebEnhancement, setFormWebEnhancement] = useState(false);
   const [formSaving, setFormSaving] = useState(false);
 
   const load = async () => {
     setLoading(true);
     try {
-      const [p, m, e] = await Promise.all([
+      const [p, m, e, w] = await Promise.all([
         getProviders().catch(() => []), getModels().catch(() => null),
         getEmbeddingConfig().catch(() => ({ provider: 'transformers-local' as const, model: 'BAAI/bge-small-zh-v1.5', dimensions: 512 })),
+        getWebAccessConfig().catch(() => DEFAULT_WEB_ACCESS),
       ]);
-      setProviders(p); setModels(m); setEmbedding(e);
+      setProviders(p); setModels(m); setEmbedding(e); setWebAccess(w);
     } catch { message.error(t('common.error')); } finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, []);
@@ -59,6 +66,7 @@ export default function ModelsPage() {
     setIsEditing(false); setEditTarget('');
     setFormName(''); setFormApiKey(''); setFormBaseUrl(''); setFormProtocol('openai');
     setFormDirect(false); setFormCapabilities({});
+    setFormWebEnhancement(false);
     setDrawerOpen(true);
   };
 
@@ -66,10 +74,12 @@ export default function ModelsPage() {
     setIsEditing(true); setEditTarget(p.name);
     setFormName(p.name); setFormApiKey(''); setFormBaseUrl(p.baseUrl || '');
     setFormProtocol(p.protocol || p.detectedProtocol || 'openai'); setFormCapabilities(p.capabilities || {});
+    setFormWebEnhancement(Boolean((p.capabilities as any)?.webSearch));
     try {
       const detail = await getProviderDetail(p.name);
       setFormApiKey(detail.apiKey ? '••••••••' : '');
       setFormBaseUrl(detail.baseUrl || ''); setFormCapabilities(detail.capabilities || {});
+      setFormWebEnhancement(Boolean((detail.capabilities as any)?.webSearch));
     } catch { /* use existing */ }
     setDrawerOpen(true);
   };
@@ -78,7 +88,8 @@ export default function ModelsPage() {
     if (!formName.trim()) return; setFormSaving(true);
     try {
       const apiKey = isEditing && formApiKey.includes('•') ? undefined : formApiKey || undefined;
-      await saveProvider(formName.trim(), { oldName: isEditing ? editTarget : undefined, apiKey, baseUrl: formBaseUrl || undefined, protocol: formProtocol, directEndpoint: formDirect, capabilities: formCapabilities });
+      const combinedCapabilities = { ...formCapabilities, webSearch: formWebEnhancement };
+      await saveProvider(formName.trim(), { oldName: isEditing ? editTarget : undefined, apiKey, baseUrl: formBaseUrl || undefined, protocol: formProtocol, directEndpoint: formDirect, capabilities: combinedCapabilities });
       setDrawerOpen(false); await load(); message.success(t('common.success'));
     } catch { message.error(t('common.error')); } finally { setFormSaving(false); }
   };
@@ -110,159 +121,174 @@ export default function ModelsPage() {
   };
   const handleEmbeddingSave = async () => { setEmbeddingSaving(true); try { const s = await saveEmbeddingConfig(embedding); setEmbedding(s); setEmbeddingTestResult(null); message.success(t('common.success')); } catch { message.error(t('common.error')); } finally { setEmbeddingSaving(false); } };
   const handleEmbeddingTest = async () => { setEmbeddingTesting(true); try { const r = await embeddingHealthCheck(); setEmbeddingTestResult(r.success); message[r.success ? 'success' : 'error'](r.message || (r.success ? t('models.connected') : t('models.connectionFailed'))); } catch { setEmbeddingTestResult(false); } finally { setEmbeddingTesting(false); } };
+  const handleWebAccessSave = async (next: WebAccessConfig) => {
+    setWebAccess(next); setWebAccessSaving(true);
+    try { const saved = await saveWebAccessConfig(next); setWebAccess(saved); message.success(t('common.success')); }
+    catch { setWebAccess(webAccess); message.error(t('common.error')); }
+    finally { setWebAccessSaving(false); }
+  };
 
   if (loading) return (
-    <div className="space-y-5 animateFadeIn">
+    <div className="space-y-6">
       <Skeleton active title paragraph={{ rows: 1 }} />
-      <Card size="small"><Skeleton active paragraph={{ rows: 6 }} /></Card>
-      <Card size="small"><Skeleton active paragraph={{ rows: 4 }} /></Card>
-      <Card size="small"><Skeleton active paragraph={{ rows: 3 }} /></Card>
+      <div className="p-4 bg-[var(--colorBgHover)] rounded-xl border border-[var(--borderColor)]"><Skeleton active paragraph={{ rows: 6 }} /></div>
+      <div className="p-4 bg-[var(--colorBgHover)] rounded-xl border border-[var(--borderColor)]"><Skeleton active paragraph={{ rows: 4 }} /></div>
+      <div className="p-4 bg-[var(--colorBgHover)] rounded-xl border border-[var(--borderColor)]"><Skeleton active paragraph={{ rows: 3 }} /></div>
     </div>
   );
 
   return (
-    <div className="space-y-5 animateFadeIn">
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-        <div><h1 className="pageTitle">{t('models.title')}</h1><p className="pageDesc">{t('models.description')}</p></div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openAddDrawer}>{t('models.addModel')}</Button>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        title={t('models.title')}
+        description={t('models.description')}
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={openAddDrawer}>
+            {t('models.addModel')}
+          </Button>
+        }
+      />
 
       {/* 供应商列表 */}
-      <Card size="small" title={`${t('models.modelList')} (${providers.length})`}>
-        {providers.length === 0 ? <span style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>{t('models.noProviders')}</span> : (
-          <Row gutter={[12, 12]}>
-            {providers.map((p, index) => (
-              <Col key={p.name} xs={24} sm={12} lg={8} xl={6}>
-                <Card size="small" hoverable style={{ height: '100%' }}>
-                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 8, minWidth: 0 }}>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</div>
-                      <div style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}><ThunderboltOutlined /> {p.protocol || p.detectedProtocol || 'openai'}</div>
+      <div>
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-base font-semibold text-[var(--colorText)] tracking-wide">{t('models.modelList')} <span className="text-[var(--colorTextTertiary)] ml-2 font-normal">({providers.length})</span></h2>
+        </div>
+        {providers.length === 0 ? <div className="text-center py-12 bg-[var(--colorBgHover)] rounded-2xl border border-dashed border-[var(--borderColorStrong)] text-[var(--colorTextTertiary)] text-sm">{t('models.noProviders')}</div> : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {providers.map(p => (
+              <div key={p.name} className="group p-5 rounded-2xl border border-transparent hover:border-[var(--borderColorStrong)] bg-[var(--colorBgContainer)] hover:bg-[var(--colorBgHover)] hover:shadow-sm flex flex-col cursor-pointer transition-all duration-300">
+                <div className="flex items-start justify-between gap-3 mb-4 min-w-0">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-base text-[var(--colorText)] truncate mb-1">{p.name}</div>
+                    <div className="text-xs text-[var(--colorTextTertiary)] flex items-center gap-1 uppercase tracking-wider font-semibold">
+                      <ThunderboltOutlined /> {p.protocol || p.detectedProtocol || 'openai'}
                     </div>
-                    <Space size={2}>
-                      <Button size="small" loading={testing === p.name} onClick={() => { void handleTest(p.name); }}
-                        icon={results[p.name] === true ? <CheckCircleFilled style={{ color: 'var(--colorOk)' }} /> : results[p.name] === false ? <CloseCircleFilled style={{ color: 'var(--colorDanger)' }} /> : <ApiOutlined />} />
-                      <Button size="small" icon={<EditOutlined />} onClick={() => { void openEditDrawer(p); }} />
-                      <Popconfirm title={t('models.deleteProviderConfirm')} onConfirm={() => { void handleDelete(p.name); }}>
-                        <Button size="small" danger icon={<DeleteOutlined />} />
-                      </Popconfirm>
-                    </Space>
                   </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}><KeyOutlined /> {p.hasApiKey ? '••••••••' : '—'}</span>
-                    {p.baseUrl && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.baseUrl}><GlobalOutlined /> {p.baseUrl}</span>}
-                    <Space size={4} wrap>
-                      {CAPABILITY_OPTIONS.filter(o => p.capabilities?.[o.key]).map(o => <Tag key={o.key} color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{o.label}</Tag>)}
-                    </Space>
+                  <Space size={0} className="-mr-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Button type="text" size="small" loading={testing === p.name} onClick={(e) => { e.stopPropagation(); void handleTest(p.name); }}
+                      icon={results[p.name] === true ? <CheckCircleFilled className="text-[var(--colorOk)]" /> : results[p.name] === false ? <CloseCircleFilled className="text-[var(--colorDanger)]" /> : <ApiOutlined className="text-[var(--colorTextSecondary)]" />} />
+                    <Button type="text" size="small" icon={<EditOutlined className="text-[var(--colorTextSecondary)]" />} onClick={(e) => { e.stopPropagation(); void openEditDrawer(p); }} />
+                    <Popconfirm title={t('models.deleteProviderConfirm')} onConfirm={(e) => { e?.stopPropagation(); void handleDelete(p.name); }} onCancel={(e) => e?.stopPropagation()}>
+                      <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} />
+                    </Popconfirm>
+                  </Space>
+                </div>
+                <div className="flex flex-col gap-3 mt-auto pt-4 border-t border-[var(--borderColor)]">
+                  <div className="flex items-center justify-between text-xs text-[var(--colorTextSecondary)]">
+                    <span className="flex items-center gap-1"><KeyOutlined /> {t('models.apiKey')}</span>
+                    <span className="font-mono text-[var(--colorTextTertiary)]">{p.hasApiKey ? '••••••••' : t('models.none')}</span>
                   </div>
-                </Card>
-              </Col>
+                  {p.baseUrl && (
+                    <div className="flex items-center justify-between text-xs text-[var(--colorTextSecondary)]">
+                      <span className="flex items-center gap-1"><GlobalOutlined /> URL</span>
+                      <span className="truncate max-w-[120px] font-mono text-[var(--colorTextTertiary)]" title={p.baseUrl}>{p.baseUrl.replace(/^https?:\/\//, '')}</span>
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {CAPABILITY_OPTIONS.filter(o => p.capabilities?.[o.key]).map(o => <Tag key={o.key} color="blue" bordered={false} className="m-0 text-[10px] bg-[var(--colorBrand)]/5 text-[var(--colorBrand)] leading-[18px]">{t(o.labelKey)}</Tag>)}
+                    {(p.capabilities as any)?.webSearch && <Tag color="green" bordered={false} className="m-0 text-[10px] leading-[18px]">{t('models.webEnhancement')}</Tag>}
+                  </div>
+                </div>
+              </div>
             ))}
-          </Row>
+          </div>
         )}
-      </Card>
+      </div>
 
-      {/* 嵌入配置 */}
-      <Card size="small" title={t('models.embeddingConfig')}>
-        <Alert type="info" showIcon message={t('models.embeddingHint')} style={{ marginBottom: 16 }} />
-        <Row gutter={[12, 12]}>
-          <Col xs={24} sm={8}>
-            <div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.embeddingProvider')}</div>
-            <Select value={embedding.provider} style={{ width: '100%' }}
-              options={[{ label: '本地语义模型（推荐）', value: 'transformers-local' }, { label: '外部 Embedding（高级）', value: 'openai-compatible' }]}
+
+      {/* 嵌入配置 - 沉浸式网格 */}
+      <div>
+        <h2 className="text-base font-semibold text-[var(--colorText)] tracking-wide mb-6">{t('models.embeddingConfig')}</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wider mb-2 text-[var(--colorTextTertiary)]">{t('models.embeddingProvider')}</div>
+            <Select value={embedding.provider} className="w-full h-10" variant="borderless"
+              style={{ background: 'var(--colorBgHover)', borderRadius: '8px' }}
+              options={[{ label: t('models.localRecommended'), value: 'transformers-local' }, { label: t('models.externalAdvanced'), value: 'openai-compatible' }]}
               onChange={v => setEmbedding(prev => ({ ...prev, provider: v as EmbeddingConfig['provider'], model: v === 'transformers-local' ? (prev.model || 'BAAI/bge-small-zh-v1.5') : prev.model, dimensions: v === 'transformers-local' ? 512 : (prev.dimensions || 1024) }))} />
-          </Col>
+          </div>
           {embedding.provider === 'openai-compatible' && (
             <>
-              <Col xs={24} sm={8}><div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>Base URL</div><Input value={embedding.baseUrl} onChange={e => setEmbedding(p => ({ ...p, baseUrl: e.target.value }))} placeholder="http://localhost:11434/v1" /></Col>
-              <Col xs={24} sm={8}><div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.model')}</div><Input value={embedding.model} onChange={e => setEmbedding(p => ({ ...p, model: e.target.value }))} placeholder="bge-m3" /></Col>
-              <Col xs={24} sm={8}>
-                <div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.apiKey')}</div>
-                <Input.Password value={embedding.apiKey} onFocus={() => { if (embedding.apiKey?.includes('•')) setEmbedding(p => ({ ...p, apiKey: '' })); }} onChange={e => setEmbedding(p => ({ ...p, apiKey: e.target.value }))} placeholder={t('models.optional')} />
-                {embedding.hasApiKey && <div style={{ fontSize: 11, color: 'var(--colorTextSecondary)', marginTop: 4 }}>{t('models.embeddingApiKeyHint')}</div>}
-              </Col>
+              <div><div className="text-xs font-semibold uppercase tracking-wider mb-2 text-[var(--colorTextTertiary)]">{t('models.baseUrl')}</div><Input className="h-10 px-4 bg-[var(--colorBgHover)]" value={embedding.baseUrl} onChange={e => setEmbedding(p => ({ ...p, baseUrl: e.target.value }))} placeholder="http://localhost:11434/v1" /></div>
+              <div><div className="text-xs font-semibold uppercase tracking-wider mb-2 text-[var(--colorTextTertiary)]">{t('models.model')}</div><Input className="h-10 px-4 bg-[var(--colorBgHover)]" value={embedding.model} onChange={e => setEmbedding(p => ({ ...p, model: e.target.value }))} placeholder="bge-m3" /></div>
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider mb-2 text-[var(--colorTextTertiary)]">{t('models.apiKey')}</div>
+                <Input.Password className="h-10 px-4 bg-[var(--colorBgHover)]" value={embedding.apiKey} onFocus={() => { if (embedding.apiKey?.includes('•')) setEmbedding(p => ({ ...p, apiKey: '' })); }} onChange={e => setEmbedding(p => ({ ...p, apiKey: e.target.value }))} placeholder={t('models.optional')} />
+              </div>
             </>
           )}
           {embedding.provider === 'transformers-local' && (
-            <Col xs={24} sm={8}><div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.model')}</div><Input value={embedding.model} onChange={e => setEmbedding(p => ({ ...p, model: e.target.value }))} placeholder="BAAI/bge-small-zh-v1.5" /></Col>
+            <div><div className="text-xs font-semibold uppercase tracking-wider mb-2 text-[var(--colorTextTertiary)]">{t('models.model')}</div><Input className="h-10 px-4 bg-[var(--colorBgHover)]" value={embedding.model} onChange={e => setEmbedding(p => ({ ...p, model: e.target.value }))} placeholder="BAAI/bge-small-zh-v1.5" /></div>
           )}
-          <Col xs={24} sm={8}>
-            <div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.dimensions')}</div>
-            <InputNumber style={{ width: '100%' }} min={1} value={embedding.dimensions} onChange={v => setEmbedding(p => ({ ...p, dimensions: Number(v || (p.provider === 'transformers-local' ? 512 : 1024)) }))} />
-          </Col>
-          <Col xs={24} sm={8}>
-            <div style={{ fontSize: 12, marginBottom: 4, color: 'var(--colorTextSecondary)' }}>{t('models.status')}</div>
-            <Space>
-              <Tag color="blue">{embedding.provider === 'transformers-local' ? '本地语义模型' : t('models.openAICompatible')}</Tag>
-              {embeddingTestResult === true && <Tag color="success">{t('models.connected')}</Tag>}
-              {embeddingTestResult === false && <Tag color="error">{t('models.connectionFailed')}</Tag>}
-            </Space>
-          </Col>
-        </Row>
-        <Space style={{ marginTop: 16 }}>
-          <Button type="primary" loading={embeddingSaving} onClick={() => { void handleEmbeddingSave(); }}>{t('models.saveEmbedding')}</Button>
-          <Button loading={embeddingTesting} onClick={() => { void handleEmbeddingTest(); }}>{t('models.testEmbedding')}</Button>
-        </Space>
-      </Card>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wider mb-2 text-[var(--colorTextTertiary)]">{t('models.dimensions')}</div>
+            <InputNumber className="w-full h-10 px-2 bg-[var(--colorBgHover)] border-transparent flex items-center" min={1} value={embedding.dimensions} onChange={v => setEmbedding(p => ({ ...p, dimensions: Number(v || (p.provider === 'transformers-local' ? 512 : 1024)) }))} />
+          </div>
+        </div>
+        <div className="mt-8 flex gap-3">
+          <Button type="primary" className="h-10 px-6 font-medium shadow-none" loading={embeddingSaving} onClick={() => { void handleEmbeddingSave(); }}>{t('models.saveEmbedding')}</Button>
+          <Button className="h-10 px-6 font-medium shadow-none bg-[var(--colorBgHover)] border-transparent hover:border-[var(--borderColorStrong)]" loading={embeddingTesting} onClick={() => { void handleEmbeddingTest(); }}>{t('models.testEmbedding')}</Button>
+          <div className="ml-auto flex items-center h-10 gap-2">
+            <Tag color="blue" bordered={false} className="m-0 bg-[var(--colorBgHover)] text-[var(--colorTextSecondary)]">{embedding.provider === 'transformers-local' ? t('models.localEmbedding') : t('models.openAICompatible')}</Tag>
+            {embeddingTestResult === true && <Tag color="success" bordered={false} className="m-0" icon={<CheckCircleFilled />}>{t('models.connected')}</Tag>}
+            {embeddingTestResult === false && <Tag color="error" bordered={false} className="m-0" icon={<CloseCircleFilled />}>{t('models.connectionFailed')}</Tag>}
+          </div>
+        </div>
+      </div>
+
 
       {/* 模型层级 */}
       {models && (
-        <Card size="small" title={t('models.modelTiers')}>
-          <Row gutter={[12, 12]}>
-            {TIERS.map(({ key, labelKey, descKey }) => {
-              const tier = models[key as keyof ModelsConfig];
-              const tierOpts = tier.list.map(m => ({ label: `${m.provider} / ${m.name}`, value: `${m.provider}:${m.name}` }));
-              const newOpts = providers.filter(p => !tier.list.some(m => m.provider === p.name)).map(p => ({ label: p.name, value: `${p.name}:${p.name}` }));
-              const activeModel = tier.active ? tier.list.find(m => m.name === tier.active) : null;
-              return (
-                <Col key={key} xs={24} lg={8}>
-                  <Card size="small" title={<span style={{ fontSize: 14 }}>{t(labelKey)}</span>} style={{ height: '100%' }}>
-                    <div style={{ fontSize: 12, color: 'var(--colorTextSecondary)', marginBottom: 8, lineHeight: 1.5 }}>{t(descKey)}</div>
+        <>
+          <div className="mb-6">
+            <h2 className="text-base font-semibold text-[var(--colorText)] tracking-wide mb-6">{t('models.modelTiers')}</h2>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+              {TIERS.map(({ key, labelKey, descKey }) => {
+                const tier = models[key as keyof ModelsConfig];
+                const tierOpts = tier.list.map(m => ({ label: `${m.provider} / ${m.name}`, value: `${m.provider}:${m.name}` }));
+                const newOpts = providers.filter(p => !tier.list.some(m => m.provider === p.name)).map(p => ({ label: p.name, value: `${p.name}:${p.name}` }));
+                const activeModel = tier.active ? tier.list.find(m => m.name === tier.active) : null;
+                return (
+                  <div key={key} className="p-6 bg-[var(--colorBgHover)] rounded-xl flex flex-col transition-colors border border-transparent hover:border-[var(--borderColorStrong)]">
+                    <div className="text-sm font-semibold text-[var(--colorText)] uppercase tracking-wider mb-2">{t(labelKey)}</div>
+                    <div className="text-xs text-[var(--colorTextTertiary)] mb-5 leading-relaxed flex-1">{t(descKey)}</div>
                     <Select value={tier.active ? `${activeModel?.provider || ''}:${tier.active}` : undefined}
                       onChange={v => { void handleModelChange(key, v); }} allowClear placeholder={t('models.selectModelPlaceholder')}
-                      style={{ width: '100%' }} options={[...tierOpts, ...newOpts]} />
+                      className="w-full h-10" variant="borderless" style={{ background: 'var(--colorBgElevated)', borderRadius: '8px' }} options={[...tierOpts, ...newOpts]} />
                     {activeModel && (() => {
                       const prov = providers.find(p => p.name === activeModel.provider);
                       return (
-                        <div style={{
-                          marginTop: 12,
-                          padding: '8px 12px',
-                          background: 'var(--colorBgElevated)',
-                          borderRadius: 6,
-                          border: '1px solid var(--colorBorderSecondary)',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 8,
-                        }}>
-                          <ApiOutlined style={{ color: 'var(--colorAccent)', fontSize: 14, flexShrink: 0 }} />
-                          <span style={{ fontSize: 12, fontWeight: 500, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <div className="mt-4 px-4 py-3 bg-[var(--colorBgElevated)] rounded-lg border border-[var(--borderColor)] flex items-center gap-3 transition-colors">
+                          <ApiOutlined className="text-[var(--colorBrand)] text-base shrink-0" />
+                          <span className="text-sm font-medium flex-1 min-w-0 truncate text-[var(--colorText)]">
                             {activeModel.provider}
                           </span>
                           {prov?.capabilities && CAPABILITY_OPTIONS.filter(o => prov.capabilities![o.key]).length > 0 && (
-                            <Space size={4} wrap style={{ flexShrink: 0 }}>
+                            <div className="flex gap-1 shrink-0">
                               {CAPABILITY_OPTIONS.filter(o => prov.capabilities![o.key]).slice(0, 2).map(o => (
-                                <Tag key={o.key} color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{o.label}</Tag>
+                                <Tag key={o.key} color="blue" bordered={false} className="m-0 text-[10px] bg-[var(--colorBrand)]/5 text-[var(--colorBrand)] leading-[18px]">{t(o.labelKey)}</Tag>
                               ))}
-                            </Space>
+                            </div>
                           )}
-                          <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '18px', flexShrink: 0 }}>激活</Tag>
+                          <Tag color="success" bordered={false} className="m-0 text-[10px] leading-[18px] shrink-0 uppercase">{t('models.active')}</Tag>
                         </div>
                       );
                     })()}
-                  </Card>
-                </Col>
-              );
-            })}
-          </Row>
-        </Card>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
       )}
 
       {/* 供应商抽屉（添加 / 编辑） */}
       <Drawer
         title={isEditing ? t('models.editModel') : t('models.addModel')}
-        open={drawerOpen} onClose={() => setDrawerOpen(false)} width={800} maskClosable={false}
-        style={{ borderRadius: '12px 0 0 12px' }}
-        styles={{ body: { padding: '16px 24px' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
+        open={drawerOpen} onClose={() => setDrawerOpen(false)}
+        width={800}
+        styles={{ body: { padding: '24px 32px' }, header: { padding: '16px 32px', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
         extra={<Button type="primary" loading={formSaving} onClick={() => { void handleSaveProvider(); }}>{t('common.save')}</Button>}
       >
         <Form layout="vertical">
@@ -271,11 +297,15 @@ export default function ModelsPage() {
             <Input.Password value={formApiKey} onFocus={() => { if (isEditing && formApiKey.includes('•')) setFormApiKey(''); }} onChange={e => setFormApiKey(e.target.value)} placeholder={isEditing ? t('models.apiKeyEditPlaceholder') : 'sk-...'} />
           </Form.Item>
           <Form.Item label={t('models.baseUrl')}><Input value={formBaseUrl} onChange={e => setFormBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" /></Form.Item>
-          <Form.Item label={t('models.protocol')}><Select value={formProtocol} onChange={setFormProtocol} options={PROTOCOL_OPTIONS} /></Form.Item>
-          <Form.Item label="直连端点"><Checkbox checked={formDirect} onChange={e => setFormDirect(e.target.checked)}>Base URL 是完整接口地址</Checkbox></Form.Item>
-          <Form.Item label="多模态能力">
+          <Form.Item label={t('models.protocol')}><Select value={formProtocol} onChange={setFormProtocol} options={PROTOCOL_OPTIONS.map(option => ({ label: t(option.labelKey), value: option.value }))} /></Form.Item>
+          <Form.Item label={t('models.directEndpoint')}><Checkbox checked={formDirect} onChange={e => setFormDirect(e.target.checked)}>{t('models.directEndpointDesc')}</Checkbox></Form.Item>
+          <Form.Item label={t('models.webEnhancement')}>
+            <Switch checked={formWebEnhancement} onChange={setFormWebEnhancement} />
+            <span className="ml-3 text-xs text-[var(--colorTextSecondary)]">{t('models.webEnhancementDesc')}</span>
+          </Form.Item>
+          <Form.Item label={t('models.capabilities')}>
             <Checkbox.Group value={CAPABILITY_OPTIONS.filter(o => formCapabilities[o.key]).map(o => o.key)}
-              options={CAPABILITY_OPTIONS.map(o => ({ label: o.label, value: o.key }))}
+              options={CAPABILITY_OPTIONS.map(o => ({ label: t(o.labelKey), value: o.key }))}
               onChange={values => setFormCapabilities(Object.fromEntries(CAPABILITY_OPTIONS.map(o => [o.key, values.includes(o.key)])))} />
           </Form.Item>
         </Form>

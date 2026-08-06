@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState } from 'react';
 import { useAppTranslations } from '@/components/Layout';
-import { Card, Button, Drawer, Input, App, Tag, Popconfirm, Empty, Space, Checkbox, Skeleton, Select, Divider, Spin, Segmented } from 'antd';
+import { Button, Drawer, Input, App, Tag, Popconfirm, Empty, Space, Checkbox, Skeleton, Select, Divider, Spin, Segmented } from 'antd';
 import { EditOutlined, FileTextOutlined, FolderOutlined, DeleteOutlined, PlusOutlined, ImportOutlined, ExportOutlined, SendOutlined, RobotOutlined, SearchOutlined, UnorderedListOutlined, AppstoreOutlined } from '@ant-design/icons';
 
 interface PromptProject {
@@ -93,8 +93,8 @@ function getPromptSource(p: PromptProject): SourceFilter {
   if (p.isCurrent) return 'current';
   return 'project';
 }
-function sourceLabel(source: SourceFilter) {
-  return source === 'custom' ? '我的提示词' : source === 'current' ? '当前项目' : source === 'project' ? '其他项目' : '全部';
+function sourceLabel(source: SourceFilter, t: any) {
+  return source === 'custom' ? t('prompt.customPrompt') : source === 'current' ? t('prompt.currentProject') : source === 'project' ? t('prompt.otherProjects') : t('prompt.allPrompts');
 }
 function sourceColor(source: SourceFilter) {
   return source === 'custom' ? 'cyan' : source === 'current' ? 'green' : source === 'project' ? 'blue' : 'default';
@@ -427,160 +427,149 @@ export default function PromptPage() {
   const promptTags = (p: PromptProject) => {
     const source = getPromptSource(p);
     return <Space size={4} wrap>
-      <Tag color={sourceColor(source)} style={{ margin: 0 }}>{sourceLabel(source)}</Tag>
-      {p.selected && <Tag color="purple" style={{ margin: 0 }}>已选中</Tag>}
-      {!p.hasFile && <Tag style={{ margin: 0 }}>无文件</Tag>}
+      <Tag color={sourceColor(source)} style={{ margin: 0 }}>{sourceLabel(source, t)}</Tag>
+      {p.selected && <Tag color="purple" style={{ margin: 0 }}>{t('prompt.selected')}</Tag>}
+      {!p.hasFile && <Tag style={{ margin: 0 }}>{t('prompt.missingFileStatus')}</Tag>}
     </Space>;
   };
 
-  const promptActions = (p: PromptProject) => <Space size={6}>
-    {p.hasFile && <Checkbox checked={p.selected} onChange={e => { void handleSelect(p, e.target.checked); }}>选中</Checkbox>}
-    {!p.hasFile && p.projectRoot && <Button size="small" icon={<PlusOutlined />} onClick={() => openCreate(p)}>创建</Button>}
-    {p.hasFile && <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(p)}>编辑</Button>}
+  const promptActions = (p: PromptProject) => <div className="flex items-center gap-1.5">
+    {p.hasFile && <Checkbox checked={p.selected} onChange={e => { void handleSelect(p, e.target.checked); }} className="mr-1">{t('prompt.selected')}</Checkbox>}
+    {!p.hasFile && p.projectRoot && <Button size="small" icon={<PlusOutlined />} onClick={() => openCreate(p)}>{t('common.add')}</Button>}
+    {p.hasFile && <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(p)}>{t('common.edit')}</Button>}
     {p.hasFile && <Button size="small" icon={<ExportOutlined />} onClick={() => handleExportOne(p)}>导出</Button>}
     <Popconfirm title={isCustomPrompt(p) ? '删除自定义提示词？' : '删除项目记录及文件？'} onConfirm={() => { void handleDelete(p); }}>
       <Button size="small" danger icon={<DeleteOutlined />} />
     </Popconfirm>
-  </Space>;
+  </div>;
 
   const renderPromptListItem = (p: PromptProject) => {
     const excerpt = promptExcerpt(p, 180);
     const active = activePrompt?.id === p.id;
-    return <div key={p.id} onClick={() => setActivePromptId(p.id)} style={{ display: 'grid', gridTemplateColumns: '28px minmax(0, 1fr) auto', gap: 12, alignItems: 'center', padding: 14, border: `1px solid ${active ? 'var(--colorAccent)' : 'var(--colorBorderSecondary)'}`, borderRadius: 12, background: active ? 'var(--colorFillSecondary)' : 'var(--colorBgContainer)', cursor: 'pointer', transition: 'all .2s ease' }}>
+    return <div key={p.id} onClick={() => setActivePromptId(p.id)} className={`group grid grid-cols-[28px_1fr_auto] gap-4 items-center p-4 rounded-xl transition-all cursor-pointer ${active ? 'bg-[var(--colorBgSelected)] shadow-md' : 'bg-transparent hover:bg-[var(--colorBgHover)] hover:shadow-sm'}`}>
       <Checkbox checked={checkedPromptIds.includes(p.id)} onClick={e => e.stopPropagation()} onChange={e => setCheckedPromptIds(items => e.target.checked ? Array.from(new Set([...items, p.id])) : items.filter(id => id !== p.id))} />
-      <div style={{ minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-          <FileTextOutlined style={{ color: p.isCurrent ? 'var(--colorOk)' : 'var(--colorAccent)' }} />
-          <span style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.projectName}</span>
+      <div className="min-w-0">
+        <div className="flex items-center gap-3 mb-1.5">
+          <FileTextOutlined className={p.isCurrent ? 'text-[var(--colorOk)] text-lg' : 'text-[var(--colorTextSecondary)] text-lg'} />
+          <span className="font-semibold truncate text-[var(--colorText)] text-base">{p.projectName}</span>
           {promptTags(p)}
         </div>
-        <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: excerpt ? 6 : 0 }}>
-          <FolderOutlined style={{ marginRight: 4 }} />{p.projectRoot || p.customizePath || '本地提示词'} · {formatDate(p.mtime)}
+        <div className="text-xs text-[var(--colorTextTertiary)] truncate flex items-center gap-1.5 font-medium">
+          <FolderOutlined /> {p.projectRoot || p.customizePath || '本地提示词'}
+          <span className="text-[var(--colorBorderSecondary)]">|</span>
+          {formatDate(p.mtime)}
         </div>
-        {excerpt && <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12, lineHeight: 1.6, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', whiteSpace: 'pre-wrap' }}>{excerpt}</div>}
+        {excerpt && <div className="mt-2.5 bg-[var(--colorFillAlter)] p-2.5 rounded-lg overflow-hidden"><div className="text-sm text-[var(--colorTextSecondary)] line-clamp-2 leading-normal">{excerpt}</div></div>}
       </div>
-      <div onClick={e => e.stopPropagation()}>{promptActions(p)}</div>
+      <div onClick={e => e.stopPropagation()} className={`transition-opacity flex items-center ${active ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+        {promptActions(p)}
+      </div>
     </div>;
   };
 
   const renderPromptCard = (p: PromptProject) => {
     const excerpt = promptExcerpt(p, 180);
     const active = activePrompt?.id === p.id;
-    return <Card key={p.id} size="small" hoverable onClick={() => setActivePromptId(p.id)} style={{ borderColor: active ? 'var(--colorAccent)' : undefined }} styles={{ body: { display: 'flex', flexDirection: 'column', minHeight: 210 } }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        <Checkbox checked={checkedPromptIds.includes(p.id)} onClick={e => e.stopPropagation()} onChange={e => setCheckedPromptIds(items => e.target.checked ? Array.from(new Set([...items, p.id])) : items.filter(id => id !== p.id))} />
-        <FileTextOutlined style={{ color: p.isCurrent ? 'var(--colorOk)' : 'var(--colorAccent)' }} />
-        <span style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{p.projectName}</span>
+    return <div key={p.id} onClick={() => setActivePromptId(p.id)} className={`group flex flex-col p-5 rounded-2xl transition-all cursor-pointer ${active ? 'bg-[var(--colorBgSelected)] shadow-md' : 'bg-[var(--colorBgContainer)] hover:bg-[var(--colorBgHover)] shadow-sm hover:shadow-md'}`}>
+      <div className="flex items-start justify-between gap-3 mb-4 min-w-0">
+        <div className="flex items-center gap-3 min-w-0 flex-1">
+          <Checkbox checked={checkedPromptIds.includes(p.id)} onClick={e => e.stopPropagation()} onChange={e => setCheckedPromptIds(items => e.target.checked ? Array.from(new Set([...items, p.id])) : items.filter(id => id !== p.id))} />
+          <FileTextOutlined className={p.isCurrent ? 'text-[var(--colorOk)] text-lg' : 'text-[var(--colorTextSecondary)] text-lg'} />
+          <span className="font-bold text-base text-[var(--colorText)] truncate mb-1">{p.projectName}</span>
+        </div>
       </div>
-      <div style={{ marginBottom: 8 }}>{promptTags(p)}</div>
-      <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 8 }}><FolderOutlined style={{ marginRight: 4 }} />{p.projectRoot || p.customizePath || '本地提示词'}</div>
-      <div style={{ padding: 10, background: 'var(--colorFillAlter)', borderRadius: 8, color: 'var(--colorTextSecondary)', fontSize: 12, lineHeight: 1.6, minHeight: 72, maxHeight: 72, overflow: 'hidden', whiteSpace: 'pre-wrap' }}>{excerpt || '暂无内容预览'}</div>
-      <div style={{ marginTop: 'auto', paddingTop: 10, borderTop: '1px solid var(--colorBorderSecondary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
-        <span style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>{formatDate(p.mtime)}</span>
-        {promptActions(p)}
+      <div className="mb-3">{promptTags(p)}</div>
+      <div className="text-xs text-[var(--colorTextTertiary)] truncate flex items-center gap-1.5 mb-4 bg-[var(--colorFillAlter)] p-1.5 rounded inline-flex self-start">
+        <FolderOutlined />
+        {p.projectRoot || p.customizePath || '本地提示词'}
       </div>
-    </Card>;
+      <div className="flex-1 bg-[var(--colorFillAlter)] p-3 rounded-xl mb-4 overflow-hidden">
+        {excerpt ? <div className="text-sm text-[var(--colorTextSecondary)] line-clamp-3 leading-normal">{excerpt}</div> : <div className="text-sm text-[var(--colorTextQuaternary)] italic">暂无内容预览</div>}
+      </div>
+      <div className="mt-auto pt-4 flex justify-between items-center" onClick={e => e.stopPropagation()}>
+        <span className="text-xs font-medium text-[var(--colorTextTertiary)] bg-[var(--colorFillSecondary)] px-2 py-1 rounded">{formatDate(p.mtime)}</span>
+        <div className={`transition-opacity ${active ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>{promptActions(p)}</div>
+      </div>
+    </div>;
   };
 
   if (loading) return (
-    <div className="space-y-5 animateFadeIn">
+    <div className="space-y-12">
       <Skeleton active title paragraph={{ rows: 1 }} />
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
-        {Array.from({ length: 4 }).map((_, i) => <Card key={i} size="small"><Skeleton active paragraph={{ rows: 4 }} /></Card>)}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+        {Array.from({ length: 4 }).map((_, i) => <div key={i} className="p-4 border border-[var(--borderColor)]"><Skeleton active paragraph={{ rows: 4 }} /></div>)}
       </div>
     </div>
   );
 
   return (
-    <div className="space-y-5 animateFadeIn">
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-        <div><h1 className="pageTitle">{t('nav.promptManagement')}</h1><p className="pageDesc">{t('prompt.description')}</p></div>
+    <div className="space-y-8 animateFadeIn">
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-6 mb-2">
+        <div>
+            <h1 className="text-3xl font-extrabold tracking-tight text-[var(--colorText)] mb-2.5 flex items-center gap-2">
+                <FileTextOutlined className="text-[var(--colorAccent)]" />
+                {t('nav.promptManagement')}
+            </h1>
+            <p className="text-sm text-[var(--colorTextSecondary)]">{t('prompt.description')}</p>
+        </div>
         <Space wrap>
-          {currentProject && <Tag color="green" style={{ lineHeight: '22px' }}><FolderOutlined /> {currentProject.projectRoot}</Tag>}
+          {currentProject && <Tag color="green" style={{ lineHeight: '22px' }} bordered={false}><FolderOutlined /> {currentProject.projectRoot}</Tag>}
           <input ref={fileInputRef} type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={e => { void handleImportFile(e.target.files?.[0]); }} />
-          <Button icon={<ImportOutlined />} loading={importing} onClick={() => fileInputRef.current?.click()}>导入</Button>
-          <Button icon={<ExportOutlined />} disabled={filteredProjects.length === 0} onClick={() => handleExport('filtered')}>导出筛选</Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate()}>创建提示词</Button>
+          <Button icon={<ImportOutlined />} loading={importing} onClick={() => fileInputRef.current?.click()} className="rounded-lg">{t('prompt.import')}</Button>
+          <Button icon={<ExportOutlined />} disabled={filteredProjects.length === 0} onClick={() => handleExport('filtered')} className="rounded-lg">{t('prompt.exportFiltered')}</Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate()} className="shadow-none rounded-lg">{t('prompt.createPrompt')}</Button>
         </Space>
       </div>
 
-      <Card size="small" styles={{ body: { display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' } }}>
-        <Input prefix={<SearchOutlined />} allowClear placeholder="搜索名称、内容、路径..." value={searchText} onChange={e => setSearchText(e.target.value)} style={{ width: 280 }} />
-        <Select<SourceFilter> value={sourceFilter} onChange={setSourceFilter} style={{ width: 150 }} options={[
-          { label: `全部 (${promptStats.all})`, value: 'all' },
-          { label: `我的提示词 (${promptStats.custom})`, value: 'custom' },
-          { label: `当前项目 (${promptStats.current})`, value: 'current' },
-          { label: `其他项目 (${promptStats.project})`, value: 'project' },
+      <div className="flex flex-wrap items-center gap-3 bg-[var(--colorBgContainer)] p-3 rounded-xl shadow-sm mb-6">
+        <Input prefix={<SearchOutlined className="text-[var(--colorTextTertiary)]" />} allowClear placeholder={t('prompt.searchPrompt')} value={searchText} onChange={e => setSearchText(e.target.value)} style={{ width: 280 }} bordered={false} className="bg-[var(--colorBgHover)] rounded-lg hover:bg-[var(--colorFillAlter)] focus:bg-[var(--colorBgElevated)] transition-colors" />
+        <div className="h-4 w-[1px] bg-[var(--borderColorStrong)] mx-1"></div>
+        <Select<SourceFilter> value={sourceFilter} onChange={setSourceFilter} style={{ width: 150 }} variant="borderless" options={[
+          { label: `${t('prompt.allPrompts')} (${promptStats.all})`, value: 'all' },
+          { label: `${t('prompt.customPrompt')} (${promptStats.custom})`, value: 'custom' },
+          { label: `${t('prompt.currentProject')} (${promptStats.current})`, value: 'current' },
+          { label: `${t('prompt.otherProjects')} (${promptStats.project})`, value: 'project' },
         ]} />
-        <Select<StatusFilter> value={statusFilter} onChange={setStatusFilter} style={{ width: 130 }} options={[
-          { label: '全部状态', value: 'all' },
-          { label: `已选中 (${promptStats.selected})`, value: 'selected' },
-          { label: `未选中 (${promptStats.unselected})`, value: 'unselected' },
-          { label: `有文件 (${promptStats.hasFile})`, value: 'hasFile' },
-          { label: `无文件 (${promptStats.missingFile})`, value: 'missingFile' },
+        <Select<StatusFilter> value={statusFilter} onChange={setStatusFilter} style={{ width: 130 }} variant="borderless" options={[
+          { label: t('prompt.promptStatus'), value: 'all' },
+          { label: `${t('prompt.selected')} (${promptStats.selected})`, value: 'selected' },
+          { label: `${t('prompt.unselected')} (${promptStats.unselected})`, value: 'unselected' },
+          { label: `${t('prompt.hasFileStatus')} (${promptStats.hasFile})`, value: 'hasFile' },
+          { label: `${t('prompt.missingFileStatus')} (${promptStats.missingFile})`, value: 'missingFile' },
         ]} />
-        <Select<SortMode> value={sortMode} onChange={setSortMode} style={{ width: 140 }} options={[
-          { label: '最近修改优先', value: 'mtime' },
-          { label: '名称 A-Z', value: 'name' },
-          { label: '来源优先', value: 'source' },
-          { label: '已选中优先', value: 'selected' },
+        <Select<SortMode> value={sortMode} onChange={setSortMode} style={{ width: 140 }} variant="borderless" options={[
+          { label: t('prompt.sortByMtime'), value: 'mtime' },
+          { label: t('prompt.sortByName'), value: 'name' },
+          { label: t('prompt.sortBySource'), value: 'source' },
+          { label: t('prompt.sortBySelected'), value: 'selected' },
         ]} />
-        <Segmented value={viewMode} onChange={value => setViewMode(value as ViewMode)} options={[{ label: <UnorderedListOutlined />, value: 'list' }, { label: <AppstoreOutlined />, value: 'card' }]} />
-        <div style={{ flex: 1 }} />
-        <span style={{ color: 'var(--colorTextSecondary)', fontSize: 13 }}>已显示 {filteredProjects.length} / {projects.length}</span>
-      </Card>
+        <div className="flex-1"></div>
+        <Segmented value={viewMode} onChange={value => setViewMode(value as ViewMode)} options={[{ label: <UnorderedListOutlined />, value: 'list' }, { label: <AppstoreOutlined />, value: 'card' }]} className="bg-[var(--colorBgHover)] p-1 rounded-lg" />
+      </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '260px minmax(0, 1fr)', gap: 14, alignItems: 'start' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <Card size="small" title="分组导航" styles={{ body: { padding: 8 } }}>
-            {([
-              ['all', '全部', promptStats.all], ['custom', '我的提示词', promptStats.custom], ['current', '当前项目', promptStats.current], ['project', '其他项目', promptStats.project],
-            ] as Array<[SourceFilter, string, number]>).map(([key, label, count]) => (
-              <button key={key} onClick={() => setSourceFilter(key)} style={{ width: '100%', border: 'none', background: sourceFilter === key ? 'var(--colorFillSecondary)' : 'transparent', color: 'var(--colorText)', padding: '9px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between', cursor: 'pointer', fontWeight: sourceFilter === key ? 700 : 400 }}>
-                <span>{label}</span><span>{count}</span>
-              </button>
-            ))}
-            <Divider style={{ margin: '8px 0' }} />
-            {([
-              ['selected', '已选中', promptStats.selected], ['unselected', '未选中', promptStats.unselected],
-            ] as Array<[StatusFilter, string, number]>).map(([key, label, count]) => (
-              <button key={key} onClick={() => setStatusFilter(statusFilter === key ? 'all' : key)} style={{ width: '100%', border: 'none', background: statusFilter === key ? 'var(--colorFillSecondary)' : 'transparent', color: 'var(--colorText)', padding: '9px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between', cursor: 'pointer', fontWeight: statusFilter === key ? 700 : 400 }}>
-                <span>{label}</span><span>{count}</span>
-              </button>
-            ))}
-          </Card>
-
-          <Card size="small" title="详情预览" styles={{ body: { height: 300, display: 'flex', flexDirection: 'column', gap: 10, overflow: 'hidden' } }}>
-            {!activePrompt ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择一个提示词" /> : <>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}><FileTextOutlined style={{ color: 'var(--colorAccent)', flexShrink: 0 }} /><strong style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{activePrompt.projectName}</strong></div>
-              <div style={{ minWidth: 0, overflow: 'hidden' }}>{promptTags(activePrompt)}</div>
-              <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12, lineHeight: 1.7, minWidth: 0 }}>
-                <div>更新时间：{formatDate(activePrompt.mtime)}</div>
-                <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>文件路径：{activePrompt.customizePath || '-'}</div>
-                <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>项目路径：{activePrompt.projectRoot || '-'}</div>
-              </div>
-              <div style={{ flex: 1, minHeight: 0, padding: 10, borderRadius: 8, background: 'var(--colorFillAlter)', color: 'var(--colorTextSecondary)', fontSize: 12, lineHeight: 1.7, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{promptExcerpt(activePrompt, 800) || '暂无内容预览'}</div>
-              <div>{promptActions(activePrompt)}</div>
-            </>}
-          </Card>
-        </div>
-
-        <div style={{ minWidth: 0 }}>
+      <div className="grid grid-cols-1 gap-8 items-start">
+        <div className="min-w-0">
           {visibleCheckedIds.length > 0 && (
-            <Card size="small" style={{ marginBottom: 12 }} styles={{ body: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } }}>
-              <span style={{ fontWeight: 600 }}>已选择 {visibleCheckedIds.length} 项</span>
-              <Button size="small" onClick={() => { void handleBatchSelect(true); }}>批量选中</Button>
-              <Button size="small" onClick={() => { void handleBatchSelect(false); }}>取消选中</Button>
-              <Button size="small" icon={<ExportOutlined />} onClick={() => handleExport('checked')}>导出选中</Button>
-              <Button size="small" onClick={() => setCheckedPromptIds([])}>清空选择</Button>
-            </Card>
+            <div className="flex items-center gap-3 flex-wrap p-4 mb-6 bg-[var(--colorBgHover)] rounded-xl shadow-sm">
+              <span className="font-semibold text-sm">已选择 <span className="text-[var(--colorAccent)]">{visibleCheckedIds.length}</span> 项</span>
+              <div className="h-4 w-[1px] bg-[var(--borderColorStrong)] mx-1"></div>
+              <Button size="small" onClick={() => { void handleBatchSelect(true); }}>{t('prompt.batchSelect')}</Button>
+              <Button size="small" onClick={() => { void handleBatchSelect(false); }}>{t('prompt.cancelSelect')}</Button>
+              <Button size="small" icon={<ExportOutlined />} onClick={() => handleExport('checked')}>{t('prompt.exportSelected')}</Button>
+              <Button size="small" danger onClick={() => setCheckedPromptIds([])}>{t('prompt.clearSelect')}</Button>
+            </div>
           )}
           {filteredProjects.length === 0 ? (
-            <Card><Empty description={searchText || statusFilter !== 'all' ? '没有找到匹配的提示词，请尝试更换关键词或清空筛选条件' : '当前分组没有提示词'} /></Card>
+            <div className="py-32 text-center border border-dashed border-[var(--borderColor)] rounded-2xl bg-[var(--colorBgHover)]">
+                <Empty 
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description={<span className="text-[var(--colorTextSecondary)]">{searchText || statusFilter !== 'all' ? t('prompt.noMatchDesc') : t('prompt.noPromptInGroup')}</span>} 
+                />
+            </div>
           ) : viewMode === 'list' ? (
-            <Space direction="vertical" size={10} style={{ width: '100%' }}>{filteredProjects.map(renderPromptListItem)}</Space>
+            <div className="flex flex-col gap-3">{filteredProjects.map(renderPromptListItem)}</div>
           ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>{filteredProjects.map(renderPromptCard)}</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">{filteredProjects.map(renderPromptCard)}</div>
           )}
         </div>
       </div>
@@ -588,16 +577,16 @@ export default function PromptPage() {
       <Drawer
         title={
           isCreating
-            ? '创建提示词'
+            ? t('prompt.createPrompt')
             : editing && isCustomPrompt(editing)
-              ? `编辑我的提示词 — ${editName || editing.projectName}`
-              : `编辑项目提示词 — ${editing?.projectName || ''}`
+              ? `${t('prompt.customPrompt')} — ${editName || editing.projectName}`
+              : `${t('prompt.currentProject')} — ${editing?.projectName || ''}`
         }
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        width={980} maskClosable={false}
-        style={{ borderRadius: '12px 0 0 12px' }}
-        styles={{ body: { padding: '16px 24px', display: 'grid', gridTemplateRows: 'minmax(320px, 1fr) 420px', gap: 14, height: '100%' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
+        width={1080}
+        maskClosable={false}
+        styles={{ body: { padding: '24px 32px', display: 'grid', gridTemplateRows: 'minmax(320px, 1fr) 420px', gap: 24, height: '100%' }, header: { borderBottom: '1px solid var(--colorBorderSecondary)', padding: '16px 32px' } }}
         extra={
           <Space>
             <Button onClick={() => setDrawerOpen(false)}>{t('common.cancel')}</Button>
@@ -606,15 +595,10 @@ export default function PromptPage() {
         }
       >
         <div style={{ minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 16 }}>
             {isCreating || (editing && isCustomPrompt(editing)) ? (
-              <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                <Input placeholder="提示词名称" value={editName} onChange={e => setEditName(e.target.value)} style={{ maxWidth: 520 }} />
-                {!isCreating && <div style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>{editing?.customizePath}</div>}
-              </Space>
-            ) : (
-              <div style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>{editing?.customizePath}</div>
-            )}
+              <Input size="large" placeholder={t('prompt.promptName')} value={editName} onChange={e => setEditName(e.target.value)} style={{ maxWidth: '100%', fontWeight: 500, fontSize: 16 }} />
+            ) : null}
           </div>
           <Input.TextArea
             value={editContent}
@@ -625,15 +609,15 @@ export default function PromptPage() {
 
         <div style={{ minHeight: 0, border: '1px solid var(--colorBorderSecondary)', borderRadius: 10, background: 'var(--colorBgContainer)', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 8px 24px rgba(15, 23, 42, 0.06)' }}>
           <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--colorBorderSecondary)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-            <Space size={6}><RobotOutlined style={{ color: 'var(--colorAccent)' }} /><span style={{ fontWeight: 600 }}>AI 提示词助手</span></Space>
+            <Space size={6}><RobotOutlined style={{ color: 'var(--colorAccent)' }} /><span style={{ fontWeight: 600 }}>{t('prompt.aiPromptAssistant')}</span></Space>
             <Space size={6}>
-              {chatMessages.length > 0 && <Button size="small" onClick={() => setChatMessages([])}>清空历史</Button>}
-              {chatLoading ? <Tag color="processing" style={{ margin: 0 }}>生成中</Tag> : <Tag color="blue" style={{ margin: 0 }}>可对话优化</Tag>}
+              {chatMessages.length > 0 && <Button size="small" onClick={() => setChatMessages([])}>{t('prompt.clearHistory')}</Button>}
+              {chatLoading ? <Tag color="processing" style={{ margin: 0 }}>{t('prompt.generating')}</Tag> : <Tag color="blue" style={{ margin: 0 }}>{t('prompt.canConverse')}</Tag>}
             </Space>
           </div>
           <div ref={chatListRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 14, background: 'var(--colorFillAlter)' }}>
             {chatMessages.length === 0 && !chatLoading ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="输入 @ 召回知识库文件，再描述你的优化目标" />
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('prompt.mentionRecallHint')} />
             ) : (
               <Space direction="vertical" size={12} style={{ width: '100%' }}>
                 {chatMessages.map((item, index) => {
@@ -644,7 +628,7 @@ export default function PromptPage() {
                         {item.content}
                         {!isUser && (
                           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
-                            <Button size="small" type="primary" onClick={() => applyChatContent(item.content)}>应用</Button>
+                            <Button size="small" type="primary" onClick={() => applyChatContent(item.content)}>{t('prompt.apply')}</Button>
                           </div>
                         )}
                       </div>
@@ -654,7 +638,7 @@ export default function PromptPage() {
                 {chatLoading && (
                   <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
                     <div style={{ padding: '10px 12px', borderRadius: 12, background: 'var(--colorBgContainer)', border: '1px solid var(--colorBorderSecondary)', color: 'var(--colorTextSecondary)', fontSize: 13 }}>
-                      <Spin size="small" style={{ marginRight: 8 }} />AI 正在分析并生成内容...
+                      <Spin size="small" style={{ marginRight: 8 }} />{t('prompt.aiAnalyzing')}
                     </div>
                   </div>
                 )}
@@ -674,28 +658,28 @@ export default function PromptPage() {
               <div style={{ maxHeight: 260, overflowY: 'auto', marginBottom: 8, border: '1px solid var(--colorBorderSecondary)', borderRadius: 12, background: 'var(--colorBgElevated, var(--colorBgContainer))', boxShadow: '0 16px 40px rgba(15, 23, 42, 0.14)' }}>
                 <div style={{ position: 'sticky', top: 0, zIndex: 1, padding: '10px 12px', borderBottom: '1px solid var(--colorBorderSecondary)', background: 'var(--colorBgElevated, var(--colorBgContainer))', display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
                   <div>
-                    <div style={{ color: 'var(--colorText)', fontSize: 13, fontWeight: 700 }}>召回知识库文件</div>
-                    <div style={{ color: 'var(--colorTextSecondary)', fontSize: 11 }}>支持文件名与知识库内容检索，最多召回 3 个文件</div>
+                    <div style={{ color: 'var(--colorText)', fontSize: 13, fontWeight: 700 }}>{t('prompt.recallKbFiles')}</div>
+                    <div style={{ color: 'var(--colorTextSecondary)', fontSize: 11 }}>{t('prompt.recallLimitHint')}</div>
                   </div>
-                  <Tag color={knowledgeMentionQuery ? 'blue' : 'default'} style={{ margin: 0, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' }}>{knowledgeMentionQuery ? `@${knowledgeMentionQuery}` : '输入 @关键词'}</Tag>
+                  <Tag color={knowledgeMentionQuery ? 'blue' : 'default'} style={{ margin: 0, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' }}>{knowledgeMentionQuery ? `@${knowledgeMentionQuery}` : t('prompt.inputAtKeyword')}</Tag>
                 </div>
                 {knowledgeLoading ? (
-                  <div style={{ padding: 14, color: 'var(--colorTextSecondary)', fontSize: 12 }}><Spin size="small" style={{ marginRight: 8 }} />正在加载知识库文件...</div>
+                  <div style={{ padding: 14, color: 'var(--colorTextSecondary)', fontSize: 12 }}><Spin size="small" style={{ marginRight: 8 }} />{t('prompt.loadingKbFiles')}</div>
                 ) : knowledgeFiles.length === 0 ? (
-                  <div style={{ padding: 14, color: 'var(--colorTextSecondary)', fontSize: 12 }}>暂无可召回的知识库文件</div>
+                  <div style={{ padding: 14, color: 'var(--colorTextSecondary)', fontSize: 12 }}>{t('prompt.noRecallableKbFiles')}</div>
                 ) : filteredKnowledgeFiles.length === 0 ? (
-                  <div style={{ padding: 14, color: 'var(--colorTextSecondary)', fontSize: 12 }}>{knowledgeSearching ? <><Spin size="small" style={{ marginRight: 8 }} />正在检索知识库内容...</> : '没有匹配的知识库文件，请换个关键词'}</div>
+                  <div style={{ padding: 14, color: 'var(--colorTextSecondary)', fontSize: 12 }}>{knowledgeSearching ? <><Spin size="small" style={{ marginRight: 8 }} />{t('prompt.searchingKbContent')}</> : t('prompt.noMatchingKbFiles')}</div>
                 ) : <>
-                  {knowledgeSearching && <div style={{ padding: '8px 12px', color: 'var(--colorTextSecondary)', fontSize: 12, borderBottom: '1px solid var(--colorBorderSecondary)' }}><Spin size="small" style={{ marginRight: 8 }} />正在继续检索内容匹配...</div>}
+                  {knowledgeSearching && <div style={{ padding: '8px 12px', color: 'var(--colorTextSecondary)', fontSize: 12, borderBottom: '1px solid var(--colorBorderSecondary)' }}><Spin size="small" style={{ marginRight: 8 }} />{t('prompt.continueSearchingKb')}</div>}
                   {filteredKnowledgeFiles.slice(0, 30).map(file => (
                     <div key={file.relativePath} onMouseDown={e => { e.preventDefault(); insertKnowledgeReference(file.relativePath); }} style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: '1px solid var(--colorBorderSecondary)', fontSize: 12, display: 'grid', gridTemplateColumns: '22px minmax(0, 1fr) auto', gap: 10, alignItems: 'center' }}>
                       <div style={{ width: 22, height: 22, borderRadius: 7, background: 'var(--colorFillSecondary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><FileTextOutlined style={{ color: 'var(--colorAccent)' }} /></div>
                       <div style={{ minWidth: 0 }}>
                         <div style={{ color: 'var(--colorText)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 700 }}>{file.relativePath}</div>
-                        <div style={{ color: 'var(--colorTextSecondary)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.category || '未分类'} · {file.format || '未知格式'}{typeof file.score === 'number' ? ` · score ${file.score.toFixed(2)}` : ''}</div>
+                        <div style={{ color: 'var(--colorTextSecondary)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.category || t('prompt.unclassified')} · {file.format || t('prompt.unknownFormat')}{typeof file.score === 'number' ? ` · score ${file.score.toFixed(2)}` : ''}</div>
                       </div>
                       <Space size={4}>
-                        <Tag color={file.matchedBy === 'content' ? 'purple' : file.matchedBy === 'disk' ? 'orange' : 'blue'} style={{ margin: 0 }}>{file.matchedBy === 'content' ? '内容匹配' : file.matchedBy === 'disk' ? '磁盘文件' : '文件匹配'}</Tag>
+                        <Tag color={file.matchedBy === 'content' ? 'purple' : file.matchedBy === 'disk' ? 'orange' : 'blue'} style={{ margin: 0 }}>{file.matchedBy === 'content' ? t('prompt.contentMatch') : file.matchedBy === 'disk' ? t('prompt.diskFile') : t('prompt.fileMatch')}</Tag>
                         <Tag style={{ margin: 0 }}>{file.status}</Tag>
                       </Space>
                     </div>
@@ -710,11 +694,11 @@ export default function PromptPage() {
                 onFocus={() => setShowKnowledgePicker(getKnowledgeMentionQuery(chatInput) !== null)}
                 onPressEnter={e => { if (!e.shiftKey) { e.preventDefault(); void handlePromptChat(); } }}
                 disabled={chatLoading}
-                placeholder="输入 @ 召回知识库文件，再描述优化目标..."
+                placeholder={t('prompt.mentionRecallPlaceholder')}
                 autoSize={{ minRows: 2, maxRows: 5 }}
                 style={{ fontSize: 13, lineHeight: 1.6 }}
               />
-              <Button type="primary" icon={<SendOutlined />} loading={chatLoading} disabled={!chatInput.trim()} onClick={() => { void handlePromptChat(); }}>发送</Button>
+              <Button type="primary" icon={<SendOutlined />} loading={chatLoading} disabled={!chatInput.trim()} onClick={() => { void handlePromptChat(); }}>{t('prompt.send')}</Button>
             </div>
           </div>
         </div>

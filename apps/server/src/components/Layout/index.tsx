@@ -7,6 +7,7 @@ import { ThemeProvider as NextThemesProvider, useTheme } from 'next-themes';
 import { ConfigProvider, App } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import enUS from 'antd/locale/en_US';
+import NProgress from 'nprogress';
 import { getAntdTheme } from '@/lib/antdTheme';
 import { Sidebar } from '@/components/Sidebar';
 import { Header } from '@/components/Header';
@@ -77,8 +78,17 @@ function LayoutShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const start = () => setTransitioning(true);
-    const done = () => setTransitioning(false);
+    // 禁用 NProgress 的 spinner，只保留顶部加载条
+    NProgress.configure({ showSpinner: false, minimum: 0.1 });
+
+    const start = () => {
+      setTransitioning(true);
+      NProgress.start();
+    };
+    const done = () => {
+      setTransitioning(false);
+      NProgress.done();
+    };
     router.events.on('routeChangeStart', start);
     router.events.on('routeChangeComplete', done);
     router.events.on('routeChangeError', done);

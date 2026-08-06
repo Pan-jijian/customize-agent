@@ -109,7 +109,7 @@ export function selectEvidenceByBudget(items: DocumentEvidence[], options: { max
   const maxItems = Number.isFinite(options.maxItems) && options.maxItems! > 0 ? Math.floor(options.maxItems!) : undefined;
   const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.floor(options.maxChars!) : undefined;
   const ranked = uniqueEvidence(items, undefined, diagnostics);
-  const pinned = options.preservePinned ? ranked.filter(item => item.source === 'pinned-evidence' || item.source === 'bound-file') : [];
+  const pinned = options.preservePinned ? ranked.filter(item => item.source === 'pinned-evidence' || item.source === 'bound-file' || item.source === 'required-fact-evidence') : [];
   const normal = ranked.filter(item => !pinned.includes(item));
   const selected: DocumentEvidence[] = [];
   const perFileCounts = new Map<string, number>();

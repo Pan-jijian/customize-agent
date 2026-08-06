@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Empty, Input, Popconfirm, Skeleton, Space, Table, Tag, Typography, message } from 'antd';
-import { ReloadOutlined, DeleteOutlined, DownOutlined, UpOutlined } from '@ant-design/icons';
+import { Button, Empty, Input, Popconfirm, Skeleton, Space, Table, Tag, Typography, message } from 'antd';
+import { ReloadOutlined, DeleteOutlined, SearchOutlined, ExceptionOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useAppTranslations } from '@/components/Layout';
+import { PageHeader } from '@/components/PageHeader';
 import { clearErrorLogs, getErrorLogs, type ErrorLogEntry } from '@/lib/api';
 
 const { Text, Paragraph } = Typography;
@@ -19,7 +20,6 @@ export default function SystemLogsPage() {
   const [logs, setLogs] = useState<ErrorLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState('');
-  const [guideExpanded, setGuideExpanded] = useState(false);
 
   /** 加载最近的错误日志 */
   const load = async () => {
@@ -40,85 +40,86 @@ export default function SystemLogsPage() {
   }, [keyword, logs]);
 
   const columns: ColumnsType<ErrorLogEntry> = [
-    { title: '序号', key: 'index', width: 70, render: (_: unknown, __: ErrorLogEntry, index: number) => index + 1 },
-    { title: '时间', dataIndex: 'createdAt', width: 170, render: value => new Date(value).toLocaleString() },
-    { title: '级别', dataIndex: 'level', width: 80, render: level => <Tag color={levelColor(level)} style={{ margin: 0 }}>{level}</Tag> },
-    { title: '来源', dataIndex: 'source', width: 200, render: value => <Text code style={{ fontSize: 12 }}>{value}</Text> },
-    { title: '函数', dataIndex: 'functionName', width: 160, render: value => value ? <Text code style={{ fontSize: 12 }}>{value}</Text> : <Text type="secondary">-</Text> },
-    {
-      title: '错误信息', dataIndex: 'message',
-      render: value => <Paragraph style={{ maxWidth: 480, overflowWrap: 'anywhere', wordBreak: 'break-all', marginBottom: 0, fontSize: 12 }} ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}>{value}</Paragraph>,
+    { title: t('logs.time'), dataIndex: 'createdAt', width: 160, render: value => <span className="text-xs text-[var(--colorTextSecondary)] font-mono">{new Date(value).toLocaleString()}</span> },
+    { title: t('logs.level'), dataIndex: 'level', width: 80, render: level => <Tag color={levelColor(level)} bordered={false} className="m-0 text-[10px] uppercase tracking-wider">{level}</Tag> },
+    { title: t('logs.source'), dataIndex: 'source', width: 220, render: value => <span className="text-xs font-mono text-[var(--colorTextSecondary)] break-all">{value}</span> },
+    { title: t('logs.message'), dataIndex: 'message',
+      render: value => <div className="text-sm text-[var(--colorText)] max-w-3xl whitespace-normal break-words leading-relaxed" title={value}>{value}</div>,
     },
-    { title: 'Request ID', dataIndex: 'id', width: 200, render: value => <Text copyable code style={{ fontSize: 12 }}>{value.slice(0, 8)}</Text> },
+    { title: t('logs.requestId'), dataIndex: 'id', width: 120, render: value => <Text copyable className="text-[10px] font-mono text-[var(--colorTextTertiary)]">{value.slice(0, 8)}</Text> },
   ];
 
   if (loading && logs.length === 0) return (
-    <div className="space-y-5 animateFadeIn">
+    <div className="space-y-8 animateFadeIn">
       <Skeleton active title paragraph={{ rows: 1 }} />
       <Skeleton active paragraph={{ rows: 12 }} />
     </div>
   );
 
   return (
-    <div className="space-y-5 animateFadeIn">
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-        <div><h1 className="pageTitle">{t('nav.systemLogs')}</h1><p className="pageDesc">查看 API 异常、模型健康检查失败、PDF 降级等运行时问题。</p></div>
-        <Space>
-          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>刷新</Button>
-          <Popconfirm title="确认清空所有错误日志？" onConfirm={() => { void (async () => { await clearErrorLogs(); message.success('已清空'); await load(); })(); }}>
-            <Button danger icon={<DeleteOutlined />}>清空日志</Button>
+    <div className="h-[calc(100vh-140px)] flex flex-col">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-[var(--borderColor)] shrink-0 animateFadeIn">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-[var(--colorText)] mb-1">{t('nav.systemLogs')}</h1>
+          <p className="text-xs text-[var(--colorTextSecondary)]">{t('logs.monitorSystem')}</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <Input placeholder={t('logs.searchLogs')} prefix={<SearchOutlined className="text-[var(--colorTextTertiary)]" />} value={keyword} onChange={e => setKeyword(e.target.value)} allowClear className="w-[260px] bg-[var(--colorBgHover)] border-transparent" />
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load()} className="shadow-none">{t('logs.refresh')}</Button>
+          <Popconfirm title={t('logs.clearConfirm')} onConfirm={() => { void (async () => { await clearErrorLogs(); message.success(t('common.success')); await load(); })(); }}>
+            <Button danger icon={<DeleteOutlined />} className="shadow-none border-transparent">{t('logs.clear')}</Button>
           </Popconfirm>
-        </Space>
+        </div>
       </div>
 
-      <Alert type="info" showIcon
-        message={
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span>日志保存在本机 ~/.customize-agent/logs/errors.jsonl，最多读取最近 500 条。</span>
-            <Button type="link" size="small" icon={guideExpanded ? <UpOutlined /> : <DownOutlined />}
-              onClick={() => setGuideExpanded(!guideExpanded)} style={{ padding: '0 4px' }}>
-              {guideExpanded ? '收起' : '展开'}
-            </Button>
-          </div>
-        }
-        description={guideExpanded ? '系统自动记录未捕获的异常、API 错误、模型健康检查失败等运行时问题。日志文件超过 2MB 会自动轮转。' : undefined}
-      />
+      <div className="flex items-center gap-2 py-3 px-1 text-xs text-[var(--colorTextTertiary)] shrink-0 animateFadeIn stagger-1">
+        <InfoCircleOutlined /> {t('logs.logStorageInfo')} <code className="bg-[var(--colorBgHover)] px-1 rounded">~/.customize-agent/logs/errors.jsonl</code>. {t('logs.maxLoaded')}
+      </div>
 
-      <Input.Search allowClear placeholder="搜索 requestId / source / function / message / stack" value={keyword} onChange={event => setKeyword(event.target.value)} style={{ maxWidth: 480 }} />
-
-      <Table
-        rowKey="id"
-        loading={loading}
-        dataSource={filtered}
-        columns={columns}
-        size="middle"
-        locale={{ emptyText: <Empty description="暂无错误日志" /> }}
-        pagination={{ pageSize: 20, showSizeChanger: true, showTotal: total => `共 ${total} 条` }}
-        expandable={{
-          expandedRowRender: record => (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '8px 0' }}>
-              {record.request && (
-                <div>
-                  <Text strong style={{ fontSize: 12, marginBottom: 4, display: 'block' }}>Request</Text>
-                  <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0, padding: 10, background: 'var(--colorFillAlter)', borderRadius: 8, fontSize: 12, lineHeight: 1.5 }}>{JSON.stringify(record.request, null, 2)}</pre>
-                </div>
-              )}
-              {record.meta !== undefined && (
-                <div>
-                  <Text strong style={{ fontSize: 12, marginBottom: 4, display: 'block' }}>Meta</Text>
-                  <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0, padding: 10, background: 'var(--colorFillAlter)', borderRadius: 8, fontSize: 12, lineHeight: 1.5 }}>{JSON.stringify(record.meta, null, 2)}</pre>
-                </div>
-              )}
-              {record.stack && (
-                <div>
-                  <Text strong style={{ fontSize: 12, marginBottom: 4, display: 'block' }}>Stack</Text>
-                  <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0, padding: 10, background: 'var(--colorFillAlter)', borderRadius: 8, fontSize: 12, lineHeight: 1.5, maxHeight: 300, overflow: 'auto' }}>{record.stack}</pre>
-                </div>
-              )}
-            </div>
-          ),
-        }}
-      />
+      <div className="flex-1 overflow-hidden bg-[var(--colorBg)] rounded-lg animateFadeIn stagger-2">
+        <Table
+          rowKey="id"
+          loading={loading}
+          dataSource={filtered}
+          columns={columns}
+          size="middle"
+          className="h-full modern-table"
+          scroll={{ y: 'calc(100vh - 280px)' }}
+          locale={{ emptyText: <Empty description={t('logs.noLogsFound')} className="py-20" /> }}
+          pagination={false}
+          rowClassName="hover:bg-[var(--colorBgHover)] transition-colors cursor-pointer"
+          expandable={{
+            expandedRowRender: record => (
+              <div className="flex flex-col gap-4 p-4 bg-[var(--colorBgHover)]/50 border-t border-[var(--borderColor)]">
+                {record.functionName && (
+                  <div className="text-xs text-[var(--colorTextSecondary)]">
+                    <span className="font-semibold uppercase tracking-wider text-[var(--colorTextTertiary)] mr-2">{t('logs.function')}</span>
+                    <code className="font-mono bg-[var(--colorBgElevated)] px-2 py-1 rounded">{record.functionName}</code>
+                  </div>
+                )}
+                {record.request && (
+                  <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--colorTextTertiary)] mb-2">{t('logs.requestContext')}</div>
+                    <pre className="text-xs font-mono bg-[var(--colorBgElevated)] p-3 rounded-md border border-[var(--borderColor)] whitespace-pre-wrap break-all m-0 text-[var(--colorTextSecondary)]">{JSON.stringify(record.request, null, 2)}</pre>
+                  </div>
+                )}
+                {record.meta !== undefined && (
+                  <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--colorTextTertiary)] mb-2">{t('logs.metadata')}</div>
+                    <pre className="text-xs font-mono bg-[var(--colorBgElevated)] p-3 rounded-md border border-[var(--borderColor)] whitespace-pre-wrap break-all m-0 text-[var(--colorTextSecondary)]">{JSON.stringify(record.meta, null, 2)}</pre>
+                  </div>
+                )}
+                {record.stack && (
+                  <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--colorTextTertiary)] mb-2">{t('logs.stackTrace')}</div>
+                    <pre className="text-[11px] font-mono bg-[#1e1e1e] text-[#d4d4d4] p-3 rounded-md overflow-x-auto m-0 leading-relaxed">{record.stack}</pre>
+                  </div>
+                )}
+              </div>
+            ),
+          }}
+        />
+      </div>
     </div>
   );
 }

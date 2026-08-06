@@ -26,13 +26,21 @@ if (fs.existsSync(apiRuntime)) {
   if (patched !== runtime) fs.writeFileSync(apiRuntime, patched);
 }
 
+function staticAssetExists(file) {
+  const absolute = path.join(nextDir, file);
+  if (fs.existsSync(absolute)) return true;
+  const parsed = path.parse(absolute);
+  if (!fs.existsSync(parsed.dir)) return false;
+  return fs.readdirSync(parsed.dir).some(name => name === parsed.base || (name.startsWith(`${parsed.name}-`) && name.endsWith(parsed.ext)));
+}
+
 const manifest = JSON.parse(fs.readFileSync(path.join(nextDir, 'build-manifest.json'), 'utf8'));
 const files = new Set();
 for (const value of Object.values(manifest.pages || {})) {
   if (Array.isArray(value)) for (const file of value) if (file.startsWith('static/')) files.add(file);
 }
 for (const file of files) {
-  if (!fs.existsSync(path.join(nextDir, file))) {
+  if (!staticAssetExists(file)) {
     console.error(`Missing static chunk referenced by build-manifest: .next/${file}`);
     process.exit(1);
   }
@@ -47,14 +55,10 @@ if (!fs.existsSync(pagesManifestPath)) {
 const pagesManifest = JSON.parse(fs.readFileSync(pagesManifestPath, 'utf8'));
 for (const [route, file] of Object.entries(pagesManifest)) {
   const pagePath = path.join(nextDir, 'server', file);
-  if (!fs.existsSync(pagePath)) {
+  const htmlFallbackPath = pagePath.replace(/\.js$/u, '.html');
+  if (!fs.existsSync(pagePath) && !fs.existsSync(htmlFallbackPath)) {
     console.error(`Missing page artifact for ${route}: .next/server/${file}`);
     process.exit(1);
   }
 }
-if (!pagesManifest['/overview']) {
-  console.error('[server] Missing required dashboard page in pages manifest: /overview');
-  process.exit(1);
-}
-
 console.log(`Next static assets verified: ${files.size} chunks, ${Object.keys(pagesManifest).length} pages`);

@@ -98,7 +98,7 @@ export class TextChunker {
   }
 
   private createCandidates(text: string, file: ClassifiedFile, config: ChunkConfig): ChunkCandidate[] {
-    if (file.category === 'spreadsheet') return this.createTableCandidates(text, config);
+    if (file.category === 'spreadsheet' || this.hasMarkdownTableBlock(text)) return this.createMixedTableCandidates(text, file.category, config);
     if (file.category === 'data') return this.createDataCandidates(text, config);
     if (file.category === 'code') return this.createCodeCandidates(text, file, config);
     return this.createTextCandidates(text, file.category, config);
@@ -134,33 +134,52 @@ export class TextChunker {
     return candidates;
   }
 
-  private createTableCandidates(text: string, config: ChunkConfig): ChunkCandidate[] {
-    if (this.isMarkdownTable(text)) {
-      const tableBlocks = this.extractMarkdownTableBlocks(text);
-      if (tableBlocks.length > 0) {
-        return tableBlocks.flatMap((block, parentIndex) => {
-          const sectionTitle = this.extractSectionTitle(block.text) ?? '表格数据';
-          return this.splitMarkdownTable(block.text, config.maxChunkSize).map((part, childIndex) => {
-            const localStart = Math.max(0, block.text.indexOf(part.slice(0, 40)));
-            const startChar = block.startChar + localStart;
-            return {
-              text: part,
-              startChar,
-              endChar: startChar + part.length,
-              sectionTitle,
-              titlePath: sectionTitle,
-              kind: 'table',
-              parentId: `table-${parentIndex}`,
-              parentIndex,
-              childIndex,
-              rowRange: this.extractMarkdownTableRowRange(part),
-              parentText: block.text,
-            };
-          });
+  private createMixedTableCandidates(text: string, category: FileCategory, config: ChunkConfig): ChunkCandidate[] {
+    const tableBlocks = this.extractMarkdownTableBlocks(text);
+    if (tableBlocks.length === 0) return this.createTextCandidates(text, category, config);
+
+    const candidates: ChunkCandidate[] = [];
+    let cursor = 0;
+    tableBlocks.forEach((block, parentIndex) => {
+      const beforeStart = cursor;
+      const before = text.slice(beforeStart, block.startChar).trim();
+      if (before) {
+        candidates.push(...this.createTextCandidates(before, category, config).map(candidate => ({
+          ...candidate,
+          startChar: candidate.startChar + beforeStart,
+          endChar: candidate.endChar + beforeStart,
+        })));
+      }
+      const sectionTitle = this.extractSectionTitle(block.text) ?? '表格数据';
+      for (const [childIndex, part] of this.splitMarkdownTable(block.text, config.maxChunkSize).entries()) {
+        const localStart = Math.max(0, block.text.indexOf(part.slice(0, 40)));
+        const startChar = block.startChar + localStart;
+        candidates.push({
+          text: part,
+          startChar,
+          endChar: startChar + part.length,
+          sectionTitle,
+          titlePath: sectionTitle,
+          kind: 'table',
+          parentId: `table-${parentIndex}`,
+          parentIndex,
+          childIndex,
+          rowRange: this.extractMarkdownTableRowRange(part),
+          parentText: block.text,
         });
       }
+      cursor = block.startChar + block.text.length;
+    });
+    const afterStart = cursor;
+    const after = text.slice(afterStart).trim();
+    if (after) {
+      candidates.push(...this.createTextCandidates(after, category, config).map(candidate => ({
+        ...candidate,
+        startChar: candidate.startChar + afterStart,
+        endChar: candidate.endChar + afterStart,
+      })));
     }
-    return this.createTextCandidates(text, 'spreadsheet', config);
+    return candidates;
   }
 
   private createDataCandidates(text: string, config: ChunkConfig): ChunkCandidate[] {
@@ -378,6 +397,10 @@ export class TextChunker {
   private isMarkdownTable(text: string): boolean {
     const lines = text.trim().split(/\r?\n/u);
     return lines.length >= 3 && lines.some(line => /^\s*\|?\s*:?-{3,}:?\s*\|/u.test(line));
+  }
+
+  private hasMarkdownTableBlock(text: string): boolean {
+    return /^\s*\|?\s*:?-{3,}:?\s*\|/mu.test(text);
   }
 
   private extractMarkdownTableBlocks(text: string): Array<{ text: string; startChar: number }> {

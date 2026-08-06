@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Badge, Button, Drawer, Empty, List, Progress, Space, Tag, Typography } from 'antd';
+import { Badge, Button, Drawer, Empty, List, Progress, Tag, Typography } from 'antd';
 import { ClockCircleOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined } from '@ant-design/icons';
 import { getJobs, type KbOperationRecord } from '@/lib/api';
 
@@ -70,28 +70,30 @@ export function JobStatus() {
           {latest.title} · {latest.percent}%
         </span>
       )}
-      <Drawer title="后台任务" placement="right" width={420} open={open} onClose={() => setOpen(false)} extra={<Button size="small" onClick={() => void loadJobs()}>刷新</Button>}>
-        {jobs.length === 0 ? <Empty description="暂无后台任务" /> : (
+      <Drawer title="后台任务" placement="right" size={460} open={open} onClose={() => setOpen(false)} extra={<Button size="small" onClick={() => void loadJobs()}>刷新</Button>} styles={{ body: { padding: 0 } }}>
+        {jobs.length === 0 ? <div className="h-full flex items-start justify-center pt-16"><Empty description="暂无后台任务" /></div> : (
           <List
+            className="text-left"
             dataSource={jobs}
             renderItem={job => (
-              <List.Item>
+              <List.Item className="!items-start !px-5 !py-4">
                 <List.Item.Meta
-                  avatar={statusIcon(job.status)}
+                  className="!items-start [&_.ant-list-item-meta-content]:min-w-0 [&_.ant-list-item-meta-title]:mb-2 [&_.ant-list-item-meta-description]:text-left"
+                  avatar={<span className="mt-1 inline-flex text-base">{statusIcon(job.status)}</span>}
                   title={
-                    <Space>
-                      <Typography.Text strong>{job.title}</Typography.Text>
-                      <Tag color={statusColor(job.status)}>{job.status}</Tag>
-                    </Space>
+                    <div className="flex items-start justify-between gap-3 text-left">
+                      <Typography.Text strong className="min-w-0 flex-1 leading-6" ellipsis={{ tooltip: job.title }}>{job.title}</Typography.Text>
+                      <Tag color={statusColor(job.status)} className="m-0 shrink-0">{job.status}</Tag>
+                    </div>
                   }
                   description={
-                    <Space direction="vertical" style={{ width: '100%' }} size={6}>
-                      <Typography.Text type={job.status === 'error' ? 'danger' : undefined}>{job.error || job.message}</Typography.Text>
+                    <div className="flex w-full flex-col items-stretch gap-2 text-left">
+                      <Typography.Text type={job.status === 'error' ? 'danger' : undefined} className="block whitespace-pre-wrap break-words leading-6">{job.error || job.message}</Typography.Text>
                       <Progress percent={Math.max(0, Math.min(100, Math.round(job.percent || 0)))} status={job.status === 'error' ? 'exception' : job.status === 'success' ? 'success' : 'active'} />
-                      {job.chunkCount ? <Typography.Text type="secondary">切片数：{job.chunkCount}</Typography.Text> : null}
-                      {job.filePath && <Typography.Text type="secondary">文件：{job.filePath}</Typography.Text>}
-                      <Typography.Text type="secondary">更新时间：{new Date(job.updatedAt).toLocaleString()}</Typography.Text>
-                    </Space>
+                      {job.chunkCount ? <Typography.Text type="secondary" className="block text-xs">切片数：{job.chunkCount}</Typography.Text> : null}
+                      {job.filePath && <Typography.Text type="secondary" className="block text-xs break-all">文件：{job.filePath}</Typography.Text>}
+                      <Typography.Text type="secondary" className="block text-xs">更新时间：{new Date(job.updatedAt).toLocaleString()}</Typography.Text>
+                    </div>
                   }
                 />
               </List.Item>

@@ -27,8 +27,6 @@ const zh: Record<string, string | string[]> = {
   'welcome.start_hint': '输入任务开始',
   'welcome.usage_hints': '引用文件   / 命令   ↑↓ 历史',
   'welcome.kb_status': '知识库: {status}',
-  'welcome.web_dashboard': 'Web 控制台: {url}',
-  'welcome.web_dashboard_stopped': 'Web 控制台: 未启动',
 
   // ── 模式标签 ──
   'mode.agent': 'AGENT',
@@ -352,10 +350,6 @@ const zh: Record<string, string | string[]> = {
   'plan.banner': 'Plan 模式',
   'plan.complete': '计划完成',
 
-  // ── 知识库 Web 控制台 ──
-  'kb.dash_url': '管理控制台: {url}',
-  'kb.dash_auto_started': '控制台已在 CLI 启动时自动拉起。',
-  'kb.dash_manual': '请手动启动: cd apps/server && pnpm dev',
 
   // ── 通用 ──
   'common.truncation': '…',

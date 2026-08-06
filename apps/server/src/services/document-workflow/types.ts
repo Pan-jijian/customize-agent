@@ -21,6 +21,32 @@ export interface PromptDocumentRuleSet {
   requiredTables: string[];
 }
 
+export interface WebAccessConfig {
+  enabled: boolean;
+  allowProjectFacts: false;
+  maxQueriesPerChapter: number;
+  maxResultsPerQuery: number;
+  trustedDomains: string[];
+}
+
+export interface RuntimePromptRuleSet extends PromptDocumentRuleSet {
+  sourceHash: string;
+  exactHeadings: string[];
+  forbidExtraHeadings: boolean;
+  requiredSubjects: string[];
+  forbiddenSubjects: string[];
+  backendTerms: string[];
+  commercialTerms: string[];
+  forbidFabrication: boolean;
+  requireEvidenceForQuantities: boolean;
+  preferProjectFacts: boolean;
+  minWords?: number;
+  minChars?: number;
+  chapterRules: Array<{ chapterTitle: string; mustInclude: string[]; mustNotInclude: string[] }>;
+  roleRules: Array<{ roleId: string; focusAreas: string[]; mustDo: string[]; mustNotDo: string[] }>;
+  executionSummary: string[];
+}
+
 export interface DocumentTemplateChapter {
   id: string;
   title: string;
@@ -220,7 +246,7 @@ export interface ExportGateResult {
 }
 
 export interface DocumentExecutionStage {
-  type: 'role_binding' | 'knowledge_retrieval' | 'context_recall' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference';
+  type: 'role_binding' | 'knowledge_retrieval' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference';
   roleId: string;
   promptId?: string;
   status: 'running' | 'success' | 'fallback' | 'skipped' | 'failed';

@@ -1,8 +1,24 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useAppTranslations } from '@/components/Layout';
-import { Card, Row, Col, Statistic, Progress, Tag, Space, Button } from 'antd';
+import { Row, Col, Progress, Space, Button } from 'antd';
 import { CloudServerOutlined, ApiOutlined, ThunderboltOutlined, CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined, FileTextOutlined, HddOutlined, FormOutlined, LayoutOutlined, NodeIndexOutlined, RobotOutlined } from '@ant-design/icons';
 import { getSystemStats, type SystemStats, getProviders, getDocumentRoles, getDocumentTemplates, getEmbeddingConfig, type EmbeddingConfig } from '@/lib/api';
+
+/** 极简风格数据卡片组件 (Linear 风格无边框) */
+function DashCard({ title, value, subtext, icon, colorClass, animationClass }: { title: React.ReactNode, value: React.ReactNode, subtext?: React.ReactNode, icon?: React.ReactNode, colorClass?: string, animationClass?: string }) {
+  return (
+    <div className={`p-4 animateFadeIn flex flex-col justify-between border-l-2 border-transparent hover:border-[var(--colorBrand)] transition-colors ${animationClass || ''}`} style={{ opacity: 0 }}>
+      <div className="flex items-start justify-between mb-2">
+        <div className="text-xs font-semibold text-[var(--colorTextSecondary)] tracking-wide uppercase">{title}</div>
+        {icon && <div className={colorClass} style={{ opacity: 0.7 }}>{icon}</div>}
+      </div>
+      <div>
+        <div className="text-3xl font-bold tracking-tight">{value}</div>
+        {subtext && <div className="text-xs mt-1 truncate font-medium" style={{ color: 'var(--colorTextTertiary)' }}>{subtext}</div>}
+      </div>
+    </div>
+  );
+}
 
 export default function OverviewPage() {
   const t = useAppTranslations();
@@ -36,129 +52,122 @@ export default function OverviewPage() {
 
   useEffect(() => { void load(); const timer = setInterval(() => { void load(); }, 10000); return () => clearInterval(timer); }, [load]);
 
-  const cpuColor = (stats?.cpu.usagePercent ?? 0) > 80 ? 'var(--colorDanger)' : (stats?.cpu.usagePercent ?? 0) > 50 ? 'var(--colorWarning)' : 'var(--colorOk)';
-  const memColor = (stats?.memory.usagePercent ?? 0) > 80 ? 'var(--colorDanger)' : (stats?.memory.usagePercent ?? 0) > 50 ? 'var(--colorWarning)' : 'var(--colorOk)';
   const successRate = stats?.tasks.total ? Math.round((stats.tasks.success / stats.tasks.total) * 100) : 0;
   const topModel = stats?.models?.[0];
-  const latestLogTime = stats?.logs.latestAt ? new Date(stats.logs.latestAt).toLocaleString() : '暂无日志';
+  const latestLogTime = stats?.logs.latestAt ? new Date(stats.logs.latestAt).toLocaleString() : t('overview.noLogs');
 
   return (
-    <div className="space-y-6 animateFadeIn">
-      <div className="flex items-center justify-between">
-        <div><h1 className="pageTitle">{t('overview.title')}</h1><p className="pageDesc">{t('overview.description')}</p></div>
+    <div className="space-y-12">
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-6 border-b border-[var(--borderColor)]">
+        <div>
+          <h1 className="text-3xl font-extrabold tracking-tight text-[var(--colorText)] mb-2">{t('overview.title')}</h1>
+          <p className="text-sm text-[var(--colorTextSecondary)]">{t('overview.description')}</p>
+        </div>
         <Space>
-          <span style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>统计更新：{latestLogTime}</span>
-          <Button icon={<ReloadOutlined spin={loading} />} loading={loading} onClick={() => { void load(); }}>{t('common.retry')}</Button>
+          <span className="text-xs font-mono" style={{ color: 'var(--colorTextTertiary)' }}>{t('overview.updated')}: {latestLogTime}</span>
+          <Button type="text" icon={<ReloadOutlined spin={loading} />} onClick={() => { void load(); }} />
         </Space>
       </div>
 
-      {/* CPU + 内存 */}
-      <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12}>
-          <Card size="small" title={<><CloudServerOutlined /> CPU</>}>
-            <div style={{ textAlign: 'center' }}>
-              <Progress type="circle" percent={stats?.cpu.usagePercent ?? 0} size={120} strokeColor={cpuColor} format={pct => `${pct?.toFixed(1)}%`} />
-              <div className="text-xs mt-2" style={{ color: 'var(--colorTextSecondary)' }}>{stats?.cpu.cores ?? 0} {t('overview.cores')}</div>
-            </div>
-          </Card>
-        </Col>
-        <Col xs={24} sm={12}>
-          <Card size="small" title={<><HddOutlined /> {t('overview.memory')}</>}>
-            <div style={{ textAlign: 'center' }}>
-              <Progress type="circle" percent={stats?.memory.usagePercent ?? 0} size={120} strokeColor={memColor} format={pct => `${pct}%`} />
-              <div className="text-xs mt-2" style={{ color: 'var(--colorTextSecondary)' }}>{stats?.memory.processMB ?? 0} MB / {stats?.memory.totalMB ?? 0} MB</div>
-            </div>
-          </Card>
-        </Col>
-      </Row>
+      {/* 核心指标层 - Vercel / Linear 横向数据流 */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-8 divide-x border-b pb-8 border-[var(--borderColor)] divide-[var(--borderColor)] -mx-4 px-4">
+        <DashCard 
+          title={t('overview.uptime')} 
+          value={`${stats ? Math.floor(stats.uptime / 3600) : 0}h`} 
+          icon={<ApiOutlined size={16} />} 
+          colorClass="text-[var(--colorBrand)]"
+          animationClass="stagger-1"
+        />
+        <DashCard 
+          title={t('overview.tokensUsed')} 
+          value={(stats?.tokens.total ?? 0).toLocaleString()} 
+          subtext={`P ${stats?.tokens.prompt ?? 0} / C ${stats?.tokens.completion ?? 0}`} 
+          icon={<ThunderboltOutlined size={16} />} 
+          colorClass="text-[var(--colorWarn)]"
+          animationClass="stagger-2"
+        />
+        <DashCard 
+          title={t('overview.tasksTotal')} 
+          value={(stats?.tasks.total ?? 0).toLocaleString()} 
+          subtext={`✓ ${stats?.tasks.success ?? 0} | ✗ ${stats?.tasks.failed ?? 0} | ↻ ${stats?.tasks.running ?? 0}`} 
+          icon={<FileTextOutlined size={16} />} 
+          colorClass="text-[var(--colorInfo)]"
+          animationClass="stagger-3"
+        />
+        <DashCard 
+          title={t('overview.successRate')} 
+          value={`${successRate}%`} 
+          icon={successRate > 80 ? <CheckCircleOutlined size={16} /> : <CloseCircleOutlined size={16} />} 
+          colorClass={successRate > 80 ? "text-[var(--colorOk)]" : "text-[var(--colorDanger)]"}
+          animationClass="stagger-4"
+        />
+      </div>
 
-      {/* 统计信息 */}
-      <Row gutter={[16, 16]}>
-        <Col xs={12} sm={6}>
-          <Card size="small"><Statistic title="运行时间" value={stats ? Math.floor(stats.uptime / 3600) : 0} suffix="小时" prefix={<ApiOutlined />} /></Card>
-        </Col>
-        <Col xs={12} sm={6}>
-          <Card size="small">
-            <Statistic title={t('overview.tokensUsed')} value={stats?.tokens.total ?? 0} prefix={<ThunderboltOutlined />} />
-            <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>Prompt {stats?.tokens.prompt ?? 0} / Completion {stats?.tokens.completion ?? 0}</div>
-          </Card>
-        </Col>
-        <Col xs={12} sm={6}>
-          <Card size="small">
-            <Statistic title={t('overview.tasksTotal')} value={stats?.tasks.total ?? 0} prefix={<FileTextOutlined />} />
-            <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>成功 {stats?.tasks.success ?? 0} / 失败 {stats?.tasks.failed ?? 0} / 运行中 {stats?.tasks.running ?? 0}</div>
-          </Card>
-        </Col>
-        <Col xs={12} sm={6}>
-          <Card size="small"><Statistic title={t('overview.successRate')} value={successRate} suffix="%" prefix={successRate > 80 ? <CheckCircleOutlined style={{ color: 'var(--colorOk)' }} /> : <CloseCircleOutlined style={{ color: 'var(--colorDanger)' }} />} /></Card>
-        </Col>
-      </Row>
+      {/* 资源分布 - 无边框网格 */}
+      <div>
+        <h2 className="text-sm font-semibold mb-6 uppercase tracking-wider text-[var(--colorTextSecondary)] animateFadeIn stagger-5" style={{ opacity: 0 }}>{t('overview.systemResources')}</h2>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-y-8 gap-x-4">
+          <DashCard title={t('overview.fileRoles')} value={fileRoleCount} animationClass="stagger-5" />
+          <DashCard title={t('overview.promptRoles')} value={promptRoleCount} animationClass="stagger-5" />
+          <DashCard title={t('overview.templateCount')} value={templateCount} animationClass="stagger-5" />
+          <DashCard title={t('overview.semanticModel')} value={embeddingConfig?.provider === 'openai-compatible' ? t('overview.external') : embeddingConfig ? t('overview.local') : '—'} subtext={embeddingConfig?.model ?? t('overview.notConfigured')} animationClass="stagger-5" />
+          <DashCard title={t('overview.modelProviders')} value={providerCount} animationClass="stagger-5" />
+          <DashCard title={t('overview.auditLogs')} value={stats?.logs.events ?? 0} animationClass="stagger-5" />
+        </div>
+      </div>
 
-      {/* 资源状态 */}
-      <Card size="small" title="资源概览">
-        <Row gutter={[16, 16]}>
-          <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small" style={{ height: '100%' }}><Statistic title="文件角色" value={fileRoleCount} prefix={<FileTextOutlined style={{ color: 'var(--colorAccent)' }} />} /></Card>
-          </Col>
-          <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small" style={{ height: '100%' }}><Statistic title="提示词角色" value={promptRoleCount} prefix={<FormOutlined style={{ color: 'var(--colorWarning)' }} />} /></Card>
-          </Col>
-          <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small" style={{ height: '100%' }}><Statistic title="模板" value={templateCount} prefix={<LayoutOutlined style={{ color: 'var(--colorDanger)' }} />} /></Card>
-          </Col>
-          <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small" style={{ height: '100%', overflow: 'hidden' }}>
-              <Statistic
-                title="语义模型"
-                value={embeddingConfig?.provider === 'openai-compatible' ? '外部 Embedding' : embeddingConfig ? '本地语义模型' : '—'}
-                prefix={<NodeIndexOutlined style={{ color: 'var(--colorAccent)' }} />}
-                valueStyle={{ fontSize: 18, whiteSpace: 'nowrap' }}
-              />
-              {embeddingConfig?.model && (
-                <div className="text-xs mt-1" style={{ color: 'var(--colorTextSecondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`${embeddingConfig.model}${embeddingConfig.dimensions ? ` · ${embeddingConfig.dimensions}维` : ''}`}>
-                  {embeddingConfig.model}{embeddingConfig.dimensions ? ` · ${embeddingConfig.dimensions}维` : ''}
-                </div>
-              )}
-            </Card>
-          </Col>
-          <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small" style={{ height: '100%' }}><Statistic title="模型供应商" value={providerCount} prefix={<RobotOutlined style={{ color: 'var(--colorAccent)' }} />} /></Card>
-          </Col>
-          <Col xs={24} sm={12} md={8} lg={4}>
-            <Card size="small" style={{ height: '100%' }}><Statistic title="审计日志" value={stats?.logs.events ?? 0} suffix="条" prefix={<ApiOutlined style={{ color: 'var(--colorOk)' }} />} /></Card>
-          </Col>
-        </Row>
-      </Card>
-
-      {/* 热门模型 + 任务类型 */}
-      <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12}>
-          <Card size="small" title={t('overview.topModel')} style={{ height: '100%' }}>
-            {topModel ? (
-              <div className="flex items-center gap-4">
-                <ApiOutlined style={{ fontSize: 24, color: 'var(--colorAccent)' }} />
-                <div>
-                  <div className="font-semibold">{topModel.model}</div>
-                  <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>
-                    @{topModel.provider} — {topModel.count} {t('overview.calls')}
-                  </div>
-                </div>
+      {/* 底部详细信息 - 两列式 */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-12 pt-8 border-t border-[var(--borderColor)] animateFadeIn stagger-5" style={{ opacity: 0 }}>
+        <div>
+          <div className="text-sm font-semibold mb-6 uppercase tracking-wider text-[var(--colorTextSecondary)]">{t('overview.hardwareUsage')}</div>
+          <div className="space-y-6">
+            <div className="flex items-center gap-6">
+              <Progress type="dashboard" percent={stats?.cpu.usagePercent ?? 0} size={64} strokeColor={(stats?.cpu.usagePercent ?? 0) > 80 ? 'var(--colorDanger)' : 'var(--colorText)'} strokeWidth={10} />
+              <div>
+                <div className="text-sm font-medium text-[var(--colorTextSecondary)]">{t('overview.cpuUsage')}</div>
+                <div className="text-xl font-bold">{stats?.cpu.usagePercent?.toFixed(1) ?? '0.0'}%</div>
+                <div className="text-xs text-[var(--colorTextTertiary)]">{stats?.cpu.cores ?? 0} {t('overview.cores')}</div>
               </div>
-            ) : <span style={{ color: 'var(--colorTextSecondary)' }}>暂无真实模型调用日志</span>}
-          </Card>
-        </Col>
-        <Col xs={24} sm={12}>
-          <Card size="small" title={t('overview.taskTypes')} style={{ height: '100%' }}>
-            {stats?.tasks.types && Object.keys(stats.tasks.types).length > 0 ? (
-              <Space wrap>
-                {Object.entries(stats.tasks.types).sort((a, b) => b[1] - a[1]).map(([taskType, count]) => (
-                  <Tag key={taskType}>{taskType.slice(0, 30)}: {count}</Tag>
-                ))}
-              </Space>
-            ) : <span style={{ color: 'var(--colorTextSecondary)' }}>{t('common.noData')}</span>}
-          </Card>
-        </Col>
-      </Row>
+            </div>
+            <div className="flex items-center gap-6">
+              <Progress type="dashboard" percent={stats?.memory.usagePercent ?? 0} size={64} strokeColor={(stats?.memory.usagePercent ?? 0) > 80 ? 'var(--colorDanger)' : 'var(--colorTextSecondary)'} strokeWidth={10} />
+              <div>
+                <div className="text-sm font-medium text-[var(--colorTextSecondary)]">{t('overview.memoryUsage')}</div>
+                <div className="text-xl font-bold">{stats?.memory.usagePercent ?? 0}%</div>
+                <div className="text-xs text-[var(--colorTextTertiary)]">{stats?.memory.processMB ?? 0} MB / {stats?.memory.totalMB ?? 0} MB</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="text-sm font-semibold mb-6 uppercase tracking-wider text-[var(--colorTextSecondary)]">{t('overview.activityContext')}</div>
+          <div className="space-y-6">
+            <div>
+              <div className="text-xs text-[var(--colorTextTertiary)] mb-1">{t('overview.topModel')}</div>
+              {topModel ? (
+                <div className="font-semibold flex items-center gap-2">
+                  <RobotOutlined className="text-[var(--colorTextSecondary)]" /> {topModel.model} 
+                  <span className="font-normal text-[var(--colorTextTertiary)] text-sm">@{topModel.provider}</span>
+                </div>
+              ) : <span className="text-sm text-[var(--colorTextTertiary)]">{t('overview.noDataAvailable')}</span>}
+            </div>
+            
+            <div>
+              <div className="text-xs text-[var(--colorTextTertiary)] mb-3">{t('overview.recentTaskTypes')}</div>
+              {stats?.tasks.types && Object.keys(stats.tasks.types).length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(stats.tasks.types).sort((a, b) => b[1] - a[1]).map(([taskType, count]) => (
+                    <div key={taskType} className="px-2 py-1 rounded text-xs font-mono bg-[var(--colorBgHover)] text-[var(--colorTextSecondary)]">
+                      {taskType.slice(0, 30)} <span className="ml-2 font-bold text-[var(--colorText)]">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : <span className="text-sm text-[var(--colorTextTertiary)]">{t('common.noData')}</span>}
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

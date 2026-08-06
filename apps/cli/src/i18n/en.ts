@@ -27,8 +27,6 @@ const en: Record<string, string | string[]> = {
   'welcome.start_hint': 'Type a task to begin',
   'welcome.usage_hints': '@ attach files   / commands   ↑↓ history',
   'welcome.kb_status': 'Knowledge Base: {status}',
-  'welcome.web_dashboard': 'Web Dashboard: {url}',
-  'welcome.web_dashboard_stopped': 'Web Dashboard: stopped',
 
   // ── Mode Labels ──
   'mode.agent': 'AGENT',
@@ -351,10 +349,6 @@ const en: Record<string, string | string[]> = {
   'plan.banner': 'Plan Mode',
   'plan.complete': 'Plan Complete',
 
-  // ── Knowledge Base Web Dashboard ──
-  'kb.dash_url': 'Dashboard: {url}',
-  'kb.dash_auto_started': 'Dashboard was auto-started with the CLI.',
-  'kb.dash_manual': 'Start manually: cd apps/server && pnpm dev',
 
   // ── Common ──
   'common.truncation': '…',

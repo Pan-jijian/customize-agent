@@ -2,22 +2,15 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { MultiProjectManager, getProjectKbPath } from '@customize-agent/knowledge';
 import { t } from '../tui/renderer.js';
-import type { I18nManager } from '../i18n/manager.js';
 
 export class KbCommands {
   private manager?: MultiProjectManager;
-  private dashboardUrl?: string;
-  private i18n?: I18nManager;
 
   constructor(
     private readonly projectRoot: string,
     manager?: MultiProjectManager,
-    dashboardUrl?: string,
-    i18n?: I18nManager,
   ) {
     this.manager = manager;
-    this.dashboardUrl = dashboardUrl;
-    this.i18n = i18n;
   }
 
   private getManager(): MultiProjectManager {
@@ -63,10 +56,6 @@ export class KbCommands {
         return;
       case 'config':
         await this.config();
-        return;
-      case 'dash':
-      case 'dashboard':
-        await this.dashboard(tokens);
         return;
       case 'add':
         await this.add(tokens);
@@ -275,21 +264,6 @@ export class KbCommands {
       process.stdout.write(`    ${extractor}: builtin\n`);
     }
     process.stdout.write('\n');
-  }
-
-  private async dashboard(tokens: string[]): Promise<void> {
-    if (this.dashboardUrl && tokens.length === 0) {
-      const url = this.i18n?.t('kb.dash_url', { url: this.dashboardUrl }) ?? `Dashboard: ${this.dashboardUrl}`;
-      const hint = this.i18n?.t('kb.dash_auto_started') ?? 'Dashboard was auto-started with the CLI.';
-      process.stdout.write(t.success(`${url}\n`));
-      process.stdout.write(t.dim(`${hint}\n\n`));
-      return;
-    }
-    const port = tokens[0] ? Number(tokens[0]) : 17321;
-    const url = this.i18n?.t('kb.dash_url', { url: `http://localhost:${port}` }) ?? `Dashboard: http://localhost:${port}`;
-    const hint = this.i18n?.t('kb.dash_manual') ?? 'Start manually: cd apps/server && pnpm dev';
-    process.stdout.write(t.success(`${url}\n`));
-    process.stdout.write(t.dim(`${hint}\n\n`));
   }
 
   private extractScope(tokens: string[]): { scope: 'project' | 'global' | 'all'; rest: string[] } {

@@ -49,7 +49,11 @@
     "tokyo",
     "Bubblewrap",
     "backtrack",
-    "subcmd"
+    "subcmd",
+    "prerender",
+    "napi",
+    "tesseract",
+    "topbar"
   ],
   "ignorePaths": [
     "pnpm-lock.yaml",

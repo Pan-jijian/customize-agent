@@ -76,18 +76,18 @@ export default function KnowledgeManagePage() {
         <Row gutter={[16, 16]}>
           <Col xs={12} sm={6}><Statistic title={t('knowledge.fileCount')} value={catStats.count} prefix={<FileOutlined style={{ color: 'var(--colorAccent)' }} />} /></Col>
           <Col xs={12} sm={6}><Statistic title={t('knowledge.totalSize')} value={formatBytes(catStats.totalSize)} prefix={<HddOutlined style={{ color: 'var(--colorWarning)' }} />} /></Col>
-          <Col xs={12} sm={6}><Statistic title="切片数" value={catStats.totalChunks} prefix={<BlockOutlined style={{ color: 'var(--colorOk)' }} />} /></Col>
-          <Col xs={12} sm={6}><Statistic title="平均大小" value={catStats.count > 0 ? formatBytes(catStats.totalSize / catStats.count) : '—'} prefix={<DatabaseOutlined style={{ color: 'var(--colorDanger)' }} />} /></Col>
+          <Col xs={12} sm={6}><Statistic title={t('knowledge.chunksCount')} value={catStats.totalChunks} prefix={<BlockOutlined style={{ color: 'var(--colorOk)' }} />} /></Col>
+          <Col xs={12} sm={6}><Statistic title={t('knowledge.averageSize')} value={catStats.count > 0 ? formatBytes(catStats.totalSize / catStats.count) : '—'} prefix={<DatabaseOutlined style={{ color: 'var(--colorDanger)' }} />} /></Col>
         </Row>
       </Card>
 
       {features && (
         <Card title={t('knowledge.features')} size="small">
           <Descriptions size="small" column={{ xs: 1, sm: 2 }} bordered>
-            <Descriptions.Item label={<><ApartmentOutlined style={{ marginRight: 4 }} />Vector Store</>}>
+            <Descriptions.Item label={<><ApartmentOutlined style={{ marginRight: 4 }} />{t('knowledge.vectorStore')}</>}>
               <Tag color="blue">{features.vectorStore}</Tag>
             </Descriptions.Item>
-            <Descriptions.Item label={<><BlockOutlined style={{ marginRight: 4 }} />Embedding</>}>
+            <Descriptions.Item label={<><BlockOutlined style={{ marginRight: 4 }} />{t('knowledge.embedding')}</>}>
               <Tag color="purple">{features.embeddingProvider}</Tag>
             </Descriptions.Item>
             <Descriptions.Item label={<><MergeCellsOutlined style={{ marginRight: 4 }} />{t('knowledge.featureDedup')}</>}>
@@ -99,7 +99,7 @@ export default function KnowledgeManagePage() {
               <div className="text-xs" style={{ color: 'var(--colorTextSecondary)', marginTop: 2 }}>{t('knowledge.featureChunkerDesc')}</div>
             </Descriptions.Item>
             {features.builtinExtractors?.length > 0 && (
-              <Descriptions.Item label="内置提取器" span={2}>
+              <Descriptions.Item label={t('knowledge.builtinExtractors')} span={2}>
                 <Space wrap>{features.builtinExtractors.map(e => <Tag key={e} color="cyan">{e}</Tag>)}</Space>
               </Descriptions.Item>
             )}

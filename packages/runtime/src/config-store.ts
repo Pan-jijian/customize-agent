@@ -1,3 +1,4 @@
+// cSpell:ignore BAAI
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -48,11 +49,20 @@ export interface EmbeddingConfig {
   dimensions?: number;
 }
 
+export interface WebAccessConfig {
+  enabled: boolean;
+  allowProjectFacts: false;
+  maxQueriesPerChapter: number;
+  maxResultsPerQuery: number;
+  trustedDomains: string[];
+}
+
 export interface UserConfig {
   language: 'zh' | 'en';
   providers: Record<string, ProviderConfig>;
   models: ModelsConfig;
   embedding: EmbeddingConfig;
+  webAccess: WebAccessConfig;
 }
 
 // ── 协议自动推断 ──
@@ -79,7 +89,8 @@ export function resolveProtocol(providerName: string, config?: ProviderConfig): 
 
 const EMPTY_TIER: TierConfig = { active: '', list: [] };
 const DEFAULT_EMBEDDING: EmbeddingConfig = { provider: 'transformers-local', model: 'BAAI/bge-small-zh-v1.5', dimensions: 512 };
-const DEFAULT_CONFIG: UserConfig = { language: 'zh', providers: {}, models: { reader: { ...EMPTY_TIER }, reasoning: { ...EMPTY_TIER }, action: { ...EMPTY_TIER } }, embedding: { ...DEFAULT_EMBEDDING } };
+const DEFAULT_WEB_ACCESS: WebAccessConfig = { enabled: false, allowProjectFacts: false, maxQueriesPerChapter: 2, maxResultsPerQuery: 3, trustedDomains: [] };
+const DEFAULT_CONFIG: UserConfig = { language: 'zh', providers: {}, models: { reader: { ...EMPTY_TIER }, reasoning: { ...EMPTY_TIER }, action: { ...EMPTY_TIER } }, embedding: { ...DEFAULT_EMBEDDING }, webAccess: { ...DEFAULT_WEB_ACCESS } };
 
 // ── ConfigStore ──
 
@@ -107,7 +118,7 @@ export class ConfigStore {
       this._cache = this._parse(JSON.parse(raw));
       this._cacheMtimeMs = stat?.mtimeMs ?? 0;
     } catch {
-      this._cache = { ...DEFAULT_CONFIG, models: { reader: { ...EMPTY_TIER }, reasoning: { ...EMPTY_TIER }, action: { ...EMPTY_TIER } }, embedding: { ...DEFAULT_EMBEDDING } };
+      this._cache = { ...DEFAULT_CONFIG, models: { reader: { ...EMPTY_TIER }, reasoning: { ...EMPTY_TIER }, action: { ...EMPTY_TIER } }, embedding: { ...DEFAULT_EMBEDDING }, webAccess: { ...DEFAULT_WEB_ACCESS } };
       this.save(this._cache);
     }
     return this._cache;
@@ -182,6 +193,16 @@ export class ConfigStore {
     return this.save(cfg);
   }
 
+  getWebAccess(): WebAccessConfig {
+    return this.load().webAccess;
+  }
+
+  setWebAccess(webAccess: Partial<WebAccessConfig>): UserConfig {
+    const cfg = this.load();
+    cfg.webAccess = this._pWebAccess({ ...cfg.webAccess, ...webAccess });
+    return this.save(cfg);
+  }
+
   // ── Model ──
 
   /** 获取指定层级的模型配置 */
@@ -236,6 +257,7 @@ export class ConfigStore {
         action: this._pTier((raw.models as Record<string, unknown>)?.action),
       },
       embedding: this._pEmbedding(raw.embedding),
+      webAccess: this._pWebAccess(raw.webAccess),
     };
   }
 
@@ -282,6 +304,20 @@ export class ConfigStore {
       apiKey: provider === 'openai-compatible' && typeof r.apiKey === 'string' ? r.apiKey : undefined,
       model: provider === 'transformers-local' ? 'BAAI/bge-small-zh-v1.5' : typeof r.model === 'string' && r.model ? r.model : undefined,
       dimensions: provider === 'transformers-local' ? 512 : typeof r.dimensions === 'number' && Number.isFinite(r.dimensions) ? r.dimensions : undefined,
+    };
+  }
+
+  private _pWebAccess(raw: unknown): WebAccessConfig {
+    if (!raw || typeof raw !== 'object') return { ...DEFAULT_WEB_ACCESS };
+    const r = raw as Record<string, unknown>;
+    const maxQueriesPerChapter = Number(r.maxQueriesPerChapter ?? DEFAULT_WEB_ACCESS.maxQueriesPerChapter);
+    const maxResultsPerQuery = Number(r.maxResultsPerQuery ?? DEFAULT_WEB_ACCESS.maxResultsPerQuery);
+    return {
+      enabled: r.enabled === true,
+      allowProjectFacts: false,
+      maxQueriesPerChapter: Number.isFinite(maxQueriesPerChapter) ? Math.min(4, Math.max(1, Math.floor(maxQueriesPerChapter))) : DEFAULT_WEB_ACCESS.maxQueriesPerChapter,
+      maxResultsPerQuery: Number.isFinite(maxResultsPerQuery) ? Math.min(5, Math.max(1, Math.floor(maxResultsPerQuery))) : DEFAULT_WEB_ACCESS.maxResultsPerQuery,
+      trustedDomains: Array.isArray(r.trustedDomains) ? r.trustedDomains.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim()).slice(0, 30) : [],
     };
   }
 }

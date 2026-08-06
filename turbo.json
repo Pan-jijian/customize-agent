@@ -38,8 +38,7 @@
         "@customize-agent/tools#build",
         "@customize-agent/engine#build",
         "@customize-agent/knowledge#build",
-        "@customize-agent/memory#build",
-        "@customize-agent/server#build"
+        "@customize-agent/memory#build"
       ],
       "outputs": ["dist/**"]
     },
@@ -70,8 +69,7 @@
         "@customize-agent/tools#build",
         "@customize-agent/engine#build",
         "@customize-agent/knowledge#build",
-        "@customize-agent/memory#build",
-        "@customize-agent/server#build"
+        "@customize-agent/memory#build"
       ]
     },
     "dev": {

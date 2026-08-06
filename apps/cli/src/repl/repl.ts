@@ -30,7 +30,6 @@ export interface ReplConfig {
   createExecutor?: (providerName: string, modelName: string, providerConfig?: ProviderConfig) => Promise<AgentExecutor>;
   executorConfigKey?: string;
   kbManager?: MultiProjectManager;
-  dashboardUrl?: string;
   kbStatus?: string;
   version: string;
 }
@@ -57,7 +56,6 @@ export class Repl {
   private sessionCommands: SessionCommands;
   private kbCommands: KbCommands;
   private kbManager?: MultiProjectManager;
-  private dashboardUrl?: string;
   private kbStatus = '未初始化';
   private version: string;
   private commands: ReplCommandInfo[] = [];
@@ -81,7 +79,6 @@ export class Repl {
     this.createExecutor = config.createExecutor;
     this.executorConfigKey = config.executorConfigKey;
     this.kbManager = config.kbManager;
-    this.dashboardUrl = config.dashboardUrl;
     this.kbStatus = config.kbStatus ?? this.kbStatus;
     this.version = config.version;
     this.modelProviderCommands = new ModelProviderCommands({
@@ -94,7 +91,7 @@ export class Repl {
     });
     this.history = [{ role: 'system', content: this.executor.getSystemPrompt() }];
     this.toolCommands = new ToolCommands(this.builtinTools, this.i18n, this.history);
-    this.kbCommands = new KbCommands(this.root, this.kbManager, this.dashboardUrl, this.i18n);
+    this.kbCommands = new KbCommands(this.root, this.kbManager);
     this.sessionCommands = new SessionCommands({
       history: this.history,
       executor: this.executor,
@@ -711,7 +708,6 @@ ${s.bold(this.i18n.t('help.tips')) + ':'}
       configHint: [
         hasModels ? undefined : this.i18n.t('cmd.first_config'),
         this.i18n.t('welcome.kb_status', { status: this.kbStatus }),
-        this.dashboardUrl ? this.i18n.t('welcome.web_dashboard', { url: this.dashboardUrl }) : this.i18n.t('welcome.web_dashboard_stopped'),
       ].filter(Boolean).join('\n'),
     }));
   }

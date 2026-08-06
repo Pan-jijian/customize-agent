@@ -680,10 +680,14 @@ export class ContentExtractor {
 
   private async extractOfficeDocument(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     const ext = path.extname(file.absolutePath).toLowerCase();
+    const isZip = this.isZipOpenXmlFile(file.absolutePath);
+    const isOle = this.isOleCompoundFile(file.absolutePath);
+    if (isOle) return this.extractOleOfficeDocument(file, ext === '.docx' ? ['文件扩展名为 .docx，但真实格式为旧版 OLE/CFB Office 复合文档，已按旧版 Office 解析'] : []);
     if (ext === '.rtf') return this.extractRtf(file);
     if (ext === '.doc') return this.extractLegacyWordDocument(file);
     if (ext === '.ppt') return this.extractLegacyOfficeBinary(file);
     if (ext === '.docx') {
+      if (!isZip) return this.extractLegacyOfficeBinaryWithWarnings(file, ['文件扩展名为 .docx，但未检测到 OpenXML ZIP 文件头，已降级为二进制可读文本抽取']);
       try {
         const styledMarkdown = await this.extractDocxStyleTreeMarkdown(file.absolutePath);
         if (styledMarkdown.trim()) {
@@ -756,6 +760,43 @@ export class ContentExtractor {
       metadata: { extractionMode: 'builtin_legacy_office_binary_strings', vectorizable: true, contentCoverage: 'legacy_office_binary_strings', stringCount: strings.length },
       warnings: text ? [] : ['旧版 Office 二进制文件未提取到正文，未入库'],
     };
+  }
+
+  private extractLegacyOfficeBinaryWithWarnings(file: ClassifiedFile, warnings: string[]): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
+    const result = this.extractLegacyOfficeBinary(file);
+    return { ...result, warnings: [...warnings, ...result.warnings] };
+  }
+
+  private isZipOpenXmlFile(filePath: string): boolean {
+    const header = fs.readFileSync(filePath).subarray(0, 4);
+    return header.length >= 4 && header[0] === 0x50 && header[1] === 0x4b && [0x03, 0x05, 0x07].includes(header[2] ?? -1);
+  }
+
+  private isOleCompoundFile(filePath: string): boolean {
+    const signature = fs.readFileSync(filePath).subarray(0, 8);
+    return signature.equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
+  }
+
+  private async extractOleOfficeDocument(file: ClassifiedFile, warnings: string[] = []): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
+    const word = await this.extractLegacyWordDocument(file);
+    if (word.text.trim() && word.metadata.extractionMode === 'builtin_word_extractor') {
+      return {
+        text: word.text,
+        metadata: { ...word.metadata, realOfficeContainer: 'ole_cfb' },
+        warnings: [...warnings, ...word.warnings],
+      };
+    }
+
+    const spreadsheet = await this.extractSpreadsheet(file);
+    if (spreadsheet.text.trim() && spreadsheet.metadata.extractionMode !== 'office_zip_failed') {
+      return {
+        text: spreadsheet.text,
+        metadata: { ...spreadsheet.metadata, realOfficeContainer: 'ole_cfb' },
+        warnings: [...warnings, ...spreadsheet.warnings],
+      };
+    }
+
+    return this.extractLegacyOfficeBinaryWithWarnings(file, warnings);
   }
 
   private findMergedCellValue(sheet: SpreadsheetSheet, merges: SpreadsheetRange[], row: number, col: number, XLSX: any): string | undefined {
@@ -837,6 +878,7 @@ export class ContentExtractor {
     // 在 xml 中 w:body 的一级子节点通常是 w:p 和 w:tbl
     const elements = Array.from(docXml.matchAll(/<(w:p|w:tbl)[\s>][\s\S]*?<\/\1>/gu), match => ({ tag: match[1], xml: match[0] }));
     const lines: string[] = [];
+    let tableIndex = 0;
     
     for (const { tag, xml } of elements) {
       if (tag === 'w:p') {
@@ -848,34 +890,54 @@ export class ContentExtractor {
         const level = this.docxHeadingLevel(style, bold, size, texts);
         lines.push(`${level > 0 ? `${'#'.repeat(level)} ` : ''}${texts.trim()}`);
       } else if (tag === 'w:tbl') {
-        const trList = Array.from(xml.matchAll(/<w:tr[\s>][\s\S]*?<\/w:tr>/gu), match => match[0]);
-        const rows: string[][] = [];
-        for (const tr of trList) {
-          const tcList = Array.from(tr.matchAll(/<w:tc[\s>][\s\S]*?<\/w:tc>/gu), match => match[0]);
-          const cols: string[] = [];
-          for (const tc of tcList) {
-            const tcText = Array.from(tc.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/gu), match => this.stripXml(match[1] ?? '')).join('');
-            cols.push(tcText.trim().replace(/\r?\n/gu, ' '));
-          }
-          rows.push(cols);
-        }
+        tableIndex += 1;
+        const rows = this.extractDocxTableRows(xml);
         if (rows.length > 0) {
-          const maxCols = Math.max(...rows.map(r => r.length));
-          // 补齐列数
-          rows.forEach(r => { while (r.length < maxCols) r.push(''); });
-          
+          const maxCols = Math.max(...rows.map(row => row.length), 1);
+          rows.forEach(row => { while (row.length < maxCols) row.push(''); });
           const header = rows[0] || Array(maxCols).fill('');
-          const mdTable = [
-            `| ${header.join(' | ')} |`,
-            `| ${header.map(() => '---').join(' | ')} |`,
-            ...rows.slice(1).map(row => `| ${row.join(' | ')} |`)
-          ].join('\n');
-          lines.push(mdTable);
+          const mdTable = this.toMarkdownTable(header, rows.slice(1));
+          const declarations = rows.slice(1).flatMap((row, rowIndex) => row.map((value, colIndex) => {
+            const column = header[colIndex] || `COL${colIndex + 1}`;
+            return `表${tableIndex}.R${rowIndex + 2}C${colIndex + 1} ${column}: ${value}`;
+          })).filter(line => !line.endsWith(': '));
+          lines.push([`DOCX 表格 ${tableIndex}`, mdTable, '表格路径声明', ...declarations].join('\n'));
         }
       }
     }
     
     return lines.join('\n\n');
+  }
+
+  private extractDocxTableRows(tableXml: string): string[][] {
+    const activeVMerges = new Map<number, string>();
+    return Array.from(tableXml.matchAll(/<w:tr[\s>][\s\S]*?<\/w:tr>/gu), match => match[0]).map(tr => {
+      const row: string[] = [];
+      for (const tc of Array.from(tr.matchAll(/<w:tc[\s>][\s\S]*?<\/w:tc>/gu), match => match[0])) {
+        const gridSpan = Math.max(1, Number(/<w:gridSpan\s+w:val="(\d+)"/u.exec(tc)?.[1] ?? 1));
+        const vMerge = /<w:vMerge(?:\s+w:val="([^"]+)")?\s*\/?/u.exec(tc)?.[1] ?? (/<w:vMerge\b/u.test(tc) ? 'continue' : undefined);
+        const cellText = this.extractDocxCellText(tc);
+        const colIndex = row.length;
+        const value = vMerge === 'continue' ? (activeVMerges.get(colIndex) ?? cellText) : cellText;
+        if (vMerge === 'restart' || (vMerge && cellText)) activeVMerges.set(colIndex, cellText);
+        if (!vMerge) activeVMerges.delete(colIndex);
+        for (let index = 0; index < gridSpan; index++) row.push(index === 0 ? value : '');
+      }
+      return row;
+    }).filter(row => row.some(Boolean));
+  }
+
+  private extractDocxCellText(cellXml: string): string {
+    return Array.from(cellXml.matchAll(/<w:p[\s>][\s\S]*?<\/w:p>/gu), match => match[0])
+      .map(paragraph => Array.from(paragraph.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>|<w:tab\s*\/>|<w:br\s*\/>/gu), match => {
+        if (match[1] != null) return this.stripXml(match[1]);
+        if (match[0].startsWith('<w:tab')) return ' ';
+        return '\n';
+      }).join('').trim())
+      .filter(Boolean)
+      .join(' / ')
+      .replace(/\s+/gu, ' ')
+      .trim();
   }
 
   private docxHeadingLevel(style: string, bold: boolean, size: number, text: string): number {

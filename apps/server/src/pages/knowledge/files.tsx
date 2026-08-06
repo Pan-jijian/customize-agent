@@ -2,9 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppLocale, useAppTranslations } from '@/components/Layout';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import { Card, Table, Button, Input, Select, Tag, Modal, Space, App, Progress, Tooltip } from 'antd';
+import { Table, Button, Input, Select, Tag, Modal, Space, App, Dropdown } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { UploadOutlined, SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined } from '@ant-design/icons';
+import { SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined, MoreOutlined, PlusOutlined } from '@ant-design/icons';
+import { ChevronRight, ChevronDown } from 'lucide-react';
 import { getJob, getKbFiles, getKbOperations, clearKbOperations, deleteKbOperation, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, reindexKbFile, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
@@ -506,8 +507,8 @@ export default function FilesPage() {
 
   const defaultExpandedKeys = useMemo(() => {
     if (searchQuery) return allTreeKeys;
-    return treeData.map(n => n.key);
-  }, [searchQuery, allTreeKeys, treeData]);
+    return [];
+  }, [searchQuery, allTreeKeys]);
 
   useEffect(() => { setExpandedRowKeys(defaultExpandedKeys); }, [defaultExpandedKeys]);
 
@@ -557,8 +558,7 @@ export default function FilesPage() {
             <span className={styles.folderName} onClick={(e) => { e.stopPropagation(); handleExpand(!expandedRowKeys.includes(r.key), r); }}>{r.name}</span>
           ) : (
             <>
-
-              <Link className="truncate max-w-[380px] inline-block" href={`/knowledge/file-detail?relativePath=${encodeURIComponent(r.key)}`}>{r.name}</Link>
+              <Link className="min-w-0 max-w-[520px] whitespace-normal break-words leading-relaxed" href={`/knowledge/file-detail?relativePath=${encodeURIComponent(r.key)}`}>{r.name}</Link>
             </>
           )}
         </span>
@@ -575,14 +575,14 @@ export default function FilesPage() {
       render: (_: unknown, r: FileTreeNode) => formatBytes(r.isFolder ? (r.totalSize ?? 0) : (r.file?.fileSize ?? 0)),
     },
     {
-      title: '切片', dataIndex: 'chunkCount', key: 'chunks', width: 80,
+      title: t('chunksCount'), dataIndex: 'chunkCount', key: 'chunks', width: 80,
       render: (_: unknown, r: FileTreeNode) => {
         const count = r.isFolder ? (r.totalChunks ?? 0) : (r.file?.chunkCount ?? 0);
         return <Tag color={count > 1 ? 'green' : 'orange'}>{count}</Tag>;
       },
     },
     {
-      title: '解析状态', dataIndex: 'status', key: 'status', width: 100,
+      title: t('parsingStatus'), dataIndex: 'status', key: 'status', width: 100,
       render: (_: unknown, r: FileTreeNode) => r.isFolder
         ? <span style={{ color: 'var(--colorTextQuaternary)' }}>—</span>
         : <Tag color={statusTagColor(r.file?.status)}>{r.file?.errorMessage || r.file?.status || '—'}</Tag>,
@@ -594,143 +594,150 @@ export default function FilesPage() {
         : (r.file?.mtime ? new Date(r.file.mtime).toLocaleDateString(locale) : '—'),
     },
     {
-      title: '来源', key: 'source', width: 100,
+      title: t('source'), key: 'source', width: 100,
       render: (_: unknown, r: FileTreeNode) => r.isFolder
         ? <span style={{ color: 'var(--colorTextQuaternary)' }}>—</span>
-        : <Tag color="cyan">文件</Tag>,
+        : <Tag color="cyan">{t('fileSource')}</Tag>,
     },
     {
-      title: '', key: 'act', width: 100,
+      title: '', key: 'act', width: 80, align: 'center',
       render: (_: unknown, r: FileTreeNode) => r.isFolder ? null : (
-        <Space size={4}>
-          <Tooltip title="重新解析、分块并入库">
-            <Button type="text" size="small" loading={Boolean(r.file && reindexingFiles.has(r.file.relativePath))} icon={<SyncOutlined />} onClick={() => { void handleReindexFile(r.file!); }} />
-          </Tooltip>
-          <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => handleDelete(r.file!)} />
-        </Space>
+        <Dropdown menu={{ items: [
+          { key: 'reindex', label: t('reindex'), icon: <SyncOutlined />, onClick: () => { void handleReindexFile(r.file!); } },
+          { type: 'divider' },
+          { key: 'delete', label: t('delete'), icon: <DeleteOutlined />, danger: true, onClick: () => handleDelete(r.file!) },
+        ] }} trigger={['click']}>
+          <Button type="text" size="small" icon={<MoreOutlined />} />
+        </Dropdown>
       ),
     },
   ];
 
+  const headerExtra = (
+    <div className="flex flex-1 md:flex-none w-full md:w-auto items-center gap-3">
+      <Input placeholder={t('searchPlaceholder')} prefix={<SearchOutlined className="text-[var(--colorTextTertiary)]" />} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); }} allowClear className="max-w-[300px] flex-1 bg-transparent hover:bg-transparent focus:bg-transparent" bordered={false} style={{ borderBottom: '1px solid var(--borderColor)', borderRadius: 0, paddingLeft: 0, paddingRight: 0 }} />
+      <Select value={category || undefined} onChange={(v) => { setCategory(v || ''); }} placeholder={t('filterCategory')} allowClear style={{ width: 140 }} variant="borderless"
+        options={[{ label: t('allCategories'), value: '' }, ...CATEGORIES.map((c) => ({ label: categoryLabel(c, locale), value: c }))]} />
+      <div className="w-[1px] h-6 bg-[var(--borderColor)] mx-1"></div>
+      <Dropdown
+        menu={{
+          items: [
+            { key: 'file', label: t('uploadFiles'), icon: <FileOutlined />, onClick: () => document.getElementById('kb-file-upload-input')?.click() },
+            { key: 'folder', label: t('uploadFolder'), icon: <FolderOutlined />, onClick: () => document.getElementById('kb-folder-upload-input')?.click() },
+            { type: 'divider' },
+            { key: 'reindex', label: t('reindexAll'), icon: <SyncOutlined />, onClick: () => { void handleReindexAll(); }, danger: true },
+          ]
+        }}
+        trigger={['click']}
+      >
+        <Button type="primary" icon={<PlusOutlined />} loading={uploading || reindexingAll} className="rounded-md px-4">{t('new')}</Button>
+      </Dropdown>
+      <input id="kb-file-upload-input" type="file" multiple hidden accept=".pdf,.doc,.docx,.txt,.md,.csv,.tsv,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.svg,.dwg,.dxf,.step,.stp,.iges,.igs,.js,.ts,.tsx,.jsx,.py,.go,.java,.cs,.cpp,.c,.h,.json,.jsonl,.yaml,.yml,.xml,.html,.htm,.drawio,.dio,.vsdx,.vdx,.puml,.plantuml,.mmd,.mermaid,.excalidraw" onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
+      <input id="kb-folder-upload-input" type="file" multiple hidden {...{ webkitdirectory: '' }} onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
+    </div>
+  );
+
   return (
-    <div className="space-y-5 animateFadeIn">
-      <h2 className="pageTitle">{t('files')}</h2>
-
-      <div className="flex flex-wrap items-end gap-3">
-        <Input placeholder={t('searchPlaceholder')} prefix={<SearchOutlined />} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); }} allowClear className={styles.filterInput} />
-        <Select value={category || undefined} onChange={(v) => { setCategory(v || ''); }} placeholder={t('filterCategory')} allowClear className={styles.filterSelect}
-          options={[{ label: t('allCategories'), value: '' }, ...CATEGORIES.map((c) => ({ label: categoryLabel(c, locale), value: c }))]} />
-        <Button type="primary" icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-file-upload-input')?.click()}>{uploading ? t('uploading') : t('upload')}</Button>
-        <Button icon={<UploadOutlined />} loading={uploading} onClick={() => document.getElementById('kb-folder-upload-input')?.click()}>上传文件夹</Button>
-        <Button icon={<SyncOutlined />} loading={reindexingAll} onClick={() => { void handleReindexAll(); }}>重新解析入库</Button>
-        <input id="kb-file-upload-input" type="file" multiple hidden accept=".pdf,.doc,.docx,.txt,.md,.csv,.tsv,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.svg,.dwg,.dxf,.step,.stp,.iges,.igs,.js,.ts,.tsx,.jsx,.py,.go,.java,.cs,.cpp,.c,.h,.json,.jsonl,.yaml,.yml,.xml,.html,.htm,.drawio,.dio,.vsdx,.vdx,.puml,.plantuml,.mmd,.mermaid,.excalidraw" onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
-        <input id="kb-folder-upload-input" type="file" multiple hidden {...{ webkitdirectory: '' }} onChange={(event) => { const selected = Array.from(event.target.files ?? []); event.target.value = ''; void handleUpload(selected); }} />
-      </div>
-
-      {/* 可折叠的状态卡片 */}
-      <Card size="small" className={styles.statusCard} styles={{ body: { padding: 0 } }}>
-        <div className={styles.statusSummary} onClick={() => setStatusCollapsed(!statusCollapsed)}>
-          <span className={styles.statusSummaryText}>
-            {statusItems.length === 0 ? '暂无文件任务' : (
-              <Space size={6}>
-                {statusStats.processing > 0 && <Tag color="processing" style={{ margin: 0 }} icon={<SyncOutlined spin />}>处理中 {statusStats.processing}</Tag>}
-                <Tag color="success" style={{ margin: 0 }} icon={<CheckCircleOutlined />}>已完成 {statusStats.success}</Tag>
-                <Tag color="error" style={{ margin: 0 }} icon={<CloseCircleOutlined />}>失败 {statusStats.error}</Tag>
-              </Space>
-            )}
-          </span>
-          {statusItems.length > 0 && (
-            <Space size={6}>
-              <Button size="small" className={styles.statusClearBtn} onClick={(e) => { e.stopPropagation(); void handleClearOperations(); }}>清空</Button>
-              <Button size="small" className={styles.statusExpandBtn} onClick={(e) => { e.stopPropagation(); setStatusCollapsed(!statusCollapsed); }}>
-                {statusCollapsed ? '展开' : '收起'}
-              </Button>
-            </Space>
-          )}
+    <div className="h-[calc(100vh-140px)] flex flex-col">
+      <div className="bg-[var(--colorBgContainer)] rounded-2xl border border-[var(--borderColor)] p-6 mb-4 shrink-0 animateFadeIn">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 pb-6 border-b border-[var(--borderColor)]">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-[var(--colorText)] mb-1 flex items-center gap-2">
+              <DatabaseOutlined className="text-[var(--colorAccent)]" />
+              {t('files')}
+            </h1>
+            <p className="text-sm text-[var(--colorTextSecondary)] m-0">{t('manageRawFiles')}</p>
+          </div>
+          {headerExtra}
         </div>
 
-        {!statusCollapsed && statusItems.length > 0 && (
-          <div className={styles.statusPanel}>
-            <div className={styles.statusFilters}>
-              <span className={`${styles.filterPill} ${statusFilter === 'all' ? styles.filterPillActive : ''}`} style={statusFilter === 'all' ? { color: '#1677ff' } : undefined} onClick={() => setStatusFilter('all')}>全部 <b>{statusItems.length}</b></span>
-              <span className={`${styles.filterPill} ${statusFilter === 'processing' ? styles.filterPillActive : ''}`} style={statusFilter === 'processing' ? { color: '#1677ff' } : undefined} onClick={() => setStatusFilter('processing')}><SyncOutlined spin={statusStats.processing > 0} /> 处理中 <b>{statusStats.processing}</b></span>
-              <span className={`${styles.filterPill} ${statusFilter === 'success' ? styles.filterPillActive : ''}`} style={statusFilter === 'success' ? { color: '#52c41a' } : undefined} onClick={() => setStatusFilter('success')}><CheckCircleOutlined /> 已完成 <b>{statusStats.success}</b></span>
-              <span className={`${styles.filterPill} ${statusFilter === 'error' ? styles.filterPillActive : ''}`} style={statusFilter === 'error' ? { color: '#ff4d4f' } : undefined} onClick={() => setStatusFilter('error')}><CloseCircleOutlined /> 失败 <b>{statusStats.error}</b></span>
+        {/* 顶部数据概览 (填充空旷感) */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-6 pt-6 stagger-1">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl bg-[var(--colorBgHover)] flex items-center justify-center text-xl text-[var(--colorTextSecondary)]">
+              <FolderOpenOutlined />
             </div>
-            <div className={styles.timelineList}>
-              {filteredStatusItems.length === 0 ? (
-                <div className={styles.statusEmpty}>没有匹配的任务</div>
-              ) : (
-                filteredStatusItems.map((item, idx) => {
-                  const key = item.id || `${item.type}-${item.createdAt ?? item.title}-${idx}`;
-                  const expanded = expandedItems.has(key);
-                  return (
-                    <div key={key} className={styles.timelineItem}>
-                      <div className={styles.timelineRow} onClick={() => toggleExpand(key)}>
-                        <span className={styles.timelineStatusIcon}>
-                          {item.status === 'success' ? <CheckCircleOutlined style={{ color: '#52c41a' }} />
-                            : item.status === 'processing' ? <SyncOutlined spin style={{ color: '#1677ff' }} />
-                            : item.status === 'error' ? <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
-                            : <span style={{ color: '#fa8c16', fontWeight: 700 }}>!</span>}
-                        </span>
-                        <span className={styles.timelineTitle}>{item.title}</span>
-                        {typeof item.percent === 'number' && item.status === 'processing' && (
-                          <span className={styles.timelinePercent}>{item.percent}%</span>
-                        )}
-                        <Button type="text" size="small" danger icon={<DeleteOutlined />} style={{ width: 22, height: 22, padding: 0, fontSize: 12 }} onClick={(e) => { void dismissItem(item, e); }} />
-                      </div>
-                      {expanded && (
-                        <div className={styles.timelineDetail}>
-                          {typeof item.percent === 'number' && item.status === 'processing' && <Progress percent={item.percent} size="small" strokeColor="#1677ff" />}
-                          {item.description && <div className={styles.timelineDesc}>{item.description}</div>}
-                          {item.error && <div style={{ color: 'var(--colorError)', fontSize: 12, wordBreak: 'break-word' }}>{item.error}</div>}
-                          {item.filePath && <Tooltip title={item.filePath}><div className={styles.timelinePath}>{item.filePath}</div></Tooltip>}
-                          <div className={styles.timelineMeta}>
-                            {typeof item.chunkCount === 'number' && <span className={styles.timelineMetaTag}>切片 <b>{item.chunkCount}</b></span>}
-                            {typeof item.textLength === 'number' && <span className={styles.timelineMetaTag}>正文 <b>{item.textLength.toLocaleString(locale)}</b> 字符</span>}
-                            {item.extractionMode && <span className={styles.timelineMetaTag}>解析 <b>{item.extractionMode}</b></span>}
-                          </div>
-                          {item.status === 'error' && <div style={{ color: 'var(--colorError)', fontSize: 12 }}>此任务失败，请重新上传文件或重试操作</div>}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })
-              )}
+            <div>
+              <div className="text-[11px] font-semibold text-[var(--colorTextTertiary)] uppercase tracking-wider mb-1">{t('totalRootFolders')}</div>
+              <div className="text-xl font-bold text-[var(--colorText)] leading-none">{treeData.length}</div>
             </div>
           </div>
-        )}
-      </Card>
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl bg-[var(--colorBgHover)] flex items-center justify-center text-xl text-[var(--colorTextSecondary)]">
+              <FileTextOutlined />
+            </div>
+            <div>
+              <div className="text-[11px] font-semibold text-[var(--colorTextTertiary)] uppercase tracking-wider mb-1">{t('totalFilesStats')}</div>
+              <div className="text-xl font-bold text-[var(--colorText)] leading-none">{files.length}</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl bg-green-50 dark:bg-green-900/20 flex items-center justify-center text-xl text-green-600 dark:text-green-500">
+              <CheckCircleOutlined />
+            </div>
+            <div>
+              <div className="text-[11px] font-semibold text-[var(--colorTextTertiary)] uppercase tracking-wider mb-1">{t('successfullyParsed')}</div>
+              <div className="text-xl font-bold text-[var(--colorText)] leading-none">{files.filter(f => f.status === 'success').length}</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl bg-red-50 dark:bg-red-900/20 flex items-center justify-center text-xl text-red-600 dark:text-red-500">
+              <CloseCircleOutlined />
+            </div>
+            <div>
+              <div className="text-[11px] font-semibold text-[var(--colorTextTertiary)] uppercase tracking-wider mb-1">{t('parsingErrors')}</div>
+              <div className="text-xl font-bold text-[var(--colorText)] leading-none">{files.filter(f => f.status === 'error').length}</div>
+            </div>
+          </div>
+        </div>
+      </div>
 
-      <Card
-        title="文件列表"
-        extra={
+      {loadError && <div className="p-4 mb-4 bg-[var(--colorDanger)]/10 text-[var(--colorDanger)] rounded-xl border border-[var(--colorDanger)]/20">{loadError}</div>}
+
+      <div className="flex-1 min-h-0 bg-[var(--colorBgContainer)] rounded-2xl border border-[var(--borderColor)] overflow-hidden flex flex-col animateFadeIn stagger-3" style={{ opacity: 0 }}>
+        <div className="flex justify-between items-center p-4 bg-[var(--colorBgHover)] border-b border-[var(--borderColor)] shrink-0">
+          <div className="text-xs text-[var(--colorTextSecondary)] font-medium">
+            {t('showingMatchingFiles').replace('{count}', String(filtered.length))}
+          </div>
           <Space size={8}>
-            <Button danger size="small" disabled={selectedFileCount === 0} icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')}>
-              删除已选 {selectedFileCount || ''}
-            </Button>
-            <Button danger size="small" disabled={files.length === 0} onClick={() => handleBulkDelete('all')}>删除全部文件</Button>
+            {selectedFileCount > 0 && (
+              <Button danger size="small" icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')} className="rounded-lg">
+                {t('deleteSelected')} ({selectedFileCount})
+              </Button>
+            )}
+            <Button danger size="small" disabled={files.length === 0} onClick={() => handleBulkDelete('all')} className="rounded-lg">{t('deleteAll')}</Button>
           </Space>
-        }
-      >
-        {loadError && <div className={styles.statusEmpty}>文件列表加载失败：{loadError}</div>}
-        <Table<FileTreeNode> rowKey="key" columns={columns} dataSource={treeData} loading={loading} size="middle"
-          expandable={{ expandedRowKeys, onExpand: handleExpand, childrenColumnName: 'children' }}
-          locale={{ emptyText: loading ? '正在加载文件列表...' : searchQuery ? t('emptySearch') : t('noFiles') }}
+        </div>
+
+        <Table<FileTreeNode>
+          rowKey="key"
+          columns={columns}
+          dataSource={treeData}
+          loading={loading && !uploading && !reindexingAll}
+          size="middle"
+          className="flex-1 custom-table border-0"
+          scroll={{ y: 'calc(100vh - 460px)' }}
+          expandable={{ 
+            expandedRowKeys, 
+            onExpand: handleExpand,
+            expandIcon: ({ expanded, onExpand, record }) =>
+              record.isFolder ? (
+                <button type="button" onClick={(e) => onExpand(record, e)} className="w-6 h-6 mr-1 inline-flex items-center justify-center align-middle text-[var(--colorTextTertiary)] hover:text-[var(--colorText)] transition-colors bg-transparent border-0 p-0 leading-none">
+                  {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                </button>
+              ) : <span className="w-6 h-6 inline-flex" />
+          }}
+          locale={{ emptyText: loading ? t('common.loading') : searchQuery ? t('emptySearch') : t('noFiles') }}
           pagination={false}
-          rowClassName={(r) => r.isFolder ? styles.folderRow : ''}
+          rowClassName={(r) => `hover:bg-[var(--colorBgHover)] transition-colors ${r.isFolder ? 'font-medium bg-[var(--colorBgSecondary)]/30' : ''}`}
           rowSelection={{
             selectedRowKeys,
             onChange: setSelectedRowKeys,
             checkStrictly: false,
             getCheckboxProps: (record) => ({ disabled: record.isFolder ? (record.fileCount ?? 0) === 0 : false }),
           }}
-          footer={() => (
-            <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>
-              当前展示 {filtered.length} 个文件；全部文件 {files.length} 个；{treeData.length} 个顶层目录
-            </div>
-          )} />
-      </Card>
+        />
+      </div>
     </div>
   );
 }

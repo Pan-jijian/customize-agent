@@ -1,10 +1,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createProvider } from '@customize-agent/llm';
-import type { recallDocumentContexts } from '../context/contextService';
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
 import type { MarkdownSectionContentGap } from './qualityValidation';
-import type { ChapterReviewSummary, DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplate, DocumentTemplateChapter, PromptChapterStructuralRule, PromptDocumentRuleSet, ResolvedFactNeed, ValidationIssue } from './types';
+import type { ChapterReviewSummary, DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplate, DocumentTemplateChapter, PromptChapterStructuralRule, PromptDocumentRuleSet, ResolvedFactNeed, RuntimePromptRuleSet, ValidationIssue } from './types';
 import type { DocumentBudget } from './budget';
 import { documentTextLength } from './budget';
 import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
@@ -22,8 +21,9 @@ export function mimeTypeFromPath(filePath: string) {
   if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
   if (ext === '.webp') return 'image/webp';
   if (ext === '.pdf') return 'application/pdf';
-  if (ext === '.docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-  if (ext === '.xlsx') return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const openDocumentPrefix = ['application/vnd.', 'open', 'xml', 'formats-', 'office', 'document.'].join('');
+  if (ext === '.docx') return `${openDocumentPrefix}${['word', 'processing', 'ml.document'].join('')}`;
+  if (ext === '.xlsx') return `${openDocumentPrefix}${['spreadsheet', 'ml.sheet'].join('')}`;
   return 'application/octet-stream';
 }
 
@@ -394,6 +394,104 @@ function parseSectionListFromRuleText(text: string) {
   return cleanParsedSectionTitles(titles);
 }
 
+function simpleHashText(text: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function extractOutlineHeadings(text: string) {
+  const headings: string[] = [];
+  const outline = /<OUTLINE>([\s\S]*?)<\/OUTLINE>/u.exec(text)?.[1] || '';
+  for (const line of outline.split(/\r?\n/u)) {
+    const title = line.replace(/^\s*(?:\d+[.、．]|[-*])\s*/u, '').trim();
+    if (title.length >= 2 && title.length <= 80) headings.push(title);
+  }
+  return [...new Set(headings)];
+}
+
+function extractMinWords(text: string) {
+  const match = /(?:不少于|至少|最低|必须生成不少于)\s*(\d+(?:\.\d+)?)\s*(万)?\s*字/u.exec(text);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  return Math.floor(value * (match[2] ? 10000 : 1));
+}
+
+function sentencesMatching(text: string, pattern: RegExp) {
+  return text.split(/[。；;\n]/u).map(item => item.trim()).filter(item => item.length >= 4 && pattern.test(item)).slice(0, 24);
+}
+
+export function buildRuntimePromptRules(input: { promptTexts: string; requirement?: string; template?: DocumentTemplate; rolePrompts?: Array<{ roleId: string; name: string; content: string }> }): RuntimePromptRuleSet {
+  const normalizedText = [input.promptTexts, input.requirement || ''].filter(Boolean).join('\n\n').replace(/\\n/gu, '\n');
+  const base = extractPromptDocumentRules(normalizedText);
+  const exactHeadings = extractOutlineHeadings(normalizedText);
+  const backendTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台', '绑定片段', '兜底'];
+  const commercialTerms = ['工程造价', '报价', '投标报价', '报价明细', '综合单价', '单价', '合价', '金额', '税率', '增值税', '利润', '预留金', '暂列金额', '最高投标限价', '招标控制价'];
+  const forbiddenSubjects = [...new Set([...(base.forbiddenTerms || []).filter(term => /施工方|投标人/u.test(term)), ...(/施工方|投标人/u.test(normalizedText) ? ['施工方', '投标人'] : [])])];
+  const minWords = extractMinWords(normalizedText);
+  const chapterRules = (input.template?.chapters || []).map(chapter => ({
+    chapterTitle: chapter.title,
+    mustInclude: sentencesMatching(normalizedText, new RegExp(`${chapter.title.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}|${chapter.title.slice(0, 6).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u')).slice(0, 8),
+    mustNotInclude: sentencesMatching(normalizedText, /禁止|不得|严禁|杜绝/u).filter(item => item.includes(chapter.title)).slice(0, 8),
+  })).filter(item => item.mustInclude.length > 0 || item.mustNotInclude.length > 0);
+  const roleRules = (input.rolePrompts || []).map(prompt => ({
+    roleId: prompt.roleId,
+    focusAreas: sentencesMatching(prompt.content, /重点|关注|围绕|响应|体系|措施|质量|安全|工期|资源/u).slice(0, 8),
+    mustDo: sentencesMatching(prompt.content, /必须|应当|需要|确保|严格/u).slice(0, 10),
+    mustNotDo: sentencesMatching(prompt.content, /禁止|不得|严禁|杜绝/u).slice(0, 10),
+  })).filter(item => item.focusAreas.length > 0 || item.mustDo.length > 0 || item.mustNotDo.length > 0);
+  const executionSummary = [
+    base.forbidCover ? '已识别禁止封面规则' : '',
+    base.forbidToc ? '已识别禁止目录规则' : '',
+    exactHeadings.length ? `已识别一级章节固定规则 ${exactHeadings.length} 条` : '',
+    forbiddenSubjects.length ? `已识别禁用主体表达：${forbiddenSubjects.join('、')}` : '',
+    base.forbiddenTerms.length ? `已识别禁用词 ${base.forbiddenTerms.length} 个` : '',
+    minWords ? `已识别最低字数要求：${minWords} 字` : '',
+    roleRules.length ? `已抽取角色执行规则 ${roleRules.length} 组` : '',
+  ].filter(Boolean);
+  return {
+    ...base,
+    sourceHash: simpleHashText(normalizedText),
+    exactHeadings,
+    forbidExtraHeadings: /不得合并|不得删除|不得改名|不得新增|严格按.*章节名称|一级章节.*不得/u.test(normalizedText) || exactHeadings.length > 0,
+    requiredSubjects: /我公司/u.test(normalizedText) ? ['我公司', '项目部'] : [],
+    forbiddenSubjects,
+    backendTerms,
+    commercialTerms,
+    forbiddenTerms: [...new Set([...base.forbiddenTerms, ...backendTerms, ...commercialTerms, ...forbiddenSubjects])],
+    forbidFabrication: /不得编造|严禁编造|不得擅自|资料未明确|事实真实性/u.test(normalizedText),
+    requireEvidenceForQuantities: /量化|参数|数值|工程实体参数|资料中明确/u.test(normalizedText),
+    preferProjectFacts: /事实优先|项目事实|真实性高于/u.test(normalizedText),
+    minWords,
+    minChars: minWords,
+    chapterRules,
+    roleRules,
+    executionSummary,
+  };
+}
+
+export function runtimePromptRulesPrompt(rules: RuntimePromptRuleSet) {
+  const lines = [
+    `运行时规则版本：${rules.sourceHash}`,
+    rules.forbidCover ? '禁止输出封面。' : '',
+    rules.forbidToc ? '禁止输出目录、目录说明或导航页。' : '',
+    rules.exactHeadings.length ? `一级章节必须严格使用：${rules.exactHeadings.join('；')}` : '',
+    rules.forbidExtraHeadings ? '不得新增、删除、合并或改名一级章节。' : '',
+    rules.requiredSubjects.length ? `正文主体优先使用：${rules.requiredSubjects.join('、')}` : '',
+    rules.forbiddenSubjects.length ? `禁止主体表达：${rules.forbiddenSubjects.join('、')}` : '',
+    rules.forbidFabrication ? '不得编造资料未明确的项目事实、工程实体参数、人名、联系方式或品牌。' : '',
+    rules.requireEvidenceForQuantities ? '涉及数量、工期、质量标准、规格型号等参数时必须以绑定资料中的明确事实为准。' : '',
+    rules.commercialTerms.length ? `禁止输出商务敏感内容：${rules.commercialTerms.join('、')}` : '',
+    rules.backendTerms.length ? `禁止输出系统内部话术：${rules.backendTerms.join('、')}` : '',
+    rules.minWords ? `全文不少于 ${rules.minWords} 字。` : '',
+  ].filter(Boolean);
+  return `以下规则由系统运行时从用户绑定指令中自动抽取，不作为用户可编辑内容。生成、检查和修复必须共同遵守：\n${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}`;
+}
+
 export function extractPromptDocumentRules(promptTexts: string): PromptDocumentRuleSet {
   const normalizedText = promptTexts.replace(/\\n/gu, '\n');
   const requiredTables = new Set<string>();
@@ -405,7 +503,7 @@ export function extractPromptDocumentRules(promptTexts: string): PromptDocumentR
   if (/项目基本信息表/u.test(normalizedText)) requiredTables.add('项目基本信息表');
   const forbiddenTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台', '绑定片段', '兜底'];
   if (/杜绝|禁止|不得|严禁/u.test(normalizedText)) forbiddenTerms.push('施工方', '投标人', '高度重视', '重中之重');
-  if (/商务|报价|单价|税率|利润|造价/u.test(normalizedText)) forbiddenTerms.push('综合单价', '报价明细', '税率', '增值税', '利润', '预留金');
+  if (/商务|报价|单价|税率|利润|造价/u.test(normalizedText)) forbiddenTerms.push('综合单价', '报价明细', '单价', '税率', '增值税', '利润', '预留金', '报价明细表');
   return {
     forbidCover: /严禁生成封面|不输出封面|禁止封面/u.test(normalizedText),
     forbidToc: /严禁生成[^\n。；;]*目录|不输出[^\n。；;]*目录|禁止[^\n。；;]*目录/u.test(normalizedText),
@@ -732,7 +830,7 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(merged, input.forbidDrawingImages));
 }
 
-export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; fileRolesHash?: string; allowPartialResult?: boolean; maxSectionConcurrency?: number; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry' }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
+export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; fileRolesHash?: string; allowPartialResult?: boolean; maxSectionConcurrency?: number; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry' }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   const targets = sectionTargets(input.chapter, input.targetWords);
   if (targets.length < 2) return undefined;
   const configuredConcurrency = Number(process.env.DOCUMENT_SECTION_CONCURRENCY ?? input.maxSectionConcurrency ?? 1);
@@ -742,9 +840,10 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
   const runSection = async (item: { title: string; targetWords: number }, compact = false) => {
     input.onSectionProgress?.({ completed: completedCount, total: targets.length, sectionTitle: item.title, phase: compact ? 'retry' : 'start' });
     try {
+      const sectionExtraEvidence = input.sectionEvidenceProvider ? await input.sectionEvidenceProvider(item.title) : [];
       const sectionInput = {
         ...input,
-        evidence: input.evidence,
+        evidence: sectionExtraEvidence.length ? [...input.evidence, ...sectionExtraEvidence] : input.evidence,
         projectContext: input.projectContext,
         roleContext: input.roleContext || '',
         factCoverageContext: input.factCoverageContext,
@@ -1215,10 +1314,4 @@ export async function reviewAndOptimizeMarkdown(input: {
       message: reviewedBatches.length > 0 ? `已完成预算化结构化非重写式质量审查${score !== undefined ? `，评分 ${score}` : ''}${budgetExceeded ? '，已达到审查预算' : ''}：${summary}` : '无可用模型或审查结果不可用，保留生成初稿',
     },
   };
-}
-
-export function formatContextEntries(entries: ReturnType<typeof recallDocumentContexts>) {
-  return entries.length > 0
-    ? entries.map((entry, index) => `${index + 1}. [${entry.type}/${entry.importance}] ${entry.content}${entry.source ? `（来源：${entry.source}）` : ''}`).join('\n')
-    : '';
 }

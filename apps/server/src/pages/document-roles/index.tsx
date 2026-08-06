@@ -175,16 +175,16 @@ export default function DocumentRolesPage() {
       .sort((a, b) => Number(a.order ?? 0) - Number(b.order ?? 0))
       .map(item => getRoleById(item.roleId))
       .filter((role): role is DocumentRole => Boolean(role));
-    if (selected.length === 0) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={type === 'file' ? '暂未选择文件角色' : '暂未选择提示词角色'} />;
-    return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    if (selected.length === 0) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={type === 'file' ? t('roles.noFileRoleSelected') : t('roles.noPromptRoleSelected')} />;
+    return <div className="flex flex-col gap-2">
       {selected.map((role, index) => {
         const resources = roleResources(role);
         const typeKey = role.type === 'file' ? role.processingType ?? '' : role.executionType ?? '';
-        return <div key={role.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 8, background: 'var(--colorBgContainer)', border: '1px solid var(--colorBorderSecondary)' }}>
-          <Tag color={color} style={{ margin: 0 }}>#{index + 1}</Tag>
-          <span style={{ fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{role.name}</span>
-          <Tag style={{ margin: 0 }}>{t(labelMap[typeKey] || 'roles.reference')}</Tag>
-          {role.type === 'prompt' && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>绑定 {resources.length} 个提示词</span>}
+        return <div key={role.id} className="flex items-center gap-2 p-2 rounded-lg bg-[var(--colorBgContainer)] border border-[var(--borderColor)]">
+          <Tag color={color} className="m-0">#{index + 1}</Tag>
+          <span className="font-semibold flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{role.name}</span>
+          <Tag className="m-0">{t(labelMap[typeKey] || 'roles.reference')}</Tag>
+          {role.type === 'prompt' && <span className="text-xs text-[var(--colorTextSecondary)]">{t('roles.bindPromptCount').replace('{count}', String(resources.length))}</span>}
         </div>;
       })}
     </div>;
@@ -205,7 +205,7 @@ export default function DocumentRolesPage() {
   const roleCardGrid = (list: DocumentRole[], tFn: (key: string) => string) => {
     if (list.length === 0) return <Empty description={t('common.noData')} />;
     return (
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))', gap: 12 }}>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
         {list.map((role) => {
           const resources = role.type === 'prompt' ? (role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : []) : [];
           const display = resources.slice(0, 3);
@@ -213,37 +213,41 @@ export default function DocumentRolesPage() {
           const icon = roleTypeIcon(role);
           const iconColor = roleTypeColor(role);
           return (
-            <Card key={role.id} size="small" hoverable style={{ minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1 }}>
-                  <span style={{ color: iconColor, fontSize: 16, flexShrink: 0, lineHeight: 1 }}>{icon}</span>
-                  <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', lineHeight: '20px' }}>{role.name}</span>
+            <div key={role.id} className="group p-5 rounded-xl border border-transparent hover:border-[var(--borderColorStrong)] bg-[var(--colorBgContainer)] hover:bg-[var(--colorBgHover)] hover:shadow-sm flex flex-col transition-all duration-300 min-w-0">
+              <div className="flex items-start justify-between gap-3 mb-4 min-w-0">
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <span style={{ color: iconColor, fontSize: 20, flexShrink: 0, lineHeight: 1 }}>{icon}</span>
+                  <span className="font-bold text-base text-[var(--colorText)] truncate mb-1">{role.name}</span>
                 </div>
-                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                  <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>我的角色</Tag>
+                <div className="flex gap-2 flex-shrink-0">
+                  <Tag color="cyan" bordered={false} className="m-0 text-[10px] leading-[18px]">我的角色</Tag>
                 </div>
               </div>
-              {role.description && <Paragraph ellipsis={{ rows: 2 }} style={{ fontSize: 12, color: 'var(--colorTextSecondary)', marginBottom: 8 }}>{role.description}</Paragraph>}
-              <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                <Tag color={role.type === 'file' ? 'blue' : 'purple'} style={{ margin: 0 }}>{roleTypeLabel(role, tFn)}</Tag>
-                {resources.length > 0 && <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>绑定 {resources.length} 个提示词</span>}
-              </div>
-              {display.length > 0 && (
-                <div style={{ marginBottom: 10 }}>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                    {display.map(r => <Tag key={r} color="purple" title={r} style={{ margin: 0, fontSize: 10, lineHeight: '16px', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis' }}>{promptDisplayName(r)}</Tag>)}
-                    {remaining > 0 && <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>+{remaining}</Tag>}
+              
+              {role.description && <Paragraph ellipsis={{ rows: 2 }} className="text-xs text-[var(--colorTextSecondary)] mb-4">{role.description}</Paragraph>}
+              
+              <div className="flex flex-col gap-3 mt-auto pt-4 border-t border-[var(--borderColor)]">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Tag color={role.type === 'file' ? 'blue' : 'purple'} bordered={false} className="m-0">{roleTypeLabel(role, tFn)}</Tag>
+                  {resources.length > 0 && <span className="text-xs text-[var(--colorTextSecondary)]">绑定 {resources.length} 个提示词</span>}
+                </div>
+                
+                {display.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {display.map(r => <Tag key={r} color="purple" bordered={false} title={r} className="m-0 text-[10px] leading-[18px] max-w-[140px] truncate">{promptDisplayName(r)}</Tag>)}
+                    {remaining > 0 && <Tag bordered={false} className="m-0 text-[10px] leading-[18px]">+{remaining}</Tag>}
                   </div>
+                )}
+                
+                <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity mt-2">
+                  <Button type="text" size="small" icon={<EditOutlined className="text-[var(--colorTextSecondary)]" />} onClick={() => openRoleDrawer(role)} />
+                  {!role.builtIn && <Button type="text" size="small" icon={<ExportOutlined className="text-[var(--colorTextSecondary)]" />} onClick={() => exportRole(role)} />}
+                  <Popconfirm title={t('common.confirm')} onConfirm={() => { void removeRole(role); }}>
+                    <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+                  </Popconfirm>
                 </div>
-              )}
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, paddingTop: 4, borderTop: '1px solid var(--colorBorderSecondary)' }}>
-                <Button size="small" icon={<EditOutlined />} onClick={() => openRoleDrawer(role)}>编辑</Button>
-                {!role.builtIn && <Button size="small" icon={<ExportOutlined />} onClick={() => exportRole(role)}>导出</Button>}
-                <Popconfirm title={t('common.confirm')} onConfirm={() => { void removeRole(role); }}>
-                  <Button size="small" danger icon={<DeleteOutlined />} />
-                </Popconfirm>
               </div>
-            </Card>
+            </div>
           );
         })}
       </div>
@@ -275,69 +279,79 @@ export default function DocumentRolesPage() {
       description={guideExpanded ? t('roles.plainGuideDesc') : undefined}
     />
 
-    <Card size="small"
-      tabList={[
-        { key: 'file', label: `文件角色 (${fileRoles.length})` },
-        { key: 'prompt', label: `提示词角色 (${promptRoles.length})` },
-        { key: 'configs', label: `项目角色配置 (${visibleConfigs.length})` },
-      ]}
-      activeTabKey={activeTab} onTabChange={setActiveTab}
-    >
-      {activeTab === 'configs' ? (
-        visibleConfigs.length === 0 ? <Empty description={t('common.noData')} /> : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
+    <div className="bg-[var(--colorBg)] rounded-xl border border-[var(--borderColor)] mt-4">
+      <Tabs
+        className="px-6 pt-2 custom-tabs"
+        items={[
+          { key: 'file', label: `文件角色 (${fileRoles.length})` },
+          { key: 'prompt', label: `提示词角色 (${promptRoles.length})` },
+          { key: 'configs', label: `项目角色配置 (${visibleConfigs.length})` },
+        ]}
+        activeKey={activeTab} onChange={setActiveTab}
+      />
+      <div className="p-6 pt-2">
+        {activeTab === 'configs' ? (
+          visibleConfigs.length === 0 ? <Empty description={t('common.noData')} /> : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {visibleConfigs.map((config) => {
               const fileItems = config.fileRoles.map(fr => ({ ...fr, role: getRoleById(fr.roleId) })).filter(x => x.role);
               const promptItems = config.promptRoles.map(pr => ({ ...pr, role: getRoleById(pr.roleId) })).filter(x => x.role);
               return (
-                <Card key={config.id} size="small" hoverable style={{ minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
-                    <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{config.name}</span>
-                    <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>我的配置</Tag>
-                    <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                      <Button size="small" icon={<EditOutlined />} onClick={() => openConfigDrawer(config)}>编辑</Button>
-                      {!config.builtIn && <Button size="small" icon={<ExportOutlined />} onClick={() => exportConfig(config)}>导出</Button>}
-                      <Popconfirm title={t('common.confirm')} onConfirm={() => { void removeConfig(config.id); }}>
-                        <Button size="small" danger icon={<DeleteOutlined />} />
-                      </Popconfirm>
+                <div key={config.id} className="group p-5 rounded-xl border border-transparent hover:border-[var(--borderColorStrong)] bg-[var(--colorBgContainer)] hover:bg-[var(--colorBgHover)] hover:shadow-sm flex flex-col transition-all duration-300 min-w-0">
+                  <div className="flex items-start justify-between gap-3 mb-4 min-w-0">
+                    <span className="font-bold text-base text-[var(--colorText)] truncate flex-1">{config.name}</span>
+                    <div className="flex gap-2 flex-shrink-0">
+                      <Tag color="cyan" bordered={false} className="m-0 text-[10px] leading-[18px]">我的配置</Tag>
                     </div>
                   </div>
-                  {config.description && <Paragraph ellipsis={{ rows: 2 }} style={{ fontSize: 12, color: 'var(--colorTextSecondary)', marginBottom: 8 }}>{config.description}</Paragraph>}
-                  <div style={{ fontSize: 12, color: 'var(--colorTextSecondary)' }}>
-                    <div style={{ marginBottom: 4 }}>
-                      <span>文件角色 ({config.fileRoles.length}): </span>
+                  
+                  {config.description && <Paragraph ellipsis={{ rows: 2 }} className="text-xs text-[var(--colorTextSecondary)] mb-4">{config.description}</Paragraph>}
+                  
+                  <div className="flex flex-col gap-3 mt-auto pt-4 border-t border-[var(--borderColor)]">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs text-[var(--colorTextSecondary)]">文件角色 ({config.fileRoles.length})</span>
                       {fileItems.length > 0 ? (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
-                          {fileItems.slice(0, 4).map(fr => <Tag key={fr.roleId} color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{fr.role!.name}</Tag>)}
-                          {fileItems.length > 4 && <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>+{fileItems.length - 4}</Tag>}
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {fileItems.slice(0, 4).map(fr => <Tag key={fr.roleId} color="blue" bordered={false} className="m-0 text-[10px] leading-[18px]">{fr.role!.name}</Tag>)}
+                          {fileItems.length > 4 && <Tag bordered={false} className="m-0 text-[10px] leading-[18px]">+{fileItems.length - 4}</Tag>}
                         </div>
-                      ) : <span style={{ color: 'var(--colorTextQuaternary)' }}>无</span>}
+                      ) : <span className="text-xs text-[var(--colorTextTertiary)]">无</span>}
                     </div>
-                    <div>
-                      <span>提示词角色 ({config.promptRoles.length}): </span>
+                    
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs text-[var(--colorTextSecondary)]">提示词角色 ({config.promptRoles.length})</span>
                       {promptItems.length > 0 ? (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
-                          {promptItems.slice(0, 4).map(pr => <Tag key={pr.roleId} color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>{pr.role!.name}</Tag>)}
-                          {promptItems.length > 4 && <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>+{promptItems.length - 4}</Tag>}
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {promptItems.slice(0, 4).map(pr => <Tag key={pr.roleId} color="purple" bordered={false} className="m-0 text-[10px] leading-[18px]">{pr.role!.name}</Tag>)}
+                          {promptItems.length > 4 && <Tag bordered={false} className="m-0 text-[10px] leading-[18px]">+{promptItems.length - 4}</Tag>}
                         </div>
-                      ) : <span style={{ color: 'var(--colorTextQuaternary)' }}>无</span>}
+                      ) : <span className="text-xs text-[var(--colorTextTertiary)]">无</span>}
                     </div>
                   </div>
-                </Card>
+                  
+                  <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity mt-4">
+                    <Button type="text" size="small" icon={<EditOutlined className="text-[var(--colorTextSecondary)]" />} onClick={() => openConfigDrawer(config)} />
+                    {!config.builtIn && <Button type="text" size="small" icon={<ExportOutlined className="text-[var(--colorTextSecondary)]" />} onClick={() => exportConfig(config)} />}
+                    <Popconfirm title={t('common.confirm')} onConfirm={() => { void removeConfig(config.id); }}>
+                      <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+                    </Popconfirm>
+                  </div>
+                </div>
               );
             })}
           </div>
         )
       ) : (activeTab === 'file' ? roleCardGrid(fileRoles, t) : roleCardGrid(promptRoles, t))}
-    </Card>
+      </div>
+    </div>
 
     {/* 角色编辑器抽屉 */}
     <Drawer
       title={t('roles.roleEditor')}
       open={roleDrawerOpen} onClose={() => setRoleDrawerOpen(false)}
-      width={800} maskClosable={false}
-      style={{ borderRadius: '12px 0 0 12px' }}
-      styles={{ body: { padding: '16px 24px' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
+      width={800}
+      maskClosable={false}
+      styles={{ body: { padding: '24px 32px' }, header: { padding: '16px 32px', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
       extra={<Button type="primary" onClick={() => { void saveRole(); }}>{t('common.save')}</Button>}
     >
       <Form form={roleForm} layout="vertical">
@@ -385,9 +399,9 @@ export default function DocumentRolesPage() {
     <Drawer
       title={t('roles.configEditor')}
       open={configDrawerOpen} onClose={() => setConfigDrawerOpen(false)}
-      width={800} maskClosable={false}
-      style={{ borderRadius: '12px 0 0 12px' }}
-      styles={{ body: { padding: '16px 24px' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
+      width={800}
+      maskClosable={false}
+      styles={{ body: { padding: '24px 32px' }, header: { padding: '16px 32px', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
       extra={<Button type="primary" onClick={() => { void saveConfig(); }}>{t('common.save')}</Button>}
     >
       <Form form={configForm} layout="vertical">
@@ -403,9 +417,9 @@ export default function DocumentRolesPage() {
           {
             key: 'file', label: `文件角色 (${selectedFileRoles.length}/${allFileRoles.length})`,
             children: <Form.List name="fileRoles">{(fields, { add, remove }) => (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <Card size="small" title="已选文件角色" style={{ background: 'var(--colorFillQuaternary)' }}>{selectedRoleSummary(selectedFileRoles, 'file')}</Card>
-                {fields.length === 0 && <Empty description="暂未添加文件角色" />}
+          <div className="flex flex-col gap-6 pt-4">
+            <Card size="small" title="已选文件角色" className="bg-[var(--colorBgHover)] border-[var(--borderColorStrong)]" styles={{ header: { borderBottom: '1px solid var(--borderColorStrong)' } }}>{selectedRoleSummary(selectedFileRoles, 'file')}</Card>
+            {fields.length === 0 && <Empty description="暂未添加文件角色" />}
                 {fields.map((field, index) => (
                   <Card key={field.key} size="small" style={{ border: '1px solid var(--colorBorderSecondary)', position: 'relative' }}>
                     <div style={{ position: 'absolute', top: -10, left: 12, background: '#1677ff', color: '#fff', fontSize: 11, fontWeight: 700, padding: '1px 8px', borderRadius: 10 }}>#{index + 1}</div>
@@ -432,9 +446,9 @@ export default function DocumentRolesPage() {
           {
             key: 'prompt', label: `提示词角色 (${selectedPromptRoles.length}/${allPromptRoles.length})`,
             children: <Form.List name="promptRoles">{(fields, { add, remove }) => (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <Card size="small" title="已选提示词角色" style={{ background: 'var(--colorFillQuaternary)' }}>{selectedRoleSummary(selectedPromptRoles, 'prompt')}</Card>
-                {fields.length === 0 && <Empty description="暂未添加提示词角色" />}
+          <div className="flex flex-col gap-6 pt-4">
+            <Card size="small" title="已选提示词角色" className="bg-[var(--colorBgHover)] border-[var(--borderColorStrong)]" styles={{ header: { borderBottom: '1px solid var(--borderColorStrong)' } }}>{selectedRoleSummary(selectedPromptRoles, 'prompt')}</Card>
+            {fields.length === 0 && <Empty description="暂未添加提示词角色" />}
                 {fields.map((field, index) => (
                   <Card key={field.key} size="small" style={{ border: '1px solid var(--colorBorderSecondary)', position: 'relative' }}>
                     <div style={{ position: 'absolute', top: -10, left: 12, background: '#722ed1', color: '#fff', fontSize: 11, fontWeight: 700, padding: '1px 8px', borderRadius: 10 }}>#{index + 1}</div>

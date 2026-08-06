@@ -115,16 +115,6 @@ export function extractGeneratedSections(markdown: string) {
   return [...new Set(sections)];
 }
 
-function standaloneBoldTitle(line: string) {
-  const match = /^\*\*([^*]+?)\*\*\s*[:：]?\s*$/u.exec(line.trim());
-  if (!match) return '';
-  const title = displayChapterTitle(match[1] || '');
-  if (title.length < 2 || title.length > 40) return '';
-  if (/[。；;.!！?？]$/u.test(title)) return '';
-  if (/^(注|说明|备注|提示|要求)[:：]/u.test(title)) return '';
-  return title;
-}
-
 export function normalizeTertiaryHeadings(markdown: string) {
   const lines = markdown.split(/\r?\n/u);
   let currentSectionNumber = '';
@@ -320,9 +310,9 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
       const sourceSection = tertiary[1] && tertiary[2] ? `${tertiary[1]}.${tertiary[2]}` : activeSourceSection;
       const title = displayChapterTitle(tertiary[4] || '');
       const titleKey = normalizePlannedSectionTitle(title);
-      const isPlannedUnemittedSection = plannedSectionIndex(title) >= 0 && !emittedSectionKeys.has(titleKey);
+      const isPlannedPendingSection = plannedSectionIndex(title) >= 0 && !emittedSectionKeys.has(titleKey);
       if (!sectionIndex) return normalizeSectionHeading(title, sourceSection);
-      if (sourceSection && sourceSection !== activeSourceSection && ((chapters[chapterIndex]?.sections || []).length === 0 || isPlannedUnemittedSection)) return normalizeSectionHeading(title, sourceSection);
+      if (sourceSection && sourceSection !== activeSourceSection && ((chapters[chapterIndex]?.sections || []).length === 0 || isPlannedPendingSection)) return normalizeSectionHeading(title, sourceSection);
       tertiaryIndex += 1;
       return tertiaryIndex <= 4 ? `#### ${chapterIndex + 1}.${sectionIndex}.${tertiaryIndex} ${title}` : `**${title}**`;
     }
@@ -370,8 +360,26 @@ function ensureRequiredTables(markdown: string, rules?: PromptDocumentRuleSet) {
   return next;
 }
 
+function applyForbiddenTermReplacements(markdown: string, rules?: PromptDocumentRuleSet) {
+  let next = markdown
+    .replace(/知识库|提示词|绑定片段|后台|资料库|OCR|联网增强|联网检索|网页资料|搜索结果|根据网页|互联网资料|在线资料|浏览器|搜索引擎/giu, '项目资料')
+    .replace(/建议补充/gu, '需完善')
+    .replace(/\b兜底\b|兜底生成|兜底片段/gu, '补充完善')
+    .replace(/施工方(?!法|案|式|针|向)/gu, '我公司')
+    .replace(/投标人/gu, '我公司')
+    .replace(/高度重视/gu, '严格落实')
+    .replace(/重中之重/gu, '关键控制事项');
+  for (const term of rules?.forbiddenTerms || []) {
+    if (!term) continue;
+    if (/^(?:工程造价|造价|报价|投标报价|报价明细|综合单价|单价|合价|金额|税率|增值税|利润|预留金|暂列金额|报价明细表|最高投标限价|招标控制价)$/u.test(term)) {
+      next = next.split(/\r?\n/u).filter(line => !new RegExp(escapedRegExp(term), 'u').test(line)).join('\n');
+    }
+  }
+  return next;
+}
+
 export function applyPromptDocumentRules(markdown: string, rules?: PromptDocumentRuleSet) {
-  if (!rules) return markdown;
+  if (!rules) return applyForbiddenTermReplacements(markdown);
   let next = ensureRequiredTables(markdown, rules);
   if (rules.forbidCover) {
     next = next.replace(/<div class="document-cover">[\s\S]*?<\/div>\s*(?:<div class="page-break"><\/div>\s*)?/giu, '');
@@ -388,12 +396,7 @@ export function applyPromptDocumentRules(markdown: string, rules?: PromptDocumen
     }
     next = next.replace(new RegExp(escapedRegExp(term.from), 'gu'), term.to);
   }
-  next = next
-    .replace(/\b兜底\b|兜底生成|兜底片段/gu, '补充完善')
-    .replace(/知识库|提示词|绑定片段|后台/gu, '项目资料')
-    .replace(/建议补充/gu, '需完善')
-    .replace(/资料库/gu, '项目资料')
-    .replace(/OCR/giu, '资料识别');
+  next = applyForbiddenTermReplacements(next, rules);
   return next.replace(/\n{3,}/gu, '\n\n').trim();
 }
 
@@ -468,6 +471,20 @@ export function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumen
   if (missingTables.length > 0) issues.push({ level: 'error', message: `正文缺少总控提示词要求的表格：${missingTables.join('、')}`, suggestion: '请在对应章节补齐表名、表头和数据口径，不得编造资料外工程实体参数。' });
   const hitTerms = (rules.forbiddenTerms || []).filter(term => term && new RegExp(escapedRegExp(term), 'u').test(markdown));
   if (hitTerms.length > 0) issues.push({ level: 'warning', message: `正文残留总控提示词禁止词：${hitTerms.join('、')}`, suggestion: '请改为正式交付语言，删除后台话术、第三人称和口号式表达。' });
+  const runtimeRules = rules as PromptDocumentRuleSet & { exactHeadings?: string[]; forbidExtraHeadings?: boolean; requiredSubjects?: string[]; forbiddenSubjects?: string[]; minChars?: number };
+  const exactHeadings = runtimeRules.exactHeadings || [];
+  if (exactHeadings.length > 0) {
+    const actualHeadings = [...markdown.matchAll(/^##\s+(.+)$/gmu)].map(match => displayChapterTitle(match[1] || ''));
+    const normalizedExactHeadings = exactHeadings.map(displayChapterTitle);
+    const missingHeadings = exactHeadings.filter(title => !actualHeadings.includes(displayChapterTitle(title)));
+    const extraHeadings = runtimeRules.forbidExtraHeadings ? actualHeadings.filter(title => !normalizedExactHeadings.includes(displayChapterTitle(title))) : [];
+    if (missingHeadings.length > 0) issues.push({ level: 'error', message: `正文缺少提示词指定一级章节：${missingHeadings.join('、')}`, suggestion: '请严格按用户提示词 OUTLINE 输出一级章节。' });
+    if (extraHeadings.length > 0) issues.push({ level: 'error', message: `正文出现提示词未允许的一级章节：${extraHeadings.join('、')}`, suggestion: '请删除或并入指定一级章节，不得新增一级章节。' });
+  }
+  const subjectHits = (runtimeRules.forbiddenSubjects || []).filter(term => term && new RegExp(escapedRegExp(term), 'u').test(markdown));
+  if (subjectHits.length > 0) issues.push({ level: 'warning', message: `正文残留禁用主体表达：${subjectHits.join('、')}`, suggestion: '请统一改为用户提示词指定的表达主体。' });
+  const plainLength = markdown.replace(/\s/gu, '').length;
+  if (runtimeRules.minChars && plainLength < runtimeRules.minChars) issues.push({ level: 'warning', message: `正文长度低于提示词要求：当前 ${plainLength} 字，要求不少于 ${runtimeRules.minChars} 字`, suggestion: '请按章节深度扩写，但不得编造资料外事实。' });
   return issues;
 }
 

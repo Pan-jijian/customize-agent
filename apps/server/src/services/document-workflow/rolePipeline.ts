@@ -1,13 +1,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
-import { computeProjectId } from '@customize-agent/knowledge';
-import type { getMultiProjectManager } from '../knowledge/kbService';
 import { BLOCKING_CHAPTER_ISSUE_RE, PROMPT_EXECUTION_SCORE_RULES, QUALITY_REPAIR_INSTRUCTIONS, QUALITY_REPAIR_TYPE_RULES, REPAIRABLE_QUALITY_ISSUE_RE, ROLE_OUTPUT_TYPE_RULES } from '../constants';
 import { listDocumentRoles } from '../document-core/documentRoleService';
-import type { KbSearchResult } from '@/lib/api';
 import type { QualityRepairType, RoleEvidencePool, RoleExecutionNode, RoleExtractionChapterInput, RoleExtractionFactInput, RoleExtractionLlmResult, RoleExtractionRequirementInput, RoleNodeArtifact, RoleNodeFact, TenderPlanChapter } from '../types';
-import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplate, DocumentTemplateChapter, FileBinding, PromptBinding } from './types';
+import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplate, DocumentTemplateChapter, FileBinding, PromptBinding } from './types';
 
 export type { QualityRepairType, RoleEvidencePool, RoleExecutionNode, RoleExtractionChapterInput, RoleExtractionFactInput, RoleExtractionLlmResult, RoleExtractionRequirementInput, RoleNodeArtifact, RoleNodeFact, TenderPlanChapter } from '../types';
 import { readPromptContents, type ResolvedPromptContent, violatesConfiguredChapterTitleFilter } from './templateStore';
@@ -17,7 +13,7 @@ import { CAD_ENTITY_TOKEN_RE, CN_NUMERAL_RE, FILE_NAME_RE } from './constants';
 import { FORMAL_WRITING_RULES, WORKFLOW_PHRASE_RE, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentTextLength } from './budget';
 import { classifyQualitySeverity, degenerateContentIssues } from './qualityValidation';
-import { callDocumentLlm, callDocumentLlmJson, getAdaptiveDocumentLlmLimit } from './llmClient';
+import { callDocumentLlmJson, getAdaptiveDocumentLlmLimit } from './llmClient';
 import { asObjectArray, asStringArray, safePlanId, stableHash, stringifyFactValue, throwIfAborted } from './utils';
 
 
