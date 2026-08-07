@@ -7,6 +7,7 @@ import { generateDocumentDraft } from '../document-workflow';
 import { collectSectionContentGaps } from '../document-workflow/qualityValidation';
 import { computeProjectId } from '@customize-agent/knowledge';
 import { getProjectRoot } from '../knowledge/kbService';
+import { upsertKbOperation } from '../knowledge/kbOperationLog';
 
 export type GeneratedDocumentStatus = 'generating' | 'completed' | 'warning' | 'failed' | 'aborted';
 
@@ -129,13 +130,13 @@ function getActiveTaskByDocumentId(documentId: string) {
   return null;
 }
 
-function markStaleGeneratingRecord(record: GeneratedDocumentRecord, _projectRoot = getProjectRoot()) {
+function markStaleGeneratingRecord(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
   if (record.status !== 'generating' || getActiveTaskByDocumentId(record.id)) return record;
   const staleAfterMs = Math.max(DOCUMENT_TASK_TIMEOUT_MS, DOCUMENT_TASK_NO_PROGRESS_MS * 2);
   if (Date.now() - record.updatedAt < staleAfterMs) return record;
   const message = '生成任务已中断，请点击继续生成或重新生成';
   const status: GeneratedDocumentStatus = record.checkpointChapters?.length ? 'warning' : 'failed';
-  return {
+  const next = {
     ...record,
     title: fallbackFailedTitle(record),
     status,
@@ -144,6 +145,18 @@ function markStaleGeneratingRecord(record: GeneratedDocumentRecord, _projectRoot
     completedAt: Date.now(),
     warningIssues: record.checkpointChapters?.length ? [...(record.warningIssues || []), message] : record.warningIssues,
   };
+  if (record.taskId) {
+    upsertDocumentOperation(projectRoot, {
+      taskId: record.taskId,
+      title: `生成 ${next.title}`,
+      status: status === 'warning' ? 'warning' : 'error',
+      percent: 100,
+      message,
+      stages: next.executionStages,
+      error: message,
+    });
+  }
+  return next;
 }
 
 export function listGeneratedDocuments(projectRoot = getProjectRoot()) {
@@ -191,7 +204,13 @@ export function abortGeneratedDocument(id: string, projectRoot = getProjectRoot(
       tasks.delete(key);
     }
   }
-  return saveGeneratedDocument({ ...current, status: 'aborted', error: '用户中止', executionStages: failRunningStages(current.executionStages, '用户中止'), completedAt: Date.now() }, projectRoot);
+  const message = '用户中止';
+  const executionStages = failRunningStages(current.executionStages, message);
+  const record = saveGeneratedDocument({ ...current, status: 'aborted', error: message, executionStages, completedAt: Date.now() }, projectRoot);
+  if (record.taskId) {
+    upsertDocumentOperation(projectRoot, { taskId: record.taskId, title: `生成 ${record.title}`, status: 'warning', percent: 100, message, stages: executionStages, error: message });
+  }
+  return record;
 }
 
 export function deleteGeneratedDocument(id: string, projectRoot = getProjectRoot()) {
@@ -235,7 +254,6 @@ function generatedDocumentAssetPath(record: Pick<GeneratedDocumentRecord, 'id' |
 }
 
 export function upsertGeneratedDocumentAsset(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
-  const now = Date.now();
   const relativePath = generatedDocumentAssetPath(record);
   const absolutePath = path.join(generatedRoot(projectRoot), relativePath.replace(/^generatedDocuments\//u, ''));
   fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
@@ -324,6 +342,36 @@ function activeTaskResponse(task: GenerateTask, projectRoot: string) {
   return { taskId: task.id, documentId: task.documentId, record };
 }
 
+function documentOperationDetails(stages: GeneratedDocumentRecord['executionStages'] | undefined) {
+  const important = (stages || []).filter(stage =>
+    stage.type === 'role_binding' ||
+    stage.roleId === 'runtime-prompt-rules' ||
+    stage.roleId === 'document-readiness' ||
+    stage.roleId === 'default-path-quality-repair' ||
+    stage.type === 'export_ready' ||
+    stage.status === 'failed' ||
+    stage.status === 'fallback',
+  );
+  return important.flatMap(stage => [
+    `${stage.subtitle || stage.roleName || stage.roleId}：${stage.message || stage.status}`,
+    ...(stage.details || []).slice(0, 8).map(detail => `  - ${detail}`),
+  ]).slice(0, 80);
+}
+
+function upsertDocumentOperation(projectRoot: string, input: { taskId: string; title: string; status: 'processing' | 'success' | 'warning' | 'error'; percent: number; message: string; stages?: GeneratedDocumentRecord['executionStages']; error?: string }) {
+  upsertKbOperation(projectRoot, {
+    id: input.taskId,
+    type: 'document',
+    title: input.title,
+    stage: input.status === 'processing' ? 'generating' : input.status === 'error' ? 'error' : 'done',
+    status: input.status,
+    percent: input.percent,
+    message: input.message,
+    error: input.error,
+    details: documentOperationDetails(input.stages),
+  });
+}
+
 /** 启动异步文档生成任务，包含进度回调持久化、结果入库、资源管理，返回任务 ID 和文档 ID */
 export function startGenerateDocumentTask(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; resumeDocumentId?: string }, projectRoot = getProjectRoot()) {
   const resolvedProjectRoot = path.resolve(projectRoot);
@@ -368,6 +416,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     updatedAt: now,
   };
   saveGeneratedDocument(initial, resolvedProjectRoot);
+  upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${initial.title}`, status: 'processing', percent: 1, message: '文档生成任务已进入后台队列', stages: initial.executionStages });
   const controller = new AbortController();
   const taskRef: { current?: GenerateTask } = {};
   const failAndStop = (message: string) => {
@@ -375,18 +424,21 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     if (taskRef.current) clearGenerateTaskTimers(taskRef.current);
     const current = getGeneratedDocument(documentId, resolvedProjectRoot);
     if (current?.checkpointChapters?.length) {
-      saveGeneratedDocument({
+      const failedStages = failRunningStages(current.executionStages, message);
+      const saved = saveGeneratedDocument({
         ...current,
         title: current.title && current.title !== '生成中' ? current.title : `${current.templateName || '文档'}生成未完成`,
         status: 'warning',
         error: message,
         markdown: current.markdown || current.checkpointChapters.map(chapter => `# ${chapter.title}\n\n${chapter.content}`).join('\n\n'),
-        executionStages: failRunningStages(current.executionStages, message),
+        executionStages: failedStages,
         completedAt: Date.now(),
         warningIssues: [...(current.warningIssues || []), message],
       }, resolvedProjectRoot);
+      upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${saved.title}`, status: 'warning', percent: 100, message, stages: failedStages, error: message });
     } else {
-      failGeneratingDocument(documentId, resolvedProjectRoot, message);
+      const failed = failGeneratingDocument(documentId, resolvedProjectRoot, message);
+      upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${failed?.title || '文档'}`, status: 'error', percent: 100, message, stages: failed?.executionStages, error: message });
     }
     tasks.delete(taskId);
   };
@@ -406,12 +458,14 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       const current = getGeneratedDocument(documentId, resolvedProjectRoot);
       if (current && current.status === 'generating') {
         const checkpointChapters = checkpoint?.chapters ? mergeDraftChapters(current.checkpointChapters, checkpoint.chapters).map(trimChapterEvidence) : current.checkpointChapters;
-        saveGeneratedDocument(trimEvidenceContent({
+        const saved = saveGeneratedDocument(trimEvidenceContent({
           ...current,
           executionStages: stages,
           checkpointChapters,
           partialChapters: checkpoint?.chapters ? summarizeCheckpointChapters(checkpointChapters) : current.partialChapters,
         }), resolvedProjectRoot);
+        const latestStage = [...stages].reverse().find(stage => stage.status === 'running') || stages[stages.length - 1];
+        upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${saved.templateName || saved.title}`, status: 'processing', percent: Math.max(1, Math.min(99, latestStage?.progress ? Math.round((latestStage.progress.current / Math.max(1, latestStage.progress.total)) * 90) : 30)), message: latestStage?.message || '文档生成中', stages });
         lastProgressSaveAt = nowProgress;
         lastProgressSignature = signature;
         console.log(`[gen] progress saved: ${stages.length} stages, checkpoint=${checkpointChapters?.length || 0}, doc=${documentId}`);
@@ -433,7 +487,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       templateName: result.templateName,
       title: result.title,
       markdown: result.markdown,
-      status: result.exportGate.passed ? 'completed' : 'warning',
+      status: result.exportGate.passed ? 'completed' : 'failed',
       draft: result,
       executionStages: result.executionStages,
       partialChapters: result.partialChapters,
@@ -444,7 +498,8 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       warningIssues,
     }), resolvedProjectRoot);
     upsertGeneratedDocumentAsset(record, resolvedProjectRoot);
-    const assets = upsertGeneratedAssets(result.assets || [], documentId, resolvedProjectRoot);
+    upsertGeneratedAssets(result.assets || [], documentId, resolvedProjectRoot);
+    upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${record.title}`, status: record.status === 'completed' ? 'success' : 'error', percent: 100, message: record.status === 'completed' ? '文档生成完成，已通过导出门禁' : `文档生成未通过导出门禁，存在 ${warningIssues.length || 1} 个阻断问题`, stages: result.executionStages, error: record.status === 'completed' ? undefined : warningIssues.join('；') });
     return record;
   }).catch(error => {
     const current = getGeneratedDocument(documentId, resolvedProjectRoot);
@@ -452,16 +507,18 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     const message = error instanceof Error ? error.message : String(error);
     const status: GeneratedDocumentStatus = isAbortError(error) ? 'aborted' : current.checkpointChapters?.length ? 'warning' : 'failed';
     const markdown = current.markdown || current.checkpointChapters?.map(chapter => `# ${chapter.title}\n\n${chapter.content}`).join('\n\n') || '';
+    const failedStages = failRunningStages(current.executionStages, message);
     const record = saveGeneratedDocument(trimEvidenceContent({
       ...current,
       title: status === 'failed' ? fallbackFailedTitle(current) : current.title && current.title !== '生成中' ? current.title : `${current.templateName || '文档'}生成未完成`,
       status,
       error: message,
       markdown,
-      executionStages: failRunningStages(current.executionStages, message),
+      executionStages: failedStages,
       completedAt: Date.now(),
       warningIssues: status === 'warning' ? [...(current.warningIssues || []), message] : current.warningIssues,
     }), resolvedProjectRoot);
+    upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${record.title}`, status: status === 'warning' ? 'warning' : 'error', percent: 100, message, stages: failedStages, error: message });
     return record;
   }).finally(() => {
     if (taskRef.current) clearGenerateTaskTimers(taskRef.current);

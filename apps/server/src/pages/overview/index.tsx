@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useAppTranslations } from '@/components/Layout';
-import { Row, Col, Progress, Space, Button } from 'antd';
-import { CloudServerOutlined, ApiOutlined, ThunderboltOutlined, CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined, FileTextOutlined, HddOutlined, FormOutlined, LayoutOutlined, NodeIndexOutlined, RobotOutlined } from '@ant-design/icons';
+import { Progress, Space, Button } from 'antd';
+import { ApiOutlined, ThunderboltOutlined, CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined, FileTextOutlined, RobotOutlined } from '@ant-design/icons';
 import { getSystemStats, type SystemStats, getProviders, getDocumentRoles, getDocumentTemplates, getEmbeddingConfig, type EmbeddingConfig } from '@/lib/api';
 
 /** 极简风格数据卡片组件 (Linear 风格无边框) */

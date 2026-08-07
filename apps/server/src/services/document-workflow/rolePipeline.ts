@@ -13,7 +13,7 @@ import { CAD_ENTITY_TOKEN_RE, CN_NUMERAL_RE, FILE_NAME_RE } from './constants';
 import { FORMAL_WRITING_RULES, WORKFLOW_PHRASE_RE, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentTextLength } from './budget';
 import { classifyQualitySeverity, degenerateContentIssues } from './qualityValidation';
-import { callDocumentLlmJson, getAdaptiveDocumentLlmLimit } from './llmClient';
+import { callDocumentLlmJson } from './llmClient';
 import { asObjectArray, asStringArray, safePlanId, stableHash, stringifyFactValue, throwIfAborted } from './utils';
 
 
@@ -25,22 +25,12 @@ export function selectDocumentGenerationStrategy(input: { template: DocumentTemp
   const longform = input.targetWords >= 30000 || chapterCount >= 8 || avgChapterTarget >= 4000;
   const compact = input.targetWords <= 6000 && chapterCount <= 4 && !strict;
   const mode: DocumentGenerationStrategy['mode'] = strict ? 'strict' : longform ? 'longform' : compact ? 'fast' : 'balanced';
-  const targetLlmConcurrency = Number(process.env.DOCUMENT_TARGET_LLM_CONCURRENCY ?? 0);
-  const defaultChapterConcurrency = Math.max(1, chapterCount);
-  const defaultSectionConcurrency = strict ? 1 : (longform ? 2 : 3);
-  const maxChapterConcurrency = Math.max(1, Math.min(chapterCount || 1, Math.floor(Number(process.env.DOCUMENT_CHAPTER_CONCURRENCY ?? defaultChapterConcurrency))));
-  const maxSectionConcurrency = Math.max(1, Math.min(3, Math.floor(Number(process.env.DOCUMENT_SECTION_CONCURRENCY ?? defaultSectionConcurrency))));
-  const maxChapterReviewConcurrency = Math.max(1, Math.min(2, Math.floor(Number(process.env.DOCUMENT_CHAPTER_REVIEW_CONCURRENCY ?? defaultChapterConcurrency))));
   return {
     mode,
     enableChapterReview: true,
     enableGlobalReview: true,
     enableDocumentBudgetExpansion: true,
     enableFinalQualityReview: true,
-    maxChapterConcurrency,
-    maxSectionConcurrency,
-    maxChapterReviewConcurrency,
-    targetLlmConcurrency,
   };
 }
 
@@ -48,7 +38,7 @@ export function createGenerationDiagnostics(strategy: DocumentGenerationStrategy
   return {
     strategy,
     metrics: [],
-    llm: { calls: 0, failures: 0, throttledWaits: 0, throttledWaitMs: 0, maxActive: 0, currentLimit: getAdaptiveDocumentLlmLimit(), limitAdjustments: 0 },
+    llm: { calls: 0, failures: 0, maxActive: 0 },
     evidence: { raw: 0, used: 0, filteredNoise: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0 },
     quality: { blockingCount: 0, importantCount: 0, minorCount: 0, repairedCount: 0 },
   };
@@ -350,7 +340,7 @@ export async function executeRoleExtractionNode(template: DocumentTemplate, node
     resources: [],
     byKind: { map: [], image: [], table: [], document: [], spreadsheet: [], text: [], attachment: [] },
     summary: '',
-  }, { maxChars: evidencePromptBudgetForTarget(1800, 8000, Math.max(14000, getAdaptiveDocumentLlmLimit() * 3500)) });
+  }, { maxChars: evidencePromptBudgetForTarget(1800, 8000, 14000) });
   const extractionPrompt = `你正在执行一个“文件角色 × 提示词角色”的读取节点。\n节点类型：${node.outputType}\n文件角色：${node.fileRoleName}（${node.fileRoleId}）\n要求：严格按该节点绑定的提示词读取该文件角色的内容，不要读取其他角色。提示词角色只提供规则和格式约束，其中的示例、样例、占位项目名、编号、日期、数量和示例正文不得作为事实抽取来源。\n\n请返回 JSON，字段包括 chapters、facts、outputRequirements、forbidImageInsertion、warnings。chapters 只提取当前模板和规范包需要的正式章节；requirements 只保留可合并写入正文的核心要求，避免无依据地拆成过细子节点。facts 必须只来自下面的绑定文件片段，优先抽取对象、范围、区域、阶段、数量、日期、周期、规格、单位、资源数量、检查频次和来源口径；同类对象不得合并丢失，计量单位保持原文含义，必要时使用导出友好的正式写法。\n\n绑定文件片段：\n${sample}`;
   const warnings: string[] = [];
   throwIfAborted(signal);
@@ -625,6 +615,9 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     FORMAL_WRITING_RULES,
     input.forbidDrawingImages ? '图片类资料只作为文本事实来源，禁止插入图片或 Markdown 图片语法。' : '',
     '每个 patch 必须能通过 originalText 或 targetStart/targetEnd 在原章节中唯一定位；replacement 只替换该局部片段。',
+    '只修复列出的问题，不得整章重写，不得删除无问题小节，不得改变一级/二级章节结构。',
+    '如问题涉及缺少正式表格，replacement 必须包含 Markdown 表名、表头、分隔线和至少一行数据；不得只写“见下表”或空表。',
+    '如问题涉及提示词要求的关键词或禁用内容，只在相关段落自然补齐或替换，不得堆砌关键词。',
     '禁止新增证据摘要中没有的信息；无法安全定位的问题不要生成 patch。',
     '返回 JSON：{"patches":[{"originalText":"原局部文本","targetStart":"定位起始文本","targetEnd":"定位结束文本","replacement":"替换后的局部文本","reason":"修复原因"}]}',
     input.promptTexts,
@@ -662,9 +655,7 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
       stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'success' as const, message: `已完成质量检查，未定位到可安全局部修复的阻断问题：共 ${repairableIssues.length} 个；${repairableIssues.slice(0, 8).join('；')}` },
     };
   }
-  const configuredRepairConcurrency = Number(process.env.DOCUMENT_REPAIR_CONCURRENCY ?? input.strategy?.maxChapterReviewConcurrency ?? candidates.length);
-  const maxRepairConcurrency = (input.strategy?.maxChapterReviewConcurrency ?? candidates.length) || 1;
-  const concurrency = Math.max(1, Math.min(maxRepairConcurrency, Number.isFinite(configuredRepairConcurrency) ? Math.floor(configuredRepairConcurrency) : candidates.length || 1));
+  const concurrency = Math.max(1, candidates.length || 1);
   const repairedById = new Map<string, string>();
   let patchCount = 0;
   for (let offset = 0; offset < candidates.length; offset += concurrency) {
@@ -724,8 +715,13 @@ export function buildBoundEvidenceScope(projectRoot: string, bindings: FileBindi
   return new Set(bindings.flatMap(binding => fileScopeKeys(projectRoot, binding.filePath)));
 }
 
+function preservePromptCodeBlock(block: string) {
+  return /<OUTLINE>|\|\s*[^\n]+\s*\||#{1,6}\s+|必须|禁止|不得|应当|要求|规则|格式|输出|表格|章节|小节|正文/u.test(block);
+}
+
 export function sanitizePromptForExecution(content: string) {
-  const lines = content.replace(/```[\s\S]*?```/gu, '\n【示例代码块已省略：仅作为格式参考，不作为当前文档事实】\n').split(/\r?\n/u);
+  const normalized = content.replace(/```([\s\S]*?)```/gu, (_match, block: string) => preservePromptCodeBlock(block) ? `\n${block.trim()}\n` : '\n【示例代码块已省略：仅作为格式参考，不作为当前文档事实】\n');
+  const lines = normalized.split(/\r?\n/u);
   const result: string[] = [];
   let skippingExample = false;
   let inOutline = false;
@@ -738,7 +734,7 @@ export function sanitizePromptForExecution(content: string) {
       continue;
     }
     const startsExample = /^(?:#+\s*)?(?:示例|样例|范例|例如|参考示例|示例数据|示例正文|示例目录|example|sample)\s*[:：]?/iu.test(trimmed);
-    const startsRule = /(?:不得|禁止|必须|应当|要求|规则|格式|输出|保留|只返回|不要)/u.test(trimmed);
+    const startsRule = /(?:不得|禁止|必须|应当|要求|规则|格式|输出|保留|只返回|不要|表格|章节|小节|正文|目录|封面)/u.test(trimmed);
     if (startsExample && !startsRule) {
       if (!result.at(-1)?.includes('示例内容已省略')) result.push('【示例内容已省略：仅作为格式参考，不作为当前文档事实】');
       skippingExample = true;
@@ -749,7 +745,7 @@ export function sanitizePromptForExecution(content: string) {
         skippingExample = false;
         continue;
       }
-      if (/^(?:#+\s*)?(?:规则|要求|输出|格式|禁止|注意|正文|章节|风格|校验)/u.test(trimmed)) skippingExample = false;
+      if (/^(?:#+\s*)?(?:规则|要求|输出|格式|禁止|注意|正文|章节|小节|表格|风格|校验)/u.test(trimmed) || /\|\s*[^\n]+\s*\|/u.test(trimmed)) skippingExample = false;
       else continue;
     }
     result.push(line);

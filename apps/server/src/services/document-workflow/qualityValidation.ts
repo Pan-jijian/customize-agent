@@ -3,9 +3,12 @@ import { readEngineeringDocumentConfig } from '../document-validation/engineerin
 import { CHAPTER_HEADING_RE, EXPORT_BLOCKING_ISSUE_RE, EXPORT_GATE_PRECISION_ISSUE_RE, EXPORT_GATE_PROJECT_CONTAMINATION_RE, FALLBACK_GATE_EVALUATORS, FORMAL_PLACEHOLDER_PATTERNS, FORMAL_STYLE_FORBIDDEN_PHRASES, LINE_SPLIT_RE, MARKDOWN_IMAGE_RE, MARKDOWN_SECTION_HEADING_RE, MARKDOWN_TABLE_BLOCK_SPLIT_RE, MARKDOWN_TABLE_DIVIDER_RE, MARKDOWN_TABLE_ROW_RE, MARKDOWN_TOP_HEADING_RE, NON_BLANK_RE, PRECISE_FACT_MIN_TOKEN_COUNT, PRECISE_FACT_MIN_USAGE_RATE, PRECISE_FACT_SOURCE_RE, PRECISE_FACT_TOKEN_RE, DOCUMENT_BASIC_INFO_BLOCK_RE, DOCUMENT_BASIC_INFO_FIELDS, DOCUMENT_BASIC_INFO_TABLE_RE, PROMPT_EXAMPLE_BLOCK_RE, QUALITY_SEVERITY_RULES, SPEC_GATE_RULE_HANDLERS, SPECIFICATION_CONTENT_RE, STRUCTURED_DATA_CONTENT_RE, TOC_BLOCK_RE, TOC_INDENTED_SECTION_LINE_RE, TOC_SECTION_LINE_RE, WHITESPACE_RE } from '../constants';
 import type { QualitySeverity, QualitySeveritySummary, SpecGateRuleContext } from '../types';
 import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentTemplate, ExportGateResult, FileBinding, PromptBinding, ValidationIssue } from './types';
-import { estimateDocumentPages } from './budget';
+import { documentTextLength, estimateDocumentPages } from './budget';
+import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch } from './engineeringUnits';
+import { displayChapterTitle } from './outline';
 import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
+import { stringifyFactValue } from './utils';
 
 export function isExportBlockingIssue(issue: ValidationIssue) {
   return EXPORT_BLOCKING_ISSUE_RE.test(issue.message);
@@ -65,9 +68,13 @@ export function degenerateContentIssues(markdown: string, chapters: DocumentDraf
 }
 
 function isHardExportBlockingIssue(issue: ValidationIssue) {
+  if (/提示词要求|疑似提示词指令标题|适用性自相矛盾|正式表格不足|目录与正文|不得出现/u.test(issue.message)) return true;
+  if (/配置要求缺少必要内容/u.test(issue.message)) return issue.level === 'error';
+  if (/正文缺少规划小节|缺少规划小节|小节内容补写未完成|空小节|小节只有标题|只有标题或表格无正文|生成未完成|生成后事实反查失败/u.test(issue.message)) return true;
+  if (/规划小节正文过短|小节生成未达标/u.test(issue.message)) return /项目概况|招标范围|工期|质量|安全|危大|验收|资源配置/u.test(issue.message);
+  if (/跨章一致性|专业评分不足|专业缺口|泛化套话|缺少关键线路|缺少材料验收|缺少风险识别|缺少进场/u.test(issue.message)) return issue.level === 'error' && !/证据使用覆盖率偏低|章节逻辑依赖不足|文档交付评分报告/u.test(issue.message);
   if (!isExportBlockingIssue(issue)) return false;
-  if (/章节审查|最终质量审查|规划小节正文过短|正文篇幅明显低于目标|正文缺少规划小节|缺少规划小节|小节内容补写未完成|正文存在空泛占位表达|结构化事实读取不足|正文可能未显式覆盖|仅包含文件类型和占位符|不在本次招标范围内/u.test(issue.message)) return false;
-  if (/空小节|小节只有标题|只有标题或表格无正文/u.test(issue.message) && !/全文|整篇|生成未完成|章节生成失败/u.test(issue.message)) return false;
+  if (/章节审查|最终质量审查|正文篇幅明显低于目标|正文存在空泛占位表达|结构化事实读取不足|正文可能未显式覆盖|仅包含文件类型和占位符|不在本次招标范围内/u.test(issue.message)) return false;
   return true;
 }
 
@@ -147,7 +154,7 @@ export function formalStyleIssues(markdown: string): ValidationIssue[] {
     if (markdown.includes(item)) hit.push(item);
   }
   if (hit.length > 0) issues.push({ level: 'warning', message: `存在模板化前缀或套话：${hit.join('、')}`, suggestion: '请删除“本节/本章将/以下从”等前缀，标题后直接进入对象、动作、措施、检查和闭环。' });
-  const backstage = markdown.match(/OCR|知识库|提示词|绑定片段|兜底|后台|文件路径|PDF|DWG|Excel|识别错误/giu);
+  const backstage = markdown.match(/OCR|知识库|提示词|绑定片段|兜底|后台|文件路径|识别错误/giu);
   if (backstage?.length) issues.push({ level: 'error', message: `正文包含后台或资料处理话术：${[...new Set(backstage)].join('、')}`, suggestion: '请改为正式文档语言，例如“资料文字不清”“资料口径不一致”“项目资料”，不得暴露后台处理过程。' });
   return issues;
 }
@@ -158,6 +165,14 @@ export function minChapterSectionIssues(chapters: Array<Pick<DocumentDraftChapte
     const sections = (chapter.sections || []).filter(Boolean);
     const duplicates = sections.filter((section, index) => sections.indexOf(section) !== index);
     if (duplicates.length > 0) issues.push({ level: 'warning', message: `${chapter.title} 存在重复小节：${[...new Set(duplicates)].join('、')}`, suggestion: '请保留用户需求、模板或显式大纲中真实需要的小节，删除重复项。' });
+    const thematic = new Map<string, string[]>();
+    for (const section of sections) {
+      const key = /劳动力|人员|工种/u.test(section) ? '劳动力计划' : /机械|设备|机具/u.test(section) ? '机械设备计划' : /材料|物资/u.test(section) ? '材料物资计划' : /冬季|雨季|高温|台风|大风/u.test(section) ? '特殊气候措施' : '';
+      if (key) thematic.set(key, [...(thematic.get(key) || []), section]);
+    }
+    for (const [key, values] of thematic) {
+      if (values.length > 1) issues.push({ level: 'warning', message: `${chapter.title} 存在重复主题小节：${key}（${values.join('、')}）`, suggestion: '请合并同类小节，只保留一个主表或主方案，其他位置采用引用或执行说明。' });
+    }
   }
   return issues;
 }
@@ -215,9 +230,27 @@ export function tocBodyConsistencyIssues(markdown: string): ValidationIssue[] {
   const missingInBody = tocSections.filter(title => !bodySet.has(title));
   const missingInToc = bodySections.filter(title => !tocSet.has(title));
   const issues: ValidationIssue[] = [];
-  if (missingInBody.length > 0) issues.push({ level: 'warning', message: `目录小节未在正文中找到：${[...new Set(missingInBody)].join('、')}`, suggestion: '请以用户 outline 抽取出的章节为准，修正文目录与正文二级小节编号及标题。' });
-  if (missingInToc.length > 0) issues.push({ level: 'warning', message: `正文小节未进入目录：${[...new Set(missingInToc)].join('、')}`, suggestion: '请重新生成目录，确保只收录正文二级小节，不收录三级小节。' });
+  if (missingInBody.length > 0) issues.push({ level: 'error', message: `目录与正文不一致，目录小节未在正文中找到：${[...new Set(missingInBody)].join('、')}`, suggestion: '请以最终清洗后的正文二级标题为准重新生成目录。' });
+  if (missingInToc.length > 0) issues.push({ level: 'error', message: `目录与正文不一致，正文小节未进入目录：${[...new Set(missingInToc)].join('、')}`, suggestion: '请重新生成目录，确保只收录正文二级小节，不收录三级小节。' });
   return issues;
+}
+
+function isInstructionLikeStructureTitle(value: string) {
+  const rawTitle = value
+    .replace(/^#{1,6}\s+/u, '')
+    .replace(/^\s*\d+(?:\.\d+)*(?:[.．、]|\s)+/u, '')
+    .replace(/^第[一二三四五六七八九十百千万\d]+[章节篇部分]\s*/u, '')
+    .trim();
+  const displayTitle = displayChapterTitle(rawTitle);
+  const instructionTitleRe = /^(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用).*|(?:如|若|如果)(?:涉及|不涉及|适用|不适用).*|.*(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成).*|.*(?:按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|注意事项))\s*$/u;
+  return instructionTitleRe.test(rawTitle) || instructionTitleRe.test(displayTitle);
+}
+
+export function instructionLikeHeadingIssues(markdown: string): ValidationIssue[] {
+  const headings = [...markdown.matchAll(/^#{2,6}\s+(.+)$/gmu)]
+    .map(match => displayChapterTitle(match[1] || ''))
+    .filter(isInstructionLikeStructureTitle);
+  return headings.length > 0 ? [{ level: 'error', message: `正文存在疑似提示词指令标题：${[...new Set(headings)].slice(0, 8).join('、')}`, suggestion: '请删除或改写为正式施工组织设计小节标题，目录也不得收录该类标题。' }] : [];
 }
 
 export function formalContentIntegrityIssues(markdown: string): ValidationIssue[] {
@@ -288,6 +321,7 @@ function gapForSection(chapterTitle: string, sectionTitle: string, level: 3 | 4,
   const bodyWithoutTables = body.split('\n').filter(line => !MARKDOWN_TABLE_ROW_RE.test(line) && !MARKDOWN_TABLE_DIVIDER_RE.test(line)).join('\n');
   const nonTableBody = bodyWithoutTables.replace(/^#{1,6}\s+.+$/gmu, '');
   const nonTableLength = sectionBodyTextLength(nonTableBody);
+  if (/【本小节生成未达标，需重新生成】/u.test(body)) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: `${chapterTitle} 小节生成未达标：${sectionTitle}` };
   if (hasTable && nonTableLength < 20) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'table_only', planned, message: `${chapterTitle} 小节只有标题或表格无正文：${sectionTitle}` };
   if (bodyLength >= 80 && nonTableLength >= 20) return undefined;
   if (bodyLength === 0) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: `${chapterTitle} 空小节：${sectionTitle}` };
@@ -309,7 +343,7 @@ export function collectSectionContentGaps(markdown: string, chapters: Array<Pick
         seen.add(key);
         continue;
       }
-      const gap = gapForSection(chapter.title, normalized || section, found.level, found.body, true);
+      const gap = gapForSection(chapter.title, section, found.level, found.body, true);
       if (gap) gaps.push(gap);
       seen.add(key);
     }
@@ -327,14 +361,161 @@ export function collectSectionContentGaps(markdown: string, chapters: Array<Pick
 
 export function sectionContentIntegrityIssues(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content' | 'sections'>>): ValidationIssue[] {
   return collectSectionContentGaps(markdown, chapters).map(gap => ({
-    level: gap.reason === 'empty' ? 'error' as const : 'warning' as const,
+    level: 'error' as const,
     message: gap.message,
     suggestion: gap.reason === 'missing_planned_section'
-      ? '建议补写该二级小节；如正文已在相邻小节覆盖，可作为质量优化项处理。'
+      ? '必须补写该规划小节，不能跳过或用相邻小节替代。'
       : gap.reason === 'table_only'
-        ? '请在表格前后补充来源、适用范围、结论和执行要求。'
-        : '建议补充与该小节相关的材料事实、适用边界和必要说明。',
+        ? '必须在表格前后补充来源、适用范围、结论和执行要求。'
+        : '必须补充与该小节相关的材料事实、适用边界和必要说明，达到正文完整度要求。',
   }));
+}
+
+function isNoisyComparableFactValue(value: string) {
+  const text = value.trim();
+  if (!text || text.length > 80) return true;
+  if (/\|/u.test(text) || /^#+\s*/u.test(text)) return true;
+  if (/见(?:招标公告|投标人须知|前附表|本项目|补疑)|资料参数行摘要|公共资源交易监督管理|开评标程序|解密时间|联系人|联系电话/u.test(text)) return true;
+  if (/是否|符合|采购范围|规定的投标截止时间|电子交易系统/u.test(text) && /\d{3,}/u.test(text)) return true;
+  return false;
+}
+
+function normalizedFactValue(fact: DocumentFact) {
+  return `${fact.fieldName || fact.key} ${stringifyFactValue(fact.value)}`.replace(/\s+/gu, ' ').trim();
+}
+
+export function crossChapterConsistencyIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const expectedSchedule = factsModel.schedule.map(normalizedFactValue).find(value => /\d+\s*(?:日历天|天|个月|月)|计划工期|合同工期/u.test(value));
+  const expectedQuality = factsModel.quality.map(normalizedFactValue).find(value => /质量|合格|优良/u.test(value));
+  if (expectedSchedule) {
+    const expectedDuration = expectedSchedule.match(/\d+\s*(?:日历天|个月|月)/u)?.[0]?.replace(/\s+/gu, '');
+    const durationMatches = [...new Set((markdown.match(/\d+\s*(?:日历天|个月|月)/gu) || []).map(item => item.replace(/\s+/gu, '')))].filter(item => item.length > 1);
+    const conflicting = expectedDuration ? durationMatches.filter(item => item !== expectedDuration) : [];
+    if (expectedDuration && conflicting.length > 0) issues.push({ level: 'error', message: `跨章一致性冲突：正文出现与资料工期不一致的表述 ${conflicting.slice(0, 6).join('、')}`, suggestion: `请统一使用资料中的工期口径：${expectedSchedule}` });
+  }
+  if (expectedQuality && !/质量标准|质量目标|合格|优良/u.test(markdown)) issues.push({ level: 'error', message: '跨章一致性缺口：正文未稳定体现资料中的质量目标', suggestion: `请在工程概况、质量保证和验收相关章节统一体现：${expectedQuality}` });
+  return issues;
+}
+
+export function managementMeasureNumberIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const managementNumberPattern = /(?:三检制|三级教育|三级管理|5S|24\s*小时|每日|每周|每月|一次|两次)/gu;
+  for (const chapter of chapters) {
+    const matches = [...new Set(chapter.content.match(managementNumberPattern) || [])];
+    if (matches.length >= 3 && !/责任人|检查记录|整改|复查|验收|台账|交底|巡查|闭环/u.test(chapter.content)) {
+      issues.push({ level: 'warning', message: `${chapter.title} 管理措施数字较多但缺少执行闭环：${matches.slice(0, 8).join('、')}`, suggestion: '这些管理数字可以保留，但需要补充责任主体、检查频次、记录台账、整改复查和闭环要求。' });
+    }
+  }
+  return issues;
+}
+
+export function genericProfessionalContentIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {
+  const generic = /(?:加强组织领导|严格执行规范|落实责任制度|确保工程质量|强化过程管理|提高思想认识|完善管理体系|形成闭环管理)/gu;
+  const issues: ValidationIssue[] = [];
+  for (const chapter of chapters) {
+    const matches = chapter.content.match(generic) || [];
+    if (matches.length >= 6 && !/材料|工序|验收|复验|节点|风险|交底|隐蔽|检验批|进场/u.test(chapter.content)) issues.push({ level: 'error', message: `${chapter.title} 存在较多未绑定项目事实和工序控制点的泛化套话`, suggestion: '请替换为结合资料事实、施工对象、工序控制、验收资料和整改闭环的专业内容。' });
+  }
+  return issues;
+}
+
+function trustedFactCorpus(factsModel: DocumentFactsModel) {
+  return [
+    ...factsModel.project,
+    ...factsModel.schedule,
+    ...factsModel.quality,
+    ...factsModel.safety,
+    ...factsModel.resources,
+    ...factsModel.preciseFacts,
+    ...factsModel.bills,
+    ...factsModel.drawings,
+    ...factsModel.rules,
+    ...factsModel.specifications,
+  ].map(normalizedFactValue).join('\n');
+}
+
+function generatedFactTokenClass(token: string, context: string): 'hard' | 'soft' {
+  const normalized = `${token} ${context}`;
+  if (/三检制|三级|5S|24\s*小时|每日|每周|每月|一次|两次|责任制|制度/u.test(normalized)) return 'soft';
+  if (/总工期|计划工期|合同工期|日历天/u.test(normalized)) return 'hard';
+  if (/最高投标限价|招标控制价|合同估算价|投资估算|报价|金额|万元|元/u.test(normalized)) return 'hard';
+  if (/(?:工程量|清单|建设规模|建筑面积|长度|材料|设备|规格|型号).{0,24}(?:m²|㎡|m3|m³|米|吨|套|台|个|项|%)/u.test(normalized)) return 'hard';
+  if (/标准|规范|编号|GB|JGJ|CJJ|DB\d+/u.test(normalized)) return 'hard';
+  return 'soft';
+}
+
+export function generatedFactVerificationIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+  const corpus = trustedFactCorpus(factsModel);
+  if (documentTextLength(corpus) < 80) return [];
+  const issues: ValidationIssue[] = [];
+  const compactCorpus = normalizeEngineeringTextForFactMatch(corpus);
+  const hardSuspicious: string[] = [];
+  const softSuspicious: string[] = [];
+  for (const token of extractEngineeringMeasureTokens(markdown)) {
+    const normalizedToken = normalizeEngineeringTextForFactMatch(token);
+    const tokenIndex = markdown.indexOf(token);
+    const context = tokenIndex >= 0 ? markdown.slice(Math.max(0, tokenIndex - 36), Math.min(markdown.length, tokenIndex + token.length + 36)) : markdown;
+    const tokenClass = generatedFactTokenClass(token, context);
+    if (tokenClass === 'hard' && !compactCorpus.includes(normalizedToken)) hardSuspicious.push(token);
+    if (tokenClass === 'soft' && !compactCorpus.includes(normalizedToken)) softSuspicious.push(token);
+  }
+  const uniqueHardSuspicious = [...new Set(hardSuspicious)];
+  const uniqueSoftSuspicious = [...new Set(softSuspicious)];
+  if (uniqueHardSuspicious.length >= 2) issues.push({ level: 'error', message: `生成后事实反查失败：正文出现资料事实主表中未找到的关键数字 ${uniqueHardSuspicious.slice(0, 8).join('、')}`, suggestion: '请删除无法在资料中反查的关键数字，或改写为资料已明确的事实口径。' });
+  if (uniqueSoftSuspicious.length >= 6) issues.push({ level: 'warning', message: `生成后事实反查提示：正文出现较多未在资料事实主表中反查到的管理数字 ${uniqueSoftSuspicious.slice(0, 10).join('、')}`, suggestion: '请确认这些管理数字属于通用制度、规范要求或项目资料事实；如无依据，建议改为定性管理要求。' });
+  if (/质量目标|质量标准/u.test(markdown) && factsModel.quality.length > 0 && !factsModel.quality.some(fact => markdown.includes(stringifyFactValue(fact.value).slice(0, 18)))) issues.push({ level: 'warning', message: '生成后事实反查提示：正文质量目标表述未明显匹配质量事实主表', suggestion: '请使用资料中的质量目标原文或等价表述。' });
+  return issues;
+}
+
+function professionalScoreThreshold(title: string) {
+  if (/概况|工程|项目/u.test(title)) return { min: 5, focus: '事实依据、项目特异性' };
+  if (/部署|总体|组织/u.test(title)) return { min: 6, focus: '组织结构、可执行闭环、跨章一致性' };
+  if (/进度|工期/u.test(title)) return { min: 6, focus: '进度结构、工期一致性、纠偏机制' };
+  if (/质量/u.test(title)) return { min: 6, focus: '质量深度、验收复验、资料闭环' };
+  if (/安全|文明|危大|风险/u.test(title)) return { min: 6, focus: '风险覆盖、应急响应、检查整改' };
+  if (/资源|材料|设备|劳动力/u.test(title)) return { min: 5, focus: '资源依据、进场调配、进度支撑' };
+  return { min: 4, focus: '事实依据、专业深度、可执行性' };
+}
+
+export function professionalScoreIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  for (const chapter of chapters) {
+    const text = chapter.content;
+    if (documentTextLength(text) < 800) continue;
+    const factuality = /资料|招标|清单|图纸|标准|范围|工期|质量|验收/u.test(text) ? 2 : /项目|工程|要求/u.test(text) ? 1 : 0;
+    const structure = /首先|其次|同时|最后|一是|二是|流程|步骤|阶段|组织顺序/u.test(text) ? 2 : /并且|同时|然后|因此/u.test(text) ? 1 : 0;
+    const depth = /控制点|关键线路|复验|隐蔽验收|风险|交底|检验批|整改|闭环/u.test(text) ? 2 : /措施|要求|管理|检查/u.test(text) ? 1 : 0;
+    const executable = /责任人|检查|记录|验收|整改|复查|进场|调配|应急/u.test(text) ? 2 : /落实|执行|安排|组织/u.test(text) ? 1 : 0;
+    const specificity = /本项目|本工程|招标范围|工程量|建设地点|计划工期|质量目标/u.test(text) ? 2 : /项目|工程/u.test(text) ? 1 : 0;
+    const consistency = /工期|质量|安全|资源|验收/u.test(text) ? 2 : /目标|要求/u.test(text) ? 1 : 0;
+    const scores = { factuality, structure, depth, executable, specificity, consistency };
+    const total = factuality + structure + depth + executable + specificity + consistency;
+    const threshold = professionalScoreThreshold(chapter.title);
+    if (total < threshold.min) {
+      const weak = Object.entries(scores).filter(([, value]) => value < 1).map(([key]) => key).join('、') || threshold.focus;
+      issues.push({ level: 'error', message: `${chapter.title} 专业评分不足：${total}/12，薄弱维度：${weak}`, suggestion: `请按章节任务卡补齐${threshold.focus}，并写出资料依据、实施流程、专业控制点和检查整改闭环。` });
+    }
+  }
+  return issues;
+}
+
+export function professionalContentIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {
+  const rules = [
+    { re: /进度|工期/u, need: /关键线路|穿插|纠偏|资源保障|节点|动态调整/u, message: '进度工期章节缺少关键线路、穿插施工或纠偏保障内容' },
+    { re: /质量/u, need: /材料.*验收|复验|隐蔽验收|整改.*复验|质量.*资料|检验批/u, message: '质量章节缺少材料验收复验、隐蔽验收或整改复验闭环' },
+    { re: /安全|文明|危大|风险/u, need: /风险|临电|消防|应急|检查.*整改|文明施工|人员|设备/u, message: '安全文明章节缺少风险识别、现场控制或应急检查闭环' },
+    { re: /资源|材料|设备|劳动力/u, need: /进场|验收|调配|保管|供应|投入计划/u, message: '资源章节缺少进场、验收、调配或保管计划' },
+    { re: /施工|工艺|技术|方案/u, need: /准备|流程|工艺|控制点|验收|交底/u, message: '施工技术章节缺少施工准备、工艺流程、控制点或验收要求' },
+  ];
+  const issues: ValidationIssue[] = [];
+  for (const chapter of chapters) {
+    const text = chapter.content;
+    for (const rule of rules) {
+      if (rule.re.test(chapter.title) && documentTextLength(text) >= 600 && !rule.need.test(text)) issues.push({ level: 'error', message: `${chapter.title}：${rule.message}`, suggestion: '请按专业任务卡定向补写该章节，补齐可实施的控制措施、资料依据和闭环要求。' });
+    }
+  }
+  return issues;
 }
 
 function shouldIgnorePreciseToken(token: string, context: string) {
@@ -379,6 +560,7 @@ export function preciseFactUsageIssues(markdown: string, factsModel: DocumentFac
 
 export function formalPlaceholderIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  if (/【本小节生成未达标，需重新生成】/u.test(markdown)) issues.push({ level: 'error', message: '生成未完成：存在未达标小节，需要重新生成或补写后才能导出', suggestion: '请重新生成未达标小节，禁止将占位内容作为正式正文。' });
   for (const pattern of FORMAL_PLACEHOLDER_PATTERNS) {
     if (pattern.test(markdown)) issues.push({ level: 'warning', message: `存在占位式表达：${pattern.source}`, suggestion: '请改写为来自资料的准确事实；资料确实未提供时，改写为正式管理措施，不留空值或“见资料/按文件”。' });
   }
@@ -448,7 +630,7 @@ function validateRequiredSpecFields(spec: AutoDocumentSpecPackage, chapters: Doc
         if (!satisfiedBySourceRole && evidenceSatisfiesSpecField(item, field)) satisfiedBySourceRole = true;
       }
     }
-    if (schemaFacts.length === 0 && !factNames.has(field.name) && !satisfiedByChapterEvidence) next.push({ level: 'warning', message: `必需事实缺失：${field.name}`, suggestion: field.extractionHint || '请补充资料或调整事实字段配置。' });
+    if (schemaFacts.length === 0 && !factNames.has(field.name) && !satisfiedByChapterEvidence) next.push({ level: 'warning', message: `系统暂未从知识库确认必需事实：${field.name}`, suggestion: field.extractionHint || '请扩大本地知识库检索、执行事实补抽，或调整事实字段配置。' });
     if (!satisfiedBySourceRole) next.push({ level: 'warning', message: `必需事实来源角色不匹配：${field.name}`, suggestion: `请确认该事实来自角色：${field.sourceRoleIds?.join('、')}` });
   }
 }

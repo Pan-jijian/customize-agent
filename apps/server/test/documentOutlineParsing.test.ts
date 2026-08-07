@@ -64,4 +64,17 @@ describe('document explicit outline parsing', () => {
       '后续服务与持续改进',
     ]);
   });
+
+  it('filters instruction-like conditional outline lines', () => {
+    const outline = `<OUTLINE>
+第一章 工程概况
+第二章 特殊气候施工措施
+- 判断是否涉及冬季施工
+第三章 资源投入计划
+</OUTLINE>`;
+    const chapters = extractExplicitOutlineFromSources([{ text: outline, source: '提示词角色', strict: true }]);
+
+    expect(chapters.map(chapter => chapter.title)).toEqual(['工程概况', '特殊气候施工措施', '资源投入计划']);
+    expect(chapters.map(chapter => chapter.title).join('\n')).not.toContain('判断是否');
+  });
 });

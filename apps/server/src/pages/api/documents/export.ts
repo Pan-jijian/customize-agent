@@ -109,19 +109,20 @@ function isMarkdownTableSeparator(line: string) {
 function looksLikeMarkdownTableRow(line: string) {
   const trimmed = line.trim();
   if (!trimmed || /^#{1,6}\s+/u.test(trimmed) || isMarkdownTableSeparator(trimmed)) return false;
-  const pipeCount = (trimmed.match(/\|/gu) || []).length;
-  return pipeCount >= 2 || pipeCount >= 1 && /^\s*\|/u.test(trimmed) || pipeCount >= 1 && /\|\s*$/u.test(trimmed);
+  const pipeCount = (trimmed.match(/(?<!\\)\|/gu) || []).length;
+  return pipeCount >= 1;
 }
 
 function splitMarkdownTableRow(line: string) {
   const trimmed = line.trim().replace(/^\|/u, '').replace(/\|$/u, '').trim();
-  return trimmed.split('|').map(cell => cell.trim());
+  return trimmed.split(/(?<!\\)\|/u).map(cell => cell.replace(/\\\|/gu, '|').trim());
 }
 
 function normalizeMarkdownTableRow(cells: string[], columns: number) {
   const normalized = cells.slice(0, columns);
+  if (cells.length > columns && columns > 0) normalized[columns - 1] = [normalized[columns - 1], ...cells.slice(columns)].filter(Boolean).join(' | ');
   while (normalized.length < columns) normalized.push('');
-  return `| ${normalized.join(' | ')} |`;
+  return `| ${normalized.map(cell => cell.replace(/\|/gu, '\\|')).join(' | ')} |`;
 }
 
 function defaultTableHeaders(columns: number) {
@@ -138,8 +139,8 @@ function collectBareTableRows(lines: string[], start: number) {
     index += 1;
   }
   const columnCounts = rows.map(row => splitMarkdownTableRow(row).length);
-  const columns = columnCounts[0] || 0;
-  if (rows.length < 2 || columns < 2 || columnCounts.some(count => count !== columns)) return null;
+  const columns = Math.max(...columnCounts, 0);
+  if (rows.length < 2 || columns < 2) return null;
   return { rows, columns, next: index };
 }
 
@@ -164,7 +165,15 @@ function normalizeLooseMarkdownTables(input: string) {
     if (looksLikeMarkdownTableRow(line) && separator !== undefined && isMarkdownTableSeparator(separator)) {
       const header = splitMarkdownTableRow(line);
       const separatorColumns = splitMarkdownTableRow(separator).length;
-      const columns = Math.max(2, header.length, separatorColumns);
+      const dataRows: string[][] = [];
+      let scanIndex = nextIndex + 1;
+      while (scanIndex < lines.length) {
+        const row = lines[scanIndex] || '';
+        if (!looksLikeMarkdownTableRow(row)) break;
+        dataRows.push(splitMarkdownTableRow(row));
+        scanIndex += 1;
+      }
+      const columns = Math.max(2, header.length, separatorColumns, ...dataRows.map(row => row.length));
       if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
       output.push(normalizeMarkdownTableRow(header, columns));
       output.push(`| ${Array.from({ length: columns }, () => '---').join(' | ')} |`);
@@ -385,17 +394,20 @@ function parseMarkdownTable(lines: string[], start: number) {
   if (separatorIndex >= lines.length || !looksLikeMarkdownTableRow(lines[start] || '') || !isMarkdownTableSeparator(lines[separatorIndex] || '')) return null;
   const header = splitMarkdownTableRow(lines[start] || '').map(cell => stripInlineMarkdown(cell));
   const separatorColumns = splitMarkdownTableRow(lines[separatorIndex] || '').length;
-  const columns = Math.max(2, header.length, separatorColumns);
-  const rows: string[][] = [header];
+  const dataRows: string[][] = [];
   let index = separatorIndex + 1;
   while (index < lines.length && looksLikeMarkdownTableRow(lines[index] || '')) {
-    const row = splitMarkdownTableRow(lines[index] || '').map(cell => stripInlineMarkdown(cell));
-    const normalized = row.slice(0, columns);
-    while (normalized.length < columns) normalized.push('');
-    rows.push(normalized);
+    dataRows.push(splitMarkdownTableRow(lines[index] || '').map(cell => stripInlineMarkdown(cell)));
     index += 1;
   }
-  return { rows, next: index };
+  const columns = Math.max(2, header.length, separatorColumns, ...dataRows.map(row => row.length));
+  const normalize = (row: string[]) => {
+    const normalized = row.slice(0, columns);
+    if (row.length > columns && columns > 0) normalized[columns - 1] = [normalized[columns - 1], ...row.slice(columns)].filter(Boolean).join(' | ');
+    while (normalized.length < columns) normalized.push('');
+    return normalized;
+  };
+  return { rows: [normalize(header), ...dataRows.map(normalize)], next: index };
 }
 
 function docxTable(rows: string[][], style: ReturnType<typeof resolveExportStyle>) {
@@ -529,10 +541,6 @@ function docxCorePropertiesXml(title: string) {
 
 function docxAppPropertiesXml() {
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Customize Agent</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company></Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>1.0</AppVersion></Properties>';
-}
-
-function appendBeforeClose(xml: string, closeTag: string, fragment: string) {
-  return xml.includes(fragment) ? xml : xml.replace(closeTag, `${fragment}${closeTag}`);
 }
 
 async function ensureDocxPackageParts(zip: JSZip, title: string, settings?: DocumentExportSettings, images: DocxImageItem[] = []) {
@@ -718,6 +726,33 @@ function repeatedParagraphWarnings(markdown: string) {
   return repeated;
 }
 
+function exportTablePreflightIssues(markdown: string) {
+  const issues: string[] = [];
+  const lines = markdown.split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] || '';
+    if (!looksLikeMarkdownTableRow(line)) continue;
+    const separatorIndex = lines[index + 1]?.trim() === '' ? index + 2 : index + 1;
+    if (separatorIndex < lines.length && isMarkdownTableSeparator(lines[separatorIndex] || '')) {
+      const rows: string[] = [];
+      let rowIndex = separatorIndex + 1;
+      while (rowIndex < lines.length && looksLikeMarkdownTableRow(lines[rowIndex] || '')) {
+        rows.push(lines[rowIndex] || '');
+        rowIndex += 1;
+      }
+      if (rows.length === 0) issues.push(`第 ${index + 1} 行表格只有表头，没有数据行`);
+      const counts = [line, ...rows].map(row => splitMarkdownTableRow(row).length);
+      if (Math.max(...counts) - Math.min(...counts) > 2) issues.push(`第 ${index + 1} 行附近表格列数差异较大，导出版式可能异常`);
+      index = rowIndex - 1;
+      continue;
+    }
+    if (index + 1 < lines.length && looksLikeMarkdownTableRow(lines[index + 1] || '')) issues.push(`第 ${index + 1} 行附近疑似裸表格，已尝试自动规范化`);
+  }
+  const fenceCount = (markdown.match(/```/gu) || []).length;
+  if (fenceCount % 2 === 1) issues.push('存在未闭合代码块，可能影响后续内容导出');
+  return [...new Set(issues)].slice(0, 20);
+}
+
 function validateExportMarkdown(markdown: string, baseline?: string) {
   const stats = markdownStats(markdown);
   const baseStats = baseline ? markdownStats(baseline) : undefined;
@@ -741,7 +776,8 @@ function validateExportMarkdown(markdown: string, baseline?: string) {
 
   const repeated = repeatedParagraphWarnings(markdown);
   if (repeated.length > 0) issues.push(`正文存在重复段落：${repeated.slice(0, 2).join('；')}`);
-  return issues;
+  issues.push(...exportTablePreflightIssues(markdown));
+  return [...new Set(issues)];
 }
 
 function prepareExportMarkdown(rawMarkdown: string, baseline?: string) {

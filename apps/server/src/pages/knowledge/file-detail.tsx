@@ -315,7 +315,7 @@ export default function KnowledgeFileDetailPage() {
       <Card size="small"><Skeleton active paragraph={{ rows: 4 }} /></Card>
     </div>
   );
-  if (loadError) return <Alert type="error" showIcon message={t('knowledge.fileDetailLoadFailed')} description={loadError} />;
+  if (loadError) return <Alert type="error" showIcon description={<><div>{t('knowledge.fileDetailLoadFailed')}</div><div>{loadError}</div></>} />;
   if (!detail) return <Empty description={t('knowledge.selectFile')} />;
 
   return (
@@ -341,7 +341,7 @@ export default function KnowledgeFileDetailPage() {
       </div>
 
       <Card size="small" className="rounded-2xl border-[var(--borderColor)]" title={<span className="font-semibold">{t('knowledge.basicInfo')}</span>}>
-        <Descriptions size="small" column={{ xxl: 3, xl: 2, lg: 2, md: 1, sm: 1, xs: 1 }} bordered labelStyle={{ width: '120px', background: 'var(--colorFillAlter)', color: 'var(--colorTextSecondary)' }}>
+        <Descriptions size="small" column={{ xxl: 3, xl: 2, lg: 2, md: 1, sm: 1, xs: 1 }} bordered styles={{ label: { width: '120px', background: 'var(--colorFillAlter)', color: 'var(--colorTextSecondary)' } }}>
           <Descriptions.Item label={t('knowledge.path')} span={3}><span className="break-all">{detail.file.relativePath}</span></Descriptions.Item>
           <Descriptions.Item label={t('knowledge.originalFile')} span={3}><span className="break-all">{detail.absolutePath ?? '-'}</span></Descriptions.Item>
           <Descriptions.Item label={t('knowledge.directory')} span={3}><span className="break-all">{detail.directory ?? '-'}</span></Descriptions.Item>
@@ -375,7 +375,7 @@ export default function KnowledgeFileDetailPage() {
       </Card>
 
       <Card size="small" className="rounded-2xl border-[var(--borderColor)]" title={<span className="font-semibold">{t('knowledge.parentChunks')} <Tag className="ml-2 border-0 bg-[var(--colorFillSecondary)] text-xs font-normal">{filteredParents.length} / {detail.parents.length}</Tag></span>}>
-        <Alert type="info" showIcon message={t('knowledge.parentChunkHint')} className="mb-4 rounded-xl border-blue-200 bg-blue-50/50" />
+        <Alert type="info" showIcon description={t('knowledge.parentChunkHint')} className="mb-4 rounded-xl border-blue-200 bg-blue-50/50" />
         <Table rowKey="id" columns={parentColumns} dataSource={filteredParents} pagination={{ pageSize: 10 }} size="small" className="custom-table" />
       </Card>
 

@@ -513,7 +513,7 @@ export default function PromptPage() {
             <p className="text-sm text-[var(--colorTextSecondary)]">{t('prompt.description')}</p>
         </div>
         <Space wrap>
-          {currentProject && <Tag color="green" style={{ lineHeight: '22px' }} bordered={false}><FolderOutlined /> {currentProject.projectRoot}</Tag>}
+          {currentProject && <Tag color="green" style={{ lineHeight: '22px' }} className="border-0"><FolderOutlined /> {currentProject.projectRoot}</Tag>}
           <input ref={fileInputRef} type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={e => { void handleImportFile(e.target.files?.[0]); }} />
           <Button icon={<ImportOutlined />} loading={importing} onClick={() => fileInputRef.current?.click()} className="rounded-lg">{t('prompt.import')}</Button>
           <Button icon={<ExportOutlined />} disabled={filteredProjects.length === 0} onClick={() => handleExport('filtered')} className="rounded-lg">{t('prompt.exportFiltered')}</Button>
@@ -522,7 +522,7 @@ export default function PromptPage() {
       </div>
 
       <div className="flex flex-wrap items-center gap-3 bg-[var(--colorBgContainer)] p-3 rounded-xl shadow-sm mb-6">
-        <Input prefix={<SearchOutlined className="text-[var(--colorTextTertiary)]" />} allowClear placeholder={t('prompt.searchPrompt')} value={searchText} onChange={e => setSearchText(e.target.value)} style={{ width: 280 }} bordered={false} className="bg-[var(--colorBgHover)] rounded-lg hover:bg-[var(--colorFillAlter)] focus:bg-[var(--colorBgElevated)] transition-colors" />
+        <Input prefix={<SearchOutlined className="text-[var(--colorTextTertiary)]" />} allowClear placeholder={t('prompt.searchPrompt')} value={searchText} onChange={e => setSearchText(e.target.value)} style={{ width: 280 }} variant="borderless" className="bg-[var(--colorBgHover)] rounded-lg hover:bg-[var(--colorFillAlter)] focus:bg-[var(--colorBgElevated)] transition-colors" />
         <div className="h-4 w-[1px] bg-[var(--borderColorStrong)] mx-1"></div>
         <Select<SourceFilter> value={sourceFilter} onChange={setSourceFilter} style={{ width: 150 }} variant="borderless" options={[
           { label: `${t('prompt.allPrompts')} (${promptStats.all})`, value: 'all' },
@@ -584,9 +584,7 @@ export default function PromptPage() {
         }
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        width={1080}
-        maskClosable={false}
-        styles={{ body: { padding: '24px 32px', display: 'grid', gridTemplateRows: 'minmax(320px, 1fr) 420px', gap: 24, height: '100%' }, header: { borderBottom: '1px solid var(--colorBorderSecondary)', padding: '16px 32px' } }}
+        styles={{ wrapper: { width: 1080 }, mask: { pointerEvents: 'none' }, body: { padding: '24px 32px', display: 'grid', gridTemplateRows: 'minmax(320px, 1fr) 420px', gap: 24, height: '100%' }, header: { borderBottom: '1px solid var(--colorBorderSecondary)', padding: '16px 32px' } }}
         extra={
           <Space>
             <Button onClick={() => setDrawerOpen(false)}>{t('common.cancel')}</Button>
@@ -619,7 +617,7 @@ export default function PromptPage() {
             {chatMessages.length === 0 && !chatLoading ? (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('prompt.mentionRecallHint')} />
             ) : (
-              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%' }}>
                 {chatMessages.map((item, index) => {
                   const isUser = item.role === 'user';
                   return (
@@ -642,7 +640,7 @@ export default function PromptPage() {
                     </div>
                   </div>
                 )}
-              </Space>
+              </div>
             )}
           </div>
           <Divider style={{ margin: 0 }} />

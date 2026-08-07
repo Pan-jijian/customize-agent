@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Button, Empty, Input, Popconfirm, Skeleton, Space, Table, Tag, Typography, message } from 'antd';
-import { ReloadOutlined, DeleteOutlined, SearchOutlined, ExceptionOutlined, InfoCircleOutlined } from '@ant-design/icons';
+import { Button, Empty, Input, Popconfirm, Skeleton, Table, Tag, Typography, message } from 'antd';
+import { ReloadOutlined, DeleteOutlined, SearchOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useAppTranslations } from '@/components/Layout';
-import { PageHeader } from '@/components/PageHeader';
 import { clearErrorLogs, getErrorLogs, type ErrorLogEntry } from '@/lib/api';
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 /** 根据日志级别返回对应的标签颜色 */
 function levelColor(level: ErrorLogEntry['level']) {
@@ -41,7 +40,7 @@ export default function SystemLogsPage() {
 
   const columns: ColumnsType<ErrorLogEntry> = [
     { title: t('logs.time'), dataIndex: 'createdAt', width: 160, render: value => <span className="text-xs text-[var(--colorTextSecondary)] font-mono">{new Date(value).toLocaleString()}</span> },
-    { title: t('logs.level'), dataIndex: 'level', width: 80, render: level => <Tag color={levelColor(level)} bordered={false} className="m-0 text-[10px] uppercase tracking-wider">{level}</Tag> },
+    { title: t('logs.level'), dataIndex: 'level', width: 80, render: level => <Tag color={levelColor(level)} className="m-0 text-[10px] uppercase tracking-wider border-0">{level}</Tag> },
     { title: t('logs.source'), dataIndex: 'source', width: 220, render: value => <span className="text-xs font-mono text-[var(--colorTextSecondary)] break-all">{value}</span> },
     { title: t('logs.message'), dataIndex: 'message',
       render: value => <div className="text-sm text-[var(--colorText)] max-w-3xl whitespace-normal break-words leading-relaxed" title={value}>{value}</div>,

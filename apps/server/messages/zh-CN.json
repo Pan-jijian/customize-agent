@@ -667,24 +667,9 @@
     "processingTypeHelp": "大白话：这个文件在生成里扮演什么角色。规则文件是要求和评分规则；项目事实文件是真实项目资料；表格数据是 Excel/CSV/清单；图纸文件是图纸目录和设计说明；规范文件是标准规范；参考资料只做辅助参考。",
     "multiBindFileHelp": "可以多选。比如“项目事实文件”可以同时绑定招标文件、合同摘要、项目概况。少量明确资料建议单绑；同一用途多份资料建议多绑。",
     "multiBindPromptHelp": "可以多选。比如“章节生成”可以同时绑定通用写作要求、公司风格要求、甲方特殊要求。系统会按项目角色配置中的角色顺序使用。",
-    "addRole": "添加角色",
     "noFileRoleSelected": "暂未选择文件角色",
     "noPromptRoleSelected": "暂未选择提示词角色",
     "bindPromptCount": "绑定 {count} 个提示词"
-  },
-  "settings": {
-    "title": "系统设置",
-    "description": "管理语言、主题等偏好",
-    "language": "语言",
-    "languageDesc": "界面显示语言",
-    "theme": "主题",
-    "themeDesc": "浅色 / 深色模式",
-    "light": "浅色",
-    "dark": "深色",
-    "system": "跟随系统",
-    "about": "关于",
-    "version": "版本",
-    "port": "服务端口"
   },
   "common": {
     "save": "保存",

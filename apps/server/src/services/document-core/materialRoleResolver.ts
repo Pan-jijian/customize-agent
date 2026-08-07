@@ -20,17 +20,19 @@ function rolesFromTemplate(template: DocumentTemplate): MaterialRole[] {
   return [...roles];
 }
 
-function requiredRoleSet(template: DocumentTemplate) {
-  const text = [template.name, template.category, template.description, template.outputTitle].join('\n');
+function requiredRoleSet(template: DocumentTemplate, summary: ProjectMaterialSummary) {
+  const text = [template.name, template.category, template.description, template.outputTitle, ...template.chapters.flatMap(chapter => [chapter.title, chapter.purpose])].join('\n');
   const required = new Set<MaterialRole>(['project_overview', 'scope_description']);
-  if (/需求|规则|响应|方案|实施|专项|安全|质量|进度|合规/iu.test(text)) ['requirement_document', 'structured_data', 'schedule_quality_safety'].forEach(role => required.add(role as MaterialRole));
-  if (/设计|方案|说明|图像|地图|附件/iu.test(text)) required.add('design_specification');
+  if (/需求|规则|响应|方案|实施|专项|安全|质量|进度|合规|施工组织|技术标/iu.test(text)) ['requirement_document', 'structured_data'].forEach(role => required.add(role as MaterialRole));
+  if (/安全|质量|进度|工期|文明|环保|验收/iu.test(text) || summary.materialInventory.schedule_quality_safety.length > 0) required.add('schedule_quality_safety');
+  if (/设计|图纸|平面|立面|剖面|做法/iu.test(text) || summary.materialInventory.design_specification.length > 0) required.add('design_specification');
+  if (/风险|重点|难点|约束|现场|危大/iu.test(text) || summary.materialInventory.risk_constraints.length > 0) required.add('risk_constraints');
   return required;
 }
 
 export function resolveTemplateMaterialRoles(template: DocumentTemplate, summary: ProjectMaterialSummary): ResolvedMaterialRole[] {
-  const requiredRoles = requiredRoleSet(template);
-  return rolesFromTemplate(template).map(role => {
+  const requiredRoles = requiredRoleSet(template, summary);
+  return [...new Set([...rolesFromTemplate(template), ...requiredRoles])].map(role => {
     const files = summary.materialInventory[role] || [];
     const required = requiredRoles.has(role);
     const satisfied = files.length > 0;
@@ -47,6 +49,16 @@ export function resolveTemplateMaterialRoles(template: DocumentTemplate, summary
   });
 }
 
+function clampRate(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
+
 export function materialRoleSatisfactionRate(resolved: ResolvedMaterialRole[]) {
-  return resolved.length ? resolved.filter(item => item.satisfied).length / resolved.length : 1;
+  if (resolved.length === 0) return 1;
+  const required = resolved.filter(item => item.required);
+  const optional = resolved.filter(item => !item.required);
+  const requiredScore = required.length ? required.filter(item => item.satisfied).length / required.length : 1;
+  const optionalScore = optional.length ? optional.filter(item => item.satisfied).length / optional.length : 1;
+  const weakRequiredPenalty = required.some(item => item.weak) ? 0.05 : 0;
+  return clampRate((requiredScore * 0.75) + (optionalScore * 0.2) + 0.05 - weakRequiredPenalty);
 }

@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/server",
-  "version": "4.0.111",
+  "version": "4.1.5",
   "description": "Customize Agent Web 管理控制台",
   "exports": {
     "./package.json": "./package.json"
@@ -11,7 +11,7 @@
   },
   "scripts": {
     "dev": "next dev -p 17321",
-    "build": "node -e \"require('fs').rmSync('.next', { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })\" && next build && node scripts/verify-next-static.js && node -e \"const fs=require('fs'); for (const p of ['.next/cache','.next/static/development','.next/static/webpack']) fs.rmSync(p, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })\"",
+    "build": "node -e \"require('fs').rmSync('.next', { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })\" && next build && node -e \"const fs=require('fs'); for (const p of ['.next/cache','.next/static/development','.next/static/webpack']) fs.rmSync(p, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })\" && node scripts/verify-next-static.js",
     "prestart": "node scripts/verify-next-static.js",
     "start": "next start -p 17321",
     "lint": "eslint src/"

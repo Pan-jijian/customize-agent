@@ -3,8 +3,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { computeProjectId } from '@customize-agent/knowledge';
 
-export type KbOperationType = 'upload' | 'delete' | 'reindex';
-export type KbOperationStage = 'uploading' | 'parsing' | 'chunking' | 'vectorizing' | 'done' | 'error';
+export type KbOperationType = 'upload' | 'delete' | 'reindex' | 'document';
+export type KbOperationStage = 'uploading' | 'parsing' | 'chunking' | 'vectorizing' | 'generating' | 'validating' | 'done' | 'error';
 export type KbOperationStatus = 'processing' | 'success' | 'warning' | 'error';
 
 export interface KbOperationRecord {
@@ -21,6 +21,7 @@ export interface KbOperationRecord {
   textLength?: number;
   extractionMode?: string;
   error?: string;
+  details?: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -62,6 +63,7 @@ export function upsertKbOperation(projectRoot: string, patch: Omit<Partial<KbOpe
     textLength: patch.textLength ?? current?.textLength,
     extractionMode: patch.extractionMode ?? current?.extractionMode,
     error: patch.error ?? current?.error,
+    details: patch.details ?? current?.details,
     createdAt: current?.createdAt ?? now,
     updatedAt: now,
   };

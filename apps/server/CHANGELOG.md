@@ -1,5 +1,71 @@
 # server
 
+## 4.0.122
+
+### Patch Changes
+
+- Fix document section repair loop, export gate blocking, and generation quality safeguards.
+
+## 4.0.121
+
+### Patch Changes
+
+- Improve document readiness scoring diagnostics and responsive workflow layout.
+
+## 4.0.120
+
+### Patch Changes
+
+- Improve longform document generation quality, timeout handling, section fallback content, and polluted heading cleanup.
+
+## 4.0.119
+
+### Patch Changes
+
+- 增强文档生成事实落位、量化参数门禁和模板运行即时反馈交互。
+
+## 4.0.118
+
+### Patch Changes
+
+- 修复服务端生产包启动校验、文档工作流提示词绑定可见性、目录正文清洗和最终导出门禁。
+
+## 4.0.117
+
+### Patch Changes
+
+- Fix server runtime startup artifacts and hydration stability for the web console.
+
+## 4.0.116
+
+### Patch Changes
+
+- Fix documents page development runtime noise by disabling Next dev indicators and keeping Drawer usage compatible with the installed Ant Design version.
+
+## 4.0.115
+
+### Patch Changes
+
+- Fix dashboard documents page runtime warnings by aligning Drawer usage with the installed Ant Design API and simplifying background job status rendering.
+
+## 4.0.114
+
+### Patch Changes
+
+- Fix packaged dashboard startup returning 404 by restoring clean production .next packaging and validating required page routes before start or publish.
+
+## 4.0.113
+
+### Patch Changes
+
+- Improve document generation quality by respecting prompt-driven cover and table-of-contents intent, filtering instruction-like outline headings, strengthening final quality gates, reducing fact noise, and keeping generated tables of contents aligned with final document structure.
+
+## 4.0.112
+
+### Patch Changes
+
+- Improve document workflow prompt execution, export table handling, generation diagnostics, and background job status consistency.
+
 ## 4.0.94
 
 ### Patch Changes

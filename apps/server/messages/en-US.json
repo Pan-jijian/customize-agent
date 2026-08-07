@@ -671,20 +671,6 @@
     "noPromptRoleSelected": "No prompt role selected",
     "bindPromptCount": "Bind {count} Prompts"
   },
-  "settings": {
-    "title": "System Settings",
-    "description": "Manage language, theme, and other preferences",
-    "language": "Language",
-    "languageDesc": "Interface display language",
-    "theme": "Theme",
-    "themeDesc": "Light / Dark mode",
-    "light": "Light",
-    "dark": "Dark",
-    "system": "System",
-    "about": "About",
-    "version": "Version",
-    "port": "Service Port"
-  },
   "common": {
     "save": "Save",
     "cancel": "Cancel",

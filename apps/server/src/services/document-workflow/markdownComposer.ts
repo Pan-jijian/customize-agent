@@ -10,6 +10,22 @@ export function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
 export const WORKFLOW_PHRASE_RE = /.*(?:知识库证据|文件角色|提示词角色|后台自动规范|规范包|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|校验结果).*(?:\n|$)/gu;
 const RAW_SOURCE_LINE_RE = /^\s*(?:#{1,6}\s*)?(?:PDF\s*第\s*\d+\s*页|rule\b|文件[:：]|片段[:：]|来源[:：]).*$/gimu;
 const ASCII_FLOW_LINE_RE = /^\s*(?:[│┃┆┊┌┐└┘├┤┬┴┼─━╭╮╰╯]|[↓↑→←⇒⇨➡])+\s*$/gmu;
+const INSTRUCTION_HEADING_RE = /^#{2,6}\s+(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用)|^#{2,6}\s+(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:如|若|如果)(?:涉及|不涉及|适用|不适用)|^#{2,6}\s+.*(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成)|^#{2,6}\s+.*(?:按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|说明要求|注意事项)\s*$/gmu;
+const INSTRUCTION_TITLE_RE = /^(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用).*|(?:如|若|如果)(?:涉及|不涉及|适用|不适用).*|.*(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成).*|.*(?:按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|说明要求|注意事项))\s*$/u;
+
+function instructionTitleCandidate(value: string) {
+  return value
+    .replace(/^#{1,6}\s+/u, '')
+    .replace(/^\s*\d+(?:\.\d+)*(?:[.．、]|\s)+/u, '')
+    .replace(/^第[一二三四五六七八九十百千万\d]+[章节篇部分]\s*/u, '')
+    .trim();
+}
+
+function isInstructionLikeTitle(value: string) {
+  const rawTitle = instructionTitleCandidate(value);
+  const displayTitle = displayChapterTitle(rawTitle);
+  return INSTRUCTION_TITLE_RE.test(rawTitle) || INSTRUCTION_TITLE_RE.test(displayTitle);
+}
 
 export function normalizeProductionText(markdown: string) {
   return markdown
@@ -37,17 +53,24 @@ export function sanitizeFormalMarkdown(markdown: string) {
     .replace(WORKFLOW_PHRASE_RE, '')
     .replace(RAW_SOURCE_LINE_RE, '')
     .replace(ASCII_FLOW_LINE_RE, '')
+    .replace(INSTRUCTION_HEADING_RE, '')
     .replace(FILE_NAME_RE, '')
     .replace(/^#\s+/gmu, '')
     .replace(CAD_ENTITY_TOKEN_RE, '')
     .replace(/第\s*\d+\s*页\s*\/\s*共\s*\d+\s*页/gu, '');
   return cleaned.split(/\r?\n/u)
-    .filter(line => {
+    .filter((line, index, lines) => {
+      const previousPlain = index > 0 ? displayChapterTitle((lines[index - 1] || '').trim().replace(/^#{1,6}\s+/u, '')) : '';
+      const currentPlain = displayChapterTitle(line.trim().replace(/^#{1,6}\s+/u, ''));
+      if (previousPlain && isInstructionLikeTitle(previousPlain) && currentPlain.length > 0 && currentPlain.length <= 12 && !/^#{1,6}\s/u.test(line.trim())) return false;
       const trimmed = line.trim();
       if (!trimmed) return true;
+      if (/该小节围绕.+进行补充说明/u.test(trimmed)) return false;
       if (/^\s*\|/u.test(trimmed) || /^\s*\|?\s*:?-{3,}:?/u.test(trimmed)) return true;
       const plain = displayChapterTitle(trimmed.replace(/^#{1,6}\s+/u, ''));
+      if (/^(?:雨季|冬季|高温|台风|大风等特殊气候|雨季、冬季、高温、台风、大风等特殊气候)$/u.test(plain)) return false;
       if (plain.length <= 1) return false;
+      if (isInstructionLikeTitle(plain)) return false;
       return !(/[，、；：和与在为对将]$/u.test(plain) || /(通过|包括|如下|主要包括)$/u.test(plain));
     })
     .join('\n')
@@ -111,6 +134,7 @@ export function extractGeneratedSections(markdown: string) {
   const sections = [...markdown.matchAll(/^###\s+(.+)$/gmu)]
     .map(match => displayChapterTitle(match[1] || ''))
     .filter(section => section.length >= 2 && section.length <= 80)
+    .filter(section => !isInstructionLikeTitle(section))
     .filter(section => !/^\d+(?:\.\d+){2,}\s+/u.test(section));
   return [...new Set(sections)];
 }
@@ -173,9 +197,22 @@ function tocSectionTitle(chapterIndex: number, sectionIndex: number, section: st
   return hasSectionNumber(section) ? clean : `${chapterIndex + 1}.${sectionIndex + 1} ${clean}`;
 }
 
+function normalizeTocSection(section: string) {
+  const raw = section.replace(/\*+/gu, '').trim();
+  if (isInstructionLikeTitle(raw)) return '';
+  const clean = displayChapterTitle(raw).replace(/^[-—–]\s*/u, '').trim();
+  if (isInstructionLikeTitle(clean)) return '';
+  if (/^(?:雨季|冬季|高温|台风|大风等特殊气候)$/u.test(clean)) return '';
+  return clean;
+}
+
+function cleanTocSections(sections: string[] = []) {
+  return [...new Set(sections.map(normalizeTocSection).filter(section => section.length >= 2))];
+}
+
 function composeTocLines(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections'>>) {
   return chapters.flatMap((chapter, index) => {
-    const sections = chapter.sections || [];
+    const sections = cleanTocSections(chapter.sections || []);
     return [
       formalChapterTitle(index, chapter.title),
       '',
@@ -188,12 +225,23 @@ function composeTocMarkdown(chapters: Array<Pick<DocumentDraftChapter, 'title' |
   return ['## 目录', '', ...composeTocLines(chapters)].join('\n');
 }
 
+function removeCoverBlock(markdown: string) {
+  return markdown.replace(/<div class="document-cover">[\s\S]*?<\/div>\s*(?:<div class="page-break"><\/div>\s*)?/giu, '').replace(/^#\s+.+\n{1,2}/u, '');
+}
+
+function removeTocBlock(markdown: string) {
+  return markdown
+    .replace(/^##\s+目录\s*$[\s\S]*?(?=\n<div class="page-break"><\/div>|\n##\s+第[一二三四五六七八九十百千万\d]+章|\n##\s+)/gmu, '')
+    .replace(/^<div class="page-break"><\/div>\s*(?=##\s+第[一二三四五六七八九十百千万\d]+章)/gmu, '');
+}
+
 export function inferChapterSectionsFromMarkdown(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections'>>) {
-  const normalizedMarkdown = normalizeFormalChapterHeadings(removeDuplicateTocBlocks(markdown), chapters);
+  const bodyMarkdown = removeTocBlock(markdown);
+  const normalizedMarkdown = normalizeFormalChapterHeadings(removeDuplicateTocBlocks(bodyMarkdown), chapters);
   const headingMatches = [...normalizedMarkdown.matchAll(/^##\s+(.+)$/gmu)];
   return chapters.map((chapter, index) => {
     const expected = formalChapterTitle(index, chapter.title);
-    const current = headingMatches.find(match => sameStructuralTitle(match[1] || '', expected));
+    const current = headingMatches.find(match => sameStructuralTitle(match[1] || '', chapter.title) || sameStructuralTitle(match[1] || '', expected));
     if (!current || current.index === undefined) return chapter.sections || [];
     const next = headingMatches.find(match => (match.index || 0) > (current.index || 0) && chapters.some(item => sameStructuralTitle(match[1] || '', item.title)));
     const plannedSections = chapter.sections || [];
@@ -262,7 +310,8 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
     return sections.findIndex(section => normalizePlannedSectionTitle(section) === key);
   };
   const normalizeSectionHeading = (title: string, fallbackSourceSection?: string) => {
-    const cleanTitle = displayChapterTitle(title);
+    const cleanTitle = normalizeTocSection(title);
+    if (!cleanTitle || isInstructionLikeTitle(title) || isInstructionLikeTitle(cleanTitle)) return '';
     const plannedIndex = plannedSectionIndex(cleanTitle);
     const plannedSections = chapters[chapterIndex]?.sections || [];
     if (plannedSections.length > 0 && plannedIndex < 0) {
@@ -287,8 +336,18 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
     emittedSectionKeys.add(sectionKey);
     return `### ${chapterIndex + 1}.${sectionIndex} ${plannedIndex >= 0 ? displayChapterTitle(plannedSections[plannedIndex]) : cleanTitle}`;
   };
+  let inTocBlock = false;
   return lines.map(line => {
     const trimmed = line.trim();
+    if (/^##\s+目录\s*$/u.test(trimmed)) {
+      inTocBlock = true;
+      return line;
+    }
+    if (inTocBlock && /^<div class="page-break"><\/div>$/u.test(trimmed)) {
+      inTocBlock = false;
+      return line;
+    }
+    if (inTocBlock) return line;
     if (/^##\s+第[一二三四五六七八九十百千万\d]+章\s+/u.test(trimmed)) {
       chapterIndex += 1;
       sectionIndex = 0;
@@ -317,12 +376,12 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
       return tertiaryIndex <= 4 ? `#### ${chapterIndex + 1}.${sectionIndex}.${tertiaryIndex} ${title}` : `**${title}**`;
     }
     return line;
-  }).join('\n');
+  }).filter(line => line !== '').join('\n');
 }
 
 function requiredTableMarkdown(title: string) {
   if (/项目基本信息/u.test(title)) return '';
-  return [`**${title}**`, '', '| 项目 | 内容 | 数据口径 | 备注 |', '|---|---|---|---|', `| ${title.replace(/表$/u, '')} | 依据项目资料、施工组织安排和审批确认结果填写 | 资料已明确的采用资料原值；资料未明确的实施前复核确认 | 不编造资料外工程实体参数 |`].join('\n');
+  return [`**${title}**`, '', '| 项目 | 内容 | 数据口径 | 备注 |', '|---|---|---|---|', `| ${title.replace(/表$/u, '')} | 依据项目资料、施工组织安排和审批确认结果填写 | 已确认事实采用知识库原值；系统暂未确认的实施前复核并触发补抽 | 不编造知识库外工程实体参数 |`].join('\n');
 }
 
 function hasProjectBasicInfoTable(markdown: string) {
@@ -382,11 +441,10 @@ export function applyPromptDocumentRules(markdown: string, rules?: PromptDocumen
   if (!rules) return applyForbiddenTermReplacements(markdown);
   let next = ensureRequiredTables(markdown, rules);
   if (rules.forbidCover) {
-    next = next.replace(/<div class="document-cover">[\s\S]*?<\/div>\s*(?:<div class="page-break"><\/div>\s*)?/giu, '');
+    next = removeCoverBlock(next);
   }
   if (rules.forbidToc) {
-    next = next.replace(/^##\s+目录\s*$[\s\S]*?(?=\n<div class="page-break"><\/div>|\n##\s+第[一二三四五六七八九十百千万\d]+章|\n##\s+)/gmu, '');
-    next = next.replace(/^<div class="page-break"><\/div>\s*(?=##\s+第[一二三四五六七八九十百千万\d]+章)/gmu, '');
+    next = removeTocBlock(next);
   }
   for (const term of rules.preferredTerms || []) {
     if (!term.from || term.from === term.to) continue;
@@ -402,9 +460,25 @@ export function applyPromptDocumentRules(markdown: string, rules?: PromptDocumen
 
 export function ensureFormalToc(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections'>>) {
   const normalizedMarkdown = normalizeFormalChapterHeadings(markdown, chapters);
-  const toc = composeTocMarkdown(chapters);
-  if (/^##\s+目录\s*$/mu.test(normalizedMarkdown)) {
-    return normalizedMarkdown.replace(/^##\s+目录\s*$[\s\S]*?(?=\n<div class="page-break"><\/div>|\n##\s+)/mu, toc.trim());
+  const bodyMarkdown = removeTocBlock(normalizedMarkdown);
+  const headingMatches = [...bodyMarkdown.matchAll(/^##\s+(.+)$/gmu)];
+  const tocChapters = chapters.map((chapter) => {
+    if (chapter.sections?.length) return chapter;
+    const current = headingMatches.find(match => sameStructuralTitle(match[1] || '', chapter.title));
+    if (!current || current.index === undefined) return chapter;
+    const next = headingMatches.find(match => (match.index || 0) > (current.index || 0) && chapters.some(item => sameStructuralTitle(match[1] || '', item.title)));
+    const sections = extractGeneratedSections(bodyMarkdown.slice(current.index, next?.index ?? bodyMarkdown.length)).slice(0, 8);
+    return sections.length ? { ...chapter, sections } : chapter;
+  });
+  const toc = composeTocMarkdown(tocChapters);
+  const tocMatch = /^##\s+目录\s*$/mu.exec(normalizedMarkdown);
+  if (tocMatch?.index !== undefined) {
+    const afterToc = tocMatch.index + tocMatch[0].length;
+    const nextChapter = normalizedMarkdown.slice(afterToc).search(/\n##\s+第[一二三四五六七八九十百千万\d]+章/u);
+    const pageBreaks = [...normalizedMarkdown.slice(afterToc).matchAll(/\n<div class="page-break"><\/div>/gu)];
+    const relativeEnd = pageBreaks[0]?.index ?? (nextChapter >= 0 ? nextChapter : normalizedMarkdown.length - afterToc);
+    const end = afterToc + relativeEnd;
+    return `${normalizedMarkdown.slice(0, tocMatch.index)}${toc.trim()}${normalizedMarkdown.slice(end)}`.replace(/\n{3,}/gu, '\n\n');
   }
   const coverBreak = '<div class="page-break"></div>';
   const index = normalizedMarkdown.indexOf(coverBreak);
@@ -432,6 +506,12 @@ export function findChapterBlock(markdown: string, title: string) {
 
 function hasMarkdownTable(markdown: string) {
   return /\|[^\n]+\|\s*\n\s*\|\s*:?-{3,}:?\s*\|/u.test(markdown);
+}
+
+function tableNearTitle(markdown: string, title: string) {
+  const titleIndex = markdown.search(new RegExp(escapedRegExp(title), 'u'));
+  if (titleIndex < 0) return false;
+  return hasMarkdownTable(markdown.slice(titleIndex, Math.min(markdown.length, titleIndex + 1600)));
 }
 
 function normalizePlannedSectionTitle(title: string) {
@@ -465,16 +545,26 @@ export function plannedStructurePrompt(template: DocumentTemplate) {
 export function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumentRuleSet): ValidationIssue[] {
   if (!rules) return [];
   const issues: ValidationIssue[] = [];
-  if (rules.forbidCover && /document-cover|^#\s+/mu.test(markdown)) issues.push({ level: 'error', message: '正文残留封面内容', suggestion: '总控提示词禁止封面时，正式正文必须直接进入第一章。' });
-  if (rules.forbidToc && /^##\s+目录\s*$/mu.test(markdown)) issues.push({ level: 'error', message: '正文残留目录内容', suggestion: '总控提示词禁止目录时，正式正文不得生成目录或导航页。' });
-  const missingTables = (rules.requiredTables || []).filter(title => !new RegExp(escapedRegExp(title), 'u').test(markdown));
-  if (missingTables.length > 0) issues.push({ level: 'error', message: `正文缺少总控提示词要求的表格：${missingTables.join('、')}`, suggestion: '请在对应章节补齐表名、表头和数据口径，不得编造资料外工程实体参数。' });
+  const instructionHeadings = [...markdown.matchAll(INSTRUCTION_HEADING_RE)].map(match => (match[0] || '').replace(/^#{2,6}\s+/u, '').trim()).filter(Boolean);
+  if (instructionHeadings.length > 0) issues.push({ level: 'error', message: `正文存在疑似提示词指令标题：${instructionHeadings.slice(0, 5).join('、')}`, suggestion: '请删除或改写为正式施工组织设计小节标题。' });
+  const hasCover = /document-cover|^#\s+/mu.test(markdown);
+  const hasToc = /^##\s+目录\s*$/mu.test(markdown);
+  if (rules.coverPolicy === 'required' && !hasCover) issues.push({ level: 'error', message: '正文缺少提示词要求的封面', suggestion: '用户明确要求封面时，应保留封面内容。' });
+  if (rules.tocPolicy === 'required' && !hasToc) issues.push({ level: 'error', message: '正文缺少提示词要求的目录', suggestion: '用户明确要求目录时，应基于最终合法正文标题生成目录。' });
+  if (rules.forbidCover && hasCover) issues.push({ level: 'error', message: '正文残留封面内容', suggestion: '总控提示词禁止封面时，正式正文必须直接进入第一章。' });
+  if (rules.forbidToc && hasToc) issues.push({ level: 'error', message: '正文残留目录内容', suggestion: '总控提示词禁止目录时，正式正文不得生成目录或导航页。' });
+  const missingTables = (rules.requiredTables || []).filter(title => !new RegExp(escapedRegExp(title), 'u').test(markdown) || !tableNearTitle(markdown, title));
+  if (missingTables.length > 0) issues.push({ level: 'error', message: `正文缺少总控提示词要求的正式表格：${missingTables.join('、')}`, suggestion: '请在对应章节补齐表名、表头、分隔线和数据行，不得只写表名或空表。' });
+  const missingKeywords = (rules.requiredKeywords || []).filter(keyword => keyword && !new RegExp(escapedRegExp(keyword), 'u').test(markdown));
+  if (missingKeywords.length > 0) issues.push({ level: 'warning', message: `正文缺少提示词要求覆盖的关键词：${missingKeywords.join('、')}`, suggestion: '请在相关章节自然补齐这些要点，避免堆砌关键词。' });
+  const forbiddenPatternHits = (rules.forbiddenPatterns || []).filter(term => term && new RegExp(escapedRegExp(term), 'u').test(markdown));
+  if (forbiddenPatternHits.length > 0) issues.push({ level: 'warning', message: `正文出现提示词禁止内容：${forbiddenPatternHits.join('、')}`, suggestion: '请删除或替换为正式交付表述。' });
   const hitTerms = (rules.forbiddenTerms || []).filter(term => term && new RegExp(escapedRegExp(term), 'u').test(markdown));
   if (hitTerms.length > 0) issues.push({ level: 'warning', message: `正文残留总控提示词禁止词：${hitTerms.join('、')}`, suggestion: '请改为正式交付语言，删除后台话术、第三人称和口号式表达。' });
   const runtimeRules = rules as PromptDocumentRuleSet & { exactHeadings?: string[]; forbidExtraHeadings?: boolean; requiredSubjects?: string[]; forbiddenSubjects?: string[]; minChars?: number };
   const exactHeadings = runtimeRules.exactHeadings || [];
   if (exactHeadings.length > 0) {
-    const actualHeadings = [...markdown.matchAll(/^##\s+(.+)$/gmu)].map(match => displayChapterTitle(match[1] || ''));
+    const actualHeadings = [...markdown.matchAll(/^##\s+(.+)$/gmu)].map(match => displayChapterTitle(match[1] || '')).filter(title => !(title === '目录' && rules.tocPolicy === 'required'));
     const normalizedExactHeadings = exactHeadings.map(displayChapterTitle);
     const missingHeadings = exactHeadings.filter(title => !actualHeadings.includes(displayChapterTitle(title)));
     const extraHeadings = runtimeRules.forbidExtraHeadings ? actualHeadings.filter(title => !normalizedExactHeadings.includes(displayChapterTitle(title))) : [];
@@ -531,22 +621,38 @@ function sortChapterSectionsByNumber(markdown: string) {
 
 export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 'title' | 'sections'>>(markdown: string, chapters: T[], options: { forbidDrawingImages?: boolean; promptRules?: PromptDocumentRuleSet } = {}) {
   const cleanedMarkdown = applyPromptDocumentRules(removeUnwantedDrawingImages(markdown, Boolean(options.forbidDrawingImages)), options.promptRules);
-  const normalizedMarkdown = sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanedMarkdown)));
+  const policyMarkdown = options.promptRules
+    ? options.promptRules.coverPolicy === 'required'
+      ? options.promptRules.tocPolicy === 'required'
+        ? cleanedMarkdown
+        : removeTocBlock(cleanedMarkdown)
+      : options.promptRules.tocPolicy === 'required'
+        ? removeCoverBlock(cleanedMarkdown)
+        : removeCoverBlock(removeTocBlock(cleanedMarkdown))
+    : cleanedMarkdown;
+  const normalizedMarkdown = sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(policyMarkdown)));
   const inferredSections = inferChapterSectionsFromMarkdown(normalizedMarkdown, chapters);
   const finalizedChapters = chapters.map((chapter, index) => ({
     ...chapter,
     sections: inferredSections[index]?.length ? inferredSections[index] : chapter.sections || [],
   }));
-  const tocAppliedMarkdown = options.promptRules?.forbidToc ? normalizeFormalChapterHeadings(normalizedMarkdown, finalizedChapters) : ensureFormalToc(normalizedMarkdown, finalizedChapters);
+  const tocAppliedMarkdown = options.promptRules?.tocPolicy === 'required' ? ensureFormalToc(normalizedMarkdown, finalizedChapters) : normalizeFormalChapterHeadings(normalizedMarkdown, finalizedChapters);
   const finalizedMarkdown = applyPromptDocumentRules(sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(tocAppliedMarkdown))), options.promptRules);
   return { markdown: finalizedMarkdown, chapters: finalizedChapters };
 }
 
-export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'markdown'>): string {
-  const chapterMarkdown = draft.chapters
-    .map((chapter, index) => normalizeChapterDraftContent(chapter, index))
+export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'markdown'>, options: { forbidDrawingImages?: boolean; promptRules?: PromptDocumentRuleSet } = {}): string {
+  const cleanChapters = draft.chapters.map(chapter => ({ ...chapter, sections: cleanTocSections(chapter.sections || []) }));
+  const normalizedChapterBlocks = cleanChapters.map((chapter, index) => normalizeChapterDraftContent(chapter, index));
+  const chapterMarkdown = normalizedChapterBlocks
     .filter(Boolean)
     .join('\n\n');
+  const tocChapters = cleanChapters.map((chapter, index) => {
+    if (chapter.sections?.length) return chapter;
+    const normalizedBlock = normalizeFormalChapterHeadings(normalizedChapterBlocks[index] || '', [chapter]);
+    const sections = extractGeneratedSections(normalizedBlock).slice(0, 8);
+    return sections.length ? { ...chapter, sections: cleanTocSections(sections) } : chapter;
+  });
   const initialMarkdown = [
     `<div class="document-cover">`,
     `# ${draft.title}`,
@@ -555,12 +661,12 @@ export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'mar
     '',
     '<div class="page-break"></div>',
     '',
-    composeTocMarkdown(draft.chapters),
+    composeTocMarkdown(tocChapters),
     '',
     '<div class="page-break"></div>',
     '',
     chapterMarkdown,
   ].join('\n');
 
-  return finalizeDocumentMarkdown(initialMarkdown, draft.chapters).markdown;
+  return finalizeDocumentMarkdown(initialMarkdown, cleanChapters, options).markdown;
 }

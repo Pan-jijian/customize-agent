@@ -14,11 +14,15 @@ export interface PromptChapterStructuralRule {
 }
 
 export interface PromptDocumentRuleSet {
+  coverPolicy?: 'required' | 'forbidden' | 'unspecified';
+  tocPolicy?: 'required' | 'forbidden' | 'unspecified';
   forbidCover?: boolean;
   forbidToc?: boolean;
   forbiddenTerms: string[];
   preferredTerms: Array<{ from: string; to: string }>;
   requiredTables: string[];
+  requiredKeywords?: string[];
+  forbiddenPatterns?: string[];
 }
 
 export interface WebAccessConfig {
@@ -290,10 +294,6 @@ export interface DocumentGenerationStrategy {
   enableGlobalReview: boolean;
   enableDocumentBudgetExpansion: boolean;
   enableFinalQualityReview: boolean;
-  maxChapterConcurrency: number;
-  maxSectionConcurrency: number;
-  maxChapterReviewConcurrency: number;
-  targetLlmConcurrency: number;
 }
 
 export interface DocumentPerformanceMetric {
@@ -307,15 +307,114 @@ export interface DocumentPerformanceMetric {
 export interface DocumentGenerationDiagnostics {
   strategy: DocumentGenerationStrategy;
   metrics: DocumentPerformanceMetric[];
-  llm: { calls: number; failures: number; throttledWaits: number; throttledWaitMs: number; maxActive: number; currentLimit: number; limitAdjustments: number };
+  llm: { calls: number; failures: number; maxActive: number };
   evidence: { raw: number; used: number; filteredNoise: number; avgNoiseScore: number; avgFactDensity: number; searchQueries: number; searchMs: number; contextChars: number };
   quality: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number };
+}
+
+export interface DocumentProfileReport {
+  type: string;
+  dimensions: string[];
+  requiredEvidencePolicy: string;
+}
+
+export interface DocumentKnowledgeCoverageReport {
+  score: number;
+  evidenceCount: number;
+  confirmedFiles: number;
+  chapterReports: Array<{ chapterId: string; title: string; requiredDomains: string[]; confirmedDomains: string[]; unconfirmedDomains: string[]; score: number }>;
+  unconfirmedDomains: string[];
+  remediation: string;
+}
+
+export interface DocumentFactTrace {
+  label: string;
+  value: string;
+  sourceFile?: string;
+  status: 'used' | 'unplaced';
+  confidence: number;
+}
+
+export interface ChapterCoverageReport {
+  chapterId: string;
+  title: string;
+  score: number;
+  checks: Array<{ key: string; label: string; passed: boolean }>;
+  action: string;
+}
+
+export interface RetrievalCoverageReport {
+  chapterId: string;
+  chapterTitle: string;
+  risk: { totalChunks: number; loadedChunks: number; omittedChunks: number; loadedRatio: number; highRisk: boolean };
+  evidenceCount: number;
+  evidenceFiles: number;
+  sectionCovered: number;
+  sectionTotal: number;
+  requiredFactCovered: number;
+  requiredFactTotal: number;
+}
+
+export interface DocumentQualityReport {
+  overall: number;
+  deliveryProbability: number;
+  target: number;
+  passed: boolean;
+  scores: {
+    factuality: number;
+    structure: number;
+    professionalDepth: number;
+    executable: number;
+    evidenceCoverage: number;
+    consistency: number;
+  };
+  summary: string;
+  actions: string[];
+}
+
+export interface RepairStrategy {
+  priority: 'high' | 'medium' | 'low';
+  title: string;
+  action: string;
+}
+
+export interface DocumentReviewChecklistItem {
+  key: string;
+  label: string;
+  passed: boolean;
+  message?: string;
+}
+
+export interface DocumentWorkflowVersion {
+  version: string;
+  rules: string[];
+}
+
+export interface DocumentTelemetryReport {
+  llmCalls: number;
+  llmFailures: number;
+  maxParallelLlm: number;
+  searchQueries: number;
+  evidenceContextChars: number;
+  qualityIssues: DocumentGenerationDiagnostics['quality'];
+  slowMetrics: Array<{ name: string; durationMs: number }>;
+  elapsedMs?: number;
 }
 
 export interface DocumentReviewMetadata {
   chapterSummaries: ChapterReviewSummary[];
   globalIssues: string[];
   diagnostics: DocumentGenerationDiagnostics;
+  profile?: DocumentProfileReport;
+  knowledgeCoverage?: DocumentKnowledgeCoverageReport;
+  factTraces?: DocumentFactTrace[];
+  chapterCoverage?: ChapterCoverageReport[];
+  retrievalCoverage?: RetrievalCoverageReport[];
+  qualityReport?: DocumentQualityReport;
+  repairStrategies?: RepairStrategy[];
+  reviewChecklist?: DocumentReviewChecklistItem[];
+  workflowVersion?: DocumentWorkflowVersion;
+  telemetry?: DocumentTelemetryReport;
 }
 
 export interface GeneratedDocumentDraft {

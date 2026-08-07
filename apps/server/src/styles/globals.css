@@ -4,18 +4,6 @@
 
 @import "tailwindcss";
 
-@source "../pages";
-@source "../components";
-@source "../hooks";
-@source "../lib";
-
-@theme {
-  --color-primary: var(--colorBrand);
-  --color-danger: var(--colorDanger);
-  --color-warning: var(--colorWarn);
-  --color-success: var(--colorOk);
-}
-
 :root {
   /* 全局统一底色，极净的白 */
   --colorBg: #ffffff;

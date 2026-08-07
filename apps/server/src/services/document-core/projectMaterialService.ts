@@ -70,7 +70,7 @@ export interface ProjectMaterialSummary {
   };
 }
 
-const REQUIRED_ROLES: MaterialRole[] = ['project_overview', 'requirement_document', 'addendum', 'structured_data', 'design_specification', 'schedule_quality_safety', 'scope_description'];
+const BASE_REQUIRED_ROLES: MaterialRole[] = ['project_overview', 'requirement_document', 'structured_data', 'scope_description'];
 const ALL_ROLES: MaterialRole[] = ['project_overview', 'requirement_document', 'addendum', 'structured_data', 'budget_cost', 'design_specification', 'resource_recommendation', 'schedule_quality_safety', 'scope_description', 'technical_specification', 'risk_constraints'];
 
 function emptyInventory(): Record<MaterialRole, MaterialEvidenceRef[]> {
@@ -231,6 +231,14 @@ function scoreGroupByRequirement(group: string, requirement: string) {
   return score;
 }
 
+function expectedCoverageRoles(inventory: Record<MaterialRole, MaterialEvidenceRef[]>): MaterialRole[] {
+  const roles = new Set<MaterialRole>(BASE_REQUIRED_ROLES);
+  for (const role of ['design_specification', 'schedule_quality_safety', 'risk_constraints', 'resource_recommendation', 'technical_specification', 'budget_cost', 'addendum'] as MaterialRole[]) {
+    if (inventory[role].length > 0) roles.add(role);
+  }
+  return [...roles];
+}
+
 function selectMaterialFiles(files: KnowledgeFileDiscoveryItem[], options?: { requirement?: string; boundFilePaths?: string[] }) {
   const active = files.filter(file => file.status !== 'error');
   const boundKeys = new Set((options?.boundFilePaths || []).map(normalizePathKey));
@@ -274,8 +282,9 @@ export function buildProjectMaterialSummary(projectRoot: string, options?: { req
   const documentNo = inferDocumentNo(files);
   const projectIdentity = buildFingerprint(files, allFiles);
   const textFacts = extractTextFacts(files);
-  const satisfiedRoles = REQUIRED_ROLES.filter(role => inventory[role].length > 0);
-  const missingRoles = REQUIRED_ROLES.filter(role => inventory[role].length === 0);
+  const coverageRoles = expectedCoverageRoles(inventory);
+  const satisfiedRoles = coverageRoles.filter(role => inventory[role].length > 0);
+  const missingRoles = coverageRoles.filter(role => inventory[role].length === 0);
   return {
     projectId: projectName.replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/gu, '-').slice(0, 80) || 'current-project',
     projectName,
@@ -312,10 +321,10 @@ export function buildProjectMaterialSummary(projectRoot: string, options?: { req
       constraintsAndRisks: `约束和风险资料：${summarizeFiles(inventory.risk_constraints, '未识别到重点难点或约束资料')}。`,
     },
     coverage: {
-      requiredRoles: REQUIRED_ROLES,
+      requiredRoles: coverageRoles,
       satisfiedRoles,
       missingRoles,
-      materialCompletenessRate: REQUIRED_ROLES.length ? satisfiedRoles.length / REQUIRED_ROLES.length : 1,
+      materialCompletenessRate: coverageRoles.length ? satisfiedRoles.length / coverageRoles.length : 1,
     },
   };
 }

@@ -19,11 +19,15 @@ for (const item of required) {
   }
 }
 
-const apiRuntime = path.join(nextDir, 'server', 'webpack-api-runtime.js');
-if (fs.existsSync(apiRuntime)) {
-  const runtime = fs.readFileSync(apiRuntime, 'utf8');
-  const patched = runtime.replace(/\.\/chunks\/vendor-chunks\//gu, './vendor-chunks/');
-  if (patched !== runtime) fs.writeFileSync(apiRuntime, patched);
+for (const runtimePath of [
+  path.join(nextDir, 'server', 'webpack-api-runtime.js'),
+  path.join(nextDir, 'server', 'webpack-runtime.js'),
+]) {
+  if (fs.existsSync(runtimePath)) {
+    const runtime = fs.readFileSync(runtimePath, 'utf8');
+    const patched = runtime.replace(/\.\/chunks\/vendor-chunks\//gu, './vendor-chunks/');
+    if (patched !== runtime) fs.writeFileSync(runtimePath, patched);
+  }
 }
 
 function staticAssetExists(file) {
@@ -53,6 +57,23 @@ if (!fs.existsSync(pagesManifestPath)) {
   process.exit(1);
 }
 const pagesManifest = JSON.parse(fs.readFileSync(pagesManifestPath, 'utf8'));
+const requiredRoutes = ['/', '/overview', '/documents', '/knowledge/files', '/prompt', '/models', '/settings'];
+const missingRoutes = requiredRoutes.filter(route => !pagesManifest[route]);
+if (missingRoutes.length > 0) {
+  console.error(`[server] Invalid Next pages manifest, missing routes: ${missingRoutes.join(', ')}`);
+  console.error('[server] The packaged build may have been polluted by a development server. Run `pnpm build` before publishing or reinstall the latest @customize-agent/server.');
+  process.exit(1);
+}
+for (const polluted of [
+  path.join(nextDir, 'static', 'development'),
+  path.join(nextDir, 'static', 'webpack'),
+]) {
+  if (fs.existsSync(polluted)) {
+    console.error(`[server] Invalid production build artifact: ${path.relative(root, polluted)} should not be packaged.`);
+    console.error('[server] Run `pnpm build` to regenerate isolated production artifacts.');
+    process.exit(1);
+  }
+}
 for (const [route, file] of Object.entries(pagesManifest)) {
   const pagePath = path.join(nextDir, 'server', file);
   const htmlFallbackPath = pagePath.replace(/\.js$/u, '.html');

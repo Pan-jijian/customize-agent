@@ -1,16 +1,23 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { useTheme } from 'next-themes';
 import { useAppLocale, useAppTranslations } from '@/components/Layout';
 import { Sun, Moon, Languages } from 'lucide-react';
-import { JobStatus } from '@/components/JobStatus';
+import { JobStatus } from '@/components/JobStatus/index';
 
 /** 顶部导航栏：主题切换与语言切换按钮 */
 export function Header() {
   const { resolvedTheme, setTheme } = useTheme();
   const { locale, setLocale } = useAppLocale();
   const t = useAppTranslations('settings');
-  const isDark = resolvedTheme === 'dark';
+  const [mounted, setMounted] = useState(false);
+  const isDark = mounted && resolvedTheme === 'dark';
+  const displayLocale = mounted ? locale : 'zh-CN';
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const toggleTheme = () => setTheme(isDark ? 'light' : 'dark');
 
@@ -28,7 +35,7 @@ export function Header() {
       </button>
       <button onClick={toggleLocale} className="topbarBtn">
         <Languages size={14} />
-        <span>{locale === 'zh-CN' ? 'English' : '中文'}</span>
+        <span>{displayLocale === 'zh-CN' ? 'English' : '中文'}</span>
       </button>
     </header>
   );

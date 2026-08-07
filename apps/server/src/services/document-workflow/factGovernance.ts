@@ -158,7 +158,7 @@ export function collectMarkdownTableCandidates(markdown: string, sourceName = 'g
     const value = cells[0] === '序号' && cells.length >= 3 ? cells[2] : cells[1];
     const rowSource = cells[0] === '序号' && cells.length >= 4 ? cells[3] : cells[2];
     const spec = PROJECT_BASIC_FIELD_SPECS.find(item => item.aliases.some(alias => label.includes(alias)) || item.label === label);
-    if (!spec || !value || /内容|参数|资料未明确/u.test(value)) continue;
+    if (!spec || !value || /内容|参数|资料未明确|系统暂未确认|暂未从知识库确认/u.test(value)) continue;
     candidates.push(scoreFactCandidate({
       fieldKey: spec.key,
       label: spec.label,

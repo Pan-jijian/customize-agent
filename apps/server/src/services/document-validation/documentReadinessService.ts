@@ -23,6 +23,7 @@ export interface DocumentGenerationReadiness {
   specCompletenessRate: number;
   missingRoles: string[];
   weakRoles: string[];
+  diagnostics: string[];
   chapterDiagnostics: ChapterReadinessDiagnostic[];
   blockingIssues: string[];
   warnings: string[];
@@ -97,6 +98,16 @@ export function evaluateDocumentReadiness(input: {
   if (weakChapters.length > 0) warnings.push(`章节级证据覆盖较弱：${weakChapters.slice(0, 5).map(chapter => `${chapter.title} ${Math.round(chapter.readinessRate * 100)}%`).join('、')}`);
   const emptyEvidenceChapters = chapterDiagnostics.filter(chapter => chapter.requiredFacts.length > 0 && chapter.evidenceCount === 0);
   if (emptyEvidenceChapters.length > 0) warnings.push(`部分章节缺少匹配证据：${emptyEvidenceChapters.slice(0, 5).map(chapter => chapter.title).join('、')}`);
+  const satisfiedMaterialRoles = input.summary.coverage.satisfiedRoles;
+  const optionalMissingRoles = input.resolvedRoles.filter(role => !role.required && !role.satisfied).map(role => role.role);
+  const diagnostics = [
+    `资料范围：${input.summary.source.selectionReason}，可用文件 ${input.summary.source.selectedFiles}/${input.summary.source.totalFiles} 份`,
+    `已识别资料类型：${satisfiedMaterialRoles.join('、') || '无'}`,
+    input.summary.coverage.missingRoles.length ? `待补充必需资料类型：${input.summary.coverage.missingRoles.join('、')}` : '必需资料类型已满足',
+    missingRoles.length ? `模板强相关资料角色缺失：${missingRoles.join('、')}` : '模板强相关资料角色已满足',
+    optionalMissingRoles.length ? `可选资料角色未识别：${optionalMissingRoles.join('、')}` : '',
+    weakRoles.length ? `证据较弱资料角色：${weakRoles.join('、')}` : '',
+  ].filter(Boolean);
   const specParts = [input.spec.factFields.length > 0, input.spec.chapterRules.length > 0, input.spec.gateRules.length > 0];
   return {
     ready: blockingIssues.length === 0,
@@ -105,6 +116,7 @@ export function evaluateDocumentReadiness(input: {
     specCompletenessRate: specParts.filter(Boolean).length / specParts.length,
     missingRoles,
     weakRoles,
+    diagnostics,
     chapterDiagnostics,
     blockingIssues,
     warnings,

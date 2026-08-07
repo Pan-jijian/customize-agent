@@ -287,7 +287,7 @@ export default function ModelsPage() {
       <Drawer
         title={isEditing ? t('models.editModel') : t('models.addModel')}
         open={drawerOpen} onClose={() => setDrawerOpen(false)}
-        width={800}
+        size="large"
         styles={{ body: { padding: '24px 32px' }, header: { padding: '16px 32px', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
         extra={<Button type="primary" loading={formSaving} onClick={() => { void handleSaveProvider(); }}>{t('common.save')}</Button>}
       >

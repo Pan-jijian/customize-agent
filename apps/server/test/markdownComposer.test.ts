@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { composeDocumentMarkdown, ensureFormalToc, inferChapterSectionsFromMarkdown, normalizeTertiaryHeadings, sanitizeFormalMarkdown } from '../src/services/document-workflow/markdownComposer';
-import { collectSectionContentGaps, sectionContentIntegrityIssues, tocBodyConsistencyIssues } from '../src/services/document-workflow/qualityValidation';
+import { chapterSectionFactUsageIssues, normalizePlannedSections } from '../src/services/document-workflow/chapterGeneration';
+import { composeDocumentMarkdown, ensureFormalToc, finalizeDocumentMarkdown, inferChapterSectionsFromMarkdown, normalizeTertiaryHeadings, promptDocumentRuleIssues, sanitizeFormalMarkdown } from '../src/services/document-workflow/markdownComposer';
+import { collectSectionContentGaps, instructionLikeHeadingIssues, sectionContentIntegrityIssues, tocBodyConsistencyIssues } from '../src/services/document-workflow/qualityValidation';
 
 describe('normalizeTertiaryHeadings', () => {
   it('renumbers existing tertiary headings by current secondary section', () => {
@@ -191,5 +192,133 @@ describe('formal markdown structure', () => {
     expect(markdown).not.toMatch(/^在$/mu);
     expect(markdown).not.toContain('本段内容包括');
     expect(markdown).toContain('| 在 |');
+  });
+
+  it('checks prompt hard rules for formal tables, required keywords and forbidden content', () => {
+    const markdown = [
+      '## 第一章 施工部署',
+      '',
+      '**资源计划表**',
+      '',
+      '当前章节只写了表名，没有正式表格，并且出现禁止出现内容。',
+    ].join('\n');
+    const issues = promptDocumentRuleIssues(markdown, {
+      forbiddenTerms: [],
+      preferredTerms: [],
+      requiredTables: ['资源计划表'],
+      requiredKeywords: ['闭环管理'],
+      forbiddenPatterns: ['禁止出现内容'],
+    });
+    const messages = issues.map(issue => issue.message).join('\n');
+
+    expect(messages).toContain('正文缺少总控提示词要求的正式表格：资源计划表');
+    expect(messages).toContain('正文缺少提示词要求覆盖的关键词：闭环管理');
+    expect(messages).toContain('正文出现提示词禁止内容：禁止出现内容');
+  });
+
+  it('respects prompt cover and toc policy instead of always generating them', () => {
+    const chapters = [{ title: '工程概况', sections: ['项目概况'], content: '### 项目概况\n正文内容完整。' }];
+    const source = [
+      '<div class="document-cover">',
+      '# 测试文档',
+      '</div>',
+      '',
+      '<div class="page-break"></div>',
+      '',
+      '## 目录',
+      '',
+      '第一章 工程概况',
+      '',
+      '<div class="page-break"></div>',
+      '',
+      '## 第一章 工程概况',
+      '### 项目概况',
+      '正文内容完整。',
+    ].join('\n');
+    const withoutFrontMatter = finalizeDocumentMarkdown(source, chapters, {
+      promptRules: { coverPolicy: 'unspecified', tocPolicy: 'unspecified', forbiddenTerms: [], preferredTerms: [], requiredTables: [] },
+    }).markdown;
+    const withFrontMatter = finalizeDocumentMarkdown(source, chapters, {
+      promptRules: { coverPolicy: 'required', tocPolicy: 'required', forbiddenTerms: [], preferredTerms: [], requiredTables: [] },
+    }).markdown;
+
+    expect(withoutFrontMatter).not.toContain('document-cover');
+    expect(withoutFrontMatter).not.toMatch(/^##\s+目录/mu);
+    expect(withFrontMatter).toContain('document-cover');
+    expect(withFrontMatter).toMatch(/^##\s+目录/mu);
+  });
+
+  it('removes instruction-like headings from generated toc and body', () => {
+    const markdown = composeDocumentMarkdown({
+      title: '测试文档',
+      chapters: [{
+        title: '特殊气候措施',
+        sections: ['判断是否涉及冬季施工', '雨季施工措施'],
+        content: ['### 判断是否涉及冬季施工', '本项目应结合气象资料执行。', '', '### 雨季施工措施', '雨季施工应覆盖排水、材料防潮、设备巡检、临电保护和应急响应要求。'].join('\n'),
+      }],
+    });
+
+    expect(markdown).not.toContain('判断是否涉及冬季施工');
+    expect(markdown).toContain('  1.1 雨季施工措施');
+    expect(markdown).toContain('### 1.1 雨季施工措施');
+    expect(tocBodyConsistencyIssues(markdown)).toHaveLength(0);
+    expect(instructionLikeHeadingIssues(markdown)).toHaveLength(0);
+  });
+
+  it('reports instruction-like headings and toc/body mismatches as blocking issues', () => {
+    const markdown = ['## 目录', '', '第一章 特殊气候措施', '  1.1 判断是否涉及冬季施工', '', '<div class="page-break"></div>', '', '## 第一章 特殊气候措施', '', '### 1.1 雨季施工措施', '雨季施工应覆盖排水、材料防潮、设备巡检、临电保护和应急响应要求。', '', '### 1.2 判断是否涉及冬季施工', '本项目按实际情况判断。'].join('\n');
+
+    expect(tocBodyConsistencyIssues(markdown).every(issue => issue.level === 'error')).toBe(true);
+    expect(instructionLikeHeadingIssues(markdown).map(issue => issue.message).join('\n')).toContain('疑似提示词指令标题');
+  });
+
+  it('filters polluted planned sections before generation', () => {
+    expect(normalizePlannedSections(['**应急预案**', '- 判断是否涉', '雨季', '冬季', '高温', '台风', '大风等特殊气候', '雨季、冬季、高温、台风、大风等特殊气候', '确保工期的保障体系与措施'], '确保工期与质量的保障体系与措施')).toEqual(['应急预案', '确保工期的保障体系与措施']);
+  });
+
+  it('removes prompt-fragment and fragmented weather headings from toc/body', () => {
+    const markdown = composeDocumentMarkdown({
+      title: '测试文档',
+      chapters: [{
+        title: '确保工期与质量的保障体系与措施',
+        sections: ['**应急预案**', '- 判断是否涉', '雨季', '冬季', '高温', '台风', '大风等特殊气候', '雨季、冬季、高温、台风、大风等特殊气候', '确保工期的保障体系与措施'],
+        content: ['### **应急预案**', '建立应急组织。', '', '### - 判断是否涉', '雨季', '', '### 雨季', '雨季施工应做好排水。', '', '### 雨季、冬季、高温、台风、大风等特殊气候', '特殊天气控制。', '', '### 确保工期的保障体系与措施', '项目应围绕45日历天工期目标组织资源。'].join('\n'),
+      }],
+    });
+
+    expect(markdown).not.toContain('**应急预案**');
+    expect(markdown).toContain('应急预案');
+    expect(markdown).not.toContain('判断是否涉');
+    expect(markdown).not.toContain('  1.2 雨季');
+    expect(markdown).not.toContain('### 1.2 雨季');
+    expect(markdown).not.toContain('雨季、冬季、高温、台风、大风等特殊气候');
+    expect(markdown).toContain('确保工期的保障体系与措施');
+  });
+
+  it('removes repeated generic supplement placeholders', () => {
+    const markdown = composeDocumentMarkdown({
+      title: '测试文档',
+      chapters: [{ title: '施工方案', sections: ['主要施工方案'], content: '### 主要施工方案\n该小节围绕“主要施工方案”进行补充说明，执行时应结合本章已列明的资料事实、施工对象、控制边界和质量安全要求组织实施。\n针对本项目建筑面积约4645㎡的特点组织施工。' }],
+    });
+
+    expect(markdown).not.toContain('该小节围绕');
+    expect(markdown).toContain('建筑面积约4645㎡');
+  });
+
+  it('detects section-level fact density gaps when evidence facts are not used', () => {
+    const chapter = { id: 'c1', title: '施工部署', purpose: '', queries: [], requiredFacts: [], sections: ['工程概况'] };
+    const evidence = [{ filePath: '/tmp/招标文件.md', content: '建设地点：黄山市屯溪区。\n计划工期：180日历天。\n质量标准：一次性验收合格。', score: 1 }];
+    const looseContent = '## 施工部署\n\n### 工程概况\n\n本工程应结合现场情况组织施工，强化质量、安全和进度管理。';
+    const factualContent = '## 施工部署\n\n### 工程概况\n\n本工程建设地点为黄山市屯溪区，计划工期为180日历天，质量标准为一次性验收合格。项目组织应围绕该地点条件、工期节点和质量目标配置资源。';
+
+    expect(chapterSectionFactUsageIssues({ chapter, content: looseContent, evidence }).join('\n')).toContain('资料事实落位不足');
+    expect(chapterSectionFactUsageIssues({ chapter, content: factualContent, evidence })).toHaveLength(0);
+  });
+
+  it('removes instruction-like headings during sanitization and reports them before cleanup', () => {
+    const markdown = ['## 第二章 特殊气候措施', '', '### 2.2 - 判断是否涉', '', '本项目不涉及冬季施工。'].join('\n');
+
+    expect(promptDocumentRuleIssues(markdown, { forbiddenTerms: [], preferredTerms: [], requiredTables: [] }).map(issue => issue.message).join('\n')).toContain('疑似提示词指令标题');
+    expect(sanitizeFormalMarkdown(markdown)).not.toContain('判断是否涉');
   });
 });

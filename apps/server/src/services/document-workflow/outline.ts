@@ -17,10 +17,17 @@ function cleanOutlineTitle(title: string) {
   return cleaned.replace(/\s+/gu, ' ');
 }
 
+function isInstructionLikeOutlineTitle(title: string) {
+  const normalized = cleanOutlineTitle(title).replace(/\s+/gu, '');
+  if (!normalized) return true;
+  if (/^(?:目录|章节|大纲|要求|说明|注意|输出|格式|示例|例如|写法|占位|提示)$/u.test(normalized)) return true;
+  if (/^(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用)|^(?:如|若|如果)(?:涉及|不涉及|适用|不适用)|(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成)|按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|说明要求|注意事项/u.test(normalized)) return true;
+  if (/[：:]$|[，、；。]$/u.test(normalized)) return true;
+  return false;
+}
+
 function isInvalidOutlineTitle(title: string) {
-  // 既然用户显式在 <OUTLINE> 中提供，完全信任用户的输入，不再做语义、关键字或长度限制
-  // 仅过滤掉清理后完全为空的行
-  return title.trim().length === 0;
+  return title.trim().length === 0 || isInstructionLikeOutlineTitle(title);
 }
 
 function outlineTitlesFromBlock(content: string) {
@@ -123,6 +130,7 @@ export function isValidGeneratedChapterTitle(title: string) {
   if (/[{}<>]|Markdown|JSON|变量|占位符/u.test(clean)) return false;
   if (/[。；;]$/u.test(clean) || /[:：]\s*[。；;]?$/u.test(clean)) return false;
   if (/^(目录|章节|大纲|要求|说明|注意|输出|格式|示例|例如|写法|占位)$/u.test(clean)) return false;
+  if (isInstructionLikeOutlineTitle(clean)) return false;
   if (/(评标委员会|完全满足评审要求|全面梳理与响应|坚实的技术保障)/u.test(clean)) return false;
   return !isPollutedChapterTitle(clean);
 }

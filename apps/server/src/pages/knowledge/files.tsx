@@ -6,7 +6,7 @@ import { Table, Button, Input, Select, Tag, Modal, Space, App, Dropdown } from '
 import type { ColumnsType } from 'antd/es/table';
 import { SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined, MoreOutlined, PlusOutlined } from '@ant-design/icons';
 import { ChevronRight, ChevronDown } from 'lucide-react';
-import { getJob, getKbFiles, getKbOperations, clearKbOperations, deleteKbOperation, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, reindexKbFile, type KbFileItem, type KbOperationRecord } from '@/lib/api';
+import { getJob, getKbFiles, getKbOperations, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, reindexKbFile, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
@@ -44,11 +44,7 @@ export default function FilesPage() {
   const [reindexingAll, setReindexingAll] = useState(false);
   const [statusItems, setStatusItems] = useState<StatusItem[]>([]);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
-  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
-  const [statusFilter, setStatusFilter] = useState<'all' | 'processing' | 'success' | 'error'>('all');
-  const [statusCollapsed, setStatusCollapsed] = useState(true);
   const [expandedRowKeys, setExpandedRowKeys] = useState<React.Key[]>([]);
-  const [reindexingFiles, setReindexingFiles] = useState<Set<string>>(new Set());
   const categoryRef = useRef(category);
 
   useEffect(() => { categoryRef.current = category; }, [category]);
@@ -81,25 +77,28 @@ export default function FilesPage() {
 
   useEffect(() => { void loadFiles(category); }, [category, loadFiles]);
 
-  const mapOperation = (record: KbOperationRecord): StatusItem => ({
-    id: record.id,
-    type: record.type,
-    title: record.title,
-    description: record.message,
-    status: record.status,
-    percent: record.percent,
-    filePath: record.filePath,
-    chunkCount: record.chunkCount,
-    textLength: record.textLength,
-    extractionMode: record.extractionMode,
-    error: record.error,
-    createdAt: record.createdAt,
-  });
+  const mapOperation = (record: KbOperationRecord): StatusItem | null => {
+    if (record.type === 'document') return null;
+    return {
+      id: record.id,
+      type: record.type,
+      title: record.title,
+      description: record.message,
+      status: record.status,
+      percent: record.percent,
+      filePath: record.filePath,
+      chunkCount: record.chunkCount,
+      textLength: record.textLength,
+      extractionMode: record.extractionMode,
+      error: record.error,
+      createdAt: record.createdAt,
+    };
+  };
 
   const loadOperations = useCallback(async () => {
     try {
       const result = await getKbOperations();
-      const operationItems = result.operations.map(mapOperation);
+      const operationItems = result.operations.map(mapOperation).filter((item): item is StatusItem => Boolean(item));
       setStatusItems(items => {
         const operationIds = new Set(operationItems.map(item => item.id).filter(Boolean));
         const mergedOperations = operationItems.map(item => {
@@ -126,32 +125,6 @@ export default function FilesPage() {
 
   useEffect(() => { void loadOperations(); }, [loadOperations]);
 
-  const handleClearOperations = async () => {
-    try {
-      await clearKbOperations();
-      setStatusItems([]);
-      message.success('任务状态已清空');
-    } catch {
-      message.error('清空任务状态失败');
-    }
-  };
-
-  const toggleExpand = (key: string) => {
-    setExpandedItems(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
-    });
-  };
-
-  const dismissItem = async (item: StatusItem, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (item.id) {
-      try { await deleteKbOperation(item.id); } catch { /* ignore */ }
-    }
-    setStatusItems(prev => prev.filter(s => s !== item));
-  };
-
   const statusStats = useMemo(() => {
     let processing = 0, success = 0, error = 0;
     for (const item of statusItems) {
@@ -163,9 +136,6 @@ export default function FilesPage() {
   }, [statusItems]);
 
   useEffect(() => {
-    if (statusStats.processing > 0) setStatusCollapsed(false);
-  }, [statusStats.processing]);
-  useEffect(() => {
     if (statusStats.processing === 0) return;
     const operationsTimer = window.setInterval(() => { void loadOperations(); }, 2000);
     const filesTimer = window.setInterval(() => { void loadFiles(undefined, { silent: true }); }, 8000);
@@ -174,15 +144,6 @@ export default function FilesPage() {
       window.clearInterval(filesTimer);
     };
   }, [loadFiles, loadOperations, statusStats.processing]);
-
-  const filteredStatusItems = statusFilter === 'all'
-    ? statusItems
-    : statusItems.filter(item => {
-        if (statusFilter === 'processing') return item.status === 'processing';
-        if (statusFilter === 'success') return item.status === 'success';
-        if (statusFilter === 'error') return item.status === 'error' || item.status === 'warning';
-        return true;
-      });
 
   const handleUpload = async (uploadFilesList: File[]) => {
     const allowedFiles = uploadFilesList.filter(file => {
@@ -281,7 +242,6 @@ export default function FilesPage() {
 
   const handleReindexFile = async (record: KbFileItem) => {
     const localId = `file-reindex-ui-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setReindexingFiles(prev => new Set(prev).add(record.relativePath));
     upsertStatusItem({ id: localId, type: 'reindex', title: `重新解析 ${record.relativePath}`, description: '正在提交单文件后台任务', status: 'processing', percent: 5, filePath: record.relativePath });
     try {
       const result = await reindexKbFile(record.relativePath);
@@ -333,12 +293,6 @@ export default function FilesPage() {
       const description = error instanceof Error ? error.message : '单文件重新解析失败';
       message.error(description);
       upsertStatusItem({ id: localId, type: 'error', title: `重新解析失败 ${record.relativePath}`, description, status: 'error', percent: 100, filePath: record.relativePath }, [`重新解析 ${record.relativePath}`]);
-    } finally {
-      setReindexingFiles(prev => {
-        const next = new Set(prev);
-        next.delete(record.relativePath);
-        return next;
-      });
     }
   };
 
@@ -615,7 +569,7 @@ export default function FilesPage() {
 
   const headerExtra = (
     <div className="flex flex-1 md:flex-none w-full md:w-auto items-center gap-3">
-      <Input placeholder={t('searchPlaceholder')} prefix={<SearchOutlined className="text-[var(--colorTextTertiary)]" />} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); }} allowClear className="max-w-[300px] flex-1 bg-transparent hover:bg-transparent focus:bg-transparent" bordered={false} style={{ borderBottom: '1px solid var(--borderColor)', borderRadius: 0, paddingLeft: 0, paddingRight: 0 }} />
+      <Input placeholder={t('searchPlaceholder')} prefix={<SearchOutlined className="text-[var(--colorTextTertiary)]" />} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); }} allowClear variant="borderless" className="max-w-[300px] flex-1 bg-transparent hover:bg-transparent focus:bg-transparent" style={{ borderBottom: '1px solid var(--borderColor)', borderRadius: 0, paddingLeft: 0, paddingRight: 0 }} />
       <Select value={category || undefined} onChange={(v) => { setCategory(v || ''); }} placeholder={t('filterCategory')} allowClear style={{ width: 140 }} variant="borderless"
         options={[{ label: t('allCategories'), value: '' }, ...CATEGORIES.map((c) => ({ label: categoryLabel(c, locale), value: c }))]} />
       <div className="w-[1px] h-6 bg-[var(--borderColor)] mx-1"></div>

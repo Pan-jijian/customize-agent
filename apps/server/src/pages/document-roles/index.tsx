@@ -349,7 +349,7 @@ export default function DocumentRolesPage() {
     <Drawer
       title={t('roles.roleEditor')}
       open={roleDrawerOpen} onClose={() => setRoleDrawerOpen(false)}
-      width={800}
+      size="large"
       maskClosable={false}
       styles={{ body: { padding: '24px 32px' }, header: { padding: '16px 32px', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
       extra={<Button type="primary" onClick={() => { void saveRole(); }}>{t('common.save')}</Button>}
@@ -399,7 +399,7 @@ export default function DocumentRolesPage() {
     <Drawer
       title={t('roles.configEditor')}
       open={configDrawerOpen} onClose={() => setConfigDrawerOpen(false)}
-      width={800}
+      size="large"
       maskClosable={false}
       styles={{ body: { padding: '24px 32px' }, header: { padding: '16px 32px', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
       extra={<Button type="primary" onClick={() => { void saveConfig(); }}>{t('common.save')}</Button>}

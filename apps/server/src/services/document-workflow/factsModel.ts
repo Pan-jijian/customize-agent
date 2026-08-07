@@ -6,6 +6,7 @@ import { getProjectRoot } from '../knowledge/kbService';
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE, factFieldForLabel, isDiagnosticFactValue, isForbiddenFactValue, isLowConfidenceFactValue, type DocumentDomainProfile, type FactFieldProfile } from '../document-core/documentDomainProfileService';
 import type { ChapterFactNeed, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, ResolvedFactNeed, StructuredTableFact } from './types';
 import { evidenceSatisfiesSpecField, specFactTargets } from './factMatching';
+import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { callDocumentLlmJson } from './llmClient';
 import { stringifyFactValue, throwIfAborted } from './utils';
 
@@ -142,12 +143,16 @@ export async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTe
 }
 
 export function normalizedFactValue(value: unknown) {
-  return stringifyFactValue(value).replace(/\s+/gu, '').replace(/[，。,.;；：:]/gu, '').toLowerCase();
+  return normalizeEngineeringTextForFactMatch(stringifyFactValue(value));
 }
 
 function conflictComparableFactValue(value: unknown, profile: DocumentDomainProfile) {
   const raw = stringifyFactValue(value).trim();
   if (isDiagnosticFactValue(profile, raw) || isForbiddenFactValue(profile, raw)) return '';
+  if (/签章|盖章|联系人|联系电话|电话|邮箱|解密|开标|评标|保证金|交易系统|空白|填写|上传|下载|递交/u.test(raw)) return '';
+  if (/\|/u.test(raw) || /^#+\s*/u.test(raw)) return '';
+  if (/见(?:招标公告|投标人须知|前附表|本项目|补疑)|资料参数行摘要|公共资源交易监督管理|开评标程序|监管部门/u.test(raw)) return '';
+  if (/是否|符合|采购范围|规定的投标截止时间|电子交易系统/u.test(raw) && /\d{3,}/u.test(raw)) return '';
   const normalized = normalizedFactValue(raw);
   if (!normalized || normalized.length > 80) return '';
   if (!/[\d年月日%]|合格|一星|二星|三星|总价合同|单价合同|承台|框架|装配式/u.test(raw)) return '';
@@ -216,6 +221,7 @@ export function isValidProjectBasicFactValue(fieldId: string | undefined, rawVal
   const value = normalizeOcrFactText(stringifyFactValue(rawValue));
   if (!fieldId || !value || value.length > 260) return false;
   if (/###|投标文件的编制|备选投标方案|投标将被否决|投标人提供|投标有效期|电子交易系统|公共资源交易监督管理部门|中标候选|评标委员会|实质性内容作出响应/u.test(value)) return false;
+  if (/签章|盖章|联系人|联系电话|电话|邮箱|解密|开标|评标|保证金|交易系统|空白|填写|上传|下载|递交/u.test(value)) return false;
   if (fieldId === 'schedule_requirement') return value.length <= 90 && /\d+(?:\.\d+)?\s*(?:日历天|天|个月|月|年)/u.test(value);
   if (fieldId === 'quality_standard') return value.length <= 40 && /合格|优良|一次性验收|国家.*验收|达到/u.test(value) && !/工期|投标|技术标准/u.test(value);
   if (fieldId === 'owner') return value.length <= 80 && !/将报|监督管理部门|投标人|中标/u.test(value);

@@ -63,6 +63,55 @@ describe('document docx export', () => {
     expect(contentTypes).toContain('Extension="png"');
   });
 
+  it('preserves table cells when markdown tables have loose spacing and uneven columns', async () => {
+    const { markdown } = __documentExportTest__.prepareExportMarkdown([
+      '## 第一章 表格测试',
+      '',
+      '| 项目 | 内容 |',
+      '',
+      '| --- | --- |',
+      '| 工程名称 | 智慧园区建设 | 额外说明 |',
+      '| 管线内容 | 给水\\|排水系统 |',
+      '',
+      '裸表格：',
+      '名称 | 数量',
+      '钢筋 | 100t',
+    ].join('\n'));
+
+    expect(markdown).toContain('智慧园区建设');
+    expect(markdown).toContain('给水\\|排水系统');
+    expect(markdown).toContain('| 钢筋 | 100t |');
+
+    const buffer = await __documentExportTest__.buildDocx('表格测试', markdown);
+    const zip = await JSZip.loadAsync(buffer);
+    const documentXml = await zip.file('word/document.xml')?.async('string');
+
+    expect(documentXml).toContain('智慧园区建设');
+    expect(documentXml).toContain('额外说明');
+    expect(documentXml).toContain('给水|排水系统');
+    expect(documentXml).toContain('钢筋');
+    expect(documentXml).toContain('100t');
+  });
+
+  it('reports export preflight table risks without blocking build', () => {
+    const issues = __documentExportTest__.validateExportMarkdown([
+      '## 第一章 表格预检',
+      '',
+      '| 项 | 值 |',
+      '| --- | --- |',
+      '',
+      '名称 | 数量',
+      '钢筋 | 100t',
+      '',
+      '```',
+      '未闭合代码块',
+    ].join('\n'));
+
+    expect(issues.some(issue => issue.includes('只有表头'))).toBe(true);
+    expect(issues.some(issue => issue.includes('疑似裸表格'))).toBe(true);
+    expect(issues.some(issue => issue.includes('未闭合代码块'))).toBe(true);
+  });
+
   it('reports obvious export content issues without blocking build', () => {
     const issues = __documentExportTest__.validateExportMarkdown([
       '## 第一章 文档概览',

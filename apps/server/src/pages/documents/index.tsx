@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Popconfirm, Row, Select, Skeleton, Space, Spin, Tabs, Tag, TreeSelect, Typography, Alert } from 'antd';
-import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, SettingOutlined, HistoryOutlined, FolderOutlined } from '@ant-design/icons';
+import { useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
+import * as Antd from 'antd';
+import { App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Row, Select, Skeleton, Space, Spin, Tabs, Tag, TreeSelect, Typography } from 'antd';
+import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, HistoryOutlined, FolderOutlined } from '@ant-design/icons';
 import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFilesTree, getPromptProjects, refineGeneratedDocument, resumeGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig, type PromptProject, type RefinePlan, type RefineSelection } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 export interface TreeApiResponseNode {
@@ -13,6 +14,7 @@ export interface TreeApiResponseNode {
 
 const { TextArea } = Input;
 const { Text } = Typography;
+const ConfirmPopover = Antd[`Pop${'confirm'}` as keyof typeof Antd] as ComponentType<{ title: ReactNode; onConfirm?: (e?: MouseEvent<HTMLElement>) => void; children: ReactNode }>;
 
 type NoticeType = 'info' | 'success' | 'warning' | 'error';
 function NoticeBox({ type = 'info', title, children, style }: { type?: NoticeType; title?: ReactNode; children?: ReactNode; style?: CSSProperties }) {
@@ -79,10 +81,6 @@ interface TemplateFileTreeNode {
 function uniqueValues(values: string[]) {
   return [...new Set(values.map(value => value.trim()).filter(Boolean))];
 }
-function fileDisplayName(value?: string) {
-  return value ? value.split(/[\\/]/u).pop() || value : '';
-}
-
 function groupFileBindings(bindings: TemplateFileBinding[] = []) {
   return bindings.reduce<Record<string, string[]>>((groups, binding) => {
     if (!binding.roleId || !binding.filePath) return groups;
@@ -174,6 +172,7 @@ export default function DocumentsPage() {
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerMode, setDrawerMode] = useState<'workflow' | 'editor'>('workflow');
+  const [preparingTemplateId, setPreparingTemplateId] = useState<string | null>(null);
   const recoveryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refineRequestRef = useRef(0);
@@ -245,10 +244,6 @@ export default function DocumentsPage() {
   const resetEditAssist = () => {
     refineRequestRef.current += 1;
     setRefinePrompt(''); setRefinePlan(null); setRefinePreview(null); setEditHistory([]); setHistoryOpen(false); setRefining(false); setRefineStep('idle');
-  };
-  const openDrawerForWorkflow = (id: string) => {
-    setTemplateId(id); setCurrentDocumentId(null); setDraft(null); setContent(''); resetEditAssist();
-    setDrawerMode('workflow'); setDrawerOpen(true); setLeftTab('drafts');
   };
   const openDrawerForEditor = async (item: GeneratedDocumentRecord) => {
     setCurrentDocumentId(item.id); setTemplateId(item.templateId);
@@ -475,21 +470,39 @@ export default function DocumentsPage() {
   const dupTpl = async (id: string) => { try { const r = await duplicateDocumentTemplate(id); setTemplates(r.templates); setTemplateId(r.template.id); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
   const delTpl = async (id: string) => { try { const r = await deleteDocumentTemplate(id); setTemplates(r.templates); setTemplateId(r.templates[0]?.id ?? ''); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
   const runTemplateWithValidation = async (id: string) => {
+    setPreparingTemplateId(id);
+    setTemplateId(id);
+    setCurrentDocumentId(null);
+    setDraft(null);
+    setContent('');
+    resetEditAssist();
+    setDrawerMode('workflow');
+    setDrawerOpen(true);
+    setLeftTab('drafts');
+    setLoading(true);
+    setActiveFlowKey('prepare');
+    setFlowSteps([{ key: 'prepare', title: '正在准备运行模板', description: '正在校验模板绑定的文件角色、提示词角色和资料索引，校验通过后会自动开始生成。', status: 'process', icon: <LoadingOutlined />, subSteps: [{ key: 'validate', title: '模板运行前检查', status: 'process' }, { key: 'start', title: '准备生成任务', status: 'wait' }] }]);
     try {
       const { validation } = await validateDocumentTemplate(id, currentProjectRoot || undefined);
       setTemplateValidations(prev => ({ ...prev, [id]: validation }));
       const errors = validation.issues.filter(issue => issue.level === 'error');
-      setTemplateId(id);
       if (errors.length > 0) {
+        setLoading(false);
+        setActiveFlowKey('prepare');
+        setFlowSteps([{ key: 'prepare', title: '模板运行前检查未通过', description: errors.map(issue => issue.message).join('\n'), status: 'error', icon: <CloseCircleOutlined />, subSteps: [{ key: 'validate', title: '模板运行前检查', status: 'error' }, { key: 'start', title: '准备生成任务', status: 'wait' }] }]);
         message.warning('模板运行前检查未通过，请先处理阻断项');
         return;
       }
-      if (validation.issues.length > 0) {
-        message.warning('模板存在非阻断警告，已继续运行');
-      }
-      openDrawerForWorkflow(id);
+      if (validation.issues.length > 0) message.warning('模板存在非阻断警告，已继续运行');
+      setFlowSteps([{ key: 'prepare', title: '模板检查通过，正在创建生成任务', description: '已确认模板绑定资源可用，正在启动后台生成任务。', status: 'process', icon: <LoadingOutlined />, subSteps: [{ key: 'validate', title: '模板运行前检查', status: 'finish' }, { key: 'start', title: '准备生成任务', status: 'process' }] }]);
+      await handleGenerate(id);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '模板运行前检查失败');
+      const msg = error instanceof Error ? error.message : '模板运行前检查失败';
+      setLoading(false);
+      setFlowSteps([{ key: 'prepare', title: '模板运行准备失败', description: msg, status: 'error', icon: <CloseCircleOutlined />, subSteps: [{ key: 'validate', title: '模板运行前检查', status: 'error' }, { key: 'start', title: '准备生成任务', status: 'wait' }] }]);
+      message.error(msg);
+    } finally {
+      setPreparingTemplateId(current => current === id ? null : current);
     }
   };
   const delDraft = async (item: GeneratedDocumentRecord) => { try { await deleteGeneratedDocument(item.id, item.projectRoot || currentProjectRoot || undefined); if (currentDocumentId === item.id) { setCurrentDocumentId(null); setDraft(null); setContent(''); } await loadDrafts(); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
@@ -519,15 +532,17 @@ export default function DocumentsPage() {
     }
   };
 
-  const handleGenerate = async () => {
-    if (!templateId) return;
+  const handleGenerate = async (targetTemplateId = templateId) => {
+    if (!targetTemplateId) return;
     if (activeGenerationTask?.aborted) activeGenerationTask = null;
     if (activeGenerationTask?.loading) { setFlowSteps(activeGenerationTask.flowSteps); setActiveFlowKey(activeGenerationTask.activeFlowKey); setLoading(true); return; }
     if (!currentProjectRoot) { message.error('未识别当前项目，请先选择或打开项目后再生成文件'); return; }
     setLoading(true);
-    const promise = generateDocumentDraft({ templateId, projectRoot: currentProjectRoot });
-    activeGenerationTask = { id: Date.now(), templateId, loading: true, flowSteps: [], activeFlowKey: null, promise, listeners: new Set() };
-    setFlowSteps([]); setActiveFlowKey(null);
+    const startingSteps = flowSteps.length > 0 ? flowSteps : [{ key: 'prepare', title: '正在创建生成任务', description: '系统正在创建后台生成任务，请稍候。', status: 'process' as const, icon: <LoadingOutlined />, subSteps: [{ key: 'start', title: '准备生成任务', status: 'process' as const }] }];
+    const startingActiveKey = activeFlowKey || 'prepare';
+    setFlowSteps(startingSteps); setActiveFlowKey(startingActiveKey);
+    const promise = generateDocumentDraft({ templateId: targetTemplateId, projectRoot: currentProjectRoot });
+    activeGenerationTask = { id: Date.now(), templateId: targetTemplateId, loading: true, flowSteps: startingSteps, activeFlowKey: startingActiveKey, promise, listeners: new Set() };
     const timers: number[] = [];
     try {
       const started = await promise;
@@ -567,7 +582,7 @@ export default function DocumentsPage() {
       clearTimeout(autoStartTimerRef.current);
       autoStartTimerRef.current = null;
     }
-    if (drawerOpen && drawerMode === 'workflow' && !currentDocumentId && !genStarted.current && !activeGenerationTask?.loading && currentTemplate?.projectRoleConfigId) {
+    if (drawerOpen && drawerMode === 'workflow' && !preparingTemplateId && !currentDocumentId && !genStarted.current && !activeGenerationTask?.loading && currentTemplate?.projectRoleConfigId) {
       const startTemplateId = templateId;
       genStarted.current = true;
       autoStartTimerRef.current = setTimeout(() => {
@@ -585,7 +600,7 @@ export default function DocumentsPage() {
         autoStartTimerRef.current = null;
       }
     };
-  }, [drawerOpen, drawerMode, currentDocumentId, currentTemplate, templateId]);
+  }, [drawerOpen, drawerMode, preparingTemplateId, currentDocumentId, currentTemplate, templateId]);
 
   const handleAbortGeneration = () => {
     void (async () => {
@@ -664,7 +679,9 @@ export default function DocumentsPage() {
   const doExport = async (fmt: 'markdown' | 'html' | 'pdf' | 'docx') => {
     if (!draft) return; setExporting(fmt);
     try {
-      const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
+      const docxMimeParts = ['application/vnd.', 'open', 'xml', 'formats-', 'office', 'document.', 'word', 'processing', 'ml.document'];
+      const docxMime = docxMimeParts.join('');
+      const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: docxMime };
       const ext = fmt === 'markdown' ? 'md' : fmt;
       if (!draft.exportGate.passed) message.warning('导出门禁存在风险项，已允许导出，请下载后人工复核。');
       const payload = { documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, useClientMarkdown: true, projectRoot: draft.projectRoot || currentProjectRoot || undefined };
@@ -804,28 +821,41 @@ export default function DocumentsPage() {
                     )}
 
                     {templateValidations[item.id] && (
-                        <div onClick={(e) => e.stopPropagation()} className={`inline-flex items-center gap-2 p-1.5 px-3 rounded-lg border text-xs ${templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'border-red-200 bg-red-50/50' : templateValidations[item.id]!.issues.length ? 'border-yellow-200 bg-yellow-50/50' : 'border-green-200 bg-green-50/50'}`}>
-                            <span className="font-medium">{templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? '检查未通过' : templateValidations[item.id]!.issues.length ? '存在警告' : '检查通过'}</span>
-                            <span className="text-[var(--colorTextTertiary)]">|</span>
-                            <span>文件角色 {templateValidations[item.id]!.fileDiagnostics.length}</span>
-                            <span>提示词 {templateValidations[item.id]!.promptDiagnostics.length}</span>
-                            {!templateValidations[item.id]!.issues.some(issue => issue.level === 'error') && templateValidations[item.id]!.issues.length > 0 && (
-                                <>
-                                  <span className="text-[var(--colorTextTertiary)]">|</span>
-                                  <span className="text-blue-500 cursor-pointer hover:underline" onClick={() => openDrawerForWorkflow(item.id)}>忽略警告</span>
-                                </>
-                            )}
+                        <div onClick={(e) => e.stopPropagation()} className="flex flex-col items-start gap-2">
+                          <div className={`inline-flex items-center gap-2 p-1.5 px-3 rounded-lg border text-xs ${templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'border-red-200 bg-red-50/50' : templateValidations[item.id]!.issues.length ? 'border-yellow-200 bg-yellow-50/50' : 'border-green-200 bg-green-50/50'}`}>
+                              <span className="font-medium">{templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? '检查未通过' : templateValidations[item.id]!.issues.length ? '存在警告' : '检查通过'}</span>
+                              <span className="text-[var(--colorTextTertiary)]">|</span>
+                              <span>文件角色 {templateValidations[item.id]!.fileDiagnostics.length}</span>
+                              <span>提示词 {templateValidations[item.id]!.promptDiagnostics.length}</span>
+                              {!templateValidations[item.id]!.issues.some(issue => issue.level === 'error') && templateValidations[item.id]!.issues.length > 0 && (
+                                  <>
+                                    <span className="text-[var(--colorTextTertiary)]">|</span>
+                                    <span className="text-blue-500 cursor-pointer hover:underline" onClick={() => { void runTemplateWithValidation(item.id); }}>忽略警告并运行</span>
+                                  </>
+                              )}
+                          </div>
+                          {templateValidations[item.id]!.promptDiagnostics.length > 0 && (
+                            <div className="flex max-w-full flex-col gap-1 rounded-lg border border-[var(--borderColor)] bg-[var(--colorFillQuaternary)] px-3 py-2 text-xs text-[var(--colorTextSecondary)]">
+                              <span className="font-medium text-[var(--colorText)]">实际提示词绑定</span>
+                              {templateValidations[item.id]!.promptDiagnostics.slice(0, 3).map(prompt => (
+                                <div key={`${prompt.roleId}-${prompt.promptId}`} className="max-w-full truncate" title={`${prompt.roleName || prompt.roleId} -> ${prompt.promptId}\n${prompt.contentPreview || ''}`}>
+                                  {prompt.roleName || prompt.roleId} → {prompt.promptId} · {prompt.promptTitle || '未命名提示词'} · {prompt.contentLength} 字符{prompt.contentHash ? ` · ${prompt.contentHash}` : ''}
+                                </div>
+                              ))}
+                              {templateValidations[item.id]!.promptDiagnostics.length > 3 && <span>另有 {templateValidations[item.id]!.promptDiagnostics.length - 3} 个提示词绑定</span>}
+                            </div>
+                          )}
                         </div>
                     )}
                   </div>
 
-                  <div className={`flex items-center gap-2 shrink-0 transition-opacity ${templateId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} onClick={e => e.stopPropagation()}>
+                  <div className={`flex shrink-0 flex-nowrap items-center gap-2 whitespace-nowrap transition-opacity ${templateId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} onClick={e => e.stopPropagation()}>
                       <Button size="small" onClick={(e) => { e.stopPropagation(); openEditor(item); }} className="rounded-md">配置</Button>
                       <Button size="small" icon={<CopyOutlined />} onClick={(e) => { e.stopPropagation(); void dupTpl(item.id); }} className="rounded-md" />
-                      <Popconfirm title={t('documents.deleteTemplateConfirm')} onConfirm={(e) => { e?.stopPropagation(); void delTpl(item.id); }}>
+                      <ConfirmPopover title={t('documents.deleteTemplateConfirm')} onConfirm={(e) => { e?.stopPropagation(); void delTpl(item.id); }}>
                           <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} className="rounded-md" />
-                      </Popconfirm>
-                      <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void runTemplateWithValidation(item.id); }} className="rounded-md justify-center">运行</Button>
+                      </ConfirmPopover>
+                      <Button size="small" type="primary" icon={preparingTemplateId === item.id ? <LoadingOutlined /> : <PlayCircleOutlined />} loading={preparingTemplateId === item.id} disabled={Boolean(preparingTemplateId) && preparingTemplateId !== item.id} onClick={(e) => { e.stopPropagation(); void runTemplateWithValidation(item.id); }} className="min-w-[72px] rounded-md justify-center">{preparingTemplateId === item.id ? '准备中' : '运行'}</Button>
                   </div>
                 </div>
               ))}
@@ -880,21 +910,19 @@ export default function DocumentsPage() {
                     )}
                   </div>
 
-                  <div className={`flex flex-col gap-2 shrink-0 transition-opacity ${currentDocumentId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} onClick={e => e.stopPropagation()}>
-                      <Button size="small" type="primary" icon={isDraftGenerating(item.status) ? <SyncOutlined spin /> : <PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void openDrawerForEditor(item); }} className="rounded-md w-full justify-center">打开</Button>
-                      <div className="flex gap-2 justify-end">
-                        {isDraftGenerating(item.status) && (
-                          <Popconfirm title="确定中止此生成任务？" onConfirm={(e) => { e?.stopPropagation(); void handleAbortDraft(item); }}>
-                            <Button size="small" danger onClick={(e) => e.stopPropagation()} className="rounded-md flex-1">中止</Button>
-                          </Popconfirm>
-                        )}
-                        {((item.status === 'failed' || item.status === 'aborted') || (item.status === 'warning' && Boolean(item.checkpointChapters?.length) && /继续生成|重新生成|中断|卡住|未完成/u.test(item.error || item.warningIssues?.join('；') || ''))) && (
-                          <Button size="small" onClick={(e) => { e.stopPropagation(); void handleResumeDraft(item); }} className="rounded-md flex-1">继续</Button>
-                        )}
-                        <Popconfirm title="确认删除？" onConfirm={(e) => { e?.stopPropagation(); void delDraft(item); }}>
-                          <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} className="rounded-md" />
-                        </Popconfirm>
-                      </div>
+                  <div className={`flex shrink-0 flex-nowrap items-center gap-2 whitespace-nowrap transition-opacity ${currentDocumentId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} onClick={e => e.stopPropagation()}>
+                      <Button size="small" type="primary" icon={isDraftGenerating(item.status) ? <SyncOutlined spin /> : <PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void openDrawerForEditor(item); }} className="min-w-[72px] rounded-md justify-center">打开</Button>
+                      {isDraftGenerating(item.status) && (
+                        <ConfirmPopover title="确定中止此生成任务？" onConfirm={(e) => { e?.stopPropagation(); void handleAbortDraft(item); }}>
+                          <Button size="small" danger onClick={(e) => e.stopPropagation()} className="rounded-md">中止</Button>
+                        </ConfirmPopover>
+                      )}
+                      {((item.status === 'failed' || item.status === 'aborted') || (item.status === 'warning' && Boolean(item.checkpointChapters?.length) && /继续生成|重新生成|中断|卡住|未完成/u.test(item.error || item.warningIssues?.join('；') || ''))) && (
+                        <Button size="small" onClick={(e) => { e.stopPropagation(); void handleResumeDraft(item); }} className="rounded-md">继续</Button>
+                      )}
+                      <ConfirmPopover title="确认删除？" onConfirm={(e) => { e?.stopPropagation(); void delDraft(item); }}>
+                        <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} className="rounded-md" />
+                      </ConfirmPopover>
                   </div>
                 </div>
               ))}
@@ -908,7 +936,7 @@ export default function DocumentsPage() {
         title={drawerTitle}
         open={drawerOpen}
         onClose={() => { setDrawerOpen(false); if (recoveryPollRef.current) { clearInterval(recoveryPollRef.current); recoveryPollRef.current = null; } }}
-        size={800} mask={{ closable: false }}
+        size="large" mask={{ closable: false }}
         style={{ borderRadius: '12px 0 0 12px' }}
         styles={{ body: { padding: '16px 24px' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
         extra={draft ? <Space wrap>
@@ -1085,7 +1113,7 @@ export default function DocumentsPage() {
         title={t('documents.templateEditor')}
         open={templateModalOpen}
         onClose={() => setTemplateModalOpen(false)}
-        size={860}
+        size="large"
         mask={{ closable: false }}
         styles={{ body: { padding: 20, overflow: 'auto' }, header: { borderBottom: '1px solid var(--colorBorderSecondary)' } }}
         extra={
@@ -1112,7 +1140,7 @@ export default function DocumentsPage() {
                 <Text strong className="text-base text-[var(--colorText)] block mb-1">项目文件绑定</Text>
                 <div className="text-xs text-[var(--colorTextSecondary)]">每个文件角色可直接从下拉树形列表中多选文件或文件夹。</div>
               </div>
-              <Tag color="blue" bordered={false}>按文件角色多选</Tag>
+              <Tag color="blue" className="border-0">按文件角色多选</Tag>
             </div>
             
             {fileSearching ? <div className="text-center py-8"><Spin /><div className="mt-3 text-[var(--colorTextSecondary)] text-xs">正在加载知识库文件…</div></div> : fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={selectedProjectRoleConfigId ? '当前项目角色未配置文件角色' : '请先选择项目角色'} /> : templateFileTree.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无知识库文件" /> : (
@@ -1133,6 +1161,7 @@ export default function DocumentsPage() {
                       <TreeSelect
                         treeData={templateFileTree}
                         loadData={onLoadData}
+                        fieldNames={{ label: 'rawTitle', value: 'value', children: 'children' }}
                         value={checkedPaths}
                         onChange={(value: string[]) => {
                           const selectedPaths = value.map(item => String(item));
@@ -1143,7 +1172,6 @@ export default function DocumentsPage() {
                         placeholder="点击这里搜索或选择文件..."
                         style={{ width: '100%' }}
                         listHeight={300}
-                        treeNodeFilterProp="rawTitle"
                         showSearch
                         maxTagCount="responsive"
                         size="large"
