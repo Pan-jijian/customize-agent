@@ -127,8 +127,8 @@ function normalizeMarkdownTableRow(cells: string[], columns: number) {
 
 function defaultTableHeaders(columns: number) {
   if (columns === 2) return ['信息项', '内容'];
-  const headers = ['项目', '内容', '备注', '说明'];
-  return Array.from({ length: columns }, (_item, index) => headers[index] || `列${index + 1}`);
+  const headers = ['控制项目', '控制内容', '执行要求', '责任主体', '检查与验收', '备注'];
+  return Array.from({ length: columns }, (_item, index) => headers[index] || `补充说明${index + 1}`);
 }
 
 function collectBareTableRows(lines: string[], start: number) {
@@ -660,8 +660,8 @@ strong{font-weight:700}
 ul,ol{margin:0 0 8pt 2em;padding:0}li{margin:0 0 4pt 0;text-align:justify;break-inside:avoid}
 h1,h2,h3,h4{font-family:${style.fontFamily};line-height:${style.lineCss};font-weight:700;color:#111827;page-break-after:avoid;break-after:avoid;break-inside:avoid}
 h1{text-align:center;font-size:${Math.max(style.titlePt + 6, 22)}pt;margin:80pt 0 28pt 0}
-h2{text-align:center;font-size:${Math.max(style.titlePt + 2, 18)}pt;border:0;padding:0;margin:24pt 0 14pt 0;break-before:auto}
-h2:not(:first-child){page-break-before:always;break-before:page}
+h2{text-align:center;font-size:${Math.max(style.titlePt + 2, 18)}pt;border:0;padding:0;margin:24pt 0 14pt 0;break-before:auto;page-break-before:auto}
+h2.document-chapter-heading:not(:first-child){page-break-before:always;break-before:page}
 h3{font-size:${style.titleCss};margin:16pt 0 7pt 0}
 h4{font-size:${style.bodyCss};margin:10pt 0 5pt 0}
 .document-toc{page-break-after:always;break-after:page}.document-toc h2{text-align:center;margin-top:0;page-break-before:auto;break-before:auto}.document-toc p{margin:0 0 4pt 0;text-align:left;text-indent:0}.document-toc .toc-chapter{font-weight:700;margin-top:8pt}.document-toc .toc-section{margin-left:2em}
@@ -790,9 +790,16 @@ function prepareExportMarkdown(rawMarkdown: string, baseline?: string) {
   };
 }
 
+function markChapterHeadings(html: string) {
+  return html.replace(/<h2([^>]*)>(第[一二三四五六七八九十百千万\d]+章\s*[\s\S]*?)<\/h2>/gu, (_match, attrs: string, title: string) => {
+    if (/\bclass=/iu.test(attrs)) return `<h2${attrs.replace(/class=(['"])(.*?)\1/iu, (_classMatch, quote: string, classes: string) => `class=${quote}${classes} document-chapter-heading${quote}`)}>${title}</h2>`;
+    return `<h2${attrs} class="document-chapter-heading">${title}</h2>`;
+  });
+}
+
 async function buildExportHtml(title: string, markdown: string, settings: DocumentExportSettings | undefined, projectRoot: string) {
   const { marked } = await import('marked');
-  return inlineLocalImages(htmlShell(title, marked.parse(markdown, { async: false }) as string, settings), projectRoot);
+  return inlineLocalImages(htmlShell(title, markChapterHeadings(marked.parse(markdown, { async: false }) as string), settings), projectRoot);
 }
 
 function existingBrowserPaths() {

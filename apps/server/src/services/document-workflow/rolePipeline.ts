@@ -519,15 +519,9 @@ export function repairableQualityIssue(issue: string) {
 
 export function lightweightChapterIssues(input: { chapter: DocumentTemplateChapter; content: string; missingFacts: string[]; targetWords: number }) {
   const issues: string[] = [];
-  if (!new RegExp(`^##\\s+${input.chapter.title.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'mu').test(input.content)) issues.push('正文缺少章节标题');
+  if (!new RegExp(`^##\\s+(?:第[一二三四五六七八九十百千万\\d]+章\\s*)?${input.chapter.title.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'mu').test(input.content)) issues.push('正文缺少章节标题');
   for (const degenerateIssue of degenerateContentIssues(input.content, [{ id: input.chapter.id, title: input.chapter.title, content: input.content, evidence: [], sections: input.chapter.sections || [], missingFacts: [] }])) {
     issues.push(degenerateIssue.message);
-  }
-  for (const section of input.chapter.sections || []) {
-    const escaped = section.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-    const match = input.content.match(new RegExp(`^#{3,4}\\s+(?:\\d+(?:\\.\\d+)*[.．、]?\\s+)?${escaped}\\s*\\n([\\s\\S]*?)(?=^###\\s+|^##\\s+|$)`, 'mu'));
-    if (!match) issues.push(`缺少规划小节：${section}`);
-    else if (documentTextLength(match[1]) < 180) issues.push(`规划小节正文过短：${section}`);
   }
   if (documentTextLength(input.content) < Math.floor(input.targetWords * 0.85)) issues.push('正文篇幅明显低于目标');
   WORKFLOW_PHRASE_RE.lastIndex = 0;
@@ -544,8 +538,8 @@ export function issuesForChapter(chapter: DocumentDraftChapter, issues: string[]
   const sectionHits = new Set(chapter.sections || []);
   const text = `${chapter.title}\n${chapter.sections?.join('\n') || ''}\n${chapter.content.slice(0, 8000)}`;
   return actionableIssues
-    .filter(issue => issue.includes(chapter.title) || [...sectionHits].some(section => issue.includes(section)) || /图片|三级小节|目录|表格|量化|数值|单位|事实/u.test(issue) && /!\[|####|\*\*|\||m\s*[²2]|mm2|cm2|km2/u.test(text))
-    .slice(0, 6);
+    .filter(issue => issue.includes(chapter.title) || [...sectionHits].some(section => issue.includes(section)) || /图片|三级小节|目录|表格|量化|数值|单位|事实|不得出现|禁止词|禁用主体|生成后事实反查失败|跨章一致性/u.test(issue) && /!\[|####|\*\*|\||m\s*[²2]|mm2|cm2|km2|重新生成|见招标公告|招标范围|兜底|施工方|\d/u.test(text))
+    .slice(0, 8);
 }
 
 export function classifyQualityRepairType(issues: string[]): QualityRepairType {
@@ -642,6 +636,15 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
   return { content, appliedCount, repairType };
 }
 
+function summarizeRepairIssue(issue: string) {
+  return issue
+    .replace(/【修复任务包】/gu, '')
+    .split(/\r?\n/u)
+    .map(line => line.replace(/^(?:修复类型|修复对象|问题|要求|输出要求)：/u, '').trim())
+    .filter(Boolean)[0]
+    ?.slice(0, 80) || '质量问题';
+}
+
 export async function repairMarkdownByQuality(input: { markdown: string; template: DocumentTemplate; chapters: DocumentDraftChapter[]; promptTexts: string; requirement?: string; issues: string[]; forbidDrawingImages: boolean; strategy?: DocumentGenerationStrategy; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   const repairableIssues = input.issues.filter(issue => classifyQualitySeverity(issue) !== 'minor').filter(repairableQualityIssue);
   if (repairableIssues.length === 0) return { markdown: input.markdown, chapters: input.chapters, stage: undefined as DocumentExecutionStage | undefined };
@@ -652,7 +655,7 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
     return {
       markdown: input.markdown,
       chapters: input.chapters,
-      stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'success' as const, message: `已完成质量检查，未定位到可安全局部修复的阻断问题：共 ${repairableIssues.length} 个；${repairableIssues.slice(0, 8).join('；')}` },
+      stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'success' as const, message: `已完成质量检查，未定位到可安全局部修复的阻断问题：共 ${repairableIssues.length} 个；摘要：${repairableIssues.slice(0, 5).map(summarizeRepairIssue).join('；')}` },
     };
   }
   const concurrency = Math.max(1, candidates.length || 1);
@@ -668,15 +671,22 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
     });
   }
   let repairedCount = 0;
+  let rejectedShrinkCount = 0;
   const repairedChapters = input.chapters.map(chapter => {
     const content = repairedById.get(chapter.id);
     if (!content || content === chapter.content) return chapter;
+    const beforeChars = documentTextLength(chapter.content);
+    const afterChars = documentTextLength(content);
+    if (afterChars < Math.max(1200, Math.floor(beforeChars * 0.92))) {
+      rejectedShrinkCount += 1;
+      return chapter;
+    }
     repairedCount += 1;
     return { ...chapter, content };
   });
   const message = repairedCount > 0
-    ? `已应用 ${patchCount} 个局部质量 patch，修复 ${repairedCount} 个章节；未进行整章或全文重写`
-    : `已完成质量检查，未生成可唯一定位且通过校验的局部 patch：共 ${repairableIssues.length} 个；${repairableIssues.slice(0, 8).join('；')}`;
+    ? `已应用 ${patchCount} 个局部质量 patch，修复 ${repairedCount} 个章节；拒绝 ${rejectedShrinkCount} 个明显缩水 patch；未进行整章或全文重写`
+    : `已完成质量检查，未生成可唯一定位且通过校验的局部 patch：共 ${repairableIssues.length} 个，拒绝 ${rejectedShrinkCount} 个明显缩水 patch；摘要：${repairableIssues.slice(0, 5).map(summarizeRepairIssue).join('；')}`;
   return {
     markdown: input.markdown,
     chapters: repairedChapters,

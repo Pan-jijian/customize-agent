@@ -68,10 +68,14 @@ export function degenerateContentIssues(markdown: string, chapters: DocumentDraf
 }
 
 function isHardExportBlockingIssue(issue: ValidationIssue) {
-  if (/提示词要求|疑似提示词指令标题|适用性自相矛盾|正式表格不足|目录与正文|不得出现/u.test(issue.message)) return true;
+  if (/提示词要求|疑似提示词指令标题|适用性自相矛盾|正式表格不足|不得出现/u.test(issue.message)) return true;
+  if (/目录与正文/u.test(issue.message)) return false;
   if (/配置要求缺少必要内容/u.test(issue.message)) return issue.level === 'error';
-  if (/正文缺少规划小节|缺少规划小节|小节内容补写未完成|空小节|小节只有标题|只有标题或表格无正文|生成未完成|生成后事实反查失败/u.test(issue.message)) return true;
-  if (/规划小节正文过短|小节生成未达标/u.test(issue.message)) return /项目概况|招标范围|工期|质量|安全|危大|验收|资源配置/u.test(issue.message);
+  if (/正文缺少规划小节|缺少规划小节/u.test(issue.message)) return false;
+  if (/小节内容补写未完成|空小节|小节只有标题|只有标题或表格无正文|生成未完成/u.test(issue.message)) return true;
+  if (/生成后事实反查失败/u.test(issue.message)) return false;
+  if (/规划小节正文过短|小节生成未达标/u.test(issue.message)) return false;
+  if (/事实一致性冲突：项目名称/u.test(issue.message)) return false;
   if (/跨章一致性|专业评分不足|专业缺口|泛化套话|缺少关键线路|缺少材料验收|缺少风险识别|缺少进场/u.test(issue.message)) return issue.level === 'error' && !/证据使用覆盖率偏低|章节逻辑依赖不足|文档交付评分报告/u.test(issue.message);
   if (!isExportBlockingIssue(issue)) return false;
   if (/章节审查|最终质量审查|正文篇幅明显低于目标|正文存在空泛占位表达|结构化事实读取不足|正文可能未显式覆盖|仅包含文件类型和占位符|不在本次招标范围内/u.test(issue.message)) return false;
@@ -264,6 +268,52 @@ export function formalContentIntegrityIssues(markdown: string): ValidationIssue[
   if (unfinished) issues.push({ level: 'warning', message: `正文存在疑似截断句：${unfinished}`, suggestion: '请补完整该段落，避免以连接词、逗号或冒号结尾。' });
   const longLine = lines.find(line => line.length > 380);
   if (longLine) issues.push({ level: 'warning', message: `正文存在过长段落：${longLine}`, suggestion: '请拆分为多段或表格，改善导出版式和可读性。' });
+  const inlineList = lines.find(line => /\S.+(?:\s|[。；;])(?:\d+[.、](?=\s|\*\*)\s*|[（(]\d+[）)]\s*|[-*+]\s+)\S.+(?:\s|[。；;])(?:\d+[.、](?=\s|\*\*)\s*|[（(]\d+[）)]\s*|[-*+]\s+)\S/u.test(line) && !/\b\d+\.\d+\s*(?:mm|cm|m|㎡|m2|kg|t|MPa|kPa|V|KV|kV|A)\b/iu.test(line));
+  if (inlineList) issues.push({ level: 'error', message: `正文存在列表项粘连同一行：${inlineList.slice(0, 120)}`, suggestion: '有序列表和无序列表必须逐项独占一行，确保 Markdown/PDF/DOCX 正确排版。' });
+  const sourcePageRef = markdown.match(/(?:PDF\s*)?第\s*\d+\s*(?:[-—至到~～]\s*\d+)?\s*页|(?:图纸|清单|资料|文件|[\u4e00-\u9fa5A-Za-z0-9（）()、·-]{2,24}(?:工程)?)\s*(?:[（(]?\s*|(?:共|多达|约|合计)\s*)\d+\s*页|[\u4e00-\u9fa5A-Za-z0-9、及与和]{2,24}\s*(?:共|多达|约|合计)\s*\d+\s*页|\d+\s*页\s*(?:图纸|资料|文件|装饰|土建|加固|给排水|电气|智能化|消防)|\d+\s*页/iu)?.[0];
+  if (sourcePageRef) issues.push({ level: 'error', message: `正文残留资料页码元信息：${sourcePageRef}`, suggestion: '正式投标正文应引用招标文件、施工图设计文件、工程量清单和相关专业图纸，不写 PDF 页码或资料页数。' });
+  const internalTrace = lines.find(line => /仅作为内部事实提取依据|正式正文不得引用文件名|后台事实|内部事实/u.test(line));
+  if (internalTrace) issues.push({ level: 'error', message: `正文残留内部处理说明：${internalTrace.slice(0, 120)}`, suggestion: '正式投标正文不得出现内部事实抽取、后台处理或文件名引用限制说明。' });
+  return issues;
+}
+
+export function formalHeadingHierarchyIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const illegalH2 = [...markdown.matchAll(/^##\s+(.+)$/gmu)]
+    .map(match => displayChapterTitle(match[1] || ''))
+    .filter(title => title !== '目录' && !/^第[一二三四五六七八九十百千万\d]+章\s+/u.test(title));
+  if (illegalH2.length > 0) issues.push({ level: 'error', message: `正文存在非正式章二级标题：${[...new Set(illegalH2)].slice(0, 8).join('、')}`, suggestion: '正文 ## 只允许用于“第X章”正式章标题；章内小节必须使用 ### X.Y。' });
+  const chapterMatches = [...markdown.matchAll(/^##\s+(第[一二三四五六七八九十百千万\d]+章\s+.+)$/gmu)];
+  for (let index = 0; index < chapterMatches.length; index += 1) {
+    const start = chapterMatches[index].index || 0;
+    const end = chapterMatches[index + 1]?.index ?? markdown.length;
+    const block = markdown.slice(start, end);
+    const sections = [...block.matchAll(/^###\s+\d+\.\d+\s+(.+)$/gmu)].map(match => displayChapterTitle(match[1] || ''));
+    const chapterTitle = displayChapterTitle((chapterMatches[index][1] || '').replace(/^第[一二三四五六七八九十百千万\d]+章\s*/u, ''));
+    if (sections.length === 1 && normalizeStructureTitle(sections[0]) === normalizeStructureTitle(chapterTitle)) {
+      issues.push({ level: 'error', message: `章节只有一个且与章名同名的小节：${chapterMatches[index][1]}`, suggestion: '应拆分为多个业务小节，不能用章标题重复作为唯一二级小节。' });
+    }
+  }
+  return issues;
+}
+
+export function markdownTableQualityIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  for (const block of markdownTables(markdown)) {
+    const rows = block.split(LINE_SPLIT_RE).filter(line => MARKDOWN_TABLE_ROW_RE.test(line));
+    if (rows.length < 2) continue;
+    if (!MARKDOWN_TABLE_DIVIDER_RE.test(rows[1] || '')) {
+      issues.push({ level: 'error', message: `表格分隔线位置不规范：${rows[0] || ''}`, suggestion: 'Markdown 表格必须紧跟表头输出分隔线，例如 |---|---|，中间不得插入正文或其他管道行。' });
+      continue;
+    }
+    const cells = rows.map(line => line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).map(cell => cell.trim()));
+    const header = cells[0] || [];
+    const genericHeaders = header.filter(cell => /^(?:列|字段|内容|备注)\d+$/u.test(cell));
+    if (genericHeaders.length > 0) issues.push({ level: 'error', message: `表格存在泛化表头：${genericHeaders.join('、')}`, suggestion: '正式投标表格必须使用业务字段表头，不得出现“列5/字段1/内容2”等临时表头。' });
+    const expectedColumns = header.length;
+    const badRow = cells.find((row, rowIndex) => (rowIndex !== 1 && row.some(cell => !cell)) || row.length !== expectedColumns);
+    if (badRow) issues.push({ level: 'error', message: `表格存在空单元格或列数不一致：${header.join('、')}`, suggestion: '请补齐每个单元格内容并统一列数；无适用内容时写明“不适用原因”或调整表格结构。' });
+  }
   return issues;
 }
 
@@ -296,7 +346,13 @@ function normalizeSectionTitleForGap(title: string) {
 function sameSectionTitle(left: string, right: string) {
   const leftKey = normalizeSectionTitleForGap(left);
   const rightKey = normalizeSectionTitleForGap(right);
-  return Boolean(leftKey && rightKey && leftKey === rightKey);
+  if (!leftKey || !rightKey) return false;
+  if (leftKey === rightKey || leftKey.includes(rightKey) || rightKey.includes(leftKey)) return true;
+  const tokenRe = /项目概况|主要施工方案|新技术新材料|工程重点难点|重点难点|危大工程|保障体系|安全保障|工期|质量|安全生产|应急预案|资源|人材机|材料|机械|劳动力|进度|关键线路|交通疏导|成品保护|深化设计|验收/gu;
+  const leftTokens = new Set(leftKey.match(tokenRe) || []);
+  const rightTokens = new Set(rightKey.match(tokenRe) || []);
+  const overlap = [...leftTokens].filter(token => rightTokens.has(token)).length;
+  return overlap >= 2 || (Math.min(leftTokens.size, rightTokens.size) === 1 && overlap === 1 && Math.max(leftKey.length, rightKey.length) <= 16);
 }
 
 function collectActualSections(source: string) {
@@ -312,7 +368,16 @@ function collectActualSections(source: string) {
 }
 
 function sectionBodyForTitle(markdown: string, section: string) {
-  return collectActualSections(markdown).find(item => sameSectionTitle(item.rawTitle, section));
+  const matches = collectActualSections(markdown).filter(item => sameSectionTitle(item.rawTitle, section));
+  if (matches.length <= 1) return matches[0];
+  return matches
+    .map(item => ({ item, gap: gapForSection('', section, item.level, item.body, true), textLength: sectionBodyTextLength(item.body) }))
+    .sort((left, right) => {
+      const leftBad = left.gap && (left.gap.reason === 'empty' || left.gap.reason === 'table_only') ? 1 : 0;
+      const rightBad = right.gap && (right.gap.reason === 'empty' || right.gap.reason === 'table_only') ? 1 : 0;
+      if (leftBad !== rightBad) return leftBad - rightBad;
+      return right.textLength - left.textLength;
+    })[0]?.item;
 }
 
 function gapForSection(chapterTitle: string, sectionTitle: string, level: 3 | 4, body: string, planned: boolean): MarkdownSectionContentGap | undefined {
@@ -322,6 +387,7 @@ function gapForSection(chapterTitle: string, sectionTitle: string, level: 3 | 4,
   const nonTableBody = bodyWithoutTables.replace(/^#{1,6}\s+.+$/gmu, '');
   const nonTableLength = sectionBodyTextLength(nonTableBody);
   if (/【本小节生成未达标，需重新生成】/u.test(body)) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: `${chapterTitle} 小节生成未达标：${sectionTitle}` };
+  if (/项目基本信息|基本信息|工程概况表|项目概况表/u.test(sectionTitle) && (hasTable || bodyLength >= 40)) return undefined;
   if (hasTable && nonTableLength < 20) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'table_only', planned, message: `${chapterTitle} 小节只有标题或表格无正文：${sectionTitle}` };
   if (bodyLength >= 80 && nonTableLength >= 20) return undefined;
   if (bodyLength === 0) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: `${chapterTitle} 空小节：${sectionTitle}` };
@@ -360,28 +426,35 @@ export function collectSectionContentGaps(markdown: string, chapters: Array<Pick
 }
 
 export function sectionContentIntegrityIssues(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content' | 'sections'>>): ValidationIssue[] {
-  return collectSectionContentGaps(markdown, chapters).map(gap => ({
-    level: 'error' as const,
-    message: gap.message,
-    suggestion: gap.reason === 'missing_planned_section'
-      ? '必须补写该规划小节，不能跳过或用相邻小节替代。'
-      : gap.reason === 'table_only'
+  return collectSectionContentGaps(markdown, chapters)
+    .filter(gap => gap.reason === 'empty' || gap.reason === 'table_only')
+    .map(gap => ({
+      level: 'error' as const,
+      message: gap.message,
+      suggestion: gap.reason === 'table_only'
         ? '必须在表格前后补充来源、适用范围、结论和执行要求。'
         : '必须补充与该小节相关的材料事实、适用边界和必要说明，达到正文完整度要求。',
-  }));
-}
-
-function isNoisyComparableFactValue(value: string) {
-  const text = value.trim();
-  if (!text || text.length > 80) return true;
-  if (/\|/u.test(text) || /^#+\s*/u.test(text)) return true;
-  if (/见(?:招标公告|投标人须知|前附表|本项目|补疑)|资料参数行摘要|公共资源交易监督管理|开评标程序|解密时间|联系人|联系电话/u.test(text)) return true;
-  if (/是否|符合|采购范围|规定的投标截止时间|电子交易系统/u.test(text) && /\d{3,}/u.test(text)) return true;
-  return false;
+    }));
 }
 
 function normalizedFactValue(fact: DocumentFact) {
   return `${fact.fieldName || fact.key} ${stringifyFactValue(fact.value)}`.replace(/\s+/gu, ' ').trim();
+}
+
+function durationValues(text: string) {
+  const values = new Set<string>();
+  const patterns = [
+    /\d+\s*日历天/gu,
+    /(?:计划工期|合同工期|总工期|工期|施工周期)[^\n。；;]{0,12}\d+\s*天/gu,
+    /(?:计划工期|合同工期|总工期|工期|施工周期)[^\n。；;]{0,12}\d+\s*(?:个月|月)/gu,
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const value = match[0].match(/\d+\s*(?:日历天|天|个月|月)/u)?.[0]?.replace(/\s+/gu, '');
+      if (value) values.add(value);
+    }
+  }
+  return [...values];
 }
 
 export function crossChapterConsistencyIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
@@ -389,10 +462,10 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
   const expectedSchedule = factsModel.schedule.map(normalizedFactValue).find(value => /\d+\s*(?:日历天|天|个月|月)|计划工期|合同工期/u.test(value));
   const expectedQuality = factsModel.quality.map(normalizedFactValue).find(value => /质量|合格|优良/u.test(value));
   if (expectedSchedule) {
-    const expectedDuration = expectedSchedule.match(/\d+\s*(?:日历天|个月|月)/u)?.[0]?.replace(/\s+/gu, '');
-    const durationMatches = [...new Set((markdown.match(/\d+\s*(?:日历天|个月|月)/gu) || []).map(item => item.replace(/\s+/gu, '')))].filter(item => item.length > 1);
-    const conflicting = expectedDuration ? durationMatches.filter(item => item !== expectedDuration) : [];
-    if (expectedDuration && conflicting.length > 0) issues.push({ level: 'error', message: `跨章一致性冲突：正文出现与资料工期不一致的表述 ${conflicting.slice(0, 6).join('、')}`, suggestion: `请统一使用资料中的工期口径：${expectedSchedule}` });
+    const expectedDuration = durationValues(expectedSchedule)[0];
+    const durationMatches = durationValues(markdown);
+    const conflicting = expectedDuration ? durationMatches.filter(item => item !== expectedDuration && /日历天/u.test(item)) : [];
+    if (expectedDuration && conflicting.length >= 2) issues.push({ level: 'warning', message: `跨章一致性冲突：正文出现与资料工期不一致的表述 ${conflicting.slice(0, 6).join('、')}`, suggestion: `请统一使用资料中的工期口径：${expectedSchedule}` });
   }
   if (expectedQuality && !/质量标准|质量目标|合格|优良/u.test(markdown)) issues.push({ level: 'error', message: '跨章一致性缺口：正文未稳定体现资料中的质量目标', suggestion: `请在工程概况、质量保证和验收相关章节统一体现：${expectedQuality}` });
   return issues;

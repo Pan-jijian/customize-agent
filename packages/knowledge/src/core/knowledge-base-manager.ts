@@ -408,7 +408,7 @@ export class KnowledgeBaseManager {
     };
   }
 
-  async hybridSearch(query: string, options: { limit?: number; filters?: SearchFilters; collections?: string[]; weights?: RetrievalWeights; generationMode?: boolean } = {}): Promise<FederatedResult> {
+  async hybridSearch(query: string, options: { limit?: number; filters?: SearchFilters; collections?: string[]; weights?: RetrievalWeights; generationMode?: boolean; disableReranker?: boolean } = {}): Promise<FederatedResult> {
     const requestedLimit = Number.isFinite(options.limit) && options.limit! > 0 ? Math.ceil(options.limit!) : undefined;
     const corpusSize = this.searchCorpusSize(options.filters);
     const effectiveLimit = requestedLimit ?? corpusSize;
@@ -439,7 +439,10 @@ export class KnowledgeBaseManager {
     // 2. 对这些子块进行交叉编码器重排（Cross-Encoder Rerank）
     let reranked = mergedChildChunks;
     let rerankerName = 'local-heuristic-fallback';
-    if (mergedChildChunks.length > 0) {
+    if (options.disableReranker) {
+      reranked = this.heuristicRerank(query, mergedChildChunks);
+      rerankerName = 'local-heuristic-disabled-reranker';
+    } else if (mergedChildChunks.length > 0) {
       const rerankLimit = requestedLimit ? Math.min(30, mergeLimit) : mergedChildChunks.length;
       const candidates = mergedChildChunks.slice(0, rerankLimit);
       // 这里使用的是子块自身内容，通常在 500 tokens 左右，不仅相关性判断最准，而且不会超出 Reranker 的 max_length
@@ -506,6 +509,10 @@ export class KnowledgeBaseManager {
 
   listFiles(): IndexStateRecord[] {
     return this.store.listRecords();
+  }
+
+  listChunks(options: { relativePath?: string; limit?: number } = {}) {
+    return this.store.listChunks(options);
   }
 
   getFileDetail(relativePath: string, options: { maxChunkContentChars?: number } = {}) {
@@ -793,21 +800,51 @@ export class KnowledgeBaseManager {
   }
 
   private heuristicRerank(query: string, items: FederatedSearchItem[]): FederatedSearchItem[] {
-    const terms = query.toLowerCase().split(/[\s,，。；;：:、]+/u).filter(Boolean);
+    const terms = this.queryTerms(query);
     const phrase = query.toLowerCase().trim();
+    const normalizedPhrase = this.normalizeSearchText(query);
+    const factLabels = this.queryFactLabels(query);
+    const wantsTable = /表|行|列|金额|数量|报价|评分|清单|明细|统计|数据/u.test(query);
+    const wantsDrawing = /图纸|图层|轴网|标注|块|实体|cad|dwg|dxf|step|iges|模型/u.test(query);
+    const wantsData = /json|xml|yaml|字段|配置|数据|路径|price|id|name/u.test(query);
     return items.map(item => {
-      const content = `${item.filePath}\n${item.titlePath ?? ''}\n${item.sectionTitle ?? ''}\n${item.chunkKind ?? ''}\n${item.content}`.toLowerCase();
+      const rawContent = `${item.filePath}\n${item.titlePath ?? ''}\n${item.sectionTitle ?? ''}\n${item.chunkKind ?? ''}\n${item.content}`;
+      const content = rawContent.toLowerCase();
+      const normalizedContent = this.normalizeSearchText(rawContent);
       let rerankBoost = 0;
-      if (phrase && content.includes(phrase)) rerankBoost += 120;
+      if (phrase && content.includes(phrase)) rerankBoost += 160;
+      if (normalizedPhrase.length >= 4 && normalizedContent.includes(normalizedPhrase)) rerankBoost += 220;
       const titleText = `${item.titlePath ?? ''}\n${item.sectionTitle ?? ''}`.toLowerCase();
+      const normalizedTitle = this.normalizeSearchText(titleText);
+      let matchedTermCount = 0;
       for (const term of terms) {
         if (!term) continue;
-        if (content.includes(term)) rerankBoost += 8;
-        if (titleText.includes(term)) rerankBoost += 18;
+        const normalizedTerm = this.normalizeSearchText(term);
+        const matchedContent = content.includes(term) || normalizedContent.includes(normalizedTerm);
+        const matchedTitle = titleText.includes(term) || normalizedTitle.includes(normalizedTerm);
+        if (matchedContent) {
+          matchedTermCount += 1;
+          rerankBoost += 12;
+        }
+        if (matchedTitle) rerankBoost += 22;
       }
-      if (item.chunkKind === 'table' && /表|行|列|金额|数量|报价|评分|清单|明细|统计|数据/u.test(query)) rerankBoost += 40;
-      if (item.chunkKind === 'metadata' && /图纸|图层|轴网|标注|块|实体|cad|dxf|step|iges|模型/u.test(query)) rerankBoost += 60;
-      if (item.chunkKind === 'data' && /json|xml|yaml|字段|配置|数据|路径|price|id|name/u.test(query)) rerankBoost += 30;
+      if (matchedTermCount >= 2) rerankBoost += matchedTermCount * 18;
+      for (const label of factLabels) {
+        const normalizedLabel = this.normalizeSearchText(label);
+        if (normalizedContent.includes(normalizedLabel)) rerankBoost += 80;
+        if (normalizedTitle.includes(normalizedLabel)) rerankBoost += 120;
+      }
+      if (item.chunkKind === 'table') rerankBoost += wantsTable ? 25 : -80;
+      if (item.chunkKind === 'metadata') rerankBoost += wantsDrawing ? 60 : -100;
+      if (item.chunkKind === 'data') rerankBoost += wantsData ? 30 : -12;
+      if (/\.(?:dwg|dxf)(?:$|[?#])/iu.test(item.filePath)) {
+        rerankBoost += wantsDrawing ? 120 : -60;
+        if (this.isLowQualityCadText(item.content)) rerankBoost -= wantsDrawing ? 60 : 160;
+      }
+      if (/工作表：|COL\d+|专业工程暂估价计价表|分部分项工程量清单计价表|材料（工程设备）暂估单价一览表/u.test(item.content)) {
+        rerankBoost -= wantsTable ? 35 : 140;
+      }
+      if (/第\s*\d+\s*页\s*共\s*\d+\s*页|PDF\s*第\s*\d+\s*页/iu.test(item.content) && factLabels.length > 0) rerankBoost -= 12;
       const score = item.score + rerankBoost;
       return {
         ...item,
@@ -819,6 +856,39 @@ export class KnowledgeBaseManager {
         },
       };
     }).sort((a, b) => b.score - a.score);
+  }
+
+  private normalizeSearchText(value: string): string {
+    return value.toLowerCase().replace(/\s+/gu, '');
+  }
+
+  private isLowQualityCadText(value: string): boolean {
+    const compact = value.replace(/\s+/gu, '');
+    if (compact.length === 0) return true;
+    const readable = compact.match(/[\u4e00-\u9fa5A-Za-z0-9（）()【】《》、，。；;：:,.\-/㎡%]/gu)?.length || 0;
+    return readable / compact.length < 0.55;
+  }
+
+  private queryTerms(query: string): string[] {
+    const base = query.toLowerCase().split(/[\s,，。；;：:、]+/u).filter(Boolean);
+    const labels = this.queryFactLabels(query).map(label => label.toLowerCase());
+    return [...new Set([...base, ...labels].filter(term => term.length > 0))];
+  }
+
+  private queryFactLabels(query: string): string[] {
+    const labels: string[] = [];
+    if (/建设地点|工程地点|项目地点|地点|在哪里|位于/u.test(query)) labels.push('建设地点', '工程地点', '项目地点', '项目位于', '位于');
+    if (/出资比例|资金比例|资金来源|出资/u.test(query)) labels.push('项目出资比例', '出资比例', '资金来源', '资金落实情况');
+    if (/项目名称|招标项目名称|工程名称/u.test(query)) labels.push('招标项目名称', '工程名称', '项目名称');
+    if (/项目编号|招标编号/u.test(query)) labels.push('招标项目编号', '项目编号');
+    if (/工期|日历天|计划开工|计划竣工/u.test(query)) labels.push('计划工期', '总工期', '工期', '计划开工日期', '计划竣工日期');
+    if (/质量标准|质量要求|合格/u.test(query)) labels.push('质量标准', '质量要求');
+    if (/招标范围|工程范围|承包范围|施工范围/u.test(query)) labels.push('招标范围', '工程承包范围', '施工范围');
+    if (/建设单位|招标人|项目业主/u.test(query)) labels.push('招标人', '项目业主', '建设单位');
+    if (/临水|临电|临时水电|水电接引|接驳点|挂表计量|施工水电/u.test(query)) labels.push('临水临电', '临时水电接引', '施工水电接引费', '接驳点挂表计量', '挂表计量');
+    if (/场地限制|材料堆场|办公区|生活区|加工区/u.test(query)) labels.push('场地限制', '不具备材料堆场', '搭设加工区', '搭设办公区', '搭设生活区');
+    if (/拆除|修补|破损处|改造维修/u.test(query)) labels.push('改造维修项目', '拆除内容比较多', '破损处进行修补');
+    return [...new Set(labels)];
   }
 
 

@@ -69,24 +69,24 @@ export class MultiProjectManager {
     return this.registry.list();
   }
 
-  async search(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope; filters?: SearchFilters; weights?: RetrievalWeights; generationMode?: boolean } = {}): Promise<FederatedResult> {
+  async search(projectRoot: string, query: string, options: { limit?: number; scope?: SearchScope; filters?: SearchFilters; weights?: RetrievalWeights; generationMode?: boolean; disableReranker?: boolean } = {}): Promise<FederatedResult> {
     const limit = Number.isFinite(options.limit) && options.limit! > 0 ? Math.ceil(options.limit!) : undefined;
     const scope = options.scope ?? 'project';
     const project = await this.getProject(projectRoot);
 
-    if (scope === 'project') return project.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode });
+    if (scope === 'project') return project.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode, disableReranker: options.disableReranker });
 
     const projectResults = scope === 'all'
-      ? await project.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode })
+      ? await project.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode, disableReranker: options.disableReranker })
       : { results: [], scopesSearched: [], queryTimeMs: 0 } as FederatedResult;
 
     if (scope === 'global') {
       const global = await this.getGlobalKB();
-      return global.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode });
+      return global.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode, disableReranker: options.disableReranker });
     }
 
     const global = await this.getGlobalKB();
-    const globalResults = await global.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode });
+    const globalResults = await global.hybridSearch(query, { limit, filters: options.filters, weights: options.weights, generationMode: options.generationMode, disableReranker: options.disableReranker });
     const mergeLimit = limit ?? (projectResults.results.length + globalResults.results.length);
     const merged = new FederationSearch().merge([...projectResults.results, ...globalResults.results], mergeLimit, 'all');
     return {

@@ -1,4 +1,4 @@
-import { plannedAutoSpecGateIssues, crossChapterConsistencyIssues, degenerateContentIssues, duplicateBasicInfoIssues, formalContentIntegrityIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssues, genericProfessionalContentIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, minChapterSectionIssues, preciseFactUsageIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
+import { plannedAutoSpecGateIssues, crossChapterConsistencyIssues, degenerateContentIssues, duplicateBasicInfoIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssues, genericProfessionalContentIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
 import { chapterDependencyIssues, documentDeliveryScoreIssues, evidenceUsageCoverageIssues, paragraphGenericIssues } from './documentDeliveryReport';
 import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues } from './markdownComposer';
 import { webEvidenceLeakageIssues } from './webResearchService';
@@ -15,7 +15,9 @@ export function buildStandardFinalValidationIssues(input: {
   return [
     ...(input.promptDocumentRules?.forbidToc ? [] : [...tocHierarchyIssues(input.markdown), ...tocBodyConsistencyIssues(input.markdown)]),
     ...instructionLikeHeadingIssues(input.markdown),
+    ...formalHeadingHierarchyIssues(input.markdown),
     ...formalContentIntegrityIssues(input.markdown),
+    ...markdownTableQualityIssues(input.markdown),
     ...sectionContentIntegrityIssues(input.markdown, input.chapters),
     ...professionalContentIssues(input.chapters),
     ...professionalScoreIssues(input.chapters),

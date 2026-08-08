@@ -9,7 +9,14 @@ function normalize(value: string) {
 function comparableValue(value: string, profile: DocumentDomainProfile) {
   const trimmed = value.trim();
   if (isDiagnosticFactValue(profile, trimmed) || isForbiddenFactValue(profile, trimmed)) return '';
-  const normalized = normalize(trimmed);
+  if (/签章|盖章|联系人|联系电话|电话|邮箱|解密|开标|评标|保证金|交易系统|空白|填写|上传|下载|递交|投标文件制作|电子服务系统|交易平台/u.test(trimmed)) return '';
+  if (/\|/u.test(trimmed) || /^#+\s*/u.test(trimmed)) return '';
+  if (/见(?:招标公告|投标人须知|前附表|本项目|补疑)|资料参数行摘要|公共资源交易监督管理|开评标程序|监管部门|招标代理机构|监督管理部门|行政监督部门/u.test(trimmed)) return '';
+  if (/是否|符合|采购范围|规定的投标截止时间|电子交易系统|投标人须知|招标文件正文/u.test(trimmed) && /\d{3,}/u.test(trimmed)) return '';
+  if (/项目名称|工程名称/u.test(trimmed) && /项目编号|工程概况|建筑面积|本项目分为|现状建筑物|改造工程|标段/u.test(trimmed)) return '';
+  if (/项目编号[:：]|工程概况[:：]|本项目分为|现状建筑物|总建筑面积|本次改造工程|清单编制说明/u.test(trimmed)) return '';
+  const duration = /\d+(?:\.\d+)?\s*(?:日历天|天|个月|月)/u.exec(trimmed)?.[0];
+  const normalized = normalize(duration && /工期|总工期|合同工期|计划工期|施工周期/u.test(trimmed) ? duration : trimmed);
   if (!normalized || normalized.length > 80) return '';
   return normalized;
 }

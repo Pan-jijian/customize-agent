@@ -903,9 +903,9 @@ export default function DocumentsPage() {
 
                     {(item.status === 'warning' || item.status === 'failed' || item.status === 'aborted') && (
                       <div className={`inline-flex items-center gap-2 p-1.5 px-3 rounded-lg border text-xs ${item.status === 'failed' || item.status === 'aborted' ? 'border-red-200 bg-red-50/50' : 'border-yellow-200 bg-yellow-50/50'}`}>
-                        <span className="font-medium">{item.status === 'failed' ? '生成失败' : item.status === 'aborted' ? '已中止' : '需复核'}</span>
+                        <span className="font-medium">{item.status === 'failed' ? item.draft?.exportGate?.passed === false ? '门禁未通过' : '生成失败' : item.status === 'aborted' ? '已中止' : '需复核'}</span>
                         <span className="text-[var(--colorTextTertiary)]">|</span>
-                        <span className="truncate max-w-[400px]">{item.error || item.warningIssues?.[0] || item.draft?.validationIssues.find(x => x.level === 'error' || x.level === 'warning')?.message || '需复核'}</span>
+                        <span className="truncate max-w-[400px]">{item.error || item.warningIssues?.[0] || item.draft?.validationIssues.find(x => x.level === 'error' || x.level === 'warning')?.message || item.draft?.exportGate?.checklist.find(x => !x.passed)?.label || '需复核'}</span>
                       </div>
                     )}
                   </div>
@@ -974,6 +974,10 @@ export default function DocumentsPage() {
                 ))}
               </VerticalStack>
             </Card>
+          )}
+
+          {drawerMode === 'workflow' && workflowRecord?.draft?.exportGate?.passed === false && (
+            <NoticeBox type="error" title="生成已完成，但导出门禁未通过">{`阻断项：${workflowRecord.draft.exportGate.blockingIssues?.slice(0, 6).map(item => item.message).join('；') || workflowRecord.draft.exportGate.checklist.filter(item => !item.passed).map(item => item.label).join('；') || '存在阻断级校验错误'}。可点击继续生成触发自动修复，或在“校验”页查看完整问题。`}</NoticeBox>
           )}
 
           {drawerMode === 'workflow' && workflowRecord?.reviewMetadata?.diagnostics && (

@@ -7,6 +7,7 @@ import { generateDocumentDraft } from '../document-workflow';
 import { collectSectionContentGaps } from '../document-workflow/qualityValidation';
 import { computeProjectId } from '@customize-agent/knowledge';
 import { getProjectRoot } from '../knowledge/kbService';
+import { documentTextLength } from '../document-workflow/budget';
 import { upsertKbOperation } from '../knowledge/kbOperationLog';
 
 export type GeneratedDocumentStatus = 'generating' | 'completed' | 'warning' | 'failed' | 'aborted';
@@ -64,7 +65,7 @@ function summarizeCheckpointChapters(chapters: DocumentDraftChapter[] | undefine
   return (chapters || []).map(chapter => ({
     id: chapter.id,
     title: chapter.title,
-    chars: chapter.content.length,
+    chars: documentTextLength(chapter.content),
     status: chapter.content.trim().length > 0 ? 'completed' as const : 'failed' as const,
     updatedAt: Date.now(),
   }));

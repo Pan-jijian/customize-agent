@@ -26,7 +26,7 @@ function professionalSectionTaskCard(chapterTitle: string, sectionTitle: string)
     /资源|材料|设备|劳动力/u.test(joined) ? '必须说明资源配置依据、进场验收、保管调配，并与工期和质量目标一致。' : '',
     /施工|工艺|技术|方案/u.test(joined) ? '必须写清施工准备、工艺流程、关键控制点、验收要求和资料依据。' : '',
   ].filter(Boolean);
-  return ['【小节专业任务卡】', `任务对象：${sectionTitle}`, ...(points.length ? points : ['必须结合知识库已确认事实说明对象范围、实施方法、控制要点、验收要求和资料闭环，避免泛化套话。'])].join('\n');
+  return ['【小节专业任务卡】', `任务对象：${sectionTitle}`, ...(points.length ? points : ['必须结合本项目资料明确事实说明对象范围、实施方法、控制要点、验收要求和资料闭环，避免泛化套话。'])].join('\n');
 }
 
 export function mimeTypeFromPath(filePath: string) {
@@ -390,15 +390,26 @@ function sectionTitleEquivalent(a: string, b: string) {
   return left === right || left.includes(right) || right.includes(left);
 }
 
-function cleanParsedSectionTitles(titles: string[]) {
-  return Array.from(new Set(titles.map(normalizePlannedSectionTitle).filter(title => title.length >= 2 && title.length <= 30 && !isInstructionLikeSectionTitle(title) && !/必须|强制|排序|设置|输出|独立|之后|之前|小节|其他必要/u.test(title))));
+function conditionalSectionRuleContext(text: string) {
+  return /判断是否涉及|若涉及|若不涉及|如果涉及|如果不涉及|不涉及.*如实说明|根据项目所在地气候特征|根据计划施工周期|根据.*施工周期|按需|视情况|可设置|专项小节/u.test(text);
+}
+
+function cleanParsedSectionTitles(titles: string[], context = '') {
+  const conditionalContext = conditionalSectionRuleContext(context);
+  return Array.from(new Set(titles.map(normalizePlannedSectionTitle).filter(title => {
+    if (title.length < 2 || title.length > 30) return false;
+    if (isInstructionLikeSectionTitle(title)) return false;
+    if (/必须|强制|排序|设置|输出|独立|之后|之前|小节|其他必要/u.test(title)) return false;
+    if (conditionalContext && /^(?:雨季|冬季|高温|台风|大风等特殊气候|雨季、冬季、高温、台风、大风等特殊气候)$/u.test(title)) return false;
+    return true;
+  })));
 }
 
 function parseSectionListFromRuleText(text: string) {
   const topList = /(?:以下小节设置和排序|强制小节|必须小节)[：:]\s*([\s\S]*?)(?:\n\s*#{2,6}\s|\n\s*第[一二两三四五六七八九十\d]+章|$)/u.exec(text)?.[1];
   if (topList) {
     const titles = [...topList.matchAll(/(?:^|\n)\s*\d+[.．、]\s*([^——\-—：:。；;\n]{2,30})(?:[——\-—：:]|，|,|。|；|;|\n|$)/gu)].map(match => match[1]);
-    const cleaned = cleanParsedSectionTitles(titles);
+    const cleaned = cleanParsedSectionTitles(titles, text);
     if (cleaned.length > 0) return cleaned;
   }
 
@@ -415,7 +426,7 @@ function parseSectionListFromRuleText(text: string) {
   for (const match of text.matchAll(afterSectionLabelPattern)) {
     for (const item of match[1].split(/[、,，/／及和与]/u)) titles.push(item);
   }
-  return cleanParsedSectionTitles(titles);
+  return cleanParsedSectionTitles(titles, text);
 }
 
 function simpleHashText(text: string) {
@@ -631,6 +642,7 @@ export function extractPromptStructuralRules(promptTexts: string, chapters?: Doc
     const start = Math.max(0, match.index || 0);
     const next = matches.find(item => (item.index || 0) > start)?.index;
     const block = normalizedText.slice(start, Math.min(normalizedText.length, next ?? start + 1400));
+    if (conditionalSectionRuleContext(block) && !/(强制小节|必须小节|以下小节设置和排序|必须设置独立的|必须包含独立的)/u.test(block)) continue;
     const titles = parseSectionListFromRuleText(block);
     if (titles.length === 0) continue;
     const item = grouped.get(chapterNumber) || { blocks: [], titles: [] };
@@ -722,11 +734,11 @@ function evidenceParameterDensity(evidence: DocumentEvidence[]) {
 function minimumSectionCount(chapter: DocumentTemplateChapter, targetWords: number, evidence: DocumentEvidence[], lockedCount: number) {
   const title = chapter.title;
   const coreChapter = /质量|安全|工期|进度|物资|材料|机械|设备|劳动力|危大|专项|文明|总平面|施工方法|施工方案/u.test(title);
-  let minimum = targetWords >= 14000 ? 8 : targetWords >= 8000 ? 6 : targetWords >= 5000 ? 5 : targetWords >= 3000 ? 4 : 3;
+  let minimum = targetWords >= 14000 ? 6 : targetWords >= 8000 ? 5 : targetWords >= 5000 ? 4 : targetWords >= 3000 ? 4 : 3;
   if (coreChapter) minimum = Math.max(minimum, 4);
   const density = evidenceParameterDensity(evidence);
-  if (density >= 20) minimum = Math.max(minimum, 6);
-  else if (density >= 10) minimum = Math.max(minimum, 5);
+  if (density >= 20) minimum = Math.max(minimum, 5);
+  else if (density >= 10) minimum = Math.max(minimum, 4);
   return Math.max(minimum, lockedCount);
 }
 
@@ -749,7 +761,7 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
   const chapterStructuralRules = structuralRulesForChapter(input.structuralRules, input.chapter, input.chapterIndex);
   const lockedSections = chapterStructuralRules.flatMap(rule => rule.requiredSections).sort((a, b) => (a.order || 0) - (b.order || 0)).map(rule => rule.title);
   const minSections = minimumSectionCount(input.chapter, input.targetWords, input.evidence, lockedSections.length);
-  const maxSections = Math.max(minSections + 2, input.targetWords >= 14000 ? 10 : input.targetWords >= 8000 ? 8 : 7);
+  const maxSections = Math.max(minSections, Math.min(7, input.targetWords >= 8000 ? 7 : 6));
   const result = await callDocumentLlmJson<{ sections?: string[] }>([
     '你是专业文档结构规划专家。',
     '只根据用户提示词、章节标题和真实绑定资料规划本章二级小节；不得使用“目标与范围、资料依据、实施内容、质量控制”等通用占位小节凑数。',
@@ -766,7 +778,7 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
     input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
     lockedSections.length ? `系统已从提示词解析出本章强制二级小节，必须按此顺序置于本章小节最前，不得删除、改名或重排：${lockedSections.join('、')}` : '',
     evidenceText ? `真实绑定资料：\n${evidenceText}` : '',
-    `请输出 ${minSections}-${maxSections} 个适合直接成稿的二级小节标题。标题必须具体、业务相关、能承载真实资料；每个小节应对应不同工作面、技术点、管理点或资料类别，避免多个小节表达同一内容。核心章节不得只输出“总体部署与责任分工、实施流程与关键控制”两个泛化小节。`,
+    `请输出 ${minSections}-${maxSections} 个适合直接成稿的二级小节标题。标题必须具体、业务相关、能承载真实资料；每个标题控制在 16 个汉字以内，避免多个小节表达同一内容。核心章节不得只输出“总体部署与责任分工、实施流程与关键控制”两个泛化小节。`,
     'JSON 格式：{"sections":["小节标题1","小节标题2"]}',
   ].filter(Boolean).join('\n\n'), { maxTokens: 1600, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics, timeoutMs: 120000 });
   const sections = Array.from(new Set(compoundSectionSeeds(input.chapter.title)));
@@ -783,7 +795,7 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
     if (sections.length >= minSections) break;
     if (!sections.some(section => section.includes(seed) || seed.includes(section))) sections.push(seed);
   }
-  return applyPromptStructuralRules(sections, input.chapter.title, chapterStructuralRules);
+  return applyPromptStructuralRules(sections, input.chapter.title, chapterStructuralRules).slice(0, Math.max(maxSections, lockedSections.length));
 }
 
 interface SectionFactCardItem {
@@ -960,8 +972,8 @@ function writingTopicTitle(sectionTitle: string, index: number, total: number) {
 }
 
 function writingTasksForSection(sectionTitle: string, targetWords: number): SectionWritingTask[] {
-  const maxTaskWords = Math.max(1200, Math.floor(Number(process.env.DOCUMENT_WRITING_TASK_MAX_WORDS ?? 2200)));
-  const taskCount = targetWords > maxTaskWords * 1.25 ? Math.ceil(targetWords / maxTaskWords) : 1;
+  const maxTaskWords = Math.max(1400, Math.floor(Number(process.env.DOCUMENT_WRITING_TASK_MAX_WORDS ?? 2800)));
+  const taskCount = targetWords > maxTaskWords * 1.5 ? Math.ceil(targetWords / maxTaskWords) : 1;
   const perTask = Math.max(800, Math.ceil(targetWords / taskCount));
   if (taskCount <= 1) return [{ sectionTitle, taskTitle: sectionTitle, targetWords, index: 1, total: 1 }];
   return Array.from({ length: taskCount }, (_, index) => ({
@@ -1050,13 +1062,14 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
 export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; fileRolesHash?: string; allowPartialResult?: boolean; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry' }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   const targets = sectionTargets(input.chapter, input.targetWords);
   if (targets.length < 2) return undefined;
-  const concurrency = Math.max(1, targets.length);
+  const configuredSectionConcurrency = Number(process.env.DOCUMENT_SECTION_CONCURRENCY || targets.length || 1);
+  const concurrency = Math.max(1, Math.min(targets.length, Number.isFinite(configuredSectionConcurrency) ? Math.floor(configuredSectionConcurrency) : (targets.length || 1)));
   const results: Array<string | undefined> = new Array(targets.length);
   let completedCount = 0;
   const runSection = async (item: { title: string; targetWords: number }, compact = false) => {
     input.onSectionProgress?.({ completed: completedCount, total: targets.length, sectionTitle: item.title, phase: compact ? 'retry' : 'start' });
     try {
-      const sectionTimeoutMs = compact ? 90_000 : Math.max(90_000, Math.min(150_000, Math.ceil(timeoutMsForChapter(item.targetWords) * 0.45)));
+      const sectionTimeoutMs = compact ? 75_000 : Math.max(75_000, Math.min(120_000, Math.ceil(timeoutMsForChapter(item.targetWords) * 0.4)));
       const sectionExtraEvidence = input.sectionEvidenceProvider
         ? (await callWithTimeout(() => input.sectionEvidenceProvider!(item.title), Math.min(25_000, Math.floor(sectionTimeoutMs * 0.25)), input.signal)) || []
         : [];
@@ -1118,7 +1131,7 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
 
 export function outputTokensForChapter(minWords: number, targetWords?: number) {
   const words = targetWords || minWords;
-  return Math.min(32000, Math.max(6000, Math.ceil(words * 1.6)));
+  return Math.min(24000, Math.max(5000, Math.ceil(words * 1.45)));
 }
 
 export function timeoutMsForChapter(targetWords?: number) {
@@ -1241,7 +1254,7 @@ export async function supplementShortSections(input: { template: DocumentTemplat
   const plannedTargets = sectionTargets(input.chapter, input.targetWords);
   const targetByTitle = new Map(plannedTargets.map(target => [target.title, target]));
   const forcedTargets = (input.forcedSections || [])
-    .filter(gap => gap.chapterTitle === input.chapter.title && (gap.planned || ['missing_planned_section', 'empty', 'too_short', 'table_only'].includes(gap.reason)))
+    .filter(gap => gap.chapterTitle === input.chapter.title && ['empty', 'table_only'].includes(gap.reason))
     .map(gap => ({ title: gap.sectionTitle, targetWords: Math.max(targetByTitle.get(gap.sectionTitle)?.targetWords || 0, Math.floor(input.targetWords / Math.max(1, plannedTargets.length || input.forcedSections?.length || 1))), forced: true, reason: gap.reason }));
   const targets = [...plannedTargets];
   for (const forced of forcedTargets) {
@@ -1262,7 +1275,7 @@ export async function supplementShortSections(input: { template: DocumentTemplat
   const maxRepairTargets = Number(process.env.DOCUMENT_SECTION_REPAIR_MAX_TARGETS || 0);
   const supplementTargets = maxRepairTargets > 0 ? allSupplementTargets.slice(0, maxRepairTargets) : allSupplementTargets;
   const supplements = new Map<string, string | undefined>();
-  const concurrency = Math.max(1, Math.min(3, supplementTargets.length || 1));
+  const concurrency = Math.max(1, supplementTargets.length || 1);
   for (let offset = 0; offset < supplementTargets.length; offset += concurrency) {
     const batch = supplementTargets.slice(offset, offset + concurrency);
     const attempts = sectionSupplementAttempts(supplementTargets.length);
@@ -1282,7 +1295,7 @@ export async function supplementShortSections(input: { template: DocumentTemplat
           sectionTitle: target.title,
           targetWords,
           maxWords: Math.ceil(targetWords * 1.25),
-          timeoutMs: Math.max(120000, Math.min(300000, Math.ceil(timeoutMsForChapter(targetWords) * 0.7))),
+          timeoutMs: Math.max(75_000, Math.min(150_000, Math.ceil(timeoutMsForChapter(targetWords) * 0.55))),
         }, attempts);
       } catch {
         return undefined;
@@ -1300,7 +1313,7 @@ export async function supplementShortSections(input: { template: DocumentTemplat
 export async function expandChapterToTarget(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; content: string; evidence: DocumentEvidence[]; promptTexts: string; requirement?: string; roleContext: string; targetChars: number; maxChars?: number; forbidDrawingImages: boolean; maxTokens?: number; signal?: AbortSignal; strictBudget?: boolean }) {
   let content = input.content;
   let rounds = 0;
-  const maxRounds = input.strictBudget ? expansionRoundsForDeficit(input.targetChars - documentTextLength(content)) : Math.min(1, expansionRoundsForDeficit(input.targetChars - documentTextLength(content)));
+  const maxRounds = Math.min(1, expansionRoundsForDeficit(input.targetChars - documentTextLength(content)));
   const maxChars = input.maxChars ?? Math.ceil(input.targetChars * 1.12);
   for (; rounds < maxRounds && documentTextLength(content) < input.targetChars && documentTextLength(content) < maxChars; rounds += 1) {
     throwIfAborted(input.signal);
@@ -1308,6 +1321,7 @@ export async function expandChapterToTarget(input: { template: DocumentTemplate;
     try {
       const currentChars = documentTextLength(content);
       const incrementalTarget = Math.min(input.targetChars, currentChars + (input.strictBudget ? 5600 : 3200));
+      const roundMaxChars = Math.min(maxChars, currentChars + (input.strictBudget ? 9000 : 4200));
       const expanded = await callWithTimeout(
         signal => expandChapterContent({
           template: input.template,
@@ -1318,12 +1332,12 @@ export async function expandChapterToTarget(input: { template: DocumentTemplate;
           requirement: input.requirement,
           roleContext: input.roleContext,
           targetChars: incrementalTarget,
-          maxChars: Math.min(maxChars, currentChars + (input.strictBudget ? 7000 : 4200)),
+          maxChars: roundMaxChars,
           forbidDrawingImages: input.forbidDrawingImages,
-          maxTokens: Math.min(input.maxTokens ?? outputTokensForChapter(currentChars, incrementalTarget), outputTokensForChapter(currentChars, incrementalTarget)),
+          maxTokens: input.strictBudget ? outputTokensForChapter(currentChars, incrementalTarget) : Math.min(input.maxTokens ?? outputTokensForChapter(currentChars, incrementalTarget), outputTokensForChapter(currentChars, incrementalTarget)),
           signal,
         }),
-        120000,
+        timeoutMsForChapter(incrementalTarget),
         input.signal,
       );
       if (!expanded || expanded === before) break;
@@ -1336,24 +1350,30 @@ export async function expandChapterToTarget(input: { template: DocumentTemplate;
 }
 
 
-export async function expandDocumentToBudget(input: { template: DocumentTemplate; chapters: DocumentDraftChapter[]; budget: DocumentBudget; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; signal?: AbortSignal }) {
+export async function expandDocumentToBudget(input: { template: DocumentTemplate; chapters: DocumentDraftChapter[]; budget: DocumentBudget; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; signal?: AbortSignal; onRoundProgress?: (chapters: DocumentDraftChapter[], context: { round: number; totalChars: number; addedChars: number; maxRounds: number }) => void }) {
   if (!input.budget.minChars) return input.chapters;
   let chapters = input.chapters;
   let totalChars = documentTextLength(chapters.map(chapter => chapter.content).join('\n\n'));
-  const maxDocumentRounds = Math.min(input.budget.longformStrict ? 3 : 1, expansionRoundsForDeficit(input.budget.minChars - totalChars));
+  const maxDocumentRounds = Math.min(input.budget.longformStrict ? 10 : 3, expansionRoundsForDeficit(input.budget.minChars - totalChars) + 4);
   const concurrency = Math.max(1, input.chapters.length || 1);
   const lowGrowthChapterIds = new Set<string>();
   const documentMaxChars = input.budget.maxChars;
   for (let round = 0; round < maxDocumentRounds && totalChars < input.budget.minChars && (!documentMaxChars || totalChars < documentMaxChars); round += 1) {
     throwIfAborted(input.signal);
     const roundStartChars = totalChars;
-    const deficits = chapters
+    const remainingDeficit = Math.max(0, input.budget.minChars - totalChars);
+    const expandableChapters = chapters.filter(chapter => !lowGrowthChapterIds.has(chapter.id));
+    if (expandableChapters.length === 0 && totalChars < input.budget.minChars) lowGrowthChapterIds.clear();
+    const activeChapters = chapters.filter(chapter => !lowGrowthChapterIds.has(chapter.id));
+    const perChapterShare = Math.ceil(remainingDeficit / Math.max(1, activeChapters.length));
+    const deficits = activeChapters
       .map(chapter => {
-        const target = input.budget.chapterTargets.get(chapter.id) || 0;
         const current = documentTextLength(chapter.content);
+        const weightedTarget = input.budget.chapterTargets.get(chapter.id) || current;
+        const target = Math.max(weightedTarget, current + Math.ceil(perChapterShare * (input.budget.longformStrict ? 1.35 : 1)));
         return { chapter, target, current, deficit: target - current };
       })
-      .filter(item => item.deficit > 500 && !lowGrowthChapterIds.has(item.chapter.id))
+      .filter(item => item.deficit > 500)
       .sort((a, b) => b.deficit - a.deficit);
     if (deficits.length === 0) break;
     for (let offset = 0; offset < deficits.length && totalChars < input.budget.minChars && (!documentMaxChars || totalChars < documentMaxChars); offset += concurrency) {
@@ -1365,8 +1385,9 @@ export async function expandDocumentToBudget(input: { template: DocumentTemplate
       const perChapterRoom = Number.isFinite(remainingDocumentRoom) ? Math.max(500, Math.floor(remainingDocumentRoom / batch.length)) : undefined;
       const results = await Promise.all(batch.map(async item => {
         try {
-          const incrementalTarget = Math.min(item.target, item.current + Math.max(input.budget.longformStrict ? 3600 : 1200, Math.min(item.deficit, input.budget.longformStrict ? 7600 : 3200)));
-          const maxChars = perChapterRoom ? Math.min(Math.ceil(incrementalTarget * 1.12), item.current + perChapterRoom) : Math.ceil(incrementalTarget * 1.12);
+          const increment = Math.max(input.budget.longformStrict ? 7000 : 1600, Math.min(item.deficit, input.budget.longformStrict ? 12000 : 3600));
+          const incrementalTarget = Math.min(item.target, item.current + increment);
+          const maxChars = perChapterRoom ? Math.min(Math.ceil(incrementalTarget * 1.15), item.current + perChapterRoom) : Math.ceil(incrementalTarget * 1.15);
           const expanded = await expandChapterToTarget({ template: input.template, chapter: { id: item.chapter.id, title: item.chapter.title, purpose: item.chapter.title, queries: [], requiredFacts: [], sections: item.chapter.sections }, content: item.chapter.content, evidence: item.chapter.evidence, promptTexts: input.promptTexts, requirement: input.requirement, roleContext: '', targetChars: incrementalTarget, maxChars, forbidDrawingImages: input.forbidDrawingImages, maxTokens: outputTokensForChapter(item.current, incrementalTarget), signal: input.signal, strictBudget: input.budget.longformStrict });
           return { id: item.chapter.id, beforeChars: item.current, content: expanded.content };
         } catch {
@@ -1375,12 +1396,13 @@ export async function expandDocumentToBudget(input: { template: DocumentTemplate
       }));
       for (const result of results) {
         const afterChars = documentTextLength(result.content);
-        if (afterChars <= result.beforeChars + 300) lowGrowthChapterIds.add(result.id);
+        if (!input.budget.longformStrict && afterChars <= result.beforeChars + 300) lowGrowthChapterIds.add(result.id);
         chapters = chapters.map(chapter => chapter.id === result.id ? { ...chapter, content: result.content } : chapter);
       }
       totalChars = documentTextLength(chapters.map(chapter => chapter.content).join('\n\n'));
+      input.onRoundProgress?.(chapters, { round: round + 1, totalChars, addedChars: Math.max(0, totalChars - roundStartChars), maxRounds: maxDocumentRounds });
     }
-    if (totalChars <= roundStartChars + (input.budget.longformStrict ? 80 : 300)) break;
+    if (!input.budget.longformStrict && totalChars <= roundStartChars + 300) break;
   }
   return chapters;
 }
@@ -1424,7 +1446,7 @@ export async function reviewChapterSummaries(input: { template: DocumentTemplate
       const hasChunkFail = chunkReviews.some(item => item?.status === 'fail');
       const hasChunkWarn = chunkReviews.some(item => item?.status === 'warn');
       const issues = mergeUniqueStrings([...localIssues, ...parsedIssues]);
-      const blockingLocalIssue = localIssues.some(issue => /缺少规划小节|规划小节正文过短|空小节|只有标题|只有表格|正文篇幅明显低于目标|低于目标|缺失|占位|泄露|不足/u.test(issue));
+      const blockingLocalIssue = localIssues.some(issue => /空小节|只有标题|只有表格|正文篇幅明显低于目标|低于目标|占位|泄露/u.test(issue));
       const status = hasChunkFail || blockingLocalIssue ? 'fail' : hasChunkWarn || issues.length > 0 ? 'warn' : 'pass';
       return { chapterId: chapter.id, title: chapter.title, status, issues, suggestions: parsedSuggestions, chars: documentTextLength(chapter.content) } as ChapterReviewSummary;
     }));

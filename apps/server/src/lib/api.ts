@@ -64,6 +64,17 @@ export async function searchKbFiles(opts?: { query?: string; projectRoot?: strin
   return fetchJson<{ files: KbFileItem[]; total: number }>(`/api/kb/files/search?${params}`);
 }
 
+export interface KbRetrievalEvalCase { id?: string; query: string; relevantFiles?: string[]; relevantSnippets?: string[]; expectedTerms?: string[]; filePaths?: string[]; filePathPrefixes?: string[]; topK?: number; }
+export interface KbRetrievalEvalReport { totalCases: number; validCases: number; invalidCases: number; topK: number; recallAtK: number; precisionAtK: number; mrr: number; ndcgAtK: number; pass95: boolean; cases: unknown[]; invalid: Array<{ id: string; query: string; reason: string }>; }
+
+export async function evaluateKbRetrieval(opts: { projectRoot?: string; cases?: KbRetrievalEvalCase[]; topK?: number; generationMode?: boolean; filePaths?: string[]; filePathPrefixes?: string[]; autoGenerate?: boolean; limit?: number; perFileLimit?: number; fileLayer?: 'all' | 'document' | 'cad'; includeExtensions?: string[]; excludeExtensions?: string[]; compact?: boolean; disableReranker?: boolean }) {
+  return fetchJson<KbRetrievalEvalReport>('/api/kb/evaluate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  });
+}
+
 export async function getKbFileDetail(relativePath: string, projectRoot?: string) {
   const params = new URLSearchParams({ relativePath });
   if (projectRoot) params.set('projectRoot', projectRoot);

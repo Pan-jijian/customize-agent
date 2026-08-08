@@ -23,6 +23,7 @@ type CadAnnotation = { text: string; x?: number; y?: number; layer?: string; blo
 
 const CAD_INTERNAL_TOKEN_RE = /\b(?:TDbPipe|TDbPipeValve|TDbPipeFitting|TDbWellh|AcDb\w+|Dwg\w+|ObjectId|Handle|ByLayer|Continuous|Model|Layout\d*)\b/giu;
 const CAD_INTERNAL_LINE_RE = /^(?:TDb\w+|AcDb\w+|[A-F0-9]{8,}|\d+|Model|Layout\d*|ByLayer|Continuous)$/iu;
+const CAD_DOMAIN_SIGNAL_RE = /工程|项目|施工|建筑|结构|装饰|电气|给排水|消防|暖通|平面|立面|剖面|节点|详图|材料|尺寸|标高|轴线|图层|门窗|墙|地面|顶面|照明|配电|弱电|空调|卫生间|楼梯|屋面|基础|柱|梁|板|图号|设计|说明/u;
 const OCR_NATIVE_NOISE_PATTERNS = [/^Image too small to scale!!/u, /^Line cannot be recognized!!$/u];
 
 /** 文件内容提取器，支持文档、表格、图片、CAD 等多种文件格式的内容抽取 */
@@ -162,9 +163,30 @@ export class ContentExtractor {
       .trim();
   }
 
+  private isLikelyGarbledCadText(value: string): boolean {
+    const compact = value.replace(/\s+/gu, '');
+    if (!compact) return true;
+    const chars = [...compact];
+    const readable = chars.filter(char => /[\p{Script=Han}\p{Script=Latin}\d（）()【】《》、，。；;：:,.\-/㎡%]/u.test(char)).length;
+    const cjk = chars.filter(char => /[\p{Script=Han}]/u.test(char)).length;
+    const latin = chars.filter(char => /[\p{Script=Latin}]/u.test(char)).length;
+    const digits = chars.filter(char => /\d/u.test(char)).length;
+    const symbols = chars.length - readable;
+    const readableRatio = readable / chars.length;
+    const symbolRatio = symbols / chars.length;
+    const hasDomainSignal = CAD_DOMAIN_SIGNAL_RE.test(compact);
+    const hasCommonTextShape = /[，。；：、,.\-/()（）]|\d+(?:\.\d+)?\s*(?:mm|cm|m|㎡|%|°)?/iu.test(compact);
+    const latinVowelCount = chars.filter(char => /[aAeEiIoOuU]/u.test(char)).length;
+    if (readableRatio < 0.6) return true;
+    if (symbolRatio > 0.35 && !hasDomainSignal) return true;
+    if (latin >= 12 && latinVowelCount === 0 && !hasDomainSignal) return true;
+    if (cjk >= 8 && digits === 0 && !hasDomainSignal && !hasCommonTextShape) return true;
+    return false;
+  }
+
   private isReadableCadValue(value: string): boolean {
     const cleaned = this.cleanCadReadableText(value);
-    return cleaned.length >= 2 && !CAD_INTERNAL_LINE_RE.test(cleaned) && /[\p{Script=Han}\p{Letter}\d]/u.test(cleaned);
+    return cleaned.length >= 2 && !CAD_INTERNAL_LINE_RE.test(cleaned) && /[\p{Script=Han}\p{Letter}\d]/u.test(cleaned) && !this.isLikelyGarbledCadText(cleaned);
   }
 
   private cleanExtractedText(value: string, file: ClassifiedFile): string {
@@ -178,7 +200,7 @@ export class ContentExtractor {
     return normalized
       .split(/\r?\n/u)
       .map(line => this.cleanCadReadableText(line))
-      .filter(line => line && !CAD_INTERNAL_LINE_RE.test(line))
+      .filter(line => line && !CAD_INTERNAL_LINE_RE.test(line) && !this.isLikelyGarbledCadText(line))
       .join('\n')
       .replace(/\n{3,}/gu, '\n\n');
   }
@@ -190,7 +212,7 @@ export class ContentExtractor {
   }
 
   private async extractCad(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
-    const metadata: Record<string, unknown> = { extractionMode: 'builtin_cad_structural', vectorizable: true };
+    const metadata: Record<string, unknown> = { extractionMode: 'builtin_cad_structural', vectorizable: true, preferredExtractionMode: 'dwg_to_dxf_semantic' };
     const warnings: string[] = [];
     const ext = path.extname(file.absolutePath).toLowerCase();
 
@@ -198,7 +220,7 @@ export class ContentExtractor {
     if (ext === '.dwg') {
       const converted = await this.tryConvertDwgToDxf(file.absolutePath);
       if (converted?.dxfText) {
-        const parsed = await this.extractDxf(file, converted.dxfText, { ...metadata, extractionMode: converted.tool, convertedFrom: 'dwg' });
+        const parsed = await this.extractDxf(file, converted.dxfText, { ...metadata, extractionMode: converted.tool, convertedFrom: 'dwg', professionalConversionUsed: true });
         parsed.warnings.push(...converted.warnings);
         return parsed;
       }
@@ -286,12 +308,18 @@ export class ContentExtractor {
       if (result.text.trim()) return result;
     }
 
-    const readable = this.extractBinaryReadableFragments(file.absolutePath).filter(value => this.isReadableCadValue(value)).slice(0, 5000);
+    const binaryFragments = this.extractBinaryReadableFragments(file.absolutePath);
+    const readable = binaryFragments.filter(value => this.isReadableCadValue(value)).slice(0, 5000);
+    const filteredCount = Math.max(0, binaryFragments.length - readable.length);
     metadata.extractionMode = 'builtin_cad_readable_fragments';
-    metadata.contentCoverage = readable.length > 0 ? 'cad_readable_text_fragments' : 'metadata';
+    metadata.professionalConversionUsed = false;
+    metadata.contentCoverage = readable.length > 0 ? 'cad_readable_text_fragments_filtered' : 'metadata';
+    metadata.contentConfidence = readable.length > 0 ? 'low_fallback_filtered' : 'metadata_only';
+    metadata.stringCandidateCount = binaryFragments.length;
     metadata.stringCount = readable.length;
+    metadata.filteredGarbledStringCount = filteredCount;
     if (readable.length === 0) warnings.push(`${file.format} 内置 CAD 解析器未提取到可用文本，仅记录文件元数据，未生成可检索正文切片`);
-    else warnings.push(`${file.format} 未检测到专业 DWG 转换器，已使用内置可读标注/标题块抽取；如需完整图纸结构，请安装 ODA File Converter 或 LibreDWG 并配置外部解析器`);
+    else warnings.push(`${file.format} 内置 DWG→DXF 转换未成功，已使用低置信度可读标注/标题块兜底抽取并过滤疑似乱码 ${filteredCount} 条；该结果仅作为兜底证据，不应等同于完整图层、块、标注和尺寸语义解析`);
     return {
       text: readable.length > 0 ? [this.metadataOnlyText(file), `CAD 图纸可读标注/标题块/属性:\n${readable.join('\n')}`].join('\n') : this.metadataOnlyText(file),
       metadata,
@@ -393,14 +421,26 @@ export class ContentExtractor {
     try {
       const mod = await resolveAndImport('dwgdxf') as { convertDwgToDxf?: (dwg: Uint8Array | ArrayBuffer, options?: { wasmBase?: string }) => Promise<Uint8Array> };
       if (!mod.convertDwgToDxf) return { tool: 'dwgdxf_wasm', warnings: ['内置 dwgdxf WASM 转换器未导出 convertDwgToDxf'] };
-      const wasmBase = pathToFileURL(path.join(path.dirname(resolvePackage('dwgdxf')), 'wasm')).href;
-      const dxfBytes = await mod.convertDwgToDxf(fs.readFileSync(filePath), { wasmBase });
-      const dxfText = Buffer.from(dxfBytes).toString('utf8');
-      return dxfText.trim()
-        ? { dxfText, tool: 'dwgdxf_wasm', warnings: [] }
-        : { tool: 'dwgdxf_wasm', warnings: ['内置 dwgdxf WASM 转换器未输出 DXF 文本'] };
+      const dwgBytes = fs.readFileSync(filePath);
+      const attempts: Array<{ label: string; options?: { wasmBase?: string } }> = [
+        { label: 'package-default' },
+        { label: 'package-dist-wasm', options: { wasmBase: pathToFileURL(path.join(path.dirname(resolvePackage('dwgdxf')), 'wasm')).href } },
+        { label: 'package-root-dist-wasm', options: { wasmBase: pathToFileURL(path.join(path.dirname(path.dirname(resolvePackage('dwgdxf'))), 'wasm')).href } },
+      ];
+      const failures: string[] = [];
+      for (const attempt of attempts) {
+        try {
+          const dxfBytes = await mod.convertDwgToDxf(dwgBytes, attempt.options);
+          const dxfText = Buffer.from(dxfBytes).toString('utf8');
+          if (dxfText.trim()) return { dxfText, tool: `dwgdxf_wasm:${attempt.label}`, warnings: [] };
+          failures.push(`${attempt.label}: 未输出 DXF 文本`);
+        } catch (error) {
+          failures.push(`${attempt.label}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      return { tool: 'dwgdxf_wasm', warnings: [`内置 dwgdxf WASM 转换失败: ${failures.join('；')}`] };
     } catch (error) {
-      return { tool: 'dwgdxf_wasm', warnings: [`内置 dwgdxf WASM 转换失败: ${error instanceof Error ? error.message : String(error)}`] };
+      return { tool: 'dwgdxf_wasm', warnings: [`内置 dwgdxf WASM 加载失败: ${error instanceof Error ? error.message : String(error)}`] };
     }
   }
 

@@ -22,5 +22,5 @@ export { HNSWVectorStore } from './vector/hnsw-vector-store.js';
 export { CollectionManager, globalCollectionName, projectCollectionName } from './vector/collection-manager.js';
 export type { CollectionClient, VectorCollectionInfo, VectorDocument, VectorSearchQuery, VectorSearchResult, VectorStoreInterface, VectorWriteOptions } from './vector/types.js';
 export { VectorIndexer, type VectorIndexResult } from './vector/vector-indexer.js';
-export { FederationSearch, type FederatedQuery, type FederatedResult, type FederatedSearchItem, type SearchFilters, type SearchScope } from './search/federation-search.js';
+export { FederationSearch, type FederatedQuery, type FederatedResult, type FederatedSearchItem, type RetrievalWeights, type SearchFilters, type SearchScope } from './search/federation-search.js';
 export type { LLMChatMessage, LLMChatOptions, LLMChatResponse, LLMSearchProvider } from './llm/llm-search-provider.js';

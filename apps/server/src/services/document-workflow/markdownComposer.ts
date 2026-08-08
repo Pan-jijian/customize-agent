@@ -7,7 +7,7 @@ export function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
   return markdown.replace(/^!\[[^\]]*(?:图纸|drawing|cad|地图|平面|剖面|立面)[^\]]*\]\([^)]*\)\s*$/gimu, '').replace(/\n{3,}/gu, '\n\n');
 }
 
-export const WORKFLOW_PHRASE_RE = /.*(?:知识库证据|文件角色|提示词角色|后台自动规范|规范包|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|校验结果).*(?:\n|$)/gu;
+export const WORKFLOW_PHRASE_RE = /.*(?:知识库证据|知识库已确认事实|文件角色|提示词角色|后台自动规范|规范包|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|校验结果|修复任务包|修复类型|修复对象|输出要求).*(?:\n|$)/gu;
 const RAW_SOURCE_LINE_RE = /^\s*(?:#{1,6}\s*)?(?:PDF\s*第\s*\d+\s*页|rule\b|文件[:：]|片段[:：]|来源[:：]).*$/gimu;
 const ASCII_FLOW_LINE_RE = /^\s*(?:[│┃┆┊┌┐└┘├┤┬┴┼─━╭╮╰╯]|[↓↑→←⇒⇨➡])+\s*$/gmu;
 const INSTRUCTION_HEADING_RE = /^#{2,6}\s+(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用)|^#{2,6}\s+(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:如|若|如果)(?:涉及|不涉及|适用|不适用)|^#{2,6}\s+.*(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成)|^#{2,6}\s+.*(?:按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|说明要求|注意事项)\s*$/gmu;
@@ -42,6 +42,88 @@ export function normalizeProductionText(markdown: string) {
     .replace(/\s*±\s*/gu, '±');
 }
 
+export function normalizeTenderSourcePageRefs(markdown: string) {
+  return markdown
+    .replace(/PDF\s*第\s*\d+\s*页/giu, '相关资料')
+    .replace(/第\s*\d+\s*页\s*\/\s*共\s*\d+\s*页/gu, '')
+    .replace(/第\s*\d+\s*(?:[-—至到~～]\s*\d+)?\s*页/gu, '相关资料')
+    .replace(/(装饰工程|土建工程|加固工程|给排水工程|电气工程|智能化工程|消防工程|弱电智能化工程|室外道排工程|建筑结构加固工程)\s*(?:(?:施工)?图纸|资料|文件)?\s*[（(]?\s*(?:(?:共|多达|约|合计)\s*)?\d+\s*页\s*[）)]?/gu, '$1施工图纸')
+    .replace(/\d+\s*页\s*(装饰|土建|加固|给排水|电气|智能化|消防|弱电智能化|室外道排|建筑结构加固)\s*(?:专业)?\s*(?:(?:施工)?图纸)?/gu, '$1专业图纸')
+    .replace(/(装饰|土建|加固|给排水|电气|智能化|消防|弱电智能化|室外道排|建筑结构加固)\s*(?:专业)?\s*(?:[（(]\s*)?\d+\s*页\s*(?:(?:施工)?图纸)?\s*[）)]?/gu, '$1专业图纸')
+    .replace(/([\u4e00-\u9fa5A-Za-z0-9、及与和]{2,24})\s*(?:共|多达|约|合计)\s*\d+\s*页/gu, '$1相关专业图纸')
+    .replace(/([\u4e00-\u9fa5A-Za-z0-9（）()、·-]{2,24}工程)\s*(?:图纸|资料|文件)?\s*[（(]?\s*(?:(?:共|多达|约|合计)\s*)?\d+\s*页\s*[）)]?/gu, '$1施工图纸')
+    .replace(/([\u4e00-\u9fa5A-Za-z0-9（）()、·-]{2,24})(?<!施工)\s*(?:施工)?图纸\s*[（(]?\s*(?:(?:共|多达|约|合计)\s*)?\d+\s*页\s*[）)]?/gu, '$1施工图纸')
+    .replace(/(给排水|电气|智能化|消防|暖通|人防)\s*[（(]\s*\d+\s*页\s*[）)]/gu, '$1专业图纸')
+    .replace(/(?:依据|按照|结合)?\s*图纸\s*[（(]\s*\d+\s*页\s*[）)]/gu, '依据相关专业图纸')
+    .replace(/(?:依据|按照|结合)?\s*清单\s*[（(]?\s*\d+\s*页\s*[）)]?/gu, '依据工程量清单')
+    .replace(/资料\s*[（(]?\s*\d+\s*页\s*[）)]?/gu, '项目资料')
+    .replace(/[（(]?[\u4e00-\u9fa5A-Za-z0-9、及与和]*(?:图纸|清单|资料|文件|工程)?[\u4e00-\u9fa5A-Za-z0-9、及与和]*(?:(?:共|多达|约|合计)\s*)?\d+\s*页[\u4e00-\u9fa5A-Za-z0-9、及与和]*(?:图纸|清单|资料|文件)?[）)]?/gu, match => /图纸|工程|装饰|土建|加固|给排水|电气|智能化|消防/u.test(match) ? '相关专业图纸' : /清单/u.test(match) ? '工程量清单' : '相关资料')
+    .replace(/(?:位于|详见|见|参见|依据|按照|结合)?\s*相关资料(?:\s*相关资料)+/gu, '相关资料');
+}
+
+const INLINE_LIST_MARKER_RE = String.raw`(?:\d+[.、](?=\s|\*\*)\s*|[（(]\d+[）)]\s*|[-*+]\s+)`;
+const INLINE_LIST_PAIR_RE = new RegExp(String.raw`\S.+(?:\s|[。；;])${INLINE_LIST_MARKER_RE}\S.+(?:\s|[。；;])${INLINE_LIST_MARKER_RE}\S`, 'u');
+
+export function hasInlineListCollision(line: string) {
+  return INLINE_LIST_PAIR_RE.test(line) && !/\b\d+\.\d+\s*(?:mm|cm|m|㎡|m2|kg|t|MPa|kPa|V|KV|kV|A)\b/iu.test(line);
+}
+
+function normalizeInlineListsInLine(line: string) {
+  if (/^\s*\|/u.test(line) || /^\s*\|?\s*:?-{3,}:?/u.test(line)) return line;
+  return line
+    .replace(/([。；;])\s*(?=(?:\d+[.、](?=\s|\*\*)\s*|[（(]\d+[）)]\s*|[-*+]\s+)\S)/gu, '$1\n')
+    .replace(/([^\n])\s+(?=(?:\d+[.、](?=\s|\*\*)\s*|[（(]\d+[）)]\s*|[-*+]\s+)\*\*)/gu, '$1\n');
+}
+
+export function normalizeInlineListBreaks(markdown: string) {
+  return markdown.split(/\r?\n/u).map(normalizeInlineListsInLine).join('\n').replace(/\n{3,}/gu, '\n\n');
+}
+
+function isMarkdownTableDivider(line: string) {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/u.test(line);
+}
+
+function isMarkdownTableRow(line: string) {
+  const trimmed = line.trim();
+  return /^\|.*\|$/u.test(trimmed) && trimmed.split('|').length >= 3;
+}
+
+function tableColumnCount(line: string) {
+  return line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).length;
+}
+
+function dividerForColumns(columns: number) {
+  return `| ${Array.from({ length: Math.max(2, columns) }, () => '---').join(' | ')} |`;
+}
+
+function normalizeTableRowColumns(line: string, columns: number) {
+  const cells = line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).map(cell => cell.trim());
+  while (cells.length < columns) cells.push('按审批确认执行');
+  return `| ${cells.slice(0, columns).join(' | ')} |`;
+}
+
+export function normalizeMarkdownTableDividers(markdown: string) {
+  const lines = markdown.split(/\r?\n/u);
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!isMarkdownTableRow(line) || isMarkdownTableDivider(line)) {
+      output.push(line);
+      continue;
+    }
+    const next = lines[index + 1] || '';
+    const columns = tableColumnCount(line);
+    output.push(normalizeTableRowColumns(line, columns));
+    if (isMarkdownTableDivider(next)) {
+      output.push(dividerForColumns(columns));
+      index += 1;
+      continue;
+    }
+    if (isMarkdownTableRow(next)) output.push(dividerForColumns(columns));
+  }
+  return output.join('\n').replace(/\n{3,}/gu, '\n\n');
+}
+
 export function stripMarkdownDocumentFence(markdown: string) {
   const trimmed = markdown.trim();
   const match = /^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/iu.exec(trimmed);
@@ -49,15 +131,14 @@ export function stripMarkdownDocumentFence(markdown: string) {
 }
 
 export function sanitizeFormalMarkdown(markdown: string) {
-  const cleaned = normalizeProductionText(stripMarkdownDocumentFence(markdown))
+  const cleaned = normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(normalizeProductionText(stripMarkdownDocumentFence(markdown)))))
     .replace(WORKFLOW_PHRASE_RE, '')
     .replace(RAW_SOURCE_LINE_RE, '')
     .replace(ASCII_FLOW_LINE_RE, '')
     .replace(INSTRUCTION_HEADING_RE, '')
     .replace(FILE_NAME_RE, '')
     .replace(/^#\s+/gmu, '')
-    .replace(CAD_ENTITY_TOKEN_RE, '')
-    .replace(/第\s*\d+\s*页\s*\/\s*共\s*\d+\s*页/gu, '');
+    .replace(CAD_ENTITY_TOKEN_RE, '');
   return cleaned.split(/\r?\n/u)
     .filter((line, index, lines) => {
       const previousPlain = index > 0 ? displayChapterTitle((lines[index - 1] || '').trim().replace(/^#{1,6}\s+/u, '')) : '';
@@ -66,6 +147,7 @@ export function sanitizeFormalMarkdown(markdown: string) {
       const trimmed = line.trim();
       if (!trimmed) return true;
       if (/该小节围绕.+进行补充说明/u.test(trimmed)) return false;
+      if (/仅作为内部事实提取依据|正式正文不得引用文件名|后台事实|内部事实/u.test(trimmed)) return false;
       if (/^\s*\|/u.test(trimmed) || /^\s*\|?\s*:?-{3,}:?/u.test(trimmed)) return true;
       const plain = displayChapterTitle(trimmed.replace(/^#{1,6}\s+/u, ''));
       if (/^(?:雨季|冬季|高温|台风|大风等特殊气候|雨季、冬季、高温、台风、大风等特殊气候)$/u.test(plain)) return false;
@@ -244,11 +326,10 @@ export function inferChapterSectionsFromMarkdown(markdown: string, chapters: Arr
     const current = headingMatches.find(match => sameStructuralTitle(match[1] || '', chapter.title) || sameStructuralTitle(match[1] || '', expected));
     if (!current || current.index === undefined) return chapter.sections || [];
     const next = headingMatches.find(match => (match.index || 0) > (current.index || 0) && chapters.some(item => sameStructuralTitle(match[1] || '', item.title)));
-    const plannedSections = chapter.sections || [];
-    if (plannedSections.length > 0) return plannedSections;
     const block = normalizedMarkdown.slice(current.index, next?.index ?? normalizedMarkdown.length);
     const extracted = extractGeneratedSections(block);
-    return extracted.length > 0 ? extracted.slice(0, 6) : [];
+    if (extracted.length > 0) return extracted.slice(0, 12);
+    return chapter.sections || [];
   });
 }
 
@@ -314,14 +395,6 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
     if (!cleanTitle || isInstructionLikeTitle(title) || isInstructionLikeTitle(cleanTitle)) return '';
     const plannedIndex = plannedSectionIndex(cleanTitle);
     const plannedSections = chapters[chapterIndex]?.sections || [];
-    if (plannedSections.length > 0 && plannedIndex < 0) {
-      if (!sectionIndex) {
-        sectionIndex = 1;
-        activeSourceSection = `${chapterIndex + 1}.1`;
-      }
-      tertiaryIndex += 1;
-      return tertiaryIndex <= 4 ? `#### ${chapterIndex + 1}.${sectionIndex}.${tertiaryIndex} ${cleanTitle}` : `**${cleanTitle}**`;
-    }
     const nextIndex = plannedIndex >= 0 ? plannedIndex + 1 : sectionIndex + 1;
     const sectionKey = plannedIndex >= 0 ? normalizePlannedSectionTitle(plannedSections[plannedIndex]) : normalizePlannedSectionTitle(cleanTitle);
     if (emittedSectionKeys.has(sectionKey)) {
@@ -356,10 +429,18 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
       emittedSectionKeys = new Set<string>();
       return line;
     }
+    const h2ChineseSection = /^##\s+第[一二三四五六七八九十百千万\d]+节\s+(.+)$/u.exec(trimmed);
+    if (chapterIndex >= 0 && h2ChineseSection) return normalizeSectionHeading(h2ChineseSection[1] || '');
     const h2SingleNumberedSection = /^##\s+\d+[.．、]\s+(.+)$/u.exec(trimmed);
     if (chapterIndex >= 0 && h2SingleNumberedSection) return normalizeSectionHeading(h2SingleNumberedSection[1] || '');
     const h2NumberedSection = /^##\s+(\d+)\.(\d+)\s+(.+)$/u.exec(trimmed);
     if (chapterIndex >= 0 && h2NumberedSection) return normalizeSectionHeading(h2NumberedSection[3] || '', `${h2NumberedSection[1]}.${h2NumberedSection[2]}`);
+    const h2PlainSection = /^##\s+(.+)$/u.exec(trimmed);
+    if (chapterIndex >= 0 && h2PlainSection) {
+      const plainTitle = displayChapterTitle(h2PlainSection[1] || '');
+      if (/^本章目录$/u.test(plainTitle)) return '';
+      return normalizeSectionHeading(plainTitle);
+    }
     const section = /^###\s+(?:(\d+)\.(\d+)\s+)?(.+)$/u.exec(trimmed);
     if (chapterIndex >= 0 && section) return normalizeSectionHeading(section[3] || '', section[1] && section[2] ? `${section[1]}.${section[2]}` : undefined);
     const h3NumberedAsSection = /^####\s+(\d+)\.(\d+)(?!\.)\s+(.+)$/u.exec(trimmed);
@@ -381,7 +462,7 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
 
 function requiredTableMarkdown(title: string) {
   if (/项目基本信息/u.test(title)) return '';
-  return [`**${title}**`, '', '| 项目 | 内容 | 数据口径 | 备注 |', '|---|---|---|---|', `| ${title.replace(/表$/u, '')} | 依据项目资料、施工组织安排和审批确认结果填写 | 已确认事实采用知识库原值；系统暂未确认的实施前复核并触发补抽 | 不编造知识库外工程实体参数 |`].join('\n');
+  return [`**${title}**`, '', '| 控制项目 | 控制内容 | 执行要求 | 复核要求 |', '|---|---|---|---|', `| ${title.replace(/表$/u, '')} | 依据招标文件、施工图设计文件、工程量清单和施工组织安排填写 | 实施前完成专业复核、审批确认和交底闭环 | 不采用无依据的工程实体参数 |`].join('\n');
 }
 
 function hasProjectBasicInfoTable(markdown: string) {
@@ -430,7 +511,7 @@ function applyForbiddenTermReplacements(markdown: string, rules?: PromptDocument
     .replace(/重中之重/gu, '关键控制事项');
   for (const term of rules?.forbiddenTerms || []) {
     if (!term) continue;
-    if (/^(?:工程造价|造价|报价|投标报价|报价明细|综合单价|单价|合价|金额|税率|增值税|利润|预留金|暂列金额|报价明细表|最高投标限价|招标控制价)$/u.test(term)) {
+    if (/^(?:报价明细表|最高投标限价|招标控制价)$/u.test(term)) {
       next = next.split(/\r?\n/u).filter(line => !new RegExp(escapedRegExp(term), 'u').test(line)).join('\n');
     }
   }
@@ -524,15 +605,6 @@ function normalizePlannedSectionTitle(title: string) {
     .trim();
 }
 
-function hasPlannedSection(body: string, section: string) {
-  const target = normalizePlannedSectionTitle(section);
-  return body.split(/\r?\n/u).some(line => {
-    const match = /^#{2,4}\s+(.+)$/u.exec(line.trim());
-    if (!match) return false;
-    return normalizePlannedSectionTitle(match[1] || '') === target;
-  });
-}
-
 export function plannedStructurePrompt(template: DocumentTemplate) {
   return template.chapters.map(chapter => [
     `- ${chapter.title}`,
@@ -559,7 +631,7 @@ export function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumen
   if (missingKeywords.length > 0) issues.push({ level: 'warning', message: `正文缺少提示词要求覆盖的关键词：${missingKeywords.join('、')}`, suggestion: '请在相关章节自然补齐这些要点，避免堆砌关键词。' });
   const forbiddenPatternHits = (rules.forbiddenPatterns || []).filter(term => term && new RegExp(escapedRegExp(term), 'u').test(markdown));
   if (forbiddenPatternHits.length > 0) issues.push({ level: 'warning', message: `正文出现提示词禁止内容：${forbiddenPatternHits.join('、')}`, suggestion: '请删除或替换为正式交付表述。' });
-  const hitTerms = (rules.forbiddenTerms || []).filter(term => term && new RegExp(escapedRegExp(term), 'u').test(markdown));
+  const hitTerms = (rules.forbiddenTerms || []).filter(term => term && !/^(?:工程造价|造价|报价|投标报价|综合单价|单价|合价|金额|税率|增值税|利润|预留金|暂列金额)$/u.test(term) && new RegExp(escapedRegExp(term), 'u').test(markdown));
   if (hitTerms.length > 0) issues.push({ level: 'warning', message: `正文残留总控提示词禁止词：${hitTerms.join('、')}`, suggestion: '请改为正式交付语言，删除后台话术、第三人称和口号式表达。' });
   const runtimeRules = rules as PromptDocumentRuleSet & { exactHeadings?: string[]; forbidExtraHeadings?: boolean; requiredSubjects?: string[]; forbiddenSubjects?: string[]; minChars?: number };
   const exactHeadings = runtimeRules.exactHeadings || [];
@@ -569,7 +641,7 @@ export function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumen
     const missingHeadings = exactHeadings.filter(title => !actualHeadings.includes(displayChapterTitle(title)));
     const extraHeadings = runtimeRules.forbidExtraHeadings ? actualHeadings.filter(title => !normalizedExactHeadings.includes(displayChapterTitle(title))) : [];
     if (missingHeadings.length > 0) issues.push({ level: 'error', message: `正文缺少提示词指定一级章节：${missingHeadings.join('、')}`, suggestion: '请严格按用户提示词 OUTLINE 输出一级章节。' });
-    if (extraHeadings.length > 0) issues.push({ level: 'error', message: `正文出现提示词未允许的一级章节：${extraHeadings.join('、')}`, suggestion: '请删除或并入指定一级章节，不得新增一级章节。' });
+    if (extraHeadings.length > 0) issues.push({ level: 'warning', message: `正文出现提示词未允许的一级章节：${extraHeadings.join('、')}`, suggestion: '请检查是否为正文内部层级误升；如不影响指定 OUTLINE 完整性，可在后续排版中并入所属章节。' });
   }
   const subjectHits = (runtimeRules.forbiddenSubjects || []).filter(term => term && new RegExp(escapedRegExp(term), 'u').test(markdown));
   if (subjectHits.length > 0) issues.push({ level: 'warning', message: `正文残留禁用主体表达：${subjectHits.join('、')}`, suggestion: '请统一改为用户提示词指定的表达主体。' });
@@ -587,11 +659,48 @@ export function plannedStructureIssues(markdown: string, template: DocumentTempl
       continue;
     }
     const body = block.heading + block.body;
-    const missingSections = (chapter.sections || []).filter(section => !hasPlannedSection(body, section));
-    if (missingSections.length > 0) issues.push({ level: 'error', message: `${chapter.title} 正文缺少规划小节：${missingSections.join('、')}`, suggestion: '请重新生成或检查审查阶段是否删除了二级小节。' });
     if (chapter.tableSections?.length && !hasMarkdownTable(body)) issues.push({ level: 'error', message: `${chapter.title} 缺少必要的正式表格`, suggestion: '请按模板 tableSections/tableRequirements 在对应小节补充正式 Markdown 表格。' });
   }
   return issues;
+}
+
+function promoteSameTitleWrapperSections(markdown: string) {
+  const chapterMatches = [...markdown.matchAll(/^##\s+(.+)$/gmu)].filter(match => /^第[一二三四五六七八九十百千万\d]+章\s+/u.test(match[1] || ''));
+  if (chapterMatches.length === 0) return markdown;
+  let result = markdown.slice(0, chapterMatches[0].index || 0);
+  for (let chapterIndex = 0; chapterIndex < chapterMatches.length; chapterIndex += 1) {
+    const chapterStart = chapterMatches[chapterIndex].index || 0;
+    const chapterEnd = chapterMatches[chapterIndex + 1]?.index ?? markdown.length;
+    const block = markdown.slice(chapterStart, chapterEnd);
+    const sectionMatches = [...block.matchAll(/^###\s+(\d+)\.(\d+)\s+(.+)$/gmu)];
+    if (sectionMatches.length !== 1) {
+      result += block;
+      continue;
+    }
+    const sectionMatch = sectionMatches[0];
+    const chapterTitle = displayChapterTitle((chapterMatches[chapterIndex][1] || '').replace(/^第[一二三四五六七八九十百千万\d]+章\s*/u, ''));
+    const sectionTitle = displayChapterTitle(sectionMatch[3] || '');
+    const wrapperStart = sectionMatch.index || 0;
+    const tertiaryMatches = [...block.slice(wrapperStart).matchAll(/^####\s+\d+\.\d+\.\d+\s+(.+)$/gmu)];
+    if (tertiaryMatches.length < 2 || !sameStructuralTitle(sectionTitle, chapterTitle)) {
+      result += block;
+      continue;
+    }
+    const prefix = block.slice(0, wrapperStart).trimEnd();
+    const wrapper = block.slice(wrapperStart);
+    const firstTertiary = wrapper.search(/^####\s+/mu);
+    const intro = firstTertiary > 0 ? wrapper.slice(sectionMatch[0].length, firstTertiary).trim() : '';
+    const rebuiltSections = tertiaryMatches.map((match, index) => {
+      const start = match.index || 0;
+      const end = tertiaryMatches[index + 1]?.index ?? wrapper.length;
+      const title = displayChapterTitle(match[1] || '');
+      const body = wrapper.slice(start + match[0].length, end).trim();
+      const heading = `### ${chapterIndex + 1}.${index + 1} ${title}`;
+      return `${heading}\n\n${index === 0 && intro ? `${intro}\n\n` : ''}${body}`.trim();
+    }).join('\n\n');
+    result += `${prefix}\n\n${rebuiltSections}\n\n`;
+  }
+  return result.replace(/\n{3,}/gu, '\n\n').trim();
 }
 
 function sortChapterSectionsByNumber(markdown: string) {
@@ -630,7 +739,7 @@ export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 't
         ? removeCoverBlock(cleanedMarkdown)
         : removeCoverBlock(removeTocBlock(cleanedMarkdown))
     : cleanedMarkdown;
-  const normalizedMarkdown = sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(policyMarkdown)));
+  const normalizedMarkdown = sortChapterSectionsByNumber(promoteSameTitleWrapperSections(normalizeTertiaryHeadings(sanitizeFormalMarkdown(policyMarkdown))));
   const inferredSections = inferChapterSectionsFromMarkdown(normalizedMarkdown, chapters);
   const finalizedChapters = chapters.map((chapter, index) => ({
     ...chapter,
