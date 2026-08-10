@@ -32,6 +32,7 @@ interface IndexJob {
   uploadTitle?: string;
   forceReindexAll?: boolean;
   relativePath?: string;
+  relativePaths?: string[];
 }
 
 const activeJobs = new Map<string, ActiveIndexJob>();
@@ -88,13 +89,15 @@ async function runInProcess(job: IndexJob, operationId: string, operationType: '
   try {
     project = await getMultiProjectManager().getProject(job.projectRoot);
     const onProgress = (progress: WorkerProgress) => upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: toOperationStage(progress.stage), status: progress.stage === 'error' ? 'error' : 'processing', percent: progress.percent, message: progress.message, filePath: progress.filePath || job.relativePath, chunkCount: progress.chunkCount, error: progress.vectorStatus?.error });
-    let diff = job.relativePath
-      ? await project.reindexFile(job.relativePath, { vectorMode: job.vectorMode, onProgress })
-      : job.forceReindexAll
-        ? await project.forceReindexAll({ vectorMode: job.vectorMode, onProgress })
-        : await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
+    let diff = job.relativePaths?.length
+      ? await project.incrementalIndex({ vectorMode: job.vectorMode, onProgress, onlyRelativePaths: job.relativePaths })
+      : job.relativePath
+        ? await project.reindexFile(job.relativePath, { vectorMode: job.vectorMode, onProgress })
+        : job.forceReindexAll
+          ? await project.forceReindexAll({ vectorMode: job.vectorMode, onProgress })
+          : await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
     let idleChecks = 0;
-    while (!job.relativePath && (project.countPendingIndexJobs() > 0 || (job.uploadOperationId && project.uploadSessionIsOpen(job.uploadOperationId) && idleChecks < 120))) {
+    while (!job.relativePath && !job.relativePaths?.length && (project.countPendingIndexJobs() > 0 || (job.uploadOperationId && project.uploadSessionIsOpen(job.uploadOperationId) && idleChecks < 120))) {
       if (project.countPendingIndexJobs() === 0) {
         idleChecks += 1;
         await new Promise(resolve => setTimeout(resolve, 1000));

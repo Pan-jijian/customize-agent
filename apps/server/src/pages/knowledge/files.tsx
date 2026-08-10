@@ -240,25 +240,25 @@ export default function FilesPage() {
     }
   };
 
-  const handleReindexFile = async (record: KbFileItem) => {
+  const handleReindexPath = async (relativePath: string, isFolder = false) => {
     const localId = `file-reindex-ui-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    upsertStatusItem({ id: localId, type: 'reindex', title: `重新解析 ${record.relativePath}`, description: '正在提交单文件后台任务', status: 'processing', percent: 5, filePath: record.relativePath });
+    upsertStatusItem({ id: localId, type: 'reindex', title: `${isFolder ? '重新解析文件夹' : '重新解析'} ${relativePath}`, description: isFolder ? '正在提交文件夹后台任务' : '正在提交单文件后台任务', status: 'processing', percent: 5, filePath: relativePath });
     try {
-      const result = await reindexKbFile(record.relativePath);
+      const result = await reindexKbFile(relativePath);
       const operationId = result.operationId || localId;
       const initialJob = result.job;
       message.info(result.alreadyRunning ? '已有知识库任务正在后台执行' : '已提交单文件重新解析任务');
       upsertStatusItem({
         id: operationId,
         type: 'reindex',
-        title: initialJob?.title || `重新解析 ${record.relativePath}`,
+        title: initialJob?.title || `重新解析 ${relativePath}`,
         description: initialJob?.message || '后台将重新解析、分块并入库该文件',
         status: initialJob?.status || 'processing',
         percent: initialJob?.percent ?? 10,
-        filePath: initialJob?.filePath || record.relativePath,
+        filePath: initialJob?.filePath || relativePath,
         chunkCount: initialJob?.chunkCount,
         error: initialJob?.error,
-      }, [`重新解析 ${record.relativePath}`]);
+      }, [`重新解析 ${relativePath}`]);
 
       for (let i = 0; i < 240; i++) {
         const current = await getJob(operationId).then(response => response.job).catch(async () => {
@@ -270,11 +270,11 @@ export default function FilesPage() {
           upsertStatusItem({
             id: operationId,
             type: current.status === 'error' ? 'error' : 'reindex',
-            title: current.status === 'success' ? `重新解析完成 ${record.relativePath}` : current.status === 'error' ? `重新解析失败 ${record.relativePath}` : current.title,
+            title: current.status === 'success' ? `重新解析完成 ${relativePath}` : current.status === 'error' ? `重新解析失败 ${relativePath}` : current.title,
             description: current.error || current.message,
             status: current.status,
             percent: current.percent,
-            filePath: current.filePath || record.relativePath,
+            filePath: current.filePath || relativePath,
             chunkCount: current.chunkCount,
             error: current.error,
           });
@@ -292,7 +292,7 @@ export default function FilesPage() {
     } catch (error) {
       const description = error instanceof Error ? error.message : '单文件重新解析失败';
       message.error(description);
-      upsertStatusItem({ id: localId, type: 'error', title: `重新解析失败 ${record.relativePath}`, description, status: 'error', percent: 100, filePath: record.relativePath }, [`重新解析 ${record.relativePath}`]);
+      upsertStatusItem({ id: localId, type: 'error', title: `重新解析失败 ${relativePath}`, description, status: 'error', percent: 100, filePath: relativePath }, [`重新解析 ${relativePath}`]);
     }
   };
 
@@ -555,9 +555,11 @@ export default function FilesPage() {
     },
     {
       title: '', key: 'act', width: 80, align: 'center',
-      render: (_: unknown, r: FileTreeNode) => r.isFolder ? null : (
-        <Dropdown menu={{ items: [
-          { key: 'reindex', label: t('reindex'), icon: <SyncOutlined />, onClick: () => { void handleReindexFile(r.file!); } },
+      render: (_: unknown, r: FileTreeNode) => (
+        <Dropdown menu={{ items: r.isFolder ? [
+          { key: 'reindex-folder', label: '重新索引文件夹', icon: <SyncOutlined />, disabled: (r.fileCount ?? 0) === 0, onClick: () => { void handleReindexPath(r.key, true); } },
+        ] : [
+          { key: 'reindex', label: t('reindex'), icon: <SyncOutlined />, onClick: () => { void handleReindexPath(r.file!.relativePath); } },
           { type: 'divider' },
           { key: 'delete', label: t('delete'), icon: <DeleteOutlined />, danger: true, onClick: () => handleDelete(r.file!) },
         ] }} trigger={['click']}>

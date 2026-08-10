@@ -82,7 +82,7 @@ export async function getKbFileDetail(relativePath: string, projectRoot?: string
 }
 
 export async function reindexKbFile(relativePath: string, projectRoot?: string) {
-  return fetchJson<{ success: boolean; accepted?: boolean; alreadyRunning?: boolean; operationId?: string; job?: KbOperationRecord; detail?: KbFileDetail }>('/api/kb/files/reindex', {
+  return fetchJson<{ success: boolean; accepted?: boolean; alreadyRunning?: boolean; operationId?: string; job?: KbOperationRecord; detail?: KbFileDetail; fileCount?: number }>('/api/kb/files/reindex', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ relativePath, projectRoot }),

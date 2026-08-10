@@ -98,28 +98,41 @@ function dividerForColumns(columns: number) {
 
 function normalizeTableRowColumns(line: string, columns: number) {
   const cells = line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).map(cell => cell.trim());
-  while (cells.length < columns) cells.push('按审批确认执行');
+  while (cells.length < columns) cells.push('');
   return `| ${cells.slice(0, columns).join(' | ')} |`;
+}
+
+function looksLikeTableHeader(line: string) {
+  const cells = line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).map(cell => cell.replace(/\*\*/gu, '').trim());
+  if (cells.length < 2) return false;
+  const headerCells = cells.filter(cell => /^(?:序号|信息项|内容|控制项目|控制内容|执行要求|责任主体|检查(?:与验收)?|验收标准|备注|名称|规格(?:型号)?|单位|数量|阶段|措施|风险|应急物资名称|资源类别|投入计划|管理要求)$/u.test(cell));
+  return headerCells.length >= Math.min(2, cells.length);
 }
 
 export function normalizeMarkdownTableDividers(markdown: string) {
   const lines = markdown.split(/\r?\n/u);
   const output: string[] = [];
+  let activeColumns = 0;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     if (!isMarkdownTableRow(line) || isMarkdownTableDivider(line)) {
+      if (!isMarkdownTableDivider(line)) activeColumns = 0;
       output.push(line);
       continue;
     }
     const next = lines[index + 1] || '';
-    const columns = tableColumnCount(line);
+    const columns = activeColumns || tableColumnCount(line);
     output.push(normalizeTableRowColumns(line, columns));
     if (isMarkdownTableDivider(next)) {
       output.push(dividerForColumns(columns));
+      activeColumns = columns;
       index += 1;
       continue;
     }
-    if (isMarkdownTableRow(next)) output.push(dividerForColumns(columns));
+    if (!activeColumns && isMarkdownTableRow(next) && looksLikeTableHeader(line)) {
+      output.push(dividerForColumns(columns));
+      activeColumns = columns;
+    }
   }
   return output.join('\n').replace(/\n{3,}/gu, '\n\n');
 }

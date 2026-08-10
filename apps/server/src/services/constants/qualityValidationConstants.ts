@@ -8,7 +8,7 @@ export const EXPORT_BLOCKING_ISSUE_RE = /用户要求不得|出现禁用文本|�
 export const EXPORT_GATE_PRECISION_ISSUE_RE = /可靠精确参数使用不足/u;
 
 /** 导出门禁中用于判断项目污染和事实冲突的问题规则。 */
-export const EXPORT_GATE_PROJECT_CONTAMINATION_RE = /其他对象|其他文档|文档编号|对象名称|事实一致性冲突/iu;
+export const EXPORT_GATE_PROJECT_CONTAMINATION_RE = /其他对象|其他文档|文档编号|正文疑似混入|事实一致性冲突/iu;
 
 /** 质量问题严重程度规则，按顺序命中。 */
 export const QUALITY_SEVERITY_RULES: Array<{ severity: QualitySeverity; pattern: RegExp }> = [

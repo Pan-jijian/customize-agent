@@ -153,6 +153,8 @@ function conflictComparableFactValue(value: unknown, profile: DocumentDomainProf
   if (/\|/u.test(raw) || /^#+\s*/u.test(raw)) return '';
   if (/见(?:招标公告|投标人须知|前附表|本项目|补疑)|资料参数行摘要|公共资源交易监督管理|开评标程序|监管部门/u.test(raw)) return '';
   if (/是否|符合|采购范围|规定的投标截止时间|电子交易系统/u.test(raw) && /\d{3,}/u.test(raw)) return '';
+  const duration = raw.match(/\d+\s*日历天/u)?.[0]?.replace(/\s+/gu, '');
+  if (duration && /工期|日历天|开工日期|竣工/u.test(raw)) return duration;
   const normalized = normalizedFactValue(raw);
   if (!normalized || normalized.length > 80) return '';
   if (!/[\d年月日%]|合格|一星|二星|三星|总价合同|单价合同|承台|框架|装配式/u.test(raw)) return '';

@@ -66,7 +66,10 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
     });
     return response.content.trim();
   } catch (error) {
-    if (options.diagnostics) options.diagnostics.llm.failures += 1;
+    if (options.diagnostics) {
+      options.diagnostics.llm.failures += 1;
+      options.diagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
+    }
     if (options.signal?.aborted) throw new Error('用户中止', { cause: error });
     return undefined;
   } finally {

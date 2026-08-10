@@ -86,14 +86,16 @@ async function main() {
     error: progress.vectorStatus?.error,
   });
 
-  let diff = job.relativePath
-    ? await project.reindexFile(job.relativePath, { vectorMode: job.vectorMode, onProgress })
-    : job.forceReindexAll
-      ? await project.forceReindexAll({ vectorMode: job.vectorMode, onProgress })
-      : await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
+  let diff = job.relativePaths?.length
+    ? await project.incrementalIndex({ vectorMode: job.vectorMode, onProgress, onlyRelativePaths: job.relativePaths })
+    : job.relativePath
+      ? await project.reindexFile(job.relativePath, { vectorMode: job.vectorMode, onProgress })
+      : job.forceReindexAll
+        ? await project.forceReindexAll({ vectorMode: job.vectorMode, onProgress })
+        : await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
 
   let idleChecks = 0;
-  while (!job.relativePath && (project.countPendingIndexJobs() > 0 || (job.uploadOperationId && project.uploadSessionIsOpen(job.uploadOperationId) && idleChecks < 120))) {
+  while (!job.relativePath && !job.relativePaths?.length && (project.countPendingIndexJobs() > 0 || (job.uploadOperationId && project.uploadSessionIsOpen(job.uploadOperationId) && idleChecks < 120))) {
     if (project.countPendingIndexJobs() === 0) {
       idleChecks += 1;
       await new Promise(resolve => setTimeout(resolve, 1000));
@@ -124,7 +126,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  upsert(projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'done', status: 'success', percent: 100, message: job.relativePath ? '单文件重新解析完成' : '知识库后台索引完成', filePath: job.relativePath, fileName: job.relativePath ? path.basename(job.relativePath) : undefined });
+  upsert(projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'done', status: 'success', percent: 100, message: job.relativePaths?.length ? '文件夹重新解析完成' : job.relativePath ? '单文件重新解析完成' : '知识库后台索引完成', filePath: job.relativePath, fileName: job.relativePath ? path.basename(job.relativePath) : undefined });
 }
 
 main().catch(error => {

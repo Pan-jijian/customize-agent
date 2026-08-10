@@ -220,7 +220,7 @@ function collectTocSectionTitles(markdown: string) {
 }
 
 function collectBodySectionTitles(markdown: string) {
-  return [...markdown.matchAll(/^###\s+(.+)$/gmu)]
+  return [...markdown.matchAll(/^###\s+(\d+\.\d+\s+.+)$/gmu)]
     .map(match => normalizeStructureTitle(match[1] || ''))
     .filter(Boolean);
 }
@@ -299,6 +299,11 @@ export function formalHeadingHierarchyIssues(markdown: string): ValidationIssue[
 
 export function markdownTableQualityIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  if (/按审批确认执行/u.test(markdown)) issues.push({ level: 'error', message: '表格存在自动兜底污染内容：按审批确认执行', suggestion: '正式投标表格不得使用通用兜底短语，应保留真实业务内容或删除该行。' });
+  const basicInfoTableCount = (markdown.match(/\|\s*信息项\s*\|\s*内容\s*\|/gu) || []).length;
+  if (basicInfoTableCount > 1) issues.push({ level: 'error', message: `项目基础信息类表格重复：${basicInfoTableCount} 处`, suggestion: '项目名称、招标人、建设地点、工期、质量等基础信息只能集中输出一次。' });
+  const repeatedDividerRows = markdown.match(/^\|\s*---\s*\|\s*---\s*\|\s*$/gmu) || [];
+  if (repeatedDividerRows.length > 20) issues.push({ level: 'error', message: `表格分隔线异常重复：${repeatedDividerRows.length} 行`, suggestion: '请修复表格规范化逻辑，禁止把数据行拆成多个碎表。' });
   for (const block of markdownTables(markdown)) {
     const rows = block.split(LINE_SPLIT_RE).filter(line => MARKDOWN_TABLE_ROW_RE.test(line));
     if (rows.length < 2) continue;

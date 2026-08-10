@@ -1373,7 +1373,7 @@ export async function expandDocumentToBudget(input: { template: DocumentTemplate
         const target = Math.max(weightedTarget, current + Math.ceil(perChapterShare * (input.budget.longformStrict ? 1.35 : 1)));
         return { chapter, target, current, deficit: target - current };
       })
-      .filter(item => item.deficit > 500)
+      .filter(item => item.deficit > (input.budget.longformStrict ? 120 : 500))
       .sort((a, b) => b.deficit - a.deficit);
     if (deficits.length === 0) break;
     for (let offset = 0; offset < deficits.length && totalChars < input.budget.minChars && (!documentMaxChars || totalChars < documentMaxChars); offset += concurrency) {
@@ -1402,7 +1402,8 @@ export async function expandDocumentToBudget(input: { template: DocumentTemplate
       totalChars = documentTextLength(chapters.map(chapter => chapter.content).join('\n\n'));
       input.onRoundProgress?.(chapters, { round: round + 1, totalChars, addedChars: Math.max(0, totalChars - roundStartChars), maxRounds: maxDocumentRounds });
     }
-    if (!input.budget.longformStrict && totalChars <= roundStartChars + 300) break;
+    const lowGrowthThreshold = input.budget.longformStrict ? 80 : 300;
+    if (totalChars <= roundStartChars + lowGrowthThreshold) break;
   }
   return chapters;
 }

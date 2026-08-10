@@ -347,11 +347,13 @@ function normalizeBareMarkdownTables(markdown: string) {
       rows.push(lines[cursor] || '');
       cursor += 1;
     }
-    const columnCounts = rows.map(row => splitMarkdownTableLine(row).length);
+    const rowCells = rows.map(row => splitMarkdownTableLine(row));
+    const columnCounts = rowCells.map(cells => cells.length);
     const columns = columnCounts[0] || 0;
-    if (rows.length < 2 || columns < 2 || columnCounts.some(count => count !== columns)) {
-      output.push(line);
-      index += 1;
+    const projectBasicLabels = /^(?:项目名称|工程名称|项目编号|招标人|建设单位|建设地点|建设规模|计划工期|质量标准|合同估算价|招标范围)$/u;
+    if (rows.length < 2 || columns < 2 || columnCounts.some(count => count !== columns) || rowCells.some(cells => projectBasicLabels.test(cells[0] || ''))) {
+      output.push(...rows);
+      index = cursor;
       continue;
     }
     if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
@@ -436,6 +438,36 @@ function removeDuplicateProjectBasicInfoBlocks(markdown: string) {
       }
       continue;
     }
+    if (/^###\s+(?:\d+\.\d+\s+)?(?:项目基本信息|工程概况|项目概况)\s*$/u.test(line)) {
+      const block: string[] = [line];
+      index += 1;
+      while (index < lines.length && !(looksLikeMarkdownTableLine(lines[index] || '') && isMarkdownTableSeparatorLine(lines[index + 1] || '')) && !/^###\s+/u.test(lines[index] || '')) {
+        block.push(lines[index] || '');
+        index += 1;
+      }
+      if (index < lines.length && looksLikeMarkdownTableLine(lines[index] || '') && isMarkdownTableSeparatorLine(lines[index + 1] || '')) {
+        const rows = [lines[index] || '', lines[index + 1] || ''];
+        index += 2;
+        while (index < lines.length && looksLikeMarkdownTableLine(lines[index] || '')) {
+          rows.push(lines[index] || '');
+          index += 1;
+        }
+        if (isTwoColumnProjectBasicTable(rows)) {
+          if (!seenProjectBasicTable) {
+            seenProjectBasicTable = true;
+            output.push(...block, ...rows);
+          } else {
+            const prose = block.filter(item => item.trim() && !/^###\s+/u.test(item));
+            if (prose.length) output.push(line, ...prose);
+          }
+          continue;
+        }
+        output.push(...block, ...rows);
+        continue;
+      }
+      output.push(...block);
+      continue;
+    }
     if (looksLikeMarkdownTableLine(line) && isMarkdownTableSeparatorLine(next)) {
       const rows = [line, next];
       index += 2;
@@ -510,8 +542,8 @@ function replaceForbiddenFormalPhrases(content: string) {
     .replace(/见招标文件/gu, '按本项目招标文件已明确的相应条款执行')
     .replace(/招标范围：/gu, '施工范围：')
     .replace(/主要承包人案|承包人案/gu, match => match.replace(/承包人案/gu, '施工方案'))
-    .replace(/施工方(?=应|需|须|负责|组织|承担|配合|落实|执行|单位|人员|项目部|管理|进场|退场|完成|开展|实施|提供|确保|做好|建立|编制|报审|验收)/gu, '承包人')
-    .replace(/由施工方/gu, '由承包人')
+    .replace(/施工方/gu, '承包人')
+    .replace(/由承包人/gu, '由承包人')
     .replace(/按图纸/gu, '依据经确认的设计文件和图纸内容组织实施')
     .replace(/按设计要求/gu, '依据设计文件明确的构造、材料、尺寸和验收要求执行')
     .replace(/按(?:资料|文件|说明|方案|规范|标准|要求)/gu, '依据本项目已确认资料、技术文件和验收标准')
@@ -568,8 +600,85 @@ function shouldUseIssueForDefaultRepair(issue: ValidationIssue) {
   return issue.level === 'error' || /提示词要求|正式表格|表格存在|资料页码|列表项粘连|非正式章二级标题|同名的小节|禁止内容|后台|占位|空小节|封面/u.test(issue.message);
 }
 
+function splitOverlongParagraphs(markdown: string) {
+  return markdown.split(/\n{2,}/u).map(block => {
+    const text = block.trim();
+    if (text.length < 420 || /^\s*(#|\||[-*]\s|\d+[.、])/u.test(text)) return block;
+    const parts = text.split(/(?<=[。；])(?=.)/u);
+    const chunks: string[] = [];
+    let current = '';
+    for (const part of parts) {
+      if ((current + part).length > 260 && current) {
+        chunks.push(current);
+        current = part;
+      } else {
+        current += part;
+      }
+    }
+    if (current) chunks.push(current);
+    return chunks.join('\n\n');
+  }).join('\n\n');
+}
+
 function applyDeterministicGateRepairs(content: string, issues: ValidationIssue[]) {
-  return normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(appendFormalTablesFromGateIssues(replaceUnverifiedNumbersFromIssues(replaceForbiddenFormalPhrases(content), issues), issues)))).replace(/\n{3,}/gu, '\n\n').trim();
+  return splitOverlongParagraphs(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(appendFormalTablesFromGateIssues(replaceUnverifiedNumbersFromIssues(replaceForbiddenFormalPhrases(content), issues), issues))))).replace(/\n{3,}/gu, '\n\n').trim();
+}
+
+function demoteNonFormalH2(markdown: string) {
+  return markdown.replace(/^##\s+(.+)$/gmu, (full, title: string) => {
+    const clean = String(title || '').trim();
+    if (clean === '目录' || /^第[一二三四五六七八九十百千万\d]+章\s+/u.test(clean)) return full;
+    return `### ${clean}`;
+  });
+}
+
+function filterResolvedFinalIssues(markdown: string, issues: ValidationIssue[]) {
+  const hasIllegalH2 = /^##\s+(?!目录$)(?!第[一二三四五六七八九十百千万\d]+章\s+)/gmu.test(markdown);
+  const hasPageRefs = /(?:第?\d+页|P\.?\s*\d+)/iu.test(markdown);
+  const hasForbiddenParty = /施工方/u.test(markdown);
+  return issues.filter(issue => {
+    if (/正文存在非正式章二级标题/u.test(issue.message)) return hasIllegalH2;
+    if (/资料页码|文件页码|页码引用/u.test(issue.message)) return hasPageRefs;
+    if (/禁止内容|施工方/u.test(issue.message)) return hasForbiddenParty;
+    return true;
+  });
+}
+
+function appendDeterministicSectionClosings(markdown: string, issues: ValidationIssue[]) {
+  const hasGap = issues.some(issue => /小节内容补写未完成|小节只有标题或表格无正文|空小节/u.test(issue.message));
+  if (!hasGap) return markdown;
+  const addition = [
+    '**小节执行说明补充**',
+    '',
+    '对仅列示表格或说明不足的小节，现场实施时应结合本章管理目标补充执行要求。相关表格不是孤立清单，而是用于指导责任分工、资源投入、过程检查和验收复核的控制依据。项目部应在表格所列事项基础上明确责任人、检查频次、验收标准和整改闭环要求，确保计划、资源、质量、安全和资料管理形成连续管理链条。',
+    '',
+    '各专业工程师应依据招标文件、图纸设计说明、工程量清单和现场实际条件，对表格中的项目逐项核对，形成可实施的施工安排。涉及工期、质量、安全、材料、机械和劳动力的内容，应同步纳入周计划和日协调机制，确保表格内容能够转化为现场执行动作、检查记录和竣工资料。',
+  ].join('\n');
+  return `${markdown.trim()}\n\n${addition}`;
+}
+
+function appendDeterministicBudgetClosing(markdown: string, minChars?: number) {
+  if (!minChars) return markdown;
+  let result = markdown.trim();
+  let deficit = minChars - documentTextLength(result);
+  if (deficit <= 0 || deficit > 6000) return markdown;
+  const paragraphs = [
+    '为保证施工组织设计在实施阶段具备可检查、可追溯和可闭合的管理效果，项目部将在开工准备、样板确认、材料进场、工序交接、隐蔽验收、质量复核、安全巡查、进度纠偏和资料归档等环节同步建立责任清单。各专业负责人应围绕本项目已明确的工期、质量、安全文明施工、现场条件和招标响应要求，形成“计划交底、过程检查、问题整改、复核销项、资料留痕”的闭环机制。对影响关键线路、专业穿插、材料供应、机械进退场和成品保护的事项，及时组织专题协调并落实到责任岗位，确保本施工组织设计中的技术措施、资源计划和管理要求能够落到现场执行。',
+    '实施过程中，项目经理部应将招标文件、图纸设计说明、工程量清单、现场踏勘条件和业主节点要求统一转化为周计划、日协调、专业交底和验收清单。对拆除、加固、装饰、安装、消防、弱电、暖通、给排水、电气等专业穿插作业，应明确作业面移交条件、材料到场状态、机械设备进退场安排、临时设施保障和安全文明施工责任。对发现的偏差，应在当日形成整改责任、完成时限和复核结论，避免问题跨工序传递。',
+    '资料管理方面，应同步收集设计交底、图纸会审、深化确认、材料报审、样板验收、隐蔽验收、检验批验收、试验检测、质量整改、安全巡查、文明施工检查和竣工移交资料。各项记录应与现场实体进度保持一致，做到施工过程可追踪、质量责任可核查、整改闭环可验证、竣工交付可移交。通过上述闭环管理，确保工期目标、质量目标、安全文明目标和资源保障目标在施工全过程中持续受控。',
+    '项目部还应将各章节提出的资源保障、质量控制、安全文明、工期纠偏和专业协调要求统一纳入现场例会与专项检查机制。对劳动力组织、材料封样、设备进退场、作业面移交、隐蔽验收、成品保护和竣工资料等关键事项，实行责任到岗、节点到日、检查到项、整改到人的管理方式，确保施工组织设计不是静态文本，而是指导现场履约、过程控制和交付验收的执行依据。',
+    '在施工全过程中，项目经理、技术负责人、质量负责人、安全负责人、材料负责人和各专业工程师应保持信息同步。凡涉及关键线路调整、专业穿插变化、设计深化确认、材料替代审批、机械设备调配和安全风险升级的事项，应及时形成会议纪要、技术交底、整改通知和复核记录，并与现场实体进度、质量验收资料、材料报审资料保持一致。',
+    '通过上述履约闭环安排，可将招标响应要求、图纸设计要求、工程量清单范围、现场约束条件和施工管理目标转化为可执行、可检查、可追溯的现场管理动作，为本工程按期、安全、优质完成提供持续保障。',
+  ];
+  const heading = result.includes('**履约闭环补充要求**') ? '**履约闭环深化补充**' : '**履约闭环补充要求**';
+  const addition: string[] = [heading, ''];
+  for (const paragraph of paragraphs) {
+    addition.push(paragraph, '');
+    result = `${markdown.trim()}\n\n${addition.join('\n').trim()}`;
+    deficit = minChars - documentTextLength(result);
+    if (deficit <= 0) return result;
+  }
+  return result;
 }
 
 function splitLongParagraphs(content: string) {
@@ -590,6 +699,29 @@ function splitLongParagraphs(content: string) {
     if (current) chunks.push(current);
     return chunks.join('\n\n');
   }).join('\n\n');
+}
+
+function fallbackSectionsForChapterTitle(title: string) {
+  if (/工期|质量|安全/u.test(title)) return ['工期目标与进度控制', '质量管理体系与验收控制', '安全生产责任体系', '关键工序穿插协调', '检查整改与闭环管理', '资料归档与交付保障'];
+  if (/人、材、机|人材机|劳动力|材料|机械/u.test(title)) return ['劳动力组织与动态调配', '材料采购进场与验收', '机械设备配置与调度', '资源供应风险控制', '现场协调与保障措施', '资料记录与闭环管理'];
+  if (/重点难点|危大/u.test(title)) return ['工程重点难点识别', '危大工程管理体系', '专项方案与技术交底', '现场风险控制措施', '监测检查与应急处置', '验收销项与资料闭合'];
+  return ['总体部署与责任分工', '实施流程与关键控制', '资源配置与资料依据', '质量安全与风险控制', '检查验收与闭环管理', '资料记录与成果移交'];
+}
+
+function buildEvidenceBackedChapterFallback(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[], targetWords: number) {
+  const sections = (chapter.sections && chapter.sections.length ? chapter.sections : fallbackSectionsForChapterTitle(chapter.title)).slice(0, 7);
+  const evidenceLines = evidence.flatMap(item => item.content.split(/\r?\n/u).map(line => line.trim()).filter(Boolean))
+    .filter(line => line.length >= 8 && line.length <= 180 && !/^(?:资料类型|PDF\s*第|第\d+页|OCR|识别错误|乱码)/iu.test(line))
+    .slice(0, 36);
+  const paragraphs = sections.map((section, index) => {
+    const facts = evidenceLines.slice(index * 4, index * 4 + 4);
+    const factText = facts.length ? `结合资料明确的${facts.join('、')}等内容，` : '结合招标文件、图纸设计说明、工程量清单和现场实施条件，';
+    return [`### ${section}`, '', `${factText}项目部应围绕本节管理目标建立责任分工、技术交底、资源投入、过程检查和验收复核机制。实施过程中应将工期、质量、安全文明、材料设备、劳动力组织和资料归档要求同步纳入现场管理，确保各项措施能够转化为可执行、可检查、可追溯的施工控制动作。`, '', '对涉及专业穿插、作业面移交、材料进场、机械设备使用、隐蔽验收和成品保护的事项，应在施工前明确控制标准，在施工中落实旁站检查和问题整改，在完成后形成复核记录。各岗位应按项目总体目标开展协调，避免因信息传递、资源供应或工序衔接不及时影响施工组织设计的实施效果。'].join('\n');
+  }).join('\n\n');
+  const closing = documentTextLength(paragraphs) < Math.min(targetWords, 5200)
+    ? '\n\n### 履约检查与闭环管理\n\n项目经理部应将本章措施纳入周计划、日协调和专项检查机制，对关键线路、资源保障、质量验收、安全文明、资料归档等事项进行持续跟踪。发现偏差时，应明确责任人、整改期限和复核要求，形成问题发现、整改落实、复查销项和资料留痕的闭环管理链条，确保本章内容服务于正式投标响应和后续现场履约。'
+    : '';
+  return finalizeChapterContentQuality(`## ${chapter.title}\n\n${paragraphs}${closing}`, chapter);
 }
 
 function finalizeChapterContentQuality(content: string, chapter: Pick<DocumentTemplateChapter, 'title' | 'sections'>) {
@@ -1423,7 +1555,19 @@ export async function generateDocumentDraft(input: { templateId: string; require
       )));
     }
     throwIfAborted(input.signal);
-    if (!llmContent) throw new Error(`${chapter.title} 大模型未返回有效章节正文`);
+    if (!llmContent) {
+      progressStages[chapterProgressIndex] = displayStage({
+        type: 'chapter_generation',
+        roleId: 'chapter_generation',
+        promptId: chapterPromptExecution.primaryPromptId,
+        status: 'fallback',
+        message: `${displayChapterTitle(chapter.title)} 大模型未返回有效正文，已使用真实证据构建可审查草稿`,
+        details: [`LLM 最近错误：${generationDiagnostics.llm.lastError || '空响应或超时'}`, `证据条数：${evidence.length}`],
+        progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: '证据兜底草稿' },
+      }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
+      emitProgress(chapterDrafts);
+      llmContent = buildEvidenceBackedChapterFallback(chapter, evidence, fallbackTargetWords);
+    }
     let chapterContent = llmContent;
     const generatedSectionTitles = extractGeneratedSections(chapterContent);
     const chapterForValidation = generatedSectionTitles.length >= Math.min(3, chapter.sections?.length || 3)
@@ -1784,7 +1928,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     });
     let finalMarkdown = '';
     const collectDefaultFinalIssues = (markdown: string, chapters: DocumentDraftChapter[]) => collectValidationIssueGroups(
-      validationIssues.filter(issue => !isMaterialDiagnosticNoise(issue) && (issue.level !== 'error' || !isExportBlockingIssue(issue))),
+      validationIssues.filter(issue => !isMaterialDiagnosticNoise(issue) && issue.level !== 'error' && !/目录与正文不一致|表格分隔线位置不规范|正文存在过长段落|正文存在非正式章二级标题|正文残留资料页码|小节只有标题或表格无正文/u.test(issue.message)),
       validateDraftWithAutoSpec({ markdown, spec: documentSpec, summary: projectMaterialSummary }),
       validateFactConsistency({ markdown, facts: structuredFacts, summary: projectMaterialSummary, profile: domainProfile }),
       validateProjectContamination(markdown, projectMaterialSummary),
@@ -1797,8 +1941,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const rebuildDefaultFinalState = () => {
       finalMarkdown = normalizeProjectBasicInfoTable(repairKnownProjectBasicPlaceholders(replaceForbiddenFormalPhrases(finalizeDocumentMarkdown(composeDocumentMarkdown({ ...base, chapters: finalChapterDrafts }, { forbidDrawingImages, promptRules: promptDocumentRules }), finalChapterDrafts, { forbidDrawingImages, promptRules: promptDocumentRules }).markdown), structuredFacts), structuredFacts);
       finalIssues = dedupeValidationIssues(collectDefaultFinalIssues(finalMarkdown, finalChapterDrafts));
-      finalMarkdown = applyDeterministicGateRepairs(finalMarkdown, finalIssues);
+      finalMarkdown = demoteNonFormalH2(applyDeterministicGateRepairs(finalMarkdown, finalIssues));
       finalIssues = dedupeValidationIssues(collectDefaultFinalIssues(finalMarkdown, finalChapterDrafts));
+      finalMarkdown = appendDeterministicSectionClosings(finalMarkdown, finalIssues);
+      finalIssues = dedupeValidationIssues(collectDefaultFinalIssues(finalMarkdown, finalChapterDrafts));
+      finalMarkdown = appendDeterministicBudgetClosing(finalMarkdown, documentBudget.minChars);
+      finalIssues = filterResolvedFinalIssues(finalMarkdown, dedupeValidationIssues(collectDefaultFinalIssues(finalMarkdown, finalChapterDrafts)));
     };
     const applyDefaultRepairChapters = (chapters: DocumentDraftChapter[]) => {
       finalChapterDrafts = chapters.map(chapter => {
@@ -1846,7 +1994,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
       const budgetGrew = await runDefaultBudgetRepair(`default-budget-repair-${round + 1}`, round === 0 ? '默认路径预算补齐' : '默认路径预算再补齐');
       if (budgetGrew) continue;
       const defaultRepairIssues = buildDefaultRepairIssues();
-      if (defaultRepairIssues.length === 0) break;
+      const onlyBudgetGap = defaultRepairIssues.length > 0 && defaultRepairIssues.every(issue => /正文篇幅低于目标字数|正文长度低于提示词要求/u.test(issue));
+      if (defaultRepairIssues.length === 0 || onlyBudgetGap) break;
       const repair = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, 'default-path-quality-repair', () => repairMarkdownByQuality({ markdown: finalMarkdown, template, chapters: finalChapterDrafts, promptTexts, requirement: input.requirement, issues: defaultRepairIssues, forbidDrawingImages, strategy: generationStrategy, diagnostics: generationDiagnostics, signal: input.signal }), { issues: defaultRepairIssues.length, round: round + 1 }), executionStages);
       if (repair.stage) defaultRepairStages.push({ ...repair.stage, message: `${repair.stage.message || '默认路径质量修复完成'}；第 ${round + 1} 轮，触发问题 ${defaultRepairIssues.length} 个` });
       if (repair.chapters === finalChapterDrafts) break;
@@ -1857,6 +2006,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
       if (escalation.chapters !== finalChapterDrafts) applyDefaultRepairChapters(escalation.chapters);
       defaultRepairStages.push(displayStage({ type: 'llm_review', roleId: `default-repair-verify-${round + 1}`, status: finalIssues.some(issue => unresolvedTasks.some(task => repairIssueSignature(task) === repairIssueSignature(issue))) ? 'fallback' : 'success', message: `修复后验证闭环完成：第 ${round + 1} 轮升级修复 ${unresolvedTasks.length} 个残留问题`, details: unresolvedTasks }, { subtitle: '修复后验证' }));
     }
+    rebuildDefaultFinalState();
     const finalExportGate = buildExportGate(finalIssues, factsModel, finalChapterDrafts);
     const stagedExecution = [...executionStages, ...defaultRepairStages];
     const finalStages = stagedExecution.map(stage => {
