@@ -1,5 +1,5 @@
 import type { AutoDocumentSpecGateRule, GateRuleEvaluator } from '../document-core/autoDocumentSpecTypes';
-import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, FileBinding, PromptBinding } from '../document-workflow/types';
+import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, ProjectBinding, PromptBinding } from '../document-workflow/types';
 
 /** 文档质量问题严重程度，用于导出门禁和修复优先级排序。 */
 export type QualitySeverity = 'blocking' | 'important' | 'minor';
@@ -32,7 +32,7 @@ export interface SpecGateRuleContext {
   estimatedPages: number;
   allFacts: DocumentFact[];
   factsModel: DocumentFactsModel;
-  fileBindings: FileBinding[];
+  projectBindings: ProjectBinding[];
   promptBindings: PromptBinding[];
 }
 

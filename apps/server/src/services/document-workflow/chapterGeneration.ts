@@ -10,7 +10,6 @@ import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidenceP
 import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
 import { callDocumentLlm, callDocumentLlmJson, callWithTimeout, getActiveModelWithProvider, providerFactoryName } from './llmClient';
 import { stringifyFactValue, throwIfAborted } from './utils';
-import type { RoleNodeFact, TenderPlanChapter } from './rolePipeline';
 import { lightweightChapterIssues, measureGenerationStep } from './rolePipeline';
 import { displayChapterTitle } from './outline';
 import { displayStage, elapsedMessage } from './progress';
@@ -221,7 +220,7 @@ function extractChapterPreciseTokens(evidence: DocumentEvidence[]) {
   return [...tokens].slice(0, 40);
 }
 
-export function buildChapterFactCoverageContext(input: { chapter: DocumentTemplateChapter; plan?: TenderPlanChapter; spec?: AutoDocumentSpecPackage; roleFacts: Array<{ fact: RoleNodeFact }>; evidence: DocumentEvidence[]; missingFacts: string[]; indexedFacts?: DocumentFact[]; resolvedFactNeeds?: ResolvedFactNeed[]; factNeedsPrompt?: string }) {
+export function buildChapterFactCoverageContext(input: { chapter: DocumentTemplateChapter; plan?: { requiredContents?: string[]; evidenceNeeds?: string[] }; spec?: AutoDocumentSpecPackage; roleFacts: Array<{ fact: { key: string; value: unknown } }>; evidence: DocumentEvidence[]; missingFacts: string[]; indexedFacts?: DocumentFact[]; resolvedFactNeeds?: ResolvedFactNeed[]; factNeedsPrompt?: string }) {
   const specRule = input.spec?.chapterRules.find(rule => rule.id === input.chapter.id || rule.title === input.chapter.title);
   const specFactNames = (specRule?.requiredFactIds || [])
     .map(id => input.spec?.factFields.find(field => field.id === id)?.name)
@@ -288,7 +287,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     `- 保留章节标题；内容不少于 ${options.minWords || 1000} 字${options.targetWords ? `，目标约 ${options.targetWords} 字` : ''}${options.maxWords ? `，最多不超过 ${options.maxWords} 字` : ''}。`,
     chapter.sections?.length ? '- 必须完整包含已规划小节；不要新增未规划的二级小节。' : '- 未预设小节时，不要为了凑结构强行新增小节。',
     chapter.tableSections?.length ? `- 以下小节可使用表格辅助表达：${chapter.tableSections.join('、')}。` : '',
-    '- 内容必须遵循用户提示词、模板章节、提示词角色、文件角色和绑定材料；不得编造材料未提供的事实。',
+    '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的事实。',
     '- 将材料要点自然融入正文；不要输出系统证据清单、中间分析过程或后台流程话术。',
     SECTION_GENERATION_SAFETY_RULES,
     '',
@@ -1059,7 +1058,7 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(merged, input.forbidDrawingImages));
 }
 
-export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; fileRolesHash?: string; allowPartialResult?: boolean; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry' }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
+export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; materialContextHash?: string; allowPartialResult?: boolean; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry' }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   const targets = sectionTargets(input.chapter, input.targetWords);
   if (targets.length < 2) return undefined;
   const configuredSectionConcurrency = Number(process.env.DOCUMENT_SECTION_CONCURRENCY || targets.length || 1);

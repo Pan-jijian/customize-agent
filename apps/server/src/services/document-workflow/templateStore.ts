@@ -10,7 +10,8 @@ import { buildProjectMaterialSummary, type MaterialRole } from '../document-core
 import { applyKeywordRules, MATERIAL_ROLE_RULES } from '../document-core/documentSemanticRules';
 import { resolveTemplateMaterialRoles } from '../document-core/materialRoleResolver';
 import { evaluateDocumentReadiness } from '../document-validation/documentReadinessService';
-import type { DocumentTemplate, FileBinding, PromptBinding } from './types';
+import type { DocumentTemplate, ProjectBinding, PromptBinding } from './types';
+import { templateProjectBindings } from './projectMaterialProfile';
 
 export type PromptExecutionCategory = 'writer' | 'chapter' | 'extraction' | 'formatting' | 'reference';
 
@@ -20,21 +21,20 @@ function isUsableKnowledgeFile(file: KnowledgeFilePath) {
   return file.status !== 'disk' && file.status !== 'error' && Number(file.indexedAt || 0) > 0 && Number(file.chunkCount || 0) > 0;
 }
 
-function expandTemplateFileBindings(bindings: FileBinding[], files: KnowledgeFilePath[]) {
-  if (bindings.length === 0) return bindings;
+function expandProjectBindings(bindings: ProjectBinding[], files: KnowledgeFilePath[]) {
+  if (bindings.length === 0) return [];
   const filePathSet = new Set(files.map(file => file.relativePath));
-  const expanded: FileBinding[] = [];
+  const expanded: string[] = [];
   const seen = new Set<string>();
   for (const binding of bindings) {
-    const normalizedPath = binding.filePath.replace(/^\/+|\/+$/gu, '');
+    const normalizedPath = binding.materialRootPath.replace(/^\/+|\/+$/gu, '');
     const matchedPaths = filePathSet.has(normalizedPath)
       ? [normalizedPath]
       : files.filter(file => file.relativePath.startsWith(`${normalizedPath}/`) && isUsableKnowledgeFile(file)).map(file => file.relativePath);
     for (const filePath of matchedPaths) {
-      const key = `${binding.roleId}\n${filePath}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      expanded.push({ ...binding, filePath });
+      if (seen.has(filePath)) continue;
+      seen.add(filePath);
+      expanded.push(filePath);
     }
   }
   return expanded;
@@ -102,13 +102,12 @@ function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
     exportSettings: template.exportSettings,
     generationSettings: template.generationSettings,
     promptIds: Array.isArray(template.promptIds) ? template.promptIds.filter(Boolean) : [],
-    boundFilePaths: Array.isArray(template.boundFilePaths) ? template.boundFilePaths.filter(Boolean) : [],
+    projectBindings: Array.isArray(template.projectBindings)
+      ? template.projectBindings.filter(item => item.materialRootPath).map(item => ({ materialRootPath: item.materialRootPath.replace(/^\/+|\/+$/gu, '') }))
+      : templateProjectBindings(template),
     promptBindings: Array.isArray(template.promptBindings)
       ? template.promptBindings.filter(item => item.promptId && item.roleId)
       : (Array.isArray(template.promptIds) ? template.promptIds.filter(Boolean).map(promptId => ({ promptId, roleId: 'chapter_generation' })) : []),
-    fileBindings: Array.isArray(template.fileBindings)
-      ? template.fileBindings.filter(item => item.filePath && item.roleId)
-      : (Array.isArray(template.boundFilePaths) ? template.boundFilePaths.filter(Boolean).map(filePath => ({ filePath, roleId: 'reference' })) : []),
     builtIn: false,
   };
 }
@@ -258,42 +257,29 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
     };
   }
   const promptRoles = listDocumentRoles('prompt');
-  const fileRoles = listDocumentRoles('file');
   const configId = defaultProjectRoleConfigIdForTemplate(template);
   const config = projectRoleConfigForTemplate(template);
   if (!configId) issues.push({ level: 'error', message: '模板未绑定项目角色配置，且未匹配到自动专业角色配置' });
   if (configId && !config) issues.push({ level: 'error', message: `项目角色配置不存在或已删除：${configId}` });
   if (template.promptIds?.length) issues.push({ level: 'warning', message: '模板存在旧 promptIds 字段残留，该字段已不参与生成，请清理模板历史数据。' });
   if (template.promptBindings?.length) issues.push({ level: 'warning', message: '模板存在旧 promptBindings 字段残留，该字段已不参与生成，请清理模板历史数据。' });
-  if (template.boundFilePaths?.length) issues.push({ level: 'warning', message: '模板存在旧 boundFilePaths 字段残留，生成只使用项目角色配置和显式文件角色绑定。' });
   const promptBindings = templatePromptBindings(template);
-  const explicitFileBindings = templateFileBindings(template);
+  const projectBindings = templateProjectBindings(template);
   if (config && config.promptRoles.length === 0) issues.push({ level: 'error', message: '项目角色配置未配置提示词角色。' });
   if (config && config.promptRoles.length > 0 && promptBindings.length === 0) issues.push({ level: 'error', message: '项目角色配置中的提示词角色未绑定任何有效提示词资源。' });
   const resolvedProjectRoot = path.resolve(projectRoot);
   const files = listKnowledgeFiles(resolvedProjectRoot);
-  const fileBindings = expandTemplateFileBindings(explicitFileBindings, files);
-  if (explicitFileBindings.length === 0) issues.push({ level: 'error', message: '模板未绑定知识库文件。模板生成文件只允许使用显式绑定的知识库文件，请先在模板中绑定需要参与生成的资料。' });
-  else if (fileBindings.length === 0) issues.push({ level: 'error', message: '模板绑定的知识库文件或文件夹不存在，请重新选择项目文件绑定。' });
+  const materialFilePaths = expandProjectBindings(projectBindings, files);
+  if (projectBindings.length === 0) issues.push({ level: 'error', message: '模板未绑定项目资料包，请先选择需要参与生成的项目文件夹。' });
+  else if (materialFilePaths.length === 0) issues.push({ level: 'error', message: '模板绑定的项目资料包不存在或没有可用索引文件，请重新选择项目资料包。' });
   const fileMap = new Map(files.map(file => [file.relativePath, file]));
-  for (const item of config?.fileRoles || []) {
-    const role = fileRoles.find(candidate => candidate.id === item.roleId);
-    if (!role) {
-      issues.push({ level: 'error', message: `文件角色不存在：${item.roleId}` });
-      continue;
-    }
-    const hasBinding = explicitFileBindings.some(binding => binding.roleId === item.roleId);
-    if (!hasBinding) issues.push({ level: 'warning', message: `项目角色配置包含文件角色但模板未绑定资料：${role.name}` });
-  }
-  const fileDiagnostics = fileBindings.map(binding => {
-    const role = fileRoles.find(item => item.id === binding.roleId);
-    const file = fileMap.get(binding.filePath);
-    if (!role) issues.push({ level: 'error', message: `文件角色不存在：${binding.roleId}` });
-    if (!file) issues.push({ level: 'error', message: `知识库文件不存在：${binding.filePath}` });
-    if (file && (file.status === 'disk' || file.indexedAt === 0)) issues.push({ level: 'warning', message: `知识库文件存在但尚未完成索引：${binding.filePath}` });
-    if (file?.status === 'error') issues.push({ level: 'warning', message: `知识库文件索引失败：${binding.filePath}${file.errorMessage ? `，${file.errorMessage}` : ''}` });
-    if (file && file.chunkCount === 0) issues.push({ level: 'warning', message: `知识库文件暂无可检索内容切片：${binding.filePath}` });
-    return { ...binding, roleName: role?.name, exists: Boolean(file), indexed: Boolean(file && file.indexedAt > 0 && file.status !== 'disk'), chunkCount: file?.chunkCount ?? 0, vectorReady: Boolean(file && file.chunkCount > 0) };
+  const fileDiagnostics = materialFilePaths.map(filePath => {
+    const file = fileMap.get(filePath);
+    if (!file) issues.push({ level: 'error', message: `知识库文件不存在：${filePath}` });
+    if (file && (file.status === 'disk' || file.indexedAt === 0)) issues.push({ level: 'warning', message: `知识库文件存在但尚未完成索引：${filePath}` });
+    if (file?.status === 'error') issues.push({ level: 'warning', message: `知识库文件索引失败：${filePath}${file.errorMessage ? `，${file.errorMessage}` : ''}` });
+    if (file && file.chunkCount === 0) issues.push({ level: 'warning', message: `知识库文件暂无可检索内容切片：${filePath}` });
+    return { filePath, roleId: 'project_material', roleName: '项目资料包', exists: Boolean(file), indexed: Boolean(file && file.indexedAt > 0 && file.status !== 'disk'), chunkCount: file?.chunkCount ?? 0, vectorReady: Boolean(file && file.chunkCount > 0) };
   });
   const resolvedPrompts = readPromptContents(promptBindings);
   const configuredPromptRoleIds = new Set(config?.promptRoles.map(item => item.roleId) || []);
@@ -327,8 +313,7 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
   let readiness;
   if (template) {
     const projectMaterialSummary = buildProjectMaterialSummary(resolvedProjectRoot, {
-      boundFilePaths: fileBindings.map(binding => binding.filePath),
-      boundFileRoles: boundFileRolesForMaterialSummary(fileBindings),
+      boundFilePaths: materialFilePaths,
     });
     const resolvedMaterialRoles = resolveTemplateMaterialRoles(template, projectMaterialSummary);
     readiness = evaluateDocumentReadiness({
@@ -394,35 +379,6 @@ export function projectRoleConfigForTemplate(template: DocumentTemplate) {
   return configId ? getProjectRoleConfig(configId) : undefined;
 }
 
-function materialRolesForFileRole(role?: { id?: string; name?: string; description?: string; processingType?: string }): MaterialRole[] {
-  const roles = new Set<MaterialRole>(['project_overview']);
-  const processingType = role?.processingType || '';
-  if (processingType === 'rule') roles.add('requirement_document');
-  if (processingType === 'table') roles.add('structured_data');
-  if (processingType === 'drawing') roles.add('design_specification');
-  if (processingType === 'specification') roles.add('technical_specification');
-
-  const text = `${role?.id || ''} ${role?.name || ''} ${role?.description || ''} ${processingType}`;
-  for (const inferred of applyKeywordRules(text, MATERIAL_ROLE_RULES)) roles.add(inferred);
-  if (/清单|工程量|范围|施工范围|工作内容|boq|scope/iu.test(text)) roles.add('scope_description');
-  if (/工期|进度|质量|安全|文明|环保|验收|schedule|quality|safety/iu.test(text)) roles.add('schedule_quality_safety');
-  if (/重点|难点|风险|约束|现场|限制|管线|危大|risk|constraint/iu.test(text)) roles.add('risk_constraints');
-  if (/材料|设备|品牌|资源|人员|机械|采购|resource|brand|equipment/iu.test(text)) roles.add('resource_recommendation');
-  if (/招标|响应|实质性|评审|废标|条款|要求|tender|requirement/iu.test(text)) roles.add('requirement_document');
-  if (/图纸|设计|说明|drawing|design/iu.test(text)) roles.add('design_specification');
-  return [...roles];
-}
-
-export function boundFileRolesForMaterialSummary(bindings: FileBinding[]) {
-  const grouped = new Map<string, MaterialRole[]>();
-  const fileRoles = listDocumentRoles('file');
-  for (const binding of bindings) {
-    const role = fileRoles.find(item => item.id === binding.roleId);
-    const roles = materialRolesForFileRole(role);
-    grouped.set(binding.filePath, [...new Set([...(grouped.get(binding.filePath) || []), ...roles])]);
-  }
-  return [...grouped.entries()].map(([filePath, roles]) => ({ filePath, roles }));
-}
 
 function promptExecutionTypeFromRoleId(roleId: string) {
   if (/extract|extraction|抽取|清单|图纸|品牌/u.test(roleId)) return 'fact_extraction';
@@ -458,6 +414,3 @@ export function templatePromptBindings(template: DocumentTemplate): PromptBindin
   return uniquePromptBindings(bindings);
 }
 
-export function templateFileBindings(template: DocumentTemplate): FileBinding[] {
-  return template.fileBindings?.length ? template.fileBindings : (template.boundFilePaths ?? []).map(filePath => ({ filePath, roleId: 'reference' }));
-}

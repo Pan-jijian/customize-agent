@@ -32,7 +32,6 @@ export const FALLBACK_GATE_EVALUATORS: Record<string, (rule: AutoDocumentSpecGat
 export const SPEC_GATE_RULE_HANDLERS: SpecGateRuleHandler[] = [
   ({ evaluator, target, factNames }) => evaluator.subject === 'fact' && evaluator.operator === 'exists' && target && !factNames.has(target) ? `缺少事实 ${target}` : undefined,
   ({ evaluator, target, chapterTitles }) => evaluator.subject === 'chapter' && evaluator.operator === 'exists' && target && !chapterTitles.has(target) ? `缺少章节 ${target}` : undefined,
-  ({ evaluator, target, fileBindings }) => evaluator.subject === 'file_role' && evaluator.operator === 'exists' && target && !fileBindings.some(binding => binding.roleId === target) ? `缺少文件角色 ${target}` : undefined,
   ({ evaluator, target, promptBindings }) => evaluator.subject === 'prompt_role' && evaluator.operator === 'exists' && target && !promptBindings.some(binding => binding.roleId === target) ? `缺少提示词角色 ${target}` : undefined,
   ({ evaluator, value, markdown }) => evaluator.subject === 'document' && evaluator.operator === 'contains' && value && !markdown.includes(value) ? `全文必须包含 ${value}` : undefined,
   ({ evaluator, value, markdown }) => evaluator.subject === 'document' && evaluator.operator === 'not_contains' && value && markdown.includes(value) ? `出现禁用文本 ${value}` : undefined,

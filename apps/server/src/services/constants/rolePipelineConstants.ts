@@ -1,25 +1,4 @@
-import type { QualityRepairType, RoleExecutionNode } from '../types';
-
-/** 角色输出类型推断规则，按顺序匹配。 */
-export const ROLE_OUTPUT_TYPE_RULES: Array<{ outputType: RoleExecutionNode['outputType']; pattern: RegExp }> = [
-  { outputType: 'template_requirements', pattern: /模板|范本|章节|目录|输出要求|编制要求|template|requirement/u },
-  { outputType: 'bill_facts', pattern: /表格|列表|明细|数量|数据|table|sheet|quantity|data/u },
-  { outputType: 'drawing_facts', pattern: /设计|方案|说明|图像|地图|drawing|image|map|design/u },
-  { outputType: 'technical_facts', pattern: /规范|标准|规则|参数|技术|spec|standard|technical|rule/u },
-  { outputType: 'reference_facts', pattern: /任务|范围|事实|fact|scope|reference/u },
-];
-
-/** 文件角色和提示词角色匹配加分规则。 */
-export const PROMPT_EXECUTION_SCORE_RULES: Array<{ points: number; filePattern?: RegExp; promptPattern: RegExp }> = [
-  { points: 5, promptPattern: /fact|抽取|读取|提取|理解|reference/u },
-  { points: 1, promptPattern: /chapter_generation|章节生成|正文生成/u },
-  { points: 6, filePattern: /requirement|rule|template|需求|规则|模板|范本/u, promptPattern: /requirement|rule|template|需求|规则|模板|范本|章节|目录|输出要求|编制要求/u },
-  { points: 6, filePattern: /table|sheet|quantity|data|表格|列表|明细|数量|数据/u, promptPattern: /table|sheet|quantity|data|表格|列表|明细|数量|数据|字段/u },
-  { points: 6, filePattern: /drawing|image|map|design|设计|方案|说明|图像|地图/u, promptPattern: /drawing|image|map|design|设计|方案|说明|文本|标注/u },
-  { points: 6, filePattern: /material|equipment|brand|resource|材料|设备|品牌|资源/u, promptPattern: /material|equipment|brand|resource|材料|设备|品牌|资源|推荐/u },
-  { points: 6, filePattern: /schedule|quality|safety|progress|周期|质量|安全|进度/u, promptPattern: /schedule|quality|safety|progress|周期|质量|安全|进度/u },
-  { points: 6, filePattern: /risk|constraint|重点|难点|约束|风险/u, promptPattern: /risk|constraint|重点|难点|约束|风险/u },
-];
+import type { QualityRepairType } from '../types';
 
 /** 章节生成后必须阻断通过的问题。 */
 export const BLOCKING_CHAPTER_ISSUE_RE = /正文缺少章节标题|空小节|小节只有标题|只有标题或表格无正文|后台流程话术|重复 token|退化输出/u;

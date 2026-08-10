@@ -2,7 +2,7 @@ import type { AutoDocumentSpecGateRule, AutoDocumentSpecPackage, GateRuleEvaluat
 import { readEngineeringDocumentConfig } from '../document-validation/engineeringDocumentConfigService';
 import { CHAPTER_HEADING_RE, EXPORT_BLOCKING_ISSUE_RE, EXPORT_GATE_PRECISION_ISSUE_RE, EXPORT_GATE_PROJECT_CONTAMINATION_RE, FALLBACK_GATE_EVALUATORS, FORMAL_PLACEHOLDER_PATTERNS, FORMAL_STYLE_FORBIDDEN_PHRASES, LINE_SPLIT_RE, MARKDOWN_IMAGE_RE, MARKDOWN_SECTION_HEADING_RE, MARKDOWN_TABLE_BLOCK_SPLIT_RE, MARKDOWN_TABLE_DIVIDER_RE, MARKDOWN_TABLE_ROW_RE, MARKDOWN_TOP_HEADING_RE, NON_BLANK_RE, PRECISE_FACT_MIN_TOKEN_COUNT, PRECISE_FACT_MIN_USAGE_RATE, PRECISE_FACT_SOURCE_RE, PRECISE_FACT_TOKEN_RE, DOCUMENT_BASIC_INFO_BLOCK_RE, DOCUMENT_BASIC_INFO_FIELDS, DOCUMENT_BASIC_INFO_TABLE_RE, PROMPT_EXAMPLE_BLOCK_RE, QUALITY_SEVERITY_RULES, SPEC_GATE_RULE_HANDLERS, SPECIFICATION_CONTENT_RE, STRUCTURED_DATA_CONTENT_RE, TOC_BLOCK_RE, TOC_INDENTED_SECTION_LINE_RE, TOC_SECTION_LINE_RE, WHITESPACE_RE } from '../constants';
 import type { QualitySeverity, QualitySeveritySummary, SpecGateRuleContext } from '../types';
-import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentTemplate, ExportGateResult, FileBinding, PromptBinding, ValidationIssue } from './types';
+import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentTemplate, ExportGateResult, ProjectBinding, PromptBinding, ValidationIssue } from './types';
 import { documentTextLength, estimateDocumentPages } from './budget';
 import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { displayChapterTitle } from './outline';
@@ -721,7 +721,7 @@ function applySpecGateRule(context: SpecGateRuleContext): ValidationIssue | unde
   return undefined;
 }
 
-export function applySpecGateRules(spec: AutoDocumentSpecPackage | undefined, issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[], markdown: string, fileBindings: FileBinding[], promptBindings: PromptBinding[]) {
+export function applySpecGateRules(spec: AutoDocumentSpecPackage | undefined, issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[], markdown: string, projectBindings: ProjectBinding[], promptBindings: PromptBinding[]) {
   if (!spec) return issues;
   const next = [...issues];
   const allFacts = collectAllFacts(factsModel);
@@ -757,7 +757,7 @@ export function applySpecGateRules(spec: AutoDocumentSpecPackage | undefined, is
       estimatedPages,
       allFacts,
       factsModel,
-      fileBindings,
+      projectBindings,
       promptBindings,
     });
     if (issue) next.push(issue);

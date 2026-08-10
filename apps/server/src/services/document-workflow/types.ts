@@ -97,9 +97,8 @@ export interface PromptBinding {
   roleId: string;
 }
 
-export interface FileBinding {
-  filePath: string;
-  roleId: string;
+export interface ProjectBinding {
+  materialRootPath: string;
 }
 
 export interface DocumentTemplate {
@@ -112,10 +111,9 @@ export interface DocumentTemplate {
   exportSettings?: DocumentExportSettings;
   generationSettings?: DocumentGenerationSettings;
   projectRoleConfigId?: string;
+  projectBindings?: ProjectBinding[];
   promptIds?: string[];
-  boundFilePaths?: string[];
   promptBindings?: PromptBinding[];
-  fileBindings?: FileBinding[];
   builtIn?: boolean;
 }
 

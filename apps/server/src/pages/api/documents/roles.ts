@@ -3,7 +3,7 @@ import { deleteDocumentRole, deleteProjectRoleConfig, exportDocumentRolesPayload
 
 /** 验证并解析角色类型参数 */
 function parseType(value: unknown): DocumentRoleType | undefined {
-  return value === 'file' || value === 'prompt' ? value : undefined;
+  return value === 'prompt' ? value : undefined;
 }
 
 /**

@@ -14,3 +14,4 @@ export * from './qualityValidation';
 export * from './llmClient';
 export * from './rolePipeline';
 export * from './chapterGeneration';
+export * from './projectMaterialProfile';

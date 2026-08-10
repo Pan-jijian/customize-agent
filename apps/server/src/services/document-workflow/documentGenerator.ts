@@ -1,21 +1,20 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { computeProjectId } from '@customize-agent/knowledge';
-import { getMultiProjectManager, getProjectRoot, listKnowledgeFiles } from '../knowledge/kbService';
+import { getMultiProjectManager, getProjectRoot } from '../knowledge/kbService';
 import { getConfigStore } from '../common/configService';
-import { getProjectRoleConfig, listDocumentRoles } from '../document-core/documentRoleService';
+import { getProjectRoleConfig } from '../document-core/documentRoleService';
 import { autoSpecPrompt, getOrCreateAutoDocumentSpec } from '../document-core/autoDocumentSpecService';
 import { buildProjectMaterialSummary, projectMaterialPrompt } from '../document-core/projectMaterialService';
 import { resolveDocumentDomainProfile } from '../document-core/documentDomainProfileService';
-import { resolveTemplateMaterialRoles } from '../document-core/materialRoleResolver';
 import { evaluateDocumentReadiness, readinessPrompt } from '../document-validation/documentReadinessService';
 import { validateDraftWithAutoSpec } from '../document-validation/documentValidationService';
 import { validateProjectContamination } from '../document-validation/documentContaminationService';
 import { chapterReadinessIssues, evaluateChapterReadiness } from '../document-validation/chapterReadinessService';
 import { validateFactConsistency } from '../document-validation/factConsistencyService';
 import type { KbSearchResult } from '@/lib/api';
-import type { DocumentAsset, DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, FileBinding, GeneratedDocumentDraft, RetrievalCoverageReport, ValidationIssue, WebAccessConfig } from './types';
-import { boundFileRolesForMaterialSummary, buildPromptBindingPlan, defaultProjectRoleConfigIdForTemplate, getDocumentTemplate, templateFileBindings, templatePromptBindings, type ResolvedPromptContent } from './templateStore';
+import type { DocumentAsset, DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, GeneratedDocumentDraft, RetrievalCoverageReport, ValidationIssue, WebAccessConfig } from './types';
+import { buildPromptBindingPlan, defaultProjectRoleConfigIdForTemplate, getDocumentTemplate, templatePromptBindings, type ResolvedPromptContent } from './templateStore';
 import { evidenceLine, evidencePromptBudgetForTarget, selectEvidenceByBudget } from './evidence';
 import { displayChapterTitle, effectiveTemplateChapters, extractExplicitOutlineFromSources } from './outline';
 import { evidenceMatchesFact } from './factMatching';
@@ -35,14 +34,14 @@ import { buildRepairStrategies, repairStrategyIssues } from './documentRepairStr
 import { buildDocumentReviewChecklist } from './documentReviewChecklist';
 import { DOCUMENT_WORKFLOW_VERSION } from './documentWorkflowVersion';
 import { buildDocumentTelemetryReport } from './documentTelemetry';
-import { buildRetrievalCoverageReport, retrieveDeepChapterEvidence, retrievalCoverageIssues, retrievalCoverageRisk, sampleBoundFileEvidence } from './documentEvidenceRetrieval';
+import { buildRetrievalCoverageReport, retrieveDeepChapterEvidence, retrievalCoverageIssues, retrievalCoverageRisk } from './documentEvidenceRetrieval';
 import { buildChapterFactNeeds, extractFacts, extractFactsWithLlm, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, factNeedsCoveragePrompt, factsForChapterNeeds, isValidProjectBasicFactValue, normalizeOcrFactText, resolveChapterFactNeeds, shouldRunLlmFactExtraction } from './factsModel';
 import { buildCanonicalFacts } from './factGovernance';
 import { stableHash, stringifyFactValue, throwIfAborted } from '@/services/document-workflow/utils';
 import { displayStage, elapsedMessage, upsertProgressStage } from './progress';
 import { callWithTimeout, getActiveModelWithProvider } from './llmClient';
-import type { RoleNodeArtifact } from './rolePipeline';
-import { blockingChapterIssues, buildBoundEvidenceScope, buildRoleChapterContext, buildRoleEvidencePool, buildRoleExecutionNodes, chapterPlanFor, createGenerationDiagnostics, evidenceForRoleFiles, evidenceInScope, executeRoleExtractionNode, fileScopeKeys, lightweightChapterIssues, measureGenerationStep, promptTextsForResolvedPrompts, projectEvidenceVersionHash, repairChapterByQuality, repairMarkdownByQuality, roleArtifactsDigest, roleFactsForChapter, shouldForbidDrawingImages, selectDocumentGenerationStrategy, tenderPlanChaptersFromArtifacts } from './rolePipeline';
+import { blockingChapterIssues, createGenerationDiagnostics, evidenceInScope, lightweightChapterIssues, measureGenerationStep, promptTextsForResolvedPrompts, repairChapterByQuality, repairMarkdownByQuality, selectDocumentGenerationStrategy } from './rolePipeline';
+import { buildProjectMaterialProfile, buildProjectUnderstanding, expandProjectMaterialBindings, materialKindMaps, materialRoleId, retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from './projectMaterialProfile';
 import { buildChapterFactCoverageContext, buildLlmChapterContent, buildRuntimePromptRules, buildSectionParallelChapterContent, buildValidationIssues, chapterSectionFactUsageIssues, expandChapterToTarget, expandDocumentToBudget, extractPromptStructuralRules, normalizePlannedSections, outputTokensForChapter, planChapterSectionsWithLlm, reviewAndOptimizeMarkdown, reviewChapterSummaries, reviewGlobalConsistency, runtimePromptRulesPrompt, supplementShortSections, timeoutMsForChapter, understandReferenceFiles } from './chapterGeneration';
 import { retrieveWebEvidence, webAccessPrompt } from './webResearchService';
 
@@ -60,27 +59,6 @@ function reportGenerationDebugEvent(projectRoot: string, event: Record<string, u
   }
 }
 
-function expandDirectoryFileBindings(projectRoot: string, bindings: FileBinding[]) {
-  if (bindings.length === 0) return bindings;
-  const files = listKnowledgeFiles(projectRoot);
-  const filePathSet = new Set(files.map(file => file.relativePath));
-  const usableDirectoryFiles = files.filter(file => file.status !== 'disk' && file.status !== 'error' && Number(file.indexedAt || 0) > 0 && Number(file.chunkCount || 0) > 0);
-  const expanded: FileBinding[] = [];
-  const seen = new Set<string>();
-  for (const binding of bindings) {
-    const normalizedPath = binding.filePath.replace(/^\/+|\/+$/gu, '');
-    const matchedPaths = filePathSet.has(normalizedPath)
-      ? [normalizedPath]
-      : usableDirectoryFiles.filter(file => file.relativePath.startsWith(`${normalizedPath}/`)).map(file => file.relativePath);
-    for (const filePath of matchedPaths) {
-      const key = `${binding.roleId}\n${filePath}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      expanded.push({ ...binding, filePath });
-    }
-  }
-  return expanded;
-}
 
 function validateDraft(chapters: DocumentDraftChapter[], structuredFacts: DocumentFact[] = [], template?: DocumentTemplate) {
   const warnings: string[] = [];
@@ -91,8 +69,6 @@ function validateDraft(chapters: DocumentDraftChapter[], structuredFacts: Docume
   }
   if (template && chapters.length < template.chapters.length) errors.push(`章节生成不完整：已生成 ${chapters.length}/${template.chapters.length} 章`);
   if (template && templatePromptBindings(template).length === 0) errors.push('模板未绑定任何提示词');
-  const roleIds = new Set(structuredFacts.map(fact => fact.roleId));
-  if (template?.fileBindings?.some(binding => binding.roleId === 'rule') && !roleIds.has('rule')) warnings.push('rule 角色未抽取到结构化事实');
   return { passed: errors.length === 0, warnings, errors };
 }
 
@@ -1038,61 +1014,51 @@ export async function generateDocumentDraft(input: { templateId: string; require
     roleId: projectRoleConfigId,
     status: 'running',
     message: `生成任务已创建，正在读取模板与角色配置：${template.name}`,
-    details: [`当前项目：${projectId}`, `资料目录：${path.join(projectRoot, 'knowledgeBase')}`, '正在读取文件角色和提示词角色绑定'],
+    details: [`当前项目：${projectId}`, `资料目录：${path.join(projectRoot, 'knowledgeBase')}`, '正在读取项目资料包和提示词配置'],
     progress: { current: 1, total: 4, label: '初始化配置' },
   }, { subtitle: projectRoleConfigName, roleName: projectRoleConfigName, order: 0 })];
   emitProgress();
   const promptPlan = buildPromptBindingPlan(template);
   const promptBindings = promptPlan.bindings;
-  const explicitFileBindings = templateFileBindings(template);
   upsertProgressStage(progressStages, displayStage({
     type: 'validation',
     roleId: 'document-preparation',
     status: 'running',
-    message: '正在分析模板规范、用户要求与绑定材料摘要',
-    details: ['解析 OUTLINE 与模板章节', '读取绑定文件清单', '评估材料覆盖率与生成准备度'],
+    message: '正在分析模板规范、用户要求与项目资料包',
+    details: ['解析 OUTLINE 与模板章节', '读取项目资料包', '自动识别资料类型并构建项目理解'],
     progress: { current: 1, total: 3, label: '准备分析' },
   }, { subtitle: '生成准备', order: progressStages.length }));
   emitProgress();
-  if (explicitFileBindings.length === 0) throw new Error('模板未绑定知识库文件。模板生成文件只允许使用显式绑定的知识库文件，请先在模板中绑定需要参与生成的资料。');
+  const materialFilePaths = expandProjectMaterialBindings(projectRoot, template);
+  if (materialFilePaths.length === 0) throw new Error('模板未绑定可用项目资料包，请先在模板中绑定需要参与生成的项目文件夹。');
+  const projectMaterialProfile = buildProjectMaterialProfile(projectRoot, template);
+  const projectUnderstanding = buildProjectUnderstanding(template, projectMaterialProfile);
+  const { kindByPath, processingByPath } = materialKindMaps(projectMaterialProfile);
   const promptOutlineTexts = promptTextsForResolvedPrompts([...promptPlan.writerPrompts, ...promptPlan.chapterPrompts]);
   const explicitPromptChapters = extractExplicitOutlineFromSources([
     { text: input.requirement, source: '用户需求', strict: true },
     { text: promptOutlineTexts, source: '提示词角色', strict: true },
   ]);
   const hasExplicitOutline = explicitPromptChapters.length >= 2;
-  if (hasExplicitOutline) {
-    template = { ...baseTemplate, chapters: explicitPromptChapters };
-  }
-  upsertProgressStage(progressStages, displayStage({
-    type: 'validation',
-    roleId: 'document-preparation',
-    status: 'running',
-    message: `正在扫描 ${explicitFileBindings.length} 个绑定材料并生成摘要`,
-    details: ['读取材料清单', '统计基础事实与材料角色覆盖', '准备后台控制提示词'],
-    progress: { current: 2, total: 5, label: '资料摘要' },
-  }, { subtitle: '生成准备', order: progressStages.length }));
-  emitProgress();
-  const fileBindings = expandDirectoryFileBindings(projectRoot, explicitFileBindings);
-  if (fileBindings.length === 0) throw new Error('模板绑定的知识库文件或文件夹不存在，请重新选择项目文件绑定。');
-  const projectMaterialSummary = await withProgressHeartbeat(() => Promise.resolve(buildProjectMaterialSummary(projectRoot, { requirement: input.requirement, boundFilePaths: fileBindings.map(binding => binding.filePath), boundFileRoles: boundFileRolesForMaterialSummary(fileBindings) })));
+  if (hasExplicitOutline) template = { ...baseTemplate, chapters: explicitPromptChapters };
+  const projectMaterialSummary = await withProgressHeartbeat(() => Promise.resolve(buildProjectMaterialSummary(projectRoot, { requirement: input.requirement, boundFilePaths: materialFilePaths })));
   upsertProgressStage(progressStages, displayStage({
     type: 'validation',
     roleId: 'document-preparation',
     status: 'running',
     message: '正在生成自动文档规格并评估生成准备度',
-    details: [`资料覆盖率线索：${Object.keys(projectMaterialSummary.materialInventory).length} 类角色`, '评估必需资料角色', '生成事实字段与章节约束'],
-    progress: { current: 3, total: 5, label: '规格评估' },
+    details: [`项目资料：${materialFilePaths.length} 份`, `资料类型：${Object.values(projectMaterialProfile.groups).filter(files => files.length > 0).length} 类`, '生成事实字段与章节约束'],
+    progress: { current: 2, total: 3, label: '规格评估' },
   }, { subtitle: '生成准备', order: progressStages.length }));
   emitProgress();
   const autoSpec = await withProgressHeartbeat(() => Promise.resolve(getOrCreateAutoDocumentSpec(template, input.requirement || '')));
   const documentSpec = autoSpec.spec;
   const domainProfile = resolveDocumentDomainProfile(template, input.requirement || '');
-  const resolvedMaterialRoles = resolveTemplateMaterialRoles(template, projectMaterialSummary);
+  const resolvedMaterialRoles: Parameters<typeof evaluateDocumentReadiness>[0]['resolvedRoles'] = [];
   const readiness = evaluateDocumentReadiness({ template, spec: documentSpec, summary: projectMaterialSummary, resolvedRoles: resolvedMaterialRoles });
   if (!readiness.ready) throw new Error(`生成准备度不足：${readiness.blockingIssues.join('；')}`);
-  const generationControlPrompt = [projectMaterialPrompt(projectMaterialSummary, { publicSafe: true }), autoSpecPrompt(documentSpec, autoSpec.sourceHash, { publicSafe: true }), readinessPrompt(readiness, { publicSafe: true })].filter(Boolean).join('\n\n');
-  const diagnosticControlPrompt = [projectMaterialPrompt(projectMaterialSummary), autoSpecPrompt(documentSpec, autoSpec.sourceHash), readinessPrompt(readiness)].filter(Boolean).join('\n\n');
+  const generationControlPrompt = [projectUnderstanding.prompt, projectMaterialPrompt(projectMaterialSummary, { publicSafe: true }), autoSpecPrompt(documentSpec, autoSpec.sourceHash, { publicSafe: true }), readinessPrompt(readiness, { publicSafe: true })].filter(Boolean).join('\n\n');
+  const diagnosticControlPrompt = [projectUnderstanding.prompt, projectMaterialPrompt(projectMaterialSummary), autoSpecPrompt(documentSpec, autoSpec.sourceHash), readinessPrompt(readiness)].filter(Boolean).join('\n\n');
   const writingPromptTexts = promptTextsForResolvedPrompts([...promptPlan.writerPrompts, ...promptPlan.formattingPrompts]);
   const generalChapterPromptTexts = promptTextsForResolvedPrompts([...promptPlan.writerPrompts, ...promptPlan.chapterPrompts, ...promptPlan.formattingPrompts]);
   const sourcePromptTexts = promptTextsForResolvedPrompts(promptPlan.prompts);
@@ -1107,36 +1073,36 @@ export async function generateDocumentDraft(input: { templateId: string; require
     type: 'validation',
     roleId: 'document-preparation',
     status: 'success',
-    message: `模板规范与资料摘要分析完成，识别 ${fileBindings.length} 条文件角色绑定`,
-    details: [`提示词角色：${promptBindings.length} 个`, `文件角色：${fileBindings.length} 个`, hasExplicitOutline ? `识别 OUTLINE 章节：${explicitPromptChapters.length} 个` : '未识别显式 OUTLINE，使用模板章节'],
+    message: `模板规范与项目资料理解完成，识别 ${materialFilePaths.length} 份项目资料`,
+    details: [`提示词绑定：${promptBindings.length} 个`, `项目资料包：${projectMaterialProfile.materialRoots.join('、') || '当前知识库'}`, hasExplicitOutline ? `识别 OUTLINE 章节：${explicitPromptChapters.length} 个` : '未识别显式 OUTLINE，使用模板章节'],
     progress: { current: 3, total: 3, label: '准备完成' },
   }, { subtitle: '生成准备', order: progressStages.length }));
   emitProgress();
-  const evidenceScopePaths = buildBoundEvidenceScope(projectRoot, fileBindings);
-  const allFileRoles = listDocumentRoles('file');
-  const fileRoleByPath = new Map(fileBindings.flatMap(binding => fileScopeKeys(projectRoot, binding.filePath).map(key => [key, binding.roleId] as const)));
-  const fileProcessingByPath = new Map(fileBindings.flatMap(binding => fileScopeKeys(projectRoot, binding.filePath).map(key => [key, allFileRoles.find(role => role.id === binding.roleId)?.processingType || 'reference'] as const)));
+  const evidenceScopePaths = new Set(materialFilePaths);
+  const fileRoleByPath = new Map([...kindByPath.entries()].map(([filePath, kind]) => [filePath, materialRoleId(kind)] as const));
+  const fileProcessingByPath = new Map([...processingByPath.entries()].map(([filePath, processing]) => [filePath, processing] as const));
   upsertProgressStage(progressStages, displayStage({
     type: 'knowledge_retrieval',
     roleId: 'knowledge-index',
     status: 'running',
-    message: '正在读取已入库的模板绑定资料',
-    details: ['使用上传阶段已完成的解析、切片和索引结果', '不在生成流程中重新解析或入库', '准备章节证据检索范围'],
+    message: '正在读取项目资料包索引',
+    details: ['使用上传阶段已完成的解析、切片和索引结果', '不在生成流程中重新解析或入库', '准备按资料类型召回章节证据'],
     progress: { current: 1, total: 3, label: '读取索引' },
   }, { subtitle: '知识库检索', order: progressStages.length }));
   emitProgress();
   const project = await withProgressHeartbeat(() => manager.getProject(projectRoot));
   const indexHealth = kbIndexHealth(project, [...evidenceScopePaths]);
   if (indexHealth.blockingIssues.length > 0) throw new Error(`生成前知识索引不可用：${indexHealth.blockingIssues.join('；')}`);
-  const availableEvidenceScopePaths = new Set(indexHealth.usablePaths.flatMap(filePath => fileScopeKeys(projectRoot, filePath)));
+  const availableEvidenceScopePaths = new Set(indexHealth.usablePaths);
   const requestedEvidencePerChapter = resolveDocumentGenerationEvidenceLimit(project, [...availableEvidenceScopePaths], input.maxEvidencePerChapter);
   const indexHealthHasActionableWarning = indexHealth.pendingJobs > 0 || (indexHealth.vectorStatus && indexHealth.vectorStatus.status !== 'ready') || indexHealth.usableChunkCount === 0;
+  const rolePoolRisk = retrievalCoverageRisk({ totalChunks: indexHealth.usableChunkCount, loadedChunks: indexHealth.usableChunkCount });
   upsertProgressStage(progressStages, displayStage({
     type: 'knowledge_retrieval',
     roleId: 'knowledge-index',
     status: indexHealthHasActionableWarning ? 'fallback' : 'success',
-    message: `已读取知识索引：绑定文件 ${indexHealth.scopedRecords.length} 份，可用切片 ${indexHealth.usableChunkCount} 条，开始构建角色资料证据池`,
-    details: [`绑定文件：${evidenceScopePaths.size} 份`, `可用证据文件：${availableEvidenceScopePaths.size} 份`, `向量状态：${indexHealth.vectorStatus?.status || 'unknown'}`, ...indexHealth.warnings, '即将按角色读取资料片段'],
+    message: `已读取知识索引：项目资料 ${indexHealth.scopedRecords.length} 份，可用切片 ${indexHealth.usableChunkCount} 条`,
+    details: [`项目资料：${evidenceScopePaths.size} 份`, `可用证据文件：${availableEvidenceScopePaths.size} 份`, `向量状态：${indexHealth.vectorStatus?.status || 'unknown'}`, ...indexHealth.warnings, '后续将按招标正文/清单/图纸/补疑等资料类型召回'],
     progress: { current: 3, total: 3, label: '索引已就绪' },
   }, { subtitle: '知识库检索', order: progressStages.length }));
   emitProgress();
@@ -1150,19 +1116,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const chapterDraftsByOrder: Array<DocumentDraftChapter | undefined> = [];
   const chapterGenerationStagesByOrder: Array<DocumentExecutionStage | undefined> = [];
   let knowledgeBaseStageIndex = -1;
-  const roleNodes = buildRoleExecutionNodes(template, promptBindings, fileBindings);
-  const rolePoolEvidenceBudget = evidencePromptBudgetForTarget(Math.max(1200, explicitFileBindings.length * 900), 12000, 0);
-  const roleEvidencePool = buildRoleEvidencePool(project, roleNodes, projectRoot, rolePoolEvidenceBudget);
-  const rolePoolRisk = retrievalCoverageRisk({ totalChunks: roleEvidencePool.totalChunkCount, loadedChunks: roleEvidencePool.loadedChunkCount });
-  const rolePoolStage = displayStage({
-    type: 'file_understanding',
-    roleId: 'role-evidence-pool',
-    status: 'success',
-    message: `已构建共享资料证据池：唯一文件 ${roleEvidencePool.uniqueFileCount} 份，角色绑定 ${roleEvidencePool.bindingCount} 条，加载片段 ${roleEvidencePool.loadedChunkCount}/${roleEvidencePool.totalChunkCount}`,
-    details: [`复用绑定：${Math.max(0, roleEvidencePool.bindingCount - roleEvidencePool.uniqueFileCount)} 条`, `待执行资料理解节点：${roleNodes.length} 个`, roleEvidencePool.omittedChunkCount > 0 ? `按模型上下文预算延后加载片段：${roleEvidencePool.omittedChunkCount} 条` : '材料片段已全部纳入共享池'],
-    progress: { current: roleEvidencePool.uniqueFileCount, total: Math.max(1, roleEvidencePool.bindingCount), label: '资料池' },
-  }, { subtitle: '共享资料池', order: progressStages.length });
-  upsertProgressStage(progressStages, rolePoolStage);
+  const projectUnderstandingStage = { stage: displayStage({ type: 'file_understanding', roleId: 'project-understanding', status: 'success', message: `已完成项目资料理解：${projectMaterialProfile.files.length} 份资料，${Object.values(projectMaterialProfile.groups).filter(files => files.length > 0).length} 类资料类型`, details: projectUnderstanding.prompt.split('\n').slice(0, 16) }, { subtitle: '项目资料理解', order: progressStages.length }) };
+  upsertProgressStage(progressStages, projectUnderstandingStage.stage);
   emitProgress();
   const projectBasicEvidence = await collectProjectBasicEvidence({ manager, project, projectRoot, scopedFilePaths: [...evidenceScopePaths].filter(Boolean).sort(), fileRoleByPath, fileProcessingByPath, signal: input.signal });
   if (projectBasicEvidence.length > 0) {
@@ -1170,68 +1125,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
     upsertProgressStage(progressStages, displayStage({ type: 'knowledge_retrieval', roleId: 'project-basic-evidence', status: 'success', message: `已锁定项目基础事实证据 ${projectBasicEvidence.length} 条`, details: projectBasicEvidence.slice(0, 8).map(item => `${path.basename(item.filePath)}｜${item.sectionTitle || '正文片段'}｜score=${item.score.toFixed(2)}`) }, { subtitle: '基础事实召回', order: progressStages.length }));
     emitProgress();
   }
-  const roleArtifacts: RoleNodeArtifact[] = [];
-  const projectEvidenceVersion = projectEvidenceVersionHash(project, projectRoot, evidenceScopePaths);
-  const activeModelName = getActiveModelWithProvider()?.model.name;
-  const roleCachePromptTexts = promptTextsForResolvedPrompts([...promptPlan.extractionPrompts, ...promptPlan.referencePrompts]);
-  const fileRolesHash = stableHash({
-    fileBindings,
-    evidenceScopePaths: [...evidenceScopePaths].sort(),
-    activeModelName,
-    projectEvidenceVersion,
-    promptTexts: roleCachePromptTexts,
-    materialFingerprint: projectMaterialSummary.fingerprint,
-    materialInventory: Object.fromEntries(Object.entries(projectMaterialSummary.materialInventory).map(([role, files]) => [role, files.map(file => ({ filePath: file.filePath, chunkCount: file.chunkCount }))])),
-  });
-  const roleConcurrency = Math.max(1, roleNodes.length || 1);
-  for (let offset = 0; offset < roleNodes.length; offset += roleConcurrency) {
-    throwIfAborted(input.signal);
-    const batch = roleNodes.slice(offset, offset + roleConcurrency);
-    const batchJobs = batch.map(async (node, batchIndex) => {
-      const nodeStartedAt = Date.now();
-      const nodeEvidence = evidenceForRoleFiles(roleEvidencePool, node, projectRoot).filter(item => evidenceInScope(projectRoot, item.filePath, evidenceScopePaths));
-      const runningStageIndex = progressStages.length;
-      const runningStage = displayStage({
-        type: 'file_understanding',
-        roleId: node.fileRoleId,
-        promptId: node.promptRoleIds[0],
-        status: 'running',
-        message: `${node.fileRoleName} 正在复用共享资料池读取 ${node.filePaths.length} 条绑定，候选证据 ${nodeEvidence.length} 条`,
-        details: [`绑定文件：${node.filePaths.length} 份`, `候选证据：${nodeEvidence.length} 条`, node.promptRoleNames.length ? `关联提示词：${node.promptRoleNames.join('、')}` : '未绑定专用提示词'],
-        progress: { current: offset + batchIndex + 1, total: roleNodes.length, label: '资料理解' },
-      }, { subtitle: node.fileRoleName, roleName: node.fileRoleName, promptName: node.promptRoleNames.join('、') || undefined, order: runningStageIndex });
-      progressStages.push(runningStage);
-      emitProgress();
-      const artifact = await withProgressHeartbeat(() => executeRoleExtractionNode(template, node, nodeEvidence, input.signal));
-      const completedStage = displayStage({
-        type: 'file_understanding',
-        roleId: node.fileRoleId,
-        promptId: node.promptRoleIds[0],
-        status: nodeEvidence.length > 0 ? 'success' : 'fallback',
-        message: elapsedMessage(`${node.fileRoleName} 节点已完成，产出章节建议 ${artifact.chapters.length} 个、事实 ${artifact.facts.length} 条`, nodeStartedAt),
-        details: [`产出章节建议：${artifact.chapters.length} 个`, `提取事实：${artifact.facts.length} 条`, '已完成模型理解'],
-        progress: { current: offset + batchIndex + 1, total: roleNodes.length, label: '资料理解' },
-      }, { subtitle: node.fileRoleName, roleName: node.fileRoleName, promptName: node.promptRoleNames.join('、') || undefined, order: runningStageIndex });
-      progressStages[runningStageIndex] = completedStage;
-      emitProgress();
-      return { artifact, evidence: nodeEvidence };
-    });
-    const batchResults = await Promise.all(batchJobs);
-    for (const item of batchResults) {
-      allEvidence.push(...item.evidence);
-      roleArtifacts.push(item.artifact);
-    }
-    const compactRoleEvidence = selectEvidenceByBudget(allEvidence, { maxItems: Math.max(40, roleNodes.length * 8), maxChars: Math.max(45000, roleNodes.length * 5000), preservePinned: true });
-    allEvidence.splice(0, allEvidence.length, ...compactRoleEvidence);
-  }
   const earlyLocalFacts = extractStructuredFacts(allEvidence, template, documentSpec);
   const earlyProjectBasicFacts = extractProjectBasicFactsFromEvidence(allEvidence);
   const earlyPreciseFacts = extractPreciseFactsFromEvidence(allEvidence, domainProfile);
-  const earlyRoleFacts: DocumentFact[] = roleArtifacts.flatMap(artifact => artifact.facts.map(fact => ({ key: fact.key, value: stringifyFactValue(fact.value), sourceFile: fact.sourceFile, roleId: fact.roleId, confidence: 0.9 })));
-  const preliminaryFactsModel = buildFactsModel([...earlyRoleFacts, ...earlyLocalFacts, ...earlyProjectBasicFacts, ...earlyPreciseFacts], extractStructuredTables(allEvidence), missingItems, documentSpec, domainProfile);
-  const tenderPlan = tenderPlanChaptersFromArtifacts(template, roleArtifacts);
+  const preliminaryFactsModel = buildFactsModel([...earlyLocalFacts, ...earlyProjectBasicFacts, ...earlyPreciseFacts], extractStructuredTables(allEvidence), missingItems, documentSpec, domainProfile);
   let effectiveChapters = effectiveTemplateChapters(template, documentSpec, { preserveExplicitOutline: hasExplicitOutline });
-  const baseProjectContext = roleArtifactsDigest(roleArtifacts);
+  const baseProjectContext = projectUnderstanding.prompt;
   let projectContext = [baseProjectContext, buildDocumentBlueprintContext({ template: { ...template, chapters: effectiveChapters }, chapters: effectiveChapters, factsModel: preliminaryFactsModel, requirement: input.requirement })].filter(Boolean).join('\n\n');
   const provisionalTemplate = { ...template, chapters: effectiveChapters };
   const promptStructuralRules = extractPromptStructuralRules([promptTexts, input.requirement || ''].filter(Boolean).join('\n\n'), effectiveChapters);
@@ -1247,7 +1146,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     }
     llmSectionPlanningCount += 1;
     const chapterEvidence = selectEvidenceByBudget(allEvidence.filter(item => item.chapterId === chapter.id || evidenceMatchesFact(item, chapter.title)), { maxChars: evidencePromptBudgetForTarget(provisionalBudget.chapterTargets.get(chapter.id) || 1200), preservePinned: true });
-    const roleContext = buildRoleChapterContext(roleArtifacts, chapter, chapterPlanFor(chapter, tenderPlan));
+    const roleContext = projectUnderstanding.chapterPlans.find(plan => plan.chapterId === chapter.id)?.writingGoal || '';
     const planningPromptExecution = resolveChapterPromptExecution(promptPlan, chapter);
     const sections = await planChapterSectionsWithLlm({ template: provisionalTemplate, chapter, chapterIndex, evidence: chapterEvidence, promptTexts: planningPromptExecution.promptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: provisionalBudget.chapterTargets.get(chapter.id) || 1200, structuralRules: promptStructuralRules, signal: input.signal });
     const lockedRuleDetails = promptStructuralRules.filter(rule => rule.chapterIndex === chapterIndex || (rule.chapterTitle && displayChapterTitle(rule.chapterTitle) === displayChapterTitle(chapter.title))).flatMap(rule => rule.requiredSections.map(section => `强制小节：${section.title}`));
@@ -1269,7 +1168,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     type: 'validation',
     roleId: 'section-planning',
     status: 'success',
-    message: `小节规划：${llmSectionPlanningCount} 章由 LLM 基于${sectionPlanningSource}、角色和绑定文件证据规划小节，${skippedSectionPlanningCount} 章已由模板显式提供小节并跳过规划`,
+    message: `小节规划：${llmSectionPlanningCount} 章由 LLM 基于${sectionPlanningSource}、项目资料理解和证据规划小节，${skippedSectionPlanningCount} 章已由模板显式提供小节并跳过规划`,
   }, { subtitle: '小节规划策略' });
 
   // 第一个进度回调：角色绑定完成
@@ -1279,7 +1178,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     ...promptPlan.unresolvedRoles.map(roleId => `unresolved｜${roleId}｜项目角色配置中的提示词角色不存在`),
     ...promptPlan.missingResourceRoles.map(roleId => `missingResource｜${roleId}｜提示词角色未显式绑定资源`),
   ];
-  upsertProgressStage(progressStages, displayStage({ type: 'role_binding', roleId: projectRoleConfigId, status: 'success', message: `已绑定 ${fileBindings.length} 个文件角色、${promptPlan.prompts.length} 个有效提示词；写作 ${promptPlan.writerPrompts.length}、章节 ${promptPlan.chapterPrompts.length}、抽取 ${promptPlan.extractionPrompts.length}；已自动抽取运行时规则 ${runtimePromptRules.executionSummary.length} 条；语义资料覆盖 ${Math.round(readiness.materialCoverageRate * 100)}%${outlineMessage}`, details: [...promptPlanDetails, ...runtimePromptRules.executionSummary.map(item => `runtimeRule｜${item}`)] }, { subtitle: projectRoleConfigName, roleName: projectRoleConfigName }));
+  upsertProgressStage(progressStages, displayStage({ type: 'role_binding', roleId: projectRoleConfigId, status: 'success', message: `已绑定项目资料 ${materialFilePaths.length} 份、${promptPlan.prompts.length} 个有效提示词；写作 ${promptPlan.writerPrompts.length}、章节 ${promptPlan.chapterPrompts.length}、抽取 ${promptPlan.extractionPrompts.length}；已自动抽取运行时规则 ${runtimePromptRules.executionSummary.length} 条；语义资料覆盖 ${Math.round(readiness.materialCoverageRate * 100)}%${outlineMessage}`, details: [...promptPlanDetails, ...runtimePromptRules.executionSummary.map(item => `runtimeRule｜${item}`)] }, { subtitle: projectRoleConfigName, roleName: projectRoleConfigName }));
   upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'runtime-prompt-rules', status: 'success', message: `运行时提示词规则已抽取：${runtimePromptRules.executionSummary.length} 条，版本 ${runtimePromptRules.sourceHash}`, details: runtimePromptRules.executionSummary.length ? [...runtimePromptRules.executionSummary, `必需表格：${runtimePromptRules.requiredTables.join('、') || '无'}`, `必含关键词：${runtimePromptRules.requiredKeywords?.join('、') || '无'}`, `禁含内容：${runtimePromptRules.forbiddenPatterns?.join('、') || '无'}`] : ['未从提示词中识别到额外硬规则，使用系统默认质量规则'] }, { subtitle: '提示词规则执行' }));
   upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-readiness', status: readiness.ready ? 'success' : 'failed', message: `生成准备度：绑定资料已就绪，语义覆盖 ${Math.round(readiness.materialCoverageRate * 100)}%，角色匹配 ${Math.round(readiness.roleSatisfactionRate * 100)}%，优化建议 ${Math.round(readiness.specCompletenessRate * 100)}%`, details: readiness.diagnostics }, { subtitle: '生成准备度检查' }));
   upsertProgressStage(progressStages, sectionPlanningStage);
@@ -1308,8 +1207,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
     }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder }));
     emitProgress();
     const rawEvidence: DocumentEvidence[] = [];
-    const plan = chapterPlanFor(chapter, tenderPlan);
-    const planQueries = plan ? [plan.title, ...plan.requiredContents, ...plan.evidenceNeeds, ...plan.requirements.flatMap(item => [item.title, item.requirementText, ...item.requiredContents, ...item.evidenceNeeds])].filter(Boolean) : [];
+    const plan = projectUnderstanding.chapterPlans.find(item => item.chapterId === chapter.id || item.chapterTitle === chapter.title);
+    const planQueries = plan ? Object.values(plan.evidenceQueries).flat().filter(Boolean) : [];
     const baseQueries = chapter.queries.length > 0 ? chapter.queries : [template.name, template.outputTitle, chapter.title];
     const chapterBasicQueries = /概况|工程|项目|总体|部署|进度|工期|质量/u.test(chapter.title) ? PROJECT_BASIC_FACT_QUERIES : [];
     const queries = compactChapterQueries(chapter, [...baseQueries, ...planQueries], chapterBasicQueries);
@@ -1355,11 +1254,10 @@ export async function generateDocumentDraft(input: { templateId: string; require
           source: item.source,
         })));
     }
+    const plannedMaterialEvidence = await retrievePlannedMaterialEvidence({ manager, projectRoot, chapter, plan, profile: projectMaterialProfile, scopedFilePaths, limitPerQuery: Math.min(requestedEvidencePerChapter, 10), signal: input.signal });
+    rawEvidence.push(...plannedMaterialEvidence);
     const pinnedEvidencePaths = new Set<string>((chapter.pinnedEvidenceFilePaths || []).filter(Boolean));
-    const matchedRoleContexts = roleFactsForChapter(roleArtifacts, chapter, plan);
-    rawEvidence.push(...matchedRoleContexts.flatMap(({ artifact }) => artifact.evidence
-      .filter(item => evidenceInScope(projectRoot, item.filePath, evidenceScopePaths))
-      .map(item => ({ ...item, chapterId: chapter.id, source: 'role-node' }))));
+    const matchedRoleContexts: Array<{ fact: never }> = [];
     if (/概况|工程|项目|总体|部署|进度|工期|质量/u.test(chapter.title)) rawEvidence.push(...projectBasicEvidence.map(item => ({ ...item, chapterId: chapter.id, source: 'pinned-evidence' })));
     const chapterPinnedPaths = new Set([...pinnedEvidencePaths]);
     const chapterBudgetTarget = documentBudget.chapterTargets.get(chapter.id) || 1200;
@@ -1392,7 +1290,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
       webResearchReport.filteredCount += webResult.filtered;
     }
     const evidenceBudgetChars = evidencePromptBudgetForTarget(chapterBudgetTarget, 7000, 26000);
-    const sampledEvidence = sampleBoundFileEvidence({ project, chapter, scopedFilePaths, fileRoleByPath, fileProcessingByPath, highRisk: rolePoolRisk.highRisk });
+    const sampledEvidence = sampleProjectMaterialEvidence({ project, chapter, plan, profile: projectMaterialProfile, scopedFilePaths, highRisk: rolePoolRisk.highRisk });
     if (sampledEvidence.length > 0) scopedEvidence.push(...sampledEvidence);
     let evidence = optimizeChapterEvidence(chapter, scopedEvidence, { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter, chapter, rolePoolRisk.highRisk), maxChars: evidenceBudgetChars + (rolePoolRisk.highRisk ? 14000 : 4000), preservePinned: true }, generationDiagnostics);
     let missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
@@ -1418,13 +1316,13 @@ export async function generateDocumentDraft(input: { templateId: string; require
     emitProgress();
 
     throwIfAborted(input.signal);
-    const forbidDrawingImages = shouldForbidDrawingImages(roleArtifacts, template);
-    const roleContext = buildRoleChapterContext(roleArtifacts, chapter, plan);
+    const forbidDrawingImages = false;
+    const roleContext = [plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : ''].filter(Boolean).join('\n');
     const chapterPromptExecution = resolveChapterPromptExecution(promptPlan, chapter);
     if (promptPlan.writerPrompts.length > 0 && !chapterPromptExecution.primaryWriter) throw new Error(`${displayChapterTitle(chapter.title)} 写作主控提示词未进入章节生成阶段`);
     const chapterPromptTexts = [chapterPromptExecution.promptTexts, generationControlPrompt].filter(Boolean).join('\n\n');
     const chapterPromptDetails = chapterPromptExecution.promptDetails.length ? chapterPromptExecution.promptDetails : ['未绑定章节写作提示词'];
-    const chapterFactNeeds = buildChapterFactNeeds({ template, chapter, spec: documentSpec, profile: domainProfile, promptTexts: chapterPromptTexts, requirement: input.requirement, plan });
+    const chapterFactNeeds = buildChapterFactNeeds({ template, chapter, spec: documentSpec, profile: domainProfile, promptTexts: chapterPromptTexts, requirement: input.requirement, plan: plan ? { requiredContents: plan.mustCover, evidenceNeeds: Object.values(plan.evidenceQueries).flat() } : undefined });
     let resolvedFactNeeds = resolveChapterFactNeeds({ needs: chapterFactNeeds, factsModel: preliminaryFactsModel, evidence: scopedEvidence, profile: domainProfile });
     let requiredMissingNeeds = resolvedFactNeeds.filter(item => item.need.required && item.status !== 'satisfied').map(item => item.need.label);
     if (requiredMissingNeeds.length > 0 && scopedFilePaths.length > 0) {
@@ -1462,7 +1360,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     generationDiagnostics.evidence.contextChars += chapterEvidenceChars;
     const indexedFacts = factsForChapterNeeds(resolvedFactNeeds);
     const projectBasicFactsForChapter = /概况|工程|项目|总体|部署|进度|工期|质量/u.test(chapter.title) ? earlyProjectBasicFacts : [];
-    const factCoverageContext = buildChapterFactCoverageContext({ chapter, plan, spec: documentSpec, roleFacts: matchedRoleContexts, evidence, missingFacts, indexedFacts: [...projectBasicFactsForChapter, ...indexedFacts], resolvedFactNeeds, factNeedsPrompt: factNeedsCoveragePrompt(resolvedFactNeeds) });
+    const factCoverageContext = buildChapterFactCoverageContext({ chapter, plan: undefined, spec: documentSpec, roleFacts: matchedRoleContexts, evidence, missingFacts, indexedFacts: [...projectBasicFactsForChapter, ...indexedFacts], resolvedFactNeeds, factNeedsPrompt: factNeedsCoveragePrompt(resolvedFactNeeds) });
     const factNeedSummary = { total: resolvedFactNeeds.length, satisfied: resolvedFactNeeds.filter(item => item.status === 'satisfied').length, missing: resolvedFactNeeds.filter(item => item.status === 'missing').length, lowConfidence: resolvedFactNeeds.filter(item => item.status === 'low_confidence').length };
     for (const fact of requiredMissingNeeds) missingItems.push(`${chapter.title}：事实需求未确认 ${fact}`);
     const specChapterRule = documentSpec?.chapterRules.find(rule => rule.id === chapter.id || rule.title === chapter.title);
@@ -1473,7 +1371,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const adaptiveMinimum = documentBudget.targetChars ? Math.min(1800, Math.max(600, Math.floor(generationTargetCap * 0.5))) : 1200;
     const targetWords = generationTargetCap;
     const budgetTargetWords = budgetTarget;
-    const minWords = Math.max(Math.min(plan?.minWords || 0, targetWords), Math.min(specChapterRule?.minWords || 0, targetWords), Math.min(documentSpec?.dynamicChapterRule.minWordsPerChapter || 0, targetWords), Math.floor(targetWords * 0.78), adaptiveMinimum);
+    const minWords = Math.max(Math.min(specChapterRule?.minWords || 0, targetWords), Math.min(documentSpec?.dynamicChapterRule.minWordsPerChapter || 0, targetWords), Math.floor(targetWords * 0.78), adaptiveMinimum);
     const generationMaxTokens = outputTokensForChapter(minWords, targetWords);
     const fallbackRatio = 0.55;
     const fallbackCap = Math.min(targetWords, 6000);
@@ -1506,7 +1404,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const sectionFirstTimeoutMs = useSectionFirst ? Math.min(timeoutMsForChapter(targetWords) + 30000, 330000) : Math.min(timeoutMsForChapter(targetWords), 180000);
     let llmContent = useSectionFirst
       ? await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-section-draft:${chapter.id}`, () => callWithTimeout(
-        signal => buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: chapterPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: activeModelName, fileRolesHash, allowPartialResult: false, sectionEvidenceProvider: sectionTitle => retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal }), diagnostics: generationDiagnostics, signal }),
+        signal => buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: chapterPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts }), allowPartialResult: false, sectionEvidenceProvider: sectionTitle => retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal }), diagnostics: generationDiagnostics, signal }),
         sectionFirstTimeoutMs,
         input.signal,
       )))
@@ -1749,15 +1647,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
   allEvidence.splice(0, allEvidence.length, ...compactPostFileEvidence);
 
   const facts = extractFacts(template, allEvidence, documentSpec);
-  for (const artifact of roleArtifacts) {
-    for (const fact of artifact.facts) facts[fact.key] = `${stringifyFactValue(fact.value)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
-  }
   const localFacts = extractStructuredFacts(allEvidence, template, documentSpec);
   const projectBasicFacts = extractProjectBasicFactsFromEvidence(allEvidence);
   const preciseFacts = extractPreciseFactsFromEvidence(allEvidence, domainProfile);
-  const roleStructuredFacts: DocumentFact[] = roleArtifacts.flatMap(artifact => artifact.facts.map(fact => ({ key: fact.key, value: stringifyFactValue(fact.value), sourceFile: fact.sourceFile, roleId: fact.roleId, confidence: 0.9 })));
+  const roleStructuredFacts: DocumentFact[] = [];
   const preLlmFacts = [...roleStructuredFacts, ...localFacts, ...projectBasicFacts, ...preciseFacts];
-  let llmExtraction: { facts: DocumentFact[]; stages: DocumentExecutionStage[] } = { facts: [], stages: [{ type: 'fact_extraction', roleId: 'llm-json', status: 'skipped', message: '已有本地/角色事实覆盖主要必需字段，跳过 LLM 全量事实抽取' }] };
+  let llmExtraction: { facts: DocumentFact[]; stages: DocumentExecutionStage[] } = { facts: [], stages: [{ type: 'fact_extraction', roleId: 'llm-json', status: 'skipped', message: '已有本地/资料事实覆盖主要必需字段，跳过 LLM 全量事实抽取' }] };
   if (shouldRunLlmFactExtraction(preLlmFacts, template, documentSpec)) {
     const factExtractionEvidence = selectEvidenceByBudget(allEvidence, { maxItems: 48, maxChars: 45000, preservePinned: true });
     try { llmExtraction = await extractFactsWithLlm(factExtractionEvidence, factExtractionPromptTexts, template, documentSpec, input.signal); } catch (err) { if (input.signal?.aborted) throw err; console.error('[gen] fact extraction failed:', err); }
@@ -1793,17 +1688,11 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const validation = validateDraft(chapterDrafts, structuredFacts, template);
   validation.warnings = [...validation.warnings, ...readiness.warnings];
   validation.errors = [...validation.errors, ...readiness.blockingIssues];
-  const roleArtifactWarningIssues = roleArtifacts.flatMap(artifact => artifact.warnings.map(warning => ({
-    level: /结构化事实读取不足|结构化章节读取不足|兜底|片段/u.test(warning) ? 'info' as const : 'warning' as const,
-    message: warning,
-    suggestion: '这是资料抽取诊断，不代表已抽取到的可靠参数不可用；生成时仍应优先使用绑定资料中的可靠参数。',
-  }))).filter(issue => !isMaterialDiagnosticNoise(issue));
   let validationIssues = collectValidationIssueGroups(
     buildValidationIssues(validation, factsModel, chapterDrafts),
     chapterReadinessIssues(chapterReadiness),
-    roleArtifactWarningIssues,
   );
-  const forbidDrawingImages = shouldForbidDrawingImages(roleArtifacts, template);
+  const forbidDrawingImages = false;
   const budgetStartedAt = Date.now();
   const budgetBeforeChars = documentTextLength(chapterDrafts.map(chapter => chapter.content).join('\n\n'));
   upsertProgressStage(progressStages, displayStage({
@@ -2223,10 +2112,11 @@ export async function generateDocumentDraft(input: { templateId: string; require
         if (chapterGaps.length === 0) return chapter;
         const templateChapter = effectiveChapters.find(item => item.id === chapter.id || item.title === chapter.title) || { id: chapter.id, title: chapter.title, purpose: '', queries: [], requiredFacts: [], sections: chapter.sections };
         const targetWords = documentBudget.chapterTargets.get(chapter.id) || 1200;
-        const plan = chapterPlanFor(templateChapter, tenderPlan);
+        const plan = projectUnderstanding.chapterPlans.find(item => item.chapterId === templateChapter.id || item.chapterTitle === templateChapter.title);
+        const repairRoleContext = [plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : ''].filter(Boolean).join('\n');
         try {
           const supplemented = await callWithTimeout(
-            signal => supplementShortSections({ template, chapter: templateChapter, content: chapter.content, evidence: chapter.evidence, missingFacts: chapter.missingFacts, promptTexts, projectContext, requirement: input.requirement, roleContext: buildRoleChapterContext(roleArtifacts, templateChapter, plan), targetWords, forbidDrawingImages, forcedSections: chapterGaps, signal }),
+            signal => supplementShortSections({ template, chapter: templateChapter, content: chapter.content, evidence: chapter.evidence, missingFacts: chapter.missingFacts, promptTexts, projectContext, requirement: input.requirement, roleContext: repairRoleContext, targetWords, forbidDrawingImages, forcedSections: chapterGaps, signal }),
             Math.min(300000, Math.max(90000, chapterGaps.length * 90000)),
             input.signal,
           );
@@ -2280,10 +2170,11 @@ export async function generateDocumentDraft(input: { templateId: string; require
         if (chapterGaps.length === 0) return chapter;
         const templateChapter = effectiveChapters.find(item => item.id === chapter.id || item.title === chapter.title) || { id: chapter.id, title: chapter.title, purpose: '', queries: [], requiredFacts: [], sections: chapter.sections };
         const targetWords = documentBudget.chapterTargets.get(chapter.id) || 1200;
-        const plan = chapterPlanFor(templateChapter, tenderPlan);
+        const plan = projectUnderstanding.chapterPlans.find(item => item.chapterId === templateChapter.id || item.chapterTitle === templateChapter.title);
+        const repairRoleContext = [plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : ''].filter(Boolean).join('\n');
         try {
           const supplemented = await callWithTimeout(
-            signal => supplementShortSections({ template, chapter: templateChapter, content: chapter.content, evidence: chapter.evidence, missingFacts: chapter.missingFacts, promptTexts, projectContext, requirement: input.requirement, roleContext: buildRoleChapterContext(roleArtifacts, templateChapter, plan), targetWords, forbidDrawingImages, forcedSections: chapterGaps, signal }),
+            signal => supplementShortSections({ template, chapter: templateChapter, content: chapter.content, evidence: chapter.evidence, missingFacts: chapter.missingFacts, promptTexts, projectContext, requirement: input.requirement, roleContext: repairRoleContext, targetWords, forbidDrawingImages, forcedSections: chapterGaps, signal }),
             Math.min(300000, Math.max(90000, chapterGaps.length * 90000)),
             input.signal,
           );
@@ -2310,7 +2201,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   if (canonicalFacts.size > 0) executionStages.push({ type: 'fact_extraction', roleId: 'canonical-facts', status: 'success', message: `已决策可信基础事实 ${canonicalFacts.size} 项`, details: [...canonicalFacts.values()].map(fact => `${fact.label}=${fact.value}（${fact.source}，confidence=${fact.confidence}）`).slice(0, 12) });
   const preRepairWarningIssues = [...structureIssueMessages];
   validationIssues = collectValidationIssueGroups(
-    applySpecGateRules(documentSpec, [...validationIssues, ...preRepairWarningIssues.map(message => ({ level: 'warning' as const, message }))], factsModel, finalChapterDrafts, finalMarkdown, fileBindings, promptBindings),
+    applySpecGateRules(documentSpec, [...validationIssues, ...preRepairWarningIssues.map(message => ({ level: 'warning' as const, message }))], factsModel, finalChapterDrafts, finalMarkdown, template.projectBindings || [], promptBindings),
     validateDraftWithAutoSpec({ markdown: finalMarkdown, spec: documentSpec, summary: projectMaterialSummary }),
     validateFactConsistency({ markdown: finalMarkdown, facts: structuredFacts, summary: projectMaterialSummary, profile: domainProfile }),
     validateProjectContamination(finalMarkdown, projectMaterialSummary),
@@ -2400,11 +2291,12 @@ export async function regenerateDocumentChapter(input: { templateId: string; cha
   const projectRoot = path.resolve(input.projectRoot || getProjectRoot());
   if (!projectRoot) throw new Error('No knowledge base project found');
   const manager = getMultiProjectManager();
-  const fileBindings = templateFileBindings(template);
-  const boundFilePaths = buildBoundEvidenceScope(projectRoot, fileBindings);
-  const allFileRoles = listDocumentRoles('file');
-  const fileRoleByPath = new Map(fileBindings.flatMap(binding => fileScopeKeys(projectRoot, binding.filePath).map(key => [key, binding.roleId] as const)));
-  const fileProcessingByPath = new Map(fileBindings.flatMap(binding => fileScopeKeys(projectRoot, binding.filePath).map(key => [key, allFileRoles.find(role => role.id === binding.roleId)?.processingType || 'reference'] as const)));
+  const materialFilePaths = expandProjectMaterialBindings(projectRoot, template);
+  const projectMaterialProfile = buildProjectMaterialProfile(projectRoot, template);
+  const { kindByPath, processingByPath } = materialKindMaps(projectMaterialProfile);
+  const boundFilePaths = new Set(materialFilePaths);
+  const fileRoleByPath = new Map([...kindByPath.entries()].map(([filePath, kind]) => [filePath, materialRoleId(kind)] as const));
+  const fileProcessingByPath = new Map([...processingByPath.entries()].map(([filePath, processing]) => [filePath, processing] as const));
   const project = await manager.getProject(projectRoot);
   const requestedEvidencePerChapter = resolveDocumentGenerationEvidenceLimit(project, [...boundFilePaths], input.maxEvidencePerChapter);
   const rawEvidence: DocumentEvidence[] = [];

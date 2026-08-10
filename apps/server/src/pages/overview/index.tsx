@@ -25,7 +25,6 @@ export default function OverviewPage() {
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [providerCount, setProviderCount] = useState(0);
-  const [fileRoleCount, setFileRoleCount] = useState(0);
   const [promptRoleCount, setPromptRoleCount] = useState(0);
   const [templateCount, setTemplateCount] = useState(0);
   const [embeddingConfig, setEmbeddingConfig] = useState<EmbeddingConfig | null>(null);
@@ -43,7 +42,6 @@ export default function OverviewPage() {
       setStats(s);
       setProviderCount(Array.isArray(provs) ? provs.length : 0);
       const roles = Array.isArray(rolesResult.roles) ? rolesResult.roles : [];
-      setFileRoleCount(roles.filter(r => r.type === 'file').length);
       setPromptRoleCount(roles.filter(r => r.type === 'prompt').length);
       setTemplateCount(Array.isArray(templatesResult.templates) ? templatesResult.templates.length : 0);
       setEmbeddingConfig(embConfig);
@@ -107,7 +105,7 @@ export default function OverviewPage() {
       <div>
         <h2 className="text-sm font-semibold mb-6 uppercase tracking-wider text-[var(--colorTextSecondary)] animateFadeIn stagger-5" style={{ opacity: 0 }}>{t('overview.systemResources')}</h2>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-y-8 gap-x-4">
-          <DashCard title={t('overview.fileRoles')} value={fileRoleCount} animationClass="stagger-5" />
+          <DashCard title={t('overview.materialUnderstanding')} value="自动" animationClass="stagger-5" />
           <DashCard title={t('overview.promptRoles')} value={promptRoleCount} animationClass="stagger-5" />
           <DashCard title={t('overview.templateCount')} value={templateCount} animationClass="stagger-5" />
           <DashCard title={t('overview.semanticModel')} value={embeddingConfig?.provider === 'openai-compatible' ? t('overview.external') : embeddingConfig ? t('overview.local') : '—'} subtext={embeddingConfig?.model ?? t('overview.notConfigured')} animationClass="stagger-5" />

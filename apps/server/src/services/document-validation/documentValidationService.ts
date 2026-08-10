@@ -43,7 +43,7 @@ export function validateDraftWithAutoSpec(input: {
   if (documentNo && !markdown.includes(documentNo)) {
     issues.push({ level: 'info', message: '正文未体现文档/任务编号', suggestion: '如文档需要编号，请在概况、背景或首页信息中补充。' });
   }
-  const forbidden = ['知识库证据', '文件角色', '提示词角色', '文档规范包', '规范包', '后台自动规范', '后台优化建议', '基础事实候选', '材料未提供', '未检索到'];
+  const forbidden = ['知识库证据', '资料类型', '提示词角色', '文档规范包', '规范包', '后台自动规范', '后台优化建议', '基础事实候选', '材料未提供', '未检索到'];
   for (const text of forbidden) {
     if (markdown.includes(text)) issues.push({ level: 'error', message: `正文包含后台流程话术：${text}`, suggestion: '请重新生成或在审查阶段删除后台流程描述。' });
   }

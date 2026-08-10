@@ -4,7 +4,7 @@ export function stageTitle(type: DocumentExecutionStage['type']) {
   const titles: Record<DocumentExecutionStage['type'], string> = {
     role_binding: '项目角色配置绑定',
     knowledge_retrieval: '知识库证据检索',
-    file_understanding: '文件角色读取',
+    file_understanding: '项目资料理解',
     fact_extraction: '事实抽取',
     chapter_generation: '章节正文生成',
     asset_generation: '生成资源处理',

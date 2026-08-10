@@ -1,11 +1,11 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { DOCUMENT_ROLE_ID_MAX_LENGTH, FILE_PROCESSING_TYPES, PROMPT_EXECUTION_TYPES } from '../constants';
-import type { DocumentRole, DocumentRolesExportFile, DocumentRoleType, FileProcessingType, ProjectRoleConfig, ProjectRoleItem, PromptExecutionType, RoleStore } from '../types';
+import { DOCUMENT_ROLE_ID_MAX_LENGTH, PROMPT_EXECUTION_TYPES } from '../constants';
+import type { DocumentRole, DocumentRolesExportFile, DocumentRoleType, ProjectRoleConfig, ProjectRoleItem, PromptExecutionType, RoleStore } from '../types';
 import { readEngineeringDocumentConfig } from '../document-validation/engineeringDocumentConfigService';
 
-export type { DocumentRole, DocumentRolesExportFile, DocumentRoleType, FileProcessingType, ProjectRoleConfig, ProjectRoleItem, PromptExecutionType } from '../types';
+export type { DocumentRole, DocumentRolesExportFile, DocumentRoleType, ProjectRoleConfig, ProjectRoleItem, PromptExecutionType } from '../types';
 
 function storePath() {
   const dir = path.join(os.homedir(), '.customize-agent');
@@ -43,9 +43,6 @@ function uniqueRoleItems(items: ProjectRoleItem[] = []) {
   return result;
 }
 
-function sanitizeProcessingType(value: unknown): FileProcessingType {
-  return typeof value === 'string' && FILE_PROCESSING_TYPES.has(value) ? value as FileProcessingType : 'reference';
-}
 
 function sanitizeRoleItems(items: unknown): ProjectRoleItem[] {
   if (!Array.isArray(items)) return [];
@@ -58,18 +55,20 @@ function sanitizeRoleItems(items: unknown): ProjectRoleItem[] {
   return uniqueRoleItems(normalized);
 }
 
+function isPromptRole(role: unknown): role is DocumentRole {
+  return Boolean(role && typeof role === 'object' && (role as { type?: unknown }).type === 'prompt');
+}
+
 function sanitizeRole(role: DocumentRole): DocumentRole {
-  const type = role.type === 'prompt' ? 'prompt' : 'file';
   return {
     id: safeId(role.id),
     name: role.name || '未命名角色',
     description: role.description || '',
-    type,
+    type: 'prompt',
     builtIn: Boolean(role.builtIn),
-    resourceId: type === 'prompt' ? role.resourceId || role.resourceIds?.[0] || undefined : undefined,
-    resourceIds: type === 'prompt' ? uniqueStrings(Array.isArray(role.resourceIds) && role.resourceIds.length > 0 ? role.resourceIds : role.resourceId ? [role.resourceId] : []) : [],
-    executionType: type === 'prompt' ? sanitizeExecutionType(role.executionType) : undefined,
-    processingType: type === 'file' ? sanitizeProcessingType(role.processingType) : undefined,
+    resourceId: role.resourceId || role.resourceIds?.[0] || undefined,
+    resourceIds: uniqueStrings(Array.isArray(role.resourceIds) && role.resourceIds.length > 0 ? role.resourceIds : role.resourceId ? [role.resourceId] : []),
+    executionType: sanitizeExecutionType(role.executionType),
   };
 }
 
@@ -79,7 +78,6 @@ function sanitizeConfig(config: ProjectRoleConfig): ProjectRoleConfig {
     name: config.name || '未命名配置',
     description: config.description || '',
     builtIn: Boolean(config.builtIn),
-    fileRoles: sanitizeRoleItems(config.fileRoles),
     promptRoles: sanitizeRoleItems(config.promptRoles),
   };
 }
@@ -89,9 +87,9 @@ function readStore(): RoleStore & { deletedRoleIds?: string[]; deletedConfigIds?
     const file = storePath();
     if (!fs.existsSync(file)) return { roles: [], configs: [], deletedRoleIds: [], deletedConfigIds: [] };
     const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as (Partial<RoleStore> & { deletedRoleIds?: string[]; deletedConfigIds?: string[] }) | DocumentRole[];
-    if (Array.isArray(raw)) return { roles: raw.map(sanitizeRole), configs: [], deletedRoleIds: [], deletedConfigIds: [] };
+    if (Array.isArray(raw)) return { roles: raw.filter(isPromptRole).map(sanitizeRole), configs: [], deletedRoleIds: [], deletedConfigIds: [] };
     return {
-      roles: Array.isArray(raw.roles) ? raw.roles.map(sanitizeRole) : [],
+      roles: Array.isArray(raw.roles) ? raw.roles.filter(isPromptRole).map(sanitizeRole) : [],
       configs: Array.isArray(raw.configs) ? raw.configs.map(sanitizeConfig) : [],
       deletedRoleIds: uniqueStrings(raw.deletedRoleIds || []),
       deletedConfigIds: uniqueStrings(raw.deletedConfigIds || []),
@@ -111,7 +109,7 @@ function writeStore(store: RoleStore & { deletedRoleIds?: string[]; deletedConfi
 }
 
 function configuredRoles() {
-  return readEngineeringDocumentConfig().roles.map(role => sanitizeRole({ ...role, builtIn: true }));
+  return readEngineeringDocumentConfig().roles.filter(isPromptRole).map(role => sanitizeRole({ ...role, builtIn: true }));
 }
 
 function configuredRoleConfigs() {
@@ -144,7 +142,6 @@ export function deleteDocumentRole(type: DocumentRoleType, id: string) {
   store.roles = store.roles.filter(item => !(item.id === id && item.type === type));
   store.configs = store.configs.map(config => ({
     ...config,
-    fileRoles: config.fileRoles.filter(item => !(type === 'file' && item.roleId === id)),
     promptRoles: config.promptRoles.filter(item => !(type === 'prompt' && item.roleId === id)),
   }));
   writeStore(store);
@@ -159,7 +156,6 @@ export function listProjectRoleConfigs(): ProjectRoleConfig[] {
   const configConfigs = configuredRoleConfigs().filter(config => !deletedConfigIds.has(config.id) && !customConfigIds.has(config.id));
   return [...configConfigs, ...customConfigs].map(config => ({
     ...config,
-    fileRoles: config.fileRoles.filter(item => !deletedRoleIds.has(`file:${item.roleId}`)),
     promptRoles: config.promptRoles.filter(item => !deletedRoleIds.has(`prompt:${item.roleId}`)),
   }));
 }
@@ -217,7 +213,7 @@ export function exportDocumentRolesPayload(input?: { roleIds?: string[]; configI
 
 export function importDocumentRolesPayload(payload: unknown): { importedRoles: number; importedConfigs: number } {
   const source = payload && typeof payload === 'object' ? payload as Partial<DocumentRolesExportFile> : {};
-  const rawRoles = Array.isArray(source.roles) ? source.roles : [];
+  const rawRoles = Array.isArray(source.roles) ? source.roles.filter(isPromptRole) : [];
   const rawConfigs = Array.isArray(source.configs) ? source.configs : [];
   if (rawRoles.length === 0 && rawConfigs.length === 0) throw new Error('没有可导入的角色配置');
 
@@ -242,7 +238,6 @@ export function importDocumentRolesPayload(payload: unknown): { importedRoles: n
       ...config,
       id,
       builtIn: false,
-      fileRoles: normalizeRoleItemsWithMap(config.fileRoles, roleIdMap).filter(item => allRoleIds.has(item.roleId)),
       promptRoles: normalizeRoleItemsWithMap(config.promptRoles, roleIdMap).filter(item => allRoleIds.has(item.roleId)),
     });
   });

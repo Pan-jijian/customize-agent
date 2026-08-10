@@ -13,7 +13,7 @@ function hashTemplate(template: DocumentTemplate, requirement = '') {
     outputTitle: template.outputTitle,
     chapters: template.chapters,
     promptBindings: template.promptBindings,
-    fileBindings: template.fileBindings,
+    projectBindings: template.projectBindings,
     projectRoleConfigId: template.projectRoleConfigId,
     requirement,
   })).digest('hex').slice(0, 12);

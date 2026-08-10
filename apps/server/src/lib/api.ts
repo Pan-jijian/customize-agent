@@ -335,18 +335,18 @@ export async function searchKb(query: string, opts?: { projectRoot?: string; cat
 
 export interface DocumentTemplateChapter { id: string; title: string; purpose: string; queries: string[]; requiredFacts: string[]; sections?: string[]; tableSections?: string[]; tableRequirements?: string[]; pinnedEvidenceFilePaths?: string[]; }
 export interface PromptBinding { promptId: string; roleId: string; }
-export interface FileBinding { filePath: string; roleId: string; }
+export interface ProjectBinding { materialRootPath: string; }
 export type PromptExecutionType = 'fact_extraction' | 'chapter_generation' | 'llm_review' | 'validation' | 'formatting' | 'reference';
-export type FileProcessingType = 'rule' | 'table' | 'drawing' | 'specification' | 'reference';
-export interface DocumentRole { id: string; name: string; description: string; type: 'file' | 'prompt'; resourceId?: string; resourceIds?: string[]; builtIn?: boolean; executionType?: PromptExecutionType; processingType?: FileProcessingType; }
+export type DocumentRoleType = 'prompt';
+export interface DocumentRole { id: string; name: string; description: string; type: DocumentRoleType; resourceId?: string; resourceIds?: string[]; builtIn?: boolean; executionType?: PromptExecutionType; }
 export interface ProjectRoleItem { roleId: string; order: number; }
-export interface ProjectRoleConfig { id: string; name: string; description: string; fileRoles: ProjectRoleItem[]; promptRoles: ProjectRoleItem[]; builtIn?: boolean; }
+export interface ProjectRoleConfig { id: string; name: string; description: string; promptRoles: ProjectRoleItem[]; builtIn?: boolean; }
 export interface DocumentExportSettings { page?: { paper?: string; marginTop?: string; marginRight?: string; marginBottom?: string; marginLeft?: string }; typography?: { fontFamily?: string; lineHeight?: string; titleSize?: string; bodySize?: string }; targetPages?: { min?: number; target?: number; max?: number }; }
 export interface DocumentGenerationSettings { targetPages?: { min?: number; target?: number; max?: number }; }
-export interface DocumentTemplate { id: string; name: string; description: string; category: string; outputTitle: string; chapters: DocumentTemplateChapter[]; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; projectRoleConfigId?: string; promptIds?: string[]; boundFilePaths?: string[]; promptBindings?: PromptBinding[]; fileBindings?: FileBinding[]; builtIn?: boolean; }
+export interface DocumentTemplate { id: string; name: string; description: string; category: string; outputTitle: string; chapters: DocumentTemplateChapter[]; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; projectRoleConfigId?: string; projectBindings?: ProjectBinding[]; promptIds?: string[]; promptBindings?: PromptBinding[]; builtIn?: boolean; }
 export interface ChapterReadinessDiagnostic { chapterId: string; title: string; requiredFacts: string[]; coveredFacts: string[]; missingFacts: string[]; requiredRoles: string[]; satisfiedRoles: string[]; evidenceCount: number; readinessRate: number; }
 export interface DocumentGenerationReadiness { ready: boolean; materialCoverageRate: number; roleSatisfactionRate: number; specCompletenessRate: number; missingRoles: string[]; weakRoles: string[]; diagnostics: string[]; chapterDiagnostics: ChapterReadinessDiagnostic[]; blockingIssues: string[]; warnings: string[]; }
-export interface DocumentTemplateValidation { templateId: string; projectRoleConfigId?: string; fileDiagnostics: Array<FileBinding & { roleName?: string; exists: boolean; indexed: boolean; chunkCount: number; vectorReady: boolean }>; promptDiagnostics: Array<PromptBinding & { roleName?: string; promptTitle?: string; promptSource?: 'custom' | 'file'; contentHash?: string; contentPreview?: string; exists: boolean; contentLength: number }>; readiness?: DocumentGenerationReadiness; issues: Array<{ level: 'error' | 'warning'; message: string }> }
+export interface DocumentTemplateValidation { templateId: string; projectRoleConfigId?: string; fileDiagnostics: Array<{ filePath: string; roleName?: string; exists: boolean; indexed: boolean; chunkCount: number; vectorReady: boolean }>; promptDiagnostics: Array<PromptBinding & { roleName?: string; promptTitle?: string; promptSource?: 'custom' | 'file'; contentHash?: string; contentPreview?: string; exists: boolean; contentLength: number }>; readiness?: DocumentGenerationReadiness; issues: Array<{ level: 'error' | 'warning'; message: string }> }
 export interface PromptProject { id: string; projectId: string; projectRoot?: string; projectName: string; customizePath: string; content: string; mtime: string; hasFile: boolean; isCurrent: boolean; selected: boolean; source: 'current' | 'project' | 'custom'; }
 export interface DocumentEvidence { chapterId: string; filePath: string; score: number; content: string; roleId?: string; processingType?: string; sectionTitle?: string; source?: string; }
 export interface DocumentDraftChapter { id: string; title: string; content: string; evidence: DocumentEvidence[]; missingFacts: string[]; sections?: string[]; }
@@ -365,11 +365,11 @@ export interface GeneratedDocumentDraft { templateId: string; templateName: stri
 export interface StoredDocumentDraft extends GeneratedDocumentDraft { id: string; updatedAt: number; }
 
 export async function getPromptProjects() { return fetchJson<PromptProject[]>('/api/prompt'); }
-export async function getDocumentRoles(type?: 'file' | 'prompt') { return fetchJson<{ roles: DocumentRole[]; configs: ProjectRoleConfig[] }>(`/api/documents/roles${type ? `?type=${type}` : ''}`); }
+export async function getDocumentRoles(type?: DocumentRoleType) { return fetchJson<{ roles: DocumentRole[]; configs: ProjectRoleConfig[] }>(`/api/documents/roles${type ? `?type=${type}` : ''}`); }
 export async function saveDocumentRole(role: DocumentRole) {
   return fetchJson<{ role: DocumentRole; roles: DocumentRole[]; configs: ProjectRoleConfig[] }>('/api/documents/roles', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(role) });
 }
-export async function deleteDocumentRole(type: 'file' | 'prompt', id: string) {
+export async function deleteDocumentRole(type: DocumentRoleType, id: string) {
   return fetchJson<{ success: boolean; roles: DocumentRole[]; configs: ProjectRoleConfig[] }>(`/api/documents/roles?type=${type}&id=${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 export async function saveProjectRoleConfig(config: ProjectRoleConfig) {

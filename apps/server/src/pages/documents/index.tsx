@@ -65,8 +65,7 @@ function templateIcon(category: string, isActive: boolean) {
   return <span style={{ color: isActive ? 'var(--colorAccent)' : 'var(--colorTextSecondary)', fontSize: 16, marginTop: 2, flexShrink: 0 }}>{icon}</span>;
 }
 
-type TemplateFileBinding = NonNullable<DocumentTemplate['fileBindings']>[number];
-type TemplateEditorForm = DocumentTemplate & { fileBindingGroups?: Record<string, string[]> };
+type TemplateEditorForm = DocumentTemplate & { projectMaterialRoots?: string[] };
 interface TemplateFileTreeNode {
   key: string;
   value: string;
@@ -81,12 +80,8 @@ interface TemplateFileTreeNode {
 function uniqueValues(values: string[]) {
   return [...new Set(values.map(value => value.trim()).filter(Boolean))];
 }
-function groupFileBindings(bindings: TemplateFileBinding[] = []) {
-  return bindings.reduce<Record<string, string[]>>((groups, binding) => {
-    if (!binding.roleId || !binding.filePath) return groups;
-    groups[binding.roleId] = uniqueValues([...(groups[binding.roleId] || []), binding.filePath]);
-    return groups;
-  }, {});
+function projectMaterialRoots(template: DocumentTemplate) {
+  return uniqueValues((template.projectBindings || []).map(binding => binding.materialRootPath).filter(Boolean));
 }
 
 function buildTemplateFileTree(nodes: TreeApiResponseNode[]): TemplateFileTreeNode[] {
@@ -127,7 +122,6 @@ export default function DocumentsPage() {
   const [prompts, setPrompts] = useState<PromptProject[]>([]);
   const [templateFileTree, setTemplateFileTree] = useState<TemplateFileTreeNode[]>([]);
   const [fileSearching, setFileSearching] = useState(false);
-  const [activeTemplateFileRoleId, setActiveTemplateFileRoleId] = useState<string>();
   const [pageLoading, setPageLoading] = useState(true);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState<GeneratedDocumentDraft | null>(null);
@@ -145,26 +139,7 @@ export default function DocumentsPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [templateValidations, setTemplateValidations] = useState<Record<string, DocumentTemplateValidation>>({});
-  const selectedProjectRoleConfigId = Form.useWatch('projectRoleConfigId', form);
-  const selectedProjectRoleConfig = useMemo(() => roleConfigs.find(config => config.id === selectedProjectRoleConfigId), [roleConfigs, selectedProjectRoleConfigId]);
-  const scopedFileRoleIds = useMemo(() => new Set((selectedProjectRoleConfig?.fileRoles || []).map(item => item.roleId)), [selectedProjectRoleConfig]);
-  const fileRoleOptions = useMemo(() => {
-    const fileRoles = roles.filter(role => role.type === 'file' && (!selectedProjectRoleConfigId || scopedFileRoleIds.has(role.id)));
-    return fileRoles.map(role => ({ label: role.name, value: role.id }));
-  }, [roles, scopedFileRoleIds, selectedProjectRoleConfigId]);
-  const selectedGroups = (Form.useWatch('fileBindingGroups', form) || {}) as Record<string, string[]>;
   const currentProjectRoot = useMemo(() => prompts.find(item => item.selected)?.projectRoot || prompts.find(item => item.isCurrent)?.projectRoot || prompts[0]?.projectRoot || '', [prompts]);
-  useEffect(() => {
-    if (!templateModalOpen || !selectedProjectRoleConfigId) return;
-    const groups = (form.getFieldValue('fileBindingGroups') || {}) as Record<string, string[]>;
-    const nextGroups = Object.fromEntries(Object.entries(groups).filter(([roleId]) => scopedFileRoleIds.has(roleId)));
-    if (Object.keys(nextGroups).length !== Object.keys(groups).length) form.setFieldValue('fileBindingGroups', nextGroups);
-  }, [form, scopedFileRoleIds, selectedProjectRoleConfigId, templateModalOpen]);
-  useEffect(() => {
-    if (!templateModalOpen) return;
-    if (fileRoleOptions.length === 0) { setActiveTemplateFileRoleId(undefined); return; }
-    if (!activeTemplateFileRoleId || !fileRoleOptions.some(option => option.value === activeTemplateFileRoleId)) setActiveTemplateFileRoleId(fileRoleOptions[0].value);
-  }, [activeTemplateFileRoleId, fileRoleOptions, templateModalOpen]);
   const [flowSteps, setFlowSteps] = useState<FlowStep[]>([]);
   const [activeFlowKey, setActiveFlowKey] = useState<string | null>(null);
   const [workflowRecord, setWorkflowRecord] = useState<GeneratedDocumentRecord | null>(null);
@@ -439,30 +414,23 @@ export default function DocumentsPage() {
   };
 
   const openEditor = (tpl?: DocumentTemplate) => {
-    const value = tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, chapters: [], fileBindings: [] };
+    const value = tpl ?? { id: `tpl-${Date.now()}`, name: '', description: '', category: '自定义', outputTitle: '', projectRoleConfigId: undefined, chapters: [], projectBindings: [] };
     form.resetFields();
-    form.setFieldsValue({ ...value, fileBindingGroups: groupFileBindings(value.fileBindings) });
-    const configFileRoleId = roleConfigs.find(config => config.id === value.projectRoleConfigId)?.fileRoles?.[0]?.roleId;
-    setActiveTemplateFileRoleId(configFileRoleId);
+    form.setFieldsValue({ ...value, projectMaterialRoots: projectMaterialRoots(value) });
     void loadTemplateFiles();
     setTemplateModalOpen(true);
   };
-  const updateTemplateFileBinding = (roleId: string, paths: string[]) => {
-    const groups = (form.getFieldValue('fileBindingGroups') || {}) as Record<string, string[]>;
-    form.setFieldValue('fileBindingGroups', { ...groups, [roleId]: uniqueValues(paths) });
+  const updateProjectMaterialRoots = (paths: string[]) => {
+    form.setFieldValue('projectMaterialRoots', uniqueValues(paths));
   };
 
   const saveTpl = async () => {
     try {
       await form.validateFields();
       const v = form.getFieldsValue(true) as TemplateEditorForm;
-      const allowedRoleIds = new Set((roleConfigs.find(config => config.id === v.projectRoleConfigId)?.fileRoles || []).map(item => item.roleId));
-      const groupValues = v.fileBindingGroups || {};
-      const fileBindings = Object.entries(groupValues)
-        .filter(([roleId]) => allowedRoleIds.size === 0 || allowedRoleIds.has(roleId))
-        .flatMap(([roleId, paths]) => uniqueValues(paths || []).map(filePath => ({ roleId, filePath })));
-      const { fileBindingGroups: _fileBindingGroups, ...templateValues } = v as TemplateEditorForm;
-      const template = { ...templateValues, chapters: [], fileBindings } as DocumentTemplate;
+      const projectBindings = uniqueValues(v.projectMaterialRoots || []).map(materialRootPath => ({ materialRootPath }));
+      const { projectMaterialRoots: _projectMaterialRoots, ...templateValues } = v;
+      const template = { ...templateValues, chapters: [], projectBindings } as DocumentTemplate;
       const r = await saveDocumentTemplate(template);
       setTemplates(r.templates); setTemplateId(r.template.id); setTemplateModalOpen(false); await loadDrafts(); message.success(t('common.success'));
     } catch (e) { if (e instanceof Error) message.error(e.message); }
@@ -481,7 +449,7 @@ export default function DocumentsPage() {
     setLeftTab('drafts');
     setLoading(true);
     setActiveFlowKey('prepare');
-    setFlowSteps([{ key: 'prepare', title: '正在准备运行模板', description: '正在校验模板绑定的文件角色、提示词角色和资料索引，校验通过后会自动开始生成。', status: 'process', icon: <LoadingOutlined />, subSteps: [{ key: 'validate', title: '模板运行前检查', status: 'process' }, { key: 'start', title: '准备生成任务', status: 'wait' }] }]);
+    setFlowSteps([{ key: 'prepare', title: '正在准备运行模板', description: '正在校验模板绑定的项目资料包、提示词配置和资料索引，校验通过后会自动开始生成。', status: 'process', icon: <LoadingOutlined />, subSteps: [{ key: 'validate', title: '模板运行前检查', status: 'process' }, { key: 'start', title: '准备生成任务', status: 'wait' }] }]);
     try {
       const { validation } = await validateDocumentTemplate(id, currentProjectRoot || undefined);
       setTemplateValidations(prev => ({ ...prev, [id]: validation }));
@@ -825,7 +793,7 @@ export default function DocumentsPage() {
                           <div className={`inline-flex items-center gap-2 p-1.5 px-3 rounded-lg border text-xs ${templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'border-red-200 bg-red-50/50' : templateValidations[item.id]!.issues.length ? 'border-yellow-200 bg-yellow-50/50' : 'border-green-200 bg-green-50/50'}`}>
                               <span className="font-medium">{templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? '检查未通过' : templateValidations[item.id]!.issues.length ? '存在警告' : '检查通过'}</span>
                               <span className="text-[var(--colorTextTertiary)]">|</span>
-                              <span>文件角色 {templateValidations[item.id]!.fileDiagnostics.length}</span>
+                              <span>项目资料 {templateValidations[item.id]!.fileDiagnostics.length}</span>
                               <span>提示词 {templateValidations[item.id]!.promptDiagnostics.length}</span>
                               {!templateValidations[item.id]!.issues.some(issue => issue.level === 'error') && templateValidations[item.id]!.issues.length > 0 && (
                                   <>
@@ -1141,49 +1109,29 @@ export default function DocumentsPage() {
           <div className="mb-6">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <Text strong className="text-base text-[var(--colorText)] block mb-1">项目文件绑定</Text>
-                <div className="text-xs text-[var(--colorTextSecondary)]">每个文件角色可直接从下拉树形列表中多选文件或文件夹。</div>
+                <Text strong className="text-base text-[var(--colorText)] block mb-1">项目资料包绑定</Text>
+                <div className="text-xs text-[var(--colorTextSecondary)]">直接选择整个项目文件夹，系统会自动识别招标正文、清单、图纸、补疑等资料类型。</div>
               </div>
-              <Tag color="blue" className="border-0">按文件角色多选</Tag>
+              <Tag color="blue" className="border-0">按项目资料包</Tag>
             </div>
             
-            {fileSearching ? <div className="text-center py-8"><Spin /><div className="mt-3 text-[var(--colorTextSecondary)] text-xs">正在加载知识库文件…</div></div> : fileRoleOptions.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={selectedProjectRoleConfigId ? '当前项目角色未配置文件角色' : '请先选择项目角色'} /> : templateFileTree.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无知识库文件" /> : (
-              <div className="flex flex-col gap-4">
-                {fileRoleOptions.map(option => {
-                  const activeRoleId = option.value;
-                  const checkedPaths = activeRoleId ? uniqueValues(selectedGroups[activeRoleId] || []) : [];
-                  
-                  return (
-                    <div key={option.value} className="flex flex-col gap-2">
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium text-sm text-[var(--colorText)]">{option.label}</span>
-                        <Button type="link" size="small" danger disabled={checkedPaths.length === 0} onClick={() => updateTemplateFileBinding(activeRoleId, [])} className="p-0 h-auto">清空</Button>
-                      </div>
-                      
-                      <Form.Item name={['fileBindingGroups', activeRoleId]} hidden><Input /></Form.Item>
-                      
-                      <TreeSelect
-                        treeData={templateFileTree}
-                        loadData={onLoadData}
-                        fieldNames={{ label: 'rawTitle', value: 'value', children: 'children' }}
-                        value={checkedPaths}
-                        onChange={(value: string[]) => {
-                          const selectedPaths = value.map(item => String(item));
-                          updateTemplateFileBinding(activeRoleId, selectedPaths);
-                        }}
-                        treeCheckable={true}
-                        showCheckedStrategy={TreeSelect.SHOW_PARENT}
-                        placeholder="点击这里搜索或选择文件..."
-                        style={{ width: '100%' }}
-                        listHeight={300}
-                        showSearch
-                        maxTagCount="responsive"
-                        size="large"
-                      />
-                    </div>
-                  );
-                })}
-              </div>
+            {fileSearching ? <div className="text-center py-8"><Spin /><div className="mt-3 text-[var(--colorTextSecondary)] text-xs">正在加载知识库文件…</div></div> : templateFileTree.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无知识库文件" /> : (
+              <Form.Item name="projectMaterialRoots" rules={[{ required: true, message: '请选择项目资料包' }]}> 
+                <TreeSelect
+                  treeData={templateFileTree}
+                  loadData={onLoadData}
+                  fieldNames={{ label: 'rawTitle', value: 'value', children: 'children' }}
+                  onChange={(value: string[]) => updateProjectMaterialRoots(value.map(item => String(item)))}
+                  treeCheckable={true}
+                  showCheckedStrategy={TreeSelect.SHOW_PARENT}
+                  placeholder="点击这里选择项目文件夹..."
+                  style={{ width: '100%' }}
+                  listHeight={360}
+                  showSearch
+                  maxTagCount="responsive"
+                  size="large"
+                />
+              </Form.Item>
             )}
           </div>
         </Form>
