@@ -1,5 +1,11 @@
 # @customize-agent/knowledge
 
+## 4.0.42
+
+### Patch Changes
+
+- 批量发布所有包的 patch 版本
+
 ## 4.0.36
 
 ### Patch Changes

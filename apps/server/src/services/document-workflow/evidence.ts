@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplateChapter, EvidenceBundle, ResourceEvidence } from './types';
 import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
 import { evidenceMatchesFact } from './factMatching';
+import { selectByScore, textImportanceScore } from './selection';
 
 export function readableSourceLabel(item: Pick<DocumentEvidence, 'roleId' | 'processingType' | 'sectionTitle'>, index = 0) {
   const role = item.processingType === 'drawing' || item.roleId?.includes('drawing') ? '视觉资料'
@@ -49,7 +50,13 @@ function extractParameterLines(content: string) {
     const hasContext = /项目|工程|工期|合同|估算|价格|地点|规模|清单|图纸|设计|规格|型号|数量|单位|材料|设备|管|线|电缆|混凝土|钢筋|砌体|门窗|防水|标准|规范|验收|做法|参数|尺寸|标高|厚度|强度|等级|系统|安装/u.test(line);
     return isProjectBasicValue || hasParameter || (hasContext && /\d/u.test(line) && line.length <= 260);
   });
-  return [...new Set(parameterLines)].slice(0, 80).join('\n');
+  // 用评分选择最重要的参数行（而非硬截断前 80 行）
+  const uniqueLines = [...new Set(parameterLines)];
+  const selected = selectByScore(uniqueLines, l => textImportanceScore(l), { maxItems: 100, maxChars: 12000 }, 'parameter-lines');
+  if (selected.dropped.length > 0) {
+    console.log(`[evidence] 参数行：${uniqueLines.length} → 选择 ${selected.selected.length}，丢弃 ${selected.dropped.length}`);
+  }
+  return selected.selected.join('\n');
 }
 
 export function sanitizeEvidenceContent(filePath: string, content: string) {
@@ -103,6 +110,83 @@ export function uniqueEvidence(items: DocumentEvidence[], limit?: number, diagno
     diagnostics.evidence.avgFactDensity = scored.length ? Number((totalDensity / scored.length).toFixed(3)) : 0;
   }
   return selected.map(entry => entry.item);
+}
+
+// evidenceDedupeKey 仅在模块内部使用，不对外导出
+
+/** 证据声明结果 */
+export type EvidenceClaimResult = 'new' | 'claimed-by-other-chapter' | 'duplicate-in-chapter';
+
+/** 排除源（固定/绑定/需求事实/多模态证据）在跨章节去重中保持豁免 */
+export function isExemptEvidenceSource(item: DocumentEvidence): boolean {
+  return item.source === 'pinned-evidence' || item.source === 'bound-file' || item.source === 'required-fact-evidence' || item.source === 'multimodal';
+}
+
+/** 跨章节证据声明注册表，用于去重和复用追踪 */
+export class EvidenceClaimRegistry {
+  private claims = new Map<string, { chapterIds: Set<string>; item: DocumentEvidence }>();
+
+  claim(item: DocumentEvidence, chapterId: string): EvidenceClaimResult {
+    const key = evidenceDedupeKey(item);
+    const existing = this.claims.get(key);
+    if (!existing) {
+      this.claims.set(key, { chapterIds: new Set([chapterId]), item });
+      return 'new';
+    }
+    existing.chapterIds.add(chapterId);
+    if (existing.chapterIds.has(chapterId) && existing.chapterIds.size === 1) return 'duplicate-in-chapter';
+    return isExemptEvidenceSource(item) ? 'new' : 'claimed-by-other-chapter';
+  }
+
+  /** 返回被多个章节复用的证据条目 */
+  duplicateItems(): Array<{ key: string; filePath: string; chapterIds: string[]; count: number }> {
+    return [...this.claims.entries()]
+      .filter(([, entry]) => entry.chapterIds.size > 1)
+      .map(([key, entry]) => ({ key, filePath: entry.item.filePath, chapterIds: [...entry.chapterIds], count: entry.chapterIds.size }))
+      .sort((a, b) => b.count - a.count);
+  }
+}
+
+/** 在章节证据中加入跨章节去重过滤，安全底限 minRemaining 防止证据不足 */
+export function dedupeChapterEvidence(
+  evidence: DocumentEvidence[],
+  chapterId: string,
+  registry: EvidenceClaimRegistry,
+  opts?: { minRemaining?: number },
+): DocumentEvidence[] {
+  const minRemaining = opts?.minRemaining ?? 8;
+  const sorted = [...evidence].sort((a, b) => b.score - a.score);
+  const kept: DocumentEvidence[] = [];
+  const dropped: DocumentEvidence[] = [];
+  for (const item of sorted) {
+    const result = registry.claim(item, chapterId);
+    if (result === 'claimed-by-other-chapter') {
+      dropped.push(item);
+    } else {
+      kept.push(item);
+    }
+  }
+  // 安全底限：如果去重后证据太少，从被丢弃的高分条目中补齐
+  if (kept.length < minRemaining && dropped.length > 0) {
+    const needed = minRemaining - kept.length;
+    kept.push(...dropped.slice(0, needed));
+  }
+  return kept;
+}
+
+/** 全局证据去重：对全量证据按内容 key 保留最高分 */
+export function dedupeGlobalEvidence(evidence: DocumentEvidence[]): DocumentEvidence[] {
+  const best = new Map<string, DocumentEvidence>();
+  for (const item of evidence) {
+    if (isExemptEvidenceSource(item)) {
+      best.set(`${evidenceDedupeKey(item)}:${item.chapterId}`, item);
+      continue;
+    }
+    const key = evidenceDedupeKey(item);
+    const existing = best.get(key);
+    if (!existing || item.score > existing.score) best.set(key, item);
+  }
+  return [...best.values()].sort((a, b) => b.score - a.score);
 }
 
 export function selectEvidenceByBudget(items: DocumentEvidence[], options: { maxItems?: number; maxChars?: number; preservePinned?: boolean } = {}, diagnostics?: DocumentGenerationDiagnostics): DocumentEvidence[] {

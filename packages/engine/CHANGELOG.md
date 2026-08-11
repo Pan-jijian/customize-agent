@@ -1,5 +1,15 @@
 # @customize-agent/engine
 
+## 3.0.9
+
+### Patch Changes
+
+- 批量发布所有包的 patch 版本
+- Updated dependencies
+  - @customize-agent/llm@3.0.13
+  - @customize-agent/tools@3.0.20
+  - @customize-agent/types@3.0.9
+
 ## 3.0.4
 
 ### Patch Changes

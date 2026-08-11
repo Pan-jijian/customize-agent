@@ -1,5 +1,11 @@
 # @customize-agent/types
 
+## 3.0.9
+
+### Patch Changes
+
+- 批量发布所有包的 patch 版本
+
 ## 3.0.4
 
 ### Patch Changes

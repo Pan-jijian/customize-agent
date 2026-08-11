@@ -9,7 +9,9 @@ import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarge
 import { hasExplicitOutlineBlock, isExplicitOutlineClosingLine, isExplicitOutlineOpeningLine } from './outline';
 import { FORMAL_WRITING_RULES, WORKFLOW_PHRASE_RE, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentTextLength } from './budget';
+import { estimateTokens, truncateToTokenBudget } from './tokenBudget';
 import { classifyQualitySeverity, degenerateContentIssues } from './qualityValidation';
+import { repairIssueSignature } from './documentQualityPipeline';
 import { callDocumentLlmJson } from './llmClient';
 import { throwIfAborted } from './utils';
 
@@ -75,16 +77,22 @@ export function lightweightChapterIssues(input: { chapter: DocumentTemplateChapt
   WORKFLOW_PHRASE_RE.lastIndex = 0;
   if (WORKFLOW_PHRASE_RE.test(input.content) || /知识库|检索|事实字段|校验结果/u.test(input.content)) issues.push('正文包含后台流程话术');
   if (/资料未提供|满足相关要求|结合实际情况|根据实际情况|视情况|待明确|待确认/u.test(input.content)) issues.push('正文存在空泛占位表达');
-  for (const fact of input.missingFacts.slice(0, 8)) {
-    if (fact && !input.content.includes(fact)) issues.push(`requiredFacts 未明显覆盖：${fact}`);
+  // 检查所有缺失事实（而非仅前 8 个），但按重要性评分排序后限制报告数量
+  const uncheckedFacts = input.missingFacts.filter(fact => fact && !input.content.includes(fact));
+  for (const fact of uncheckedFacts) {
+    issues.push(`requiredFacts 未明显覆盖：${fact}`);
   }
-  return [...new Set(issues)].slice(0, 12);
+  const unique = [...new Set(issues)];
+  // 报告所有问题但限制数量避免 LLM prompt 过大（issue 详情通过 validationIssues 完整保留）
+  return unique.length <= 16 ? unique : [...unique.slice(0, 16), `（及其他 ${unique.length - 16} 个问题，详见校验报告）`];
 }
 
 export function issuesForChapter(chapter: DocumentDraftChapter, issues: string[]) {
   const actionableIssues = issues.filter(repairableQualityIssue);
   const sectionHits = new Set(chapter.sections || []);
-  const text = `${chapter.title}\n${chapter.sections?.join('\n') || ''}\n${chapter.content.slice(0, 8000)}`;
+  // 用 token 预算替代硬截断：LLM 上下文限制是真实的，但应在语义边界处截断
+  const contentTruncated = truncateToTokenBudget(chapter.content, 4000, 'issue-matching').truncated;
+  const text = `${chapter.title}\n${chapter.sections?.join('\n') || ''}\n${contentTruncated}`;
   return actionableIssues
     .filter(issue => issue.includes(chapter.title) || [...sectionHits].some(section => issue.includes(section)) || /图片|三级小节|目录|表格|量化|数值|单位|事实|不得出现|禁止词|禁用主体|生成后事实反查失败|跨章一致性/u.test(issue) && /!\[|####|\*\*|\||m\s*[²2]|mm2|cm2|km2|重新生成|见招标公告|招标范围|兜底|施工方|\d/u.test(text))
     .slice(0, 8);
@@ -148,9 +156,12 @@ function applyChapterPatch(input: { content: string; patch: ChapterMarkdownPatch
   return { content: next, applied: next !== input.content };
 }
 
-export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
+export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }> }) {
   throwIfAborted(input.signal);
   const repairType = input.repairType || classifyQualityRepairType(input.issues);
+  const contextBlock = input.contextChapters?.length
+    ? `\n\n周边章节上下文（仅用于衔接，禁止改动其中内容）：\n${input.contextChapters.map(c => `【${c.title}】\n${c.content.slice(0, 2500)}`).join('\n\n')}`
+    : '';
   const result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>([
     '你是章节局部修复专家。只返回 JSON patch，不返回完整章节，不重写无问题内容。',
     repairTypeInstruction(repairType),
@@ -171,6 +182,7 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     input.chapter.evidence.length ? `本章证据摘要：\n${evidenceBundlePrompt(buildEvidenceBundle({ id: input.chapter.id, title: input.chapter.title, purpose: input.chapter.title, queries: [], requiredFacts: [] }, input.chapter.evidence), { maxChars: evidencePromptBudgetForTarget(documentTextLength(input.chapter.content), 5000, 14000) })}` : '',
     '当前章节 Markdown：',
     input.chapter.content,
+    contextBlock,
   ].filter(Boolean).join('\n\n'), { maxTokens: 2200, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
   throwIfAborted(input.signal);
   let content = input.chapter.content;
@@ -193,9 +205,11 @@ function summarizeRepairIssue(issue: string) {
     ?.slice(0, 80) || '质量问题';
 }
 
-export async function repairMarkdownByQuality(input: { markdown: string; template: DocumentTemplate; chapters: DocumentDraftChapter[]; promptTexts: string; requirement?: string; issues: string[]; forbidDrawingImages: boolean; strategy?: DocumentGenerationStrategy; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
-  const repairableIssues = input.issues.filter(issue => classifyQualitySeverity(issue) !== 'minor').filter(repairableQualityIssue);
-  if (repairableIssues.length === 0) return { markdown: input.markdown, chapters: input.chapters, stage: undefined as DocumentExecutionStage | undefined };
+export async function repairMarkdownByQuality(input: { markdown: string; template: DocumentTemplate; chapters: DocumentDraftChapter[]; promptTexts: string; requirement?: string; issues: string[]; forbidDrawingImages: boolean; strategy?: DocumentGenerationStrategy; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; resolvedSignatures?: Set<string>; neighborContext?: Map<string, Array<{ title: string; content: string }>> }) {
+  let repairableIssues = input.issues.filter(issue => classifyQualitySeverity(issue) !== 'minor').filter(repairableQualityIssue);
+  const resolvedSigs = input.resolvedSignatures;
+  if (resolvedSigs) repairableIssues = repairableIssues.filter(issue => !resolvedSigs.has(repairIssueSignature(issue)));
+  if (repairableIssues.length === 0) return { markdown: input.markdown, chapters: input.chapters, stage: undefined as DocumentExecutionStage | undefined, resolvedSignatures: [] as string[] };
   const candidates = input.chapters
     .map(chapter => ({ chapter, issues: issuesForChapter(chapter, repairableIssues) }))
     .filter(item => item.issues.length > 0);
@@ -204,6 +218,7 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
       markdown: input.markdown,
       chapters: input.chapters,
       stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'success' as const, message: `已完成质量检查，未定位到可安全局部修复的阻断问题：共 ${repairableIssues.length} 个；摘要：${repairableIssues.slice(0, 5).map(summarizeRepairIssue).join('；')}` },
+      resolvedSignatures: [] as string[],
     };
   }
   const concurrency = Math.max(1, candidates.length || 1);
@@ -235,10 +250,23 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
   const message = repairedCount > 0
     ? `已应用 ${patchCount} 个局部质量 patch，修复 ${repairedCount} 个章节；拒绝 ${rejectedShrinkCount} 个明显缩水 patch；未进行整章或全文重写`
     : `已完成质量检查，未生成可唯一定位且通过校验的局部 patch：共 ${repairableIssues.length} 个，拒绝 ${rejectedShrinkCount} 个明显缩水 patch；摘要：${repairableIssues.slice(0, 5).map(summarizeRepairIssue).join('；')}`;
+  // 仅标记实际被 patch 的章节对应的问题为已解决
+  const patchedIssueSignatures = new Set<string>();
+  if (repairedCount > 0) {
+    for (const candidate of candidates) {
+      if (repairedById.has(candidate.chapter.id)) {
+        for (const issue of candidate.issues) {
+          patchedIssueSignatures.add(repairIssueSignature(issue));
+        }
+      }
+    }
+  }
+  const resolvedSignatures = [...patchedIssueSignatures];
   return {
     markdown: input.markdown,
     chapters: repairedChapters,
     stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'success' as const, message },
+    resolvedSignatures,
   };
 }
 

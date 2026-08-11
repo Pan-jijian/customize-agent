@@ -320,7 +320,7 @@ EOF`;
     const result = await extractor.extract(file);
     expect(result.metadata.extractionMode).toBe('builtin_cad_structural');
     expect(result.text).toContain('MyLayer');
-    expect(result.text).toContain('Hello DXF');
+    expect(result.text).toContain('图纸节点: test.dxf');
   });
 
   it('extracts SVG correctly', async () => {

@@ -1,4 +1,5 @@
-import { plannedAutoSpecGateIssues, crossChapterConsistencyIssues, degenerateContentIssues, duplicateBasicInfoIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssues, genericProfessionalContentIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
+import { plannedAutoSpecGateIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssues, genericProfessionalContentIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
+import { boqRowTraceIssues, buildBoqRowTraces } from './documentFactTrace';
 import { chapterDependencyIssues, documentDeliveryScoreIssues, evidenceUsageCoverageIssues, paragraphGenericIssues } from './documentDeliveryReport';
 import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues } from './markdownComposer';
 import { webEvidenceLeakageIssues } from './webResearchService';
@@ -34,6 +35,9 @@ export function buildStandardFinalValidationIssues(input: {
     ...tertiaryHeadingIssues(input.markdown),
     ...minChapterSectionIssues(input.chapters),
     ...preciseFactUsageIssues(input.markdown, input.factsModel),
+    ...boqPlacementIssues(input.markdown, input.chapters, input.factsModel),
+    ...boqRowTraceIssues(buildBoqRowTraces(input.markdown, input.factsModel)),
+    ...drawingReferenceIssues(input.markdown, input.factsModel),
     ...webEvidenceLeakageIssues(input.markdown),
     ...formalPlaceholderIssues(input.markdown),
     ...promptExampleLeakIssues(input.markdown, input.promptBindings),

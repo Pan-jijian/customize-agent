@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { chapterSectionFactUsageIssues, normalizePlannedSections } from '../src/services/document-workflow/chapterGeneration';
+import { chapterSectionFactUsageIssues } from '../src/services/document-workflow/chapterGeneration';
+import { normalizePlannedSections } from '../src/services/document-workflow/promptRuleExtraction';
 import { composeDocumentMarkdown, ensureFormalToc, finalizeDocumentMarkdown, inferChapterSectionsFromMarkdown, normalizeTertiaryHeadings, promptDocumentRuleIssues, sanitizeFormalMarkdown } from '../src/services/document-workflow/markdownComposer';
 import { collectSectionContentGaps, instructionLikeHeadingIssues, sectionContentIntegrityIssues, tocBodyConsistencyIssues } from '../src/services/document-workflow/qualityValidation';
 
@@ -309,9 +310,9 @@ describe('formal markdown structure', () => {
     const chapter = { id: 'c1', title: '施工部署', purpose: '', queries: [], requiredFacts: [], sections: ['工程概况'] };
     const evidence = [{ filePath: '/tmp/招标文件.md', content: '建设地点：黄山市屯溪区。\n计划工期：180日历天。\n质量标准：一次性验收合格。', score: 1 }];
     const looseContent = '## 施工部署\n\n### 工程概况\n\n本工程应结合现场情况组织施工，强化质量、安全和进度管理。';
-    const factualContent = '## 施工部署\n\n### 工程概况\n\n本工程建设地点为黄山市屯溪区，计划工期为180日历天，质量标准为一次性验收合格。项目组织应围绕该地点条件、工期节点和质量目标配置资源。';
+    const factualContent = '## 施工部署\n\n### 工程概况\n\n本工程建设地点为黄山市屯溪区，计划工期为180日历天，质量标准为一次性验收合格。项目组织应围绕该地点条件、工期节点和质量目标配置资源。工程总建筑面积约4645平方米，包括综合楼、厂房及配套设施。施工内容涵盖地基基础、主体结构、装饰装修、机电安装等分部工程，需编制详细的施工组织设计和专项施工方案。同时做好现场临时设施的搭设和施工机具的调配工作，合理安排施工顺序和劳动力计划，确保各工序衔接顺畅。';
 
-    expect(chapterSectionFactUsageIssues({ chapter, content: looseContent, evidence }).join('\n')).toContain('资料事实落位不足');
+    expect(chapterSectionFactUsageIssues({ chapter, content: looseContent, evidence }).join('\n')).toContain('小节正文过短，需补写专业做法和证据依据');
     expect(chapterSectionFactUsageIssues({ chapter, content: factualContent, evidence })).toHaveLength(0);
   });
 

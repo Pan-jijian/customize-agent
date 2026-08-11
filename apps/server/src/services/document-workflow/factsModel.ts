@@ -104,7 +104,9 @@ export async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTe
   const maxItems = Math.max(8, Math.floor(Number(process.env.DOCUMENT_FACT_EXTRACTION_MAX_ITEMS ?? 48)));
   let chars = 0;
   const sampleParts: string[] = [];
-  for (const item of evidence.slice(0, maxItems)) {
+  // 按分数排序取最重要的证据（而非前 maxItems 个）
+  const topEvidence = [...evidence].sort((a, b) => b.score - a.score).slice(0, maxItems);
+  for (const item of topEvidence) {
     const content = stringifyFactValue(item.content).replace(/\s+/gu, ' ').slice(0, Math.max(800, Math.floor(maxChars / maxItems)));
     const part = `文件:${item.filePath}\n角色:${item.roleId || ''}\n处理:${item.processingType || ''}\n内容:${content}`;
     if (sampleParts.length > 0 && chars + part.length > maxChars) break;
@@ -226,7 +228,7 @@ export function isValidProjectBasicFactValue(fieldId: string | undefined, rawVal
   if (/签章|盖章|联系人|联系电话|电话|邮箱|解密|开标|评标|保证金|交易系统|空白|填写|上传|下载|递交/u.test(value)) return false;
   if (fieldId === 'schedule_requirement') return value.length <= 90 && /\d+(?:\.\d+)?\s*(?:日历天|天|个月|月|年)/u.test(value);
   if (fieldId === 'quality_standard') return value.length <= 40 && /合格|优良|一次性验收|国家.*验收|达到/u.test(value) && !/工期|投标|技术标准/u.test(value);
-  if (fieldId === 'owner') return value.length <= 80 && !/将报|监督管理部门|投标人|中标/u.test(value);
+  if (fieldId === 'owner') return value.length >= 4 && value.length <= 80 && /公司|局|委员会|中心|处|院|所|校|集团|有限|股份|责任|管理/u.test(value) && !/将报|监督管理部门|投标人|中标|负责解释|见招标|详见|空白|填写/u.test(value);
   if (fieldId === 'project_location') return value.length <= 120 && !/见招标公告|详见|投标/u.test(value);
   if (fieldId === 'project_code') return /^[A-Za-z0-9\-_.（）()]+$/u.test(value);
   if (fieldId === 'project_investment_estimate') return value.length <= 100 && /\d+(?:\.\d+)?\s*(?:万元|元)/u.test(value);

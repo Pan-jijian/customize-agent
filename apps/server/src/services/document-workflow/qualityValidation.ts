@@ -519,7 +519,9 @@ function generatedFactTokenClass(token: string, context: string): 'hard' | 'soft
   if (/总工期|计划工期|合同工期|日历天/u.test(normalized)) return 'hard';
   if (/最高投标限价|招标控制价|合同估算价|投资估算|报价|金额|万元|元/u.test(normalized)) return 'hard';
   if (/(?:工程量|清单|建设规模|建筑面积|长度|材料|设备|规格|型号).{0,24}(?:m²|㎡|m3|m³|米|吨|套|台|个|项|%)/u.test(normalized)) return 'hard';
-  if (/标准|规范|编号|GB|JGJ|CJJ|DB\d+/u.test(normalized)) return 'hard';
+  // 国家标准/行业标准编号是通用引用，不是项目特有事实，降级为 soft
+  if (/GB\s*\d|JGJ\s*\d|CJJ\s*\d|ISO\s*\d|GB\/T|CECS\s*\d|DL\s*\d|YB\s*\d|SH\s*\d|SJ\/T\s*\d|CJJ\/T\s*\d/u.test(normalized)) return 'soft';
+  if (/标准|规范|编号/u.test(normalized)) return 'hard';
   return 'soft';
 }
 
@@ -633,6 +635,95 @@ export function preciseFactUsageIssues(markdown: string, factsModel: DocumentFac
   if (tokens.length >= PRECISE_FACT_MIN_TOKEN_COUNT && used / tokens.length < PRECISE_FACT_MIN_USAGE_RATE) issues.push({ level: 'warning', message: `可靠精确参数使用不足：${used}/${tokens.length}`, suggestion: '请将资料中可靠的规格、参数、数量、时间、比例和标准编号写入对应章节；商务金额、单价、税率、预留金不得写入正文。' });
   if (factsModel.bills.length > 0 && !STRUCTURED_DATA_CONTENT_RE.test(markdown)) issues.push({ level: 'error', message: '正文未体现结构化数据资料', suggestion: '请从表格、列表或明细中提取对象、单位、数量、规格和关键参数补入对应章节。' });
   if (factsModel.drawings.length > 0 && !SPECIFICATION_CONTENT_RE.test(markdown)) issues.push({ level: 'error', message: '正文未体现设计/方案/说明类资料', suggestion: '请从设计、方案或说明资料中提取对象、流程、节点、做法、配置、规则和标准要求。' });
+  return issues;
+}
+
+/** 清单落位校验：逐行检查 BOQ 表格中的清单项是否在正文中落位 */
+export function boqPlacementIssues(markdown: string, chapters: DocumentDraftChapter[], factsModel: DocumentFactsModel): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const tables = factsModel.tables || [];
+  if (tables.length === 0) return issues;
+
+  const normalizedMarkdown = markdown.replace(/\s+/gu, '').toLowerCase();
+  let totalRows = 0;
+  let placedRows = 0;
+  const unplacedSamples: string[] = [];
+
+  for (const table of tables) {
+    const headers = table.headers.map(h => h.replace(/\s+/gu, '').toLowerCase());
+    const nameCol = headers.findIndex(h => /项目名称|^名称$|清单项|分部分项|项目特征/u.test(h));
+    const codeCol = headers.findIndex(h => /项目编码|编码|编号/u.test(h)); // 不含"序号"，避免序列号误匹配
+    const qtyCol = headers.findIndex(h => /^工程量$|^数量$/u.test(h)); // 不含"单位"，避免单位列误读为数量
+
+    for (const row of table.rows) {
+      totalRows += 1;
+      const itemName = nameCol >= 0 ? (row[nameCol] || '').replace(/\s+/gu, '') : '';
+      const itemCode = codeCol >= 0 ? (row[codeCol] || '').replace(/\s+/gu, '') : '';
+      const quantity = qtyCol >= 0 ? (row[qtyCol] || '').replace(/\s+/gu, '') : '';
+
+      // 检查清单项名称或编码是否在正文中出现（统一使用 16 字符前缀匹配）
+      const namePrefix = itemName.length >= 3 ? itemName.slice(0, Math.min(itemName.length, 16)) : '';
+      const codePrefix = itemCode.length >= 3 ? itemCode.slice(0, Math.min(itemCode.length, 12)) : '';
+      const namePlaced = namePrefix && normalizedMarkdown.includes(namePrefix);
+      const codePlaced = codePrefix && normalizedMarkdown.includes(codePrefix);
+
+      if (namePlaced || codePlaced) {
+        placedRows += 1;
+      } else if (itemName.length >= 3) {
+        unplacedSamples.push(`${itemName.slice(0, 40)}${quantity ? ` ${quantity}` : ''}（未落位）`);
+      }
+    }
+  }
+
+  if (totalRows > 0) {
+    const rate = placedRows / totalRows;
+    const unplacedSummary = unplacedSamples.length > 0
+      ? `未落位项（共${unplacedSamples.length}项）：${unplacedSamples.slice(0, 12).join('；')}${unplacedSamples.length > 12 ? ` 及其他${unplacedSamples.length - 12}项` : ''}`
+      : '';
+    if (rate < 0.3) {
+      issues.push({ level: 'error', message: `清单项落位严重不足：${placedRows}/${totalRows} 项（${Math.round(rate * 100)}%），将触发质量修复`, suggestion: `请将清单中的工程内容、项目特征和数量写入对应章节正文。${unplacedSummary}` });
+    } else if (rate < 0.6) {
+      issues.push({ level: 'warning', message: `清单项落位不足：${placedRows}/${totalRows} 项（${Math.round(rate * 100)}%）`, suggestion: `建议补充落位以下清单项：${unplacedSummary}` });
+    }
+  }
+
+  return issues;
+}
+
+/** 图纸引用校验：检查图纸/设计资料是否在正文中被引用 */
+export function drawingReferenceIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const drawings = factsModel.drawings || [];
+  if (drawings.length === 0) return issues;
+
+  const normalizedMarkdown = markdown.replace(/\s+/gu, '').toLowerCase();
+  const drawingSourceFiles = [...new Set(drawings.map(d => d.sourceFile || '').filter(Boolean))];
+  let referencedFiles = 0;
+  const unreferencedFiles: string[] = [];
+
+  for (const file of drawingSourceFiles) {
+    const baseName = file.replace(/\.[^.]+$/u, '').replace(/[/\\]/gu, '').toLowerCase();
+    const displayName = file.split('/').pop() || file;
+    // 短文件名（< 3 字符）不参与精确匹配，改为检查是否包含图纸关键词
+    const matched = baseName.length >= 3
+      ? normalizedMarkdown.includes(baseName.slice(0, Math.min(baseName.length, 12)))
+      : /图纸|设计|说明|节点|做法|构造/u.test(normalizedMarkdown);
+    if (matched) {
+      referencedFiles += 1;
+    } else {
+      unreferencedFiles.push(displayName);
+    }
+  }
+
+  if (drawingSourceFiles.length > 0) {
+    const rate = referencedFiles / drawingSourceFiles.length;
+    if (rate < 0.25) {
+      issues.push({ level: 'error', message: `图纸引用严重不足：${referencedFiles}/${drawingSourceFiles.length} 份图纸被正文引用（${Math.round(rate * 100)}%）`, suggestion: `请将图纸中的设计说明、构造做法、材料规格和设备参数写入对应章节。未引用图纸：${unreferencedFiles.slice(0, 5).join('、')}` });
+    } else if (rate < 0.5) {
+      issues.push({ level: 'warning', message: `图纸引用不足：${referencedFiles}/${drawingSourceFiles.length} 份（${Math.round(rate * 100)}%）`, suggestion: `建议补充引用：${unreferencedFiles.slice(0, 5).join('、')}` });
+    }
+  }
+
   return issues;
 }
 

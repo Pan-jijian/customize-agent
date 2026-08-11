@@ -1,5 +1,11 @@
 # @customize-agent/memory
 
+## 3.0.13
+
+### Patch Changes
+
+- 批量发布所有包的 patch 版本
+
 ## 3.0.9
 
 ### Patch Changes

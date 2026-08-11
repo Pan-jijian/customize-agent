@@ -94,10 +94,12 @@ export function JobStatus() {
   const [mounted, setMounted] = useState(false);
   const failureCountRef = useRef(0);
   const timerRef = useRef<number | null>(null);
+  const jobsRef = useRef<KbOperationRecord[]>([]);
 
   const loadJobs = async () => {
     const result = await getJobs({ limit: 50 });
     failureCountRef.current = 0;
+    jobsRef.current = result.jobs || [];
     setJobs(result.jobs || []);
   };
 
@@ -115,7 +117,8 @@ export function JobStatus() {
     const poll = async () => {
       try {
         await loadJobs();
-        if (!disposed) schedule(2000);
+        const hasActive = jobsRef.current.some(job => job.status === 'processing');
+        if (!disposed) schedule(hasActive ? 2000 : 30000);
       } catch {
         failureCountRef.current += 1;
         const delay = Math.min(30000, 2000 * 2 ** Math.min(4, failureCountRef.current));

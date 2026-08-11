@@ -1,5 +1,20 @@
 # customize-agent
 
+## 4.0.90
+
+### Patch Changes
+
+- 批量发布所有包的 patch 版本
+- Updated dependencies
+  - @customize-agent/engine@3.0.9
+  - @customize-agent/knowledge@4.0.42
+  - @customize-agent/llm@3.0.13
+  - @customize-agent/memory@3.0.13
+  - @customize-agent/runtime@3.0.13
+  - @customize-agent/search@3.0.9
+  - @customize-agent/tools@3.0.20
+  - @customize-agent/types@3.0.9
+
 ## 4.0.85
 
 ### Patch Changes

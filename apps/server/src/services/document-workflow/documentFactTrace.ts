@@ -50,12 +50,79 @@ export function buildDocumentFactTraces(markdown: string, factsModel: DocumentFa
 }
 
 export function factTraceIssues(traces: DocumentFactTrace[], options: { maxIssues?: number } = {}): ValidationIssue[] {
-  return traces
-    .filter(trace => trace.status === 'unplaced' && /项目|工程|编号|地点|规模|范围|工期|质量|安全|资源|材料|设备|验收|\d/u.test(`${trace.label}${trace.value}`))
-    .slice(0, options.maxIssues || 20)
+  const unplaced = traces.filter(trace => trace.status === 'unplaced' && /项目|工程|编号|地点|规模|范围|工期|质量|安全|资源|材料|设备|验收|\d/u.test(`${trace.label}${trace.value}`));
+  const limit = options.maxIssues && options.maxIssues > 0 ? options.maxIssues : unplaced.length;
+  return unplaced
+    .slice(0, limit)
     .map(trace => ({
       level: 'warning' as const,
       message: `已确认知识库事实未落位：${trace.label}=${trace.value}`,
-      suggestion: `请将该事实落位到对应章节，并保持来源 ${trace.sourceFile || '结构化事实主表'} 的原始口径。`,
+      suggestion: `请将该事实落位到对应章节，并保持来源 ${trace.sourceFile || '结构化事实主表'} 的原始口径。${unplaced.length > limit ? `（共${unplaced.length}个未落位事实，此处显示前${limit}个）` : ''}`,
     }));
+}
+
+/** 构建 BOQ 行级落位追踪 */
+export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsModel): import('./types').BoqRowTrace[] {
+  const tables = factsModel.tables || [];
+  const traces: import('./types').BoqRowTrace[] = [];
+  const normalizedMarkdown = normalize(markdown);
+
+  for (const table of tables) {
+    const headers = table.headers.map(h => h.replace(/\s+/gu, '').toLowerCase());
+    const nameCol = headers.findIndex(h => /项目名称|名称|清单项|分部分项|项目特征|工程内容|材料名称|设备名称/u.test(h));
+    const codeCol = headers.findIndex(h => /编码|编号|序号|项目编码/u.test(h));
+    const qtyCol = headers.findIndex(h => /数量|工程量/u.test(h));
+    const unitCol = headers.findIndex(h => /单位/u.test(h));
+
+    for (const row of table.rows) {
+      const itemName = nameCol >= 0 ? (row[nameCol] || '') : '';
+      const itemCode = codeCol >= 0 ? (row[codeCol] || '') : '';
+      const quantity = qtyCol >= 0 ? (row[qtyCol] || '') : '';
+      const unit = unitCol >= 0 ? (row[unitCol] || '') : '';
+
+      if (!itemName && !itemCode) continue;
+
+      const normalizedName = normalize(itemName);
+      const normalizedCode = normalize(itemCode);
+      const placed = (normalizedName.length >= 3 && normalizedMarkdown.includes(normalizedName.slice(0, 12)))
+        || (normalizedCode.length >= 3 && normalizedMarkdown.includes(normalizedCode.slice(0, 8)));
+
+      traces.push({
+        itemCode: itemCode.slice(0, 50),
+        itemName: itemName.slice(0, 200),
+        quantity: quantity.slice(0, 50),
+        unit: unit.slice(0, 20),
+        sourceFile: table.sourceFile || '',
+        placed,
+      });
+    }
+  }
+
+  // 按已在正文中标记已落位，按未落位排序到前面
+  return traces.sort((a, b) => (a.placed === b.placed ? 0 : a.placed ? 1 : -1));
+}
+
+/** BOQ 行级落位问题（从 trace 生成） */
+export function boqRowTraceIssues(traces: import('./types').BoqRowTrace[], options: { maxIssues?: number } = {}): ValidationIssue[] {
+  const unplaced = traces.filter(t => !t.placed);
+  if (unplaced.length === 0) return [];
+  const total = traces.length;
+  const rate = (total - unplaced.length) / total;
+
+  const issues: ValidationIssue[] = [];
+  if (rate < 0.3) {
+    issues.push({
+      level: 'error',
+      message: `BOQ 清单行级落位严重不足：${total - unplaced.length}/${total} 行（${Math.round(rate * 100)}%）`,
+      suggestion: `未落位清单项示例：${unplaced.slice(0, 5).map(t => `${t.itemName} ${t.quantity}${t.unit}`).join('；')}`,
+    });
+  } else if (rate < 0.6) {
+    issues.push({
+      level: 'warning',
+      message: `BOQ 清单行级落位不足：${total - unplaced.length}/${total} 行（${Math.round(rate * 100)}%）`,
+      suggestion: `建议补充落位：${unplaced.slice(0, 5).map(t => t.itemName).join('、')}`,
+    });
+  }
+
+  return issues;
 }

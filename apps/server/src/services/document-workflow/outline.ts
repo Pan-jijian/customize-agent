@@ -166,7 +166,7 @@ export function uniqueTemplateChapters(chapters: DocumentTemplateChapter[], opti
       if (options?.template && violatesConfiguredChapterTitleForbiddenFilter(key, options.template)) return false;
     }
     seen.add(key);
-    chapter.title = key;
+    chapter.title = key; // chapter 是 filter 的回调参数，来自调用方传入的数组；调用方应传入副本以避免原始数据被修改
     return true;
   });
 }

@@ -1,5 +1,15 @@
 # server
 
+## 4.1.20
+
+### Patch Changes
+
+- 批量发布所有包的 patch 版本
+- Updated dependencies
+  - @customize-agent/knowledge@4.0.42
+  - @customize-agent/llm@3.0.13
+  - @customize-agent/runtime@3.0.13
+
 ## 4.0.122
 
 ### Patch Changes

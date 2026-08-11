@@ -27,10 +27,17 @@ export interface PromptDocumentRuleSet {
 
 export interface WebAccessConfig {
   enabled: boolean;
-  allowProjectFacts: false;
+  allowProjectFacts: boolean;
   maxQueriesPerChapter: number;
   maxResultsPerQuery: number;
   trustedDomains: string[];
+}
+
+/** 单条运行时规则的抽取溯源信息 */
+export interface RuleExtractionTrace {
+  rule: string;
+  source: { promptId: string; roleId: string; pattern: string };
+  matchedText: string;
 }
 
 export interface RuntimePromptRuleSet extends PromptDocumentRuleSet {
@@ -49,6 +56,10 @@ export interface RuntimePromptRuleSet extends PromptDocumentRuleSet {
   chapterRules: Array<{ chapterTitle: string; mustInclude: string[]; mustNotInclude: string[] }>;
   roleRules: Array<{ roleId: string; focusAreas: string[]; mustDo: string[]; mustNotDo: string[] }>;
   executionSummary: string[];
+  /** 按规则类别分组的来源归属 */
+  ruleSources?: Record<string, Array<{ promptId: string; roleId: string; pattern: string; matchedText: string }>>;
+  /** 扁平化的规则抽取追溯列表 */
+  extractionTrace?: RuleExtractionTrace[];
 }
 
 export interface DocumentTemplateChapter {
@@ -115,6 +126,12 @@ export interface DocumentTemplate {
   promptIds?: string[];
   promptBindings?: PromptBinding[];
   builtIn?: boolean;
+  /** 模版版本号，每次内容变更时自动递增，从 1 开始 */
+  version?: number;
+  /** 模版最后更新时间戳 */
+  updatedAt?: number;
+  /** 模版变更日志，记录每次版本变更的摘要 */
+  changeLog?: Array<{ version: number; timestamp: number; summary: string }>;
 }
 
 export interface DocumentEvidence {
@@ -156,6 +173,10 @@ export interface DocumentDraftChapter {
   evidence: DocumentEvidence[];
   missingFacts: string[];
   sections?: string[];
+  /** 章节生成是否因超时回退到证据兜底草稿 */
+  timedOut?: boolean;
+  /** 章节生成实际耗时（毫秒） */
+  elapsedMs?: number;
 }
 
 export interface FactSourceRef {
@@ -262,6 +283,8 @@ export interface DocumentExecutionStage {
   group?: string;
   order?: number;
   executionVersion?: 2;
+  /** 章节生成是否因超时回退到证据兜底模式 */
+  chapterTimeoutFallback?: boolean;
 }
 
 export interface DocumentAsset {
@@ -418,6 +441,7 @@ export interface DocumentReviewMetadata {
 export interface GeneratedDocumentDraft {
   templateId: string;
   templateName: string;
+  templateVersion?: number;
   title: string;
   requirement: string;
   projectRoot?: string;
@@ -436,8 +460,61 @@ export interface GeneratedDocumentDraft {
   executionStages: DocumentExecutionStage[];
   exportGate: ExportGateResult;
   assets?: DocumentAsset[];
-  partialChapters?: Array<{ id: string; title: string; chars: number; status: 'completed' | 'failed'; updatedAt: number }>;
+  partialChapters?: Array<{ id: string; title: string; chars: number; status: 'completed' | 'failed'; updatedAt: number; timedOut?: boolean; elapsedMs?: number }>;
   checkpointChapters?: DocumentDraftChapter[];
   reviewMetadata?: DocumentReviewMetadata;
+  /** 提示词绑定溯源：记录每个提示词的完整绑定链路 */
+  promptProvenance?: Array<{ promptId: string; roleId: string; configId: string; roleName: string; contentHash: string; order: number }>;
+  /** 项目资料图谱：从招标文件+清单+图纸中提取的结构化项目理解 */
+  projectGraph?: ProjectGraph;
+  /** 施工组织设计写作任务书：每章的写作指导 */
+  writingTaskBrief?: WritingTaskBrief;
   generatedAt: number;
+}
+
+/** 项目资料图谱：跨文件的结构化项目理解 */
+export interface ProjectGraph {
+  works: Array<{ name: string; scope: string; sourceFiles: string[]; relatedItems: string[] }>;
+  methods: Array<{ name: string; steps: string[]; applicableWorks: string[]; sourceFiles: string[] }>;
+  resources: Array<{ name: string; type: 'material' | 'equipment' | 'labor'; spec: string; quantity: string; unit: string; sourceFiles: string[] }>;
+  schedule: Array<{ milestone: string; duration: string; startDate: string; endDate: string; sourceFiles: string[] }>;
+  standards: Array<{ code: string; description: string; sourceFiles: string[] }>;
+  risks: Array<{ risk: string; level: 'high' | 'medium' | 'low'; mitigation: string; sourceFiles: string[] }>;
+  requirements: Array<{ category: string; detail: string; sourceFiles: string[] }>;
+  siteConditions: Array<{ condition: string; impact: string; sourceFiles: string[] }>;
+  addendumChanges: Array<{ originalPath: string; original: string; revised: string; sourceFile: string }>;
+  gaps: string[];
+  generatedAt: number;
+}
+
+/** 施工组织设计写作任务书 */
+export interface WritingTaskBrief {
+  documentType: string;
+  globalWritingFocus: string[];
+  chapters: WritingTaskBriefChapter[];
+}
+
+/** 单章写作任务卡 */
+export interface WritingTaskBriefChapter {
+  chapterId: string;
+  chapterTitle: string;
+  writingGoal: string;
+  mustCover: string[];
+  factDomains: string[];
+  evidenceRefs: Array<{ filePath: string; kind: string; priority: 'must' | 'should' | 'may' }>;
+  boqTargets: Array<{ itemCode: string; itemName: string; quantity: string; unit: string }>;
+  drawingTargets: string[];
+  gaps: string[];
+}
+
+/** BOQ 行级落位追踪 */
+export interface BoqRowTrace {
+  itemCode: string;
+  itemName: string;
+  quantity: string;
+  unit: string;
+  sourceFile: string;
+  placed: boolean;
+  placedInChapter?: string;
+  placedInSection?: string;
 }

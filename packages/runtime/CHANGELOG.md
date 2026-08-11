@@ -1,5 +1,13 @@
 # @customize-agent/runtime
 
+## 3.0.13
+
+### Patch Changes
+
+- 批量发布所有包的 patch 版本
+- Updated dependencies
+  - @customize-agent/types@3.0.9
+
 ## 3.0.8
 
 ### Patch Changes

@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import type { DocumentFact, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter } from './types';
 import { stringifyFactValue } from './utils';
+import { selectByScore, factImportanceScore } from './selection';
 
 type BlueprintFactsModel = Pick<DocumentFactsModel, 'project' | 'schedule' | 'quality' | 'safety' | 'resources' | 'preciseFacts' | 'bills' | 'drawings' | 'rules' | 'specifications'>;
 
@@ -85,7 +86,8 @@ export function chapterTaskCardLine(chapter: DocumentTemplateChapter) {
 }
 
 export function buildDocumentBlueprintContext(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string }) {
-  const coreFacts = [
+  // 去重后按重要性评分排序，保留最重要的核心事实（而非静默截断）
+  const uniqueFacts = [
     ...input.factsModel.project,
     ...input.factsModel.schedule,
     ...input.factsModel.quality,
@@ -95,9 +97,20 @@ export function buildDocumentBlueprintContext(input: { template: DocumentTemplat
   ].filter((fact, index, array) => {
     const value = stringifyFactValue(fact.value).replace(/\s+/gu, ' ').trim();
     return value.length > 0 && array.findIndex(item => `${item.key}:${stringifyFactValue(item.value).replace(/\s+/gu, ' ').trim()}` === `${fact.key}:${value}`) === index;
-  }).slice(0, 36);
+  });
+  const coreFactsResult = selectByScore(
+    uniqueFacts,
+    f => factImportanceScore(f),
+    { maxItems: 48, maxChars: 18000 },
+    'coreFacts',
+  );
+  const coreFacts = coreFactsResult.selected;
+  // 如果丢弃了重要事实，在蓝图中记录
+  const droppedFactNote = coreFactsResult.dropped.length > 0
+    ? [`⚠️ 因 LLM 上下文预算限制，${coreFactsResult.dropped.length} 个低优先级事实未纳入蓝图；完整事实主表可在生成后的事实覆盖报告查看。`]
+    : [];
   const profile = documentProfileForContext(input);
-  const evidenceTraceLines = coreFacts.slice(0, 18).map((fact, index) => `${index + 1}. ${fact.fieldName || fact.key || '资料事实'}｜${stringifyFactValue(fact.value).replace(/\s+/gu, ' ').slice(0, 90)}｜来源：${fact.sourceFile ? path.basename(fact.sourceFile) : '结构化事实主表'}`);
+  const evidenceTraceLines = coreFacts.map((fact, index) => `${index + 1}. ${fact.fieldName || fact.key || '资料事实'}｜${stringifyFactValue(fact.value).replace(/\s+/gu, ' ').slice(0, 90)}｜来源：${fact.sourceFile ? path.basename(fact.sourceFile) : '结构化事实主表'}`);
   const coverageMatrix = factCoverageMatrixLines(input.chapters);
   const supportMatrix = input.chapters.map((chapter, index) => {
     const support = supportLevelForChapter(chapter, input.factsModel);
@@ -118,5 +131,6 @@ export function buildDocumentBlueprintContext(input: { template: DocumentTemplat
     '跨章一致性要求：所有章节必须共用同一套工期、质量、范围、资源和验收口径；不得在不同章节写出相互矛盾的项目基础信息。',
     `章节专业任务卡：\n${chapterLines.join('\n')}`,
     `章节实施方案：\n${executionPlans.join('\n')}`,
+    ...droppedFactNote,
   ].filter(Boolean).join('\n');
 }

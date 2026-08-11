@@ -3,6 +3,7 @@ import type { DocumentEvidence, DocumentTemplateChapter, RetrievalCoverageReport
 import { cleanEvidenceText, selectEvidenceByBudget } from './evidence';
 import { evidenceMatchesFact } from './factMatching';
 import { throwIfAborted } from './utils';
+import { selectByScore, textImportanceScore } from './selection';
 
 export interface RetrievalCoverageRisk {
   totalChunks: number;
@@ -29,21 +30,25 @@ export function retrievalCoverageRisk(input: { totalChunks: number; loadedChunks
 }
 
 export function buildDeepRetrievalQueries(chapter: DocumentTemplateChapter, requiredNeeds: string[] = []) {
-  const sections = chapter.sections || [];
-  const requiredFacts = [...chapter.requiredFacts, ...requiredNeeds];
-  const base = [chapter.title, ...sections.slice(0, 12), ...requiredFacts.slice(0, 12)];
+  const allSections = chapter.sections || [];
+  const allFacts = [...chapter.requiredFacts, ...requiredNeeds];
+  // 用评分选择最重要的 sections 和 facts（而非硬截断前 N 个）
+  const topSections = selectByScore(allSections, s => textImportanceScore(s), { maxItems: 16, maxChars: 1200 }, 'retrieval-sections').selected;
+  const topFacts = selectByScore(allFacts, f => textImportanceScore(f), { maxItems: 16, maxChars: 1200 }, 'retrieval-facts').selected;
   const domainHints = /进度|工期|节点/u.test(chapter.title) ? ['合同工期', '计划工期', '日历天', '开工', '竣工', '关键线路']
     : /质量|验收/u.test(chapter.title) ? ['质量标准', '验收规范', '检验批', '复验', '合格']
       : /安全|危大|风险/u.test(chapter.title) ? ['安全措施', '风险源', '危大工程', '应急', '检查整改']
         : /资源|人|材|机|材料|设备/u.test(chapter.title) ? ['劳动力', '材料', '机械设备', '进场计划', '资源保障']
           : ['工程范围', '施工方法', '控制要点', '验收要求'];
-  const tokens = uniqueTokens([...base, ...domainHints]);
+  const allTokens = uniqueTokens([chapter.title, ...topSections, ...topFacts, ...domainHints]);
+  // 查询构造：按 token 重要性评分选择最关键的（而非前 18 个）
+  const topTokens = selectByScore(allTokens, t => textImportanceScore(t), { maxItems: 24, maxChars: 800 }, 'retrieval-tokens').selected;
   return [...new Set([
-    `${chapter.title} ${sections.slice(0, 8).join(' ')}`.trim(),
-    ...requiredFacts.map(fact => `${chapter.title} ${fact}`.trim()),
-    ...sections.slice(0, 10).map(section => `${chapter.title} ${section} ${requiredFacts.slice(0, 4).join(' ')}`.trim()),
+    `${chapter.title} ${topSections.join(' ')}`.trim(),
+    ...topFacts.map(fact => `${chapter.title} ${fact}`.trim()),
+    ...topSections.map(section => `${chapter.title} ${section} ${topFacts.slice(0, 6).join(' ')}`.trim()),
     `${chapter.title} ${domainHints.join(' ')}`.trim(),
-    tokens.slice(0, 18).join(' '),
+    topTokens.join(' '),
   ].filter(Boolean))];
 }
 

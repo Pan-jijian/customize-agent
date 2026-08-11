@@ -1,0 +1,516 @@
+import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, PromptChapterStructuralRule, PromptDocumentRuleSet, RuleExtractionTrace, RuntimePromptRuleSet } from './types';
+import { documentTextLength } from './budget';
+import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
+import { callDocumentLlmJson } from './llmClient';
+import { displayChapterTitle } from './outline';
+
+export function professionalSectionTaskCard(chapterTitle: string, sectionTitle: string) {
+  const joined = `${chapterTitle} ${sectionTitle}`;
+  const points = [
+    /概况|工程|项目/u.test(joined) ? '必须落入项目名称、范围、地点、规模、工期、质量目标等资料事实；说明编制边界。' : '',
+    /部署|总体|组织/u.test(joined) ? '必须说明施工组织逻辑、施工段/专业接口、资源进场和管理闭环。' : '',
+    /进度|工期/u.test(joined) ? '必须围绕总工期、关键线路、资源保障、穿插施工和纠偏机制展开。' : '',
+    /质量/u.test(joined) ? '必须覆盖材料验收复验、过程检查、隐蔽验收、整改复验和质量资料归档。' : '',
+    /安全|文明|风险|危大/u.test(joined) ? '必须覆盖风险识别、人员设备、临电消防、现场文明、检查整改和应急响应。' : '',
+    /资源|材料|设备|劳动力/u.test(joined) ? '必须说明资源配置依据、进场验收、保管调配，并与工期和质量目标一致。' : '',
+    /施工|工艺|技术|方案/u.test(joined) ? '必须写清施工准备、工艺流程、关键控制点、验收要求和资料依据。' : '',
+  ].filter(Boolean);
+  return ['【小节专业任务卡】', `任务对象：${sectionTitle}`, ...(points.length ? points : ['必须结合本项目资料明确事实说明对象范围、实施方法、控制要点、验收要求和资料闭环，避免泛化套话。'])].join('\n');
+}
+
+function normalizePlannedSectionTitle(title: string) {
+  return displayChapterTitle(title.replace(/\*+/gu, ''))
+    .replace(/^第[一二三四五六七八九十百千万\d]+[章节篇部分、.．\s-]*/u, '')
+    .replace(/^\d+(?:\.\d+)*(?:[.．、]|\s)+/u, '')
+    .replace(/^[-—–]\s*/u, '')
+    .replace(/[<>]/gu, '')
+    .replace(/[：:。；;,.，]+$/gu, '')
+    .trim();
+}
+
+function isInstructionLikeSectionTitle(title: string) {
+  const normalized = normalizePlannedSectionTitle(title).replace(/\s+/gu, '');
+  if (!normalized) return true;
+  if (/^(?:目录|章节|大纲|要求|说明|注意|输出|格式|示例|例如|写法|占位|提示)$/u.test(normalized)) return true;
+  return /^(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用)|^(?:如|若|如果)(?:涉及|不涉及|适用|不适用)|(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成)|按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|说明要求|注意事项/u.test(normalized);
+}
+
+function isInvalidPlannedSectionTitle(title: string, chapterTitle: string) {
+  const normalized = normalizePlannedSectionTitle(title);
+  const normalizedChapter = normalizePlannedSectionTitle(chapterTitle);
+  if (normalized.length < 4 || normalized.length > 60) return true;
+  if (normalized === normalizedChapter) return true;
+  if (isInstructionLikeSectionTitle(normalized)) return true;
+  if (/^(?:目标与范围|资料依据|实施内容|质量控制|概述|总体要求)$/u.test(normalized)) return true;
+  if (/^(?:雨季|冬季|高温|台风|大风等特殊气候|雨季、冬季、高温、台风、大风等特殊气候)$/u.test(normalized)) return true;
+  if (/如需|应由|大模型|提示词|上下文|动态规划|OUTLINE|章节生成|按照.*明确指定|需求和资料|JSON|小节标题/u.test(normalized)) return true;
+  if (/(.)\1/u.test(normalized)) return true;
+  const tail = normalizedChapter.match(/[\p{L}\p{N}]{2,6}$/u)?.[0] || '';
+  if (tail.length >= 2 && /^.{2,8}\p{L}$/u.test(normalized) && normalized.endsWith(tail.slice(-1)) && !normalized.includes(tail)) return true;
+  return false;
+}
+
+function chineseOrdinalToNumber(value: string) {
+  const digits: Record<string, number> = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (/^\d+$/u.test(value)) return Number(value);
+  if (digits[value] !== undefined) return digits[value];
+  if (value === '十') return 10;
+  const tenMatch = /^(?:(一|二|两|三|四|五|六|七|八|九)?)十(?:(一|二|两|三|四|五|六|七|八|九))?$/u.exec(value);
+  if (!tenMatch) return undefined;
+  const tens = tenMatch[1] ? digits[tenMatch[1]] : 1;
+  const ones = tenMatch[2] ? digits[tenMatch[2]] : 0;
+  return tens * 10 + ones;
+}
+
+function sectionTitleEquivalent(a: string, b: string) {
+  const left = normalizePlannedSectionTitle(a).replace(/[\s()（）:：.。；;,，、-]/gu, '');
+  const right = normalizePlannedSectionTitle(b).replace(/[\s()（）:：.。；;,，、-]/gu, '');
+  if (!left || !right) return false;
+  return left === right || left.includes(right) || right.includes(left);
+}
+
+function conditionalSectionRuleContext(text: string) {
+  return /判断是否涉及|若涉及|若不涉及|如果涉及|如果不涉及|不涉及.*如实说明|根据项目所在地气候特征|根据计划施工周期|根据.*施工周期|按需|视情况|可设置|专项小节/u.test(text);
+}
+
+function cleanParsedSectionTitles(titles: string[], context = '') {
+  const conditionalContext = conditionalSectionRuleContext(context);
+  return Array.from(new Set(titles.map(normalizePlannedSectionTitle).filter(title => {
+    if (title.length < 2 || title.length > 30) return false;
+    if (isInstructionLikeSectionTitle(title)) return false;
+    if (/必须|强制|排序|设置|输出|独立|之后|之前|小节|其他必要/u.test(title)) return false;
+    if (conditionalContext && /^(?:雨季|冬季|高温|台风|大风等特殊气候|雨季、冬季、高温、台风、大风等特殊气候)$/u.test(title)) return false;
+    return true;
+  })));
+}
+
+function parseSectionListFromRuleText(text: string) {
+  const topList = /(?:以下小节设置和排序|强制小节|必须小节)[：:]\s*([\s\S]*?)(?:\n\s*#{2,6}\s|\n\s*第[一二两三四五六七八九十\d]+章|$)/u.exec(text)?.[1];
+  if (topList) {
+    const titles = [...topList.matchAll(/(?:^|\n)\s*\d+[.．、]\s*([^——\-—：:。；;\n]{2,30})(?:[——\-—：:]|，|,|。|；|;|\n|$)/gu)].map(match => match[1]);
+    const cleaned = cleanParsedSectionTitles(titles, text);
+    if (cleaned.length > 0) return cleaned;
+  }
+
+  const titles: string[] = [];
+  const afterRequiredPattern = /第[一二两三四五六七八九十\d]+章[^。；;\n]{0,50}(?:强制)?(?:包含|设置|输出|排序|挂靠)[^：:。；;\n]{0,20}[：:]\s*([^。；;\n]{2,120})/gu;
+  for (const match of text.matchAll(afterRequiredPattern)) {
+    for (const item of match[1].split(/[、,，/／及和与]/u)) titles.push(item);
+  }
+  const quotedSectionPattern = /[“"]([^”"]{2,30})[”"]\s*(?:二级)?小节/gu;
+  for (const match of text.matchAll(quotedSectionPattern)) titles.push(match[1]);
+  const namedPattern = /([\p{Script=Han}A-Za-z0-9（）()]{2,30})(?:——|—|-|：|:)\s*(?:独立的)?(?:二级)?小节/gu;
+  for (const match of text.matchAll(namedPattern)) titles.push(match[1]);
+  const afterSectionLabelPattern = /(?:必须|应当|需|需要|包含|设置|输出)[^。；;\n]{0,30}(?:独立的)?(?:二级)?小节[：:]\s*([^。；;\n]{2,80})/gu;
+  for (const match of text.matchAll(afterSectionLabelPattern)) {
+    for (const item of match[1].split(/[、,，/／及和与]/u)) titles.push(item);
+  }
+  return cleanParsedSectionTitles(titles, text);
+}
+
+function simpleHashText(text: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function extractOutlineHeadings(text: string) {
+  const headings: string[] = [];
+  const outline = /<OUTLINE>([\s\S]*?)<\/OUTLINE>/u.exec(text)?.[1] || '';
+  for (const line of outline.split(/\r?\n/u)) {
+    const title = line.replace(/^\s*(?:\d+[.、．]|[-*])\s*/u, '').trim();
+    if (title.length >= 2 && title.length <= 80 && !isInstructionLikeSectionTitle(title)) headings.push(title);
+  }
+  return [...new Set(headings)];
+}
+
+function extractMinWords(text: string) {
+  const match = /(?:不少于|至少|最低|必须生成不少于)\s*(\d+(?:\.\d+)?)\s*(万)?\s*字/u.exec(text);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  return Math.floor(value * (match[2] ? 10000 : 1));
+}
+
+function extractRequiredKeywordRules(text: string) {
+  const keywords = new Set<string>();
+  const patterns = [
+    /(?:必须|应当|需要|全文必须)包含[：:]\s*([^。；;\n]+)/gu,
+    /(?:必须|应当|需要|全文必须)体现[：:]\s*([^。；;\n]+)/gu,
+    /(?:关键词|核心要点)[：:]\s*([^。；;\n]+)/gu,
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      for (const part of (match[1] || '').split(/[、,，/／及和与]/u)) {
+        const keyword = part.trim().replace(/["“”'‘’《》<>]/gu, '');
+        if (keyword.length >= 2 && keyword.length <= 24 && !/表格|章节|小节|正文|目录|封面/u.test(keyword)) keywords.add(keyword);
+      }
+    }
+  }
+  return [...keywords].slice(0, 24);
+}
+
+function extractForbiddenPatternRules(text: string) {
+  const patterns = new Set<string>();
+  const forbidLinePatterns = [
+    /(?:禁止|不得|严禁|杜绝)出现[：:]\s*([^。；;\n]+)/gu,
+    /(?:禁用词|禁止词|不得使用)[：:]\s*([^。；;\n]+)/gu,
+  ];
+  for (const pattern of forbidLinePatterns) {
+    for (const match of text.matchAll(pattern)) {
+      for (const part of (match[1] || '').split(/[、,，/／及和与]/u)) {
+        const value = part.trim().replace(/["“”'‘’《》<>]/gu, '');
+        if (value.length >= 2 && value.length <= 24) patterns.add(value);
+      }
+    }
+  }
+  return [...patterns].slice(0, 40);
+}
+
+function extractRequiredTableTitles(text: string) {
+  const titles = new Set<string>();
+  const patterns = [
+    /(?:必须|应当|需要|全文必须|至少)输出(?:的)?表格[：:]\s*([^。；;\n]+)/gu,
+    /(?:必须|应当|需要|全文必须|至少)包含(?:的)?表格[：:]\s*([^。；;\n]+)/gu,
+    /(?:表格清单|表格要求)[：:]\s*([^。；;\n]+)/gu,
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      for (const part of (match[1] || '').split(/[、,，/／及和与]/u)) {
+        const title = /([\p{Script=Han}A-Za-z0-9（）()《》<>]{2,40}表)/u.exec(part.trim())?.[1];
+        if (title) titles.add(title.replace(/[<>《》]/gu, ''));
+      }
+    }
+  }
+  for (const match of text.matchAll(/([\p{Script=Han}A-Za-z0-9（）()]{2,40}表)(?:必须|应当|需要|不得缺失|不可缺失)/gu)) titles.add(match[1]);
+  if (/项目基本信息表/u.test(text)) titles.add('项目基本信息表');
+  return [...titles];
+}
+
+function sentencesMatching(text: string, pattern: RegExp) {
+  return text.split(/[。；;\n]/u).map(item => item.trim()).filter(item => item.length >= 4 && pattern.test(item)).slice(0, 24);
+}
+
+/** 在属性化提示词列表中搜索 matchedText，确定规则来源归属 */
+function attributedMatch(
+  attributedPrompts: Array<{ promptId: string; roleId: string; content: string }>,
+  matchedText: string,
+  patternSource: string,
+): { promptId: string; roleId: string; pattern: string } {
+  for (const p of attributedPrompts) {
+    if (p.content.includes(matchedText)) return { promptId: p.promptId, roleId: p.roleId, pattern: patternSource };
+  }
+  return { promptId: 'system:generation-control', roleId: 'generation-control', pattern: patternSource };
+}
+
+export function buildRuntimePromptRules(input: {
+  promptTexts: string;
+  requirement?: string;
+  template?: DocumentTemplate;
+  rolePrompts?: Array<{ roleId: string; name: string; content: string }>;
+  /** 属性化提示词列表，用于规则溯源 */
+  attributedPrompts?: Array<{ promptId: string; roleId: string; name: string; content: string }>;
+}): RuntimePromptRuleSet {
+  const attributed = input.attributedPrompts || [];
+  const normalizedText = [input.promptTexts, input.requirement || ''].filter(Boolean).join('\n\n').replace(/\\n/gu, '\n');
+  const base = extractPromptDocumentRules(normalizedText);
+  const requiredTables = [...new Set([...base.requiredTables, ...extractRequiredTableTitles(normalizedText)])];
+  const requiredKeywords = extractRequiredKeywordRules(normalizedText);
+  const forbiddenPatterns = extractForbiddenPatternRules(normalizedText);
+  const exactHeadings = extractOutlineHeadings(normalizedText);
+  const backendTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台', '绑定片段', '兜底'];
+  const commercialTerms = ['工程造价', '报价', '投标报价', '报价明细', '综合单价', '单价', '合价', '金额', '税率', '增值税', '利润', '预留金', '暂列金额', '最高投标限价', '招标控制价'];
+  const forbiddenSubjects = [...new Set([...(base.forbiddenTerms || []).filter(term => /施工方|投标人/u.test(term)), ...(/施工方|投标人/u.test(normalizedText) ? ['施工方', '投标人'] : [])])];
+  const minWords = extractMinWords(normalizedText);
+  const chapterRules = (input.template?.chapters || []).map(chapter => ({
+    chapterTitle: chapter.title,
+    mustInclude: sentencesMatching(normalizedText, new RegExp(`${chapter.title.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}|${chapter.title.slice(0, 6).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u')).slice(0, 8),
+    mustNotInclude: sentencesMatching(normalizedText, /禁止|不得|严禁|杜绝/u).filter(item => item.includes(chapter.title)).slice(0, 8),
+  })).filter(item => item.mustInclude.length > 0 || item.mustNotInclude.length > 0);
+  const roleRules = (input.rolePrompts || []).map(prompt => ({
+    roleId: prompt.roleId,
+    focusAreas: sentencesMatching(prompt.content, /重点|关注|围绕|响应|体系|措施|质量|安全|工期|资源/u).slice(0, 8),
+    mustDo: sentencesMatching(prompt.content, /必须|应当|需要|确保|严格/u).slice(0, 10),
+    mustNotDo: sentencesMatching(prompt.content, /禁止|不得|严禁|杜绝/u).slice(0, 10),
+  })).filter(item => item.focusAreas.length > 0 || item.mustDo.length > 0 || item.mustNotDo.length > 0);
+  const executionSummary = [
+    base.coverPolicy && base.coverPolicy !== 'unspecified' ? `已识别封面规则：${base.coverPolicy === 'required' ? '要求生成' : '禁止生成'}` : '',
+    base.tocPolicy && base.tocPolicy !== 'unspecified' ? `已识别目录规则：${base.tocPolicy === 'required' ? '要求生成' : '禁止生成'}` : '',
+    exactHeadings.length ? `已识别一级章节固定规则 ${exactHeadings.length} 条` : '',
+    forbiddenSubjects.length ? `已识别禁用主体表达：${forbiddenSubjects.join('、')}` : '',
+    base.forbiddenTerms.length ? `已识别禁用词 ${base.forbiddenTerms.length} 个` : '',
+    requiredTables.length ? `已识别必需表格：${requiredTables.join('、')}` : '',
+    requiredKeywords.length ? `已识别必含关键词：${requiredKeywords.join('、')}` : '',
+    forbiddenPatterns.length ? `已识别禁止出现内容：${forbiddenPatterns.join('、')}` : '',
+    minWords ? `已识别最低字数要求：${minWords} 字` : '',
+    roleRules.length ? `已抽取角色执行规则 ${roleRules.length} 组` : '',
+  ].filter(Boolean);
+  // 构建规则溯源信息
+  const extractionTrace: RuleExtractionTrace[] = [];
+  const ruleSources: Record<string, Array<{ promptId: string; roleId: string; pattern: string; matchedText: string }>> = {};
+  const addTrace = (key: string, rule: string, matchedText: string, pattern: string) => {
+    const source = attributedMatch(attributed, matchedText, pattern);
+    if (!ruleSources[key]) ruleSources[key] = [];
+    if (ruleSources[key].length < 24) ruleSources[key].push({ ...source, matchedText });
+    if (extractionTrace.length < 60) extractionTrace.push({ rule, source, matchedText });
+  };
+  if (base.coverPolicy && base.coverPolicy !== 'unspecified') addTrace('coverPolicy', `已识别封面规则：${base.coverPolicy}`, '封面', /封面|cover/u.source);
+  if (base.tocPolicy && base.tocPolicy !== 'unspecified') addTrace('tocPolicy', `已识别目录规则：${base.tocPolicy}`, '目录', /目录|toc/u.source);
+  for (const t of requiredTables) addTrace('requiredTables', `必需表格：${t}`, t, /全文必须输出|必须输出表格|项目基本信息表/u.source);
+  for (const kw of requiredKeywords) addTrace('requiredKeywords', `必含关键词：${kw}`, kw, /必须包含|必须含|应包含|需要包含/u.source);
+  for (const fp of forbiddenPatterns) addTrace('forbiddenPatterns', `禁止内容：${fp}`, fp, /禁止|不得|严禁|杜绝/u.source);
+  for (const h of exactHeadings) addTrace('exactHeadings', `固定章节：${h}`, h, /第[一二三四五六七八九十百千\d]+章/u.source);
+  if (minWords) addTrace('minWords', `最低字数：${minWords}`, String(minWords), /\d{3,}\s*字/u.source);
+  return {
+    ...base,
+    requiredTables,
+    requiredKeywords,
+    forbiddenPatterns,
+    sourceHash: simpleHashText(normalizedText),
+    exactHeadings,
+    forbidExtraHeadings: /不得合并|不得删除|不得改名|不得新增|严格按.*章节名称|一级章节.*不得/u.test(normalizedText) || exactHeadings.length > 0,
+    requiredSubjects: /我公司/u.test(normalizedText) ? ['我公司', '项目部'] : [],
+    forbiddenSubjects,
+    backendTerms,
+    commercialTerms,
+    forbiddenTerms: [...new Set([...base.forbiddenTerms, ...backendTerms, ...commercialTerms, ...forbiddenSubjects])],
+    forbidFabrication: /不得编造|严禁编造|不得擅自|资料未明确|系统暂未|事实真实性/u.test(normalizedText),
+    requireEvidenceForQuantities: /量化|参数|数值|工程实体参数|资料中明确/u.test(normalizedText),
+    preferProjectFacts: /事实优先|项目事实|真实性高于/u.test(normalizedText),
+    minWords,
+    minChars: minWords,
+    chapterRules,
+    roleRules,
+    executionSummary,
+    ruleSources: Object.keys(ruleSources).length > 0 ? ruleSources : undefined,
+    extractionTrace: extractionTrace.length > 0 ? extractionTrace : undefined,
+  };
+}
+
+export function runtimePromptRulesPrompt(rules: RuntimePromptRuleSet) {
+  const lines = [
+    `运行时规则版本：${rules.sourceHash}`,
+    rules.coverPolicy === 'required' ? '用户要求输出封面时必须保留封面；未要求时不得由系统擅自决定。' : '',
+    rules.tocPolicy === 'required' ? '用户要求输出目录时必须保留目录，并确保目录只来自最终合法正文标题。' : '',
+    rules.forbidCover ? '用户明确禁止输出封面。' : '',
+    rules.forbidToc ? '用户明确禁止输出目录、目录说明或导航页。' : '',
+    rules.exactHeadings.length ? `一级章节必须严格使用：${rules.exactHeadings.join('；')}` : '',
+    rules.forbidExtraHeadings ? '不得新增、删除、合并或改名一级章节。' : '',
+    rules.requiredSubjects.length ? `正文主体优先使用：${rules.requiredSubjects.join('、')}` : '',
+    rules.forbiddenSubjects.length ? `禁止主体表达：${rules.forbiddenSubjects.join('、')}` : '',
+    rules.forbidFabrication ? '不得编造系统暂未从知识库确认的项目事实、工程实体参数、人名、联系方式或品牌；应通过扩大检索、事实补抽或落位修复解决。' : '',
+    rules.requireEvidenceForQuantities ? '涉及数量、工期、质量标准、规格型号等参数时必须以绑定资料中的明确事实为准。' : '',
+    rules.commercialTerms.length ? `禁止输出商务敏感内容：${rules.commercialTerms.join('、')}` : '',
+    rules.backendTerms.length ? `禁止输出系统内部话术：${rules.backendTerms.join('、')}` : '',
+    rules.requiredTables.length ? `必须输出以下正式 Markdown 表格：${rules.requiredTables.join('、')}。表格必须包含表名、表头、分隔线和数据行。` : '',
+    rules.requiredKeywords?.length ? `正文必须覆盖以下关键词或要点：${rules.requiredKeywords.join('、')}。` : '',
+    rules.forbiddenPatterns?.length ? `正文禁止出现以下内容：${rules.forbiddenPatterns.join('、')}。` : '',
+    rules.minWords ? `全文不少于 ${rules.minWords} 字。` : '',
+  ].filter(Boolean);
+  return `以下规则由系统运行时从用户绑定指令中自动抽取，不作为用户可编辑内容。生成、检查和修复必须共同遵守：\n${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}`;
+}
+
+function promptPolicy(text: string, subject: '封面' | '目录'): 'required' | 'forbidden' | 'unspecified' {
+  const required = new RegExp(`(?:生成|包含|输出|需要|保留|设置|编制|制作)[^。；;\\n]{0,12}${subject}|${subject}[^。；;\\n]{0,12}(?:必须|应当|需要|保留|生成|输出|包含)`, 'u').test(text);
+  const forbidden = new RegExp(`(?:不要|不需要|不允许|不得|禁止|严禁|不输出|不生成|无需)[^。；;\\n]{0,12}${subject}|${subject}[^。；;\\n]{0,12}(?:不要|不需要|不允许|不得|禁止|严禁|不输出|不生成|无需)`, 'u').test(text);
+  if (forbidden) return 'forbidden';
+  if (required) return 'required';
+  return 'unspecified';
+}
+
+export function extractPromptDocumentRules(promptTexts: string): PromptDocumentRuleSet {
+  const normalizedText = promptTexts.replace(/\\n/gu, '\n');
+  const requiredTables = new Set<string>();
+  const tableLine = /全文必须输出[：:]\s*([^。；;\n]+)/u.exec(normalizedText)?.[1] || /必须输出(?:的)?表格[：:]\s*([^。；;\n]+)/u.exec(normalizedText)?.[1] || '';
+  for (const part of tableLine.split(/[、,，]/u)) {
+    const title = /([\p{Script=Han}A-Za-z0-9（）()]{2,30}表)$/u.exec(part.trim())?.[1];
+    if (title && title.length >= 4 && title.length <= 30) requiredTables.add(title);
+  }
+  if (/项目基本信息表/u.test(normalizedText)) requiredTables.add('项目基本信息表');
+  const forbiddenTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台', '绑定片段', '兜底'];
+  if (/杜绝|禁止|不得|严禁/u.test(normalizedText)) forbiddenTerms.push('施工方', '投标人', '高度重视', '重中之重');
+  if (/商务|报价|单价|税率|利润|造价/u.test(normalizedText)) forbiddenTerms.push('综合单价', '报价明细', '单价', '税率', '增值税', '利润', '预留金', '报价明细表');
+  const coverPolicy = promptPolicy(normalizedText, '封面');
+  const tocPolicy = promptPolicy(normalizedText, '目录');
+  return {
+    coverPolicy,
+    tocPolicy,
+    forbidCover: coverPolicy === 'forbidden',
+    forbidToc: tocPolicy === 'forbidden',
+    forbiddenTerms: [...new Set(forbiddenTerms)],
+    preferredTerms: [{ from: '施工方', to: '我公司' }, { from: '投标人', to: '我公司' }, { from: '高度重视', to: '严格落实' }, { from: '重中之重', to: '关键控制事项' }],
+    requiredTables: [...requiredTables],
+    requiredKeywords: extractRequiredKeywordRules(normalizedText),
+    forbiddenPatterns: extractForbiddenPatternRules(normalizedText),
+  };
+}
+
+export function extractPromptStructuralRules(promptTexts: string, chapters?: DocumentTemplateChapter[]): PromptChapterStructuralRule[] {
+  const normalizedText = promptTexts.replace(/\\n/gu, '\n');
+  const chapterRulePattern = /第([一二两三四五六七八九十\d]+)章[^\n。；;]{0,80}(?:强制|必须|挂靠|小节|排序|最先|之后|之前)/gu;
+  const grouped = new Map<number, { blocks: string[]; titles: string[] }>();
+  const matches = [...normalizedText.matchAll(chapterRulePattern)];
+  for (const match of matches) {
+    const chapterNumber = chineseOrdinalToNumber(match[1]);
+    if (!chapterNumber) continue;
+    const start = Math.max(0, match.index || 0);
+    const next = matches.find(item => (item.index || 0) > start)?.index;
+    const block = normalizedText.slice(start, Math.min(normalizedText.length, next ?? start + 1400));
+    if (conditionalSectionRuleContext(block) && !/(强制小节|必须小节|以下小节设置和排序|必须设置独立的|必须包含独立的)/u.test(block)) continue;
+    const titles = parseSectionListFromRuleText(block);
+    if (titles.length === 0) continue;
+    const item = grouped.get(chapterNumber) || { blocks: [], titles: [] };
+    item.blocks.push(block);
+    for (const title of titles) {
+      if (!item.titles.some(existing => sectionTitleEquivalent(existing, title))) item.titles.push(title);
+    }
+    grouped.set(chapterNumber, item);
+  }
+  return [...grouped.entries()].map(([chapterNumber, item]) => {
+    const chapter = chapters?.[chapterNumber - 1];
+    return {
+      chapterIndex: chapterNumber - 1,
+      chapterTitle: chapter?.title,
+      source: item.blocks[0]?.split('\n').find(line => line.trim())?.trim().slice(0, 120),
+      requiredSections: item.titles.map((title, index) => ({ title, order: index + 1, required: true, source: item.blocks[0]?.slice(0, 240) })),
+    };
+  });
+}
+
+function structuralRulesForChapter(rules: PromptChapterStructuralRule[] | undefined, chapter: DocumentTemplateChapter, chapterIndex?: number) {
+  return (rules || []).filter(rule => {
+    if (rule.chapterIndex !== undefined && chapterIndex !== undefined && rule.chapterIndex === chapterIndex) return true;
+    if (rule.chapterTitle && sectionTitleEquivalent(rule.chapterTitle, chapter.title)) return true;
+    return false;
+  });
+}
+
+export function normalizePlannedSections(sections: string[] = [], chapterTitle: string) {
+  const result: string[] = [];
+  for (const section of sections) {
+    const title = normalizePlannedSectionTitle(section);
+    if (!title || isInvalidPlannedSectionTitle(title, chapterTitle)) continue;
+    if (!result.some(item => sectionTitleEquivalent(item, title))) result.push(title);
+  }
+  return result;
+}
+
+function applyPromptStructuralRules(sections: string[], chapterTitle: string, rules: PromptChapterStructuralRule[]) {
+  const locked = rules.flatMap(rule => rule.requiredSections).sort((a, b) => (a.order || 0) - (b.order || 0));
+  const result = normalizePlannedSections(locked.map(rule => rule.title), chapterTitle);
+  for (const section of normalizePlannedSections(sections, chapterTitle)) {
+    if (!result.some(item => sectionTitleEquivalent(item, section))) result.push(section);
+  }
+  return result;
+}
+
+function compoundSectionSeeds(chapterTitle: string) {
+  const title = normalizePlannedSectionTitle(chapterTitle);
+  const seeds: string[] = [];
+  const completeClause = /体系|措施|管理|保障|方案|要求|计划|控制|配置/u;
+  const addAndGroup = (value: string) => {
+    const match = /^(.*?)([^与和及、,，；;]+(?:[与和及][^与和及、,，；;]+)+)(的.+)$/u.exec(value);
+    if (!match) return false;
+    const prefix = match[1] || '';
+    const suffix = match[3] || '';
+    for (const item of match[2].split(/[与和及]/u)) seeds.push(normalizePlannedSectionTitle(`${prefix}${item}${suffix}`));
+    return true;
+  };
+  const addCommaGroup = (value: string) => {
+    const parts = value.split(/[、,，]/u).map(normalizePlannedSectionTitle).filter(Boolean);
+    if (parts.length > 1 && parts.every(part => part.length >= 4 && completeClause.test(part))) {
+      for (const part of parts) {
+        if (!addAndGroup(part)) seeds.push(part);
+      }
+      return true;
+    }
+    const match = /^(.*?)([^、,，；;]+(?:[、,，][^、,，；;]+)+)(的.+)$/u.exec(value);
+    if (!match) return false;
+    const prefix = match[1] || '';
+    const suffix = match[3] || '';
+    for (const item of match[2].split(/[、,，]/u)) seeds.push(normalizePlannedSectionTitle(`${prefix}${item}${suffix}`));
+    return true;
+  };
+  for (const part of title.split(/[；;]/u)) {
+    if (addCommaGroup(part) || addAndGroup(part)) continue;
+    const cleaned = normalizePlannedSectionTitle(part);
+    if (cleaned && cleaned !== title) seeds.push(cleaned);
+  }
+  return Array.from(new Set(seeds)).filter(item => item.length >= 4 && item.length <= 60 && item !== title && !isInvalidPlannedSectionTitle(item, chapterTitle));
+}
+
+function evidenceParameterDensity(evidence: DocumentEvidence[]) {
+  const text = evidence.map(item => `${item.sectionTitle || ''}\n${item.content}`).join('\n').slice(0, 30000);
+  const matches = text.match(/\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年|万元|元)|DN\s*\d+|Φ\s*\d+|φ\s*\d+|C\d{2,}|HRB\d+|GB\/?T?\s*[\w.-]+|JGJ\s*[\w.-]+/giu) || [];
+  return new Set(matches.map(item => item.replace(/\s+/gu, ''))).size;
+}
+
+export function minimumSectionCount(chapter: DocumentTemplateChapter, targetWords: number, evidence: DocumentEvidence[], lockedCount: number) {
+  const title = chapter.title;
+  const coreChapter = /质量|安全|工期|进度|物资|材料|机械|设备|劳动力|危大|专项|文明|总平面|施工方法|施工方案/u.test(title);
+  let minimum = targetWords >= 14000 ? 6 : targetWords >= 8000 ? 5 : targetWords >= 5000 ? 4 : targetWords >= 3000 ? 4 : 3;
+  if (coreChapter) minimum = Math.max(minimum, 4);
+  const density = evidenceParameterDensity(evidence);
+  if (density >= 20) minimum = Math.max(minimum, 5);
+  else if (density >= 10) minimum = Math.max(minimum, 4);
+  return Math.max(minimum, lockedCount);
+}
+
+export function fallbackSectionsForChapter(chapterTitle: string) {
+  if (/质量/u.test(chapterTitle)) return ['质量目标与质量管理体系', '关键工序质量控制措施', '材料设备进场验收与检验', '质量检查试验与验收程序', '质量通病防治与整改闭环', '成品保护与资料管理'];
+  if (/安全/u.test(chapterTitle)) return ['安全生产管理体系', '危险源辨识与分级管控', '现场安全防护措施', '临时用电与机械设备安全管理', '应急处置与安全检查整改', '安全教育培训与交底'];
+  if (/工期|进度/u.test(chapterTitle)) return ['总工期目标与节点安排', '施工进度计划编制原则', '关键线路与工序穿插安排', '资源投入与工期保障措施', '进度偏差纠偏与动态调整', '工期风险识别与应对措施'];
+  if (/物资|材料/u.test(chapterTitle)) return ['主要材料设备需求分析', '材料采购与进场计划', '材料验收复试与保管', '周转材料配置与使用管理', '材料供应风险与保障措施'];
+  if (/机械|设备/u.test(chapterTitle)) return ['主要机械设备配置原则', '机械设备进退场计划', '机械设备调度与运行管理', '机械设备维护保养与安全检查', '关键设备保障措施'];
+  if (/劳动力/u.test(chapterTitle)) return ['劳动力配置原则', '各阶段劳动力投入计划', '专业工种与特种作业人员配置', '劳动力动态调配措施', '劳务管理与教育交底'];
+  if (/文明|环保/u.test(chapterTitle)) return ['现场封闭与场容场貌管理', '环境保护与污染防治措施', '材料设备定置化管理', '职业健康与消防文明管理', '文明施工检查与整改'];
+  if (/总平面|平面布置/u.test(chapterTitle)) return ['施工总平面布置原则', '临时道路与材料堆场布置', '临时用水用电及排水布置', '办公生活与加工区域布置', '总平面动态调整与管理'];
+  if (/危大|专项/u.test(chapterTitle)) return ['危大工程识别与清单管理', '专项施工方案编制与审批', '专家论证与技术交底', '现场实施监测与旁站管理', '应急处置与验收销项'];
+  if (/施工方法|施工方案|主要/u.test(chapterTitle)) return ['总体施工部署与流程安排', '主要分部分项施工方法', '关键工序技术控制要点', '资源配置与穿插组织', '质量安全与成品保护措施'];
+  return ['总体部署与责任分工', '实施流程与关键控制', '资源配置与资料依据', '质量安全与风险控制', '检查验收与闭环管理', '资料记录与成果移交'];
+}
+
+export async function planChapterSectionsWithLlm(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; chapterIndex?: number; evidence: DocumentEvidence[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; structuralRules?: PromptChapterStructuralRule[]; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics }) {
+  const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, input.evidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 5000, 12000) });
+  const chapterStructuralRules = structuralRulesForChapter(input.structuralRules, input.chapter, input.chapterIndex);
+  const lockedSections = chapterStructuralRules.flatMap(rule => rule.requiredSections).sort((a, b) => (a.order || 0) - (b.order || 0)).map(rule => rule.title);
+  const minSections = minimumSectionCount(input.chapter, input.targetWords, input.evidence, lockedSections.length);
+  const maxSections = Math.max(minSections, Math.min(7, input.targetWords >= 8000 ? 7 : 6));
+  const result = await callDocumentLlmJson<{ sections?: string[] }>([
+    '你是专业文档结构规划专家。',
+    '只根据用户提示词、章节标题和真实绑定资料规划本章二级小节；不得使用"目标与范围、资料依据、实施内容、质量控制"等通用占位小节凑数。',
+    '施工组织、技术措施、资源配置、质量、安全、工期、材料、设备、劳动力、危大工程等核心章节必须拆成足够的专业工作面，不得只输出两个泛化小节。',
+    '不得把提示词条件句或短语碎片作为小节标题，例如"判断是否涉、是否涉及、如涉及、雨季、冬季、高温、台风、大风等特殊气候"。',
+    '只返回 JSON。',
+  ].join('\n'), [
+    `文档模板：${input.template.name}`,
+    `章节标题：${input.chapter.title}`,
+    input.chapter.purpose && !isInvalidPlannedSectionTitle(input.chapter.purpose, input.chapter.title) ? `章节目的：${input.chapter.purpose}` : '',
+    input.requirement ? `用户要求：${input.requirement}` : '',
+    input.projectContext ? `上下文：\n${input.projectContext}` : '',
+    input.roleContext,
+    input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
+    lockedSections.length ? `系统已从提示词解析出本章强制二级小节，必须按此顺序置于本章小节最前，不得删除、改名或重排：${lockedSections.join('、')}` : '',
+    evidenceText ? `真实绑定资料：\n${evidenceText}` : '',
+    `请输出 ${minSections}-${maxSections} 个适合直接成稿的二级小节标题。标题必须具体、业务相关、能承载真实资料；每个标题控制在 16 个汉字以内，避免多个小节表达同一内容。核心章节不得只输出"总体部署与责任分工、实施流程与关键控制"两个泛化小节。`,
+    'JSON 格式：{"sections":["小节标题1","小节标题2"]}',
+  ].filter(Boolean).join('\n\n'), { maxTokens: 1600, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics, timeoutMs: 120000 });
+  const sections = Array.from(new Set(compoundSectionSeeds(input.chapter.title)));
+  for (const title of (result?.sections || []).map(normalizePlannedSectionTitle).filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title))) {
+    if (!sections.some(section => section.includes(title) || title.includes(section))) sections.push(title);
+  }
+  const fallbackSeeds = [input.chapter.title, ...(input.chapter.requiredFacts || []), ...(input.chapter.queries || [])]
+    .flatMap(item => String(item || '').split(/[；;。\n]/u))
+    .map(normalizePlannedSectionTitle)
+    .filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title));
+  const typedSeeds = fallbackSectionsForChapter(input.chapter.title)
+    .filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title));
+  for (const seed of [...fallbackSeeds, ...typedSeeds]) {
+    if (sections.length >= minSections) break;
+    if (!sections.some(section => section.includes(seed) || seed.includes(section))) sections.push(seed);
+  }
+  return applyPromptStructuralRules(sections, input.chapter.title, chapterStructuralRules).slice(0, Math.max(maxSections, lockedSections.length));
+}

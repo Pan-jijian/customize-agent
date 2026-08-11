@@ -1,7 +1,10 @@
 import * as path from 'node:path';
 import { listKnowledgeFiles } from '../knowledge/kbService';
-import type { DocumentEvidence, DocumentTemplate, DocumentTemplateChapter, ProjectBinding } from './types';
+import type { DocumentEvidence, DocumentTemplate, DocumentTemplateChapter, ProjectBinding, ProjectGraph } from './types';
+import { projectGraphPrompt } from './projectGraph';
 import { cleanEvidenceText, selectEvidenceByBudget } from './evidence';
+import { chineseTokenMatch } from './textMatch';
+import { selectByScore, textImportanceScore } from './selection';
 
 export type MaterialKind =
   | 'tender_document'
@@ -177,8 +180,21 @@ function chapterKinds(title: string): MaterialKind[] {
 }
 
 function queriesForKind(chapter: DocumentTemplateChapter, kind: MaterialKind) {
-  const sections = (chapter.sections || []).slice(0, 8).join(' ');
-  const facts = chapter.requiredFacts.slice(0, 8).join(' ');
+  // 用评分函数选择最重要的小节和事实（而非粗暴截断前 N 个）
+  const sectionsResult = selectByScore(
+    chapter.sections || [],
+    s => textImportanceScore(s),
+    { maxItems: 12, maxChars: 600 },
+    `queriesForKind:${chapter.id}:sections`,
+  );
+  const factsResult = selectByScore(
+    chapter.requiredFacts,
+    f => textImportanceScore(f),
+    { maxItems: 12, maxChars: 600 },
+    `queriesForKind:${chapter.id}:facts`,
+  );
+  const sections = sectionsResult.selected.join(' ');
+  const facts = factsResult.selected.join(' ');
   const base = `${chapter.title} ${sections} ${facts}`.trim();
   const byKind: Record<MaterialKind, string[]> = {
     tender_document: [base, `${chapter.title} 招标范围 工期 质量 标准 评审 响应要求`, '项目概况 招标范围 投标文件 技术标 施工组织设计'],
@@ -194,9 +210,10 @@ function queriesForKind(chapter: DocumentTemplateChapter, kind: MaterialKind) {
   return [...new Set(byKind[kind].filter(Boolean))];
 }
 
-export function buildProjectUnderstanding(template: DocumentTemplate, profile: ProjectMaterialProfile): ProjectUnderstanding {
+export function buildProjectUnderstanding(template: DocumentTemplate, profile: ProjectMaterialProfile, projectGraph?: ProjectGraph): ProjectUnderstanding {
+  const graphPrompt = projectGraph ? projectGraphPrompt(projectGraph) : '';
   const globalWritingFocus = [
-    `本次文档必须围绕项目资料包“${profile.projectName}”展开，不得把其他项目资料混入正文。`,
+    `本次文档必须围绕项目资料包”${profile.projectName}”展开，不得把其他项目资料混入正文。`,
     '招标文件正文用于确定项目边界、招标响应、工期质量安全目标和评审关注点。',
     '工程量清单用于确定主要工程内容、分部分项、项目特征、资源配置和施工方法依据。',
     '图纸/设计资料用于确定施工对象、空间关系、构造做法、专业接口和重点难点。',
@@ -206,21 +223,36 @@ export function buildProjectUnderstanding(template: DocumentTemplate, profile: P
     const kinds: MaterialKind[] = chapterKinds(chapter.title).filter(kind => profile.groups[kind]?.length > 0);
     const fallbackKinds: MaterialKind[] = ['tender_document', 'bill_of_quantities', 'drawing'];
     const mustUseMaterialKinds: MaterialKind[] = kinds.length ? kinds : fallbackKinds.filter(kind => profile.groups[kind]?.length > 0);
+    // 从 ProjectGraph 推导本章必须覆盖的工程内容（基于 token 匹配而非固定截断）
+    const graphWorksForChapter = (projectGraph?.works || []).filter(w => {
+      if (!w.name) return false;
+      const matchChapter = chineseTokenMatch(w.name, chapter.title);
+      const matchSections = (chapter.sections || []).some(s => chineseTokenMatch(w.name, s));
+      return matchChapter || matchSections;
+    }).map(w => `${w.name}：${w.scope.slice(0, 120)}`);
+    const graphMethodsForChapter = (projectGraph?.methods || []).filter(m => {
+      if (!m.applicableWorks?.length) return false;
+      return m.applicableWorks.some(aw => {
+        const matchChapter = chineseTokenMatch(aw, chapter.title);
+        const matchSections = (chapter.sections || []).some(s => chineseTokenMatch(aw, s));
+        return matchChapter || matchSections;
+      });
+    }).map(m => m.name);
     return {
       chapterId: chapter.id,
       chapterTitle: chapter.title,
-      writingGoal: `围绕“${chapter.title}”组织本项目资料事实，优先体现招标要求、清单工程内容、图纸施工对象和补疑修正口径。`,
+      writingGoal: `围绕”${chapter.title}”组织本项目资料事实，优先体现招标要求、清单工程内容、图纸施工对象和补疑修正口径。`,
       mustUseMaterialKinds,
       evidenceQueries: Object.fromEntries(ALL_KINDS.map(kind => [kind, queriesForKind(chapter, kind)])) as Record<MaterialKind, string[]>,
-      mustCover: [chapter.purpose, ...(chapter.sections || []), ...chapter.requiredFacts].filter(Boolean).slice(0, 16),
+      mustCover: [...new Set([chapter.purpose, ...(chapter.sections || []), ...chapter.requiredFacts, ...graphWorksForChapter, ...graphMethodsForChapter])].filter(Boolean).slice(0, 24),
       avoidWriting: ['不得脱离项目资料泛泛套写通用内容', '不得编造资料未确认的数字、日期、金额、工程量、规格和标准', '不得忽略补疑/澄清对原始资料的修正'],
     };
   });
-  const prompt = projectUnderstandingPrompt({ profile, globalWritingFocus, chapterPlans });
+  const prompt = projectUnderstandingPrompt({ profile, globalWritingFocus, chapterPlans, graphPrompt });
   return { profile, globalWritingFocus, chapterPlans, prompt };
 }
 
-export function projectUnderstandingPrompt(input: { profile: ProjectMaterialProfile; globalWritingFocus: string[]; chapterPlans: ChapterMaterialPlan[] }) {
+export function projectUnderstandingPrompt(input: { profile: ProjectMaterialProfile; globalWritingFocus: string[]; chapterPlans: ChapterMaterialPlan[]; graphPrompt?: string }) {
   const { profile } = input;
   const inventoryLines = ALL_KINDS
     .map(kind => `${materialKindLabel(kind)}：${profile.groups[kind].length ? profile.groups[kind].map(file => `${file.fileName}(${file.chunkCount || 0})`).join('、') : '未识别'}`)
@@ -243,6 +275,7 @@ export function projectUnderstandingPrompt(input: { profile: ProjectMaterialProf
     ...input.globalWritingFocus.map(item => `- ${item}`),
     '章节资料使用计划：',
     chapterLines,
+    input.graphPrompt || '',
   ].filter(Boolean).join('\n');
 }
 
@@ -283,7 +316,14 @@ export async function retrievePlannedMaterialEvidence(input: {
   for (const kind of input.plan.mustUseMaterialKinds) {
     const filePaths = input.profile.groups[kind].map(file => file.filePath).filter(filePath => input.scopedFilePaths.includes(filePath));
     if (filePaths.length === 0) continue;
-    for (const query of input.plan.evidenceQueries[kind].slice(0, 3)) {
+    // 用评分选择最重要的查询（而非仅取前 3 个）
+    const kindQueries = selectByScore(
+      input.plan.evidenceQueries[kind] || [],
+      q => textImportanceScore(q),
+      { maxItems: 6, maxChars: 1200 },
+      `evidence-queries:${kind}`,
+    ).selected;
+    for (const query of kindQueries) {
       if (input.signal?.aborted) throw new Error('aborted');
       const result = await input.manager.search(input.projectRoot, query, { scope: 'project', filters: { filePaths }, limit: input.limitPerQuery, weights: { keyword: 0.68, vector: 0.25, rewrite: 0.85, hybridBonus: 0.3 }, generationMode: false });
       evidence.push(...result.results.filter(item => filePaths.includes(item.filePath)).map(item => ({
@@ -304,9 +344,13 @@ export async function retrievePlannedMaterialEvidence(input: {
 export function sampleProjectMaterialEvidence(input: { project: { getFileDetail?: (relativePath: string, options?: { maxChunkContentChars?: number }) => { file: { relativePath: string }; chunks: Array<{ content: string; sectionTitle?: string }>; totalChunkCount?: number } | undefined }; chapter: DocumentTemplateChapter; plan?: ChapterMaterialPlan; profile: ProjectMaterialProfile; scopedFilePaths: string[]; highRisk?: boolean }) {
   const evidence: DocumentEvidence[] = [];
   const plannedKinds = new Set(input.plan?.mustUseMaterialKinds || []);
-  const files = input.profile.files.filter(file => input.scopedFilePaths.includes(file.filePath) && (plannedKinds.size === 0 || plannedKinds.has(file.kind))).slice(0, input.highRisk ? 80 : 40);
+  // 按优先级（kind priority + chunk count）评分选择文件，而非硬截断前 N 个
+  const matchingFiles = input.profile.files.filter(file => input.scopedFilePaths.includes(file.filePath) && (plannedKinds.size === 0 || plannedKinds.has(file.kind)));
+  const fileLimit = input.highRisk ? 80 : 40;
+  const topFiles = matchingFiles.sort((a, b) => b.priority - a.priority).slice(0, fileLimit);
   const tokens = [input.chapter.title, ...(input.chapter.sections || []), ...input.chapter.requiredFacts].filter(Boolean);
-  for (const file of files) {
+  const chunkLimit = input.highRisk ? 6 : 3;
+  for (const file of topFiles) {
     const detail = input.project.getFileDetail?.(file.filePath, { maxChunkContentChars: input.highRisk ? 24000 : 12000 });
     if (!detail?.chunks?.length) continue;
     const ranked = detail.chunks.map((chunk, index) => {
@@ -315,7 +359,7 @@ export function sampleProjectMaterialEvidence(input: { project: { getFileDetail?
       const hits = tokens.filter(token => text.includes(token)).length;
       const numericBonus = /\d+(?:\.\d+)?\s*(?:日历天|天|月|年|万元|元|㎡|m²|m³|米|mm|台|套|人|项|%|MPa|kPa)/u.test(content) ? 1 : 0;
       return { chunk, index, score: hits * 0.8 + numericBonus + (index === 0 ? 0.4 : 0) + file.priority / 120 };
-    }).filter(item => item.score > 0).sort((a, b) => b.score - a.score).slice(0, input.highRisk ? 6 : 3);
+    }).filter(item => item.score > 0).sort((a, b) => b.score - a.score).slice(0, chunkLimit);
     for (const item of ranked) evidence.push({
       chapterId: input.chapter.id,
       filePath: detail.file.relativePath,

@@ -216,6 +216,44 @@ function normalizeLooseMarkdownTables(input: string) {
   return output.join('\n').replace(/\n{3,}/gu, '\n\n');
 }
 
+/** 智能段落规范化：将单换行分隔的连续文本行转为双换行段落，避免导出时粘连 */
+function normalizeParagraphs(input: string): string {
+  const lines = input.split('\n');
+  const out: string[] = [];
+  let consecutiveText = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] || '';
+    const trimmed = line.trim();
+
+    // 空行、标题、表格、列表、代码块 → 保持原样，重置连续文本计数
+    if (!trimmed || /^(#{1,6}\s|\||[-*+]\s|\d+[.、]\s|```|<div|\[\[PAGE)/u.test(trimmed)) {
+      if (consecutiveText > 1) out.push(''); // 在连续文本块后补一个空行
+      out.push(line);
+      consecutiveText = 0;
+      continue;
+    }
+
+    consecutiveText += 1;
+
+    // 连续文本行之间：如果上一行以句号/分号结尾，且本行不是续句，插入空行
+    if (consecutiveText > 1) {
+      const prevLine = (out[out.length - 1] || '').trim();
+      const PARAGRAPH_START_RE = /^(?:根据|依据|按照|针对|对于|关于|同时|此外|另外|因此|所以|但是|然而|并且|而且|以及|或者|一是|二是|三是|步骤\d|第[\d一二三四五六七八九十]+[步条])/u;
+      const prevEnds = /[。；）)」』]$/u.test(prevLine);
+      const thisStarts = /^[（(「『\d]/u.test(trimmed) || PARAGRAPH_START_RE.test(trimmed);
+      if (prevEnds || thisStarts) {
+        out.push('');
+        consecutiveText = 1;
+      }
+    }
+
+    out.push(line);
+  }
+
+  return out.join('\n').replace(/\n{3,}/gu, '\n\n');
+}
+
 function normalizeExportUnits(input: string) {
   const normalizePower = (value: string) => value
     .replace(/m\s*<sup>\s*2\s*<\/sup>/giu, 'm²')
@@ -228,7 +266,7 @@ function normalizeExportUnits(input: string) {
     .replace(/(?<=\d)m\s*3(?![\p{L}\p{N}_])/giu, 'm³')
     .replace(/(?<![\p{L}\p{N}_])m\s*2(?![\p{L}\p{N}_])/giu, 'm²')
     .replace(/(?<![\p{L}\p{N}_])m\s*3(?![\p{L}\p{N}_])/giu, 'm³');
-  return normalizeLooseMarkdownTables(normalizePower(stripMarkdownDocumentFence(input)));
+  return normalizeParagraphs(normalizeLooseMarkdownTables(normalizePower(stripMarkdownDocumentFence(input))));
 }
 
 function stripInlineMarkdown(input: string) {
@@ -267,21 +305,32 @@ function lengthToTwips(value: string | undefined, fallbackCm: number) {
 
 function resolveExportStyle(settings?: DocumentExportSettings) {
   const raw = exportStyle(settings);
-  const bodyPt = pointsValue(raw.bodySize, 14);
-  const titlePt = pointsValue(raw.titleSize, 16);
-  const linePt = pointsValue(raw.lineHeight, 22);
+  const typography = settings?.typography || {};
+  // 模板有配置就用模板的，没有就用默认值
+  // 默认：正文宋体小四(12pt)、一级标题黑体二号(22pt)、二级黑体小三(15pt)、三级黑体四号(14pt)、1.5倍行距
+  const bodyPt = typography.bodySize ? pointsValue(typography.bodySize, 12) : 12;
+  const h1Pt = typography.titleSize ? pointsValue(typography.titleSize, 22) : 22;
+  const h2Pt = 15;
+  const h3Pt = 14;
+  const linePt = typography.lineHeight ? pointsValue(typography.lineHeight, 18) : 18;
+  const headingFont = typography.fontFamily ? typography.fontFamily : '黑体';
+  const bodyFont = '宋体';
   return {
     ...raw,
-    bodyPt,
-    titlePt,
-    linePt,
+    bodyPt, h1Pt, h2Pt, h3Pt, linePt,
     bodyHalfPoints: Math.round(bodyPt * 2),
-    titleHalfPoints: Math.round(titlePt * 2),
+    h1HalfPoints: Math.round(h1Pt * 2),
+    h2HalfPoints: Math.round(h2Pt * 2),
+    h3HalfPoints: Math.round(h3Pt * 2),
     lineTwips: Math.round(linePt * 20),
-    fontEastAsia: '宋体',
-    fontAscii: 'SimSun',
+    fontHeading: headingFont,
+    fontHeadingAscii: headingFont === '黑体' ? 'SimHei' : headingFont,
+    fontBody: bodyFont,
+    fontBodyAscii: 'SimSun',
     bodyCss: `${bodyPt}pt`,
-    titleCss: `${titlePt}pt`,
+    h1Css: `${h1Pt}pt`,
+    h2Css: `${h2Pt}pt`,
+    h3Css: `${h3Pt}pt`,
     lineCss: `${linePt}pt`,
   };
 }
@@ -418,7 +467,7 @@ function docxTable(rows: string[][], style: ReturnType<typeof resolveExportStyle
   const grid = `<w:tblGrid>${columnWidths.map(width => `<w:gridCol w:w="${width}"/>`).join('')}</w:tblGrid>`;
   const cells = (row: string[], rowIndex: number) => columnWidths.map((width, columnIndex) => {
     const cell = row[columnIndex] || '';
-    return `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/><w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="120" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tcMar>${rowIndex === 0 ? '<w:shd w:val="clear" w:fill="F3F4F6"/>' : ''}</w:tcPr>${docxParagraph(cell, { bold: rowIndex === 0, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingAfter: 0, align: rowIndex === 0 ? 'center' : 'left' })}</w:tc>`;
+    return `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/><w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="120" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tcMar>${rowIndex === 0 ? '<w:shd w:val="clear" w:fill="F3F4F6"/>' : ''}</w:tcPr>${docxParagraph(cell, { bold: rowIndex === 0, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontBody, fontAscii: style.fontBodyAscii, spacingAfter: 0, align: rowIndex === 0 ? 'center' : 'left' })}</w:tc>`;
   }).join('');
   return `<w:tbl><w:tblPr><w:tblW w:w="${tableWidth}" w:type="dxa"/><w:tblLook w:firstRow="1" w:noHBand="0"/><w:tblBorders><w:top w:val="single" w:sz="6" w:color="666666"/><w:left w:val="single" w:sz="6" w:color="666666"/><w:bottom w:val="single" w:sz="6" w:color="666666"/><w:right w:val="single" w:sz="6" w:color="666666"/><w:insideH w:val="single" w:sz="4" w:color="666666"/><w:insideV w:val="single" w:sz="4" w:color="666666"/></w:tblBorders></w:tblPr>${grid}${rows.map((row, rowIndex) => `<w:tr>${cells(row, rowIndex)}</w:tr>`).join('')}</w:tbl>`;
 }
@@ -433,13 +482,13 @@ function docxTocFieldParagraph(style: ReturnType<typeof resolveExportStyle>) {
 
 function docxTocParagraph(line: string, style: ReturnType<typeof resolveExportStyle>) {
   const sectionLine = isTocSectionLine(line);
-  return docxParagraph(stripInlineMarkdown(line), { bold: !sectionLine, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingAfter: sectionLine ? 30 : 80, indentLeft: sectionLine ? 420 : 0, align: 'left' });
+  return docxParagraph(stripInlineMarkdown(line), { bold: !sectionLine, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontBody, fontAscii: style.fontBodyAscii, spacingAfter: sectionLine ? 30 : 80, indentLeft: sectionLine ? 420 : 0, align: 'left' });
 }
 
 function docxHeadingParagraph(level: number, text: string, style: ReturnType<typeof resolveExportStyle>) {
-  if (level === 2) return docxParagraph(text, { styleId: 'Heading1', outlineLevel: 0, bold: true, size: Math.max(style.titleHalfPoints + 4, 36), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: 'center', spacingBefore: 260, spacingAfter: 180, keepNext: true });
-  if (level === 3) return docxParagraph(text, { styleId: 'Heading2', outlineLevel: 1, bold: true, size: Math.max(style.titleHalfPoints, 32), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingBefore: 180, spacingAfter: 100, keepNext: true });
-  return docxParagraph(text, { styleId: 'Heading3', outlineLevel: 2, bold: true, size: Math.max(style.bodyHalfPoints, 28), line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, spacingBefore: 120, spacingAfter: 80, keepNext: true });
+  if (level === 2) return docxParagraph(text, { styleId: 'Heading1', outlineLevel: 0, bold: true, size: style.h1HalfPoints, line: style.lineTwips, fontEastAsia: style.fontHeading, fontAscii: style.fontHeadingAscii, align: 'center', spacingBefore: 260, spacingAfter: 180, keepNext: true });
+  if (level === 3) return docxParagraph(text, { styleId: 'Heading2', outlineLevel: 1, bold: true, size: style.h2HalfPoints, line: style.lineTwips, fontEastAsia: style.fontHeading, fontAscii: style.fontHeadingAscii, align: 'left', spacingBefore: 180, spacingAfter: 100, keepNext: true });
+  return docxParagraph(text, { styleId: 'Heading3', outlineLevel: 2, bold: true, size: style.h3HalfPoints, line: style.lineTwips, fontEastAsia: style.fontHeading, fontAscii: style.fontHeadingAscii, align: 'left', spacingBefore: 120, spacingAfter: 80, keepNext: true });
 }
 
 function orderedListMatch(line: string) {
@@ -456,7 +505,7 @@ function unorderedListMatch(line: string) {
 
 function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, context?: DocxBuildContext) {
   const style = resolveExportStyle(settings);
-  const titleSize = style.titleHalfPoints;
+  const h1Size = style.h1HalfPoints;
   const bodySize = style.bodyHalfPoints;
   const normalizedMarkdown = normalizeExportUnits(markdown);
   const lines = normalizedMarkdown.replace(/<div class="page-break"><\/div>/gu, '\n[[PAGE_BREAK]]\n').split('\n');
@@ -472,7 +521,7 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, 
     if (line === '[[PAGE_BREAK]]') { inToc = false; inCover = false; blocks.push(docxParagraph('', { pageBreak: true })); index += 1; continue; }
     if (inCover) {
       const coverText = stripInlineMarkdown(line.replace(/^#\s+/u, ''));
-      if (coverText) blocks.push(docxParagraph(coverText, { bold: true, size: Math.max(titleSize + 8, 44), line: Math.round(style.lineTwips * 1.15), fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: 'center', spacingBefore: 360, spacingAfter: 220 }));
+      if (coverText) blocks.push(docxParagraph(coverText, { bold: true, size: Math.max(h1Size + 8, 44), line: Math.round(style.lineTwips * 1.15), fontEastAsia: style.fontHeading, fontAscii: style.fontHeadingAscii, align: 'center', spacingBefore: 360, spacingAfter: 220 }));
       index += 1;
       continue;
     }
@@ -498,17 +547,31 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, 
     if (!inToc && orderedList) {
       const indentLeft = orderedList.level === 0 ? 720 : orderedList.level === 1 ? 1080 : 1440;
       const hanging = orderedList.level === 0 ? 360 : orderedList.level === 1 ? 420 : 480;
-      blocks.push(docxParagraph(`${orderedList.marker} ${orderedList.text}`, { styleId: 'ListParagraph', numbering: { numId: 1, level: orderedList.level }, size: bodySize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, indentLeft, hanging, spacingAfter: 60 }));
+      blocks.push(docxParagraph(`${orderedList.marker} ${orderedList.text}`, { styleId: 'ListParagraph', numbering: { numId: 1, level: orderedList.level }, size: bodySize, line: style.lineTwips, fontEastAsia: style.fontBody, fontAscii: style.fontBodyAscii, indentLeft, hanging, spacingAfter: 60 }));
       index += 1;
       continue;
     }
     if (!inToc && unorderedList) {
-      blocks.push(docxParagraph(`• ${unorderedList}`, { styleId: 'ListParagraph', size: bodySize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, indentLeft: 720, hanging: 360, spacingAfter: 60 }));
+      blocks.push(docxParagraph(`• ${unorderedList}`, { styleId: 'ListParagraph', size: bodySize, line: style.lineTwips, fontEastAsia: style.fontBody, fontAscii: style.fontBodyAscii, indentLeft: 720, hanging: 360, spacingAfter: 60 }));
       index += 1;
       continue;
     }
+    // 识别伪标题（如 **项目基本信息表**、**施工范围及项目特征**），在导出中提升字号
+    const pseudoHeading = /^\*\*[^*]+\*\*\s*$/u.test(line) && plainLine.length <= 40;
     const boldLine = /^\*\*[^*]+\*\*\s*[:：]?\s*$/u.test(line) || /^（[一二三四五六七八九十]+）/u.test(plainLine) || /^[一二三四五六七八九十]+、/u.test(plainLine);
-    blocks.push(inToc ? docxTocParagraph(line, style) : docxParagraph(plainLine, { bold: boldLine, size: bodySize, line: style.lineTwips, fontEastAsia: style.fontEastAsia, fontAscii: style.fontAscii, align: 'both', firstLine: boldLine ? 0 : 560, spacingBefore: boldLine ? 80 : 0 }));
+    blocks.push(inToc
+      ? docxTocParagraph(line, style)
+      : docxParagraph(plainLine, {
+          bold: boldLine || pseudoHeading,
+          size: pseudoHeading ? Math.max(style.bodyHalfPoints + 2, 30) : bodySize,
+          line: style.lineTwips,
+          fontEastAsia: style.fontBody,
+          fontAscii: style.fontBodyAscii,
+          align: pseudoHeading ? 'left' : 'both',
+          firstLine: (boldLine || pseudoHeading) ? 0 : 560,
+          spacingBefore: pseudoHeading ? 120 : (boldLine ? 80 : 0),
+          spacingAfter: pseudoHeading ? 60 : undefined,
+        }));
     index += 1;
   }
   return blocks.join('');
@@ -516,9 +579,9 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, 
 
 function docxStylesXml(settings?: DocumentExportSettings) {
   const style = resolveExportStyle(settings);
-  const fontAttrs = `w:ascii="${escapeXml(style.fontAscii)}" w:hAnsi="${escapeXml(style.fontAscii)}" w:eastAsia="${escapeXml(style.fontEastAsia)}" w:cs="${escapeXml(style.fontAscii)}"`;
+  const fontAttrs = `w:ascii="${escapeXml(style.fontBodyAscii)}" w:hAnsi="${escapeXml(style.fontBodyAscii)}" w:eastAsia="${escapeXml(style.fontBody)}" w:cs="${escapeXml(style.fontBodyAscii)}"`;
   const headingStyle = (id: string, name: string, size: number, level: number, before: number, after: number, align?: string) => `<w:style w:type="paragraph" w:styleId="${id}"><w:name w:val="${name}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="${9 + level}"/><w:qFormat/><w:rPr><w:b/><w:rFonts ${fontAttrs}/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr><w:pPr><w:keepNext/><w:keepLines/><w:outlineLvl w:val="${level}"/><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:before="${before}" w:after="${after}"/>${align ? `<w:jc w:val="${align}"/>` : ''}</w:pPr></w:style>`;
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:style>${headingStyle('Heading1', 'heading 1', Math.max(style.titleHalfPoints + 4, 36), 0, 260, 180, 'center')}${headingStyle('Heading2', 'heading 2', Math.max(style.titleHalfPoints, 32), 1, 180, 100)}${headingStyle('Heading3', 'heading 3', Math.max(style.bodyHalfPoints, 28), 2, 120, 80)}<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:uiPriority w:val="34"/><w:qFormat/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:style></w:styles>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:style>${headingStyle('Heading1', 'heading 1', Math.max(style.h1HalfPoints + 4, 36), 0, 260, 180, 'center')}${headingStyle('Heading2', 'heading 2', Math.max(style.h1HalfPoints, 32), 1, 180, 100)}${headingStyle('Heading3', 'heading 3', Math.max(style.bodyHalfPoints, 28), 2, 120, 80)}<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:uiPriority w:val="34"/><w:qFormat/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:style></w:styles>`;
 }
 
 function docxNumberingXml() {
@@ -531,7 +594,7 @@ function docxSettingsXml() {
 
 function docxFontTableXml(settings?: DocumentExportSettings) {
   const style = resolveExportStyle(settings);
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:font w:name="${escapeXml(style.fontEastAsia)}"><w:charset w:val="86"/><w:family w:val="roman"/></w:font><w:font w:name="${escapeXml(style.fontAscii)}"><w:family w:val="roman"/></w:font></w:fonts>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:font w:name="${escapeXml(style.fontBody)}"><w:charset w:val="86"/><w:family w:val="roman"/></w:font><w:font w:name="${escapeXml(style.fontBodyAscii)}"><w:family w:val="roman"/></w:font></w:fonts>`;
 }
 
 function docxCorePropertiesXml(title: string) {
@@ -631,10 +694,10 @@ function exportStyle(settings?: DocumentExportSettings) {
   const marginRight = cssValue(page.marginRight, '18mm');
   const marginBottom = cssValue(page.marginBottom, '22mm');
   const marginLeft = cssValue(page.marginLeft, '18mm');
-  const fontFamily = cssValue(typography.fontFamily, 'SimSun, 宋体, serif');
-  const lineHeight = pointsCss(typography.lineHeight, 22);
-  const titleSize = pointsCss(typography.titleSize, 16);
-  const bodySize = pointsCss(typography.bodySize, 14);
+  const fontFamily = typography.fontFamily || 'SimSun, 宋体, serif';
+  const lineHeight = typography.lineHeight || '18pt';
+  const titleSize = typography.titleSize || '22pt';
+  const bodySize = typography.bodySize || '12pt';
   return { paper, marginTop, marginRight, marginBottom, marginLeft, fontFamily, lineHeight, titleSize, bodySize };
 }
 
@@ -659,13 +722,13 @@ p{margin:0 0 7pt 0;text-align:justify;text-justify:inter-ideograph;text-indent:2
 strong{font-weight:700}
 ul,ol{margin:0 0 8pt 2em;padding:0}li{margin:0 0 4pt 0;text-align:justify;break-inside:avoid}
 h1,h2,h3,h4{font-family:${style.fontFamily};line-height:${style.lineCss};font-weight:700;color:#111827;page-break-after:avoid;break-after:avoid;break-inside:avoid}
-h1{text-align:center;font-size:${Math.max(style.titlePt + 6, 22)}pt;margin:80pt 0 28pt 0}
-h2{text-align:center;font-size:${Math.max(style.titlePt + 2, 18)}pt;border:0;padding:0;margin:24pt 0 14pt 0;break-before:auto;page-break-before:auto}
+h1{text-align:center;font-size:${Math.max(style.h1Pt + 6, 22)}pt;margin:80pt 0 28pt 0}
+h2{text-align:center;font-size:${Math.max(style.h1Pt + 2, 18)}pt;border:0;padding:0;margin:24pt 0 14pt 0;break-before:auto;page-break-before:auto}
 h2.document-chapter-heading:not(:first-child){page-break-before:always;break-before:page}
-h3{font-size:${style.titleCss};margin:16pt 0 7pt 0}
+h3{font-size:${style.h1Css};margin:16pt 0 7pt 0}
 h4{font-size:${style.bodyCss};margin:10pt 0 5pt 0}
 .document-toc{page-break-after:always;break-after:page}.document-toc h2{text-align:center;margin-top:0;page-break-before:auto;break-before:auto}.document-toc p{margin:0 0 4pt 0;text-align:left;text-indent:0}.document-toc .toc-chapter{font-weight:700;margin-top:8pt}.document-toc .toc-section{margin-left:2em}
-.document-cover{height:calc(100vh - ${style.marginTop} - ${style.marginBottom});page-break-after:always;break-after:page;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-size:${Math.max(style.titlePt + 8, 24)}pt;line-height:${Math.max(style.linePt + 10, 34)}pt;font-weight:700}.document-cover h1,.document-cover p{font-size:${Math.max(style.titlePt + 8, 24)}pt;line-height:${Math.max(style.linePt + 10, 34)}pt;font-weight:700;text-align:center;text-indent:0;margin:0 0 18pt 0}
+.document-cover{height:calc(100vh - ${style.marginTop} - ${style.marginBottom});page-break-after:always;break-after:page;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-size:${Math.max(style.h1Pt + 8, 24)}pt;line-height:${Math.max(style.linePt + 10, 34)}pt;font-weight:700}.document-cover h1,.document-cover p{font-size:${Math.max(style.h1Pt + 8, 24)}pt;line-height:${Math.max(style.linePt + 10, 34)}pt;font-weight:700;text-align:center;text-indent:0;margin:0 0 18pt 0}
 img{display:block;max-width:100%;max-height:500px;object-fit:contain;margin:10pt auto;page-break-inside:avoid;break-inside:avoid}
 table{width:100%;border-collapse:collapse;table-layout:auto;page-break-inside:auto;break-inside:auto;margin:8pt 0 10pt 0}
 thead{display:table-header-group}tfoot{display:table-footer-group}tr{page-break-inside:avoid;break-inside:avoid;page-break-after:auto}

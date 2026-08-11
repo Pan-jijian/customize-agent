@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { DocumentDraftChapter, GeneratedDocumentDraft, DocumentAsset } from '../document-workflow/types';
-import { generateDocumentDraft } from '../document-workflow';
+import { generateDocumentDraft, getDocumentTemplate } from '../document-workflow';
 import { collectSectionContentGaps } from '../document-workflow/qualityValidation';
 import { computeProjectId } from '@customize-agent/knowledge';
 import { getProjectRoot } from '../knowledge/kbService';
@@ -17,6 +17,7 @@ export interface GeneratedDocumentRecord {
   taskId?: string;
   templateId: string;
   templateName?: string;
+  templateVersion?: number;
   title: string;
   requirement: string;
   projectRoot?: string;
@@ -30,6 +31,7 @@ export interface GeneratedDocumentRecord {
   partialChapters?: GeneratedDocumentDraft['partialChapters'];
   checkpointChapters?: DocumentDraftChapter[];
   reviewMetadata?: GeneratedDocumentDraft['reviewMetadata'];
+  promptProvenance?: GeneratedDocumentDraft['promptProvenance'];
   assets: DocumentAsset[];
   createdAt: number;
   updatedAt: number;
@@ -68,6 +70,8 @@ function summarizeCheckpointChapters(chapters: DocumentDraftChapter[] | undefine
     chars: documentTextLength(chapter.content),
     status: chapter.content.trim().length > 0 ? 'completed' as const : 'failed' as const,
     updatedAt: Date.now(),
+    timedOut: chapter.timedOut,
+    elapsedMs: chapter.elapsedMs,
   }));
 }
 
@@ -404,6 +408,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     id: documentId,
     taskId,
     templateId: input.templateId,
+    templateVersion: getDocumentTemplate(input.templateId)?.version,
     title: '生成中',
     requirement: input.requirement || '',
     maxEvidencePerChapter: input.maxEvidencePerChapter,
@@ -498,6 +503,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     const record = saveGeneratedDocument(trimEvidenceContent({
       ...current,
       templateName: result.templateName,
+      templateVersion: result.templateVersion ?? current.templateVersion,
       title: result.title,
       markdown: result.markdown,
       status: result.exportGate.passed ? 'completed' : 'failed',
@@ -506,6 +512,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       partialChapters: result.partialChapters,
       checkpointChapters: result.chapters,
       reviewMetadata: result.reviewMetadata,
+      promptProvenance: result.promptProvenance ?? current.promptProvenance,
       assets: result.assets || [],
       completedAt: Date.now(),
       warningIssues,

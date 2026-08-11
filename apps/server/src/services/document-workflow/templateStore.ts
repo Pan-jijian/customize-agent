@@ -50,7 +50,14 @@ export interface ResolvedPromptContent {
   contentPreview: string;
   executionType: string;
   category: PromptExecutionCategory;
-  bindingSource: 'projectRole';
+  /** 完整绑定链路：projectRole:<configId>:<roleId>:order=<n> */
+  bindingSource: string;
+  /** 项目角色配置 ID */
+  roleConfigId?: string;
+  /** 提示词角色名称 */
+  roleName?: string;
+  /** 在项目角色配置中的排序 */
+  order?: number;
 }
 
 export interface PromptBindingPlan {
@@ -79,6 +86,13 @@ function promptConfigPath() {
   return path.join(agentHome(), 'prompts.json');
 }
 
+/** 计算模版内容签名（排除版本元数据），用于检测内容是否发生实质性变更 */
+function templateContentSignature(template: DocumentTemplate): string {
+  const { version, updatedAt, changeLog, ...content } = template as DocumentTemplate & { version?: unknown; updatedAt?: unknown; changeLog?: unknown };
+  const canonical = JSON.stringify(content, Object.keys(content).sort());
+  return createHash('sha256').update(canonical).digest('hex');
+}
+
 function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
   return {
     ...template,
@@ -87,6 +101,9 @@ function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
     description: template.description || '',
     category: template.category || '自定义',
     outputTitle: template.outputTitle || template.name || '文档',
+    version: Number.isFinite(template.version) && (template.version as number) > 0 ? Math.floor(template.version as number) : 1,
+    updatedAt: Number.isFinite(template.updatedAt) ? template.updatedAt : Date.now(),
+    changeLog: Array.isArray(template.changeLog) ? template.changeLog.filter((e: unknown) => e && typeof e === 'object' && Number.isFinite((e as Record<string, unknown>).version) && typeof (e as Record<string, unknown>).summary === 'string').slice(0, 50) : [],
     projectRoleConfigId: template.projectRoleConfigId || undefined,
     chapters: Array.isArray(template.chapters) && template.chapters.length > 0 ? template.chapters.map((chapter, index) => ({
       id: (chapter.id || `chapter-${index + 1}`).replace(/[^a-zA-Z0-9_-]/gu, '-').slice(0, 80),
@@ -116,8 +133,19 @@ function readCustomTemplates(): DocumentTemplate[] {
   try {
     const file = templateStorePath();
     if (!fs.existsSync(file)) return [];
-    return (JSON.parse(fs.readFileSync(file, 'utf-8')) as DocumentTemplate[]).map(sanitizeTemplate);
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (!Array.isArray(raw)) {
+      fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
+      return [];
+    }
+    return (raw as DocumentTemplate[]).map(sanitizeTemplate);
   } catch {
+    try {
+      const file = templateStorePath();
+      if (fs.existsSync(file)) fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
+    } catch {
+      // 备份失败，放弃
+    }
     return [];
   }
 }
@@ -198,8 +226,10 @@ export function buildPromptBindingPlan(template: DocumentTemplate): PromptBindin
     const prompt = readPromptById(binding.promptId);
     if (!prompt) continue;
     const role = roles.find(candidate => candidate.id === binding.roleId);
+    const configItem = projectConfig?.promptRoles.find(item => item.roleId === binding.roleId);
     const executionType = role?.executionType || promptRoleExecutionTypeFromId(binding.roleId);
     const category = categoryForPrompt(binding.roleId, executionType, prompt.name);
+    const bindingSource = `projectRole:${projectConfig?.id || 'unknown'}:${binding.roleId}:order=${configItem?.order ?? 0}`;
     prompts.push({
       ...prompt,
       roleId: binding.roleId,
@@ -207,7 +237,10 @@ export function buildPromptBindingPlan(template: DocumentTemplate): PromptBindin
       contentPreview: promptContentPreview(prompt.content),
       executionType,
       category,
-      bindingSource: 'projectRole',
+      bindingSource,
+      roleConfigId: projectConfig?.id,
+      roleName: role?.name,
+      order: configItem?.order,
     });
   }
   return {
@@ -237,12 +270,42 @@ export function getDocumentTemplate(templateId: string): DocumentTemplate | unde
   return listDocumentTemplates().find(template => template.id === templateId);
 }
 
+/** 获取指定版本的模版溯源信息（不保留历史内容快照，仅用于溯源展示） */
+export function getTemplateAtVersion(templateId: string, reqVersion: number): { template: DocumentTemplate; history: Array<{ version: number; timestamp: number; summary: string }>; currentVersion: number } | undefined {
+  const template = getDocumentTemplate(templateId);
+  if (!template) return undefined;
+  const currentVersion = template.version || 1;
+  const clampedVersion = Math.max(1, Math.min(reqVersion, currentVersion));
+  const history = (template.changeLog || []).filter(e => e.version <= clampedVersion);
+  return { template: { ...template, version: clampedVersion }, history, currentVersion };
+}
+
 export function saveDocumentTemplate(template: DocumentTemplate): DocumentTemplate {
   const sanitized = sanitizeTemplate(template);
+  const existing = readCustomTemplates().find(item => item.id === sanitized.id);
+  const now = Date.now();
+  let nextVersion: number;
+  let changeLog: Array<{ version: number; timestamp: number; summary: string }>;
+  if (existing && templateContentSignature(existing) !== templateContentSignature(sanitized)) {
+    // 内容变更：递增版本
+    nextVersion = (existing.version || 0) + 1;
+    const chapterTitles = sanitized.chapters.map(c => c.title).join('、');
+    const summary = chapterTitles ? `章节结构调整：${chapterTitles.slice(0, 80)}${chapterTitles.length > 80 ? '…' : ''}` : '模版内容已更新';
+    changeLog = [{ version: nextVersion, timestamp: now, summary }, ...(existing.changeLog || [])].slice(0, 50);
+  } else if (existing) {
+    // 内容未变更：保留现有版本和日志（防止客户端传旧版本导致回退）
+    nextVersion = existing.version || 1;
+    changeLog = existing.changeLog || [];
+  } else {
+    // 新建模版
+    nextVersion = 1;
+    changeLog = [{ version: 1, timestamp: now, summary: '创建模版' }];
+  }
+  const versioned = { ...sanitized, version: nextVersion, updatedAt: now, changeLog };
   const templates = readCustomTemplates().filter(item => item.id !== sanitized.id);
-  templates.push(sanitized);
+  templates.push(versioned);
   writeCustomTemplates(templates);
-  return sanitized;
+  return versioned;
 }
 
 export async function validateDocumentTemplateRun(templateId: string, projectRoot = getProjectRoot()) {
@@ -337,7 +400,16 @@ export function deleteDocumentTemplate(templateId: string) {
 export function duplicateDocumentTemplate(templateId: string): DocumentTemplate {
   const source = getDocumentTemplate(templateId);
   if (!source) throw new Error('Document template not found');
-  const duplicated = sanitizeTemplate({ ...source, id: `${source.id}-copy-${Date.now()}`, name: `${source.name} Copy`, builtIn: false });
+  const now = Date.now();
+  const duplicated = sanitizeTemplate({
+    ...source,
+    id: `${source.id}-copy-${now}`,
+    name: `${source.name} Copy`,
+    builtIn: false,
+    version: 1,
+    updatedAt: now,
+    changeLog: [{ version: 1, timestamp: now, summary: `从 ${source.id} v${source.version || 1} 复制` }],
+  });
   const templates = readCustomTemplates();
   templates.push(duplicated);
   writeCustomTemplates(templates);

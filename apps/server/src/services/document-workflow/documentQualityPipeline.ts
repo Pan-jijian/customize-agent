@@ -49,3 +49,42 @@ export function unresolvedRepairTasks(before: Array<ValidationIssue | string>, a
     return buildRepairTaskMessage(issue).replace('修复类型：', `修复类型：${level}-小节/章节重写；原类型：`);
   });
 }
+
+/** 增量修复的问题解决账本：追踪哪些问题已被修复，支持停滞检测 */
+export class ResolutionLedger {
+  private resolved = new Set<string>();
+  private stagnantCount = 0;
+
+  markResolved(issue: ValidationIssue | string): void {
+    this.resolved.add(repairIssueSignature(issue));
+  }
+
+  isResolved(issue: ValidationIssue | string): boolean {
+    return this.resolved.has(repairIssueSignature(issue));
+  }
+
+  /** 记录一轮修复结果；返回 true 表示连续 2 轮无进展，应停止 */
+  markRound(progressed: boolean): boolean {
+    if (progressed) {
+      this.stagnantCount = 0;
+      return false;
+    }
+    this.stagnantCount += 1;
+    return this.stagnantCount >= 2;
+  }
+
+  /** 过滤出尚未被解决的 issues */
+  pending<T extends ValidationIssue | string>(issues: T[]): T[] {
+    return issues.filter(issue => !this.isResolved(issue));
+  }
+
+  /** 已解决数量 */
+  resolvedCount(): number {
+    return this.resolved.size;
+  }
+
+  /** 获取已解决的签名 Set 用于传递到 repair 函数 */
+  pendingSignatures(): Set<string> {
+    return new Set(this.resolved);
+  }
+}

@@ -14,4 +14,7 @@ export * from './qualityValidation';
 export * from './llmClient';
 export * from './rolePipeline';
 export * from './chapterGeneration';
+export * from './promptRuleExtraction';
+export * from './documentGeneratorHelpers';
+export * from './documentPipeline';
 export * from './projectMaterialProfile';

@@ -40,7 +40,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         fileUnderstanding: capabilities.fileUnderstanding === true,
         audio: capabilities.audio === true,
         video: capabilities.video === true,
-      });
+        webSearch: capabilities.webSearch === true,
+      } as Record<string, boolean>);
       const config = store.load();
       if (!config.models.action.list.some((model) => model.provider === targetName && model.name === targetName)) {
         store.addModel('action', { provider: targetName, name: targetName });

@@ -30,6 +30,7 @@ export interface ModelCapabilities {
   fileUnderstanding?: boolean;
   audio?: boolean;
   video?: boolean;
+  webSearch?: boolean;
 }
 
 export interface ProviderConfig {
@@ -279,6 +280,7 @@ export class ConfigStore {
           fileUnderstanding: capabilities.fileUnderstanding === true,
           audio: capabilities.audio === true,
           video: capabilities.video === true,
+          webSearch: capabilities.webSearch === true,
         },
       };
     }

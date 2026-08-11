@@ -6,16 +6,22 @@ export function buildRepairStrategies(input: { issues: ValidationIssue[]; qualit
   if (blocking.length > 0) {
     strategies.push({ priority: 'high', title: '阻断问题修复', action: `修复 ${blocking.length} 个导出阻断问题，优先处理事实冲突、结构缺失、模板规则违规和占位残留。` });
   }
-  const unplacedFacts = (input.factTraces || []).filter(trace => trace.status === 'unplaced').slice(0, 10);
-  if (unplacedFacts.length > 0) {
-    strategies.push({ priority: 'high', title: '事实落位修复', action: `将 ${unplacedFacts.length} 项已确认知识库事实写入对应章节，保持原始数值、单位和来源口径。` });
+  const allUnplacedFacts = (input.factTraces || []).filter(trace => trace.status === 'unplaced');
+  if (allUnplacedFacts.length > 0) {
+    const summary = allUnplacedFacts.length > 12
+      ? `${allUnplacedFacts.length} 项（示例：${allUnplacedFacts.slice(0, 8).map(t => t.label).join('、')} 等）`
+      : `${allUnplacedFacts.length} 项（${allUnplacedFacts.map(t => t.label).join('、')}）`;
+    strategies.push({ priority: 'high', title: '事实落位修复', action: `将 ${summary} 已确认知识库事实写入对应章节，保持原始数值、单位和来源口径。` });
   }
   if (input.knowledgeCoverage && input.knowledgeCoverage.score < 95) {
     strategies.push({ priority: 'medium', title: '知识库确认覆盖修复', action: '扩大本地知识库检索范围，执行事实补抽和章节证据重分配；这是系统检索、抽取、落位问题，不要求用户追加资料。' });
   }
-  const weakChapters = (input.chapterCoverage || []).filter(chapter => chapter.score < 80).slice(0, 8);
-  if (weakChapters.length > 0) {
-    strategies.push({ priority: 'medium', title: '章节覆盖修复', action: `补齐低覆盖章节：${weakChapters.map(chapter => chapter.title).join('、')}。` });
+  const allWeakChapters = (input.chapterCoverage || []).filter(chapter => chapter.score < 80);
+  if (allWeakChapters.length > 0) {
+    const display = allWeakChapters.length > 10
+      ? `${allWeakChapters.slice(0, 8).map(c => c.title).join('、')} 及其他${allWeakChapters.length - 8}章`
+      : allWeakChapters.map(c => c.title).join('、');
+    strategies.push({ priority: 'medium', title: '章节覆盖修复', action: `补齐低覆盖章节（${allWeakChapters.length}章）：${display}。` });
   }
   if (input.qualityReport && !input.qualityReport.passed) {
     strategies.push({ priority: 'medium', title: '交付置信度修复', action: input.qualityReport.actions.join(' ') });

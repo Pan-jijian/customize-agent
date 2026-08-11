@@ -1,5 +1,14 @@
 # @customize-agent/tools
 
+## 3.0.20
+
+### Patch Changes
+
+- 批量发布所有包的 patch 版本
+- Updated dependencies
+  - @customize-agent/search@3.0.9
+  - @customize-agent/types@3.0.9
+
 ## 3.0.16
 
 ### Patch Changes
