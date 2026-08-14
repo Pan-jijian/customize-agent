@@ -328,7 +328,7 @@ export interface DocumentPerformanceMetric {
 export interface DocumentGenerationDiagnostics {
   strategy: DocumentGenerationStrategy;
   metrics: DocumentPerformanceMetric[];
-  llm: { calls: number; failures: number; maxActive: number; lastError?: string };
+  llm: { calls: number; failures: number; maxActive: number; lastError?: string; retries: number };
   evidence: { raw: number; used: number; filteredNoise: number; avgNoiseScore: number; avgFactDensity: number; searchQueries: number; searchMs: number; contextChars: number };
   quality: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number };
 }
@@ -367,7 +367,7 @@ export interface ChapterCoverageReport {
 export interface RetrievalCoverageReport {
   chapterId: string;
   chapterTitle: string;
-  risk: { totalChunks: number; loadedChunks: number; omittedChunks: number; loadedRatio: number; highRisk: boolean };
+  risk: { totalChunks: number; loadedChunks: number; omittedChunks: number; loadedRatio: number; highRisk: boolean; riskReason?: string };
   evidenceCount: number;
   evidenceFiles: number;
   sectionCovered: number;

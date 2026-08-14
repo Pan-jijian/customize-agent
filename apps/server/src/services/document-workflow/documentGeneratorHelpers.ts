@@ -78,10 +78,11 @@ export function evidenceDedupeIdentity(item: DocumentEvidence) {
 export async function collectProjectBasicEvidence(input: { manager: ReturnType<typeof getMultiProjectManager>; project: any; projectRoot: string; scopedFilePaths: string[]; fileRoleByPath: Map<string, string>; fileProcessingByPath: Map<string, string>; signal?: AbortSignal }): Promise<DocumentEvidence[]> {
   const evidence: DocumentEvidence[] = [];
   const scopedFileSet = new Set(input.scopedFilePaths);
-  for (const query of PROJECT_BASIC_FACT_QUERIES) {
+  // 基础事实查询并行化（原为 5 组查询串行，每次都是一次检索往返）
+  const queryResults = await Promise.all(PROJECT_BASIC_FACT_QUERIES.map(async query => {
     throwIfAborted(input.signal);
     const result = await input.manager.search(input.projectRoot, query, { scope: 'project', filters: { filePaths: input.scopedFilePaths }, limit: 10, weights: { keyword: 0.65, vector: 0.25, rewrite: 0.8, hybridBonus: 0.2 }, generationMode: false });
-    evidence.push(...result.results.filter(item => scopedFileSet.has(item.filePath) && projectBasicFactScore(`${item.sectionTitle || ''}\n${item.content}`) > 0).map(item => ({
+    return result.results.filter(item => scopedFileSet.has(item.filePath) && projectBasicFactScore(`${item.sectionTitle || ''}\n${item.content}`) > 0).map(item => ({
       chapterId: 'project-basic',
       filePath: item.filePath,
       score: Math.max(item.score, 1) + projectBasicFactScore(`${item.sectionTitle || ''}\n${item.content}`),
@@ -90,8 +91,10 @@ export async function collectProjectBasicEvidence(input: { manager: ReturnType<t
       processingType: input.fileProcessingByPath.get(item.filePath),
       sectionTitle: item.sectionTitle,
       source: 'pinned-evidence',
-    })));
-  }
+    }));
+  }));
+  evidence.push(...queryResults.flat());
+  // getFileDetail 为同步文件读取，Promise.all 不会带来并发收益，保持串行扫描
   for (const relativePath of input.scopedFilePaths) {
     throwIfAborted(input.signal);
     const detail = input.project.getFileDetail?.(relativePath, { maxChunkContentChars: 12000 });
@@ -563,8 +566,30 @@ export function splitOverlongParagraphs(markdown: string) {
   }).join('\n\n');
 }
 
-export function applyDeterministicGateRepairs(content: string, issues: ValidationIssue[]) {
-  return splitOverlongParagraphs(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(appendFormalTablesFromGateIssues(replaceUnverifiedNumbersFromIssues(replaceForbiddenFormalPhrases(content), issues), issues))))).replace(/\n{3,}/gu, '\n\n').trim();
+export function stripForbiddenGateTexts(markdown: string, forbiddenTexts: string[]) {
+  const terms = [...new Set(forbiddenTexts.filter(Boolean))];
+  if (terms.length === 0) return markdown;
+  let next = markdown;
+  for (const term of terms) {
+    const pattern = escapeRegExpLiteral(term);
+    // 1) 表格数据行：整行移除（保留表头与分隔线）
+    next = next.split(/\r?\n/u).map(line => {
+      if (!looksLikeMarkdownTableLine(line) || isMarkdownTableSeparatorLine(line)) return line;
+      return new RegExp(pattern, 'u').test(line) ? '' : line;
+    }).join('\n');
+    // 2) 正文句子：移除包含禁止词的整句（以句读为边界，窗口 400 字覆盖常规句长）
+    next = next.replace(new RegExp(`[^。；;\\n]{0,400}${pattern}[^。；;\\n]{0,400}`, 'gu'), '');
+    // 3) 兜底：任何残留出现处直接移除该子串
+    next = next.split(term).join('');
+  }
+  return next.replace(/\n{3,}/gu, '\n\n').trim();
+}
+
+export function applyDeterministicGateRepairs(content: string, issues: ValidationIssue[], forbiddenTexts: string[] = []) {
+  const repaired = splitOverlongParagraphs(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(appendFormalTablesFromGateIssues(replaceUnverifiedNumbersFromIssues(replaceForbiddenFormalPhrases(content), issues), issues))))).replace(/\n{3,}/gu, '\n\n').trim();
+  // 最后兜底清除 autoSpecGates 禁止词：LLM 局部修复对多处/跨句出现的禁止词经常无法唯一定位，
+  // 确定性清除保证门禁要求“不得出现”的内容不会残留到导出校验
+  return stripForbiddenGateTexts(repaired, forbiddenTexts);
 }
 
 export function demoteNonFormalH2(markdown: string) {
@@ -765,8 +790,11 @@ export function factMatchesChapterText(fact: DocumentFact, chapter: DocumentDraf
   return (chapter.sections || []).some(section => text.includes(section));
 }
 
-export function appendMissingFactPatchesToChapters(chapters: DocumentDraftChapter[], facts: DocumentFact[], markdown: string) {
-  const missing = uncoveredImportantFacts(markdown, facts, { maxItems: 18 });
+export function appendMissingFactPatchesToChapters(chapters: DocumentDraftChapter[], facts: DocumentFact[], markdown: string, options: { forbiddenTexts?: string[] } = {}) {
+  const forbiddenTexts = [...new Set((options.forbiddenTexts || []).filter(Boolean))];
+  const missing = uncoveredImportantFacts(markdown, facts, { maxItems: 18 })
+    // 源头过滤：事实值包含门禁禁止词时不补写，避免把禁止词注入正文后再触发导出门禁失败
+    .filter(item => forbiddenTexts.length === 0 || !forbiddenTexts.some(term => `${item.label}${item.value}`.includes(term)));
   if (missing.length === 0) return { chapters, patchedCount: 0, missingCount: 0 };
   const nextChapters = chapters.map(chapter => ({ ...chapter }));
   let patchedCount = 0;
@@ -815,8 +843,16 @@ export function optimizeChapterEvidence(chapter: DocumentTemplateChapter, eviden
 export function compactChapterQueries(chapter: DocumentTemplateChapter, queries: string[], chapterBasicQueries: string[]) {
   const sectionQuery = (chapter.sections || []).slice(0, 10).join(' ');
   const requiredFactQuery = chapter.requiredFacts.slice(0, 10).join(' ');
-  const primary = `${chapter.title} ${sectionQuery} ${requiredFactQuery}`.trim();
-  return [...new Set([primary, ...queries, ...chapterBasicQueries].filter(Boolean))];
+  // 复合标题拆解：将"工期与质量、安全生产"拆分为独立子查询，提高KB检索精度
+  const compositeParts = chapter.title.split(/[、，,与和及]+/u).map(p => p.trim()).filter(p => p.length >= 4);
+  const decomposedQueries = compositeParts.length >= 2
+    ? [
+        `${chapter.title} ${sectionQuery} ${requiredFactQuery}`.trim(),
+        ...compositeParts.map(part => `${part} ${(chapter.sections || []).slice(0, 6).join(' ')}`.trim()),
+        `${compositeParts.slice(0, 3).join(' ')} ${requiredFactQuery}`.trim(),
+      ]
+    : [`${chapter.title} ${sectionQuery} ${requiredFactQuery}`.trim()];
+  return [...new Set([...decomposedQueries, ...queries, ...chapterBasicQueries].filter(Boolean))];
 }
 
 export function qualityFirstSearchQueryLimit(chapter: DocumentTemplateChapter, chapterBasicQueries: string[]) {
@@ -859,7 +895,10 @@ export async function retrieveSectionEvidence(input: { manager: ReturnType<typeo
 
 export async function retrieveMissingFactEvidence(input: { manager: ReturnType<typeof getMultiProjectManager>; projectRoot: string; chapter: DocumentTemplateChapter; needs: string[]; scopedFilePaths: string[]; fileRoleByPath: Map<string, string>; fileProcessingByPath: Map<string, string>; signal?: AbortSignal }) {
   const evidence: DocumentEvidence[] = [];
-  for (const need of input.needs.slice(0, 8)) {
+  const needs = input.needs.slice(0, 8);
+  // 缺失事实补检索并行化：与主章节检索路径保持一致（全部需求并发执行，不加人为并发上限）；
+  // 结果后续统一按评分排序去重，并行不改变召回质量
+  const results = await Promise.all(needs.map(async need => {
     throwIfAborted(input.signal);
     const query = `${input.chapter.title} ${need} ${(input.chapter.sections || []).join(' ')}`.trim();
     const result = await input.manager.search(input.projectRoot, query, {
@@ -869,7 +908,7 @@ export async function retrieveMissingFactEvidence(input: { manager: ReturnType<t
       weights: searchWeightsForChapter(`${input.chapter.title} ${need}`),
       generationMode: false,
     });
-    evidence.push(...result.results
+    return result.results
       .filter(item => input.scopedFilePaths.includes(item.filePath))
       .map(item => ({
         chapterId: input.chapter.id,
@@ -880,9 +919,10 @@ export async function retrieveMissingFactEvidence(input: { manager: ReturnType<t
         processingType: input.fileProcessingByPath.get(item.filePath),
         sectionTitle: item.sectionTitle,
         source: 'required-fact-evidence',
-      })));
-  }
-  return selectEvidenceByBudget(evidence, { maxItems: Math.max(6, input.needs.length * 3), maxChars: 18000, preservePinned: true });
+      }));
+  }));
+  evidence.push(...results.flat());
+  return selectEvidenceByBudget(evidence, { maxItems: Math.max(6, needs.length * 3), maxChars: 18000, preservePinned: true });
 }
 
 export function summarizeIssueList(prefix: string, filePaths: string[], limit = 12) {

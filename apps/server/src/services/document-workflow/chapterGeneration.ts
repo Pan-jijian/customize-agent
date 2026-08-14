@@ -447,7 +447,9 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
   const runSection = async (item: { title: string; targetWords: number }, compact = false) => {
     input.onSectionProgress?.({ completed: completedCount, total: targets.length, sectionTitle: item.title, phase: compact ? 'retry' : 'start' });
     try {
-      const sectionTimeoutMs = compact ? 75_000 : Math.max(75_000, Math.min(120_000, Math.ceil(timeoutMsForChapter(item.targetWords) * 0.4)));
+      // 小节级超时与模型输出速度校准（实测 10-16 字/秒）：~1600 字小节需 100-160 秒，
+      // 原 75-120s 上限必然超时；紧凑重试与最终补写同步放宽
+      const sectionTimeoutMs = compact ? Math.max(120_000, Math.min(180_000, Math.ceil(timeoutMsForChapter(item.targetWords) * 0.8))) : Math.max(150_000, Math.min(240_000, Math.ceil(timeoutMsForChapter(item.targetWords) * 1.2)));
       const sectionExtraEvidence = input.sectionEvidenceProvider
         ? (await callWithTimeout(() => input.sectionEvidenceProvider!(item.title), Math.min(25_000, Math.floor(sectionTimeoutMs * 0.25)), input.signal)) || []
         : [];
@@ -496,11 +498,12 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
       batchResults.forEach((content, index) => { if (content) results[batchIndexes[index]] = content; });
     }
     missingIndexes = results.map((content, index) => content ? -1 : index).filter(index => index >= 0);
-    for (const index of missingIndexes.slice(0, concurrency)) {
+    // 最终补写：并发批次执行（原为逐个串行，单节 150s 超时下多节串行轻易超出外层总控）
+    const finalRetryIndexes = missingIndexes.slice(0, concurrency);
+    if (finalRetryIndexes.length > 0) {
       throwIfAborted(input.signal);
-      const target = targets[index];
-      const content = await runSection({ ...target, targetWords: Math.max(target.targetWords, 900) }, true);
-      if (content) results[index] = content;
+      const finalResults = await Promise.all(finalRetryIndexes.map(index => runSection({ ...targets[index], targetWords: Math.max(targets[index].targetWords, 900) }, true)));
+      finalResults.forEach((content, position) => { if (content) results[finalRetryIndexes[position]] = content; });
     }
   }
   const sectionContents = results.map((content, index) => ensureNonEmptySectionContent(content || '', targets[index].title, input.evidence));
@@ -688,41 +691,72 @@ export async function supplementShortSections(input: { template: DocumentTemplat
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(content, input.forbidDrawingImages));
 }
 
-export async function expandChapterToTarget(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; content: string; evidence: DocumentEvidence[]; promptTexts: string; requirement?: string; roleContext: string; targetChars: number; maxChars?: number; forbidDrawingImages: boolean; maxTokens?: number; signal?: AbortSignal; strictBudget?: boolean }) {
+// 扩写收敛器参数：与当前模型输出速度匹配（实测约 13-16 字/秒）。
+// 小步增量保证单轮在超时内可写完；超时/被拒后降档增量重试一次，避免"大增量 + 严格超时"轮轮落空
+const EXPANSION_INCREMENT_CHARS = 2000;
+const EXPANSION_DEGRADED_INCREMENT_CHARS = 1000;
+const EXPANSION_MAX_ROUNDS = 6;
+
+export async function expandChapterToTarget(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; content: string; evidence: DocumentEvidence[]; promptTexts: string; requirement?: string; roleContext: string; targetChars: number; maxChars?: number; forbidDrawingImages: boolean; signal?: AbortSignal; strictBudget?: boolean }) {
   let content = input.content;
   let rounds = 0;
-  const maxRounds = Math.min(1, expansionRoundsForDeficit(input.targetChars - documentTextLength(content)));
+  const targetChars = input.targetChars;
   const maxChars = input.maxChars ?? Math.ceil(input.targetChars * 1.12);
-  for (; rounds < maxRounds && documentTextLength(content) < input.targetChars && documentTextLength(content) < maxChars; rounds += 1) {
+  const totalDeficit = targetChars - documentTextLength(content);
+  const maxRounds = totalDeficit <= 0 ? 0 : Math.min(EXPANSION_MAX_ROUNDS, Math.max(1, Math.ceil(totalDeficit / EXPANSION_INCREMENT_CHARS)));
+  let noGrowthStreak = 0;
+  for (; rounds < maxRounds && documentTextLength(content) < targetChars && documentTextLength(content) < maxChars; rounds += 1) {
     throwIfAborted(input.signal);
-    const before = content;
-    try {
+    const beforeChars = documentTextLength(content);
+    const remaining = Math.max(0, targetChars - beforeChars);
+    if (remaining <= 300) break;
+    let grown = false;
+    // 常规增量 → 超时/被拒后降档（增量减半）再试一次；成功后不再追加
+    for (const increment of [Math.min(input.strictBudget ? 2400 : EXPANSION_INCREMENT_CHARS, remaining), Math.min(EXPANSION_DEGRADED_INCREMENT_CHARS, remaining)]) {
+      if (increment <= 0 || grown) continue;
+      throwIfAborted(input.signal);
       const currentChars = documentTextLength(content);
-      const incrementalTarget = Math.min(input.targetChars, currentChars + (input.strictBudget ? 5600 : 3200));
-      const roundMaxChars = Math.min(maxChars, currentChars + (input.strictBudget ? 9000 : 4200));
-      const expanded = await callWithTimeout(
-        signal => expandChapterContent({
-          template: input.template,
-          chapter: input.chapter,
-          currentContent: content,
-          evidence: input.evidence,
-          promptTexts: input.promptTexts,
-          requirement: input.requirement,
-          roleContext: input.roleContext,
-          targetChars: incrementalTarget,
-          maxChars: roundMaxChars,
-          forbidDrawingImages: input.forbidDrawingImages,
-          maxTokens: input.strictBudget ? outputTokensForChapter(currentChars, incrementalTarget) : Math.min(input.maxTokens ?? outputTokensForChapter(currentChars, incrementalTarget), outputTokensForChapter(currentChars, incrementalTarget)),
-          signal,
-        }),
-        timeoutMsForChapter(incrementalTarget),
-        input.signal,
-      );
-      if (!expanded || expanded === before) break;
-      content = expanded;
-    } catch {
-      break;
+      const incrementalTarget = Math.min(targetChars, currentChars + increment);
+      const roundMaxChars = Math.min(maxChars, currentChars + increment + (input.strictBudget ? 2200 : 1600));
+      const timeoutMs = increment >= EXPANSION_INCREMENT_CHARS ? 240_000 : 180_000;
+      try {
+        const expanded = await callWithTimeout(
+          signal => expandChapterContent({
+            template: input.template,
+            chapter: input.chapter,
+            currentContent: content,
+            evidence: input.evidence,
+            promptTexts: input.promptTexts,
+            requirement: input.requirement,
+            roleContext: input.roleContext,
+            targetChars: incrementalTarget,
+            maxChars: roundMaxChars,
+            forbidDrawingImages: input.forbidDrawingImages,
+            // token 预算按"全文重写（当前字数 + 本轮增量）"计算，避免输出截断导致 acceptExpandedChapter 拒绝
+            maxTokens: outputTokensForChapter(currentChars + increment, incrementalTarget),
+            signal,
+          }),
+          timeoutMs,
+          input.signal,
+        );
+        if (expanded && expanded !== content) {
+          content = expanded;
+          grown = true;
+          break;
+        }
+        // 产出为空或被 acceptExpandedChapter 拒绝 → 降档增量再试
+      } catch {
+        // 超时/失败 → 降档增量再试；用户中止直接抛出
+        if (input.signal?.aborted) throw new Error('用户中止');
+      }
     }
+    if (grown && documentTextLength(content) > beforeChars + 200) {
+      noGrowthStreak = 0;
+    } else {
+      noGrowthStreak += 1;
+    }
+    // 连续两轮无实质增长即停，避免轮轮空烧
+    if (noGrowthStreak >= 2) break;
   }
   return { content, rounds };
 }
@@ -732,7 +766,7 @@ export async function expandDocumentToBudget(input: { template: DocumentTemplate
   if (!input.budget.minChars) return input.chapters;
   let chapters = input.chapters;
   let totalChars = documentTextLength(chapters.map(chapter => chapter.content).join('\n\n'));
-  const maxDocumentRounds = Math.min(input.budget.longformStrict ? 10 : 3, expansionRoundsForDeficit(input.budget.minChars - totalChars) + 4);
+  const maxDocumentRounds = Math.min(input.budget.longformStrict ? 10 : 6, expansionRoundsForDeficit(input.budget.minChars - totalChars) + 4);
   const concurrency = Math.max(1, input.chapters.length || 1);
   const lowGrowthChapterIds = new Set<string>();
   const documentMaxChars = input.budget.maxChars;
@@ -763,10 +797,11 @@ export async function expandDocumentToBudget(input: { template: DocumentTemplate
       const perChapterRoom = Number.isFinite(remainingDocumentRoom) ? Math.max(500, Math.floor(remainingDocumentRoom / batch.length)) : undefined;
       const results = await Promise.all(batch.map(async item => {
         try {
-          const increment = Math.max(input.budget.longformStrict ? 7000 : 1600, Math.min(item.deficit, input.budget.longformStrict ? 12000 : 3600));
+          // 与章节扩写共用收敛器：小步增量 + 降档重试，避免慢模型下"大增量 + 严格超时"轮轮落空
+          const increment = Math.min(item.deficit, input.budget.longformStrict ? 2400 : EXPANSION_INCREMENT_CHARS);
           const incrementalTarget = Math.min(item.target, item.current + increment);
           const maxChars = perChapterRoom ? Math.min(Math.ceil(incrementalTarget * 1.15), item.current + perChapterRoom) : Math.ceil(incrementalTarget * 1.15);
-          const expanded = await expandChapterToTarget({ template: input.template, chapter: { id: item.chapter.id, title: item.chapter.title, purpose: item.chapter.title, queries: [], requiredFacts: [], sections: item.chapter.sections }, content: item.chapter.content, evidence: item.chapter.evidence, promptTexts: input.promptTexts, requirement: input.requirement, roleContext: '', targetChars: incrementalTarget, maxChars, forbidDrawingImages: input.forbidDrawingImages, maxTokens: outputTokensForChapter(item.current, incrementalTarget), signal: input.signal, strictBudget: input.budget.longformStrict });
+          const expanded = await expandChapterToTarget({ template: input.template, chapter: { id: item.chapter.id, title: item.chapter.title, purpose: item.chapter.title, queries: [], requiredFacts: [], sections: item.chapter.sections }, content: item.chapter.content, evidence: item.chapter.evidence, promptTexts: input.promptTexts, requirement: input.requirement, roleContext: '', targetChars: incrementalTarget, maxChars, forbidDrawingImages: input.forbidDrawingImages, signal: input.signal, strictBudget: input.budget.longformStrict });
           return { id: item.chapter.id, beforeChars: item.current, content: expanded.content };
         } catch {
           return { id: item.chapter.id, beforeChars: item.current, content: item.chapter.content };
@@ -831,8 +866,8 @@ export async function understandReferenceFiles(projectRoot: string, evidence: Do
 
 export async function reviewChapterSummaries(input: { template: DocumentTemplate; chapters: DocumentDraftChapter[]; budget: DocumentBudget; promptTexts: string; requirement?: string; strategy: DocumentGenerationStrategy; diagnostics: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   throwIfAborted(input.signal); const plan = adaptiveReviewPlan({ totalChars: input.chapters.reduce((s,ch) => s + documentTextLength(ch.content), 0), chapterCount: input.chapters.length, chunkChars: 12000, phase: 'chapter' });
-  const summaries: ChapterReviewSummary[] = [];
-  for (const chapter of input.chapters) {
+  // 章节并行审查（原为串行遍历每章，长文档耗时随章节数线性增长）
+  const summaries: ChapterReviewSummary[] = await Promise.all(input.chapters.map(async chapter => {
     throwIfAborted(input.signal); const chunks = chunkTextForReview(chapter.content, 12000).slice(0, plan.chunks);
     const bundle = buildEvidenceBundle({ id: chapter.id, title: chapter.title, purpose: chapter.title, queries: [], requiredFacts: [] }, chapter.evidence);
     const evidenceText = evidenceBundlePrompt(bundle, { maxChars: plan.budgetPerChunk });
@@ -843,8 +878,8 @@ export async function reviewChapterSummaries(input: { template: DocumentTemplate
     const chunkReviews = await Promise.all(chunks.map(chunk => callDocumentLlmJson<{ issues?: string[]; suggestions?: string[] }>('你是专业文档审查专家。审查章节质量。只返回 JSON。', `${input.promptTexts}\n\n${summary}\n\n${chunk}\n\n返回 JSON：{"issues":[],"suggestions":[]}`, { maxTokens: 1200, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics })));
     const issues = mergeUniqueStrings(chunkReviews.flatMap(r => Array.isArray(r?.issues) ? r.issues : [])).slice(0, plan.maxIssues);
     const suggestions = mergeUniqueStrings(chunkReviews.flatMap(r => Array.isArray(r?.suggestions) ? r.suggestions : [])).slice(0, plan.maxIssues);
-    summaries.push({ chapterId: chapter.id, title: chapter.title, status: issues.length > 0 ? 'fail' as const : 'pass' as const, issues, suggestions, chars: documentTextLength(chapter.content) });
-  }
+    return { chapterId: chapter.id, title: chapter.title, status: issues.length > 0 ? 'fail' as const : 'pass' as const, issues, suggestions, chars: documentTextLength(chapter.content) };
+  }));
   const failCount = summaries.filter(s => s.status !== 'pass').length;
   return { summaries, stage: displayStage({ type: 'llm_review', roleId: 'chapter-review', status: failCount > 0 ? 'fallback' : 'success', message: failCount > 0 ? `章节审查完成：${failCount}/${summaries.length} 章需要修复` : '章节审查完成，全部通过' }, { subtitle: '章节级质量审查' }) };
 }
@@ -858,13 +893,34 @@ export async function reviewGlobalConsistency(input: { template: DocumentTemplat
   return { issues, stage: displayStage({ type: 'llm_review', roleId: 'global-consistency-review', status: issues.length > 0 ? 'fallback' : 'success', message: issues.length > 0 ? `全局一致性审查完成：发现 ${issues.length} 个跨章问题` : '全局一致性审查通过' }, { subtitle: '全局一致性审查' }) };
 }
 
+function stripReviewChunkHeader(text: string) {
+  return text.replace(/^\s*\*\*\s*第\s*\d+\s*\/\s*\d+\s*部分\s*\*\*\s*\n+/u, '').trim();
+}
+
 export async function reviewAndOptimizeMarkdown(input: { template: DocumentTemplate; spec?: any; markdown: string; evidence?: DocumentEvidence[]; promptTexts: string; requirement?: string; projectContext?: string; diagnostics: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   throwIfAborted(input.signal); const totalChars = documentTextLength(input.markdown); const plan = adaptiveReviewPlan({ totalChars, chapterCount: 1, chunkChars: 12000, phase: 'final' });
-  const chunks = chunkTextForReview(input.markdown, 12000).slice(0, plan.chunks);
+  const allParts = splitTextForReview(input.markdown, 12000);
+  const reviewedParts = allParts.slice(0, plan.chunks);
+  // 超出审查分片预算的尾部原文不参与 LLM 审查，但重建文档时必须原样保留，避免整篇内容丢失
+  const unreviewedTail = allParts.slice(plan.chunks).join('\n\n');
+  const chunks = reviewedParts.map((part, index) => `**第 ${index + 1}/${allParts.length} 部分**\n\n${part}`);
   const reviewedBatches = await Promise.all(chunks.map(chunk => callDocumentLlmJson<{ issues?: Array<{ message: string }>; optimized?: string }>('你是专业文档审查与优化专家。审查 Markdown 质量并输出优化建议。只返回 JSON。', `${input.promptTexts}\n\n${input.projectContext || ''}\n\n${chunk}\n\n返回 JSON：{"issues":[{"message":"问题描述"}],"optimized":"优化后的 Markdown 片段"}`, { maxTokens: 2000, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics })));
   const issues = reviewedBatches.flatMap(r => Array.isArray(r?.issues) ? r.issues.filter((i: any) => i?.message) : []).slice(0, plan.maxIssues);
-  const optimizedParts = reviewedBatches.filter(r => typeof r?.optimized === 'string').map(r => (r as any).optimized).filter(Boolean);
-  const markdown = optimizedParts.length > 0 ? optimizedParts.join('\n\n') : input.markdown;
-  const summaryMsg = optimizedParts.length > 0 ? `最终质量审查优化完成：生成 ${optimizedParts.length} 个优化片段` : issues.length > 0 ? `最终质量审查完成：发现 ${issues.length} 个问题` : '最终质量审查通过';
-  return { markdown, stage: displayStage({ type: 'llm_review', roleId: 'final-quality-review', status: issues.length > 0 && optimizedParts.length === 0 ? 'fallback' : 'success', message: summaryMsg }, { subtitle: '最终质量审查' }) };
+  // 逐分片合并：只有审查返回有效 optimized 时才采用优化片段，否则保留原分片；
+  // 避免"部分分片未返回 optimized 时整篇文档被少数片段替换"的内容丢失；同时剥离分片头部标记
+  let optimizedCount = 0;
+  const merged = chunks.map((chunk, index) => {
+    const original = stripReviewChunkHeader(chunk);
+    const candidate = reviewedBatches[index]?.optimized;
+    const optimized = typeof candidate === 'string' && candidate.trim() ? stripReviewChunkHeader(candidate) : '';
+    // 优化片段显著缩水（不足原文 60%）或与原文一致视为无效，保留原分片
+    if (optimized && optimized !== original && optimized.length >= Math.floor(Math.max(1, original.length) * 0.6)) {
+      optimizedCount += 1;
+      return optimized;
+    }
+    return original;
+  }).filter(Boolean);
+  const markdown = [...merged, unreviewedTail].filter(Boolean).join('\n\n');
+  const summaryMsg = optimizedCount > 0 ? `最终质量审查优化完成：生成 ${optimizedCount} 个优化片段（其余分片保留原文）` : issues.length > 0 ? `最终质量审查完成：发现 ${issues.length} 个问题` : '最终质量审查通过';
+  return { markdown, stage: displayStage({ type: 'llm_review', roleId: 'final-quality-review', status: issues.length > 0 && optimizedCount === 0 ? 'fallback' : 'success', message: summaryMsg }, { subtitle: '最终质量审查' }) };
 }

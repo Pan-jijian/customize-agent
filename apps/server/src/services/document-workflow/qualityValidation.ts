@@ -767,6 +767,18 @@ export function plannedAutoSpecGateIssues(markdown: string, template: DocumentTe
   return issues;
 }
 
+/** 模板命中的 autoSpecGates 禁止词列表：供确定性修复链在写入正文前过滤、并兜底清除残留出现 */
+export function autoSpecGateForbiddenTexts(template: DocumentTemplate): string[] {
+  const text = `${template.name} ${template.category} ${template.outputTitle} ${template.description}`;
+  const forbidden = new Set<string>();
+  for (const gate of readEngineeringDocumentConfig().autoSpecGates) {
+    if (templateMatchesAutoSpecGate(text, gate.templateMatchers)) {
+      for (const item of gate.forbiddenTexts) if (item) forbidden.add(item);
+    }
+  }
+  return [...forbidden];
+}
+
 function collectAllFacts(factsModel: DocumentFactsModel) {
   const allFacts = [...factsModel.project, ...factsModel.schedule, ...factsModel.quality, ...factsModel.safety, ...factsModel.resources];
   for (const facts of Object.values(factsModel.schemaFacts)) allFacts.push(...facts);

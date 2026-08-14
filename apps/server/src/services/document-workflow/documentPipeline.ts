@@ -7,7 +7,7 @@ import { validateFactConsistency } from '../document-validation/factConsistencyS
 import { displayChapterTitle } from './outline';
 import { composeDocumentMarkdown, plannedStructureIssues, promptDocumentRuleIssues, extractGeneratedSections, finalizeDocumentMarkdown, tertiaryHeadingIssues } from './markdownComposer';
 import { documentBudgetIssues, documentBudgetStatus, documentTextLength, pageTargetIssues } from './budget';
-import { applySpecGateRules, buildExportGate, collectSectionContentGaps, plannedAutoSpecGateIssues, duplicateBasicInfoIssues, formalContentIntegrityIssues, formalPlaceholderIssues, formalStyleIssues, isExportBlockingIssue, minChapterSectionIssues, preciseFactUsageIssues, qualitySeveritySummary, sectionContentIntegrityIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
+import { applySpecGateRules, buildExportGate, collectSectionContentGaps, plannedAutoSpecGateIssues, autoSpecGateForbiddenTexts, duplicateBasicInfoIssues, formalContentIntegrityIssues, formalPlaceholderIssues, formalStyleIssues, isExportBlockingIssue, minChapterSectionIssues, preciseFactUsageIssues, qualitySeveritySummary, sectionContentIntegrityIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
 import { buildPostRepairIssues, buildProfessionalRepairIssues } from './documentPostRepairChecks';
 import { buildRepairTaskMessage, collectMessageGroups, collectValidationIssueGroups, dedupeValidationIssues, repairIssueSignature, unresolvedRepairTasks } from './documentQualityPipeline';
 import { buildStandardFinalValidationIssues } from './documentFinalValidation';
@@ -28,7 +28,7 @@ import { displayStage, elapsedMessage, upsertProgressStage } from './progress';
 import { callWithTimeout } from './llmClient';
 import { lightweightChapterIssues, measureGenerationStep, repairChapterByQuality, repairMarkdownByQuality } from './rolePipeline';
 import { buildValidationIssues, chapterSectionFactUsageIssues, expandDocumentToBudget, reviewAndOptimizeMarkdown, reviewChapterSummaries, reviewGlobalConsistency, supplementShortSections, understandReferenceFiles } from './chapterGeneration';
-import { appendMissingFactPatchesToChapters, applyDeterministicGateRepairs, appendDeterministicBudgetClosing, appendDeterministicSectionClosings, demoteNonFormalH2, factCoverageIssues, factsWithSourceFallback, filterResolvedFinalIssues, finalizeChapterContentQuality, isMaterialDiagnosticNoise, normalizeProjectBasicInfoTable, partialChapterStatus, projectBasicPlaceholderIssues, repairKnownProjectBasicPlaceholders, replaceForbiddenFormalPhrases, shouldUseIssueForDefaultRepair, slowMetricSummary, validateDraft } from './documentGeneratorHelpers';
+import { appendMissingFactPatchesToChapters, applyDeterministicGateRepairs, appendDeterministicBudgetClosing, appendDeterministicSectionClosings, demoteNonFormalH2, factCoverageIssues, factsWithSourceFallback, filterResolvedFinalIssues, finalizeChapterContentQuality, isMaterialDiagnosticNoise, normalizeProjectBasicInfoTable, partialChapterStatus, projectBasicPlaceholderIssues, repairKnownProjectBasicPlaceholders, replaceForbiddenFormalPhrases, shouldUseIssueForDefaultRepair, slowMetricSummary, stripForbiddenGateTexts, validateDraft } from './documentGeneratorHelpers';
 
 export async function finalizeGeneration(p: {
   chapterDrafts: DocumentDraftChapter[];
@@ -68,6 +68,7 @@ export async function finalizeGeneration(p: {
     emitProgress, withProgressHeartbeat,
   } = p;
   const { signal, requirement } = input;
+  const gateForbiddenTexts = autoSpecGateForbiddenTexts(template);
 
   chapterDrafts = chapterDraftsByOrder.filter((item): item is DocumentDraftChapter => Boolean(item));
   chapterGenerationStages.push(...chapterGenerationStagesByOrder.filter((item): item is DocumentExecutionStage => Boolean(item)));
@@ -190,7 +191,7 @@ export async function finalizeGeneration(p: {
     : chapterDrafts;
   chapterDrafts.splice(0, chapterDrafts.length, ...budgetExpandedChapters);
   const budgetDraftMarkdown = chapterDrafts.map(chapter => chapter.content).join('\n\n');
-  const factPatch = appendMissingFactPatchesToChapters(chapterDrafts, structuredFacts, budgetDraftMarkdown);
+  const factPatch = appendMissingFactPatchesToChapters(chapterDrafts, structuredFacts, budgetDraftMarkdown, { forbiddenTexts: gateForbiddenTexts });
   if (factPatch.patchedCount > 0) {
     chapterDrafts.splice(0, chapterDrafts.length, ...factPatch.chapters);
     validationIssues = [...validationIssues, { level: 'info', message: `已自动补写未落位事实 ${factPatch.patchedCount} 项`, suggestion: '补写仅使用本项目资料明确事实，未补写商务敏感信息或系统暂未确认内容。' }];
@@ -291,7 +292,7 @@ export async function finalizeGeneration(p: {
     const rebuildDefaultFinalState = () => {
       finalMarkdown = normalizeProjectBasicInfoTable(repairKnownProjectBasicPlaceholders(replaceForbiddenFormalPhrases(finalizeDocumentMarkdown(composeDocumentMarkdown({ ...base, chapters: finalChapterDrafts }, { forbidDrawingImages, promptRules: promptDocumentRules }), finalChapterDrafts, { forbidDrawingImages, promptRules: promptDocumentRules }).markdown), structuredFacts), structuredFacts);
       finalIssues = dedupeValidationIssues(collectDefaultFinalIssues(finalMarkdown, finalChapterDrafts));
-      finalMarkdown = demoteNonFormalH2(applyDeterministicGateRepairs(finalMarkdown, finalIssues));
+      finalMarkdown = demoteNonFormalH2(applyDeterministicGateRepairs(finalMarkdown, finalIssues, gateForbiddenTexts));
       finalIssues = dedupeValidationIssues(collectDefaultFinalIssues(finalMarkdown, finalChapterDrafts));
       finalMarkdown = appendDeterministicSectionClosings(finalMarkdown, finalIssues);
       finalIssues = dedupeValidationIssues(collectDefaultFinalIssues(finalMarkdown, finalChapterDrafts));
@@ -339,10 +340,15 @@ export async function finalizeGeneration(p: {
     };
     const defaultRepairStages: DocumentExecutionStage[] = [];
     rebuildDefaultFinalState();
+    let budgetStuck = false;
+    let consecutiveQualityNoProgress = 0;
+    let previousBlockingSignatures = new Set(finalIssues.filter(issue => issue.level === 'error').map(issue => repairIssueSignature(issue)));
     for (let round = 0; round < 5; round += 1) {
       throwIfAborted(signal);
-      const budgetGrew = await runDefaultBudgetRepair(`default-budget-repair-${round + 1}`, round === 0 ? '默认路径预算补齐' : '默认路径预算再补齐');
+      // 优化：预算扩写一旦失败（无增长）就不再重试，只保留质量修复
+      const budgetGrew = budgetStuck ? false : await runDefaultBudgetRepair(`default-budget-repair-${round + 1}`, round === 0 ? '默认路径预算补齐' : '默认路径预算再补齐');
       if (budgetGrew) continue;
+      budgetStuck = true;
       const defaultRepairIssues = buildDefaultRepairIssues();
       const onlyBudgetGap = defaultRepairIssues.length > 0 && defaultRepairIssues.every(issue => /正文篇幅低于目标字数|正文长度低于提示词要求/u.test(issue));
       if (defaultRepairIssues.length === 0 || onlyBudgetGap) break;
@@ -355,6 +361,19 @@ export async function finalizeGeneration(p: {
       const escalation = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, 'default-path-quality-repair-escalation', () => repairMarkdownByQuality({ markdown: finalMarkdown, template, chapters: finalChapterDrafts, promptTexts, requirement: requirement, issues: unresolvedTasks, forbidDrawingImages, strategy: generationStrategy, diagnostics: generationDiagnostics, signal: signal }), { issues: unresolvedTasks.length, round: round + 1 }), executionStages);
       if (escalation.chapters !== finalChapterDrafts) applyDefaultRepairChapters(escalation.chapters);
       defaultRepairStages.push(displayStage({ type: 'llm_review', roleId: `default-repair-verify-${round + 1}`, status: finalIssues.some(issue => unresolvedTasks.some(task => repairIssueSignature(task) === repairIssueSignature(issue))) ? 'fallback' : 'success', message: `修复后验证闭环完成：第 ${round + 1} 轮升级修复 ${unresolvedTasks.length} 个残留问题`, details: unresolvedTasks }, { subtitle: '修复后验证' }));
+      // 质量修复无进展护栏：连续两轮"error 级问题签名集合"未变小（没解决任何阻断）即退出，
+      // 避免后几轮重复修复同样的问题白烧时间（与 budgetStuck 同一思路，保留当前成果进入最终校验）
+      const currentBlockingSignatures = new Set(finalIssues.filter(issue => issue.level === 'error').map(issue => repairIssueSignature(issue)));
+      if (currentBlockingSignatures.size === 0 || currentBlockingSignatures.size < previousBlockingSignatures.size) {
+        consecutiveQualityNoProgress = 0;
+      } else {
+        consecutiveQualityNoProgress += 1;
+        if (consecutiveQualityNoProgress >= 2) {
+          defaultRepairStages.push(displayStage({ type: 'llm_review', roleId: 'default-repair-stuck', status: 'fallback', message: `连续 ${consecutiveQualityNoProgress} 轮质量修复未减少阻断问题，已停止重复修复并保留当前成果` }, { subtitle: '修复收敛' }));
+          break;
+        }
+      }
+      previousBlockingSignatures = currentBlockingSignatures;
     }
     rebuildDefaultFinalState();
     const finalExportGate = buildExportGate(finalIssues, factsModel, finalChapterDrafts);
@@ -509,7 +528,7 @@ export async function finalizeGeneration(p: {
     : { markdown: initialMarkdown, stage: { type: 'llm_review' as const, roleId: 'llm-review', status: riskChapters.length > 0 ? 'fallback' as const : 'success' as const, message: riskChapters.length > 0 ? `本地风险扫描发现 ${riskChapters.length} 个低/中风险章节，未达到最终 LLM 审查触发阈值，保留为待复核 warning` : '本地风险扫描未发现需要 LLM 最终质量审查的章节' } };
   review.stage.message = elapsedMessage(review.stage.message || 'LLM 审查完成', reviewStartedAt);
   throwIfAborted(signal);
-  const reviewedMarkdownBase = applyDeterministicGateRepairs(finalizeDocumentMarkdown(review.markdown === initialMarkdown ? composeDocumentMarkdown({ ...base, validationIssues, exportGate: base.exportGate, executionStages }, { forbidDrawingImages, promptRules: promptDocumentRules }) : review.markdown, chapterDrafts, { forbidDrawingImages, promptRules: promptDocumentRules }).markdown, validationIssues);
+  const reviewedMarkdownBase = applyDeterministicGateRepairs(finalizeDocumentMarkdown(review.markdown === initialMarkdown ? composeDocumentMarkdown({ ...base, validationIssues, exportGate: base.exportGate, executionStages }, { forbidDrawingImages, promptRules: promptDocumentRules }) : review.markdown, chapterDrafts, { forbidDrawingImages, promptRules: promptDocumentRules }).markdown, validationIssues, gateForbiddenTexts);
   const structureIssueMessages = plannedStructureIssues(reviewedMarkdownBase, template).map(issue => buildRepairTaskMessage(issue));
   const placeholderIssueMessages = formalPlaceholderIssues(reviewedMarkdownBase).map(issue => buildRepairTaskMessage(issue));
   const gateIssueMessages = plannedAutoSpecGateIssues(reviewedMarkdownBase, template).map(issue => buildRepairTaskMessage(issue));
@@ -541,14 +560,14 @@ export async function finalizeGeneration(p: {
   let reviewedStages = repair.stage ? [...executionStages, review.stage, repair.stage] : [...executionStages, review.stage];
   let repairedChapterDrafts = repair.chapters;
   let postPatchMarkdown = composeDocumentMarkdown({ ...base, chapters: repairedChapterDrafts, validationIssues, exportGate: base.exportGate, executionStages }, { forbidDrawingImages, promptRules: promptDocumentRules });
-  postPatchMarkdown = applyDeterministicGateRepairs(postPatchMarkdown, validationIssues);
+  postPatchMarkdown = applyDeterministicGateRepairs(postPatchMarkdown, validationIssues, gateForbiddenTexts);
   const postRepairIssues = buildPostRepairIssues({ markdown: postPatchMarkdown, chapters: repairedChapterDrafts, template, factsModel });
   const unresolvedQualityTasks = unresolvedRepairTasks(repairIssues, postRepairIssues).slice(0, 8);
   if (unresolvedQualityTasks.length > 0) {
     const escalation = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, 'local-patch-quality-repair-escalation', () => repairMarkdownByQuality({ markdown: postPatchMarkdown, template, chapters: repairedChapterDrafts, promptTexts, requirement: requirement, issues: unresolvedQualityTasks, forbidDrawingImages, strategy: generationStrategy, diagnostics: generationDiagnostics, signal: signal }), { issues: unresolvedQualityTasks.length }), reviewedStages);
     repairedChapterDrafts = escalation.chapters;
     postPatchMarkdown = composeDocumentMarkdown({ ...base, chapters: repairedChapterDrafts, validationIssues, exportGate: base.exportGate, executionStages }, { forbidDrawingImages, promptRules: promptDocumentRules });
-    postPatchMarkdown = applyDeterministicGateRepairs(postPatchMarkdown, validationIssues);
+    postPatchMarkdown = applyDeterministicGateRepairs(postPatchMarkdown, validationIssues, gateForbiddenTexts);
     reviewedStages = escalation.stage ? [...reviewedStages, { ...escalation.stage, roleId: 'quality-repair-escalation', message: `修复后验证发现残留问题，已升级修复 ${unresolvedQualityTasks.length} 个问题` }] : reviewedStages;
   }
   const postPatchSectionGaps = collectSectionContentGaps(postPatchMarkdown, repairedChapterDrafts.map(chapter => ({ ...chapter, sections: extractGeneratedSections(chapter.content) })))
@@ -657,7 +676,7 @@ export async function finalizeGeneration(p: {
   }
   finalizedDocument = finalizeDocumentMarkdown(composeDocumentMarkdown({ ...base, chapters: finalChapterDrafts, validationIssues, exportGate: base.exportGate, executionStages }, { forbidDrawingImages, promptRules: promptDocumentRules }), finalChapterDrafts, { forbidDrawingImages, promptRules: promptDocumentRules });
   finalChapterDrafts = finalizedDocument.chapters;
-  finalMarkdown = normalizeProjectBasicInfoTable(repairKnownProjectBasicPlaceholders(finalizedDocument.markdown, structuredFacts), structuredFacts);
+  finalMarkdown = stripForbiddenGateTexts(normalizeProjectBasicInfoTable(repairKnownProjectBasicPlaceholders(finalizedDocument.markdown, structuredFacts), structuredFacts), gateForbiddenTexts);
   const canonicalFacts = buildCanonicalFacts({ facts: structuredFacts, markdown: finalMarkdown });
   if (canonicalFacts.size > 0) executionStages.push({ type: 'fact_extraction', roleId: 'canonical-facts', status: 'success', message: `已决策可信基础事实 ${canonicalFacts.size} 项`, details: [...canonicalFacts.values()].map(fact => `${fact.label}=${fact.value}（${fact.source}，confidence=${fact.confidence}）`).slice(0, 12) });
   const preRepairWarningIssues = [...structureIssueMessages];
@@ -669,11 +688,11 @@ export async function finalizeGeneration(p: {
     projectBasicPlaceholderIssues(finalMarkdown, structuredFacts),
     buildStandardFinalValidationIssues({ markdown: finalMarkdown, chapters: finalChapterDrafts, factsModel, template, promptBindings, promptDocumentRules }),
   );
-  const finalFactPatch = appendMissingFactPatchesToChapters(finalChapterDrafts, structuredFacts, finalMarkdown);
+  const finalFactPatch = appendMissingFactPatchesToChapters(finalChapterDrafts, structuredFacts, finalMarkdown, { forbiddenTexts: gateForbiddenTexts });
   if (finalFactPatch.patchedCount > 0) {
     finalChapterDrafts = finalFactPatch.chapters.map(chapter => ({ ...chapter, sections: chapter.sections || [] }));
     validationIssues = [...validationIssues, { level: 'info', message: `最终审查阶段已补写未落位事实 ${finalFactPatch.patchedCount} 项`, suggestion: '补写仅使用本项目资料明确事实，未补写商务敏感信息或系统暂未确认内容。' }];
-    finalMarkdown = finalizeDocumentMarkdown(composeDocumentMarkdown({ ...base, chapters: finalChapterDrafts, validationIssues, exportGate: base.exportGate, executionStages }, { forbidDrawingImages, promptRules: promptDocumentRules }), finalChapterDrafts, { forbidDrawingImages, promptRules: promptDocumentRules }).markdown;
+    finalMarkdown = stripForbiddenGateTexts(finalizeDocumentMarkdown(composeDocumentMarkdown({ ...base, chapters: finalChapterDrafts, validationIssues, exportGate: base.exportGate, executionStages }, { forbidDrawingImages, promptRules: promptDocumentRules }), finalChapterDrafts, { forbidDrawingImages, promptRules: promptDocumentRules }).markdown, gateForbiddenTexts);
   }
   validationIssues = collectValidationIssueGroups(validationIssues, factCoverageIssues(finalMarkdown, [...structuredFacts, ...factsModel.preciseFacts], { maxIssues: 30 }));
   finalMarkdown = finalizeDocumentMarkdown(finalMarkdown, finalChapterDrafts, { forbidDrawingImages, promptRules: promptDocumentRules }).markdown;
@@ -712,7 +731,7 @@ export async function finalizeGeneration(p: {
   finalStages.push(displayStage({ type: 'reference', roleId: 'knowledge-coverage', status: knowledgeCoverage.score >= 85 ? 'success' : 'fallback', message: `知识库确认覆盖率：${knowledgeCoverage.score}%（证据 ${knowledgeCoverage.evidenceCount} 条，文件 ${knowledgeCoverage.confirmedFiles} 份）`, details: [knowledgeCoverage.remediation] }, { subtitle: '知识库覆盖' }));
   finalStages.push(displayStage({ type: 'validation', roleId: 'document-review-checklist', status: reviewChecklist.every(item => item.passed) ? 'success' : 'fallback', message: `交付复核清单：通过 ${reviewChecklist.filter(item => item.passed).length}/${reviewChecklist.length}`, details: reviewChecklist.map(item => `${item.passed ? '通过' : '待修复'}：${item.label}${item.message ? `（${item.message}）` : ''}`) }, { subtitle: '交付复核' }));
   const slowMetrics = slowMetricSummary(generationDiagnostics.metrics);
-  finalStages.push(displayStage({ type: 'validation', roleId: 'document-diagnostics', status: 'success', message: `性能统计：LLM ${generationDiagnostics.llm.calls} 次，失败 ${generationDiagnostics.llm.failures} 次，峰值并行 ${generationDiagnostics.llm.maxActive}，检索 ${generationDiagnostics.evidence.searchQueries} 次/${Math.round(generationDiagnostics.evidence.searchMs / 1000)} 秒，证据上下文 ${generationDiagnostics.evidence.contextChars} 字，噪声过滤 ${generationDiagnostics.evidence.filteredNoise} 条，质量问题 阻断${generationDiagnostics.quality.blockingCount}/重要${generationDiagnostics.quality.importantCount}/轻微${generationDiagnostics.quality.minorCount}${slowMetrics ? `，Top耗时：${slowMetrics}` : ''}` }, { subtitle: '后台诊断' }));
+  finalStages.push(displayStage({ type: 'validation', roleId: 'document-diagnostics', status: 'success', message: `性能统计：LLM ${generationDiagnostics.llm.calls} 次，失败 ${generationDiagnostics.llm.failures} 次，瞬态重试 ${generationDiagnostics.llm.retries} 次，峰值并行 ${generationDiagnostics.llm.maxActive}，检索 ${generationDiagnostics.evidence.searchQueries} 次/${Math.round(generationDiagnostics.evidence.searchMs / 1000)} 秒，证据上下文 ${generationDiagnostics.evidence.contextChars} 字，噪声过滤 ${generationDiagnostics.evidence.filteredNoise} 条，质量问题 阻断${generationDiagnostics.quality.blockingCount}/重要${generationDiagnostics.quality.importantCount}/轻微${generationDiagnostics.quality.minorCount}${slowMetrics ? `，Top耗时：${slowMetrics}` : ''}` }, { subtitle: '后台诊断' }));
   const compactFinalChapterDrafts = finalChapterDrafts.map(chapter => ({
     ...chapter,
     evidence: selectEvidenceByBudget(chapter.evidence || [], { maxItems: 12, maxChars: 9000, preservePinned: true }),

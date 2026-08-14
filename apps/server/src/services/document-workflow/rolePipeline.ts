@@ -24,6 +24,8 @@ export function selectDocumentGenerationStrategy(input: { template: DocumentTemp
   const strict = /专项|安全|质量|验收|审核|合同|合规|审计|风控|风险/u.test(text);
   const longform = input.targetWords >= 30000 || chapterCount >= 8 || avgChapterTarget >= 4000;
   const compact = input.targetWords <= 6000 && chapterCount <= 4 && !strict;
+  // mode 仅为文档画像标签：LLM 审查开关保持全开，实际是否执行由本地风险阈值自适应决定
+  // （无风险自动跳过，不额外付出时间成本；不通过关闭审查来换取速度，避免质量下降）
   return {
     mode: strict ? 'strict' : longform ? 'longform' : compact ? 'fast' : 'balanced',
     enableChapterReview: true,
@@ -37,7 +39,7 @@ export function createGenerationDiagnostics(strategy: DocumentGenerationStrategy
   return {
     strategy,
     metrics: [],
-    llm: { calls: 0, failures: 0, maxActive: 0 },
+    llm: { calls: 0, failures: 0, maxActive: 0, retries: 0 },
     evidence: { raw: 0, used: 0, filteredNoise: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0 },
     quality: { blockingCount: 0, importantCount: 0, minorCount: 0, repairedCount: 0 },
   };
