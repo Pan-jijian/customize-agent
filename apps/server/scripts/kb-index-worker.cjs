@@ -95,7 +95,11 @@ async function main() {
         : await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
 
   let idleChecks = 0;
-  while (!job.relativePath && !job.relativePaths?.length && (project.countPendingIndexJobs() > 0 || (job.uploadOperationId && project.uploadSessionIsOpen(job.uploadOperationId) && idleChecks < 120))) {
+  // 上传 session 空闲上限：批次间无新文件到达超过该时长即退出等待，避免前端中断后 worker 永久挂起
+  const sessionIdleLimitMs = Math.max(60_000, Number(process.env.CUSTOMIZE_KB_UPLOAD_SESSION_IDLE_MS || 600_000));
+  const maxIdleChecks = Math.max(10, Math.ceil(sessionIdleLimitMs / 1000));
+  // 等待任何未关闭的上传 session（不限于本 operationId），避免重叠上传的后续批次文件无人消费
+  while (!job.relativePath && !job.relativePaths?.length && (project.countPendingIndexJobs() > 0 || (project.hasOpenUploadSessions() && idleChecks < maxIdleChecks))) {
     if (project.countPendingIndexJobs() === 0) {
       idleChecks += 1;
       await new Promise(resolve => setTimeout(resolve, 1000));

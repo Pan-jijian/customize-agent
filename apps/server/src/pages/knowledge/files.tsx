@@ -6,7 +6,7 @@ import { Table, Button, Input, Select, Tag, Modal, Space, App, Dropdown } from '
 import type { ColumnsType } from 'antd/es/table';
 import { SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined, MoreOutlined, PlusOutlined } from '@ant-design/icons';
 import { ChevronRight, ChevronDown } from 'lucide-react';
-import { getJob, getKbFiles, getKbOperations, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, reindexKbFile, type KbFileItem, type KbOperationRecord } from '@/lib/api';
+import { getJob, getKbFiles, getKbOperations, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, reindexKbFile, PartialUploadError, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
@@ -46,6 +46,9 @@ export default function FilesPage() {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [expandedRowKeys, setExpandedRowKeys] = useState<React.Key[]>([]);
   const categoryRef = useRef(category);
+  // 待联动刷新的上传操作 id 及其上次观察到的阶段：上传完成/解析阶段变化时刷新文件列表
+  const pendingUploadRefreshIds = useRef<Set<string>>(new Set());
+  const uploadStageRef = useRef<Map<string, string>>(new Map());
 
   useEffect(() => { categoryRef.current = category; }, [category]);
   useEffect(() => {
@@ -99,6 +102,21 @@ export default function FilesPage() {
     try {
       const result = await getKbOperations();
       const operationItems = result.operations.map(mapOperation).filter((item): item is StatusItem => Boolean(item));
+      // 上传联动刷新：跟踪的上传操作阶段变化（上传完成/索引阶段推进/完成）时静默刷新文件列表，替代固定延时刷新
+      for (const id of [...pendingUploadRefreshIds.current]) {
+        const op = result.operations.find(item => item.id === id);
+        if (!op) continue;
+        const stageKey = `${op.status}:${op.stage}`;
+        const prev = uploadStageRef.current.get(id) ?? '';
+        if (op.status === 'success' || op.status === 'error') {
+          pendingUploadRefreshIds.current.delete(id);
+          uploadStageRef.current.delete(id);
+          void loadFiles(undefined, { silent: true });
+        } else if (stageKey !== prev) {
+          uploadStageRef.current.set(id, stageKey);
+          void loadFiles(undefined, { silent: true });
+        }
+      }
       setStatusItems(items => {
         const operationIds = new Set(operationItems.map(item => item.id).filter(Boolean));
         const mergedOperations = operationItems.map(item => {
@@ -109,7 +127,7 @@ export default function FilesPage() {
         return [...mergedOperations, ...localItems].slice(0, 50);
       });
     } catch { /* ignore operation log load failure */ }
-  }, []);
+  }, [loadFiles]);
 
   const upsertStatusItem = useCallback((next: StatusItem, aliases: string[] = []) => {
     setStatusItems(items => {
@@ -156,6 +174,8 @@ export default function FilesPage() {
     const titleName = allowedFiles.length === 1 ? allowedFiles[0]!.name : `${allowedFiles.length} 个文件`;
     setUploading(true);
     const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    pendingUploadRefreshIds.current.add(uploadId);
+    uploadStageRef.current.set(uploadId, '');
     upsertStatusItem({ id: uploadId, type: 'upload', title: `上传 ${titleName}`, description: '等待上传、解析、切片和入库；同路径文件会更新，其他已有文件不会清除', status: 'processing', percent: 5 });
     try {
       await uploadKbFiles(allowedFiles, undefined, uploadId, progress => {
@@ -173,12 +193,21 @@ export default function FilesPage() {
       setCategory('');
       setSelectedRowKeys([]);
       categoryRef.current = '';
+      // 文件列表刷新交由 loadOperations 联动触发：上传完成（stage→parsing）与索引完成（status→success）时自动刷新
       await loadOperations();
-      window.setTimeout(() => { void loadFiles(undefined, { silent: true }); }, 2000);
     } catch (error) {
-      const description = error instanceof Error ? error.message : '请重试或检查文件格式';
-      message.error(description || '上传失败');
-      upsertStatusItem({ id: uploadId, type: 'error', title: `上传失败 ${titleName}`, description, status: 'error', percent: 100 });
+      if (error instanceof PartialUploadError) {
+        // 部分批次成功：已落盘文件照常进入索引，只提示失败的批次
+        const sample = error.failures.slice(0, 3).map(f => `批次 ${f.batchIndex + 1}（${f.files.join('、')}${f.files.length < 5 ? '' : ' 等'}）：${f.message}`).join('；');
+        message.warning(`${error.message}，失败文件可重新选择上传`);
+        upsertStatusItem({ id: uploadId, type: 'upload', title: `部分文件上传失败 ${titleName}`, description: sample || error.message, status: 'warning', percent: 100, error: sample || error.message });
+      } else {
+        pendingUploadRefreshIds.current.delete(uploadId);
+        uploadStageRef.current.delete(uploadId);
+        const description = error instanceof Error ? error.message : '请重试或检查文件格式';
+        message.error(description || '上传失败');
+        upsertStatusItem({ id: uploadId, type: 'error', title: `上传失败 ${titleName}`, description, status: 'error', percent: 100 });
+      }
     } finally {
       setUploading(false);
     }

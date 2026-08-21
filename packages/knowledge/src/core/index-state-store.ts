@@ -721,6 +721,13 @@ export class IndexStateStore {
     return row?.value;
   }
 
+  listMetadataKeys(prefix?: string): string[] {
+    const rows = prefix
+      ? (this.db.prepare('SELECT key FROM kb_metadata WHERE key LIKE ?').all(`${prefix}%`) as Array<{ key: string }>)
+      : (this.db.prepare('SELECT key FROM kb_metadata').all() as Array<{ key: string }>);
+    return rows.map(row => row.key);
+  }
+
   getStats(): { fileCount: number; chunkCount: number; totalSizeBytes: number; lastIndexedAt: number } {
     const stats = this.db.prepare(`
       SELECT

@@ -148,7 +148,8 @@ export default function DocumentsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerMode, setDrawerMode] = useState<'workflow' | 'editor'>('workflow');
   const [preparingTemplateId, setPreparingTemplateId] = useState<string | null>(null);
-  const recoveryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recoveryPollRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  const lastWorkflowSignatureRef = useRef('');
   const autoStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refineRequestRef = useRef(0);
   const activeGenStorageKey = useMemo(() => `activeGenDocId:${currentProjectRoot || 'default'}`, [currentProjectRoot]);
@@ -197,6 +198,7 @@ export default function DocumentsPage() {
       void (async () => {
         try {
           const { document: d } = await getGeneratedDocument(savedDocId, false, currentProjectRoot || undefined);
+          if (!d) return; // 服务端未返回记录（如 meta 短路），下一轮继续
           await loadDrafts();
           if (d.status !== 'generating') {
             localStorage.removeItem(storageKey);
@@ -229,6 +231,7 @@ export default function DocumentsPage() {
       setDrawerMode('workflow'); setDrawerOpen(true);
       try {
         const { document } = await getGeneratedDocument(item.id, false, item.projectRoot || currentProjectRoot || undefined);
+        if (!document) throw new Error('文档记录不存在');
         applyGeneratedRecordToWorkflow(document);
         if (isDraftGenerating(document.status)) startRecoveredGenerationPolling(document.id, document.projectRoot || item.projectRoot || currentProjectRoot || undefined);
         else await loadDrafts();
@@ -241,6 +244,7 @@ export default function DocumentsPage() {
     setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null); resetEditAssist();
     try {
       const { document } = await getGeneratedDocument(item.id, false, item.projectRoot || currentProjectRoot || undefined);
+      if (!document) throw new Error('文档记录不存在');
       setDraft(document.draft || null); setContent(document.editedMarkdown || document.markdown);
     } catch { message.error(t('common.error')); }
     setDrawerOpen(true);
@@ -338,6 +342,10 @@ export default function DocumentsPage() {
     return { steps: [], activeKey: null };
   };
   const applyGeneratedRecordToWorkflow = (record: GeneratedDocumentRecord) => {
+    const stages = record.executionStages || [];
+    const signature = `${record.id}|${record.updatedAt}|${record.status}|${record.error || ''}|${stages.length}|${stages.map(s => `${s.status}:${s.progress?.current ?? 0}/${s.progress?.total ?? 0}`).join(',')}`;
+    if (lastWorkflowSignatureRef.current === signature) return; // 轮询结果未变化：跳过无效重渲染
+    lastWorkflowSignatureRef.current = signature;
     setWorkflowRecord(record);
     const { steps, activeKey } = buildFlowStepsFromRecord(record);
     setFlowSteps(steps); setActiveFlowKey(activeKey); setLoading(isDraftGenerating(record.status)); setSnap(steps, activeKey, isDraftGenerating(record.status));
@@ -346,28 +354,35 @@ export default function DocumentsPage() {
       setDraft(record.draft); setContent(record.editedMarkdown || record.markdown); setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null);
     }
   };
+  const stopRecoveredGenerationPolling = (documentId: string) => {
+    const interval = recoveryPollRef.current.get(documentId);
+    if (interval) {
+      clearInterval(interval);
+      recoveryPollRef.current.delete(documentId);
+    }
+  };
   const startRecoveredGenerationPolling = (documentId: string, projectRoot?: string) => {
-    if (recoveryPollRef.current) clearInterval(recoveryPollRef.current);
-    recoveryPollRef.current = setInterval(() => {
+    // 同一文档的旧轮询先停止，避免重复叠加
+    stopRecoveredGenerationPolling(documentId);
+    const interval = setInterval(() => {
       void (async () => {
         try {
           const { document } = await getGeneratedDocument(documentId, true, projectRoot || currentProjectRoot || undefined);
+          if (!document) return;
           applyGeneratedRecordToWorkflow(document);
           await loadDrafts();
           if (!isDraftGenerating(document.status)) {
-            if (recoveryPollRef.current) clearInterval(recoveryPollRef.current);
-            recoveryPollRef.current = null;
+            stopRecoveredGenerationPolling(documentId);
             localStorage.removeItem(activeGenStorageKey);
           }
-        } catch { /* ignore */ }
+        } catch { /* 单次轮询失败忽略，下一轮继续 */ }
       })();
     }, 2000);
+    recoveryPollRef.current.set(documentId, interval);
   };
   useEffect(() => () => {
-    if (recoveryPollRef.current) {
-      clearInterval(recoveryPollRef.current);
-      recoveryPollRef.current = null;
-    }
+    for (const interval of recoveryPollRef.current.values()) clearInterval(interval);
+    recoveryPollRef.current.clear();
     if (autoStartTimerRef.current) {
       clearTimeout(autoStartTimerRef.current);
       autoStartTimerRef.current = null;
@@ -461,6 +476,7 @@ export default function DocumentsPage() {
       setTemplateValidations(prev => ({ ...prev, [id]: validation }));
       const errors = validation.issues.filter(issue => issue.level === 'error');
       if (errors.length > 0) {
+        genStarted.current = true; // 阻断 autoStart 竞态：校验失败后不允许 effect 自动发起生成
         setLoading(false);
         setActiveFlowKey('prepare');
         setFlowSteps([{ key: 'prepare', title: '模板运行前检查未通过', description: errors.map(issue => issue.message).join('\n'), status: 'error', icon: <CloseCircleOutlined />, subSteps: [{ key: 'validate', title: '模板运行前检查', status: 'error' }, { key: 'start', title: '准备生成任务', status: 'wait' }] }]);
@@ -471,6 +487,7 @@ export default function DocumentsPage() {
       setFlowSteps([{ key: 'prepare', title: '模板检查通过，正在创建生成任务', description: '已确认模板绑定资源可用，正在启动后台生成任务。', status: 'process', icon: <LoadingOutlined />, subSteps: [{ key: 'validate', title: '模板运行前检查', status: 'finish' }, { key: 'start', title: '准备生成任务', status: 'process' }] }]);
       await handleGenerate(id);
     } catch (error) {
+      genStarted.current = true; // 阻断 autoStart 竞态：校验异常后不允许 effect 自动发起生成
       const msg = error instanceof Error ? error.message : '模板运行前检查失败';
       setLoading(false);
       setFlowSteps([{ key: 'prepare', title: '模板运行准备失败', description: msg, status: 'error', icon: <CloseCircleOutlined />, subSteps: [{ key: 'validate', title: '模板运行前检查', status: 'error' }, { key: 'start', title: '准备生成任务', status: 'wait' }] }]);
@@ -485,17 +502,35 @@ export default function DocumentsPage() {
     const startedAt = Date.now();
     let lastUpdatedAt = 0;
     let lastChangedAt = Date.now();
+    let networkFailures = 0;
     const maxWaitMs = 125 * 60 * 1000;
     const maxNoProgressMs = 16 * 60 * 1000;
+    const maxNetworkFailures = 3;
     for (;;) {
       if (task?.aborted) throw new Error('用户中止');
       const controller = new AbortController();
       if (task) task.pollController = controller;
-      let document: GeneratedDocumentRecord;
+      let document: GeneratedDocumentRecord | null;
       try {
-        ({ document } = await getGeneratedDocument(docId, true, currentProjectRoot || undefined, controller.signal));
+        // 携带上次看到的 updatedAt：服务端基于 meta sidecar 短路，未变化时只返回轻量状态
+        ({ document } = await getGeneratedDocument(docId, true, currentProjectRoot || undefined, controller.signal, lastUpdatedAt || undefined));
+        networkFailures = 0;
+      } catch (error) {
+        if (task?.aborted) throw new Error('用户中止', { cause: error });
+        if (error instanceof DOMException && error.name === 'AbortError') throw new Error('用户中止', { cause: error });
+        // 网络抖动重试：连续失败超过上限才放弃，避免偶发断网直接终止整个生成流程
+        networkFailures += 1;
+        if (networkFailures >= maxNetworkFailures) throw error instanceof Error ? error : new Error('生成进度获取失败');
+        await new Promise(r => window.setTimeout(r, 2000 * networkFailures));
+        continue;
       } finally {
         if (task?.pollController === controller) task.pollController = undefined;
+      }
+      if (!document) {
+        // meta 未变化：跳过全量应用，避免无效重渲染
+        if (Date.now() - startedAt > maxWaitMs || Date.now() - lastChangedAt > maxNoProgressMs) throw new Error('生成任务疑似卡住，请点击继续生成或重新生成');
+        await new Promise(r => window.setTimeout(r, 1500));
+        continue;
       }
       applyGeneratedRecordToWorkflow(document);
       if (document.updatedAt !== lastUpdatedAt) { lastUpdatedAt = document.updatedAt; lastChangedAt = Date.now(); }
@@ -588,7 +623,8 @@ export default function DocumentsPage() {
         activeGenerationTask = null;
       }
       localStorage.removeItem(activeGenStorageKey);
-      if (recoveryPollRef.current) { clearInterval(recoveryPollRef.current); recoveryPollRef.current = null; }
+      for (const interval of recoveryPollRef.current.values()) clearInterval(interval);
+      recoveryPollRef.current.clear();
       setLoading(false); setFlowSteps([]); setActiveFlowKey(null);
       setDrawerOpen(false);
       await loadDrafts();
@@ -633,7 +669,7 @@ export default function DocumentsPage() {
       setLoading(false);
     }
     localStorage.removeItem(activeGenStorageKey);
-    if (recoveryPollRef.current) { clearInterval(recoveryPollRef.current); recoveryPollRef.current = null; }
+    stopRecoveredGenerationPolling(item.id);
     try {
       await abortGeneratedDocument(item.id, item.projectRoot || currentProjectRoot || undefined);
       message.success('已中止生成任务');
@@ -909,7 +945,7 @@ export default function DocumentsPage() {
       <Drawer
         title={drawerTitle}
         open={drawerOpen}
-        onClose={() => { setDrawerOpen(false); if (recoveryPollRef.current) { clearInterval(recoveryPollRef.current); recoveryPollRef.current = null; } }}
+        onClose={() => { setDrawerOpen(false); for (const interval of recoveryPollRef.current.values()) clearInterval(interval); recoveryPollRef.current.clear(); }}
         size="large" mask={{ closable: false }}
         style={{ borderRadius: '12px 0 0 12px' }}
         styles={{ body: { padding: '16px 24px' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}

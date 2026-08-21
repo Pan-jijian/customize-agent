@@ -1,9 +1,8 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import formidable, { type File as FormidableFile } from 'formidable';
 import { getMultiProjectManager, getProjectRoot } from '@/services/knowledge/kbService';
-import { setKbUploadProgress } from '@/services/knowledge/kbUploadProgress';
 import { upsertKbOperation } from '@/services/knowledge/kbOperationLog';
-import { startKnowledgeIndex } from '@/services/knowledge/kbIndexWorkerService';
+import { isKnowledgeIndexing, startKnowledgeIndex } from '@/services/knowledge/kbIndexWorkerService';
 
 export const config = {
   api: { bodyParser: false, responseLimit: false },
@@ -86,7 +85,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     if (projectRoot) {
       upsertKbOperation(projectRoot, { id: operationId, type: 'upload', title: `上传 ${titleName}`, stage: 'uploading', status: 'processing', percent: 1, message: '正在接收上传请求', fileName: titleName });
-      setKbUploadProgress(operationId, { stage: 'uploading', percent: 1, message: '正在接收上传请求', fileName: titleName });
     }
 
     const parsed = await parseMultipart(req);
@@ -105,8 +103,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (acceptedFiles.length === 0) {
       if (parsed.fields.uploadComplete) await project.stageUploadedFilePaths([], operationId, parsed.fields.fileOffset, true);
+      // 首批即为空批次时也必须确保索引 worker 已入队，否则后续批次的文件只会落盘不会被解析
+      if (parsed.fields.startIndex && !isKnowledgeIndexing(projectRoot)) {
+        startKnowledgeIndex({ id: `${operationId}-worker`, projectRoot, vectorMode: 'defer', uploadOperationId: operationId, uploadTitle: titleName });
+      }
       const message = `第 ${parsed.fields.batchIndex + 1}/${parsed.fields.totalBatches} 批仅包含空文件、系统文件或备份文件，已跳过`;
-      setKbUploadProgress(operationId, { stage: parsed.fields.uploadComplete ? 'done' : 'uploading', percent: parsed.fields.uploadComplete ? 100 : Math.min(4, Math.max(1, Math.round(((parsed.fields.batchIndex + 1) / parsed.fields.totalBatches) * 4))), message, fileName: titleName });
       upsertKbOperation(projectRoot, { id: operationId, type: 'upload', title: `上传 ${titleName}`, stage: parsed.fields.uploadComplete ? 'done' : 'uploading', status: 'warning', percent: parsed.fields.uploadComplete ? 100 : Math.min(4, Math.max(1, Math.round(((parsed.fields.batchIndex + 1) / parsed.fields.totalBatches) * 4))), message, fileName: titleName });
       return res.status(202).json({ success: true, accepted: true, operationId, jobs: [], skippedEmptyCount, batchIndex: parsed.fields.batchIndex, totalBatches: parsed.fields.totalBatches, indexingStarted: false });
     }
@@ -124,7 +125,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ? `文件已落盘，后台索引任务已排队${skippedEmptyCount ? `，已跳过 ${skippedEmptyCount} 个空文件、系统文件或备份文件` : ''}`
       : `文件已落盘：第 ${parsed.fields.batchIndex + 1}/${parsed.fields.totalBatches} 批${skippedEmptyCount ? `，已跳过 ${skippedEmptyCount} 个空文件、系统文件或备份文件` : ''}`;
 
-    setKbUploadProgress(operationId, { stage: 'uploading', percent, message, fileName: titleName });
     upsertKbOperation(projectRoot, {
       id: operationId,
       type: 'upload',
@@ -154,7 +154,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : '上传或索引失败';
-    setKbUploadProgress(operationId, { stage: 'error', percent: 100, message, fileName: titleName });
     if (projectRoot) {
       try {
         const project = await getMultiProjectManager().getProject(projectRoot);

@@ -146,6 +146,8 @@ interface GenerateTask {
 
 const tasks = new Map<string, GenerateTask>();
 const ABANDONED_RECORD_STALE_MS = Math.max(60 * 60_000, Number(process.env.DOCUMENT_ABANDONED_RECORD_STALE_MS ?? 24 * 60 * 60_000));
+/** 本进程启动时刻：用于重启后快速识别“上一次进程遗留”的 generating 记录，无需等待 24 小时阈值 */
+const PROCESS_STARTED_AT = Date.now();
 
 function generatedProjectId(projectRoot = getProjectRoot()) {
   return computeProjectId(path.resolve(projectRoot));
@@ -161,6 +163,30 @@ export function generatedRoot(projectRoot = getProjectRoot()) {
 function indexPath(projectRoot = getProjectRoot()) { return path.join(generatedRoot(projectRoot), 'index.json'); }
 function assetsPath(projectRoot = getProjectRoot()) { return path.join(generatedRoot(projectRoot), 'assets.json'); }
 function draftPath(id: string, projectRoot = getProjectRoot()) { return path.join(generatedRoot(projectRoot), 'drafts', `${id}.json`); }
+function draftMetaPath(id: string, projectRoot = getProjectRoot()) { return path.join(generatedRoot(projectRoot), 'drafts', `${id}.meta.json`); }
+
+interface GeneratedDocumentMeta {
+  updatedAt: number;
+  status: GeneratedDocumentStatus;
+  completedAt?: number;
+}
+
+/** 轻量元信息：轮询接口用其判断文档是否有变化，未变化时无需读取完整 draft 文件 */
+export function getGeneratedDocumentMeta(id: string, projectRoot = getProjectRoot()): GeneratedDocumentMeta | null {
+  const meta = readJson<GeneratedDocumentMeta | null>(draftMetaPath(id, projectRoot), null);
+  return meta && Number.isFinite(meta.updatedAt) ? meta : null;
+}
+
+function writeGeneratedDocumentMeta(record: GeneratedDocumentRecord, projectRoot: string) {
+  writeJson(draftMetaPath(record.id, projectRoot), { updatedAt: record.updatedAt, status: record.status, completedAt: record.completedAt } satisfies GeneratedDocumentMeta);
+}
+
+/** 判断 generating 记录是否需要绕过轻量轮询短路、强制全量读取以触发 stale 标记 */
+export function generatingRecordRequiresFullPoll(meta: GeneratedDocumentMeta | null) {
+  if (!meta || meta.status !== 'generating') return false;
+  if (meta.updatedAt < PROCESS_STARTED_AT) return true;
+  return Date.now() - meta.updatedAt >= ABANDONED_RECORD_STALE_MS;
+}
 export function generatedAssetAbsolutePath(asset: Pick<GeneratedAssetRecord, 'path'>, projectRoot = getProjectRoot()) {
   if (!asset.path) return null;
   if (path.isAbsolute(asset.path)) return asset.path;
@@ -172,9 +198,12 @@ function readJson<T>(file: string, fallback: T): T {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')) as T; } catch { return fallback; }
 }
 
+/** 原子写 JSON：先写临时文件再 rename，避免进程崩溃时写坏一半的 draft/index 文件 */
 function writeJson(file: string, data: unknown) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, file);
 }
 
 function getActiveTaskByDocumentId(documentId: string) {
@@ -184,7 +213,9 @@ function getActiveTaskByDocumentId(documentId: string) {
 
 function markStaleGeneratingRecord(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
   if (record.status !== 'generating' || getActiveTaskByDocumentId(record.id)) return record;
-  if (Date.now() - record.updatedAt < ABANDONED_RECORD_STALE_MS) return record;
+  // 进程重启后内存任务丢失：updatedAt 早于本进程启动时间的记录立即标记，无需等待长阈值
+  const staleThresholdMs = record.updatedAt < PROCESS_STARTED_AT ? 0 : ABANDONED_RECORD_STALE_MS;
+  if (Date.now() - record.updatedAt < staleThresholdMs) return record;
   const message = '生成任务已中断，请点击继续生成或重新生成';
   const status: GeneratedDocumentStatus = record.checkpointChapters?.length ? 'warning' : 'failed';
   const next = {
@@ -235,6 +266,7 @@ export function saveGeneratedDocument(record: GeneratedDocumentRecord, projectRo
   const now = Date.now();
   const next = trimEvidenceContent({ ...record, updatedAt: options?.preserveUpdatedAt ? record.updatedAt : now });
   writeJson(draftPath(next.id, projectRoot), next);
+  writeGeneratedDocumentMeta(next, projectRoot);
   const list = readJson<GeneratedDocumentListItem[]>(indexPath(projectRoot), []).filter(item => item.id !== next.id);
   list.unshift(toGeneratedDocumentListItem(next));
   writeJson(indexPath(projectRoot), list);
@@ -489,6 +521,11 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       if (active && active.record.templateId === input.templateId && active.record.projectRoot === resolvedProjectRoot) return active;
     }
   }
+  // 全局并发上限：避免多个生成任务同时耗尽 LLM 资源；已存在的 active 任务在上方复用分支直接返回
+  const maxConcurrentGenerations = Math.max(1, Number(process.env.DOCUMENT_MAX_CONCURRENT_GENERATIONS ?? 2));
+  if (tasks.size >= maxConcurrentGenerations) {
+    throw new Error(`当前已有 ${tasks.size} 个文档生成任务在运行（上限 ${maxConcurrentGenerations}），请等待完成或中止后再运行`);
+  }
   const documentId = existing?.id || `doc-${now}-${crypto.randomBytes(4).toString('hex')}`;
   const taskId = `task-${now}-${crypto.randomBytes(4).toString('hex')}`;
   const initial: GeneratedDocumentRecord = existing ? {
@@ -528,6 +565,8 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
   let lastProgressSaveAt = 0;
   let lastProgressSignature = '';
   const minProgressSaveInterval = Math.max(1_000, Math.min(15_000, Number(process.env.DOCUMENT_PROGRESS_SAVE_INTERVAL_MS ?? 5_000)));
+  // 阶段签名未变（如周期性心跳）时的保底写盘间隔，避免每 30s 心跳全量写盘
+  const minProgressHeartbeatSaveInterval = Math.max(30_000, Math.min(300_000, Number(process.env.DOCUMENT_PROGRESS_HEARTBEAT_SAVE_INTERVAL_MS ?? 60_000)));
   const promise = generateDocumentDraft({ ...input, projectRoot: resolvedProjectRoot, resumeChapters, signal: controller.signal, onProgress: (stages, checkpoint) => {
     try {
       if (taskRef.current) taskRef.current.lastProgressAt = Date.now();
@@ -536,7 +575,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
         stages: stages.map(stage => ({ type: stage.type, roleId: stage.roleId, status: stage.status, message: stage.message, progress: stage.progress })),
         checkpoint: checkpoint?.chapters?.map(chapter => [chapter.id, chapter.content.length, chapter.sections?.length || 0]) || [],
       });
-      if (!checkpoint?.chapters && signature === lastProgressSignature && nowProgress - lastProgressSaveAt < minProgressSaveInterval) return;
+      if (!checkpoint?.chapters && signature === lastProgressSignature && nowProgress - lastProgressSaveAt < Math.max(minProgressSaveInterval, minProgressHeartbeatSaveInterval)) return;
       const current = getGeneratedDocument(documentId, resolvedProjectRoot);
       if (current && current.status === 'generating') {
         const checkpointChapters = checkpoint?.chapters ? mergeDraftChapters(current.checkpointChapters, checkpoint.chapters).map(trimChapterEvidence) : current.checkpointChapters;

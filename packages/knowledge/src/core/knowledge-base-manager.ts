@@ -1119,6 +1119,20 @@ export class KnowledgeBaseManager {
     return this.store.getMetadata(`upload_session:${operationId}`) === 'open';
   }
 
+  listOpenUploadSessions(): string[] {
+    this.initialize();
+    const prefix = 'upload_session:';
+    return this.store.listMetadataKeys(prefix)
+      .filter(key => this.store.getMetadata(key) === 'open')
+      .map(key => key.slice(prefix.length));
+  }
+
+  hasOpenUploadSessions(): boolean {
+    this.initialize();
+    const prefix = 'upload_session:';
+    return this.store.listMetadataKeys(prefix).some(key => this.store.getMetadata(key) === 'open');
+  }
+
   private emptyDiff(): DiffResult {
     return { newFiles: [], modifiedFiles: [], deletedFiles: [], unchangedCount: 0, mtimeOnlyCount: 0, skippedFiles: [], hasChanges: false, diffTimeMs: 0 };
   }

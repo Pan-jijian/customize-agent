@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { startGenerateDocumentTask } from '@/services/document-core/generatedDocumentService';
 import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
-import { validateDocumentTemplateRun } from '@/services/document-workflow';
+import { validateDocumentTemplateRunCached } from '@/services/document-workflow';
 
 /**
  * 生成文档 API 处理器
@@ -14,7 +14,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // 校验必填参数
   if (!templateId) return res.status(400).json({ error: 'templateId required' });
   if (!projectRoot) return res.status(400).json({ error: 'projectRoot required' });
-  const validation = await validateDocumentTemplateRun(templateId, projectRoot, { requirement });
+  // 使用带短 TTL 缓存的校验：前端模板页面刚校验过时直接复用结果，避免重复执行资料理解等昂贵检查
+  const validation = await validateDocumentTemplateRunCached(templateId, projectRoot, { requirement });
   const errors = validation.issues.filter(issue => issue.level === 'error');
   if (errors.length > 0) return res.status(422).json({ error: '生成前检查未通过', validation, issues: errors });
   // 启动异步生成任务并返回任务信息

@@ -354,14 +354,23 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
     }
   }
   const fileMap = new Map(files.map(file => [file.relativePath, file]));
+  const notIndexedWarnings: Array<{ level: 'warning'; message: string }> = [];
   const fileDiagnostics = materialFilePaths.map(filePath => {
     const file = fileMap.get(filePath);
     if (!file) issues.push({ level: 'error', message: `知识库文件不存在：${filePath}` });
-    if (file && (file.status === 'disk' || file.indexedAt === 0)) issues.push({ level: 'warning', message: `知识库文件存在但尚未完成索引：${filePath}` });
+    if (file && (file.status === 'disk' || file.indexedAt === 0)) notIndexedWarnings.push({ level: 'warning', message: `知识库文件存在但尚未完成索引：${filePath}` });
     if (file?.status === 'error') issues.push({ level: 'warning', message: `知识库文件索引失败：${filePath}${file.errorMessage ? `，${file.errorMessage}` : ''}` });
     if (file && file.chunkCount === 0) issues.push({ level: 'warning', message: `知识库文件暂无可检索内容切片：${filePath}` });
     return { filePath, roleId: 'project_material', roleName: '项目资料包', exists: Boolean(file), indexed: Boolean(file && file.indexedAt > 0 && file.status !== 'disk'), chunkCount: file?.chunkCount ?? 0, vectorReady: Boolean(file && file.chunkCount > 0) };
   });
+  const existingFileCount = fileDiagnostics.filter(item => item.exists).length;
+  const unindexedFileCount = fileDiagnostics.filter(item => item.exists && !item.indexed).length;
+  if (existingFileCount > 0 && unindexedFileCount === existingFileCount) {
+    // 资料包内文件全部尚未完成解析入库，运行时检索拿不到内容，升级为阻断错误而非仅告警
+    issues.push({ level: 'error', message: `模板绑定的项目资料包（${existingFileCount} 份文件）均尚未完成解析入库，请等待后台索引完成后再运行模板` });
+  } else {
+    issues.push(...notIndexedWarnings);
+  }
   const resolvedPrompts = readPromptContents(promptBindings);
   const configuredPromptRoleIds = new Set(config?.promptRoles.map(item => item.roleId) || []);
   for (const item of config?.promptRoles || []) {
@@ -408,6 +417,36 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
     for (const message of readiness.warnings) issues.push({ level: 'warning', message });
   }
   return { templateId, projectRoleConfigId: configId, fileDiagnostics, promptDiagnostics, readiness, issues };
+}
+
+interface TemplateRunValidationCacheEntry {
+  at: number;
+  result: Awaited<ReturnType<typeof validateDocumentTemplateRun>>;
+}
+
+const templateRunValidationCache = new Map<string, TemplateRunValidationCacheEntry>();
+const TEMPLATE_RUN_VALIDATION_CACHE_TTL_MS = Math.max(5_000, Number(process.env.DOCUMENT_TEMPLATE_VALIDATION_CACHE_TTL_MS ?? 30_000));
+
+/** 带短 TTL 缓存的模板运行前校验：前端校验与生成接口校验连续触发时复用结果，避免重复执行昂贵的资料理解与准备度评估 */
+export async function validateDocumentTemplateRunCached(templateId: string, projectRoot = getProjectRoot(), options: { requirement?: string } = {}) {
+  const resolvedProjectRoot = path.resolve(projectRoot);
+  const template = getDocumentTemplate(templateId);
+  const files = listKnowledgeFiles(resolvedProjectRoot);
+  // 轻量签名：模板版本/更新时间 + 资料文件数量与最新修改时间，任一变化即失效
+  const signature = JSON.stringify({
+    templateId,
+    templateVersion: template?.version ?? 0,
+    templateUpdatedAt: template?.updatedAt ?? 0,
+    projectRoot: resolvedProjectRoot,
+    requirement: options.requirement ?? '',
+    fileCount: files.length,
+    lastFileMtime: files.reduce((max, file) => Math.max(max, file.mtime), 0),
+  });
+  const cached = templateRunValidationCache.get(signature);
+  if (cached && Date.now() - cached.at < TEMPLATE_RUN_VALIDATION_CACHE_TTL_MS) return cached.result;
+  const result = await validateDocumentTemplateRun(templateId, resolvedProjectRoot, options);
+  templateRunValidationCache.set(signature, { at: Date.now(), result });
+  return result;
 }
 
 export function deleteDocumentTemplate(templateId: string) {

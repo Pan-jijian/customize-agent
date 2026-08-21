@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
-import { deleteGeneratedDocument, getGeneratedDocument, updateGeneratedDocument } from '@/services/document-core/generatedDocumentService';
+import { deleteGeneratedDocument, getGeneratedDocument, getGeneratedDocumentMeta, generatingRecordRequiresFullPoll, updateGeneratedDocument } from '@/services/document-core/generatedDocumentService';
 
 export const config = {
   api: { bodyParser: { sizeLimit: '50mb' } },
@@ -53,6 +53,14 @@ function generatedDocumentHandler(req: NextApiRequest, res: NextApiResponse) {
   if (!id) return res.status(400).json({ error: 'id required' });
   const projectRoot = typeof req.query.projectRoot === 'string' ? req.query.projectRoot : undefined;
   if (req.method === 'GET') {
+    // 轻量轮询短路：客户端携带上次看到的 updatedAt，未变化时只返回 meta 状态，避免反复读全量 draft
+    const ifUpdatedSince = req.query.ifUpdatedSince ? Number(req.query.ifUpdatedSince) : undefined;
+    if (ifUpdatedSince !== undefined && Number.isFinite(ifUpdatedSince)) {
+      const meta = getGeneratedDocumentMeta(id, projectRoot);
+      if (meta && meta.updatedAt === ifUpdatedSince && !generatingRecordRequiresFullPoll(meta)) {
+        return res.status(200).json({ document: null, unchanged: true, updatedAt: meta.updatedAt, status: meta.status });
+      }
+    }
     const record = getGeneratedDocument(id, projectRoot);
     if (!record) return res.status(404).json({ error: 'Document not found' });
     if (req.query.lite === '1') return res.status(200).json({ document: liteDocument(record) });

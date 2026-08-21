@@ -98,7 +98,11 @@ async function runInProcess(job: IndexJob, operationId: string, operationType: '
           ? await project.forceReindexAll({ vectorMode: job.vectorMode, onProgress })
           : await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
     let idleChecks = 0;
-    while (!job.relativePath && !job.relativePaths?.length && (project.countPendingIndexJobs() > 0 || (job.uploadOperationId && project.uploadSessionIsOpen(job.uploadOperationId) && idleChecks < 120))) {
+    // 上传 session 空闲上限：批次间无新文件到达超过该时长即退出等待，避免前端中断后 worker 永久挂起
+    const sessionIdleLimitMs = Math.max(60_000, Number(process.env.CUSTOMIZE_KB_UPLOAD_SESSION_IDLE_MS || 600_000));
+    const maxIdleChecks = Math.max(10, Math.ceil(sessionIdleLimitMs / 1000));
+    // 等待任何未关闭的上传 session（不限于本 operationId），避免重叠上传的后续批次文件无人消费
+    while (!job.relativePath && !job.relativePaths?.length && (project.countPendingIndexJobs() > 0 || (project.hasOpenUploadSessions() && idleChecks < maxIdleChecks))) {
       if (project.countPendingIndexJobs() === 0) {
         idleChecks += 1;
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -130,23 +134,31 @@ async function runInProcess(job: IndexJob, operationId: string, operationType: '
 
 /** 将知识库索引任务加入队列执行，包含扫描变更、解析分块、向量化等阶段，并通过操作日志实时汇报进度 */
 export function enqueueKnowledgeIndex(job: IndexJob): Promise<WorkerResult> {
-  const existing = activeJobs.get(job.projectRoot);
-  if (existing) return existing.promise;
+  const previous = activeJobs.get(job.projectRoot);
   const operationId = job.uploadOperationId ?? job.id;
   const operationType = job.uploadOperationId ? 'upload' : 'reindex';
   const operationTitle = job.uploadOperationId ? `上传 ${job.uploadTitle ?? '文件'}` : job.relativePath ? `重新解析 ${job.relativePath}` : '知识库后台索引';
-  upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'uploading', status: 'processing', percent: 5, message: '索引任务已进入后台队列', filePath: job.relativePath, fileName: job.relativePath?.split('/').pop() });
-  const promise = (process.env.CUSTOMIZE_AGENT_DISABLE_KB_CHILD_PROCESS === '1'
-    ? runInProcess(job, operationId, operationType, operationTitle)
-    : runInChildProcess(job, operationId, operationType, operationTitle)
-  ).then(result => {
-    if (result.success) {
-      upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'done', status: 'success', percent: 100, message: job.relativePath ? '单文件重新解析完成，正在后台更新项目理解缓存' : '知识库后台索引完成，正在后台更新项目理解缓存', filePath: job.relativePath, fileName: job.relativePath?.split('/').pop() });
-      startProjectIntelligenceBuild(job.projectRoot);
-    }
-    return result;
-  }).finally(() => activeJobs.delete(job.projectRoot));
-  activeJobs.set(job.projectRoot, { operationId, promise, startedAt: Date.now() });
+  const runCurrent = () => {
+    upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'uploading', status: 'processing', percent: 5, message: '索引任务已进入后台队列', filePath: job.relativePath, fileName: job.relativePath?.split('/').pop() });
+    return (process.env.CUSTOMIZE_AGENT_DISABLE_KB_CHILD_PROCESS === '1'
+      ? runInProcess(job, operationId, operationType, operationTitle)
+      : runInChildProcess(job, operationId, operationType, operationTitle)
+    ).then(result => {
+      if (result.success) {
+        upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'done', status: 'success', percent: 100, message: job.relativePath ? '单文件重新解析完成，正在后台更新项目理解缓存' : '知识库后台索引完成，正在后台更新项目理解缓存', filePath: job.relativePath, fileName: job.relativePath?.split('/').pop() });
+        startProjectIntelligenceBuild(job.projectRoot);
+      }
+      return result;
+    });
+  };
+  // 同项目已有索引任务在跑时串成链式队列：前一任务结束后继续消费新入队的文件，避免重叠上传的文件被吞
+  const promise = previous ? previous.promise.then(runCurrent, runCurrent) : runCurrent();
+  const entry: ActiveIndexJob = { operationId, promise, startedAt: previous?.startedAt ?? Date.now() };
+  activeJobs.set(job.projectRoot, entry);
+  // 仅当仍是最新链节时才清理，避免前一任务的 finally 误删后排队的新任务
+  void promise.finally(() => {
+    if (activeJobs.get(job.projectRoot) === entry) activeJobs.delete(job.projectRoot);
+  });
   return promise;
 }
 

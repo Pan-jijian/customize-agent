@@ -99,6 +99,22 @@ export async function openKbFileTarget(relativePath: string, target: 'file' | 'd
 
 export interface KbUploadBatchResult { success: boolean; accepted?: boolean; operationId?: string; relativePath?: string; jobs?: Array<{ id: string; relativePath: string; status: string }>; batchIndex?: number; totalBatches?: number; indexingStarted?: boolean; }
 
+/** 批次上传部分失败：已成功批次已落盘并继续索引，失败的批次信息通过该错误暴露给 UI 提示 */
+export class PartialUploadError extends Error {
+  succeededBatches: number;
+  failedBatches: number;
+  totalBatches: number;
+  failures: Array<{ batchIndex: number; files: string[]; message: string }>;
+  constructor(detail: { succeededBatches: number; failedBatches: number; totalBatches: number; failures: Array<{ batchIndex: number; files: string[]; message: string }> }) {
+    super(`上传部分成功：${detail.succeededBatches}/${detail.totalBatches} 个批次已上传，${detail.failedBatches} 个批次失败`);
+    this.name = 'PartialUploadError';
+    this.succeededBatches = detail.succeededBatches;
+    this.failedBatches = detail.failedBatches;
+    this.totalBatches = detail.totalBatches;
+    this.failures = detail.failures;
+  }
+}
+
 function fileRelativePath(file: File) {
   return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
 }
@@ -153,26 +169,38 @@ export async function uploadKbFiles(files: File[], projectRoot?: string, uploadI
   if (current.length > 0) batches.push({ files: current, offset: currentOffset });
 
   const results: KbUploadBatchResult[] = [];
+  const failures: Array<{ batchIndex: number; files: string[]; message: string }> = [];
   let completedFiles = 0;
   let cursor = 0;
   async function uploadBatch(batchIndex: number) {
     const batch = batches[batchIndex]!;
     const params = new URLSearchParams({ batchIndex: String(batchIndex), totalBatches: String(batches.length) });
     if (uploadId) params.set('uploadId', uploadId);
-    const result = await fetchJson<KbUploadBatchResult>(`/api/kb/upload?${params}`, {
-      method: 'POST',
-      body: appendUploadForm(batch.files, {
-        projectRoot,
-        uploadId,
-        batchIndex,
-        totalBatches: batches.length,
-        fileOffset: batch.offset,
-        startIndex: batchIndex === 0,
-        uploadComplete: batches.length === 1,
-      }),
-    });
-    results[batchIndex] = result;
-    completedFiles += batch.files.length;
+    let lastError: Error | undefined;
+    // 批次失败重试 1 次：网络抖动/网关超时导致的瞬时失败不应直接放弃整个批次
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const result = await fetchJson<KbUploadBatchResult>(`/api/kb/upload?${params}`, {
+          method: 'POST',
+          body: appendUploadForm(batch.files, {
+            projectRoot,
+            uploadId,
+            batchIndex,
+            totalBatches: batches.length,
+            fileOffset: batch.offset,
+            startIndex: batchIndex === 0,
+            uploadComplete: batches.length === 1,
+          }),
+        });
+        results[batchIndex] = result;
+        completedFiles += batch.files.length;
+        onBatchProgress?.({ uploadedFiles: completedFiles, totalFiles: files.length, batchIndex, totalBatches: batches.length });
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+    failures.push({ batchIndex, files: batch.files.slice(0, 5).map(file => file.name), message: lastError?.message || '上传失败' });
     onBatchProgress?.({ uploadedFiles: completedFiles, totalFiles: files.length, batchIndex, totalBatches: batches.length });
   }
   const workers = Array.from({ length: Math.min(maxConcurrentBatches, batches.length) }, async () => {
@@ -182,13 +210,21 @@ export async function uploadKbFiles(files: File[], projectRoot?: string, uploadI
     }
   });
   await Promise.all(workers);
-  if (batches.length > 1) {
+  const succeededBatches = batches.length - failures.length;
+  if (failures.length > 0 && succeededBatches === 0) {
+    throw new Error(failures[0]?.message || '上传失败');
+  }
+  if (batches.length > 1 && succeededBatches > 0) {
+    // 即使部分批次失败，也关闭上传会话，让已成功落盘的文件进入索引
     const result = await fetchJson<KbUploadBatchResult>(`/api/kb/upload/complete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectRoot, uploadId }),
     });
     results.push(result);
+  }
+  if (failures.length > 0) {
+    throw new PartialUploadError({ succeededBatches, failedBatches: failures.length, totalBatches: batches.length, failures });
   }
   return results.filter(Boolean).at(-1) ?? { success: true };
 }
@@ -399,12 +435,13 @@ export async function getGeneratedDocuments(projectRoot?: string) {
   const p = projectRoot ? `?projectRoot=${encodeURIComponent(projectRoot)}` : '';
   return fetchJson<{ documents: GeneratedDocumentRecord[] }>(`/api/documents/generated${p}`);
 }
-export async function getGeneratedDocument(id: string, lite = false, projectRoot?: string, signal?: AbortSignal) {
+export async function getGeneratedDocument(id: string, lite = false, projectRoot?: string, signal?: AbortSignal, ifUpdatedSince?: number) {
   const params = new URLSearchParams();
   if (lite) params.set('lite', '1');
   if (projectRoot) params.set('projectRoot', projectRoot);
+  if (ifUpdatedSince !== undefined && Number.isFinite(ifUpdatedSince)) params.set('ifUpdatedSince', String(ifUpdatedSince));
   const query = params.toString() ? `?${params.toString()}` : '';
-  return fetchJson<{ document: GeneratedDocumentRecord }>(`/api/documents/generated/${encodeURIComponent(id)}${query}`, { signal });
+  return fetchJson<{ document: GeneratedDocumentRecord | null; unchanged?: boolean; updatedAt?: number; status?: string }>(`/api/documents/generated/${encodeURIComponent(id)}${query}`, { signal });
 }
 export async function updateGeneratedDocument(id: string, patch: Partial<GeneratedDocumentRecord>, projectRoot?: string) {
   const p = projectRoot ? `?projectRoot=${encodeURIComponent(projectRoot)}` : '';

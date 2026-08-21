@@ -41,7 +41,10 @@ function readAll(projectRoot: string): KbOperationRecord[] {
 function writeAll(projectRoot: string, records: KbOperationRecord[]) {
   const file = logPath(projectRoot);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${records.slice(-200).map(record => JSON.stringify(record)).join('\n')}\n`, 'utf8');
+  // 原子写：先写临时文件再 rename，避免并发写盘时读到半截 JSON 导致日志损坏
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, `${records.slice(-200).map(record => JSON.stringify(record)).join('\n')}\n`, 'utf8');
+  fs.renameSync(tmp, file);
 }
 
 export function upsertKbOperation(projectRoot: string, patch: Omit<Partial<KbOperationRecord>, 'id'> & Pick<KbOperationRecord, 'id' | 'type' | 'title'>): KbOperationRecord {
