@@ -1,6 +1,8 @@
-import type { DocumentFact } from './types';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { CanonicalFact as GovernedCanonicalFact, CanonicalFactModel, DocumentFact, ProjectGraph } from './types';
 import { normalizeOcrFactText } from './factsModel';
-import { stringifyFactValue } from './utils';
+import { stableHash, stringifyFactValue } from './utils';
 
 export type FactValueType = 'duration' | 'money' | 'location' | 'organization' | 'standard' | 'identifier' | 'scale' | 'text';
 
@@ -83,6 +85,11 @@ function valueTypeScore(value: string, spec: FieldSpec) {
       if (/\d+(?:\.\d+)?\s*(?:㎡|平方米|m²|米|m|层|栋|座|万元|元)/iu.test(value)) return { rejected: false, score: 30, reason: '包含规模数值或单位' };
       return { rejected: false, score: 5, reason: '规模字段为文本描述' };
     default:
+      if (spec.key === 'project_name') {
+        if (/存在部位|风险等级|管控措施|监测频次|闭环要求|序号|内容|范围|不适用/u.test(value)) return { rejected: true, score: -90, reason: '项目名称字段串位或表头噪声' };
+        if (!/项目|工程|学院|宿舍|楼|校区|施工总承包/u.test(value)) return { rejected: true, score: -70, reason: '项目名称缺少工程名称特征' };
+        return { rejected: false, score: 35, reason: '符合项目名称特征' };
+      }
       return { rejected: false, score: value.length >= 2 ? 10 : -20, reason: '文本字段' };
   }
 }
@@ -194,4 +201,224 @@ export function buildCanonicalFacts(input: { facts: DocumentFact[]; markdown?: s
     ...collectStructuredFactCandidates(input.facts),
     ...collectMarkdownTableCandidates(input.markdown || ''),
   ]);
+}
+
+function factSourceType(fact: DocumentFact): GovernedCanonicalFact['sourceType'] {
+  const source = `${fact.sourceFile || ''} ${fact.sourceRef?.sectionTitle || ''} ${fact.roleId || ''}`;
+  if (/合同/u.test(source)) return 'contract';
+  if (/招标|公告|前附表|需求书/u.test(source)) return 'tender';
+  if (/清单|工程量|BOQ|报价/u.test(source)) return 'boq';
+  if (/图纸|设计|CAD|DWG/u.test(source)) return 'drawing';
+  if (/规范|标准/u.test(source)) return 'standard';
+  return 'structured_fact';
+}
+
+function factPriority(sourceType: GovernedCanonicalFact['sourceType']) {
+  const priorities: Record<GovernedCanonicalFact['sourceType'], number> = {
+    user: 100,
+    contract: 90,
+    tender: 85,
+    boq: 75,
+    drawing: 70,
+    standard: 60,
+    evidence: 55,
+    structured_fact: 50,
+    projectGraph: 40,
+    generated_markdown: 30,
+    derived: 20,
+    unknown: 10,
+  };
+  return priorities[sourceType];
+}
+
+function governedFactFromCanonical(fact: CanonicalFact): GovernedCanonicalFact {
+  const sourceType = fact.source.includes('generated_markdown') ? 'generated_markdown' : fact.source.includes('evidence') ? 'evidence' : 'structured_fact';
+  return {
+    key: fact.fieldKey,
+    label: fact.label,
+    value: fact.value,
+    normalizedValue: normalizeOcrFactText(fact.value),
+    sourceType,
+    sourceFile: fact.source,
+    confidence: fact.confidence,
+    priority: factPriority(sourceType),
+    locked: factPriority(sourceType) >= 80,
+    selectedReason: fact.selectedReason,
+  };
+}
+
+function governedFactFromDocumentFact(fact: DocumentFact, key: string, label: string): GovernedCanonicalFact {
+  const value = stringifyFactValue(fact.value);
+  const sourceType = factSourceType(fact);
+  return {
+    key,
+    label,
+    value,
+    normalizedValue: normalizeOcrFactText(value),
+    sourceType,
+    sourceFile: fact.sourceFile,
+    sourceRef: fact.sourceRef?.sectionTitle,
+    confidence: Math.round((fact.confidence || 0.5) * 100),
+    priority: factPriority(sourceType),
+    locked: factPriority(sourceType) >= 80,
+    selectedReason: '按资料来源优先级和字段置信度决策',
+  };
+}
+
+function pickFactsByPattern(facts: DocumentFact[], key: string, label: string, pattern: RegExp) {
+  return facts
+    .filter(fact => pattern.test(`${fact.fieldId || ''}${fact.key || ''}${fact.fieldName || ''}`))
+    .map(fact => governedFactFromDocumentFact(fact, key, label))
+    .filter(fact => fact.value && !/资料未明确|系统暂未确认/u.test(fact.value))
+    .sort((a, b) => b.priority - a.priority || b.confidence - a.confidence || a.value.length - b.value.length);
+}
+
+function chooseFact(candidates: GovernedCanonicalFact[]) {
+  return candidates[0];
+}
+
+function conflictsFor(key: string, label: string, candidates: GovernedCanonicalFact[]) {
+  const values = [...new Map(candidates.map(fact => [fact.normalizedValue, fact])).values()];
+  if (values.length <= 1) return undefined;
+  const topPriority = Math.max(...values.map(fact => fact.priority));
+  const topValues = values.filter(fact => fact.priority === topPriority);
+  return {
+    key,
+    label,
+    values: values.map(fact => ({ value: fact.value, sourceFile: fact.sourceFile, priority: fact.priority, confidence: fact.confidence })),
+    decision: topValues.length === 1 ? 'highest_priority_selected' as const : 'manual_review_required' as const,
+  };
+}
+
+function graphFacts(graph?: ProjectGraph): GovernedCanonicalFact[] {
+  if (!graph) return [];
+  const resources = (graph.resources || []).map(resource => ({
+    key: `resource_${resource.type}_${resource.name}`,
+    label: resource.type === 'equipment' ? '机械设备' : resource.type === 'labor' ? '劳动力' : '材料资源',
+    value: [resource.name, resource.spec, resource.quantity, resource.unit].filter(Boolean).join(' '),
+    normalizedValue: normalizeOcrFactText([resource.name, resource.spec, resource.quantity, resource.unit].filter(Boolean).join(' ')),
+    sourceType: 'projectGraph' as const,
+    sourceFile: resource.sourceFiles?.[0],
+    confidence: 55,
+    priority: factPriority('projectGraph'),
+    locked: false,
+    selectedReason: '来自项目图谱资源节点',
+  })).filter(fact => fact.value);
+  const risks = (graph.risks || []).map(risk => ({
+    key: `risk_${risk.risk}`,
+    label: '风险源',
+    value: [risk.risk, risk.level, risk.mitigation].filter(Boolean).join(' '),
+    normalizedValue: normalizeOcrFactText([risk.risk, risk.level, risk.mitigation].filter(Boolean).join(' ')),
+    sourceType: 'projectGraph' as const,
+    sourceFile: risk.sourceFiles?.[0],
+    confidence: 55,
+    priority: factPriority('projectGraph'),
+    locked: false,
+    selectedReason: '来自项目图谱风险节点',
+  })).filter(fact => fact.value);
+  return [...resources, ...risks];
+}
+
+function factCacheRoot(projectRoot?: string) {
+  const root = path.join(process.env.HOME || process.cwd(), '.customize-agent', 'cache', 'document-workflow', stableHash(projectRoot || 'default'));
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
+function canonicalFactCacheKey(input: { facts: DocumentFact[]; markdown?: string; projectGraph?: ProjectGraph; requiredKeys?: string[]; requirement?: string; templateId?: string }) {
+  return stableHash({
+    version: 'canonical-facts-v2',
+    requirement: input.requirement || '',
+    templateId: input.templateId || '',
+    requiredKeys: input.requiredKeys || [],
+    facts: input.facts.map(fact => ({ key: fact.key, fieldId: fact.fieldId, fieldName: fact.fieldName, value: fact.value, sourceFile: fact.sourceFile, roleId: fact.roleId, confidence: fact.confidence })).sort((a, b) => `${a.sourceFile}${a.key}${a.value}`.localeCompare(`${b.sourceFile}${b.key}${b.value}`)),
+    graphHash: input.projectGraph ? stableHash(input.projectGraph) : '',
+    markdownHash: input.markdown ? stableHash(input.markdown.slice(0, 20000)) : '',
+  });
+}
+
+function readCachedCanonicalFacts(projectRoot: string | undefined, key: string): CanonicalFactModel | undefined {
+  const root = factCacheRoot(projectRoot);
+  if (!root) return undefined;
+  try {
+    const cached = JSON.parse(fs.readFileSync(path.join(root, `canonical-facts-${key}.json`), 'utf8')) as CanonicalFactModel;
+    return cached && cached.byKey ? cached : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeCachedCanonicalFacts(projectRoot: string | undefined, key: string, facts: CanonicalFactModel) {
+  const root = factCacheRoot(projectRoot);
+  if (!root) return;
+  fs.writeFileSync(path.join(root, `canonical-facts-${key}.json`), JSON.stringify(facts, null, 2));
+}
+
+export function buildCanonicalFactModel(input: { facts: DocumentFact[]; markdown?: string; projectGraph?: ProjectGraph; requiredKeys?: string[]; projectRoot?: string; requirement?: string; templateId?: string }): CanonicalFactModel {
+  const cacheKey = canonicalFactCacheKey(input);
+  const cached = readCachedCanonicalFacts(input.projectRoot, cacheKey);
+  if (cached) return cached;
+  const canonicalMap = buildCanonicalFacts({ facts: input.facts, markdown: input.markdown });
+  const byKey: Record<string, GovernedCanonicalFact> = {};
+  for (const [key, fact] of canonicalMap.entries()) byKey[key] = governedFactFromCanonical(fact);
+
+  const sourceFacts = input.facts || [];
+  const fieldPatterns: Array<{ key: string; label: string; pattern: RegExp; bucket: keyof CanonicalFactModel }> = [
+    { key: 'project_name', label: '项目名称', pattern: /项目名称|工程名称|招标项目名称|project_name/u, bucket: 'projectIdentity' },
+    { key: 'project_code', label: '项目编号', pattern: /项目编号|招标项目编号|project_code/u, bucket: 'projectIdentity' },
+    { key: 'owner', label: '招标人', pattern: /招标人|建设单位|发包人|owner/u, bucket: 'projectIdentity' },
+    { key: 'project_location', label: '建设地点', pattern: /建设地点|实施地点|project_location/u, bucket: 'projectIdentity' },
+    { key: 'project_scale', label: '建设规模', pattern: /建设规模|工程规模|project_scale/u, bucket: 'projectScope' },
+    { key: 'construction_scope', label: '施工范围', pattern: /施工范围|招标范围|工程范围/u, bucket: 'projectScope' },
+    { key: 'duration', label: '计划工期', pattern: /计划工期|合同工期|总工期|schedule_requirement|duration/u, bucket: 'schedule' },
+    { key: 'quality_target', label: '质量目标', pattern: /质量标准|质量目标|quality_standard/u, bucket: 'quality' },
+  ];
+  const conflicts: CanonicalFactModel['conflicts'] = [];
+  for (const item of fieldPatterns) {
+    const candidates = pickFactsByPattern(sourceFacts, item.key, item.label, item.pattern);
+    if (!byKey[item.key] && candidates.length > 0) byKey[item.key] = chooseFact(candidates)!;
+    const conflict = conflictsFor(item.key, item.label, candidates);
+    if (conflict) conflicts.push(conflict);
+  }
+
+  const graphFactList = graphFacts(input.projectGraph);
+  const resources = graphFactList.filter(fact => /resource_/u.test(fact.key));
+  const risks = graphFactList.filter(fact => /risk_/u.test(fact.key));
+  for (const fact of graphFactList) if (!byKey[fact.key]) byKey[fact.key] = fact;
+
+  const gaps = (input.requiredKeys || [])
+    .filter(key => !byKey[key])
+    .map(key => ({ key, label: PROJECT_BASIC_FIELD_SPECS.find(spec => spec.key === key)?.label || key, reason: '未从用户输入、招标资料、清单、图纸或项目图谱中确认该事实' }));
+
+  const result: CanonicalFactModel = {
+    projectIdentity: {
+      projectName: byKey.project_name,
+      projectCode: byKey.project_code,
+      owner: byKey.owner,
+      location: byKey.project_location,
+    },
+    projectScope: {
+      scale: byKey.project_scale,
+      constructionScope: byKey.construction_scope,
+    },
+    schedule: {
+      duration: byKey.duration || byKey.schedule_requirement,
+    },
+    quality: {
+      target: byKey.quality_target || byKey.quality_standard,
+    },
+    safety: {
+      risks,
+    },
+    resources: {
+      resources,
+    },
+    environment: {},
+    constraints: {},
+    byKey,
+    conflicts,
+    gaps,
+  };
+  writeCachedCanonicalFacts(input.projectRoot, cacheKey, result);
+  return result;
 }

@@ -3,6 +3,8 @@ import { boqRowTraceIssues, buildBoqRowTraces } from './documentFactTrace';
 import { chapterDependencyIssues, documentDeliveryScoreIssues, evidenceUsageCoverageIssues, paragraphGenericIssues } from './documentDeliveryReport';
 import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues } from './markdownComposer';
 import { webEvidenceLeakageIssues } from './webResearchService';
+import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
+import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, PromptBinding, PromptDocumentRuleSet, ValidationIssue } from './types';
 
 export function buildStandardFinalValidationIssues(input: {
@@ -27,6 +29,13 @@ export function buildStandardFinalValidationIssues(input: {
     ...crossChapterConsistencyIssues(input.markdown, input.factsModel),
     ...evidenceUsageCoverageIssues(input.markdown, input.factsModel),
     ...paragraphGenericIssues(input.markdown),
+    ...constructionOrgGenericLanguageIssues(input.chapters),
+    ...constructionOrgControlLoopIssues(input.chapters),
+    ...constructionOrgProfessionalChainIssues({ markdown: input.markdown, factsModel: input.factsModel, chapters: input.chapters }),
+    ...constructionOrgConsistencyIssues(input.markdown, input.factsModel),
+    ...constructionOrgChapterDataCoverageIssues(input.chapters, input.factsModel),
+    ...constructionOrgMajorContentIssues(input.chapters, input.markdown),
+    ...constructionOrgBonusModuleIssues(input.chapters),
     ...chapterDependencyIssues(input.chapters),
     ...documentDeliveryScoreIssues(input.markdown, input.chapters, input.factsModel),
     ...generatedFactVerificationIssues(input.markdown, input.factsModel),

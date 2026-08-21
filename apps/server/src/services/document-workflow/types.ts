@@ -1,3 +1,5 @@
+import type { AgentWorkflowContext } from './agentWorkflow';
+
 export interface PromptRequiredSectionRule {
   title: string;
   aliases?: string[];
@@ -62,6 +64,75 @@ export interface RuntimePromptRuleSet extends PromptDocumentRuleSet {
   extractionTrace?: RuleExtractionTrace[];
 }
 
+export interface ProjectGraphTableFieldPlan {
+  name: string;
+  required: boolean;
+  sourceDomain: 'project' | 'works' | 'methods' | 'resources' | 'schedule' | 'standards' | 'risks' | 'requirements' | 'siteConditions' | 'factsModel' | 'standard';
+  sourceHint: string;
+  fallbackPolicy: 'projectFactOnly' | 'standardAllowed' | 'deriveFromContext';
+}
+
+export type GovernedTableNecessity = 'must' | 'should' | 'conditional' | 'reference';
+export type GovernedTableOutputType = 'markdown_table' | 'checklist' | 'paragraph' | 'merged_into_existing_table' | 'skip';
+export type GovernedTableFallbackPolicy = 'generate_with_confirmed_facts' | 'generate_with_review_notes' | 'convert_to_text' | 'skip_with_reason';
+
+export interface GovernedTableFieldPlan extends ProjectGraphTableFieldPlan {
+  confirmed: boolean;
+  missingReason?: string;
+}
+
+export interface ProjectGraphTablePlan {
+  id: string;
+  title: string;
+  chapterTitle: string;
+  moduleTitle: string;
+  required: boolean;
+  reason: string;
+  fields: ProjectGraphTableFieldPlan[];
+  sourceDomains: ProjectGraphTableFieldPlan['sourceDomain'][];
+  necessity?: GovernedTableNecessity;
+  belongsToChapter?: boolean;
+  scopeExplanation?: string;
+  triggerFacts?: string[];
+  triggerGraphNodes?: string[];
+  fillability?: {
+    requiredFieldCount: number;
+    confirmedFieldCount: number;
+    missingProjectFactFields: string[];
+    canGenerate: boolean;
+    fallbackPolicy: GovernedTableFallbackPolicy;
+  };
+  outputDecision?: {
+    shouldOutput: boolean;
+    outputType: GovernedTableOutputType;
+    decisionReason: string;
+  };
+  narrativeRequirements?: {
+    beforeTable: string[];
+    afterTable: string[];
+    controlLoop?: string[];
+  };
+  rowSeeds?: Array<{
+    rowLabel: string;
+    source: 'canonicalFact' | 'projectGraph' | 'boq' | 'standard';
+    confirmedFields: string[];
+    missingFields: string[];
+    sourceRef?: string;
+  }>;
+}
+
+export interface ChapterReadinessPlan {
+  chapterId: string;
+  chapterTitle: string;
+  canGenerate: boolean;
+  riskLevel: 'low' | 'medium' | 'high';
+  missingFacts: string[];
+  missingEvidence: string[];
+  tableFieldGaps: string[];
+  suggestedStrategy: 'normal' | 'section_first' | 'evidence_first' | 'generate_with_review_notes';
+  reason: string;
+}
+
 export interface DocumentTemplateChapter {
   id: string;
   title: string;
@@ -71,6 +142,7 @@ export interface DocumentTemplateChapter {
   sections?: string[];
   tableSections?: string[];
   tableRequirements?: string[];
+  tablePlans?: ProjectGraphTablePlan[];
   pinnedEvidenceFilePaths?: string[];
 }
 
@@ -173,7 +245,8 @@ export interface DocumentDraftChapter {
   evidence: DocumentEvidence[];
   missingFacts: string[];
   sections?: string[];
-  /** 章节生成是否因超时回退到证据兜底草稿 */
+  tablePlans?: ProjectGraphTablePlan[];
+  /** 章节生成是否超时 */
   timedOut?: boolean;
   /** 章节生成实际耗时（毫秒） */
   elapsedMs?: number;
@@ -237,6 +310,47 @@ export interface ResolvedFactNeed {
   evidence?: DocumentEvidence[];
 }
 
+export interface CanonicalFact {
+  key: string;
+  label: string;
+  value: string;
+  normalizedValue: string;
+  sourceType: 'user' | 'tender' | 'contract' | 'boq' | 'drawing' | 'standard' | 'projectGraph' | 'derived' | 'structured_fact' | 'generated_markdown' | 'evidence' | 'unknown';
+  sourceFile?: string;
+  sourceRef?: string;
+  confidence: number;
+  priority: number;
+  locked: boolean;
+  selectedReason?: string;
+}
+
+export interface CanonicalFactConflict {
+  key: string;
+  label: string;
+  values: Array<{ value: string; sourceFile?: string; priority: number; confidence: number }>;
+  decision: 'highest_priority_selected' | 'manual_review_required';
+}
+
+export interface CanonicalFactGap {
+  key: string;
+  label: string;
+  reason: string;
+}
+
+export interface CanonicalFactModel {
+  projectIdentity: Record<string, CanonicalFact | undefined>;
+  projectScope: Record<string, CanonicalFact | CanonicalFact[] | undefined>;
+  schedule: Record<string, CanonicalFact | CanonicalFact[] | undefined>;
+  quality: Record<string, CanonicalFact | CanonicalFact[] | undefined>;
+  safety: Record<string, CanonicalFact | CanonicalFact[] | undefined>;
+  resources: Record<string, CanonicalFact[]>;
+  environment: Record<string, CanonicalFact | undefined>;
+  constraints: Record<string, CanonicalFact[]>;
+  byKey: Record<string, CanonicalFact>;
+  conflicts: CanonicalFactConflict[];
+  gaps: CanonicalFactGap[];
+}
+
 export interface DocumentFactsModel {
   project: DocumentFact[];
   schedule: DocumentFact[];
@@ -253,6 +367,7 @@ export interface DocumentFactsModel {
   factIndex: EvidenceFactIndex;
   missing: string[];
   conflicts: string[];
+  canonical?: CanonicalFactModel;
 }
 
 export interface ValidationIssue {
@@ -260,6 +375,10 @@ export interface ValidationIssue {
   message: string;
   source?: string;
   suggestion?: string;
+  severity?: 'blocker' | 'warning' | 'suggestion';
+  repairability?: 'local_deterministic' | 'llm_repairable' | 'manual_review' | 'not_repair_needed';
+  category?: 'structure' | 'table' | 'fact_consistency' | 'evidence_coverage' | 'professional_chain' | 'control_loop' | 'format' | 'style' | 'scope';
+  owner?: 'system' | 'llm' | 'user';
 }
 
 export interface ExportGateResult {
@@ -272,7 +391,7 @@ export interface DocumentExecutionStage {
   type: 'role_binding' | 'knowledge_retrieval' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference';
   roleId: string;
   promptId?: string;
-  status: 'running' | 'success' | 'fallback' | 'skipped' | 'failed';
+  status: 'running' | 'success' | 'skipped' | 'failed';
   message?: string;
   details?: string[];
   progress?: { current: number; total: number; label?: string };
@@ -283,8 +402,8 @@ export interface DocumentExecutionStage {
   group?: string;
   order?: number;
   executionVersion?: 2;
-  /** 章节生成是否因超时回退到证据兜底模式 */
-  chapterTimeoutFallback?: boolean;
+  /** 章节生成是否超时 */
+  chapterTimedOut?: boolean;
 }
 
 export interface DocumentAsset {
@@ -295,7 +414,7 @@ export interface DocumentAsset {
   url?: string;
   prompt?: string;
   modelProvider?: string;
-  status: 'generated' | 'prompt_ready' | 'fallback';
+  status: 'generated' | 'prompt_ready' | 'failed';
   message?: string;
 }
 
@@ -465,6 +584,8 @@ export interface GeneratedDocumentDraft {
   reviewMetadata?: DocumentReviewMetadata;
   /** 提示词绑定溯源：记录每个提示词的完整绑定链路 */
   promptProvenance?: Array<{ promptId: string; roleId: string; configId: string; roleName: string; contentHash: string; order: number }>;
+  /** Agent 工作流上下文：资料范围、资料快照、基础图谱、节点状态 */
+  agentWorkflow?: AgentWorkflowContext;
   /** 项目资料图谱：从招标文件+清单+图纸中提取的结构化项目理解 */
   projectGraph?: ProjectGraph;
   /** 施工组织设计写作任务书：每章的写作指导 */

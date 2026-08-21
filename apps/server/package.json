@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/server",
-  "version": "4.1.20",
+  "version": "4.1.46",
   "description": "Customize Agent Web 管理控制台",
   "exports": {
     "./package.json": "./package.json"
@@ -10,8 +10,9 @@
     "customize-dashboard": "scripts/start-server.cjs"
   },
   "scripts": {
-    "dev": "next dev -p 17321",
+    "dev": "node -e \"require('fs').rmSync('.next', { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })\" && next dev -p 17321",
     "build": "node -e \"require('fs').rmSync('.next', { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })\" && next build && node -e \"const fs=require('fs'); for (const p of ['.next/cache','.next/static/development','.next/static/webpack']) fs.rmSync(p, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })\" && node scripts/verify-next-static.js",
+    "prepack": "node -e \"const fs=require('fs'); for (const p of ['.next/cache','.next/static/development','.next/static/webpack']) fs.rmSync(p, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })\" && node scripts/verify-next-static.js --silent",
     "prestart": "node scripts/verify-next-static.js",
     "start": "next start -p 17321",
     "lint": "eslint src/"
@@ -43,9 +44,9 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.2",
-    "@customize-agent/knowledge": "workspace:^",
-    "@customize-agent/llm": "workspace:^",
-    "@customize-agent/runtime": "workspace:^",
+    "@customize-agent/knowledge": "^4.0.42",
+    "@customize-agent/llm": "^3.0.13",
+    "@customize-agent/runtime": "^3.0.13",
     "@napi-rs/canvas": "^0.1.82",
     "@types/nprogress": "^0.2.3",
     "antd": "^6.5.0",

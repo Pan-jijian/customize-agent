@@ -30,7 +30,7 @@ export function selectDocumentGenerationStrategy(input: { template: DocumentTemp
     mode: strict ? 'strict' : longform ? 'longform' : compact ? 'fast' : 'balanced',
     enableChapterReview: true,
     enableGlobalReview: true,
-    enableDocumentBudgetExpansion: true,
+    enableDocumentBudgetExpansion: false,
     enableFinalQualityReview: true,
   };
 }
@@ -223,7 +223,8 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
       resolvedSignatures: [] as string[],
     };
   }
-  const concurrency = Math.max(1, candidates.length || 1);
+  const configuredConcurrency = Number(process.env.DOCUMENT_QUALITY_REPAIR_CONCURRENCY || 2);
+  const concurrency = Math.max(1, Math.min(candidates.length || 1, Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : 2));
   const repairedById = new Map<string, string>();
   let patchCount = 0;
   for (let offset = 0; offset < candidates.length; offset += concurrency) {
@@ -237,6 +238,7 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
   }
   let repairedCount = 0;
   let rejectedShrinkCount = 0;
+  const actuallyRepairedIds = new Set<string>();
   const repairedChapters = input.chapters.map(chapter => {
     const content = repairedById.get(chapter.id);
     if (!content || content === chapter.content) return chapter;
@@ -247,6 +249,7 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
       return chapter;
     }
     repairedCount += 1;
+    actuallyRepairedIds.add(chapter.id);
     return { ...chapter, content };
   });
   const message = repairedCount > 0
@@ -256,7 +259,7 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
   const patchedIssueSignatures = new Set<string>();
   if (repairedCount > 0) {
     for (const candidate of candidates) {
-      if (repairedById.has(candidate.chapter.id)) {
+      if (actuallyRepairedIds.has(candidate.chapter.id)) {
         for (const issue of candidate.issues) {
           patchedIssueSignatures.add(repairIssueSignature(issue));
         }

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
+const silent = process.argv.includes('--silent');
 const root = path.resolve(__dirname, '..');
 const nextDir = path.join(root, '.next');
 const required = [
@@ -82,4 +83,4 @@ for (const [route, file] of Object.entries(pagesManifest)) {
     process.exit(1);
   }
 }
-console.log(`Next static assets verified: ${files.size} chunks, ${Object.keys(pagesManifest).length} pages`);
+if (!silent) console.log(`Next static assets verified: ${files.size} chunks, ${Object.keys(pagesManifest).length} pages`);

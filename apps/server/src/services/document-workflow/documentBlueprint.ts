@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { constructionOrgBlueprintRuleLines, constructionOrgProjectTypePrompt } from './constructionOrgQualityRules';
 import type { DocumentFact, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter } from './types';
 import { stringifyFactValue } from './utils';
 import { selectByScore, factImportanceScore } from './selection';
@@ -81,8 +82,17 @@ export function chapterExecutionPlanLine(chapter: DocumentTemplateChapter, facts
   ].join('\n');
 }
 
+function chapterTablePlanLines(chapter: DocumentTemplateChapter) {
+  const plans = chapter.tablePlans || [];
+  if (plans.length === 0) return [];
+  return [
+    '   - 本章必须按项目图谱生成以下表格/清单：',
+    ...plans.map(plan => `     * ${plan.required ? '必写' : '按需'}《${plan.title}》：字段=${plan.fields.map(field => field.name).join('、')}；来源域=${plan.sourceDomains.join('、')}；${plan.reason}`),
+  ];
+}
+
 export function chapterTaskCardLine(chapter: DocumentTemplateChapter) {
-  return [`章节任务卡：${chapter.title}`, `   - 必须覆盖事实域：${factCoverageTargetsForTitle(chapter.title).join('、')}`, ...professionalPointsForTitle(chapter.title).map(point => `   - ${point}`), ...(chapter.sections || []).slice(0, 10).map(section => `   - 小节任务：${section}｜${professionalPointsForTitle(section).join('；')}`)].join('\n');
+  return [`章节任务卡：${chapter.title}`, `   - 必须覆盖事实域：${factCoverageTargetsForTitle(chapter.title).join('、')}`, ...professionalPointsForTitle(chapter.title).map(point => `   - ${point}`), ...(chapter.sections || []).slice(0, 10).map(section => `   - 小节任务：${section}｜${professionalPointsForTitle(section).join('；')}`), ...chapterTablePlanLines(chapter), ...constructionOrgBlueprintRuleLines(chapter)].join('\n');
 }
 
 export function buildDocumentBlueprintContext(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string }) {
@@ -118,6 +128,7 @@ export function buildDocumentBlueprintContext(input: { template: DocumentTemplat
   });
   const chapterLines = input.chapters.map(chapterTaskCardLine);
   const executionPlans = input.chapters.map(chapter => chapterExecutionPlanLine(chapter, input.factsModel));
+  const constructionOrgProjectPrompt = constructionOrgProjectTypePrompt({ templateName: input.template.name, outputTitle: input.template.outputTitle, requirement: input.requirement, chapters: input.chapters });
   return [
     '【全局文档蓝图与一致性约束】',
     `文档类型画像：${profile.type}；评分重点：${profile.focus.join('、')}`,
@@ -127,6 +138,7 @@ export function buildDocumentBlueprintContext(input: { template: DocumentTemplat
     evidenceTraceLines.length ? `关键事实证据追踪清单：\n${evidenceTraceLines.join('\n')}` : '',
     `事实覆盖矩阵：\n${coverageMatrix.join('\n')}`,
     `知识库确认覆盖矩阵：\n${supportMatrix.join('\n')}`,
+    constructionOrgProjectPrompt,
     '证据引用约束：工期、质量目标、招标范围、金额、工程量、标准规范、验收要求等关键事实必须来自可信基础事实主表或绑定材料；系统暂未从知识库确认的数字和参数不得编造。',
     '跨章一致性要求：所有章节必须共用同一套工期、质量、范围、资源和验收口径；不得在不同章节写出相互矛盾的项目基础信息。',
     `章节专业任务卡：\n${chapterLines.join('\n')}`,

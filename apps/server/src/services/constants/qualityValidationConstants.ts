@@ -57,7 +57,7 @@ export const MARKDOWN_TABLE_BLOCK_SPLIT_RE = /\n{2,}/u;
 export const MARKDOWN_TABLE_ROW_RE = /\|.+\|/u;
 
 /** Markdown 表格分隔线识别规则。 */
-export const MARKDOWN_TABLE_DIVIDER_RE = /\n\s*\|?\s*:?-{3,}:?/u;
+export const MARKDOWN_TABLE_DIVIDER_RE = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/u;
 
 /** Markdown 图片语法识别规则。 */
 export const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/gu;

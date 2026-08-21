@@ -1,8 +1,7 @@
-import * as path from 'node:path';
 import type { DocumentEvidence, DocumentTemplateChapter, RetrievalCoverageReport, ValidationIssue } from './types';
-import { cleanEvidenceText, selectEvidenceByBudget } from './evidence';
+import { selectEvidenceByBudget } from './evidence';
 import { evidenceMatchesFact } from './factMatching';
-import { throwIfAborted } from './utils';
+import { runWithAdaptiveConcurrency, throwIfAborted } from './utils';
 import { selectByScore, textImportanceScore } from './selection';
 
 export interface RetrievalCoverageRisk {
@@ -15,8 +14,6 @@ export interface RetrievalCoverageRisk {
 }
 
 type SearchManager = { search: (projectRoot: string, query: string, options: any) => Promise<{ results: Array<{ filePath: string; score: number; content: string; sectionTitle?: string; source?: string }> }> };
-
-type DetailProject = { getFileDetail?: (relativePath: string, options?: { maxChunkContentChars?: number }) => { file: { relativePath: string }; chunks: Array<{ content: string; sectionTitle?: string }>; totalChunkCount?: number } | undefined };
 
 function uniqueTokens(values: string[]) {
   return [...new Set(values.flatMap(value => value.split(/[\s、，,。；;：:（）()《》【】\-/]+/u)).map(value => value.trim()).filter(value => value.length >= 2))];
@@ -108,6 +105,7 @@ export async function retrieveDeepChapterEvidence(input: {
   highRisk?: boolean;
   signal?: AbortSignal;
 }) {
+  throwIfAborted(input.signal);
   const evidence: DocumentEvidence[] = [];
   if (input.scopedFilePaths.length === 0) return evidence;
   // 资源/材料/清单类章节 + 复合标题章节：扩大深召回查询数量，覆盖更多BOQ和清单材料
@@ -119,9 +117,9 @@ export async function retrieveDeepChapterEvidence(input: {
   const limit = Math.ceil((input.highRisk ? 24 : 14) * (isResourceHeavy ? 1.4 : 1));
   const maxEvidence = Math.ceil((input.highRisk ? 72 : 42) * budgetMultiplier);
   const maxChars = Math.ceil((input.highRisk ? 72000 : 42000) * budgetMultiplier);
-  // 深召回查询并行化：与主章节检索路径保持一致（全部查询并发执行，不加人为并发上限）；
-  // 结果后续统一按评分排序去重，并行不改变召回质量
-  const searchResults = await Promise.all(queries.map(async query => {
+  // 深召回按工作流自适应并发执行：保持吞吐，但避免多章节叠加时形成检索洪峰。
+  const searchResults = await runWithAdaptiveConcurrency(queries, async query => {
+    throwIfAborted(input.signal);
     const result = await input.manager.search(input.projectRoot, query, {
       scope: 'project',
       filters: { filePaths: input.scopedFilePaths },
@@ -130,37 +128,9 @@ export async function retrieveDeepChapterEvidence(input: {
       generationMode: false,
     });
     return mapSearchResults({ chapter: input.chapter, results: result.results.filter(item => input.scopedFilePaths.includes(item.filePath)), fileRoleByPath: input.fileRoleByPath, fileProcessingByPath: input.fileProcessingByPath, boost: 2.4, source: 'deep-retrieval' });
-  }));
+  }, { kind: 'deepRetrieval', highRisk: input.highRisk });
   evidence.push(...searchResults.flat());
   return selectEvidenceByBudget(evidence, { maxItems: maxEvidence, maxChars, preservePinned: true });
-}
-
-export function sampleBoundFileEvidence(input: { project: DetailProject; chapter: DocumentTemplateChapter; scopedFilePaths: string[]; fileRoleByPath: Map<string, string>; fileProcessingByPath: Map<string, string>; highRisk?: boolean }) {
-  const evidence: DocumentEvidence[] = [];
-  const tokens = uniqueTokens([input.chapter.title, ...(input.chapter.sections || []), ...input.chapter.requiredFacts]);
-  const budget = input.highRisk ? 24000 : 12000;
-  for (const filePath of input.scopedFilePaths.slice(0, input.highRisk ? 80 : 40)) {
-    const detail = input.project.getFileDetail?.(filePath, { maxChunkContentChars: budget });
-    if (!detail?.chunks?.length) continue;
-    const ranked = detail.chunks.map((chunk, index) => {
-      const content = cleanEvidenceText(chunk.content);
-      const haystack = `${chunk.sectionTitle || ''}\n${content}`;
-      const hits = tokens.filter(token => haystack.includes(token)).length;
-      const numericBonus = /\d+(?:\.\d+)?\s*(?:日历天|天|月|年|万元|元|㎡|m²|m³|米|mm|台|套|人|项|%|MPa|kPa)/u.test(content) ? 1 : 0;
-      return { chunk, index, score: hits * 0.8 + numericBonus + (index === 0 ? 0.4 : 0) };
-    }).filter(item => item.score > 0).sort((a, b) => b.score - a.score).slice(0, input.highRisk ? 6 : 3);
-    for (const item of ranked) evidence.push({
-      chapterId: input.chapter.id,
-      filePath: detail.file.relativePath,
-      score: 1.8 + item.score,
-      content: item.chunk.content,
-      roleId: input.fileRoleByPath.get(detail.file.relativePath),
-      processingType: input.fileProcessingByPath.get(detail.file.relativePath),
-      sectionTitle: item.chunk.sectionTitle,
-      source: 'bound-file-sample',
-    });
-  }
-  return selectEvidenceByBudget(evidence, { maxItems: input.highRisk ? 60 : 30, maxChars: input.highRisk ? 60000 : 30000, preservePinned: true });
 }
 
 export function buildRetrievalCoverageReport(input: { chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; risk: RetrievalCoverageRisk }): RetrievalCoverageReport {

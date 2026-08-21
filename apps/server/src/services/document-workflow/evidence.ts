@@ -53,9 +53,6 @@ function extractParameterLines(content: string) {
   // 用评分选择最重要的参数行（而非硬截断前 80 行）
   const uniqueLines = [...new Set(parameterLines)];
   const selected = selectByScore(uniqueLines, l => textImportanceScore(l), { maxItems: 100, maxChars: 12000 }, 'parameter-lines');
-  if (selected.dropped.length > 0) {
-    console.log(`[evidence] 参数行：${uniqueLines.length} → 选择 ${selected.selected.length}，丢弃 ${selected.dropped.length}`);
-  }
   return selected.selected.join('\n');
 }
 

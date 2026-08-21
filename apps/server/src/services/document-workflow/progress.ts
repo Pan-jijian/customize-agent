@@ -32,7 +32,14 @@ export function displayStage(stage: DocumentExecutionStage, overrides: Partial<D
 }
 
 export function upsertProgressStage(stages: DocumentExecutionStage[], stage: DocumentExecutionStage): number {
-  const index = stages.findIndex(item => item.type === stage.type && item.roleId === stage.roleId && item.promptId === stage.promptId);
+  const identity = (item: DocumentExecutionStage) => {
+    const chapterScoped = item.type === 'chapter_generation' || /^agent-(?:reviewer|repairer|chapter-task|final-gate-repair)-/u.test(item.roleId || '');
+    return chapterScoped
+      ? [item.type, item.roleId || '', item.promptId || '', item.subtitle || '', item.order ?? ''].join('::')
+      : [item.type, item.roleId || '', item.promptId || ''].join('::');
+  };
+  const stageIdentity = identity(stage);
+  const index = stages.findIndex(item => identity(item) === stageIdentity);
   if (index >= 0) {
     stages[index] = { ...stage, order: stages[index]?.order ?? stage.order };
     return index;

@@ -74,7 +74,9 @@ export function chapterBudgetWeight(chapter: DocumentTemplateChapter) {
 export function buildDocumentBudget(input: { requirement?: string; promptTexts: string; template: DocumentTemplate; chapters: DocumentTemplateChapter[]; spec?: AutoDocumentSpecPackage }): DocumentBudget {
   const settings = input.template.generationSettings || input.template.exportSettings;
   const charsPerPage = charsPerPageForSettings(input.template.exportSettings || input.template.generationSettings);
-  const explicit = explicitLengthTargets([input.requirement || '', input.promptTexts].join('\n'));
+  const requirementExplicit = explicitLengthTargets(input.requirement || '');
+  const promptExplicit = explicitLengthTargets(input.promptTexts || '');
+  const explicit = requirementExplicit.targetChars || requirementExplicit.targetPages ? requirementExplicit : promptExplicit;
   const hasExplicitTarget = Boolean(explicit.targetChars || explicit.targetPages);
   const settingPages = hasExplicitTarget ? undefined : settings?.targetPages?.target || settings?.targetPages?.min;
   const explicitPageChars = explicit.targetPages ? explicit.targetPages * charsPerPage : undefined;
@@ -125,7 +127,7 @@ export function pageTargetIssues(settings: DocumentGenerationSettings | Document
   const min = target.min || target.target;
   const max = target.max || target.target;
   const issues: ValidationIssue[] = [];
-  if (min && estimatedPages < min) issues.push({ level: 'error', message: `正文篇幅低于目标页数：预计约 ${estimatedPages} 页，目标不少于 ${min} 页`, suggestion: '请重新生成或增加章节正文深度后再导出正式文件。' });
+  if (min && estimatedPages < min) issues.push({ level: 'warning', message: `正文篇幅低于目标页数：预计约 ${estimatedPages} 页，目标不少于 ${min} 页`, suggestion: '建议增加章节正文深度，或根据实际需求调整目标页数。' });
   if (max && estimatedPages > max + 4) issues.push({ level: 'warning', message: `正文篇幅可能超过目标页数：预计约 ${estimatedPages} 页，目标不超过 ${max} 页`, suggestion: '建议检查是否存在重复段落或过度展开。' });
   return issues;
 }
@@ -134,7 +136,7 @@ export function documentBudgetIssues(budget: DocumentBudget, markdown: string): 
   const { currentChars, estimatedPages } = documentBudgetStatus(budget, markdown);
   const issues: ValidationIssue[] = [];
   if (budget.minChars && currentChars < budget.minChars) {
-    issues.push({ level: 'error', message: `正文篇幅低于目标字数：当前 ${currentChars} 字，目标不少于 ${budget.minChars} 字`, suggestion: '请继续扩写缺口章节，或降低目标字数/页数后重新生成。' });
+    issues.push({ level: 'warning', message: `正文篇幅低于目标字数：当前 ${currentChars} 字，目标不少于 ${budget.minChars} 字`, suggestion: '建议继续扩写缺口章节，或根据实际需求调整目标字数/页数。' });
   }
   if (budget.maxChars && currentChars > Math.ceil(budget.maxChars * 1.12)) {
     issues.push({ level: 'error', message: `正文篇幅超过目标字数区间：当前 ${currentChars} 字，建议不超过 ${budget.maxChars} 字`, suggestion: '请压缩重复段落、过细小节或过度展开内容后再导出。' });
@@ -142,7 +144,7 @@ export function documentBudgetIssues(budget: DocumentBudget, markdown: string): 
     issues.push({ level: 'warning', message: `正文篇幅超过目标字数区间：当前 ${currentChars} 字，建议不超过 ${budget.maxChars} 字`, suggestion: '建议减少重复段落、过细小节或过度展开内容。' });
   }
   if (budget.minPages && estimatedPages < budget.minPages) {
-    issues.push({ level: 'error', message: `正文篇幅低于目标页数：预计约 ${estimatedPages} 页，目标不少于 ${budget.minPages} 页`, suggestion: '请继续扩写正文，或调整导出字号/行距后再导出。' });
+    issues.push({ level: 'warning', message: `正文篇幅低于目标页数：预计约 ${estimatedPages} 页，目标不少于 ${budget.minPages} 页`, suggestion: '建议继续扩写正文，或根据实际导出版式调整目标页数。' });
   }
   if (budget.maxPages && estimatedPages > budget.maxPages) {
     issues.push({ level: 'warning', message: `正文篇幅超过目标页数区间：预计约 ${estimatedPages} 页，建议不超过 ${budget.maxPages} 页`, suggestion: '建议压缩过度展开内容或调整目标页数。' });

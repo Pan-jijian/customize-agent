@@ -6,8 +6,7 @@ import { getProjectRoot, listKnowledgeFiles } from '../knowledge/kbService';
 import { getProjectRoleConfig, listDocumentRoles } from '../document-core/documentRoleService';
 import { readEngineeringDocumentConfig } from '../document-validation/engineeringDocumentConfigService';
 import { getOrCreateAutoDocumentSpec } from '../document-core/autoDocumentSpecService';
-import { buildProjectMaterialSummary, type MaterialRole } from '../document-core/projectMaterialService';
-import { applyKeywordRules, MATERIAL_ROLE_RULES } from '../document-core/documentSemanticRules';
+import { buildProjectMaterialSummary } from '../document-core/projectMaterialService';
 import { resolveTemplateMaterialRoles } from '../document-core/materialRoleResolver';
 import { evaluateDocumentReadiness } from '../document-validation/documentReadinessService';
 import type { DocumentTemplate, ProjectBinding, PromptBinding } from './types';
@@ -87,10 +86,17 @@ function promptConfigPath() {
 }
 
 /** 计算模版内容签名（排除版本元数据），用于检测内容是否发生实质性变更 */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value as Record<string, unknown>).sort().map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function templateContentSignature(template: DocumentTemplate): string {
   const { version, updatedAt, changeLog, ...content } = template as DocumentTemplate & { version?: unknown; updatedAt?: unknown; changeLog?: unknown };
-  const canonical = JSON.stringify(content, Object.keys(content).sort());
-  return createHash('sha256').update(canonical).digest('hex');
+  return createHash('sha256').update(stableJson(content)).digest('hex');
 }
 
 function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
@@ -114,6 +120,7 @@ function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
       sections: Array.isArray(chapter.sections) ? chapter.sections.filter(Boolean) : [],
       tableSections: Array.isArray(chapter.tableSections) ? chapter.tableSections.filter(Boolean) : [],
       tableRequirements: Array.isArray(chapter.tableRequirements) ? chapter.tableRequirements.filter(Boolean) : [],
+      tablePlans: Array.isArray(chapter.tablePlans) ? chapter.tablePlans : [],
       pinnedEvidenceFilePaths: Array.isArray(chapter.pinnedEvidenceFilePaths) ? chapter.pinnedEvidenceFilePaths.filter(Boolean) : [],
     })) : [{ id: 'document', title: template.outputTitle || template.name || '文档', purpose: template.description || '', queries: [], requiredFacts: [] }],
     exportSettings: template.exportSettings,
@@ -308,7 +315,7 @@ export function saveDocumentTemplate(template: DocumentTemplate): DocumentTempla
   return versioned;
 }
 
-export async function validateDocumentTemplateRun(templateId: string, projectRoot = getProjectRoot()) {
+export async function validateDocumentTemplateRun(templateId: string, projectRoot = getProjectRoot(), options: { requirement?: string } = {}) {
   const template = getDocumentTemplate(templateId);
   const issues: Array<{ level: 'error' | 'warning'; message: string }> = [];
   if (!template) {
@@ -335,6 +342,17 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
   const materialFilePaths = expandProjectBindings(projectBindings, files);
   if (projectBindings.length === 0) issues.push({ level: 'error', message: '模板未绑定项目资料包，请先选择需要参与生成的项目文件夹。' });
   else if (materialFilePaths.length === 0) issues.push({ level: 'error', message: '模板绑定的项目资料包不存在或没有可用索引文件，请重新选择项目资料包。' });
+  let previewMaterialSummary;
+  if (template) {
+    previewMaterialSummary = buildProjectMaterialSummary(resolvedProjectRoot, {
+      requirement: options.requirement,
+      boundFilePaths: materialFilePaths,
+    });
+    if (projectBindings.length === 0 && !previewMaterialSummary.source.ambiguous && previewMaterialSummary.source.selectedFiles > 0) {
+      const index = issues.findIndex(issue => issue.level === 'error' && issue.message === '模板未绑定项目资料包，请先选择需要参与生成的项目文件夹。');
+      if (index >= 0) issues.splice(index, 1);
+    }
+  }
   const fileMap = new Map(files.map(file => [file.relativePath, file]));
   const fileDiagnostics = materialFilePaths.map(filePath => {
     const file = fileMap.get(filePath);
@@ -375,7 +393,8 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
   });
   let readiness;
   if (template) {
-    const projectMaterialSummary = buildProjectMaterialSummary(resolvedProjectRoot, {
+    const projectMaterialSummary = previewMaterialSummary || buildProjectMaterialSummary(resolvedProjectRoot, {
+      requirement: options.requirement,
       boundFilePaths: materialFilePaths,
     });
     const resolvedMaterialRoles = resolveTemplateMaterialRoles(template, projectMaterialSummary);

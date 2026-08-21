@@ -258,6 +258,12 @@ export default function DocumentsPage() {
   const draftStatusColor = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? 'success' : s === 'warning' ? 'warning' : s === 'failed' ? 'error' : s === 'aborted' ? 'default' : 'processing';
   const draftStatusText = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? '已完成' : s === 'warning' ? '需复核' : s === 'failed' ? '失败' : s === 'aborted' ? '已中止' : '生成中';
   const isDraftGenerating = (s: GeneratedDocumentRecord['status']) => s !== 'completed' && s !== 'warning' && s !== 'failed' && s !== 'aborted';
+  const canResumeDraft = (item?: GeneratedDocumentRecord | null) => Boolean(item) && (
+    item!.status === 'failed'
+    || item!.status === 'aborted'
+    || (item!.status === 'warning' && Boolean(item!.checkpointChapters?.length) && /继续生成|重新生成|中断|卡住|未完成|门禁|阻断/u.test(item!.error || item!.warningIssues?.join('；') || item!.draft?.exportGate?.blockingIssues?.map(issue => issue.message).join('；') || ''))
+    || Boolean(item!.draft?.exportGate && item!.draft.exportGate.passed === false)
+  );
 
   const subIcon = (s: FlowStepStatus) => {
     if (s === 'process') return <LoadingOutlined />;
@@ -286,7 +292,7 @@ export default function DocumentsPage() {
     const first = step.subSteps.findIndex(s => s.status === 'wait');
     return step.subSteps.map((s, i) => i < first || first === -1 ? { ...s, status: 'finish' as const } : i === first ? { ...s, status: 'process' as const } : s);
   };
-  const stageToFlowStatus = (status: GeneratedDocumentDraft['executionStages'][number]['status']): FlowStepStatus => status === 'failed' ? 'error' : status === 'running' ? 'process' : status === 'fallback' ? 'warning' : 'finish';
+  const stageToFlowStatus = (status: GeneratedDocumentDraft['executionStages'][number]['status']): FlowStepStatus => status === 'failed' ? 'error' : status === 'running' ? 'process' : 'finish';
   const stageDetailsToSubSteps = (stage: GeneratedDocumentDraft['executionStages'][number], status: FlowStepStatus, index: number): FlowSubStep[] => {
     const details = Array.isArray(stage.details) ? stage.details.filter(Boolean) : [];
     const progressText = stage.progress ? `${stage.progress.label || '进度'}：${stage.progress.current}/${stage.progress.total}` : '';
@@ -908,12 +914,13 @@ export default function DocumentsPage() {
         style={{ borderRadius: '12px 0 0 12px' }}
         styles={{ body: { padding: '16px 24px' }, header: { borderRadius: '12px 0 0 0', borderBottom: '1px solid var(--colorBorderSecondary)' } }}
         extra={draft ? <Space wrap>
+          {canResumeDraft(workflowRecord) && <Button icon={<PlayCircleOutlined />} disabled={refining || loading} onClick={() => { if (workflowRecord) void handleResumeDraft(workflowRecord); }}>继续生成</Button>}
           <Button icon={<SaveOutlined />} disabled={refining} onClick={() => { void saveDraft(); }}>{t('documents.saveDraft')}</Button>
           <Button icon={<DownloadOutlined />} disabled={refining} loading={exporting === 'markdown'} onClick={() => { void doExport('markdown'); }}>MD</Button>
           <Button disabled={refining} loading={exporting === 'html'} onClick={() => { void doExport('html'); }}>HTML</Button>
           <Button disabled={refining} loading={exporting === 'docx'} onClick={() => { void doExport('docx'); }}>DOCX</Button>
           <Button type="primary" disabled={refining} loading={exporting === 'pdf'} onClick={() => { void doExport('pdf'); }}>PDF</Button>
-        </Space> : (loading && drawerMode === 'workflow') ? <Button danger onClick={handleAbortGeneration}>中止任务</Button> : undefined}
+        </Space> : canResumeDraft(workflowRecord) ? <Button type="primary" icon={<PlayCircleOutlined />} loading={loading} onClick={() => { if (workflowRecord) void handleResumeDraft(workflowRecord); }}>继续生成</Button> : (loading && drawerMode === 'workflow') ? <Button danger onClick={handleAbortGeneration}>中止任务</Button> : undefined}
       >
         <VerticalStack style={{ width: '100%' }} gap={16}>
           {/* 工作流模式：执行步骤 */}
@@ -945,7 +952,12 @@ export default function DocumentsPage() {
           )}
 
           {drawerMode === 'workflow' && workflowRecord?.draft?.exportGate?.passed === false && (
-            <NoticeBox type="error" title="生成已完成，但导出门禁未通过">{`阻断项：${workflowRecord.draft.exportGate.blockingIssues?.slice(0, 6).map(item => item.message).join('；') || workflowRecord.draft.exportGate.checklist.filter(item => !item.passed).map(item => item.label).join('；') || '存在阻断级校验错误'}。可点击继续生成触发自动修复，或在“校验”页查看完整问题。`}</NoticeBox>
+            <NoticeBox type="error" title="生成已完成，但导出门禁未通过">
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                <span>{`阻断项：${workflowRecord.draft.exportGate.blockingIssues?.slice(0, 6).map(item => item.message).join('；') || workflowRecord.draft.exportGate.checklist.filter(item => !item.passed).map(item => item.label).join('；') || '存在阻断级校验错误'}。可点击继续生成触发自动修复，或在“校验”页查看完整问题。`}</span>
+                {canResumeDraft(workflowRecord) && <Button type="primary" size="small" icon={<PlayCircleOutlined />} loading={loading} onClick={() => { void handleResumeDraft(workflowRecord); }}>继续生成 / 自动修复</Button>}
+              </Space>
+            </NoticeBox>
           )}
 
           {drawerMode === 'workflow' && workflowRecord?.reviewMetadata?.diagnostics && (

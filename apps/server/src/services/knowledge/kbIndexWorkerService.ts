@@ -2,6 +2,7 @@ import { fork } from 'child_process';
 import path from 'path';
 import { getMultiProjectManager } from './kbService';
 import { upsertKbOperation, type KbOperationStage } from './kbOperationLog';
+import { startProjectIntelligenceBuild } from '../document-workflow/projectIntelligence';
 
 interface WorkerProgress {
   stage: string;
@@ -117,7 +118,7 @@ async function runInProcess(job: IndexJob, operationId: string, operationType: '
       upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'error', status: 'error', percent: 100, message: error, error });
       return { success: false, error, stats: { ...project.getStats(), vectorStatus } };
     }
-    upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'done', status: 'success', percent: 100, message: job.relativePath ? '单文件重新解析完成' : '知识库后台索引完成', filePath: job.relativePath, fileName: job.relativePath?.split('/').pop() });
+    upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'done', status: 'success', percent: 100, message: job.relativePath ? '单文件重新解析完成，正在后台更新项目理解缓存' : '知识库后台索引完成，正在后台更新项目理解缓存', filePath: job.relativePath, fileName: job.relativePath?.split('/').pop() });
     return { success: true, stats: { ...project.getStats(), vectorStatus } };
   } catch (error) {
     const message = error instanceof Error ? (error.stack || error.message) : String(error);
@@ -138,7 +139,13 @@ export function enqueueKnowledgeIndex(job: IndexJob): Promise<WorkerResult> {
   const promise = (process.env.CUSTOMIZE_AGENT_DISABLE_KB_CHILD_PROCESS === '1'
     ? runInProcess(job, operationId, operationType, operationTitle)
     : runInChildProcess(job, operationId, operationType, operationTitle)
-  ).finally(() => activeJobs.delete(job.projectRoot));
+  ).then(result => {
+    if (result.success) {
+      upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'done', status: 'success', percent: 100, message: job.relativePath ? '单文件重新解析完成，正在后台更新项目理解缓存' : '知识库后台索引完成，正在后台更新项目理解缓存', filePath: job.relativePath, fileName: job.relativePath?.split('/').pop() });
+      startProjectIntelligenceBuild(job.projectRoot);
+    }
+    return result;
+  }).finally(() => activeJobs.delete(job.projectRoot));
   activeJobs.set(job.projectRoot, { operationId, promise, startedAt: Date.now() });
   return promise;
 }

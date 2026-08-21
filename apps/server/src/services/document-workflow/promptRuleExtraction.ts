@@ -135,18 +135,23 @@ function extractMinWords(text: string) {
   return Math.floor(value * (match[2] ? 10000 : 1));
 }
 
+function splitExplicitRuleList(value: string) {
+  return value
+    .split(/[、,，/／]/u)
+    .map(item => item.trim().replace(/["“”'‘’《》<>]/gu, ''))
+    .filter(item => item.length >= 2 && item.length <= 24 && !/[。；;：:]/u.test(item));
+}
+
 function extractRequiredKeywordRules(text: string) {
   const keywords = new Set<string>();
   const patterns = [
-    /(?:必须|应当|需要|全文必须)包含[：:]\s*([^。；;\n]+)/gu,
-    /(?:必须|应当|需要|全文必须)体现[：:]\s*([^。；;\n]+)/gu,
-    /(?:关键词|核心要点)[：:]\s*([^。；;\n]+)/gu,
+    /(?:关键词|核心要点|必含关键词|必须包含的关键词)[：:]\s*([^。；;\n]+)/gu,
+    /(?:必须|应当|需要|全文必须)包含(?:以下|如下)?(?:关键词|核心词|术语)[：:]\s*([^。；;\n]+)/gu,
   ];
   for (const pattern of patterns) {
     for (const match of text.matchAll(pattern)) {
-      for (const part of (match[1] || '').split(/[、,，/／及和与]/u)) {
-        const keyword = part.trim().replace(/["“”'‘’《》<>]/gu, '');
-        if (keyword.length >= 2 && keyword.length <= 24 && !/表格|章节|小节|正文|目录|封面/u.test(keyword)) keywords.add(keyword);
+      for (const keyword of splitExplicitRuleList(match[1] || '')) {
+        if (!/表格|章节|小节|正文|目录|封面/u.test(keyword)) keywords.add(keyword);
       }
     }
   }
@@ -156,15 +161,12 @@ function extractRequiredKeywordRules(text: string) {
 function extractForbiddenPatternRules(text: string) {
   const patterns = new Set<string>();
   const forbidLinePatterns = [
-    /(?:禁止|不得|严禁|杜绝)出现[：:]\s*([^。；;\n]+)/gu,
-    /(?:禁用词|禁止词|不得使用)[：:]\s*([^。；;\n]+)/gu,
+    /(?:禁用词|禁止词|不得使用词|禁用表达|禁止表达)[：:]\s*([^。；;\n]+)/gu,
+    /(?:禁止|不得|严禁|杜绝)出现(?:以下|如下)?(?:词语|用词|表达|话术)[：:]\s*([^。；;\n]+)/gu,
   ];
   for (const pattern of forbidLinePatterns) {
     for (const match of text.matchAll(pattern)) {
-      for (const part of (match[1] || '').split(/[、,，/／及和与]/u)) {
-        const value = part.trim().replace(/["“”'‘’《》<>]/gu, '');
-        if (value.length >= 2 && value.length <= 24) patterns.add(value);
-      }
+      for (const value of splitExplicitRuleList(match[1] || '')) patterns.add(value);
     }
   }
   return [...patterns].slice(0, 40);
@@ -221,9 +223,9 @@ export function buildRuntimePromptRules(input: {
   const requiredKeywords = extractRequiredKeywordRules(normalizedText);
   const forbiddenPatterns = extractForbiddenPatternRules(normalizedText);
   const exactHeadings = extractOutlineHeadings(normalizedText);
-  const backendTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台', '绑定片段', '兜底'];
-  const commercialTerms = ['工程造价', '报价', '投标报价', '报价明细', '综合单价', '单价', '合价', '金额', '税率', '增值税', '利润', '预留金', '暂列金额', '最高投标限价', '招标控制价'];
-  const forbiddenSubjects = [...new Set([...(base.forbiddenTerms || []).filter(term => /施工方|投标人/u.test(term)), ...(/施工方|投标人/u.test(normalizedText) ? ['施工方', '投标人'] : [])])];
+  const backendTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台', '绑定片段'];
+  const commercialTerms = /技术标(?:正文)?(?:不得|禁止|严禁).*(?:商务|报价|单价|税率|利润|造价)/u.test(normalizedText) ? ['报价明细表'] : [];
+  const forbiddenSubjects: string[] = [];
   const minWords = extractMinWords(normalizedText);
   const chapterRules = (input.template?.chapters || []).map(chapter => ({
     chapterTitle: chapter.title,
@@ -278,7 +280,7 @@ export function buildRuntimePromptRules(input: {
     commercialTerms,
     forbiddenTerms: [...new Set([...base.forbiddenTerms, ...backendTerms, ...commercialTerms, ...forbiddenSubjects])],
     forbidFabrication: /不得编造|严禁编造|不得擅自|资料未明确|系统暂未|事实真实性/u.test(normalizedText),
-    requireEvidenceForQuantities: /量化|参数|数值|工程实体参数|资料中明确/u.test(normalizedText),
+    requireEvidenceForQuantities: /量化|参数|数值|具体数据|具体参数|工程实体参数|资料中明确|不得空泛|不能空泛|泛泛而谈/u.test(normalizedText),
     preferProjectFacts: /事实优先|项目事实|真实性高于/u.test(normalizedText),
     minWords,
     minChars: minWords,
@@ -330,9 +332,9 @@ export function extractPromptDocumentRules(promptTexts: string): PromptDocumentR
     if (title && title.length >= 4 && title.length <= 30) requiredTables.add(title);
   }
   if (/项目基本信息表/u.test(normalizedText)) requiredTables.add('项目基本信息表');
-  const forbiddenTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台', '绑定片段', '兜底'];
-  if (/杜绝|禁止|不得|严禁/u.test(normalizedText)) forbiddenTerms.push('施工方', '投标人', '高度重视', '重中之重');
-  if (/商务|报价|单价|税率|利润|造价/u.test(normalizedText)) forbiddenTerms.push('综合单价', '报价明细', '单价', '税率', '增值税', '利润', '预留金', '报价明细表');
+  const forbiddenTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台', '绑定片段'];
+  if (/杜绝(?:套话|空话)|禁止(?:套话|空话)|不得(?:套话|空话)|严禁(?:套话|空话)/u.test(normalizedText)) forbiddenTerms.push('高度重视', '重中之重');
+  if (/技术标(?:正文)?(?:不得|禁止|严禁).*(?:商务|报价|单价|税率|利润|造价)/u.test(normalizedText)) forbiddenTerms.push('报价明细表');
   const coverPolicy = promptPolicy(normalizedText, '封面');
   const tocPolicy = promptPolicy(normalizedText, '目录');
   return {
@@ -341,7 +343,7 @@ export function extractPromptDocumentRules(promptTexts: string): PromptDocumentR
     forbidCover: coverPolicy === 'forbidden',
     forbidToc: tocPolicy === 'forbidden',
     forbiddenTerms: [...new Set(forbiddenTerms)],
-    preferredTerms: [{ from: '施工方', to: '我公司' }, { from: '投标人', to: '我公司' }, { from: '高度重视', to: '严格落实' }, { from: '重中之重', to: '关键控制事项' }],
+    preferredTerms: [{ from: '高度重视', to: '严格落实' }, { from: '重中之重', to: '关键控制事项' }],
     requiredTables: [...requiredTables],
     requiredKeywords: extractRequiredKeywordRules(normalizedText),
     forbiddenPatterns: extractForbiddenPatternRules(normalizedText),
@@ -497,7 +499,7 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
     evidenceText ? `真实绑定资料：\n${evidenceText}` : '',
     `请输出 ${minSections}-${maxSections} 个适合直接成稿的二级小节标题。标题必须具体、业务相关、能承载真实资料；每个标题控制在 16 个汉字以内，避免多个小节表达同一内容。核心章节不得只输出"总体部署与责任分工、实施流程与关键控制"两个泛化小节。`,
     'JSON 格式：{"sections":["小节标题1","小节标题2"]}',
-  ].filter(Boolean).join('\n\n'), { maxTokens: 1600, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics, timeoutMs: 120000 });
+  ].filter(Boolean).join('\n\n'), { maxTokens: 1600, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics });
   const sections = Array.from(new Set(compoundSectionSeeds(input.chapter.title)));
   for (const title of (result?.sections || []).map(normalizePlannedSectionTitle).filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title))) {
     if (!sections.some(section => section.includes(title) || title.includes(section))) sections.push(title);

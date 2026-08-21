@@ -98,6 +98,20 @@ function topLevelGroup(relativePath: string) {
   return parts.length > 1 ? parts[0] : path.basename(parts[0] || '当前项目');
 }
 
+function normalizeScopeText(text: string) {
+  return text.replace(/[\s_\-—（）()【】、，,.。·]/gu, '').replaceAll('[', '').replaceAll(']', '').toLowerCase();
+}
+
+function scoreGroupByRequirement(group: string, requirement: string) {
+  const normalizedGroup = normalizeScopeText(group);
+  const normalizedRequirement = normalizeScopeText(requirement);
+  if (normalizedGroup.length >= 4 && normalizedRequirement.includes(normalizedGroup.slice(0, Math.min(16, normalizedGroup.length)))) return 100;
+  const genericTokens = new Set(['项目', '工程', '施工', '总承包', '资料', '招标', '图纸', '清单']);
+  return group.split(/(?:\s|_|-|—|（|）|\(|\)|【|】|\[|\]|、|，|,|\.)+/u)
+    .filter(token => token.length >= 2 && !genericTokens.has(token))
+    .reduce((score, token) => score + (requirement.includes(token) ? Math.min(20, token.length) : 0), 0);
+}
+
 function cleanProjectName(value: string) {
   return value.replace(/\.(?:pdf|docx?|xlsx?|xls|dwg|zip)$/iu, '').replace(/^\d+(?:\.\d+)?[-_\s]*/u, '').trim();
 }
@@ -123,27 +137,49 @@ export function inferMaterialKind(filePath: string): { kind: MaterialKind; confi
   return { kind: 'other', confidence: 0.35, signals: ['未命中明确资料类型，按其他资料处理'] };
 }
 
-function selectMaterialFiles(files: KnowledgeFile[], bindings?: ProjectBinding[]) {
+function selectMaterialFiles(files: KnowledgeFile[], bindings?: ProjectBinding[], requirement?: string) {
   const active = files.filter(isUsableKnowledgeFile);
   const roots = (bindings || []).map(binding => normalizePathKey(binding.materialRootPath)).filter(Boolean);
-  if (roots.length === 0) return { files: active, roots: [...new Set(active.map(file => topLevelGroup(file.relativePath)).filter(Boolean))], warnings: ['模板未显式绑定项目资料包，已使用当前知识库全部可用资料。'] };
-  const selected = active.filter(file => roots.some(root => normalizePathKey(file.relativePath) === root || normalizePathKey(file.relativePath).startsWith(`${root}/`)));
-  return { files: selected, roots, warnings: selected.length === 0 ? ['项目资料包下未找到已完成索引的可用文件。'] : [] };
+  if (roots.length > 0) {
+    const selected = active.filter(file => roots.some(root => normalizePathKey(file.relativePath) === root || normalizePathKey(file.relativePath).startsWith(`${root}/`)));
+    const scoped = scopeFilesByRequirement(selected, requirement);
+    return { files: scoped.files, roots: scoped.roots.length ? scoped.roots : roots, warnings: selected.length === 0 ? ['项目资料包下未找到已完成索引的可用文件。'] : [] };
+  }
+  const scoped = scopeFilesByRequirement(active, requirement);
+  if (scoped.scoped) return { files: scoped.files, roots: scoped.roots, warnings: [] };
+  return { files: active, roots: [...new Set(active.map(file => topLevelGroup(file.relativePath)).filter(Boolean))], warnings: ['模板未显式绑定项目资料包，已使用当前知识库全部可用资料。'] };
+}
+
+function scopeFilesByRequirement(files: KnowledgeFile[], requirement?: string) {
+  const req = (requirement || '').trim();
+  if (!req) return { files, roots: [...new Set(files.map(file => topLevelGroup(file.relativePath)).filter(Boolean))], scoped: false };
+  const groups = new Map<string, KnowledgeFile[]>();
+  for (const file of files) {
+    const group = topLevelGroup(file.relativePath);
+    if (!group) continue;
+    groups.set(group, [...(groups.get(group) || []), file]);
+  }
+  const scored = [...groups.entries()]
+    .map(([group, groupFiles]) => ({ group, groupFiles, score: scoreGroupByRequirement(group, req) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+  if (scored.length > 0 && (scored.length === 1 || scored[0].score > scored[1].score)) return { files: scored[0].groupFiles, roots: [scored[0].group], scoped: true };
+  return { files, roots: [...groups.keys()], scoped: false };
 }
 
 export function templateProjectBindings(template: DocumentTemplate): ProjectBinding[] {
   return (template.projectBindings || []).filter(binding => binding.materialRootPath).map(binding => ({ materialRootPath: normalizePathKey(binding.materialRootPath) }));
 }
 
-export function expandProjectMaterialBindings(projectRoot: string, template: DocumentTemplate) {
+export function expandProjectMaterialBindings(projectRoot: string, template: DocumentTemplate, options: { requirement?: string } = {}) {
   const files = listKnowledgeFiles(projectRoot);
-  const selection = selectMaterialFiles(files, templateProjectBindings(template));
+  const selection = selectMaterialFiles(files, templateProjectBindings(template), options.requirement);
   return selection.files.map(file => file.relativePath);
 }
 
-export function buildProjectMaterialProfile(projectRoot: string, template: DocumentTemplate): ProjectMaterialProfile {
+export function buildProjectMaterialProfile(projectRoot: string, template: DocumentTemplate, options: { requirement?: string } = {}): ProjectMaterialProfile {
   const files = listKnowledgeFiles(projectRoot);
-  const selection = selectMaterialFiles(files, templateProjectBindings(template));
+  const selection = selectMaterialFiles(files, templateProjectBindings(template), options.requirement);
   const groups: Record<MaterialKind, MaterialFileProfile[]> = { tender_document: [], bill_of_quantities: [], drawing: [], addendum: [], contract: [], technical_specification: [], schedule_document: [], quality_safety_document: [], other: [] };
   const profiles = selection.files.map(file => {
     const inferred = inferMaterialKind(file.relativePath);

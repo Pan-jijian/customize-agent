@@ -9,6 +9,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { generatedRoot, getGeneratedDocument } from '@/services/document-core/generatedDocumentService';
 import { getProjectRoot } from '@/services/knowledge/kbService';
 import type { DocumentExportSettings } from '@/services/document-workflow';
+import { sanitizeFormalMarkdown } from '@/services/document-workflow/markdownComposer';
 import { recordErrorLog } from '@/services/common/errorLogService';
 import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
 
@@ -529,6 +530,7 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, 
     if (image) { blocks.push(docxImageParagraph(image)); index += 1; continue; }
     const table = parseMarkdownTable(lines, index);
     if (table) { blocks.push(docxTable(table.rows, style), docxParagraph('', { spacingAfter: 80, line: style.lineTwips })); index = table.next; continue; }
+    if (isMarkdownTableSeparator(line)) { index += 1; continue; }
     const heading = /^(#{1,4})\s+(.+)$/u.exec(line);
     if (heading) {
       const headingText = stripInlineMarkdown(heading[2]);
@@ -843,9 +845,17 @@ function validateExportMarkdown(markdown: string, baseline?: string) {
   return [...new Set(issues)];
 }
 
+function normalizeExportMarkdownHeadings(markdown: string) {
+  return markdown
+    .replace(/(##\s*第[一二三四五六七八九十百千万\d]+章[^\n#]*?)\s+(#{3,4}\s*\d+(?:\.\d+)+\s+)/gu, '$1\n\n$2')
+    .replace(/([^\n])\s+(##\s*第[一二三四五六七八九十百千万\d]+章\s+)/gu, '$1\n\n$2')
+    .replace(/([^\n])\s+(#{3,4}\s*\d+(?:\.\d+)+\s+)/gu, '$1\n\n$2')
+    .replace(/(#{2,4}\s+[^\n]+?)\s+(#{2,4}\s+)/gu, '$1\n\n$2');
+}
+
 function prepareExportMarkdown(rawMarkdown: string, baseline?: string) {
-  const markdown = normalizeExportUnits(rawMarkdown);
-  const baselineMarkdown = normalizeExportUnits(baseline || '');
+  const markdown = normalizeExportMarkdownHeadings(normalizeExportUnits(sanitizeFormalMarkdown(rawMarkdown)));
+  const baselineMarkdown = normalizeExportMarkdownHeadings(normalizeExportUnits(sanitizeFormalMarkdown(baseline || '')));
   return {
     markdown,
     baselineMarkdown,
@@ -860,9 +870,14 @@ function markChapterHeadings(html: string) {
   });
 }
 
+function removeRenderedMarkdownTableSeparators(html: string) {
+  return html.replace(/<p>\s*\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*<\/p>/giu, '');
+}
+
 async function buildExportHtml(title: string, markdown: string, settings: DocumentExportSettings | undefined, projectRoot: string) {
   const { marked } = await import('marked');
-  return inlineLocalImages(htmlShell(title, markChapterHeadings(marked.parse(markdown, { async: false }) as string), settings), projectRoot);
+  const body = removeRenderedMarkdownTableSeparators(markChapterHeadings(marked.parse(markdown, { async: false }) as string));
+  return inlineLocalImages(htmlShell(title, body, settings), projectRoot);
 }
 
 function existingBrowserPaths() {

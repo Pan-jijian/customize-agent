@@ -22,7 +22,7 @@ export function extractFacts(template: DocumentTemplate, evidence: DocumentEvide
 export function extractStructuredTables(evidence: DocumentEvidence[]): StructuredTableFact[] {
   const tables: StructuredTableFact[] = [];
   const seen = new Set<string>();
-  for (const item of evidence.filter(e => e.processingType === 'table')) {
+  for (const item of evidence.filter(e => e.processingType === 'table' || e.processingType === 'structured_data' || e.processingType === 'bill_of_quantities')) {
     if (seen.has(item.filePath)) continue;
     seen.add(item.filePath);
     const root = getProjectRoot();
@@ -70,9 +70,9 @@ export function extractStructuredFacts(evidence: DocumentEvidence[], template: D
   for (const item of evidence) {
     for (const { field, pattern } of dynamicPatterns) {
       if (!evidenceSatisfiesSpecField(item, field)) continue;
-      const match = item.content.match(pattern) || [undefined, item.content.replace(/\s+/gu, ' ')];
+      const match = item.content.match(pattern);
       const value = match?.[1]?.trim();
-      if (value && !facts.some(fact => fact.fieldId === field.id && fact.value === value)) {
+      if (value && value.length <= 220 && !isForbiddenFactValue(DEFAULT_DOCUMENT_DOMAIN_PROFILE, value) && !isDiagnosticFactValue(DEFAULT_DOCUMENT_DOMAIN_PROFILE, value) && !facts.some(fact => fact.fieldId === field.id && fact.value === value)) {
         facts.push({ key: field.name, fieldId: field.id, fieldName: field.name, value, sourceFile: item.filePath, roleId: item.roleId || 'unknown', processingType: item.processingType, confidence: item.score, sourceRef: { filePath: item.filePath, roleId: item.roleId || 'unknown', processingType: item.processingType, sectionTitle: item.sectionTitle } });
       }
     }
@@ -121,7 +121,7 @@ export async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTe
   const llm = await callDocumentLlmJson<{ facts?: Array<{ fieldId?: string; fieldName?: string; key: string; value: string; sourceFile?: string; roleId?: string; processingType?: string; confidence?: number }> }>(
     promptTexts || '你是文档事实抽取器。',
     `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色；事实取舍和冲突处理遵循规范包字段说明、文件角色和提示词角色配置。\n返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","sourceFile":"...","roleId":"...","processingType":"reference","confidence":0.8}]}。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`,
-    { signal },
+    { signal, maxTokens: 1800, temperature: 0.1 },
   );
   throwIfAborted(signal);
   if (!llm?.facts?.length) return { facts: [], stages };
@@ -148,9 +148,18 @@ export function normalizedFactValue(value: unknown) {
   return normalizeEngineeringTextForFactMatch(stringifyFactValue(value));
 }
 
+function hasCorruptTextMarkers(text: string) {
+  const corruptMarks = text.match(/�|￿/gu)?.length || 0;
+  return corruptMarks >= 2 || Array.from(text).some(char => {
+    const code = char.charCodeAt(0);
+    return code === 0xfffd || (code < 32 && code !== 9 && code !== 10 && code !== 13);
+  });
+}
+
 function conflictComparableFactValue(value: unknown, profile: DocumentDomainProfile) {
   const raw = stringifyFactValue(value).trim();
   if (isDiagnosticFactValue(profile, raw) || isForbiddenFactValue(profile, raw)) return '';
+  if (hasCorruptTextMarkers(raw)) return '';
   if (/签章|盖章|联系人|联系电话|电话|邮箱|解密|开标|评标|保证金|交易系统|空白|填写|上传|下载|递交/u.test(raw)) return '';
   if (/\|/u.test(raw) || /^#+\s*/u.test(raw)) return '';
   if (/见(?:招标公告|投标人须知|前附表|本项目|补疑)|资料参数行摘要|公共资源交易监督管理|开评标程序|监管部门/u.test(raw)) return '';
@@ -224,7 +233,7 @@ const PROJECT_BASIC_FACT_PATTERNS = [
 export function isValidProjectBasicFactValue(fieldId: string | undefined, rawValue: unknown) {
   const value = normalizeOcrFactText(stringifyFactValue(rawValue));
   if (!fieldId || !value || value.length > 260) return false;
-  if (/###|投标文件的编制|备选投标方案|投标将被否决|投标人提供|投标有效期|电子交易系统|公共资源交易监督管理部门|中标候选|评标委员会|实质性内容作出响应/u.test(value)) return false;
+  if (/###|第\s*\d+\s*页|共\s*\d+\s*页|律师代理费|投标文件的编制|备选投标方案|投标将被否决|投标人提供|投标有效期|电子交易系统|公共资源交易监督管理部门|中标候选|评标委员会|实质性内容作出响应/u.test(value)) return false;
   if (/签章|盖章|联系人|联系电话|电话|邮箱|解密|开标|评标|保证金|交易系统|空白|填写|上传|下载|递交/u.test(value)) return false;
   if (fieldId === 'schedule_requirement') return value.length <= 90 && /\d+(?:\.\d+)?\s*(?:日历天|天|个月|月|年)/u.test(value);
   if (fieldId === 'quality_standard') return value.length <= 40 && /合格|优良|一次性验收|国家.*验收|达到/u.test(value) && !/工期|投标|技术标准/u.test(value);
@@ -494,10 +503,11 @@ export function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFa
       && (!isForbiddenFactValue(profile, text) || isProjectBasicCommercialFact(text))
       && !isDiagnosticFactValue(profile, text);
   });
-  const billFacts = facts.filter(fact => fact.processingType === 'table' || /bill|boq|table|sheet|data|表格|列表|明细|数据/u.test(`${fact.roleId} ${fact.sourceFile}`));
+  const billFacts = facts.filter(fact => fact.processingType === 'table' || fact.processingType === 'structured_data' || fact.processingType === 'bill_of_quantities' || /bill|boq|table|sheet|data|表格|列表|明细|数据/u.test(`${fact.roleId} ${fact.sourceFile}`));
+  const projectFacts = facts.filter(fact => /项目名称|工程名称|项目编号|招标项目编号|招标人|建设单位|发包人|建设地点|建设规模|招标范围|计划工期|合同工期|周期要求|质量标准|合同估算|投资估算|最高投标限价|招标控制价/u.test(`${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`)).slice(0, 80);
   const factIndex = buildEvidenceFactIndex(facts, preciseFacts, billFacts, profile);
   return {
-    project: facts,
+    project: projectFacts,
     schedule: byKeys(['工期', '开工', '竣工', '节点', '周期']),
     quality: byKeys(['质量', '验收']),
     safety: byKeys(['安全', '风险']),

@@ -1,4 +1,4 @@
-import type { DocumentFact, DocumentFactTrace, DocumentFactsModel, ValidationIssue } from './types';
+import type { BoqRowTrace, DocumentFact, DocumentFactTrace, DocumentFactsModel, ValidationIssue } from './types';
 import { stringifyFactValue } from './utils';
 
 function normalize(value: string) {
@@ -29,6 +29,16 @@ function appears(markdown: string, value: string) {
   return numericParts.some(part => normalize(part).length >= 2 && normalizedMarkdown.includes(normalize(part)));
 }
 
+function isActionableTraceFact(trace: DocumentFactTrace) {
+  const value = String(trace.value || '').trim();
+  const labelValue = `${trace.label}${value}`;
+  if (!/项目|工程|编号|地点|规模|范围|工期|质量|安全|资源|材料|设备|验收|\d/u.test(labelValue)) return false;
+  if (/^(?:见|详见|按|执行|参见|依据).{0,16}(?:前附表|招标公告|招标文件|合同|协议书|通用条款|专用条款|图纸|清单|附件|资料)$/u.test(value)) return false;
+  if (/^(?:合同协议书|通用条款|专用条款|招标文件|招标公告|投标人须知前附表|附件|资料)$/u.test(value.replace(/[（）()\d一二三四五六七八九十、.．\s]/gu, ''))) return false;
+  if (value.length < 4 && !/\d/u.test(value)) return false;
+  return true;
+}
+
 export function buildDocumentFactTraces(markdown: string, factsModel: DocumentFactsModel): DocumentFactTrace[] {
   const seen = new Set<string>();
   const traces: DocumentFactTrace[] = [];
@@ -50,7 +60,7 @@ export function buildDocumentFactTraces(markdown: string, factsModel: DocumentFa
 }
 
 export function factTraceIssues(traces: DocumentFactTrace[], options: { maxIssues?: number } = {}): ValidationIssue[] {
-  const unplaced = traces.filter(trace => trace.status === 'unplaced' && /项目|工程|编号|地点|规模|范围|工期|质量|安全|资源|材料|设备|验收|\d/u.test(`${trace.label}${trace.value}`));
+  const unplaced = traces.filter(trace => trace.status === 'unplaced' && isActionableTraceFact(trace));
   const limit = options.maxIssues && options.maxIssues > 0 ? options.maxIssues : unplaced.length;
   return unplaced
     .slice(0, limit)
@@ -62,9 +72,9 @@ export function factTraceIssues(traces: DocumentFactTrace[], options: { maxIssue
 }
 
 /** 构建 BOQ 行级落位追踪 */
-export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsModel): import('./types').BoqRowTrace[] {
+export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsModel): BoqRowTrace[] {
   const tables = factsModel.tables || [];
-  const traces: import('./types').BoqRowTrace[] = [];
+  const traces: BoqRowTrace[] = [];
   const normalizedMarkdown = normalize(markdown);
 
   for (const table of tables) {
@@ -103,7 +113,7 @@ export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsMod
 }
 
 /** BOQ 行级落位问题（从 trace 生成） */
-export function boqRowTraceIssues(traces: import('./types').BoqRowTrace[], options: { maxIssues?: number } = {}): ValidationIssue[] {
+export function boqRowTraceIssues(traces: BoqRowTrace[], options: { maxIssues?: number } = {}): ValidationIssue[] {
   const unplaced = traces.filter(t => !t.placed);
   if (unplaced.length === 0) return [];
   const total = traces.length;
@@ -112,9 +122,9 @@ export function boqRowTraceIssues(traces: import('./types').BoqRowTrace[], optio
   const issues: ValidationIssue[] = [];
   if (rate < 0.3) {
     issues.push({
-      level: 'error',
+      level: 'warning',
       message: `BOQ 清单行级落位严重不足：${total - unplaced.length}/${total} 行（${Math.round(rate * 100)}%）`,
-      suggestion: `未落位清单项示例：${unplaced.slice(0, 5).map(t => `${t.itemName} ${t.quantity}${t.unit}`).join('；')}`,
+      suggestion: `清单明细数量较大，建议优先补充主要分部分项、关键规格和大额工程量。未落位清单项示例：${unplaced.slice(0, 5).map(t => `${t.itemName} ${t.quantity}${t.unit}`).join('；')}`,
     });
   } else if (rate < 0.6) {
     issues.push({

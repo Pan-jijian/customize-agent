@@ -165,13 +165,13 @@ importers:
         specifier: ^6.3.2
         version: 6.3.2(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@customize-agent/knowledge':
-        specifier: workspace:^
+        specifier: ^4.0.42
         version: link:../../packages/knowledge
       '@customize-agent/llm':
-        specifier: workspace:^
+        specifier: ^3.0.13
         version: link:../../packages/llm
       '@customize-agent/runtime':
-        specifier: workspace:^
+        specifier: ^3.0.13
         version: link:../../packages/runtime
       '@napi-rs/canvas':
         specifier: ^0.1.82

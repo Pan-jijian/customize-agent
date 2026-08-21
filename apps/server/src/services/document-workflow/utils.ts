@@ -35,3 +35,36 @@ export function stringifyFactValue(value: unknown): string {
 export function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw new Error('用户中止');
 }
+
+export function adaptiveConcurrency(input: { total: number; kind: 'chapter' | 'search' | 'deepRetrieval' | 'sectionRepair' | 'llmRepair'; targetWords?: number; highRisk?: boolean }) {
+  const total = Math.max(1, input.total);
+  if (input.kind === 'chapter') {
+    if (total <= 3) return total;
+    if (total <= 6) return Math.min(total, 4);
+    if (total <= 10) return Math.min(total, 6);
+    return Math.min(total, 8);
+  }
+  if (input.kind === 'search') return total <= 6 ? total : Math.min(total, 8);
+  if (input.kind === 'deepRetrieval') return Math.min(total, input.highRisk ? 6 : 4);
+  if (input.kind === 'sectionRepair') {
+    if (total <= 3) return total;
+    if (total <= 8) return 4;
+    return Math.min(total, 6);
+  }
+  return Math.min(total, 4);
+}
+
+export async function runWithAdaptiveConcurrency<T, R>(items: T[], worker: (item: T, index: number) => Promise<R>, options: { kind: 'chapter' | 'search' | 'deepRetrieval' | 'sectionRepair' | 'llmRepair'; targetWords?: number; highRisk?: boolean; concurrency?: number }) {
+  if (items.length === 0) return [];
+  const concurrency = Math.max(1, Math.min(items.length, options.concurrency || adaptiveConcurrency({ total: items.length, kind: options.kind, targetWords: options.targetWords, highRisk: options.highRisk })));
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  await Promise.all(Array.from({ length: concurrency }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }));
+  return results;
+}

@@ -1,6 +1,8 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { DocumentEvidence, DocumentExecutionStage, ProjectGraph } from './types';
 import { callDocumentLlmJson } from './llmClient';
-import { throwIfAborted } from './utils';
+import { runWithAdaptiveConcurrency, stableHash, throwIfAborted } from './utils';
 import { displayStage } from './progress';
 
 const SYSTEM_PROMPT = [
@@ -34,7 +36,7 @@ function buildPrompt(evidence: DocumentEvidence[]): string {
 function normalize(raw: Partial<ProjectGraph> | undefined, evidence: DocumentEvidence[]): ProjectGraph | undefined {
   if (!raw) return undefined;
   const files = new Set(evidence.map(e => e.filePath));
-  const ok = (f: unknown) => typeof f === 'string' && (files.has(f) || evidence.some(e => e.filePath.includes(f) || f.includes(e.filePath)));
+  const ok = (f: unknown) => typeof f === 'string' && (files.has(f) || evidence.some(e => path.basename(e.filePath) === path.basename(f)));
   const s = (v: unknown, n: number) => typeof v === 'string' ? v.slice(0, n) : typeof v === 'number' ? String(v).slice(0, n) : '';
   const a = (v: unknown, n: number) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.length > 0) : []).slice(0, n);
 
@@ -84,21 +86,79 @@ function normalize(raw: Partial<ProjectGraph> | undefined, evidence: DocumentEvi
   };
 }
 
-function charCount(items: DocumentEvidence[]): number {
-  return items.reduce((sum, e) => sum + e.content.length, 0);
+function evidenceText(items: DocumentEvidence[]) {
+  return items.map(item => `${item.filePath}\n${item.sectionTitle || ''}\n${item.content}`).join('\n');
 }
 
-function batch(items: DocumentEvidence[], maxChars: number): DocumentEvidence[][] {
-  const batches: DocumentEvidence[][] = [];
-  let cur: DocumentEvidence[] = [];
-  let n = 0;
-  for (const item of items) {
-    if (n + item.content.length > maxChars && cur.length > 0) { batches.push(cur); cur = []; n = 0; }
-    cur.push(item);
-    n += item.content.length;
+function extractFirst(text: string, pattern: RegExp) {
+  const match = text.match(pattern);
+  return match?.[1]?.replace(/\s+/gu, ' ').trim().slice(0, 500) || '';
+}
+
+type ProjectGraphDomain = 'scope' | 'methods' | 'resources' | 'scheduleStandards' | 'risksSite' | 'requirementsAddendum';
+
+const DOMAIN_PROMPTS: Record<ProjectGraphDomain, { title: string; pattern: RegExp; guidance: string }> = {
+  scope: { title: '项目基本信息、工程范围、主要工程内容', pattern: /项目名称|工程名称|招标范围|施工范围|建设内容|建设规模|建筑面积|工程概况|清单|图纸/u, guidance: '重点填充 works、requirements。必须识别项目名称、建设地点、建设规模、招标范围、工程内容；有来源才写。' },
+  methods: { title: '关键施工方法与专业工序', pattern: /施工方法|施工工艺|工序|流程|专项|装饰|装修|加固|电气|给排水|消防|智能化|暖通|屋面|外墙/u, guidance: '重点填充 methods，并关联 applicableWorks。步骤必须来自资料或由资料中的专业工程内容直接归纳。' },
+  resources: { title: '材料、设备、劳动力、工程量资源', pattern: /材料|设备|机械|劳动力|工程量|清单|规格|型号|数量|单位|暂估|主材/u, guidance: '重点填充 resources。材料设备和工程量能确认多少写多少，数量和单位不得编造。' },
+  scheduleStandards: { title: '工期节点、质量目标、标准规范、验收要求', pattern: /工期|日历天|开工|竣工|节点|进度|质量|验收|标准|规范|合格|创优/u, guidance: '重点填充 schedule、standards。必须优先抽取总工期、质量标准、验收标准和关键节点。' },
+  risksSite: { title: '现场条件、重难点、风险与约束', pattern: /现场|周边|交通|既有|营业|拆除|保护|安全|文明|扬尘|噪声|风险|难点|危大/u, guidance: '重点填充 risks、siteConditions。风险必须给出资料支撑的原因和控制方向。' },
+  requirementsAddendum: { title: '招标管理要求、补疑澄清与修正', pattern: /招标|投标|合同|要求|承包|分包|保修|补疑|澄清|答疑|修正|变更/u, guidance: '重点填充 requirements、addendumChanges。补疑澄清必须写 original、revised、sourceFile；无法确认原文时不要编造。' },
+};
+
+function sourceFilesFor(items: DocumentEvidence[], textPattern: RegExp, max = 8) {
+  return [...new Set(items.filter(item => textPattern.test(item.content) || textPattern.test(item.sectionTitle || '') || textPattern.test(item.filePath)).map(item => item.filePath))].slice(0, max);
+}
+
+function buildProjectGraphHintsFromEvidence(evidence: DocumentEvidence[]) {
+  const text = evidenceText(evidence);
+  const hint = (label: string, pattern: RegExp) => {
+    const value = extractFirst(text, pattern);
+    return value ? `${label}：${value}` : '';
+  };
+  return [
+    hint('项目名称', /(?:招标项目名称|项目名称|工程名称)[：:\s]*([^。；\n]{3,120})/u),
+    hint('建设地点', /(?:建设地点|项目地点|实施地点)[：:\s]*([^。；\n]{3,160})/u),
+    hint('建设规模', /(?:建设规模|建筑面积|总建筑面积)[：:\s]*([^。；\n]{3,120})/u),
+    hint('计划工期', /(?:计划工期|总工期|工期要求|工期总日历天数)[：:\s]*([^。；\n]{2,80})/u),
+    hint('质量标准', /(?:质量标准|质量要求|质量目标)[：:\s]*([^。；\n]{2,120})/u),
+    hint('招标范围', /(?:招标范围|工程承包范围|施工范围|建设内容)[：:\s]*([\s\S]{20,700}?)(?=\n#{1,4}\s|\n\d+[.、]\s|质量|工期|$)/u),
+    sourceFilesFor(evidence, /补疑|澄清|答疑|修正/u).length ? `补疑澄清文件：${sourceFilesFor(evidence, /补疑|澄清|答疑|修正/u).join('、')}` : '',
+  ].filter(Boolean);
+}
+
+function selectDomainEvidence(evidence: DocumentEvidence[], domain: ProjectGraphDomain, maxChars = 52000) {
+  const domainSpec = DOMAIN_PROMPTS[domain];
+  const ranked = [...evidence].sort((a, b) => {
+    const aHit = domainSpec.pattern.test(`${a.filePath}${a.sectionTitle || ''}${a.content}`) ? 1 : 0;
+    const bHit = domainSpec.pattern.test(`${b.filePath}${b.sectionTitle || ''}${b.content}`) ? 1 : 0;
+    return bHit - aHit || b.score - a.score;
+  });
+  const selected: DocumentEvidence[] = [];
+  let chars = 0;
+  for (const item of ranked) {
+    const slice = { ...item, content: item.content.replace(/\s+/gu, ' ').trim().slice(0, 5000) };
+    if (chars + slice.content.length > maxChars && selected.length >= 8) continue;
+    selected.push(slice);
+    chars += slice.content.length;
+    if (chars >= maxChars || selected.length >= 18) break;
   }
-  if (cur.length > 0) batches.push(cur);
-  return batches;
+  return selected;
+}
+
+function buildDomainPrompt(evidence: DocumentEvidence[], domain: ProjectGraphDomain, hints: string[]) {
+  const spec = DOMAIN_PROMPTS[domain];
+  return [
+    `请抽取项目图谱分域：${spec.title}`,
+    spec.guidance,
+    '确定性线索仅用于帮助定位原文，不得作为最终图谱事实直接照抄；最终 JSON 必须由资料证据支撑。',
+    hints.length ? `定位线索：\n${hints.map(item => `- ${item}`).join('\n')}` : '',
+    buildPrompt(evidence),
+  ].filter(Boolean).join('\n\n');
+}
+
+function graphItemCount(graph: ProjectGraph) {
+  return graph.works.length + graph.methods.length + graph.resources.length + graph.schedule.length + graph.standards.length + graph.risks.length + graph.requirements.length + graph.siteConditions.length + graph.addendumChanges.length;
 }
 
 function merge(graphs: ProjectGraph[]): ProjectGraph {
@@ -118,12 +178,86 @@ function merge(graphs: ProjectGraph[]): ProjectGraph {
   };
 }
 
-function stage(graph: ProjectGraph): DocumentExecutionStage {
+function cacheRoot(projectRoot?: string) {
+  const root = path.join(process.env.HOME || process.cwd(), '.customize-agent', 'cache', 'document-workflow', stableHash(projectRoot || 'default'));
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
+function fileSignature(projectRoot: string | undefined, filePath: string) {
+  if (!projectRoot) return undefined;
+  const fullPath = path.isAbsolute(filePath) ? filePath : path.join(projectRoot, filePath);
+  try {
+    const stat = fs.statSync(fullPath);
+    return { mtimeMs: stat.mtimeMs, size: stat.size };
+  } catch {
+    return undefined;
+  }
+}
+
+function graphCacheKey(input: { evidence: DocumentEvidence[]; requirement?: string; templateId?: string; projectRoot?: string }) {
+  return stableHash({
+    version: 'project-graph-v5-short-timeout-single-pass',
+    requirement: input.requirement || '',
+    templateId: input.templateId || '',
+    evidence: input.evidence.map(item => ({ filePath: item.filePath, fileSig: fileSignature(input.projectRoot, item.filePath), sectionTitle: item.sectionTitle, contentHash: stableHash({ length: item.content.length, head: item.content.slice(0, 8000), tail: item.content.slice(-8000) }) })).sort((a, b) => `${a.filePath}${a.sectionTitle}`.localeCompare(`${b.filePath}${b.sectionTitle}`)),
+  });
+}
+
+function readCachedGraph(projectRoot: string | undefined, key: string): ProjectGraph | undefined {
+  const root = cacheRoot(projectRoot);
+  if (!root) return undefined;
+  try {
+    const cached = JSON.parse(fs.readFileSync(path.join(root, `project-graph-${key}.json`), 'utf8')) as ProjectGraph;
+    return cached && Array.isArray(cached.works) ? cached : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeCachedGraph(projectRoot: string | undefined, key: string, graph?: ProjectGraph) {
+  const root = cacheRoot(projectRoot);
+  if (!root || !graph) return;
+  fs.writeFileSync(path.join(root, `project-graph-${key}.json`), JSON.stringify(graph, null, 2));
+}
+
+interface ProjectGraphValidation {
+  ok: boolean;
+  reasons: string[];
+}
+
+function validateProjectGraph(graph: ProjectGraph | undefined, evidence: DocumentEvidence[]): ProjectGraphValidation {
+  if (!graph) return { ok: false, reasons: ['LLM 未返回可解析的 ProjectGraph JSON'] };
+  const reasons: string[] = [];
+  const n = graphItemCount(graph);
+  const text = evidenceText(evidence);
+  if (n === 0) reasons.push('ProjectGraph 全部节点为空');
+  if (/招标范围|施工范围|建设内容|工程名称|项目名称|工程量|清单|图纸/u.test(text) && graph.works.length === 0) reasons.push('缺少工程范围/主要工程内容 works');
+  if (/工期|日历天|进度/u.test(text) && graph.schedule.length === 0) reasons.push('资料包含工期信息但 schedule 为空');
+  if (/质量|验收|标准|规范/u.test(text) && graph.standards.length === 0) reasons.push('资料包含质量/验收/标准信息但 standards 为空');
+  if (/材料|设备|机械|劳动力|工程量|清单/u.test(text) && graph.resources.length === 0) reasons.push('资料包含资源或工程量信息但 resources 为空');
+  const sourced = [
+    ...graph.works, ...graph.methods, ...graph.resources, ...graph.schedule,
+    ...graph.standards, ...graph.risks, ...graph.requirements, ...graph.siteConditions,
+  ].filter(item => (item.sourceFiles || []).length > 0).length + graph.addendumChanges.filter(item => item.sourceFile).length;
+  if (n > 0 && sourced === 0) reasons.push('图谱节点缺少来源文件');
+  return { ok: reasons.length === 0, reasons };
+}
+
+function stage(graph: ProjectGraph, cached = false): DocumentExecutionStage {
   const n = graph.works.length + graph.methods.length + graph.resources.length + graph.schedule.length + graph.standards.length + graph.risks.length + graph.requirements.length + graph.siteConditions.length + graph.addendumChanges.length;
   return displayStage({
     type: 'file_understanding', roleId: 'project-graph', status: 'success',
-    message: `${graph.works.length}工程 ${graph.methods.length}工法 ${graph.resources.length}资源 ${graph.schedule.length}节点 ${graph.standards.length}标准 ${graph.risks.length}风险 ${graph.requirements.length}要求 ${graph.siteConditions.length}条件 ${graph.addendumChanges.length}修正${graph.gaps.length ? ` ${graph.gaps.length}缺口` : ''}（${n}项）`,
+    message: `${cached ? '复用缓存：' : ''}${graph.works.length}工程 ${graph.methods.length}工法 ${graph.resources.length}资源 ${graph.schedule.length}节点 ${graph.standards.length}标准 ${graph.risks.length}风险 ${graph.requirements.length}要求 ${graph.siteConditions.length}条件 ${graph.addendumChanges.length}修正${graph.gaps.length ? ` ${graph.gaps.length}缺口` : ''}（${n}项）`,
     details: [...graph.works.slice(0, 3).map(w => w.name), ...graph.resources.slice(0, 3).map(r => r.name), ...graph.gaps.slice(0, 3)],
+  }, { subtitle: '项目图谱分析' });
+}
+
+function failedStage(reasons: string[]): DocumentExecutionStage {
+  return displayStage({
+    type: 'file_understanding', roleId: 'project-graph', status: 'failed',
+    message: `项目图谱分析失败：${reasons.slice(0, 3).join('；')}`,
+    details: reasons.slice(0, 8),
   }, { subtitle: '项目图谱分析' });
 }
 
@@ -131,56 +265,69 @@ export async function buildProjectGraph(input: {
   evidence: DocumentEvidence[];
   signal?: AbortSignal;
   timeoutMs?: number;
+  projectRoot?: string;
+  requirement?: string;
+  templateId?: string;
 }): Promise<{ graph?: ProjectGraph; stage: DocumentExecutionStage }> {
   throwIfAborted(input.signal);
-  if (input.evidence.length === 0) return { graph: undefined, stage: displayStage({ type: 'file_understanding', roleId: 'project-graph', status: 'skipped', message: '无证据' }, { subtitle: '项目图谱分析' }) };
+  if (input.evidence.length === 0) {
+    return { stage: failedStage(['未检索到项目证据，无法生成可信 LLM 项目图谱']) };
+  }
+  const cacheKey = graphCacheKey({ evidence: input.evidence, requirement: input.requirement, templateId: input.templateId, projectRoot: input.projectRoot });
+  const cached = readCachedGraph(input.projectRoot, cacheKey);
+  const cachedValidation = cached ? validateProjectGraph(cached, input.evidence) : undefined;
+  if (cached && cachedValidation?.ok) return { graph: cached, stage: stage(cached, true) };
+
+  const sorted = [...input.evidence].sort((a, b) => b.score - a.score);
+  const hints = buildProjectGraphHintsFromEvidence(sorted);
+  const failures: string[] = [];
+
+  async function callDomain(domain: ProjectGraphDomain, extraReasons: string[] = []): Promise<ProjectGraph | undefined> {
+    const evidence = selectDomainEvidence(sorted, domain, extraReasons.length ? 64000 : 52000);
+    const raw = await callDocumentLlmJson<ProjectGraph>(
+      `${SYSTEM_PROMPT}\n\n当前只抽取分域：${DOMAIN_PROMPTS[domain].title}。其他字段可以返回空数组，但本分域相关字段必须尽最大能力从证据中抽取。${extraReasons.length ? `\n本次定向修复原因：${extraReasons.join('；')}` : ''}`,
+      buildDomainPrompt(evidence, domain, hints),
+      { temperature: extraReasons.length ? 0 : 0.1, signal: input.signal },
+    );
+    throwIfAborted(input.signal);
+    return normalize(raw, evidence);
+  }
+
+  async function buildByDomains(repairReasons: string[] = []) {
+    const domains = Object.keys(DOMAIN_PROMPTS) as ProjectGraphDomain[];
+    const graphs = await runWithAdaptiveConcurrency(domains, async domain => {
+      try {
+        const graph = await callDomain(domain, repairReasons);
+        if (graph && graphItemCount(graph) > 0) return graph;
+        failures.push(`${DOMAIN_PROMPTS[domain].title} 未抽取到有效节点`);
+      } catch (err) {
+        if (input.signal?.aborted) throw err;
+        failures.push(`${DOMAIN_PROMPTS[domain].title} LLM 调用失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+      return undefined;
+    }, { kind: 'llmRepair', targetWords: 4000, concurrency: Number(process.env.DOCUMENT_PROJECT_GRAPH_DOMAIN_CONCURRENCY || 2) });
+    const validGraphs = graphs.filter((graph): graph is ProjectGraph => Boolean(graph));
+    return validGraphs.length ? merge(validGraphs) : undefined;
+  }
 
   try {
-    const sorted = [...input.evidence].sort((a, b) => b.score - a.score);
-    const total = charCount(sorted);
-
-    // 一次 LLM 调用处理全部证据；证据过多时分批
-    async function callAndNormalize(evidence: DocumentEvidence[]): Promise<ProjectGraph | undefined> {
-      let raw = await callDocumentLlmJson<ProjectGraph>(SYSTEM_PROMPT, buildPrompt(evidence), { temperature: 0.1, signal: input.signal, timeoutMs: input.timeoutMs || 180000 });
-      throwIfAborted(input.signal);
-      let g = normalize(raw, evidence);
-      // 重试：LLM 返回了 JSON 但字段全空（格式可能不对），用更短的提示再试一次
-      if (raw && !g && JSON.stringify(raw).length > 10) {
-        raw = await callDocumentLlmJson<ProjectGraph>(
-          `${SYSTEM_PROMPT}\n\n重要：必须返回所有7个字段的数组。即使某个字段没有数据，也要返回空数组 []。`,
-          buildPrompt(evidence),
-          { temperature: 0, signal: input.signal, timeoutMs: input.timeoutMs || 180000 },
-        );
-        throwIfAborted(input.signal);
-        g = normalize(raw, evidence);
-      }
-      return g;
+    const first = await buildByDomains();
+    const validation = validateProjectGraph(first, sorted);
+    if (validation.ok && first) {
+      writeCachedGraph(input.projectRoot, cacheKey, first);
+      return { graph: first, stage: stage(first) };
     }
 
-    if (total <= 80000) {
-      const g = await callAndNormalize(sorted);
-      return g && (g.works.length + g.methods.length + g.resources.length + g.schedule.length + g.standards.length + g.risks.length + g.requirements.length + g.siteConditions.length + g.addendumChanges.length) > 0
-        ? { graph: g, stage: stage(g) }
-        : { graph: undefined, stage: displayStage({ type: 'file_understanding', roleId: 'project-graph', status: 'fallback', message: '未产出足够结构化内容' }, { subtitle: '项目图谱分析' }) };
+    if (first && graphItemCount(first) > 0) {
+      writeCachedGraph(input.projectRoot, cacheKey, first);
+      return { graph: first, stage: stage(first) };
     }
 
-    const batches = batch(sorted, 60000);
-    const graphs: ProjectGraph[] = [];
-    for (const b of batches) {
-      throwIfAborted(input.signal);
-      const raw = await callDocumentLlmJson<ProjectGraph>(SYSTEM_PROMPT, buildPrompt(b), { temperature: 0.1, signal: input.signal, timeoutMs: input.timeoutMs || 180000 });
-      const g = normalize(raw, b);
-      if (g) graphs.push(g);
-    }
-    if (graphs.length === 0) return { graph: undefined, stage: displayStage({ type: 'file_understanding', roleId: 'project-graph', status: 'fallback', message: '未产出足够结构化内容' }, { subtitle: '项目图谱分析' }) };
-
-    const m = merge(graphs);
-    const n = m.works.length + m.methods.length + m.resources.length + m.schedule.length + m.standards.length + m.risks.length + m.requirements.length + m.siteConditions.length + m.addendumChanges.length;
-    return n > 0 ? { graph: m, stage: stage(m) } : { graph: undefined, stage: displayStage({ type: 'file_understanding', roleId: 'project-graph', status: 'fallback', message: '合并后无数据' }, { subtitle: '项目图谱分析' }) };
+    return { stage: failedStage([...validation.reasons, ...failures]) };
   } catch (err) {
     if (input.signal?.aborted) throw err;
     console.error('[project-graph] failed:', err);
-    return { graph: undefined, stage: displayStage({ type: 'file_understanding', roleId: 'project-graph', status: 'fallback', message: '分析失败' }, { subtitle: '项目图谱分析' }) };
+    return { stage: failedStage([err instanceof Error ? err.message : String(err), ...failures]) };
   }
 }
 

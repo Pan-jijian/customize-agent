@@ -34,13 +34,13 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       if (action === 'abort' && documentId) {
         const record = abortGeneratedDocument(documentId, projectRoot);
         if (!record) return res.status(409).json({ error: 'Document not found or not generating' });
-        return res.status(200).json({ document: record });
+        return res.status(200).json({ document: { id: record.id, taskId: record.taskId, templateId: record.templateId, title: record.title, status: record.status, wordCount: record.wordCount, createdAt: record.createdAt, updatedAt: record.updatedAt, completedAt: record.completedAt, error: record.error, partialChapters: record.partialChapters } });
       }
       if (action === 'resume' && documentId) {
         const record = getGeneratedDocument(documentId, projectRoot);
         if (!record) return res.status(404).json({ error: 'Document not found' });
         const task = startGenerateDocumentTask({ templateId: record.templateId, requirement: record.requirement, maxEvidencePerChapter: record.maxEvidencePerChapter, resumeDocumentId: documentId }, record.projectRoot || projectRoot);
-        return res.status(202).json(task);
+        return res.status(202).json({ taskId: task.taskId, documentId: task.documentId, status: task.record.status, updatedAt: task.record.updatedAt });
       }
       return res.status(400).json({ error: 'Unknown action' });
     }

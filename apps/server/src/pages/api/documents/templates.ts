@@ -12,7 +12,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     if (req.method === 'GET') {
       const validateId = String(req.query.validate || '');
-      if (validateId) return res.status(200).json({ validation: await validateDocumentTemplateRun(validateId, typeof req.query.projectRoot === 'string' && req.query.projectRoot ? req.query.projectRoot : undefined) });
+      if (validateId) return res.status(200).json({ validation: await validateDocumentTemplateRun(validateId, typeof req.query.projectRoot === 'string' && req.query.projectRoot ? req.query.projectRoot : undefined, { requirement: typeof req.query.requirement === 'string' ? req.query.requirement : undefined }) });
       return res.status(200).json({ templates: listDocumentTemplates() });
     }
     if (req.method === 'POST' || req.method === 'PUT') {

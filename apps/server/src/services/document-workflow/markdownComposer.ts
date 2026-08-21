@@ -7,7 +7,7 @@ export function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
   return markdown.replace(/^!\[[^\]]*(?:图纸|drawing|cad|地图|平面|剖面|立面)[^\]]*\]\([^)]*\)\s*$/gimu, '').replace(/\n{3,}/gu, '\n\n');
 }
 
-export const WORKFLOW_PHRASE_RE = /.*(?:知识库证据|知识库已确认事实|资料类型|提示词角色|后台自动规范|规范包|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|校验结果|修复任务包|修复类型|修复对象|输出要求).*(?:\n|$)/gu;
+export const WORKFLOW_PHRASE_RE = /^.*(?:知识库证据|知识库已确认事实|资料类型|提示词角色|后台自动规范|规范包|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|校验结果|修复任务包|修复类型|修复对象|输出要求|当前项目绑定资料|已召回证据|证据边界|可审查草稿|Reviewer|Repairer).*$(?:\n)?|^.*本节围绕.+确保各项措施与本工程实施条件相匹配。?\s*$(?:\n)?|^.*建立施工准备、过程控制、检查验收和资料归档要求.*$(?:\n)?|^.*形成责任明确、过程可控、资料完整的管理闭环。?\s*$(?:\n)?|^.*确保现场管理要求与施工进度、资源组织和验收节点同步推进。?\s*$(?:\n)?|^\s*(?:管理闭环|责任明确、过程可控、资料完整|与本工程实施条件相匹配)[。；;]?\s*$(?:\n)?/gmu;
 const RAW_SOURCE_LINE_RE = /^\s*(?:#{1,6}\s*)?(?:PDF\s*第\s*\d+\s*页|rule\b|文件[:：]|片段[:：]|来源[:：]).*$/gimu;
 const ASCII_FLOW_LINE_RE = /^\s*(?:[│┃┆┊┌┐└┘├┤┬┴┼─━╭╮╰╯]|[↓↑→←⇒⇨➡])+\s*$/gmu;
 const INSTRUCTION_HEADING_RE = /^#{2,6}\s+(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用)|^#{2,6}\s+(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:如|若|如果)(?:涉及|不涉及|适用|不适用)|^#{2,6}\s+.*(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成)|^#{2,6}\s+.*(?:按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|说明要求|注意事项)\s*$/gmu;
@@ -45,7 +45,7 @@ export function normalizeProductionText(markdown: string) {
 export function normalizeTenderSourcePageRefs(markdown: string) {
   return markdown
     .replace(/PDF\s*第\s*\d+\s*页/giu, '相关资料')
-    .replace(/第\s*\d+\s*页\s*\/\s*共\s*\d+\s*页/gu, '')
+    .replace(/第\s*\d+\s*页\s*(?:\/|共)\s*\d+\s*页/gu, '')
     .replace(/第\s*\d+\s*(?:[-—至到~～]\s*\d+)?\s*页/gu, '相关资料')
     .replace(/(装饰工程|土建工程|加固工程|给排水工程|电气工程|智能化工程|消防工程|弱电智能化工程|室外道排工程|建筑结构加固工程)\s*(?:(?:施工)?图纸|资料|文件)?\s*[（(]?\s*(?:(?:共|多达|约|合计)\s*)?\d+\s*页\s*[）)]?/gu, '$1施工图纸')
     .replace(/\d+\s*页\s*(装饰|土建|加固|给排水|电气|智能化|消防|弱电智能化|室外道排|建筑结构加固)\s*(?:专业)?\s*(?:(?:施工)?图纸)?/gu, '$1专业图纸')
@@ -102,11 +102,42 @@ function normalizeTableRowColumns(line: string, columns: number) {
   return `| ${cells.slice(0, columns).join(' | ')} |`;
 }
 
+function removeEmptyMarkdownTableColumns(markdown: string) {
+  const lines = markdown.split(/\r?\n/u);
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!isMarkdownTableRow(lines[index]) || !isMarkdownTableDivider(lines[index + 1] || '')) {
+      output.push(lines[index]);
+      continue;
+    }
+    const table: string[] = [];
+    while (index < lines.length && isMarkdownTableRow(lines[index])) {
+      table.push(lines[index]);
+      index += 1;
+    }
+    index -= 1;
+    const rows = table.map(line => line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).map(cell => cell.trim()));
+    const width = Math.max(...rows.map(row => row.length));
+    const keep = Array.from({ length: width }, (_, col) => rows.some((row, rowIndex) => rowIndex !== 1 && Boolean(row[col]?.trim())));
+    const normalizedRows = rows.map((row, rowIndex) => {
+      const cells = keep.map((enabled, col) => enabled ? (row[col] || '') : null).filter((cell): cell is string => cell !== null);
+      return rowIndex === 1 ? dividerForColumns(cells.length) : `| ${cells.join(' | ')} |`;
+    });
+    output.push(...normalizedRows);
+  }
+  return output.join('\n');
+}
+
 function looksLikeTableHeader(line: string) {
   const cells = line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).map(cell => cell.replace(/\*\*/gu, '').trim());
   if (cells.length < 2) return false;
   const headerCells = cells.filter(cell => /^(?:序号|信息项|内容|控制项目|控制内容|执行要求|责任主体|检查(?:与验收)?|验收标准|备注|名称|规格(?:型号)?|单位|数量|阶段|措施|风险|应急物资名称|资源类别|投入计划|管理要求)$/u.test(cell));
   return headerCells.length >= Math.min(2, cells.length);
+}
+
+function startsTableRow(line: string) {
+  const trimmed = line.trim();
+  return trimmed.startsWith('|') && trimmed.length > 1;
 }
 
 export function normalizeMarkdownTableDividers(markdown: string) {
@@ -115,8 +146,14 @@ export function normalizeMarkdownTableDividers(markdown: string) {
   let activeColumns = 0;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (!isMarkdownTableRow(line) || isMarkdownTableDivider(line)) {
-      if (!isMarkdownTableDivider(line)) activeColumns = 0;
+    if (isMarkdownTableDivider(line)) {
+      output.push(line);
+      continue;
+    }
+    // 表格数据行可能因模型输出截断而缺少行尾“|”，处于活跃表格内时应一并纳入规范化，补齐为表头列数。
+    const isRow = isMarkdownTableRow(line) || (activeColumns > 0 && startsTableRow(line));
+    if (!isRow) {
+      activeColumns = 0;
       output.push(line);
       continue;
     }
@@ -143,8 +180,43 @@ export function stripMarkdownDocumentFence(markdown: string) {
   return match ? match[1].trim() : markdown;
 }
 
+export const SOURCE_ENUMERATION_PHRASE_RE = /(?:项目部|本项目|本工程)?(?:根据|依据|结合|按照|以)?(?:本项目|项目|[^。；;\n]{0,30}?)?(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸|图纸资料|设计修改通知单)(?:[、,，及和与\s]*(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸|图纸资料|设计修改通知单|现行规范|规范)){1,}(?:[^。；;\n]{0,80})?[，,]/u;
+
+export function cleanFormalSourcePhrases(markdown: string) {
+  return markdown
+    .split(/\r?\n/u)
+    .map(line => {
+      if (/^\s*\|/u.test(line.trim())) return line;
+      return line
+        .replace(SOURCE_ENUMERATION_PHRASE_RE, '')
+        .replace(/(?:施工图设计说明|工程量清单项目特征|补充答疑修正口径|答疑修正口径)(?:[、,，及和与\s]*(?:施工图设计说明|工程量清单项目特征|补充答疑修正口径|答疑修正口径)){1,}/gu, '项目技术文件')
+        .replace(/(?:根据|依据|以)(?:[^。；;\n]{0,30})?(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸)(?:[^。；;\n]{0,40})(?:编制|确定|要求|为编制基础)[。；;]?/gu, '')
+        .replace(/\s{2,}/gu, ' ')
+        .trimEnd();
+    })
+    .filter(line => !/^(?:本节|本小节|本章)?(?:内容|措施)?(?:根据|依据)(?:招标文件|补疑澄清文件|补遗澄清文件|答疑(?:回复)?文件|澄清文件|工程量清单|设计图纸|施工图纸)[^。；;\n]*[。；;]?$/u.test(line.trim()))
+    .join('\n')
+    .replace(/\n{3,}/gu, '\n\n');
+}
+
+export function sourcePhraseIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  markdown.split(/\r?\n/u).forEach((line, index) => {
+    if (SOURCE_ENUMERATION_PHRASE_RE.test(line)) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `正式正文不得出现资料来源罗列话术：第 ${index + 1} 行`, suggestion: '删除“根据/依据招标文件、清单、图纸”等来源罗列，直接保留项目事实、施工内容和控制措施。' });
+    if (/^\s*\*\*[^*]{2,40}表\*\*\s*$/u.test(line)) issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'system', message: `正式正文不得用粗体段落充当表名：第 ${index + 1} 行`, suggestion: '表名必须转换为 #### 四级标题，避免导出后混入正文段落。' });
+  });
+  return issues.slice(0, 20);
+}
+
 export function sanitizeFormalMarkdown(markdown: string) {
-  const cleaned = normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(normalizeProductionText(stripMarkdownDocumentFence(markdown)))))
+  const cleaned = removeEmptyMarkdownTableColumns(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(normalizeProductionText(cleanFormalSourcePhrases(stripMarkdownDocumentFence(markdown)))))))
+    .split(/\r?\n/u)
+    .map(line => /^\s*\|/u.test(line) ? line.replace(/\s*不适用\s*(?=\|)/gu, ' ') : line)
+    .join('\n')
+    .replace(/^\*\*([^*\n]{2,40}(?:改造|工作包|工程|施工))\*\*\s*$/gmu, '#### $1')
+    .replace(/承包人案/gu, '方案')
+    .replace(/承包人法(?=[:：])/gu, '施工方法')
+    .replace(/承包人法/gu, '方法')
     .replace(WORKFLOW_PHRASE_RE, '')
     .replace(RAW_SOURCE_LINE_RE, '')
     .replace(ASCII_FLOW_LINE_RE, '')
@@ -185,6 +257,7 @@ export const MARKDOWN_TABLE_FORMAT_RULES = [
 export const FORMAL_WRITING_RULES = [
   '以下规则仅用于保障导出格式正确和事实安全，不得覆盖用户在提示词中已明确的要求。',
   '不得把”知识库、检索、资料类型、提示词角色、规范包、事实字段、缺失项、校验结果、资料未提供、未检索到”等后台流程话术写入正文。',
+  '严禁使用“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列开头；正文必须直接写项目事实、施工内容、控制措施、验收节点。',
   // 导出格式 —— DOCX/PDF 渲染器依赖以下 Markdown 规范
   '【导出格式】章标题用 ## ，节标题用 ### 加数字编号（如 1.1），小节标题用 #### 加数字编号（如 1.1.1）。禁止用数字编号或粗体代替 ###/#### 标题。',
   MARKDOWN_TABLE_FORMAT_RULES,
@@ -194,7 +267,7 @@ export const FORMAL_WRITING_RULES = [
 ].join('\n');
 
 export const SECTION_GENERATION_SAFETY_RULES = [
-  '只生成当前小节正文，不生成其他二级小节，不重复章节一级标题。',
+  '只生成当前节及其节内三级小节正文，不生成其他同级节，不重复章节一级标题。',
   '优先使用当前模板、用户要求、绑定提示词和绑定材料中的事实；缺少依据时不得编造具体数值、名称、时间、规格或责任。',
   '小节应有实质正文；除非用户或模板明确要求纯表格，否则表格只能作为辅助表达，不能整节只有表格。',
   '不得用通用兜底段落、空泛管理话术或后台缺料说明冒充正文；信息不足时只写已有事实、适用边界和待复核口径。',
@@ -238,6 +311,11 @@ export function normalizeTertiaryHeadings(markdown: string) {
   let currentSectionNumber = '';
   let tertiaryIndex = 0;
   const normalized = lines.map(line => {
+    const boldTableTitle = /^\*\*([^*]{2,40}表)\*\*\s*$/u.exec(line.trim());
+    if (boldTableTitle && currentSectionNumber) {
+      tertiaryIndex += 1;
+      return `#### ${currentSectionNumber}.${tertiaryIndex} ${displayChapterTitle(boldTableTitle[1] || '')}`;
+    }
     const section = /^###\s+(\d+\.\d+)\s+.+$/u.exec(line.trim());
     if (section) {
       currentSectionNumber = section[1];
@@ -308,9 +386,8 @@ function composeTocLines(chapters: Array<Pick<DocumentDraftChapter, 'title' | 's
   return chapters.flatMap((chapter, index) => {
     const sections = cleanTocSections(chapter.sections || []);
     return [
-      formalChapterTitle(index, chapter.title),
-      '',
-      ...sections.flatMap((section, sectionIndex) => [`  ${tocSectionTitle(index, sectionIndex, section)}`, '']),
+      `- ${formalChapterTitle(index, chapter.title)}`,
+      ...sections.map((section, sectionIndex) => `  - ${tocSectionTitle(index, sectionIndex, section)}`),
     ];
   });
 }
@@ -514,11 +591,12 @@ function ensureRequiredTables(markdown: string, rules?: PromptDocumentRuleSet) {
 
 function applyForbiddenTermReplacements(markdown: string, rules?: PromptDocumentRuleSet) {
   let next = markdown
-    .replace(/知识库|提示词|绑定片段|后台|资料库|OCR|联网增强|联网检索|网页资料|搜索结果|根据网页|互联网资料|在线资料|浏览器|搜索引擎/giu, '项目资料')
-    .replace(/建议补充/gu, '需完善')
-    .replace(/\b兜底\b|兜底生成|兜底片段/gu, '补充完善')
-    .replace(/施工方(?!法|案|式|针|向)/gu, '我公司')
-    .replace(/投标人/gu, '我公司')
+    .replace(/^\*\*([^*\n]{2,40}(?:改造|工作包|工程|施工))\*\*\s*$/gmu, '#### $1')
+    .replace(/承包人案/gu, '方案')
+    .replace(/承包人法(?=[:：])/gu, '施工方法')
+    .replace(/承包人法/gu, '方法')
+    .replace(/(?:本|我)施工方/gu, '我公司')
+    .replace(/(?:本|我)投标人/gu, '我公司')
     .replace(/高度重视/gu, '严格落实')
     .replace(/重中之重/gu, '关键控制事项');
   for (const term of rules?.forbiddenTerms || []) {
@@ -541,8 +619,9 @@ export function applyPromptDocumentRules(markdown: string, rules?: PromptDocumen
   }
   for (const term of rules.preferredTerms || []) {
     if (!term.from || term.from === term.to) continue;
+    if (term.from.length < 2) continue;
     if (term.from === '施工方') {
-      next = next.replace(/施工方(?!法|案|式|针|向)/gu, term.to);
+      next = next.replace(/施工方(?!法|案|式|针|向|面)/gu, term.to);
       continue;
     }
     next = next.replace(new RegExp(escapedRegExp(term.from), 'gu'), term.to);
@@ -623,6 +702,7 @@ export function plannedStructurePrompt(template: DocumentTemplate) {
     chapter.sections?.length ? `  规划小节：${chapter.sections.join('、')}` : '',
     chapter.tableSections?.length ? `  表格小节：${chapter.tableSections.join('、')}` : '',
     chapter.tableRequirements?.length ? `  表格内容要求：${chapter.tableRequirements.join('；')}` : '',
+    chapter.tablePlans?.length ? `  结构化表格规划：${chapter.tablePlans.map(plan => `${plan.title}(${plan.fields.map(field => field.name).join('/')})`).join('；')}` : '',
   ].filter(Boolean).join('\n')).join('\n');
 }
 
@@ -643,7 +723,7 @@ export function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumen
   if (missingKeywords.length > 0) issues.push({ level: 'warning', message: `正文缺少提示词要求覆盖的关键词：${missingKeywords.join('、')}`, suggestion: '请在相关章节自然补齐这些要点，避免堆砌关键词。' });
   const forbiddenPatternHits = (rules.forbiddenPatterns || []).filter(term => term && new RegExp(escapedRegExp(term), 'u').test(markdown));
   if (forbiddenPatternHits.length > 0) issues.push({ level: 'warning', message: `正文出现提示词禁止内容：${forbiddenPatternHits.join('、')}`, suggestion: '请删除或替换为正式交付表述。' });
-  const hitTerms = (rules.forbiddenTerms || []).filter(term => term && !/^(?:工程造价|造价|报价|投标报价|综合单价|单价|合价|金额|税率|增值税|利润|预留金|暂列金额)$/u.test(term) && new RegExp(escapedRegExp(term), 'u').test(markdown));
+  const hitTerms = (rules.forbiddenTerms || []).filter(term => term && !/^(?:工程造价|造价|报价|投标报价|综合单价|单价|合价|金额|税率|增值税|利润|预留金|暂列金额|兜底)$/u.test(term) && new RegExp(escapedRegExp(term), 'u').test(markdown));
   if (hitTerms.length > 0) issues.push({ level: 'warning', message: `正文残留总控提示词禁止词：${hitTerms.join('、')}`, suggestion: '请改为正式交付语言，删除后台话术、第三人称和口号式表达。' });
   const runtimeRules = rules as PromptDocumentRuleSet & { exactHeadings?: string[]; forbidExtraHeadings?: boolean; requiredSubjects?: string[]; forbiddenSubjects?: string[]; minChars?: number };
   const exactHeadings = runtimeRules.exactHeadings || [];
@@ -659,7 +739,7 @@ export function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumen
   if (subjectHits.length > 0) issues.push({ level: 'warning', message: `正文残留禁用主体表达：${subjectHits.join('、')}`, suggestion: '请统一改为用户提示词指定的表达主体。' });
   const plainLength = markdown.replace(/\s/gu, '').length;
   if (runtimeRules.minChars && plainLength < runtimeRules.minChars) issues.push({ level: 'warning', message: `正文长度低于提示词要求：当前 ${plainLength} 字，要求不少于 ${runtimeRules.minChars} 字`, suggestion: '请按章节深度扩写，但不得编造资料外事实。' });
-  return issues;
+  return issues.map(issue => issue.level === 'warning' && /提示词|禁止|禁用|低于提示词要求|必含关键词|必需表格|主体表达/u.test(issue.message) ? { ...issue, level: 'error' as const, severity: issue.severity || ('blocker' as const) } : issue);
 }
 
 export function plannedStructureIssues(markdown: string, template: DocumentTemplate): ValidationIssue[] {
@@ -671,7 +751,7 @@ export function plannedStructureIssues(markdown: string, template: DocumentTempl
       continue;
     }
     const body = block.heading + block.body;
-    if (chapter.tableSections?.length && !hasMarkdownTable(body)) issues.push({ level: 'error', message: `${chapter.title} 缺少必要的正式表格`, suggestion: '请按模板 tableSections/tableRequirements 在对应小节补充正式 Markdown 表格。' });
+    if (chapter.tableSections?.length && !hasMarkdownTable(body)) issues.push({ level: 'warning', message: `${chapter.title} 缺少必要的正式表格`, suggestion: '建议按模板 tableSections/tableRequirements 在对应小节补充正式 Markdown 表格。' });
   }
   return issues;
 }
