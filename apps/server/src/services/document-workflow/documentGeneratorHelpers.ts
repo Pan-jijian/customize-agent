@@ -8,7 +8,7 @@ import type { buildPromptBindingPlan } from './templateStore';
 import { selectEvidenceByBudget } from './evidence';
 import { normalizeOcrFactText, isValidProjectBasicFactValue } from './factsModel';
 import { buildCanonicalFacts } from './factGovernance';
-import { normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTenderSourcePageRefs } from './markdownComposer';
+import { normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTenderSourcePageRefs, removeAdjacentDuplicateHeadings } from './markdownComposer';
 import { collectSectionContentGaps } from './qualityValidation';
 import { stringifyFactValue, throwIfAborted } from './utils';
 import { promptTextsForResolvedPrompts } from './rolePipeline';
@@ -534,6 +534,26 @@ export function replaceForbiddenFormalPhrases(content: string) {
     .replace(/相关要求/gu, '本项目已明确的质量、安全、技术和验收要求');
 }
 
+// 正式正文中绝无合法用途的占位/系统话术：包含此类话术的句子整句删除，
+// 避免 Reviewer 报禁止话术后 Repairer patch 无法定位或修复后又残留导致不收敛；
+// 占位句删除后若小节过浅，由“正文不足”检查触发 Repairer 用真实证据补写。
+const FORBIDDEN_PLACEHOLDER_PHRASES = ['资料未明确', '系统暂未', '项目资料暂未', '暂未明确', '待确认', '待资料复核', '待系统', '未检索到', '资料不足', '无法确认', '建议补充', '可核验信息', '知识库', 'COL'];
+
+export function stripForbiddenPlaceholderSentences(content: string) {
+  if (!FORBIDDEN_PLACEHOLDER_PHRASES.some(phrase => content.includes(phrase))) return content;
+  return content
+    .split('\n')
+    .map(line => {
+      if (/^\s*#{1,6}\s/u.test(line) || /^\s*\|/u.test(line)) return line;
+      if (!FORBIDDEN_PLACEHOLDER_PHRASES.some(phrase => line.includes(phrase))) return line;
+      return line
+        .split(/(?<=[。；;])/u)
+        .filter(segment => !FORBIDDEN_PLACEHOLDER_PHRASES.some(phrase => segment.includes(phrase)))
+        .join('');
+    })
+    .join('\n');
+}
+
 
 export function splitOverlongParagraphs(markdown: string) {
   return markdown.split(/\n{2,}/u).map(block => {
@@ -558,13 +578,13 @@ export function splitOverlongParagraphs(markdown: string) {
 export function demoteNonFormalH2(markdown: string) {
   return markdown.replace(/^##\s+(.+)$/gmu, (full, title: string) => {
     const clean = String(title || '').trim();
-    if (clean === '目录' || /^第[一二三四五六七八九十百千万\d]+章\s+/u.test(clean)) return full;
+    if (clean === '目录' || /^附录/u.test(clean) || /^第[一二三四五六七八九十百千万\d]+章\s+/u.test(clean)) return full;
     return `### ${clean}`;
   });
 }
 
 export function filterResolvedFinalIssues(markdown: string, issues: ValidationIssue[]) {
-  const hasIllegalH2 = /^##\s+(?!目录$)(?!第[一二三四五六七八九十百千万\d]+章\s+)/gmu.test(markdown);
+  const hasIllegalH2 = /^##\s+(?!目录$)(?!附录)(?!第[一二三四五六七八九十百千万\d]+章\s+)/gmu.test(markdown);
   const hasPageRefs = /(?:第?\d+页|P\.?\s*\d+)/iu.test(markdown);
   const hasForbiddenParty = /施工方/u.test(markdown);
   return issues.filter(issue => {
@@ -667,7 +687,7 @@ function ensureWorkPackageOverviewLabels(content: string) {
 }
 
 export function finalizeChapterContentQuality(content: string, chapter: Pick<DocumentTemplateChapter, 'title' | 'sections'>) {
-  return ensureWorkPackageOverviewLabels(removeEmptySubSectionHeadings(replaceConstructionOrgGenericPhrases(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(splitLongParagraphs(replaceForbiddenFormalPhrases(repairTableOnlySections(repairPlannedSectionBodies(content, chapter)))))))))).replace(/\n{3,}/gu, '\n\n').trim();
+  return ensureWorkPackageOverviewLabels(removeEmptySubSectionHeadings(replaceConstructionOrgGenericPhrases(removeAdjacentDuplicateHeadings(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(splitLongParagraphs(stripForbiddenPlaceholderSentences(replaceForbiddenFormalPhrases(repairTableOnlySections(repairPlannedSectionBodies(content, chapter)))))))))))).replace(/\n{3,}/gu, '\n\n').trim();
 }
 
 export function promptMatchesChapter(prompt: ResolvedPromptContent, _chapter: DocumentTemplateChapter) {

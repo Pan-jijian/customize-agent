@@ -250,6 +250,8 @@ export interface DocumentDraftChapter {
   timedOut?: boolean;
   /** 章节生成实际耗时（毫秒） */
   elapsedMs?: number;
+  /** 章节生成中（仅有部分小节正文的 checkpoint 快照，不可作为 resume 复用） */
+  inProgress?: boolean;
 }
 
 export interface FactSourceRef {
@@ -553,6 +555,14 @@ export interface DocumentReviewMetadata {
   qualityReport?: DocumentQualityReport;
   repairStrategies?: RepairStrategy[];
   reviewChecklist?: DocumentReviewChecklistItem[];
+  professionalScore?: {
+    total: number;
+    grade: '专业' | '良好' | '合格' | '待提升';
+    dimensions: Array<{ key: string; label: string; score: number; detail: string; weight: number }>;
+    summary: string;
+    topIssues: string[];
+  };
+  writingTaskBrief?: WritingTaskBrief;
   workflowVersion?: DocumentWorkflowVersion;
   telemetry?: DocumentTelemetryReport;
 }
@@ -579,7 +589,7 @@ export interface GeneratedDocumentDraft {
   executionStages: DocumentExecutionStage[];
   exportGate: ExportGateResult;
   assets?: DocumentAsset[];
-  partialChapters?: Array<{ id: string; title: string; chars: number; status: 'completed' | 'failed'; updatedAt: number; timedOut?: boolean; elapsedMs?: number }>;
+  partialChapters?: Array<{ id: string; title: string; chars: number; status: 'completed' | 'failed' | 'in_progress'; updatedAt: number; timedOut?: boolean; elapsedMs?: number }>;
   checkpointChapters?: DocumentDraftChapter[];
   reviewMetadata?: DocumentReviewMetadata;
   /** 提示词绑定溯源：记录每个提示词的完整绑定链路 */

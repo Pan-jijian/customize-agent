@@ -269,8 +269,8 @@ export function tocBodyConsistencyIssues(markdown: string): ValidationIssue[] {
   const missingInBody = tocSections.filter(title => !bodySet.has(title));
   const missingInToc = bodySections.filter(title => !tocSet.has(title));
   const issues: ValidationIssue[] = [];
-  if (missingInBody.length > 0) issues.push({ level: 'warning', message: `目录与正文不一致，目录小节未在正文中找到：${[...new Set(missingInBody)].join('、')}`, suggestion: '建议以最终清洗后的正文二级标题为准重新生成目录。' });
-  if (missingInToc.length > 0) issues.push({ level: 'warning', message: `目录与正文不一致，正文小节未进入目录：${[...new Set(missingInToc)].join('、')}`, suggestion: '建议重新生成目录，确保只收录正文二级小节，不收录三级小节。' });
+  if (missingInBody.length > 0) issues.push({ level: 'error', message: `目录与正文不一致，目录小节未在正文中找到：${[...new Set(missingInBody)].join('、')}`, suggestion: '建议以最终清洗后的正文二级标题为准重新生成目录。' });
+  if (missingInToc.length > 0) issues.push({ level: 'error', message: `目录与正文不一致，正文小节未进入目录：${[...new Set(missingInToc)].join('、')}`, suggestion: '建议重新生成目录，确保只收录正文二级小节，不收录三级小节。' });
   return issues;
 }
 
@@ -318,7 +318,7 @@ export function formalHeadingHierarchyIssues(markdown: string): ValidationIssue[
   const bodyMarkdown = firstBodyChapter >= 0 ? markdown.slice(firstBodyChapter) : markdown.replace(/^##\s+目录[\s\S]*?(?=^##\s+第[一二三四五六七八九十百千万\d]+章\s+)/mu, '');
   const illegalH2 = [...bodyMarkdown.matchAll(/^##\s+(.+)$/gmu)]
     .map(match => (match[1] || '').trim())
-    .filter(title => title !== '目录' && !/^第[一二三四五六七八九十百千万\d]+章\s+/u.test(title))
+    .filter(title => title !== '目录' && !/^第[一二三四五六七八九十百千万\d]+章\s+/u.test(title) && !/^附录/u.test(title))
     .map(title => displayChapterTitle(title));
   if (illegalH2.length > 0) issues.push({ level: 'error', message: `正文存在非正式章二级标题：${[...new Set(illegalH2)].slice(0, 8).join('、')}`, suggestion: '正文 ## 只允许用于“第X章”正式章标题；章内小节必须使用 ### X.Y。' });
   const chapterMatches = [...markdown.matchAll(/^##\s+(第[一二三四五六七八九十百千万\d]+章\s+.+)$/gmu)];
@@ -338,8 +338,16 @@ export function formalHeadingHierarchyIssues(markdown: string): ValidationIssue[
 export function markdownTableQualityIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   if (/按审批确认执行/u.test(markdown)) issues.push({ level: 'error', message: '表格存在自动兜底污染内容：按审批确认执行', suggestion: '正式投标表格不得使用通用兜底短语，应保留真实业务内容或删除该行。' });
-  const basicInfoTableCount = (markdown.match(/\|\s*信息项\s*\|\s*内容\s*\|/gu) || []).length;
-  if (basicInfoTableCount > 1) issues.push({ level: 'error', message: `项目基础信息类表格重复：${basicInfoTableCount} 处`, suggestion: '项目名称、招标人、建设地点、工期、质量等基础信息只能集中输出一次。' });
+  // “信息项|内容”表头也被 Writer 用于工程量/设备参数汇总表，只有内容含项目基础信息字段的表才算“基础信息表”；
+  // 直接按表头计数会把第三章的工程量汇总表误判为“基础信息重复”。
+  const basicInfoTableBlocks: string[] = [];
+  for (const match of markdown.matchAll(/\|\s*信息项\s*\|\s*内容\s*\|/gu)) {
+    const rest = markdown.slice(match.index || 0);
+    const end = rest.indexOf('\n\n');
+    basicInfoTableBlocks.push(end >= 0 ? rest.slice(0, end) : rest.slice(0, 800));
+  }
+  const duplicatedBasicInfoTableCount = basicInfoTableBlocks.filter(block => /项目名称|招标人|建设单位|发包人|建设地点|招标范围|计划工期|合同估算价|质量标准/u.test(block)).length;
+  if (duplicatedBasicInfoTableCount > 1) issues.push({ level: 'error', message: `项目基础信息类表格重复：${duplicatedBasicInfoTableCount} 处`, suggestion: '项目名称、招标人、建设地点、工期、质量等基础信息只能集中输出一次。' });
   const repeatedDividerRows = markdown.match(/^\|\s*---\s*\|\s*---\s*\|\s*$/gmu) || [];
   if (repeatedDividerRows.length > 20) issues.push({ level: 'error', message: `表格分隔线异常重复：${repeatedDividerRows.length} 行`, suggestion: '请修复表格规范化逻辑，禁止把数据行拆成多个碎表。' });
   for (const block of markdownTables(markdown)) {
@@ -423,6 +431,11 @@ function sectionBodyForTitle(markdown: string, section: string) {
     })[0]?.item;
 }
 
+function tableDataRowCount(body: string) {
+  const rows = body.split(LINE_SPLIT_RE).filter(line => MARKDOWN_TABLE_ROW_RE.test(line) && !MARKDOWN_TABLE_DIVIDER_RE.test(line));
+  return Math.max(0, rows.length - 1);
+}
+
 function gapForSection(chapterTitle: string, sectionTitle: string, level: 3 | 4, body: string, planned: boolean): MarkdownSectionContentGap | undefined {
   const bodyLength = sectionBodyTextLength(body);
   const hasTable = MARKDOWN_TABLE_ROW_RE.test(body) && body.split(LINE_SPLIT_RE).some(line => MARKDOWN_TABLE_DIVIDER_RE.test(line));
@@ -431,8 +444,13 @@ function gapForSection(chapterTitle: string, sectionTitle: string, level: 3 | 4,
   const nonTableLength = sectionBodyTextLength(nonTableBody);
   if (/\[WRITER_MISSING_SECTION\]|Writer 未完成/u.test(body)) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: `${chapterTitle} 小节内容补写未完成：${sectionTitle}` };
   if (/【本小节生成未达标，需重新生成】/u.test(body)) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: `${chapterTitle} 小节生成未达标：${sectionTitle}` };
-  if (/项目基本信息|基本信息|工程概况表|项目概况表/u.test(sectionTitle) && (hasTable || bodyLength >= 40)) return undefined;
-  if (hasTable && nonTableLength < 20) return undefined;
+  if (/项目基本信息|基本信息|工程概况|项目概况|工程概述|项目概述/u.test(sectionTitle) && (hasTable || bodyLength >= 40)) return undefined;
+  // 附录A/B 由导出层按正文自动归集注入，不属于 Writer 成稿范围；只要带表格即视为有效，不参与正文完整度校验
+  if (/^附录[一二三四五六七八九十A-Z\d]/u.test(sectionTitle) && hasTable) return undefined;
+  // 清单/配置类小节本体即表格清单（如危大工程控制清单、主要周转材料配置），表格数据行≥2 视为有效正文，避免误报“只有标题或表格无正文”
+  const listStyleSection = /清单|配置|汇总|一览|计划表|明细/u.test(sectionTitle);
+  if (hasTable && listStyleSection && tableDataRowCount(body) >= 2) return undefined;
+  if (hasTable && nonTableLength < 20) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: planned ? `${chapterTitle} 只有标题或表格无正文：${sectionTitle}` : `${chapterTitle} 小节只有标题或表格无正文：${sectionTitle}` };
   if (bodyLength >= 80 && nonTableLength >= 20) return undefined;
   if (bodyLength === 0) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: `${chapterTitle} 空小节：${sectionTitle}` };
   if (bodyLength < 180) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'too_short', planned, message: `${chapterTitle} ${planned ? '规划小节' : '正文小节'}正文过短：${sectionTitle}` };
@@ -444,7 +462,8 @@ export function collectSectionContentGaps(markdown: string, chapters: Array<Pick
   const seen = new Set<string>();
   for (const chapter of chapters) {
     const source = chapter.content?.trim() ? chapter.content : markdown;
-    const plannedSections = (chapter.sections || []).filter(section => !/^(?:施工概况|施工流程|施工方法)$/u.test(normalizeSectionTitleForGap(section)));
+    // 附录小节由导出层自动归集注入 markdown 尾部，不进入章节草稿 content，也不应由 Writer 成稿，跳过规划小节校验
+    const plannedSections = (chapter.sections || []).filter(section => !/^(?:施工概况|施工流程|施工方法)$/u.test(normalizeSectionTitleForGap(section)) && !/^附录/u.test(section.trim()));
     for (const section of plannedSections) {
       const normalized = normalizeSectionTitleForGap(section);
       const found = sectionBodyForTitle(source, section);

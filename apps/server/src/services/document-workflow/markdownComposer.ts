@@ -1,6 +1,7 @@
 import type { DocumentDraftChapter, DocumentTemplate, GeneratedDocumentDraft, PromptDocumentRuleSet, ValidationIssue } from './types';
 import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
 import { displayChapterTitle, formalChapterTitle, normalizeGeneratedChapterTitle } from './outline';
+import { composeDrawingIndexMarkdown, composeEnhancedCoverMarkdown, composeProcessParameterSummaryMarkdown } from './composeAppendices';
 
 export function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
   if (!forbid) return markdown;
@@ -191,7 +192,7 @@ export function cleanFormalSourcePhrases(markdown: string) {
         .replace(SOURCE_ENUMERATION_PHRASE_RE, '')
         .replace(/(?:施工图设计说明|工程量清单项目特征|补充答疑修正口径|答疑修正口径)(?:[、,，及和与\s]*(?:施工图设计说明|工程量清单项目特征|补充答疑修正口径|答疑修正口径)){1,}/gu, '项目技术文件')
         .replace(/(?:根据|依据|以)(?:[^。；;\n]{0,30})?(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸)(?:[^。；;\n]{0,40})(?:编制|确定|要求|为编制基础)[。；;]?/gu, '')
-        .replace(/\s{2,}/gu, ' ')
+        .replace(/(?<=\S)\s{2,}(?=\S)/gu, ' ')
         .trimEnd();
     })
     .filter(line => !/^(?:本节|本小节|本章)?(?:内容|措施)?(?:根据|依据)(?:招标文件|补疑澄清文件|补遗澄清文件|答疑(?:回复)?文件|澄清文件|工程量清单|设计图纸|施工图纸)[^。；;\n]*[。；;]?$/u.test(line.trim()))
@@ -213,11 +214,18 @@ export function sanitizeFormalMarkdown(markdown: string) {
     .split(/\r?\n/u)
     .map(line => /^\s*\|/u.test(line) ? line.replace(/\s*不适用\s*(?=\|)/gu, ' ') : line)
     .join('\n')
-    .replace(/^\*\*([^*\n]{2,40}(?:改造|工作包|工程|施工))\*\*\s*$/gmu, '#### $1')
+    .replace(/^\*\*([^*\n]{4,40})\*\*\s*$/gmu, (line: string, title: string) => {
+      const clean = title.trim();
+      // 整行加粗且带句末标点/冒号或为提示语的不属于小节标题，保留原文；其余按“禁止用粗体代替标题”规范转为 #### 标题
+      if (/[:：。！!？?，,、]$/u.test(clean) || /^(?:注意|提示|备注|警告|说明)/u.test(clean)) return line;
+      return `#### ${clean}`;
+    })
     .replace(/承包人案/gu, '方案')
     .replace(/承包人法(?=[:：])/gu, '施工方法')
     .replace(/承包人法/gu, '方法')
     .replace(WORKFLOW_PHRASE_RE, '')
+    .replace(/(^|\n)---\s*\n+(?=以上内容已依据)/gu, '$1')
+    .replace(/^以上内容已依据[\s\S]*?(?=\n\s*\n)/gmu, '')
     .replace(RAW_SOURCE_LINE_RE, '')
     .replace(ASCII_FLOW_LINE_RE, '')
     .replace(INSTRUCTION_HEADING_RE, '')
@@ -258,6 +266,7 @@ export const FORMAL_WRITING_RULES = [
   '以下规则仅用于保障导出格式正确和事实安全，不得覆盖用户在提示词中已明确的要求。',
   '不得把”知识库、检索、资料类型、提示词角色、规范包、事实字段、缺失项、校验结果、资料未提供、未检索到”等后台流程话术写入正文。',
   '严禁使用“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列开头；正文必须直接写项目事实、施工内容、控制措施、验收节点。',
+  '禁止模板化空话与流程套话：不同小节必须写各自专属的专业内容，逐节落位本项目工程量、设备规格、工艺参数与验收标准，不得复制相同段落，不得用泛化的流程描述代替专业内容；正文末尾不得输出自我总结或合规声明段落。',
   // 导出格式 —— DOCX/PDF 渲染器依赖以下 Markdown 规范
   '【导出格式】章标题用 ## ，节标题用 ### 加数字编号（如 1.1），小节标题用 #### 加数字编号（如 1.1.1）。禁止用数字编号或粗体代替 ###/#### 标题。',
   MARKDOWN_TABLE_FORMAT_RULES,
@@ -291,6 +300,41 @@ function sameStructuralTitle(left: string, right: string) {
   const leftKey = structuralTitleKey(left);
   const rightKey = structuralTitleKey(right);
   return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+/** 修复双标题叠加（“## ### 标题”同段粘连）与相邻结构重复标题：合并叠加行并删除与前一行结构一致的标题行。 */
+export function removeAdjacentDuplicateHeadings(markdown: string) {
+  const lines = markdown.split(/\r?\n/u);
+  const output: string[] = [];
+  let previousTitle = '';
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    // 双标题叠加：## ### 标题 → 降级保留 ### 标题
+    const stacked = /^##\s+(#{2,5})\s+(.+)$/u.exec(trimmed);
+    if (stacked) {
+      const heading = stacked[1] || '';
+      const title = (stacked[2] || '').trim();
+      if (title && !sameStructuralTitle(title, previousTitle)) {
+        output.push(`${heading} ${displayChapterTitle(title)}`);
+        previousTitle = title;
+      }
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.+)$/u.exec(trimmed);
+    if (heading) {
+      const title = (heading[2] || '').trim();
+      if (title) {
+        if (sameStructuralTitle(title, previousTitle)) continue;
+        previousTitle = title;
+      }
+      output.push(rawLine);
+      continue;
+    }
+    // 正文行隔断相邻比较，避免跨段误删
+    if (trimmed) previousTitle = '';
+    output.push(rawLine);
+  }
+  return output.join('\n').replace(/\n{3,}/gu, '\n\n');
 }
 
 function chapterHeadingText(line: string) {
@@ -374,7 +418,8 @@ function normalizeTocSection(section: string) {
   if (isInstructionLikeTitle(raw)) return '';
   const clean = displayChapterTitle(raw).replace(/^[-—–]\s*/u, '').trim();
   if (isInstructionLikeTitle(clean)) return '';
-  if (/^(?:雨季|冬季|高温|台风|大风等特殊气候)$/u.test(clean)) return '';
+  if (/^(?:雨季|冬季|高温|台风|大风)(?:[、，](?:雨季|冬季|高温|台风|大风))*等特殊气候$/u.test(clean)) return '';
+  if (/^(?:雨季|冬季|高温|台风|大风)$/u.test(clean)) return '';
   return clean;
 }
 
@@ -386,8 +431,8 @@ function composeTocLines(chapters: Array<Pick<DocumentDraftChapter, 'title' | 's
   return chapters.flatMap((chapter, index) => {
     const sections = cleanTocSections(chapter.sections || []);
     return [
-      `- ${formalChapterTitle(index, chapter.title)}`,
-      ...sections.map((section, sectionIndex) => `  - ${tocSectionTitle(index, sectionIndex, section)}`),
+      `${formalChapterTitle(index, chapter.title)}`,
+      ...sections.map((section, sectionIndex) => `  ${tocSectionTitle(index, sectionIndex, section)}`),
     ];
   });
 }
@@ -417,7 +462,7 @@ export function inferChapterSectionsFromMarkdown(markdown: string, chapters: Arr
     const next = headingMatches.find(match => (match.index || 0) > (current.index || 0) && chapters.some(item => sameStructuralTitle(match[1] || '', item.title)));
     const block = normalizedMarkdown.slice(current.index, next?.index ?? normalizedMarkdown.length);
     const extracted = extractGeneratedSections(block);
-    if (extracted.length > 0) return extracted.slice(0, 12);
+    if (extracted.length > 0) return extracted.slice(0, 100);
     return chapter.sections || [];
   });
 }
@@ -528,6 +573,7 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
     if (chapterIndex >= 0 && h2PlainSection) {
       const plainTitle = displayChapterTitle(h2PlainSection[1] || '');
       if (/^本章目录$/u.test(plainTitle)) return '';
+      if (/^附录/u.test(plainTitle)) return line;
       return normalizeSectionHeading(plainTitle);
     }
     const section = /^###\s+(?:(\d+)\.(\d+)\s+)?(.+)$/u.exec(trimmed);
@@ -591,7 +637,12 @@ function ensureRequiredTables(markdown: string, rules?: PromptDocumentRuleSet) {
 
 function applyForbiddenTermReplacements(markdown: string, rules?: PromptDocumentRuleSet) {
   let next = markdown
-    .replace(/^\*\*([^*\n]{2,40}(?:改造|工作包|工程|施工))\*\*\s*$/gmu, '#### $1')
+    .replace(/^\*\*([^*\n]{4,40})\*\*\s*$/gmu, (line: string, title: string) => {
+      const clean = title.trim();
+      // 整行加粗且带句末标点/冒号或为提示语的不属于小节标题，保留原文；其余按“禁止用粗体代替标题”规范转为 #### 标题
+      if (/[:：。！!？?，,、]$/u.test(clean) || /^(?:注意|提示|备注|警告|说明)/u.test(clean)) return line;
+      return `#### ${clean}`;
+    })
     .replace(/承包人案/gu, '方案')
     .replace(/承包人法(?=[:：])/gu, '施工方法')
     .replace(/承包人法/gu, '方法')
@@ -639,7 +690,7 @@ export function ensureFormalToc(markdown: string, chapters: Array<Pick<DocumentD
     const current = headingMatches.find(match => sameStructuralTitle(match[1] || '', chapter.title));
     if (!current || current.index === undefined) return chapter;
     const next = headingMatches.find(match => (match.index || 0) > (current.index || 0) && chapters.some(item => sameStructuralTitle(match[1] || '', item.title)));
-    const sections = extractGeneratedSections(bodyMarkdown.slice(current.index, next?.index ?? bodyMarkdown.length)).slice(0, 8);
+    const sections = extractGeneratedSections(bodyMarkdown.slice(current.index, next?.index ?? bodyMarkdown.length)).slice(0, 100);
     return sections.length ? { ...chapter, sections } : chapter;
   });
   const toc = composeTocMarkdown(tocChapters);
@@ -728,7 +779,7 @@ export function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumen
   const runtimeRules = rules as PromptDocumentRuleSet & { exactHeadings?: string[]; forbidExtraHeadings?: boolean; requiredSubjects?: string[]; forbiddenSubjects?: string[]; minChars?: number };
   const exactHeadings = runtimeRules.exactHeadings || [];
   if (exactHeadings.length > 0) {
-    const actualHeadings = [...markdown.matchAll(/^##\s+(.+)$/gmu)].map(match => displayChapterTitle(match[1] || '')).filter(title => !(title === '目录' && rules.tocPolicy === 'required'));
+    const actualHeadings = [...markdown.matchAll(/^##\s+(.+)$/gmu)].map(match => displayChapterTitle(match[1] || '')).filter(title => !(title === '目录' && rules.tocPolicy === 'required') && !/^附录/u.test(title));
     const normalizedExactHeadings = exactHeadings.map(displayChapterTitle);
     const missingHeadings = exactHeadings.filter(title => !actualHeadings.includes(displayChapterTitle(title)));
     const extraHeadings = runtimeRules.forbidExtraHeadings ? actualHeadings.filter(title => !normalizedExactHeadings.includes(displayChapterTitle(title))) : [];
@@ -851,14 +902,11 @@ export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'mar
   const tocChapters = cleanChapters.map((chapter, index) => {
     if (chapter.sections?.length) return chapter;
     const normalizedBlock = normalizeFormalChapterHeadings(normalizedChapterBlocks[index] || '', [chapter]);
-    const sections = extractGeneratedSections(normalizedBlock).slice(0, 8);
+    const sections = extractGeneratedSections(normalizedBlock).slice(0, 100);
     return sections.length ? { ...chapter, sections: cleanTocSections(sections) } : chapter;
   });
   const initialMarkdown = [
-    `<div class="document-cover">`,
-    `# ${draft.title}`,
-    '',
-    `</div>`,
+    composeEnhancedCoverMarkdown(draft.title, draft.facts),
     '',
     '<div class="page-break"></div>',
     '',
@@ -869,5 +917,9 @@ export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'mar
     chapterMarkdown,
   ].join('\n');
 
-  return finalizeDocumentMarkdown(initialMarkdown, cleanChapters, options).markdown;
+  const finalized = finalizeDocumentMarkdown(initialMarkdown, cleanChapters, options);
+  const appendices = [composeDrawingIndexMarkdown(finalized.markdown), composeProcessParameterSummaryMarkdown(finalized.markdown)].filter(Boolean).join('\n');
+  return appendices
+    ? `${finalized.markdown.replace(/\n{3,}/gu, '\n\n')}\n\n<div class="page-break"></div>\n\n${appendices}`
+    : finalized.markdown;
 }

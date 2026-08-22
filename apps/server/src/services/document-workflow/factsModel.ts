@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
 import { getProjectRoot } from '../knowledge/kbService';
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE, factFieldForLabel, isDiagnosticFactValue, isForbiddenFactValue, isLowConfidenceFactValue, type DocumentDomainProfile, type FactFieldProfile } from '../document-core/documentDomainProfileService';
-import type { ChapterFactNeed, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, ResolvedFactNeed, StructuredTableFact } from './types';
+import type { ChapterFactNeed, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ResolvedFactNeed, StructuredTableFact } from './types';
 import { evidenceSatisfiesSpecField, specFactTargets } from './factMatching';
 import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { callDocumentLlmJson } from './llmClient';
@@ -98,7 +98,7 @@ export function shouldRunLlmFactExtraction(existingFacts: DocumentFact[], templa
   return covered / targets.length < 0.9;
 }
 
-export async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: string, template: DocumentTemplate, spec?: AutoDocumentSpecPackage, signal?: AbortSignal): Promise<{ facts: DocumentFact[]; stages: DocumentExecutionStage[] }> {
+export async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: string, template: DocumentTemplate, spec?: AutoDocumentSpecPackage, signal?: AbortSignal, diagnostics?: DocumentGenerationDiagnostics): Promise<{ facts: DocumentFact[]; stages: DocumentExecutionStage[] }> {
   const stages: DocumentExecutionStage[] = [{ type: 'fact_extraction', roleId: 'llm-json', status: 'skipped', message: 'LLM JSON 抽取未启用或无可用模型' }];
   const maxChars = Math.max(12000, Math.floor(Number(process.env.DOCUMENT_FACT_EXTRACTION_MAX_CHARS ?? 45000)));
   const maxItems = Math.max(8, Math.floor(Number(process.env.DOCUMENT_FACT_EXTRACTION_MAX_ITEMS ?? 48)));
@@ -121,7 +121,7 @@ export async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTe
   const llm = await callDocumentLlmJson<{ facts?: Array<{ fieldId?: string; fieldName?: string; key: string; value: string; sourceFile?: string; roleId?: string; processingType?: string; confidence?: number }> }>(
     promptTexts || '你是文档事实抽取器。',
     `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色；事实取舍和冲突处理遵循规范包字段说明、文件角色和提示词角色配置。\n返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","sourceFile":"...","roleId":"...","processingType":"reference","confidence":0.8}]}。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`,
-    { signal, maxTokens: 1800, temperature: 0.1 },
+    { signal, maxTokens: 1800, temperature: 0.1, diagnostics },
   );
   throwIfAborted(signal);
   if (!llm?.facts?.length) return { facts: [], stages };
@@ -236,9 +236,10 @@ export function isValidProjectBasicFactValue(fieldId: string | undefined, rawVal
   if (/###|第\s*\d+\s*页|共\s*\d+\s*页|律师代理费|投标文件的编制|备选投标方案|投标将被否决|投标人提供|投标有效期|电子交易系统|公共资源交易监督管理部门|中标候选|评标委员会|实质性内容作出响应/u.test(value)) return false;
   if (/签章|盖章|联系人|联系电话|电话|邮箱|解密|开标|评标|保证金|交易系统|空白|填写|上传|下载|递交/u.test(value)) return false;
   if (fieldId === 'schedule_requirement') return value.length <= 90 && /\d+(?:\.\d+)?\s*(?:日历天|天|个月|月|年)/u.test(value);
-  if (fieldId === 'quality_standard') return value.length <= 40 && /合格|优良|一次性验收|国家.*验收|达到/u.test(value) && !/工期|投标|技术标准/u.test(value);
+  if (fieldId === 'quality_standard') return value.length <= 40 && /合格|优良|一次性验收|国家.*验收|达到/u.test(value) && !/工期|投标|技术标准|\d[.．、]/u.test(value);
   if (fieldId === 'owner') return value.length >= 4 && value.length <= 80 && /公司|局|委员会|中心|处|院|所|校|集团|有限|股份|责任|管理/u.test(value) && !/将报|监督管理部门|投标人|中标|负责解释|见招标|详见|空白|填写/u.test(value);
   if (fieldId === 'project_location') return value.length <= 120 && !/见招标公告|详见|投标/u.test(value);
+  if (fieldId === 'project_scope') return value.length <= 220 && !/^[（(]\s*\d+[)）]/u.test(value) && !/具备.{0,24}(?:证书|考核合格|安全生产考核)/u.test(value) && !/^见(?:招标|投标人|前附)/u.test(value);
   if (fieldId === 'project_code') return /^[A-Za-z0-9\-_.（）()]+$/u.test(value);
   if (fieldId === 'project_investment_estimate') return value.length <= 100 && /\d+(?:\.\d+)?\s*(?:万元|元)/u.test(value);
   return value.length <= 220;

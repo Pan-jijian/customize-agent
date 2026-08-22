@@ -13,9 +13,9 @@ export function professionalSectionTaskCard(chapterTitle: string, sectionTitle: 
     /质量/u.test(joined) ? '必须覆盖材料验收复验、过程检查、隐蔽验收、整改复验和质量资料归档。' : '',
     /安全|文明|风险|危大/u.test(joined) ? '必须覆盖风险识别、人员设备、临电消防、现场文明、检查整改和应急响应。' : '',
     /资源|材料|设备|劳动力/u.test(joined) ? '必须说明资源配置依据、进场验收、保管调配，并与工期和质量目标一致。' : '',
-    /施工|工艺|技术|方案/u.test(joined) ? '必须写清施工准备、工艺流程、关键控制点、验收要求和资料依据。' : '',
+    /施工|工艺|技术|方案/u.test(joined) ? '必须写清施工准备、工艺流程、关键控制点、验收要求和资料依据；每个分项工程方案必须落位至少 4 个工艺参数（mm、MPa、间距、偏差、坡度、养护天数、试验压力、搭接长度等），参数来自绑定资料或行业通用规范值，不得编造；纯设备配置型内容必须写型号、规格、容量、数量参数。' : '',
   ].filter(Boolean);
-  return ['【小节专业任务卡】', `任务对象：${sectionTitle}`, ...(points.length ? points : ['必须结合本项目资料明确事实说明对象范围、实施方法、控制要点、验收要求和资料闭环，避免泛化套话。'])].join('\n');
+  return ['【小节专业任务卡】', `任务对象：${sectionTitle}`, ...(points.length ? points : ['必须结合本项目资料明确事实说明对象范围、实施方法、控制要点、验收要求和资料闭环，避免泛化套话。']), '禁止套话：不得使用“本小节围绕……展开”“结合绑定项目资料、施工组织安排和现场实施条件”“交底覆盖率按100%控制”等模板化开篇；不得只写“加强管理、严格把控、确保质量”式口号；每个三级小节必须写与本节标题对应的专属内容，不得与其他小节内容相同或近似。'].join('\n');
 }
 
 function normalizePlannedSectionTitle(title: string) {
@@ -25,6 +25,8 @@ function normalizePlannedSectionTitle(title: string) {
     .replace(/^[-—–]\s*/u, '')
     .replace(/[<>]/gu, '')
     .replace(/[：:。；;,.，]+$/gu, '')
+    // 清理规划模型残留的英文括号注释（如 "(or use numbering consistent with the outline)"），避免注释进入目录与正文标题
+    .replace(/\s*[（(][^（）()]{0,40}[a-zA-Z]{3,}[^（）()]{0,40}[)）]\s*$/u, '')
     .trim();
 }
 
@@ -223,7 +225,9 @@ export function buildRuntimePromptRules(input: {
   const requiredKeywords = extractRequiredKeywordRules(normalizedText);
   const forbiddenPatterns = extractForbiddenPatternRules(normalizedText);
   const exactHeadings = extractOutlineHeadings(normalizedText);
-  const backendTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台', '绑定片段'];
+  // “后台”不单独作为禁止词：正文中的“后台权限设置/后台管理”等是智慧工地平台的正当专业术语，
+  // 必须用“后台话术/后台流程”等复合词才能准确拦截提示词泄漏且不误伤正当用法。
+  const backendTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台话术', '后台流程', '后台数据', '后台资料', '后台溯源', '绑定片段'];
   const commercialTerms = /技术标(?:正文)?(?:不得|禁止|严禁).*(?:商务|报价|单价|税率|利润|造价)/u.test(normalizedText) ? ['报价明细表'] : [];
   const forbiddenSubjects: string[] = [];
   const minWords = extractMinWords(normalizedText);
@@ -332,7 +336,9 @@ export function extractPromptDocumentRules(promptTexts: string): PromptDocumentR
     if (title && title.length >= 4 && title.length <= 30) requiredTables.add(title);
   }
   if (/项目基本信息表/u.test(normalizedText)) requiredTables.add('项目基本信息表');
-  const forbiddenTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台', '绑定片段'];
+  // “后台”不单独作为禁止词：正文中的“后台权限设置/后台管理”等是智慧工地平台的正当专业术语，
+  // 必须用“后台话术/后台流程”等复合词才能准确拦截提示词泄漏且不误伤正当用法。
+  const forbiddenTerms = ['知识库', '提示词', '建议补充', '资料库', 'OCR', '后台话术', '后台流程', '后台数据', '后台资料', '后台溯源', '绑定片段'];
   if (/杜绝(?:套话|空话)|禁止(?:套话|空话)|不得(?:套话|空话)|严禁(?:套话|空话)/u.test(normalizedText)) forbiddenTerms.push('高度重视', '重中之重');
   if (/技术标(?:正文)?(?:不得|禁止|严禁).*(?:商务|报价|单价|税率|利润|造价)/u.test(normalizedText)) forbiddenTerms.push('报价明细表');
   const coverPolicy = promptPolicy(normalizedText, '封面');

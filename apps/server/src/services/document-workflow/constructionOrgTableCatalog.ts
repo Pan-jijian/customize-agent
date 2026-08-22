@@ -15,6 +15,21 @@ function field(name: string, sourceDomain: ProjectGraphTableFieldPlan['sourceDom
 
 export const CONSTRUCTION_ORG_TABLE_CATALOG: ConstructionOrgTableDefinition[] = [
   {
+    id: 'project-overview',
+    title: '工程概况一览表',
+    moduleTitles: ['编制说明与工程概况'],
+    required: true,
+    triggerKeywords: ['工程概况', '概况', '编制说明', '建设规模', '工期'],
+    fields: [
+      field('工程名称', 'project', '从项目名称、招标范围提取', 'projectFactOnly'),
+      field('建设地点', 'project', '从建设地点资料提取', 'projectFactOnly'),
+      field('建设规模', 'project', '建筑面积、结构形式、层数等从资料提取', 'projectFactOnly'),
+      field('计划工期', 'schedule', '从工期节点或资料提取', 'projectFactOnly'),
+      field('质量标准', 'standards', '从招标要求或质量标准提取', 'standardAllowed'),
+      field('招标范围', 'requirements', '从招标范围与工作内容提取', 'deriveFromContext'),
+    ],
+  },
+  {
     id: 'project-difficulty',
     title: '项目重难点识别表',
     moduleTitles: ['编制说明与工程概况'],

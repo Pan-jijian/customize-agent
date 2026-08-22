@@ -2,6 +2,7 @@ import type { AgentWorkflowContext, AgentWorkflowNode } from './agentWorkflow';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentTemplate, DocumentTemplateChapter, ProjectGraph, ValidationIssue } from './types';
 import { stableHash, stringifyFactValue } from './utils';
 import { documentTextLength } from './budget';
+import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './constructionOrgAudit';
 
 export interface AgentSectionPlan {
   title: string;
@@ -271,11 +272,6 @@ function extractSectionBody(content: string, sectionTitle: string) {
   return matches.sort((a, b) => documentTextLength(b) - documentTextLength(a))[0] || '';
 }
 
-function sectionHasSemanticCoverage(content: string, sectionTitle: string) {
-  const tokens = sectionTitle.split(/[、，,；;\s]+/u).map(token => token.replace(/项目|工程|主要|措施|体系|方案|专项/gu, '').trim()).filter(token => token.length >= 2);
-  return tokens.length > 0 && tokens.some(token => content.includes(token));
-}
-
 function actionableReviewFact(fact: DocumentFact) {
   const value = factValue(fact);
   if (!value || value.length < 3) return false;
@@ -300,10 +296,19 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
       const criticalDepth = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试|见证取样/u.test(section.title);
       const nearEnough = documentTextLength(body) >= Math.floor(section.minChars * 0.7);
       issues.push({ level: criticalDepth && !nearEnough ? 'error' : 'warning', severity: criticalDepth && !nearEnough ? 'blocker' : 'warning', category: 'structure', owner: 'system', message: `${section.title} 正文不足，未达到任务最小深度`, suggestion: criticalDepth ? '关键小节必须基于项目事实和对应关系重写补足；不得仅保留概述性文字。' : '应基于该小节事实卡和证据重新生成，不得使用标题占位。' });
-    } else if (!body && chapterLength < Math.max(section.minChars, 1200) && !sectionHasSemanticCoverage(content, section.title)) {
-      issues.push({ level: 'warning', severity: 'warning', category: 'structure', owner: 'system', message: `${section.title} 未匹配到独立小节标题`, suggestion: '正文已成文但小节标题与规划标题不完全一致，建议后续按规划标题进一步规范结构。' });
+    } else if (!body) {
+      const criticalDepth = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试|见证取样/u.test(section.title);
+      // 规划小节完全无正文时必须报告：之前章节正文足够长时空小节会被静默跳过，导致导出后出现只有标题的空小节；
+      // 不依赖 sectionHasSemanticCoverage 兜底，因为相邻小节标题（如“主要分部分项工程施工流程”）会命中关键词造成误判。
+      issues.push({ level: criticalDepth ? 'error' : 'warning', severity: criticalDepth ? 'blocker' : 'warning', category: 'structure', owner: 'system', message: criticalDepth ? `${section.title} 正文不足，未达到任务最小深度` : `${section.title} 未匹配到独立小节标题`, suggestion: criticalDepth ? '关键小节缺失正文，必须基于该小节事实卡和证据生成正式正文，不得以标题占位。' : '正文已成文但小节标题与规划标题不完全一致，建议后续按规划标题进一步规范结构。' });
     }
     if (!section.ready) issues.push(...section.issues.map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const })));
+    // 分项工程施工方案必须落位工艺参数；缺失时触发 Repairer 定向补写（设备型号规格参数同样计入）
+    if (/主要分部分项工程施工方案|主要施工方法/u.test(section.title)) {
+      const methodBody = extractSectionBody(content, section.title);
+      const paramCount = new Set([...(methodBody.match(PROCESS_PARAMETER_RE) || []), ...(methodBody.match(DEVICE_SPEC_RE) || [])]).size;
+      if (documentTextLength(methodBody) >= 800 && paramCount < 4) issues.push({ level: 'warning', severity: 'warning', category: 'professional_chain', owner: 'system', message: `${section.title} 工艺参数落位不足：当前 ${paramCount} 个，要求不少于 4 个`, suggestion: '必须补充 mm/MPa/间距/偏差/坡度/试验压力等工艺参数（来自绑定资料或行业规范值）或设备型号规格参数。' });
+    }
   }
   const scopeRoots = input.context.materialScope.selectedRoots;
   for (const root of input.context.materialScope.rejectedRoots) {
@@ -317,7 +322,10 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
   if (actionableFacts.length >= 3 && supportedFacts === 0 && documentTextLength(content) < 1200) issues.push({ level: 'warning', severity: 'warning', category: 'evidence_coverage', owner: 'system', message: `${input.draft.title} 未明显落位章节事实卡`, suggestion: '建议将章节事实卡中的关键工程事实写入对应小节，但不因引用型或低可执行事实阻断。' });
   const blockingIssues = issues.filter(issue => issue.level === 'error' || issue.severity === 'blocker');
   const depthIssues = issues.filter(issue => /正文不足|未落位章节事实卡/u.test(issue.message));
-  return { issues, supportedFacts, unsupportedSignals: issues.map(issue => issue.message), repairable: issues.length > 0 && (issues.length <= 6 || depthIssues.length === issues.length || blockingIssues.length === 0) };
+  // 只要存在可定向修复的阻断问题（Writer 未完成/正文不足），就必须触发 Repairer：
+  // 否则一个非深度类 blocker（如禁止话术）会让整个章节的 Repairer 停摆，连累可修复的正文不足小节。
+  const hasFixableBlocking = blockingIssues.some(issue => /Writer 未完成|正文不足，未达到任务最小深度/u.test(issue.message));
+  return { issues, supportedFacts, unsupportedSignals: issues.map(issue => issue.message), repairable: issues.length > 0 && (issues.length <= 6 || depthIssues.length === issues.length || blockingIssues.length === 0 || hasFixableBlocking) };
 }
 
 export function buildTargetedRepairInstruction(input: { task: AgentChapterTask; review: AgentReviewResult }) {

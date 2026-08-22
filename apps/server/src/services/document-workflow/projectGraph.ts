@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { DocumentEvidence, DocumentExecutionStage, ProjectGraph } from './types';
+import type { DocumentEvidence, DocumentExecutionStage, DocumentGenerationDiagnostics, ProjectGraph } from './types';
 import { callDocumentLlmJson } from './llmClient';
 import { runWithAdaptiveConcurrency, stableHash, throwIfAborted } from './utils';
 import { displayStage } from './progress';
@@ -268,6 +268,7 @@ export async function buildProjectGraph(input: {
   projectRoot?: string;
   requirement?: string;
   templateId?: string;
+  diagnostics?: DocumentGenerationDiagnostics;
 }): Promise<{ graph?: ProjectGraph; stage: DocumentExecutionStage }> {
   throwIfAborted(input.signal);
   if (input.evidence.length === 0) {
@@ -287,7 +288,7 @@ export async function buildProjectGraph(input: {
     const raw = await callDocumentLlmJson<ProjectGraph>(
       `${SYSTEM_PROMPT}\n\n当前只抽取分域：${DOMAIN_PROMPTS[domain].title}。其他字段可以返回空数组，但本分域相关字段必须尽最大能力从证据中抽取。${extraReasons.length ? `\n本次定向修复原因：${extraReasons.join('；')}` : ''}`,
       buildDomainPrompt(evidence, domain, hints),
-      { temperature: extraReasons.length ? 0 : 0.1, signal: input.signal },
+      { temperature: extraReasons.length ? 0 : 0.1, signal: input.signal, diagnostics: input.diagnostics },
     );
     throwIfAborted(input.signal);
     return normalize(raw, evidence);
@@ -323,6 +324,11 @@ export async function buildProjectGraph(input: {
       return { graph: first, stage: stage(first) };
     }
 
+    const retried = await buildByDomains([...validation.reasons, ...failures]);
+    if (retried && graphItemCount(retried) > 0) {
+      writeCachedGraph(input.projectRoot, cacheKey, retried);
+      return { graph: retried, stage: stage(retried) };
+    }
     return { stage: failedStage([...validation.reasons, ...failures]) };
   } catch (err) {
     if (input.signal?.aborted) throw err;

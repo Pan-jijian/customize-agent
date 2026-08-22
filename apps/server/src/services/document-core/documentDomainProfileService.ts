@@ -123,7 +123,7 @@ const DEFAULT_FACT_FIELDS: FactFieldProfile[] = [
 ];
 
 const COMMON_FORBIDDEN_PATTERNS = [/投标报价|报价明细|单价|合价|综合单价|预留金|暂列金额|税率|增值税|利润|结算/u];
-const COMMON_DIAGNOSTIC_PATTERNS = [/OCR|识别错误|乱码|无法确认|疑似|不确定|绑定片段|兜底|知识库|提示词|后台|文件路径|PDF|DWG|Excel/u];
+const COMMON_DIAGNOSTIC_PATTERNS = [/OCR|识别错误|乱码|无法确认|疑似|不确定|绑定片段|兜底|知识库|提示词|后台|文件路径|PDF|DWG|Excel/u, /^#+\s*/u, /^见(?:招标|投标人|前附|补疑|图纸|清单|文件|资料|公告|须知)/u];
 const COMMON_LOW_CONFIDENCE_PATTERNS = [/无法确认|疑似|不确定|需复核|文字模糊|语义断裂|识别错误|乱码/u];
 
 export const DEFAULT_DOCUMENT_DOMAIN_PROFILE: DocumentDomainProfile = {

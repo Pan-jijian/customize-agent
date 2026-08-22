@@ -29,12 +29,17 @@ function appears(markdown: string, value: string) {
   return numericParts.some(part => normalize(part).length >= 2 && normalizedMarkdown.includes(normalize(part)));
 }
 
-function isActionableTraceFact(trace: DocumentFactTrace) {
+export function isActionableTraceFact(trace: DocumentFactTrace) {
   const value = String(trace.value || '').trim();
   const labelValue = `${trace.label}${value}`;
   if (!/项目|工程|编号|地点|规模|范围|工期|质量|安全|资源|材料|设备|验收|\d/u.test(labelValue)) return false;
   if (/^(?:见|详见|按|执行|参见|依据).{0,16}(?:前附表|招标公告|招标文件|合同|协议书|通用条款|专用条款|图纸|清单|附件|资料)$/u.test(value)) return false;
   if (/^(?:合同协议书|通用条款|专用条款|招标文件|招标公告|投标人须知前附表|附件|资料)$/u.test(value.replace(/[（）()\d一二三四五六七八九十、.．\s]/gu, ''))) return false;
+  // 值本身是标题行、编号引用或指向性短语的事实不具备可执行落位意义，不进入修复清单
+  if (/^#+\s*/u.test(value)) return false;
+  // “技术参数/精确参数”是正文可写参数池（清单编码、孤立尺寸等），用于提示词注入而非逐条落位义务，不参与落位评分
+  if (/^(?:技术参数|精确参数)$/u.test(trace.label)) return false;
+  if (/^[（(]\s*\d+[)）]/u.test(value) && /具备|证书|考核|资格|人员/u.test(value)) return false;
   if (value.length < 4 && !/\d/u.test(value)) return false;
   return true;
 }

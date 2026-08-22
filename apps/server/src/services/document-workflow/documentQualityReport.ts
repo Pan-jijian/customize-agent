@@ -1,8 +1,14 @@
 import { documentTextLength } from './budget';
+import { isActionableTraceFact } from './documentFactTrace';
 import type { ChapterCoverageReport, DocumentDraftChapter, DocumentFactTrace, DocumentKnowledgeCoverageReport, DocumentQualityReport, ValidationIssue } from './types';
 
 function scoreFromIssues(issues: ValidationIssue[]) {
-  const penalty = issues.reduce((sum, issue) => sum + (issue.level === 'error' ? 10 : issue.level === 'warning' ? 4 : 1), 0);
+  const errorCount = issues.filter(issue => issue.level === 'error').length;
+  const warningCount = issues.filter(issue => issue.level === 'warning').length;
+  const infoCount = issues.filter(issue => issue.level === 'info').length;
+  // warning/info 扣分设封顶：大量低危优化提示（事实落位建议、覆盖率提示）不应把一致性维度线性压到 0 分；
+  // 阻断项（error）保持高权重，确保真正的问题显著影响评分。
+  const penalty = errorCount * 12 + Math.min(warningCount * 2, 30) + Math.min(infoCount, 10);
   return Math.max(0, 100 - penalty);
 }
 
@@ -21,8 +27,10 @@ export function buildDocumentQualityReport(input: {
 }): DocumentQualityReport {
   const issueScore = scoreFromIssues(input.issues);
   const chapterScore = average(input.chapterCoverage.map(item => item.score));
-  const usedFacts = input.factTraces.filter(trace => trace.status === 'used').length;
-  const factScore = input.factTraces.length ? Math.round((usedFacts / input.factTraces.length) * 100) : 100;
+  // 事实落位评分只统计具备落位意义的事实：标题行、指向性短语（“见招标公告”）等抽取噪音不参与评分
+  const scoredTraces = input.factTraces.filter(isActionableTraceFact);
+  const usedFacts = scoredTraces.filter(trace => trace.status === 'used').length;
+  const factScore = scoredTraces.length ? Math.round((usedFacts / scoredTraces.length) * 100) : 100;
   const structureScore = input.chapters.length > 0 && input.chapters.every(chapter => input.markdown.includes(chapter.title) && documentTextLength(chapter.content) >= 600) ? 95 : 78;
   const scores = {
     factuality: Math.min(100, Math.round((factScore * 0.65) + (issueScore * 0.35))),

@@ -18,6 +18,8 @@ import { buildDocumentBudget, documentTextLength } from './budget';
 import { sectionContentIntegrityIssues } from './qualityValidation';
 import { buildDocumentBlueprintContext } from './documentBlueprint';
 import { enrichConstructionOrgOutline } from './constructionOrgCatalog';
+import { validateBidStructureBeforeGeneration } from './constructionBidStructure';
+import { buildWritingTaskBrief, writingTaskBriefChapterPrompt } from './documentWritingTaskBrief';
 import { buildConstructionOrgTablePlans } from './constructionOrgTablePlan';
 import { buildRetrievalCoverageReport, retrieveDeepChapterEvidence, retrievalCoverageRisk } from './documentEvidenceRetrieval';
 import { buildChapterFactNeeds, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, factNeedsCoveragePrompt, factsForChapterNeeds, resolveChapterFactNeeds } from './factsModel';
@@ -26,7 +28,7 @@ import { displayStage, elapsedMessage, upsertProgressStage } from './progress';
 import { getActiveModelWithProvider } from './llmClient';
 import { createGenerationDiagnostics, evidenceInScope, measureGenerationStep, promptTextsForResolvedPrompts, repairChapterByQuality, selectDocumentGenerationStrategy } from './rolePipeline';
 import { buildProjectMaterialProfile, buildProjectUnderstanding, expandProjectMaterialBindings, materialKindMaps, materialRoleId, retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from './projectMaterialProfile';
-import { buildChapterFactCoverageContext, buildEvidenceOnlyChapterContent, buildLlmChapterContent, buildLlmSectionContent, buildSectionGroupChapterContent, buildSectionParallelChapterContent, chapterSectionFactUsageIssues, outputTokensForChapter } from './chapterGeneration';
+import { buildChapterFactCoverageContext, buildEvidenceOnlyChapterContent, buildLlmChapterContent, buildLlmSectionContent, buildSectionGroupChapterContent, buildSectionParallelChapterContent, chapterSectionFactUsageIssues, outputTokensForChapter, reviewGlobalConsistency } from './chapterGeneration';
 import { buildRuntimePromptRules, extractPromptStructuralRules, normalizePlannedSections, planChapterSectionsWithLlm, runtimePromptRulesPrompt } from './promptRuleExtraction';
 import { retrieveWebEvidence, webAccessPrompt } from './webResearchService';
 import { finalizeGeneration } from './documentPipeline';
@@ -265,7 +267,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
       progress: { current: 2, total: 3, label: '项目图谱' },
     }, { subtitle: '项目资料图谱分析', order: progressStages.length }));
     emitProgress();
-    const projectGraphResult = await withProgressHeartbeat(() => buildProjectGraph({ evidence: allEvidence, signal: input.signal, projectRoot, requirement: input.requirement, templateId: template.id }), progressStages);
+    const projectGraphResult = await withProgressHeartbeat(() => buildProjectGraph({ evidence: allEvidence, signal: input.signal, projectRoot, requirement: input.requirement, templateId: template.id, diagnostics: generationDiagnostics }), progressStages);
     if (!projectGraphResult.graph) throw new Error(`完整项目图谱构建失败：${projectGraphResult.stage.message || projectGraphResult.stage.status}`);
     projectGraph = projectGraphResult.graph;
     upsertProgressStage(progressStages, projectGraphResult.stage);
@@ -278,7 +280,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
   // 构建章节→图谱节点映射：将图谱中的 works/methods/resources 按章节标题匹配
   const rawEffectiveChapters = effectiveTemplateChapters(template, documentSpec, { preserveExplicitOutline: hasExplicitOutline });
   const enrichedOutlineChapters = enrichConstructionOrgOutline({ template, chapters: rawEffectiveChapters, requirement: input.requirement });
-  const baseEffectiveChapters = buildConstructionOrgTablePlans({ chapters: enrichedOutlineChapters, projectGraph, canonicalFacts });
+  const bidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: enrichedOutlineChapters, requirement: input.requirement });
+  const baseEffectiveChapters = buildConstructionOrgTablePlans({ chapters: bidStructureAudit.enrichedChapters, projectGraph, canonicalFacts });
   template = { ...template, chapters: baseEffectiveChapters };
   const chapterGraphMap = new Map<string, { graphFiles: Set<string>; graphBoqItems: Array<{ name: string; quantity: string; unit: string; sourceFiles: string[] }>; graphWorks: string[]; graphMethods: string[]; gaps: string[] }>();
   if (projectGraph) {
@@ -349,8 +352,13 @@ export async function generateDocumentDraft(input: { templateId: string; require
     return { ...chapter, sections };
   }, { kind: 'llmRepair', targetWords: provisionalBudget.targetChars || 4000, concurrency: 2 });
   const plannedWithConstructionOrgRequiredSections = enrichConstructionOrgOutline({ template, chapters: plannedChapters, requirement: input.requirement });
-  effectiveChapters = buildConstructionOrgTablePlans({ chapters: plannedWithConstructionOrgRequiredSections, projectGraph, canonicalFacts });
+  const finalBidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: plannedWithConstructionOrgRequiredSections, requirement: input.requirement });
+  effectiveChapters = buildConstructionOrgTablePlans({ chapters: finalBidStructureAudit.enrichedChapters, projectGraph, canonicalFacts });
+  if (finalBidStructureAudit.issues.length > 0 || bidStructureAudit.issues.length > 0) {
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'bid-structure-audit', status: finalBidStructureAudit.issues.some(issue => issue.severity === 'blocker') ? 'failed' : 'success', message: `评标结构符合性校验：${finalBidStructureAudit.diagnostics.length} 个结构组，${finalBidStructureAudit.diagnostics.filter(item => item.status === 'satisfied').length} 个已满足，${finalBidStructureAudit.diagnostics.filter(item => item.status === 'missing' && item.level === 'required').length} 个必查缺失（已自动补挂），${finalBidStructureAudit.diagnostics.filter(item => item.status === 'fragmented').length} 个分散`, details: [...finalBidStructureAudit.diagnostics.map(item => `${item.status === 'satisfied' ? '满足' : item.status === 'fragmented' ? '分散' : '补挂'}：${item.groupTitle}${item.status === 'missing' ? `（补挂小节：${item.missingSections.join('、')}）` : ''}`), ...finalBidStructureAudit.issues.map(issue => `提示：${issue.message}`).slice(0, 8)] }, { subtitle: '评标结构校验' }));
+  }
   template = { ...template, chapters: effectiveChapters };
+  const writingTaskBrief = buildWritingTaskBrief({ chapters: effectiveChapters, factsModel: preliminaryFactsModel, projectGraph: projectGraph || undefined, requirement: input.requirement, templateName: template.name });
   const documentBlueprintContext = buildDocumentBlueprintContext({ template, chapters: effectiveChapters, factsModel: preliminaryFactsModel, requirement: input.requirement });
   projectContext = [baseProjectContext, documentBlueprintContext].filter(Boolean).join('\n\n');
   if (!scopedIntelligence) {
@@ -478,12 +486,18 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const searchResults: KbSearchResult[][] = [];
     // 优化：KB搜索并行化 — 多组查询并发执行，减少串行I/O等待
     const searchQueries = queries.slice(0, maxSearchQueries);
-    if (scopedFilePaths.length > 0 && searchQueries.length > 0) {
+    // 模板必需事实定向查询并入首轮并行检索：提前命中缺失事实证据，降低后续深召回/补充检索触发概率，减少串行轮次
+    const requiredFactSearchQueries = (chapter.requiredFacts || [])
+      .filter((fact: string) => Boolean(fact) && !searchQueries.some(query => query.includes(fact) || fact.includes(query)))
+      .slice(0, 4)
+      .map((fact: string) => `${chapter.title} ${fact}`);
+    const mergedSearchQueries = [...searchQueries, ...requiredFactSearchQueries];
+    if (scopedFilePaths.length > 0 && mergedSearchQueries.length > 0) {
       throwIfAborted(input.signal);
-      const parallelResults = await runWithAdaptiveConcurrency(searchQueries, async query => searchWithCache(query, scopedFilePaths, Math.min(requestedEvidencePerChapter, 12), chapter.title), { kind: 'search' });
+      const parallelResults = await runWithAdaptiveConcurrency(mergedSearchQueries, async query => searchWithCache(query, scopedFilePaths, Math.min(requestedEvidencePerChapter, 12), chapter.title), { kind: 'search' });
       searchResults.push(...parallelResults);
     }
-    generationDiagnostics.evidence.searchQueries += Math.min(queries.length, maxSearchQueries);
+    generationDiagnostics.evidence.searchQueries += mergedSearchQueries.length;
     generationDiagnostics.evidence.searchMs += Date.now() - searchStartedAt;
     for (const results of searchResults) {
       rawEvidence.push(...results
@@ -578,7 +592,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
           graphMapping.gaps.length ? `图谱识别本章资料缺口：${graphMapping.gaps.join('；')}` : '',
         ].filter(Boolean).join('\n')
       : '';
-    const roleContext = [graphRoleHint, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : ''].filter(Boolean).join('\n');
+    const roleContext = [writingTaskBriefChapterPrompt(writingTaskBrief, chapter.id), graphRoleHint, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : ''].filter(Boolean).join('\n');
     const chapterPromptExecution = resolveChapterPromptExecution(promptPlan, chapter);
     if (promptPlan.writerPrompts.length > 0 && !chapterPromptExecution.primaryWriter) throw new Error(`${displayChapterTitle(chapter.title)} 写作主控提示词未进入章节生成阶段`);
     const chapterPromptTexts = [chapterPromptExecution.promptTexts, generationControlPrompt].filter(Boolean).join('\n\n');
@@ -656,6 +670,20 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const sectionFirstAutoEligible = targetWords >= 6000 && sectionCount >= 4 && sectionCount <= maxSectionFirstSections && !compositeChapterTitle;
     const useSectionGroup = !sectionFirstDisabled && sectionCount >= 2 && (sectionCount > maxSectionFirstSections || compositeChapterTitle || (documentBudget.longformStrict && sectionCount >= 6));
     const useSectionFirst = !sectionFirstDisabled && !useSectionGroup && sectionCount >= 2 && sectionCount <= maxSectionFirstSections && (sectionFirstForced || sectionFirstAutoEligible || documentBudget.longformStrict);
+    // 小节级 checkpoint：小节完成时把“进行中章节”（含已完成小节正文）写入 checkpoint 快照，
+    // 章节生成中途失败/中止时不丢已生成小节；节流 3 秒避免高频写盘
+    let lastSectionCheckpointAt = 0;
+    const emitSectionCheckpoint = (partialSections: Array<string | undefined>) => {
+      const nowSectionCheckpoint = Date.now();
+      if (nowSectionCheckpoint - lastSectionCheckpointAt < 3000) return;
+      lastSectionCheckpointAt = nowSectionCheckpoint;
+      const partialContent = partialSections.filter(Boolean).join('\n\n');
+      if (!partialContent.trim()) return;
+      emitProgress([...chapterDrafts, { id: chapter.id, title: chapter.title, content: `## ${chapter.title}\n\n${partialContent}`, evidence, missingFacts, sections: chapter.sections || [], tablePlans: chapter.tablePlans || [], inProgress: true }]);
+    };
+    const onSectionProgressForCheckpoint = (event: { phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => {
+      if (event.phase === 'complete' && event.partialSections) emitSectionCheckpoint(event.partialSections);
+    };
     let content: string;
     if (resumedContent) {
       content = finalizeChapterContentQuality(resumedContent, chapter);
@@ -685,14 +713,14 @@ export async function generateDocumentDraft(input: { templateId: string; require
       emitProgress();
       let llmContent = useSectionGroup
         ? await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-section-group-draft:${chapter.id}`, () =>
-          buildSectionGroupChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, sectionEvidenceProvider: sectionTitle => retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }), diagnostics: generationDiagnostics, signal: input.signal })
+          buildSectionGroupChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, sectionEvidenceProvider: sectionTitle => retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }), onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal })
         ))
         : useSectionFirst
           ? await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-section-draft:${chapter.id}`, () =>
-            buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts }), allowPartialResult: false, sectionEvidenceProvider: sectionTitle => retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }), diagnostics: generationDiagnostics, signal: input.signal })
+            buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts }), allowPartialResult: false, compactProjectContext: true, sectionEvidenceProvider: sectionTitle => retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }), onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal })
           ))
           : await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-draft:${chapter.id}`, () =>
-            buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords, targetWords, maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal })
+            buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords, targetWords, maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics })
           ));
       if (!llmContent && useSectionGroup) {
         progressStages[chapterProgressIndex] = displayStage({
@@ -724,7 +752,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
         emitProgress(chapterDrafts);
         llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-compact-fallback:${chapter.id}`, () =>
-          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords: Math.floor(minWords * 0.65), targetWords: Math.floor(effectiveTargetWords * 0.75), maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal }).catch(error => {
+          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords: Math.floor(minWords * 0.65), targetWords: Math.floor(effectiveTargetWords * 0.75), maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics }).catch(error => {
             generationDiagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
             return undefined;
           })
@@ -787,12 +815,13 @@ export async function generateDocumentDraft(input: { templateId: string; require
     let agentReview = reviewChapterDraft({ task: chapterTaskResult.task, draft: draftChapter, context: agentWorkflow });
     agentWorkflow.reviewResults = { ...(agentWorkflow.reviewResults || {}), [chapter.id]: agentReview };
     const blockingReviewIssues = agentReview.issues.filter(issue => issue.severity === 'blocker' || issue.level === 'error');
-    const initialReviewNeedsRepair = blockingReviewIssues.length > 0 && (agentReview.repairable || blockingReviewIssues.some(issue => /Writer 未完成/u.test(issue.message)));
+    const hasWriterMissingIssues = blockingReviewIssues.some(issue => /Writer 未完成/u.test(issue.message));
+    const hasDepthBlockers = blockingReviewIssues.some(issue => /正文不足，未达到任务最小深度/u.test(issue.message));
+    const initialReviewNeedsRepair = blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers);
     agentWorkflow.nodes.push({ id: `chapter-reviewer-${chapter.id}`, type: 'chapter_reviewer', status: blockingReviewIssues.length ? (initialReviewNeedsRepair ? 'running' : 'failed') : 'completed', startedAt: Date.now(), completedAt: Date.now(), outputSummary: agentReview.issues.length ? `${agentReview.issues.length} 个 Reviewer 提示` : 'Reviewer 通过', metrics: { supportedFacts: agentReview.supportedFacts }, issues: agentReview.issues });
     upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-reviewer-${chapter.id}`, status: blockingReviewIssues.length ? (initialReviewNeedsRepair ? 'running' : 'failed') : 'success', message: blockingReviewIssues.length ? `${displayChapterTitle(chapter.title)} Reviewer 发现 ${blockingReviewIssues.length} 个阻断问题，等待 Repairer 修复` : `${displayChapterTitle(chapter.title)} Reviewer 通过${agentReview.issues.length ? `（${agentReview.issues.length} 个优化提示）` : ''}`, details: agentReview.issues.map(issue => issue.message) }, { subtitle: 'Agent Reviewer', order: progressStages.length }));
     emitProgress(chapterDrafts);
-    const hasWriterMissingIssues = blockingReviewIssues.some(issue => /Writer 未完成/u.test(issue.message));
-    if (blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues)) {
+    if (blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers)) {
       const repairReview = { ...agentReview, issues: blockingReviewIssues };
       const repairInstruction = agentReview.repairable
         ? buildTargetedRepairInstruction({ task: chapterTaskResult.task, review: repairReview })
@@ -862,7 +891,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         };
         const sectionEvidence = filterEvidenceByProjectScope(await retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }).catch(() => []), projectMaterialScope);
         assertEvidenceInProjectScope(sectionEvidence.length ? sectionEvidence : evidence, projectMaterialScope, `repair:${chapter.id}:${sectionTitle}`);
-        const repairTargetWords = Math.max(taskSection?.minChars || 0, /项目主要施工内容|主要分部分项工程施工方案|主要施工方法/u.test(sectionTitle) ? 2200 : /项目特点.*重点.*难点|重点.*难点.*分析/u.test(sectionTitle) ? 1800 : /原材料进场复试|见证取样|危大工程专项施工方案审批流程/u.test(sectionTitle) ? 1200 : 760);
+        const repairTargetWords = Math.max(taskSection?.minChars || 0, /项目主要施工内容/u.test(sectionTitle) ? 2200 : /主要分部分项工程施工方案|主要施工方法/u.test(sectionTitle) ? 1800 : /项目特点.*重点.*难点|重点.*难点.*分析/u.test(sectionTitle) ? 1500 : /原材料进场复试|见证取样|危大工程专项施工方案审批流程/u.test(sectionTitle) ? 900 : 760);
         const isDepthRepair = /正文不足，未达到任务最小深度/u.test(issue.message);
         generationDiagnostics.llm.lastError = undefined;
         let repairedSection = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `agent-repairer-section:${chapter.id}:${sectionTitle}`, () => buildLlmSectionContent({
@@ -962,6 +991,20 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const chapterDraftsFinal = chapterDraftsByOrder.filter((item): item is DocumentDraftChapter => Boolean(item));
   chapterGenerationStages.push(...chapterGenerationStagesByOrder.filter((item): item is DocumentExecutionStage => Boolean(item)));
 
+  // 全局一致性审查：env 开关默认关闭（额外 LLM 成本）；开启后在最终导出前做一次跨章一致性审查，结果注入导出校验
+  let globalConsistencyIssues: string[] = [];
+  if (process.env.DOCUMENT_GLOBAL_CONSISTENCY_REVIEW === '1') {
+    try {
+      const globalReview = await withProgressHeartbeat(() => reviewGlobalConsistency({ template, chapters: chapterDraftsFinal, chapterReviews: [], promptTexts: reviewPromptTexts, requirement: input.requirement, projectContext, diagnostics: generationDiagnostics, signal: input.signal }));
+      globalConsistencyIssues = globalReview.issues;
+      upsertProgressStage(progressStages, globalReview.stage);
+      emitProgress(chapterDraftsFinal);
+    } catch (err) {
+      if (input.signal?.aborted) throw err;
+      console.error('[gen] global consistency review failed:', err);
+    }
+  }
+
   return finalizeGeneration({
     chapterDrafts: chapterDraftsFinal, chapterDraftsByOrder, chapterGenerationStagesByOrder,
     chapterGenerationStages, effectiveChapters, template, allEvidence,
@@ -976,6 +1019,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
     factExtractionPromptTexts,
     hasExplicitOutline, missingItems, retrievalCoverageReports,
     failedChapterMessages, webResearchReport, indexHealth, promptPlan,
+    globalConsistencyIssues,
+    writingTaskBrief,
     agentWorkflow,
     emitProgress, withProgressHeartbeat,
   });

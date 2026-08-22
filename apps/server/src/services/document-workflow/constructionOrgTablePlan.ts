@@ -212,7 +212,7 @@ export function tablePlansPrompt(chapter: DocumentTemplateChapter) {
       `   - 字段来源：${plan.fields.map(field => `${field.name}←${field.sourceDomain}（${field.sourceHint}）`).join('；')}`,
       plan.fillability?.missingProjectFactFields.length ? `   - 字段约束：${plan.fillability.missingProjectFactFields.join('、')} 必须继续从项目图谱、可信事实和绑定资料中取值；不得写固定占位话术。` : `   - 可填性：已确认字段 ${plan.fillability?.confirmedFieldCount ?? plan.fields.length}/${plan.fields.length}。`,
       plan.rowSeeds?.length ? `   - 行级填充计划：${plan.rowSeeds.slice(0, 8).map(seed => `${seed.rowLabel}（${seed.source}${seed.missingFields.length ? `，字段待从资料补齐：${seed.missingFields.join('/')}` : ''}）`).join('；')}` : '',
-      `   - 约束：${plan.fields.some(field => field.fallbackPolicy === 'projectFactOnly') ? 'projectFactOnly 字段必须来自项目资料、项目图谱或可信事实；不得编造，不得写占位话术。' : '按项目资料、图谱事实和本章场景填写，不得输出固定套话。'}`,
+      `   - 约束：${plan.fields.some(field => field.fallbackPolicy === 'projectFactOnly') ? 'projectFactOnly 字段必须来自项目资料、项目图谱或可信事实；不得编造，不得写占位话术。' : '可按标准施工组织流程填写，但必须贴合本章和项目场景。'}`,
     ].filter(Boolean).join('\n')),
   ].join('\n');
 }
