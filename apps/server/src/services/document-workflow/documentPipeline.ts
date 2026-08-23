@@ -240,7 +240,8 @@ export async function finalizeGeneration(p: {
   assertEvidenceInProjectScope(generatedChapterEvidence, projectMaterialScope, 'finalize:chapter-evidence');
   if (generatedChapterEvidence.length > 0) {
     allEvidence.push(...generatedChapterEvidence);
-    const compactGeneratedEvidence = selectEvidenceByBudget(allEvidence, { maxChars: Math.max(50000, effectiveChapters.length * 9000), preservePinned: true });
+    // P1-7 证据内存节流：章节证据收集后统一压缩，maxChars 90k 封顶（20+ 章文档不再线性膨胀），pinned 证据仍优先保留
+    const compactGeneratedEvidence = selectEvidenceByBudget(allEvidence, { maxChars: Math.min(90000, Math.max(50000, effectiveChapters.length * 9000)), preservePinned: true });
     allEvidence.splice(0, allEvidence.length, ...compactGeneratedEvidence);
   }
   const scopedAllEvidence = filterEvidenceByProjectScope(allEvidence, projectMaterialScope);
@@ -258,7 +259,7 @@ export async function finalizeGeneration(p: {
     console.error('[gen] fileUnderstanding failed:', err);
   }
   upsertProgressStage(progressStages, fileUnderstanding.stage);
-  const compactPostFileEvidence = selectEvidenceByBudget(allEvidence, { maxItems: Math.max(48, effectiveChapters.length * 10), maxChars: Math.max(52000, effectiveChapters.length * 9000), preservePinned: true });
+  const compactPostFileEvidence = selectEvidenceByBudget(allEvidence, { maxItems: Math.max(48, effectiveChapters.length * 10), maxChars: Math.min(90000, Math.max(52000, effectiveChapters.length * 9000)), preservePinned: true });
   allEvidence.splice(0, allEvidence.length, ...filterEvidenceByProjectScope(compactPostFileEvidence, projectMaterialScope));
   assertEvidenceInProjectScope(allEvidence, projectMaterialScope, 'finalize:post-file-understanding');
 

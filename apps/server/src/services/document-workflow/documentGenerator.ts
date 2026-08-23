@@ -416,6 +416,15 @@ export async function generateDocumentDraft(input: { templateId: string; require
   // 跨章引用安全：Repairer 仅修复本章小节，跨章审查与最终门禁在所有章节完成后按章节序执行
   const reviewSemaphore = new Semaphore(reviewConcurrency);
   const reviewTaskPool: Promise<void>[] = [];
+  // P1-5 基础事实查询跨章缓存：PROJECT_BASIC_FACT_QUERIES 不含章节标题，概况/质量/进度类章节会并入每章查询集重复全链路检索；
+  // 在章节循环外预执行一次（默认权重），章节内直接取用结果
+  const basicFactScopePaths = [...availableEvidenceScopePaths].filter(Boolean).sort();
+  const basicFactSearchStartedAt = Date.now();
+  const basicFactSearchResults = basicFactScopePaths.length > 0
+    ? (await runWithAdaptiveConcurrency(PROJECT_BASIC_FACT_QUERIES, async query => searchWithCache(query, basicFactScopePaths, Math.min(requestedEvidencePerChapter, 12), ''), { kind: 'search' })).flat()
+    : [];
+  generationDiagnostics.evidence.searchQueries += PROJECT_BASIC_FACT_QUERIES.length;
+  generationDiagnostics.evidence.searchMs += Date.now() - basicFactSearchStartedAt;
   for (let chapterOffset = 0; chapterOffset < effectiveChapters.length; chapterOffset += chapterConcurrency) {
     const chapterBatch = effectiveChapters.slice(chapterOffset, chapterOffset + chapterConcurrency);
     const batchTasks = await Promise.all(chapterBatch.map(async (chapter, batchIndex): Promise<(() => Promise<void>) | undefined> => {
@@ -474,10 +483,11 @@ export async function generateDocumentDraft(input: { templateId: string; require
     }
     // ===== 图谱驱动证据注入结束 =====
 
-    const chapterBasicQueries = /概况|工程|项目|总体|部署|进度|工期|质量/u.test(chapter.title) ? PROJECT_BASIC_FACT_QUERIES : [];
-    const queries = compactChapterQueries(chapter, [...baseQueries, ...planQueries], chapterBasicQueries);
+    // P1-5：基础事实查询已跨章预执行缓存（basicFactSearchResults），不再并入本章查询集重复检索
+    const usesCachedBasicFacts = /概况|工程|项目|总体|部署|进度|工期|质量/u.test(chapter.title);
+    const queries = compactChapterQueries(chapter, [...baseQueries, ...planQueries], []);
     // P4：前序章节缺事实信号累积的扩展深度叠加到本章查询上限
-    const maxSearchQueries = qualityFirstSearchQueryLimit(chapter, chapterBasicQueries) + searchExpansionBoost;
+    const maxSearchQueries = qualityFirstSearchQueryLimit(chapter, []) + searchExpansionBoost;
     const searchStartedAt = Date.now();
     progressStages[chapterProgressIndex] = displayStage({
       type: 'chapter_generation',
@@ -523,6 +533,21 @@ export async function generateDocumentDraft(input: { templateId: string; require
           source: item.source,
         })));
     }
+    // P1-5：概况/质量/进度类章节直接取用跨章预执行的基础事实检索结果（resumed 章节跳过，与原检索语义一致）
+    if (usesCachedBasicFacts && scopedFilePaths.length > 0 && basicFactSearchResults.length > 0) {
+      rawEvidence.push(...basicFactSearchResults
+        .filter(item => evidenceInScope(projectRoot, item.filePath, evidenceScopePaths))
+        .map(item => ({
+          chapterId: chapter.id,
+          filePath: item.filePath,
+          score: item.score,
+          content: item.content,
+          roleId: fileRoleByPath.get(item.filePath),
+          processingType: fileProcessingByPath.get(item.filePath),
+          sectionTitle: item.sectionTitle,
+          source: 'basic-fact-cache',
+        })));
+    }
     const plannedMaterialEvidence = resumedContent ? [] : await retrievePlannedMaterialEvidence({ manager, projectRoot, chapter, plan, profile: projectMaterialProfile, scopedFilePaths, limitPerQuery: Math.min(requestedEvidencePerChapter, 10), signal: input.signal }).catch(() => []);
     rawEvidence.push(...plannedMaterialEvidence);
     const pinnedEvidencePaths = new Set<string>((chapter.pinnedEvidenceFilePaths || []).filter(Boolean));
@@ -561,38 +586,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
     assertEvidenceInProjectScope(evidence, projectMaterialScope, `chapter:${chapter.id}:initial`);
     let missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
     let deepEvidenceCount = 0;
-    // 优化：图谱证据充足且多样化时才跳过深召回（文件多样性≥6 + 无缺失事实）
-    const readinessPlan = buildChapterReadinessPlan({ chapter, evidence });
-    const evidenceFileCount = new Set(evidence.map(item => item.filePath)).size;
-    const graphEvidenceSufficient = Boolean(graphMapping)
-      && (graphMapping?.graphFiles.size || 0) >= 8
-      && evidenceFileCount >= 6
-      && missingFacts.length === 0
-      && readinessPlan.riskLevel === 'low';
-    const needsDeepRetrieval = scopedFilePaths.length <= 80 && (readinessPlan.suggestedStrategy === 'evidence_first' || rolePoolRisk.highRisk || missingFacts.length > 0 || (evidence.length < 8 && readinessPlan.riskLevel !== 'low'));
-    if (!graphEvidenceSufficient && needsDeepRetrieval && scopedFilePaths.length > 0) {
-      const deepEvidence = await retrieveDeepChapterEvidence({ manager, projectRoot, chapter, scopedFilePaths, fileRoleByPath, fileProcessingByPath, requiredNeeds: missingFacts, highRisk: rolePoolRisk.highRisk, signal: input.signal }).catch(() => []);
-      deepEvidenceCount = deepEvidence.length;
-      if (deepEvidence.length > 0) {
-        scopedEvidence = optimizeChapterEvidence(chapter, [...scopedEvidence, ...filterEvidenceByProjectScope(deepEvidence, projectMaterialScope)], { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter + 12, chapter, rolePoolRisk.highRisk), maxChars: evidenceBudgetChars + (rolePoolRisk.highRisk ? 36000 : 16000), preservePinned: true }, generationDiagnostics);
-        scopedEvidence = filterEvidenceByProjectScope(scopedEvidence, projectMaterialScope);
-        evidence = optimizeChapterEvidence(chapter, scopedEvidence, { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter + 8, chapter, rolePoolRisk.highRisk), maxChars: evidenceBudgetChars + (rolePoolRisk.highRisk ? 28000 : 12000), preservePinned: true }, generationDiagnostics);
-        assertEvidenceInProjectScope(evidence, projectMaterialScope, `chapter:${chapter.id}:deep`);
-        missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
-      }
-    }
-    if (evidence.length === 0) missingItems.push(`${chapter.title}：缺少可支撑正文的项目资料证据`);
-    for (const fact of missingFacts) missingItems.push(`${chapter.title}：事实需求未满足 ${fact}`);
-    // 证据检索完成 → 持续刷新证据数量
-    const knowledgeBaseStage = displayStage({ type: 'knowledge_retrieval', roleId: 'knowledge-base', status: (allEvidence.length > 0 ? 'success' : 'failed'), message: `已检索/绑定 ${allEvidence.length} 条证据` });
-    if (knowledgeBaseStageIndex < 0) {
-      knowledgeBaseStageIndex = upsertProgressStage(progressStages, knowledgeBaseStage);
-    } else {
-      progressStages[knowledgeBaseStageIndex] = { ...knowledgeBaseStage, order: progressStages[knowledgeBaseStageIndex]?.order ?? knowledgeBaseStage.order };
-    }
-    emitProgress();
-
-    throwIfAborted(input.signal);
+    // P1-4：事实需求计算提前到深召回判断之前，把 requiredMissingNeeds 并入深召回一次完成，
+    // 避免缺失事实与必需事实需求两次深召回查询集高度重叠
     const forbidDrawingImages = false;
     const graphRoleHint = graphMapping
       ? [
@@ -610,8 +605,32 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const chapterFactNeeds = buildChapterFactNeeds({ template, chapter, spec: documentSpec, profile: domainProfile, promptTexts: chapterPromptTexts, requirement: input.requirement, plan: plan ? { requiredContents: plan.mustCover, evidenceNeeds: Object.values(plan.evidenceQueries).flat() } : undefined });
     let resolvedFactNeeds = resolveChapterFactNeeds({ needs: chapterFactNeeds, factsModel: preliminaryFactsModel, evidence: scopedEvidence, profile: domainProfile });
     let requiredMissingNeeds = resolvedFactNeeds.filter(item => item.need.required && item.status !== 'satisfied').map(item => item.need.label);
+    // 优化：图谱证据充足且多样化时才跳过深召回（文件多样性≥6 + 无缺失事实）
+    const readinessPlan = buildChapterReadinessPlan({ chapter, evidence });
+    const evidenceFileCount = new Set(evidence.map(item => item.filePath)).size;
+    const graphEvidenceSufficient = Boolean(graphMapping)
+      && (graphMapping?.graphFiles.size || 0) >= 8
+      && evidenceFileCount >= 6
+      && missingFacts.length === 0
+      && readinessPlan.riskLevel === 'low';
+    const needsDeepRetrieval = scopedFilePaths.length <= 80 && (readinessPlan.suggestedStrategy === 'evidence_first' || rolePoolRisk.highRisk || missingFacts.length > 0 || requiredMissingNeeds.length > 0 || (evidence.length < 8 && readinessPlan.riskLevel !== 'low'));
+    if (!graphEvidenceSufficient && needsDeepRetrieval && scopedFilePaths.length > 0) {
+      // P1-4：缺失事实与必需事实需求并入同一次深召回（原两次调用查询集高度重叠，合并后每章深召回查询数约降 40%）
+      const deepEvidence = await retrieveDeepChapterEvidence({ manager, projectRoot, chapter, scopedFilePaths, fileRoleByPath, fileProcessingByPath, requiredNeeds: [...new Set([...missingFacts, ...requiredMissingNeeds])], highRisk: rolePoolRisk.highRisk || requiredMissingNeeds.length > 0, signal: input.signal }).catch(() => []);
+      deepEvidenceCount = deepEvidence.length;
+      if (deepEvidence.length > 0) {
+        scopedEvidence = optimizeChapterEvidence(chapter, [...scopedEvidence, ...filterEvidenceByProjectScope(deepEvidence, projectMaterialScope)], { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter + 12, chapter, rolePoolRisk.highRisk), maxChars: evidenceBudgetChars + (rolePoolRisk.highRisk ? 36000 : 16000), preservePinned: true }, generationDiagnostics);
+        scopedEvidence = filterEvidenceByProjectScope(scopedEvidence, projectMaterialScope);
+        evidence = optimizeChapterEvidence(chapter, scopedEvidence, { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter + 8, chapter, rolePoolRisk.highRisk), maxChars: evidenceBudgetChars + (rolePoolRisk.highRisk ? 28000 : 12000), preservePinned: true }, generationDiagnostics);
+        assertEvidenceInProjectScope(evidence, projectMaterialScope, `chapter:${chapter.id}:deep`);
+        missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
+      }
+      // P1-4：深召回后重算事实需求，仍缺失的必需需求触发下方一次轻量补充
+      resolvedFactNeeds = resolveChapterFactNeeds({ needs: chapterFactNeeds, factsModel: preliminaryFactsModel, evidence: scopedEvidence, profile: domainProfile });
+      requiredMissingNeeds = resolvedFactNeeds.filter(item => item.need.required && item.status !== 'satisfied').map(item => item.need.label);
+    }
+    // P1-4：合并深召回后仍有必需事实缺口时做一次轻量补充（原第二次深召回，highRisk 强制；仅当新 needs 出现时触发）
     if (requiredMissingNeeds.length > 0 && scopedFilePaths.length > 0) {
-      // 缺失事实补检索与深召回合并为一次调用：精确 need 查询已并入深召回查询集（结果保留 required-fact-evidence 标记）
       const mergedSupplementalEvidence = filterEvidenceByProjectScope(await retrieveDeepChapterEvidence({ manager, projectRoot, chapter, scopedFilePaths, fileRoleByPath, fileProcessingByPath, requiredNeeds: requiredMissingNeeds, highRisk: true, signal: input.signal }).catch(() => []), projectMaterialScope);
       if (mergedSupplementalEvidence.length > 0) {
         scopedEvidence = optimizeChapterEvidence(chapter, [...scopedEvidence, ...mergedSupplementalEvidence], { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter + 16, chapter, true), maxChars: evidenceBudgetChars + 42000, preservePinned: true }, generationDiagnostics);
@@ -624,6 +643,19 @@ export async function generateDocumentDraft(input: { templateId: string; require
       }
     }
     assertEvidenceInProjectScope(evidence, projectMaterialScope, `chapter:${chapter.id}:writer-input`);
+    if (evidence.length === 0) missingItems.push(`${chapter.title}：缺少可支撑正文的项目资料证据`);
+    for (const fact of missingFacts) missingItems.push(`${chapter.title}：事实需求未满足 ${fact}`);
+    // 证据检索完成 → 持续刷新证据数量
+    const knowledgeBaseStage = displayStage({ type: 'knowledge_retrieval', roleId: 'knowledge-base', status: (allEvidence.length > 0 ? 'success' : 'failed'), message: `已检索/绑定 ${allEvidence.length} 条证据` });
+    if (knowledgeBaseStageIndex < 0) {
+      knowledgeBaseStageIndex = upsertProgressStage(progressStages, knowledgeBaseStage);
+    } else {
+      progressStages[knowledgeBaseStageIndex] = { ...knowledgeBaseStage, order: progressStages[knowledgeBaseStageIndex]?.order ?? knowledgeBaseStage.order };
+    }
+    emitProgress();
+
+    throwIfAborted(input.signal);
+
     // P4 检索自适应：本章仍有未满足的必需事实需求 → 调高后续章节查询扩展深度（上限 +2）
     if (requiredMissingNeeds.length > 0 && searchExpansionBoost < 2) searchExpansionBoost += 1;
     // P0-1 小节级检索复用：跨小节/跨修复轮缓存（查询=章节+小节标题），
