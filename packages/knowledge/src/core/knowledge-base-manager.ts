@@ -18,8 +18,14 @@ import type { VectorStoreInterface } from '../vector/types.js';
 import { VectorIndexer, type VectorIndexResult } from '../vector/vector-indexer.js';
 import { ChangeTracker } from './change-tracker.js';
 import { KnowledgeFileScanner } from './file-scanner.js';
-import { IndexStateStore, type ChunkSearchResult, type FileRelationship } from './index-state-store.js';
+import { IndexStateStore, type ChunkSearchResult, type FileRelationship, type StoredChunk } from './index-state-store.js';
 import { getProjectKbPath, ProjectConfigManager } from './project-config.js';
+
+// 查询扩展（LLM）调用的约束：生成流程会高频触发查询扩展，
+// TTL 缓存吸收重复扩展、信号量避免扩展请求无界并发击穿模型端点
+const QUERY_EXPANSION_TTL_MS = 10 * 60 * 1000;
+const QUERY_EXPANSION_CACHE_MAX = 256;
+const QUERY_EXPANSION_MAX_CONCURRENCY = 2;
 
 export type KnowledgeIndexStage = 'scanning' | 'parsing' | 'chunking' | 'vectorizing' | 'done' | 'error';
 
@@ -66,6 +72,10 @@ export class KnowledgeBaseManager {
   private projectConfig?: ProjectConfig;
   private lastSkippedFiles: DiffResult['skippedFiles'] = [];
   private readonly llmProvider?: LLMSearchProvider;
+  private readonly queryExpansionCache = new Map<string, { queries: string[]; expiresAt: number }>();
+  private readonly queryExpansionInFlight = new Map<string, Promise<string[]>>();
+  private queryExpansionActive = 0;
+  private readonly queryExpansionWaiters: Array<() => void> = [];
   private onProgress?: (progress: KnowledgeIndexProgress) => void;
 
   constructor(options: KnowledgeBaseManagerOptions) {
@@ -372,11 +382,9 @@ export class KnowledgeBaseManager {
 
   private searchCorpusSize(filters?: SearchFilters): number {
     const paths = filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined);
-    const pathSet = new Set(paths?.filter(Boolean));
-    const total = this.store.listRecords()
-      .filter(record => pathSet.size === 0 || pathSet.has(record.relativePath))
-      .reduce((sum, record) => sum + Math.max(0, Math.ceil(Number(record.chunkCount) || 0)), 0);
-    return Math.max(1, total);
+    const pathSet = paths?.filter(Boolean) ?? [];
+    // 单条 SUM 聚合，避免 listRecords 全量加载每条索引记录
+    return Math.max(1, this.store.countIndexedChunks(pathSet.length > 0 ? pathSet : undefined));
   }
 
   expandContext(item: FederatedSearchItem): FederatedSearchItem {
@@ -396,7 +404,13 @@ export class KnowledgeBaseManager {
     const chunks = parentChunks.length > 0 ? parentChunks : this.store.getContextChunks(item.filePath, chunkIndex, 1);
     if (chunks.length === 0) {
       const document = this.store.getDocumentChunk(item.filePath);
-      return document ? { ...item, content: document.content, sectionTitle: item.sectionTitle ?? 'Document Parent' } : item;
+      if (!document) return item;
+      // 文档级兜底必须截断：整份文档全文（可能 10 万字级）会撑爆 LLM 上下文预算并稀释命中片段信噪比
+      const MAX_DOCUMENT_CONTENT_CHARS = 6000;
+      const content = document.content.length > MAX_DOCUMENT_CONTENT_CHARS
+        ? `${document.content.slice(0, MAX_DOCUMENT_CONTENT_CHARS)}\n……（文档过长，已截断，完整内容请查看原文件）`
+        : document.content;
+      return { ...item, content, sectionTitle: item.sectionTitle ?? 'Document Parent' };
     }
     return {
       ...item,
@@ -410,8 +424,8 @@ export class KnowledgeBaseManager {
 
   async hybridSearch(query: string, options: { limit?: number; filters?: SearchFilters; collections?: string[]; weights?: RetrievalWeights; generationMode?: boolean; disableReranker?: boolean } = {}): Promise<FederatedResult> {
     const requestedLimit = Number.isFinite(options.limit) && options.limit! > 0 ? Math.ceil(options.limit!) : undefined;
-    const corpusSize = this.searchCorpusSize(options.filters);
-    const effectiveLimit = requestedLimit ?? corpusSize;
+    // 调用方已显式指定 limit 时无需计算语料总量，避免每次搜索都做一次全量聚合
+    const effectiveLimit = requestedLimit ?? this.searchCorpusSize(options.filters);
     const start = Date.now();
     const weights = this.retrievalWeights(options.weights);
     const rewrittenQueries = options.generationMode ? [query.trim()].filter(Boolean) : await this.rewriteQueries(query);
@@ -768,7 +782,17 @@ export class KnowledgeBaseManager {
   private async llmExpandQueries(query: string): Promise<string[]> {
     if (!this.llmProvider) return [];
 
-    const prompt = `你是一个搜索查询优化器。用户输入了一个搜索查询，请生成 3-5 个不同的查询变体，用不同的措辞和同义词来表达相同的信息需求，以便在知识库中检索到更全面的结果。
+    // TTL 缓存 + 在途去重：生成流程会在短时间内对相近查询重复扩展，
+    // 缓存避免重复 LLM 调用；同一查询并发进入时复用同一 Promise
+    const cached = this.queryExpansionCache.get(query);
+    if (cached && cached.expiresAt > Date.now()) return cached.queries;
+    const inFlight = this.queryExpansionInFlight.get(query);
+    if (inFlight) return inFlight;
+
+    const run = (async () => {
+      const release = await this.acquireQueryExpansionSlot();
+      try {
+        const prompt = `你是一个搜索查询优化器。用户输入了一个搜索查询，请生成 3-5 个不同的查询变体，用不同的措辞和同义词来表达相同的信息需求，以便在知识库中检索到更全面的结果。
 
 如果查询是中文，请同时生成英文变体；如果查询是英文，请同时生成中文变体。
 
@@ -776,17 +800,47 @@ export class KnowledgeBaseManager {
 
 原始查询：${query}`;
 
-    const response = await this.llmProvider.chat([
-      { role: 'system', content: '你是一个精确的搜索查询扩展引擎。只输出查询列表。' },
-      { role: 'user', content: prompt },
-    ], { temperature: 0.3, maxTokens: 500 });
+        const response = await this.llmProvider!.chat([
+          { role: 'system', content: '你是一个精确的搜索查询扩展引擎。只输出查询列表。' },
+          { role: 'user', content: prompt },
+        ], { temperature: 0.3, maxTokens: 500 });
 
-    return response.content
-      .split('\n')
-      .map(line => line.replace(/^[-*\d.]+\s*/, '').trim())
-      .filter(line => line.length > 0 && line !== query)
-      .slice(0, 5);
+        const queries = response.content
+          .split('\n')
+          .map(line => line.replace(/^[-*\d.]+\s*/, '').trim())
+          .filter(line => line.length > 0 && line !== query)
+          .slice(0, 5);
+        if (this.queryExpansionCache.size >= QUERY_EXPANSION_CACHE_MAX) this.queryExpansionCache.clear();
+        this.queryExpansionCache.set(query, { queries, expiresAt: Date.now() + QUERY_EXPANSION_TTL_MS });
+        return queries;
+      } finally {
+        release();
+        this.queryExpansionInFlight.delete(query);
+      }
+    })();
+    this.queryExpansionInFlight.set(query, run);
+    return run;
   }
+
+  /** 查询扩展 LLM 调用的简易信号量：与文档生成端的全局信号量解耦，避免扩展请求无界并发击穿模型端点 */
+  private acquireQueryExpansionSlot(): Promise<() => void> {
+    return new Promise(resolve => {
+      if (this.queryExpansionActive < QUERY_EXPANSION_MAX_CONCURRENCY) {
+        this.queryExpansionActive += 1;
+        resolve(this.releaseQueryExpansionSlot);
+      } else {
+        this.queryExpansionWaiters.push(() => {
+          this.queryExpansionActive += 1;
+          resolve(this.releaseQueryExpansionSlot);
+        });
+      }
+    });
+  }
+
+  private releaseQueryExpansionSlot = () => {
+    this.queryExpansionActive = Math.max(0, this.queryExpansionActive - 1);
+    this.queryExpansionWaiters.shift()?.();
+  };
 
   private retrievalWeights(overrides: RetrievalWeights = {}): Record<string, number> {
     return {
@@ -894,9 +948,13 @@ export class KnowledgeBaseManager {
 
 
   private hydrateVectorResultsFromSqlite(items: FederatedSearchItem[]): FederatedSearchItem[] {
+    // 批量按 rowid 取切片，避免对每条向量结果单发一次 SQL（N+1）
+    const rowids = [...new Set(items.filter(item => item.rowid).map(item => item.rowid as number))];
+    const chunksByRowid = new Map<number, StoredChunk>();
+    for (const chunk of this.store.getChunksByRowids(rowids)) chunksByRowid.set(chunk.rowid, chunk);
     return items.map(item => {
       if (!item.rowid) return item;
-      const chunk = this.store.getChunkByRowid(item.rowid);
+      const chunk = chunksByRowid.get(item.rowid);
       if (!chunk) return item;
       const hydrated = this.toFederatedItem({ ...chunk, score: item.score, scoreDetails: item.scoreDetails }, 'vector');
       return { ...hydrated, score: item.score, scoreDetails: item.scoreDetails };

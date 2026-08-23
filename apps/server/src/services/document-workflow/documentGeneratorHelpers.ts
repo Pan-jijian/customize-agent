@@ -1,5 +1,4 @@
 import * as path from 'node:path';
-import { replaceConstructionOrgGenericPhrases } from './constructionOrgQualityRules';
 import type { getMultiProjectManager } from '../knowledge/kbService';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from './types';
 import { documentTextLength } from './budget';
@@ -13,6 +12,28 @@ import { collectSectionContentGaps } from './qualityValidation';
 import { stringifyFactValue, throwIfAborted } from './utils';
 import { promptTextsForResolvedPrompts } from './rolePipeline';
 
+
+export function chapterGenerationTargets(input: { budgetTarget: number; sectionCount: number; title: string; longformStrict: boolean }) {
+  const { budgetTarget, sectionCount, title, longformStrict } = input;
+  const composite = /[、，,；;]/u.test(title);
+  const isCritical = /工期|进度|质量|安全|危大|资源|人材机|保障|措施|重难点/u.test(title);
+  const isLight = /概况|结语|附录|说明/u.test(title);
+  const structureTarget = sectionCount > 0
+    ? sectionCount * (composite ? 720 : isCritical ? 900 : 780)
+    : isCritical ? 5200 : 3600;
+  const lower = longformStrict ? (isLight ? 2600 : isCritical ? 5200 : 3600) : Math.min(1200, budgetTarget);
+  const upper = longformStrict
+    ? Math.min(Math.max(4200, budgetTarget), sectionCount >= 30 ? 9800 : composite ? 8800 : isCritical ? 9200 : 7200)
+    : budgetTarget;
+  const roundTarget = Math.max(lower, Math.min(budgetTarget, structureTarget, upper));
+  return {
+    budgetTarget,
+    roundTarget,
+    structureTarget,
+    maxWords: Math.ceil(roundTarget * (input.longformStrict ? 1.12 : 1.18)),
+    label: `章节预算约 ${budgetTarget} 字，本轮生成约 ${roundTarget} 字，结构目标约 ${structureTarget} 字`,
+  };
+}
 
 export function validateDraft(chapters: DocumentDraftChapter[], _structuredFacts: DocumentFact[] = [], template?: DocumentTemplate) {
   const warnings: string[] = [];
@@ -687,7 +708,7 @@ function ensureWorkPackageOverviewLabels(content: string) {
 }
 
 export function finalizeChapterContentQuality(content: string, chapter: Pick<DocumentTemplateChapter, 'title' | 'sections'>) {
-  return ensureWorkPackageOverviewLabels(removeEmptySubSectionHeadings(replaceConstructionOrgGenericPhrases(removeAdjacentDuplicateHeadings(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(splitLongParagraphs(stripForbiddenPlaceholderSentences(replaceForbiddenFormalPhrases(repairTableOnlySections(repairPlannedSectionBodies(content, chapter)))))))))))).replace(/\n{3,}/gu, '\n\n').trim();
+  return ensureWorkPackageOverviewLabels(removeEmptySubSectionHeadings(removeAdjacentDuplicateHeadings(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(splitLongParagraphs(stripForbiddenPlaceholderSentences(replaceForbiddenFormalPhrases(repairTableOnlySections(repairPlannedSectionBodies(content, chapter))))))))))).replace(/\n{3,}/gu, '\n\n').trim();
 }
 
 export function promptMatchesChapter(prompt: ResolvedPromptContent, _chapter: DocumentTemplateChapter) {
@@ -862,38 +883,6 @@ export async function retrieveSectionEvidence(input: { manager: ReturnType<typeo
       sectionTitle: item.sectionTitle,
       source: 'section-evidence',
     })), { maxItems: 5, maxChars: 9000, preservePinned: true });
-}
-
-export async function retrieveMissingFactEvidence(input: { manager: ReturnType<typeof getMultiProjectManager>; projectRoot: string; chapter: DocumentTemplateChapter; needs: string[]; scopedFilePaths: string[]; fileRoleByPath: Map<string, string>; fileProcessingByPath: Map<string, string>; signal?: AbortSignal }) {
-  const evidence: DocumentEvidence[] = [];
-  const needs = input.needs.slice(0, 8);
-  // 缺失事实补检索并行化：与主章节检索路径保持一致（全部需求并发执行，不加人为并发上限）；
-  // 结果后续统一按评分排序去重，并行不改变召回质量
-  const results = await Promise.all(needs.map(async need => {
-    throwIfAborted(input.signal);
-    const query = `${input.chapter.title} ${need} ${(input.chapter.sections || []).join(' ')}`.trim();
-    const result = await input.manager.search(input.projectRoot, query, {
-      scope: 'project',
-      filters: { filePaths: input.scopedFilePaths },
-      limit: 6,
-      weights: searchWeightsForChapter(`${input.chapter.title} ${need}`),
-      generationMode: false,
-    });
-    return result.results
-      .filter(item => input.scopedFilePaths.includes(item.filePath))
-      .map(item => ({
-        chapterId: input.chapter.id,
-        filePath: item.filePath,
-        score: item.score + 2,
-        content: item.content,
-        roleId: input.fileRoleByPath.get(item.filePath),
-        processingType: input.fileProcessingByPath.get(item.filePath),
-        sectionTitle: item.sectionTitle,
-        source: 'required-fact-evidence',
-      }));
-  }));
-  evidence.push(...results.flat());
-  return selectEvidenceByBudget(evidence, { maxItems: Math.max(6, needs.length * 3), maxChars: 18000, preservePinned: true });
 }
 
 export function summarizeIssueList(prefix: string, filePaths: string[], limit = 12) {

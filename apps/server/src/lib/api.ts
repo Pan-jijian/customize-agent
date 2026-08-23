@@ -380,9 +380,9 @@ export interface ProjectRoleConfig { id: string; name: string; description: stri
 export interface DocumentExportSettings { page?: { paper?: string; marginTop?: string; marginRight?: string; marginBottom?: string; marginLeft?: string }; typography?: { fontFamily?: string; lineHeight?: string; titleSize?: string; bodySize?: string }; targetPages?: { min?: number; target?: number; max?: number }; }
 export interface DocumentGenerationSettings { targetPages?: { min?: number; target?: number; max?: number }; }
 export interface DocumentTemplate { id: string; name: string; description: string; category: string; outputTitle: string; chapters: DocumentTemplateChapter[]; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; projectRoleConfigId?: string; projectBindings?: ProjectBinding[]; promptIds?: string[]; promptBindings?: PromptBinding[]; builtIn?: boolean; }
-export interface ChapterReadinessDiagnostic { chapterId: string; title: string; requiredFacts: string[]; coveredFacts: string[]; missingFacts: string[]; requiredRoles: string[]; satisfiedRoles: string[]; evidenceCount: number; readinessRate: number; }
-export interface DocumentGenerationReadiness { ready: boolean; materialCoverageRate: number; roleSatisfactionRate: number; specCompletenessRate: number; missingRoles: string[]; weakRoles: string[]; diagnostics: string[]; chapterDiagnostics: ChapterReadinessDiagnostic[]; blockingIssues: string[]; warnings: string[]; }
-export interface DocumentTemplateValidation { templateId: string; projectRoleConfigId?: string; fileDiagnostics: Array<{ filePath: string; roleName?: string; exists: boolean; indexed: boolean; chunkCount: number; vectorReady: boolean }>; promptDiagnostics: Array<PromptBinding & { roleName?: string; promptTitle?: string; promptSource?: 'custom' | 'file'; contentHash?: string; contentPreview?: string; exists: boolean; contentLength: number }>; readiness?: DocumentGenerationReadiness; issues: Array<{ level: 'error' | 'warning'; message: string }> }
+export interface ChapterReadinessDiagnostic { chapterId: string; title: string; requiredFacts: string[]; coveredFacts: string[]; missingFacts: string[]; requiredRoles: string[]; satisfiedRoles: string[]; evidenceCount: number; }
+export interface DocumentGenerationReadiness { ready: boolean; missingRoles: string[]; weakRoles: string[]; diagnostics: string[]; chapterDiagnostics: ChapterReadinessDiagnostic[]; blockingIssues: string[]; warnings: string[]; }
+export interface DocumentTemplateValidation { templateId: string; projectRoleConfigId?: string; configName?: string; fileDiagnostics: Array<{ filePath: string; roleName?: string; exists: boolean; indexed: boolean; chunkCount: number; vectorReady: boolean }>; promptDiagnostics: Array<PromptBinding & { roleName?: string; promptTitle?: string; promptSource?: 'custom' | 'file'; contentHash?: string; contentPreview?: string; exists: boolean; contentLength: number }>; roleDiagnostics: Array<{ roleId: string; roleName?: string; order: number; resourceIds: string[]; boundPromptIds: string[]; status: 'ok' | 'missing_prompt' | 'missing_resource' | 'role_missing' }>; readiness?: DocumentGenerationReadiness; issues: Array<{ level: 'error' | 'warning'; message: string }>; strategyPreview?: { mode: 'fast' | 'balanced' | 'longform' | 'strict'; enableGlobalReview: boolean; globalReviewSamplingRate: number; repairRoundBudget: number; chapterConcurrency: number; reviewConcurrency: number; evidenceFloorChars: number; evidenceCeilingChars: number; targetWords: number; chapterCount: number; triggers: string[] }; referenceStructureSuggestion?: { projectType: string; sourceCount: number; missingHeadings: Array<{ title: string; ratio: number }> } }
 export interface PromptProject { id: string; projectId: string; projectRoot?: string; projectName: string; customizePath: string; content: string; mtime: string; hasFile: boolean; isCurrent: boolean; selected: boolean; source: 'current' | 'project' | 'custom'; }
 export interface DocumentEvidence { chapterId: string; filePath: string; score: number; content: string; roleId?: string; processingType?: string; sectionTitle?: string; source?: string; }
 export interface DocumentDraftChapter { id: string; title: string; content: string; evidence: DocumentEvidence[]; missingFacts: string[]; sections?: string[]; }
@@ -395,9 +395,11 @@ export interface ExportGateResult { passed: boolean; blockingIssues: ValidationI
 export interface DocumentExecutionStage { type: 'role_binding' | 'knowledge_retrieval' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference'; roleId: string; promptId?: string; status: 'running' | 'success' | 'skipped' | 'failed'; message?: string; details?: string[]; progress?: { current: number; total: number; label?: string }; title?: string; subtitle?: string; roleName?: string; promptName?: string; group?: string; order?: number; executionVersion?: 2; }
 export interface DocumentAsset { id: string; type: 'image' | 'audio' | 'video' | 'file'; role: 'cover' | 'reference' | 'generated' | 'attachment' | 'map' | 'operator'; path?: string; url?: string; prompt?: string; modelProvider?: string; status: 'generated' | 'prompt_ready' | 'failed'; message?: string; }
 export interface GeneratedAssetRecord extends DocumentAsset { name: string; source: 'knowledge_base' | 'generated' | 'uploaded' | 'external_url'; indexed: boolean; usedByDocumentIds: string[]; createdAt: number; updatedAt: number; }
-export interface GeneratedDocumentRecord { id: string; taskId?: string; templateId: string; templateName?: string; title: string; requirement: string; projectRoot?: string; projectId?: string; knowledgeBasePath?: string; markdown: string; editedMarkdown?: string; status: 'generating' | 'completed' | 'warning' | 'failed' | 'aborted'; draft?: GeneratedDocumentDraft; executionStages?: GeneratedDocumentDraft['executionStages']; partialChapters?: GeneratedDocumentDraft['partialChapters']; checkpointChapters?: DocumentDraftChapter[]; reviewMetadata?: GeneratedDocumentDraft['reviewMetadata']; assets: DocumentAsset[]; createdAt: number; updatedAt: number; completedAt?: number; error?: string; warningIssues?: string[]; maxEvidencePerChapter?: number; }
-export interface DocumentReviewMetadata { chapterSummaries: Array<{ chapterId: string; title: string; status: 'pass' | 'warn' | 'fail'; issues: string[]; suggestions: string[]; chars: number }>; globalIssues: string[]; diagnostics: { strategy: { mode: 'fast' | 'balanced' | 'longform' | 'strict'; largeDocumentMode?: boolean; enableChapterReview: boolean; enableGlobalReview: boolean; enableDocumentBudgetExpansion?: boolean; enableFinalQualityReview?: boolean; maxChapterReviewConcurrency: number; targetLlmConcurrency: number }; metrics: Array<{ name: string; startedAt: number; endedAt: number; durationMs: number; meta?: Record<string, string | number | boolean> }>; llm: { calls: number; failures: number; throttledWaits: number; throttledWaitMs?: number; maxActive: number; currentLimit: number; limitAdjustments: number }; evidence?: { raw: number; used: number; filteredNoise: number; avgNoiseScore: number; avgFactDensity: number; searchQueries?: number; searchMs?: number; contextChars?: number }; quality?: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number } } }
-export interface GeneratedDocumentDraft { templateId: string; templateName: string; title: string; requirement: string; projectRoot?: string; projectId?: string; markdown: string; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; facts: Record<string, string>; structuredFacts: DocumentFact[]; factsModel: DocumentFactsModel; chapters: DocumentDraftChapter[]; sources: Array<{ filePath: string; count: number }>; missingItems: string[]; validation: { passed: boolean; warnings: string[]; errors: string[] }; validationIssues: ValidationIssue[]; executionStages: DocumentExecutionStage[]; exportGate: ExportGateResult; assets?: DocumentAsset[]; partialChapters?: Array<{ id: string; title: string; chars: number; status: 'completed' | 'failed' | 'in_progress'; updatedAt: number }>; reviewMetadata?: DocumentReviewMetadata; generatedAt: number; }
+export interface GeneratedDocumentRecord { id: string; taskId?: string; templateId: string; templateName?: string; title: string; requirement: string; projectRoot?: string; projectId?: string; knowledgeBasePath?: string; markdown: string; editedMarkdown?: string; status: 'generating' | 'completed' | 'warning' | 'failed' | 'aborted'; draft?: GeneratedDocumentDraft; executionStages?: GeneratedDocumentDraft['executionStages']; partialChapters?: GeneratedDocumentDraft['partialChapters']; checkpointChapters?: DocumentDraftChapter[]; reviewMetadata?: GeneratedDocumentDraft['reviewMetadata']; assets: DocumentAsset[]; createdAt: number; updatedAt: number; completedAt?: number; error?: string; warningIssues?: string[]; maxEvidencePerChapter?: number; exportReports?: ExportReport[] }
+/** 导出后闭环报告：归档到记录详情，支持与历史版本对比 */
+export interface ExportReport { format: 'markdown' | 'html' | 'pdf' | 'docx'; exportedAt: number; durationMs?: number; benchmarkScore?: number; benchmarkSourceCount?: number; ruleSummary?: string[]; repairedCount?: number; blockingCount?: number; gatePassed?: boolean }
+export interface DocumentReviewMetadata { chapterSummaries: Array<{ chapterId: string; title: string; status: 'pass' | 'warn' | 'fail'; issues: string[]; suggestions: string[]; chars: number }>; globalIssues: string[]; diagnostics: { strategy: { mode: 'fast' | 'balanced' | 'longform' | 'strict'; largeDocumentMode?: boolean; enableChapterReview: boolean; enableGlobalReview: boolean; enableDocumentBudgetExpansion?: boolean; enableFinalQualityReview?: boolean; maxChapterReviewConcurrency: number; targetLlmConcurrency: number }; metrics: Array<{ name: string; startedAt: number; endedAt: number; durationMs: number; meta?: Record<string, string | number | boolean> }>; llm: { calls: number; failures: number; throttledWaits: number; throttledWaitMs?: number; maxActive: number; currentLimit: number; limitAdjustments: number }; evidence?: { raw: number; used: number; filteredNoise: number; avgNoiseScore: number; avgFactDensity: number; searchQueries?: number; searchMs?: number; contextChars?: number }; quality?: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number } }; qualityBenchmark?: { projectType: string; referenceSourceCount: number; overallScore: number; items: Array<{ key: string; label: string; generated: number; reference: number; score: number; passed: boolean; unit: 'percent' | 'count' | 'perKChars' }> } }
+export interface GeneratedDocumentDraft { templateId: string; templateName: string; title: string; requirement: string; projectRoot?: string; projectId?: string; markdown: string; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; facts: Record<string, string>; structuredFacts: DocumentFact[]; factsModel: DocumentFactsModel; chapters: DocumentDraftChapter[]; sources: Array<{ filePath: string; count: number }>; missingItems: string[]; validation: { passed: boolean; warnings: string[]; errors: string[] }; validationIssues: ValidationIssue[]; executionStages: DocumentExecutionStage[]; exportGate: ExportGateResult; assets?: DocumentAsset[]; partialChapters?: Array<{ id: string; title: string; chars: number; status: 'completed' | 'failed' | 'in_progress'; updatedAt: number }>; reviewMetadata?: DocumentReviewMetadata; promptRules?: { executionSummary?: string[]; ruleSources?: Record<string, Array<{ promptId: string; roleId: string; pattern: string; matchedText: string }>>; sourceHash?: string; requiredTables?: string[]; requiredKeywords?: string[]; forbiddenPatterns?: string[]; exactHeadings?: string[]; minWords?: number; coverPolicy?: string; tocPolicy?: string }; generatedAt: number; }
 export interface StoredDocumentDraft extends GeneratedDocumentDraft { id: string; updatedAt: number; }
 
 export async function getPromptProjects() { return fetchJson<PromptProject[]>('/api/prompt'); }
@@ -583,4 +585,82 @@ export async function getKbCategoryStats(projectRoot?: string) {
 // ═══════ 供应商详情 ═══════
 export async function getProviderDetail(name: string) {
   return fetchJson<ProviderInfo>(`/api/config/providers/${encodeURIComponent(name)}`);
+}
+
+// ═══════ 模板参考库 ═══════
+
+export interface TemplateReferenceRecord {
+  id: string;
+  fileName: string;
+  projectType: string;
+  typeSource: 'manual' | 'auto';
+  uploadedAt: number;
+  fileSize: number;
+  filePath: string;
+  status: 'parsing' | 'ready' | 'failed';
+  errorMessage?: string;
+  isPrimary?: boolean;
+  qualityProfile?: {
+    wordCount: number;
+    effectiveWordCount: number;
+    paramDensity: number;
+    paramCount: number;
+    arrowChainCoverage: number;
+    duplicationRate: number;
+    tableCount: number;
+    sectionCount: number;
+    subsectionCount: number;
+    subitemCount?: number;
+    avgSectionWords: number;
+    headingStructure: string[];
+    tableTitles?: string[];
+    paramTokens?: Array<{ token: string; count: number }>;
+    segmentCount?: number;
+    arrowChainSegmentCount?: number;
+    duplicatedSegmentCount?: number;
+  };
+}
+
+/** 类型级累积画像：某工程类型下全部参考样本的聚合特征 */
+export interface ReferenceTypeProfile {
+  projectType: string;
+  sourceCount: number;
+  totalWords: number;
+  updatedAt: number;
+  metrics: {
+    paramDensity: { avg: number; min: number; max: number };
+    arrowChainCoverage: { avg: number; min: number; max: number };
+    duplicationRate: { avg: number; min: number; max: number };
+    tableCount: { avg: number; min: number; max: number };
+    sectionCount: { avg: number; min: number; max: number };
+    subsectionCount?: { avg: number; min: number; max: number };
+    subitemCount?: { avg: number; min: number; max: number };
+    avgSectionWords: { avg: number };
+  };
+  typicalHeadings: Array<{ title: string; count: number; ratio: number }>;
+  commonTables: Array<{ title: string; count: number }>;
+  frequentParams: Array<{ token: string; count: number }>;
+}
+
+export async function getTemplateReferenceTypeProfiles() {
+  return fetchJson<{ profiles: ReferenceTypeProfile[] }>('/api/template-references?action=typeProfiles');
+}
+
+export async function getTemplateReferences() {
+  return fetchJson<{ references: TemplateReferenceRecord[] }>('/api/template-references');
+}
+
+export async function uploadTemplateReference(file: File, projectType?: string) {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (projectType) formData.append('projectType', projectType);
+  return fetchJson<{ success: boolean; reference: TemplateReferenceRecord }>('/api/template-references', { method: 'POST', body: formData });
+}
+
+export async function patchTemplateReference(id: string, patch: { projectType?: string; isPrimary?: boolean }) {
+  return fetchJson<{ success: boolean; reference: TemplateReferenceRecord }>('/api/template-references', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, ...patch }) });
+}
+
+export async function deleteTemplateReferenceApi(id: string) {
+  return fetchJson<{ success: boolean }>(`/api/template-references?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

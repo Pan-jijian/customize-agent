@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState } from 'react';
 import { useAppTranslations } from '@/components/Layout';
 import { Button, Drawer, Input, App, Tag, Popconfirm, Empty, Space, Checkbox, Skeleton, Select, Divider, Spin, Segmented } from 'antd';
-import { EditOutlined, FileTextOutlined, FolderOutlined, DeleteOutlined, PlusOutlined, ImportOutlined, ExportOutlined, SendOutlined, RobotOutlined, SearchOutlined, UnorderedListOutlined, AppstoreOutlined } from '@ant-design/icons';
+import { EditOutlined, FileTextOutlined, FolderOutlined, DeleteOutlined, PlusOutlined, ImportOutlined, ExportOutlined, SendOutlined, RobotOutlined, SearchOutlined, UnorderedListOutlined, AppstoreOutlined, SafetyCertificateOutlined, CheckCircleOutlined, BookOutlined } from '@ant-design/icons';
 
 interface PromptProject {
   id: string; projectId: string; projectRoot?: string; projectName: string;
@@ -11,6 +11,17 @@ interface PromptProject {
 interface PromptChatMessage { role: 'user' | 'assistant'; content: string; }
 interface KnowledgeFile { relativePath: string; category: string; format: string; fileSize: number; status: string; chunkCount?: number; score?: number; matchedBy?: 'path' | 'metadata' | 'content' | 'disk'; }
 interface ReferencedKnowledgeFile { relativePath: string; content: string; }
+interface PromptRulePreview {
+  recognized: boolean;
+  summary: string[];
+  requiredTables: string[];
+  requiredKeywords: string[];
+  forbiddenPatterns: string[];
+  exactHeadings: string[];
+  minWords?: number;
+  coverPolicy: string;
+  tocPolicy: string;
+}
 type SourceFilter = 'all' | 'custom' | 'current' | 'project';
 type StatusFilter = 'all' | 'selected' | 'unselected' | 'hasFile' | 'missingFile';
 type SortMode = 'mtime' | 'name' | 'source' | 'selected';
@@ -25,6 +36,12 @@ async function saveProject(filePath: string, content: string, name?: string) {
   const res = await fetch('/api/prompt', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filePath, content, name }) });
   if (!res.ok) throw new Error('Failed');
   return res.json();
+}
+async function previewPromptRules(content: string): Promise<PromptRulePreview | null> {
+  const res = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'previewRules', content }) });
+  if (!res.ok) return null;
+  const data = await res.json() as { preview?: PromptRulePreview };
+  return data.preview || null;
 }
 async function createProjectPrompt(projectRoot: string) {
   const res = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'create', projectRoot, content: '# CUSTOMIZE\n' }) });
@@ -186,6 +203,37 @@ export default function PromptPage() {
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [knowledgeSearching, setKnowledgeSearching] = useState(false);
   const [showKnowledgePicker, setShowKnowledgePicker] = useState(false);
+  const [rulePreview, setRulePreview] = useState<PromptRulePreview | null>(null);
+  const [rulePreviewLoading, setRulePreviewLoading] = useState(false);
+  /** 范式推荐：插入参考库章节结构 */
+  const [paradigmType, setParadigmType] = useState<string | undefined>(undefined);
+  const [paradigmLoading, setParadigmLoading] = useState(false);
+
+  const insertParadigm = async () => {
+    if (!paradigmType) return;
+    setParadigmLoading(true);
+    try {
+      const res = await fetch(`/api/template-references?action=paradigms&projectType=${encodeURIComponent(paradigmType)}`);
+      const data = await res.json() as { paradigm?: { text: string; sourceCount: number } | null };
+      if (!data.paradigm) { message.info(t('prompt.paradigmEmpty')); return; }
+      setEditContent(prev => prev.trim() ? `${prev.trim()}\n\n${data.paradigm!.text}` : data.paradigm!.text);
+      message.success(t('prompt.paradigmInserted'));
+    } catch {
+      message.error(t('prompt.paradigmFailed'));
+    } finally {
+      setParadigmLoading(false);
+    }
+  };
+
+  // 编辑提示词时防抖预检：复用运行时规则抽取（纯正则），让用户知道系统将强制执行哪些硬性规则
+  useEffect(() => {
+    if (!drawerOpen || !editContent.trim()) { setRulePreview(null); setRulePreviewLoading(false); return; }
+    setRulePreviewLoading(true);
+    const timer = setTimeout(() => {
+      void previewPromptRules(editContent).then(preview => { setRulePreview(preview); setRulePreviewLoading(false); });
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [editContent, drawerOpen]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const chatListRef = useRef<HTMLDivElement | null>(null);
   const knowledgeMentionQuery = getKnowledgeMentionQuery(chatInput);
@@ -601,8 +649,33 @@ export default function PromptPage() {
           <Input.TextArea
             value={editContent}
             onChange={e => setEditContent(e.target.value)}
-            style={{ flex: 1, minHeight: 280, fontFamily: 'SF Mono, Monaco, Consolas, monospace', fontSize: 13, resize: 'none' }}
+            style={{ flex: 1, minHeight: 140, fontFamily: 'SF Mono, Monaco, Consolas, monospace', fontSize: 13, resize: 'none' }}
           />
+          <div style={{ marginTop: 12, border: '1px solid var(--colorBorderSecondary)', borderRadius: 10, background: 'var(--colorBgContainer)', padding: '10px 12px', maxHeight: 170, overflowY: 'auto' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <Space size={6}><SafetyCertificateOutlined style={{ color: 'var(--colorAccent)' }} /><span style={{ fontWeight: 600, fontSize: 12 }}>{t('prompt.rulePreviewTitle')}</span></Space>
+              {rulePreviewLoading && <Spin size="small" />}
+            </div>
+            {!rulePreview ? (
+              <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>{editContent.trim() ? t('prompt.rulePreviewAnalyzing') : t('prompt.rulePreviewHint')}</div>
+            ) : !rulePreview.recognized ? (
+              <div style={{ color: 'var(--colorTextSecondary)', fontSize: 12 }}>{t('prompt.rulePreviewNone')}</div>
+            ) : (
+              <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                {rulePreview.summary.map((line, index) => (
+                  <div key={index} style={{ fontSize: 12, color: 'var(--colorText)', display: 'flex', gap: 6, lineHeight: 1.6 }}>
+                    <CheckCircleOutlined style={{ color: 'var(--colorSuccess)', marginTop: 4 }} /><span>{line}</span>
+                  </div>
+                ))}
+              </Space>
+            )}
+            <Divider style={{ margin: '8px 0' }} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)', whiteSpace: 'nowrap' }}>{t('prompt.paradigmTitle')}</span>
+              <Select size="small" allowClear placeholder={t('prompt.paradigmTypePlaceholder')} style={{ minWidth: 110 }} value={paradigmType} onChange={setParadigmType} options={['房建', '市政', '公路', '桥梁与隧道', '水利水电', '电力', '机电安装', '装饰装修', '园林绿化', '铁路', '港口与航道', '矿山冶金', '其他'].map(type => ({ value: type, label: type }))} />
+              <Button size="small" icon={<BookOutlined />} loading={paradigmLoading} disabled={!paradigmType} onClick={() => { void insertParadigm(); }}>{t('prompt.paradigmInsert')}</Button>
+            </div>
+          </div>
         </div>
 
         <div style={{ minHeight: 0, border: '1px solid var(--colorBorderSecondary)', borderRadius: 10, background: 'var(--colorBgContainer)', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 8px 24px rgba(15, 23, 42, 0.06)' }}>

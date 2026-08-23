@@ -310,7 +310,7 @@ export function runtimePromptRulesPrompt(rules: RuntimePromptRuleSet) {
     rules.requiredSubjects.length ? `正文主体优先使用：${rules.requiredSubjects.join('、')}` : '',
     rules.forbiddenSubjects.length ? `禁止主体表达：${rules.forbiddenSubjects.join('、')}` : '',
     rules.forbidFabrication ? '不得编造系统暂未从知识库确认的项目事实、工程实体参数、人名、联系方式或品牌；应通过扩大检索、事实补抽或落位修复解决。' : '',
-    rules.requireEvidenceForQuantities ? '涉及数量、工期、质量标准、规格型号等参数时必须以绑定资料中的明确事实为准。' : '',
+    rules.requireEvidenceForQuantities ? '涉及数量、工期、质量标准目标、规格型号等项目专属参数时必须以绑定资料中的明确事实为准；通用标准规范编号与法规名称可依据现行有效版本直接引用。' : '',
     rules.commercialTerms.length ? `禁止输出商务敏感内容：${rules.commercialTerms.join('、')}` : '',
     rules.backendTerms.length ? `禁止输出系统内部话术：${rules.backendTerms.join('、')}` : '',
     rules.requiredTables.length ? `必须输出以下正式 Markdown 表格：${rules.requiredTables.join('、')}。表格必须包含表名、表头、分隔线和数据行。` : '',
@@ -523,4 +523,87 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
     if (!sections.some(section => section.includes(seed) || seed.includes(section))) sections.push(seed);
   }
   return applyPromptStructuralRules(sections, input.chapter.title, chapterStructuralRules).slice(0, Math.max(maxSections, lockedSections.length));
+}
+
+/** 提示词保存前预检结果：向用户展示系统运行时将从该提示词中执行的硬性规则 */
+export interface PromptRulePreview {
+  recognized: boolean;
+  summary: string[];
+  requiredTables: string[];
+  requiredKeywords: string[];
+  forbiddenPatterns: string[];
+  exactHeadings: string[];
+  minWords: number | undefined;
+  coverPolicy: string;
+  tocPolicy: string;
+}
+
+/** 提示词保存前预检：轻量复用运行时规则抽取（纯正则，无 LLM 调用） */
+export function previewPromptRules(content: string): PromptRulePreview {
+  const rules = buildRuntimePromptRules({ promptTexts: content });
+  return {
+    recognized: rules.executionSummary.length > 0,
+    summary: rules.executionSummary,
+    requiredTables: rules.requiredTables,
+    requiredKeywords: rules.requiredKeywords || [],
+    forbiddenPatterns: rules.forbiddenPatterns || [],
+    exactHeadings: rules.exactHeadings || [],
+    minWords: rules.minWords,
+    coverPolicy: rules.coverPolicy || 'unspecified',
+    tocPolicy: rules.tocPolicy || 'unspecified',
+  };
+}
+
+/** 多提示词规则冲突检测：对比各提示词运行时抽取的硬性规则，识别相互矛盾的要求（模板校验时调用） */
+export function detectPromptRuleConflicts(prompts: Array<{ promptId: string; name: string; roleId: string; content: string }>): Array<{ level: 'warning'; message: string }> {
+  const conflicts: Array<{ level: 'warning'; message: string }> = [];
+  const extracted = prompts
+    .map(prompt => ({ prompt, rules: buildRuntimePromptRules({ promptTexts: prompt.content }) }))
+    .filter(item => item.rules.executionSummary.length > 0);
+  if (extracted.length < 2) return conflicts;
+  for (let i = 0; i < extracted.length; i++) {
+    for (let j = i + 1; j < extracted.length; j++) {
+      const a = extracted[i];
+      const b = extracted[j];
+      const aName = `${a.prompt.name}(${a.prompt.roleId})`;
+      const bName = `${b.prompt.name}(${b.prompt.roleId})`;
+      // 必含关键词 vs 禁词/禁止内容：交叉冲突
+      const crossHits: string[] = [];
+      for (const kw of a.rules.requiredKeywords || []) {
+        for (const fb of [...(b.rules.forbiddenTerms || []), ...(b.rules.forbiddenPatterns || [])]) {
+          if (kw.includes(fb) || fb.includes(kw)) crossHits.push(`「${kw}」被要求必含（${aName}）但被禁止（${bName}：${fb}）`);
+        }
+      }
+      for (const kw of b.rules.requiredKeywords || []) {
+        for (const fa of [...(a.rules.forbiddenTerms || []), ...(a.rules.forbiddenPatterns || [])]) {
+          if (kw.includes(fa) || fa.includes(kw)) crossHits.push(`「${kw}」被要求必含（${bName}）但被禁止（${aName}：${fa}）`);
+        }
+      }
+      for (const hit of [...new Set(crossHits)].slice(0, 4)) conflicts.push({ level: 'warning', message: hit });
+      // 固定一级章节列表冲突
+      const aHeadings = a.rules.exactHeadings || [];
+      const bHeadings = b.rules.exactHeadings || [];
+      if (aHeadings.length > 0 && bHeadings.length > 0) {
+        const bSet = new Set(bHeadings);
+        const aSet = new Set(aHeadings);
+        const diff = [...new Set([...aHeadings.filter(h => !bSet.has(h)), ...bHeadings.filter(h => !aSet.has(h))])];
+        if (diff.length > 0) {
+          conflicts.push({ level: 'warning', message: `固定一级章节列表不一致：${aName} 要求 ${aHeadings.length} 章，${bName} 要求 ${bHeadings.length} 章（差异：${diff.slice(0, 3).join('、')}）。生成时将合并去重。` });
+        }
+      }
+      // 封面/目录策略冲突
+      for (const policy of ['coverPolicy', 'tocPolicy'] as const) {
+        const av = a.rules[policy];
+        const bv = b.rules[policy];
+        if (av && bv && av !== 'unspecified' && bv !== 'unspecified' && av !== bv) {
+          conflicts.push({ level: 'warning', message: `${policy === 'coverPolicy' ? '封面' : '目录'}策略冲突：${aName} 要求「${av === 'required' ? '生成' : '禁止'}」，${bName} 要求「${bv === 'required' ? '生成' : '禁止'}」。生成时以禁止优先。` });
+        }
+      }
+      // 最低字数冲突
+      if (a.rules.minWords && b.rules.minWords && a.rules.minWords !== b.rules.minWords) {
+        conflicts.push({ level: 'warning', message: `最低字数要求不一致：${aName} ${a.rules.minWords} 字 vs ${bName} ${b.rules.minWords} 字。生成时将取最大值 ${Math.max(a.rules.minWords, b.rules.minWords)} 字。` });
+      }
+    }
+  }
+  return conflicts;
 }

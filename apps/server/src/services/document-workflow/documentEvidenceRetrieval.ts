@@ -113,24 +113,38 @@ export async function retrieveDeepChapterEvidence(input: {
   const isCompositeTitle = /[、，,与和及]/.test(input.chapter.title);
   const budgetMultiplier = (isResourceHeavy ? 1.6 : 1) * (isCompositeTitle ? 1.4 : 1);
   const maxQueries = Math.ceil((input.highRisk ? 18 : 10) * budgetMultiplier);
-  const queries = buildDeepRetrievalQueries(input.chapter, input.requiredNeeds).slice(0, maxQueries);
   const limit = Math.ceil((input.highRisk ? 24 : 14) * (isResourceHeavy ? 1.4 : 1));
   const maxEvidence = Math.ceil((input.highRisk ? 72 : 42) * budgetMultiplier);
   const maxChars = Math.ceil((input.highRisk ? 72000 : 42000) * budgetMultiplier);
+  // 缺失事实精确查询（原 retrieveMissingFactEvidence 的职责）并入深召回：
+  // 一次自适应并发批次同时覆盖精确 need 查询与广谱扩展查询，消除第二路串行检索；
+  // 精确查询结果标记 required-fact-evidence 以保留预算优先/跨章节豁免语义
+  const preciseNeeds = (input.requiredNeeds || []).slice(0, 8);
+  const baseQueries = buildDeepRetrievalQueries(input.chapter, input.requiredNeeds).slice(0, maxQueries);
+  const preciseQueries = preciseNeeds
+    .map(need => `${input.chapter.title} ${need} ${(input.chapter.sections || []).join(' ')}`.trim())
+    .filter(query => !baseQueries.includes(query));
+  const taggedQueries: Array<{ text: string; boost: number; source: string }> = [
+    ...preciseQueries.map(text => ({ text, boost: 2, source: 'required-fact-evidence' })),
+    ...baseQueries.map(text => ({ text, boost: 2.4, source: 'deep-retrieval' })),
+  ];
   // 深召回按工作流自适应并发执行：保持吞吐，但避免多章节叠加时形成检索洪峰。
-  const searchResults = await runWithAdaptiveConcurrency(queries, async query => {
+  const searchResults = await runWithAdaptiveConcurrency(taggedQueries, async entry => {
     throwIfAborted(input.signal);
-    const result = await input.manager.search(input.projectRoot, query, {
+    const result = await input.manager.search(input.projectRoot, entry.text, {
       scope: 'project',
       filters: { filePaths: input.scopedFilePaths },
       limit,
       weights: { keyword: 0.62, vector: 0.32, rewrite: 0.9, hybridBonus: 0.28 },
       generationMode: false,
     });
-    return mapSearchResults({ chapter: input.chapter, results: result.results.filter(item => input.scopedFilePaths.includes(item.filePath)), fileRoleByPath: input.fileRoleByPath, fileProcessingByPath: input.fileProcessingByPath, boost: 2.4, source: 'deep-retrieval' });
+    return mapSearchResults({ chapter: input.chapter, results: result.results.filter(item => input.scopedFilePaths.includes(item.filePath)), fileRoleByPath: input.fileRoleByPath, fileProcessingByPath: input.fileProcessingByPath, boost: entry.boost, source: entry.source });
   }, { kind: 'deepRetrieval', highRisk: input.highRisk });
   evidence.push(...searchResults.flat());
-  return selectEvidenceByBudget(evidence, { maxItems: maxEvidence, maxChars, preservePinned: true });
+  // 精确 need 检索沿用原 retrieveMissingFactEvidence 的预算（needs×3 条 / 18000 字），避免挤占广谱深召回预算
+  const preciseEvidence = selectEvidenceByBudget(evidence.filter(item => item.source === 'required-fact-evidence'), { maxItems: Math.max(6, preciseNeeds.length * 3), maxChars: 18000, preservePinned: true });
+  const deepEvidence = selectEvidenceByBudget(evidence.filter(item => item.source !== 'required-fact-evidence'), { maxItems: maxEvidence, maxChars, preservePinned: true });
+  return [...preciseEvidence, ...deepEvidence];
 }
 
 export function buildRetrievalCoverageReport(input: { chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; risk: RetrievalCoverageRisk }): RetrievalCoverageReport {

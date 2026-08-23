@@ -66,7 +66,6 @@ export interface ProjectMaterialSummary {
     requiredRoles: MaterialRole[];
     satisfiedRoles: MaterialRole[];
     missingRoles: MaterialRole[];
-    materialCompletenessRate: number;
   };
 }
 
@@ -324,7 +323,6 @@ export function buildProjectMaterialSummary(projectRoot: string, options?: { req
       requiredRoles: coverageRoles,
       satisfiedRoles,
       missingRoles,
-      materialCompletenessRate: coverageRoles.length ? satisfiedRoles.length / coverageRoles.length : 1,
     },
   };
 }
@@ -353,13 +351,12 @@ export function projectMaterialPrompt(summary: ProjectMaterialSummary, options: 
   return [
     '## 后台绑定材料摘要',
     summary.extractedSections.projectOverview,
-    `材料指纹：对象名候选 ${summary.fingerprint.projectNames.join('、') || '无'}；编号 ${summary.fingerprint.documentNos.join('、') || '无'}；资料组 ${summary.fingerprint.fileGroups.join('、') || '无'}；置信度 ${Math.round(summary.fingerprint.confidence * 100)}%。`,
+    `材料指纹：对象名候选 ${summary.fingerprint.projectNames.join('、') || '无'}；编号 ${summary.fingerprint.documentNos.join('、') || '无'}；资料组 ${summary.fingerprint.fileGroups.join('、') || '无'}。`,
     `内容级事实候选：责任主体 ${summary.facts.ownerNames?.join('、') || '无'}；地点 ${summary.facts.locationNames?.join('、') || '无'}；周期 ${summary.facts.scheduleValues?.join('、') || '无'}；质量 ${summary.facts.qualityTargets?.join('、') || '无'}。`,
     summary.extractedSections.scopeSummary,
     summary.extractedSections.structuredDataSummary,
     summary.extractedSections.designSummary,
     summary.extractedSections.scheduleQualitySafetySummary,
     summary.extractedSections.constraintsAndRisks,
-    `资料满足率：${Math.round(summary.coverage.materialCompletenessRate * 100)}%`,
   ].join('\n');
 }

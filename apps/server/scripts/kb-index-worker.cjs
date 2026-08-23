@@ -1,58 +1,13 @@
 #!/usr/bin/env node
-const crypto = require('node:crypto');
-const fs = require('node:fs');
-const os = require('node:os');
+// 知识库后台索引子进程壳：索引主循环复用 @customize-agent/knowledge 的 runIndexLoop
+// （与主进程 runInProcess 共用同一实现），本文件只负责参数解析、进程壳与日志 IPC 转发。
+// 操作日志单写者为主进程：worker 不再直接读写 kb-operations.jsonl，
+// 而是通过 process.send({ type: 'log', patch }) 把补丁交给主进程统一落盘，
+// 避免父子进程同时读改写日志文件造成记录丢失。
 const path = require('node:path');
 
-function computeProjectId(projectRoot) {
-  return crypto.createHash('sha256').update(path.resolve(projectRoot)).digest('hex').slice(0, 12);
-}
-
-function logPath(projectRoot) {
-  return path.join(os.homedir(), '.customize-agent', 'projects', computeProjectId(path.resolve(projectRoot)), 'kb-operations.jsonl');
-}
-
-function readAll(projectRoot) {
-  const file = logPath(projectRoot);
-  if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap(line => {
-    try { return [JSON.parse(line)]; } catch { return []; }
-  });
-}
-
-function writeAll(projectRoot, records) {
-  const file = logPath(projectRoot);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${records.slice(-200).map(record => JSON.stringify(record)).join('\n')}\n`, 'utf8');
-}
-
-function upsert(projectRoot, patch) {
-  const now = Date.now();
-  const records = readAll(projectRoot);
-  const index = records.findIndex(record => record.id === patch.id);
-  const current = index >= 0 ? records[index] : undefined;
-  const next = {
-    id: patch.id,
-    type: patch.type,
-    title: patch.title,
-    stage: patch.stage ?? current?.stage ?? 'uploading',
-    status: patch.status ?? current?.status ?? 'processing',
-    message: patch.message ?? current?.message ?? '',
-    percent: patch.percent ?? current?.percent ?? 0,
-    fileName: patch.fileName ?? current?.fileName,
-    filePath: patch.filePath ?? current?.filePath,
-    chunkCount: patch.chunkCount ?? current?.chunkCount,
-    textLength: patch.textLength ?? current?.textLength,
-    extractionMode: patch.extractionMode ?? current?.extractionMode,
-    error: patch.error ?? current?.error,
-    createdAt: current?.createdAt ?? now,
-    updatedAt: now,
-  };
-  if (index >= 0) records[index] = next;
-  else records.push(next);
-  writeAll(projectRoot, records);
-  if (process.send) process.send({ type: 'progress', record: next });
-  return next;
+function upsert(_projectRoot, patch) {
+  if (process.send) process.send({ type: 'log', patch });
 }
 
 function toStage(stage) {
@@ -86,44 +41,7 @@ async function main() {
     error: progress.vectorStatus?.error,
   });
 
-  let diff = job.relativePaths?.length
-    ? await project.incrementalIndex({ vectorMode: job.vectorMode, onProgress, onlyRelativePaths: job.relativePaths })
-    : job.relativePath
-      ? await project.reindexFile(job.relativePath, { vectorMode: job.vectorMode, onProgress })
-      : job.forceReindexAll
-        ? await project.forceReindexAll({ vectorMode: job.vectorMode, onProgress })
-        : await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
-
-  let idleChecks = 0;
-  // 上传 session 空闲上限：批次间无新文件到达超过该时长即退出等待，避免前端中断后 worker 永久挂起
-  const sessionIdleLimitMs = Math.max(60_000, Number(process.env.CUSTOMIZE_KB_UPLOAD_SESSION_IDLE_MS || 600_000));
-  const maxIdleChecks = Math.max(10, Math.ceil(sessionIdleLimitMs / 1000));
-  // 等待任何未关闭的上传 session（不限于本 operationId），避免重叠上传的后续批次文件无人消费
-  while (!job.relativePath && !job.relativePaths?.length && (project.countPendingIndexJobs() > 0 || (project.hasOpenUploadSessions() && idleChecks < maxIdleChecks))) {
-    if (project.countPendingIndexJobs() === 0) {
-      idleChecks += 1;
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      continue;
-    }
-    idleChecks = 0;
-    const nextDiff = await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
-    diff = {
-      newFiles: [...diff.newFiles, ...nextDiff.newFiles],
-      modifiedFiles: [...diff.modifiedFiles, ...nextDiff.modifiedFiles],
-      deletedFiles: [...diff.deletedFiles, ...nextDiff.deletedFiles],
-      unchangedCount: diff.unchangedCount + nextDiff.unchangedCount,
-      mtimeOnlyCount: diff.mtimeOnlyCount + nextDiff.mtimeOnlyCount,
-      skippedFiles: [...diff.skippedFiles, ...nextDiff.skippedFiles],
-      hasChanges: diff.hasChanges || nextDiff.hasChanges,
-      diffTimeMs: diff.diffTimeMs + nextDiff.diffTimeMs,
-    };
-  }
-
-  let vectorStatus = project.getVectorStatus();
-  if (job.vectorMode === 'defer' && vectorStatus.status === 'pending') {
-    await project.indexVectors();
-    vectorStatus = project.getVectorStatus();
-  }
+  const { vectorStatus } = await knowledge.runIndexLoop(project, job, onProgress);
   if (vectorStatus.status === 'error') {
     const error = vectorStatus.error || 'HNSWLib 向量入库失败';
     upsert(projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'error', status: 'error', percent: 100, message: error, error });

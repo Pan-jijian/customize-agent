@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chapterSectionFactUsageIssues } from '../src/services/document-workflow/chapterGeneration';
+import { chapterSectionFactUsageIssues } from '../src/services/document-workflow/chapterReview';
 import { normalizePlannedSections } from '../src/services/document-workflow/promptRuleExtraction';
 import { composeDocumentMarkdown, ensureFormalToc, finalizeDocumentMarkdown, inferChapterSectionsFromMarkdown, normalizeTertiaryHeadings, promptDocumentRuleIssues, sanitizeFormalMarkdown } from '../src/services/document-workflow/markdownComposer';
 import { collectSectionContentGaps, instructionLikeHeadingIssues, sectionContentIntegrityIssues, tocBodyConsistencyIssues } from '../src/services/document-workflow/qualityValidation';

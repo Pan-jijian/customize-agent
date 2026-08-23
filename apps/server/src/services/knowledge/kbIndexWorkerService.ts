@@ -1,17 +1,9 @@
 import { fork } from 'child_process';
 import path from 'path';
+import { runIndexLoop, type KnowledgeIndexProgress } from '@customize-agent/knowledge';
 import { getMultiProjectManager } from './kbService';
 import { upsertKbOperation, type KbOperationStage } from './kbOperationLog';
 import { startProjectIntelligenceBuild } from '../document-workflow/projectIntelligence';
-
-interface WorkerProgress {
-  stage: string;
-  percent: number;
-  message: string;
-  filePath?: string;
-  chunkCount?: number;
-  vectorStatus?: { error?: string; status?: string };
-}
 
 interface WorkerResult {
   success: boolean;
@@ -74,6 +66,10 @@ function runInChildProcess(job: IndexJob, operationId: string, operationType: 'u
       upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'error', status: 'error', percent: 100, message, error: message });
       resolve({ success: false, error: message });
     });
+    // 操作日志单写者：子进程不再直接写 kb-operations.jsonl，进度与日志补丁经 IPC 转发由主进程统一落盘
+    child.on('message', (msg: { type?: string; patch?: Parameters<typeof upsertKbOperation>[1] }) => {
+      if (msg?.type === 'log' && msg?.patch) upsertKbOperation(job.projectRoot, msg.patch);
+    });
     child.on('exit', code => {
       if (code === 0) resolve({ success: true });
       else {
@@ -89,34 +85,9 @@ async function runInProcess(job: IndexJob, operationId: string, operationType: '
   let project: Awaited<ReturnType<ReturnType<typeof getMultiProjectManager>['getProject']>> | undefined;
   try {
     project = await getMultiProjectManager().getProject(job.projectRoot);
-    const onProgress = (progress: WorkerProgress) => upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: toOperationStage(progress.stage), status: progress.stage === 'error' ? 'error' : 'processing', percent: progress.percent, message: progress.message, filePath: progress.filePath || job.relativePath, chunkCount: progress.chunkCount, error: progress.vectorStatus?.error });
-    let diff = job.relativePaths?.length
-      ? await project.incrementalIndex({ vectorMode: job.vectorMode, onProgress, onlyRelativePaths: job.relativePaths })
-      : job.relativePath
-        ? await project.reindexFile(job.relativePath, { vectorMode: job.vectorMode, onProgress })
-        : job.forceReindexAll
-          ? await project.forceReindexAll({ vectorMode: job.vectorMode, onProgress })
-          : await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
-    let idleChecks = 0;
-    // 上传 session 空闲上限：批次间无新文件到达超过该时长即退出等待，避免前端中断后 worker 永久挂起
-    const sessionIdleLimitMs = Math.max(60_000, Number(process.env.CUSTOMIZE_KB_UPLOAD_SESSION_IDLE_MS || 600_000));
-    const maxIdleChecks = Math.max(10, Math.ceil(sessionIdleLimitMs / 1000));
-    // 等待任何未关闭的上传 session（不限于本 operationId），避免重叠上传的后续批次文件无人消费
-    while (!job.relativePath && !job.relativePaths?.length && (project.countPendingIndexJobs() > 0 || (project.hasOpenUploadSessions() && idleChecks < maxIdleChecks))) {
-      if (project.countPendingIndexJobs() === 0) {
-        idleChecks += 1;
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        continue;
-      }
-      idleChecks = 0;
-      const nextDiff = await project.consumePendingIndexJobs({ vectorMode: job.vectorMode, onProgress, waitForUploadId: job.uploadOperationId });
-      diff = { newFiles: [...diff.newFiles, ...nextDiff.newFiles], modifiedFiles: [...diff.modifiedFiles, ...nextDiff.modifiedFiles], deletedFiles: [...diff.deletedFiles, ...nextDiff.deletedFiles], unchangedCount: diff.unchangedCount + nextDiff.unchangedCount, mtimeOnlyCount: diff.mtimeOnlyCount + nextDiff.mtimeOnlyCount, skippedFiles: [...diff.skippedFiles, ...nextDiff.skippedFiles], hasChanges: diff.hasChanges || nextDiff.hasChanges, diffTimeMs: diff.diffTimeMs + nextDiff.diffTimeMs };
-    }
-    let vectorStatus = project.getVectorStatus();
-    if (job.vectorMode === 'defer' && vectorStatus.status === 'pending') {
-      await project.indexVectors();
-      vectorStatus = project.getVectorStatus();
-    }
+    const onProgress = (progress: KnowledgeIndexProgress) => upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: toOperationStage(progress.stage), status: progress.stage === 'error' ? 'error' : 'processing', percent: progress.percent, message: progress.message, filePath: progress.filePath || job.relativePath, chunkCount: progress.chunkCount, error: progress.vectorStatus?.error });
+    // 索引主循环与 kb-index-worker.cjs 共用 runIndexLoop 实现，子进程只负责进程壳与日志转发
+    const { vectorStatus } = await runIndexLoop(project, job, onProgress);
     if (vectorStatus.status === 'error') {
       const error = vectorStatus.error || 'HNSWLib 向量入库失败';
       upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'error', status: 'error', percent: 100, message: error, error });

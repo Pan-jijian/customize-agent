@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import * as Antd from 'antd';
-import { App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Row, Select, Skeleton, Space, Spin, Tabs, Tag, TreeSelect, Typography } from 'antd';
-import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, HistoryOutlined, FolderOutlined } from '@ant-design/icons';
-import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFilesTree, getPromptProjects, refineGeneratedDocument, resumeGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig, type PromptProject, type RefinePlan, type RefineSelection } from '@/lib/api';
+import { App, Button, Card, Col, Descriptions, Divider, Drawer, Empty, Form, Input, List, Progress, Row, Select, Skeleton, Space, Spin, Tabs, Tag, TreeSelect, Typography } from 'antd';
+import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, HistoryOutlined, FolderOutlined, TrophyOutlined, ExclamationCircleOutlined, WarningOutlined, ArrowDownOutlined, ArrowUpOutlined } from '@ant-design/icons';
+import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFilesTree, getPromptProjects, refineGeneratedDocument, resumeGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type ExportReport, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig, type PromptProject, type RefinePlan, type RefineSelection } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 export interface TreeApiResponseNode {
   key: string;
@@ -139,6 +139,14 @@ export default function DocumentsPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [templateValidations, setTemplateValidations] = useState<Record<string, DocumentTemplateValidation>>({});
+    // B1/U1：模板体检报告展开状态与卡片引用（按钮直达修复项滚动定位）
+    const [expandedHealthTplId, setExpandedHealthTplId] = useState<string | null>(null);
+    const tplCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+    // U2：工作流节点耗时记录（key → 开始/结束时间）
+    const stepTimingRef = useRef<Map<string, { startedAt: number; endedAt?: number }>>(new Map());
+    const [flowTick, setFlowTick] = useState(0);
+    // B3：导出闭环报告历史（记录详情展示与历史对比）
+    const [exportReports, setExportReports] = useState<ExportReport[]>([]);
   const currentProjectRoot = useMemo(() => prompts.find(item => item.selected)?.projectRoot || prompts.find(item => item.isCurrent)?.projectRoot || prompts[0]?.projectRoot || '', [prompts]);
   const [flowSteps, setFlowSteps] = useState<FlowStep[]>([]);
   const [activeFlowKey, setActiveFlowKey] = useState<string | null>(null);
@@ -147,6 +155,19 @@ export default function DocumentsPage() {
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerMode, setDrawerMode] = useState<'workflow' | 'editor'>('workflow');
+  // 工作流抽屉节点展开状态：按 step.key 记录，轮询刷新时保持用户展开选择
+  const [expandedStepKeys, setExpandedStepKeys] = useState<Set<string>>(new Set());
+  const toggleStepExpanded = (key: string) => {
+    setExpandedStepKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+  // 导出门禁阻断项完整列表展开状态
+  const [expandBlockingIssues, setExpandBlockingIssues] = useState(false);
+  // 提示词规则生效报告溯源展开状态
+  const [expandPromptRuleSources, setExpandPromptRuleSources] = useState(false);
   const [preparingTemplateId, setPreparingTemplateId] = useState<string | null>(null);
   const recoveryPollRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
   const lastWorkflowSignatureRef = useRef('');
@@ -178,6 +199,25 @@ export default function DocumentsPage() {
       getPromptProjects().then(items => setPrompts(items)),
     ]).catch(() => message.error(t('common.error'))).finally(() => setPageLoading(false));
   }, [message, t]);
+
+  // B1 运行前置校验：模板列表加载后预取每个模板的运行前校验结果，有阻断项时运行按钮直达修复
+  useEffect(() => {
+    if (templates.length === 0 || !currentProjectRoot) return;
+    let cancelled = false;
+    void (async () => {
+      const entries = await Promise.all(templates.map(async item => {
+        try {
+          const { validation } = await validateDocumentTemplate(item.id, currentProjectRoot);
+          return [item.id, validation] as const;
+        } catch { return null; }
+      }));
+      if (cancelled) return;
+      const next: Record<string, DocumentTemplateValidation> = {};
+      for (const entry of entries) if (entry) next[entry[0]] = entry[1];
+      setTemplateValidations(next);
+    })();
+    return () => { cancelled = true; };
+  }, [templates, currentProjectRoot]);
 
   useEffect(() => {
     if (!currentProjectRoot) return;
@@ -246,6 +286,7 @@ export default function DocumentsPage() {
       const { document } = await getGeneratedDocument(item.id, false, item.projectRoot || currentProjectRoot || undefined);
       if (!document) throw new Error('文档记录不存在');
       setDraft(document.draft || null); setContent(document.editedMarkdown || document.markdown);
+      setExportReports(document.exportReports || []); // B3：加载归档的导出闭环报告
     } catch { message.error(t('common.error')); }
     setDrawerOpen(true);
   };
@@ -276,13 +317,17 @@ export default function DocumentsPage() {
     if (s === 'error') return <DeleteOutlined />;
     return <span style={{ display: 'inline-block', height: 6, width: 6, borderRadius: '50%', background: 'var(--colorTextTertiary)' }} />;
   };
-  const stepDesc = (step: FlowStep) => (
-    <div>
-      {step.subtitle && <div style={{ marginBottom: 4 }}><Tag>{step.subtitle}</Tag></div>}
-      <div>{step.description}</div>
-      <div style={{ marginTop: 4 }}>{step.subSteps.map(item => <div key={item.key} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: item.status === 'process' ? 'var(--colorPrimary)' : 'var(--colorTextSecondary)' }}>{subIcon(item.status)}<span>{item.title}</span></div>)}</div>
-    </div>
-  );
+  const stepDesc = (step: FlowStep, expanded: boolean) => {
+    const descriptionTooLong = step.description.length > 240;
+    const visibleSubSteps = expanded ? step.subSteps : step.subSteps.slice(0, 8);
+    return (
+      <div>
+        {step.subtitle && <div style={{ marginBottom: 4 }}><Tag>{step.subtitle}</Tag></div>}
+        <div style={!expanded && descriptionTooLong ? { display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' } : undefined}>{step.description}</div>
+        <div style={{ marginTop: 4 }}>{visibleSubSteps.map(item => <div key={item.key} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: item.status === 'process' ? 'var(--colorPrimary)' : 'var(--colorTextSecondary)' }}>{subIcon(item.status)}<span>{item.title}</span></div>)}</div>
+      </div>
+    );
+  };
   const flowIcon = (s: FlowStep) => s.status === 'process' ? <LoadingOutlined /> : s.status === 'warning' ? <SafetyCertificateOutlined style={{ color: 'var(--colorWarning)' }} /> : s.icon;
   const antdStatus = (s: FlowStepStatus) => s === 'warning' ? 'finish' as const : s;
 
@@ -302,7 +347,7 @@ export default function DocumentsPage() {
     const progressText = stage.progress ? `${stage.progress.label || '进度'}：${stage.progress.current}/${stage.progress.total}` : '';
     const items = [...(progressText ? [progressText] : []), ...details];
     if (items.length === 0) return [{ key: `stage-${index}`, title: stagePromptName(stage) ? `提示词：${stagePromptName(stage)}` : stageActorName(stage), status }];
-    return items.slice(0, 8).map((title, itemIndex) => ({
+    return items.map((title, itemIndex) => ({
       key: `stage-${index}-${itemIndex}`,
       title,
       status: status === 'process' && itemIndex === 0 ? 'process' : status === 'error' && itemIndex === 0 ? 'error' : status === 'warning' ? 'warning' : status === 'process' ? 'finish' : status,
@@ -348,11 +393,49 @@ export default function DocumentsPage() {
     lastWorkflowSignatureRef.current = signature;
     setWorkflowRecord(record);
     const { steps, activeKey } = buildFlowStepsFromRecord(record);
+    trackStepTiming(steps); // U2：记录节点进入/离开 process 的时间，渲染耗时 chip
     setFlowSteps(steps); setActiveFlowKey(activeKey); setLoading(isDraftGenerating(record.status)); setSnap(steps, activeKey, isDraftGenerating(record.status));
     if (record.status === 'failed' || record.status === 'aborted') setDrawerMode('workflow');
     if ((record.status === 'completed' || record.status === 'warning') && record.draft) {
       setDraft(record.draft); setContent(record.editedMarkdown || record.markdown); setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null);
+      setExportReports(record.exportReports || []); // B3：同步归档的导出闭环报告
     }
+  };
+  // U2：节点耗时跟踪——进入 process 记录开始时间，离开时记录结束时间
+  const trackStepTiming = (steps: FlowStep[]) => {
+    const now = Date.now();
+    for (const step of steps) {
+      const prev = stepTimingRef.current.get(step.key);
+      if (step.status === 'process' && !prev) stepTimingRef.current.set(step.key, { startedAt: now });
+      else if ((step.status === 'finish' || step.status === 'error' || step.status === 'warning') && prev && !prev.endedAt) stepTimingRef.current.set(step.key, { ...prev, endedAt: now });
+    }
+  };
+  // U2：节点耗时 chip（运行中节点随 flowTick 每秒刷新）
+  const fmtMs = (ms: number) => {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return `${s} 秒`;
+    const m = Math.floor(s / 60);
+    return m < 60 ? `${m} 分 ${s % 60} 秒` : `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
+  };
+  const stepDurationChip = (step: FlowStep) => {
+    void flowTick; // 依赖每秒 tick 重渲染运行中节点的耗时
+    const timing = stepTimingRef.current.get(step.key);
+    if (!timing) return null;
+    const end = timing.endedAt ?? Date.now();
+    const text = fmtMs(end - timing.startedAt);
+    return <Tag className="border-0 bg-[var(--colorFillSecondary)] m-0">{timing.endedAt ? text : `${text}（运行中）`}</Tag>;
+  };
+  // U3 复用：对标分格式化（workflow 模式与 editor 模式质量卡片共用）
+  const formatBenchmarkValue = (value: number, unit: 'percent' | 'count' | 'perKChars') => {
+    if (unit === 'percent') return `${(value * 100).toFixed(1)}%`;
+    if (unit === 'perKChars') return `${value.toFixed(1)}/千字`;
+    return String(Math.round(value));
+  };
+  // B1：有阻断项的模板，运行按钮变"先修复 N 个问题"，点击直达体检报告并滚动到卡片
+  const jumpToTemplateFix = (id: string) => {
+    setTemplateId(id);
+    setExpandedHealthTplId(id);
+    window.setTimeout(() => tplCardRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
   };
   const stopRecoveredGenerationPolling = (documentId: string) => {
     const interval = recoveryPollRef.current.get(documentId);
@@ -396,6 +479,12 @@ export default function DocumentsPage() {
     }), 1400);
     return () => window.clearInterval(t);
   }, [activeFlowKey, loading]);
+  // U2：运行中每秒 tick，驱动节点耗时 chip 实时刷新
+  useEffect(() => {
+    if (!loading) return undefined;
+    const t = window.setInterval(() => setFlowTick(tick => tick + 1), 1000);
+    return () => window.clearInterval(t);
+  }, [loading]);
 
   const loadTemplateFiles = async (parentPath: string = '') => {
     setFileSearching(true);
@@ -497,6 +586,155 @@ export default function DocumentsPage() {
     }
   };
   const delDraft = async (item: GeneratedDocumentRecord) => { try { await deleteGeneratedDocument(item.id, item.projectRoot || currentProjectRoot || undefined); if (currentDocumentId === item.id) { setCurrentDocumentId(null); setDraft(null); setContent(''); } await loadDrafts(); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
+
+  // T6 大纲建议：一键把参考库建议的典型章节追加到模板（只添加、不改动现有章节）
+  const addSuggestedChapters = async (item: DocumentTemplate, suggestion: NonNullable<DocumentTemplateValidation['referenceStructureSuggestion']>) => {
+    try {
+      const existingTitles = new Set(item.chapters.map(chapter => chapter.title.trim()));
+      const additions = suggestion.missingHeadings.filter(heading => !existingTitles.has(heading.title.trim()));
+      if (additions.length === 0) { message.info('建议章节已全部存在'); return; }
+      const chapters = [...item.chapters, ...additions.map(heading => ({ id: `ch-ref-${Date.now()}-${item.chapters.length}`, title: heading.title, purpose: '', queries: [], requiredFacts: [] }))];
+      const r = await saveDocumentTemplate({ ...item, chapters });
+      setTemplates(r.templates);
+      // 清除旧校验结果，模板列表更新后由校验 effect 自动刷新
+      setTemplateValidations(prev => { const next = { ...prev }; delete next[item.id]; return next; });
+      message.success(t('common.success'));
+    } catch (e) { if (e instanceof Error) message.error(e.message); }
+  };
+
+  // B1/B2/U1：模板体检报告面板——分层展示阻断/警告、绑定链路图（模板→角色→提示词→状态）、策略预估
+  const renderTemplateHealthPanel = (item: DocumentTemplate) => {
+    const validation = templateValidations[item.id];
+    if (!validation) return null;
+    const errors = validation.issues.filter(issue => issue.level === 'error');
+    const warnings = validation.issues.filter(issue => issue.level === 'warning');
+    const expanded = expandedHealthTplId === item.id;
+    const roleDiagnostics = validation.roleDiagnostics || [];
+    const promptMap = new Map<string, DocumentTemplateValidation['promptDiagnostics']>();
+    for (const prompt of validation.promptDiagnostics) {
+      const list = promptMap.get(prompt.roleId) || [];
+      list.push(prompt);
+      promptMap.set(prompt.roleId, list);
+    }
+    const fixAction = (issueMessage: string): { label: string; href?: string; onClick?: () => void } | undefined => {
+      if (/资料包|项目资料|知识库|索引/u.test(issueMessage)) return { label: '配置模板', onClick: () => openEditor(item) };
+      if (/提示词|绑定/u.test(issueMessage)) return { label: '提示词库', href: '/prompt' };
+      if (/项目角色配置/u.test(issueMessage)) return { label: '角色配置', href: '/document-roles' };
+      return undefined;
+    };
+    const strategy = validation.strategyPreview;
+    const modeColor = strategy?.mode === 'strict' ? 'error' : strategy?.mode === 'fast' ? 'blue' : strategy?.mode === 'longform' ? 'purple' : 'green';
+    return (
+      <div onClick={(e) => e.stopPropagation()} className="flex flex-col items-start gap-2 w-full">
+        <div className={`inline-flex items-center gap-2 p-1.5 px-3 rounded-lg border text-xs ${errors.length ? 'border-red-200 bg-red-50/50' : warnings.length ? 'border-yellow-200 bg-yellow-50/50' : 'border-green-200 bg-green-50/50'}`}>
+          <span className="font-medium">{errors.length ? `检查未通过（${errors.length} 项阻断）` : warnings.length ? `存在警告（${warnings.length} 项）` : '检查通过'}</span>
+          <span className="text-[var(--colorTextTertiary)]">|</span>
+          <span>项目资料 {validation.fileDiagnostics.length}</span>
+          <span>提示词 {validation.promptDiagnostics.length}</span>
+          <span>角色链路 {roleDiagnostics.length}</span>
+          {strategy && <><span className="text-[var(--colorTextTertiary)]">|</span><Tag color={modeColor} className="border-0 m-0">{strategy.mode} 策略预估</Tag></>}
+          {!errors.length && warnings.length > 0 && (
+            <>
+              <span className="text-[var(--colorTextTertiary)]">|</span>
+              <span className="text-blue-500 cursor-pointer hover:underline" onClick={() => { void runTemplateWithValidation(item.id); }}>忽略警告并运行</span>
+            </>
+          )}
+          <span className="text-blue-500 cursor-pointer hover:underline" onClick={() => setExpandedHealthTplId(expanded ? null : item.id)}>{expanded ? <ArrowUpOutlined /> : <ArrowDownOutlined />}{expanded ? '收起体检' : '体检报告'}</span>
+        </div>
+        {expanded && (
+          <div className="w-full flex flex-col gap-3 rounded-xl border border-[var(--borderColor)] bg-[var(--colorBgContainer)] p-3">
+            {/* U1：阻断项（直达修复） */}
+            {errors.length > 0 && (
+              <div className="flex flex-col gap-1">
+                <span className="text-xs font-bold text-[var(--colorError)]">阻断项（{errors.length}）— 必须修复后才能运行</span>
+                {errors.map(issue => {
+                  const action = fixAction(issue.message);
+                  return (
+                    <div key={issue.message} className="flex items-start justify-between gap-2 rounded-lg border border-red-200 bg-red-50/40 px-2.5 py-1.5 text-xs">
+                      <span className="text-[var(--colorText)]">{issue.message}</span>
+                      {action && (action.href
+                        ? <a className="shrink-0 text-red-500 hover:underline" href={action.href}>{action.label} ›</a>
+                        : <span className="shrink-0 text-red-500 cursor-pointer hover:underline" onClick={action.onClick}>{action.label} ›</span>)}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {/* U1：警告项 */}
+            {warnings.length > 0 && (
+              <div className="flex flex-col gap-1">
+                <span className="text-xs font-bold text-[var(--colorWarning)]">警告项（{warnings.length}）— 可忽略并继续运行</span>
+                {warnings.map(issue => (
+                  <div key={issue.message} className="rounded-lg border border-yellow-200 bg-yellow-50/40 px-2.5 py-1.5 text-xs text-[var(--colorTextSecondary)]">{issue.message}</div>
+                ))}
+              </div>
+            )}
+            {/* B2：绑定链路图（模板→角色配置→角色→提示词→状态） */}
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-bold text-[var(--colorText)]">绑定链路（{validation.configName || '未绑定角色配置'}）</span>
+              {roleDiagnostics.length === 0 ? (
+                <span className="text-xs text-[var(--colorTextTertiary)]">未配置提示词角色链路</span>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  {roleDiagnostics.map(roleDiag => {
+                    const prompts = promptMap.get(roleDiag.roleId) || [];
+                    return (
+                      <div key={roleDiag.roleId} className="flex items-center gap-1.5 text-xs flex-wrap rounded-lg border border-[var(--borderColor)] bg-[var(--colorFillQuaternary)] px-2 py-1">
+                        <span className="text-[var(--colorTextSecondary)]">{item.name}</span>
+                        <span className="text-[var(--colorTextTertiary)]">→</span>
+                        <span className="text-[var(--colorTextSecondary)]">{validation.configName || '角色配置'}</span>
+                        <span className="text-[var(--colorTextTertiary)]">→</span>
+                        <span className={roleDiag.status === 'ok' ? 'text-[var(--colorText)]' : 'text-[var(--colorError)] font-medium'}>{roleDiag.roleName || roleDiag.roleId}</span>
+                        <span className="text-[var(--colorTextTertiary)]">→</span>
+                        {prompts.length === 0 ? (
+                          <Tag color="error" className="border-0 m-0">{roleDiag.status === 'missing_resource' ? '角色未绑定资源' : roleDiag.status === 'role_missing' ? '角色不存在' : '未绑定提示词'}</Tag>
+                        ) : (
+                          <span className="flex items-center gap-1 flex-wrap">
+                            {prompts.map(prompt => (
+                              <Tag key={prompt.promptId} color={prompt.exists && prompt.contentLength > 0 ? 'success' : prompt.exists ? 'warning' : 'error'} className="border-0 m-0" title={prompt.contentPreview || prompt.promptId}>
+                                {prompt.exists ? `${prompt.promptTitle || prompt.promptId} ${prompt.contentLength}字符` : `${prompt.promptId} 已删除`}
+                              </Tag>
+                            ))}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            {/* U1：策略预估 */}
+            {strategy && (
+              <div className="flex flex-col gap-1 rounded-lg border border-blue-200 bg-blue-50/40 px-2.5 py-2 text-xs">
+                <span className="font-bold text-[var(--colorText)]">生成策略预估（生成前体检）</span>
+                <span className="text-[var(--colorTextSecondary)]">约 {strategy.chapterCount} 章 / 目标 {strategy.targetWords >= 10000 ? `${(strategy.targetWords / 10000).toFixed(1)} 万字` : `${strategy.targetWords} 字`}；章节并发 {strategy.chapterConcurrency}；审查流水线 {strategy.reviewConcurrency} 路；每章证据预算 {Math.round(strategy.evidenceFloorChars / 1000)}k-{Math.round(strategy.evidenceCeilingChars / 1000)}k 字符；修复轮次预算 {strategy.repairRoundBudget} 轮{strategy.globalReviewSamplingRate < 1 ? `；全局审查抽检 ${Math.round(strategy.globalReviewSamplingRate * 100)}%` : ''}</span>
+                {strategy.triggers.map(trigger => <span key={trigger} className="text-[var(--colorTextTertiary)]">· {trigger}</span>)}
+              </div>
+            )}
+            {/* T6 大纲建议：参考库典型章节缺失建议（仅建议、一键添加、不阻断运行） */}
+            {(() => {
+              const suggestion = validation.referenceStructureSuggestion;
+              if (!suggestion || suggestion.missingHeadings.length === 0) return null;
+              return (
+                <div className="flex flex-col gap-1.5 rounded-lg border border-purple-200 bg-purple-50/40 px-2.5 py-2 text-xs">
+                  <span className="font-bold text-[var(--colorText)]">参考库大纲建议（{suggestion.projectType} · {suggestion.sourceCount} 份同类工程画像）</span>
+                  <span className="text-[var(--colorTextSecondary)]">以下章节出现于半数以上同类工程但当前模板缺失，仅建议、不影响运行：</span>
+                  <span className="flex items-center gap-1 flex-wrap">
+                    {suggestion.missingHeadings.map(heading => (
+                      <Tag key={heading.title} className="border-0 m-0 bg-white">{heading.title} · {Math.round(heading.ratio * 100)}% 样本</Tag>
+                    ))}
+                  </span>
+                  <span>
+                    <Button size="small" type="primary" ghost icon={<PlusOutlined />} onClick={() => void addSuggestedChapters(item, suggestion)} className="rounded-md">一键添加到模板</Button>
+                  </span>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const waitForDoc = async (docId: string, task?: GenerationTaskState) => {
     const startedAt = Date.now();
@@ -697,6 +935,13 @@ export default function DocumentsPage() {
       const payload = { documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, useClientMarkdown: true, projectRoot: draft.projectRoot || currentProjectRoot || undefined };
       const blob = await exportDocument(payload);
       dl(blob, `${draft.title}.${ext}`, mimes[fmt]);
+      // B3：导出成功后刷新归档的闭环报告，展示最新一次导出与历史对比
+      if (currentDocumentId) {
+        try {
+          const { document } = await getGeneratedDocument(currentDocumentId, false, draft.projectRoot || currentProjectRoot || undefined);
+          if (document) setExportReports(document.exportReports || []);
+        } catch { /* 报告刷新失败不影响导出 */ }
+      }
     } catch (e) { message.error(e instanceof Error ? e.message : t('common.error')); } finally { setExporting(null); }
   };
   const saveDraft = async () => {
@@ -813,7 +1058,7 @@ export default function DocumentsPage() {
           ) : (
             <div className="grid grid-cols-1 gap-4">
               {templates.map(item => (
-                <div key={item.id} 
+                <div key={item.id} ref={(el) => { tplCardRefs.current[item.id] = el; }} 
                      className={`group flex items-center p-4 rounded-2xl transition-all cursor-pointer ${templateId === item.id ? 'bg-[var(--colorBgSelected)] shadow-md' : 'bg-[var(--colorBgContainer)] hover:bg-[var(--colorBgHover)] shadow-sm hover:shadow-md'}`}
                      onClick={() => setTemplateId(item.id)}>
                   <div className="flex-1 min-w-0 pr-4">
@@ -830,33 +1075,7 @@ export default function DocumentsPage() {
                         </div>
                     )}
 
-                    {templateValidations[item.id] && (
-                        <div onClick={(e) => e.stopPropagation()} className="flex flex-col items-start gap-2">
-                          <div className={`inline-flex items-center gap-2 p-1.5 px-3 rounded-lg border text-xs ${templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? 'border-red-200 bg-red-50/50' : templateValidations[item.id]!.issues.length ? 'border-yellow-200 bg-yellow-50/50' : 'border-green-200 bg-green-50/50'}`}>
-                              <span className="font-medium">{templateValidations[item.id]!.issues.some(issue => issue.level === 'error') ? '检查未通过' : templateValidations[item.id]!.issues.length ? '存在警告' : '检查通过'}</span>
-                              <span className="text-[var(--colorTextTertiary)]">|</span>
-                              <span>项目资料 {templateValidations[item.id]!.fileDiagnostics.length}</span>
-                              <span>提示词 {templateValidations[item.id]!.promptDiagnostics.length}</span>
-                              {!templateValidations[item.id]!.issues.some(issue => issue.level === 'error') && templateValidations[item.id]!.issues.length > 0 && (
-                                  <>
-                                    <span className="text-[var(--colorTextTertiary)]">|</span>
-                                    <span className="text-blue-500 cursor-pointer hover:underline" onClick={() => { void runTemplateWithValidation(item.id); }}>忽略警告并运行</span>
-                                  </>
-                              )}
-                          </div>
-                          {templateValidations[item.id]!.promptDiagnostics.length > 0 && (
-                            <div className="flex max-w-full flex-col gap-1 rounded-lg border border-[var(--borderColor)] bg-[var(--colorFillQuaternary)] px-3 py-2 text-xs text-[var(--colorTextSecondary)]">
-                              <span className="font-medium text-[var(--colorText)]">实际提示词绑定</span>
-                              {templateValidations[item.id]!.promptDiagnostics.slice(0, 3).map(prompt => (
-                                <div key={`${prompt.roleId}-${prompt.promptId}`} className="max-w-full truncate" title={`${prompt.roleName || prompt.roleId} -> ${prompt.promptId}\n${prompt.contentPreview || ''}`}>
-                                  {prompt.roleName || prompt.roleId} → {prompt.promptId} · {prompt.promptTitle || '未命名提示词'} · {prompt.contentLength} 字符{prompt.contentHash ? ` · ${prompt.contentHash}` : ''}
-                                </div>
-                              ))}
-                              {templateValidations[item.id]!.promptDiagnostics.length > 3 && <span>另有 {templateValidations[item.id]!.promptDiagnostics.length - 3} 个提示词绑定</span>}
-                            </div>
-                          )}
-                        </div>
-                    )}
+                    {renderTemplateHealthPanel(item)}
                   </div>
 
                   <div className={`flex shrink-0 flex-nowrap items-center gap-2 whitespace-nowrap transition-opacity ${templateId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} onClick={e => e.stopPropagation()}>
@@ -865,7 +1084,15 @@ export default function DocumentsPage() {
                       <ConfirmPopover title={t('documents.deleteTemplateConfirm')} onConfirm={(e) => { e?.stopPropagation(); void delTpl(item.id); }}>
                           <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} className="rounded-md" />
                       </ConfirmPopover>
-                      <Button size="small" type="primary" icon={preparingTemplateId === item.id ? <LoadingOutlined /> : <PlayCircleOutlined />} loading={preparingTemplateId === item.id} disabled={Boolean(preparingTemplateId) && preparingTemplateId !== item.id} onClick={(e) => { e.stopPropagation(); void runTemplateWithValidation(item.id); }} className="min-w-[72px] rounded-md justify-center">{preparingTemplateId === item.id ? '准备中' : '运行'}</Button>
+                      {(() => {
+                        const validation = templateValidations[item.id];
+                        const errorCount = validation?.issues.filter(issue => issue.level === 'error').length ?? 0;
+                        if (errorCount > 0) {
+                          // B1：有阻断项时按钮变"先修复 N 个问题"，点击直达体检报告修复项
+                          return <Button size="small" danger icon={<WarningOutlined />} disabled={Boolean(preparingTemplateId) && preparingTemplateId !== item.id} onClick={(e) => { e.stopPropagation(); jumpToTemplateFix(item.id); }} className="min-w-[108px] rounded-md justify-center">先修复 {errorCount} 个问题</Button>;
+                        }
+                        return <Button size="small" type="primary" icon={preparingTemplateId === item.id ? <LoadingOutlined /> : <PlayCircleOutlined />} loading={preparingTemplateId === item.id} disabled={Boolean(preparingTemplateId) && preparingTemplateId !== item.id} onClick={(e) => { e.stopPropagation(); void runTemplateWithValidation(item.id); }} className="min-w-[72px] rounded-md justify-center">{preparingTemplateId === item.id ? '准备中' : '运行'}</Button>;
+                      })()}
                   </div>
                 </div>
               ))}
@@ -962,15 +1189,24 @@ export default function DocumentsPage() {
           {/* 工作流模式：执行步骤 */}
           {drawerMode === 'workflow' && flowSteps.length > 0 && (
             <VerticalStack gap={10}>
-              {flowSteps.map((s, index) => (
-                <div key={s.key} style={{ display: 'flex', gap: 10, padding: 10, border: '1px solid var(--colorBorderSecondary)', borderRadius: 10, background: index === activeFlowIndex ? 'var(--colorFillAlter)' : 'var(--colorBgContainer)' }}>
-                  <span>{flowIcon(s)}</span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <Space wrap><Text strong>{s.title}</Text><Tag color={s.status === 'finish' ? 'success' : s.status === 'error' ? 'error' : s.status === 'warning' ? 'warning' : s.status === 'process' ? 'processing' : 'default'}>{antdStatus(s.status)}</Tag></Space>
-                    <div style={{ marginTop: 4, color: 'var(--colorTextSecondary)', fontSize: 12, whiteSpace: 'pre-wrap' }}>{stepDesc(s)}</div>
+              {flowSteps.map((s, index) => {
+                const stepExpanded = expandedStepKeys.has(s.key);
+                const hasMoreContent = s.subSteps.length > 8 || s.description.length > 240;
+                return (
+                  <div key={s.key} style={{ display: 'flex', gap: 10, padding: 10, border: '1px solid var(--colorBorderSecondary)', borderRadius: 10, background: index === activeFlowIndex ? 'var(--colorFillAlter)' : 'var(--colorBgContainer)' }}>
+                    <span>{flowIcon(s)}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <Space wrap><Text strong>{s.title}</Text><Tag color={s.status === 'finish' ? 'success' : s.status === 'error' ? 'error' : s.status === 'warning' ? 'warning' : s.status === 'process' ? 'processing' : 'default'}>{antdStatus(s.status)}</Tag>{stepDurationChip(s)}</Space>
+                      <div style={{ marginTop: 4, color: 'var(--colorTextSecondary)', fontSize: 12, whiteSpace: 'pre-wrap' }}>{stepDesc(s, stepExpanded)}</div>
+                      {hasMoreContent && (
+                        <Button size="small" type="link" style={{ padding: 0, height: 'auto', marginTop: 6 }} onClick={() => toggleStepExpanded(s.key)}>
+                          {stepExpanded ? '收起' : s.subSteps.length > 8 ? `更多（${s.subSteps.length} 条详情）` : '更多'}
+                        </Button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </VerticalStack>
           )}
 
@@ -987,22 +1223,139 @@ export default function DocumentsPage() {
             </Card>
           )}
 
-          {drawerMode === 'workflow' && workflowRecord?.draft?.exportGate?.passed === false && (
-            <NoticeBox type="error" title="生成已完成，但导出门禁未通过">
-              <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                <span>{`阻断项：${workflowRecord.draft.exportGate.blockingIssues?.slice(0, 6).map(item => item.message).join('；') || workflowRecord.draft.exportGate.checklist.filter(item => !item.passed).map(item => item.label).join('；') || '存在阻断级校验错误'}。可点击继续生成触发自动修复，或在“校验”页查看完整问题。`}</span>
-                {canResumeDraft(workflowRecord) && <Button type="primary" size="small" icon={<PlayCircleOutlined />} loading={loading} onClick={() => { void handleResumeDraft(workflowRecord); }}>继续生成 / 自动修复</Button>}
-              </Space>
-            </NoticeBox>
-          )}
+          {drawerMode === 'workflow' && workflowRecord?.draft?.exportGate?.passed === false && (() => {
+            const gateBlockingItems = workflowRecord.draft.exportGate.blockingIssues?.map(item => item.message)
+              || workflowRecord.draft.exportGate.checklist.filter(item => !item.passed).map(item => item.label)
+              || ['存在阻断级校验错误'];
+            const visibleBlockingItems = expandBlockingIssues ? gateBlockingItems : gateBlockingItems.slice(0, 6);
+            return (
+              <NoticeBox type="error" title="生成已完成，但导出门禁未通过">
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  <span>{`阻断项：${visibleBlockingItems.join('；')}${gateBlockingItems.length > 6 && !expandBlockingIssues ? `…（共 ${gateBlockingItems.length} 项）` : ''}。可点击继续生成触发自动修复，或在“校验”页查看完整问题。`}</span>
+                  {gateBlockingItems.length > 6 && (
+                    <Button size="small" type="link" style={{ padding: 0, height: 'auto', alignSelf: 'flex-start' }} onClick={() => setExpandBlockingIssues(prev => !prev)}>
+                      {expandBlockingIssues ? '收起' : `查看全部 ${gateBlockingItems.length} 项`}
+                    </Button>
+                  )}
+                  {canResumeDraft(workflowRecord) && <Button type="primary" size="small" icon={<PlayCircleOutlined />} loading={loading} onClick={() => { void handleResumeDraft(workflowRecord); }}>继续生成 / 自动修复</Button>}
+                </Space>
+              </NoticeBox>
+            );
+          })()}
 
           {drawerMode === 'workflow' && workflowRecord?.reviewMetadata?.diagnostics && (
             <NoticeBox type="info" title="后台自动优化">{`策略：${workflowRecord.reviewMetadata.diagnostics.strategy.mode}；LLM 调用 ${workflowRecord.reviewMetadata.diagnostics.llm.calls} 次；噪声过滤 ${workflowRecord.reviewMetadata.diagnostics.evidence?.filteredNoise || 0} 条；质量门禁 阻断${workflowRecord.reviewMetadata.diagnostics.quality?.blockingCount || 0}/重要${workflowRecord.reviewMetadata.diagnostics.quality?.importantCount || 0}/轻微${workflowRecord.reviewMetadata.diagnostics.quality?.minorCount || 0}；自动限流调整 ${workflowRecord.reviewMetadata.diagnostics.llm.limitAdjustments} 次。审查与诊断信息仅用于系统修复，不会写入正文或导出文件。`}</NoticeBox>
           )}
 
+          {drawerMode === 'workflow' && workflowRecord?.draft?.promptRules && (() => {
+            const promptRules = workflowRecord.draft.promptRules;
+            const summary = promptRules.executionSummary || [];
+            const sourceEntries = Object.entries(promptRules.ruleSources || {}).filter(([, items]) => items.length > 0);
+            const hasSources = sourceEntries.length > 0;
+            const visibleSources = expandPromptRuleSources ? sourceEntries : sourceEntries.slice(0, 3);
+            return (
+              <Card size="small" title={<Space size={6}><SafetyCertificateOutlined style={{ color: 'var(--colorAccent)' }} />提示词规则生效报告{summary.length > 0 && <Tag style={{ margin: 0 }}>{summary.length} 条</Tag>}</Space>} styles={{ body: { padding: 12 } }}>
+                <VerticalStack gap={6}>
+                  {summary.length > 0 && summary.map((line, index) => (
+                    <div key={index} style={{ display: 'flex', gap: 6, fontSize: 12, color: 'var(--colorText)', lineHeight: 1.6 }}>
+                      <CheckCircleOutlined style={{ color: 'var(--colorSuccess)', marginTop: 4 }} /><span>{line}</span>
+                    </div>
+                  ))}
+                  {hasSources && (
+                    <>
+                      <Divider style={{ margin: '4px 0' }} />
+                      <Text type="secondary" style={{ fontSize: 12 }}>规则溯源（自动从以下提示词中抽取）：</Text>
+                      {visibleSources.map(([key, items]) => (
+                        <div key={key} style={{ fontSize: 12, color: 'var(--colorTextSecondary)', lineHeight: 1.6 }}>
+                          <Text strong style={{ fontSize: 12 }}>{key}</Text>：{items.map(item => `${item.roleId}「${item.matchedText.length > 24 ? `${item.matchedText.slice(0, 24)}…` : item.matchedText}」`).join('、')}
+                        </div>
+                      ))}
+                      {sourceEntries.length > 3 && (
+                        <Button size="small" type="link" style={{ padding: 0, height: 'auto', alignSelf: 'flex-start' }} onClick={() => setExpandPromptRuleSources(prev => !prev)}>
+                          {expandPromptRuleSources ? '收起溯源' : `查看全部溯源（${sourceEntries.length} 类）`}
+                        </Button>
+                      )}
+                    </>
+                  )}
+                  {!hasSources && summary.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>未从提示词中识别到额外硬规则，使用系统默认质量规则。</Text>}
+                </VerticalStack>
+              </Card>
+            );
+          })()}
+
+          {/* 工作流模式：质量对标卡（与模板参考库同工程类型基准对比） */}
+          {drawerMode === 'workflow' && workflowRecord?.draft?.reviewMetadata?.qualityBenchmark && (() => {
+            const benchmark = workflowRecord.draft.reviewMetadata.qualityBenchmark;
+            return (
+              <Card size="small" title={<Space size={6}><TrophyOutlined style={{ color: '#faad14' }} />质量对标<Tag color="gold" style={{ margin: 0 }}>{benchmark.projectType}参考</Tag></Space>} extra={<Text strong style={{ fontSize: 15, color: benchmark.overallScore >= 80 ? 'var(--colorSuccess)' : 'var(--colorWarning)' }}>{benchmark.overallScore} 分</Text>} styles={{ body: { padding: 12 } }}>
+                <VerticalStack gap={8}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>与模板参考库 {benchmark.referenceSourceCount} 份同类入围文件的质量画像对比：</Text>
+                  {benchmark.items.map(item => (
+                    <div key={item.key} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{ width: 86, fontSize: 12, color: 'var(--colorTextSecondary)', flexShrink: 0 }}>{item.label}</div>
+                      <Progress percent={Math.min(100, item.score)} size="small" status={item.passed ? 'normal' : 'exception'} style={{ flex: 1, margin: 0 }} showInfo={false} />
+                      <div style={{ width: 96, fontSize: 12, textAlign: 'right', flexShrink: 0, color: item.passed ? 'var(--colorSuccess)' : 'var(--colorWarning)' }}>
+                        {item.passed ? <CheckCircleOutlined style={{ marginRight: 4 }} /> : <ExclamationCircleOutlined style={{ marginRight: 4 }} />}
+                        {formatBenchmarkValue(item.generated, item.unit)}
+                      </div>
+                    </div>
+                  ))}
+                  <Text type="secondary" style={{ fontSize: 12 }}>基准参考值：{benchmark.items.map(item => `${item.label} ${formatBenchmarkValue(item.reference, item.unit)}`).join('；')}</Text>
+                </VerticalStack>
+              </Card>
+            );
+          })()}
+
           {/* 工作流模式：步骤出现前的加载动画 */}
           {drawerMode === 'workflow' && loading && flowSteps.length === 0 && (
             <div style={{ textAlign: 'center', padding: 40 }}><Spin /><div style={{ marginTop: 12, color: 'var(--colorTextSecondary)' }}>正在准备生成…</div></div>
+          )}
+
+          {/* U3：运行后质量卡片（editor 模式：对标分 + 修复记录） */}
+          {drawerMode === 'editor' && draft?.reviewMetadata?.qualityBenchmark && (() => {
+            const benchmark = draft.reviewMetadata.qualityBenchmark;
+            const quality = draft.reviewMetadata.diagnostics?.quality;
+            const repairDetails = (draft.executionStages || [])
+              .filter(stage => stage.type === 'llm_review' || stage.roleId === 'quality-repair')
+              .flatMap(stage => (stage.details || []).filter(detail => /修复|补写|补齐|改进|调整/u.test(detail)))
+              .slice(0, 8);
+            return (
+              <Card size="small" title={<Space size={6}><TrophyOutlined style={{ color: '#faad14' }} />运行质量报告<Tag color="gold" className="border-0 m-0">{benchmark.projectType}对标</Tag></Space>} extra={<Text strong style={{ fontSize: 15, color: benchmark.overallScore >= 80 ? 'var(--colorSuccess)' : 'var(--colorWarning)' }}>{benchmark.overallScore} 分</Text>} styles={{ body: { padding: 12 } }}>
+                <VerticalStack gap={8}>
+                  <Space wrap size={6}>
+                    <Tag className="border-0 bg-[var(--colorFillSecondary)] m-0">对标库 {benchmark.referenceSourceCount} 份同类文件</Tag>
+                    {quality && <Tag color={quality.blockingCount > 0 ? 'error' : 'success'} className="border-0 m-0">审查修复 {quality.repairedCount} 项 / 问题 {quality.blockingCount + quality.importantCount + quality.minorCount} 项</Tag>}
+                    <Tag className="border-0 bg-[var(--colorFillSecondary)] m-0">{benchmark.items.filter(item => item.passed).length}/{benchmark.items.length} 指标达标</Tag>
+                  </Space>
+                  {repairDetails.length > 0 && (
+                    <div className="flex flex-col gap-1 rounded-lg border border-[var(--borderColor)] bg-[var(--colorFillQuaternary)] px-3 py-2">
+                      <span className="text-xs font-medium text-[var(--colorText)]">修复记录（审查阶段自动修复的内容）</span>
+                      {repairDetails.map((detail, index) => <span key={index} className="text-xs text-[var(--colorTextSecondary)]">· {detail}</span>)}
+                    </div>
+                  )}
+                  <Text type="secondary" style={{ fontSize: 12 }}>基准参考值：{benchmark.items.map(item => `${item.label} ${formatBenchmarkValue(item.reference, item.unit)}`).join('；')}</Text>
+                </VerticalStack>
+              </Card>
+            );
+          })()}
+
+          {/* B3：导出后闭环报告（总用时/质量对标分/规则执行摘要/修复记录归档，历史对比） */}
+          {drawerMode === 'editor' && exportReports.length > 0 && (
+            <Card size="small" title={<Space size={6}><DownloadOutlined />导出闭环报告<Tag className="border-0 bg-[var(--colorFillSecondary)] m-0">{exportReports.length}</Tag></Space>} styles={{ body: { padding: 12 } }}>
+              <VerticalStack gap={6}>
+                {[...exportReports].reverse().map((report, index) => (
+                  <div key={`${report.exportedAt}-${index}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--borderColor)] bg-[var(--colorFillQuaternary)] px-3 py-2 text-xs">
+                    <Text strong>{report.format.toUpperCase()}</Text>
+                    <Tag color="blue" className="border-0 m-0">{new Date(report.exportedAt).toLocaleString()}</Tag>
+                    {report.durationMs !== undefined && <span className="text-[var(--colorTextSecondary)]">总用时 {fmtMs(report.durationMs)}</span>}
+                    {report.benchmarkScore !== undefined && <span className="text-[var(--colorTextSecondary)]">质量对标 {report.benchmarkScore} 分</span>}
+                    {report.repairedCount !== undefined && <span className="text-[var(--colorTextSecondary)]">修复 {report.repairedCount} 项{report.blockingCount !== undefined ? `（阻断 ${report.blockingCount}）` : ''}</span>}
+                    {report.ruleSummary && report.ruleSummary.length > 0 && <span className="text-[var(--colorTextSecondary)]">规则 {report.ruleSummary.length} 条</span>}
+                    {report.gatePassed === false && <Tag color="error" className="border-0 m-0">门禁未过</Tag>}
+                  </div>
+                ))}
+              </VerticalStack>
+            </Card>
           )}
 
           {/* 两种模式：编辑器（生成后或从草稿打开） */}

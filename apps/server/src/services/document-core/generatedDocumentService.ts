@@ -72,6 +72,26 @@ export interface GeneratedDocumentRecord {
   error?: string;
   warningIssues?: string[];
   maxEvidencePerChapter?: number;
+  /** 导出后闭环报告历史（B3：归档总用时/质量对标分/规则执行摘要/修复记录，支持历史对比） */
+  exportReports?: ExportReport[];
+}
+
+/** 导出后闭环报告：归档到记录详情，支持与历史版本对比 */
+export interface ExportReport {
+  format: 'markdown' | 'html' | 'pdf' | 'docx';
+  exportedAt: number;
+  /** 生成总用时（毫秒） */
+  durationMs?: number;
+  /** 质量对标分（0-100） */
+  benchmarkScore?: number;
+  benchmarkSourceCount?: number;
+  /** 提示词规则执行摘要 */
+  ruleSummary?: string[];
+  /** 审查修复记录：已修复问题数 */
+  repairedCount?: number;
+  /** 审查修复记录：阻断问题数 */
+  blockingCount?: number;
+  gatePassed?: boolean;
 }
 
 function failRunningStages(stages: GeneratedDocumentRecord['executionStages'], message: string): GeneratedDocumentRecord['executionStages'] {

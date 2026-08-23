@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { constructionOrgChapterRulePrompt, constructionOrgControlLoopIssues, constructionOrgGenericLanguageIssues, replaceConstructionOrgGenericPhrases } from '../src/services/document-workflow/constructionOrgQualityRules';
+import { constructionOrgChapterRulePrompt, constructionOrgControlLoopIssues, constructionOrgGenericLanguageIssues } from '../src/services/document-workflow/constructionOrgQualityRules';
 import { constructionOrgConsistencyIssues } from '../src/services/document-workflow/constructionOrgConsistency';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplateChapter } from '../src/services/document-workflow/types';
 
@@ -38,15 +38,9 @@ describe('construction organization quality rules', () => {
   });
 
   it('detects generic language and missing control loops', () => {
-    const chapters = [draft('安全管理措施', '本章将加强管理，确保质量，做好安全管理。', ['安全管理、风险分级与危大工程管控'])];
+    const chapters = [draft('安全管理措施', '本章将精心组织、科学管理，确保质量，做好安全管理。', ['安全管理、风险分级与危大工程管控'])];
     expect(constructionOrgGenericLanguageIssues(chapters)[0]?.message).toContain('空泛套话');
     expect(constructionOrgControlLoopIssues(chapters)[0]?.message).toContain('安全闭环');
-  });
-
-  it('replaces weak generic phrases in generated content', () => {
-    const content = replaceConstructionOrgGenericPhrases('加强管理，严格控制，及时处理。');
-    expect(content).toContain('责任岗位');
-    expect(content).toContain('复查销项');
   });
 
   it('flags consistency risk against known project facts', () => {

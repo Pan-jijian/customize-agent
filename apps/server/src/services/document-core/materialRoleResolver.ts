@@ -48,17 +48,3 @@ export function resolveTemplateMaterialRoles(template: DocumentTemplate, summary
     };
   });
 }
-
-function clampRate(value: number) {
-  return Math.max(0, Math.min(1, value));
-}
-
-export function materialRoleSatisfactionRate(resolved: ResolvedMaterialRole[]) {
-  if (resolved.length === 0) return 1;
-  const required = resolved.filter(item => item.required);
-  const optional = resolved.filter(item => !item.required);
-  const requiredScore = required.length ? required.filter(item => item.satisfied).length / required.length : 1;
-  const optionalScore = optional.length ? optional.filter(item => item.satisfied).length / optional.length : 1;
-  const weakRequiredPenalty = required.some(item => item.weak) ? 0.05 : 0;
-  return clampRate((requiredScore * 0.75) + (optionalScore * 0.2) + 0.05 - weakRequiredPenalty);
-}

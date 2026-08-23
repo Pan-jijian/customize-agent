@@ -3,8 +3,7 @@ import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } fro
 
 export const CONSTRUCTION_ORG_GENERIC_PHRASES = [
   '精心组织', '科学管理', '精益求精', '全力保障', '高效推进', '力争一流',
-  '完善体系', '最大限度', '显著提升', '大力落实', '充分确保', '严格把控',
-  '加强管理', '提高意识', '强化监督', '持续完善', '定期检查', '及时处理',
+  '最大限度', '显著提升', '大力落实', '充分确保', '严格把控',
 ];
 
 const CONTROL_LOOP_RULES: Array<{ pattern: RegExp; label: string; required: string[]; prompt: string }> = [
@@ -220,17 +219,4 @@ export function constructionOrgBonusModuleIssues(chapters: DocumentDraftChapter[
     }
   }
   return issues;
-}
-
-export function replaceConstructionOrgGenericPhrases(content: string) {
-  let next = content;
-  const replacements: Array<[RegExp, string]> = [
-    [/加强管理/gu, '明确责任岗位、执行动作、检查频次和整改闭环'],
-    [/严格控制/gu, '按标准限值、检查频次和复查销项要求控制'],
-    [/确保质量/gu, '通过样板引路、三检制度、隐蔽验收和质量问题闭环整改保证质量'],
-    [/及时处理/gu, '发现问题后明确责任人、整改时限、复查人员和销项记录'],
-    [/强化监督/gu, '由责任岗位按日巡查、周复核和问题台账闭环监督'],
-  ];
-  for (const [pattern, replacement] of replacements) next = next.replace(pattern, replacement);
-  return next;
 }

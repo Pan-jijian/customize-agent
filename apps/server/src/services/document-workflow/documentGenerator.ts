@@ -23,17 +23,21 @@ import { buildWritingTaskBrief, writingTaskBriefChapterPrompt } from './document
 import { buildConstructionOrgTablePlans } from './constructionOrgTablePlan';
 import { buildRetrievalCoverageReport, retrieveDeepChapterEvidence, retrievalCoverageRisk } from './documentEvidenceRetrieval';
 import { buildChapterFactNeeds, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, factNeedsCoveragePrompt, factsForChapterNeeds, resolveChapterFactNeeds } from './factsModel';
-import { adaptiveConcurrency, runWithAdaptiveConcurrency, stableHash, throwIfAborted } from './utils';
+import { adaptiveConcurrency, runWithAdaptiveConcurrency, Semaphore, stableHash, throwIfAborted } from './utils';
 import { displayStage, elapsedMessage, upsertProgressStage } from './progress';
 import { getActiveModelWithProvider } from './llmClient';
 import { createGenerationDiagnostics, evidenceInScope, measureGenerationStep, promptTextsForResolvedPrompts, repairChapterByQuality, selectDocumentGenerationStrategy } from './rolePipeline';
+import { buildGenerationBudget, type GenerationBudget } from './generationBudget';
 import { buildProjectMaterialProfile, buildProjectUnderstanding, expandProjectMaterialBindings, materialKindMaps, materialRoleId, retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from './projectMaterialProfile';
-import { buildChapterFactCoverageContext, buildEvidenceOnlyChapterContent, buildLlmChapterContent, buildLlmSectionContent, buildSectionGroupChapterContent, buildSectionParallelChapterContent, chapterSectionFactUsageIssues, outputTokensForChapter, reviewGlobalConsistency } from './chapterGeneration';
+import { buildChapterFactCoverageContext, buildLlmChapterContent, buildLlmSectionContent, buildSectionGroupChapterContent, buildSectionParallelChapterContent, outputTokensForChapter } from './chapterGeneration';
+import { buildEvidenceOnlyChapterContent } from './chapterExpansion';
+import { chapterSectionFactUsageIssues, reviewGlobalConsistency } from './chapterReview';
 import { buildRuntimePromptRules, extractPromptStructuralRules, normalizePlannedSections, planChapterSectionsWithLlm, runtimePromptRulesPrompt } from './promptRuleExtraction';
 import { retrieveWebEvidence, webAccessPrompt } from './webResearchService';
 import { finalizeGeneration } from './documentPipeline';
-import { chapterCompletionStatus, collectProjectBasicEvidence, compactChapterQueries, finalizeChapterContentQuality, kbIndexHealth, optimizeChapterEvidence, PROJECT_BASIC_FACT_QUERIES, qualityFirstEvidenceItemLimit, qualityFirstSearchQueryLimit, resolveChapterPromptExecution, resolveDocumentGenerationEvidenceLimit, retrieveMissingFactEvidence, retrieveSectionEvidence, searchWeightsForChapter } from './documentGeneratorHelpers';
+import { chapterCompletionStatus, chapterGenerationTargets, collectProjectBasicEvidence, compactChapterQueries, finalizeChapterContentQuality, kbIndexHealth, optimizeChapterEvidence, PROJECT_BASIC_FACT_QUERIES, qualityFirstEvidenceItemLimit, qualityFirstSearchQueryLimit, resolveChapterPromptExecution, resolveDocumentGenerationEvidenceLimit, retrieveSectionEvidence, searchWeightsForChapter } from './documentGeneratorHelpers';
 import { buildProjectGraph } from './projectGraph';
+import { referenceQualityTargetLines } from './templateReferenceService';
 import { buildScopedProjectIntelligence, constructionOrganizationPrompt } from './projectIntelligence';
 import { assertEvidenceInProjectScope, createProjectMaterialScope, filterEvidenceByProjectScope, filterFactsByProjectScope, projectScopeAudit } from './projectMaterialScope';
 import { agentWorkflowStages, createAgentWorkflowContext } from './agentWorkflow';
@@ -42,26 +46,11 @@ import { buildCanonicalFactModel, PROJECT_BASIC_FIELD_SPECS } from './factGovern
 import { buildChapterReadinessPlan } from './chapterReadiness';
 import { chineseTokenMatch } from './textMatch';
 
-function chapterGenerationTargets(input: { budgetTarget: number; sectionCount: number; title: string; longformStrict: boolean }) {
-  const { budgetTarget, sectionCount, title, longformStrict } = input;
-  const composite = /[、，,；;]/u.test(title);
-  const isCritical = /工期|进度|质量|安全|危大|资源|人材机|保障|措施|重难点/u.test(title);
-  const isLight = /概况|结语|附录|说明/u.test(title);
-  const structureTarget = sectionCount > 0
-    ? sectionCount * (composite ? 720 : isCritical ? 900 : 780)
-    : isCritical ? 5200 : 3600;
-  const lower = longformStrict ? (isLight ? 2600 : isCritical ? 5200 : 3600) : Math.min(1200, budgetTarget);
-  const upper = longformStrict
-    ? Math.min(Math.max(4200, budgetTarget), sectionCount >= 30 ? 9800 : composite ? 8800 : isCritical ? 9200 : 7200)
-    : budgetTarget;
-  const roundTarget = Math.max(lower, Math.min(budgetTarget, structureTarget, upper));
-  return {
-    budgetTarget,
-    roundTarget,
-    structureTarget,
-    maxWords: Math.ceil(roundTarget * (input.longformStrict ? 1.12 : 1.18)),
-    label: `章节预算约 ${budgetTarget} 字，本轮生成约 ${roundTarget} 字，结构目标约 ${structureTarget} 字`,
-  };
+/** P3：按剩余问题类型粗略预估还需的修复轮次（深度/补写类每轮约修复 2 小节，其他类 1 轮） */
+function estimateRemainingRepairRounds(issues: Array<{ message: string }>): number {
+  const depthCount = issues.filter(issue => /正文不足，未达到任务最小深度|Writer 未完成/u.test(issue.message)).length;
+  const otherCount = issues.length - depthCount;
+  return Math.max(depthCount > 0 ? Math.ceil(depthCount / 2) : 0, otherCount > 0 ? 1 : 0);
 }
 
 export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; resumeChapters?: DocumentDraftChapter[]; signal?: AbortSignal; onProgress?: (stages: DocumentExecutionStage[], checkpoint?: { chapters?: DocumentDraftChapter[] }) => void }): Promise<GeneratedDocumentDraft> {
@@ -360,7 +349,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
   }
   template = { ...template, chapters: effectiveChapters };
   const writingTaskBrief = buildWritingTaskBrief({ chapters: effectiveChapters, factsModel: preliminaryFactsModel, projectGraph: projectGraph || undefined, requirement: input.requirement, templateName: template.name });
-  const documentBlueprintContext = buildDocumentBlueprintContext({ template, chapters: effectiveChapters, factsModel: preliminaryFactsModel, requirement: input.requirement });
+  // T5 蓝图注入：同类工程质量参考（软性参考，按篇幅折减；无同类型参考样本或类型未识别时返回空，不注入）
+  const referenceLines = referenceQualityTargetLines({ templateName: template.name, chapterTitles: effectiveChapters.map(chapter => chapter.title), requirement: input.requirement, targetWords: provisionalBudget.targetChars || 0 });
+  if (referenceLines.length > 0) {
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'reference-benchmark', status: 'success', message: '已读取模板参考库同类工程画像，作为质量软性参考注入文档蓝图', details: referenceLines }, { subtitle: '参考画像注入', order: progressStages.length }));
+  }
+  const documentBlueprintContext = buildDocumentBlueprintContext({ template, chapters: effectiveChapters, factsModel: preliminaryFactsModel, requirement: input.requirement, referenceLines });
   projectContext = [baseProjectContext, documentBlueprintContext].filter(Boolean).join('\n\n');
   if (!scopedIntelligence) {
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-blueprint', status: 'success', message: '已生成全局事实主表与文档蓝图，后续章节和小节将共用同一套专业约束', details: documentBlueprintContext.split('\n').slice(0, 12) }, { subtitle: '全局蓝图' }));
@@ -371,9 +365,22 @@ export async function generateDocumentDraft(input: { templateId: string; require
   agentWorkflow.nodes.push(plannedDocument.node);
   upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'agent-document-planner', status: 'success', message: plannedDocument.node.outputSummary || 'Agent 文档规划完成', details: plannedDocument.plan.chapters.map(chapter => `${chapter.title}：${chapter.sections.length} 个小节任务`) }, { subtitle: 'Agent Document Planner', order: progressStages.length }));
   checkpointChapterOrderIds = effectiveChapters.map(chapter => chapter.id);
-  const generationStrategy = selectDocumentGenerationStrategy({ template, targetWords: documentBudget.targetChars || [...documentBudget.chapterTargets.values()].reduce((sum, value) => sum + value, 0), requirement: input.requirement });
+  // P1 全局预算模型：生成前按章节数×目标字数×资料量一次性计算并发数、证据预算、审查深度与修复轮次预算
+  const budgetTargetWords = documentBudget.targetChars || [...documentBudget.chapterTargets.values()].reduce((sum, value) => sum + value, 0);
+  const generationStrategy = selectDocumentGenerationStrategy({ template, targetWords: budgetTargetWords, requirement: input.requirement, materialFileCount: materialFilePaths.length, evidenceCount: allEvidence.length });
+  const generationBudget: GenerationBudget = buildGenerationBudget({
+    template,
+    chapters: effectiveChapters,
+    targetWords: budgetTargetWords,
+    requirement: input.requirement,
+    materialFileCount: materialFilePaths.length,
+    evidenceCount: allEvidence.length,
+    hasVeryLargeExplicitChapter: effectiveChapters.some(chapter => (chapter.sections || []).filter(Boolean).length >= 30),
+    configuredChapterConcurrency: Number(process.env.DOCUMENT_CHAPTER_CONCURRENCY || 0),
+    strategy: generationStrategy,
+  });
   const generationDiagnostics = createGenerationDiagnostics(generationStrategy);
-  upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-strategy', status: 'success', message: `已自动选择 ${generationStrategy.mode} 生成策略：章节审查 ${generationStrategy.enableChapterReview ? '启用' : '跳过'}、全局审查 ${generationStrategy.enableGlobalReview ? '启用' : '跳过'}、最终质量审查 ${generationStrategy.enableFinalQualityReview ? '启用' : '跳过'}、全文扩写 ${generationStrategy.enableDocumentBudgetExpansion ? '启用' : '跳过'}；LLM 调用按工作流任务自然并行` }, { subtitle: '后台自动策略' }));
+  upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-strategy', status: 'success', message: `已自动选择 ${generationStrategy.mode} 生成策略：章节审查 ${generationStrategy.enableChapterReview ? '启用' : '跳过'}、全局审查 ${generationStrategy.enableGlobalReview ? `${generationStrategy.globalReviewSamplingRate && generationStrategy.globalReviewSamplingRate < 1 ? `抽检 ${Math.round((generationStrategy.globalReviewSamplingRate ?? 1) * 100)}%` : '启用'}` : '跳过'}、最终质量审查 ${generationStrategy.enableFinalQualityReview ? '启用' : '跳过'}、全文扩写 ${generationStrategy.enableDocumentBudgetExpansion ? '启用' : '跳过'}`, details: generationBudget.triggers }, { subtitle: '后台自动策略' }));
   const sectionPlanningSource = hasExplicitOutline ? 'OUTLINE 章节' : '模板章节';
   const sectionPlanningStage: DocumentExecutionStage = displayStage({
     type: 'validation',
@@ -389,28 +396,28 @@ export async function generateDocumentDraft(input: { templateId: string; require
     ...promptPlan.unresolvedRoles.map(roleId => `unresolved｜${roleId}｜项目角色配置中的提示词角色不存在`),
     ...promptPlan.missingResourceRoles.map(roleId => `missingResource｜${roleId}｜提示词角色未显式绑定资源`),
   ];
-  upsertProgressStage(progressStages, displayStage({ type: 'role_binding', roleId: projectRoleConfigId, status: 'success', message: `已绑定项目资料 ${materialFilePaths.length} 份、${promptPlan.prompts.length} 个有效提示词；写作 ${promptPlan.writerPrompts.length}、章节 ${promptPlan.chapterPrompts.length}、抽取 ${promptPlan.extractionPrompts.length}；已自动抽取运行时规则 ${runtimePromptRules.executionSummary.length} 条；语义资料覆盖 ${Math.round(readiness.materialCoverageRate * 100)}%${outlineMessage}`, details: [...promptPlanDetails, ...runtimePromptRules.executionSummary.map(item => `runtimeRule｜${item}`)] }, { subtitle: projectRoleConfigName, roleName: projectRoleConfigName }));
+  upsertProgressStage(progressStages, displayStage({ type: 'role_binding', roleId: projectRoleConfigId, status: 'success', message: `已绑定项目资料 ${materialFilePaths.length} 份、${promptPlan.prompts.length} 个有效提示词；写作 ${promptPlan.writerPrompts.length}、章节 ${promptPlan.chapterPrompts.length}、抽取 ${promptPlan.extractionPrompts.length}；已自动抽取运行时规则 ${runtimePromptRules.executionSummary.length} 条${outlineMessage}`, details: [...promptPlanDetails, ...runtimePromptRules.executionSummary.map(item => `runtimeRule｜${item}`)] }, { subtitle: projectRoleConfigName, roleName: projectRoleConfigName }));
   upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'runtime-prompt-rules', status: 'success', message: `运行时提示词规则已抽取：${runtimePromptRules.executionSummary.length} 条，版本 ${runtimePromptRules.sourceHash}`, details: runtimePromptRules.executionSummary.length ? [...runtimePromptRules.executionSummary, `必需表格：${runtimePromptRules.requiredTables.join('、') || '无'}`, `必含关键词：${runtimePromptRules.requiredKeywords?.join('、') || '无'}`, `禁含内容：${runtimePromptRules.forbiddenPatterns?.join('、') || '无'}`] : ['未从提示词中识别到额外硬规则，使用系统默认质量规则'] }, { subtitle: '提示词规则执行' }));
-  upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-readiness', status: readiness.ready ? 'success' : 'failed', message: `生成准备度：绑定资料已就绪，语义覆盖 ${Math.round(readiness.materialCoverageRate * 100)}%，角色匹配 ${Math.round(readiness.roleSatisfactionRate * 100)}%，优化建议 ${Math.round(readiness.specCompletenessRate * 100)}%`, details: readiness.diagnostics }, { subtitle: '生成准备度检查' }));
+  upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-readiness', status: readiness.ready ? 'success' : 'failed', message: '生成准备度：绑定资料已就绪', details: readiness.diagnostics }, { subtitle: '生成准备度检查' }));
   upsertProgressStage(progressStages, sectionPlanningStage);
   emitProgress();
 
   const avgChapterTarget = Math.round(([...documentBudget.chapterTargets.values()].reduce((sum, value) => sum + value, 0) || documentBudget.targetChars || 0) / Math.max(1, effectiveChapters.length));
   const configuredChapterConcurrency = Number(process.env.DOCUMENT_CHAPTER_CONCURRENCY || 0);
-  const hasVeryLargeExplicitChapter = effectiveChapters.some(chapter => (chapter.sections || []).filter(Boolean).length >= 30);
-  const autoChapterConcurrency = (() => {
-    if (effectiveChapters.length <= 1) return 1;
-    if (hasVeryLargeExplicitChapter) return 1;
-    if (documentBudget.longformStrict || avgChapterTarget >= 9000) return 2;
-    if (avgChapterTarget >= 6500) return Math.min(3, effectiveChapters.length);
-    return Math.min(4, effectiveChapters.length);
-  })();
-  const chapterConcurrency = Math.max(1, Math.min(effectiveChapters.length || 1, Number.isFinite(configuredChapterConcurrency) && configuredChapterConcurrency > 0 ? Math.floor(configuredChapterConcurrency) : autoChapterConcurrency));
-  upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'chapter-concurrency', status: 'success', message: `章节自适应调度：本轮 ${chapterConcurrency}/${effectiveChapters.length} 章并发`, details: [`有效章节数：${effectiveChapters.length}`, `平均章节目标：${avgChapterTarget} 字`, Number.isFinite(configuredChapterConcurrency) && configuredChapterConcurrency > 0 ? `章节并发来自 DOCUMENT_CHAPTER_CONCURRENCY=${Math.floor(configuredChapterConcurrency)}` : `章节并发自适应=${autoChapterConcurrency}，${hasVeryLargeExplicitChapter ? '存在超长显式小节章，优先逐章产出 checkpoint' : '长章保守、短章提速'}`] }, { subtitle: '章节并发策略' }));
+  // P1：并发预算统一由预算模型给出；P2：审查修复与生成流水线重叠（审查池与生成批独立限流）
+  const chapterConcurrency = generationBudget.chapterConcurrency;
+  const reviewConcurrency = generationBudget.reviewConcurrency;
+  upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'chapter-concurrency', status: 'success', message: `章节流水线调度：生成 ${chapterConcurrency}/${effectiveChapters.length} 章并发，审查修复 ${reviewConcurrency} 路流水线（章节生成完立即进入审查，与后续章节生成重叠）`, details: [`有效章节数：${effectiveChapters.length}`, `平均章节目标：${avgChapterTarget} 字`, Number.isFinite(configuredChapterConcurrency) && configuredChapterConcurrency > 0 ? `章节并发来自 DOCUMENT_CHAPTER_CONCURRENCY=${Math.floor(configuredChapterConcurrency)}` : `章节并发由预算模型计算，修复轮次预算 ${generationBudget.repairRoundBudget} 轮`] }, { subtitle: '章节流水线策略' }));
   emitProgress();
+  // P4 检索自适应：前序章节"缺事实"信号累积的查询扩展深度（0-2，调高后续章节查询扩展与深召回）
+  let searchExpansionBoost = 0;
+  // P2 审查流水线：章节生成完成后立即进入审查修复（独立信号量限流），与后续批次章节生成重叠；
+  // 跨章引用安全：Repairer 仅修复本章小节，跨章审查与最终门禁在所有章节完成后按章节序执行
+  const reviewSemaphore = new Semaphore(reviewConcurrency);
+  const reviewTaskPool: Promise<void>[] = [];
   for (let chapterOffset = 0; chapterOffset < effectiveChapters.length; chapterOffset += chapterConcurrency) {
     const chapterBatch = effectiveChapters.slice(chapterOffset, chapterOffset + chapterConcurrency);
-    await Promise.all(chapterBatch.map(async (chapter, batchIndex) => {
+    const batchTasks = await Promise.all(chapterBatch.map(async (chapter, batchIndex): Promise<(() => Promise<void>) | undefined> => {
     const chapterOrder = chapterOffset + batchIndex;
     throwIfAborted(input.signal);
     const chapterStartedAt = Date.now();
@@ -468,7 +475,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
 
     const chapterBasicQueries = /概况|工程|项目|总体|部署|进度|工期|质量/u.test(chapter.title) ? PROJECT_BASIC_FACT_QUERIES : [];
     const queries = compactChapterQueries(chapter, [...baseQueries, ...planQueries], chapterBasicQueries);
-    const maxSearchQueries = qualityFirstSearchQueryLimit(chapter, chapterBasicQueries);
+    // P4：前序章节缺事实信号累积的扩展深度叠加到本章查询上限
+    const maxSearchQueries = qualityFirstSearchQueryLimit(chapter, chapterBasicQueries) + searchExpansionBoost;
     const searchStartedAt = Date.now();
     progressStages[chapterProgressIndex] = displayStage({
       type: 'chapter_generation',
@@ -544,7 +552,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
       webResearchReport.queries.push(...webResult.queries);
       webResearchReport.filteredCount += webResult.filtered + webResult.evidence.length;
     }
-    const evidenceBudgetChars = evidencePromptBudgetForTarget(chapterBudgetTarget, 7000, 26000);
+    const evidenceBudgetChars = evidencePromptBudgetForTarget(chapterBudgetTarget, generationBudget.evidenceFloorChars, generationBudget.evidenceCeilingChars);
     const sampledEvidence = resumedContent ? [] : sampleProjectMaterialEvidence({ project, chapter, plan, profile: projectMaterialProfile, scopedFilePaths, highRisk: rolePoolRisk.highRisk });
     if (sampledEvidence.length > 0) scopedEvidence.push(...filterEvidenceByProjectScope(sampledEvidence, projectMaterialScope));
     scopedEvidence = filterEvidenceByProjectScope(scopedEvidence, projectMaterialScope);
@@ -602,9 +610,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
     let resolvedFactNeeds = resolveChapterFactNeeds({ needs: chapterFactNeeds, factsModel: preliminaryFactsModel, evidence: scopedEvidence, profile: domainProfile });
     let requiredMissingNeeds = resolvedFactNeeds.filter(item => item.need.required && item.status !== 'satisfied').map(item => item.need.label);
     if (requiredMissingNeeds.length > 0 && scopedFilePaths.length > 0) {
-      const supplementalEvidence = await retrieveMissingFactEvidence({ manager, projectRoot, chapter, needs: requiredMissingNeeds, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }).catch(() => []);
-      const deepNeedEvidence = await retrieveDeepChapterEvidence({ manager, projectRoot, chapter, scopedFilePaths, fileRoleByPath, fileProcessingByPath, requiredNeeds: requiredMissingNeeds, highRisk: true, signal: input.signal }).catch(() => []);
-      const mergedSupplementalEvidence = filterEvidenceByProjectScope([...supplementalEvidence, ...deepNeedEvidence], projectMaterialScope);
+      // 缺失事实补检索与深召回合并为一次调用：精确 need 查询已并入深召回查询集（结果保留 required-fact-evidence 标记）
+      const mergedSupplementalEvidence = filterEvidenceByProjectScope(await retrieveDeepChapterEvidence({ manager, projectRoot, chapter, scopedFilePaths, fileRoleByPath, fileProcessingByPath, requiredNeeds: requiredMissingNeeds, highRisk: true, signal: input.signal }).catch(() => []), projectMaterialScope);
       if (mergedSupplementalEvidence.length > 0) {
         scopedEvidence = optimizeChapterEvidence(chapter, [...scopedEvidence, ...mergedSupplementalEvidence], { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter + 16, chapter, true), maxChars: evidenceBudgetChars + 42000, preservePinned: true }, generationDiagnostics);
         scopedEvidence = filterEvidenceByProjectScope(scopedEvidence, projectMaterialScope);
@@ -616,6 +623,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
       }
     }
     assertEvidenceInProjectScope(evidence, projectMaterialScope, `chapter:${chapter.id}:writer-input`);
+    // P4 检索自适应：本章仍有未满足的必需事实需求 → 调高后续章节查询扩展深度（上限 +2）
+    if (requiredMissingNeeds.length > 0 && searchExpansionBoost < 2) searchExpansionBoost += 1;
     const retrievalCoverageReport = buildRetrievalCoverageReport({ chapter, evidence, risk: rolePoolRisk });
     retrievalCoverageReports.push(retrievalCoverageReport);
     const chapterEvidenceFiles = new Set(evidence.map(item => item.filePath));
@@ -812,17 +821,24 @@ export async function generateDocumentDraft(input: { templateId: string; require
       progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: chapterIssues.length ? '章节已生成' : '章节达标' },
     }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
     chapterGenerationStagesByOrder[chapterOrder] = latestChapterStageForProgress;
+    // P2：生成阶段结束，审查修复阶段作为延迟任务返回，由审查池调度（与后续批次章节生成流水线重叠）
+    return async (): Promise<void> => {
+    try {
     let draftChapter = { id: chapter.id, title: chapter.title, content, evidence, missingFacts, sections, tablePlans: chapter.tablePlans || [] };
     let agentReview = reviewChapterDraft({ task: chapterTaskResult.task, draft: draftChapter, context: agentWorkflow });
     agentWorkflow.reviewResults = { ...(agentWorkflow.reviewResults || {}), [chapter.id]: agentReview };
-    const blockingReviewIssues = agentReview.issues.filter(issue => issue.severity === 'blocker' || issue.level === 'error');
-    const hasWriterMissingIssues = blockingReviewIssues.some(issue => /Writer 未完成/u.test(issue.message));
-    const hasDepthBlockers = blockingReviewIssues.some(issue => /正文不足，未达到任务最小深度/u.test(issue.message));
-    const initialReviewNeedsRepair = blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers);
-    agentWorkflow.nodes.push({ id: `chapter-reviewer-${chapter.id}`, type: 'chapter_reviewer', status: blockingReviewIssues.length ? (initialReviewNeedsRepair ? 'running' : 'failed') : 'completed', startedAt: Date.now(), completedAt: Date.now(), outputSummary: agentReview.issues.length ? `${agentReview.issues.length} 个 Reviewer 提示` : 'Reviewer 通过', metrics: { supportedFacts: agentReview.supportedFacts }, issues: agentReview.issues });
-    upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-reviewer-${chapter.id}`, status: blockingReviewIssues.length ? (initialReviewNeedsRepair ? 'running' : 'failed') : 'success', message: blockingReviewIssues.length ? `${displayChapterTitle(chapter.title)} Reviewer 发现 ${blockingReviewIssues.length} 个阻断问题，等待 Repairer 修复` : `${displayChapterTitle(chapter.title)} Reviewer 通过${agentReview.issues.length ? `（${agentReview.issues.length} 个优化提示）` : ''}`, details: agentReview.issues.map(issue => issue.message) }, { subtitle: 'Agent Reviewer', order: progressStages.length }));
+    let blockingReviewIssues = agentReview.issues.filter(issue => issue.severity === 'blocker' || issue.level === 'error');
+    let hasWriterMissingIssues = blockingReviewIssues.some(issue => /Writer 未完成/u.test(issue.message));
+    let hasDepthBlockers = blockingReviewIssues.some(issue => /正文不足，未达到任务最小深度/u.test(issue.message));
+    let needsRepair = blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers);
+    // P3：Repairer 轮次预算上限（默认 3 轮），超预算转"标记问题 + 门禁阻断 + 用户决策"
+    const repairRoundBudget = generationBudget.repairRoundBudget;
+    let repairRounds = 0;
+    agentWorkflow.nodes.push({ id: `chapter-reviewer-${chapter.id}`, type: 'chapter_reviewer', status: blockingReviewIssues.length ? (needsRepair ? 'running' : 'failed') : 'completed', startedAt: Date.now(), completedAt: Date.now(), outputSummary: agentReview.issues.length ? `${agentReview.issues.length} 个 Reviewer 提示` : 'Reviewer 通过', metrics: { supportedFacts: agentReview.supportedFacts }, issues: agentReview.issues });
+    upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-reviewer-${chapter.id}`, status: blockingReviewIssues.length ? (needsRepair ? 'running' : 'failed') : 'success', message: blockingReviewIssues.length ? `${displayChapterTitle(chapter.title)} Reviewer 发现 ${blockingReviewIssues.length} 个阻断问题，等待 Repairer 修复（轮次预算 ${repairRoundBudget} 轮）` : `${displayChapterTitle(chapter.title)} Reviewer 通过${agentReview.issues.length ? `（${agentReview.issues.length} 个优化提示）` : ''}`, details: agentReview.issues.map(issue => issue.message) }, { subtitle: 'Agent Reviewer', order: progressStages.length }));
     emitProgress(chapterDrafts);
-    if (blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers)) {
+    while (needsRepair && repairRounds < repairRoundBudget) {
+      repairRounds += 1;
       const repairReview = { ...agentReview, issues: blockingReviewIssues };
       const repairInstruction = agentReview.repairable
         ? buildTargetedRepairInstruction({ task: chapterTaskResult.task, review: repairReview })
@@ -958,20 +974,32 @@ export async function generateDocumentDraft(input: { templateId: string; require
       draftChapter = { ...draftChapter, content: finalizeChapterContentQuality(repaired.content || draftChapter.content, chapter) };
       agentReview = reviewChapterDraft({ task: chapterTaskResult.task, draft: draftChapter, context: agentWorkflow });
       agentWorkflow.reviewResults = { ...(agentWorkflow.reviewResults || {}), [chapter.id]: agentReview };
-      const postRepairFailed = agentReview.issues.some(issue => issue.severity === 'blocker' || issue.level === 'error');
+      blockingReviewIssues = agentReview.issues.filter(issue => issue.severity === 'blocker' || issue.level === 'error');
+      hasWriterMissingIssues = blockingReviewIssues.some(issue => /Writer 未完成/u.test(issue.message));
+      hasDepthBlockers = blockingReviewIssues.some(issue => /正文不足，未达到任务最小深度/u.test(issue.message));
+      needsRepair = blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers);
+      const postRepairFailed = blockingReviewIssues.length > 0;
       agentWorkflow.nodes.push({ id: `chapter-repairer-${chapter.id}`, type: 'chapter_repairer', status: postRepairFailed ? 'failed' : 'completed', startedAt: Date.now(), completedAt: Date.now(), outputSummary: agentReview.issues.length ? `修复后仍有 ${agentReview.issues.length} 个问题` : '定向修复通过', metrics: { supportedFacts: agentReview.supportedFacts }, issues: agentReview.issues });
-      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-reviewer-${chapter.id}`, status: postRepairFailed ? 'failed' : 'success', message: postRepairFailed ? `${displayChapterTitle(chapter.title)} Reviewer 复审仍有 ${agentReview.issues.length} 个阻断问题` : `${displayChapterTitle(chapter.title)} Reviewer 复审通过`, details: agentReview.issues.map(issue => issue.message) }, { subtitle: 'Agent Reviewer', order: repairerStageOrder - 1 }));
-      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: postRepairFailed ? 'failed' : 'success', message: agentReview.issues.length ? `${displayChapterTitle(chapter.title)} 定向修复后仍有 ${agentReview.issues.length} 个问题` : `${displayChapterTitle(chapter.title)} 定向修复通过`, details: [...repairSectionResults, ...agentReview.issues.map(issue => `剩余：${issue.message}`)] }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
+      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-reviewer-${chapter.id}`, status: postRepairFailed ? 'failed' : 'success', message: postRepairFailed ? `${displayChapterTitle(chapter.title)} Reviewer 第 ${repairRounds} 轮复审仍有 ${blockingReviewIssues.length} 个阻断问题${needsRepair && repairRounds < repairRoundBudget ? '，继续下一轮修复' : ''}` : `${displayChapterTitle(chapter.title)} Reviewer 第 ${repairRounds} 轮复审通过`, details: agentReview.issues.map(issue => issue.message) }, { subtitle: 'Agent Reviewer', order: repairerStageOrder - 1 }));
+      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: postRepairFailed ? 'failed' : 'success', message: agentReview.issues.length ? `${displayChapterTitle(chapter.title)} 第 ${repairRounds} 轮定向修复后仍有 ${agentReview.issues.length} 个问题` : `${displayChapterTitle(chapter.title)} 定向修复通过`, details: [...repairSectionResults, ...agentReview.issues.map(issue => `剩余：${issue.message}`)] }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
       emitProgress(chapterDrafts);
     }
     if (agentReview.issues.some(issue => issue.severity === 'blocker' || issue.level === 'error')) {
-      failedChapterMessages.push(`${displayChapterTitle(chapter.title)} Reviewer 未通过：${agentReview.issues.map(issue => issue.message).join('；')}`);
+      const remainingRounds = estimateRemainingRepairRounds(blockingReviewIssues);
+      failedChapterMessages.push(`${displayChapterTitle(chapter.title)} Reviewer 未通过：${agentReview.issues.map(issue => issue.message).join('；')}（修复轮次预算 ${repairRoundBudget} 轮已用尽，预估还需 ${remainingRounds} 轮修复；问题已标记并转入门禁阻断，可在记录详情查看后决定继续修复或调整模板）`);
     }
     chapterDraftsByOrder[chapterOrder] = draftChapter;
     chapterDrafts = chapterDraftsByOrder.filter((item): item is DocumentDraftChapter => Boolean(item));
     emitProgress(chapterDrafts);
     generationDiagnostics.quality.blockingCount += agentReview.issues.filter(issue => issue.level === 'error').length;
     generationDiagnostics.quality.importantCount += agentReview.issues.filter(issue => issue.level === 'warning').length;
+    } catch (reviewErr) {
+      // 审查修复阶段异常不中断整次生成：标记为失败章节，交由 Final Gate 门禁阻断
+      if (input.signal?.aborted) throw reviewErr;
+      console.error(`[gen] chapter ${chapter.title} review failed:`, reviewErr);
+      failedChapterMessages.push(`${displayChapterTitle(chapter.title)}：审查修复阶段失败：${reviewErr instanceof Error ? reviewErr.message : '未知错误'}`);
+    }
+    };
     } catch (err) {
       if (input.signal?.aborted) throw err;
       console.error(`[gen] chapter ${chapter.title} failed:`, err);
@@ -989,17 +1017,32 @@ export async function generateDocumentDraft(input: { templateId: string; require
     if (latestChapterStageForProgress) progressStages[chapterProgressIndex] = latestChapterStageForProgress;
     emitProgress(chapterDrafts);
     }));
+    // P2：本批章节全部生成完毕，审查修复任务排入审查池（reviewConcurrency 限流），与下一批章节生成重叠
+    for (const reviewTask of batchTasks) {
+      if (!reviewTask) continue;
+      reviewTaskPool.push(reviewSemaphore.run(reviewTask));
+    }
   }
+  // P2：等待全部章节审查修复完成；chapterDraftsByOrder 按章节序写入，跨章引用修复安全
+  await Promise.all(reviewTaskPool);
   const chapterDraftsFinal = chapterDraftsByOrder.filter((item): item is DocumentDraftChapter => Boolean(item));
   chapterGenerationStages.push(...chapterGenerationStagesByOrder.filter((item): item is DocumentExecutionStage => Boolean(item)));
 
-  // 全局一致性审查：env 开关默认关闭（额外 LLM 成本）；开启后在最终导出前做一次跨章一致性审查，结果注入导出校验
+  // 全局一致性审查：strict 画像默认开启（额外 LLM 成本，全文分块审查）；
+  // fast 小文档降级为抽检（按 globalReviewSamplingRate 抽样章节，至少 2 章保证跨章对比）；
+  // env DOCUMENT_GLOBAL_CONSISTENCY_REVIEW=1 强制开启、=0 强制关闭；开启后在最终导出前做一次跨章一致性审查，结果注入导出校验
   let globalConsistencyIssues: string[] = [];
-  if (process.env.DOCUMENT_GLOBAL_CONSISTENCY_REVIEW === '1') {
+  if (generationStrategy.enableGlobalReview) {
     try {
-      const globalReview = await withProgressHeartbeat(() => reviewGlobalConsistency({ template, chapters: chapterDraftsFinal, chapterReviews: [], promptTexts: reviewPromptTexts, requirement: input.requirement, projectContext, diagnostics: generationDiagnostics, signal: input.signal }));
+      const samplingRate = generationStrategy.globalReviewSamplingRate ?? 1;
+      const sampledChapters = samplingRate >= 1 || chapterDraftsFinal.length <= 2
+        ? chapterDraftsFinal
+        : chapterDraftsFinal.filter((chapter, index) => index % Math.max(2, Math.round(1 / samplingRate)) === 0);
+      const sampledCount = sampledChapters.length;
+      const globalReview = await withProgressHeartbeat(() => reviewGlobalConsistency({ template, chapters: sampledChapters, chapterReviews: [], promptTexts: reviewPromptTexts, requirement: input.requirement, projectContext, diagnostics: generationDiagnostics, signal: input.signal }));
       globalConsistencyIssues = globalReview.issues;
-      upsertProgressStage(progressStages, globalReview.stage);
+      const sampledStage = sampledCount < chapterDraftsFinal.length ? { ...globalReview.stage, message: `${globalReview.stage.message || '全局一致性审查完成'}（抽检 ${sampledCount}/${chapterDraftsFinal.length} 章）` } : globalReview.stage;
+      upsertProgressStage(progressStages, sampledStage);
       emitProgress(chapterDraftsFinal);
     } catch (err) {
       if (input.signal?.aborted) throw err;
@@ -1028,63 +1071,4 @@ export async function generateDocumentDraft(input: { templateId: string; require
   });
 }
 
-export async function regenerateDocumentChapter(input: { templateId: string; chapterId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; documentId?: string; currentMarkdown?: string; existingFacts?: string[] }): Promise<DocumentDraftChapter> {
-  const template = getDocumentTemplate(input.templateId);
-  if (!template) throw new Error('Document template not found');
-  const chapter = template.chapters.find(item => item.id === input.chapterId);
-  if (!chapter) throw new Error('Document chapter not found');
-  const projectRoot = path.resolve(input.projectRoot || getProjectRoot());
-  if (!projectRoot) throw new Error('No knowledge base project found');
-  const manager = getMultiProjectManager();
-  const materialFilePaths = expandProjectMaterialBindings(projectRoot, template, { requirement: input.requirement });
-  const projectMaterialProfile = buildProjectMaterialProfile(projectRoot, template, { requirement: input.requirement });
-  const { kindByPath, processingByPath } = materialKindMaps(projectMaterialProfile);
-  const boundFilePaths = new Set(materialFilePaths);
-  const projectMaterialScope = createProjectMaterialScope(projectRoot, materialFilePaths);
-  const fileRoleByPath = new Map([...kindByPath.entries()].map(([filePath, kind]) => [filePath, materialRoleId(kind)] as const));
-  const fileProcessingByPath = new Map([...processingByPath.entries()].map(([filePath, processing]) => [filePath, processing] as const));
-  const project = await manager.getProject(projectRoot);
-  const requestedEvidencePerChapter = resolveDocumentGenerationEvidenceLimit(project, [...boundFilePaths], input.maxEvidencePerChapter);
-  const rawEvidence: DocumentEvidence[] = [];
-  const scopedFilePaths = [...boundFilePaths].filter(Boolean).sort();
-  const queries = compactChapterQueries(chapter, chapter.queries, []);
-  const maxSearchQueries = qualityFirstSearchQueryLimit(chapter, []);
-  for (const query of queries.slice(0, maxSearchQueries)) {
-    const result = await manager.search(projectRoot, query, {
-      scope: 'project',
-      filters: { filePaths: scopedFilePaths },
-      limit: Math.min(requestedEvidencePerChapter, 12),
-      weights: { keyword: 0.4, vector: 0.45, rewrite: 0.75, hybridBonus: 0.15 },
-    });
-    rawEvidence.push(...result.results
-      .filter((item: KbSearchResult) => evidenceInScope(projectRoot, item.filePath, boundFilePaths))
-      .map((item: KbSearchResult) => ({
-        chapterId: chapter.id,
-        filePath: item.filePath,
-        score: item.score,
-        content: item.content,
-        roleId: fileRoleByPath.get(item.filePath),
-        processingType: fileProcessingByPath.get(item.filePath),
-        sectionTitle: item.sectionTitle,
-        source: item.source,
-      })));
-  }
-  const scopedEvidence = filterEvidenceByProjectScope(rawEvidence.filter(item => evidenceInScope(projectRoot, item.filePath, boundFilePaths)), projectMaterialScope);
-  const evidence = optimizeChapterEvidence(chapter, scopedEvidence, { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter, chapter), maxChars: 16000, preservePinned: true });
-  assertEvidenceInProjectScope(evidence, projectMaterialScope, `regenerate:${chapter.id}`);
-  const existingContext = input.currentMarkdown || '';
-  const existingFactSet = new Set(input.existingFacts ?? []);
-  const missingFacts = chapter.requiredFacts.filter(fact => !existingFactSet.has(fact) && !evidence.some(item => evidenceMatchesFact(item, fact)));
-  if (evidence.length === 0) throw new Error(`${displayChapterTitle(chapter.title)} 缺少可支撑正文的项目资料证据`);
-  const content = [
-    `## ${chapter.title}`,
-    '',
-    input.requirement ? `> 生成要求：${input.requirement}` : '',
-    existingContext ? `> 当前文档上下文摘要：${existingContext.replace(/\s+/gu, ' ')}` : '',
-    `本章依据已锁定项目资料围绕“${chapter.purpose}”重新整理，并与当前文档上下文保持一致。`,
-    '',
-    '### 资料依据',
-    ...evidence.map(evidenceLine),
-  ].filter(Boolean).join('\n');
-  return { id: chapter.id, title: chapter.title, content, evidence, missingFacts };
-}
+export { regenerateDocumentChapter } from './documentRegeneration';

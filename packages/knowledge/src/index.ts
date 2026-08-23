@@ -13,6 +13,7 @@ export { ChangeTracker } from './core/change-tracker.js';
 export { KnowledgeFileScanner, type DiskFileStat } from './core/file-scanner.js';
 export { IndexStateStore, type ChunkSearchResult, type FileHashRecord, type FileRelationship, type StoredChunk } from './core/index-state-store.js';
 export { KnowledgeBaseManager, type KnowledgeBaseManagerOptions, type KnowledgeIndexProgress } from './core/knowledge-base-manager.js';
+export { runIndexLoop, type IndexRunJob, type IndexRunOutcome } from './core/index-runner.js';
 export { MultiProjectManager } from './core/multi-project-manager.js';
 export { computeProjectId } from './core/project-id.js';
 export { ensureProjectCustomizeFile, getProjectConfigPath, getProjectKbPath, ProjectConfigManager } from './core/project-config.js';

@@ -11,6 +11,8 @@ import { resolveTemplateMaterialRoles } from '../document-core/materialRoleResol
 import { evaluateDocumentReadiness } from '../document-validation/documentReadinessService';
 import type { DocumentTemplate, ProjectBinding, PromptBinding } from './types';
 import { templateProjectBindings } from './projectMaterialProfile';
+import { charsPerPageForSettings, explicitLengthTargets } from './budget';
+import { referenceStructureSuggestion as buildReferenceStructureSuggestion } from './templateReferenceService';
 
 export type PromptExecutionCategory = 'writer' | 'chapter' | 'extraction' | 'formatting' | 'reference';
 
@@ -323,6 +325,9 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
       issues: [{ level: 'error' as const, message: '文档模板不存在或已删除' }],
       fileDiagnostics: [],
       promptDiagnostics: [],
+      roleDiagnostics: [],
+      readiness: undefined,
+      strategyPreview: undefined,
       config: undefined,
     };
   }
@@ -400,6 +405,24 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
       exists: Boolean(prompt),
     };
   });
+  // B2 绑定链路：项目角色配置中每个提示词角色的完整链路状态（含未绑定提示词的角色）
+  const roleDiagnostics = (config?.promptRoles || []).map(item => {
+    const role = promptRoles.find(candidate => candidate.id === item.roleId);
+    const resourceIds = role ? (role.resourceIds?.length ? role.resourceIds : role.resourceId ? [role.resourceId] : []) : [];
+    const boundPromptIds = promptBindings.filter(binding => binding.roleId === item.roleId).map(binding => binding.promptId);
+    const status = !role ? 'role_missing' : resourceIds.length === 0 ? 'missing_resource' : boundPromptIds.length === 0 ? 'missing_prompt' : 'ok';
+    return { roleId: item.roleId, roleName: role?.name, order: item.order, resourceIds, boundPromptIds, status };
+  });
+  // 多提示词规则冲突预检（动态 import 规避 templateStore ↔ promptRuleExtraction 模块环）
+  if (resolvedPrompts.length > 1) {
+    try {
+      const { detectPromptRuleConflicts } = await import('./promptRuleExtraction');
+      const conflicts = detectPromptRuleConflicts(resolvedPrompts.map(prompt => ({ promptId: prompt.id, name: prompt.name, roleId: prompt.roleId, content: prompt.content })));
+      for (const conflict of conflicts) issues.push({ level: conflict.level, message: `提示词规则冲突：${conflict.message}` });
+    } catch {
+      // 冲突检测失败不影响模板校验主流程
+    }
+  }
   let readiness;
   if (template) {
     const projectMaterialSummary = previewMaterialSummary || buildProjectMaterialSummary(resolvedProjectRoot, {
@@ -416,7 +439,45 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
     for (const message of readiness.blockingIssues) issues.push({ level: 'error', message: `生成准备度不足：${message}` });
     for (const message of readiness.warnings) issues.push({ level: 'warning', message });
   }
-  return { templateId, projectRoleConfigId: configId, fileDiagnostics, promptDiagnostics, readiness, issues };
+  // U1 生成前体检：预估生成策略与预算（目标字数为近似估算；动态 import 规避 templateStore ↔ rolePipeline 模块环）
+  let strategyPreview;
+  try {
+    const spec = getOrCreateAutoDocumentSpec(template).spec;
+    const { effectiveTemplateChapters } = await import('./outline');
+    const previewChapters = effectiveTemplateChapters(template, spec);
+    const settings = template.generationSettings || template.exportSettings;
+    const charsPerPage = charsPerPageForSettings(template.exportSettings || template.generationSettings);
+    const explicit = explicitLengthTargets(options.requirement || '');
+    const settingPages = settings?.targetPages?.target || settings?.targetPages?.min;
+    const estimatedTargetChars = explicit.targetChars || (explicit.targetPages ? explicit.targetPages * charsPerPage : undefined) || (settingPages ? settingPages * charsPerPage : undefined);
+    const specMinTotal = previewChapters.reduce((sum, chapter) => sum + Math.max(
+      spec.chapterRules.find(rule => rule.id === chapter.id || rule.title === chapter.title)?.minWords || 0,
+      spec.dynamicChapterRule.minWordsPerChapter || 0,
+    ), 0);
+    const previewTargetWords = Math.round(estimatedTargetChars || specMinTotal || previewChapters.length * 1200);
+    const previewEvidenceCount = materialFilePaths.reduce((sum, filePath) => sum + (fileMap.get(filePath)?.chunkCount ?? 0), 0);
+    const { previewGenerationBudgetForTemplate } = await import('./generationBudget');
+    strategyPreview = previewGenerationBudgetForTemplate({
+      template,
+      chapters: previewChapters,
+      requirement: options.requirement,
+      materialFileCount: materialFilePaths.length,
+      evidenceCount: previewEvidenceCount,
+      targetWords: previewTargetWords,
+      hasVeryLargeExplicitChapter: previewChapters.some(chapter => (chapter.sections || []).filter(Boolean).length >= 30),
+      configuredChapterConcurrency: Number(process.env.DOCUMENT_CHAPTER_CONCURRENCY || 0),
+    });
+  } catch {
+    // 策略预估失败不影响模板校验主流程
+  }
+  // T6 大纲建议：模板章节 vs 同类工程典型结构，缺失高频章节仅建议（不阻断、不强制）
+  let referenceStructureSuggestion;
+  try {
+    referenceStructureSuggestion = buildReferenceStructureSuggestion({ templateName: template.name, chapterTitles: template.chapters.map(chapter => chapter.title) });
+  } catch {
+    // 参考库建议失败不影响模板校验主流程
+  }
+  return { templateId, projectRoleConfigId: configId, configName: config?.name, fileDiagnostics, promptDiagnostics, roleDiagnostics, readiness, issues, strategyPreview, referenceStructureSuggestion };
 }
 
 interface TemplateRunValidationCacheEntry {

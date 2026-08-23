@@ -1,6 +1,6 @@
 import type { AgentWorkflowContext, AgentWorkflowNode } from './agentWorkflow';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentTemplate, DocumentTemplateChapter, ProjectGraph, ValidationIssue } from './types';
-import { stableHash, stringifyFactValue } from './utils';
+import { extractSection, stableHash, stringifyFactValue } from './utils';
 import { documentTextLength } from './budget';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './constructionOrgAudit';
 
@@ -63,7 +63,7 @@ export interface AgentReviewResult {
 }
 
 const FORMAL_FORBIDDEN_PHRASES = [
-  '知识库', '系统暂未', '项目资料暂未', '资料未明确', '暂未明确', '待确认', '待资料复核', '待系统', '未检索到', '资料不足', '无法确认', '建议补充', '不适用', 'COL', '可核验信息', '围绕',
+  '知识库', '系统暂未', '项目资料暂未', '资料未明确', '暂未明确', '待确认', '待资料复核', '待系统', '未检索到', '资料不足', '无法确认', '建议补充', '不适用', 'COL', '可核验信息',
 ];
 
 function normalizeText(value: string) {
@@ -156,7 +156,7 @@ export function planDocument(input: { template: DocumentTemplate; context: Agent
       requiredFacts: [...new Set([...(chapter.requiredFacts || []), chapter.title])],
       requiredGraphNodes: [chapter.title],
       evidenceQueries: [...new Set([chapter.title, ...(chapter.queries || []), ...(chapter.requiredFacts || [])])],
-      qualityRules: ['事实必须来自锁定资料范围', '不得出现后台话术和兜底措辞', '不得混入其他项目名称', '章节必须覆盖规划小节'],
+      qualityRules: ['项目专属事实必须来自锁定资料范围，不得混入其他项目名称', '法规规范等公共知识不受锁定范围限制', '不得出现后台话术和兜底措辞', '章节必须覆盖规划小节'],
       forbiddenPhrases: FORMAL_FORBIDDEN_PHRASES,
       sections: sectionTitles.map(sectionTitle => ({
         title: sectionTitle,
@@ -193,7 +193,8 @@ export function planChapterTask(input: { plan: AgentDocumentPlan; chapter: Docum
     const sectionEvidence = input.evidence.filter(item => section.evidenceQueries.some(query => evidenceMatches(item, query))).slice(0, 24);
     const graphNodes = section.requiredGraphNodes.flatMap(query => graphNodeSummary(input.context.baseProjectGraph, query)).slice(0, 12);
     const issues: ValidationIssue[] = [];
-    if (sectionEvidence.length === 0 && sectionFacts.length === 0 && graphNodes.length === 0) issues.push({ level: 'error', severity: 'blocker', category: 'evidence_coverage', owner: 'system', message: `${section.title} 缺少事实、图谱或证据支撑`, suggestion: '应先定向检索和抽取事实，不能生成占位正文。' });
+    const isPublicKnowledgeSection = /法律法规|法规|规章|规范标准|标准规范|行业标准|现行规范|编制依据/u.test(section.title);
+    if (!isPublicKnowledgeSection && sectionEvidence.length === 0 && sectionFacts.length === 0 && graphNodes.length === 0) issues.push({ level: 'error', severity: 'blocker', category: 'evidence_coverage', owner: 'system', message: `${section.title} 缺少事实、图谱或证据支撑`, suggestion: '应先定向检索和抽取事实，不能生成占位正文。' });
     return { ...section, factIds: sectionFacts.map(fact => stableHash({ key: fact.key, value: stringifyFactValue(fact.value), sourceFile: fact.sourceFile }).slice(0, 12)), evidenceIds: sectionEvidence.map(item => stableHash({ filePath: item.filePath, content: item.content.slice(0, 160), score: item.score }).slice(0, 12)), graphNodeIds: graphNodes.map(node => stableHash(node).slice(0, 12)), ready: issues.length === 0, issues };
   });
   const issues = sections.flatMap(section => section.issues);
@@ -224,52 +225,8 @@ export function chapterTaskPrompt(task: AgentChapterTask) {
     task.graphContext ? `图谱上下文：\n${task.graphContext}` : '',
     factLines ? `事实卡：\n${factLines}` : '',
     `小节任务：\n${sectionLines}`,
-    '写作要求：必须严格按“小节任务”逐项输出，每个任务都必须保留完全一致的三级标题“### 小节标题”；不得合并小节、不得改写小节标题、不得省略小节；只使用事实卡、图谱上下文和绑定证据；不得输出后台话术、兜底措辞、待确认、不适用；缺少事实的小节不得编造。',
+    '写作要求：必须严格按“小节任务”逐项输出，每个任务都必须保留完全一致的三级标题“### 小节标题”；不得合并小节、不得改写小节标题、不得省略小节；项目专属事实只使用事实卡、图谱上下文和绑定证据，法律法规、标准规范等公共知识可直接引用；不得输出后台话术、兜底措辞、待确认、不适用；缺少项目事实的小节不得编造。',
   ].filter(Boolean).join('\n\n');
-}
-
-function headingTitleText(line: string) {
-  return line
-    .replace(/^\s*#{2,4}\s*/u, '')
-    .replace(/^\s*(?:\d+(?:\.\d+)*|[一二三四五六七八九十]+)(?:[、.．]|\s+)\s*/u, '')
-    .trim();
-}
-
-function normalizeSectionTitleForMatch(value: string) {
-  return normalizeText(headingTitleText(value));
-}
-
-function comparableSectionTitle(value: string) {
-  return normalizeSectionTitleForMatch(value)
-    .replace(/施工(?=方案|流程|方法)/gu, '')
-    .replace(/专项(?=方案)/gu, '')
-    .replace(/项目|工程|主要|重点|技术/gu, '')
-    .replace(/\s/gu, '');
-}
-
-function extractSectionBody(content: string, sectionTitle: string) {
-  const lines = content.split('\n');
-  const normalizedTitle = normalizeSectionTitleForMatch(sectionTitle);
-  const comparableTitle = comparableSectionTitle(sectionTitle);
-  const matches: string[] = [];
-  let start = -1;
-  const flush = (end: number) => {
-    if (start < 0) return;
-    const body = lines.slice(start, end).join('\n').trim();
-    if (body) matches.push(body);
-    start = -1;
-  };
-  for (let index = 0; index < lines.length; index += 1) {
-    if (!/^\s*#{2,3}\s+/u.test(lines[index])) continue;
-    flush(index);
-    const title = normalizeSectionTitleForMatch(headingTitleText(lines[index]));
-    const comparableHeading = comparableSectionTitle(headingTitleText(lines[index]));
-    if (title === normalizedTitle || title.includes(normalizedTitle) || normalizedTitle.includes(title) || comparableHeading === comparableTitle || comparableHeading.includes(comparableTitle) || comparableTitle.includes(comparableHeading)) {
-      start = index + 1;
-    }
-  }
-  flush(lines.length);
-  return matches.sort((a, b) => documentTextLength(b) - documentTextLength(a))[0] || '';
 }
 
 function actionableReviewFact(fact: DocumentFact) {
@@ -285,12 +242,11 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
   const issues: ValidationIssue[] = [];
   const content = input.draft.content || '';
   for (const phrase of FORMAL_FORBIDDEN_PHRASES) {
-    if (phrase === '围绕') continue;
     if (content.includes(phrase)) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `${input.draft.title} 正文包含禁止话术：${phrase}`, suggestion: '改为事实支撑的正式表达；缺失事实不得占位。' });
   }
   const chapterLength = documentTextLength(content);
   for (const section of input.task.sections) {
-    const body = extractSectionBody(content, section.title);
+    const body = extractSection(content, section.title, { fuzzy: true });
     if (body.includes('[WRITER_MISSING_SECTION]') || (!body && content.includes('[WRITER_MISSING_SECTION]'))) issues.push({ level: 'error', severity: 'blocker', category: 'structure', owner: 'system', message: `${section.title} Writer 未完成`, suggestion: 'Repairer 必须基于该小节事实卡和证据生成正式正文，并删除 WRITER_MISSING_SECTION 标记。' });
     else if (body && documentTextLength(body) < section.minChars) {
       const criticalDepth = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试|见证取样/u.test(section.title);
@@ -305,13 +261,13 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
     if (!section.ready) issues.push(...section.issues.map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const })));
     // 分项工程施工方案必须落位工艺参数；缺失时触发 Repairer 定向补写（设备型号规格参数同样计入）
     if (/主要分部分项工程施工方案|主要施工方法/u.test(section.title)) {
-      const methodBody = extractSectionBody(content, section.title);
+      const methodBody = extractSection(content, section.title, { fuzzy: true });
       const paramCount = new Set([...(methodBody.match(PROCESS_PARAMETER_RE) || []), ...(methodBody.match(DEVICE_SPEC_RE) || [])]).size;
       if (documentTextLength(methodBody) >= 800 && paramCount < 4) issues.push({ level: 'warning', severity: 'warning', category: 'professional_chain', owner: 'system', message: `${section.title} 工艺参数落位不足：当前 ${paramCount} 个，要求不少于 4 个`, suggestion: '必须补充 mm/MPa/间距/偏差/坡度/试验压力等工艺参数（来自绑定资料或行业规范值）或设备型号规格参数。' });
     }
     // 工序链箭头密度：方法类/流程类小节必须用“→”串联工序链，避免纯文字流程叙述拉低整体箭头密度
     if (/主要分部分项工程施工方案|主要施工方法|项目主要施工内容|施工流程|施工顺序|多工序穿插|三检制度|隐蔽工程验收|闭环整改|应急演练|转运路线/u.test(section.title)) {
-      const methodBody = extractSectionBody(content, section.title);
+      const methodBody = extractSection(content, section.title, { fuzzy: true });
       const arrowCount = (methodBody.match(/→/gu) || []).length;
       if (documentTextLength(methodBody) >= 500 && arrowCount < 3) issues.push({ level: 'warning', severity: 'warning', category: 'professional_chain', owner: 'system', message: `${section.title} 工序链箭头缺失：当前 ${arrowCount} 个“→”，工序序列未按箭头链表达`, suggestion: '工艺流程与方法叙述中的连续工序必须用“→”串联（如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”），每条链不少于 3 个环节，方法叙述中同样需要箭头链。' });
     }

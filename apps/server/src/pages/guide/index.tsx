@@ -1,38 +1,46 @@
-import { Card, Col, Collapse, Row, Space, Tag, Timeline, Typography } from 'antd';
-import { BookOutlined, CheckCircleOutlined, DatabaseOutlined, FileSearchOutlined, FileTextOutlined, NodeIndexOutlined, PlayCircleOutlined, SettingOutlined } from '@ant-design/icons';
+import { useEffect, useState } from 'react';
+import { Card, Col, Collapse, Divider, Row, Space, Tag, Timeline, Typography } from 'antd';
+import { BookOutlined, CheckCircleOutlined, DatabaseOutlined, FileSearchOutlined, FileTextOutlined, NodeIndexOutlined, PlayCircleOutlined, SettingOutlined, SyncOutlined } from '@ant-design/icons';
+import { getDocumentRoles, getDocumentTemplates, getGeneratedDocuments, getKbStats, getPromptProjects, validateDocumentTemplate } from '@/lib/api';
 
 const { Title, Paragraph, Text } = Typography;
 
+// U4：五步引导流，每步带当前项目状态与跳转链接
 const steps = [
   {
     icon: <DatabaseOutlined />,
     title: '上传项目资料包',
     goal: '将同一项目的招标正文、清单、图纸、补疑等资料放在同一个项目文件夹下。',
     checks: ['资料已上传', '索引完成', '可选择项目文件夹'],
+    href: '/knowledge',
   },
   {
     icon: <SettingOutlined />,
     title: '维护提示词角色',
     goal: '只配置写作、事实抽取、质量审查、格式化等提示词角色；项目资料类型由系统自动识别。',
     checks: ['角色已绑定提示词', '编排配置已保存'],
+    href: '/prompt',
   },
   {
     icon: <FileTextOutlined />,
     title: '配置文档模板',
     goal: '选择项目资料包，配置章节结构、输出标题、页数目标和提示词编排。',
     checks: ['资料包已绑定', '章节结构完整', '运行前校验通过'],
+    href: '/documents',
   },
   {
     icon: <PlayCircleOutlined />,
     title: '运行工作流',
     goal: '系统构建项目理解，并按章节组合招标正文、清单、图纸、补疑等证据生成文档。',
     checks: ['项目理解完成', '章节逐步生成', '证据来源可追溯'],
+    href: '/documents',
   },
   {
     icon: <CheckCircleOutlined />,
     title: '审查与导出',
     goal: '查看结构化事实、来源、缺失项和导出门禁，确认文档可交付。',
     checks: ['无阻断问题', '正文无后台话术', '导出结果可打开'],
+    href: '/documents',
   },
 ];
 
@@ -49,7 +57,75 @@ const flowCards = [
   { icon: <BookOutlined />, title: '章节证据计划', desc: '不同章节按不同资料组合召回，减少泛化套话和无来源事实。' },
 ];
 
+// U4：五步引导流的当前项目状态（每步完成情况）
+interface GuideProjectState {
+  kbFileCount: number;
+  promptRoleCount: number;
+  roleConfigCount: number;
+  templateCount: number;
+  templateBlockedCount: number;
+  recordCount: number;
+  completedRecordCount: number;
+  exportCount: number;
+}
+
+interface StepStatus { text: string; level: 'done' | 'progress' | 'todo'; }
+
 export default function GuidePage() {
+  // U4：加载当前项目状态，每步卡片展示完成度
+  const [projectState, setProjectState] = useState<GuideProjectState | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const promptProjects = await getPromptProjects();
+        const projectRoot = promptProjects.find(item => item.selected)?.projectRoot || promptProjects.find(item => item.isCurrent)?.projectRoot || promptProjects[0]?.projectRoot || '';
+        const [rolesData, templatesData, draftsData, kbStats] = await Promise.all([
+          getDocumentRoles('prompt'),
+          getDocumentTemplates(),
+          getGeneratedDocuments(projectRoot || undefined),
+          getKbStats(projectRoot || undefined),
+        ]);
+        const templateBlockedFlags = await Promise.all(templatesData.templates.map(async template => {
+          try {
+            const { validation } = await validateDocumentTemplate(template.id, projectRoot || undefined);
+            return validation.issues.some(issue => issue.level === 'error');
+          } catch { return false; }
+        }));
+        if (cancelled) return;
+        setProjectState({
+          kbFileCount: kbStats.fileCount,
+          promptRoleCount: rolesData.roles.length,
+          roleConfigCount: rolesData.configs.length,
+          templateCount: templatesData.templates.length,
+          templateBlockedCount: templateBlockedFlags.filter(blocked => blocked).length,
+          recordCount: draftsData.documents.length,
+          completedRecordCount: draftsData.documents.filter(document => document.status === 'completed' || document.status === 'warning').length,
+          exportCount: draftsData.documents.reduce((sum, document) => sum + (document.exportReports?.length || 0), 0),
+        });
+      } catch {
+        // 状态加载失败保持空态，不影响引导内容展示
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const stepStatus = (index: number): StepStatus => {
+    const s = projectState;
+    if (!s) return { text: '加载中…', level: 'todo' };
+    switch (index) {
+      case 0: return s.kbFileCount > 0 ? { text: `已入库 ${s.kbFileCount} 份资料文件`, level: 'done' } : { text: '尚未上传项目资料', level: 'progress' };
+      case 1: return s.promptRoleCount > 0 ? { text: `${s.promptRoleCount} 个提示词角色 / ${s.roleConfigCount} 套编排`, level: 'done' } : { text: '尚未配置提示词角色', level: 'todo' };
+      case 2: return s.templateCount > 0 ? (s.templateBlockedCount > 0 ? { text: `${s.templateCount} 个模板，${s.templateBlockedCount} 个存在阻断项`, level: 'progress' } : { text: `${s.templateCount} 个模板全部通过运行前校验`, level: 'done' }) : { text: '尚未创建文档模板', level: 'todo' };
+      case 3: return s.recordCount > 0 ? { text: `已生成 ${s.completedRecordCount}/${s.recordCount} 条有效记录`, level: 'done' } : { text: '尚无生成记录', level: 'todo' };
+      case 4: return s.exportCount > 0 ? { text: `已导出 ${s.exportCount} 次，报告已归档`, level: 'done' } : s.completedRecordCount > 0 ? { text: '有生成记录待导出', level: 'progress' } : { text: '等待生成记录后导出', level: 'todo' };
+      default: return { text: '', level: 'todo' };
+    }
+  };
+  const statusTag = (status: StepStatus) => (
+    <Tag color={status.level === 'done' ? 'success' : status.level === 'progress' ? 'processing' : 'default'} icon={projectState === null ? <SyncOutlined spin /> : undefined} className="border-0">{status.text}</Tag>
+  );
+
   return <div className="p-6 max-w-7xl mx-auto">
     <div className="w-full flex flex-col gap-6">
       <Card
@@ -86,6 +162,11 @@ export default function GuidePage() {
               <Paragraph className="text-sm text-[var(--colorTextSecondary)] min-h-[44px] !mb-4">{step.goal}</Paragraph>
               <div className="flex flex-wrap gap-1.5">
                 {step.checks.map(check => <Tag key={check}>{check}</Tag>)}
+              </div>
+              <Divider className="!my-3" />
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                {statusTag(stepStatus(index))}
+                <a className="text-xs text-[var(--colorPrimary)] hover:underline" href={step.href}>去完成 ›</a>
               </div>
             </Card>
           </Col>)}

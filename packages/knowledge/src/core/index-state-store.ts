@@ -472,13 +472,24 @@ export class IndexStateStore {
     return row ? this.rowToDocumentChunk(row) : undefined;
   }
 
+  /** 聚合统计切片数：单条 SUM 查询，避免加载全部索引记录后再求和 */
+  countIndexedChunks(filePaths?: string[]): number {
+    const paths = filePaths?.filter(Boolean) ?? [];
+    const clause = paths.length > 0 ? ` WHERE relative_path IN (${paths.map(() => '?').join(', ')})` : '';
+    const row = this.db.prepare(`SELECT COALESCE(SUM(chunk_count), 0) AS total FROM kb_index_state${clause}`)
+      .get(...paths) as { total?: number } | undefined;
+    return Math.max(0, Math.ceil(Number(row?.total) || 0));
+  }
+
   getChunksByParent(relativePath: string, parentId: string, limit = 6): StoredChunk[] {
+    // 使用 parent_id 列 + idx_kb_chunks_parent 索引；
+    // 原先的 metadata_json LIKE '%"parentId":"..."%' 无法使用索引，是每次调用的全表扫描
     const rows = this.db.prepare(`
       SELECT rowid, * FROM kb_chunks
-      WHERE relative_path = ? AND metadata_json LIKE ?
+      WHERE relative_path = ? AND parent_id = ?
       ORDER BY chunk_index
       LIMIT ?
-    `).all(relativePath, `%"parentId":"${parentId.replace(/[%_]/gu, '')}"%`, limit) as Array<Record<string, unknown>>;
+    `).all(relativePath, parentId, limit) as Array<Record<string, unknown>>;
     return rows.map(row => this.rowToChunk(row, 0));
   }
 
@@ -493,11 +504,11 @@ export class IndexStateStore {
     if (terms.length === 0) return [];
     const filePaths = [...new Set((filters.filePaths ?? []).filter(Boolean))];
     const effectiveLimit = this.resolveChunkSearchLimit(limit, filePaths);
-    const results = [
-      ...(this.ftsEnabled ? this.searchChunksFts(terms, effectiveLimit, filePaths) : []),
-      ...this.searchChunksLike(terms, effectiveLimit, filePaths),
-    ];
-    return this.mergeKeywordResults(results, effectiveLimit);
+    const ftsResults = this.ftsEnabled ? this.searchChunksFts(terms, effectiveLimit, filePaths) : [];
+    // FTS 返回充分结果时跳过 LIKE 全表扫描（LOWER(x) LIKE '%term%' 无法使用索引，最多 40 term × 7 列）；
+    // 中文子串匹配 FTS 命中通常不足，此时 LIKE 仍会执行补齐召回，行为与原先一致
+    const likeResults = ftsResults.length >= effectiveLimit ? [] : this.searchChunksLike(terms, effectiveLimit, filePaths);
+    return this.mergeKeywordResults([...ftsResults, ...likeResults], effectiveLimit);
   }
 
   private filePathFilterClause(filePaths: string[], column = 'relative_path') {

@@ -281,7 +281,7 @@ export function buildProjectUnderstanding(template: DocumentTemplate, profile: P
       mustUseMaterialKinds,
       evidenceQueries: Object.fromEntries(ALL_KINDS.map(kind => [kind, queriesForKind(chapter, kind)])) as Record<MaterialKind, string[]>,
       mustCover: [...new Set([chapter.purpose, ...(chapter.sections || []), ...chapter.requiredFacts, ...graphWorksForChapter, ...graphMethodsForChapter])].filter(Boolean).slice(0, 24),
-      avoidWriting: ['不得脱离项目资料泛泛套写通用内容', '不得编造资料未确认的数字、日期、金额、工程量、规格和标准', '不得忽略补疑/澄清对原始资料的修正'],
+      avoidWriting: ['不得脱离项目资料泛泛套写通用内容', '不得编造资料未确认的项目专属数字、日期、金额、工程量、材料规格；标准规范编号与法规名称属公共知识可正常引用', '不得忽略补疑/澄清对原始资料的修正'],
     };
   });
   const prompt = projectUnderstandingPrompt({ profile, globalWritingFocus, chapterPlans, graphPrompt });

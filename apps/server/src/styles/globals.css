@@ -26,6 +26,29 @@
   --colorWarn: #f59e0b;
   --colorInfo: #2563eb;
 
+  /* ── Ant Design 主题变量兼容层 ──
+     antd v6 注入的 CSS 变量为 --ant-* 前缀，且作用域在其内部包装层而非 :root，
+     页面引用的旧命名变量必须在此自行定义（值与 antdTheme.ts 的 iOS 主题对齐）。 */
+  --colorPrimary: #007aff;
+  --colorAccent: #007aff;
+  --colorSuccess: #34c759;
+  --colorWarning: #ff9500;
+  --colorError: #ff3b30;
+
+  --colorBgContainer: rgba(255, 255, 255, 0.78);
+  --colorFillAlter: rgba(0, 0, 0, 0.02);
+  --colorFillSecondary: rgba(0, 0, 0, 0.04);
+  --colorFillTertiary: rgba(0, 0, 0, 0.03);
+  --colorFillQuaternary: rgba(0, 0, 0, 0.02);
+  --colorBorderSecondary: rgba(60, 60, 67, 0.12);
+
+  --colorTextQuaternary: rgba(60, 60, 67, 0.18);
+
+  --colorWarningBg: #fff8e6;
+  --colorSuccessBg: #e8f9ee;
+  --colorInfoBg: #e8f2ff;
+  --colorErrorBg: #ffeceb;
+
   --glassBg: rgba(255, 255, 255, 0.85);
   --glassBlur: saturate(180%) blur(16px);
 
@@ -33,6 +56,9 @@
   --borderColor: rgba(0, 0, 0, 0.08);
   --borderColorStrong: rgba(0, 0, 0, 0.15);
   --borderColorSelected: #3b82f6; /* 选中状态的边框色 */
+  --borderSoft: rgba(0, 0, 0, 0.06);
+  --textSecondary: #737373;
+  --surfaceElevated: #ffffff;
 
   /* 极软的阴影，仅用于浮窗/下拉菜单 */
   --shadowSoft: 0 4px 12px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.02);
@@ -68,10 +94,34 @@
   --colorWarn: #fbbf24;
   --colorInfo: #3b82f6;
 
+  /* Ant Design 主题变量兼容层（暗色，与 antdTheme.ts 的 iOS 暗色主题对齐） */
+  --colorPrimary: #0a84ff;
+  --colorAccent: #0a84ff;
+  --colorSuccess: #30d158;
+  --colorWarning: #ff9f0a;
+  --colorError: #ff453a;
+
+  --colorBgContainer: rgba(44, 44, 46, 0.78);
+  --colorFillAlter: rgba(255, 255, 255, 0.03);
+  --colorFillSecondary: rgba(255, 255, 255, 0.06);
+  --colorFillTertiary: rgba(255, 255, 255, 0.04);
+  --colorFillQuaternary: rgba(255, 255, 255, 0.03);
+  --colorBorderSecondary: rgba(255, 255, 255, 0.10);
+
+  --colorTextQuaternary: rgba(235, 235, 245, 0.24);
+
+  --colorWarningBg: rgba(255, 159, 10, 0.12);
+  --colorSuccessBg: rgba(48, 209, 88, 0.12);
+  --colorInfoBg: rgba(10, 132, 255, 0.12);
+  --colorErrorBg: rgba(255, 69, 58, 0.12);
+
   --glassBg: rgba(0, 0, 0, 0.85);
   --borderColor: rgba(255, 255, 255, 0.12);
   --borderColorStrong: rgba(255, 255, 255, 0.2);
   --borderColorSelected: #60a5fa;
+  --borderSoft: rgba(255, 255, 255, 0.08);
+  --textSecondary: #a3a3a3;
+  --surfaceElevated: #1c1c1e;
 
   --shadowSoft: 0 4px 12px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.2);
   --shadowCard: 0 0 0 1px rgba(255,255,255,0.08), 0 4px 16px rgba(0,0,0,0.4);

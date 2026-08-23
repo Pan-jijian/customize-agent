@@ -183,27 +183,47 @@ export function stripMarkdownDocumentFence(markdown: string) {
 
 export const SOURCE_ENUMERATION_PHRASE_RE = /(?:项目部|本项目|本工程)?(?:根据|依据|结合|按照|以)?(?:本项目|项目|[^。；;\n]{0,30}?)?(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸|图纸资料|设计修改通知单)(?:[、,，及和与\s]*(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸|图纸资料|设计修改通知单|现行规范|规范)){1,}(?:[^。；;\n]{0,80})?[，,]/u;
 
+const BASIS_SECTION_TITLE_RE = /编制依据|编制说明|法律法规|规范标准|标准依据/u;
+
 export function cleanFormalSourcePhrases(markdown: string) {
-  return markdown
-    .split(/\r?\n/u)
-    .map(line => {
-      if (/^\s*\|/u.test(line.trim())) return line;
-      return line
-        .replace(SOURCE_ENUMERATION_PHRASE_RE, '')
-        .replace(/(?:施工图设计说明|工程量清单项目特征|补充答疑修正口径|答疑修正口径)(?:[、,，及和与\s]*(?:施工图设计说明|工程量清单项目特征|补充答疑修正口径|答疑修正口径)){1,}/gu, '项目技术文件')
-        .replace(/(?:根据|依据|以)(?:[^。；;\n]{0,30})?(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸)(?:[^。；;\n]{0,40})(?:编制|确定|要求|为编制基础)[。；;]?/gu, '')
-        .replace(/(?<=\S)\s{2,}(?=\S)/gu, ' ')
-        .trimEnd();
-    })
-    .filter(line => !/^(?:本节|本小节|本章)?(?:内容|措施)?(?:根据|依据)(?:招标文件|补疑澄清文件|补遗澄清文件|答疑(?:回复)?文件|澄清文件|工程量清单|设计图纸|施工图纸)[^。；;\n]*[。；;]?$/u.test(line.trim()))
-    .join('\n')
-    .replace(/\n{3,}/gu, '\n\n');
+  const lines = markdown.split(/\r?\n/u);
+  const output: string[] = [];
+  let inBasisSection = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^#{2,4}\s+/u.test(trimmed)) {
+      inBasisSection = BASIS_SECTION_TITLE_RE.test(trimmed.replace(/^#{2,4}\s+/u, ''));
+      output.push(line);
+      continue;
+    }
+    if (/^\s*\|/u.test(trimmed) || inBasisSection) {
+      // 编制依据类小节（编制依据/编制说明/法律法规/规范标准等）允许集中罗列依据文件，不执行来源罗列清洗
+      output.push(line.trimEnd());
+      continue;
+    }
+    const cleaned = line
+      .replace(SOURCE_ENUMERATION_PHRASE_RE, '')
+      .replace(/(?:施工图设计说明|工程量清单项目特征|补充答疑修正口径|答疑修正口径)(?:[、,，及和与\s]*(?:施工图设计说明|工程量清单项目特征|补充答疑修正口径|答疑修正口径)){1,}/gu, '项目技术文件')
+      .replace(/(?:根据|依据|以)(?:[^。；;\n]{0,30})?(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸)(?:[^。；;\n]{0,40})(?:编制|确定|要求|为编制基础)[。；;]?/gu, '')
+      .replace(/(?<=\S)\s{2,}(?=\S)/gu, ' ')
+      .trimEnd();
+    if (!/^(?:本节|本小节|本章)?(?:内容|措施)?(?:根据|依据)(?:招标文件|补疑澄清文件|补遗澄清文件|答疑(?:回复)?文件|澄清文件|工程量清单|设计图纸|施工图纸)[^。；;\n]*[。；;]?$/u.test(cleaned.trim())) {
+      output.push(cleaned);
+    }
+  }
+  return output.join('\n').replace(/\n{3,}/gu, '\n\n');
 }
 
 export function sourcePhraseIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  let inBasisSection = false;
   markdown.split(/\r?\n/u).forEach((line, index) => {
-    if (SOURCE_ENUMERATION_PHRASE_RE.test(line)) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `正式正文不得出现资料来源罗列话术：第 ${index + 1} 行`, suggestion: '删除“根据/依据招标文件、清单、图纸”等来源罗列，直接保留项目事实、施工内容和控制措施。' });
+    const trimmed = line.trim();
+    if (/^#{2,4}\s+/u.test(trimmed)) {
+      inBasisSection = BASIS_SECTION_TITLE_RE.test(trimmed.replace(/^#{2,4}\s+/u, ''));
+      return;
+    }
+    if (SOURCE_ENUMERATION_PHRASE_RE.test(line) && !inBasisSection) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `正式正文不得出现资料来源罗列话术：第 ${index + 1} 行`, suggestion: '删除“根据/依据招标文件、清单、图纸”等来源罗列，直接保留项目事实、施工内容和控制措施；编制依据类小节可集中罗列依据文件。' });
     if (/^\s*\*\*[^*]{2,40}表\*\*\s*$/u.test(line)) issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'system', message: `正式正文不得用粗体段落充当表名：第 ${index + 1} 行`, suggestion: '表名必须转换为 #### 四级标题，避免导出后混入正文段落。' });
   });
   return issues.slice(0, 20);
@@ -265,19 +285,19 @@ export const MARKDOWN_TABLE_FORMAT_RULES = [
 export const FORMAL_WRITING_RULES = [
   '以下规则仅用于保障导出格式正确和事实安全，不得覆盖用户在提示词中已明确的要求。',
   '不得把”知识库、检索、资料类型、提示词角色、规范包、事实字段、缺失项、校验结果、资料未提供、未检索到”等后台流程话术写入正文。',
-  '严禁使用“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列开头；正文必须直接写项目事实、施工内容、控制措施、验收节点。',
+  '严禁使用“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列开头；正文必须直接写项目事实、施工内容、控制措施、验收节点。编制依据类小节除外：该小节可集中罗列编制依据文件清单。',
   '禁止模板化空话与流程套话：不同小节必须写各自专属的专业内容，逐节落位本项目工程量、设备规格、工艺参数与验收标准，不得复制相同段落，不得用泛化的流程描述代替专业内容；正文末尾不得输出自我总结或合规声明段落。',
   // 导出格式 —— DOCX/PDF 渲染器依赖以下 Markdown 规范
   '【导出格式】章标题用 ## ，节标题用 ### 加数字编号（如 1.1），小节标题用 #### 加数字编号（如 1.1.1）。禁止用数字编号或粗体代替 ###/#### 标题。',
   MARKDOWN_TABLE_FORMAT_RULES,
   // 段落格式 —— 导出渲染需要双换行才是段落
   '【段落格式】段落之间必须空行（双换行）分隔，不得用单换行连续写大段文字。列表项逐行独占。步骤描述之间加空行。',
-  '正文事实必须来自绑定材料；信息不足时保持审慎，不得编造精确数量。',
+  '事实来源分级：项目专属事实（工期、金额、工程量、建设规模、人名、公司、品牌、供应商、材料规格、日期节点）必须来自绑定材料，不得编造；公共专业知识（法律法规名称、标准规范编号 GB/JGJ/CJJ/DB 系列、通用施工工艺与行业惯例）可依据现行有效版本和专业经验直接撰写，不要求材料提供，但不得虚构编号或引用已废止版本。',
 ].join('\n');
 
 export const SECTION_GENERATION_SAFETY_RULES = [
   '只生成当前节及其节内三级小节正文，不生成其他同级节，不重复章节一级标题。',
-  '优先使用当前模板、用户要求、绑定提示词和绑定材料中的事实；缺少依据时不得编造具体数值、名称、时间、规格或责任。',
+  '优先使用当前模板、用户要求、绑定提示词和绑定材料中的事实；项目专属事实（具体数值、时间、规格、人名、品牌、责任主体）缺少依据时不得编造；法律法规名称、标准规范编号等公共专业知识可依据现行有效版本直接引用，无需材料提供。',
   '小节应有实质正文；除非用户或模板明确要求纯表格，否则表格只能作为辅助表达，不能整节只有表格。',
   '不得用通用兜底段落、空泛管理话术或后台缺料说明冒充正文；信息不足时只写已有事实、适用边界和待复核口径。',
 ].join('\n');

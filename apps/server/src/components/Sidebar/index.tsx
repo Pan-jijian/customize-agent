@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { useAppTranslations } from '@/components/Layout';
-import { LayoutDashboard, Database, Cpu, Settings, MessageSquare, ChevronDown, ChevronRight, FileText, FolderOpen, PanelLeftClose, PanelLeftOpen, Files, BookOpen, Bug, Moon } from 'lucide-react';
+import { LayoutDashboard, Database, Cpu, Settings, MessageSquare, ChevronDown, ChevronRight, FileText, FolderOpen, PanelLeftClose, PanelLeftOpen, Files, BookOpen, Bug, Moon, LibraryBig } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 import { Tooltip } from 'antd';
@@ -36,6 +36,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: '/prompt', icon: MessageSquare, labelKey: 'nav.promptManagement' },
   { href: '/document-roles', icon: Settings, labelKey: 'nav.documentRoles' },
   { href: '/documents', icon: Files, labelKey: 'nav.documents' },
+  { href: '/template-references', icon: LibraryBig, labelKey: 'nav.templateReferences' },
   { href: '/asset-library', icon: FolderOpen, labelKey: 'nav.assetLibrary' },
   { href: '/system/logs', icon: Bug, labelKey: 'nav.systemLogs' },
   { href: '/guide', icon: BookOpen, labelKey: 'nav.guide' },

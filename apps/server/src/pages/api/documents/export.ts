@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import JSZip from 'jszip';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { generatedRoot, getGeneratedDocument } from '@/services/document-core/generatedDocumentService';
+import { generatedRoot, getGeneratedDocument, updateGeneratedDocument, type ExportReport, type GeneratedDocumentRecord } from '@/services/document-core/generatedDocumentService';
 import { getProjectRoot } from '@/services/knowledge/kbService';
 import type { DocumentExportSettings } from '@/services/document-workflow';
 import { sanitizeFormalMarkdown } from '@/services/document-workflow/markdownComposer';
@@ -984,6 +984,35 @@ async function renderPdfBuffer(html: string, settings?: DocumentExportSettings) 
 }
 
 /**
+ * B3 导出后闭环报告：导出成功后归档总用时/质量对标分/规则执行摘要/修复记录到记录详情，
+ * 支持与历史版本对比。归档失败不影响导出结果。
+ */
+function archiveExportReport(record: GeneratedDocumentRecord | null, format: ExportFormat, projectRoot: string) {
+  if (!record) return;
+  try {
+    const draft = record.draft;
+    const benchmark = draft?.reviewMetadata?.qualityBenchmark;
+    const quality = draft?.reviewMetadata?.diagnostics?.quality;
+    const durationMs = record.completedAt ? Math.max(0, record.completedAt - record.createdAt) : Math.max(0, Date.now() - record.createdAt);
+    const report: ExportReport = {
+      format,
+      exportedAt: Date.now(),
+      durationMs,
+      benchmarkScore: benchmark?.overallScore,
+      benchmarkSourceCount: benchmark?.referenceSourceCount,
+      ruleSummary: (draft?.promptRules?.executionSummary || []).slice(0, 12),
+      repairedCount: quality?.repairedCount,
+      blockingCount: quality?.blockingCount,
+      gatePassed: draft?.exportGate?.passed,
+    };
+    const history = [...(record.exportReports || []), report].slice(-20);
+    updateGeneratedDocument(record.id, { exportReports: history }, projectRoot);
+  } catch {
+    // 报告归档失败不影响导出
+  }
+}
+
+/**
  * 文档导出 API 处理器
  * 支持导出为 Markdown、HTML、DOCX、PDF 四种格式
  * PDF 导出优先使用 Playwright 内置 Chromium，失败时自动尝试系统浏览器
@@ -1014,6 +1043,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const filename = safeFileName(title);
     // Markdown 格式直接返回文本
     if (format === 'markdown') {
+      archiveExportReport(record, format, projectRoot);
       res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.md`)}`);
       return res.status(200).send(markdown);
@@ -1021,6 +1051,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // DOCX 格式
     if (format === 'docx') {
       const docx = await buildDocx(title, markdown, exportSettings, body.wordTemplatePath, projectRoot);
+      archiveExportReport(record, format, projectRoot);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.docx`)}`);
       return res.status(200).send(docx);
@@ -1028,6 +1059,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // HTML 和 PDF 需要将 Markdown 渲染为 HTML
     const html = await buildExportHtml(title, markdown, exportSettings, projectRoot);
     if (format === 'html') {
+      archiveExportReport(record, format, projectRoot);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.html`)}`);
       return res.status(200).send(html);
@@ -1035,6 +1067,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     try {
       const pdf = await renderPdfBuffer(html, exportSettings);
       const pages = pdfPageCount(pdf);
+      archiveExportReport(record, format, projectRoot);
       res.setHeader('Content-Type', 'application/pdf');
       if (pages) res.setHeader('X-PDF-Page-Count', String(pages));
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.pdf`)}`);

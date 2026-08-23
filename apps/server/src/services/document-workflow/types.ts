@@ -1,4 +1,5 @@
 import type { AgentWorkflowContext } from './agentWorkflow';
+import type { QualityBenchmarkResult } from './benchmarkQuality';
 
 export interface PromptRequiredSectionRule {
   title: string;
@@ -436,6 +437,10 @@ export interface DocumentGenerationStrategy {
   enableGlobalReview: boolean;
   enableDocumentBudgetExpansion: boolean;
   enableFinalQualityReview: boolean;
+  /** fast 模式全局一致性审查抽检率（0-1，1=全量审查） */
+  globalReviewSamplingRate?: number;
+  /** Repairer 修复轮次预算上限（超过后转标记问题+门禁阻断，默认 3） */
+  repairRoundBudget?: number;
 }
 
 export interface DocumentPerformanceMetric {
@@ -565,6 +570,8 @@ export interface DocumentReviewMetadata {
   writingTaskBrief?: WritingTaskBrief;
   workflowVersion?: DocumentWorkflowVersion;
   telemetry?: DocumentTelemetryReport;
+  /** 质量对标：与模板参考库同工程类型基准的对比结果 */
+  qualityBenchmark?: QualityBenchmarkResult;
 }
 
 export interface GeneratedDocumentDraft {
@@ -594,6 +601,8 @@ export interface GeneratedDocumentDraft {
   reviewMetadata?: DocumentReviewMetadata;
   /** 提示词绑定溯源：记录每个提示词的完整绑定链路 */
   promptProvenance?: Array<{ promptId: string; roleId: string; configId: string; roleName: string; contentHash: string; order: number }>;
+  /** 运行时提示词规则：生成时从提示词中抽取的硬性规则及溯源（用于生效报告展示） */
+  promptRules?: RuntimePromptRuleSet;
   /** Agent 工作流上下文：资料范围、资料快照、基础图谱、节点状态 */
   agentWorkflow?: AgentWorkflowContext;
   /** 项目资料图谱：从招标文件+清单+图纸中提取的结构化项目理解 */

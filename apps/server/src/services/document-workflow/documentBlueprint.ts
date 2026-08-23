@@ -95,7 +95,7 @@ export function chapterTaskCardLine(chapter: DocumentTemplateChapter) {
   return [`章节任务卡：${chapter.title}`, `   - 必须覆盖事实域：${factCoverageTargetsForTitle(chapter.title).join('、')}`, ...professionalPointsForTitle(chapter.title).map(point => `   - ${point}`), ...(chapter.sections || []).slice(0, 10).map(section => `   - 小节任务：${section}｜${professionalPointsForTitle(section).join('；')}`), ...chapterTablePlanLines(chapter), ...constructionOrgBlueprintRuleLines(chapter)].join('\n');
 }
 
-export function buildDocumentBlueprintContext(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string }) {
+export function buildDocumentBlueprintContext(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string; referenceLines?: string[] }) {
   // 去重后按重要性评分排序，保留最重要的核心事实（而非静默截断）
   const uniqueFacts = [
     ...input.factsModel.project,
@@ -139,8 +139,9 @@ export function buildDocumentBlueprintContext(input: { template: DocumentTemplat
     `事实覆盖矩阵：\n${coverageMatrix.join('\n')}`,
     `知识库确认覆盖矩阵：\n${supportMatrix.join('\n')}`,
     constructionOrgProjectPrompt,
-    '证据引用约束：工期、质量目标、招标范围、金额、工程量、标准规范、验收要求等关键事实必须来自可信基础事实主表或绑定材料；系统暂未从知识库确认的数字和参数不得编造。',
+    '证据引用约束：工期、质量目标、招标范围、金额、工程量、验收要求等项目专属事实必须来自可信基础事实主表或绑定材料，系统暂未确认的数字和参数不得编造；标准规范编号、法律法规名称属于公共专业知识，可依据现行有效版本直接引用，不要求材料提供，但不得虚构编号或引用已废止版本。',
     '跨章一致性要求：所有章节必须共用同一套工期、质量、范围、资源和验收口径；不得在不同章节写出相互矛盾的项目基础信息。',
+    ...(input.referenceLines?.length ? [`同类工程质量参考（软性参考，事实仍以知识库证据为准）：\n${input.referenceLines.join('\n')}`] : []),
     `章节专业任务卡：\n${chapterLines.join('\n')}`,
     `章节实施方案：\n${executionPlans.join('\n')}`,
     ...droppedFactNote,

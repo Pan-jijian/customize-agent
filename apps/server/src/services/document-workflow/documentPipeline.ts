@@ -16,6 +16,7 @@ import { buildKnowledgeCoverageReport, knowledgeCoverageIssues } from './documen
 import { buildDocumentFactTraces, factTraceIssues } from './documentFactTrace';
 import { buildChapterCoverageReports, chapterCoverageIssues } from './documentChapterCoverage';
 import { buildDocumentQualityReport, qualityReportIssues } from './documentQualityReport';
+import { benchmarkGeneratedMarkdown } from './benchmarkQuality';
 import { buildRepairStrategies, repairStrategyIssues } from './documentRepairStrategies';
 import { buildDocumentReviewChecklist } from './documentReviewChecklist';
 import { collectValidationIssueGroups } from './documentQualityPipeline';
@@ -24,10 +25,11 @@ import { buildDocumentTelemetryReport } from './documentTelemetry';
 import { retrievalCoverageIssues } from './documentEvidenceRetrieval';
 import { extractFacts, extractFactsWithLlm, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, shouldRunLlmFactExtraction } from './factsModel';
 import { buildCanonicalFacts } from './factGovernance';
-import { stringifyFactValue, throwIfAborted } from './utils';
+import { extractSection, stringifyFactValue, throwIfAborted } from './utils';
 import { formalTextGateIssues } from './agentWorkflow';
 import { displayStage, upsertProgressStage } from './progress';
-import { buildLlmSectionContent, buildValidationIssues, chapterSectionFactUsageIssues, criticalSectionBlockerMinChars, understandReferenceFiles } from './chapterGeneration';
+import { buildLlmSectionContent, buildValidationIssues, criticalSectionBlockerMinChars } from './chapterGeneration';
+import { chapterSectionFactUsageIssues, understandReferenceFiles } from './chapterReview';
 import { factCoverageIssues, factsWithEvidenceSource, finalizeChapterContentQuality, normalizeProjectBasicInfoTable, partialChapterStatus, projectBasicPlaceholderIssues, slowMetricSummary, validateDraft } from './documentGeneratorHelpers';
 import { constructionOrgProfessionalAuditIssues } from './constructionOrgAudit';
 import { buildProfessionalScoreReport } from './documentProfessionalScore';
@@ -74,22 +76,6 @@ function replaceMarkdownSection(content: string, sectionTitle: string, sectionCo
 }
 
 function criticalSectionFactDensityIssues(chapters: DocumentDraftChapter[]) {
-  const extractSection = (content: string, title: string) => {
-    const lines = content.split('\n');
-    let start = lines.findIndex(line => /^###\s+(?:\d+(?:\.\d+)*\s+)?/u.test(line.trim()) && line.includes(title));
-    if (start < 0) start = lines.findIndex(line => /^#{3,4}\s+(?:\d+(?:\.\d+)*\s+)?/u.test(line.trim()) && line.includes(title));
-    if (start < 0) return '';
-    const startLevel = (/^(#{2,6})\s+/u.exec(lines[start].trim())?.[1].length) || 3;
-    let end = lines.length;
-    for (let index = start + 1; index < lines.length; index += 1) {
-      const heading = /^(#{2,6})\s+/u.exec(lines[index].trim());
-      if (heading && heading[1].length <= startLevel) {
-        end = index;
-        break;
-      }
-    }
-    return lines.slice(start, end).join('\n');
-  };
   const countMatches = (text: string, patterns: RegExp[]) => patterns.filter(pattern => pattern.test(text)).length;
   const numericFactCount = (text: string) => new Set(text.match(/\d+(?:\.\d+)?\s*(?:m²|㎡|平方米|m|mm|层|栋|日历天|天|%|台|套|根|处|个|kg|t|吨)/giu) || []).size;
   const rules = [
@@ -131,22 +117,6 @@ function criticalSectionFactDensityIssues(chapters: DocumentDraftChapter[]) {
 }
 
 function criticalSectionDepthIssues(chapters: DocumentDraftChapter[]): ValidationIssue[] {
-  const extractSection = (content: string, title: string) => {
-    const lines = content.split('\n');
-    let start = lines.findIndex(line => /^###\s+(?:\d+(?:\.\d+)*\s+)?/u.test(line.trim()) && line.includes(title));
-    if (start < 0) start = lines.findIndex(line => /^#{3,4}\s+(?:\d+(?:\.\d+)*\s+)?/u.test(line.trim()) && line.includes(title));
-    if (start < 0) return '';
-    const startLevel = (/^(#{2,6})\s+/u.exec(lines[start].trim())?.[1].length) || 3;
-    let end = lines.length;
-    for (let index = start + 1; index < lines.length; index += 1) {
-      const heading = /^(#{2,6})\s+/u.exec(lines[index].trim());
-      if (heading && heading[1].length <= startLevel) {
-        end = index;
-        break;
-      }
-    }
-    return lines.slice(start, end).join('\n');
-  };
   const rules = [
     { title: '项目特点、重点、难点分析', minChars: 1800 },
     { title: '项目主要施工内容', minChars: 2200 },
@@ -400,11 +370,13 @@ export async function finalizeGeneration(p: {
   const criticalSectionTitleRe = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样/u;
   const emptySectionIssues = Array.from(new Map(finalGateRepairCandidates
     .map(issue => {
-      const match = /^(.*?)(?:\s+|)(?:空小节|小节内容补写未完成|小节生成未达标|小节只有标题|只有标题或表格无正文|规划小节正文过短|正文小节正文过短|正文不足)：(.+)$/u.exec(issue.message);
+      const match = /^(.*?)(?:\s+|)(?:空小节|小节内容补写未完成|小节生成未达标|小节只有标题|只有标题或表格无正文|规划小节正文过短|正文小节正文过短|缺少规划小节|正文不足)[：:,，]\s*(.+)$/u.exec(issue.message);
       if (!match) return undefined;
       // 关键小节（重点难点/主要施工内容/分部分项方案等）优先修复：避免普通空小节占满修复名额导致关键小节错误残留
       const depthIssue = /^(.*?)\s+(项目特点、重点、难点分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样)\s+正文不足/u.exec(issue.message);
-      const sectionTitle = depthIssue ? depthIssue[2] : match[2].split(/[：:，,]/u)[0].trim();
+      // Reviewer 深度类消息无章节前缀（“项目主要施工内容 正文不足，未达到任务最小深度”），单独解析小节标题
+      const reviewerDepthIssue = /^(.+?)\s*正文不足，未达到任务最小深度$/u.exec(issue.message);
+      const sectionTitle = depthIssue ? depthIssue[2] : reviewerDepthIssue ? reviewerDepthIssue[1].trim() : match[2].split(/[：:,，,]/u)[0].trim();
       return { issue, match, critical: criticalSectionTitleRe.test(sectionTitle) };
     })
     .filter((item): item is { issue: ValidationIssue; match: RegExpExecArray; critical: boolean } => Boolean(item))
@@ -413,6 +385,7 @@ export async function finalizeGeneration(p: {
     .slice(0, 4);
   if (emptySectionIssues.length > 0) {
     const repairDetails: string[] = [];
+    const repairedSectionKeys = new Set<string>();
     for (const { issue, match } of emptySectionIssues) {
       let chapterTitle = match[1].trim();
       let sectionTitle = match[2].trim();
@@ -421,7 +394,12 @@ export async function finalizeGeneration(p: {
         chapterTitle = depthIssue[1].trim();
         sectionTitle = depthIssue[2].trim();
       }
-      let chapterIndex = finalChapterDrafts.findIndex(chapter => chapter.title === chapterTitle || chapterTitle.includes(chapter.title) || chapter.title.includes(chapterTitle));
+      const reviewerDepthIssue = /^(.+?)\s*正文不足，未达到任务最小深度$/u.exec(issue.message);
+      if (reviewerDepthIssue) {
+        chapterTitle = '';
+        sectionTitle = reviewerDepthIssue[1].trim();
+      }
+      let chapterIndex = chapterTitle ? finalChapterDrafts.findIndex(chapter => chapter.title === chapterTitle || chapterTitle.includes(chapter.title) || chapter.title.includes(chapterTitle)) : -1;
       if (chapterIndex < 0) {
         chapterIndex = finalChapterDrafts.findIndex(chapter => (chapter.content || '').includes(sectionTitle));
       }
@@ -431,6 +409,7 @@ export async function finalizeGeneration(p: {
         repairDetails.push(`失败：${chapterTitle}/${sectionTitle} 未定位到章节`);
         continue;
       }
+      chapterTitle = chapterTitle || draftChapter.title;
       const runningRepairStage = displayStage({ type: 'llm_review', roleId: `agent-final-gate-repair-${draftChapter.id}`, status: 'running', message: `Final Gate 正在补写空小节：${chapterTitle} / ${sectionTitle}`, details: repairDetails }, { subtitle: 'Final Gate Repair' });
       upsertProgressStage(progressStages, runningRepairStage);
       upsertProgressStage(finalGateRepairStages, runningRepairStage);
@@ -460,8 +439,20 @@ export async function finalizeGeneration(p: {
       if (generated && documentTextLength(generated) >= 80) {
         const nextContent = replaceMarkdownSection(draftChapter.content, sectionTitle, generated);
         repaired = nextContent !== draftChapter.content;
-        if (repaired) finalChapterDrafts[chapterIndex] = { ...draftChapter, content: finalizeChapterContentQuality(nextContent, templateChapter) };
-        repairDetails.push(repaired ? `成功：${chapterTitle}/${sectionTitle}（${documentTextLength(generated)}字）` : `失败：${chapterTitle}/${sectionTitle}（未定位到原小节块）`);
+        if (!repaired && /缺少规划小节/u.test(issue.message)) {
+          // 规划小节在正文中完全缺失：无原块可替换，将补写正文追加为新的三级小节
+          const appended = `${draftChapter.content.replace(/\s+$/u, '')}\n\n### ${sectionTitle}\n\n${generated.replace(/^#{2,6}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]+\n+/u, '').trim()}\n`;
+          repaired = true;
+          finalChapterDrafts[chapterIndex] = { ...draftChapter, content: finalizeChapterContentQuality(appended, templateChapter) };
+          repairedSectionKeys.add(`${chapterTitle}::${sectionTitle}`);
+          repairDetails.push(`成功：${chapterTitle}/${sectionTitle}（${documentTextLength(generated)}字，追加为缺失小节）`);
+        } else if (repaired) {
+          finalChapterDrafts[chapterIndex] = { ...draftChapter, content: finalizeChapterContentQuality(nextContent, templateChapter) };
+          repairedSectionKeys.add(`${chapterTitle}::${sectionTitle}`);
+          repairDetails.push(`成功：${chapterTitle}/${sectionTitle}（${documentTextLength(generated)}字）`);
+        } else {
+          repairDetails.push(`失败：${chapterTitle}/${sectionTitle}（未定位到原小节块）`);
+        }
       } else {
         repairDetails.push(`失败：${chapterTitle}/${sectionTitle}（${generationDiagnostics.llm.lastError || '空响应'}）`);
       }
@@ -471,15 +462,13 @@ export async function finalizeGeneration(p: {
       emitProgress(finalChapterDrafts, progressStages);
     }
     finalMarkdown = normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary))));
-    const repairedValidationBase = baseValidationIssues.filter(issue => !emptySectionIssues.some(item => {
-      let chapterTitle = item.match[1].trim();
-      let sectionTitle = item.match[2].trim();
-      const depthIssue = /^(.*?)\s+(项目特点、重点、难点分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样)\s+正文不足/u.exec(item.issue.message);
-      if (depthIssue) {
-        chapterTitle = depthIssue[1].trim();
-        sectionTitle = depthIssue[2].trim();
-      }
-      return issue.message.includes(chapterTitle) && issue.message.includes(sectionTitle) && /空小节|小节内容补写未完成|小节生成未达标|小节只有标题|正文小节正文过短|规划小节正文过短|缺少规划小节|正文不足/u.test(issue.message);
+    const repairedValidationBase = baseValidationIssues.filter(issue => ![...repairedSectionKeys].some(key => {
+      const [chapterTitle, sectionTitle] = key.split('::');
+      if (!/空小节|小节内容补写未完成|小节生成未达标|小节只有标题|正文小节正文过短|规划小节正文过短|缺少规划小节|正文不足/u.test(issue.message)) return false;
+      // Reviewer 深度类消息无章节前缀，单独按“小节标题 + 正文不足，未达到任务最小深度”匹配
+      const escapedSection = sectionTitle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+      if (new RegExp(`^\\s*${escapedSection}\\s*正文不足，未达到任务最小深度$`, 'u').test(issue.message)) return true;
+      return issue.message.includes(chapterTitle) && issue.message.includes(sectionTitle);
     })
     // 事实落位警告是预算稿快照（Final Gate 修复前的章节草稿拼接），修复后的重算会用最新 finalMarkdown 重新生成，
     // 旧快照必须丢弃：否则已落位的事实（如基本信息表中的招标人）会带着修复前的警告进入最终交付。
@@ -542,6 +531,7 @@ export async function finalizeGeneration(p: {
     assets,
     partialChapters: finalChapterDrafts.map(chapter => ({ id: chapter.id, title: chapter.title, chars: documentTextLength(chapter.content), status: partialChapterStatus(chapter, documentBudget.chapterTargets.get(chapter.id)), updatedAt: Date.now() })),
     checkpointChapters: compactFinalChapterDrafts,
+    promptRules: promptDocumentRules,
     agentWorkflow,
     reviewMetadata: {
       chapterSummaries: [],
@@ -559,6 +549,7 @@ export async function finalizeGeneration(p: {
       writingTaskBrief,
       workflowVersion: DOCUMENT_WORKFLOW_VERSION,
       telemetry,
+      qualityBenchmark: benchmarkGeneratedMarkdown(finalMarkdown),
     },
     generatedAt: Date.now(),
     markdown: finalMarkdown,

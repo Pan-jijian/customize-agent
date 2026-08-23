@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import Database from 'better-sqlite3';
+import { previewPromptRules } from '../../services/document-workflow/promptRuleExtraction';
 
 type RegistryRow = Record<string, unknown>;
 
@@ -245,6 +246,10 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     if (req.method === 'POST') {
       const { action, projectRoot, content, name, selectedIds, prompts, mode } = req.body;
       const config = loadPromptConfig();
+      if (action === 'previewRules') {
+        if (typeof content !== 'string') return res.status(400).json({ error: 'content required' });
+        return res.status(200).json({ success: true, preview: previewPromptRules(content) });
+      }
       if (action === 'import' || mode === 'import') {
         const items = normalizeImportPrompts(prompts ?? req.body);
         if (items.length === 0) return res.status(400).json({ error: '没有可导入的提示词' });

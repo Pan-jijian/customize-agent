@@ -17,21 +17,30 @@ import { throwIfAborted } from './utils';
 
 export type { QualityRepairType } from '../types';
 
-export function selectDocumentGenerationStrategy(input: { template: DocumentTemplate; targetWords: number; requirement?: string }): DocumentGenerationStrategy {
+export function selectDocumentGenerationStrategy(input: { template: DocumentTemplate; targetWords: number; requirement?: string; materialFileCount?: number; evidenceCount?: number }): DocumentGenerationStrategy {
   const chapterCount = input.template.chapters.length;
   const avgChapterTarget = chapterCount > 0 ? input.targetWords / chapterCount : input.targetWords;
   const text = `${input.template.name}\n${input.template.category || ''}\n${input.requirement || ''}`;
-  const strict = /专项|安全|质量|验收|审核|合同|合规|审计|风控|风险/u.test(text);
+  // strict 触发条件明确化：风险领域关键词、超长文档（≥4 万字）、资料稀疏（证据/资料过少）三类
+  const riskKeywords = /专项|安全|质量|验收|审核|合同|合规|审计|风控|风险/u.test(text);
+  const veryLong = input.targetWords >= 40000;
+  const sparseMaterials = (input.materialFileCount ?? 0) < 4 && (input.evidenceCount ?? 0) < 6;
+  const strict = riskKeywords || veryLong || sparseMaterials;
   const longform = input.targetWords >= 30000 || chapterCount >= 8 || avgChapterTarget >= 4000;
   const compact = input.targetWords <= 6000 && chapterCount <= 4 && !strict;
   // mode 仅为文档画像标签：章节级 Reviewer/Repairer 与 Final Gate 始终执行（本地风险阈值自适应跳过无风险项，不额外付出时间成本）；
-  // 全局一致性审查由 DOCUMENT_GLOBAL_CONSISTENCY_REVIEW=1 开关控制（默认关闭），标签与真实执行保持一致
+  // 全局一致性审查：strict 画像（专项/安全/质量/合同等）默认开启（全文分块审查成本可控，跨章一致性收益明显）；
+  // fast 小文档全局审查降级为抽检（按 35% 章节抽样，降低额外 LLM 成本）；
+  // env DOCUMENT_GLOBAL_CONSISTENCY_REVIEW=1 强制开启、=0 强制关闭
+  const globalReviewEnabled = process.env.DOCUMENT_GLOBAL_CONSISTENCY_REVIEW !== '0' && (strict || compact || process.env.DOCUMENT_GLOBAL_CONSISTENCY_REVIEW === '1');
   return {
     mode: strict ? 'strict' : longform ? 'longform' : compact ? 'fast' : 'balanced',
     enableChapterReview: true,
-    enableGlobalReview: process.env.DOCUMENT_GLOBAL_CONSISTENCY_REVIEW === '1',
+    enableGlobalReview: globalReviewEnabled,
     enableDocumentBudgetExpansion: false,
     enableFinalQualityReview: true,
+    globalReviewSamplingRate: globalReviewEnabled && compact ? 0.35 : 1,
+    repairRoundBudget: 3,
   };
 }
 
