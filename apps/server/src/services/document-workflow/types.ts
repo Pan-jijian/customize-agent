@@ -454,7 +454,7 @@ export interface DocumentPerformanceMetric {
 export interface DocumentGenerationDiagnostics {
   strategy: DocumentGenerationStrategy;
   metrics: DocumentPerformanceMetric[];
-  llm: { calls: number; failures: number; maxActive: number; lastError?: string; retries: number };
+  llm: { calls: number; failures: number; maxActive: number; lastError?: string; retries: number; failureStreak?: number };
   evidence: { raw: number; used: number; filteredNoise: number; avgNoiseScore: number; avgFactDensity: number; searchQueries: number; searchMs: number; contextChars: number };
   quality: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number };
 }

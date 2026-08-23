@@ -766,7 +766,7 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
   for (let offset = 0; offset < llmSectionLimit;) {
     throwIfAborted(input.signal);
     // 连续失败≥2 时批次降为串行，避免失败率高的模型被无脑并发反复击穿
-    const batchSize = getDocumentLlmFailureStreak() >= 2 ? 1 : concurrency;
+    const batchSize = getDocumentLlmFailureStreak(input.diagnostics) >= 2 ? 1 : concurrency;
     const batch = targets.slice(offset, Math.min(llmSectionLimit, offset + batchSize));
     const batchResults = await Promise.all(batch.map((item, index) => runSection({ ...item, index: offset + index })));
     batchResults.forEach((content, index) => { results[offset + index] = content; });
@@ -777,7 +777,7 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
   if (retryIndexes.length > 0) {
     for (let offset = 0; offset < retryIndexes.length;) {
       throwIfAborted(input.signal);
-      const batchSize = getDocumentLlmFailureStreak() >= 2 ? 1 : concurrency;
+      const batchSize = getDocumentLlmFailureStreak(input.diagnostics) >= 2 ? 1 : concurrency;
       const batchIndexes = retryIndexes.slice(offset, offset + batchSize);
       const batchResults = await Promise.all(batchIndexes.map(index => runSection({ ...targets[index], index }, true)));
       batchResults.forEach((content, index) => { if (content) results[batchIndexes[index]] = content; });
@@ -787,7 +787,7 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
     // 最终补写：并发批次处理全部缺失小节，避免只修复首批缺失导致后续关键小节被空置。
     for (let offset = 0; offset < missingIndexes.length;) {
       throwIfAborted(input.signal);
-      const batchSize = getDocumentLlmFailureStreak() >= 2 ? 1 : concurrency;
+      const batchSize = getDocumentLlmFailureStreak(input.diagnostics) >= 2 ? 1 : concurrency;
       const finalRetryIndexes = missingIndexes.slice(offset, offset + batchSize);
       const finalResults = await Promise.all(finalRetryIndexes.map(index => runSection({ ...targets[index], targetWords: Math.max(targets[index].targetWords, 900), index }, true)));
       finalResults.forEach((content, position) => { if (content) results[finalRetryIndexes[position]] = content; });

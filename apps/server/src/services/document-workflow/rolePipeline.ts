@@ -48,7 +48,7 @@ export function createGenerationDiagnostics(strategy: DocumentGenerationStrategy
   return {
     strategy,
     metrics: [],
-    llm: { calls: 0, failures: 0, maxActive: 0, retries: 0 },
+    llm: { calls: 0, failures: 0, maxActive: 0, retries: 0, failureStreak: 0 },
     evidence: { raw: 0, used: 0, filteredNoise: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0 },
     quality: { blockingCount: 0, importantCount: 0, minorCount: 0, repairedCount: 0 },
   };

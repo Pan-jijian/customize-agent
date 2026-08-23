@@ -59,8 +59,9 @@ function releaseLlmSlot() {
   }
 }
 
-export function getDocumentLlmFailureStreak() {
-  return llmFailureStreak;
+/** P1-9 失败 streak 隔离：优先取 per-generation diagnostics 的 streak（多文档并发生成互不降级），无 diagnostics 时回退全局值 */
+export function getDocumentLlmFailureStreak(diagnostics?: { llm?: { failureStreak?: number } }) {
+  return diagnostics?.llm?.failureStreak ?? llmFailureStreak;
 }
 
 export function getDocumentLlmMaxConcurrency() {
@@ -141,6 +142,8 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
         const attemptMaxTokens = attempt === 0 ? baseMaxTokens : (thinkingModel ? outputCap : baseMaxTokens);
         const content = await attemptOnce(attemptMaxTokens);
         llmFailureStreak = 0;
+        // P1-9：per-generation streak 同步清零（成功即恢复并发），多文档互不影响
+        if (options.diagnostics) options.diagnostics.llm.failureStreak = 0;
         return content;
       } catch (error) {
         lastError = error;
@@ -153,6 +156,8 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
     llmFailureStreak += 1;
     if (options.diagnostics) {
       options.diagnostics.llm.failures += 1;
+      // P1-9：per-generation streak 同步递增，章节并发降级只作用于本生成任务
+      options.diagnostics.llm.failureStreak = (options.diagnostics.llm.failureStreak || 0) + 1;
       options.diagnostics.llm.lastError = lastError instanceof Error ? lastError.message : lastError === EMPTY_CONTENT ? '空响应（思考阶段耗尽输出预算）' : String(lastError);
     }
     return undefined;
