@@ -6,6 +6,7 @@ describe('real full generation', () => {
   it('generates real document with real template and project materials', async () => {
     const out: string[] = [];
     const log = (msg: string) => { out.push(msg); fs.writeFileSync('/tmp/real-gen-21-progress.log', out.join('\n')); };
+    let peakSearchQueryDetails = 0;
     const start = Date.now();
     log('START ' + new Date().toISOString());
     const draft = await generateDocumentDraft({
@@ -13,6 +14,8 @@ describe('real full generation', () => {
       projectRoot: '/Users/pan/Desktop/codeing/customize-agent',
       requirement: '依据招标文件要求编制施工组织设计，覆盖工期、质量、安全、主要施工方案等全部章节。',
       onProgress: (stages, checkpoint) => {
+        const searchQueryDetails = stages.reduce((n, s) => n + (s.details || []).filter(d => d.startsWith('检索：')).length, 0);
+        if (searchQueryDetails > peakSearchQueryDetails) peakSearchQueryDetails = searchQueryDetails;
         const running = stages.filter(s => s.status === 'running').slice(-2).map(s => `${s.status}:${s.message}`.slice(0, 100));
         const latest = stages.filter(s => s.status !== 'running').slice(-4).map(s => `${s.status}:${s.message}`.slice(0, 120));
         log(`PROGRESS ${Math.round((Date.now() - start) / 1000)}s | ${latest.join(' || ')}${running.length ? ` || RUNNING ${running.join(' // ')}` : ''}`);
@@ -22,7 +25,7 @@ describe('real full generation', () => {
       },
     });
     const elapsed = Math.round((Date.now() - start) / 1000);
-    log(`DONE elapsed=${elapsed}s chapters=${draft.chapters.length} markdownChars=${draft.markdown?.length || 0}`);
+    log(`DONE elapsed=${elapsed}s chapters=${draft.chapters.length} markdownChars=${draft.markdown?.length || 0} peakSearchQueryDetails=${peakSearchQueryDetails}`);
     const review = draft.reviewMetadata;
     log('REVIEW: ' + JSON.stringify({
       writingTaskBrief: review?.writingTaskBrief ? { docType: review.writingTaskBrief.documentType, chapters: review.writingTaskBrief.chapters.length, focus: review.writingTaskBrief.globalWritingFocus.length } : null,
