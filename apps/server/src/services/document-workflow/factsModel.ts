@@ -8,6 +8,7 @@ import type { ChapterFactNeed, DocumentEvidence, DocumentExecutionStage, Documen
 import { evidenceSatisfiesSpecField, specFactTargets } from './factMatching';
 import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { callDocumentLlmJson } from './llmClient';
+import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE } from './parameterPatterns';
 import { stringifyFactValue, throwIfAborted } from './utils';
 
 export function extractFacts(template: DocumentTemplate, evidence: DocumentEvidence[], spec?: AutoDocumentSpecPackage): Record<string, string> {
@@ -198,8 +199,6 @@ export function detectFactConflicts(facts: DocumentFact[], spec?: AutoDocumentSp
   return conflicts.slice(0, 8);
 }
 
-const PRECISE_VALUE_RE = /(?:\b[A-Z]{1,8}[\w./-]*\d[\w./-]*\b|\b\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年|万元|元)\b|\b\d+\s*[×xX]\s*\d+(?:\s*[×xX]\s*\d+)?\b|\b(?:GB|GB\/T|ISO|IEC|IEEE|RFC|API|DB\d*|T\/[A-Z]+)\s*[\w.-]+\b)/giu;
-
 export function normalizeOcrFactText(text: string) {
   return stringifyFactValue(text)
     .replace(/[\u00A0\u2002-\u200B\u3000]/gu, ' ')
@@ -289,7 +288,7 @@ export function extractPreciseFactsFromEvidence(evidence: DocumentEvidence[], pr
     const sourceLooksUseful = /drawing|table|bill|boq|draw|data|sheet|spec|standard|record|report|表格|数据|规格|参数|标准|记录|报告|清单|图纸|说明/u.test(sourceContext);
     if (!sourceLooksUseful && item.score < 0.75) continue;
     const content = stringifyFactValue(item.content).replace(/\s+/gu, ' ');
-    for (const match of content.matchAll(PRECISE_VALUE_RE)) {
+    for (const match of content.matchAll(PRECISE_TOKEN_RE)) {
       const token = match[0].trim();
       if (!token || isForbiddenFactValue(profile, token)) continue;
       const start = Math.max(0, (match.index || 0) - 40);
@@ -343,7 +342,7 @@ function buildEvidenceFactIndex(facts: DocumentFact[], preciseFacts: DocumentFac
     const text = factText(fact);
     return fact.confidence >= 0.58 && !isGenerationExcludedFact(fact) && !isForbiddenFactValue(profile, text) && !isDiagnosticFactValue(profile, text) && !isLowConfidenceFactValue(profile, text);
   });
-  const parameterFacts = [...preciseFacts.filter(fact => !isGenerationExcludedFact(fact)), ...reliableFacts.filter(fact => /\d|DN|φ|Φ|mm|cm|m²|m3|m³|MPa|kPa|℃|%|GB|JGJ|ISO|IEC|台|套|个|项|批|次|份|人|㎡|型号|规格|数量|单位/iu.test(factText(fact)))]
+  const parameterFacts = [...preciseFacts.filter(fact => !isGenerationExcludedFact(fact)), ...reliableFacts.filter(fact => HAS_QUANTIFIED_VALUE_RE.test(factText(fact)))]
     .filter((fact, index, array) => array.findIndex(item => item.sourceFile === fact.sourceFile && item.value === fact.value && item.key === fact.key) === index)
     .slice(0, 360);
   const tableFacts = reliableFacts.filter(fact => fact.processingType === 'table' || /table|sheet|表格|清单|明细|数据|参数行摘要/u.test(factText(fact)));
@@ -501,7 +500,7 @@ export function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFa
   const byProcessing = (type: string) => facts.filter(fact => fact.processingType === type || fact.roleId.includes(type));
   const preciseFacts = facts.filter(fact => {
     const text = `${fact.key} ${fact.fieldName || ''} ${fact.value}`;
-    return /\d|DN|φ|Φ|mm|cm|m²|m3|m³|MPa|kPa|℃|%|GB|ISO|IEC|IEEE|RFC|API|台|套|个|项|批|次|份|人|㎡/iu.test(text)
+    return HAS_QUANTIFIED_VALUE_RE.test(text)
       && (!isForbiddenFactValue(profile, text) || isProjectBasicCommercialFact(text))
       && !isDiagnosticFactValue(profile, text);
   });

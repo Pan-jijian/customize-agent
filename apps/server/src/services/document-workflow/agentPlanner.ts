@@ -2,7 +2,7 @@ import type { AgentWorkflowContext, AgentWorkflowNode } from './agentWorkflow';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentTemplate, DocumentTemplateChapter, ProjectGraph, ValidationIssue } from './types';
 import { extractSection, stableHash, stringifyFactValue } from './utils';
 import { documentTextLength } from './budget';
-import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './constructionOrgAudit';
+import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 
 export interface AgentSectionPlan {
   title: string;
@@ -244,6 +244,8 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
   for (const phrase of FORMAL_FORBIDDEN_PHRASES) {
     if (content.includes(phrase)) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `${input.draft.title} 正文包含禁止话术：${phrase}`, suggestion: '改为事实支撑的正式表达；缺失事实不得占位。' });
   }
+  // P0-2：LLM 全故障时的证据骨架草稿必须被 Review 门禁拦截，不允许以模板拼接正文静默通过
+  if (content.includes('[EVIDENCE_SKELETON]')) issues.push({ level: 'error', severity: 'blocker', category: 'evidence_coverage', owner: 'system', message: `${input.draft.title} 正文为 LLM 全故障后的证据骨架草稿，禁止作为正式正文通过`, suggestion: '必须由 Repairer 基于小节事实卡与证据完整重写为正式正文，并删除 [EVIDENCE_SKELETON] 标记；若 LLM 仍不可用，本章节保持 failed 阻断。' });
   const chapterLength = documentTextLength(content);
   for (const section of input.task.sections) {
     const body = extractSection(content, section.title, { fuzzy: true });

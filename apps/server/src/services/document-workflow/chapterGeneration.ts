@@ -14,6 +14,7 @@ import { tablePlansPrompt } from './constructionOrgTablePlan';
 import { constructionOrgBonusModulePrompt, constructionOrgChapterRulePrompt } from './constructionOrgQualityRules';
 import { buildProcessKnowledgePrompt, matchProcessKnowledgeCards } from './constructionProcessKnowledge';
 import { criticalSectionBlockerMinChars, ensureGroupTertiaryShell, ensureTertiarySectionShell, groupHasMajorConstructionSection, isCriticalDeepSection, isGeneralManagementSection, keySectionWritingRequirement, mergeDuplicateWorkPackageSubsections, outputTokensForChapter, parseMajorConstructionPackages, sectionContentBody, sectionStructureIssue } from './chapterPostProcessing';
+import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE, QUANTIFIED_FACT_RE } from './parameterPatterns';
 
 export * from './chapterPostProcessing';
 
@@ -30,12 +31,11 @@ export function buildValidationIssues(validation: { warnings: string[]; errors: 
 
 function extractChapterPreciseTokens(evidence: DocumentEvidence[]) {
   const tokens = new Set<string>();
-  const tokenRe = /(?:\b[A-Z]{1,8}[\w./-]*\d[\w./-]*\b|\b\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年|万元|元)\b|\b\d+\s*[×xX]\s*\d+(?:\s*[×xX]\s*\d+)?\b|\b(?:GB|GB\/T|ISO|IEC|IEEE|RFC|API|DB\d*|T\/[A-Z]+)\s*[\w.-]+\b)/giu;
   for (const item of evidence) {
     const content = stringifyFactValue(item.content).replace(/\s+/gu, ' ');
     if (/报价明细|投标报价|单价|合价|综合单价|预留金|税率|增值税|利润|结算/u.test(content) && !/合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价/u.test(content)) continue;
     if (/OCR|识别错误|乱码|无法确认|疑似|不确定|语义断裂/u.test(content)) continue;
-    for (const match of content.matchAll(tokenRe)) tokens.add(match[0].trim());
+    for (const match of content.matchAll(PRECISE_TOKEN_RE)) tokens.add(match[0].trim());
     if (tokens.size >= 40) break;
   }
   return [...tokens].slice(0, 40);
@@ -73,7 +73,7 @@ export function buildChapterFactCoverageContext(input: { chapter: DocumentTempla
     .filter(fact => /建设地点|建设规模|招标范围|计划工期|合同工期|周期要求|质量标准|合同估算|投资估算|最高投标限价|招标控制价/u.test(`${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`))
     .filter((fact, index, array) => array.findIndex(item => `${item.key || item.fieldName}:${stringifyFactValue(item.value)}` === `${fact.key || fact.fieldName}:${stringifyFactValue(fact.value)}`) === index);
   // 精确参数：保留所有数值事实，限制连接后的总字符数不超过 3000
-  const preciseTokensAll = [...new Set([...extractChapterPreciseTokens(input.evidence), ...resolvedFacts.map(fact => stringifyFactValue(fact.value)).filter(value => /\d|DN|φ|Φ|mm|cm|m²|m3|m³|MPa|kPa|℃|%|GB|JGJ|ISO|台|套|个|项|批|次|份|人|㎡|日历天|万元|元/iu.test(value)), ...allIndexedFacts.map(fact => stringifyFactValue(fact.value)).filter(value => /\d|DN|φ|Φ|mm|cm|m²|m3|m³|MPa|kPa|℃|%|GB|JGJ|ISO|台|套|个|项|批|次|份|人|㎡|日历天|万元|元/iu.test(value))])];
+  const preciseTokensAll = [...new Set([...extractChapterPreciseTokens(input.evidence), ...resolvedFacts.map(fact => stringifyFactValue(fact.value)).filter(value => HAS_QUANTIFIED_VALUE_RE.test(value)), ...allIndexedFacts.map(fact => stringifyFactValue(fact.value)).filter(value => HAS_QUANTIFIED_VALUE_RE.test(value))])];
   let preciseChars = 0;
   const preciseTokens: string[] = [];
   for (const t of preciseTokensAll) {
@@ -177,7 +177,7 @@ export function evidenceForSection(sectionTitle: string, chapter: DocumentTempla
     const rawText = `${item.filePath}\n${item.sectionTitle || ''}\n${item.content}`;
     const hitScore = tokens.reduce((score, token) => score + (text.includes(token) ? 1 : 0), 0);
     const sectionScore = item.sectionTitle && (sectionTitle.includes(item.sectionTitle) || item.sectionTitle.includes(sectionTitle)) ? 4 : 0;
-    const parameterScore = /\d|DN|φ|Φ|mm|cm|m²|m3|m³|MPa|kPa|℃|%|GB|JGJ|ISO|台|套|个|项|批|次|份|人|㎡|日历天|万元|元|规格|型号|数量|合同估算价|合同估算价格|计划工期/iu.test(rawText) ? 1.5 : 0;
+    const parameterScore = (HAS_QUANTIFIED_VALUE_RE.test(rawText) || /合同估算价|合同估算价格|计划工期/u.test(rawText)) ? 1.5 : 0;
     const basicFactScore = basicFactSection && /计划工期|合同工期|合同估算价|合同估算价格|投资估算|建设地点|建设规模|质量标准|招标范围/u.test(rawText) ? 5 : 0;
     const typeScore = /table|sheet|bill|data|drawing|图纸|表格|清单|参数|数据|说明/u.test(`${item.roleId || ''} ${item.processingType || ''} ${item.filePath}`) ? 0.8 : 0;
     return { item, score: hitScore + sectionScore + parameterScore + basicFactScore + typeScore + item.score * 0.1 - index * 0.001 };
@@ -205,7 +205,6 @@ interface SectionFactCard {
   prompt: string;
 }
 
-const QUANTIFIED_FACT_RE = /\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年)|DN\s*\d+|φ\s*\d+|Φ\s*\d+|GB\s*\d+|JGJ\s*\d+/iu;
 const DETAIL_FACT_RE = /计划工期|合同工期|建设地点|建设规模|质量标准|招标范围|施工范围|工作内容|项目特征|材料|设备|规格|型号|数量|单位|做法|节点|系统|管径|标高|尺寸|厚度|强度|等级|验收|检测|试验|安全|文明|扬尘|环保|消防|临时用电|临水|排水|交叉施工|地下管线|有限空间|危大|专项方案|专家论证|进度节点|保修|移交/iu;
 const COMMERCIAL_SENSITIVE_RE = /报价明细|综合单价|税率|增值税|利润|结算|预留金|暂列金额|暂估价/u;
 const ALLOWED_COMMERCIAL_FACT_RE = /合同估算价|合同估算价格|投资估算|估算价格|工程估算价|最高投标限价|招标控制价/u;

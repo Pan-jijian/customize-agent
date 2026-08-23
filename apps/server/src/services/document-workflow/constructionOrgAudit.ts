@@ -1,4 +1,7 @@
 import type { DocumentDraftChapter, ValidationIssue } from './types';
+import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
+
+export { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 
 /**
  * L4 校验体系：面向施工组织设计的专业性审计校验器。
@@ -34,11 +37,6 @@ const FILLER_PARAGRAPH_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 ];
 
 const WORK_PACKAGE_SECTION_PATTERNS = [/主要分部分项工程施工方案/u, /主要施工方法/u, /主要施工内容/u, /施工方案/u];
-
-export const PROCESS_PARAMETER_RE = /\d+(?:\.\d+)?\s*(?:mm|MPa|kN|kN\/m²|kPa|℃|%|d|h|min|m\/s|次\/天)|[<>≤≥]\s*\d+(?:\.\d+)?\s*(?:mm|MPa|%|d)|间距[≤<]?\s*\d+|偏差[≤<]?\s*\d+|坡度\s*\d+(?:\.\d+)?(?::\d+|%)|压实度\s*[≥>]?\s*\d+|坍落度|闭水试验|静载试验|拉拔试验|探伤|试验压力|锚固长度|搭接长度|保护层厚度|(?:防护挑网|安全网|防护网|围挡|警戒(?:区|线|距离)|防护栏杆).{0,12}(?:宽度|高度|距离|范围)[^，。；;]{0,8}\d+(?:\.\d+)?\s*m|(?:宽度|高度|距离|范围)[^，。；;]{0,8}\d+(?:\.\d+)?\s*m.{0,12}(?:防护挑网|安全网|防护网|围挡|警戒|防护栏杆)/giu;
-
-// 设备配置参数（配电箱/控制箱型号、容量、IP 等级等）：设备清单型小节以型号规格为参数载体
-export const DEVICE_SPEC_RE = /\d[A-Z][A-Z0-9a-z]*\b|[A-Z]{1,2}\d{2,3}\b|\d+(?:\.\d+)?\s*(?:kW|kVA|KVA|KW)\b|IP\d{2}/gu;
 
 const BASIC_FACT_RE = /(?:建筑面积|面积|总建筑面积)[约]?\s*\d+(?:\.\d+)?\s*(?:㎡|m²)|计划工期\s*\d+|日历天|地上\s*\d+\s*层|框架结构|质量标准[:：]?\s*合格/giu;
 

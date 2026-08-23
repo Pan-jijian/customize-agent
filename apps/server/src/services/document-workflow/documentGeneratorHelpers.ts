@@ -870,6 +870,9 @@ export async function retrieveSectionEvidence(input: { manager: ReturnType<typeo
     limit: 5,
     weights: searchWeightsForChapter(query),
     generationMode: false,
+    // 小节级检索跳过 LocalReranker 交叉编码：每小节一次全链路检索是本链路最大耗时点，
+    // 后续还有 evidenceForSection/selectEvidenceByBudget 双层本地重排兜底，交叉编码收益低
+    disableReranker: true,
   });
   return selectEvidenceByBudget(result.results
     .filter(item => input.scopedFilePaths.includes(item.filePath))

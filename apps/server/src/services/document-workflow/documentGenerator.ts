@@ -29,7 +29,8 @@ import { getActiveModelWithProvider } from './llmClient';
 import { createGenerationDiagnostics, evidenceInScope, measureGenerationStep, promptTextsForResolvedPrompts, repairChapterByQuality, selectDocumentGenerationStrategy } from './rolePipeline';
 import { buildGenerationBudget, type GenerationBudget } from './generationBudget';
 import { buildProjectMaterialProfile, buildProjectUnderstanding, expandProjectMaterialBindings, materialKindMaps, materialRoleId, retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from './projectMaterialProfile';
-import { buildChapterFactCoverageContext, buildLlmChapterContent, buildLlmSectionContent, buildSectionGroupChapterContent, buildSectionParallelChapterContent, outputTokensForChapter } from './chapterGeneration';
+import { buildChapterFactCoverageContext, buildLlmChapterContent, buildLlmSectionContent, buildSectionGroupChapterContent, buildSectionParallelChapterContent, evidenceForSection, outputTokensForChapter } from './chapterGeneration';
+import { QUANTIFIED_FACT_RE } from './parameterPatterns';
 import { buildEvidenceOnlyChapterContent } from './chapterExpansion';
 import { chapterSectionFactUsageIssues, reviewGlobalConsistency } from './chapterReview';
 import { buildRuntimePromptRules, extractPromptStructuralRules, normalizePlannedSections, planChapterSectionsWithLlm, runtimePromptRulesPrompt } from './promptRuleExtraction';
@@ -625,6 +626,26 @@ export async function generateDocumentDraft(input: { templateId: string; require
     assertEvidenceInProjectScope(evidence, projectMaterialScope, `chapter:${chapter.id}:writer-input`);
     // P4 检索自适应：本章仍有未满足的必需事实需求 → 调高后续章节查询扩展深度（上限 +2）
     if (requiredMissingNeeds.length > 0 && searchExpansionBoost < 2) searchExpansionBoost += 1;
+    // P0-1 小节级检索复用：跨小节/跨修复轮缓存（查询=章节+小节标题），
+    // 章节级 evidence 经 evidenceForSection 过滤后 ≥4 条且含量化参数时短路跳过检索；
+    // 检索本身已在 retrieveSectionEvidence 内跳过 LocalReranker，后续还有双层本地重排兜底
+    const sectionEvidenceCache = new Map<string, DocumentEvidence[]>();
+    const sectionEvidenceForChapter = (sectionTitle: string): Promise<DocumentEvidence[]> => {
+      const cacheKey = stableHash({ kind: 'section', query: `${chapter.title} ${sectionTitle}`.trim(), scopedFilePaths });
+      const cached = sectionEvidenceCache.get(cacheKey);
+      if (cached) return Promise.resolve(cached);
+      const chapterSectionEvidence = evidenceForSection(sectionTitle, chapter, evidence);
+      const quantifiedCount = chapterSectionEvidence.filter(item => QUANTIFIED_FACT_RE.test(item.content)).length;
+      if (chapterSectionEvidence.length >= 4 && quantifiedCount >= 1) {
+        const shortcut = chapterSectionEvidence.slice(0, 5);
+        sectionEvidenceCache.set(cacheKey, shortcut);
+        return Promise.resolve(shortcut);
+      }
+      return retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }).then(results => {
+        sectionEvidenceCache.set(cacheKey, results);
+        return results;
+      });
+    };
     const retrievalCoverageReport = buildRetrievalCoverageReport({ chapter, evidence, risk: rolePoolRisk });
     retrievalCoverageReports.push(retrievalCoverageReport);
     const chapterEvidenceFiles = new Set(evidence.map(item => item.filePath));
@@ -723,11 +744,11 @@ export async function generateDocumentDraft(input: { templateId: string; require
       emitProgress();
       let llmContent = useSectionGroup
         ? await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-section-group-draft:${chapter.id}`, () =>
-          buildSectionGroupChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, sectionEvidenceProvider: sectionTitle => retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }), onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal })
+          buildSectionGroupChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal })
         ))
         : useSectionFirst
           ? await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-section-draft:${chapter.id}`, () =>
-            buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts }), allowPartialResult: false, compactProjectContext: true, sectionEvidenceProvider: sectionTitle => retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }), onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal })
+            buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts }), allowPartialResult: false, compactProjectContext: true, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal })
           ))
           : await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-draft:${chapter.id}`, () =>
             buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords, targetWords, maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics })
@@ -744,7 +765,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
         emitProgress(chapterDrafts);
         llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-section-fallback:${chapter.id}`, () =>
-          buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts, fallback: 'section-parallel' }), allowPartialResult: false, sectionEvidenceProvider: sectionTitle => retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }), diagnostics: generationDiagnostics, signal: input.signal }).catch(error => {
+          buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts, fallback: 'section-parallel' }), allowPartialResult: false, sectionEvidenceProvider: sectionEvidenceForChapter, diagnostics: generationDiagnostics, signal: input.signal }).catch(error => {
             generationDiagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
             return undefined;
           })
@@ -769,17 +790,38 @@ export async function generateDocumentDraft(input: { templateId: string; require
         ));
       }
       if (!llmContent && evidence.length > 0) {
+        // P0-2 确定性兜底改造：进入证据骨架前，先把 LLM 失败原因反馈给模型再试 1 次紧凑整章生成，
+        // 给瞬态故障（超时/限流/预算耗尽）一次恢复机会，避免正常场景退化为模板拼接正文
         progressStages[chapterProgressIndex] = displayStage({
           type: 'chapter_generation',
           roleId: 'chapter_generation',
           promptId: chapterPromptExecution.primaryPromptId,
           status: 'running',
-          message: `${displayChapterTitle(chapter.title)} LLM 多路径未返回有效正文，正在用当前项目证据生成可审查草稿`,
+          message: `${displayChapterTitle(chapter.title)} LLM 多路径未返回有效正文，正在反馈失败原因重试紧凑整章生成`,
           details: [`LLM 最近错误：${generationDiagnostics.llm.lastError || '空响应或超时'}`, `证据条数：${evidence.length}`],
-          progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: '证据草稿' },
+          progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: '失败原因重试' },
         }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
         emitProgress(chapterDrafts);
-        llmContent = buildEvidenceOnlyChapterContent({ chapter, evidence, targetWords: effectiveTargetWords, forbidDrawingImages });
+        const retryRoleContext = [roleContext, `【上一轮 LLM 生成失败，请先分析失败原因，再调整策略重新输出完整章节正文】失败原因：${generationDiagnostics.llm.lastError || '空响应或超时'}`].filter(Boolean).join('\n');
+        llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-lastretry:${chapter.id}`, () =>
+          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, retryRoleContext, { forbidDrawingImages, minWords: Math.floor(minWords * 0.55), targetWords: Math.floor(effectiveTargetWords * 0.6), maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics }).catch(error => {
+            generationDiagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
+            return undefined;
+          })
+        ));
+      }
+      if (!llmContent && evidence.length > 0) {
+        progressStages[chapterProgressIndex] = displayStage({
+          type: 'chapter_generation',
+          roleId: 'chapter_generation',
+          promptId: chapterPromptExecution.primaryPromptId,
+          status: 'running',
+          message: `${displayChapterTitle(chapter.title)} LLM 全故障，正在用当前项目证据生成带阻断标记的可审查骨架草稿`,
+          details: [`LLM 最近错误：${generationDiagnostics.llm.lastError || '空响应或超时'}`, `证据条数：${evidence.length}`, '骨架草稿将带 [EVIDENCE_SKELETON] 标记并由 Review 门禁强制拦截，不允许静默通过'],
+          progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: '证据骨架' },
+        }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
+        emitProgress(chapterDrafts);
+        llmContent = `[EVIDENCE_SKELETON]\n${buildEvidenceOnlyChapterContent({ chapter, evidence, targetWords: effectiveTargetWords, forbidDrawingImages })}`;
       }
       throwIfAborted(input.signal);
       if (!llmContent) {
@@ -810,7 +852,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const expandedSectionIssues = sectionContentIntegrityIssues(content, [{ title: chapter.title, content, sections }]).map(issue => issue.message);
     const factUsageWarnings = factUsageIssues.slice(0, 6).map(issue => `小节事实密度需优化：${issue}`);
     const chapterIssues = [...expandedSectionIssues, ...factUsageWarnings];
-    const chapterStatus = chapterCompletionStatus(chapterChars, targetWords, chapterIssues);
+    // P0-2：LLM 全故障时的证据骨架草稿强制 failed，禁止通过 Review 门禁静默成文
+    const chapterStatus = content.includes('[EVIDENCE_SKELETON]') ? 'failed' : chapterCompletionStatus(chapterChars, targetWords, chapterIssues);
     latestChapterStageForProgress = displayStage({
       type: 'chapter_generation',
       roleId: 'chapter_generation',
@@ -906,7 +949,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
           const body = stripGeneratedHeading(sectionValue);
           return body ? `${contentValue.trimEnd()}\n\n### ${title}\n\n${body}` : contentValue;
         };
-        const sectionEvidence = filterEvidenceByProjectScope(await retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }).catch(() => []), projectMaterialScope);
+        const sectionEvidence = filterEvidenceByProjectScope(await sectionEvidenceForChapter(sectionTitle).catch(() => []), projectMaterialScope);
         assertEvidenceInProjectScope(sectionEvidence.length ? sectionEvidence : evidence, projectMaterialScope, `repair:${chapter.id}:${sectionTitle}`);
         const repairTargetWords = Math.max(taskSection?.minChars || 0, /项目主要施工内容/u.test(sectionTitle) ? 2200 : /主要分部分项工程施工方案|主要施工方法/u.test(sectionTitle) ? 1800 : /项目特点.*重点.*难点|重点.*难点.*分析/u.test(sectionTitle) ? 1500 : /原材料进场复试|见证取样|危大工程专项施工方案审批流程/u.test(sectionTitle) ? 900 : 760);
         const isDepthRepair = /正文不足，未达到任务最小深度/u.test(issue.message);

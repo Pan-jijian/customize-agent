@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplateChapter, EvidenceBundle, ResourceEvidence } from './types';
 import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
+import { EVIDENCE_PARAMETER_RE } from './parameterPatterns';
 import { evidenceMatchesFact } from './factMatching';
 import { selectByScore, textImportanceScore } from './selection';
 
@@ -46,7 +47,7 @@ function extractParameterLines(content: string) {
   const parameterLines = lines.filter(line => {
     const isProjectBasicValue = /计划工期|合同工期|工期|合同估算价|合同估算价格|投资估算|估算价格|工程估算价|最高投标限价|招标控制价|建设地点|建设规模|质量标准/u.test(line);
     if (!isProjectBasicValue && /综合单价|合价|报价明细|投标报价|税率|增值税|利润|预留金|暂列金额|结算/u.test(line)) return false;
-    const hasParameter = /\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年)|DN\s*\d+|Φ\s*\d+|φ\s*\d+|C\d{2,}|HRB\d+|GB\/?T?\s*[\w.-]+|JGJ\s*[\w.-]+|\d+\s*[×xX]\s*\d+/iu.test(line);
+    const hasParameter = EVIDENCE_PARAMETER_RE.test(line);
     const hasContext = /项目|工程|工期|合同|估算|价格|地点|规模|清单|图纸|设计|规格|型号|数量|单位|材料|设备|管|线|电缆|混凝土|钢筋|砌体|门窗|防水|标准|规范|验收|做法|参数|尺寸|标高|厚度|强度|等级|系统|安装/u.test(line);
     return isProjectBasicValue || hasParameter || (hasContext && /\d/u.test(line) && line.length <= 260);
   });
