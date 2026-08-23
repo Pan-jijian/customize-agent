@@ -41,7 +41,7 @@ export class MultiProjectManager {
       scope: 'project',
       projectRoot: resolvedRoot,
       projectId,
-      kbPath: getProjectKbPath(resolvedRoot),
+      kbPath: getProjectKbPath(resolvedRoot, this.storageRoot),
       storageRoot: this.storageRoot,
       llmProvider: this.llmProvider,
     });
@@ -126,7 +126,7 @@ export class MultiProjectManager {
         scope: 'project',
         projectRoot: project.projectRoot,
         projectId: project.projectId,
-        kbPath: project.kbPath,
+        kbPath: getProjectKbPath(project.projectRoot, this.storageRoot),
         storageRoot: this.storageRoot,
         llmProvider: this.llmProvider,
       });

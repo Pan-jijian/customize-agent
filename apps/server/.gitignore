@@ -1,0 +1,26 @@
+# Next.js 构建输出
+.next/
+out/
+
+# 依赖
+node_modules/
+
+# 环境文件
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+
+# 日志
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts

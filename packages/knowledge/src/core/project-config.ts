@@ -11,9 +11,10 @@ export function getProjectConfigPath(projectRoot: string, storageRoot = path.joi
   return path.join(storageRoot, 'projects', projectId, 'project.json');
 }
 
-/** 获取项目知识库目录路径 */
-export function getProjectKbPath(projectRoot: string): string {
-  return path.join(projectRoot, KNOWLEDGE_BASE_DIR);
+/** 获取项目知识库落盘目录路径（用户数据目录下，与 kb.db 索引同生命周期，不再落在项目根目录） */
+export function getProjectKbPath(projectRoot: string, storageRoot = path.join(os.homedir(), USER_DATA_DIR)): string {
+  const projectId = computeProjectId(projectRoot);
+  return path.join(storageRoot, 'projects', projectId, KNOWLEDGE_BASE_DIR);
 }
 
 const DEFAULT_CUSTOMIZE_MD = `# Customize Agent 配置示例

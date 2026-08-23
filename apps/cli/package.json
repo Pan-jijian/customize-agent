@@ -1,0 +1,91 @@
+{
+  "name": "customize-agent",
+  "version": "4.0.90",
+  "description": "通用终端 AI 助手 — 原生 Function Calling + 双语 TUI + 三级模型分层",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "customize": "dist/index.js",
+    "customize-agent": "dist/index.js"
+  },
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "start": "node ./dist/index.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "author": "Pan-jijian",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pan-jijian/customize-agent.git",
+    "directory": "apps/cli"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai-agent",
+    "cli",
+    "llm",
+    "customize-agent",
+    "terminal",
+    "tui",
+    "mcp"
+  ],
+  "packageManager": "pnpm@10.26.1",
+  "dependencies": {
+    "@customize-agent/engine": "workspace:^",
+    "@customize-agent/knowledge": "workspace:^",
+    "@customize-agent/llm": "workspace:^",
+    "@customize-agent/memory": "workspace:^",
+    "@customize-agent/runtime": "workspace:^",
+    "@customize-agent/search": "workspace:^",
+    "@customize-agent/tools": "workspace:^",
+    "@customize-agent/types": "workspace:^",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@napi-rs/canvas": "^0.1.82",
+    "archiver": "^8.0.0",
+    "better-sqlite3": "^12.10.0",
+    "commander": "^15.0.0",
+    "execa": "^9.6.1",
+    "fast-glob": "^3.3.3",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.12.0",
+    "marked": "^15.0.12",
+    "openai": "^6.42.0",
+    "pdf-parse": "^2.4.5",
+    "pdfjs-dist": "^5.4.394",
+    "sharp": "0.34.5",
+    "tesseract.js": "^7.0.0",
+    "string-width": "^8.2.1",
+    "tree-sitter": "^0.22.0",
+    "tree-sitter-c": "^0.23.0",
+    "tree-sitter-cpp": "^0.23.0",
+    "tree-sitter-go": "^0.23.0",
+    "tree-sitter-java": "^0.23.0",
+    "tree-sitter-javascript": "^0.23.0",
+    "tree-sitter-php": "^0.23.0",
+    "tree-sitter-python": "^0.23.0",
+    "tree-sitter-ruby": "^0.23.0",
+    "tree-sitter-rust": "^0.23.0",
+    "tree-sitter-typescript": "^0.23.0",
+    "typescript": "^6.0.3",
+    "vscode-languageserver-protocol": "^3.17.5",
+    "wrap-ansi": "^10.0.0",
+    "xlsx": "^0.18.5"
+  }
+}

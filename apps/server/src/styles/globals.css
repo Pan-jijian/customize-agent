@@ -1,0 +1,269 @@
+/* ═══════════════════════════════════════════════════════════
+   Linear / Vercel Style Design Tokens — CSS Variables
+   ═══════════════════════════════════════════════════════════ */
+
+@import "tailwindcss";
+
+:root {
+  /* 全局统一底色，极净的白 */
+  --colorBg: #ffffff;
+  --colorBgElevated: #ffffff;
+  --colorBgSecondary: #fafafa;
+  --colorBgHover: #f5f5f5;
+  --colorBgSelected: #eff6ff; /* 选中状态的淡蓝色背景 */
+  
+  --colorText: #171717;
+  --colorTextSecondary: #737373;
+  --colorTextTertiary: #a3a3a3;
+  
+  /* 引入柔和的交互品牌色 (Vercel Blue) */
+  --colorBrand: #0066cc;
+  --colorBrandHover: #0052a3;
+  --colorBrand2: #171717;
+  
+  --colorDanger: #e11d48;
+  --colorOk: #16a34a;
+  --colorWarn: #f59e0b;
+  --colorInfo: #2563eb;
+
+  /* ── Ant Design 主题变量兼容层 ──
+     antd v6 注入的 CSS 变量为 --ant-* 前缀，且作用域在其内部包装层而非 :root，
+     页面引用的旧命名变量必须在此自行定义（值与 antdTheme.ts 的 iOS 主题对齐）。 */
+  --colorPrimary: #007aff;
+  --colorAccent: #007aff;
+  --colorSuccess: #34c759;
+  --colorWarning: #ff9500;
+  --colorError: #ff3b30;
+
+  --colorBgContainer: rgba(255, 255, 255, 0.78);
+  --colorFillAlter: rgba(0, 0, 0, 0.02);
+  --colorFillSecondary: rgba(0, 0, 0, 0.04);
+  --colorFillTertiary: rgba(0, 0, 0, 0.03);
+  --colorFillQuaternary: rgba(0, 0, 0, 0.02);
+  --colorBorderSecondary: rgba(60, 60, 67, 0.12);
+
+  --colorTextQuaternary: rgba(60, 60, 67, 0.18);
+
+  --colorWarningBg: #fff8e6;
+  --colorSuccessBg: #e8f9ee;
+  --colorInfoBg: #e8f2ff;
+  --colorErrorBg: #ffeceb;
+
+  --glassBg: rgba(255, 255, 255, 0.85);
+  --glassBlur: saturate(180%) blur(16px);
+
+  /* 边框必须非常通透、柔和，避免死板的黑线 */
+  --borderColor: rgba(0, 0, 0, 0.08);
+  --borderColorStrong: rgba(0, 0, 0, 0.15);
+  --borderColorSelected: #3b82f6; /* 选中状态的边框色 */
+  --borderSoft: rgba(0, 0, 0, 0.06);
+  --textSecondary: #737373;
+  --surfaceElevated: #ffffff;
+
+  /* 极软的阴影，仅用于浮窗/下拉菜单 */
+  --shadowSoft: 0 4px 12px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.02);
+  --shadowCard: 0 0 0 1px rgba(0,0,0,0.03), 0 2px 12px rgba(0,0,0,0.04);
+  --shadowButton: 0 1px 2px rgba(0,0,0,0.05);
+
+  --radiusSm: 6px;
+  --radiusMd: 10px;
+  --radiusLg: 14px;
+  --radiusPill: 9999px;
+
+  --sidebarWidth: 260px;
+  --fontSans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.dark {
+  --colorBg: #000000;
+  --colorBgElevated: #0a0a0a;
+  --colorBgSecondary: #121212;
+  --colorBgHover: #1a1a1a;
+  --colorBgSelected: rgba(59, 130, 246, 0.15); /* 暗黑模式选中背景 */
+  
+  --colorText: #ededed;
+  --colorTextSecondary: #a3a3a3;
+  --colorTextTertiary: #737373;
+  
+  --colorBrand: #3b82f6;
+  --colorBrandHover: #60a5fa;
+  --colorBrand2: #d4d4d4;
+  
+  --colorDanger: #f43f5e;
+  --colorOk: #22c55e;
+  --colorWarn: #fbbf24;
+  --colorInfo: #3b82f6;
+
+  /* Ant Design 主题变量兼容层（暗色，与 antdTheme.ts 的 iOS 暗色主题对齐） */
+  --colorPrimary: #0a84ff;
+  --colorAccent: #0a84ff;
+  --colorSuccess: #30d158;
+  --colorWarning: #ff9f0a;
+  --colorError: #ff453a;
+
+  --colorBgContainer: rgba(44, 44, 46, 0.78);
+  --colorFillAlter: rgba(255, 255, 255, 0.03);
+  --colorFillSecondary: rgba(255, 255, 255, 0.06);
+  --colorFillTertiary: rgba(255, 255, 255, 0.04);
+  --colorFillQuaternary: rgba(255, 255, 255, 0.03);
+  --colorBorderSecondary: rgba(255, 255, 255, 0.10);
+
+  --colorTextQuaternary: rgba(235, 235, 245, 0.24);
+
+  --colorWarningBg: rgba(255, 159, 10, 0.12);
+  --colorSuccessBg: rgba(48, 209, 88, 0.12);
+  --colorInfoBg: rgba(10, 132, 255, 0.12);
+  --colorErrorBg: rgba(255, 69, 58, 0.12);
+
+  --glassBg: rgba(0, 0, 0, 0.85);
+  --borderColor: rgba(255, 255, 255, 0.12);
+  --borderColorStrong: rgba(255, 255, 255, 0.2);
+  --borderColorSelected: #60a5fa;
+  --borderSoft: rgba(255, 255, 255, 0.08);
+  --textSecondary: #a3a3a3;
+  --surfaceElevated: #1c1c1e;
+
+  --shadowSoft: 0 4px 12px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadowCard: 0 0 0 1px rgba(255,255,255,0.08), 0 4px 16px rgba(0,0,0,0.4);
+  --shadowButton: 0 1px 2px rgba(0,0,0,0.3);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Reset
+   ═══════════════════════════════════════════════════════════ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-family: var(--fontSans);
+  background: var(--colorBg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.appShellPlaceholder {
+  min-height: 100vh;
+  background: var(--colorBg);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--fontSans);
+  color: var(--colorText);
+  background: var(--colorBg);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--borderColorStrong); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--colorTextTertiary); }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animateFadeIn { animation: fadeIn 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) forwards; }
+
+.stagger-1 { animation-delay: 0.05s; }
+.stagger-2 { animation-delay: 0.1s; }
+.stagger-3 { animation-delay: 0.15s; }
+.stagger-4 { animation-delay: 0.2s; }
+.stagger-5 { animation-delay: 0.25s; }
+
+.space-y-8 > * + * { margin-top: 32px; }
+.space-y-6 > * + * { margin-top: 24px; }
+.space-y-5 > * + * { margin-top: 20px; }
+.space-y-4 > * + * { margin-top: 16px; }
+.space-y-3 > * + * { margin-top: 12px; }
+.space-y-2 > * + * { margin-top: 8px; }
+
+.space-x-8 > * + * { margin-left: 32px; }
+.space-x-6 > * + * { margin-left: 24px; }
+.space-x-4 > * + * { margin-left: 16px; }
+.space-x-2 > * + * { margin-left: 8px; }
+
+/* ── Route Transition ── */
+.routeProgress {
+  position: fixed;
+  top: 0;
+  left: var(--sidebarWidth);
+  right: 0;
+  height: 3px;
+  z-index: 1000;
+  background: linear-gradient(90deg, var(--colorPrimary), var(--colorAccent));
+  animation: routeProgress 0.9s ease-in-out infinite;
+}
+
+/* NProgress Customization */
+#nprogress {
+  pointer-events: none;
+}
+#nprogress .bar {
+  background: var(--colorBrand);
+  position: fixed;
+  z-index: 1031;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 3px;
+}
+#nprogress .peg {
+  display: block;
+  position: absolute;
+  right: 0px;
+  width: 100px;
+  height: 100%;
+  box-shadow: 0 0 10px var(--colorBrand), 0 0 5px var(--colorBrand);
+  opacity: 1.0;
+  transform: rotate(3deg) translate(0px, -4px);
+}
+
+.routeLoadingCard {
+  margin-bottom: 16px;
+  border: 1px solid var(--borderSoft);
+  border-radius: 16px;
+  padding: 14px 16px;
+  color: var(--textSecondary);
+  background: var(--surfaceElevated);
+}
+
+@keyframes routeProgress {
+  0% { transform: scaleX(0.15); transform-origin: left; opacity: 0.65; }
+  50% { transform: scaleX(0.7); transform-origin: left; opacity: 1; }
+  100% { transform: scaleX(1); transform-origin: left; opacity: 0.35; }
+}
+
+@media (max-width: 1024px) {
+  :root { --sidebarWidth: 200px; }
+}
+
+@media (max-width: 860px) {
+  :root { --sidebarWidth: 72px; }
+  .sidebarLogo { padding: 16px; justify-content: center; }
+  .sidebarLogoTitle,
+  .sidebarLogoSub,
+  .sidebarItem span:not(.sidebarChevron),
+  .sidebarFooter { display: none; }
+  .sidebarItem { justify-content: center; padding: 11px; }
+  .sidebarSubmenu { padding-left: 0; }
+  .sidebarSubItem { padding-left: 11px; }
+  .mainInner { padding: 20px; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); }
+  .topbar { padding: 10px 16px; margin: 10px 12px 0; }
+}
+
+@media (max-width: 640px) {
+  .sidebar { left: 6px; top: 6px; bottom: calc(6px + env(safe-area-inset-bottom, 0px)); }
+  .mainContent { margin-left: 72px; }
+  .mainInner { padding: 12px; padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+  .topbar { margin: 8px 8px 0; padding: 8px 12px; border-radius: 16px; }
+}

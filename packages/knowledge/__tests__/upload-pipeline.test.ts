@@ -935,7 +935,7 @@ startxref
       ], undefined, { vectorMode: 'defer' });
       expectIndexed(manager, '主文件夹/子文件夹/deep-a.md', '第一层子目录中的内容');
       expectIndexed(manager, '主文件夹/子文件夹/更深/deep-b.md', '第二层更深子目录中的内容');
-      expect(fs.existsSync(path.join(root, 'knowledgeBase', '主文件夹', '子文件夹', '更深', 'deep-b.md'))).toBe(true);
+      expect(fs.existsSync(path.join(manager.kbPath, '主文件夹', '子文件夹', '更深', 'deep-b.md'))).toBe(true);
     } finally {
       manager.close();
       fs.rmSync(root, { recursive: true, force: true });

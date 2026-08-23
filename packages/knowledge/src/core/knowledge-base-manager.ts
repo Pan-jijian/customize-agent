@@ -98,7 +98,7 @@ export class KnowledgeBaseManager {
       if (!options.projectRoot || !options.projectId) {
         throw new Error('project knowledge base requires projectRoot and projectId');
       }
-      this.kbPath = options.kbPath ?? getProjectKbPath(options.projectRoot);
+      this.kbPath = options.kbPath ?? getProjectKbPath(options.projectRoot, storageRoot);
       dbPath = path.join(storageRoot, 'projects', options.projectId, 'kb.db');
     }
     this.store = new IndexStateStore(dbPath);
