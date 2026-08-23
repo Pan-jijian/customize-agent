@@ -437,6 +437,8 @@ export async function finalizeGeneration(p: {
       emitProgress(finalChapterDrafts, progressStages);
       const criticalMinChars = criticalSectionBlockerMinChars(sectionTitle);
       const repairTargetWords = Math.max(620, criticalMinChars > 0 ? Math.ceil(criticalMinChars / 0.7) : 620);
+      const lastFailure = generationDiagnostics.llm.lastError;
+      generationDiagnostics.llm.lastError = undefined;
       const generated = await withProgressHeartbeat(() => buildLlmSectionContent({
         template,
         chapter: templateChapter,
@@ -450,7 +452,7 @@ export async function finalizeGeneration(p: {
         targetWords: repairTargetWords,
         maxWords: Math.ceil(repairTargetWords * 1.32),
         forbidDrawingImages: false,
-        qualityFeedback: `Final Gate 发现“${sectionTitle}”为空小节或深度不足。请基于证据完整重写该小节正式正文（原小节内容将被整体替换），包含检查责任、验收节点、资料闭环、整改复验要求，优先落位项目建筑面积、层数、工期、专业范围等量化参数，不得输出占位或解释。`,
+        qualityFeedback: `Final Gate 发现“${sectionTitle}”为空小节或深度不足。请基于证据完整重写该小节正式正文（原小节内容将被整体替换），包含检查责任、验收节点、资料闭环、整改复验要求，优先落位项目建筑面积、层数、工期、专业范围等量化参数，不得输出占位或解释。${lastFailure ? `此前生成被拒原因：${lastFailure}，必须逐条修正。` : ''}`,
         diagnostics: generationDiagnostics,
         signal,
       }));

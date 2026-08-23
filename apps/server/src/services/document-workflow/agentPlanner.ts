@@ -309,6 +309,12 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
       const paramCount = new Set([...(methodBody.match(PROCESS_PARAMETER_RE) || []), ...(methodBody.match(DEVICE_SPEC_RE) || [])]).size;
       if (documentTextLength(methodBody) >= 800 && paramCount < 4) issues.push({ level: 'warning', severity: 'warning', category: 'professional_chain', owner: 'system', message: `${section.title} 工艺参数落位不足：当前 ${paramCount} 个，要求不少于 4 个`, suggestion: '必须补充 mm/MPa/间距/偏差/坡度/试验压力等工艺参数（来自绑定资料或行业规范值）或设备型号规格参数。' });
     }
+    // 工序链箭头密度：方法类/流程类小节必须用“→”串联工序链，避免纯文字流程叙述拉低整体箭头密度
+    if (/主要分部分项工程施工方案|主要施工方法|项目主要施工内容|施工流程|施工顺序|多工序穿插|三检制度|隐蔽工程验收|闭环整改|应急演练|转运路线/u.test(section.title)) {
+      const methodBody = extractSectionBody(content, section.title);
+      const arrowCount = (methodBody.match(/→/gu) || []).length;
+      if (documentTextLength(methodBody) >= 500 && arrowCount < 3) issues.push({ level: 'warning', severity: 'warning', category: 'professional_chain', owner: 'system', message: `${section.title} 工序链箭头缺失：当前 ${arrowCount} 个“→”，工序序列未按箭头链表达`, suggestion: '工艺流程与方法叙述中的连续工序必须用“→”串联（如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”），每条链不少于 3 个环节，方法叙述中同样需要箭头链。' });
+    }
   }
   const scopeRoots = input.context.materialScope.selectedRoots;
   for (const root of input.context.materialScope.rejectedRoots) {

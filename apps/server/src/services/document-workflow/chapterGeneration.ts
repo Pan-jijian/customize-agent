@@ -337,8 +337,8 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     input.roleContext,
     input.missingFacts.length ? `需要特别补足的信息：${input.missingFacts.join('、')}` : '',
     input.qualityFeedback ? `上轮小节未通过质量检查，必须修正：${input.qualityFeedback}` : '',
-    /项目主要施工内容/u.test(input.sectionTitle) ? '【项目主要施工内容专项结构】只能根据绑定材料中的当前项目事实识别施工对象和工作包；不得套用固定行业模板，不得复述完整工程概况，不得写“以图纸清单为准”式空话；不得使用 Markdown 表格。必须按专业工程/分部分项工程逐项展开，每项使用“#### 工作包名称”作为三级小节标题，并固定包含“施工概况：”“施工流程：”“施工方法：”三段。施工概况必须写该工作包对应的本项目作业对象、部位、规模/工程量、材料设备或系统边界，写成连贯叙述段落，不得出现“1．xxx 2．xxx”编号清单或“xxx｜工程量”式清单原文罗列；施工流程必须使用“→”串联关键工序；施工方法必须写成连贯叙述，落到具体工具机具、测量/检测方法、工艺参数、材料规格、穿插关系、质量验收、复试检测和资料闭环，禁止“按规范施工”“结合实际执行”式空话。至少形成 5 个施工工作包，工作包必须来自绑定材料证据。' : '',
-    /主要分部分项工程施工方案/u.test(input.sectionTitle) ? '【主要分部分项工程施工方案专项要求】每个“#### 分项工程方案”三级小节必须包含施工概况（本项目作业对象、部位、工程量）、工艺流程（用“→”串联关键工序）和施工方法（工具机具、材料规格、验收标准）。每个分项方案正文必须落位至少 4 个工艺参数（mm、MPa、间距、偏差、坡度、养护天数、试验压力、搭接长度等），参数来自绑定材料或行业通用规范值，不得编造；纯设备配置型小节必须写型号、规格、容量、数量参数；不得写“按规范施工”“结合实际执行”式空话。' : '',
+    /项目主要施工内容/u.test(input.sectionTitle) ? '【项目主要施工内容专项结构】只能根据绑定材料中的当前项目事实识别施工对象和工作包；不得套用固定行业模板，不得复述完整工程概况，不得写“以图纸清单为准”式空话；不得使用 Markdown 表格。必须按专业工程/分部分项工程逐项展开，每项使用“#### 工作包名称”作为三级小节标题，并固定包含“施工概况：”“施工流程：”“施工方法：”三段。工作包小节必须与上下文“主要施工工作包”列表一一对应，每个工作包只允许展开一次；严禁把同一个工作包以“X工程”“X工作包”两种口径重复写成两个小节，也不得新增图谱之外的工作包小节。施工概况必须写该工作包对应的本项目作业对象、部位、规模/工程量、材料设备或系统边界，写成连贯叙述段落，不得出现“1．xxx 2．xxx”编号清单或“xxx｜工程量”式清单原文罗列；施工流程必须使用“→”串联关键工序；施工方法必须写成连贯叙述，落到具体工具机具、测量/检测方法、工艺参数、材料规格、穿插关系、质量验收、复试检测和资料闭环，方法叙述中的连续工序序列同样用“→”串联（如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”），每个工作包的方法段正文至少 1 条不少于 4 个环节的箭头工序链，不得只把箭头局限在施工流程行；每个工作包施工方法必须落位至少 3 个具体工艺参数（厚度、间距、偏差、含水率、饱满度、坡度、压实度等），参数来自绑定材料或行业通用规范值，禁止“按规范施工”“结合实际执行”式空话，严禁把工程量清单条目原样罗列成“xxx：2台；xxx：1台；”式参数堆砌。施工方法写法样例（句式参照，内容按本项目事实替换）：“配电箱采用挂墙方式安装，箱体中心距地1.5m，盘面垂直度偏差不超过1.5/1000；柜内元器件按系统图接线，导线分色标识，接线紧固力矩按规格控制；安装完成后进行绝缘电阻测试并形成通电试运行记录。”至少形成 5 个施工工作包，工作包必须来自绑定材料证据。' : '',
+    /主要分部分项工程施工方案/u.test(input.sectionTitle) ? '【主要分部分项工程施工方案专项要求】每个“#### 分项工程方案”三级小节必须包含施工概况（本项目作业对象、部位、工程量）、工艺流程（用“→”串联关键工序）和施工方法（工具机具、材料规格、验收标准）。施工方法叙述中的连续工序序列同样用“→”串联（如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”），每个分项方案的方法段正文至少 1 条不少于 4 个环节的箭头工序链，不得只把箭头局限在工艺流程行；每个分项方案正文必须落位至少 4 个工艺参数（mm、MPa、间距、偏差、坡度、养护天数、试验压力、搭接长度等），参数来自绑定材料或行业通用规范值，不得编造；纯设备配置型小节必须写型号、规格、容量、数量参数；不得写“按规范施工”“结合实际执行”式空话。' : '',
     processKnowledgePrompt,
     `请只生成当前节内容，使用“### ${input.sectionTitle}”作为节标题；正文必须下沉到若干“#### 三级小节标题”下面，不得在 ### 标题后直接写大段正文。目标约 ${input.targetWords} 字${input.maxWords ? `，最多不超过 ${input.maxWords} 字` : ''}。`,
     '本章节结构已由系统按模板和提示词锁定；不得删除、重命名、合并或重排当前节标题；每个节下必须自然展开三级小节，三级小节承载正文。',
@@ -359,10 +359,6 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   const structureIssue = sectionStructureIssue(input.sectionTitle, normalizedContent);
   if (structureIssue) {
     if (input.diagnostics) input.diagnostics.llm.lastError = `${structureIssue}：${input.chapter.title} / ${input.sectionTitle}`;
-    if (/项目主要施工内容/u.test(input.sectionTitle)) {
-      const deterministic = buildMajorConstructionFallbackSection(input.sectionTitle, input.projectContext, input.evidence);
-      if (deterministic) return deterministic;
-    }
     return undefined;
   }
   const criticalMinChars = criticalSectionBlockerMinChars(input.sectionTitle);
@@ -371,13 +367,11 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   const minSectionChars = Math.min(Math.max(Math.floor(input.targetWords * 0.7), criticalMinChars), Math.max(500, input.targetWords));
   if (isCriticalDeepSection(input.sectionTitle) && documentTextLength(normalizedContent) < minSectionChars) {
     if (input.diagnostics) input.diagnostics.llm.lastError = `section writer 正文不足：${input.chapter.title} / ${input.sectionTitle} / ${documentTextLength(normalizedContent)}/${minSectionChars}字`;
-    if (/项目主要施工内容/u.test(input.sectionTitle)) {
-      const deterministic = buildMajorConstructionFallbackSection(input.sectionTitle, input.projectContext, input.evidence);
-      if (deterministic) return deterministic;
-    }
     return undefined;
   }
-  return ensureTertiarySectionShell(input.sectionTitle, normalizedContent);
+  // “项目主要施工内容”节去重：LLM 可能把同一工作包按“X工程”“X工作包”两遍展开，确定性合并删除重复小节
+  const finalContent = /项目主要施工内容/u.test(input.sectionTitle) ? mergeDuplicateWorkPackageSubsections(normalizedContent) : normalizedContent;
+  return ensureTertiarySectionShell(input.sectionTitle, finalContent);
 }
 
 interface SectionWritingTask {
@@ -435,9 +429,124 @@ function sectionContentBody(content: string) {
 
 function currentSectionBlock(sectionTitle: string, content: string) {
   const escaped = sectionTitle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-  const match = content.match(new RegExp(`^###\\s+(?:\\d+(?:\\.\\d+)*\\s+)?${escaped}\\s*\\n([\\s\\S]*?)(?=^###\\s+|^##\\s+|$)`, 'mu'));
+  // 注意：m 标志下 $ 匹配每个行尾，若本节是文档最后一节会导致块在首个 #### 行被截断；
+  // 用 (?![\s\S]) 表示真正的字符串末尾
+  const match = content.match(new RegExp(`^###\\s+(?:\\d+(?:\\.\\d+)*\\s+)?${escaped}\\s*\\n([\\s\\S]*?)(?=^###\\s+|^##\\s+|(?![\\s\\S]))`, 'mu'));
   return match ? match[0] : content;
 }
+
+/** 中文 bigram 关键词集合：把连续中文字符串按相邻两字切分，用于标题/段落相似度匹配 */
+function chineseBigramSet(text: string): Set<string> {
+  const grams = new Set<string>();
+  for (const run of text.match(/[\u4e00-\u9fa5]{2,}/gu) || []) {
+    if (run.length === 2) { grams.add(run); continue; }
+    for (let index = 0; index <= run.length - 2; index += 1) grams.add(run.slice(index, index + 2));
+  }
+  return grams;
+}
+
+function sharedGramCount(first: Set<string>, second: Set<string>): number {
+  let count = 0;
+  for (const gram of first) if (second.has(gram)) count += 1;
+  return count;
+}
+
+/** 施工叙述中的高频通用动词/名词 bigram，对段落语义重合判定无区分度，需过滤 */
+const STOP_BIGRAMS = new Set([
+  '采用', '安装', '控制', '检测', '检查', '验收', '记录', '施工', '要求', '完成', '进行', '实测', '形成', '复核', '处理', '保护', '清理', '准备', '组织', '安全', '质量', '部位', '范围', '内容', '工作', '项目', '工程', '材料', '设备', '分别', '规范', '图纸', '设计', '依据', '确认', '资料', '技术', '文件', '标准', '合格', '偏差', '允许', '符合', '确保', '防止', '严禁', '不得', '统一', '配备', '设置', '使用', '作业', '过程', '移交', '闭环', '整改', '问题', '发现', '及时', '后续', '工序', '环节', '位置', '高度', '间距', '严格', '必须', '所有', '相关', '执行', '落实', '到位', '同步', '相应', '重点', '加强', '管理', '隐蔽', '报告', '签字', '填写', '留置', '保养', '维修',
+]);
+
+/** 过滤通用施工动词后的段落 bigram 交集数，用于判定两小节是否同一工作包 */
+function sharedMeaningfulGramCount(first: Set<string>, second: Set<string>): number {
+  let count = 0;
+  for (const gram of first) {
+    if (STOP_BIGRAMS.has(gram)) continue;
+    if (second.has(gram)) count += 1;
+  }
+  return count;
+}
+
+/**
+ * “项目主要施工内容”节 LLM 成稿可能把同一个工作包按“X工程”“X工作包”两种口径重复展开两遍：
+ * 确定性合并：把“X工作包”小节中独有的量化参数句并入匹配的“X工程”小节施工方法段，删除重复小节并重排编号。
+ */
+export function mergeDuplicateWorkPackageSubsections(content: string): string {
+  // 注意：m 标志下 $ 匹配每个行尾，结尾边界必须用 (?!(\\s|\\S)) 表示真正的字符串末尾，否则块在首行就被截断
+  const sectionBlock = content.match(/^###\s+(?:\d+\.\d+\s+)?项目主要施工内容\s*\n([\s\S]*?)(?=^###\s+|^##\s+|(?!(\s|\S)))/mu);
+  if (!sectionBlock) return content;
+  const block = sectionBlock[0];
+  const headingEnd = block.indexOf('\n');
+  const body = block.slice(headingEnd + 1);
+  const parts = body.split(/^(?=####\s+)/mu);
+  type PackageBlock = { title: string; cleanTitle: string; body: string; isWorkPackage: boolean; titleGrams: Set<string>; segGrams: Set<string>[] };
+  const packages: PackageBlock[] = [];
+  for (const part of parts) {
+    const match = part.match(/^####\s+(.+?)\s*\n([\s\S]*)$/u);
+    if (!match) continue;
+    const title = match[1].trim();
+    const cleanTitle = title.replace(/^\d+\.\d+\.\d+\s*/u, '');
+    const segments = match[2]
+      .split(/(?=施工概况|施工流程|施工方法)/u)
+      .filter(Boolean)
+      .map(segment => chineseBigramSet(segment.replace(/^施工(?:概况|流程|方法)[:：]?/u, '')));
+    packages.push({ title, cleanTitle, body: match[2], isWorkPackage: /工作包\s*$/u.test(cleanTitle), titleGrams: chineseBigramSet(cleanTitle), segGrams: segments });
+  }
+  const workPackages = packages.filter(item => item.isWorkPackage);
+  const namedPackages = packages.filter(item => !item.isWorkPackage);
+  if (workPackages.length === 0 || namedPackages.length === 0) return content;
+  const deleted = new Set<PackageBlock>();
+  for (const workPackage of workPackages) {
+    let best: PackageBlock | undefined;
+    let bestScore = 0;
+    for (const named of namedPackages) {
+      if (deleted.has(named)) continue;
+      const titleShared = sharedGramCount(workPackage.titleGrams, named.titleGrams);
+      if (titleShared < 2) continue;
+      // 三段式对应段至少两段语义重合（每段共享非停用 bigram ≥4）才判定同一工作包；低重叠多为跨工作包同名泛词（室内/改造/安装）
+      const segmentOverlaps = Math.min(workPackage.segGrams.length, named.segGrams.length);
+      const overlapping = Array.from({ length: segmentOverlaps }, (_item, index) => sharedMeaningfulGramCount(workPackage.segGrams[index], named.segGrams[index])).filter(count => count >= 4).length;
+      if (overlapping < 2) continue;
+      const score = titleShared + overlapping * 2;
+      if (score > bestScore) { bestScore = score; best = named; }
+    }
+    if (!best) continue;
+    // 合并：把“工作包”小节中独有的量化参数句追加到保留小节的施工方法段末尾；单位先归一化避免“1596.99m2/1596.99平方米”双写
+    const target = best;
+    const normalizeUnits = (value: string) => value
+      .replace(/平方米/gu, 'm2').replace(/m²|㎡/gu, 'm2')
+      .replace(/立方米/gu, 'm3').replace(/m³/gu, 'm3')
+      .replace(/毫米/gu, 'mm')
+      .replace(/\s+/gu, '');
+    const normalizedTarget = normalizeUnits(target.body);
+    // 句子带单位的参数 token；句子的全部参数 token 已在保留小节中出现则不追加，避免同数字不同写法双写
+    const PARAM_TOKEN = /\d+(?:\.\d+)?(?:平方米|立方米|毫米|m2|m3|mm|㎡|m²|m³|米|台|套|个|座|根|扇|樘|块|件|组|吨|kg|t|%)/gu;
+    const allParamsAlreadyInTarget = (sentence: string) => {
+      const tokens = sentence.match(PARAM_TOKEN);
+      if (!tokens || tokens.length === 0) return false;
+      return tokens.every(token => normalizedTarget.includes(normalizeUnits(token)));
+    };
+    const additions: string[] = [];
+    for (const sentence of workPackage.body.split(/[。；，,\n]/u).map(item => item.trim()).filter(Boolean)) {
+      if (!/\d/u.test(sentence)) continue;
+      const stripped = sentence.replace(/^施工(?:概况|流程|方法)[:：]?/u, '').trim();
+      if (!stripped) continue;
+      if (allParamsAlreadyInTarget(stripped)) continue;
+      additions.push(stripped);
+    }
+    if (additions.length > 0) target.body = `${target.body.trimEnd()}${additions.join('。')}。\n`;
+    deleted.add(workPackage);
+  }
+  const remaining = packages.filter(item => !deleted.has(item));
+  if (remaining.length === packages.length) return content;
+  const numbered = remaining.every(item => /^\d+\.\d+\.\d+\s+/u.test(item.title));
+  const rebuilt = remaining.map((item, index) => {
+    const title = numbered ? `#### ${item.title.replace(/^\d+\.\d+\.\d+\s*/u, `${sectionBlock[0].split('\n')[0].match(/\d+\.\d+/u)?.[0] || '1.1'}.${index + 1} `)}` : `#### ${item.cleanTitle}`;
+    return `${title}\n${item.body.trimEnd()}`;
+  });
+  const headingLine = block.slice(0, headingEnd + 1);
+  return content.replace(block, `${headingLine}${rebuilt.join('\n')}\n`);
+}
+
 
 function hasTertiarySubsections(content: string, sectionTitle?: string) {
   const target = sectionTitle ? currentSectionBlock(sectionTitle, content) : content;
@@ -454,24 +563,13 @@ function cleanMajorConstructionFact(text: string) {
     .trim();
 }
 
-// 将「1．xxx 2．xxx｜19.79m3」这类清单原文转为可读的叙述短语：
-// 1）去除编号前缀（数字/中文序号/带圈数字）；2）将「｜量」转为「（量）」；3）去重并截断。
-function narrateConstructionFacts(facts: string[], max = 6) {
-  return [...new Set(facts)]
-    .map(fact => cleanMajorConstructionFact(fact)
-      .replace(/^[①-⑳㈠-㈩⑴-⒇]\s*/u, '')
-      .replace(/^\d+\s*[．.、:：)）]\s*/u, '')
-      .replace(/^[一二三四五六七八九十]+\s*[、．.]\s*/u, '')
-      .replace(/｜\s*([^；;、，,\n]+)/gu, '（$1）'))
-    .filter(item => item && item.length >= 4)
-    .slice(0, max);
-}
-
 function isUsableMajorConstructionFact(text: string) {
   const value = cleanMajorConstructionFact(text);
   if (!value || value.length < 4 || value.length > 120) return false;
   if (/资料内容事实|#{2,6}|未尽事宜|项目编号\s*[:：]?\s*[一二三四五六七八九十]?$/u.test(value)) return false;
   if (/本项目为|总建筑面积|保留现状|专业施工内容统筹|招标文件列明|招标范围还包含|具备有效的.*资质/u.test(value)) return false;
+  // 清单原文备注式半截条目（“（土壤类别未注明）”“挖土深度未注明”等）不是可叙述工程量，过滤
+  if (/未注明|以图纸为准|按设计要求确定/u.test(value) && !/\d/u.test(value)) return false;
   if ((value.match(/工程|维修|改造|安装|设备/gu) || []).length >= 4 && !/\d|㎡|m2|m²|mm|厚|验收|检测|调试|试验|复试/u.test(value)) return false;
   return /\d|㎡|m2|m²|mm|厚|工程|材料|设备|系统|范围|改造|维修|加固|消防|水电|智能化|管网|屋面|门窗|验收|检测|调试/u.test(value);
 }
@@ -486,6 +584,55 @@ function splitConstructionSteps(text: string) {
     .filter(item => item && item.length >= 2 && item.length <= 40)
     .filter(item => !/^按?施工准备$|^实施$|^检查$|^验收组织?$|^按规范和资料闭环$/u.test(item))
     .filter(item => !/本项目为|总建筑面积|保留现状|专业施工内容统筹|招标文件列明|招标范围|未尽事宜|具备有效/u.test(item));
+}
+
+/** 清单条目式去重：同一对象以“名称：数量”“名称 参数 数量”“名称｜规格”等格式重复出现时，
+ * 先按归一化标点后的子串关系合并；子串不成立但共享设备型号/数量标识且首词相同或词集合存在包含关系的，保留信息更全的条目 */
+export function dedupeQuantityFacts(items: string[]) {
+  const result: Array<{ text: string; norm: string; tokens: Set<string>; models: Set<string> }> = [];
+  for (const item of items) {
+    const norm = item.replace(/[：:，,、；;｜|（）()]/gu, ' ').replace(/\s+/gu, ' ').trim();
+    const tokens = new Set(norm.split(' ').filter(token => token.length >= 2));
+    const models = new Set([
+      ...(norm.match(/\d+[A-Z]{2,}[A-Za-z0-9]*/gu) || []),
+      ...(norm.match(/\d+(?:\.\d+)?\s*(?:台|套|个|座|㎡|m2|m²|m³|m3|kg|t|根|扇|樘|块|件|组|mm)/gu) || []),
+    ]);
+    const firstToken = norm.split(' ')[0] || '';
+    const existingIndex = result.findIndex(entry => {
+      if (entry.norm.includes(norm) || norm.includes(entry.norm)) return true;
+      // 同一对象的多格式条目：共享设备型号/数量标识，且首词相同或词集合存在包含关系
+      const shareModel = [...models].some(model => entry.models.has(model)) || [...entry.models].some(model => models.has(model));
+      if (!shareModel) return false;
+      const subsetOf = (a: Set<string>, b: Set<string>) => [...a].every(token => b.has(token));
+      return subsetOf(tokens, entry.tokens) || subsetOf(entry.tokens, tokens) || firstToken === entry.norm.split(' ')[0];
+    });
+    if (existingIndex >= 0) {
+      const prev = result[existingIndex];
+      // 词集合更全者优先；同规模时保留更简洁（含“名称：数量”格式）的条目
+      if (tokens.size > prev.tokens.size || (tokens.size === prev.tokens.size && item.length < prev.text.length)) result[existingIndex] = { text: item, norm, tokens, models };
+    } else {
+      result.push({ text: item, norm, tokens, models });
+    }
+  }
+  return result.map(entry => entry.text);
+}
+
+/** 流程步骤过滤：结构化数据常把工程量清单条目混入 process（如“XX总箱 2台 非标箱 挂墙安装”），
+ * 这类条目不是工序动作，按“数字+量词”“设备型号串”与“是清单条目的子串”三重特征剔除 */
+export function filterConstructionSteps(steps: string[], quantityFacts: string[]) {
+  const quantityNorms = quantityFacts.map(item => item.replace(/[：:，,、；;｜|（）()]/gu, ' ').replace(/\s+/gu, ' ').trim());
+  const actionWord = /安装|敷设|浇筑|砌筑|抹灰|回填|拆除|吊装|固定|连接|试验|调试|养护|压实|铺设|焊接|绑扎|涂刷|灌浆|开挖|预制|穿线|放线|找平|清底|防水|密封/u;
+  return steps.filter(step => {
+    if (/\d+(?:\.\d+)?\s*(?:台|套|个|座|㎡|m2|m²|m³|m3|kg|t|根|扇|樘|块|件|组)/u.test(step)) return false;
+    // 设备条目式步骤（“安装XX总箱1APEza、XX风机配电箱3APpy等”）不是工序动作，剔除
+    if (/[A-Z]+\d+/u.test(step) && /箱|柜|泵|机组|风机|面板/u.test(step)) return false;
+    const norm = step.replace(/[：:，,、；;｜|（）()]/gu, ' ').replace(/\s+/gu, ' ').trim();
+    // 短工序词（砌筑/抹灰/挂墙安装）即使出现在清单条目中也要保留
+    if (norm.length <= 6 && actionWord.test(norm)) return true;
+    // 短残尾仅当不是清单条目子串时保留（剔除“配电箱”式残尾）
+    if (norm.length < 4) return !quantityNorms.some(quantity => quantity.includes(norm));
+    return !quantityNorms.some(quantity => quantity.includes(norm));
+  });
 }
 
 function isWorkPackageListFact(text: string) {
@@ -504,8 +651,8 @@ function parseMajorConstructionPackages(projectContext: string, evidence: Docume
       for (const item of items) {
         const name = cleanMajorConstructionFact(item.name || '');
         const scope = cleanMajorConstructionFact(item.scope || '');
-        const quantities = [...(item.quantities || []), ...(item.materials || []), ...(item.methods || [])].map(cleanMajorConstructionFact).filter(isUsableMajorConstructionFact).filter(item => !isWorkPackageListFact(item));
-        const process = (item.process || []).flatMap(splitConstructionSteps);
+        const quantities = dedupeQuantityFacts([...(item.quantities || []), ...(item.materials || []), ...(item.methods || [])].map(cleanMajorConstructionFact).filter(isUsableMajorConstructionFact).filter(item => !isWorkPackageListFact(item)));
+        const process = filterConstructionSteps((item.process || []).flatMap(splitConstructionSteps), quantities);
         const acceptance = (item.acceptance || []).map(cleanMajorConstructionFact).filter(item => item && !isWorkPackageListFact(item));
         if (!name || /^\d*徽光阁项目施工$/u.test(name) || name === '徽光阁项目施工') continue;
         if (!scope || /资料内容事实|#{2,6}/u.test(scope)) continue;
@@ -522,8 +669,8 @@ function parseMajorConstructionPackages(projectContext: string, evidence: Docume
     if (!match) continue;
     const name = cleanMajorConstructionFact(match[1]);
     const scope = cleanMajorConstructionFact(match[2]);
-    const quantities = splitFactItems(match[3]).filter(item => item !== '按证据展开');
-    const process = splitConstructionSteps(match[4]);
+    const quantities = dedupeQuantityFacts(splitFactItems(match[3]).filter(item => item !== '按证据展开'));
+    const process = filterConstructionSteps(splitConstructionSteps(match[4]), quantities);
     const acceptance = match[5].split(/[；;、，,]/u)
       .map(item => cleanMajorConstructionFact(item))
       .filter(item => item && item !== '按规范和资料闭环')
@@ -535,121 +682,37 @@ function parseMajorConstructionPackages(projectContext: string, evidence: Docume
   return packages.slice(0, 8);
 }
 
-function projectFactSummary(projectContext: string, evidence: DocumentEvidence[]) {
-  const text = `${projectContext}\n${evidence.map(item => cleanEvidenceText(stringifyFactValue(item.content))).join('\n')}`;
-  const facts = [
-    text.match(/建筑面积(?:约)?\s*[\d.]+\s*(?:㎡|m²)/u)?.[0],
-    text.match(/地上\s*[一二三四五六七八九十\d]+\s*层/u)?.[0],
-    text.match(/[一二三四五六七八九十\d]+\s*层框架结构/u)?.[0],
-    text.match(/保留在营业商铺\s*[\d.]+\s*㎡/u)?.[0],
-    text.match(/闲置空间(?:约)?\s*[\d.]+\s*㎡/u)?.[0],
-    text.match(/计划工期\s*[\d.]+\s*日历天/u)?.[0],
-    text.match(/质量标准[:：]?\s*合格/u)?.[0],
-  ].filter(Boolean) as string[];
-  return [...new Set(facts)].slice(0, 6).join('，');
-}
-
-function buildMajorConstructionFallbackSection(sectionTitle: string, projectContext = '', evidence: DocumentEvidence[] = []) {
-  const packages = parseMajorConstructionPackages(projectContext, evidence)
-    .filter(pkg => pkg.scope && (pkg.quantities.length > 0 || pkg.process.length > 0 || pkg.acceptance.length > 0));
-  if (packages.length < 5) return undefined;
-  const projectFacts = projectFactSummary(projectContext, evidence);
-  const validPackages = packages.map(pkg => {
-    const process = pkg.process.length >= 3 ? pkg.process : [];
-    const methodFacts = [...pkg.quantities, ...pkg.acceptance]
-      .filter(item => !/本项目为|总建筑面积|保留现状|专业施工内容统筹|招标文件列明|招标范围还包含|具备有效/u.test(item))
-      .filter(item => !((item.match(/工程|维修|改造|安装|设备/gu) || []).length >= 4 && !/\d|㎡|m2|m²|mm|厚|验收|检测|调试|试验|复试/u.test(item)))
-      .slice(0, 8);
-    return { pkg, process, methodFacts };
-  }).filter(item => item.methodFacts.length >= 2 && item.process.length >= 2);
-  if (validPackages.length < 5) return undefined;
-  return [
-    `### ${sectionTitle}`,
-    '',
-    ...validPackages.flatMap(({ pkg, process, methodFacts }) => {
-      const quantities = narrateConstructionFacts(pkg.quantities, 6);
-      const acceptance = narrateConstructionFacts(pkg.acceptance, 4);
-      const methods = narrateConstructionFacts(methodFacts, 8);
-      const quantityLead = quantities.length
-        ? `该工作包涉及的工程量、材料与设备包括${quantities.join('；')}。`
-        : acceptance.length ? `该工作包涉及的验收与检测要求包括${acceptance.join('；')}。` : '';
-      const methodLead = methods.length
-        ? methods.join('；') + '。'
-        : '按施工准备→过程实施→检查验收→问题整改→资料归档组织，重点控制工具机具、工艺参数、材料规格与验收检测。';
-      return [
-        `#### ${pkg.name}`,
-        '',
-        `施工概况：${pkg.name}属于本项目主要施工内容，实施范围为${pkg.scope}。${projectFacts ? `本项目已确认的基础条件包括${projectFacts}。` : ''}${quantityLead}`,
-        '',
-        `施工流程：${process.join('→')}。`,
-        '',
-        `施工方法：${methodLead}`,
-        '',
-      ];
-    }),
-  ].join('\n');
-}
-
-// “主要分部分项工程施工方案/主要施工方法”确定性兜底：
-// 用施工工作包结构化数据按分项工程叙述施工方案，落位工程量/验收参数，避免空小节与纯套话残留。
-function buildMethodSectionFallback(sectionTitle: string, projectContext = '', evidence: DocumentEvidence[] = []) {
-  const packages = parseMajorConstructionPackages(projectContext, evidence)
-    .filter(pkg => pkg.scope && (pkg.quantities.length > 0 || pkg.process.length > 0 || pkg.acceptance.length > 0));
-  if (packages.length < 2) return undefined;
-  const blocks = packages.slice(0, 8).map(pkg => {
-    const quantities = narrateConstructionFacts(pkg.quantities, 6);
-    const acceptance = narrateConstructionFacts(pkg.acceptance, 4);
-    const process = [...new Set(pkg.process)].slice(0, 8);
-    const lines = [
-      `本分部分项工程实施范围为${pkg.scope}。`,
-      quantities.length ? `涉及主要工程量与材料设备：${quantities.join('；')}。` : '',
-      process.length ? `施工流程按${process.join('→')}组织。` : '',
-      acceptance.length ? `验收要点：${acceptance.join('；')}。` : '',
-      '过程控制执行样板引路、工序交接检、隐蔽验收和问题整改闭环，关键参数由责任岗位复核后签字确认。',
-    ].filter(Boolean);
-    return `#### ${pkg.name}\n\n${lines.join('')}`;
-  });
-  return [`### ${sectionTitle}`, '', ...blocks].join('\n\n');
-}
-
-function buildGenericFallbackSection(sectionTitle: string) {
-  const isKeyDifficulty = /项目特点.*重点.*难点|重点.*难点.*分析/u.test(sectionTitle);
-  const topicCount = isKeyDifficulty ? 5 : 3;
-  const topics = Array.from({ length: topicCount }, (_, index) => writingTopicTitle(sectionTitle, index, topicCount));
-  // 通用兜底正文必须与特定项目解耦：只写结构化的过程要求，具体事实由绑定资料在后续补齐；
-  // 禁止套用“本小节围绕……展开”式模板空话（重复段检测会阻断此类段落）。
-  const topicBodies: Record<number, string> = {
-    0: '依据本项目已确认资料中的项目边界、工程量与设计做法，逐项明确作业对象、部位范围与过程控制目标，作为作业条件确认、技术交底和过程实施的输入。',
-    1: '按“作业条件确认→技术交底→过程实施→自检互检→整改复查→资料归档”组织，交底覆盖到直接作业人员，实施过程留存检查记录与影像，问题整改定人、定时限、定复查。',
-    2: '过程控制重点落到材料规格与验收、工序交接、测量复核和成品保护；关键节点由责任岗位复核后签字确认，发现偏差当日反馈、限期整改并销项。',
-    3: '按项目质量与安全目标分解到责任岗位，执行日巡查、周复核、节点验收三级检查，形成台账与闭环记录。',
-    4: '收尾阶段完成缺陷自查、整改销项、验收资料整理与移交，确保与总体进度计划和质量验收要求衔接。',
-  };
-  return [
-    `### ${sectionTitle}`,
-    '',
-    ...topics.flatMap((topic, topicIndex) => [
-      `#### ${topic}`,
-      '',
-      topicBodies[topicIndex % 5] || topicBodies[0],
-      '',
-    ]),
-  ].join('\n');
-}
-
-function sectionStructureIssue(sectionTitle: string, content: string) {
+export function sectionStructureIssue(sectionTitle: string, content: string) {
   if (/项目主要施工内容/u.test(sectionTitle)) {
     const block = currentSectionBlock(sectionTitle, content);
     if (!hasTertiarySubsections(content, sectionTitle)) return `${sectionTitle} 缺少施工工作包三级小节`;
     if (!hasMajorConstructionContentStructure(block)) return `${sectionTitle} 未按施工工作包展开`;
     const packageBlocks = block.split(/^####\s+/gmu).slice(1).map(item => item.trim()).filter(Boolean);
     if (packageBlocks.some(item => !item.includes('施工概况') || !item.includes('施工流程') || !item.includes('施工方法'))) return `${sectionTitle} 存在工作包结构不完整`;
-    if (/资料内容事实|#{2,6}\s+|\*\*[^*]+\*\*|未尽事宜|专业施工内容统筹|招标范围还包含|具备有效的.*资质|安全生产考核合格证书|注册建造师|联合体投标|项目经理要求|投标人资格|投标人资质|营业执照|安全生产许可证|资格审查|资格后审|中标通知书|签订合同|电子交易系统|投标保证金|评标办法|踏勘现场|投标预备会/u.test(block)) return `${sectionTitle} 存在脏事实或标题污染`;
+    // 脏事实/标题污染：针对去掉节标题后的正文检查；非法标题层级（## 二级、### 三级、##### 五级等）必须行首锚定，
+    // #### 四级标题是本节合法的工作包标题，不得误判（否则本节永远回退兜底）
+    const blockBody = sectionContentBody(block);
+    if (/资料内容事实|(?:^#{2,3}|^#{5,6})\s+|\*\*[^*]+\*\*|未尽事宜|专业施工内容统筹|招标范围还包含|具备有效的.*资质|安全生产考核合格证书|注册建造师|联合体投标|项目经理要求|投标人资格|投标人资质|营业执照|安全生产许可证|资格审查|资格后审|中标通知书|签订合同|电子交易系统|投标保证金|评标办法|踏勘现场|投标预备会/mu.test(blockBody)) return `${sectionTitle} 存在脏事实或标题污染`;
     if (packageBlocks.some(item => /施工流程[:：][\s\S]*?(未尽事宜|本项目为|总建筑面积|保留现状|专业施工内容统筹|招标文件列明|招标范围|安全生产考核合格证书|联合体投标|注册建造师)/u.test(item))) return `${sectionTitle} 存在工作包流程污染`;
+    // 工序链箭头硬门：方法段正文至少 1 条箭头工序链且全节箭头数充足，否则判定 Writer 未按“→”串联工序，本轮被拒并把原因反馈给后续重写
+    const arrowChains = (block.match(/→/gu) || []).length;
+    if (arrowChains < Math.max(5, packageBlocks.length) || packageBlocks.some(item => {
+      const method = item.match(/施工方法[:：]([\s\S]*?)(?=\n施工|$)/u)?.[1] || '';
+      return method.trim().length > 0 && !method.includes('→');
+    })) return `${sectionTitle} 存在工作包方法段工序链箭头缺失`;
     if (packageBlocks.some(item => {
       const method = item.match(/施工方法[:：]([\s\S]*?)(?=\n施工|$)/u)?.[1] || '';
       if (/安全生产考核合格证书|联合体投标|注册建造师|投标人资格|资质要求|营业执照|安全生产许可证/u.test(method)) return true;
-      return method.length < 30 || ((method.match(/工程|维修|改造|安装|设备/gu) || []).length >= 4 && !/\d|㎡|m2|m²|mm|厚|验收|检测|调试|试验|复试|记录|报告/u.test(method));
+      if (method.length < 30) return true;
+      // 方法段必须是“怎么做”的叙述：含施工动作/机具/检测动作词；
+      // 纯参数罗列（有数字但无任何做法）一律判弱，回退到工艺知识卡兜底叙述。
+      // “安装/固定/挂墙/机具”等弱词会出现在清单条目名里（如“配电箱 非标箱 挂墙安装 2台”），
+      // 不足以证明是叙述；仅当同时存在多处“条目：数量”式冒号数字标记时才作为强证据判弱
+      const strongAction = /→|采用|组织|浇筑|铺设|焊接|绑扎|砌筑|抹灰|涂刷|敷设|压实|养护|试验|调试|测量|放线|验收|检测|复试|记录|报告|吊装|灌注|埋设|嵌缝/u;
+      const weakAction = /安装|固定|挂墙|机具/u;
+      const listingMarkers = (method.match(/[:：]\s*\d/gu) || []).length;
+      const bareParams = /\d/u.test(method) && !strongAction.test(method) && (listingMarkers >= 2 || !weakAction.test(method));
+      return bareParams || ((method.match(/工程|维修|改造|安装|设备/gu) || []).length >= 4 && !/\d|㎡|m2|m²|mm|厚|验收|检测|调试|试验|复试|记录|报告/u.test(method));
     })) return `${sectionTitle} 存在工作包施工方法过弱`;
     const body = sectionContentBody(block);
     if (/^\s*\|.+\|\s*$/mu.test(body)) return `${sectionTitle} 不应使用 Markdown 表格替代工作包正文`;
@@ -845,7 +908,7 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
           maxWords: Math.ceil(retryTargetWords * 1.18),
           qualityFeedback: [
             task.total > 1 ? `这是首轮生成的主题任务 ${task.index}/${task.total}，只聚焦“${task.taskTitle}”。不得重复同小节其他主题的通用表述；优先写入与本主题相关的资料事实、规格、数量、标准、检查要求和执行动作。` : input.qualityFeedback,
-            attempt > 0 ? `上一轮未生成有效正文。本轮必须直接输出“### ${input.sectionTitle}”及正式正文，优先完成可审查、可落位事实的核心内容。` : ''
+            attempt > 0 ? `上一轮未生成有效正文${input.diagnostics?.llm.lastError ? `（被拒原因：${input.diagnostics.llm.lastError}）` : ''}。本轮必须直接输出“### ${input.sectionTitle}”及正式正文，逐条修正被拒原因，优先完成可审查、可落位事实的核心内容。` : ''
           ].filter(Boolean).join('\n'),
         });
       } catch {
@@ -858,7 +921,7 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
             sectionTitle: task.sectionTitle,
             targetWords: Math.max(520, Math.floor(retryTargetWords * 0.85)),
             maxWords: Math.ceil(Math.max(520, Math.floor(retryTargetWords * 0.85)) * 1.18),
-            qualityFeedback: `前序 Writer 未完成。本轮使用轻量定向 Writer，只完成“${input.sectionTitle}”正式正文。`,
+            qualityFeedback: `前序 Writer 未完成${input.diagnostics?.llm.lastError ? `（被拒原因：${input.diagnostics.llm.lastError}）` : ''}。本轮使用轻量定向 Writer，只完成“${input.sectionTitle}”正式正文，逐条修正被拒原因。`,
           });
         } catch (error) {
           if (input.diagnostics) input.diagnostics.llm.lastError = `focused writer 后置异常：${input.chapter.title} / ${task.sectionTitle} / ${error instanceof Error ? error.message : String(error)}`;
@@ -869,33 +932,19 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
     if (taskContent) parts.push(sectionContentBody(taskContent));
   }
   if (parts.length === 0) {
-    if (/项目主要施工内容/u.test(input.sectionTitle)) {
-      const deterministic = buildMajorConstructionFallbackSection(input.sectionTitle, input.projectContext, input.evidence);
-      if (deterministic) return sanitizeFormalMarkdown(removeUnwantedDrawingImages(deterministic, input.forbidDrawingImages));
-    }
-    if (/主要分部分项工程施工方案|主要施工方法/u.test(input.sectionTitle)) {
-      const deterministic = buildMethodSectionFallback(input.sectionTitle, input.projectContext, input.evidence);
-      if (deterministic) return sanitizeFormalMarkdown(removeUnwantedDrawingImages(deterministic, input.forbidDrawingImages));
-    }
+    // 全部任务未产出有效正文：不做模板拼接兜底，返回 undefined 交由上层重试/Reviewer 修复链路处理
+    if (input.diagnostics && !input.diagnostics.llm.lastError) input.diagnostics.llm.lastError = `task writer 未产出有效正文：${input.chapter.title} / ${input.sectionTitle}`;
     return undefined;
   }
   let merged = `### ${input.sectionTitle}\n\n${parts.join('\n\n')}`;
-  // 空壳保护：任务正文若在清洗链中被删除只剩标题，应判定失败并触发上层兜底，而不是把空小节传给后续流程。
+  // 空壳保护：任务正文若在清洗链中被删除只剩标题，判定失败交由上层修复，不落模板拼接兜底
   if (documentTextLength(sectionContentBody(merged)) < 200) {
     if (input.diagnostics) input.diagnostics.llm.lastError = `task writer 正文空壳：${input.chapter.title} / ${input.sectionTitle} / ${documentTextLength(sectionContentBody(merged))}字`;
-    if (/主要分部分项工程施工方案|主要施工方法/u.test(input.sectionTitle)) {
-      const deterministic = buildMethodSectionFallback(input.sectionTitle, input.projectContext, input.evidence);
-      if (deterministic) return sanitizeFormalMarkdown(removeUnwantedDrawingImages(deterministic, input.forbidDrawingImages));
-    }
     return undefined;
   }
   const structureIssue = sectionStructureIssue(input.sectionTitle, merged);
   if (structureIssue) {
     if (input.diagnostics) input.diagnostics.llm.lastError = `task writer ${structureIssue}：${input.chapter.title} / ${input.sectionTitle}`;
-    if (/项目主要施工内容/u.test(input.sectionTitle)) {
-      const deterministic = buildMajorConstructionFallbackSection(input.sectionTitle, input.projectContext, input.evidence);
-      if (deterministic) return sanitizeFormalMarkdown(removeUnwantedDrawingImages(deterministic, input.forbidDrawingImages));
-    }
     return undefined;
   }
   merged = await supplementSectionContent({ ...input, currentContent: merged, targetWords: input.targetWords });
@@ -938,16 +987,20 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
   const maxGroupSize = Math.max(2, Math.min(targets.length >= 30 ? 5 : 6, Number.isFinite(configuredGroupSize) ? Math.floor(configuredGroupSize) : defaultGroupSize));
   const chapterHasMajorConstructionSection = targets.some(target => /项目主要施工内容/u.test(target.title));
   const groups = groupSectionTargets(targets, maxGroupSize);
-  const defaultGroupConcurrency = 2;
+  const defaultGroupConcurrency = 3;
   const configuredConcurrency = Number(process.env.DOCUMENT_SECTION_GROUP_CONCURRENCY || defaultGroupConcurrency);
-  const concurrency = Math.max(1, Math.min(groups.length, targets.length >= 30 ? 1 : groups.length, Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : defaultGroupConcurrency));
+  // 大章节（≥30 小节）历史原因组间强制串行导致 50 小节章节耗时 50+ 分钟；
+  // 改为允许组间并发（默认 3），失败降级串行由上层失败 streak 机制兜底
+  const concurrency = Math.max(1, Math.min(groups.length, Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : defaultGroupConcurrency));
   const results: string[] = new Array(groups.length).fill('');
   let emptyLlmGroupCount = 0;
   const runGroup = async (group: typeof targets): Promise<{ content: string; llmChars: number }> => {
     const groupSections = group.map(item => item.title);
     const groupLabel = groupSections.join('、');
     const rawGroupTargetWords = group.reduce((sum, item) => sum + item.targetWords, 0);
-    const groupTargetWords = Math.min(rawGroupTargetWords, targets.length >= 30 ? 1200 : 2800);
+    // 大章节组级目标字数上限过小会导致每小节只分得 300 字、批量触发“正文过短”修复循环；
+    // 放宽到 2400，让组级一次成稿接近小节目标字数
+    const groupTargetWords = Math.min(rawGroupTargetWords, targets.length >= 30 ? 2400 : 2800);
     const groupEvidenceLists = await Promise.all(groupSections.map(section => input.sectionEvidenceProvider
       ? input.sectionEvidenceProvider(section).catch(() => [])
       : Promise.resolve([])));
@@ -1124,14 +1177,8 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
     }
   }
   missingIndexes = results.map((content, index) => content ? -1 : index).filter(index => index >= 0);
-  for (const index of missingIndexes) {
-    const title = targets[index].title;
-    results[index] = /项目主要施工内容/u.test(title)
-      ? (buildMajorConstructionFallbackSection(title, input.projectContext, input.evidence) || undefined)
-      : /主要分部分项工程施工方案|主要施工方法/u.test(title)
-        ? (buildMethodSectionFallback(title, input.projectContext, input.evidence) || buildGenericFallbackSection(title))
-        : buildGenericFallbackSection(title);
-  }
+  // 最终缺失小节不做确定性模板拼接兜底：留空由后续 Reviewer/Repairer/Final Gate 的 LLM 修复链路处理
+  if (missingIndexes.length > 0 && input.diagnostics) input.diagnostics.llm.lastError = `章级生成缺失小节：${input.chapter.title} / ${missingIndexes.map(index => targets[index].title).join('、')}`;
   const sectionContents = results.map(content => content || '');
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(`## ${input.chapter.title}\n\n${sectionContents.join('\n\n')}`, input.forbidDrawingImages));
 }
@@ -1286,7 +1333,7 @@ async function buildQualifiedSectionSupplement(input: Parameters<typeof buildLlm
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const generated = await buildLlmSectionContent({ ...input, qualityFeedback: feedback });
     if (!generated) {
-      feedback = '上一轮未生成有效正文，请重新生成完整小节正文。';
+      feedback = `上一轮未生成有效正文${input.diagnostics?.llm.lastError ? `（被拒原因：${input.diagnostics.llm.lastError}）` : ''}，请针对被拒原因重新生成完整小节正文。`;
       continue;
     }
     const issue = sectionSupplementQualityIssue(input.sectionTitle, generated);

@@ -38,6 +38,15 @@ export const PROCESS_KNOWLEDGE_CARDS: ProcessKnowledgeCard[] = [
     standards: ['GB 50202-2018 建筑地基基础工程施工质量验收标准'],
   },
   {
+    id: 'earthwork-backfill',
+    name: '土方回填',
+    aliases: ['素土回填', '填土碾压', '回填', '余方弃置', '人工清底'],
+    process: ['基底隐蔽验收', '分层摊铺', '分层碾压', '压实度检测', '边角补夯', '表面整平'],
+    params: ['每层虚铺厚度≤300mm', '填土含水率控制在最优含水率±2%', '压实系数≥0.94', '边角部位采用小型夯实机补夯', '压实度每层每100m²不少于1组检测'],
+    acceptance: ['压实度检测报告', '回填土施工记录', '隐蔽验收记录'],
+    standards: ['GB 50202-2018 建筑地基基础工程施工质量验收标准', 'GB 50268-2008 给水排水管道工程施工及验收规范'],
+  },
+  {
     id: 'foundation-pit-support',
     name: '基坑支护',
     aliases: ['基坑支护', '钢板桩', '土钉墙', '支护桩', '冠梁'],
@@ -274,23 +283,52 @@ export const PROCESS_KNOWLEDGE_CARDS: ProcessKnowledgeCard[] = [
 ];
 
 const CARD_BY_ALIAS = new Map<string, ProcessKnowledgeCard>();
+const CARD_BY_ID = new Map<string, ProcessKnowledgeCard>();
 for (const card of PROCESS_KNOWLEDGE_CARDS) {
+  CARD_BY_ID.set(card.id, card);
   CARD_BY_ALIAS.set(card.name, card);
   for (const alias of card.aliases) CARD_BY_ALIAS.set(alias, card);
 }
 
+/** 泛化工作包名（如“安装工程”“结构加固改造工程”）→ 相关工艺卡组合，避免泛化名称无法精确命中别名 */
+const BROAD_PACKAGE_CARD_GROUPS: Array<{ pattern: RegExp; cardIds: string[] }> = [
+  { pattern: /安装工程|机电安装/u, cardIds: ['electrical', 'plumbing', 'hvac', 'fire-protection', 'weak-current'] },
+  { pattern: /结构加固|加固改造/u, cardIds: ['structural-strengthen', 'concrete-works', 'rebar-works', 'formwork-works'] },
+  { pattern: /装饰工程|装饰装修/u, cardIds: ['plastering', 'tile-paving', 'ceil-partition', 'painting', 'door-window'] },
+  { pattern: /外墙|屋面|立面/u, cardIds: ['facade-renovation', 'waterproofing', 'scaffold'] },
+  { pattern: /室外道排|道排|室外管网|雨污水/u, cardIds: ['municipal-pipe', 'municipal-road', 'earthwork-excavation'] },
+  { pattern: /智能化/u, cardIds: ['weak-current'] },
+  { pattern: /消防/u, cardIds: ['fire-protection'] },
+  { pattern: /拆除/u, cardIds: ['demolition'] },
+  { pattern: /水电改造/u, cardIds: ['plumbing', 'electrical'] },
+];
+
+/** 按工作包名匹配工艺知识卡：精确别名 → 包含匹配 → 泛化工作包分组 */
 export function matchProcessKnowledgeCards(workPackageNames: string[], projectTypes: ConstructionOrgProjectType[] = []): ProcessKnowledgeCard[] {
   const matched = new Set<ProcessKnowledgeCard>();
   for (const name of workPackageNames) {
-    const card = CARD_BY_ALIAS.get(name);
-    if (card) matched.add(card);
+    const direct = CARD_BY_ALIAS.get(name);
+    if (direct) matched.add(direct);
+    // 包含匹配：工作包名包含别名关键词（如“室外道排工程”含“道排”）
+    for (const [alias, card] of CARD_BY_ALIAS) {
+      if (alias.length >= 3 && name.includes(alias)) matched.add(card);
+    }
+    // 泛化工作包名 → 卡片组
+    for (const group of BROAD_PACKAGE_CARD_GROUPS) {
+      if (group.pattern.test(name)) {
+        for (const cardId of group.cardIds) {
+          const card = CARD_BY_ID.get(cardId);
+          if (card) matched.add(card);
+        }
+      }
+    }
   }
-  // 按项目类型补充适用卡（最多 6 张）
+  // 按项目类型补充适用卡
   for (const card of PROCESS_KNOWLEDGE_CARDS) {
-    if (matched.size >= 8) break;
+    if (matched.size >= 16) break;
     if (!card.projectTypes || card.projectTypes.some(type => projectTypes.includes(type))) matched.add(card);
   }
-  return [...matched].slice(0, 8);
+  return [...matched].slice(0, 16);
 }
 
 /**

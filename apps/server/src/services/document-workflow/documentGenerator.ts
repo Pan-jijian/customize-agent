@@ -267,7 +267,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
       progress: { current: 2, total: 3, label: '项目图谱' },
     }, { subtitle: '项目资料图谱分析', order: progressStages.length }));
     emitProgress();
-    const projectGraphResult = await withProgressHeartbeat(() => buildProjectGraph({ evidence: allEvidence, signal: input.signal, projectRoot, requirement: input.requirement, templateId: template.id, diagnostics: generationDiagnostics }), progressStages);
+    // generationDiagnostics 在此函数后半段才初始化，临时图谱构建路径不依赖诊断统计，不传 diagnostics 避免 TDZ
+    const projectGraphResult = await withProgressHeartbeat(() => buildProjectGraph({ evidence: allEvidence, signal: input.signal, projectRoot, requirement: input.requirement, templateId: template.id }), progressStages);
     if (!projectGraphResult.graph) throw new Error(`完整项目图谱构建失败：${projectGraphResult.stage.message || projectGraphResult.stage.status}`);
     projectGraph = projectGraphResult.graph;
     upsertProgressStage(progressStages, projectGraphResult.stage);
@@ -913,6 +914,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
           signal: input.signal,
         })));
         if (!repairedSection || repairedSection.includes('WRITER_MISSING_SECTION')) {
+          const lastFailure = generationDiagnostics.llm.lastError;
           generationDiagnostics.llm.lastError = undefined;
           upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: `${displayChapterTitle(chapter.title)} 正在二次补写${rewriteReason} ${sectionIndex + 1}/${sectionRewriteIssues.length}：${sectionTitle}`, details: [...repairSectionResults, `重试：${sectionTitle}`] }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
           emitProgress(chapterDrafts);
@@ -930,7 +932,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
             maxWords: repairTargetWords * 1.15,
             forbidDrawingImages,
             factCoverageContext,
-            qualityFeedback: `第二次定向补写“${sectionTitle}”：只写该小节正式正文，不写解释，不保留 WRITER_MISSING_SECTION。`,
+            qualityFeedback: `第二次定向补写“${sectionTitle}”：只写该小节正式正文，不写解释，不保留 WRITER_MISSING_SECTION。${lastFailure ? `上次失败原因：${lastFailure}，必须逐条修正。` : ''}`,
             diagnostics: generationDiagnostics,
             signal: input.signal,
           })));

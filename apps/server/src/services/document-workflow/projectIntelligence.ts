@@ -5,10 +5,11 @@ import { getMultiProjectManager, getStorageRoot, listKnowledgeFiles } from '../k
 import { upsertKbOperation } from '../knowledge/kbOperationLog';
 import { buildBaseProjectGraph, buildAgentMaterialSnapshot, resolveAgentMaterialScope } from './agentWorkflow';
 import { buildProjectGraph } from './projectGraph';
+import { dedupeQuantityFacts, filterConstructionSteps } from './chapterGeneration';
 import type { DocumentEvidence, DocumentFact, DocumentTemplate, ProjectGraph } from './types';
 import { stableHash } from './utils';
 
-const INTELLIGENCE_VERSION = 'project-intelligence-v8' as const;
+const INTELLIGENCE_VERSION = 'project-intelligence-v9' as const;
 const SCOPE_VERSION = 'material-scope-v4' as const;
 
 export interface ProjectIntelligenceFileAsset {
@@ -463,23 +464,27 @@ function buildConstructionOrganizationGraph(projectGraph: ProjectGraph, files: P
     const relatedMethods = projectGraph.methods.filter(method => (method.applicableWorks || []).some(item => item.includes(name) || name.includes(item)) || method.name.includes(name)).slice(0, 4);
     const relatedResources = projectGraph.resources.filter(resource => !isMetaLabel(resource.name) && (relatedText.includes(resource.name) || (resource.sourceFiles || []).some(file => sourceFileList.includes(file)))).slice(0, 8);
 
-    // 施工流程：优先 LLM 方法步骤，其次用工作包事实名称按顺序组织工序
-    const process = clean([...relatedMethods.flatMap(item => item.steps || []), ...sourceFacts.map(fact => fact.split(/[：:]/u)[0] || '').filter(Boolean)], 10);
-    // 施工方法：LLM 方法名 + 叙述化事实（真实参数、材料、做法）
-    const methods = clean([...relatedMethods.map(item => item.name), ...sourceFacts], 10);
+    // 施工流程：只用 LLM 方法步骤；清单条目名前缀不是工序动作，混入会在成稿中产生“→配电箱”式残尾
+    const process = clean([...relatedMethods.flatMap(item => item.steps || [])], 10);
+    // 施工方法：LLM 方法名 + 叙述化事实（真实参数、材料、做法）；已入工程量的清单条目式事实不再重复保留
+    const resourceNames = relatedResources.map(item => item.name).filter(Boolean);
+    const methods = clean([...relatedMethods.map(item => item.name), ...sourceFacts.filter(fact => !resourceNames.some(resName => resName.length >= 4 && fact.includes(resName)))], 10);
     const finalScope = (scope || '').trim() || sourceFacts.slice(0, 2).join('；') || name;
     // 有真实事实即收录，避免把目录中的真实工作包当作空壳跳过
     if (sourceFacts.length === 0 && !finalScope && process.length === 0 && methods.length === 0) return;
 
     seenNames.add(name);
+    // 工程量：资源“名称：数量”格式优先；清单条目式事实若包含已列资源名（同一对象双格式重复）则丢弃
     workPackages.push({
       name,
       scope: finalScope,
-      quantities: clean([...relatedResources.map(item => `${item.name}${item.quantity ? `：${item.quantity}${item.unit || ''}` : ''}`), ...sourceFacts.filter(fact => /\d|㎡|m2|m²|米|m³|立方|吨|台|套|项/u.test(fact))], 8),
+      quantities: clean([...relatedResources.map(item => `${item.name}${item.quantity ? `：${item.quantity}${item.unit || ''}` : ''}`), ...sourceFacts.filter(fact => /\d|㎡|m2|m²|米|m³|立方|吨|台|套|项/u.test(fact) && !resourceNames.some(resName => resName.length >= 4 && fact.includes(resName)))], 8),
       materials: clean(relatedResources.map(item => [item.name, item.spec].filter(Boolean).join('｜')), 8),
       process,
       methods,
-      acceptance: clean([...projectGraph.standards.filter(item => (item.sourceFiles || []).some(file => sourceFileList.includes(file))).map(item => item.description || item.code), ...sourceFacts.filter(fact => /验收|复试|检测|见证|检验|质量/u.test(fact))], 8),
+      acceptance: clean([...projectGraph.standards.filter(item => (item.sourceFiles || []).some(file => sourceFileList.includes(file))).map(item => item.description || item.code), ...sourceFacts.filter(fact => /验收|复试|检测|见证|检验|质量/u.test(fact))], 8)
+        // 验收条目必须含真实验收/检测术语，防止门窗等异包清单条目串台（真实缓存曾把“木质门五金…”混入结构加固验收）
+        .filter(item => /验收|检测|试验|复试|实测|试块|测试|检查|记录|报告|见证|取样|拉拔|探伤|闭水|通电|绝缘|接地|电阻|偏差|压实度|密实度|强度|合格|规范/u.test(item)),
       sourceFiles: sourceFileList,
     });
   };
@@ -553,19 +558,30 @@ function filterConstructionOrganizationGraph(graph: ConstructionOrganizationGrap
 
 export function constructionOrganizationPrompt(graph?: ConstructionOrganizationGraph) {
   if (!graph || graph.workPackages.length === 0) return '';
-  const structuredPackages = graph.workPackages.slice(0, 12).map(item => ({
+  // 提示词层面统一清洗：工程量双格式条目去重、流程剔除清单条目，保证 LLM 成稿与确定性兜底拿到一致干净数据
+  const cleanedPackages = graph.workPackages.slice(0, 12).map(item => {
+    const quantities = dedupeQuantityFacts([...item.quantities, ...item.materials, ...item.methods]
+      .map(text => text.replace(/\s+/gu, ' ').trim())
+      .filter(text => text.length >= 4 && text.length <= 120));
+    const process = filterConstructionSteps(
+      item.process.map(text => text.replace(/\s+/gu, ' ').trim()).filter(text => text.length >= 2 && text.length <= 40),
+      quantities,
+    );
+    return { name: item.name, scope: item.scope, quantities, process, acceptance: item.acceptance };
+  });
+  const structuredPackages = cleanedPackages.map(item => ({
     name: item.name,
     scope: item.scope,
     quantities: item.quantities,
-    materials: item.materials,
+    materials: [],
     process: item.process,
-    methods: item.methods,
+    methods: [],
     acceptance: item.acceptance,
   }));
   return [
     '## 施工组织设计专项图谱',
     '主要施工工作包：',
-    ...graph.workPackages.slice(0, 12).map((item, index) => `${index + 1}. ${item.name}｜范围：${item.scope}｜工程量/材料：${[...item.quantities, ...item.materials].slice(0, 5).join('；') || '按证据展开'}｜流程：${item.process.slice(0, 8).join('→') || '按施工准备→实施→检查→验收组织'}｜验收：${item.acceptance.slice(0, 4).join('；') || '按规范和资料闭环'}`),
+    ...cleanedPackages.map((item, index) => `${index + 1}. ${item.name}｜范围：${item.scope}｜工程量/材料：${item.quantities.slice(0, 5).join('；') || '按证据展开'}｜流程：${item.process.slice(0, 8).join('→') || '按施工准备→实施→检查→验收组织'}｜验收：${item.acceptance.slice(0, 4).join('；') || '按规范和资料闭环'}`),
     '施工工作包结构化数据：',
     JSON.stringify(structuredPackages),
     graph.controlMatrix.length ? '重点难点—施工内容—措施矩阵：' : '',
