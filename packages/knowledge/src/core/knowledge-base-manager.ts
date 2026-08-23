@@ -428,6 +428,9 @@ export class KnowledgeBaseManager {
     const effectiveLimit = requestedLimit ?? this.searchCorpusSize(options.filters);
     const start = Date.now();
     const weights = this.retrievalWeights(options.weights);
+    // P1-10 检索语义澄清：generationMode=true 表示"生成场景检索"（文档正文生成链路调用），
+    // 该场景刻意跳过 LLM 查询重写——正文生成已占满 LLM 全局信号量，检索侧再触发 LLM 扩展会互相拖慢；
+    // 命名按"调用场景"而非"是否启用 LLM 重写"，因此 true 反而跳过重写。
     const rewrittenQueries = options.generationMode ? [query.trim()].filter(Boolean) : await this.rewriteQueries(query);
     const rankedLists: Array<{ source: 'keyword' | 'vector'; items: FederatedSearchItem[]; queryIndex: number }> = [];
     const keywordMultiplier = options.generationMode ? 2 : 3;

@@ -41,7 +41,7 @@ import { buildProjectGraph } from './projectGraph';
 import { referenceQualityTargetLines } from './templateReferenceService';
 import { buildScopedProjectIntelligence, constructionOrganizationPrompt } from './projectIntelligence';
 import { assertEvidenceInProjectScope, createProjectMaterialScope, filterEvidenceByProjectScope, filterFactsByProjectScope, projectScopeAudit } from './projectMaterialScope';
-import { agentWorkflowStages, createAgentWorkflowContext } from './agentWorkflow';
+import { agentWorkflowStages, createAgentWorkflowContext, throttleAgentWorkflowNodes } from './agentWorkflow';
 import { buildTargetedRepairInstruction, chapterTaskPrompt, planChapterTask, planDocument, reviewChapterDraft } from './agentPlanner';
 import { buildCanonicalFactModel, PROJECT_BASIC_FIELD_SPECS } from './factGovernance';
 import { buildChapterReadinessPlan } from './chapterReadiness';
@@ -706,6 +706,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const chapterTaskResult = planChapterTask({ plan: plannedDocument.plan, chapter, context: agentWorkflow, evidence });
     agentWorkflow.chapterTasks = [...(agentWorkflow.chapterTasks || []).filter(item => item.chapterId !== chapter.id), chapterTaskResult.task];
     agentWorkflow.nodes.push(chapterTaskResult.node);
+    throttleAgentWorkflowNodes(agentWorkflow);
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: `agent-chapter-task-${chapter.id}`, status: chapterTaskResult.task.ready || resumedContent ? 'success' : 'failed', message: chapterTaskResult.task.ready ? chapterTaskResult.node.outputSummary || `${displayChapterTitle(chapter.title)} 章节任务规划完成` : resumedContent ? `${displayChapterTitle(chapter.title)} 章节任务未完全就绪，已复用已有正文并交由 Reviewer/Repairer 处理` : chapterTaskResult.node.outputSummary || `${displayChapterTitle(chapter.title)} 章节任务规划完成`, details: chapterTaskResult.task.issues.map(issue => issue.message) }, { subtitle: 'Agent Chapter Task Planner', order: progressStages.length }));
     emitProgress(chapterDrafts);
     if (!chapterTaskResult.task.ready && !resumedContent) throw new Error(`${displayChapterTitle(chapter.title)} 章节任务未就绪：${chapterTaskResult.task.issues.map(issue => issue.message).join('；')}`);
@@ -876,7 +877,6 @@ export async function generateDocumentDraft(input: { templateId: string; require
       }
       content = finalizeChapterContentQuality(chapterContent, chapter);
     }
-    const expandRounds = 0;
     const factUsageIssues = chapterSectionFactUsageIssues({ chapter, content, evidence });
     const chapterChars = documentTextLength(content);
     const generatedSectionsForReview = extractGeneratedSections(content);
@@ -891,8 +891,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
       roleId: 'chapter_generation',
       promptId: chapterPromptExecution.primaryPromptId,
       status: chapterStatus,
-      message: elapsedMessage(`${displayChapterTitle(chapter.title)} 已由大模型成稿${expandRounds > 0 ? `并定向扩写 ${expandRounds} 轮` : ''}：当前 ${chapterChars} 字；章节预算约 ${targetPlan.budgetTarget} 字，本轮目标约 ${targetPlan.roundTarget} 字${chapterIssues.length ? `；待优化：${chapterIssues.slice(0, 8).join('、')}` : ''}`, chapterStartedAt),
-      details: [`本轮完成率：${Math.round(chapterChars / Math.max(1, targetPlan.roundTarget) * 100)}%`, `结构目标约 ${targetPlan.structureTarget} 字`, ...chapterPromptDetails, `二级小节：${sections.length} 个`, `扩写轮次：${expandRounds}`],
+      message: elapsedMessage(`${displayChapterTitle(chapter.title)} 已由大模型成稿：当前 ${chapterChars} 字；章节预算约 ${targetPlan.budgetTarget} 字，本轮目标约 ${targetPlan.roundTarget} 字${chapterIssues.length ? `；待优化：${chapterIssues.slice(0, 8).join('、')}` : ''}`, chapterStartedAt),
+      details: [`本轮完成率：${Math.round(chapterChars / Math.max(1, targetPlan.roundTarget) * 100)}%`, `结构目标约 ${targetPlan.structureTarget} 字`, ...chapterPromptDetails, `二级小节：${sections.length} 个`],
       progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: chapterIssues.length ? '章节已生成' : '章节达标' },
     }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
     chapterGenerationStagesByOrder[chapterOrder] = latestChapterStageForProgress;
@@ -910,6 +910,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const repairRoundBudget = generationBudget.repairRoundBudget;
     let repairRounds = 0;
     agentWorkflow.nodes.push({ id: `chapter-reviewer-${chapter.id}`, type: 'chapter_reviewer', status: blockingReviewIssues.length ? (needsRepair ? 'running' : 'failed') : 'completed', startedAt: Date.now(), completedAt: Date.now(), outputSummary: agentReview.issues.length ? `${agentReview.issues.length} 个 Reviewer 提示` : 'Reviewer 通过', metrics: { supportedFacts: agentReview.supportedFacts }, issues: agentReview.issues });
+    throttleAgentWorkflowNodes(agentWorkflow);
     upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-reviewer-${chapter.id}`, status: blockingReviewIssues.length ? (needsRepair ? 'running' : 'failed') : 'success', message: blockingReviewIssues.length ? `${displayChapterTitle(chapter.title)} Reviewer 发现 ${blockingReviewIssues.length} 个阻断问题，等待 Repairer 修复（轮次预算 ${repairRoundBudget} 轮）` : `${displayChapterTitle(chapter.title)} Reviewer 通过${agentReview.issues.length ? `（${agentReview.issues.length} 个优化提示）` : ''}`, details: agentReview.issues.map(issue => issue.message) }, { subtitle: 'Agent Reviewer', order: progressStages.length }));
     emitProgress(chapterDrafts);
     while (needsRepair && repairRounds < repairRoundBudget) {
@@ -1055,6 +1056,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
       needsRepair = blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers);
       const postRepairFailed = blockingReviewIssues.length > 0;
       agentWorkflow.nodes.push({ id: `chapter-repairer-${chapter.id}`, type: 'chapter_repairer', status: postRepairFailed ? 'failed' : 'completed', startedAt: Date.now(), completedAt: Date.now(), outputSummary: agentReview.issues.length ? `修复后仍有 ${agentReview.issues.length} 个问题` : '定向修复通过', metrics: { supportedFacts: agentReview.supportedFacts }, issues: agentReview.issues });
+      throttleAgentWorkflowNodes(agentWorkflow);
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-reviewer-${chapter.id}`, status: postRepairFailed ? 'failed' : 'success', message: postRepairFailed ? `${displayChapterTitle(chapter.title)} Reviewer 第 ${repairRounds} 轮复审仍有 ${blockingReviewIssues.length} 个阻断问题${needsRepair && repairRounds < repairRoundBudget ? '，继续下一轮修复' : ''}` : `${displayChapterTitle(chapter.title)} Reviewer 第 ${repairRounds} 轮复审通过`, details: agentReview.issues.map(issue => issue.message) }, { subtitle: 'Agent Reviewer', order: repairerStageOrder - 1 }));
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: postRepairFailed ? 'failed' : 'success', message: agentReview.issues.length ? `${displayChapterTitle(chapter.title)} 第 ${repairRounds} 轮定向修复后仍有 ${agentReview.issues.length} 个问题` : `${displayChapterTitle(chapter.title)} 定向修复通过`, details: [...repairSectionResults, ...agentReview.issues.map(issue => `剩余：${issue.message}`)] }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
       emitProgress(chapterDrafts);

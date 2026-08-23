@@ -195,6 +195,27 @@ function buildQualityReportBundle(input: {
   return { knowledgeCoverage, factTraces, chapterCoverage, qualityReport, repairStrategies, validationIssues: issues, finalExportGate };
 }
 
+/** P1-11 executionStages 限幅：20+ 章文档 progressStages 可达数百条，前端渲染/序列化开销随章数线性增长；
+ * 超过上限时把中间历史阶段合并为一条归档摘要（保留头尾关键阶段） */
+function throttleExecutionStages(stages: DocumentExecutionStage[], limit = 300): DocumentExecutionStage[] {
+  if (stages.length <= limit) return stages;
+  const headCount = 4;
+  const tailCount = limit - headCount - 1;
+  if (tailCount <= 0) return stages.slice(-limit);
+  const head = stages.slice(0, headCount);
+  const tail = stages.slice(-tailCount);
+  const archived = stages.slice(headCount, stages.length - tailCount);
+  const failedCount = archived.filter(stage => stage.status === 'failed').length;
+  const summary: DocumentExecutionStage = {
+    type: 'validation',
+    roleId: 'stage-archive',
+    status: failedCount > 0 ? 'failed' : 'success',
+    message: `已归档 ${archived.length} 个中间执行阶段${failedCount > 0 ? `（含 ${failedCount} 个失败记录）` : ''}`,
+    details: archived[0]?.subtitle ? [`归档区间：${archived[0].subtitle} → ${archived[archived.length - 1]?.subtitle || ''}`] : [],
+  };
+  return [...head, summary, ...tail];
+}
+
 export async function finalizeGeneration(p: {
   chapterDrafts: DocumentDraftChapter[];
   chapterDraftsByOrder: Array<DocumentDraftChapter | undefined>;
@@ -318,7 +339,7 @@ export async function finalizeGeneration(p: {
   }));
 
   const assets: DocumentAsset[] = [];
-  const executionStages: DocumentExecutionStage[] = [...progressStages, ...chapterGenerationStages];
+  const executionStages: DocumentExecutionStage[] = throttleExecutionStages([...progressStages, ...chapterGenerationStages]);
   upsertProgressStage(executionStages, displayStage({ type: 'reference', roleId: 'knowledge-usage-report', status: 'success', message: `资料使用报告：证据 ${allEvidence.length} 条，来源文件 ${sources.length} 份，结构化事实 ${structuredFacts.length} 条`, details: [`证据类型：${[...evidenceSourceCounts.entries()].map(([name, count]) => `${name} ${count}`).join('，') || '无'}`, `索引健康：可用切片 ${indexHealth.usableChunkCount} 条，待索引 ${indexHealth.pendingJobs} 个，向量 ${indexHealth.vectorStatus?.status || 'unknown'}`] }, { subtitle: '资料使用报告' }));
   upsertProgressStage(executionStages, displayStage({ type: 'reference', roleId: 'web-research-report', status: webResearchReport.enabled ? 'success' : 'skipped', message: webResearchReport.enabled ? `联网增强：检索章节 ${new Set(webResearchReport.chapters).size} 个，查询 ${webResearchReport.queries.length} 个，使用公开资料 ${webResearchReport.evidenceCount} 条` : '联网增强未开启', details: webResearchReport.enabled ? [`检索主题：${[...new Set(webResearchReport.queries)].join('；') || '无'}`, `过滤结果：${webResearchReport.filteredCount} 条`, '公开资料仅用于通用规范、政策、工艺和措施补充，不作为项目事实来源'] : ['可在模型配置中开启联网增强'] }, { subtitle: '联网增强报告' }));
 

@@ -277,6 +277,27 @@ export function createAgentWorkflowContext(input: { template: DocumentTemplate; 
   };
 }
 
+/** P1-11 agentWorkflow 节点节流：节点数超过上限时把历史 completed/failed/skipped 节点合并为摘要节点，
+ * 避免 20+ 章文档 nodes 随章数线性膨胀（前端渲染/序列化开销）。保留最近 keepRecent 个节点与 project_graph 等关键节点。 */
+export function throttleAgentWorkflowNodes(context: AgentWorkflowContext, limit = 200, keepRecent = 50) {
+  if (context.nodes.length <= limit) return;
+  const recent = context.nodes.slice(-keepRecent);
+  const candidates = context.nodes.slice(0, context.nodes.length - keepRecent);
+  const archivable = candidates.filter(node => node.type !== 'project_graph' && (node.status === 'completed' || node.status === 'failed' || node.status === 'skipped'));
+  const kept = candidates.filter(node => !archivable.includes(node));
+  if (archivable.length === 0) return;
+  const summaryNode: AgentWorkflowNode = {
+    id: `nodes-archive-${Date.now()}`,
+    type: 'summary',
+    status: 'completed',
+    startedAt: archivable[0].startedAt,
+    completedAt: archivable[archivable.length - 1].completedAt || Date.now(),
+    outputSummary: `已归档 ${archivable.length} 个历史节点（${[...new Set(archivable.map(node => node.type))].join('、')}）`,
+    metrics: { archivedNodes: archivable.length },
+  };
+  context.nodes.splice(0, context.nodes.length, ...kept, summaryNode, ...recent);
+}
+
 export function agentWorkflowStages(context: AgentWorkflowContext): DocumentExecutionStage[] {
   const graphNode = context.nodes.find(node => node.type === 'project_graph');
   const precomputed = Boolean(graphNode?.metrics?.precomputed);
