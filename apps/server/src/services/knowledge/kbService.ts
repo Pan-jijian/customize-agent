@@ -22,6 +22,10 @@ export function getProjectKbRoot(projectRoot: string): string {
 }
 
 export function getMultiProjectManager(): MultiProjectManager {
+  // P1-10 检索语义澄清：当前刻意不注入 llmProvider（llm-search-provider 未接入），
+  // 检索侧查询重写（rewriteQueries 的 LLM 扩展）因此静默退化为本地规则扩展；
+  // 若未来启用 LLM 查询重写，必须注入独立低并发通道的 LLM 客户端实例（独立信号量），
+  // 避免与文档正文生成争抢全局 LLM 信号量导致互相拖慢。
   if (!manager) manager = new MultiProjectManager(getStorageRoot());
   return manager;
 }
