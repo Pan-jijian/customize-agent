@@ -393,37 +393,36 @@ export async function finalizeGeneration(p: {
   const emptySectionIssues = Array.from(new Map(finalGateRepairCandidates
     .map(issue => {
       const match = /^(.*?)(?:\s+|)(?:空小节|小节内容补写未完成|小节生成未达标|小节只有标题|只有标题或表格无正文|规划小节正文过短|正文小节正文过短|缺少规划小节|正文不足)[：:,，]\s*(.+)$/u.exec(issue.message);
-      if (!match) return undefined;
       // 关键小节（重点难点/主要施工内容/分部分项方案等）优先修复：避免普通空小节占满修复名额导致关键小节错误残留
       const depthIssue = /^(.*?)\s+(项目特点、重点、难点分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样)\s+正文不足/u.exec(issue.message);
       // Reviewer 深度类消息无章节前缀（“项目主要施工内容 正文不足，未达到任务最小深度”），单独解析小节标题
       const reviewerDepthIssue = /^(.+?)\s*正文不足，未达到任务最小深度$/u.exec(issue.message);
-      const sectionTitle = depthIssue ? depthIssue[2] : reviewerDepthIssue ? reviewerDepthIssue[1].trim() : match[2].split(/[：:,，,]/u)[0].trim();
-      return { issue, match, critical: criticalSectionTitleRe.test(sectionTitle) };
+      // Final Gate 结构校验消息：小节完全缺失（“施工组织设计缺少"项目主要施工内容"小节”），必须带引号才匹配，避免误伤“缺少规划小节”类消息
+      const missingSectionIssue = /^(?:施工组织设计\s*)?缺少[“"'](.+?)[”"']小节$/u.exec(issue.message);
+      if (!match && !missingSectionIssue) return undefined;
+      const chapterTitle = depthIssue ? depthIssue[1].trim() : reviewerDepthIssue ? '' : missingSectionIssue ? '' : match![1].trim();
+      const sectionTitle = depthIssue ? depthIssue[2] : reviewerDepthIssue ? reviewerDepthIssue[1].trim() : missingSectionIssue ? missingSectionIssue[1].trim() : match![2].split(/[：:,，,]/u)[0].trim();
+      return { issue, chapterTitle, sectionTitle, critical: criticalSectionTitleRe.test(sectionTitle) };
     })
-    .filter((item): item is { issue: ValidationIssue; match: RegExpExecArray; critical: boolean } => Boolean(item))
-    .map(item => [`${item.match[1].trim()}::${item.match[2].trim()}`, item])).values())
+    .filter((item): item is { issue: ValidationIssue; chapterTitle: string; sectionTitle: string; critical: boolean } => Boolean(item))
+    .map(item => [`${item.chapterTitle}::${item.sectionTitle}`, item])).values())
     .sort((a, b) => Number(b.critical) - Number(a.critical))
     .slice(0, 4);
   if (emptySectionIssues.length > 0) {
     const repairDetails: string[] = [];
     const repairedSectionKeys = new Set<string>();
-    for (const { issue, match } of emptySectionIssues) {
-      let chapterTitle = match[1].trim();
-      let sectionTitle = match[2].trim();
-      const depthIssue = /^(.*?)\s+(项目特点、重点、难点分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样)\s+正文不足/u.exec(issue.message);
-      if (depthIssue) {
-        chapterTitle = depthIssue[1].trim();
-        sectionTitle = depthIssue[2].trim();
-      }
-      const reviewerDepthIssue = /^(.+?)\s*正文不足，未达到任务最小深度$/u.exec(issue.message);
-      if (reviewerDepthIssue) {
-        chapterTitle = '';
-        sectionTitle = reviewerDepthIssue[1].trim();
-      }
+    for (const { issue, chapterTitle: parsedChapterTitle, sectionTitle } of emptySectionIssues) {
+      let chapterTitle = parsedChapterTitle;
       let chapterIndex = chapterTitle ? finalChapterDrafts.findIndex(chapter => chapter.title === chapterTitle || chapterTitle.includes(chapter.title) || chapter.title.includes(chapterTitle)) : -1;
       if (chapterIndex < 0) {
         chapterIndex = finalChapterDrafts.findIndex(chapter => (chapter.content || '').includes(sectionTitle));
+      }
+      if (chapterIndex < 0) {
+        // 小节完全缺失（正文中无标题）：按模板计划小节定位章节，保证“缺少‘XXX’小节”类问题能进入补写
+        chapterIndex = finalChapterDrafts.findIndex(chapter => {
+          const plannedSections = effectiveChapters.find(item => item.id === chapter.id || item.title === chapter.title)?.sections || [];
+          return plannedSections.some(section => section.includes(sectionTitle) || sectionTitle.includes(section));
+        });
       }
       const draftChapter = finalChapterDrafts[chapterIndex];
       const templateChapter = effectiveChapters.find(chapter => chapter.id === draftChapter?.id || chapter.title === draftChapter?.title);
@@ -456,15 +455,16 @@ export async function finalizeGeneration(p: {
         qualityFeedback: `Final Gate 发现“${sectionTitle}”为空小节或深度不足。请基于证据完整重写该小节正式正文（原小节内容将被整体替换），包含检查责任、验收节点、资料闭环、整改复验要求，优先落位项目建筑面积、层数、工期、专业范围等量化参数，不得输出占位或解释。${lastFailure ? `此前生成被拒原因：${lastFailure}，必须逐条修正。` : ''}`,
         diagnostics: generationDiagnostics,
         signal,
+        allowLenientStructureGate: true,
       }));
       let repaired = false;
       // 深度不足类修复必须达到关键小节 blocker 字数才允许替换：防止把原本更长的正文换成更短的补写稿，
       // 导致修复轮次被浪费在无效替换上（曾出现 1800+ 字小节被换成 1200 字稿后仍不足 1760 的倒退）
-      const depthAcceptMinChars = /正文不足/u.test(issue.message) ? criticalMinChars : 0;
+      const depthAcceptMinChars = /正文不足|缺少[“"'].+[”"']小节/u.test(issue.message) ? criticalMinChars : 0;
       if (generated && documentTextLength(generated) >= (depthAcceptMinChars || 80)) {
         const nextContent = replaceMarkdownSection(draftChapter.content, sectionTitle, generated);
         repaired = nextContent !== draftChapter.content;
-        if (!repaired && /缺少规划小节/u.test(issue.message)) {
+        if (!repaired && /(?:缺少规划小节|缺少[“"'].+[”"']小节)/u.test(issue.message)) {
           // 规划小节在正文中完全缺失：无原块可替换，将补写正文追加为新的三级小节
           const appended = `${draftChapter.content.replace(/\s+$/u, '')}\n\n### ${sectionTitle}\n\n${generated.replace(/^#{2,6}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]+\n+/u, '').trim()}\n`;
           repaired = true;
@@ -490,7 +490,7 @@ export async function finalizeGeneration(p: {
     finalMarkdown = normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary))));
     const repairedValidationBase = baseValidationIssues.filter(issue => ![...repairedSectionKeys].some(key => {
       const [chapterTitle, sectionTitle] = key.split('::');
-      if (!/空小节|小节内容补写未完成|小节生成未达标|小节只有标题|正文小节正文过短|规划小节正文过短|缺少规划小节|正文不足/u.test(issue.message)) return false;
+      if (!/空小节|小节内容补写未完成|小节生成未达标|小节只有标题|正文小节正文过短|规划小节正文过短|缺少规划小节|缺少[“"'].+[”"']小节|正文不足/u.test(issue.message)) return false;
       // Reviewer 深度类消息无章节前缀，单独按“小节标题 + 正文不足，未达到任务最小深度”匹配
       const escapedSection = sectionTitle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
       if (new RegExp(`^\\s*${escapedSection}\\s*正文不足，未达到任务最小深度$`, 'u').test(issue.message)) return true;

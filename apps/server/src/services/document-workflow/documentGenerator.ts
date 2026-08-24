@@ -29,7 +29,7 @@ import { getActiveModelWithProvider } from './llmClient';
 import { createGenerationDiagnostics, evidenceInScope, measureGenerationStep, promptTextsForResolvedPrompts, repairChapterByQuality, selectDocumentGenerationStrategy } from './rolePipeline';
 import { buildGenerationBudget, type GenerationBudget } from './generationBudget';
 import { buildProjectMaterialProfile, buildProjectUnderstanding, expandProjectMaterialBindings, materialKindMaps, materialRoleId, retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from './projectMaterialProfile';
-import { buildChapterFactCoverageContext, buildLlmChapterContent, buildLlmSectionContent, buildSectionGroupChapterContent, buildSectionParallelChapterContent, evidenceForSection, outputTokensForChapter } from './chapterGeneration';
+import { buildChapterFactCoverageContext, buildLlmChapterContent, buildLlmSectionContent, buildSectionGroupChapterContent, buildSectionParallelChapterContent, criticalSectionBlockerMinChars, evidenceForSection, outputTokensForChapter } from './chapterGeneration';
 import { QUANTIFIED_FACT_RE } from './parameterPatterns';
 import { buildEvidenceOnlyChapterContent } from './chapterExpansion';
 import { chapterSectionFactUsageIssues, reviewGlobalConsistency } from './chapterReview';
@@ -1004,6 +1004,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
           qualityFeedback: `Repairer 定向补写“${sectionTitle}”。必须输出该小节正式正文并彻底删除 WRITER_MISSING_SECTION 标记。`,
           diagnostics: generationDiagnostics,
           signal: input.signal,
+          allowLenientStructureGate: true,
         })));
         if (!repairedSection || repairedSection.includes('WRITER_MISSING_SECTION')) {
           const lastFailure = generationDiagnostics.llm.lastError;
@@ -1027,12 +1028,16 @@ export async function generateDocumentDraft(input: { templateId: string; require
             qualityFeedback: `第二次定向补写“${sectionTitle}”：只写该小节正式正文，不写解释，不保留 WRITER_MISSING_SECTION。${lastFailure ? `上次失败原因：${lastFailure}，必须逐条修正。` : ''}`,
             diagnostics: generationDiagnostics,
             signal: input.signal,
+            allowLenientStructureGate: true,
           })));
         }
         if (repairedSection && !repairedSection.includes('WRITER_MISSING_SECTION')) {
           const normalizedSection = /^#{3,4}\s+/u.test(repairedSection.trim()) ? repairedSection.trim() : `### ${sectionTitle}\n\n${repairedSection.trim()}`;
           const normalizedLength = documentTextLength(normalizedSection);
-          const enoughDepth = !isDepthRepair || normalizedLength >= Math.floor(repairTargetWords * 0.85);
+          // 深度验收线：与 buildLlmSectionContent 的 minSectionChars 口径完全一致，
+          // 门禁（含降级验收）已放行的内容不得在此处被更严的线拒收；关键小节 blocker 线承担 0.8×目标的把关职责
+          const depthAcceptLine = Math.min(Math.max(Math.floor(repairTargetWords * 0.7), criticalSectionBlockerMinChars(sectionTitle)), Math.max(500, repairTargetWords));
+          const enoughDepth = !isDepthRepair || normalizedLength >= depthAcceptLine;
           const nextContent = enoughDepth ? replaceChapterSection(draftChapter.content, sectionTitle, normalizedSection) : draftChapter.content;
           const hasRange = nextContent !== draftChapter.content;
           if (hasRange) draftChapter = { ...draftChapter, content: nextContent };

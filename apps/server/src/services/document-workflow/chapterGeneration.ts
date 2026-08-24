@@ -13,7 +13,7 @@ import { normalizePlannedSections, professionalSectionTaskCard } from './promptR
 import { tablePlansPrompt } from './constructionOrgTablePlan';
 import { constructionOrgBonusModulePrompt, constructionOrgChapterRulePrompt } from './constructionOrgQualityRules';
 import { buildProcessKnowledgePrompt, matchProcessKnowledgeCards } from './constructionProcessKnowledge';
-import { criticalSectionBlockerMinChars, ensureGroupTertiaryShell, ensureTertiarySectionShell, groupHasMajorConstructionSection, isCriticalDeepSection, isGeneralManagementSection, keySectionWritingRequirement, mergeDuplicateWorkPackageSubsections, outputTokensForChapter, parseMajorConstructionPackages, sectionContentBody, sectionStructureIssue } from './chapterPostProcessing';
+import { criticalSectionBlockerMinChars, currentSectionBlock, ensureGroupTertiaryShell, ensureTertiarySectionShell, groupHasMajorConstructionSection, isCriticalDeepSection, isGeneralManagementSection, keySectionWritingRequirement, majorContentPollutionIssue, mergeDuplicateWorkPackageSubsections, outputTokensForChapter, parseMajorConstructionPackages, repairMajorContentWorkPackageLabels, sectionContentBody, sectionStructureIssue } from './chapterPostProcessing';
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE, QUANTIFIED_FACT_RE } from './parameterPatterns';
 
 export * from './chapterPostProcessing';
@@ -314,7 +314,7 @@ function compactSectionProjectContext(projectContext: string, maxChars = 2000) {
   return compact.length <= maxChars ? compact : `${compact.slice(0, maxChars)}\n（上下文已截断，完整信息见绑定材料与证据）`;
 }
 
-export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number }) {
+export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number; allowLenientStructureGate?: boolean }) {
   const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
   const sectionFactCard = buildSectionFactCard(input.sectionTitle, sectionEvidence);
   const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 3500, 9000) });
@@ -353,22 +353,40 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   if (!content || content.length < 80) return undefined;
   const normalized = sanitizeFormalMarkdown(removeUnwantedDrawingImages(content.startsWith('### ') ? content : `### ${input.sectionTitle}\n\n${content}`, input.forbidDrawingImages));
   const normalizedContent = normalized.replace(/^##\s+.*\n+/u, '').trim();
-  const structureIssue = sectionStructureIssue(input.sectionTitle, normalizedContent);
-  if (structureIssue) {
-    if (input.diagnostics) input.diagnostics.llm.lastError = `${structureIssue}：${input.chapter.title} / ${input.sectionTitle}`;
-    return undefined;
-  }
   const criticalMinChars = criticalSectionBlockerMinChars(input.sectionTitle);
   // 单次任务的最小字数不得超过任务目标字数：任务拆分会把小节拆成多个 targetWords≈800 的主题任务，
   // 此时全局 criticalMinChars（如 1800）远大于任务目标，每个任务都无法达标而被整体拒绝，反而产出空小节。
   const minSectionChars = Math.min(Math.max(Math.floor(input.targetWords * 0.7), criticalMinChars), Math.max(500, input.targetWords));
-  if (isCriticalDeepSection(input.sectionTitle) && documentTextLength(normalizedContent) < minSectionChars) {
-    if (input.diagnostics) input.diagnostics.llm.lastError = `section writer 正文不足：${input.chapter.title} / ${input.sectionTitle} / ${documentTextLength(normalizedContent)}/${minSectionChars}字`;
+  let structureIssue = sectionStructureIssue(input.sectionTitle, normalizedContent);
+  let finalContent = normalizedContent;
+  if (structureIssue && /项目主要施工内容/u.test(input.sectionTitle)) {
+    // 门禁拒绝先做确定性结构修复：补全工作包三段标签后复查，避免“全有或全无”式丢弃
+    const labelRepaired = repairMajorContentWorkPackageLabels(normalizedContent);
+    if (labelRepaired !== normalizedContent && !sectionStructureIssue(input.sectionTitle, labelRepaired)) {
+      structureIssue = '';
+      finalContent = labelRepaired;
+    }
+  }
+  if (structureIssue && input.allowLenientStructureGate && /项目主要施工内容/u.test(input.sectionTitle)) {
+    // 修复链路降级验收：深度关键小节多次被门禁拒绝会导致小节永久缺失（初稿起标题就不写入）。
+    // 只要三级工作包结构存在、字数达标且无脏事实污染，就保留内容交由清洗链与终检把关，
+    // 避免小节整体消失造成的结构缺陷
+    const block = currentSectionBlock(input.sectionTitle, finalContent);
+    const packageCount = (block.match(/^####\s+/gmu) || []).length;
+    const polluted = majorContentPollutionIssue(sectionContentBody(block));
+    if (packageCount >= 3 && !polluted && documentTextLength(finalContent) >= minSectionChars) structureIssue = '';
+  }
+  if (structureIssue) {
+    if (input.diagnostics) input.diagnostics.llm.lastError = `${structureIssue}：${input.chapter.title} / ${input.sectionTitle}`;
+    return undefined;
+  }
+  if (isCriticalDeepSection(input.sectionTitle) && documentTextLength(finalContent) < minSectionChars) {
+    if (input.diagnostics) input.diagnostics.llm.lastError = `section writer 正文不足：${input.chapter.title} / ${input.sectionTitle} / ${documentTextLength(finalContent)}/${minSectionChars}字`;
     return undefined;
   }
   // “项目主要施工内容”节去重：LLM 可能把同一工作包按“X工程”“X工作包”两遍展开，确定性合并删除重复小节
-  const finalContent = /项目主要施工内容/u.test(input.sectionTitle) ? mergeDuplicateWorkPackageSubsections(normalizedContent) : normalizedContent;
-  return ensureTertiarySectionShell(input.sectionTitle, finalContent);
+  const dedupedContent = /项目主要施工内容/u.test(input.sectionTitle) ? mergeDuplicateWorkPackageSubsections(finalContent) : finalContent;
+  return ensureTertiarySectionShell(input.sectionTitle, dedupedContent);
 }
 
 interface SectionWritingTask {

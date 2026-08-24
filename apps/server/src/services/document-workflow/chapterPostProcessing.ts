@@ -7,7 +7,7 @@ export function sectionContentBody(content: string) {
   return content.replace(/^#{3,4}\s+.*\n+/u, '').trim();
 }
 
-function currentSectionBlock(sectionTitle: string, content: string) {
+export function currentSectionBlock(sectionTitle: string, content: string) {
   const escaped = sectionTitle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   // 注意：m 标志下 $ 匹配每个行尾，若本节是文档最后一节会导致块在首个 #### 行被截断；
   // 用 (?![\s\S]) 表示真正的字符串末尾
@@ -242,7 +242,7 @@ export function parseMajorConstructionPackages(projectContext: string, evidence:
         const quantities = dedupeQuantityFacts([...(item.quantities || []), ...(item.materials || []), ...(item.methods || [])].map(cleanMajorConstructionFact).filter(isUsableMajorConstructionFact).filter(item => !isWorkPackageListFact(item)));
         const process = filterConstructionSteps((item.process || []).flatMap(splitConstructionSteps), quantities);
         const acceptance = (item.acceptance || []).map(cleanMajorConstructionFact).filter(item => item && !isWorkPackageListFact(item));
-        if (!name || /^\d*徽光阁项目施工$/u.test(name) || name === '徽光阁项目施工') continue;
+        if (!name || /项目施工$/u.test(name)) continue;
         if (!scope || /资料内容事实|#{2,6}/u.test(scope)) continue;
         packages.push({ name, scope, quantities, process, acceptance });
       }
@@ -263,11 +263,111 @@ export function parseMajorConstructionPackages(projectContext: string, evidence:
       .map(item => cleanMajorConstructionFact(item))
       .filter(item => item && item !== '按规范和资料闭环')
       .filter(item => !isWorkPackageListFact(item));
-    if (!name || /^\d*徽光阁项目施工$/u.test(name) || name === '徽光阁项目施工') continue;
+    if (!name || /项目施工$/u.test(name)) continue;
     if (!scope || /资料内容事实|#{2,6}/u.test(scope)) continue;
     packages.push({ name, scope, quantities, process, acceptance });
   }
   return packages.slice(0, 8);
+}
+
+/** “项目主要施工内容”脏事实/标题污染检查（供结构门禁与降级验收复用）：
+ * 针对去掉节标题后的正文；非法标题层级（## 二级、### 三级、##### 五级等）必须行首锚定，
+ * #### 四级标题是本节合法的工作包标题，不得误判 */
+export function majorContentPollutionIssue(blockBody: string) {
+  return /资料内容事实|(?:^#{2,3}|^#{5,6})\s+|\*\*[^*]+\*\*|未尽事宜|专业施工内容统筹|招标范围还包含|具备有效的.*资质|安全生产考核合格证书|注册建造师|联合体投标|项目经理要求|投标人资格|投标人资质|营业执照|安全生产许可证|资格审查|资格后审|中标通知书|签订合同|电子交易系统|投标保证金|评标办法|踏勘现场|投标预备会/mu.test(blockBody);
+}
+
+/** 确定性补全“项目主要施工内容”小节内工作包的三段标签：
+ * 门禁要求每个工作包块必须含“施工概况/施工流程/施工方法”，LLM 偶尔漏写个别标签导致整节被拒；
+ * 本函数把块内无标签文本按顺序归入缺失标签（流程优先取含“→”的行），
+ * 不生成新内容、不重排已有标签行，修复后由调用方复查结构门禁决定是否采用 */
+export function repairMajorContentWorkPackageLabels(content: string) {
+  if (!/项目主要施工内容/u.test(content)) return content;
+  const lines = content.split(/\r?\n/u);
+  const result: string[] = [];
+  let inMainSection = false;
+  let block: string[] | null = null;
+  const flushBlock = () => {
+    if (!block) return;
+    const heading = block[0];
+    const bodyLines = block.slice(1);
+    const hasOverview = bodyLines.some(line => /^施工概况[:：]?/u.test(line.trim()));
+    const hasFlow = bodyLines.some(line => /^施工流程[:：]?/u.test(line.trim()));
+    const hasMethod = bodyLines.some(line => /^施工方法[:：]?/u.test(line.trim()));
+    if (hasOverview && hasFlow && hasMethod) {
+      result.push(...block);
+      block = null;
+      return;
+    }
+    const fixed: string[] = [heading];
+    const unlabeled: string[] = [];
+    for (const line of bodyLines) {
+      if (/^(施工概况|施工流程|施工方法)[:：]/u.test(line.trim())) fixed.push(line);
+      else if (line.trim()) unlabeled.push(line);
+    }
+    if (unlabeled.length === 0) {
+      result.push(...block);
+      block = null;
+      return;
+    }
+    // 缺哪个标签补哪个：概况取首条无标签行，流程优先取含“→”的行（无法确定性造箭头时不硬补），方法取剩余行合并
+    const remaining = [...unlabeled];
+    if (!hasOverview && remaining.length) {
+      const line = remaining.shift();
+      if (line !== undefined && line.trim()) fixed.push(`施工概况：${line.trim()}`);
+    }
+    if (!hasFlow && remaining.length) {
+      const flowIndex = remaining.findIndex(line => line.includes('→'));
+      if (flowIndex >= 0) {
+        const [flow] = remaining.splice(flowIndex, 1);
+        fixed.push(`施工流程：${flow.trim()}`);
+      }
+    }
+    if (!hasMethod && remaining.length) {
+      const methodText = remaining.map(line => line.trim()).filter(Boolean).join('');
+      if (methodText) fixed.push(`施工方法：${methodText}`);
+    }
+    // 已有多余标签但仍有未归类行（如已有流程/方法标签而概况补完后剩余的正文）：原样保留在块尾，避免丢内容
+    fixed.push(...remaining.filter(line => line.trim()));
+    result.push(...fixed);
+    block = null;
+  };
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^##\s+/u.test(trimmed)) {
+      flushBlock();
+      block = null;
+      inMainSection = false;
+      result.push(line);
+      continue;
+    }
+    if (/^###\s+/u.test(trimmed)) {
+      flushBlock();
+      block = null;
+      inMainSection = /项目主要施工内容/u.test(trimmed);
+      result.push(line);
+      continue;
+    }
+    if (!inMainSection) {
+      result.push(line);
+      continue;
+    }
+    if (/^####\s+/u.test(trimmed)) {
+      flushBlock();
+      block = [line];
+      continue;
+    }
+    if (/^#{1,6}\s+/u.test(trimmed)) {
+      flushBlock();
+      block = null;
+      result.push(line);
+      continue;
+    }
+    if (block) block.push(line);
+    else result.push(line);
+  }
+  flushBlock();
+  return result.join('\n');
 }
 
 export function sectionStructureIssue(sectionTitle: string, content: string) {
@@ -280,7 +380,7 @@ export function sectionStructureIssue(sectionTitle: string, content: string) {
     // 脏事实/标题污染：针对去掉节标题后的正文检查；非法标题层级（## 二级、### 三级、##### 五级等）必须行首锚定，
     // #### 四级标题是本节合法的工作包标题，不得误判（否则本节永远回退兜底）
     const blockBody = sectionContentBody(block);
-    if (/资料内容事实|(?:^#{2,3}|^#{5,6})\s+|\*\*[^*]+\*\*|未尽事宜|专业施工内容统筹|招标范围还包含|具备有效的.*资质|安全生产考核合格证书|注册建造师|联合体投标|项目经理要求|投标人资格|投标人资质|营业执照|安全生产许可证|资格审查|资格后审|中标通知书|签订合同|电子交易系统|投标保证金|评标办法|踏勘现场|投标预备会/mu.test(blockBody)) return `${sectionTitle} 存在脏事实或标题污染`;
+    if (majorContentPollutionIssue(blockBody)) return `${sectionTitle} 存在脏事实或标题污染`;
     if (packageBlocks.some(item => /施工流程[:：][\s\S]*?(未尽事宜|本项目为|总建筑面积|保留现状|专业施工内容统筹|招标文件列明|招标范围|安全生产考核合格证书|联合体投标|注册建造师)/u.test(item))) return `${sectionTitle} 存在工作包流程污染`;
     // 工序链箭头硬门：方法段正文至少 1 条箭头工序链且全节箭头数充足，否则判定 Writer 未按“→”串联工序，本轮被拒并把原因反馈给后续重写
     const arrowChains = (block.match(/→/gu) || []).length;
