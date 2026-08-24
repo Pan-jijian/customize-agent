@@ -43,7 +43,7 @@ export function buildStandardFinalValidationIssues(input: {
     ...formalStyleIssues(input.markdown),
     ...tertiaryHeadingIssues(input.markdown),
     ...minChapterSectionIssues(input.chapters),
-    ...preciseFactUsageIssues(input.markdown, input.factsModel),
+    ...preciseFactUsageIssues(input.markdown, input.factsModel, input.chapters),
     ...boqPlacementIssues(input.markdown, input.chapters, input.factsModel),
     ...boqRowTraceIssues(buildBoqRowTraces(input.markdown, input.factsModel)),
     ...drawingReferenceIssues(input.markdown, input.factsModel),

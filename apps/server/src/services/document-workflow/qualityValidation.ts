@@ -732,6 +732,29 @@ function collectPreciseFactTokens(factsModel: DocumentFactsModel) {
   return [...tokens];
 }
 
+/** 日历日期噪声：年份（2024年）与月份（12月）不是工程参数，不计入抽查池 */
+function isCalendarNoiseToken(token: string) {
+  return /^\d{4}\s*年$/u.test(token) || /^\d{1,2}\s*月$/u.test(token);
+}
+
+/** 章节证据窗口内的精确参数 token 集合：抽查口径与 LLM 实际可见证据对齐 */
+function collectEvidencePreciseTokens(chapters: DocumentDraftChapter[]) {
+  const tokens = new Set<string>();
+  for (const chapter of chapters) {
+    for (const item of chapter.evidence || []) {
+      const content = typeof item.content === "string" ? item.content : "";
+      for (const match of content.matchAll(PRECISE_FACT_TOKEN_RE)) {
+        const token = match[0].trim();
+        if (!token || isCalendarNoiseToken(token)) continue;
+        const index = match.index || 0;
+        const context = content.slice(Math.max(0, index - 40), index + token.length + 40);
+        if (!shouldIgnorePreciseToken(token, context)) tokens.add(token);
+      }
+    }
+  }
+  return [...tokens];
+}
+
 function countUsedPreciseTokens(tokens: string[], normalizedMarkdown: string) {
   let used = 0;
   for (const token of tokens) {
@@ -747,17 +770,24 @@ const PRECISE_FACT_CRITICAL_MIN_RATE = 0.5;
 const CRITICAL_PRECISE_UNIT_RE = /日历天|个月|㎡|m²|m3|m³|MPa|kPa|kN|GB\/T|GB|JGJ|ISO|DN|φ|Φ|米\/秒|天$/u;
 
 function criticalPreciseTokens(tokens: string[]) {
-  const critical = tokens.filter(token => CRITICAL_PRECISE_UNIT_RE.test(token));
-  const rest = tokens.filter(token => !CRITICAL_PRECISE_UNIT_RE.test(token));
+  // 先确定性排序（字典序）再分层抽样：消除上游 LLM 提取顺序对抽查池的随机影响，
+  // 保证同一项目重跑时抽查池与判定结果可复现
+  const sorted = [...tokens].sort((a, b) => a.localeCompare(b, "zh"));
+  const critical = sorted.filter(token => CRITICAL_PRECISE_UNIT_RE.test(token));
+  const rest = sorted.filter(token => !CRITICAL_PRECISE_UNIT_RE.test(token));
   // 分层抽样：关键单位优先进入抽查池，但保留少量常规规格 token，
   // 避免关键 token 过多时抽查池被单一单位类型（如大量面积值）占满而失去代表性
   return [...critical.slice(0, 8), ...rest.slice(0, 2)].slice(0, 10);
 }
 
-export function preciseFactUsageIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+export function preciseFactUsageIssues(markdown: string, factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[] = []): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const normalized = markdown.replace(WHITESPACE_RE, '');
-  const tokens = collectPreciseFactTokens(factsModel);
+  // 抽查口径对齐：优先使用章节证据窗口内的精确参数（LLM 实际收到的证据），
+  // 消除“全项目精确事实中从未进入证据窗口”参数的结构性假阳性；
+  // 证据池过小（章节 evidence 缺失或参数过少）时回退全项目精确事实池，保持门禁兜底能力
+  const evidenceTokens = collectEvidencePreciseTokens(chapters);
+  const tokens = evidenceTokens.length >= PRECISE_FACT_MIN_TOKEN_COUNT ? evidenceTokens : collectPreciseFactTokens(factsModel);
   const used = countUsedPreciseTokens(tokens, normalized);
   if (tokens.length >= PRECISE_FACT_MIN_TOKEN_COUNT && used / tokens.length < PRECISE_FACT_MIN_USAGE_RATE) issues.push({ level: 'warning', message: `可靠精确参数使用不足：${used}/${tokens.length}`, suggestion: '请将资料中可靠的规格、参数、数量、时间、比例和标准编号写入对应章节；商务金额、单价、税率、预留金不得写入正文。' });
   // 关键参数抽查：对高价值精确参数单独抽查使用率，过低时升级为 error，
