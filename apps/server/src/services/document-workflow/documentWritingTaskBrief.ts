@@ -13,7 +13,7 @@ const CHAPTER_FOCUS_RULES: Array<{ pattern: RegExp; goal: string; mustCover: str
   { pattern: /重点|难点/u, goal: '识别项目重点难点并给出针对性对策，每项落到责任岗位与验收节点', mustCover: ['重点难点成因与影响范围', '对应施工内容与专项措施', '责任岗位、检查频次、整改闭环'] },
   { pattern: /部署|总体|流水|顺序/u, goal: '明确施工部署逻辑、流水段划分与资源调配机制', mustCover: ['施工区段与流水划分', '各阶段施工顺序与穿插关系', '资源动态调配机制'] },
   { pattern: /进度|工期/u, goal: '围绕总工期与关键节点展开进度保障', mustCover: ['总进度计划与关键节点', '周/日计划分解', '进度偏差识别与纠偏措施'] },
-  { pattern: /质量/u, goal: '覆盖材料验收、过程控制、隐蔽验收、整改复验的质量闭环', mustCover: ['质量目标与验收依据', '三检制度与样板引路', '隐蔽工程验收与材料复试', '质量通病防治与闭环整改'] },
+  { pattern: /质量/u, goal: '覆盖材料验收、过程控制、隐蔽验收、整改复验的质量闭环', mustCover: ['质量目标与验收依据', '三检制度与样板引路', '隐蔽工程验收与材料复试', '质量通病防治与闭环整改', '保修与缺陷责任期承诺'] },
   { pattern: /安全|危大|风险/u, goal: '覆盖风险识别、危大工程专项方案、检查整改与应急响应', mustCover: ['危险源辨识与风险分级', '危大工程清单与专项方案', '安全交底与隐患排查闭环'] },
   { pattern: /资源|材料|设备|劳动力|人材机/u, goal: '说明资源配置依据、进场验收与保管调配', mustCover: ['机械设备投入计划', '分阶段劳动力计划', '材料进场计划与验收'] },
   { pattern: /文明|绿色|环保|扬尘|噪声/u, goal: '覆盖扬尘噪声管控、四节一环保与智慧监测', mustCover: ['扬尘噪声分时段管控', '四节一环保措施', '监测预警与台账'] },
@@ -65,7 +65,7 @@ export function buildWritingTaskBrief(input: {
   return {
     documentType: isConstructionOrg ? '施工组织设计' : '专业文档',
     globalWritingFocus: isConstructionOrg
-      ? [...globalWritingFocus, ...(canonicalLines.length ? [`项目可信基础事实（写作时必须优先落位）：${canonicalLines.slice(0, 10).join('；')}`] : [])]
+      ? [...globalWritingFocus, '招标硬性要求必须逐项明确响应：质量标准、计划工期、缺陷责任期与保修、安全文明目标、项目经理及组织机构；工期/质量/保修类承诺可在概况与质量章节落位，不得遗漏', ...(canonicalLines.length ? [`项目可信基础事实（写作时必须优先落位）：${canonicalLines.slice(0, 10).join('；')}`] : [])]
       : globalWritingFocus.slice(0, 2),
     chapters,
   };
