@@ -1,6 +1,6 @@
 import type { DocumentDraftChapter } from './types';
 import { duplicateParagraphIssues, fillerParagraphIssues, processParameterDensityIssues, tableCompletenessIssues, reviewResponseIssues, sectionCardStructureIssues } from './constructionOrgAudit';
-import { QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
+import { PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
 
 /**
  * L6 质量度量：施工组织设计专业度评分（7 维）。
@@ -48,27 +48,28 @@ function structureScore(chapters: DocumentDraftChapter[]): { score: number; deta
   return { score, detail: `覆盖 ${hit.length}/${groups.length} 个核心结构组${missing.length ? `；缺失：${missing.join('、')}` : ''}` };
 }
 
-/** 2. 事实落位率：量化数字与项目事实覆盖 */
+/** 2. 事实落位率：量化数字与项目事实覆盖。
+ * 标尺校准：量化密度系数 18→22；事实词按 18 类覆盖率计分（类数/18×15），消除长文档字数稀释。 */
 function factLandingScore(chapters: DocumentDraftChapter[]): { score: number; detail: string } {
   const wholeText = chapters.map(chapter => chapter.content).join('\n');
   const quantified = new Set(wholeText.match(QUANTIFIED_BODY_PARAM_RE) || []);
   const factTokens = new Set(wholeText.match(/工程量|材料|设备|范围|流程|验收|检测|复试|调试|隐蔽|检验批|资料|记录|系统|部位|接口|规格|标准/gu) || []);
   const totalChars = Math.max(1, wholeText.length);
   const quantifiedDensity = quantified.size / (totalChars / 1000);
-  const factDensity = factTokens.size / (totalChars / 1000);
-  const score = clamp(Math.min(100, quantifiedDensity * 18 + factDensity * 12));
-  return { score, detail: `量化参数 ${quantified.size} 项（每千字 ${quantifiedDensity.toFixed(1)}），专业事实词 ${factTokens.size} 类（每千字 ${factDensity.toFixed(1)}）` };
+  const score = clamp(Math.min(100, quantifiedDensity * 22 + (factTokens.size / 18) * 15));
+  return { score, detail: `量化参数 ${quantified.size} 项（每千字 ${quantifiedDensity.toFixed(1)}），专业事实词 ${factTokens.size}/18 类` };
 }
 
-/** 3. 工艺参数密度 */
+/** 3. 工艺参数密度。
+ * 标尺校准：口径扩展为参数库统一口径（强度等级 M5.0/C25、体积面积 m³/m²、绝缘电阻 MΩ、养护时间等）；
+ * 公式由 密度×12+20 调整为 密度×20+40，与参考库优秀样本锚定。 */
 function processParameterScore(chapters: DocumentDraftChapter[]): { score: number; detail: string } {
   const wholeText = chapters.map(chapter => chapter.content).join('\n');
-  const processParams = new Set(wholeText.match(/\d+(?:\.\d+)?\s*(?:mm|MPa|kN|kPa|℃|d)|间距[≤<]?\s*\d+|偏差[≤<]?\s*\d+|坡度\s*\d+|压实度\s*[≥>]?\s*\d+|坍落度|闭水试验|静载试验|拉拔试验|探伤|试验压力|锚固长度|搭接长度|保护层厚度/giu) || []);
-  const basicFacts = new Set(wholeText.match(/(?:建筑面积|面积)[约]?\s*\d+(?:\.\d+)?\s*(?:㎡|m²)|计划工期\s*\d+|日历天|地上\s*\d+\s*层/giu) || []);
+  const processParams = new Set(wholeText.match(PROCESS_PARAMETER_RE) || []);
   const totalChars = Math.max(1, wholeText.length);
   const density = processParams.size / (totalChars / 1000);
-  const score = clamp(Math.min(100, density * 12 + (basicFacts.size > 0 ? 20 : 0)));
-  return { score, detail: `工艺参数 ${processParams.size} 项（每千字 ${density.toFixed(1)}），概况数字 ${basicFacts.size} 项` };
+  const score = clamp(Math.min(100, density * 20 + 40));
+  return { score, detail: `工艺参数 ${processParams.size} 项（每千字 ${density.toFixed(1)}）` };
 }
 
 /** 4. 表格完整度 */

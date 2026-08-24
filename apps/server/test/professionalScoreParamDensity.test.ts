@@ -19,20 +19,20 @@ function chaptersFromBodies(bodies: string[]): DocumentDraftChapter[] {
 }
 
 describe('专业评分参数密度口径（90 分目标）', () => {
-  it('factLanding：量化参数密度 5/千字 + 事实词 1 类 → 约 93 分（80 分档以上）', () => {
+  it('factLanding：量化参数密度 5/千字 + 事实词 1 类 → 约 100 分（80 分档以上）', () => {
     const body = buildBody(['施工面积120㎡', '管道长300m', '板厚50mm', '设备2台', '工期15天']);
     const bodyWithFactWord = body.replace(fillerPlaceholder(), '工程量清单') as string;
     const report = buildProfessionalScoreReport(chaptersFromBodies([bodyWithFactWord]), '');
     const factLanding = report.dimensions.find(item => item.key === 'factLanding')!;
-    // 密度 5.0 × 18 + 事实词 1.0 × 12 = 102 → clamp 100 附近；目标档位 ≥ 80
+    // 校准公式：密度 5.0 × 22 + 事实词 1/18 × 15 ≈ 110.8 → clamp 100；目标档位 ≥ 80
     expect(factLanding.score).toBeGreaterThanOrEqual(80);
   });
 
-  it('processParameter：工艺参数密度 5/千字 + 概况数字 → 约 80 分（70 分档以上）', () => {
+  it('processParameter：工艺参数密度 5/千字 → 100 分（70 分档以上）', () => {
     const body = buildBody(['建筑面积12000㎡', '板厚50mm', '强度25MPa', '荷载12kN', '温度30℃', '坍落度按规范控制']);
     const report = buildProfessionalScoreReport(chaptersFromBodies([body]), '');
     const processParameter = report.dimensions.find(item => item.key === 'processParameter')!;
-    // 工艺参数密度 5.0 × 12 + 20（概况数字存在） = 80
+    // 校准公式：扩展口径密度 6.0 × 20 + 40 = 160 → clamp 100
     expect(processParameter.score).toBeGreaterThanOrEqual(70);
   });
 
@@ -45,6 +45,34 @@ describe('专业评分参数密度口径（90 分目标）', () => {
     // detail 中报告密度应与常量口径一致（每千字 5.0）
     expect(factLanding.detail).toContain('每千字 5.0');
     expect(density).toBeCloseTo(5.0, 1);
+  });
+
+  it('校准锚定：优秀样本特征（6 万字/量化密度 3.5/事实词 18 类全覆盖）→ factLanding ≈ 92 分', () => {
+    const params: string[] = [];
+    for (let i = 0; i < 210; i += 1) params.push(`施工面积${120 + i}㎡`);
+    const factWords = ['工程量', '材料', '设备', '范围', '流程', '验收', '检测', '复试', '调试', '隐蔽', '检验批', '资料', '记录', '系统', '部位', '接口', '规格', '标准'];
+    const body = buildBody([...params, ...factWords], 60000);
+    const report = buildProfessionalScoreReport(chaptersFromBodies([body]), '');
+    const factLanding = report.dimensions.find(item => item.key === 'factLanding')!;
+    // 3.5 × 22 + (18/18) × 15 = 92；长文档下事实词类数覆盖率不随字数稀释
+    expect(factLanding.score).toBeGreaterThanOrEqual(85);
+    expect(factLanding.score).toBeLessThanOrEqual(97);
+    expect(factLanding.detail).toContain('18/18 类');
+  });
+
+  it('校准锚定：工艺参数密度 2.5/千字（扩展口径 M5.0/m³/MΩ）→ ≈ 90 分', () => {
+    const params: string[] = [];
+    for (let i = 0; i < 150; i += 1) {
+      if (i % 3 === 0) params.push(`砌筑砂浆强度等级M${5 + i * 0.5}`);
+      else if (i % 3 === 1) params.push(`混凝土浇筑量${100 + i}m³`);
+      else params.push(`绝缘电阻不小于${0.5 + i * 0.01}MΩ`);
+    }
+    const body = buildBody(params, 60000);
+    const report = buildProfessionalScoreReport(chaptersFromBodies([body]), '');
+    const processParameter = report.dimensions.find(item => item.key === 'processParameter')!;
+    // 2.5 × 20 + 40 = 90
+    expect(processParameter.score).toBeGreaterThanOrEqual(85);
+    expect(processParameter.score).toBeLessThanOrEqual(97);
   });
 });
 

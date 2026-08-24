@@ -36,4 +36,20 @@ describe('parameterPatterns 口径统一', () => {
     expect(matches(QUANTIFIED_FACT_RE, '型号：QTZ80 塔式起重机')).toBe(false);
     expect(matches(DEVICE_SPEC_RE, 'QTZ80 塔式起重机')).toBe(true);
   });
+
+  it('扩展口径：强度等级/体积/绝缘电阻/时间/饱满度等工艺参数命中', () => {
+    expect(matches(PROCESS_PARAMETER_RE, '砌筑砂浆强度等级 M5.0')).toBe(true);
+    expect(matches(PROCESS_PARAMETER_RE, '混凝土强度等级 C25')).toBe(true);
+    expect(matches(PROCESS_PARAMETER_RE, '混凝土浇筑量 300m³')).toBe(true);
+    expect(matches(PROCESS_PARAMETER_RE, '绝缘电阻不小于 0.5MΩ')).toBe(true);
+    expect(matches(PROCESS_PARAMETER_RE, '养护时间不少于 7d')).toBe(true);
+    expect(matches(PROCESS_PARAMETER_RE, '灰缝饱满度不低于 90%')).toBe(true);
+    expect(matches(PROCESS_PARAMETER_RE, '基坑开挖深度 4.5m')).toBe(true);
+  });
+
+  it('扩展口径不误配：年份编号与字母缩略词不命中工艺参数', () => {
+    expect(matches(PROCESS_PARAMETER_RE, '依据 GB50204-2015 验收')).toBe(false);
+    expect(matches(PROCESS_PARAMETER_RE, '2026 年 8 月 24 日开工')).toBe(false);
+    expect(matches(PROCESS_PARAMETER_RE, 'M 型控制箱随设备进场')).toBe(false);
+  });
 });
