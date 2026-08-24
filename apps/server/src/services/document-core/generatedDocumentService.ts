@@ -164,10 +164,22 @@ interface GenerateTask {
   lastProgressAt: number;
 }
 
-const tasks = new Map<string, GenerateTask>();
+/**
+ * dev 模式下 webpack 会把每个 API 路由各自打包为独立 chunk，共享模块在每个 chunk 中复制一份；
+ * 任务注册表与进程启动时刻必须挂到 globalThis 才能保证所有路由实例共享同一份状态，
+ * 否则启动任务的路由实例与轮询列表的路由实例持有不同的 tasks Map 与 PROCESS_STARTED_AT，
+ * 轮询会把正在运行的任务误判为“生成任务已中断”。
+ */
+const globalDocumentTaskStore = globalThis as typeof globalThis & {
+  __generatedDocumentTasks?: Map<string, GenerateTask>;
+  __generatedDocumentProcessStartedAt?: number;
+};
+const tasks = (globalDocumentTaskStore.__generatedDocumentTasks ??= new Map<string, GenerateTask>());
 const ABANDONED_RECORD_STALE_MS = Math.max(60 * 60_000, Number(process.env.DOCUMENT_ABANDONED_RECORD_STALE_MS ?? 24 * 60 * 60_000));
 /** 本进程启动时刻：用于重启后快速识别“上一次进程遗留”的 generating 记录，无需等待 24 小时阈值 */
-const PROCESS_STARTED_AT = Date.now();
+const PROCESS_STARTED_AT = (globalDocumentTaskStore.__generatedDocumentProcessStartedAt ??= Date.now());
+/** 宽限期：generating 记录 updatedAt 距今小于该值时不判定中断，避免误杀刚创建或仍有实例在推进的任务 */
+const RECENT_UPDATE_GRACE_MS = Math.max(30_000, Number(process.env.DOCUMENT_RECENT_UPDATE_GRACE_MS ?? 60_000));
 
 function generatedProjectId(projectRoot = getProjectRoot()) {
   return computeProjectId(path.resolve(projectRoot));
@@ -204,6 +216,8 @@ function writeGeneratedDocumentMeta(record: GeneratedDocumentRecord, projectRoot
 /** 判断 generating 记录是否需要绕过轻量轮询短路、强制全量读取以触发 stale 标记 */
 export function generatingRecordRequiresFullPoll(meta: GeneratedDocumentMeta | null) {
   if (!meta || meta.status !== 'generating') return false;
+  // 宽限期内不强制全量读取：记录近期仍在更新，说明有实例在推进生成，无需触发 stale 标记路径
+  if (Date.now() - meta.updatedAt < RECENT_UPDATE_GRACE_MS) return false;
   if (meta.updatedAt < PROCESS_STARTED_AT) return true;
   return Date.now() - meta.updatedAt >= ABANDONED_RECORD_STALE_MS;
 }
@@ -233,6 +247,8 @@ function getActiveTaskByDocumentId(documentId: string) {
 
 function markStaleGeneratingRecord(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
   if (record.status !== 'generating' || getActiveTaskByDocumentId(record.id)) return record;
+  // 宽限期豁免：记录近期仍在更新，说明有实例在推进生成（如 dev 多实例、断点续传恢复），不能判为中断
+  if (Date.now() - record.updatedAt < RECENT_UPDATE_GRACE_MS) return record;
   // 进程重启后内存任务丢失：updatedAt 早于本进程启动时间的记录立即标记，无需等待长阈值
   const staleThresholdMs = record.updatedAt < PROCESS_STARTED_AT ? 0 : ABANDONED_RECORD_STALE_MS;
   if (Date.now() - record.updatedAt < staleThresholdMs) return record;
