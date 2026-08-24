@@ -385,6 +385,8 @@ export function referenceQualityTargetLines(input: { templateName: string; chapt
   const headingGroups = profiles.map(item => (item.headingStructure || []).map(title => ({ value: title })));
   const headingCounts = mergeCounts(headingGroups);
   const frequentHeadings = headingCounts.filter(item => item.count >= Math.ceil(sourceCount / 2)).slice(0, 12);
+  const paramGroups = profiles.map(item => (item.paramTokens || []).map(token => ({ value: token.token, weight: token.count })));
+  const paramCounts = mergeCounts(paramGroups);
   const lines: string[] = [
     `同类工程（${type}）参考特征（来自 ${sourceCount} 份优秀入围文件画像，仅供软性参考；任何项目专属数字与参数仍必须以知识库证据为准，为对齐特征而编造参数、虚构表格或堆砌无意义内容严格禁止）：`,
   ];
@@ -399,6 +401,9 @@ export function referenceQualityTargetLines(input: { templateName: string; chapt
   lines.push(`- 章节体量参考：同类工程平均约 ${Math.round(aggregated.sectionCount.avg)} 章、平均每章约 ${avgSectionWords} 字；实际以模板章节与篇幅目标为准。`);
   if (frequentHeadings.length > 0) {
     lines.push(`- 典型章节结构参考（出现于半数以上样本，仅供结构参考，不强制）：${frequentHeadings.map(item => item.value).join('、')}`);
+  }
+  if (paramCounts.length > 0) {
+    lines.push(`- 高频工艺参数种类参考：${paramCounts.slice(0, 12).map(item => item.value).join('、')}（同类型优秀样本中出现频次最高的工艺参数词条，施工方法小节可按专业实际与通用规范自然使用这些参数种类；项目专属数值必须来自知识库证据，不得为凑密度编造）。`);
   }
   return lines;
 }

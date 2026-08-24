@@ -72,12 +72,12 @@ export function buildChapterFactCoverageContext(input: { chapter: DocumentTempla
   const projectBasicFacts = [...resolvedFacts, ...allIndexedFacts]
     .filter(fact => /建设地点|建设规模|招标范围|计划工期|合同工期|周期要求|质量标准|合同估算|投资估算|最高投标限价|招标控制价/u.test(`${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`))
     .filter((fact, index, array) => array.findIndex(item => `${item.key || item.fieldName}:${stringifyFactValue(item.value)}` === `${fact.key || fact.fieldName}:${stringifyFactValue(fact.value)}`) === index);
-  // 精确参数：保留所有数值事实，限制连接后的总字符数不超过 3000
+  // 精确参数：保留所有数值事实，限制连接后的总字符数不超过 6000（参数种类是专业评分硬性验收项，预算不足会截断 LLM 可落位的参数清单）
   const preciseTokensAll = [...new Set([...extractChapterPreciseTokens(input.evidence), ...resolvedFacts.map(fact => stringifyFactValue(fact.value)).filter(value => HAS_QUANTIFIED_VALUE_RE.test(value)), ...allIndexedFacts.map(fact => stringifyFactValue(fact.value)).filter(value => HAS_QUANTIFIED_VALUE_RE.test(value))])];
   let preciseChars = 0;
   const preciseTokens: string[] = [];
   for (const t of preciseTokensAll) {
-    if (preciseChars + t.length > 3000 && preciseTokens.length >= 10) break;
+    if (preciseChars + t.length > 6000 && preciseTokens.length >= 10) break;
     preciseTokens.push(t);
     preciseChars += t.length + 1;
   }
@@ -90,7 +90,7 @@ export function buildChapterFactCoverageContext(input: { chapter: DocumentTempla
     projectBasicFacts.length ? `项目基础事实卡片（资料已明确，项目概况、项目基本信息表、进度和质量相关内容必须优先使用，不得输出任何占位话术）：\n${projectBasicFacts.map(fact => `- ${fact.key || fact.fieldName}：${cleanEvidenceText(stringifyFactValue(fact.value)).slice(0, 220)}${fact.sourceFile ? `（来源：${fact.sourceFile.split('/').pop()}）` : ''}`).join('\n')}\n项目基本信息表必须使用固定表头：| 信息项 | 内容 |，不得使用“序号｜项目名称｜内容参数”表头，不得输出后台溯源列。` : '',
     input.factNeedsPrompt || '',
     indexedFactLines.length ? `全局资料事实索引匹配到的本章可写事实：\n${indexedFactLines.join('\n')}` : '',
-    preciseTokens.length ? `本章资料中可直接使用的可靠精确参数/编号：${preciseTokens.join('、')}。这些参数来自绑定资料，不属于编造；涉及对应对象、部位、工序、材料、设备、项目概况、质量验收或安全控制时必须自然写入正文，并保持原样或等价专业表达。项目基础事实中的合同估算价、计划工期可用于项目概况；不得写入报价明细、单价、税率、预留金。` : '',
+    preciseTokens.length ? `本章资料中可直接使用的可靠精确参数/编号：${preciseTokens.join('、')}。这些参数来自绑定资料，不属于编造；涉及对应对象、部位、工序、材料、设备、项目概况、质量验收或安全控制时必须自然写入正文，并保持原样或等价专业表达。量化参数落位是硬性验收项：本章正文必须达到每千字不少于 2 个不同量化参数的密度（以上方清单参数优先），同一参数不得反复堆砌凑数，参数种类不足将被打回重写。项目基础事实中的合同估算价、计划工期可用于项目概况；不得写入报价明细、单价、税率、预留金。` : '',
     unresolvedNeeds.length ? `当前事实需求仍未充分确认：${unresolvedNeeds.join('、')}。未确认项不得编造；但已满足事实需求中的资料事实必须写入对应小节。` : '',
     input.missingFacts.length ? `模板显式要求中当前检索未充分命中的项：${input.missingFacts.join('、')}。未命中项不得编造，但不得因此省略上方已经明确的可靠参数。` : '',
     `本章可用材料来源约 ${evidenceSourceCount} 个文件，正文必须按事实需求把可用事实内化到对应小节，不得单列后台资料清单。`,
@@ -286,7 +286,7 @@ export function buildSectionFactCard(sectionTitle: string, evidence: DocumentEvi
   return {
     items,
     quantifiedCount: items.filter(item => item.quantified).length,
-    prompt: lines.length ? `【当前小节写作任务卡】\n小节：${sectionTitle}\n必须优先落位的资料事实：\n${lines.join('\n')}\n成稿要求：1）至少自然写入其中 2 条资料事实；2）如存在数字、规格、标准编号、数量、工期，必须至少原样写入 1 条；3）围绕“资料依据—对象范围—实施做法—检查验收/闭环”展开，不得写成“结合实际、按规范执行”的泛化空话；4）不得改写、换算或编造资料未提供的参数。` : '',
+    prompt: lines.length ? `【当前小节写作任务卡】\n小节：${sectionTitle}\n必须优先落位的资料事实：\n${lines.join('\n')}\n成稿要求：1）至少自然写入其中 2 条资料事实；2）如存在数字、规格、标准编号、数量、工期，必须至少原样写入 1 条；3）围绕“资料依据—对象范围—实施做法—检查验收/闭环”展开，不得写成“结合实际、按规范执行”的泛化空话；4）不得改写、换算或编造资料未提供的参数；5）量化参数落位硬性要求：本节正文每千字不少于 2 个不同量化参数（优先使用上方清单参数与资料原文参数），同一参数不得反复堆砌凑数，参数种类不足将被判为质量不达标打回重写。` : '',
   };
 }
 
@@ -318,8 +318,8 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
   const sectionFactCard = buildSectionFactCard(input.sectionTitle, sectionEvidence);
   const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 3500, 9000) });
-  // 工作包级小节：从项目图谱/上下文识别工作包，匹配工艺知识卡，注入工序链与工艺参数参考
-  const majorConstructionPackages = /项目主要施工内容/u.test(input.sectionTitle) ? parseMajorConstructionPackages(input.projectContext, sectionEvidence) : [];
+  // 工作包级小节（项目主要施工内容/主要分部分项工程施工方案/主要施工方法）：从项目图谱/上下文识别工作包，匹配工艺知识卡，注入工序链与工艺参数参考
+  const majorConstructionPackages = /项目主要施工内容|主要分部分项工程施工方案|主要施工方法/u.test(input.sectionTitle) ? parseMajorConstructionPackages(input.projectContext, sectionEvidence) : [];
   const processKnowledgeCards = majorConstructionPackages.length > 0 ? matchProcessKnowledgeCards(majorConstructionPackages.map(pkg => pkg.name)) : [];
   const processKnowledgePrompt = processKnowledgeCards.length > 0 ? buildProcessKnowledgePrompt(processKnowledgeCards, majorConstructionPackages.map(pkg => pkg.name)) : '';
   const prompt = [

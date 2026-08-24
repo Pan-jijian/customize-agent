@@ -2,7 +2,7 @@ import type { AgentWorkflowContext, AgentWorkflowNode } from './agentWorkflow';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentTemplate, DocumentTemplateChapter, ProjectGraph, ValidationIssue } from './types';
 import { extractSection, stableHash, stringifyFactValue } from './utils';
 import { documentTextLength } from './budget';
-import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
+import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
 
 export interface AgentSectionPlan {
   title: string;
@@ -261,11 +261,14 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
       issues.push({ level: criticalDepth ? 'error' : 'warning', severity: criticalDepth ? 'blocker' : 'warning', category: 'structure', owner: 'system', message: criticalDepth ? `${section.title} 正文不足，未达到任务最小深度` : `${section.title} 未匹配到独立小节标题`, suggestion: criticalDepth ? '关键小节缺失正文，必须基于该小节事实卡和证据生成正式正文，不得以标题占位。' : '正文已成文但小节标题与规划标题不完全一致，建议后续按规划标题进一步规范结构。' });
     }
     if (!section.ready) issues.push(...section.issues.map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const })));
-    // 分项工程施工方案必须落位工艺参数；缺失时触发 Repairer 定向补写（设备型号规格参数同样计入）
+    // 施工方法类小节参数落位综合检查：工艺参数（mm/MPa/间距/偏差等）不足、或量化参数密度低于每千字 2 个时触发 Repairer 定向补写（设备型号规格参数同样计入）
     if (/主要分部分项工程施工方案|主要施工方法/u.test(section.title)) {
       const methodBody = extractSection(content, section.title, { fuzzy: true });
+      const bodyChars = documentTextLength(methodBody);
       const paramCount = new Set([...(methodBody.match(PROCESS_PARAMETER_RE) || []), ...(methodBody.match(DEVICE_SPEC_RE) || [])]).size;
-      if (documentTextLength(methodBody) >= 800 && paramCount < 4) issues.push({ level: 'warning', severity: 'warning', category: 'professional_chain', owner: 'system', message: `${section.title} 工艺参数落位不足：当前 ${paramCount} 个，要求不少于 4 个`, suggestion: '必须补充 mm/MPa/间距/偏差/坡度/试验压力等工艺参数（来自绑定资料或行业规范值）或设备型号规格参数。' });
+      const quantifiedCount = new Set(methodBody.match(QUANTIFIED_BODY_PARAM_RE) || []).size;
+      const quantifiedDensity = bodyChars > 0 ? quantifiedCount / (bodyChars / 1000) : 0;
+      if (documentTextLength(methodBody) >= 800 && (paramCount < 4 || quantifiedDensity < 2)) issues.push({ level: 'warning', severity: 'warning', category: 'professional_chain', owner: 'system', message: `${section.title} 参数落位不足：工艺参数 ${paramCount} 个（要求不少于 4 个），量化参数密度每千字 ${quantifiedDensity.toFixed(1)} 个（要求不少于 2 个）`, suggestion: '必须补充 mm/MPa/间距/偏差/坡度/试验压力等工艺参数（来自绑定资料或行业规范值）或设备型号规格参数，并提升量化参数（数量/规格/工期/面积等）落位密度；同一参数不得反复堆砌凑数。' });
     }
     // 工序链箭头密度：方法类/流程类小节必须用“→”串联工序链，避免纯文字流程叙述拉低整体箭头密度
     if (/主要分部分项工程施工方案|主要施工方法|项目主要施工内容|施工流程|施工顺序|多工序穿插|三检制度|隐蔽工程验收|闭环整改|应急演练|转运路线/u.test(section.title)) {

@@ -25,3 +25,6 @@ export const PROCESS_PARAMETER_RE = /\d+(?:\.\d+)?\s*(?:mm|MPa|kN|kN\/m²|kPa|�
 
 // 设备配置参数（配电箱/控制箱型号、容量、IP 等级等）：设备清单型小节以型号规格为参数载体
 export const DEVICE_SPEC_RE = /\d[A-Z][A-Z0-9a-z]*\b|[A-Z]{1,2}\d{2,3}\b|\d+(?:\.\d+)?\s*(?:kW|kVA|KVA|KW)\b|IP\d{2}/gu;
+
+/** 正文量化参数（专业评分"事实落位率"与参数密度检查共用口径）：数值+常用单位 */
+export const QUANTIFIED_BODY_PARAM_RE = /\d+(?:\.\d+)?\s*(?:m²|㎡|m3|m³|mm|cm|m|km|kg|t|MPa|kPa|℃|%|日历天|天|层|台|套|个|项|次|份|人|小时)/giu;

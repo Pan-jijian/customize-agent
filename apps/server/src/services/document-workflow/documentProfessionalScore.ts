@@ -1,5 +1,6 @@
 import type { DocumentDraftChapter } from './types';
 import { duplicateParagraphIssues, fillerParagraphIssues, processParameterDensityIssues, tableCompletenessIssues, reviewResponseIssues, sectionCardStructureIssues } from './constructionOrgAudit';
+import { QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
 
 /**
  * L6 质量度量：施工组织设计专业度评分（7 维）。
@@ -50,7 +51,7 @@ function structureScore(chapters: DocumentDraftChapter[]): { score: number; deta
 /** 2. 事实落位率：量化数字与项目事实覆盖 */
 function factLandingScore(chapters: DocumentDraftChapter[]): { score: number; detail: string } {
   const wholeText = chapters.map(chapter => chapter.content).join('\n');
-  const quantified = new Set(wholeText.match(/\d+(?:\.\d+)?\s*(?:m²|㎡|m3|m³|mm|cm|m|km|kg|t|MPa|kPa|℃|%|日历天|天|层|台|套|个|项|次|份|人|小时)/giu) || []);
+  const quantified = new Set(wholeText.match(QUANTIFIED_BODY_PARAM_RE) || []);
   const factTokens = new Set(wholeText.match(/工程量|材料|设备|范围|流程|验收|检测|复试|调试|隐蔽|检验批|资料|记录|系统|部位|接口|规格|标准/gu) || []);
   const totalChars = Math.max(1, wholeText.length);
   const quantifiedDensity = quantified.size / (totalChars / 1000);
