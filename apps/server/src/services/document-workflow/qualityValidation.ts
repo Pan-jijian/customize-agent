@@ -448,8 +448,8 @@ function gapForSection(chapterTitle: string, sectionTitle: string, level: 3 | 4,
   if (/项目基本信息|基本信息|工程概况|项目概况|工程概述|项目概述/u.test(sectionTitle) && (hasTable || bodyLength >= 40)) return undefined;
   // 附录A/B 由导出层按正文自动归集注入，不属于 Writer 成稿范围；只要带表格即视为有效，不参与正文完整度校验
   if (/^附录[一二三四五六七八九十A-Z\d]/u.test(sectionTitle) && hasTable) return undefined;
-  // 清单/配置类小节本体即表格清单（如危大工程控制清单、主要周转材料配置），表格数据行≥2 视为有效正文，避免误报“只有标题或表格无正文”
-  const listStyleSection = /清单|配置|汇总|一览|计划表|明细/u.test(sectionTitle);
+  // 清单/配置类小节本体即表格清单（如危大工程控制清单、主要周转材料配置、危大工程全流程闭环管控表），表格数据行≥2 视为有效正文，避免误报“只有标题或表格无正文”
+  const listStyleSection = /清单|配置|汇总|一览|计划表|明细/u.test(sectionTitle) || /表[^，。；：\s]{0,6}$/u.test(sectionTitle);
   if (hasTable && listStyleSection && tableDataRowCount(body) >= 2) return undefined;
   if (hasTable && nonTableLength < 20) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: planned ? `${chapterTitle} 只有标题或表格无正文：${sectionTitle}` : `${chapterTitle} 小节只有标题或表格无正文：${sectionTitle}` };
   if (bodyLength >= 80 && nonTableLength >= 20) return undefined;
@@ -715,6 +715,9 @@ function shouldIgnorePreciseToken(token: string, context: string) {
   if (/万元|元|报价|单价|合价|综合单价|预留金|税率|增值税|利润|结算/u.test(`${token} ${context}`)) return true;
   if (/OCR|识别错误|乱码|无法确认|疑似|不确定|语义断裂|页码|目录/u.test(context)) return true;
   if (/^\d+$/.test(token) && Number(token) < 10) return true;
+  // 合同条款义务类参数（如通用条款“之日起X天内发出开工通知”、“承包人应在X天内提交”）是法律条款表述，
+  // 不是项目专属工程参数，不要求写入正文，也不进入抽查池；项目计划工期参数不受影响
+  if (/之日起.{0,8}天内|天内.{0,10}(?:发出|提交|通知|回复|答复|完成|开工|竣工|报送|支付|更换)|因发包人原因|因承包人原因|未能按时|逾期|违约金/u.test(context)) return true;
   return false;
 }
 

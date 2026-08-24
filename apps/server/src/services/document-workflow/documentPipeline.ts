@@ -458,7 +458,10 @@ export async function finalizeGeneration(p: {
         signal,
       }));
       let repaired = false;
-      if (generated && documentTextLength(generated) >= 80) {
+      // 深度不足类修复必须达到关键小节 blocker 字数才允许替换：防止把原本更长的正文换成更短的补写稿，
+      // 导致修复轮次被浪费在无效替换上（曾出现 1800+ 字小节被换成 1200 字稿后仍不足 1760 的倒退）
+      const depthAcceptMinChars = /正文不足/u.test(issue.message) ? criticalMinChars : 0;
+      if (generated && documentTextLength(generated) >= (depthAcceptMinChars || 80)) {
         const nextContent = replaceMarkdownSection(draftChapter.content, sectionTitle, generated);
         repaired = nextContent !== draftChapter.content;
         if (!repaired && /缺少规划小节/u.test(issue.message)) {
@@ -476,7 +479,8 @@ export async function finalizeGeneration(p: {
           repairDetails.push(`失败：${chapterTitle}/${sectionTitle}（未定位到原小节块）`);
         }
       } else {
-        repairDetails.push(`失败：${chapterTitle}/${sectionTitle}（${generationDiagnostics.llm.lastError || '空响应'}）`);
+        const generatedChars = documentTextLength(generated || '');
+        repairDetails.push(`失败：${chapterTitle}/${sectionTitle}（${generatedChars > 0 && generatedChars < (depthAcceptMinChars || 80) ? `补写仅 ${generatedChars} 字，未达 ${depthAcceptMinChars || 80} 字验收线` : generationDiagnostics.llm.lastError || '空响应'}）`);
       }
       const completedRepairStage = displayStage({ type: 'llm_review', roleId: `agent-final-gate-repair-${draftChapter.id}`, status: repaired ? 'success' : 'failed', message: repaired ? `Final Gate 空小节修复完成：${chapterTitle} / ${sectionTitle}` : `Final Gate 空小节修复失败：${chapterTitle} / ${sectionTitle}`, details: repairDetails }, { subtitle: 'Final Gate Repair' });
       upsertProgressStage(progressStages, completedRepairStage);

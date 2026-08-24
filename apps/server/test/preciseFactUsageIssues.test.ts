@@ -57,4 +57,18 @@ describe('preciseFactUsageIssues 证据窗口口径', () => {
     const messages = preciseIssueMessages(markdown, [makeChapter(evidence)], makeFactsModel());
     expect(messages.filter(message => message.includes('可靠精确参数使用不足'))).toHaveLength(0);
   });
+
+  it('合同通用条款义务类参数不进入抽查池（如“之日起X天内发出开工通知”）', () => {
+    const evidence = `${DN_EVIDENCE} 因发包人原因造成监理人未能在计划开工日期之日起180天内发出开工通知的，承包人有权解除合同。`;
+    const markdown = `正文包含全部管径参数：${DN_TOKENS.join('、')}。`;
+    const messages = preciseIssueMessages(markdown, [makeChapter(evidence)], makeFactsModel());
+    expect(messages.filter(message => message.includes('可靠精确参数使用不足'))).toHaveLength(0);
+  });
+
+  it('项目计划工期参数不受条款过滤影响，未落位仍触发关键参数抽查', () => {
+    const evidence = `${DN_EVIDENCE} 计划工期45天，质量标准合格。`;
+    const markdown = '正文只写了 2 个管径：DN15、DN20。';
+    const messages = preciseIssueMessages(markdown, [makeChapter(evidence)], makeFactsModel());
+    expect(messages.some(message => message.startsWith('可靠精确参数使用不足：关键参数抽查') && message.includes('45天'))).toBe(true);
+  });
 });

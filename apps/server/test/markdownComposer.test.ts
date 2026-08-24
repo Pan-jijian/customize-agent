@@ -186,6 +186,19 @@ describe('formal markdown structure', () => {
     expect(gaps.map(gap => gap.message).join('\n')).not.toContain('资源保障');
   });
 
+  it('exempts table-only sections whose title ends with 表 (data rows >= 2)', () => {
+    const content = [
+      '### 危大工程全流程闭环管控表',
+      '',
+      '| 类别 | 内容 |',
+      '| --- | --- |',
+      '| 深基坑 | 支护方案、监测要求 |',
+      '| 高支模 | 专项方案、验收记录 |',
+    ].join('\n');
+    const gaps = collectSectionContentGaps(content, [{ title: '危大工程', sections: [], content }]);
+    expect(gaps).toHaveLength(0);
+  });
+
   it('removes orphan and unfinished lines during sanitization', () => {
     const markdown = sanitizeFormalMarkdown(['完整段落。', '在', '本段内容包括', '| 列 |', '| --- |', '| 在 |'].join('\n'));
 
