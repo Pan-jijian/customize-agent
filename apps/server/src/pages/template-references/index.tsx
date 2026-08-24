@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { App, Button, Card, Drawer, Dropdown, Popconfirm, Progress, Spin, Tag, Tooltip, Upload } from 'antd';
-import { CheckCircleFilled, CloseCircleFilled, DeleteOutlined, FileTextOutlined, InboxOutlined, MoreOutlined, ProfileOutlined, RiseOutlined, StarFilled, StarOutlined, UploadOutlined } from '@ant-design/icons';
+import { CheckCircleFilled, CloseCircleFilled, DeleteOutlined, FileTextOutlined, InboxOutlined, MoreOutlined, ProfileOutlined, RiseOutlined, UploadOutlined } from '@ant-design/icons';
 import { useAppTranslations } from '@/components/Layout';
 import { deleteTemplateReferenceApi, getTemplateReferenceTypeProfiles, getTemplateReferences, patchTemplateReference, uploadTemplateReference, type ReferenceTypeProfile, type TemplateReferenceRecord } from '@/lib/api';
 
@@ -145,15 +145,6 @@ export default function TemplateReferencesPage() {
     }
   };
 
-  const handleSetPrimary = async (record: TemplateReferenceRecord) => {
-    try {
-      await patchTemplateReference(record.id, { isPrimary: !record.isPrimary });
-      await loadAll();
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : t('refs.operationFailed'));
-    }
-  };
-
   const handleChangeType = async (record: TemplateReferenceRecord, projectType: string) => {
     try {
       await patchTemplateReference(record.id, { projectType });
@@ -243,7 +234,6 @@ export default function TemplateReferencesPage() {
             </span>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 min-w-0">
-                {record.isPrimary && <StarFilled className="text-[#faad14] text-xs shrink-0" />}
                 <Tooltip title={record.fileName}>
                   <span className="font-medium text-[var(--colorText)] truncate block">{record.fileName}</span>
                 </Tooltip>
@@ -256,13 +246,6 @@ export default function TemplateReferencesPage() {
             </div>
           </div>
           <div className="flex items-center shrink-0" onClick={event => event.stopPropagation()}>
-            {ready && (
-              <Tooltip title={record.isPrimary ? t('refs.unsetPrimary') : t('refs.setPrimary')}>
-                <Button size="small" type="text" className="!w-7 !h-7 !min-w-7 flex items-center justify-center" onClick={() => { void handleSetPrimary(record); }}>
-                  {record.isPrimary ? <StarFilled style={{ color: '#faad14' }} /> : <StarOutlined />}
-                </Button>
-              </Tooltip>
-            )}
             <Dropdown
               menu={{
                 items: PROJECT_TYPES.filter(type => type !== record.projectType).map(type => ({ key: `type-${type}`, label: `${t('refs.changeType')}：${type}` })),
@@ -333,7 +316,6 @@ export default function TemplateReferencesPage() {
           <div className="flex items-center gap-3 flex-wrap shrink-0">
             <HeaderStat value={readyCount} label={t('refs.totalSamples')} accent="#1677ff" />
             <HeaderStat value={typeProfiles.length} label={t('refs.coveredTypes')} accent="#16a34a" />
-            <HeaderStat value={references.filter(item => item.isPrimary).length} label={t('refs.primaryCount')} accent="#f59e0b" />
           </div>
         </div>
 
@@ -495,9 +477,7 @@ export default function TemplateReferencesPage() {
                 {profileSourceFiles.map(item => (
                   <div key={item.id} className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 bg-[var(--colorFillQuaternary)]">
                     <FileTextOutlined className="text-[var(--colorTextTertiary)] text-sm shrink-0" />
-                    {item.isPrimary && <StarFilled style={{ color: '#faad14', fontSize: 12 }} />}
                     <span className="flex-1 min-w-0 text-[13px] text-[var(--colorText)] truncate" title={item.fileName}>{item.fileName}</span>
-                    {item.isPrimary && <Tag color="gold" className="!m-0">{t('refs.profilePrimaryBadge')}</Tag>}
                     <span className="text-xs text-[var(--colorTextTertiary)] shrink-0">{formatBytes(item.fileSize)}</span>
                   </div>
                 ))}

@@ -30,8 +30,8 @@ function makeProfile(wordCount: number, headings: string[], tables: string[], pa
   };
 }
 
-function makeRecord(id: string, projectType: ReferenceProjectType, profile: ReferenceQualityProfile, isPrimary = false): TemplateReferenceRecord {
-  return { id, fileName: `${id}.pdf`, projectType, typeSource: 'manual', uploadedAt: Date.now(), fileSize: 1024, filePath: `files/${id}.pdf`, status: 'ready', qualityProfile: profile, isPrimary };
+function makeRecord(id: string, projectType: ReferenceProjectType, profile: ReferenceQualityProfile): TemplateReferenceRecord {
+  return { id, fileName: `${id}.pdf`, projectType, typeSource: 'manual', uploadedAt: Date.now(), fileSize: 1024, filePath: `files/${id}.pdf`, status: 'ready', qualityProfile: profile };
 }
 
 const ORIGINAL_INDEX = (() => { try { return fs.existsSync(indexPath()) ? fs.readFileSync(indexPath(), 'utf-8') : ''; } catch { return ''; } })();
@@ -39,9 +39,9 @@ const ORIGINAL_INDEX = (() => { try { return fs.existsSync(indexPath()) ? fs.rea
 describe('模板参考库类型画像（T2/T5/T6）冒烟', () => {
   beforeAll(() => {
     // 备份真实参考库索引，写入合成样本（房建 2 份 + 市政 1 份单样本）
-    const recordA = makeRecord('ref-smoke-a', '房建', makeProfile(20000, ['编制依据', '工程概况', '施工部署', '施工进度计划', '主要施工方案', '质量保证措施', '安全文明施工', '竣工验收'], ['主要施工机械设备表', '劳动力计划表'], [{ token: '养护', count: 5 }, { token: '数值参数（数字+单位）', count: 40 }]), true);
+    const recordA = makeRecord('ref-smoke-a', '房建', makeProfile(20000, ['编制依据', '工程概况', '施工部署', '施工进度计划', '主要施工方案', '质量保证措施', '安全文明施工', '竣工验收'], ['主要施工机械设备表', '劳动力计划表'], [{ token: '养护', count: 5 }, { token: '数值参数（数字+单位）', count: 40 }]));
     const recordB = makeRecord('ref-smoke-b', '房建', makeProfile(30000, ['编制依据', '工程概况', '施工部署', '施工总平面布置', '主要施工方案', '质量保证措施', '安全文明施工', '绿色施工', '应急预案'], ['主要施工机械设备表', '施工进度计划表'], [{ token: '养护', count: 8 }, { token: '数值参数（数字+单位）', count: 60 }]));
-    const recordC = makeRecord('ref-smoke-c', '市政', makeProfile(15000, ['工程概况', '施工方案', '质量措施'], ['进度计划表'], [{ token: '数值参数（数字+单位）', count: 30 }]), true);
+    const recordC = makeRecord('ref-smoke-c', '市政', makeProfile(15000, ['工程概况', '施工方案', '质量措施'], ['进度计划表'], [{ token: '数值参数（数字+单位）', count: 30 }]));
     fs.mkdirSync(path.dirname(indexPath()), { recursive: true });
     fs.writeFileSync(indexPath(), JSON.stringify([recordA, recordB, recordC]), 'utf-8');
   });

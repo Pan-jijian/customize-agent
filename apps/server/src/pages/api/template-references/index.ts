@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import formidable, { type File as FormidableFile } from 'formidable';
-import { addTemplateReference, buildTypeProfiles, deleteTemplateReference, listTemplateReferences, recomputeStaleProfiles, referenceParadigmText, setPrimaryTemplateReference, updateTemplateReferenceType, type TemplateReferenceRecord } from '@/services/document-workflow/templateReferenceService';
+import { addTemplateReference, buildTypeProfiles, deleteTemplateReference, listTemplateReferences, recomputeStaleProfiles, referenceParadigmText, updateTemplateReferenceType, type TemplateReferenceRecord } from '@/services/document-workflow/templateReferenceService';
 import { REFERENCE_PROJECT_TYPES, type ReferenceProjectType } from '@/services/document-workflow/referenceQualityProfile';
 
 export const config = {
@@ -47,7 +47,7 @@ function sanitizeRecord(record: TemplateReferenceRecord): TemplateReferenceRecor
   return { ...record, filePath: '' };
 }
 
-/** 模板参考库 API：GET 列表 / POST 上传（multipart） / DELETE 删除 / PATCH 类型标注与主参考 */
+/** 模板参考库 API：GET 列表 / POST 上传（multipart） / DELETE 删除 / PATCH 类型标注 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     // 画像口径升级后旧画像自动重算（幂等），保证列表与聚合返回的数据始终是当前口径
@@ -79,7 +79,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json({ success: true, reference: sanitizeRecord(record) });
     }
     if (req.method === 'PATCH') {
-      const body = (await readJsonBody(req)) as { id?: string; projectType?: unknown; isPrimary?: boolean } | undefined;
+      const body = (await readJsonBody(req)) as { id?: string; projectType?: unknown } | undefined;
       const id = body?.id;
       if (!id) return res.status(400).json({ error: 'id required' });
       if (typeof body.projectType === 'string') {
@@ -88,11 +88,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         const updated = updateTemplateReferenceType(id, type);
         return updated ? res.status(200).json({ success: true, reference: sanitizeRecord(updated) }) : res.status(404).json({ error: 'Reference not found' });
       }
-      if (typeof body.isPrimary === 'boolean') {
-        const updated = setPrimaryTemplateReference(id, body.isPrimary);
-        return updated ? res.status(200).json({ success: true, reference: sanitizeRecord(updated) }) : res.status(404).json({ error: 'Reference not found or not ready' });
-      }
-      return res.status(400).json({ error: 'projectType or isPrimary required' });
+      return res.status(400).json({ error: 'projectType required' });
     }
     if (req.method === 'DELETE') {
       // DELETE 请求体在各运行环境支持不一致，id 走查询参数

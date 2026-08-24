@@ -12,7 +12,7 @@ export interface QualityBenchmarkItem {
   label: string;
   /** 生成文档实测值 */
   generated: number;
-  /** 参考基准值（主参考画像或同类型均值口径） */
+  /** 参考基准值（同类型全部优质样本画像的加权聚合口径） */
   reference: number;
   /** 单项达成率（0-100，可超 100 截断） */
   score: number;

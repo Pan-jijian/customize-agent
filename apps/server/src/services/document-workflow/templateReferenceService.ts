@@ -24,8 +24,6 @@ export interface TemplateReferenceRecord {
   qualityProfile?: ReferenceQualityProfile;
   /** 画像计算逻辑版本：与 PROFILE_VERSION 不符的旧画像在读取前自动重算，保证口径升级后沉淀数据仍准确 */
   profileVersion?: number;
-  /** 是否该工程类型的主参考（用于默认对标基准） */
-  isPrimary?: boolean;
 }
 
 /**
@@ -151,9 +149,6 @@ export async function addTemplateReference(input: {
     record.profileVersion = PROFILE_VERSION;
     record.status = 'ready';
     if (record.typeSource === 'auto') record.projectType = suggestProjectType(text);
-    // 每类型首个 ready 参考默认作为主参考
-    const sameType = records.filter(item => item.projectType === record.projectType && item.status === 'ready' && item.id !== id);
-    record.isPrimary = sameType.length === 0;
     writeIndex(records);
   } catch (error) {
     record.status = 'failed';
@@ -169,31 +164,10 @@ export function deleteTemplateReference(id: string): boolean {
   const target = records.find(item => item.id === id);
   if (!target) return false;
   const next = records.filter(item => item.id !== id);
-  // 若删除的是主参考，自动让同类型最早的 ready 记录接任
-  if (target.isPrimary) {
-    const successor = next.find(item => item.projectType === target.projectType && item.status === 'ready');
-    if (successor) successor.isPrimary = true;
-  }
   writeIndex(next);
   const filePath = path.join(referencesRoot(), target.filePath);
   try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch { /* 原文删除失败不阻断索引删除 */ }
   return true;
-}
-
-/** 设置某工程类型的主参考（同类型其他记录取消主参考） */
-export function setPrimaryTemplateReference(id: string, primary: boolean): TemplateReferenceRecord | undefined {
-  const records = readIndex();
-  const target = records.find(item => item.id === id);
-  if (!target || target.status !== 'ready') return undefined;
-  if (primary) {
-    for (const item of records) {
-      if (item.projectType === target.projectType) item.isPrimary = item.id === id;
-    }
-  } else {
-    target.isPrimary = false;
-  }
-  writeIndex(records);
-  return target;
 }
 
 /** 修改参考文件的工程类型标注（改为手动标注） */
@@ -223,20 +197,49 @@ export function readTemplateReferenceText(id: string, maxChars = 20000): string 
   }
 }
 
-/** 获取某工程类型的对标基准（取主参考画像，缺省取同类型画像均值） */
+/**
+ * 获取某工程类型的对标基准：同类型全部优质样本画像的加权聚合（类型画像口径）。
+ * 用户上传的每份参考均视为优质样本，1 份样本同样构成基准；仅 0 份样本时无基准。
+ * 返回的合成画像中 5 个对标指标（参数密度/工序链/重复率/表格/章节）取聚合均值，
+ * 其余结构信息取首样本（仅用于范式展示，不参与对标计算）。
+ */
 export function referenceBenchmarkForType(type: ReferenceProjectType): { profile: ReferenceQualityProfile; sourceCount: number } | undefined {
   const ready = listTemplateReferencesByType(type).filter(item => item.status === 'ready' && item.qualityProfile);
   if (ready.length === 0) return undefined;
-  const primary = ready.find(item => item.isPrimary) || ready[0];
-  return { profile: primary.qualityProfile!, sourceCount: ready.length };
+  const profiles = ready.map(item => item.qualityProfile!);
+  const aggregated = aggregateProfileMetrics(profiles);
+  const primary = profiles[0];
+  return {
+    profile: {
+      wordCount: average(profiles.map(item => item.wordCount)),
+      effectiveWordCount: average(profiles.map(item => item.effectiveWordCount)),
+      paramDensity: aggregated.paramDensity.avg,
+      paramCount: Math.round(average(profiles.map(item => item.paramCount))),
+      arrowChainCoverage: aggregated.arrowChainCoverage.avg,
+      duplicationRate: aggregated.duplicationRate.avg,
+      tableCount: Math.round(aggregated.tableCount.avg),
+      sectionCount: Math.round(aggregated.sectionCount.avg),
+      subsectionCount: Math.round(aggregated.subsectionCount.avg),
+      subitemCount: Math.round(aggregated.subitemCount.avg),
+      avgSectionWords: aggregated.avgSectionWords.avg,
+      headingStructure: primary.headingStructure,
+      tableTitles: primary.tableTitles,
+      paramTokens: primary.paramTokens,
+      segmentCount: Math.round(average(profiles.map(item => item.segmentCount || 0))),
+      arrowChainSegmentCount: Math.round(average(profiles.map(item => item.arrowChainSegmentCount || 0))),
+      duplicatedSegmentCount: Math.round(average(profiles.map(item => item.duplicatedSegmentCount || 0))),
+    },
+    sourceCount: ready.length,
+  };
 }
 
-/** 某工程类型的章节结构范式：把主参考的标题结构格式化为可直接插入提示词的章节列表文本 */
+/** 某工程类型的章节结构范式：同类型全部样本一级标题频次聚合（高频优先），格式化为可直接插入提示词的章节列表文本 */
 export function referenceParadigmText(type: ReferenceProjectType): { text: string; sourceCount: number } | undefined {
   const ready = listTemplateReferencesByType(type).filter(item => item.status === 'ready' && item.qualityProfile?.headingStructure?.length);
   if (ready.length === 0) return undefined;
-  const primary = ready.find(item => item.isPrimary) || ready[0];
-  const headings = primary.qualityProfile!.headingStructure.slice(0, 12);
+  const headingGroups = ready.map(item => (item.qualityProfile!.headingStructure || []).map(title => ({ value: title })));
+  const headingCounts = mergeCounts(headingGroups);
+  const headings = headingCounts.slice(0, 12).map(item => item.value);
   const text = headings.map((title, index) => `第${['一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '十一', '十二'][index] ?? (index + 1)}章 ${title}`).join('\n');
   return { text, sourceCount: ready.length };
 }
@@ -368,7 +371,7 @@ export function buildTypeProfiles(): ReferenceTypeProfile[] {
  * 防负面干扰设计：
  * - 只按"形"给软性参考，明确"项目专属数字与参数仍以知识库证据为准"，与事实红线同向；
  * - 量化目标按本项目目标字数与参考样本平均字数折减，避免小项目被大工程典型值误导；
- * - 样本门槛：仅 1 份样本时只给结构参考（不给量化目标），≥2 份才给量化目标，避免单一样本误导；
+ * - 用户上传的每份参考均视为优质样本，1 份样本同样给出量化目标与结构参考；
  * - 无同类型样本时返回空数组，不注入任何内容。
  */
 export function referenceQualityTargetLines(input: { templateName: string; chapterTitles: string[]; requirement?: string; targetWords: number }): string[] {
@@ -385,17 +388,15 @@ export function referenceQualityTargetLines(input: { templateName: string; chapt
   const lines: string[] = [
     `同类工程（${type}）参考特征（来自 ${sourceCount} 份优秀入围文件画像，仅供软性参考；任何项目专属数字与参数仍必须以知识库证据为准，为对齐特征而编造参数、虚构表格或堆砌无意义内容严格禁止）：`,
   ];
-  if (sourceCount >= 2) {
-    const aggregated = aggregateProfileMetrics(profiles);
-    const paramDensity = aggregated.paramDensity.avg;
-    const arrowChain = aggregated.arrowChainCoverage.avg;
-    const tablesPerSection = aggregated.sectionCount.avg > 0 ? aggregated.tableCount.avg / aggregated.sectionCount.avg : 0;
-    const avgSectionWords = aggregated.avgSectionWords.avg;
-    lines.push(`- 工艺参数密度参考：约 ${(paramDensity * scale).toFixed(1)} 个/千字（同类工程画像均值 ${paramDensity.toFixed(1)}，已按本项目篇幅折减）；参数应来自已确认事实与专业知识，不得编造。`);
-    lines.push(`- 工序链覆盖率参考：含"→"工序链的段落占比约 ${Math.round(arrowChain * 100)}%；施工与流程小节宜用工序链串联工艺步骤。`);
-    lines.push(`- 表格参考：同类工程平均每章约 ${tablesPerSection.toFixed(1)} 张正式表格（在事实允许的前提下合理配置）。`);
-    lines.push(`- 章节体量参考：同类工程平均约 ${Math.round(aggregated.sectionCount.avg)} 章、平均每章约 ${avgSectionWords} 字；实际以模板章节与篇幅目标为准。`);
-  }
+  const aggregated = aggregateProfileMetrics(profiles);
+  const paramDensity = aggregated.paramDensity.avg;
+  const arrowChain = aggregated.arrowChainCoverage.avg;
+  const tablesPerSection = aggregated.sectionCount.avg > 0 ? aggregated.tableCount.avg / aggregated.sectionCount.avg : 0;
+  const avgSectionWords = aggregated.avgSectionWords.avg;
+  lines.push(`- 工艺参数密度参考：约 ${(paramDensity * scale).toFixed(1)} 个/千字（同类工程画像均值 ${paramDensity.toFixed(1)}，已按本项目篇幅折减）；参数应来自已确认事实与专业知识，不得编造。`);
+  lines.push(`- 工序链覆盖率参考：含"→"工序链的段落占比约 ${Math.round(arrowChain * 100)}%；施工与流程小节宜用工序链串联工艺步骤。`);
+  lines.push(`- 表格参考：同类工程平均每章约 ${tablesPerSection.toFixed(1)} 张正式表格（在事实允许的前提下合理配置）。`);
+  lines.push(`- 章节体量参考：同类工程平均约 ${Math.round(aggregated.sectionCount.avg)} 章、平均每章约 ${avgSectionWords} 字；实际以模板章节与篇幅目标为准。`);
   if (frequentHeadings.length > 0) {
     lines.push(`- 典型章节结构参考（出现于半数以上样本，仅供结构参考，不强制）：${frequentHeadings.map(item => item.value).join('、')}`);
   }

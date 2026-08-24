@@ -33,7 +33,7 @@ async function main() {
   }
   const total = listTemplateReferences();
   console.log(`\n参考库现有 ${total.length} 份：`);
-  for (const item of total) console.log(`  [${item.projectType}] ${item.fileName} (${item.status}${item.isPrimary ? ', 主参考' : ''})`);
+  for (const item of total) console.log(`  [${item.projectType}] ${item.fileName} (${item.status})`);
 }
 
 main().catch(error => {

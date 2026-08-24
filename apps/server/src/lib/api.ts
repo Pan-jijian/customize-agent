@@ -599,7 +599,6 @@ export interface TemplateReferenceRecord {
   filePath: string;
   status: 'parsing' | 'ready' | 'failed';
   errorMessage?: string;
-  isPrimary?: boolean;
   qualityProfile?: {
     wordCount: number;
     effectiveWordCount: number;
@@ -657,7 +656,7 @@ export async function uploadTemplateReference(file: File, projectType?: string) 
   return fetchJson<{ success: boolean; reference: TemplateReferenceRecord }>('/api/template-references', { method: 'POST', body: formData });
 }
 
-export async function patchTemplateReference(id: string, patch: { projectType?: string; isPrimary?: boolean }) {
+export async function patchTemplateReference(id: string, patch: { projectType?: string }) {
   return fetchJson<{ success: boolean; reference: TemplateReferenceRecord }>('/api/template-references', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, ...patch }) });
 }
 
