@@ -439,7 +439,8 @@ function buildConstructionOrganizationGraph(projectGraph: ProjectGraph, files: P
     const fileName = segments[segments.length - 1] || '';
     const dirName = segments[segments.length - 2] || '';
     const name = (dirName.replace(/^\d+\s*/, '').trim() || fileName.replace(/\.xls$/iu, '').trim());
-    if (!name || /徽光阁项目施工|清单编制说明|图纸目录|可调整价差|汇总|一览表/u.test(name)) continue;
+    // 剔除非工作包目录：项目根目录常以“项目施工”结尾（如“X项目施工”），属总体泛化标签而非工作包
+    if (!name || /项目施工$|清单编制说明|图纸目录|可调整价差|汇总|一览表/u.test(name)) continue;
     if (!fileWorkNames.has(name)) fileWorkNames.set(name, []);
     fileWorkNames.get(name)!.push(file.relativePath);
   }

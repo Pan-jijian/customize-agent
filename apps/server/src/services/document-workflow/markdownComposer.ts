@@ -621,7 +621,7 @@ function requiredTableMarkdown(title: string) {
 }
 
 function hasProjectBasicInfoTable(markdown: string) {
-  return /项目基本信息/u.test(markdown) || /\|\s*信息项\s*\|\s*内容\s*\|/u.test(markdown) || /\|\s*项目名称\s*\|[^\n]*(?:徽光阁|项目施工|工程)/u.test(markdown);
+  return /项目基本信息/u.test(markdown) || /\|\s*信息项\s*\|\s*内容\s*\|/u.test(markdown) || /\|\s*项目名称\s*\|[^\n|]+\|/u.test(markdown);
 }
 
 function targetChapterTitleForTable(title: string) {
