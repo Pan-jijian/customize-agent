@@ -1,5 +1,11 @@
 # server
 
+## 4.2.8
+
+### Patch Changes
+
+- 修复 dev 模式下多路由 chunk 复制模块实例导致任务注册表与进程启动时刻不共享的问题：生成任务注册表挂到 globalThis 跨 chunk 共享，stale 判定增加宽限期豁免，避免首次运行模板的生成任务被轮询接口误判为“生成任务已中断”而直接失败
+
 ## 4.2.7
 
 ### Patch Changes
