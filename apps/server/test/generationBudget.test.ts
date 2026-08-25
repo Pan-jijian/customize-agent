@@ -71,10 +71,10 @@ describe('buildGenerationBudget', () => {
     expect(budget.reviewConcurrency).toBe(2);
   });
 
-  it('超长显式小节章降为单章并发', () => {
+  it('超长显式小节章降为三章并发（规划驱动管线后不再独占槽位）', () => {
     const { template, chapters } = makeTemplate(5);
     const budget = buildGenerationBudget({ template, chapters, targetWords: 12000, materialFileCount: 8, evidenceCount: 40, hasVeryLargeExplicitChapter: true, configuredChapterConcurrency: 0, strategy });
-    expect(budget.chapterConcurrency).toBe(1);
+    expect(budget.chapterConcurrency).toBe(3);
   });
 
   it('显式环境变量覆盖章节并发', () => {
@@ -88,6 +88,13 @@ describe('buildGenerationBudget', () => {
     const { template, chapters } = makeTemplate(3, '小型方案');
     const budget = buildGenerationBudget({ template, chapters, targetWords: 4000, materialFileCount: 5, evidenceCount: 20, hasVeryLargeExplicitChapter: false, configuredChapterConcurrency: 0, strategy: fastStrategy });
     expect(budget.reviewConcurrency).toBe(1);
+  });
+
+  it('审查流水线并发随全局 LLM 档位自适应（长文档升档）', () => {
+    const longStrategy = selectDocumentGenerationStrategy({ template: makeTemplate(9, '常规房建模板').template, targetWords: 100000, materialFileCount: 8, evidenceCount: 40 });
+    const { template, chapters } = makeTemplate(9, '常规房建模板');
+    const budget = buildGenerationBudget({ template, chapters, targetWords: 100000, materialFileCount: 8, evidenceCount: 40, hasVeryLargeExplicitChapter: false, configuredChapterConcurrency: 0, strategy: longStrategy });
+    expect(budget.reviewConcurrency).toBe(4);
   });
 
   it('证据预算区间随篇幅收缩', () => {

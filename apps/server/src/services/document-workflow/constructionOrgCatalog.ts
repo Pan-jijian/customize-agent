@@ -190,6 +190,18 @@ const CORE_MODULES: ConstructionOrgModule[] = [
     attachHints: ['应急', '预案', '救援', '安全', '保障', '措施'],
   },
   {
+    id: 'innovation-tech',
+    title: '新技术、新工艺、新材料、新设备的应用',
+    aliases: ['新技术', '新工艺', '新材料', '新设备', '四新技术', '科技创新', '四新'],
+    category: 'digital',
+    level: 'conditional',
+    sectionItems: ['新技术新工艺应用计划', '新材料应用与性能保障', '新设备投入与功效提升', '创新技术应用效果与实施保障'],
+    queries: ['新技术应用', '新工艺', '新材料', '新设备', '四新'],
+    facts: ['新技术要求', '新工艺要求', '新材料要求', '新设备要求'],
+    tableSections: ['新技术新工艺应用计划表'],
+    attachHints: ['技术', '创新', '保障', '措施', '质量', '工期'],
+  },
+  {
     id: 'digital-bim',
     title: 'BIM、智慧工地与创新加分模块',
     aliases: ['BIM', '智慧工地', '数字化', '智能监测', '创新加分', 'AI视频识别'],

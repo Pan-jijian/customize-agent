@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildConstructionOrgTablePlans, tablePlansPrompt } from '../src/services/document-workflow/constructionOrgTablePlan';
+import { buildConstructionOrgTablePlans, sectionTablePlans, tablePlanExecutionGaps, tablePlansPrompt, unassignedSectionTablePlans } from '../src/services/document-workflow/constructionOrgTablePlan';
 import type { DocumentTemplateChapter, ProjectGraph } from '../src/services/document-workflow/types';
 
 function chapter(id: string, title: string, sections: string[] = [], tableSections: string[] = []): DocumentTemplateChapter {
@@ -65,5 +65,59 @@ describe('construction organization table plan', () => {
 
     expect(secondPass.tablePlans?.map(plan => plan.title)).toContain('主要施工机械设备投入计划表');
     expect(secondPass.tablePlans?.map(plan => plan.title)).toContain('关键施工节点控制计划表');
+  });
+});
+
+describe('劳动力推导授权与表格执行核验', () => {
+  function resourcesChapter(): ReturnType<typeof buildConstructionOrgTablePlans>[number] {
+    return buildConstructionOrgTablePlans({
+      projectGraph: graph,
+      chapters: [chapter('c1', '资源配置计划', ['资源配置计划'])],
+    })[0];
+  }
+
+  it('labor plan headcount field uses deriveFromProject and generates derivation authorization', () => {
+    const resources = resourcesChapter();
+    const laborPlan = resources.tablePlans?.find(plan => plan.title === '分阶段劳动力动态投入计划表');
+    expect(laborPlan).toBeDefined();
+    const headcount = laborPlan!.fields.find(field => field.name === '人数');
+    expect(headcount?.fallbackPolicy).toBe('deriveFromProject');
+    // 表格治理规则必须给出推导授权，禁止“资料没有就不填”
+    expect(resources.tableRequirements?.join('、')).toContain('投标人计划编制类字段');
+    const prompt = tablePlansPrompt(resources);
+    expect(prompt).toContain('投标人编制类字段授权');
+    expect(prompt).toContain('必须推导并落到具体数字');
+  });
+
+  it('assigns table plans to matching section titles and reports unassigned plans', () => {
+    const resources = resourcesChapter();
+    const labor = sectionTablePlans(resources, '分阶段劳动力投入计划');
+    expect(labor.map(plan => plan.title)).toContain('分阶段劳动力动态投入计划表');
+    const unrelated = sectionTablePlans(resources, '施工平面布置');
+    expect(unrelated.map(plan => plan.title)).not.toContain('分阶段劳动力动态投入计划表');
+    // 所有小节都不承接时，应写表格全部进入兜底清单
+    const unassigned = unassignedSectionTablePlans(resources, ['与表格无关的小节']);
+    expect(unassigned.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('tablePlanExecutionGaps reports chapters where actual markdown tables fall far below planned', () => {
+    const resources = resourcesChapter();
+    const planned = (resources.tablePlans || []).filter(plan => plan.outputDecision?.shouldOutput).length;
+    expect(planned).toBeGreaterThanOrEqual(2);
+    const gaps = tablePlanExecutionGaps([resources], [{ title: '资源配置计划', content: '本章只有正文，没有 markdown 表格。' }]);
+    const gap = gaps.find(item => item.chapterTitle === '资源配置计划');
+    expect(gap).toBeDefined();
+    expect(gap!.planned).toBe(planned);
+    expect(gap!.actual).toBe(0);
+  });
+
+  it('tablePlanExecutionGaps passes chapters whose actual table count reaches the execution threshold', () => {
+    const resources = resourcesChapter();
+    const planned = (resources.tablePlans || []).filter(plan => plan.outputDecision?.shouldOutput).length;
+    const LF = String.fromCharCode(10);
+    const rows = Array.from({ length: Math.max(0, Math.ceil(planned * 0.6)) }, (_, index) => `| 表${index + 1} | 内容 |`);
+    const content = rows.map(row => `${row}${LF}| --- | --- |${LF}| 数据 | 数据 |`).join(LF);
+    const gaps = tablePlanExecutionGaps([resources], [{ title: '资源配置计划', content }]);
+    expect(gaps.find(item => item.chapterTitle === '资源配置计划')).toBeUndefined();
   });
 });

@@ -232,8 +232,8 @@ export async function repairMarkdownByQuality(input: { markdown: string; templat
       resolvedSignatures: [] as string[],
     };
   }
-  const configuredConcurrency = Number(process.env.DOCUMENT_QUALITY_REPAIR_CONCURRENCY || 2);
-  const concurrency = Math.max(1, Math.min(candidates.length || 1, Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : 2));
+  const configuredConcurrency = Number(process.env.DOCUMENT_QUALITY_REPAIR_CONCURRENCY || 4);
+  const concurrency = Math.max(1, Math.min(candidates.length || 1, Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : 4));
   const repairedById = new Map<string, string>();
   let patchCount = 0;
   for (let offset = 0; offset < candidates.length; offset += concurrency) {

@@ -87,6 +87,7 @@ function isHardExportBlockingIssue(issue: ValidationIssue) {
   if (/配置要求缺少必要内容/u.test(issue.message)) return issue.level === 'error';
   if (/小节内容补写未完成|空小节|小节只有标题|生成未完成/u.test(issue.message)) return true;
   if (/生成后事实反查失败/u.test(issue.message)) return false;
+  if (/工序规格冲突/u.test(issue.message)) return issue.level === 'error';
   if (/项目特点、重点、难点分析 正文不足|项目主要施工内容 正文不足/u.test(issue.message)) return true;
   if (/规划小节正文过短/u.test(issue.message)) return false;
   if (/事实一致性冲突：项目名称/u.test(issue.message)) return false;
@@ -110,7 +111,8 @@ export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentF
   const governedIssues = issues.map(classifyValidationIssue);
   const hardBlockingIssues = governedIssues.filter(issue => issue.level === 'error' && isHardExportBlockingIssue(issue));
   // 已生成实质正文时仍保留关键结构阻断（缺节、空小节、生成未达标、正文不足等），仅豁免其余软性门禁，避免质量门禁卡住交付。
-  const CRITICAL_BLOCK_RE = /缺少规划小节|小节生成未达标|小节内容补写未完成|空小节|小节只有标题|生成未完成|正文不足|主要施工内容小节缺失|部分章节生成失败|Writer 未完成|不得出现|疑似提示词指令标题|项目污染/u;
+  // 跨章一致性（含数值口径冲突与复核残留）是用户明确的低级错误红线，有正文时同样硬阻断
+  const CRITICAL_BLOCK_RE = /缺少规划小节|小节生成未达标|小节内容补写未完成|空小节|小节只有标题|生成未完成|正文不足|主要施工内容小节缺失|部分章节生成失败|Writer 未完成|不得出现|疑似提示词指令标题|项目污染|跨章一致性/u;
   const blockingIssues = hasBody ? hardBlockingIssues.filter(issue => CRITICAL_BLOCK_RE.test(issue.message)) : hardBlockingIssues;
   const checklist = [
     { key: 'no_errors', label: '无阻断级校验错误', passed: blockingIssues.length === 0 },
@@ -120,6 +122,8 @@ export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentF
     { key: 'chapter_evidence', label: '章节均具备证据', passed: chapters.every(chapter => chapter.evidence.length > 0) },
     { key: 'no_missing_content', label: '无资料未提供章节', passed: chapters.every(chapter => !chapter.content.includes('资料未提供')) },
     { key: 'no_project_contamination', label: '无项目污染和事实一致性阻断', passed: !issues.some(issue => issue.level === 'error' && EXPORT_GATE_PROJECT_CONTAMINATION_RE.test(issue.message) && isHardExportBlockingIssue(issue)) },
+    // 数字级口径不一致（建设规模/估算价/工期与资料不符）属低级错误，导出门禁必须拦截
+    { key: 'numeric_consistency', label: '跨章数值口径与资料一致', passed: !issues.some(issue => issue.level === 'error' && /跨章一致性冲突|跨章一致性缺口|跨章一致性复核/u.test(issue.message) && isHardExportBlockingIssue(issue)) },
   ];
   return { passed: blockingIssues.length === 0, blockingIssues, checklist };
 }
@@ -448,9 +452,11 @@ function gapForSection(chapterTitle: string, sectionTitle: string, level: 3 | 4,
   if (/项目基本信息|基本信息|工程概况|项目概况|工程概述|项目概述/u.test(sectionTitle) && (hasTable || bodyLength >= 40)) return undefined;
   // 附录A/B 由导出层按正文自动归集注入，不属于 Writer 成稿范围；只要带表格即视为有效，不参与正文完整度校验
   if (/^附录[一二三四五六七八九十A-Z\d]/u.test(sectionTitle) && hasTable) return undefined;
-  // 清单/配置类小节本体即表格清单（如危大工程控制清单、主要周转材料配置、危大工程全流程闭环管控表），表格数据行≥2 视为有效正文，避免误报“只有标题或表格无正文”
-  const listStyleSection = /清单|配置|汇总|一览|计划表|明细/u.test(sectionTitle) || /表[^，。；：\s]{0,6}$/u.test(sectionTitle);
-  if (hasTable && listStyleSection && tableDataRowCount(body) >= 2) return undefined;
+  // 表格载体小节：清单/配置/汇总/一览/明细类本体即表格清单，计划/进度/节点/安排类核心交付物即计划编排表格
+  // （如危大工程控制清单、主要周转材料配置、关键节点计划与责任分解、关键施工节点控制计划），
+  // 表格数据行≥2 即视为有效交付，与“只有标题无正文”区分，避免表格治理要求输出表格后反被“无正文”门禁阻断
+  const tableCarrierSection = /清单|配置|汇总|一览|明细|计划|进度|节点|安排/u.test(sectionTitle) || /表[^，。；：\s]{0,6}$/u.test(sectionTitle);
+  if (hasTable && tableCarrierSection && tableDataRowCount(body) >= 2) return undefined;
   if (hasTable && nonTableLength < 20) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: planned ? `${chapterTitle} 只有标题或表格无正文：${sectionTitle}` : `${chapterTitle} 小节只有标题或表格无正文：${sectionTitle}` };
   if (bodyLength >= 80 && nonTableLength >= 20) return undefined;
   if (bodyLength === 0) return { chapterTitle, sectionTitle, level, bodyLength, reason: 'empty', planned, message: `${chapterTitle} 空小节：${sectionTitle}` };
@@ -551,7 +557,8 @@ function scaledNumericValue(entry: { value: string; unit: string }) {
 // 总量口径词：只比对总量口径（总建筑面积/建设规模/总用地面积），
 // 子项口径（地上/地下/单栋）数值不同属正常分层，不视为冲突
 const SCALE_SCOPE_RE = /总建筑面积|总建设规模|建设规模|总用地面积|总占地面积/u;
-const SCALE_UNIT_RE = /㎡|m²|平方米/u;
+// 面积单位归一化：扫描文本先行归一，m2（ASCII 数字）与 ㎡/m²/平方米 同口径（历史漏报根因：正文混写 m2 与 ㎡）
+const SCALE_UNIT_RE = /㎡|m²|m2|平方米/u;
 const COST_SCOPE_RE = /合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|工程总投资|总投资|工程造价/u;
 const COST_UNIT_RE = /万元|亿元/u;
 
@@ -566,14 +573,15 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
     if (expectedDuration && conflicting.length >= 2) issues.push({ level: 'warning', message: `跨章一致性冲突：正文出现与资料工期不一致的表述 ${conflicting.slice(0, 6).join('、')}`, suggestion: `请统一使用资料中的工期口径：${expectedSchedule}` });
   }
   if (expectedQuality && !/质量标准|质量目标|合格|优良/u.test(markdown)) issues.push({ level: 'error', message: '跨章一致性缺口：正文未稳定体现资料中的质量目标', suggestion: `请在工程概况、质量保证和验收相关章节统一体现：${expectedQuality}` });
-  // 建设规模口径冲突：资料中的总量面积与正文同口径数值比对，出现 2 个以上不同取值才报警（单一差异可能是表述误差）
+  // 建设规模口径冲突：资料中的总量面积与正文同口径数值比对；
+  // 与裁决口径不符的取值出现 1 次即判定冲突（数字级不一致是低级错误，不得以“表述误差”放过），error 级进入修复链
   const expectedScale = factsModel.project.map(normalizedFactValue).find(value => /建设规模|建筑面积|占地面积|用地面积/u.test(value));
   if (expectedScale) {
     const scaleMain = scopedNumericEntries(expectedScale, SCALE_SCOPE_RE, SCALE_UNIT_RE)[0];
     const scaleMatches = scopedNumericEntries(markdown, SCALE_SCOPE_RE, SCALE_UNIT_RE);
     if (scaleMain) {
       const scaleConflicts = scaleMatches.filter(entry => scaledNumericValue(entry) !== scaledNumericValue(scaleMain));
-      if (scaleConflicts.length >= 2) issues.push({ level: 'warning', message: `跨章一致性冲突：正文出现与资料建设规模不一致的表述 ${scaleConflicts.slice(0, 6).map(entry => `${entry.value}${entry.unit}`).join('、')}`, suggestion: `请统一使用资料中的建设规模口径：${expectedScale.slice(0, 80)}` });
+      if (scaleConflicts.length >= 1) issues.push({ level: 'error', message: `跨章一致性冲突：正文出现与资料建设规模不一致的表述 ${scaleConflicts.slice(0, 6).map(entry => `${entry.value}${entry.unit}`).join('、')}`, suggestion: `请统一使用资料中的建设规模口径：${expectedScale.slice(0, 80)}` });
     }
   }
   // 合同估算价口径冲突：估算价/最高限价等金额口径在正文中不得出现多个互相矛盾的取值
@@ -583,7 +591,71 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
     const costMatches = scopedNumericEntries(markdown, COST_SCOPE_RE, COST_UNIT_RE);
     if (costMain) {
       const costConflicts = costMatches.filter(entry => scaledNumericValue(entry) !== scaledNumericValue(costMain));
-      if (costConflicts.length >= 2) issues.push({ level: 'warning', message: `跨章一致性冲突：正文出现与资料估算价不一致的表述 ${costConflicts.slice(0, 6).map(entry => `${entry.value}${entry.unit}`).join('、')}`, suggestion: `请统一使用资料中的估算价口径：${expectedCost.slice(0, 80)}` });
+      if (costConflicts.length >= 1) issues.push({ level: 'error', message: `跨章一致性冲突：正文出现与资料估算价不一致的表述 ${costConflicts.slice(0, 6).map(entry => `${entry.value}${entry.unit}`).join('、')}`, suggestion: `请统一使用资料中的估算价口径：${expectedCost.slice(0, 80)}` });
+    }
+  }
+  return issues;
+}
+
+// ===== 工序规格冲突扫描 =====
+// 资料中明确的结构层规格（找平层/防水层等配比与厚度）被正文改写为其他数值时，属低级错误，
+// 必须确定性拦截（历史缺陷：屋面找平层资料 1:2.5+20mm 被正文写成 1:3+15mm）
+
+function layeredSpecEntries(text: string) {
+  const entries: Array<{ layer: string; ratio?: string; thickness?: number }> = [];
+  const seen = new Set<string>();
+  const LAYER_RE = /找平层|抹灰层|防水层|保温层|结合层|垫层|面层|粘结层|隔热层|隔离层/gu;
+  for (const match of text.matchAll(LAYER_RE)) {
+    const layer = match[0];
+    const windowText = text.slice(Math.max(0, match.index - 60), Math.min(text.length, match.index + 90));
+    const ratio = windowText.match(/(\d+:\d+(?:\.\d+)?)/u)?.[1];
+    const thicknessMatch = windowText.match(/(\d+(?:\.\d+)?)\s*mm/u);
+    const thickness = thicknessMatch ? Number(thicknessMatch[1]) : undefined;
+    const key = `${layer}|${ratio || ''}|${thickness ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push({ layer, ratio, thickness });
+  }
+  return entries;
+}
+
+export function processSpecConflictIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const sourceText = [
+    ...factsModel.specifications,
+    ...factsModel.quality,
+    ...factsModel.preciseFacts,
+    ...factsModel.bills,
+  ].map(normalizedFactValue).join('\n');
+  const sourceEntries = layeredSpecEntries(sourceText);
+  if (sourceEntries.length === 0) return issues;
+  // 资料侧同一结构层出现多个不同规格时口径不唯一，跳过该层（无法确定性裁决）
+  const sourceByLayer = new Map<string, typeof sourceEntries>();
+  for (const entry of sourceEntries) {
+    const list = sourceByLayer.get(entry.layer) || [];
+    list.push(entry);
+    sourceByLayer.set(entry.layer, list);
+  }
+  const bodyEntries = layeredSpecEntries(markdown);
+  const reported = new Set<string>();
+  for (const [layer, sources] of sourceByLayer) {
+    const sourceRatios = [...new Set(sources.map(entry => entry.ratio).filter(Boolean))];
+    const sourceThicknesses = [...new Set(sources.map(entry => entry.thickness).filter((value): value is number => Number.isFinite(value)))];
+    for (const body of bodyEntries.filter(entry => entry.layer === layer)) {
+      if (sourceRatios.length === 1 && body.ratio && body.ratio !== sourceRatios[0]) {
+        const key = `ratio|${layer}|${body.ratio}`;
+        if (!reported.has(key)) {
+          reported.add(key);
+          issues.push({ level: 'error', message: `工序规格冲突：正文${layer}配比 ${body.ratio} 与资料口径 ${sourceRatios[0]} 不一致`, suggestion: `请将${layer}配比统一为资料口径 ${sourceRatios[0]}，禁止改写资料规格。` });
+        }
+      }
+      if (sourceThicknesses.length === 1 && Number.isFinite(body.thickness) && Math.abs((body.thickness as number) - sourceThicknesses[0]) >= 1) {
+        const key = `thickness|${layer}|${body.thickness}`;
+        if (!reported.has(key)) {
+          reported.add(key);
+          issues.push({ level: 'error', message: `工序规格冲突：正文${layer}厚度 ${body.thickness}mm 与资料口径 ${sourceThicknesses[0]}mm 不一致`, suggestion: `请将${layer}厚度统一为资料口径 ${sourceThicknesses[0]}mm。` });
+        }
+      }
     }
   }
   return issues;
@@ -626,15 +698,18 @@ function trustedFactCorpus(factsModel: DocumentFactsModel) {
   ].map(normalizedFactValue).join('\n');
 }
 
-function generatedFactTokenClass(token: string, context: string): 'hard' | 'soft' {
+function generatedFactTokenClass(token: string, context: string): 'scope' | 'spec' | 'soft' {
   const normalized = `${token} ${context}`;
   if (/三检制|三级|5S|24\s*小时|每日|每周|每月|一次|两次|责任制|制度/u.test(normalized)) return 'soft';
-  if (/总工期|计划工期|合同工期|日历天/u.test(normalized)) return 'hard';
-  if (/最高投标限价|招标控制价|合同估算价|投资估算|报价|金额|万元|元/u.test(normalized)) return 'hard';
-  if (/(?:工程量|清单|建设规模|建筑面积|长度|材料|设备|规格|型号).{0,24}(?:m²|㎡|m3|m³|米|吨|套|台|个|项|%)/u.test(normalized)) return 'hard';
+  // 项目总量口径（工期/金额/建设规模）：正文偏离资料口径属低级错误，升级为 error 走修复链
+  if (/总工期|计划工期|合同工期|日历天/u.test(normalized)) return 'scope';
+  if (/最高投标限价|招标控制价|合同估算价|投资估算|报价|金额|万元|元/u.test(normalized)) return 'scope';
+  if (/(?:建设规模|总建筑面积|总用地面积|总占地面积).{0,16}(?:m²|㎡|m2|平方米)/u.test(normalized)) return 'scope';
+  // 工程量/材料/设备规格明细：与资料口径不符时提示复核（规格细节较多，warning 级避免误伤）
+  if (/(?:工程量|清单|建设规模|建筑面积|长度|材料|设备|规格|型号).{0,24}(?:m²|㎡|m3|m³|米|吨|套|台|个|项|%)/u.test(normalized)) return 'spec';
   // 国家标准/行业标准/地方标准编号是通用引用，不是项目特有事实，降级为 soft
   if (/GB\s*\d|JGJ\s*\d|CJJ\s*\d|ISO\s*\d|GB\/T|CECS\s*\d|DL\s*\d|YB\s*\d|SH\s*\d|SJ\/T\s*\d|CJJ\/T\s*\d|DB\s*\d/u.test(normalized)) return 'soft';
-  if (/标准|规范|编号/u.test(normalized)) return 'hard';
+  if (/标准|规范|编号/u.test(normalized)) return 'spec';
   return 'soft';
 }
 
@@ -643,19 +718,24 @@ export function generatedFactVerificationIssues(markdown: string, factsModel: Do
   if (documentTextLength(corpus) < 80) return [];
   const issues: ValidationIssue[] = [];
   const compactCorpus = normalizeEngineeringTextForFactMatch(corpus);
-  const hardSuspicious: string[] = [];
+  const scopeSuspicious: string[] = [];
+  const specSuspicious: string[] = [];
   const softSuspicious: string[] = [];
   for (const token of extractEngineeringMeasureTokens(markdown)) {
     const normalizedToken = normalizeEngineeringTextForFactMatch(token);
     const tokenIndex = markdown.indexOf(token);
     const context = tokenIndex >= 0 ? markdown.slice(Math.max(0, tokenIndex - 36), Math.min(markdown.length, tokenIndex + token.length + 36)) : markdown;
     const tokenClass = generatedFactTokenClass(token, context);
-    if (tokenClass === 'hard' && !compactCorpus.includes(normalizedToken)) hardSuspicious.push(token);
+    if (tokenClass === 'scope' && !compactCorpus.includes(normalizedToken)) scopeSuspicious.push(token);
+    if (tokenClass === 'spec' && !compactCorpus.includes(normalizedToken)) specSuspicious.push(token);
     if (tokenClass === 'soft' && !compactCorpus.includes(normalizedToken)) softSuspicious.push(token);
   }
-  const uniqueHardSuspicious = [...new Set(hardSuspicious)];
+  const uniqueScopeSuspicious = [...new Set(scopeSuspicious)];
+  const uniqueSpecSuspicious = [...new Set(specSuspicious)];
   const uniqueSoftSuspicious = [...new Set(softSuspicious)];
-  if (uniqueHardSuspicious.length >= 2) issues.push({ level: 'warning', message: `生成后事实反查提示：正文出现资料事实主表中未找到的关键数字 ${uniqueHardSuspicious.slice(0, 8).join('、')}`, suggestion: '建议复核这些数字是否来自管理制度、规范要求或资料事实；如无依据，改为定性管理要求。' });
+  // 总量口径类硬数字反查失败：error 级进入修复链（消息前缀匹配 REPAIRABLE_QUALITY_ISSUE_RE 的“生成后事实反查失败”）
+  if (uniqueScopeSuspicious.length >= 1) issues.push({ level: 'error', message: `生成后事实反查失败：正文出现资料事实主表中未找到的总量口径数字 ${uniqueScopeSuspicious.slice(0, 8).join('、')}`, suggestion: '总量口径数字（工期/金额/建设规模）必须与资料一致；请删除或改写为资料确认的口径，禁止编造。' });
+  if (uniqueSpecSuspicious.length >= 2) issues.push({ level: 'warning', message: `生成后事实反查提示：正文出现资料事实主表中未找到的规格明细数字 ${uniqueSpecSuspicious.slice(0, 8).join('、')}`, suggestion: '建议复核这些规格是否来自管理制度、规范要求或资料事实；如无依据，改为定性管理要求。' });
   if (uniqueSoftSuspicious.length >= 6) issues.push({ level: 'warning', message: `生成后事实反查提示：正文出现较多未在资料事实主表中反查到的管理数字 ${uniqueSoftSuspicious.slice(0, 10).join('、')}`, suggestion: '请确认这些管理数字属于通用制度、规范要求或项目资料事实；如无依据，建议改为定性管理要求。' });
   if (/质量目标|质量标准/u.test(markdown) && factsModel.quality.length > 0 && !factsModel.quality.some(fact => markdown.includes(stringifyFactValue(fact.value).slice(0, 18)))) issues.push({ level: 'warning', message: '生成后事实反查提示：正文质量目标表述未明显匹配质量事实主表', suggestion: '请使用资料中的质量目标原文或等价表述。' });
   return issues;

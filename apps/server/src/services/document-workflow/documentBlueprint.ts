@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import { constructionOrgBlueprintRuleLines, constructionOrgProjectTypePrompt } from './constructionOrgQualityRules';
-import type { DocumentFact, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter } from './types';
+import type { DocumentFact, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict } from './types';
 import { stringifyFactValue } from './utils';
 import { selectByScore, factImportanceScore } from './selection';
 
@@ -95,7 +95,17 @@ export function chapterTaskCardLine(chapter: DocumentTemplateChapter) {
   return [`章节任务卡：${chapter.title}`, `   - 必须覆盖事实域：${factCoverageTargetsForTitle(chapter.title).join('、')}`, ...professionalPointsForTitle(chapter.title).map(point => `   - ${point}`), ...(chapter.sections || []).slice(0, 10).map(section => `   - 小节任务：${section}｜${professionalPointsForTitle(section).join('；')}`), ...chapterTablePlanLines(chapter), ...constructionOrgBlueprintRuleLines(chapter)].join('\n');
 }
 
-export function buildDocumentBlueprintContext(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string; referenceLines?: string[] }) {
+function numericScopeConflictLines(scopeConflicts: NumericScopeConflict[]) {
+  return scopeConflicts.map(conflict => {
+    const sourceList = conflict.values.map(item => `${item.value}${item.unit}（来源：${item.sourceFile ? path.basename(item.sourceFile) : '未知'}）`).join('、');
+    const rule = conflict.resolution
+      ? `裁决口径：${conflict.resolution}（按资料来源优先级裁决）。全文必须统一使用该数值，禁止出现其他取值或换算后不等价的表述。`
+      : `多个来源优先级相同且取值不一致，无法自动裁决：请以澄清/补疑类文件为准；若仍无法确定，在正文中只采用其中一处取值并在概况中注明，其余章节保持一致，禁止混写。`;
+    return `- ${conflict.scope}：${sourceList}。${rule}`;
+  });
+}
+
+export function buildDocumentBlueprintContext(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string; referenceLines?: string[]; scopeConflicts?: NumericScopeConflict[] }) {
   // 去重后按重要性评分排序，保留最重要的核心事实（而非静默截断）
   const uniqueFacts = [
     ...input.factsModel.project,
@@ -141,6 +151,7 @@ export function buildDocumentBlueprintContext(input: { template: DocumentTemplat
     constructionOrgProjectPrompt,
     '证据引用约束：工期、质量目标、招标范围、金额、工程量、验收要求等项目专属事实必须来自可信基础事实主表或绑定材料，系统暂未确认的数字和参数不得编造；标准规范编号、法律法规名称属于公共专业知识，可依据现行有效版本直接引用，不要求材料提供，但不得虚构编号或引用已废止版本。',
     '跨章一致性要求：所有章节必须共用同一套工期、质量、范围、资源和验收口径；不得在不同章节写出相互矛盾的项目基础信息。',
+    ...(input.scopeConflicts?.length ? [`【源级口径冲突裁决（最高优先级约束）】资料文件中存在同口径数值冲突，必须按下述裁决执行：\n${numericScopeConflictLines(input.scopeConflicts).join('\n')}`] : []),
     ...(input.referenceLines?.length ? [`同类工程质量参考（软性参考，事实仍以知识库证据为准）：\n${input.referenceLines.join('\n')}`] : []),
     `章节专业任务卡：\n${chapterLines.join('\n')}`,
     `章节实施方案：\n${executionPlans.join('\n')}`,

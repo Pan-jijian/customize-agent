@@ -1,5 +1,6 @@
 import type { AgentWorkflowContext, AgentWorkflowNode } from './agentWorkflow';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentTemplate, DocumentTemplateChapter, ProjectGraph, ValidationIssue } from './types';
+import type { PlannedChapterStructure } from './chapterPlanner';
 import { extractSection, stableHash, stringifyFactValue } from './utils';
 import { documentTextLength } from './budget';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
@@ -179,7 +180,7 @@ export function planDocument(input: { template: DocumentTemplate; context: Agent
   };
   return {
     plan,
-    node: { id: 'document-planner', type: 'document_planner', status: 'completed', startedAt, completedAt: Date.now(), outputSummary: `${chapters.length} 章、${chapters.reduce((sum, item) => sum + item.sections.length, 0)} 个小节任务`, metrics: { chapters: chapters.length } },
+    node: { id: 'document-planner', type: 'document_planner', status: 'completed', startedAt, completedAt: Date.now(), outputSummary: `${chapters.length} 章、${chapters.reduce((sum, item) => sum + item.sections.length, 0)} 条细目任务`, metrics: { chapters: chapters.length } },
   };
 }
 
@@ -211,7 +212,7 @@ export function planChapterTask(input: { plan: AgentDocumentPlan; chapter: Docum
   };
   return {
     task,
-    node: { id: `chapter-task-${input.chapter.id}`, type: 'chapter_task_planner', status: task.ready ? 'completed' : 'failed', startedAt, completedAt: Date.now(), outputSummary: `${task.sections.filter(item => item.ready).length}/${task.sections.length} 个小节任务就绪`, metrics: { facts: task.facts.length, evidence: task.evidence.length, issues: issues.length }, issues },
+    node: { id: `chapter-task-${input.chapter.id}`, type: 'chapter_task_planner', status: task.ready ? 'completed' : 'failed', startedAt, completedAt: Date.now(), outputSummary: `${task.sections.filter(item => item.ready).length}/${task.sections.length} 条细目任务就绪`, metrics: { facts: task.facts.length, evidence: task.evidence.length, issues: issues.length }, issues },
   };
 }
 
@@ -229,6 +230,29 @@ export function chapterTaskPrompt(task: AgentChapterTask) {
   ].filter(Boolean).join('\n\n');
 }
 
+/**
+ * 规划驱动模式的章节任务提示：章级 Planner 已把细目重排为「三级主题块 + 语义合并后的 H4 要点」，
+ * 成稿必须遵循主题块结构，不得为每条输入细目单独开设标题（否则会重新碎片化）。
+ */
+export function chapterTaskPromptForPlannedStructure(task: AgentChapterTask, structure: PlannedChapterStructure) {
+  const factLines = task.facts.slice(0, 18).map(fact => `- ${fact.key}：${factValue(fact)}${fact.sourceFile ? `（来源：${fact.sourceFile}）` : ''}`).join('\n');
+  const blockLines = structure.blocks.map((block, blockIndex) => {
+    const pointLines = block.subPoints.map(point => (point.sources.length > 1
+      ? `  - #### ${point.title}（覆盖评分细目：${point.sources.join('、')}）`
+      : `  - #### ${point.title}`)).join('\n');
+    return `${blockIndex + 1}. 必须输出三级标题：### ${block.title}\n${pointLines}`;
+  }).join('\n');
+  return [
+    '【Agent 章节任务】（主题块成稿模式）',
+    `任务ID：${task.taskId}`,
+    `章节：${task.title}`,
+    task.graphContext ? `图谱上下文：\n${task.graphContext}` : '',
+    factLines ? `事实卡：\n${factLines}` : '',
+    `主题块与 H4 要点（必须严格按此两层结构成稿）：\n${blockLines}`,
+    '写作要求：必须严格按“主题块→H4 要点”两层结构输出，三级标题与 H4 要点标题必须与给定标题完全一致，不得改名、合并或遗漏 H4 要点；每个 H4 要点必须覆盖其标注的全部评分细目内容，但不得为这些评分细目单独开设小节标题；项目专属事实只使用事实卡、图谱上下文和绑定证据，法律法规、标准规范等公共知识可直接引用；不得输出后台话术、兜底措辞、待确认、不适用；缺少项目事实的小节不得编造。',
+  ].filter(Boolean).join('\n\n');
+}
+
 function actionableReviewFact(fact: DocumentFact) {
   const value = factValue(fact);
   if (!value || value.length < 3) return false;
@@ -238,7 +262,7 @@ function actionableReviewFact(fact: DocumentFact) {
 }
 
 
-export function reviewChapterDraft(input: { task: AgentChapterTask; draft: DocumentDraftChapter; context: AgentWorkflowContext }): AgentReviewResult {
+export function reviewChapterDraft(input: { task: AgentChapterTask; draft: DocumentDraftChapter; context: AgentWorkflowContext; plannedCoverage?: Record<string, string[]> }): AgentReviewResult {
   const issues: ValidationIssue[] = [];
   const content = input.draft.content || '';
   for (const phrase of FORMAL_FORBIDDEN_PHRASES) {
@@ -247,25 +271,64 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
   // P0-2：LLM 全故障时的证据骨架草稿必须被 Review 门禁拦截，不允许以模板拼接正文静默通过
   if (content.includes('[EVIDENCE_SKELETON]')) issues.push({ level: 'error', severity: 'blocker', category: 'evidence_coverage', owner: 'system', message: `${input.draft.title} 正文为 LLM 全故障后的证据骨架草稿，禁止作为正式正文通过`, suggestion: '必须由 Repairer 基于小节事实卡与证据完整重写为正式正文，并删除 [EVIDENCE_SKELETON] 标记；若 LLM 仍不可用，本章节保持 failed 阻断。' });
   const chapterLength = documentTextLength(content);
+  // 规划驱动模式：细目按覆盖映射表定位承接的 H4 小节（标题可能已被语义重写），
+  // 不再要求正文出现与细目同名的标题，避免把真合并误判为缺节并触发重新拆节
+  const plannedCoverage = input.plannedCoverage;
+  const sectionAnchor = (sectionTitle: string) => {
+    const anchors = plannedCoverage?.[sectionTitle];
+    return anchors && anchors.length > 0 ? anchors[0] : sectionTitle;
+  };
+  // 承接小节被多条细目共享才算语义合并（1:1 但标题重写不算），合并后单细目深度阈值按组内共享放宽
+  const anchorSectionCount = new Map<string, number>();
+  for (const anchors of Object.values(plannedCoverage || {})) {
+    if (anchors.length > 0) anchorSectionCount.set(anchors[0], (anchorSectionCount.get(anchors[0]) || 0) + 1);
+  }
+  const mergedSection = (sectionTitle: string) => {
+    const anchors = plannedCoverage?.[sectionTitle];
+    if (!anchors || anchors.length === 0) return false;
+    return (anchorSectionCount.get(anchors[0]) || 1) > 1;
+  };
+  // 同一承接小节被多条细目共享时，深度检查只做一次（按组内最大最小深度要求）
+  const anchorDepthCheck = new Map<string, number>();
+  const anchorDepthChecked = new Set<string>();
   for (const section of input.task.sections) {
-    const body = extractSection(content, section.title, { fuzzy: true });
-    if (body.includes('[WRITER_MISSING_SECTION]') || (!body && content.includes('[WRITER_MISSING_SECTION]'))) issues.push({ level: 'error', severity: 'blocker', category: 'structure', owner: 'system', message: `${section.title} Writer 未完成`, suggestion: 'Repairer 必须基于该小节事实卡和证据生成正式正文，并删除 WRITER_MISSING_SECTION 标记。' });
-    else if (body && documentTextLength(body) < section.minChars) {
+    const anchor = sectionAnchor(section.title);
+    const merged = mergedSection(section.title);
+    const previous = anchorDepthCheck.get(anchor);
+    anchorDepthCheck.set(anchor, previous === undefined ? section.minChars : Math.max(previous, section.minChars));
+  }
+  for (const section of input.task.sections) {
+    const anchor = sectionAnchor(section.title);
+    const merged = mergedSection(section.title);
+    const body = extractSection(content, anchor, { fuzzy: true });
+    if (body.includes('[WRITER_MISSING_SECTION]') || (!body && content.includes('[WRITER_MISSING_SECTION]'))) {
+      // 同一承接小节被多条细目共享时只报一次（merged 组内重复修复指令会浪费 Repairer 轮次）
+      if (!anchorDepthChecked.has(anchor)) {
+        anchorDepthChecked.add(anchor);
+        issues.push({ level: 'error', severity: 'blocker', category: 'structure', owner: 'system', message: merged ? `${anchor} Writer 未完成（承接 ${section.title}）` : `${section.title} Writer 未完成`, suggestion: 'Repairer 必须基于该小节事实卡和证据生成正式正文，并删除 WRITER_MISSING_SECTION 标记。' });
+      }
+    }
+    else if (body && !anchorDepthChecked.has(anchor)) {
+      anchorDepthChecked.add(anchor);
+      const anchorMinChars = anchorDepthCheck.get(anchor) || section.minChars;
+      // 语义合并后共享同一承接小节：单细目深度阈值放宽至 50%（整块字数由块级写手质检兜底）
+      const threshold = merged ? Math.max(200, Math.floor(anchorMinChars * 0.5)) : anchorMinChars;
       const criticalDepth = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试|见证取样/u.test(section.title);
       // 容忍线与 Final Gate blocker 口径一致（minChars × 0.8）：低于该线必须触发深度修复，
       // 否则 0.7~0.8 之间的深度缺口会被 Reviewer 放过、被 Final Gate 阻断，修复机会浪费在最终门禁上
-      const nearEnough = documentTextLength(body) >= Math.floor(section.minChars * 0.8);
-      issues.push({ level: criticalDepth && !nearEnough ? 'error' : 'warning', severity: criticalDepth && !nearEnough ? 'blocker' : 'warning', category: 'structure', owner: 'system', message: `${section.title} 正文不足，未达到任务最小深度`, suggestion: criticalDepth ? '关键小节必须基于项目事实和对应关系重写补足；不得仅保留概述性文字。' : '应基于该小节事实卡和证据重新生成，不得使用标题占位。' });
-    } else if (!body) {
+      const nearEnough = documentTextLength(body) >= Math.floor(threshold * 0.8);
+      issues.push({ level: criticalDepth && !nearEnough ? 'error' : 'warning', severity: criticalDepth && !nearEnough ? 'blocker' : 'warning', category: 'structure', owner: 'system', message: merged ? `${anchor} 正文不足，未达到任务最小深度（承接 ${section.title}）` : `${section.title} 正文不足，未达到任务最小深度`, suggestion: criticalDepth ? '关键小节必须基于项目事实和对应关系重写补足；不得仅保留概述性文字。' : '应基于该小节事实卡和证据重新生成，不得使用标题占位。' });
+    } else if (!body && !anchorDepthChecked.has(anchor)) {
+      anchorDepthChecked.add(anchor);
       const criticalDepth = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试|见证取样/u.test(section.title);
       // 规划小节完全无正文时必须报告：之前章节正文足够长时空小节会被静默跳过，导致导出后出现只有标题的空小节；
       // 不依赖 sectionHasSemanticCoverage 兜底，因为相邻小节标题（如“主要分部分项工程施工流程”）会命中关键词造成误判。
-      issues.push({ level: criticalDepth ? 'error' : 'warning', severity: criticalDepth ? 'blocker' : 'warning', category: 'structure', owner: 'system', message: criticalDepth ? `${section.title} 正文不足，未达到任务最小深度` : `${section.title} 未匹配到独立小节标题`, suggestion: criticalDepth ? '关键小节缺失正文，必须基于该小节事实卡和证据生成正式正文，不得以标题占位。' : '正文已成文但小节标题与规划标题不完全一致，建议后续按规划标题进一步规范结构。' });
+      issues.push({ level: criticalDepth ? 'error' : 'warning', severity: criticalDepth ? 'blocker' : 'warning', category: 'structure', owner: 'system', message: criticalDepth ? `${section.title} 正文不足，未达到任务最小深度` : `${merged ? `承接小节 ${anchor} 缺失` : section.title} 未匹配到独立小节标题`, suggestion: criticalDepth ? '关键小节缺失正文，必须基于该小节事实卡和证据生成正式正文，不得以标题占位。' : '正文已成文但小节标题与规划标题不完全一致，建议后续按规划标题进一步规范结构。' });
     }
     if (!section.ready) issues.push(...section.issues.map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const })));
     // 施工方法类小节参数落位综合检查：工艺参数（mm/MPa/间距/偏差等）不足、或量化参数密度低于每千字 2 个时触发 Repairer 定向补写（设备型号规格参数同样计入）
     if (/主要分部分项工程施工方案|主要施工方法/u.test(section.title)) {
-      const methodBody = extractSection(content, section.title, { fuzzy: true });
+      const methodBody = extractSection(content, anchor, { fuzzy: true });
       const bodyChars = documentTextLength(methodBody);
       const paramCount = new Set([...(methodBody.match(PROCESS_PARAMETER_RE) || []), ...(methodBody.match(DEVICE_SPEC_RE) || [])]).size;
       const quantifiedCount = new Set(methodBody.match(QUANTIFIED_BODY_PARAM_RE) || []).size;
@@ -274,7 +337,7 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
     }
     // 工序链箭头密度：方法类/流程类小节必须用“→”串联工序链，避免纯文字流程叙述拉低整体箭头密度
     if (/主要分部分项工程施工方案|主要施工方法|项目主要施工内容|施工流程|施工顺序|多工序穿插|三检制度|隐蔽工程验收|闭环整改|应急演练|转运路线/u.test(section.title)) {
-      const methodBody = extractSection(content, section.title, { fuzzy: true });
+      const methodBody = extractSection(content, anchor, { fuzzy: true });
       const arrowCount = (methodBody.match(/→/gu) || []).length;
       if (documentTextLength(methodBody) >= 500 && arrowCount < 3) issues.push({ level: 'warning', severity: 'warning', category: 'professional_chain', owner: 'system', message: `${section.title} 工序链箭头缺失：当前 ${arrowCount} 个“→”，工序序列未按箭头链表达`, suggestion: '工艺流程与方法叙述中的连续工序必须用“→”串联（如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”），每条链不少于 3 个环节，方法叙述中同样需要箭头链。' });
     }
@@ -297,13 +360,17 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
   return { issues, supportedFacts, unsupportedSignals: issues.map(issue => issue.message), repairable: issues.length > 0 && (issues.length <= 6 || depthIssues.length === issues.length || blockingIssues.length === 0 || hasFixableBlocking) };
 }
 
-export function buildTargetedRepairInstruction(input: { task: AgentChapterTask; review: AgentReviewResult }) {
+export function buildTargetedRepairInstruction(input: { task: AgentChapterTask; review: AgentReviewResult; plannedMode?: boolean }) {
   if (!input.review.repairable) return '';
+  // 规划驱动模式：只修复列出的问题并保持主题块+H4 两层结构，不附「逐条 ### 输出细目」指令，防止修复时重新拆节
+  const plannedConstraint = input.plannedMode
+    ? '【结构约束】本章采用主题块成稿模式，必须保持现有三级主题块与 H4 要点标题不变；只修复列出的问题，不得新增小节、不得拆分或合并现有小节、不得把评分细目展开为独立标题。'
+    : chapterTaskPrompt(input.task);
   return [
     '【Agent 定向修复任务】',
     `章节：${input.task.title}`,
     '只修复下列问题，不重写无关内容；如果问题是小节正文不足，必须按原小节标题完整补足该小节正式正文，每个小节不得少于任务最小深度：',
     ...input.review.issues.map(issue => `- ${issue.message}；${issue.suggestion || ''}`),
-    chapterTaskPrompt(input.task),
+    plannedConstraint,
   ].join('\n');
 }

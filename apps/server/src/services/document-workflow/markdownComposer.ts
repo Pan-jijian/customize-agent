@@ -8,7 +8,7 @@ export function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
   return markdown.replace(/^!\[[^\]]*(?:图纸|drawing|cad|地图|平面|剖面|立面)[^\]]*\]\([^)]*\)\s*$/gimu, '').replace(/\n{3,}/gu, '\n\n');
 }
 
-export const WORKFLOW_PHRASE_RE = /^.*(?:知识库证据|知识库已确认事实|资料类型|提示词角色|后台自动规范|规范包|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|校验结果|修复任务包|修复类型|修复对象|输出要求|当前项目绑定资料|已召回证据|证据边界|可审查草稿|Reviewer|Repairer).*$(?:\n)?|^.*本节围绕.+确保各项措施与本工程实施条件相匹配。?\s*$(?:\n)?|^.*建立施工准备、过程控制、检查验收和资料归档要求.*$(?:\n)?|^.*形成责任明确、过程可控、资料完整的管理闭环。?\s*$(?:\n)?|^.*确保现场管理要求与施工进度、资源组织和验收节点同步推进。?\s*$(?:\n)?|^\s*(?:管理闭环|责任明确、过程可控、资料完整|与本工程实施条件相匹配)[。；;]?\s*$(?:\n)?/gmu;
+export const WORKFLOW_PHRASE_RE = /^.*(?:知识库证据|知识库已确认事实|资料类型|提示词角色|后台自动规范|规范包|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|校验结果|修复任务包|修复类型|修复对象|输出要求|当前项目绑定资料|已召回证据|证据边界|可审查草稿|Reviewer|Repairer).*$(?:\s)?|^.*本节围绕.+确保各项措施与本工程实施条件相匹配。?\s*$(?:\s)?|^.*建立施工准备、过程控制、检查验收和资料归档要求.*$(?:\s)?|^.*形成责任明确、过程可控、资料完整的管理闭环。?\s*$(?:\s)?|^.*确保现场管理要求与施工进度、资源组织和验收节点同步推进。?\s*$(?:\s)?|^\s*(?:管理闭环|责任明确、过程可控、资料完整|与本工程实施条件相匹配)[。；;]?\s*$(?:\s)?/gmu;
 const RAW_SOURCE_LINE_RE = /^\s*(?:#{1,6}\s*)?(?:PDF\s*第\s*\d+\s*页|rule\b|文件[:：]|片段[:：]|来源[:：]).*$/gimu;
 const ASCII_FLOW_LINE_RE = /^\s*(?:[│┃┆┊┌┐└┘├┤┬┴┼─━╭╮╰╯]|[↓↑→←⇒⇨➡])+\s*$/gmu;
 const INSTRUCTION_HEADING_RE = /^#{2,6}\s+(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用)|^#{2,6}\s+(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:如|若|如果)(?:涉及|不涉及|适用|不适用)|^#{2,6}\s+.*(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成)|^#{2,6}\s+.*(?:按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|说明要求|注意事项)\s*$/gmu;
@@ -76,8 +76,13 @@ function normalizeInlineListsInLine(line: string) {
     .replace(/([^\n])\s+(?=(?:\d+[.、](?=\s|\*\*)\s*|[（(]\d+[）)]\s*|[-*+]\s+)\*\*)/gu, '$1\n');
 }
 
+const CR_CHAR = String.fromCharCode(13);
+const LF_CHAR = String.fromCharCode(10);
+const NEWLINE_SPLIT_RE = new RegExp(`${CR_CHAR}?${LF_CHAR}`, 'u');
+const NEWLINE_RUN_RE = new RegExp(`${LF_CHAR}{3,}`, 'gu');
+
 export function normalizeInlineListBreaks(markdown: string) {
-  return markdown.split(/\r?\n/u).map(normalizeInlineListsInLine).join('\n').replace(/\n{3,}/gu, '\n\n');
+  return markdown.split(NEWLINE_SPLIT_RE).map(normalizeInlineListsInLine).join(LF_CHAR).replace(NEWLINE_RUN_RE, LF_CHAR + LF_CHAR);
 }
 
 function isMarkdownTableDivider(line: string) {
@@ -293,6 +298,7 @@ export const FORMAL_WRITING_RULES = [
   // 段落格式 —— 导出渲染需要双换行才是段落
   '【段落格式】段落之间必须空行（双换行）分隔，不得用单换行连续写大段文字。列表项逐行独占。步骤描述之间加空行。',
   '事实来源分级：项目专属事实（工期、金额、工程量、建设规模、人名、公司、品牌、供应商、材料规格、日期节点）必须来自绑定材料，不得编造；公共专业知识（法律法规名称、标准规范编号 GB/JGJ/CJJ/DB 系列、通用施工工艺与行业惯例）可依据现行有效版本和专业经验直接撰写，不要求材料提供，但不得虚构编号或引用已废止版本。',
+  '计划编制类字段边界：劳动力计划人数、机械设备台班、进度时间安排、材料进场时间、检验批划分等属于投标人计划编制成果，资料中不会直接给出，必须基于项目工程量、总工期、工序流水与定额工效推导出具体数值并写入正文，不得因资料未提供而留空或用“另行确定”等话术回避。',
 ].join('\n');
 
 export const SECTION_GENERATION_SAFETY_RULES = [

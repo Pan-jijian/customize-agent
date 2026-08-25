@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { matchProcessKnowledgeCards } from '../src/services/document-workflow/constructionProcessKnowledge';
 import { repairMajorContentWorkPackageLabels, sectionStructureIssue } from '../src/services/document-workflow/chapterGeneration';
+import { auditEvaluationCriteriaCoverage, extractEvaluationCriteriaItems, validateBidStructureBeforeGeneration } from '../src/services/document-workflow/constructionBidStructure';
+import type { DocumentTemplate, DocumentTemplateChapter } from '../src/services/document-workflow/types';
 
 const structuredPackages = '施工工作包结构化数据：[{"name":"安装工程","scope":"含配电箱安装、桥架敷设及智能化面板点位安装","quantities":["消防动力配电总箱1APEza/1APEzb：2台","动力配电总箱1APz：1台","配电箱 非标箱 挂墙安装 2台"],"process":["配电箱安装","挂墙安装","柜内元器件接线","通电调试"],"acceptance":["绝缘电阻测试","通电试运行"]},{"name":"结构加固改造工程","scope":"含砌块墙加固","quantities":["砌块墙（100mm厚，3.6m以内）：19.79m3","砌块墙（200mm厚，3.6m以内）：256.01m3"],"process":["砌筑","墙顶塞缝"],"acceptance":["砌筑砂浆试块"]},{"name":"拆除工程","scope":"楼地面及天棚拆除","quantities":["楼地面、天棚拆除投影面积：4781.59㎡"],"process":["围挡隔离","分层拆除","垃圾清运"],"acceptance":["拆除专项方案"]},{"name":"装饰工程","scope":"墙面抹灰、墙地砖铺贴及吊顶","quantities":["吊顶拆除投影面积：4781.59㎡"],"process":["基层处理","抹灰","铺贴"],"acceptance":["空鼓敲击检查"]},{"name":"室外道排工程","scope":"室外雨污水管网","quantities":["HDPE双壁波纹管DN300：120m"],"process":["沟槽开挖","管道安装","闭水试验","回填"],"acceptance":["闭水试验记录"]},{"name":"智能化工程","scope":"综合布线及面板安装","quantities":["信息面板：24个"],"process":["管线预埋","线缆敷设","面板安装"],"acceptance":["链路测试报告"]}]';
 const projectContext = `8.4徽光阁项目施工｜范围：建筑结构加固改造、建筑消防改造、室内装饰改造、室内水电改造、空调通风系统改造、弱电智能化改造、室外道排改造、屋面维修和建筑立面修补｜面积：建筑面积约为4645㎡｜计划工期：45日历天｜质量标准：合格
@@ -163,5 +165,57 @@ describe('repairMajorContentWorkPackageLabels deterministic label repair', () =>
     const once = repairMajorContentWorkPackageLabels(content);
     const twice = repairMajorContentWorkPackageLabels(once);
     expect(twice).toBe(once);
+  });
+});
+
+describe('evaluation criteria coverage audit（评分标准条目 ↔ 大纲承接）', () => {
+  function criteriaChapter(id: string, title: string, sections: string[] = []): DocumentTemplateChapter {
+    return { id, title, purpose: `生成${title}`, queries: [title], requiredFacts: [], sections };
+  }
+
+  const evaluationTexts = [
+    '技术评审标准：',
+    '1. 施工进度计划与工期保障措施',
+    '2. 质量保证体系与质量控制措施',
+    '8. 新技术、新工艺、新材料、新设备的应用',
+  ];
+
+  it('extracts numbered criteria items and filters framework noise', () => {
+    const items = extractEvaluationCriteriaItems([...evaluationTexts, '9. 投标人须按详见招标文件要求编制（噪声条目）']);
+    expect(items).toContain('施工进度计划与工期保障措施');
+    expect(items).toContain('新技术、新工艺、新材料、新设备的应用');
+  });
+
+  it('audits coverage: items fully carried by chapter sections are covered', () => {
+    const chapters = [
+      criteriaChapter('c1', '编制说明与工程概况', ['工程概况']),
+      criteriaChapter('c2', '进度计划与工期保障', ['施工进度计划与工期保障措施']),
+    ];
+    const items = extractEvaluationCriteriaItems(evaluationTexts);
+    const audit = auditEvaluationCriteriaCoverage(chapters, items);
+    expect(audit.uncovered.map(item => item.item)).toContain('新技术、新工艺、新材料、新设备的应用');
+    expect(audit.uncovered.map(item => item.item)).not.toContain('施工进度计划与工期保障措施');
+  });
+
+  it('validateBidStructureBeforeGeneration auto-appends uncovered criteria as sections', () => {
+    const chapters = [
+      criteriaChapter('c1', '编制说明与工程概况', ['工程概况']),
+      criteriaChapter('c2', '进度计划与工期保障', ['总进度计划']),
+    ];
+    const template: DocumentTemplate = {
+      id: 'criteria-template',
+      name: '施工组织设计测试模板',
+      description: '测试',
+      category: '施工组织设计',
+      outputTitle: '施工组织设计',
+      chapters,
+    };
+    const result = validateBidStructureBeforeGeneration({ template, chapters, evaluationTexts });
+    const allSections = result.enrichedChapters.flatMap(chapter => chapter.sections || []);
+    expect(allSections.join('、')).toContain('新技术、新工艺、新材料、新设备的应用');
+    // criteriaAudit 是补小节前的审计快照；补小节后的结构应通过重新审计（0 未承接）
+    const reAudit = auditEvaluationCriteriaCoverage(result.enrichedChapters, extractEvaluationCriteriaItems(evaluationTexts));
+    expect(reAudit.uncovered.map(item => item.item)).not.toContain('新技术、新工艺、新材料、新设备的应用');
+    expect(result.issues.some(issue => issue.message.includes('新技术'))).toBe(true);
   });
 });

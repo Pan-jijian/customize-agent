@@ -1224,13 +1224,14 @@ export class KnowledgeBaseManager {
 
   private hasUsableContent(text: string, metadata: Record<string, unknown>): boolean {
     const coverage = String(metadata.contentCoverage ?? '');
-    if (['metadata', 'metadata_filename', 'pdf_metadata_only', 'office_zip_empty_text', 'office_zip_failed'].includes(coverage)) return false;
+    if (['metadata', 'metadata_filename', 'pdf_metadata_only', 'office_zip_empty_text', 'office_zip_failed', 'cad_no_extractable_text'].includes(coverage)) return false;
     return text.trim().length > 0;
   }
 
   private isMetadataOnlyNonBlocking(file: ClassifiedFile, metadata: Record<string, unknown>): boolean {
     const coverage = String(metadata.contentCoverage ?? '');
-    return file.category === 'image' && ['image_too_small_for_ocr', 'ocr_no_text'].includes(coverage);
+    return (file.category === 'image' && ['image_too_small_for_ocr', 'ocr_no_text'].includes(coverage))
+      || (file.category === 'cad' && coverage === 'cad_no_extractable_text');
   }
 
   private defaultUploadRelativePath(fileName: string): string {

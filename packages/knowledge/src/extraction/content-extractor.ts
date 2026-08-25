@@ -21,9 +21,15 @@ type SpreadsheetSheet = Record<string, SpreadsheetCell | unknown> & { '!ref'?: s
 type PdfTextItem = { str: string; x: number; y: number; width: number; height: number; fontName?: string };
 type CadAnnotation = { text: string; x?: number; y?: number; layer?: string; block?: string; entityType?: string };
 
-const CAD_INTERNAL_TOKEN_RE = /\b(?:TDbPipe|TDbPipeValve|TDbPipeFitting|TDbWellh|AcDb\w+|Dwg\w+|ObjectId|Handle|ByLayer|Continuous|Model|Layout\d*)\b/giu;
-const CAD_INTERNAL_LINE_RE = /^(?:TDb\w+|AcDb\w+|[A-F0-9]{8,}|\d+|Model|Layout\d*|ByLayer|Continuous)$/iu;
-const CAD_DOMAIN_SIGNAL_RE = /工程|项目|施工|建筑|结构|装饰|电气|给排水|消防|暖通|平面|立面|剖面|节点|详图|材料|尺寸|标高|轴线|图层|门窗|墙|地面|顶面|照明|配电|弱电|空调|卫生间|楼梯|屋面|基础|柱|梁|板|图号|设计|说明/u;
+const CAD_INTERNAL_TOKEN_RE = /\b(?:TDbPipe|TDbPipeValve|TDbPipeFitting|TDbWellh|AcDb[\w:]+|Dwg\w+|ObjectId|Handle|ByLayer|Continuous|Model|Layout\d*|MLEADERSTYLE|AppInfoHistory|AppInfoDataList|ObjectDBX|Classes|DICTIONARYVARP|ObjFreeSpaceP|AuxHeaderT|\$AUDIT_BAD_\w+)\b/giu;
+const CAD_INTERNAL_LINE_RE = /^(?:TDb\w+|AcDb[\w:]+|\$AUDIT_BAD_\w+|[A-F0-9]{8,}|\d+|Model|Layout\d*|ByLayer|Continuous|MLEADERSTYLE|ObjectDBX)$/iu;
+/** DWG 二进制误读产生的 C1 控制字符（U+0080-U+009F，如 GBK 半字节），正常图纸标注不会出现 */
+const CAD_C1_CONTROL_RE = /[\u0080-\u009F]/gu;
+/** AutoCAD 控制码：%%c=Φ、%%d=°、%%p=±、%%132 等数字码=Φ，统一解码为可读符号 */
+const CAD_CONTROL_CODE_RE = /%%(?:c|d|p|\d{2,3})/giu;
+const CAD_DOMAIN_SIGNAL_RE = /工程|项目|施工|建筑|结构|装饰|电气|给排水|消防|暖通|平面|立面|剖面|节点|详图|材料|尺寸|标高|轴线|图层|门窗|墙|地面|顶面|照明|配电|弱电|空调|卫生间|楼梯|屋面|基础|柱|梁|板|图号|设计|说明|轴|电|井|土|夯/u;
+/** 图纸兜底解析可读字符（汉字/字母/数字）的最低总量，低于该值视为无字符数据，不入库 */
+const MIN_CAD_CHARACTER_DATA = 32;
 const OCR_NATIVE_NOISE_PATTERNS = [/^Image too small to scale!!/u, /^Line cannot be recognized!!$/u];
 
 /** 文件内容提取器，支持文档、表格、图片、CAD 等多种文件格式的内容抽取 */
@@ -157,6 +163,8 @@ export class ContentExtractor {
 
   private cleanCadReadableText(value: string): string {
     return value
+      .replace(CAD_C1_CONTROL_RE, ' ')
+      .replace(CAD_CONTROL_CODE_RE, code => (code.toLowerCase() === '%%d' ? '°' : code.toLowerCase() === '%%p' ? '±' : 'Φ'))
       .replace(CAD_INTERNAL_TOKEN_RE, '')
       .replace(/\b(?:LINE|LWPOLYLINE|POLYLINE|INSERT|HATCH|CIRCLE|ARC|DIMENSION|TEXT|MTEXT)\b/giu, '')
       .replace(/\s+/gu, ' ')
@@ -177,10 +185,86 @@ export class ContentExtractor {
     const hasDomainSignal = CAD_DOMAIN_SIGNAL_RE.test(compact);
     const hasCommonTextShape = /[，。；：、,.\-/()（）]|\d+(?:\.\d+)?\s*(?:mm|cm|m|㎡|%|°)?/iu.test(compact);
     const latinVowelCount = chars.filter(char => /[aAeEiIoOuU]/u.test(char)).length;
+    // 替换符（U+FFFD）：解码失败的标志，正常标注不会出现
+    if (chars.includes('\uFFFD')) return true;
+    // 罕见符号（箭头补充、CJK 部首、杂项数学/圈符/地图符号）：二进制误读产物，
+    // 正常图纸标注只用常用标点与工程符号
+    if (/[\u2046-\u205F\u2070-\u209F\u2100-\u2102\u2104-\u214F\u21B0-\u21FF\u2270-\u22FF\u2400-\u243F\u249C-\u24FF\u2640-\u26FF\u27C0-\u27EF\u2900-\u297F\u2A00-\u2AFF\u2B00-\u2BFF\u2E00-\u2FFF\u3200-\u33FF]/u.test(compact)) return true;
     if (readableRatio < 0.6) return true;
     if (symbolRatio > 0.35 && !hasDomainSignal) return true;
     if (latin >= 12 && latinVowelCount === 0 && !hasDomainSignal) return true;
     if (cjk >= 8 && digits === 0 && !hasDomainSignal && !hasCommonTextShape) return true;
+    // 短行内汉字-Latin-汉字交叉混排（考堂f肀、渱潑喲W晀耀）：二进制误读的典型形态；
+    // 正常标注的字母编号在汉字前或后（JD 电井、AB轴），不会夹在汉字中间
+    if (chars.length <= 8 && cjk >= 2 && latin >= 1 && digits === 0 && !hasDomainSignal && /[\p{Script=Han}][\p{Script=Latin}][\p{Script=Han}]/u.test(compact)) return true;
+    // 纯 Latin 行含 Latin-1 扩展字符（VdA«UdA«UdANÒg、dAç dA+ dA«）：正常英文标注不用扩展字符
+    if (cjk === 0 && digits === 0 && latin >= 8 && /[\u00A0-\u02AF\u1E00-\u1EFF]/u.test(compact)) return true;
+    // 超长无句读行：二进制误读产生的长连续乱码（常混入个别汉字/数字触发域信号豁免，
+    // 因此只认中文句读，数字/单位不再豁免）
+    if (chars.length > 400 && !/[\u3002\uFF0C\uFF1B\uFF1A\u3001、，。；：]/.test(compact)) return true;
+    // 行内短片段周期性重复（Ml+Ml+Ml、AM~AM~BM~BM、M|¶M|¶、2dA+2dA+2dA）：
+    // 正常标注不会让同一 2-4 字符片段在一行内重复出现，二进制误读则产生大量循环模式
+    const shortTokens = compact.split(/[^\p{L}\p{N}]+/u).filter(token => token.length >= 1 && token.length <= 4);
+    if (shortTokens.length >= 3 && chars.length >= 8 && !hasDomainSignal) {
+      const tokenFreq = new Map<string, number>();
+      for (const token of shortTokens) tokenFreq.set(token, (tokenFreq.get(token) ?? 0) + 1);
+      let repeatedChars = 0;
+      for (const [token, count] of tokenFreq) {
+        if (count >= 2) repeatedChars += token.length * count;
+      }
+      if (repeatedChars / Math.max(1, shortTokens.join('').length) >= 0.4) return true;
+    }
+    // 短行内同一汉字高频重复（摁䭚摁譚摁譚摁、耀U耀W耀Y耀）：正常标注不会在
+    // 14 字符以内的行里让重复汉字占比超过 60%
+    const hanChars = chars.filter(char => /[\p{Script=Han}]/u.test(char));
+    if (hanChars.length >= 4 && chars.length <= 14) {
+      const hanFreq = new Map<string, number>();
+      for (const char of hanChars) hanFreq.set(char, (hanFreq.get(char) ?? 0) + 1);
+      const repeatedHan = hanChars.filter(char => (hanFreq.get(char) ?? 0) >= 2).length;
+      if (repeatedHan / hanChars.length >= 0.6) return true;
+    }
+    // Latin-1 扩展字符（¡-ÿ 区）密集行：中文图纸标注几乎不用这些字符，
+    // 二进制误读（GBK/CP1252 混读）会批量产生
+    const latinExtended = chars.filter(char => /[\u00A0-\u02AF\u1E00-\u1EFF]/u.test(char)).length;
+    if (latinExtended >= 3 && (latinExtended / chars.length >= 0.3 || latin / Math.max(1, chars.length) >= 0.6)) return true;
+    // 纯 Latin-1 扩展字母短行（无 ASCII 字母/数字）：GBK 中文标注被 Latin-1 误读的
+    // 典型产物（"上"→ÉÏ、"柜"→¹ñ），正常标注的英文是 ASCII、中文是汉字，
+    // 不会出现整行全由扩展拉丁字母构成的短行
+    if (cjk === 0 && digits === 0 && latin >= 2 && latinExtended === latin && chars.length <= 12) return true;
+    // GBK 误读标点/字母混入 ASCII 标注（"1APz:P4~P6"→1APz£ºP4~P6、"消防控制"→Ïû·À¿ØÖÆ）：
+    // 正常工程标注只使用 °±×÷·µ²³Ø 等少数 Latin-1 字符，
+    // 无汉字行中出现 2 个以上其他 Latin-1 字符即判定为 GBK 编码误读
+    const gbkMisreadChars = chars.filter(char => /[\u00A0-\u00FF]/u.test(char) && !'°±×÷·µ²³Ø'.includes(char)).length;
+    if (gbkMisreadChars >= 2 && cjk === 0) return true;
+    // 分数符号/上标数字（¼½¾¹）：中文工程图纸标注几乎不用（仅 ²³ 常见保留），
+    // 出现在标注中基本是 GBK 误读（门宽 FM×1524 误读为 FM¼×1524）
+    if (/[¹¼½¾]/u.test(compact) && cjk === 0) return true;
+    // 无空格的超长 Latin 字母串（≥16 字符）：正常标注是词/编号，不会出现连续长字母串
+    if (/[\p{Script=Latin}\u00C0-\u024F]{16,}/u.test(compact)) return true;
+    // GUID：DWG 内部结构标识，不是图纸字符数据
+    if (/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/u.test(compact)) return true;
+    // 单汉字高频重复：正常标注/文本不会让同一汉字占比超过 20%（如乱码行中
+    // 生僻字“罍”重复 400+ 次仍被 readableRatio 计为可读字符而漏网）
+    const charCounts = new Map<string, number>();
+    for (const char of chars) charCounts.set(char, (charCounts.get(char) ?? 0) + 1);
+    let mostCommon = '';
+    let mostCommonCount = 0;
+    for (const [char, count] of charCounts) {
+      if (count > mostCommonCount) {
+        mostCommon = char;
+        mostCommonCount = count;
+      }
+    }
+    if (mostCommonCount >= 5 && mostCommonCount / chars.length > 0.2 && /[\p{Script=Han}]/u.test(mostCommon)) return true;
+    // CJK 扩展区生僻字（Ext A/B 等）混排：正常图纸标注几乎只用常用字（基本区
+    // U+4E00-U+9FFF），二进制误读会批量产生 U+3400-U+4DBF 等扩展区字符
+    const rareCjk = chars.filter(char => /[\u3400-\u4DBF\u{20000}-\u{2FA1F}]/u.test(char)).length;
+    if (rareCjk >= 2 && rareCjk / chars.length >= 0.1) return true;
+    if (rareCjk >= 1 && rareCjk / chars.length >= 0.2) return true;
+    // 非中/英/希字母脚本混排（韩文、藏文、彝文、泰文等）：中文标注行内混入
+    // 其他文字系统字母是二进制误读的典型产物（希腊字母 ΦφΩ 在图纸中常见，豁免）
+    const foreignLetter = chars.filter(char => /\p{Letter}/u.test(char) && !/[\p{Script=Han}\p{Script=Latin}\p{Script=Greek}]/u.test(char)).length;
+    if (foreignLetter >= 1 && cjk > 0) return true;
     return false;
   }
 
@@ -193,7 +277,8 @@ export class ContentExtractor {
     const normalized = [...value]
       .filter(char => {
         const code = char.charCodeAt(0);
-        return code === 9 || code === 10 || code === 13 || code >= 32;
+        // U+FFFF 非字符：PDF 表单空白下划线/占位符的提取产物，无检索意义，统一剔除
+        return code !== 0xFFFF && (code === 9 || code === 10 || code === 13 || code >= 32);
       })
       .join('');
     if (file.category !== 'cad') return normalized.replace(/\n{3,}/gu, '\n\n');
@@ -209,6 +294,11 @@ export class ContentExtractor {
     const cjk = (value.match(/[\p{Script=Han}]/gu) ?? []).length;
     const alnum = (value.match(/[\p{L}\p{N}]/gu) ?? []).length;
     return cjk * 4 + alnum + Math.min(value.length, 200) / 20;
+  }
+
+  /** 统计图纸提取片段中的实际字符数据量（汉字/字母/数字），用于判断"无字符数据不入库" */
+  private countCadCharacterData(fragments: string[]): number {
+    return (fragments.join('').match(/[\p{Script=Han}\p{L}\p{N}]/gu) ?? []).length;
   }
 
   private async extractCad(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
@@ -243,7 +333,16 @@ export class ContentExtractor {
       metadata.blockNames = uniqueBlocks.slice(0, 80);
       metadata.entityTypeCount = uniqueEntityTypes.length;
       metadata.entityTypes = uniqueEntityTypes.slice(0, 80);
+      const characterDataCount = this.countCadCharacterData([...textEntities.map(annotation => annotation.text), ...uniqueLayers, ...uniqueBlocks]);
+      if (characterDataCount < MIN_CAD_CHARACTER_DATA) {
+        // 图纸无字符数据（无文字标注、图层/块名均为内部默认值），不入库
+        metadata.contentCoverage = 'cad_no_extractable_text';
+        metadata.characterDataCount = characterDataCount;
+        warnings.push(`${file.format} DXF 未提取到字符数据（仅 ${characterDataCount} 个可读字符），图纸内容未入库`);
+        return { text: this.metadataOnlyText(file), metadata, warnings };
+      }
       metadata.contentCoverage = 'dxf_semantic_layer_block_annotations';
+      metadata.characterDataCount = characterDataCount;
       const semanticNodes = this.buildCadSemanticNodes(file, uniqueLayers, uniqueBlocks, uniqueEntityTypes, textEntities);
       return {
         text: [
@@ -309,19 +408,53 @@ export class ContentExtractor {
     }
 
     const binaryFragments = this.extractBinaryReadableFragments(file.absolutePath);
-    const readable = binaryFragments.filter(value => this.isReadableCadValue(value)).slice(0, 5000);
+    // OLE 属性集（<prop_set ...>）是 DWG 文件内部的二进制属性结构，不含图纸标注字符，
+    // 属于解析噪声而非字符数据，直接排除（不锚定行首：误读字符可能混在片段开头）
+    const withoutPropSets = binaryFragments.filter(value => !/<prop_set\b/u.test(value));
+    let readable = withoutPropSets.filter(value => this.isReadableCadValue(value)).slice(0, 5000);
+    // 文档级字符词频过滤：真实标注文字在图纸中会重复出现（标题/图层/图名等），
+    // 随机二进制噪声片段中每个字符几乎只出现一次（孤立字符）；短片段若全部由
+    // 孤立字符构成即为随机噪声，丢弃
+    const charFreq = new Map<string, number>();
+    for (const value of readable) {
+      for (const char of value) charFreq.set(char, (charFreq.get(char) ?? 0) + 1);
+    }
+    const isolatedNoise = (value: string): boolean => {
+      if (CAD_DOMAIN_SIGNAL_RE.test(value)) return false;
+      const letters = [...value].filter(char => /[\p{L}\p{N}]/u.test(char));
+      if (letters.length > 8) return false;
+      const freqs = letters.map(char => charFreq.get(char) ?? 1);
+      // 短片段中 60% 以上字符在全文只出现一次 → 随机噪声（真实标注文字会重复出现）
+      const isolatedCount = freqs.filter(freq => freq <= 1).length;
+      return isolatedCount / Math.max(1, letters.length) >= 0.6;
+    };
+    readable = readable.filter(value => !isolatedNoise(value));
+    // 可信片段过滤：真实图纸标注至少含 3 个汉字（图名/说明/材料文字）或含域信号词，
+    // 且全部字符落在图纸常用字符白名单内（汉字/ASCII 字母数字/常用标点/工程符号）；
+    // 二进制误读碎片常含 Latin 扩展字母、罕见符号或纯字母数字串，白名单直接排除
+    const trustedCadFragment = (value: string): boolean => {
+      const hanCount = (value.match(/\p{Script=Han}/gu) ?? []).length;
+      if (hanCount < 3 && !CAD_DOMAIN_SIGNAL_RE.test(value)) return false;
+      return !/[^\p{Script=Han}A-Za-z0-9\s\u3000-\u303F\uFF01-\uFF5E\u2460-\u2473\u2160-\u2179°Φφ×±≤≥∠√℃‰※′″〇●○◆■□▲△★☆◇→←↑↓ΩΔαβγθλμω]/u.test(value);
+    };
+    readable = readable.filter(trustedCadFragment);
     const filteredCount = Math.max(0, binaryFragments.length - readable.length);
+    // 图纸"字符数据"= 提取到的标注/标题块中实际可读的文字（汉字/字母/数字）总量；
+    // 低于最低阈值视为无字符数据，不入库
+    const characterDataCount = this.countCadCharacterData(readable);
+    const hasCharacterData = characterDataCount >= MIN_CAD_CHARACTER_DATA;
     metadata.extractionMode = 'builtin_cad_readable_fragments';
     metadata.professionalConversionUsed = false;
-    metadata.contentCoverage = readable.length > 0 ? 'cad_readable_text_fragments_filtered' : 'metadata';
-    metadata.contentConfidence = readable.length > 0 ? 'low_fallback_filtered' : 'metadata_only';
+    metadata.contentCoverage = hasCharacterData ? 'cad_readable_text_fragments_filtered' : 'cad_no_extractable_text';
+    metadata.contentConfidence = hasCharacterData ? 'low_fallback_filtered' : 'metadata_only';
     metadata.stringCandidateCount = binaryFragments.length;
     metadata.stringCount = readable.length;
+    metadata.characterDataCount = characterDataCount;
     metadata.filteredGarbledStringCount = filteredCount;
-    if (readable.length === 0) warnings.push(`${file.format} 内置 CAD 解析器未提取到可用文本，仅记录文件元数据，未生成可检索正文切片`);
+    if (!hasCharacterData) warnings.push(`${file.format} 内置 CAD 解析器未提取到字符数据（仅 ${characterDataCount} 个可读字符），图纸内容未入库`);
     else warnings.push(`${file.format} 内置 DWG→DXF 转换未成功，已使用低置信度可读标注/标题块兜底抽取并过滤疑似乱码 ${filteredCount} 条；该结果仅作为兜底证据，不应等同于完整图层、块、标注和尺寸语义解析`);
     return {
-      text: readable.length > 0 ? [this.metadataOnlyText(file), `CAD 图纸可读标注/标题块/属性:\n${readable.join('\n')}`].join('\n') : this.metadataOnlyText(file),
+      text: hasCharacterData ? [this.metadataOnlyText(file), `CAD 图纸可读标注/标题块/属性:\n${readable.join('\n')}`].join('\n') : this.metadataOnlyText(file),
       metadata,
       warnings,
     };
@@ -352,8 +485,17 @@ export class ContentExtractor {
     metadata.blockNames = uniqueBlocks.slice(0, 80);
     metadata.entityTypeCount = uniqueEntityTypes.length;
     metadata.entityTypes = uniqueEntityTypes.slice(0, 80);
-    metadata.contentCoverage = 'dxf_semantic_layer_block_annotations';
     metadata.parsedByDxfParser = Boolean(parsed);
+    const characterDataCount = this.countCadCharacterData([...textEntities.map(annotation => annotation.text), ...uniqueLayers, ...uniqueBlocks]);
+    if (characterDataCount < MIN_CAD_CHARACTER_DATA) {
+      // 图纸无字符数据（无文字标注、图层/块名均为内部默认值），不入库
+      metadata.contentCoverage = 'cad_no_extractable_text';
+      metadata.characterDataCount = characterDataCount;
+      warnings.push(`${file.format} DXF 未提取到字符数据（仅 ${characterDataCount} 个可读字符），图纸内容未入库`);
+      return { text: this.metadataOnlyText(file), metadata, warnings };
+    }
+    metadata.contentCoverage = 'dxf_semantic_layer_block_annotations';
+    metadata.characterDataCount = characterDataCount;
     const semanticNodes = this.buildCadSemanticNodes(file, uniqueLayers, uniqueBlocks, uniqueEntityTypes, textEntities);
     return {
       text: [
@@ -391,10 +533,14 @@ export class ContentExtractor {
     return entities.flatMap(section => {
       const text = this.cleanCadReadableText(/(?:^|\r?\n)\s*(?:1|3)\s*\r?\n([^\r\n]+)/u.exec(section)?.[1] ?? '');
       if (!text || !this.isReadableCadValue(text)) return [];
+      // 图层/块名同样要过可读性过滤：DXF 里 GBK 误读（Ïä¹ñ）或纯数字/内部
+      // 标识（11、AcDb...）会直接混进节点文本，不合格时置空由语义节点回退
+      const layer = /(?:^|\r?\n)\s*8\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim() ?? '';
+      const block = /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim() ?? '';
       return [{
         text,
-        layer: /(?:^|\r?\n)\s*8\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim(),
-        block: /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim(),
+        layer: layer && this.isReadableCadValue(layer) ? layer : undefined,
+        block: block && this.isReadableCadValue(block) ? block : undefined,
         entityType: section.trim().split(/\s+/u)[0],
         x: Number(/(?:^|\r?\n)\s*10\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]),
         y: Number(/(?:^|\r?\n)\s*20\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]),
@@ -422,23 +568,37 @@ export class ContentExtractor {
       const mod = await resolveAndImport('dwgdxf') as { convertDwgToDxf?: (dwg: Uint8Array | ArrayBuffer, options?: { wasmBase?: string }) => Promise<Uint8Array> };
       if (!mod.convertDwgToDxf) return { tool: 'dwgdxf_wasm', warnings: ['内置 dwgdxf WASM 转换器未导出 convertDwgToDxf'] };
       const dwgBytes = fs.readFileSync(filePath);
-      const attempts: Array<{ label: string; options?: { wasmBase?: string } }> = [
-        { label: 'package-default' },
-        { label: 'package-dist-wasm', options: { wasmBase: pathToFileURL(path.join(path.dirname(resolvePackage('dwgdxf')), 'wasm')).href } },
-        { label: 'package-root-dist-wasm', options: { wasmBase: pathToFileURL(path.join(path.dirname(path.dirname(resolvePackage('dwgdxf'))), 'wasm')).href } },
-      ];
-      const failures: string[] = [];
-      for (const attempt of attempts) {
-        try {
-          const dxfBytes = await mod.convertDwgToDxf(dwgBytes, attempt.options);
-          const dxfText = Buffer.from(dxfBytes).toString('utf8');
-          if (dxfText.trim()) return { dxfText, tool: `dwgdxf_wasm:${attempt.label}`, warnings: [] };
-          failures.push(`${attempt.label}: 未输出 DXF 文本`);
-        } catch (error) {
-          failures.push(`${attempt.label}: ${error instanceof Error ? error.message : String(error)}`);
+      // 注意：dwgdxf 内部对 WASM 基础 URL 有模块级缓存，只有首次调用传入的
+      // wasmBase 才会生效。若首次调用不带 wasmBase，会走到包内硬编码的构建机
+      // 路径（file:///home/runner/work/...）并永久缓存失败结果，后续重试全部
+      // 复用同一失败 Promise。因此第一次调用就必须传本地包内 wasm 目录的
+      // 正确 file:// URL，不允许再回退重试（重试无效且会污染缓存）。
+      let wasmBase: string | undefined;
+      try {
+        const localWasmDir = path.join(path.dirname(resolvePackage('dwgdxf')), 'wasm');
+        if (fs.existsSync(path.join(localWasmDir, 'dwgdxf_bg.wasm'))) {
+          wasmBase = pathToFileURL(localWasmDir).href;
         }
+      } catch { /* 包解析失败时回退到包内默认路径（大概率也会失败，但由下方 catch 统一记录） */ }
+      try {
+        const dxfBytes = await mod.convertDwgToDxf(dwgBytes, wasmBase ? { wasmBase } : undefined);
+        const dxfText = Buffer.from(dxfBytes).toString('utf8');
+        if (dxfText.trim()) return { dxfText, tool: wasmBase ? 'dwgdxf_wasm:local_wasm' : 'dwgdxf_wasm:package_default', warnings: [] };
+        return { tool: 'dwgdxf_wasm', warnings: ['内置 dwgdxf WASM 未输出 DXF 文本'] };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        // unreachable 多为 WASM 内存压力下的瞬时失败（批量索引时主进程同时持有
+        // 大型 SQLite 缓存会挤压可用内存），换一个内存状态重试一次；格式类错误
+        // （Invalid file format 等）重试无意义，直接失败降级。
+        if (detail.includes('unreachable')) {
+          try {
+            const retryBytes = await mod.convertDwgToDxf(dwgBytes, wasmBase ? { wasmBase } : undefined);
+            const retryText = Buffer.from(retryBytes).toString('utf8');
+            if (retryText.trim()) return { dxfText: retryText, tool: wasmBase ? 'dwgdxf_wasm:local_wasm' : 'dwgdxf_wasm:package_default', warnings: ['内置 dwgdxf WASM 首次转换失败（unreachable），重试成功'] };
+          } catch { /* 重试仍失败，按原错误降级 */ }
+        }
+        return { tool: 'dwgdxf_wasm', warnings: [`内置 dwgdxf WASM 转换失败${wasmBase ? '' : '（未找到本地 WASM 文件，使用了包内默认路径）'}: ${detail}`] };
       }
-      return { tool: 'dwgdxf_wasm', warnings: [`内置 dwgdxf WASM 转换失败: ${failures.join('；')}`] };
     } catch (error) {
       return { tool: 'dwgdxf_wasm', warnings: [`内置 dwgdxf WASM 加载失败: ${error instanceof Error ? error.message : String(error)}`] };
     }
@@ -793,12 +953,20 @@ export class ContentExtractor {
   }
 
   private extractLegacyOfficeBinary(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
-    const strings = this.extractBinaryStrings(file.absolutePath).slice(0, 1_000);
+    const candidates = this.extractBinaryStrings(file.absolutePath).slice(0, 1_000);
+    // 二进制兜底提取出的字符串中混有大量误读乱码（如 OLE 复合文档中 UTF-16LE
+    // 中文被 latin1/utf8 误读产生的长串生僻字），复用 CAD 乱码判定规则过滤，
+    // 避免乱码直接入库污染检索与预览。
+    const strings = candidates.filter(value => !this.isLikelyGarbledCadText(value));
+    const filteredCount = candidates.length - strings.length;
     const text = strings.join('\n').trim();
     return {
       text,
-      metadata: { extractionMode: 'builtin_legacy_office_binary_strings', vectorizable: true, contentCoverage: 'legacy_office_binary_strings', stringCount: strings.length },
-      warnings: text ? [] : ['旧版 Office 二进制文件未提取到正文，未入库'],
+      metadata: { extractionMode: 'builtin_legacy_office_binary_strings', vectorizable: true, contentCoverage: 'legacy_office_binary_strings_filtered', stringCandidateCount: candidates.length, stringCount: strings.length, filteredGarbledStringCount: filteredCount },
+      warnings: [
+        ...(filteredCount > 0 ? [`已过滤疑似乱码字符串 ${filteredCount} 条`] : []),
+        ...(text ? [] : ['旧版 Office 二进制文件未提取到正文，未入库']),
+      ],
     };
   }
 

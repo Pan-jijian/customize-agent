@@ -65,11 +65,30 @@ export async function understandReferenceFiles(projectRoot: string, evidence: Do
   catch (err) { console.error('[multimodal] failed:', err); return { notes: [], stage: displayStage({ type: 'file_understanding', roleId: 'multimodal-files', status: 'failed', message: '多模态文件理解失败' }, { subtitle: '多模态参考文件' }) }; }
 }
 
+// 从章节正文确定性提取总量口径数字清单，作为全局一致性审查的比对输入：
+// LLM 摘要式阅读会漏掉 1600 字符之后的关键数字（历史缺陷），清单化可保证跨章数值全部进入审查视野
+function numericDigestForChapter(content: string) {
+  const patterns = [
+    /(?:总建筑面积|建设规模|总用地面积|总占地面积)[^\n。；;]{0,18}\d+(?:[.,]\d+)?\s*万?\s*(?:㎡|m²|m2|平方米)/gu,
+    /(?:合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|工程总投资|总投资|工程造价)[^\n。；;]{0,18}\d+(?:[.,]\d+)?\s*万?\s*(?:万元|亿元|元)/gu,
+    /(?:计划工期|合同工期|总工期|施工周期)[^\n。；;]{0,18}\d+\s*(?:日历天|天|个月|月)/gu,
+    /(?:质量标准|质量目标)[^\n。；;]{0,26}/gu,
+    /(?:找平层|抹灰层|防水层|保温层|结合层|垫层|面层|粘结层)[^\n。；;]{0,24}\d+:\d+(?:\.\d+)?/gu,
+  ];
+  const digest: string[] = [];
+  for (const pattern of patterns) {
+    const matches = [...new Set(content.match(pattern) || [])].slice(0, 4);
+    digest.push(...matches);
+  }
+  return [...new Set(digest.map(item => item.replace(/\s+/gu, ' ').trim()).filter(Boolean))].join('；');
+}
+
 export async function reviewGlobalConsistency(input: { template: DocumentTemplate; chapters: DocumentDraftChapter[]; chapterReviews: ChapterReviewSummary[]; promptTexts: string; requirement?: string; projectContext?: string; diagnostics: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
-  throwIfAborted(input.signal); const summaries = input.chapters.map(ch => { const p = ch.content.replace(/#{1,6}\s+/gu,'').replace(/\*\*/gu,'').replace(/\|/gu,' ').replace(/[\n\r]+/gu,' ').trim(); return `章节：${ch.title}\n${p.slice(0,1600)}`; });
+  throwIfAborted(input.signal); const summaries = input.chapters.map(ch => { const p = ch.content.replace(/#{1,6}\s+/gu,'').replace(/\*\*/gu,'').replace(/\|/gu,' ').replace(/[\n\r]+/gu,' ').trim(); const digest = numericDigestForChapter(ch.content); return `章节：${ch.title}\n数值口径清单：${digest || '（未提取到总量口径数字）'}\n正文摘要：${p.slice(0,600)}`; });
   const text = summaries.join('\n\n---\n\n'); const plan = adaptiveReviewPlan({ totalChars: text.length, chapterCount: input.chapters.length, chunkChars: 16000, phase: 'global' });
   const chunks = chunkTextForReview(text, 16000).slice(0, plan.chunks);
-  const chunkReviews = await Promise.all(chunks.map(chunk => callDocumentLlmJson<{ issues?: string[] }>('你是专业文档审查专家。检查跨章节一致性。只返回 JSON。', `${input.promptTexts}\n\n${input.projectContext || ''}\n\n${chunk}\n\n返回 JSON：{"issues":[]}`, { maxTokens: 1000, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics })));
+  const reviewPrompt = '你是专业文档审查专家。检查跨章节数值一致性。每个章节都附带“数值口径清单”（从正文确定性提取的总量口径数字）。只报告确定性矛盾，两类：(1) 两章之间同一口径的数值互相矛盾；(2) 正文数值与项目上下文中的资料口径或裁决口径明确不符。每条冲突必须包含：章节名+冲突数值+正确口径（正确口径必须取自项目上下文中的资料或裁决，不得自行编造）。资料未提供某口径不构成冲突，不得报告；各章表述一致但资料未明确的字段不得报告；各章一致的表述不得报告。只返回 JSON。';
+  const chunkReviews = await Promise.all(chunks.map(chunk => callDocumentLlmJson<{ issues?: string[] }>(reviewPrompt, `${input.promptTexts}\n\n${input.projectContext || ''}\n\n${chunk}\n\n返回 JSON：{"issues":[]}`, { maxTokens: 1000, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics })));
   const issues = mergeUniqueStrings(chunkReviews.flatMap(r => Array.isArray(r?.issues) ? r.issues : []));
   return { issues, stage: displayStage({ type: 'llm_review', roleId: 'global-consistency-review', status: issues.length > 0 ? 'failed' : 'success', message: issues.length > 0 ? `全局一致性审查完成：发现 ${issues.length} 个跨章问题` : '全局一致性审查通过' }, { subtitle: '全局一致性审查' }) };
 }

@@ -171,6 +171,65 @@ function normalize(text: string) {
   return displayChapterTitle(text).replace(/\s+/gu, '').toLowerCase();
 }
 
+// ===== 评分标准条目提取与承接审计 =====
+// 招标文件常以“1.针对…；2.…；3.…”形式给出技术文件评审条目（评分标准），
+// 章节结构必须逐条承接；未承接条目（如“新技术、新工艺…”）由前置校验自动补小节，
+// 避免评分标准明确要求的内容因显式大纲未覆盖而整篇缺失（历史缺陷：新技术新工艺 0 次出现）
+
+const EVALUATION_FRAMEWORK_STOP_WORDS = new Set(['针对', '确保', '对于', '关于', '以及', '工程', '项目', '施工', '组织', '设计', '的应', '应用', '体系', '措施', '管理', '保障', '与措', '和措', '具体', '内容', '要求', '整体性']);
+
+/** 从证据文本中提取评分标准编号条目（数字编号 + 短标题短语） */
+export function extractEvaluationCriteriaItems(texts: string[]): string[] {
+  const merged = texts.join('\n');
+  const items = new Set<string>();
+  for (const match of merged.matchAll(/(\d{1,2})\s*[.、．]\s*([^；。\n]{4,60})/gu)) {
+    const raw = match[2].trim().replace(/[“”"'"]/gu, '');
+    if (!/[\u4e00-\u9fa5]{4}/u.test(raw)) continue;
+    if (/AI|大模型|评审|评分|分值|分项|子项|满分|得分|投标人须|详见|招标文件/u.test(raw)) continue;
+    if (/公共资源|电子交易|加密|投标|开标|评标委员会/u.test(raw)) continue;
+    items.add(raw);
+  }
+  return [...items];
+}
+
+/** 条目特征词（2 字滑窗，去框架停用词）；用于与章节标题/小节做承接比对 */
+function criterionFeatures(item: string) {
+  const text = normalize(item);
+  const features: string[] = [];
+  for (let index = 0; index < text.length - 1; index += 1) {
+    const pair = text.slice(index, index + 2);
+    if (EVALUATION_FRAMEWORK_STOP_WORDS.has(pair)) continue;
+    if (/[，、,（）()0-9a-z]/u.test(pair)) continue;
+    features.push(pair);
+  }
+  return [...new Set(features)];
+}
+
+/** 章节文本是否承接了某评分条目（特征词命中率 ≥40%，容忍滑窗噪声词） */
+function chapterCoversCriterion(chapter: DocumentTemplateChapter, features: string[]) {
+  if (features.length === 0) return false;
+  const text = normalize(`${chapter.title} ${(chapter.sections || []).join(' ')}`);
+  const hit = features.filter(feature => text.includes(feature)).length;
+  return hit / features.length >= 0.4;
+}
+
+export interface EvaluationCriteriaAudit {
+  items: string[];
+  uncovered: Array<{ item: string; features: string[] }>;
+}
+
+/** 评分标准条目 ↔ 大纲承接审计：返回未被任何章节承接的条目 */
+export function auditEvaluationCriteriaCoverage(chapters: DocumentTemplateChapter[], items: string[]): EvaluationCriteriaAudit {
+  const uncovered: Array<{ item: string; features: string[] }> = [];
+  for (const item of items) {
+    const features = criterionFeatures(item);
+    if (features.length === 0) continue;
+    if (chapters.some(chapter => chapterCoversCriterion(chapter, features))) continue;
+    uncovered.push({ item, features });
+  }
+  return { items, uncovered };
+}
+
 export interface BidStructureDiagnostic {
   groupId: BidStructureGroupId;
   groupTitle: string;
@@ -230,7 +289,9 @@ export function validateBidStructureBeforeGeneration(input: {
   template: DocumentTemplate;
   chapters: DocumentTemplateChapter[];
   requirement?: string;
-}): { diagnostics: BidStructureDiagnostic[]; issues: BidStructureIssue[]; enrichedChapters: DocumentTemplateChapter[] } {
+  /** 评分标准相关证据文本（招标文件切片），用于提取评审条目并做承接审计 */
+  evaluationTexts?: string[];
+}): { diagnostics: BidStructureDiagnostic[]; issues: BidStructureIssue[]; enrichedChapters: DocumentTemplateChapter[]; criteriaAudit?: EvaluationCriteriaAudit } {
   const diagnostics = auditBidStructure(input.chapters);
   const issues: BidStructureIssue[] = [];
   const missingRequired = diagnostics.filter(item => item.level === 'required' && item.status === 'missing');
@@ -268,6 +329,30 @@ export function validateBidStructureBeforeGeneration(input: {
     }
   }
 
+  // 评分标准条目承接审计：招标文件评审条目必须被章节结构承接；
+  // 未承接条目自动补为小节（挂靠公共特征词最多的章节），保证评分标准要求的内容不会被整篇遗漏
+  let criteriaAudit: EvaluationCriteriaAudit | undefined;
+  if (input.evaluationTexts?.length) {
+    const items = extractEvaluationCriteriaItems(input.evaluationTexts);
+    criteriaAudit = auditEvaluationCriteriaCoverage(enriched, items);
+    for (const { item, features } of criteriaAudit.uncovered) {
+      const sectionTitle = cleanEvaluationItemTitle(item);
+      if (!sectionTitle) continue;
+      const carrierIndex = enriched.reduce((best, chapter, index) => {
+        const text = normalize(`${chapter.title} ${(chapter.sections || []).join(' ')}`);
+        const score = features.filter(feature => text.includes(feature)).length;
+        const bestScore = best.index >= 0 ? features.filter(feature => normalize(`${enriched[best.index].title} ${(enriched[best.index].sections || []).join(' ')}`).includes(feature)).length : -1;
+        return score > bestScore ? { index, score } : best;
+      }, { index: -1, score: -1 });
+      const target = enriched[carrierIndex.index >= 0 ? carrierIndex.index : 0];
+      if (!target.sections.some(existing => normalize(existing).includes(normalize(sectionTitle)) || normalize(sectionTitle).includes(normalize(existing)))) {
+        target.sections.push(sectionTitle);
+        target.purpose = `${target.purpose || ''}；系统已按招标文件技术评审条目自动补足小节“${sectionTitle}”，必须基于项目资料与适用技术展开实质内容。`;
+        issues.push({ level: 'warning', severity: 'warning', message: `评分标准条目“${item}”无承接章节，已自动补小节“${sectionTitle}”至“${target.title}”`, suggestion: '请确认补充小节与招标文件评审条目口径一致。' });
+      }
+    }
+  }
+
   // 项目类型专属加分结构
   const projectTypes = inferConstructionOrgProjectTypes(input);
   for (const type of projectTypes) {
@@ -284,5 +369,13 @@ export function validateBidStructureBeforeGeneration(input: {
     }
   }
 
-  return { diagnostics, issues, enrichedChapters: enriched };
+  return { diagnostics, issues, enrichedChapters: enriched, criteriaAudit };
+}
+
+/** 评分条目标题清理：去掉“针对/确保”等框架前缀与“的保障体系与措施”等尾缀，得到可作小节标题的短语 */
+function cleanEvaluationItemTitle(item: string) {
+  const title = item.replace(/^针对/u, '').replace(/^确保/u, '').replace(/的保障体系与措施$/u, '').replace(/的管理体系与措施$/u, '').replace(/保障体系与措施$/u, '').replace(/管理体系与措施$/u, '').replace(/[，、；,;]+$/u, '').trim();
+  if (!/[\u4e00-\u9fa5]{4}/u.test(title)) return '';
+  if (/工期与质量/u.test(title)) return ''; // 框架条目，正文结构已由大纲承接
+  return title.length > 24 ? title.slice(0, 24) : title;
 }

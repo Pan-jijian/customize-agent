@@ -9,9 +9,26 @@ let activeDocumentLlmCalls = 0;
 
 const LLM_RETRY_DELAY_MS = 1200;
 
-/** 全局 LLM 并发上限：避免多文档 × 多章节 × 多小节同时打爆模型端点（默认 4，可用 DOCUMENT_LLM_MAX_CONCURRENCY 覆盖） */
+/** 全局 LLM 并发上限：避免多文档 × 多章节 × 多小节同时打爆模型端点（默认 8，可用 DOCUMENT_LLM_MAX_CONCURRENCY 覆盖） */
 const rawMaxConcurrency = Number(process.env.DOCUMENT_LLM_MAX_CONCURRENCY);
-const llmMaxConcurrency = Number.isFinite(rawMaxConcurrency) && rawMaxConcurrency > 0 ? Math.floor(rawMaxConcurrency) : 4;
+const envMaxConcurrency = Number.isFinite(rawMaxConcurrency) && rawMaxConcurrency > 0 ? Math.floor(rawMaxConcurrency) : undefined;
+let llmMaxConcurrency = envMaxConcurrency ?? 8;
+
+/** 按文档目标字数计算全局并发档位：文档越大调用越多，并发上限越高；20 万字级文档走 32 档 */
+export function concurrencyForDocumentScale(targetWords: number) {
+  if (targetWords <= 20000) return 8;
+  if (targetWords <= 80000) return 16;
+  if (targetWords <= 150000) return 24;
+  return 32;
+}
+
+/** 生成开始时按文档规模提升全局并发上限（只升不降：多文档并发生成互不踩踏；上限始终受 env 强制覆盖约束） */
+export function raiseDocumentLlmConcurrencyForScale(targetWords: number) {
+  const scaled = concurrencyForDocumentScale(targetWords);
+  const ceiling = envMaxConcurrency ?? scaled;
+  llmMaxConcurrency = Math.max(llmMaxConcurrency, Math.min(scaled, ceiling));
+  return llmMaxConcurrency;
+}
 /** 全局连续失败计数：成功清零、失败递增；连续失败≥2 时章节小节并发降级为串行，避免失败率高的模型被无脑并发反复击穿 */
 let llmFailureStreak = 0;
 
@@ -166,7 +183,7 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
   }
 }
 
-function extractJsonPayload(response: string) {
+export function extractJsonPayload(response: string) {
   const trimmed = response.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu)?.[1]?.trim();
   if (fenced) return fenced;

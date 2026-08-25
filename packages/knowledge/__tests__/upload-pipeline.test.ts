@@ -290,7 +290,7 @@ export function getUser(id: number): User {
   });
 
   it('extracts DXF CAD data correctly', async () => {
-    // 最小 DXF，包含一个图层和文本实体
+    // 最小 DXF，包含一个图层和文本实体（字符数据需 ≥32，否则按无字符数据不入库处理）
     const dxf = `0
 SECTION
 2
@@ -310,7 +310,7 @@ MyLayer
 20
 200
 1
-Hello DXF
+Hello DXF 徽光阁项目施工总平面图及结构加固设计说明
 0
 ENDSEC
 0

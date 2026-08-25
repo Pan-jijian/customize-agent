@@ -330,6 +330,149 @@ f 1 2 3 4`;
   });
 });
 
+// ─── 8.5 乱码过滤（CAD 二进制兜底 + 旧版 Office 兜底） ─────────
+
+describe('Garbled text filtering', () => {
+  const garbledFilter = (extractor as unknown as { isLikelyGarbledCadText: (value: string) => boolean }).isLikelyGarbledCadText.bind(extractor);
+
+  it('rejects long garbled binary-misread lines (mixed domain char exempt pattern)', () => {
+    // 真实故障样本：DWG 二进制误读产生的超长乱码行，罍重复 406 次且混入单字
+    // “板”触发域信号豁免，旧规则 readableRatio/symbolRatio 全部失效
+    const garbledLongLine = `${'罍'.repeat(406)}板${'眄'.repeat(300)}`;
+    expect(garbledFilter(garbledLongLine)).toBe(true);
+  });
+
+  it('rejects lines where a single Han char dominates (>20%)', () => {
+    const dominated = `${'罍'.repeat(60)}板墙柱梁基础`;
+    expect(garbledFilter(dominated)).toBe(true);
+  });
+
+  it('rejects CJK extension-A rare char mixing (binary misread)', () => {
+    // 真实故障样本：DWG 二进制误读批量产生 U+3400-U+4DBF 扩展区生僻字
+    expect(garbledFilter('䱠䑿䵳、M䵀倀M䵠瀀陸㽍䵠怿㽍䵠怿㽍䵠怿㽌怀㽍䵠怿㽍䵠怿㽍䵠怿㽌怀')).toBe(true);
+    expect(garbledFilter('䱠朅唪脘a')).toBe(true);
+  });
+
+  it('rejects non-CJK script letters mixed into Chinese lines', () => {
+    // 韩文/藏文/彝文等非中英希字母混入中文行是二进制误读典型产物
+    expect(garbledFilter('␏琀밠⸠<༠ļᄠ¼మ簃球吁籂퐿异㜘⼁佤柜՜传')).toBe(true);
+    expect(garbledFilter('鈉婋殃⮓䬋憑ꀂ呻')).toBe(true);
+  });
+
+  it('accepts Greek letters common in CAD annotations', () => {
+    expect(garbledFilter('Φ14@200 双层双向钢筋')).toBe(false);
+    expect(garbledFilter('Ω 电阻值 10k')).toBe(false);
+  });
+
+  it('accepts normal CAD annotation text', () => {
+    expect(garbledFilter('徽光阁项目施工总平面图')).toBe(false);
+    expect(garbledFilter('本图纸版权归本院所有，未经允许不得复制。')).toBe(false);
+    expect(garbledFilter('R1500 半径 12mm 墙体')).toBe(false);
+  });
+
+  it('filters garbled strings from DWG binary fallback extraction', async () => {
+    // 伪 DWG：含正常中文标注与乱码行；dwgdxf 转换失败后走内置兜底路径
+    // （正常标注需 ≥32 个字符数据，否则按"无字符数据不入库"处理）
+    const buffer = Buffer.concat([
+      Buffer.from('徽光阁项目施工总平面图及结构加固施工图纸设计说明与材料清单编制依据及适用范围', 'utf8'),
+      Buffer.from([0x00, 0x01, 0x02]),
+      Buffer.from(`${'罍'.repeat(406)}板`, 'utf8'),
+    ]);
+    const file = makeFile('cad/fake-garbled.dwg', buffer);
+    const result = await extractor.extract(file);
+    expect(result.text).not.toContain('罍');
+    expect(result.text).toContain('徽光阁');
+  });
+
+  it('filters garbled strings from legacy .xls fallback extraction', async () => {
+    // 伪 .xls（无效 CFB）：xlsx 解析失败后走旧版 Office 二进制兜底，
+    // UTF-16LE 中文正常解码、乱码行应被过滤
+    const buffer = Buffer.concat([
+      Buffer.from('拆除工程量清单', 'utf16le'),
+      Buffer.from([0x00, 0x00]),
+      Buffer.from(`${'罍'.repeat(406)}板`, 'utf8'),
+    ]);
+    const file = makeFile('sheets/fake-garbled.xls', buffer);
+    const result = await extractor.extract(file);
+    expect(result.text).not.toContain('罍');
+    expect(result.text).toContain('拆除工程量清单');
+  });
+});
+
+// ─── 8.6 图纸无字符数据不入库 ─────────────────────────
+
+describe('CAD no-extractable-text (no character data)', () => {
+  it('DWG fallback: OLE property-set fragments only → cad_no_extractable_text', async () => {
+    // 伪 DWG：仅含 OLE 属性集 XML 片段（DWG 内部结构噪声，无图纸标注字符）
+    const buffer = Buffer.concat([
+      Buffer.from('<prop_set label="Standard" description="ACAD standard property set" type="dict">', 'utf8'),
+      Buffer.from([0x00, 0x01]),
+      Buffer.from('<prop_set label="AUDIT_INFO" description="" type="dict">', 'utf8'),
+    ]);
+    const file = makeFile('cad/fake-notext.dwg', buffer);
+    const result = await extractor.extract(file);
+    expect(String(result.metadata.contentCoverage)).toBe('cad_no_extractable_text');
+    expect(result.text).not.toContain('prop_set');
+    expect(result.warnings.join(' ')).toContain('未提取到字符数据');
+  });
+
+  it('DWG fallback: sparse numeric fragments only → cad_no_extractable_text', async () => {
+    // 零星短碎片（不足最低字符数据阈值）不算"有字符数据"
+    const buffer = Buffer.concat([
+      Buffer.from('A1 M24', 'utf8'),
+      Buffer.from([0x00, 0x01]),
+      Buffer.from('0.5', 'utf8'),
+    ]);
+    const file = makeFile('cad/fake-sparse.dwg', buffer);
+    const result = await extractor.extract(file);
+    expect(String(result.metadata.contentCoverage)).toBe('cad_no_extractable_text');
+  });
+
+  it('DWG fallback: enough annotation text keeps content', async () => {
+    // 伪 DWG：含足够多可读中文标注（≥ 最低字符数据阈值），仍正常入库
+    const buffer = Buffer.concat([
+      Buffer.from('徽光阁项目施工总平面图：建筑定位轴线、标高尺寸及各单体平面布置说明，未经设计院许可不得复制。', 'utf8'),
+      Buffer.from([0x00, 0x01, 0x02]),
+    ]);
+    const file = makeFile('cad/fake-annotated.dwg', buffer);
+    const result = await extractor.extract(file);
+    expect(String(result.metadata.contentCoverage)).toBe('cad_readable_text_fragments_filtered');
+    expect(result.text).toContain('徽光阁');
+    expect(Number(result.metadata.characterDataCount)).toBeGreaterThanOrEqual(32);
+  });
+
+  it('DXF without text entities → cad_no_extractable_text', async () => {
+    // 合法 DXF：只有 LINE 实体、图层为内部默认值 "0"，无任何文字标注
+    const dxf = [
+      '0', 'SECTION', '2', 'ENTITIES',
+      '0', 'LINE', '8', '0',
+      '10', '0.0', '20', '0.0', '30', '0.0',
+      '11', '10.0', '21', '10.0', '31', '0.0',
+      '0', 'ENDSEC', '0', 'EOF',
+    ].join('\n');
+    const file = makeFile('cad/no-text.dxf', dxf);
+    const result = await extractor.extract(file);
+    expect(String(result.metadata.contentCoverage)).toBe('cad_no_extractable_text');
+    expect(result.text).not.toContain('未提取到文字标注');
+  });
+
+  it('DXF with text annotations keeps content', async () => {
+    const annotation = '本图纸为徽光阁项目施工总平面图，包含建筑定位轴线、标高尺寸及各单体平面布置说明';
+    const dxf = [
+      '0', 'SECTION', '2', 'ENTITIES',
+      '0', 'TEXT', '8', '建筑标注层',
+      '10', '0.0', '20', '0.0', '30', '0.0', '40', '2.5',
+      '1', annotation,
+      '0', 'ENDSEC', '0', 'EOF',
+    ].join('\n');
+    const file = makeFile('cad/annotated.dxf', dxf);
+    const result = await extractor.extract(file);
+    expect(String(result.metadata.contentCoverage)).toBe('dxf_semantic_layer_block_annotations');
+    expect(result.text).toContain('徽光阁');
+    expect(Number(result.metadata.characterDataCount)).toBeGreaterThanOrEqual(32);
+  });
+});
+
 // ─── 9. 各类别的完整流水线 ───────────────────────
 
 describe('Full extraction → chunk → verify', () => {

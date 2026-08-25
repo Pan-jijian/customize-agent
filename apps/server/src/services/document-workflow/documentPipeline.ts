@@ -1,5 +1,5 @@
 import type { AgentWorkflowContext } from './agentWorkflow';
-import type { DocumentAsset, DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, GeneratedDocumentDraft, RetrievalCoverageReport, ValidationIssue, WritingTaskBrief } from './types';
+import type { DocumentAsset, DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, GeneratedDocumentDraft, NumericScopeConflict, RetrievalCoverageReport, ValidationIssue, WritingTaskBrief } from './types';
 import type { ProjectMaterialScope } from './projectMaterialScope';
 import { assertEvidenceInProjectScope, filterEvidenceByProjectScope, filterFactsByProjectScope, projectScopeAudit, sourceInProjectScope } from './projectMaterialScope';
 import { selectEvidenceByBudget } from './evidence';
@@ -24,7 +24,7 @@ import { DOCUMENT_WORKFLOW_VERSION } from './documentWorkflowVersion';
 import { buildDocumentTelemetryReport } from './documentTelemetry';
 import { retrievalCoverageIssues } from './documentEvidenceRetrieval';
 import { extractFacts, extractFactsWithLlm, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, shouldRunLlmFactExtraction } from './factsModel';
-import { buildCanonicalFacts } from './factGovernance';
+import { applyScopeConflictResolutions, buildCanonicalFacts, detectNumericScopeConflicts } from './factGovernance';
 import { extractSection, stringifyFactValue, throwIfAborted } from './utils';
 import { formalTextGateIssues } from './agentWorkflow';
 import { displayStage, upsertProgressStage } from './progress';
@@ -239,6 +239,8 @@ export async function finalizeGeneration(p: {
   indexHealth: any; promptPlan: any;
   agentWorkflow: AgentWorkflowContext;
   globalConsistencyIssues?: string[];
+  /** 生成阶段裁决的源级同口径冲突（与 canonicalFacts.scopeConflicts 同源），用于事实主表回写，保证裁决口径全局唯一 */
+  scopeConflicts?: NumericScopeConflict[];
   writingTaskBrief?: WritingTaskBrief;
   emitProgress: (c?: DocumentDraftChapter[], s?: DocumentExecutionStage[]) => void;
   withProgressHeartbeat: <T>(w: () => Promise<T>, s?: DocumentExecutionStage[]) => Promise<T>;
@@ -248,7 +250,7 @@ export async function finalizeGeneration(p: {
     progressStages, documentSpec, projectMaterialSummary, domainProfile, documentBudget,
     input, generationDiagnostics, promptTexts, promptBindings, promptDocumentRules, projectRoot, projectId, readiness,
     factExtractionPromptTexts, hasExplicitOutline, missingItems, retrievalCoverageReports, failedChapterMessages,
-    webResearchReport, indexHealth, agentWorkflow, globalConsistencyIssues, writingTaskBrief, emitProgress, withProgressHeartbeat,
+    webResearchReport, indexHealth, agentWorkflow, globalConsistencyIssues, scopeConflicts, writingTaskBrief, emitProgress, withProgressHeartbeat,
   } = p;
   const { signal, requirement } = input;
 
@@ -301,12 +303,14 @@ export async function finalizeGeneration(p: {
   }
   for (const stage of llmExtraction.stages) upsertProgressStage(progressStages, stage);
   const structuredFacts = filterFactsByProjectScope(factsWithEvidenceSource([...localFacts, ...projectBasicFacts, ...preciseFacts, ...llmExtraction.facts], allEvidence), projectMaterialScope);
-  for (const fact of structuredFacts) facts[fact.key] = `${stringifyFactValue(fact.value)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
+  // 源级同口径冲突裁决回写：裁决值统一进入事实主表与确定性校验基准，避免正文被主表败选值误导（如 4645㎡ 与 4646㎡ 并存）
+  const governedStructuredFacts = applyScopeConflictResolutions(structuredFacts, scopeConflicts ?? detectNumericScopeConflicts(structuredFacts));
+  for (const fact of governedStructuredFacts) facts[fact.key] = `${stringifyFactValue(fact.value)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
 
   const structuredTables = filterFactsByProjectScope(extractStructuredTables(allEvidence), projectMaterialScope);
-  const factsModel = buildFactsModel(structuredFacts, structuredTables, missingItems, documentSpec, domainProfile);
+  const factsModel = buildFactsModel(governedStructuredFacts, structuredTables, missingItems, documentSpec, domainProfile);
   const chapterReadiness = evaluateChapterReadiness(chapterDrafts, documentSpec);
-  const validation = validateDraft(chapterDrafts, structuredFacts, template);
+  const validation = validateDraft(chapterDrafts, governedStructuredFacts, template);
   validation.warnings = [...validation.warnings, ...readiness.warnings];
   validation.errors = [...validation.errors, ...readiness.blockingIssues];
 
@@ -319,7 +323,7 @@ export async function finalizeGeneration(p: {
   let validationIssues = collectValidationIssueGroups(
     buildValidationIssues(validation, factsModel, chapterDrafts),
     chapterReadinessIssues(chapterReadiness),
-    (globalConsistencyIssues || []).slice(0, 10).map(message => ({ level: 'warning' as const, severity: 'warning' as const, category: 'fact_consistency' as const, owner: 'llm' as const, message: `跨章一致性复核：${message}`, suggestion: '建议在章节续写或定向修复阶段消除跨章不一致。' })),
+    (globalConsistencyIssues || []).slice(0, 10).map(message => ({ level: 'error' as const, severity: 'blocker' as const, category: 'fact_consistency' as const, owner: 'llm' as const, repairability: 'llm_repairable' as const, message: `跨章一致性复核：${message}`, suggestion: '跨章数值口径不一致属低级错误，必须定向修复统一口径后重新校验。' })),
   );
   const budgetDraftMarkdown = chapterDrafts.map(chapter => chapter.content).join('\n\n');
   validationIssues = collectValidationIssueGroups(

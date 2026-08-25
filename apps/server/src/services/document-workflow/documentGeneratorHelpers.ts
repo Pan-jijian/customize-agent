@@ -133,11 +133,6 @@ export async function collectProjectBasicEvidence(input: { manager: ReturnType<t
   }).slice(0, 24);
 }
 
-export function criticalChapterSectionGaps(markdown: string, chapter: DocumentTemplateChapter) {
-  return collectSectionContentGaps(markdown, [{ title: chapter.title, content: markdown, sections: chapter.sections || [] }])
-    .filter(gap => gap.reason === 'empty' || gap.reason === 'missing_planned_section');
-}
-
 export function removeSystemInjectedBoilerplate(content: string) {
   return content
     .replace(/^\s*本表依据项目图谱[^\n。]*[。.]\s*$/gmu, '')

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { chapterSectionFactUsageIssues } from '../src/services/document-workflow/chapterReview';
 import { normalizePlannedSections } from '../src/services/document-workflow/promptRuleExtraction';
-import { composeDocumentMarkdown, ensureFormalToc, finalizeDocumentMarkdown, inferChapterSectionsFromMarkdown, normalizeTertiaryHeadings, promptDocumentRuleIssues, sanitizeFormalMarkdown } from '../src/services/document-workflow/markdownComposer';
+import { composeDocumentMarkdown, ensureFormalToc, finalizeDocumentMarkdown, inferChapterSectionsFromMarkdown, normalizeInlineListBreaks, normalizeTertiaryHeadings, promptDocumentRuleIssues, sanitizeFormalMarkdown } from '../src/services/document-workflow/markdownComposer';
 import { collectSectionContentGaps, instructionLikeHeadingIssues, sectionContentIntegrityIssues, tocBodyConsistencyIssues } from '../src/services/document-workflow/qualityValidation';
 
 describe('normalizeTertiaryHeadings', () => {
@@ -199,6 +199,33 @@ describe('formal markdown structure', () => {
     expect(gaps).toHaveLength(0);
   });
 
+  it('exempts table-carrier sections (计划/节点类) with complete data tables', () => {
+    const LF_CHAR = String.fromCharCode(10);
+    const content = [
+      '### 关键节点计划与责任分解',
+      '',
+      '| 关键节点 | 计划完成时间 | 责任岗位 |',
+      '| --- | --- | --- |',
+      '| 施工准备 | 第1～3日 | 技术负责人 |',
+      '| 拆除清运 | 第4～10日 | 施工员 |',
+    ].join(LF_CHAR);
+    const gaps = collectSectionContentGaps(content, [{ title: '工程重点难点及危大工程的保障体系', sections: ['关键节点计划与责任分解'], content }]);
+    expect(gaps).toHaveLength(0);
+  });
+
+  it('still blocks table-carrier sections when data rows are below 2', () => {
+    const LF_CHAR = String.fromCharCode(10);
+    const content = [
+      '### 施工进度计划',
+      '',
+      '| 项 | 值 |',
+      '| --- | --- |',
+      '| 开工 | 第1日 |',
+    ].join(LF_CHAR);
+    const gaps = collectSectionContentGaps(content, [{ title: '工期计划', sections: [], content }]);
+    expect(gaps.map(gap => gap.message).join('、')).toContain('小节只有标题或表格无正文：施工进度计划');
+  });
+
   it('removes orphan and unfinished lines during sanitization', () => {
     const markdown = sanitizeFormalMarkdown(['完整段落。', '在', '本段内容包括', '| 列 |', '| --- |', '| 在 |'].join('\n'));
 
@@ -334,5 +361,21 @@ describe('formal markdown structure', () => {
 
     expect(promptDocumentRuleIssues(markdown, { forbiddenTerms: [], preferredTerms: [], requiredTables: [] }).map(issue => issue.message).join('\n')).toContain('疑似提示词指令标题');
     expect(sanitizeFormalMarkdown(markdown)).not.toContain('判断是否涉');
+  });
+});
+
+describe('normalizeInlineListBreaks regression', () => {
+  it('splits CRLF and LF lines and collapses 3+ newline runs to double', () => {
+    const LF = String.fromCharCode(10);
+    const CR = String.fromCharCode(13);
+    const input = `第一行${CR}${LF}第二行${LF}${LF}${LF}第三行`;
+    const result = normalizeInlineListBreaks(input);
+    expect(result.split(LF)).toEqual(['第一行', '第二行', '', '第三行']);
+  });
+
+  it('keeps normal single-LF separators unchanged', () => {
+    const LF = String.fromCharCode(10);
+    const result = normalizeInlineListBreaks(`甲${LF}乙${LF}丙`);
+    expect(result.split(LF)).toEqual(['甲', '乙', '丙']);
   });
 });

@@ -20,16 +20,17 @@ import { buildDocumentBlueprintContext } from './documentBlueprint';
 import { enrichConstructionOrgOutline } from './constructionOrgCatalog';
 import { validateBidStructureBeforeGeneration } from './constructionBidStructure';
 import { buildWritingTaskBrief, writingTaskBriefChapterPrompt } from './documentWritingTaskBrief';
-import { buildConstructionOrgTablePlans } from './constructionOrgTablePlan';
+import { buildConstructionOrgTablePlans, tablePlanExecutionGaps } from './constructionOrgTablePlan';
 import { buildRetrievalCoverageReport, retrieveDeepChapterEvidence, retrievalCoverageRisk } from './documentEvidenceRetrieval';
 import { buildChapterFactNeeds, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, factNeedsCoveragePrompt, factsForChapterNeeds, resolveChapterFactNeeds } from './factsModel';
 import { adaptiveConcurrency, runWithAdaptiveConcurrency, Semaphore, stableHash, throwIfAborted } from './utils';
 import { displayStage, elapsedMessage, upsertProgressStage } from './progress';
-import { getActiveModelWithProvider } from './llmClient';
+import { getActiveModelWithProvider, raiseDocumentLlmConcurrencyForScale } from './llmClient';
 import { createGenerationDiagnostics, evidenceInScope, measureGenerationStep, promptTextsForResolvedPrompts, repairChapterByQuality, selectDocumentGenerationStrategy } from './rolePipeline';
 import { buildGenerationBudget, type GenerationBudget } from './generationBudget';
 import { buildProjectMaterialProfile, buildProjectUnderstanding, expandProjectMaterialBindings, materialKindMaps, materialRoleId, retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from './projectMaterialProfile';
-import { buildChapterFactCoverageContext, buildLlmChapterContent, buildLlmSectionContent, buildSectionGroupChapterContent, buildSectionParallelChapterContent, criticalSectionBlockerMinChars, evidenceForSection, outputTokensForChapter } from './chapterGeneration';
+import { buildChapterFactCoverageContext, buildLlmChapterContent, buildLlmSectionContent, buildPlannedChapterContent, buildSectionParallelChapterContent, criticalSectionBlockerMinChars, evidenceForSection, outputTokensForChapter } from './chapterGeneration';
+import { planChapterStructure, plannedSectionCoverageMap, cleanInputSections, type PlannedChapterStructure } from './chapterPlanner';
 import { QUANTIFIED_FACT_RE } from './parameterPatterns';
 import { buildEvidenceOnlyChapterContent } from './chapterExpansion';
 import { chapterSectionFactUsageIssues, reviewGlobalConsistency } from './chapterReview';
@@ -42,7 +43,7 @@ import { referenceQualityTargetLines } from './templateReferenceService';
 import { buildScopedProjectIntelligence, constructionOrganizationPrompt } from './projectIntelligence';
 import { assertEvidenceInProjectScope, createProjectMaterialScope, filterEvidenceByProjectScope, filterFactsByProjectScope, projectScopeAudit } from './projectMaterialScope';
 import { agentWorkflowStages, createAgentWorkflowContext, throttleAgentWorkflowNodes } from './agentWorkflow';
-import { buildTargetedRepairInstruction, chapterTaskPrompt, planChapterTask, planDocument, reviewChapterDraft } from './agentPlanner';
+import { buildTargetedRepairInstruction, chapterTaskPrompt, chapterTaskPromptForPlannedStructure, planChapterTask, planDocument, reviewChapterDraft } from './agentPlanner';
 import { buildCanonicalFactModel, PROJECT_BASIC_FIELD_SPECS } from './factGovernance';
 import { buildChapterReadinessPlan } from './chapterReadiness';
 import { chineseTokenMatch } from './textMatch';
@@ -271,7 +272,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
   // 构建章节→图谱节点映射：将图谱中的 works/methods/resources 按章节标题匹配
   const rawEffectiveChapters = effectiveTemplateChapters(template, documentSpec, { preserveExplicitOutline: hasExplicitOutline });
   const enrichedOutlineChapters = enrichConstructionOrgOutline({ template, chapters: rawEffectiveChapters, requirement: input.requirement });
-  const bidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: enrichedOutlineChapters, requirement: input.requirement });
+  // 评分标准相关证据切片：用于提取招标文件技术评审条目并与大纲做承接审计
+  const evaluationTexts = allEvidence
+    .filter(item => /评审|评分标准|评分办法|评审标准|详细评审/u.test(`${item.sectionTitle || ''}${item.content}`.slice(0, 600)))
+    .map(item => item.content)
+    .slice(0, 12);
+  const bidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: enrichedOutlineChapters, requirement: input.requirement, evaluationTexts });
   const baseEffectiveChapters = buildConstructionOrgTablePlans({ chapters: bidStructureAudit.enrichedChapters, projectGraph, canonicalFacts });
   template = { ...template, chapters: baseEffectiveChapters };
   const chapterGraphMap = new Map<string, { graphFiles: Set<string>; graphBoqItems: Array<{ name: string; quantity: string; unit: string; sourceFiles: string[] }>; graphWorks: string[]; graphMethods: string[]; gaps: string[] }>();
@@ -319,7 +325,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   let effectiveChapters = baseEffectiveChapters;
   const constructionOrgContext = constructionOrganizationPrompt(scopedIntelligence?.constructionOrganizationGraph) || scopedIntelligence?.constructionOrganizationContext;
   const baseProjectContext = [projectUnderstanding.prompt, constructionOrgContext].filter(Boolean).join('\n\n');
-  let projectContext = [baseProjectContext, buildDocumentBlueprintContext({ template: { ...template, chapters: effectiveChapters }, chapters: effectiveChapters, factsModel: preliminaryFactsModel, requirement: input.requirement })].filter(Boolean).join('\n\n');
+  let projectContext = [baseProjectContext, buildDocumentBlueprintContext({ template: { ...template, chapters: effectiveChapters }, chapters: effectiveChapters, factsModel: preliminaryFactsModel, requirement: input.requirement, scopeConflicts: canonicalFacts.scopeConflicts })].filter(Boolean).join('\n\n');
   const provisionalTemplate = { ...template, chapters: effectiveChapters };
   const promptStructuralRules = extractPromptStructuralRules([promptTexts, input.requirement || ''].filter(Boolean).join('\n\n'), effectiveChapters);
   const provisionalBudget = buildDocumentBudget({ requirement: input.requirement, promptTexts, template: provisionalTemplate, chapters: effectiveChapters, spec: documentSpec });
@@ -343,7 +349,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     return { ...chapter, sections };
   }, { kind: 'llmRepair', targetWords: provisionalBudget.targetChars || 4000, concurrency: 2 });
   const plannedWithConstructionOrgRequiredSections = enrichConstructionOrgOutline({ template, chapters: plannedChapters, requirement: input.requirement });
-  const finalBidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: plannedWithConstructionOrgRequiredSections, requirement: input.requirement });
+  const finalBidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: plannedWithConstructionOrgRequiredSections, requirement: input.requirement, evaluationTexts });
   effectiveChapters = buildConstructionOrgTablePlans({ chapters: finalBidStructureAudit.enrichedChapters, projectGraph, canonicalFacts });
   if (finalBidStructureAudit.issues.length > 0 || bidStructureAudit.issues.length > 0) {
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'bid-structure-audit', status: finalBidStructureAudit.issues.some(issue => issue.severity === 'blocker') ? 'failed' : 'success', message: `评标结构符合性校验：${finalBidStructureAudit.diagnostics.length} 个结构组，${finalBidStructureAudit.diagnostics.filter(item => item.status === 'satisfied').length} 个已满足，${finalBidStructureAudit.diagnostics.filter(item => item.status === 'missing' && item.level === 'required').length} 个必查缺失（已自动补挂），${finalBidStructureAudit.diagnostics.filter(item => item.status === 'fragmented').length} 个分散`, details: [...finalBidStructureAudit.diagnostics.map(item => `${item.status === 'satisfied' ? '满足' : item.status === 'fragmented' ? '分散' : '补挂'}：${item.groupTitle}${item.status === 'missing' ? `（补挂小节：${item.missingSections.join('、')}）` : ''}`), ...finalBidStructureAudit.issues.map(issue => `提示：${issue.message}`).slice(0, 8)] }, { subtitle: '评标结构校验' }));
@@ -355,7 +361,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   if (referenceLines.length > 0) {
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'reference-benchmark', status: 'success', message: '已读取模板参考库同类工程画像，作为质量软性参考注入文档蓝图', details: referenceLines }, { subtitle: '参考画像注入', order: progressStages.length }));
   }
-  const documentBlueprintContext = buildDocumentBlueprintContext({ template, chapters: effectiveChapters, factsModel: preliminaryFactsModel, requirement: input.requirement, referenceLines });
+  const documentBlueprintContext = buildDocumentBlueprintContext({ template, chapters: effectiveChapters, factsModel: preliminaryFactsModel, requirement: input.requirement, referenceLines, scopeConflicts: canonicalFacts.scopeConflicts });
   projectContext = [baseProjectContext, documentBlueprintContext].filter(Boolean).join('\n\n');
   if (!scopedIntelligence) {
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-blueprint', status: 'success', message: '已生成全局事实主表与文档蓝图，后续章节和小节将共用同一套专业约束', details: documentBlueprintContext.split('\n').slice(0, 12) }, { subtitle: '全局蓝图' }));
@@ -364,7 +370,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const plannedDocument = planDocument({ template, context: agentWorkflow, title: template.name });
   agentWorkflow.documentPlan = plannedDocument.plan;
   agentWorkflow.nodes.push(plannedDocument.node);
-  upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'agent-document-planner', status: 'success', message: plannedDocument.node.outputSummary || 'Agent 文档规划完成', details: plannedDocument.plan.chapters.map(chapter => `${chapter.title}：${chapter.sections.length} 个小节任务`) }, { subtitle: 'Agent Document Planner', order: progressStages.length }));
+  upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'agent-document-planner', status: 'success', message: plannedDocument.node.outputSummary || 'Agent 文档规划完成', details: plannedDocument.plan.chapters.map(chapter => `${chapter.title}：${chapter.sections.length} 条细目`) }, { subtitle: 'Agent Document Planner', order: progressStages.length }));
   checkpointChapterOrderIds = effectiveChapters.map(chapter => chapter.id);
   // P1 全局预算模型：生成前按章节数×目标字数×资料量一次性计算并发数、证据预算、审查深度与修复轮次预算
   const budgetTargetWords = documentBudget.targetChars || [...documentBudget.chapterTargets.values()].reduce((sum, value) => sum + value, 0);
@@ -381,6 +387,9 @@ export async function generateDocumentDraft(input: { templateId: string; require
     strategy: generationStrategy,
   });
   const generationDiagnostics = createGenerationDiagnostics(generationStrategy);
+  // 按文档规模提升全局 LLM 并发上限（8/16/24/32 档）：长文档调用量大，默认 4 并发会线性拉长总耗时；
+  // 端点限流由瞬态重试与失败连击降级串行兜底
+  raiseDocumentLlmConcurrencyForScale(budgetTargetWords);
   upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-strategy', status: 'success', message: `已自动选择 ${generationStrategy.mode} 生成策略：章节审查 ${generationStrategy.enableChapterReview ? '启用' : '跳过'}、全局审查 ${generationStrategy.enableGlobalReview ? `${generationStrategy.globalReviewSamplingRate && generationStrategy.globalReviewSamplingRate < 1 ? `抽检 ${Math.round((generationStrategy.globalReviewSamplingRate ?? 1) * 100)}%` : '启用'}` : '跳过'}、最终质量审查 ${generationStrategy.enableFinalQualityReview ? '启用' : '跳过'}、全文扩写 ${generationStrategy.enableDocumentBudgetExpansion ? '启用' : '跳过'}`, details: generationBudget.triggers }, { subtitle: '后台自动策略' }));
   const sectionPlanningSource = hasExplicitOutline ? 'OUTLINE 章节' : '模板章节';
   const sectionPlanningStage: DocumentExecutionStage = displayStage({
@@ -734,6 +743,10 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const sectionFirstAutoEligible = targetWords >= 6000 && sectionCount >= 4 && sectionCount <= maxSectionFirstSections && !compositeChapterTitle;
     const useSectionGroup = !sectionFirstDisabled && sectionCount >= 2 && (sectionCount > maxSectionFirstSections || compositeChapterTitle || (documentBudget.longformStrict && sectionCount >= 6));
     const useSectionFirst = !sectionFirstDisabled && !useSectionGroup && sectionCount >= 2 && sectionCount <= maxSectionFirstSections && (sectionFirstForced || sectionFirstAutoEligible || documentBudget.longformStrict);
+    // 规划驱动模式状态：块级成稿后 Reviewer/Repairer 按覆盖映射表审查承接，避免把语义合并后的 H4 误判为缺节并重新拆回
+    let plannedStructureRef: PlannedChapterStructure | undefined;
+    let plannedPromptTextsRef: string | undefined;
+    let plannedCoverageRef: Record<string, string[]> | undefined;
     // 小节级 checkpoint：小节完成时把“进行中章节”（含已完成小节正文）写入 checkpoint 快照，
     // 章节生成中途失败/中止时不丢已生成小节；节流 3 秒避免高频写盘
     let lastSectionCheckpointAt = 0;
@@ -768,40 +781,62 @@ export async function generateDocumentDraft(input: { templateId: string; require
         roleId: 'chapter_generation',
         promptId: chapterPromptExecution.primaryPromptId,
         status: 'running',
-        message: useSectionGroup ? `${displayChapterTitle(chapter.title)} 正在按语义小节组并发成稿` : useSectionFirst ? `${displayChapterTitle(chapter.title)} 正在按小节并发成稿` : `${displayChapterTitle(chapter.title)} 正在整章一次成稿`,
+        message: useSectionGroup ? `${displayChapterTitle(chapter.title)} 正在规划主题块并准备并发成稿` : useSectionFirst ? `${displayChapterTitle(chapter.title)} 正在按小节并发成稿` : `${displayChapterTitle(chapter.title)} 正在整章一次成稿`,
         details: (useSectionGroup || useSectionFirst)
-          ? [...chapterPromptDetails, `有效证据：${evidence.length} 条`, `事实需求：${factNeedSummary.satisfied}/${factNeedSummary.total} 已满足，缺失 ${factNeedSummary.missing}，低置信 ${factNeedSummary.lowConfidence}`, targetPlan.label, `生成上限约 ${chapterMaxChars} 字`, `规划小节：${chapter.sections?.length || 0} 个`, useSectionGroup ? '小节较多，按工期/质量/安全/资源等语义组并发生成，避免整章长调用低产' : '按章节结构拆分小节自然并发生成，章节聚合后再审查修复']
+          ? [...chapterPromptDetails, `有效证据：${evidence.length} 条`, `事实需求：${factNeedSummary.satisfied}/${factNeedSummary.total} 已满足，缺失 ${factNeedSummary.missing}，低置信 ${factNeedSummary.lowConfidence}`, targetPlan.label, `生成上限约 ${chapterMaxChars} 字`, `模板细目：${chapter.sections?.length || 0} 条`, useSectionGroup ? '细目较多，先由章级 Planner 聚类为主题块并语义合并，再按主题块全并发出稿，避免逐小节碎片化' : '按章节结构拆分小节自然并发生成，章节聚合后再审查修复']
           : [...chapterPromptDetails, `有效证据：${evidence.length} 条`, `事实需求：${factNeedSummary.satisfied}/${factNeedSummary.total} 已满足，缺失 ${factNeedSummary.missing}，低置信 ${factNeedSummary.lowConfidence}`, targetPlan.label, `生成上限约 ${chapterMaxChars} 字`, `规划小节：${sectionCount} 个`, '首次生成必须覆盖章节结构、小节和事实，篇幅目标仅作为规划参考'], 
-        progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: useSectionGroup ? '小节分组' : useSectionFirst ? '小节并发' : '整章成稿' },
+        progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: useSectionGroup ? '主题块并发' : useSectionFirst ? '小节并发' : '整章成稿' },
       }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
       emitProgress();
-      let llmContent = useSectionGroup
-        ? await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-section-group-draft:${chapter.id}`, () =>
-          buildSectionGroupChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal })
-        ))
-        : useSectionFirst
-          ? await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-section-draft:${chapter.id}`, () =>
-            buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts }), allowPartialResult: false, compactProjectContext: true, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal })
-          ))
-          : await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-draft:${chapter.id}`, () =>
-            buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords, targetWords, maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics })
+      let llmContent: string | undefined;
+      if (useSectionGroup) {
+        // 规划驱动管线（治本路径）：章级 Planner 读项目图谱+文档蓝图，把显式细目重排为主题块并做语义合并
+        // （相近细目合并进重写标题的 H4），从目录形态与 LLM 调用数两个维度根治碎片化；
+        // LLM 失败/细目过少时由确定性语义域分组在同一管线内接管（永不回退逐小节碎片化成稿）
+        const chapterTitleForBlueprint = displayChapterTitle(chapter.title);
+        const blueprintChapterLines = documentBlueprintContext.split('\n').filter(line => line.includes(chapterTitleForBlueprint));
+        const plannedBlueprintContext = blueprintChapterLines.length > 0 ? blueprintChapterLines.join('\n') : documentBlueprintContext.slice(0, 4000);
+        const plannedStructure = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-plan:${chapter.id}`, () =>
+          planChapterStructure({ template, chapter, evidence, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, graphContext: chapterTaskResult.task.graphContext, blueprintContext: plannedBlueprintContext, signal: input.signal, diagnostics: generationDiagnostics })
+        ));
+        if (plannedStructure.blocks.length > 0) {
+          plannedStructureRef = plannedStructure;
+          const plannedCoverage = plannedSectionCoverageMap(cleanInputSections(chapter), plannedStructure);
+          plannedCoverageRef = plannedCoverage;
+          const plannedPromptTexts = [chapterPromptTexts, chapterTaskPromptForPlannedStructure(chapterTaskResult.task, plannedStructure)].filter(Boolean).join('\n\n');
+          plannedPromptTextsRef = plannedPromptTexts;
+          const h4Count = plannedStructure.blocks.reduce((sum, block) => sum + block.subPoints.length, 0);
+          const mergedCount = plannedStructure.blocks.reduce((sum, block) => sum + block.subPoints.reduce((count, point) => count + Math.max(0, point.sources.length - 1), 0), 0);
+          const plannerNote = plannedStructure.llmPlanned
+            ? (plannedStructure.fallbackSections.length > 0 ? `（${plannedStructure.fallbackSections.length} 条细目由覆盖校验挂回主题块）` : '')
+            : `（LLM 规划未命中：${(plannedStructure.llmFailure || '未返回有效结构').slice(0, 50)}，已按语义域确定性分组）`;
+          progressStages[chapterProgressIndex] = displayStage({
+            type: 'chapter_generation',
+            roleId: 'chapter_generation',
+            promptId: chapterPromptExecution.primaryPromptId,
+            status: 'running',
+            message: `${displayChapterTitle(chapter.title)} 已规划 ${plannedStructure.blocks.length} 个主题块，正在按主题块并发成稿${plannerNote}`,
+            details: [...chapterPromptDetails, `有效证据：${evidence.length} 条`, `输入细目 ${sectionCount} 条 → 主题块 ${plannedStructure.blocks.length} 个（每块 2~4 个 H4 要点）`, `语义合并 ${mergedCount} 条细目，目录级 H4 合计 ${h4Count} 个`, '单块 1200~2200 字，主题块间全并发，单节深度与整体耗时双优'],
+            progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: '主题块并发' },
+          }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
+          // 同步把「Agent Chapter Task Planner」stage 更新为规划驱动视角：
+          // 细目任务卡是事实/证据分配单元，最终目录按主题块+H4 成稿，避免残留「N/N 个小节任务就绪」误导
+          const chapterTaskStage = progressStages.find(stage => stage.roleId === `agent-chapter-task-${chapter.id}`);
+          if (chapterTaskStage) {
+            chapterTaskStage.message = `${chapterTaskResult.task.sections.filter(item => item.ready).length}/${chapterTaskResult.task.sections.length} 条细目任务就绪（已规划为 ${plannedStructure.blocks.length} 个主题块）`;
+          }
+          emitProgress(chapterDrafts);
+          llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-planned-block-draft:${chapter.id}`, () =>
+            buildPlannedChapterContent({ template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, sectionEvidenceProvider: sectionEvidenceForChapter, diagnostics: generationDiagnostics, signal: input.signal }, plannedStructure)
           ));
-      if (!llmContent && useSectionGroup) {
-        progressStages[chapterProgressIndex] = displayStage({
-          type: 'chapter_generation',
-          roleId: 'chapter_generation',
-          promptId: chapterPromptExecution.primaryPromptId,
-          status: 'running',
-          message: `${displayChapterTitle(chapter.title)} 小节组未返回有效正文，正在切换为逐小节备用成稿`,
-          details: [`LLM 最近错误：${generationDiagnostics.llm.lastError || '小节组空响应或超时'}`, `有效证据：${evidence.length} 条`],
-          progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: '备用成稿' },
-        }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
-        emitProgress(chapterDrafts);
-        llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-section-fallback:${chapter.id}`, () =>
-          buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts, fallback: 'section-parallel' }), allowPartialResult: false, sectionEvidenceProvider: sectionEvidenceForChapter, diagnostics: generationDiagnostics, signal: input.signal }).catch(error => {
-            generationDiagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
-            return undefined;
-          })
+        }
+      } else if (useSectionFirst) {
+        llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-section-draft:${chapter.id}`, () =>
+          buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts }), allowPartialResult: false, compactProjectContext: true, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal })
+        ));
+      } else {
+        llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-draft:${chapter.id}`, () =>
+          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords, targetWords, maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics })
         ));
       }
       if (!llmContent && (useSectionGroup || useSectionFirst)) {
@@ -810,8 +845,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
           roleId: 'chapter_generation',
           promptId: chapterPromptExecution.primaryPromptId,
           status: 'running',
-          message: `${displayChapterTitle(chapter.title)} 小节成稿未完成，正在切换为整章紧凑备用成稿`,
-          details: [`LLM 最近错误：${generationDiagnostics.llm.lastError || '小节成稿空响应或超时'}`, `有效证据：${evidence.length} 条`],
+          message: `${displayChapterTitle(chapter.title)} ${useSectionGroup ? '主题块成稿未完成' : '小节成稿未完成'}，正在切换为整章紧凑备用成稿`,
+          details: [`LLM 最近错误：${generationDiagnostics.llm.lastError || '成稿空响应或超时'}`, `有效证据：${evidence.length} 条`],
           progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: '整章备用' },
         }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
         emitProgress(chapterDrafts);
@@ -900,7 +935,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     return async (): Promise<void> => {
     try {
     let draftChapter = { id: chapter.id, title: chapter.title, content, evidence, missingFacts, sections, tablePlans: chapter.tablePlans || [] };
-    let agentReview = reviewChapterDraft({ task: chapterTaskResult.task, draft: draftChapter, context: agentWorkflow });
+    let agentReview = reviewChapterDraft({ task: chapterTaskResult.task, draft: draftChapter, context: agentWorkflow, plannedCoverage: plannedCoverageRef });
     agentWorkflow.reviewResults = { ...(agentWorkflow.reviewResults || {}), [chapter.id]: agentReview };
     let blockingReviewIssues = agentReview.issues.filter(issue => issue.severity === 'blocker' || issue.level === 'error');
     let hasWriterMissingIssues = blockingReviewIssues.some(issue => /Writer 未完成/u.test(issue.message));
@@ -917,7 +952,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
       repairRounds += 1;
       const repairReview = { ...agentReview, issues: blockingReviewIssues };
       const repairInstruction = agentReview.repairable
-        ? buildTargetedRepairInstruction({ task: chapterTaskResult.task, review: repairReview })
+        ? buildTargetedRepairInstruction({ task: chapterTaskResult.task, review: repairReview, plannedMode: Boolean(plannedStructureRef) })
         : [
           '【Agent 定向修复任务】',
           `章节：${chapterTaskResult.task.title}`,
@@ -993,7 +1028,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
           sectionTitle,
           evidence: sectionEvidence.length ? sectionEvidence : evidence,
           missingFacts,
-          promptTexts: [agentEnhancedPromptTexts, repairInstruction].filter(Boolean).join('\n\n'),
+          promptTexts: [plannedPromptTextsRef || agentEnhancedPromptTexts, repairInstruction].filter(Boolean).join('\n\n'),
           projectContext,
           requirement: input.requirement,
           roleContext,
@@ -1050,10 +1085,10 @@ export async function generateDocumentDraft(input: { templateId: string; require
       }
       let repaired = { content: draftChapter.content, appliedCount: 0 };
       if (blockingReviewIssues.some(issue => !/Writer 未完成|正文不足，未达到任务最小深度/u.test(issue.message))) {
-        repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `agent-repairer:${chapter.id}`, () => repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: draftChapter.content, evidence, missingFacts, sections }, issues: blockingReviewIssues.map(issue => `${issue.message}；${issue.suggestion || ''}`), promptTexts: [agentEnhancedPromptTexts, repairInstruction].filter(Boolean).join('\n\n'), requirement: input.requirement, forbidDrawingImages, diagnostics: generationDiagnostics, signal: input.signal })));
+        repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `agent-repairer:${chapter.id}`, () => repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: draftChapter.content, evidence, missingFacts, sections }, issues: blockingReviewIssues.map(issue => `${issue.message}；${issue.suggestion || ''}`), promptTexts: [plannedPromptTextsRef || agentEnhancedPromptTexts, repairInstruction].filter(Boolean).join('\n\n'), requirement: input.requirement, forbidDrawingImages, diagnostics: generationDiagnostics, signal: input.signal })));
       }
       draftChapter = { ...draftChapter, content: finalizeChapterContentQuality(repaired.content || draftChapter.content, chapter) };
-      agentReview = reviewChapterDraft({ task: chapterTaskResult.task, draft: draftChapter, context: agentWorkflow });
+      agentReview = reviewChapterDraft({ task: chapterTaskResult.task, draft: draftChapter, context: agentWorkflow, plannedCoverage: plannedCoverageRef });
       agentWorkflow.reviewResults = { ...(agentWorkflow.reviewResults || {}), [chapter.id]: agentReview };
       blockingReviewIssues = agentReview.issues.filter(issue => issue.severity === 'blocker' || issue.level === 'error');
       hasWriterMissingIssues = blockingReviewIssues.some(issue => /Writer 未完成/u.test(issue.message));
@@ -1110,9 +1145,14 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const chapterDraftsFinal = chapterDraftsByOrder.filter((item): item is DocumentDraftChapter => Boolean(item));
   chapterGenerationStages.push(...chapterGenerationStagesByOrder.filter((item): item is DocumentExecutionStage => Boolean(item)));
 
+  // 源级同口径裁决已在事实主表构建入口完成（buildCanonicalFactModel 内 applyScopeConflictResolutions），
+  // Writer 输入的事实与蓝图约束全部只含裁决口径（补疑优先），败选数值从源头就不会写入正文；
+  // 此处不再做生成后全文替换（用户明确要求：源头解决，而非事后清除）
+
   // 全局一致性审查：strict 画像默认开启（额外 LLM 成本，全文分块审查）；
   // fast 小文档降级为抽检（按 globalReviewSamplingRate 抽样章节，至少 2 章保证跨章对比）；
-  // env DOCUMENT_GLOBAL_CONSISTENCY_REVIEW=1 强制开启、=0 强制关闭；开启后在最终导出前做一次跨章一致性审查，结果注入导出校验
+  // env DOCUMENT_GLOBAL_CONSISTENCY_REVIEW=1 强制开启、=0 强制关闭；开启后在最终导出前做一次跨章一致性审查，
+  // 审查发现的确定性数值冲突先进入定向修复闭环（修复→复检，最多 2 轮），仍有残留才注入导出校验升级为阻断
   let globalConsistencyIssues: string[] = [];
   if (generationStrategy.enableGlobalReview) {
     try {
@@ -1121,14 +1161,79 @@ export async function generateDocumentDraft(input: { templateId: string; require
         ? chapterDraftsFinal
         : chapterDraftsFinal.filter((chapter, index) => index % Math.max(2, Math.round(1 / samplingRate)) === 0);
       const sampledCount = sampledChapters.length;
-      const globalReview = await withProgressHeartbeat(() => reviewGlobalConsistency({ template, chapters: sampledChapters, chapterReviews: [], promptTexts: reviewPromptTexts, requirement: input.requirement, projectContext, diagnostics: generationDiagnostics, signal: input.signal }));
+      const runGlobalReview = () => withProgressHeartbeat(() => reviewGlobalConsistency({ template, chapters: sampledChapters, chapterReviews: [], promptTexts: reviewPromptTexts, requirement: input.requirement, projectContext, diagnostics: generationDiagnostics, signal: input.signal }));
+      const globalReview = await runGlobalReview();
       globalConsistencyIssues = globalReview.issues;
+      // 跨章一致性冲突修复闭环：按冲突描述中的正确口径对点名章节做 fact_conflict 定向修复，再复检；
+      // 无任何 patch 落地的轮次立即停止，避免空转消耗 LLM 预算
+      for (let repairRound = 0; repairRound < 2 && globalConsistencyIssues.length > 0; repairRound += 1) {
+        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-repair', status: 'running', message: `跨章一致性冲突第 ${repairRound + 1} 轮定向修复（${globalConsistencyIssues.length} 个冲突）` }, { subtitle: '跨章一致性修复' }));
+        emitProgress(chapterDraftsFinal);
+        let appliedCount = 0;
+        for (const chapter of chapterDraftsFinal) {
+          const related = globalConsistencyIssues.filter(issue => issue.includes(chapter.title));
+          if (related.length === 0) continue;
+          const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `global-consistency-repair:${chapter.id}`, () => repairChapterByQuality({
+            template,
+            chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence || [], missingFacts: chapter.missingFacts || [], sections: chapter.sections },
+            issues: related.map(issue => `${issue}；请严格按冲突描述中给出的正确口径统一本章全部数值，不得引入第三个数值。`),
+            promptTexts: reviewPromptTexts,
+            requirement: input.requirement,
+            forbidDrawingImages: true,
+            diagnostics: generationDiagnostics,
+            signal: input.signal,
+          })));
+          if (repaired.content && repaired.content !== chapter.content) {
+            chapter.content = repaired.content;
+            appliedCount += 1;
+          }
+        }
+        if (appliedCount === 0) break;
+        emitProgress(chapterDraftsFinal);
+        const reReview = await runGlobalReview();
+        globalConsistencyIssues = reReview.issues;
+        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-review', status: globalConsistencyIssues.length > 0 ? 'failed' : 'success', message: globalConsistencyIssues.length > 0 ? `跨章一致性复检：仍有 ${globalConsistencyIssues.length} 个冲突` : '跨章一致性复检通过' }, { subtitle: '全局一致性审查' }));
+        emitProgress(chapterDraftsFinal);
+      }
       const sampledStage = sampledCount < chapterDraftsFinal.length ? { ...globalReview.stage, message: `${globalReview.stage.message || '全局一致性审查完成'}（抽检 ${sampledCount}/${chapterDraftsFinal.length} 章）` } : globalReview.stage;
       upsertProgressStage(progressStages, sampledStage);
       emitProgress(chapterDraftsFinal);
     } catch (err) {
       if (input.signal?.aborted) throw err;
       console.error('[gen] global consistency review failed:', err);
+    }
+  }
+
+  // 表格执行率确定性核验：表格计划（治理决策）必须真实落为 markdown 表格；
+  // 执行率显著不足的章节进入定向补表修复闭环（最多 2 轮），保证表格数量与计划一致
+  let tableGaps = tablePlanExecutionGaps(effectiveChapters, chapterDraftsFinal);
+  if (tableGaps.length > 0) {
+    for (let round = 0; round < 2 && tableGaps.length > 0; round += 1) {
+      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-repair', status: 'running', message: `表格执行率修复第 ${round + 1} 轮（${tableGaps.length} 个章节缺表）` }, { subtitle: '表格执行率修复' }));
+      emitProgress(chapterDraftsFinal);
+      let appliedCount = 0;
+      for (const gap of tableGaps) {
+        const draft = chapterDraftsFinal.find(item => item.title === gap.chapterTitle || gap.chapterTitle.includes(item.title) || item.title.includes(gap.chapterTitle));
+        if (!draft) continue;
+        const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `table-execution-repair:${draft.id}`, () => repairChapterByQuality({
+          template,
+          chapter: { id: draft.id, title: draft.title, content: draft.content, evidence: draft.evidence || [], missingFacts: draft.missingFacts || [], sections: draft.sections },
+          issues: [`计划表格缺失（计划 ${gap.planned} 张，实际仅 ${gap.actual} 张）：${gap.plans.map(plan => `${plan.title}（表头：${plan.fields.map(field => field.name).join('、')}）`).join('；')}。必须按表头字段补齐这些 markdown 表格并紧跟相关小节输出，不得删除已有正文；每个表格前须有 1～2 句引导叙述说明表格作用与关键结论，表格不能替代小节正文；deriveFromProject 字段基于项目工程量、总工期与工序流水按定额工效推导具体数值，projectFactOnly 字段不得编造。`],
+          promptTexts: reviewPromptTexts,
+          requirement: input.requirement,
+          forbidDrawingImages: true,
+          diagnostics: generationDiagnostics,
+          signal: input.signal,
+        })));
+        if (repaired.content && repaired.content !== draft.content) {
+          draft.content = repaired.content;
+          appliedCount += 1;
+        }
+      }
+      if (appliedCount === 0) break;
+      emitProgress(chapterDraftsFinal);
+      tableGaps = tablePlanExecutionGaps(effectiveChapters, chapterDraftsFinal);
+      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-review', status: tableGaps.length > 0 ? 'failed' : 'success', message: tableGaps.length > 0 ? `表格执行率复检：仍有 ${tableGaps.length} 个章节缺表` : '表格执行率复检通过' }, { subtitle: '表格执行率核验' }));
     }
   }
 
@@ -1147,6 +1252,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     hasExplicitOutline, missingItems, retrievalCoverageReports,
     failedChapterMessages, webResearchReport, indexHealth, promptPlan,
     globalConsistencyIssues,
+    scopeConflicts: canonicalFacts.scopeConflicts,
     writingTaskBrief,
     agentWorkflow,
     emitProgress, withProgressHeartbeat,

@@ -1,20 +1,21 @@
 import * as path from 'node:path';
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
-import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ResolvedFactNeed, ValidationIssue } from './types';
+import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ProjectGraphTablePlan, ResolvedFactNeed, ValidationIssue } from './types';
 import type { DocumentBudget } from './budget';
 import { documentTextLength } from './budget';
 import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
 import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
-import { callDocumentLlm, getDocumentLlmFailureStreak } from './llmClient';
+import { callDocumentLlm, getDocumentLlmFailureStreak, getDocumentLlmMaxConcurrency } from './llmClient';
 import { stringifyFactValue, throwIfAborted } from './utils';
 import { selectByScore, factImportanceScore } from './selection';
 import { measureGenerationStep } from './rolePipeline';
 import { normalizePlannedSections, professionalSectionTaskCard } from './promptRuleExtraction';
-import { tablePlansPrompt } from './constructionOrgTablePlan';
+import { sectionTablePlans, sectionTablePlansPrompt, tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
 import { constructionOrgBonusModulePrompt, constructionOrgChapterRulePrompt } from './constructionOrgQualityRules';
 import { buildProcessKnowledgePrompt, matchProcessKnowledgeCards } from './constructionProcessKnowledge';
 import { criticalSectionBlockerMinChars, currentSectionBlock, ensureGroupTertiaryShell, ensureTertiarySectionShell, groupHasMajorConstructionSection, isCriticalDeepSection, isGeneralManagementSection, keySectionWritingRequirement, majorContentPollutionIssue, mergeDuplicateWorkPackageSubsections, outputTokensForChapter, parseMajorConstructionPackages, repairMajorContentWorkPackageLabels, sectionContentBody, sectionStructureIssue } from './chapterPostProcessing';
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE, QUANTIFIED_FACT_RE } from './parameterPatterns';
+import type { PlannedChapterStructure } from './chapterPlanner';
 
 export * from './chapterPostProcessing';
 
@@ -314,7 +315,7 @@ function compactSectionProjectContext(projectContext: string, maxChars = 2000) {
   return compact.length <= maxChars ? compact : `${compact.slice(0, maxChars)}\n（上下文已截断，完整信息见绑定材料与证据）`;
 }
 
-export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number; allowLenientStructureGate?: boolean }) {
+export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number; allowLenientStructureGate?: boolean; tablePlanInstruction?: string }) {
   const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
   const sectionFactCard = buildSectionFactCard(input.sectionTitle, sectionEvidence);
   const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 3500, 9000) });
@@ -330,6 +331,7 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     input.projectContext ? `上下文：\n${input.compactProjectContext ? compactSectionProjectContext(input.projectContext) : input.projectContext}` : '',
     input.factCoverageContext || '',
     professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
+    input.tablePlanInstruction || '',
     sectionFactCard.prompt,
     input.roleContext,
     input.missingFacts.length ? `需要特别补足的信息：${input.missingFacts.join('、')}` : '',
@@ -430,6 +432,13 @@ function writingTasksForSection(sectionTitle: string, targetWords: number): Sect
   }));
 }
 
+/** 计算某小节的表格计划指令：按标题匹配章节表格计划；未分配必写表由宿主小节兜底承接（保证必写表不丢失） */
+function buildSectionTablePlanInstruction(chapter: DocumentTemplateChapter, sectionTitle: string, extraPlans: ProjectGraphTablePlan[] = []): string {
+  const assigned = sectionTablePlans(chapter, sectionTitle);
+  const plans = [...assigned, ...extraPlans.filter(plan => !assigned.some(item => item.id === plan.id))];
+  return sectionTablePlansPrompt(plans, sectionTitle);
+}
+
 async function buildFocusedSectionDraft(input: Parameters<typeof buildLlmSectionContent>[0]) {
   const sectionEvidence = (isGeneralManagementSection(input.sectionTitle)
     ? [...evidenceForSection(input.sectionTitle, input.chapter, input.evidence), ...input.evidence]
@@ -453,6 +462,7 @@ async function buildFocusedSectionDraft(input: Parameters<typeof buildLlmSection
     input.requirement ? `用户要求：${input.requirement}` : '',
     professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
     keySectionWritingRequirement(input.sectionTitle),
+    input.tablePlanInstruction || '',
     sectionFactCard.prompt,
     `目标正文约 ${input.targetWords} 字，最多 ${input.maxWords || Math.ceil(input.targetWords * 1.18)} 字。正文必须分布在 #### 三级小节下，包含对象范围、执行措施、检查验收和资料闭环；没有精确数值时写正式过程控制，不编造数值。`,
     '禁止写“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列话术；直接写项目事实、施工内容、控制措施和验收要求。',
@@ -529,10 +539,14 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
     if (focused) return sanitizeFormalMarkdown(removeUnwantedDrawingImages(focused, input.forbidDrawingImages));
   }
   const tasks = writingTasksForSection(input.sectionTitle, input.targetWords);
-  const parts: string[] = [];
-  for (const task of tasks) {
+  const parts: Array<string | undefined> = new Array(tasks.length);
+  // 主题任务并行：任务已按主题切分（特点/难点/措施等），互不重叠；
+  // 串行是历史原因（3 任务 × 多轮重试 = 单个小节 50+ 分钟），改为 2 路并发分批执行，
+  // 主题重复风险由 Reviewer 与重复控制评分兜底；lastError 局部化避免并行任务互相覆盖
+  const writeTask = async (task: SectionWritingTask): Promise<string | undefined> => {
     throwIfAborted(input.signal);
     let taskContent: string | undefined;
+    let taskError: string | undefined;
     const maxAttempts = task.total > 1 ? 2 : 3;
     for (let attempt = 0; attempt < maxAttempts && !taskContent; attempt += 1) {
       const retryTargetWords = attempt === 0 ? task.targetWords : Math.max(560, Math.floor(task.targetWords * (attempt === 1 ? 0.85 : 0.7)));
@@ -544,12 +558,13 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
           maxWords: Math.ceil(retryTargetWords * 1.18),
           qualityFeedback: [
             task.total > 1 ? `这是首轮生成的主题任务 ${task.index}/${task.total}，只聚焦“${task.taskTitle}”。不得重复同小节其他主题的通用表述；优先写入与本主题相关的资料事实、规格、数量、标准、检查要求和执行动作。` : input.qualityFeedback,
-            attempt > 0 ? `上一轮未生成有效正文${input.diagnostics?.llm.lastError ? `（被拒原因：${input.diagnostics.llm.lastError}）` : ''}。本轮必须直接输出“### ${input.sectionTitle}”及正式正文，逐条修正被拒原因，优先完成可审查、可落位事实的核心内容。` : ''
+            attempt > 0 ? `上一轮未生成有效正文${taskError ? `（被拒原因：${taskError}）` : ''}。本轮必须直接输出“### ${input.sectionTitle}”及正式正文，逐条修正被拒原因，优先完成可审查、可落位事实的核心内容。` : ''
           ].filter(Boolean).join('\n'),
         });
       } catch {
         taskContent = undefined;
       }
+      if (!taskContent) taskError = input.diagnostics?.llm.lastError;
       if (!taskContent && attempt === maxAttempts - 1) {
         try {
           taskContent = await buildFocusedSectionDraft({
@@ -557,7 +572,7 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
             sectionTitle: task.sectionTitle,
             targetWords: Math.max(520, Math.floor(retryTargetWords * 0.85)),
             maxWords: Math.ceil(Math.max(520, Math.floor(retryTargetWords * 0.85)) * 1.18),
-            qualityFeedback: `前序 Writer 未完成${input.diagnostics?.llm.lastError ? `（被拒原因：${input.diagnostics.llm.lastError}）` : ''}。本轮使用轻量定向 Writer，只完成“${input.sectionTitle}”正式正文，逐条修正被拒原因。`,
+            qualityFeedback: `前序 Writer 未完成${taskError ? `（被拒原因：${taskError}）` : ''}。本轮使用轻量定向 Writer，只完成“${input.sectionTitle}”正式正文，逐条修正被拒原因。`,
           });
         } catch (error) {
           if (input.diagnostics) input.diagnostics.llm.lastError = `focused writer 后置异常：${input.chapter.title} / ${task.sectionTitle} / ${error instanceof Error ? error.message : String(error)}`;
@@ -565,14 +580,23 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
         }
       }
     }
-    if (taskContent) parts.push(sectionContentBody(taskContent));
+    return taskContent ? sectionContentBody(taskContent) : undefined;
+  };
+  const configuredTaskConcurrency = Number(process.env.DOCUMENT_WRITING_TASK_CONCURRENCY || 2);
+  const taskConcurrency = Math.max(1, Math.min(tasks.length, 2, Number.isFinite(configuredTaskConcurrency) ? Math.floor(configuredTaskConcurrency) : 2));
+  for (let offset = 0; offset < tasks.length; offset += taskConcurrency) {
+    throwIfAborted(input.signal);
+    const batch = tasks.slice(offset, offset + taskConcurrency);
+    const batchResults = await Promise.all(batch.map(task => writeTask(task)));
+    batchResults.forEach((content, index) => { parts[offset + index] = content; });
   }
-  if (parts.length === 0) {
+  const collected = parts.filter((part): part is string => Boolean(part));
+  if (collected.length === 0) {
     // 全部任务未产出有效正文：不做模板拼接兜底，返回 undefined 交由上层重试/Reviewer 修复链路处理
     if (input.diagnostics && !input.diagnostics.llm.lastError) input.diagnostics.llm.lastError = `task writer 未产出有效正文：${input.chapter.title} / ${input.sectionTitle}`;
     return undefined;
   }
-  let merged = `### ${input.sectionTitle}\n\n${parts.join('\n\n')}`;
+  let merged = `### ${input.sectionTitle}\n\n${collected.join('\n\n')}`;
   // 空壳保护：任务正文若在清洗链中被删除只剩标题，判定失败交由上层修复，不落模板拼接兜底
   if (documentTextLength(sectionContentBody(merged)) < 200) {
     if (input.diagnostics) input.diagnostics.llm.lastError = `task writer 正文空壳：${input.chapter.title} / ${input.sectionTitle} / ${documentTextLength(sectionContentBody(merged))}字`;
@@ -622,11 +646,11 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
   const maxGroupSize = Math.max(2, Math.min(targets.length >= 30 ? 5 : 6, Number.isFinite(configuredGroupSize) ? Math.floor(configuredGroupSize) : defaultGroupSize));
   const chapterHasMajorConstructionSection = targets.some(target => /项目主要施工内容/u.test(target.title));
   const groups = groupSectionTargets(targets, maxGroupSize);
-  const defaultGroupConcurrency = 3;
+  const defaultGroupConcurrency = 6;
   const configuredConcurrency = Number(process.env.DOCUMENT_SECTION_GROUP_CONCURRENCY || defaultGroupConcurrency);
   // 大章节（≥30 小节）历史原因组间强制串行导致 50 小节章节耗时 50+ 分钟；
-  // 改为允许组间并发（默认 3），失败降级串行由上层失败 streak 机制兜底
-  const concurrency = Math.max(1, Math.min(groups.length, Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : defaultGroupConcurrency));
+  // 组间并发默认 6（受全局 LLM 信号量约束），失败降级串行由上层失败 streak 机制兜底
+  const concurrency = Math.max(1, Math.min(groups.length, getDocumentLlmMaxConcurrency(), Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : defaultGroupConcurrency));
   const results: string[] = new Array(groups.length).fill('');
   let emptyLlmGroupCount = 0;
   const runGroup = async (group: typeof targets): Promise<{ content: string; llmChars: number }> => {
@@ -651,7 +675,11 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
     const buildSectionTaskGroup = async () => {
       const parts: Array<string | undefined> = new Array(group.length);
       const failures: string[] = [];
-      const taskConcurrency = Math.max(1, Math.min(group.length, Number(process.env.DOCUMENT_SECTION_GROUP_TASK_CONCURRENCY || 2)));
+      const taskConcurrency = Math.max(1, Math.min(group.length, Number(process.env.DOCUMENT_SECTION_GROUP_TASK_CONCURRENCY || 4)));
+      // 全章表格计划分配：未分配必写表挂到本章最后一个小节兜底（分组链路同样保证必写表不丢失）
+      const chapterAllTitles = targets.map(item => item.title);
+      const unassignedPlans = unassignedSectionTablePlans(input.chapter, chapterAllTitles);
+      const unassignedHostTitle = chapterAllTitles.length > 0 ? chapterAllTitles[chapterAllTitles.length - 1] : '';
       const writeOne = async (item: typeof group[number], batchSignal: AbortSignal = input.signal as AbortSignal) => {
         const activeSignal = batchSignal || input.signal;
         // 复用组级汇总时已检索的小节证据（groupEvidenceLists 按 groupSections 顺序构建），
@@ -674,6 +702,7 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
             maxWords: Math.ceil(Math.max(item.targetWords, 900) * 1.16),
             forbidDrawingImages: input.forbidDrawingImages,
             factCoverageContext: input.factCoverageContext,
+            tablePlanInstruction: buildSectionTablePlanInstruction(input.chapter, item.title, item.title === unassignedHostTitle ? unassignedPlans : []),
             signal: activeSignal,
             diagnostics: input.diagnostics,
           });
@@ -749,6 +778,10 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
   const results: Array<string | undefined> = new Array(targets.length);
   const completedSections: Array<string | undefined> = new Array(targets.length);
   let completedCount = 0;
+  // 表格计划按小节分配：未被任何小节标题承接的必写表统一挂到本章最后一个小节（收尾小节）兜底输出
+  const allSectionTitles = targets.map(item => item.title);
+  const unassignedPlans = unassignedSectionTablePlans(input.chapter, allSectionTitles);
+  const unassignedHostIndex = targets.length - 1;
   const runSection = async (item: { title: string; targetWords: number; index: number }, compact = false) => {
     input.onSectionProgress?.({ completed: completedCount, total: targets.length, sectionTitle: item.title, phase: compact ? 'retry' : 'start', partialSections: [...completedSections] });
     try {
@@ -765,6 +798,7 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
         sectionTitle: item.title,
         targetWords: item.targetWords,
         maxWords: input.maxWords ? Math.max(item.targetWords, Math.ceil(input.maxWords / targets.length)) : Math.ceil(item.targetWords * 1.12),
+        tablePlanInstruction: buildSectionTablePlanInstruction(input.chapter, item.title, item.index === unassignedHostIndex ? unassignedPlans : []),
       };
       const content = item.targetWords >= 1400
         ? await buildTaskBasedSectionContent({ ...sectionInput, signal: input.signal })
@@ -849,4 +883,118 @@ export async function buildQualifiedSectionSupplement(input: Parameters<typeof b
     feedback = issue;
   }
   return undefined;
+}
+
+/**
+ * 规划驱动块级写手：消费章级规划结构（PlannedChapterStructure），每个主题块一次 LLM 调用成稿
+ * （含全部 H4 要点与专属事实），块间全并发推进，从根源上把「LLM 调用数」与「输入细目数」解耦。
+ * 单块质检（H4 锚点完整性 + 字数下限）失败整块重试一次；要点 ≥4 的块仍失败时对半拆为子块再试
+ * （自愈仍在块级管线内，不降级逐小节）；仍有块失败时返回 undefined，由上层走整章单次生成兜底。
+ */
+export async function buildPlannedChapterContent(input: {
+  template: DocumentTemplate;
+  chapter: DocumentTemplateChapter;
+  evidence: DocumentEvidence[];
+  missingFacts: string[];
+  promptTexts: string;
+  projectContext: string;
+  requirement?: string;
+  roleContext?: string;
+  targetWords: number;
+  maxWords?: number;
+  forbidDrawingImages: boolean;
+  factCoverageContext?: string;
+  compactProjectContext?: boolean;
+  sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>;
+  diagnostics?: DocumentGenerationDiagnostics;
+  signal?: AbortSignal;
+}, structure: PlannedChapterStructure): Promise<string | undefined> {
+  const blocks = structure.blocks;
+  if (blocks.length === 0) return undefined;
+  // 表格计划按主题块挂接：块内 subPoint 覆盖的源细目标题命中的表挂到该块；未命中必写表挂最后一块兜底，保证必写表不丢失
+  const allSubPointTitles = blocks.flatMap(block => block.subPoints.flatMap(point => point.sources));
+  const unassignedPlans = unassignedSectionTablePlans(input.chapter, allSubPointTitles);
+  const blockTablePlans = blocks.map((block, index) => {
+    const own = (input.chapter.tablePlans || []).filter(plan => {
+      if (unassignedPlans.includes(plan)) return false;
+      const title = plan.title || '';
+      return block.subPoints.some(point => point.sources.some(source => title.includes(source) || source.includes(title)) || title.includes(point.title) || point.title.includes(title));
+    });
+    return index === blocks.length - 1 ? [...own, ...unassignedPlans] : own;
+  });
+  const configuredConcurrency = Number(process.env.DOCUMENT_PLANNED_BLOCK_CONCURRENCY || blocks.length);
+  const concurrency = Math.max(1, Math.min(blocks.length, getDocumentLlmMaxConcurrency(), Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : blocks.length));
+  const results: Array<string | undefined> = new Array(blocks.length).fill(undefined);
+  const writeBlock = async (block: (typeof blocks)[number], index: number): Promise<string | undefined> => {
+    const sectionTitles = block.subPoints.map(point => point.title);
+    // 块级证据：全章证据按块标题与要点关键词过滤 + 块标题定向检索补充，避免无关证据挤占上下文
+    const blockTokens = tokenizeForRelevance(`${block.title} ${sectionTitles.join(' ')}`).filter(token => token.length >= 2);
+    const scoredEvidence = input.evidence
+      .map(item => ({ item, score: blockTokens.reduce((sum, token) => sum + (item.content.includes(token) ? 1 : 0), 0) }))
+      .filter(entry => entry.score > 0)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 10)
+      .map(entry => ({ ...entry.item, content: entry.item.content.slice(0, 1400) }));
+    const extraEvidence = input.sectionEvidenceProvider ? await input.sectionEvidenceProvider(block.title).catch(() => []) : [];
+    const blockEvidence = [...scoredEvidence, ...extraEvidence].slice(0, 12);
+    const blockChapter = { ...input.chapter, title: block.title, sections: sectionTitles, tablePlans: blockTablePlans[index] || [] };
+    const factsHint = block.facts.length
+      ? `【本主题块专属事实（只能在本节使用，不得重复出现在本章其他节）】${block.facts.map(item => `- ${item}`).join('\n')}`
+      : '';
+    // 覆盖清单：语义合并后的 H4 标注其承载的全部评分细目，写手按清单展开内容但不得为细目单独开设标题
+    const coverageList = block.subPoints.map(point => (point.sources.length > 1
+      ? `- #### ${point.title}（覆盖评分细目：${point.sources.join('、')}）`
+      : `- #### ${point.title}`)).join('\n');
+    const blockRoleContext = [input.roleContext || '', factsHint, `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下 H4 要点逐点写出实施性正文，H4 标题必须与给定标题完全一致，不得改名、合并或遗漏；每个 H4 必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题：\n${coverageList}`].filter(Boolean).join('\n\n');
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const feedback = attempt === 0 ? '' : '【上一轮未通过质检】必须完整包含每个 H4 要点标题并展开正文，总字数不少于目标字数，不得合并或遗漏要点。';
+      try {
+        const content = await buildLlmChapterContent(input.template, blockChapter, blockEvidence, input.missingFacts, input.promptTexts, input.projectContext, input.requirement, feedback ? `${blockRoleContext}\n\n${feedback}` : blockRoleContext, {
+          forbidDrawingImages: input.forbidDrawingImages,
+          minWords: Math.floor(block.targetWords * 0.6),
+          targetWords: block.targetWords,
+          maxWords: Math.ceil(block.targetWords * 1.1),
+          maxTokens: outputTokensForChapter(Math.floor(block.targetWords * 0.6), block.targetWords),
+          factCoverageContext: `${input.factCoverageContext || ''}${factsHint ? `\n${factsHint}` : ''}`,
+          signal: input.signal,
+          diagnostics: input.diagnostics,
+        });
+        if (!content) continue;
+        const stripped = content.replace(/^##\s+.+$/mu, '').trim();
+        const normalized = ensureGroupTertiaryShell(sectionTitles, stripped);
+        const chars = documentTextLength(normalized);
+        const missing = sectionTitles.filter(title => !normalized.includes(title));
+        if (chars >= Math.max(400, Math.floor(block.targetWords * 0.5)) && missing.length === 0) {
+          return normalized;
+        }
+        if (input.diagnostics && attempt === 1) input.diagnostics.llm.lastError = `规划块质检未达标：${block.title}（${chars} 字，缺 ${missing.join('、') || '无'}）`;
+      } catch (error) {
+        if (input.diagnostics && attempt === 1) input.diagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    // 自愈拆半：要点 ≥4 的块两次尝试仍未达标时，对半拆为两个子块各自成稿（仍在块级管线内，不降级逐小节）
+    if (block.subPoints.length >= 4) {
+      const mid = Math.ceil(block.subPoints.length / 2);
+      const halfTarget = Math.max(800, Math.floor(block.targetWords / 2));
+      const halfParts = await Promise.all([
+        writeBlock({ ...block, subPoints: block.subPoints.slice(0, mid), targetWords: halfTarget }, index),
+        writeBlock({ ...block, subPoints: block.subPoints.slice(mid), targetWords: halfTarget }, index),
+      ]);
+      if (halfParts.every((part): part is string => Boolean(part))) return halfParts.join(String.fromCharCode(10) + String.fromCharCode(10));
+      if (input.diagnostics) input.diagnostics.llm.lastError = `规划块拆半后仍未成稿：${block.title}`;
+    }
+    return undefined;
+  };
+  const runBlock = async (block: (typeof blocks)[number], index: number): Promise<void> => {
+    results[index] = await writeBlock(block, index);
+  };
+  for (let offset = 0; offset < blocks.length; offset += concurrency) {
+    throwIfAborted(input.signal);
+    const batch = blocks.slice(offset, offset + concurrency);
+    await Promise.all(batch.map((block, index) => runBlock(block, offset + index)));
+  }
+  if (results.some(content => !content)) return undefined;
+  const body = results.join('\n\n');
+  if (!body.trim()) return undefined;
+  return sanitizeFormalMarkdown(removeUnwantedDrawingImages(`## ${input.chapter.title}\n\n${body}`, input.forbidDrawingImages));
 }

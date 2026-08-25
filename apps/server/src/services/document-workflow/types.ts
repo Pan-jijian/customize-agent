@@ -70,7 +70,8 @@ export interface ProjectGraphTableFieldPlan {
   required: boolean;
   sourceDomain: 'project' | 'works' | 'methods' | 'resources' | 'schedule' | 'standards' | 'risks' | 'requirements' | 'siteConditions' | 'factsModel' | 'standard';
   sourceHint: string;
-  fallbackPolicy: 'projectFactOnly' | 'standardAllowed' | 'deriveFromContext';
+  /** projectFactOnly:资料没有不得填写；standardAllowed:按行业标准做法填写；deriveFromContext:结合图谱与上下文推导；deriveFromProject:基于项目事实（工程量/工期/工序）推导的投标人编制类字段 */
+  fallbackPolicy: 'projectFactOnly' | 'standardAllowed' | 'deriveFromContext' | 'deriveFromProject';
 }
 
 export type GovernedTableNecessity = 'must' | 'should' | 'conditional' | 'reference';
@@ -318,7 +319,7 @@ export interface CanonicalFact {
   label: string;
   value: string;
   normalizedValue: string;
-  sourceType: 'user' | 'tender' | 'contract' | 'boq' | 'drawing' | 'standard' | 'projectGraph' | 'derived' | 'structured_fact' | 'generated_markdown' | 'evidence' | 'unknown';
+  sourceType: 'user' | 'addendum' | 'tender' | 'contract' | 'boq' | 'drawing' | 'standard' | 'projectGraph' | 'derived' | 'structured_fact' | 'generated_markdown' | 'evidence' | 'unknown';
   sourceFile?: string;
   sourceRef?: string;
   confidence: number;
@@ -340,6 +341,15 @@ export interface CanonicalFactGap {
   reason: string;
 }
 
+/** 源级同口径数值冲突：不同资料文件对同一总量口径（建设规模/估算价/工期）给出不同数值 */
+export interface NumericScopeConflict {
+  kind: 'area' | 'cost' | 'duration';
+  scope: string;
+  values: Array<{ value: string; unit: string; sourceFile?: string; priority: number }>;
+  /** 裁决后的统一口径（按资料来源优先级裁决）；为空表示同优先级下无法自动裁决，需人工复核 */
+  resolution?: string;
+}
+
 export interface CanonicalFactModel {
   projectIdentity: Record<string, CanonicalFact | undefined>;
   projectScope: Record<string, CanonicalFact | CanonicalFact[] | undefined>;
@@ -352,6 +362,8 @@ export interface CanonicalFactModel {
   byKey: Record<string, CanonicalFact>;
   conflicts: CanonicalFactConflict[];
   gaps: CanonicalFactGap[];
+  /** 跨资料文件的同口径数值冲突及裁决结果（生成注入用） */
+  scopeConflicts: NumericScopeConflict[];
 }
 
 export interface DocumentFactsModel {
