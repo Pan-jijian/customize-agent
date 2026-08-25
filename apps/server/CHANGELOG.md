@@ -1,5 +1,13 @@
 # server
 
+## 4.3.1
+
+### Patch Changes
+
+- f4781ee: 文档生成稳定性优化：章级规划驱动管线（Planner 读项目图谱与文档蓝图，重排主题块并语义合并相邻细目，治理目录碎片化）；按文档规模自适应提升全局 LLM 并发上限（8/16/24/32 档）；招标结构生成前审计（评分条目承接校验）；表格计划执行与生成诊断细化。
+- Updated dependencies [f4781ee]
+  - @customize-agent/knowledge@4.0.44
+
 ## 4.3.0
 
 ### Minor Changes
