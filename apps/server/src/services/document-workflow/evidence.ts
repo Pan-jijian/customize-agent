@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplateChapter, EvidenceBundle, ResourceEvidence } from './types';
 import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
-import { EVIDENCE_PARAMETER_RE } from './parameterPatterns';
+import { EVIDENCE_PARAMETER_RE, HAS_QUANTIFIED_VALUE_RE } from './parameterPatterns';
 import { evidenceMatchesFact } from './factMatching';
 import { selectByScore, textImportanceScore } from './selection';
 
@@ -278,8 +278,8 @@ export function buildEvidenceBundle(chapter: DocumentTemplateChapter, evidence: 
     resource.score = Math.max(resource.score, item.score);
     resource.relatedFacts = [...new Set([...resource.relatedFacts, ...relatedFactsForResource(item, chapter)])];
     resource.relatedChapters = [...new Set([...resource.relatedChapters, chapter.title])];
-    const snippet = item.content.replace(/\s+/gu, ' ').slice(0, 320);
-    if (snippet && resource.snippets.length < 3 && !resource.snippets.includes(snippet)) resource.snippets.push(snippet);
+    const snippet = item.content.replace(/\s+/gu, ' ').slice(0, 600);
+    if (snippet && resource.snippets.length < 4 && !resource.snippets.includes(snippet)) resource.snippets.push(snippet);
     resourceMap.set(item.filePath, resource);
   }
   const resources = [...resourceMap.values()].sort((a, b) => b.score - a.score);
@@ -295,12 +295,19 @@ export function buildEvidenceBundle(chapter: DocumentTemplateChapter, evidence: 
 
 export interface EvidencePromptOptions {
   maxChars?: number;
+  /** 模板要求覆盖的事实：注入排序时对命中项加权，保证关键参数块不被高分泛化块挤出预算 */
+  requiredFacts?: string[];
 }
 
-export function evidencePromptBudgetForTarget(targetWords?: number, floorChars = 6000, ceilingChars = 18000) {
+export function evidencePromptBudgetForTarget(targetWords?: number, floorChars = 8000, ceilingChars = 36000) {
   const words = Number.isFinite(targetWords) && targetWords! > 0 ? Math.ceil(targetWords!) : 1200;
-  const dynamic = Math.ceil(words * 5.5);
-  return Math.max(floorChars, Math.min(ceilingChars, dynamic));
+  // 事实/字数比：每目标字配 12 字符证据（含结构化开销），证据不足是空话灌水的直接原因；
+  // 天花板按 env 可调（DOCUMENT_EVIDENCE_BUDGET_CEILING），默认 36000 让深召回的 42K-72K 证据尽可能全量注入，
+  // 替代旧的 18K 过度保守上限（旧上限丢弃 60%-85% 召回内容）
+  const configuredCeiling = Number(process.env.DOCUMENT_EVIDENCE_BUDGET_CEILING);
+  const ceiling = Number.isFinite(configuredCeiling) && configuredCeiling > 0 ? Math.floor(configuredCeiling) : ceilingChars;
+  const dynamic = Math.ceil(words * 12);
+  return Math.max(floorChars, Math.min(ceiling, dynamic));
 }
 
 function appendWithinBudget(parts: string[], next: string, state: { chars: number; omitted: number }, maxChars?: number) {
@@ -314,38 +321,52 @@ function appendWithinBudget(parts: string[], next: string, state: { chars: numbe
   state.omitted += 1;
 }
 
-function selectEvidenceForPrompt<T extends { filePath: string; score: number }>(items: T[], maxChars: number | undefined, render: (item: T, index: number) => string) {
+/** 证据注入排序分：检索分数 + 事实价值（量化参数/项目基础事实/requiredFacts 命中/标准编号）。
+ * 事实覆盖优先于文件多样性：旧 byFile top-1 启发式会牺牲文件内第 2 条关键参数块，已移除 */
+function evidencePromptImportance(item: DocumentEvidence, requiredFacts: string[]): number {
+  const text = `${item.sectionTitle || ''}\n${item.content}`;
+  let score = item.score;
+  if (HAS_QUANTIFIED_VALUE_RE.test(text)) score += 8;
+  if (/计划工期|合同工期|合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|建设地点|建设规模|质量标准|招标范围/u.test(text)) score += 10;
+  for (const fact of requiredFacts) {
+    if (fact && (text.includes(fact) || evidenceMatchesFact(item, fact))) score += 6;
+  }
+  if (/GB\s*\/?\s*T?|JGJ|CJJ|DB\s*\/?\s*T?|CECS|ISO/iu.test(text)) score += 3;
+  return score;
+}
+
+function selectEvidenceForPrompt<T extends { filePath: string }>(items: T[], maxChars: number | undefined, render: (item: T, index: number) => string, rank: (item: T) => number) {
   const state = { chars: 0, omitted: 0 };
   const selected: string[] = [];
-  const selectedItems = new Set<T>();
-  const byFile = new Set<string>();
-  const ranked = [...items].sort((a, b) => b.score - a.score);
+  const perFile = new Map<string, number>();
+  const ranked = [...items].sort((a, b) => rank(b) - rank(a));
   for (const item of ranked) {
-    if (byFile.has(item.filePath)) continue;
+    // 单文件最多 6 条：保留多来源覆盖，但不再强制每文件只取 1 条
+    const fileCount = perFile.get(item.filePath) || 0;
+    if (fileCount >= 6) continue;
     const before = selected.length;
     appendWithinBudget(selected, render(item, selected.length), state, maxChars);
-    if (selected.length > before) {
-      byFile.add(item.filePath);
-      selectedItems.add(item);
-    }
-  }
-  for (const item of ranked) {
-    if (selectedItems.has(item)) continue;
-    appendWithinBudget(selected, render(item, selected.length), state, maxChars);
+    if (selected.length > before) perFile.set(item.filePath, fileCount + 1);
   }
   return { lines: selected, omitted: state.omitted };
 }
 
 export function evidenceBundlePrompt(bundle: EvidenceBundle, options: EvidencePromptOptions = {}) {
   const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.ceil(options.maxChars!) : undefined;
+  const requiredFacts = options.requiredFacts || [];
   const resourcePrompt = selectEvidenceForPrompt(bundle.resources, maxChars ? Math.floor(maxChars * 0.35) : undefined, (item, index) => [
     `- 资料：${readableSourceLabel(item, index)}`,
     `  资料类型：${item.kind}`,
     `  正文用途：${item.contentUse}`,
     item.relatedFacts.length ? `  可用事实方向：${item.relatedFacts.join('、')}` : '',
     item.snippets.length ? `  可用内容：${item.snippets.map(cleanEvidenceText).filter(Boolean).join(' / ')}` : '',
-  ].filter(Boolean).join('\n'));
-  const textPrompt = selectEvidenceForPrompt(bundle.textEvidence, maxChars ? Math.floor(maxChars * 0.65) : undefined, (item, index) => `${readableSourceLabel(item, index)}\n类型：${item.processingType || 'reference'}\n章节/片段：${item.sectionTitle?.replace(FILE_NAME_RE, '') || '资料片段'}\n内容：${cleanEvidenceText(item.content).replace(/\s+/gu, ' ')}`);
+  ].filter(Boolean).join('\n'), item => item.score);
+  // 文本证据保留结构化换行（表格、键值对、清单行），不做单行压缩——单行压缩会把多列表格变成文字墙
+  const textPrompt = selectEvidenceForPrompt(bundle.textEvidence, maxChars ? Math.floor(maxChars * 0.65) : undefined, (item, index) => {
+    const body = cleanEvidenceText(item.content);
+    const truncated = body.length > 1200 ? `${body.slice(0, 1200)}\n（片段截断，完整 ${body.length} 字符）` : body;
+    return `${readableSourceLabel(item, index)}\n类型：${item.processingType || 'reference'}\n章节/片段：${item.sectionTitle?.replace(FILE_NAME_RE, '') || '资料片段'}\n内容：\n${truncated}`;
+  }, item => evidencePromptImportance(item, requiredFacts));
   const omittedNote = resourcePrompt.omitted + textPrompt.omitted > 0
     ? `提示：完整证据池仍保留 ${bundle.textEvidence.length} 条文本片段、${bundle.resources.length} 个结构化材料；为控制单次模型输入，本次只发送预算内高相关且覆盖多来源的证据，未发送片段将在章节/小节相关检索和质量校验中继续参与。`
     : '';

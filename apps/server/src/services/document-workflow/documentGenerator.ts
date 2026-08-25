@@ -687,6 +687,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
         return results;
       });
     };
+    // P4 硬回路提供器：两步生成大纲报告「材料缺失事实」时定向补检（复用小节级检索，禁用重排器，预算 9000 字符）
+    const supplementEvidenceForChapter = (missingFacts: string[]): Promise<DocumentEvidence[]> => {
+      if (missingFacts.length === 0 || scopedFilePaths.length === 0) return Promise.resolve([]);
+      const label = missingFacts.slice(0, 6).join(' ');
+      return retrieveSectionEvidence({ manager, projectRoot, chapter, sectionTitle: label, scopedFilePaths, fileRoleByPath, fileProcessingByPath, signal: input.signal }).catch(() => []);
+    };
     const retrievalCoverageReport = buildRetrievalCoverageReport({ chapter, evidence, risk: rolePoolRisk });
     retrievalCoverageReports.push(retrievalCoverageReport);
     const chapterEvidenceFiles = new Set(evidence.map(item => item.filePath));
@@ -836,7 +842,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         ));
       } else {
         llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-draft:${chapter.id}`, () =>
-          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords, targetWords, maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics })
+          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords, targetWords, maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics, supplementEvidenceProvider: supplementEvidenceForChapter })
         ));
       }
       if (!llmContent && (useSectionGroup || useSectionFirst)) {
@@ -851,7 +857,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
         emitProgress(chapterDrafts);
         llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-compact-fallback:${chapter.id}`, () =>
-          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords: Math.floor(minWords * 0.65), targetWords: Math.floor(effectiveTargetWords * 0.75), maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics }).catch(error => {
+          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords: Math.floor(minWords * 0.65), targetWords: Math.floor(effectiveTargetWords * 0.75), maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics, supplementEvidenceProvider: supplementEvidenceForChapter }).catch(error => {
             generationDiagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
             return undefined;
           })
@@ -872,7 +878,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         emitProgress(chapterDrafts);
         const retryRoleContext = [roleContext, `【上一轮 LLM 生成失败，请先分析失败原因，再调整策略重新输出完整章节正文】失败原因：${generationDiagnostics.llm.lastError || '空响应或超时'}`].filter(Boolean).join('\n');
         llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-lastretry:${chapter.id}`, () =>
-          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, retryRoleContext, { forbidDrawingImages, minWords: Math.floor(minWords * 0.55), targetWords: Math.floor(effectiveTargetWords * 0.6), maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics }).catch(error => {
+          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, retryRoleContext, { forbidDrawingImages, minWords: Math.floor(minWords * 0.55), targetWords: Math.floor(effectiveTargetWords * 0.6), maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics, supplementEvidenceProvider: supplementEvidenceForChapter }).catch(error => {
             generationDiagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
             return undefined;
           })

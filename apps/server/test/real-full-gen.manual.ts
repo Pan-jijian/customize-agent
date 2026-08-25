@@ -5,7 +5,7 @@ import { generateDocumentDraft } from '../src/services/document-workflow/documen
 describe('real full generation', () => {
   it('generates real document with real template and project materials', async () => {
     const out: string[] = [];
-    const log = (msg: string) => { out.push(msg); fs.writeFileSync('/tmp/real-gen-21-progress.log', out.join('\n')); };
+    const log = (msg: string) => { out.push(msg); fs.writeFileSync('/tmp/real-gen-23-progress.log', out.join('\n')); };
     let peakSearchQueryDetails = 0;
     const start = Date.now();
     log('START ' + new Date().toISOString());
@@ -20,7 +20,7 @@ describe('real full generation', () => {
         const latest = stages.filter(s => s.status !== 'running').slice(-4).map(s => `${s.status}:${s.message}`.slice(0, 120));
         log(`PROGRESS ${Math.round((Date.now() - start) / 1000)}s | ${latest.join(' || ')}${running.length ? ` || RUNNING ${running.join(' // ')}` : ''}`);
         if (checkpoint?.chapters?.length) {
-          fs.writeFileSync('/tmp/real-gen-21-checkpoint.json', JSON.stringify(checkpoint.chapters.map(c => ({ id: c.id, title: c.title, chars: c.content?.length || 0, content: c.content || '' })), null, 2));
+          fs.writeFileSync('/tmp/real-gen-23-checkpoint.json', JSON.stringify(checkpoint.chapters.map(c => ({ id: c.id, title: c.title, chars: c.content?.length || 0, content: c.content || '' })), null, 2));
         }
       },
     });
@@ -33,8 +33,8 @@ describe('real full generation', () => {
       stageCount: draft.executionStages?.length,
       failedStages: draft.executionStages?.filter(s => s.status === 'failed').length,
     }));
-    fs.writeFileSync('/tmp/real-gen-21-output.md', draft.markdown || '');
-    fs.writeFileSync('/tmp/real-gen-21-review.json', JSON.stringify({
+    fs.writeFileSync('/tmp/real-gen-23-output.md', draft.markdown || '');
+    fs.writeFileSync('/tmp/real-gen-23-review.json', JSON.stringify({
       reviewMetadata: draft.reviewMetadata,
       executionStages: draft.executionStages,
       chapters: draft.chapters.map(c => ({ id: c.id, title: c.title, sections: c.sections?.length, chars: c.content?.length })),

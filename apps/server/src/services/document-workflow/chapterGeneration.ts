@@ -5,7 +5,7 @@ import type { DocumentBudget } from './budget';
 import { documentTextLength } from './budget';
 import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
 import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
-import { callDocumentLlm, getDocumentLlmFailureStreak, getDocumentLlmMaxConcurrency } from './llmClient';
+import { callDocumentLlm, callDocumentLlmJson, getDocumentLlmFailureStreak, getDocumentLlmMaxConcurrency } from './llmClient';
 import { stringifyFactValue, throwIfAborted } from './utils';
 import { selectByScore, factImportanceScore } from './selection';
 import { measureGenerationStep } from './rolePipeline';
@@ -99,10 +99,138 @@ export function buildChapterFactCoverageContext(input: { chapter: DocumentTempla
   ].filter(Boolean).join('\n');
 }
 
+/** 用户提示词中明确给定的事实性表述（工期/地点/规模/范围/金额/目标等）：作为最高优先级事实源注入。
+ * 对齐「长提示词直接承载项目事实」的工作流（用户手动 OCR + 长提示词即可稳定生成）；
+ * 若与绑定材料数值冲突，以绑定材料为准。 */
+export function extractUserRequirementFacts(requirement?: string): string[] {
+  if (!requirement) return [];
+  const facts: string[] = [];
+  for (const rawLine of requirement.split(/\r?\n|[。；;]/u)) {
+    const line = rawLine.trim();
+    if (line.length < 4 || line.length > 240) continue;
+    if (!/计划工期|合同工期|工期|日历天|建设地点|工程地点|建设规模|工程规模|建筑面积|质量标准|质量目标|招标范围|施工范围|工作内容|合同估算|投资估算|最高投标限价|招标控制价|暂列金额|安全目标|文明施工目标|项目名称|工程名称/u.test(line)) continue;
+    // 纯指令句（无数值/单位支撑）不算事实，避免把写作要求误当事实注入
+    if (/(?:请|务必|不得|禁止|不要|要求你|你需要|生成|输出|格式|模板)/u.test(line) && !/(?:日历天|㎡|m2|平方米|万元|元|米|天|%|层|栋|台|套)/u.test(line)) continue;
+    facts.push(line);
+    if (facts.length >= 24) break;
+  }
+  return [...new Set(facts)];
+}
+
+export function userRequirementFactsPrompt(requirement?: string) {
+  const facts = extractUserRequirementFacts(requirement);
+  if (facts.length === 0) return '';
+  return [
+    '【用户提示词明确给定的事实——最高优先级，必须原样写入正文相关小节】',
+    ...facts.map(fact => `- ${fact}`),
+    '这些事实来自用户要求；若与绑定材料中的数值冲突，以绑定材料为准。',
+  ].join('\n');
+}
+
+/** 两步生成第一步产出的事实大纲 */
+interface ChapterFactOutline {
+  sections: Array<{ title?: string; facts?: string[]; quantifiedFacts?: string[]; missingFacts?: string[] }>;
+}
+
+/** 两步生成（事实大纲 → 写作）第一步：让 LLM 先基于绑定材料逐小节规划可写事实。
+ * JSON 解析失败反馈后重试一次；仍失败返回 undefined 由调用方退化为单步生成（非模板兜底）。 */
+async function buildChapterFactOutline(input: { template: DocumentTemplate; chapter: DocumentTemplate['chapters'][number]; sections: string[]; requiredFacts: string[]; missingFacts: string[]; promptTexts: string; evidenceText: string; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics }): Promise<ChapterFactOutline | undefined> {
+  const sectionLines = input.sections.length
+    ? input.sections.map((section, index) => `${index + 1}. ${section}`).join('\n')
+    : '（本章无预设小节，请按材料自然归纳 2-5 个主题作为大纲小节）';
+  const system = [
+    '你是文档事实规划专家。先通读绑定材料，再为本章每个小节列出「可写事实」，供 Writer 逐条落位。',
+    '事实必须逐字来自绑定材料：数值、单位、标准编号必须原样保留，不得改写、换算或编造；不得把写作要求当作事实。',
+    'quantifiedFacts 放含数字/单位/编号的事实；missingFacts 放该小节需要但材料中确实找不到的事实（供 Writer 用公共专业知识补做法，禁止编造具体值）。',
+    input.promptTexts,
+    '只返回 JSON，不要返回 markdown。',
+  ].filter(Boolean).join('\n\n');
+  const prompt = [
+    `文档模板：${input.template.name}`,
+    `章节标题：${input.chapter.title}`,
+    `章节目的：${input.chapter.purpose}`,
+    `预设小节：\n${sectionLines}`,
+    input.requiredFacts.length ? `模板要求覆盖的事实：${input.requiredFacts.join('、')}` : '',
+    input.missingFacts.length ? `当前检索未充分命中的事实（如材料中确实没有，写入对应小节的 missingFacts）：${input.missingFacts.join('、')}` : '',
+    `绑定材料：\n${input.evidenceText}`,
+    '返回 JSON：{"sections":[{"title":"小节名","facts":["可写事实（必须来自材料）"],"quantifiedFacts":["含数值/单位/编号的事实（必须原样）"],"missingFacts":["该小节需要但材料缺失的事实"]}]}',
+  ].filter(Boolean).join('\n\n');
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const outline = await callDocumentLlmJson<ChapterFactOutline>(system, prompt, { maxTokens: 1600, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
+    if (outline && Array.isArray(outline.sections) && outline.sections.length > 0) return outline;
+  }
+  return undefined;
+}
+
+function renderChapterFactOutline(outline: ChapterFactOutline, stillMissingFacts: Set<string>) {
+  const blocks = outline.sections.map(section => {
+    const facts = [...new Set([...(section.facts || []), ...(section.quantifiedFacts || [])])].filter(Boolean);
+    // 仅保留「补充检索后仍缺失」的事实标注缺失（已被覆盖的已在证据池提示中转为落位指令）
+    const missing = (section.missingFacts || []).filter(fact => fact && stillMissingFacts.has(fact));
+    return [
+      `### ${section.title || '正文'}`,
+      facts.length ? `必须写入的事实（数值必须原样）：\n${facts.map(fact => `- ${fact}`).join('\n')}` : '',
+      missing.length ? `材料缺失（禁止编造具体值；可用公共专业知识补做法与要求）：${missing.join('、')}` : '',
+    ].filter(Boolean).join('\n');
+  });
+  return [
+    '【事实大纲——由事实规划阶段生成，写作时必须逐条落位】',
+    '大纲事实全部来自绑定材料，落位不构成编造；数值、单位、标准编号必须与大纲完全一致。',
+    ...blocks,
+  ].join('\n\n');
+}
+
+/** 判断大纲中标记缺失的事实是否被定向补充检索覆盖（保守策略：至少两个有效 token 或一段 6+ 字连续片段命中才认为覆盖，
+ * 避免误判导致 Writer 编造数值） */
+function factCoveredByEvidence(fact: string, evidence: DocumentEvidence[]): boolean {
+  const haystack = evidence.map(item => `${item.sectionTitle || ''}\n${item.content}`).join('\n');
+  const tokens = fact.split(/[\s、，,。；;：:（）()【】[\]《》]/u).map(token => token.trim()).filter(token => token.length >= 4);
+  if (tokens.length === 0) return false;
+  const hitTokens = tokens.filter(token => haystack.includes(token)).length;
+  if (hitTokens >= 2) return true;
+  const chunks = [...new Set(fact.match(/.{6,}/gu) || [])];
+  return chunks.some(chunk => haystack.includes(chunk));
+}
+
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; diagnostics?: DocumentGenerationDiagnostics } = {}) {
+export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
-  const evidenceText = evidenceBundlePrompt(bundle, { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords) });
+  let evidenceText = evidenceBundlePrompt(bundle, { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords), requiredFacts: chapter.requiredFacts });
+  // 两步生成（事实大纲 → 写作）：第一步先让 LLM 基于绑定材料规划可写事实清单，
+  // 第二步按大纲逐条落位写作，根治「要求具体但证据碎片化导致空话灌水」的不稳定。
+  // env DOCUMENT_TWO_STEP_GENERATION=0 显式关闭；大纲阶段失败退化为单步生成（非模板兜底）
+  const twoStepConfigured = process.env.DOCUMENT_TWO_STEP_GENERATION;
+  const twoStepEnabled = options.twoStep !== false && twoStepConfigured !== '0' && evidence.length >= 3 && evidenceText.length > 0;
+  let outlineBlock = '';
+  let outline: ChapterFactOutline | undefined;
+  let stillMissingFacts = new Set<string>();
+  if (twoStepEnabled) {
+    outline = await buildChapterFactOutline({ template, chapter, sections: chapter.sections?.filter(Boolean) || [], requiredFacts: chapter.requiredFacts, missingFacts, promptTexts, evidenceText, signal: options.signal, diagnostics: options.diagnostics });
+    if (outline) {
+      // P4 硬回路：大纲报告的材料缺失事实 → 定向补充检索 → 命中材料并入证据池后重渲染大纲
+      const allOutlinedMissing = [...new Set(outline.sections.flatMap(section => (section.missingFacts || []).filter(Boolean)))];
+      const outlinedMissingFacts = allOutlinedMissing.slice(0, 12);
+      if (outlinedMissingFacts.length > 0 && options.supplementEvidenceProvider) {
+        const supplements = await options.supplementEvidenceProvider(outlinedMissingFacts).catch(() => []);
+        const fresh = supplements.filter(item => !evidence.some(existing => existing.filePath === item.filePath && (existing.sectionTitle || '') === (item.sectionTitle || '')));
+        if (fresh.length > 0) {
+          const mergedEvidence = [...evidence, ...fresh];
+          evidenceText = evidenceBundlePrompt(buildEvidenceBundle(chapter, mergedEvidence), { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords), requiredFacts: chapter.requiredFacts });
+          // 覆盖判断基于合并后证据池：原证据已覆盖的事实不算缺失，避免误标
+          stillMissingFacts = new Set(allOutlinedMissing.filter(fact => !factCoveredByEvidence(fact, mergedEvidence)));
+          if (stillMissingFacts.size < allOutlinedMissing.length) {
+            evidenceText = `${evidenceText}\n\n【定向补充检索】以下大纲缺失事实已找到对应材料并追加在上方，请一并落位：${allOutlinedMissing.filter(fact => !stillMissingFacts.has(fact)).join('、')}`;
+          }
+        } else {
+          stillMissingFacts = new Set(allOutlinedMissing);
+        }
+      } else {
+        stillMissingFacts = new Set(allOutlinedMissing);
+      }
+      outlineBlock = renderChapterFactOutline(outline, stillMissingFacts);
+    }
+  }
+  const userFactBlock = userRequirementFactsPrompt(requirement);
   // 即使 evidenceText 和 roleContext 为空，也让 LLM 基于 projectContext 和 promptTexts 尝试生成
   const sectionInstruction = chapter.sections?.length
     ? `本章小节由生成前规划得到，请完整包含并展开以下小节：\n${chapter.sections.map(section => `- ${section}`).join('\n')}`
@@ -126,10 +254,12 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     constructionOrgRuleInstruction,
     constructionOrgBonusInstruction,
     requirement ? `用户要求：${requirement}` : '',
+    userFactBlock,
     projectContext ? `上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${projectContext}` : '',
     roleContext ? roleContext : '',
     options.factCoverageContext || '',
     missingFacts.length ? `需要特别补足的信息：${missingFacts.join('、')}` : '',
+    outlineBlock,
     '请生成可直接导出的 Markdown 章节，要求：',
     `- 保留章节标题；内容不少于 ${options.minWords || 1000} 字${options.targetWords ? `，目标约 ${options.targetWords} 字` : ''}${options.maxWords ? `，最多不超过 ${options.maxWords} 字` : ''}。`,
     chapter.sections?.length ? '- 必须完整包含已规划小节；不要新增未规划的二级小节。' : '- 未预设小节时，不要为了凑结构强行新增小节。',
@@ -318,7 +448,7 @@ function compactSectionProjectContext(projectContext: string, maxChars = 2000) {
 export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number; allowLenientStructureGate?: boolean; tablePlanInstruction?: string }) {
   const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
   const sectionFactCard = buildSectionFactCard(input.sectionTitle, sectionEvidence);
-  const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 3500, 9000) });
+  const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 3500, 9000), requiredFacts: input.chapter.requiredFacts });
   // 工作包级小节（项目主要施工内容/主要分部分项工程施工方案/主要施工方法）：从项目图谱/上下文识别工作包，匹配工艺知识卡，注入工序链与工艺参数参考
   const majorConstructionPackages = /项目主要施工内容|主要分部分项工程施工方案|主要施工方法/u.test(input.sectionTitle) ? parseMajorConstructionPackages(input.projectContext, sectionEvidence) : [];
   const processKnowledgeCards = majorConstructionPackages.length > 0 ? matchProcessKnowledgeCards(majorConstructionPackages.map(pkg => pkg.name)) : [];
@@ -328,6 +458,7 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     `章节标题：${input.chapter.title}`,
     `当前二级小节：${input.sectionTitle}`,
     input.requirement ? `用户要求：${input.requirement}` : '',
+    userRequirementFactsPrompt(input.requirement),
     input.projectContext ? `上下文：\n${input.compactProjectContext ? compactSectionProjectContext(input.projectContext) : input.projectContext}` : '',
     input.factCoverageContext || '',
     professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
@@ -502,7 +633,7 @@ async function supplementSectionContent(input: Parameters<typeof buildLlmSection
   const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
   const sectionFactCard = buildSectionFactCard(input.sectionTitle, sectionEvidence);
   if (missing <= Math.max(260, Math.floor(input.targetWords * 0.12))) return input.currentContent;
-  const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(Math.min(input.targetWords, 2600), 3500, 9000) });
+  const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(Math.min(input.targetWords, 2600), 3500, 9000), requiredFacts: input.chapter.requiredFacts });
   const patchTarget = Math.max(500, missing);
   const patch = await callDocumentLlm([
     '你是专业文档小节补写专家。只做补写，不重写全文。',
@@ -738,6 +869,7 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
           maxWords: Math.ceil(groupTargetWords * 1.08),
           maxTokens: outputTokensForChapter(Math.floor(groupTargetWords * 0.45), groupTargetWords),
           factCoverageContext: `${input.factCoverageContext || ''}\n本轮输出多个节时，每个 ### 节下必须至少有一个 #### 三级小节承载正文。`,
+          twoStep: false,
           signal: input.signal,
           diagnostics: input.diagnostics,
         });
@@ -956,6 +1088,7 @@ export async function buildPlannedChapterContent(input: {
           maxWords: Math.ceil(block.targetWords * 1.1),
           maxTokens: outputTokensForChapter(Math.floor(block.targetWords * 0.6), block.targetWords),
           factCoverageContext: `${input.factCoverageContext || ''}${factsHint ? `\n${factsHint}` : ''}`,
+          twoStep: false,
           signal: input.signal,
           diagnostics: input.diagnostics,
         });

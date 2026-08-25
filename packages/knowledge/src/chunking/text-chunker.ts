@@ -463,12 +463,60 @@ export class TextChunker {
       }
     }
     if (current.length > 0) chunks.push([...header, ...current].join('\n'));
-    return chunks.flatMap(chunk => this.estimateTokens(chunk) > maxTokens ? this.splitByWindow(chunk, maxTokens) : [chunk]);
+    // 行原子性：超出预算的表块按行边界拆分并保留表头，绝不切开数据行（旧 splitByWindow 会把行切成碎片）
+    return chunks.flatMap(chunk => this.estimateTokens(chunk) > maxTokens ? this.splitTableByRowBoundary(chunk, header.length, maxTokens) : [chunk]);
+  }
+
+  /** 按行边界拆分超预算表块：表头行与数据行均保持完整；单行超预算也保持完整，不做窗口硬切 */
+  private splitTableByRowBoundary(chunk: string, headerLineCount: number, maxTokens: number): string[] {
+    const lines = chunk.split(/\r?\n/u).filter(Boolean);
+    const header = lines.slice(0, Math.min(headerLineCount, lines.length - 1));
+    const rows = lines.slice(header.length);
+    if (rows.length <= 1) return [chunk];
+    const mid = Math.ceil(rows.length / 2);
+    const left = [...header, ...rows.slice(0, mid)].join('\n');
+    const right = [...header, ...rows.slice(mid)].join('\n');
+    return [left, right].flatMap(part => this.estimateTokens(part) > maxTokens ? this.splitTableByRowBoundary(part, header.length, maxTokens) : [part]);
+  }
+
+  /** 表头行数（表头行 + 分隔行），非标准表格返回 0 */
+  private tableHeaderLineCount(text: string): number {
+    const lines = text.trim().split(/\r?\n/u);
+    const separatorIndex = lines.findIndex(line => /^\s*\|?\s*:?-{3,}:?\s*\|/u.test(line));
+    return separatorIndex > 0 ? separatorIndex + 1 : 0;
+  }
+
+  /** 计算切分片段在原文本中的起始偏移（顺序扫描，避免共享表头前缀导致 indexOf 重复命中） */
+  private chunkPartStartOffsets(text: string, parts: string[]): number[] {
+    const offsets: number[] = [];
+    let cursor = 0;
+    for (const part of parts) {
+      const index = text.indexOf(part, cursor);
+      offsets.push(index >= 0 ? index : cursor);
+      cursor = index >= 0 ? index + part.length : cursor;
+    }
+    return offsets;
   }
 
   private enforceCandidateLimit(candidates: ChunkCandidate[], config: ChunkConfig): ChunkCandidate[] {
     return candidates.flatMap(candidate => {
       if (this.estimateTokens(candidate.text) <= config.maxChunkSize) return [candidate];
+      // 表格候选：按行边界拆分并保留表头，避免 splitByWindow 把数据行切成碎片
+      if (candidate.kind === 'table') {
+        const headerLineCount = this.tableHeaderLineCount(candidate.text);
+        if (headerLineCount > 0) {
+          const parts = this.splitTableByRowBoundary(candidate.text, headerLineCount, config.maxChunkSize);
+          const offsets = this.chunkPartStartOffsets(candidate.text, parts);
+          return parts.map((text, index) => ({
+            ...candidate,
+            text,
+            childIndex: candidate.childIndex + index,
+            startChar: candidate.startChar + (offsets[index] ?? 0),
+            endChar: candidate.startChar + (offsets[index] ?? 0) + text.length,
+            rowRange: candidate.rowRange ? `${candidate.rowRange}#${index + 1}` : undefined,
+          }));
+        }
+      }
       return this.splitByWindow(candidate.text, config.maxChunkSize, config.overlap).map((text, index) => ({
         ...candidate,
         text,
