@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applyScopeConflictResolutions, detectNumericScopeConflicts } from '../src/services/document-workflow/factGovernance';
-import type { DocumentFact } from '../src/services/document-workflow/types';
+import { crossChapterConsistencyIssues } from '../src/services/document-workflow/qualityValidation';
+import type { DocumentFact, DocumentFactsModel } from '../src/services/document-workflow/types';
 
 function fact(key: string, value: string, sourceFile: string, roleId = 'local'): DocumentFact {
   return { key, value, sourceFile, roleId, confidence: 1 };
@@ -88,5 +89,44 @@ describe('补疑优先与源头裁决（回归：无“总”字前缀 + 单位�
     const conflicts = detectNumericScopeConflicts(facts);
     const resolved = applyScopeConflictResolutions(facts, conflicts);
     expect(resolved.find(item => item.key === 'project_scale_1')!.value).toBe('建设规模：建筑面积约4646平方米');
+  });
+
+  it('非对称“总”字：招标正文无“总”字 + 补疑带“总”字也必须归入同组检出（历史漏检：分组按原文词隔离）', () => {
+    const facts = [
+      fact('project_scale_1', '项目位于安庆路城隍庙南大门内，建筑面积约为4645㎡', '招标文件正文.pdf'),
+      fact('project_scale_2', '总建筑面积约4646m2', '补疑1.docx'),
+    ];
+    const conflicts = detectNumericScopeConflicts(facts);
+    const conflict = conflicts.find(item => item.kind === 'area');
+    expect(conflict).toBeDefined();
+    expect(conflict!.resolution).toBe('4646m2');
+    expect(conflict!.values.map(value => `${value.value}${value.unit}`)).toContain('4645㎡');
+  });
+});
+
+describe('crossChapterConsistencyIssues 校验基准与裁决同源', () => {
+  function factsModel(project: DocumentFact[]): DocumentFactsModel {
+    return { project, schedule: [], quality: [], safety: [], resources: [], tables: [], drawings: [], bills: [], preciseFacts: [], rules: [], specifications: [], schemaFacts: {}, factIndex: {}, missing: [], conflicts: [] } as unknown as DocumentFactsModel;
+  }
+  const conflictingFacts = [
+    fact('project_scale_1', '项目位于安庆路城隍庙南大门内，建筑面积约为4645㎡', '招标文件正文.pdf'),
+    fact('project_scale_2', '总建筑面积约4646m2', '补疑1.docx'),
+  ];
+
+  it('正文全用裁决胜出值时不误报（历史缺陷：主表取出败选值导致误报）', () => {
+    const conflicts = detectNumericScopeConflicts(conflictingFacts);
+    const markdown = '# 工程概况\n本项目建设规模为总建筑面积约4646㎡，共地上二层。';
+    const issues = crossChapterConsistencyIssues(markdown, factsModel(conflictingFacts), conflicts);
+    expect(issues.filter(issue => issue.message.includes('建设规模'))).toEqual([]);
+  });
+
+  it('正文混写败选值（无“总”字口径）时确定性检出 error', () => {
+    const conflicts = detectNumericScopeConflicts(conflictingFacts);
+    const markdown = '# 工程概况\n本项目建设规模为总建筑面积约4646㎡。\n# 施工部署\n现场建筑面积约为4645㎡，场地狭小。';
+    const issues = crossChapterConsistencyIssues(markdown, factsModel(conflictingFacts), conflicts);
+    const scaleIssue = issues.find(issue => issue.message.includes('建设规模'));
+    expect(scaleIssue).toBeDefined();
+    expect(scaleIssue!.level).toBe('error');
+    expect(scaleIssue!.message).toContain('4645㎡');
   });
 });

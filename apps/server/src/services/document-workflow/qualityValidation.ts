@@ -560,9 +560,9 @@ function scaledNumericValue(entry: { value: string; unit: string }) {
   return base;
 }
 
-// 总量口径词：只比对总量口径（总建筑面积/建设规模/总用地面积），
+// 总量口径词：只比对总量口径（总建筑面积/建设规模/总用地面积），“总”字可选（与裁决侧 scopeReForKind 对称），
 // 子项口径（地上/地下/单栋）数值不同属正常分层，不视为冲突
-const SCALE_SCOPE_RE = /总建筑面积|总建设规模|建设规模|总用地面积|总占地面积/u;
+const SCALE_SCOPE_RE = /(?<![地上地下])总?建筑面积|总?建设规模|总?用地面积|总?占地面积/u;
 // 面积单位归一化：扫描文本先行归一，m2（ASCII 数字）与 ㎡/m²/平方米 同口径（历史漏报根因：正文混写 m2 与 ㎡）
 const SCALE_UNIT_RE = /㎡|m²|m2|平方米/u;
 const COST_SCOPE_RE = /合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|工程总投资|总投资|工程造价/u;
@@ -573,6 +573,11 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
   // 校验基准与生成裁决同源：源级同口径冲突的裁决值（补疑修正后的胜出数值）优先作为期望口径，
   // 避免事实主表候选排序差异导致检查基准与裁决基准不一致（历史缺陷：正文全用胜出值时因主表取出败选值而误报）
   const scopeWinner = (kind: NumericScopeConflict['kind']) => scopeConflicts?.find(conflict => conflict.kind === kind && conflict.resolution)?.resolution;
+  // 裁决值是“数值+单位”短串（如“4646m2”），不带口径词前缀，直接从裁决值提取数值条目用于同口径比对
+  const numericEntryFromResolution = (resolution: string) => {
+    const match = /(\d+(?:\.\d+)?)\s*(㎡|m²|m2|平方米|万元|亿元)/u.exec(resolution);
+    return match ? { value: match[1], unit: match[2] } : undefined;
+  };
   const expectedSchedule = scopeWinner('duration') ?? factsModel.schedule.map(normalizedFactValue).find(value => /\d+\s*(?:日历天|天|个月|月)|计划工期|合同工期/u.test(value));
   const expectedQuality = factsModel.quality.map(normalizedFactValue).find(value => /质量|合格|优良/u.test(value));
   if (expectedSchedule) {
@@ -587,9 +592,10 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
   if (expectedQuality && !/质量标准|质量目标|合格|优良/u.test(markdown)) issues.push({ level: 'error', message: '跨章一致性缺口：正文未稳定体现资料中的质量目标', suggestion: `请在工程概况、质量保证和验收相关章节统一体现：${expectedQuality}` });
   // 建设规模口径冲突：资料中的总量面积与正文同口径数值比对；
   // 与裁决口径不符的取值出现 1 次即判定冲突（数字级不一致是低级错误，不得以“表述误差”放过），error 级进入修复链
-  const expectedScale = scopeWinner('area') ?? factsModel.project.map(normalizedFactValue).find(value => /建设规模|建筑面积|占地面积|用地面积/u.test(value));
+  const areaResolution = scopeWinner('area');
+  const expectedScale = areaResolution ?? factsModel.project.map(normalizedFactValue).find(value => /建设规模|建筑面积|占地面积|用地面积/u.test(value));
   if (expectedScale) {
-    const scaleMain = scopedNumericEntries(expectedScale, SCALE_SCOPE_RE, SCALE_UNIT_RE)[0];
+    const scaleMain = areaResolution ? numericEntryFromResolution(areaResolution) : scopedNumericEntries(expectedScale, SCALE_SCOPE_RE, SCALE_UNIT_RE)[0];
     const scaleMatches = scopedNumericEntries(markdown, SCALE_SCOPE_RE, SCALE_UNIT_RE);
     if (scaleMain) {
       const scaleConflicts = scaleMatches.filter(entry => scaledNumericValue(entry) !== scaledNumericValue(scaleMain));
@@ -597,9 +603,10 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
     }
   }
   // 合同估算价口径冲突：估算价/最高限价等金额口径在正文中不得出现多个互相矛盾的取值
-  const expectedCost = scopeWinner('cost') ?? factsModel.project.map(normalizedFactValue).find(value => /合同估算|投资估算|最高投标限价|招标控制价|总投资|工程造价/u.test(value));
+  const costResolution = scopeWinner('cost');
+  const expectedCost = costResolution ?? factsModel.project.map(normalizedFactValue).find(value => /合同估算|投资估算|最高投标限价|招标控制价|总投资|工程造价/u.test(value));
   if (expectedCost) {
-    const costMain = scopedNumericEntries(expectedCost, COST_SCOPE_RE, COST_UNIT_RE)[0];
+    const costMain = costResolution ? numericEntryFromResolution(costResolution) : scopedNumericEntries(expectedCost, COST_SCOPE_RE, COST_UNIT_RE)[0];
     const costMatches = scopedNumericEntries(markdown, COST_SCOPE_RE, COST_UNIT_RE);
     if (costMain) {
       const costConflicts = costMatches.filter(entry => scaledNumericValue(entry) !== scaledNumericValue(costMain));

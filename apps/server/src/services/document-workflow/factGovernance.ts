@@ -445,11 +445,14 @@ export function detectNumericScopeConflicts(facts: DocumentFact[]): NumericScope
       }
     }
     if (entries.length < 2) continue;
-    // 按口径词分组：同一口径词（如“总建筑面积”）下出现不同取值且来自不同文件 → 冲突
+    // 按口径词分组：同一口径词下出现不同取值且来自不同文件 → 冲突；
+    // 「总」字归一：招标文件常写“建筑面积约为4645㎡”（无“总”字），补疑写“总建筑面积约4646㎡”，
+    // 同一总量口径只是“总”字有无差异，必须归入同组检出（历史缺陷：分组按原文词隔离导致跨文件漏检）
     const byScope = entries.reduce((map, entry) => {
-      const list = map.get(entry.scope) || [];
+      const scopeKey = entry.scope.replace(/^总/u, '');
+      const list = map.get(scopeKey) || [];
       list.push(entry);
-      map.set(entry.scope, list);
+      map.set(scopeKey, list);
       return map;
     }, new Map<string, Entry[]>());
     for (const [scope, scoped] of byScope) {
