@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { applyScopeConflictResolutions, detectNumericScopeConflicts } from '../src/services/document-workflow/factGovernance';
+import { extractProjectBasicFactsFromEvidence } from '../src/services/document-workflow/factsModel';
 import { crossChapterConsistencyIssues } from '../src/services/document-workflow/qualityValidation';
-import type { DocumentFact, DocumentFactsModel } from '../src/services/document-workflow/types';
+import type { DocumentEvidence, DocumentFact, DocumentFactsModel } from '../src/services/document-workflow/types';
 
 function fact(key: string, value: string, sourceFile: string, roleId = 'local'): DocumentFact {
   return { key, value, sourceFile, roleId, confidence: 1 };
@@ -128,5 +129,41 @@ describe('crossChapterConsistencyIssues 校验基准与裁决同源', () => {
     expect(scaleIssue).toBeDefined();
     expect(scaleIssue!.level).toBe('error');
     expect(scaleIssue!.message).toContain('4645㎡');
+  });
+});
+
+describe('事实提取层嵌入句式（补疑总量口径进入事实主表的源头）', () => {
+  function evidence(filePath: string, content: string): DocumentEvidence {
+    return { chapterId: 'ch-1', filePath, score: 1, content, roleId: 'material' };
+  }
+
+  it('补疑“总建筑面积约4646m2”嵌入句式（无“建设规模：”标签）必须提取为事实', () => {
+    const facts = extractProjectBasicFactsFromEvidence([
+      evidence('8.4徽光阁项目施工/招标文件正文.pdf', '2.6建设规模：项目位于安庆路城隍庙南大门内，建筑面积约为4645㎡。'),
+      evidence('8.4徽光阁项目施工/002招标，图纸补疑/徽光阁项目施工补疑1.docx', '一、工程概况：本项目分为1个标段，现状建筑物为地上三层框架结构，总建筑面积约4646m2，本次改造工程保留现状在营业商铺278m2。'),
+    ]);
+    const scaleFacts = facts.filter(item => item.fieldId === 'project_scale');
+    const scaleValues = scaleFacts.map(item => item.value);
+    expect(scaleValues.some(value => value.includes('总建筑面积约4646m2'))).toBe(true);
+    expect(scaleValues.some(value => value.includes('4645㎡'))).toBe(true);
+  });
+
+  it('提取结果可直接触发源级冲突裁决（4645 vs 4646 → 裁决 4646m2）', () => {
+    const extracted = extractProjectBasicFactsFromEvidence([
+      evidence('8.4徽光阁项目施工/招标文件正文.pdf', '2.6建设规模：项目位于安庆路城隍庙南大门内，建筑面积约为4645㎡。'),
+      evidence('8.4徽光阁项目施工/002招标，图纸补疑/徽光阁项目施工补疑1.docx', '一、工程概况：本项目分为1个标段，现状建筑物为地上三层框架结构，总建筑面积约4646m2，本次改造工程保留现状在营业商铺278m2。'),
+    ]);
+    const conflicts = detectNumericScopeConflicts(extracted);
+    const conflict = conflicts.find(item => item.kind === 'area');
+    expect(conflict).toBeDefined();
+    expect(conflict!.resolution).toBe('4646m2');
+  });
+
+  it('分层口径（地上建筑面积）不得作为总量口径提取', () => {
+    const extracted = extractProjectBasicFactsFromEvidence([
+      evidence('图纸.pdf', '总建筑面积4646㎡；地上建筑面积3200㎡'),
+    ]);
+    const values = extracted.filter(item => item.fieldId === 'project_scale').map(item => item.value);
+    expect(values.some(value => value.includes('3200'))).toBe(false);
   });
 });

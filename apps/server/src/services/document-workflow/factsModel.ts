@@ -224,6 +224,9 @@ const PROJECT_BASIC_FACT_PATTERNS = [
   { fieldId: 'owner', key: '招标人', fieldName: '招标人', pattern: /(?:招标人|建设单位|发包人)[：:\s为是]+([^\n。；;]{2,120})/u },
   { fieldId: 'project_location', key: '建设地点', fieldName: '建设地点', pattern: /建设地点[：:\s为是]+([^\n。；;]{2,100})/u },
   { fieldId: 'project_scale', key: '建设规模', fieldName: '建设规模', pattern: /建设规模[：:\s为是]+([^\n。；;]{2,220})/u },
+  // 嵌入句式补充：补疑/清单等文件常写“总建筑面积约4646m2”（无“建设规模：”标签），
+  // 若无此模式则总量口径事实缺失，源级冲突裁决无从触发（历史缺陷：补疑更新面积未进事实主表）
+  { fieldId: 'project_scale', key: '建设规模', fieldName: '建设规模', pattern: /((?<![地上地下])总?建筑面积(?:约|约为|约计|共计|为)?\s*[\d,，.]+\s*(?:㎡|m²|m2|平方米))/u },
   { fieldId: 'project_scope', key: '招标范围', fieldName: '招标范围', pattern: /招标范围[：:\s为是]+([^\n。；;]{2,220})/u },
   { fieldId: 'schedule_requirement', key: '计划工期', fieldName: '周期要求', pattern: /(?:(?:计划工期|合同工期|总工期)[：:\s为是约]*|工期[：:\s为是约]+)([^\n。；;]{0,40}?\d+(?:\.\d+)?\s*(?:日历天|天|个月|月|年)(?:[^\n。；;]{0,30})?)/u },
   { fieldId: 'quality_standard', key: '质量标准', fieldName: '质量标准', pattern: /质量标准[：:\s为是]+([^\n。；;]{1,60})/u },
