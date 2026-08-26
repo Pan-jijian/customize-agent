@@ -8,6 +8,10 @@ function fact(key: string, value: string, sourceFile: string, roleId = 'local'):
   return { key, value, sourceFile, roleId, confidence: 1 };
 }
 
+function evidence(filePath: string, content: string): DocumentEvidence {
+  return { chapterId: 'ch-1', filePath, score: 1, content, roleId: 'material' };
+}
+
 describe('detectNumericScopeConflicts', () => {
   it('跨文件同口径建设规模冲突：补疑优先级最高，裁决为补疑值', () => {
     const facts = [
@@ -133,10 +137,6 @@ describe('crossChapterConsistencyIssues 校验基准与裁决同源', () => {
 });
 
 describe('事实提取层嵌入句式（补疑总量口径进入事实主表的源头）', () => {
-  function evidence(filePath: string, content: string): DocumentEvidence {
-    return { chapterId: 'ch-1', filePath, score: 1, content, roleId: 'material' };
-  }
-
   it('补疑“总建筑面积约4646m2”嵌入句式（无“建设规模：”标签）必须提取为事实', () => {
     const facts = extractProjectBasicFactsFromEvidence([
       evidence('8.4徽光阁项目施工/招标文件正文.pdf', '2.6建设规模：项目位于安庆路城隍庙南大门内，建筑面积约为4645㎡。'),
@@ -165,5 +165,54 @@ describe('事实提取层嵌入句式（补疑总量口径进入事实主表的�
     ]);
     const values = extracted.filter(item => item.fieldId === 'project_scale').map(item => item.value);
     expect(values.some(value => value.includes('3200'))).toBe(false);
+  });
+});
+
+describe('目标性数值甄别（业务目标不得作为裁决候选/事实主表口径）', () => {
+  it('补疑“拟建设总建筑面积约5000㎡”是业务目标，不得覆盖招标正文确定值（不判冲突）', () => {
+    const facts = [
+      fact('project_scale_1', '2.6建设规模：项目位于安庆路城隍庙南大门内，建筑面积约为4645㎡', '招标文件正文.pdf'),
+      fact('project_scale_2', '本工程拟建设总建筑面积约5000㎡', '徽光阁项目施工补疑1.docx'),
+    ];
+    const conflicts = detectNumericScopeConflicts(facts);
+    expect(conflicts.find(item => item.kind === 'area')).toBeUndefined();
+  });
+
+  it('补疑客观陈述（现状建筑物总建筑面积4646m2）仍参与裁决', () => {
+    const facts = [
+      fact('project_scale_1', '2.6建设规模：项目位于安庆路城隍庙南大门内，建筑面积约为4645㎡', '招标文件正文.pdf'),
+      fact('project_scale_2', '现状建筑物为地上三层框架结构，总建筑面积约4646m2', '徽光阁项目施工补疑1.docx'),
+    ];
+    const conflicts = detectNumericScopeConflicts(facts);
+    const conflict = conflicts.find(item => item.kind === 'area');
+    expect(conflict).toBeDefined();
+    expect(conflict!.resolution).toBe('4646m2');
+  });
+
+  it('句读后的确定口径不因前方“计划工期”误伤（“计划工期365日历天，总建筑面积4646㎡”正常参与裁决）', () => {
+    const facts = [
+      fact('project_scale_1', '2.6建设规模：项目位于安庆路城隍庙南大门内，建筑面积约为4645㎡', '招标文件正文.pdf'),
+      fact('project_scale_2', '计划工期365日历天，总建筑面积4646㎡', '徽光阁项目施工补疑1.docx'),
+    ];
+    const conflicts = detectNumericScopeConflicts(facts);
+    const conflict = conflicts.find(item => item.kind === 'area');
+    expect(conflict).toBeDefined();
+    expect(conflict!.resolution).toBe('4646㎡');
+  });
+
+  it('提取层：目标性表述（拟建设总建筑面积约5000㎡）不进入事实主表', () => {
+    const extracted = extractProjectBasicFactsFromEvidence([
+      evidence('8.4徽光阁项目施工/002招标，图纸补疑/徽光阁项目施工补疑1.docx', '本工程拟建设总建筑面积约5000㎡，分两期实施。'),
+    ]);
+    const scaleValues = extracted.filter(item => item.fieldId === 'project_scale').map(item => item.value);
+    expect(scaleValues.some(value => value.includes('5000'))).toBe(false);
+  });
+
+  it('提取层：客观陈述总建筑面积仍被提取（不受目标性负分支影响）', () => {
+    const extracted = extractProjectBasicFactsFromEvidence([
+      evidence('8.4徽光阁项目施工/002招标，图纸补疑/徽光阁项目施工补疑1.docx', '现状建筑物为地上三层框架结构，总建筑面积约4646m2。'),
+    ]);
+    const scaleValues = extracted.filter(item => item.fieldId === 'project_scale').map(item => item.value);
+    expect(scaleValues.some(value => value.includes('4646m2'))).toBe(true);
   });
 });

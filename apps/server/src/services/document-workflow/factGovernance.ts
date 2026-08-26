@@ -399,6 +399,13 @@ function extractNumericScopeEntries(text: string, kind: NumericScopeConflict['ki
     const value = match[1].replace(/[,，]/gu, '').trim();
     const unit = (match[2] || '').trim();
     if (!scope || !value) continue;
+    // 目标性数值甄别：补疑/澄清文件中的“拟建设总建筑面积约5000㎡”“计划总投资X万元”等表述是业务目标而非确定口径，
+    // 不得作为裁决候选覆盖招标正文的确定值（工期类除外：“计划工期/合同工期”本身是正式口径）
+    if (kind !== 'duration') {
+      // 只检查 scope 词前最近句读/换行内的短窗口（“，拟达到总建筑面积5000”命中；“计划工期365日历天，总建筑面积4646㎡”不误伤）
+      const prefix = text.slice(Math.max(0, match.index - 12), match.index).replace(/^.*[。；;\n，,]/u, '');
+      if (/拟|计划|规划|目标|力争|预计|期望|远期|未来|设想|建议|预期|争取/u.test(prefix)) continue;
+    }
     let compareKey: string;
     if (kind === 'duration') {
       // 工期天数与月数不可直接换算，按“数值+单位”原样比对
