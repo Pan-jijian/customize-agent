@@ -37,7 +37,7 @@ import { chapterSectionFactUsageIssues, reviewGlobalConsistency } from './chapte
 import { buildRuntimePromptRules, extractPromptStructuralRules, normalizePlannedSections, planChapterSectionsWithLlm, runtimePromptRulesPrompt } from './promptRuleExtraction';
 import { retrieveWebEvidence, webAccessPrompt } from './webResearchService';
 import { finalizeGeneration } from './documentPipeline';
-import { chapterCompletionStatus, chapterGenerationTargets, collectProjectBasicEvidence, compactChapterQueries, finalizeChapterContentQuality, kbIndexHealth, optimizeChapterEvidence, PROJECT_BASIC_FACT_QUERIES, qualityFirstEvidenceItemLimit, qualityFirstSearchQueryLimit, resolveChapterPromptExecution, resolveDocumentGenerationEvidenceLimit, retrieveSectionEvidence, searchWeightsForChapter } from './documentGeneratorHelpers';
+import { anchorTitleForSection, chapterCompletionStatus, chapterGenerationTargets, collectProjectBasicEvidence, compactChapterQueries, finalizeChapterContentQuality, hasDepthWarningIssues, kbIndexHealth, optimizeChapterEvidence, PROJECT_BASIC_FACT_QUERIES, qualityFirstEvidenceItemLimit, qualityFirstSearchQueryLimit, repairTargetWordsForSection, resolveChapterPromptExecution, resolveDocumentGenerationEvidenceLimit, retrieveSectionEvidence, searchWeightsForChapter } from './documentGeneratorHelpers';
 import { buildProjectGraph } from './projectGraph';
 import { referenceQualityTargetLines } from './templateReferenceService';
 import { buildScopedProjectIntelligence, constructionOrganizationPrompt } from './projectIntelligence';
@@ -966,7 +966,10 @@ export async function generateDocumentDraft(input: { templateId: string; require
     let blockingReviewIssues = agentReview.issues.filter(issue => issue.severity === 'blocker' || issue.level === 'error');
     let hasWriterMissingIssues = blockingReviewIssues.some(issue => /Writer 未完成/u.test(issue.message));
     let hasDepthBlockers = blockingReviewIssues.some(issue => /正文不足，未达到任务最小深度/u.test(issue.message));
-    let needsRepair = blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers);
+    // 深度不足类问题（含 warning 级）也要触发修复：Reviewer 只把关键小节的"正文不足"标为 blocker，
+    // 普通小节是 warning 级；若只按 blocker 触发，warning 级深度缺口永远不补写，修复循环空转（历史缺陷：47 个 warning 修复两轮问题数纹丝不动）
+    let hasDepthWarnings = hasDepthWarningIssues(agentReview.issues);
+    let needsRepair = (blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers)) || hasDepthWarnings;
     // P3：Repairer 轮次预算上限（默认 3 轮），超预算转"标记问题 + 门禁阻断 + 用户决策"
     const repairRoundBudget = generationBudget.repairRoundBudget;
     let repairRounds = 0;
@@ -974,6 +977,13 @@ export async function generateDocumentDraft(input: { templateId: string; require
     throttleAgentWorkflowNodes(agentWorkflow);
     upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-reviewer-${chapter.id}`, status: blockingReviewIssues.length ? (needsRepair ? 'running' : 'failed') : 'success', message: blockingReviewIssues.length ? `${displayChapterTitle(chapter.title)} Reviewer 发现 ${blockingReviewIssues.length} 个阻断问题，等待 Repairer 修复（轮次预算 ${repairRoundBudget} 轮）` : `${displayChapterTitle(chapter.title)} Reviewer 通过${agentReview.issues.length ? `（${agentReview.issues.length} 个优化提示）` : ''}`, details: agentReview.issues.map(issue => issue.message) }, { subtitle: 'Agent Reviewer', order: progressStages.length }));
     emitProgress(chapterDrafts);
+    // Reviewer 深度通过线 = 承接小节组内最大 minChars × 0.8；Repairer 补写目标必须对齐该线，
+    // 否则补写达标（0.7×目标）却被复审驳回，同一小节反复修（历史缺陷：补写 793 字过 Repairer 验收线仍被复审以 0.8×组内最大深度驳回）
+    const anchorDepthMap = new Map<string, number>();
+    for (const section of chapterTaskResult.task.sections) {
+      const anchor = anchorTitleForSection(plannedCoverageRef, section.title);
+      anchorDepthMap.set(anchor, Math.max(anchorDepthMap.get(anchor) || 0, section.minChars));
+    }
     while (needsRepair && repairRounds < repairRoundBudget) {
       repairRounds += 1;
       const repairReview = { ...agentReview, issues: blockingReviewIssues };
@@ -986,70 +996,83 @@ export async function generateDocumentDraft(input: { templateId: string; require
           ...blockingReviewIssues.map(issue => `- ${issue.message}；${issue.suggestion || ''}`),
         ].join('\n');
       const repairerStageOrder = progressStages.length;
-      const writerMissingIssues = blockingReviewIssues.filter(item => /Writer 未完成/u.test(item.message));
-      const depthRepairIssues = blockingReviewIssues.filter(item => /正文不足，未达到任务最小深度/u.test(item.message));
+      // 修复范围：深度不足类问题（含 warning 级）全部参与补写——只修 blocker 会让普通小节永远不补写（历史缺陷：47 个 warning 级"正文不足"修复两轮问题数纹丝不动，轮次预算空转）
+      const writerMissingIssues = agentReview.issues.filter(item => /Writer 未完成/u.test(item.message));
+      const depthRepairIssues = agentReview.issues.filter(item => /正文不足，未达到任务最小深度/u.test(item.message));
       const sectionRewriteIssues = [...writerMissingIssues, ...depthRepairIssues.filter(item => !writerMissingIssues.some(existing => existing.message === item.message))];
       const repairSectionResults: string[] = [];
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: `${displayChapterTitle(chapter.title)} Reviewer 发现 ${blockingReviewIssues.length} 个阻断问题，正在定向修复`, details: blockingReviewIssues.map(issue => issue.message) }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
       emitProgress(chapterDrafts);
-      for (const [sectionIndex, issue] of sectionRewriteIssues.entries()) {
+      const replaceChapterSection = (contentValue: string, title: string, sectionValue: string, anchorTitle?: string) => {
+        const normalizeHeadingTitle = (value: string) => value.replace(/[\u00a0\u3000]/gu, ' ').replace(/^\d+(?:\.\d+)*\s+/u, '').trim();
+        const comparableHeadingTitle = (value: string) => normalizeHeadingTitle(value).replace(/施工(?=方案|流程|方法)/gu, '').replace(/专项(?=方案)/gu, '').replace(/\s/gu, '');
+        // 标题重写（plannedCoverage 1:1 承接）场景：规划标题与正文 H4 标题字面差异大，定位须同时尝试承接标题，
+        // 否则 miss 后走 plannedIndex 兜底在下一规划小节前插入新 H4，旧承接小节残留形成重复小节（每轮修复多一个）
+        const matchesSectionHeading = (headingTitle: string) => {
+          const candidates = [title, anchorTitle].filter((item): item is string => typeof item === 'string');
+          return candidates.some(candidate => {
+            const comparableHeading = comparableHeadingTitle(headingTitle);
+            const comparableCandidate = comparableHeadingTitle(candidate);
+            return headingTitle === candidate || headingTitle.includes(candidate) || candidate.includes(headingTitle)
+              || comparableHeading === comparableCandidate || comparableHeading.includes(comparableCandidate) || comparableCandidate.includes(comparableHeading);
+          });
+        };
+        const stripGeneratedHeading = (value: string) => value.trim().replace(/^#{2,6}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]+\n+/u, '').trim();
+        const lines = contentValue.split('\n');
+        let cursor = 0;
+        for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+          const line = lines[lineIndex];
+          const lineStart = cursor;
+          cursor += line.length + 1;
+          const heading = /^(#{3,4})\s+(.+)$/u.exec(line.trim());
+          if (!heading) continue;
+          const headingTitle = normalizeHeadingTitle(heading[2]);
+          if (!matchesSectionHeading(headingTitle)) continue;
+          // 工作包型关键小节：正文由同级 H4 工作包展开，替换边界扩展到下一个上级标题（H2/H3），
+          // 吞并原有工作包 H4——否则每轮 Repairer 补写都会在旧工作包前追加一组新工作包，形成多组重复
+          const boundaryHeadingRe = heading[1].length === 3 && WORK_PACKAGE_SECTION_RE.test(title) ? /^#{2,3}\s+/u : /^#{2,4}\s+/u;
+          let endLine = lines.length;
+          for (let next = lineIndex + 1; next < lines.length; next += 1) {
+            if (boundaryHeadingRe.test(lines[next].trim())) {
+              endLine = next;
+              break;
+            }
+          }
+          const endOffset = endLine < lines.length ? lines.slice(0, endLine).join('\n').length : contentValue.length;
+          const body = stripGeneratedHeading(sectionValue);
+          return `${contentValue.slice(0, lineStart)}${line.trim()}\n\n${body}${contentValue.slice(endOffset)}`;
+        }
+        const plannedIndex = chapterTaskResult.task.sections.findIndex(item => comparableHeadingTitle(item.title) === comparableHeadingTitle(title));
+        if (plannedIndex >= 0) {
+          const nextPlanned = chapterTaskResult.task.sections.slice(plannedIndex + 1).map(item => comparableHeadingTitle(item.title));
+          for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+            const heading = /^(#{3,4})\s+(.+)$/u.exec(lines[lineIndex].trim());
+            if (!heading) continue;
+            if (!nextPlanned.includes(comparableHeadingTitle(heading[2]))) continue;
+            const insertOffset = lines.slice(0, lineIndex).join('\n').length + (lineIndex > 0 ? 1 : 0);
+            const body = stripGeneratedHeading(sectionValue);
+            return body ? `${contentValue.slice(0, insertOffset).trimEnd()}\n\n### ${title}\n\n${body}\n\n${contentValue.slice(insertOffset).trimStart()}` : contentValue;
+          }
+        }
+        const body = stripGeneratedHeading(sectionValue);
+        return body ? `${contentValue.trimEnd()}\n\n### ${title}\n\n${body}` : contentValue;
+      };
+      // 单个小节补写（LLM 调用部分）：返回待落位的补写结果；落位必须在批次完成后串行执行，避免并发改写 draftChapter 互相覆盖
+      const processSectionRewrite = async (issue: { message: string; suggestion?: string }): Promise<{ sectionTitle: string; rewriteReason: string; normalizedSection?: string; normalizedLength: number; enoughDepth: boolean; evidenceCount: number; repairTargetWords: number; failed?: string } | undefined> => {
+        throwIfAborted(input.signal);
         const sectionTitle = issue.message
           .replace(/\s*Writer 未完成.*$/u, '')
           .replace(/\s*正文不足，未达到任务最小深度.*$/u, '')
           .trim();
         const rewriteReason = /Writer 未完成/u.test(issue.message) ? '缺失小节' : '深度不足小节';
-        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: `${displayChapterTitle(chapter.title)} 正在补写${rewriteReason} ${sectionIndex + 1}/${sectionRewriteIssues.length}：${sectionTitle}`, details: [...repairSectionResults, `当前：${sectionTitle}`] }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
-        emitProgress(chapterDrafts);
         const taskSection = chapterTaskResult.task.sections.find(item => item.title === sectionTitle);
-        const replaceChapterSection = (contentValue: string, title: string, sectionValue: string) => {
-          const normalizeHeadingTitle = (value: string) => value.replace(/[\u00a0\u3000]/gu, ' ').replace(/^\d+(?:\.\d+)*\s+/u, '').trim();
-          const comparableHeadingTitle = (value: string) => normalizeHeadingTitle(value).replace(/施工(?=方案|流程|方法)/gu, '').replace(/专项(?=方案)/gu, '').replace(/\s/gu, '');
-          const stripGeneratedHeading = (value: string) => value.trim().replace(/^#{2,6}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]+\n+/u, '').trim();
-          const lines = contentValue.split('\n');
-          let cursor = 0;
-          for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-            const line = lines[lineIndex];
-            const lineStart = cursor;
-            cursor += line.length + 1;
-            const heading = /^(#{3,4})\s+(.+)$/u.exec(line.trim());
-            if (!heading) continue;
-            const headingTitle = normalizeHeadingTitle(heading[2]);
-            const comparableHeading = comparableHeadingTitle(headingTitle);
-            const comparableTitle = comparableHeadingTitle(title);
-            if (headingTitle !== title && !headingTitle.includes(title) && !title.includes(headingTitle) && comparableHeading !== comparableTitle && !comparableHeading.includes(comparableTitle) && !comparableTitle.includes(comparableHeading)) continue;
-            // 工作包型关键小节：正文由同级 H4 工作包展开，替换边界扩展到下一个上级标题（H2/H3），
-            // 吞并原有工作包 H4——否则每轮 Repairer 补写都会在旧工作包前追加一组新工作包，形成多组重复
-            const boundaryHeadingRe = heading[1].length === 3 && WORK_PACKAGE_SECTION_RE.test(title) ? /^#{2,3}\s+/u : /^#{2,4}\s+/u;
-            let endLine = lines.length;
-            for (let next = lineIndex + 1; next < lines.length; next += 1) {
-              if (boundaryHeadingRe.test(lines[next].trim())) {
-                endLine = next;
-                break;
-              }
-            }
-            const endOffset = endLine < lines.length ? lines.slice(0, endLine).join('\n').length : contentValue.length;
-            const body = stripGeneratedHeading(sectionValue);
-            return `${contentValue.slice(0, lineStart)}${line.trim()}\n\n${body}${contentValue.slice(endOffset)}`;
-          }
-          const plannedIndex = chapterTaskResult.task.sections.findIndex(item => comparableHeadingTitle(item.title) === comparableHeadingTitle(title));
-          if (plannedIndex >= 0) {
-            const nextPlanned = chapterTaskResult.task.sections.slice(plannedIndex + 1).map(item => comparableHeadingTitle(item.title));
-            for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-              const heading = /^(#{3,4})\s+(.+)$/u.exec(lines[lineIndex].trim());
-              if (!heading) continue;
-              if (!nextPlanned.includes(comparableHeadingTitle(heading[2]))) continue;
-              const insertOffset = lines.slice(0, lineIndex).join('\n').length + (lineIndex > 0 ? 1 : 0);
-              const body = stripGeneratedHeading(sectionValue);
-              return body ? `${contentValue.slice(0, insertOffset).trimEnd()}\n\n### ${title}\n\n${body}\n\n${contentValue.slice(insertOffset).trimStart()}` : contentValue;
-            }
-          }
-          const body = stripGeneratedHeading(sectionValue);
-          return body ? `${contentValue.trimEnd()}\n\n### ${title}\n\n${body}` : contentValue;
-        };
+        const anchorMinChars = anchorDepthMap.get(anchorTitleForSection(plannedCoverageRef, sectionTitle)) || 0;
+        // 补写目标对齐 Reviewer 通过线（组内最大 minChars × 0.8）：目标 = ceil(anchorMinChars / 0.8)，
+        // 使 Repairer 验收线 0.7×目标 ≈ 0.875×anchorMinChars ≥ Reviewer 0.8×anchorMinChars，一次补写即可复审通过
+        const repairTargetWords = repairTargetWordsForSection(sectionTitle, taskSection?.minChars, anchorMinChars);
+        const isDepthRepair = /正文不足，未达到任务最小深度/u.test(issue.message);
         const sectionEvidence = filterEvidenceByProjectScope(await sectionEvidenceForChapter(sectionTitle).catch(() => []), projectMaterialScope);
         assertEvidenceInProjectScope(sectionEvidence.length ? sectionEvidence : evidence, projectMaterialScope, `repair:${chapter.id}:${sectionTitle}`);
-        const repairTargetWords = Math.max(taskSection?.minChars || 0, /项目主要施工内容/u.test(sectionTitle) ? 2200 : /主要分部分项工程施工方案|主要施工方法/u.test(sectionTitle) ? 1800 : /项目特点.*重点.*难点|重点.*难点.*分析/u.test(sectionTitle) ? 1500 : /原材料进场复试|见证取样|危大工程专项施工方案审批流程/u.test(sectionTitle) ? 900 : 760);
-        const isDepthRepair = /正文不足，未达到任务最小深度/u.test(issue.message);
         generationDiagnostics.llm.lastError = undefined;
         let repairedSection = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `agent-repairer-section:${chapter.id}:${sectionTitle}`, () => buildLlmSectionContent({
           template,
@@ -1073,8 +1096,6 @@ export async function generateDocumentDraft(input: { templateId: string; require
         if (!repairedSection || repairedSection.includes('WRITER_MISSING_SECTION')) {
           const lastFailure = generationDiagnostics.llm.lastError;
           generationDiagnostics.llm.lastError = undefined;
-          upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: `${displayChapterTitle(chapter.title)} 正在二次补写${rewriteReason} ${sectionIndex + 1}/${sectionRewriteIssues.length}：${sectionTitle}`, details: [...repairSectionResults, `重试：${sectionTitle}`] }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
-          emitProgress(chapterDrafts);
           repairedSection = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `agent-repairer-section-retry:${chapter.id}:${sectionTitle}`, () => buildLlmSectionContent({
             template,
             chapter,
@@ -1102,14 +1123,33 @@ export async function generateDocumentDraft(input: { templateId: string; require
           // 门禁（含降级验收）已放行的内容不得在此处被更严的线拒收；关键小节 blocker 线承担 0.8×目标的把关职责
           const depthAcceptLine = Math.min(Math.max(Math.floor(repairTargetWords * 0.7), criticalSectionBlockerMinChars(sectionTitle)), Math.max(500, repairTargetWords));
           const enoughDepth = !isDepthRepair || normalizedLength >= depthAcceptLine;
-          const nextContent = enoughDepth ? replaceChapterSection(draftChapter.content, sectionTitle, normalizedSection) : draftChapter.content;
+          return { sectionTitle, rewriteReason, normalizedSection, normalizedLength, enoughDepth, evidenceCount: sectionEvidence.length || evidence.length, repairTargetWords };
+        }
+        return { sectionTitle, rewriteReason, normalizedLength: 0, enoughDepth: false, evidenceCount: 0, repairTargetWords, failed: !repairedSection ? generationDiagnostics.llm.lastError || '空响应' : '仍包含 WRITER_MISSING_SECTION' };
+      };
+      // 深度不足小节批量并发补写（每批 3 个）：批次内 LLM 调用并发，落位串行，避免并发改写 draftChapter 互相覆盖
+      const rewriteBatchSize = 3;
+      for (let start = 0; start < sectionRewriteIssues.length; start += rewriteBatchSize) {
+        const batch = sectionRewriteIssues.slice(start, start + rewriteBatchSize);
+        const batchResults = await Promise.allSettled(batch.map(issue => processSectionRewrite(issue)));
+        for (const result of batchResults) {
+          if (result.status === 'rejected') {
+            if (input.signal?.aborted) throw result.reason;
+            repairSectionResults.push(`失败：${result.reason instanceof Error ? result.reason.message : '未知异常'}`);
+            continue;
+          }
+          if (!result.value) continue;
+          if (result.value.failed) {
+            repairSectionResults.push(`失败：${result.value.sectionTitle}（${result.value.failed}）`);
+            continue;
+          }
+          const anchorSectionTitle = anchorTitleForSection(plannedCoverageRef, result.value.sectionTitle);
+          const nextContent = result.value.enoughDepth ? replaceChapterSection(draftChapter.content, result.value.sectionTitle, result.value.normalizedSection || '', anchorSectionTitle) : draftChapter.content;
           const hasRange = nextContent !== draftChapter.content;
           if (hasRange) draftChapter = { ...draftChapter, content: nextContent };
-          repairSectionResults.push(hasRange ? `成功：${sectionTitle}（${normalizedLength}字，证据 ${sectionEvidence.length || evidence.length} 条）` : `失败：${sectionTitle}（${enoughDepth ? '未定位到原小节块' : `补写不足 ${normalizedLength}/${repairTargetWords} 字`}）`);
-        } else {
-          repairSectionResults.push(`失败：${sectionTitle}（${!repairedSection ? generationDiagnostics.llm.lastError || '空响应' : '仍包含 WRITER_MISSING_SECTION'}）`);
+          repairSectionResults.push(hasRange ? `成功：${result.value.sectionTitle}（${result.value.normalizedLength}字，证据 ${result.value.evidenceCount} 条）` : `失败：${result.value.sectionTitle}（${result.value.enoughDepth ? '未定位到原小节块' : `补写不足 ${result.value.normalizedLength}/${result.value.repairTargetWords} 字`}）`);
         }
-        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: `${displayChapterTitle(chapter.title)} 已补写${rewriteReason} ${sectionIndex + 1}/${sectionRewriteIssues.length}`, details: repairSectionResults }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
+        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: `${displayChapterTitle(chapter.title)} 已补写深度不足小节 ${Math.min(start + rewriteBatchSize, sectionRewriteIssues.length)}/${sectionRewriteIssues.length}`, details: repairSectionResults }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
         emitProgress(chapterDrafts);
       }
       let repaired = { content: draftChapter.content, appliedCount: 0 };
@@ -1122,7 +1162,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
       blockingReviewIssues = agentReview.issues.filter(issue => issue.severity === 'blocker' || issue.level === 'error');
       hasWriterMissingIssues = blockingReviewIssues.some(issue => /Writer 未完成/u.test(issue.message));
       hasDepthBlockers = blockingReviewIssues.some(issue => /正文不足，未达到任务最小深度/u.test(issue.message));
-      needsRepair = blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers);
+      hasDepthWarnings = hasDepthWarningIssues(agentReview.issues);
+      needsRepair = (blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers)) || hasDepthWarnings;
       const postRepairFailed = blockingReviewIssues.length > 0;
       agentWorkflow.nodes.push({ id: `chapter-repairer-${chapter.id}`, type: 'chapter_repairer', status: postRepairFailed ? 'failed' : 'completed', startedAt: Date.now(), completedAt: Date.now(), outputSummary: agentReview.issues.length ? `修复后仍有 ${agentReview.issues.length} 个问题` : '定向修复通过', metrics: { supportedFacts: agentReview.supportedFacts }, issues: agentReview.issues });
       throttleAgentWorkflowNodes(agentWorkflow);

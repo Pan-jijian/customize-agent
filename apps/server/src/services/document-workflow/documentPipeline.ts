@@ -30,7 +30,7 @@ import { formalTextGateIssues } from './agentWorkflow';
 import { displayStage, upsertProgressStage } from './progress';
 import { buildLlmSectionContent, buildValidationIssues, criticalSectionBlockerMinChars } from './chapterGeneration';
 import { chapterSectionFactUsageIssues, understandReferenceFiles } from './chapterReview';
-import { factCoverageIssues, factsWithEvidenceSource, finalizeChapterContentQuality, normalizeProjectBasicInfoTable, partialChapterStatus, projectBasicPlaceholderIssues, slowMetricSummary, validateDraft } from './documentGeneratorHelpers';
+import { factCoverageIssues, factsWithEvidenceSource, criticalSectionBlockerLine, finalizeChapterContentQuality, normalizeProjectBasicInfoTable, partialChapterStatus, projectBasicPlaceholderIssues, slowMetricSummary, validateDraft } from './documentGeneratorHelpers';
 import { constructionOrgProfessionalAuditIssues } from './constructionOrgAudit';
 import { buildProfessionalScoreReport } from './documentProfessionalScore';
 
@@ -159,10 +159,12 @@ function criticalSectionDepthIssues(chapters: DocumentDraftChapter[]): Validatio
   const issues: ValidationIssue[] = [];
   for (const chapter of chapters) {
     for (const rule of rules) {
-      const body = extractSection(chapter.content, rule.title);
+      // exact 优先、fuzzy 兜底：exact 不会把相似子小节（如"质量检验方法"）误当"主要施工方法"（fuzzy 归一化后仅剩"方法"二字），
+      // 只有标题被语义重写（缺前缀/后缀）时才启用 fuzzy，兼顾"标题重写不误报"与"相似标题不漏判"
+      const body = extractSection(chapter.content, rule.title) || extractSection(chapter.content, rule.title, { fuzzy: true });
       const actualChars = documentTextLength(body);
       if (!body || actualChars >= rule.minChars) continue;
-      const blockerMinChars = rule.blockerMinChars || Math.floor(rule.minChars * 0.8);
+      const blockerMinChars = criticalSectionBlockerLine(rule.title);
       if (actualChars >= blockerMinChars) {
         issues.push({ level: 'warning', severity: 'warning', message: `${chapter.title} ${rule.title} 正文深度接近目标：当前 ${actualChars} 字，目标 ${rule.minChars} 字`, suggestion: '已达到可交付深度，建议后续按项目数据继续优化扩写。' });
       } else {
@@ -426,34 +428,37 @@ export async function finalizeGeneration(p: {
   let { knowledgeCoverage, factTraces, chapterCoverage, qualityReport, repairStrategies, finalExportGate } = qualityBundle;
   validationIssues = qualityBundle.validationIssues;
   const finalGateRepairStages: DocumentExecutionStage[] = [];
-  // 修复口径：Final Gate 只修 error 级结构缺陷（空小节/缺失小节/深度不足），warning 建议类告警一律不进入修复循环，
-  // 避免“建议补写→重算仍告警”的永不收敛修复空转；事实安全/污染类 error 由导出门禁阻断，不在此补写
-  const finalGateRepairCandidates = [
-    ...finalExportGate.blockingIssues,
-    ...validationIssues.filter(issue => issue.level === 'error'),
-  ];
-  const criticalSectionTitleRe = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样/u;
-  const emptySectionIssues = Array.from(new Map(finalGateRepairCandidates
-    .map(issue => {
-      const match = /^(.*?)(?:\s+|)(?:空小节|小节内容补写未完成|小节生成未达标|小节只有标题|只有标题或表格无正文|规划小节正文过短|正文小节正文过短|缺少规划小节|正文不足)[：:,，]\s*(.+)$/u.exec(issue.message);
-      // 关键小节（重点难点/主要施工内容/分部分项方案等）优先修复：避免普通空小节占满修复名额导致关键小节错误残留
-      const depthIssue = /^(.*?)\s+(项目特点、重点、难点分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样)\s+正文不足/u.exec(issue.message);
-      // Reviewer 深度类消息无章节前缀（“项目主要施工内容 正文不足，未达到任务最小深度”），单独解析小节标题
-      const reviewerDepthIssue = /^(.+?)\s*正文不足，未达到任务最小深度$/u.exec(issue.message);
-      // Final Gate 结构校验消息：小节完全缺失（“施工组织设计缺少"项目主要施工内容"小节”），必须带引号才匹配，避免误伤“缺少规划小节”类消息
-      const missingSectionIssue = /^(?:施工组织设计\s*)?缺少[“"'](.+?)[”"']小节$/u.exec(issue.message);
-      if (!match && !missingSectionIssue) return undefined;
-      const chapterTitle = depthIssue ? depthIssue[1].trim() : reviewerDepthIssue ? '' : missingSectionIssue ? '' : match![1].trim();
-      const sectionTitle = depthIssue ? depthIssue[2] : reviewerDepthIssue ? reviewerDepthIssue[1].trim() : missingSectionIssue ? missingSectionIssue[1].trim() : match![2].split(/[：:,，,]/u)[0].trim();
-      return { issue, chapterTitle, sectionTitle, critical: criticalSectionTitleRe.test(sectionTitle) };
-    })
-    .filter((item): item is { issue: ValidationIssue; chapterTitle: string; sectionTitle: string; critical: boolean } => Boolean(item))
-    .map(item => [`${item.chapterTitle}::${item.sectionTitle}`, item])).values())
-    .sort((a, b) => Number(b.critical) - Number(a.critical))
-    .slice(0, 4);
-  if (emptySectionIssues.length > 0) {
+  // Final Gate 修复循环：每轮重算 error 级结构缺陷候选并补写（每轮最多 4 个），补写后重算校验组；
+  // 最多 3 轮，避免“候选超限残留 error 直接阻断”（历史缺陷：6 个深度不足 error 只修 4 个，剩余 2 个让整篇生成失败）
+  const repairedSectionKeys = new Set<string>();
+  for (let finalGateRepairRound = 0; finalGateRepairRound < 3; finalGateRepairRound += 1) {
+    // 修复口径：Final Gate 只修 error 级结构缺陷（空小节/缺失小节/深度不足），warning 建议类告警一律不进入修复循环，
+    // 避免“建议补写→重算仍告警”的永不收敛修复空转；事实安全/污染类 error 由导出门禁阻断，不在此补写
+    const finalGateRepairCandidates = [
+      ...finalExportGate.blockingIssues,
+      ...validationIssues.filter(issue => issue.level === 'error'),
+    ];
+    const criticalSectionTitleRe = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样/u;
+    const emptySectionIssues = Array.from(new Map(finalGateRepairCandidates
+      .map(issue => {
+        const match = /^(.*?)(?:\s+|)(?:空小节|小节内容补写未完成|小节生成未达标|小节只有标题|只有标题或表格无正文|规划小节正文过短|正文小节正文过短|缺少规划小节|正文不足)[：:,，]\s*(.+)$/u.exec(issue.message);
+        // 关键小节（重点难点/主要施工内容/分部分项方案等）优先修复：避免普通空小节占满修复名额导致关键小节错误残留
+        const depthIssue = /^(.*?)\s+(项目特点、重点、难点分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样)\s+正文不足/u.exec(issue.message);
+        // Reviewer 深度类消息无章节前缀（“项目主要施工内容 正文不足，未达到任务最小深度”），单独解析小节标题
+        const reviewerDepthIssue = /^(.+?)\s*正文不足，未达到任务最小深度$/u.exec(issue.message);
+        // Final Gate 结构校验消息：小节完全缺失（“施工组织设计缺少"项目主要施工内容"小节”），必须带引号才匹配，避免误伤“缺少规划小节”类消息
+        const missingSectionIssue = /^(?:施工组织设计\s*)?缺少[“"'](.+?)[”"']小节$/u.exec(issue.message);
+        if (!match && !missingSectionIssue) return undefined;
+        const chapterTitle = depthIssue ? depthIssue[1].trim() : reviewerDepthIssue ? '' : missingSectionIssue ? '' : match![1].trim();
+        const sectionTitle = depthIssue ? depthIssue[2] : reviewerDepthIssue ? reviewerDepthIssue[1].trim() : missingSectionIssue ? missingSectionIssue[1].trim() : match![2].split(/[：:,，,]/u)[0].trim();
+        return { issue, chapterTitle, sectionTitle, critical: criticalSectionTitleRe.test(sectionTitle) };
+      })
+      .filter((item): item is { issue: ValidationIssue; chapterTitle: string; sectionTitle: string; critical: boolean } => Boolean(item))
+      .map(item => [`${item.chapterTitle}::${item.sectionTitle}`, item])).values())
+      .sort((a, b) => Number(b.critical) - Number(a.critical))
+      .slice(0, 4);
+    if (emptySectionIssues.length === 0) break;
     const repairDetails: string[] = [];
-    const repairedSectionKeys = new Set<string>();
     for (const { issue, chapterTitle: parsedChapterTitle, sectionTitle } of emptySectionIssues) {
       let chapterTitle = parsedChapterTitle;
       let chapterIndex = chapterTitle ? finalChapterDrafts.findIndex(chapter => chapter.title === chapterTitle || chapterTitle.includes(chapter.title) || chapter.title.includes(chapterTitle)) : -1;

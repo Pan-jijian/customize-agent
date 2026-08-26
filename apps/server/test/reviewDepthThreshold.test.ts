@@ -59,4 +59,9 @@ describe('reviewChapterDraft 关键小节深度容忍线（与 Final Gate blocke
     const review = reviewChapterDraft({ task: makeTask(), draft: makeDraft(Math.floor(SECTION_MIN_CHARS * 0.85)), context });
     expect(review.issues.some(issue => issue.level === 'error' && /正文不足，未达到任务最小深度/u.test(issue.message))).toBe(false);
   });
+
+  it('正文达到容忍线时不再报任何「正文不足」issue（达标静默，Repairer 收敛前提）', () => {
+    const review = reviewChapterDraft({ task: makeTask(), draft: makeDraft(Math.floor(SECTION_MIN_CHARS * 0.85)), context });
+    expect(review.issues.filter(issue => /正文不足，未达到任务最小深度/u.test(issue.message))).toEqual([]);
+  });
 });

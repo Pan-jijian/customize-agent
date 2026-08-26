@@ -319,7 +319,11 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
       // 容忍线与 Final Gate blocker 口径一致（minChars × 0.8）：低于该线必须触发深度修复，
       // 否则 0.7~0.8 之间的深度缺口会被 Reviewer 放过、被 Final Gate 阻断，修复机会浪费在最终门禁上
       const nearEnough = documentTextLength(body) >= Math.floor(threshold * 0.8);
-      issues.push({ level: criticalDepth && !nearEnough ? 'error' : 'warning', severity: criticalDepth && !nearEnough ? 'blocker' : 'warning', category: 'structure', owner: 'system', message: merged ? `${anchor} 正文不足，未达到任务最小深度（承接 ${section.title}）` : `${section.title} 正文不足，未达到任务最小深度`, suggestion: criticalDepth ? '关键小节必须基于项目事实和对应关系重写补足；不得仅保留概述性文字。' : '应基于该小节事实卡和证据重新生成，不得使用标题占位。' });
+      // 达标小节静默：不再报「正文不足」warning——否则 hasDepthWarnings 永真，Repairer 每轮全量补写达标小节，
+      // 3 轮预算空转且达标正文被反复重写引入不稳定（历史缺陷：达标小节仍报 warning → Repairer 永不收敛）
+      if (!nearEnough) {
+        issues.push({ level: criticalDepth ? 'error' : 'warning', severity: criticalDepth ? 'blocker' : 'warning', category: 'structure', owner: 'system', message: merged ? `${anchor} 正文不足，未达到任务最小深度（承接 ${section.title}）` : `${section.title} 正文不足，未达到任务最小深度`, suggestion: criticalDepth ? '关键小节必须基于项目事实和对应关系重写补足；不得仅保留概述性文字。' : '应基于该小节事实卡和证据重新生成，不得使用标题占位。' });
+      }
     } else if (!body && !anchorDepthChecked.has(anchor)) {
       anchorDepthChecked.add(anchor);
       const criticalDepth = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试|见证取样/u.test(section.title);

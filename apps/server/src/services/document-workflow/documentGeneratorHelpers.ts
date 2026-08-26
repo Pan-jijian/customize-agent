@@ -11,6 +11,7 @@ import { normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTen
 import { collectSectionContentGaps } from './qualityValidation';
 import { stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
 import { promptTextsForResolvedPrompts } from './rolePipeline';
+import { criticalSectionBlockerMinChars } from './chapterPostProcessing';
 
 
 export function chapterGenerationTargets(input: { budgetTarget: number; sectionCount: number; title: string; longformStrict: boolean }) {
@@ -52,6 +53,59 @@ export function chapterCompletionStatus(chars: number, _targetWords: number, iss
   return 'success';
 }
 
+/**
+ * Repairer 补写目标字数：对齐 Reviewer 深度通过线（承接小节组内最大 minChars × 0.8）。
+ * 目标 = ceil(anchorMinChars / 0.8)，使 Repairer 验收线 0.7×目标 ≈ 0.875×anchorMinChars ≥ Reviewer 0.8×anchorMinChars，
+ * 一次补写即可复审通过；否则补写达标却被复审驳回，同一小节反复修（历史缺陷：补写 793 字过 Repairer 验收线仍被复审驳回）。
+ */
+export function repairTargetWordsForSection(sectionTitle: string, taskMinChars?: number, anchorMinChars?: number) {
+  return Math.max(
+    taskMinChars || 0,
+    anchorMinChars && anchorMinChars > 0 ? Math.ceil(anchorMinChars / 0.8) : 0,
+    /项目主要施工内容/u.test(sectionTitle) ? 2200
+      : /主要分部分项工程施工方案|主要施工方法/u.test(sectionTitle) ? 1800
+        : /项目特点.*重点.*难点|重点.*难点.*分析/u.test(sectionTitle) ? 1500
+          : /原材料进场复试|见证取样|危大工程专项施工方案审批流程/u.test(sectionTitle) ? 900 : 760,
+  );
+}
+
+/**
+ * warning 级"正文不足"问题检测：Reviewer 只把关键小节的"正文不足"标为 blocker，普通小节是 warning 级；
+ * 修复循环若不处理 warning 级深度缺口，修复多轮问题数纹丝不动（历史缺陷：47 个 warning 修复两轮后仍 49 个问题）。
+ */
+export function hasDepthWarningIssues(issues: Array<{ level?: string; severity?: string; message: string }>) {
+  return issues.some(issue => issue.level !== 'error' && issue.severity !== 'blocker' && /正文不足，未达到任务最小深度/u.test(issue.message));
+}
+
+/**
+ * Final Gate 关键小节深度阻断线：min(规则表 blocker 线, Writer/Repairer/Final Gate 修复验收线)。
+ * 阻断线不得超过修复验收线（criticalSectionBlockerMinChars），否则补写达标替换后重算仍不足，同一小节永不自愈。
+ * 历史缺陷："主要施工方法"修复验收线 1200 但阻断线 1760（规则表 2200×0.8），补写 1715 字达标替换后仍被判不足，整篇生成失败。
+ */
+export function criticalSectionBlockerLine(title: string) {
+  const rules: Array<{ title: string; minChars: number; blockerMinChars?: number }> = [
+    { title: '项目特点、重点、难点分析', minChars: 1800 },
+    { title: '项目主要施工内容', minChars: 2200 },
+    { title: '主要分部分项工程施工方案', minChars: 1200, blockerMinChars: 800 },
+    { title: '主要施工方法', minChars: 2200 },
+    { title: '危大工程专项施工方案审批流程', minChars: 500, blockerMinChars: 250 },
+    { title: '原材料进场复试与见证取样', minChars: 600, blockerMinChars: 300 },
+  ];
+  const rule = rules.find(item => item.title === title);
+  if (!rule) return 0;
+  const ruleBlocker = rule.blockerMinChars || Math.floor(rule.minChars * 0.8);
+  const repairAcceptLine = criticalSectionBlockerMinChars(title);
+  return Math.min(ruleBlocker, repairAcceptLine > 0 ? repairAcceptLine : ruleBlocker);
+}
+
+/**
+ * 小节标题 → 承接锚点标题：plannedCoverage 映射存在时用首个承接 H4 标题（标题可能被语义重写），
+ * 否则用规划标题本身。Repairer 补写目标必须按锚点查深度表，按规划标题查会 miss（历史缺陷：1:1 标题重写小节查表得 0，补写达标仍被复审驳回）。
+ */
+export function anchorTitleForSection(plannedCoverage: Record<string, string[]> | undefined, sectionTitle: string) {
+  const anchors = plannedCoverage?.[sectionTitle];
+  return anchors && anchors.length > 0 ? anchors[0] : sectionTitle;
+}
 export function partialChapterStatus(chapter: DocumentDraftChapter, _targetWords?: number): 'completed' | 'failed' {
   const chars = documentTextLength(chapter.content);
   if (chars <= 0) return 'failed';
