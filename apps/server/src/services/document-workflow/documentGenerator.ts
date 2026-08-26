@@ -15,7 +15,7 @@ import { displayChapterTitle, effectiveTemplateChapters, extractExplicitOutlineF
 import { evidenceMatchesFact } from './factMatching';
 import { plannedStructurePrompt, extractGeneratedSections } from './markdownComposer';
 import { buildDocumentBudget, documentTextLength } from './budget';
-import { sectionContentIntegrityIssues, crossChapterConsistencyIssues, processSpecConflictIssues } from './qualityValidation';
+import { sectionContentIntegrityIssues, crossChapterConsistencyIssues, processSpecConflictIssues, applyDeterministicConsistencyFixes } from './qualityValidation';
 import { buildDocumentBlueprintContext } from './documentBlueprint';
 import { enrichConstructionOrgOutline } from './constructionOrgCatalog';
 import { validateBidStructureBeforeGeneration } from './constructionBidStructure';
@@ -271,7 +271,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
 
   // 构建章节→图谱节点映射：将图谱中的 works/methods/resources 按章节标题匹配
   const rawEffectiveChapters = effectiveTemplateChapters(template, documentSpec, { preserveExplicitOutline: hasExplicitOutline });
-  const enrichedOutlineChapters = enrichConstructionOrgOutline({ template, chapters: rawEffectiveChapters, requirement: input.requirement });
+  const outlineEnrichment = enrichConstructionOrgOutline({ template, chapters: rawEffectiveChapters, requirement: input.requirement });
+  const enrichedOutlineChapters = outlineEnrichment.chapters;
   // 评分标准相关证据切片：用于提取招标文件技术评审条目并与大纲做承接审计
   const evaluationTexts = allEvidence
     .filter(item => /评审|评分标准|评分办法|评审标准|详细评审/u.test(`${item.sectionTitle || ''}${item.content}`.slice(0, 600)))
@@ -348,7 +349,18 @@ export async function generateDocumentDraft(input: { templateId: string; require
     if (!sections.length) throw new Error(`${displayChapterTitle(chapter.title)} 小节规划未生成可用小节`);
     return { ...chapter, sections };
   }, { kind: 'llmRepair', targetWords: provisionalBudget.targetChars || 4000, concurrency: 2 });
-  const plannedWithConstructionOrgRequiredSections = enrichConstructionOrgOutline({ template, chapters: plannedChapters, requirement: input.requirement });
+  const plannedWithConstructionOrgOutline = enrichConstructionOrgOutline({ template, chapters: plannedChapters, requirement: input.requirement });
+  const plannedWithConstructionOrgRequiredSections = plannedWithConstructionOrgOutline.chapters;
+  // 标准模块挂靠报告：挂靠量不再被写死上限截断（历史缺陷：50 上限静默丢弃尾部模块小节），
+  // 无处安放的可选模块显式可见——宁多勿丢，丢失必可见
+  {
+    const outlineReport = plannedWithConstructionOrgOutline.report;
+    if (outlineReport.unattached.length > 0) {
+      upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'construction-org-outline-unattached', status: 'success', message: `标准模块挂靠：${outlineReport.totals.attachedModules} 个模块、${outlineReport.totals.sectionCount} 个小节；${outlineReport.unattached.length} 个可选模块未挂靠（无语义匹配章节，已记录）`, details: outlineReport.unattached.map(item => `未挂靠：${item.moduleTitle}（${item.sections.length} 小节，${item.level}）`) }, { subtitle: '标准模块挂靠' }));
+    } else {
+      upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'construction-org-outline-attached', status: 'success', message: `标准模块挂靠：${outlineReport.totals.attachedModules} 个模块、${outlineReport.totals.sectionCount} 个小节全部挂靠`, details: outlineReport.attached.map(item => `${item.kind === 'fallback' ? '兜底挂靠' : '挂靠'}：${item.moduleTitle} → ${item.chapterTitle}`) }, { subtitle: '标准模块挂靠' }));
+    }
+  }
   const finalBidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: plannedWithConstructionOrgRequiredSections, requirement: input.requirement, evaluationTexts });
   effectiveChapters = buildConstructionOrgTablePlans({ chapters: finalBidStructureAudit.enrichedChapters, projectGraph, canonicalFacts });
   if (finalBidStructureAudit.issues.length > 0 || bidStructureAudit.issues.length > 0) {
@@ -1257,7 +1269,10 @@ export async function generateDocumentDraft(input: { templateId: string; require
           const normalizedChapterContent = chapter.content.replace(/\s+/gu, '').replace(/平方米|m²|m2/giu, '㎡');
           const related = globalConsistencyIssues.filter(issue => {
             if (issue.includes(chapter.title)) return true;
-            const conflictList = issue.match(/不一致的表述\s*([^。\n]+)/u)?.[1] || '';
+            // 冲突数值列表到分号为止（issue 是“message；suggestion”拼接，分号后是修复建议文案，
+            // 混入会阻断数值定位）——历史缺陷：建议尾部并入 conflictList 导致建设规模冲突无法关联任何章节，
+            // 修复指令从未发出，残留冲突被导出校验硬阻断（用户环境 10970平方米 死循环）
+            const conflictList = issue.match(/不一致的表述\s*([^；;。\n]+)/u)?.[1] || '';
             const valueHits = conflictList.split(/[、，,]/u).some(value => {
               const normalized = value.trim().replace(/\s+/gu, '').replace(/平方米|m²|m2/giu, '㎡');
               return normalized.length >= 3 && normalizedChapterContent.includes(normalized);
@@ -1287,6 +1302,15 @@ export async function generateDocumentDraft(input: { templateId: string; require
         const reReview = await runGlobalReview();
         globalConsistencyIssues = [...new Set([...reReview.issues, ...runDeterministicConsistencyCheck()])];
         upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-review', status: globalConsistencyIssues.length > 0 ? 'failed' : 'success', message: globalConsistencyIssues.length > 0 ? `跨章一致性复检：仍有 ${globalConsistencyIssues.length} 个冲突` : '跨章一致性复检通过' }, { subtitle: '全局一致性审查' }));
+        emitProgress(chapterDraftsFinal);
+      }
+      // 2 轮 LLM 定向修复仍未消除的数值冲突：按检测同源归属规则确定性定点替换（“检测定位=修复定位”），
+      // 不依赖 LLM 定位能力——repairChapterByQuality 约束“无法安全定位的问题不要生成 patch”，数值冲突
+      // 修复器常因无法在正文定位错误数值而不产出 patch，残留冲突会被导出门禁硬阻断形成“继续生成”死循环
+      const deterministicFix = applyDeterministicConsistencyFixes(chapterDraftsFinal, preliminaryFactsModel, canonicalFacts.scopeConflicts);
+      if (deterministicFix.fixedCount > 0) {
+        globalConsistencyIssues = [...new Set([...globalConsistencyIssues, ...runDeterministicConsistencyCheck()])];
+        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-deterministic-fix', status: 'success', message: `跨章一致性数值定点修复：${deterministicFix.fixedCount} 处（${deterministicFix.details.slice(0, 4).join('、')}）`, details: deterministicFix.details.slice(4) }, { subtitle: '跨章一致性修复' }));
         emitProgress(chapterDraftsFinal);
       }
       const sampledStage = sampledCount < chapterDraftsFinal.length ? { ...globalReview.stage, message: `${globalReview.stage.message || '全局一致性审查完成'}（抽检 ${sampledCount}/${chapterDraftsFinal.length} 章）` } : globalReview.stage;

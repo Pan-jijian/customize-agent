@@ -335,19 +335,25 @@ function moduleApplies(module: ConstructionOrgModule, projectTypes: Construction
   return module.aliases.some(alias => text.includes(normalizeText(alias))) || module.sectionItems.some(item => text.includes(normalizeText(item)));
 }
 
-function chapterModuleScore(chapterTitle: string, module: ConstructionOrgModule) {
+function chapterModuleScore(chapterTitle: string, module: ConstructionOrgModule, broadCarrier = false) {
   const title = normalizeText(chapterTitle);
   let score = 0;
-  for (const hint of module.attachHints) if (title.includes(normalizeText(hint))) score += 5;
+  // 宽载体章节（保障/措施/管理类聚合章）不认宽词弱匹配：attachHints 与类别加分会把
+  // 环境/劳务/季节/应急等模块全部吸到同一章（历史缺陷：单章挂靠 49+ 条后被 50 上限静默截断），
+  // 只保留 alias 整词命中与下方模块级特化锚点，保证“语义强相关才挂靠”
+  if (!broadCarrier) {
+    for (const hint of module.attachHints) if (title.includes(normalizeText(hint))) score += 5;
+    if (/概况|部署|组织|平面|资源|进度/u.test(title) && module.category === 'setup') score += 6;
+    if (/方案|施工|技术|工艺|分部分项|方法/u.test(title) && module.category === 'technical') score += 8;
+    if (/保障|保证|措施|管理/u.test(title) && ['assurance', 'environment', 'labor', 'seasonal', 'emergency', 'digital'].includes(module.category)) score += 6;
+  }
   for (const alias of module.aliases) {
     const normalized = normalizeText(alias);
     if (title.includes(normalized) || normalized.includes(title)) score += 12;
   }
-  if (/概况|部署|组织|平面|资源|进度/u.test(title) && module.category === 'setup') score += 6;
-  if (/方案|施工|技术|工艺|分部分项|方法/u.test(title) && module.category === 'technical') score += 8;
-  if (/保障|保证|措施|管理/u.test(title) && ['assurance', 'environment', 'labor', 'seasonal', 'emergency', 'digital'].includes(module.category)) score += 6;
   if (/质量/u.test(title) && module.id === 'quality') score += 15;
   if (/安全|危大|风险/u.test(title) && module.id === 'safety-risk') score += 15;
+  if (/工期|进度/u.test(title) && module.id === 'progress') score += 15;
   if (/文明|环保|扬尘|噪声|绿色/u.test(title) && module.id === 'environment-green') score += 15;
   if (/工资|劳务|实名/u.test(title) && module.id === 'labor-wage') score += 15;
   if (/应急|预案/u.test(title) && module.id === 'emergency') score += 15;
@@ -385,12 +391,24 @@ function isNarrowScopeChapterTitle(title: string) {
   return /雨季|冬季|高温|防汛|扬尘|噪声|工资|劳务|实名|应急|BIM|智慧|管线|交通导改|垃圾分类|多塔|成品保护/u.test(title);
 }
 
+/** 宽载体章节：保障/措施/管理类聚合标题且非窄域专题（如“确保工期与质量的保障体系与措施”） */
+function isBroadCarrierChapterTitle(title: string) {
+  return /保障|保证|措施|管理/u.test(title) && !isNarrowScopeChapterTitle(title);
+}
+
 function shouldAttachModule(catalogModule: ConstructionOrgModule, chapter: DocumentTemplateChapter, projectTypes: ConstructionOrgProjectType[], allText: string) {
   if (!moduleApplies(catalogModule, projectTypes, allText)) return false;
   const title = normalizeText(chapter.title);
   const inChapterScope = catalogModule.aliases.some(alias => title.includes(normalizeText(alias))) || catalogModule.sectionItems.some(item => title.includes(normalizeText(item)));
   if (inChapterScope) return true;
   if (isNarrowScopeChapterTitle(chapter.title)) return false;
+  // 宽载体章：只挂语义锚点强命中的必查模块（特化词 +15/+12 或 alias 命中，≥10 分）；
+  // 可选模块（BIM/四新/周边保护/竣工交付）不首选挂宽载体章——其小节多为项目特定内容，
+  // 无素材支撑会制造 blocker；必查模块未命中时由 missingMandatory 兜底回流保证归宿
+  if (isBroadCarrierChapterTitle(chapter.title)) {
+    if (catalogModule.level === 'conditional' || catalogModule.level === 'optional') return false;
+    return chapterModuleScore(chapter.title, catalogModule, true) >= 10;
+  }
   const score = chapterModuleScore(chapter.title, catalogModule);
   if (score >= 10) return true;
   if (catalogModule.level === 'optional') return score >= 12 || /BIM|智慧|数字|创新/iu.test(allText);
@@ -408,41 +426,55 @@ function hasBroadCarrierChapter(chapters: DocumentTemplateChapter[]) {
   return chapters.some(chapter => /概况|部署|总体|组织|主要施工方案|保障|保证|综合措施|管理体系/u.test(chapter.title) && !/雨季|冬季|高温|防汛|扬尘|噪声|工资|劳务|应急|BIM|智慧|管线|交通导改/u.test(chapter.title));
 }
 
-export function enrichConstructionOrgOutline(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; requirement?: string }) {
-  if (!isConstructionOrgDocument(input)) return input.chapters;
+/** 挂靠报告：标准模块挂靠结果与无处安放的可选模块（宁多勿丢，丢失必可见） */
+export interface ConstructionOrgOutlineReport {
+  attached: Array<{ chapterId: string; chapterTitle: string; moduleId: string; moduleTitle: string; kind: 'matched' | 'fallback' }>;
+  unattached: Array<{ moduleId: string; moduleTitle: string; level: string; sections: string[]; reason: 'no-semantic-chapter' }>;
+  totals: { attachedModules: number; sectionCount: number };
+}
+
+export function enrichConstructionOrgOutline(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; requirement?: string }): { chapters: DocumentTemplateChapter[]; report: ConstructionOrgOutlineReport } {
+  if (!isConstructionOrgDocument(input)) return { chapters: input.chapters, report: { attached: [], unattached: [], totals: { attachedModules: 0, sectionCount: 0 } } };
   const projectTypes = inferConstructionOrgProjectTypes(input);
   const allText = normalizeText(`${input.template.name} ${input.template.outputTitle || ''} ${input.requirement || ''} ${input.chapters.map(chapter => `${chapter.title} ${(chapter.sections || []).join(' ')}`).join(' ')}`);
   const hasBroadCarrier = hasBroadCarrierChapter(input.chapters);
   const applicableModules = CONSTRUCTION_ORG_CATALOG.filter(catalogModule => moduleApplies(catalogModule, projectTypes, allText));
   const attached = new Set<string>();
+  const report: ConstructionOrgOutlineReport = { attached: [], unattached: [], totals: { attachedModules: 0, sectionCount: 0 } };
   const enriched = input.chapters.map(chapter => ({ ...chapter, sections: [...(chapter.sections || [])], queries: [...(chapter.queries || [])], requiredFacts: [...(chapter.requiredFacts || [])], tableSections: [...(chapter.tableSections || [])] }));
 
   for (const catalogModule of applicableModules) {
     const matchingIndexes = enriched
-      .map((chapter, index) => ({ index, score: chapterModuleScore(chapter.title, catalogModule), chapter }))
+      .map((chapter, index) => ({ index, score: chapterModuleScore(chapter.title, catalogModule, isBroadCarrierChapterTitle(chapter.title)), chapter }))
       .filter(item => shouldAttachModule(catalogModule, item.chapter, projectTypes, allText))
       .sort((a, b) => b.score - a.score);
-    const targetIndex = matchingIndexes[0]?.index ?? ((hasBroadCarrier && (catalogModule.level === 'core' || catalogModule.level === 'mandatory')) ? defaultTargetChapterIndex(catalogModule, enriched) : -1);
+    const matchedTargetIndex = matchingIndexes[0]?.index;
+    const targetIndex = matchedTargetIndex ?? ((hasBroadCarrier && (catalogModule.level === 'core' || catalogModule.level === 'mandatory')) ? defaultTargetChapterIndex(catalogModule, enriched) : -1);
     if (targetIndex < 0) continue;
     const target = enriched[targetIndex];
     const sectionTitle = moduleSectionTitle(catalogModule, target);
-    target.sections = uniqueAppend(target.sections, [sectionTitle, ...catalogModule.sectionItems], 50);
-    target.queries = uniqueAppend(target.queries, [catalogModule.title, ...catalogModule.queries], 30);
-    target.requiredFacts = uniqueAppend(target.requiredFacts, catalogModule.facts, 30);
-    target.tableSections = uniqueAppend(target.tableSections, catalogModule.tableSections || [], 20);
+    // 不设任何容量截断：挂靠由语义锚点决定，细目数量交由下游主题块规划分治处理，
+    // 避免历史缺陷——写死 50 上限静默丢弃尾部模块小节（含评标必查内容）
+    target.sections = uniqueAppend(target.sections, [sectionTitle, ...catalogModule.sectionItems]);
+    target.queries = uniqueAppend(target.queries, [catalogModule.title, ...catalogModule.queries]);
+    target.requiredFacts = uniqueAppend(target.requiredFacts, catalogModule.facts);
+    target.tableSections = uniqueAppend(target.tableSections, catalogModule.tableSections || []);
     target.purpose = `${target.purpose}；系统已按施工组织设计标准模块库自动挂靠“${catalogModule.title}”，仅在本章范围内展开与章节语义、项目类型和资料事实合理相关的内容，禁止机械塞入无关内容。`;
     attached.add(catalogModule.id);
+    report.attached.push({ chapterId: target.id, chapterTitle: target.title, moduleId: catalogModule.id, moduleTitle: catalogModule.title, kind: matchedTargetIndex !== undefined ? 'matched' : 'fallback' });
   }
 
   const missingMandatory = hasBroadCarrier ? applicableModules.filter(catalogModule => (catalogModule.level === 'mandatory' || catalogModule.level === 'core') && !attached.has(catalogModule.id)) : [];
   for (const catalogModule of missingMandatory) {
     const targetIndex = defaultTargetChapterIndex(catalogModule, enriched);
     const target = enriched[targetIndex];
-    target.sections = uniqueAppend(target.sections, [catalogModule.title, ...catalogModule.sectionItems], 50);
-    target.queries = uniqueAppend(target.queries, [catalogModule.title, ...catalogModule.queries], 30);
-    target.requiredFacts = uniqueAppend(target.requiredFacts, catalogModule.facts, 30);
-    target.tableSections = uniqueAppend(target.tableSections, catalogModule.tableSections || [], 20);
+    target.sections = uniqueAppend(target.sections, [catalogModule.title, ...catalogModule.sectionItems]);
+    target.queries = uniqueAppend(target.queries, [catalogModule.title, ...catalogModule.queries]);
+    target.requiredFacts = uniqueAppend(target.requiredFacts, catalogModule.facts);
+    target.tableSections = uniqueAppend(target.tableSections, catalogModule.tableSections || []);
     target.purpose = `${target.purpose}；系统已补足施工组织设计必备模块“${catalogModule.title}”，需以合理挂靠方式呈现，不改变用户一级章节。`;
+    attached.add(catalogModule.id);
+    report.attached.push({ chapterId: target.id, chapterTitle: target.title, moduleId: catalogModule.id, moduleTitle: catalogModule.title, kind: 'fallback' });
   }
 
   const hasMajorConstructionContent = enriched.some(chapter => /项目主要施工内容|主要施工内容/u.test(`${chapter.title} ${(chapter.sections || []).join(' ')}`));
@@ -450,11 +482,18 @@ export function enrichConstructionOrgOutline(input: { template: DocumentTemplate
     const setupModule = CORE_MODULES.find(module => module.id === 'basis-overview');
     const targetIndex = enriched.findIndex(chapter => /概况|重点|难点|部署|总体|施工|保障/u.test(chapter.title));
     const target = enriched[targetIndex >= 0 ? targetIndex : 0];
-    target.sections = uniquePrepend(target.sections, ['项目主要施工内容'], 50);
-    target.queries = uniqueAppend(target.queries, ['项目主要施工内容', ...(setupModule?.queries || [])], 30);
-    target.requiredFacts = uniqueAppend(target.requiredFacts, setupModule?.facts || ['施工内容', '工程量', '施工范围'], 30);
+    target.sections = uniquePrepend(target.sections, ['项目主要施工内容']);
+    target.queries = uniqueAppend(target.queries, ['项目主要施工内容', ...(setupModule?.queries || [])]);
+    target.requiredFacts = uniqueAppend(target.requiredFacts, setupModule?.facts || ['施工内容', '工程量', '施工范围']);
     target.purpose = `${target.purpose}；系统已补足施工组织设计必备小节“项目主要施工内容”，必须按工作包展开施工概况、施工流程、施工方法。`;
   }
 
-  return enriched;
+  // 无处安放的可选模块显式记录（宁多勿丢：不挂靠也必须可见，绝不静默丢弃）
+  for (const catalogModule of applicableModules) {
+    if (attached.has(catalogModule.id)) continue;
+    report.unattached.push({ moduleId: catalogModule.id, moduleTitle: catalogModule.title, level: catalogModule.level, sections: catalogModule.sectionItems, reason: 'no-semantic-chapter' });
+  }
+  report.totals.attachedModules = attached.size;
+  report.totals.sectionCount = enriched.reduce((sum, chapter) => sum + (chapter.sections || []).length, 0);
+  return { chapters: enriched, report };
 }

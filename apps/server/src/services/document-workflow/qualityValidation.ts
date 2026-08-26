@@ -623,20 +623,68 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
 // 资料中明确的结构层规格（找平层/防水层等配比与厚度）被正文改写为其他数值时，属低级错误，
 // 必须确定性拦截（历史缺陷：屋面找平层资料 1:2.5+20mm 被正文写成 1:3+15mm）
 
+const SPEC_LAYER_RE = /找平层|抹灰层|防水层|保温层|结合层|垫层|面层|粘结层|隔热层|隔离层/gu;
+// 数值与层名之间出现施工动作动词，说明该数值描述的是施工过程/其他层（如“保温层施工完成后铺设
+// 20mm 厚找平层”，20mm 属找平层不属保温层），当前层不得占用。注意“采用”不是排除词：
+// 层名后“采用 1:3 水泥砂浆厚 20mm”是标准规格句式，数值仍属当前层
+const SPEC_ACTION_RE = /铺设|施工|浇筑|粘贴|铺贴|涂抹|完成|进行|待|设置|铺装|挂网|喷涂|灌注/u;
+
+/** 层名→归属数值（含位置）的收集：检测与确定性定点修复共用同一套归属规则，保证“检测定位=修复定位” */
+function collectLayerNumbers(text: string): Array<{ layer: string; span: [number, number]; raw: string; kind: 'thickness' | 'ratio' }> {
+  const claims: Array<{ layer: string; span: [number, number]; raw: string; kind: 'thickness' | 'ratio' }> = [];
+  const matches = [...text.matchAll(SPEC_LAYER_RE)];
+  const usedRanges: Array<[number, number]> = [];
+  const isUsed = (start: number, end: number) => usedRanges.some(([s, e]) => start < e && end > s);
+  // 在窗口内按方向取第一个/最后一个“未被占用且与层名之间无施工动作”的数值，命中即登记占用，
+  // 保证一个数值只归属一个层（多层连续描述“找平层 20mm、防水层 2mm、保温层 130mm”各取各值）
+  const claim = (window: string, offset: number, re: RegExp, direction: 'first' | 'last', layer: string, kind: 'thickness' | 'ratio') => {
+    const found = [...window.matchAll(re)];
+    const ordered = direction === 'first' ? found : [...found].reverse();
+    for (const m of ordered) {
+      const absStart = offset + (m.index ?? 0);
+      const absEnd = absStart + m[0].length;
+      if (isUsed(absStart, absEnd)) continue;
+      const gap = direction === 'first' ? window.slice(0, m.index ?? 0) : window.slice((m.index ?? 0) + m[0].length);
+      if (SPEC_ACTION_RE.test(gap)) continue;
+      usedRanges.push([absStart, absEnd]);
+      claims.push({ layer, span: [absStart, absEnd], raw: m[0], kind });
+      return;
+    }
+  };
+  for (let i = 0; i < matches.length; i += 1) {
+    const match = matches[i];
+    const layer = match[0];
+    // 规格数值关联：优先取当前层名之后、下一个层名之前的区间（“保温层厚130mm”“保温层（XPS）130mm”），
+    // 该区间无数值时兜底取上一个层名之后、当前层名之前的区间（“130mm厚保温层”）。
+    // 历史缺陷：旧实现用“层名前 60 字符”宽窗口取第一个数值，多层连续描述（如“找平层 20mm、防水层 2mm、
+    // 结合层 30mm、保温层 130mm”）时把前层数值误归当前层——正文写对也会误报冲突（用户环境误报
+    // 保温层 20/30/2mm），且修复器在正文找不到“保温层 20mm”无法定位，残留冲突被导出校验硬阻断形成死循环
+    const layerStart = match.index ?? 0;
+    const layerEnd = layerStart + layer.length;
+    const nextLayerStart = matches[i + 1]?.index;
+    const afterEnd = nextLayerStart === undefined ? Math.min(text.length, layerEnd + 90) : nextLayerStart;
+    const after = text.slice(layerEnd, afterEnd);
+    const prevLayerEnd = i > 0 ? (matches[i - 1].index ?? 0) + matches[i - 1][0].length : Math.max(0, layerStart - 40);
+    const before = text.slice(prevLayerEnd, layerStart);
+    claim(after, layerEnd, /(\d+:\d+(?:\.\d+)?)/gu, 'first', layer, 'ratio');
+    claim(before, prevLayerEnd, /(\d+:\d+(?:\.\d+)?)/gu, 'last', layer, 'ratio');
+    claim(after, layerEnd, /(\d+(?:\.\d+)?)\s*mm/gu, 'first', layer, 'thickness');
+    claim(before, prevLayerEnd, /(\d+(?:\.\d+)?)\s*mm/gu, 'last', layer, 'thickness');
+  }
+  return claims;
+}
+
 function layeredSpecEntries(text: string) {
   const entries: Array<{ layer: string; ratio?: string; thickness?: number }> = [];
   const seen = new Set<string>();
-  const LAYER_RE = /找平层|抹灰层|防水层|保温层|结合层|垫层|面层|粘结层|隔热层|隔离层/gu;
-  for (const match of text.matchAll(LAYER_RE)) {
-    const layer = match[0];
-    const windowText = text.slice(Math.max(0, match.index - 60), Math.min(text.length, match.index + 90));
-    const ratio = windowText.match(/(\d+:\d+(?:\.\d+)?)/u)?.[1];
-    const thicknessMatch = windowText.match(/(\d+(?:\.\d+)?)\s*mm/u);
-    const thickness = thicknessMatch ? Number(thicknessMatch[1]) : undefined;
-    const key = `${layer}|${ratio || ''}|${thickness ?? ''}`;
+  for (const claim of collectLayerNumbers(text)) {
+    const ratio = claim.kind === 'ratio' ? claim.raw.match(/(\d+:\d+(?:\.\d+)?)/u)?.[1] : undefined;
+    const thicknessMatch = claim.kind === 'thickness' ? claim.raw.match(/(\d+(?:\.\d+)?)/u)?.[1] : undefined;
+    const thickness = thicknessMatch ? Number(thicknessMatch) : undefined;
+    const key = `${claim.layer}|${ratio || ''}|${thickness ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    entries.push({ layer, ratio, thickness });
+    entries.push({ layer: claim.layer, ratio, thickness });
   }
   return entries;
 }
@@ -681,6 +729,105 @@ export function processSpecConflictIssues(markdown: string, factsModel: Document
     }
   }
   return issues;
+}
+
+// ===== 确定性定点修复 =====
+// LLM 定向修复（fact_conflict）受“无法安全定位的问题不要生成 patch”约束，数值冲突经 2 轮修复仍可能
+// 残留，残留会被导出门禁硬阻断形成“继续生成”死循环（历史缺陷：用户环境保温层 20/30/2mm、10970㎡
+// 冲突修复器在正文无法定位 → 不产出 patch → 残留 → 阻断）。此处按检测同源归属规则
+// （collectLayerNumbers / scopedNumericEntries）定位错误数值并确定性替换为资料口径，
+// 保证“检测定位=修复定位”，不依赖 LLM 定位能力。
+
+/** 与 processSpecConflictIssues / crossChapterConsistencyIssues 完全同源的修复目标口径 */
+function deterministicFixTargets(factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[]) {
+  const sourceText = [
+    ...factsModel.specifications,
+    ...factsModel.quality,
+    ...factsModel.preciseFacts,
+    ...factsModel.bills,
+  ].map(normalizedFactValue).join('\n');
+  const sourceByLayer = new Map<string, { ratios: string[]; thicknesses: number[] }>();
+  for (const entry of layeredSpecEntries(sourceText)) {
+    const list = sourceByLayer.get(entry.layer) || { ratios: [], thicknesses: [] };
+    if (entry.ratio && !list.ratios.includes(entry.ratio)) list.ratios.push(entry.ratio);
+    if (Number.isFinite(entry.thickness) && !list.thicknesses.includes(entry.thickness as number)) list.thicknesses.push(entry.thickness as number);
+    sourceByLayer.set(entry.layer, list);
+  }
+  // 资料同层多口径时无法确定性裁决，跳过该层（与检测侧“口径不唯一跳过”一致）
+  const specTargets = new Map<string, { ratio?: string; thickness?: number }>();
+  for (const [layer, list] of sourceByLayer) {
+    if (list.ratios.length !== 1 && list.thicknesses.length !== 1) continue;
+    specTargets.set(layer, { ratio: list.ratios.length === 1 ? list.ratios[0] : undefined, thickness: list.thicknesses.length === 1 ? list.thicknesses[0] : undefined });
+  }
+  const scopeWinner = (kind: NumericScopeConflict['kind']) => scopeConflicts?.find(conflict => conflict.kind === kind && conflict.resolution)?.resolution;
+  const numericEntryFromResolution = (resolution: string) => {
+    const match = /(\d+(?:\.\d+)?)\s*(㎡|m²|m2|平方米|万元|亿元)/u.exec(resolution);
+    return match ? { value: match[1], unit: match[2] } : undefined;
+  };
+  const areaResolution = scopeWinner('area');
+  const expectedScale = areaResolution ?? factsModel.project.map(normalizedFactValue).find(value => /建设规模|建筑面积/u.test(value));
+  const costResolution = scopeWinner('cost');
+  const expectedCost = costResolution ?? factsModel.project.map(normalizedFactValue).find(value => /合同估算|投资估算|最高投标限价|招标控制价|总投资|工程造价/u.test(value));
+  return {
+    specTargets,
+    scaleTarget: expectedScale ? (areaResolution ? numericEntryFromResolution(areaResolution) : scopedNumericEntries(expectedScale, SCALE_SCOPE_RE, SCALE_UNIT_RE)[0]) : undefined,
+    costTarget: expectedCost ? (costResolution ? numericEntryFromResolution(costResolution) : scopedNumericEntries(expectedCost, COST_SCOPE_RE, COST_UNIT_RE)[0]) : undefined,
+  };
+}
+
+/** 单章定点修复：span 基于原始 text 收集，替换从后往前执行避免偏移 */
+function fixChapterDeterministic(text: string, targets: ReturnType<typeof deterministicFixTargets>): { content: string; fixedCount: number; details: string[] } {
+  const replacements: Array<{ start: number; end: number; replacement: string; detail: string }> = [];
+  // 结构层规格：collectLayerNumbers 与检测共用归属规则，定位到的错误数值必为检测所报冲突，直接替换为资料口径
+  for (const claim of collectLayerNumbers(text)) {
+    const target = targets.specTargets.get(claim.layer);
+    if (!target) continue;
+    if (claim.kind === 'ratio' && target.ratio) {
+      const ratio = claim.raw.match(/(\d+:\d+(?:\.\d+)?)/u)?.[1];
+      if (ratio && ratio !== target.ratio) replacements.push({ start: claim.span[0], end: claim.span[1], replacement: claim.raw.replace(/(\d+:\d+(?:\.\d+)?)/u, target.ratio), detail: `${claim.layer}配比 ${ratio}→${target.ratio}` });
+    }
+    if (claim.kind === 'thickness' && Number.isFinite(target.thickness)) {
+      const thickness = Number(claim.raw.match(/(\d+(?:\.\d+)?)/u)?.[1]);
+      if (Number.isFinite(thickness) && Math.abs(thickness - (target.thickness as number)) >= 1) replacements.push({ start: claim.span[0], end: claim.span[1], replacement: claim.raw.replace(/(\d+(?:\.\d+)?)/u, String(target.thickness)), detail: `${claim.layer}厚度 ${thickness}mm→${target.thickness}mm` });
+    }
+  }
+  // 建设规模/估算价：与检测同源模式带 span 重新匹配，败选数值替换为期望口径（单位保留原样）
+  const collectScopeSpans = (target: { value: string; unit: string } | undefined, scopeRe: RegExp, unitRe: RegExp, kindLabel: string) => {
+    if (!target) return;
+    const pattern = new RegExp(`(?:${scopeRe.source})(?:[^\\n。；;，,]{0,14}?)(\\d{2,}(?:[.,]\\d+)?\\s*万?)\\s*(${unitRe.source})`, 'giu');
+    for (const match of text.matchAll(pattern)) {
+      const entry = { value: match[1].replace(/[,，]/gu, '').replace(/\s+/gu, ''), unit: match[2] };
+      if (scaledNumericValue(entry) === scaledNumericValue(target)) continue;
+      const start = (match.index ?? 0) + match[0].indexOf(match[1]);
+      const end = start + match[1].length;
+      if (replacements.some(item => item.start < end && item.end > start)) continue;
+      replacements.push({ start, end, replacement: target.value, detail: `${kindLabel} ${entry.value}${entry.unit}→${target.value}${entry.unit}` });
+    }
+  };
+  collectScopeSpans(targets.scaleTarget, SCALE_SCOPE_RE, SCALE_UNIT_RE, '建设规模');
+  collectScopeSpans(targets.costTarget, COST_SCOPE_RE, COST_UNIT_RE, '估算价');
+  if (replacements.length === 0) return { content: text, fixedCount: 0, details: [] };
+  replacements.sort((a, b) => b.start - a.start);
+  let content = text;
+  for (const item of replacements) content = content.slice(0, item.start) + item.replacement + content.slice(item.end);
+  return { content, fixedCount: replacements.length, details: replacements.map(item => item.detail) };
+}
+
+/** 确定性定点修复兜底：LLM 定向修复未消除的数值口径冲突，按检测同源归属规则直接替换为资料口径（原地修改 chapters 内容） */
+export function applyDeterministicConsistencyFixes(chapters: Array<Pick<DocumentDraftChapter, 'id' | 'title' | 'content'>>, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[]): { fixedCount: number; details: string[] } {
+  const targets = deterministicFixTargets(factsModel, scopeConflicts);
+  if (targets.specTargets.size === 0 && !targets.scaleTarget && !targets.costTarget) return { fixedCount: 0, details: [] };
+  let fixedCount = 0;
+  const details: string[] = [];
+  for (const chapter of chapters) {
+    const fix = fixChapterDeterministic(chapter.content, targets);
+    if (fix.fixedCount > 0) {
+      chapter.content = fix.content;
+      fixedCount += fix.fixedCount;
+      details.push(...fix.details);
+    }
+  }
+  return { fixedCount, details };
 }
 
 export function managementMeasureNumberIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {
