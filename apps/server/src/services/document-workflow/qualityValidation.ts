@@ -560,9 +560,11 @@ function scaledNumericValue(entry: { value: string; unit: string }) {
   return base;
 }
 
-// 总量口径词：只比对总量口径（总建筑面积/建设规模/总用地面积），“总”字可选（与裁决侧 scopeReForKind 对称），
-// 子项口径（地上/地下/单栋）数值不同属正常分层，不视为冲突
-const SCALE_SCOPE_RE = /(?<![地上地下])总?建筑面积|总?建设规模|总?用地面积|总?占地面积/u;
+// 总量口径词：只比对建筑总量口径（总建筑面积/建设规模），“总”字可选（与裁决侧 scopeReForKind 对称），
+// 子项口径（地上/地下/单栋/门卫室等具体建筑物）数值不同属正常分层，不视为冲突；
+// 用地面积/占地面积是独立字段（与建设规模不同口径），不得与建筑总量混比（历史缺陷：
+// 正文正确转述资料“总用地面积 X㎡”被判为与建设规模冲突，导出门禁误阻断）
+const SCALE_SCOPE_RE = /(?<![地上地下门卫室值班室配电室配电房泵房水泵房锅炉房公厕车库车棚岗亭传达室警卫室样板房售楼处门房])总?建筑面积|总?建设规模/u;
 // 面积单位归一化：扫描文本先行归一，m2（ASCII 数字）与 ㎡/m²/平方米 同口径（历史漏报根因：正文混写 m2 与 ㎡）
 const SCALE_UNIT_RE = /㎡|m²|m2|平方米/u;
 const COST_SCOPE_RE = /合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|工程总投资|总投资|工程造价/u;
@@ -590,10 +592,11 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
     if (expectedDuration && conflicting.length >= 2) issues.push({ level: 'warning', message: `跨章一致性冲突：正文出现与资料工期不一致的表述 ${conflicting.slice(0, 6).join('、')}`, suggestion: `请统一使用资料中的工期口径：${expectedSchedule}` });
   }
   if (expectedQuality && !/质量标准|质量目标|合格|优良/u.test(markdown)) issues.push({ level: 'error', message: '跨章一致性缺口：正文未稳定体现资料中的质量目标', suggestion: `请在工程概况、质量保证和验收相关章节统一体现：${expectedQuality}` });
-  // 建设规模口径冲突：资料中的总量面积与正文同口径数值比对；
+  // 建设规模口径冲突：资料中的建筑总量面积与正文同口径数值比对；
+  // 期望口径只取建筑总量口径（建设规模/建筑面积）——用地面积/占地面积是独立字段，不得作为期望值；
   // 与裁决口径不符的取值出现 1 次即判定冲突（数字级不一致是低级错误，不得以“表述误差”放过），error 级进入修复链
   const areaResolution = scopeWinner('area');
-  const expectedScale = areaResolution ?? factsModel.project.map(normalizedFactValue).find(value => /建设规模|建筑面积|占地面积|用地面积/u.test(value));
+  const expectedScale = areaResolution ?? factsModel.project.map(normalizedFactValue).find(value => /建设规模|建筑面积/u.test(value));
   if (expectedScale) {
     const scaleMain = areaResolution ? numericEntryFromResolution(areaResolution) : scopedNumericEntries(expectedScale, SCALE_SCOPE_RE, SCALE_UNIT_RE)[0];
     const scaleMatches = scopedNumericEntries(markdown, SCALE_SCOPE_RE, SCALE_UNIT_RE);

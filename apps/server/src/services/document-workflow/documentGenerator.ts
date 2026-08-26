@@ -15,7 +15,7 @@ import { displayChapterTitle, effectiveTemplateChapters, extractExplicitOutlineF
 import { evidenceMatchesFact } from './factMatching';
 import { plannedStructurePrompt, extractGeneratedSections } from './markdownComposer';
 import { buildDocumentBudget, documentTextLength } from './budget';
-import { sectionContentIntegrityIssues } from './qualityValidation';
+import { sectionContentIntegrityIssues, crossChapterConsistencyIssues, processSpecConflictIssues } from './qualityValidation';
 import { buildDocumentBlueprintContext } from './documentBlueprint';
 import { enrichConstructionOrgOutline } from './constructionOrgCatalog';
 import { validateBidStructureBeforeGeneration } from './constructionBidStructure';
@@ -1232,8 +1232,19 @@ export async function generateDocumentDraft(input: { templateId: string; require
         : chapterDraftsFinal.filter((chapter, index) => index % Math.max(2, Math.round(1 / samplingRate)) === 0);
       const sampledCount = sampledChapters.length;
       const runGlobalReview = () => withProgressHeartbeat(() => reviewGlobalConsistency({ template, chapters: sampledChapters, chapterReviews: [], promptTexts: reviewPromptTexts, requirement: input.requirement, projectContext, diagnostics: generationDiagnostics, signal: input.signal }));
+      // 确定性跨章数值冲突（crossChapterConsistencyIssues / processSpecConflictIssues）：正文出现与资料
+      // 建设规模/估算价/结构层规格不一致的取值时，确定性检测比 LLM 审查更精确；此前只在导出校验阶段暴露、
+      // 生成流程内无修复机会，用户只能看到“导出门禁未通过”后手动继续生成（历史缺陷，且重跑生成必然复现——
+      // LLM 依据同样资料会再次写出同样数值，导致“继续生成”按钮永远失败）。此处并入修复闭环统一修复。
+      const runDeterministicConsistencyCheck = () => {
+        const fullMarkdown = chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
+        return [
+          ...crossChapterConsistencyIssues(fullMarkdown, preliminaryFactsModel, canonicalFacts.scopeConflicts).filter(issue => /跨章一致性冲突/u.test(issue.message)),
+          ...processSpecConflictIssues(fullMarkdown, preliminaryFactsModel).filter(issue => issue.level === 'error'),
+        ].map(issue => `${issue.message}；${issue.suggestion || ''}`);
+      };
       const globalReview = await runGlobalReview();
-      globalConsistencyIssues = globalReview.issues;
+      globalConsistencyIssues = [...new Set([...globalReview.issues, ...runDeterministicConsistencyCheck()])];
       // 跨章一致性冲突修复闭环：按冲突描述中的正确口径对点名章节做 fact_conflict 定向修复，再复检；
       // 无任何 patch 落地的轮次立即停止，避免空转消耗 LLM 预算
       for (let repairRound = 0; repairRound < 2 && globalConsistencyIssues.length > 0; repairRound += 1) {
@@ -1241,12 +1252,25 @@ export async function generateDocumentDraft(input: { templateId: string; require
         emitProgress(chapterDraftsFinal);
         let appliedCount = 0;
         for (const chapter of chapterDraftsFinal) {
-          const related = globalConsistencyIssues.filter(issue => issue.includes(chapter.title));
+          // 冲突关联章节：LLM 审查 issue 含章节标题；确定性冲突的 issue 不含章节标题，
+          // 用冲突表述中的数值/层级定位（数值或“找平层/防水层”等层级出现在哪个章节正文，哪个章节参与定向修复）
+          const normalizedChapterContent = chapter.content.replace(/\s+/gu, '').replace(/平方米|m²|m2/giu, '㎡');
+          const related = globalConsistencyIssues.filter(issue => {
+            if (issue.includes(chapter.title)) return true;
+            const conflictList = issue.match(/不一致的表述\s*([^。\n]+)/u)?.[1] || '';
+            const valueHits = conflictList.split(/[、，,]/u).some(value => {
+              const normalized = value.trim().replace(/\s+/gu, '').replace(/平方米|m²|m2/giu, '㎡');
+              return normalized.length >= 3 && normalizedChapterContent.includes(normalized);
+            });
+            if (valueHits) return true;
+            const layer = issue.match(/正文([^配比厚度\s]{1,6}?)(?:配比|厚度)/u)?.[1];
+            return Boolean(layer && chapter.content.includes(layer));
+          });
           if (related.length === 0) continue;
           const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `global-consistency-repair:${chapter.id}`, () => repairChapterByQuality({
             template,
             chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence || [], missingFacts: chapter.missingFacts || [], sections: chapter.sections },
-            issues: related.map(issue => `${issue}；请严格按冲突描述中给出的正确口径统一本章全部数值，不得引入第三个数值。`),
+            issues: related.map(issue => `${issue}；请严格按冲突描述中给出的资料口径修正本章对应表述，不得引入新的数值；与资料口径一致的既有表述（含分层/子项数值）不得改动。`),
             promptTexts: reviewPromptTexts,
             requirement: input.requirement,
             forbidDrawingImages: true,
@@ -1261,7 +1285,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         if (appliedCount === 0) break;
         emitProgress(chapterDraftsFinal);
         const reReview = await runGlobalReview();
-        globalConsistencyIssues = reReview.issues;
+        globalConsistencyIssues = [...new Set([...reReview.issues, ...runDeterministicConsistencyCheck()])];
         upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-review', status: globalConsistencyIssues.length > 0 ? 'failed' : 'success', message: globalConsistencyIssues.length > 0 ? `跨章一致性复检：仍有 ${globalConsistencyIssues.length} 个冲突` : '跨章一致性复检通过' }, { subtitle: '全局一致性审查' }));
         emitProgress(chapterDraftsFinal);
       }

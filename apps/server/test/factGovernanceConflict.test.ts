@@ -136,6 +136,66 @@ describe('crossChapterConsistencyIssues 校验基准与裁决同源', () => {
   });
 });
 
+describe('跨章一致性口径隔离（回归：用地面积误报导致导出门禁阻断）', () => {
+  function factsModel(project: DocumentFact[]): DocumentFactsModel {
+    return { project, schedule: [], quality: [], safety: [], resources: [], tables: [], drawings: [], bills: [], preciseFacts: [], rules: [], specifications: [], schemaFacts: {}, factIndex: {}, missing: [], conflicts: [] } as unknown as DocumentFactsModel;
+  }
+  const conflictingFacts = [
+    fact('project_scale_1', '项目位于安庆路城隍庙南大门内，建筑面积约为4645㎡', '招标文件正文.pdf'),
+    fact('project_scale_2', '总建筑面积约4646m2', '补疑1.docx'),
+  ];
+
+  it('正文正确转述资料用地面积不误报（历史缺陷：用地面积与建设规模混比，门禁阻断）', () => {
+    const conflicts = detectNumericScopeConflicts(conflictingFacts);
+    const markdown = '# 工程概况\n本项目总用地面积28570.36平方米，建设规模为总建筑面积约4646㎡，场地平整。';
+    const issues = crossChapterConsistencyIssues(markdown, factsModel(conflictingFacts), conflicts);
+    expect(issues.filter(issue => issue.message.includes('建设规模'))).toEqual([]);
+  });
+
+  it('正文分层口径（地上建筑面积10970㎡）不判为总量冲突（负向后顾隔离）', () => {
+    const conflicts = detectNumericScopeConflicts(conflictingFacts);
+    const markdown = '# 工程概况\n本项目建设规模为总建筑面积约4646㎡，其中地上建筑面积10970平方米不计入总量。\n# 施工部署\n现场建筑面积约为4646㎡。';
+    const issues = crossChapterConsistencyIssues(markdown, factsModel(conflictingFacts), conflicts);
+    expect(issues.filter(issue => issue.message.includes('建设规模'))).toEqual([]);
+  });
+
+  it('正文子项建筑面（门卫室120㎡）不判为总量冲突（具体建筑物名称隔离）', () => {
+    const conflicts = detectNumericScopeConflicts(conflictingFacts);
+    const markdown = '# 工程概况\n本项目建设规模为总建筑面积约4646㎡。\n# 施工部署\n门卫室建筑面积120平方米，临时设施按需布置。';
+    const issues = crossChapterConsistencyIssues(markdown, factsModel(conflictingFacts), conflicts);
+    expect(issues.filter(issue => issue.message.includes('建设规模'))).toEqual([]);
+  });
+
+  it('正文出现与建设规模不符的建筑总量数值仍拦截（保留拦截能力）', () => {
+    const conflicts = detectNumericScopeConflicts(conflictingFacts);
+    const markdown = '# 工程概况\n本项目建设规模为总建筑面积约4646㎡。\n# 施工部署\n总建筑面积约10970平方米，场地狭小。';
+    const issues = crossChapterConsistencyIssues(markdown, factsModel(conflictingFacts), conflicts);
+    const scaleIssue = issues.find(issue => issue.message.includes('建设规模'));
+    expect(scaleIssue).toBeDefined();
+    expect(scaleIssue!.level).toBe('error');
+    expect(scaleIssue!.message).toContain('10970平方米');
+  });
+
+  it('用地面积跨文件差异不产生 area 裁决（独立字段不得污染建设规模口径）', () => {
+    const facts = [
+      fact('land_1', '总用地面积28570.36㎡', '招标文件.pdf'),
+      fact('land_2', '总用地面积30000㎡', '图纸.pdf'),
+    ];
+    const conflicts = detectNumericScopeConflicts(facts);
+    expect(conflicts.find(item => item.kind === 'area')).toBeUndefined();
+  });
+
+  it('建设规模事实与用地面积同文本并存时仍正确提取期望口径', () => {
+    const facts = [
+      fact('project_scale_1', '建设规模：总建筑面积约4646㎡；总用地面积28570.36㎡', '招标文件.pdf'),
+    ];
+    const conflicts = detectNumericScopeConflicts(facts);
+    const markdown = '# 工程概况\n本项目总用地面积28570.36平方米，总建筑面积约4646㎡。';
+    const issues = crossChapterConsistencyIssues(markdown, factsModel(facts), conflicts);
+    expect(issues.filter(issue => issue.message.includes('建设规模'))).toEqual([]);
+  });
+});
+
 describe('事实提取层嵌入句式（补疑总量口径进入事实主表的源头）', () => {
   it('补疑“总建筑面积约4646m2”嵌入句式（无“建设规模：”标签）必须提取为事实', () => {
     const facts = extractProjectBasicFactsFromEvidence([

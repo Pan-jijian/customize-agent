@@ -79,9 +79,39 @@ export function clearErrorLogs() {
 }
 
 let processHandlersInstalled = false;
+
+// 异常风暴防护：stdout/stderr 不可写（如管道破裂 EPIPE）时，console.error 会同步抛错再次触发
+// uncaughtException，形成无限递归风暴占满事件循环（曾导致生成任务假死、HTTP 无响应）。
+// 通过 try-catch 断链 + 同窗口限流，保证处理器自身永不递归。
+export function createProcessErrorHandler(
+  label: string,
+  record: (error: unknown) => void,
+  output: (label: string, error: unknown) => void,
+  limit = 20,
+) {
+  let windowStart = 0;
+  let count = 0;
+  return (error: unknown) => {
+    try {
+      record(error);
+      const now = Date.now();
+      if (now - windowStart > 60_000) {
+        windowStart = now;
+        count = 0;
+      }
+      if (count < limit) {
+        count += 1;
+        output(label, error);
+      }
+    } catch {
+      // stdout/stderr 写入失败时静默，避免 console 抛错递归触发 uncaughtException 风暴
+    }
+  };
+}
+
 export function installProcessErrorHandlers() {
   if (processHandlersInstalled) return;
   processHandlersInstalled = true;
-  process.on('uncaughtException', error => { recordErrorLog({ source: 'process', functionName: 'uncaughtException', error }); console.error('[process] uncaughtException', error); });
-  process.on('unhandledRejection', reason => { recordErrorLog({ source: 'process', functionName: 'unhandledRejection', error: reason }); console.error('[process] unhandledRejection', reason); });
+  process.on('uncaughtException', createProcessErrorHandler('uncaughtException', error => recordErrorLog({ source: 'process', functionName: 'uncaughtException', error }), (label, error) => console.error(`[process] ${label}`, error)));
+  process.on('unhandledRejection', createProcessErrorHandler('unhandledRejection', reason => recordErrorLog({ source: 'process', functionName: 'unhandledRejection', error: reason }), (label, error) => console.error(`[process] ${label}`, error)));
 }
