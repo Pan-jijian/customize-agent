@@ -1,5 +1,11 @@
 # server
 
+## 4.5.5
+
+### Patch Changes
+
+- 修复进程异常处理器风暴缺陷：stdout/stderr 不可写（如管道破裂 EPIPE）时，uncaughtException/unhandledRejection 处理器内 console.error 会抛错再次触发异常，形成无限递归风暴占满事件循环（曾导致生成任务假死、HTTP 无响应、日志目录被轮转文件撑爆）。现在通过 try-catch 断链 + 60s 窗口限流（每窗口最多 20 次 console 输出，日志落盘不受限）保证处理器自身永不递归。
+
 ## 4.5.4
 
 ### Patch Changes
