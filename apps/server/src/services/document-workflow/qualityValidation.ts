@@ -830,6 +830,16 @@ export function applyDeterministicConsistencyFixes(chapters: Array<Pick<Document
   return { fixedCount, details };
 }
 
+/** 全文级确定性定点修复：覆盖章节正文之外的合成区（封面信息块/基本信息表/附录）中的败选数值。
+ * 章节级修复只改章节正文，合成区由 facts 生成，败选值残留时修复器在章节正文找不到目标、fixedCount=0，
+ * 检测重跑仍报错，导出门禁永久阻断（历史缺陷：用户环境建设规模败选值 10970㎡ 进入封面合成区形成死循环） */
+export function applyDeterministicConsistencyFixesToMarkdown(markdown: string, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[]): { markdown: string; fixedCount: number; details: string[] } {
+  const targets = deterministicFixTargets(factsModel, scopeConflicts);
+  if (targets.specTargets.size === 0 && !targets.scaleTarget && !targets.costTarget) return { markdown, fixedCount: 0, details: [] };
+  const fix = fixChapterDeterministic(markdown, targets);
+  return { markdown: fix.content, fixedCount: fix.fixedCount, details: fix.details };
+}
+
 export function managementMeasureNumberIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const managementNumberPattern = /(?:三检制|三级教育|三级管理|5S|24\s*小时|每日|每周|每月|一次|两次)/gu;

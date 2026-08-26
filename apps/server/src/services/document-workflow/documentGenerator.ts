@@ -1309,7 +1309,14 @@ export async function generateDocumentDraft(input: { templateId: string; require
       // 修复器常因无法在正文定位错误数值而不产出 patch，残留冲突会被导出门禁硬阻断形成“继续生成”死循环
       const deterministicFix = applyDeterministicConsistencyFixes(chapterDraftsFinal, preliminaryFactsModel, canonicalFacts.scopeConflicts);
       if (deterministicFix.fixedCount > 0) {
-        globalConsistencyIssues = [...new Set([...globalConsistencyIssues, ...runDeterministicConsistencyCheck()])];
+        // 修复后重算：确定性数值冲突快照必须用最新检测结果替换，不得合并保留已修复问题的旧快照
+        //（历史缺陷：修复已生效但旧快照残留，被 finalize 包装为「跨章一致性复核」error 硬阻断导出）
+        globalConsistencyIssues = [
+          ...new Set([
+            ...globalConsistencyIssues.filter(issue => !/^跨章一致性冲突|^工序规格冲突/u.test(issue)),
+            ...runDeterministicConsistencyCheck(),
+          ]),
+        ];
         upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-deterministic-fix', status: 'success', message: `跨章一致性数值定点修复：${deterministicFix.fixedCount} 处（${deterministicFix.details.slice(0, 4).join('、')}）`, details: deterministicFix.details.slice(4) }, { subtitle: '跨章一致性修复' }));
         emitProgress(chapterDraftsFinal);
       }

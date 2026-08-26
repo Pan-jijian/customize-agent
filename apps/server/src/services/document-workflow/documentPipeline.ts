@@ -9,7 +9,7 @@ import { chapterReadinessIssues, evaluateChapterReadiness } from '../document-va
 import { validateFactConsistency } from '../document-validation/factConsistencyService';
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from './budget';
-import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes } from './qualityValidation';
+import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown } from './qualityValidation';
 import { buildStandardFinalValidationIssues } from './documentFinalValidation';
 import { buildDocumentProfileReport } from './documentProfiles';
 import { buildKnowledgeCoverageReport, knowledgeCoverageIssues } from './documentKnowledgeCoverage';
@@ -362,7 +362,10 @@ export async function finalizeGeneration(p: {
   let validationIssues = collectValidationIssueGroups(
     buildValidationIssues(validation, factsModel, chapterDrafts),
     chapterReadinessIssues(chapterReadiness),
-    (globalConsistencyIssues || []).slice(0, 10).map(message => ({ level: 'error' as const, severity: 'blocker' as const, category: 'fact_consistency' as const, owner: 'llm' as const, repairability: 'llm_repairable' as const, message: `跨章一致性复核：${message}`, suggestion: '跨章数值口径不一致属低级错误，必须定向修复统一口径后重新校验。' })),
+    // 生成阶段跨章一致性快照：确定性数值冲突（跨章一致性冲突/工序规格冲突）不在此重复包装，
+    // 由 buildStandardFinalValidationIssues 在最终 finalMarkdown 上实时重跑报告，避免修复生效后旧快照
+    // 仍以「跨章一致性复核」error 硬阻断导出（历史缺陷：用户环境保温层 2mm、10970㎡ 修复后旧快照残留阻断）
+    (globalConsistencyIssues || []).filter(message => !/^跨章一致性冲突|^工序规格冲突/u.test(message)).slice(0, 10).map(message => ({ level: 'error' as const, severity: 'blocker' as const, category: 'fact_consistency' as const, owner: 'llm' as const, repairability: 'llm_repairable' as const, message: `跨章一致性复核：${message}`, suggestion: '跨章数值口径不一致属低级错误，必须定向修复统一口径后重新校验。' })),
   );
   const budgetDraftMarkdown = chapterDrafts.map(chapter => chapter.content).join('\n\n');
   validationIssues = collectValidationIssueGroups(
@@ -420,9 +423,17 @@ export async function finalizeGeneration(p: {
   // 数值冲突（finalize 口径与生成阶段 preliminaryFactsModel 可能不同）；“检测定位=修复定位”，
   // 修复后重建 finalMarkdown 再进入最终校验，避免残留冲突被导出门禁硬阻断
   const finalDeterministicFix = applyDeterministicConsistencyFixes(finalChapterDrafts, factsModel, scopeConflicts);
-  if (finalDeterministicFix.fixedCount > 0) {
+  // 全文级定点修复探测：封面信息块/基本信息表等合成区由 facts 生成，章节修复覆盖不到；败选数值残留会
+  // 被重跑检测持续拦截形成死循环（历史缺陷：用户环境建设规模败选值 10970㎡ 留在封面，修复器在章节
+  // 正文找不到目标 fixedCount=0，导出门禁永久阻断）
+  const needsMarkdownFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts).fixedCount > 0;
+  if (finalDeterministicFix.fixedCount > 0 || needsMarkdownFix) {
     finalMarkdown = supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template);
-    upsertProgressStage(executionStages, displayStage({ type: 'validation', roleId: 'deterministic-consistency-fix', status: 'success', message: `跨章一致性数值定点修复：${finalDeterministicFix.fixedCount} 处（${finalDeterministicFix.details.slice(0, 4).join('、')}）`, details: finalDeterministicFix.details.slice(4) }, { subtitle: '跨章一致性修复' }));
+    const postRebuildFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
+    if (postRebuildFix.fixedCount > 0) finalMarkdown = postRebuildFix.markdown;
+    const totalFixed = finalDeterministicFix.fixedCount + postRebuildFix.fixedCount;
+    const totalDetails = [...new Set([...finalDeterministicFix.details, ...postRebuildFix.details])];
+    upsertProgressStage(executionStages, displayStage({ type: 'validation', roleId: 'deterministic-consistency-fix', status: 'success', message: `跨章一致性数值定点修复：${totalFixed} 处（${totalDetails.slice(0, 4).join('、')}）`, details: totalDetails.slice(4) }, { subtitle: '跨章一致性修复' }));
   }
 
   const canonicalFacts = buildCanonicalFacts({ facts: structuredFacts, markdown: finalMarkdown });
@@ -568,10 +579,16 @@ export async function finalizeGeneration(p: {
   // Final Gate 补写小节由 LLM 生成，可能引入新的跨章数值冲突（生成阶段修复闭环不覆盖补写内容）：
   // 导出前做最后一次确定性定点修复，修复后重建 finalMarkdown 并重算校验组，避免补写残留冲突被导出门禁硬阻断
   const postFinalGateFix = applyDeterministicConsistencyFixes(finalChapterDrafts, factsModel, scopeConflicts);
-  if (postFinalGateFix.fixedCount > 0) {
+  // 全文级定点修复同 finalize 入口处：封面/信息表合成区的败选数值章节修复覆盖不到，必须同步修复
+  const needsPostGateMarkdownFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts).fixedCount > 0;
+  if (postFinalGateFix.fixedCount > 0 || needsPostGateMarkdownFix) {
     finalMarkdown = supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template);
+    const postRebuildMarkdownFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
+    if (postRebuildMarkdownFix.fixedCount > 0) finalMarkdown = postRebuildMarkdownFix.markdown;
     recomputeFinalValidationBundle();
-    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'deterministic-consistency-fix', status: 'success', message: `跨章一致性数值定点修复：${postFinalGateFix.fixedCount} 处（${postFinalGateFix.details.slice(0, 4).join('、')}）`, details: postFinalGateFix.details.slice(4) }, { subtitle: '跨章一致性修复' }));
+    const totalFixed = postFinalGateFix.fixedCount + postRebuildMarkdownFix.fixedCount;
+    const totalDetails = [...new Set([...postFinalGateFix.details, ...postRebuildMarkdownFix.details])];
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'deterministic-consistency-fix', status: 'success', message: `跨章一致性数值定点修复：${totalFixed} 处（${totalDetails.slice(0, 4).join('、')}）`, details: totalDetails.slice(4) }, { subtitle: '跨章一致性修复' }));
   }
   const reviewChecklist = buildDocumentReviewChecklist({ exportGate: finalExportGate, qualityReport, repairStrategies });
   const telemetry = buildDocumentTelemetryReport({ diagnostics: generationDiagnostics });
