@@ -2,20 +2,26 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createProvider } from '@customize-agent/llm';
 import type { ChapterReviewSummary, DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from './types';
-import { documentTextLength } from './budget';
 import { callDocumentLlm, callDocumentLlmJson, getActiveModelWithProvider } from './llmClient';
 import { displayStage } from './progress';
 import { throwIfAborted } from './utils';
-import { buildSectionFactCard, evidenceForSection, sectionFactUsageIssue, sectionTargets } from './chapterGeneration';
+import { buildSectionFactCard, evidenceForSection, sectionFactUsageIssue } from './chapterGeneration';
+import { extractGeneratedSections } from './markdownComposer';
 
 export function chapterSectionFactUsageIssues(input: { chapter: DocumentTemplateChapter; content: string; evidence: DocumentEvidence[] }) {
-  return sectionTargets(input.chapter, Math.max(1000, documentTextLength(input.content))).flatMap(target => {
-    const escaped = target.title.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-    const match = input.content.match(new RegExp(`^#{2,4}\\s+(?:\\d+(?:\\.\\d+)*\\s+)?${escaped}\\s*\\n([\\s\\S]*?)(?=^#{2,4}\\s+|$)`, 'mu'));
+  // 结构口径：按最终 markdown 中实际存在的 ### 小节标题检查，模板细目只作为写作清单。
+  // 主题块规划会把模板细目语义合并成更少的主题块，被合并的细目不会以独立 ### 小节
+  // 出现在最终目录中；若仍按模板细目逐条正则匹配，只会反复报“小节正文过短”触发
+  // 永不收敛的修复循环。正文块截止到下一个 ##/### 标题，#### 三级小节计入所属 ### 正文。
+  const headings = extractGeneratedSections(input.content);
+  if (headings.length === 0) return [];
+  return headings.flatMap(title => {
+    const escaped = title.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const match = input.content.match(new RegExp(`^###\\s+(?:\\d+(?:\\.\\d+)*[、.．\\s]*\\s+)?${escaped}\\s*\\n([\\s\\S]*?)(?=^#{2,3}\\s+|$)`, 'mu'));
     const body = match?.[1] || '';
-    const factCard = buildSectionFactCard(target.title, evidenceForSection(target.title, input.chapter, input.evidence));
-    const issue = sectionFactUsageIssue(target.title, body, factCard);
-    return issue ? [`${target.title}：${issue}`] : [];
+    const factCard = buildSectionFactCard(title, evidenceForSection(title, input.chapter, input.evidence));
+    const issue = sectionFactUsageIssue(title, body, factCard);
+    return issue ? [`${title}：${issue}`] : [];
   });
 }
 

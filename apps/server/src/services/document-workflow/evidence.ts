@@ -323,7 +323,7 @@ function appendWithinBudget(parts: string[], next: string, state: { chars: numbe
 
 /** 证据注入排序分：检索分数 + 事实价值（量化参数/项目基础事实/requiredFacts 命中/标准编号）。
  * 事实覆盖优先于文件多样性：旧 byFile top-1 启发式会牺牲文件内第 2 条关键参数块，已移除 */
-function evidencePromptImportance(item: DocumentEvidence, requiredFacts: string[]): number {
+export function evidencePromptImportance(item: DocumentEvidence, requiredFacts: string[]): number {
   const text = `${item.sectionTitle || ''}\n${item.content}`;
   let score = item.score;
   if (HAS_QUANTIFIED_VALUE_RE.test(text)) score += 8;

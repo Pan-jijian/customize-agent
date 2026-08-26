@@ -2,7 +2,7 @@ import type { AutoDocumentSpecGateRule, AutoDocumentSpecPackage, GateRuleEvaluat
 import { readEngineeringDocumentConfig } from '../document-validation/engineeringDocumentConfigService';
 import { CHAPTER_HEADING_RE, EXPORT_BLOCKING_ISSUE_RE, EXPORT_GATE_PRECISION_ISSUE_RE, EXPORT_GATE_PROJECT_CONTAMINATION_RE, FALLBACK_GATE_EVALUATORS, FORMAL_PLACEHOLDER_PATTERNS, FORMAL_STYLE_FORBIDDEN_PHRASES, LINE_SPLIT_RE, MARKDOWN_IMAGE_RE, MARKDOWN_SECTION_HEADING_RE, MARKDOWN_TABLE_BLOCK_SPLIT_RE, MARKDOWN_TABLE_DIVIDER_RE, MARKDOWN_TABLE_ROW_RE, MARKDOWN_TOP_HEADING_RE, NON_BLANK_RE, PRECISE_FACT_MIN_TOKEN_COUNT, PRECISE_FACT_MIN_USAGE_RATE, PRECISE_FACT_SOURCE_RE, PRECISE_FACT_TOKEN_RE, DOCUMENT_BASIC_INFO_BLOCK_RE, DOCUMENT_BASIC_INFO_FIELDS, DOCUMENT_BASIC_INFO_TABLE_RE, PROMPT_EXAMPLE_BLOCK_RE, QUALITY_SEVERITY_RULES, SPEC_GATE_RULE_HANDLERS, SPECIFICATION_CONTENT_RE, STRUCTURED_DATA_CONTENT_RE, TOC_BLOCK_RE, TOC_INDENTED_SECTION_LINE_RE, TOC_SECTION_LINE_RE, WHITESPACE_RE } from '../constants';
 import type { QualitySeverity, QualitySeveritySummary, SpecGateRuleContext } from '../types';
-import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentTemplate, ExportGateResult, ProjectBinding, PromptBinding, ValidationIssue } from './types';
+import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentTemplate, ExportGateResult, NumericScopeConflict, ProjectBinding, PromptBinding, ValidationIssue } from './types';
 import { documentTextLength, estimateDocumentPages } from './budget';
 import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { displayChapterTitle } from './outline';
@@ -348,8 +348,13 @@ export function markdownTableQualityIssues(markdown: string): ValidationIssue[] 
   const basicInfoTableBlocks: string[] = [];
   for (const match of markdown.matchAll(/\|\s*信息项\s*\|\s*内容\s*\|/gu)) {
     const rest = markdown.slice(match.index || 0);
-    const end = rest.indexOf('\n\n');
-    basicInfoTableBlocks.push(end >= 0 ? rest.slice(0, end) : rest.slice(0, 800));
+    // 只收集表格行：表格后紧跟标题/正文时不得并入（否则段落中的“计划工期”等词会误判为基础信息表重复）
+    const tableLines: string[] = [];
+    for (const line of rest.split(LINE_SPLIT_RE)) {
+      if (tableLines.length > 0 && !MARKDOWN_TABLE_ROW_RE.test(line)) break;
+      tableLines.push(line);
+    }
+    basicInfoTableBlocks.push(tableLines.join('\n'));
   }
   const duplicatedBasicInfoTableCount = basicInfoTableBlocks.filter(block => /项目名称|招标人|建设单位|发包人|建设地点|招标范围|计划工期|合同估算价|质量标准/u.test(block)).length;
   if (duplicatedBasicInfoTableCount > 1) issues.push({ level: 'error', message: `项目基础信息类表格重复：${duplicatedBasicInfoTableCount} 处`, suggestion: '项目名称、招标人、建设地点、工期、质量等基础信息只能集中输出一次。' });
@@ -513,7 +518,8 @@ function normalizedFactValue(fact: DocumentFact) {
 function durationValues(text: string) {
   const values = new Set<string>();
   const patterns = [
-    /\d+\s*日历天/gu,
+    // 排除"XX日历天内"的时限表达（如"中标公示期结束后7日历天内编制施组计划"是计划编制时限，不是工期口径）
+    /\d+\s*日历天(?!内)/gu,
     /(?:计划工期|合同工期|总工期|工期|施工周期)[^\n。；;]{0,12}\d+\s*天/gu,
     /(?:计划工期|合同工期|总工期|工期|施工周期)[^\n。；;]{0,12}\d+\s*(?:个月|月)/gu,
   ];
@@ -562,20 +568,26 @@ const SCALE_UNIT_RE = /㎡|m²|m2|平方米/u;
 const COST_SCOPE_RE = /合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|工程总投资|总投资|工程造价/u;
 const COST_UNIT_RE = /万元|亿元/u;
 
-export function crossChapterConsistencyIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+export function crossChapterConsistencyIssues(markdown: string, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[]): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  const expectedSchedule = factsModel.schedule.map(normalizedFactValue).find(value => /\d+\s*(?:日历天|天|个月|月)|计划工期|合同工期/u.test(value));
+  // 校验基准与生成裁决同源：源级同口径冲突的裁决值（补疑修正后的胜出数值）优先作为期望口径，
+  // 避免事实主表候选排序差异导致检查基准与裁决基准不一致（历史缺陷：正文全用胜出值时因主表取出败选值而误报）
+  const scopeWinner = (kind: NumericScopeConflict['kind']) => scopeConflicts?.find(conflict => conflict.kind === kind && conflict.resolution)?.resolution;
+  const expectedSchedule = scopeWinner('duration') ?? factsModel.schedule.map(normalizedFactValue).find(value => /\d+\s*(?:日历天|天|个月|月)|计划工期|合同工期/u.test(value));
   const expectedQuality = factsModel.quality.map(normalizedFactValue).find(value => /质量|合格|优良/u.test(value));
   if (expectedSchedule) {
     const expectedDuration = durationValues(expectedSchedule)[0];
-    const durationMatches = durationValues(markdown);
+    // 剥离表格行：进度计划表中的分项持续时间（"第1日~第7日 7日历天"）是计划分解数据，
+    // 不是总工期口径表述，不得与资料工期比对
+    const nonTableMarkdown = markdown.split('\n').filter(line => !/^\s*\|/u.test(line.trim())).join('\n');
+    const durationMatches = durationValues(nonTableMarkdown);
     const conflicting = expectedDuration ? durationMatches.filter(item => item !== expectedDuration && /日历天/u.test(item)) : [];
     if (expectedDuration && conflicting.length >= 2) issues.push({ level: 'warning', message: `跨章一致性冲突：正文出现与资料工期不一致的表述 ${conflicting.slice(0, 6).join('、')}`, suggestion: `请统一使用资料中的工期口径：${expectedSchedule}` });
   }
   if (expectedQuality && !/质量标准|质量目标|合格|优良/u.test(markdown)) issues.push({ level: 'error', message: '跨章一致性缺口：正文未稳定体现资料中的质量目标', suggestion: `请在工程概况、质量保证和验收相关章节统一体现：${expectedQuality}` });
   // 建设规模口径冲突：资料中的总量面积与正文同口径数值比对；
   // 与裁决口径不符的取值出现 1 次即判定冲突（数字级不一致是低级错误，不得以“表述误差”放过），error 级进入修复链
-  const expectedScale = factsModel.project.map(normalizedFactValue).find(value => /建设规模|建筑面积|占地面积|用地面积/u.test(value));
+  const expectedScale = scopeWinner('area') ?? factsModel.project.map(normalizedFactValue).find(value => /建设规模|建筑面积|占地面积|用地面积/u.test(value));
   if (expectedScale) {
     const scaleMain = scopedNumericEntries(expectedScale, SCALE_SCOPE_RE, SCALE_UNIT_RE)[0];
     const scaleMatches = scopedNumericEntries(markdown, SCALE_SCOPE_RE, SCALE_UNIT_RE);
@@ -585,7 +597,7 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
     }
   }
   // 合同估算价口径冲突：估算价/最高限价等金额口径在正文中不得出现多个互相矛盾的取值
-  const expectedCost = factsModel.project.map(normalizedFactValue).find(value => /合同估算|投资估算|最高投标限价|招标控制价|总投资|工程造价/u.test(value));
+  const expectedCost = scopeWinner('cost') ?? factsModel.project.map(normalizedFactValue).find(value => /合同估算|投资估算|最高投标限价|招标控制价|总投资|工程造价/u.test(value));
   if (expectedCost) {
     const costMain = scopedNumericEntries(expectedCost, COST_SCOPE_RE, COST_UNIT_RE)[0];
     const costMatches = scopedNumericEntries(markdown, COST_SCOPE_RE, COST_UNIT_RE);
@@ -701,6 +713,12 @@ function trustedFactCorpus(factsModel: DocumentFactsModel) {
 function generatedFactTokenClass(token: string, context: string): 'scope' | 'spec' | 'soft' {
   const normalized = `${token} ${context}`;
   if (/三检制|三级|5S|24\s*小时|每日|每周|每月|一次|两次|责任制|制度/u.test(normalized)) return 'soft';
+  // 商务金额类（暂列金额/暂估价/报价/单价/税率）：招标人给定或商务条款数字，事实提取侧本就不纳入主表，
+  // 反查侧不得据此判为“编造总量口径”硬阻断——正文忠实引用暂列金额（如“暂列金额60万元”）是合规写法
+  if (/暂列金额|暂估价|报价|单价|合价|综合单价|税率|增值税|预留金/u.test(normalized)) return 'soft';
+  // 具体日期 token（"2026年8月8日"中的"2026年""8月"）属于日期表述，不是总量口径数字；
+  // 编造日期由 Writer 规则约束与跨章检查处理，此处降级 soft 避免把日期误判为工期口径阻断导出
+  if (/^\d+(?:\.\d+)?(?:月|年)$/u.test(token) && /开工|竣工|日期|计划|年|月/u.test(context)) return 'soft';
   // 项目总量口径（工期/金额/建设规模）：正文偏离资料口径属低级错误，升级为 error 走修复链
   if (/总工期|计划工期|合同工期|日历天/u.test(normalized)) return 'scope';
   if (/最高投标限价|招标控制价|合同估算价|投资估算|报价|金额|万元|元/u.test(normalized)) return 'scope';
@@ -722,9 +740,17 @@ export function generatedFactVerificationIssues(markdown: string, factsModel: Do
   const specSuspicious: string[] = [];
   const softSuspicious: string[] = [];
   for (const token of extractEngineeringMeasureTokens(markdown)) {
+    // 章节编号（1.2、2.3 等无单位纯小数）是目录/标题编号，不是工程数字，不进反查池
+    if (/^\d+\.\d+$/u.test(token)) continue;
     const normalizedToken = normalizeEngineeringTextForFactMatch(token);
     const tokenIndex = markdown.indexOf(token);
-    const context = tokenIndex >= 0 ? markdown.slice(Math.max(0, tokenIndex - 36), Math.min(markdown.length, tokenIndex + token.length + 36)) : markdown;
+    if (tokenIndex < 0) continue;
+    // 表格行中的数值（进度计划表分项持续时间"第24～34天"、机械配置表"第X天"等）
+    // 属于计划排期分解数据，不属于总量口径，不做资料事实反查
+    const lineStart = markdown.lastIndexOf('\n', tokenIndex - 1) + 1;
+    const tokenLine = markdown.slice(lineStart, markdown.indexOf('\n', tokenIndex) < 0 ? markdown.length : markdown.indexOf('\n', tokenIndex));
+    if (/^\s*\|/u.test(tokenLine.trim())) continue;
+    const context = markdown.slice(Math.max(0, tokenIndex - 36), Math.min(markdown.length, tokenIndex + token.length + 36));
     const tokenClass = generatedFactTokenClass(token, context);
     if (tokenClass === 'scope' && !compactCorpus.includes(normalizedToken)) scopeSuspicious.push(token);
     if (tokenClass === 'spec' && !compactCorpus.includes(normalizedToken)) specSuspicious.push(token);
@@ -796,14 +822,19 @@ function shouldIgnorePreciseToken(token: string, context: string) {
   if (/OCR|识别错误|乱码|无法确认|疑似|不确定|语义断裂|页码|目录/u.test(context)) return true;
   if (/^\d+$/.test(token) && Number(token) < 10) return true;
   // 合同条款义务类参数（如通用条款“之日起X天内发出开工通知”、“承包人应在X天内提交”）是法律条款表述，
-  // 不是项目专属工程参数，不要求写入正文，也不进入抽查池；项目计划工期参数不受影响
-  if (/之日起.{0,8}天内|天内.{0,10}(?:发出|提交|通知|回复|答复|完成|开工|竣工|报送|支付|更换)|因发包人原因|因承包人原因|未能按时|逾期|违约金/u.test(context)) return true;
+  // 不是项目专属工程参数，不要求写入正文，也不进入抽查池；项目计划工期参数不受影响。
+  // 违约金/保证金阶梯数字（“延期28天及以上”“竣工验收通过后28天”）：证据分块常截断“违约金”语境，
+  // 必须按“天以上/‰/暂扣/履约保证金”等强信号独立识别，否则条款数字会被误当成工期参数强制写入正文
+  if (/之日起.{0,8}天内|天内.{0,10}(?:发出|提交|通知|回复|答复|完成|开工|竣工|报送|支付|更换)|天以上|天及以上|‰|暂扣|履约保证金|通过后.{0,6}天|因发包人原因|因承包人原因|未能按时|逾期|违约金/u.test(context)) return true;
   return false;
 }
 
 function collectPreciseFactTokens(factsModel: DocumentFactsModel) {
   const tokens = new Set<string>();
   for (const fact of factsModel.preciseFacts) {
+    // BOQ 清单参数（清单计价表中的设备技术参数、数量等）由“清单项落位”检查单独负责，
+    // 不进入精确参数抽查池：清单随机参数（如智能化设备 15.50kPa）会挤占项目核心参数的抽查名额
+    if (fact.roleId === 'bill_of_quantities') continue;
     const source = `${fact.processingType || ''} ${fact.roleId} ${fact.sourceFile}`;
     if (!PRECISE_FACT_SOURCE_RE.test(source) && fact.roleId !== 'precise_fact') continue;
     const context = `${fact.key} ${fact.fieldName || ''} ${fact.value}`;
@@ -825,6 +856,9 @@ function collectEvidencePreciseTokens(chapters: DocumentDraftChapter[]) {
   const tokens = new Set<string>();
   for (const chapter of chapters) {
     for (const item of chapter.evidence || []) {
+      // BOQ 清单表格证据（计价表/暂估单价表等）有独立的“清单项落位”检查，
+      // 其行级参数（设备技术参数、数量、金额）不进入精确参数抽查池，避免清单随机参数挤占项目核心参数
+      if (/bill_of_quantities|boq/u.test(`${item.roleId || ''}`)) continue;
       const content = typeof item.content === "string" ? item.content : "";
       for (const match of content.matchAll(PRECISE_FACT_TOKEN_RE)) {
         const token = match[0].trim();
@@ -1043,6 +1077,18 @@ export function autoSpecGateForbiddenTexts(template: DocumentTemplate): string[]
     }
   }
   return [...forbidden];
+}
+
+/** 模板命中的 autoSpecGates 必要术语列表：Final Gate 确定性补写用，保证施组标准术语（编制依据/主要施工材料等）一定出现在正文 */
+export function autoSpecGateRequiredTexts(template: DocumentTemplate): string[] {
+  const text = `${template.name} ${template.category} ${template.outputTitle} ${template.description}`;
+  const required = new Set<string>();
+  for (const gate of readEngineeringDocumentConfig().autoSpecGates) {
+    if (templateMatchesAutoSpecGate(text, gate.templateMatchers)) {
+      for (const item of gate.requiredTexts) if (item) required.add(item);
+    }
+  }
+  return [...required];
 }
 
 function collectAllFacts(factsModel: DocumentFactsModel) {

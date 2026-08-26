@@ -5,6 +5,21 @@ function normalize(value: string) {
   return value.replace(/[\s,，.。:：;；|｜（）()《》<>【】"“”'‘’]/gu, '').toLowerCase();
 }
 
+/** 事实值清洗：去除表格行尾巴（| | | |）、条款尾巴（“4．未尽事宜详见……”）、残留分隔标点等抽取噪音 */
+export function cleanFactValue(value: string) {
+  let cleaned = value
+    // 表格行尾巴：`室外道排工程 | | | | |` → `室外道排工程`
+    .replace(/[|｜]\s*(?:[|｜]\s*)+$/gu, '')
+    // 条款尾巴：`胶圈接口 4．未尽事宜详见施工图纸、补遗…` → `胶圈接口`
+    .replace(/(?:[。；;]|\d+\s*[．.、])\s*(?:未尽事宜|其余(?:未尽)?事宜|其他(?:未尽)?事宜|注\s*[：:]).*$/u, '')
+    .trim();
+  // 残留分隔标点：`本项目维修改造包含室内装饰工程、门窗维修、屋面维修、` → 去掉尾部顿号
+  cleaned = cleaned.replace(/[、，,;；]+\s*$/u, '').trim();
+  // 表格行内残留的孤立管道（值中间混入 | 但非结尾时取首段）
+  if (/[|｜]/u.test(cleaned)) cleaned = cleaned.split(/[|｜]/u)[0]?.trim() || cleaned;
+  return cleaned;
+}
+
 function trustedFacts(factsModel: DocumentFactsModel): DocumentFact[] {
   return [
     ...factsModel.project,
@@ -25,22 +40,55 @@ function appears(markdown: string, value: string) {
   const normalizedValue = normalize(value);
   if (!normalizedValue || normalizedValue.length < 2) return true;
   if (normalizedMarkdown.includes(normalizedValue)) return true;
-  const numericParts = value.match(/\d+(?:\.\d+)?\s*(?:日历天|天|个月|月|年|万元|元|平方米|㎡|m²|立方米|m³|米|m|mm|cm|台|套|人|项|%|MPa|kPa)?/giu) || [];
+  // 全值匹配失败时按片段匹配：条款列表（“1、……；2、……”）或顿号列举中任一核心片段落位即视为已使用；
+  // 仅当拆分出至少两个片段时才启用，避免长单句的部分子串误命中
+  {
+    const fragments = value
+      .split(/[；;。\n]|、|，|,/u)
+      .map(fragment => normalize(fragment.replace(/^\s*\d+\s*[、.．]\s*/u, '')))
+      .filter(fragment => fragment.length >= 4);
+    if (fragments.length >= 2 && fragments.some(fragment => normalizedMarkdown.includes(fragment))) return true;
+  }
+  // 核心词匹配：对象名类短值在正文以组成词出现时视为落位（如“室外道排工程”→“室外道排”、“外墙、屋面工程”→“外墙”+“屋面”）；
+  // 单片段要求 ≥3 字符、多片段要求 ≥2 字符，避免二字通用词单点命中造成虚假落位
+  {
+    const coreFragments = value
+      .replace(/[、，,;；|｜\s]+/gu, '、')
+      .split('、')
+      .map(fragment => normalize(fragment.replace(/(?:工程|项目|改造|维修|安装|施工|内容|资料|要求|标准)+$/u, '')))
+      .filter(fragment => fragment.length >= 2);
+    if (coreFragments.length >= 1 && (coreFragments.length >= 2 || (coreFragments[0]?.length ?? 0) >= 3) && coreFragments.every(fragment => normalizedMarkdown.includes(fragment))) return true;
+  }
+  const numericParts = value.match(/\d+(?:\.\d+)?\s*(?:日历天|天|个月|月|年|万元|元|平方米|㎡|m²|立方米|m³|米|m|mm|cm|台|套|人|项|%|MPa|kPa|个|栋|层|标段|批|处|座|组|道|根|樘|扇)?/giu) || [];
   return numericParts.some(part => normalize(part).length >= 2 && normalizedMarkdown.includes(normalize(part)));
+}
+
+/** 值级可执行性判断：指向值（见XXX）、标题行、标题+正文混合残留、纯文档引用名等不具备落位意义的事实值，与 isActionableTraceFact 共用同一口径 */
+export function isActionableFactValue(value: string) {
+  if (/^(?:见|详见|按|执行|参见|依据).{0,16}(?:前附表|招标公告|招标文件|合同|协议书|通用条款|专用条款|图纸|清单|附件|资料)$/u.test(value)) return false;
+  // “质量标准：见招标公告”类标签+指向混合行（标签后紧跟指向短语，无实际数值）
+  if (/(?:^|[:：]\s*)(?:见|详见|按|执行|参见|依据)[^。；;]{0,18}(?:前附表|招标公告|招标文件|合同|协议书|通用条款|专用条款|图纸|清单|附件|资料|补疑|答疑)[^。；;]{0,6}$/u.test(value)) return false;
+  // “见XXX招标范围/补疑/答疑”类指向短语（如“见本项目招标补疑中的招标范围”）不具备落位意义
+  if (/^见.{0,24}(?:招标范围|招标补疑|补疑|前附表|答疑)/u.test(value)) return false;
+  if (/^(?:合同协议书|通用条款|专用条款|招标文件|招标公告|投标人须知前附表|附件|资料)$/u.test(value.replace(/[（）()\d一二三四五六七八九十、.．\s]/gu, ''))) return false;
+  // 表格尾巴清洗后只剩标签名（如“工程名称 | | |” → “工程名称”）无实际值，不构成事实
+  if (/^(?:工程名称|项目名称|建设地点|建设规模|计划工期|质量标准|招标范围|合同估算价|工程概况|项目概况|项目内容)$/u.test(value)) return false;
+  // 值本身是标题行、编号引用或指向性短语的事实不具备可执行落位意义，不进入修复清单
+  if (/^#+\s*/u.test(value)) return false;
+  // 标题+正文混合残留（如“一、工程概况：本项目分为1个标段”）是抽取噪音而非单条事实
+  if (/^[一二三四五六七八九十]+[、.．]\s*\S{2,}[：:]/u.test(value)) return false;
+  if (/^[（(]\s*\d+[)）]/u.test(value) && /具备|证书|考核|资格|人员/u.test(value)) return false;
+  if (value.length < 4 && !/\d/u.test(value)) return false;
+  return true;
 }
 
 export function isActionableTraceFact(trace: DocumentFactTrace) {
   const value = String(trace.value || '').trim();
   const labelValue = `${trace.label}${value}`;
   if (!/项目|工程|编号|地点|规模|范围|工期|质量|安全|资源|材料|设备|验收|\d/u.test(labelValue)) return false;
-  if (/^(?:见|详见|按|执行|参见|依据).{0,16}(?:前附表|招标公告|招标文件|合同|协议书|通用条款|专用条款|图纸|清单|附件|资料)$/u.test(value)) return false;
-  if (/^(?:合同协议书|通用条款|专用条款|招标文件|招标公告|投标人须知前附表|附件|资料)$/u.test(value.replace(/[（）()\d一二三四五六七八九十、.．\s]/gu, ''))) return false;
-  // 值本身是标题行、编号引用或指向性短语的事实不具备可执行落位意义，不进入修复清单
-  if (/^#+\s*/u.test(value)) return false;
+  if (!isActionableFactValue(value)) return false;
   // “技术参数/精确参数”是正文可写参数池（清单编码、孤立尺寸等），用于提示词注入而非逐条落位义务，不参与落位评分
   if (/^(?:技术参数|精确参数)$/u.test(trace.label)) return false;
-  if (/^[（(]\s*\d+[)）]/u.test(value) && /具备|证书|考核|资格|人员/u.test(value)) return false;
-  if (value.length < 4 && !/\d/u.test(value)) return false;
   return true;
 }
 
@@ -48,7 +96,7 @@ export function buildDocumentFactTraces(markdown: string, factsModel: DocumentFa
   const seen = new Set<string>();
   const traces: DocumentFactTrace[] = [];
   for (const fact of trustedFacts(factsModel)) {
-    const value = stringifyFactValue(fact.value).replace(/\s+/gu, ' ').trim();
+    const value = cleanFactValue(stringifyFactValue(fact.value).replace(/\s+/gu, ' ').trim());
     const label = fact.fieldName || fact.key || fact.fieldId || '资料事实';
     const key = `${label}:${value}`;
     if (!value || seen.has(key)) continue;

@@ -57,11 +57,18 @@ export function validateFactConsistency(input: { markdown: string; facts: Docume
   const projectName = input.summary.facts.projectName;
   if (projectName && projectName !== '当前知识库项目' && !looksLikePathBundleName(projectName)) {
     const normalizedMarkdown = normalize(input.markdown);
-    const coreNames = [projectName, ...input.summary.fingerprint.projectNames]
+    const candidateNames = [projectName, ...input.summary.fingerprint.projectNames]
       .flatMap(name => [name, name.replace(/^\d+(?:\.\d+)?[^\u4e00-\u9fa5]*/u, ''), name.replace(/\([^)]*\)|（[^）]*）/gu, '')])
       .map(name => normalize(name))
-      .filter(name => name.length >= 8);
-    if (!coreNames.some(name => normalizedMarkdown.includes(name) || (name.length >= 12 && normalizedMarkdown.includes(name.slice(0, Math.max(8, Math.floor(name.length * 0.72))))))) {
+      .filter(name => name.length >= 4);
+    // 短项目名（4-7 字符，如“徽光阁项目施工”）只做精确包含匹配：短名泛化截断误伤风险高，
+    // 精确匹配是可靠的；此前按 8 字符过滤会得到空候选集，导致短名项目必报“未包含对象名称”误报
+    const longNames = candidateNames.filter(name => name.length >= 8);
+    const shortNames = candidateNames.filter(name => name.length < 8);
+    const longMatched = longNames.some(name => normalizedMarkdown.includes(name) || (name.length >= 12 && normalizedMarkdown.includes(name.slice(0, Math.max(8, Math.floor(name.length * 0.72))))));
+    const shortMatched = shortNames.some(name => normalizedMarkdown.includes(name));
+    const matched = longNames.length > 0 ? longMatched : shortNames.length > 0 ? shortMatched : true;
+    if (!matched) {
       issues.push({ level: 'warning', message: `正文未包含当前对象名称：${projectName}`, suggestion: '请确认标题、概况或背景信息是否已体现当前对象名称。' });
     }
   }

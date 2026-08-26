@@ -70,15 +70,3 @@ export function buildWritingTaskBrief(input: {
     chapters,
   };
 }
-
-/** 生成单章写作任务书提示文本（注入章节写作 roleContext） */
-export function writingTaskBriefChapterPrompt(brief: WritingTaskBrief, chapterId: string): string {
-  const chapter = brief.chapters.find(item => item.chapterId === chapterId);
-  if (!chapter) return '';
-  return [
-    '【本章写作任务书】',
-    `写作目标：${chapter.writingGoal}`,
-    chapter.mustCover.length ? `必须覆盖：${chapter.mustCover.join('、')}` : '',
-    chapter.boqTargets.length ? `清单目标项：${chapter.boqTargets.slice(0, 20).map(item => `${item.itemName} ${item.quantity}${item.unit}`).join('、')}` : '',
-  ].filter(Boolean).join('\n');
-}

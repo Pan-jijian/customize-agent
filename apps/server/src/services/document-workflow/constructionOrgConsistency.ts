@@ -22,6 +22,13 @@ function normalizeValue(value: string) {
   return value.replace(/[\s，。；;：:|]/gu, '').trim();
 }
 
+/** 通用施工术语：施组常规做法中的设施/指标词，正文提及（无论带不带规格）不要求资料事实逐字支持，
+ * 否则“不使用塔式起重机”“脚手架”“噪声、PM2.5”等合理表述会被误判为与项目图谱不一致 */
+const GENERIC_TERMS_RE = /塔式起重机|履带吊|汽车吊|卷扬机|脚手架|扣件|钢管|模板|噪声|PM2\.5|PM10|TSP|扬尘在线监测|临电|消防|安全网|围挡|洗车台|沉淀池|雾炮/u;
+
+/** 否定语境（“不使用塔式起重机”“无需大型吊装机械”）是合理技术决策，不是配置声明，不参与一致性核对 */
+const NEGATION_CTX_RE = /不使用|不采用|不配置|无需|未采用|不得使用|禁止使用/u;
+
 function factValues(factsModel: DocumentFactsModel, groups: Array<keyof DocumentFactsModel>) {
   const values: string[] = [];
   for (const group of groups) {
@@ -40,6 +47,7 @@ function markdownValues(markdown: string, patterns: RegExp[]) {
     const globalPattern = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
     for (const match of markdown.matchAll(globalPattern)) {
       const value = normalizeValue(match[1] || match[0] || '');
+      if (NEGATION_CTX_RE.test(value)) continue;
       if (value.length >= 2 && value.length <= 80) values.push(value);
     }
   }
@@ -57,7 +65,7 @@ export function constructionOrgConsistencyIssues(markdown: string, factsModel: D
   for (const rule of CONSISTENCY_RULES) {
     const facts = factValues(factsModel, rule.factGroups);
     const generated = markdownValues(markdown, rule.patterns);
-    const conflicting = generated.filter(value => !hasCompatibleFact(value, facts)).slice(0, 5);
+    const conflicting = generated.filter(value => !GENERIC_TERMS_RE.test(value) && !hasCompatibleFact(value, facts)).slice(0, 5);
     if (conflicting.length > 0) {
       issues.push({
         level: 'warning',

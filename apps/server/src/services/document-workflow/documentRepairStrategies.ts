@@ -31,7 +31,8 @@ export function buildRepairStrategies(input: { issues: ValidationIssue[]; qualit
 
 export function repairStrategyIssues(strategies: RepairStrategy[]): ValidationIssue[] {
   return strategies.filter(strategy => strategy.priority === 'high').map(strategy => ({
-    level: 'warning' as const,
+    // 修复策略是流程状态说明而非正文缺陷，按 info 计入，避免污染缺陷计分
+    level: 'info' as const,
     message: `修复策略待执行：${strategy.title}`,
     suggestion: strategy.action,
   }));

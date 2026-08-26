@@ -31,7 +31,9 @@ export function evidenceUsageCoverageIssues(markdown: string, factsModel: Docume
     { label: '资源', corpus: trustedFactCorpus({ ...factsModel, project: [], schedule: [], quality: [], safety: [], preciseFacts: [], bills: [], drawings: [], rules: [], specifications: [] }), required: /资源|材料|设备|劳动力/u },
     { label: '工程量', corpus: trustedFactCorpus({ ...factsModel, project: [], schedule: [], quality: [], safety: [], resources: [], preciseFacts: [], drawings: [], rules: [], specifications: [] }), required: /工程量|清单|建筑面积|长度|吨|台|套|项/u },
   ];
-  const markdownCompact = markdown.replace(/\s+/gu, '');
+  // corpus 行经 normalizeEngineeringTextForFactMatch 归一（日历天→天、平方米→m2），正文侧必须同口径归一，
+  // 否则“45日历天”与“45天”这类同义写法会误判为未使用事实
+  const markdownCompact = normalizeEngineeringTextForFactMatch(markdown.replace(/\s+/gu, ''));
   const issues: ValidationIssue[] = [];
   for (const section of sections) {
     if (!section.required.test(markdown)) continue;
@@ -83,7 +85,8 @@ export function documentDeliveryScoreIssues(markdown: string, chapters: Array<Pi
   };
   const total = scoreParts.factuality + scoreParts.structure + scoreParts.depth + scoreParts.executable + scoreParts.evidence;
   return [{
-    level: 'warning',
+    // 交付评分汇总报告是元信息而非正文缺陷，按 info 计入，避免污染缺陷计分
+    level: 'info',
     message: `文档交付评分报告：总分 ${total}/10，事实${scoreParts.factuality}，结构${scoreParts.structure}，专业${scoreParts.depth}，可执行${scoreParts.executable}，证据${scoreParts.evidence}`,
     suggestion: total >= 8 ? '可交付，但建议继续优化证据使用覆盖率和章节依赖链路。' : '建议优先修复低分维度后再导出。',
   }];

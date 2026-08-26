@@ -707,7 +707,7 @@ export default function DocumentsPage() {
             {strategy && (
               <div className="flex flex-col gap-1 rounded-lg border border-blue-200 bg-blue-50/40 px-2.5 py-2 text-xs">
                 <span className="font-bold text-[var(--colorText)]">生成策略预估（生成前体检）</span>
-                <span className="text-[var(--colorTextSecondary)]">约 {strategy.chapterCount} 章 / 目标 {strategy.targetWords >= 10000 ? `${(strategy.targetWords / 10000).toFixed(1)} 万字` : `${strategy.targetWords} 字`}；章节并发 {strategy.chapterConcurrency}；审查流水线 {strategy.reviewConcurrency} 路；每章证据预算 {Math.round(strategy.evidenceFloorChars / 1000)}k-{Math.round(strategy.evidenceCeilingChars / 1000)}k 字符；修复轮次预算 {strategy.repairRoundBudget} 轮{strategy.globalReviewSamplingRate < 1 ? `；全局审查抽检 ${Math.round(strategy.globalReviewSamplingRate * 100)}%` : ''}</span>
+                <span className="text-[var(--colorTextSecondary)]">约 {strategy.chapterCount} 章 / 目标 {strategy.targetWords >= 10000 ? `${(strategy.targetWords / 10000).toFixed(1)} 万字` : `${strategy.targetWords} 字`}；全章节并行（{strategy.chapterConcurrency} 章同批）；审查流水线 {strategy.reviewConcurrency} 路；每章证据预算 {Math.round(strategy.evidenceFloorChars / 1000)}k-{Math.round(strategy.evidenceCeilingChars / 1000)}k 字符；修复轮次预算 {strategy.repairRoundBudget} 轮{strategy.globalReviewSamplingRate < 1 ? `；全局审查抽检 ${Math.round(strategy.globalReviewSamplingRate * 100)}%` : ''}</span>
                 {strategy.triggers.map(trigger => <span key={trigger} className="text-[var(--colorTextTertiary)]">· {trigger}</span>)}
               </div>
             )}

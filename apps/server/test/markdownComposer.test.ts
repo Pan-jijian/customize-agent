@@ -362,6 +362,37 @@ describe('formal markdown structure', () => {
     expect(promptDocumentRuleIssues(markdown, { forbiddenTerms: [], preferredTerms: [], requiredTables: [] }).map(issue => issue.message).join('\n')).toContain('疑似提示词指令标题');
     expect(sanitizeFormalMarkdown(markdown)).not.toContain('判断是否涉');
   });
+
+  it('keeps work-package H4 headings under their H3 instead of promoting them', () => {
+    const markdown = composeDocumentMarkdown({
+      title: '测试文档',
+      chapters: [{
+        title: '主要施工方案',
+        sections: ['文明施工与环境保护', '主要分部分项工程施工方案'],
+        content: [
+          '### 文明施工与环境保护',
+          '正文内容完整。',
+          '#### 9.0 文明施工',
+          '正文内容完整。',
+          '#### 9.0 扬尘噪声废水达标管控',
+          '正文内容完整。',
+          '### 主要分部分项工程施工方案',
+          '正文内容完整。',
+          '#### 4.1 室内拆除与垃圾外运',
+          '正文内容完整。',
+        ].join('\n'),
+      }],
+    });
+
+    expect(markdown).toContain('### 1.1 文明施工与环境保护');
+    expect(markdown).toContain('### 1.2 主要分部分项工程施工方案');
+    expect(markdown).toContain('#### 1.1.1 文明施工');
+    expect(markdown).toContain('#### 1.1.2 扬尘噪声废水达标管控');
+    expect(markdown).toContain('#### 1.2.1 室内拆除与垃圾外运');
+    expect(markdown).not.toContain('### 1.3 文明施工');
+    expect(markdown).not.toContain('### 1.3 室内拆除与垃圾外运');
+    expect(tocBodyConsistencyIssues(markdown)).toHaveLength(0);
+  });
 });
 
 describe('normalizeInlineListBreaks regression', () => {

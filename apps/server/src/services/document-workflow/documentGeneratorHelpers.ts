@@ -4,12 +4,12 @@ import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, Do
 import { documentTextLength } from './budget';
 import { templatePromptBindings, type ResolvedPromptContent } from './templateStore';
 import type { buildPromptBindingPlan } from './templateStore';
-import { selectEvidenceByBudget } from './evidence';
+import { evidencePromptImportance, selectEvidenceByBudget } from './evidence';
 import { normalizeOcrFactText, isValidProjectBasicFactValue } from './factsModel';
 import { buildCanonicalFacts } from './factGovernance';
 import { normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTenderSourcePageRefs, removeAdjacentDuplicateHeadings } from './markdownComposer';
 import { collectSectionContentGaps } from './qualityValidation';
-import { stringifyFactValue, throwIfAborted } from './utils';
+import { stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
 import { promptTextsForResolvedPrompts } from './rolePipeline';
 
 
@@ -612,14 +612,24 @@ export function filterResolvedFinalIssues(markdown: string, issues: ValidationIs
 }
 
 export function splitLongParagraphs(content: string) {
+  // 验证侧 formalContentIntegrityIssues 对正文行 >380 字符报 warning；
+  // 生成侧以 360 字符为段落上限并留出 Markdown 加粗/链接语法字符余量，避免稳定触发该 warning
+  const MAX_PARAGRAPH = 360;
   return content.split(/\n{2,}/u).map(block => {
-    if (/^\s*(#{1,6}\s+|[-*+]\s+|\|)/u.test(block) || block.length < 520) return block;
-    const sentences = block.split(/(?<=[。；])/u).map(item => item.trim()).filter(Boolean);
-    if (sentences.length < 4) return block;
+    if (/^\s*(#{1,6}\s+|[-*+]\s+|\|)/u.test(block) || block.length <= MAX_PARAGRAPH + 20) return block;
+    // 先按句号/分号拆句，单句仍超上限时再按逗号拆，避免段落被保留为超长单段
+    const sentences = block
+      .split(/(?<=[。；])/u)
+      .flatMap(item => {
+        const sentence = item.trim();
+        if (!sentence) return [];
+        if (sentence.length > MAX_PARAGRAPH) return sentence.split(/(?<=[，,])/u).map(part => part.trim()).filter(Boolean);
+        return [sentence];
+      });
     const chunks: string[] = [];
     let current = '';
     for (const sentence of sentences) {
-      if (current.length > 260 && current.length + sentence.length > 420) {
+      if (current && current.length + sentence.length > MAX_PARAGRAPH) {
         chunks.push(current);
         current = sentence;
       } else {
@@ -638,6 +648,11 @@ function removeEmptySubSectionHeadings(content: string) {
     const line = lines[index];
     const trimmed = line.trim();
     if (!/^(#{4,5})\s+/u.test(trimmed)) {
+      result.push(line);
+      continue;
+    }
+    // 工作包型关键小节标题后紧跟同级 H4 工作包是合法结构（小节正文由工作包列表展开），不得误删
+    if (WORK_PACKAGE_SECTION_RE.test(trimmed)) {
       result.push(line);
       continue;
     }
@@ -822,7 +837,9 @@ export function chapterTextScore(chapter: DocumentTemplateChapter, item: Pick<Do
 export function optimizeChapterEvidence(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[], options: { maxChars: number; maxItems?: number; preservePinned?: boolean }, diagnostics?: DocumentGenerationDiagnostics) {
   const scored = evidence.map(item => ({
     ...item,
-    score: item.score * processingTypeWeightForChapter(chapter, item.processingType) + chapterTextScore(chapter, item),
+    // 池截断排序与注入排序统一为 evidencePromptImportance 口径（量化值 +8 / 项目基础事实 +10 / requiredFacts +6 / 标准编号 +3），
+    // 避免量化关键事实与模板要求事实在 maxItems 截断时被高分泛化块挤出证据池
+    score: evidencePromptImportance(item, chapter.requiredFacts) * processingTypeWeightForChapter(chapter, item.processingType) + chapterTextScore(chapter, item),
   }));
   return selectEvidenceByBudget(scored, options, diagnostics);
 }

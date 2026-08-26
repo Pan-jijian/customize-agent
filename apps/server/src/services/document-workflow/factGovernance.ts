@@ -473,8 +473,8 @@ export function detectNumericScopeConflicts(facts: DocumentFact[]): NumericScope
   return conflicts;
 }
 
-export function applyScopeConflictResolutions(facts: DocumentFact[], conflicts: NumericScopeConflict[]): DocumentFact[] {
-  // 每个 kind 取第一条确定性裁决（resolution 唯一时才成立）；无裁决直接返回原事实
+export function numericScopeResolutions(conflicts: NumericScopeConflict[]) {
+  // 每个 kind 取第一条确定性裁决（resolution 唯一时才成立）
   const resolutions = new Map<NumericScopeConflict['kind'], { winnerNum: string; losers: Array<{ value: string; unit: string }> }>();
   for (const conflict of conflicts) {
     if (!conflict.resolution || resolutions.has(conflict.kind)) continue;
@@ -486,6 +486,54 @@ export function applyScopeConflictResolutions(facts: DocumentFact[], conflicts: 
     if (!winnerNum || losers.length === 0) continue;
     resolutions.set(conflict.kind, { winnerNum, losers });
   }
+  return resolutions;
+}
+
+/**
+ * 文本级裁决改写：把任意文本（证据原文切片、事实值、提示词片段）中的败选数值替换为裁决胜出值。
+ * 裁决必须在数据进入写作模型之前完成——检索原文切片含旧值时，模型会照抄旧值，事后修复是亡羊补牢；
+ * 与 applyScopeConflictResolutions 共用同一套裁决解析，保证主表改写与上下文改写口径一致。
+ */
+export function applyScopeOverridesToText(text: string, conflicts: NumericScopeConflict[]): string {
+  let result = text;
+  for (const { winnerNum, losers } of numericScopeResolutions(conflicts).values()) {
+    for (const loser of losers) {
+      if (loser.unit && result.includes(`${loser.value}${loser.unit}`)) {
+        result = result.split(`${loser.value}${loser.unit}`).join(`${winnerNum}${loser.unit}`);
+      } else if (result.includes(loser.value)) {
+        result = result.split(loser.value).join(winnerNum);
+      }
+    }
+  }
+  return result;
+}
+
+/** 证据切片数组裁决改写（原地无变化时返回原对象引用，避免无谓扩散） */
+export function governEvidenceValues<T extends { content: string }>(evidence: T[], conflicts: NumericScopeConflict[]): T[] {
+  if (!conflicts?.length) return evidence;
+  return evidence.map(item => {
+    const content = applyScopeOverridesToText(item.content, conflicts);
+    return content === item.content ? item : { ...item, content };
+  });
+}
+
+/**
+ * 渲染章节写作强制约束锚点：裁决结果必须逐章注入写作 roleContext（全局蓝图长文本中易被淹没），
+ * 写作模型在生成每个章节时都直接看到「败选值禁止出现」的硬约束，而不是靠事后审查修复
+ */
+export function renderScopeOverrideAnchors(conflicts: NumericScopeConflict[]): string[] {
+  const lines: string[] = [];
+  for (const conflict of conflicts) {
+    if (!conflict.resolution) continue;
+    const losers = conflict.values.filter(value => `${value.value}${value.unit}` !== conflict.resolution);
+    if (losers.length === 0) continue;
+    lines.push(`${conflict.scope}必须统一为 ${conflict.resolution}（补疑/答疑/澄清类修正文件权威最高；${losers.map(loser => `${loser.value}${loser.unit}`).join('、')} 已被修正，正文禁止出现）`);
+  }
+  return lines;
+}
+
+export function applyScopeConflictResolutions(facts: DocumentFact[], conflicts: NumericScopeConflict[]): DocumentFact[] {
+  const resolutions = numericScopeResolutions(conflicts);
   if (resolutions.size === 0) return facts;
   const kindRe: Record<NumericScopeConflict['kind'], RegExp> = {
     area: /建设规模|工程规模|建筑面积|用地面积|占地面积|project_scale|scale/u,

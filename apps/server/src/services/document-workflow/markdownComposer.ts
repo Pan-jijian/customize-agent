@@ -1,7 +1,9 @@
 import type { DocumentDraftChapter, DocumentTemplate, GeneratedDocumentDraft, PromptDocumentRuleSet, ValidationIssue } from './types';
 import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
+import { WORK_PACKAGE_SECTION_RE } from './utils';
 import { displayChapterTitle, formalChapterTitle, normalizeGeneratedChapterTitle } from './outline';
 import { composeDrawingIndexMarkdown, composeEnhancedCoverMarkdown, composeProcessParameterSummaryMarkdown } from './composeAppendices';
+import { FORBIDDEN_EMPTY_PHRASES } from './tenderBidScoring';
 
 export function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
   if (!forbid) return markdown;
@@ -228,6 +230,7 @@ export function sourcePhraseIssues(markdown: string): ValidationIssue[] {
       inBasisSection = BASIS_SECTION_TITLE_RE.test(trimmed.replace(/^#{2,4}\s+/u, ''));
       return;
     }
+    if (/^\s*\|/u.test(trimmed)) return;
     if (SOURCE_ENUMERATION_PHRASE_RE.test(line) && !inBasisSection) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `正式正文不得出现资料来源罗列话术：第 ${index + 1} 行`, suggestion: '删除“根据/依据招标文件、清单、图纸”等来源罗列，直接保留项目事实、施工内容和控制措施；编制依据类小节可集中罗列依据文件。' });
     if (/^\s*\*\*[^*]{2,40}表\*\*\s*$/u.test(line)) issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'system', message: `正式正文不得用粗体段落充当表名：第 ${index + 1} 行`, suggestion: '表名必须转换为 #### 四级标题，避免导出后混入正文段落。' });
   });
@@ -287,11 +290,25 @@ export const MARKDOWN_TABLE_FORMAT_RULES = [
   '项目名称、项目编号、招标人/业主/建设单位、建设地点、建设规模、计划工期、质量标准、合同估算价等项目基础信息，只能在项目基本信息表中集中输出一次；后续章节如需引用，应写入正文或专业表格的业务字段，不得重复生成项目基础信息键值表。',
 ].join('\n');
 
+/** 招标技术标评审写作方法论（《施组设计汇总方案.md》高频评审逻辑 + 用户“青天大模型 AI 评标”提示词提炼）：
+ * 内容落地五要素、负面词库禁写、评分点响应、数据表格化、数据自洽、黄金公式与低雷同 */
+export const TENDER_BID_WRITING_RULES = [
+  '【内容落地五要素】每项管控措施必须写全五要素：方案 + 流程 + 责任人 + 时间节点 + 验收标准；责任人落到具体岗位（项目经理/技术负责人/施工员/质检员/安全员/材料员等），检查频次量化到每日/每周/每月/不少于X次，整改落到“整改→复查→销项”闭环。禁止只写“加强、落实、确保”式无责任、无标准、无频次的空话。',
+  `【空话禁用词】以下词语直接禁写，一律替换为“责任岗位 + 执行动作 + 量化标准 + 检查频次 + 整改闭环”句式：${FORBIDDEN_EMPTY_PHRASES.join('、')}；并避免“合理、充分、完善、切实、尽量、适时”等单字虚词作为措施句核心动词。`,
+  '【评分点响应】段落首句先回应本节评分点或招标评审关键词，再展开具体措施；一段只写一个主题，避免多个得分点混在大段文字中；三级标题尽量直接放置评分关键词。',
+  '【数据表格化】关键数据（建筑面积、层数、总工期、开工竣工节点、设备型号数量、管理人员配置、劳动力人数、材料批次、养护天数、检测频次、检验批划分）优先用表格呈现，不藏在正文大段文字中；表格前必须有 1～2 句引导叙述说明表格作用与关键结论，表格不能替代小节正文。',
+  '【数据自洽】全文核心数据（工程名称、建设地点、总工期、建筑面积、层数、人员、机械、材料批次、施工阶段划分、危大工程清单）必须前后一致，任何跨章冲突、参数矛盾即为内容缺陷；数据以绑定材料与计划推导结果为准，不得一处一改。',
+  '【工艺黄金公式】工艺描述按“工艺名称 + 来源依据 + 适用范围 + 核心工序（按施工顺序 3～5 步）+ 质量控制要点（1～2 个量化指标）”展开；提及规范标准必须带编号（如 GB 50204-2015）并采用现行有效版本，不得虚构或引用已废止版本。',
+  '【重难点公式】重难点 = 项目具体条件 + 难度分析 + 影响后果；工程重点 3～5 条、工程难点 3～4 条，每个重难点必须在后续对应章节给出解决措施形成跨章闭环。',
+  '【低雷同】不同章节不得复制相同段落；同类措施必须通过句式重构、数据替换、流程细化差异化表达；不写“本工程严格执行国家有关标准规范”式通用万能句。',
+].join('\n');
+
 export const FORMAL_WRITING_RULES = [
   '以下规则仅用于保障导出格式正确和事实安全，不得覆盖用户在提示词中已明确的要求。',
   '不得把”知识库、检索、资料类型、提示词角色、规范包、事实字段、缺失项、校验结果、资料未提供、未检索到”等后台流程话术写入正文。',
   '严禁使用“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列开头；正文必须直接写项目事实、施工内容、控制措施、验收节点。编制依据类小节除外：该小节可集中罗列编制依据文件清单。',
   '禁止模板化空话与流程套话：不同小节必须写各自专属的专业内容，逐节落位本项目工程量、设备规格、工艺参数与验收标准，不得复制相同段落，不得用泛化的流程描述代替专业内容；正文末尾不得输出自我总结或合规声明段落。',
+  TENDER_BID_WRITING_RULES,
   // 导出格式 —— DOCX/PDF 渲染器依赖以下 Markdown 规范
   '【导出格式】章标题用 ## ，节标题用 ### 加数字编号（如 1.1），小节标题用 #### 加数字编号（如 1.1.1）。禁止用数字编号或粗体代替 ###/#### 标题。',
   MARKDOWN_TABLE_FORMAT_RULES,
@@ -304,6 +321,7 @@ export const FORMAL_WRITING_RULES = [
 export const SECTION_GENERATION_SAFETY_RULES = [
   '只生成当前节及其节内三级小节正文，不生成其他同级节，不重复章节一级标题。',
   '优先使用当前模板、用户要求、绑定提示词和绑定材料中的事实；项目专属事实（具体数值、时间、规格、人名、品牌、责任主体）缺少依据时不得编造；法律法规名称、标准规范编号等公共专业知识可依据现行有效版本直接引用，无需材料提供。',
+  '禁止编造具体日期：开工日期、竣工日期、具体某月某日只有在绑定材料明确提供时才可写入；材料未提供具体日期时，进度安排一律用相对工期表达（如"开工令下发后第7日""第1日～第7日"），不得写"2026年8月8日"等绝对日期。',
   '小节应有实质正文；除非用户或模板明确要求纯表格，否则表格只能作为辅助表达，不能整节只有表格。',
   '不得用通用兜底段落、空泛管理话术或后台缺料说明冒充正文；信息不足时只写已有事实、适用边界和待复核口径。',
 ].join('\n');
@@ -544,6 +562,8 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
   let sectionIndex = 0;
   let tertiaryIndex = 0;
   let activeSourceSection = '';
+  let activeSourceSectionTitle = '';
+  let hasRealActiveSection = false;
   let emittedSectionKeys = new Set<string>();
   const plannedSectionIndex = (title: string) => {
     const sections = chapters[chapterIndex]?.sections || [];
@@ -566,8 +586,18 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
     sectionIndex = nextIndex;
     tertiaryIndex = 0;
     activeSourceSection = fallbackSourceSection || `${chapterIndex + 1}.${sectionIndex}`;
+    activeSourceSectionTitle = plannedIndex >= 0 ? displayChapterTitle(plannedSections[plannedIndex]) : cleanTitle;
     emittedSectionKeys.add(sectionKey);
     return `### ${chapterIndex + 1}.${sectionIndex} ${plannedIndex >= 0 ? displayChapterTitle(plannedSections[plannedIndex]) : cleanTitle}`;
+  };
+  /** 四级标题成稿：同一 H3 小节下前 4 个编号为 #### x.y.z，其后降级为粗体（后续 sanitize 会转回 H4 并重新编号） */
+  const emitTertiary = (title: string, sourceSection: string) => {
+    const titleKey = normalizePlannedSectionTitle(title);
+    const isPlannedPendingSection = plannedSectionIndex(title) >= 0 && !emittedSectionKeys.has(titleKey);
+    if (!sectionIndex) return normalizeSectionHeading(title, sourceSection);
+    if (sourceSection && sourceSection !== activeSourceSection && ((chapters[chapterIndex]?.sections || []).length === 0 || isPlannedPendingSection)) return normalizeSectionHeading(title, sourceSection);
+    tertiaryIndex += 1;
+    return tertiaryIndex <= 4 ? `#### ${chapterIndex + 1}.${sectionIndex}.${tertiaryIndex} ${title}` : `**${title}**`;
   };
   let inTocBlock = false;
   return lines.map(line => {
@@ -586,36 +616,43 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
       sectionIndex = 0;
       tertiaryIndex = 0;
       activeSourceSection = '';
+      activeSourceSectionTitle = '';
+      hasRealActiveSection = false;
       emittedSectionKeys = new Set<string>();
       return line;
     }
     const h2ChineseSection = /^##\s+第[一二三四五六七八九十百千万\d]+节\s+(.+)$/u.exec(trimmed);
-    if (chapterIndex >= 0 && h2ChineseSection) return normalizeSectionHeading(h2ChineseSection[1] || '');
+    if (chapterIndex >= 0 && h2ChineseSection) { hasRealActiveSection = true; return normalizeSectionHeading(h2ChineseSection[1] || ''); }
     const h2SingleNumberedSection = /^##\s+\d+[.．、]\s+(.+)$/u.exec(trimmed);
-    if (chapterIndex >= 0 && h2SingleNumberedSection) return normalizeSectionHeading(h2SingleNumberedSection[1] || '');
+    if (chapterIndex >= 0 && h2SingleNumberedSection) { hasRealActiveSection = true; return normalizeSectionHeading(h2SingleNumberedSection[1] || ''); }
     const h2NumberedSection = /^##\s+(\d+)\.(\d+)\s+(.+)$/u.exec(trimmed);
-    if (chapterIndex >= 0 && h2NumberedSection) return normalizeSectionHeading(h2NumberedSection[3] || '', `${h2NumberedSection[1]}.${h2NumberedSection[2]}`);
+    if (chapterIndex >= 0 && h2NumberedSection) { hasRealActiveSection = true; return normalizeSectionHeading(h2NumberedSection[3] || '', `${h2NumberedSection[1]}.${h2NumberedSection[2]}`); }
     const h2PlainSection = /^##\s+(.+)$/u.exec(trimmed);
     if (chapterIndex >= 0 && h2PlainSection) {
       const plainTitle = displayChapterTitle(h2PlainSection[1] || '');
       if (/^本章目录$/u.test(plainTitle)) return '';
       if (/^附录/u.test(plainTitle)) return line;
+      hasRealActiveSection = true;
       return normalizeSectionHeading(plainTitle);
     }
     const section = /^###\s+(?:(\d+)\.(\d+)\s+)?(.+)$/u.exec(trimmed);
-    if (chapterIndex >= 0 && section) return normalizeSectionHeading(section[3] || '', section[1] && section[2] ? `${section[1]}.${section[2]}` : undefined);
+    if (chapterIndex >= 0 && section) { hasRealActiveSection = true; return normalizeSectionHeading(section[3] || '', section[1] && section[2] ? `${section[1]}.${section[2]}` : undefined); }
     const h3NumberedAsSection = /^####\s+(\d+)\.(\d+)(?!\.)\s+(.+)$/u.exec(trimmed);
-    if (chapterIndex >= 0 && h3NumberedAsSection) return normalizeSectionHeading(h3NumberedAsSection[3] || '', `${h3NumberedAsSection[1]}.${h3NumberedAsSection[2]}`);
+    if (chapterIndex >= 0 && h3NumberedAsSection) {
+      const candidateTitle = displayChapterTitle(h3NumberedAsSection[3] || '');
+      const inWorkPackageSection = WORK_PACKAGE_SECTION_RE.test(activeSourceSectionTitle);
+      const plannedSectionsEmpty = (chapters[chapterIndex]?.sections || []).length === 0;
+      const isPlannedSection = plannedSectionIndex(candidateTitle) >= 0;
+      // 带两位编号的 H4 升级为 H3 仅限「LLM 全程用 #### X.Y 代替 H3」的误写场景：
+      // 章内出现过真实 H3（###/## 节标题）后，一律视为小节内四级标题——否则工作包型小节下的
+      // 工作包 H4（4.1/9.0 等）会被升成 H3，把目录结构撑爆
+      if (!hasRealActiveSection && !inWorkPackageSection && (isPlannedSection || plannedSectionsEmpty)) return normalizeSectionHeading(h3NumberedAsSection[3] || '', `${h3NumberedAsSection[1]}.${h3NumberedAsSection[2]}`);
+      return emitTertiary(candidateTitle, activeSourceSection);
+    }
     const tertiary = /^####\s+(?:(\d+)\.(\d+)\.(\d+)\s+)?(.+)$/u.exec(trimmed);
     if (chapterIndex >= 0 && tertiary) {
       const sourceSection = tertiary[1] && tertiary[2] ? `${tertiary[1]}.${tertiary[2]}` : activeSourceSection;
-      const title = displayChapterTitle(tertiary[4] || '');
-      const titleKey = normalizePlannedSectionTitle(title);
-      const isPlannedPendingSection = plannedSectionIndex(title) >= 0 && !emittedSectionKeys.has(titleKey);
-      if (!sectionIndex) return normalizeSectionHeading(title, sourceSection);
-      if (sourceSection && sourceSection !== activeSourceSection && ((chapters[chapterIndex]?.sections || []).length === 0 || isPlannedPendingSection)) return normalizeSectionHeading(title, sourceSection);
-      tertiaryIndex += 1;
-      return tertiaryIndex <= 4 ? `#### ${chapterIndex + 1}.${sectionIndex}.${tertiaryIndex} ${title}` : `**${title}**`;
+      return emitTertiary(displayChapterTitle(tertiary[4] || ''), sourceSection);
     }
     return line;
   }).filter(line => line !== '').join('\n');
@@ -815,8 +852,10 @@ export function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumen
   const subjectHits = (runtimeRules.forbiddenSubjects || []).filter(term => term && new RegExp(escapedRegExp(term), 'u').test(markdown));
   if (subjectHits.length > 0) issues.push({ level: 'warning', message: `正文残留禁用主体表达：${subjectHits.join('、')}`, suggestion: '请统一改为用户提示词指定的表达主体。' });
   const plainLength = markdown.replace(/\s/gu, '').length;
-  if (runtimeRules.minChars && plainLength < runtimeRules.minChars) issues.push({ level: 'warning', message: `正文长度低于提示词要求：当前 ${plainLength} 字，要求不少于 ${runtimeRules.minChars} 字`, suggestion: '请按章节深度扩写，但不得编造资料外事实。' });
-  return issues.map(issue => issue.level === 'warning' && /提示词|禁止|禁用|低于提示词要求|必含关键词|必需表格|主体表达/u.test(issue.message) ? { ...issue, level: 'error' as const, severity: issue.severity || ('blocker' as const) } : issue);
+  // 提示词字数目标是生成预算口径：95% 以上视为达标（生成波动容差），不足按 warning 提示而非阻断，
+  // 与 documentBudgetIssues 的“低于目标字数”warning 口径一致
+  if (runtimeRules.minChars && plainLength < Math.floor(runtimeRules.minChars * 0.95)) issues.push({ level: 'warning', message: `正文长度低于提示词要求：当前 ${plainLength} 字，要求不少于 ${runtimeRules.minChars} 字`, suggestion: '请按章节深度扩写，但不得编造资料外事实。' });
+  return issues.map(issue => issue.level === 'warning' && /提示词|禁止|禁用|必含关键词|必需表格|主体表达/u.test(issue.message) ? { ...issue, level: 'error' as const, severity: issue.severity || ('blocker' as const) } : issue);
 }
 
 export function plannedStructureIssues(markdown: string, template: DocumentTemplate): ValidationIssue[] {

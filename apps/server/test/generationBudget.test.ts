@@ -63,18 +63,17 @@ describe('selectDocumentGenerationStrategy', () => {
 describe('buildGenerationBudget', () => {
   const strategy = selectDocumentGenerationStrategy({ template: makeTemplate(6, '常规房建模板').template, targetWords: 15000, materialFileCount: 8, evidenceCount: 40 });
 
-  it('按章节数与篇幅计算并发', () => {
+  it('章节并发不设档位上限：全部章节同批启动（全局 LLM 信号量兜底）', () => {
     const { template, chapters } = makeTemplate(10);
     const budget = buildGenerationBudget({ template, chapters, targetWords: 15000, materialFileCount: 8, evidenceCount: 40, hasVeryLargeExplicitChapter: false, configuredChapterConcurrency: 0, strategy });
-    expect(budget.chapterConcurrency).toBeGreaterThanOrEqual(2);
-    expect(budget.chapterConcurrency).toBeLessThanOrEqual(4);
+    expect(budget.chapterConcurrency).toBe(10);
     expect(budget.reviewConcurrency).toBe(2);
   });
 
-  it('超长显式小节章降为三章并发（规划驱动管线后不再独占槽位）', () => {
+  it('超大显式小节章同样全并发（不再独占槽位降档）', () => {
     const { template, chapters } = makeTemplate(5);
     const budget = buildGenerationBudget({ template, chapters, targetWords: 12000, materialFileCount: 8, evidenceCount: 40, hasVeryLargeExplicitChapter: true, configuredChapterConcurrency: 0, strategy });
-    expect(budget.chapterConcurrency).toBe(3);
+    expect(budget.chapterConcurrency).toBe(5);
   });
 
   it('显式环境变量覆盖章节并发', () => {
@@ -103,6 +102,6 @@ describe('buildGenerationBudget', () => {
     const shortBudget = buildGenerationBudget({ template, chapters, targetWords: 4000, materialFileCount: 5, evidenceCount: 20, hasVeryLargeExplicitChapter: false, configuredChapterConcurrency: 0, strategy: shortStrategy });
     expect(shortBudget.evidenceCeilingChars).toBeLessThanOrEqual(12000);
     expect(shortBudget.repairRoundBudget).toBe(3);
-    expect(shortBudget.triggers.some(trigger => trigger.includes('章节并发'))).toBe(true);
+    expect(shortBudget.triggers.some(trigger => trigger.includes('全章节并行生成'))).toBe(true);
   });
 });

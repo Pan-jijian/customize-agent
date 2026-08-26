@@ -16,6 +16,7 @@ import { buildProcessKnowledgePrompt, matchProcessKnowledgeCards } from './const
 import { criticalSectionBlockerMinChars, currentSectionBlock, ensureGroupTertiaryShell, ensureTertiarySectionShell, groupHasMajorConstructionSection, isCriticalDeepSection, isGeneralManagementSection, keySectionWritingRequirement, majorContentPollutionIssue, mergeDuplicateWorkPackageSubsections, outputTokensForChapter, parseMajorConstructionPackages, repairMajorContentWorkPackageLabels, sectionContentBody, sectionStructureIssue } from './chapterPostProcessing';
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE, QUANTIFIED_FACT_RE } from './parameterPatterns';
 import type { PlannedChapterStructure } from './chapterPlanner';
+import { cleanFactValue, isActionableFactValue } from './documentFactTrace';
 
 export * from './chapterPostProcessing';
 
@@ -193,9 +194,11 @@ function factCoveredByEvidence(fact: string, evidence: DocumentEvidence[]): bool
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics } = {}) {
+export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
-  let evidenceText = evidenceBundlePrompt(bundle, { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords), requiredFacts: chapter.requiredFacts });
+  // 证据注入预算与 generationBudget 的证据区间（7k-26k 档）对齐：未显式传入时保持旧默认，
+  // 由 documentGenerator 主路径统一传入按章节目标字计算的 floor/ceiling
+  let evidenceText = evidenceBundlePrompt(bundle, { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars), requiredFacts: chapter.requiredFacts });
   // 两步生成（事实大纲 → 写作）：第一步先让 LLM 基于绑定材料规划可写事实清单，
   // 第二步按大纲逐条落位写作，根治「要求具体但证据碎片化导致空话灌水」的不稳定。
   // env DOCUMENT_TWO_STEP_GENERATION=0 显式关闭；大纲阶段失败退化为单步生成（非模板兜底）
@@ -215,7 +218,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
         const fresh = supplements.filter(item => !evidence.some(existing => existing.filePath === item.filePath && (existing.sectionTitle || '') === (item.sectionTitle || '')));
         if (fresh.length > 0) {
           const mergedEvidence = [...evidence, ...fresh];
-          evidenceText = evidenceBundlePrompt(buildEvidenceBundle(chapter, mergedEvidence), { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords), requiredFacts: chapter.requiredFacts });
+          evidenceText = evidenceBundlePrompt(buildEvidenceBundle(chapter, mergedEvidence), { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars), requiredFacts: chapter.requiredFacts });
           // 覆盖判断基于合并后证据池：原证据已覆盖的事实不算缺失，避免误标
           stillMissingFacts = new Set(allOutlinedMissing.filter(fact => !factCoveredByEvidence(fact, mergedEvidence)));
           if (stillMissingFacts.size < allOutlinedMissing.length) {
@@ -397,8 +400,10 @@ export function buildSectionFactCard(sectionTitle: string, evidence: DocumentEvi
   const sectionTokens = tokenizeForRelevance(sectionTitle).filter(token => token.length >= 2);
   for (const item of evidence) {
     for (const rawLine of stringifyFactValue(item.content).split(/\r?\n/u)) {
-      const line = cleanFactLine(rawLine);
+      // 与 documentFactTrace 已修口径贯通：先清洗指向值（见XXX）、表格尾巴、标题混合值，再判断可执行性
+      const line = cleanFactValue(cleanFactLine(rawLine));
       if (line.length < 4 || line.length > 280) continue;
+      if (!isActionableFactValue(line)) continue;
       if (isNoisyFactLine(line)) continue;
       if (COMMERCIAL_SENSITIVE_RE.test(line) && !ALLOWED_COMMERCIAL_FACT_RE.test(line)) continue;
       const quantified = QUANTIFIED_FACT_RE.test(line);
@@ -1078,8 +1083,12 @@ export async function buildPlannedChapterContent(input: {
       ? `- #### ${point.title}（覆盖评分细目：${point.sources.join('、')}）`
       : `- #### ${point.title}`)).join('\n');
     const blockRoleContext = [input.roleContext || '', factsHint, `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下 H4 要点逐点写出实施性正文，H4 标题必须与给定标题完全一致，不得改名、合并或遗漏；每个 H4 必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题：\n${coverageList}`].filter(Boolean).join('\n\n');
+    let lastMissing: string[] = [];
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const feedback = attempt === 0 ? '' : '【上一轮未通过质检】必须完整包含每个 H4 要点标题并展开正文，总字数不少于目标字数，不得合并或遗漏要点。';
+      // 第二轮反馈针对性列出缺失 H4 标题，让重试有的放矢，避免通用反馈反复缺失要点后被迫拆半/整章降级
+      const feedback = attempt === 0 ? '' : lastMissing.length
+        ? `【上一轮未通过质检】缺失 H4 要点标题：${lastMissing.join('、')}。必须逐点补齐以上 H4 标题并展开正式正文，H4 标题与给定标题完全一致，总字数不少于目标字数。`
+        : '【上一轮未通过质检】必须完整包含每个 H4 要点标题并展开正文，总字数不少于目标字数，不得合并或遗漏要点。';
       try {
         const content = await buildLlmChapterContent(input.template, blockChapter, blockEvidence, input.missingFacts, input.promptTexts, input.projectContext, input.requirement, feedback ? `${blockRoleContext}\n\n${feedback}` : blockRoleContext, {
           forbidDrawingImages: input.forbidDrawingImages,
@@ -1100,6 +1109,7 @@ export async function buildPlannedChapterContent(input: {
         if (chars >= Math.max(400, Math.floor(block.targetWords * 0.5)) && missing.length === 0) {
           return normalized;
         }
+        lastMissing = missing;
         if (input.diagnostics && attempt === 1) input.diagnostics.llm.lastError = `规划块质检未达标：${block.title}（${chars} 字，缺 ${missing.join('、') || '无'}）`;
       } catch (error) {
         if (input.diagnostics && attempt === 1) input.diagnostics.llm.lastError = error instanceof Error ? error.message : String(error);

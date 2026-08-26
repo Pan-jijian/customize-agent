@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { documentTextLength } from './budget';
 
+// 工作包型关键小节：标题后以同级 H4 工作包（施工概况/施工流程/施工方法）展开正文。
+// 深度口径必须向下包含这些同级 H4，否则只提取到标题后的概述段，关键小节永远“深度不足”并触发破坏性修复
+export const WORK_PACKAGE_SECTION_RE = /项目主要施工内容|主要分部分项工程施工方案|主要施工方法/u;
+
 // 按标题定位正文小节：精确模式（默认）按“标题行含目标字符串 + 同级/上级标题定界”返回整节（含标题行）；
 // fuzzy 模式按归一化标题模糊匹配（剥离编号/空白/常见泛化词）返回最长命中正文（不含标题行）。
 // 供关键小节深度/密度检查（documentPipeline）与 Reviewer 小节定位（agentPlanner）共用，避免三处重复实现漂移。
@@ -18,10 +22,13 @@ function extractSectionExact(content: string, title: string, headingStartRe: Reg
   const start = lines.findIndex(line => headingStartRe.test(line.trim()) && line.includes(title));
   if (start < 0) return '';
   const startLevel = (/^(#{2,6})\s+/u.exec(lines[start].trim())?.[1].length) || 3;
+  // 工作包型关键小节（H4 标题 + 同级 H4 工作包展开）：同级 H4 是正文而非边界，
+  // 仅上级标题（H2/H3）定界，向下包含全部工作包正文
+  const includePeerH4 = startLevel === 4 && WORK_PACKAGE_SECTION_RE.test(title);
   let end = lines.length;
   for (let index = start + 1; index < lines.length; index += 1) {
     const heading = /^(#{2,6})\s+/u.exec(lines[index].trim());
-    if (heading && heading[1].length <= startLevel) {
+    if (heading && heading[1].length <= startLevel && !(includePeerH4 && heading[1].length === startLevel)) {
       end = index;
       break;
     }
@@ -51,19 +58,29 @@ function extractSectionFuzzy(content: string, sectionTitle: string) {
   const comparableTitle = comparableSectionTitleText(sectionTitle);
   const matches: string[] = [];
   let start = -1;
+  let startWorkPackage = false;
   const flush = (end: number) => {
     if (start < 0) return;
     const body = lines.slice(start, end).join('\n').trim();
     if (body) matches.push(body);
     start = -1;
+    startWorkPackage = false;
   };
   for (let index = 0; index < lines.length; index += 1) {
-    if (!/^\s*#{2,3}\s+/u.test(lines[index])) continue;
+    // H4 必须纳入标题扫描：主题块成稿正文以 `### 主题块` + `#### H4 要点` 组织，
+    // Reviewer 的 plannedCoverage 锚点是 H4 要点标题；旧实现只扫 H2/H3 导致锚点全部匹配失败，
+    // 产生"未匹配到独立小节标题"误报与 Repairer 修复无效循环
+    if (!/^\s*#{2,4}\s+/u.test(lines[index])) continue;
+    const level = (/^\s*(#{2,4})\s+/u.exec(lines[index])?.[1].length) || 3;
+    // 命中工作包型关键小节后，后续同级 H4 是工作包正文而非小节边界，
+    // 继续向下收集直到上级标题（H2/H3），避免只提取到标题后的概述段
+    if (start >= 0 && startWorkPackage && level === 4) continue;
     flush(index);
     const normalizedHeading = sectionHeadingTitleText(lines[index]).replace(/\s+/gu, '').toLowerCase();
     const comparableHeading = comparableSectionTitleText(lines[index]);
     if (normalizedHeading === normalizedTitle || normalizedHeading.includes(normalizedTitle) || normalizedTitle.includes(normalizedHeading) || comparableHeading === comparableTitle || comparableHeading.includes(comparableTitle) || comparableTitle.includes(comparableHeading)) {
       start = index + 1;
+      startWorkPackage = level <= 4 && WORK_PACKAGE_SECTION_RE.test(lines[index]);
     }
   }
   flush(lines.length);

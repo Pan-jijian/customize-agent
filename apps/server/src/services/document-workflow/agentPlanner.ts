@@ -311,9 +311,11 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
     else if (body && !anchorDepthChecked.has(anchor)) {
       anchorDepthChecked.add(anchor);
       const anchorMinChars = anchorDepthCheck.get(anchor) || section.minChars;
-      // 语义合并后共享同一承接小节：单细目深度阈值放宽至 50%（整块字数由块级写手质检兜底）
-      const threshold = merged ? Math.max(200, Math.floor(anchorMinChars * 0.5)) : anchorMinChars;
       const criticalDepth = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试|见证取样/u.test(section.title);
+      // 语义合并后共享同一承接小节：单细目深度阈值放宽至 50%（整块字数由块级写手质检兜底）；
+      // 但关键小节不放宽——Final Gate 的 criticalSectionDepthIssues 按原始 minChars 精确提取，
+      // 若 Reviewer 用放宽口径放过，章节修复轮次结束后仍会被最终门禁以 minChars×0.8 阻断，修复机会浪费
+      const threshold = merged && !criticalDepth ? Math.max(200, Math.floor(anchorMinChars * 0.5)) : anchorMinChars;
       // 容忍线与 Final Gate blocker 口径一致（minChars × 0.8）：低于该线必须触发深度修复，
       // 否则 0.7~0.8 之间的深度缺口会被 Reviewer 放过、被 Final Gate 阻断，修复机会浪费在最终门禁上
       const nearEnough = documentTextLength(body) >= Math.floor(threshold * 0.8);

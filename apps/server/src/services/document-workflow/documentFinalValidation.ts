@@ -5,7 +5,7 @@ import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
 import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
-import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, PromptBinding, PromptDocumentRuleSet, ValidationIssue } from './types';
+import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, ValidationIssue } from './types';
 
 export function buildStandardFinalValidationIssues(input: {
   markdown: string;
@@ -14,6 +14,8 @@ export function buildStandardFinalValidationIssues(input: {
   template: DocumentTemplate;
   promptBindings: PromptBinding[];
   promptDocumentRules?: PromptDocumentRuleSet;
+  /** 源级同口径冲突裁决（校验基准与生成裁决同源） */
+  scopeConflicts?: NumericScopeConflict[];
 }): ValidationIssue[] {
   return [
     ...(input.promptDocumentRules?.forbidToc ? [] : [...tocHierarchyIssues(input.markdown), ...tocBodyConsistencyIssues(input.markdown)]),
@@ -26,7 +28,7 @@ export function buildStandardFinalValidationIssues(input: {
     ...professionalScoreIssues(input.chapters),
     ...genericProfessionalContentIssues(input.chapters),
     ...managementMeasureNumberIssues(input.chapters),
-    ...crossChapterConsistencyIssues(input.markdown, input.factsModel),
+    ...crossChapterConsistencyIssues(input.markdown, input.factsModel, input.scopeConflicts),
     ...processSpecConflictIssues(input.markdown, input.factsModel),
     ...evidenceUsageCoverageIssues(input.markdown, input.factsModel),
     ...paragraphGenericIssues(input.markdown),

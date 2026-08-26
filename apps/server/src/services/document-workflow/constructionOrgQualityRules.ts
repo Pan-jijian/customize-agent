@@ -214,7 +214,8 @@ export function constructionOrgBonusModuleIssues(chapters: DocumentDraftChapter[
     const text = `${chapter.title} ${(chapter.sections || []).join(' ')} ${chapter.content}`;
     for (const bonusModule of BONUS_MODULES) {
       if (bonusModule.pattern.test(text) && !chapter.content.includes(bonusModule.title)) {
-        issues.push({ level: 'warning', message: `${chapter.title} 可补充隐藏高分模块：${bonusModule.title}`, suggestion: bonusModule.prompt });
+        // 隐藏高分模块是可加分建议而非缺陷，按 info 计入，避免污染缺陷计分
+        issues.push({ level: 'info', message: `${chapter.title} 可补充隐藏高分模块：${bonusModule.title}`, suggestion: bonusModule.prompt });
       }
     }
   }

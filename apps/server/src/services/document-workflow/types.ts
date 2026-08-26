@@ -520,12 +520,18 @@ export interface DocumentQualityReport {
   target: number;
   passed: boolean;
   scores: {
-    factuality: number;
-    structure: number;
-    professionalDepth: number;
-    executable: number;
-    evidenceCoverage: number;
-    consistency: number;
+    /** 资料完整性 */
+    completeness: number;
+    /** 方案针对性 */
+    specificity: number;
+    /** 合规性 */
+    compliance: number;
+    /** 可落地性 */
+    executability: number;
+    /** 编制规范性 */
+    normalization: number;
+    /** 低雷同性 */
+    uniqueness: number;
   };
   summary: string;
   actions: string[];

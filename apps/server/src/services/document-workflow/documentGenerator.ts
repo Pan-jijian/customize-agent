@@ -19,11 +19,11 @@ import { sectionContentIntegrityIssues } from './qualityValidation';
 import { buildDocumentBlueprintContext } from './documentBlueprint';
 import { enrichConstructionOrgOutline } from './constructionOrgCatalog';
 import { validateBidStructureBeforeGeneration } from './constructionBidStructure';
-import { buildWritingTaskBrief, writingTaskBriefChapterPrompt } from './documentWritingTaskBrief';
+import { buildWritingTaskBrief } from './documentWritingTaskBrief';
 import { buildConstructionOrgTablePlans, tablePlanExecutionGaps } from './constructionOrgTablePlan';
 import { buildRetrievalCoverageReport, retrieveDeepChapterEvidence, retrievalCoverageRisk } from './documentEvidenceRetrieval';
 import { buildChapterFactNeeds, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, factNeedsCoveragePrompt, factsForChapterNeeds, resolveChapterFactNeeds } from './factsModel';
-import { adaptiveConcurrency, runWithAdaptiveConcurrency, Semaphore, stableHash, throwIfAborted } from './utils';
+import { adaptiveConcurrency, runWithAdaptiveConcurrency, Semaphore, stableHash, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
 import { displayStage, elapsedMessage, upsertProgressStage } from './progress';
 import { getActiveModelWithProvider, raiseDocumentLlmConcurrencyForScale } from './llmClient';
 import { createGenerationDiagnostics, evidenceInScope, measureGenerationStep, promptTextsForResolvedPrompts, repairChapterByQuality, selectDocumentGenerationStrategy } from './rolePipeline';
@@ -44,7 +44,7 @@ import { buildScopedProjectIntelligence, constructionOrganizationPrompt } from '
 import { assertEvidenceInProjectScope, createProjectMaterialScope, filterEvidenceByProjectScope, filterFactsByProjectScope, projectScopeAudit } from './projectMaterialScope';
 import { agentWorkflowStages, createAgentWorkflowContext, throttleAgentWorkflowNodes } from './agentWorkflow';
 import { buildTargetedRepairInstruction, chapterTaskPrompt, chapterTaskPromptForPlannedStructure, planChapterTask, planDocument, reviewChapterDraft } from './agentPlanner';
-import { buildCanonicalFactModel, PROJECT_BASIC_FIELD_SPECS } from './factGovernance';
+import { buildCanonicalFactModel, governEvidenceValues, PROJECT_BASIC_FIELD_SPECS, renderScopeOverrideAnchors } from './factGovernance';
 import { buildChapterReadinessPlan } from './chapterReadiness';
 import { chineseTokenMatch } from './textMatch';
 
@@ -391,6 +391,10 @@ export async function generateDocumentDraft(input: { templateId: string; require
   // 端点限流由瞬态重试与失败连击降级串行兜底
   raiseDocumentLlmConcurrencyForScale(budgetTargetWords);
   upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-strategy', status: 'success', message: `已自动选择 ${generationStrategy.mode} 生成策略：章节审查 ${generationStrategy.enableChapterReview ? '启用' : '跳过'}、全局审查 ${generationStrategy.enableGlobalReview ? `${generationStrategy.globalReviewSamplingRate && generationStrategy.globalReviewSamplingRate < 1 ? `抽检 ${Math.round((generationStrategy.globalReviewSamplingRate ?? 1) * 100)}%` : '启用'}` : '跳过'}、最终质量审查 ${generationStrategy.enableFinalQualityReview ? '启用' : '跳过'}、全文扩写 ${generationStrategy.enableDocumentBudgetExpansion ? '启用' : '跳过'}`, details: generationBudget.triggers }, { subtitle: '后台自动策略' }));
+  // 源级口径冲突裁决节点：向用户明示补疑修正后的统一口径，避免用户对比资料原文旧值与正文新值时误判为生成错误
+  if (canonicalFacts.scopeConflicts.length > 0) {
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'scope-conflict-resolution', status: 'success', message: `源级数据口径冲突已裁决（补疑/澄清修正文件权威最高）：${canonicalFacts.scopeConflicts.map(conflict => conflict.resolution ? `${conflict.scope} → ${conflict.resolution}` : `${conflict.scope} → 待人工复核`).join('；')}`, details: canonicalFacts.scopeConflicts.flatMap(conflict => conflict.values.map(value => `来源「${value.sourceFile || '未知文件'}」取值 ${value.value}${value.unit}`)) }, { subtitle: '数据口径裁决' }));
+  }
   const sectionPlanningSource = hasExplicitOutline ? 'OUTLINE 章节' : '模板章节';
   const sectionPlanningStage: DocumentExecutionStage = displayStage({
     type: 'validation',
@@ -417,7 +421,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
   // P1：并发预算统一由预算模型给出；P2：审查修复与生成流水线重叠（审查池与生成批独立限流）
   const chapterConcurrency = generationBudget.chapterConcurrency;
   const reviewConcurrency = generationBudget.reviewConcurrency;
-  upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'chapter-concurrency', status: 'success', message: `章节流水线调度：生成 ${chapterConcurrency}/${effectiveChapters.length} 章并发，审查修复 ${reviewConcurrency} 路流水线（章节生成完立即进入审查，与后续章节生成重叠）`, details: [`有效章节数：${effectiveChapters.length}`, `平均章节目标：${avgChapterTarget} 字`, Number.isFinite(configuredChapterConcurrency) && configuredChapterConcurrency > 0 ? `章节并发来自 DOCUMENT_CHAPTER_CONCURRENCY=${Math.floor(configuredChapterConcurrency)}` : `章节并发由预算模型计算，修复轮次预算 ${generationBudget.repairRoundBudget} 轮`] }, { subtitle: '章节流水线策略' }));
+  upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'chapter-concurrency', status: 'success', message: `章节流水线调度：${effectiveChapters.length} 章全部同批并行生成，审查修复 ${reviewConcurrency} 路流水线（章节生成完立即进入审查，与后续章节生成重叠）`, details: [`有效章节数：${effectiveChapters.length}`, `平均章节目标：${avgChapterTarget} 字`, Number.isFinite(configuredChapterConcurrency) && configuredChapterConcurrency > 0 ? `章节并发来自 DOCUMENT_CHAPTER_CONCURRENCY=${Math.floor(configuredChapterConcurrency)}` : `全部章节并行生成，在飞调用由全局 LLM 并发档位（${generationBudget.llmConcurrency}）统一约束；修复轮次预算 ${generationBudget.repairRoundBudget} 轮`] }, { subtitle: '章节流水线策略' }));
   emitProgress();
   // P4 检索自适应：前序章节"缺事实"信号累积的查询扩展深度（0-2，调高后续章节查询扩展与深召回）
   let searchExpansionBoost = 0;
@@ -592,6 +596,9 @@ export async function generateDocumentDraft(input: { templateId: string; require
     if (sampledEvidence.length > 0) scopedEvidence.push(...filterEvidenceByProjectScope(sampledEvidence, projectMaterialScope));
     scopedEvidence = filterEvidenceByProjectScope(scopedEvidence, projectMaterialScope);
     let evidence = optimizeChapterEvidence(chapter, scopedEvidence, { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter, chapter, rolePoolRisk.highRisk), maxChars: evidenceBudgetChars + (rolePoolRisk.highRisk ? 14000 : 4000), preservePinned: true }, generationDiagnostics);
+    // 源级同口径裁决前置到证据切片：资料原文（如招标正文 4645㎡）被补疑修正后，进入写作 LLM 的切片必须先改写成裁决值，
+    // 否则模型看到原文旧值会照抄（历史缺陷：第 3 章 checkpoint 混用 4645/4646），只能靠事后全局审查修复
+    evidence = governEvidenceValues(evidence, canonicalFacts.scopeConflicts);
     assertEvidenceInProjectScope(evidence, projectMaterialScope, `chapter:${chapter.id}:initial`);
     let missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
     let deepEvidenceCount = 0;
@@ -606,7 +613,10 @@ export async function generateDocumentDraft(input: { templateId: string; require
           graphMapping.gaps.length ? `图谱识别本章资料缺口：${graphMapping.gaps.join('；')}` : '',
         ].filter(Boolean).join('\n')
       : '';
-    const roleContext = [writingTaskBriefChapterPrompt(writingTaskBrief, chapter.id), graphRoleHint, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : ''].filter(Boolean).join('\n');
+    // 写作任务书不再逐章注入：其“写作目标/必须覆盖/清单目标”与 plan（项目资料理解的章节计划，源自模板+图谱、更项目专属）语义重叠，
+    // 全局写作约束由文档蓝图（projectContext）统一承载，逐章 roleContext 保留图谱提示与项目理解的章节计划即可
+    const scopeOverrideAnchors = renderScopeOverrideAnchors(canonicalFacts.scopeConflicts);
+    const roleContext = [graphRoleHint, scopeOverrideAnchors.length ? `【数据口径强制约束】${scopeOverrideAnchors.join('；')}` : '', plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : ''].filter(Boolean).join('\n');
     const chapterPromptExecution = resolveChapterPromptExecution(promptPlan, chapter);
     if (promptPlan.writerPrompts.length > 0 && !chapterPromptExecution.primaryWriter) throw new Error(`${displayChapterTitle(chapter.title)} 写作主控提示词未进入章节生成阶段`);
     const chapterPromptTexts = [chapterPromptExecution.promptTexts, generationControlPrompt].filter(Boolean).join('\n\n');
@@ -631,6 +641,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         scopedEvidence = optimizeChapterEvidence(chapter, [...scopedEvidence, ...filterEvidenceByProjectScope(deepEvidence, projectMaterialScope)], { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter + 12, chapter, rolePoolRisk.highRisk), maxChars: evidenceBudgetChars + (rolePoolRisk.highRisk ? 36000 : 16000), preservePinned: true }, generationDiagnostics);
         scopedEvidence = filterEvidenceByProjectScope(scopedEvidence, projectMaterialScope);
         evidence = optimizeChapterEvidence(chapter, scopedEvidence, { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter + 8, chapter, rolePoolRisk.highRisk), maxChars: evidenceBudgetChars + (rolePoolRisk.highRisk ? 28000 : 12000), preservePinned: true }, generationDiagnostics);
+        evidence = governEvidenceValues(evidence, canonicalFacts.scopeConflicts);
         assertEvidenceInProjectScope(evidence, projectMaterialScope, `chapter:${chapter.id}:deep`);
         missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
       }
@@ -645,6 +656,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         scopedEvidence = optimizeChapterEvidence(chapter, [...scopedEvidence, ...mergedSupplementalEvidence], { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter + 16, chapter, true), maxChars: evidenceBudgetChars + 42000, preservePinned: true }, generationDiagnostics);
         scopedEvidence = filterEvidenceByProjectScope(scopedEvidence, projectMaterialScope);
         evidence = optimizeChapterEvidence(chapter, scopedEvidence, { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter + 12, chapter, true), maxChars: evidenceBudgetChars + 32000, preservePinned: true }, generationDiagnostics);
+        evidence = governEvidenceValues(evidence, canonicalFacts.scopeConflicts);
         assertEvidenceInProjectScope(evidence, projectMaterialScope, `chapter:${chapter.id}:supplemental`);
         missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
         resolvedFactNeeds = resolveChapterFactNeeds({ needs: chapterFactNeeds, factsModel: preliminaryFactsModel, evidence: scopedEvidence, profile: domainProfile });
@@ -842,10 +854,18 @@ export async function generateDocumentDraft(input: { templateId: string; require
         ));
       } else {
         llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-draft:${chapter.id}`, () =>
-          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords, targetWords, maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics, supplementEvidenceProvider: supplementEvidenceForChapter })
+          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords, targetWords, maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics, supplementEvidenceProvider: supplementEvidenceForChapter, evidenceFloorChars: generationBudget.evidenceFloorChars, evidenceCeilingChars: generationBudget.evidenceCeilingChars })
         ));
       }
       if (!llmContent && (useSectionGroup || useSectionFirst)) {
+        // 整章紧凑备用成稿按原细目组织正文（buildLlmChapterContent 的 sectionInstruction），
+        // 必须清空主题块规划引用：否则 Reviewer/Repairer 继续用 H4 主题块锚点定位，
+        // 会在大段正文中 extractSection 全部失败，产生"未匹配到独立小节标题"误报 + 修复无效循环
+        if (useSectionGroup) {
+          plannedStructureRef = undefined;
+          plannedPromptTextsRef = undefined;
+          plannedCoverageRef = undefined;
+        }
         progressStages[chapterProgressIndex] = displayStage({
           type: 'chapter_generation',
           roleId: 'chapter_generation',
@@ -857,7 +877,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
         emitProgress(chapterDrafts);
         llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-compact-fallback:${chapter.id}`, () =>
-          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords: Math.floor(minWords * 0.65), targetWords: Math.floor(effectiveTargetWords * 0.75), maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics, supplementEvidenceProvider: supplementEvidenceForChapter }).catch(error => {
+          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, roleContext, { forbidDrawingImages, minWords: Math.floor(minWords * 0.65), targetWords: Math.floor(effectiveTargetWords * 0.75), maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics, supplementEvidenceProvider: supplementEvidenceForChapter, evidenceFloorChars: generationBudget.evidenceFloorChars, evidenceCeilingChars: generationBudget.evidenceCeilingChars }).catch(error => {
             generationDiagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
             return undefined;
           })
@@ -878,7 +898,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         emitProgress(chapterDrafts);
         const retryRoleContext = [roleContext, `【上一轮 LLM 生成失败，请先分析失败原因，再调整策略重新输出完整章节正文】失败原因：${generationDiagnostics.llm.lastError || '空响应或超时'}`].filter(Boolean).join('\n');
         llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-lastretry:${chapter.id}`, () =>
-          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, retryRoleContext, { forbidDrawingImages, minWords: Math.floor(minWords * 0.55), targetWords: Math.floor(effectiveTargetWords * 0.6), maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics, supplementEvidenceProvider: supplementEvidenceForChapter }).catch(error => {
+          buildLlmChapterContent(template, chapter, evidence, missingFacts, agentEnhancedPromptTexts, projectContext, input.requirement, retryRoleContext, { forbidDrawingImages, minWords: Math.floor(minWords * 0.55), targetWords: Math.floor(effectiveTargetWords * 0.6), maxWords: chapterMaxChars, maxTokens: generationMaxTokens, factCoverageContext, signal: input.signal, diagnostics: generationDiagnostics, supplementEvidenceProvider: supplementEvidenceForChapter, evidenceFloorChars: generationBudget.evidenceFloorChars, evidenceCeilingChars: generationBudget.evidenceCeilingChars }).catch(error => {
             generationDiagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
             return undefined;
           })
@@ -997,9 +1017,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
             const comparableHeading = comparableHeadingTitle(headingTitle);
             const comparableTitle = comparableHeadingTitle(title);
             if (headingTitle !== title && !headingTitle.includes(title) && !title.includes(headingTitle) && comparableHeading !== comparableTitle && !comparableHeading.includes(comparableTitle) && !comparableTitle.includes(comparableHeading)) continue;
+            // 工作包型关键小节：正文由同级 H4 工作包展开，替换边界扩展到下一个上级标题（H2/H3），
+            // 吞并原有工作包 H4——否则每轮 Repairer 补写都会在旧工作包前追加一组新工作包，形成多组重复
+            const boundaryHeadingRe = heading[1].length === 3 && WORK_PACKAGE_SECTION_RE.test(title) ? /^#{2,3}\s+/u : /^#{2,4}\s+/u;
             let endLine = lines.length;
             for (let next = lineIndex + 1; next < lines.length; next += 1) {
-              if (/^#{2,4}\s+/u.test(lines[next].trim())) {
+              if (boundaryHeadingRe.test(lines[next].trim())) {
                 endLine = next;
                 break;
               }

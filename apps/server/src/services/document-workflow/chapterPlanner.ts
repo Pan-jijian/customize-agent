@@ -105,6 +105,17 @@ const MAX_SUB_POINTS_PER_BLOCK = 6;
 const MIN_BLOCK_TARGET_WORDS = 1200;
 const MAX_BLOCK_TARGET_WORDS = 2200;
 
+/**
+ * 评标必查细目关键词：含这些词的输入细目必须保留为独立 H4 要点（标题可微调但关键词必须保留），
+ * 不得被主题块聚类合并吞并（历史缺陷：“项目主要施工内容”被并入“项目概况与施工内容综述”导致目录缺评标必查词）。
+ * 工期/质量/安全等高频词不进此表：章节内多条细目含这些词时全部保真会碎片化目录，由其自然聚类。
+ */
+const CRITICAL_SECTION_KEYWORDS = ['主要施工内容', '工程概况', '项目概况', '重点难点', '危大工程', '应急预案', '施工部署', '总平面'];
+
+export function isCriticalSection(title: string) {
+  return CRITICAL_SECTION_KEYWORDS.some(keyword => title.includes(keyword));
+}
+
 /** 输入细目清洗：过滤无效标题（指令型/占位型）并去重 */
 export function cleanInputSections(chapter: DocumentTemplateChapter) {
   const seen = new Set<string>();
@@ -160,6 +171,16 @@ function ensureSectionCoverage(inputSections: string[], blocks: PlannedChapterBl
         }
       }
     }
+    // 评标必查细目兜底保真：无论相似度多高都不得并入既有 H4，必须新增独立 H4 保留原标题，
+    // 否则“项目主要施工内容/危大工程/应急预案”等必查词会被语义合并吞掉，目录失分
+    if (isCriticalSection(section)) {
+      const targetBlock = bestBlock || enriched[enriched.length - 1];
+      if (targetBlock) {
+        targetBlock.subPoints.push({ title: section.slice(0, 30), sources: [section] });
+        fallbackSections.push(section);
+        continue;
+      }
+    }
     if (bestPoint && bestScore >= 0.5) {
       // 归并进既有 H4：LLM 的合并意图保留，代码只做承接挂接
       bestPoint.sources.push(section);
@@ -183,13 +204,13 @@ export function fallbackStructureForSections(inputSections: string[], chapterTit
     items.push(section);
     byDomain.set(key, items);
   }
-  // 域内确定性合并：与上一条细目互为包含（如「X」与「X编制/记录」）或二字滑窗重叠率 ≥75% 时并入同一 H4（无 LLM 可用时仍保持目录瘦身）
+  // 域内确定性合并：与上一条细目互为包含（如「X」与「X编制/记录」）或二字滑窗重叠率 ≥75% 时并入同一 H4（无 LLM 可用时仍保持目录瘦身）；评标必查细目不参与合并
   const mergeDomainSections = (items: string[]): PlannedChapterSubPoint[] => {
     const merged: PlannedChapterSubPoint[] = [];
     for (const section of items) {
       const last = merged[merged.length - 1];
       const lastSource = last ? last.sources[last.sources.length - 1] : '';
-      if (last && (sameSectionText(section, lastSource) || bigramOverlap(section, lastSource) >= 0.75)) {
+      if (!isCriticalSection(section) && last && (sameSectionText(section, lastSource) || bigramOverlap(section, lastSource) >= 0.75)) {
         last.sources.push(section);
         if (section.length > last.title.length) last.title = section.slice(0, 30);
       } else {
@@ -266,11 +287,14 @@ export async function planChapterStructureWithLlm(input: {
     const failure = first && !first.blocks.length ? first.llmFailure : (second && !second.blocks.length ? second.llmFailure : undefined);
     return { blocks: [], coveredSections: [], fallbackSections: [], llmPlanned: false, llmFailure: failure ? `分批规划未命中（${failure}）` : '分批规划未命中' };
   }
-  const maxBlocks = Math.min(12, Math.ceil(inputSections.length / 4));
-  const minBlocks = Math.max(3, Math.min(maxBlocks, Math.floor(inputSections.length / 6)));
-  // H4 总数目标：输入细目数的 35%~55%，保证目录真正瘦身（细目 50 条 → H4 约 18~27 个）
-  const minH4 = Math.max(2, Math.round(inputSections.length * 0.35));
-  const maxH4 = Math.max(minH4, Math.round(inputSections.length * 0.55));
+  const maxBlocks = Math.min(12, Math.ceil(inputSections.length / 2.5));
+  // 块数下限：细目较多时目录不应压成 2~3 块（历史缺陷：11 细目聚类成 3 块最终只剩 2 个三级节，目录粒度与评标预期不符）
+  const minBlocks = Math.max(3, Math.min(maxBlocks, Math.ceil(inputSections.length / 3)));
+  // H4 总数目标：评标必查细目不计入压缩预算（必查细目强制独立 H4），其余细目按 35%~60% 压缩，保证目录真正瘦身又不吞必查点
+  const criticalCount = inputSections.filter(isCriticalSection).length;
+  const compressibleCount = Math.max(0, inputSections.length - criticalCount);
+  const minH4 = Math.max(2, criticalCount + Math.max(1, Math.round(compressibleCount * 0.35)));
+  const maxH4 = Math.max(minH4, criticalCount + Math.round(compressibleCount * 0.6));
   // 单次规划尝试：attempt 0 完整上下文；attempt 1 精简上下文（证据预算与 facts 减半）。
   // 推理模型思考阶段随机挤占 8192 输出预算，JSON 截断/空响应呈随机性（同规模同输入时而命中时而失败），
   // 失败后以更短输入重试一次可显著提升命中率；全部失败则透传首因+重试因供进度展示诊断
@@ -281,7 +305,7 @@ export async function planChapterStructureWithLlm(input: {
       '你是专业施工组织设计文档结构规划专家。',
       '任务：把章节的细目清单重排为目录级主题块（三级小节），每个主题块下挂 2~4 个 H4 要点；语义相近、内容连贯的细目必须合并进同一个 H4 要点。',
       '硬性规则：',
-      `1. 合并决策：语义相近、内容连贯的输入细目必须合并进同一个 H4 要点；H4 要点标题必须重写为更概括、更专业的标题（16 字以内），不得直接照抄任一输入细目标题；每个 H4 要点的 sources 字段逐字列出它所覆盖的全部输入细目标题，不得改写、不得遗漏、不得重复映射。`,
+      `1. 合并决策：语义相近、内容连贯的输入细目必须合并进同一个 H4 要点；H4 要点标题必须重写为更概括、更专业的标题（16 字以内），不得直接照抄任一输入细目标题；每个 H4 要点的 sources 字段逐字列出它所覆盖的全部输入细目标题，不得改写、不得遗漏、不得重复映射。例外：含评标必查关键词的输入细目（主要施工内容/工程概况/重点难点/危大工程/应急预案/施工部署/总平面等）必须保留为独立 H4 要点，不得与其他细目合并吞并，其 H4 标题必须保留该关键词。`,
       `2. 合并依据：优先参考项目图谱与文档蓝图，把在项目中对应同一套工程对象/管理闭环的细目合并（如「三检制度」「样板引路」「隐蔽工程验收」同属质量管控闭环）；不得把内容无关的细目强行合并。`,
       `3. 主题块标题必须具体、专业、能承载其要点（16 字以内），不得使用"目标与范围""资料依据""总体要求"等通用占位标题；同一内容不得在两个块重复出现。`,
       `4. 数量约束：整章 H4 要点总数必须控制在 ${minH4}~${maxH4} 个之间；每个主题块 2~4 个 H4 要点。`,
