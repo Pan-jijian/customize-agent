@@ -29,7 +29,7 @@ import { comparableSectionTitleText, extractSection, stringifyFactValue, throwIf
 import { formalTextGateIssues } from './agentWorkflow';
 import { displayStage, upsertProgressStage } from './progress';
 import { buildLlmSectionContent, buildValidationIssues, criticalSectionBlockerMinChars } from './chapterGeneration';
-import { chapterSectionFactUsageIssues, understandReferenceFiles } from './chapterReview';
+import { chapterSectionFactUsageIssues } from './chapterReview';
 import { factCoverageIssues, factsWithEvidenceSource, criticalSectionBlockerLine, finalizeChapterContentQuality, normalizeProjectBasicInfoTable, partialChapterStatus, projectBasicPlaceholderIssues, slowMetricSummary, validateDraft } from './documentGeneratorHelpers';
 import { constructionOrgProfessionalAuditIssues } from './constructionOrgAudit';
 import { buildProfessionalScoreReport } from './documentProfessionalScore';
@@ -382,16 +382,6 @@ export async function finalizeGeneration(p: {
   assertEvidenceInProjectScope(allEvidence, projectMaterialScope, 'finalize:all-evidence');
 
   throwIfAborted(signal);
-  upsertProgressStage(progressStages, displayStage({ type: 'file_understanding', roleId: 'multimodal-files', status: 'running', message: '正在理解多模态参考文件' }, { subtitle: '多模态参考文件' }));
-  emitProgress(chapterDrafts);
-  let fileUnderstanding: { stage: DocumentExecutionStage; notes: string[] } = { stage: { type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '文件理解跳过' }, notes: [] };
-  try {
-    fileUnderstanding = await understandReferenceFiles(projectRoot, allEvidence, signal);
-  } catch (err) {
-    if (signal?.aborted) throw err;
-    console.error('[gen] fileUnderstanding failed:', err);
-  }
-  upsertProgressStage(progressStages, fileUnderstanding.stage);
   const compactPostFileEvidence = selectEvidenceByBudget(allEvidence, { maxItems: Math.max(48, effectiveChapters.length * 10), maxChars: Math.min(90000, Math.max(52000, effectiveChapters.length * 9000)), preservePinned: true });
   allEvidence.splice(0, allEvidence.length, ...filterEvidenceByProjectScope(compactPostFileEvidence, projectMaterialScope));
   assertEvidenceInProjectScope(allEvidence, projectMaterialScope, 'finalize:post-file-understanding');

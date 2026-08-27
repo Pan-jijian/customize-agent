@@ -20,7 +20,7 @@ export function stageTitle(type: DocumentExecutionStage['type']) {
 export function stageRoleDisplayName(roleId?: string) {
   const names: Record<string, string> = {
     'knowledge-base': '知识库', 'document-readiness': '生成准备度检查', 'quality-repair': '质量补写', 'export-gate': '导出门禁',
-    'final-format': '正式排版', 'multimodal-files': '多模态文件理解', 'llm-json': 'LLM 事实抽取',
+    'final-format': '正式排版', 'llm-json': 'LLM 事实抽取',
     'llm-review': 'LLM 审查', 'document-workflow': '最终规范校验',
   };
   return roleId ? names[roleId] : undefined;

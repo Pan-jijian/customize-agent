@@ -1,8 +1,5 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { createProvider } from '@customize-agent/llm';
 import type { ChapterReviewSummary, DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from './types';
-import { callDocumentLlm, callDocumentLlmJson, getActiveModelWithProvider } from './llmClient';
+import { callDocumentLlm, callDocumentLlmJson } from './llmClient';
 import { displayStage } from './progress';
 import { throwIfAborted } from './utils';
 import { buildSectionFactCard, evidenceForSection, sectionFactUsageIssue } from './chapterGeneration';
@@ -46,29 +43,6 @@ function adaptiveReviewPlan(input: { totalChars: number; chapterCount: number; c
   const baseChunks = Math.ceil(input.totalChars / Math.max(1000, input.chunkChars));
   const chunks = input.phase === 'chapter' ? envPositiveInt('DOCUMENT_CHAPTER_REVIEW_MAX_CHUNKS') || Math.min(Math.max(2, Math.floor(input.totalChars / input.chapterCount / 4000)), baseChunks) : input.phase === 'global' ? envPositiveInt('DOCUMENT_GLOBAL_REVIEW_MAX_CHUNKS') || Math.min(4, baseChunks) : envPositiveInt('DOCUMENT_FINAL_REVIEW_MAX_CHUNKS') || Math.min(6, baseChunks);
   return { chunks, budgetPerChunk: Math.ceil(input.totalChars / Math.max(1, chunks)), maxIssues: Math.max(4, Math.min(28, Math.ceil(chunks * 2.5))) };
-}
-
-export async function understandReferenceFiles(projectRoot: string, evidence: DocumentEvidence[], signal?: AbortSignal): Promise<{ notes: string[]; stage: DocumentExecutionStage }> {
-  const active = getActiveModelWithProvider(); if (!active) return { notes: [], stage: displayStage({ type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '当前模型不可用' }, { subtitle: '多模态参考文件' }) };
-  let provider: ReturnType<typeof createProvider>;
-  try {
-    provider = createProvider(active.model.provider, { apiKey: active.provider.apiKey, baseUrl: active.provider.baseUrl, modelName: active.model.name, directEndpoint: active.provider.directEndpoint });
-  } catch {
-    return { notes: [], stage: displayStage({ type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: `当前模型服务 ${active.model.provider} 不支持多模态文件理解，已跳过` }, { subtitle: '多模态参考文件' }) };
-  }
-  const maxFiles = 4; const maxBytes = 8 * 1024 * 1024;
-  const candidates = [...new Set(evidence.map(item => item.filePath).filter(file => /\.(png|jpe?g|webp|pdf|docx|xlsx)$/iu.test(file)))].slice(0, maxFiles);
-  if (candidates.length === 0) return { notes: [], stage: displayStage({ type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '未找到多模态参考文件' }, { subtitle: '多模态参考文件' }) };
-  const files: Array<{ name: string; buffer: Buffer; mimeType: string }> = [];
-  for (const filePath of candidates) {
-    const absPath = path.isAbsolute(filePath) ? filePath : path.join(projectRoot, filePath); if (!fs.existsSync(absPath)) continue;
-    const stat = fs.statSync(absPath); if (stat.size > maxBytes) continue;
-    files.push({ name: path.basename(filePath), buffer: fs.readFileSync(absPath), mimeType: /\.png$/iu.test(filePath) ? 'image/png' : /\.jpe?g$/iu.test(filePath) ? 'image/jpeg' : /\.webp$/iu.test(filePath) ? 'image/webp' : 'application/pdf' });
-    if (files.length >= maxFiles) break;
-  }
-  if (files.length === 0) return { notes: [], stage: displayStage({ type: 'file_understanding', roleId: 'multimodal-files', status: 'skipped', message: '未找到可读取的多模态文件' }, { subtitle: '多模态参考文件' }) };
-  try { if (signal?.aborted) throw new Error('aborted'); const result = await (provider as any).understandFiles?.({ files }); if (!result?.length) return { notes: [], stage: displayStage({ type: 'file_understanding', roleId: 'multimodal-files', status: 'failed', message: '多模态模型未返回文件理解结果' }, { subtitle: '多模态参考文件' }) }; return { notes: result, stage: displayStage({ type: 'file_understanding', roleId: 'multimodal-files', status: 'success', message: `已完成 ${result.length} 个多模态文件理解` }, { subtitle: '多模态参考文件' }) }; }
-  catch (err) { console.error('[multimodal] failed:', err); return { notes: [], stage: displayStage({ type: 'file_understanding', roleId: 'multimodal-files', status: 'failed', message: '多模态文件理解失败' }, { subtitle: '多模态参考文件' }) }; }
 }
 
 // 从章节正文确定性提取总量口径数字清单，作为全局一致性审查的比对输入：
