@@ -1,5 +1,6 @@
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplateChapter, ValidationIssue } from './types';
 import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgCatalog';
+import { DIVISION_PROCESS_LABEL_RE, DIVISION_SECTION_QUALITY, DIVISION_SECTION_RE } from './writingSpec';
 
 export const CONSTRUCTION_ORG_GENERIC_PHRASES = [
   '精心组织', '科学管理', '精益求精', '全力保障', '高效推进', '力争一流',
@@ -144,8 +145,28 @@ export function constructionOrgBonusModulePrompt(chapter: DocumentTemplateChapte
 
 function extractMajorConstructionSection(content: string) {
   const lines = content.split('\n');
-  const start = lines.findIndex(line => /^###\s+(?:\d+(?:\.\d+)*\s+)?(?:项目主要施工内容|主要施工内容)\s*$/u.test(line.trim()));
-  if (start < 0) return '';
+  let start = lines.findIndex(line => /^###\s+(?:\d+(?:\.\d+)*\s+)?(?:项目主要施工内容|主要施工内容)\s*$/u.test(line.trim()));
+  if (start < 0) {
+    // 锚点标题被合并重写（真实生成缺陷：planner 输出“工程概况与主要施工内容”主题块，工作包缺失时
+    // 精确匹配落空误报缺失）：仅当合并块内所有 #### 子块均为三段式工作包（施工概况+施工流程+施工方法）
+    // 且不少于 5 个时才认定为有效的主要施工内容；否则维持“小节缺失”语义，交由 Final Gate 追加
+    // “### 项目主要施工内容”修复，避免把概况型子块误当工作包校验产生不可修复的硬阻断
+    const mergedStart = lines.findIndex(line => /^###\s+(?:\d+(?:\.\d+)*\s+)?[^\n]*主要施工内容[^\n]*$/u.test(line.trim()));
+    if (mergedStart >= 0) {
+      let mergedEnd = lines.length;
+      for (let index = mergedStart + 1; index < lines.length; index += 1) {
+        if (/^#{2,3}\s+/u.test(lines[index].trim())) {
+          mergedEnd = index;
+          break;
+        }
+      }
+      const blocks = lines.slice(mergedStart, mergedEnd).join('\n').split(/^####\s+/gmu).slice(1).map(block => block.trim()).filter(Boolean);
+      if (blocks.length >= 5 && blocks.every(block => block.includes('施工概况') && block.includes('施工流程') && block.includes('施工方法'))) {
+        start = mergedStart;
+      }
+    }
+    if (start < 0) return '';
+  }
   let end = lines.length;
   for (let index = start + 1; index < lines.length; index += 1) {
     if (/^#{2,3}\s+/u.test(lines[index].trim())) {
@@ -218,6 +239,88 @@ export function constructionOrgBonusModuleIssues(chapters: DocumentDraftChapter[
         issues.push({ level: 'info', message: `${chapter.title} 可补充隐藏高分模块：${bonusModule.title}`, suggestion: bonusModule.prompt });
       }
     }
+  }
+  return issues;
+}
+
+// ═══════ 分部分项专项验收器 ═══════
+// 对标 constructionOrgMajorContentIssues（工作包≥5、三段式、箭头链、参数密度、脏事实检测），
+// 针对“主要分部分项工程施工方案/主要施工方法”关键小节：历史上该小节曾错位到“新工艺”章节且写得概略，
+// 终检无专项验收器把关导致问题直达交付（历史缺陷：分部分项错位+内容概略未被拦截）。
+// 阈值与专项提示词同源（writingSpec.DIVISION_SECTION_QUALITY），保证“写作要求=验收标准”。
+
+/** 提取“主要分部分项工程施工方案/主要施工方法”小节内容（### 标题到下一个同级标题为止） */
+function extractDivisionSection(content: string) {
+  const lines = content.split('\n');
+  const start = lines.findIndex(line => /^###\s+(?:\d+(?:\.\d+)*\s+)?[^\n]*?(?:主要分部分项工程施工方案|主要施工方法)[^\n]*$/u.test(line.trim()));
+  if (start < 0) return '';
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^#{2,3}\s+/u.test(lines[index].trim())) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start, end).join('\n');
+}
+
+export function constructionOrgDivisionSectionIssues(chapters: DocumentDraftChapter[], markdown = ''): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const wholeText = markdown || chapters.map(chapter => `${chapter.title}\n${(chapter.sections || []).join('\n')}\n${chapter.content}`).join('\n\n');
+  const candidateChapters = chapters.filter(chapter => DIVISION_SECTION_RE.test(`${chapter.title} ${(chapter.sections || []).join(' ')}`));
+  if (candidateChapters.length === 0) return issues;
+
+  const validateContent = (label: string, content: string) => {
+    // 分项工程方案 = #### 小节（与 majorContent 工作包口径一致）；
+    // 兼容粗体伪标题一段式：无 #### 小节时按“行首 **分项名**”切块（真实生成缺陷：LLM 用粗体行替代小节标题，
+    // 历史验收器按 #### 切出 0 块只能报“分项不足”，无法定位各分项缺什么，粗体形态由此穿透门禁交付）
+    let packageBlocks = content.split(/^####\s+/gmu).slice(1).map(block => block.trim()).filter(Boolean);
+    if (packageBlocks.length === 0) {
+      packageBlocks = [...content.matchAll(/^\*\*[^*]+\*\*[\s\S]*?(?=^\*\*[^*]+\*\*|\s*$)/gmu)].map(match => match[0].trim()).filter(Boolean);
+    }
+    const packageCount = packageBlocks.length;
+    const incompletePackages = packageBlocks.filter(block => !block.includes('施工概况') || !DIVISION_PROCESS_LABEL_RE.test(block) || !block.includes('施工方法'));
+    // 脏事实：资料原文残留、嵌入标题、粗体伪标题、空话套话（与专项提示词禁止项同口径）
+    const dirtyPackages = packageBlocks.filter(block => /资料内容事实|#{2,6}\s+|\*\*[^*]+\*\*|未尽事宜|按规范施工|结合实际执行|招标范围还包含/u.test(block));
+    // 箭头工序链：每个分项方案的方法段至少 1 条 ≥4 环节链条（历史缺陷：箭头只局限在流程行、方法段空泛）
+    const weakChainPackages = packageBlocks.filter(block => {
+      const method = block.match(/施工方法[:：]([\s\S]*?)(?=\n施工|$)/u)?.[1] || '';
+      const chains = method.match(/[^\s→]{2,}(?:→[^\s→]{2,}){3,}/gu) || [];
+      return chains.length === 0;
+    });
+    // 参数密度：每个分项方案正文至少 4 个工艺参数（数字+单位，或“间距/偏差/坡度/养护”等工艺词+数字）
+    const paramRe = /\d+(?:\.\d+)?\s*(?:㎡|m²|m2|m3|m³|mm|cm|m|MPa|kPa|%|日历天|天|小时|层|台|套|个|次|kN|t)/giu;
+    const paramWordRe = /(?:间距|偏差|坡度|养护|搭接|试验压力|含水率|饱满度|压实度|厚度|饱满)[^\n]{0,10}\d/giu;
+    const weakParamPackages = packageBlocks.filter(block => {
+      const count = (block.match(paramRe) || []).length + (block.match(paramWordRe) || []).length;
+      return count < DIVISION_SECTION_QUALITY.minParamsPerPackage;
+    });
+    if (packageCount < DIVISION_SECTION_QUALITY.blockerMinPackages) {
+      issues.push({ level: 'error', severity: 'blocker', message: `${label} 分部分项工程施工方案分项不足：当前 ${packageCount} 个，要求不少于 ${DIVISION_SECTION_QUALITY.blockerMinPackages} 个`, suggestion: '按资料识别的专业工程/分部分项工程逐项展开，每项写施工概况、工艺流程、施工方法。' });
+    } else if (packageCount < DIVISION_SECTION_QUALITY.minPackages) {
+      issues.push({ level: 'warning', message: `${label} 分部分项工程施工方案建议扩充：当前 ${packageCount} 个分项方案，建议不少于 ${DIVISION_SECTION_QUALITY.minPackages} 个`, suggestion: '优先覆盖资料明确的专业工程范围（土方、基础、主体、装饰、安装、室外等）。' });
+    }
+    if (incompletePackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 分部分项工程施工方案存在 ${incompletePackages.length} 个分项方案缺少施工概况/工艺流程/施工方法`, suggestion: '每个分项方案必须分别包含“施工概况、工艺流程、施工方法”，不能只在整节中出现一次。' });
+    if (dirtyPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 分部分项工程施工方案存在脏事实或空话污染`, suggestion: '清理“资料内容事实”、嵌入的 ### 标题、粗体伪标题、未尽事宜、“按规范施工/结合实际执行”式空话，只保留可交付正文。' });
+    if (weakChainPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 分部分项工程施工方案存在 ${weakChainPackages.length} 个分项方案施工方法缺少箭头工序链`, suggestion: `每个分项方案的施工方法段至少 1 条不少于 ${DIVISION_SECTION_QUALITY.minArrowChainLength} 个环节的“→”工序链（如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”）。` });
+    if (weakParamPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 分部分项工程施工方案存在 ${weakParamPackages.length} 个分项方案工艺参数不足（少于 ${DIVISION_SECTION_QUALITY.minParamsPerPackage} 个）`, suggestion: '每个分项方案必须落位至少 4 个具体工艺参数（mm、MPa、间距、偏差、坡度、养护天数、试验压力、搭接长度等），参数来自绑定材料或行业通用规范值，不得编造。' });
+    // 分项深度下限：门窗维修、立面修补等小分项常被一句话带过（真实生成缺陷：12 个分项中 2~3 个仅 40~80 字），
+    // 每分项必须写足三段式正文，过短按结构缺陷进入修复循环补写
+    const shallowPackages = packageBlocks.filter(block => block.replace(/\s/gu, '').length < DIVISION_SECTION_QUALITY.minPackageChars);
+    if (shallowPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 分部分项工程施工方案存在 ${shallowPackages.length} 个分项方案正文过短（少于 ${DIVISION_SECTION_QUALITY.minPackageChars} 字）`, suggestion: '每个分项方案都要写足“施工概况+工艺流程+施工方法”三段式，门窗维修、立面修补等小分项同样需要逐段展开，不得一句话带过。' });
+    // 分项深度均衡：最短分项不足最长分项 balanceRatio 时给扩充建议（warning 不阻断，由质量报告引导后续优化）
+    const packageLengths = packageBlocks.map(block => block.replace(/\s/gu, '').length);
+    const imbalanced = packageLengths.length > 1 && Math.min(...packageLengths) > 0 && Math.min(...packageLengths) < Math.max(...packageLengths) * DIVISION_SECTION_QUALITY.balanceRatio;
+    if (imbalanced) issues.push({ level: 'warning', message: `${label} 分部分项工程施工方案分项深度失衡：最短分项不足最长分项三分之一`, suggestion: '参照最长分项（如拆除、结构加固）的展开深度，为偏短分项补足机具、材料规格、工艺参数与验收标准。' });
+  };
+
+  for (const chapter of candidateChapters) {
+    const content = extractDivisionSection(chapter.content) || extractDivisionSection(wholeText);
+    if (!content) {
+      issues.push({ level: 'error', severity: 'blocker', message: `${chapter.title} 分部分项工程施工方案小节缺失或标题结构异常`, suggestion: '必须生成“### 主要分部分项工程施工方案”，并在该小节内部使用“#### 分项工程方案”逐项展开。' });
+      continue;
+    }
+    validateContent(chapter.title, content);
   }
   return issues;
 }

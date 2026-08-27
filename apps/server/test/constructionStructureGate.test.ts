@@ -182,8 +182,11 @@ describe('evaluation criteria coverage audit（评分标准条目 ↔ 大纲承�
 
   it('extracts numbered criteria items and filters framework noise', () => {
     const items = extractEvaluationCriteriaItems([...evaluationTexts, '9. 投标人须按详见招标文件要求编制（噪声条目）']);
-    expect(items).toContain('施工进度计划与工期保障措施');
-    expect(items).toContain('新技术、新工艺、新材料、新设备的应用');
+    expect(items.map(item => item.text)).toContain('施工进度计划与工期保障措施');
+    expect(items.map(item => item.text)).toContain('新技术、新工艺、新材料、新设备的应用');
+    expect(items.some(item => item.text.includes('投标人须'))).toBe(false);
+    // 条目对象化：携带编号与可作小节标题的清理短语，供承接审计与后置校验复用
+    expect(items.every(item => Number.isInteger(item.index) && typeof item.title === 'string')).toBe(true);
   });
 
   it('audits coverage: items fully carried by chapter sections are covered', () => {
@@ -193,8 +196,20 @@ describe('evaluation criteria coverage audit（评分标准条目 ↔ 大纲承�
     ];
     const items = extractEvaluationCriteriaItems(evaluationTexts);
     const audit = auditEvaluationCriteriaCoverage(chapters, items);
-    expect(audit.uncovered.map(item => item.item)).toContain('新技术、新工艺、新材料、新设备的应用');
-    expect(audit.uncovered.map(item => item.item)).not.toContain('施工进度计划与工期保障措施');
+    expect(audit.uncovered.map(entry => entry.title)).toContain('新技术、新工艺、新材料、新设备的应用');
+    expect(audit.uncovered.map(entry => entry.title)).not.toContain('施工进度计划与工期保障措施');
+  });
+
+  it('audits coverage: semantically similar section satisfies criterion without explicit match', () => {
+    const chapters = [
+      criteriaChapter('c1', '新技术应用与四新管理', ['拟采用的新技术新工艺应用']),
+    ];
+    const items = extractEvaluationCriteriaItems(['3. 拟采用的新技术、新工艺（如有）；']);
+    // 语义相似度 ≥0.6 视为已承接（bge-small 余弦口径）；相似度不足仍判未承接
+    const strongSimilarity = (left: string, right: string) => (left.includes('新技术') && right.includes('新技术') ? 0.85 : 0.1);
+    expect(auditEvaluationCriteriaCoverage(chapters, items, { semanticSimilarity: strongSimilarity }).uncovered).toHaveLength(0);
+    const weakSimilarity = () => 0.3;
+    expect(auditEvaluationCriteriaCoverage(chapters, items, { semanticSimilarity: weakSimilarity }).uncovered.map(entry => entry.title)).toContain(items[0]!.title);
   });
 
   it('validateBidStructureBeforeGeneration auto-appends uncovered criteria as sections', () => {
@@ -210,12 +225,13 @@ describe('evaluation criteria coverage audit（评分标准条目 ↔ 大纲承�
       outputTitle: '施工组织设计',
       chapters,
     };
-    const result = validateBidStructureBeforeGeneration({ template, chapters, evaluationTexts });
+    const items = extractEvaluationCriteriaItems(evaluationTexts);
+    const result = validateBidStructureBeforeGeneration({ template, chapters, evaluationItems: items });
     const allSections = result.enrichedChapters.flatMap(chapter => chapter.sections || []);
     expect(allSections.join('、')).toContain('新技术、新工艺、新材料、新设备的应用');
     // criteriaAudit 是补小节前的审计快照；补小节后的结构应通过重新审计（0 未承接）
-    const reAudit = auditEvaluationCriteriaCoverage(result.enrichedChapters, extractEvaluationCriteriaItems(evaluationTexts));
-    expect(reAudit.uncovered.map(item => item.item)).not.toContain('新技术、新工艺、新材料、新设备的应用');
+    const reAudit = auditEvaluationCriteriaCoverage(result.enrichedChapters, items);
+    expect(reAudit.uncovered.map(entry => entry.title)).not.toContain('新技术、新工艺、新材料、新设备的应用');
     expect(result.issues.some(issue => issue.message.includes('新技术'))).toBe(true);
   });
 });

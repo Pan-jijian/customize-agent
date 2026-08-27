@@ -408,6 +408,61 @@ export function referenceQualityTargetLines(input: { templateName: string; chapt
   return lines;
 }
 
+/**
+ * 写法骨架切片（方案4/E5）：画像量化统计只告诉生成器“参数密度要多少”，
+ * 没告诉它“范文逐分项怎么展开才像范文”。本函数从画像结构数据聚合“写法骨架”描述——
+ * 章节推进序列、分层展开深度、方案章节典型组织与分部分项三段式展开模式。
+ * 只描述展开模式，不复制样本原文数值与句子，避免参考文件成为事实污染源。
+ */
+export function referenceWritingSkeletonLines(input: { templateName: string; chapterTitles: string[]; requirement?: string }): string[] {
+  const type = suggestProjectType([input.templateName, ...input.chapterTitles, input.requirement].filter(Boolean).join(' '));
+  const ready = listTemplateReferencesByType(type).filter(item => item.status === 'ready' && item.qualityProfile);
+  if (ready.length === 0) return [];
+  const profiles = ready.map(item => item.qualityProfile!);
+  const half = Math.ceil(ready.length / 2);
+  // 章节推进骨架：出现于半数以上样本的一级章节标题，按样本中平均出现位置排序 → 典型章序（非频次序）
+  const positionSums = new Map<string, { sum: number; count: number }>();
+  const titleCounts = new Map<string, number>();
+  for (const profile of profiles) {
+    const seenInFile = new Set<string>();
+    (profile.headingStructure || []).forEach((title, index) => {
+      titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
+      if (seenInFile.has(title)) return;
+      seenInFile.add(title);
+      const entry = positionSums.get(title) || { sum: 0, count: 0 };
+      entry.sum += index;
+      entry.count += 1;
+      positionSums.set(title, entry);
+    });
+  }
+  const skeletonHeadings = [...titleCounts.entries()]
+    .filter(([, count]) => count >= half)
+    .sort((a, b) => {
+      const pa = positionSums.get(a[0])!;
+      const pb = positionSums.get(b[0])!;
+      return pa.sum / pa.count - pb.sum / pb.count;
+    })
+    .map(([title]) => title)
+    .slice(0, 10);
+  const totalSections = profiles.reduce((sum, item) => sum + item.sectionCount, 0);
+  const totalSubsections = profiles.reduce((sum, item) => sum + (item.subsectionCount || 0), 0);
+  const totalSubitems = profiles.reduce((sum, item) => sum + (item.subitemCount || 0), 0);
+  const lines: string[] = ['- 写法骨架参考（同类优秀样本的展开模式，仅供结构参照；样本中的任何数值与原文句子都不得复制）：'];
+  if (skeletonHeadings.length >= 3) {
+    lines.push(`- 章节推进骨架：${skeletonHeadings.join(' → ')}（出现于半数以上样本的一级章节按典型顺序排列，仅作结构参照，不强制）。`);
+  }
+  if (totalSections > 0) {
+    lines.push(`- 分层展开深度：同类样本平均每章约 ${(totalSubsections / totalSections).toFixed(1)} 个二级小节、${(totalSubitems / totalSections).toFixed(1)} 个三级子目——范文把方案分层展开到具体措施条目，而不是整段综述概括。`);
+  }
+  const schemeTitles = skeletonHeadings.filter(title => /施工方案|施工方法|施工内容|施工部署|分部分项/u.test(title)).slice(0, 4);
+  if (schemeTitles.length > 0) {
+    lines.push(`- 方案章节典型组织：同类样本中方案类章节以「${schemeTitles.join('」「')}」等标题独立成章，逐分项展开，不并入项目概况章节。`);
+  }
+  // 分部分项展开模式骨架：三段式 + 工序链组织方式（与生成侧专项规则同源，此处作为范文印证）
+  lines.push('- 分部分项展开模式：同类样本按“施工概况（作业对象、部位、工程量）→工艺流程（→串联关键工序）→施工方法（工具机具、材料规格、工艺参数、验收标准）”三段逐分项展开；方法段正文以“→”串联连续工序链，工艺参数落位在方法叙述中而非单独罗列清单。');
+  return lines;
+}
+
 // ═══════ 大纲建议（T6）：模板章节与同类工程典型结构对比，缺失高频章节给出建议 ═══════
 
 /** 归一化章节标题（去"第X章/第X篇/编号"前缀），用于与参考画像标题对比 */

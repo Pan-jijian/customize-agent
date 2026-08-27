@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { chapterSectionFactUsageIssues } from '../src/services/document-workflow/chapterReview';
 import { normalizePlannedSections } from '../src/services/document-workflow/promptRuleExtraction';
-import { composeDocumentMarkdown, ensureFormalToc, finalizeDocumentMarkdown, inferChapterSectionsFromMarkdown, normalizeInlineListBreaks, normalizeTertiaryHeadings, promptDocumentRuleIssues, sanitizeFormalMarkdown } from '../src/services/document-workflow/markdownComposer';
+import { composeDocumentMarkdown, ensureFormalToc, finalizeDocumentMarkdown, inferChapterSectionsFromMarkdown, normalizeInlineListBreaks, normalizeTertiaryHeadings, promptDocumentRuleIssues, sanitizeFormalMarkdown, TENDER_BID_WRITING_RULES } from '../src/services/document-workflow/markdownComposer';
 import { collectSectionContentGaps, instructionLikeHeadingIssues, sectionContentIntegrityIssues, tocBodyConsistencyIssues } from '../src/services/document-workflow/qualityValidation';
 
 describe('normalizeTertiaryHeadings', () => {
@@ -408,5 +408,19 @@ describe('normalizeInlineListBreaks regression', () => {
     const LF = String.fromCharCode(10);
     const result = normalizeInlineListBreaks(`甲${LF}乙${LF}丙`);
     expect(result.split(LF)).toEqual(['甲', '乙', '丙']);
+  });
+});
+
+describe('TENDER_BID_WRITING_RULES 质量硬约束防回归', () => {
+  it('包含闭环句式密度硬约束（每 1500 字 1 段三要素齐全）', () => {
+    expect(TENDER_BID_WRITING_RULES).toContain('每 1500 字至少 1 段完整闭环句式');
+  });
+
+  it('包含工艺参数密度硬约束（每 1000 字 6 处量化参数）', () => {
+    expect(TENDER_BID_WRITING_RULES).toContain('每 1000 字至少落位 6 处带单位的量化工艺参数');
+  });
+
+  it('包含工序链箭头硬约束（段落占比不低于 8%）', () => {
+    expect(TENDER_BID_WRITING_RULES).toContain('全文含箭头工序链的段落占比不低于 8%');
   });
 });

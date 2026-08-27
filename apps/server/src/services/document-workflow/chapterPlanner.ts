@@ -1,23 +1,27 @@
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from './types';
 import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
-import { callDocumentLlm, extractJsonPayload } from './llmClient';
+import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
+import { buildSemanticSimilarity, type SemanticSimilarityFn } from './semanticSimilarity';
 import { displayChapterTitle } from './outline';
+import { CRITICAL_SECTION_ANCHORS, isCriticalSectionTitle } from './writingSpec';
 
 /**
  * 章级规划者（Chapter Planner）：把模板/OUTLINE 显式提供的细目清单重排为「三级主题块 + H4 要点」结构，
  * 从根本上解决「小节数 = LLM 调用数」的碎片化生成问题。
  *
  * 职责：
- * 1. 语义聚类：把多达数十条的输入细目聚类为 6~12 个目录级主题块（三级小节）；
- * 2. 语义合并：语义相近的细目由 LLM 合并进同一个重写标题的 H4 要点（sources 逐字保留被合并细目），
+ * 1. 块候选聚类：确定性/轻量地把多达数十条的输入细目聚类为块候选（语义域粗分 + bge-small 余弦相似度细聚）；
+ * 2. 逐块小步规划：每块一次小 LLM 调用产出该块 H4 结构（输出 ≤2000 token，远离 8192 共享输出池），块间并发；
+ * 3. 语义合并：语义相近的细目由 LLM 合并进同一个重写标题的 H4 要点（sources 逐字保留被合并细目），
  *    从根本上消除「每条细目一个标题」的目录碎片化；代码侧确定性校验 100% 覆盖；
- * 3. 事实分配：关键证据只分配给唯一主题块，消除逐节现场检索导致的跨节重复引用；
- * 4. 字数预算：按 subPoints 数量加权分配每块目标字数（1200~2200），保证单节深度。
+ * 4. 事实分配：关键证据只分配给唯一主题块，消除逐节现场检索导致的跨节重复引用；
+ * 5. 字数预算：按 subPoints 数量加权分配每块目标字数（1200~2200），保证单节深度。
  *
  * 上下文：LLM 规划时注入项目图谱章节定向摘要与文档蓝图（本章任务卡/实施方案/事实覆盖矩阵），
  * 让合并决策基于项目实际结构（工程/工法/资源/工期/标准/风险/要求）而非标题表面相似度。
  *
- * 失败回退：LLM JSON 无效时降级为确定性语义域分组（域内高相似细目合并，每块 ≤6 个 H4），保证管线永远可用。
+ * 失败回退：块级失败隔离——单个块 LLM 失败/JSON 无效时该块由语义域确定性分组接管，不影响其他块；
+ * 语义模型不可用时聚类退化为域内顺序切块，管线永远可用。
  */
 
 export interface PlannedChapterSubPoint {
@@ -106,14 +110,12 @@ const MIN_BLOCK_TARGET_WORDS = 1200;
 const MAX_BLOCK_TARGET_WORDS = 2200;
 
 /**
- * 评标必查细目关键词：含这些词的输入细目必须保留为独立 H4 要点（标题可微调但关键词必须保留），
+ * 评标必查细目锚定清单：从 writingSpec 单点消费（含关键小节写法规则的唯一来源），
+ * 含锚定词的输入细目必须保留为独立 H4 要点（标题可微调但关键词必须保留），
  * 不得被主题块聚类合并吞并（历史缺陷：“项目主要施工内容”被并入“项目概况与施工内容综述”导致目录缺评标必查词）。
- * 工期/质量/安全等高频词不进此表：章节内多条细目含这些词时全部保真会碎片化目录，由其自然聚类。
  */
-const CRITICAL_SECTION_KEYWORDS = ['主要施工内容', '工程概况', '项目概况', '重点难点', '危大工程', '应急预案', '施工部署', '总平面'];
-
 export function isCriticalSection(title: string) {
-  return CRITICAL_SECTION_KEYWORDS.some(keyword => title.includes(keyword));
+  return isCriticalSectionTitle(title);
 }
 
 /** 输入细目清洗：过滤无效标题（指令型/占位型）并去重 */
@@ -241,14 +243,135 @@ function allocateBlockTargetWords(blocks: PlannedChapterBlock[], targetWords: nu
   }
 }
 
-interface PlannerLlmBlock {
+/** 单块最多输入细目数：控制单块 prompt 与输出规模（小步化） */
+const MAX_SECTIONS_PER_BLOCK = 8;
+/** 语义聚类合并阈值：域内两条细目余弦 ≥0.5 归入同一块候选 */
+const BLOCK_CLUSTER_SIMILARITY = 0.5;
+/** 单块规划 LLM 调用输出上限（token）：小步化核心，远离 8192 共享输出池 */
+const BLOCK_PLAN_MAX_TOKENS = 2000;
+
+/** 单块规划 LLM 输出（p3-s1）：一个主题块的 title/subPoints/facts */
+interface PlannerBlockPlan {
   title?: string;
   subPoints?: Array<{ title?: string; source?: string; sources?: string[] }>;
   facts?: string[];
 }
 
+/** 单块规划输出 JSON Schema：约束单块结构，校验失败可诊断缺失字段与截断位置 */
+const BLOCK_PLAN_SCHEMA: DocumentJsonSchema = {
+  type: 'object',
+  required: ['title', 'subPoints'],
+  properties: {
+    title: { type: 'string', required: true, minLength: 2, maxLength: 80 },
+    subPoints: {
+      type: 'array',
+      required: true,
+      minItems: 1,
+      maxItems: MAX_SUB_POINTS_PER_BLOCK,
+      items: {
+        type: 'object',
+        required: true,
+        properties: {
+          title: { type: 'string', required: true, minLength: 2, maxLength: 60 },
+          sources: { type: 'array', required: true, maxItems: MAX_SECTIONS_PER_BLOCK, items: { type: 'string', maxLength: 120 } },
+        },
+      },
+    },
+    facts: { type: 'array', maxItems: 2, items: { type: 'string', maxLength: 100 } },
+  },
+};
+
 /**
- * 章级 LLM 规划：输入细目 ≤8 条时不调用 Planner（逐节路径更高效），由调用方判断；
+ * 阶段 1 块候选聚类：评标必查细目独立成块（保真防吞并）；其余按语义域分组，
+ * 域内用余弦相似度贪心聚类（最高相似度 ≥0.5 且块未满则并入，否则新块）；
+ * 语义模型不可用（similarity=undefined）时退化为域内顺序切块（每块 ≤8 条）。
+ */
+function clusterBlockCandidates(inputSections: string[], similarity?: SemanticSimilarityFn): string[][] {
+  const criticalBlocks: string[][] = [];
+  const byDomain = new Map<string, string[]>();
+  for (const section of inputSections) {
+    if (isCriticalSection(section)) {
+      criticalBlocks.push([section]);
+      continue;
+    }
+    const key = sectionDomain(section);
+    const items = byDomain.get(key) || [];
+    items.push(section);
+    byDomain.set(key, items);
+  }
+  const domainBlocks: string[][] = [];
+  for (const items of byDomain.values()) {
+    const blocks: string[][] = [];
+    for (const section of items) {
+      if (!similarity) {
+        // 无语义模型：域内顺序切块（每块 ≤MAX_SECTIONS_PER_BLOCK）
+        const last = blocks[blocks.length - 1];
+        if (last && last.length < MAX_SECTIONS_PER_BLOCK) last.push(section);
+        else blocks.push([section]);
+        continue;
+      }
+      let bestBlock: string[] | undefined;
+      let bestScore = -1;
+      for (const block of blocks) {
+        if (block.length >= MAX_SECTIONS_PER_BLOCK) continue;
+        const score = Math.max(...block.map(member => similarity(section, member)));
+        if (score > bestScore) {
+          bestScore = score;
+          bestBlock = block;
+        }
+      }
+      if (bestBlock && bestScore >= BLOCK_CLUSTER_SIMILARITY) bestBlock.push(section);
+      else blocks.push([section]);
+    }
+    domainBlocks.push(...blocks);
+  }
+  return [...criticalBlocks, ...domainBlocks];
+}
+
+/** 单块 LLM 输出 → PlannedChapterBlock：sources 仅保留能与块细目对齐的原文，防编造；无效返回 undefined */
+function buildPlannedBlock(result: PlannerBlockPlan, sections: string[], chapterTitle: string): PlannedChapterBlock | undefined {
+  const title = normalizePlannedTitle(result.title || '');
+  if (!title || isInvalidTitle(title, chapterTitle)) return undefined;
+  const subPoints = (result.subPoints || [])
+    .map(point => {
+      // 兼容旧格式 source（单条）与新格式 sources（多条合并）
+      const rawSources = Array.isArray(point.sources) && point.sources.length > 0 ? point.sources : (point.source ? [point.source] : []);
+      // 仅保留能与输入细目对齐的 sources，防止 LLM 编造细目原文；去重保证不重复映射
+      const sources: string[] = [];
+      for (const rawSource of rawSources) {
+        const normalized = normalizePlannedTitle(rawSource || '');
+        if (normalized.length < 4) continue;
+        if (!sections.some(section => sameSectionText(normalized, section))) continue;
+        if (!sources.some(existing => sameSectionText(existing, normalized))) sources.push(normalized);
+      }
+      const subTitle = normalizePlannedTitle(point.title || '');
+      // H4 标题有效即保留（LLM 的合并意图）；sources 未对齐时交由 ensureSectionCoverage 按相似度挂接
+      if (!subTitle || subTitle.length < 4) return sources.length > 0 ? { title: sources[0].slice(0, 30), sources } : undefined;
+      // H4 标题重写：优先 LLM 给的概括标题；照抄细目时取首条细目截断兜底
+      const titleCandidate = subTitle && !sources.some(source => sameSectionText(subTitle, source)) ? subTitle : (sources[0] || subTitle);
+      return { title: titleCandidate.slice(0, 30), sources };
+    })
+    .filter((point): point is PlannedChapterSubPoint => Boolean(point));
+  if (subPoints.length === 0) return undefined;
+  const facts = (result.facts || []).map(item => item.trim().slice(0, 80)).filter(Boolean).slice(0, 2);
+  return { title, subPoints, facts, targetWords: MIN_BLOCK_TARGET_WORDS };
+}
+
+/** 块级证据过滤：按块细目首尾关键词匹配证据内容，取 top 8 条（每条截 800 字），避免无关证据挤占小调用输入 */
+function blockEvidenceForSections(sections: string[], evidence: DocumentEvidence[]): DocumentEvidence[] {
+  const keywords = sections.flatMap(section => [section.slice(0, 4), section.slice(-4)]).filter(keyword => keyword.length >= 2);
+  const scored = evidence
+    .map(item => ({ item, score: keywords.reduce((sum, keyword) => sum + (item.content.includes(keyword) ? 1 : 0), 0) }))
+    .filter(entry => entry.score > 0)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 8);
+  return scored.map(entry => ({ ...entry.item, content: entry.item.content.slice(0, 800) }));
+}
+
+/**
+ * 章级 LLM 规划（p3-s1 逐主题块小步规划）：输入细目 ≤8 条时不调用 Planner（逐节路径更高效），由调用方判断；
+ * 细目先经语义聚类切分为块候选，再逐块一次小调用产出该块 H4 结构（输出 ≤2000 token），
+ * 块间并发、块级失败隔离（失败块由语义域确定性结构接管），合并后统一覆盖校验。
  * 返回 undefined 表示规划失败，调用方走 fallbackStructureForSections。
  */
 export async function planChapterStructureWithLlm(input: {
@@ -263,124 +386,78 @@ export async function planChapterStructureWithLlm(input: {
   graphContext?: string;
   /** 文档蓝图（本章专业任务卡/实施方案/事实覆盖矩阵），供合并决策参考 */
   blueprintContext?: string;
+  /** 语义嵌入注入（单测替换本地 bge-small 模型）；缺省时使用本地语义模型 */
+  semanticEmbedder?: (texts: string[]) => Promise<number[][]>;
   signal?: AbortSignal;
   diagnostics?: DocumentGenerationDiagnostics;
 }): Promise<PlannedChapterStructure | undefined> {
   const inputSections = cleanInputSections(input.chapter);
   if (inputSections.length <= 8) return undefined;
-  // 分而治之：推理模型的思考阶段占 70%+ 输出预算，细目过多时单次合并 JSON 会被截断或空响应；
-  // 已验证 11/13 条稳定命中、25 条空响应、50 条截断 → 每批 ≤16 条（50 条递归拆成 13/12/13/12 四批），
-  // 两批结果拼接后统一覆盖校验；任一批失败则整体未命中交由确定性兜底
-  const BATCH_MAX_SECTIONS = 16;
-  if (inputSections.length > BATCH_MAX_SECTIONS) {
-    const mid = Math.ceil(inputSections.length / 2);
-    const batchChapter = (sections: string[]): DocumentTemplateChapter => ({ ...input.chapter, sections });
-    const first = await planChapterStructureWithLlm({ ...input, chapter: batchChapter(inputSections.slice(0, mid)), targetWords: Math.ceil(input.targetWords / 2) });
-    const second = first && first.blocks.length > 0
-      ? await planChapterStructureWithLlm({ ...input, chapter: batchChapter(inputSections.slice(mid)), targetWords: Math.floor(input.targetWords / 2) })
-      : undefined;
-    if (first && first.blocks.length > 0 && second && second.blocks.length > 0) {
-      const blocks = [...first.blocks, ...second.blocks];
-      allocateBlockTargetWords(blocks, input.targetWords);
-      return ensureSectionCoverage(inputSections, blocks);
-    }
-    const failure = first && !first.blocks.length ? first.llmFailure : (second && !second.blocks.length ? second.llmFailure : undefined);
-    return { blocks: [], coveredSections: [], fallbackSections: [], llmPlanned: false, llmFailure: failure ? `分批规划未命中（${failure}）` : '分批规划未命中' };
-  }
-  const maxBlocks = Math.min(12, Math.ceil(inputSections.length / 2.5));
-  // 块数下限：细目较多时目录不应压成 2~3 块（历史缺陷：11 细目聚类成 3 块最终只剩 2 个三级节，目录粒度与评标预期不符）
-  const minBlocks = Math.max(3, Math.min(maxBlocks, Math.ceil(inputSections.length / 3)));
-  // H4 总数目标：评标必查细目不计入压缩预算（必查细目强制独立 H4），其余细目按 35%~60% 压缩，保证目录真正瘦身又不吞必查点
-  const criticalCount = inputSections.filter(isCriticalSection).length;
-  const compressibleCount = Math.max(0, inputSections.length - criticalCount);
-  const minH4 = Math.max(2, criticalCount + Math.max(1, Math.round(compressibleCount * 0.35)));
-  const maxH4 = Math.max(minH4, criticalCount + Math.round(compressibleCount * 0.6));
-  // 单次规划尝试：attempt 0 完整上下文；attempt 1 精简上下文（证据预算与 facts 减半）。
-  // 推理模型思考阶段随机挤占 8192 输出预算，JSON 截断/空响应呈随机性（同规模同输入时而命中时而失败），
-  // 失败后以更短输入重试一次可显著提升命中率；全部失败则透传首因+重试因供进度展示诊断
-  const planOnce = async (attempt: number): Promise<{ blocks: PlannedChapterBlock[]; failure?: string }> => {
-    const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, input.evidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, attempt === 0 ? 5000 : 3000, attempt === 0 ? 12000 : 8000) });
-    const factsLimit = attempt === 0 ? 4 : 2;
+  // 阶段 1：块候选聚类（语义模型不可用时 buildSemanticSimilarity 返回 undefined，聚类退化为域内顺序切块）
+  const similarity = await buildSemanticSimilarity(inputSections, inputSections, input.semanticEmbedder);
+  const clusters = clusterBlockCandidates(inputSections, similarity);
+  const halfTarget = Math.max(800, Math.floor(input.targetWords / Math.max(1, clusters.length)));
+  // 阶段 2：逐块小调用（输出 ≤2000 token，远离 8192 共享输出池），块间并发、块级失败隔离
+  const planBlockWithLlm = async (sections: string[], blockIndex: number): Promise<{ blocks: PlannedChapterBlock[]; llmPlanned: boolean; failure?: string }> => {
+    const blockEvidence = blockEvidenceForSections(sections, input.evidence);
+    const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, blockEvidence), { maxChars: evidencePromptBudgetForTarget(halfTarget, 2500, 5000) });
     const promptLines = [
       '你是专业施工组织设计文档结构规划专家。',
-      '任务：把章节的细目清单重排为目录级主题块（三级小节），每个主题块下挂 2~4 个 H4 要点；语义相近、内容连贯的细目必须合并进同一个 H4 要点。',
+      '任务：把一个主题块内的输入细目重排为 H4 要点结构；语义相近、内容连贯的细目必须合并进同一个 H4 要点。',
       '硬性规则：',
-      `1. 合并决策：语义相近、内容连贯的输入细目必须合并进同一个 H4 要点；H4 要点标题必须重写为更概括、更专业的标题（16 字以内），不得直接照抄任一输入细目标题；每个 H4 要点的 sources 字段逐字列出它所覆盖的全部输入细目标题，不得改写、不得遗漏、不得重复映射。例外：含评标必查关键词的输入细目（主要施工内容/工程概况/重点难点/危大工程/应急预案/施工部署/总平面等）必须保留为独立 H4 要点，不得与其他细目合并吞并，其 H4 标题必须保留该关键词。`,
-      `2. 合并依据：优先参考项目图谱与文档蓝图，把在项目中对应同一套工程对象/管理闭环的细目合并（如「三检制度」「样板引路」「隐蔽工程验收」同属质量管控闭环）；不得把内容无关的细目强行合并。`,
-      `3. 主题块标题必须具体、专业、能承载其要点（16 字以内），不得使用"目标与范围""资料依据""总体要求"等通用占位标题；同一内容不得在两个块重复出现。`,
-      `4. 数量约束：整章 H4 要点总数必须控制在 ${minH4}~${maxH4} 个之间；每个主题块 2~4 个 H4 要点。`,
-      `5. facts 字段：从绑定资料中摘取与本主题块直接相关的关键事实短句（每条 ≤60 字，1~${factsLimit} 条）；同一条事实只能分配给一个主题块。`,
+      `1. 合并决策：语义相近、内容连贯的输入细目必须合并进同一个 H4 要点；H4 要点标题必须重写为更概括、更专业的标题（16 字以内），不得直接照抄任一输入细目标题；每个 H4 要点的 sources 字段逐字列出它所覆盖的全部输入细目标题，不得改写、不得遗漏、不得重复映射。例外：含评标必查关键词的输入细目（${CRITICAL_SECTION_ANCHORS.join('/')}等）必须保留为独立 H4 要点，不得与其他细目合并吞并，其 H4 标题必须保留该关键词。`,
+      `2. 合并依据：优先参考项目图谱与文档蓝图，把对应同一套工程对象/管理闭环的细目合并（如「三检制度」「样板引路」「隐蔽工程验收」同属质量管控闭环）；不得把内容无关的细目强行合并。`,
+      `3. 主题块标题必须具体、专业、能承载其要点（16 字以内），不得使用"目标与范围""资料依据""总体要求"等通用占位标题。`,
+      `4. 数量约束：本主题块 1~${MAX_SUB_POINTS_PER_BLOCK} 个 H4 要点。`,
+      '5. facts 字段：从绑定资料中摘取与本主题块直接相关的关键事实短句（每条 ≤60 字，0~2 条）。',
       '6. 只返回 JSON，不要输出任何其他文字。',
-      `JSON 格式：{"blocks":[{"title":"主题块标题","subPoints":[{"title":"H4要点标题","sources":["输入细目原文"]}],"facts":["事实短句"]}]}`,
+      'JSON 格式：{"title":"主题块标题","subPoints":[{"title":"H4要点标题","sources":["输入细目原文"]}],"facts":["事实短句"]}',
     ];
     const userLines = [
       `文档模板：${input.template.name}`,
       `章节标题：${input.chapter.title}`,
       input.requirement ? `用户要求：${input.requirement}` : '',
-      input.graphContext ? `项目图谱（本章定向，工程/工法/资源/工期/标准/风险/要求）：${input.graphContext.slice(0, 2500)}` : '',
-      input.blueprintContext ? `文档蓝图（本章任务卡与实施方案）：${input.blueprintContext.slice(0, 4000)}` : '',
-      input.projectContext ? `上下文：${input.projectContext.slice(0, 2000)}` : '',
-      input.roleContext ? `角色要求：${input.roleContext.slice(0, 2000)}` : '',
+      input.graphContext ? `项目图谱（本章定向）：${input.graphContext.slice(0, 1500)}` : '',
+      input.blueprintContext ? `文档蓝图（本章任务卡与实施方案）：${input.blueprintContext.slice(0, 2000)}` : '',
+      input.projectContext ? `上下文：${input.projectContext.slice(0, 1000)}` : '',
+      input.roleContext ? `角色要求：${input.roleContext.slice(0, 1000)}` : '',
       evidenceText ? `真实绑定资料：${evidenceText}` : '',
-      `输入细目清单（共 ${inputSections.length} 条，必须全部覆盖，允许合并进同一 H4）：${inputSections.join('、')}`,
-      `请输出 ${minBlocks}-${maxBlocks} 个主题块，整章 H4 要点 ${minH4}-${maxH4} 个，确保所有输入细目被覆盖。`,
+      `输入细目清单（本主题块共 ${sections.length} 条，必须全部覆盖，允许合并进同一 H4）：${sections.join('、')}`,
+      `请输出 1 个主题块，1~${MAX_SUB_POINTS_PER_BLOCK} 个 H4 要点，确保所有输入细目被覆盖。`,
     ];
-    const rawResponse = await callDocumentLlm(promptLines.join(LF), userLines.filter(Boolean).join(LF + LF), true, { maxTokens: Math.max(3200, inputSections.length * 120), temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics });
-    if (!rawResponse) {
-      // 透传 llmClient 记录的失败原因（空响应/限流/超时/连接失败），避免「LLM 无响应」不可诊断
-      const lastError = input.diagnostics?.llm.lastError;
-      return { blocks: [], failure: lastError ? `LLM 无响应（${lastError}）` : 'LLM 无响应' };
+    // 块间并发共享 diagnostics.llm.lastError：失败原因经 outFailure 独立带出（每块各自的对象，无竞态），
+    // 不读共享 lastError 避免前序块/并发块写下的陈旧错误串号
+    const blockFailure: { value?: string } = {};
+    const result = await callDocumentLlmJson<PlannerBlockPlan>(promptLines.join(LF), userLines.filter(Boolean).join(LF + LF), {
+      maxTokens: BLOCK_PLAN_MAX_TOKENS,
+      temperature: 0.1,
+      signal: input.signal,
+      diagnostics: input.diagnostics,
+      schema: BLOCK_PLAN_SCHEMA,
+      disableThinkingBoost: true,
+      outFailure: blockFailure,
+    });
+    if (!result) {
+      // 透传 llmClient/schema 校验记录的失败原因（空响应/限流/超时/截断位置/缺失字段），避免「LLM 无响应」不可诊断
+      const failure = blockFailure.value ? `第 ${blockIndex + 1} 块未通过校验（${blockFailure.value}）` : `第 ${blockIndex + 1} 块 LLM 无响应`;
+      // 块级失败隔离：失败块由语义域确定性结构接管，不影响其他块
+      return { blocks: fallbackStructureForSections(sections, input.chapter.title, halfTarget).blocks, llmPlanned: false, failure };
     }
-    let result: { blocks?: PlannerLlmBlock[] };
-    try {
-      result = JSON.parse(extractJsonPayload(rawResponse)) as { blocks?: PlannerLlmBlock[] };
-    } catch {
-      const tail = rawResponse.slice(-100).replace(/\s+/gu, ' ');
-      return { blocks: [], failure: `JSON 解析失败，响应末段：${tail}` };
+    const block = buildPlannedBlock(result, sections, input.chapter.title);
+    if (!block) {
+      return { blocks: fallbackStructureForSections(sections, input.chapter.title, halfTarget).blocks, llmPlanned: false, failure: `第 ${blockIndex + 1} 块 LLM 结构无效（title/subPoints 缺失或未对齐）` };
     }
-    if (!result?.blocks?.length) return { blocks: [], failure: 'LLM 返回 JSON 但 blocks 为空' };
-    const blocks: PlannedChapterBlock[] = [];
-    for (const raw of result.blocks) {
-      const title = normalizePlannedTitle(raw.title || '');
-      if (!title || isInvalidTitle(title, input.chapter.title)) continue;
-      const subPoints = (raw.subPoints || [])
-        .map(point => {
-          // 兼容旧格式 source（单条）与新格式 sources（多条合并）
-          const rawSources = Array.isArray(point.sources) && point.sources.length > 0 ? point.sources : (point.source ? [point.source] : []);
-          // 仅保留能与输入细目对齐的 sources，防止 LLM 编造细目原文；去重保证不重复映射
-          const sources: string[] = [];
-          for (const rawSource of rawSources) {
-            const normalized = normalizePlannedTitle(rawSource || '');
-            if (normalized.length < 4) continue;
-            if (!inputSections.some(section => sameSectionText(normalized, section))) continue;
-            if (!sources.some(existing => sameSectionText(existing, normalized))) sources.push(normalized);
-          }
-          const subTitle = normalizePlannedTitle(point.title || '');
-          // H4 标题有效即保留（LLM 的合并意图）；sources 未对齐时交由 ensureSectionCoverage 按相似度挂接
-          if (!subTitle || subTitle.length < 4) return sources.length > 0 ? { title: sources[0].slice(0, 30), sources } : undefined;
-          // H4 标题重写：优先 LLM 给的概括标题；照抄细目时取首条细目截断兜底
-          const titleCandidate = subTitle && !sources.some(source => sameSectionText(subTitle, source)) ? subTitle : (sources[0] || subTitle);
-          return { title: titleCandidate.slice(0, 30), sources };
-        })
-        .filter((point): point is PlannedChapterSubPoint => Boolean(point));
-      if (subPoints.length === 0) continue;
-      const facts = (raw.facts || []).map(item => item.trim().slice(0, 80)).filter(Boolean).slice(0, factsLimit);
-      blocks.push({ title, subPoints, facts, targetWords: MIN_BLOCK_TARGET_WORDS });
-    }
-    if (blocks.length < 2) return { blocks: [], failure: `LLM 主题块有效数不足（仅 ${blocks.length} 个）` };
-    return { blocks };
+    return { blocks: [block], llmPlanned: true };
   };
-  const firstAttempt = await planOnce(0);
-  if (firstAttempt.blocks.length > 0) {
-    allocateBlockTargetWords(firstAttempt.blocks, input.targetWords);
-    return ensureSectionCoverage(inputSections, firstAttempt.blocks);
+  const results = await Promise.all(clusters.map((sections, index) => planBlockWithLlm(sections, index)));
+  const blocks = results.flatMap(result => result.blocks);
+  const failures = results.map(result => result.failure).filter(Boolean);
+  if (blocks.length === 0) {
+    return { blocks: [], coveredSections: [], fallbackSections: [], llmPlanned: false, llmFailure: failures.join('；') || '未知原因' };
   }
-  const retryAttempt = await planOnce(1);
-  if (retryAttempt.blocks.length > 0) {
-    allocateBlockTargetWords(retryAttempt.blocks, input.targetWords);
-    return ensureSectionCoverage(inputSections, retryAttempt.blocks);
-  }
-  return { blocks: [], coveredSections: [], fallbackSections: [], llmPlanned: false, llmFailure: `重试后仍未命中（${retryAttempt.failure || '未知原因'}；首因：${firstAttempt.failure || '未知原因'}）` };
+  allocateBlockTargetWords(blocks, input.targetWords);
+  const merged = ensureSectionCoverage(inputSections, blocks);
+  return { ...merged, llmPlanned: results.some(result => result.llmPlanned), llmFailure: failures.length > 0 ? `块级降级（${failures.join('；')}）` : undefined };
 }
 
 /** 规划结果中未被覆盖的细目：用于诊断与提示（确保评分条目承接可追踪） */
@@ -423,6 +500,8 @@ export async function planChapterStructure(input: {
   targetWords: number;
   graphContext?: string;
   blueprintContext?: string;
+  /** 语义嵌入注入（单测替换本地 bge-small 模型）；缺省时使用本地语义模型 */
+  semanticEmbedder?: (texts: string[]) => Promise<number[][]>;
   signal?: AbortSignal;
   diagnostics?: DocumentGenerationDiagnostics;
 }): Promise<PlannedChapterStructure> {

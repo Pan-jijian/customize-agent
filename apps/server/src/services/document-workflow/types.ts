@@ -341,13 +341,20 @@ export interface CanonicalFactGap {
   reason: string;
 }
 
-/** 源级同口径数值冲突：不同资料文件对同一总量口径（建设规模/估算价/工期）给出不同数值 */
+/** 源级同口径数值冲突：不同资料文件对同一总量口径（建设规模/估算价/工期/层数/车位数）给出不同数值 */
 export interface NumericScopeConflict {
-  kind: 'area' | 'cost' | 'duration';
+  kind: 'area' | 'cost' | 'duration' | 'floors' | 'parkingSpaces';
   scope: string;
   values: Array<{ value: string; unit: string; sourceFile?: string; priority: number }>;
-  /** 裁决后的统一口径（按资料来源优先级裁决）；为空表示同优先级下无法自动裁决，需人工复核 */
+  /** 裁决后的统一口径（按资料来源优先级与数值语境裁决）；为空表示同优先级下无法自动裁决，需人工复核 */
   resolution?: string;
+  /**
+   * 裁决置信度（数值语境分类驱动，决定下游改写的强度）：
+   * high=修正型语境（补疑/答疑类文件的正式修正语）明确胜出，可确定性改写证据与正文并注入强制锚点；
+   * medium=本体口径一致胜出（含补疑复述型），确定性改写保留但锚点措辞降级；
+   * low=锚定弱或语境模糊，不参与确定性改写，仅作为人工复核提示报告。
+   */
+  confidence?: 'high' | 'medium' | 'low';
 }
 
 export interface CanonicalFactModel {
@@ -466,8 +473,8 @@ export interface DocumentPerformanceMetric {
 export interface DocumentGenerationDiagnostics {
   strategy: DocumentGenerationStrategy;
   metrics: DocumentPerformanceMetric[];
-  llm: { calls: number; failures: number; maxActive: number; lastError?: string; retries: number; failureStreak?: number };
-  evidence: { raw: number; used: number; filteredNoise: number; avgNoiseScore: number; avgFactDensity: number; searchQueries: number; searchMs: number; contextChars: number };
+  llm: { calls: number; failures: number; maxActive: number; lastError?: string; retries: number; failureStreak?: number; schemaFailures?: number };
+  evidence: { raw: number; used: number; filteredNoise: number; budgetDropped: number; avgNoiseScore: number; avgFactDensity: number; searchQueries: number; searchMs: number; contextChars: number };
   quality: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number };
 }
 

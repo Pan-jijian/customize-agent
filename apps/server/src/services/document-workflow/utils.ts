@@ -43,7 +43,12 @@ function sectionHeadingTitleText(line: string) {
     .trim();
 }
 
-function comparableSectionTitleText(value: string) {
+/**
+ * 标题可比归一化：去除编号、空白与高频修饰词后比较，供小节定位与深度提取共用。
+ * 定位口径必须与 extractSectionFuzzy 一致：验收器按可比标题找到的小节，修复器也要能用同口径定位替换，
+ * 否则出现“验收器报深度不足、修复器未定位到原小节块”的错配（真实生成缺陷：项目特点、重点、难点分析 ↔ 项目重点难点分析）。
+ */
+export function comparableSectionTitleText(value: string) {
   return sectionHeadingTitleText(value)
     .replace(/\s+/gu, '')
     .toLowerCase()

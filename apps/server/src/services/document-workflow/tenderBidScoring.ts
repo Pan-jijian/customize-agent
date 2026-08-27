@@ -108,12 +108,18 @@ function complianceScore(markdown: string) {
   return Math.round((hits / COMPLIANCE_ITEMS.length) * 100);
 }
 
-/** 可落地性：管控闭环句式密度（责任岗位+检查频次+整改闭环），每 1500 字至少 1 段闭环句式 */
-function executabilityScore(markdown: string) {
+/** 闭环句式分块统计（与可落地性评分同口径）：按空行分块（≥30 字），同一块内三要素齐全才算闭环块 */
+export function closedLoopBlockStats(markdown: string) {
   const blocks = markdown.split(/\n{2,}/u).filter(block => block.trim().length >= 30);
   const closedLoopBlocks = blocks.filter(block =>
     CLOSED_LOOP_ROLE_RE.test(block) && CLOSED_LOOP_FREQUENCY_RE.test(block) && CLOSED_LOOP_CLOSURE_RE.test(block),
   ).length;
+  return { blocks: blocks.length, closedLoopBlocks };
+}
+
+/** 可落地性：管控闭环句式密度（责任岗位+检查频次+整改闭环），每 1500 字至少 1 段闭环句式 */
+function executabilityScore(markdown: string) {
+  const { closedLoopBlocks } = closedLoopBlockStats(markdown);
   const target = Math.max(6, Math.ceil(documentTextLength(markdown) / 1500));
   return Math.round(Math.min(1, closedLoopBlocks / target) * 100);
 }

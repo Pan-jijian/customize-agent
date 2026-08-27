@@ -9,6 +9,7 @@ import { displayChapterTitle } from './outline';
 import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
 import { stringifyFactValue } from './utils';
+import { closedLoopBlockStats } from './tenderBidScoring';
 
 export function isExportBlockingIssue(issue: ValidationIssue) {
   return EXPORT_BLOCKING_ISSUE_RE.test(issue.message);
@@ -97,6 +98,65 @@ function isHardExportBlockingIssue(issue: ValidationIssue) {
   return true;
 }
 
+/**
+ * 同章内同名三级小节重复检测：主题块/补写链路反复追加同名 H4 小节（真实生成缺陷：1.4 出现 4 个“工程难点分析”、2.14 出现 4 个隐蔽验收主题小节），
+ * 归一化去编号/空白后同章重复 ≥2 次给出合并/重命名建议（warning 不阻断，由质量报告引导后续优化）
+ */
+export function headingDuplicateIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const chapterParts = markdown.split(/^##\s+/gmu).slice(1);
+  for (const part of chapterParts) {
+    const lines = part.split(/\r?\n/u);
+    const chapterTitle = (lines.shift() || '').trim();
+    const counts = new Map<string, number>();
+    for (const line of lines) {
+      const headingMatch = /^####\s+(.+)$/u.exec(line.trim());
+      if (!headingMatch) continue;
+      const key = headingMatch[1].replace(/^\d+(?:\.\d+)*\s*/u, '').replace(/\s+/gu, '');
+      if (key.length < 2) continue;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    for (const [name, count] of counts) {
+      if (count < 2) continue;
+      issues.push({ level: 'warning', message: `${chapterTitle || '某章'} 存在同名小节重复：“${name}”出现 ${count} 次`, suggestion: '同主题内容应合并为一个小节；若确为不同方面，请重命名标题以区分内容，避免目录重复堆叠。' });
+      if (issues.length >= 6) return issues;
+    }
+  }
+  return issues;
+}
+
+/** 评分条目标题的框架停用词（核心词提取时剔除，精确匹配整词） */
+const CRITERIA_CORE_STOP_WORDS = new Set(['如有', '应用', '措施', '体系', '管理', '保障', '要求', '内容', '工程', '项目', '施工']);
+
+/** 招标评分条目标题 → 核心关键词集：去框架前缀/括号/尾缀后按顿号及与切分，供正文命中检查 */
+export function evaluationCriteriaCoreKeywords(title: string): string[] {
+  const cleaned = title
+    .replace(/^拟采用/u, '').replace(/^针对/u, '').replace(/^确保/u, '')
+    .replace(/[（(][^）)]*[）)]/gu, '')
+    .replace(/的保障体系与措施$|管理体系与措施$|保障体系与措施$/u, '')
+    .trim();
+  return cleaned.split(/[、，,；;及与和]+/u)
+    .map(part => part.replace(/^[的了者]+/u, '').trim())
+    .filter(part => part.length >= 2 && !CRITERIA_CORE_STOP_WORDS.has(part));
+}
+
+/**
+ * 招标评分条目正文承接后置校验：已提取的评审条目若核心关键词在最终正文 0 次出现，报 warning。
+ * 前置补小节只能保证大纲覆盖，主题块规划/成稿阶段仍可能把补入小节合并丢失（历史缺陷：
+ * “拟采用的新技术、新工艺”整篇 0 次出现），后置命中检查是承接链的最后一道兑底。
+ */
+export function evaluationCriteriaCoverageIssues(markdown: string, items: string[]): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const normalized = markdown.replace(/\s+/gu, '');
+  for (const item of items.slice(0, 8)) {
+    const keywords = evaluationCriteriaCoreKeywords(item);
+    if (keywords.length === 0) continue;
+    if (keywords.some(keyword => normalized.includes(keyword))) continue;
+    issues.push({ level: 'warning', severity: 'warning', message: `招标文件评分条目“${item}”未在正文中出现（核心词：${keywords.join('/')}）`, suggestion: '评审条目必须逐条承接为正文小节；请补写对应内容并确保核心关键词落位，避免评标失分。' });
+  }
+  return issues;
+}
+
 export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[]): ExportGateResult {
   const hasBody = chapters.some(chapter => {
     const body = (chapter.content || '')
@@ -112,7 +172,7 @@ export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentF
   const hardBlockingIssues = governedIssues.filter(issue => issue.level === 'error' && isHardExportBlockingIssue(issue));
   // 已生成实质正文时仍保留关键结构阻断（缺节、空小节、生成未达标、正文不足等），仅豁免其余软性门禁，避免质量门禁卡住交付。
   // 跨章一致性（含数值口径冲突与复核残留）是用户明确的低级错误红线，有正文时同样硬阻断
-  const CRITICAL_BLOCK_RE = /缺少规划小节|小节生成未达标|小节内容补写未完成|空小节|小节只有标题|生成未完成|正文不足|主要施工内容小节缺失|部分章节生成失败|Writer 未完成|不得出现|疑似提示词指令标题|项目污染|跨章一致性/u;
+  const CRITICAL_BLOCK_RE = /缺少规划小节|小节生成未达标|小节内容补写未完成|空小节|小节只有标题|生成未完成|正文不足|主要施工内容小节缺失|部分章节生成失败|Writer 未完成|不得出现|疑似提示词指令标题|项目污染|跨章一致性|分部分项工程施工方案/u;
   const blockingIssues = hasBody ? hardBlockingIssues.filter(issue => CRITICAL_BLOCK_RE.test(issue.message)) : hardBlockingIssues;
   const checklist = [
     { key: 'no_errors', label: '无阻断级校验错误', passed: blockingIssues.length === 0 },
@@ -378,6 +438,50 @@ export function markdownTableQualityIssues(markdown: string): ValidationIssue[] 
   return issues;
 }
 
+/** 表格凑数治理：同主题重复堆叠 + 连续堆表（无正文分隔），是生成侧用表格凑字数的典型形态。
+ * 与 markdownTableQualityIssues 的结构缺陷检测互补，本函数只针对“凑数”形态，warning 不阻断门禁。 */
+export function tableSpamIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const lines = markdown.split(LINE_SPLIT_RE);
+  const blocks: Array<{ headerKey: string; headerText: string; start: number; end: number; dividerCount: number }> = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!MARKDOWN_TABLE_ROW_RE.test(lines[index])) continue;
+    const start = index;
+    const block: string[] = [];
+    while (index < lines.length && MARKDOWN_TABLE_ROW_RE.test(lines[index])) {
+      block.push(lines[index]);
+      index += 1;
+    }
+    index -= 1;
+    const dividerCount = block.filter(line => MARKDOWN_TABLE_DIVIDER_RE.test(line)).length;
+    if (dividerCount === 0) continue;
+    const rawHeader = (block[0] || '').trim();
+    const body = rawHeader.startsWith('|') ? rawHeader.slice(1) : rawHeader;
+    const core = body.endsWith('|') ? body.slice(0, -1) : body;
+    const headerCells = core.split('|').map(cell => cell.split('**').join('').trim()).filter(cell => cell.length > 0);
+    blocks.push({ headerKey: headerCells.join('|'), headerText: headerCells.join('、'), start, end: index, dividerCount });
+  }
+  const byHeader = new Map<string, number>();
+  for (const block of blocks) byHeader.set(block.headerKey, (byHeader.get(block.headerKey) || 0) + 1);
+  const duplicated = [...byHeader.entries()].filter(([, count]) => count >= 3);
+  if (duplicated.length > 0) {
+    const sample = blocks.find(block => byHeader.get(block.headerKey) === duplicated[0]?.[1])?.headerText || '';
+    issues.push({ level: 'warning', message: `同主题表格重复堆叠：${duplicated.length} 组相同表头出现 3 次及以上（如：${sample}）`, suggestion: '同一主题表格全文只出现一次，禁止拆成多张碎表重复堆叠凑数；请合并同类表格或删除重复内容。' });
+  }
+  // 连续堆叠两类形态：表格块之间只有空行无正文分隔；单块内多条分隔线（多张表连写不换行）
+  let stacked = 0;
+  for (let blockIndex = 1; blockIndex < blocks.length; blockIndex += 1) {
+    const previous = blocks[blockIndex - 1];
+    const current = blocks[blockIndex];
+    if (!previous || !current) continue;
+    const between = lines.slice(previous.end + 1, current.start);
+    if (between.every(line => line.trim() === '')) stacked += 1;
+  }
+  for (const block of blocks) if (block.dividerCount >= 2) stacked += block.dividerCount - 1;
+  if (stacked >= 2) issues.push({ level: 'warning', message: `表格连续堆叠：${stacked} 处相邻表格无正文分隔`, suggestion: '表格之间应有正文引导叙述，禁止连续堆叠多张表格凑数。' });
+  return issues;
+}
+
 function sectionBodyTextLength(body: string) {
   const text = body.split(LINE_SPLIT_RE)
     .filter(line => !/^#{1,6}\s+/u.test(line.trim()))
@@ -560,8 +664,8 @@ function scaledNumericValue(entry: { value: string; unit: string }) {
   return base;
 }
 
-// 总量口径词：只比对建筑总量口径（总建筑面积/建设规模），“总”字可选（与裁决侧 scopeReForKind 对称），
-// 子项口径（地上/地下/单栋/门卫室等具体建筑物）数值不同属正常分层，不视为冲突；
+// 总量口径词：只比对建筑总量口径（总建筑面积/建设规模），“总”字可选（基础口径词与 factGovernance.scopeReForKind('area') 同源单点，
+// 此处是其带子项口径黑名单的增强版）；子项口径（地上/地下/单栋/门卫室等具体建筑物）数值不同属正常分层，不视为冲突；
 // 用地面积/占地面积是独立字段（与建设规模不同口径），不得与建筑总量混比（历史缺陷：
 // 正文正确转述资料“总用地面积 X㎡”被判为与建设规模冲突，导出门禁误阻断）
 const SCALE_SCOPE_RE = /(?<![地上地下门卫室值班室配电室配电房泵房水泵房锅炉房公厕车库车棚岗亭传达室警卫室样板房售楼处门房])总?建筑面积|总?建设规模/u;
@@ -573,8 +677,9 @@ const COST_UNIT_RE = /万元|亿元/u;
 export function crossChapterConsistencyIssues(markdown: string, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[]): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   // 校验基准与生成裁决同源：源级同口径冲突的裁决值（补疑修正后的胜出数值）优先作为期望口径，
-  // 避免事实主表候选排序差异导致检查基准与裁决基准不一致（历史缺陷：正文全用胜出值时因主表取出败选值而误报）
-  const scopeWinner = (kind: NumericScopeConflict['kind']) => scopeConflicts?.find(conflict => conflict.kind === kind && conflict.resolution)?.resolution;
+  // 避免事实主表候选排序差异导致检查基准与裁决基准不一致（历史缺陷：正文全用胜出值时因主表取出败选值而误报）；
+  // low 置信度裁决锚定弱，不作校验基准（与生成侧“不参与确定性改写”同口径）
+  const scopeWinner = (kind: NumericScopeConflict['kind']) => scopeConflicts?.find(conflict => conflict.kind === kind && conflict.resolution && conflict.confidence !== 'low')?.resolution;
   // 裁决值是“数值+单位”短串（如“4646m2”），不带口径词前缀，直接从裁决值提取数值条目用于同口径比对
   const numericEntryFromResolution = (resolution: string) => {
     const match = /(\d+(?:\.\d+)?)\s*(㎡|m²|m2|平方米|万元|亿元)/u.exec(resolution);
@@ -759,7 +864,7 @@ function deterministicFixTargets(factsModel: DocumentFactsModel, scopeConflicts?
     if (list.ratios.length !== 1 && list.thicknesses.length !== 1) continue;
     specTargets.set(layer, { ratio: list.ratios.length === 1 ? list.ratios[0] : undefined, thickness: list.thicknesses.length === 1 ? list.thicknesses[0] : undefined });
   }
-  const scopeWinner = (kind: NumericScopeConflict['kind']) => scopeConflicts?.find(conflict => conflict.kind === kind && conflict.resolution)?.resolution;
+  const scopeWinner = (kind: NumericScopeConflict['kind']) => scopeConflicts?.find(conflict => conflict.kind === kind && conflict.resolution && conflict.confidence !== 'low')?.resolution;
   const numericEntryFromResolution = (resolution: string) => {
     const match = /(\d+(?:\.\d+)?)\s*(㎡|m²|m2|平方米|万元|亿元)/u.exec(resolution);
     return match ? { value: match[1], unit: match[2] } : undefined;
@@ -838,6 +943,15 @@ export function applyDeterministicConsistencyFixesToMarkdown(markdown: string, f
   if (targets.specTargets.size === 0 && !targets.scaleTarget && !targets.costTarget) return { markdown, fixedCount: 0, details: [] };
   const fix = fixChapterDeterministic(markdown, targets);
   return { markdown: fix.content, fixedCount: fix.fixedCount, details: fix.details };
+}
+
+/** 全文级闭环句式密度检测：与可落地性评分同口径（每 1500 字至少 1 段三要素齐全的闭环句式），
+ * 密度不足时给 warning 指导修订（不阻断门禁，与评分口径同源避免双重标准） */
+export function closedLoopDensityIssues(markdown: string): ValidationIssue[] {
+  const { closedLoopBlocks } = closedLoopBlockStats(markdown);
+  const target = Math.max(6, Math.ceil(documentTextLength(markdown) / 1500));
+  if (closedLoopBlocks >= target) return [];
+  return [{ level: 'warning', message: `可落地性闭环句式密度不足：全文 ${closedLoopBlocks} 段完整闭环句式，未达每 1500 字 1 段（目标 ${target} 段）`, suggestion: '在措施类段落中补齐“责任岗位 + 检查频次 + 整改闭环”三要素齐全的闭环句式：同一自然段内同时出现岗位（如项目经理/质检员/安全员）、频次（每日/每周/不少于X次）与闭环（整改/复查/销项）。' }];
 }
 
 export function managementMeasureNumberIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {

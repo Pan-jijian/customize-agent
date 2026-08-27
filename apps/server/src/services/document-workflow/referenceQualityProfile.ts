@@ -208,13 +208,24 @@ function countSubsectionLevels(text: string, skipCnNumbered: boolean): { subsect
   return { subsectionCount, subitemCount };
 }
 
-/** 统计表格标题数（"XX表/XX清单"结尾的标题行 + 框线/管道表格） */
+/** 统计表格数量：表格标题行（"XX表/XX清单"结尾）每行 1 张；框线表格表首 ┌─ 计 1 张；
+ * markdown 管道表格按连续行块计数（整块 1 张），表块前 3 行内已有表格标题行时不再重复计。
+ * 历史口径按管道行逐行计数，20 行表虚高为 20 张，与参考库（PDF 按标题/框线计数）口径错位，对标失真 */
 function countTables(text: string): number {
   let count = 0;
-  for (const rawLine of text.split(/\n+/u)) {
-    const line = cleanHeadingLine(rawLine);
+  const lines = text.split(/\n+/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = cleanHeadingLine(lines[index] || '');
     if (!line) continue;
-    if (TABLE_MARK_RE.test(line) || /^┌─/u.test(line) || /^\|.*\|.*\|$/u.test(line)) count += 1;
+    if (TABLE_MARK_RE.test(line) || /^┌─/u.test(line)) { count += 1; continue; }
+    if (/^\|.*\|.*\|$/u.test(line)) {
+      let previous = '';
+      for (let back = index - 1; back >= 0 && back >= index - 3; back -= 1) {
+        const candidate = cleanHeadingLine(lines[back] || '');
+        if (candidate) { previous = candidate; break; }
+      }
+      if (!/^\|.*\|.*\|$/u.test(previous) && !TABLE_MARK_RE.test(previous)) count += 1;
+    }
   }
   return count;
 }
@@ -295,6 +306,12 @@ export function suggestProjectType(text: string): ReferenceProjectType {
     // 竞争接近（冠军不足亚军 2 倍）且密度兜底存在显著更强的类型信号时，以密度兜底为准，
     // 修正综合体项目（卫生院配套道路、园区基础设施）被通用词带偏的误判
     if (secondCount > 0 && bestCount < secondCount * 2 && densityBest && densityBest.count > bestCount) return densityBest.type;
+    // 强判别冠军与密度兜底冲突仲裁：密度最佳类型异于冠军，且密度信号同时显著强于
+    // 冠军类型自身密度信号（2 倍）与冠军判别词频次（2 倍）时改判密度最佳，
+    // 修正装修/房建改造项目水电章节的"配电/电缆"子专业词被电力强判别词带偏的误判
+    // （真实生成缺陷：徽光阁既有建筑改造项目被判电力，对标基准与蓝图注入全链路错位）
+    const championDenseCount = scores.find(item => item.type === bestType)?.count || 0;
+    if (densityBest && densityBest.type !== bestType && densityBest.count > championDenseCount * 2 && densityBest.count >= bestCount * 2) return densityBest.type;
     return bestType;
   }
   return densityBest && densityBest.count > 0 ? densityBest.type : '其他';

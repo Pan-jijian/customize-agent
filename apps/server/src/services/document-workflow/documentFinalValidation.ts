@@ -1,10 +1,10 @@
-import { plannedAutoSpecGateIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssues, genericProfessionalContentIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
+import { closedLoopDensityIssues, plannedAutoSpecGateIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssues, genericProfessionalContentIssues, headingDuplicateIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
 import { boqRowTraceIssues, buildBoqRowTraces } from './documentFactTrace';
 import { chapterDependencyIssues, documentDeliveryScoreIssues, evidenceUsageCoverageIssues, paragraphGenericIssues } from './documentDeliveryReport';
 import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues } from './markdownComposer';
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
-import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
+import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgDivisionSectionIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, ValidationIssue } from './types';
 
 export function buildStandardFinalValidationIssues(input: {
@@ -16,18 +16,24 @@ export function buildStandardFinalValidationIssues(input: {
   promptDocumentRules?: PromptDocumentRuleSet;
   /** 源级同口径冲突裁决（校验基准与生成裁决同源） */
   scopeConflicts?: NumericScopeConflict[];
+  /** 招标文件评分条目标题（承接审计产物），用于后置正文命中检查 */
+  evaluationCriteriaItems?: string[];
 }): ValidationIssue[] {
   return [
     ...(input.promptDocumentRules?.forbidToc ? [] : [...tocHierarchyIssues(input.markdown), ...tocBodyConsistencyIssues(input.markdown)]),
+    ...headingDuplicateIssues(input.markdown),
+    ...evaluationCriteriaCoverageIssues(input.markdown, input.evaluationCriteriaItems || []),
     ...instructionLikeHeadingIssues(input.markdown),
     ...formalHeadingHierarchyIssues(input.markdown),
     ...formalContentIntegrityIssues(input.markdown),
     ...markdownTableQualityIssues(input.markdown),
+    ...tableSpamIssues(input.markdown),
     ...sectionContentIntegrityIssues(input.markdown, input.chapters),
     ...professionalContentIssues(input.chapters),
     ...professionalScoreIssues(input.chapters),
     ...genericProfessionalContentIssues(input.chapters),
     ...managementMeasureNumberIssues(input.chapters),
+    ...closedLoopDensityIssues(input.markdown),
     ...crossChapterConsistencyIssues(input.markdown, input.factsModel, input.scopeConflicts),
     ...processSpecConflictIssues(input.markdown, input.factsModel),
     ...evidenceUsageCoverageIssues(input.markdown, input.factsModel),
@@ -38,6 +44,7 @@ export function buildStandardFinalValidationIssues(input: {
     ...constructionOrgConsistencyIssues(input.markdown, input.factsModel),
     ...constructionOrgChapterDataCoverageIssues(input.chapters, input.factsModel),
     ...constructionOrgMajorContentIssues(input.chapters, input.markdown),
+    ...constructionOrgDivisionSectionIssues(input.chapters, input.markdown),
     ...constructionOrgBonusModuleIssues(input.chapters),
     ...chapterDependencyIssues(input.chapters),
     ...documentDeliveryScoreIssues(input.markdown, input.chapters, input.factsModel),

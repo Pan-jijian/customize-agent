@@ -209,6 +209,8 @@ export function selectEvidenceByBudget(items: DocumentEvidence[], options: { max
   };
   for (const item of pinned) tryPush(item, true);
   for (const item of normal) tryPush(item);
+  // 预算裁剪量记录：被 maxItems/maxChars/单文件上限裁掉的条目写入诊断，使预算软限制可观测（历史缺陷：裁剪静默发生，生成链路无感知）
+  if (diagnostics) diagnostics.evidence.budgetDropped += Math.max(0, ranked.length - selected.length);
   return selected;
 }
 

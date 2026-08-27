@@ -228,6 +228,16 @@ describe('suggestProjectType', () => {
     expect(suggestProjectType(text)).toBe('电力');
   });
 
+  it('装修改造项目水电章节配电词密集仍判房建（密度仲裁修正强判别误判）', () => {
+    const text = '本项目为既有建筑装修改造工程，主体为三层框架结构建筑，总建筑面积约4600平方米，层高3.6米。工程内容包括室内装饰装修、结构加固、水电改造、消防改造、通风空调、室外道排等。配电箱共64个、配电回路128路、配电系统按三级保护配置，电缆总长8600米。装饰装修面积3800平方米，拆除垃圾外运160吨，结构加固采用碳纤维布1200平方米。营业商铺位于沿街建筑一层，建筑外立面同步翻新，主体结构为框架结构，楼内管线密集，属公共建筑改造范畴。';
+    expect(suggestProjectType(text)).toBe('房建');
+  });
+
+  it('变电站工程判别词与密度词同向仍判电力（不误伤真电力项目）', () => {
+    const text = '本项目新建110kV变电站一座，变电站围墙内设主变区、配电装置区，配电装置采用GIS设备，架设输电线路12公里，电缆敷设8公里，架空线路沿线设铁塔。设备安装调试后送电。';
+    expect(suggestProjectType(text)).toBe('电力');
+  });
+
   it('港航工程判港口与航道', () => {
     const text = '本项目新建码头泊位 3 个，疏浚航道 5km，建设防波堤与护岸工程，含水工建筑物施工。';
     expect(suggestProjectType(text)).toBe('港口与航道');
@@ -239,5 +249,48 @@ describe('suggestProjectType', () => {
 
   it('返回类型在合法枚举内', () => {
     expect(REFERENCE_PROJECT_TYPES).toContain(suggestProjectType(SAMPLE_PDF_TEXT));
+  });
+});
+
+describe('tableCount 分块计数口径（P2-6）', () => {
+  it('连续管道表格行块整块计 1 张（历史口径逐行计数虚高）', () => {
+    const text = [
+      '| 序号 | 设备名称 | 数量 |',
+      '|---|---|---|',
+      '| 1 | 塔吊 | 2 台 |',
+      '| 2 | 挖机 | 3 台 |',
+      '| 3 | 泵车 | 1 台 |',
+    ].join('\n');
+    expect(buildReferenceQualityProfile(text).tableCount).toBe(1);
+  });
+
+  it('表格标题行与紧随的管道表块不重复计数', () => {
+    const text = [
+      '## 主要施工机械设备配置表',
+      '| 序号 | 设备名称 | 数量 |',
+      '|---|---|---|',
+      '| 1 | 塔吊 | 2 台 |',
+      '',
+      '## 劳动力计划表',
+      '| 工种 | 人数 | 进场时间 |',
+      '|---|---|---|',
+      '| 木工 | 20 | 第 10 天 |',
+    ].join('\n');
+    expect(buildReferenceQualityProfile(text).tableCount).toBe(2);
+  });
+
+  it('被正文分隔的多个管道表块分别计数', () => {
+    const text = [
+      '| A | B |',
+      '|---|---|',
+      '| 1 | 2 |',
+      '',
+      '表格后的正文说明段落。',
+      '',
+      '| C | D |',
+      '|---|---|',
+      '| 3 | 4 |',
+    ].join('\n');
+    expect(buildReferenceQualityProfile(text).tableCount).toBe(2);
   });
 });

@@ -25,7 +25,7 @@ import { buildDocumentTelemetryReport } from './documentTelemetry';
 import { retrievalCoverageIssues } from './documentEvidenceRetrieval';
 import { extractFacts, extractFactsWithLlm, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, shouldRunLlmFactExtraction } from './factsModel';
 import { applyScopeConflictResolutions, buildCanonicalFacts, detectNumericScopeConflicts } from './factGovernance';
-import { extractSection, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
+import { comparableSectionTitleText, extractSection, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
 import { formalTextGateIssues } from './agentWorkflow';
 import { displayStage, upsertProgressStage } from './progress';
 import { buildLlmSectionContent, buildValidationIssues, criticalSectionBlockerMinChars } from './chapterGeneration';
@@ -33,6 +33,7 @@ import { chapterSectionFactUsageIssues, understandReferenceFiles } from './chapt
 import { factCoverageIssues, factsWithEvidenceSource, criticalSectionBlockerLine, finalizeChapterContentQuality, normalizeProjectBasicInfoTable, partialChapterStatus, projectBasicPlaceholderIssues, slowMetricSummary, validateDraft } from './documentGeneratorHelpers';
 import { constructionOrgProfessionalAuditIssues } from './constructionOrgAudit';
 import { buildProfessionalScoreReport } from './documentProfessionalScore';
+import { recordDeterministicFixCases } from './workflowCaseLog';
 
 function sanitizeContaminationCandidates(markdown: string, summary: any) {
   const currentNames = new Set([summary?.projectName, ...(summary?.fingerprint?.projectNames || [])].filter(Boolean));
@@ -68,7 +69,7 @@ function supplementRequiredTexts(markdown: string, template: DocumentTemplate): 
   return `${markdown.replace(/\s+$/u, '')}\n${supplement}`;
 }
 
-function replaceMarkdownSection(content: string, sectionTitle: string, sectionContent: string) {
+export function replaceMarkdownSection(content: string, sectionTitle: string, sectionContent: string) {
   const normalizeHeadingTitle = (value: string) => value
     .replace(/[\u00a0\u3000]/gu, ' ')
     .replace(/^\d+(?:\.\d+)*\s+/u, '')
@@ -78,6 +79,27 @@ function replaceMarkdownSection(content: string, sectionTitle: string, sectionCo
     .replace(/^#{2,6}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]+\n+/u, '')
     .trim();
   const lines = content.split('\n');
+  // 标题语义重写定位（与验收器 extractSectionFuzzy 同口径）：规划锚点“项目特点、重点、难点分析”
+  // 在成稿中常被改写为“项目重点难点分析”等标题，字面不匹配导致修复器“未定位到原小节块”修复失效；
+  // 可比标题归一化后按包含关系定位。聚合主题块（H3 下紧跟 H4 子小节）不可被单小节替换，跳过，
+  // 只替换叶子级小节，避免整块内容被补写稿吞并（真实生成缺陷：深度不足修复替换整章主题块破坏结构）
+  const comparableMatches = (headingTitle: string) => {
+    const comparableHeading = comparableSectionTitleText(headingTitle);
+    const comparableTitle = comparableSectionTitleText(sectionTitle);
+    return comparableHeading === comparableTitle || comparableHeading.includes(comparableTitle) || comparableTitle.includes(comparableHeading);
+  };
+  const isAggregateThemeBlock = (index: number) => {
+    const heading = /^(#{3,4})\s+(.+)$/u.exec(lines[index].trim());
+    if (!heading || heading[1].length !== 3) return false;
+    // 聚合主题块判定：H3 标题后（允许空行间隔）到下一个 H2/H3 之间若存在任何 #### 子小节，
+    // 说明该块由子小节展开，不可被单小节整体替换，否则吞并子小节（如基本信息表）破坏结构
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const trimmed = lines[next].trim();
+      if (/^#{2,3}\s+/u.test(trimmed)) return false;
+      if (/^####\s+/u.test(trimmed)) return true;
+    }
+    return false;
+  };
   let cursor = 0;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -86,7 +108,9 @@ function replaceMarkdownSection(content: string, sectionTitle: string, sectionCo
     const heading = /^(#{3,4})\s+(.+)$/u.exec(line.trim());
     if (!heading) continue;
     const headingTitle = normalizeHeadingTitle(heading[2]);
-    if (headingTitle !== sectionTitle && !headingTitle.includes(sectionTitle) && !sectionTitle.includes(headingTitle)) continue;
+    const exactMatch = headingTitle === sectionTitle || headingTitle.includes(sectionTitle) || sectionTitle.includes(headingTitle);
+    if (!exactMatch && !comparableMatches(headingTitle)) continue;
+    if (!exactMatch && comparableMatches(headingTitle) && isAggregateThemeBlock(index)) continue;
     const headingLevel = heading[1].length;
     // 工作包型关键小节：正文由同级 H4 工作包展开，替换边界必须扩展到下一个上级标题（H2/H3），
     // 吞并原有工作包 H4——否则生成稿工作包与旧稿工作包前后重复，且标题下直接跟 H4 会被误判为空标题
@@ -104,6 +128,50 @@ function replaceMarkdownSection(content: string, sectionTitle: string, sectionCo
     return `${content.slice(0, lineStart)}${line.trim()}\n\n${body}${content.slice(endOffset)}`;
   }
   return content;
+}
+
+/**
+ * Final Gate 修复候选解析：从 error 级结构缺陷消息中解析（章节标题、小节标题、是否关键小节）三元组，
+ * 未命中返回 undefined（非结构类 error 不进修复循环）。覆盖消息形态：
+ * - 空小节/深度不足（含 Reviewer 无章节前缀形态“XX 正文不足，未达到任务最小深度”）
+ * - 小节完全缺失（“施工组织设计缺少"XXX"小节”）
+ * - 锚点小节缺失或标题结构异常（专项验收器：锚点被合并/改写后工作包缺失，映射回标准锚点标题走追加修复）
+ */
+export function parseFinalGateRepairCandidate(issue: ValidationIssue): { issue: ValidationIssue; chapterTitle: string; sectionTitle: string; critical: boolean } | undefined {
+  const criticalSectionTitleRe = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样/u;
+  const match = /^(.*?)(?:\s+|)(?:空小节|小节内容补写未完成|小节生成未达标|小节只有标题|只有标题或表格无正文|规划小节正文过短|正文小节正文过短|缺少规划小节|正文不足)[：:,，]\s*(.+)$/u.exec(issue.message);
+  // 关键小节（重点难点/主要施工内容/分部分项方案等）优先修复：避免普通空小节占满修复名额导致关键小节错误残留
+  const depthIssue = /^(.*?)\s+(项目特点、重点、难点分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样)\s+正文不足/u.exec(issue.message);
+  // Reviewer 深度类消息无章节前缀（“项目主要施工内容 正文不足，未达到任务最小深度”），单独解析小节标题
+  const reviewerDepthIssue = /^(.+?)\s*正文不足，未达到任务最小深度$/u.exec(issue.message);
+  // Final Gate 结构校验消息：小节完全缺失（“施工组织设计缺少"项目主要施工内容"小节”），必须带引号才匹配，避免误伤“缺少规划小节”类消息
+  const missingSectionIssue = /^(?:施工组织设计\s*)?缺少[“"'](.+?)[”"']小节$/u.exec(issue.message);
+  // 专项结构校验消息：锚点小节被合并/改写后未形成规范结构（“工程重点难点及危大工程的保障体系 主要施工内容小节缺失或标题结构异常”），
+  // 与 missingSectionIssue 同属“缺失可补写”语义，按标准锚点标题映射进追加修复路径（真实生成缺陷：合并标题工作包缺失时精确匹配落空，
+  // 该消息未被任何解析正则命中导致永不修复）
+  const anchorSectionIssue = /^(.*?)\s+(主要施工内容|分部分项工程施工方案)小节缺失或标题结构异常$/u.exec(issue.message);
+  // 分部分项专项验收消息（分项不足/缺三段式/缺箭头链/参数不足）：与 anchorSectionIssue 同属“结构不达标可补写”语义，
+  // 消息带章节前缀但无固定后缀形态，直接映射标准锚点标题（历史缺陷：验收器 blocker 未被门禁拦截、消息形态也未进修复循环，分部分项永远无法自愈）
+  const divisionIssue = /^(.*?)\s+分部分项工程施工方案/u.exec(issue.message);
+  if (!match && !missingSectionIssue && !anchorSectionIssue && !divisionIssue) return undefined;
+  const chapterTitle = depthIssue ? depthIssue[1].trim() : reviewerDepthIssue ? '' : missingSectionIssue ? '' : anchorSectionIssue ? anchorSectionIssue[1].trim() : divisionIssue ? divisionIssue[1].trim() : match![1].trim();
+  const sectionTitle = depthIssue ? depthIssue[2] : reviewerDepthIssue ? reviewerDepthIssue[1].trim() : missingSectionIssue ? missingSectionIssue[1].trim() : anchorSectionIssue ? (anchorSectionIssue[2] === '主要施工内容' ? '项目主要施工内容' : '主要分部分项工程施工方案') : divisionIssue ? '主要分部分项工程施工方案' : match![2].split(/[：:,，,]/u)[0].trim();
+  return { issue, chapterTitle, sectionTitle, critical: criticalSectionTitleRe.test(sectionTitle) };
+}
+
+/**
+ * 已修复小节旧快照 issue 过滤判定（Final Gate 修复后重算用）：结构缺陷类消息才进入过滤，
+ * 章节+小节标题双包含命中即丢弃旧 issue，避免修复后的重算带着旧 blocker 进入最终交付。
+ * 锚点缺失类消息只带缩写锚点（“主要施工内容小节缺失”），修复器按标准标题（“项目主要施工内容”）
+ * 记 key，需去“项目/主要”前缀做包含匹配才能命中旧快照 issue，否则修复后旧 blocker 残留被门禁持续阻断。
+ */
+export function isRepairedSectionIssue(issueMessage: string, chapterTitle: string, sectionTitle: string) {
+  if (!/空小节|小节内容补写未完成|小节生成未达标|小节只有标题|正文小节正文过短|规划小节正文过短|缺少规划小节|缺少[“"'].+[”"']小节|正文不足|小节缺失或标题结构异常|分部分项工程施工方案/u.test(issueMessage)) return false;
+  // Reviewer 深度类消息无章节前缀，单独按“小节标题 + 正文不足，未达到任务最小深度”匹配
+  const escapedSection = sectionTitle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  if (new RegExp(`^\\s*${escapedSection}\\s*正文不足，未达到任务最小深度$`, 'u').test(issueMessage)) return true;
+  const looseSection = sectionTitle.replace(/^(?:项目|主要)/u, '').replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  return issueMessage.includes(chapterTitle) && (issueMessage.includes(sectionTitle) || (looseSection !== escapedSection && issueMessage.includes(looseSection)));
 }
 
 function criticalSectionFactDensityIssues(chapters: DocumentDraftChapter[]) {
@@ -184,15 +252,16 @@ function buildFullValidationIssues(input: {
   documentSpec: any; validationIssues: ValidationIssue[]; factsModel: any; finalChapterDrafts: DocumentDraftChapter[]; finalMarkdown: string;
   template: DocumentTemplate; promptBindings: any[]; promptDocumentRules: any; projectMaterialSummary: any; domainProfile: any; structuredFacts: DocumentFact[]; documentBudget: any;
   scopeConflicts?: NumericScopeConflict[];
+  evaluationCriteriaItems?: string[];
 }): ValidationIssue[] {
-  const { documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts } = input;
+  const { documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems } = input;
   return collectValidationIssueGroups(
     applySpecGateRules(documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template.projectBindings || [], promptBindings),
     validateDraftWithAutoSpec({ markdown: finalMarkdown, spec: documentSpec, summary: projectMaterialSummary }),
     validateFactConsistency({ markdown: finalMarkdown, facts: structuredFacts, summary: projectMaterialSummary, profile: domainProfile }),
     validateProjectContamination(finalMarkdown, projectMaterialSummary),
     projectBasicPlaceholderIssues(finalMarkdown, structuredFacts),
-    buildStandardFinalValidationIssues({ markdown: finalMarkdown, chapters: finalChapterDrafts, factsModel, template, promptBindings, promptDocumentRules, scopeConflicts }),
+    buildStandardFinalValidationIssues({ markdown: finalMarkdown, chapters: finalChapterDrafts, factsModel, template, promptBindings, promptDocumentRules, scopeConflicts, evaluationCriteriaItems }),
     factCoverageIssues(finalMarkdown, [...structuredFacts, ...factsModel.preciseFacts], { maxIssues: 30 }).map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const, suggestion: '建议后续优化事实自然落位；导出阶段不因未落位的引用型或可优化事实阻断。' })),
     pageTargetIssues(template.generationSettings || template.exportSettings, finalMarkdown).filter(issue => !(documentBudget.minPages && /低于目标页数/u.test(issue.message))),
     documentBudgetIssues(documentBudget, finalMarkdown),
@@ -281,6 +350,8 @@ export async function finalizeGeneration(p: {
   /** 生成阶段裁决的源级同口径冲突（与 canonicalFacts.scopeConflicts 同源），用于事实主表回写，保证裁决口径全局唯一 */
   scopeConflicts?: NumericScopeConflict[];
   writingTaskBrief?: WritingTaskBrief;
+  /** 招标文件评分条目标题（承接审计产物），用于最终正文承接后置校验 */
+  evaluationCriteriaItems?: string[];
   emitProgress: (c?: DocumentDraftChapter[], s?: DocumentExecutionStage[]) => void;
   withProgressHeartbeat: <T>(w: () => Promise<T>, s?: DocumentExecutionStage[]) => Promise<T>;
 }): Promise<GeneratedDocumentDraft> {
@@ -289,7 +360,7 @@ export async function finalizeGeneration(p: {
     progressStages, documentSpec, projectMaterialSummary, domainProfile, documentBudget,
     input, generationDiagnostics, promptTexts, promptBindings, promptDocumentRules, projectRoot, projectId, readiness,
     factExtractionPromptTexts, hasExplicitOutline, missingItems, retrievalCoverageReports, failedChapterMessages,
-    webResearchReport, indexHealth, agentWorkflow, globalConsistencyIssues, scopeConflicts, writingTaskBrief, emitProgress, withProgressHeartbeat,
+    webResearchReport, indexHealth, agentWorkflow, globalConsistencyIssues, scopeConflicts, writingTaskBrief, evaluationCriteriaItems, emitProgress, withProgressHeartbeat,
   } = p;
   const { signal, requirement } = input;
 
@@ -433,6 +504,8 @@ export async function finalizeGeneration(p: {
     if (postRebuildFix.fixedCount > 0) finalMarkdown = postRebuildFix.markdown;
     const totalFixed = finalDeterministicFix.fixedCount + postRebuildFix.fixedCount;
     const totalDetails = [...new Set([...finalDeterministicFix.details, ...postRebuildFix.details])];
+    // 修复案例落盘（数据而非代码）：只追加、不参与生成决策，供事后复盘检测器覆盖盲区；失败静默不影响主链路
+    recordDeterministicFixCases(totalDetails.map(detail => ({ caseType: 'deterministic_fix', recordedAt: Date.now(), fixName: 'applyDeterministicConsistencyFixes', detail })));
     upsertProgressStage(executionStages, displayStage({ type: 'validation', roleId: 'deterministic-consistency-fix', status: 'success', message: `跨章一致性数值定点修复：${totalFixed} 处（${totalDetails.slice(0, 4).join('、')}）`, details: totalDetails.slice(4) }, { subtitle: '跨章一致性修复' }));
   }
 
@@ -441,7 +514,7 @@ export async function finalizeGeneration(p: {
 
   // Final Gate 修复后重算问题组会重新计算，修复基线只保留基础累计问题，避免重复累加
   const baseValidationIssues = validationIssues;
-  validationIssues = buildFullValidationIssues({ documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts });
+  validationIssues = buildFullValidationIssues({ documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems });
 
   let qualityBundle = buildQualityReportBundle({ finalChapterDrafts, effectiveChapters, factsModel, allEvidence, finalMarkdown, validationIssues, retrievalCoverageReports, includeRetrievalCoverage: true, template });
   let { knowledgeCoverage, factTraces, chapterCoverage, qualityReport, repairStrategies, finalExportGate } = qualityBundle;
@@ -455,16 +528,12 @@ export async function finalizeGeneration(p: {
   const recomputeFinalValidationBundle = () => {
     const repairedValidationBase = baseValidationIssues.filter(issue => ![...repairedSectionKeys].some(key => {
       const [chapterTitle, sectionTitle] = key.split('::');
-      if (!/空小节|小节内容补写未完成|小节生成未达标|小节只有标题|正文小节正文过短|规划小节正文过短|缺少规划小节|缺少[“"'].+[”"']小节|正文不足/u.test(issue.message)) return false;
-      // Reviewer 深度类消息无章节前缀，单独按“小节标题 + 正文不足，未达到任务最小深度”匹配
-      const escapedSection = sectionTitle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-      if (new RegExp(`^\\s*${escapedSection}\\s*正文不足，未达到任务最小深度$`, 'u').test(issue.message)) return true;
-      return issue.message.includes(chapterTitle) && issue.message.includes(sectionTitle);
+      return isRepairedSectionIssue(issue.message, chapterTitle, sectionTitle);
     })
     // 事实落位警告是预算稿快照（Final Gate 修复前的章节草稿拼接），修复后的重算会用最新 finalMarkdown 重新生成，
     // 旧快照必须丢弃：否则已落位的事实（如基本信息表中的招标人）会带着修复前的警告进入最终交付。
     && !/已确认事实未在正文中落位/u.test(issue.message));
-    validationIssues = buildFullValidationIssues({ documentSpec, validationIssues: repairedValidationBase, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts });
+    validationIssues = buildFullValidationIssues({ documentSpec, validationIssues: repairedValidationBase, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems });
     qualityBundle = buildQualityReportBundle({ finalChapterDrafts, effectiveChapters, factsModel, allEvidence, finalMarkdown, validationIssues, retrievalCoverageReports, includeRetrievalCoverage: false, template });
     ({ knowledgeCoverage, factTraces, chapterCoverage, qualityReport, repairStrategies, finalExportGate } = qualityBundle);
     validationIssues = qualityBundle.validationIssues;
@@ -476,21 +545,8 @@ export async function finalizeGeneration(p: {
       ...finalExportGate.blockingIssues,
       ...validationIssues.filter(issue => issue.level === 'error'),
     ];
-    const criticalSectionTitleRe = /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样/u;
     const emptySectionIssues = Array.from(new Map(finalGateRepairCandidates
-      .map(issue => {
-        const match = /^(.*?)(?:\s+|)(?:空小节|小节内容补写未完成|小节生成未达标|小节只有标题|只有标题或表格无正文|规划小节正文过短|正文小节正文过短|缺少规划小节|正文不足)[：:,，]\s*(.+)$/u.exec(issue.message);
-        // 关键小节（重点难点/主要施工内容/分部分项方案等）优先修复：避免普通空小节占满修复名额导致关键小节错误残留
-        const depthIssue = /^(.*?)\s+(项目特点、重点、难点分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试与见证取样)\s+正文不足/u.exec(issue.message);
-        // Reviewer 深度类消息无章节前缀（“项目主要施工内容 正文不足，未达到任务最小深度”），单独解析小节标题
-        const reviewerDepthIssue = /^(.+?)\s*正文不足，未达到任务最小深度$/u.exec(issue.message);
-        // Final Gate 结构校验消息：小节完全缺失（“施工组织设计缺少"项目主要施工内容"小节”），必须带引号才匹配，避免误伤“缺少规划小节”类消息
-        const missingSectionIssue = /^(?:施工组织设计\s*)?缺少[“"'](.+?)[”"']小节$/u.exec(issue.message);
-        if (!match && !missingSectionIssue) return undefined;
-        const chapterTitle = depthIssue ? depthIssue[1].trim() : reviewerDepthIssue ? '' : missingSectionIssue ? '' : match![1].trim();
-        const sectionTitle = depthIssue ? depthIssue[2] : reviewerDepthIssue ? reviewerDepthIssue[1].trim() : missingSectionIssue ? missingSectionIssue[1].trim() : match![2].split(/[：:,，,]/u)[0].trim();
-        return { issue, chapterTitle, sectionTitle, critical: criticalSectionTitleRe.test(sectionTitle) };
-      })
+      .map(issue => parseFinalGateRepairCandidate(issue))
       .filter((item): item is { issue: ValidationIssue; chapterTitle: string; sectionTitle: string; critical: boolean } => Boolean(item))
       .map(item => [`${item.chapterTitle}::${item.sectionTitle}`, item])).values())
       .sort((a, b) => Number(b.critical) - Number(a.critical))
@@ -546,11 +602,15 @@ export async function finalizeGeneration(p: {
       let repaired = false;
       // 深度不足类修复必须达到关键小节 blocker 字数才允许替换：防止把原本更长的正文换成更短的补写稿，
       // 导致修复轮次被浪费在无效替换上（曾出现 1800+ 字小节被换成 1200 字稿后仍不足 1760 的倒退）
-      const depthAcceptMinChars = /正文不足|缺少[“"'].+[”"']小节/u.test(issue.message) ? criticalMinChars : 0;
+      const depthAcceptMinChars = /正文不足|缺少[“"'].+[”"']小节|小节缺失或标题结构异常/u.test(issue.message) ? criticalMinChars : 0;
       if (generated && documentTextLength(generated) >= (depthAcceptMinChars || 80)) {
-        const nextContent = replaceMarkdownSection(draftChapter.content, sectionTitle, generated);
-        repaired = nextContent !== draftChapter.content;
-        if (!repaired && /(?:缺少规划小节|缺少[“"'].+[”"']小节)/u.test(issue.message)) {
+        // “小节缺失或标题结构异常”必须按标准 ### 结构追加修复：可比标题若命中 H4 级承接块（如主题块成稿的
+        // “#### 2.5.1 主要分部分项工程施工方案”），原地替换会造成 ### 结构要求与 #### 标题层级倒置，
+        // 校验器精确定位持续落空、修复永不收敛；统一追加“### 标准锚点”小节
+        const forceAppend = /小节缺失或标题结构异常/u.test(issue.message);
+        const nextContent = forceAppend ? draftChapter.content : replaceMarkdownSection(draftChapter.content, sectionTitle, generated);
+        repaired = !forceAppend && nextContent !== draftChapter.content;
+        if (!repaired && (forceAppend || /(?:缺少规划小节|缺少[“"'].+[”"']小节)/u.test(issue.message))) {
           // 规划小节在正文中完全缺失：无原块可替换，将补写正文追加为新的三级小节
           const appended = `${draftChapter.content.replace(/\s+$/u, '')}\n\n### ${sectionTitle}\n\n${generated.replace(/^#{2,6}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]+\n+/u, '').trim()}\n`;
           repaired = true;
@@ -616,7 +676,7 @@ export async function finalizeGeneration(p: {
   finalStages.push(displayStage({ type: 'reference', roleId: 'knowledge-coverage', status: knowledgeCoverage.score >= 85 ? 'success' : 'failed', message: `资料确认覆盖率：${knowledgeCoverage.score}%（证据 ${knowledgeCoverage.evidenceCount} 条，文件 ${knowledgeCoverage.confirmedFiles} 份）`, details: [knowledgeCoverage.remediation] }, { subtitle: '资料覆盖' }));
   finalStages.push(displayStage({ type: 'validation', roleId: 'document-review-checklist', status: reviewChecklist.every(item => item.passed) ? 'success' : finalExportGate.passed ? 'skipped' : 'failed', message: `交付复核清单：通过 ${reviewChecklist.filter(item => item.passed).length}/${reviewChecklist.length}${finalExportGate.passed && !reviewChecklist.every(item => item.passed) ? '（导出门禁已通过，其余项作为优化建议归档）' : ''}`, details: reviewChecklist.map(item => `${item.passed ? '通过' : '待修复'}：${item.label}${item.message ? `（${item.message}）` : ''}`) }, { subtitle: '交付复核' }));
   const slowMetrics = slowMetricSummary(generationDiagnostics.metrics);
-  finalStages.push(displayStage({ type: 'validation', roleId: 'document-diagnostics', status: 'success', message: `性能统计：LLM ${generationDiagnostics.llm.calls} 次，失败 ${generationDiagnostics.llm.failures} 次，瞬态重试 ${generationDiagnostics.llm.retries} 次，峰值并行 ${generationDiagnostics.llm.maxActive}，检索 ${generationDiagnostics.evidence.searchQueries} 次/${Math.round(generationDiagnostics.evidence.searchMs / 1000)} 秒，证据上下文 ${generationDiagnostics.evidence.contextChars} 字，噪声过滤 ${generationDiagnostics.evidence.filteredNoise} 条，质量问题 阻断${generationDiagnostics.quality.blockingCount}/重要${generationDiagnostics.quality.importantCount}/轻微${generationDiagnostics.quality.minorCount}${slowMetrics ? `，Top耗时：${slowMetrics}` : ''}` }, { subtitle: '后台诊断' }));
+  finalStages.push(displayStage({ type: 'validation', roleId: 'document-diagnostics', status: 'success', message: `性能统计：LLM ${generationDiagnostics.llm.calls} 次，失败 ${generationDiagnostics.llm.failures} 次，瞬态重试 ${generationDiagnostics.llm.retries} 次，schema 校验失败 ${generationDiagnostics.llm.schemaFailures} 次，峰值并行 ${generationDiagnostics.llm.maxActive}，检索 ${generationDiagnostics.evidence.searchQueries} 次/${Math.round(generationDiagnostics.evidence.searchMs / 1000)} 秒，证据上下文 ${generationDiagnostics.evidence.contextChars} 字，噪声过滤 ${generationDiagnostics.evidence.filteredNoise} 条，预算裁剪 ${generationDiagnostics.evidence.budgetDropped} 条，质量问题 阻断${generationDiagnostics.quality.blockingCount}/重要${generationDiagnostics.quality.importantCount}/轻微${generationDiagnostics.quality.minorCount}${slowMetrics ? `，Top耗时：${slowMetrics}` : ''}` }, { subtitle: '后台诊断' }));
 
   const compactFinalChapterDrafts = finalChapterDrafts.map(chapter => ({ ...chapter, evidence: selectEvidenceByBudget(chapter.evidence || [], { maxItems: 12, maxChars: 9000, preservePinned: true }) }));
   finalChapterDrafts = compactFinalChapterDrafts;

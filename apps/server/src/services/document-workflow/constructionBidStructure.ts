@@ -171,61 +171,77 @@ function normalize(text: string) {
   return displayChapterTitle(text).replace(/\s+/gu, '').toLowerCase();
 }
 
+/** 章节承接判定的规范文本（标题+小节拼接后规范化截断）；语义相似度闭包按此文本缓存向量，调用方必须用同一函数取 key 才能命中缓存 */
+export function chapterCriteriaText(chapter: DocumentTemplateChapter): string {
+  return normalize(`${chapter.title} ${(chapter.sections || []).join(' ')}`).slice(0, 800);
+}
+
 // ===== 评分标准条目提取与承接审计 =====
 // 招标文件常以“1.针对…；2.…；3.…”形式给出技术文件评审条目（评分标准），
 // 章节结构必须逐条承接；未承接条目（如“新技术、新工艺…”）由前置校验自动补小节，
-// 避免评分标准明确要求的内容因显式大纲未覆盖而整篇缺失（历史缺陷：新技术新工艺 0 次出现）
+// 避免评分标准明确要求的内容因显式大纲未覆盖而整篇缺失（历史缺陷：新技术新工艺 0 次出现）。
+// 承接判定不再用 2 字滑窗词面命中率（通用词稀释导致误判已承接），
+// 改为“显式包含 → 本地语义相似度（bge-small 余弦）→ 未承接”两级判定。
 
-const EVALUATION_FRAMEWORK_STOP_WORDS = new Set(['针对', '确保', '对于', '关于', '以及', '工程', '项目', '施工', '组织', '设计', '的应', '应用', '体系', '措施', '管理', '保障', '与措', '和措', '具体', '内容', '要求', '整体性']);
+/** 结构化评分条目：提取自招标文件评审标准文本，以对象形式在管线中传递 */
+export interface EvaluationCriteriaItem {
+  /** 条目编号（原文数字编号，如 3） */
+  index: number;
+  /** 条目原文（清理引号后） */
+  text: string;
+  /** 可作小节标题的清理短语（cleanEvaluationItemTitle），可能为空 */
+  title: string;
+}
 
-/** 从证据文本中提取评分标准编号条目（数字编号 + 短标题短语） */
-export function extractEvaluationCriteriaItems(texts: string[]): string[] {
+/** 从证据文本中提取评分标准编号条目（数字编号 + 短标题短语，纯结构提取） */
+export function extractEvaluationCriteriaItems(texts: string[]): EvaluationCriteriaItem[] {
   const merged = texts.join('\n');
-  const items = new Set<string>();
+  const items = new Map<number, EvaluationCriteriaItem>();
   for (const match of merged.matchAll(/(\d{1,2})\s*[.、．]\s*([^；。\n]{4,60})/gu)) {
     const raw = match[2].trim().replace(/[“”"'"]/gu, '');
     if (!/[\u4e00-\u9fa5]{4}/u.test(raw)) continue;
     if (/AI|大模型|评审|评分|分值|分项|子项|满分|得分|投标人须|详见|招标文件/u.test(raw)) continue;
     if (/公共资源|电子交易|加密|投标|开标|评标委员会/u.test(raw)) continue;
-    items.add(raw);
+    const index = Number(match[1]);
+    if (!items.has(index)) items.set(index, { index, text: raw, title: cleanEvaluationItemTitle(raw) });
   }
-  return [...items];
+  return [...items.values()];
 }
 
-/** 条目特征词（2 字滑窗，去框架停用词）；用于与章节标题/小节做承接比对 */
-function criterionFeatures(item: string) {
-  const text = normalize(item);
-  const features: string[] = [];
-  for (let index = 0; index < text.length - 1; index += 1) {
-    const pair = text.slice(index, index + 2);
-    if (EVALUATION_FRAMEWORK_STOP_WORDS.has(pair)) continue;
-    if (/[，、,（）()0-9a-z]/u.test(pair)) continue;
-    features.push(pair);
-  }
-  return [...new Set(features)];
-}
-
-/** 章节文本是否承接了某评分条目（特征词命中率 ≥40%，容忍滑窗噪声词） */
-function chapterCoversCriterion(chapter: DocumentTemplateChapter, features: string[]) {
-  if (features.length === 0) return false;
-  const text = normalize(`${chapter.title} ${(chapter.sections || []).join(' ')}`);
-  const hit = features.filter(feature => text.includes(feature)).length;
-  return hit / features.length >= 0.4;
+/** 章节文本是否显式承接了条目（条目标题短语直接出现在章节标题/小节中，确定性第一道） */
+function chapterCoversCriterionExplicitly(chapterText: string, title: string) {
+  const normalizedTitle = normalize(title);
+  if (!normalizedTitle) return false;
+  return chapterText.includes(normalizedTitle) || normalizedTitle.includes(chapterText.slice(0, 40));
 }
 
 export interface EvaluationCriteriaAudit {
-  items: string[];
-  uncovered: Array<{ item: string; features: string[] }>;
+  items: EvaluationCriteriaItem[];
+  uncovered: Array<{ item: EvaluationCriteriaItem; title: string; bestSimilarity?: number }>;
 }
 
-/** 评分标准条目 ↔ 大纲承接审计：返回未被任何章节承接的条目 */
-export function auditEvaluationCriteriaCoverage(chapters: DocumentTemplateChapter[], items: string[]): EvaluationCriteriaAudit {
-  const uncovered: Array<{ item: string; features: string[] }> = [];
+/**
+ * 评分标准条目 ↔ 大纲承接审计：返回未被任何章节承接的条目。
+ * 判定顺序：显式包含 → 语义相似度（≥0.6）→ 未承接；
+ * 语义相似度函数缺失或不可用时自动降级为仅显式承接判定。
+ */
+export function auditEvaluationCriteriaCoverage(
+  chapters: DocumentTemplateChapter[],
+  items: EvaluationCriteriaItem[],
+  options?: { semanticSimilarity?: (leftText: string, rightText: string) => number },
+): EvaluationCriteriaAudit {
+  const uncovered: Array<{ item: EvaluationCriteriaItem; title: string; bestSimilarity?: number }> = [];
+  const chapterTexts = chapters.map(chapterCriteriaText);
   for (const item of items) {
-    const features = criterionFeatures(item);
-    if (features.length === 0) continue;
-    if (chapters.some(chapter => chapterCoversCriterion(chapter, features))) continue;
-    uncovered.push({ item, features });
+    const title = item.title;
+    if (!title) continue;
+    if (chapterTexts.some(text => chapterCoversCriterionExplicitly(text, title))) continue;
+    let bestSimilarity = 0;
+    if (options?.semanticSimilarity) {
+      for (const text of chapterTexts) bestSimilarity = Math.max(bestSimilarity, options.semanticSimilarity(title, text));
+    }
+    if (bestSimilarity >= 0.6) continue;
+    uncovered.push({ item, title, bestSimilarity: options?.semanticSimilarity ? bestSimilarity : undefined });
   }
   return { items, uncovered };
 }
@@ -289,8 +305,10 @@ export function validateBidStructureBeforeGeneration(input: {
   template: DocumentTemplate;
   chapters: DocumentTemplateChapter[];
   requirement?: string;
-  /** 评分标准相关证据文本（招标文件切片），用于提取评审条目并做承接审计 */
-  evaluationTexts?: string[];
+  /** 结构化评分条目（对象化，替代旧 evaluationTexts 文本切片） */
+  evaluationItems?: EvaluationCriteriaItem[];
+  /** 语义相似度函数（本地 bge-small 余弦），缺省时仅显式承接判定 */
+  semanticSimilarity?: (leftText: string, rightText: string) => number;
 }): { diagnostics: BidStructureDiagnostic[]; issues: BidStructureIssue[]; enrichedChapters: DocumentTemplateChapter[]; criteriaAudit?: EvaluationCriteriaAudit } {
   const diagnostics = auditBidStructure(input.chapters);
   const issues: BidStructureIssue[] = [];
@@ -331,24 +349,26 @@ export function validateBidStructureBeforeGeneration(input: {
 
   // 评分标准条目承接审计：招标文件评审条目必须被章节结构承接；
   // 未承接条目自动补为小节（挂靠公共特征词最多的章节），保证评分标准要求的内容不会被整篇遗漏
+  // 注意：审计与承载章打分必须基于 input.chapters（与调用方构建语义相似度闭包时的缓存 key 同源），
+  // 不得用上面已补全小节的 enriched——补全后 chapterCriteriaText 不在闭包缓存内会静默返回 0，
+  // 导致被补全章节的承接判定/承载打分全部失效、误补冗余小节（历史缺陷：缓存 key 跨阶段不一致）
   let criteriaAudit: EvaluationCriteriaAudit | undefined;
-  if (input.evaluationTexts?.length) {
-    const items = extractEvaluationCriteriaItems(input.evaluationTexts);
-    criteriaAudit = auditEvaluationCriteriaCoverage(enriched, items);
-    for (const { item, features } of criteriaAudit.uncovered) {
-      const sectionTitle = cleanEvaluationItemTitle(item);
+  if (input.evaluationItems?.length) {
+    const chapterTexts = input.chapters.map(chapterCriteriaText);
+    criteriaAudit = auditEvaluationCriteriaCoverage(input.chapters, input.evaluationItems, { semanticSimilarity: input.semanticSimilarity });
+    for (const { item } of criteriaAudit.uncovered) {
+      const sectionTitle = item.title;
       if (!sectionTitle) continue;
-      const carrierIndex = enriched.reduce((best, chapter, index) => {
-        const text = normalize(`${chapter.title} ${(chapter.sections || []).join(' ')}`);
-        const score = features.filter(feature => text.includes(feature)).length;
-        const bestScore = best.index >= 0 ? features.filter(feature => normalize(`${enriched[best.index].title} ${(enriched[best.index].sections || []).join(' ')}`).includes(feature)).length : -1;
-        return score > bestScore ? { index, score } : best;
-      }, { index: -1, score: -1 });
-      const target = enriched[carrierIndex.index >= 0 ? carrierIndex.index : 0];
+      const carrierIndex = chapterTexts.reduce((best, text, index) => {
+        // 挂靠评分：语义相似度可用时用余弦打分；否则用条目标题的显式包含计数兜底
+        const score = input.semanticSimilarity ? input.semanticSimilarity(sectionTitle, text) : (text.includes(normalize(sectionTitle)) ? 1 : 0);
+        return score > best.score ? { index, score } : best;
+      }, { index: -1, score: -1 }).index;
+      const target = enriched[carrierIndex >= 0 ? carrierIndex : 0];
       if (!target.sections.some(existing => normalize(existing).includes(normalize(sectionTitle)) || normalize(sectionTitle).includes(normalize(existing)))) {
         target.sections.push(sectionTitle);
         target.purpose = `${target.purpose || ''}；系统已按招标文件技术评审条目自动补足小节“${sectionTitle}”，必须基于项目资料与适用技术展开实质内容。`;
-        issues.push({ level: 'warning', severity: 'warning', message: `评分标准条目“${item}”无承接章节，已自动补小节“${sectionTitle}”至“${target.title}”`, suggestion: '请确认补充小节与招标文件评审条目口径一致。' });
+        issues.push({ level: 'warning', severity: 'warning', message: `评分标准条目“${sectionTitle}”无承接章节，已自动补小节“${sectionTitle}”至“${target.title}”`, suggestion: '请确认补充小节与招标文件评审条目口径一致。' });
       }
     }
   }

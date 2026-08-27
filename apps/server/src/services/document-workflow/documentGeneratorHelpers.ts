@@ -383,10 +383,24 @@ export function normalizeBareMarkdownTables(markdown: string) {
       index = cursor;
       continue;
     }
+    // 裸表格列头判定：第一行单元格若均为短词且不含数值/标点（数据行普遍含数量、日期、百分比或长句），
+    // 视为 LLM 原始列头行，保留并仅补分隔行；否则无法判定列头语义，原样保留。
+    // 强制套通用列头模板会把语义不符的模板列头盖在材料/设备等数据上，造成
+    // “责任岗位”列填日期、“检查标准”列填管径的列头数据错位（真实生成缺陷）
+    const firstRow = rowCells[0] || [];
+    const dataRows = rowCells.slice(1);
+    const looksLikeHeaderRow = firstRow.length >= 2 && firstRow.every(cell =>
+      cell.length > 0 && cell.length <= 12 && !/\d/u.test(cell) && !/[。，；：]/u.test(cell))
+      && dataRows.some(cells => cells.some(cell => /\d/u.test(cell) || cell.length > 12));
+    if (!looksLikeHeaderRow) {
+      output.push(...rows);
+      index = cursor;
+      continue;
+    }
     if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
-    output.push(formatMarkdownTableLine(genericTableHeaders(columns), columns));
+    output.push(formatMarkdownTableLine(firstRow, columns));
     output.push(formatMarkdownTableLine(Array.from({ length: columns }, () => '---'), columns));
-    for (const row of rows) output.push(formatMarkdownTableLine(splitMarkdownTableLine(row), columns));
+    for (const row of dataRows) output.push(formatMarkdownTableLine(row, columns));
     index = cursor;
     if (index < lines.length && lines[index]?.trim()) output.push('');
   }
@@ -883,18 +897,26 @@ export function processingTypeWeightForChapter(chapter: DocumentTemplateChapter,
 
 export function chapterTextScore(chapter: DocumentTemplateChapter, item: Pick<DocumentEvidence, 'content' | 'sectionTitle' | 'filePath'>) {
   const text = `${item.sectionTitle || ''}\n${item.filePath}\n${item.content}`;
-  const tokens = [...new Set([chapter.title, ...(chapter.sections || []), ...chapter.requiredFacts].flatMap(value => value.split(/[\s、，,。；;：:（）()《》【】\-/]+/u)).map(value => value.trim()).filter(value => value.length >= 2).slice(0, 36))];
+  const tokens = [...new Set([chapter.title, ...(chapter.sections || []), ...chapter.requiredFacts].flatMap(value => value.split(/[\s、，,。；;：:（）()《》【】-]+/u)).map(value => value.trim()).filter(value => value.length >= 2).slice(0, 36))];
   const hits = tokens.filter(token => text.includes(token)).length;
   return Math.min(1.8, hits * 0.16);
 }
 
-export function optimizeChapterEvidence(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[], options: { maxChars: number; maxItems?: number; preservePinned?: boolean }, diagnostics?: DocumentGenerationDiagnostics) {
-  const scored = evidence.map(item => ({
-    ...item,
+/** 证据语义排序用的规范文本（与语义相似度闭包缓存 key 一致，调用方构建闭包时必须用同一函数取 rightTexts） */
+export function semanticEvidenceText(item: Pick<DocumentEvidence, 'sectionTitle' | 'content'>): string {
+  return `${item.sectionTitle || ''}${item.content}`.slice(0, 600);
+}
+
+export function optimizeChapterEvidence(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[], options: { maxChars: number; maxItems?: number; preservePinned?: boolean; semantic?: { similarity: (leftText: string, rightText: string) => number; queryText: string } }, diagnostics?: DocumentGenerationDiagnostics) {
+  const scored = evidence.map(item => {
     // 池截断排序与注入排序统一为 evidencePromptImportance 口径（量化值 +8 / 项目基础事实 +10 / requiredFacts +6 / 标准编号 +3），
     // 避免量化关键事实与模板要求事实在 maxItems 截断时被高分泛化块挤出证据池
-    score: evidencePromptImportance(item, chapter.requiredFacts) * processingTypeWeightForChapter(chapter, item.processingType) + chapterTextScore(chapter, item),
-  }));
+    const baseScore = evidencePromptImportance(item, chapter.requiredFacts) * processingTypeWeightForChapter(chapter, item.processingType) + chapterTextScore(chapter, item);
+    // 语义相关性（本地 bge-small 余弦）作排序主键（×10 压过词面/重要性分数），词面与重要性分数保留作第二键；
+    // 闭包缓存未命中的条目（候选池外/嵌入失败）语义分为 0，退回 baseScore 口径
+    const semanticScore = options.semantic ? options.semantic.similarity(options.semantic.queryText, semanticEvidenceText(item)) : 0;
+    return { ...item, score: baseScore * 0.5 + semanticScore * 10 };
+  });
   return selectEvidenceByBudget(scored, options, diagnostics);
 }
 
@@ -936,9 +958,8 @@ export async function retrieveSectionEvidence(input: { manager: ReturnType<typeo
     limit: 5,
     weights: searchWeightsForChapter(query),
     generationMode: false,
-    // 小节级检索跳过 LocalReranker 交叉编码：每小节一次全链路检索是本链路最大耗时点，
-    // 后续还有 evidenceForSection/selectEvidenceByBudget 双层本地重排兜底，交叉编码收益低
-    disableReranker: true,
+    // 小节级检索打开 LocalReranker 交叉编码（历史缺陷：disableReranker 跳过交叉编码后，召回主键退化为关键词/向量混合分，
+    // 小节级 top-5 证据相关性下降，承接/证据取舍被迫依赖正则词面），rerank 后分数作为小节证据排序主键
   });
   return selectEvidenceByBudget(result.results
     .filter(item => input.scopedFilePaths.includes(item.filePath))

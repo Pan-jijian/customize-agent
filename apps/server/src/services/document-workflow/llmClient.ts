@@ -109,7 +109,7 @@ export function getActiveModelWithProvider() {
   return { model: selected, provider: providerConfig };
 }
 
-export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {}): Promise<string | undefined> {
+export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; disableThinkingBoost?: boolean } = {}): Promise<string | undefined> {
   if (options.diagnostics) options.diagnostics.llm.calls += 1;
   const release = await acquireLlmSlot(options.signal);
   if (options.diagnostics) options.diagnostics.llm.maxActive = Math.max(options.diagnostics.llm.maxActive, activeDocumentLlmCalls);
@@ -132,17 +132,19 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
     // deepseek 官方 API 输出上限为 8192，openai 兼容工厂报告的 16384 必须收敛，否则会被 API 拒绝
     const rawOutputCap = provider.capabilities?.maxOutputTokens || 8192;
     const outputCap = /deepseek/iu.test(modelName) ? Math.min(rawOutputCap, 8192) : rawOutputCap;
-    const baseMaxTokens = thinkingModel && options.maxTokens
+    // disableThinkingBoost（p3-s2）：小步化调用（如主题块成稿）按目标字数 1:1.2 直接设定输出预算，不再 ×6 放大——
+    // 小预算强制模型缩短思考，把共享输出池让给正文；×6 放大只保留给整章级大调用
+    const baseMaxTokens = thinkingModel && options.maxTokens && !options.disableThinkingBoost
       ? Math.min(Math.ceil(options.maxTokens * 6), outputCap)
       : options.maxTokens;
     // 空响应标记：推理模型思考阶段耗尽输出预算时 content 可能为空；
     // 严禁把 thinkingContent（模型思维链）当作正文返回，否则思考过程会泄漏进文档
     const EMPTY_CONTENT = Symbol('empty-content');
-    const attemptOnce = async (maxTokensArg: number | undefined): Promise<string> => {
+    const attemptOnce = async (maxTokensArg: number | undefined, thinkingTrimmingHint = false): Promise<string> => {
       if (options.signal?.aborted) throw new Error('用户中止');
       const response = await provider.chat([
         { role: 'system', content: jsonOnly ? `${system}\n只返回 JSON，不要返回 markdown。` : system },
-        { role: 'user', content: prompt },
+        { role: 'user', content: thinkingTrimmingHint ? `${prompt}\n\n（重要：缩短思考过程，直接给出最终结论。）` : prompt },
       ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: maxTokensArg, signal: options.signal });
       const content = response.content?.trim() ?? '';
       if (content) return content;
@@ -155,9 +157,11 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
     for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
       if (options.signal?.aborted) throw new Error('用户中止');
       try {
-        // 空响应重试时把输出预算提升到模型上限，给思考阶段与正文留足空间
-        const attemptMaxTokens = attempt === 0 ? baseMaxTokens : (thinkingModel ? outputCap : baseMaxTokens);
-        const content = await attemptOnce(attemptMaxTokens);
+        // 空响应重试提示词收敛：输出预算保持不变（放大预算已被实测证伪——思考阶段会同步吃掉新增预算），
+        // 改为在用户提示词后追加“缩短思考”指令，把共享输出池让给正文；瞬态错误重试不追加（网络重试与提示词无关）
+        const attemptMaxTokens = baseMaxTokens;
+        const thinkingTrimmingHint = attempt === 1 && lastError === EMPTY_CONTENT;
+        const content = await attemptOnce(attemptMaxTokens, thinkingTrimmingHint);
         llmFailureStreak = 0;
         // P1-9：per-generation streak 同步清零（成功即恢复并发），多文档互不影响
         if (options.diagnostics) options.diagnostics.llm.failureStreak = 0;
@@ -198,12 +202,117 @@ export function extractJsonPayload(response: string) {
   return trimmed;
 }
 
-export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {}): Promise<T | undefined> {
-  const response = await callDocumentLlm(system, prompt, true, { maxTokens: options.maxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics });
-  if (!response) return undefined;
+/** 轻量 JSON Schema 字段定义（规划/审查/修复类 jsonOnly 调用的输出约束，避免引入重依赖） */
+export interface DocumentJsonSchemaField {
+  type: 'string' | 'number' | 'boolean' | 'array' | 'object';
+  /** object 内字段是否必填（缺失即报错） */
+  required?: boolean;
+  minLength?: number;
+  maxLength?: number;
+  minItems?: number;
+  maxItems?: number;
+  /** array 元素约束 */
+  items?: DocumentJsonSchemaField;
+  /** object 子字段约束 */
+  properties?: Record<string, DocumentJsonSchemaField>;
+}
+
+export interface DocumentJsonSchema {
+  type: 'object';
+  required?: string[];
+  properties: Record<string, DocumentJsonSchemaField>;
+}
+
+/** 校验单个值：返回错误明细（含字段路径，如 $.blocks[2].subPoints[0].title），供诊断透传 */
+function validateSchemaField(value: unknown, field: DocumentJsonSchemaField, path: string): string[] {
+  const actualType = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
+  if (actualType !== field.type) return [`字段 ${path} 类型错误（期望 ${field.type}，得到 ${actualType}）`];
+  const errors: string[] = [];
+  if (field.type === 'string') {
+    const text = value as string;
+    if (field.minLength !== undefined && text.length < field.minLength) errors.push(`字段 ${path} 长度不足（期望 ≥${field.minLength}，得到 ${text.length}）`);
+    if (field.maxLength !== undefined && text.length > field.maxLength) errors.push(`字段 ${path} 长度超限（期望 ≤${field.maxLength}，得到 ${text.length}）`);
+  } else if (field.type === 'array') {
+    const items = value as unknown[];
+    if (field.minItems !== undefined && items.length < field.minItems) errors.push(`字段 ${path} 条数不足（期望 ≥${field.minItems}，得到 ${items.length}）`);
+    if (field.maxItems !== undefined && items.length > field.maxItems) errors.push(`字段 ${path} 条数超限（期望 ≤${field.maxItems}，得到 ${items.length}）`);
+    if (field.items) items.forEach((item, index) => errors.push(...validateSchemaField(item, field.items as DocumentJsonSchemaField, `${path}[${index}]`)));
+  } else if (field.type === 'object' && field.properties) {
+    const record = value as Record<string, unknown>;
+    for (const [key, subField] of Object.entries(field.properties)) {
+      const subValue = record[key];
+      if (subValue === undefined) {
+        if (subField.required) errors.push(`缺失字段 ${path}.${key}`);
+        continue;
+      }
+      errors.push(...validateSchemaField(subValue, subField, `${path}.${key}`));
+    }
+  }
+  return errors;
+}
+
+/** 顶层对象校验：必填字段缺失 + 属性约束，错误上限 6 条防止日志爆炸 */
+export function validateJsonAgainstSchema(value: unknown, schema: DocumentJsonSchema): string[] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return [`根节点类型错误（期望 object，得到 ${value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value}）`];
+  }
+  const record = value as Record<string, unknown>;
+  const errors: string[] = [];
+  for (const key of schema.required || []) {
+    if (!(key in record)) errors.push(`缺失字段 $.${key}`);
+  }
+  for (const [key, field] of Object.entries(schema.properties)) {
+    const fieldValue = record[key];
+    if (fieldValue === undefined) {
+      if (field.required) errors.push(`缺失字段 $.${key}`);
+      continue;
+    }
+    errors.push(...validateSchemaField(fieldValue, field, `$.${key}`));
+  }
+  return errors.slice(0, 6);
+}
+
+/** JSON 截断特征探测：未闭合括号/引号 + 响应末段，用于解析失败诊断（截断位置） */
+export function describeJsonParseFailure(raw: string): string {
+  const payload = extractJsonPayload(raw);
+  const openBraces = (payload.match(/\{/gu) || []).length - (payload.match(/\}/gu) || []).length;
+  const openBrackets = (payload.match(/\[/gu) || []).length - (payload.match(/\]/gu) || []).length;
+  const tail = payload.slice(-80).replace(/\s+/gu, ' ');
+  if (openBraces > 0 || openBrackets > 0) return `JSON 被截断（{ 未闭合 ${openBraces} 个、[ 未闭合 ${openBrackets} 个），截断位置响应末段：${tail}`;
+  return `JSON 语法错误，出错位置响应末段：${tail}`;
+}
+
+/** schema 校验失败记录：写入 diagnostics 供进度展示与测试断言（lastError 覆盖为可诊断原因） */
+function recordJsonValidationFailure(diagnostics: DocumentGenerationDiagnostics | undefined, message: string) {
+  if (!diagnostics) return;
+  diagnostics.llm.schemaFailures = (diagnostics.llm.schemaFailures || 0) + 1;
+  diagnostics.llm.lastError = message;
+}
+
+export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; outFailure?: { value?: string } } = {}): Promise<T | undefined> {
+  const response = await callDocumentLlm(system, prompt, true, { maxTokens: options.maxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost });
+  if (!response) {
+    // 空响应/网络失败：原因由 callDocumentLlm 写入 diagnostics.llm.lastError，经 outFailure 带出供调用方定位
+    if (options.outFailure && options.diagnostics?.llm.lastError) options.outFailure.value = options.diagnostics.llm.lastError;
+    return undefined;
+  }
+  const payload = extractJsonPayload(response);
   try {
-    return JSON.parse(extractJsonPayload(response)) as T;
+    const parsed = JSON.parse(payload) as T;
+    if (options.schema) {
+      const errors = validateJsonAgainstSchema(parsed, options.schema);
+      if (errors.length > 0) {
+        const message = `JSON Schema 校验失败：${errors.join('；')}`;
+        recordJsonValidationFailure(options.diagnostics, message);
+        if (options.outFailure) options.outFailure.value = message;
+        return undefined;
+      }
+    }
+    return parsed;
   } catch {
+    const message = `JSON 解析失败：${describeJsonParseFailure(payload)}`;
+    recordJsonValidationFailure(options.diagnostics, message);
+    if (options.outFailure) options.outFailure.value = message;
     return undefined;
   }
 }

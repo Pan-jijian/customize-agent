@@ -17,6 +17,7 @@ import { criticalSectionBlockerMinChars, currentSectionBlock, ensureGroupTertiar
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE, QUANTIFIED_FACT_RE } from './parameterPatterns';
 import type { PlannedChapterStructure } from './chapterPlanner';
 import { cleanFactValue, isActionableFactValue } from './documentFactTrace';
+import { DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE, chapterAnchoredRules, sectionAnchoredRules } from './writingSpec';
 
 export * from './chapterPostProcessing';
 
@@ -194,7 +195,7 @@ function factCoveredByEvidence(fact: string, evidence: DocumentEvidence[]): bool
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number } = {}) {
+export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; disableThinkingBoost?: boolean } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   // 证据注入预算与 generationBudget 的证据区间（7k-26k 档）对齐：未显式传入时保持旧默认，
   // 由 documentGenerator 主路径统一传入按章节目标字计算的 floor/ceiling
@@ -242,6 +243,9 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
   const tablePlanInstruction = tablePlansPrompt(chapter);
   const constructionOrgRuleInstruction = constructionOrgChapterRulePrompt(chapter);
   const constructionOrgBonusInstruction = constructionOrgBonusModulePrompt(chapter);
+  // 锚定专项规则（章标题+小节清单整体判别）：主题块管线的 blockChapter.sections 是 H4 要点标题，
+  // 与逐小节管线同源同口径注入分部分项/主要施工内容专项要求（历史缺陷：主题块管线拿不到专项规则导致概略）
+  const anchoredRuleInstructions = chapterAnchoredRules(chapter.title, chapter.sections || []);
   const system = [
     FORMAL_WRITING_RULES,
     options.forbidDrawingImages ? '图片类材料只作为文本事实依据；禁止插入图片或 Markdown 图片语法。' : '',
@@ -256,6 +260,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     tablePlanInstruction,
     constructionOrgRuleInstruction,
     constructionOrgBonusInstruction,
+    ...anchoredRuleInstructions,
     requirement ? `用户要求：${requirement}` : '',
     userFactBlock,
     projectContext ? `上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${projectContext}` : '',
@@ -276,7 +281,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     evidenceText,
     options.userWriterRules ? `\n【用户写作指令——必须严格遵守】\n${options.userWriterRules}` : '',
   ].filter(Boolean).join('\n');
-  const content = await callDocumentLlm(system, prompt, false, { maxTokens: options.maxTokens, signal: options.signal, diagnostics: options.diagnostics });
+  const content = await callDocumentLlm(system, prompt, false, { maxTokens: options.maxTokens, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost });
   if (!content || content.length < 120) return undefined;
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(content.startsWith('## ') ? content : `## ${chapter.title}\n\n${content}`, Boolean(options.forbidDrawingImages)));
 }
@@ -455,7 +460,7 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   const sectionFactCard = buildSectionFactCard(input.sectionTitle, sectionEvidence);
   const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 3500, 9000), requiredFacts: input.chapter.requiredFacts });
   // 工作包级小节（项目主要施工内容/主要分部分项工程施工方案/主要施工方法）：从项目图谱/上下文识别工作包，匹配工艺知识卡，注入工序链与工艺参数参考
-  const majorConstructionPackages = /项目主要施工内容|主要分部分项工程施工方案|主要施工方法/u.test(input.sectionTitle) ? parseMajorConstructionPackages(input.projectContext, sectionEvidence) : [];
+  const majorConstructionPackages = (MAJOR_CONTENT_SECTION_RE.test(input.sectionTitle) || DIVISION_SECTION_RE.test(input.sectionTitle)) ? parseMajorConstructionPackages(input.projectContext, sectionEvidence) : [];
   const processKnowledgeCards = majorConstructionPackages.length > 0 ? matchProcessKnowledgeCards(majorConstructionPackages.map(pkg => pkg.name)) : [];
   const processKnowledgePrompt = processKnowledgeCards.length > 0 ? buildProcessKnowledgePrompt(processKnowledgeCards, majorConstructionPackages.map(pkg => pkg.name)) : '';
   const prompt = [
@@ -472,8 +477,8 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     input.roleContext,
     input.missingFacts.length ? `需要特别补足的信息：${input.missingFacts.join('、')}` : '',
     input.qualityFeedback ? `上轮小节未通过质量检查，必须修正：${input.qualityFeedback}` : '',
-    /项目主要施工内容/u.test(input.sectionTitle) ? '【项目主要施工内容专项结构】只能根据绑定材料中的当前项目事实识别施工对象和工作包；不得套用固定行业模板，不得复述完整工程概况，不得写“以图纸清单为准”式空话；不得使用 Markdown 表格。必须按专业工程/分部分项工程逐项展开，每项使用“#### 工作包名称”作为三级小节标题，并固定包含“施工概况：”“施工流程：”“施工方法：”三段。工作包小节必须与上下文“主要施工工作包”列表一一对应，每个工作包只允许展开一次；严禁把同一个工作包以“X工程”“X工作包”两种口径重复写成两个小节，也不得新增图谱之外的工作包小节。施工概况必须写该工作包对应的本项目作业对象、部位、规模/工程量、材料设备或系统边界，写成连贯叙述段落，不得出现“1．xxx 2．xxx”编号清单或“xxx｜工程量”式清单原文罗列；施工流程必须使用“→”串联关键工序；施工方法必须写成连贯叙述，落到具体工具机具、测量/检测方法、工艺参数、材料规格、穿插关系、质量验收、复试检测和资料闭环，方法叙述中的连续工序序列同样用“→”串联（如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”），每个工作包的方法段正文至少 1 条不少于 4 个环节的箭头工序链，不得只把箭头局限在施工流程行；每个工作包施工方法必须落位至少 3 个具体工艺参数（厚度、间距、偏差、含水率、饱满度、坡度、压实度等），参数来自绑定材料或行业通用规范值，禁止“按规范施工”“结合实际执行”式空话，严禁把工程量清单条目原样罗列成“xxx：2台；xxx：1台；”式参数堆砌。施工方法写法样例（句式参照，内容按本项目事实替换）：“配电箱采用挂墙方式安装，箱体中心距地1.5m，盘面垂直度偏差不超过1.5/1000；柜内元器件按系统图接线，导线分色标识，接线紧固力矩按规格控制；安装完成后进行绝缘电阻测试并形成通电试运行记录。”至少形成 5 个施工工作包，工作包必须来自绑定材料证据。' : '',
-    /主要分部分项工程施工方案/u.test(input.sectionTitle) ? '【主要分部分项工程施工方案专项要求】每个“#### 分项工程方案”三级小节必须包含施工概况（本项目作业对象、部位、工程量）、工艺流程（用“→”串联关键工序）和施工方法（工具机具、材料规格、验收标准）。施工方法叙述中的连续工序序列同样用“→”串联（如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”），每个分项方案的方法段正文至少 1 条不少于 4 个环节的箭头工序链，不得只把箭头局限在工艺流程行；每个分项方案正文必须落位至少 4 个工艺参数（mm、MPa、间距、偏差、坡度、养护天数、试验压力、搭接长度等），参数来自绑定材料或行业通用规范值，不得编造；纯设备配置型小节必须写型号、规格、容量、数量参数；不得写“按规范施工”“结合实际执行”式空话。' : '',
+    // 专项写法规则单点注入：从 writingSpec 查表（含分部分项专项要求），三管线同源同口径
+    ...sectionAnchoredRules(input.sectionTitle),
     processKnowledgePrompt,
     `请只生成当前节内容，使用“### ${input.sectionTitle}”作为节标题；正文必须下沉到若干“#### 三级小节标题”下面，不得在 ### 标题后直接写大段正文。目标约 ${input.targetWords} 字${input.maxWords ? `，最多不超过 ${input.maxWords} 字` : ''}。`,
     '本章节结构已由系统按模板和提示词锁定；不得删除、重命名、合并或重排当前节标题；每个节下必须自然展开三级小节，三级小节承载正文。',
@@ -598,6 +603,8 @@ async function buildFocusedSectionDraft(input: Parameters<typeof buildLlmSection
     input.requirement ? `用户要求：${input.requirement}` : '',
     professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
     keySectionWritingRequirement(input.sectionTitle),
+    // 专项写法规则单点注入：与逐小节/整章管线同源（writingSpec 查表）
+    ...sectionAnchoredRules(input.sectionTitle),
     input.tablePlanInstruction || '',
     sectionFactCard.prompt,
     `目标正文约 ${input.targetWords} 字，最多 ${input.maxWords || Math.ceil(input.targetWords * 1.18)} 字。正文必须分布在 #### 三级小节下，包含对象范围、执行措施、检查验收和资料闭环；没有精确数值时写正式过程控制，不编造数值。`,
@@ -1043,6 +1050,8 @@ export async function buildPlannedChapterContent(input: {
   factCoverageContext?: string;
   compactProjectContext?: boolean;
   sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>;
+  /** 块级进度回调：块成稿完成即触发（phase='complete'，partialSections 为已完成块正文），供 checkpoint 快照写盘 */
+  onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void;
   diagnostics?: DocumentGenerationDiagnostics;
   signal?: AbortSignal;
 }, structure: PlannedChapterStructure): Promise<string | undefined> {
@@ -1095,7 +1104,10 @@ export async function buildPlannedChapterContent(input: {
           minWords: Math.floor(block.targetWords * 0.6),
           targetWords: block.targetWords,
           maxWords: Math.ceil(block.targetWords * 1.1),
-          maxTokens: outputTokensForChapter(Math.floor(block.targetWords * 0.6), block.targetWords),
+          // p3-s2：块成稿输出预算按目标字数 1:1.2 设定且不走 thinking ×6 放大（小预算强制短思考，把共享输出池让给正文），
+          // 下限 1600 token 保证拆半后的小块（800~1000 字）仍有足够正文空间
+          maxTokens: Math.max(1600, Math.ceil(block.targetWords * 1.2)),
+          disableThinkingBoost: true,
           factCoverageContext: `${input.factCoverageContext || ''}${factsHint ? `\n${factsHint}` : ''}`,
           twoStep: false,
           signal: input.signal,
@@ -1130,6 +1142,8 @@ export async function buildPlannedChapterContent(input: {
   };
   const runBlock = async (block: (typeof blocks)[number], index: number): Promise<void> => {
     results[index] = await writeBlock(block, index);
+    // p3-s3 块级 checkpoint：块成稿完成即上报（partialSections 按 index 序保留已完成块），供 documentGenerator 节流写盘快照，中断续跑不重生成
+    if (results[index]) input.onSectionProgress?.({ completed: results.filter(Boolean).length, total: blocks.length, sectionTitle: block.title, phase: 'complete', partialSections: [...results] });
   };
   for (let offset = 0; offset < blocks.length; offset += concurrency) {
     throwIfAborted(input.signal);

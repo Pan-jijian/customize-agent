@@ -3,6 +3,8 @@ import * as path from 'node:path';
 import type { CanonicalFact as GovernedCanonicalFact, CanonicalFactModel, DocumentFact, NumericScopeConflict, ProjectGraph } from './types';
 import { normalizeOcrFactText } from './factsModel';
 import { stableHash, stringifyFactValue } from './utils';
+import { recordArbitrationCases } from './workflowCaseLog';
+import { loadWorkflowRules, workflowRulesHash, type WorkflowRulesConfig } from './workflowRules';
 
 export type FactValueType = 'duration' | 'money' | 'location' | 'organization' | 'standard' | 'identifier' | 'scale' | 'text';
 
@@ -342,10 +344,13 @@ function factCacheRoot(projectRoot?: string) {
   return root;
 }
 
-function canonicalFactCacheKey(input: { facts: DocumentFact[]; markdown?: string; projectGraph?: ProjectGraph; requiredKeys?: string[]; requirement?: string; templateId?: string }) {
+function canonicalFactCacheKey(input: { facts: DocumentFact[]; markdown?: string; projectGraph?: ProjectGraph; requiredKeys?: string[]; requirement?: string; templateId?: string; projectRoot?: string }) {
   return stableHash({
-    // v4：裁决前置到事实主表构建入口（补疑优先 + “总”字可选正则），旧缓存结构不再适用
-    version: 'canonical-facts-v4',
+    // v5：数值语境四分类裁决（门槛型/目标型剔除、锚点评分决胜、置信度分级、层数/车位数新口径），
+    // 旧缓存按旧裁决口径产出，不再适用；
+    // rulesHash：workflowRules 配置哈希并入缓存键（F3），项目级规则覆盖变化自动失效旧裁决缓存，无需手动 bump
+    version: 'canonical-facts-v5',
+    rulesHash: workflowRulesHash(input.projectRoot),
     requirement: input.requirement || '',
     templateId: input.templateId || '',
     requiredKeys: input.requiredKeys || [],
@@ -374,43 +379,117 @@ function writeCachedCanonicalFacts(projectRoot: string | undefined, key: string,
 }
 
 // ===== 源级同口径数值冲突裁决 =====
-// 不同资料文件对同一总量口径（建设规模/估算价/工期）给出不同数值时，生成前必须先裁决出统一口径，
+// 不同资料文件对同一总量口径（建设规模/估算价/工期/层数/车位数）给出不同数值时，生成前必须先裁决出统一口径，
 // 否则正文会混写两个数值（历史缺陷：招标文件正文 4645㎡ 与补疑/清单 4646㎡ 同时进入事实主表）
 
-function scopeReForKind(kind: NumericScopeConflict['kind']) {
+// ===== 数值语境四分类（结构锚定 + 语义角色判别，取代纯词表枚举）=====
+// 同一口径数值在不同语境中承担不同语义角色，不能一律参与裁决：
+// - ontological 本体口径：资料对项目总量口径的直接表述，裁决池的主体；
+// - amendment 修正型：补疑/答疑/澄清类文件中的正式修正表述（修正为/调整为/变更为），裁决最高可信；
+// - aspirational 目标型：拟/规划/目标等愿景表述，不是确定口径，不参与裁决；
+// - threshold 门槛型：不低于/不少于/不超过等资格或约束限定表述，描述的是门槛而非项目真实数值，
+//   绝不能作为裁决候选覆盖本体口径（历史缺陷：补疑资格条款“项目经理业绩要求：建筑面积不低于19000㎡”
+//   污染招标正文“建筑规模20000㎡”）。
+
+export type NumericContextClass = 'ontological' | 'amendment' | 'aspirational' | 'threshold';
+
+// 语境分类正则编译缓存（词表源字符串来自 workflowRules 配置，编译一次复用）
+const ruleReCache = new Map<string, RegExp>();
+function ruleRe(source: string) {
+  let re = ruleReCache.get(source);
+  if (!re) { re = new RegExp(source, 'u'); ruleReCache.set(source, re); }
+  return re;
+}
+
+/**
+ * 数值语境分类：取「口径词前 10 字符 + 口径词后到数值之间的宽窗口」为判别语境。
+ * “计划工期/合同工期”中的“计划/合同”属于口径词自身，不落入窗口，避免误判目标型；
+ * “拟建设总建筑面积约5000㎡”的“拟建设”落在口径词前窗口 → 目标型；
+ * “建筑面积不低于19000㎡”的“不低于”落在口径词后窗口 → 门槛型。
+ * 四分类词表由 workflowRules 配置驱动（项目级可覆盖，与缓存哈希联动）。
+ */
+function classifyNumericContext(text: string, scopeStart: number, scopeLength: number, valueStart: number, sourceFile: string | undefined, rules: WorkflowRulesConfig): NumericContextClass {
+  const before = text.slice(Math.max(0, scopeStart - 10), scopeStart);
+  const gap = text.slice(scopeStart + scopeLength, valueStart);
+  const context = `${before}${gap}`;
+  const { addendumSource, amendmentContext, thresholdComparison, aspirationalPrefix } = rules.factGovernance;
+  if (ruleRe(addendumSource).test(sourceFile || '') && ruleRe(amendmentContext).test(context)) return 'amendment';
+  if (ruleRe(thresholdComparison).test(context)) return 'threshold';
+  if (ruleRe(aspirationalPrefix).test(before)) return 'aspirational';
+  return 'ontological';
+}
+
+/** 数值与口径词的锚定强度：距离越近、语义角色越实，锚定越强（同优先级时作为裁决决胜键） */
+function anchorScoreFor(contextClass: NumericContextClass, gapLength: number) {
+  const distance = gapLength <= 3 ? 3 : gapLength <= 9 ? 2 : 1;
+  return distance + (contextClass === 'ontological' || contextClass === 'amendment' ? 2 : 1);
+}
+
+function scopeKindLabel(kind: NumericScopeConflict['kind']) {
+  if (kind === 'area') return '面积';
+  if (kind === 'cost') return '金额';
+  if (kind === 'floors') return '层数';
+  if (kind === 'parkingSpaces') return '车位数';
+  return '工期';
+}
+
+/**
+ * 总量口径词基础表（同源单点）：qualityValidation 的 SCALE_SCOPE_RE/COST_SCOPE_RE 是此表带子项口径
+ * 黑名单（地上/地下/门卫室等分层口径排除）的增强版——改基础口径词时两侧必须同步。
+ */
+export function scopeReForKind(kind: NumericScopeConflict['kind']) {
   // “总”字可选：招标文件常写“建筑面积约为4645㎡”（无“总”字），必须与“总建筑面积”同口径检出；
   // 口径限定为建筑总量（建设规模/建筑面积）：用地面积、占地面积是独立字段（不同口径），
   // 混入裁决会让用地数值污染“建设规模”期望口径（历史缺陷：正文正确转述资料用地面积被判为与建设规模冲突）
   if (kind === 'area') return /总?建筑面积|建设规模/u;
   if (kind === 'cost') return /合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|工程总投资|总投资|工程造价/u;
+  if (kind === 'floors') return /总?层数|建筑层数|地上层数|地下层数|楼层数/u;
+  if (kind === 'parkingSpaces') return /总?车位|停车位|机动车位|车位数/u;
   return /计划工期|合同工期|总工期|施工周期/u;
 }
 
-function unitReForKind(kind: NumericScopeConflict['kind']) {
+/** 总量口径单位基础表（与 scopeReForKind 同源单点，qualityValidation 的 SCALE_UNIT_RE/COST_UNIT_RE 同源） */
+export function unitReForKind(kind: NumericScopeConflict['kind']) {
   if (kind === 'area') return '(万?㎡|万?m²|万?m2|万?平方米)';
   if (kind === 'cost') return '(万元|亿元|万?元)';
+  if (kind === 'floors') return '(层)';
+  if (kind === 'parkingSpaces') return '(个|个车位|个停车位)';
   return '(日历天|天|个月|月)';
 }
 
-function extractNumericScopeEntries(text: string, kind: NumericScopeConflict['kind']) {
-  const entries: Array<{ scope: string; value: string; unit: string; compareKey: string }> = [];
+interface NumericScopeEntry {
+  scope: string;
+  value: string;
+  unit: string;
+  compareKey: string;
+  contextClass: NumericContextClass;
+  anchorScore: number;
+  gapLength: number;
+}
+
+function extractNumericScopeEntries(text: string, kind: NumericScopeConflict['kind'], sourceFile: string | undefined, rules: WorkflowRulesConfig) {
+  const entries: NumericScopeEntry[] = [];
   const scopeRe = scopeReForKind(kind);
-  const pattern = new RegExp(`(?:${scopeRe.source})(?:[^0-9\\n]{0,14}?)(\\d{2,}(?:[.,]\\d+)?)\\s*${unitReForKind(kind)}`, 'giu');
+  // 层数/车位数允许个位数（如“地上层数6层”），面积/金额/工期保持两位以上降噪
+  const numberRe = kind === 'floors' || kind === 'parkingSpaces' ? '\\d+(?:[.,]\\d+)?' : '\\d{2,}(?:[.,]\\d+)?';
+  const pattern = new RegExp(`(?:${scopeRe.source})(?:[^0-9\\n]{0,14}?)(${numberRe})\\s*${unitReForKind(kind)}`, 'giu');
+  const numberPattern = new RegExp(numberRe, 'u');
   for (const match of text.matchAll(pattern)) {
-    const scope = match[0].match(scopeRe)?.[0] || '';
+    const scopeMatch = match[0].match(scopeRe);
+    const scope = scopeMatch?.[0] || '';
     const value = match[1].replace(/[,，]/gu, '').trim();
     const unit = (match[2] || '').trim();
-    if (!scope || !value) continue;
-    // 目标性数值甄别：补疑/澄清文件中的“拟建设总建筑面积约5000㎡”“计划总投资X万元”等表述是业务目标而非确定口径，
-    // 不得作为裁决候选覆盖招标正文的确定值（工期类除外：“计划工期/合同工期”本身是正式口径）
-    if (kind !== 'duration') {
-      // 只检查 scope 词前最近句读/换行内的短窗口（“，拟达到总建筑面积5000”命中；“计划工期365日历天，总建筑面积4646㎡”不误伤）
-      const prefix = text.slice(Math.max(0, match.index - 12), match.index).replace(/^.*[。；;\n，,]/u, '');
-      if (/拟|计划|规划|目标|力争|预计|期望|远期|未来|设想|建议|预期|争取/u.test(prefix)) continue;
-    }
+    if (!scope || !value || !numberPattern.test(value)) continue;
+    const scopeStart = (match.index ?? 0) + (scopeMatch?.index ?? 0);
+    const valueStart = (match.index ?? 0) + match[0].indexOf(match[1]);
+    const gapLength = valueStart - (scopeStart + scope.length);
+    const contextClass = classifyNumericContext(text, scopeStart, scope.length, valueStart, sourceFile, rules);
+    // 门槛型/目标型数值是约束或愿景语义，不是项目真实口径，剔除出裁决池（19000 事故根治：
+    // “业绩要求：建筑面积不低于19000㎡”不再作为裁决候选覆盖招标正文“建筑规模20000㎡”）
+    if (contextClass === 'threshold' || contextClass === 'aspirational') continue;
     let compareKey: string;
-    if (kind === 'duration') {
-      // 工期天数与月数不可直接换算，按“数值+单位”原样比对
+    if (kind === 'duration' || kind === 'floors' || kind === 'parkingSpaces') {
+      // 工期天数与月数不可直接换算，层数/车位数无“万”进制，按“数值+单位”原样比对
       compareKey = `${value}|${unit}`;
     } else {
       // 面积/金额归一化到基准单位（㎡/元），使“3.5万㎡”与“35000㎡”、“500万元”与“5000000元”可等价比较
@@ -420,7 +499,7 @@ function extractNumericScopeEntries(text: string, kind: NumericScopeConflict['ki
       const normalized = /亿元/u.test(unit) ? base * 100000000 : /万元/u.test(unit) ? base * 10000 : base;
       compareKey = String(normalized);
     }
-    entries.push({ scope, value, unit, compareKey });
+    entries.push({ scope, value, unit, compareKey, contextClass, anchorScore: anchorScoreFor(contextClass, gapLength), gapLength });
   }
   return entries;
 }
@@ -436,17 +515,17 @@ function sourceFilePriority(sourceFile?: string, roleId?: string) {
   return 50;
 }
 
-export function detectNumericScopeConflicts(facts: DocumentFact[]): NumericScopeConflict[] {
+export function detectNumericScopeConflicts(facts: DocumentFact[], rules: WorkflowRulesConfig = loadWorkflowRules()): NumericScopeConflict[] {
   const conflicts: NumericScopeConflict[] = [];
-  const kinds: NumericScopeConflict['kind'][] = ['area', 'cost', 'duration'];
+  const kinds: NumericScopeConflict['kind'][] = ['area', 'cost', 'duration', 'floors', 'parkingSpaces'];
   for (const kind of kinds) {
-    type Entry = { scope: string; value: string; unit: string; compareKey: string; sourceFile?: string; priority: number };
+    type Entry = NumericScopeEntry & { sourceFile?: string; priority: number };
     const seen = new Set<string>();
     const entries: Entry[] = [];
     for (const fact of facts) {
       const text = stringifyFactValue(fact.value);
       const priority = sourceFilePriority(fact.sourceFile, fact.roleId);
-      for (const entry of extractNumericScopeEntries(text, kind)) {
+      for (const entry of extractNumericScopeEntries(text, kind, fact.sourceFile, rules)) {
         const key = `${fact.sourceFile || ''}|${entry.scope}|${entry.compareKey}`;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -472,13 +551,24 @@ export function detectNumericScopeConflicts(facts: DocumentFact[]): NumericScope
       if (distinctFiles.size < 2) continue;
       const bestPriority = Math.max(...scoped.map(entry => entry.priority));
       const bestEntries = scoped.filter(entry => entry.priority === bestPriority);
-      const bestKeys = new Set(bestEntries.map(entry => entry.compareKey));
-      const winner = bestEntries[0];
+      // 同优先级下按锚点评分决胜：数值与口径词距离越近、语义角色越实（本体/修正型），锚定越强
+      const bestAnchor = Math.max(...bestEntries.map(entry => entry.anchorScore));
+      const anchoredEntries = bestEntries.filter(entry => entry.anchorScore === bestAnchor);
+      const anchoredKeys = new Set(anchoredEntries.map(entry => entry.compareKey));
+      const winner = anchoredKeys.size === 1 ? anchoredEntries[0] : undefined;
+      // 置信度分级：修正型语境明确胜出=high；本体口径胜出=medium；
+      // 数值距口径词超过 9 字符属锚定弱（弱关联），降一级——low 不参与确定性改写，仅作人工复核提示
+      let confidence: NumericScopeConflict['confidence'];
+      if (winner) {
+        const weaklyAnchored = winner.gapLength > rules.factGovernance.weakAnchorGapThreshold;
+        confidence = winner.contextClass === 'amendment' ? (weaklyAnchored ? 'medium' : 'high') : (weaklyAnchored ? 'low' : 'medium');
+      }
       conflicts.push({
         kind,
-        scope: `${scope}（${kind === 'area' ? '面积' : kind === 'cost' ? '金额' : '工期'}口径）`,
+        scope: `${scope}（${scopeKindLabel(kind)}口径）`,
         values: [...new Map(scoped.map(entry => [`${entry.value}${entry.unit}|${entry.sourceFile || ''}`, { value: entry.value, unit: entry.unit, sourceFile: entry.sourceFile, priority: entry.priority }])).values()],
-        resolution: bestKeys.size === 1 ? `${winner.value}${winner.unit}` : undefined,
+        resolution: winner ? `${winner.value}${winner.unit}` : undefined,
+        ...(confidence ? { confidence } : {}),
       });
     }
   }
@@ -486,10 +576,11 @@ export function detectNumericScopeConflicts(facts: DocumentFact[]): NumericScope
 }
 
 export function numericScopeResolutions(conflicts: NumericScopeConflict[]) {
-  // 每个 kind 取第一条确定性裁决（resolution 唯一时才成立）
+  // 每个 kind 取第一条确定性裁决（resolution 唯一时才成立）；
+  // low 置信度的裁决锚定弱、语境模糊，不参与证据/正文的确定性改写，避免用弱裁决覆盖可能正确的原文
   const resolutions = new Map<NumericScopeConflict['kind'], { winnerNum: string; losers: Array<{ value: string; unit: string }> }>();
   for (const conflict of conflicts) {
-    if (!conflict.resolution || resolutions.has(conflict.kind)) continue;
+    if (!conflict.resolution || conflict.confidence === 'low' || resolutions.has(conflict.kind)) continue;
     const winner = conflict.values.find(value => `${value.value}${value.unit}` === conflict.resolution);
     const winnerNum = winner ? winner.value.replace(/[,，]/gu, '') : '';
     const losers = conflict.values
@@ -539,7 +630,15 @@ export function renderScopeOverrideAnchors(conflicts: NumericScopeConflict[]): s
     if (!conflict.resolution) continue;
     const losers = conflict.values.filter(value => `${value.value}${value.unit}` !== conflict.resolution);
     if (losers.length === 0) continue;
-    lines.push(`${conflict.scope}必须统一为 ${conflict.resolution}（补疑/答疑/澄清类修正文件权威最高；${losers.map(loser => `${loser.value}${loser.unit}`).join('、')} 已被修正，正文禁止出现）`);
+    const loserText = losers.map(loser => `${loser.value}${loser.unit}`).join('、');
+    // 分级锚点措辞：置信度决定约束强度；low 只提示人工复核，不注入强制改写约束
+    if (conflict.confidence === 'high') {
+      lines.push(`${conflict.scope}必须统一为 ${conflict.resolution}（补疑/答疑/澄清类修正文件权威最高；${loserText} 已被修正，正文禁止出现）`);
+    } else if (conflict.confidence === 'medium') {
+      lines.push(`${conflict.scope}应统一为 ${conflict.resolution}（按资料来源优先级裁决；${loserText} 为败选值，正文避免使用）`);
+    } else {
+      lines.push(`${conflict.scope}参考口径为 ${conflict.resolution}（锚定较弱，请人工复核；${loserText} 不参与自动改写）`);
+    }
   }
   return lines;
 }
@@ -551,6 +650,8 @@ export function applyScopeConflictResolutions(facts: DocumentFact[], conflicts: 
     area: /建设规模|工程规模|建筑面积|用地面积|占地面积|project_scale|scale/u,
     cost: /合同估算|投资估算|最高投标限价|招标控制价|总投资|工程造价|project_cost|cost|price|amount/u,
     duration: /计划工期|合同工期|总工期|施工周期|duration|schedule/u,
+    floors: /总层数|建筑层数|地上层数|地下层数|楼层数|project_floors|floors/u,
+    parkingSpaces: /总车位|停车位|机动车位|车位数|project_parking|parking/u,
   };
   return facts.map(fact => {
     const kind = ([...resolutions.keys()] as NumericScopeConflict['kind'][]).find(item => kindRe[item].test(fact.key) || kindRe[item].test(fact.value));
@@ -580,7 +681,20 @@ export function buildCanonicalFactModel(input: { facts: DocumentFact[]; markdown
   // 之后 canonical 选择、Writer 输入、校验基准全部只见裁决后的统一口径（补疑值），
   // 文档中从源头就不会出现败选数值（如 4645），无需任何生成后“清除”逻辑
   const rawFacts = input.facts || [];
-  const scopeConflicts = detectNumericScopeConflicts(rawFacts);
+  // 裁决规则按项目加载（支持项目级 workflow-rules.json 覆盖，覆盖变化经 rulesHash 自动失效缓存）
+  const scopeConflicts = detectNumericScopeConflicts(rawFacts, loadWorkflowRules(input.projectRoot));
+  // 裁决案例落盘（数据而非代码）：把本次裁决决策（含置信度与转人工标记）追加进案例库，
+  // 供事后复盘口径演化；只追加、不参与生成决策，失败静默不影响主链路
+  recordArbitrationCases(scopeConflicts.map(conflict => ({
+    caseType: 'scope_conflict_arbitration',
+    recordedAt: Date.now(),
+    kind: conflict.kind,
+    scope: conflict.scope,
+    values: conflict.values.map(value => ({ value: value.value, unit: value.unit, sourceFile: value.sourceFile, priority: value.priority })),
+    winner: conflict.resolution,
+    confidence: conflict.confidence,
+    manualReviewRequired: !conflict.resolution,
+  })));
   const sourceFacts = applyScopeConflictResolutions(rawFacts, scopeConflicts);
   const canonicalMap = buildCanonicalFacts({ facts: sourceFacts, markdown: input.markdown });
   const byKey: Record<string, GovernedCanonicalFact> = {};

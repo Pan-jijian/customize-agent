@@ -10,7 +10,7 @@ import { evaluateDocumentReadiness, readinessPrompt } from '../document-validati
 import type { KbSearchResult } from '@/lib/api';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, GeneratedDocumentDraft, RetrievalCoverageReport, WebAccessConfig } from './types';
 import { buildPromptBindingPlan, defaultProjectRoleConfigIdForTemplate, getDocumentTemplate } from './templateStore';
-import { evidenceLine, evidencePromptBudgetForTarget, selectEvidenceByBudget } from './evidence';
+import { evidenceLine, evidencePromptBudgetForTarget, isExemptEvidenceSource, selectEvidenceByBudget } from './evidence';
 import { displayChapterTitle, effectiveTemplateChapters, extractExplicitOutlineFromSources } from './outline';
 import { evidenceMatchesFact } from './factMatching';
 import { plannedStructurePrompt, extractGeneratedSections } from './markdownComposer';
@@ -18,12 +18,13 @@ import { buildDocumentBudget, documentTextLength } from './budget';
 import { sectionContentIntegrityIssues, crossChapterConsistencyIssues, processSpecConflictIssues, applyDeterministicConsistencyFixes } from './qualityValidation';
 import { buildDocumentBlueprintContext } from './documentBlueprint';
 import { enrichConstructionOrgOutline } from './constructionOrgCatalog';
-import { validateBidStructureBeforeGeneration } from './constructionBidStructure';
+import { validateBidStructureBeforeGeneration, extractEvaluationCriteriaItems, chapterCriteriaText } from './constructionBidStructure';
+import { buildSemanticSimilarity } from './semanticSimilarity';
 import { buildWritingTaskBrief } from './documentWritingTaskBrief';
 import { buildConstructionOrgTablePlans, tablePlanExecutionGaps } from './constructionOrgTablePlan';
 import { buildRetrievalCoverageReport, retrieveDeepChapterEvidence, retrievalCoverageRisk } from './documentEvidenceRetrieval';
 import { buildChapterFactNeeds, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, factNeedsCoveragePrompt, factsForChapterNeeds, resolveChapterFactNeeds } from './factsModel';
-import { adaptiveConcurrency, runWithAdaptiveConcurrency, Semaphore, stableHash, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
+import { adaptiveConcurrency, comparableSectionTitleText, runWithAdaptiveConcurrency, Semaphore, stableHash, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
 import { displayStage, elapsedMessage, upsertProgressStage } from './progress';
 import { getActiveModelWithProvider, raiseDocumentLlmConcurrencyForScale } from './llmClient';
 import { createGenerationDiagnostics, evidenceInScope, measureGenerationStep, promptTextsForResolvedPrompts, repairChapterByQuality, selectDocumentGenerationStrategy } from './rolePipeline';
@@ -37,9 +38,9 @@ import { chapterSectionFactUsageIssues, reviewGlobalConsistency } from './chapte
 import { buildRuntimePromptRules, extractPromptStructuralRules, normalizePlannedSections, planChapterSectionsWithLlm, runtimePromptRulesPrompt } from './promptRuleExtraction';
 import { retrieveWebEvidence, webAccessPrompt } from './webResearchService';
 import { finalizeGeneration } from './documentPipeline';
-import { anchorTitleForSection, chapterCompletionStatus, chapterGenerationTargets, collectProjectBasicEvidence, compactChapterQueries, finalizeChapterContentQuality, hasDepthWarningIssues, kbIndexHealth, optimizeChapterEvidence, PROJECT_BASIC_FACT_QUERIES, qualityFirstEvidenceItemLimit, qualityFirstSearchQueryLimit, repairTargetWordsForSection, resolveChapterPromptExecution, resolveDocumentGenerationEvidenceLimit, retrieveSectionEvidence, searchWeightsForChapter } from './documentGeneratorHelpers';
+import { anchorTitleForSection, chapterCompletionStatus, chapterGenerationTargets, collectProjectBasicEvidence, compactChapterQueries, finalizeChapterContentQuality, hasDepthWarningIssues, kbIndexHealth, optimizeChapterEvidence, PROJECT_BASIC_FACT_QUERIES, qualityFirstEvidenceItemLimit, qualityFirstSearchQueryLimit, repairTargetWordsForSection, resolveChapterPromptExecution, resolveDocumentGenerationEvidenceLimit, retrieveSectionEvidence, searchWeightsForChapter, semanticEvidenceText } from './documentGeneratorHelpers';
 import { buildProjectGraph } from './projectGraph';
-import { referenceQualityTargetLines } from './templateReferenceService';
+import { referenceQualityTargetLines, referenceWritingSkeletonLines } from './templateReferenceService';
 import { buildScopedProjectIntelligence, constructionOrganizationPrompt } from './projectIntelligence';
 import { assertEvidenceInProjectScope, createProjectMaterialScope, filterEvidenceByProjectScope, filterFactsByProjectScope, projectScopeAudit } from './projectMaterialScope';
 import { agentWorkflowStages, createAgentWorkflowContext, throttleAgentWorkflowNodes } from './agentWorkflow';
@@ -273,12 +274,17 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const rawEffectiveChapters = effectiveTemplateChapters(template, documentSpec, { preserveExplicitOutline: hasExplicitOutline });
   const outlineEnrichment = enrichConstructionOrgOutline({ template, chapters: rawEffectiveChapters, requirement: input.requirement });
   const enrichedOutlineChapters = outlineEnrichment.chapters;
-  // 评分标准相关证据切片：用于提取招标文件技术评审条目并与大纲做承接审计
-  const evaluationTexts = allEvidence
-    .filter(item => /评审|评分标准|评分办法|评审标准|详细评审/u.test(`${item.sectionTitle || ''}${item.content}`.slice(0, 600)))
-    .map(item => item.content)
-    .slice(0, 12);
-  const bidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: enrichedOutlineChapters, requirement: input.requirement, evaluationTexts });
+  // 评分标准条目提取：从绑定招标材料中定位技术评审章节的编号条目（对象化，不再 slice(0,600) 词面过滤），
+  // 并以本地 bge-small 嵌入构建“条目标题 ↔ 大纲章节”语义相似度函数供承接审计使用（嵌入不可用时审计自动降级为显式承接判定）
+  const evaluationSourceTexts = allEvidence
+    .filter(item => /评审|评分标准|评分办法|详细评审/u.test(`${item.sectionTitle || ''}${item.content}`))
+    .map(item => item.content);
+  const evaluationItems = extractEvaluationCriteriaItems(evaluationSourceTexts);
+  const criteriaSimilarity = await buildSemanticSimilarity(
+    evaluationItems.map(item => item.title),
+    enrichedOutlineChapters.map(chapterCriteriaText),
+  );
+  const bidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: enrichedOutlineChapters, requirement: input.requirement, evaluationItems, semanticSimilarity: criteriaSimilarity });
   const baseEffectiveChapters = buildConstructionOrgTablePlans({ chapters: bidStructureAudit.enrichedChapters, projectGraph, canonicalFacts });
   template = { ...template, chapters: baseEffectiveChapters };
   const chapterGraphMap = new Map<string, { graphFiles: Set<string>; graphBoqItems: Array<{ name: string; quantity: string; unit: string; sourceFiles: string[] }>; graphWorks: string[]; graphMethods: string[]; gaps: string[] }>();
@@ -361,15 +367,24 @@ export async function generateDocumentDraft(input: { templateId: string; require
       upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'construction-org-outline-attached', status: 'success', message: `标准模块挂靠：${outlineReport.totals.attachedModules} 个模块、${outlineReport.totals.sectionCount} 个小节全部挂靠`, details: outlineReport.attached.map(item => `${item.kind === 'fallback' ? '兜底挂靠' : '挂靠'}：${item.moduleTitle} → ${item.chapterTitle}`) }, { subtitle: '标准模块挂靠' }));
     }
   }
-  const finalBidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: plannedWithConstructionOrgRequiredSections, requirement: input.requirement, evaluationTexts });
+  // 规划后章节文本已变化，重建语义相似度缓存（同一闭包缓存 key 不可跨阶段复用）
+  const finalCriteriaSimilarity = await buildSemanticSimilarity(
+    evaluationItems.map(item => item.title),
+    plannedWithConstructionOrgRequiredSections.map(chapterCriteriaText),
+  );
+  const finalBidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: plannedWithConstructionOrgRequiredSections, requirement: input.requirement, evaluationItems, semanticSimilarity: finalCriteriaSimilarity });
   effectiveChapters = buildConstructionOrgTablePlans({ chapters: finalBidStructureAudit.enrichedChapters, projectGraph, canonicalFacts });
   if (finalBidStructureAudit.issues.length > 0 || bidStructureAudit.issues.length > 0) {
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'bid-structure-audit', status: finalBidStructureAudit.issues.some(issue => issue.severity === 'blocker') ? 'failed' : 'success', message: `评标结构符合性校验：${finalBidStructureAudit.diagnostics.length} 个结构组，${finalBidStructureAudit.diagnostics.filter(item => item.status === 'satisfied').length} 个已满足，${finalBidStructureAudit.diagnostics.filter(item => item.status === 'missing' && item.level === 'required').length} 个必查缺失（已自动补挂），${finalBidStructureAudit.diagnostics.filter(item => item.status === 'fragmented').length} 个分散`, details: [...finalBidStructureAudit.diagnostics.map(item => `${item.status === 'satisfied' ? '满足' : item.status === 'fragmented' ? '分散' : '补挂'}：${item.groupTitle}${item.status === 'missing' ? `（补挂小节：${item.missingSections.join('、')}）` : ''}`), ...finalBidStructureAudit.issues.map(issue => `提示：${issue.message}`).slice(0, 8)] }, { subtitle: '评标结构校验' }));
   }
   template = { ...template, chapters: effectiveChapters };
   const writingTaskBrief = buildWritingTaskBrief({ chapters: effectiveChapters, factsModel: preliminaryFactsModel, projectGraph: projectGraph || undefined, requirement: input.requirement, templateName: template.name });
-  // T5 蓝图注入：同类工程质量参考（软性参考，按篇幅折减；无同类型参考样本或类型未识别时返回空，不注入）
-  const referenceLines = referenceQualityTargetLines({ templateName: template.name, chapterTitles: effectiveChapters.map(chapter => chapter.title), requirement: input.requirement, targetWords: provisionalBudget.targetChars || 0 });
+  // T5 蓝图注入：同类工程质量参考（软性参考，按篇幅折减；无同类型参考样本或类型未识别时返回空，不注入）；
+  // 写法骨架切片（方案4/E5）：与量化参考同链路注入，补齐“怎么写才像范文”的展开模式描述
+  const referenceLines = [
+    ...referenceQualityTargetLines({ templateName: template.name, chapterTitles: effectiveChapters.map(chapter => chapter.title), requirement: input.requirement, targetWords: provisionalBudget.targetChars || 0 }),
+    ...referenceWritingSkeletonLines({ templateName: template.name, chapterTitles: effectiveChapters.map(chapter => chapter.title), requirement: input.requirement }),
+  ];
   if (referenceLines.length > 0) {
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'reference-benchmark', status: 'success', message: '已读取模板参考库同类工程画像，作为质量软性参考注入文档蓝图', details: referenceLines }, { subtitle: '参考画像注入', order: progressStages.length }));
   }
@@ -607,7 +622,14 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const sampledEvidence = resumedContent ? [] : sampleProjectMaterialEvidence({ project, chapter, plan, profile: projectMaterialProfile, scopedFilePaths, highRisk: rolePoolRisk.highRisk });
     if (sampledEvidence.length > 0) scopedEvidence.push(...filterEvidenceByProjectScope(sampledEvidence, projectMaterialScope));
     scopedEvidence = filterEvidenceByProjectScope(scopedEvidence, projectMaterialScope);
-    let evidence = optimizeChapterEvidence(chapter, scopedEvidence, { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter, chapter, rolePoolRisk.highRisk), maxChars: evidenceBudgetChars + (rolePoolRisk.highRisk ? 14000 : 4000), preservePinned: true }, generationDiagnostics);
+    // P1 语义排序：章节证据按“章查询 ↔ 证据文本”本地 bge-small 余弦排序（语义主键，预算只做最终兑底）。
+    // 候选池先按词面/重要性分数粗排收窄到 60 条（pinned 证据全保留）控制嵌入批量规模；
+    // 嵌入不可用时语义选项缺省，优化退化为原 score 口径（语义模型不可用不得阻断生成）
+    const semanticPool = scopedEvidence.length > 60
+      ? [...new Set([...scopedEvidence.filter(item => isExemptEvidenceSource(item)), ...[...scopedEvidence].sort((a, b) => b.score - a.score).slice(0, 60)])]
+      : scopedEvidence;
+    const chapterSemanticSimilarity = await buildSemanticSimilarity([chapterCriteriaText(chapter)], semanticPool.map(semanticEvidenceText));
+    let evidence = optimizeChapterEvidence(chapter, scopedEvidence, { maxItems: qualityFirstEvidenceItemLimit(requestedEvidencePerChapter, chapter, rolePoolRisk.highRisk), maxChars: evidenceBudgetChars + (rolePoolRisk.highRisk ? 14000 : 4000), preservePinned: true, semantic: chapterSemanticSimilarity ? { similarity: chapterSemanticSimilarity, queryText: chapterCriteriaText(chapter) } : undefined }, generationDiagnostics);
     // 源级同口径裁决前置到证据切片：资料原文（如招标正文 4645㎡）被补疑修正后，进入写作 LLM 的切片必须先改写成裁决值，
     // 否则模型看到原文旧值会照抄（历史缺陷：第 3 章 checkpoint 混用 4645/4646），只能靠事后全局审查修复
     evidence = governEvidenceValues(evidence, canonicalFacts.scopeConflicts);
@@ -838,8 +860,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
           const h4Count = plannedStructure.blocks.reduce((sum, block) => sum + block.subPoints.length, 0);
           const mergedCount = plannedStructure.blocks.reduce((sum, block) => sum + block.subPoints.reduce((count, point) => count + Math.max(0, point.sources.length - 1), 0), 0);
           const plannerNote = plannedStructure.llmPlanned
-            ? (plannedStructure.fallbackSections.length > 0 ? `（${plannedStructure.fallbackSections.length} 条细目由覆盖校验挂回主题块）` : '')
-            : `（LLM 规划未命中：${(plannedStructure.llmFailure || '未返回有效结构').slice(0, 50)}，已按语义域确定性分组）`;
+            ? (plannedStructure.llmFailure ? `（部分主题块降级：${plannedStructure.llmFailure.slice(0, 80)}）` : (plannedStructure.fallbackSections.length > 0 ? `（${plannedStructure.fallbackSections.length} 条细目由覆盖校验挂回主题块）` : ''))
+            : `（LLM 规划未命中：${(plannedStructure.llmFailure || '未返回有效结构').slice(0, 80)}，已按语义域确定性分组）`;
           progressStages[chapterProgressIndex] = displayStage({
             type: 'chapter_generation',
             roleId: 'chapter_generation',
@@ -857,7 +879,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
           }
           emitProgress(chapterDrafts);
           llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-planned-block-draft:${chapter.id}`, () =>
-            buildPlannedChapterContent({ template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, sectionEvidenceProvider: sectionEvidenceForChapter, diagnostics: generationDiagnostics, signal: input.signal }, plannedStructure)
+            buildPlannedChapterContent({ template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal }, plannedStructure)
           ));
         }
       } else if (useSectionFirst) {
@@ -1017,7 +1039,9 @@ export async function generateDocumentDraft(input: { templateId: string; require
       emitProgress(chapterDrafts);
       const replaceChapterSection = (contentValue: string, title: string, sectionValue: string, anchorTitle?: string) => {
         const normalizeHeadingTitle = (value: string) => value.replace(/[\u00a0\u3000]/gu, ' ').replace(/^\d+(?:\.\d+)*\s+/u, '').trim();
-        const comparableHeadingTitle = (value: string) => normalizeHeadingTitle(value).replace(/施工(?=方案|流程|方法)/gu, '').replace(/专项(?=方案)/gu, '').replace(/\s/gu, '');
+        // 与验收器/终检修复器同口径（comparableSectionTitleText）：去编号、空白、lower、去“施工/专项方案”修饰与“项目|工程|主要|重点|技术”泛化词，
+        // 避免字面差异大的重写标题（如“项目重点难点分析”vs“项目特点、重点、难点分析”）定位失败后退入 plannedIndex 兑底插新小节，旧承接小节残留形成重复
+        const comparableHeadingTitle = comparableSectionTitleText;
         // 标题重写（plannedCoverage 1:1 承接）场景：规划标题与正文 H4 标题字面差异大，定位须同时尝试承接标题，
         // 否则 miss 后走 plannedIndex 兜底在下一规划小节前插入新 H4，旧承接小节残留形成重复小节（每轮修复多一个）
         const matchesSectionHeading = (headingTitle: string) => {
@@ -1362,6 +1386,29 @@ export async function generateDocumentDraft(input: { templateId: string; require
     }
   }
 
+  // P4 预算裁剪报告：生成全程软限制裁剪量汇总，历史缺陷（maxItems/maxChars/slice 静默裁剪，链路无感知，
+  // 质量问题时无法区分「证据不足」与「预算截断」）在此收敛为单一可观测出口；
+  // 软限制审计分类：语义取舍类已迁移本地语义模型，防爆兜底类保留且逐项记录裁剪量
+  {
+    const evidenceStats = generationDiagnostics.evidence;
+    const llmStats = generationDiagnostics.llm;
+    upsertProgressStage(progressStages, displayStage({
+      type: 'validation',
+      roleId: 'budget-trim-report',
+      status: 'success',
+      message: `预算裁剪报告：证据 ${evidenceStats.raw} 条 → 采用 ${evidenceStats.used} 条（噪声过滤 ${evidenceStats.filteredNoise} 条、预算兜底裁剪 ${evidenceStats.budgetDropped} 条），证据上下文 ${evidenceStats.contextChars} 字`,
+      details: [
+        `证据质量：平均噪声分 ${evidenceStats.avgNoiseScore}，平均事实密度 ${evidenceStats.avgFactDensity}`,
+        `检索：${evidenceStats.searchQueries} 组查询，耗时 ${Math.round(evidenceStats.searchMs / 1000)} 秒`,
+        `LLM：${llmStats.calls} 次调用，失败 ${llmStats.failures} 次，重试 ${llmStats.retries} 次，schema 校验失败 ${llmStats.schemaFailures} 次`,
+        '防爆兜底类软限制（保留并逐项记录裁剪量）：selectEvidenceByBudget 的 maxItems/maxChars、uniqueEvidence 噪声过滤、evidenceBundlePrompt 的 maxChars、块级证据 top-k 截断、块级 facts 截断',
+        '语义取舍类软限制（已迁移本地语义模型）：evaluationTexts 词面过滤→条目对象化、criterionFeatures 二字滑窗→bge-small 余弦、章节证据字符硬截→语义排序取 top-k',
+        'LLM 输出侧：schema 校验（截断位置可诊断）、空响应重试提示词收敛、块成稿 maxTokens 按目标字数 1:1.2（不走 thinking ×6 放大）',
+      ],
+    }, { subtitle: '预算裁剪审计' }));
+    emitProgress(chapterDraftsFinal);
+  }
+
   return finalizeGeneration({
     chapterDrafts: chapterDraftsFinal, chapterDraftsByOrder, chapterGenerationStagesByOrder,
     chapterGenerationStages, effectiveChapters, template, allEvidence,
@@ -1379,6 +1426,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     globalConsistencyIssues,
     scopeConflicts: canonicalFacts.scopeConflicts,
     writingTaskBrief,
+    evaluationCriteriaItems: evaluationItems.map(item => item.title).filter(Boolean),
     agentWorkflow,
     emitProgress, withProgressHeartbeat,
   });

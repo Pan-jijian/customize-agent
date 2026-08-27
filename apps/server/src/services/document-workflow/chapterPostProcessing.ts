@@ -2,6 +2,7 @@ import type { DocumentEvidence } from './types';
 import { cleanEvidenceText } from './evidence';
 import { documentTextLength } from './budget';
 import { displayChapterTitle } from './outline';
+import { criticalSectionBlockerMinChars as criticalSectionBlockerMinCharsFromSpec, isCriticalDeepSectionTitle } from './writingSpec';
 
 export function sectionContentBody(content: string) {
   return content.replace(/^#{3,4}\s+.*\n+/u, '').trim();
@@ -432,7 +433,8 @@ export function groupHasMajorConstructionSection(groupSections: string[]) {
 }
 
 export function isCriticalDeepSection(sectionTitle: string) {
-  return /项目特点.*重点.*难点|重点.*难点.*分析|项目主要施工内容|主要分部分项工程施工方案|主要施工方法|危大工程专项施工方案审批流程|原材料进场复试|见证取样/u.test(sectionTitle);
+  // 单点转发：深度关键小节判别统一由 writingSpec 收口，新增类型只改 writingSpec 一处
+  return isCriticalDeepSectionTitle(sectionTitle);
 }
 
 export function isGeneralManagementSection(sectionTitle: string) {
@@ -460,13 +462,8 @@ export function keySectionWritingRequirement(sectionTitle: string) {
 }
 
 export function criticalSectionBlockerMinChars(sectionTitle: string) {
-  if (/危大工程专项施工方案审批流程|原材料进场复试|见证取样/u.test(sectionTitle)) return 650;
-  if (/项目主要施工内容/u.test(sectionTitle)) return 1800;
-  // “主要分部分项工程施工方案/主要施工方法”的全局门槛收敛到 1200：1800 字超过单次 LLM 稳定产出上限，
-  // 导致 Writer/Repairer/Final Gate 补写永远被拒（真实生成中 1489 字也被判不足），空小节无法自愈。
-  if (/主要分部分项工程施工方案|主要施工方法/u.test(sectionTitle)) return 1200;
-  if (/项目特点.*重点.*难点|重点.*难点.*分析/u.test(sectionTitle)) return 1500;
-  return 0;
+  // 单点转发：生成侧深度门槛统一由 writingSpec 收口
+  return criticalSectionBlockerMinCharsFromSpec(sectionTitle);
 }
 
 export function outputTokensForChapter(minWords: number, targetWords?: number) {
