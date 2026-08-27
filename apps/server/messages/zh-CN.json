@@ -334,7 +334,11 @@
     "fileUnderstanding": "文件理解",
     "audioCapability": "音频能力",
     "videoCapability": "视频能力",
-    "localEmbedding": "本地 Embedding"
+    "localEmbedding": "本地 Embedding",
+    "thinkingMode": "思考模式",
+    "thinkingFollowTask": "跟随任务策略（推荐）",
+    "thinkingEnabled": "强制开启",
+    "thinkingDisabled": "强制关闭"
   },
   "prompt": {
     "title": "提示词管理",

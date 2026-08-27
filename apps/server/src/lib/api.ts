@@ -512,7 +512,8 @@ export async function exportDocument(input: { documentId?: string; title?: strin
 
 export interface ModelCapabilities { imageGeneration?: boolean; imageUnderstanding?: boolean; fileUnderstanding?: boolean; audio?: boolean; video?: boolean; }
 export interface ProviderInfo { name: string; apiKey?: string; baseUrl?: string; protocol?: string; directEndpoint?: boolean; detectedProtocol: string; hasApiKey: boolean; capabilities?: ModelCapabilities; }
-export interface ModelsConfig { reader: { active: string; list: { name: string; provider: string }[] }; reasoning: { active: string; list: { name: string; provider: string }[] }; action: { active: string; list: { name: string; provider: string }[] }; }
+export type ModelThinkingPreference = 'follow-task' | 'enabled' | 'disabled';
+export interface ModelsConfig { reader: { active: string; list: { name: string; provider: string; thinking?: ModelThinkingPreference }[] }; reasoning: { active: string; list: { name: string; provider: string; thinking?: ModelThinkingPreference }[] }; action: { active: string; list: { name: string; provider: string; thinking?: ModelThinkingPreference }[] }; }
 export interface EmbeddingConfig { provider: 'openai-compatible' | 'transformers-local'; baseUrl?: string; apiKey?: string; model?: string; dimensions?: number; hasApiKey?: boolean; }
 export interface WebAccessConfig { enabled: boolean; allowProjectFacts: false; maxQueriesPerChapter: number; maxResultsPerQuery: number; trustedDomains: string[]; }
 

@@ -1,5 +1,19 @@
 # server
 
+## 4.6.1
+
+### Patch Changes
+
+- 模型配置新增思考模式选项 + 新模型接入清单
+
+  - ModelEntry 新增 thinking 偏好（follow-task 默认 / enabled 强制开 / disabled 强制关），优先级高于任务策略
+  - 模型设置页每个已启用模型可配置思考模式（三档下拉），保存经 /api/config/models 透传
+  - 不可关模型（gemini 3.x）在强制关闭配置下忽略配置并告警降级
+  - CUSTOMIZE.md 新增"新模型接入清单"：qwen/glm 等新模型接入只需在 MODEL_THINKING_PROFILES 注册一条画像
+
+- Updated dependencies
+  - @customize-agent/runtime@3.1.0
+
 ## 4.6.0
 
 ### Minor Changes

@@ -134,10 +134,27 @@ export interface ThinkingDecision {
   warning?: string;
 }
 
-/** 任务类型 × 模型思考能力 → 思考策略决策（纯函数，供测试覆盖全组合） */
-export function decideThinkingPolicy(taskKind: DocumentLlmTaskKind, modelName: string): ThinkingDecision {
-  if (taskKind !== 'structuredGeneration') return { disableThinking: false, budgetMode: 'compact' };
+/**
+ * 任务类型 × 模型思考能力 × 用户偏好 → 思考策略决策（纯函数，供测试覆盖全组合）。
+ * 用户偏好（模型配置 thinking 选项）优先级高于任务策略：
+ * disabled/enabled 强制覆盖；follow-task（默认）跟随任务策略。
+ */
+export function decideThinkingPolicy(taskKind: DocumentLlmTaskKind, modelName: string, userPreference?: 'follow-task' | 'enabled' | 'disabled'): ThinkingDecision {
   const capability = thinkingCapabilityForModel(modelName);
+  // 用户显式强制关思考：可关模型直接关；不可关模型告警降级（与任务策略一致）
+  if (userPreference === 'disabled') {
+    if (!capability || capability.disable === 'unsupported') {
+      return {
+        disableThinking: false,
+        budgetMode: capability?.budgetPolicy === 'shared' ? 'relaxed' : 'compact',
+        warning: `当前模型 ${modelName} 思考不可关闭（厂商限制），已忽略“强制关闭思考”配置；建议切换 deepseek 或 gpt 系列模型`,
+      };
+    }
+    return { disableThinking: true, budgetMode: 'compact' };
+  }
+  // 用户显式强制开思考：覆盖任务策略（即使结构化生成也保留思考）
+  if (userPreference === 'enabled') return { disableThinking: false, budgetMode: 'compact' };
+  if (taskKind !== 'structuredGeneration') return { disableThinking: false, budgetMode: 'compact' };
   // 未注册画像的模型：不注入思考参数（保持厂商默认行为），预算保守直通
   if (!capability) return { disableThinking: false, budgetMode: 'compact' };
   if (capability.disable === 'unsupported') {
@@ -166,8 +183,8 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
       DOCUMENT_LLM_PROVIDER_CACHE.set(providerKey, provider);
     }
     const modelName = selected.name.toLowerCase();
-    // 任务类型 × 模型思考能力 → 决策（本客户端文档生成专用，默认 structuredGeneration）
-    const decision = decideThinkingPolicy(options.taskKind ?? 'structuredGeneration', modelName);
+    // 任务类型 × 模型思考能力 × 用户配置偏好 → 决策（本客户端文档生成专用，默认 structuredGeneration）
+    const decision = decideThinkingPolicy(options.taskKind ?? 'structuredGeneration', modelName, selected.thinking);
     if (decision.warning && options.diagnostics && !options.diagnostics.llm.thinkingWarning) {
       options.diagnostics.llm.thinkingWarning = decision.warning;
     }

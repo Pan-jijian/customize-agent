@@ -50,6 +50,29 @@ describe('decideThinkingPolicy 任务类型 × 模型思考能力决策矩阵', 
       expect(decision.warning).toBeUndefined();
     });
   });
+
+  describe('用户配置偏好（模型设置 thinking 选项）优先级高于任务策略', () => {
+    it('disabled 强制关思考：可关模型即使 reasoning 任务也关', () => {
+      const decision = decideThinkingPolicy('reasoning', 'deepseek-v4-pro', 'disabled');
+      expect(decision).toEqual({ disableThinking: true, budgetMode: 'compact' });
+    });
+
+    it('enabled 强制开思考：结构化生成也保留思考（覆盖任务策略）', () => {
+      const decision = decideThinkingPolicy('structuredGeneration', 'gpt-5.5', 'enabled');
+      expect(decision).toEqual({ disableThinking: false, budgetMode: 'compact' });
+    });
+
+    it('disabled × 不可关模型（gemini 3.x）：忽略配置并告警降级', () => {
+      const decision = decideThinkingPolicy('structuredGeneration', 'gemini-3.1-pro-preview', 'disabled');
+      expect(decision.disableThinking).toBe(false);
+      expect(decision.warning).toMatch(/已忽略.*强制关闭思考/);
+    });
+
+    it('follow-task（默认）：与未设置行为一致', () => {
+      expect(decideThinkingPolicy('structuredGeneration', 'deepseek-v4-pro', 'follow-task'))
+        .toEqual(decideThinkingPolicy('structuredGeneration', 'deepseek-v4-pro'));
+    });
+  });
 });
 
 describe('并发上限解除（用户既定决策：LLM 并发不受限）', () => {

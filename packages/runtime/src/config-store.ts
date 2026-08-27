@@ -7,9 +7,18 @@ import * as os from 'os';
 
 export type ModelTier = 'reader' | 'reasoning' | 'action';
 
+export type ModelThinkingPreference = 'follow-task' | 'enabled' | 'disabled';
+
 export interface ModelEntry {
   name: string;
   provider: string;
+  /**
+   * 思考模式偏好（可选）：
+   * - follow-task（默认）：跟随任务策略——结构化生成关思考、交互场景保留
+   * - enabled：强制开思考（覆盖任务策略）
+   * - disabled：强制关思考（覆盖任务策略；模型不可关时仍告警降级）
+   */
+  thinking?: ModelThinkingPreference;
 }
 
 export interface TierConfig {

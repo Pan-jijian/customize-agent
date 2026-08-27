@@ -115,7 +115,17 @@ export default function ModelsPage() {
     if (!val) { tc.active = ''; setModels(updated); try { await saveModels(updated); } catch { message.error(t('common.error')); } return; }
     const [provider, name] = val.includes(':') ? val.split(':') : [val, val];
     tc.active = name;
-    if (!tc.list.some(m => m.name === name && m.provider === provider)) tc.list.push({ name, provider });
+    if (!tc.list.some(m => m.name === name && m.provider === provider)) tc.list.push({ name, provider, thinking: 'follow-task' });
+    setModels(updated);
+    try { await saveModels(updated); } catch { message.error(t('common.error')); }
+  };
+  const handleThinkingChange = async (tier: string, val: 'follow-task' | 'enabled' | 'disabled') => {
+    if (!models) return;
+    const updated = { ...models };
+    const tc = updated[tier as keyof ModelsConfig];
+    const target = tc.list.find(m => m.name === tc.active);
+    if (!target) return;
+    target.thinking = val;
     setModels(updated);
     try { await saveModels(updated); } catch { message.error(t('common.error')); }
   };
@@ -259,20 +269,32 @@ export default function ModelsPage() {
                     {activeModel && (() => {
                       const prov = providers.find(p => p.name === activeModel.provider);
                       return (
-                        <div className="mt-4 px-4 py-3 bg-[var(--colorBgElevated)] rounded-lg border border-[var(--borderColor)] flex items-center gap-3 transition-colors">
-                          <ApiOutlined className="text-[var(--colorBrand)] text-base shrink-0" />
-                          <span className="text-sm font-medium flex-1 min-w-0 truncate text-[var(--colorText)]">
-                            {activeModel.provider}
-                          </span>
-                          {prov?.capabilities && CAPABILITY_OPTIONS.filter(o => prov.capabilities![o.key]).length > 0 && (
-                            <div className="flex gap-1 shrink-0">
-                              {CAPABILITY_OPTIONS.filter(o => prov.capabilities![o.key]).slice(0, 2).map(o => (
-                                <Tag key={o.key} color="blue" bordered={false} className="m-0 text-[10px] bg-[var(--colorBrand)]/5 text-[var(--colorBrand)] leading-[18px]">{t(o.labelKey)}</Tag>
-                              ))}
-                            </div>
-                          )}
-                          <Tag color="success" bordered={false} className="m-0 text-[10px] leading-[18px] shrink-0 uppercase">{t('models.active')}</Tag>
-                        </div>
+                        <>
+                          <div className="mt-4 px-4 py-3 bg-[var(--colorBgElevated)] rounded-lg border border-[var(--borderColor)] flex items-center gap-3 transition-colors">
+                            <ApiOutlined className="text-[var(--colorBrand)] text-base shrink-0" />
+                            <span className="text-sm font-medium flex-1 min-w-0 truncate text-[var(--colorText)]">
+                              {activeModel.provider}
+                            </span>
+                            {prov?.capabilities && CAPABILITY_OPTIONS.filter(o => prov.capabilities![o.key]).length > 0 && (
+                              <div className="flex gap-1 shrink-0">
+                                {CAPABILITY_OPTIONS.filter(o => prov.capabilities![o.key]).slice(0, 2).map(o => (
+                                  <Tag key={o.key} color="blue" bordered={false} className="m-0 text-[10px] bg-[var(--colorBrand)]/5 text-[var(--colorBrand)] leading-[18px]">{t(o.labelKey)}</Tag>
+                                ))}
+                              </div>
+                            )}
+                            <Tag color="success" bordered={false} className="m-0 text-[10px] leading-[18px] shrink-0 uppercase">{t('models.active')}</Tag>
+                          </div>
+                          <div className="mt-3 flex items-center gap-3">
+                            <span className="text-xs text-[var(--colorTextTertiary)] shrink-0">{t('models.thinkingMode')}</span>
+                            <Select value={activeModel.thinking ?? 'follow-task'} size="small" style={{ flex: 1 }}
+                              onChange={v => { void handleThinkingChange(key, v); }}
+                              options={[
+                                { label: t('models.thinkingFollowTask'), value: 'follow-task' },
+                                { label: t('models.thinkingEnabled'), value: 'enabled' },
+                                { label: t('models.thinkingDisabled'), value: 'disabled' },
+                              ]} />
+                          </div>
+                        </>
                       );
                     })()}
                   </div>

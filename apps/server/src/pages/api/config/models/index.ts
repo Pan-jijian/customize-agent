@@ -24,7 +24,11 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
               const model = entry as Record<string, unknown>;
               return typeof model.name === 'string' && typeof model.provider === 'string';
             })
-            .map(entry => ({ name: entry.name, provider: entry.provider })),
+            .map(entry => {
+              const model = entry as { name: string; provider: string; thinking?: unknown };
+              const thinking = model.thinking === 'enabled' || model.thinking === 'disabled' ? model.thinking : 'follow-task';
+              return { name: model.name, provider: model.provider, thinking };
+            }),
         };
       }
       store.save(config);

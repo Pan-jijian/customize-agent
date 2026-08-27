@@ -334,7 +334,11 @@
     "fileUnderstanding": "File Understanding",
     "audioCapability": "Audio",
     "videoCapability": "Video",
-    "localEmbedding": "Local Embedding"
+    "localEmbedding": "Local Embedding",
+    "thinkingMode": "Thinking Mode",
+    "thinkingFollowTask": "Follow Task Strategy (Recommended)",
+    "thinkingEnabled": "Force On",
+    "thinkingDisabled": "Force Off"
   },
   "prompt": {
     "title": "Prompt Management",
