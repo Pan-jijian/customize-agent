@@ -168,10 +168,10 @@ importers:
         specifier: ^4.1.0
         version: link:../../packages/knowledge
       '@customize-agent/llm':
-        specifier: ^3.0.13
+        specifier: ^3.1.0
         version: link:../../packages/llm
       '@customize-agent/runtime':
-        specifier: ^3.0.13
+        specifier: ^3.1.0
         version: link:../../packages/runtime
       '@napi-rs/canvas':
         specifier: ^0.1.82

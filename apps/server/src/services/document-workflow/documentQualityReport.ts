@@ -1,4 +1,4 @@
-import { buildTenderBidScores } from './tenderBidScoring';
+import { buildTenderBidScores, buildTenderBidTemplatingReport } from './tenderBidScoring';
 import type { DocumentDraftChapter, DocumentFactTrace, DocumentKnowledgeCoverageReport, DocumentQualityReport, DocumentTemplate, ValidationIssue } from './types';
 
 /**
@@ -30,12 +30,14 @@ export function buildDocumentQualityReport(input: {
   const blockingIssues = input.issues.filter(issue => issue.level === 'error').length;
   const deliveryProbability = Math.max(0, Math.min(99, Math.round(overall - blockingIssues * 8)));
   const target = input.knowledgeCoverage.score >= 95 ? 95 : 85;
+  const templating = buildTenderBidTemplatingReport(input.markdown);
   return {
     overall,
     deliveryProbability,
     target,
     passed: deliveryProbability >= target && blockingIssues === 0,
     scores,
+    templating,
     summary: `交付置信度 ${deliveryProbability}% / 目标 ${target}%，综合评分 ${overall}/100（资料完整性 ${scores.completeness}、方案针对性 ${scores.specificity}、合规性 ${scores.compliance}、可落地性 ${scores.executability}、编制规范性 ${scores.normalization}、低雷同性 ${scores.uniqueness}）`,
     actions: deliveryProbability >= target && blockingIssues === 0
       ? ['已达到当前质量目标，建议保持事实口径和导出前复核。']

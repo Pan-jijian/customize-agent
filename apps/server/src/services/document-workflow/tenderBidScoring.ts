@@ -1,6 +1,16 @@
 import type { DocumentDraftChapter, DocumentFactTrace, DocumentTemplate, ValidationIssue } from './types';
 import { isActionableTraceFact } from './documentFactTrace';
 import { documentTextLength } from './budget';
+import {
+  fillerDensityReport,
+  vagueResponseHits,
+  fiveElementBlockStats,
+  dangerousTwoStepCheck,
+  emergencyStructureCheck,
+  difficultyCountermeasureReport,
+  crossProjectResidueHits,
+  type TemplatingLevel,
+} from './tenderBidChecks';
 
 /**
  * 招标技术标评审六维评分（确定性计算，非 LLM）：
@@ -102,10 +112,19 @@ function specificityScore(markdown: string, chapters: DocumentDraftChapter[], fa
   return Math.round((usedRate * 0.55 + distribution * 0.45) * 100);
 }
 
-/** 合规性：危大闭环链（辨识→方案→审批论证→交底→监测→验收）+ 三级配电两级保护 + 实名制/工资专户/应急/绿色施工 */
+/**
+ * 合规性：危大闭环链（辨识→方案→审批论证→交底→监测→验收）+ 三级配电两级保护 + 实名制/工资专户/应急/绿色施工；
+ * 按 docx 判定标尺叠加：危大两步确认法（类别匹配+参数分级，10%）与应急预案八部分结构（10%）
+ */
 function complianceScore(markdown: string) {
   const hits = COMPLIANCE_ITEMS.filter(pattern => pattern.test(markdown)).length;
-  return Math.round((hits / COMPLIANCE_ITEMS.length) * 100);
+  const base = hits / COMPLIANCE_ITEMS.length;
+  const dangerous = dangerousTwoStepCheck(markdown);
+  const dangerousRate = dangerous.twoStepComplete ? 1
+    : dangerous.categories.length > 0 && dangerous.graded ? 0.6
+      : dangerous.categories.length > 0 ? 0.3 : 0;
+  const emergency = emergencyStructureCheck(markdown);
+  return Math.round((base * 0.8 + dangerousRate * 0.1 + emergency.coverage * 0.1) * 100);
 }
 
 /** 闭环句式分块统计（与可落地性评分同口径）：按空行分块（≥30 字），同一块内三要素齐全才算闭环块 */
@@ -117,11 +136,13 @@ export function closedLoopBlockStats(markdown: string) {
   return { blocks: blocks.length, closedLoopBlocks };
 }
 
-/** 可落地性：管控闭环句式密度（责任岗位+检查频次+整改闭环），每 1500 字至少 1 段闭环句式 */
+/** 可落地性：措施五要素闭合块密度（方案＋流程＋责任人＋时间节点＋验收标准，docx L93），每 1500 字至少 1 段 */
 function executabilityScore(markdown: string) {
-  const { closedLoopBlocks } = closedLoopBlockStats(markdown);
+  const { blocks, completeBlocks } = fiveElementBlockStats(markdown);
   const target = Math.max(6, Math.ceil(documentTextLength(markdown) / 1500));
-  return Math.round(Math.min(1, closedLoopBlocks / target) * 100);
+  const density = Math.min(1, completeBlocks / target);
+  const fiveElementRate = blocks ? completeBlocks / blocks : 0;
+  return Math.round((density * 0.7 + fiveElementRate * 0.3) * 100);
 }
 
 /** 编制规范性：复用已有确定性检查消息（目录层级/表格规范/跨章数据一致/结构完整） */
@@ -131,9 +152,15 @@ function normalizationScore(issues: ValidationIssue[]) {
   return Math.max(0, 100 - normErrors * 8 - Math.min(normWarnings * 3, 30));
 }
 
-/** 低雷同性：空话禁用词命中率 + 重复句式率（≥12 字符正文句去标点后重复比例） */
+/**
+ * 低雷同性：空话禁用词命中率 + 模糊应答词（附录一第 3 类，零出现要求）+ 套话密度超标扣分
+ * （docx L156：核心章节套话占比≤10%）+ 重复句式率（≥12 字符正文句去标点后重复比例）
+ */
 function uniquenessScore(markdown: string) {
   const forbiddenHits = FORBIDDEN_EMPTY_PHRASES.filter(phrase => markdown.includes(phrase)).length;
+  const vagueHitCount = vagueResponseHits(markdown).reduce((sum, hit) => sum + hit.count, 0);
+  const filler = fillerDensityReport(markdown);
+  const fillerPenalty = Math.max(0, filler.ratio - 0.1) * 100;
   const sentences = markdown
     .split(/\n+/u)
     .filter(line => line.trim() && !/^\s*(#{1,6}\s+|\||[-*+]\s|>)/u.test(line))
@@ -141,7 +168,7 @@ function uniquenessScore(markdown: string) {
     .map(sentence => sentence.replace(/[\s，,、：:（）()【】[\]《》“”"'`]/gu, ''))
     .filter(sentence => sentence.length >= 12);
   const duplicateRate = sentences.length ? (sentences.length - new Set(sentences).size) / sentences.length : 0;
-  return Math.max(0, Math.round(100 - forbiddenHits * 4 - duplicateRate * 60));
+  return Math.max(0, Math.round(100 - forbiddenHits * 4 - vagueHitCount * 6 - fillerPenalty * 0.5 - duplicateRate * 60));
 }
 
 export interface TenderBidScores {
@@ -155,8 +182,62 @@ export interface TenderBidScores {
   executability: number;
   /** 编制规范性 */
   normalization: number;
-  /** 低雷同性 */
+  /** 低雷同性（触发式否决项：<30 判重度雷同风险） */
   uniqueness: number;
+}
+
+/** 模板化套用专项检测报告（docx 第十类核心降档判定，供报告与降档决策） */
+export interface TenderBidTemplatingReport {
+  /** 整体模板化等级：重/中/轻 */
+  level: TemplatingLevel;
+  /** 套话句占比（docx：核心章节 ≤10%） */
+  fillerRatio: number;
+  /** 套话句/总句数（量化依据） */
+  fillerSentences: number;
+  totalSentences: number;
+  /** 模糊应答词命中次数（零出现要求） */
+  vagueHitCount: number;
+  vaguePhrases: string[];
+  /** 重复句式率 */
+  duplicateSentenceRate: number;
+  /** 跨项目内容残留命中（零残留要求） */
+  crossProjectResidue: string[];
+  /** 重难点对策"归因+量化目标"双达标占比（<50% 判重度模板化，docx L156） */
+  difficultyCountermeasureRatio: number;
+  difficultyBothCount: number;
+  difficultyCountermeasures: number;
+  /** 重难点章节重度模板化警示 */
+  difficultyHeavyTemplated: boolean;
+}
+
+export function buildTenderBidTemplatingReport(markdown: string): TenderBidTemplatingReport {
+  const filler = fillerDensityReport(markdown);
+  const vagueHits = vagueResponseHits(markdown);
+  const sentences = markdown
+    .split(/\n+/u)
+    .filter(line => line.trim() && !/^\s*(#{1,6}\s+|\||[-*+]\s|>)/u.test(line))
+    .flatMap(line => line.split(/[。；;]/u))
+    .map(sentence => sentence.replace(/[\s，,、:：（）()【】[\]《》“”"'`]/gu, ''))
+    .filter(sentence => sentence.length >= 12);
+  const duplicateRate = sentences.length ? (sentences.length - new Set(sentences).size) / sentences.length : 0;
+  const difficulty = difficultyCountermeasureReport(markdown);
+  const residue = crossProjectResidueHits(markdown);
+  // 重难点对策双达标占比 <50% 直接判重度模板化（docx L156）；否则按套话密度三档
+  const level: TemplatingLevel = difficulty.heavyTemplated ? 'heavy' : filler.level;
+  return {
+    level,
+    fillerRatio: filler.ratio,
+    fillerSentences: filler.fillerSentences,
+    totalSentences: filler.totalSentences,
+    vagueHitCount: vagueHits.reduce((sum, hit) => sum + hit.count, 0),
+    vaguePhrases: vagueHits.map(hit => hit.phrase),
+    duplicateSentenceRate: duplicateRate,
+    crossProjectResidue: residue,
+    difficultyCountermeasureRatio: difficulty.ratio,
+    difficultyBothCount: difficulty.bothCount,
+    difficultyCountermeasures: difficulty.countermeasures,
+    difficultyHeavyTemplated: difficulty.heavyTemplated,
+  };
 }
 
 export function buildTenderBidScores(input: {

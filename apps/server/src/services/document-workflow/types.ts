@@ -1,5 +1,6 @@
 import type { AgentWorkflowContext } from './agentWorkflow';
 import type { QualityBenchmarkResult } from './benchmarkQuality';
+import type { TenderBidTemplatingReport } from './tenderBidScoring';
 
 export interface PromptRequiredSectionRule {
   title: string;
@@ -542,6 +543,8 @@ export interface DocumentQualityReport {
   };
   summary: string;
   actions: string[];
+  /** 模板化套用专项检测报告（docx 第十类核心降档判定，重难点重度模板化→直接降档） */
+  templating?: TenderBidTemplatingReport;
 }
 
 export interface RepairStrategy {
