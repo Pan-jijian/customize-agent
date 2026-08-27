@@ -764,7 +764,9 @@ function ensureWorkPackageOverviewLabels(content: string) {
     const line = lines[index];
     const trimmed = line.trim();
     if (/^###\s+/u.test(trimmed)) {
-      inMainContent = /项目主要施工内容/u.test(trimmed);
+      // 工作包型关键小节（主要施工内容/分部分项方案/主要施工方法）统一启用首行标签规范化：
+      // 历史缺陷：八度实测“主要分部分项工程施工方案”补写稿无“施工概况”标签被专项验收器阻断（同小节只覆盖“项目主要施工内容”）
+      inMainContent = WORK_PACKAGE_SECTION_RE.test(trimmed);
       atPackageStart = false;
       result.push(line);
       continue;

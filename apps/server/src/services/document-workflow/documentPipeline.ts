@@ -134,6 +134,14 @@ export function replaceMarkdownSection(content: string, sectionTitle: string, se
   return content;
 }
 
+/** Final Gate 补写 qualityFeedback：工作包型小节注入三段式标签硬性要求（八度实测缺陷：补写稿无标签被专项验收器阻断） */
+export function buildFinalGateRepairQualityFeedback(sectionTitle: string, lastFailure?: string): string {
+  const workPackageQualityFeedback = WORK_PACKAGE_SECTION_RE.test(sectionTitle)
+    ? `该小节按专业工程/分项工程方案组织，每个 #### 分项方案必须按“施工概况（作业对象、部位、工程量）”“施工流程（“→”箭头串联工序链）”“施工方法（工具机具、材料规格、工艺参数、验收标准）”三段展开，“施工概况”“施工流程”“施工方法”三个标签必须在每个分项方案正文中逐字出现；每个分项方案至少 4 个带单位工艺参数，施工方法段至少 1 条不少于 4 个环节的“→”工序链。`
+    : '';
+  return `Final Gate 发现“${sectionTitle}”为空小节或深度不足。请基于证据完整重写该小节正式正文（原小节内容将被整体替换），包含检查责任、验收节点、资料闭环、整改复验要求，优先落位项目建筑面积、层数、工期、专业范围等量化参数，不得输出占位或解释。${workPackageQualityFeedback}${lastFailure ? `此前生成被拒原因：${lastFailure}，必须逐条修正。` : ''}`;
+}
+
 /**
  * Final Gate 修复候选解析：从 error 级结构缺陷消息中解析（章节标题、小节标题、是否关键小节）三元组，
  * 未命中返回 undefined（非结构类 error 不进修复循环）。覆盖消息形态：
@@ -487,7 +495,7 @@ export async function finalizeGeneration(p: {
     return { ...chapter, sections: chapter.sections || [], content: finalizeChapterContentQuality(chapter.content, templateChapter) };
   });
   let finalMarkdown = finalizeDocumentMarkdown(composeDocumentMarkdown({ templateId: template.id, templateName: template.name, title: template.outputTitle, requirement: requirement || '', projectRoot, projectId, exportSettings: template.exportSettings, generationSettings: template.generationSettings, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems: [...new Set(missingItems)], validation, validationIssues, executionStages, exportGate: { passed: false, blockingIssues: [], checklist: [] }, assets, partialChapters: [], checkpointChapters: finalChapterDrafts, generatedAt: Date.now() }, { forbidDrawingImages: false, promptRules: promptDocumentRules }), finalChapterDrafts, { forbidDrawingImages: false, promptRules: promptDocumentRules }).markdown;
-  finalMarkdown = supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(finalMarkdown, structuredFacts), projectMaterialSummary)))), template);
+  finalMarkdown = finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(finalMarkdown, structuredFacts), projectMaterialSummary)))), template));
   // 跨章一致性数值定点修复兜底：导出阶段用完整事实主表口径做最后一次确定性对齐，覆盖生成流程未修掉的
   // 数值冲突（finalize 口径与生成阶段 preliminaryFactsModel 可能不同）；“检测定位=修复定位”，
   // 修复后重建 finalMarkdown 再进入最终校验，避免残留冲突被导出门禁硬阻断
@@ -497,7 +505,7 @@ export async function finalizeGeneration(p: {
   // 正文找不到目标 fixedCount=0，导出门禁永久阻断）
   const needsMarkdownFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts).fixedCount > 0;
   if (finalDeterministicFix.fixedCount > 0 || needsMarkdownFix) {
-    finalMarkdown = supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template);
+    finalMarkdown = finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template));
     const postRebuildFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
     if (postRebuildFix.fixedCount > 0) finalMarkdown = postRebuildFix.markdown;
     const totalFixed = finalDeterministicFix.fixedCount + postRebuildFix.fixedCount;
@@ -579,6 +587,9 @@ export async function finalizeGeneration(p: {
       const repairTargetWords = Math.max(620, criticalMinChars > 0 ? Math.ceil(criticalMinChars / 0.7) : 620);
       const lastFailure = generationDiagnostics.llm.lastError;
       generationDiagnostics.llm.lastError = undefined;
+      // 工作包型小节（主要施工内容/分部分项方案/主要施工方法）补写必须带三段式标签硬性要求：
+      // 历史缺陷：八度实测 Final Gate 补写“主要分部分项工程施工方案”通篇无“施工概况/施工流程/施工方法”标签，
+      // 分部分项专项验收器判定 9 个分项缺三段式+缺箭头工序链，3 轮补写全部不达标，导出门禁 2 个 blocker 残留导致生成失败
       const generated = await withProgressHeartbeat(() => buildLlmSectionContent({
         template,
         chapter: templateChapter,
@@ -592,7 +603,7 @@ export async function finalizeGeneration(p: {
         targetWords: repairTargetWords,
         maxWords: Math.ceil(repairTargetWords * 1.32),
         forbidDrawingImages: false,
-        qualityFeedback: `Final Gate 发现“${sectionTitle}”为空小节或深度不足。请基于证据完整重写该小节正式正文（原小节内容将被整体替换），包含检查责任、验收节点、资料闭环、整改复验要求，优先落位项目建筑面积、层数、工期、专业范围等量化参数，不得输出占位或解释。${lastFailure ? `此前生成被拒原因：${lastFailure}，必须逐条修正。` : ''}`,
+        qualityFeedback: buildFinalGateRepairQualityFeedback(sectionTitle, lastFailure),
         diagnostics: generationDiagnostics,
         signal,
         allowLenientStructureGate: true,
@@ -631,7 +642,7 @@ export async function finalizeGeneration(p: {
       upsertProgressStage(finalGateRepairStages, completedRepairStage);
       emitProgress(finalChapterDrafts, progressStages);
     }
-    finalMarkdown = supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template);
+    finalMarkdown = finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template));
     recomputeFinalValidationBundle();
   }
   // Final Gate 补写小节由 LLM 生成，可能引入新的跨章数值冲突（生成阶段修复闭环不覆盖补写内容）：
@@ -640,7 +651,7 @@ export async function finalizeGeneration(p: {
   // 全文级定点修复同 finalize 入口处：封面/信息表合成区的败选数值章节修复覆盖不到，必须同步修复
   const needsPostGateMarkdownFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts).fixedCount > 0;
   if (postFinalGateFix.fixedCount > 0 || needsPostGateMarkdownFix) {
-    finalMarkdown = supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template);
+    finalMarkdown = finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template));
     const postRebuildMarkdownFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
     if (postRebuildMarkdownFix.fixedCount > 0) finalMarkdown = postRebuildMarkdownFix.markdown;
     recomputeFinalValidationBundle();

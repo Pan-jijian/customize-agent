@@ -1,5 +1,15 @@
 # server
 
+## 4.8.3
+
+### Patch Changes
+
+- 八度实测失败修复（4.8.3）：
+
+  - Final Gate 补写工作包型小节（主要施工内容/分部分项方案/主要施工方法）时注入三段式标签硬性要求（施工概况/施工流程/施工方法逐字出现、方法段 ≥4 环节箭头工序链、每分项 ≥4 工艺参数），修复补写稿无标签被分部分项专项验收器 3 轮全部拦截、导出门禁 2 个 blocker 残留导致生成失败的缺陷
+  - ensureWorkPackageOverviewLabels 首行标签规范化扩展到全部分部分项工作包小节（原仅覆盖"项目主要施工内容"）
+  - 最终组装链（4 处 supplementRequiredTexts 出口）统一补 finalizeFinalMarkdownStructure 兜底，清除 normalizeProjectBasicInfoTable 重排产生的空壳小节（如"1.1.3 工程概况"）
+
 ## 4.8.2
 
 ### Patch Changes
