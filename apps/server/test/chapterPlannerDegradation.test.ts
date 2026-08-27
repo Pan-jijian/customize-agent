@@ -107,15 +107,16 @@ afterEach(() => {
 });
 
 describe('planChapterStructureWithLlm 逐主题块小步规划（p3-s1）', () => {
-  it('16 条：语义域聚类出 6 个块候选，逐块 LLM 命中时块间合并且细目 100% 承接', async () => {
+  it('16 条：语义域聚类出 4 个块候选，逐块 LLM 命中时块间合并且细目 100% 承接', async () => {
     vi.mocked(callDocumentLlmJson).mockImplementation(async (_system, prompt) => planFromPrompt(prompt));
     const diagnostics = makeDiagnostics();
     const structure = await planChapterStructureWithLlm(baseInput(BASE_SECTIONS, diagnostics));
     expect(structure).toBeDefined();
     expect(structure!.llmPlanned).toBe(true);
-    // 2 个评标必查块（危大工程管控/应急预案编制）+ 4 个语义域块（施工组织 4/工期进度 5/质量验收 4/安全风险 1）= 6 块
-    expect(structure!.blocks.length).toBe(6);
-    expect(callDocumentLlmJson).toHaveBeenCalledTimes(6);
+    // 必查细目（危大工程管控/应急预案编制）并入语义域分组（不每条独立成块）：
+    // 施工组织 4/工期进度 5/质量验收 4/安全风险 3 = 4 块
+    expect(structure!.blocks.length).toBe(4);
+    expect(callDocumentLlmJson).toHaveBeenCalledTimes(4);
     expect(uncoveredPlannerSections(BASE_SECTIONS, structure!)).toEqual([]);
     expect([...structure!.coveredSections, ...structure!.fallbackSections].sort()).toEqual([...BASE_SECTIONS].sort());
   });
@@ -138,7 +139,7 @@ describe('planChapterStructureWithLlm 逐主题块小步规划（p3-s1）', () =
 
   it('20 条：部分块命中、部分块校验失败时块级失败隔离，失败块细目被兜底（一批失败不影响另一批）', async () => {
     vi.mocked(callDocumentLlmJson).mockImplementation(async (_system, prompt, options) => {
-      // 只让「工期进度」域块失败，其余 7 个块正常命中
+      // 只让「工期进度」域块失败，其余 5 个块正常命中
       if (prompt.includes('工期保证措施')) {
         if (options?.outFailure) options.outFailure.value = 'JSON 解析失败：JSON 被截断（{ 未闭合 1 个）';
         return undefined;
@@ -174,7 +175,7 @@ describe('planChapterStructureWithLlm 逐主题块小步规划（p3-s1）', () =
     const structure = await planChapterStructureWithLlm(baseInput(BASE_SECTIONS, diagnostics));
     expect(structure).toBeDefined();
     expect(structure!.llmPlanned).toBe(true);
-    // 每条细目独立成块 → 每块一次小调用（远离整章一次大 JSON）
+    // 相似度全 0：域内每条独立成块（必查与普通细目同口径）→ 每块一次小调用（远离整章一次大 JSON）
     expect(callDocumentLlmJson).toHaveBeenCalledTimes(BASE_SECTIONS.length);
     expect(uncoveredPlannerSections(BASE_SECTIONS, structure!)).toEqual([]);
   });

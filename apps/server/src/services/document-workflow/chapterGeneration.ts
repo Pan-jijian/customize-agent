@@ -1104,9 +1104,10 @@ export async function buildPlannedChapterContent(input: {
           minWords: Math.floor(block.targetWords * 0.6),
           targetWords: block.targetWords,
           maxWords: Math.ceil(block.targetWords * 1.1),
-          // p3-s2：块成稿输出预算按目标字数 1:1.2 设定且不走 thinking ×6 放大（小预算强制短思考，把共享输出池让给正文），
-          // 下限 1600 token 保证拆半后的小块（800~1000 字）仍有足够正文空间
-          maxTokens: Math.max(1600, Math.ceil(block.targetWords * 1.2)),
+          // p3-s2 修正：deepseek 思考 token 与正文共享输出池，1:1.2 小预算被思考耗尽导致空响应/正文截断，
+          // 块成稿大面积失败触发整章降级（实测：2/3 章降级，交付置信度 46%）；
+          // 改为目标字数 ×1.5 且下限 3200（2200 字正文 ≈ 3300~4400 token + 思考空间，仍低于 8192 共享池）
+          maxTokens: Math.max(3200, Math.ceil(block.targetWords * 1.5)),
           disableThinkingBoost: true,
           factCoverageContext: `${input.factCoverageContext || ''}${factsHint ? `\n${factsHint}` : ''}`,
           twoStep: false,

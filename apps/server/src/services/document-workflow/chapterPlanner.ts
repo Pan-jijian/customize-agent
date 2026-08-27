@@ -247,8 +247,10 @@ function allocateBlockTargetWords(blocks: PlannedChapterBlock[], targetWords: nu
 const MAX_SECTIONS_PER_BLOCK = 8;
 /** 语义聚类合并阈值：域内两条细目余弦 ≥0.5 归入同一块候选 */
 const BLOCK_CLUSTER_SIMILARITY = 0.5;
-/** 单块规划 LLM 调用输出上限（token）：小步化核心，远离 8192 共享输出池 */
-const BLOCK_PLAN_MAX_TOKENS = 2000;
+/** 单块规划 LLM 调用输出上限（token）：小步化核心；deepseek 思考 token 与正文共享输出池，
+ * 预算过小会被思考耗尽产生空响应（实测：2000 token 时「思考阶段耗尽输出预算」空响应，
+ * 4096 给思考留出空间，JSON 输出本身 ≤2000 token，仍远离 8192 共享池） */
+const BLOCK_PLAN_MAX_TOKENS = 4096;
 
 /** 单块规划 LLM 输出（p3-s1）：一个主题块的 title/subPoints/facts */
 interface PlannerBlockPlan {
@@ -287,13 +289,12 @@ const BLOCK_PLAN_SCHEMA: DocumentJsonSchema = {
  * 语义模型不可用（similarity=undefined）时退化为域内顺序切块（每块 ≤8 条）。
  */
 function clusterBlockCandidates(inputSections: string[], similarity?: SemanticSimilarityFn): string[][] {
-  const criticalBlocks: string[][] = [];
+  // 必查细目不每条独立成块（实测缺陷：徽光阁 52 条细目命中 10 个锚定词 → 21 块，
+  // LLM 调用数从基线 56 次膨胀至 132 次，块成稿大面积失败触发整章降级）：
+  // 必查细目并入语义域分组参与聚类，块内 H4 保真由规划 prompt 规则（必查关键词必须独立 H4）
+  // 与 ensureSectionCoverage 必查兜底（未映射必查必新增独立 H4）双重保证
   const byDomain = new Map<string, string[]>();
   for (const section of inputSections) {
-    if (isCriticalSection(section)) {
-      criticalBlocks.push([section]);
-      continue;
-    }
     const key = sectionDomain(section);
     const items = byDomain.get(key) || [];
     items.push(section);
@@ -325,7 +326,7 @@ function clusterBlockCandidates(inputSections: string[], similarity?: SemanticSi
     }
     domainBlocks.push(...blocks);
   }
-  return [...criticalBlocks, ...domainBlocks];
+  return domainBlocks;
 }
 
 /** 单块 LLM 输出 → PlannedChapterBlock：sources 仅保留能与块细目对齐的原文，防编造；无效返回 undefined */
