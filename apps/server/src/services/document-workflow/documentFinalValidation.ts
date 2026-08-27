@@ -5,7 +5,7 @@ import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
 import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgDivisionSectionIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
-import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, ValidationIssue } from './types';
+import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, ValidationIssue } from './types';
 
 export function buildStandardFinalValidationIssues(input: {
   markdown: string;
@@ -18,12 +18,14 @@ export function buildStandardFinalValidationIssues(input: {
   scopeConflicts?: NumericScopeConflict[];
   /** 招标文件评分条目标题（承接审计产物），用于后置正文命中检查 */
   evaluationCriteriaItems?: string[];
+  /** 模块挂靠后的大纲（含四新等承诺小节）：承诺承接检查的基准，缺省回退 template.chapters */
+  effectiveChapters?: DocumentTemplateChapter[];
 }): ValidationIssue[] {
   return [
     ...(input.promptDocumentRules?.forbidToc ? [] : [...tocHierarchyIssues(input.markdown), ...tocBodyConsistencyIssues(input.markdown)]),
     ...headingDuplicateIssues(input.markdown),
     ...evaluationCriteriaCoverageIssues(input.markdown, input.evaluationCriteriaItems || []),
-    ...innovationTechCoverageIssues(input.markdown, input.template.chapters || []),
+    ...innovationTechCoverageIssues(input.markdown, input.effectiveChapters || input.template.chapters || []),
     ...instructionLikeHeadingIssues(input.markdown),
     ...formalHeadingHierarchyIssues(input.markdown),
     ...formalContentIntegrityIssues(input.markdown),

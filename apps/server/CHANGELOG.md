@@ -1,5 +1,11 @@
 # server
 
+## 4.5.17
+
+### Patch Changes
+
+- 语义分层治理：回滚内部术语正则替换（词面替换违反"语义判断归 LLM、正则仅用于结构"架构原则），治理链改为 提示词禁写 → Reviewer 确定性标记（FORMAL_FORBIDDEN_PHRASES 新增"工作包"）→ Repairer 按上下文语义改写（suggestion 带语境改写示例）→ Final Gate 保险丝 internalTerminologyIssues 词面标记兜底；innovationTechCoverageIssues 由四新关键词正则改为承诺小节成稿结构检查（大纲承诺小节在正文必须有对应标题且正文 ≥200 字），并将模块挂靠后的 effectiveChapters 传导到最终校验，修复原始模板未挂靠时承诺检测静默落空的问题。
+
 ## 4.5.16
 
 ### Patch Changes

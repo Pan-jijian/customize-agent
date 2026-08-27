@@ -259,12 +259,10 @@ export function sanitizeFormalMarkdown(markdown: string) {
     .replace(INSTRUCTION_HEADING_RE, '')
     .replace(FILE_NAME_RE, '')
     .replace(/^#\s+/gmu, '')
-    .replace(CAD_ENTITY_TOKEN_RE, '')
-    // 内部术语净化：生成系统以“工作包”指代专业工程展开单元，提示词曾把该术语传导给 LLM 写入正式正文
-    // （真实生成缺陷：“拆除工程工作包”“以下按工作包逐项说明”进入交付稿），确定性剥除：
-    // 标题尾缀整体删除（“拆除工程工作包”→“拆除工程”），正文残留替换为正式术语“专业工程”
-    .replace(/^(#{1,6}\s+(?:\d+(?:\.\d+)*\s*)?[^\n]{2,40}?)工作包(?=\s*$)/gmu, '$1')
-    .replace(/工作包/gu, '专业工程');
+    .replace(CAD_ENTITY_TOKEN_RE, '');
+  // 内部术语不在此做正则替换：术语合法性属语义判断（如“工作包”按语境应改写为“拆除工程/专业工程”等），
+  // 词面替换必然产生语义错误；治理链为 提示词禁写 → Reviewer 确定性标记（FORMAL_FORBIDDEN_PHRASES）
+  // → Repairer 按上下文语义改写 → Final Gate 保险丝（internalTerminologyIssues 词面标记兜底）
   return cleaned.split(/\r?\n/u)
     .filter((line, index, lines) => {
       const previousPlain = index > 0 ? displayChapterTitle((lines[index - 1] || '').trim().replace(/^#{1,6}\s+/u, '')) : '';

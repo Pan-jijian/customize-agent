@@ -65,6 +65,9 @@ export interface AgentReviewResult {
 
 const FORMAL_FORBIDDEN_PHRASES = [
   '知识库', '系统暂未', '项目资料暂未', '资料未明确', '暂未明确', '待确认', '待资料复核', '待系统', '未检索到', '资料不足', '无法确认', '建议补充', '不适用', 'COL', '可核验信息',
+  // 内部术语（词面标记）：术语合法性属语义判断，这里只做确定性 flag 触发 Repairer 按上下文语义改写，
+  // 不做词面替换（“工作包”按语境应改写为“拆除工程/专业工程”等，逐词替换必然产生语义错误）
+  '工作包',
 ];
 
 function normalizeText(value: string) {
@@ -266,7 +269,7 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
   const issues: ValidationIssue[] = [];
   const content = input.draft.content || '';
   for (const phrase of FORMAL_FORBIDDEN_PHRASES) {
-    if (content.includes(phrase)) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `${input.draft.title} 正文包含禁止话术：${phrase}`, suggestion: '改为事实支撑的正式表达；缺失事实不得占位。' });
+    if (content.includes(phrase)) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `${input.draft.title} 正文包含禁止话术：${phrase}`, suggestion: phrase === '工作包' ? '这是生成系统后台概念，必须结合上下文语义改写为正式术语（如“拆除工程工作包”→“拆除工程”、“按工作包逐项说明”→“按专业工程逐项说明”），不得做词面替换。' : '改为事实支撑的正式表达；缺失事实不得占位。' });
   }
   // P0-2：LLM 全故障时的证据骨架草稿必须被 Review 门禁拦截，不允许以模板拼接正文静默通过
   if (content.includes('[EVIDENCE_SKELETON]')) issues.push({ level: 'error', severity: 'blocker', category: 'evidence_coverage', owner: 'system', message: `${input.draft.title} 正文为 LLM 全故障后的证据骨架草稿，禁止作为正式正文通过`, suggestion: '必须由 Repairer 基于小节事实卡与证据完整重写为正式正文，并删除 [EVIDENCE_SKELETON] 标记；若 LLM 仍不可用，本章节保持 failed 阻断。' });

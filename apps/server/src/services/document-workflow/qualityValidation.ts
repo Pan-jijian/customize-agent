@@ -8,7 +8,7 @@ import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch }
 import { displayChapterTitle } from './outline';
 import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
-import { stringifyFactValue } from './utils';
+import { extractSection, stringifyFactValue } from './utils';
 import { closedLoopBlockStats } from './tenderBidScoring';
 
 export function isExportBlockingIssue(issue: ValidationIssue) {
@@ -158,28 +158,35 @@ export function evaluationCriteriaCoverageIssues(markdown: string, items: string
 }
 
 /**
- * 内部术语泄漏保险丝：清洗链已确定性净化“工作包”等后台术语，若最终正文仍有残留说明净化链
- * 未覆盖该生成路径（如绕过 finalize 的直出路径），按阻断计分而不是静默放行——后台概念流入
- * 正式正文属交付级低级错误（真实生成缺陷：“拆除工程工作包”标题进入交付稿未被任何评分发现）。
+ * 内部术语泄漏保险丝（词面标记，不做替换）：后台概念流入正式正文属交付级低级错误，
+ * 术语改写是语义动作必须由 Repairer 按上下文完成（如“工作包”按语境改写为“拆除工程/专业工程”），
+ * 这里只做词面标记触发修复循环；若仍残留则硬阻断，绝不静默放行（真实生成缺陷：“拆除工程工作包”标题进入交付稿未被任何评分发现）。
  */
 export function internalTerminologyIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   if (/工作包/u.test(markdown)) {
-    issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'system', message: '正式正文仍包含后台内部术语“工作包”，净化链未覆盖该生成路径', suggestion: '正文小节与叙述应使用“专业工程/分部分项工程”等正式术语，禁止出现生成系统后台概念。' });
+    issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'system', message: '正式正文仍包含后台内部术语“工作包”，需要按上下文语义改写为正式术语', suggestion: '请结合语境改写：“拆除工程工作包”→“拆除工程”，“按工作包逐项说明”→“按专业工程逐项说明”；禁止出现生成系统后台概念。' });
   }
   return issues;
 }
 
 /**
- * 四新技术后置承接检查：施工组织设计大纲已通过标准模块挂靠承诺“新技术、新工艺、新材料、新设备”
- * 内容时（大纲含四新小节），若最终正文四新关键词 0 次出现，说明成稿阶段把补入小节合并丢失，报 warning
- * 计入交付质量计分；大纲未承诺时不制造新义务（避免对未要求的文档类型误报）。
+ * 四新技术后置承接检查（小节成稿结构检查，不做关键词语义判断）：施工组织设计大纲通过标准模块挂靠
+ * 承诺了四新小节（如“新技术、新工艺、新材料、新设备的应用”），最终正文必须有对应小节标题且正文成稿
+ * （承诺小节在主题块合并/降级中丢失的真实缺陷）；大纲未承诺时不制造新义务（避免对未要求的文档类型误报）。
+ * 成稿但内容空洞的风险由事实密度/闭环句式/Reviewer 维度覆盖，此处不越界做语义判断。
  */
 export function innovationTechCoverageIssues(markdown: string, outlineChapters: Array<{ title?: string; sections?: string[] }>): ValidationIssue[] {
-  const committed = outlineChapters.some(chapter => /新技术|新工艺|新材料|新设备|四新/u.test(`${chapter.title || ''} ${(chapter.sections || []).join(' ')}`));
-  if (!committed) return [];
-  if (/新技术|新工艺|新材料|新设备|四新/u.test(markdown.replace(/\s+/gu, ''))) return [];
-  return [{ level: 'warning', severity: 'warning', message: '大纲已规划新技术/新工艺/新材料/新设备应用内容，但正文未出现任何相关表述', suggestion: '请补写四新技术应用小节，落位本项目适用的创新工艺、新材料与新设备应用计划。' }];
+  const committedSections = (outlineChapters || []).flatMap(chapter => (chapter.sections || []).filter(section => /新技术|新工艺|新材料|新设备|四新/u.test(section)));
+  if (committedSections.length === 0) return [];
+  const issues: ValidationIssue[] = [];
+  for (const sectionTitle of [...new Set(committedSections)]) {
+    const body = extractSection(markdown, sectionTitle, { fuzzy: true });
+    if (!body || documentTextLength(body) < 200) {
+      issues.push({ level: 'warning', severity: 'warning', message: `大纲承诺小节“${sectionTitle}”未在正文成稿（正文 ${body ? documentTextLength(body) : 0} 字，要求不少于 200 字）`, suggestion: '请补写四新技术应用小节成稿，落位本项目适用的创新工艺、新材料与新设备应用计划。' });
+    }
+  }
+  return issues;
 }
 
 export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[]): ExportGateResult {
