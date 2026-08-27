@@ -1035,7 +1035,9 @@ export async function generateDocumentDraft(input: { templateId: string; require
       const depthRepairIssues = agentReview.issues.filter(item => /正文不足，未达到任务最小深度/u.test(item.message));
       const sectionRewriteIssues = [...writerMissingIssues, ...depthRepairIssues.filter(item => !writerMissingIssues.some(existing => existing.message === item.message))];
       const repairSectionResults: string[] = [];
-      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: `${displayChapterTitle(chapter.title)} Reviewer 发现 ${blockingReviewIssues.length} 个阻断问题，正在定向修复`, details: blockingReviewIssues.map(issue => issue.message) }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
+      // 修复范围可能只有 warning 级深度缺口（blockingReviewIssues 为 0）：消息必须按实际修复来源描述，
+      // 否则出现“Reviewer 发现 0 个阻断问题，正在定向修复”的矛盾展示（历史缺陷：纯 warning 深度补写轮）
+      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: blockingReviewIssues.length > 0 ? `${displayChapterTitle(chapter.title)} Reviewer 发现 ${blockingReviewIssues.length} 个阻断问题，正在定向修复` : `${displayChapterTitle(chapter.title)} 正在定向补写 ${sectionRewriteIssues.length} 个深度不足小节`, details: sectionRewriteIssues.length > 0 ? sectionRewriteIssues.map(issue => issue.message) : blockingReviewIssues.map(issue => issue.message) }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
       emitProgress(chapterDrafts);
       const replaceChapterSection = (contentValue: string, title: string, sectionValue: string, anchorTitle?: string) => {
         const normalizeHeadingTitle = (value: string) => value.replace(/[\u00a0\u3000]/gu, ' ').replace(/^\d+(?:\.\d+)*\s+/u, '').trim();
@@ -1064,9 +1066,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
           if (!heading) continue;
           const headingTitle = normalizeHeadingTitle(heading[2]);
           if (!matchesSectionHeading(headingTitle)) continue;
-          // 工作包型关键小节：正文由同级 H4 工作包展开，替换边界扩展到下一个上级标题（H2/H3），
-          // 吞并原有工作包 H4——否则每轮 Repairer 补写都会在旧工作包前追加一组新工作包，形成多组重复
-          const boundaryHeadingRe = heading[1].length === 3 && WORK_PACKAGE_SECTION_RE.test(title) ? /^#{2,3}\s+/u : /^#{2,4}\s+/u;
+          // 工作包型小节：正文由同级 H4 工作包展开（标题正则命中，或标题后紧跟同级 H4 的结构特征），
+          // 替换边界扩展到下一个上级标题（H2/H3）吞并原有工作包 H4——否则每轮 Repairer 补写都会在旧工作包前
+          // 追加一组新工作包，形成成对重复（真实生成缺陷：安全管理目标等 H4 修复两轮后重复出现）
+          const nextNonEmptyLine = lines.slice(lineIndex + 1).find(line => line.trim());
+          const workPackageLike = heading[1].length === 3 && (WORK_PACKAGE_SECTION_RE.test(title) || Boolean(nextNonEmptyLine && /^#{4}\s+/u.test(nextNonEmptyLine.trim())));
+          const boundaryHeadingRe = workPackageLike ? /^#{2,3}\s+/u : /^#{2,4}\s+/u;
           let endLine = lines.length;
           for (let next = lineIndex + 1; next < lines.length; next += 1) {
             if (boundaryHeadingRe.test(lines[next].trim())) {

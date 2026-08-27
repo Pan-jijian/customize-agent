@@ -1470,7 +1470,7 @@ export default function DocumentsPage() {
                     children: <List size="small" dataSource={draft.executionStages} renderItem={s => (
                       <List.Item>
                         <List.Item.Meta avatar={STAGE_ICONS[s.type] || <FileTextOutlined />}
-                          title={<Text title={s.roleId} style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{`${STAGE_TITLES[s.type] || s.type} · ${s.roleName || roleDisplayName(s.roleId)}`}</Text>}
+                          title={<Text title={s.roleId} style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{`${s.title || STAGE_TITLES[s.type] || s.type} · ${s.roleName || s.subtitle || roleDisplayName(s.roleId)}`}</Text>}
                           description={<Text type="secondary" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{s.message}</Text>} />
                         <Tag color={s.status === 'success' ? 'success' : s.status === 'failed' ? 'error' : s.status === 'skipped' ? 'default' : 'warning'}>{s.status}</Tag>
                       </List.Item>

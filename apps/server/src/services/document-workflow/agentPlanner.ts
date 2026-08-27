@@ -300,7 +300,11 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
   for (const section of input.task.sections) {
     const anchor = sectionAnchor(section.title);
     const merged = mergedSection(section.title);
-    const body = extractSection(content, anchor, { fuzzy: true });
+    // 锚点回退：plannedCoverage 锚点（规划重写 H4 标题）与块成稿实际 H4 标题可能不一致（块级降级/成稿标题偏差），
+    // 锚点提取为空时回退按细目原始标题提取——与 Repairer 落位口径（原始标题 + comparable 包含匹配）对齐，
+    // 否则补写已落位但 Reviewer 永远按失效锚点报“正文不足”，修复轮次空转（真实生成缺陷：3 轮修复后仍 2 个阻断问题）
+    let body = extractSection(content, anchor, { fuzzy: true });
+    if (!body && anchor !== section.title) body = extractSection(content, section.title, { fuzzy: true });
     if (body.includes('[WRITER_MISSING_SECTION]') || (!body && content.includes('[WRITER_MISSING_SECTION]'))) {
       // 同一承接小节被多条细目共享时只报一次（merged 组内重复修复指令会浪费 Repairer 轮次）
       if (!anchorDepthChecked.has(anchor)) {

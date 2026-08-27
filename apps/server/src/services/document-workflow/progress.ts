@@ -1,6 +1,12 @@
 import type { DocumentExecutionStage } from './types';
 
-export function stageTitle(type: DocumentExecutionStage['type']) {
+export function stageTitle(type: DocumentExecutionStage['type'], roleId?: string) {
+  // Agent Reviewer / Agent Repairer 节点区分展示：不能都叫“LLM 审查优化”，
+  // 前者是审查节点（LLM 审查），后者是修复优化节点（LLM 优化）
+  if (type === 'llm_review') {
+    if (roleId?.startsWith('agent-reviewer')) return 'LLM 审查';
+    if (roleId?.startsWith('agent-repairer')) return 'LLM 优化';
+  }
   const titles: Record<DocumentExecutionStage['type'], string> = {
     role_binding: '项目角色配置绑定',
     knowledge_retrieval: '知识库证据检索',
@@ -27,7 +33,7 @@ export function stageRoleDisplayName(roleId?: string) {
 }
 
 export function displayStage(stage: DocumentExecutionStage, overrides: Partial<DocumentExecutionStage> = {}): DocumentExecutionStage {
-  const next = { executionVersion: 2 as const, title: stageTitle(stage.type), group: stage.type, ...stage, ...overrides };
+  const next = { executionVersion: 2 as const, title: stageTitle(stage.type, stage.roleId), group: stage.type, ...stage, ...overrides };
   return { ...next, roleName: next.roleName || stageRoleDisplayName(next.roleId), subtitle: next.subtitle || next.roleName || stageRoleDisplayName(next.roleId) };
 }
 
