@@ -1,5 +1,11 @@
 # server
 
+## 4.8.1
+
+### Patch Changes
+
+- 降级改造验收锁定：块成稿质检重试+拆半优先自愈（buildPlannedChapterContent）与修复批量化（repairChapterByQuality 一次调用多 issues/patch 局部失败隔离）补齐测试覆盖，门禁 837 全绿
+
 ## 4.8.0
 
 ### Minor Changes
