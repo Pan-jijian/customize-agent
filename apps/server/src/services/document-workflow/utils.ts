@@ -54,7 +54,11 @@ export function comparableSectionTitleText(value: string) {
     .toLowerCase()
     .replace(/施工(?=方案|流程|方法)/gu, '')
     .replace(/专项(?=方案)/gu, '')
-    .replace(/项目|工程|主要|重点|技术/gu, '');
+    .replace(/项目|工程|主要|重点|技术/gu, '')
+    // 连接词与顿号不参与可比性：成稿标题常把细目顿号改写为“与/及”（如“项目特点、重点、难点分析”→“工程特点与重点难点分析”），
+    // 不剥离会永久匹配失败，关键小节被误报“正文不足”且修复轮次空转（真实生成缺陷：3 轮修复后仍 2 个阻断问题）
+    .replace(/[、，,；;·．.／/]+/gu, '')
+    .replace(/与|及|和|暨/gu, '');
 }
 
 function extractSectionFuzzy(content: string, sectionTitle: string) {
@@ -63,12 +67,14 @@ function extractSectionFuzzy(content: string, sectionTitle: string) {
   const comparableTitle = comparableSectionTitleText(sectionTitle);
   const matches: string[] = [];
   let start = -1;
+  let startLevel = 0;
   let startWorkPackage = false;
   const flush = (end: number) => {
     if (start < 0) return;
     const body = lines.slice(start, end).join('\n').trim();
     if (body) matches.push(body);
     start = -1;
+    startLevel = 0;
     startWorkPackage = false;
   };
   for (let index = 0; index < lines.length; index += 1) {
@@ -77,14 +83,16 @@ function extractSectionFuzzy(content: string, sectionTitle: string) {
     // 产生"未匹配到独立小节标题"误报与 Repairer 修复无效循环
     if (!/^\s*#{2,4}\s+/u.test(lines[index])) continue;
     const level = (/^\s*(#{2,4})\s+/u.exec(lines[index])?.[1].length) || 3;
-    // 命中工作包型关键小节后，后续同级 H4 是工作包正文而非小节边界，
-    // 继续向下收集直到上级标题（H2/H3），避免只提取到标题后的概述段
-    if (start >= 0 && startWorkPackage && level === 4) continue;
+    // H3 小节命中后向下包含 H4 子节：H3 小节正文常全部承载于其 H4 子节（H3 自身零正文），
+    // 若在 H4 处截断会提取 0 字并误报“正文不足” blocker（真实生成缺陷：危大工程专项施工方案审批流程
+    // 下 4 个 H4 共 1298 字仍被报不足，修复 3 轮空转）；工作包型小节命中后同级 H4 同理是正文而非边界
+    if (start >= 0 && (startWorkPackage || startLevel === 3) && level === 4) continue;
     flush(index);
     const normalizedHeading = sectionHeadingTitleText(lines[index]).replace(/\s+/gu, '').toLowerCase();
     const comparableHeading = comparableSectionTitleText(lines[index]);
     if (normalizedHeading === normalizedTitle || normalizedHeading.includes(normalizedTitle) || normalizedTitle.includes(normalizedHeading) || comparableHeading === comparableTitle || comparableHeading.includes(comparableTitle) || comparableTitle.includes(comparableHeading)) {
       start = index + 1;
+      startLevel = level;
       startWorkPackage = level <= 4 && WORK_PACKAGE_SECTION_RE.test(lines[index]);
     }
   }
