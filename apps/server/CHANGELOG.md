@@ -1,5 +1,24 @@
 # server
 
+## 4.6.0
+
+### Minor Changes
+
+- 思考策略重构 + 并发上限解除（生成提速核心版）
+
+  - 新增模型思考画像注册表（MODEL_THINKING_PROFILES）：deepseek（shared 池可关）、gpt-5（effort none）、gemini 3.x（不可关）、qwen/glm（预留），新增模型只需追加一条画像
+  - ChatOptions 新增 disableThinking 与 extraBody：provider 按模型画像翻译厂商参数（thinking disabled / reasoning effort none），不可关模型抛显式能力错误
+  - 文档生成管线默认 structuredGeneration 任务模式：全部调用硬关思考（思维链不再抢占正文输出池），正文独占 max_tokens 预算
+  - 删除模型名正则猜测与 ×6 预算放大博弈：预算按目标字数直通；思考不可关且共享池的模型保留 relaxed 放大
+  - 并发上限解除：全局 LLM 并发默认 64（DOCUMENT_LLM_MAX_CONCURRENCY 可覆盖，0=不限），不再按文档规模 8/16/24/32 分档
+  - 失败 streak 降串行阈值 2 → 5：偶发失败不再使并发塌缩
+  - deepseek 走专用 Provider 工厂（真实 8192 输出上限声明）
+
+### Patch Changes
+
+- Updated dependencies
+  - @customize-agent/llm@3.1.0
+
 ## 4.5.17
 
 ### Patch Changes

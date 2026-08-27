@@ -12,6 +12,8 @@ const GOOGLE_CAPABILITIES: ModelCapabilities = {
   supportsVision: true,
   supportsThinking: true,
   supportsEmbedding: false,
+  // Gemini 3/3.1 Pro 无法关闭思考（thinkingBudget=0 仅 2.5 Flash 有效），思考独立预算不抢正文池
+  thinking: { defaultEnabled: true, disable: 'unsupported', budgetPolicy: 'separate' },
 };
 
 interface GeminiPart {

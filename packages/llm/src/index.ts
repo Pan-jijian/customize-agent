@@ -3,6 +3,8 @@ export type {
   LLMResponse,
   ChatOptions,
   ModelCapabilities,
+  ThinkingCapability,
+  ThinkingDisableMode,
   ImageGenerationOptions,
   ImageGenerationResult,
   FileUnderstandingInput,
@@ -13,6 +15,7 @@ export type {
 } from './interface.js';
 
 export { DEFAULT_CAPABILITIES } from './interface.js';
+export { MODEL_THINKING_PROFILES, thinkingCapabilityForModel, thinkingDisableBody } from './thinking.js';
 export { DeepSeekProvider } from './providers/deepseek.js';
 export { OpenAIProvider } from './providers/openai.js';
 export { AnthropicProvider } from './providers/anthropic.js';

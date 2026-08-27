@@ -8,8 +8,11 @@ const OPENAI_CAPABILITIES: ModelCapabilities = {
   supportsStreaming: true,
   supportsFunctionCalling: true,
   supportsVision: true,
-  supportsThinking: false,
+  supportsThinking: true,
   supportsEmbedding: true,
+  // GPT-5 系列为推理模型（默认 effort=medium），reasoning.effort=none 等同非推理模型；
+  // 思考 token 独立预算，不抢正文输出池（实际行为按模型名画像为准，见 thinking.ts）
+  thinking: { defaultEnabled: true, disable: 'openai-reasoning-effort', budgetPolicy: 'separate' },
 };
 
 /**

@@ -67,7 +67,8 @@ describe('buildGenerationBudget', () => {
     const { template, chapters } = makeTemplate(10);
     const budget = buildGenerationBudget({ template, chapters, targetWords: 15000, materialFileCount: 8, evidenceCount: 40, hasVeryLargeExplicitChapter: false, configuredChapterConcurrency: 0, strategy });
     expect(budget.chapterConcurrency).toBe(10);
-    expect(budget.reviewConcurrency).toBe(2);
+    // 并发上限解除后全局信号量默认 64（≥32 档），审查流水线 5 路（min(5, 章数)）
+    expect(budget.reviewConcurrency).toBe(5);
   });
 
   it('超大显式小节章同样全并发（不再独占槽位降档）', () => {
@@ -89,11 +90,12 @@ describe('buildGenerationBudget', () => {
     expect(budget.reviewConcurrency).toBe(1);
   });
 
-  it('审查流水线并发随全局 LLM 档位自适应（长文档升档）', () => {
+  it('审查流水线并发随全局 LLM 上限自适应（并发解除后统一 5 路）', () => {
     const longStrategy = selectDocumentGenerationStrategy({ template: makeTemplate(9, '常规房建模板').template, targetWords: 100000, materialFileCount: 8, evidenceCount: 40 });
     const { template, chapters } = makeTemplate(9, '常规房建模板');
     const budget = buildGenerationBudget({ template, chapters, targetWords: 100000, materialFileCount: 8, evidenceCount: 40, hasVeryLargeExplicitChapter: false, configuredChapterConcurrency: 0, strategy: longStrategy });
-    expect(budget.reviewConcurrency).toBe(4);
+    // 默认并发上限 64：审查流水线 5 路（min(5, 章数 9)）
+    expect(budget.reviewConcurrency).toBe(5);
   });
 
   it('证据预算区间随篇幅收缩', () => {

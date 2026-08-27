@@ -24,6 +24,8 @@ vi.mock('@customize-agent/llm', () => ({
     capabilities: { maxOutputTokens: 8192 },
     chat: chatMock,
   })),
+  // 未注册画像 → decideThinkingPolicy 保守不注入思考参数（与旧行为一致）
+  thinkingCapabilityForModel: vi.fn(() => undefined),
 }));
 
 function makeDiagnostics(): DocumentGenerationDiagnostics {

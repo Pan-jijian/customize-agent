@@ -10,6 +10,8 @@ const DEEPSEEK_CAPABILITIES: ModelCapabilities = {
   supportsVision: false,
   supportsThinking: true,
   supportsEmbedding: false,
+  // 思考默认开启（effort=high）且与正文共享 8192 输出池；支持 thinking {type:disabled} 硬关
+  thinking: { defaultEnabled: true, disable: 'deepseek-thinking', budgetPolicy: 'shared' },
 };
 
 /**

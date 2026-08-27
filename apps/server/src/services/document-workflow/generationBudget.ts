@@ -48,19 +48,18 @@ export function buildGenerationBudget(input: {
   const strategy = input.strategy;
   const triggers: string[] = [];
   // 并发预算：章节生成并发不设档位上限——全部章节同批启动（用户明确端点不会因章节并发限流），
-  // 在飞调用总量由全局 LLM 信号量（8/16/24/32 档）统一约束；DOCUMENT_CHAPTER_CONCURRENCY 可显式调低
+  // 在飞调用总量由全局 LLM 信号量（默认 64，DOCUMENT_LLM_MAX_CONCURRENCY 可覆盖）统一约束；DOCUMENT_CHAPTER_CONCURRENCY 可显式调低
   const sparse = input.materialFileCount < 4 && input.evidenceCount < 6;
   const autoChapterConcurrency = chapterCount;
   const configured = Number.isFinite(input.configuredChapterConcurrency) && input.configuredChapterConcurrency > 0 ? Math.floor(input.configuredChapterConcurrency) : undefined;
   const chapterConcurrency = Math.max(1, Math.min(chapterCount, configured ?? autoChapterConcurrency));
-  // 全局 LLM 并发档位：按文档目标字数自适应（8/16/24/32），供生成开始前提升全局信号量
+  // 全局 LLM 并发上限：所有文档规模统一（默认 64），供生成开始前设置全局信号量
   const llmConcurrency = concurrencyForDocumentScale(input.targetWords);
-  // 审查流水线并发自适应：fast 串行；其余按全局 LLM 并发档位缩放（8→2、16→3、24→4、32→5），
-  // 章节全并发后不再从“档位 − 生成并发”余量扣减（余量会退化到 1），生成+审查共享全局信号量自然调度，
-  // 在飞调用总量始终受全局档位硬约束
+  // 审查流水线并发自适应：fast 串行；其余按全局 LLM 并发上限缩放（≥32→5、≥16→3、其余 2），
+  // 章节全并发后不再从“上限 − 生成并发”余量扣减（余量会退化到 1），生成+审查共享全局信号量自然调度
   const reviewConcurrency = (() => {
     if (strategy.mode === 'fast') return 1;
-    const scaled = llmConcurrency >= 32 ? 5 : llmConcurrency >= 24 ? 4 : llmConcurrency >= 16 ? 3 : 2;
+    const scaled = llmConcurrency >= 32 ? 5 : llmConcurrency >= 16 ? 3 : 2;
     return Math.max(1, Math.min(scaled, chapterCount));
   })();
   const { floorChars, ceilingChars } = evidenceBudgetRange(avgChapterTargetSafe);

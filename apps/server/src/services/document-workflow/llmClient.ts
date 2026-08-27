@@ -1,4 +1,4 @@
-import { createProvider } from '@customize-agent/llm';
+import { createProvider, thinkingCapabilityForModel } from '@customize-agent/llm';
 import { resolveProtocol } from '@customize-agent/runtime';
 import { getConfigStore } from '@/services/common/configService';
 import type { DocumentGenerationDiagnostics } from './types';
@@ -9,27 +9,31 @@ let activeDocumentLlmCalls = 0;
 
 const LLM_RETRY_DELAY_MS = 1200;
 
-/** 全局 LLM 并发上限：避免多文档 × 多章节 × 多小节同时打爆模型端点（默认 8，可用 DOCUMENT_LLM_MAX_CONCURRENCY 覆盖） */
+/**
+ * 全局 LLM 并发上限：用户既定决策——LLM 并发调用不应受限制（实测模型端点并发量高，不会因并发限流）。
+ * 默认 64（足以覆盖 51 主题块全并发 + 3 路审查修复流水线）；DOCUMENT_LLM_MAX_CONCURRENCY 可覆盖，
+ * 设为 0 表示完全解除上限。仅瞬态错误重试（429/5xx）保留端点保护语义，与并发上限无关。
+ */
 const rawMaxConcurrency = Number(process.env.DOCUMENT_LLM_MAX_CONCURRENCY);
-const envMaxConcurrency = Number.isFinite(rawMaxConcurrency) && rawMaxConcurrency > 0 ? Math.floor(rawMaxConcurrency) : undefined;
-let llmMaxConcurrency = envMaxConcurrency ?? 8;
+const envMaxConcurrency = Number.isFinite(rawMaxConcurrency)
+  ? (rawMaxConcurrency === 0 ? Number.POSITIVE_INFINITY : (rawMaxConcurrency > 0 ? Math.floor(rawMaxConcurrency) : undefined))
+  : undefined;
+let llmMaxConcurrency: number = envMaxConcurrency ?? 64;
 
-/** 按文档目标字数计算全局并发档位：文档越大调用越多，并发上限越高；20 万字级文档走 32 档 */
-export function concurrencyForDocumentScale(targetWords: number) {
-  if (targetWords <= 20000) return 8;
-  if (targetWords <= 80000) return 16;
-  if (targetWords <= 150000) return 24;
-  return 32;
-}
-
-/** 生成开始时按文档规模提升全局并发上限（只升不降：多文档并发生成互不踩踏；上限始终受 env 强制覆盖约束） */
-export function raiseDocumentLlmConcurrencyForScale(targetWords: number) {
-  const scaled = concurrencyForDocumentScale(targetWords);
-  const ceiling = envMaxConcurrency ?? scaled;
-  llmMaxConcurrency = Math.max(llmMaxConcurrency, Math.min(scaled, ceiling));
+/** 文档目标字数与全局并发上限解耦：所有规模统一使用 llmMaxConcurrency（默认 64，env 可覆盖） */
+export function concurrencyForDocumentScale(_targetWords: number) {
   return llmMaxConcurrency;
 }
-/** 全局连续失败计数：成功清零、失败递增；连续失败≥2 时章节小节并发降级为串行，避免失败率高的模型被无脑并发反复击穿 */
+
+/** 生成开始时保持并发上限不变（不再按规模降档），仅受 env 强制覆盖约束 */
+export function raiseDocumentLlmConcurrencyForScale(_targetWords: number) {
+  llmMaxConcurrency = envMaxConcurrency ?? 64;
+  return llmMaxConcurrency;
+}
+/**
+ * 全局连续失败计数：成功清零、失败递增；连续失败≥5 时章节小节并发降级为串行。
+ * 阈值从 2 提到 5：偶发失败（单模型瞬时抽风）不应使整体并发塌缩，只有持续性失败才降级。
+ */
 let llmFailureStreak = 0;
 
 interface LlmSlotWaiter {
@@ -96,6 +100,9 @@ export function providerFactoryName(providerName: string, providerConfig?: { pro
   if (protocol === 'google') return 'google';
   if (protocol === 'ollama') return 'ollama';
   if (protocol === 'openrouter') return 'openrouter';
+  // deepseek 走专用 Provider：能力声明含真实 8192 输出上限与 reasoning_content 提取，
+  // 而非 openai 兼容工厂的 16384 声明（会被官方 API 拒绝）
+  if (/deepseek/iu.test(providerName)) return 'deepseek';
   return 'openai';
 }
 
@@ -109,7 +116,42 @@ export function getActiveModelWithProvider() {
   return { model: selected, provider: providerConfig };
 }
 
-export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; disableThinkingBoost?: boolean } = {}): Promise<string | undefined> {
+/**
+ * 任务类型：决定是否要求模型关闭思考（思维链）。
+ * - structuredGeneration：受约束的结构化生成/抽取/对照任务（成稿、规划、审查、修复）——
+ *   不需要多步推理，质量靠外部 Review→Repair 循环而非内部思维链，要求关思考。
+ * - reasoning：需要深度推理的交互场景（聊天、复杂分析）——保持模型默认。
+ * callDocumentLlm 是文档生成专用客户端，默认 structuredGeneration。
+ */
+export type DocumentLlmTaskKind = 'structuredGeneration' | 'reasoning' | 'default';
+
+export interface ThinkingDecision {
+  /** 是否向 provider 传 disableThinking（翻译为厂商参数） */
+  disableThinking: boolean;
+  /** compact=正文独占输出池（maxTokens 直通）；relaxed=思考不可关且共享池，预算放大保正文 */
+  budgetMode: 'compact' | 'relaxed';
+  /** 模型思考不可关时的告警（写入 diagnostics 供进度展示） */
+  warning?: string;
+}
+
+/** 任务类型 × 模型思考能力 → 思考策略决策（纯函数，供测试覆盖全组合） */
+export function decideThinkingPolicy(taskKind: DocumentLlmTaskKind, modelName: string): ThinkingDecision {
+  if (taskKind !== 'structuredGeneration') return { disableThinking: false, budgetMode: 'compact' };
+  const capability = thinkingCapabilityForModel(modelName);
+  // 未注册画像的模型：不注入思考参数（保持厂商默认行为），预算保守直通
+  if (!capability) return { disableThinking: false, budgetMode: 'compact' };
+  if (capability.disable === 'unsupported') {
+    // 思考不可关（如 Gemini 3/3.1 Pro）：shared 池模型正文预算必须放大，separate 池不抢正文只影响耗时
+    return {
+      disableThinking: false,
+      budgetMode: capability.budgetPolicy === 'shared' ? 'relaxed' : 'compact',
+      warning: `当前模型 ${modelName} 思考不可关闭（厂商限制），生成耗时受限；建议切换 deepseek 或 gpt 系列模型`,
+    };
+  }
+  return { disableThinking: true, budgetMode: 'compact' };
+}
+
+export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind } = {}): Promise<string | undefined> {
   if (options.diagnostics) options.diagnostics.llm.calls += 1;
   const release = await acquireLlmSlot(options.signal);
   if (options.diagnostics) options.diagnostics.llm.maxActive = Math.max(options.diagnostics.llm.maxActive, activeDocumentLlmCalls);
@@ -123,18 +165,18 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
       provider = createProvider(providerFactoryName(selected.provider, providerConfig), { baseUrl: providerConfig.baseUrl, apiKey: providerConfig.apiKey, modelName: selected.name, directEndpoint: providerConfig.directEndpoint });
       DOCUMENT_LLM_PROVIDER_CACHE.set(providerKey, provider);
     }
-    // reasoning 模型（deepseek-v4-pro 等）思考阶段与正文共享 max_tokens 预算，实测思考占 70%+，
-    // 预算不足会导致 content 为空、整节生成被当作空响应丢弃；对声明 supportsThinking 的模型放大输出预算。
-    // 经 openai 协议接入的 deepseek 推理模型工厂能力位是 false，需按模型名模式补充识别
     const modelName = selected.name.toLowerCase();
-    const thinkingModel = provider.capabilities?.supportsThinking === true
-      || /reasoning|thinking|reasoner|deepseek.*pro|o[1-9]|^r[1-9]/iu.test(modelName);
-    // deepseek 官方 API 输出上限为 8192，openai 兼容工厂报告的 16384 必须收敛，否则会被 API 拒绝
+    // 任务类型 × 模型思考能力 → 决策（本客户端文档生成专用，默认 structuredGeneration）
+    const decision = decideThinkingPolicy(options.taskKind ?? 'structuredGeneration', modelName);
+    if (decision.warning && options.diagnostics && !options.diagnostics.llm.thinkingWarning) {
+      options.diagnostics.llm.thinkingWarning = decision.warning;
+    }
+    // deepseek 官方 API 输出上限 8192（专用 Provider 已声明）；openai 兼容工厂报告的 16384 对 deepseek 必须收敛
     const rawOutputCap = provider.capabilities?.maxOutputTokens || 8192;
     const outputCap = /deepseek/iu.test(modelName) ? Math.min(rawOutputCap, 8192) : rawOutputCap;
-    // disableThinkingBoost（p3-s2）：小步化调用（如主题块成稿）按目标字数 1:1.2 直接设定输出预算，不再 ×6 放大——
-    // 小预算强制模型缩短思考，把共享输出池让给正文；×6 放大只保留给整章级大调用
-    const baseMaxTokens = thinkingModel && options.maxTokens && !options.disableThinkingBoost
+    // 思考关闭后正文独占输出池，maxTokens 直通；仅当思考不可关且与正文共享池（relaxed）时放大预算保正文。
+    // disableThinkingBoost 已废弃（思考由 disableThinking 硬关而非预算博弈），保留签名兼容存量调用点。
+    const baseMaxTokens = decision.budgetMode === 'relaxed' && options.maxTokens
       ? Math.min(Math.ceil(options.maxTokens * 6), outputCap)
       : options.maxTokens;
     // 空响应标记：推理模型思考阶段耗尽输出预算时 content 可能为空；
@@ -145,7 +187,7 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
       const response = await provider.chat([
         { role: 'system', content: jsonOnly ? `${system}\n只返回 JSON，不要返回 markdown。` : system },
         { role: 'user', content: thinkingTrimmingHint ? `${prompt}\n\n（重要：缩短思考过程，直接给出最终结论。）` : prompt },
-      ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: maxTokensArg, signal: options.signal });
+      ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: maxTokensArg, signal: options.signal, disableThinking: decision.disableThinking });
       const content = response.content?.trim() ?? '';
       if (content) return content;
       throw EMPTY_CONTENT;
@@ -289,8 +331,8 @@ function recordJsonValidationFailure(diagnostics: DocumentGenerationDiagnostics 
   diagnostics.llm.lastError = message;
 }
 
-export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; outFailure?: { value?: string } } = {}): Promise<T | undefined> {
-  const response = await callDocumentLlm(system, prompt, true, { maxTokens: options.maxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost });
+export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string } } = {}): Promise<T | undefined> {
+  const response = await callDocumentLlm(system, prompt, true, { maxTokens: options.maxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost, taskKind: options.taskKind });
   if (!response) {
     // 空响应/网络失败：原因由 callDocumentLlm 写入 diagnostics.llm.lastError，经 outFailure 带出供调用方定位
     if (options.outFailure && options.diagnostics?.llm.lastError) options.outFailure.value = options.diagnostics.llm.lastError;

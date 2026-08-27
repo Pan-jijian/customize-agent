@@ -5,6 +5,7 @@ import { withRetry } from '../retry.js';
 import { toOpenAIMessages, toOpenAITools, openAIHealthCheck } from '../utils/messages.js';
 import { countTokensFromMessages } from '../utils/tokens.js';
 import { createLLMResponse } from '../utils/response.js';
+import { thinkingDisableBody } from '../thinking.js';
 
 /**
  * OpenAI 兼容 Provider 抽象基类。
@@ -218,15 +219,32 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
     return this.directEndpoint ? base : `${base}${suffix}`;
   }
 
-  private async _postChat(messages: Message[], options?: ChatOptions): Promise<OpenAI.Chat.Completions.ChatCompletion> {
-    const body = {
+  /**
+   * 构造请求体（chat 与 chatStream 共用）：
+   * 1. options.extraBody 顶层合并（透传厂商原生参数）；
+   * 2. options.disableThinking=true 时按模型画像翻译思考关闭参数——
+   *    deepseek → thinking {type:disabled}；gpt-5 → reasoning {effort:none}；
+   *    不可关模型（gemini 3.x）抛显式能力错误，绝不静默失败。
+   */
+  private _buildRequestBody(messages: Message[], options?: ChatOptions): Record<string, unknown> {
+    const body: Record<string, unknown> = {
       model: this.modelName,
       messages: toOpenAIMessages(messages),
       temperature: options?.temperature ?? 0.2,
       max_tokens: options?.maxTokens,
       tools: this._buildTools(options?.tools),
     };
-    if (!this.directEndpoint) return this.client.chat.completions.create(body as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming, { signal: options?.signal });
+    if (options?.disableThinking) {
+      const thinkingBody = thinkingDisableBody(this.modelName);
+      if (thinkingBody) Object.assign(body, thinkingBody);
+    }
+    if (options?.extraBody) Object.assign(body, options.extraBody);
+    return body;
+  }
+
+  private async _postChat(messages: Message[], options?: ChatOptions): Promise<OpenAI.Chat.Completions.ChatCompletion> {
+    const body = this._buildRequestBody(messages, options);
+    if (!this.directEndpoint) return this.client.chat.completions.create(body as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming, { signal: options?.signal });
     const first = await this._postDirectChat(body, options);
     if (first.ok) return first.response;
     if (!/temperature.*default|unsupported.*temperature|Unsupported value: 'temperature'/iu.test(first.error)) throw new Error(first.error);
@@ -287,13 +305,9 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
     return withRetry(
       async () => {
         const stream = await this.client.chat.completions.create({
-          model: this.modelName,
-          messages: toOpenAIMessages(messages),
-          temperature: options?.temperature ?? 0.2,
-          max_tokens: options?.maxTokens,
-          tools: this._buildTools(options?.tools),
+          ...this._buildRequestBody(messages, options),
           stream: true,
-        }, { signal: options?.signal });
+        } as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming, { signal: options?.signal });
 
         let content = '';
         this._thinkingContent = '';
