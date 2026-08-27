@@ -442,4 +442,32 @@ describe('sanitizeFormalMarkdown 语义治理边界（内部术语不做正则�
     const markdown = sanitizeFormalMarkdown('| 拆除作业与保留商铺并存 | 拆除工作包、相邻商铺安全 |');
     expect(markdown).toContain('拆除工作包');
   });
+
+  it('后台话术（提示词角色/知识库证据）仍被确定性清洗——与术语治理分层互不干扰', () => {
+    const markdown = sanitizeFormalMarkdown('提示词角色：本章说明知识库证据来源。');
+    expect(markdown).not.toContain('提示词角色');
+  });
+
+  it('工作包与后台话术同现时：后台话术行被清、工作包行保留待语义改写', () => {
+    const markdown = sanitizeFormalMarkdown('提示词角色：本章说明知识库证据来源。\n以下按工作包逐项说明。');
+    expect(markdown).not.toContain('提示词角色');
+    expect(markdown).toContain('工作包');
+  });
+
+  it('“工作包”在编号标题行（#### 1.3.1 拆除工程工作包）保留原样', () => {
+    const markdown = sanitizeFormalMarkdown('#### 1.3.1 拆除工程工作包\n\n正文。');
+    expect(markdown).toContain('#### 1.3.1 拆除工程工作包');
+  });
+
+  it('纯正式正文（无内部术语）清洗后不变形', () => {
+    const markdown = sanitizeFormalMarkdown('### 拆除工程\n\n拆除工程施工概况，施工流程按工序链组织，施工方法落位工艺参数。');
+    expect(markdown).toContain('### 拆除工程');
+    expect(markdown).toContain('工艺参数');
+  });
+
+  it('多行文档中所有位置的工作包全部保留（供 Reviewer 一次性标记）', () => {
+    const markdown = sanitizeFormalMarkdown('#### 拆除工程工作包\n以下按工作包逐项说明。\n| 项 | 内容 |\n|---|---|\n| 1 | 拆除工作包 |');
+    const count = (markdown.match(/工作包/gu) || []).length;
+    expect(count).toBe(3);
+  });
 });
