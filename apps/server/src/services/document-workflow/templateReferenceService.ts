@@ -24,6 +24,8 @@ export interface TemplateReferenceRecord {
   qualityProfile?: ReferenceQualityProfile;
   /** 画像计算逻辑版本：与 PROFILE_VERSION 不符的旧画像在读取前自动重算，保证口径升级后沉淀数据仍准确 */
   profileVersion?: number;
+  /** 代表性文本切片（≤8 段、每段 ≤300 字）：供模板化语义相似度检测（A3）对比，避免每次生成重新提取原文 */
+  textSlices?: string[];
 }
 
 /**
@@ -40,6 +42,25 @@ function referencesRoot() {
 
 function referencesIndexPath() {
   return path.join(referencesRoot(), 'references.json');
+}
+
+/** 从提取文本中抽代表性切片（每 ~3000 字取一段 ≤300 字，最多 8 段），供语义相似度检测用 */
+export function sampleReferenceTextSlices(text: string, maxSlices = 8): string[] {
+  const paragraphs = text
+    .split(/\n{2,}|\r\n\r\n/u)
+    .map(item => item.replace(/\s+/gu, ' ').trim())
+    .filter(item => item.length >= 20);
+  const step = Math.max(1, Math.floor(paragraphs.length / maxSlices));
+  const slices: string[] = [];
+  for (let i = 0; i < paragraphs.length && slices.length < maxSlices; i += step) {
+    slices.push((paragraphs[i] as string).slice(0, 300));
+  }
+  return [...new Set(slices)];
+}
+
+/** 按工程类型聚合参考库文本切片（含索引记录中已存的切片，不重新提取原文） */
+export function referenceTextSlicesForType(type: ReferenceProjectType): string[] {
+  return listTemplateReferencesByType(type).flatMap(item => item.textSlices || []);
 }
 
 /** 读取参考库索引（容错：损坏时备份并重置） */
@@ -147,6 +168,7 @@ export async function addTemplateReference(input: {
     const profile = buildReferenceQualityProfile(text);
     record.qualityProfile = profile;
     record.profileVersion = PROFILE_VERSION;
+    record.textSlices = sampleReferenceTextSlices(text);
     record.status = 'ready';
     if (record.typeSource === 'auto') record.projectType = suggestProjectType(text);
     writeIndex(records);

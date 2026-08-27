@@ -1,6 +1,8 @@
 import type { DocumentDraftChapter } from './types';
 import { duplicateParagraphIssues, fillerParagraphIssues, processParameterDensityIssues, tableCompletenessIssues, reviewResponseIssues, sectionCardStructureIssues } from './constructionOrgAudit';
 import { PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
+import { fillerDensityReport } from './tenderBidChecks';
+import type { TenderBidTemplatingReport } from './tenderBidScoring';
 
 /**
  * L6 质量度量：施工组织设计专业度评分（7 维）。
@@ -103,15 +105,18 @@ function tableScore(chapters: DocumentDraftChapter[], markdown = ''): { score: n
   return { score, detail: `表格 ${tableCount} 个，其中字段完整 ${completeTables} 个` };
 }
 
-/** 5. 废话率（反比） */
+/** 5. 废话率（反比）：叠加 docx 套话密度口径（核心章节套话占比 ≤10%，超标线性扣分） */
 function fillerScore(chapters: DocumentDraftChapter[]): { score: number; detail: string } {
   const fillerIssues = fillerParagraphIssues(chapters);
   const fillerHits = chapters.reduce((total, chapter) => {
     const count = (chapter.content.match(/本小节围绕|交底覆盖率按100%|24小时内形成整改责任|按施工准备→过程实施→检查验收→问题整改→资料归档的闭环组织|按作业条件确认→技术交底→过程实施|依据本项目已确认资料中的项目边界/gu) || []).length;
     return total + count;
   }, 0);
-  const score = clamp(100 - fillerHits * 15 - fillerIssues.filter(issue => issue.level === 'error').length * 25);
-  return { score, detail: `模板化空话命中 ${fillerHits} 处，废话段问题 ${fillerIssues.length} 项` };
+  const filler = fillerDensityReport(chapters.map(chapter => chapter.content).join('\n'));
+  // docx：套话占比 ≤10% 为达标线；超标部分线性扣分（每超 10 个百分点扣 40 分），叠加深套话短语命中扣分
+  const ratioPenalty = Math.max(0, filler.ratio - 0.1) * 400;
+  const score = clamp(100 - fillerHits * 15 - fillerIssues.filter(issue => issue.level === 'error').length * 25 - ratioPenalty);
+  return { score, detail: `模板化空话命中 ${fillerHits} 处，套话句占比 ${(filler.ratio * 100).toFixed(1)}%（docx 达标线 ≤10%），废话段问题 ${fillerIssues.length} 项` };
 }
 
 /** 6. 重复率（反比） */
@@ -137,7 +142,7 @@ function reviewResponseScore(chapters: DocumentDraftChapter[], markdown = ''): {
   return { score, detail: `招标硬性要求响应 ${hit.length}/${responseItems.length} 项${reviewIssues.length ? `（未响应：${reviewIssues.map(issue => issue.message.replace(/未检测到对招标硬性要求的响应：/u, '')).join('、')}）` : ''}` };
 }
 
-export function buildProfessionalScoreReport(chapters: DocumentDraftChapter[], markdown = ''): ProfessionalScoreReport {
+export function buildProfessionalScoreReport(chapters: DocumentDraftChapter[], markdown = '', options: { templating?: TenderBidTemplatingReport } = {}): ProfessionalScoreReport {
   const structure = structureScore(chapters);
   const factLanding = factLandingScore(chapters);
   const processParameter = processParameterScore(chapters);
@@ -156,16 +161,18 @@ export function buildProfessionalScoreReport(chapters: DocumentDraftChapter[], m
     { key: 'reviewResponse', label: '评标响应度', score: reviewResponse.score, detail: reviewResponse.detail, weight: 0.10 },
   ];
   const total = clamp(dimensions.reduce((sum, dimension) => sum + dimension.score * dimension.weight, 0));
-  const grade: ProfessionalScoreReport['grade'] = total >= 85 ? '专业' : total >= 70 ? '良好' : total >= 55 ? '合格' : '待提升';
+  // docx 模板化降档：重度模板化直接压到合格线以下，中度压到良好线以下（模板化是核心降档判定）
+  const cappedTotal = options.templating?.level === 'heavy' ? Math.min(total, 54) : options.templating?.level === 'medium' ? Math.min(total, 69) : total;
+  const grade: ProfessionalScoreReport['grade'] = cappedTotal >= 85 ? '专业' : cappedTotal >= 70 ? '良好' : cappedTotal >= 55 ? '合格' : '待提升';
   const topIssues = [...duplicateParagraphIssues(chapters), ...fillerParagraphIssues(chapters), ...processParameterDensityIssues(chapters), ...sectionCardStructureIssues(chapters)]
     .slice(0, 5)
     .map(issue => issue.message);
   const weakDimensions = dimensions.filter(dimension => dimension.score < 70).map(dimension => `${dimension.label}（${dimension.score}分）`);
   return {
-    total,
+    total: cappedTotal,
     grade,
     dimensions,
-    summary: `施工组织设计专业度评分 ${total} 分（${grade}）${weakDimensions.length ? `；待提升：${weakDimensions.join('、')}` : ''}`,
+    summary: `施工组织设计专业度评分 ${cappedTotal} 分（${grade}）${options.templating && options.templating.level !== 'light' ? `；模板化等级：${options.templating.level === 'heavy' ? '重度' : '中度'}（降档已生效）` : ''}${weakDimensions.length ? `；待提升：${weakDimensions.join('、')}` : ''}`,
     topIssues,
   };
 }

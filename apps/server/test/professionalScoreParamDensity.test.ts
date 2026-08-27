@@ -3,6 +3,7 @@ import { buildProfessionalScoreReport } from '../src/services/document-workflow/
 import { buildSectionFactCard } from '../src/services/document-workflow/chapterGeneration';
 import { QUANTIFIED_BODY_PARAM_RE } from '../src/services/document-workflow/parameterPatterns';
 import type { DocumentDraftChapter, DocumentEvidence } from '../src/services/document-workflow/types';
+import type { TenderBidTemplatingReport } from '../src/services/document-workflow/tenderBidScoring';
 
 /** 构造约 N 字符的中文正文，并在其中嵌入指定参数片段（参数不重复） */
 function buildBody(params: string[], targetChars = 1000): string {
@@ -92,5 +93,56 @@ describe('小节写作任务卡参数约束', () => {
     const card = buildSectionFactCard('施工准备与部署', evidence);
     expect(card.prompt).toContain('每千字不少于 2 个不同量化参数');
     expect(card.prompt).toContain('同一参数不得反复堆砌凑数');
+  });
+});
+
+// A4：docx 模板化降档（重度压到合格线下 / 中度压到良好线下）
+function templatingReport(level: 'light' | 'medium' | 'heavy'): TenderBidTemplatingReport {
+  return {
+    level,
+    fillerRatio: level === 'heavy' ? 0.45 : level === 'medium' ? 0.25 : 0.05,
+    fillerSentences: 1,
+    totalSentences: 20,
+    vagueHitCount: 0,
+    vaguePhrases: [],
+    duplicateSentenceRate: 0,
+    crossProjectResidue: [],
+    difficultyCountermeasureRatio: 1,
+    difficultyBothCount: 5,
+    difficultyCountermeasures: 5,
+    difficultyHeavyTemplated: level === 'heavy',
+  };
+}
+
+describe('专业评分模板化降档（docx 核心降档判定）', () => {
+  it('重度模板化压到合格线以下（≤54 分）', () => {
+    const body = buildBody(['施工面积120㎡', '管道长300m', '板厚50mm', '设备2台', '工期15天']);
+    const report = buildProfessionalScoreReport(chaptersFromBodies([body]), '', { templating: templatingReport('heavy') });
+    expect(report.total).toBeLessThanOrEqual(54);
+    expect(report.grade).toBe('待提升');
+    expect(report.summary).toContain('模板化等级：重度');
+  });
+
+  it('中度模板化压到良好线以下（≤69 分）', () => {
+    const body = buildBody(['施工面积120㎡', '管道长300m', '板厚50mm', '设备2台', '工期15天']);
+    const report = buildProfessionalScoreReport(chaptersFromBodies([body]), '', { templating: templatingReport('medium') });
+    expect(report.total).toBeLessThanOrEqual(69);
+    expect(report.summary).toContain('模板化等级：中度');
+  });
+
+  it('轻度模板化不降档', () => {
+    const body = buildBody(['施工面积120㎡', '管道长300m', '板厚50mm', '设备2台', '工期15天']);
+    const withTemplating = buildProfessionalScoreReport(chaptersFromBodies([body]), '', { templating: templatingReport('light') });
+    const without = buildProfessionalScoreReport(chaptersFromBodies([body]), '');
+    expect(withTemplating.total).toBe(without.total);
+  });
+
+  it('套话句占比超标时废话控制维度按 docx 密度口径扣分', () => {
+    // 纯套话文本（精心组织/全力保障）→ 套话占比高 → filler 维度扣分
+    const body = '项目部精心组织施工资源调配，全力保障工程进度节点按期完成。'.repeat(30);
+    const report = buildProfessionalScoreReport(chaptersFromBodies([body]), '');
+    const filler = report.dimensions.find(item => item.key === 'filler')!;
+    expect(filler.score).toBeLessThan(60);
+    expect(filler.detail).toContain('docx 达标线');
   });
 });

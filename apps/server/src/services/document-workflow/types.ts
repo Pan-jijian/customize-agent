@@ -1,6 +1,7 @@
 import type { AgentWorkflowContext } from './agentWorkflow';
 import type { QualityBenchmarkResult } from './benchmarkQuality';
 import type { TenderBidTemplatingReport } from './tenderBidScoring';
+import type { TemplateSimilarityReport } from './templateSimilarity';
 
 export interface PromptRequiredSectionRule {
   title: string;
@@ -588,6 +589,10 @@ export interface DocumentReviewMetadata {
   qualityReport?: DocumentQualityReport;
   repairStrategies?: RepairStrategy[];
   reviewChecklist?: DocumentReviewChecklistItem[];
+  /** A3 模板语义相似度三档（与参考库同类样本对比，嵌入不可用/无样本时缺失） */
+  templateSimilarity?: TemplateSimilarityReport;
+  /** A2 语义级模板化复核改进建议（仅风险信号命中时产出） */
+  templatingReviewIssues?: string[];
   professionalScore?: {
     total: number;
     grade: '专业' | '良好' | '合格' | '待提升';

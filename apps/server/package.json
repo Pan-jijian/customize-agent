@@ -1,6 +1,6 @@
 {
   "name": "@customize-agent/server",
-  "version": "4.7.0",
+  "version": "4.8.0",
   "description": "Customize Agent Web 管理控制台",
   "exports": {
     "./package.json": "./package.json"

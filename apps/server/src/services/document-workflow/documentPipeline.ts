@@ -34,6 +34,10 @@ import { factCoverageIssues, factsWithEvidenceSource, criticalSectionBlockerLine
 import { constructionOrgProfessionalAuditIssues } from './constructionOrgAudit';
 import { buildProfessionalScoreReport } from './documentProfessionalScore';
 import { recordDeterministicFixCases } from './workflowCaseLog';
+import { buildTemplateSimilarityReport } from './templateSimilarity';
+import { referenceTextSlicesForType } from './templateReferenceService';
+import { suggestProjectType } from './referenceQualityProfile';
+import { reviewTemplatingSemantics } from './templatingReview';
 
 function sanitizeContaminationCandidates(markdown: string, summary: any) {
   const currentNames = new Set([summary?.projectName, ...(summary?.fingerprint?.projectNames || [])].filter(Boolean));
@@ -646,7 +650,14 @@ export async function finalizeGeneration(p: {
   const reviewChecklist = buildDocumentReviewChecklist({ exportGate: finalExportGate, qualityReport, repairStrategies });
   const telemetry = buildDocumentTelemetryReport({ diagnostics: generationDiagnostics });
   const finalQualitySummary = qualitySeveritySummary(validationIssues);
-  const professionalScore = buildProfessionalScoreReport(finalChapterDrafts, finalMarkdown);
+  const professionalScore = buildProfessionalScoreReport(finalChapterDrafts, finalMarkdown, { templating: qualityReport.templating });
+  // A3 模板语义相似度（docx 三档：<30% 独立 / 30-60% 参考改编 / >60% 抄袭风险）：
+  // 嵌入模型不可用或参考库无同类样本时降级 undefined，不阻塞导出
+  const templateSimilarity = await withProgressHeartbeat(() => buildTemplateSimilarityReport(finalMarkdown, referenceTextSlicesForType(suggestProjectType(finalMarkdown))));
+  // A2 语义级模板化复核（仅 A1 风险信号命中时触发一次 LLM，失败静默降级）
+  const templatingReview = qualityReport.templating
+    ? await withProgressHeartbeat(() => reviewTemplatingSemantics({ templating: qualityReport.templating!, markdown: finalMarkdown, diagnostics: generationDiagnostics, signal }))
+    : { issues: [], reviewed: false };
   generationDiagnostics.quality.blockingCount += finalQualitySummary.blocking;
   generationDiagnostics.quality.importantCount += finalQualitySummary.important;
   generationDiagnostics.quality.minorCount += finalQualitySummary.minor;
@@ -663,6 +674,12 @@ export async function finalizeGeneration(p: {
   finalStages.push(displayStage({ type: 'validation', roleId: 'agent-final-gate', status: finalExportGate.passed ? 'success' : 'failed', message: finalExportGate.passed ? 'Agent 最终门禁通过' : `Agent 最终门禁阻断 ${blockingCount} 个问题`, details: finalExportGate.blockingIssues.slice(0, 12).map(issue => issue.message) }, { subtitle: 'Agent 最终门禁' }));
   finalStages.push(displayStage({ type: 'validation', roleId: 'document-delivery-score', status: qualityReport.passed ? 'success' : finalExportGate.passed ? 'skipped' : 'failed', message: finalExportGate.passed && !qualityReport.passed ? `${qualityReport.summary}（导出门禁已通过，作为后续优化建议归档）` : qualityReport.summary, details: qualityReport.actions }, { subtitle: '交付评分' }));
   finalStages.push(displayStage({ type: 'validation', roleId: 'document-professional-score', status: professionalScore.grade === '专业' || professionalScore.grade === '良好' ? 'success' : 'skipped', message: professionalScore.summary, details: [...professionalScore.dimensions.map(dimension => `${dimension.label}：${dimension.score} 分（${dimension.detail}）`), ...professionalScore.topIssues.map(issue => `待修复：${issue}`)] }, { subtitle: '专业度评分' }));
+  if (qualityReport.templating && qualityReport.templating.level !== 'light') {
+    finalStages.push(displayStage({ type: 'validation', roleId: 'document-templating-report', status: 'skipped', message: `模板化检测：${qualityReport.templating.level === 'heavy' ? '重度' : '中度'}模板化（套话句占比 ${(qualityReport.templating.fillerRatio * 100).toFixed(1)}%，重难点归因＋量化双达标占比 ${(qualityReport.templating.difficultyCountermeasureRatio * 100).toFixed(0)}%，模糊应答词 ${qualityReport.templating.vagueHitCount} 处）`, details: templatingReview.issues }, { subtitle: '模板化检测' }));
+  }
+  if (templateSimilarity) {
+    finalStages.push(displayStage({ type: 'validation', roleId: 'document-template-similarity', status: templateSimilarity.level === 'independent' ? 'success' : 'skipped', message: `模板相似度：${templateSimilarity.level === 'independent' ? '独立编制' : templateSimilarity.level === 'adapted' ? '参考改编' : '抄袭风险'}（最高单句相似度 ${(templateSimilarity.maxSimilarity * 100).toFixed(0)}%，对比参考库 ${templateSimilarity.referenceSlices} 个样本切片）`, details: [] }, { subtitle: '模板相似度' }));
+  }
   if (writingTaskBrief) {
     finalStages.push(displayStage({ type: 'reference', roleId: 'document-writing-task-brief', status: 'success', message: `写作任务书：${writingTaskBrief.documentType}，${writingTaskBrief.chapters.length} 章任务卡，全局写作焦点 ${writingTaskBrief.globalWritingFocus.length} 条`, details: [...writingTaskBrief.globalWritingFocus, ...writingTaskBrief.chapters.slice(0, 10).map(chapter => `${chapter.chapterTitle}：覆盖 ${chapter.mustCover.length} 项`)], subtitle: '写作任务书' }));
   }
@@ -711,6 +728,8 @@ export async function finalizeGeneration(p: {
       repairStrategies,
       reviewChecklist,
       professionalScore,
+      templateSimilarity,
+      templatingReviewIssues: templatingReview.issues,
       writingTaskBrief,
       workflowVersion: DOCUMENT_WORKFLOW_VERSION,
       telemetry,
