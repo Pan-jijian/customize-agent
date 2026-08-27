@@ -5,6 +5,73 @@ import { documentTextLength } from './budget';
 // 深度口径必须向下包含这些同级 H4，否则只提取到标题后的概述段，关键小节永远“深度不足”并触发破坏性修复
 export const WORK_PACKAGE_SECTION_RE = /项目主要施工内容|主要分部分项工程施工方案|主要施工方法/u;
 
+/** 小节标题去重归一化：剥离编号前缀与括号标注后比较（“1.3.2 室外雨污分流改造”与“1.3.12 室外雨污分流改造”视为同一要点）。
+ * 供块成稿质检的重复 H4 检测与成稿后处理的重复小节去重共用，避免两处口径漂移。 */
+export function normalizeSubsectionTitleForDedup(title: string): string {
+  return title
+    .replace(/^\d+(?:\.\d+)*\s*/u, '')
+    .replace(/[（(][^（）()]*[）)]/gu, '')
+    .replace(/[\s:：、。，,;；/|—-]/gu, '');
+}
+
+/** 同一 H3 小节范围内出现 ≥2 次的归一化 H4 标题（返回原样标题文本）：
+ * 块成稿 LLM 单次输出常把同一批要点重复展开多轮（同题不同号），质检只查缺失会漏过重复。 */
+export function findDuplicateH4Titles(markdown: string): string[] {
+  const lines = markdown.split(/\r?\n/u);
+  let currentH3 = '';
+  const seen = new Map<string, number>();
+  const duplicates: string[] = [];
+  for (const rawLine of lines) {
+    const heading = /^(#{2,6})\s+(.+)$/u.exec(rawLine.trim());
+    if (!heading) continue;
+    const level = heading[1].length;
+    if (level === 2) { currentH3 = ''; continue; }
+    if (level === 3) { currentH3 = heading[2].trim(); continue; }
+    if (level !== 4) continue;
+    const key = `${currentH3}::${normalizeSubsectionTitleForDedup(heading[2].trim())}`;
+    if (!key) continue;
+    const count = (seen.get(key) || 0) + 1;
+    seen.set(key, count);
+    if (count >= 2) duplicates.push(heading[2].trim());
+  }
+  return duplicates;
+}
+
+/** 同 H3 小节内同名 H4 重复展开去重：保留首次出现的完整小节，删除后续重复标题及其正文整块。
+ * 与 removeAdjacentDuplicateHeadings（仅相邻标题行比较）互补：重复轮次之间隔着正文行时相邻比较无法命中，
+ * 必须按 H3 作用域做归一化集合去重。跨 H3 的同名 H4 视为合法结构（各分项工程下常见“施工准备”等），不去重。 */
+export function dedupeRepeatedSubsections(content: string): string {
+  const lines = content.split(/\r?\n/u);
+  const result: string[] = [];
+  let currentH3 = '';
+  const seen = new Set<string>();
+  let skipping = false;
+  for (const rawLine of lines) {
+    const heading = /^(#{2,6})\s+(.+)$/u.exec(rawLine.trim());
+    if (heading) {
+      const level = heading[1].length;
+      if (level <= 3) {
+        currentH3 = level === 3 ? heading[2].trim() : '';
+        seen.clear();
+      }
+      skipping = false;
+      if (level === 4) {
+        const key = `${currentH3}::${normalizeSubsectionTitleForDedup(heading[2].trim())}`;
+        if (!key) {
+          result.push(rawLine);
+          continue;
+        }
+        if (seen.has(key)) { skipping = true; continue; }
+        seen.add(key);
+      }
+      result.push(rawLine);
+      continue;
+    }
+    if (!skipping) result.push(rawLine);
+  }
+  return result.join('\n');
+}
+
 // 按标题定位正文小节：精确模式（默认）按“标题行含目标字符串 + 同级/上级标题定界”返回整节（含标题行）；
 // fuzzy 模式按归一化标题模糊匹配（剥离编号/空白/常见泛化词）返回最长命中正文（不含标题行）。
 // 供关键小节深度/密度检查（documentPipeline）与 Reviewer 小节定位（agentPlanner）共用，避免三处重复实现漂移。

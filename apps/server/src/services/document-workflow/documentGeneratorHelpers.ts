@@ -9,7 +9,7 @@ import { normalizeOcrFactText, isValidProjectBasicFactValue } from './factsModel
 import { buildCanonicalFacts } from './factGovernance';
 import { normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTenderSourcePageRefs, removeAdjacentDuplicateHeadings } from './markdownComposer';
 import { collectSectionContentGaps } from './qualityValidation';
-import { stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
+import { dedupeRepeatedSubsections, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
 import { promptTextsForResolvedPrompts } from './rolePipeline';
 import { criticalSectionBlockerMinChars } from './chapterPostProcessing';
 
@@ -457,7 +457,8 @@ export function removeDuplicateProjectBasicInfoBlocks(markdown: string) {
   for (let index = 0; index < lines.length;) {
     const line = lines[index] || '';
     const next = lines[index + 1] || '';
-    const namedProjectBasicTitle = /(?:\*\*[^\n]*项目基本信息表[^\n]*\*\*|####\s+[^\n]*项目基本信息表[^\n]*|###\s+[^\n]*项目基本信息表[^\n]*)/u.test(line);
+    // eslint-disable-next-line no-control-regex -- [^\u000A] 与原始 [^\n] 语义等价（编辑工具会破坏字面换行转义，改用 unicode 转义）
+    const namedProjectBasicTitle = /(?:\*\*[^\u000A]*项目基本信息表[^\u000A]*\*\*|####\s+[^\u000A]*项目基本信息表[^\u000A]*|###\s+[^\u000A]*项目基本信息表[^\u000A]*)/u.test(line);
     if (namedProjectBasicTitle) {
       const block: string[] = [line];
       index += 1;
@@ -582,7 +583,8 @@ export function normalizeProjectBasicInfoTable(content: string, facts: DocumentF
     .replace(/\*\*项目基本信息表\*\*[\s\S]*?(?=\n\n(?:[^|\n]|$)|$)/u, '')
     .replace(/\|\s*(?:序号\s*\|\s*项目名称\s*\|\s*内容参数|信息项\s*\|\s*内容\s*(?:\|\s*资料来源\/(?:说明|证明))?)\s*\|[\s\S]*?(?=\n\n(?:[^|\n]|$)|$)/u, '')
     .replace(/^\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|\s*\n(?:^\|.*\|\s*\n?)*/gmu, '')
-    .replace(/该小节围绕“[^”]+”进行补充说明[^\n]*(?:\n\n该小节围绕“[^”]+”进行补充说明[^\n]*)*/gu, '')
+    // eslint-disable-next-line no-control-regex -- [^\u000A] 与原始 [^\n] 语义等价（编辑工具会破坏字面换行转义，改用 unicode 转义）
+    .replace(/该小节围绕“[^”]+”进行补充说明[^\u000A]*(?:\u000A\u000A该小节围绕“[^”]+”进行补充说明[^\u000A]*)*/gu, '')
     .replace(/\n{3,}/gu, '\n\n')
     .trim();
   const rebuiltSection = `${projectSection[0].trimEnd()}\n\n${table}${cleanedBody ? `\n\n${cleanedBody}` : ''}\n\n`;
@@ -709,13 +711,17 @@ export function splitLongParagraphs(content: string) {
   }).join('\n\n');
 }
 
+/** 空壳小节标题清理：标题后直到下一个标题行之间没有任何非空内容，且下一标题不是更深层级的子小节
+ * （子小节存在说明正文由子层展开，不算空壳）→ 删除空标题整行。
+ * 覆盖 H3~H5：块成稿 LLM 偶尔输出“### 1.1.2 项目基本信息”这类无正文空壳，紧邻有正文小节时相邻去重管不到，必须整行删除。 */
 function removeEmptySubSectionHeadings(content: string) {
   const lines = content.split(/\r?\n/u);
   const result: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     const trimmed = line.trim();
-    if (!/^(#{4,5})\s+/u.test(trimmed)) {
+    const heading = /^(#{3,5})\s+/u.exec(trimmed);
+    if (!heading) {
       result.push(line);
       continue;
     }
@@ -724,18 +730,26 @@ function removeEmptySubSectionHeadings(content: string) {
       result.push(line);
       continue;
     }
+    const level = heading[1].length;
     let cursor = index + 1;
     let hasBody = false;
+    let nextHeadingLevel = 0;
     while (cursor < lines.length) {
       const next = lines[cursor].trim();
-      if (/^#{1,6}\s+/u.test(next)) break;
+      const nextHeading = /^(#{1,6})\s+/u.exec(next);
+      if (nextHeading) {
+        nextHeadingLevel = nextHeading[1].length;
+        break;
+      }
       if (next) {
         hasBody = true;
         break;
       }
       cursor += 1;
     }
-    if (hasBody) result.push(line);
+    // 下一标题为更深层子小节时保留；零正文且无子层展开的空壳标题删除
+    if (!hasBody && !(nextHeadingLevel > level)) continue;
+    result.push(line);
   }
   return result.join('\n');
 }
@@ -786,7 +800,13 @@ function ensureWorkPackageOverviewLabels(content: string) {
 }
 
 export function finalizeChapterContentQuality(content: string, chapter: Pick<DocumentTemplateChapter, 'title' | 'sections'>) {
-  return ensureWorkPackageOverviewLabels(removeEmptySubSectionHeadings(removeAdjacentDuplicateHeadings(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(splitLongParagraphs(stripForbiddenPlaceholderSentences(replaceForbiddenFormalPhrases(repairTableOnlySections(repairPlannedSectionBodies(content, chapter))))))))))).replace(/\n{3,}/gu, '\n\n').trim();
+  return ensureWorkPackageOverviewLabels(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(removeAdjacentDuplicateHeadings(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(splitLongParagraphs(stripForbiddenPlaceholderSentences(replaceForbiddenFormalPhrases(repairTableOnlySections(repairPlannedSectionBodies(content, chapter)))))))))))).replace(/\n{3,}/gu, '\n\n').trim();
+}
+
+/** 最终组装路径的重复/空壳兜底清理：rebuildFinalMarkdown 不再逐章跑 finalizeChapterContentQuality，
+ * 补跑同 H3 重复 H4 去重与空壳小节删除，避免 Final Gate 补写与章节拼接残留的重复/空壳进入成品文档。 */
+export function finalizeFinalMarkdownStructure(markdown: string): string {
+  return removeEmptySubSectionHeadings(dedupeRepeatedSubsections(markdown));
 }
 
 export function promptMatchesChapter(prompt: ResolvedPromptContent, _chapter: DocumentTemplateChapter) {

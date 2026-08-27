@@ -458,7 +458,31 @@ export async function planChapterStructureWithLlm(input: {
   }
   allocateBlockTargetWords(blocks, input.targetWords);
   const merged = ensureSectionCoverage(inputSections, blocks);
-  return { ...merged, llmPlanned: results.some(result => result.llmPlanned), llmFailure: failures.length > 0 ? `块级降级（${failures.join('；')}）` : undefined };
+  const deduped = dedupeCrossBlockOverlaps(merged);
+  return { ...deduped, llmPlanned: results.some(result => result.llmPlanned), llmFailure: failures.length > 0 ? `块级降级（${failures.join('；')}）` : undefined };
+}
+
+/**
+ * 跨块重叠去重：同一输入细目被多个主题块的 H4 重复映射时（LLM 聚类块边界模糊导致），
+ * 仅保留首个块中的映射，后续块从 sources 剥离；sources 被清空的 H4 整点删除。
+ * 避免成稿时同一套内容在不同主题块下重复展开（实测“3.1.1 施工部署与流水组织”H4 与“3.3 施工部署与流水组织”H3 同章双写）。
+ */
+export function dedupeCrossBlockOverlaps(structure: PlannedChapterStructure): PlannedChapterStructure {
+  const claimed: string[] = [];
+  const blocks = structure.blocks.map(block => ({
+    ...block,
+    subPoints: block.subPoints
+      .map(point => {
+        const keptSources = point.sources.filter(source => {
+          if (claimed.some(existing => sameSectionText(existing, source))) return false;
+          claimed.push(source);
+          return true;
+        });
+        return { ...point, sources: keptSources };
+      })
+      .filter(point => point.sources.length > 0),
+  }));
+  return { ...structure, blocks };
 }
 
 /** 规划结果中未被覆盖的细目：用于诊断与提示（确保评分条目承接可追踪） */

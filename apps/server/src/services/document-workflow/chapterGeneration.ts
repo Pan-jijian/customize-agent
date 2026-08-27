@@ -6,7 +6,7 @@ import { documentTextLength } from './budget';
 import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
 import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
 import { callDocumentLlm, callDocumentLlmJson, getDocumentLlmFailureStreak, getDocumentLlmMaxConcurrency } from './llmClient';
-import { stringifyFactValue, throwIfAborted } from './utils';
+import { findDuplicateH4Titles, stringifyFactValue, throwIfAborted } from './utils';
 import { selectByScore, factImportanceScore } from './selection';
 import { measureGenerationStep } from './rolePipeline';
 import { normalizePlannedSections, professionalSectionTaskCard } from './promptRuleExtraction';
@@ -1096,11 +1096,16 @@ export async function buildPlannedChapterContent(input: {
       : `- #### ${point.title}`)).join('\n');
     const blockRoleContext = [input.roleContext || '', factsHint, `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下 H4 要点逐点写出实施性正文，H4 标题必须与给定标题完全一致，不得改名、合并或遗漏；每个 H4 必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题：\n${coverageList}`].filter(Boolean).join('\n\n');
     let lastMissing: string[] = [];
+    let lastDuplicates: string[] = [];
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      // 第二轮反馈针对性列出缺失 H4 标题，让重试有的放矢，避免通用反馈反复缺失要点后被迫拆半/整章降级
-      const feedback = attempt === 0 ? '' : lastMissing.length
-        ? `【上一轮未通过质检】缺失 H4 要点标题：${lastMissing.join('、')}。必须逐点补齐以上 H4 标题并展开正式正文，H4 标题与给定标题完全一致，总字数不少于目标字数。`
-        : '【上一轮未通过质检】必须完整包含每个 H4 要点标题并展开正文，总字数不少于目标字数，不得合并或遗漏要点。';
+      // 第二轮反馈针对性列出缺失/重复 H4 标题，让重试有的放矢，避免通用反馈反复缺失要点后被迫拆半/整章降级
+      const feedback = attempt === 0 ? '' : [
+        '【上一轮未通过质检】',
+        lastMissing.length ? `缺失 H4 要点标题：${lastMissing.join('、')}。必须逐点补齐以上 H4 标题并展开正式正文，H4 标题与给定标题完全一致。` : '',
+        lastDuplicates.length ? `重复展开的 H4 要点标题：${lastDuplicates.join('、')}。同一小节内相同要点被重复展开多轮，必须只保留一轮完整展开，其余重复小节连同标题整体删除，不得以换编号方式重复同一内容。` : '',
+        lastMissing.length === 0 && lastDuplicates.length === 0 ? '必须完整包含每个 H4 要点标题并展开正文，不得合并或遗漏要点。' : '',
+        '总字数不少于目标字数。',
+      ].filter(Boolean).join('');
       try {
         const content = await buildLlmChapterContent(input.template, blockChapter, blockEvidence, input.missingFacts, input.promptTexts, input.projectContext, input.requirement, feedback ? `${blockRoleContext}\n\n${feedback}` : blockRoleContext, {
           forbidDrawingImages: input.forbidDrawingImages,
@@ -1123,11 +1128,14 @@ export async function buildPlannedChapterContent(input: {
         const normalized = ensureGroupTertiaryShell(sectionTitles, stripped);
         const chars = documentTextLength(normalized);
         const missing = sectionTitles.filter(title => !normalized.includes(title));
-        if (chars >= Math.max(400, Math.floor(block.targetWords * 0.5)) && missing.length === 0) {
+        // 同 H3 内同名 H4 重复展开同样视为质检不达标（实测一轮输出三轮相同改造项/危大工程三连），阻断重复进入二轮后处理
+        const duplicates = findDuplicateH4Titles(normalized);
+        if (chars >= Math.max(400, Math.floor(block.targetWords * 0.5)) && missing.length === 0 && duplicates.length === 0) {
           return normalized;
         }
         lastMissing = missing;
-        if (input.diagnostics && attempt === 1) input.diagnostics.llm.lastError = `规划块质检未达标：${block.title}（${chars} 字，缺 ${missing.join('、') || '无'}）`;
+        lastDuplicates = duplicates;
+        if (input.diagnostics && attempt === 1) input.diagnostics.llm.lastError = `规划块质检未达标：${block.title}（${chars} 字，缺 ${missing.join('、') || '无'}${duplicates.length ? `，重复 H4 ${duplicates.join('、')}` : ''}）`;
       } catch (error) {
         if (input.diagnostics && attempt === 1) input.diagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
       }
