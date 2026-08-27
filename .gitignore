@@ -69,3 +69,4 @@ skills/
 .cursor/
 # Claude Code 项目文件
 .CLAUDE.md
+.publish-npm-cache/
