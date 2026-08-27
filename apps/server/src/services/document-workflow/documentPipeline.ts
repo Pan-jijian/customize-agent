@@ -9,7 +9,7 @@ import { chapterReadinessIssues, evaluateChapterReadiness } from '../document-va
 import { validateFactConsistency } from '../document-validation/factConsistencyService';
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from './budget';
-import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown } from './qualityValidation';
+import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown, internalTerminologyIssues } from './qualityValidation';
 import { buildStandardFinalValidationIssues } from './documentFinalValidation';
 import { buildDocumentProfileReport } from './documentProfiles';
 import { buildKnowledgeCoverageReport, knowledgeCoverageIssues } from './documentKnowledgeCoverage';
@@ -267,6 +267,7 @@ function buildFullValidationIssues(input: {
     documentBudgetIssues(documentBudget, finalMarkdown),
     plannedStructureIssues(finalMarkdown, template),
     formalTextGateIssues(finalMarkdown),
+    internalTerminologyIssues(finalMarkdown),
     finalMarkdown.includes('WRITER_MISSING_SECTION') || finalMarkdown.includes('Writer 未完成') ? [{ level: 'error' as const, severity: 'blocker' as const, category: 'structure' as const, owner: 'system' as const, message: '最终正文仍包含未完成小节标记', suggestion: '必须重新补写对应小节并删除 WRITER_MISSING_SECTION/Writer 未完成。' }] : [],
     criticalSectionDepthIssues(finalChapterDrafts),
     criticalSectionFactDensityIssues(finalChapterDrafts),

@@ -109,14 +109,17 @@ describe('construction org outline: 去截断与精准化回归（历史缺陷�
     expect(broadChapter?.sections).not.toContain('文明施工、扬尘、噪声与绿色施工');
   });
 
-  it('可选模块无语义匹配章节时进入 report.unattached 显式记录', () => {
+  it('可选模块无语义匹配章节时进入 report.unattached；conditional 模块兜底挂靠不丢失', () => {
     const chapters = [chapter('c1', '确保工期与质量的保障体系与措施'), chapter('c2', '主要分部分项工程施工方案')];
-    const { report } = enrichConstructionOrgOutline({ template: template(chapters), chapters, requirement: '施工组织设计' });
+    const { chapters: enriched, report } = enrichConstructionOrgOutline({ template: template(chapters), chapters, requirement: '施工组织设计' });
     const unattachedIds = report.unattached.map(item => item.moduleId);
-    expect(unattachedIds).toContain('delivery');
-    const delivery = report.unattached.find(item => item.moduleId === 'delivery');
-    expect(delivery?.reason).toBe('no-semantic-chapter');
-    expect(delivery?.sections.length).toBeGreaterThan(0);
+    // optional 模块（BIM/智慧工地）仍不挂宽载体章，显式记录宁可丢可见
+    expect(unattachedIds).toContain('digital-bim');
+    // conditional 模块（竣工交付）已判定适用，全章落选时兜底挂到语义分最高章，不再静默丢失（历史缺陷：四新/竣工交付整篇 0 次出现）
+    const deliveryAttached = report.attached.find(item => item.moduleId === 'delivery');
+    expect(deliveryAttached?.kind).toBe('fallback');
+    const deliveryChapter = enriched.find(item => item.id === deliveryAttached?.chapterId);
+    expect(deliveryChapter?.sections?.some(section => /竣工|验收|保修/u.test(section))).toBe(true);
   });
 
   it('工期质量宽载体章经特化锚点挂靠进度计划模块（kind=matched）', () => {

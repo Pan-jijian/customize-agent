@@ -424,3 +424,23 @@ describe('TENDER_BID_WRITING_RULES 质量硬约束防回归', () => {
     expect(TENDER_BID_WRITING_RULES).toContain('全文含箭头工序链的段落占比不低于 8%');
   });
 });
+
+describe('sanitizeFormalMarkdown 内部术语净化（工作包）', () => {
+  it('标题尾缀“工作包”整体剥除（拆除工程工作包→拆除工程）', () => {
+    const markdown = sanitizeFormalMarkdown('### 1.3 项目主要施工内容\n\n#### 1.3.1 拆除工程工作包\n\n正文内容。');
+    expect(markdown).toContain('#### 1.3.1 拆除工程');
+    expect(markdown).not.toContain('工作包');
+  });
+
+  it('正文叙述中的“工作包”替换为正式术语“专业工程”', () => {
+    const markdown = sanitizeFormalMarkdown('以下按工作包逐项说明施工概况、施工流程、施工方法。');
+    expect(markdown).toContain('以下按专业工程逐项说明');
+    expect(markdown).not.toContain('工作包');
+  });
+
+  it('表格行中的“工作包”同样净化', () => {
+    const markdown = sanitizeFormalMarkdown('| 拆除作业与保留商铺并存 | 拆除工作包、相邻商铺安全 |');
+    expect(markdown).toContain('拆除专业工程');
+    expect(markdown).not.toContain('工作包');
+  });
+});

@@ -195,7 +195,7 @@ function factCoveredByEvidence(fact: string, evidence: DocumentEvidence[]): bool
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; disableThinkingBoost?: boolean } = {}) {
+export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; disableThinkingBoost?: boolean; compactProjectContext?: boolean } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   // 证据注入预算与 generationBudget 的证据区间（7k-26k 档）对齐：未显式传入时保持旧默认，
   // 由 documentGenerator 主路径统一传入按章节目标字计算的 floor/ceiling
@@ -263,7 +263,10 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     ...anchoredRuleInstructions,
     requirement ? `用户要求：${requirement}` : '',
     userFactBlock,
-    projectContext ? `上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${projectContext}` : '',
+    // 块级调用必须压缩上下文：planned 块路径按块并发成稿，每块全量注入 projectContext（蓝图+事实主表+图谱映射）
+    // 会让单块输入 token 数倍于输出预算，实测单块调用 30~40 分钟（真实性能缺陷：徽光阁 3 章块草稿累计 112 分钟）；
+    // 压缩只保留结构化事实行与蓝图约束行，专业叙述由块级证据承载
+    projectContext ? `上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${options.compactProjectContext ? compactSectionProjectContext(projectContext) : projectContext}` : '',
     roleContext ? roleContext : '',
     options.factCoverageContext || '',
     missingFacts.length ? `需要特别补足的信息：${missingFacts.join('、')}` : '',
@@ -542,7 +545,7 @@ interface SectionWritingTask {
 
 function writingTopicTitle(sectionTitle: string, index: number, total: number) {
   if (/项目特点.*重点.*难点|重点.*难点.*分析/u.test(sectionTitle)) return ['项目特点与基础事实', '施工重点识别', '施工难点成因与影响', '应对措施与责任闭环', '重点难点与施工内容对应关系'][index % 5];
-  if (/项目主要施工内容/u.test(sectionTitle)) return ['专业工程工作包识别与施工概况', '专业工程施工流程', '专业工程施工方法', '工程量参数与资源穿插', '验收检测与资料闭环'][index % 5];
+  if (/项目主要施工内容/u.test(sectionTitle)) return ['专业工程识别与施工概况', '专业工程施工流程', '专业工程施工方法', '工程量参数与资源穿插', '验收检测与资料闭环'][index % 5];
   if (/主要分部分项工程施工方案|主要施工方法/u.test(sectionTitle)) return ['当前项目分部分项对象', '主要工艺流程与施工顺序', '材料设备与参数控制', '质量安全控制点', '验收移交与资料闭环'][index % 5];
   const lower = sectionTitle.toLowerCase();
   const generic = ['资料依据与适用范围', '对象范围与关键参数', '实施方法与组织安排', '质量安全控制要求', '检查验收与闭环管理'];
@@ -1101,6 +1104,7 @@ export async function buildPlannedChapterContent(input: {
       try {
         const content = await buildLlmChapterContent(input.template, blockChapter, blockEvidence, input.missingFacts, input.promptTexts, input.projectContext, input.requirement, feedback ? `${blockRoleContext}\n\n${feedback}` : blockRoleContext, {
           forbidDrawingImages: input.forbidDrawingImages,
+          compactProjectContext: input.compactProjectContext,
           minWords: Math.floor(block.targetWords * 0.6),
           targetWords: block.targetWords,
           maxWords: Math.ceil(block.targetWords * 1.1),

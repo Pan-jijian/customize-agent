@@ -157,6 +157,31 @@ export function evaluationCriteriaCoverageIssues(markdown: string, items: string
   return issues;
 }
 
+/**
+ * 内部术语泄漏保险丝：清洗链已确定性净化“工作包”等后台术语，若最终正文仍有残留说明净化链
+ * 未覆盖该生成路径（如绕过 finalize 的直出路径），按阻断计分而不是静默放行——后台概念流入
+ * 正式正文属交付级低级错误（真实生成缺陷：“拆除工程工作包”标题进入交付稿未被任何评分发现）。
+ */
+export function internalTerminologyIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (/工作包/u.test(markdown)) {
+    issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'system', message: '正式正文仍包含后台内部术语“工作包”，净化链未覆盖该生成路径', suggestion: '正文小节与叙述应使用“专业工程/分部分项工程”等正式术语，禁止出现生成系统后台概念。' });
+  }
+  return issues;
+}
+
+/**
+ * 四新技术后置承接检查：施工组织设计大纲已通过标准模块挂靠承诺“新技术、新工艺、新材料、新设备”
+ * 内容时（大纲含四新小节），若最终正文四新关键词 0 次出现，说明成稿阶段把补入小节合并丢失，报 warning
+ * 计入交付质量计分；大纲未承诺时不制造新义务（避免对未要求的文档类型误报）。
+ */
+export function innovationTechCoverageIssues(markdown: string, outlineChapters: Array<{ title?: string; sections?: string[] }>): ValidationIssue[] {
+  const committed = outlineChapters.some(chapter => /新技术|新工艺|新材料|新设备|四新/u.test(`${chapter.title || ''} ${(chapter.sections || []).join(' ')}`));
+  if (!committed) return [];
+  if (/新技术|新工艺|新材料|新设备|四新/u.test(markdown.replace(/\s+/gu, ''))) return [];
+  return [{ level: 'warning', severity: 'warning', message: '大纲已规划新技术/新工艺/新材料/新设备应用内容，但正文未出现任何相关表述', suggestion: '请补写四新技术应用小节，落位本项目适用的创新工艺、新材料与新设备应用计划。' }];
+}
+
 export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[]): ExportGateResult {
   const hasBody = chapters.some(chapter => {
     const body = (chapter.content || '')

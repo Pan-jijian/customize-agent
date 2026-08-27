@@ -1,5 +1,14 @@
 # server
 
+## 4.5.16
+
+### Patch Changes
+
+- - 性能：planned 块级生成启用上下文压缩（compactProjectContext 真正传递到 buildLlmChapterContent），单块输入不再全量携带蓝图与事实主表，修复单块调用 30~40 分钟（徽光阁实测 3 章块草稿累计 112 分钟）
+  - 术语净化：sanitizeFormalMarkdown 确定性剥除后台术语"工作包"（标题尾缀整体删除、正文替换为"专业工程"）；写作任务书与主题任务卡改用正式用语，禁止 LLM 把内部概念写入交付稿
+  - 大纲完整性：conditional 标准模块（四新/周边保护/竣工交付）已判定适用但全章落选时兜底挂靠语义分最高章，修复"新技术、新工艺、新材料、新设备"整篇 0 次出现的承接纳底
+  - 评分可信度：新增内部术语泄漏阻断保险丝（internalTerminologyIssues，残留"工作包"计阻断）与四新技术后置承接检查（大纲承诺但正文 0 次出现计 warning），评分不再对明显缺陷"打满分"
+
 ## 4.5.15
 
 ### Patch Changes

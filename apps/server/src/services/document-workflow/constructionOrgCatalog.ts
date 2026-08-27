@@ -449,7 +449,11 @@ export function enrichConstructionOrgOutline(input: { template: DocumentTemplate
       .filter(item => shouldAttachModule(catalogModule, item.chapter, projectTypes, allText))
       .sort((a, b) => b.score - a.score);
     const matchedTargetIndex = matchingIndexes[0]?.index;
-    const targetIndex = matchedTargetIndex ?? ((hasBroadCarrier && (catalogModule.level === 'core' || catalogModule.level === 'mandatory')) ? defaultTargetChapterIndex(catalogModule, enriched) : -1);
+    let targetIndex = matchedTargetIndex ?? ((hasBroadCarrier && (catalogModule.level === 'core' || catalogModule.level === 'mandatory')) ? defaultTargetChapterIndex(catalogModule, enriched) : -1);
+    // conditional 模块兜底：已判定适用（moduleApplies）却在全章落选时不降级丢弃——宽载体章体系下
+    // 四新/周边保护/竣工交付等模块无语义强锚点章，历史缺陷是“新技术新工艺整篇 0 次出现”；
+    // 挂到语义分最高的目标章（fallback），这些小节不在关键深度/事实密度 blocker 规则内，不会因素材不足制造阻断
+    if (targetIndex < 0 && catalogModule.level === 'conditional') targetIndex = defaultTargetChapterIndex(catalogModule, enriched);
     if (targetIndex < 0) continue;
     const target = enriched[targetIndex];
     const sectionTitle = moduleSectionTitle(catalogModule, target);
