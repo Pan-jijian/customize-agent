@@ -20,15 +20,21 @@ import {
  */
 
 /** 负面词库（短语级）：《施组设计汇总方案.md》第十一节 + 用户“青天大模型 AI 评标”提示词第十二节禁用词合并，
- * 同时供低雷同性评分与生成提示词禁写。单字虚词（合理/充分/完善/切实/尽量/适时/加强/及时等）
- * 只进生成侧提示词，不纳入确定性评分正则，避免“及时整改”等正常表述被误伤 */
+ * 供低雷同性评分使用。单字虚词（合理/充分/完善/切实/尽量/适时/加强/及时等）
+ * 只进生成侧提示词，不纳入确定性评分正则，避免“及时整改”等正常表述被误伤。
+ * 十度实测：短语级正则仍会误伤正常语境（“建设单位会同监管部门定期检查”/“智能化系统性调试”），
+ * “定期检查”“系统性”移入 FORBIDDEN_PROMPT_PHRASES（仅禁写，不参与评分扣分）。 */
 export const FORBIDDEN_EMPTY_PHRASES = [
   '精心组织', '科学统筹', '科学管理', '精益求精', '全力保障', '高效推进',
   '力争优质', '力争一流', '一流水平', '完善体系', '最大限度', '显著提升',
   '大力落实', '严格把控', '充分确保', '竭力打造', '现代化管理', '加强管理',
-  '提高意识', '强化监督', '持续完善', '定期检查', '及时处理', '全方位',
-  '系统性', '常态化', '提质增效', '高标准', '统筹推进',
+  '提高意识', '强化监督', '持续完善', '及时处理', '全方位',
+  '常态化', '提质增效', '高标准', '统筹推进',
 ];
+
+/** 生成侧禁写词库（用户提示词第十二节禁用词全量）：FORBIDDEN_EMPTY_PHRASES 基础上
+ * 保留“定期检查/系统性”等语境敏感词——评分不扣分（避免误伤正常表述），但提示词层面继续禁写。 */
+export const FORBIDDEN_PROMPT_PHRASES = [...FORBIDDEN_EMPTY_PHRASES, '定期检查', '系统性'];
 
 /** 案例落地句式三要素（责任岗位 + 检查频次 + 整改闭环），供可落地性评分与提示词共用 */
 export const CLOSED_LOOP_ROLE_RE = /项目经理|技术负责人|总工程师|项目负责人|施工员|质检员|质量员|安全员|专职安全员|材料员|资料员|测量员|试验员|电工|文明施工管理员|专业工长/u;
@@ -136,10 +142,12 @@ export function closedLoopBlockStats(markdown: string) {
   return { blocks: blocks.length, closedLoopBlocks };
 }
 
-/** 可落地性：措施五要素闭合块密度（方案＋流程＋责任人＋时间节点＋验收标准，docx L93），每 1500 字至少 1 段 */
-function executabilityScore(markdown: string) {
+/** 可落地性：措施五要素闭合块密度（方案＋流程＋责任人＋时间节点＋验收标准，docx L93）
+ * 目标基准优先取参考库同类工程完整五要素块均值（人工样本实测画像，对标口径），
+ * 无参考库样本时回退每 1500 字 1 块的历史口径 */
+function executabilityScore(markdown: string, referenceCompleteBlocks?: number) {
   const { blocks, completeBlocks } = fiveElementBlockStats(markdown);
-  const target = Math.max(6, Math.ceil(documentTextLength(markdown) / 1500));
+  const target = Math.max(6, Math.ceil(referenceCompleteBlocks ?? documentTextLength(markdown) / 1500));
   const density = Math.min(1, completeBlocks / target);
   const fiveElementRate = blocks ? completeBlocks / blocks : 0;
   return Math.round((density * 0.7 + fiveElementRate * 0.3) * 100);
@@ -246,12 +254,14 @@ export function buildTenderBidScores(input: {
   template?: DocumentTemplate | null;
   factTraces: DocumentFactTrace[];
   issues: ValidationIssue[];
+  /** 参考库同类工程完整五要素块均值（可选）：提供时作为可落地性目标基准 */
+  referenceCompleteBlocks?: number;
 }): TenderBidScores {
   return {
     completeness: completenessScore(input.markdown, input.chapters, input.template),
     specificity: specificityScore(input.markdown, input.chapters, input.factTraces),
     compliance: complianceScore(input.markdown),
-    executability: executabilityScore(input.markdown),
+    executability: executabilityScore(input.markdown, input.referenceCompleteBlocks),
     normalization: normalizationScore(input.issues),
     uniqueness: uniquenessScore(input.markdown),
   };

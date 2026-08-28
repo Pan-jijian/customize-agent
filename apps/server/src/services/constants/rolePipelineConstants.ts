@@ -4,7 +4,7 @@ import type { QualityRepairType } from '../types';
 export const BLOCKING_CHAPTER_ISSUE_RE = /正文缺少章节标题|空小节|小节只有标题|只有标题或表格无正文|后台流程话术|重复 token|退化输出/u;
 
 /** 可通过局部 LLM 修复的质量问题。 */
-export const REPAIRABLE_QUALITY_ISSUE_RE = /阻断|错误|正文缺少章节标题|空小节|小节只有标题|只有标题或表格无正文|小节生成未达标|生成未完成|Writer 未完成|WRITER_MISSING_SECTION|正文不足|生成后事实反查失败|工序规格冲突|不得出现|禁止词|禁用主体|正式表格不足|缺少必要的正式表格|事实一致性|跨章一致性|其他项目|项目编号|项目名称|后台流程|提示词|结构化精确参数使用不足|可靠精确参数使用不足|参数落位不足|工艺参数|量化参数密度|正文未体现结构化数据资料|正文未体现设计\/方案\/说明类资料|图片|重复 token|退化输出/u;
+export const REPAIRABLE_QUALITY_ISSUE_RE = /阻断|错误|正文缺少章节标题|空小节|小节只有标题|只有标题或表格无正文|小节生成未达标|生成未完成|Writer 未完成|WRITER_MISSING_SECTION|正文不足|生成后事实反查失败|工序规格冲突|不得出现|禁止词|禁用主体|正式表格不足|缺少必要的正式表格|事实一致性|跨章一致性|同名小节重复|概况复述|其他项目|项目编号|项目名称|后台流程|提示词|结构化精确参数使用不足|可靠精确参数使用不足|参数落位不足|工艺参数|量化参数密度|正文未体现结构化数据资料|正文未体现设计\/方案\/说明类资料|图片|重复 token|退化输出/u;
 
 /** 修复问题分类规则，按顺序匹配。 */
 export const QUALITY_REPAIR_TYPE_RULES: Array<{ type: QualityRepairType; pattern: RegExp }> = [

@@ -1,9 +1,11 @@
 /**
  * 参考文件质量画像提取（纯函数，无 IO）。
  * 用于模板参考库：把用户上传的优秀入围施组文件解析为可量化的质量特征，
- * 作为生成后质量对标的基准。画像只描述"形"（参数密度、工序链、结构），
+ * 作为生成后质量对标的基准。画像只描述“形”（参数密度、工序链、结构），
  * 不提取事实内容——参考文件永不作为生成的事实材料。
  */
+import { fiveElementBlockStats } from './tenderBidChecks';
+import type { SemanticProfileEnrichment } from './referenceProfileSemantic';
 
 /** 参考文件支持的工程类型（覆盖建筑行业主要招标类型） */
 export const REFERENCE_PROJECT_TYPES = ['房建', '市政', '公路', '桥梁与隧道', '水利水电', '电力', '机电安装', '装饰装修', '园林绿化', '铁路', '港口与航道', '矿山冶金', '其他'] as const;
@@ -41,10 +43,16 @@ export interface ReferenceQualityProfile {
   paramTokens: Array<{ token: string; count: number }>;
   /** 参与覆盖率计算的正文段落总数（供类型画像加权聚合） */
   segmentCount: number;
-  /** 含"→"工序链的段落数（供类型画像加权聚合） */
+  /** 含“→”工序链的段落数（供类型画像加权聚合） */
   arrowChainSegmentCount: number;
   /** 重复段落数（供类型画像加权聚合） */
   duplicatedSegmentCount: number;
+  /** 措施五要素闭合块数（方案＋流程＋责任人＋时间节点＋验收标准，与可落地性评分同口径）：
+   * 供交付置信度可落地性维度对标参考库人工样本实测画像 */
+  fiveElementCompleteBlocks: number;
+  /** 语义画像补充层（embedding 语义模型 + LLM 离线标注）：上传/版本迁移时异步构建后缓存，
+   * 生成链路只读缓存保持评分确定性；构建失败时 undefined 回退正则层口径 */
+  semantic?: SemanticProfileEnrichment;
 }
 
 /** 工艺参数口径（分支一：英文/符号单位；与质量校验的参数落位校验保持一致） */
@@ -355,5 +363,6 @@ export function buildReferenceQualityProfile(text: string): ReferenceQualityProf
     segmentCount: segments.length,
     arrowChainSegmentCount,
     duplicatedSegmentCount,
+    fiveElementCompleteBlocks: fiveElementBlockStats(text).completeBlocks,
   };
 }

@@ -199,7 +199,8 @@ export function extractEvaluationCriteriaItems(texts: string[]): EvaluationCrite
   const items = new Map<number, EvaluationCriteriaItem>();
   for (const match of merged.matchAll(/(\d{1,2})\s*[.、．]\s*([^；。\n]{4,60})/gu)) {
     const raw = match[2].trim().replace(/[“”"'"]/gu, '');
-    if (!/[\u4e00-\u9fa5]{4}/u.test(raw)) continue;
+    // 汉字阈值 4→3：短条目（如“确保黄山杯”清理后仅 3 字）必须保留，否则创优类条目被静默丢弃零承接
+    if (!/[\u4e00-\u9fa5]{3}/u.test(raw) && !/[杯奖]/u.test(raw)) continue;
     if (/AI|大模型|评审|评分|分值|分项|子项|满分|得分|投标人须|详见|招标文件/u.test(raw)) continue;
     if (/公共资源|电子交易|加密|投标|开标|评标委员会/u.test(raw)) continue;
     const index = Number(match[1]);
@@ -395,7 +396,8 @@ export function validateBidStructureBeforeGeneration(input: {
 /** 评分条目标题清理：去掉“针对/确保”等框架前缀与“的保障体系与措施”等尾缀，得到可作小节标题的短语 */
 function cleanEvaluationItemTitle(item: string) {
   const title = item.replace(/^针对/u, '').replace(/^确保/u, '').replace(/的保障体系与措施$/u, '').replace(/的管理体系与措施$/u, '').replace(/保障体系与措施$/u, '').replace(/管理体系与措施$/u, '').replace(/[，、；,;]+$/u, '').trim();
-  if (!/[\u4e00-\u9fa5]{4}/u.test(title)) return '';
+  // 汉字阈值 4→3（创优类短条目如“黄山杯”必须保留）；2 字含“杯/奖”的奖项条目同样保留
+  if (!/[\u4e00-\u9fa5]{3}/u.test(title) && !/[杯奖]/u.test(title)) return '';
   if (/工期与质量/u.test(title)) return ''; // 框架条目，正文结构已由大纲承接
   return title.length > 24 ? title.slice(0, 24) : title;
 }

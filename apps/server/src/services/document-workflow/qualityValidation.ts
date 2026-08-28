@@ -3,6 +3,9 @@ import { readEngineeringDocumentConfig } from '../document-validation/engineerin
 import { CHAPTER_HEADING_RE, EXPORT_BLOCKING_ISSUE_RE, EXPORT_GATE_PRECISION_ISSUE_RE, EXPORT_GATE_PROJECT_CONTAMINATION_RE, FALLBACK_GATE_EVALUATORS, FORMAL_PLACEHOLDER_PATTERNS, FORMAL_STYLE_FORBIDDEN_PHRASES, LINE_SPLIT_RE, MARKDOWN_IMAGE_RE, MARKDOWN_SECTION_HEADING_RE, MARKDOWN_TABLE_BLOCK_SPLIT_RE, MARKDOWN_TABLE_DIVIDER_RE, MARKDOWN_TABLE_ROW_RE, MARKDOWN_TOP_HEADING_RE, NON_BLANK_RE, PRECISE_FACT_MIN_TOKEN_COUNT, PRECISE_FACT_MIN_USAGE_RATE, PRECISE_FACT_SOURCE_RE, PRECISE_FACT_TOKEN_RE, DOCUMENT_BASIC_INFO_BLOCK_RE, DOCUMENT_BASIC_INFO_FIELDS, DOCUMENT_BASIC_INFO_TABLE_RE, PROMPT_EXAMPLE_BLOCK_RE, QUALITY_SEVERITY_RULES, SPEC_GATE_RULE_HANDLERS, SPECIFICATION_CONTENT_RE, STRUCTURED_DATA_CONTENT_RE, TOC_BLOCK_RE, TOC_INDENTED_SECTION_LINE_RE, TOC_SECTION_LINE_RE, WHITESPACE_RE } from '../constants';
 import type { QualitySeverity, QualitySeveritySummary, SpecGateRuleContext } from '../types';
 import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentTemplate, ExportGateResult, NumericScopeConflict, ProjectBinding, PromptBinding, ValidationIssue } from './types';
+import type { FactTokenScopeClassifier } from './factTokenClassifier';
+import type { SemanticSimilarityFn } from './semanticSimilarity';
+import type { DepthDimension, ProfessionalDepthAnalysis } from './professionalDepthClassifier';
 import { documentTextLength, estimateDocumentPages } from './budget';
 import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { displayChapterTitle } from './outline';
@@ -144,14 +147,28 @@ export function evaluationCriteriaCoreKeywords(title: string): string[] {
  * 招标评分条目正文承接后置校验：已提取的评审条目若核心关键词在最终正文 0 次出现，报 warning。
  * 前置补小节只能保证大纲覆盖，主题块规划/成稿阶段仍可能把补入小节合并丢失（历史缺陷：
  * “拟采用的新技术、新工艺”整篇 0 次出现），后置命中检查是承接链的最后一道兑底。
+ * round-14 零误伤：词面未命中时由 bge 语义相似度兑底（变体表述不误报），语义模型不可用时
+ * 仅词面命中判定，宁漏报不误报。
  */
-export function evaluationCriteriaCoverageIssues(markdown: string, items: string[]): ValidationIssue[] {
+export function evaluationCriteriaCoverageIssues(
+  markdown: string,
+  items: string[],
+  options: { semanticSimilarity?: SemanticSimilarityFn } = {},
+): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const normalized = markdown.replace(/\s+/gu, '');
+  const chapterLines = options.semanticSimilarity
+    ? markdown.split(/\n/u).filter(line => /^#{2,4}\s/u.test(line.trim())).map(line => line.trim().replace(/^#{2,4}\s+/u, '').replace(/^\d+(?:\.\d+)*[\s、.]+/u, '').trim()).filter(Boolean).slice(0, 80)
+    : [];
   for (const item of items.slice(0, 8)) {
     const keywords = evaluationCriteriaCoreKeywords(item);
     if (keywords.length === 0) continue;
     if (keywords.some(keyword => normalized.includes(keyword))) continue;
+    // 语义兑底：核心词词面未命中时，条目标题与章节标题的 bge 余弦 ≥0.6 视为已承接（变体表述不误报）
+    if (options.semanticSimilarity && chapterLines.length > 0) {
+      const best = Math.max(...chapterLines.map(line => options.semanticSimilarity!(item, line)));
+      if (best >= 0.6) continue;
+    }
     issues.push({ level: 'warning', severity: 'warning', message: `招标文件评分条目“${item}”未在正文中出现（核心词：${keywords.join('/')}）`, suggestion: '评审条目必须逐条承接为正文小节；请补写对应内容并确保核心关键词落位，避免评标失分。' });
   }
   return issues;
@@ -180,9 +197,16 @@ export function innovationTechCoverageIssues(markdown: string, outlineChapters: 
   const committedSections = (outlineChapters || []).flatMap(chapter => (chapter.sections || []).filter(section => /新技术|新工艺|新材料|新设备|四新/u.test(section)));
   if (committedSections.length === 0) return [];
   const issues: ValidationIssue[] = [];
+  // 合并成稿兜底：正文常把承诺的多个四新细化小节（新技术/新工艺/新材料/新设备的应用）合并为
+  // “四新技术应用管理”等单一成稿小节（主题块合并是合法设计），逐个小节标题 fuzzy 匹配必然失败，
+  // 会误报“0 字”（十四度实测：正文 2.14.1 四新技术应用管理已成稿仍被报未成稿）。
+  // 承诺仍未兑现的判定不受影响：正文无任何“四新”小节成稿时兜底不生效，照常报 warning。
+  const mergedBody = extractSection(markdown, '四新', { fuzzy: true });
+  const mergedLength = mergedBody ? documentTextLength(mergedBody) : 0;
   for (const sectionTitle of [...new Set(committedSections)]) {
     const body = extractSection(markdown, sectionTitle, { fuzzy: true });
     if (!body || documentTextLength(body) < 200) {
+      if (mergedLength >= 200) continue;
       issues.push({ level: 'warning', severity: 'warning', message: `大纲承诺小节“${sectionTitle}”未在正文成稿（正文 ${body ? documentTextLength(body) : 0} 字，要求不少于 200 字）`, suggestion: '请补写四新技术应用小节成稿，落位本项目适用的创新工艺、新材料与新设备应用计划。' });
     }
   }
@@ -204,7 +228,7 @@ export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentF
   const hardBlockingIssues = governedIssues.filter(issue => issue.level === 'error' && isHardExportBlockingIssue(issue));
   // 已生成实质正文时仍保留关键结构阻断（缺节、空小节、生成未达标、正文不足等），仅豁免其余软性门禁，避免质量门禁卡住交付。
   // 跨章一致性（含数值口径冲突与复核残留）是用户明确的低级错误红线，有正文时同样硬阻断
-  const CRITICAL_BLOCK_RE = /缺少规划小节|小节生成未达标|小节内容补写未完成|空小节|小节只有标题|生成未完成|正文不足|主要施工内容小节缺失|部分章节生成失败|Writer 未完成|不得出现|疑似提示词指令标题|项目污染|跨章一致性|分部分项工程施工方案/u;
+  const CRITICAL_BLOCK_RE = /缺少规划小节|小节生成未达标|小节内容补写未完成|空小节|小节只有标题|生成未完成|正文不足|主要施工内容小节缺失|缺少[“"']项目主要施工内容[”"']小节|部分章节生成失败|Writer 未完成|不得出现|疑似提示词指令标题|项目污染|跨章一致性|分部分项工程施工方案|后台内部术语|重复专业工程/u;
   const blockingIssues = hasBody ? hardBlockingIssues.filter(issue => CRITICAL_BLOCK_RE.test(issue.message)) : hardBlockingIssues;
   const checklist = [
     { key: 'no_errors', label: '无阻断级校验错误', passed: blockingIssues.length === 0 },
@@ -466,6 +490,25 @@ export function markdownTableQualityIssues(markdown: string): ValidationIssue[] 
     const expectedColumns = header.length;
     const badRow = cells.find((row, rowIndex) => rowIndex !== 1 && row.length !== expectedColumns);
     if (badRow) issues.push({ level: 'error', message: `表格列数不一致：${header.join('、')}`, suggestion: '请统一表头和数据行列数；不应通过自动填充兜底词修补表格。' });
+    // 数据行空单元格/占位符检测（十度实测缺陷：竣工清理计划表末列为空、临时用电表“—/若干/约82kW”占位）：
+    // 正式交付表格不得出现数据缺失；合计/小计/总计/累计行的“—”属“不适用”行业惯例，豁免
+    const dataRows = cells.slice(2);
+    const emptyCellRow = dataRows.find(row => row.some(cell => cell === ''));
+    if (emptyCellRow) issues.push({ level: 'error', message: `表格存在空单元格：${header.join('、')}（“${emptyCellRow[0] || ''}”行）`, suggestion: '正式交付表格不得出现空单元格；缺失数据应从资料补齐或按业务口径填写具体值，不得留空。' });
+    const placeholderCellRow = dataRows.find(row => row.some((cell, cellIndex) => {
+      if (!/^(?:—+|-+|-|\/|N\/A|n\/a|待定|待补充|待确认|待查|待补|若干|暂无|无数据)$/u.test(cell) && !/^约\d/u.test(cell)) return false;
+      // 合计/小计/总计/累计行的“—”为不适用语义，豁免；其余占位词（若干/约/待定等）任何行均不豁免
+      return !(/^(?:合计|小计|总计|累计)/u.test(row[0] || '') && /^(?:—+|-+)$/u.test(cell) && cellIndex > 0);
+    }));
+    if (placeholderCellRow) {
+      // 提取真正触发缺陷的单元格（与检测口径一致：合计行“—”豁免，不进入消息定位）
+      const isTotalRow = /^(?:合计|小计|总计|累计)/u.test(placeholderCellRow[0] || '');
+      const placeholderCell = placeholderCellRow.find((cell, cellIndex) => {
+        if (!/^(?:—+|-+|-|\/|N\/A|n\/a|待定|待补充|待确认|待查|待补|若干|暂无|无数据)$/u.test(cell) && !/^约\d/u.test(cell)) return false;
+        return !(isTotalRow && /^(?:—+|-+)$/u.test(cell) && cellIndex > 0);
+      }) || '';
+      issues.push({ level: 'error', message: `表格存在占位符单元格：${header.join('、')}（“${placeholderCellRow[0] || ''}”行“${placeholderCell}”）`, suggestion: '正式交付表格不得用“—/若干/约/待定”等占位或模糊表达代替具体数据；应从资料补齐具体数值。' });
+    }
   }
   return issues;
 }
@@ -706,7 +749,7 @@ const SCALE_UNIT_RE = /㎡|m²|m2|平方米/u;
 const COST_SCOPE_RE = /合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|工程总投资|总投资|工程造价/u;
 const COST_UNIT_RE = /万元|亿元/u;
 
-export function crossChapterConsistencyIssues(markdown: string, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[]): ValidationIssue[] {
+export function crossChapterConsistencyIssues(markdown: string, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[], analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   // 校验基准与生成裁决同源：源级同口径冲突的裁决值（补疑修正后的胜出数值）优先作为期望口径，
   // 避免事实主表候选排序差异导致检查基准与裁决基准不一致（历史缺陷：正文全用胜出值时因主表取出败选值而误报）；
@@ -728,7 +771,12 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
     const conflicting = expectedDuration ? durationMatches.filter(item => item !== expectedDuration && /日历天/u.test(item)) : [];
     if (expectedDuration && conflicting.length >= 2) issues.push({ level: 'warning', message: `跨章一致性冲突：正文出现与资料工期不一致的表述 ${conflicting.slice(0, 6).join('、')}`, suggestion: `请统一使用资料中的工期口径：${expectedSchedule}` });
   }
-  if (expectedQuality && !/质量标准|质量目标|合格|优良/u.test(markdown)) issues.push({ level: 'error', message: '跨章一致性缺口：正文未稳定体现资料中的质量目标', suggestion: `请在工程概况、质量保证和验收相关章节统一体现：${expectedQuality}` });
+  // round-14 零误伤：质量目标词面未命中时由 bge 语义兑底（质量章节覆盖验收闭环语义即视为质量体系已体现），
+  // 语义模型不可用时保留词面判定（质量目标章节为模板固定结构，四词词表命中率极高，残余风险由 warning 级事实值反查兑底）
+  if (expectedQuality && !/质量标准|质量目标|合格|优良/u.test(markdown)) {
+    const semanticQualityCovered = analyses && [...analyses.values()].some(analysis => analysis.contentNeeds.quality);
+    if (!semanticQualityCovered) issues.push({ level: 'error', message: '跨章一致性缺口：正文未稳定体现资料中的质量目标', suggestion: `请在工程概况、质量保证和验收相关章节统一体现：${expectedQuality}` });
+  }
   // 建设规模口径冲突：资料中的建筑总量面积与正文同口径数值比对；
   // 期望口径只取建筑总量口径（建设规模/建筑面积）——用地面积/占地面积是独立字段，不得作为期望值；
   // 与裁决口径不符的取值出现 1 次即判定冲突（数字级不一致是低级错误，不得以“表述误差”放过），error 级进入修复链
@@ -986,24 +1034,34 @@ export function closedLoopDensityIssues(markdown: string): ValidationIssue[] {
   return [{ level: 'warning', message: `可落地性闭环句式密度不足：全文 ${closedLoopBlocks} 段完整闭环句式，未达每 1500 字 1 段（目标 ${target} 段）`, suggestion: '在措施类段落中补齐“责任岗位 + 检查频次 + 整改闭环”三要素齐全的闭环句式：同一自然段内同时出现岗位（如项目经理/质检员/安全员）、频次（每日/每周/不少于X次）与闭环（整改/复查/销项）。' }];
 }
 
-export function managementMeasureNumberIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {
+export function managementMeasureNumberIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const managementNumberPattern = /(?:三检制|三级教育|三级管理|5S|24\s*小时|每日|每周|每月|一次|两次)/gu;
   for (const chapter of chapters) {
     const matches = [...new Set(chapter.content.match(managementNumberPattern) || [])];
-    if (matches.length >= 3 && !/责任人|检查记录|整改|复查|验收|台账|交底|巡查|闭环/u.test(chapter.content)) {
+    if (matches.length < 3) continue;
+    const analysis = analyses?.get(chapter.title);
+    // 语义模型不可用时静默跳过（零误伤）：执行闭环必须由 bge 嵌入判定，
+    // 关键词闭环正则必然误伤（闭环词命中的模板段漏检、变体闭环表述误报）
+    if (!analysis) continue;
+    if (!analysis.closedLoop) {
       issues.push({ level: 'warning', message: `${chapter.title} 管理措施数字较多但缺少执行闭环：${matches.slice(0, 8).join('、')}`, suggestion: '这些管理数字可以保留，但需要补充责任主体、检查频次、记录台账、整改复查和闭环要求。' });
     }
   }
   return issues;
 }
 
-export function genericProfessionalContentIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {
+export function genericProfessionalContentIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const generic = /(?:加强组织领导|严格执行规范|落实责任制度|确保工程质量|强化过程管理|提高思想认识|完善管理体系|形成闭环管理)/gu;
   const issues: ValidationIssue[] = [];
   for (const chapter of chapters) {
     const matches = chapter.content.match(generic) || [];
-    if (matches.length >= 6 && !/材料|工序|验收|复验|节点|风险|交底|隐蔽|检验批|进场/u.test(chapter.content)) issues.push({ level: 'error', message: `${chapter.title} 存在较多未绑定项目事实和工序控制点的泛化套话`, suggestion: '请替换为结合资料事实、施工对象、工序控制、验收资料和整改闭环的专业内容。' });
+    if (matches.length < 6) continue;
+    const analysis = analyses?.get(chapter.title);
+    // 语义模型不可用时静默跳过（零误伤）：是否绑定项目事实必须由 bge 嵌入判定，
+    // 具体词正则必然误伤（“材料”等词零命中但实质具体的章节被误判泛化）
+    if (!analysis) continue;
+    if (!analysis.concrete) issues.push({ level: 'error', message: `${chapter.title} 存在较多未绑定项目事实和工序控制点的泛化套话`, suggestion: '请替换为结合资料事实、施工对象、工序控制、验收资料和整改闭环的专业内容。' });
   }
   return issues;
 }
@@ -1023,8 +1081,11 @@ function trustedFactCorpus(factsModel: DocumentFactsModel) {
   ].map(normalizedFactValue).join('\n');
 }
 
-function generatedFactTokenClass(token: string, context: string): 'scope' | 'spec' | 'soft' {
+function generatedFactTokenClass(token: string, context: string, prefix?: string): 'scope' | 'spec' | 'soft' {
   const normalized = `${token} ${context}`;
+  // 单位门控（十一度实测误伤）：token 自身单位决定口径类别，上下文关键词不得跨口径升级——
+  // “4次”是专项应急演练频次计数，不能因 ±36 字上下文出现“日历天”而被判为工期总量口径编造
+  if (/(?:工日|人日|次|台|套|个|人|层|间|批|项|处|座|栋|根|只|组|件|块|片|面|条|道|樘|扇|盏|节|段)$/u.test(token)) return 'soft';
   if (/三检制|三级|5S|24\s*小时|每日|每周|每月|一次|两次|责任制|制度/u.test(normalized)) return 'soft';
   // 商务金额类（暂列金额/暂估价/报价/单价/税率）：招标人给定或商务条款数字，事实提取侧本就不纳入主表，
   // 反查侧不得据此判为“编造总量口径”硬阻断——正文忠实引用暂列金额（如“暂列金额60万元”）是合规写法
@@ -1032,10 +1093,17 @@ function generatedFactTokenClass(token: string, context: string): 'scope' | 'spe
   // 具体日期 token（"2026年8月8日"中的"2026年""8月"）属于日期表述，不是总量口径数字；
   // 编造日期由 Writer 规则约束与跨章检查处理，此处降级 soft 避免把日期误判为工期口径阻断导出
   if (/^\d+(?:\.\d+)?(?:月|年)$/u.test(token) && /开工|竣工|日期|计划|年|月/u.test(context)) return 'soft';
-  // 项目总量口径（工期/金额/建设规模）：正文偏离资料口径属低级错误，升级为 error 走修复链
-  if (/总工期|计划工期|合同工期|日历天/u.test(normalized)) return 'scope';
-  if (/最高投标限价|招标控制价|合同估算价|投资估算|报价|金额|万元|元/u.test(normalized)) return 'scope';
-  if (/(?:建设规模|总建筑面积|总用地面积|总占地面积).{0,16}(?:m²|㎡|m2|平方米)/u.test(normalized)) return 'scope';
+  // 项目总量口径（工期/金额/建设规模）：正文偏离资料口径属低级错误，升级为 error 走修复链。
+  // token 必须携带对应口径单位才能升级，防止上下文关键词跨口径误伤（见上方单位门控说明）。
+  // 上下文关键词只在 token 前导近邻窗口（prefix）内匹配：±36 字全窗口在语义分类器不可用时会把
+  // “养护期30天，满足总工期要求”误判为工期总量口径编造（error 硬阻断误伤）；
+  // 语义路径的远距离口径由 bge 语义分类器补升级（generatedFactVerificationIssuesAsync），漏检由语义补足。
+  const scopeContext = prefix ?? context;
+  if (/(?:天|工作天|月|年)$/u.test(token) && /总工期|计划工期|合同工期|日历天|施工周期/u.test(scopeContext)) return 'scope';
+  // 金额类不能裸匹配单字“元”：正文常见“结构单元/元件/元素/元器件”等词含“元”字，
+  // 会把方法段工艺参数（如“拆除段单元划分”语境下的 200m2）误判为金额口径编造（十度实测误伤）
+  if (/(?:万元|亿元|元)$/u.test(token) && /最高投标限价|招标控制价|合同估算价|投资估算|报价|金额|人民币/u.test(scopeContext)) return 'scope';
+  if (/(?:m2|hm2|亩|㎡|m²|平方米)$/u.test(token) && /建设规模|总建筑面积|总用地面积|总占地面积/u.test(scopeContext)) return 'scope';
   // 工程量/材料/设备规格明细：与资料口径不符时提示复核（规格细节较多，warning 级避免误伤）
   if (/(?:工程量|清单|建设规模|建筑面积|长度|材料|设备|规格|型号).{0,24}(?:m²|㎡|m3|m³|米|吨|套|台|个|项|%)/u.test(normalized)) return 'spec';
   // 国家标准/行业标准/地方标准编号是通用引用，不是项目特有事实，降级为 soft
@@ -1044,31 +1112,53 @@ function generatedFactTokenClass(token: string, context: string): 'scope' | 'spe
   return 'soft';
 }
 
-export function generatedFactVerificationIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
-  const corpus = trustedFactCorpus(factsModel);
-  if (documentTextLength(corpus) < 80) return [];
-  const issues: ValidationIssue[] = [];
-  const compactCorpus = normalizeEngineeringTextForFactMatch(corpus);
-  const scopeSuspicious: string[] = [];
-  const specSuspicious: string[] = [];
-  const softSuspicious: string[] = [];
+interface FactVerificationCandidate {
+  token: string;
+  normalizedToken: string;
+  context: string;
+  /** token 前导近邻窗口（16 字）：scope 升级的关键词封闭匹配限定在近邻，杜绝远距离上下文误升级 */
+  prefix: string;
+}
+
+/** 收集待反查的工程度量 token（表格行排除、章节编号排除、上下文切片），与口径分类解耦 */
+function collectFactVerificationCandidates(markdown: string): FactVerificationCandidate[] {
+  const candidates: FactVerificationCandidate[] = [];
   for (const token of extractEngineeringMeasureTokens(markdown)) {
     // 章节编号（1.2、2.3 等无单位纯小数）是目录/标题编号，不是工程数字，不进反查池
     if (/^\d+\.\d+$/u.test(token)) continue;
     const normalizedToken = normalizeEngineeringTextForFactMatch(token);
-    const tokenIndex = markdown.indexOf(token);
+    let tokenIndex = markdown.indexOf(token);
+    if (tokenIndex < 0) {
+      // 归一化单位还原（日历天→天、㎡→m2 等）后 token 与原文形态不一致：退化为按数值部分定位，
+      // 保证工期/面积口径 token 不因归一化丢位而漏反查（“30日历天”提取为“30天”后原文找不到）
+      const numericPart = /^\d+(?:\.\d+)?/u.exec(token)?.[0];
+      tokenIndex = numericPart ? markdown.indexOf(numericPart) : -1;
+    }
     if (tokenIndex < 0) continue;
     // 表格行中的数值（进度计划表分项持续时间"第24～34天"、机械配置表"第X天"等）
     // 属于计划排期分解数据，不属于总量口径，不做资料事实反查
     const lineStart = markdown.lastIndexOf('\n', tokenIndex - 1) + 1;
-    const tokenLine = markdown.slice(lineStart, markdown.indexOf('\n', tokenIndex) < 0 ? markdown.length : markdown.indexOf('\n', tokenIndex));
+    const lineEnd = markdown.indexOf('\n', tokenIndex);
+    const tokenLine = markdown.slice(lineStart, lineEnd < 0 ? markdown.length : lineEnd);
     if (/^\s*\|/u.test(tokenLine.trim())) continue;
     const context = markdown.slice(Math.max(0, tokenIndex - 36), Math.min(markdown.length, tokenIndex + token.length + 36));
-    const tokenClass = generatedFactTokenClass(token, context);
-    if (tokenClass === 'scope' && !compactCorpus.includes(normalizedToken)) scopeSuspicious.push(token);
-    if (tokenClass === 'spec' && !compactCorpus.includes(normalizedToken)) specSuspicious.push(token);
-    if (tokenClass === 'soft' && !compactCorpus.includes(normalizedToken)) softSuspicious.push(token);
+    // token 前导近邻窗口（16 字）：scope 升级的关键词封闭匹配限定在近邻，杜绝远距离上下文误升级（round-14 零误伤）
+    const prefix = markdown.slice(Math.max(0, tokenIndex - 16), tokenIndex);
+    candidates.push({ token, normalizedToken, context, prefix });
   }
+  return candidates;
+}
+
+/** 由三类可疑桶生成反查 issues（同步/异步分类链路共用，保证消息与阈值一致） */
+function buildFactVerificationIssuesFromBuckets(input: {
+  markdown: string;
+  factsModel: DocumentFactsModel;
+  scopeSuspicious: string[];
+  specSuspicious: string[];
+  softSuspicious: string[];
+}): ValidationIssue[] {
+  const { markdown, factsModel, scopeSuspicious, specSuspicious, softSuspicious } = input;
+  const issues: ValidationIssue[] = [];
   const uniqueScopeSuspicious = [...new Set(scopeSuspicious)];
   const uniqueSpecSuspicious = [...new Set(specSuspicious)];
   const uniqueSoftSuspicious = [...new Set(softSuspicious)];
@@ -1078,6 +1168,69 @@ export function generatedFactVerificationIssues(markdown: string, factsModel: Do
   if (uniqueSoftSuspicious.length >= 6) issues.push({ level: 'warning', message: `生成后事实反查提示：正文出现较多未在资料事实主表中反查到的管理数字 ${uniqueSoftSuspicious.slice(0, 10).join('、')}`, suggestion: '请确认这些管理数字属于通用制度、规范要求或项目资料事实；如无依据，建议改为定性管理要求。' });
   if (/质量目标|质量标准/u.test(markdown) && factsModel.quality.length > 0 && !factsModel.quality.some(fact => markdown.includes(stringifyFactValue(fact.value).slice(0, 18)))) issues.push({ level: 'warning', message: '生成后事实反查提示：正文质量目标表述未明显匹配质量事实主表', suggestion: '请使用资料中的质量目标原文或等价表述。' });
   return issues;
+}
+
+/** 模糊口径单位后缀：可被总量口径或明细口径解释的单位，其口径归属需语义分类复核 */
+const AMBIGUOUS_SCOPE_UNIT_RE = /(?:天|工作天|日历天|月|年|万元|亿元|元|m2|hm2|亩|㎡|m²|平方米)$/u;
+
+/** 同步反查校验（正则门控分类，语义分类器不可用时的降级路径） */
+export function generatedFactVerificationIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+  const corpus = trustedFactCorpus(factsModel);
+  if (documentTextLength(corpus) < 80) return [];
+  const compactCorpus = normalizeEngineeringTextForFactMatch(corpus);
+  const scopeSuspicious: string[] = [];
+  const specSuspicious: string[] = [];
+  const softSuspicious: string[] = [];
+  for (const candidate of collectFactVerificationCandidates(markdown)) {
+    const { token, normalizedToken, context, prefix } = candidate;
+    const tokenClass = generatedFactTokenClass(token, context, prefix);
+    if (tokenClass === 'scope' && !compactCorpus.includes(normalizedToken)) scopeSuspicious.push(token);
+    if (tokenClass === 'spec' && !compactCorpus.includes(normalizedToken)) specSuspicious.push(token);
+    if (tokenClass === 'soft' && !compactCorpus.includes(normalizedToken)) softSuspicious.push(token);
+  }
+  return buildFactVerificationIssuesFromBuckets({ markdown, factsModel, scopeSuspicious, specSuspicious, softSuspicious });
+}
+
+/**
+ * 反查校验（语义口径分类链路，round-13）：模糊单位 token 的 scope 升级/降级由总量口径语义分类器复核——
+ * 正则升级 scope 需语义确认（根治跨口径误伤），正则漏判时语义可升级（补足变体表述漏检）。
+ * scopeClassifier 不可用时与同步版完全等价（正则门控）。
+ */
+export async function generatedFactVerificationIssuesAsync(
+  markdown: string,
+  factsModel: DocumentFactsModel,
+  options: { scopeClassifier?: FactTokenScopeClassifier } = {},
+): Promise<ValidationIssue[]> {
+  const corpus = trustedFactCorpus(factsModel);
+  if (documentTextLength(corpus) < 80) return [];
+  const compactCorpus = normalizeEngineeringTextForFactMatch(corpus);
+  const candidates = collectFactVerificationCandidates(markdown);
+  // 批量语义预分类：一次批量嵌入所有模糊单位候选查询，避免逐条 pipeline 调用开销
+  let semanticMap: Map<string, 'scope' | 'other'> | undefined;
+  if (options.scopeClassifier) {
+    const ambiguousCandidates = candidates.filter(candidate => AMBIGUOUS_SCOPE_UNIT_RE.test(candidate.token));
+    if (ambiguousCandidates.length > 0) {
+      const results = await options.scopeClassifier.batchClassify(ambiguousCandidates.map(candidate => `${candidate.token} ${candidate.context}`.slice(0, 160)));
+      semanticMap = new Map();
+      ambiguousCandidates.forEach((candidate, index) => semanticMap!.set(candidate.token, results[index] || 'other'));
+    }
+  }
+  const scopeSuspicious: string[] = [];
+  const specSuspicious: string[] = [];
+  const softSuspicious: string[] = [];
+  for (const candidate of candidates) {
+    const { token, normalizedToken, context, prefix } = candidate;
+    let tokenClass = generatedFactTokenClass(token, context, prefix);
+    if (semanticMap && AMBIGUOUS_SCOPE_UNIT_RE.test(token)) {
+      const semantic = semanticMap.get(token) || 'other';
+      if (tokenClass === 'scope') tokenClass = semantic === 'scope' ? 'scope' : 'soft';
+      else if (semantic === 'scope') tokenClass = 'scope';
+    }
+    if (tokenClass === 'scope' && !compactCorpus.includes(normalizedToken)) scopeSuspicious.push(token);
+    if (tokenClass === 'spec' && !compactCorpus.includes(normalizedToken)) specSuspicious.push(token);
+    if (tokenClass === 'soft' && !compactCorpus.includes(normalizedToken)) softSuspicious.push(token);
+  }
+  return buildFactVerificationIssuesFromBuckets({ markdown, factsModel, scopeSuspicious, specSuspicious, softSuspicious });
 }
 
 function professionalScoreThreshold(title: string) {
@@ -1090,41 +1243,44 @@ function professionalScoreThreshold(title: string) {
   return { min: 4, focus: '事实依据、专业深度、可执行性' };
 }
 
-export function professionalScoreIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {
+export function professionalScoreIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  const dimensionOrder: DepthDimension[] = ['factuality', 'structure', 'depth', 'executable', 'specificity', 'consistency'];
   for (const chapter of chapters) {
     const text = chapter.content;
     if (documentTextLength(text) < 800) continue;
-    const factuality = /资料|招标|清单|图纸|标准|范围|工期|质量|验收/u.test(text) ? 2 : /项目|工程|要求/u.test(text) ? 1 : 0;
-    const structure = /首先|其次|同时|最后|一是|二是|流程|步骤|阶段|组织顺序/u.test(text) ? 2 : /并且|同时|然后|因此/u.test(text) ? 1 : 0;
-    const depth = /控制点|关键线路|复验|隐蔽验收|风险|交底|检验批|整改|闭环/u.test(text) ? 2 : /措施|要求|管理|检查/u.test(text) ? 1 : 0;
-    const executable = /责任人|检查|记录|验收|整改|复查|进场|调配|应急/u.test(text) ? 2 : /落实|执行|安排|组织/u.test(text) ? 1 : 0;
-    const specificity = /本项目|本工程|招标范围|工程量|建设地点|计划工期|质量目标/u.test(text) ? 2 : /项目|工程/u.test(text) ? 1 : 0;
-    const consistency = /工期|质量|安全|资源|验收/u.test(text) ? 2 : /目标|要求/u.test(text) ? 1 : 0;
-    const scores = { factuality, structure, depth, executable, specificity, consistency };
-    const total = factuality + structure + depth + executable + specificity + consistency;
     const threshold = professionalScoreThreshold(chapter.title);
+    const analysis = analyses?.get(chapter.title);
+    // 语义模型不可用时静默跳过（零误伤）：六维覆盖必须由 bge 嵌入判定，
+    // 关键词正则模拟语义打分必然误伤（变体表述零命中/仅罗列关键词的模板段拿满分）
+    if (!analysis) continue;
+    const total = dimensionOrder.filter(dimension => analysis.dimensions[dimension]).length * 2;
     if (total < threshold.min) {
-      const weak = Object.entries(scores).filter(([, value]) => value < 1).map(([key]) => key).join('、') || threshold.focus;
+      const weak = dimensionOrder.filter(dimension => !analysis.dimensions[dimension]).join('、') || threshold.focus;
       issues.push({ level: 'error', message: `${chapter.title} 专业评分不足：${total}/12，薄弱维度：${weak}`, suggestion: `请按章节任务卡补齐${threshold.focus}，并写出资料依据、实施流程、专业控制点和检查整改闭环。` });
     }
   }
   return issues;
 }
 
-export function professionalContentIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {
+export function professionalContentIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const rules = [
-    { re: /进度|工期/u, need: /关键线路|穿插|纠偏|资源保障|节点|动态调整/u, message: '进度工期章节缺少关键线路、穿插施工或纠偏保障内容' },
-    { re: /质量/u, need: /材料.*验收|复验|隐蔽验收|整改.*复验|质量.*资料|检验批/u, message: '质量章节缺少材料验收复验、隐蔽验收或整改复验闭环' },
-    { re: /安全|文明|危大|风险/u, need: /风险|临电|消防|应急|检查.*整改|文明施工|人员|设备/u, message: '安全文明章节缺少风险识别、现场控制或应急检查闭环' },
-    { re: /资源|材料|设备|劳动力/u, need: /进场|验收|调配|保管|供应|投入计划/u, message: '资源章节缺少进场、验收、调配或保管计划' },
-    { re: /施工|工艺|技术|方案/u, need: /准备|流程|工艺|控制点|验收|交底/u, message: '施工技术章节缺少施工准备、工艺流程、控制点或验收要求' },
+    { re: /进度|工期/u, needKey: 'schedule' as const, need: /关键线路|穿插|纠偏|资源保障|节点|动态调整/u, message: '进度工期章节缺少关键线路、穿插施工或纠偏保障内容' },
+    { re: /质量/u, needKey: 'quality' as const, need: /材料.*验收|复验|隐蔽验收|整改.*复验|质量.*资料|检验批/u, message: '质量章节缺少材料验收复验、隐蔽验收或整改复验闭环' },
+    { re: /安全|文明|危大|风险/u, needKey: 'safety' as const, need: /风险|临电|消防|应急|检查.*整改|文明施工|人员|设备/u, message: '安全文明章节缺少风险识别、现场控制或应急检查闭环' },
+    { re: /资源|材料|设备|劳动力/u, needKey: 'resource' as const, need: /进场|验收|调配|保管|供应|投入计划/u, message: '资源章节缺少进场、验收、调配或保管计划' },
+    { re: /施工|工艺|技术|方案/u, needKey: 'construction' as const, need: /准备|流程|工艺|控制点|验收|交底/u, message: '施工技术章节缺少施工准备、工艺流程、控制点或验收要求' },
   ];
   const issues: ValidationIssue[] = [];
   for (const chapter of chapters) {
-    const text = chapter.content;
+    if (documentTextLength(chapter.content) < 600) continue;
+    const analysis = analyses?.get(chapter.title);
+    // 语义模型不可用时静默跳过（零误伤）：缺项判定必须由 bge 嵌入完成，
+    // 关键词 need 正则必然误伤（“关键线路法（CPM）”等变体表述零命中即判缺项）
+    if (!analysis) continue;
     for (const rule of rules) {
-      if (rule.re.test(chapter.title) && documentTextLength(text) >= 600 && !rule.need.test(text)) issues.push({ level: 'error', message: `${chapter.title}：${rule.message}`, suggestion: '请按专业任务卡定向补写该章节，补齐可实施的控制措施、资料依据和闭环要求。' });
+      if (!rule.re.test(chapter.title)) continue;
+      if (!analysis.contentNeeds[rule.needKey]) issues.push({ level: 'error', message: `${chapter.title}：${rule.message}`, suggestion: '请按专业任务卡定向补写该章节，补齐可实施的控制措施、资料依据和闭环要求。' });
     }
   }
   return issues;

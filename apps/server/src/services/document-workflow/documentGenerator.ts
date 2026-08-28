@@ -20,6 +20,9 @@ import { buildDocumentBlueprintContext } from './documentBlueprint';
 import { enrichConstructionOrgOutline } from './constructionOrgCatalog';
 import { validateBidStructureBeforeGeneration, extractEvaluationCriteriaItems, chapterCriteriaText } from './constructionBidStructure';
 import { buildSemanticSimilarity } from './semanticSimilarity';
+import { extractTenderRequirements, hasTenderRequirements, normalizeChapterTitleLine, tenderRequirementCheckItems, tenderRequirementsSummary, tenderRequirementsWritingRules } from './tenderRequirements';
+import { buildFactTokenScopeClassifier } from './factTokenClassifier';
+import { buildProfessionalDepthClassifier } from './professionalDepthClassifier';
 import { buildWritingTaskBrief } from './documentWritingTaskBrief';
 import { buildConstructionOrgTablePlans, tablePlanExecutionGaps } from './constructionOrgTablePlan';
 import { buildRetrievalCoverageReport, retrieveDeepChapterEvidence, retrievalCoverageRisk } from './documentEvidenceRetrieval';
@@ -280,11 +283,31 @@ export async function generateDocumentDraft(input: { templateId: string; require
     .filter(item => /评审|评分标准|评分办法|详细评审/u.test(`${item.sectionTitle || ''}${item.content}`))
     .map(item => item.content);
   const evaluationItems = extractEvaluationCriteriaItems(evaluationSourceTexts);
+  // 空输入短路显性化（历史缺陷：评审证据存在但编号条目提取为空时，承接审计静默通过）——
+  // 显性 stage 提示降级风险；黄山杯等短条目/绿色等级/禁编日期由评分项要求提取通道覆盖，不受此影响
+  if (evaluationSourceTexts.length > 0 && evaluationItems.length === 0) {
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'bid-structure-audit', status: 'skipped', message: '评审章节证据存在但未提取到评分条目标题：评分标准编号条目提取为空，承接审计将静默通过', details: ['请检查招标文件评标办法章节编号格式；评分项要求（创优目标/绿色等级/禁编日期）由评分项要求提取通道覆盖'] }, { subtitle: '评标结构校验', order: progressStages.length }));
+  }
   const criteriaSimilarity = await buildSemanticSimilarity(
     evaluationItems.map(item => item.title),
     enrichedOutlineChapters.map(chapterCriteriaText),
   );
   const bidStructureAudit = validateBidStructureBeforeGeneration({ template, chapters: enrichedOutlineChapters, requirement: input.requirement, evaluationItems, semanticSimilarity: criteriaSimilarity });
+  // 招标文件“要求与标准”层提取（round-13）：LLM 结构化提取全文评分项要求（创优目标/绿色等级/奖项条款/体系基准/禁编日期），
+  // 不限于评审章节——投标人须知前附表（如 10.9）、专用合同条款（如 5.1.1）、技术标准章节（如第七章）等位置的要求均覆盖。
+  // 提取失败/无绑定资料时返回空模型，零响应检测自动跳过；语义模型不可用不得阻塞生成。
+  const tenderRequirementEvidence = selectEvidenceByBudget(
+    [...allEvidence.filter(item => /招标|评标|投标须知|专用合同|合同条款|技术标准|技术要求/u.test(`${item.filePath || ''}${item.sectionTitle || ''}`)), ...allEvidence.filter(item => !/招标|评标|投标须知|专用合同|合同条款|技术标准|技术要求/u.test(`${item.filePath || ''}${item.sectionTitle || ''}`))],
+    { maxItems: 36, maxChars: 50000, preservePinned: true },
+  );
+  const tenderRequirements = await withProgressHeartbeat(() => extractTenderRequirements(tenderRequirementEvidence, { signal: input.signal }));
+  if (hasTenderRequirements(tenderRequirements)) {
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-extraction', status: 'success', message: '招标文件评分项要求结构化提取完成', details: tenderRequirementsSummary(tenderRequirements) }, { subtitle: '评分项要求提取', order: progressStages.length }));
+    emitProgress();
+  } else if (tenderRequirementEvidence.length > 0) {
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-extraction', status: 'skipped', message: '评分项要求提取未获得有效结果（模型不可用或资料中无要求），零响应检测自动跳过', details: [] }, { subtitle: '评分项要求提取', order: progressStages.length }));
+    emitProgress();
+  }
   const baseEffectiveChapters = buildConstructionOrgTablePlans({ chapters: bidStructureAudit.enrichedChapters, projectGraph, canonicalFacts });
   template = { ...template, chapters: baseEffectiveChapters };
   const chapterGraphMap = new Map<string, { graphFiles: Set<string>; graphBoqItems: Array<{ name: string; quantity: string; unit: string; sourceFiles: string[] }>; graphWorks: string[]; graphMethods: string[]; gaps: string[] }>();
@@ -378,6 +401,18 @@ export async function generateDocumentDraft(input: { templateId: string; require
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'bid-structure-audit', status: finalBidStructureAudit.issues.some(issue => issue.severity === 'blocker') ? 'failed' : 'success', message: `评标结构符合性校验：${finalBidStructureAudit.diagnostics.length} 个结构组，${finalBidStructureAudit.diagnostics.filter(item => item.status === 'satisfied').length} 个已满足，${finalBidStructureAudit.diagnostics.filter(item => item.status === 'missing' && item.level === 'required').length} 个必查缺失（已自动补挂），${finalBidStructureAudit.diagnostics.filter(item => item.status === 'fragmented').length} 个分散`, details: [...finalBidStructureAudit.diagnostics.map(item => `${item.status === 'satisfied' ? '满足' : item.status === 'fragmented' ? '分散' : '补挂'}：${item.groupTitle}${item.status === 'missing' ? `（补挂小节：${item.missingSections.join('、')}）` : ''}`), ...finalBidStructureAudit.issues.map(issue => `提示：${issue.message}`).slice(0, 8)] }, { subtitle: '评标结构校验' }));
   }
   template = { ...template, chapters: effectiveChapters };
+  // 评分项要求↔章节标题语义相似度（零响应检测第二道：变体表述兜底；嵌入不可用时 requirementsCoverageIssues 降级仅显式判定）
+  // 章节标题与零响应检测侧同口径归一化（normalizeChapterTitleLine），避免闭包缓存 key 不一致静默返回 0
+  const requirementsSimilarity = await buildSemanticSimilarity(
+    tenderRequirementCheckItems(tenderRequirements).map(({ item }) => item.coreTerms.join(' ') || item.text),
+    effectiveChapters.map(chapter => normalizeChapterTitleLine(chapter.title)),
+  );
+  // 总量口径语义分类器（round-13）：事实反查的口径归属语义复核（根治跨口径误伤）；
+  // 模型不可用时降级为近邻窗口正则门控（round-14 收紧，scope 升级关键词限定 token 前导 16 字内）
+  const factTokenScopeClassifier = await buildFactTokenScopeClassifier();
+  // 专业深度语义分类器（round-14）：章节专业深度/缺项/套话/闭环/依赖的语义判定（根治关键词正则模拟语义打分）；
+  // 模型不可用时六类判定静默跳过（零误伤：漏检可接受、误伤不可容忍）
+  const professionalDepthClassifier = await buildProfessionalDepthClassifier();
   const writingTaskBrief = buildWritingTaskBrief({ chapters: effectiveChapters, factsModel: preliminaryFactsModel, projectGraph: projectGraph || undefined, requirement: input.requirement, templateName: template.name });
   // T5 蓝图注入：同类工程质量参考（软性参考，按篇幅折减；无同类型参考样本或类型未识别时返回空，不注入）；
   // 写法骨架切片（方案4/E5）：与量化参考同链路注入，补齐“怎么写才像范文”的展开模式描述
@@ -389,7 +424,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'reference-benchmark', status: 'success', message: '已读取模板参考库同类工程画像，作为质量软性参考注入文档蓝图', details: referenceLines }, { subtitle: '参考画像注入', order: progressStages.length }));
   }
   const documentBlueprintContext = buildDocumentBlueprintContext({ template, chapters: effectiveChapters, factsModel: preliminaryFactsModel, requirement: input.requirement, referenceLines, scopeConflicts: canonicalFacts.scopeConflicts });
-  projectContext = [baseProjectContext, documentBlueprintContext].filter(Boolean).join('\n\n');
+  // 评分项要求写作规则注入：生成时显性响应招标要求（零响应即评标失分），与零响应检测共用同一份提取模型
+  projectContext = [baseProjectContext, documentBlueprintContext, tenderRequirementsWritingRules(tenderRequirements)].filter(Boolean).join('\n\n');
   if (!scopedIntelligence) {
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-blueprint', status: 'success', message: '已生成全局事实主表与文档蓝图，后续章节和小节将共用同一套专业约束', details: documentBlueprintContext.split('\n').slice(0, 12) }, { subtitle: '全局蓝图' }));
   }
@@ -1003,7 +1039,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
     // 深度不足类问题（含 warning 级）也要触发修复：Reviewer 只把关键小节的"正文不足"标为 blocker，
     // 普通小节是 warning 级；若只按 blocker 触发，warning 级深度缺口永远不补写，修复循环空转（历史缺陷：47 个 warning 修复两轮问题数纹丝不动）
     let hasDepthWarnings = hasDepthWarningIssues(agentReview.issues);
-    let needsRepair = (blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers)) || hasDepthWarnings;
+    // 标题对齐/工序链缺失类 warning（正文已成文但标题与规划不一致、方法段缺箭头链）：
+    // blocker 清零后单独补一轮定向精修，避免该类问题直达交付（十度实测：9 个小节标题未对齐 + 2 个小节缺箭头链穿透门禁）
+    let polishWarnings = agentReview.issues.filter(issue => issue.level === 'warning' && /未匹配到独立小节标题|工序链箭头缺失/u.test(issue.message));
+    // 精修轮去重标志：polish 类 warning 每章最多触发一轮定向精修，LLM 未收敛时避免空转轮次预算
+    let polishRoundDone = false;
+    let needsRepair = (blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers)) || hasDepthWarnings || (blockingReviewIssues.length === 0 && polishWarnings.length > 0);
     // P3：Repairer 轮次预算上限（默认 3 轮），超预算转"标记问题 + 门禁阻断 + 用户决策"
     const repairRoundBudget = generationBudget.repairRoundBudget;
     let repairRounds = 0;
@@ -1021,7 +1062,18 @@ export async function generateDocumentDraft(input: { templateId: string; require
     while (needsRepair && repairRounds < repairRoundBudget) {
       repairRounds += 1;
       const repairReview = { ...agentReview, issues: blockingReviewIssues };
-      const repairInstruction = agentReview.repairable
+      // 无阻断问题但存在标题对齐/工序链缺失类 warning 且尚未精修过：本轮执行定向精修
+      // （若同时存在深度 warning，下方批量补写照常执行，精修与补写互不冲突）
+      const polishOnly = blockingReviewIssues.length === 0 && polishWarnings.length > 0 && !polishRoundDone;
+      const repairInstruction = polishOnly
+        ? [
+          '【Agent 定向精修任务】',
+          `章节：${chapterTaskResult.task.title}`,
+          '仅处理下列结构类问题，不重写其他内容：标题未对齐的小节仅调整标题使之与规划标题一致（正文保持不变）；工序链箭头缺失的小节在方法/流程叙述中补写“→”箭头工序链，每条链不少于 3 个环节。',
+          ...polishWarnings.map(issue => `- ${issue.message}；${issue.suggestion || ''}`),
+          '【结构约束】保持现有小节结构与正文内容不变，不得新增/删除/合并小节，不得改写无关正文。',
+        ].join('\n')
+        : agentReview.repairable
         ? buildTargetedRepairInstruction({ task: chapterTaskResult.task, review: repairReview, plannedMode: Boolean(plannedStructureRef) })
         : [
           '【Agent 定向修复任务】',
@@ -1037,7 +1089,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
       const repairSectionResults: string[] = [];
       // 修复范围可能只有 warning 级深度缺口（blockingReviewIssues 为 0）：消息必须按实际修复来源描述，
       // 否则出现“Reviewer 发现 0 个阻断问题，正在定向修复”的矛盾展示（历史缺陷：纯 warning 深度补写轮）
-      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: blockingReviewIssues.length > 0 ? `${displayChapterTitle(chapter.title)} Reviewer 发现 ${blockingReviewIssues.length} 个阻断问题，正在定向修复` : `${displayChapterTitle(chapter.title)} 正在定向补写 ${sectionRewriteIssues.length} 个深度不足小节`, details: sectionRewriteIssues.length > 0 ? sectionRewriteIssues.map(issue => issue.message) : blockingReviewIssues.map(issue => issue.message) }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
+      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: blockingReviewIssues.length > 0 ? `${displayChapterTitle(chapter.title)} Reviewer 发现 ${blockingReviewIssues.length} 个阻断问题，正在定向修复` : polishOnly ? `${displayChapterTitle(chapter.title)} 正在定向精修 ${polishWarnings.length} 个结构类问题` : `${displayChapterTitle(chapter.title)} 正在定向补写 ${sectionRewriteIssues.length} 个深度不足小节`, details: sectionRewriteIssues.length > 0 ? sectionRewriteIssues.map(issue => issue.message) : polishOnly ? polishWarnings.map(issue => issue.message) : blockingReviewIssues.map(issue => issue.message) }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
       emitProgress(chapterDrafts);
       const replaceChapterSection = (contentValue: string, title: string, sectionValue: string, anchorTitle?: string) => {
         const normalizeHeadingTitle = (value: string) => value.replace(/[\u00a0\u3000]/gu, ' ').replace(/^\d+(?:\.\d+)*\s+/u, '').trim();
@@ -1056,15 +1108,25 @@ export async function generateDocumentDraft(input: { templateId: string; require
         };
         const stripGeneratedHeading = (value: string) => value.trim().replace(/^#{2,6}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]+\n+/u, '').trim();
         const lines = contentValue.split('\n');
-        let cursor = 0;
+        // 两趟收集：H3（细目自身标题）命中优先整节替换，H4 锚点命中仅兜底——单趟首个命中会把 ### 级补写稿
+        // 插入同名 H4 要点位置形成层级错乱，且复审按锚点提取仍报不足（十四度实测：补写 2087 字落到 1.2.6
+        // 同名 H4 要点，Reviewer 按“项目特点分析”锚点提取最长区间仍 < 阈值，修复 2 轮空转）
+        const h3Hits: number[] = [];
+        const h4Hits: number[] = [];
         for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
           const line = lines[lineIndex];
-          const lineStart = cursor;
-          cursor += line.length + 1;
           const heading = /^(#{3,4})\s+(.+)$/u.exec(line.trim());
           if (!heading) continue;
           const headingTitle = normalizeHeadingTitle(heading[2]);
           if (!matchesSectionHeading(headingTitle)) continue;
+          if (heading[1].length === 3) h3Hits.push(lineIndex);
+          else h4Hits.push(lineIndex);
+        }
+        const lineIndex = h3Hits[0] ?? h4Hits[0];
+        if (lineIndex !== undefined) {
+          const line = lines[lineIndex];
+          const lineStart = lines.slice(0, lineIndex).join('\n').length + (lineIndex > 0 ? 1 : 0);
+          const heading = /^(#{3,4})\s+(.+)$/u.exec(line.trim())!;
           // 工作包型小节：正文由同级 H4 工作包展开（标题正则命中，或标题后紧跟同级 H4 的结构特征），
           // 替换边界扩展到下一个上级标题（H2/H3）吞并原有工作包 H4——否则每轮 Repairer 补写都会在旧工作包前
           // 追加一组新工作包，形成成对重复（真实生成缺陷：安全管理目标等 H4 修复两轮后重复出现）
@@ -1193,7 +1255,11 @@ export async function generateDocumentDraft(input: { templateId: string; require
         emitProgress(chapterDrafts);
       }
       let repaired = { content: draftChapter.content, appliedCount: 0 };
-      if (blockingReviewIssues.some(issue => !/Writer 未完成|正文不足，未达到任务最小深度/u.test(issue.message))) {
+      if (polishOnly) {
+        // 定向精修轮：标题对齐/工序链箭头缺失类 warning 单独执行，与 blocker 修复共用 patch 定位管道
+        polishRoundDone = true;
+        repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `agent-polisher:${chapter.id}`, () => repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: draftChapter.content, evidence, missingFacts, sections }, issues: polishWarnings.map(issue => `${issue.message}；${issue.suggestion || ''}`), promptTexts: [plannedPromptTextsRef || agentEnhancedPromptTexts, repairInstruction].filter(Boolean).join('\n\n'), requirement: input.requirement, forbidDrawingImages, diagnostics: generationDiagnostics, signal: input.signal })));
+      } else if (blockingReviewIssues.some(issue => !/Writer 未完成|正文不足，未达到任务最小深度/u.test(issue.message))) {
         repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `agent-repairer:${chapter.id}`, () => repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: draftChapter.content, evidence, missingFacts, sections }, issues: blockingReviewIssues.map(issue => `${issue.message}；${issue.suggestion || ''}`), promptTexts: [plannedPromptTextsRef || agentEnhancedPromptTexts, repairInstruction].filter(Boolean).join('\n\n'), requirement: input.requirement, forbidDrawingImages, diagnostics: generationDiagnostics, signal: input.signal })));
       }
       draftChapter = { ...draftChapter, content: finalizeChapterContentQuality(repaired.content || draftChapter.content, chapter) };
@@ -1203,9 +1269,29 @@ export async function generateDocumentDraft(input: { templateId: string; require
       hasWriterMissingIssues = blockingReviewIssues.some(issue => /Writer 未完成/u.test(issue.message));
       hasDepthBlockers = blockingReviewIssues.some(issue => /正文不足，未达到任务最小深度/u.test(issue.message));
       hasDepthWarnings = hasDepthWarningIssues(agentReview.issues);
-      needsRepair = (blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers)) || hasDepthWarnings;
+      // 复审后重算 polish 类 warning：blocker 修复轮清零后若标题对齐/工序链缺失仍存在，补一轮定向精修
+      polishWarnings = agentReview.issues.filter(issue => issue.level === 'warning' && /未匹配到独立小节标题|工序链箭头缺失/u.test(issue.message));
+      needsRepair = (blockingReviewIssues.length > 0 && (agentReview.repairable || hasWriterMissingIssues || hasDepthBlockers)) || hasDepthWarnings || (blockingReviewIssues.length === 0 && polishWarnings.length > 0 && !polishRoundDone);
       const postRepairFailed = blockingReviewIssues.length > 0;
-      agentWorkflow.nodes.push({ id: `chapter-repairer-${chapter.id}`, type: 'chapter_repairer', status: postRepairFailed ? 'failed' : 'completed', startedAt: Date.now(), completedAt: Date.now(), outputSummary: agentReview.issues.length ? `修复后仍有 ${agentReview.issues.length} 个问题` : '定向修复通过', metrics: { supportedFacts: agentReview.supportedFacts }, issues: agentReview.issues });
+      // 节点状态收口：Repairer 节点按章去重（同 id 只保留最新轮状态），Reviewer 节点同步从 running 收口为终态；
+      // 否则首轮 Review 置 running 后永不更新、每轮 Repairer 重复 push 同 id 节点，前端节点图出现"卡死 + 重复失败"假象
+      //（十四度实测：1 个 chapter_reviewer 永久 running，6 个 chapter_repairer 里 2 个 failed 且同 id 重复）
+      const repairerNodeId = `chapter-repairer-${chapter.id}`;
+      const existingRepairer = agentWorkflow.nodes.find(node => node.id === repairerNodeId);
+      if (existingRepairer) {
+        existingRepairer.status = postRepairFailed ? 'failed' : 'completed';
+        existingRepairer.completedAt = Date.now();
+        existingRepairer.outputSummary = agentReview.issues.length ? `修复后仍有 ${agentReview.issues.length} 个问题` : '定向修复通过';
+        existingRepairer.issues = agentReview.issues;
+      } else {
+        agentWorkflow.nodes.push({ id: repairerNodeId, type: 'chapter_repairer', status: postRepairFailed ? 'failed' : 'completed', startedAt: Date.now(), completedAt: Date.now(), outputSummary: agentReview.issues.length ? `修复后仍有 ${agentReview.issues.length} 个问题` : '定向修复通过', metrics: { supportedFacts: agentReview.supportedFacts }, issues: agentReview.issues });
+      }
+      const reviewerNode = agentWorkflow.nodes.find(node => node.id === `chapter-reviewer-${chapter.id}`);
+      if (reviewerNode && reviewerNode.status === 'running') {
+        reviewerNode.status = postRepairFailed ? 'failed' : 'completed';
+        reviewerNode.completedAt = Date.now();
+        reviewerNode.outputSummary = agentReview.issues.length ? `${agentReview.issues.length} 个 Reviewer 提示` : 'Reviewer 通过';
+      }
       throttleAgentWorkflowNodes(agentWorkflow);
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-reviewer-${chapter.id}`, status: postRepairFailed ? 'failed' : 'success', message: postRepairFailed ? `${displayChapterTitle(chapter.title)} Reviewer 第 ${repairRounds} 轮复审仍有 ${blockingReviewIssues.length} 个阻断问题${needsRepair && repairRounds < repairRoundBudget ? '，继续下一轮修复' : ''}` : `${displayChapterTitle(chapter.title)} Reviewer 第 ${repairRounds} 轮复审通过`, details: agentReview.issues.map(issue => issue.message) }, { subtitle: 'Agent Reviewer', order: repairerStageOrder - 1 }));
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: postRepairFailed ? 'failed' : 'success', message: agentReview.issues.length ? `${displayChapterTitle(chapter.title)} 第 ${repairRounds} 轮定向修复后仍有 ${agentReview.issues.length} 个问题` : `${displayChapterTitle(chapter.title)} 定向修复通过`, details: [...repairSectionResults, ...agentReview.issues.map(issue => `剩余：${issue.message}`)] }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
@@ -1383,9 +1469,16 @@ export async function generateDocumentDraft(input: { templateId: string; require
           appliedCount += 1;
         }
       }
-      if (appliedCount === 0) break;
+      if (appliedCount === 0) {
+        // 修复未应用任何 patch 时也必须收口 running 态：否则“表格执行率修复”stage 永久停在 running，
+        // 前端节点图出现卡死假象（十四度实测：1 个章节缺表但补表 patch 全部落空，stage 停在 running）
+        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-repair', status: 'failed', message: `表格执行率修复第 ${round + 1} 轮：补表 patch 未应用（${tableGaps.length} 个章节缺表）` }, { subtitle: '表格执行率修复' }));
+        emitProgress(chapterDraftsFinal);
+        break;
+      }
       emitProgress(chapterDraftsFinal);
       tableGaps = tablePlanExecutionGaps(effectiveChapters, chapterDraftsFinal);
+      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-repair', status: tableGaps.length > 0 ? 'failed' : 'success', message: tableGaps.length > 0 ? `表格执行率修复第 ${round + 1} 轮完成，仍有 ${tableGaps.length} 个章节缺表` : `表格执行率修复第 ${round + 1} 轮完成` }, { subtitle: '表格执行率修复' }));
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-review', status: tableGaps.length > 0 ? 'failed' : 'success', message: tableGaps.length > 0 ? `表格执行率复检：仍有 ${tableGaps.length} 个章节缺表` : '表格执行率复检通过' }, { subtitle: '表格执行率核验' }));
     }
   }
@@ -1431,6 +1524,10 @@ export async function generateDocumentDraft(input: { templateId: string; require
     scopeConflicts: canonicalFacts.scopeConflicts,
     writingTaskBrief,
     evaluationCriteriaItems: evaluationItems.map(item => item.title).filter(Boolean),
+    tenderRequirements,
+    requirementsSimilarity,
+    factTokenScopeClassifier,
+    professionalDepthClassifier,
     agentWorkflow,
     emitProgress, withProgressHeartbeat,
   });

@@ -8,6 +8,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { FileClassifier, ContentExtractor } from '@customize-agent/knowledge';
 import { buildReferenceQualityProfile, suggestProjectType, type ReferenceProjectType, type ReferenceQualityProfile } from './referenceQualityProfile';
+import { buildSemanticProfileEnrichment } from './referenceProfileSemantic';
 
 export interface TemplateReferenceRecord {
   id: string;
@@ -32,7 +33,7 @@ export interface TemplateReferenceRecord {
  * 画像计算逻辑版本。提取口径变更（层级分层/正则修复等）时必须递增，
  * 否则已入库文件的旧画像不会重算，页面会持续展示口径错误的数据。
  */
-export const PROFILE_VERSION = 2;
+export const PROFILE_VERSION = 4;
 
 function referencesRoot() {
   const dir = path.join(os.homedir(), '.customize-agent', 'template-references');
@@ -131,6 +132,29 @@ async function doRecomputeStaleProfiles(): Promise<void> {
     }
   }
   if (changed) writeIndex(records);
+  // 语义画像补充层（embedding+LLM 离线标注）后台异步构建：不阻塞 GET 列表响应，
+  // 失败静默降级保留正则层画像；语义层不参与评分公式，构建间隙读取旧语义无影响
+  for (const record of stale) {
+    const filePath = path.join(referencesRoot(), record.filePath);
+    if (record.status === 'ready' && fs.existsSync(filePath)) void enrichRecordSemantics(record, filePath);
+  }
+}
+
+/** 语义画像补充（后台异步，不阻塞上传返回）：embedding 去重 + LLM 批注 + LLM 点评，
+ * 完成后重读索引更新对应记录；失败静默降级，参考库保持正则层画像可用 */
+async function enrichRecordSemantics(record: TemplateReferenceRecord, storedPath: string): Promise<void> {
+  try {
+    const text = await extractReferenceText(storedPath);
+    const semantic = await buildSemanticProfileEnrichment(text, record.qualityProfile?.headingStructure || []);
+    if (!semantic) return;
+    const records = readIndex();
+    const target = records.find(item => item.id === record.id);
+    if (!target || !target.qualityProfile) return;
+    target.qualityProfile = { ...target.qualityProfile, semantic };
+    writeIndex(records);
+  } catch {
+    // 语义层失败静默降级，不阻塞参考库可用性
+  }
 }
 
 /**
@@ -172,6 +196,8 @@ export async function addTemplateReference(input: {
     record.status = 'ready';
     if (record.typeSource === 'auto') record.projectType = suggestProjectType(text);
     writeIndex(records);
+    // 语义画像补充（embedding+LLM 离线标注）：后台异步构建，不阻塞上传返回
+    void enrichRecordSemantics(record, storedPath);
   } catch (error) {
     record.status = 'failed';
     record.errorMessage = error instanceof Error ? error.message : '解析失败';
@@ -223,6 +249,8 @@ export function readTemplateReferenceText(id: string, maxChars = 20000): string 
  * 获取某工程类型的对标基准：同类型全部优质样本画像的加权聚合（类型画像口径）。
  * 用户上传的每份参考均视为优质样本，1 份样本同样构成基准；仅 0 份样本时无基准。
  * 返回的合成画像中 5 个对标指标（参数密度/工序链/重复率/表格/章节）取聚合均值，
+ * 五要素闭合块取同类型样本最大值——PDF 提取文本块结构失真（无空行分隔）会系统性
+ * 拉低按块统计值，0 块属无信号而非真实为 0，对标基准取人工样本可达水平（天花板）而非均值。
  * 其余结构信息取首样本（仅用于范式展示，不参与对标计算）。
  */
 export function referenceBenchmarkForType(type: ReferenceProjectType): { profile: ReferenceQualityProfile; sourceCount: number } | undefined {
@@ -250,6 +278,7 @@ export function referenceBenchmarkForType(type: ReferenceProjectType): { profile
       segmentCount: Math.round(average(profiles.map(item => item.segmentCount || 0))),
       arrowChainSegmentCount: Math.round(average(profiles.map(item => item.arrowChainSegmentCount || 0))),
       duplicatedSegmentCount: Math.round(average(profiles.map(item => item.duplicatedSegmentCount || 0))),
+      fiveElementCompleteBlocks: Math.max(0, ...profiles.map(item => item.fiveElementCompleteBlocks || 0)),
     },
     sourceCount: ready.length,
   };
@@ -418,7 +447,10 @@ export function referenceQualityTargetLines(input: { templateName: string; chapt
   const tablesPerSection = aggregated.sectionCount.avg > 0 ? aggregated.tableCount.avg / aggregated.sectionCount.avg : 0;
   const avgSectionWords = aggregated.avgSectionWords.avg;
   lines.push(`- 工艺参数密度参考：约 ${(paramDensity * scale).toFixed(1)} 个/千字（同类工程画像均值 ${paramDensity.toFixed(1)}，已按本项目篇幅折减）；参数应来自已确认事实与专业知识，不得编造。`);
-  lines.push(`- 工序链覆盖率参考：含"→"工序链的段落占比约 ${Math.round(arrowChain * 100)}%；施工与流程小节宜用工序链串联工艺步骤。`);
+  // 工序链覆盖率参考与对标评分同口径取 8% 下限：参考样本多为扫描/简版文件该特征偏弱，
+  // 直接注入真实均值会把生成侧软目标拉到门禁线以下（十度实测：真实样本均值 1.4%，生成侧门禁要求 8%）
+  const arrowChainFloor = Math.max(arrowChain, 0.08);
+  lines.push(`- 工序链覆盖率参考：含“→”工序链的段落占比不低于 ${Math.round(arrowChainFloor * 100)}%（同类工程画像均值 ${Math.round(arrowChain * 100)}%，已按生成侧门禁取下限）；施工与流程小节宜用工序链串联工艺步骤。`);
   lines.push(`- 表格参考：同类工程平均每章约 ${tablesPerSection.toFixed(1)} 张正式表格（在事实允许的前提下合理配置）。`);
   lines.push(`- 章节体量参考：同类工程平均约 ${Math.round(aggregated.sectionCount.avg)} 章、平均每章约 ${avgSectionWords} 字；实际以模板章节与篇幅目标为准。`);
   if (frequentHeadings.length > 0) {

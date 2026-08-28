@@ -269,7 +269,7 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
   const issues: ValidationIssue[] = [];
   const content = input.draft.content || '';
   for (const phrase of FORMAL_FORBIDDEN_PHRASES) {
-    if (content.includes(phrase)) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `${input.draft.title} 正文包含禁止话术：${phrase}`, suggestion: phrase === '工作包' ? '这是生成系统后台概念，必须结合上下文语义改写为正式术语（如“拆除工程工作包”→“拆除工程”、“按工作包逐项说明”→“按专业工程逐项说明”），不得做词面替换。' : '改为事实支撑的正式表达；缺失事实不得占位。' });
+    if (content.includes(phrase)) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `${input.draft.title} 正文包含禁止话术：${phrase}`, suggestion: phrase === '工作包' ? '这是生成系统后台概念，正文中不得出现该词：结合上下文语义改写为正式术语（如“拆除工程”“按专业工程逐项说明”），不得做词面替换。' : '改为事实支撑的正式表达；缺失事实不得占位。' });
   }
   // P0-2：LLM 全故障时的证据骨架草稿必须被 Review 门禁拦截，不允许以模板拼接正文静默通过
   if (content.includes('[EVIDENCE_SKELETON]')) issues.push({ level: 'error', severity: 'blocker', category: 'evidence_coverage', owner: 'system', message: `${input.draft.title} 正文为 LLM 全故障后的证据骨架草稿，禁止作为正式正文通过`, suggestion: '必须由 Repairer 基于小节事实卡与证据完整重写为正式正文，并删除 [EVIDENCE_SKELETON] 标记；若 LLM 仍不可用，本章节保持 failed 阻断。' });
@@ -301,13 +301,28 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
     anchorDepthCheck.set(anchor, previous === undefined ? section.minChars : Math.max(previous, section.minChars));
   }
   for (const section of input.task.sections) {
-    const anchor = sectionAnchor(section.title);
+    // 1:N 拆分聚合：细目可被规划为多个 H4 要点（plannedCoverage 多锚点），深度由所有承接要点共同承担；
+    // 只取首个锚点会用细目级 minChars 压单个 H4 要点（如“项目特点、重点、难点分析”1800 字 vs 单要点 400 字），
+    // 关键小节被误报“正文不足”、修复轮次空转（十四度实测：补写 2087 字落位后复审仍被驳回）
+    const plannedAnchors = plannedCoverage?.[section.title];
+    const anchorList = plannedAnchors && plannedAnchors.length > 0 ? plannedAnchors : [section.title];
+    const anchor = anchorList[0];
     const merged = mergedSection(section.title);
-    // 锚点回退：plannedCoverage 锚点（规划重写 H4 标题）与块成稿实际 H4 标题可能不一致（块级降级/成稿标题偏差），
+    // 锚点聚合提取：各承接要点正文拼接（extractSection 返回最长匹配区间，同名小节只计一次）；
     // 锚点提取为空时回退按细目原始标题提取——与 Repairer 落位口径（原始标题 + comparable 包含匹配）对齐，
     // 否则补写已落位但 Reviewer 永远按失效锚点报“正文不足”，修复轮次空转（真实生成缺陷：3 轮修复后仍 2 个阻断问题）
-    let body = extractSection(content, anchor, { fuzzy: true });
-    if (!body && anchor !== section.title) body = extractSection(content, section.title, { fuzzy: true });
+    const extractedBodies = new Set<string>();
+    let body = '';
+    for (const anchorTitle of anchorList) {
+      const part = extractSection(content, anchorTitle, { fuzzy: true });
+      if (part && !extractedBodies.has(part)) { extractedBodies.add(part); body += (body ? '\n' : '') + part; }
+    }
+    if (anchor !== section.title) {
+      // 细目整节复查：模板显式小节场景正文承载于 H4 子节（如“### 1.4 项目特点、重点、难点分析”下 1.4.1~1.4.3），
+      // 单 H4 要点短正文不代表细目深度不足，与锚点聚合正文取更长者作为深度口径，避免误报 blocker 反复补写
+      const whole = extractSection(content, section.title, { fuzzy: true });
+      if (whole && !extractedBodies.has(whole) && documentTextLength(whole) > documentTextLength(body)) body = whole;
+    }
     if (body.includes('[WRITER_MISSING_SECTION]') || (!body && content.includes('[WRITER_MISSING_SECTION]'))) {
       // 同一承接小节被多条细目共享时只报一次（merged 组内重复修复指令会浪费 Repairer 轮次）
       if (!anchorDepthChecked.has(anchor)) {

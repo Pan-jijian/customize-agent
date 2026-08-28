@@ -1,4 +1,5 @@
 import type { ChapterCoverageReport, DocumentFactTrace, DocumentKnowledgeCoverageReport, DocumentQualityReport, RepairStrategy, ValidationIssue } from './types';
+import { isActionableTraceFact } from './documentFactTrace';
 
 export function buildRepairStrategies(input: { issues: ValidationIssue[]; qualityReport?: DocumentQualityReport; knowledgeCoverage?: DocumentKnowledgeCoverageReport; factTraces?: DocumentFactTrace[]; chapterCoverage?: ChapterCoverageReport[] }): RepairStrategy[] {
   const strategies: RepairStrategy[] = [];
@@ -6,7 +7,9 @@ export function buildRepairStrategies(input: { issues: ValidationIssue[]; qualit
   if (blocking.length > 0) {
     strategies.push({ priority: 'high', title: '阻断问题修复', action: `修复 ${blocking.length} 个导出阻断问题，优先处理事实冲突、结构缺失、模板规则违规和占位残留。` });
   }
-  const allUnplacedFacts = (input.factTraces || []).filter(trace => trace.status === 'unplaced');
+  // 未落位事实统计必须按可执行口径过滤：技术参数/精确参数池（清单编码、孤立尺寸）是提示词注入池而非逐条落位义务，
+  // 不过滤会把 94 项技术参数算进“未落位事实”（十度实测：98 项告警中 94 项是参数池噪音，真实硬缺陷仅 2 条）
+  const allUnplacedFacts = (input.factTraces || []).filter(trace => trace.status === 'unplaced' && isActionableTraceFact(trace));
   if (allUnplacedFacts.length > 0) {
     const summary = allUnplacedFacts.length > 12
       ? `${allUnplacedFacts.length} 项（示例：${allUnplacedFacts.slice(0, 8).map(t => t.label).join('、')} 等）`

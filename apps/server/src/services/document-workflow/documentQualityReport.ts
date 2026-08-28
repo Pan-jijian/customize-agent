@@ -16,6 +16,8 @@ export function buildDocumentQualityReport(input: {
   knowledgeCoverage: DocumentKnowledgeCoverageReport;
   factTraces: DocumentFactTrace[];
   template?: DocumentTemplate | null;
+  /** 参考库同类工程完整五要素块均值（可选）：提供时作为可落地性评分的目标基准 */
+  referenceCompleteBlocks?: number;
 }): DocumentQualityReport {
   const scores = buildTenderBidScores({
     markdown: input.markdown,
@@ -23,6 +25,7 @@ export function buildDocumentQualityReport(input: {
     template: input.template,
     factTraces: input.factTraces,
     issues: input.issues,
+    referenceCompleteBlocks: input.referenceCompleteBlocks,
   });
   const weighted = scores.completeness * 0.30 + scores.specificity * 0.25 + scores.compliance * 0.20
     + scores.executability * 0.15 + scores.normalization * 0.10;

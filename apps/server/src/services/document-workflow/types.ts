@@ -392,6 +392,48 @@ export interface DocumentFactsModel {
   missing: string[];
   conflicts: string[];
   canonical?: CanonicalFactModel;
+  /** 招标文件文本性评分项要求（创优目标/绿色等级/特殊质量标准/体系基准等），LLM 结构化提取产物 */
+  tenderRequirements?: TenderRequirementModel;
+}
+
+/** 单项评分项要求：text 为要求原文，coreTerms 为可用于正文命中检测的核心词（由 LLM 提取时给出，避免下游正则猜词） */
+export interface TenderRequirementItem {
+  text: string;
+  coreTerms: string[];
+  source?: string;
+}
+
+/**
+ * 招标文件“要求与标准”结构化模型：从全量绑定资料 LLM 结构化提取的文本性评分项要求。
+ * 数字事实由 factsModel 承担；本模型承载无数字形态的实质要求（创优目标、等级、体系基准、禁编条款），
+ * 下游两个出口：① 注入章节写作规则（生成时显性响应）；② 生成后零响应检测（校验器锚点）。
+ * 历史缺陷：黄山杯零响应（否决级）——纯文本要求无结构化字段可存，生成链路零感知。
+ */
+export interface TenderRequirementModel {
+  /** 创优目标（如“确保黄山杯”） */
+  awardObjectives: TenderRequirementItem[];
+  /** 特殊质量标准（如“确保获得黄山杯，支付 300 万元”） */
+  specialQualityStandards: TenderRequirementItem[];
+  /** 奖项条款（与创优目标关联的奖励/支付条款） */
+  awardClauses: TenderRequirementItem[];
+  /** 绿色建筑等级（如“国标二星级”） */
+  greenBuildingGrade?: TenderRequirementItem;
+  /** 智慧工地等级（如“基本级”） */
+  smartSiteGrade?: TenderRequirementItem;
+  /** 装配率要求 */
+  assemblyRate?: TenderRequirementItem;
+  /** 体系基准要求（如“扬尘治理六个百分百”，要求逐项覆盖） */
+  systematicBenchmarks: TenderRequirementItem[];
+  /** 禁编日期条款（如“以开工令时间为准”→ 正文不得自设具体开工日期） */
+  dateFabricationProhibited: boolean;
+  /** 其他禁止性/约束性要求原文 */
+  prohibitionNotes: TenderRequirementItem[];
+  /** 篇幅限制建议（如“不超过 50 页”） */
+  pageLimit?: TenderRequirementItem;
+  /** 提取是否实际执行（LLM 不可用/资料为空时为 false，下游不得据此阻断） */
+  extracted: boolean;
+  /** 提取源文本哈希（判定可复现溯源用） */
+  sourceHash?: string;
 }
 
 export interface ValidationIssue {

@@ -145,13 +145,16 @@ export function constructionOrgBonusModulePrompt(chapter: DocumentTemplateChapte
 
 function extractMajorConstructionSection(content: string) {
   const lines = content.split('\n');
-  let start = lines.findIndex(line => /^###\s+(?:\d+(?:\.\d+)*\s+)?(?:项目主要施工内容|主要施工内容)\s*$/u.test(line.trim()));
+  // 容忍标题内空格（十度实测：“项目主要施工 内容”带空格导致精确匹配落空误报缺失）；
+  // 接受 H4 层级（十一度实测：正文产出“### 1.3 施工内容与现场条件保障 / #### 1.3.1 项目主要施工内容”，
+  // 小节位于 H4 时仍应校验其内部专业工程块，标题块由 validateContent 剥离）
+  let start = lines.findIndex(line => /^#{3,4}\s+(?:\d+(?:\.\d+)*\s+)?(?:项目主要施工\s*内容|主要施工\s*内容)\s*$/u.test(line.trim()));
   if (start < 0) {
     // 锚点标题被合并重写（真实生成缺陷：planner 输出“工程概况与主要施工内容”主题块，工作包缺失时
     // 精确匹配落空误报缺失）：仅当合并块内所有 #### 子块均为三段式工作包（施工概况+施工流程+施工方法）
     // 且不少于 5 个时才认定为有效的主要施工内容；否则维持“小节缺失”语义，交由 Final Gate 追加
     // “### 项目主要施工内容”修复，避免把概况型子块误当工作包校验产生不可修复的硬阻断
-    const mergedStart = lines.findIndex(line => /^###\s+(?:\d+(?:\.\d+)*\s+)?[^\n]*主要施工内容[^\n]*$/u.test(line.trim()));
+    const mergedStart = lines.findIndex(line => /^###\s+(?:\d+(?:\.\d+)*\s+)?[^\n]*主要施工\s*内容[^\n]*$/u.test(line.trim()));
     if (mergedStart >= 0) {
       let mergedEnd = lines.length;
       for (let index = mergedStart + 1; index < lines.length; index += 1) {
@@ -186,9 +189,11 @@ export function constructionOrgMajorContentIssues(chapters: DocumentDraftChapter
   const shouldRequireMajorContent = /施工组织设计|施工组织|计划工期|质量标准|项目经理|工程概况/u.test(wholeText) && /施工/u.test(wholeText);
 
   const validateContent = (label: string, content: string) => {
-    const packageCount = (content.match(/^####\s+(?:\d+(?:\.\d+)*\s+)?[一二三四五六七八九十\d]*[、.．]?\s*\S+/gmu) || []).length
-      || (content.match(/^[一二三四五六七八九十]+、\S+/gmu) || []).length;
-    const packageBlocks = content.split(/^####\s+/gmu).slice(1).map(block => block.trim()).filter(Boolean);
+    // H4 层级小节（#### 1.3.1 项目主要施工内容）：先剥离小节标题行再计数，避免小节标题块被当作缺三段式的专业工程块误报
+    const clean = content.replace(/^####\s+(?:\d+(?:\.\d+)*\s+)?(?:项目主要施工\s*内容|主要施工\s*内容)\s*\n+/mu, '');
+    const packageCount = (clean.match(/^####\s+(?:\d+(?:\.\d+)*\s+)?[一二三四五六七八九十\d]*[、.．]?\s*\S+/gmu) || []).length
+      || (clean.match(/^[一二三四五六七八九十]+、\S+/gmu) || []).length;
+    const packageBlocks = clean.split(/^####\s+/gmu).slice(1).map(block => block.trim()).filter(Boolean);
     const incompletePackages = packageBlocks.filter(block => !block.includes('施工概况') || !block.includes('施工流程') || !block.includes('施工方法'));
     const dirtyPackages = packageBlocks.filter(block => /资料内容事实|#{2,6}\s+|\*\*[^*]+\*\*|未尽事宜|专业施工内容统筹|招标范围还包含|具备有效的.*资质/u.test(block));
     const weakMethodPackages = packageBlocks.filter(block => {
@@ -199,21 +204,26 @@ export function constructionOrgMajorContentIssues(chapters: DocumentDraftChapter
       const process = block.match(/施工流程[:：]([\s\S]*?)(?=\n施工方法|$)/u)?.[1] || '';
       return /未尽事宜|本项目为|总建筑面积|保留现状|专业施工内容统筹|招标文件列明|招标范围/u.test(process);
     });
-    if (packageCount < 5) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容工作包不足：当前 ${packageCount} 个，要求不少于 5 个`, suggestion: '按资料识别专业工程/分部分项工作包，逐项写施工概况、施工流程、施工方法。' });
-    if (incompletePackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在 ${incompletePackages.length} 个工作包缺少施工概况/施工流程/施工方法`, suggestion: '每个工作包必须分别包含“施工概况、施工流程、施工方法”，不能只在整节中出现一次。' });
+    // 重复专业工程检测（十一度实测缺陷：1.3.2~1.3.11 与 1.3.12~1.3.21 两套同名专业工程重复出现，标题仅差“工程”尾缀）：
+    // 标题去编号、去“工程”尾缀归一化后重复的块判定为冗余小节，必须合并去重
+    const normalizedTitles = packageBlocks.map(block => (block.split('\n')[0] || '').replace(/^\d+(?:\.\d+)*\s+/u, '').replace(/工程$/u, '').replace(/[、.．]/gu, '').trim());
+    const duplicateTitles = [...new Set(normalizedTitles.filter((title, index) => title && normalizedTitles.indexOf(title) !== index))];
+    if (duplicateTitles.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在 ${duplicateTitles.length} 组重复专业工程小节：${duplicateTitles.slice(0, 5).join('、')}`, suggestion: '同一专业工程只保留一个小节，将重复小节的独有内容合并后删除冗余小节，避免专业工程重复铺陈。' });
+    if (packageCount < 5) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容专业工程不足：当前 ${packageCount} 个，要求不少于 5 个`, suggestion: '按资料识别专业工程/分部分项工程，逐项写施工概况、施工流程、施工方法。' });
+    if (incompletePackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在 ${incompletePackages.length} 个专业工程缺少施工概况/施工流程/施工方法`, suggestion: '每个专业工程必须分别包含“施工概况、施工流程、施工方法”，不能只在整节中出现一次。' });
     if (dirtyPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在脏事实或标题污染`, suggestion: '清理“资料内容事实”、嵌入的 ### 标题、粗体伪标题、未尽事宜、招标范围罗列等污染内容，只保留可交付正文。' });
-    if (weakMethodPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在 ${weakMethodPackages.length} 个工作包施工方法过弱`, suggestion: '施工方法不能只是工作包名称或专业范围罗列，必须写资料已确认的工程量、材料、检测、调试、验收或记录要求。' });
-    if (dirtyProcessPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在 ${dirtyProcessPackages.length} 个工作包流程污染`, suggestion: '施工流程只能写工序链条，不能混入项目概况、总建筑面积、招标范围、未尽事宜等说明性事实。' });
+    if (weakMethodPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在 ${weakMethodPackages.length} 个专业工程施工方法过弱`, suggestion: '施工方法不能只是专业工程名称或专业范围罗列，必须写资料已确认的工程量、材料、检测、调试、验收或记录要求。' });
+    if (dirtyProcessPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在 ${dirtyProcessPackages.length} 个专业工程流程污染`, suggestion: '施工流程只能写工序链条，不能混入项目概况、总建筑面积、招标范围、未尽事宜等说明性事实。' });
     if (!/→|->/u.test(content)) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容缺少箭头式施工流程`, suggestion: '施工流程应写成“测量放线→基层处理→工序实施→检查验收→资料归档”等链条。' });
     const parameterCount = (content.match(/\d+(?:\.\d+)?\s*(?:㎡|m²|mm|cm|m|MPa|kPa|%|日历天|层|台|套|个|项|批|次|小时|年)/giu) || []).length;
     const factDetailCount = (content.match(/工程量|材料|设备|范围|流程|验收|检测|复试|调试|隐蔽|检验批|资料|记录|系统|部位|接口|规格|标准/gu) || []).length;
     if (parameterCount < 2 || factDetailCount < 12) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容事实细度不足：参数 ${parameterCount} 项、事实细节 ${factDetailCount} 项`, suggestion: '主要施工内容必须落到资料已确认的范围、工程量/材料、流程、验收和记录要求；资料未明确的工具、型号、参数不得编造。' });
-    if (/^\s*\|.+\|\s*$/mu.test(content)) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容不应使用 Markdown 表格替代工作包正文`, suggestion: '主要施工内容应采用三级小节和段落式工作包写法，不使用表格承载主体内容。' });
+    if (/^\s*\|.+\|\s*$/mu.test(content)) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容不应使用 Markdown 表格替代专业工程正文`, suggestion: '主要施工内容应采用三级小节和段落式专业工程写法，不使用表格承载主体内容。' });
   };
 
   if (candidateChapters.length === 0 && shouldRequireMajorContent) {
     const content = extractMajorConstructionSection(wholeText);
-    if (!content) return [{ level: 'error', severity: 'blocker', message: '施工组织设计缺少“项目主要施工内容”小节', suggestion: '必须生成“### 项目主要施工内容”，并在该小节内部使用“#### 工作包名称”逐项展开。' }];
+    if (!content) return [{ level: 'error', severity: 'blocker', message: '施工组织设计缺少“项目主要施工内容”小节', suggestion: '必须生成“### 项目主要施工内容”，并在该小节内部使用“#### 专业工程名称”逐项展开。' }];
     validateContent('全文', content);
     return issues;
   }
@@ -221,7 +231,7 @@ export function constructionOrgMajorContentIssues(chapters: DocumentDraftChapter
   for (const chapter of candidateChapters) {
     const content = extractMajorConstructionSection(chapter.content) || extractMajorConstructionSection(wholeText);
     if (!content) {
-      issues.push({ level: 'error', severity: 'blocker', message: `${chapter.title} 主要施工内容小节缺失或标题结构异常`, suggestion: '必须生成“### 项目主要施工内容”，并在该小节内部使用“#### 工作包名称”逐项展开。' });
+      issues.push({ level: 'error', severity: 'blocker', message: `${chapter.title} 主要施工内容小节缺失或标题结构异常`, suggestion: '必须生成“### 项目主要施工内容”，并在该小节内部使用“#### 专业工程名称”逐项展开。' });
       continue;
     }
     validateContent(chapter.title, content);

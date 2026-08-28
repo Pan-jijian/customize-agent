@@ -3,6 +3,7 @@ import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, Validation
 import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { stringifyFactValue } from './utils';
 import { generatedFactVerificationIssues, professionalScoreIssues } from './qualityValidation';
+import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
 
 function normalizedFactValue(fact: DocumentFact) {
   return normalizeEngineeringTextForFactMatch(`${fact.fieldName || fact.key} ${stringifyFactValue(fact.value)}`);
@@ -44,43 +45,62 @@ export function evidenceUsageCoverageIssues(markdown: string, factsModel: Docume
   return issues;
 }
 
-export function paragraphGenericIssues(markdown: string): ValidationIssue[] {
+export async function paragraphGenericIssues(markdown: string, classifier?: ProfessionalDepthClassifier): Promise<ValidationIssue[]> {
   const paragraphs = markdown.split(/\n\s*\n/gu).map(item => item.trim()).filter(Boolean);
   const genericPattern = /(?:加强组织领导|严格执行规范|落实责任制度|确保工程质量|强化过程管理|提高思想认识|完善管理体系|形成闭环管理|统筹推进|全面落实)/gu;
   const issues: ValidationIssue[] = [];
   for (const paragraph of paragraphs) {
     if (documentTextLength(paragraph) < 120) continue;
     const genericMatches = paragraph.match(genericPattern) || [];
-    const concreteMatches = paragraph.match(/材料|工序|验收|复验|节点|风险|交底|隐蔽|检验批|进场|责任人|台账|工期|质量|安全|资源/u) || [];
-    if (genericMatches.length >= 2 && concreteMatches.length < 2) {
+    if (genericMatches.length < 2) continue;
+    // 语义路径（round-14）：是否绑定具体对象/控制点/闭环由 bge 嵌入判定；语义模型不可用时静默跳过（零误伤）
+    if (!classifier) continue;
+    const analysis = await classifier.analyze(paragraph);
+    // 嵌入失败/空段落返回 undefined：判定不了就不判（零误伤），不得用全 false 替身报空泛
+    if (!analysis) continue;
+    if (!analysis.concrete) {
       issues.push({ level: 'warning', message: `段落存在空泛表述：${paragraph.slice(0, 48)}...`, suggestion: '请补充该段对应的对象、动作、控制点或验收闭环，避免只保留管理性套话。' });
     }
   }
   return issues;
 }
 
-export function chapterDependencyIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>): ValidationIssue[] {
+export function chapterDependencyIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  const chapterMap = new Map(chapters.map(chapter => [chapter.title, chapter.content]));
+  // 语义模型不可用时静默跳过（零误伤）：章节依赖支撑关系必须由 bge 嵌入判定
+  if (!analyses) return issues;
   const chapterText = chapters.map(chapter => `${chapter.title}\n${chapter.content}`).join('\n\n');
-  if (/进度|工期/u.test(chapterText) && /资源|材料|设备|劳动力/u.test(chapterText) && !/保障|投入|调配|进场|计划/u.test(chapterMap.get(chapters.find(chapter => /资源|材料|设备|劳动力/u.test(chapter.title))?.title || '') || '')) {
-    issues.push({ level: 'warning', message: '章节逻辑依赖不足：进度章节与资源章节之间缺少明显支撑关系', suggestion: '请在资源章节补充与工期目标相匹配的劳动力、材料、设备投入和调配计划。' });
+  // 进度↔资源支撑：语义路径由 bge 嵌入判定资源章节是否覆盖投入调配计划
+  if (/进度|工期/u.test(chapterText) && /资源|材料|设备|劳动力/u.test(chapterText)) {
+    const resourceChapter = chapters.find(chapter => /资源|材料|设备|劳动力/u.test(chapter.title));
+    const analysis = resourceChapter ? analyses.get(resourceChapter.title) : undefined;
+    if (!analysis?.contentNeeds.resource) {
+      issues.push({ level: 'warning', message: '章节逻辑依赖不足：进度章节与资源章节之间缺少明显支撑关系', suggestion: '请在资源章节补充与工期目标相匹配的劳动力、材料、设备投入和调配计划。' });
+    }
   }
-  if (/质量/u.test(chapterText) && /施工|工艺|技术/u.test(chapterText) && !/验收|复验|控制点|交底|隐蔽/u.test(chapterText)) {
-    issues.push({ level: 'warning', message: '章节逻辑依赖不足：质量章节未明显支撑施工工艺控制', suggestion: '请在施工技术和质量章节之间补齐工艺控制点、验收要求和整改复验闭环。' });
+  // 质量↔工艺支撑：语义路径由 bge 嵌入判定质量/施工章节是否覆盖工艺控制与验收衔接
+  if (/质量/u.test(chapterText) && /施工|工艺|技术/u.test(chapterText)) {
+    const supported = chapters.some(chapter => analyses.get(chapter.title)?.contentNeeds.quality || analyses.get(chapter.title)?.contentNeeds.construction);
+    if (!supported) {
+      issues.push({ level: 'warning', message: '章节逻辑依赖不足：质量章节未明显支撑施工工艺控制', suggestion: '请在施工技术和质量章节之间补齐工艺控制点、验收要求和整改复验闭环。' });
+    }
   }
-  if (/安全|文明|风险/u.test(chapterText) && !/应急|检查|整改|巡查|培训|演练/u.test(chapterText)) {
-    issues.push({ level: 'warning', message: '章节逻辑依赖不足：安全章节缺少检查整改和应急支撑', suggestion: '请补齐风险识别、检查整改、应急响应和演练闭环。' });
+  // 安全↔应急支撑：语义路径由 bge 嵌入判定安全章节是否覆盖检查整改与应急闭环
+  if (/安全|文明|风险/u.test(chapterText)) {
+    const supported = chapters.some(chapter => analyses.get(chapter.title)?.contentNeeds.safety);
+    if (!supported) {
+      issues.push({ level: 'warning', message: '章节逻辑依赖不足：安全章节缺少检查整改和应急支撑', suggestion: '请补齐风险识别、检查整改、应急响应和演练闭环。' });
+    }
   }
   return issues;
 }
 
-export function documentDeliveryScoreIssues(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, factsModel: DocumentFactsModel): ValidationIssue[] {
+export function documentDeliveryScoreIssues(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, factsModel: DocumentFactsModel, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const scoreParts = {
     factuality: generatedFactVerificationIssues(markdown, factsModel).some(issue => issue.level === 'error') ? 0 : 2,
     structure: chapters.length > 0 && chapters.every(chapter => markdown.includes(chapter.title) && documentTextLength(chapter.content) >= 600) ? 2 : 1,
-    depth: professionalScoreIssues(chapters).length === 0 ? 2 : 1,
-    executable: chapterDependencyIssues(chapters).length === 0 ? 2 : 1,
+    depth: professionalScoreIssues(chapters, analyses).length === 0 ? 2 : 1,
+    executable: chapterDependencyIssues(chapters, analyses).length === 0 ? 2 : 1,
     evidence: evidenceUsageCoverageIssues(markdown, factsModel).length === 0 ? 2 : 1,
   };
   const total = scoreParts.factuality + scoreParts.structure + scoreParts.depth + scoreParts.executable + scoreParts.evidence;
