@@ -801,14 +801,34 @@ function ensureWorkPackageOverviewLabels(content: string) {
   return result.join('\n');
 }
 
+/** 工作包三段式标签归一化：LLM 补写稿常输出畸形标签形态——“施工概况：**施工概况**：”重复标签、
+ * “**施工流程**：/**施工方法**：”粗体伪标签——粗体命中分部分项验收器脏事实正则、方法段提取正则
+ * 拿不到冒号后内容（九度实测缺陷：10 个分项被报脏事实+缺箭头链 blocker）。归一为纯文本标签形态。 */
+export function normalizeWorkPackageLabels(markdown: string): string {
+  let normalized = markdown;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = normalized
+      // 重复标签形态先于粗体形态处理，避免“施工概况：**施工概况**：”被粗体替换残留前缀
+      .replace(/^\s*施工概况[:：]\s*\*\*施工概况\*\*[:：]/gmu, '施工概况：')
+      .replace(/^\s*施工流程[:：]\s*\*\*施工流程\*\*[:：]/gmu, '施工流程：')
+      .replace(/^\s*施工方法[:：]\s*\*\*施工方法\*\*[:：]/gmu, '施工方法：')
+      .replace(/^\s*\*\*施工概况\*\*[:：]/gmu, '施工概况：')
+      .replace(/^\s*\*\*施工流程\*\*[:：]/gmu, '施工流程：')
+      .replace(/^\s*\*\*施工方法\*\*[:：]/gmu, '施工方法：');
+    if (next === normalized) break;
+    normalized = next;
+  }
+  return normalized;
+}
+
 export function finalizeChapterContentQuality(content: string, chapter: Pick<DocumentTemplateChapter, 'title' | 'sections'>) {
-  return ensureWorkPackageOverviewLabels(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(removeAdjacentDuplicateHeadings(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(splitLongParagraphs(stripForbiddenPlaceholderSentences(replaceForbiddenFormalPhrases(repairTableOnlySections(repairPlannedSectionBodies(content, chapter)))))))))))).replace(/\n{3,}/gu, '\n\n').trim();
+  return ensureWorkPackageOverviewLabels(normalizeWorkPackageLabels(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(removeAdjacentDuplicateHeadings(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(splitLongParagraphs(stripForbiddenPlaceholderSentences(replaceForbiddenFormalPhrases(repairTableOnlySections(repairPlannedSectionBodies(content, chapter))))))))))))).replace(/\n{3,}/gu, '\n\n').trim();
 }
 
 /** 最终组装路径的重复/空壳兜底清理：rebuildFinalMarkdown 不再逐章跑 finalizeChapterContentQuality，
  * 补跑同 H3 重复 H4 去重与空壳小节删除，避免 Final Gate 补写与章节拼接残留的重复/空壳进入成品文档。 */
 export function finalizeFinalMarkdownStructure(markdown: string): string {
-  return removeEmptySubSectionHeadings(dedupeRepeatedSubsections(markdown));
+  return removeEmptySubSectionHeadings(dedupeRepeatedSubsections(normalizeWorkPackageLabels(markdown)));
 }
 
 export function promptMatchesChapter(prompt: ResolvedPromptContent, _chapter: DocumentTemplateChapter) {

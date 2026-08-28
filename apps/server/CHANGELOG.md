@@ -1,5 +1,17 @@
 # server
 
+## 4.8.4
+
+### Patch Changes
+
+- 九度实测失败根因修复：分部分项补写稿畸形标签归一化、comparable 定位短串误命中防护、工序链检查回退流程段、工艺参数口径补全。
+
+  九度实测（4.8.3 验收）暴露 5 个 blocker 的三组根因：
+
+  1. 畸形标签：三段式标签要求生效后 LLM 输出"施工概况：**施工概况**："重复标签与"**施工流程**：/**施工方法**："粗体伪标签——粗体命中脏事实正则、方法段提取正则拿不到冒号后内容。修复：normalizeWorkPackageLabels 归一化（挂 finalizeChapterContentQuality 与 finalizeFinalMarkdownStructure）+ 补写 prompt 禁止粗体/重复标签形态、给出小分项参数类型示例。
+  2. comparable 定位短串误命中："主要施工方法"与"施工方法"归一化同为"方法"、comparableTitle.includes('流程') 命中"#### 施工流程"块——criticalSectionDepthIssues 报"主要施工方法 360 字""危大 79 字"误导性 blocker，且 replaceMarkdownSection 反向包含把 4600 字补写稿替换进 H4 块并剥离标题丢失。修复：comparableSectionHeadingMatches 空串/短串（<4 字）排除，extractSectionFuzzy/replaceMarkdownSection/Repairer 替换三处同口径收敛，删除反向包含。
+  3. 工序链检查口径错配：施工组织设计规范中工序链写在工艺流程是标准写法，验收器强制方法段含链导致 3 轮补写不收敛。修复：链检查方法段优先、流程段回退，提取正则容忍粗体标签形态；paramRe 补 N/颗/樘/扇 单位（门窗维修类参数不误报）。
+
 ## 4.8.3
 
 ### Patch Changes

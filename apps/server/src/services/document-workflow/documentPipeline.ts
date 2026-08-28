@@ -25,7 +25,7 @@ import { buildDocumentTelemetryReport } from './documentTelemetry';
 import { retrievalCoverageIssues } from './documentEvidenceRetrieval';
 import { extractFacts, extractFactsWithLlm, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, shouldRunLlmFactExtraction } from './factsModel';
 import { applyScopeConflictResolutions, buildCanonicalFacts, detectNumericScopeConflicts } from './factGovernance';
-import { comparableSectionTitleText, extractSection, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
+import { comparableSectionHeadingMatches, extractSection, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
 import { formalTextGateIssues } from './agentWorkflow';
 import { displayStage, upsertProgressStage } from './progress';
 import { buildLlmSectionContent, buildValidationIssues, criticalSectionBlockerMinChars } from './chapterGeneration';
@@ -87,11 +87,7 @@ export function replaceMarkdownSection(content: string, sectionTitle: string, se
   // 在成稿中常被改写为“项目重点难点分析”等标题，字面不匹配导致修复器“未定位到原小节块”修复失效；
   // 可比标题归一化后按包含关系定位。聚合主题块（H3 下紧跟 H4 子小节）不可被单小节替换，跳过，
   // 只替换叶子级小节，避免整块内容被补写稿吞并（真实生成缺陷：深度不足修复替换整章主题块破坏结构）
-  const comparableMatches = (headingTitle: string) => {
-    const comparableHeading = comparableSectionTitleText(headingTitle);
-    const comparableTitle = comparableSectionTitleText(sectionTitle);
-    return comparableHeading === comparableTitle || comparableHeading.includes(comparableTitle) || comparableTitle.includes(comparableHeading);
-  };
+  const comparableMatches = (headingTitle: string) => comparableSectionHeadingMatches(headingTitle, sectionTitle);
   const isAggregateThemeBlock = (index: number) => {
     const heading = /^(#{3,4})\s+(.+)$/u.exec(lines[index].trim());
     if (!heading || heading[1].length !== 3) return false;
@@ -112,7 +108,9 @@ export function replaceMarkdownSection(content: string, sectionTitle: string, se
     const heading = /^(#{3,4})\s+(.+)$/u.exec(line.trim());
     if (!heading) continue;
     const headingTitle = normalizeHeadingTitle(heading[2]);
-    const exactMatch = headingTitle === sectionTitle || headingTitle.includes(sectionTitle) || sectionTitle.includes(headingTitle);
+    // 反向包含（sectionTitle.includes(headingTitle)）不做：“主要施工方法”.includes(“施工方法”)会把
+    // “#### 施工方法”H4 块误当目标小节，4600 字补写稿被替换进错误位置且标题被剥离后丢失（九度实测缺陷）
+    const exactMatch = headingTitle === sectionTitle || headingTitle.includes(sectionTitle);
     if (!exactMatch && !comparableMatches(headingTitle)) continue;
     if (!exactMatch && comparableMatches(headingTitle) && isAggregateThemeBlock(index)) continue;
     const headingLevel = heading[1].length;
@@ -137,7 +135,7 @@ export function replaceMarkdownSection(content: string, sectionTitle: string, se
 /** Final Gate 补写 qualityFeedback：工作包型小节注入三段式标签硬性要求（八度实测缺陷：补写稿无标签被专项验收器阻断） */
 export function buildFinalGateRepairQualityFeedback(sectionTitle: string, lastFailure?: string): string {
   const workPackageQualityFeedback = WORK_PACKAGE_SECTION_RE.test(sectionTitle)
-    ? `该小节按专业工程/分项工程方案组织，每个 #### 分项方案必须按“施工概况（作业对象、部位、工程量）”“施工流程（“→”箭头串联工序链）”“施工方法（工具机具、材料规格、工艺参数、验收标准）”三段展开，“施工概况”“施工流程”“施工方法”三个标签必须在每个分项方案正文中逐字出现；每个分项方案至少 4 个带单位工艺参数，施工方法段至少 1 条不少于 4 个环节的“→”工序链。`
+    ? `该小节按专业工程/分项工程方案组织，每个 #### 分项方案必须按“施工概况（作业对象、部位、工程量）”“施工流程（“→”箭头串联工序链）”“施工方法（工具机具、材料规格、工艺参数、验收标准）”三段展开，“施工概况”“施工流程”“施工方法”三个标签必须在每个分项方案正文中逐字出现。标签形态要求：三个标签必须写成纯文本行首形态（如“施工概况：”），严禁粗体包裹（**施工概况**：）或重复前缀（施工概况：**施工概况**：）。每个分项方案的施工流程段至少 1 条不少于 4 个环节的“→”工序链（如“基层清理→放线定位→分层施工→养护→验收”），施工方法段内也必须包含一条工序链。每个分项方案至少 4 个带单位工艺参数，小分项（拆除、门窗维修、立面修补等）同样必须写足，参数类型参考：拆除面积㎡、垃圾外运量t、外运距离km、日拆除进度㎡/天、更换数量樘、启闭力N、胶缝宽度mm、安装偏差mm。`
     : '';
   return `Final Gate 发现“${sectionTitle}”为空小节或深度不足。请基于证据完整重写该小节正式正文（原小节内容将被整体替换），包含检查责任、验收节点、资料闭环、整改复验要求，优先落位项目建筑面积、层数、工期、专业范围等量化参数，不得输出占位或解释。${workPackageQualityFeedback}${lastFailure ? `此前生成被拒原因：${lastFailure}，必须逐条修正。` : ''}`;
 }

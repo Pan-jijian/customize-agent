@@ -282,14 +282,21 @@ export function constructionOrgDivisionSectionIssues(chapters: DocumentDraftChap
     const incompletePackages = packageBlocks.filter(block => !block.includes('施工概况') || !DIVISION_PROCESS_LABEL_RE.test(block) || !block.includes('施工方法'));
     // 脏事实：资料原文残留、嵌入标题、粗体伪标题、空话套话（与专项提示词禁止项同口径）
     const dirtyPackages = packageBlocks.filter(block => /资料内容事实|#{2,6}\s+|\*\*[^*]+\*\*|未尽事宜|按规范施工|结合实际执行|招标范围还包含/u.test(block));
-    // 箭头工序链：每个分项方案的方法段至少 1 条 ≥4 环节链条（历史缺陷：箭头只局限在流程行、方法段空泛）
+    // 箭头工序链：每个分项方案至少 1 条 ≥4 环节链条（方法段优先，方法段无链回退流程段——
+    // 施工组织设计规范中工序链写在工艺流程是标准写法，九度实测补写稿链全部落在“施工流程”行，
+    // 方法段提取正则又拿不到“**施工方法**：”粗体形态冒号后内容，10 个分项被误报缺链）
     const weakChainPackages = packageBlocks.filter(block => {
-      const method = block.match(/施工方法[:：]([\s\S]*?)(?=\n施工|$)/u)?.[1] || '';
-      const chains = method.match(/[^\s→]{2,}(?:→[^\s→]{2,}){3,}/gu) || [];
-      return chains.length === 0;
+      // 粗体伪标签兼容：验收器直读最终 markdown，标签归一化虽已覆盖成稿链，双保险容忍粗体形态
+      const method = block.match(/(?:\*\*)?施工方法(?:\*\*)?[:：]([\s\S]*?)(?=\n施工|$)/u)?.[1] || '';
+      const methodChains = method.match(/[^\s→]{2,}(?:→[^\s→]{2,}){3,}/gu) || [];
+      if (methodChains.length > 0) return false;
+      const flow = block.match(/(?:\*\*)?(?:施工流程|工艺流程)(?:\*\*)?[:：]([\s\S]*?)(?=\n(?:施工|工艺)|$)/u)?.[1] || '';
+      const flowChains = flow.match(/[^\s→]{2,}(?:→[^\s→]{2,}){3,}/gu) || [];
+      return flowChains.length === 0;
     });
-    // 参数密度：每个分项方案正文至少 4 个工艺参数（数字+单位，或“间距/偏差/坡度/养护”等工艺词+数字）
-    const paramRe = /\d+(?:\.\d+)?\s*(?:㎡|m²|m2|m3|m³|mm|cm|m|MPa|kPa|%|日历天|天|小时|层|台|套|个|次|kN|t)/giu;
+    // 参数密度：每个分项方案正文至少 4 个工艺参数（数字+单位，或“间距/偏差/坡度/养护”等工艺词+数字）；
+    // 单位表含 N/颗/樘/扇：门窗维修类分项“启闭力不大于50N”“螺钉固定不少于2颗”属有效工艺参数（九度实测缺陷：正则漏判报参数不足）
+    const paramRe = /\d+(?:\.\d+)?\s*(?:㎡|m²|m2|m3|m³|mm|cm|m|MPa|kPa|%|日历天|天|小时|层|台|套|个|次|kN|t|N|颗|樘|扇)/giu;
     const paramWordRe = /(?:间距|偏差|坡度|养护|搭接|试验压力|含水率|饱满度|压实度|厚度|饱满)[^\n]{0,10}\d/giu;
     const weakParamPackages = packageBlocks.filter(block => {
       const count = (block.match(paramRe) || []).length + (block.match(paramWordRe) || []).length;

@@ -128,10 +128,23 @@ export function comparableSectionTitleText(value: string) {
     .replace(/与|及|和|暨/gu, '');
 }
 
+/** 标题可比匹配（extractSectionFuzzy 与修复器替换定位共用口径）：
+ * - 归一化后为空串或短串（<4 字）的标题不参与匹配：“主要施工方法”与“施工方法”都归一为“方法”、
+ *   “施工流程”归一为“流程”，空串/短串的 === 与包含判断会把任意小节（如“#### 施工方法”H4 块、“#### 施工流程”块）
+ *   误当目标小节（九度实测缺陷：报“主要施工方法 360 字”“危大 79 字”误导性 blocker，且 4600 字补写稿被替换进错误位置丢失）
+ * - 合法关键小节归一化后均 ≥4 字（如“重点难点分析”“分部分项方案”“危大方案审批流程”），=== 与包含判断不受影响 */
+export function comparableSectionHeadingMatches(headingTitle: string, sectionTitle: string): boolean {
+  const comparableHeading = comparableSectionTitleText(headingTitle);
+  const comparableTitle = comparableSectionTitleText(sectionTitle);
+  if (!comparableHeading || !comparableTitle) return false;
+  if (comparableHeading.length < 4 || comparableTitle.length < 4) return false;
+  if (comparableHeading === comparableTitle) return true;
+  return comparableHeading.includes(comparableTitle) || comparableTitle.includes(comparableHeading);
+}
+
 function extractSectionFuzzy(content: string, sectionTitle: string) {
   const lines = content.split('\n');
   const normalizedTitle = sectionHeadingTitleText(sectionTitle).replace(/\s+/gu, '').toLowerCase();
-  const comparableTitle = comparableSectionTitleText(sectionTitle);
   const matches: string[] = [];
   let start = -1;
   let startLevel = 0;
@@ -156,8 +169,9 @@ function extractSectionFuzzy(content: string, sectionTitle: string) {
     if (start >= 0 && (startWorkPackage || startLevel === 3) && level === 4) continue;
     flush(index);
     const normalizedHeading = sectionHeadingTitleText(lines[index]).replace(/\s+/gu, '').toLowerCase();
-    const comparableHeading = comparableSectionTitleText(lines[index]);
-    if (normalizedHeading === normalizedTitle || normalizedHeading.includes(normalizedTitle) || normalizedTitle.includes(normalizedHeading) || comparableHeading === comparableTitle || comparableHeading.includes(comparableTitle) || comparableTitle.includes(comparableHeading)) {
+    // 反向包含（normalizedTitle.includes(normalizedHeading)）不做：标题“施工方法”是“主要施工方法”的子串，
+    // 会把“#### 施工方法”H4 块误当“主要施工方法”小节；标题被语义重写（缺前缀）场景由 comparableSectionHeadingMatches 带长度保护兜底
+    if (normalizedHeading === normalizedTitle || normalizedHeading.includes(normalizedTitle) || comparableSectionHeadingMatches(lines[index], sectionTitle)) {
       start = index + 1;
       startLevel = level;
       startWorkPackage = level <= 4 && WORK_PACKAGE_SECTION_RE.test(lines[index]);

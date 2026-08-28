@@ -24,7 +24,7 @@ import { buildWritingTaskBrief } from './documentWritingTaskBrief';
 import { buildConstructionOrgTablePlans, tablePlanExecutionGaps } from './constructionOrgTablePlan';
 import { buildRetrievalCoverageReport, retrieveDeepChapterEvidence, retrievalCoverageRisk } from './documentEvidenceRetrieval';
 import { buildChapterFactNeeds, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, factNeedsCoveragePrompt, factsForChapterNeeds, resolveChapterFactNeeds } from './factsModel';
-import { adaptiveConcurrency, comparableSectionTitleText, runWithAdaptiveConcurrency, Semaphore, stableHash, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
+import { adaptiveConcurrency, comparableSectionHeadingMatches, comparableSectionTitleText, runWithAdaptiveConcurrency, Semaphore, stableHash, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
 import { displayStage, elapsedMessage, upsertProgressStage } from './progress';
 import { getActiveModelWithProvider, raiseDocumentLlmConcurrencyForScale } from './llmClient';
 import { createGenerationDiagnostics, evidenceInScope, measureGenerationStep, promptTextsForResolvedPrompts, repairChapterByQuality, selectDocumentGenerationStrategy } from './rolePipeline';
@@ -1041,18 +1041,17 @@ export async function generateDocumentDraft(input: { templateId: string; require
       emitProgress(chapterDrafts);
       const replaceChapterSection = (contentValue: string, title: string, sectionValue: string, anchorTitle?: string) => {
         const normalizeHeadingTitle = (value: string) => value.replace(/[\u00a0\u3000]/gu, ' ').replace(/^\d+(?:\.\d+)*\s+/u, '').trim();
-        // 与验收器/终检修复器同口径（comparableSectionTitleText）：去编号、空白、lower、去“施工/专项方案”修饰与“项目|工程|主要|重点|技术”泛化词，
+        // 与验收器/终检修复器同口径（comparableSectionHeadingMatches）：去编号、空白、lower、去“施工/专项方案”修饰与“项目|工程|主要|重点|技术”泛化词，
         // 避免字面差异大的重写标题（如“项目重点难点分析”vs“项目特点、重点、难点分析”）定位失败后退入 plannedIndex 兑底插新小节，旧承接小节残留形成重复
-        const comparableHeadingTitle = comparableSectionTitleText;
         // 标题重写（plannedCoverage 1:1 承接）场景：规划标题与正文 H4 标题字面差异大，定位须同时尝试承接标题，
         // 否则 miss 后走 plannedIndex 兜底在下一规划小节前插入新 H4，旧承接小节残留形成重复小节（每轮修复多一个）
         const matchesSectionHeading = (headingTitle: string) => {
           const candidates = [title, anchorTitle].filter((item): item is string => typeof item === 'string');
           return candidates.some(candidate => {
-            const comparableHeading = comparableHeadingTitle(headingTitle);
-            const comparableCandidate = comparableHeadingTitle(candidate);
-            return headingTitle === candidate || headingTitle.includes(candidate) || candidate.includes(headingTitle)
-              || comparableHeading === comparableCandidate || comparableHeading.includes(comparableCandidate) || comparableCandidate.includes(comparableHeading);
+            // 反向包含（candidate.includes(headingTitle)）不做：与 replaceMarkdownSection/验收器同口径修复，
+            // “主要施工方法”.includes(“施工方法”)会把“#### 施工方法”H4 块误当目标小节（九度实测缺陷）
+            return headingTitle === candidate || headingTitle.includes(candidate)
+              || comparableSectionHeadingMatches(headingTitle, candidate);
           });
         };
         const stripGeneratedHeading = (value: string) => value.trim().replace(/^#{2,6}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]+\n+/u, '').trim();
@@ -1083,13 +1082,13 @@ export async function generateDocumentDraft(input: { templateId: string; require
           const body = stripGeneratedHeading(sectionValue);
           return `${contentValue.slice(0, lineStart)}${line.trim()}\n\n${body}${contentValue.slice(endOffset)}`;
         }
-        const plannedIndex = chapterTaskResult.task.sections.findIndex(item => comparableHeadingTitle(item.title) === comparableHeadingTitle(title));
+        const plannedIndex = chapterTaskResult.task.sections.findIndex(item => comparableSectionTitleText(item.title) === comparableSectionTitleText(title));
         if (plannedIndex >= 0) {
-          const nextPlanned = chapterTaskResult.task.sections.slice(plannedIndex + 1).map(item => comparableHeadingTitle(item.title));
+          const nextPlanned = chapterTaskResult.task.sections.slice(plannedIndex + 1).map(item => comparableSectionTitleText(item.title));
           for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
             const heading = /^(#{3,4})\s+(.+)$/u.exec(lines[lineIndex].trim());
             if (!heading) continue;
-            if (!nextPlanned.includes(comparableHeadingTitle(heading[2]))) continue;
+            if (!nextPlanned.includes(comparableSectionTitleText(heading[2]))) continue;
             const insertOffset = lines.slice(0, lineIndex).join('\n').length + (lineIndex > 0 ? 1 : 0);
             const body = stripGeneratedHeading(sectionValue);
             return body ? `${contentValue.slice(0, insertOffset).trimEnd()}\n\n### ${title}\n\n${body}\n\n${contentValue.slice(insertOffset).trimStart()}` : contentValue;
