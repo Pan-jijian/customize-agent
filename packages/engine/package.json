@@ -37,9 +37,9 @@
     "orchestration"
   ],
   "dependencies": {
-    "@customize-agent/llm": "workspace:^",
-    "@customize-agent/tools": "workspace:^",
-    "@customize-agent/types": "workspace:^",
+    "@customize-agent/llm": "^3.0.13",
+    "@customize-agent/tools": "^3.0.20",
+    "@customize-agent/types": "^3.0.9",
     "execa": "^9.6.1"
   },
   "devDependencies": {

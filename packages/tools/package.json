@@ -36,8 +36,8 @@
     "tools"
   ],
   "dependencies": {
-    "@customize-agent/search": "workspace:^",
-    "@customize-agent/types": "workspace:^",
+    "@customize-agent/search": "^3.0.9",
+    "@customize-agent/types": "^3.0.9",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "archiver": "^8.0.0",
     "execa": "^9.6.1",

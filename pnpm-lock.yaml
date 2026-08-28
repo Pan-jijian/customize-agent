@@ -42,28 +42,28 @@ importers:
   apps/cli:
     dependencies:
       '@customize-agent/engine':
-        specifier: workspace:^
+        specifier: ^3.0.9
         version: link:../../packages/engine
       '@customize-agent/knowledge':
-        specifier: workspace:^
+        specifier: ^4.1.0
         version: link:../../packages/knowledge
       '@customize-agent/llm':
-        specifier: workspace:^
+        specifier: ^3.0.13
         version: link:../../packages/llm
       '@customize-agent/memory':
-        specifier: workspace:^
+        specifier: ^3.0.13
         version: link:../../packages/memory
       '@customize-agent/runtime':
-        specifier: workspace:^
+        specifier: ^3.0.13
         version: link:../../packages/runtime
       '@customize-agent/search':
-        specifier: workspace:^
+        specifier: ^3.0.9
         version: link:../../packages/search
       '@customize-agent/tools':
-        specifier: workspace:^
+        specifier: ^3.0.20
         version: link:../../packages/tools
       '@customize-agent/types':
-        specifier: workspace:^
+        specifier: ^3.0.9
         version: link:../../packages/types
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
@@ -265,13 +265,13 @@ importers:
   packages/engine:
     dependencies:
       '@customize-agent/llm':
-        specifier: workspace:^
+        specifier: ^3.0.13
         version: link:../llm
       '@customize-agent/tools':
-        specifier: workspace:^
+        specifier: ^3.0.20
         version: link:../tools
       '@customize-agent/types':
-        specifier: workspace:^
+        specifier: ^3.0.9
         version: link:../types
       execa:
         specifier: ^9.6.1
@@ -352,7 +352,7 @@ importers:
   packages/llm:
     dependencies:
       '@customize-agent/types':
-        specifier: workspace:^
+        specifier: ^3.0.9
         version: link:../types
       openai:
         specifier: ^6.42.0
@@ -378,7 +378,7 @@ importers:
   packages/runtime:
     dependencies:
       '@customize-agent/types':
-        specifier: workspace:^
+        specifier: ^3.0.9
         version: link:../types
     devDependencies:
       '@types/node':
@@ -388,10 +388,10 @@ importers:
   packages/search:
     dependencies:
       '@customize-agent/llm':
-        specifier: workspace:^
+        specifier: ^3.0.13
         version: link:../llm
       '@customize-agent/types':
-        specifier: workspace:^
+        specifier: ^3.0.9
         version: link:../types
       '@vscode/ripgrep':
         specifier: ^1.18.0
@@ -455,10 +455,10 @@ importers:
   packages/tools:
     dependencies:
       '@customize-agent/search':
-        specifier: workspace:^
+        specifier: ^3.0.9
         version: link:../search
       '@customize-agent/types':
-        specifier: workspace:^
+        specifier: ^3.0.9
         version: link:../types
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0

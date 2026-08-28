@@ -1,5 +1,15 @@
 # @customize-agent/llm
 
+## 3.1.1
+
+### Patch Changes
+
+- 修复 npm 安装失败：3.1.0 依赖声明泄漏 workspace: 协议导致下游无法安装。
+
+  用户从 npm 安装 @customize-agent/server 时，依赖解析到 @customize-agent/llm@3.1.0 / @customize-agent/runtime@3.1.0，其 dependencies 声明为 "@customize-agent/types": "workspace:^"（pnpm workspace 内部协议泄漏到 registry），npm/pnpm 在非 workspace 环境解析失败（pnpm 报 ERR_PNPM_WORKSPACE_PKG_NOT_FOUND，npm 静默 exit 1）。
+
+  修复：全部 workspace 源码包的内部依赖由 workspace:^ 改为具体版本号（llm/runtime 依赖 types ^3.0.9；tools/search/engine/cli 同步版本号化），杜绝发布工具转换环节再次泄漏。发布 llm 3.1.1 / runtime 3.1.1 后，server 4.8.4（依赖 ^3.1.0）自动恢复可安装。
+
 ## 3.1.0
 
 ### Minor Changes
