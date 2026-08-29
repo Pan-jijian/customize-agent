@@ -11,7 +11,7 @@ import { getProjectKbRoot, getProjectRoot } from '../knowledge/kbService';
 import { documentTextLength } from '../document-workflow/budget';
 import { upsertKbOperation } from '../knowledge/kbOperationLog';
 
-export type GeneratedDocumentStatus = 'generating' | 'completed' | 'warning' | 'failed' | 'aborted';
+export type GeneratedDocumentStatus = 'generating' | 'completed' | 'completed_with_issues' | 'warning' | 'failed' | 'aborted';
 
 export interface GeneratedDocumentListItem {
   id: string;
@@ -653,13 +653,16 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     const sectionGaps = collectSectionContentGaps(result.markdown, result.chapters).filter(gap => gap.reason === 'empty');
     if (sectionGaps.length > 0) warningIssues.unshift(`小节内容补写未完成：仍有 ${sectionGaps.length} 个空洞小节，请继续生成或补充资料后重试`);
     if (!result.exportGate.passed && warningIssues.length === 0) warningIssues.push('导出门禁未通过：存在未完成的硬阻断检查项');
+    // F5 状态语义：门禁通过=completed；未通过但已产出实质正文=completed_with_issues（文档可下载，问题清单随附）；
+    // 未通过且无实质正文=failed（需用户继续修复或补充资料后重试，可基于 checkpoint 增量续修）
+    const completedStatus: GeneratedDocumentStatus = result.exportGate.passed ? 'completed' : documentTextLength(markdown) >= 3000 ? 'completed_with_issues' : 'failed';
     const completedBase = trimEvidenceContent({
       ...current,
       templateName: result.templateName,
       templateVersion: result.templateVersion ?? current.templateVersion,
       title: result.title,
       markdown: result.markdown,
-      status: result.exportGate.passed ? 'completed' as const : 'failed' as const,
+      status: completedStatus,
       draft: result,
       executionStages: result.executionStages,
       partialChapters: result.partialChapters,
@@ -677,7 +680,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       assets: generatedAsset ? [generatedAsset, ...(completedBase.assets || []).filter(asset => asset.id !== generatedAsset.id)] : completedBase.assets,
     }, resolvedProjectRoot);
     upsertGeneratedAssets(result.assets || [], documentId, resolvedProjectRoot);
-    upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${record.title}`, status: record.status === 'completed' ? 'success' : 'error', percent: 100, message: record.status === 'completed' ? '文档生成完成，已通过导出门禁' : `文档生成未通过导出门禁，存在 ${warningIssues.length || 1} 个阻断问题`, stages: result.executionStages, error: record.status === 'completed' ? undefined : warningIssues.join('；') });
+    upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${record.title}`, status: record.status === 'completed' ? 'success' : record.status === 'completed_with_issues' ? 'warning' : 'error', percent: 100, message: record.status === 'completed' ? '文档生成完成，已通过导出门禁' : record.status === 'completed_with_issues' ? `文档已生成（带 ${warningIssues.length || 1} 项待复核问题，可下载后人工完善）` : `文档生成未通过导出门禁，存在 ${warningIssues.length || 1} 个阻断问题`, stages: result.executionStages, error: record.status === 'completed' || record.status === 'completed_with_issues' ? undefined : warningIssues.join('；') });
     return record;
   }).catch(error => {
     const current = getGeneratedDocument(documentId, resolvedProjectRoot);

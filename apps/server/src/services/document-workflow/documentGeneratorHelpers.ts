@@ -26,7 +26,13 @@ export function chapterGenerationTargets(input: { budgetTarget: number; sectionC
   const upper = longformStrict
     ? Math.min(Math.max(4200, budgetTarget), sectionCount >= 30 ? 9800 : composite ? 8800 : isCritical ? 9200 : 7200)
     : budgetTarget;
-  const roundTarget = Math.max(lower, Math.min(budgetTarget, structureTarget, upper));
+  // 长文模式（提示词有明确篇幅要求如「不少于5万字」）：提示词预算必须完整下达，不得被
+  // upper 硬顶（7200~9800）与 structureTarget（节均 720~900 字的结构估算）双重压制，
+  // 否则章预算 16667 字被压至 5200~9200 字，5 万字要求永远达不到（历史缺陷：字数卡 3.8 万）。
+  // 单次 LLM 调用的输出安全由块/节级预算（chapterPlanner/写作任务拆分）独立保证，不在章级截断目标。
+  const roundTarget = longformStrict
+    ? Math.max(lower, budgetTarget)
+    : Math.max(lower, Math.min(budgetTarget, structureTarget, upper));
   return {
     budgetTarget,
     roundTarget,
@@ -129,7 +135,10 @@ export function projectBasicFactScore(text: string) {
   if (/质量标准|质量目标|合格|优良/u.test(normalized)) score += 4;
   if (/建设地点|建设规模|招标范围|项目概况与招标范围/u.test(normalized)) score += 4;
   if (/工程量|清单|图纸|设计说明|施工范围|施工内容|材料|设备|工艺|验收|复试|检测/u.test(normalized)) score += 3;
-  if (/投标人须知|保证金|付款|违约金|电子交易|公共资源|开标|评标|合同协议书/u.test(normalized)) score -= 4;
+  // 窄过滤（模块1b）：只减分纯程序性短语（账户/开标评标程序/交易系统），放行前附表实质条款。
+  // 历史缺陷：宽词「投标人须知」把整个前附表章节切片减分（实质条款如创优目标/绿色建筑等级被压出
+  // 检索 Top-N）；「保证金」误伤履约/质量保证金；「违约金」误伤工期延误赔偿条款（施组必须响应）。
+  if (/保证金账户|开户行|开户名称|收款账户|汇款|转账账户|电子交易系统|公共资源交易|开标时间|开标地点|评标委员会|评标办法/u.test(normalized)) score -= 4;
   return score;
 }
 
@@ -571,7 +580,9 @@ export function normalizeProjectBasicInfoTable(content: string, facts: DocumentF
   if (!projectSection?.index && projectSection?.index !== 0) return content;
   const sectionStart = projectSection.index;
   const sectionBodyStart = sectionStart + projectSection[0].length;
-  const nextHeading = /^###\s+/gmu;
+  // 小节边界必须停在下一个 H2/H3（取更早者）：只找 H3 会把下一章的“## 第X章”标题行吞进 body，
+  // 标题行落入小节正文后随旧表删除正则被连坐删除（徽光阁缺陷：第二章标题行丢失，2.1-2.46 共 46 小节错位挂在第一章下）
+  const nextHeading = /^#{2,3}\s+/gmu;
   nextHeading.lastIndex = sectionBodyStart;
   const nextMatch = nextHeading.exec(content);
   const sectionEnd = nextMatch?.index ?? content.length;
@@ -579,9 +590,12 @@ export function normalizeProjectBasicInfoTable(content: string, facts: DocumentF
   const table = projectBasicInfoTableMarkdown(facts, body, content);
   const hasUsefulFact = projectBasicInfoRows(facts, body, content).some(row => !/资料未明确|系统暂未从知识库确认|项目资料暂未明确/u.test(row[1]));
   if (!hasUsefulFact) return content;
+  // 旧基本信息表删除必须按“连续表格行”界定终点：历史缺陷（徽光阁第一章 21632 字被吞至 866 字）根因是
+  // 旧正则依赖 `(?=\n\n(?:[^|\n]|$)|$)` 假设表格后必有空行+非表格行，而 LLM 成稿表格后无空行直接连正文
+  // （正文标题前也无空行），lookahead 全程不满足使 `[\s\S]*?` 贪吞到小节末尾，整节内容与后续标题行被删除
   const cleanedBody = body
-    .replace(/\*\*项目基本信息表\*\*[\s\S]*?(?=\n\n(?:[^|\n]|$)|$)/u, '')
-    .replace(/\|\s*(?:序号\s*\|\s*项目名称\s*\|\s*内容参数|信息项\s*\|\s*内容\s*(?:\|\s*资料来源\/(?:说明|证明))?)\s*\|[\s\S]*?(?=\n\n(?:[^|\n]|$)|$)/u, '')
+    .replace(/\*\*项目基本信息表\*\*[^\n]*(?:\n\s*\|[^\n]*)*/u, '')
+    .replace(/\|\s*(?:序号\s*\|\s*项目名称\s*\|\s*内容参数|信息项\s*\|\s*内容\s*(?:\|\s*资料来源\/(?:说明|证明))?)\s*\|[^\n]*(?:\n\s*\|[^\n]*)*/u, '')
     .replace(/^\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|\s*\n(?:^\|.*\|\s*\n?)*/gmu, '')
     // eslint-disable-next-line no-control-regex -- [^\u000A] 与原始 [^\n] 语义等价（编辑工具会破坏字面换行转义，改用 unicode 转义）
     .replace(/该小节围绕“[^”]+”进行补充说明[^\u000A]*(?:\u000A\u000A该小节围绕“[^”]+”进行补充说明[^\u000A]*)*/gu, '')
@@ -821,14 +835,28 @@ export function normalizeWorkPackageLabels(markdown: string): string {
   return normalized;
 }
 
+/**
+ * 后台术语确定性词形规范化（问题4根治）：正式交付文档中「工作包」是后台生成概念，任何语境均不应出现。
+ * 语义改写优先由 Repairer 按上下文完成（qualityValidation 的 blocker 触发定向修复）；此处兜底词形替换
+ * 保证该 blocker 必然收敛，杜绝「修复→复检仍报→再修复」死循环消耗轮次预算（历史缺陷：工作包术语多轮不收敛）。
+ * 映射与 qualityValidation 的 suggestion 同口径：“X工程工作包”→“X工程”，“按工作包”→“按专业工程”。
+ */
+export function rewriteWorkPackageTerminology(content: string): string {
+  let next = content;
+  next = next.replace(/([\u4e00-\u9fa5A-Za-z]{2,16})工程工作包/gu, '$1工程');
+  next = next.replace(/(按|以|按每个|每个|的)工作包/gu, '$1专业工程');
+  next = next.replace(/工作包/gu, '专业工程');
+  return next;
+}
+
 export function finalizeChapterContentQuality(content: string, chapter: Pick<DocumentTemplateChapter, 'title' | 'sections'>) {
-  return ensureWorkPackageOverviewLabels(normalizeWorkPackageLabels(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(removeAdjacentDuplicateHeadings(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(splitLongParagraphs(stripForbiddenPlaceholderSentences(replaceForbiddenFormalPhrases(repairTableOnlySections(repairPlannedSectionBodies(content, chapter))))))))))))).replace(/\n{3,}/gu, '\n\n').trim();
+  return ensureWorkPackageOverviewLabels(normalizeWorkPackageLabels(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(removeAdjacentDuplicateHeadings(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(splitLongParagraphs(stripForbiddenPlaceholderSentences(replaceForbiddenFormalPhrases(repairTableOnlySections(repairPlannedSectionBodies(rewriteWorkPackageTerminology(content), chapter))))))))))))).replace(/\n{3,}/gu, '\n\n').trim();
 }
 
 /** 最终组装路径的重复/空壳兜底清理：rebuildFinalMarkdown 不再逐章跑 finalizeChapterContentQuality，
  * 补跑同 H3 重复 H4 去重与空壳小节删除，避免 Final Gate 补写与章节拼接残留的重复/空壳进入成品文档。 */
 export function finalizeFinalMarkdownStructure(markdown: string): string {
-  return removeEmptySubSectionHeadings(dedupeRepeatedSubsections(normalizeWorkPackageLabels(markdown)));
+  return removeEmptySubSectionHeadings(dedupeRepeatedSubsections(normalizeWorkPackageLabels(rewriteWorkPackageTerminology(markdown))));
 }
 
 export function promptMatchesChapter(prompt: ResolvedPromptContent, _chapter: DocumentTemplateChapter) {
@@ -955,7 +983,7 @@ export function optimizeChapterEvidence(chapter: DocumentTemplateChapter, eviden
     // 避免量化关键事实与模板要求事实在 maxItems 截断时被高分泛化块挤出证据池
     const baseScore = evidencePromptImportance(item, chapter.requiredFacts) * processingTypeWeightForChapter(chapter, item.processingType) + chapterTextScore(chapter, item);
     // 语义相关性（本地 bge-small 余弦）作排序主键（×10 压过词面/重要性分数），词面与重要性分数保留作第二键；
-    // 闭包缓存未命中的条目（候选池外/嵌入失败）语义分为 0，退回 baseScore 口径
+    // 闭包缓存未命中的条目（候选池外）语义分为 0，退回 baseScore 口径
     const semanticScore = options.semantic ? options.semantic.similarity(options.semantic.queryText, semanticEvidenceText(item)) : 0;
     return { ...item, score: baseScore * 0.5 + semanticScore * 10 };
   });

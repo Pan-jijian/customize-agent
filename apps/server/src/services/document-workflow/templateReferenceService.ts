@@ -124,7 +124,7 @@ async function doRecomputeStaleProfiles(): Promise<void> {
     if (!fs.existsSync(filePath)) continue;
     try {
       const text = await extractReferenceText(filePath);
-      record.qualityProfile = buildReferenceQualityProfile(text);
+      record.qualityProfile = await buildReferenceQualityProfile(text);
       record.profileVersion = PROFILE_VERSION;
       changed = true;
     } catch {
@@ -189,7 +189,7 @@ export async function addTemplateReference(input: {
   // 解析画像：成功置 ready，失败保留原文与失败状态供用户查看
   try {
     const text = await extractReferenceText(storedPath);
-    const profile = buildReferenceQualityProfile(text);
+    const profile = await buildReferenceQualityProfile(text);
     record.qualityProfile = profile;
     record.profileVersion = PROFILE_VERSION;
     record.textSlices = sampleReferenceTextSlices(text);
@@ -450,7 +450,7 @@ export function referenceQualityTargetLines(input: { templateName: string; chapt
   // 工序链覆盖率参考与对标评分同口径取 8% 下限：参考样本多为扫描/简版文件该特征偏弱，
   // 直接注入真实均值会把生成侧软目标拉到门禁线以下（十度实测：真实样本均值 1.4%，生成侧门禁要求 8%）
   const arrowChainFloor = Math.max(arrowChain, 0.08);
-  lines.push(`- 工序链覆盖率参考：含“→”工序链的段落占比不低于 ${Math.round(arrowChainFloor * 100)}%（同类工程画像均值 ${Math.round(arrowChain * 100)}%，已按生成侧门禁取下限）；施工与流程小节宜用工序链串联工艺步骤。`);
+  lines.push(`- 工序顺序表达覆盖率参考：含工序顺序表达（顺序词叙述/编号步骤/有序无序列表/箭头链任一形式，形式由模型自然选择）的段落占比不低于 ${Math.round(arrowChainFloor * 100)}%（同类工程画像均值 ${Math.round(arrowChain * 100)}%，已按生成侧门禁取下限）；施工与流程小节宜用工序顺序表达串联工艺步骤。`);
   lines.push(`- 表格参考：同类工程平均每章约 ${tablesPerSection.toFixed(1)} 张正式表格（在事实允许的前提下合理配置）。`);
   lines.push(`- 章节体量参考：同类工程平均约 ${Math.round(aggregated.sectionCount.avg)} 章、平均每章约 ${avgSectionWords} 字；实际以模板章节与篇幅目标为准。`);
   if (frequentHeadings.length > 0) {
@@ -513,7 +513,7 @@ export function referenceWritingSkeletonLines(input: { templateName: string; cha
     lines.push(`- 方案章节典型组织：同类样本中方案类章节以「${schemeTitles.join('」「')}」等标题独立成章，逐分项展开，不并入项目概况章节。`);
   }
   // 分部分项展开模式骨架：三段式 + 工序链组织方式（与生成侧专项规则同源，此处作为范文印证）
-  lines.push('- 分部分项展开模式：同类样本按“施工概况（作业对象、部位、工程量）→工艺流程（→串联关键工序）→施工方法（工具机具、材料规格、工艺参数、验收标准）”三段逐分项展开；方法段正文以“→”串联连续工序链，工艺参数落位在方法叙述中而非单独罗列清单。');
+  lines.push('- 分部分项展开模式：同类样本按“施工概况（作业对象、部位、工程量）→工艺流程（工序顺序表达串联关键工序）→施工方法（工具机具、材料规格、工艺参数、验收标准）”三段逐分项展开；方法段正文以工序顺序表达（形式由模型自然选择：顺序词叙述、编号步骤、有序/无序列表或箭头链均可）串联连续工序，工艺参数落位在方法叙述中而非单独罗列清单。');
   return lines;
 }
 

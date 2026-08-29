@@ -187,9 +187,12 @@ export function dedupeGlobalEvidence(evidence: DocumentEvidence[]): DocumentEvid
   return [...best.values()].sort((a, b) => b.score - a.score);
 }
 
-export function selectEvidenceByBudget(items: DocumentEvidence[], options: { maxItems?: number; maxChars?: number; preservePinned?: boolean } = {}, diagnostics?: DocumentGenerationDiagnostics): DocumentEvidence[] {
+export function selectEvidenceByBudget(items: DocumentEvidence[], options: { maxItems?: number; maxChars?: number; preservePinned?: boolean; maxItemsPerFile?: number } = {}, diagnostics?: DocumentGenerationDiagnostics): DocumentEvidence[] {
   const maxItems = Number.isFinite(options.maxItems) && options.maxItems! > 0 ? Math.floor(options.maxItems!) : undefined;
   const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.floor(options.maxChars!) : undefined;
+  // round-20 S5/W7 P6-1：单文件条目上限从固定 4 条放开到 12 条（可配置）——大文件（招标文件全文）不再被强行拆碎，
+  // 证据完整性优先；pinned 证据不受单文件上限约束（priority 通道跳过）
+  const maxItemsPerFile = Number.isFinite(options.maxItemsPerFile) && options.maxItemsPerFile! > 0 ? Math.floor(options.maxItemsPerFile!) : 12;
   const ranked = uniqueEvidence(items, undefined, diagnostics);
   const pinned = options.preservePinned ? ranked.filter(item => item.source === 'pinned-evidence' || item.source === 'bound-file' || item.source === 'required-fact-evidence') : [];
   const normal = ranked.filter(item => !pinned.includes(item));
@@ -199,7 +202,7 @@ export function selectEvidenceByBudget(items: DocumentEvidence[], options: { max
   const tryPush = (item: DocumentEvidence, priority = false) => {
     if (maxItems && selected.length >= maxItems) return;
     const fileCount = perFileCounts.get(item.filePath) || 0;
-    if (!priority && fileCount >= 4) return;
+    if (!priority && fileCount >= maxItemsPerFile) return;
     const content = cleanEvidenceText(item.content);
     const nextChars = chars + content.length;
     if (maxChars && selected.length > 0 && nextChars > maxChars) return;

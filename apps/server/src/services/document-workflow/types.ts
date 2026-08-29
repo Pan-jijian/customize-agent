@@ -1,7 +1,6 @@
 import type { AgentWorkflowContext } from './agentWorkflow';
 import type { QualityBenchmarkResult } from './benchmarkQuality';
 import type { TenderBidTemplatingReport } from './tenderBidScoring';
-import type { TemplateSimilarityReport } from './templateSimilarity';
 
 export interface PromptRequiredSectionRule {
   title: string;
@@ -430,6 +429,12 @@ export interface TenderRequirementModel {
   prohibitionNotes: TenderRequirementItem[];
   /** 篇幅限制建议（如“不超过 50 页”） */
   pageLimit?: TenderRequirementItem;
+  /** 投标人须知前附表响应条款（施组必须响应的实质条款：工期/质量标准/创优/缺陷责任期/履约担保/
+   * 工期延误赔偿/项目经理要求/分包限制等）。历史缺陷：前附表被 5 处代码主动过滤，
+   * 黄山杯/缺陷责任期/智慧工地等级等要求零感知零响应 */
+  frontScheduleClauses: TenderRequirementItem[];
+  /** 评标办法摘要（评标办法类型、分值构成、技术文件评审内容项、评分档位线） */
+  evaluationScheme?: TenderRequirementItem;
   /** 提取是否实际执行（LLM 不可用/资料为空时为 false，下游不得据此阻断） */
   extracted: boolean;
   /** 提取源文本哈希（判定可复现溯源用） */
@@ -443,7 +448,7 @@ export interface ValidationIssue {
   suggestion?: string;
   severity?: 'blocker' | 'warning' | 'suggestion';
   repairability?: 'local_deterministic' | 'llm_repairable' | 'manual_review' | 'not_repair_needed';
-  category?: 'structure' | 'table' | 'fact_consistency' | 'evidence_coverage' | 'professional_chain' | 'control_loop' | 'format' | 'style' | 'scope';
+  category?: 'structure' | 'table' | 'fact_consistency' | 'evidence_coverage' | 'professional_chain' | 'control_loop' | 'format' | 'style' | 'scope' | 'qingtian_review';
   owner?: 'system' | 'llm' | 'user';
 }
 
@@ -631,8 +636,6 @@ export interface DocumentReviewMetadata {
   qualityReport?: DocumentQualityReport;
   repairStrategies?: RepairStrategy[];
   reviewChecklist?: DocumentReviewChecklistItem[];
-  /** A3 模板语义相似度三档（与参考库同类样本对比，嵌入不可用/无样本时缺失） */
-  templateSimilarity?: TemplateSimilarityReport;
   /** A2 语义级模板化复核改进建议（仅风险信号命中时产出） */
   templatingReviewIssues?: string[];
   professionalScore?: {

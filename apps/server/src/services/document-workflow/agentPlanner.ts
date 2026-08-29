@@ -1,7 +1,7 @@
 import type { AgentWorkflowContext, AgentWorkflowNode } from './agentWorkflow';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentTemplate, DocumentTemplateChapter, ProjectGraph, ValidationIssue } from './types';
 import type { PlannedChapterStructure } from './chapterPlanner';
-import { extractSection, stableHash, stringifyFactValue } from './utils';
+import { extractSection, hasProcessSequenceExpression, stableHash, stringifyFactValue } from './utils';
 import { documentTextLength } from './budget';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
 
@@ -363,11 +363,11 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
       const quantifiedDensity = bodyChars > 0 ? quantifiedCount / (bodyChars / 1000) : 0;
       if (documentTextLength(methodBody) >= 800 && (paramCount < 4 || quantifiedDensity < 2)) issues.push({ level: 'warning', severity: 'warning', category: 'professional_chain', owner: 'system', message: `${section.title} 参数落位不足：工艺参数 ${paramCount} 个（要求不少于 4 个），量化参数密度每千字 ${quantifiedDensity.toFixed(1)} 个（要求不少于 2 个）`, suggestion: '必须补充 mm/MPa/间距/偏差/坡度/试验压力等工艺参数（来自绑定资料或行业规范值）或设备型号规格参数，并提升量化参数（数量/规格/工期/面积等）落位密度；同一参数不得反复堆砌凑数。' });
     }
-    // 工序链箭头密度：方法类/流程类小节必须用“→”串联工序链，避免纯文字流程叙述拉低整体箭头密度
+    // 工序顺序表达检测：方法类/流程类小节必须有工序顺序表达（箭头链/编号步骤/有序无序列表/顺序词/连接线任一），
+    // 不再强制“→”箭头形式（用户要求：写法合理即可，形式不限）
     if (/主要分部分项工程施工方案|主要施工方法|项目主要施工内容|施工流程|施工顺序|多工序穿插|三检制度|隐蔽工程验收|闭环整改|应急演练|转运路线/u.test(section.title)) {
       const methodBody = extractSection(content, anchor, { fuzzy: true });
-      const arrowCount = (methodBody.match(/→/gu) || []).length;
-      if (documentTextLength(methodBody) >= 500 && arrowCount < 3) issues.push({ level: 'warning', severity: 'warning', category: 'professional_chain', owner: 'system', message: `${section.title} 工序链箭头缺失：当前 ${arrowCount} 个“→”，工序序列未按箭头链表达`, suggestion: '工艺流程与方法叙述中的连续工序必须用“→”串联（如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”），每条链不少于 3 个环节，方法叙述中同样需要箭头链。' });
+      if (documentTextLength(methodBody) >= 500 && !hasProcessSequenceExpression(methodBody)) issues.push({ level: 'warning', severity: 'warning', category: 'professional_chain', owner: 'system', message: `${section.title} 工序顺序表达缺失：工序序列未以顺序词叙述、编号步骤、列表或箭头链任一形式表达`, suggestion: '工艺流程与方法叙述中的连续工序须有明确的顺序表达，形式由模型自然选择（顺序词叙述、编号步骤、有序列表或箭头链均可，如“先进行基层清理，再放线定位，随后分层摊铺，然后碾压，最后验收”），保证工序先后顺序清晰即可。' });
     }
   }
   const scopeRoots = input.context.materialScope.selectedRoots;

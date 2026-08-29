@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CanonicalFact as GovernedCanonicalFact, CanonicalFactModel, DocumentFact, NumericScopeConflict, ProjectGraph } from './types';
-import { normalizeOcrFactText } from './factsModel';
+import { cleanPdfHeadingNoise, normalizeOcrFactText } from './factsModel';
 import { stableHash, stringifyFactValue } from './utils';
 import { recordArbitrationCases } from './workflowCaseLog';
 import { loadWorkflowRules, workflowRulesHash, type WorkflowRulesConfig } from './workflowRules';
@@ -346,10 +346,15 @@ function factCacheRoot(projectRoot?: string) {
 
 function canonicalFactCacheKey(input: { facts: DocumentFact[]; markdown?: string; projectGraph?: ProjectGraph; requiredKeys?: string[]; requirement?: string; templateId?: string; projectRoot?: string }) {
   return stableHash({
+    // v7：area 裁决池异口径隔离（“建设规模：项目总占地面积约10970…”中的占地数值
+    // 不再作为建筑总量裁决候选，round-21 S6 反向改错根治），旧缓存按旧裁决口径产出，
+    // 不再适用；
+    // v6：建设规模混合口径净化（占地+建筑混合字段值只保留建筑面积段，round-21 S6），
+    // 旧缓存按旧口径产出（scale 值含占地面积段），不再适用；
     // v5：数值语境四分类裁决（门槛型/目标型剔除、锚点评分决胜、置信度分级、层数/车位数新口径），
     // 旧缓存按旧裁决口径产出，不再适用；
     // rulesHash：workflowRules 配置哈希并入缓存键（F3），项目级规则覆盖变化自动失效旧裁决缓存，无需手动 bump
-    version: 'canonical-facts-v5',
+    version: 'canonical-facts-v7',
     rulesHash: workflowRulesHash(input.projectRoot),
     requirement: input.requirement || '',
     templateId: input.templateId || '',
@@ -440,8 +445,10 @@ function scopeKindLabel(kind: NumericScopeConflict['kind']) {
 export function scopeReForKind(kind: NumericScopeConflict['kind']) {
   // “总”字可选：招标文件常写“建筑面积约为4645㎡”（无“总”字），必须与“总建筑面积”同口径检出；
   // 口径限定为建筑总量（建设规模/建筑面积）：用地面积、占地面积是独立字段（不同口径），
-  // 混入裁决会让用地数值污染“建设规模”期望口径（历史缺陷：正文正确转述资料用地面积被判为与建设规模冲突）
-  if (kind === 'area') return /总?建筑面积|建设规模/u;
+  // 混入裁决会让用地数值污染“建设规模”期望口径（历史缺陷：正文正确转述资料用地面积被判为与建设规模冲突）；
+  // 子项口径负向后顾与 qualityValidation.SCALE_SCOPE_RE 同源：地上/地下建筑面积等分层数值
+  // （如地上24783.39、地下3786.97）与建筑总量不同口径，混入“建筑面积”裁决组会导致无法决出裁决值
+  if (kind === 'area') return /(?<![地上地下门卫室值班室配电室配电房泵房水泵房锅炉房公厕车库车棚岗亭传达室警卫室样板房售楼处门房])总?建筑面积|建设规模/u;
   if (kind === 'cost') return /合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|工程总投资|总投资|工程造价/u;
   if (kind === 'floors') return /总?层数|建筑层数|地上层数|地下层数|楼层数/u;
   if (kind === 'parkingSpaces') return /总?车位|停车位|机动车位|车位数/u;
@@ -483,6 +490,13 @@ function extractNumericScopeEntries(text: string, kind: NumericScopeConflict['ki
     const scopeStart = (match.index ?? 0) + (scopeMatch?.index ?? 0);
     const valueStart = (match.index ?? 0) + match[0].indexOf(match[1]);
     const gapLength = valueStart - (scopeStart + scope.length);
+    // 异口径词隔离（area 专用）：口径词与数值之间的窗口若出现“占地/用地”字样
+    // （如“建设规模：项目总占地面积约10970平方米，单体建筑面积28570.36平方米”），
+    // 该数值属占地面积/用地面积独立口径，不得作为建筑总量裁决候选
+    // （历史缺陷：10970 被裁决为 area 胜出值进入 scopeConflicts，确定性修复器
+    // 以裁决值优先于 resolveScaleExpectation，把正文正确的 28570.36 反向改成 10970）
+    const gapText = text.slice(scopeStart + scope.length, valueStart);
+    if (kind === 'area' && /占地|用地/u.test(gapText)) continue;
     const contextClass = classifyNumericContext(text, scopeStart, scope.length, valueStart, sourceFile, rules);
     // 门槛型/目标型数值是约束或愿景语义，不是项目真实口径，剔除出裁决池（19000 事故根治：
     // “业绩要求：建筑面积不低于19000㎡”不再作为裁决候选覆盖招标正文“建筑规模20000㎡”）
@@ -699,6 +713,27 @@ export function buildCanonicalFactModel(input: { facts: DocumentFact[]; markdown
   const canonicalMap = buildCanonicalFacts({ facts: sourceFacts, markdown: input.markdown });
   const byKey: Record<string, GovernedCanonicalFact> = {};
   for (const [key, fact] of canonicalMap.entries()) byKey[key] = governedFactFromCanonical(fact);
+  // round-21 S6：建设规模混合口径净化——资料“建设规模：项目总占地面积约10970平方米，
+  // 单体建筑面积28570.36平方米”是占地+建筑两个口径的混合字段值，canonical 直接沿用会
+  // 让蓝图写作约束携带混合口径，写作模型混淆数值（实测正文 9 处“总建筑面积 10970㎡”）。
+  // canonical 的 scale 只保留“建筑面积”段（建筑总量口径）；占地数值不进 scale 字段。
+  if (byKey.project_scale) {
+    const scale = byKey.project_scale;
+    if (/占地|用地/u.test(scale.value) && /建筑面积/u.test(scale.value)) {
+      const buildStart = scale.value.search(/(?:单体)?总?建筑面积/u);
+      if (buildStart > 0) {
+        // round-23 P0-3 兜底：上游提取层已清 PDF 标题标记噪声，此处再清洗一次防
+        // LLM 提取通道残留坏值（历史缺陷：“28570.36平方###米”→“28570.36平方2.8”）
+        const buildValue = cleanPdfHeadingNoise(scale.value.slice(buildStart)).trim();
+        byKey.project_scale = {
+          ...scale,
+          value: buildValue,
+          normalizedValue: normalizeOcrFactText(buildValue),
+          selectedReason: `${scale.selectedReason}；混合口径已净化，scale 只取建筑面积段`,
+        };
+      }
+    }
+  }
 
   const fieldPatterns: Array<{ key: string; label: string; pattern: RegExp; bucket: keyof CanonicalFactModel; valueType?: FactValueType }> = [
     { key: 'project_name', label: '项目名称', pattern: /项目名称|工程名称|招标项目名称|project_name/u, bucket: 'projectIdentity', valueType: 'text' },

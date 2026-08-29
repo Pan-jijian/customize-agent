@@ -7,7 +7,7 @@ import { getLocalSemanticProvider } from './semanticSimilarity';
  * 背景（十一度实测误伤）：“4次”是专项应急演练频次计数，因 ±36 字上下文出现“日历天”关键词被正则
  * 升级为工期总量口径判为编造（跨口径误伤）；同时正则关键词封闭集必然漏判变体表述（漏检）。
  * 协同边界：结构门控（单位后缀/标准编号等确定性格式信息）仍由正则处理，语义判断（上下文口径归属）
- * 由本分类器完成；模型不可用时调用方降级为纯正则门控，语义模型不可用不得阻塞生成。
+ * 由本分类器完成；本地语义模型恒可用（本地 ONNX 推理），构建失败直接抛出暴露缺陷，无不可用降级路径。
  */
 
 /** 总量口径语义锚点：工期/金额/建设规模三类评标可复核的硬口径 */
@@ -47,37 +47,29 @@ export interface FactTokenScopeClassifier {
   batchClassify: (queries: string[]) => Promise<Array<'scope' | 'other'>>;
 }
 
-/** 构建总量口径语义分类器：预嵌入锚点向量；模型加载失败返回 undefined（调用方降级正则门控） */
-export async function buildFactTokenScopeClassifier(): Promise<FactTokenScopeClassifier | undefined> {
-  try {
-    const provider = getLocalSemanticProvider();
-    if (!provider) return undefined;
-    const [scopeVectors, countVectors] = await Promise.all([
-      provider.embedDocuments([...SCOPE_ANCHORS]),
-      provider.embedDocuments([...COUNT_ANCHORS]),
-    ]);
-    if (scopeVectors.length !== SCOPE_ANCHORS.length || countVectors.length !== COUNT_ANCHORS.length) return undefined;
-    return {
-      async batchClassify(queries) {
-        try {
-          if (queries.length === 0) return [];
-          const queryVectors = await provider.embedDocuments(queries);
-          return queries.map((_, index) => {
-            const vector = queryVectors[index];
-            if (!vector || vector.length === 0) return 'other' as const;
-            const scopeSim = Math.max(...scopeVectors.map(anchor => dot(vector, anchor)));
-            const countSim = Math.max(...countVectors.map(anchor => dot(vector, anchor)));
-            // 频次计数口径显著且强于总量口径时不升级；总量口径锚点显著时升级 scope（余弦 ≥0.6）
-            if (countSim >= 0.62 && countSim > scopeSim) return 'other' as const;
-            return scopeSim >= 0.6 ? 'scope' as const : 'other' as const;
-          });
-        } catch {
-          // 单次批量分类失败不阻塞校验：全部降级 other（保持正则门控基类结果）
-          return queries.map(() => 'other' as const);
-        }
-      },
-    };
-  } catch {
-    return undefined;
+/** 构建总量口径语义分类器：预嵌入锚点向量；本地语义模型恒可用，失败直接抛出 */
+export async function buildFactTokenScopeClassifier(): Promise<FactTokenScopeClassifier> {
+  const provider = getLocalSemanticProvider();
+  const [scopeVectors, countVectors] = await Promise.all([
+    provider.embedDocuments([...SCOPE_ANCHORS]),
+    provider.embedDocuments([...COUNT_ANCHORS]),
+  ]);
+  if (scopeVectors.length !== SCOPE_ANCHORS.length || countVectors.length !== COUNT_ANCHORS.length) {
+    throw new Error(`本地语义模型锚点嵌入数量不一致：范围锚点 ${scopeVectors.length}/${SCOPE_ANCHORS.length}，计数锚点 ${countVectors.length}/${COUNT_ANCHORS.length}`);
   }
+  return {
+    async batchClassify(queries) {
+      if (queries.length === 0) return [];
+      const queryVectors = await provider.embedDocuments(queries);
+      return queries.map((_, index) => {
+        const vector = queryVectors[index];
+        if (!vector || vector.length === 0) return 'other' as const;
+        const scopeSim = Math.max(...scopeVectors.map(anchor => dot(vector, anchor)));
+        const countSim = Math.max(...countVectors.map(anchor => dot(vector, anchor)));
+        // 频次计数口径显著且强于总量口径时不升级；总量口径锚点显著时升级 scope（余弦 ≥0.6）
+        if (countSim >= 0.62 && countSim > scopeSim) return 'other' as const;
+        return scopeSim >= 0.6 ? 'scope' as const : 'other' as const;
+      });
+    },
+  };
 }

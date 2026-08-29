@@ -2,7 +2,7 @@ import type { DocumentDraftChapter, DocumentTemplate, GeneratedDocumentDraft, Pr
 import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
 import { WORK_PACKAGE_SECTION_RE } from './utils';
 import { displayChapterTitle, formalChapterTitle, normalizeGeneratedChapterTitle } from './outline';
-import { composeDrawingIndexMarkdown, composeEnhancedCoverMarkdown, composeProcessParameterSummaryMarkdown } from './composeAppendices';
+import { composeEnhancedCoverMarkdown } from './composeAppendices';
 import { FORBIDDEN_PROMPT_PHRASES } from './tenderBidScoring';
 
 export function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
@@ -39,6 +39,8 @@ export function normalizeProductionText(markdown: string) {
     .replace(/\bmm2\b/giu, '平方毫米')
     .replace(/\bcm2\b/giu, '平方厘米')
     .replace(/\bkm2\b/giu, '平方千米')
+    .replace(/(\d+(?:\.\d+)?)平方(?:\d+(?:\.\d+)?)?(?=\d|[，,;；)）]|\s|$)/gu, '$1平方米')
+    .replace(/原则上/gu, '')
     .replace(/\s*×\s*/gu, '×')
     .replace(/\s*≤\s*/gu, '≤')
     .replace(/\s*≥\s*/gu, '≥')
@@ -240,7 +242,21 @@ export function sourcePhraseIssues(markdown: string): ValidationIssue[] {
 export function sanitizeFormalMarkdown(markdown: string) {
   const cleaned = removeEmptyMarkdownTableColumns(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(normalizeProductionText(cleanFormalSourcePhrases(stripMarkdownDocumentFence(markdown)))))))
     .split(/\r?\n/u)
-    .map(line => /^\s*\|/u.test(line) ? line.replace(/\s*不适用\s*(?=\|)/gu, ' ') : line)
+    .map(line => {
+      // 注意：不再把表格单元格里的“不适用”清洗成空格——该清洗会把单元格洗成空字符串，
+      // 制造“空单元格”硬阻断缺陷（十度实测：合计行“不适用”被洗成空格后检测器报错且修复轮无法兜底）；
+      // “不适用”本身不触发占位符检测，治理由提示词禁写清单（MARKDOWN_TABLE_FORMAT_RULES）承担。
+      // 行内伪标题拆行：LLM 成稿把“###/#### 标题”写成“句号+###标题”行内嵌入形态（徽光阁缺陷：
+      // “复查记录留存影像资料.### 危大工程专项施工方案审批流程”），行首标题扫描（extractSectionFuzzy）不识别
+      // → 小节不成节、深度检测落空、Final Gate 误判小节缺失。拆为独立标题行（前置空行保证渲染成标题）。
+      // 仅句末标点（。；;）紧贴的形态拆行，“详见### 1.2”式句中引用不拆（标题前不是句末标点）。
+      line = line.replace(/(?<=[。；;])(?=#{3,4}\s+\S)/gu, '\n\n');
+      // 表格前导句拆行：LLM 成稿把表头行粘在前导句后（合肥师范缺陷：“具体安排如下表。| 关键节点 | 计划完成时间 | …”），
+      // 同行的表头被表格解析器当作表头首列 → “表格列数不一致”误报且修复轮永不收敛；表格也无法正常渲染。
+      // 仅拆“行首无管道 + 句末标点 + 以 | 开头的完整表格行收尾”的形态（$1 不含 | 保证不误拆表格数据行内句号）。
+      line = line.replace(/^([^|]*[。；;])\s*(\|[^|\n]+\|\s*)$/u, '$1\n$2');
+      return line;
+    })
     .join('\n')
     .replace(/^\*\*([^*\n]{4,40})\*\*\s*$/gmu, (line: string, title: string) => {
       const clean = title.trim();
@@ -289,7 +305,7 @@ export const MARKDOWN_TABLE_FORMAT_RULES = [
   '表格必须包含表头行、分隔线和数据行；表头下一行必须是分隔线，例如 |---|---|。',
   '禁止只输出连续的“| 字段 | 值 |”裸表格行；两列键值信息表默认使用表头 | 信息项 | 内容 |。',
   '表头、分隔线和数据行必须连续，中间不得插入正文、说明、空行或补充段落。',
-  '表格数据完整性硬约束：数据行每一列都必须有具体数据值，不得出现空单元格；不得用“—/若干/约/待定/暂无”等占位或模糊表达代替具体数据（合计/小计/总计/累计行的“—”不适用语义除外）。数据优先取自本项目资料，资料未直接给出时按工程量、工期与专业定额工效推算具体数值。',
+  '表格数据完整性硬约束：数据行每一列都必须有具体数据值，不得出现空单元格；不得用“—/若干/约/待定/暂无/不适用”等占位或模糊表达代替具体数据（合计/小计/总计/累计行的“—”不适用语义除外）。数据优先取自本项目资料，资料未直接给出时按工程量、工期与专业定额工效推算具体数值。',
   '表格名称/标题不得占用表格单元格（如“竣工清理与移交计划表”作为表头第一格导致整表错位）；表名写在表格上方的正文叙述中，表内第一行从表头列名开始。',
   '正文表格不得展示后台溯源列或系统过程列，如“资料来源/说明”“资料来源/证明”“知识库来源”等。',
   '项目名称、项目编号、招标人/业主/建设单位、建设地点、建设规模、计划工期、质量标准、合同估算价等项目基础信息，只能在项目基本信息表中集中输出一次；后续章节如需引用，应写入正文或专业表格的业务字段，不得重复生成项目基础信息键值表。',
@@ -302,9 +318,9 @@ export const TENDER_BID_WRITING_RULES = [
   '【闭环句式密度硬约束】全文每 1500 字至少 1 段完整闭环句式：同一自然段内必须同时出现责任岗位（项目经理/技术负责人/施工员/质检员/安全员/材料员/试验员等）+ 检查频次（每日/每周/每月/不少于X次/定期）+ 整改闭环（整改/复查/销项/复验）三要素，缺一不可；禁止措施段落只有频次数字而无责任岗位，或只有岗位口号而无量化频次。',
   `【空话禁用词】以下词语直接禁写，一律替换为“责任岗位 + 执行动作 + 量化标准 + 检查频次 + 整改闭环”句式：${FORBIDDEN_PROMPT_PHRASES.join('、')}；并避免“合理、充分、完善、切实、尽量、适时”等单字虚词作为措施句核心动词。`,
   '【评分点响应】段落首句先回应本节评分点或招标评审关键词，再展开具体措施；一段只写一个主题，避免多个得分点混在大段文字中；三级标题尽量直接放置评分关键词。',
-  '【数据表格化】关键数据（建筑面积、层数、总工期、开工竣工节点、设备型号数量、管理人员配置、劳动力人数、材料批次、养护天数、检测频次、检验批划分）优先用表格呈现，不藏在正文大段文字中；表格前必须有 1～2 句引导叙述说明表格作用与关键结论，表格不能替代小节正文。每张表格应有说明性标题或表前引导句点名用途，同一主题表格全文只出现一次，禁止拆成多张碎表连续堆叠凑数。',
+  '【数据表格化】关键数据（建筑面积、层数、总工期、开工竣工节点、设备型号数量、管理人员配置、劳动力人数、材料批次、养护天数、检测频次、检验批划分）优先用表格呈现，不藏在正文大段文字中；正文中数据密集型内容（多组对比数值、多岗位职责分工、多阶段资源配置、多节点工期安排、多类管控指标、多工种劳动力分配）宁可多用表格，直观性优于纯文字叙述。表格前必须有 1～2 句引导叙述说明表格作用与关键结论，表格不能替代小节正文。每张表格应有说明性标题或表前引导句点名用途；同一主题同一数据不得重复堆叠凑数，但内容较多的主题可合理分组为多张表。',
   '【工艺参数密度】正文每 1000 字至少落位 6 处带单位的量化工艺参数（如 20mm、C30、0.5MPa、养护 28 天、搭接长度 500mm、压实度 95%、含水率 3%），均匀分布在各章节而非集中在个别小节；参数必须来自绑定材料或行业通用规范值，不得编造。',
-  '【工序链箭头】施工流程、施工方法、检验验收类叙述必须用“→”箭头串联工序链（如“测量放线→基层处理→模板安装→浇筑→养护→验收”）；每个分部分项方案至少 1 条 4 环节以上工序链，全文含箭头工序链的段落占比不低于 8%。',
+  '【工序顺序表达】施工流程、施工方法、检验验收类叙述必须有清晰的工序顺序表达，形式由模型根据内容自然选择、不做统一要求：可用顺序词叙述（先…再…最后…、依次/先后/按…顺序）、编号步骤、有序/无序列表或箭头链等形式；同一章节内形式应多样化，禁止全篇同一形式（如通篇箭头链）。每个分部分项方案至少 1 处 3 环节以上的工序顺序表达，全文含工序顺序表达的段落占比不低于 8%。',
   '【数据自洽】全文核心数据（工程名称、建设地点、总工期、建筑面积、层数、人员、机械、材料批次、施工阶段划分、危大工程清单）必须前后一致，任何跨章冲突、参数矛盾即为内容缺陷；数据以绑定材料与计划推导结果为准，不得一处一改。',
   '【工艺黄金公式】工艺描述按“工艺名称 + 来源依据 + 适用范围 + 核心工序（按施工顺序 3～5 步）+ 质量控制要点（1～2 个量化指标）”展开；提及规范标准必须带编号（如 GB 50204-2015）并采用现行有效版本，不得虚构或引用已废止版本。',
   '【重难点公式】重难点 = 项目具体条件 + 难度分析 + 影响后果；工程重点 3～5 条、工程难点 3～4 条，每个重难点必须在后续对应章节给出解决措施形成跨章闭环。',
@@ -993,8 +1009,8 @@ export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'mar
   ].join('\n');
 
   const finalized = finalizeDocumentMarkdown(initialMarkdown, cleanChapters, options);
-  const appendices = [composeDrawingIndexMarkdown(finalized.markdown), composeProcessParameterSummaryMarkdown(finalized.markdown)].filter(Boolean).join('\n');
-  return appendices
-    ? `${finalized.markdown.replace(/\n{3,}/gu, '\n\n')}\n\n<div class="page-break"></div>\n\n${appendices}`
-    : finalized.markdown;
+  // 正文末尾不再追加附录（图位索引/关键工艺参数汇总）：用户明确要求正文不需要附录内容，
+  // 附录由导出环节按需生成，不进正文 markdown（历史缺陷：附录B 自动归集表格被评标视为
+  // 非正文冗余内容，且归集了“本工作包”等后台话术污染正文）
+  return finalized.markdown;
 }

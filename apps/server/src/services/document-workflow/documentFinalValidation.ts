@@ -1,4 +1,4 @@
-import { closedLoopDensityIssues, plannedAutoSpecGateIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
+import { closedLoopDensityIssues, plannedAutoSpecGateIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues, tocThirdLevelCompletenessIssues } from './qualityValidation';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
 import { boqRowTraceIssues, buildBoqRowTraces } from './documentFactTrace';
@@ -7,9 +7,15 @@ import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
 import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgDivisionSectionIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
-import { areaArithmeticIssues, closurePhraseDensityCapIssues, dangerousListConsistencyIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, overviewRecapCandidates, overviewRecapIssues, paragraphOpeningRepeatIssues, resourceConsistencyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { areaArithmeticIssues, basicInfoScheduleFieldIssues, bodySentencesForSemantic, closurePhraseDensityCapIssues, collapseRepeatedWords, commercialDataInBodyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, paragraphOpeningRepeatIssues, repeatedWordIssues, resourceConsistencyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, stripCommercialDataSentences, supportSystemConflictIssues } from './documentIntegrityChecks';
 import { buildSemanticSimilarity } from './semanticSimilarity';
-import { requirementsCoverageIssues } from './tenderRequirements';
+import { normalizeChapterTitleLine, requirementsCoverageIssues, tenderRequirementCheckItems, tenderRequirementSemanticQuery } from './tenderRequirements';
+import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
+import { parameterConceptConflictIssues } from './parameterConceptConflicts';
+import { constructionSystemCoverageIssues } from './constructionSystemCoverage';
+import { dangerousApplicabilityIssues } from './dangerousApplicability';
+import { stagePhrasingIssues } from './stagePhrasing';
+import { emergencySectionDepthIssues } from './emergencySectionDepth';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, TenderRequirementModel, ValidationIssue } from './types';
 
 export async function buildStandardFinalValidationIssues(input: {
@@ -29,40 +35,65 @@ export async function buildStandardFinalValidationIssues(input: {
   tenderRequirements?: TenderRequirementModel;
   /** 评分项要求↔章节语义相似度函数（本地 bge 余弦），变体表述响应兜底 */
   requirementsSimilarity?: (leftText: string, rightText: string) => number;
-  /** 总量口径语义分类器（round-13）：事实反查的口径归属语义复核，不可用时降级近邻窗口正则门控 */
-  factTokenScopeClassifier?: FactTokenScopeClassifier;
-  /** 专业深度语义分类器（round-14）：章节专业深度/缺项/套话/闭环/依赖的语义判定，不可用时静默跳过（零误伤） */
-  professionalDepthClassifier?: ProfessionalDepthClassifier;
+  /** 总量口径语义分类器（round-13）：事实反查的口径归属语义复核（本地 bge 恒可用） */
+  factTokenScopeClassifier: FactTokenScopeClassifier;
+  /** 专业深度语义分类器（round-14）：章节专业深度/缺项/套话/闭环/依赖的语义判定（本地 bge 恒可用） */
+  professionalDepthClassifier: ProfessionalDepthClassifier;
 }): Promise<ValidationIssue[]> {
   const factVerification = await generatedFactVerificationIssuesAsync(input.markdown, input.factsModel, { scopeClassifier: input.factTokenScopeClassifier });
+  // W4/P3 评分项要求正文级语义检测：要求项 ↔（章节标题 + 正文句）同闭包 embedding，
+  // 正文句采样与 documentIntegrityChecks.bodySentencesForSemantic 同口径（历史缺陷：只查章节标题，
+  // 正文未落位而标题语义接近即误判为已响应）；语义模型恒可用，空输入由 buildSemanticSimilarity 返回恒零函数
+  const requirementQueries = tenderRequirementCheckItems(input.tenderRequirements).map(({ item }) => tenderRequirementSemanticQuery(item));
+  const requirementChapterLines = input.markdown.split(/\n/u).filter(line => /^#{2,4}\s/u.test(line.trim())).map(line => normalizeChapterTitleLine(line)).filter(Boolean).slice(0, 80);
+  const requirementBodySentences = bodySentencesForSemantic(input.markdown);
+  const requirementsSimilarityForCoverage = await buildSemanticSimilarity(requirementQueries, [...requirementChapterLines, ...requirementBodySentences]);
+  // 评分条目标题语义兑底专用闭包：evaluationCriteriaCoverageIssues 以条目标题原文为查询 key，
+  // 必须与构建侧同口径（历史缺陷：误传 requirementsSimilarity——前附表条款闭包缓存 key 与条目标题不一致，语义兑底恒 0）
+  const evaluationCriteriaSimilarity = await buildSemanticSimilarity(input.evaluationCriteriaItems || [], requirementChapterLines);
   // 预计算全部章节的专业深度语义分析（同一章节文本被多个校验器复用，只嵌入一次）；
-  // 嵌入失败/空文本返回 undefined 的章节不入 Map，消费方按缺失跳过（零误伤，不得用全 false 替身）
-  const analyses = input.professionalDepthClassifier
-    ? new Map((await Promise.all(input.chapters.map(async chapter => [chapter.title, await input.professionalDepthClassifier!.analyze(chapter.content)] as const)))
-      .filter((entry): entry is [string, ProfessionalDepthAnalysis] => Boolean(entry[1])))
-    : undefined;
-  // 概况复述语义兑底：结构召回“本项目为”句 + bge 余弦 vs 概况章正文；
-  // 嵌入不可用时 overviewRecapIssues 静默跳过（零误伤：判定不了就不判）
+  // 空文本章节返回 undefined 不入 Map（输入边界：无内容可分析，消费方按缺失跳过，不得用全 false 替身）
+  const analyses = new Map((await Promise.all(input.chapters.map(async chapter => [chapter.title, await input.professionalDepthClassifier.analyze(chapter.content)] as const)))
+    .filter((entry): entry is [string, ProfessionalDepthAnalysis] => Boolean(entry[1])));
+  // 概况复述语义兑底：结构召回“本项目为”句 + bge 余弦 vs 概况章正文；空输入由恒零函数承接
   const recapCandidates = overviewRecapCandidates(input.markdown);
-  const overviewSimilarity = recapCandidates.sentences.length > 0 && recapCandidates.overviewBody
-    ? await buildSemanticSimilarity(recapCandidates.sentences, [recapCandidates.overviewBody])
-    : undefined;
+  const overviewSimilarity = await buildSemanticSimilarity(recapCandidates.sentences, recapCandidates.overviewBody ? [recapCandidates.overviewBody] : []);
   return [
-    ...(input.promptDocumentRules?.forbidToc ? [] : [...tocHierarchyIssues(input.markdown), ...tocBodyConsistencyIssues(input.markdown)]),
+    ...(input.promptDocumentRules?.forbidToc ? [] : [...tocHierarchyIssues(input.markdown), ...tocBodyConsistencyIssues(input.markdown), ...tocThirdLevelCompletenessIssues(input.markdown)]),
     ...headingDuplicateIssues(input.markdown),
-    ...evaluationCriteriaCoverageIssues(input.markdown, input.evaluationCriteriaItems || [], { semanticSimilarity: input.requirementsSimilarity }),
-    ...requirementsCoverageIssues(input.markdown, input.tenderRequirements, { semanticSimilarity: input.requirementsSimilarity }),
+    ...evaluationCriteriaCoverageIssues(input.markdown, input.evaluationCriteriaItems || [], { semanticSimilarity: evaluationCriteriaSimilarity }),
+    ...await requirementsCoverageIssues(input.markdown, input.tenderRequirements, { semanticSimilarity: requirementsSimilarityForCoverage, bodyTexts: requirementBodySentences }),
     ...fabricatedStartDateIssues(input.markdown, input.factsModel),
     ...fieldValueMismatchIssues(input.markdown, input.factsModel),
     ...areaArithmeticIssues(input.markdown),
     ...resourceConsistencyIssues(input.markdown),
-    ...supportSystemConflictIssues(input.markdown),
+    // h13：节点工期口径互查（基坑支护/封顶/装饰多套第N日口径）
+    ...nodeScheduleConsistencyIssues(input.markdown),
+    // h13：跨节数值口径冲突（XPS/垫层/变压器/模板周转/砌块/灭火器/潜水泵/急救箱确定性锚点）
+    ...crossSectionNumericConflictIssues(input.markdown),
+    // h13：桩基表述残留（地基与基础无桩基工序但全文残留桩基表述）
+    ...foundationFormResidueIssues(input.markdown),
+    // h13d：基本信息表「计划工期」字段违约词校验（工期行误填违约条款文字）
+    ...basicInfoScheduleFieldIssues(input.markdown),
+    ...await supportSystemConflictIssues(input.markdown),
     ...dangerousListConsistencyIssues(input.markdown),
-    ...sixHundredPercentCoverageIssues(input.markdown),
-    ...selfUnderminingCandidateIssues(input.markdown),
+    ...await sixHundredPercentCoverageIssues(input.markdown),
+    ...await selfUnderminingCandidateIssues(input.markdown),
     ...paragraphOpeningRepeatIssues(input.markdown),
+    // Q8 叠词重复表述（L1 封闭结构提取 + 确定性去重）
+    ...repeatedWordIssues(input.markdown),
+    // Q3 商务条款数据入正文（商务词封闭集，徽光阁实测暂列金额 60 万入正文）
+    ...commercialDataInBodyIssues(input.markdown),
     ...overviewRecapIssues(input.markdown, { semanticSimilarity: overviewSimilarity }),
     ...closurePhraseDensityCapIssues(input.markdown),
+    // C1 参数概念多口径冲突（bge 概念自组织聚类 + 同簇数值冲突）
+    ...await parameterConceptConflictIssues(input.markdown),
+    // C2 内部话术语义锚点泄漏（bge 句子级锚点匹配 + 精确词兜底）
+    ...await internalTerminologyAnchorIssues(input.markdown),
+    // C3 招标范围工程系统零覆盖（章节标题义务提取 + 正文词面覆盖，确定性判定）
+    ...constructionSystemCoverageIssues(input.chapters),
+    // C4 危大工程兜底适用性（前提参数阈值判定 + 辨识区别名覆盖，确定性判定）
+    ...dangerousApplicabilityIssues(input.markdown),
     ...innovationTechCoverageIssues(input.markdown, input.effectiveChapters || input.template.chapters || []),
     ...instructionLikeHeadingIssues(input.markdown),
     ...formalHeadingHierarchyIssues(input.markdown),
@@ -74,7 +105,7 @@ export async function buildStandardFinalValidationIssues(input: {
     ...professionalScoreIssues(input.chapters, analyses),
     ...genericProfessionalContentIssues(input.chapters, analyses),
     ...managementMeasureNumberIssues(input.chapters, analyses),
-    ...closedLoopDensityIssues(input.markdown),
+    ...await closedLoopDensityIssues(input.markdown),
     ...crossChapterConsistencyIssues(input.markdown, input.factsModel, input.scopeConflicts, analyses),
     ...processSpecConflictIssues(input.markdown, input.factsModel),
     ...evidenceUsageCoverageIssues(input.markdown, input.factsModel),
@@ -91,11 +122,17 @@ export async function buildStandardFinalValidationIssues(input: {
     ...documentDeliveryScoreIssues(input.markdown, input.chapters, input.factsModel, analyses),
     ...factVerification,
     ...duplicateBasicInfoIssues(input.markdown),
-    ...formalStyleIssues(input.markdown),
+    ...await formalStyleIssues(input.markdown),
     ...tertiaryHeadingIssues(input.markdown),
     ...minChapterSectionIssues(input.chapters),
-    ...preciseFactUsageIssues(input.markdown, input.factsModel, input.chapters),
-    ...boqPlacementIssues(input.markdown, input.chapters, input.factsModel),
+    // Q11 事实落位（关键参数抽查）：字面匹配 + 本地 bge 语义兜底
+    ...await preciseFactUsageIssues(input.markdown, input.factsModel, input.chapters),
+    // Q1 清单落位：字面匹配 + 本地 bge 语义兜底，落位率 <60% 升 error 进修复循环
+    ...await boqPlacementIssues(input.markdown, input.chapters, input.factsModel),
+    // Q5 施工阶段划分口径（L1 提取阶段划分句 + bge 语义聚类互异簇 → error）
+    ...await stagePhrasingIssues(input.markdown),
+    // C5 应急预案小节深度门槛（≥300 字 + 组织/流程/物资三要素，标题召回 + bge 语义判定）
+    ...await emergencySectionDepthIssues(input.markdown),
     ...boqRowTraceIssues(buildBoqRowTraces(input.markdown, input.factsModel)),
     ...drawingReferenceIssues(input.markdown, input.factsModel),
     ...webEvidenceLeakageIssues(input.markdown),
@@ -105,5 +142,8 @@ export async function buildStandardFinalValidationIssues(input: {
     ...plannedAutoSpecGateIssues(input.markdown, input.template),
     ...plannedStructureIssues(input.markdown, input.template),
     ...promptDocumentRuleIssues(input.markdown, input.promptDocumentRules),
+    // round-18 E11：安徽省属地适配与政策合规（创优目标/四节一环保量化/工伤保险），
+    // 排在末尾使修复循环 slice 截断时让位高优先级 blocker；round-20 S1 已加语义判定（async）
+    ...await localAdaptationKeywordIssues(input.markdown, input.factsModel),
   ];
 }

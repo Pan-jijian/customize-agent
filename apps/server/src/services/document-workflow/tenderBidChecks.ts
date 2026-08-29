@@ -1,3 +1,5 @@
+import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
+
 /**
  * 招标技术标确定性检查层（对标《施工组织设计全维度校验提示词（修订完整版）》判定标尺）。
  *
@@ -19,18 +21,14 @@ export function vagueResponseHits(markdown: string) {
     .map(phrase => ({ phrase, count: markdown.split(phrase).length - 1 }));
 }
 
-// ── 2. 模板化套话检测：空泛词 + 通用模板句式 + 套话密度三档 ──
-/** 通用模板固定句式（跨项目可替换、无本项目专属参数） */
-export const TEMPLATE_FILLER_SENTENCE_RES = [
-  /一般来说/u, /通常情况下/u, /常规施工/u, /按照规范施工/u, /严格按规范/u,
-  /视情况而定/u, /适当(?:调整|安排)/u, /满足设计要求/u, /确保工程质量/u,
-] as const;
-
-/** 空泛虚词（附录一第 1 类 + 无效修饰词抽样，短语级避免误伤正常表述） */
-export const EMPTY_FILLER_WORDS = [
-  '精心组织', '科学统筹', '精益求精', '全力保障', '高效推进', '一流水平',
-  '完善体系', '最大限度', '显著提升', '大力落实', '严格把控', '充分确保',
-  '现代化管理', '加强管理', '提高意识', '强化监督', '持续完善', '提质增效',
+// ── 2. 模板化套话检测：套话语义原型 + 套话密度三档（bge 余弦判定，无词表） ──
+/** 套话语义原型（跨项目可替换、无本项目专属参数的空泛表述基准） */
+export const FILLER_SEMANTIC_QUERIES = [
+  '精心组织、科学管理，确保工程质量',
+  '严格执行相关规范和设计要求',
+  '根据实际情况适当调整施工安排',
+  '建立健全管理体系，加强过程管理',
+  '全力保障项目顺利推进',
 ] as const;
 
 export type TemplatingLevel = 'heavy' | 'medium' | 'light';
@@ -38,7 +36,7 @@ export type TemplatingLevel = 'heavy' | 'medium' | 'light';
 export interface FillerDensityReport {
   /** 核心段落总句数（≥12 字正文句） */
   totalSentences: number;
-  /** 套话句数（含空泛词/通用模板句式/模糊应答词） */
+  /** 套话句数（与套话语义原型 bge 余弦 ≥ 阈值的句子 + 模糊应答词命中句） */
   fillerSentences: number;
   /** 套话占比 */
   ratio: number;
@@ -47,16 +45,19 @@ export interface FillerDensityReport {
 }
 
 /** 套话密度统计：核心章节（全文口径，评分器可传核心段落子集）套话句占比 */
-export function fillerDensityReport(markdown: string): FillerDensityReport {
+export async function fillerDensityReport(
+  markdown: string,
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<FillerDensityReport> {
   const sentences = markdown
     .split(/\n+/u)
     .filter(line => line.trim() && !/^\s*(#{1,6}\s+|\||[-*+]\s|>)/u.test(line))
     .flatMap(line => line.split(/[。；;]/u))
     .map(sentence => sentence.trim())
     .filter(sentence => sentence.length >= 12);
+  const fillerSimilarity = await buildSemanticSimilarity(sentences, [...FILLER_SEMANTIC_QUERIES], embedDocuments);
   const fillerSentences = sentences.filter(sentence =>
-    EMPTY_FILLER_WORDS.some(word => sentence.includes(word))
-    || TEMPLATE_FILLER_SENTENCE_RES.some(pattern => pattern.test(sentence))
+    FILLER_SEMANTIC_QUERIES.some(query => fillerSimilarity(sentence, query) >= SEMANTIC_COVERAGE_THRESHOLD)
     || VAGUE_RESPONSE_PHRASES.some(phrase => sentence.includes(phrase)),
   ).length;
   const ratio = sentences.length ? fillerSentences / sentences.length : 0;
@@ -64,12 +65,15 @@ export function fillerDensityReport(markdown: string): FillerDensityReport {
   return { totalSentences: sentences.length, fillerSentences, ratio, level };
 }
 
-// ── 3. 措施五要素闭合（方案＋流程＋责任人＋时间节点＋验收标准，缺 2 项以上判不完整） ──
-export const MEASURE_PLAN_RE = /(?:制定|编制|建立|明确|采用|执行).{0,15}(?:方案|制度|措施|预案)/u;
-export const MEASURE_PROCESS_RE = /工序|流程|步骤|顺序|工艺/u;
-export const MEASURE_ROLE_RE = /项目经理|技术负责人|总工程师|项目负责人|施工员|质检员|质量员|安全员|专职安全员|材料员|资料员|测量员|试验员|电工|文明施工管理员|专业工长|班组长|监理工程师/u;
-export const MEASURE_FREQUENCY_RE = /每日|每天|每周|每月|每季度|每旬|每\s*\d+\s*天|不少于\s*\d+\s*次|24\s*小时|随时/u;
-export const MEASURE_ACCEPTANCE_RE = /验收|整改|复查|销项|闭环|复验|复核|检查合格|合格后/u;
+// ── 3. 措施五要素闭合（方案＋流程＋责任人＋时间节点＋验收标准，bge 语义判定，缺 2 项以上判不完整） ──
+/** 五要素语义原型（各要素的典型表述基准，bge 余弦 ≥ 阈值判定要素存在） */
+export const FIVE_ELEMENT_SEMANTIC_QUERIES = {
+  plan: '制定专项施工方案与管理制度，明确技术措施',
+  process: '施工工序流程与工艺步骤顺序',
+  role: '由项目经理、技术负责人等岗位人员分工负责',
+  frequency: '每日、每周等检查频次与时间节点安排',
+  acceptance: '经检查验收合格后整改销项闭环',
+} as const;
 
 export interface FiveElementBlockStats {
   blocks: number;
@@ -77,26 +81,57 @@ export interface FiveElementBlockStats {
   completeBlocks: number;
   /** 缺责任人或缺时间节点的块数（docx L93：缺这两要素判措施不完整） */
   incompleteBlocks: number;
+  /** 闭环三要素齐全块数（责任人＋检查频次＋整改闭环，供可落地性闭环密度检测复用同一批嵌入） */
+  closedLoopBlocks: number;
 }
 
-/** 措施五要素闭合统计：按空行分块（≥30 字），五要素命中 ≥4 项为闭合块 */
-export function fiveElementBlockStats(markdown: string): FiveElementBlockStats {
+/** 措施五要素闭合统计：按空行分块（≥30 字），五要素 bge 命中 ≥4 项为闭合块 */
+export async function fiveElementBlockStats(
+  markdown: string,
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<FiveElementBlockStats> {
   const blocks = markdown.split(/\n{2,}/u).filter(block => block.trim().length >= 30);
+  const elementQueries = Object.values(FIVE_ELEMENT_SEMANTIC_QUERIES);
+  const elementSimilarity = await buildSemanticSimilarity(blocks, elementQueries, embedDocuments);
+  const hasElement = (block: string, query: string) =>
+    elementSimilarity(block, query) >= SEMANTIC_COVERAGE_THRESHOLD;
+  // L2 确定性三要素词面前置判定（bge 语义判定前）：岗位/频次/闭环三类词面属封闭词表，
+  // 词面命中即可确定要素存在（bge 对长块嵌入式判定在块粒度放大时漏判——合肥师范实测
+  // 17 块 0 闭环、可落地性 0 分误报：块内「项目经理每周组织…质检员复查销项」词面三要素齐全）。
+  const ROLE_WORD_RE = /项目经理|技术负责人|施工员|质检员|安全员|材料员|资料员|测量员|劳资员|班组长|监理工程师|试验员/u;
+  const FREQUENCY_WORD_RE = /每日|每天|每周|每月|每季度|每批|不少于\s*\d+\s*次|至少\s*\d+\s*次|每周\s*\d+\s*次|每日\s*\d+\s*次|每\s*\d+\s*日/u;
+  const CLOSURE_WORD_RE = /整改|复查|销项|复验|闭环|返工/u;
+  const hasDeterministicElement = (block: string, query: string): boolean | undefined => {
+    if (query === FIVE_ELEMENT_SEMANTIC_QUERIES.role && !ROLE_WORD_RE.test(block)) return false;
+    if (query === FIVE_ELEMENT_SEMANTIC_QUERIES.role && ROLE_WORD_RE.test(block)) return true;
+    if (query === FIVE_ELEMENT_SEMANTIC_QUERIES.frequency && !FREQUENCY_WORD_RE.test(block)) return false;
+    if (query === FIVE_ELEMENT_SEMANTIC_QUERIES.frequency && FREQUENCY_WORD_RE.test(block)) return true;
+    if (query === FIVE_ELEMENT_SEMANTIC_QUERIES.acceptance && !CLOSURE_WORD_RE.test(block)) return false;
+    if (query === FIVE_ELEMENT_SEMANTIC_QUERIES.acceptance && CLOSURE_WORD_RE.test(block)) return true;
+    return undefined;
+  };
+  const judgeElement = (block: string, query: string) => {
+    const deterministic = hasDeterministicElement(block, query);
+    return deterministic !== undefined ? deterministic : hasElement(block, query);
+  };
   let completeBlocks = 0;
   let incompleteBlocks = 0;
+  let closedLoopBlocks = 0;
   for (const block of blocks) {
-    const hits = [MEASURE_PLAN_RE, MEASURE_PROCESS_RE, MEASURE_ROLE_RE, MEASURE_FREQUENCY_RE, MEASURE_ACCEPTANCE_RE]
-      .filter(pattern => pattern.test(block)).length;
+    const hits = elementQueries.filter(query => judgeElement(block, query)).length;
     if (hits >= 4) completeBlocks += 1;
-    else if (!MEASURE_ROLE_RE.test(block) || !MEASURE_FREQUENCY_RE.test(block)) incompleteBlocks += 1;
+    else if (!judgeElement(block, FIVE_ELEMENT_SEMANTIC_QUERIES.role) || !judgeElement(block, FIVE_ELEMENT_SEMANTIC_QUERIES.frequency)) incompleteBlocks += 1;
+    if (judgeElement(block, FIVE_ELEMENT_SEMANTIC_QUERIES.role)
+      && judgeElement(block, FIVE_ELEMENT_SEMANTIC_QUERIES.frequency)
+      && judgeElement(block, FIVE_ELEMENT_SEMANTIC_QUERIES.acceptance)) closedLoopBlocks += 1;
   }
-  return { blocks: blocks.length, completeBlocks, incompleteBlocks };
+  return { blocks: blocks.length, completeBlocks, incompleteBlocks, closedLoopBlocks };
 }
 
-// ── 4. 重难点对策模板化专项检测（归因＋量化目标占比 <50% 判重度模板化，docx L94/L156） ──
-/** 归因分析表述：成因/风险来源（而非仅复述现象） */
-export const DIFFICULTY_ATTRIBUTION_RE = /因为|由于|成因|风险来源|主要风险|难点在于|系.*(?:导致|造成)|因.{0,20}(?:深厚|水位|地质|临近|邻近|狭小|交叉)/u;
-/** 量化控制目标：数值 + 单位/频次 */
+// ── 4. 重难点对策模板化专项检测（归因 bge 语义判定＋量化目标结构判定，占比 <50% 判重度模板化，docx L94/L156） ──
+/** 归因分析语义原型：成因/风险来源表述基准（而非仅复述现象） */
+export const ATTRIBUTION_SEMANTIC_QUERY = '分析该工程难点的成因与风险来源';
+/** 量化控制目标：数值 + 单位/频次（结构判定，保留正则） */
 export const QUANTIFIED_TARGET_RE = /\d+(?:\.\d+)?\s*(?:mm|cm|m|米|℃|%|kN|MPa|次|天|小时|h|Hz|m³)/u;
 
 export interface DifficultyCountermeasureReport {
@@ -125,14 +160,18 @@ export function extractKeyDifficultySection(markdown: string): string {
 }
 
 /** 重难点对策模板化检测：按条目（空行分段）统计"归因＋量化目标"双达标占比 */
-export function difficultyCountermeasureReport(markdown: string): DifficultyCountermeasureReport {
+export async function difficultyCountermeasureReport(
+  markdown: string,
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<DifficultyCountermeasureReport> {
   const section = extractKeyDifficultySection(markdown);
   const entries = section.split(/\n{2,}/u).filter(block => block.trim().length >= 20);
+  const attributionSimilarity = await buildSemanticSimilarity(entries, [ATTRIBUTION_SEMANTIC_QUERY], embedDocuments);
   let attributed = 0;
   let quantified = 0;
   let bothCount = 0;
   for (const entry of entries) {
-    const hasAttribution = DIFFICULTY_ATTRIBUTION_RE.test(entry);
+    const hasAttribution = attributionSimilarity(entry, ATTRIBUTION_SEMANTIC_QUERY) >= SEMANTIC_COVERAGE_THRESHOLD;
     const hasTarget = QUANTIFIED_TARGET_RE.test(entry);
     if (hasAttribution) attributed += 1;
     if (hasTarget) quantified += 1;

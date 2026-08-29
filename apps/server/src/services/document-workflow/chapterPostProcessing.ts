@@ -2,6 +2,7 @@ import type { DocumentEvidence } from './types';
 import { cleanEvidenceText } from './evidence';
 import { documentTextLength } from './budget';
 import { displayChapterTitle } from './outline';
+import { hasProcessSequenceExpression } from './utils';
 import { criticalSectionBlockerMinChars as criticalSectionBlockerMinCharsFromSpec, isCriticalDeepSectionTitle } from './writingSpec';
 
 export function sectionContentBody(content: string) {
@@ -383,12 +384,13 @@ export function sectionStructureIssue(sectionTitle: string, content: string) {
     const blockBody = sectionContentBody(block);
     if (majorContentPollutionIssue(blockBody)) return `${sectionTitle} 存在脏事实或标题污染`;
     if (packageBlocks.some(item => /施工流程[:：][\s\S]*?(未尽事宜|本项目为|总建筑面积|保留现状|专业施工内容统筹|招标文件列明|招标范围|安全生产考核合格证书|联合体投标|注册建造师)/u.test(item))) return `${sectionTitle} 存在工作包流程污染`;
-    // 工序链箭头硬门：方法段正文至少 1 条箭头工序链且全节箭头数充足，否则判定 Writer 未按“→”串联工序，本轮被拒并把原因反馈给后续重写
-    const arrowChains = (block.match(/→/gu) || []).length;
-    if (arrowChains < Math.max(5, packageBlocks.length) || packageBlocks.some(item => {
+    // 工序顺序表达硬门：工作包方法段/流程段必须有工序顺序表达（箭头链/编号步骤/有序无序列表/顺序词/连接线任一），
+    // 不再强制“→”箭头形式；缺失则判定 Writer 未按工序顺序展开，本轮被拒并把原因反馈给后续重写
+    if (!hasProcessSequenceExpression(block) || packageBlocks.some(item => {
       const method = item.match(/施工方法[:：]([\s\S]*?)(?=\n施工|$)/u)?.[1] || '';
-      return method.trim().length > 0 && !method.includes('→');
-    })) return `${sectionTitle} 存在工作包方法段工序链箭头缺失`;
+      const flow = item.match(/(?:施工流程|工艺流程)[:：]([\s\S]*?)(?=\n施工|$)/u)?.[1] || '';
+      return (method.trim().length > 0 || flow.trim().length > 0) && !hasProcessSequenceExpression(method + flow);
+    })) return `${sectionTitle} 存在工作包工序顺序表达缺失`;
     if (packageBlocks.some(item => {
       const method = item.match(/施工方法[:：]([\s\S]*?)(?=\n施工|$)/u)?.[1] || '';
       if (/安全生产考核合格证书|联合体投标|注册建造师|投标人资格|资质要求|营业执照|安全生产许可证/u.test(method)) return true;
@@ -450,7 +452,7 @@ export function keySectionWritingRequirement(sectionTitle: string) {
   if (/项目主要施工内容/u.test(sectionTitle)) return [
     '关键小节结构要求：必须参照优秀施工组织设计的“主要施工内容”写法，按当前项目资料识别专业工程/分部分项工作包，不得只写综合概述。',
     '每个工作包固定采用段落式三段：施工概况、施工流程、施工方法；不得使用 Markdown 表格，避免导出时产生表格分隔线残留。',
-    '施工概况必须写清对象范围、工程量或规模、材料设备规格、施工部位；施工流程必须用箭头串联工序；施工方法必须写工艺做法、穿插组织、质量验收、检测复试、资料闭环。',
+    '施工概况必须写清对象范围、工程量或规模、材料设备规格、施工部位；施工流程必须有明确的工序顺序表达（形式由模型自然选择：顺序词叙述、编号步骤、有序/无序列表或箭头链均可）；施工方法必须写工艺做法、穿插组织、质量验收、检测复试、资料闭环。',
     '工作包类别必须从资料事实中识别，可覆盖但不限于结构加固、消防、装饰、水电、通风空调、弱电智能化、室外道排、屋面、立面、附属工程。',
   ].join('\n');
   if (/主要分部分项工程施工方案|主要施工方法/u.test(sectionTitle)) return [

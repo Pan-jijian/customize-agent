@@ -9,7 +9,7 @@ import type { DocumentDraftChapter, DocumentFactTrace, DocumentKnowledgeCoverage
  * 不作为线性权重维度，而是对五维加权结果做乘数修正（uniqueness 低于 90 分开始拉低 overall）。
  * 内部质量门禁（error 级：事实安全/污染/结构缺陷）与评分分离，继续通过 blockingIssues 阻断交付置信度。
  */
-export function buildDocumentQualityReport(input: {
+export async function buildDocumentQualityReport(input: {
   markdown: string;
   chapters: DocumentDraftChapter[];
   issues: ValidationIssue[];
@@ -18,14 +18,17 @@ export function buildDocumentQualityReport(input: {
   template?: DocumentTemplate | null;
   /** 参考库同类工程完整五要素块均值（可选）：提供时作为可落地性评分的目标基准 */
   referenceCompleteBlocks?: number;
-}): DocumentQualityReport {
-  const scores = buildTenderBidScores({
+  /** 单测注入的嵌入实现（替代本地模型），生产环境不传 */
+  embedDocuments?: (texts: string[]) => Promise<number[][]>;
+}): Promise<DocumentQualityReport> {
+  const scores = await buildTenderBidScores({
     markdown: input.markdown,
     chapters: input.chapters,
     template: input.template,
     factTraces: input.factTraces,
     issues: input.issues,
     referenceCompleteBlocks: input.referenceCompleteBlocks,
+    embedDocuments: input.embedDocuments,
   });
   const weighted = scores.completeness * 0.30 + scores.specificity * 0.25 + scores.compliance * 0.20
     + scores.executability * 0.15 + scores.normalization * 0.10;
@@ -33,7 +36,7 @@ export function buildDocumentQualityReport(input: {
   const blockingIssues = input.issues.filter(issue => issue.level === 'error').length;
   const deliveryProbability = Math.max(0, Math.min(99, Math.round(overall - blockingIssues * 8)));
   const target = input.knowledgeCoverage.score >= 95 ? 95 : 85;
-  const templating = buildTenderBidTemplatingReport(input.markdown);
+  const templating = await buildTenderBidTemplatingReport(input.markdown, input.embedDocuments);
   return {
     overall,
     deliveryProbability,

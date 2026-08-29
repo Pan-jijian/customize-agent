@@ -100,7 +100,7 @@ export default function GuidePage() {
           templateCount: templatesData.templates.length,
           templateBlockedCount: templateBlockedFlags.filter(blocked => blocked).length,
           recordCount: draftsData.documents.length,
-          completedRecordCount: draftsData.documents.filter(document => document.status === 'completed' || document.status === 'warning').length,
+          completedRecordCount: draftsData.documents.filter(document => document.status === 'completed' || document.status === 'completed_with_issues' || document.status === 'warning').length,
           exportCount: draftsData.documents.reduce((sum, document) => sum + (document.exportReports?.length || 0), 0),
         });
       } catch {

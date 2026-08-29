@@ -1,0 +1,235 @@
+/**
+ * documentIntegrityChecks W2/P1 改造单测：
+ * 六个百分百与本地适配三项的纯语义判定——本地 bge 恒可用（本地 ONNX 推理），判定语义全权由 bge 负责，
+ * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { basicInfoScheduleFieldIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, sixHundredPercentCoverageIssues } from './documentIntegrityChecks';
+import type { DocumentFactsModel } from './types';
+
+vi.mock('./semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
+
+import { buildSemanticSimilarity } from './semanticSimilarity';
+
+const buildSimilarityMock = vi.mocked(buildSemanticSimilarity);
+
+type SimilarityFn = (left: string, right: string) => number;
+
+function mockSimilarity(score: number): void {
+  buildSimilarityMock.mockResolvedValue((() => score) as SimilarityFn);
+}
+
+/** 六项全部覆盖的正文（每项语义 query 与正文句高度同义） */
+const FULL_SIX = [
+  '施工工地周边设置围挡封闭管理，实现工地周边100%围挡。',
+  '物料堆放覆盖防尘，实现物料堆放100%覆盖。',
+  '出入车辆冲洗设施清洗出场，实现出入车辆100%冲洗。',
+  '施工现场场地地面硬化，实现施工现场地面100%硬化。',
+  '湿法作业洒水降尘，实现拆迁工地100%湿法作业。',
+  '渣土车辆密闭运输防止遗撒，实现渣土车辆100%密闭运输。',
+].join('\n');
+
+describe('sixHundredPercentCoverageIssues（W2 纯语义判定）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('六项覆盖 → 无缺陷', async () => {
+    mockSimilarity(0.85);
+    const issues = await sixHundredPercentCoverageIssues(`环保措施\n${FULL_SIX}`);
+    expect(issues).toEqual([]);
+  });
+
+  it('缺项 → 报缺陷', async () => {
+    mockSimilarity(0.1);
+    const issues = await sixHundredPercentCoverageIssues('环保措施\n施工现场加强环保管理。');
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('扬尘治理六个百分百');
+  });
+
+  it('非施组类文档（无扬尘内容）→ 不检测', async () => {
+    mockSimilarity(0.1);
+    const issues = await sixHundredPercentCoverageIssues('本项目为办公室装饰工程。');
+    expect(issues).toEqual([]);
+    expect(buildSimilarityMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('localAdaptationKeywordIssues（W2 纯语义判定）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const hefeiFacts = { project: [{ fieldName: '建设地点', key: '建设地点', value: '合肥市瑶海区' }] } as unknown as DocumentFactsModel;
+
+  it('合肥项目且创优目标/绿色量化/工伤保险均覆盖 → 无缺陷', async () => {
+    mockSimilarity(0.85);
+    const markdown = '质量目标：争创市级优质工程奖、安全文明标准化工地。绿色施工：非传统水源利用率、废弃物回收率等绿色施工量化指标明确。劳务管理：按规定为作业人员办理工伤保险。';
+    const issues = await localAdaptationKeywordIssues(markdown, hefeiFacts);
+    expect(issues).toEqual([]);
+  });
+
+  it('合肥项目缺创优目标 → 报缺陷', async () => {
+    mockSimilarity(0.1);
+    const issues = await localAdaptationKeywordIssues('质量目标：确保工程合格。', hefeiFacts);
+    expect(issues.some(issue => /属地创优目标缺失/u.test(issue.message))).toBe(true);
+  });
+});
+
+describe('resourceConsistencyIssues（h7 劳动力数据一致性 5 模式）', () => {
+  const laborTable = (rows: string[]) => ['| 施工阶段 | 投入人数 |', '| --- | --- |', ...rows].join('\n');
+
+  it('模式 1：正文两处高峰值相差 >30% → 报互斥', () => {
+    const issues = resourceConsistencyIssues('施工高峰期投入150人组织流水作业。主体结构施工高峰期约80人连续施工。');
+    expect(issues.some(issue => /劳动力数据矛盾/u.test(issue.message) && /互斥/u.test(issue.message))).toBe(true);
+  });
+
+  it('模式 1：正文峰值相近 → 不报', () => {
+    expect(resourceConsistencyIssues('施工高峰期投入150人组织流水作业。主体结构施工高峰期约140人连续施工。')).toEqual([]);
+  });
+
+  it('模式 2：两张劳动力表峰值相差 >30% → 报互斥', () => {
+    // 表格块间以空行分隔（Markdown 表格语义：无空行会被聚合为同一表格块）
+    const markdown = [laborTable(['| 基础阶段 | 120 |', '| 主体阶段 | 80 |']), laborTable(['| 装修阶段 | 300 |'])].join('\n\n');
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => /劳动力数据矛盾/u.test(issue.message) && /另一劳动力表峰值/u.test(issue.message))).toBe(true);
+  });
+
+  it('模式 3：正文峰值显著超过表峰值 → 报（保留原口径）', () => {
+    const markdown = [laborTable(['| 基础阶段 | 100 |', '| 主体阶段 | 120 |']), '施工高峰期投入300人组织流水作业。'].join('\n');
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => /超出/u.test(issue.message))).toBe(true);
+  });
+
+  it('模式 4：合计行与明细行之和差 >10% → 报不符', () => {
+    const markdown = laborTable(['| 基础阶段 | 50 |', '| 主体阶段 | 80 |', '| 合计 | 200 |']);
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => /合计行 200 人与明细行之和 130 人/u.test(issue.message))).toBe(true);
+  });
+
+  it('模式 4：合计与明细一致 → 不报', () => {
+    const markdown = laborTable(['| 基础阶段 | 50 |', '| 主体阶段 | 80 |', '| 合计 | 130 |']);
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('模式 5：总工日与峰值×工期不自洽 → 报', () => {
+    const markdown = '本工程总工期540日历天，施工高峰期投入120人。总用工量约90000个工日。';
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => /总工日/u.test(issue.message) && /不自洽/u.test(issue.message))).toBe(true);
+  });
+
+  it('模式 5：总工日量级自洽 → 不报', () => {
+    const markdown = '本工程总工期540日历天，施工高峰期投入120人。总用工量约30000个工日。';
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('岗位配置表（岗位+职责+持证）不视为劳动力表：与分阶段表并存不报假矛盾', () => {
+    // 岗位定员（施工员3人）与劳动力峰值（95人）是两个口径，不得互查
+    const staffTable = ['| 岗位 | 人数 | 主要职责 | 持证要求 |', '| --- | --- | --- | --- |', '| 项目经理 | 1 | 全面负责 | 建造师证 |', '| 施工员 | 3 | 工序组织 | 岗位证书 |'].join('\n');
+    const markdown = [laborTable(['| 基础阶段 | 95 |', '| 主体阶段 | 80 |']), staffTable].join('\n\n');
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('排除岗位表后两张真实劳动力表峰值矛盾仍报（检测能力不削弱）', () => {
+    const markdown = [laborTable(['| 基础阶段 | 95 |']), laborTable(['| 装修阶段 | 26 |'])].join('\n\n');
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => /劳动力数据矛盾/u.test(issue.message) && /另一劳动力表峰值/u.test(issue.message))).toBe(true);
+  });
+});
+
+describe('nodeScheduleConsistencyIssues（h13 节点工期口径互查）', () => {
+  it('同节点两套口径（正序完成式 60 vs 表格式 75）→ 报互斥', () => {
+    const markdown = '第60日完成基坑支护及土方外运。进度计划表：基坑支护及土方外运完成 | 开工后第75天。';
+    const issues = nodeScheduleConsistencyIssues(markdown);
+    expect(issues.some(issue => /节点工期口径矛盾/u.test(issue.message) && /60日 与 75日/u.test(issue.message))).toBe(true);
+  });
+
+  it('倒序锁定式与正序口径矛盾（封顶 300 vs 210）→ 报', () => {
+    const markdown = '第300日完成主体结构封顶。主体封顶节点锁定在开工后第210日。';
+    const issues = nodeScheduleConsistencyIssues(markdown);
+    expect(issues.some(issue => /主体结构封顶/u.test(issue.message) && /300日 与 210日/u.test(issue.message))).toBe(true);
+  });
+
+  it('准备阶段句（场地清表施工准备）不误采为节点', () => {
+    const markdown = '第15日完成场地清表、临建搭设和基坑支护施工准备。第60日完成基坑支护及土方外运。';
+    expect(nodeScheduleConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('同节点两套口径相差 <5 天（取整允许差）→ 不报', () => {
+    const markdown = '第60日完成主体结构封顶。进度计划表：主体结构封顶完成 | 开工后第62天。';
+    expect(nodeScheduleConsistencyIssues(markdown)).toEqual([]);
+  });
+});
+
+describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', () => {
+  it('XPS 厚度 30mm vs 130mm（>20% 差异）→ 报数量矛盾', () => {
+    const markdown = '挤塑聚苯乙烯泡沫塑料板（XPS）30mm。屋面采用130mm厚挤塑聚苯板。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /挤塑聚苯板/u.test(issue.message) && /30mm 与 130mm/u.test(issue.message))).toBe(true);
+  });
+
+  it('垫层混凝土 C15 vs C20（标号类直接互斥）→ 报参数矛盾', () => {
+    const markdown = '垫层混凝土采用C15。基础垫层采用C20混凝土浇筑。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /垫层混凝土强度等级/u.test(issue.message) && /C15C标号 与 C20C标号/u.test(issue.message))).toBe(true);
+  });
+
+  it('并列枚举（50mm/70mm 多规格）→ 豁免不报', () => {
+    const markdown = '挤塑聚苯板（XPS）厚度50mm/70mm两种规格选用。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('同锚点数值差异 ≤20% → 不报', () => {
+    const markdown = '潜水泵8台。现场配置潜水泵7台。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+});
+
+describe('foundationFormResidueIssues（h13 桩基表述残留）', () => {
+  it('地基与基础无桩基工序但全文残留 ≥2 处桩基表述 → 报', () => {
+    const markdown = '### 1.3 地基与基础\n基础垫层采用C15混凝土，底板钢筋绑扎后浇筑C30混凝土。\n\n## 进度计划\n桩基施工阶段投入桩机2台。\n桩基钢筋笼验收按规范执行。';
+    const issues = foundationFormResidueIssues(markdown);
+    expect(issues.some(issue => /桩基表述残留/u.test(issue.message))).toBe(true);
+  });
+
+  it('地基与基础小节含桩基工序词 → 不报', () => {
+    const markdown = '### 1.3 地基与基础\n本工程基础采用钻孔灌注桩，桩基施工投入桩机2台。';
+    expect(foundationFormResidueIssues(markdown)).toEqual([]);
+  });
+
+  it('全文桩基表述 <2 处 → 不报', () => {
+    const markdown = '### 1.3 地基与基础\n基础垫层采用C15混凝土。\n\n桩基钢筋笼按规范验收。';
+    expect(foundationFormResidueIssues(markdown)).toEqual([]);
+  });
+});
+
+describe('basicInfoScheduleFieldIssues（h13d 信息表计划工期字段校验）', () => {
+  it('计划工期行填违约条款文字 → 报错填', () => {
+    const markdown = '| 信息项 | 内容 |\n| --- | --- |\n| 计划工期 | 工期延误56天以上发包人可切除剩余工程量 |';
+    const issues = basicInfoScheduleFieldIssues(markdown);
+    expect(issues.some(issue => /计划工期.*错填/u.test(issue.message))).toBe(true);
+  });
+
+  it('计划工期行填日历天数值 → 不报', () => {
+    const markdown = '| 信息项 | 内容 |\n| --- | --- |\n| 计划工期 | 540个日历天 |';
+    expect(basicInfoScheduleFieldIssues(markdown)).toEqual([]);
+  });
+});
+
+describe('bodySentencesForSemantic（h11b-1 均匀采样）', () => {
+  it('超 400 句长文均匀采样，首尾句均保留（尾部语义覆盖不丢失）', () => {
+    const sentences = Array.from({ length: 401 }, (_, index) => `第${index + 1}条施工措施明确了现场管理要求并落实到岗位责任。`);
+    const markdown = sentences.join('\n');
+    const sampled = bodySentencesForSemantic(markdown);
+    expect(sampled.length).toBeLessThanOrEqual(400);
+    expect(sampled.length).toBeGreaterThan(100);
+    expect(sampled[0]).toContain('第1条');
+    expect(sampled[sampled.length - 1]).toContain('第401条');
+  });
+
+  it('≤400 句短文全量保留', () => {
+    const sentences = Array.from({ length: 30 }, (_, index) => `第${index + 1}条施工措施明确了现场管理要求并落实到岗位责任。`);
+    const sampled = bodySentencesForSemantic(sentences.join('\n'));
+    expect(sampled.length).toBe(30);
+  });
+});

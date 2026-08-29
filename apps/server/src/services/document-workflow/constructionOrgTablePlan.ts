@@ -93,10 +93,10 @@ function tableNecessity(table: ConstructionOrgTableDefinition, chapter: Document
   if ((chapter.tableSections || []).some(section => section === table.title || table.title.includes(section))) return 'must';
   // 章节语义命中（章节标题/小节含模块名或触发词）即视为触发：章节既然承接该模块，对应表格就应输出
   const chapterSemanticHit = table.moduleTitles.some(moduleTitle => text.includes(normalizeText(moduleTitle))) || table.triggerKeywords.some(keyword => text.includes(normalizeText(keyword)));
-  const triggered = graphTriggersTable(table, graphTextIndex, graph) || chapterSemanticHit;
-  if (/危大|安全|进度|工期|质量|资源|人材机|机械|劳动力|材料|新技术|新工艺/u.test(text) && triggered) return 'should';
-  if (triggered) return 'conditional';
-  return 'reference';
+  if (graphTriggersTable(table, graphTextIndex, graph) || chapterSemanticHit) return 'should';
+  // 归属本章的表一律 conditional（由可填性决定输出），不再 reference 过滤丢弃——
+  // 用户反馈正文表格过少，数据密集型内容应多用表格呈现，压制因素仅剩“资料不足填不出”
+  return 'conditional';
 }
 
 function tableFillability(table: ConstructionOrgTableDefinition, graph?: ProjectGraph, canonical?: CanonicalFactModel) {
@@ -123,8 +123,9 @@ function tableOutputDecision(necessity: GovernedTableNecessity, fillability: Ret
   // must/should 一律按 markdown_table 输出：表格是硬性验收项，事实缺失只影响行级取值约束（review notes），不降级为清单或跳过
   if (necessity === 'must') return { shouldOutput: true, outputType: 'markdown_table', decisionReason: '章节必要管控表，按项目资料、图谱事实与投标人编制内容输出。' };
   if (necessity === 'should') return { shouldOutput: true, outputType: 'markdown_table', decisionReason: '项目图谱和章节语义均触发，按资料与编制推导输出。' };
-  if (necessity === 'conditional' && fillability.confirmedFieldCount > 0) return { shouldOutput: true, outputType: 'markdown_table', decisionReason: '资料或章节语义已触发该结构，按已有事实表达。' };
-  return { shouldOutput: false, outputType: 'skip', decisionReason: '非本章核心输出。' };
+  // conditional：按可填性输出（不再要求项目事实字段命中——deriveFromProject/standardAllowed 字段本就按投标人编制填写）
+  if (fillability.canGenerate) return { shouldOutput: true, outputType: 'markdown_table', decisionReason: '章节已承接该管理对象，按已有事实与编制推导输出表格。' };
+  return { shouldOutput: false, outputType: 'skip', decisionReason: '全部事实字段均缺资料支撑，暂不输出。' };
 }
 
 function tableRowSeeds(table: ConstructionOrgTableDefinition, graph?: ProjectGraph, canonical?: CanonicalFactModel): ProjectGraphTablePlan['rowSeeds'] {
@@ -160,8 +161,6 @@ export function buildConstructionOrgTablePlans(input: { chapters: DocumentTempla
         if (!tableBelongsToChapter(table, chapter)) return null;
         const sourceDomains = unique(table.fields.map(field => field.sourceDomain));
         const necessity = tableNecessity(table, chapter, combinedGraphTextIndex, input.projectGraph);
-        // 归属本章但必要性为 reference 的表不纳入计划；required 表永远 must，不会走到 reference
-        if (necessity === 'reference') return null;
         const fillability = tableFillability(table, input.projectGraph, input.canonicalFacts);
         const outputDecision = tableOutputDecision(necessity, fillability);
         const plan: ProjectGraphTablePlan = {

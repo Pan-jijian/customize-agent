@@ -40,7 +40,8 @@ export function selectDocumentGenerationStrategy(input: { template: DocumentTemp
     enableDocumentBudgetExpansion: false,
     enableFinalQualityReview: true,
     globalReviewSamplingRate: globalReviewEnabled && compact ? 0.35 : 1,
-    repairRoundBudget: 3,
+    // 修复轮次预算不再硬编码：由 buildGenerationBudget 按章节数/篇幅/资料量动态计算，
+    // 且章节修复循环内另有收敛判定（连续无进展强制切换策略），预算只作总兜底上限
   };
 }
 
@@ -167,7 +168,7 @@ function applyChapterPatch(input: { content: string; patch: ChapterMarkdownPatch
   return { content: next, applied: next !== input.content };
 }
 
-export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }> }) {
+export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }>; maxTokens?: number }) {
   throwIfAborted(input.signal);
   const repairType = input.repairType || classifyQualityRepairType(input.issues);
   const contextBlock = input.contextChapters?.length
@@ -181,6 +182,7 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     '每个 patch 必须能通过 originalText 或 targetStart/targetEnd 在原章节中唯一定位；replacement 只替换该局部片段。',
     '只修复列出的问题，不得整章重写，不得删除无问题小节，不得改变一级/二级章节结构。',
     '如问题涉及缺少正式表格，replacement 必须包含 Markdown 表名、表头、分隔线和至少一行数据；不得只写“见下表”或空表。',
+    '如问题涉及缺失关键词/要素（缺词补写类），选取相关小节最后一个完整句子作为 originalText，replacement 为该句加补充句，保证定位唯一；不得因“原文找不到该关键词”而放弃产出 patch。',
     '如问题涉及提示词要求的关键词或禁用内容，只在相关段落自然补齐或替换，不得堆砌关键词。',
     '禁止新增证据摘要中没有的信息；无法安全定位的问题不要生成 patch。',
     '返回 JSON：{"patches":[{"originalText":"原局部文本","targetStart":"定位起始文本","targetEnd":"定位结束文本","replacement":"替换后的局部文本","reason":"修复原因"}]}',
@@ -194,7 +196,7 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     '当前章节 Markdown：',
     input.chapter.content,
     contextBlock,
-  ].filter(Boolean).join('\n\n'), { maxTokens: 2200, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
+  ].filter(Boolean).join('\n\n'), { maxTokens: input.maxTokens ?? 3200, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
   throwIfAborted(input.signal);
   let content = input.chapter.content;
   let appliedCount = 0;

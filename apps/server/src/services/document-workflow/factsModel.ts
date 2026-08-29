@@ -10,6 +10,7 @@ import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { callDocumentLlmJson } from './llmClient';
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE } from './parameterPatterns';
 import { stringifyFactValue, throwIfAborted } from './utils';
+import { buildSemanticSimilarity } from './semanticSimilarity';
 
 export function extractFacts(template: DocumentTemplate, evidence: DocumentEvidence[], spec?: AutoDocumentSpecPackage): Record<string, string> {
   const facts: Record<string, string> = {};
@@ -63,17 +64,37 @@ export function extractStructuredTables(evidence: DocumentEvidence[]): Structure
 
 export function fieldExtractionPattern(name: string) {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-  return new RegExp(`${escaped}[：:\\s]+([^\\n，。；;]+)`, 'u');
+  // 规模/工期类字段值常为混合口径长句（“建设规模：总占地面积约10970平方米，单体建筑面积28570.36平方米”、
+  // “计划工期：…起，540日历天”），“，”截断会把值裁成纯占地/无数字口径（round-21 S6 实测：
+  // 截断值“项目总占地面积约10970平方米”进入事实主表首位，确定性修复器以之为建筑总量期望口径，
+  // 把正文正确的 28570.36 反向改成 10970）；此类字段改以句末标点终止，与
+  // extractProjectBasicFactsFromEvidence 的 project_scale 长窗口径一致。
+  // 窗口允许跨行（PDF 复制文本常在数字与单位之间换行，历史缺陷：事实值被截成
+  // “单体建筑面积28570.36平方”缺“米”，正文随之产出缺单位表述）；跨行吞并由
+  // extractStructuredFacts 的空白归一化 + 下一字段名截断兜底
+  const body = /规模|scale|工期|周期/iu.test(name) ? '[^。；;]{2,220}' : '[^\\n，。；;]+';
+  return new RegExp(`${escaped}[：:\\s]+(${body})`, 'u');
 }
 
 export function extractStructuredFacts(evidence: DocumentEvidence[], template: DocumentTemplate, spec?: AutoDocumentSpecPackage): DocumentFact[] {
-  const dynamicPatterns = specFactTargets(template, spec).map(field => ({ field, pattern: fieldExtractionPattern(field.name) }));
+  const dynamicTargets = specFactTargets(template, spec);
+  const dynamicPatterns = dynamicTargets.map(field => ({ field, pattern: fieldExtractionPattern(field.name) }));
+  // 跨行吞并防护：长窗口跨行后可能吞入下一字段名内容（“建设规模：…米\n计划工期：…”），
+  // 值内出现其他字段名+冒号时截断到该字段名之前
+  const otherFieldNames = dynamicTargets.map(field => field.name).filter(Boolean);
   const facts: DocumentFact[] = [];
   for (const item of evidence) {
     for (const { field, pattern } of dynamicPatterns) {
       if (!evidenceSatisfiesSpecField(item, field)) continue;
       const match = item.content.match(pattern);
-      const value = match?.[1]?.trim();
+      let value = match?.[1]?.trim();
+      if (!value) continue;
+      // 跨行空白归一化：修复“28570.36平方\n米”被截成缺“米”的历史缺陷（PDF 数字与单位之间换行）；
+      // round-23 P0-3 补强：PDF 标题标记「###」夹在句中间（“平方\n\n### 米”）时先移除标记再归一化，
+      // 否则值携带“###”进入 canonical 与写作层（实测坏值“28570.36平方2.8”传播至正文表格）
+      value = cleanPdfHeadingNoise(value).replace(/\s+/gu, '');
+      const nextFieldIndex = otherFieldNames.filter(name => name !== field.name).map(name => value!.indexOf(name)).filter(index => index > 0);
+      if (nextFieldIndex.length > 0) value = value.slice(0, Math.min(...nextFieldIndex));
       if (value && value.length <= 220 && !isForbiddenFactValue(DEFAULT_DOCUMENT_DOMAIN_PROFILE, value) && !isDiagnosticFactValue(DEFAULT_DOCUMENT_DOMAIN_PROFILE, value) && !facts.some(fact => fact.fieldId === field.id && fact.value === value)) {
         facts.push({ key: field.name, fieldId: field.id, fieldName: field.name, value, sourceFile: item.filePath, roleId: item.roleId || 'unknown', processingType: item.processingType, confidence: item.score, sourceRef: { filePath: item.filePath, roleId: item.roleId || 'unknown', processingType: item.processingType, sectionTitle: item.sectionTitle } });
       }
@@ -109,7 +130,8 @@ export async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTe
   // 按分数排序取最重要的证据（而非前 maxItems 个）
   const topEvidence = [...evidence].sort((a, b) => b.score - a.score).slice(0, maxItems);
   for (const item of topEvidence) {
-    const content = stringifyFactValue(item.content).replace(/\s+/gu, ' ').slice(0, Math.max(800, Math.floor(maxChars / maxItems)));
+    // round-23 P0-3：LLM 提取输入先清 PDF 标题标记噪声，防止模型面对夹断乱行输出截断坏值
+    const content = cleanPdfHeadingNoise(stringifyFactValue(item.content)).replace(/\s+/gu, ' ').slice(0, Math.max(800, Math.floor(maxChars / maxItems)));
     const part = `文件:${item.filePath}\n角色:${item.roleId || ''}\n处理:${item.processingType || ''}\n内容:${content}`;
     if (sampleParts.length > 0 && chars + part.length > maxChars) break;
     chars += part.length;
@@ -158,19 +180,35 @@ function hasCorruptTextMarkers(text: string) {
   });
 }
 
-function conflictComparableFactValue(value: unknown, profile: DocumentDomainProfile) {
+/** 程序性短语语义原型（h5 事实候选过滤）：投标程序/行政手续类文本基准，bge 余弦 ≥ 阈值判定为程序性文本 */
+const PROCEDURAL_VALUE_PROTOTYPES = [
+  '投标保证金的金额、收款账户名称、开户行与账号',
+  '电子投标文件加密方式与解密方式',
+  '开标时间、开标地点与开标程序',
+  '评标委员会组成与评标办法',
+  '招标人联系人、联系电话、邮箱与地址',
+  '投标文件递交方式与递交截止时间',
+  '空白表格填写说明与上传下载指引',
+  '公共资源交易平台监督管理部门',
+];
+/** 程序性词面特征（召回触发）：命中后经 bge 语义复核才过滤——放行含程序字样的实质条款句（如质量保证金金额） */
+const PROCEDURAL_LEXICAL_HINTS_RE = /签章|盖章|联系人|联系电话|电话|邮箱|解密方式|开标时间|开标地点|评标办法|评标委员会|投标保证金|保证金账户|电子交易系统|空白|填写|上传|下载|递交方式|递交截止|公共资源交易监督管理|监管部门|开评标程序|采购范围|是否|符合/u;
+const PROCEDURAL_VALUE_THRESHOLD = 0.6;
+
+function conflictComparableFactValue(value: unknown, profile: DocumentDomainProfile, isProcedural?: (raw: string) => boolean) {
   const raw = stringifyFactValue(value).trim();
   if (isDiagnosticFactValue(profile, raw) || isForbiddenFactValue(profile, raw)) return '';
   if (hasCorruptTextMarkers(raw)) return '';
-  if (/签章|盖章|联系人|联系电话|电话|邮箱|解密|开标|评标|保证金|交易系统|空白|填写|上传|下载|递交/u.test(raw)) return '';
+  // 纯结构过滤（表格行分隔/标题标记/引用跳转/内部摘要标记）保留正则：属结构判定而非语义判断
   if (/\|/u.test(raw) || /^#+\s*/u.test(raw)) return '';
-  if (/见(?:招标公告|投标人须知|前附表|本项目|补疑)|资料参数行摘要|公共资源交易监督管理|开评标程序|监管部门/u.test(raw)) return '';
-  if (/是否|符合|采购范围|规定的投标截止时间|电子交易系统/u.test(raw) && /\d{3,}/u.test(raw)) return '';
+  if (/见(?:招标公告|投标人须知|前附表|本项目|补疑)|资料参数行摘要/u.test(raw)) return '';
   const duration = raw.match(/\d+\s*日历天/u)?.[0]?.replace(/\s+/gu, '');
   if (duration && /工期|日历天|开工日期|竣工/u.test(raw)) return duration;
   const normalized = normalizedFactValue(raw);
   if (!normalized || normalized.length > 80) return '';
   if (!/[\d年月日%]|合格|一星|二星|三星|总价合同|单价合同|承台|框架|装配式/u.test(raw)) return '';
+  // 程序性词面命中 → bge 语义复核：与程序性原型余弦 ≥0.6 才过滤，实质条款句放行
+  if (PROCEDURAL_LEXICAL_HINTS_RE.test(raw) && isProcedural?.(raw)) return '';
   return normalized;
 }
 
@@ -180,14 +218,18 @@ function conflictComparableField(key: string, profile: DocumentDomainProfile) {
   return /项目名称|工程名称|招标人|建设地点|建筑面积|结构形式|层数|工期|质量标准|合同价格形式|绿色建筑等级|投标有效期|质保期/u.test(key);
 }
 
-export function detectFactConflicts(facts: DocumentFact[], spec?: AutoDocumentSpecPackage, profile: DocumentDomainProfile = DEFAULT_DOCUMENT_DOMAIN_PROFILE) {
+export async function detectFactConflicts(facts: DocumentFact[], spec?: AutoDocumentSpecPackage, profile: DocumentDomainProfile = DEFAULT_DOCUMENT_DOMAIN_PROFILE, embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<string[]> {
   const conflictKeys = (spec?.factFields.map(field => field.name) || [...new Set(facts.map(fact => fact.fieldName || fact.key))]).filter(key => conflictComparableField(key, profile));
+  // h5 程序性语义复核：词面特征命中的候选值 vs 程序性原型 bge 余弦（语义模型恒可用，空候选由恒零函数承接，无降级分支）
+  const proceduralCandidates = [...new Set(facts.map(fact => stringifyFactValue(fact.value).trim()).filter(raw => PROCEDURAL_LEXICAL_HINTS_RE.test(raw)))];
+  const proceduralSimilarity = await buildSemanticSimilarity(proceduralCandidates, PROCEDURAL_VALUE_PROTOTYPES, embedDocuments);
+  const isProcedural = (raw: string) => PROCEDURAL_VALUE_PROTOTYPES.some(prototype => proceduralSimilarity(raw, prototype) >= PROCEDURAL_VALUE_THRESHOLD);
   const conflicts: string[] = [];
   for (const key of conflictKeys) {
     const items = facts.filter(fact => fact.key === key || fact.fieldName === key || factFieldForLabel(profile, fact.fieldName || fact.key)?.name === key);
     const values = new Map<string, DocumentFact[]>();
     for (const item of items) {
-      const normalized = conflictComparableFactValue(item.value, profile);
+      const normalized = conflictComparableFactValue(item.value, profile, isProcedural);
       if (!normalized) continue;
       values.set(normalized, [...(values.get(normalized) || []), item]);
     }
@@ -197,6 +239,18 @@ export function detectFactConflicts(facts: DocumentFact[], spec?: AutoDocumentSp
     }
   }
   return conflicts.slice(0, 8);
+}
+
+/**
+ * PDF 复制文本标题标记噪声清洗（round-23 P0-3）：PDF 导出文本常把文档标题标记
+ * 「###」插入句子中间（如「28570.36平方\n\n### 米（其中…」），把数字与单位、句子
+ * 拦腰打断。历史缺陷：LLM 提取通道面对乱行文本输出截断坏值「28570.36平方2.8」，
+ * 正则通道停在换行产出缺「米」的「28570.36平方」，canonical 混合口径净化后全链路传播。
+ * 清洗规则：移除 1-6 级标题标记及紧邻空白（含换行），使夹断的句子重新闭合
+ * （「平方\n\n### 米」→「平方米」）；仅移除标记本身，不触碰正文内容。
+ */
+export function cleanPdfHeadingNoise(text: string) {
+  return stringifyFactValue(text).replace(/\s*[#＃]{1,6}\s*/gu, '');
 }
 
 export function normalizeOcrFactText(text: string) {
@@ -254,7 +308,9 @@ export function extractProjectBasicFactsFromEvidence(evidence: DocumentEvidence[
   const facts: DocumentFact[] = [];
   const seen = new Set<string>();
   for (const item of evidence) {
-    const normalizedContent = normalizeOcrFactText(item.content);
+    // round-23 P0-3：正则通道同样先清 PDF 标题标记噪声（“平方\n\n### 米”→“平方米”），
+    // 否则 project_scale pattern [^\n。；;] 停在“平方”后换行，产出缺“米”截断值
+    const normalizedContent = cleanPdfHeadingNoise(normalizeOcrFactText(item.content));
     const lines = normalizedContent.split(/\r?\n/u).flatMap(line => {
       const compact = line.replace(/\s+/gu, ' ').trim();
       return compact.length > 260 ? compact.split(/(?=\d+(?:\.\d+)?\s*[^\s：:]{2,12}[：:])/u) : [compact];
@@ -500,7 +556,38 @@ function cleanFactForPrompt(value: unknown) {
   return stringifyFactValue(value).replace(/\s+/gu, ' ').trim().slice(0, 220);
 }
 
-export function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFact[] = [], missingItems: string[] = [], spec?: AutoDocumentSpecPackage, profile: DocumentDomainProfile = DEFAULT_DOCUMENT_DOMAIN_PROFILE): DocumentFactsModel {
+// 建设规模混合口径拆分：资料“建设规模：项目总占地面积约10970平方米，单体建筑面积28570.36平方米”
+// 是占地+建筑两个口径的混合字段值，直接进事实主表会让写作模型与确定性一致性修复器混淆两个数值
+// （round-21 S6 实测：正文 9 处“总建筑面积 10970㎡”，修复器反向改错 18 处 28570.36→10970）。
+// 拆成“总占地面积”“单体建筑面积”两条独立事实，口径互不污染。
+function splitMixedScaleFacts(facts: DocumentFact[]): DocumentFact[] {
+  const result: DocumentFact[] = [];
+  for (const fact of facts) {
+    const label = `${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`;
+    const value = stringifyFactValue(fact.value);
+    if (/建设规模/u.test(label) && /占地|用地/u.test(value) && /建筑面积/u.test(value)) {
+      const siteStart = value.search(/(?:总)?占地/u);
+      const buildStart = value.search(/(?:单体)?总?建筑面积/u);
+      if (siteStart >= 0 && buildStart > siteStart) {
+        const siteValue = value.slice(siteStart, buildStart).replace(/^[，,、\s]+/u, '').replace(/[，,、\s]+$/u, '').trim();
+        const buildValue = value.slice(buildStart).trim();
+        if (siteValue && buildValue) {
+          // fieldId 处置：占地口径不保留原“建设规模”fieldId——canonical 事实主表按 fieldId 直配字段
+          // （历史缺陷：拆分后“总占地面积=项目总占地面积约10970平方米”仍被识别为 project_scale
+          // 候选并胜出，canonical“建设规模”被污染为占地数值）；建筑侧保留原 fieldId，使
+          // project_scale 字段值稳定落在建筑总量口径上
+          result.push({ ...fact, key: '总占地面积', fieldName: '总占地面积', fieldId: undefined, value: siteValue });
+          result.push({ ...fact, key: '单体建筑面积', fieldName: '单体建筑面积', value: buildValue });
+          continue;
+        }
+      }
+    }
+    result.push(fact);
+  }
+  return result;
+}
+
+export async function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFact[] = [], missingItems: string[] = [], spec?: AutoDocumentSpecPackage, profile: DocumentDomainProfile = DEFAULT_DOCUMENT_DOMAIN_PROFILE): Promise<DocumentFactsModel> {
   const byKeys = (keys: string[]) => facts.filter(fact => keys.some(key => `${fact.key} ${fact.fieldName || ''}`.includes(key)));
   const byProcessing = (type: string) => facts.filter(fact => fact.processingType === type || fact.roleId.includes(type));
   const preciseFacts = facts.filter(fact => {
@@ -510,7 +597,7 @@ export function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFa
       && !isDiagnosticFactValue(profile, text);
   });
   const billFacts = facts.filter(fact => fact.processingType === 'table' || fact.processingType === 'structured_data' || fact.processingType === 'bill_of_quantities' || /bill|boq|table|sheet|data|表格|列表|明细|数据/u.test(`${fact.roleId} ${fact.sourceFile}`));
-  const projectFacts = facts.filter(fact => /项目名称|工程名称|项目编号|招标项目编号|招标人|建设单位|发包人|建设地点|建设规模|招标范围|计划工期|合同工期|周期要求|质量标准|合同估算|投资估算|最高投标限价|招标控制价/u.test(`${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`)).slice(0, 80);
+  const projectFacts = splitMixedScaleFacts(facts.filter(fact => /项目名称|工程名称|项目编号|招标项目编号|招标人|建设单位|发包人|建设地点|建设规模|招标范围|计划工期|合同工期|周期要求|质量标准|合同估算|投资估算|最高投标限价|招标控制价/u.test(`${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`))).slice(0, 80);
   const factIndex = buildEvidenceFactIndex(facts, preciseFacts, billFacts, profile);
   return {
     project: projectFacts,
@@ -527,6 +614,6 @@ export function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFa
     schemaFacts: buildSchemaFacts(facts, spec),
     factIndex,
     missing: [...new Set(missingItems)],
-    conflicts: detectFactConflicts(facts, spec, profile),
+    conflicts: await detectFactConflicts(facts, spec, profile),
   };
 }

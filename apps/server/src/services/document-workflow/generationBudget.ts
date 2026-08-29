@@ -19,17 +19,21 @@ export interface GenerationBudget {
   evidenceFloorChars: number;
   /** 每章证据预算上限（字符，高风险/深召回时使用） */
   evidenceCeilingChars: number;
-  /** Repairer 修复轮次预算上限（P3：超过后转标记问题+门禁阻断） */
+  /** Repairer 每章修复轮次兜底上限（动态计算：base 2 + 篇幅/资料稀疏加成；收敛判定优先于预算截断） */
   repairRoundBudget: number;
+  /** Repairer 文档级总轮次池：各章按需消耗，收敛快的章节让渡预算给问题多的章节（池耗尽或全体收敛才终止修复） */
+  repairPoolBudget: number;
   /** 策略触发原因说明（供进度节点与前端体检报告展示） */
   triggers: string[];
 }
 
 /** 按平均章节目标字数确定每章证据预算区间 */
 function evidenceBudgetRange(avgChapterTarget: number): { floorChars: number; ceilingChars: number } {
-  if (avgChapterTarget >= 6000) return { floorChars: 7000, ceilingChars: 26000 };
-  if (avgChapterTarget >= 3000) return { floorChars: 6000, ceilingChars: 18000 };
-  return { floorChars: 4000, ceilingChars: 12000 };
+  // round-20 S5/W7 P6-1：证据预算三档放开——证据不足是空话灌水的直接原因，完整信息注入优先；
+  // 上限按 env DOCUMENT_EVIDENCE_BUDGET_CEILING 可覆盖（evidencePromptBudgetForTarget 内生效）
+  if (avgChapterTarget >= 6000) return { floorChars: 14000, ceilingChars: 52000 };
+  if (avgChapterTarget >= 3000) return { floorChars: 11000, ceilingChars: 36000 };
+  return { floorChars: 8000, ceilingChars: 24000 };
 }
 
 export function buildGenerationBudget(input: {
@@ -63,7 +67,18 @@ export function buildGenerationBudget(input: {
     return Math.max(1, Math.min(scaled, chapterCount));
   })();
   const { floorChars, ceilingChars } = evidenceBudgetRange(avgChapterTargetSafe);
-  const repairRoundBudget = strategy.repairRoundBudget ?? 3;
+  // 修复轮次预算动态计算（收敛驱动兜底上限）：每章上限 = base 2 + 篇幅加成 + 资料稀疏加成。
+  // 问题4收紧：篇幅加成封顶 1（历史 4 万字文档每章 5-6 轮 + 12 章总池 60+ 轮，空转消耗生成时长）；
+  // 收敛判定与硬止损（连续 4 轮不降即停）优先于预算截断，预算只做空转兜底。
+  // 文档级总池加硬顶：min(每章上限×章数, 2×章数 且 ≥12)——收敛快的章让渡预算，但总量封顶防极端空转
+  const repairRoundBudget = (() => {
+    if (strategy.repairRoundBudget) return strategy.repairRoundBudget;
+    const base = 2;
+    const scaleBoost = input.targetWords >= 20000 ? 1 : 0;
+    const sparseBoost = sparse ? 1 : 0;
+    return Math.max(2, Math.min(4, base + scaleBoost + sparseBoost));
+  })();
+  const repairPoolBudget = Math.min(repairRoundBudget * chapterCount, Math.max(12, chapterCount * 2));
 
   // 触发原因记录（进度节点与前端体检报告共用）
   if (strategy.mode === 'strict') {
@@ -74,8 +89,8 @@ export function buildGenerationBudget(input: {
   if (strategy.mode === 'fast') triggers.push('fast：小文档（≤6000 字且 ≤4 章）全局审查降级为 35% 抽检');
   if (strategy.mode === 'longform') triggers.push('longform：长文档（≥3 万字或 ≥8 章）');
   if (strategy.mode === 'balanced') triggers.push('balanced：常规篇幅文档，标准审查深度');
-  triggers.push(`全章节并行生成（${chapterConcurrency}/${chapterCount} 章同批），审查流水线 ${reviewConcurrency} 路，全局 LLM 并发档位 ${llmConcurrency}，每章证据预算 ${Math.round(floorChars / 1000)}k-${Math.round(ceilingChars / 1000)}k 字符，修复轮次预算 ${repairRoundBudget}`);
-  return { strategy, chapterConcurrency, reviewConcurrency, llmConcurrency, evidenceFloorChars: floorChars, evidenceCeilingChars: ceilingChars, repairRoundBudget, triggers };
+  triggers.push(`全章节并行生成（${chapterConcurrency}/${chapterCount} 章同批），审查流水线 ${reviewConcurrency} 路，全局 LLM 并发档位 ${llmConcurrency}，每章证据预算 ${Math.round(floorChars / 1000)}k-${Math.round(ceilingChars / 1000)}k 字符，修复轮次预算每章 ${repairRoundBudget} 轮（文档级总池 ${repairPoolBudget} 轮，收敛判定优先）`);
+  return { strategy, chapterConcurrency, reviewConcurrency, llmConcurrency, evidenceFloorChars: floorChars, evidenceCeilingChars: ceilingChars, repairRoundBudget, repairPoolBudget, triggers };
 }
 
 export interface GenerationBudgetPreview {

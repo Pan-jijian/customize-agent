@@ -58,8 +58,8 @@ export interface ReferenceQualityProfile {
 /** 工艺参数口径（分支一：英文/符号单位；与质量校验的参数落位校验保持一致） */
 const PARAM_HIT_RE = /(?:\d+(?:\.\d+)?\s*(?:mm|cm|m|㎡|m²|m2|m3|m³|kg|t|MPa|kPa|kN|V|KV|kV|A|天|%)(?![a-zA-Z\u4e00-\u9fa5])|\d+(?:\.\d+)?\s*(?:米|厘米|毫米|吨|千克|公斤|平方米|立方米)(?!\d)|(?:养护|搭接长度|试验压力|间距|偏差|坡度|含水率|压实度|强度等级|标号|厚度|宽度|高度|深度|直径|桩长|桩径))/gu;
 
-/** 工序链：与 chapterPostProcessing 的箭头链口径一致 */
-const ARROW_CHAIN_RE = /→|->/u;
+/** 工序顺序表达：与各验收器放宽后的工序顺序表达口径一致（箭头/编号步骤/列表/顺序词/连接线任一形式） */
+const PROCESS_SEQUENCE_RE = /→|->|=>|按.{0,12}顺序|依次|先后|先.{0,10}后|顺序施工|流水顺序|[\u4e00-\u9fa5]+(?:-|—|～|~)[\u4e00-\u9fa5]+(?:-|—|～|~)[\u4e00-\u9fa5]+/u;
 
 /** 表格标记：正式表格标题行（"XX表/XX清单"结尾）或框线表格 */
 const TABLE_MARK_RE = /^(?:[一二三四五六七八九十\d]+[、.．]?\s*)?[\u4e00-\u9fa5（）()、，A-Za-z0-9+\-·\s]{2,28}(?:表|清单)(?:[:：]|\s*$)/mu;
@@ -326,12 +326,12 @@ export function suggestProjectType(text: string): ReferenceProjectType {
 }
 
 /** 构建参考文件质量画像 */
-export function buildReferenceQualityProfile(text: string): ReferenceQualityProfile {
+export async function buildReferenceQualityProfile(text: string): Promise<ReferenceQualityProfile> {
   const wordCount = text.replace(/\s/gu, '').length;
   const segments = textSegments(text);
   const effectiveWordCount = segments.reduce((sum, segment) => sum + segment.replace(/\s/gu, '').length, 0);
   const paramCount = (text.match(PARAM_HIT_RE) || []).length;
-  const arrowChainSegmentCount = segments.filter(segment => ARROW_CHAIN_RE.test(segment)).length;
+  const arrowChainSegmentCount = segments.filter(segment => PROCESS_SEQUENCE_RE.test(segment)).length;
   const tableCount = countTables(text);
   const { headings, useCnAsChapter } = extractHeadingStructure(text);
   const sectionCount = headings.length;
@@ -345,6 +345,7 @@ export function buildReferenceQualityProfile(text: string): ReferenceQualityProf
   }
   let duplicatedSegmentCount = 0;
   for (const count of skeletonCounts.values()) if (count > 1) duplicatedSegmentCount += count;
+  const fiveElementStats = await fiveElementBlockStats(text);
   return {
     wordCount,
     effectiveWordCount,
@@ -363,6 +364,6 @@ export function buildReferenceQualityProfile(text: string): ReferenceQualityProf
     segmentCount: segments.length,
     arrowChainSegmentCount,
     duplicatedSegmentCount,
-    fiveElementCompleteBlocks: fiveElementBlockStats(text).completeBlocks,
+    fiveElementCompleteBlocks: fiveElementStats.completeBlocks,
   };
 }

@@ -422,6 +422,22 @@ function moduleSectionTitle(catalogModule: ConstructionOrgModule, chapter: Docum
   return catalogModule.title;
 }
 
+/** 每章系统新增小节（H3）预算：超出后模块只注入覆盖要点、不再新增标题（用户反馈章节 60+ 小节零散） */
+const MAX_CHAPTER_SECTIONS = 12;
+
+/** 二字滑窗重叠率：标题语义重合度判定（容忍“劳动力动态投入”与“劳动力投入计划”等表述差异），与表格规划承接判定同口径 */
+function bigramOverlap(left: string, right: string) {
+  const bigrams = (text: string) => {
+    const set = new Set<string>();
+    for (let index = 0; index < text.length - 1; index += 1) set.add(text.slice(index, index + 2));
+    return set;
+  };
+  const target = bigrams(normalizeText(right));
+  const source = [...bigrams(normalizeText(left))];
+  if (source.length === 0) return 0;
+  return source.filter(pair => target.has(pair)).length / source.length;
+}
+
 function hasBroadCarrierChapter(chapters: DocumentTemplateChapter[]) {
   return chapters.some(chapter => /概况|部署|总体|组织|主要施工方案|保障|保证|综合措施|管理体系/u.test(chapter.title) && !/雨季|冬季|高温|防汛|扬尘|噪声|工资|劳务|应急|BIM|智慧|管线|交通导改/u.test(chapter.title));
 }
@@ -441,7 +457,12 @@ export function enrichConstructionOrgOutline(input: { template: DocumentTemplate
   const applicableModules = CONSTRUCTION_ORG_CATALOG.filter(catalogModule => moduleApplies(catalogModule, projectTypes, allText));
   const attached = new Set<string>();
   const report: ConstructionOrgOutlineReport = { attached: [], unattached: [], totals: { attachedModules: 0, sectionCount: 0 } };
-  const enriched = input.chapters.map(chapter => ({ ...chapter, sections: [...(chapter.sections || [])], queries: [...(chapter.queries || [])], requiredFacts: [...(chapter.requiredFacts || [])], tableSections: [...(chapter.tableSections || [])] }));
+  // 记录模板自带小节数：容量预算只约束系统新增标题，模板自带 sections 不受约束
+  const templateSectionCounts = new Map<string, number>();
+  const enriched = input.chapters.map(chapter => {
+    templateSectionCounts.set(chapter.id, (chapter.sections || []).length);
+    return { ...chapter, sections: [...(chapter.sections || [])], queries: [...(chapter.queries || [])], requiredFacts: [...(chapter.requiredFacts || [])], tableSections: [...(chapter.tableSections || [])] };
+  });
 
   for (const catalogModule of applicableModules) {
     const matchingIndexes = enriched
@@ -457,13 +478,26 @@ export function enrichConstructionOrgOutline(input: { template: DocumentTemplate
     if (targetIndex < 0) continue;
     const target = enriched[targetIndex];
     const sectionTitle = moduleSectionTitle(catalogModule, target);
-    // 不设任何容量截断：挂靠由语义锚点决定，细目数量交由下游主题块规划分治处理，
-    // 避免历史缺陷——写死 50 上限静默丢弃尾部模块小节（含评标必查内容）
-    target.sections = uniqueAppend(target.sections, [sectionTitle, ...catalogModule.sectionItems]);
+    // 两级化聚合：模块标题作为唯一新增 H3，sectionItems 降级为“覆盖要点”注入 purpose，
+    // 不再逐个平铺成独立小节（历史缺陷：单章 60+ 小节零散、同义模块重复挂靠）
+    const coveragePoints = catalogModule.sectionItems.map(item => `“${item}”`).join('、');
+    const templateSectionCount = templateSectionCounts.get(target.id) ?? 0;
+    const systemAdded = target.sections.length - templateSectionCount;
+    const systemBudget = Math.max(0, MAX_CHAPTER_SECTIONS - templateSectionCount);
+    // 同章语义去重：与已有小节标题重合（二字滑窗重叠率 ≥0.6）时不新增标题，要点并入已有小节
+    const duplicateSection = target.sections.some(section => bigramOverlap(section, sectionTitle) >= 0.6);
+    const canAddSection = !duplicateSection && systemAdded < systemBudget;
+    if (canAddSection) target.sections = uniqueAppend(target.sections, [sectionTitle]);
     target.queries = uniqueAppend(target.queries, [catalogModule.title, ...catalogModule.queries]);
     target.requiredFacts = uniqueAppend(target.requiredFacts, catalogModule.facts);
     target.tableSections = uniqueAppend(target.tableSections, catalogModule.tableSections || []);
-    target.purpose = `${target.purpose}；系统已按施工组织设计标准模块库自动挂靠“${catalogModule.title}”，仅在本章范围内展开与章节语义、项目类型和资料事实合理相关的内容，禁止机械塞入无关内容。`;
+    if (canAddSection) {
+      target.purpose = `${target.purpose}；系统已按施工组织设计标准模块库挂靠“${catalogModule.title}”小节，该小节须覆盖以下要点（可在小节内以段落或列表自然展开，无需再单列小节）：${coveragePoints}；仅在本章范围内展开与章节语义、项目类型和资料事实合理相关的内容，禁止机械塞入无关内容。`;
+    } else if (duplicateSection) {
+      target.purpose = `${target.purpose}；模块“${catalogModule.title}”与本章已有小节主题重合，不新增小节标题，其覆盖要点并入该小节：${coveragePoints}。`;
+    } else {
+      target.purpose = `${target.purpose}；模块“${catalogModule.title}”因本章小节数已达容量上限不新增标题，其覆盖要点并入相近小节（可在小节内以段落或列表自然展开）：${coveragePoints}。`;
+    }
     attached.add(catalogModule.id);
     report.attached.push({ chapterId: target.id, chapterTitle: target.title, moduleId: catalogModule.id, moduleTitle: catalogModule.title, kind: matchedTargetIndex !== undefined ? 'matched' : 'fallback' });
   }
@@ -472,11 +506,17 @@ export function enrichConstructionOrgOutline(input: { template: DocumentTemplate
   for (const catalogModule of missingMandatory) {
     const targetIndex = defaultTargetChapterIndex(catalogModule, enriched);
     const target = enriched[targetIndex];
-    target.sections = uniqueAppend(target.sections, [catalogModule.title, ...catalogModule.sectionItems]);
+    const sectionTitle = moduleSectionTitle(catalogModule, target);
+    const coveragePoints = catalogModule.sectionItems.map(item => `“${item}”`).join('、');
+    const templateSectionCount = templateSectionCounts.get(target.id) ?? 0;
+    const systemBudget = Math.max(0, MAX_CHAPTER_SECTIONS - templateSectionCount);
+    const duplicateSection = target.sections.some(section => bigramOverlap(section, sectionTitle) >= 0.6);
+    const canAddSection = !duplicateSection && target.sections.length - templateSectionCount < systemBudget;
+    if (canAddSection) target.sections = uniqueAppend(target.sections, [sectionTitle]);
     target.queries = uniqueAppend(target.queries, [catalogModule.title, ...catalogModule.queries]);
     target.requiredFacts = uniqueAppend(target.requiredFacts, catalogModule.facts);
     target.tableSections = uniqueAppend(target.tableSections, catalogModule.tableSections || []);
-    target.purpose = `${target.purpose}；系统已补足施工组织设计必备模块“${catalogModule.title}”，需以合理挂靠方式呈现，不改变用户一级章节。`;
+    target.purpose = `${target.purpose}；系统已补足施工组织设计必备模块“${catalogModule.title}”${canAddSection ? '' : '（不新增小节标题，要点并入相近小节）'}，须以合理挂靠方式呈现并覆盖以下要点：${coveragePoints}；不改变用户一级章节。`;
     attached.add(catalogModule.id);
     report.attached.push({ chapterId: target.id, chapterTitle: target.title, moduleId: catalogModule.id, moduleTitle: catalogModule.title, kind: 'fallback' });
   }

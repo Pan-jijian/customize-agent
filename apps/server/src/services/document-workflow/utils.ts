@@ -5,6 +5,26 @@ import { documentTextLength } from './budget';
 // 深度口径必须向下包含这些同级 H4，否则只提取到标题后的概述段，关键小节永远“深度不足”并触发破坏性修复
 export const WORK_PACKAGE_SECTION_RE = /项目主要施工内容|主要分部分项工程施工方案|主要施工方法/u;
 
+/**
+ * 工序顺序表达检测：施工流程/施工方法的工序顺序表达形式不限——箭头链、编号步骤、
+ * 有序/无序列表、顺序词引导、连接线链任一即可，不再强制“→”箭头。
+ * 用户要求写法合理即可（箭头链/列表/连接线均可），验收器只判“有无工序顺序表达”，不判形式。
+ */
+export function hasProcessSequenceExpression(text: string): boolean {
+  if (!text) return false;
+  // 箭头链（→、->、=>）
+  if (/→|->|=>/u.test(text)) return true;
+  // 顺序词引导（按…顺序 / 依次 / 先后 / 先…后…）
+  if (/按.{0,12}顺序|依次|先后|先.{0,12}(?:后|再|然后|最后)|顺序施工|流水顺序/u.test(text)) return true;
+  // 编号步骤序列：行首 1. / 1、 / （1） / ① 式编号，至少 2 步
+  if ((text.match(/(?:^|\n)\s*(?:\d+[.、]|[（(]\d+[）)]|[一二三四五六七八九十]+[、.]|第[一二三四五六七八九十]+步)/gmu) || []).length >= 2) return true;
+  // 列表序列：行首 - / * / • 列表符，至少 2 行
+  if ((text.match(/(?:^|\n)\s*(?:[-*•]|\d+\.)\s+\S/gmu) || []).length >= 2) return true;
+  // 连接线链：中文环节以 - / — / ～ / ~ 串联，至少 3 个环节（如“基层清理-放线定位-分层摊铺”）
+  if (/[\u4e00-\u9fa5]+(?:-|—|～|~)[\u4e00-\u9fa5]+(?:-|—|～|~)[\u4e00-\u9fa5]+/u.test(text)) return true;
+  return false;
+}
+
 /** 小节标题去重归一化：剥离编号前缀与括号标注后比较（“1.3.2 室外雨污分流改造”与“1.3.12 室外雨污分流改造”视为同一要点）。
  * 供块成稿质检的重复 H4 检测与成稿后处理的重复小节去重共用，避免两处口径漂移。 */
 export function normalizeSubsectionTitleForDedup(title: string): string {

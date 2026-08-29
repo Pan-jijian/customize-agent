@@ -45,12 +45,12 @@ function duplicationScore(generated: number, reference: number): number {
 }
 
 /** 对生成文档做质量对标（按内容自动识别工程类型，取参考库同类型基准） */
-export function benchmarkGeneratedMarkdown(markdown: string): QualityBenchmarkResult | undefined {
+export async function benchmarkGeneratedMarkdown(markdown: string): Promise<QualityBenchmarkResult | undefined> {
   if (!markdown || markdown.trim().length < 500) return undefined;
   const projectType = suggestProjectType(markdown);
   const benchmark = referenceBenchmarkForType(projectType);
   if (!benchmark) return undefined;
-  const generated = buildReferenceQualityProfile(markdown);
+  const generated = await buildReferenceQualityProfile(markdown);
   const reference = benchmark.profile;
   // 工序链目标：参考文件该特征普遍偏弱，取 max(参考值, 8%) 作为最低目标（生成侧有门禁要求）
   const arrowTarget = Math.max(reference.arrowChainCoverage, 0.08);

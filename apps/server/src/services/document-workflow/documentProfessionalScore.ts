@@ -106,13 +106,13 @@ function tableScore(chapters: DocumentDraftChapter[], markdown = ''): { score: n
 }
 
 /** 5. 废话率（反比）：叠加 docx 套话密度口径（核心章节套话占比 ≤10%，超标线性扣分） */
-function fillerScore(chapters: DocumentDraftChapter[]): { score: number; detail: string } {
+async function fillerScore(chapters: DocumentDraftChapter[]): Promise<{ score: number; detail: string }> {
   const fillerIssues = fillerParagraphIssues(chapters);
   const fillerHits = chapters.reduce((total, chapter) => {
     const count = (chapter.content.match(/本小节围绕|交底覆盖率按100%|24小时内形成整改责任|按施工准备→过程实施→检查验收→问题整改→资料归档的闭环组织|按作业条件确认→技术交底→过程实施|依据本项目已确认资料中的项目边界/gu) || []).length;
     return total + count;
   }, 0);
-  const filler = fillerDensityReport(chapters.map(chapter => chapter.content).join('\n'));
+  const filler = await fillerDensityReport(chapters.map(chapter => chapter.content).join('\n'));
   // docx：套话占比 ≤10% 为达标线；超标部分线性扣分（每超 10 个百分点扣 40 分），叠加深套话短语命中扣分
   const ratioPenalty = Math.max(0, filler.ratio - 0.1) * 400;
   const score = clamp(100 - fillerHits * 15 - fillerIssues.filter(issue => issue.level === 'error').length * 25 - ratioPenalty);
@@ -142,12 +142,12 @@ function reviewResponseScore(chapters: DocumentDraftChapter[], markdown = ''): {
   return { score, detail: `招标硬性要求响应 ${hit.length}/${responseItems.length} 项${reviewIssues.length ? `（未响应：${reviewIssues.map(issue => issue.message.replace(/未检测到对招标硬性要求的响应：/u, '')).join('、')}）` : ''}` };
 }
 
-export function buildProfessionalScoreReport(chapters: DocumentDraftChapter[], markdown = '', options: { templating?: TenderBidTemplatingReport } = {}): ProfessionalScoreReport {
+export async function buildProfessionalScoreReport(chapters: DocumentDraftChapter[], markdown = '', options: { templating?: TenderBidTemplatingReport } = {}): Promise<ProfessionalScoreReport> {
   const structure = structureScore(chapters);
   const factLanding = factLandingScore(chapters);
   const processParameter = processParameterScore(chapters);
   const table = tableScore(chapters, markdown);
-  const filler = fillerScore(chapters);
+  const filler = await fillerScore(chapters);
   const duplication = duplicationScore(chapters);
   const reviewResponse = reviewResponseScore(chapters, markdown);
 

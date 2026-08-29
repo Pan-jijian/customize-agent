@@ -300,12 +300,13 @@ export default function DocumentsPage() {
     const h = Math.floor(m / 60), rm = m % 60;
     return rm ? `${h} 小时 ${rm} 分` : `${h} 小时`;
   };
-  const draftStatusColor = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? 'success' : s === 'warning' ? 'warning' : s === 'failed' ? 'error' : s === 'aborted' ? 'default' : 'processing';
-  const draftStatusText = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? '已完成' : s === 'warning' ? '需复核' : s === 'failed' ? '失败' : s === 'aborted' ? '已中止' : '生成中';
-  const isDraftGenerating = (s: GeneratedDocumentRecord['status']) => s !== 'completed' && s !== 'warning' && s !== 'failed' && s !== 'aborted';
+  const draftStatusColor = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? 'success' : s === 'completed_with_issues' ? 'warning' : s === 'warning' ? 'warning' : s === 'failed' ? 'error' : s === 'aborted' ? 'default' : 'processing';
+  const draftStatusText = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? '已完成' : s === 'completed_with_issues' ? '已完成(待复核)' : s === 'warning' ? '需复核' : s === 'failed' ? '失败' : s === 'aborted' ? '已中止' : '生成中';
+  const isDraftGenerating = (s: GeneratedDocumentRecord['status']) => s !== 'completed' && s !== 'completed_with_issues' && s !== 'warning' && s !== 'failed' && s !== 'aborted';
   const canResumeDraft = (item?: GeneratedDocumentRecord | null) => Boolean(item) && (
     item!.status === 'failed'
     || item!.status === 'aborted'
+    || item!.status === 'completed_with_issues'
     || (item!.status === 'warning' && Boolean(item!.checkpointChapters?.length) && /继续生成|重新生成|中断|卡住|未完成|门禁|阻断/u.test(item!.error || item!.warningIssues?.join('；') || item!.draft?.exportGate?.blockingIssues?.map(issue => issue.message).join('；') || ''))
     || Boolean(item!.draft?.exportGate && item!.draft.exportGate.passed === false)
   );
@@ -396,7 +397,7 @@ export default function DocumentsPage() {
     trackStepTiming(steps); // U2：记录节点进入/离开 process 的时间，渲染耗时 chip
     setFlowSteps(steps); setActiveFlowKey(activeKey); setLoading(isDraftGenerating(record.status)); setSnap(steps, activeKey, isDraftGenerating(record.status));
     if (record.status === 'failed' || record.status === 'aborted') setDrawerMode('workflow');
-    if ((record.status === 'completed' || record.status === 'warning') && record.draft) {
+    if ((record.status === 'completed' || record.status === 'completed_with_issues' || record.status === 'warning') && record.draft) {
       setDraft(record.draft); setContent(record.editedMarkdown || record.markdown); setDrawerMode('editor'); setFlowSteps([]); setActiveFlowKey(null);
       setExportReports(record.exportReports || []); // B3：同步归档的导出闭环报告
     }
@@ -772,7 +773,7 @@ export default function DocumentsPage() {
       }
       applyGeneratedRecordToWorkflow(document);
       if (document.updatedAt !== lastUpdatedAt) { lastUpdatedAt = document.updatedAt; lastChangedAt = Date.now(); }
-      if ((document.status === 'completed' || document.status === 'warning') && document.draft) return document;
+      if ((document.status === 'completed' || document.status === 'completed_with_issues' || document.status === 'warning') && document.draft) return document;
       if (document.status === 'failed' || document.status === 'aborted') throw new Error(document.error || (document.status === 'aborted' ? '生成已中止' : '生成失败'));
       if (Date.now() - startedAt > maxWaitMs || Date.now() - lastChangedAt > maxNoProgressMs) throw new Error('生成任务疑似卡住，请点击继续生成或重新生成');
       await new Promise(r => window.setTimeout(r, 1500));
@@ -1113,7 +1114,7 @@ export default function DocumentsPage() {
                   <div className="mt-1">
                       {item.status === 'completed' ? <CheckCircleOutlined className="text-xl text-[var(--colorOk)]" />
                         : item.status === 'failed' || item.status === 'aborted' ? <CloseCircleOutlined className="text-xl text-[var(--colorDanger)]" />
-                        : item.status === 'warning' ? <SafetyCertificateOutlined className="text-xl text-[var(--colorWarning)]" />
+                        : item.status === 'warning' || item.status === 'completed_with_issues' ? <SafetyCertificateOutlined className="text-xl text-[var(--colorWarning)]" />
                         : <SyncOutlined spin className="text-xl text-blue-500" />}
                   </div>
 

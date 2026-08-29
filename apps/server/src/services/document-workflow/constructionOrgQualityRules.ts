@@ -1,6 +1,7 @@
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplateChapter, ValidationIssue } from './types';
 import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgCatalog';
 import { DIVISION_PROCESS_LABEL_RE, DIVISION_SECTION_QUALITY, DIVISION_SECTION_RE } from './writingSpec';
+import { hasProcessSequenceExpression } from './utils';
 
 export const CONSTRUCTION_ORG_GENERIC_PHRASES = [
   '精心组织', '科学管理', '精益求精', '全力保障', '高效推进', '力争一流',
@@ -214,7 +215,7 @@ export function constructionOrgMajorContentIssues(chapters: DocumentDraftChapter
     if (dirtyPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在脏事实或标题污染`, suggestion: '清理“资料内容事实”、嵌入的 ### 标题、粗体伪标题、未尽事宜、招标范围罗列等污染内容，只保留可交付正文。' });
     if (weakMethodPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在 ${weakMethodPackages.length} 个专业工程施工方法过弱`, suggestion: '施工方法不能只是专业工程名称或专业范围罗列，必须写资料已确认的工程量、材料、检测、调试、验收或记录要求。' });
     if (dirtyProcessPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在 ${dirtyProcessPackages.length} 个专业工程流程污染`, suggestion: '施工流程只能写工序链条，不能混入项目概况、总建筑面积、招标范围、未尽事宜等说明性事实。' });
-    if (!/→|->/u.test(content)) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容缺少箭头式施工流程`, suggestion: '施工流程应写成“测量放线→基层处理→工序实施→检查验收→资料归档”等链条。' });
+    if (!hasProcessSequenceExpression(content)) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容缺少工序顺序表达`, suggestion: '施工流程须有明确的工序顺序表达，形式由模型自然选择、不做统一要求：顺序词叙述（先测量放线，再基层处理，随后工序实施，然后检查验收，最后资料归档）、编号步骤、有序/无序列表或箭头链均可。' });
     const parameterCount = (content.match(/\d+(?:\.\d+)?\s*(?:㎡|m²|mm|cm|m|MPa|kPa|%|日历天|层|台|套|个|项|批|次|小时|年)/giu) || []).length;
     const factDetailCount = (content.match(/工程量|材料|设备|范围|流程|验收|检测|复试|调试|隐蔽|检验批|资料|记录|系统|部位|接口|规格|标准/gu) || []).length;
     if (parameterCount < 2 || factDetailCount < 12) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容事实细度不足：参数 ${parameterCount} 项、事实细节 ${factDetailCount} 项`, suggestion: '主要施工内容必须落到资料已确认的范围、工程量/材料、流程、验收和记录要求；资料未明确的工具、型号、参数不得编造。' });
@@ -292,17 +293,14 @@ export function constructionOrgDivisionSectionIssues(chapters: DocumentDraftChap
     const incompletePackages = packageBlocks.filter(block => !block.includes('施工概况') || !DIVISION_PROCESS_LABEL_RE.test(block) || !block.includes('施工方法'));
     // 脏事实：资料原文残留、嵌入标题、粗体伪标题、空话套话（与专项提示词禁止项同口径）
     const dirtyPackages = packageBlocks.filter(block => /资料内容事实|#{2,6}\s+|\*\*[^*]+\*\*|未尽事宜|按规范施工|结合实际执行|招标范围还包含/u.test(block));
-    // 箭头工序链：每个分项方案至少 1 条 ≥4 环节链条（方法段优先，方法段无链回退流程段——
-    // 施工组织设计规范中工序链写在工艺流程是标准写法，九度实测补写稿链全部落在“施工流程”行，
-    // 方法段提取正则又拿不到“**施工方法**：”粗体形态冒号后内容，10 个分项被误报缺链）
+    // 工序顺序表达检测：每个分项方案的施工方法段或流程段必须有工序顺序表达
+    // （箭头链/编号步骤/有序无序列表/顺序词/连接线任一形式，不再强制“→”）
     const weakChainPackages = packageBlocks.filter(block => {
       // 粗体伪标签兼容：验收器直读最终 markdown，标签归一化虽已覆盖成稿链，双保险容忍粗体形态
       const method = block.match(/(?:\*\*)?施工方法(?:\*\*)?[:：]([\s\S]*?)(?=\n施工|$)/u)?.[1] || '';
-      const methodChains = method.match(/[^\s→]{2,}(?:→[^\s→]{2,}){3,}/gu) || [];
-      if (methodChains.length > 0) return false;
+      if (method.trim() && hasProcessSequenceExpression(method)) return false;
       const flow = block.match(/(?:\*\*)?(?:施工流程|工艺流程)(?:\*\*)?[:：]([\s\S]*?)(?=\n(?:施工|工艺)|$)/u)?.[1] || '';
-      const flowChains = flow.match(/[^\s→]{2,}(?:→[^\s→]{2,}){3,}/gu) || [];
-      return flowChains.length === 0;
+      return !hasProcessSequenceExpression(flow);
     });
     // 参数密度：每个分项方案正文至少 4 个工艺参数（数字+单位，或“间距/偏差/坡度/养护”等工艺词+数字）；
     // 单位表含 N/颗/樘/扇：门窗维修类分项“启闭力不大于50N”“螺钉固定不少于2颗”属有效工艺参数（九度实测缺陷：正则漏判报参数不足）
@@ -319,7 +317,7 @@ export function constructionOrgDivisionSectionIssues(chapters: DocumentDraftChap
     }
     if (incompletePackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 分部分项工程施工方案存在 ${incompletePackages.length} 个分项方案缺少施工概况/工艺流程/施工方法`, suggestion: '每个分项方案必须分别包含“施工概况、工艺流程、施工方法”，不能只在整节中出现一次。' });
     if (dirtyPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 分部分项工程施工方案存在脏事实或空话污染`, suggestion: '清理“资料内容事实”、嵌入的 ### 标题、粗体伪标题、未尽事宜、“按规范施工/结合实际执行”式空话，只保留可交付正文。' });
-    if (weakChainPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 分部分项工程施工方案存在 ${weakChainPackages.length} 个分项方案施工方法缺少箭头工序链`, suggestion: `每个分项方案的施工方法段至少 1 条不少于 ${DIVISION_SECTION_QUALITY.minArrowChainLength} 个环节的“→”工序链（如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”）。` });
+    if (weakChainPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 分部分项工程施工方案存在 ${weakChainPackages.length} 个分项方案施工方法缺少工序顺序表达`, suggestion: '每个分项方案的施工方法段/施工流程段必须有明确的工序顺序表达，形式由模型自然选择（顺序词叙述、编号步骤、有序列表或箭头链均可，如“先进行基层清理，再放线定位，随后分层摊铺，然后碾压，最后做压实度检测并验收”），保证工序先后顺序清晰。' });
     if (weakParamPackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 分部分项工程施工方案存在 ${weakParamPackages.length} 个分项方案工艺参数不足（少于 ${DIVISION_SECTION_QUALITY.minParamsPerPackage} 个）`, suggestion: '每个分项方案必须落位至少 4 个具体工艺参数（mm、MPa、间距、偏差、坡度、养护天数、试验压力、搭接长度等），参数来自绑定材料或行业通用规范值，不得编造。' });
     // 分项深度下限：门窗维修、立面修补等小分项常被一句话带过（真实生成缺陷：12 个分项中 2~3 个仅 40~80 字），
     // 每分项必须写足三段式正文，过短按结构缺陷进入修复循环补写

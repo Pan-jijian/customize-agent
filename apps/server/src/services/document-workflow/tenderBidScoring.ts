@@ -1,6 +1,7 @@
 import type { DocumentDraftChapter, DocumentFactTrace, DocumentTemplate, ValidationIssue } from './types';
 import { isActionableTraceFact } from './documentFactTrace';
 import { documentTextLength } from './budget';
+import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
 import {
   fillerDensityReport,
   vagueResponseHits,
@@ -36,37 +37,35 @@ export const FORBIDDEN_EMPTY_PHRASES = [
  * 保留“定期检查/系统性”等语境敏感词——评分不扣分（避免误伤正常表述），但提示词层面继续禁写。 */
 export const FORBIDDEN_PROMPT_PHRASES = [...FORBIDDEN_EMPTY_PHRASES, '定期检查', '系统性'];
 
-/** 案例落地句式三要素（责任岗位 + 检查频次 + 整改闭环），供可落地性评分与提示词共用 */
-export const CLOSED_LOOP_ROLE_RE = /项目经理|技术负责人|总工程师|项目负责人|施工员|质检员|质量员|安全员|专职安全员|材料员|资料员|测量员|试验员|电工|文明施工管理员|专业工长/u;
-export const CLOSED_LOOP_FREQUENCY_RE = /每日|每天|每周|每月|每季度|每旬|每\s*\d+\s*天|不少于\s*\d+\s*次|定期/u;
-export const CLOSED_LOOP_CLOSURE_RE = /整改|复查|销项|闭环|复验|回访/u;
+/** 闭环三要素（责任岗位＋检查频次＋整改闭环）：由 tenderBidChecks.fiveElementBlockStats
+ * 的 role/frequency/acceptance 语义原型复用同一批 bge 嵌入，本文件不再保留要素正则 */
 
-/** 资料完整性强制模块：危大/扬尘/实名制/工资保障/应急/绿色施工 6 项各 1 分 */
-const MANDATORY_MODULES: RegExp[] = [
-  /危大|危险性较大/u,
-  /扬尘/u,
-  /实名制/u,
-  /农民工工资|工资专用账户|工资保证金|工资支付|银行代发/u,
-  /应急预案|应急演练|应急响应/u,
-  /绿色施工/u,
-];
+/** 资料完整性强制模块语义原型：危大/扬尘/实名制/工资保障/应急/绿色施工 6 项各 1 分 */
+const MANDATORY_MODULE_QUERIES = [
+  '危险性较大的分部分项工程安全管理',
+  '扬尘污染防治措施',
+  '建筑工人实名制管理',
+  '农民工工资专用账户与工资支付保障',
+  '生产安全事故应急预案与应急演练',
+  '绿色施工与四节一环保措施',
+] as const;
 
-/** 合规性强制项：危大闭环链 6 环节 + 三级配电两级保护 3 项 + 强制制度 4 项，各 1 分 */
-const COMPLIANCE_ITEMS: RegExp[] = [
-  /辨识|识别/u,
-  /专项施工方案|专项方案/u,
-  /专家论证|论证|审批/u,
-  /交底/u,
-  /监测|监控量测|观测/u,
-  /验收/u,
-  /三级配电/u,
-  /两级保护/u,
-  /漏电保护/u,
-  /实名制/u,
-  /工资专用账户|工资专户|银行代发/u,
-  /应急预案/u,
-  /绿色施工/u,
-];
+/** 合规性强制项语义原型：危大闭环链 6 环节 + 三级配电两级保护 3 项 + 强制制度 4 项，各 1 分 */
+const COMPLIANCE_ITEM_QUERIES = [
+  '危险源辨识与风险识别评估',
+  '编制专项施工方案',
+  '组织专家论证并履行审批程序',
+  '对作业人员进行安全技术交底',
+  '施工过程监测与监控量测',
+  '分部分项工程验收',
+  '三级配电系统',
+  '两级漏电保护装置',
+  '漏电保护器与接地保护',
+  '实名制考勤与人员管理',
+  '农民工工资专用账户银行代发',
+  '应急预案编制与响应',
+  '绿色施工措施与评价',
+] as const;
 
 /** 编制规范性：复用已有确定性检查（目录层级/表格规范/跨章数据一致/结构完整）的消息口径 */
 const NORMALIZATION_ISSUE_RE = /目录|层级|编号|表格|表头|分隔线|跨章|数据一致|数值口径|页码|空小节|缺少|缺失|缺节/u;
@@ -86,8 +85,13 @@ function headingTitles(markdown: string) {
     .filter(title => title.length >= 2);
 }
 
-/** 资料完整性：章节齐全度（模板章节标题命中率）+ 强制模块覆盖（6 项各 1 分） */
-function completenessScore(markdown: string, chapters: DocumentDraftChapter[], template?: DocumentTemplate | null) {
+/** 资料完整性：章节齐全度（模板章节标题命中率）+ 强制模块覆盖（6 项各 1 分，块级 bge 语义判定） */
+function completenessScore(
+  markdown: string,
+  chapters: DocumentDraftChapter[],
+  template: DocumentTemplate | null | undefined,
+  anyBlockMatches: (query: string) => boolean,
+) {
   const titles = headingTitles(markdown);
   let chapterHitRate = 1;
   const templateChapters = template?.chapters || [];
@@ -99,8 +103,8 @@ function completenessScore(markdown: string, chapters: DocumentDraftChapter[], t
     const hits = chapters.filter(chapter => titles.some(actual => actual.includes(normalizeHeadingTitle(chapter.title)) || normalizeHeadingTitle(chapter.title).includes(actual))).length;
     chapterHitRate = hits / chapters.length;
   }
-  const moduleHits = MANDATORY_MODULES.filter(pattern => pattern.test(markdown)).length;
-  const moduleRate = moduleHits / MANDATORY_MODULES.length;
+  const moduleHits = MANDATORY_MODULE_QUERIES.filter(anyBlockMatches).length;
+  const moduleRate = moduleHits / MANDATORY_MODULE_QUERIES.length;
   return Math.round((chapterHitRate * 0.55 + moduleRate * 0.45) * 100);
 }
 
@@ -122,9 +126,9 @@ function specificityScore(markdown: string, chapters: DocumentDraftChapter[], fa
  * 合规性：危大闭环链（辨识→方案→审批论证→交底→监测→验收）+ 三级配电两级保护 + 实名制/工资专户/应急/绿色施工；
  * 按 docx 判定标尺叠加：危大两步确认法（类别匹配+参数分级，10%）与应急预案八部分结构（10%）
  */
-function complianceScore(markdown: string) {
-  const hits = COMPLIANCE_ITEMS.filter(pattern => pattern.test(markdown)).length;
-  const base = hits / COMPLIANCE_ITEMS.length;
+function complianceScore(markdown: string, anyBlockMatches: (query: string) => boolean) {
+  const hits = COMPLIANCE_ITEM_QUERIES.filter(anyBlockMatches).length;
+  const base = hits / COMPLIANCE_ITEM_QUERIES.length;
   const dangerous = dangerousTwoStepCheck(markdown);
   const dangerousRate = dangerous.twoStepComplete ? 1
     : dangerous.categories.length > 0 && dangerous.graded ? 0.6
@@ -133,20 +137,11 @@ function complianceScore(markdown: string) {
   return Math.round((base * 0.8 + dangerousRate * 0.1 + emergency.coverage * 0.1) * 100);
 }
 
-/** 闭环句式分块统计（与可落地性评分同口径）：按空行分块（≥30 字），同一块内三要素齐全才算闭环块 */
-export function closedLoopBlockStats(markdown: string) {
-  const blocks = markdown.split(/\n{2,}/u).filter(block => block.trim().length >= 30);
-  const closedLoopBlocks = blocks.filter(block =>
-    CLOSED_LOOP_ROLE_RE.test(block) && CLOSED_LOOP_FREQUENCY_RE.test(block) && CLOSED_LOOP_CLOSURE_RE.test(block),
-  ).length;
-  return { blocks: blocks.length, closedLoopBlocks };
-}
-
 /** 可落地性：措施五要素闭合块密度（方案＋流程＋责任人＋时间节点＋验收标准，docx L93）
  * 目标基准优先取参考库同类工程完整五要素块均值（人工样本实测画像，对标口径），
  * 无参考库样本时回退每 1500 字 1 块的历史口径 */
-function executabilityScore(markdown: string, referenceCompleteBlocks?: number) {
-  const { blocks, completeBlocks } = fiveElementBlockStats(markdown);
+async function executabilityScore(markdown: string, referenceCompleteBlocks?: number) {
+  const { blocks, completeBlocks } = await fiveElementBlockStats(markdown);
   const target = Math.max(6, Math.ceil(referenceCompleteBlocks ?? documentTextLength(markdown) / 1500));
   const density = Math.min(1, completeBlocks / target);
   const fiveElementRate = blocks ? completeBlocks / blocks : 0;
@@ -164,10 +159,9 @@ function normalizationScore(issues: ValidationIssue[]) {
  * 低雷同性：空话禁用词命中率 + 模糊应答词（附录一第 3 类，零出现要求）+ 套话密度超标扣分
  * （docx L156：核心章节套话占比≤10%）+ 重复句式率（≥12 字符正文句去标点后重复比例）
  */
-function uniquenessScore(markdown: string) {
+function uniquenessScore(markdown: string, filler: Awaited<ReturnType<typeof fillerDensityReport>>) {
   const forbiddenHits = FORBIDDEN_EMPTY_PHRASES.filter(phrase => markdown.includes(phrase)).length;
   const vagueHitCount = vagueResponseHits(markdown).reduce((sum, hit) => sum + hit.count, 0);
-  const filler = fillerDensityReport(markdown);
   const fillerPenalty = Math.max(0, filler.ratio - 0.1) * 100;
   const sentences = markdown
     .split(/\n+/u)
@@ -218,8 +212,11 @@ export interface TenderBidTemplatingReport {
   difficultyHeavyTemplated: boolean;
 }
 
-export function buildTenderBidTemplatingReport(markdown: string): TenderBidTemplatingReport {
-  const filler = fillerDensityReport(markdown);
+export async function buildTenderBidTemplatingReport(
+  markdown: string,
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<TenderBidTemplatingReport> {
+  const filler = await fillerDensityReport(markdown, embedDocuments);
   const vagueHits = vagueResponseHits(markdown);
   const sentences = markdown
     .split(/\n+/u)
@@ -228,7 +225,7 @@ export function buildTenderBidTemplatingReport(markdown: string): TenderBidTempl
     .map(sentence => sentence.replace(/[\s，,、:：（）()【】[\]《》“”"'`]/gu, ''))
     .filter(sentence => sentence.length >= 12);
   const duplicateRate = sentences.length ? (sentences.length - new Set(sentences).size) / sentences.length : 0;
-  const difficulty = difficultyCountermeasureReport(markdown);
+  const difficulty = await difficultyCountermeasureReport(markdown, embedDocuments);
   const residue = crossProjectResidueHits(markdown);
   // 重难点对策双达标占比 <50% 直接判重度模板化（docx L156）；否则按套话密度三档
   const level: TemplatingLevel = difficulty.heavyTemplated ? 'heavy' : filler.level;
@@ -248,7 +245,7 @@ export function buildTenderBidTemplatingReport(markdown: string): TenderBidTempl
   };
 }
 
-export function buildTenderBidScores(input: {
+export async function buildTenderBidScores(input: {
   markdown: string;
   chapters: DocumentDraftChapter[];
   template?: DocumentTemplate | null;
@@ -256,13 +253,25 @@ export function buildTenderBidScores(input: {
   issues: ValidationIssue[];
   /** 参考库同类工程完整五要素块均值（可选）：提供时作为可落地性目标基准 */
   referenceCompleteBlocks?: number;
-}): TenderBidScores {
+  /** 单测注入的嵌入实现（替代本地模型），生产环境不传 */
+  embedDocuments?: (texts: string[]) => Promise<number[][]>;
+}): Promise<TenderBidScores> {
+  // 强制模块与合规项共享同一批块嵌入（≥30 字段落块），块级任一命中即判定该项存在
+  const blocks = input.markdown.split(/\n{2,}/u).filter(block => block.trim().length >= 30);
+  const querySimilarity = await buildSemanticSimilarity(
+    blocks,
+    [...MANDATORY_MODULE_QUERIES, ...COMPLIANCE_ITEM_QUERIES],
+    input.embedDocuments,
+  );
+  const anyBlockMatches = (query: string) =>
+    blocks.some(block => querySimilarity(block, query) >= SEMANTIC_COVERAGE_THRESHOLD);
+  const filler = await fillerDensityReport(input.markdown, input.embedDocuments);
   return {
-    completeness: completenessScore(input.markdown, input.chapters, input.template),
+    completeness: completenessScore(input.markdown, input.chapters, input.template, anyBlockMatches),
     specificity: specificityScore(input.markdown, input.chapters, input.factTraces),
-    compliance: complianceScore(input.markdown),
-    executability: executabilityScore(input.markdown, input.referenceCompleteBlocks),
+    compliance: complianceScore(input.markdown, anyBlockMatches),
+    executability: await executabilityScore(input.markdown, input.referenceCompleteBlocks),
     normalization: normalizationScore(input.issues),
-    uniqueness: uniquenessScore(input.markdown),
+    uniqueness: uniquenessScore(input.markdown, filler),
   };
 }

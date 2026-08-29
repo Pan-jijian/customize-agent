@@ -56,6 +56,20 @@ export default tseslint.config(
     },
   },
   {
+    // 测试文件不纳入 tsconfig（tsconfig exclude **/*.test.ts），关闭 project service 与依赖类型信息的规则
+    files: ["**/*.test.ts", "**/*.spec.ts"],
+    languageOptions: {
+      parserOptions: {
+        projectService: false,
+      },
+    },
+    rules: {
+      "@typescript-eslint/no-floating-promises": "off",
+      "@typescript-eslint/no-misused-promises": "off",
+      "@typescript-eslint/await-thenable": "off",
+    },
+  },
+  {
     ignores: [
       "**/dist/**",
       "**/node_modules/**",

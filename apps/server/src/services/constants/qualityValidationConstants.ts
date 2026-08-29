@@ -77,9 +77,6 @@ export const MARKDOWN_SECTION_HEADING_RE = /^##\s+.+$|^###\s+.+$/gmu;
 /** 基础信息表前不应重复逐项叙述的字段。 */
 export const DOCUMENT_BASIC_INFO_FIELDS = ['对象名称', '对象编号', '文档名称', '文档编号', '任务名称', '任务编号', '地点', '责任主体', '范围', '周期要求', '计划周期', '质量标准'] as const;
 
-/** 正文中应避免的模板化前缀和套话。 */
-export const FORMAL_STYLE_FORBIDDEN_PHRASES = ['本节', '本章将', '以下从', '以下内容', '综上所述'] as const;
-
 /** 目录块识别规则。 */
 export const TOC_BLOCK_RE = /^##\s+目录\s*$([\s\S]*?)(?=\n<div class="page-break"><\/div>|\n##\s+)/mu;
 
@@ -121,6 +118,7 @@ export const FORMAL_PLACEHOLDER_PATTERNS = [
   /见(?:资料|文件|说明|方案|附件|相关文件)/u,
   /按(?:资料|文件|说明|方案|规范|标准|要求)/u,
   /满足(?:相关|有关)?要求/u,
+  /依据本项目已确认资料/u,
   /\|\s*(?:[/—-]|无|暂无|待定|待补充|N\/?A)\s*\|/iu,
 ] as const;
 

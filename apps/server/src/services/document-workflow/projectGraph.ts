@@ -103,7 +103,7 @@ const DOMAIN_PROMPTS: Record<ProjectGraphDomain, { title: string; pattern: RegEx
   resources: { title: '材料、设备、劳动力、工程量资源', pattern: /材料|设备|机械|劳动力|工程量|清单|规格|型号|数量|单位|暂估|主材/u, guidance: '重点填充 resources。材料设备和工程量能确认多少写多少，数量和单位不得编造。' },
   scheduleStandards: { title: '工期节点、质量目标、标准规范、验收要求', pattern: /工期|日历天|开工|竣工|节点|进度|质量|验收|标准|规范|合格|创优/u, guidance: '重点填充 schedule、standards。必须优先抽取总工期、质量标准、验收标准和关键节点。' },
   risksSite: { title: '现场条件、重难点、风险与约束', pattern: /现场|周边|交通|既有|营业|拆除|保护|安全|文明|扬尘|噪声|风险|难点|危大/u, guidance: '重点填充 risks、siteConditions。风险必须给出资料支撑的原因和控制方向。' },
-  requirementsAddendum: { title: '招标管理要求、补疑澄清与修正', pattern: /招标|投标|合同|要求|承包|分包|保修|补疑|澄清|答疑|修正|变更/u, guidance: '重点填充 requirements、addendumChanges。补疑澄清必须写 original、revised、sourceFile；无法确认原文时不要编造。' },
+  requirementsAddendum: { title: '招标管理要求、评标办法、补疑澄清与修正', pattern: /招标|投标|合同|要求|承包|分包|保修|补疑|澄清|答疑|修正|变更|评标|评分|评审|分值|档位|编制/u, guidance: '重点填充 requirements、addendumChanges。补疑澄清必须写 original、revised、sourceFile；必须从评标办法章节抽取 requirements（category 用“评标办法”）：评标办法类型（如技术评分合理价格法）、分值构成（技术文件/商务文件/报价文件分值）、技术文件详细评审内容项（逐项列出）、评分档位线（一般/良好/优秀分值区间）——这是章节结构设计的最强约束，遗漏即评标失分；无法确认原文时不要编造。' },
 };
 
 function sourceFilesFor(items: DocumentEvidence[], textPattern: RegExp, max = 8) {

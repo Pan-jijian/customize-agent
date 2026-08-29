@@ -224,7 +224,7 @@ export interface EvaluationCriteriaAudit {
 /**
  * 评分标准条目 ↔ 大纲承接审计：返回未被任何章节承接的条目。
  * 判定顺序：显式包含 → 语义相似度（≥0.6）→ 未承接；
- * 语义相似度函数缺失或不可用时自动降级为仅显式承接判定。
+ * 调用方未提供相似度函数时仅显式承接判定（生成主链路恒提供，本地 bge 恒可用）。
  */
 export function auditEvaluationCriteriaCoverage(
   chapters: DocumentTemplateChapter[],

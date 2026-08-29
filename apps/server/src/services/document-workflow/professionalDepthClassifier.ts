@@ -10,7 +10,7 @@ import { getLocalSemanticProvider, SEMANTIC_COVERAGE_THRESHOLD } from './semanti
  * 而未出现“纠偏”二字即判进度章节缺项；反之仅罗列关键词的模板段却拿满分（漏检）。
  * 协同边界：主题召回（标题属于哪类专业章节）与字面封闭词表（套话词/管理数字本身）仍由正则
  * 处理，语义定性（维度是否覆盖、是否具备闭环、是否绑定项目事实）由本分类器判定；
- * 模型不可用时调用方降级为原正则路径，语义模型不可用不得阻塞生成。
+ * 本地语义模型恒可用（本地 ONNX 推理），构建失败直接抛出暴露缺陷，无不可用降级路径。
  */
 
 export type DepthDimension = 'factuality' | 'structure' | 'depth' | 'executable' | 'specificity' | 'consistency';
@@ -30,7 +30,7 @@ export interface ProfessionalDepthAnalysis {
 
 export interface ProfessionalDepthClassifier {
   /** 分析单段文本（章节正文或段落），返回全部语义判定；
-   * 文本为空或嵌入调用失败时返回 undefined（调用方静默跳过，零误伤——不得用全 false 替身冒充判定结果） */
+   * 空文本返回 undefined（输入边界：无内容可分析，调用方跳过——不得用全 false 替身冒充判定结果） */
   analyze: (text: string) => Promise<ProfessionalDepthAnalysis | undefined>;
 }
 
@@ -170,61 +170,47 @@ function contentNeedCoverage(blockVectors: number[][], anchorCache: Map<string, 
   return coverage;
 }
 
-/** 构建专业深度语义分类器：预嵌入全部锚点；模型加载失败返回 undefined（调用方降级正则路径） */
-export async function buildProfessionalDepthClassifier(): Promise<ProfessionalDepthClassifier | undefined> {
-  try {
-    const provider = getLocalSemanticProvider();
-    if (!provider) return undefined;
-    const anchorGroups: Array<[string, string[]]> = [
-      ...(Object.keys(DIMENSION_ANCHORS) as DepthDimension[]).map(dimension => [`dimension:${dimension}`, DIMENSION_ANCHORS[dimension]] as [string, string[]]),
-      ...(Object.keys(CONTENT_NEED_ANCHORS) as ContentNeedKey[]).map(needKey => [`need:${needKey}`, CONTENT_NEED_ANCHORS[needKey]] as [string, string[]]),
-      ['concrete', [...CONCRETE_ANCHORS]],
-      ['closedLoop', [...CLOSED_LOOP_ANCHORS]],
-    ];
-    const anchorCache = new Map<string, number[][]>();
-    for (const [key, anchors] of anchorGroups) {
-      const vectors = await provider.embedDocuments(anchors);
-      if (vectors.length !== anchors.length) return undefined;
-      anchorCache.set(key, vectors);
+/** 构建专业深度语义分类器：预嵌入全部锚点；本地语义模型恒可用（本地 ONNX 推理），失败直接抛出 */
+export async function buildProfessionalDepthClassifier(): Promise<ProfessionalDepthClassifier> {
+  const provider = getLocalSemanticProvider();
+  const anchorGroups: Array<[string, string[]]> = [
+    ...(Object.keys(DIMENSION_ANCHORS) as DepthDimension[]).map(dimension => [`dimension:${dimension}`, DIMENSION_ANCHORS[dimension]] as [string, string[]]),
+    ...(Object.keys(CONTENT_NEED_ANCHORS) as ContentNeedKey[]).map(needKey => [`need:${needKey}`, CONTENT_NEED_ANCHORS[needKey]] as [string, string[]]),
+    ['concrete', [...CONCRETE_ANCHORS]],
+    ['closedLoop', [...CLOSED_LOOP_ANCHORS]],
+  ];
+  const anchorCache = new Map<string, number[][]>();
+  for (const [key, anchors] of anchorGroups) {
+    const vectors = await provider.embedDocuments(anchors);
+    if (vectors.length !== anchors.length) {
+      throw new Error(`本地语义模型锚点嵌入数量不一致：${key} ${vectors.length}/${anchors.length}`);
     }
-    // 闭包块向量缓存：同一章节文本被多个校验器复用时不重复嵌入
-    const blockCache = new Map<string, number[][]>();
-    const embedBlocks = async (text: string): Promise<number[][] | undefined> => {
-      const cached = blockCache.get(text);
-      if (cached !== undefined) return cached.length > 0 ? cached : undefined;
-      const chunks = chunkText(text);
-      if (chunks.length === 0) {
-        blockCache.set(text, []);
-        return undefined;
-      }
-      let vectors: number[][] | undefined;
-      try {
-        vectors = await provider.embedDocuments(chunks);
-      } catch {
-        vectors = undefined;
-      }
-      if (!vectors) {
-        blockCache.set(text, []);
-        return undefined;
-      }
-      blockCache.set(text, vectors);
-      return vectors;
-    };
-    return {
-      async analyze(text: string): Promise<ProfessionalDepthAnalysis | undefined> {
-        const blocks = await embedBlocks(text);
-        // 空文本/嵌入失败一律返回 undefined：全 false 替身会被 genericProfessionalContentIssues 等
-        // 消费方当真实判定使用，concrete=false 触发 error 误伤（零误伤原则：判定不了就不判）
-        if (!blocks || blocks.length === 0) return undefined;
-        return {
-          dimensions: dimensionCoverage(blocks, anchorCache),
-          contentNeeds: contentNeedCoverage(blocks, anchorCache),
-          concrete: maxSimilarity(blocks, anchorCache.get('concrete') || []) >= SEMANTIC_COVERAGE_THRESHOLD,
-          closedLoop: maxSimilarity(blocks, anchorCache.get('closedLoop') || []) >= SEMANTIC_COVERAGE_THRESHOLD,
-        };
-      },
-    };
-  } catch {
-    return undefined;
+    anchorCache.set(key, vectors);
   }
+  // 闭包块向量缓存：同一章节文本被多个校验器复用时不重复嵌入
+  const blockCache = new Map<string, number[][]>();
+  const embedBlocks = async (text: string): Promise<number[][]> => {
+    const cached = blockCache.get(text);
+    if (cached !== undefined) return cached;
+    const chunks = chunkText(text);
+    const vectors = await provider.embedDocuments(chunks);
+    blockCache.set(text, vectors);
+    return vectors;
+  };
+  return {
+    async analyze(text: string): Promise<ProfessionalDepthAnalysis | undefined> {
+      if (!text.trim()) return undefined;
+      const blocks = await embedBlocks(text);
+      // 空文本返回 undefined（输入边界：无内容可分析，调用方跳过）；
+      // 全 false 替身会被 genericProfessionalContentIssues 等消费方当真实判定使用，
+      // concrete=false 触发 error 误伤（判定不了就不判）
+      if (blocks.length === 0) return undefined;
+      return {
+        dimensions: dimensionCoverage(blocks, anchorCache),
+        contentNeeds: contentNeedCoverage(blocks, anchorCache),
+        concrete: maxSimilarity(blocks, anchorCache.get('concrete') || []) >= SEMANTIC_COVERAGE_THRESHOLD,
+        closedLoop: maxSimilarity(blocks, anchorCache.get('closedLoop') || []) >= SEMANTIC_COVERAGE_THRESHOLD,
+      };
+    },
+  };
 }

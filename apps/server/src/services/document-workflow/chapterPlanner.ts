@@ -20,8 +20,7 @@ import { CRITICAL_SECTION_ANCHORS, isCriticalSectionTitle } from './writingSpec'
  * 上下文：LLM 规划时注入项目图谱章节定向摘要与文档蓝图（本章任务卡/实施方案/事实覆盖矩阵），
  * 让合并决策基于项目实际结构（工程/工法/资源/工期/标准/风险/要求）而非标题表面相似度。
  *
- * 失败回退：块级失败隔离——单个块 LLM 失败/JSON 无效时该块由语义域确定性分组接管，不影响其他块；
- * 语义模型不可用时聚类退化为域内顺序切块，管线永远可用。
+ * 失败回退：块级失败隔离——单个块 LLM 失败/JSON 无效时该块由语义域确定性分组接管，不影响其他块。
  */
 
 export interface PlannedChapterSubPoint {
@@ -105,9 +104,10 @@ function sectionDomain(sectionTitle: string) {
 
 /** 主题块内 H4 要点上限：超过则切分新块，控制单次调用输出量 */
 const MAX_SUB_POINTS_PER_BLOCK = 6;
-/** 主题块最小/最大目标字数 */
+/** 主题块最小/最大目标字数：上限 4000 与成稿侧 maxTokens = 目标×1.5 ≤ 6000 对应，
+ * 8192 共享输出池内安全；长文目标（如 5 万字）靠目标驱动拆块增加块数承载，不再截断章级目标 */
 const MIN_BLOCK_TARGET_WORDS = 1200;
-const MAX_BLOCK_TARGET_WORDS = 2200;
+const MAX_BLOCK_TARGET_WORDS = 4000;
 
 /**
  * 评标必查细目锚定清单：从 writingSpec 单点消费（含关键小节写法规则的唯一来源），
@@ -233,8 +233,20 @@ export function fallbackStructureForSections(inputSections: string[], chapterTit
   return { blocks, coveredSections: inputSections.slice(), fallbackSections: [], llmPlanned: false };
 }
 
-/** 按 subPoints 数量加权分配每块目标字数（基数=章目标/块数，浮动 ±25%，封顶 1200~2200） */
+/** 按 subPoints 数量加权分配每块目标字数（基数=章目标/块数，浮动 ±25%，封顶 1200~4000）；
+ * 长文目标下达：章目标/块数超过单块安全上限时，按 H4 要点对半拆分大块直到均分目标不超上限，
+ * 保证提示词篇幅预算（如 5 万字）不被块级封顶静默截断 */
 function allocateBlockTargetWords(blocks: PlannedChapterBlock[], targetWords: number) {
+  const maxSplitRounds = 2;
+  for (let round = 0; round < maxSplitRounds && blocks.length > 0; round += 1) {
+    const perBlock = Math.floor(targetWords / blocks.length);
+    if (perBlock <= MAX_BLOCK_TARGET_WORDS) break;
+    const biggest = blocks.reduce((left, right) => (right.subPoints.length > left.subPoints.length ? right : left), blocks[0]);
+    if (biggest.subPoints.length < 2) break;
+    const mid = Math.ceil(biggest.subPoints.length / 2);
+    blocks.push({ title: biggest.subPoints[mid].title || biggest.title, subPoints: biggest.subPoints.slice(mid), facts: [], targetWords: 0 });
+    biggest.subPoints = biggest.subPoints.slice(0, mid);
+  }
   const totalPoints = blocks.reduce((sum, block) => sum + block.subPoints.length, 0) || blocks.length;
   for (const block of blocks) {
     const base = Math.max(1200, Math.floor(targetWords / Math.max(1, blocks.length)));
@@ -285,10 +297,9 @@ const BLOCK_PLAN_SCHEMA: DocumentJsonSchema = {
 
 /**
  * 阶段 1 块候选聚类：评标必查细目独立成块（保真防吞并）；其余按语义域分组，
- * 域内用余弦相似度贪心聚类（最高相似度 ≥0.5 且块未满则并入，否则新块）；
- * 语义模型不可用（similarity=undefined）时退化为域内顺序切块（每块 ≤8 条）。
+ * 域内用余弦相似度贪心聚类（最高相似度 ≥0.5 且块未满则并入，否则新块）。
  */
-function clusterBlockCandidates(inputSections: string[], similarity?: SemanticSimilarityFn): string[][] {
+function clusterBlockCandidates(inputSections: string[], similarity: SemanticSimilarityFn): string[][] {
   // 必查细目不每条独立成块（实测缺陷：徽光阁 52 条细目命中 10 个锚定词 → 21 块，
   // LLM 调用数从基线 56 次膨胀至 132 次，块成稿大面积失败触发整章降级）：
   // 必查细目并入语义域分组参与聚类，块内 H4 保真由规划 prompt 规则（必查关键词必须独立 H4）
@@ -304,13 +315,6 @@ function clusterBlockCandidates(inputSections: string[], similarity?: SemanticSi
   for (const items of byDomain.values()) {
     const blocks: string[][] = [];
     for (const section of items) {
-      if (!similarity) {
-        // 无语义模型：域内顺序切块（每块 ≤MAX_SECTIONS_PER_BLOCK）
-        const last = blocks[blocks.length - 1];
-        if (last && last.length < MAX_SECTIONS_PER_BLOCK) last.push(section);
-        else blocks.push([section]);
-        continue;
-      }
       let bestBlock: string[] | undefined;
       let bestScore = -1;
       for (const block of blocks) {
@@ -394,7 +398,7 @@ export async function planChapterStructureWithLlm(input: {
 }): Promise<PlannedChapterStructure | undefined> {
   const inputSections = cleanInputSections(input.chapter);
   if (inputSections.length <= 8) return undefined;
-  // 阶段 1：块候选聚类（语义模型不可用时 buildSemanticSimilarity 返回 undefined，聚类退化为域内顺序切块）
+  // 阶段 1：块候选聚类（本地 bge 语义域贪心聚类，嵌入失败直接抛出）
   const similarity = await buildSemanticSimilarity(inputSections, inputSections, input.semanticEmbedder);
   const clusters = clusterBlockCandidates(inputSections, similarity);
   const halfTarget = Math.max(800, Math.floor(input.targetWords / Math.max(1, clusters.length)));

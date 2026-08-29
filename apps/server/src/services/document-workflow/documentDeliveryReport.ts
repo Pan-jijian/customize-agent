@@ -45,7 +45,7 @@ export function evidenceUsageCoverageIssues(markdown: string, factsModel: Docume
   return issues;
 }
 
-export async function paragraphGenericIssues(markdown: string, classifier?: ProfessionalDepthClassifier): Promise<ValidationIssue[]> {
+export async function paragraphGenericIssues(markdown: string, classifier: ProfessionalDepthClassifier): Promise<ValidationIssue[]> {
   const paragraphs = markdown.split(/\n\s*\n/gu).map(item => item.trim()).filter(Boolean);
   const genericPattern = /(?:加强组织领导|严格执行规范|落实责任制度|确保工程质量|强化过程管理|提高思想认识|完善管理体系|形成闭环管理|统筹推进|全面落实)/gu;
   const issues: ValidationIssue[] = [];
@@ -53,10 +53,9 @@ export async function paragraphGenericIssues(markdown: string, classifier?: Prof
     if (documentTextLength(paragraph) < 120) continue;
     const genericMatches = paragraph.match(genericPattern) || [];
     if (genericMatches.length < 2) continue;
-    // 语义路径（round-14）：是否绑定具体对象/控制点/闭环由 bge 嵌入判定；语义模型不可用时静默跳过（零误伤）
-    if (!classifier) continue;
+    // 语义路径（round-14）：是否绑定具体对象/控制点/闭环由 bge 嵌入判定（本地语义模型恒可用）
     const analysis = await classifier.analyze(paragraph);
-    // 嵌入失败/空段落返回 undefined：判定不了就不判（零误伤），不得用全 false 替身报空泛
+    // 空文本返回 undefined（输入边界：无内容可分析，判定不了就不判），不得用全 false 替身报空泛
     if (!analysis) continue;
     if (!analysis.concrete) {
       issues.push({ level: 'warning', message: `段落存在空泛表述：${paragraph.slice(0, 48)}...`, suggestion: '请补充该段对应的对象、动作、控制点或验收闭环，避免只保留管理性套话。' });
@@ -67,7 +66,8 @@ export async function paragraphGenericIssues(markdown: string, classifier?: Prof
 
 export function chapterDependencyIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  // 语义模型不可用时静默跳过（零误伤）：章节依赖支撑关系必须由 bge 嵌入判定
+  // 调用方未提供语义分析时跳过（生成中间阶段无章节内容可分析；最终校验恒提供）：
+  // 章节依赖支撑关系必须由 bge 嵌入判定
   if (!analyses) return issues;
   const chapterText = chapters.map(chapter => `${chapter.title}\n${chapter.content}`).join('\n\n');
   // 进度↔资源支撑：语义路径由 bge 嵌入判定资源章节是否覆盖投入调配计划
