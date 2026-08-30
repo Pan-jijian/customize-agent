@@ -17,13 +17,35 @@ function cleanOutlineTitle(title: string) {
   return cleaned.replace(/\s+/gu, ' ');
 }
 
+/**
+ * 招标条款碎片标题判别（显式 OUTLINE 提取与写手正文 H3 提取共用）：
+ * 招标/评分办法条款被序号切分后的碎片混入标题（如「1委员会确定中」「如我方中标，我方承诺」「3项规定」「56m15：…」），
+ * 特征为条件从句、承诺/保证断言、评标委员会评审动作、条款编号残留或带数字参数的条款要求，均非章节/小节标题
+ */
+export function isTenderClauseFragmentTitle(title: string) {
+  const normalized = cleanOutlineTitle(title).replace(/\s+/gu, '');
+  if (!normalized) return true;
+  if (/^(?:如|若|如果|倘若|假如|当)[^，,。；]{0,24}[，,]/u.test(normalized)) return true;
+  if (/^(?:我(?:方|公司)|本(?:单位|公司|工程|项目)|投标人|承包人|中标人|发包人|供应商)[^，,。；]{0,14}(?:承诺|保证|响应|满足|确保|应|须|将|会)/u.test(normalized)) return true;
+  if (/(?:评标)?委员会[^，,。；]{0,10}(?:确定|认定|评审|判断|推荐)/u.test(normalized)) return true;
+  if (/^(?:不(?:得|应|宜|少于|超过|大于|小于|低于|高于)|超过|低于|高于|达到|不少于|不大于|不超过|偏差率|误差)\s*\d/u.test(normalized)) return true;
+  if (/^[^，,。；]{0,10}\d+(?:%|％)/u.test(normalized)) return true;
+  // 条款编号残留：PDF 解析把条款编号切进标题（「3项规定」「2（3）目，报价在最高限价90%-100%之」「4对与评标活动…」「56m15：…」）
+  if (/^\d+\s*项/u.test(normalized)) return true;
+  if (/^\d+(?:[（(]\d+[)）])?\s*目/u.test(normalized)) return true;
+  if (/^\d+\s*对(?:与|于)/u.test(normalized)) return true;
+  if (/^\d{1,4}[a-zA-Z]{0,3}\d{0,4}\s*[：:]/u.test(normalized)) return true;
+  if (/^(?:其他要求|需要补充的其他内容|相当于或不低于)/u.test(normalized)) return true;
+  return false;
+}
+
 function isInstructionLikeOutlineTitle(title: string) {
   const normalized = cleanOutlineTitle(title).replace(/\s+/gu, '');
   if (!normalized) return true;
   if (/^(?:目录|章节|大纲|要求|说明|注意|输出|格式|示例|例如|写法|占位|提示)$/u.test(normalized)) return true;
   if (/^(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用)|^(?:如|若|如果)(?:涉及|不涉及|适用|不适用)|(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成)|按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|说明要求|注意事项/u.test(normalized)) return true;
   if (/[：:]$|[，、；。]$/u.test(normalized)) return true;
-  return false;
+  return isTenderClauseFragmentTitle(normalized);
 }
 
 function isInvalidOutlineTitle(title: string) {

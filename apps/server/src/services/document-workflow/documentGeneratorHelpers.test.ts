@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chapterGenerationTargets } from './documentGeneratorHelpers';
+import { chapterGenerationTargets, cleanChineseWordBreakSpaces, cleanInlineFactValue, finalizeFinalMarkdownStructure, normalizeWorkPackageLabels, splitGluedTableHeaderLines, stripBidDisciplineSentences } from './documentGeneratorHelpers';
 
 describe('chapterGenerationTargets（提示词篇幅目标完整下达）', () => {
   it('长文模式：提示词章预算必须完整下达，不被 upper 硬顶与结构估算压制', () => {
@@ -33,5 +33,289 @@ describe('chapterGenerationTargets（提示词篇幅目标完整下达）', () =
     ];
     const total = chapters.reduce((sum, chapter) => sum + chapterGenerationTargets({ ...chapter, longformStrict: true }).roundTarget, 0);
     expect(total).toBe(50000);
+  });
+});
+
+describe('splitGluedTableHeaderLines（改9a：表头粘连正文拆分）', () => {
+  it('正文段尾粘连表头 → 拆成独立表头行（十一度实测形态）', () => {
+    const markdown = [
+      '### 2.2 进度计划与工期保障',
+      '本工程以540个日历天为总控基准。施工总进度计划按下表编制，各阶段持续时间按工程量倒排推导。| 施工阶段/分部分项 | 开始时间 | 结束时间 | 持续时间 | 关键线路工序 |',
+      '| --- | --- | --- | --- | --- |',
+      '| 施工准备及临设搭设 | 第1日 | 第20日 | 20日 | 是 |',
+    ].join('\n');
+    const result = splitGluedTableHeaderLines(markdown);
+    const lines = result.split('\n');
+    expect(lines[1]).toBe('本工程以540个日历天为总控基准。施工总进度计划按下表编制，各阶段持续时间按工程量倒排推导。');
+    expect(lines[2]).toBe('| 施工阶段/分部分项 | 开始时间 | 结束时间 | 持续时间 | 关键线路工序 |');
+    expect(lines[3]).toBe('| --- | --- | --- | --- | --- |');
+  });
+
+  it('数据行粘连同样拆行（不改写任何单元格文字）', () => {
+    const markdown = [
+      '分部工程验收由总监理工程师组织。| 单位工程 | 工程质量符合合格标准 | 项目经理 | 单位工程预验收 | 竣工前组织不少于2次预验收 |',
+      '| --- | --- | --- | --- | --- |',
+    ].join('\n');
+    const result = splitGluedTableHeaderLines(markdown);
+    expect(result.split('\n')[1]).toBe('| 单位工程 | 工程质量符合合格标准 | 项目经理 | 单位工程预验收 | 竣工前组织不少于2次预验收 |');
+  });
+
+  it('下一行不是表格行不拆（正文含管道符不误伤）', () => {
+    const markdown = '正文提到 A | B | C 的取值情况。\n后续正文继续。';
+    expect(splitGluedTableHeaderLines(markdown)).toBe(markdown);
+  });
+
+  it('表格块内部行不动（行首 | 的行跳过）', () => {
+    const markdown = '| 信息项 | 内容 |\n| --- | --- |\n| 项目名称 | 合肥师范 |';
+    expect(splitGluedTableHeaderLines(markdown)).toBe(markdown);
+  });
+});
+
+describe('normalizeWorkPackageLabels（改9b：冒号在 ** 内的伪标签形态）', () => {
+  it('「施工概况：**施工概况：**」→「施工概况：」（十一度实测缺陷形态）', () => {
+    expect(normalizeWorkPackageLabels('施工概况：**施工概况：** 本专业工程涵盖地下室底板。')).toBe('施工概况： 本专业工程涵盖地下室底板。');
+  });
+
+  it('「**施工流程：**」粗体伪标签 →「施工流程：」', () => {
+    expect(normalizeWorkPackageLabels('**施工流程：** 先垫层、后底板。')).toBe('施工流程： 先垫层、后底板。');
+  });
+
+  it('「**施工方法：**」粗体伪标签 →「施工方法：」', () => {
+    expect(normalizeWorkPackageLabels('**施工方法：** 分层分段开挖。')).toBe('施工方法： 分层分段开挖。');
+  });
+
+  it('历史形态「**施工概况**：」「施工概况：**施工概况**：」保持归一', () => {
+    expect(normalizeWorkPackageLabels('**施工概况**： 本工程…')).toBe('施工概况： 本工程…');
+    expect(normalizeWorkPackageLabels('施工概况：**施工概况**： 本工程…')).toBe('施工概况： 本工程…');
+  });
+
+  it('行中伪标签归一（正文句尾接“**施工流程：**”，十一度实测形态）', () => {
+    expect(normalizeWorkPackageLabels('穿墙螺栓费用按合同约定执行。**施工流程：** 垫层浇筑→砖胎膜砌筑。')).toBe('穿墙螺栓费用按合同约定执行。施工流程： 垫层浇筑→砖胎膜砌筑。');
+    expect(normalizeWorkPackageLabels('外墙防水→土方回填。**施工方法：** 垫层采用C20混凝土。')).toBe('外墙防水→土方回填。施工方法： 垫层采用C20混凝土。');
+  });
+
+  it('交叉形态不删标签词（“施工方法：**施工流程：**”保留流程标签）', () => {
+    const result = normalizeWorkPackageLabels('施工方法：**施工流程：** 垫层浇筑。');
+    expect(result).toBe('施工方法：施工流程： 垫层浇筑。');
+  });
+
+  it('无冒号纯加粗强调不动', () => {
+    const markdown = '本工程**施工方法**经专家论证后实施。';
+    expect(normalizeWorkPackageLabels(markdown)).toBe(markdown);
+  });
+
+  it('正文中其他加粗内容不受影响', () => {
+    const markdown = '本工程**重点**是基坑支护与土方外运。';
+    expect(normalizeWorkPackageLabels(markdown)).toBe(markdown);
+  });
+});
+
+describe('cleanChineseWordBreakSpaces（改9c：中文词中断空格）', () => {
+  it('同行词中断空格移除（“形成资 料”→“形成资料”）', () => {
+    expect(cleanChineseWordBreakSpaces('| 进场登记 | 核验身份证 | 劳资员 | 形成资 料 | 当日完成登记 |')).toBe('| 进场登记 | 核验身份证 | 劳资员 | 形成资料 | 当日完成登记 |');
+  });
+
+  it('英文数字间空格与标题编号空格保留', () => {
+    const markdown = '### 2.1 项目管理组织机构与职责\nC30 混凝土强度等级按补疑修正口径执行。';
+    expect(cleanChineseWordBreakSpaces(markdown)).toBe(markdown);
+  });
+
+  it('目录行「第一章 工程…」与编号行「1.1 项目…」的合法空格保留', () => {
+    const markdown = '第一章 工程重点难点及危大工程的保障体系\n1.1 项目主要施工内容\n## 第二章 确保工期与质量的保障体系与措施';
+    expect(cleanChineseWordBreakSpaces(markdown)).toBe(markdown);
+  });
+
+  it('正文行真实断词移除（“专业工程 施工”→“专业工程施工”）', () => {
+    expect(cleanChineseWordBreakSpaces('本专业工程 施工概况如下。')).toBe('本专业工程施工概况如下。');
+  });
+
+  it('全角空格同样移除', () => {
+    expect(cleanChineseWordBreakSpaces('明确\u3000回访频次')).toBe('明确回访频次');
+  });
+});
+
+describe('finalizeFinalMarkdownStructure（改9：最终组装路径覆盖清洗）', () => {
+  it('最终 md 的粘连表头与伪标签一并清洗', () => {
+    const markdown = [
+      '### 2.1 组织机构',
+      '管理人员按岗位分工。| 岗位 | 职责 | 人数 |',
+      '| --- | --- | --- |',
+      '| 项目经理 | 全面负责 | 1 |',
+    ].join('\n');
+    const result = finalizeFinalMarkdownStructure(markdown);
+    const lines = result.split('\n');
+    expect(lines[1]).toBe('管理人员按岗位分工。');
+    expect(lines[2]).toBe('| 岗位 | 职责 | 人数 |');
+  });
+});
+
+describe('cleanInlineFactValue 事实值页码清洗（空格数字形态保护）', () => {
+  it('完整页码引用「PDF 第3页」归一为「相关资料」而非删成「 3 页」', () => {
+    expect(cleanInlineFactValue('招标文件PDF 第 3 页')).toBe('招标文件相关资料');
+    expect(cleanInlineFactValue('招标文件PDF第5页')).toBe('招标文件相关资料');
+  });
+
+  it('多空格与换行分隔的完整引用同样归一（\\s* 跨空白匹配）', () => {
+    expect(cleanInlineFactValue('招标文件PDF  第   5  页')).toBe('招标文件相关资料');
+    expect(cleanInlineFactValue('招标文件PDF\t第\t5\t页')).toBe('招标文件相关资料');
+    expect(cleanInlineFactValue('招标文件PDF 第\n5 页')).toBe('招标文件相关资料');
+  });
+
+  it('全角数字完整引用保留原样（lookahead 含全角数字，不破坏内容）', () => {
+    expect(cleanInlineFactValue('招标文件PDF 第３页')).toBe('招标文件PDF 第３页');
+  });
+
+  it('页码范围「PDF 第 5-8 页」同样归一（与 normalizeTenderSourcePageRefs L60 范围兜底同口径）', () => {
+    expect(cleanInlineFactValue('招标文件PDF 第 5-8 页')).toBe('招标文件相关资料');
+    expect(cleanInlineFactValue('招标文件PDF 第5至8页')).toBe('招标文件相关资料');
+  });
+
+  it('无 PDF 前缀的纯「第N页」不属于本清洗对象，原样保留', () => {
+    expect(cleanInlineFactValue('详见工程量清单第 5 页')).toBe('详见工程量清单第 5 页');
+  });
+
+  it('残缺「PDF 第」残片仍删除且保留其前文本', () => {
+    expect(cleanInlineFactValue('招标文件封面PDF 第')).toBe('招标文件封面');
+  });
+
+  it('残片后跟非数字文本仍删除残片（不误判为完整引用）', () => {
+    expect(cleanInlineFactValue('合肥师范学院PDF 第')).toBe('合肥师范学院');
+  });
+
+  it('日期空格仍归一，行尾句号仍清理', () => {
+    expect(cleanInlineFactValue('开标日期：2026年8月19 日。')).toBe('开标日期：2026年8月19日');
+  });
+
+  it('空串与纯空白输入安全返回空串', () => {
+    expect(cleanInlineFactValue('')).toBe('');
+    expect(cleanInlineFactValue('   ')).toBe('');
+  });
+
+  it('无任何页码特征的普通事实值原样保留', () => {
+    expect(cleanInlineFactValue('合肥市瑶海区龙岗路与大众路交口')).toBe('合肥市瑶海区龙岗路与大众路交口');
+  });
+});
+
+describe('cleanInlineFactValue 完整引用批量矩阵（前缀 × 分隔 × 范围分隔符）', () => {
+  it.each([
+    // [输入, 期望]
+    ['招标文件PDF 第 3 页', '招标文件相关资料'],
+    ['招标文件PDF第3页', '招标文件相关资料'],
+    ['招标文件PDF  第  3  页', '招标文件相关资料'],
+    ['招标文件PDF\t第\t3\t页', '招标文件相关资料'],
+    ['招标文件PDF 第\n3 页', '招标文件相关资料'],
+    ['招标文件PDF 第 12 页', '招标文件相关资料'],
+    ['招标文件PDF 第 120 页', '招标文件相关资料'],
+    ['招标文件PDF 第 5-8 页', '招标文件相关资料'],
+    ['招标文件PDF 第 5 - 8 页', '招标文件相关资料'],
+    ['招标文件PDF 第 5—8 页', '招标文件相关资料'],
+    ['招标文件PDF 第 5至8 页', '招标文件相关资料'],
+    ['招标文件PDF 第 5到8 页', '招标文件相关资料'],
+    ['招标文件PDF 第 5~8 页', '招标文件相关资料'],
+    ['招标文件PDF 第 5～8 页', '招标文件相关资料'],
+    ['招标文件PDF 第 5 页。', '招标文件相关资料'],
+    ['招标文件PDF 第 5 页，详见附件。', '招标文件相关资料，详见附件'],
+    ['合肥师范学院PDF 第 3 页', '合肥师范学院相关资料'],
+    ['PDF 第 3 页', '相关资料'],
+    ['PDF第3页', '相关资料'],
+    ['pdf 第 3 页', '相关资料'],
+    ['pdf第3页', '相关资料'],
+    ['招标文件 PDF 第 3 页', '招标文件 相关资料'],
+    ['招标文件（PDF 第 3 页）', '招标文件（相关资料）'],
+    ['招标文件；PDF 第 3 页', '招标文件；相关资料'],
+    ['日期：2026年8月19日PDF 第 3 页', '日期：2026年8月19日相关资料'],
+    ['招标文件PDF 第 3 页招标文件PDF 第 5 页', '招标文件相关资料招标文件相关资料'],
+  ])('「%s」→「%s」', (input, expected) => {
+    expect(cleanInlineFactValue(input)).toBe(expected);
+  });
+});
+
+describe('cleanInlineFactValue 残片删除批量矩阵（大小写 × 空白形态 × 后跟文本）', () => {
+  it.each([
+    ['招标文件封面PDF 第', '招标文件封面'],
+    ['招标文件封面PDF第', '招标文件封面'],
+    ['招标文件封面PDF  第', '招标文件封面'],
+    ['招标文件封面PDF\t第', '招标文件封面'],
+    ['招标文件封面pdf 第', '招标文件封面'],
+    ['招标文件封面PDF 第。', '招标文件封面'],
+    ['招标文件封面PDF 第，', '招标文件封面，'],
+    ['招标文件封面PDF 第，2026年8月19日', '招标文件封面，2026年8月19日'],
+    ['合肥师范学院PDF 第', '合肥师范学院'],
+    ['招标代理：安徽省招标集团股份有限公司PDF 第', '招标代理：安徽省招标集团股份有限公司'],
+    ['PDF 第', ''],
+    ['PDF第', ''],
+    ['PDF 第（封面色）', '（封面色）'],
+    ['招标文件PDF 第PDF 第', '招标文件'],
+    ['招标文件PDF 第 三页', '招标文件三页'],
+  ])('「%s」→「%s」', (input, expected) => {
+    expect(cleanInlineFactValue(input)).toBe(expected);
+  });
+});
+
+describe('cleanInlineFactValue 不破坏批量矩阵（非清洗对象原样保留）', () => {
+  it.each([
+    ['详见工程量清单第 5 页'],
+    ['详见施工图设计文件第 5-8 页'],
+    ['招标文件PDF 第３页'],
+    ['招标文件PDF 第５页'],
+    ['合肥市瑶海区龙岗路与大众路交口'],
+    ['2026年8月19日'],
+    ['共 10 页'],
+    ['附件2：施工图纸清单'],
+    ['PDF 文件'],
+    ['第 5 层'],
+    [''],
+  ])('「%s」原样保留', (input) => {
+    expect(cleanInlineFactValue(input)).toBe(input);
+  });
+});
+
+describe('cleanInlineFactValue 日期与行尾清理批量矩阵', () => {
+  it.each([
+    ['开标日期：2026年8月19 日。', '开标日期：2026年8月19日'],
+    ['2026年8月19 日。', '2026年8月19日'],
+    ['2026年8月19日。', '2026年8月19日'],
+    ['2026年8月19日', '2026年8月19日'],
+    ['2026年8月19 日，', '2026年8月19日，'],
+    ['计划工期：540 日历天。', '计划工期：540日历天'],
+    ['合同估算价：1.2 万元', '合同估算价：1.2万元'],
+    ['单体建筑面积 28570.36 ㎡。', '单体建筑面积 28570.36㎡'],
+  ])('「%s」→「%s」', (input, expected) => {
+    expect(cleanInlineFactValue(input)).toBe(expected);
+  });
+});
+
+describe('stripBidDisciplineSentences 商务评标纪律承诺句清洗（4.12.6）', () => {
+  it('评标纪律承诺句整句删除，同段技术内容保留', () => {
+    const content = '本节针对施工现场管理提出以下要求。我公司严格遵守评标活动纪律，不向评标委员会成员或其他与评标活动有关的工作人员行贿、打招呼、递条子，不以任何方式干扰评标活动。施工现场按分区管理、责任到人执行。';
+    const result = stripBidDisciplineSentences(content);
+    expect(result).not.toContain('行贿');
+    expect(result).not.toContain('评标纪律');
+    expect(result).toContain('本节针对施工现场管理提出以下要求');
+    expect(result).toContain('施工现场按分区管理、责任到人执行');
+  });
+
+  it('无商务承诺词的内容原样返回', () => {
+    const content = '施工现场按分区管理、责任到人执行，安全防护设施验收合格后方可投入使用。';
+    expect(stripBidDisciplineSentences(content)).toBe(content);
+  });
+
+  it('标题行与表格行不参与句子清洗', () => {
+    const content = '#### 评标纪律\n| 项目 | 内容 |\n| 廉洁承诺 | 见商务文件 |';
+    expect(stripBidDisciplineSentences(content)).toBe(content);
+  });
+
+  it('无禁词词面变体（评分报告问题2原文）整句删除', () => {
+    // 评分报告（21）实测原文：无任何禁写词词面，旧 6 词表清洗漏网
+    const content = '我公司对参与本项目投标及施工组织设计编制的工作人员实行严格的纪律管理，确保投标活动合法合规；与评标活动相关工作的全体人员，不得违反评标纪律。\n本工程创优目标为确保“黄山杯”，质量目标为合格。';
+    const result = stripBidDisciplineSentences(content);
+    expect(result).not.toContain('纪律管理');
+    expect(result).not.toContain('投标活动合法合规');
+    expect(result).toContain('确保“黄山杯”');
+  });
+
+  it('技术标合法纪律表述（劳动纪律）不误删', () => {
+    const content = '项目部严格执行劳动纪律与考勤管理制度，各班组按时参加班前安全交底。';
+    expect(stripBidDisciplineSentences(content)).toBe(content);
   });
 });

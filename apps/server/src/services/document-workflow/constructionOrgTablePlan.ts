@@ -253,6 +253,33 @@ export function unassignedSectionTablePlans(chapter: DocumentTemplateChapter, se
   return plans.filter(plan => !sectionTitles.some(title => sectionTablePlans(chapter, title).some(assigned => assigned.id === plan.id)));
 }
 
+/** 组级表格计划过滤：组级成稿链路（主题块并发）每组只注入本组小节承接的表计划，
+ * 末组额外承接全章未分配表（allSectionTitles 传全章小节标题时计算未分配表并入），
+ * 避免每组都看到全章表计划导致跨组重复输出同一张表或归属错位 */
+export function groupTablePlansForSections(chapter: DocumentTemplateChapter, groupSectionTitles: string[], allSectionTitles: string[]): ProjectGraphTablePlan[] {
+  const plans = chapter.tablePlans || [];
+  if (plans.length === 0) return plans;
+  const matchedIds = new Set<string>();
+  const matched: ProjectGraphTablePlan[] = [];
+  for (const title of groupSectionTitles) {
+    for (const plan of sectionTablePlans(chapter, title)) {
+      if (!matchedIds.has(plan.id)) {
+        matchedIds.add(plan.id);
+        matched.push(plan);
+      }
+    }
+  }
+  if (allSectionTitles.length > 0) {
+    for (const plan of unassignedSectionTablePlans(chapter, allSectionTitles)) {
+      if (!matchedIds.has(plan.id)) {
+        matchedIds.add(plan.id);
+        matched.push(plan);
+      }
+    }
+  }
+  return matched;
+}
+
 /** 文档中的 markdown 表格数量（分隔行计数） */
 function markdownTableCount(markdown: string) {
   let count = 0;
@@ -294,6 +321,7 @@ export function tablePlansPrompt(chapter: DocumentTemplateChapter) {
     '【本章表格/清单结构化生成要求（硬性验收项）】',
     '以下表格来自项目图谱、事实主权模型与施工组织设计标准表格库的治理决策；不得按数量机械增减，必须按必要性、章节归属、证据可填性和输出形态执行。',
     '每个应输出（必写/应写）的表格都必须真实输出为 markdown 表格；输出后按本清单逐表自检，缺失即视为正文不足。',
+    '【表格排版硬约束】每个 markdown 表格必须独立成行：表头行必须以“|”开头单独占一行，下一行紧跟“|---|”分隔行，数据行逐行以“|”开头；严禁把表头接在正文段落同一行（如“正文……。| 表头1 | 表头2 |”），输出表格前必须先换行。',
     '每个表格前必须写 1～2 句引导叙述（说明该表的作用、数据口径与关键结论），表格不能替代所在小节全部正文；表格输出后还应围绕表中关键节点、责任分工与纠偏措施展开至少一段实施性正文。',
     '只输出表格/清单本体和用户提示词明确要求的文字；不得输出系统来源说明、后台溯源列、固定表前后说明或占位话术。',
     ...plans.map((plan, index) => [
@@ -321,6 +349,7 @@ export function sectionTablePlansPrompt(plans: ProjectGraphTablePlan[], sectionT
   return [
     `【本节“${sectionTitle}”必须输出的表格（硬性验收项）】`,
     '以下表格治理决策归属于本节，必须真实输出为 markdown 表格（紧跟相关三级小节）；输出后逐表自检，缺失即视为正文不足。',
+    '【表格排版硬约束】每个 markdown 表格必须独立成行：表头行必须以“|”开头单独占一行，下一行紧跟“|---|”分隔行，数据行逐行以“|”开头；严禁把表头接在正文段落同一行，输出表格前必须先换行。',
     '每个表格前必须写 1～2 句引导叙述（说明该表的作用、数据口径与关键结论），表格不能替代本节全部正文；表格输出后还应围绕表中关键节点、责任分工与纠偏措施展开至少一段实施性正文。',
     ...plans.map((plan, index) => [
       `${index + 1}. ${plan.required ? '必写' : '应写'}：${plan.title}`,

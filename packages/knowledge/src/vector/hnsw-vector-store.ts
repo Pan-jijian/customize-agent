@@ -10,6 +10,8 @@ type HierarchicalNSW = {
   addPoint(vector: number[], id: number, replaceDeleted?: boolean): void;
   searchKnn(vector: number[], topK: number): { neighbors: number[]; distances: number[] };
   markDelete(id: number): void;
+  getMaxElements(): number;
+  getCurrentCount(): number;
 };
 
 type HnswModule = { HierarchicalNSW: new (space: string, dimensions: number) => HierarchicalNSW };
@@ -37,8 +39,23 @@ export class HNSWVectorStore implements VectorStoreInterface {
     this.loadDocuments();
     const mod = require('hnswlib-node') as HnswModule;
     this.index = new mod.HierarchicalNSW('cosine', this.dimensions);
-    if (fs.existsSync(this.indexPath)) this.index.readIndexSync(this.indexPath, true);
-    else this.index.initIndex(this.maxElements, 16, 200, 100, true);
+    const indexExists = fs.existsSync(this.indexPath);
+    if (indexExists) {
+      this.index.readIndexSync(this.indexPath, true);
+      // 空壳索引防护：hnswlib v3.0.0 的 loadIndex 对空索引（cur_element_count=0）会把
+      // max_elements_ 覆盖为 0，此后任何 addPoint 都抛 "The number of elements exceeds
+      // the specified limit"（真实生成中向量化中断于空壳 kb_other 索引，状态永久 error）
+      if (this.index.getMaxElements() < 1 || this.index.getMaxElements() < this.index.getCurrentCount()) {
+        this.index.initIndex(this.maxElements, 16, 200, 100, true);
+      }
+      // 旧索引防护：documents sidecar 丢失/为空但索引文件仍有数据时，旧 label 与当前 sqlite
+      // rowid 脱节，语义检索按 label 回查 documents 全部落空（召回静默为零）→ 重建索引
+      if (this.documents.size === 0 && this.index.getCurrentCount() > 0) {
+        this.index.initIndex(this.maxElements, 16, 200, 100, true);
+      }
+    } else {
+      this.index.initIndex(this.maxElements, 16, 200, 100, true);
+    }
   }
 
   async upsert(documents: VectorDocument[], options: VectorWriteOptions = {}): Promise<void> {

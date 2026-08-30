@@ -1,4 +1,4 @@
-import { closedLoopDensityIssues, plannedAutoSpecGateIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues, tocThirdLevelCompletenessIssues } from './qualityValidation';
+import { closedLoopDensityIssues, plannedAutoSpecGateIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
 import { boqRowTraceIssues, buildBoqRowTraces } from './documentFactTrace';
@@ -59,7 +59,7 @@ export async function buildStandardFinalValidationIssues(input: {
   const recapCandidates = overviewRecapCandidates(input.markdown);
   const overviewSimilarity = await buildSemanticSimilarity(recapCandidates.sentences, recapCandidates.overviewBody ? [recapCandidates.overviewBody] : []);
   return [
-    ...(input.promptDocumentRules?.forbidToc ? [] : [...tocHierarchyIssues(input.markdown), ...tocBodyConsistencyIssues(input.markdown), ...tocThirdLevelCompletenessIssues(input.markdown)]),
+    ...(input.promptDocumentRules?.forbidToc ? [] : [...tocHierarchyIssues(input.markdown), ...tocBodyConsistencyIssues(input.markdown)]),
     ...headingDuplicateIssues(input.markdown),
     ...evaluationCriteriaCoverageIssues(input.markdown, input.evaluationCriteriaItems || [], { semanticSimilarity: evaluationCriteriaSimilarity }),
     ...await requirementsCoverageIssues(input.markdown, input.tenderRequirements, { semanticSimilarity: requirementsSimilarityForCoverage, bodyTexts: requirementBodySentences }),

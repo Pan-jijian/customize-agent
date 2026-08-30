@@ -16,5 +16,11 @@ export default defineConfig({
     ],
     exclude: ['**/node_modules/**', '**/dist/**'],
     testTimeout: 30_000,
+    coverage: {
+      provider: 'v8',
+      include: ['apps/server/src/services/**/*.ts'],
+      exclude: ['**/*.test.ts', '**/*.d.ts'],
+      reporter: ['text', 'json-summary'],
+    },
   },
 });

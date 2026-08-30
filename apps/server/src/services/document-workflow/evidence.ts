@@ -51,9 +51,9 @@ function extractParameterLines(content: string) {
     const hasContext = /项目|工程|工期|合同|估算|价格|地点|规模|清单|图纸|设计|规格|型号|数量|单位|材料|设备|管|线|电缆|混凝土|钢筋|砌体|门窗|防水|标准|规范|验收|做法|参数|尺寸|标高|厚度|强度|等级|系统|安装/u.test(line);
     return isProjectBasicValue || hasParameter || (hasContext && /\d/u.test(line) && line.length <= 260);
   });
-  // 用评分选择最重要的参数行（而非硬截断前 80 行）
+  // 参数行全量保留（无数量/字符截断）：按重要性排序后全部进入，评分只决定顺序不决定去留
   const uniqueLines = [...new Set(parameterLines)];
-  const selected = selectByScore(uniqueLines, l => textImportanceScore(l), { maxItems: 100, maxChars: 12000 }, 'parameter-lines');
+  const selected = selectByScore(uniqueLines, l => textImportanceScore(l), {}, 'parameter-lines');
   return selected.selected.join('\n');
 }
 
@@ -73,6 +73,67 @@ export function sanitizeEvidenceContent(filePath: string, content: string) {
     return `该资料为${ext.replace('.', '').toUpperCase()}格式附件，仅作为内部事实提取依据；正式正文不得引用文件名。`;
   }
   return cleaned;
+}
+
+/**
+ * 超长证据关键参数窗口提取：CAD 图纸/大文件经 expandContext 父块回溯后，单条证据动辄 10 万+ 字符，
+ * 关键参数（基坑底标高、坡率、开挖深度等）常位于全文尾部，头部截断会永久丢失参数数据。
+ * 历史缺陷：基坑支护图父块全文 153642 字，标高标注位于 147000+ 字符处，渲染层 slice(0,1200) 只保留
+ * 文件头元数据，写手从未见到「15.65(基坑底标高)」等真实设计参数，导致基坑深度数值在正文中缺失。
+ * 本函数扫描全文定位参数载体片段（CAD 标注字段/标高/坡率/相对标高数值/比例），
+ * 合并重叠窗口后按预算拼接，返回长度保证 ≤ maxChars。
+ */
+export function extractKeyParameterWindows(content: string, maxChars: number): string {
+  const budget = Math.max(400, Math.floor(maxChars));
+  const text = cleanEvidenceText(content);
+  if (text.length <= budget) return text;
+  // 行粒度提取：CAD 标注流以「图纸节点 + └── 标注文本」行为单位，
+  // 整行提取可保证「标注文本: 15.65(基坑底标高) | 关联对象: 邻近标注 坡率 1:1.0」中的关联参数不丢
+  const lines = text.split('\n');
+  // 行价值分级：基坑/开挖/坡率等结构安全设计参数最高优先，
+  // 管底/井底/中心标高等常规标注次之，裸负小数/比例最低。
+  // 历史缺陷：真实基坑支护图全文命中 1204 处（多为给排水管底标高等常规标注与标题行噪声），
+  // 前部噪声先占满预算，尾部「15.65(基坑底标高)」「坡率 1:1.0」被挤出渲染窗口
+  const rankedLinePatterns: Array<{ re: RegExp; value: number }> = [
+    { re: /基坑底标高|换填底标高|整平标高|开挖深度|放坡系数|支护形式|坡率/u, value: 20 },
+    { re: /标高/u, value: 10 },
+    { re: /[±＋]\s*0[.,]0{2,}/u, value: 8 },
+    { re: /[±＋-]\s*\d+\.\d{2,}/u, value: 3 },
+  ];
+  const scoredLines = lines
+    .map((line, index) => {
+      let value = 0;
+      for (const { re, value: v } of rankedLinePatterns) {
+        if (re.test(line)) { value = v; break; }
+      }
+      return { line, index, value };
+    })
+    .filter(entry => entry.value > 0);
+  if (!scoredLines.length) return text.slice(0, budget);
+  // 高价值优先、同价值按行号升序：尾部关键参数行进入预算而非被前部噪声行挤出
+  scoredLines.sort((a, b) => b.value - a.value || a.index - b.index);
+  // 头部元数据自适应压缩：极小预算（如 focused writer 520 字）下固定 300 字头部会把参数行空间挤到
+  // 只剩 1 行（历史缺陷：真实 CAD 全文 520 预算验证时「基坑底标高」被「22.00(整平标高)」关联行挤出窗口）
+  const header = text.slice(0, Math.min(300, Math.max(80, Math.floor(budget * 0.22)))).trimEnd();
+  const note = `（超长证据参数窗口提取：${scoredLines.length} 行参数命中，尾部关键参数已前置展示）`;
+  let remaining = budget - header.length - note.length - 4;
+  const parts: string[] = [];
+  const pickedIndexes = new Set<number>();
+  const contextCap = Math.max(50, Math.floor(budget * 0.15));
+  for (const { line, index } of scoredLines) {
+    if (remaining <= 30) break;
+    if (pickedIndexes.has(index)) continue;
+    const contextLine = index > 0 && /图纸节点:/u.test(lines[index - 1]) ? lines[index - 1].slice(0, contextCap) : '';
+    const piece = [contextLine, line].filter(Boolean).join('\n');
+    const chunk = piece.length > remaining ? piece.slice(0, remaining) : piece;
+    parts.push(chunk);
+    remaining -= chunk.length + 1;
+    pickedIndexes.add(index);
+    if (contextLine) pickedIndexes.add(index - 1);
+  }
+  const body = parts.length ? parts.join('\n') : text.slice(0, remaining + header.length);
+  const result = `${header}\n${note}\n${body}`;
+  return result.length > budget ? result.slice(0, budget) : result;
 }
 
 function evidenceDedupeKey(item: DocumentEvidence): string {
@@ -190,9 +251,9 @@ export function dedupeGlobalEvidence(evidence: DocumentEvidence[]): DocumentEvid
 export function selectEvidenceByBudget(items: DocumentEvidence[], options: { maxItems?: number; maxChars?: number; preservePinned?: boolean; maxItemsPerFile?: number } = {}, diagnostics?: DocumentGenerationDiagnostics): DocumentEvidence[] {
   const maxItems = Number.isFinite(options.maxItems) && options.maxItems! > 0 ? Math.floor(options.maxItems!) : undefined;
   const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.floor(options.maxChars!) : undefined;
-  // round-20 S5/W7 P6-1：单文件条目上限从固定 4 条放开到 12 条（可配置）——大文件（招标文件全文）不再被强行拆碎，
-  // 证据完整性优先；pinned 证据不受单文件上限约束（priority 通道跳过）
-  const maxItemsPerFile = Number.isFinite(options.maxItemsPerFile) && options.maxItemsPerFile! > 0 ? Math.floor(options.maxItemsPerFile!) : 12;
+  // 单文件条目上限默认不限制（全量保留）：大文件（招标文件全文）不再被拆碎，证据完整性优先；
+  // 仅显式传入 maxItemsPerFile 时才启用（兼容存量调用点），pinned 证据始终不受单文件上限约束
+  const maxItemsPerFile = Number.isFinite(options.maxItemsPerFile) && options.maxItemsPerFile! > 0 ? Math.floor(options.maxItemsPerFile!) : undefined;
   const ranked = uniqueEvidence(items, undefined, diagnostics);
   const pinned = options.preservePinned ? ranked.filter(item => item.source === 'pinned-evidence' || item.source === 'bound-file' || item.source === 'required-fact-evidence') : [];
   const normal = ranked.filter(item => !pinned.includes(item));
@@ -202,8 +263,13 @@ export function selectEvidenceByBudget(items: DocumentEvidence[], options: { max
   const tryPush = (item: DocumentEvidence, priority = false) => {
     if (maxItems && selected.length >= maxItems) return;
     const fileCount = perFileCounts.get(item.filePath) || 0;
-    if (!priority && fileCount >= maxItemsPerFile) return;
-    const content = cleanEvidenceText(item.content);
+    if (!priority && maxItemsPerFile !== undefined && fileCount >= maxItemsPerFile) return;
+    let content = cleanEvidenceText(item.content);
+    // 超长证据（CAD 父块全文等）压缩为关键参数窗口再入池：单条 15 万字全文占满预算会把其他来源证据全部挤出，
+    // 且尾部关键参数在后续渲染截断中仍会丢失——入池前压缩保证参数可见且预算留给多文件证据
+    if (maxChars && content.length > 4000) {
+      content = extractKeyParameterWindows(content, Math.min(12000, maxChars));
+    }
     const nextChars = chars + content.length;
     if (maxChars && selected.length > 0 && nextChars > maxChars) return;
     selected.push({ ...item, content });
@@ -212,7 +278,7 @@ export function selectEvidenceByBudget(items: DocumentEvidence[], options: { max
   };
   for (const item of pinned) tryPush(item, true);
   for (const item of normal) tryPush(item);
-  // 预算裁剪量记录：被 maxItems/maxChars/单文件上限裁掉的条目写入诊断，使预算软限制可观测（历史缺陷：裁剪静默发生，生成链路无感知）
+  // 裁剪量记录：被显式 maxItems/maxChars/maxItemsPerFile 裁掉的条目写入诊断，使预算软限制可观测
   if (diagnostics) diagnostics.evidence.budgetDropped += Math.max(0, ranked.length - selected.length);
   return selected;
 }
@@ -283,8 +349,9 @@ export function buildEvidenceBundle(chapter: DocumentTemplateChapter, evidence: 
     resource.score = Math.max(resource.score, item.score);
     resource.relatedFacts = [...new Set([...resource.relatedFacts, ...relatedFactsForResource(item, chapter)])];
     resource.relatedChapters = [...new Set([...resource.relatedChapters, chapter.title])];
-    const snippet = item.content.replace(/\s+/gu, ' ').slice(0, 600);
-    if (snippet && resource.snippets.length < 4 && !resource.snippets.includes(snippet)) resource.snippets.push(snippet);
+    // 全量保留内容片段（不做 600 字截断与 4 条上限：截断即丢材料事实）
+    const snippet = item.content.replace(/\s+/gu, ' ');
+    if (snippet && !resource.snippets.includes(snippet)) resource.snippets.push(snippet);
     resourceMap.set(item.filePath, resource);
   }
   const resources = [...resourceMap.values()].sort((a, b) => b.score - a.score);
@@ -369,7 +436,8 @@ export function evidenceBundlePrompt(bundle: EvidenceBundle, options: EvidencePr
   // 文本证据保留结构化换行（表格、键值对、清单行），不做单行压缩——单行压缩会把多列表格变成文字墙
   const textPrompt = selectEvidenceForPrompt(bundle.textEvidence, maxChars ? Math.floor(maxChars * 0.65) : undefined, (item, index) => {
     const body = cleanEvidenceText(item.content);
-    const truncated = body.length > 1200 ? `${body.slice(0, 1200)}\n（片段截断，完整 ${body.length} 字符）` : body;
+    // 超长证据（CAD 父块全文等）截断前先做关键参数窗口提取：头部盲截会丢失尾部标高/坡率等真实设计参数
+    const truncated = body.length > 1200 ? extractKeyParameterWindows(body, 1200) : body;
     return `${readableSourceLabel(item, index)}\n类型：${item.processingType || 'reference'}\n章节/片段：${item.sectionTitle?.replace(FILE_NAME_RE, '') || '资料片段'}\n内容：\n${truncated}`;
   }, item => evidencePromptImportance(item, requiredFacts));
   const omittedNote = resourcePrompt.omitted + textPrompt.omitted > 0

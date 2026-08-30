@@ -3,6 +3,7 @@ import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
 import { documentTextLength } from './budget';
 import { cleanPdfHeadingNoise } from './factsModel';
 import { buildSemanticSimilarity, type SemanticSimilarityFn } from './semanticSimilarity';
+import { isBidDisciplineSentence } from './utils';
 
 /**
  * 招标文件“要求与标准”层：把招标绑定资料中的文本性评分项要求（创优目标/绿色等级/特殊质量标准/
@@ -111,94 +112,114 @@ export function tenderRequirementsSourceHash(text: string) {
 
 /**
  * 从绑定资料 LLM 结构化提取招标评分项要求。
- * 输入 evidence 应已由调用方 selectEvidenceByBudget 限幅（全量招标+合同类资料优先）。
+ * 输入 evidence 全量进入提取（无丢弃式截断）；单次输入超 SOURCE_SLICE_CHARS 时按原文顺序分片多轮提取，
+ * 各片结果经 mergeTenderRequirements 字段级合并（数据零丢失，仅适配单次模型上下文）。
  */
 export async function extractTenderRequirements(
   evidence: DocumentEvidence[],
-  options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; /** 输入字符上限（窄通道小输入用，默认 150000） */ maxSourceChars?: number } = {},
+  options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {},
 ): Promise<TenderRequirementModel> {
   const empty = emptyTenderRequirements(false);
   if (!evidence || evidence.length === 0) return empty;
-  // round-21 S6：直读全文通道输入总量控制（招标文件 200+ 切片直读时防极端超长挤爆上下文；
-  // 按原文顺序累计，超限即止——评标办法位于招标文件中前部，顺序截断不会丢评标办法正文）
-  const MAX_SOURCE_CHARS = options.maxSourceChars ?? 150000;
-  const sourceTextsParts: string[] = [];
+  // 分片阈值：每片约 10 万字符（deepseek 64k token 上下文安全余量内），
+  // 按原文顺序累计分片——不是截断丢弃，而是全部内容分片完整进入提取，片间结果合并
+  const SOURCE_SLICE_CHARS = 100000;
+  let sourceLines: string[] = [];
   let sourceChars = 0;
+  const slices: string[][] = [];
   for (const item of evidence) {
     if (!item.content || !(item.content as string).trim()) continue;
     // round-23 P0-3：提取输入清 PDF 标题标记噪声（“平方\n\n### 米”夹断句会诱导模型输出截断坏值）
     const line = `【${item.filePath || '资料'}｜${item.sectionTitle || '正文'}】\n${cleanPdfHeadingNoise(item.content)}`;
-    if (sourceChars > 0 && sourceChars + line.length > MAX_SOURCE_CHARS) break;
-    sourceTextsParts.push(line);
+    if (sourceLines.length > 0 && sourceChars + line.length > SOURCE_SLICE_CHARS) {
+      slices.push(sourceLines);
+      sourceLines = [];
+      sourceChars = 0;
+    }
+    sourceLines.push(line);
     sourceChars += line.length;
   }
-  const sourceTexts = sourceTextsParts.join('\n\n');
-  if (!sourceTexts.trim()) return empty;
-  const sourceHash = tenderRequirementsSourceHash(sourceTexts.slice(0, 6000));
-  // round-21 S6 修复：三处根因一并治理（历史缺陷：无输出骨架时模型自由发挥输出 coreTerms 罗列清单内容、
-  // 2600 maxTokens 截断 finish_reason=length、评标办法正文因证据预算单文件上限截断进不了输入）。
-  // ① prompt 内嵌 JSON 字段骨架（schema 仅代码侧后置校验，模型此前看不到字段结构）；
-  // ② maxTokens 2600→5000（实测 2.6 万 token 输入下 2600 必截断，JSON 解析失败 → 空模型 → skipped）；
-  // ③ 排除指令：工程量清单项目特征不是评分项要求（输入混入清单内容时模型会罗列 coreTerms）。
-  const skeleton = [
-    '必须输出且仅输出一个 JSON 对象，字段结构如下（没有内容的字段输出空数组 [] 或省略可选字段，绝不输出其他字段名）：',
-    '{',
-    '  "awardObjectives": [{ "text": "创优目标原文", "coreTerms": ["核心词"], "source": "来源文件" }],',
-    '  "specialQualityStandards": [{ "text": "...", "coreTerms": [], "source": "..." }],',
-    '  "awardClauses": [{ "text": "...", "coreTerms": [], "source": "..." }],',
-    '  "greenBuildingGrade": { "text": "...", "coreTerms": [], "source": "..." },',
-    '  "smartSiteGrade": { "text": "...", "coreTerms": [], "source": "..." },',
-    '  "assemblyRate": { "text": "...", "coreTerms": [], "source": "..." },',
-    '  "systematicBenchmarks": [{ "text": "...", "coreTerms": [], "source": "..." }],',
-    '  "frontScheduleClauses": [{ "text": "...", "coreTerms": [], "source": "..." }],',
-    '  "dateFabricationProhibited": false,',
-    '  "prohibitionNotes": [{ "text": "...", "coreTerms": [], "source": "..." }],',
-    '  "pageLimit": { "text": "...", "coreTerms": [], "source": "..." },',
-    '  "evaluationScheme": { "text": "...", "coreTerms": [], "source": "..." }',
-    '}',
-  ].join('\n');
-  const result = await callDocumentLlmJson<RawTenderRequirements>(
-    [
-      '你是招标文件“要求与标准”结构化提取器。',
-      '从施工项目绑定资料（招标文件/合同条款/技术标准/检查规范等）中提取文本性评分项要求——这些是评标专家会核对文档是否响应、且影响否决与得分的实质要求。',
-      '只提取资料中明确写出的要求，绝不臆造；资料没有该类别时输出空数组或缺省。',
-      'coreTerms 是用于在正文中核对该要求是否被响应的核心词（2-4 个），必须选最能代表该要求的专有名词/等级/体系名（如“黄山杯”“二星级”“六个百分百”），不要泛化词。',
-      'dateFabricationProhibited：资料写明“以开工令为准/开工日期以监理开工令为准/不得自定开工日期”时为 true，否则 false。',
-      'systematicBenchmarks 提取体系化基准要求（如“扬尘治理六个百分百”“四节一环保”），单条零散要求放 prohibitionNotes。',
-      'frontScheduleClauses：从“投标人须知前附表/投标人须知”章节提取施工组织设计必须响应的实质条款——计划工期与质量要求、创优目标与奖惩（如“确保黄山杯，支付300万元”）、缺陷责任期与质保金、履约担保、工期延误赔偿、项目经理/关键人员要求、分包限制、装配式/绿色建筑/智慧工地等级、安全文明与扬尘要求、付款方式（影响资金安排）。只提取施组正文需要写入或必须遵守的条款；投标程序类条款（开标时间地点、保证金账户、投标文件递交/解密方式、评标委员会组成等纯程序信息）一律不提取。',
-      'pageLimit：资料含篇幅/编制要求（如“不超过 50 页”）时提取。',
-      'evaluationScheme：从评标办法章节提取结构性评分信息——评标办法类型、分值构成（技术文件/商务文件/报价文件分值）、技术文件详细评审内容项（逐项列出）、评分档位线（一般/良好/优秀分值区间）。text 用“；”分隔罗列原文关键信息；资料无评标办法章节时省略。',
-      '工程量清单的项目特征描述不是评分项要求，不要提取。',
-      skeleton,
-      '只返回 JSON。',
-    ].join('\n'),
-    sourceTexts,
-    {
-      maxTokens: 5000,
-      temperature: 0.1,
-      signal: options.signal,
-      diagnostics: options.diagnostics,
-      schema: REQUIREMENTS_JSON_SCHEMA,
-      taskKind: 'structuredGeneration',
-    },
-  );
-  if (!result) return { ...empty, sourceHash };
-  return {
-    awardObjectives: cleanItems(result.awardObjectives),
-    specialQualityStandards: cleanItems(result.specialQualityStandards),
-    awardClauses: cleanItems(result.awardClauses),
-    greenBuildingGrade: cleanItem(result.greenBuildingGrade),
-    smartSiteGrade: cleanItem(result.smartSiteGrade),
-    assemblyRate: cleanItem(result.assemblyRate),
-    systematicBenchmarks: cleanItems(result.systematicBenchmarks),
-    frontScheduleClauses: cleanItems(result.frontScheduleClauses),
-    dateFabricationProhibited: result.dateFabricationProhibited === true,
-    prohibitionNotes: cleanItems(result.prohibitionNotes),
-    pageLimit: cleanItem(result.pageLimit),
-    evaluationScheme: cleanItem(result.evaluationScheme),
-    extracted: true,
-    sourceHash,
-  };
+  if (sourceLines.length > 0) slices.push(sourceLines);
+
+  async function extractSlice(lines: string[]): Promise<TenderRequirementModel> {
+    const sourceTexts = lines.join('\n\n');
+    if (!sourceTexts.trim()) return empty;
+    const sourceHash = tenderRequirementsSourceHash(sourceTexts);
+    // round-21 S6 修复：三处根因一并治理（历史缺陷：无输出骨架时模型自由发挥输出 coreTerms 罗列清单内容、
+    // 2600 maxTokens 截断 finish_reason=length、评标办法正文因证据预算单文件上限截断进不了输入）。
+    // ① prompt 内嵌 JSON 字段骨架（schema 仅代码侧后置校验，模型此前看不到字段结构）；
+    // ② maxTokens 5000→16000（全量输入对应更大 JSON，输出截断会直接丢字段）；
+    // ③ 排除指令：工程量清单项目特征不是评分项要求（输入混入清单内容时模型会罗列 coreTerms）。
+    const skeleton = [
+      '必须输出且仅输出一个 JSON 对象，字段结构如下（没有内容的字段输出空数组 [] 或省略可选字段，绝不输出其他字段名）：',
+      '{',
+      '  "awardObjectives": [{ "text": "创优目标原文", "coreTerms": ["核心词"], "source": "来源文件" }],',
+      '  "specialQualityStandards": [{ "text": "...", "coreTerms": [], "source": "..." }],',
+      '  "awardClauses": [{ "text": "...", "coreTerms": [], "source": "..." }],',
+      '  "greenBuildingGrade": { "text": "...", "coreTerms": [], "source": "..." },',
+      '  "smartSiteGrade": { "text": "...", "coreTerms": [], "source": "..." },',
+      '  "assemblyRate": { "text": "...", "coreTerms": [], "source": "..." },',
+      '  "systematicBenchmarks": [{ "text": "...", "coreTerms": [], "source": "..." }],',
+      '  "frontScheduleClauses": [{ "text": "...", "coreTerms": [], "source": "..." }],',
+      '  "dateFabricationProhibited": false,',
+      '  "prohibitionNotes": [{ "text": "...", "coreTerms": [], "source": "..." }],',
+      '  "pageLimit": { "text": "...", "coreTerms": [], "source": "..." },',
+      '  "evaluationScheme": { "text": "...", "coreTerms": [], "source": "..." }',
+      '}',
+    ].join('\n');
+    const result = await callDocumentLlmJson<RawTenderRequirements>(
+      [
+        '你是招标文件“要求与标准”结构化提取器。',
+        '从施工项目绑定资料（招标文件/合同条款/技术标准/检查规范等）中提取文本性评分项要求——这些是评标专家会核对文档是否响应、且影响否决与得分的实质要求。',
+        '只提取资料中明确写出的要求，绝不臆造；资料没有该类别时输出空数组或缺省。',
+        'coreTerms 是用于在正文中核对该要求是否被响应的核心词（2-4 个），必须选最能代表该要求的专有名词/等级/体系名（如“黄山杯”“二星级”“六个百分百”），不要泛化词。',
+        'dateFabricationProhibited：资料写明“以开工令为准/开工日期以监理开工令为准/不得自定开工日期”时为 true，否则 false。',
+        'systematicBenchmarks 提取体系化基准要求（如“扬尘治理六个百分百”“四节一环保”），单条零散要求放 prohibitionNotes。',
+        'frontScheduleClauses：从“投标人须知前附表/投标人须知”章节提取施工组织设计必须响应的实质条款——计划工期与质量要求、创优目标与奖惩（如“确保黄山杯，支付300万元”）、缺陷责任期与质保金、履约担保、工期延误赔偿、项目经理/关键人员要求、分包限制、装配式/绿色建筑/智慧工地等级、安全文明与扬尘要求、付款方式（影响资金安排）。只提取施组正文需要写入或必须遵守的条款；投标程序类条款（开标时间地点、保证金账户、投标文件递交/解密方式、评标委员会组成等纯程序信息）一律不提取。',
+        'pageLimit：资料含篇幅/编制要求（如“不超过 50 页”）时提取。',
+        'evaluationScheme：从评标办法章节提取结构性评分信息——评标办法类型、分值构成（技术文件/商务文件/报价文件分值）、技术文件详细评审内容项（逐项列出）、评分档位线（一般/良好/优秀分值区间）。text 用“；”分隔罗列原文关键信息；资料无评标办法章节时省略。',
+        '工程量清单的项目特征描述不是评分项要求，不要提取。',
+        skeleton,
+        '只返回 JSON。',
+      ].join('\n'),
+      sourceTexts,
+      {
+        maxTokens: 16000,
+        temperature: 0.1,
+        signal: options.signal,
+        diagnostics: options.diagnostics,
+        schema: REQUIREMENTS_JSON_SCHEMA,
+        taskKind: 'structuredGeneration',
+      },
+    );
+    if (!result) return { ...empty, sourceHash };
+    return {
+      awardObjectives: cleanItems(result.awardObjectives),
+      specialQualityStandards: cleanItems(result.specialQualityStandards),
+      awardClauses: cleanItems(result.awardClauses),
+      greenBuildingGrade: cleanItem(result.greenBuildingGrade),
+      smartSiteGrade: cleanItem(result.smartSiteGrade),
+      assemblyRate: cleanItem(result.assemblyRate),
+      systematicBenchmarks: cleanItems(result.systematicBenchmarks),
+      // 商务纪律类条款确定性过滤（评分报告问题2）：投标/评标纪律承诺、廉洁承诺类条款
+      // 属商务投标函内容而非施组实质要求，提取后即丢弃——不注入写作、不参与零响应检测，
+      // 从源头阻断「正文响应纪律条款」的产生（LLM 分类不稳定，确定性过滤兜底）
+      frontScheduleClauses: cleanItems(result.frontScheduleClauses).filter(item => !isBidDisciplineSentence(item.text)),
+      dateFabricationProhibited: result.dateFabricationProhibited === true,
+      prohibitionNotes: cleanItems(result.prohibitionNotes).filter(item => !isBidDisciplineSentence(item.text)),
+      pageLimit: cleanItem(result.pageLimit),
+      evaluationScheme: cleanItem(result.evaluationScheme),
+      extracted: true,
+      sourceHash,
+    };
+  }
+
+  let merged: TenderRequirementModel | undefined;
+  for (const slice of slices) {
+    const result = await extractSlice(slice);
+    merged = merged ? mergeTenderRequirements(merged, result) : result;
+  }
+  return merged || empty;
 }
 
 /**
@@ -218,17 +239,17 @@ const MANDATORY_CLAUSE_SEMANTIC_FEATURES = [
   '质量目标必须确保达到合格或优良标准的要求',
 ];
 
-/** 必提条款语义召回：证据切片与语义特征集余弦相似度 ≥0.5 为候选，按最高相似度排序取 top 40（去重保序） */
+/** 必提条款语义召回：证据切片全量参与（无数量截断）与语义特征集余弦相似度 ≥0.5 为候选，按最高相似度排序（去重保序） */
 export async function filterMandatoryClauseEvidence(evidence: DocumentEvidence[]): Promise<DocumentEvidence[]> {
   if (evidence.length === 0) return [];
-  const candidates = evidence.slice(0, 160);
-  const texts = candidates.map(item => cleanPdfHeadingNoise(`${item.sectionTitle || ''}\n${item.content || ''}`).slice(0, 400));
+  const candidates = evidence;
+  const texts = candidates.map(item => cleanPdfHeadingNoise(`${item.sectionTitle || ''}\n${item.content || ''}`));
   const similarity = await buildSemanticSimilarity(MANDATORY_CLAUSE_SEMANTIC_FEATURES, texts);
   const scored = candidates
     .map((item, index) => ({ item, text: texts[index], score: Math.max(...MANDATORY_CLAUSE_SEMANTIC_FEATURES.map(feature => similarity(feature, texts[index]))) }))
     .filter(entry => entry.score >= 0.5)
     .sort((a, b) => b.score - a.score);
-  const selected = scored.slice(0, 40);
+  const selected = scored;
   const seen = new Set<string>();
   const result: DocumentEvidence[] = [];
   for (const entry of selected) {
@@ -383,6 +404,13 @@ const RESPONSIVENESS_JSON_SCHEMA: DocumentJsonSchema = {
 export async function classifyRequirementResponsiveness(items: Array<{ kind: string; text: string }>, options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {}): Promise<Map<number, boolean>> {
   const trimmed = items.map(item => ({ kind: item.kind, text: item.text.trim() })).filter(item => item.text.length > 0);
   if (trimmed.length === 0) return new Map();
+  // 商务纪律类条款确定性兜底（评分报告问题2）：投标/评标纪律承诺、廉洁承诺类条款属商务投标函
+  // 内容，无论 LLM 分类结果如何一律 responsive=false——不进入零响应检测、不注入写作规则。
+  // 词表与 utils.isBidDisciplineSentence 同口径（提取层已过滤，此处兜底提取漏网与 merge 残留）。
+  const forcedProgrammatic = new Set<number>();
+  trimmed.forEach((item, index) => {
+    if (isBidDisciplineSentence(item.text)) forcedProgrammatic.add(index);
+  });
   const raw = await callDocumentLlmJson<{ results?: Array<{ index?: number; responsive?: boolean }> }>(
     [
       '你是招标文件要求项程序性/实质性分类器。',
@@ -401,12 +429,33 @@ export async function classifyRequirementResponsiveness(items: Array<{ kind: str
       taskKind: 'structuredGeneration',
     },
   );
-  if (!raw?.results?.length) return new Map(trimmed.map((_, index) => [index, true]));
+  if (!raw?.results?.length) return new Map(trimmed.map((_, index) => [index, forcedProgrammatic.has(index) ? false : true]));
   const judged = new Map<number, boolean>();
   for (const entry of raw.results) {
     if (typeof entry.index === 'number') judged.set(entry.index, entry.responsive !== false);
   }
-  return new Map(trimmed.map((_, index) => [index, judged.get(index) ?? true]));
+  return new Map(trimmed.map((_, index) => [index, forcedProgrammatic.has(index) ? false : (judged.get(index) ?? true)]));
+}
+
+/**
+ * 字面锚点命中：语义相似度未过阈值时，专有名词（coreTerms）、数字参数、具名奖项/等级在正文字面出现即视为已响应。
+ * 黄山杯实测：正文含「黄山杯」字面且切片在索引中，但 bge 余弦仅 0.50 < 0.6 被误报零响应——
+ * 语义通道对短专有名词区分度不足，字面兜底只认锚点词（长度≥2 的 coreTerms / 数字+单位 / XX杯奖星），
+ * 不认任意长句，避免通用短语字面重合造成漏检。
+ */
+function literalAnchorHit(item: TenderRequirementItem, normalizedMarkdown: string): boolean {
+  for (const term of item.coreTerms) {
+    const clean = term.replace(/\s+/gu, '');
+    if (clean.length >= 2 && normalizedMarkdown.includes(clean)) return true;
+  }
+  const text = item.text.replace(/\s+/gu, '');
+  // 数字参数：数字+单位组合字面命中（正文数字繁多，纯数字不作锚点；单位词表限工程条款常用单位）
+  const numberAnchor = /(?:\d+(?:\.\d+)?\s*(?:%|％|天|日|万元|亿元|元|米|m|M|mm|毫米|层|年|个|月|周|小时|分钟|项|处|台|套|辆|人|家|次|遍|道|吨|kPa|MPa))/giu.exec(text);
+  if (numberAnchor && normalizedMarkdown.includes(numberAnchor[0].replace(/\s+/gu, ''))) return true;
+  // 具名奖项/等级：条款原文里的「XX杯/XX奖/XX星」锚点字面命中（「级」后缀过宽不取，靠 coreTerms/数字锚点覆盖）
+  const namedAnchor = /[\u4e00-\u9fa5]{2,6}[杯奖星]/gu.exec(text);
+  if (namedAnchor && normalizedMarkdown.includes(namedAnchor[0])) return true;
+  return false;
 }
 
 /**
@@ -436,6 +485,8 @@ export async function requirementsCoverageIssues(
       if (score > bestSimilarity) bestSimilarity = score;
     }
     if (bestSimilarity >= 0.6) continue;
+    // 字面锚点兜底：语义未过阈值但专有名词/数字参数/具名奖项字面命中时视为已响应（黄山杯 0.50 误报修复）
+    if (literalAnchorHit(item, normalized)) continue;
     issues.push({
       level: 'error',
       severity: 'blocker',

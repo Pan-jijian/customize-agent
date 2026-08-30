@@ -12,7 +12,7 @@ import { documentTextLength } from './budget';
 import { estimateTokens, truncateToTokenBudget } from './tokenBudget';
 import { classifyQualitySeverity, degenerateContentIssues } from './qualityValidation';
 import { repairIssueSignature } from './documentQualityPipeline';
-import { callDocumentLlmJson } from './llmClient';
+import { callDocumentLlmJson, isContextOverflowLlmError } from './llmClient';
 import { throwIfAborted } from './utils';
 
 export type { QualityRepairType } from '../types';
@@ -95,8 +95,8 @@ export function lightweightChapterIssues(input: { chapter: DocumentTemplateChapt
     issues.push(`requiredFacts 未明显覆盖：${fact}`);
   }
   const unique = [...new Set(issues)];
-  // 报告所有问题但限制数量避免 LLM prompt 过大（issue 详情通过 validationIssues 完整保留）
-  return unique.length <= 16 ? unique : [...unique.slice(0, 16), `（及其他 ${unique.length - 16} 个问题，详见校验报告）`];
+  // 全部问题进入修复器（无数量截断，问题反馈完整保留）
+  return unique;
 }
 
 export function issuesForChapter(chapter: DocumentDraftChapter, issues: string[]) {
@@ -106,8 +106,7 @@ export function issuesForChapter(chapter: DocumentDraftChapter, issues: string[]
   const contentTruncated = truncateToTokenBudget(chapter.content, 4000, 'issue-matching').truncated;
   const text = `${chapter.title}\n${chapter.sections?.join('\n') || ''}\n${contentTruncated}`;
   return actionableIssues
-    .filter(issue => issue.includes(chapter.title) || [...sectionHits].some(section => issue.includes(section)) || /图片|三级小节|目录|表格|量化|数值|单位|事实|不得出现|禁止词|禁用主体|生成后事实反查失败|跨章一致性/u.test(issue) && /!\[|####|\*\*|\||m\s*[²2]|mm2|cm2|km2|重新生成|见招标公告|招标范围|兜底|施工方|\d/u.test(text))
-    .slice(0, 8);
+    .filter(issue => issue.includes(chapter.title) || [...sectionHits].some(section => issue.includes(section)) || /图片|三级小节|目录|表格|量化|数值|单位|事实|不得出现|禁止词|禁用主体|生成后事实反查失败|跨章一致性/u.test(issue) && /!\[|####|\*\*|\||m\s*[²2]|mm2|cm2|km2|重新生成|见招标公告|招标范围|兜底|施工方|\d/u.test(text));
 }
 
 export function classifyQualityRepairType(issues: string[]): QualityRepairType {
@@ -133,13 +132,16 @@ interface ChapterMarkdownPatch {
 
 function uniqueTextRange(content: string, patch: ChapterMarkdownPatch) {
   const originalText = patch.originalText?.trim();
-  if (originalText && content.indexOf(originalText) === content.lastIndexOf(originalText)) return originalText;
+  // 唯一性判定必须排除「未找到」情况：indexOf 返回 -1 时 -1 === -1 为 true，
+  // 历史 bug 会把不存在的 originalText 当作唯一定位返回 → replace 静默无效果 → applied=false
+  if (originalText && content.includes(originalText) && content.indexOf(originalText) === content.lastIndexOf(originalText)) return originalText;
   const targetStart = patch.targetStart?.trim();
   const targetEnd = patch.targetEnd?.trim();
   if (!targetStart || !targetEnd) return undefined;
   const startIndex = content.indexOf(targetStart);
+  if (startIndex < 0) return undefined;
   const endIndex = content.indexOf(targetEnd, startIndex + targetStart.length);
-  if (startIndex < 0 || endIndex < 0) return undefined;
+  if (endIndex < 0) return undefined;
   const endOffset = endIndex + targetEnd.length;
   const range = content.slice(startIndex, endOffset);
   return content.indexOf(range) === content.lastIndexOf(range) ? range : undefined;
@@ -172,9 +174,14 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
   throwIfAborted(input.signal);
   const repairType = input.repairType || classifyQualityRepairType(input.issues);
   const contextBlock = input.contextChapters?.length
-    ? `\n\n周边章节上下文（仅用于衔接，禁止改动其中内容）：\n${input.contextChapters.map(c => `【${c.title}】\n${c.content.slice(0, 2500)}`).join('\n\n')}`
+    ? `\n\n周边章节上下文（仅用于衔接，禁止改动其中内容）：\n${input.contextChapters.map(c => `【${c.title}】\n${c.content}`).join('\n\n')}`
     : '';
-  const result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>([
+  // 证据注入预算：与写作侧同口径（evidencePromptBudgetForTarget）。历史缺陷：修复器全量注入每章
+  // 2.8万-3.3万字符证据 → 超上下文窗口 400 失败 → 修复闭环瘫痪（真实生成 75 次失败、瞬态重试 0 次）
+  const evidenceBundle = input.chapter.evidence.length
+    ? buildEvidenceBundle({ id: input.chapter.id, title: input.chapter.title, purpose: input.chapter.title, queries: [], requiredFacts: [] }, input.chapter.evidence)
+    : undefined;
+  const systemPrompt = [
     '你是章节局部修复专家。只返回 JSON patch，不返回完整章节，不重写无问题内容。',
     repairTypeInstruction(repairType),
     FORMAL_WRITING_RULES,
@@ -187,16 +194,26 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     '禁止新增证据摘要中没有的信息；无法安全定位的问题不要生成 patch。',
     '返回 JSON：{"patches":[{"originalText":"原局部文本","targetStart":"定位起始文本","targetEnd":"定位结束文本","replacement":"替换后的局部文本","reason":"修复原因"}]}',
     input.promptTexts,
-  ].filter(Boolean).join('\n\n'), [
+  ].filter(Boolean).join('\n\n');
+  const buildUserPrompt = (evidenceText: string) => [
     `模板：${input.template.name}`,
     `章节：${input.chapter.title}`,
     input.requirement ? `用户要求：${input.requirement}` : '',
     `需要局部修复的问题：\n${input.issues.map(item => `- ${item}`).join('\n')}`,
-    input.chapter.evidence.length ? `本章证据摘要：\n${evidenceBundlePrompt(buildEvidenceBundle({ id: input.chapter.id, title: input.chapter.title, purpose: input.chapter.title, queries: [], requiredFacts: [] }, input.chapter.evidence), { maxChars: evidencePromptBudgetForTarget(documentTextLength(input.chapter.content), 5000, 14000) })}` : '',
+    evidenceText,
     '当前章节 Markdown：',
     input.chapter.content,
     contextBlock,
-  ].filter(Boolean).join('\n\n'), { maxTokens: input.maxTokens ?? 3200, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
+  ].filter(Boolean).join('\n\n');
+  const evidenceBudget = evidenceBundle
+    ? evidencePromptBudgetForTarget(Math.min(documentTextLength(input.chapter.content), 10000), 6000, 14000)
+    : undefined;
+  const failure: { value?: string } = {};
+  let result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(evidenceBundle && evidenceBudget ? `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: evidenceBudget })}` : ''), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, outFailure: failure });
+  if (!result && evidenceBundle && isContextOverflowLlmError(failure.value)) {
+    // 上下文超长降级重试：证据压缩到极小预算（3000 字符），优先保住修复任务本身
+    result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(`本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: 3000 })}`), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
+  }
   throwIfAborted(input.signal);
   let content = input.chapter.content;
   let appliedCount = 0;
@@ -206,7 +223,9 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     content = applied.content;
     if (applied.applied) appliedCount += 1;
   }
-  return { content, appliedCount, repairType };
+  // producedCount（F4）：LLM 已产出但未应用的 patch 条数，供修复循环区分「未产出 patch」与
+  // 「产出但锚点失配未应用」两种失败诊断（历史缺陷：补表类 patch 锚点失配全部落空仍报“未产出”）
+  return { content, appliedCount, producedCount: patches.length, repairType };
 }
 
 function summarizeRepairIssue(issue: string) {

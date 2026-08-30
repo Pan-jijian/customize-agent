@@ -1,7 +1,7 @@
 import type { AgentWorkflowContext, AgentWorkflowNode } from './agentWorkflow';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentTemplate, DocumentTemplateChapter, ProjectGraph, ValidationIssue } from './types';
 import type { PlannedChapterStructure } from './chapterPlanner';
-import { extractSection, hasProcessSequenceExpression, stableHash, stringifyFactValue } from './utils';
+import { BID_DISCIPLINE_PHRASES, extractSection, hasProcessSequenceExpression, isBidDisciplineSentence, stableHash, stringifyFactValue } from './utils';
 import { documentTextLength } from './budget';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
 
@@ -68,6 +68,9 @@ const FORMAL_FORBIDDEN_PHRASES = [
   // 内部术语（词面标记）：术语合法性属语义判断，这里只做确定性 flag 触发 Repairer 按上下文语义改写，
   // 不做词面替换（“工作包”按语境应改写为“拆除工程/专业工程”等，逐词替换必然产生语义错误）
   '工作包',
+  // 商务投标函内容（投标/评标纪律、廉洁承诺类）：属商务文件内容，技术标出现既降专业性又属评标敏感表述，
+  // 必须整句删除移入商务文件（评分报告问题2），技术标只保留技术与管理承诺；词表与 utils 单一来源同口径
+  ...BID_DISCIPLINE_PHRASES,
 ];
 
 function normalizeText(value: string) {
@@ -269,7 +272,15 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
   const issues: ValidationIssue[] = [];
   const content = input.draft.content || '';
   for (const phrase of FORMAL_FORBIDDEN_PHRASES) {
-    if (content.includes(phrase)) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `${input.draft.title} 正文包含禁止话术：${phrase}`, suggestion: phrase === '工作包' ? '这是生成系统后台概念，正文中不得出现该词：结合上下文语义改写为正式术语（如“拆除工程”“按专业工程逐项说明”），不得做词面替换。' : '改为事实支撑的正式表达；缺失事实不得占位。' });
+    if (content.includes(phrase)) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `${input.draft.title} 正文包含禁止话术：${phrase}`, suggestion: phrase === '工作包' ? '这是生成系统后台概念，正文中不得出现该词：结合上下文语义改写为正式术语（如“拆除工程”“按专业工程逐项说明”），不得做词面替换。' : (BID_DISCIPLINE_PHRASES as readonly string[]).includes(phrase) ? '评标纪律承诺、廉洁承诺等属商务投标函内容，不得进入技术标正文：删除该承诺句（移入商务文件），本节只保留技术与管理内容。' : '改为事实支撑的正式表达；缺失事实不得占位。' });
+  }
+  // 商务纪律语境句（无禁词词面变体）：「实行严格的纪律管理，确保投标活动合法合规」类句子
+  // 不含禁写词但属商务投标函内容（评分报告问题2实测原文），句级判定整句删除；已含禁写词的句子
+  // 由上方词表检测覆盖，避免重复报
+  const disciplineContextSentences = content.split(/(?<=[。；;])/u)
+    .filter(segment => isBidDisciplineSentence(segment) && !(BID_DISCIPLINE_PHRASES as readonly string[]).some(phrase => segment.includes(phrase)));
+  if (disciplineContextSentences.length > 0) {
+    issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `${input.draft.title} 正文包含商务投标函纪律承诺句：${disciplineContextSentences[0].slice(0, 40)}`, suggestion: '投标/评标纪律承诺、廉洁承诺等属商务投标函内容，不得进入技术标正文：删除该承诺句（移入商务文件），本节只保留技术与管理内容。' });
   }
   // P0-2：LLM 全故障时的证据骨架草稿必须被 Review 门禁拦截，不允许以模板拼接正文静默通过
   if (content.includes('[EVIDENCE_SKELETON]')) issues.push({ level: 'error', severity: 'blocker', category: 'evidence_coverage', owner: 'system', message: `${input.draft.title} 正文为 LLM 全故障后的证据骨架草稿，禁止作为正式正文通过`, suggestion: '必须由 Repairer 基于小节事实卡与证据完整重写为正式正文，并删除 [EVIDENCE_SKELETON] 标记；若 LLM 仍不可用，本章节保持 failed 阻断。' });

@@ -10,6 +10,7 @@ import type { DepthDimension, ProfessionalDepthAnalysis } from './professionalDe
 import { documentTextLength, estimateDocumentPages } from './budget';
 import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { displayChapterTitle } from './outline';
+import { mergeTableLineBreaks } from './markdownComposer';
 import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
 import { extractSection, stringifyFactValue } from './utils';
@@ -427,31 +428,6 @@ export function tocBodyConsistencyIssues(markdown: string): ValidationIssue[] {
   return issues;
 }
 
-/** 目录三级小节完整性（h13d）：正文存在 #### X.Y.Z 三级小节时，目录必须在对应二级小节下
- * 以缩进行收录同编号三级条目。合肥师范实测：正文 3.1.1/3.1.2/3.1.3 三级小节目录全部缺收。 */
-export function tocThirdLevelCompletenessIssues(markdown: string): ValidationIssue[] {
-  const tocMatch = TOC_BLOCK_RE.exec(markdown);
-  const tocBody = tocMatch?.[1] ?? '';
-  const thirdLevel = [...markdown.matchAll(/^####\s+(\d+\.\d+\.\d+\s+.+)$/gmu)]
-    .map(match => normalizeStructureTitle(match[1] || ''))
-    .filter(Boolean);
-  if (thirdLevel.length === 0) return [];
-  const tocThird = [...tocBody.matchAll(/^\s{2,}(\d+\.\d+\.\d+\s+\S.+)$/gmu)]
-    .map(match => normalizeStructureTitle(match[1] || ''))
-    .filter(Boolean);
-  const missing = [...new Set(thirdLevel.filter(title => !tocThird.includes(title)))];
-  if (missing.length === 0) return [];
-  return [{
-    level: 'error',
-    severity: 'blocker',
-    category: 'structure',
-    owner: 'llm',
-    repairability: 'llm_repairable',
-    message: `目录小节不完整：正文存在 ${thirdLevel.length} 个三级小节，目录仅收录 ${tocThird.length} 个，缺失【${missing.slice(0, 6).join('、')}】`,
-    suggestion: '在目录对应二级小节下补齐三级小节条目（缩进的“X.Y.Z 标题”行），确保目录层级与正文标题完全一致。',
-  }];
-}
-
 function isInstructionLikeStructureTitle(value: string) {
   const rawTitle = value
     .replace(/^#{1,6}\s+/u, '')
@@ -487,7 +463,9 @@ export function formalContentIntegrityIssues(markdown: string): ValidationIssue[
   if (longLine) issues.push({ level: 'warning', message: `正文存在过长段落：${longLine}`, suggestion: '请拆分为多段或表格，改善导出版式和可读性。' });
   const inlineList = lines.find(line => /\S.+(?:\s|[。；;])(?:\d+[.、](?=\s|\*\*)\s*|[（(]\d+[）)]\s*|[-*+]\s+)\S.+(?:\s|[。；;])(?:\d+[.、](?=\s|\*\*)\s*|[（(]\d+[）)]\s*|[-*+]\s+)\S/u.test(line) && !/\b\d+\.\d+\s*(?:mm|cm|m|㎡|m2|kg|t|MPa|kPa|V|KV|kV|A)\b/iu.test(line));
   if (inlineList) issues.push({ level: 'error', message: `正文存在列表项粘连同一行：${inlineList.slice(0, 120)}`, suggestion: '有序列表和无序列表必须逐项独占一行，确保 Markdown/PDF/DOCX 正确排版。' });
-  const sourcePageRef = markdown.match(/(?:PDF\s*)?第\s*\d+\s*(?:[-—至到~～]\s*\d+)?\s*页|(?:图纸|清单|资料|文件|[\u4e00-\u9fa5A-Za-z0-9（）()、·-]{2,24}(?:工程)?)\s*(?:[（(]?\s*|(?:共|多达|约|合计)\s*)\d+\s*页|[\u4e00-\u9fa5A-Za-z0-9、及与和]{2,24}\s*(?:共|多达|约|合计)\s*\d+\s*页|\d+\s*页\s*(?:图纸|资料|文件|装饰|土建|加固|给排水|电气|智能化|消防)|\d+\s*页/iu)?.[0];
+  // 清洗链（normalizeTenderSourcePageRefs/cleanInlineFactValue）已把完整页码引用（PDF 第N页）归一为
+  // “相关资料”并删除残缺残片，最终校验文本中任何「PDF 第」形态都属清洗缺口，全部报出
+  const sourcePageRef = markdown.match(/PDF\s*第\s*|(?:PDF\s*)?第\s*\d+\s*(?:[-—至到~～]\s*\d+)?\s*页|(?:图纸|清单|资料|文件|[\u4e00-\u9fa5A-Za-z0-9（）()、·-]{2,24}(?:工程)?)\s*(?:[（(]?\s*|(?:共|多达|约|合计)\s*)\d+\s*页|[\u4e00-\u9fa5A-Za-z0-9、及与和]{2,24}\s*(?:共|多达|约|合计)\s*\d+\s*页|\d+\s*页\s*(?:图纸|资料|文件|装饰|土建|加固|给排水|电气|智能化|消防)|\d+\s*页/iu)?.[0];
   if (sourcePageRef) issues.push({ level: 'error', message: `正文残留资料页码元信息：${sourcePageRef}`, suggestion: '正式投标正文应引用招标文件、施工图设计文件、工程量清单和相关专业图纸，不写 PDF 页码或资料页数。' });
   const internalTrace = lines.find(line => /仅作为内部事实提取依据|正式正文不得引用文件名|后台事实|内部事实/u.test(line));
   if (internalTrace) issues.push({ level: 'error', message: `正文残留内部处理说明：${internalTrace.slice(0, 120)}`, suggestion: '正式投标正文不得出现内部事实抽取、后台处理或文件名引用限制说明。' });
@@ -518,7 +496,28 @@ export function formalHeadingHierarchyIssues(markdown: string): ValidationIssue[
 }
 
 export function markdownTableQualityIssues(markdown: string): ValidationIssue[] {
+  // 断行先合并再检测（E3 检测补盲）：单元格内换行的续行不以 | 开头，原样检测会被漏报；
+  // 合并后“表格列数不一致”与“空单元格”检测在真实表格结构上运行
+  markdown = mergeTableLineBreaks(markdown);
   const issues: ValidationIssue[] = [];
+  // 单竖线残行检测（E3）：表格数据行整列丢失的残片（如“企业施工工艺标准 |”），
+  // 合并层无法修复（只有单竖线无法判定续文），报告修复轮补齐或删除
+  {
+    const lines = markdown.split(LINE_SPLIT_RE);
+    for (let index = 1; index < lines.length; index += 1) {
+      const line = (lines[index] || '').trim();
+      const prev = (lines[index - 1] || '').trim();
+      const isLonePipeResidue = Boolean(line)
+        && !/^\|/u.test(line)
+        && line.endsWith('|')
+        && (line.match(/\|/gu) || []).length === 1
+        && !/^#{1,6}\s/u.test(line)
+        && MARKDOWN_TABLE_ROW_RE.test(prev);
+      if (isLonePipeResidue) {
+        issues.push({ level: 'error', message: `表格断行残片：${line}`, suggestion: '该行是表格数据行整列丢失的残片：合并回所属表格行并补齐缺失列，或删除该残行。' });
+      }
+    }
+  }
   if (/按审批确认执行/u.test(markdown)) issues.push({ level: 'error', message: '表格存在自动兜底污染内容：按审批确认执行', suggestion: '正式投标表格不得使用通用兜底短语，应保留真实业务内容或删除该行。' });
   // “信息项|内容”表头也被 Writer 用于工程量/设备参数汇总表，只有内容含项目基础信息字段的表才算“基础信息表”；
   // 直接按表头计数会把第三章的工程量汇总表误判为“基础信息重复”。
@@ -1176,7 +1175,7 @@ export function managementMeasureNumberIssues(chapters: Array<Pick<DocumentDraft
   return issues;
 }
 
-export function genericProfessionalContentIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
+export function genericProfessionalContentIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'> & Partial<Pick<DocumentDraftChapter, 'id'>>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const generic = /(?:加强组织领导|严格执行规范|落实责任制度|确保工程质量|强化过程管理|提高思想认识|完善管理体系|形成闭环管理)/gu;
   const issues: ValidationIssue[] = [];
   for (const chapter of chapters) {
@@ -1186,7 +1185,7 @@ export function genericProfessionalContentIssues(chapters: Array<Pick<DocumentDr
     // 调用方未提供语义分析时跳过（生成中间阶段无章节内容可分析；最终校验恒提供）：
     // 是否绑定项目事实必须由 bge 嵌入判定，具体词正则必然误伤（“材料”等词零命中但实质具体的章节被误判泛化）
     if (!analysis) continue;
-    if (!analysis.concrete) issues.push({ level: 'error', message: `${chapter.title} 存在较多未绑定项目事实和工序控制点的泛化套话`, suggestion: '请替换为结合资料事实、施工对象、工序控制、验收资料和整改闭环的专业内容。' });
+    if (!analysis.concrete) issues.push({ level: 'error', message: `${chapter.title} 存在较多未绑定项目事实和工序控制点的泛化套话`, suggestion: '请替换为结合资料事实、施工对象、工序控制、验收资料和整改闭环的专业内容。', chapterId: chapter.id });
   }
   return issues;
 }
@@ -1366,7 +1365,7 @@ function professionalScoreThreshold(title: string) {
   return { min: 4, focus: '事实依据、专业深度、可执行性' };
 }
 
-export function professionalScoreIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
+export function professionalScoreIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'> & Partial<Pick<DocumentDraftChapter, 'id'>>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const dimensionOrder: DepthDimension[] = ['factuality', 'structure', 'depth', 'executable', 'specificity', 'consistency'];
   for (const chapter of chapters) {
@@ -1380,13 +1379,13 @@ export function professionalScoreIssues(chapters: Array<Pick<DocumentDraftChapte
     const total = dimensionOrder.filter(dimension => analysis.dimensions[dimension]).length * 2;
     if (total < threshold.min) {
       const weak = dimensionOrder.filter(dimension => !analysis.dimensions[dimension]).join('、') || threshold.focus;
-      issues.push({ level: 'error', message: `${chapter.title} 专业评分不足：${total}/12，薄弱维度：${weak}`, suggestion: `请按章节任务卡补齐${threshold.focus}，并写出资料依据、实施流程、专业控制点和检查整改闭环。` });
+      issues.push({ level: 'error', message: `${chapter.title} 专业评分不足：${total}/12，薄弱维度：${weak}`, suggestion: `请按章节任务卡补齐${threshold.focus}，并写出资料依据、实施流程、专业控制点和检查整改闭环。`, chapterId: chapter.id });
     }
   }
   return issues;
 }
 
-export function professionalContentIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
+export function professionalContentIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'> & Partial<Pick<DocumentDraftChapter, 'id'>>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const rules = [
     { re: /进度|工期/u, needKey: 'schedule' as const, need: /关键线路|穿插|纠偏|资源保障|节点|动态调整/u, message: '进度工期章节缺少关键线路、穿插施工或纠偏保障内容' },
     { re: /质量/u, needKey: 'quality' as const, need: /材料.*验收|复验|隐蔽验收|整改.*复验|质量.*资料|检验批/u, message: '质量章节缺少材料验收复验、隐蔽验收或整改复验闭环' },
@@ -1403,7 +1402,7 @@ export function professionalContentIssues(chapters: Array<Pick<DocumentDraftChap
     if (!analysis) continue;
     for (const rule of rules) {
       if (!rule.re.test(chapter.title)) continue;
-      if (!analysis.contentNeeds[rule.needKey]) issues.push({ level: 'error', message: `${chapter.title}：${rule.message}`, suggestion: '请按专业任务卡定向补写该章节，补齐可实施的控制措施、资料依据和闭环要求。' });
+      if (!analysis.contentNeeds[rule.needKey]) issues.push({ level: 'error', message: `${chapter.title}：${rule.message}`, suggestion: '请按专业任务卡定向补写该章节，补齐可实施的控制措施、资料依据和闭环要求。', chapterId: chapter.id });
     }
   }
   return issues;

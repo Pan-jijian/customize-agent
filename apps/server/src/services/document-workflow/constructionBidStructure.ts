@@ -281,11 +281,54 @@ export function auditBidStructure(chapters: DocumentTemplateChapter[]): BidStruc
     const uniqueCarriers = [...new Set(carriers)];
     const missingSections = group.requiredSectionPatterns
       .filter(pattern => !coveredPatterns.has(pattern))
-      .map(pattern => pattern.source.replace(/[\\/^$.*+?()[\]{}|]/gu, '').replace(/u$/u, ''));
+      .map(pattern => representativeTitleForPattern(pattern));
     const status: BidStructureDiagnostic['status'] = coveredPatterns.size === group.requiredSectionPatterns.length
       ? (uniqueCarriers.length > 1 ? 'fragmented' : 'satisfied')
       : 'missing';
     return { groupId: group.id, groupTitle: group.title, level: group.level, status, carrierChapters: uniqueCarriers, missingSections, remedy: group.remedy };
+  });
+}
+
+/** 必查小节正则 → 代表标题：候选词以 | 连接，取首个候选词为代表。
+ * 历史缺陷：直接对正则 source 整体剥离 | 会把候选词粘连成脏标题（如「现场踏勘施工条件现场条件」），
+ * 补挂到章节清单后被 Writer 原样写成正文小节。 */
+export function representativeTitleForPattern(pattern: RegExp) {
+  const source = pattern.source.replace(/[\\/^$.*+?()[\]{}]/gu, '').replace(/u$/u, '');
+  const firstAlternative = source.split('|').map(item => item.trim()).find(Boolean);
+  return firstAlternative || source;
+}
+
+/** 粘连产物 → 代表词 精确回退表：必查小节正则（候选词以 | 连接）整体剥离 | 后的粘连串，
+ * 逐字映射回首个候选词。仅精确匹配才回退（不会误伤合法标题），
+ * 用于清单层修复历史上由上述 bug 产生的脏小节标题。 */
+export function concatenatedSectionTitleFixes(): Record<string, string> {
+  const fixes: Record<string, string> = {};
+  for (const group of BID_STRUCTURE_GROUPS) {
+    for (const pattern of group.requiredSectionPatterns) {
+      const representative = representativeTitleForPattern(pattern);
+      // 粘连产物 = 历史 bug 的生成口径：正则 source 整体剥离 |（候选词直接拼接）
+      const concatenated = pattern.source.replace(/[\\/^$.*+?()[\]{}|]/gu, '').replace(/u$/u, '');
+      if (concatenated !== representative && !fixes[concatenated]) fixes[concatenated] = representative;
+    }
+  }
+  return fixes;
+}
+
+/** 概况类小节置首（确定性结构清洗，仅调序）：
+ * 施工组织设计惯例——首章以「编制说明与工程概况」类小节开篇（用户明确要求第一章第一节）；
+ * 将首章（或标题含概况/编制/说明/总体的承载章）中匹配概况语义的小节稳定移到最前，
+ * 其余小节相对顺序不变。只调序，不增删不改写标题（不属于内容兜底）。 */
+export function prioritizeOverviewSections<T extends DocumentTemplateChapter>(chapters: T[]): T[] {
+  if (!chapters.length) return chapters;
+  return chapters.map((chapter, index) => {
+    const sections = chapter.sections || [];
+    if (sections.length < 2) return chapter;
+    const isOverviewCarrier = index === 0 || /概况|总体理解|编制说明|编制依据/u.test(chapter.title);
+    if (!isOverviewCarrier) return chapter;
+    const overviewIndex = sections.findIndex(section => /^(?:编制说明|编制依据)/u.test(section) || /工程概况|项目概况|基本概况/u.test(section));
+    if (overviewIndex <= 0) return chapter;
+    const reordered = [sections[overviewIndex], ...sections.filter((_, i) => i !== overviewIndex)];
+    return { ...chapter, sections: reordered };
   });
 }
 

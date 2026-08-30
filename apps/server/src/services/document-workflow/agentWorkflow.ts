@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import { listKnowledgeFiles } from '../knowledge/kbService';
 import type { AgentChapterTask, AgentDocumentPlan, AgentReviewResult } from './agentPlanner';
 import type { DocumentExecutionStage, DocumentFact, DocumentTemplate, ProjectBinding, ProjectGraph, ValidationIssue } from './types';
-import { sourcePhraseIssues } from './markdownComposer';
+import { sectionDuplicateIssues, sectionHeadingIssues, sourcePhraseIssues } from './markdownComposer';
 import { displayStage } from './progress';
 import { stableHash, stringifyFactValue } from './utils';
 
@@ -316,5 +316,5 @@ export function formalTextGateIssues(markdown: string): ValidationIssue[] {
       issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `正式正文不得出现后台或兜底话术：第 ${index + 1} 行`, suggestion: '必须改为有事实依据的正式表达；非必填缺失字段应删除，必填事实缺失应阻断生成。' });
     }
   });
-  return [...issues, ...sourcePhraseIssues(markdown)].slice(0, 20);
+  return [...issues, ...sourcePhraseIssues(markdown), ...sectionHeadingIssues(markdown), ...sectionDuplicateIssues(markdown)].slice(0, 20);
 }

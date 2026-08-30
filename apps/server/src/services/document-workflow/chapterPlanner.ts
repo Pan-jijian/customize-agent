@@ -1,5 +1,5 @@
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from './types';
-import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
+import { buildEvidenceBundle, evidenceBundlePrompt } from './evidence';
 import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
 import { buildSemanticSimilarity, type SemanticSimilarityFn } from './semanticSimilarity';
 import { displayChapterTitle } from './outline';
@@ -178,7 +178,7 @@ function ensureSectionCoverage(inputSections: string[], blocks: PlannedChapterBl
     if (isCriticalSection(section)) {
       const targetBlock = bestBlock || enriched[enriched.length - 1];
       if (targetBlock) {
-        targetBlock.subPoints.push({ title: section.slice(0, 30), sources: [section] });
+        targetBlock.subPoints.push({ title: section, sources: [section] });
         fallbackSections.push(section);
         continue;
       }
@@ -188,7 +188,7 @@ function ensureSectionCoverage(inputSections: string[], blocks: PlannedChapterBl
       bestPoint.sources.push(section);
       fallbackSections.push(section);
     } else if (bestBlock) {
-      bestBlock.subPoints.push({ title: section.slice(0, 30), sources: [section] });
+      bestBlock.subPoints.push({ title: section, sources: [section] });
       fallbackSections.push(section);
     } else {
       coveredSections.push(section);
@@ -214,9 +214,9 @@ export function fallbackStructureForSections(inputSections: string[], chapterTit
       const lastSource = last ? last.sources[last.sources.length - 1] : '';
       if (!isCriticalSection(section) && last && (sameSectionText(section, lastSource) || bigramOverlap(section, lastSource) >= 0.75)) {
         last.sources.push(section);
-        if (section.length > last.title.length) last.title = section.slice(0, 30);
+        if (section.length > last.title.length) last.title = section;
       } else {
-        merged.push({ title: section.slice(0, 30), sources: [section] });
+        merged.push({ title: section, sources: [section] });
       }
     }
     return merged;
@@ -351,26 +351,24 @@ function buildPlannedBlock(result: PlannerBlockPlan, sections: string[], chapter
       }
       const subTitle = normalizePlannedTitle(point.title || '');
       // H4 标题有效即保留（LLM 的合并意图）；sources 未对齐时交由 ensureSectionCoverage 按相似度挂接
-      if (!subTitle || subTitle.length < 4) return sources.length > 0 ? { title: sources[0].slice(0, 30), sources } : undefined;
-      // H4 标题重写：优先 LLM 给的概括标题；照抄细目时取首条细目截断兜底
+      if (!subTitle || subTitle.length < 4) return sources.length > 0 ? { title: sources[0], sources } : undefined;
+      // H4 标题重写：优先 LLM 给的概括标题；照抄细目时取首条细目（不截断，原标题全量保真）
       const titleCandidate = subTitle && !sources.some(source => sameSectionText(subTitle, source)) ? subTitle : (sources[0] || subTitle);
-      return { title: titleCandidate.slice(0, 30), sources };
+      return { title: titleCandidate, sources };
     })
     .filter((point): point is PlannedChapterSubPoint => Boolean(point));
   if (subPoints.length === 0) return undefined;
-  const facts = (result.facts || []).map(item => item.trim().slice(0, 80)).filter(Boolean).slice(0, 2);
+  const facts = (result.facts || []).map(item => item.trim()).filter(Boolean);
   return { title, subPoints, facts, targetWords: MIN_BLOCK_TARGET_WORDS };
 }
 
-/** 块级证据过滤：按块细目首尾关键词匹配证据内容，取 top 8 条（每条截 800 字），避免无关证据挤占小调用输入 */
+/** 块级证据排序：按块细目首尾关键词匹配证据内容，只排序不丢弃（全量保留进规划输入） */
 function blockEvidenceForSections(sections: string[], evidence: DocumentEvidence[]): DocumentEvidence[] {
   const keywords = sections.flatMap(section => [section.slice(0, 4), section.slice(-4)]).filter(keyword => keyword.length >= 2);
-  const scored = evidence
+  return evidence
     .map(item => ({ item, score: keywords.reduce((sum, keyword) => sum + (item.content.includes(keyword) ? 1 : 0), 0) }))
-    .filter(entry => entry.score > 0)
     .sort((left, right) => right.score - left.score)
-    .slice(0, 8);
-  return scored.map(entry => ({ ...entry.item, content: entry.item.content.slice(0, 800) }));
+    .map(entry => entry.item);
 }
 
 /**
@@ -405,7 +403,7 @@ export async function planChapterStructureWithLlm(input: {
   // 阶段 2：逐块小调用（输出 ≤2000 token，远离 8192 共享输出池），块间并发、块级失败隔离
   const planBlockWithLlm = async (sections: string[], blockIndex: number): Promise<{ blocks: PlannedChapterBlock[]; llmPlanned: boolean; failure?: string }> => {
     const blockEvidence = blockEvidenceForSections(sections, input.evidence);
-    const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, blockEvidence), { maxChars: evidencePromptBudgetForTarget(halfTarget, 2500, 5000) });
+    const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, blockEvidence));
     const promptLines = [
       '你是专业施工组织设计文档结构规划专家。',
       '任务：把一个主题块内的输入细目重排为 H4 要点结构；语义相近、内容连贯的细目必须合并进同一个 H4 要点。',
@@ -422,10 +420,10 @@ export async function planChapterStructureWithLlm(input: {
       `文档模板：${input.template.name}`,
       `章节标题：${input.chapter.title}`,
       input.requirement ? `用户要求：${input.requirement}` : '',
-      input.graphContext ? `项目图谱（本章定向）：${input.graphContext.slice(0, 1500)}` : '',
-      input.blueprintContext ? `文档蓝图（本章任务卡与实施方案）：${input.blueprintContext.slice(0, 2000)}` : '',
-      input.projectContext ? `上下文：${input.projectContext.slice(0, 1000)}` : '',
-      input.roleContext ? `角色要求：${input.roleContext.slice(0, 1000)}` : '',
+      input.graphContext ? `项目图谱（本章定向）：${input.graphContext}` : '',
+      input.blueprintContext ? `文档蓝图（本章任务卡与实施方案）：${input.blueprintContext}` : '',
+      input.projectContext ? `上下文：${input.projectContext}` : '',
+      input.roleContext ? `角色要求：${input.roleContext}` : '',
       evidenceText ? `真实绑定资料：${evidenceText}` : '',
       `输入细目清单（本主题块共 ${sections.length} 条，必须全部覆盖，允许合并进同一 H4）：${sections.join('、')}`,
       `请输出 1 个主题块，1~${MAX_SUB_POINTS_PER_BLOCK} 个 H4 要点，确保所有输入细目被覆盖。`,

@@ -53,6 +53,73 @@ describe('sixHundredPercentCoverageIssues（W2 纯语义判定）', () => {
     expect(issues).toEqual([]);
     expect(buildSimilarityMock).not.toHaveBeenCalled();
   });
+
+  it('D2 拆迁工地豁免：正文显式说明无拆迁工程时不判该项缺失', async () => {
+    mockSimilarity(0.1);
+    const issues = await sixHundredPercentCoverageIssues('环保措施\n本项目无拆迁工程，不涉及拆迁工地湿法作业。');
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('缺少【');
+    expect(issues[0].message).not.toContain('拆迁工地100%湿法作业');
+  });
+
+  it('D2 拆迁工地豁免：未说明无拆迁时该项照常判缺失', async () => {
+    mockSimilarity(0.1);
+    const issues = await sixHundredPercentCoverageIssues('环保措施\n施工现场加强环保管理。');
+    expect(issues[0].message).toContain('拆迁工地100%湿法作业');
+  });
+
+  it('D2 豁免主语限定：无主语短语「临时设施不涉及拆迁」不得豁免拆迁项', async () => {
+    // 任意语境出现「不涉及拆迁」不代表项目整体无拆迁工程——误豁免会漏拦截拆迁项缺失
+    mockSimilarity(0.1);
+    const issues = await sixHundredPercentCoverageIssues('环保措施\n施工场地狭小，临时设施布置不涉及拆迁补偿。');
+    expect(issues[0].message).toContain('拆迁工地100%湿法作业');
+  });
+
+  it('D2 豁免主语变体：本工程短距否定「无房屋拆除」同样豁免', async () => {
+    mockSimilarity(0.1);
+    const issues = await sixHundredPercentCoverageIssues('环保措施\n本工程为新建工程，建设范围内无房屋拆除。');
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).not.toContain('拆迁工地100%湿法作业');
+  });
+
+  it('D2 豁免主语变体：该工程/本标段等主语集均豁免', async () => {
+    mockSimilarity(0.1);
+    for (const body of ['该工程为新建工程，无拆迁内容。', '本标段建设范围内不涉及拆迁。', '本施工项目无拆迁工程。']) {
+      const issues = await sixHundredPercentCoverageIssues(`环保措施\n${body}`);
+      expect(issues[0].message).not.toContain('拆迁工地100%湿法作业');
+    }
+  });
+
+  it('D2 豁免窗口限定：主语与否定词间隔超过 30 字不得豁免', async () => {
+    // 主语短距窗口 30 字：否定词超出窗口即视为非本项目整体豁免声明，不得漏拦截
+    mockSimilarity(0.1);
+    const body = '本项目位于合肥市瑶海区龙岗路与大众路交口，周边现状复杂场地狭小，施工组织需充分考虑周边环境协调与扬尘控制，不涉及拆迁。';
+    const issues = await sixHundredPercentCoverageIssues(`环保措施\n${body}`);
+    expect(issues[0].message).toContain('拆迁工地100%湿法作业');
+  });
+
+  it('D2 豁免断句边界：否定词与主语在同一句内（句号前）→ 豁免成立', async () => {
+    mockSimilarity(0.1);
+    const issues = await sixHundredPercentCoverageIssues('环保措施\n本项目不涉及拆迁。');
+    expect(issues[0].message).not.toContain('拆迁工地100%湿法作业');
+  });
+
+  it('D1 口径收窄：土方开挖湿法作业句不再命中拆迁工地项', async () => {
+    // 只有拆迁工地 query 与含拆迁工地语义的正文句配对才命中；泛化「土方湿法作业」句不得掩盖拆迁项缺失
+    buildSimilarityMock.mockResolvedValue(((left: string, right: string) => (left.includes('拆迁工地') && right.includes('拆迁工地') ? 0.85 : 0.1)) as SimilarityFn);
+    const markdown = [
+      '环保措施',
+      '施工工地周边设置围挡封闭管理。',
+      '物料堆放覆盖防尘。',
+      '出入车辆冲洗设施清洗出场。',
+      '施工现场场地地面硬化。',
+      '土方开挖湿法作业洒水降尘。',
+      '渣土车辆密闭运输防止遗撒。',
+    ].join('\n');
+    const issues = await sixHundredPercentCoverageIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('拆迁工地100%湿法作业');
+  });
 });
 
 describe('localAdaptationKeywordIssues（W2 纯语义判定）', () => {

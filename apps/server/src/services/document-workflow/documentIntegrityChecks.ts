@@ -433,7 +433,9 @@ const SIX_HUNDRED_PERCENT_ITEMS = [
   { name: '物料堆放100%覆盖', query: '物料堆放覆盖防尘' },
   { name: '出入车辆100%冲洗', query: '出入车辆冲洗设施清洗出场' },
   { name: '施工现场地面100%硬化', query: '施工现场场地地面硬化' },
-  { name: '拆迁工地100%湿法作业', query: '湿法作业洒水降尘' },
+  // query 必须限定“拆迁工地”语义：不限定时土方开挖“湿法作业”会被误命中，
+  // 掩盖真缺失（评分报告问题3：拆迁工地100%湿法作业未落实）
+  { name: '拆迁工地100%湿法作业', query: '拆迁工地湿法作业洒水降尘' },
   { name: '渣土车辆100%密闭运输', query: '渣土车辆密闭运输防止遗撒' },
 ] as const;
 
@@ -470,7 +472,15 @@ export async function sixHundredPercentCoverageIssues(markdown: string): Promise
   // 文档没有任何扬尘/环保治理内容时不检测（非施组类文档不制造义务）
   if (!/扬尘|环保|文明施工|绿色施工/u.test(markdown)) return issues;
   const coverage = await judgeQueryCoverage(SIX_HUNDRED_PERCENT_ITEMS.map(item => ({ key: item.name, text: item.query })), bodySentencesForSemantic(markdown));
-  const missing = SIX_HUNDRED_PERCENT_ITEMS.filter(item => !coverage.get(item.name)).map(item => item.name);
+  // 拆迁工地豁免（D2）：新建工程无拆迁内容时，正文显式说明“本项目无拆迁工程，不涉及拆迁工地湿法作业”
+  // 即视为该项闭环，不得判定缺失（评分报告问题3：六项必须逐项落实或显式豁免，不得省略）。
+  // 豁免句必须带工程主语（本项目/本工程等）+ 短距否定词：任意语境出现「不涉及拆迁」类短语
+  // （如“临时设施布置不涉及拆迁补偿”）不代表项目整体无拆迁工程，不得豁免
+  const demolitionExempt = /(?:本项目|本工程|该工程|该项目|本标段|本施工项目)[^。；;\n]{0,30}(?:无拆迁|不涉及拆迁|无房屋拆除|无拆除)/u.test(markdown);
+  const missing = SIX_HUNDRED_PERCENT_ITEMS
+    .filter(item => !coverage.get(item.name))
+    .filter(item => !(item.name === '拆迁工地100%湿法作业' && demolitionExempt))
+    .map(item => item.name);
   if (missing.length === 0) return issues;
   issues.push({
     level: 'error',

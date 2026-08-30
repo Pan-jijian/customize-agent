@@ -43,40 +43,69 @@ const TENDER_SCORE_STANDARD = [
   '专用合同条款质量与奖项要求（招标文件原文 5.1.1）：特殊质量标准和要求：确保黄山杯。关于工程奖项的约定：本项目确保获得"黄山杯"。获得"黄山杯"的，支付该项300万元（工程量清单中已单独列项）；自竣工验收合格之日起3年内未获得"黄山杯"的，该项不予支付。关于建造要求：（1）绿色建筑等级要求：达到国标二星级；（2）智慧工地管理要求：基本级。',
 ].join('\n');
 
-// 6 个评审项 → 文档章节映射（按 markdown 行号切片，合肥师范第五轮 3 章结构：
-// L89 第一章 / L305 第二章 / L956 第三章 / 无附录）
+// 6 个评审项 → 文档章节映射：按三级标题正则自动定位（文档结构每轮可能变化，
+// 硬编码行号会在新结构下错位；标题匹配保证各轮生成均可直接评分）
 const REVIEW_ITEMS = [
   {
     id: 'item1', name: '针对工程项目整体理解', weight: 1,
-    sections: [[90, 161]], // 1.1 编制说明与工程概况 + 1.2 编制依据 + 1.3 施工内容与现场条件
+    headings: [/项目主要施工内容/, /编制说明与工程概况/],
   },
   {
     id: 'item2', name: '工程重点难点及危大工程的保障体系与措施', weight: 1,
-    sections: [[162, 186], [233, 304]], // 1.4 项目特点重点难点分析 + 1.6 危大工程与安全风险管控体系
+    headings: [/安全管理、风险分级与危大工程管控/, /危大工程与安全风险管控/, /现场踏勘施工条件/],
   },
   {
     id: 'item3', name: '拟采用的新技术、新工艺（如有）', weight: 1,
-    sections: [[734, 785], [578, 589]], // 2.44-2.48 新技术新工艺新材料新设备 + 2.29 智慧工地与在线监测
+    headings: [/新技术、新工艺、新材料、新设备/, /新技术新工艺/],
   },
   {
     id: 'item4', name: '确保工期与质量的保障体系与措施', weight: 1,
-    sections: [[329, 366], [367, 517], [786, 824]], // 2.6-2.11 进度 + 2.12-2.22 施工方案与质量 + 2.49-2.52 关键工序/重难点/成品保护/四节一环保
+    headings: [/进度计划与工期保障/, /主要分部分项工程施工方案/, /质量管理体系与质量保证措施/, /项目管理组织机构与职责/, /施工部署与施工流水组织/],
   },
   {
     id: 'item5', name: '确保人、材、机的保障体系与措施', weight: 1,
-    sections: [[187, 232], [957, 1132]], // 1.5 施工资源投入与保障计划 + 第三章
+    headings: [/资源配置计划/, /人、材、机/, /施工现场平面布置与临设管理/, /劳动力|材料|机械|设备/],
   },
   {
     id: 'item6', name: '确保安全文明生产的管理体系与措施', weight: 1,
-    sections: [[233, 304], [518, 733]], // 1.6 危大工程与安全风险管控 + 2.23-2.43 文明施工/扬尘/噪声/绿色施工/劳务/应急
+    headings: [/安全管理、风险分级与危大工程管控/, /危大工程与安全风险管控/, /文明施工、扬尘、噪声与绿色施工/, /应急管理体系/],
   },
 ];
 
-function sliceSections(md, sections) {
+/** 标题行扫描：返回 [{line(1-based), level, text}] */
+function scanHeadings(md) {
+  const headings = [];
   const lines = md.split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = lines[i].match(/^(#{1,4})\s+(.+)$/);
+    if (m) headings.push({ line: i + 1, level: m[1].length, text: m[2].trim() });
+  }
+  return headings;
+}
+
+/** 按标题正则定位评审项正文：命中标题 → 取该标题到下一个同级/更高级标题之间的行区间 */
+function locateSections(md, patterns) {
+  const lines = md.split('\n');
+  const headings = scanHeadings(md);
+  const sections = [];
+  for (const pattern of patterns) {
+    for (const heading of headings) {
+      if (!pattern.test(heading.text)) continue;
+      const next = headings.find(h => h.line > heading.line && h.level <= heading.level);
+      const end = next ? next.line - 1 : lines.length;
+      sections.push([heading.line, end]);
+      break;
+    }
+  }
+  return sections;
+}
+
+function sliceSections(md, patterns) {
+  const lines = md.split('\n');
+  const sections = locateSections(md, patterns);
   const parts = [];
   for (const [start, end] of sections) {
-    parts.push(lines.slice(start, Math.min(end, lines.length)).join('\n'));
+    parts.push(lines.slice(start - 1, Math.min(end, lines.length)).join('\n'));
   }
   return parts.join('\n\n');
 }
@@ -179,7 +208,7 @@ async function main() {
   console.log(`青天外部评分：${draft.id}，模型 ${MODEL}，正文 ${markdown.length} 字\n`);
   const results = [];
   for (const item of REVIEW_ITEMS) {
-    const sectionText = sliceSections(markdown, item.sections);
+    const sectionText = sliceSections(markdown, item.headings);
     const chunks = chunkText(sectionText);
     console.log(`[${item.id}] ${item.name}：内容 ${sectionText.length} 字 → ${chunks.length} 个子块`);
     const itemIssues = [];

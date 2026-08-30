@@ -27,6 +27,11 @@ const EMERGENCY_ELEMENT_QUERIES = {
   resource: '应急物资、应急器材设备的储备与保障措施',
 } as const;
 
+/** F3 应急物资复检口径：LLM 补写常以「物资名+数量」清单形态出现（急救箱2个、灭火器10具…），
+ * 纯语义原型可能漏判导致补写已落位仍复检不通过；封闭物资名 + 配备/储备类动词确定性兜底，与语义判定取或 */
+const EMERGENCY_RESOURCE_MATERIALS_RE = /应急物资|急救箱|灭火器|沙袋|发电机|水泵|对讲机|应急照明|应急灯|防护服|救援绳|救生衣|铁锹|编织袋|抽水泵|警示带|应急器材/u;
+const EMERGENCY_RESOURCE_PROVISION_RE = /配备|储备|保障|配置|数量|不少于|共计|套|具|个|台|把|只/u;
+
 /** 应急小节深度门槛字数（连续应急小节区块累计） */
 const EMERGENCY_MIN_CHARS = 300;
 
@@ -68,7 +73,10 @@ export async function emergencySectionDepthIssues(markdown: string): Promise<Val
   const hasElement = (query: string) => slices.some(slice => elementSimilarity(slice, query) >= SEMANTIC_COVERAGE_THRESHOLD);
   if (!hasElement(EMERGENCY_ELEMENT_QUERIES.organization)) missing.push('应急组织体系');
   if (!hasElement(EMERGENCY_ELEMENT_QUERIES.procedure)) missing.push('应急处置程序/演练');
-  if (!hasElement(EMERGENCY_ELEMENT_QUERIES.resource)) missing.push('应急物资保障');
+  // F3：物资要素判定 = 语义原型 或 确定性「物资名+配备词」兜底，避免补写已落位仍判缺失
+  const resourceOk = hasElement(EMERGENCY_ELEMENT_QUERIES.resource)
+    || (EMERGENCY_RESOURCE_MATERIALS_RE.test(blockText) && EMERGENCY_RESOURCE_PROVISION_RE.test(blockText));
+  if (!resourceOk) missing.push('应急物资保障');
   if (missing.length > 0) {
     issues.push({
       level: 'error',
@@ -78,6 +86,8 @@ export async function emergencySectionDepthIssues(markdown: string): Promise<Val
       repairability: 'llm_repairable',
       message: `应急预案小节深度不足：${blockTitles.join('、')}（缺少：${missing.join('、')}）`,
       suggestion: '补写应急组织体系（领导小组/抢险队与职责）、应急处置程序与演练安排、应急物资清单与保障措施，达到可落地深度。',
+      // F2 小节锚点：修复循环定位优先直连应急小节，不再依赖消息关键字反查
+      sectionTitle: blockTitles[0],
     });
   }
   return issues;

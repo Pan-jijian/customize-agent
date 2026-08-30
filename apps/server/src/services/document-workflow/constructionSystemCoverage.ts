@@ -23,6 +23,8 @@ export function constructionSystemCoverageIssues(chapters: DocumentDraftChapter[
   const bodies = chapters.map(chapter => chapter.content || '').join('\n');
   const uncovered = required.filter(name => !bodies.includes(name));
   if (uncovered.length === 0) return [];
+  // F2 章节锚点：零覆盖系统的义务章节（标题含系统名）即修复落位章节
+  const anchorChapter = chapters.find(chapter => uncovered.some(name => chapter.title.includes(name)));
   return [{
     level: 'error',
     severity: 'blocker',
@@ -31,5 +33,6 @@ export function constructionSystemCoverageIssues(chapters: DocumentDraftChapter[
     repairability: 'llm_repairable',
     message: `章节大纲涉及的专业工程系统在正文零覆盖：${uncovered.join('、')}`,
     suggestion: '对应章节必须补写该专业工程的施工方案正文（施工概况/施工流程/施工方法，含可核实的工艺参数），不得整章零覆盖。',
+    chapterId: anchorChapter?.id,
   }];
 }

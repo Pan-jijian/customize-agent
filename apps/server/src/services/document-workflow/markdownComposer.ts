@@ -1,7 +1,7 @@
 import type { DocumentDraftChapter, DocumentTemplate, GeneratedDocumentDraft, PromptDocumentRuleSet, ValidationIssue } from './types';
 import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
 import { WORK_PACKAGE_SECTION_RE } from './utils';
-import { displayChapterTitle, formalChapterTitle, normalizeGeneratedChapterTitle } from './outline';
+import { displayChapterTitle, formalChapterTitle, isTenderClauseFragmentTitle, normalizeGeneratedChapterTitle } from './outline';
 import { composeEnhancedCoverMarkdown } from './composeAppendices';
 import { FORBIDDEN_PROMPT_PHRASES } from './tenderBidScoring';
 
@@ -27,7 +27,10 @@ function instructionTitleCandidate(value: string) {
 function isInstructionLikeTitle(value: string) {
   const rawTitle = instructionTitleCandidate(value);
   const displayTitle = displayChapterTitle(rawTitle);
-  return INSTRUCTION_TITLE_RE.test(rawTitle) || INSTRUCTION_TITLE_RE.test(displayTitle);
+  return INSTRUCTION_TITLE_RE.test(rawTitle) || INSTRUCTION_TITLE_RE.test(displayTitle)
+    // 招标条款碎片过滤与显式 OUTLINE 提取共用同一判别器（历史缺陷：写手正文 H3 提取环节漏接该过滤，
+    // 导致「3项规定」「56m15：…」等条款碎片进入小节目录）
+    || isTenderClauseFragmentTitle(rawTitle) || isTenderClauseFragmentTitle(displayTitle);
 }
 
 export function normalizeProductionText(markdown: string) {
@@ -49,7 +52,14 @@ export function normalizeProductionText(markdown: string) {
 
 export function normalizeTenderSourcePageRefs(markdown: string) {
   return markdown
-    .replace(/PDF\s*第\s*\d+\s*页/giu, '相关资料')
+    // 完整页码引用（含“第 5-8 页”范围形态）整体归一为“相关资料”，与 cleanInlineFactValue 同构：
+    // 不带范围支持时范围形态会落入下方 L60 兜底只转「第 N-M 页」留下孤立的「PDF 」前缀
+    .replace(/PDF\s*第\s*\d+(?:\s*[-—至到~～]\s*\d+)?\s*页/giu, '相关资料')
+    // 残缺页码引用（“PDF 第”后无数字，LLM 从招标文件封面复制页码引用时截断的残片）：
+    // 直接删除残片本身，保留其前文本（如“日期：2026年8月19 日”），避免污染表格单元格；
+    // lookahead 允许空格/tab 后跟数字（“PDF 第 3 页”完整引用由上一替换归一），与
+    // cleanInlineFactValue 同口径，不跨行（\n 后数字的跨行残片仍删除）
+    .replace(/PDF\s*第(?![ \t]*[0-9０-９])/giu, '')
     .replace(/第\s*\d+\s*页\s*(?:\/|共)\s*\d+\s*页/gu, '')
     .replace(/第\s*\d+\s*(?:[-—至到~～]\s*\d+)?\s*页/gu, '相关资料')
     .replace(/(装饰工程|土建工程|加固工程|给排水工程|电气工程|智能化工程|消防工程|弱电智能化工程|室外道排工程|建筑结构加固工程)\s*(?:(?:施工)?图纸|资料|文件)?\s*[（(]?\s*(?:(?:共|多达|约|合计)\s*)?\d+\s*页\s*[）)]?/gu, '$1施工图纸')
@@ -239,8 +249,179 @@ export function sourcePhraseIssues(markdown: string): ValidationIssue[] {
   return issues.slice(0, 20);
 }
 
+/** H4 滑窗重复检测豁免词：高频施组结构词（「安全文明施工与安全管理」「质量保证体系与质量管理体系」
+ * 等合理标题中重复出现属正常搭配），豁免后避免误伤；非豁免词重复才判定疑似粘连。 */
+const H4_COMMON_SECTION_WORDS_RE = /(?:安全|管理|施工|质量|工期|进度|保障|体系|措施|控制|工程|项目|技术|方案|计划|组织|标准|规范|验收|方法|工艺|文明|绿色)/u;
+
+/** 专业工程方案标准命名（「土方开挖与基坑支护工程施工方案」「给排水及消防水系统安装工程施工方案」）：
+ * 主体为单一专业工程名（可含「与/及」并列组合），「施工方案」为固定后缀，不属于多主题拼接 */
+const PROFESSIONAL_PLAN_TITLE_RE = /(?:工程施工方案|安装工程施工方案|专业工程施工方案|专项施工方案)$/u;
+
+/** H4 小节标题治理：成稿层自由生成的 H4 可能词尾粘连（「现场踏勘施工条件现场条件」）、
+ * 多主题拼接（超过 14 字）或与本章三级小节同名（重复结构）。这里只做确定性标记，
+ * 标题改写归语义模型——由 Reviewer 按 suggestion 反馈重写，不在清洗层硬改。 */
+export function sectionHeadingIssues(markdown: string): ValidationIssue[] {
+  const lines = markdown.split(/\r?\n/u);
+  const issues: ValidationIssue[] = [];
+  const tertiaryTitles = new Set<string>();
+  for (const line of lines) {
+    const match = /^###\s+(.+)$/u.exec(line.trim());
+    if (match) tertiaryTitles.add(match[1].trim().replace(/^\d+(?:\.\d+)*\s*/u, ''));
+  }
+  lines.forEach((line, index) => {
+    const match = /^####\s+(.+)$/u.exec(line.trim());
+    if (!match) return;
+    const title = match[1].trim();
+    const plain = title.replace(/^\d+(?:\.\d+)*\s*/u, '').trim();
+    if (!plain) return;
+    if (tertiaryTitles.has(plain) || tertiaryTitles.has(title)) {
+      issues.push({
+        level: 'warning', severity: 'warning', category: 'structure', owner: 'system', repairability: 'llm_repairable',
+        message: `H4 标题与本章三级小节同名：${title}（第 ${index + 1} 行）`,
+        suggestion: `删除该 H4 块或改为三级小节「${plain}」下的独立子主题标题，禁止与三级小节同名造成结构重复。`,
+      });
+      return;
+    }
+    // 非豁免 2 字滑窗重复：标题内部同一词出现两次以上 → 疑似词尾粘连/多主题拼接
+    const counts = new Map<string, number>();
+    for (let cursor = 0; cursor < plain.length - 1; cursor += 1) {
+      const pair = plain.slice(cursor, cursor + 2);
+      if (H4_COMMON_SECTION_WORDS_RE.test(pair)) continue;
+      counts.set(pair, (counts.get(pair) || 0) + 1);
+    }
+    const dups = [...counts.entries()].filter(([, count]) => count >= 2).map(([word]) => word);
+    if (dups.length > 0) {
+      issues.push({
+        level: 'warning', severity: 'warning', category: 'structure', owner: 'system', repairability: 'llm_repairable',
+        message: `H4 标题疑似词尾粘连或多主题拼接：${title}（重复词：${dups.join('、')}，第 ${index + 1} 行）`,
+        suggestion: '重写为单一主题的短标题，去掉粘连重复的尾部词语。',
+      });
+      return;
+    }
+    if (plain.length > 14 && !PROFESSIONAL_PLAN_TITLE_RE.test(plain)) {
+      issues.push({
+        level: 'warning', severity: 'warning', category: 'structure', owner: 'system', repairability: 'llm_repairable',
+        message: `H4 标题过长疑似多主题拼接：${title}（${plain.length} 字，第 ${index + 1} 行）`,
+        suggestion: '拆分为多个独立 H4 或压缩为单一主题短标题。',
+      });
+    }
+  });
+  return issues.slice(0, 20);
+}
+
+/** 句级指纹归一：去空白与标点，保留汉字/字母/数字，用于跨节重复判定（确定性判定，内容改写归 Reviewer）。 */
+function sentenceFingerprint(sentence: string) {
+  return sentence.replace(/[\s\p{P}]+/gu, '').toLowerCase();
+}
+
+const DEDUPE_MIN_SENTENCE_CHARS = 24;
+const DEDUPE_REPEAT_RATIO = 0.3;
+
+/** 跨小节重复检测：同一章内 ### 节（含其 #### 子节正文）两两比对，
+ * 24 字以上句子去标点后重合；重合句占比超过 30% 判定重复，
+ * 生成 llm_repairable 标记交由 Repairer 差异化重写（不代码删文）。 */
+export function sectionDuplicateIssues(markdown: string): ValidationIssue[] {
+  const lines = markdown.split(/\r?\n/u);
+  const issues: ValidationIssue[] = [];
+  const chapters: Array<{ title: string; sections: Array<{ title: string; sentences: string[] }> }> = [];
+  let chapter: { title: string; sections: Array<{ title: string; sentences: string[] }> } | null = null;
+  let section: { title: string; sentences: string[] } | null = null;
+  const pushSentence = (line: string) => {
+    if (!section) return;
+    const cleaned = line.replace(/^#{1,6}\s+/u, '').replace(/^\|.*\|$/u, '').trim();
+    for (const sentence of cleaned.split(/[。；;]/u)) {
+      const trimmed = sentence.trim();
+      if (trimmed.length >= DEDUPE_MIN_SENTENCE_CHARS) section.sentences.push(sentenceFingerprint(trimmed));
+    }
+  };
+  for (const line of lines) {
+    const h2 = /^##\s+(.+)$/u.exec(line.trim());
+    if (h2) {
+      if (chapter) chapters.push(chapter);
+      chapter = { title: h2[1].trim(), sections: [] };
+      section = null;
+      continue;
+    }
+    const h3 = /^###\s+(.+)$/u.exec(line.trim());
+    if (h3 && chapter) {
+      section = { title: h3[1].trim(), sentences: [] };
+      chapter.sections.push(section);
+      continue;
+    }
+    if (/^####\s+/u.test(line.trim())) continue;
+    pushSentence(line);
+  }
+  if (chapter) chapters.push(chapter);
+  for (const item of chapters) {
+    for (let i = 0; i < item.sections.length; i += 1) {
+      for (let j = i + 1; j < item.sections.length; j += 1) {
+        const left = new Set(item.sections[i].sentences);
+        const right = new Set(item.sections[j].sentences);
+        if (left.size === 0 || right.size === 0) continue;
+        let overlap = 0;
+        for (const sentence of left) if (right.has(sentence)) overlap += 1;
+        const ratio = overlap / Math.min(left.size, right.size);
+        if (ratio >= DEDUPE_REPEAT_RATIO && overlap >= 3) {
+          issues.push({
+            level: 'warning', severity: 'warning', category: 'structure', owner: 'system', repairability: 'llm_repairable',
+            message: `${item.title} 内「${item.sections[i].title}」与「${item.sections[j].title}」正文重复（${overlap} 句重合，占 ${Math.round(ratio * 100)}%）`,
+            suggestion: '两个小节正文出现大量重复句子：后写的小节必须围绕本小节主题差异化重写，删除复制自另一小节的内容，只保留本小节专属做法与参数。',
+          });
+        }
+      }
+    }
+  }
+  return issues.slice(0, 20);
+}
+
+/** 表格单元格换行断行合并：LLM 在表格单元格内输出长文本时会在单元格内换行，
+ * 续行不以 | 开头，渲染引擎按独立行处理导致前列显示为空单元格（危大工程表“专项方案审批”列现场）。
+ * 仅合并“含 ≥2 个竖线的断行”（首段为上一行末单元格续文、其余段为本行后续列，分号连接）；
+ * 单竖线残行（整列丢失）不在本层合并，由 exportGate 表格列数检测报告修复。 */
+export function mergeTableLineBreaks(markdown: string) {
+  const lines = markdown.split(NEWLINE_SPLIT_RE);
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] || '';
+    const trimmed = line.trim();
+    const isBrokenRow = Boolean(trimmed)
+      && !/^\|/u.test(trimmed)
+      && (trimmed.match(/\|/gu) || []).length >= 2
+      && !/^#{1,6}\s/u.test(trimmed)
+      && !isMarkdownTableDivider(trimmed)
+      && output.length > 0
+      && isMarkdownTableRow(output[output.length - 1] || '');
+    if (!isBrokenRow) {
+      output.push(line);
+      continue;
+    }
+    const parts = trimmed.split('|').map(cell => cell.trim()).filter(Boolean);
+    if (parts.length < 2) {
+      output.push(line);
+      continue;
+    }
+    const prevRow = output[output.length - 1] || '';
+    if (isMarkdownTableDivider(prevRow)) {
+      // 断行紧跟分隔行（首行数据即单元格内换行/数据行首尾竖线丢失）：合并进分隔行会
+      // 把分隔行改成畸形数据行，整表渲染报废且检测误报“分隔线位置不规范”；
+      // 转为以 | 开头的表格行保留全部内容，列数失配由表格列数检测报出进专项修复轮
+      output.push(`| ${parts.join(' | ')} |`);
+      continue;
+    }
+    const prev = output[output.length - 1] || '';
+    const mergedCell = `${prev.replace(/\s*\|\s*$/u, '')}${parts[0]}`;
+    const extra = parts.slice(1).join('；');
+    output[output.length - 1] = `${mergedCell}${extra ? `；${extra}` : ''} |`;
+  }
+  return output.join(LF_CHAR);
+}
+
 export function sanitizeFormalMarkdown(markdown: string) {
-  const cleaned = removeEmptyMarkdownTableColumns(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(normalizeProductionText(cleanFormalSourcePhrases(stripMarkdownDocumentFence(markdown)))))))
+  const cleaned = removeEmptyMarkdownTableColumns(normalizeMarkdownTableDividers(mergeTableLineBreaks(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(normalizeProductionText(cleanFormalSourcePhrases(stripMarkdownDocumentFence(markdown))))))))
+    // H4 词尾严格重复：LLM 把两个候选标题粘连输出（如「现场条件现场条件」「要点要点」），
+    // 尾部等长两段完全相同属确定性冗余，直接去重；语义级粘连（如「现场踏勘施工条件现场条件」）
+    // 不做词面硬改，由 sectionHeadingIssues 标记后交 Reviewer 重写
+    .replace(/^####\s+(.*?)(.{2,4})\2\s*$/gmu, '#### $1$2')
     .split(/\r?\n/u)
     .map(line => {
       // 注意：不再把表格单元格里的“不适用”清洗成空格——该清洗会把单元格洗成空字符串，
@@ -286,6 +467,9 @@ export function sanitizeFormalMarkdown(markdown: string) {
       if (previousPlain && isInstructionLikeTitle(previousPlain) && currentPlain.length > 0 && currentPlain.length <= 12 && !/^#{1,6}\s/u.test(line.trim())) return false;
       const trimmed = line.trim();
       if (!trimmed) return true;
+      // 招标术语 H4 拦截：「补充条款」等招标文件术语不应作为正文小节标题（四级标题是成稿层自由产物，
+      // 规划层三级标题的同类治理由章节顺序核验承担）
+      if (/^####\s+.*(?:补充条款|评标办法|投标须知)/u.test(trimmed)) return false;
       if (/该小节围绕.+进行补充说明/u.test(trimmed)) return false;
       if (/仅作为内部事实提取依据|正式正文不得引用文件名|后台事实|内部事实/u.test(trimmed)) return false;
       if (/^\s*\|/u.test(trimmed) || /^\s*\|?\s*:?-{3,}:?/u.test(trimmed)) return true;
@@ -471,7 +655,7 @@ export function tertiaryHeadingIssues(markdown: string): ValidationIssue[] {
     if (heading) {
       const rawTitle = (heading[1] || '').trim();
       if (!new RegExp(`^${escapedRegExp(currentSectionNumber)}\\.\\d+\\s+\\S`, 'u').test(rawTitle)) {
-        issues.push({ level: 'warning', message: `三级小节缺少 ${currentSectionNumber}.x 编号：${displayChapterTitle(rawTitle)}`, suggestion: '三级小节必须使用“#### 章号.节号.序号 标题”，且不纳入目录。' });
+        issues.push({ level: 'warning', message: `三级小节缺少 ${currentSectionNumber}.x 编号：${displayChapterTitle(rawTitle)}`, suggestion: '三级小节必须使用“#### 章号.节号.序号 标题”。' });
       }
     }
   }
@@ -497,6 +681,7 @@ function cleanTocSections(sections: string[] = []) {
   return [...new Set(sections.map(normalizeTocSection).filter(section => section.length >= 2))];
 }
 
+/** 目录只收录章标题与二级小节；三级小节（#### X.Y.Z 标题）只存在于正文，不进入目录 */
 function composeTocLines(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections'>>) {
   return chapters.flatMap((chapter, index) => {
     const sections = cleanTocSections(chapter.sections || []);
@@ -532,7 +717,7 @@ export function inferChapterSectionsFromMarkdown(markdown: string, chapters: Arr
     const next = headingMatches.find(match => (match.index || 0) > (current.index || 0) && chapters.some(item => sameStructuralTitle(match[1] || '', item.title)));
     const block = normalizedMarkdown.slice(current.index, next?.index ?? normalizedMarkdown.length);
     const extracted = extractGeneratedSections(block);
-    if (extracted.length > 0) return extracted.slice(0, 100);
+    if (extracted.length > 0) return extracted;
     return chapter.sections || [];
   });
 }
@@ -770,17 +955,20 @@ export function applyPromptDocumentRules(markdown: string, rules?: PromptDocumen
   return next.replace(/\n{3,}/gu, '\n\n').trim();
 }
 
-export function ensureFormalToc(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections'>>) {
+export function ensureFormalToc(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'sections' | 'content'>>) {
   const normalizedMarkdown = normalizeFormalChapterHeadings(markdown, chapters);
   const bodyMarkdown = removeTocBlock(normalizedMarkdown);
   const headingMatches = [...bodyMarkdown.matchAll(/^##\s+(.+)$/gmu)];
   const tocChapters = chapters.map((chapter) => {
-    if (chapter.sections?.length) return chapter;
     const current = headingMatches.find(match => sameStructuralTitle(match[1] || '', chapter.title));
     if (!current || current.index === undefined) return chapter;
     const next = headingMatches.find(match => (match.index || 0) > (current.index || 0) && chapters.some(item => sameStructuralTitle(match[1] || '', item.title)));
-    const sections = extractGeneratedSections(bodyMarkdown.slice(current.index, next?.index ?? bodyMarkdown.length)).slice(0, 100);
-    return sections.length ? { ...chapter, sections } : chapter;
+    // content 必须取 normalizeFormalChapterHeadings 规范化后的章节区间（H4 已带 X.Y.Z 编号），
+    // 供 chapter.sections 缺失时 extractGeneratedSections 从正文提取二级小节兜底；
+    // 有 sections 的章节也不能短路返回原始 chapter，否则目录章节结构对不上正文。
+    const chapterRange = bodyMarkdown.slice(current.index, next?.index ?? bodyMarkdown.length);
+    const sections = chapter.sections?.length ? undefined : extractGeneratedSections(chapterRange);
+    return sections?.length ? { ...chapter, sections, content: chapterRange } : { ...chapter, content: chapterRange };
   });
   const toc = composeTocMarkdown(tocChapters);
   const tocMatch = /^##\s+目录\s*$/mu.exec(normalizedMarkdown);
@@ -962,7 +1150,7 @@ function sortChapterSectionsByNumber(markdown: string) {
   return result.replace(/\n{3,}/gu, '\n\n').trim();
 }
 
-export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 'title' | 'sections'>>(markdown: string, chapters: T[], options: { forbidDrawingImages?: boolean; promptRules?: PromptDocumentRuleSet } = {}) {
+export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 'title' | 'sections' | 'content'>>(markdown: string, chapters: T[], options: { forbidDrawingImages?: boolean; promptRules?: PromptDocumentRuleSet } = {}) {
   const cleanedMarkdown = applyPromptDocumentRules(removeUnwantedDrawingImages(markdown, Boolean(options.forbidDrawingImages)), options.promptRules);
   const policyMarkdown = options.promptRules
     ? options.promptRules.coverPolicy === 'required'
@@ -993,8 +1181,8 @@ export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'mar
   const tocChapters = cleanChapters.map((chapter, index) => {
     if (chapter.sections?.length) return chapter;
     const normalizedBlock = normalizeFormalChapterHeadings(normalizedChapterBlocks[index] || '', [chapter]);
-    const sections = extractGeneratedSections(normalizedBlock).slice(0, 100);
-    return sections.length ? { ...chapter, sections: cleanTocSections(sections) } : chapter;
+    const sections = extractGeneratedSections(normalizedBlock);
+    return sections.length ? { ...chapter, sections: cleanTocSections(sections), content: normalizedBlock } : { ...chapter, content: normalizedBlock };
   });
   const initialMarkdown = [
     composeEnhancedCoverMarkdown(draft.title, draft.facts),

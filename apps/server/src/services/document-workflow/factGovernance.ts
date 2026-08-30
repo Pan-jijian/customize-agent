@@ -63,6 +63,8 @@ function valueTypeScore(value: string, spec: FieldSpec) {
   switch (spec.valueType) {
     case 'duration':
       if (!/\d+(?:\.\d+)?\s*(?:日历天|天|个月|月|年)/u.test(value)) return { rejected: true, score: -80, reason: '缺少明确工期数值和时间单位' };
+      // 工期违约/处罚条款不是计划工期口径（历史缺陷：计划工期行被填“工期延误56天以上发包人可切除剩余工程量”）
+      if (/延误|逾期|违约|赔偿|罚款|处罚|扣除|扣留|切除/u.test(value)) return { rejected: true, score: -90, reason: '命中工期违约条款而非计划工期' };
       return { rejected: false, score: 45, reason: '包含明确工期数值和时间单位' };
     case 'money':
       if (!/\d+(?:\.\d+)?\s*(?:万元|元|亿元)/u.test(value)) return { rejected: true, score: -80, reason: '缺少明确金额数值和单位' };

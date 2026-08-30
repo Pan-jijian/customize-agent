@@ -35,6 +35,33 @@ export function retrievalCoverageRisk(input: { totalChunks: number; loadedChunks
   return { totalChunks, loadedChunks, omittedChunks, loadedRatio, highRisk: riskReasons.length > 0, riskReason: riskReasons.join('、') || undefined };
 }
 
+export function shouldTriggerDeepRetrieval(input: {
+  scopedFileCount: number;
+  evidenceCount: number;
+  evidenceFileCount: number;
+  suggestedStrategy: string;
+  highRisk: boolean;
+  missingFactsCount: number;
+  requiredMissingNeedsCount: number;
+  riskLevel: string;
+}) {
+  // 文件多样性兜底：证据被单一/两个文件占满时强制深召回（历史缺陷：危大章节 10 条证据全来自招标文件，
+  // 基坑支护设计图等关键参数文件从未被检索，导致基坑底标高等资料内已有数据缺失于正文）
+  const evidenceStarvedBySingleFile = input.evidenceFileCount <= 2;
+  if (input.scopedFileCount > 80) {
+    // 大资料池（>80 文件）常规跳过深召回防检索洪峰，但证据单文件占满时仍强制深召回：
+    // 关键参数文件（如基坑支护设计图）在章节检索中竞争不过高语义匹配的招标文件切片，
+    // 若随大资料池跳过深召回，基坑底标高/坡率等参数将永久缺失
+    return evidenceStarvedBySingleFile;
+  }
+  return input.suggestedStrategy === 'evidence_first'
+    || input.highRisk
+    || input.missingFactsCount > 0
+    || input.requiredMissingNeedsCount > 0
+    || evidenceStarvedBySingleFile
+    || (input.evidenceCount < 8 && input.riskLevel !== 'low');
+}
+
 export function buildDeepRetrievalQueries(chapter: DocumentTemplateChapter, requiredNeeds: string[] = []) {
   const allSections = chapter.sections || [];
   const allFacts = [...chapter.requiredFacts, ...requiredNeeds];
@@ -45,7 +72,7 @@ export function buildDeepRetrievalQueries(chapter: DocumentTemplateChapter, requ
   const isResourceChapter = /资源|人|材|机|材料|设备|清单|工程量|BOQ|报价/u.test(chapter.title);
   const domainHints = /进度|工期|节点/u.test(chapter.title) ? ['合同工期', '计划工期', '日历天', '开工', '竣工', '关键线路', '进度计划', '施工进度']
     : /质量|验收/u.test(chapter.title) ? ['质量标准', '验收规范', '检验批', '复验', '合格', '质量保证', '隐蔽验收']
-      : /安全|危大|风险/u.test(chapter.title) ? ['安全措施', '风险源', '危大工程', '应急', '检查整改', '安全防护', '应急预案']
+      : /安全|危大|风险/u.test(chapter.title) ? ['安全措施', '风险源', '危大工程', '应急', '检查整改', '安全防护', '应急预案', '基坑支护', '基坑开挖', '基坑底标高', '坡率', '支护形式', '降水', '开挖深度', '高支模', '专项方案']
         : isResourceChapter ? ['工程量清单', '项目特征', '材料设备', '规格型号', '数量单位', '劳动力', '机械设备', '进场计划', '资源保障', '主要材料', '施工机具', '材料供应', '设备配置']
           : /施工|方案|方法|技术|工艺/u.test(chapter.title) ? ['施工方法', '工艺流程', '技术标准', '构造做法', '控制要点', '施工准备']
             : ['工程范围', '施工方法', '控制要点', '验收要求'];

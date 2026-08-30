@@ -3,6 +3,18 @@ import { documentTextLength } from './budget';
 import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
 import { callDocumentLlmJson } from './llmClient';
 import { displayChapterTitle } from './outline';
+import { concatenatedSectionTitleFixes } from './constructionBidStructure';
+
+/** 清单层小节标题清洗（确定性结构清洗）：
+ * 1) 词尾等长严格重复去重（「要点要点」→「要点」，与成稿 H4 清洗同口径）；
+ * 2) 必查小节正则候选词粘连回退（「现场踏勘施工条件现场条件」→「现场踏勘」，
+ *    精确查表才回退，修复系统补挂 bug 产生或历史遗留的脏小节标题）。
+ * 语义级粘连不属此处职责（交审校），本函数只做精确确定性修复。 */
+const CONCATENATED_SECTION_TITLE_FIXES = concatenatedSectionTitleFixes();
+export function cleanSectionTitleArtifacts(title: string) {
+  const cleaned = title.replace(/(.*?)(.{2,4})\2$/u, '$1$2');
+  return CONCATENATED_SECTION_TITLE_FIXES[cleaned] || cleaned;
+}
 
 export function professionalSectionTaskCard(chapterTitle: string, sectionTitle: string) {
   const joined = `${chapterTitle} ${sectionTitle}`;
@@ -401,7 +413,7 @@ function structuralRulesForChapter(rules: PromptChapterStructuralRule[] | undefi
 export function normalizePlannedSections(sections: string[] = [], chapterTitle: string) {
   const result: string[] = [];
   for (const section of sections) {
-    const title = normalizePlannedSectionTitle(section);
+    const title = cleanSectionTitleArtifacts(normalizePlannedSectionTitle(section));
     if (!title || isInvalidPlannedSectionTitle(title, chapterTitle)) continue;
     if (!result.some(item => sectionTitleEquivalent(item, title))) result.push(title);
   }
@@ -489,40 +501,58 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
   const lockedSections = chapterStructuralRules.flatMap(rule => rule.requiredSections).sort((a, b) => (a.order || 0) - (b.order || 0)).map(rule => rule.title);
   const minSections = minimumSectionCount(input.chapter, input.targetWords, input.evidence, lockedSections.length);
   const maxSections = Math.max(minSections, Math.min(7, input.targetWords >= 8000 ? 7 : 6));
-  const result = await callDocumentLlmJson<{ sections?: string[] }>([
-    '你是专业文档结构规划专家。',
-    '只根据用户提示词、章节标题和真实绑定资料规划本章二级小节；不得使用"目标与范围、资料依据、实施内容、质量控制"等通用占位小节凑数。',
-    '施工组织、技术措施、资源配置、质量、安全、工期、材料、设备、劳动力、危大工程等核心章节必须拆成足够的专业工作面，不得只输出两个泛化小节。',
-    '不得把提示词条件句或短语碎片作为小节标题，例如"判断是否涉、是否涉及、如涉及、雨季、冬季、高温、台风、大风等特殊气候"。',
-    '只返回 JSON。',
-  ].join('\n'), [
-    `文档模板：${input.template.name}`,
-    `章节标题：${input.chapter.title}`,
-    input.chapter.purpose && !isInvalidPlannedSectionTitle(input.chapter.purpose, input.chapter.title) ? `章节目的：${input.chapter.purpose}` : '',
-    input.requirement ? `用户要求：${input.requirement}` : '',
-    input.projectContext ? `上下文：\n${input.projectContext}` : '',
-    input.roleContext,
-    input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
-    lockedSections.length ? `系统已从提示词解析出本章强制二级小节，必须按此顺序置于本章小节最前，不得删除、改名或重排：${lockedSections.join('、')}` : '',
-    evidenceText ? `真实绑定资料：\n${evidenceText}` : '',
-    `请输出 ${minSections}-${maxSections} 个适合直接成稿的二级小节标题。标题必须具体、业务相关、能承载真实资料；每个标题控制在 16 个汉字以内，避免多个小节表达同一内容。核心章节不得只输出"总体部署与责任分工、实施流程与关键控制"两个泛化小节。`,
-    'JSON 格式：{"sections":["小节标题1","小节标题2"]}',
-  ].filter(Boolean).join('\n\n'), { maxTokens: 1600, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics });
-  const sections = Array.from(new Set(compoundSectionSeeds(input.chapter.title)));
-  for (const title of (result?.sections || []).map(normalizePlannedSectionTitle).filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title))) {
-    if (!sections.some(section => section.includes(title) || title.includes(section))) sections.push(title);
+  // 改7：章节顺序规则——"编制说明与工程概况"类小节必须是第一章首节（用户明确要求）；
+  // 指令引导 + 规划后核验反馈重规划实现，不做代码硬排（禁止确定性兜底）
+  const overviewChapter = input.chapterIndex === 0 || /编制说明|工程概况|项目概况/u.test(input.chapter.title);
+  const planOnce = async (orderFeedback: string) => {
+    const result = await callDocumentLlmJson<{ sections?: string[] }>([
+      '你是专业文档结构规划专家。',
+      '只根据用户提示词、章节标题和真实绑定资料规划本章二级小节；不得使用"目标与范围、资料依据、实施内容、质量控制"等通用占位小节凑数。',
+      '施工组织、技术措施、资源配置、质量、安全、工期、材料、设备、劳动力、危大工程等核心章节必须拆成足够的专业工作面，不得只输出两个泛化小节。',
+      '不得把提示词条件句或短语碎片作为小节标题，例如"判断是否涉、是否涉及、如涉及、雨季、冬季、高温、台风、大风等特殊气候"。',
+      overviewChapter ? '本章是全文第一章：若规划出"编制说明与工程概况"类小节，必须置于小节清单第一位，不得排在任何其他小节之后。' : '',
+      '只返回 JSON。',
+    ].filter(Boolean).join('\n'), [
+      `文档模板：${input.template.name}`,
+      `章节标题：${input.chapter.title}`,
+      input.chapter.purpose && !isInvalidPlannedSectionTitle(input.chapter.purpose, input.chapter.title) ? `章节目的：${input.chapter.purpose}` : '',
+      input.requirement ? `用户要求：${input.requirement}` : '',
+      input.projectContext ? `上下文：\n${input.projectContext}` : '',
+      input.roleContext,
+      input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
+      lockedSections.length ? `系统已从提示词解析出本章强制二级小节，必须按此顺序置于本章小节最前，不得删除、改名或重排：${lockedSections.join('、')}` : '',
+      evidenceText ? `真实绑定资料：\n${evidenceText}` : '',
+      `请输出 ${minSections}-${maxSections} 个适合直接成稿的二级小节标题。标题必须具体、业务相关、能承载真实资料；每个标题控制在 16 个汉字以内，避免多个小节表达同一内容。核心章节不得只输出"总体部署与责任分工、实施流程与关键控制"两个泛化小节。`,
+      orderFeedback,
+      'JSON 格式：{"sections":["小节标题1","小节标题2"]}',
+    ].filter(Boolean).join('\n\n'), { maxTokens: 1600, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics });
+    const sections = Array.from(new Set(compoundSectionSeeds(input.chapter.title)));
+    for (const title of (result?.sections || []).map(section => cleanSectionTitleArtifacts(normalizePlannedSectionTitle(section))).filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title))) {
+      if (!sections.some(section => section.includes(title) || title.includes(section))) sections.push(title);
+    }
+    const fallbackSeeds = [input.chapter.title, ...(input.chapter.requiredFacts || []), ...(input.chapter.queries || [])]
+      .flatMap(item => String(item || '').split(/[；;。\n]/u))
+      .map(normalizePlannedSectionTitle)
+      .filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title));
+    const typedSeeds = fallbackSectionsForChapter(input.chapter.title)
+      .filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title));
+    for (const seed of [...fallbackSeeds, ...typedSeeds]) {
+      if (sections.length >= minSections) break;
+      if (!sections.some(section => section.includes(seed) || seed.includes(section))) sections.push(seed);
+    }
+    return applyPromptStructuralRules(sections, input.chapter.title, chapterStructuralRules).slice(0, Math.max(maxSections, lockedSections.length));
+  };
+  const planned = await planOnce('');
+  if (!overviewChapter) return planned;
+  const overviewIndex = planned.findIndex(section => /编制说明与工程概况|工程概况|项目概况/u.test(section));
+  if (overviewIndex <= 0) return planned;
+  // 规划结果核验失败：带位置反馈打回 LLM 重规划一轮（不硬排小节顺序）
+  const retried = await planOnce(`上一轮规划位置错误：小节"${planned[overviewIndex]}"必须是本章小节清单的第一位（第一章首节），不得排在"${planned.slice(0, overviewIndex).join('、')}"等小节之后；请重新输出完整小节清单，将该项置于第一位，其余小节顺序可保持不变。`);
+  const retriedIndex = retried.findIndex(section => /编制说明与工程概况|工程概况|项目概况/u.test(section));
+  if (retriedIndex > 0) {
+    console.error(`[plan] 章节小节顺序核验未通过（重规划后"${retried[retriedIndex]}"仍不在首位）：${input.chapter.title}，保留 LLM 规划顺序交由下游审校处理`);
   }
-  const fallbackSeeds = [input.chapter.title, ...(input.chapter.requiredFacts || []), ...(input.chapter.queries || [])]
-    .flatMap(item => String(item || '').split(/[；;。\n]/u))
-    .map(normalizePlannedSectionTitle)
-    .filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title));
-  const typedSeeds = fallbackSectionsForChapter(input.chapter.title)
-    .filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title));
-  for (const seed of [...fallbackSeeds, ...typedSeeds]) {
-    if (sections.length >= minSections) break;
-    if (!sections.some(section => section.includes(seed) || seed.includes(section))) sections.push(seed);
-  }
-  return applyPromptStructuralRules(sections, input.chapter.title, chapterStructuralRules).slice(0, Math.max(maxSections, lockedSections.length));
+  return retried;
 }
 
 /** 提示词保存前预检结果：向用户展示系统运行时将从该提示词中执行的硬性规则 */

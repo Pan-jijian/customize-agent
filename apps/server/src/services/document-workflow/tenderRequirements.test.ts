@@ -10,7 +10,7 @@ import type * as LlmClientModule from './llmClient';
 import { callDocumentLlmJson } from './llmClient';
 import { validateJsonAgainstSchema } from './llmClient';
 import { buildSemanticSimilarity } from './semanticSimilarity';
-import { emptyTenderRequirements, extractTenderRequirements, filterMandatoryClauseEvidence, hasTenderRequirements, mergeTenderRequirements, missingMandatoryFields, requirementsCoverageIssues, tenderRequirementsWritingRules, REQUIREMENTS_JSON_SCHEMA } from './tenderRequirements';
+import { emptyTenderRequirements, extractTenderRequirements, filterMandatoryClauseEvidence, hasTenderRequirements, mergeTenderRequirements, missingMandatoryFields, requirementsCoverageIssues, tenderRequirementsWritingRules, classifyRequirementResponsiveness, REQUIREMENTS_JSON_SCHEMA } from './tenderRequirements';
 import type { DocumentEvidence, TenderRequirementModel } from './types';
 
 const evidence: DocumentEvidence[] = [
@@ -179,5 +179,66 @@ describe('round-23 P0-2 奖项名称忠实性检测（requirementsCoverageIssues
     const markdown = '## 质量目标\n本项目确保获得“黄山杯”，并争创省优质工程奖。';
     const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
     expect(issues.filter(issue => issue.message.includes('杜撰'))).toEqual([]);
+  });
+});
+
+// ============ 评分报告问题2：商务纪律条款提取过滤与分类兜底 ============
+
+describe('商务纪律条款确定性治理（评分报告问题2）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('extractTenderRequirements：frontScheduleClauses/prohibitionNotes 纪律条款提取后即过滤，技术条款保留', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    mocked.mockResolvedValueOnce({
+      awardObjectives: [{ text: '创优目标：确保黄山杯。', coreTerms: ['黄山杯'], source: '招标文件.pdf' }],
+      specialQualityStandards: [],
+      awardClauses: [],
+      systematicBenchmarks: [],
+      frontScheduleClauses: [
+        { text: '计划工期：540个日历天。', coreTerms: ['540日历天'], source: '招标文件.pdf' },
+        { text: '我公司对参与本项目投标及施工组织设计编制的工作人员实行严格的纪律管理，确保投标活动合法合规。', coreTerms: ['纪律管理'], source: '招标文件.pdf' },
+        { text: '投标人不得向评标委员会成员行贿、打招呼、递条子。', coreTerms: ['行贿'], source: '招标文件.pdf' },
+      ],
+      dateFabricationProhibited: false,
+      prohibitionNotes: [
+        { text: '禁止编造开工日期。', coreTerms: ['开工日期'], source: '招标文件.pdf' },
+        { text: '参与本项目投标的全体人员签订廉洁从业承诺书。', coreTerms: ['廉洁从业'], source: '招标文件.pdf' },
+      ],
+    });
+    const model = await extractTenderRequirements(evidence, {});
+    expect(model.frontScheduleClauses.length).toBe(1);
+    expect(model.frontScheduleClauses[0].text).toContain('540个日历天');
+    expect(model.prohibitionNotes.length).toBe(1);
+    expect(model.prohibitionNotes[0].text).toContain('禁止编造开工日期');
+    // 纪律条款不得进入写作规则
+    const rules = tenderRequirementsWritingRules(model);
+    expect(rules).not.toContain('纪律管理');
+    expect(rules).not.toContain('行贿');
+    expect(rules).not.toContain('廉洁从业');
+  });
+
+  it('classifyRequirementResponsiveness：纪律条款 LLM 判 responsive=true 仍强制 false', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    // LLM 误判纪律条款为实质要求（responsive=true）
+    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }, { index: 1, responsive: true }] });
+    const judged = await classifyRequirementResponsiveness([
+      { kind: '前附表响应条款', text: '计划工期：540个日历天。' },
+      { kind: '前附表响应条款', text: '我公司对参与本项目投标的工作人员实行严格的纪律管理，确保投标活动合法合规。' },
+    ]);
+    expect(judged.get(0)).toBe(true);
+    expect(judged.get(1)).toBe(false);
+  });
+
+  it('classifyRequirementResponsiveness：LLM 失败保守全检时纪律条款同样强制 false', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    mocked.mockResolvedValueOnce(undefined);
+    const judged = await classifyRequirementResponsiveness([
+      { kind: '前附表响应条款', text: '确保黄山杯。' },
+      { kind: '前附表响应条款', text: '投标人不得串标、围标、弄虚作假。' },
+    ]);
+    expect(judged.get(0)).toBe(true);
+    expect(judged.get(1)).toBe(false);
   });
 });

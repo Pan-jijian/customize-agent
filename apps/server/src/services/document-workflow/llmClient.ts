@@ -11,23 +11,23 @@ const LLM_RETRY_DELAY_MS = 1200;
 
 /**
  * 全局 LLM 并发上限：用户既定决策——LLM 并发调用不应受限制（实测模型端点并发量高，不会因并发限流）。
- * 默认 64（足以覆盖 51 主题块全并发 + 3 路审查修复流水线）；DOCUMENT_LLM_MAX_CONCURRENCY 可覆盖，
- * 设为 0 表示完全解除上限。仅瞬态错误重试（429/5xx）保留端点保护语义，与并发上限无关。
+ * 默认完全解除上限（Number.POSITIVE_INFINITY，所有调用全并发、无排队）；DOCUMENT_LLM_MAX_CONCURRENCY
+ * 可显式覆盖（正整数 = 指定上限，0 = 完全解除）。仅瞬态错误重试（429/5xx）保留端点保护语义，与并发上限无关。
  */
 const rawMaxConcurrency = Number(process.env.DOCUMENT_LLM_MAX_CONCURRENCY);
 const envMaxConcurrency = Number.isFinite(rawMaxConcurrency)
   ? (rawMaxConcurrency === 0 ? Number.POSITIVE_INFINITY : (rawMaxConcurrency > 0 ? Math.floor(rawMaxConcurrency) : undefined))
   : undefined;
-let llmMaxConcurrency: number = envMaxConcurrency ?? 64;
+let llmMaxConcurrency: number = envMaxConcurrency ?? Number.POSITIVE_INFINITY;
 
-/** 文档目标字数与全局并发上限解耦：所有规模统一使用 llmMaxConcurrency（默认 64，env 可覆盖） */
+/** 文档目标字数与全局并发上限解耦：所有规模统一使用 llmMaxConcurrency（默认无上限，env 可覆盖） */
 export function concurrencyForDocumentScale(_targetWords: number) {
   return llmMaxConcurrency;
 }
 
 /** 生成开始时保持并发上限不变（不再按规模降档），仅受 env 强制覆盖约束 */
 export function raiseDocumentLlmConcurrencyForScale(_targetWords: number) {
-  llmMaxConcurrency = envMaxConcurrency ?? 64;
+  llmMaxConcurrency = envMaxConcurrency ?? Number.POSITIVE_INFINITY;
   return llmMaxConcurrency;
 }
 /**
@@ -92,6 +92,17 @@ export function getDocumentLlmMaxConcurrency() {
 function isTransientLlmError(error: unknown): boolean {
   const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
   return /connection error|econnrefused|econnreset|fetch failed|network|socket|eai_again|enotfound|etimedout|429|502|503|504|rate ?limit|too many requests|overloaded|服务繁忙|连接失败/iu.test(text);
+}
+
+/** 上下文超长错误识别（deepseek 输入超窗口返回 400）：供调用方做「缩减输入后降级重试」，
+ * 非瞬态不重试的 400 类错误里只有这一类值得重试（缩小输入即可成功）。
+ * 另有「JSON 输出被截断」形态（200 响应但输出预算耗尽/输入超长导致生成中断，describeJsonParseFailure
+ * 输出的“JSON 被截断（…未闭合…）”）：输入超长为根因时压缩证据降级重试同样有效，一并识别 */
+export function isContextOverflowLlmError(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  return /maximum context length|context ?length|context ?window|too many tokens|input.{0,24}too long|prompt.{0,24}too long|请求.{0,16}(超长|过长|超出)|上下文.{0,16}(超长|超出|过长|窗口)/iu.test(text)
+    || (/400/u.test(text) && /context|too ?long|token|length|上下文/iu.test(text))
+    || /JSON.{0,10}被截断|JSON.{0,10}未闭合/iu.test(text);
 }
 
 export function providerFactoryName(providerName: string, providerConfig?: { protocol?: string }) {
@@ -348,30 +359,53 @@ function recordJsonValidationFailure(diagnostics: DocumentGenerationDiagnostics 
   diagnostics.llm.lastError = message;
 }
 
-export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string } } = {}): Promise<T | undefined> {
-  const response = await callDocumentLlm(system, prompt, true, { maxTokens: options.maxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost, taskKind: options.taskKind });
-  if (!response) {
-    // 空响应/网络失败：原因由 callDocumentLlm 写入 diagnostics.llm.lastError，经 outFailure 带出供调用方定位
-    if (options.outFailure && options.diagnostics?.llm.lastError) options.outFailure.value = options.diagnostics.llm.lastError;
-    return undefined;
-  }
-  const payload = extractJsonPayload(response);
-  try {
-    const parsed = JSON.parse(payload) as T;
-    if (options.schema) {
-      const errors = validateJsonAgainstSchema(parsed, options.schema);
-      if (errors.length > 0) {
-        const message = `JSON Schema 校验失败：${errors.join('；')}`;
-        recordJsonValidationFailure(options.diagnostics, message);
+/** F1 重试循环核心：JSON 解析/schema 校验失败重试一次（失败原因回注提示词），二次仍失败才放弃。
+ * invokeLlm 可注入（单测注入 mock，生产绑定 callDocumentLlm）——模块内部词法绑定无法被 vi.mock 拦截 */
+export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string } } = {}, invokeLlm: (attemptSystem: string, attemptPrompt: string) => Promise<string | undefined> = (attemptSystem, attemptPrompt) => callDocumentLlm(attemptSystem, attemptPrompt, true, { maxTokens: options.maxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost, taskKind: options.taskKind })): Promise<T | undefined> {
+  // 历史缺陷：规划/审查/修复类 jsonOnly 调用一次失败即放弃，造成章节降级与后续数轮无效修复；
+  // 失败原因回注提示词让模型收敛，秒级重试代价远小于分钟级降级链
+  const maxJsonAttempts = 1;
+  let lastFailure: string | undefined;
+  for (let attempt = 0; attempt <= maxJsonAttempts; attempt += 1) {
+    if (options.signal?.aborted) return undefined;
+    const attemptPrompt = attempt === 0 ? prompt : `${prompt}\n\n（重试修正：上一次输出未通过——${lastFailure ?? '输出无效'}。请重新输出完整合法的 JSON，只返回 JSON。）`;
+    const response = await invokeLlm(system, attemptPrompt);
+    if (!response) {
+      // 空响应/网络失败：原因由 callDocumentLlm 写入 diagnostics.llm.lastError，经 outFailure 带出供调用方定位
+      if (options.outFailure && options.diagnostics?.llm.lastError) options.outFailure.value = options.diagnostics.llm.lastError;
+      return undefined;
+    }
+    const payload = extractJsonPayload(response);
+    try {
+      const parsed = JSON.parse(payload) as T;
+      if (options.schema) {
+        const errors = validateJsonAgainstSchema(parsed, options.schema);
+        if (errors.length > 0) {
+          const message = `JSON Schema 校验失败：${errors.join('；')}`;
+          lastFailure = message;
+          recordJsonValidationFailure(options.diagnostics, message);
+          if (attempt >= maxJsonAttempts) {
+            if (options.outFailure) options.outFailure.value = message;
+            return undefined;
+          }
+          continue;
+        }
+      }
+      return parsed;
+    } catch {
+      const message = `JSON 解析失败：${describeJsonParseFailure(payload)}`;
+      lastFailure = message;
+      recordJsonValidationFailure(options.diagnostics, message);
+      if (attempt >= maxJsonAttempts) {
         if (options.outFailure) options.outFailure.value = message;
         return undefined;
       }
+      continue;
     }
-    return parsed;
-  } catch {
-    const message = `JSON 解析失败：${describeJsonParseFailure(payload)}`;
-    recordJsonValidationFailure(options.diagnostics, message);
-    if (options.outFailure) options.outFailure.value = message;
-    return undefined;
   }
+  return undefined;
+}
+
+export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string } } = {}): Promise<T | undefined> {
+  return callDocumentLlmJsonWithRetry(system, prompt, options);
 }

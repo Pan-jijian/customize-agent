@@ -1,58 +1,9 @@
 /**
- * h13d qualityValidation 单测：目录三级小节完整性 + 截断词表扩展。
+ * qualityValidation 单测：截断词表扩展 + 占位式表达。
  * 均为 L2 确定性结构检测，无需语义通道。
  */
 import { describe, expect, it } from 'vitest';
-import { formalContentIntegrityIssues, formalPlaceholderIssues, tocThirdLevelCompletenessIssues } from './qualityValidation';
-
-describe('tocThirdLevelCompletenessIssues（h13d 目录三级小节完整性）', () => {
-  it('正文存在三级小节而目录未收录 → 报 blocker', () => {
-    const markdown = [
-      '## 目录',
-      '第三章 施工部署',
-      '  3.1 施工部署与施工流水组织',
-      '<div class="page-break"></div>',
-      '## 第三章 施工部署',
-      '#### 3.1.1 土方外运及基坑支护工程',
-      '本小节内容。',
-      '#### 3.1.2 地基与基础工程',
-      '本小节内容。',
-    ].join('\n');
-    const issues = tocThirdLevelCompletenessIssues(markdown);
-    expect(issues.length).toBe(1);
-    expect(issues[0].severity).toBe('blocker');
-    expect(issues[0].message).toContain('缺失');
-  });
-
-  it('目录收录全部三级小节 → 不报', () => {
-    const markdown = [
-      '## 目录',
-      '第三章 施工部署',
-      '  3.1 施工部署与施工流水组织',
-      '    3.1.1 土方外运及基坑支护工程',
-      '    3.1.2 地基与基础工程',
-      '<div class="page-break"></div>',
-      '## 第三章 施工部署',
-      '#### 3.1.1 土方外运及基坑支护工程',
-      '本小节内容。',
-      '#### 3.1.2 地基与基础工程',
-      '本小节内容。',
-    ].join('\n');
-    expect(tocThirdLevelCompletenessIssues(markdown)).toEqual([]);
-  });
-
-  it('正文无三级小节 → 不检测', () => {
-    const markdown = [
-      '## 目录',
-      '第三章 施工部署',
-      '  3.1 施工部署与施工流水组织',
-      '<div class="page-break"></div>',
-      '## 第三章 施工部署',
-      '本段为二级小节正文。',
-    ].join('\n');
-    expect(tocThirdLevelCompletenessIssues(markdown)).toEqual([]);
-  });
-});
+import { formalContentIntegrityIssues, formalPlaceholderIssues } from './qualityValidation';
 
 describe('formalContentIntegrityIssues 截断词表扩展（h13c）', () => {
   it('以「复查合格后」结尾且无句号 → 报截断句', () => {
@@ -68,6 +19,25 @@ describe('formalContentIntegrityIssues 截断词表扩展（h13c）', () => {
   it('完整成句（句号收尾）→ 不报截断句', () => {
     const issues = formalContentIntegrityIssues('质检员每周对库存材料进行1次状态检查，复查合格后方可投入使用。');
     expect(issues.some(issue => /疑似截断句/u.test(issue.message))).toBe(false);
+  });
+
+  it('页码元信息：任何「PDF 第」形态（含空格数字完整引用）均报残留', () => {
+    // 清洗链已归一完整引用并删残片，最终校验文本出现「PDF 第」即清洗缺口，不分形态全部报出
+    expect(formalContentIntegrityIssues('详见招标文件PDF 第 3 页。').some(issue => /正文残留资料页码元信息/u.test(issue.message))).toBe(true);
+    expect(formalContentIntegrityIssues('详见招标文件PDF 第。').some(issue => /正文残留资料页码元信息/u.test(issue.message))).toBe(true);
+  });
+
+  it('页码元信息：无 PDF 前缀的「第N页」引用同样报残留（第二分支）', () => {
+    expect(formalContentIntegrityIssues('详见工程量清单第 5 页。').some(issue => /正文残留资料页码元信息/u.test(issue.message))).toBe(true);
+  });
+
+  it('页码元信息：页码范围「第 5-8 页」报残留', () => {
+    expect(formalContentIntegrityIssues('详见施工图设计文件第 5-8 页。').some(issue => /正文残留资料页码元信息/u.test(issue.message))).toBe(true);
+  });
+
+  it('页码元信息：清洗后的正常引用「相关资料」不误报', () => {
+    const issues = formalContentIntegrityIssues('详见招标文件、施工图设计文件、工程量清单及相关资料。');
+    expect(issues.some(issue => /正文残留资料页码元信息/u.test(issue.message))).toBe(false);
   });
 });
 

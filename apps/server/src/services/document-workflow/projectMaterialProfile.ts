@@ -381,14 +381,12 @@ export async function retrievePlannedMaterialEvidence(input: {
 export function sampleProjectMaterialEvidence(input: { project: { getFileDetail?: (relativePath: string, options?: { maxChunkContentChars?: number }) => { file: { relativePath: string }; chunks: Array<{ content: string; sectionTitle?: string }>; totalChunkCount?: number } | undefined }; chapter: DocumentTemplateChapter; plan?: ChapterMaterialPlan; profile: ProjectMaterialProfile; scopedFilePaths: string[]; highRisk?: boolean }) {
   const evidence: DocumentEvidence[] = [];
   const plannedKinds = new Set(input.plan?.mustUseMaterialKinds || []);
-  // 按优先级（kind priority + chunk count）评分选择文件，而非硬截断前 N 个
+  // 按优先级（kind priority + chunk count）评分选择文件，而非硬截断前 N 个；文件全量参与（无数量截断）
   const matchingFiles = input.profile.files.filter(file => input.scopedFilePaths.includes(file.filePath) && (plannedKinds.size === 0 || plannedKinds.has(file.kind)));
-  const fileLimit = input.highRisk ? 80 : 40;
-  const topFiles = matchingFiles.sort((a, b) => b.priority - a.priority).slice(0, fileLimit);
+  const topFiles = matchingFiles.sort((a, b) => b.priority - a.priority);
   const tokens = [input.chapter.title, ...(input.chapter.sections || []), ...input.chapter.requiredFacts].filter(Boolean);
-  const chunkLimit = input.highRisk ? 6 : 3;
   for (const file of topFiles) {
-    const detail = input.project.getFileDetail?.(file.filePath, { maxChunkContentChars: input.highRisk ? 24000 : 12000 });
+    const detail = input.project.getFileDetail?.(file.filePath);
     if (!detail?.chunks?.length) continue;
     const ranked = detail.chunks.map((chunk, index) => {
       const content = cleanEvidenceText(chunk.content);
@@ -396,7 +394,7 @@ export function sampleProjectMaterialEvidence(input: { project: { getFileDetail?
       const hits = tokens.filter(token => text.includes(token)).length;
       const numericBonus = /\d+(?:\.\d+)?\s*(?:日历天|天|月|年|万元|元|㎡|m²|m³|米|mm|台|套|人|项|%|MPa|kPa)/u.test(content) ? 1 : 0;
       return { chunk, index, score: hits * 0.8 + numericBonus + (index === 0 ? 0.4 : 0) + file.priority / 120 };
-    }).filter(item => item.score > 0).sort((a, b) => b.score - a.score).slice(0, chunkLimit);
+    }).filter(item => item.score > 0).sort((a, b) => b.score - a.score);
     for (const item of ranked) evidence.push({
       chapterId: input.chapter.id,
       filePath: detail.file.relativePath,
@@ -408,5 +406,5 @@ export function sampleProjectMaterialEvidence(input: { project: { getFileDetail?
       source: 'project-material-sample',
     });
   }
-  return selectEvidenceByBudget(evidence, { maxItems: input.highRisk ? 60 : 30, maxChars: input.highRisk ? 60000 : 30000, preservePinned: true });
+  return selectEvidenceByBudget(evidence, { preservePinned: true });
 }

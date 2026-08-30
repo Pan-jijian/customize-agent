@@ -3,14 +3,13 @@ import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecT
 import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ProjectGraphTablePlan, ResolvedFactNeed, ValidationIssue } from './types';
 import type { DocumentBudget } from './budget';
 import { documentTextLength } from './budget';
-import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
+import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget, extractKeyParameterWindows } from './evidence';
 import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
 import { callDocumentLlm, callDocumentLlmJson, getDocumentLlmFailureStreak, getDocumentLlmMaxConcurrency } from './llmClient';
 import { findDuplicateH4Titles, stringifyFactValue, throwIfAborted } from './utils';
-import { selectByScore, factImportanceScore } from './selection';
 import { measureGenerationStep } from './rolePipeline';
 import { normalizePlannedSections, professionalSectionTaskCard } from './promptRuleExtraction';
-import { sectionTablePlans, sectionTablePlansPrompt, tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
+import { groupTablePlansForSections, sectionTablePlans, sectionTablePlansPrompt, tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
 import { constructionOrgBonusModulePrompt, constructionOrgChapterRulePrompt } from './constructionOrgQualityRules';
 import { buildProcessKnowledgePrompt, matchProcessKnowledgeCards } from './constructionProcessKnowledge';
 import { criticalSectionBlockerMinChars, currentSectionBlock, ensureGroupTertiaryShell, ensureTertiarySectionShell, groupHasMajorConstructionSection, isCriticalDeepSection, isGeneralManagementSection, keySectionWritingRequirement, majorContentPollutionIssue, mergeDuplicateWorkPackageSubsections, outputTokensForChapter, parseMajorConstructionPackages, repairMajorContentWorkPackageLabels, sectionContentBody, sectionStructureIssue } from './chapterPostProcessing';
@@ -58,46 +57,29 @@ export function buildChapterFactCoverageContext(input: { chapter: DocumentTempla
   ].filter(Boolean))];
   const roleFactLines = input.roleFacts.map(({ fact }) => `- ${fact.key}：${cleanEvidenceText(stringifyFactValue(fact.value))}`);
   const resolvedFacts = (input.resolvedFactNeeds || []).flatMap(item => item.facts);
-  // 用评分函数选择最重要的全局事实（而非硬截断前 40 个）
+  // 全局资料事实全量注入（不再做条目/字符预算截断：截断即事实丢失，LLM 输入容量足够）
   const allIndexedFacts = input.indexedFacts || [];
-  const indexedFactSelection = selectByScore(
-    allIndexedFacts,
-    f => factImportanceScore(f),
-    { maxItems: 48, maxChars: 12000 },
-    'indexedFacts',
-  );
   const indexedFactLines = resolvedFacts.length > 0
     ? []
-    : indexedFactSelection.selected.map(fact => `- ${fact.key || fact.fieldName || '资料事实'}：${cleanEvidenceText(stringifyFactValue(fact.value)).slice(0, 180)}${fact.sourceFile ? `（来源：${fact.sourceFile.split('/').pop()}）` : ''}`);
-  const droppedIndexedNote = indexedFactSelection.dropped.length > 0
-    ? [`⚠️ ${indexedFactSelection.dropped.length} 个低优先级事实未列出（完整列表见事实主表）`]
-    : [];
+    : allIndexedFacts.map(fact => `- ${fact.key || fact.fieldName || '资料事实'}：${cleanEvidenceText(stringifyFactValue(fact.value))}${fact.sourceFile ? `（来源：${fact.sourceFile.split('/').pop()}）` : ''}`);
   const projectBasicFacts = [...resolvedFacts, ...allIndexedFacts]
     .filter(fact => /建设地点|建设规模|招标范围|计划工期|合同工期|周期要求|质量标准|合同估算|投资估算|最高投标限价|招标控制价/u.test(`${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`))
     .filter((fact, index, array) => array.findIndex(item => `${item.key || item.fieldName}:${stringifyFactValue(item.value)}` === `${fact.key || fact.fieldName}:${stringifyFactValue(fact.value)}`) === index);
-  // 精确参数：保留所有数值事实，限制连接后的总字符数不超过 6000（参数种类是专业评分硬性验收项，预算不足会截断 LLM 可落位的参数清单）
-  const preciseTokensAll = [...new Set([...extractChapterPreciseTokens(input.evidence), ...resolvedFacts.map(fact => stringifyFactValue(fact.value)).filter(value => HAS_QUANTIFIED_VALUE_RE.test(value)), ...allIndexedFacts.map(fact => stringifyFactValue(fact.value)).filter(value => HAS_QUANTIFIED_VALUE_RE.test(value))])];
-  let preciseChars = 0;
-  const preciseTokens: string[] = [];
-  for (const t of preciseTokensAll) {
-    if (preciseChars + t.length > 6000 && preciseTokens.length >= 10) break;
-    preciseTokens.push(t);
-    preciseChars += t.length + 1;
-  }
+  // 精确参数：保留所有数值事实全量注入（参数种类是专业评分硬性验收项，截断会丢 LLM 可落位的参数清单）
+  const preciseTokens = [...new Set([...extractChapterPreciseTokens(input.evidence), ...resolvedFacts.map(fact => stringifyFactValue(fact.value)).filter(value => HAS_QUANTIFIED_VALUE_RE.test(value)), ...allIndexedFacts.map(fact => stringifyFactValue(fact.value)).filter(value => HAS_QUANTIFIED_VALUE_RE.test(value))])];
   const evidenceSourceCount = new Set([...input.evidence.map(item => item.filePath), ...resolvedFacts.map(item => item.sourceFile), ...(input.indexedFacts || []).map(item => item.sourceFile)]).size;
   const unresolvedNeeds = (input.resolvedFactNeeds || []).filter(item => item.status !== 'satisfied' && item.need.required).map(item => item.need.label);
   return [
     '【本章事实覆盖与参数落位要求】',
     requiredFacts.length ? `必须优先覆盖的事实/要求：\n${requiredFacts.map(item => `- ${item}`).join('\n')}` : '',
     roleFactLines.length ? `角色节点已抽取事实：\n${roleFactLines.join('\n')}` : '',
-    projectBasicFacts.length ? `项目基础事实卡片（资料已明确，必须优先使用，不得输出任何占位话术；其中工程地点、建设规模、计划工期等总述数据只在项目概况/工程概况类章节集中交代，其他章节仅可引用所需的具体数字，不得复述完整概况段）：\n${projectBasicFacts.map(fact => `- ${fact.key || fact.fieldName}：${cleanEvidenceText(stringifyFactValue(fact.value)).slice(0, 220)}${fact.sourceFile ? `（来源：${fact.sourceFile.split('/').pop()}）` : ''}`).join('\n')}\n项目基本信息表必须使用固定表头：| 信息项 | 内容 |，不得使用“序号｜项目名称｜内容参数”表头，不得输出后台溯源列。` : '',
+    projectBasicFacts.length ? `项目基础事实卡片（资料已明确，必须优先使用，不得输出任何占位话术；其中工程地点、建设规模、计划工期等总述数据只在项目概况/工程概况类章节集中交代，其他章节仅可引用所需的具体数字，不得复述完整概况段）：\n${projectBasicFacts.map(fact => `- ${fact.key || fact.fieldName}：${cleanEvidenceText(stringifyFactValue(fact.value))}${fact.sourceFile ? `（来源：${fact.sourceFile.split('/').pop()}）` : ''}`).join('\n')}\n项目基本信息表必须使用固定表头：| 信息项 | 内容 |，不得使用“序号｜项目名称｜内容参数”表头，不得输出后台溯源列。` : '',
     input.factNeedsPrompt || '',
     indexedFactLines.length ? `全局资料事实索引匹配到的本章可写事实：\n${indexedFactLines.join('\n')}` : '',
     preciseTokens.length ? `本章资料中可直接使用的可靠精确参数/编号：${preciseTokens.join('、')}。这些参数来自绑定资料，不属于编造；涉及对应对象、部位、工序、材料、设备、项目概况、质量验收或安全控制时必须自然写入正文，并保持原样或等价专业表达。量化参数落位是硬性验收项：本章正文必须达到每千字不少于 2 个不同量化参数的密度（以上方清单参数优先），同一参数不得反复堆砌凑数，参数种类不足将被打回重写。项目基础事实中的合同估算价、计划工期可用于项目概况；不得写入报价明细、单价、税率、预留金。` : '',
     unresolvedNeeds.length ? `当前事实需求仍未充分确认：${unresolvedNeeds.join('、')}。未确认项不得编造；但已满足事实需求中的资料事实必须写入对应小节。` : '',
     input.missingFacts.length ? `模板显式要求中当前检索未充分命中的项：${input.missingFacts.join('、')}。未命中项不得编造，但不得因此省略上方已经明确的可靠参数。` : '',
     `本章可用材料来源约 ${evidenceSourceCount} 个文件，正文必须按事实需求把可用事实内化到对应小节，不得单列后台资料清单。`,
-    ...droppedIndexedNote,
   ].filter(Boolean).join('\n');
 }
 
@@ -213,7 +195,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     if (outline) {
       // P4 硬回路：大纲报告的材料缺失事实 → 定向补充检索 → 命中材料并入证据池后重渲染大纲
       const allOutlinedMissing = [...new Set(outline.sections.flatMap(section => (section.missingFacts || []).filter(Boolean)))];
-      const outlinedMissingFacts = allOutlinedMissing.slice(0, 12);
+      const outlinedMissingFacts = allOutlinedMissing;
       if (outlinedMissingFacts.length > 0 && options.supplementEvidenceProvider) {
         const supplements = await options.supplementEvidenceProvider(outlinedMissingFacts).catch(() => []);
         const fresh = supplements.filter(item => !evidence.some(existing => existing.filePath === item.filePath && (existing.sectionTitle || '') === (item.sectionTitle || '')));
@@ -330,7 +312,6 @@ export function evidenceForSection(sectionTitle: string, chapter: DocumentTempla
   const globalFacts = scored
     .filter(({ item }) => !selectedSet.has(item))
     .filter(({ item }) => /招标范围|建设规模|建设地点|计划工期|质量标准|施工内容|管理机构|岗位职责|施工部署|现场交通|人车分流/u.test(`${item.sectionTitle || ''}\n${item.content}`))
-    .slice(0, 12)
     .map(item => item.item);
   return [...selected, ...globalFacts];
 }
@@ -452,13 +433,37 @@ export function sectionFactUsageIssue(sectionTitle: string, content: string, fac
   return `知识库事实落位不足：当前小节已落位 ${usedFacts.length}/${factCard.items.length} 条知识库事实、${usedQuantified.length}/${factCard.quantifiedCount} 条量化事实；建议补入：${missing.join('；')}`;
 }
 
-/** 小节级调用的紧凑上下文：优先保留结构化事实行与蓝图约束行，避免每个小节重复携带全量全局叙述 */
-function compactSectionProjectContext(projectContext: string, maxChars = 2000) {
+/**
+ * 小节级调用的紧凑上下文：优先保留结构化事实行与蓝图约束行，避免每个小节重复携带全量全局叙述。
+ * 置顶保护「招标文件评分项要求」段（历史缺陷：4.12.x 正文丢「确保黄山杯」——评分项要求段位于
+ * projectContext 末尾，slice(0, maxChars) 切尾部即丢创优目标，写作上下文无要求可响应 → 零响应，
+ * 修复后该段整段置顶保留，只截断其余上下文）。
+ */
+export function compactSectionProjectContext(projectContext: string, maxChars = 2000) {
   const lines = projectContext.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
-  const structured = lines.filter(line => /【.+】/u.test(line) || /=/u.test(line) || /^\d+\.\s+/u.test(line) || /：\S{1,40}$/u.test(line));
-  const keep = structured.length >= 8 ? structured : lines;
-  const compact = keep.join('\n').trim();
-  return compact.length <= maxChars ? compact : `${compact.slice(0, maxChars)}\n（上下文已截断，完整信息见绑定材料与证据）`;
+  // 拆出评分项要求段（从「【招标文件评分项要求」标记行到下一「【」标记行之前的全部编号行）
+  const requirementsLines: string[] = [];
+  const restLines: string[] = [];
+  let inRequirements = false;
+  for (const line of lines) {
+    if (line.startsWith('【招标文件评分项要求')) {
+      inRequirements = true;
+      requirementsLines.push(line);
+      continue;
+    }
+    if (inRequirements && line.startsWith('【')) inRequirements = false;
+    (inRequirements ? requirementsLines : restLines).push(line);
+  }
+  const structured = restLines.filter(line => /【.+】/u.test(line) || /=/u.test(line) || /^\d+\.\s+/u.test(line) || /：\S{1,40}$/u.test(line));
+  const keep = structured.length >= 8 ? structured : restLines;
+  const requirementsBlock = requirementsLines.join('\n').trim();
+  const compactBody = keep.join('\n').trim();
+  const truncate = (text: string, budget: number) => (text.length <= budget ? text : `${text.slice(0, budget)}\n（上下文已截断，完整信息见绑定材料与证据）`);
+  if (requirementsBlock) {
+    // 评分项要求段整段优先保留（宁超预算不丢要求——零响应是评标失分，上下文冗长只是冗余）
+    return `${requirementsBlock}\n${truncate(compactBody, Math.max(400, maxChars - requirementsBlock.length - 20))}`;
+  }
+  return truncate(compactBody, maxChars);
 }
 
 export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number; allowLenientStructureGate?: boolean; tablePlanInstruction?: string }) {
@@ -495,7 +500,10 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     '你是专业文档的小节生成专家。',
     FORMAL_WRITING_RULES,
     input.promptTexts,
-  ].filter(Boolean).join('\n\n'), prompt, false, { maxTokens: Math.min(outputTokensForChapter(input.targetWords), Math.max(1800, Math.ceil(input.targetWords * 1.8))), temperature: 0.25, signal: input.signal, diagnostics: input.diagnostics });
+    // 输出池扩容：小节正文含多个 #### 三级小节标题（实测 9 个 H4 均分输出池导致靠后小节
+    // 「工艺流程：」被 maxTokens 截断）。中文约 1.5 token/字，按 2.6 倍系数 + 2800 下限留足
+    // H4 标题与 markdown 结构开销；正文总量仍由 prompt 的 maxWords 约束，不因池放大而灌水
+  ].filter(Boolean).join('\n\n'), prompt, false, { maxTokens: Math.min(outputTokensForChapter(input.targetWords), Math.max(2800, Math.ceil(input.targetWords * 2.6))), temperature: 0.25, signal: input.signal, diagnostics: input.diagnostics });
   const content = input.diagnostics
     ? await measureGenerationStep(input.diagnostics, `section-draft:${input.chapter.id}:${input.sectionTitle}`, llmCall)
     : await llmCall();
@@ -594,7 +602,8 @@ async function buildFocusedSectionDraft(input: Parameters<typeof buildLlmSection
     .slice(0, 24);
   const sectionFactCard = buildSectionFactCard(input.sectionTitle, sectionEvidence);
   const evidenceText = sectionEvidence
-    .map((item, index) => `${index + 1}. ${cleanEvidenceText(item.content).slice(0, 520)}`)
+    // 超长证据（CAD 父块全文等）头部盲截会丢失尾部标高/坡率等关键参数：改用关键参数窗口提取（fix6 渲染层同口径）
+    .map((item, index) => `${index + 1}. ${extractKeyParameterWindows(cleanEvidenceText(item.content), 900)}`)
     .filter(Boolean)
     .join('\n');
   const previousLastError = input.diagnostics?.llm.lastError;
@@ -619,7 +628,8 @@ async function buildFocusedSectionDraft(input: Parameters<typeof buildLlmSection
     input.qualityFeedback || '',
     evidenceText ? `压缩证据：\n${evidenceText}` : '',
   ].filter(Boolean).join('\n\n'), false, {
-    maxTokens: Math.min(4800, Math.max(2200, Math.ceil(input.targetWords * 1.65))),
+    // focused writer 输出池扩容（与逐节写手同口径）：多 H4 结构开销下避免「工艺流程：」类截断
+    maxTokens: Math.min(6000, Math.max(3000, Math.ceil(input.targetWords * 2.4))),
     temperature: 0.2,
     signal: input.signal,
     diagnostics: input.diagnostics,
@@ -812,12 +822,26 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
     const groupEvidenceLists = await Promise.all(groupSections.map(section => input.sectionEvidenceProvider
       ? input.sectionEvidenceProvider(section).catch(() => [])
       : Promise.resolve([])));
-    const groupEvidence = [...input.evidence, ...groupEvidenceLists.flat().filter((item): item is DocumentEvidence => Boolean(item))]
+    // 组级证据预处理：过滤 + 相关性排序 + 关键参数窗口提取（组级证据不再头部盲截：
+    // CAD 父块全文等超长证据改用关键参数窗口提取，保留尾部标高/坡率等真实设计参数）
+    const prepareGroupEvidence = (items: DocumentEvidence[]) => items
+      .filter((item): item is DocumentEvidence => Boolean(item))
       .filter(item => !/违约金额|元\/条|罚款|处罚|检查项目检查内容|清单不再单独列项/u.test(item.content.slice(0, 500)))
       .sort((a, b) => b.score - a.score)
-      .slice(0, 10)
-      .map(item => ({ ...item, content: item.content.slice(0, 1400) }));
-    const groupChapter = { ...input.chapter, sections: targets.length >= 30 ? groupSections.slice(0, 12) : groupSections };
+      .map(item => ({ ...item, content: extractKeyParameterWindows(item.content, 1400) }));
+    // 章级证据池：供逐节降级路径按块隔离使用（每节只叠加本节自身证据，不再混入组内其他小节证据）
+    const chapterEvidencePool = prepareGroupEvidence([...input.evidence]);
+    // 组级汇总证据池：一次成稿整组时使用章级+组内各节混排取前 10
+    const groupEvidence = prepareGroupEvidence([...input.evidence, ...groupEvidenceLists.flat()]).slice(0, 10);
+    // 改5：组级表格计划按块过滤——每组只注入本组小节承接的表计划，末组额外承接全章未分配表，
+    // 避免每组都看到全章表计划导致跨组重复输出同一张表或归属错位（tablePlansPrompt 随 chapter 注入）
+    const groupChapterSections = targets.length >= 30 ? groupSections.slice(0, 12) : groupSections;
+    const isLastGroup = groups.indexOf(group) === groups.length - 1;
+    const groupChapter = {
+      ...input.chapter,
+      sections: groupChapterSections,
+      tablePlans: groupTablePlansForSections(input.chapter, groupChapterSections, isLastGroup ? targets.map(item => item.title) : []),
+    };
     if (emptyLlmGroupCount >= (targets.length >= 30 ? 1 : 2)) {
       throw new Error(`小节组 ${groupSections.join('、')} 连续空响应，已阻断以避免标题占位正文`);
     }
@@ -841,7 +865,9 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
             template: input.template,
             chapter: input.chapter,
             sectionTitle: item.title,
-            evidence: sectionExtraEvidence.length ? [...groupEvidence, ...sectionExtraEvidence] : groupEvidence,
+            // 改4：逐节生成证据按块隔离——只叠加本章级证据与本小节自身证据，
+            // 不再注入组级混排证据池（组内其他小节证据会诱导重复书写相邻小节内容）
+            evidence: sectionExtraEvidence.length ? [...chapterEvidencePool, ...prepareGroupEvidence(sectionExtraEvidence)] : chapterEvidencePool,
             missingFacts: input.missingFacts,
             promptTexts: input.promptTexts,
             projectContext: input.projectContext,
@@ -886,7 +912,7 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
           targetWords: groupTargetWords,
           maxWords: Math.ceil(groupTargetWords * 1.08),
           maxTokens: outputTokensForChapter(Math.floor(groupTargetWords * 0.45), groupTargetWords),
-          factCoverageContext: `${input.factCoverageContext || ''}\n本轮输出多个节时，每个 ### 节下必须至少有一个 #### 三级小节承载正文。`,
+          factCoverageContext: `${input.factCoverageContext || ''}\n本轮输出多个节时，每个 ### 节下必须至少有一个 #### 三级小节承载正文。#### 标题只允许使用该 ### 节下已规划的小节名，禁止新造标题；只写本节标题覆盖的内容，不得重复本章其他节内容。`,
           twoStep: false,
           signal: input.signal,
           diagnostics: input.diagnostics,
@@ -1079,16 +1105,14 @@ export async function buildPlannedChapterContent(input: {
   const results: Array<string | undefined> = new Array(blocks.length).fill(undefined);
   const writeBlock = async (block: (typeof blocks)[number], index: number): Promise<string | undefined> => {
     const sectionTitles = block.subPoints.map(point => point.title);
-    // 块级证据：全章证据按块标题与要点关键词过滤 + 块标题定向检索补充，避免无关证据挤占上下文
+    // 块级证据：全章证据按块标题与要点关键词相关性排序（只排序不丢弃，全量保留进输入）+ 块标题定向检索补充
     const blockTokens = tokenizeForRelevance(`${block.title} ${sectionTitles.join(' ')}`).filter(token => token.length >= 2);
     const scoredEvidence = input.evidence
       .map(item => ({ item, score: blockTokens.reduce((sum, token) => sum + (item.content.includes(token) ? 1 : 0), 0) }))
-      .filter(entry => entry.score > 0)
       .sort((left, right) => right.score - left.score)
-      .slice(0, 10)
-      .map(entry => ({ ...entry.item, content: entry.item.content.slice(0, 1400) }));
+      .map(entry => entry.item);
     const extraEvidence = input.sectionEvidenceProvider ? await input.sectionEvidenceProvider(block.title).catch(() => []) : [];
-    const blockEvidence = [...scoredEvidence, ...extraEvidence].slice(0, 12);
+    const blockEvidence = [...scoredEvidence, ...extraEvidence];
     const blockChapter = { ...input.chapter, title: block.title, sections: sectionTitles, tablePlans: blockTablePlans[index] || [] };
     const factsHint = block.facts.length
       ? `【本主题块专属事实（只能在本节使用，不得重复出现在本章其他节）】${block.facts.map(item => `- ${item}`).join('\n')}`
@@ -1129,12 +1153,15 @@ export async function buildPlannedChapterContent(input: {
         if (!content) continue;
         const stripped = content.replace(/^##\s+.+$/mu, '').trim();
         const normalized = ensureGroupTertiaryShell(sectionTitles, stripped);
-        const chars = documentTextLength(normalized);
-        const missing = sectionTitles.filter(title => !normalized.includes(title));
+        // 主题块必须挂 H3 块标题：模型未输出 H3 时强制补外壳，避免全部 H4 要点直接挂在章标题下
+        // 被 normalizeFormalChapterHeadings 归并到首个小节（历史缺陷：21 个 H4 挤在 2.1 一个 H3 下）
+        const withBlockShell = /^###\s+\S+/mu.test(normalized) ? normalized : `### ${block.title}\n\n${normalized}`;
+        const chars = documentTextLength(withBlockShell);
+        const missing = sectionTitles.filter(title => !withBlockShell.includes(title));
         // 同 H3 内同名 H4 重复展开同样视为质检不达标（实测一轮输出三轮相同改造项/危大工程三连），阻断重复进入二轮后处理
-        const duplicates = findDuplicateH4Titles(normalized);
+        const duplicates = findDuplicateH4Titles(withBlockShell);
         if (chars >= Math.max(400, Math.floor(block.targetWords * 0.5)) && missing.length === 0 && duplicates.length === 0) {
-          return normalized;
+          return withBlockShell;
         }
         lastMissing = missing;
         lastDuplicates = duplicates;
@@ -1147,9 +1174,10 @@ export async function buildPlannedChapterContent(input: {
     if (block.subPoints.length >= 4) {
       const mid = Math.ceil(block.subPoints.length / 2);
       const halfTarget = Math.max(800, Math.floor(block.targetWords / 2));
+      // 拆半后子块标题加（一）/（二）后缀，避免两个半块补出相同 H3 外壳造成标题重复
       const halfParts = await Promise.all([
-        writeBlock({ ...block, subPoints: block.subPoints.slice(0, mid), targetWords: halfTarget }, index),
-        writeBlock({ ...block, subPoints: block.subPoints.slice(mid), targetWords: halfTarget }, index),
+        writeBlock({ ...block, title: `${block.title}（一）`, subPoints: block.subPoints.slice(0, mid), targetWords: halfTarget }, index),
+        writeBlock({ ...block, title: `${block.title}（二）`, subPoints: block.subPoints.slice(mid), targetWords: halfTarget }, index),
       ]);
       if (halfParts.every((part): part is string => Boolean(part))) return halfParts.join(String.fromCharCode(10) + String.fromCharCode(10));
       if (input.diagnostics) input.diagnostics.llm.lastError = `规划块拆半后仍未成稿：${block.title}`;

@@ -360,7 +360,7 @@ export class IndexStateStore {
           JSON.stringify(chunk.metadata),
           now,
         );
-        insertFts?.run(chunkId, relativePath, file.category, file.format, chunk.sectionTitle ?? '', titlePath, chunkKind ?? '', searchContent);
+        insertFts?.run(chunkId, relativePath, file.category, file.format, chunk.sectionTitle ?? '', titlePath, chunkKind ?? '', `${searchContent} ${chunk.text}`);
       }
     });
     transaction();
@@ -552,12 +552,25 @@ export class IndexStateStore {
   }
 
   private searchChunksLike(terms: string[], limit: number, filePaths: string[]): ChunkSearchResult[] {
+    // 兜底拆两组：小列（路径/分类/标题等，行均几十字节）对所有词全表 LIKE，成本毫秒级；
+    // 大列（search_content/content）仅对 <3 字符短词扫描——trigram FTS 无法索引短词
+    // （中文 2 字词如“验收”），3+ 字符词已由 FTS 覆盖，不再全表扫大列
+    // （历史缺陷：40 term × 7 列全表扫描阻塞 Node 事件循环数分钟）
+    const shortTerms = [...new Set(terms.filter(term => term.length < 3))].slice(0, 6);
+    const smallColumns = terms.map(() => '(LOWER(relative_path) LIKE ? OR LOWER(category) LIKE ? OR LOWER(format) LIKE ? OR LOWER(COALESCE(title_path, \'\')) LIKE ? OR LOWER(COALESCE(chunk_kind, \'\')) LIKE ? OR LOWER(COALESCE(section_title, \'\')) LIKE ?)').join(' OR ');
+    const largeColumns = shortTerms.map(() => '(LOWER(search_content) LIKE ? OR LOWER(content) LIKE ?)').join(' OR ');
+    const condition = [smallColumns, largeColumns].filter(Boolean).join(' OR ');
     const rows = this.db.prepare(`
       SELECT rowid, * FROM kb_chunks
-      WHERE (${terms.map(() => '(LOWER(search_content) LIKE ? OR LOWER(content) LIKE ? OR LOWER(relative_path) LIKE ? OR LOWER(category) LIKE ? OR LOWER(format) LIKE ? OR LOWER(COALESCE(title_path, \'\')) LIKE ? OR LOWER(COALESCE(chunk_kind, \'\')) LIKE ?)').join(' OR ')})${this.filePathFilterClause(filePaths)}
+      WHERE (${condition})${this.filePathFilterClause(filePaths)}
       ORDER BY created_at DESC
       LIMIT ?
-    `).all(...terms.flatMap(term => [`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`]), ...filePaths, limit * 6) as Array<Record<string, unknown>>;
+    `).all(
+      ...terms.flatMap(term => [`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`]),
+      ...shortTerms.flatMap(term => [`%${term}%`, `%${term}%`]),
+      ...filePaths,
+      limit * 6,
+    ) as Array<Record<string, unknown>>;
 
     return rows
       .map(row => {
@@ -952,21 +965,47 @@ export class IndexStateStore {
 
   private initFts(): void {
     try {
-      this.db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(
-          id UNINDEXED,
-          relative_path,
-          category,
-          format,
-          section_title,
-          title_path,
-          chunk_kind,
-          content,
-          tokenize = 'unicode61 remove_diacritics 2'
-        );
-      `);
-      this.ftsEnabled = true;
-      this.rebuildFtsIfNeeded();
+      const existing = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'kb_chunks_fts'").get() as { sql?: string } | undefined;
+      // unicode61 分词下中文子串（如“混凝土”）几乎无法命中 FTS，检索频繁落入
+      // LOWER(x) LIKE '%term%' 全表兜底（最多 40 term × 7 列），在大库上同步扫描会
+      // 阻塞 Node 事件循环数分钟（页面表现为转圈）。trigram 可对任意 >=3 字符子串建索引。
+      if (existing?.sql && !/tokenize\s*=\s*'trigram/u.test(existing.sql)) {
+        this.db.exec('DROP TABLE IF EXISTS kb_chunks_fts');
+      }
+      try {
+        this.db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(
+            id UNINDEXED,
+            relative_path,
+            category,
+            format,
+            section_title,
+            title_path,
+            chunk_kind,
+            content,
+            tokenize = 'trigram case_sensitive 0'
+          );
+        `);
+        this.ftsEnabled = true;
+        this.rebuildFtsIfNeeded();
+      } catch {
+        // 旧版 SQLite 无 trigram tokenizer 时回退 unicode61，保持原有行为
+        this.db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(
+            id UNINDEXED,
+            relative_path,
+            category,
+            format,
+            section_title,
+            title_path,
+            chunk_kind,
+            content,
+            tokenize = 'unicode61 remove_diacritics 2'
+          );
+        `);
+        this.ftsEnabled = true;
+        this.rebuildFtsIfNeeded();
+      }
     } catch {
       this.ftsEnabled = false;
     }
@@ -976,9 +1015,11 @@ export class IndexStateStore {
     if (!this.ftsEnabled) return;
     const row = this.db.prepare('SELECT COUNT(*) as count FROM kb_chunks_fts').get() as { count?: number };
     if (Number(row.count ?? 0) > 0) return;
+    // content 列同时灌入 search_content 与正文：trigram 需要索引正文才能对正文内
+    // 中文子串召回，避免检索再次落入 LIKE 全表兜底
     this.db.prepare(`
       INSERT INTO kb_chunks_fts (id, relative_path, category, format, section_title, title_path, chunk_kind, content)
-      SELECT id, relative_path, category, format, COALESCE(section_title, ''), COALESCE(title_path, ''), COALESCE(chunk_kind, ''), COALESCE(search_content, content) FROM kb_chunks
+      SELECT id, relative_path, category, format, COALESCE(section_title, ''), COALESCE(title_path, ''), COALESCE(chunk_kind, ''), TRIM(COALESCE(search_content, '') || ' ' || COALESCE(content, '')) FROM kb_chunks
     `).run();
   }
 
@@ -1150,9 +1191,10 @@ export class IndexStateStore {
   }
 
   private toFtsQuery(terms: string[]): string {
-    const normalized = terms.map(term => term.replace(/["*^:(){}\]\\[]/gu, ' ').trim()).filter(term => term.length > 0);
+    // trigram tokenizer 只支持 >=3 字符的查询 token，短词由 LIKE 小列兜底补齐
+    const normalized = terms.map(term => term.replace(/["*^:(){}\]\\[]/gu, ' ').trim()).filter(term => term.length >= 3);
     const exact = normalized[0];
-    const weak = normalized.slice(1).filter(term => term.length >= 2).slice(0, 12);
+    const weak = normalized.slice(1).filter(term => term.length >= 3).slice(0, 12);
     return [exact ? `"${exact}"` : '', ...weak.map(term => `"${term}"`)].filter(Boolean).join(' OR ');
   }
 

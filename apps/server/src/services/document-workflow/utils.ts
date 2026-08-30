@@ -237,22 +237,30 @@ export function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw new Error('用户中止');
 }
 
+/**
+ * 商务投标函内容禁写词（投标/评标纪律、廉洁承诺类）：属商务文件/投标函内容，技术标中出现
+ * 既降专业性又属评标敏感表述（评分报告问题2），技术标只保留技术与管理承诺。
+ * 单一来源词表：清洗层（stripBidDisciplineSentences）、检测层（agentPlanner 禁写话术）、
+ * 提取层（tenderRequirements 纪律条款过滤）同口径复用，禁止各文件私造第二份词表。
+ */
+export const BID_DISCIPLINE_PHRASES = ['评标纪律', '投标纪律', '行贿', '打招呼', '递条子', '廉洁承诺', '廉洁自律', '串标', '围标', '弄虚作假', '干扰评标'] as const;
+
+/**
+ * 商务纪律类句子判定：句子含禁写词，或同时含「纪律/廉洁」与商务语境词（投标/评标/行贿/串标/围标/弄虚作假），
+ * 或含固定商务词组「廉洁从业」时判定为商务投标函内容。语境兜底覆盖无禁词词面变体（实测评分报告原文：
+ * 「我公司对参与本项目投标及施工组织设计编制的工作人员实行严格的纪律管理，确保投标活动合法合规」
+ * 无任何禁词词面）；「劳动纪律/施工纪律」等合法用法不含商务语境词，不误伤。
+ */
+export function isBidDisciplineSentence(text: string): boolean {
+  if (BID_DISCIPLINE_PHRASES.some(phrase => text.includes(phrase))) return true;
+  if (text.includes('廉洁从业')) return true;
+  return /纪律|廉洁/u.test(text) && /投标|评标|行贿|串标|围标|弄虚作假/u.test(text);
+}
+
 export function adaptiveConcurrency(input: { total: number; kind: 'chapter' | 'search' | 'deepRetrieval' | 'sectionRepair' | 'llmRepair'; targetWords?: number; highRisk?: boolean }) {
-  const total = Math.max(1, input.total);
-  if (input.kind === 'chapter') {
-    if (total <= 3) return total;
-    if (total <= 6) return Math.min(total, 4);
-    if (total <= 10) return Math.min(total, 6);
-    return Math.min(total, 8);
-  }
-  if (input.kind === 'search') return total <= 6 ? total : Math.min(total, 8);
-  if (input.kind === 'deepRetrieval') return Math.min(total, input.highRisk ? 6 : 4);
-  if (input.kind === 'sectionRepair') {
-    if (total <= 3) return total;
-    if (total <= 8) return 4;
-    return Math.min(total, 6);
-  }
-  return Math.min(total, 4);
+  // 并发不设档位上限：全部任务同批启动（用户既定决策——模型端点并发量高，不会因并发限流），
+  // 在飞调用总量由全局 LLM 信号量统一调度（默认无上限），失败降级仍由 llmFailureStreak 独立处理
+  return Math.max(1, input.total);
 }
 
 export async function runWithAdaptiveConcurrency<T, R>(items: T[], worker: (item: T, index: number) => Promise<R>, options: { kind: 'chapter' | 'search' | 'deepRetrieval' | 'sectionRepair' | 'llmRepair'; targetWords?: number; highRisk?: boolean; concurrency?: number }) {

@@ -7,9 +7,10 @@ import type { buildPromptBindingPlan } from './templateStore';
 import { evidencePromptImportance, selectEvidenceByBudget } from './evidence';
 import { normalizeOcrFactText, isValidProjectBasicFactValue } from './factsModel';
 import { buildCanonicalFacts } from './factGovernance';
-import { normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTenderSourcePageRefs, removeAdjacentDuplicateHeadings } from './markdownComposer';
+import { mergeTableLineBreaks, normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTenderSourcePageRefs, removeAdjacentDuplicateHeadings } from './markdownComposer';
+import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
 import { collectSectionContentGaps } from './qualityValidation';
-import { dedupeRepeatedSubsections, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
+import { BID_DISCIPLINE_PHRASES, dedupeRepeatedSubsections, isBidDisciplineSentence, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
 import { promptTextsForResolvedPrompts } from './rolePipeline';
 import { criticalSectionBlockerMinChars } from './chapterPostProcessing';
 
@@ -165,10 +166,10 @@ export async function collectProjectBasicEvidence(input: { manager: ReturnType<t
     }));
   }));
   evidence.push(...queryResults.flat());
-  // getFileDetail 为同步文件读取，Promise.all 不会带来并发收益，保持串行扫描
+  // getFileDetail 为同步文件读取，Promise.all 不会带来并发收益，保持串行扫描；整文件全量读取（无字符截断）
   for (const relativePath of input.scopedFilePaths) {
     throwIfAborted(input.signal);
-    const detail = input.project.getFileDetail?.(relativePath, { maxChunkContentChars: 12000 });
+    const detail = input.project.getFileDetail?.(relativePath);
     if (!detail?.chunks?.length) continue;
     for (const chunk of detail.chunks as Array<{ content: string; sectionTitle?: string }>) {
       const text = `${chunk.sectionTitle || ''}\n${chunk.content || ''}`;
@@ -193,7 +194,7 @@ export async function collectProjectBasicEvidence(input: { manager: ReturnType<t
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).slice(0, 24);
+  });
 }
 
 export function removeSystemInjectedBoilerplate(content: string) {
@@ -252,7 +253,17 @@ export function repairKnownProjectBasicPlaceholders(content: string, facts: Docu
 }
 
 export function cleanInlineFactValue(value: string) {
-  return normalizeOcrFactText(value).replace(/[。；;]$/u, '').trim();
+  return normalizeOcrFactText(value)
+    // 完整页码引用（“PDF 第N页”含“第 5-8 页”范围形态）与正文侧 normalizeTenderSourcePageRefs
+    // 同口径归一为“相关资料”，避免落入下方残片删除分支被误删成“ N 页”（空格+数字形态误删现场）
+    .replace(/PDF\s*第\s*\d+(?:\s*[-—至到~～]\s*\d+)?\s*页/giu, '相关资料')
+    // 残缺页码引用残片（“PDF 第”后无数字）：fact 抽取复制招标文件封面页码引用时截断，
+    // 直接删除残片保留其前文本；lookahead 允许空格/tab 后跟数字（“PDF 第 3 页”属完整引用，由上一条归一），
+    // 不跨行（\n 后数字的跨行残片仍删除）；数字与“日”间多余空格一并归一（“2026年8月19 日”）
+    .replace(/PDF\s*第(?![ \t]*[0-9０-９])/giu, '')
+    .replace(/(\d)\s+(日)/gu, '$1$2')
+    .replace(/[。；;]$/u, '')
+    .trim();
 }
 
 export function parseProjectBasicRowsFromMarkdown(content: string) {
@@ -355,6 +366,7 @@ export function genericTableHeaders(columns: number) {
 }
 
 export function normalizeBareMarkdownTables(markdown: string) {
+  markdown = mergeTableLineBreaks(markdown);
   const lines = markdown.replace(/\r?\n/gu, '\n').split('\n');
   const output: string[] = [];
   for (let index = 0; index < lines.length;) {
@@ -362,12 +374,22 @@ export function normalizeBareMarkdownTables(markdown: string) {
     const nextIndex = lines[index + 1]?.trim() === '' ? index + 2 : index + 1;
     const separator = lines[nextIndex] || '';
     if (looksLikeMarkdownTableLine(line) && isMarkdownTableSeparatorLine(separator)) {
+      const headerCells = splitMarkdownTableLine(line);
+      const headerColumns = headerCells.length;
       output.push(line);
       if (nextIndex !== index + 1) output.push(lines[index + 1] || '');
       output.push(separator);
       index = nextIndex + 1;
       while (index < lines.length && looksLikeMarkdownTableLine(lines[index] || '')) {
-        output.push(lines[index] || '');
+        // E2 超列合并：数据行列数超过表头时，多余列追加进末列表头对应单元格（分号连接），
+        // 避免渲染列错位或信息截断（危大工程表“同上 | 搭设高度8m及以上…”现场）
+        const cells = splitMarkdownTableLine(lines[index] || '');
+        if (cells.length > headerColumns) {
+          const overflow = cells.slice(headerColumns - 1).join('；');
+          output.push(formatMarkdownTableLine([...cells.slice(0, headerColumns - 1), overflow], headerColumns));
+        } else {
+          output.push(lines[index] || '');
+        }
         index += 1;
       }
       continue;
@@ -450,13 +472,17 @@ export function stripProvenanceTableColumns(markdown: string) {
   return output.join('\n').replace(/资料来源\/(?:说明|证明)/gu, '');
 }
 
+const PROJECT_BASIC_LABELS = [/^项目名称$/u, /^工程名称$/u, /^项目编号$/u, /^招标项目编号$/u, /^招标人$/u, /^项目业主$/u, /^建设单位$/u, /^发包人$/u, /^建设地点$/u, /^实施地点$/u, /^建设规模$/u, /^工程规模$/u, /^计划工期$/u, /^合同工期$/u, /^总工期$/u, /^质量标准$/u, /^质量目标$/u, /^合同估算价$/u, /^投资估算$/u, /^最高投标限价$/u, /^招标控制价$/u];
+
+function isProjectBasicLabel(label: string) {
+  return PROJECT_BASIC_LABELS.some(pattern => pattern.test(label));
+}
+
 export function removeDuplicateProjectBasicInfoBlocks(markdown: string) {
-  const projectBasicLabels = [/^项目名称$/u, /^工程名称$/u, /^项目编号$/u, /^招标项目编号$/u, /^招标人$/u, /^项目业主$/u, /^建设单位$/u, /^发包人$/u, /^建设地点$/u, /^实施地点$/u, /^建设规模$/u, /^工程规模$/u, /^计划工期$/u, /^合同工期$/u, /^总工期$/u, /^质量标准$/u, /^质量目标$/u, /^合同估算价$/u, /^投资估算$/u, /^最高投标限价$/u, /^招标控制价$/u];
   const lines = markdown.replace(/\r?\n/gu, '\n').split('\n');
   const output: string[] = [];
   let seenProjectBasicTable = false;
   const splitRow = (line: string) => splitMarkdownTableLine(line).map(cell => cell.replace(/\*\*/gu, '').trim());
-  const isProjectBasicLabel = (label: string) => projectBasicLabels.some(pattern => pattern.test(label));
   const isTwoColumnProjectBasicTable = (rows: string[]) => {
     const dataRows = rows.slice(2).map(splitRow).filter(cells => cells.length >= 2);
     const labels = dataRows.map(cells => cells[0] || '');
@@ -565,11 +591,58 @@ function removeRedundantFormalTables(content: string) {
     .replace(/\n{3,}/gu, '\n\n');
 }
 
+/** 旧项目基础信息表块删除（收窄版）：只删除「项目基础信息类」表格块——两列信息项表
+ * （项目名称/招标人等标签行占比达标）或三列序号表（序号|项目名称|内容参数）。
+ * 编制依据表（依据类别|主要文件及标准）、工程概况信息表等专业表格不在标签集内天然豁免，
+ * 消除旧正则跨空行贪婪连坐删除聚合块（H4 子小节）内其他表格的缺陷。 */
+function removeProjectBasicInfoTableBlocks(content: string) {
+  const lines = content.split('\n');
+  const output: string[] = [];
+  const isBasicTable = (rows: string[]) => {
+    const firstCells = splitMarkdownTableLine(rows[0] || '').map(cell => cell.replace(/\*\*/gu, '').trim());
+    if (firstCells[0] === '序号' && /项目名称/u.test(firstCells[1] || '')) return true;
+    const dataRows = rows.slice(2).map(splitMarkdownTableLine).filter(cells => cells.length >= 2);
+    if (dataRows.length === 0) return false;
+    const labels = dataRows.map(cells => (cells[0] || '').replace(/\*\*/gu, '').trim());
+    const matched = labels.filter(isProjectBasicLabel).length;
+    return matched >= 3 && matched >= Math.ceil(labels.length * 0.45);
+  };
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index] || '';
+    // 「**项目基本信息表**」加粗标题行（或 H3-H5 同名标题）及其紧随的表格块整体删除
+    if (/^\s*\*\*[^\n]*项目基本信息表[^\n]*\*\*\s*$/u.test(line) || /^\s*#{3,5}\s+[^\n]*项目基本信息表\s*$/u.test(line)) {
+      index += 1;
+      while (index < lines.length && (lines[index] || '').trim() === '') index += 1;
+      if (index < lines.length && looksLikeMarkdownTableLine(lines[index] || '')) {
+        index += 1;
+        while (index < lines.length && (looksLikeMarkdownTableLine(lines[index] || '') || isMarkdownTableSeparatorLine(lines[index] || ''))) index += 1;
+      }
+      continue;
+    }
+    // 裸表格块（表头+分隔行+连续数据行）：仅项目基础信息类删除，其他表格完整保留
+    if (looksLikeMarkdownTableLine(line) && index + 1 < lines.length && isMarkdownTableSeparatorLine(lines[index + 1] || '')) {
+      const rows: string[] = [line, lines[index + 1] || ''];
+      let cursor = index + 2;
+      while (cursor < lines.length && looksLikeMarkdownTableLine(lines[cursor] || '')) {
+        rows.push(lines[cursor] || '');
+        cursor += 1;
+      }
+      if (isBasicTable(rows)) {
+        index = cursor;
+        continue;
+      }
+    }
+    output.push(line);
+    index += 1;
+  }
+  return output.join('\n');
+}
+
 export function normalizeProjectBasicInfoTable(content: string, facts: DocumentFact[]) {
   content = removeRedundantFormalTables(content);
   if (!/项目基本信息|项目概况|工程概况|招标范围/u.test(content)) return removeDuplicateProjectBasicInfoBlocks(normalizeBareMarkdownTables(stripProvenanceTableColumns(content)));
   if (!/\|\s*信息项\s*\|\s*内容\s*\|/u.test(content) && projectBasicFactCandidates(facts).length > 0) {
-    const firstProjectHeading = /^(###\s+(?:\d+\.\d+\s+)?[^\n]*(?:项目概况|工程概况|项目基本信息|招标范围)[^\n]*\n)/mu.exec(content);
+    const firstProjectHeading = /^(#{3,4}\s+(?:\d+\.\d+\s+)?[^\n]*(?:项目概况|工程概况|项目基本信息|招标范围)[^\n]*\n)/mu.exec(content);
     if (firstProjectHeading?.index || firstProjectHeading?.index === 0) {
       const insertAt = firstProjectHeading.index + firstProjectHeading[0].length;
       const table = `${projectBasicInfoTableMarkdown(facts, '', content)}\n\n`;
@@ -580,9 +653,10 @@ export function normalizeProjectBasicInfoTable(content: string, facts: DocumentF
   if (!projectSection?.index && projectSection?.index !== 0) return content;
   const sectionStart = projectSection.index;
   const sectionBodyStart = sectionStart + projectSection[0].length;
-  // 小节边界必须停在下一个 H2/H3（取更早者）：只找 H3 会把下一章的“## 第X章”标题行吞进 body，
-  // 标题行落入小节正文后随旧表删除正则被连坐删除（徽光阁缺陷：第二章标题行丢失，2.1-2.46 共 46 小节错位挂在第一章下）
-  const nextHeading = /^#{2,3}\s+/gmu;
+  // 小节边界必须停在下一个 H2/H3/H4（取更早者）：H4 边界缺失时聚合块（### 1.1 编制说明与工程概况
+  // 下挂 #### 1.1.1/1.1.2/1.1.3 小节）的正文被整块吞入 body，旧表删除正则连坐删除
+  // 编制依据表与工程概况信息表（真实生成缺陷：两张表数据行全部丢失）
+  const nextHeading = /^#{2,4}\s+/gmu;
   nextHeading.lastIndex = sectionBodyStart;
   const nextMatch = nextHeading.exec(content);
   const sectionEnd = nextMatch?.index ?? content.length;
@@ -590,13 +664,9 @@ export function normalizeProjectBasicInfoTable(content: string, facts: DocumentF
   const table = projectBasicInfoTableMarkdown(facts, body, content);
   const hasUsefulFact = projectBasicInfoRows(facts, body, content).some(row => !/资料未明确|系统暂未从知识库确认|项目资料暂未明确/u.test(row[1]));
   if (!hasUsefulFact) return content;
-  // 旧基本信息表删除必须按“连续表格行”界定终点：历史缺陷（徽光阁第一章 21632 字被吞至 866 字）根因是
-  // 旧正则依赖 `(?=\n\n(?:[^|\n]|$)|$)` 假设表格后必有空行+非表格行，而 LLM 成稿表格后无空行直接连正文
-  // （正文标题前也无空行），lookahead 全程不满足使 `[\s\S]*?` 贪吞到小节末尾，整节内容与后续标题行被删除
-  const cleanedBody = body
-    .replace(/\*\*项目基本信息表\*\*[^\n]*(?:\n\s*\|[^\n]*)*/u, '')
-    .replace(/\|\s*(?:序号\s*\|\s*项目名称\s*\|\s*内容参数|信息项\s*\|\s*内容\s*(?:\|\s*资料来源\/(?:说明|证明))?)\s*\|[^\n]*(?:\n\s*\|[^\n]*)*/u, '')
-    .replace(/^\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|\s*\n(?:^\|.*\|\s*\n?)*/gmu, '')
+  // 旧基本信息表删除只作用于项目基础信息类表格块（标签集判定），
+  // 编制依据表、工程概况信息表等专业表格完整保留（详见 removeProjectBasicInfoTableBlocks）
+  const cleanedBody = removeProjectBasicInfoTableBlocks(body)
     // eslint-disable-next-line no-control-regex -- [^\u000A] 与原始 [^\n] 语义等价（编辑工具会破坏字面换行转义，改用 unicode 转义）
     .replace(/该小节围绕“[^”]+”进行补充说明[^\u000A]*(?:\u000A\u000A该小节围绕“[^”]+”进行补充说明[^\u000A]*)*/gu, '')
     .replace(/\n{3,}/gu, '\n\n')
@@ -649,6 +719,24 @@ export function stripForbiddenPlaceholderSentences(content: string) {
       return line
         .split(/(?<=[。；;])/u)
         .filter(segment => !FORBIDDEN_PLACEHOLDER_PHRASES.some(phrase => segment.includes(phrase)))
+        .join('');
+    })
+    .join('\n');
+}
+
+/** 商务评标纪律承诺句确定性删除（与 FORBIDDEN_PLACEHOLDER_PHRASES 同构治理）：
+ * 正式技术标中此类承诺绝无合法用途，整句删除后由商务文件另行承载。
+ * 判定复用 utils 单一来源词表 + 纪律语境句级兜底（覆盖「实行严格的纪律管理，确保投标活动
+ * 合法合规」类无禁词词面变体——评分报告问题2实测原文）。 */
+export function stripBidDisciplineSentences(content: string) {
+  if (!BID_DISCIPLINE_PHRASES.some(phrase => content.includes(phrase)) && !/纪律|廉洁/u.test(content)) return content;
+  return content
+    .split('\n')
+    .map(line => {
+      if (/^\s*#{1,6}\s/u.test(line) || /^\s*\|/u.test(line)) return line;
+      return line
+        .split(/(?<=[。；;])/u)
+        .filter(segment => !isBidDisciplineSentence(segment))
         .join('');
     })
     .join('\n');
@@ -822,17 +910,61 @@ export function normalizeWorkPackageLabels(markdown: string): string {
   let normalized = markdown;
   for (let pass = 0; pass < 3; pass += 1) {
     const next = normalized
-      // 重复标签形态先于粗体形态处理，避免“施工概况：**施工概况**：”被粗体替换残留前缀
-      .replace(/^\s*施工概况[:：]\s*\*\*施工概况\*\*[:：]/gmu, '施工概况：')
-      .replace(/^\s*施工流程[:：]\s*\*\*施工流程\*\*[:：]/gmu, '施工流程：')
-      .replace(/^\s*施工方法[:：]\s*\*\*施工方法\*\*[:：]/gmu, '施工方法：')
-      .replace(/^\s*\*\*施工概况\*\*[:：]/gmu, '施工概况：')
-      .replace(/^\s*\*\*施工流程\*\*[:：]/gmu, '施工流程：')
-      .replace(/^\s*\*\*施工方法\*\*[:：]/gmu, '施工方法：');
+      // 重复标签形态先于粗体形态处理，避免“施工概况：**施工概况**：”被粗体替换残留前缀。
+      // \2 反向引用保证同名标签才合并，避免“施工方法：**施工流程：**”交叉形态被误删。
+      // 冒号位置兼容四种形态：**标签**：、**标签：**、标签：**标签**：、标签：**标签：**
+      // （十一度实测：Writer 输出“施工概况：**施工概况：**”冒号在 ** 内，旧正则漏归一导致 7 处重复标签、23 处粗体伪标签进入成品）
+      .replace(/((施工概况|施工流程|施工方法)[:：])\s*\*\*\2(?:[:：])?\*\*[:：]?/gu, '$1')
+      // 行中伪标签（正文句尾接“**施工流程：**”）：归一到标签词后紧跟冒号；无冒号的纯加粗不动。
+      // 冒号在 ** 内（**标签：**）与在 ** 外（**标签**：）两种形态分别覆盖
+      .replace(/(?<![\w|])\*\*(施工概况|施工流程|施工方法)(?:[:：])\*\*[:：]?/gu, '$1：')
+      .replace(/(?<![\w|])\*\*(施工概况|施工流程|施工方法)\*\*[:：]/gu, '$1：');
     if (next === normalized) break;
     normalized = next;
   }
   return normalized;
+}
+
+/**
+ * 表头粘连行确定性拆分（改9，十一度实测缺陷）：LLM 常把表格表头写在正文段落同一行
+ * （“正文…。| 表头1 | 表头2 |”），成品渲染时表格无表头、分隔行被当首行显示为空单元格。
+ * 判定严格：行不以 | 开头、行尾以 | 结尾且含 ≥2 个非空短单元格、下一行是表格行才拆分；
+ * 只做换行拆分，不改写任何文字（不属于内容兜底）。
+ */
+export function splitGluedTableHeaderLines(markdown: string) {
+  const lines = markdown.split(/\r?\n/u);
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    const next = (lines[index + 1] || '').trim();
+    if (!trimmed || trimmed.startsWith('|') || trimmed.startsWith('#') || !next.startsWith('|')) {
+      output.push(line);
+      continue;
+    }
+    const tailMatch = /(\|\s*[^|\n]{1,40}\s*){2,}\|\s*$/u.exec(trimmed);
+    if (!tailMatch) {
+      output.push(line);
+      continue;
+    }
+    const splitAt = trimmed.length - tailMatch[0].length;
+    const body = trimmed.slice(0, splitAt).trim();
+    if (body) output.push(body);
+    output.push(tailMatch[0].trim());
+  }
+  return output.join('\n').replace(/\n{3,}/gu, '\n\n');
+}
+
+/** 中文词中断空格清洗（改9）：LLM 行宽断字把词拆断（“形成资 料”“按清 单”），
+ * 同行汉字间的空白一律移除。标题行（#）、目录编号行（1.1/第X章）的编号与标题间
+ * 合法空格保留（“第一章 工程重点难点”不得被误合并）。 */
+export function cleanChineseWordBreakSpaces(markdown: string) {
+  const lines = markdown.split(/\r?\n/u);
+  return lines.map(line => {
+    const trimmed = line.trim();
+    if (!trimmed || /^#{1,6}\s+/u.test(trimmed) || /^\d+(?:\.\d+)*\s+/u.test(trimmed) || /^第[一二三四五六七八九十百千\d]+[章节]\s+/u.test(trimmed)) return line;
+    return line.replace(/([\u4e00-\u9fa5])[ \t\u00a0\u3000]+(?=[\u4e00-\u9fa5])/gu, '$1');
+  }).join('\n');
 }
 
 /**
@@ -849,14 +981,64 @@ export function rewriteWorkPackageTerminology(content: string): string {
   return next;
 }
 
+/**
+ * 剥离写手把招标条款碎片误写成的小节标题行（如「### 3项规定」「### 56m15：…」）：
+ * 写手从评标办法条款证据中照抄碎片标题，与显式 OUTLINE 提取共用同一判别器（isTenderClauseFragmentTitle）；
+ * 标题行整行删除、行下正文保留并入上一小节，由 Reviewer/Repairer 承接段落归属。
+ */
+export function stripTenderClauseFragmentHeadings(content: string) {
+  const lines = content.split(/\r?\n/u);
+  const kept = lines.map(line => {
+    const heading = /^#{3,4}\s+(.+)$/u.exec(line.trim());
+    if (heading && isTenderClauseFragmentTitle(displayChapterTitle((heading[1] || '').trim()))) return '';
+    return line;
+  });
+  if (kept.every((line, index) => line === lines[index])) return content;
+  return kept.join('\n').replace(/\n{3,}/gu, '\n\n');
+}
+
+/**
+ * 剥离 LLM 数据一致性自查过程泄漏：以「上表/本表」开头且含「一致/修正为」的整段属
+ * 写手把表格口径推算过程写进正文（如「与 180 人不一致，故将合计行…修正为 130 人」），
+ * 自查推算不得进入成品正文，段落整体删除（历史缺陷：自查注释与表格数值矛盾直接进正文）。
+ */
+export function stripDataConsistencyLeakSentences(content: string) {
+  const paragraphs = content.split(/\n\s*\n/u);
+  const kept = paragraphs.filter(paragraph => {
+    const singleLine = paragraph.replace(/\n/gu, '');
+    return !(/^(?:上表|本表)/u.test(singleLine.trim()) && /(?:一致|修正为)/u.test(singleLine));
+  });
+  if (kept.length === paragraphs.length) return content;
+  return kept.join('\n\n');
+}
+
 export function finalizeChapterContentQuality(content: string, chapter: Pick<DocumentTemplateChapter, 'title' | 'sections'>) {
-  return ensureWorkPackageOverviewLabels(normalizeWorkPackageLabels(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(removeAdjacentDuplicateHeadings(normalizeMarkdownTableDividers(normalizeInlineListBreaks(normalizeTenderSourcePageRefs(splitLongParagraphs(stripForbiddenPlaceholderSentences(replaceForbiddenFormalPhrases(repairTableOnlySections(repairPlannedSectionBodies(rewriteWorkPackageTerminology(content), chapter))))))))))))).replace(/\n{3,}/gu, '\n\n').trim();
+  let cleaned = rewriteWorkPackageTerminology(content);
+  cleaned = repairPlannedSectionBodies(cleaned, chapter);
+  cleaned = repairTableOnlySections(cleaned);
+  cleaned = replaceForbiddenFormalPhrases(cleaned);
+  cleaned = stripForbiddenPlaceholderSentences(cleaned);
+  cleaned = stripBidDisciplineSentences(cleaned);
+  cleaned = splitLongParagraphs(cleaned);
+  cleaned = normalizeTenderSourcePageRefs(cleaned);
+  cleaned = normalizeInlineListBreaks(cleaned);
+  cleaned = splitGluedTableHeaderLines(cleaned);
+  cleaned = normalizeMarkdownTableDividers(cleaned);
+  cleaned = removeAdjacentDuplicateHeadings(cleaned);
+  cleaned = dedupeRepeatedSubsections(cleaned);
+  cleaned = removeEmptySubSectionHeadings(cleaned);
+  cleaned = cleanChineseWordBreakSpaces(cleaned);
+  cleaned = normalizeWorkPackageLabels(cleaned);
+  cleaned = ensureWorkPackageOverviewLabels(cleaned);
+  cleaned = cleaned.replace(/\n{3,}/gu, '\n\n');
+  cleaned = stripTenderClauseFragmentHeadings(cleaned);
+  return stripDataConsistencyLeakSentences(cleaned).trim();
 }
 
 /** 最终组装路径的重复/空壳兜底清理：rebuildFinalMarkdown 不再逐章跑 finalizeChapterContentQuality，
  * 补跑同 H3 重复 H4 去重与空壳小节删除，避免 Final Gate 补写与章节拼接残留的重复/空壳进入成品文档。 */
 export function finalizeFinalMarkdownStructure(markdown: string): string {
-  return removeEmptySubSectionHeadings(dedupeRepeatedSubsections(normalizeWorkPackageLabels(rewriteWorkPackageTerminology(markdown))));
+  return stripDataConsistencyLeakSentences(stripTenderClauseFragmentHeadings(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(normalizeWorkPackageLabels(cleanChineseWordBreakSpaces(splitGluedTableHeaderLines(rewriteWorkPackageTerminology(markdown))))))));
 }
 
 export function promptMatchesChapter(prompt: ResolvedPromptContent, _chapter: DocumentTemplateChapter) {
@@ -977,10 +1159,10 @@ export function semanticEvidenceText(item: Pick<DocumentEvidence, 'sectionTitle'
   return `${item.sectionTitle || ''}${item.content}`.slice(0, 600);
 }
 
-export function optimizeChapterEvidence(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[], options: { maxChars: number; maxItems?: number; preservePinned?: boolean; semantic?: { similarity: (leftText: string, rightText: string) => number; queryText: string } }, diagnostics?: DocumentGenerationDiagnostics) {
+export function optimizeChapterEvidence(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[], options: { maxChars?: number; maxItems?: number; preservePinned?: boolean; semantic?: { similarity: (leftText: string, rightText: string) => number; queryText: string } }, diagnostics?: DocumentGenerationDiagnostics) {
   const scored = evidence.map(item => {
-    // 池截断排序与注入排序统一为 evidencePromptImportance 口径（量化值 +8 / 项目基础事实 +10 / requiredFacts +6 / 标准编号 +3），
-    // 避免量化关键事实与模板要求事实在 maxItems 截断时被高分泛化块挤出证据池
+    // 注入排序统一为 evidencePromptImportance 口径（量化值 +8 / 项目基础事实 +10 / requiredFacts +6 / 标准编号 +3），
+    // 证据全量保留（无预算截断），重要性/语义分数只决定注入顺序，不决定去留
     const baseScore = evidencePromptImportance(item, chapter.requiredFacts) * processingTypeWeightForChapter(chapter, item.processingType) + chapterTextScore(chapter, item);
     // 语义相关性（本地 bge-small 余弦）作排序主键（×10 压过词面/重要性分数），词面与重要性分数保留作第二键；
     // 闭包缓存未命中的条目（候选池外）语义分为 0，退回 baseScore 口径
@@ -1025,7 +1207,7 @@ export async function retrieveSectionEvidence(input: { manager: ReturnType<typeo
   const result = await input.manager.search(input.projectRoot, query, {
     scope: 'project',
     filters: { filePaths: input.scopedFilePaths },
-    limit: 5,
+    limit: 20,
     weights: searchWeightsForChapter(query),
     generationMode: false,
     // 小节级检索打开 LocalReranker 交叉编码（历史缺陷：disableReranker 跳过交叉编码后，召回主键退化为关键词/向量混合分，
@@ -1042,7 +1224,7 @@ export async function retrieveSectionEvidence(input: { manager: ReturnType<typeo
       processingType: input.fileProcessingByPath.get(item.filePath),
       sectionTitle: item.sectionTitle,
       source: 'section-evidence',
-    })), { maxItems: 5, maxChars: 9000, preservePinned: true });
+    })), { preservePinned: true });
 }
 
 export function summarizeIssueList(prefix: string, filePaths: string[], limit = 12) {

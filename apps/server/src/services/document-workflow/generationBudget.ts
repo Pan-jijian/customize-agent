@@ -52,19 +52,17 @@ export function buildGenerationBudget(input: {
   const strategy = input.strategy;
   const triggers: string[] = [];
   // 并发预算：章节生成并发不设档位上限——全部章节同批启动（用户明确端点不会因章节并发限流），
-  // 在飞调用总量由全局 LLM 信号量（默认 64，DOCUMENT_LLM_MAX_CONCURRENCY 可覆盖）统一约束；DOCUMENT_CHAPTER_CONCURRENCY 可显式调低
+  // 在飞调用总量不受并发上限约束（全局 LLM 信号量默认完全解除，DOCUMENT_LLM_MAX_CONCURRENCY 可显式覆盖）；DOCUMENT_CHAPTER_CONCURRENCY 可显式调低
   const sparse = input.materialFileCount < 4 && input.evidenceCount < 6;
   const autoChapterConcurrency = chapterCount;
   const configured = Number.isFinite(input.configuredChapterConcurrency) && input.configuredChapterConcurrency > 0 ? Math.floor(input.configuredChapterConcurrency) : undefined;
   const chapterConcurrency = Math.max(1, Math.min(chapterCount, configured ?? autoChapterConcurrency));
-  // 全局 LLM 并发上限：所有文档规模统一（默认 64），供生成开始前设置全局信号量
+  // 全局 LLM 并发上限：所有文档规模统一（默认无上限），供生成开始前设置全局信号量
   const llmConcurrency = concurrencyForDocumentScale(input.targetWords);
-  // 审查流水线并发自适应：fast 串行；其余按全局 LLM 并发上限缩放（≥32→5、≥16→3、其余 2），
-  // 章节全并发后不再从“上限 − 生成并发”余量扣减（余量会退化到 1），生成+审查共享全局信号量自然调度
+  // 审查流水线并发与章节生成对齐：全部章节生成完立即进入审查，与后续章节生成重叠，不设路数档位
   const reviewConcurrency = (() => {
     if (strategy.mode === 'fast') return 1;
-    const scaled = llmConcurrency >= 32 ? 5 : llmConcurrency >= 16 ? 3 : 2;
-    return Math.max(1, Math.min(scaled, chapterCount));
+    return Math.max(1, chapterCount);
   })();
   const { floorChars, ceilingChars } = evidenceBudgetRange(avgChapterTargetSafe);
   // 修复轮次预算动态计算（收敛驱动兜底上限）：每章上限 = base 2 + 篇幅加成 + 资料稀疏加成。
@@ -89,7 +87,7 @@ export function buildGenerationBudget(input: {
   if (strategy.mode === 'fast') triggers.push('fast：小文档（≤6000 字且 ≤4 章）全局审查降级为 35% 抽检');
   if (strategy.mode === 'longform') triggers.push('longform：长文档（≥3 万字或 ≥8 章）');
   if (strategy.mode === 'balanced') triggers.push('balanced：常规篇幅文档，标准审查深度');
-  triggers.push(`全章节并行生成（${chapterConcurrency}/${chapterCount} 章同批），审查流水线 ${reviewConcurrency} 路，全局 LLM 并发档位 ${llmConcurrency}，每章证据预算 ${Math.round(floorChars / 1000)}k-${Math.round(ceilingChars / 1000)}k 字符，修复轮次预算每章 ${repairRoundBudget} 轮（文档级总池 ${repairPoolBudget} 轮，收敛判定优先）`);
+  triggers.push(`全章节并行生成（${chapterConcurrency}/${chapterCount} 章同批），审查流水线 ${reviewConcurrency} 路，全局 LLM 并发不设上限，每章证据预算 ${Math.round(floorChars / 1000)}k-${Math.round(ceilingChars / 1000)}k 字符，修复轮次预算每章 ${repairRoundBudget} 轮（文档级总池 ${repairPoolBudget} 轮，收敛判定优先）`);
   return { strategy, chapterConcurrency, reviewConcurrency, llmConcurrency, evidenceFloorChars: floorChars, evidenceCeilingChars: ceilingChars, repairRoundBudget, repairPoolBudget, triggers };
 }
 

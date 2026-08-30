@@ -148,6 +148,7 @@ export function resolveDocumentDomainProfile(template?: Pick<DocumentTemplate, '
 }
 
 export function factFieldForLabel(profile: DocumentDomainProfile, label: string): FactFieldProfile | undefined {
+  if (!label) return undefined;
   return profile.factFields.find(field => field.name === label || field.aliases.some(alias => label.includes(alias) || alias.includes(label)));
 }
 

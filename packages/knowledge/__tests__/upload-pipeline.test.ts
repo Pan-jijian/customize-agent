@@ -584,6 +584,25 @@ describe('IndexStateStore', () => {
     expect(results[0].content).toContain('Chunk zero');
   });
 
+  it('searches Chinese substrings via trigram FTS (>=3 chars)', () => {
+    store.replaceChunks('docs/cn-test.txt', [
+      { index: 0, text: '本工程位于合肥市，主体结构采用现浇混凝土框架体系。', startChar: 0, endChar: 28, tokenCount: 20, metadata: { chunkType: 'child' } },
+    ], { category: 'document', format: 'plaintext', collectionName: 'test-collection' });
+
+    const results = store.searchChunks('混凝土', 5);
+    expect(results.some(r => r.content.includes('混凝土'))).toBe(true);
+  });
+
+  it('searches two-char Chinese words via LIKE fallback', () => {
+    store.replaceChunks('docs/cn-short-test.txt', [
+      { index: 0, text: '分部分项工程完成后组织验收，验收合格后进入下一道工序。', startChar: 0, endChar: 28, tokenCount: 20, metadata: { chunkType: 'child' } },
+    ], { category: 'document', format: 'plaintext', collectionName: 'test-collection' });
+
+    // “验收”为 2 字词，trigram FTS 无法索引，应通过大列 LIKE 兜底召回
+    const results = store.searchChunks('验收', 5);
+    expect(results.some(r => r.content.includes('验收'))).toBe(true);
+  });
+
   it('finds exact duplicates by content hash', () => {
     store.upsertFileHash({
       contentHash: 'abc123',
