@@ -4,8 +4,8 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { basicInfoScheduleFieldIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, sixHundredPercentCoverageIssues } from './documentIntegrityChecks';
-import type { DocumentFactsModel } from './types';
+import { ambiguousEitherOrIssues, basicInfoScheduleFieldIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, excavationDepthLockIssues, fabricatedAwardIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, sixHundredPercentCoverageIssues } from './documentIntegrityChecks';
+import type { DocumentFactsModel, TenderRequirementModel } from './types';
 
 vi.mock('./semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
 
@@ -309,5 +309,92 @@ describe('bodySentencesForSemantic（h11b-1 均匀采样）', () => {
     const sentences = Array.from({ length: 30 }, (_, index) => `第${index + 1}条施工措施明确了现场管理要求并落实到岗位责任。`);
     const sampled = bodySentencesForSemantic(sentences.join('\n'));
     expect(sampled.length).toBe(30);
+  });
+});
+
+describe('ambiguousEitherOrIssues（h14 两可表述阻断）', () => {
+  it('斜杠并列两可「采用支护桩/放坡」→ 报阻断', () => {
+    const issues = ambiguousEitherOrIssues('基坑支护采用支护桩/放坡开挖方式，坑内降水配合明排。');
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('支护桩/放坡');
+  });
+
+  it('括号悬置「桩基（或独立基础/筏板基础按图纸实施）」→ 报阻断', () => {
+    const issues = ambiguousEitherOrIssues('本工程基础形式为桩基（或独立基础/筏板基础按图纸实施）。');
+    expect(issues.length).toBe(1);
+    expect(issues[0].category).toBe('fact_consistency');
+  });
+
+  it('职业枚举「主体结构木工/钢筋工」→ 不误报', () => {
+    expect(ambiguousEitherOrIssues('主体结构施工阶段投入木工/钢筋工等专业班组，各班组持证上岗。')).toEqual([]);
+  });
+
+  it('数字单位枚举「50mm/70mm」→ 不误报', () => {
+    expect(ambiguousEitherOrIssues('基层厚度采用50mm/70mm两种规格，按设计图纸选用。')).toEqual([]);
+  });
+
+  it('确定的支护决策表述 → 不报', () => {
+    expect(ambiguousEitherOrIssues('基坑支护采用放坡+喷锚，坡面挂网喷护。')).toEqual([]);
+  });
+});
+
+describe('excavationDepthLockIssues（h14 基坑深度数值锁定）', () => {
+  it('有基坑支护内容但无深度数值 → 报阻断', () => {
+    const markdown = '基坑支护采用放坡开挖，坑内降水配合明排。\n土方开挖分层进行，支护随挖随撑。\n基坑周边设置防护栏杆与排水沟。';
+    const issues = excavationDepthLockIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('基坑深度数值未锁定');
+  });
+
+  it('有「开挖深度 5.85m」表述 → 不报', () => {
+    const markdown = '基坑开挖深度5.85m，支护采用放坡喷锚。\n土方开挖分层进行，支护随挖随撑。\n基坑周边设置防护栏杆。';
+    expect(excavationDepthLockIssues(markdown)).toEqual([]);
+  });
+
+  it('无基坑工程内容 → 不检测', () => {
+    expect(excavationDepthLockIssues('本工程为装饰装修项目，主要内容为室内装修与外立面翻新。')).toEqual([]);
+  });
+});
+
+describe('fabricatedAwardIssues（h14 奖项白名单）', () => {
+  const factsModel = (qualityValues: string[]) => ({
+    project: [], schedule: [], quality: qualityValues.map(value => ({ key: '质量标准', value, sourceFile: '/proj/tender.txt', roleId: 'specification', confidence: 0.9 })),
+    safety: [], resources: [], tables: [], bills: [], drawings: [], rules: [], specifications: [], schemaFacts: {}, factIndex: {}, missing: [], conflicts: [], preciseFacts: [],
+  }) as unknown as DocumentFactsModel;
+
+  it('正文奖项在白名单外（资料无该奖项）→ 报杜撰', () => {
+    const issues = fabricatedAwardIssues('质量目标：确保获得鲁班奖。', factsModel(['质量标准：合格，确保黄山杯']));
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('鲁班奖');
+  });
+
+  it('正文奖项与白名单一致 → 不报', () => {
+    expect(fabricatedAwardIssues('质量目标：确保黄山杯。', factsModel(['质量标准：合格，确保黄山杯']))).toEqual([]);
+  });
+
+  it('通用目标表述（省优/优质工程）→ 不报杜撰', () => {
+    expect(fabricatedAwardIssues('质量目标：创省优工程。', factsModel(['质量标准：合格，确保黄山杯']))).toEqual([]);
+  });
+
+  it('白名单为空（提取失败）→ 不报（无基准不阻断）', () => {
+    expect(fabricatedAwardIssues('质量目标：确保鲁班奖。', factsModel([]))).toEqual([]);
+  });
+
+  it('评分项要求提取的奖项进入白名单', () => {
+    const requirements = { extracted: true, awardObjectives: [{ text: '创优目标：确保黄山杯', coreTerms: [] }], awardClauses: [], specialQualityStandards: [] } as unknown as TenderRequirementModel;
+    expect(fabricatedAwardIssues('质量目标：确保黄山杯。', factsModel([]), requirements)).toEqual([]);
+  });
+});
+
+describe('resourceConsistencyIssues（h14 反向劳动力口径）', () => {
+  it('「投入劳动力110人」与「劳动力高峰180人」跨口径矛盾 → 报', () => {
+    const markdown = '主体阶段投入劳动力约110人。\n劳动力高峰150～180人。';
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => /劳动力数据矛盾/u.test(issue.message))).toBe(true);
+  });
+
+  it('单一口径无矛盾 → 不报', () => {
+    const issues = resourceConsistencyIssues('主体阶段投入劳动力约110人，装饰阶段投入劳动力约105人。');
+    expect(issues).toEqual([]);
   });
 });

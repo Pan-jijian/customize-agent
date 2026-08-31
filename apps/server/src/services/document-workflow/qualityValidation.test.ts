@@ -3,7 +3,7 @@
  * 均为 L2 确定性结构检测，无需语义通道。
  */
 import { describe, expect, it } from 'vitest';
-import { formalContentIntegrityIssues, formalPlaceholderIssues } from './qualityValidation';
+import { evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalPlaceholderIssues } from './qualityValidation';
 
 describe('formalContentIntegrityIssues 截断词表扩展（h13c）', () => {
   it('以「复查合格后」结尾且无句号 → 报截断句', () => {
@@ -50,5 +50,22 @@ describe('formalPlaceholderIssues 占位式表达（h13c 词表扩展）', () =>
   it('正常事实表述 → 不报', () => {
     const issues = formalPlaceholderIssues('锚杆注浆压力按0.4MPa～0.6MPa控制。');
     expect(issues.some(issue => /占位式表达/u.test(issue.message))).toBe(false);
+  });
+});
+
+describe('evaluationCriteriaCoreKeywords（4.12.12 核心词剥离残余条款编号）', () => {
+  it('「1发包人…」编号残留被剥离，核心词不含「1」', () => {
+    const keywords = evaluationCriteriaCoreKeywords('1发包人委派的发包人代表或监理工程师');
+    expect(keywords.some(keyword => keyword.includes('发包人'))).toBe(true);
+    expect(keywords.every(keyword => !/^\d/u.test(keyword))).toBe(true);
+  });
+
+  it('多级编号「1.1 拟采用的新技术」剥离编号（编号在前时前缀保留）', () => {
+    expect(evaluationCriteriaCoreKeywords('1.1拟采用的新技术、新工艺')).toEqual(['拟采用的新技术', '新工艺']);
+  });
+
+  it('无编号标题核心词不受影响', () => {
+    const keywords = evaluationCriteriaCoreKeywords('确保黄山杯奖项创建目标实现');
+    expect(keywords.some(keyword => keyword.includes('黄山杯'))).toBe(true);
   });
 });

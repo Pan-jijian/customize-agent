@@ -262,12 +262,24 @@ function repairTableBlockLines(rawLines: string[]): { lines: string[]; removed: 
       removed += 1;
     }
   }
-  // 4. 零星空单元格 → 删除所在数据行
+  // 4. 零星空单元格/占位符单元格 → 删除所在数据行（4.12.12 扩围：—/若干/约/待定/N/A 占位与
+  // 空单元格同口径确定性删行，消除 LLM 修复不收敛的表格占位符残留；合计/小计/总计/累计行豁免）
+  const PLACEHOLDER_CELL_RE = /^(?:—+|-+|\/|N\/A|n\/a|待定|待补充|待确认|待查|待补|若干|暂无|无数据)$/u;
   for (let rowIndex = rows.length - 1; rowIndex > dividerIndex; rowIndex -= 1) {
-    if (!rows[rowIndex].some(cell => cell === '')) continue;
+    if (/^(?:合计|小计|总计|累计)/u.test(rows[rowIndex][0] || '')) continue;
+    if (!rows[rowIndex].some(cell => cell === '' || PLACEHOLDER_CELL_RE.test(cell))) continue;
     rows.splice(rowIndex, 1);
     changed = true;
     removed += 1;
+  }
+  // 4.5 “约82kW”模糊前缀归一（约N 占位表述在交付口径属占位符，数值确定化后不再阻断）
+  for (let rowIndex = dividerIndex + 1; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex];
+    for (let col = 0; col < row.length; col += 1) {
+      if (!/^约\d/u.test(row[col] || '')) continue;
+      row[col] = (row[col] || '').replace(/^约/u, '');
+      changed = true;
+    }
   }
   // 5. 删到只剩表头/分隔线时整个表格块删除
   if (rows.length <= dividerIndex + 1) {
@@ -1850,18 +1862,21 @@ export async function finalizeGeneration(p: {
     await recomputeFinalValidationBundle();
   }
   const reviewChecklist = buildDocumentReviewChecklist({ exportGate: finalExportGate, qualityReport, repairStrategies });
-  const telemetry = buildDocumentTelemetryReport({ diagnostics: generationDiagnostics });
   const finalQualitySummary = qualitySeveritySummary(validationIssues);
+  // 4.12.12：质量口径对齐——最终质量汇总须先累加进 diagnostics 再构建 telemetry（此前 telemetry
+  // 构建在累加之前，导致 qualityIssues 缺失修复循环后的最终残留汇总）；阻断数以导出门禁实际残留为准，
+  // 避免「telemetry 阻断 0 但导出门禁 N 阻断」的修复轮口径脱节
+  generationDiagnostics.quality.blockingCount += finalQualitySummary.blocking;
+  generationDiagnostics.quality.importantCount += finalQualitySummary.important;
+  generationDiagnostics.quality.minorCount += finalQualitySummary.minor;
+  const telemetry = buildDocumentTelemetryReport({ diagnostics: generationDiagnostics });
+  const blockingCount = finalExportGate.blockingIssues.length;
+  telemetry.qualityIssues.blockingCount = blockingCount;
   const professionalScore = await buildProfessionalScoreReport(finalChapterDrafts, finalMarkdown, { templating: qualityReport.templating });
   // A2 语义级模板化复核（仅 A1 风险信号命中时触发一次 LLM，失败静默降级）
   const templatingReview = qualityReport.templating
     ? await withProgressHeartbeat(() => reviewTemplatingSemantics({ templating: qualityReport.templating!, markdown: finalMarkdown, diagnostics: generationDiagnostics, signal }))
     : { issues: [], reviewed: false };
-  generationDiagnostics.quality.blockingCount += finalQualitySummary.blocking;
-  generationDiagnostics.quality.importantCount += finalQualitySummary.important;
-  generationDiagnostics.quality.minorCount += finalQualitySummary.minor;
-
-  const blockingCount = finalExportGate.blockingIssues.length;
   const finalStages = [...executionStages, ...finalGateRepairStages].map(stage => {
     if (stage.type === 'validation' && stage.roleId === 'document-workflow') return { ...stage, status: blockingCount > 0 ? 'failed' as const : 'success' as const, message: `阻断 ${blockingCount}，问题 ${validationIssues.length}` };
     if (stage.type === 'export_ready') return { ...stage, status: finalExportGate.passed ? 'success' as const : 'failed' as const, message: finalExportGate.passed ? '已准备好导出 Markdown/HTML/DOCX/PDF' : '导出门禁未通过，请完成阻断问题修复后再导出' };

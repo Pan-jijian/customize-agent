@@ -148,6 +148,9 @@ export function evaluationCriteriaCoreKeywords(title: string): string[] {
     .replace(/^拟采用/u, '').replace(/^针对/u, '').replace(/^确保/u, '')
     .replace(/[（(][^）)]*[）)]/gu, '')
     .replace(/的保障体系与措施$|管理体系与措施$|保障体系与措施$/u, '')
+    // 剥离残余条款编号（4.12.12：条目「1.1发包人委派的…」被提取清洗为「1发包人…」后，
+    // 正文标题与核心词因编号残留「1」词面不匹配误报未承接——核心词口径与标题清洗口径对齐）
+    .replace(/^\d{1,3}(?:[.、．]\d{1,3})*\s*/u, '')
     .trim();
   return cleaned.split(/[、，,；;及与和]+/u)
     .map(part => part.replace(/^[的了者]+/u, '').trim())

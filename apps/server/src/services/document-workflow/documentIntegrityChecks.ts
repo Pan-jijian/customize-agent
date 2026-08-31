@@ -1,4 +1,4 @@
-import type { DocumentFactsModel, ValidationIssue } from './types';
+import type { DocumentFactsModel, TenderRequirementModel, ValidationIssue } from './types';
 import { documentTextLength } from './budget';
 import { stringifyFactValue } from './utils';
 import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
@@ -145,6 +145,10 @@ export function areaArithmeticIssues(markdown: string): ValidationIssue[] {
 // 均为数值提取+算术比较（L2 确定性层），作为 L3.5 LLM 审查层的候选生成器同源互补
 
 const PEAK_LABOR_RE = /(?:高峰期|高峰|峰值)[^。；;\n]{0,20}?(?:约)?\s*([\d,]+)\s*人/g;
+// h14 扩围（评分报告 P2）：「主体阶段投入劳动力约110人」无「高峰」词，「劳动力高峰150～180人」
+// 与明细「木工40+钢筋35+混凝土20+吊装25=120人」三口径并存时原 PEAK_LABOR_RE 漏抓 110/120 两处，
+// 导致跨口径矛盾漏检——反向口径（劳动力/作业人员词在前、数字在后）并入同一提取池
+const LABOR_COUNT_RE = /(?:劳动力|作业人员|施工人员)[^。；;\n]{0,16}?(?:约)?\s*([\d,]+)\s*人/g;
 
 /** 单个表格块的结构解析结果（表头定位 + 人数列数据行抽取，与 qualityValidation 聚合口径一致） */
 interface LaborTableBlock {
@@ -242,9 +246,12 @@ function tablePeakLabor(markdown: string): number | undefined {
 export function resourceConsistencyIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const bodyPeaks: Array<{ value: number; text: string }> = [];
-  for (const match of markdown.matchAll(PEAK_LABOR_RE)) {
-    const value = Number(match[1].replace(/[,，]/gu, ''));
-    if (Number.isFinite(value) && value > 0) bodyPeaks.push({ value, text: match[0].trim().slice(0, 40) });
+  // h14：峰值口径与反向劳动力口径同池提取（评分报告 P2 三口径并存漏检根因）
+  for (const pattern of [PEAK_LABOR_RE, LABOR_COUNT_RE]) {
+    for (const match of markdown.matchAll(pattern)) {
+      const value = Number(match[1].replace(/[,，]/gu, ''));
+      if (Number.isFinite(value) && value > 0) bodyPeaks.push({ value, text: match[0].trim().slice(0, 40) });
+    }
   }
   const tableBlocks = collectLaborTableBlocks(markdown);
   const tablePeaks = tableBlocks.map(block => block.peak);
@@ -1162,5 +1169,119 @@ export function basicInfoScheduleFieldIssues(markdown: string): ValidationIssue[
     });
   }
   return issues.slice(0, 2);
+}
+
+// ── 16. 关键设计决策两可表述阻断（h14）：基础/支护等关键设计决策不得以斜杠并列
+// （「支护桩/放坡」）或括号悬置（「桩基（或独立基础/筏板基础按图纸实施）」）表述——
+// 评分报告 P4 实测：正文以两可形态把设计决策推回图纸，属交付前必须锁定的评审硬伤。
+// 判定防误伤：两可形态必须出现在设计决策语境（词族+决策动词窗口），职业枚举（木工/钢筋工）、
+// 数字单位枚举（50mm/70mm、C30/C35）均不命中。──
+
+/** 关键设计参数词族：斜杠两侧/悬置窗口须命中其一（基础/支护/结构等），排除职业枚举误伤 */
+const DESIGN_PARAM_WORD_RE = /基础|支护|围护|桩|结构|开挖|放坡|喷锚|排桩|连续墙|土钉|锚杆|标高|深度|形式|体系/u;
+
+export function ambiguousEitherOrIssues(markdown: string): ValidationIssue[] {
+  const normalized = markdown.replace(/\s+/gu, '');
+  const hits = new Set<string>();
+  // 形态 A：关键参数斜杠并列两可（「支护桩/放坡」「桩基础/独立基础」）；
+  // 数字枚举由归一化后不含数字单位判定天然豁免（50mm/70mm 两侧词 <2 汉字不入枚举）
+  const slashRe = /([一-龥]{2,8})\/([一-龥]{2,8})/gu;
+  for (const match of normalized.matchAll(slashRe)) {
+    if (!DESIGN_PARAM_WORD_RE.test(match[1]) && !DESIGN_PARAM_WORD_RE.test(match[2])) continue;
+    const start = Math.max(0, (match.index || 0) - 12);
+    const end = Math.min(normalized.length, (match.index || 0) + match[0].length + 12);
+    const window = normalized.slice(start, end);
+    // 决策语境要求：附近有决策动词（「采用桩基础/独立基础」是决策，「主体结构木工/钢筋工」不是）
+    if (!/采用|形式|方式|方案|选用|拟用|拟采用|为/u.test(window)) continue;
+    hits.add(`“${match[1]}/${match[2]}”`);
+  }
+  // 形态 B：括号悬置决策「（或…按图纸实施）」：括号内「或」+ 悬置词（按图纸/待定/另行…），
+  // 且括号前窗口命中设计参数词族（「桩基（或独立基础/筏板基础按图纸实施）」）
+  const pendingRe = /[（(]\s*或[^）)]{1,48}[）)]/gu;
+  for (const match of normalized.matchAll(pendingRe)) {
+    const inner = match[0].slice(1, -1);
+    if (!/按图纸|按实|按图|待定|另行|视[^，。；]{0,8}而定|根据实际/u.test(inner)) continue;
+    const start = Math.max(0, (match.index || 0) - 20);
+    const window = normalized.slice(start, (match.index || 0) + match[0].length);
+    if (!DESIGN_PARAM_WORD_RE.test(window)) continue;
+    hits.add(match[0].slice(0, 30));
+  }
+  if (hits.size === 0) return [];
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'fact_consistency',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: `关键设计决策两可表述：${[...hits].join('、')} 以并列/悬置形态表述，基础形式、支护形式等关键决策必须在正文中唯一确定`,
+    suggestion: '以设计图纸/勘察报告/工程量清单为准锁定唯一决策并删除两可表述：明确写出本项目基础形式与支护形式的具体做法（如「基础形式为筏板基础」「基坑支护采用放坡+喷锚」），禁止「或…按图纸实施」类悬置话术。',
+  }];
+}
+
+// ── 17. 基坑深度数值锁定（h14）：评分报告 P1——正文出现基坑支护/开挖成稿内容时，
+// 全文必须有「深度/标高+数值」表述（危大工程分级判定的强制依据）；资料库含 5.85m 而
+// 正文 0 处即漏锁（实测：前版有 5.85m，本版退化为无深度表述）。
+// 判定自洽：基坑语境 ≥3 处且全文无深度数值表述即报，修复轮从绑定资料锁定数值。──
+
+export function excavationDepthLockIssues(markdown: string): ValidationIssue[] {
+  const normalized = markdown.replace(/\s+/gu, '');
+  const pitHits = normalized.match(/基坑|开挖|支护/gu) || [];
+  if (pitHits.length < 3) return [];
+  // 表格行「| 基坑开挖 | 深度8m |」经空白归一后同样命中（深度后 0~10 字内数字）
+  const depthValueRe = /(?:基坑|开挖|地下室|槽底)[^。；，,]{0,14}(?:深度|标高)[^。；，,]{0,10}\d+(?:\.\d+)?/gu;
+  const depthMentionRe = /(?:深度|标高)[^。；，,]{0,10}\d+(?:\.\d+)?/gu;
+  if (depthValueRe.test(normalized) || depthMentionRe.test(normalized)) return [];
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'fact_consistency',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: '基坑深度数值未锁定：正文已有基坑支护/开挖成稿内容，但全文未出现「深度/标高+数值」表述，危大工程分级判定失去依据',
+    suggestion: '从绑定资料（地质勘察报告/基坑支护设计图/基础平面图）锁定基坑开挖深度数值（如 5.85m）写入基坑支护小节；深度 ≥5m 的深基坑须同步标注危大工程分级与专家论证要求，禁止以「按图纸确定」回避深度数值。',
+  }];
+}
+
+// ── 18. 奖项白名单（h14）：正文出现的具名奖项（XX杯/XX奖）必须来自招标文件评分项要求提取
+// 或绑定资料质量事实；白名单外的奖项判定杜撰（实测「奖项杜撰 5 处」——写作层自行编造奖项
+// 替代招标要求奖项，评标否决级硬伤）。白名单为空（提取失败）时不报：宁漏报不误报，
+// 提取失败有显性 stage 警示，不得在无基准时阻断交付。──
+
+const AWARD_NAME_RE = /[\u4e00-\u9fa5]{2,10}(?:杯|奖)/gu;
+/** 通用目标类表述不判杜撰：省优/市优/优质工程/文明工地等非具名目标 */
+const GENERIC_AWARD_RE = /优质工程|文明工地|样板|标准化|观摩|示范|精品工程|结构优质|省优|市优/u;
+
+export function fabricatedAwardIssues(markdown: string, factsModel: DocumentFactsModel, tenderRequirements?: TenderRequirementModel): ValidationIssue[] {
+  const whitelist = new Set<string>();
+  // 白名单来源 1：绑定资料质量/项目/进度事实中的奖项表述（招标文件原文出现的奖项）
+  for (const fact of [...factsModel.quality, ...factsModel.project, ...factsModel.schedule]) {
+    const text = stringifyFactValue(fact.value);
+    for (const match of text.matchAll(AWARD_NAME_RE)) whitelist.add(match[0]);
+  }
+  // 白名单来源 2：评分项要求提取的奖项类文本（创优目标/特殊质量标准/奖项条款）
+  if (tenderRequirements?.extracted) {
+    const items = [...(tenderRequirements.awardObjectives || []), ...(tenderRequirements.specialQualityStandards || []), ...(tenderRequirements.awardClauses || [])];
+    for (const item of items) {
+      for (const match of (item.text || '').matchAll(AWARD_NAME_RE)) whitelist.add(match[0]);
+    }
+  }
+  if (whitelist.size === 0) return [];
+  const fabricated = new Set<string>();
+  for (const match of markdown.matchAll(AWARD_NAME_RE)) {
+    const award = match[0];
+    if (whitelist.has(award)) continue;
+    if (GENERIC_AWARD_RE.test(award)) continue;
+    fabricated.add(award);
+  }
+  if (fabricated.size === 0) return [];
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'fact_consistency',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: `奖项表述与招标文件白名单不符：正文出现 ${[...fabricated].join('、')}，均未出现在招标文件评分项要求或绑定资料中`,
+    suggestion: '创优目标必须以招标文件原文为准逐字落位（如「确保黄山杯」），禁止自行编造或替换为其他奖项名称；白名单外的奖项表述一律删除或替换为招标原文奖项。',
+  }];
 }
 

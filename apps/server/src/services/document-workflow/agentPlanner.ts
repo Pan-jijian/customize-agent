@@ -5,6 +5,8 @@ import { BID_DISCIPLINE_PHRASES, extractSection, hasProcessSequenceExpression, i
 import { documentTextLength } from './budget';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
 import { buildSemanticSimilarity } from './semanticSimilarity';
+import { isInstructionLikeOutlineTitle } from './outline';
+import { cleanSectionTitleArtifacts } from './promptRuleExtraction';
 
 export interface AgentSectionPlan {
   title: string;
@@ -208,10 +210,14 @@ function sectionMinChars(title: string) {
 export async function planDocument(input: { template: DocumentTemplate; context: AgentWorkflowContext; title?: string; embedDocuments?: (texts: string[]) => Promise<number[][]> }): Promise<{ plan: AgentDocumentPlan; node: AgentWorkflowNode }> {
   const startedAt = Date.now();
   const chapterShapes = input.template.chapters.map(chapter => {
-    const sectionTitles = chapter.sections?.length ? chapter.sections : [chapter.title];
+    // 大纲出口最终清洗（4.12.12）：补挂/校准注入的脏小节（条款碎片、截断残留、数字参数列）
+    // 在此确定性剔除——粘连修复 + 碎片判别同口径，剔除后为空的章节退化回章节标题小节
+    const sectionTitles = (chapter.sections?.length ? chapter.sections : [chapter.title])
+      .map(title => cleanSectionTitleArtifacts(title))
+      .filter(title => title.trim().length > 0 && !isInstructionLikeOutlineTitle(title));
     return {
       chapter,
-      sectionTitles,
+      sectionTitles: sectionTitles.length > 0 ? sectionTitles : [chapter.title],
       requiredFacts: [...new Set([...(chapter.requiredFacts || []), chapter.title])],
       evidenceQueries: [...new Set([chapter.title, ...(chapter.queries || []), ...(chapter.requiredFacts || [])])],
     };

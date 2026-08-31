@@ -131,4 +131,27 @@ describe('3.3 全局 LRU 缓存', () => {
       delete process.env.DOCUMENT_EMBED_CACHE;
     }
   });
+
+  it('4.12.12 分层：长文本不写缓存——再次嵌入同长文本仍 miss（不挤占 LRU）', async () => {
+    const longText = '本项目基坑开挖深度约五点八五米，支护采用放坡喷锚体系，土方开挖分层分段进行，随挖随撑并同步开展基坑监测，坑顶四周设置截水沟、排水沟及防护栏杆并定期巡查。';
+    const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0]));
+    await buildSemanticSimilarity(['甲'], [longText], embed);
+    await buildSemanticSimilarity(['甲'], [longText], embed);
+    // 长文本不缓存：第二次仍全量嵌入；短文本「甲」命中缓存；长文本 miss 不计数（统计只反映可缓存文本）
+    expect(embed).toHaveBeenCalledTimes(2);
+    expect(embed.mock.calls[1][0]).toEqual([longText]);
+    expect(snapshotEmbedCacheStats()).toEqual({ embedCacheHits: 1, embedCacheMisses: 1 });
+  });
+
+  it('4.12.12 分层：长文本计 miss 但不污染命中率统计口径——短文本命中率不受长文本稀释', async () => {
+    const longText = '本项目基坑开挖深度约五点八五米，支护采用放坡喷锚体系，土方开挖分层分段进行，随挖随撑并同步开展基坑监测，坑顶四周设置截水沟、排水沟及防护栏杆并定期巡查。';
+    const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0]));
+    // 短文本两轮全命中 + 长文本不计数（命中率口径 = 3 hits / (3 hits + 2 misses) = 60%）
+    await buildSemanticSimilarity(['甲'], ['乙'], embed);
+    await buildSemanticSimilarity(['甲'], ['乙'], embed);
+    await buildSemanticSimilarity([longText], ['甲'], embed);
+    const stats = snapshotEmbedCacheStats();
+    expect(stats.embedCacheHits).toBe(3);
+    expect(stats.embedCacheMisses).toBe(2);
+  });
 });

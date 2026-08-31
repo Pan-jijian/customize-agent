@@ -8,6 +8,8 @@ import {
   cleanFormalSourcePhrases,
   composeDocumentMarkdown,
   ensureFormalToc,
+  dedupeCrossLevelHeadingDuplicates,
+  dedupeRepeatedBlocksWithinSections,
   extractGeneratedSections,
   findChapterBlock,
   hasInlineListCollision,
@@ -367,5 +369,62 @@ describe('L0_WRITER_SYSTEM_PREFIX（3.2 Writer 类 system 前缀统一）', () =
       if (original !== undefined) process.env.DOCUMENT_L0_SYSTEM_PREFIX = original;
       else delete process.env.DOCUMENT_L0_SYSTEM_PREFIX;
     }
+  });
+});
+
+describe('dedupeCrossLevelHeadingDuplicates（4.12.12 跨层级同名整块去重）', () => {
+  it('H2 与同名 H3 内容高度重合 → 删除较短块', () => {
+    const markdown = [
+      '## 3.2 新技术、新工艺、新材料、新设备的应用',
+      '本项目拟采用装配式叠合楼板技术，减少现场湿作业。主体结构施工中应用BIM技术进行管线综合排布。',
+      '新材料方面采用预拌砂浆，减少现场搅拌扬尘。',
+      '### 新技术、新工艺、新材料、新设备的应用',
+      '本项目拟采用装配式叠合楼板技术，减少现场湿作业。主体结构施工中应用BIM技术进行管线综合排布。',
+      '新材料方面采用预拌砂浆，减少现场搅拌扬尘。新设备方面采用智能升降机提高垂直运输效率。',
+    ].join('\n');
+    const result = dedupeCrossLevelHeadingDuplicates(markdown);
+    expect(result).not.toContain('## 3.2');
+    expect(result).toContain('### 新技术、新工艺、新材料、新设备的应用');
+    expect(result).toContain('智能升降机');
+  });
+
+  it('H2 与同名 H3 内容不重合 → H2 降级为 H3 保留独有内容', () => {
+    const markdown = [
+      '## 3.2 新技术、新工艺、新材料、新设备的应用',
+      '本项目在施工管理中引入信息化平台，实现进度、质量、安全的线上协同管控。',
+      '### 新技术、新工艺、新材料、新设备的应用',
+      '本项目拟采用装配式叠合楼板技术，减少现场湿作业。主体结构施工中应用BIM技术进行管线综合排布。',
+    ].join('\n');
+    const result = dedupeCrossLevelHeadingDuplicates(markdown);
+    expect(result).toContain('### 3.2 新技术、新工艺、新材料、新设备的应用');
+    expect(result).toContain('信息化平台');
+    expect(result).toContain('装配式叠合楼板');
+  });
+
+  it('无同名跨层级标题 → 原样返回', () => {
+    const markdown = '## 3.2 新技术应用\n本项目拟采用装配式叠合楼板技术。\n### 3.3 绿色施工\n现场采用节水节电措施。';
+    expect(dedupeCrossLevelHeadingDuplicates(markdown)).toBe(markdown);
+  });
+});
+
+describe('dedupeRepeatedBlocksWithinSections（4.12.12 同小节相邻块重复去重）', () => {
+  const repeated = '土方开挖采用分层分段开挖方式，每层开挖厚度不超过两米，开挖完成后及时进行基底验收。';
+
+  it('同小节内同一段落连续复制 3 遍 → 只保留 1 遍', () => {
+    const markdown = `### 施工方法\n${repeated}\n\n${repeated}\n\n${repeated}`;
+    const result = dedupeRepeatedBlocksWithinSections(markdown);
+    expect(result.split(repeated).length - 1).toBe(1);
+  });
+
+  it('标题行重置窗口：跨小节同名段落不误删', () => {
+    const markdown = `### 3.1 施工方法\n${repeated}\n### 3.2 施工方法\n${repeated}`;
+    const result = dedupeRepeatedBlocksWithinSections(markdown);
+    expect(result.split(repeated).length - 1).toBe(2);
+  });
+
+  it('短段落（<24 字）不参与判重', () => {
+    const markdown = '### 施工方法\n分层开挖，随挖随撑。\n分层开挖，随挖随撑。';
+    const result = dedupeRepeatedBlocksWithinSections(markdown);
+    expect(result.split('分层开挖，随挖随撑。').length - 1).toBe(2);
   });
 });

@@ -395,17 +395,29 @@ function recordJsonValidationFailure(diagnostics: DocumentGenerationDiagnostics 
   diagnostics.llm.lastError = message;
 }
 
-/** F1 重试循环核心：JSON 解析/schema 校验失败重试一次（失败原因回注提示词），二次仍失败才放弃。
+/** F1 重试循环核心：JSON 解析/schema 校验失败重试（失败原因回注提示词），重试上限内仍失败才放弃。
  * invokeLlm 可注入（单测注入 mock，生产绑定 callDocumentLlm）——模块内部词法绑定无法被 vi.mock 拦截 */
-export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>> } = {}, invokeLlm: (attemptSystem: string, attemptPrompt: string) => Promise<string | undefined> = (attemptSystem, attemptPrompt) => callDocumentLlm(attemptSystem, attemptPrompt, true, { maxTokens: options.maxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost, taskKind: options.taskKind, contextLayers: options.contextLayers })): Promise<T | undefined> {
+/**
+ * 截断类失败重试时的 maxTokens 放大系数（1.5 倍向上取整，缺省按 2000 基准）：
+ * JSON 截断根因多为 token 上限不足，同额度重试必再截断；独立纯函数便于单测观测放大逻辑
+ */
+export function amplifiedTruncationMaxTokens(current?: number): number {
+  return Math.ceil((current || 2000) * 1.5);
+}
+
+export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>> } = {}, invokeLlm?: (attemptSystem: string, attemptPrompt: string) => Promise<string | undefined>): Promise<T | undefined> {
   // 历史缺陷：规划/审查/修复类 jsonOnly 调用一次失败即放弃，造成章节降级与后续数轮无效修复；
-  // 失败原因回注提示词让模型收敛，秒级重试代价远小于分钟级降级链
-  const maxJsonAttempts = 1;
+  // 失败原因回注提示词让模型收敛，秒级重试代价远小于分钟级降级链。
+  // 4.12.12 收敛：JSON 截断类失败重试时放大 maxTokens（截断根因多为 token 上限不足，同额度重试必再截断——
+  // 实测 schema 校验失败 30 次主要来自截断输出）；重试次数 1 → 2，每次重试附上次失败原因
+  const maxJsonAttempts = 2;
   let lastFailure: string | undefined;
+  let retryMaxTokens = options.maxTokens;
+  const invoke = invokeLlm ?? ((attemptSystem: string, attemptPrompt: string) => callDocumentLlm(attemptSystem, attemptPrompt, true, { maxTokens: retryMaxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost, taskKind: options.taskKind, contextLayers: options.contextLayers }));
   for (let attempt = 0; attempt <= maxJsonAttempts; attempt += 1) {
     if (options.signal?.aborted) return undefined;
     const attemptPrompt = attempt === 0 ? prompt : `${prompt}\n\n（重试修正：上一次输出未通过——${lastFailure ?? '输出无效'}。请重新输出完整合法的 JSON，只返回 JSON。）`;
-    const response = await invokeLlm(system, attemptPrompt);
+    const response = await invoke(system, attemptPrompt);
     if (!response) {
       // 空响应/网络失败：原因由 callDocumentLlm 写入 diagnostics.llm.lastError，经 outFailure 带出供调用方定位
       if (options.outFailure && options.diagnostics?.llm.lastError) options.outFailure.value = options.diagnostics.llm.lastError;
@@ -431,6 +443,10 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
     } catch {
       const message = `JSON 解析失败：${describeJsonParseFailure(payload)}`;
       lastFailure = message;
+      // 截断类失败：重试放大 maxTokens（默认调用闭包读取 retryMaxTokens），否则同额度重试必再截断
+      if (/JSON 被截断/u.test(message)) {
+        retryMaxTokens = amplifiedTruncationMaxTokens(retryMaxTokens);
+      }
       recordJsonValidationFailure(options.diagnostics, message);
       if (attempt >= maxJsonAttempts) {
         if (options.outFailure) options.outFailure.value = message;

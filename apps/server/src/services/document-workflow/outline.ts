@@ -47,11 +47,24 @@ export function isTenderClauseFragmentTitle(title: string) {
   // 截断句碎片（真实生成回归：「本招标项目公共建筑根据《民用建筑设计统一标准》（」——
   // 标题以未闭合括号/书名号结尾，是被截断的条款原文；合法小节标题不会以左括号收尾）
   if (/[（(【［《]$/u.test(normalized)) return true;
+  // 括号配对校验（4.12.12 真实生成回归）：「1发包人委派的发包人代表或监理工程师（以下简」——
+  // 截断残留左括号但非行尾（左括号后还有「以下简」），上一规则拦不住；左括号到行尾无对应右括号即截断
+  if (/[（(【［《][^）)】］》]*$/u.test(normalized)) return true;
+  // 简称句式截断（4.12.12 真实生成回归）：合同条款「（以下简称××）」被解析截断残留「以下简」
+  if (/以下简/u.test(normalized)) return true;
+  // 数字+单位参数碎片（4.12.12 真实生成回归）：「65m18245.65m），（），（1）工程量与」——
+  // PDF 参数列（数字+单位字母粘连）被切进标题；合法小节标题不会以「数字+拉丁字母」开头
+  if (/^\d{1,4}\s*[a-zA-Z]/u.test(normalized)) return true;
+  // 评标程序动作碎片（4.12.12 真实生成回归）：「确定评标价」「确定有效评标价」——
+  // 评标委员会程序步骤被误提取为评分条目；技术标小节不会以评标价确定动作命名
+  if (/^(?:确定|计算|比较|推荐|审查|否决)(?:有效)?评标价/u.test(normalized)) return true;
   if (/^(?:其他要求|需要补充的其他内容|相当于或不低于|补充条款|建议编制要求|投标须知|评标办法)/u.test(normalized)) return true;
   return false;
 }
 
-function isInstructionLikeOutlineTitle(title: string) {
+/** 指令型/碎片标题判别（isTenderClauseFragmentTitle 超集：含冒号结尾、指令型提示语，
+ * 供评分条目提取、大纲出口清洗与补挂拦截共用同一口径——碎片混入任何一环都应被同口径拦截） */
+export function isInstructionLikeOutlineTitle(title: string) {
   const normalized = cleanOutlineTitle(title).replace(/\s+/gu, '');
   if (!normalized) return true;
   if (/^(?:目录|章节|大纲|要求|说明|注意|输出|格式|示例|例如|写法|占位|提示)$/u.test(normalized)) return true;

@@ -7,7 +7,7 @@ import type { buildPromptBindingPlan } from './templateStore';
 import { evidencePromptImportance, selectEvidenceByBudget } from './evidence';
 import { normalizeOcrFactText, isValidProjectBasicFactValue } from './factsModel';
 import { buildCanonicalFacts } from './factGovernance';
-import { mergeTableLineBreaks, normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTenderSourcePageRefs, removeAdjacentDuplicateHeadings } from './markdownComposer';
+import { mergeTableLineBreaks, normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTenderSourcePageRefs, removeAdjacentDuplicateHeadings, dedupeCrossLevelHeadingDuplicates, dedupeRepeatedBlocksWithinSections } from './markdownComposer';
 import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
 import { collectSectionContentGaps } from './qualityValidation';
 import { BID_DISCIPLINE_PHRASES, dedupeRepeatedSubsections, isBidDisciplineSentence, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
@@ -1167,6 +1167,9 @@ export function finalizeChapterContentQuality(content: string, chapter: Pick<Doc
   cleaned = normalizeWorkPackageLabels(cleaned);
   cleaned = ensureWorkPackageOverviewLabels(cleaned);
   cleaned = dedupeCrossSectionDuplicateSentences(cleaned);
+  // 4.12.12：跨层级（H2/H3 同名）整块去重与同小节内相邻块重复去重（评分报告「同名小节重复」/「整段重复三遍」根因治理）
+  cleaned = dedupeCrossLevelHeadingDuplicates(cleaned);
+  cleaned = dedupeRepeatedBlocksWithinSections(cleaned);
   cleaned = cleaned.replace(/\n{3,}/gu, '\n\n');
   cleaned = stripTenderClauseFragmentHeadings(cleaned);
   return stripDataConsistencyLeakSentences(cleaned).trim();
@@ -1175,7 +1178,7 @@ export function finalizeChapterContentQuality(content: string, chapter: Pick<Doc
 /** 最终组装路径的重复/空壳兜底清理：rebuildFinalMarkdown 不再逐章跑 finalizeChapterContentQuality，
  * 补跑同 H3 重复 H4 去重与空壳小节删除，避免 Final Gate 补写与章节拼接残留的重复/空壳进入成品文档。 */
 export function finalizeFinalMarkdownStructure(markdown: string): string {
-  return stripDataConsistencyLeakSentences(stripTenderClauseFragmentHeadings(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(normalizeWorkPackageLabels(cleanChineseWordBreakSpaces(splitGluedTableHeaderLines(rewriteWorkPackageTerminology(dedupeCrossSectionDuplicateSentences(markdown)))))))));
+  return stripDataConsistencyLeakSentences(stripTenderClauseFragmentHeadings(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(dedupeCrossLevelHeadingDuplicates(dedupeRepeatedBlocksWithinSections(normalizeWorkPackageLabels(cleanChineseWordBreakSpaces(splitGluedTableHeaderLines(rewriteWorkPackageTerminology(dedupeCrossSectionDuplicateSentences(markdown)))))))))));
 }
 
 export function promptMatchesChapter(prompt: ResolvedPromptContent, _chapter: DocumentTemplateChapter) {

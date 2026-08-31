@@ -629,6 +629,115 @@ export function removeAdjacentDuplicateHeadings(markdown: string) {
   return output.join('\n').replace(/\n{3,}/gu, '\n\n');
 }
 
+/** 标题归一化（去编号/括号/标点）：跨层级同名判定与 dedupeRepeatedSubsections 的 H4 归一化同口径 */
+function normalizeHeadingForDedup(title: string): string {
+  return title.replace(/^\d+(?:\.\d+)*\s*/u, '').replace(/[\s:：、。，,;；/|—-]/gu, '');
+}
+
+function headingBlockSentenceFingerprints(lines: string[], start: number, end: number): Set<string> {
+  const fingerprints = new Set<string>();
+  for (let index = start; index < end; index += 1) {
+    const line = lines[index].trim();
+    if (/^#{1,6}\s/u.test(line) || /^\|.*\|$/u.test(line)) continue;
+    for (const sentence of line.split(/[。；;]/u)) {
+      const trimmed = sentence.trim();
+      if (trimmed.length >= 16) fingerprints.add(trimmed.replace(/[\s\p{P}]+/gu, ''));
+    }
+  }
+  return fingerprints;
+}
+
+/**
+ * 章节内 H2/H3 跨层级同名整块去重（4.12.12 真实生成回归，评分报告「同名小节重复」blocker 根因）：
+ * Writer 把计划小节误升为 H2（「## 3.2 新技术、新工艺、新材料、新设备的应用」）后，
+ * 又按计划输出同名 H3（「### 新技术、新工艺、新材料、新设备的应用」），整块内容写两遍。
+ * 确定性修复：归一化同名时，两块的句子指纹重合率 ≥50% 直接删除内容较短块；
+ * 重合不足时把 H2 块降级为 H3 保留独有内容（章节标题本身与任何 H3 不同名，不受影响）。
+ */
+export function dedupeCrossLevelHeadingDuplicates(markdown: string): string {
+  const lines = markdown.split(/\r?\n/u);
+  const blocks: Array<{ level: number; title: string; normalized: string; start: number; end: number }> = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const heading = /^(#{2,3})\s+(.+)$/u.exec(lines[index].trim());
+    if (!heading) continue;
+    if (blocks.length > 0) blocks[blocks.length - 1].end = index;
+    blocks.push({ level: heading[1].length, title: heading[2].trim(), normalized: normalizeHeadingForDedup(heading[2].trim()), start: index, end: lines.length });
+  }
+  if (blocks.length === 0) return markdown;
+  const drops: Array<{ start: number; end: number; downgrade: boolean }> = [];
+  // 4.12.12：必须从首个块开始扫描——首个标题块本身是 H2 且后跟同名 H3 时（文档以跨层级重复块
+  // 开篇的真实形态），从 index=1 起扫会漏掉第一个块，重复块原样保留
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    if (block.level !== 2) continue;
+    const nextH2Index = blocks.findIndex((candidate, candidateIndex) => candidateIndex > index && candidate.level === 2);
+    const scopeEnd = nextH2Index >= 0 ? blocks[nextH2Index].start : lines.length;
+    const twin = blocks.find(candidate => candidate !== block && candidate.level === 3 && candidate.normalized === block.normalized && candidate.start > block.start && candidate.start < scopeEnd);
+    if (!twin) continue;
+    const blockFingerprints = headingBlockSentenceFingerprints(lines, block.start + 1, block.end);
+    const twinFingerprints = headingBlockSentenceFingerprints(lines, twin.start + 1, twin.end);
+    const overlap = [...blockFingerprints].filter(fingerprint => twinFingerprints.has(fingerprint)).length;
+    const minSize = Math.min(blockFingerprints.size, twinFingerprints.size);
+    const ratio = minSize > 0 ? overlap / minSize : 0;
+    if (ratio >= 0.5) {
+      const blockChars = lines.slice(block.start + 1, block.end).join('\n').length;
+      const twinChars = lines.slice(twin.start + 1, twin.end).join('\n').length;
+      const drop = blockChars >= twinChars ? twin : block;
+      drops.push({ start: drop.start, end: drop.end, downgrade: false });
+    } else {
+      drops.push({ start: block.start, end: block.start, downgrade: true });
+    }
+  }
+  if (drops.length === 0) return markdown;
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (drops.some(drop => !drop.downgrade && index >= drop.start && index < drop.end)) continue;
+    const downgrade = drops.find(drop => drop.downgrade && drop.start === index);
+    output.push(downgrade ? lines[index].replace(/^##\s+/, '### ') : lines[index]);
+  }
+  return output.join('\n').replace(/\n{3,}/gu, '\n\n');
+}
+
+/**
+ * 同小节内相邻段落块重复去重（4.12.12 真实生成回归，评分报告 P3）：
+ * 成稿把「施工流程：…」「施工方法：…」整段连续复制 3 遍（复制粘贴残留）。
+ * 确定性修复：同一小节内，与最近 3 个非空段中某段指纹完全相同的段落（去空白标点后 ≥24 字）删除；
+ * 标题行重置窗口（跨小节正当重复不误删），表格行不参与。
+ */
+export function dedupeRepeatedBlocksWithinSections(markdown: string): string {
+  const lines = markdown.split(/\r?\n/u);
+  const output: string[] = [];
+  let recentFingerprints: string[] = [];
+  let paragraphBuffer: string[] = [];
+  const flushParagraph = () => {
+    if (paragraphBuffer.length === 0) return;
+    const paragraph = paragraphBuffer.join('\n').trim();
+    paragraphBuffer = [];
+    if (!paragraph) return;
+    const fingerprint = paragraph.replace(/[\s\p{P}]+/gu, '');
+    if (fingerprint.length >= 24 && recentFingerprints.includes(fingerprint)) return;
+    recentFingerprints = [...recentFingerprints, fingerprint].slice(-3);
+    for (const line of paragraph.split(/\n/u)) output.push(line);
+  };
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^#{1,6}\s/u.test(trimmed)) {
+      flushParagraph();
+      output.push(line);
+      recentFingerprints = [];
+      continue;
+    }
+    if (trimmed === '') {
+      flushParagraph();
+      output.push(line);
+      continue;
+    }
+    paragraphBuffer.push(line);
+  }
+  flushParagraph();
+  return output.join('\n');
+}
+
 function chapterHeadingText(line: string) {
   return /^##\s+(.+)$/u.exec(line.trim())?.[1] || '';
 }

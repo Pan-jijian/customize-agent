@@ -68,6 +68,27 @@ describe('isTenderClauseFragmentTitle（招标条款碎片判别）', () => {
     expect(isTenderClauseFragmentTitle('本招标项目公共建筑根据《民用建筑设计统一标准》（')).toBe(true);
   });
 
+  it('括号悬置碎片命中（4.12.12：左括号后残留「以下简」但非行尾）', () => {
+    expect(isTenderClauseFragmentTitle('1发包人委派的发包人代表或监理工程师（以下简')).toBe(true);
+    expect(isTenderClauseFragmentTitle('本工程监理单位（以下简称监理人')).toBe(true);
+  });
+
+  it('简称句式截断碎片命中（4.12.12：「以下简」残留）', () => {
+    expect(isTenderClauseFragmentTitle('（以下简称招标人）委托')).toBe(true);
+    expect(isTenderClauseFragmentTitle('以下简称为甲方')).toBe(true);
+  });
+
+  it('数字+单位参数碎片命中（4.12.12：PDF 参数列粘连）', () => {
+    expect(isTenderClauseFragmentTitle('65m18245.65m），（')).toBe(true);
+    expect(isTenderClauseFragmentTitle('12层，建筑高度48.6m')).toBe(true);
+  });
+
+  it('评标程序动作碎片命中（4.12.12：「确定评标价」类）', () => {
+    expect(isTenderClauseFragmentTitle('确定评标价')).toBe(true);
+    expect(isTenderClauseFragmentTitle('确定有效评标价')).toBe(true);
+    expect(isTenderClauseFragmentTitle('确定施工部署')).toBe(false);
+  });
+
   it('补充条款类兜底短语命中（真实生成回归：模板静态 sections 混入「补充条款」）', () => {
     expect(isTenderClauseFragmentTitle('补充条款')).toBe(true);
     expect(isTenderClauseFragmentTitle('建议编制要求如下')).toBe(true);

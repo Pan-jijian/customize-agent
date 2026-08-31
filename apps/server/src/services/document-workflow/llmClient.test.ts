@@ -5,7 +5,7 @@
  * 底层 LLM 调用通过 invokeLlm 注入桩（模块内部词法绑定无法被 vi.mock 拦截）。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, type DocumentJsonSchema } from './llmClient';
+import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, type DocumentJsonSchema } from './llmClient';
 import type { DocumentGenerationDiagnostics } from './types';
 
 // 无活跃模型配置：callDocumentLlm 观测累计发生在 provider 调用之前，
@@ -37,15 +37,19 @@ describe('callDocumentLlmJsonWithRetry（F1 JSON/Schema 失败重试）', () => 
     expect(invoke.mock.calls[1][1]).toContain('JSON 解析失败');
   });
 
-  it('schema 校验失败 → 重试一次；二次仍失败 → undefined 且 outFailure 透传原因', async () => {
+  it('schema 校验失败 → 重试 2 次（共 3 次调用）仍失败 → undefined 且 outFailure 透传原因', async () => {
     const invoke = vi.fn()
+      .mockResolvedValueOnce('{"patches": []}')
       .mockResolvedValueOnce('{"patches": []}')
       .mockResolvedValueOnce('{"patches": []}');
     const outFailure: { value?: string } = {};
     const result = await callDocumentLlmJsonWithRetry<{ patches: unknown[] }>('system', 'prompt', { schema, outFailure }, invoke);
     expect(result).toBeUndefined();
-    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenCalledTimes(3);
     expect(outFailure.value).toContain('JSON Schema 校验失败');
+    // 每次重试提示词均携带上一次失败原因
+    expect(invoke.mock.calls[1][1]).toContain('JSON Schema 校验失败');
+    expect(invoke.mock.calls[2][1]).toContain('JSON Schema 校验失败');
   });
 
   it('schema 校验失败 → 重试成功返回结果', async () => {
@@ -70,6 +74,55 @@ describe('callDocumentLlmJsonWithRetry（F1 JSON/Schema 失败重试）', () => 
     expect(result).toBeUndefined();
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(outFailure.value).toBeUndefined();
+  });
+});
+
+describe('callDocumentLlmJsonWithRetry（4.12.12 重试收敛：截断类失败最多 2 次重试）', () => {
+  it('JSON 截断失败 → 重试 2 次后第三次成功（共 3 次调用），重试提示词含截断原因', async () => {
+    const invoke = vi.fn()
+      .mockResolvedValueOnce('{"patches": [{"replacement": "x"}') // 截断
+      .mockResolvedValueOnce('{"patches": [{"replacement": "x"}') // 截断
+      .mockResolvedValueOnce('{"patches": [{"replacement": "x"}]}');
+    const result = await callDocumentLlmJsonWithRetry<{ patches: unknown[] }>('system', 'prompt', {}, invoke);
+    expect(result?.patches).toHaveLength(1);
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(invoke.mock.calls[1][1]).toContain('JSON 被截断');
+    expect(invoke.mock.calls[2][1]).toContain('JSON 被截断');
+  });
+
+  it('JSON 截断 3 次均失败 → undefined 且 outFailure 含截断原因（上限 3 次调用）', async () => {
+    const invoke = vi.fn()
+      .mockResolvedValueOnce('{"a": 1')
+      .mockResolvedValueOnce('{"a": 1')
+      .mockResolvedValueOnce('{"a": 1');
+    const outFailure: { value?: string } = {};
+    const result = await callDocumentLlmJsonWithRetry<{ patches: unknown[] }>('system', 'prompt', { outFailure }, invoke);
+    expect(result).toBeUndefined();
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(outFailure.value).toContain('JSON 被截断');
+  });
+
+  it('非截断语法错误同样可重试（重试提示词不含「被截断」措辞）', async () => {
+    const invoke = vi.fn()
+      .mockResolvedValueOnce('not json at all')
+      .mockResolvedValueOnce('{"patches": [{}]}');
+    const result = await callDocumentLlmJsonWithRetry<{ patches: unknown[] }>('system', 'prompt', { schema }, invoke);
+    expect(result?.patches).toHaveLength(1);
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke.mock.calls[1][1]).toContain('JSON 解析失败');
+  });
+});
+
+describe('amplifiedTruncationMaxTokens（截断重试 maxTokens 放大 1.5 倍）', () => {
+  it('给定额度放大 1.5 倍并向上取整', () => {
+    expect(amplifiedTruncationMaxTokens(1000)).toBe(1500);
+    expect(amplifiedTruncationMaxTokens(4096)).toBe(6144);
+    expect(amplifiedTruncationMaxTokens(4097)).toBe(6146);
+  });
+
+  it('缺省/0 按 2000 基准放大为 3000', () => {
+    expect(amplifiedTruncationMaxTokens(undefined)).toBe(3000);
+    expect(amplifiedTruncationMaxTokens(0)).toBe(3000);
   });
 });
 

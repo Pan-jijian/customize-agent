@@ -30,6 +30,9 @@ export const SEMANTIC_COVERAGE_THRESHOLD = 0.6;
 const embedCache = new Map<string, number[]>();
 let embedCacheHits = 0;
 let embedCacheMisses = 0;
+// 4.12.12 分层阈值：≤64 字的短文本（章节标题/评分条目/查询词）高频重复值得缓存；
+// 长文本（证据切片/正文句）高度唯一，不查不写缓存避免挤占 LRU 容量
+const EMBED_CACHE_MAX_TEXT_CHARS = 64;
 
 function embedCacheEnabled() {
   return process.env.DOCUMENT_EMBED_CACHE !== '0';
@@ -68,14 +71,19 @@ async function embedWithGlobalCache(texts: string[], embedDocuments?: (texts: st
   const missIndicesByText = new Map<string, number[]>();
   for (let index = 0; index < texts.length; index += 1) {
     const text = texts[index];
-    const cached = embedCache.get(text);
-    if (cached) {
-      vectors[index] = cached;
-      embedCacheHits += 1;
-      // LRU 命中：删除后重插移到尾部，保持插入序淘汰最久未用
-      embedCache.delete(text);
-      embedCache.set(text, cached);
-      continue;
+    // 4.12.12 分层缓存：长文本（证据切片/正文句，高度唯一）不查不写缓存——真实生成实测
+    // 命中率 0.37%（551/150575），长文本写入挤占 LRU 容量反复淘汰高频短文本
+    // （章节标题/评分条目/查询词）；同批内去重对所有文本仍生效
+    if (text.length <= EMBED_CACHE_MAX_TEXT_CHARS) {
+      const cached = embedCache.get(text);
+      if (cached) {
+        vectors[index] = cached;
+        embedCacheHits += 1;
+        // LRU 命中：删除后重插移到尾部，保持插入序淘汰最久未用
+        embedCache.delete(text);
+        embedCache.set(text, cached);
+        continue;
+      }
     }
     const indices = missIndicesByText.get(text);
     if (indices) {
@@ -91,12 +99,15 @@ async function embedWithGlobalCache(texts: string[], embedDocuments?: (texts: st
   for (let missIndex = 0; missIndex < missTexts.length; missIndex += 1) {
     const text = missTexts[missIndex];
     const vector = embedded[missIndex];
-    for (const index of missIndicesByText.get(text)!) vectors[index] = vector;
-    embedCacheMisses += missIndicesByText.get(text)!.length;
-    embedCache.set(text, vector);
-    if (embedCache.size > maxSize) {
-      const oldest = embedCache.keys().next().value;
-      if (oldest !== undefined) embedCache.delete(oldest);
+    const indexes = missIndicesByText.get(text)!;
+    for (const index of indexes) vectors[index] = vector;
+    if (text.length <= EMBED_CACHE_MAX_TEXT_CHARS) {
+      embedCacheMisses += indexes.length;
+      embedCache.set(text, vector);
+      if (embedCache.size > maxSize) {
+        const oldest = embedCache.keys().next().value;
+        if (oldest !== undefined) embedCache.delete(oldest);
+      }
     }
   }
   return vectors;

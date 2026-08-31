@@ -1,5 +1,5 @@
 import type { DocumentTemplate, DocumentTemplateChapter } from './types';
-import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
+import { displayChapterTitle, isInstructionLikeOutlineTitle, isTenderClauseFragmentTitle } from './outline';
 import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgCatalog';
 
 /**
@@ -202,16 +202,18 @@ export function extractEvaluationCriteriaItems(texts: string[]): EvaluationCrite
     // 汉字阈值 4→3：短条目（如“确保黄山杯”清理后仅 3 字）必须保留，否则创优类条目被静默丢弃零承接
     if (!/[\u4e00-\u9fa5]{3}/u.test(raw) && !/[杯奖]/u.test(raw)) continue;
     if (/AI|大模型|评审|评分|分值|分项|子项|满分|得分|投标人须|详见|招标文件/u.test(raw)) continue;
-    if (/公共资源|电子交易|加密|投标|开标|评标委员会/u.test(raw)) continue;
+    if (/公共资源|电子交易|加密|投标|开标|评标委员会|评标价|中标候选|中标人/u.test(raw)) continue;
     const index = Number(match[1]);
     if (!items.has(index)) {
       const cleanedTitle = cleanEvaluationItemTitle(raw);
       // 条款碎片过滤（真实生成回归）：评标办法文本被序号切分后的条款碎片
       // （「1委员会确定中」「7.3项规定」「00天，计划完成时间：」「如我方中标，我方承诺：」等）
       // 不是评分标准条目；提取为条目后会被承接审计补挂成小节 → 碎片小节无事实/证据支撑
-      // → 章节任务未就绪失败。原文与清理标题任一命中即不提取（编号粘连/剥离两种形态）
-      if (cleanedTitle && isTenderClauseFragmentTitle(cleanedTitle)) continue;
-      if (isTenderClauseFragmentTitle(raw)) continue;
+      // → 章节任务未就绪失败。原文与清理标题任一命中即不提取（编号粘连/剥离两种形态）。
+      // 4.12.12 升级为 isInstructionLikeOutlineTitle 超集（冒号结尾「质量标准：」、
+      // 括号未闭合「（以下简」、数字参数「65m18245…」、评标程序「确定评标价」同口径拦截）
+      if (cleanedTitle && isInstructionLikeOutlineTitle(cleanedTitle)) continue;
+      if (isInstructionLikeOutlineTitle(raw)) continue;
       items.set(index, { index, text: raw, title: cleanedTitle });
     }
   }
@@ -414,8 +416,9 @@ export function validateBidStructureBeforeGeneration(input: {
       if (!sectionTitle) continue;
       // 条款碎片不补挂（补挂回路二次治理）：评分条目标题若为招标条款碎片
       // （编号残留/承诺断言/委员会动作等），补挂进章节后无证据支撑会阻断章节任务；
-      // 二次过滤（documentGenerator 补挂后）为最终兜底，此处提前拦截避免补挂噪音
-      if (isTenderClauseFragmentTitle(sectionTitle)) continue;
+      // 二次过滤（documentGenerator 补挂后）为最终兜底，此处提前拦截避免补挂噪音。
+      // 4.12.12 与提取环节同口径升级为超集（冒号结尾/括号未闭合/数字参数/评标程序动作）
+      if (isInstructionLikeOutlineTitle(sectionTitle)) continue;
       const carrierIndex = chapterTexts.reduce((best, text, index) => {
         // 挂靠评分：语义相似度可用时用余弦打分；否则用条目标题的显式包含计数兜底
         const score = input.semanticSimilarity ? input.semanticSimilarity(sectionTitle, text) : (text.includes(normalize(sectionTitle)) ? 1 : 0);

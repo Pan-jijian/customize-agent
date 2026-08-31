@@ -7,7 +7,7 @@ import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
 import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgDivisionSectionIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
-import { areaArithmeticIssues, basicInfoScheduleFieldIssues, bodySentencesForSemantic, closurePhraseDensityCapIssues, collapseRepeatedWords, commercialDataInBodyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, paragraphOpeningRepeatIssues, repeatedWordIssues, resourceConsistencyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, stripCommercialDataSentences, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, areaArithmeticIssues, basicInfoScheduleFieldIssues, bodySentencesForSemantic, closurePhraseDensityCapIssues, collapseRepeatedWords, commercialDataInBodyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, excavationDepthLockIssues, fabricatedAwardIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, paragraphOpeningRepeatIssues, repeatedWordIssues, resourceConsistencyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, stripCommercialDataSentences, supportSystemConflictIssues } from './documentIntegrityChecks';
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { normalizeChapterTitleLine, requirementsCoverageIssues, tenderRequirementCheckItems, tenderRequirementSemanticQuery } from './tenderRequirements';
 import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
@@ -73,6 +73,12 @@ export async function buildStandardFinalValidationIssues(input: {
     ...crossSectionNumericConflictIssues(input.markdown),
     // h13：桩基表述残留（地基与基础无桩基工序但全文残留桩基表述）
     ...foundationFormResidueIssues(input.markdown),
+    // h14：关键设计决策两可表述阻断（评分报告 P4「桩基（或独立基础/筏板基础按图纸实施）」）
+    ...ambiguousEitherOrIssues(input.markdown),
+    // h14：基坑深度数值锁定（评分报告 P1 资料有 5.85m 正文 0 处，危大分级失去依据）
+    ...excavationDepthLockIssues(input.markdown),
+    // h14：奖项白名单（正文具名奖项必须来自招标要求/绑定资料，杜撰奖项即阻断）
+    ...fabricatedAwardIssues(input.markdown, input.factsModel, input.tenderRequirements),
     // h13d：基本信息表「计划工期」字段违约词校验（工期行误填违约条款文字）
     ...basicInfoScheduleFieldIssues(input.markdown),
     ...await supportSystemConflictIssues(input.markdown),
