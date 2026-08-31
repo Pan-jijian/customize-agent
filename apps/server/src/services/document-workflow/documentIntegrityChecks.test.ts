@@ -445,9 +445,37 @@ describe('duplicateTableIssues / stripDuplicateTables（h15 表格重复）', ()
     expect(issues[0].message).toContain('表格重复');
   });
 
-  it('相邻同源同文本表格（分页复制）→ 豁免', () => {
+  it('相邻完全一致的表格（连续复制粘贴）→ 报（生成系统无分页渲染场景）', () => {
+    // 连排无空行是真实缺陷形态：第二张表直接接在第一张表后，块内切分为两张后判定重复
     const issues = duplicateTableIssues(`\n${tableA}\n${tableA}\n`);
-    expect(issues).toEqual([]);
+    expect(issues.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('连排表第二张缺分隔行（青天实测：机械表重复两次）→ 块内切分后报重复', () => {
+    const deviceHeaderA = ['| 设备名称 | 规格型号 | 数量 | 使用阶段 | 用途 | 进退场时间 |', '| --- | --- | --- | --- | --- | --- |'].join('\n');
+    const deviceRows = ['| 塔式起重机 | TC6015 | 2台 | 主体结构 | 吊装 | 开工后第15日进场 |', '| 施工升降机 | SC200/200 | 4台 | 装饰与机电 | 垂直运输 | 主体施工至6层进场 |'].join('\n');
+    const deviceHeaderB = '| 设备名称 | 规格型号 | 数量 | 使用阶段 | 主要用途 | 进退场时间 |';
+    // 第二张表 header 后无分隔行（复制粘贴残留），数据行与第一张完全一致
+    const markdown = `${deviceHeaderA}\n${deviceRows}\n${deviceHeaderB}\n${deviceRows}`;
+    const issues = duplicateTableIssues(markdown);
+    expect(issues.length).toBeGreaterThanOrEqual(1);
+    expect(issues[0].message).toContain('表格重复');
+  });
+
+  it('同主题不同表头结构（青天实测：分阶段劳动力计划表出现两次）→ 报重复', () => {
+    // 真实形态：资源总表（单值）与第二次出现的劳动力表（表头结构不同、缺调配原则列），
+    // 表头相似仅 ~0.4 但首列同批阶段、数值高度重合 → 第三条「首列 ≥0.6 且数据 ≥0.15」命中
+    const laborA = ['| 施工阶段 | 投入工种数 | 阶段平均人数 | 阶段高峰人数 | 劳动力总量(工日) |', '| --- | --- | --- | --- | --- |', '| 基坑与基础 | 4 | 85 | 120 | 5100 |', '| 主体结构 | 5 | 160 | 220 | 19200 |', '| 二次结构与砌体 | 3 | 90 | 130 | 8100 |', '| 装饰装修 | 4 | 120 | 160 | 14400 |', '| 机电安装 | 4 | 70 | 100 | 8400 |'].join('\n');
+    const laborB = ['| 施工阶段 | 主要工种 | 阶段平均人数 | 阶段高峰人数 | 主要工作内容 |', '| --- | --- | --- | --- | --- |', '| 基坑与基础 | 土方工、钢筋工、混凝土工 | 85 | 120 | 土方开挖、钢筋绑扎 |', '| 主体结构 | 钢筋工、木工、混凝土工 | 160 | 220 | 现浇结构、吊装 |', '| 装饰装修 | 抹灰工、油漆工 | 120 | 160 | 抹灰、幕墙安装 |', '| 机电安装 | 电工、管道工 | 70 | 100 | 机电安装 |'].join('\n');
+    const issues = duplicateTableIssues(`${laborA}\n\n${laborB}`);
+    expect(issues.length).toBeGreaterThanOrEqual(1);
+    expect(issues[0].message).toContain('表格重复');
+  });
+
+  it('同表头不同内容的表（不同章各列不同对象）→ 不误报', () => {
+    const tableC = ['| 保护对象 | 位置关系 | 风险影响 |', '| --- | --- | --- |', '| 地铁隧道 | 南侧 12m | 沉降风险 |'].join('\n');
+    const tableD = ['| 保护对象 | 位置关系 | 风险影响 |', '| --- | --- | --- |', '| 高压燃气管 | 北侧 8m | 泄漏风险 |'].join('\n');
+    expect(duplicateTableIssues(`${tableC}\n\n${tableD}`)).toEqual([]);
   });
 
   it('stripDuplicateTables 保留信息量大者并删除另一张', () => {

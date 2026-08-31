@@ -1318,31 +1318,69 @@ function stripAwardLeadVerb(award: string): string {
 // 属多模板拼接未清理痕迹；全文无冗余重复是形式格式类评审硬要求。
 // 判定：表头归一化完全相同，或表头相似度 ≥0.7 且首列重合 ≥60%；表格行/标题行不入段落重复池。
 
-interface MarkdownTableBlock { startLine: number; endLine: number; header: string[]; firstCol: string[]; bodyChars: number; raw: string[] }
+interface MarkdownTableBlock { startLine: number; endLine: number; header: string[]; firstCol: string[]; dataCells: string[]; bodyChars: number; raw: string[] }
+
+const TABLE_SEPARATOR_RE = /^\s*\|[\s:|-]+\|/u;
+/** 数据行与表头相似度达到该阈值时视为「无分隔行的重复粘贴表头」，在块内切分新表 */
+const EMBEDDED_HEADER_SIM = 0.6;
 
 function extractMarkdownTables(markdown: string): MarkdownTableBlock[] {
   const lines = markdown.split(/\r?\n/u);
   const tables: MarkdownTableBlock[] = [];
   const cells = (row: string) => row.trim().replace(/^\|/u, '').replace(/\|$/u, '').split('|').map(cell => cell.trim());
+  const isSeparator = (row: string) => TABLE_SEPARATOR_RE.test(row);
   let cursor = 0;
   while (cursor < lines.length) {
     if (!/^\s*\|/u.test(lines[cursor])) { cursor += 1; continue; }
     let end = cursor;
     while (end < lines.length && /^\s*\|/u.test(lines[end])) end += 1;
     const block = lines.slice(cursor, end);
-    // 标准表：第二行是分隔行（|---|:---|），数据行至少 1 行
-    if (block.length >= 3 && /^\s*\|[\s:|-]+\|/u.test(block[1] || '')) {
-      const header = cells(block[0]).map(cell => cell.replace(/[*_`]/gu, '').trim());
-      const dataRows = block.slice(2);
+    // 连排表切分：同一 | 行块内可能粘贴了多张表。①标准形态「表头行+分隔行」成表；
+    // ②复制粘贴残留形态：表头行后缺分隔行（青天实测「主要机械设备投入计划表重复两次」
+    // 第二张表无分隔行直接接数据行）——数据行与当前表头相似度 ≥0.6 时在该行切分新表。
+    let currentHeader: string[] | undefined;
+    let tableStart = 0;
+    let dataStart = 0;
+    let blockIndex = 0;
+    const pushTable = (dataEnd: number) => {
+      if (!currentHeader) return;
+      const dataRows = block.slice(dataStart, dataEnd);
+      if (dataRows.length === 0) return;
       tables.push({
-        startLine: cursor,
-        endLine: end - 1,
-        header,
+        startLine: cursor + tableStart,
+        endLine: cursor + dataEnd - 1,
+        header: currentHeader,
         firstCol: dataRows.map(row => cells(row)[0]?.replace(/[*_`]/gu, '').trim() || '').filter(Boolean),
+        dataCells: dataRows.flatMap(row => cells(row).map(cell => cell.replace(/[*_`]/gu, '').trim())).filter(Boolean),
         bodyChars: dataRows.join('').length,
-        raw: block,
+        raw: block.slice(tableStart, dataEnd),
       });
+    };
+    while (blockIndex < block.length) {
+      // ① 标准表头：当前行 + 下一行分隔行
+      if (blockIndex + 1 < block.length && isSeparator(block[blockIndex + 1] || '')) {
+        pushTable(blockIndex);
+        currentHeader = cells(block[blockIndex]).map(cell => cell.replace(/[*_`]/gu, '').trim());
+        tableStart = blockIndex;
+        dataStart = blockIndex + 2;
+        blockIndex += 2;
+        continue;
+      }
+      // ② 无分隔行的重复粘贴表头（需已处于数据区且其后还有行）
+      if (currentHeader && blockIndex > dataStart) {
+        const rowCells = cells(block[blockIndex]).map(cell => cell.replace(/[*_`]/gu, '').trim()).filter(Boolean);
+        if (jaccard(rowCells, currentHeader) >= EMBEDDED_HEADER_SIM && blockIndex + 1 < block.length && !isSeparator(block[blockIndex + 1] || '')) {
+          pushTable(blockIndex);
+          currentHeader = rowCells;
+          tableStart = blockIndex;
+          dataStart = blockIndex + 1;
+          blockIndex += 1;
+          continue;
+        }
+      }
+      blockIndex += 1;
     }
+    pushTable(block.length);
     cursor = end;
   }
   return tables;
@@ -1367,22 +1405,30 @@ export function duplicateTableIssues(markdown: string): ValidationIssue[] {
       const headerSame = a.header.length > 0 && a.header.length === b.header.length && a.header.every((cell, index) => cell === b.header[index]);
       const headerSim = jaccard(a.header, b.header);
       const firstColSim = jaccard(a.firstCol, b.firstCol);
-      if (!headerSame && !(headerSim >= 0.7 && firstColSim >= 0.6)) continue;
-      // 同源单表跨页重复（分页复制导致的连续相同表）与不同表自然相似须区分：
-      // 两表相邻且原始文本完全一致属同表重复渲染，不计冲突
-      if (b.startLine === a.endLine + 1 && a.raw.join('\n') === b.raw.join('\n')) continue;
+      // 同结构不同内容的表（如表头「保护对象|位置关系|风险影响」在不同章节各列不同对象）
+      // 不得仅凭表头相同判重复（旧文档实测：表头 100% 重合但首列 0%~11% 的三组被误报）。
+      // 真重复形态（青天实测）：①完全一致连续表（数据行 100% 重合）②第二次缺列的高度重复表
+      //（表头相似 ≥0.7 且首列重合 ≥0.6）③同主题不同表头结构（「分阶段劳动力投入计划表」出现两次，
+      // 表头相似仅 0.11 但首列同批阶段重合 ≥0.6 且数据重合 ≥0.15）；「相邻同表豁免」已移除——
+      // 生成系统无分页渲染场景，连续出现的相同表格就是复制粘贴缺陷。
+      const dataSim = jaccard(a.dataCells, b.dataCells);
+      if (!(headerSame && dataSim >= 0.6) && !(headerSim >= 0.7 && firstColSim >= 0.6) && !(firstColSim >= 0.6 && dataSim >= 0.15)) continue;
       issues.push({
         level: 'error',
         severity: 'blocker',
         category: 'style',
         owner: 'llm',
         repairability: 'llm_repairable',
-        message: `表格重复：第 ${a.startLine + 1}~${a.endLine + 1} 行表格（表头：${a.header.slice(0, 3).join('|')}）与第 ${b.startLine + 1}~${b.endLine + 1} 行表格高度重复（表头重合 ${Math.round(headerSim * 100)}%、首列重合 ${Math.round(firstColSim * 100)}%）`,
+        message: `表格重复：第 ${a.startLine + 1}~${a.endLine + 1} 行表格（表头：${a.header.slice(0, 3).join('|')}）与第 ${b.startLine + 1}~${b.endLine + 1} 行表格高度重复（表头重合 ${Math.round(headerSim * 100)}%、数据重合 ${Math.round(dataSim * 100)}%、首列重合 ${Math.round(firstColSim * 100)}%）`,
         suggestion: '同一文档内同主题表格只保留信息最全的一张：删除重复表格（保留字段与数据行更多的那张），删除后核对章节表格计划仍被覆盖。',
       });
     }
   }
-  return issues.slice(0, 3);
+  // 按重合度降序取前 5（真重复优先于同结构近似表，避免 slice 截断把真阳性挤出）
+  return issues.sort((left, right) => {
+    const sim = (message: string) => Number(message.match(/数据重合\s*(\d+)%/u)?.[1] ?? 0);
+    return sim(right.message) - sim(left.message);
+  }).slice(0, 5);
 }
 
 /** 表格重复确定性删除（检测定位=修复定位）：保留信息量大的那张（数据行字符多者），删除其余重复表 */
@@ -1399,8 +1445,9 @@ export function stripDuplicateTables(markdown: string): { markdown: string; remo
       const headerSame = a.header.length > 0 && a.header.length === b.header.length && a.header.every((cell, index) => cell === b.header[index]);
       const headerSim = jaccard(a.header, b.header);
       const firstColSim = jaccard(a.firstCol, b.firstCol);
-      if (!headerSame && !(headerSim >= 0.7 && firstColSim >= 0.6)) continue;
-      if (b.startLine === a.endLine + 1 && a.raw.join('\n') === b.raw.join('\n')) continue;
+      const dataSim = jaccard(a.dataCells, b.dataCells);
+      // 与 duplicateTableIssues 同判定口径（检测定位=修复定位）：同结构不同内容表不删
+      if (!(headerSame && dataSim >= 0.6) && !(headerSim >= 0.7 && firstColSim >= 0.6) && !(firstColSim >= 0.6 && dataSim >= 0.15)) continue;
       // 保留 bodyChars 大者（信息更全），删除另一张
       const [keep, drop] = a.bodyChars >= b.bodyChars ? [a, b] : [b, a];
       for (let line = drop.startLine; line <= drop.endLine; line += 1) removed.add(line);
