@@ -6,7 +6,7 @@ import { documentTextLength } from './budget';
 import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget, extractKeyParameterWindows } from './evidence';
 import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, removeUnwantedDrawingImages, sanitizeFormalMarkdown, writerSystemPrefix } from './markdownComposer';
 import { callDocumentLlm, callDocumentLlmJson, contextLayerChars, getDocumentLlmFailureStreak, getDocumentLlmMaxConcurrency } from './llmClient';
-import { findDuplicateH4Titles, stringifyFactValue, throwIfAborted } from './utils';
+import { dedupeRepeatedSubsections, findDuplicateH4Titles, stringifyFactValue, throwIfAborted } from './utils';
 import { measureGenerationStep } from './rolePipeline';
 import { normalizePlannedSections, professionalSectionTaskCard } from './promptRuleExtraction';
 import { groupTablePlansForSections, sectionTablePlans, sectionTablePlansPrompt, tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
@@ -1451,11 +1451,23 @@ export async function buildPlannedChapterContent(input: {
         const missing = sectionTitles.filter(title => !withBlockShell.includes(title));
         // 同 H3 内同名 H4 重复展开同样视为质检不达标（实测一轮输出三轮相同改造项/危大工程三连），阻断重复进入二轮后处理
         const duplicates = findDuplicateH4Titles(withBlockShell);
-        if (chars >= Math.max(400, Math.floor(block.targetWords * 0.5)) && missing.length === 0 && duplicates.length === 0) {
+        // 4.12.17 质检字数阈值 0.5 → 0.4：单块目标 4000 字时模型自然输出 1600~2000 字（44%~50%），
+        // 0.5 阈值（2000 字）恰好卡在自然输出上方，实测 4/6 章大面积块判失败 → 整章紧凑降级 → 全文字数雪崩；
+        // 0.4 阈值放行自然输出区间，字数缺口交由章节/交付前定向补写轮补齐（补写目标仍按章口径）
+        if (chars >= Math.max(400, Math.floor(block.targetWords * 0.4)) && missing.length === 0 && duplicates.length === 0) {
           return withBlockShell;
         }
         lastMissing = missing;
         lastDuplicates = duplicates;
+        // 4.12.17 二轮反馈后仍重复 H4：确定性去重兜底（删除第二次及以后出现的重复 H4 段，保留首次展开），
+        // 结构性重复由代码兜底，避免内容合格的块（如 4328 字、仅重复 1 个 H4）整块作废 → 整章降级 → 字数雪崩
+        if (attempt === 1 && missing.length === 0 && duplicates.length > 0) {
+          const deduped = dedupeRepeatedSubsections(withBlockShell);
+          const dedupedChars = documentTextLength(deduped);
+          if (dedupedChars >= Math.max(400, Math.floor(block.targetWords * 0.4))) {
+            return deduped;
+          }
+        }
         if (input.diagnostics && attempt === 1) input.diagnostics.llm.lastError = `规划块质检未达标：${block.title}（${chars} 字，缺 ${missing.join('、') || '无'}${duplicates.length ? `，重复 H4 ${duplicates.join('、')}` : ''}）`;
       } catch (error) {
         if (input.diagnostics && attempt === 1) input.diagnostics.llm.lastError = error instanceof Error ? error.message : String(error);

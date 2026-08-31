@@ -226,10 +226,13 @@ export function fallbackStructureForSections(inputSections: string[], chapterTit
     const mergedPoints = mergeDomainSections(items);
     for (let offset = 0; offset < mergedPoints.length; offset += MAX_SUB_POINTS_PER_BLOCK) {
       const chunk = mergedPoints.slice(offset, offset + MAX_SUB_POINTS_PER_BLOCK);
-      const pointCount = mergedPoints.length;
-      blocks.push({ title: chunk[0].title || chapterTitle, subPoints: chunk, facts: [], targetWords: Math.min(MAX_BLOCK_TARGET_WORDS, Math.max(MIN_BLOCK_TARGET_WORDS, Math.floor(targetWords / Math.max(1, Math.ceil(pointCount / MAX_SUB_POINTS_PER_BLOCK))))) });
+      blocks.push({ title: chunk[0].title || chapterTitle, subPoints: chunk, facts: [], targetWords: MIN_BLOCK_TARGET_WORDS });
     }
   }
+  // 4.12.17 章目标按块数+点数加权重分配（与 LLM 规划路径同口径）：
+  // 原公式按 ceil(细目数/6) 预估块数把单块目标虚高到 4000（章 8333 字、7 条细目 4 域时每块 4000），
+  // 块质检 0.5×目标=2000 字卡在模型单块自然输出（1600~2000 字）上方，实测 4/6 章大面积块判失败 → 整章降级 → 字数雪崩
+  allocateBlockTargetWords(blocks, targetWords);
   return { blocks, coveredSections: inputSections.slice(), fallbackSections: [], llmPlanned: false };
 }
 
