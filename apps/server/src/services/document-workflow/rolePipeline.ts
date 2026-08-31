@@ -52,7 +52,7 @@ export function createGenerationDiagnostics(strategy: DocumentGenerationStrategy
     metrics: [],
     llm: { calls: 0, failures: 0, maxActive: 0, retries: 0, failureStreak: 0, schemaFailures: 0, promptCacheHitTokens: 0, promptCacheMissTokens: 0, inputTokens: 0, outputTokens: 0, inputChars: 0, layerChars: { l0: 0, l1: 0, l2: 0, l3: 0 } },
     semantic: { embedCacheHits: 0, embedCacheMisses: 0 },
-    evidence: { raw: 0, used: 0, filteredNoise: 0, budgetDropped: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0 },
+    evidence: { raw: 0, used: 0, filteredNoise: 0, budgetDropped: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0, t0Chars: 0, t1Chars: 0, t2Lines: 0, omittedChars: 0 },
     quality: { blockingCount: 0, importantCount: 0, minorCount: 0, repairedCount: 0 },
   };
 }
@@ -231,11 +231,11 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     ]),
     l3: contextLayerChars([evidenceText]),
   });
-  const evidenceText = evidenceBundle && evidenceBudget ? `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: evidenceBudget })}` : '';
+  const evidenceText = evidenceBundle && evidenceBudget ? `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: evidenceBudget, diagnostics: input.diagnostics })}` : '';
   let result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(evidenceText), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, outFailure: failure, contextLayers: contextLayersFor(evidenceText) });
   if (!result && evidenceBundle && isContextOverflowLlmError(failure.value)) {
     // 上下文超长降级重试：证据压缩到极小预算（3000 字符），优先保住修复任务本身
-    const compactEvidenceText = `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: 3000 })}`;
+    const compactEvidenceText = `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: 3000, diagnostics: input.diagnostics })}`;
     result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(compactEvidenceText), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, contextLayers: contextLayersFor(compactEvidenceText) });
   }
   throwIfAborted(input.signal);

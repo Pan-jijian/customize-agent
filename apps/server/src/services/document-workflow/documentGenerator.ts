@@ -434,6 +434,11 @@ export async function generateDocumentDraft(input: { templateId: string; require
   })();
   const baseEffectiveChapters = buildConstructionOrgTablePlans({ chapters: bidStructureAudit.enrichedChapters, projectGraph, canonicalFacts });
   template = { ...template, chapters: baseEffectiveChapters };
+  // P4 确定性并行化：planDocument（章节任务规划，纯确定性逻辑 + 本地嵌入分类，无 LLM 调用）提前启动，
+  // 与下方评审条目语义构建、招标要求提取、事实主表构建等前置链并行执行，原串行位置 await 结果；
+  // 提前启动期间若拒绝，catch 占位防 unhandledRejection（错误在下方 await 处统一抛出）
+  const plannedDocumentTask = planDocument({ template, context: agentWorkflow, title: template.name });
+  plannedDocumentTask.catch(() => undefined);
   const chapterGraphMap = new Map<string, { graphFiles: Set<string>; graphBoqItems: Array<{ name: string; quantity: string; unit: string; sourceFiles: string[] }>; graphWorks: string[]; graphMethods: string[]; gaps: string[] }>();
   if (projectGraph) {
     const graphAllFiles = new Set<string>();
@@ -634,7 +639,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-blueprint', status: 'success', message: '已生成全局事实主表与文档蓝图，后续章节和小节将共用同一套专业约束', details: documentBlueprintContext.split('\n').slice(0, 12) }, { subtitle: '全局蓝图' }));
   }
   const documentBudget = buildDocumentBudget({ requirement: input.requirement, promptTexts, template, chapters: effectiveChapters, spec: documentSpec });
-  const plannedDocument = await planDocument({ template, context: agentWorkflow, title: template.name });
+  const plannedDocument = await plannedDocumentTask;
   agentWorkflow.documentPlan = plannedDocument.plan;
   agentWorkflow.nodes.push(plannedDocument.node);
   upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'agent-document-planner', status: 'success', message: plannedDocument.node.outputSummary || 'Agent 文档规划完成', details: plannedDocument.plan.chapters.map(chapter => `${chapter.title}：${chapter.sections.length} 条细目`) }, { subtitle: 'Agent Document Planner', order: progressStages.length }));
@@ -797,6 +802,16 @@ export async function generateDocumentDraft(input: { templateId: string; require
     }
     generationDiagnostics.evidence.searchQueries += mergedSearchQueries.length;
     generationDiagnostics.evidence.searchMs += Date.now() - searchStartedAt;
+    // P4 细粒度埋点：章节检索段历史仅首尾两个事件（KB 搜索 + LLM 深召回可达 10 分钟级，中间零事件，
+    // 前端长时间静止误判卡死）——关键检索节点即时更新本章 stage 消息与进度
+    progressStages[chapterProgressIndex] = displayStage({
+      type: 'chapter_generation',
+      roleId: 'chapter_generation',
+      status: 'running',
+      message: `${displayChapterTitle(chapter.title)} KB 检索完成：${mergedSearchQueries.length} 组查询，准备深度召回与语义排序`,
+      progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: '证据检索' },
+    }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
+    emitProgress();
     for (const results of searchResults) {
       rawEvidence.push(...results
         .filter((item: KbSearchResult) => evidenceInScope(projectRoot, item.filePath, evidenceScopePaths))
@@ -927,6 +942,18 @@ export async function generateDocumentDraft(input: { templateId: string; require
       riskLevel: readinessPlan.riskLevel,
     });
     if (!graphEvidenceSufficient && needsDeepRetrieval && scopedFilePaths.length > 0) {
+      // P4 细粒度埋点：LLM 深召回是检索段最长 LLM 调用，开始前推送事件消除盲区
+      const deepNeedCount = new Set([...missingFacts, ...requiredMissingNeeds]).size;
+      if (deepNeedCount > 0) {
+        progressStages[chapterProgressIndex] = displayStage({
+          type: 'chapter_generation',
+          roleId: 'chapter_generation',
+          status: 'running',
+          message: `${displayChapterTitle(chapter.title)} 正在深度召回缺失事实证据（${deepNeedCount} 项需求）`,
+          progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: '深度召回' },
+        }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
+        emitProgress();
+      }
       // P1-4：缺失事实与必需事实需求并入同一次深召回（原两次调用查询集高度重叠，合并后每章深召回查询数约降 40%）
       const deepEvidence = await retrieveDeepChapterEvidence({ manager, projectRoot, chapter, scopedFilePaths, fileRoleByPath, fileProcessingByPath, requiredNeeds: [...new Set([...missingFacts, ...requiredMissingNeeds])], highRisk: rolePoolRisk.highRisk || requiredMissingNeeds.length > 0, signal: input.signal }).catch(() => []);
       deepEvidenceCount = deepEvidence.length;
@@ -942,6 +969,15 @@ export async function generateDocumentDraft(input: { templateId: string; require
       // P1-4：深召回后重算事实需求，仍缺失的必需需求触发下方一次轻量补充
       resolvedFactNeeds = resolveChapterFactNeeds({ needs: chapterFactNeeds, factsModel: preliminaryFactsModel, evidence: scopedEvidence, profile: domainProfile, excludedEvidenceKeys });
       requiredMissingNeeds = resolvedFactNeeds.filter(item => item.need.required && item.status !== 'satisfied').map(item => item.need.label);
+      // P4 细粒度埋点：深召回完成即时刷新命中数（含零命中），前端可见检索推进
+      progressStages[chapterProgressIndex] = displayStage({
+        type: 'chapter_generation',
+        roleId: 'chapter_generation',
+        status: 'running',
+        message: `${displayChapterTitle(chapter.title)} 深度召回完成：命中 ${deepEvidenceCount} 条${requiredMissingNeeds.length > 0 ? `，仍缺 ${requiredMissingNeeds.length} 项（触发轻量补充）` : ''}`,
+        progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: '证据检索' },
+      }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
+      emitProgress();
     }
     // P1-4：合并深召回后仍有必需事实缺口时做一次轻量补充（原第二次深召回，highRisk 强制；仅当新 needs 出现时触发）
     if (requiredMissingNeeds.length > 0 && scopedFilePaths.length > 0) {
@@ -1051,11 +1087,14 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const maxSectionFirstSections = Math.max(4, Number(process.env.DOCUMENT_SECTION_FIRST_MAX_SECTIONS || 8));
     // 小节级成稿：长章节（目标 ≥6000 字、小节 4-8、非复合标题）自动启用，
     // 把整章长文拆成每节 900-1400 字的小调用，根治单次长文成稿长度不稳；
+    // 耗时优化 P1：阈值放宽为「小节 2-8、非复合标题」即可启用——整章单次长调用（12 分钟级）
+    // 是成稿段最大浪费（章 3 实测 724.6s 失败后降级链又重生成两遍），小节并发让单次输出
+    // 稳定在 600-1400 字、失败只重试单节，整章路径仅保留给无小节章（小目标）
     // env DOCUMENT_SECTION_FIRST_GENERATION 显式置 0 可关闭，置 1 强制开启（不区分章节画像）
     const configuredSectionFirst = process.env.DOCUMENT_SECTION_FIRST_GENERATION;
     const sectionFirstDisabled = configuredSectionFirst !== undefined && Number(configuredSectionFirst) === 0;
     const sectionFirstForced = configuredSectionFirst !== undefined && Number(configuredSectionFirst) !== 0;
-    const sectionFirstAutoEligible = targetWords >= 6000 && sectionCount >= 4 && sectionCount <= maxSectionFirstSections && !compositeChapterTitle;
+    const sectionFirstAutoEligible = sectionCount >= 2 && sectionCount <= maxSectionFirstSections && !compositeChapterTitle;
     const useSectionGroup = !sectionFirstDisabled && sectionCount >= 2 && (sectionCount > maxSectionFirstSections || compositeChapterTitle || (documentBudget.longformStrict && sectionCount >= 6));
     const useSectionFirst = !sectionFirstDisabled && !useSectionGroup && sectionCount >= 2 && sectionCount <= maxSectionFirstSections && (sectionFirstForced || sectionFirstAutoEligible || documentBudget.longformStrict);
     // 规划驱动模式状态：块级成稿后 Reviewer/Repairer 按覆盖映射表审查承接，避免把语义合并后的 H4 误判为缺节并重新拆回
@@ -1421,7 +1460,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
         const body = stripGeneratedHeading(sectionValue);
         return body ? `${contentValue.trimEnd()}\n\n### ${title}\n\n${body}` : contentValue;
       };
-      // 单个小节补写（LLM 调用部分）：返回待落位的补写结果；落位必须在批次完成后串行执行，避免并发改写 draftChapter 互相覆盖
+      // 单个小节补写（LLM 调用部分）：返回待落位的补写结果；落位必须在全部 LLM 调用完成后串行执行，避免并发改写 draftChapter 互相覆盖
       const processSectionRewrite = async (issue: { message: string; suggestion?: string }): Promise<{ sectionTitle: string; rewriteReason: string; normalizedSection?: string; normalizedLength: number; enoughDepth: boolean; evidenceCount: number; repairTargetWords: number; failed?: string } | undefined> => {
         throwIfAborted(input.signal);
         const sectionTitle = sectionTitleFromDepthIssueMessage(issue.message);
@@ -1492,52 +1531,60 @@ export async function generateDocumentDraft(input: { templateId: string; require
         }
         return { sectionTitle, rewriteReason, normalizedLength: 0, enoughDepth: false, evidenceCount: 0, repairTargetWords, failed: !repairedSection ? generationDiagnostics.llm.lastError || '空响应' : '仍包含 WRITER_MISSING_SECTION' };
       };
-      // 深度不足小节批量并发补写（每批 3 个）：批次内 LLM 调用并发，落位串行，避免并发改写 draftChapter 互相覆盖
-      const rewriteBatchSize = 3;
-      for (let start = 0; start < sectionRewriteIssues.length; start += rewriteBatchSize) {
-        const batch = sectionRewriteIssues.slice(start, start + rewriteBatchSize);
-        const batchResults = await Promise.allSettled(batch.map(issue => processSectionRewrite(issue)));
-        for (const result of batchResults) {
-          if (result.status === 'rejected') {
-            if (input.signal?.aborted) throw result.reason;
-            repairSectionResults.push(`失败：${result.reason instanceof Error ? result.reason.message : '未知异常'}`);
-            continue;
+      // P2 耗时优化：深度不足小节全并发补写（历史每批 3 个批间串行，N 个小节需 ceil(N/3) 个串行 LLM 轮次，
+      // 单章修复阶段可放大到 2~3 倍耗时；LLM 调用是补写的主要耗时，全部并行发起，落位仍是纯字符串
+      // 替换按序串行，无并发覆盖风险），并与 patch 修复（polish 精修 / blocker 修复）并行执行——
+      // 两者 issue 类别互斥（深度 vs 非深度 blocker），patch 修复不触碰深度不足小节，
+      // 深度补写按小节标题定位替换，patch 修复不改章节结构（系统约束），并行安全
+      const shouldRunPatchRepair = polishOnly || blockingReviewIssues.some(issue => !/Writer 未完成|正文不足，未达到任务最小深度/u.test(issue.message));
+      const [sectionRewriteResults, patchRepaired] = await Promise.all([
+        Promise.allSettled(sectionRewriteIssues.map(issue => processSectionRewrite(issue))),
+        (async () => {
+          if (!shouldRunPatchRepair) return null;
+          if (polishOnly) {
+            // 定向精修轮：标题对齐/工序顺序表达缺失类 warning 单独执行，与 blocker 修复共用 patch 定位管道
+            polishRoundDone = true;
+            return await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `agent-polisher:${chapter.id}`, () => repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: draftChapter.content, evidence, missingFacts, sections }, issues: polishWarnings.map(issue => `${issue.message}；${issue.suggestion || ''}`), promptTexts: [plannedPromptTextsRef || agentEnhancedPromptTexts, repairInstruction].filter(Boolean).join('\n\n'), requirement: input.requirement, forbidDrawingImages, diagnostics: generationDiagnostics, signal: input.signal })));
           }
-          if (!result.value) continue;
-          if (result.value.failed) {
-            repairSectionResults.push(`失败：${result.value.sectionTitle}（${result.value.failed}）`);
-            const failures = (sectionRewriteFailures.get(result.value.sectionTitle) || 0) + 1;
-            sectionRewriteFailures.set(result.value.sectionTitle, failures);
-            if (failures >= 2) abandonedSections.add(result.value.sectionTitle);
-            continue;
-          }
-          const anchorSectionTitle = anchorTitleForSection(plannedCoverageRef, result.value.sectionTitle);
-          const nextContent = result.value.enoughDepth ? replaceChapterSection(draftChapter.content, result.value.sectionTitle, result.value.normalizedSection || '', anchorSectionTitle) : draftChapter.content;
-          const hasRange = nextContent !== draftChapter.content;
-          if (hasRange) draftChapter = { ...draftChapter, content: nextContent };
-          if (hasRange) {
-            // 补写落位成功：清零该小节失败计数（问题4：失败计数按连续轮累计，成功一次即复位）
-            sectionRewriteFailures.delete(result.value.sectionTitle);
-            abandonedSections.delete(result.value.sectionTitle);
-          } else if (!result.value.enoughDepth) {
-            const failures = (sectionRewriteFailures.get(result.value.sectionTitle) || 0) + 1;
-            sectionRewriteFailures.set(result.value.sectionTitle, failures);
-            if (failures >= 2) abandonedSections.add(result.value.sectionTitle);
-          }
-          repairSectionResults.push(hasRange ? `成功：${result.value.sectionTitle}（${result.value.normalizedLength}字，证据 ${result.value.evidenceCount} 条）` : `失败：${result.value.sectionTitle}（${result.value.enoughDepth ? '未定位到原小节块' : `补写不足 ${result.value.normalizedLength}/${result.value.repairTargetWords} 字`}）`);
+          return await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `agent-repairer:${chapter.id}`, () => repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: draftChapter.content, evidence, missingFacts, sections }, issues: [...blockingReviewIssues.map(issue => `${issue.message}；${issue.suggestion || ''}`), ...(polishWarnings.length > 0 && !polishRoundDone ? polishWarnings.map(issue => `${issue.message}；${issue.suggestion || ''}`) : [])], promptTexts: [plannedPromptTextsRef || agentEnhancedPromptTexts, repairInstruction].filter(Boolean).join('\n\n'), requirement: input.requirement, forbidDrawingImages, diagnostics: generationDiagnostics, signal: input.signal, maxTokens: escalatedRepair ? 3200 : undefined })));
+        })(),
+      ]);
+      // 落位顺序：patch 修复全文先落位，深度补写各小节在修复后全文上逐节替换（纯字符串操作串行执行）
+      let mergedContent = patchRepaired?.content || draftChapter.content;
+      for (const result of sectionRewriteResults) {
+        if (result.status === 'rejected') {
+          if (input.signal?.aborted) throw result.reason;
+          repairSectionResults.push(`失败：${result.reason instanceof Error ? result.reason.message : '未知异常'}`);
+          continue;
         }
-        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: `${displayChapterTitle(chapter.title)} 已补写深度不足小节 ${Math.min(start + rewriteBatchSize, sectionRewriteIssues.length)}/${sectionRewriteIssues.length}`, details: repairSectionResults }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
+        if (!result.value) continue;
+        if (result.value.failed) {
+          repairSectionResults.push(`失败：${result.value.sectionTitle}（${result.value.failed}）`);
+          const failures = (sectionRewriteFailures.get(result.value.sectionTitle) || 0) + 1;
+          sectionRewriteFailures.set(result.value.sectionTitle, failures);
+          if (failures >= 2) abandonedSections.add(result.value.sectionTitle);
+          continue;
+        }
+        const anchorSectionTitle = anchorTitleForSection(plannedCoverageRef, result.value.sectionTitle);
+        const nextContent = result.value.enoughDepth ? replaceChapterSection(mergedContent, result.value.sectionTitle, result.value.normalizedSection || '', anchorSectionTitle) : mergedContent;
+        const hasRange = nextContent !== mergedContent;
+        if (hasRange) mergedContent = nextContent;
+        if (hasRange) {
+          // 补写落位成功：清零该小节失败计数（问题4：失败计数按连续轮累计，成功一次即复位）
+          sectionRewriteFailures.delete(result.value.sectionTitle);
+          abandonedSections.delete(result.value.sectionTitle);
+        } else if (!result.value.enoughDepth) {
+          const failures = (sectionRewriteFailures.get(result.value.sectionTitle) || 0) + 1;
+          sectionRewriteFailures.set(result.value.sectionTitle, failures);
+          if (failures >= 2) abandonedSections.add(result.value.sectionTitle);
+        }
+        repairSectionResults.push(hasRange ? `成功：${result.value.sectionTitle}（${result.value.normalizedLength}字，证据 ${result.value.evidenceCount} 条）` : `失败：${result.value.sectionTitle}（${result.value.enoughDepth ? '未定位到原小节块' : `补写不足 ${result.value.normalizedLength}/${result.value.repairTargetWords} 字`}）`);
+      }
+      if (sectionRewriteIssues.length > 0) {
+        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: `agent-repairer-${chapter.id}`, status: 'running', message: `${displayChapterTitle(chapter.title)} 已补写深度不足小节 ${sectionRewriteIssues.length}/${sectionRewriteIssues.length}`, details: repairSectionResults }, { subtitle: 'Agent Repairer', order: repairerStageOrder }));
         emitProgress(chapterDrafts);
       }
-      let repaired = { content: draftChapter.content, appliedCount: 0 };
-      if (polishOnly) {
-        // 定向精修轮：标题对齐/工序顺序表达缺失类 warning 单独执行，与 blocker 修复共用 patch 定位管道
-        polishRoundDone = true;
-        repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `agent-polisher:${chapter.id}`, () => repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: draftChapter.content, evidence, missingFacts, sections }, issues: polishWarnings.map(issue => `${issue.message}；${issue.suggestion || ''}`), promptTexts: [plannedPromptTextsRef || agentEnhancedPromptTexts, repairInstruction].filter(Boolean).join('\n\n'), requirement: input.requirement, forbidDrawingImages, diagnostics: generationDiagnostics, signal: input.signal })));
-      } else if (blockingReviewIssues.some(issue => !/Writer 未完成|正文不足，未达到任务最小深度/u.test(issue.message))) {
-        repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `agent-repairer:${chapter.id}`, () => repairChapterByQuality({ template, chapter: { id: chapter.id, title: chapter.title, content: draftChapter.content, evidence, missingFacts, sections }, issues: [...blockingReviewIssues.map(issue => `${issue.message}；${issue.suggestion || ''}`), ...(polishWarnings.length > 0 && !polishRoundDone ? polishWarnings.map(issue => `${issue.message}；${issue.suggestion || ''}`) : [])], promptTexts: [plannedPromptTextsRef || agentEnhancedPromptTexts, repairInstruction].filter(Boolean).join('\n\n'), requirement: input.requirement, forbidDrawingImages, diagnostics: generationDiagnostics, signal: input.signal, maxTokens: escalatedRepair ? 3200 : undefined })));
-      }
-      const repairedContent = await stripBidDisciplineSentencesSemantic(finalizeChapterContentQuality(repaired.content || draftChapter.content, chapter), bidProcedureJudge);
+      const repairedContent = await stripBidDisciplineSentencesSemantic(finalizeChapterContentQuality(mergedContent, chapter), bidProcedureJudge);
       draftChapter = { ...draftChapter, content: repairedContent };
       agentReview = reviewChapterDraft({ task: chapterTaskResult.task, draft: draftChapter, context: agentWorkflow, plannedCoverage: plannedCoverageRef });
       agentWorkflow.reviewResults = { ...(agentWorkflow.reviewResults || {}), [chapter.id]: agentReview };
@@ -1657,7 +1704,9 @@ export async function generateDocumentDraft(input: { templateId: string; require
         upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-repair', status: 'running', message: `跨章一致性冲突第 ${repairRound + 1} 轮定向修复（${globalConsistencyIssues.length} 个冲突）` }, { subtitle: '跨章一致性修复' }));
         emitProgress(chapterDraftsFinal);
         let appliedCount = 0;
-        for (const chapter of chapterDraftsFinal) {
+        // P3 耗时优化：冲突修复按章并行（历史 for 循环逐章串行，N 章冲突修复串行 N 次 LLM 调用，
+        // 全局一致性阶段可放大数倍耗时；各章 repairChapterByQuality 只改本章 content，无共享状态，并行安全）
+        const repairChapterTargets = chapterDraftsFinal.flatMap(chapter => {
           // 冲突关联章节：LLM 审查 issue 含章节标题；确定性冲突的 issue 不含章节标题，
           // 用冲突表述中的数值/层级定位（数值或“找平层/防水层”等层级出现在哪个章节正文，哪个章节参与定向修复）
           const normalizedChapterContent = chapter.content.replace(/\s+/gu, '').replace(/平方米|m²|m2/giu, '㎡');
@@ -1675,22 +1724,31 @@ export async function generateDocumentDraft(input: { templateId: string; require
             const layer = issue.match(/正文([^配比厚度\s]{1,6}?)(?:配比|厚度)/u)?.[1];
             return Boolean(layer && chapter.content.includes(layer));
           });
-          if (related.length === 0) continue;
-          const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `global-consistency-repair:${chapter.id}`, () => repairChapterByQuality({
-            template,
-            chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence || [], missingFacts: chapter.missingFacts || [], sections: chapter.sections },
-            issues: related.map(issue => `${issue}；请严格按冲突描述中给出的资料口径修正本章对应表述，不得引入新的数值；与资料口径一致的既有表述（含分层/子项数值）不得改动。`),
-            promptTexts: repairPromptTexts,
-            requirement: input.requirement,
-            forbidDrawingImages: true,
-            diagnostics: generationDiagnostics,
-            signal: input.signal,
-          })));
+          return related.length > 0 ? [{ chapter, related }] : [];
+        });
+        const repairedChapterResults = await Promise.allSettled(repairChapterTargets.map(({ chapter, related }) => withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `global-consistency-repair:${chapter.id}`, () => repairChapterByQuality({
+          template,
+          chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence || [], missingFacts: chapter.missingFacts || [], sections: chapter.sections },
+          issues: related.map(issue => `${issue}；请严格按冲突描述中给出的资料口径修正本章对应表述，不得引入新的数值；与资料口径一致的既有表述（含分层/子项数值）不得改动。`),
+          promptTexts: repairPromptTexts,
+          requirement: input.requirement,
+          forbidDrawingImages: true,
+          diagnostics: generationDiagnostics,
+          signal: input.signal,
+        })))));
+        repairedChapterResults.forEach((result, index) => {
+          if (result.status === 'rejected') {
+            if (input.signal?.aborted) throw result.reason;
+            console.error('[gen] global consistency repair failed:', result.reason);
+            return;
+          }
+          const repaired = result.value;
+          const { chapter } = repairChapterTargets[index];
           if (repaired.content && repaired.content !== chapter.content) {
             chapter.content = repaired.content;
             appliedCount += 1;
           }
-        }
+        });
         if (appliedCount === 0) break;
         emitProgress(chapterDraftsFinal);
         const reReview = await runGlobalReview();
@@ -1732,11 +1790,26 @@ export async function generateDocumentDraft(input: { templateId: string; require
       emitProgress(chapterDraftsFinal);
       let appliedCount = 0;
       const failedGapDetails: string[] = [];
-      for (const gap of tableGaps) {
+      // P3 耗时优化：表格修复按缺口章节并行（历史 for gap 串行，N 章缺表串行 N×2 次 LLM 调用；
+      // 各章 repairChapterByQuality 只改本章 draft.content，落位在全部调用完成后串行按序执行，无并发覆盖风险）
+      const gapTargets = tableGaps.flatMap(gap => {
         const draft = chapterDraftsFinal.find(item => item.title === gap.chapterTitle || gap.chapterTitle.includes(item.title) || item.title.includes(gap.chapterTitle));
-        if (!draft) continue;
-        const baseChapter = { id: draft.id, title: draft.title, content: draft.content, evidence: draft.evidence || [], missingFacts: draft.missingFacts || [], sections: draft.sections };
+        return draft ? [{ gap, draft }] : [];
+      });
+      const repairTableGap = async (target: (typeof gapTargets)[number]) => {
+        const { gap, draft } = target;
+        // P2c Delta 输入瘦身：补表修复证据按缺口表归属小节定向（归属小节证据 + 无小节归属的章级证据），
+        // 避免全章证据（可达数万字）重复注入两轮补表调用；无小节归属的章级证据承载项目图谱数值，必须保留
+        const gapModuleTitles = [...new Set(gap.plans.map(plan => plan.moduleTitle).filter(Boolean))];
+        const scopedEvidence = gapModuleTitles.length > 0
+          ? draft.evidence.filter(item => {
+            const section = item.sectionTitle;
+            return !section || gapModuleTitles.some(title => section === title || section.includes(title) || title.includes(section));
+          })
+          : draft.evidence;
+        const baseChapter = { id: draft.id, title: draft.title, content: draft.content, evidence: scopedEvidence.length ? scopedEvidence : draft.evidence, missingFacts: draft.missingFacts || [], sections: draft.sections };
         const baseIssue = `计划表格缺失（计划 ${gap.planned} 张，实际仅 ${gap.actual} 张）：${gap.plans.map(plan => `${plan.title}（表头：${plan.fields.map(field => field.name).join('、')}）`).join('；')}。必须按表头字段补齐这些 markdown 表格并紧跟相关小节输出，不得删除已有正文；每个表格前须有 1～2 句引导叙述说明表格作用与关键结论，表格不能替代小节正文；deriveFromProject 字段基于项目工程量、总工期与工序流水按定额工效推导具体数值，projectFactOnly 字段不得编造。`;
+        // 并行修复共享 diagnostics.llm.lastError，重试提示中的失败原因存在轻微串章竞争（仅影响诊断文案，不影响修复正确性）
         let repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `table-execution-repair:${draft.id}`, () => repairChapterByQuality({
           template,
           chapter: baseChapter,
@@ -1767,13 +1840,26 @@ export async function generateDocumentDraft(input: { templateId: string; require
             maxTokens: Math.min(12000, Math.max(6000, gap.plans.length * 1200)),
           })));
         }
-        if (repaired.content && repaired.content !== draft.content) {
+        return repaired;
+      };
+      const repairedTableResults = await Promise.allSettled(gapTargets.map(target => repairTableGap(target)));
+      const patchedDraftIds = new Set<string>();
+      repairedTableResults.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          if (input.signal?.aborted) throw result.reason;
+          failedGapDetails.push(`${gapTargets[index].gap.chapterTitle}：修复异常（${result.reason instanceof Error ? result.reason.message : '未知错误'}）`);
+          return;
+        }
+        const repaired = result.value;
+        const { gap, draft } = gapTargets[index];
+        if (repaired.content && repaired.content !== draft.content && !patchedDraftIds.has(draft.id)) {
           draft.content = repaired.content;
+          patchedDraftIds.add(draft.id);
           appliedCount += 1;
-        } else {
+        } else if (!patchedDraftIds.has(draft.id)) {
           failedGapDetails.push(`${gap.chapterTitle}：缺 ${gap.plans.map(plan => plan.title).join('、')}（${generationDiagnostics?.llm.lastError || '补表 patch 未应用'}）`);
         }
-      }
+      });
       if (appliedCount === 0) {
         // 修复未应用任何 patch 时也必须收口 running 态：否则“表格执行率修复”stage 永久停在 running，
         // 前端节点图出现卡死假象（十四度实测：1 个章节缺表但补表 patch 全部落空，stage 停在 running）；

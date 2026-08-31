@@ -65,12 +65,28 @@ function numericDigestForChapter(content: string) {
   return [...new Set(digest.map(item => item.replace(/\s+/gu, ' ').trim()).filter(Boolean))].join('；');
 }
 
+// 项目上下文的数值口径清单提取：全局一致性审查的冲突判定只依赖资料/裁决中的总量数值口径，
+// 蓝图叙事与图谱映射对判定无用且体积大（全量可达数万字）——确定性提取含数值的行/短语，
+// 控制注入体积，并作为跨 chunk 恒定前缀放入 system（prefix cache 全命中，公共上下文只付一次 token 成本）
+function numericContextDigest(context: string) {
+  if (!context) return '';
+  const lines = context.split('\n').map(line => line.trim()).filter(Boolean);
+  const numericLines = lines.filter(line => /\d/u.test(line) && line.length <= 500);
+  const compact = numericLines.slice(0, 120).map(line => (line.length > 240 ? `${line.slice(0, 240)}…` : line));
+  return [...new Set(compact)].join('\n').slice(0, 8000);
+}
+
 export async function reviewGlobalConsistency(input: { template: DocumentTemplate; chapters: DocumentDraftChapter[]; chapterReviews: ChapterReviewSummary[]; promptTexts: string; requirement?: string; projectContext?: string; diagnostics: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   throwIfAborted(input.signal); const summaries = input.chapters.map(ch => { const p = ch.content.replace(/#{1,6}\s+/gu,'').replace(/\*\*/gu,'').replace(/\|/gu,' ').replace(/[\n\r]+/gu,' ').trim(); const digest = numericDigestForChapter(ch.content); return `章节：${ch.title}\n数值口径清单：${digest || '（未提取到总量口径数字）'}\n正文摘要：${p.slice(0,600)}`; });
   const text = summaries.join('\n\n---\n\n'); const plan = adaptiveReviewPlan({ totalChars: text.length, chapterCount: input.chapters.length, chunkChars: 16000, phase: 'global' });
   const chunks = chunkTextForReview(text, 16000).slice(0, plan.chunks);
   const reviewPrompt = '你是专业文档审查专家。检查跨章节数值一致性。每个章节都附带“数值口径清单”（从正文确定性提取的总量口径数字）。只报告确定性矛盾，两类：(1) 两章之间同一口径的数值互相矛盾；(2) 正文数值与项目上下文中的资料口径或裁决口径明确不符。每条冲突必须包含：章节名+冲突数值+正确口径（正确口径必须取自项目上下文中的资料或裁决，不得自行编造）。资料未提供某口径不构成冲突，不得报告；各章表述一致但资料未明确的字段不得报告；各章一致的表述不得报告。只返回 JSON。';
-  const chunkReviews = await Promise.all(chunks.map(chunk => callDocumentLlmJson<{ issues?: string[] }>(reviewPrompt, `${input.promptTexts}\n\n${input.projectContext || ''}\n\n${chunk}\n\n返回 JSON：{"issues":[]}`, { maxTokens: 1000, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics })));
+  // P3 耗时优化：projectContext 移出 per-chunk user 注入——历史每个 chunk 的 user 都重复拼入全量
+  // 项目上下文（可达数万字，4 chunks 即 4 倍），且 user 首部随 chunk 变化导致 prefix cache 无法命中；
+  // 改为提取数值口径清单注入 system：跨 chunk 前缀恒定（A5a prefix cache 全命中），公共上下文只付一次成本
+  const contextDigest = numericContextDigest(input.projectContext || '');
+  const systemPrompt = [reviewPrompt, contextDigest ? `【资料口径基准（冲突判定基准：正确口径必须取自此处，不得自行编造）】\n${contextDigest}` : ''].join('\n\n');
+  const chunkReviews = await Promise.all(chunks.map(chunk => callDocumentLlmJson<{ issues?: string[] }>(systemPrompt, `${input.promptTexts}\n\n${chunk}\n\n返回 JSON：{"issues":[]}`, { maxTokens: 1000, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics })));
   const issues = mergeUniqueStrings(chunkReviews.flatMap(r => Array.isArray(r?.issues) ? r.issues : []));
   return { issues, stage: displayStage({ type: 'llm_review', roleId: 'global-consistency-review', status: issues.length > 0 ? 'failed' : 'success', message: issues.length > 0 ? `全局一致性审查完成：发现 ${issues.length} 个跨章问题` : '全局一致性审查通过' }, { subtitle: '全局一致性审查' }) };
 }

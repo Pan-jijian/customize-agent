@@ -42,19 +42,36 @@ export function evidenceQualityScore(content: string) {
   return { noiseScore, factDensity, shouldUse: text.length >= 30 && noiseScore < 0.72 && factDensity > 0.08 };
 }
 
-function extractParameterLines(content: string) {
+/**
+ * 关键事实行提取（T0 事实层来源）：数值参数行、项目基础事实行、标准规范编号行。
+ * 用于证据三层注入的关键事实层——全量保留（评分只决定顺序不决定去留），
+ * 重要数据（数值/参数/工期/金额/标高/强度等级/规范编号）经此通道不参与预算裁剪。
+ */
+export function extractKeyFactLines(content: string) {
   const lines = cleanEvidenceText(content).split('\n').map(line => line.trim()).filter(Boolean);
-  const parameterLines = lines.filter(line => {
+  const keyLines = lines.filter(line => {
     const isProjectBasicValue = /计划工期|合同工期|工期|合同估算价|合同估算价格|投资估算|估算价格|工程估算价|最高投标限价|招标控制价|建设地点|建设规模|质量标准/u.test(line);
     if (!isProjectBasicValue && /综合单价|合价|报价明细|投标报价|税率|增值税|利润|预留金|暂列金额|结算/u.test(line)) return false;
     const hasParameter = EVIDENCE_PARAMETER_RE.test(line);
+    const hasStdCode = /(?:GB\s*\/?\s*T?|JGJ|CJJ|DB\s*\/?\s*T?|CECS|ISO|IEC)\s*[\w./-]*\d/u.test(line);
     const hasContext = /项目|工程|工期|合同|估算|价格|地点|规模|清单|图纸|设计|规格|型号|数量|单位|材料|设备|管|线|电缆|混凝土|钢筋|砌体|门窗|防水|标准|规范|验收|做法|参数|尺寸|标高|厚度|强度|等级|系统|安装/u.test(line);
-    return isProjectBasicValue || hasParameter || (hasContext && /\d/u.test(line) && line.length <= 260);
+    return isProjectBasicValue || hasParameter || hasStdCode || (hasContext && /\d/u.test(line) && line.length <= 260);
   });
   // 参数行全量保留（无数量/字符截断）：按重要性排序后全部进入，评分只决定顺序不决定去留
-  const uniqueLines = [...new Set(parameterLines)];
-  const selected = selectByScore(uniqueLines, l => textImportanceScore(l), {}, 'parameter-lines');
+  const uniqueLines = [...new Set(keyLines)];
+  // 超长无换行段落（PDF 提取常见）整行进 T0 会在预算裁剪时被整行丢弃（重要数据全丢）：
+  // 先行内提取参数短语（数值+单位/基础事实短语/规范编号），保留全部重要数据、压缩叙述体积
+  const compactLines = uniqueLines.map(line => extractKeyFactPhrases(line)).filter(Boolean);
+  const selected = selectByScore([...new Set(compactLines)], l => textImportanceScore(l), {}, 'key-fact-lines');
   return selected.selected.join('\n');
+}
+
+/** 超长行参数短语提取：行 >160 字时抽取「数值+单位」「基础事实短语」「规范编号」子串，
+ * 保证长段落中的关键数值不因行截断/预算裁剪丢失（重要数据零丢失通道） */
+function extractKeyFactPhrases(line: string): string {
+  if (line.length <= 160) return line;
+  const phrases = line.match(/\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年)|DN\s*\d+|Φ\s*\d+|φ\s*\d+|C\d{2,}|HRB\d+|(?:计划工期|合同工期|合同估算价|投资估算|最高投标限价|招标控制价|建设地点|建设规模|质量标准)[^。；;，,]{0,40}|(?:GB|JGJ|CJJ|DB|CECS|ISO|IEC)\s*\/?\s*T?\s*[\w./-]*\d/gu);
+  return phrases && phrases.length > 0 ? [...new Set(phrases)].join('；') : line.slice(0, 160);
 }
 
 export function sanitizeEvidenceContent(filePath: string, content: string) {
@@ -66,7 +83,7 @@ export function sanitizeEvidenceContent(filePath: string, content: string) {
     .join('\n');
   const quality = evidenceQualityScore(cleaned);
   if (cleaned.length > 20 && quality.shouldUse) return cleaned;
-  const parameterSummary = extractParameterLines(cleaned);
+  const parameterSummary = extractKeyFactLines(cleaned);
   if (parameterSummary.length > 20) return `资料参数行摘要：\n${parameterSummary}`;
   if (cleaned.length > 80 && quality.noiseScore < 0.9) return cleaned;
   if (['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.webp', '.dwg'].includes(ext)) {
@@ -369,6 +386,8 @@ export interface EvidencePromptOptions {
   maxChars?: number;
   /** 模板要求覆盖的事实：注入排序时对命中项加权，保证关键参数块不被高分泛化块挤出预算 */
   requiredFacts?: string[];
+  /** 分层统计出口：写入 T0/T1/T2 字符量与省略量，供真实生成对账 */
+  diagnostics?: DocumentGenerationDiagnostics;
 }
 
 export function evidencePromptBudgetForTarget(targetWords?: number, floorChars = 8000, ceilingChars = 36000) {
@@ -410,23 +429,87 @@ export function evidencePromptImportance(item: DocumentEvidence, requiredFacts: 
 function selectEvidenceForPrompt<T extends { filePath: string }>(items: T[], maxChars: number | undefined, render: (item: T, index: number) => string, rank: (item: T) => number) {
   const state = { chars: 0, omitted: 0 };
   const selected: string[] = [];
+  const selectedKeys = new Set<T>();
   const perFile = new Map<string, number>();
   const ranked = [...items].sort((a, b) => rank(b) - rank(a));
+  // 第一轮：每文件 top-1（文件覆盖公平性，防高分单文件霸占预算挤出其余文件的关键证据）
   for (const item of ranked) {
-    // 单文件最多 6 条：保留多来源覆盖，但不再强制每文件只取 1 条
+    if (perFile.has(item.filePath)) continue;
+    const before = selected.length;
+    appendWithinBudget(selected, render(item, selected.length), state, maxChars);
+    if (selected.length > before) {
+      perFile.set(item.filePath, 1);
+      selectedKeys.add(item);
+    }
+  }
+  // 第二轮：按重要性继续填充（单文件最多 6 条：保留多来源覆盖，但不再强制每文件只取 1 条）
+  for (const item of ranked) {
+    if (selectedKeys.has(item)) continue;
     const fileCount = perFile.get(item.filePath) || 0;
     if (fileCount >= 6) continue;
     const before = selected.length;
     appendWithinBudget(selected, render(item, selected.length), state, maxChars);
-    if (selected.length > before) perFile.set(item.filePath, fileCount + 1);
+    if (selected.length > before) {
+      perFile.set(item.filePath, fileCount + 1);
+      selectedKeys.add(item);
+    }
   }
-  return { lines: selected, omitted: state.omitted };
+  return { lines: selected, omittedItems: ranked.filter(item => !selectedKeys.has(item)), omitted: state.omitted };
 }
 
-export function evidenceBundlePrompt(bundle: EvidenceBundle, options: EvidencePromptOptions = {}) {
-  const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.ceil(options.maxChars!) : undefined;
-  const requiredFacts = options.requiredFacts || [];
-  const resourcePrompt = selectEvidenceForPrompt(bundle.resources, maxChars ? Math.floor(maxChars * 0.35) : undefined, (item, index) => [
+/** T2 证据目录行：未全文注入的片段一行索引（来源标签 + 首段要点），保证证据池全貌可见、编号可回溯 */
+function evidenceCatalogLine(item: DocumentEvidence | ResourceEvidence, index: number) {
+  const snippetText = 'content' in item ? item.content : (item.snippets[0] || '');
+  const firstLine = cleanEvidenceText(snippetText).split('\n').map(line => line.trim()).filter(Boolean)[0] || '';
+  const digest = firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine;
+  return `- [${index}] ${readableSourceLabel(item)}${digest ? `｜${digest}` : ''}`;
+}
+
+export interface EvidenceLayerStats {
+  t0Chars: number;
+  t1Chars: number;
+  t2Lines: number;
+  t2Chars: number;
+  omittedChars: number;
+  omittedCount: number;
+}
+
+export interface EvidenceLayers {
+  t0Text: string;
+  t1Text: string;
+  t2Text: string;
+  omittedNote: string;
+  stats: EvidenceLayerStats;
+}
+
+/**
+ * 证据三层注入（T0/T1/T2）：重要数据零丢失的无损分层。
+ * - T0 关键事实层：数值参数/项目基础事实/规范编号行全量保留，永不参与预算裁剪（唯一例外：
+ *   事实行总量超过预算 60% 时按重要性排序裁剪并记录，防占满预算挤掉全部上下文）；
+ * - T1 高相关证据原文：资源层 35% + 文本层 65% 按剩余预算填充，每文件至少 1 条；
+ * - T2 证据目录：未进 T1 的片段一行索引，证据池全貌可见（数据本身不删除，后续检索/校验继续参与）。
+ */
+export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | undefined, requiredFacts: string[]): EvidenceLayers {
+  const t0FactLines = [...new Set(bundle.textEvidence.flatMap(item => extractKeyFactLines(item.content).split('\n').filter(Boolean)))];
+  const t0Budget = maxChars ? Math.floor(maxChars * 0.6) : undefined;
+  let t0Lines = t0FactLines;
+  let t0Trimmed = 0;
+  if (t0Budget && t0Lines.join('\n').length > t0Budget) {
+    const trimmed = selectByScore(t0Lines, l => textImportanceScore(l), { maxChars: t0Budget }, 't0-fact-lines');
+    t0Trimmed = trimmed.dropped.length;
+    t0Lines = trimmed.selected;
+  }
+  const t0Text = t0Lines.length
+    ? `【关键事实层——来自绑定材料的数值、参数与标准编号，正文必须原样落位，不得改写、不得编造层内没有的数值】\n${t0Lines.map(line => `- ${line}`).join('\n')}${t0Trimmed > 0 ? `\n（事实行总量超出预算上限，已按重要性保留前 ${t0Lines.length} 行）` : ''}`
+    : '';
+  // T1 预算 = 总预算 - T0（T0 全量优先）；T0 吃满预算时给 T1 保留 2000 字符（不超过总预算），
+  // 极小总预算（<2000）时不做保底放大，按原预算裁剪并如实提示省略
+  const maxCharsValue = maxChars;
+  let remaining = maxCharsValue ? maxCharsValue - t0Text.length : undefined;
+  if (remaining !== undefined && maxCharsValue !== undefined && remaining < Math.min(2000, maxCharsValue)) {
+    remaining = Math.min(2000, maxCharsValue);
+  }
+  const resourcePrompt = selectEvidenceForPrompt(bundle.resources, remaining ? Math.floor(remaining * 0.35) : undefined, (item, index) => [
     `- 资料：${readableSourceLabel(item, index)}`,
     `  资料类型：${item.kind}`,
     `  正文用途：${item.contentUse}`,
@@ -434,14 +517,47 @@ export function evidenceBundlePrompt(bundle: EvidenceBundle, options: EvidencePr
     item.snippets.length ? `  可用内容：${item.snippets.map(cleanEvidenceText).filter(Boolean).join(' / ')}` : '',
   ].filter(Boolean).join('\n'), item => item.score);
   // 文本证据保留结构化换行（表格、键值对、清单行），不做单行压缩——单行压缩会把多列表格变成文字墙
-  const textPrompt = selectEvidenceForPrompt(bundle.textEvidence, maxChars ? Math.floor(maxChars * 0.65) : undefined, (item, index) => {
+  const textPrompt = selectEvidenceForPrompt(bundle.textEvidence, remaining ? Math.floor(remaining * 0.65) : undefined, (item, index) => {
     const body = cleanEvidenceText(item.content);
     // 超长证据（CAD 父块全文等）截断前先做关键参数窗口提取：头部盲截会丢失尾部标高/坡率等真实设计参数
     const truncated = body.length > 1200 ? extractKeyParameterWindows(body, 1200) : body;
     return `${readableSourceLabel(item, index)}\n类型：${item.processingType || 'reference'}\n章节/片段：${item.sectionTitle?.replace(FILE_NAME_RE, '') || '资料片段'}\n内容：\n${truncated}`;
   }, item => evidencePromptImportance(item, requiredFacts));
-  const omittedNote = resourcePrompt.omitted + textPrompt.omitted > 0
-    ? `提示：完整证据池仍保留 ${bundle.textEvidence.length} 条文本片段、${bundle.resources.length} 个结构化材料；为控制单次模型输入，本次只发送预算内高相关且覆盖多来源的证据，未发送片段将在章节/小节相关检索和质量校验中继续参与。`
+  const t1Parts: string[] = [];
+  if (resourcePrompt.lines.length) t1Parts.push(`结构化资料：\n${resourcePrompt.lines.join('\n')}`);
+  if (textPrompt.lines.length) t1Parts.push(`文本/附件片段：\n${textPrompt.lines.join('\n\n---\n\n')}`);
+  const t1Text = t1Parts.join('\n\n');
+  const t2Items = [...resourcePrompt.omittedItems, ...textPrompt.omittedItems];
+  const t2Lines = t2Items.map((item, index) => evidenceCatalogLine(item, index));
+  const t2Text = t2Lines.length
+    ? `【证据目录——未全文注入的片段索引（正文写作不使用目录内容；目录供覆盖检索与修复追溯，完整片段仍参与后续检索与质量校验）】\n${t2Lines.join('\n')}`
     : '';
-  return [bundle.summary, omittedNote, resourcePrompt.lines.length ? `结构化资料：\n${resourcePrompt.lines.join('\n')}` : '', textPrompt.lines.length ? `文本/附件片段：\n${textPrompt.lines.join('\n\n---\n\n')}` : ''].filter(Boolean).join('\n\n');
+  const omittedChars = t2Items.reduce((sum, item) => sum + ('content' in item ? item.content.length : (item.snippets[0] || '').length), 0);
+  const stats: EvidenceLayerStats = {
+    t0Chars: t0Text.length,
+    t1Chars: t1Text.length,
+    t2Lines: t2Lines.length,
+    t2Chars: t2Text.length,
+    omittedChars,
+    omittedCount: t2Items.length,
+  };
+  const omittedNote = stats.omittedCount > 0
+    ? `提示：完整证据池仍保留 ${bundle.textEvidence.length} 条文本片段、${bundle.resources.length} 个结构化材料；本次已注入关键事实层 ${stats.t0Chars} 字（数值参数全量）与高相关片段 ${stats.t1Chars} 字，另有 ${stats.omittedCount} 条片段（${stats.omittedChars} 字）仅以目录索引呈现，将在章节/小节相关检索和质量校验中继续参与。`
+    : '';
+  return { t0Text, t1Text, t2Text, omittedNote, stats };
+}
+
+export function evidenceBundlePrompt(bundle: EvidenceBundle, options: EvidencePromptOptions = {}) {
+  const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.ceil(options.maxChars!) : undefined;
+  const requiredFacts = options.requiredFacts || [];
+  const layers = buildEvidenceLayers(bundle, maxChars, requiredFacts);
+  if (options.diagnostics) {
+    // T0/T1/T2 分层统计：供每次真实生成对账（重要数据零丢失断言 + 裁剪可观测）
+    const evidenceDiagnostics = options.diagnostics.evidence;
+    evidenceDiagnostics.t0Chars += layers.stats.t0Chars;
+    evidenceDiagnostics.t1Chars += layers.stats.t1Chars;
+    evidenceDiagnostics.t2Lines += layers.stats.t2Lines;
+    evidenceDiagnostics.omittedChars += layers.stats.omittedChars;
+  }
+  return [bundle.summary, layers.omittedNote, layers.t0Text, layers.t1Text, layers.t2Text].filter(Boolean).join('\n\n');
 }

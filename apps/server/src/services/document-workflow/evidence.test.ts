@@ -28,7 +28,8 @@ function diagnosticsOf(): DocumentGenerationDiagnostics {
     strategy: {} as DocumentGenerationStrategy,
     metrics: [],
     llm: { calls: 0, failures: 0, maxActive: 0, retries: 0 },
-    evidence: { raw: 0, used: 0, filteredNoise: 0, budgetDropped: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0 },
+    semantic: { embedCacheHits: 0, embedCacheMisses: 0 },
+    evidence: { raw: 0, used: 0, filteredNoise: 0, budgetDropped: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0, t0Chars: 0, t1Chars: 0, t2Lines: 0, omittedChars: 0 },
     quality: { blockingCount: 0, importantCount: 0, minorCount: 0, repairedCount: 0 },
   };
 }
@@ -313,5 +314,76 @@ describe('evidenceBundlePrompt', () => {
     ]);
     const prompt = evidenceBundlePrompt(bundle, { maxChars: 200 });
     expect(prompt).toContain('完整证据池仍保留');
+  });
+
+  it('T0 关键事实层全量保留：尾部关键参数不被 T1 预算裁剪挤出', () => {
+    const tail = '图纸节点: A-01\n基坑底标高: 15.65(基坑底标高)\n坡率 1:1.0';
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '支护图.dwg', processingType: 'drawing', content: `${'头部噪声填充。'.repeat(400)}\n${tail}` }),
+      evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: '计划工期：540日历天，质量标准：合格，符合国家验收规范要求，本章证据原文填充。'.repeat(50) }),
+    ]);
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 1500 });
+    expect(prompt).toContain('关键事实层');
+    expect(prompt).toContain('基坑底标高: 15.65');
+    expect(prompt).toContain('坡率 1:1.0');
+    expect(prompt).toContain('计划工期：540日历天');
+  });
+
+  it('T0 事实层不随 T1 省略而丢失（预算极小场景）', () => {
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: '计划工期：540日历天。'.repeat(30) }),
+      evidenceItem({ filePath: '补疑.pdf', processingType: 'reference', content: '基坑开挖深度：5.85m，支护形式：放坡+喷锚。'.repeat(20) }),
+    ]);
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 400 });
+    // T1 预算被压到极小，但 T0 关键事实行（工期/开挖深度/支护形式）必须全量在
+    expect(prompt).toContain('关键事实层');
+    expect(prompt).toContain('计划工期：540日历天');
+    expect(prompt).toContain('基坑开挖深度：5.85m');
+  });
+
+  it('每文件至少 1 条 T1 片段（文件覆盖公平性）', () => {
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '高分手头文件.pdf', score: 0.99, content: '项目名称：合肥市某区安置房项目，建设地点：合肥市蜀山区，计划工期：540日历天，质量标准：合格，符合国家验收规范要求，内容填充一。'.repeat(10) }),
+      evidenceItem({ filePath: '低分关键文件.pdf', score: 0.2, content: '基坑底标高：15.65，开挖深度：5.85m。' }),
+    ]);
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 1200 });
+    expect(prompt).toContain('文本/附件片段');
+    // 两个文件的 top-1 片段都进入 T1（内容块计数 ≥2，而非高分单文件霸占预算）
+    expect((prompt.match(/^内容：$/gm) || []).length).toBeGreaterThanOrEqual(2);
+    expect(prompt).toContain('基坑底标高：15.65，开挖深度：5.85m。');
+  });
+
+  it('T2 证据目录行：未进 T1 的片段以一行索引呈现且统计省略量', () => {
+    const diagnostics = diagnosticsOf();
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '文件A.pdf', processingType: 'reference', content: '项目名称：合肥项目，钢筋 100t，水泥 200t，计划工期：540日历天，内容填充一段较长的叙述以保证超预算。'.repeat(4) }),
+      evidenceItem({ filePath: '文件B.pdf', processingType: 'reference', content: '补充说明：基坑支护采用放坡开挖，坡率 1:1.0，质量标准合格。'.repeat(4) }),
+      evidenceItem({ filePath: '文件C.pdf', processingType: 'reference', content: '第三份资料：门窗采用断桥铝合金，K 值 2.0。'.repeat(4) }),
+    ]);
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 1000, diagnostics });
+    expect(prompt).toContain('证据目录');
+    expect(diagnostics.evidence.t0Chars).toBeGreaterThan(0);
+    expect(diagnostics.evidence.t1Chars).toBeGreaterThan(0);
+    expect(diagnostics.evidence.t2Lines).toBeGreaterThan(0);
+    expect(diagnostics.evidence.omittedChars).toBeGreaterThan(0);
+  });
+
+  it('证据池小于预算时零裁剪（目录与省略提示均不出现）', () => {
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: '计划工期：540日历天。' }),
+    ]);
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 5000 });
+    expect(prompt).not.toContain('证据目录');
+    expect(prompt).not.toContain('完整证据池仍保留');
+    expect(prompt).toContain('计划工期：540日历天');
+  });
+
+  it('标准规范编号行进入 T0 事实层', () => {
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: '主体结构施工执行 GB 50204-2015《混凝土结构工程施工质量验收规范》，填充叙述内容以构成完整段落文本。'.repeat(5) }),
+    ]);
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 2000 });
+    expect(prompt).toContain('关键事实层');
+    expect(prompt).toContain('GB 50204-2015');
   });
 });

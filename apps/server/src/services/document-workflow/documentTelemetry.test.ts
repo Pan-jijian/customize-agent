@@ -10,7 +10,8 @@ function makeDiagnostics(overrides: Partial<DocumentGenerationDiagnostics> = {})
     strategy: { mode: 'balanced', enableChapterReview: true, enableGlobalReview: true, enableDocumentBudgetExpansion: true, enableFinalQualityReview: true },
     metrics: [],
     llm: { calls: 0, failures: 0, maxActive: 0, retries: 0 },
-    evidence: { raw: 0, used: 0, filteredNoise: 0, budgetDropped: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0 },
+    semantic: { embedCacheHits: 0, embedCacheMisses: 0 },
+    evidence: { raw: 0, used: 0, filteredNoise: 0, budgetDropped: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0, t0Chars: 0, t1Chars: 0, t2Lines: 0, omittedChars: 0 },
     quality: { blockingCount: 0, importantCount: 0, minorCount: 0, repairedCount: 0 },
     ...overrides,
   };
