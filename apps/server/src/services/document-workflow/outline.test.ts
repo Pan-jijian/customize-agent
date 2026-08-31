@@ -97,6 +97,27 @@ describe('isTenderClauseFragmentTitle（招标条款碎片判别）', () => {
     expect(isTenderClauseFragmentTitle('投标须知')).toBe(true);
   });
 
+  it('条款编号「数字+款」碎片命中（4.12.14 真实生成回归：目录混入「4款、第5.3款…向招标人提出」）', () => {
+    expect(isTenderClauseFragmentTitle('4款、第5.3款和第6.5款的规定先向招标人提出')).toBe(true);
+    expect(isTenderClauseFragmentTitle('第5.3款的规定先向招标人提出')).toBe(true);
+    expect(isTenderClauseFragmentTitle('12款对评标活动有异议的应当先向招标人提出')).toBe(true);
+  });
+
+  it('乱码标题命中（4.12.14 用户自跑资料回归：二进制误读文本混入目录）', () => {
+    expect(isTenderClauseFragmentTitle('考堂f肀')).toBe(true);
+    expect(isTenderClauseFragmentTitle('渱潑喲W晀耀')).toBe(true);
+    expect(isTenderClauseFragmentTitle('VdA«UdA«UdANÒg')).toBe(true);
+    expect(isTenderClauseFragmentTitle('爀攀最椀猀琀礀开氀漀挀')).toBe(true);
+  });
+
+  it('工程符号与字母编号标题不误杀（K值/型钢/混凝土强度等合法形态）', () => {
+    expect(isTenderClauseFragmentTitle('节能门窗K值控制')).toBe(false);
+    expect(isTenderClauseFragmentTitle('H型钢梁吊装方案')).toBe(false);
+    expect(isTenderClauseFragmentTitle('C30混凝土浇筑方案')).toBe(false);
+    expect(isTenderClauseFragmentTitle('钢筋HRB400进场验收')).toBe(false);
+    expect(isTenderClauseFragmentTitle('传热系数K值')).toBe(false);
+  });
+
   it('正常章节标题不命中', () => {
     expect(isTenderClauseFragmentTitle('工程概况')).toBe(false);
     expect(isTenderClauseFragmentTitle('施工部署与施工流水组织')).toBe(false);

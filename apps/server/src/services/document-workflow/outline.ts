@@ -60,7 +60,38 @@ export function isTenderClauseFragmentTitle(title: string) {
   // （4.12.13 扩围：真实生成仍漏拦「确定评标基准价」——「基准」夹在动作与「价」之间）
   if (/^(?:确定|计算|比较|推荐|审查|否决)(?:有效)?评标(?:基准)?价/u.test(normalized)) return true;
   if (/^(?:其他要求|需要补充的其他内容|相当于或不低于|补充条款|建议编制要求|投标须知|评标办法)/u.test(normalized)) return true;
-  return false;
+  // 条款编号残留扩展（4.12.14 真实生成回归）：「4款、第5.3款和第6.5款的规定先向招标人提出」——
+  // 「数字+款」条款编号开头与「3项规定」「2（3）目」同族；「第X款…向…提出/告知/通知」为条款句尾
+  // 动作而非小节标题（技术标小节不会以条款编号「款」开头命名）
+  if (/^\d{1,3}\s*款/u.test(normalized)) return true;
+  if (/第\d+(?:\.\d+)?款[^，,。；]{0,20}(?:向(?:招标人|发包人|监理人?|承包人)|提出|告知|通知|送达|发出)/u.test(normalized)) return true;
+  // 乱码标题（4.12.14 用户自跑资料回归）：资料二进制/编码误读文本被提取为章节标题混入目录
+  return isLikelyMojibakeTitle(normalized);
+}
+
+/**
+ * 乱码标题判别：PDF/旧版 Office/CAD 二进制误读文本被大纲提取器当章节标题后混入目录——
+ * 「考堂f肀」「渱潑喲W晀耀」「VdA«UdA»」「爀攀最椀猀琀礀」等形态；合法小节标题由常用汉字/
+ * 数字/工程符号构成，不会命中。工程后缀搭配（门窗K值、B级混凝土）豁免汉字-拉丁交叉规则。
+ */
+export function isLikelyMojibakeTitle(title: string) {
+  const compact = title.replace(/\s+/gu, '');
+  if (!compact) return false;
+  // UTF-16LE 中文被 latin1/utf8 误读的典型生僻字串（kbEvaluationService 同源特征，剔除其中
+  // 攀/最/开等常用字——「开挖」「最终」等合法标题不得因单字命中被误杀），命中 ≥2 个才算乱码
+  const misreadHits = (compact.match(/[爀椀猟礀氀漀挀渀捁扄潓瑲湥獴慔汢]/gu) || []).length;
+  if (misreadHits >= 2) return true;
+  // 罕见 Unicode 区块（箭头补充/CJK 部首/杂项数学/圈符/地图符号）：二进制误读产物
+  if (/[\u2046-\u205F\u2070-\u209F\u2100-\u2102\u2104-\u214F\u21B0-\u21FF\u2270-\u22FF\u2400-\u243F\u249C-\u24FF\u2640-\u26FF\u27C0-\u27EF\u2900-\u297F\u2A00-\u2AFF\u2B00-\u2BFF\u2E00-\u2FFF\u3200-\u33FF]/u.test(compact)) return true;
+  // Latin-1 扩展区（排除工程合法符号 °±²³¹·×÷）：正常中文标题不用 À-ÿ 扩展字母或 «»¼ 等符号
+  if (/[\u00A0-\u00AF\u00B4\u00B6\u00B8\u00BA-\u00FF]/u.test(compact)) return true;
+  // 汉字-Latin-汉字交叉混排（「考堂f肀」）：字母编号只出现在汉字前或后，不会夹在汉字中间；
+  // 「值/级/类/区/型/构/段/座/轴/向/楼/层/栋/点/位」工程后缀豁免（门窗K值、B级混凝土合法标题）
+  if (/[\u4e00-\u9fa5][A-Za-z][\u4e00-\u9fa5]/u.test(compact) && !/[\u4e00-\u9fa5][A-Za-z](?:值|级|类|区|型|构|段|座|轴|向|楼|层|栋|点|位)/u.test(compact)) return true;
+  // 可读字符占比：非汉/拉丁/数字/常用标点的符号占比过高即乱码
+  const chars = [...compact];
+  const readable = chars.filter(char => /[\u4e00-\u9fa5A-Za-z0-9（）()【】《》、，。；;：:,.\-/㎡%°·±×÷≤≥—–]/u.test(char)).length;
+  return readable / chars.length < 0.6;
 }
 
 /** 指令型/碎片标题判别（isTenderClauseFragmentTitle 超集：含冒号结尾、指令型提示语，
