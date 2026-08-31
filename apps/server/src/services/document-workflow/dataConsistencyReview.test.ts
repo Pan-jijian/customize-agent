@@ -6,7 +6,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { callDocumentLlmJson } from './llmClient';
 import type * as LlmClientModule from './llmClient';
-import { conflictNumericKey, dataConsistencyConflictIssue, numericSentencesForReview, reviewDataConsistency, type DataConsistencyConflict } from './dataConsistencyReview';
+import { buildDataConsistencyReviewCached, conflictNumericKey, dataConsistencyConflictIssue, numericSentencesForReview, reviewDataConsistency, type DataConsistencyConflict } from './dataConsistencyReview';
+import type { DocumentGenerationDiagnostics } from './types';
 
 vi.mock('./llmClient', async () => {
   const actual = await vi.importActual<typeof LlmClientModule>('./llmClient');
@@ -100,5 +101,62 @@ describe('dataConsistencyConflictIssue（转交付阻断 issue）', () => {
     expect(issue.message).toContain('“高峰期80人”');
     expect(issue.message).toContain('“高峰期120人”');
     expect(issue.suggestion).toContain('数据口径必须唯一');
+  });
+});
+
+describe('buildDataConsistencyReviewCached（D3 快照复用三防线）', () => {
+  const textA = '高峰期投入80人组织施工。\n高峰期投入120人组织施工。';
+  const textB = '高峰期投入80人组织施工。\n高峰期投入200人组织施工。';
+  const diagnostics = () => ({ llm: { lastError: undefined } }) as unknown as DocumentGenerationDiagnostics;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('正文哈希门禁：同一正文两次调用只跑一次 LLM（命中复用）', async () => {
+    llmMock.mockResolvedValue({ conflicts: [conflict({ confidence: 0.9 })] });
+    const cached = buildDataConsistencyReviewCached({ diagnostics: diagnostics() });
+    const first = await cached(textA);
+    const second = await cached(textA);
+    expect(first).toHaveLength(1);
+    expect(second).toEqual(first);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('正文哈希门禁：正文任一字节变化即作废重跑', async () => {
+    llmMock.mockResolvedValue({ conflicts: [] });
+    const cached = buildDataConsistencyReviewCached({ diagnostics: diagnostics() });
+    await cached(textA);
+    await cached(textB);
+    expect(llmMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('写入门禁：LLM 失败（lastError 被写入）不写快照，后续调用重跑', async () => {
+    const diag = diagnostics();
+    llmMock.mockImplementation(async (_system: string, _prompt: string, options?: { diagnostics?: { llm: { lastError?: string } } }) => {
+      if (options?.diagnostics) options.diagnostics.llm.lastError = '模拟 LLM 瞬态失败';
+      return undefined;
+    });
+    const cached = buildDataConsistencyReviewCached({ diagnostics: diag });
+    expect(await cached(textA)).toEqual([]);
+    expect(await cached(textA)).toEqual([]);
+    expect(llmMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('写入门禁：成功且空结果写空快照，复用空清单不再重跑', async () => {
+    llmMock.mockResolvedValue({ conflicts: [] });
+    const cached = buildDataConsistencyReviewCached({ diagnostics: diagnostics() });
+    expect(await cached(textA)).toEqual([]);
+    expect(await cached(textA)).toEqual([]);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('不同工厂实例快照隔离（内存级生命周期，不跨任务共享）', async () => {
+    llmMock.mockResolvedValue({ conflicts: [conflict({ confidence: 0.9 })] });
+    const first = buildDataConsistencyReviewCached({ diagnostics: diagnostics() });
+    const second = buildDataConsistencyReviewCached({ diagnostics: diagnostics() });
+    await first(textA);
+    await second(textA);
+    expect(llmMock).toHaveBeenCalledTimes(2);
   });
 });

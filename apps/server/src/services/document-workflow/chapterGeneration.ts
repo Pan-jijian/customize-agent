@@ -127,10 +127,11 @@ async function buildChapterFactOutline(input: { template: DocumentTemplate; chap
     '你是文档事实规划专家。先通读绑定材料，再为本章每个小节列出「可写事实」，供 Writer 逐条落位。',
     '事实必须逐字来自绑定材料：数值、单位、标准编号必须原样保留，不得改写、换算或编造；不得把写作要求当作事实。',
     'quantifiedFacts 放含数字/单位/编号的事实；missingFacts 放该小节需要但材料中确实找不到的事实（供 Writer 用公共专业知识补做法，禁止编造具体值）。',
-    input.promptTexts,
     '只返回 JSON，不要返回 markdown。',
   ].filter(Boolean).join('\n\n');
   const prompt = [
+    // A5a 前缀缓存：可变提示词从 system 移入 user（system 恒定化，跨调用共享 prefix cache）
+    input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
     `文档模板：${input.template.name}`,
     `章节标题：${input.chapter.title}`,
     `章节目的：${input.chapter.purpose}`,
@@ -232,9 +233,10 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
   const system = [
     FORMAL_WRITING_RULES,
     options.forbidDrawingImages ? '图片类材料只作为文本事实依据；禁止插入图片或 Markdown 图片语法。' : '',
-    promptTexts,
+    // A5a 前缀缓存：可变 promptTexts 已移入 user 首部，system 保持恒定（跨章共享 prefix cache）
   ].filter(Boolean).join('\n\n');
   const prompt = [
+    promptTexts ? `配置写作主控提示词：\n${promptTexts}` : '',
     `文档模板：${template.name}`,
     `章节标题：${chapter.title}`,
     `章节目的：${chapter.purpose}`,
@@ -481,6 +483,8 @@ export function sectionFactUsageIssue(sectionTitle: string, content: string, fac
  * 置顶保护「招标文件评分项要求」段（历史缺陷：4.12.x 正文丢「确保黄山杯」——评分项要求段位于
  * projectContext 末尾，slice(0, maxChars) 切尾部即丢创优目标，写作上下文无要求可响应 → 零响应，
  * 修复后该段整段置顶保留，只截断其余上下文）。
+ * A2 双保护升级：同时置顶保护「可信基础事实主表」段（章级 scoped 上下文中的本章精确事实）——
+ * 专业文档要求"给到的条件、证据、数据精准"，事实主表与要求段同样不可被截断（宁超预算不丢事实）。
  */
 export function compactSectionProjectContext(projectContext: string, maxChars = 2000) {
   const lines = projectContext.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
@@ -497,14 +501,33 @@ export function compactSectionProjectContext(projectContext: string, maxChars = 
     if (inRequirements && line.startsWith('【')) inRequirements = false;
     (inRequirements ? requirementsLines : restLines).push(line);
   }
-  const structured = restLines.filter(line => /【.+】/u.test(line) || /=/u.test(line) || /^\d+\.\s+/u.test(line) || /：\S{1,40}$/u.test(line));
-  const keep = structured.length >= 8 ? structured : restLines;
+  // 拆出可信基础事实主表段（标记行 + 后续以 "- " 开头的全部事实行，直到下一个非列表行）
+  const factsLines: string[] = [];
+  const bodyLines: string[] = [];
+  let inFacts = false;
+  for (const line of restLines) {
+    if (line.startsWith('可信基础事实主表')) {
+      inFacts = true;
+      factsLines.push(line);
+      continue;
+    }
+    if (inFacts && line.startsWith('- ')) {
+      factsLines.push(line);
+      continue;
+    }
+    if (inFacts && !line.startsWith('- ')) inFacts = false;
+    bodyLines.push(line);
+  }
+  const structured = bodyLines.filter(line => /【.+】/u.test(line) || /=/u.test(line) || /^\d+\.\s+/u.test(line) || /：\S{1,40}$/u.test(line));
+  const keep = structured.length >= 8 ? structured : bodyLines;
   const requirementsBlock = requirementsLines.join('\n').trim();
+  const factsBlock = factsLines.join('\n').trim();
   const compactBody = keep.join('\n').trim();
   const truncate = (text: string, budget: number) => (text.length <= budget ? text : `${text.slice(0, budget)}\n（上下文已截断，完整信息见绑定材料与证据）`);
-  if (requirementsBlock) {
-    // 评分项要求段整段优先保留（宁超预算不丢要求——零响应是评标失分，上下文冗长只是冗余）
-    return `${requirementsBlock}\n${truncate(compactBody, Math.max(400, maxChars - requirementsBlock.length - 20))}`;
+  // 保护段整段优先保留（宁超预算不丢要求/事实——零响应是评标失分，事实丢失是编造风险，上下文冗长只是冗余）
+  const protectedBlock = [requirementsBlock, factsBlock].filter(Boolean).join('\n');
+  if (protectedBlock) {
+    return `${protectedBlock}\n${truncate(compactBody, Math.max(400, maxChars - protectedBlock.length - 20))}`;
   }
   return truncate(compactBody, maxChars);
 }
@@ -518,6 +541,7 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   const processKnowledgeCards = majorConstructionPackages.length > 0 ? matchProcessKnowledgeCards(majorConstructionPackages.map(pkg => pkg.name)) : [];
   const processKnowledgePrompt = processKnowledgeCards.length > 0 ? buildProcessKnowledgePrompt(processKnowledgeCards, majorConstructionPackages.map(pkg => pkg.name)) : '';
   const prompt = [
+    input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
     `文档模板：${input.template.name}`,
     `章节标题：${input.chapter.title}`,
     `当前二级小节：${input.sectionTitle}`,
@@ -542,7 +566,7 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   const llmCall = () => callDocumentLlm([
     '你是专业文档的小节生成专家。',
     FORMAL_WRITING_RULES,
-    input.promptTexts,
+    // A5a 前缀缓存：可变 promptTexts 已移入 user 首部，system 保持恒定（跨章共享 prefix cache）
     // 输出池扩容：小节正文含多个 #### 三级小节标题（实测 9 个 H4 均分输出池导致靠后小节
     // 「工艺流程：」被 maxTokens 截断）。中文约 1.5 token/字，按 2.6 倍系数 + 2800 下限留足
     // H4 标题与 markdown 结构开销；正文总量仍由 prompt 的 maxWords 约束，不因池放大而灌水
@@ -711,8 +735,9 @@ async function supplementSectionContent(input: Parameters<typeof buildLlmSection
     FORMAL_WRITING_RULES,
     '必须保留已有正文中的事实、参数、编号和结构；只补充缺口段落，不删除、不压缩已有内容。',
     SECTION_GENERATION_SAFETY_RULES,
-    input.promptTexts,
+    // A5a 前缀缓存：可变 promptTexts 已移入 user 首部，system 保持恒定（跨章共享 prefix cache）
   ].filter(Boolean).join('\n\n'), [
+    input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
     `章节标题：${input.chapter.title}`,
     `当前小节：${input.sectionTitle}`,
     input.requirement ? `用户要求：${input.requirement}` : '',

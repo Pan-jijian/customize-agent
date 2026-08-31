@@ -1,5 +1,6 @@
 import type { DocumentGenerationDiagnostics, ValidationIssue } from './types';
 import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
+import { stableHash } from './utils';
 
 /**
  * L3.5 数据一致性 LLM 审查层（h7）：
@@ -118,4 +119,26 @@ export function conflictNumericKey(message: string): string {
     .filter(token => token.length >= 2))]
     .sort((a, b) => Number(a) - Number(b))
     .join('|');
+}
+
+/**
+ * D3 快照复用工厂：同一正文的重复审查（blocker 复检 / 交付前轮 / 交付前复检）只跑一次 LLM。
+ * 三防线防脏设计：
+ * ① 正文哈希门禁——markdown 任一字节变化（修复 patch 落位后）即作废重跑，杜绝复用陈旧矛盾清单；
+ * ② 快照写入门禁——仅当本次调用未产生 LLM 错误（diagnostics.llm.lastError 未变化）才写快照，
+ *    LLM 瞬态失败返回空清单与「确实无矛盾」不可区分，失败场景不写快照、后续调用重跑，宁可少复用不可脏复用；
+ * ③ 内存级生命周期——快照是工厂闭包局部变量，不跨生成任务共享。
+ */
+export function buildDataConsistencyReviewCached(input: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics }) {
+  let snapshot: { markdownHash: string; conflicts: DataConsistencyConflict[] } | undefined;
+  return async (markdown: string): Promise<DataConsistencyConflict[]> => {
+    const markdownHash = stableHash(markdown);
+    if (snapshot?.markdownHash === markdownHash) return snapshot.conflicts;
+    // 调用前清空 lastError 哨兵：reviewDataConsistency 内部仅失败路径写 lastError（llmClient 契约），
+    // 调用后仍为空即本次审查成功（含数值句不足 2 条不调 LLM 的确定性短路）
+    if (input.diagnostics) input.diagnostics.llm.lastError = undefined;
+    const conflicts = await reviewDataConsistency(markdown, { signal: input.signal, diagnostics: input.diagnostics });
+    if (input.diagnostics?.llm.lastError === undefined) snapshot = { markdownHash, conflicts };
+    return conflicts;
+  };
 }

@@ -180,7 +180,11 @@ export function decideThinkingPolicy(taskKind: DocumentLlmTaskKind, modelName: s
 }
 
 export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind } = {}): Promise<string | undefined> {
-  if (options.diagnostics) options.diagnostics.llm.calls += 1;
+  if (options.diagnostics) {
+    options.diagnostics.llm.calls += 1;
+    // 上下文输入观测：system + user 字符总量（分层占比随 A2 章级 scoped 落地后细分）
+    options.diagnostics.llm.inputChars = (options.diagnostics.llm.inputChars || 0) + system.length + prompt.length;
+  }
   const release = await acquireLlmSlot(options.signal);
   if (options.diagnostics) options.diagnostics.llm.maxActive = Math.max(options.diagnostics.llm.maxActive, activeDocumentLlmCalls);
   try {
@@ -217,7 +221,18 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
         { role: 'user', content: thinkingTrimmingHint ? `${prompt}\n\n（重要：缩短思考过程，直接给出最终结论。）` : prompt },
       ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: maxTokensArg, signal: options.signal, disableThinking: decision.disableThinking });
       const content = response.content?.trim() ?? '';
-      if (content) return content;
+      if (content) {
+        // usage 指标累计（仅成功路径；失败/空响应无有效 usage 不累计）
+        // prompt_cache_hit/miss_tokens 为 DeepSeek prefix cache 指标，用于验证 system/user 分离的缓存收益
+        if (options.diagnostics && response.usage) {
+          const stats = options.diagnostics.llm;
+          stats.inputTokens = (stats.inputTokens || 0) + response.usage.promptTokens;
+          stats.outputTokens = (stats.outputTokens || 0) + response.usage.completionTokens;
+          stats.promptCacheHitTokens = (stats.promptCacheHitTokens || 0) + (response.usage.promptCacheHitTokens || 0);
+          stats.promptCacheMissTokens = (stats.promptCacheMissTokens || 0) + (response.usage.promptCacheMissTokens || 0);
+        }
+        return content;
+      }
       throw EMPTY_CONTENT;
     };
     // 瞬态错误/空响应重试一次：连接失败、限流、5xx 或思考耗尽预算导致的空响应

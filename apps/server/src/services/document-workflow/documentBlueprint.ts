@@ -105,32 +105,149 @@ function numericScopeConflictLines(scopeConflicts: NumericScopeConflict[]) {
   });
 }
 
-export function buildDocumentBlueprintContext(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string; referenceLines?: string[]; scopeConflicts?: NumericScopeConflict[] }) {
-  // 去重后按重要性评分排序，保留最重要的核心事实（而非静默截断）
+// ===== A1 蓝图结构化（章级 scoped 上下文）=====
+// 上下文分层瘦身的数据基础：事实按"事实域 → 章"精确映射（数据结构级，非字符串匹配，零遗漏）。
+// 映射口径与 supportLevelForChapter 的支撑判断同源：同一域 key → 同一组 factsModel 数组。
+// preciseFacts（关键精确数字：面积/工期/金额）归属全部章节——专业文档各章都可能引用精确数据，宁全勿缺。
+
+/** 域 key → factsModel 数组名（与 supportLevelForChapter 的支撑判断同口径） */
+const DOMAIN_FACT_ARRAYS: Record<string, string[]> = {
+  project: ['project'],
+  scope: ['drawings'],
+  schedule: ['schedule'],
+  quality: ['quality', 'specifications'],
+  safety: ['safety', 'rules'],
+  resources: ['resources', 'bills'],
+  quantities: ['bills', 'drawings'],
+};
+
+const FACT_ARRAY_KEYS = ['project', 'schedule', 'quality', 'safety', 'resources', 'preciseFacts', 'bills', 'drawings', 'rules', 'specifications'] as const;
+
+/** 章级事实块：本章核心事实 + 对应溯源行 + 任务卡 + 实施方案（他章内容全部剔除） */
+export interface ChapterScopedBlueprintBlock {
+  chapterIndex: number;
+  title: string;
+  facts: DocumentFact[];
+  traceLines: string[];
+  taskCard: string;
+  executionPlan: string;
+}
+
+/** 结构化蓝图：全局段（每章必带）+ 索引矩阵（全貌概览，体积小全保留）+ 按章块 */
+export interface DocumentBlueprintStructure {
+  globalLines: string[];
+  matrixLines: string[];
+  chapterBlocks: ChapterScopedBlueprintBlock[];
+  droppedFactNote: string[];
+}
+
+/** 去重 + 重要性评分选择核心事实（原 buildDocumentBlueprintContext 的选取逻辑，结构化版本共用同一份结果） */
+function selectCoreFacts(factsModel: BlueprintFactsModel) {
   const uniqueFacts = [
-    ...input.factsModel.project,
-    ...input.factsModel.schedule,
-    ...input.factsModel.quality,
-    ...input.factsModel.safety,
-    ...input.factsModel.resources,
-    ...input.factsModel.preciseFacts,
+    ...factsModel.project,
+    ...factsModel.schedule,
+    ...factsModel.quality,
+    ...factsModel.safety,
+    ...factsModel.resources,
+    ...factsModel.preciseFacts,
   ].filter((fact, index, array) => {
     const value = stringifyFactValue(fact.value).replace(/\s+/gu, ' ').trim();
     return value.length > 0 && array.findIndex(item => `${item.key}:${stringifyFactValue(item.value).replace(/\s+/gu, ' ').trim()}` === `${fact.key}:${value}`) === index;
   });
-  const coreFactsResult = selectByScore(
+  return selectByScore(
     uniqueFacts,
     f => factImportanceScore(f),
     { maxItems: 48, maxChars: 18000 },
     'coreFacts',
   );
+}
+
+function factTraceLine(fact: DocumentFact, index: number) {
+  return `${index + 1}. ${fact.fieldName || fact.key || '资料事实'}｜${stringifyFactValue(fact.value).replace(/\s+/gu, ' ').slice(0, 90)}｜来源：${fact.sourceFile ? path.basename(fact.sourceFile) : '结构化事实主表'}`;
+}
+
+/** 构建结构化蓝图：与 buildDocumentBlueprintContext 同源数据，供章级 scoped 上下文精确裁剪 */
+export function buildDocumentBlueprintStructure(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string; referenceLines?: string[]; scopeConflicts?: NumericScopeConflict[] }): DocumentBlueprintStructure {
+  const coreFactsResult = selectCoreFacts(input.factsModel);
+  const coreFacts = coreFactsResult.selected;
+  const droppedFactNote = coreFactsResult.dropped.length > 0
+    ? [`⚠️ 因 LLM 上下文预算限制，${coreFactsResult.dropped.length} 个低优先级事实未纳入蓝图；完整事实主表可在生成后的事实覆盖报告查看。`]
+    : [];
+  const profile = documentProfileForContext(input);
+  // 事实 → 原数组引用集合：判断事实所属 factsModel 数组（O(1) 归属判定）
+  const arraySets: Record<string, Set<DocumentFact>> = {};
+  for (const key of FACT_ARRAY_KEYS) arraySets[key] = new Set(input.factsModel[key] as DocumentFact[]);
+  const factBelongsToChapter = (fact: DocumentFact, chapter: DocumentTemplateChapter) => {
+    if (arraySets.preciseFacts.has(fact)) return true; // 精确事实全局共享（宁全勿缺）
+    return factCoverageTargetsForTitle(chapter.title).some(domain => (DOMAIN_FACT_ARRAYS[domain] || []).some(key => arraySets[key]?.has(fact)));
+  };
+  const chapterBlocks = input.chapters.map((chapter, chapterIndex) => {
+    const chapterFacts = coreFacts.filter(fact => factBelongsToChapter(fact, chapter));
+    return {
+      chapterIndex,
+      title: chapter.title,
+      facts: chapterFacts,
+      traceLines: chapterFacts.map((fact, index) => factTraceLine(fact, index)),
+      taskCard: chapterTaskCardLine(chapter),
+      executionPlan: chapterExecutionPlanLine(chapter, input.factsModel),
+    };
+  });
+  const globalLines = [
+    '【全局文档蓝图与一致性约束】',
+    `文档类型画像：${profile.type}；评分重点：${profile.focus.join('、')}`,
+    `文档目标：${input.template.outputTitle || input.template.name}`,
+    input.requirement ? `用户目标：${input.requirement}` : '',
+    constructionOrgProjectTypePrompt({ templateName: input.template.name, outputTitle: input.template.outputTitle, requirement: input.requirement, chapters: input.chapters }),
+    systemConstraintLine('证据引用约束：工期、质量目标、招标范围、金额、工程量、验收要求等项目专属事实必须来自可信基础事实主表或绑定材料，系统暂未确认的数字和参数不得编造；标准规范编号、法律法规名称属于公共专业知识，可依据现行有效版本直接引用，不要求材料提供，但不得虚构编号或引用已废止版本。'),
+    systemConstraintLine('跨章一致性要求：所有章节必须共用同一套工期、质量、范围、资源和验收口径；不得在不同章节写出相互矛盾的项目基础信息。'),
+    systemConstraintLine('总述数据使用约束：可信基础事实主表中的工程地点、建设规模（总建筑面积）、计划工期、改造范围等总述数据，只在项目概况/工程概况类章节集中交代；其他章节不得以"本项目为……"开头复述完整概况段，确需数据支撑时只引用所需的具体数字。'),
+    ...(input.scopeConflicts?.length ? [`【源级口径冲突裁决（最高优先级约束）】资料文件中存在同口径数值冲突，必须按下述裁决执行：\n${numericScopeConflictLines(input.scopeConflicts).join('\n')}`] : []),
+    ...(input.referenceLines?.length ? [`同类工程质量参考（软性参考，事实仍以知识库证据为准）：\n${input.referenceLines.join('\n')}`] : []),
+  ].filter(Boolean);
+  // 覆盖矩阵与确认矩阵是"章→事实域索引"性质的全貌概览（体积小），章级上下文保留全量，
+  // 便于 LLM 理解整体结构而不会引入他章正文事实
+  const matrixLines = [
+    `事实覆盖矩阵：\n${factCoverageMatrixLines(input.chapters).join('\n')}`,
+    `知识库确认覆盖矩阵：\n${input.chapters.map((chapter, index) => {
+      const support = supportLevelForChapter(chapter, input.factsModel);
+      return `${index + 1}. ${chapter.title}：${support.level}/${support.mode}；缺失 ${support.missing.join('、') || '无'}`;
+    }).join('\n')}`,
+  ];
+  return { globalLines, matrixLines, chapterBlocks, droppedFactNote };
+}
+
+/** 章级 scoped 上下文：本章事实主表 + 本章溯源行 + 本章任务卡 + 本章实施方案 + 全局段 + 索引矩阵 + 附加段（评分项要求等） */
+export function buildChapterScopedProjectContext(input: {
+  chapterTitle: string;
+  structure: DocumentBlueprintStructure;
+  requirementRules?: string;
+}): string {
+  const block = input.structure.chapterBlocks.find(item => item.title === input.chapterTitle);
+  const lines = [
+    ...input.structure.globalLines,
+    block && block.facts.length
+      ? `可信基础事实主表（本章相关）：\n${block.facts.map(fact => `- ${factLine(fact)}`).join('\n')}`
+      : '可信基础事实主表（本章相关）：系统当前结构化事实确认不足，应扩大本地知识库检索、补抽事实并修复事实落位；正文只能使用已确认事实，不得编造参数。',
+    block && block.traceLines.length ? `关键事实证据追踪清单（本章相关）：\n${block.traceLines.join('\n')}` : '',
+    ...input.structure.matrixLines,
+    block ? `章节专业任务卡：\n${block.taskCard}` : '',
+    block ? `章节实施方案：\n${block.executionPlan}` : '',
+    input.requirementRules || '',
+    ...input.structure.droppedFactNote,
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
+export function buildDocumentBlueprintContext(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string; referenceLines?: string[]; scopeConflicts?: NumericScopeConflict[] }) {
+  // 去重后按重要性评分排序，保留最重要的核心事实（而非静默截断）
+  const coreFactsResult = selectCoreFacts(input.factsModel);
   const coreFacts = coreFactsResult.selected;
   // 如果丢弃了重要事实，在蓝图中记录
   const droppedFactNote = coreFactsResult.dropped.length > 0
     ? [`⚠️ 因 LLM 上下文预算限制，${coreFactsResult.dropped.length} 个低优先级事实未纳入蓝图；完整事实主表可在生成后的事实覆盖报告查看。`]
     : [];
   const profile = documentProfileForContext(input);
-  const evidenceTraceLines = coreFacts.map((fact, index) => `${index + 1}. ${fact.fieldName || fact.key || '资料事实'}｜${stringifyFactValue(fact.value).replace(/\s+/gu, ' ').slice(0, 90)}｜来源：${fact.sourceFile ? path.basename(fact.sourceFile) : '结构化事实主表'}`);
+  const evidenceTraceLines = coreFacts.map((fact, index) => factTraceLine(fact, index));
   const coverageMatrix = factCoverageMatrixLines(input.chapters);
   const supportMatrix = input.chapters.map((chapter, index) => {
     const support = supportLevelForChapter(chapter, input.factsModel);

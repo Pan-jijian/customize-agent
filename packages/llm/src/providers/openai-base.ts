@@ -276,13 +276,18 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
       if (!choice) throw new Error('LLM returned empty choices');
 
       const msg = choice.message as { reasoning_content?: string; content?: string | null };
+      // DeepSeek 等厂商在 usage 中额外返回 prefix cache 指标（prompt_cache_hit_tokens/miss_tokens），
+      // OpenAI SDK 的 CompletionUsage 类型不含这些字段，按扩展字段安全读取透传给上层做缓存命中率观测
+      const rawUsage = response.usage as (OpenAI.Completions.CompletionUsage & Record<string, unknown>) | undefined;
       return createLLMResponse({
         content: msg.content ?? '',
         thinkingContent: msg.reasoning_content,
         toolCalls: this._extractToolCalls(choice),
-        usage: response.usage ? {
-          promptTokens: response.usage.prompt_tokens,
-          completionTokens: response.usage.completion_tokens,
+        usage: rawUsage ? {
+          promptTokens: rawUsage.prompt_tokens,
+          completionTokens: rawUsage.completion_tokens,
+          promptCacheHitTokens: typeof rawUsage.prompt_cache_hit_tokens === 'number' ? rawUsage.prompt_cache_hit_tokens : undefined,
+          promptCacheMissTokens: typeof rawUsage.prompt_cache_miss_tokens === 'number' ? rawUsage.prompt_cache_miss_tokens : undefined,
         } : undefined,
       });
     }, { signal: options?.signal });

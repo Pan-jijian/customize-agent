@@ -1,9 +1,11 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { DocumentEvidence, DocumentGenerationDiagnostics, TenderRequirementItem, TenderRequirementModel, ValidationIssue } from './types';
 import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
 import { documentTextLength } from './budget';
 import { cleanPdfHeadingNoise } from './factsModel';
 import { buildSemanticSimilarity, type SemanticSimilarityFn } from './semanticSimilarity';
-import { isBidDisciplineSentence, systemConstraintLine } from './utils';
+import { isBidDisciplineSentence, stableHash, systemConstraintLine } from './utils';
 
 /**
  * 招标文件“要求与标准”层：把招标绑定资料中的文本性评分项要求（创优目标/绿色等级/特殊质量标准/
@@ -414,6 +416,61 @@ export function hasTenderRequirements(model: TenderRequirementModel | undefined)
     model.prohibitionNotes.length > 0 ||
     Boolean(model.evaluationScheme)
   );
+}
+
+// ---------------------------------------------------------------------------
+// 提取结果磁盘缓存（B 阶段）：同一项目资料未变化时跳过主提取/窄通道 2 次 LLM。
+// 防脏双门禁：写门禁（坏结果永不固化——仅非空且必提字段齐全才落盘）+ 读门禁
+// （结构无效/空模型/必提字段缺失的缓存一律不采用，历史脏数据无法复用）。
+// 哈希失效：key = 提取器版本 + 招标文件直读集合哈希 + 预筛输入哈希，任一输入字节变化即失效；
+// 提取 prompt / bge 召回特征集变更时递增版本号强制全体失效。
+// ---------------------------------------------------------------------------
+
+const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v1';
+
+function tenderRequirementsCacheRoot(projectRoot?: string) {
+  const root = path.join(process.env.HOME || process.cwd(), '.customize-agent', 'cache', 'document-workflow', stableHash(projectRoot || 'default'));
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
+/** 证据集合指纹：全内容哈希（非 head/tail 抽样）——专业文档条件/证据/数据必须精准，
+ * 抽样哈希存在漏判变更风险，此处不省 */
+function evidenceContentFingerprint(evidence: DocumentEvidence[]) {
+  return evidence
+    .map(item => ({ filePath: item.filePath || '', sectionTitle: item.sectionTitle || '', contentHash: stableHash(item.content || '') }))
+    .sort((a, b) => `${a.filePath}|${a.sectionTitle}`.localeCompare(`${b.filePath}|${b.sectionTitle}`));
+}
+
+/** 提取缓存 key：提取器版本 + 招标文件直读集合 + 预筛输入（窄通道召回输入由直读集合确定性派生，已被覆盖） */
+export function tenderRequirementsCacheKey(input: { collectionEvidence: DocumentEvidence[]; preselectEvidence: DocumentEvidence[] }) {
+  return stableHash({
+    version: TENDER_REQUIREMENTS_CACHE_VERSION,
+    collection: evidenceContentFingerprint(input.collectionEvidence),
+    preselectInput: evidenceContentFingerprint(input.preselectEvidence),
+  });
+}
+
+/** 读缓存（防脏读门禁：文件损坏/空模型/必提字段缺失一律不采用） */
+export function readCachedTenderRequirements(projectRoot: string | undefined, key: string): TenderRequirementModel | undefined {
+  try {
+    const file = path.join(tenderRequirementsCacheRoot(projectRoot), `tender-requirements-${key}.json`);
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as TenderRequirementModel;
+    if (!hasTenderRequirements(parsed) || missingMandatoryFields(parsed)) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 写缓存（防脏写门禁：空结果/必提字段缺失不落盘，坏数据永不固化；写失败静默降级为无缓存路径） */
+export function writeCachedTenderRequirements(projectRoot: string | undefined, key: string, model: TenderRequirementModel | undefined) {
+  if (!model || !hasTenderRequirements(model) || missingMandatoryFields(model)) return;
+  try {
+    fs.writeFileSync(path.join(tenderRequirementsCacheRoot(projectRoot), `tender-requirements-${key}.json`), JSON.stringify(model, null, 2));
+  } catch {
+    // 缓存写失败不影响生成
+  }
 }
 
 /**

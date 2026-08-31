@@ -1,3 +1,6 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('./llmClient', async () => {
@@ -10,7 +13,8 @@ import type * as LlmClientModule from './llmClient';
 import { callDocumentLlmJson } from './llmClient';
 import { validateJsonAgainstSchema } from './llmClient';
 import { buildSemanticSimilarity } from './semanticSimilarity';
-import { emptyTenderRequirements, extractTenderRequirements, filterMandatoryClauseEvidence, hasTenderRequirements, mergeTenderRequirements, mergeTenderRequirementSlices, missingMandatoryFields, preselectTenderRequirementEvidence, requirementsCoverageIssues, tenderRequirementsWritingRules, classifyRequirementResponsiveness, classifyAnchorAlternativeClauses, REQUIREMENTS_JSON_SCHEMA } from './tenderRequirements';
+import { emptyTenderRequirements, extractTenderRequirements, filterMandatoryClauseEvidence, hasTenderRequirements, mergeTenderRequirements, mergeTenderRequirementSlices, missingMandatoryFields, preselectTenderRequirementEvidence, readCachedTenderRequirements, requirementsCoverageIssues, tenderRequirementsCacheKey, tenderRequirementsWritingRules, writeCachedTenderRequirements, classifyRequirementResponsiveness, classifyAnchorAlternativeClauses, REQUIREMENTS_JSON_SCHEMA } from './tenderRequirements';
+import { stableHash } from './utils';
 import type { DocumentEvidence, TenderRequirementModel } from './types';
 
 const evidence: DocumentEvidence[] = [
@@ -409,5 +413,88 @@ describe('3.2 评标办法系统侧消费与约束封装（tenderRequirementsWri
     const rules = tenderRequirementsWritingRules(model);
     expect(rules).toContain('【系统约束——仅指导写作，禁止写入正文，禁止复述本句】');
     expect(rules).toContain('黄山杯');
+  });
+});
+
+describe('B 阶段 提取结果磁盘缓存（防脏双门禁+哈希失效）', () => {
+  let tempRoot = '';
+  /** 必提字段齐全的合法提取结果（写门禁放行的最小形态） */
+  const validModel = (): TenderRequirementModel => ({
+    ...emptyTenderRequirements(true),
+    awardObjectives: [{ text: '创优目标：确保黄山杯。', coreTerms: ['黄山杯'], source: '招标文件.pdf' }],
+    awardClauses: [{ text: '确保获得黄山杯的支付300万元。', coreTerms: ['黄山杯', '300万元'], source: '招标文件.pdf' }],
+    greenBuildingGrade: { text: '绿色建筑等级要求：达到国标二星级。', coreTerms: ['二星级'], source: '招标文件.pdf' },
+    smartSiteGrade: { text: '智慧工地管理要求：基本级。', coreTerms: ['基本级'], source: '招标文件.pdf' },
+    assemblyRate: { text: '装配率为30%。', coreTerms: ['装配率', '30%'], source: '招标文件.pdf' },
+    systematicBenchmarks: [{ text: '质量体系要求：ISO9001。', coreTerms: ['ISO9001'], source: '招标文件.pdf' }],
+  });
+  const cacheFile = (key: string) => path.join(os.homedir(), '.customize-agent', 'cache', 'document-workflow', stableHash(tempRoot), `tender-requirements-${key}.json`);
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tender-requirements-cache-test-'));
+  });
+  afterEach(() => {
+    fs.rmSync(path.join(os.homedir(), '.customize-agent', 'cache', 'document-workflow', stableHash(tempRoot)), { recursive: true, force: true });
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('哈希失效：招标文件集合任一字节变化即生成不同 key', () => {
+    const keyA = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0] }], preselectEvidence: [] });
+    const keyB = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0], content: `${evidence[0].content}追加内容` }], preselectEvidence: [] });
+    expect(keyA).not.toBe(keyB);
+  });
+
+  it('哈希失效：预筛输入内容变化即生成不同 key', () => {
+    const keyA = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [{ ...evidence[0] }] });
+    const keyB = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [{ ...evidence[0], content: '不同预筛输入' }] });
+    expect(keyA).not.toBe(keyB);
+  });
+
+  it('key 对证据顺序不敏感（指纹排序后一致，同一资料重排不失效）', () => {
+    const a = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0], filePath: 'a' }, { ...evidence[0], filePath: 'b' }], preselectEvidence: [] });
+    const b = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0], filePath: 'b' }, { ...evidence[0], filePath: 'a' }], preselectEvidence: [] });
+    expect(a).toBe(b);
+  });
+
+  it('写→读回环：合法结果落盘后可原样读回', () => {
+    const model = validModel();
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
+    writeCachedTenderRequirements(tempRoot, key, model);
+    const read = readCachedTenderRequirements(tempRoot, key);
+    expect(read?.awardObjectives[0].text).toBe(model.awardObjectives[0].text);
+    expect(read?.assemblyRate?.text).toBe('装配率为30%。');
+  });
+
+  it('防脏写门禁：必提字段缺失的坏结果不落盘（坏数据永不固化）', () => {
+    const bad = { ...validModel(), awardClauses: [], greenBuildingGrade: undefined };
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
+    writeCachedTenderRequirements(tempRoot, key, bad);
+    expect(fs.existsSync(cacheFile(key))).toBe(false);
+    expect(readCachedTenderRequirements(tempRoot, key)).toBeUndefined();
+  });
+
+  it('防脏写门禁：空结果不落盘', () => {
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
+    writeCachedTenderRequirements(tempRoot, key, emptyTenderRequirements(true));
+    expect(fs.existsSync(cacheFile(key))).toBe(false);
+  });
+
+  it('防脏读门禁：手工写入的脏缓存（缺必提字段）不采用', () => {
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
+    fs.mkdirSync(path.dirname(cacheFile(key)), { recursive: true });
+    fs.writeFileSync(cacheFile(key), JSON.stringify({ ...validModel(), awardClauses: [] }), 'utf8');
+    expect(readCachedTenderRequirements(tempRoot, key)).toBeUndefined();
+  });
+
+  it('防脏读门禁：损坏 JSON 不采用', () => {
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
+    fs.mkdirSync(path.dirname(cacheFile(key)), { recursive: true });
+    fs.writeFileSync(cacheFile(key), '{损坏的JSON', 'utf8');
+    expect(readCachedTenderRequirements(tempRoot, key)).toBeUndefined();
+  });
+
+  it('缓存 miss：未写入时返回 undefined（走真实提取链）', () => {
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
+    expect(readCachedTenderRequirements(tempRoot, key)).toBeUndefined();
   });
 });

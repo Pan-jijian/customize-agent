@@ -22,7 +22,14 @@ export interface LLMResponse {
   content: string;
   thinkingContent?: string;
   toolCalls?: ToolCall[];
-  usage?: { promptTokens: number; completionTokens: number };
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    /** 上下文缓存命中 token 数（DeepSeek 自动 prefix cache 等厂商指标，非缓存提供商不返回） */
+    promptCacheHitTokens?: number;
+    /** 上下文缓存未命中 token 数（首次请求为 miss，后续前缀一致的请求转为 hit） */
+    promptCacheMissTokens?: number;
+  };
   /** 厂商特有扩展字段（如 x-openai-*, x-anthropic-* 前缀命名空间） */
   vendorExtensions?: Record<string, unknown>;
 }

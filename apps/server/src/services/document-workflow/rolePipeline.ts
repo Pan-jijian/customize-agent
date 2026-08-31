@@ -49,7 +49,7 @@ export function createGenerationDiagnostics(strategy: DocumentGenerationStrategy
   return {
     strategy,
     metrics: [],
-    llm: { calls: 0, failures: 0, maxActive: 0, retries: 0, failureStreak: 0, schemaFailures: 0 },
+    llm: { calls: 0, failures: 0, maxActive: 0, retries: 0, failureStreak: 0, schemaFailures: 0, promptCacheHitTokens: 0, promptCacheMissTokens: 0, inputTokens: 0, outputTokens: 0, inputChars: 0 },
     evidence: { raw: 0, used: 0, filteredNoise: 0, budgetDropped: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0 },
     quality: { blockingCount: 0, importantCount: 0, minorCount: 0, repairedCount: 0 },
   };
@@ -193,9 +193,10 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     '如问题涉及提示词要求的关键词或禁用内容，只在相关段落自然补齐或替换，不得堆砌关键词。',
     '禁止新增证据摘要中没有的信息；无法安全定位的问题不要生成 patch。',
     '返回 JSON：{"patches":[{"originalText":"原局部文本","targetStart":"定位起始文本","targetEnd":"定位结束文本","replacement":"替换后的局部文本","reason":"修复原因"}]}',
-    input.promptTexts,
+    // A5a 前缀缓存：可变 promptTexts 已移入 user 首部，system 保持恒定（跨章共享 prefix cache）
   ].filter(Boolean).join('\n\n');
   const buildUserPrompt = (evidenceText: string) => [
+    input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
     `模板：${input.template.name}`,
     `章节：${input.chapter.title}`,
     input.requirement ? `用户要求：${input.requirement}` : '',

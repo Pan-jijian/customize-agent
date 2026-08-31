@@ -47,4 +47,25 @@ describe('compactSectionProjectContext（评分项要求段置顶保护）', () 
     // 要求段第 60 条（尾部）完整保留——不允许被截断
     expect(result).toContain('第59条实质要求');
   });
+
+  it('A2 双保护：可信基础事实主表段整段保留（不丢本章精确事实）', () => {
+    const factsBlock = '可信基础事实主表（本章相关）：\n- 建设地点：合肥市瑶海区，总建筑面积28570平方米\n- 计划工期：365日历天\n- 合同估算价：3000万元';
+    const context = `${longPrefix}\n${factsBlock}\n关键事实证据追踪清单（本章相关）：\n1. 建设地点｜合肥市瑶海区｜来源：招标文件.pdf`;
+    const result = compactSectionProjectContext(context, 800);
+    expect(result.startsWith('可信基础事实主表')).toBe(true);
+    // 事实行整段保留（含最后一条）
+    expect(result).toContain('合同估算价：3000万元');
+    expect(result).toContain('计划工期：365日历天');
+  });
+
+  it('A2 双保护：要求段与事实主表同时存在时双双置顶保留', () => {
+    const factsBlock = '可信基础事实主表（本章相关）：\n- 计划工期：365日历天\n- 合同估算价：3000万元';
+    const context = `${longPrefix}\n${factsBlock}\n${requirements}`;
+    const result = compactSectionProjectContext(context, 600);
+    expect(result).toContain('确保黄山杯'); // 要求段保留
+    expect(result).toContain('合同估算价：3000万元'); // 事实主表保留
+    // 要求段与事实段均在输出中
+    expect(result.indexOf('【招标文件评分项要求')).toBeGreaterThanOrEqual(0);
+    expect(result.indexOf('可信基础事实主表')).toBeGreaterThanOrEqual(0);
+  });
 });

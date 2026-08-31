@@ -32,7 +32,7 @@ export function professionalSectionTaskCard(chapterTitle: string, sectionTitle: 
   return ['【小节专业任务卡】', `任务对象：${sectionTitle}`, ...(points.length ? points : ['必须结合本项目资料明确事实说明对象范围、实施方法、控制要点、验收要求和资料闭环，避免泛化套话。']), ...(arrowChainPoint ? ['工序顺序表达是硬性格式要求：正文成稿必须实际出现工序顺序表达（顺序词叙述/编号步骤/有序无序列表/箭头链任一形式，形式由模型自然选择），评审将核验，未达标会被退回重写。'] : []), '禁止套话：不得使用“本小节围绕……展开”“结合绑定项目资料、施工组织安排和现场实施条件”“交底覆盖率按100%控制”等模板化开篇；不得只写“加强管理、严格把控、确保质量”式口号；每个三级小节必须写与本节标题对应的专属内容，不得与其他小节内容相同或近似。'].join('\n');
 }
 
-function normalizePlannedSectionTitle(title: string) {
+export function normalizePlannedSectionTitle(title: string) {
   return displayChapterTitle(title.replace(/\*+/gu, ''))
     .replace(/^第[一二三四五六七八九十百千万\d]+[章节篇部分、.．\s-]*/u, '')
     .replace(/^\d+(?:\.\d+)*(?:[.．、]|\s)+/u, '')
@@ -51,7 +51,7 @@ function isInstructionLikeSectionTitle(title: string) {
   return /^(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用)|^(?:如|若|如果)(?:涉及|不涉及|适用|不适用)|(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成)|按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|说明要求|注意事项/u.test(normalized);
 }
 
-function isInvalidPlannedSectionTitle(title: string, chapterTitle: string) {
+export function isInvalidPlannedSectionTitle(title: string, chapterTitle: string) {
   const normalized = normalizePlannedSectionTitle(title);
   const normalizedChapter = normalizePlannedSectionTitle(chapterTitle);
   if (normalized.length < 4 || normalized.length > 60) return true;
@@ -78,7 +78,7 @@ function chineseOrdinalToNumber(value: string) {
   return tens * 10 + ones;
 }
 
-function sectionTitleEquivalent(a: string, b: string) {
+export function sectionTitleEquivalent(a: string, b: string) {
   const left = normalizePlannedSectionTitle(a).replace(/[\s()（）:：.。；;,，、-]/gu, '');
   const right = normalizePlannedSectionTitle(b).replace(/[\s()（）:：.。；;,，、-]/gu, '');
   if (!left || !right) return false;

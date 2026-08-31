@@ -16,7 +16,7 @@ export function createLLMResponse(params: {
     arguments: Record<string, unknown>;
     vendorExtensions?: Record<string, unknown>;
   }>;
-  usage?: { promptTokens: number; completionTokens: number };
+  usage?: LLMResponse['usage'];
   vendorExtensions?: Record<string, unknown>;
 }): LLMResponse {
   return {
