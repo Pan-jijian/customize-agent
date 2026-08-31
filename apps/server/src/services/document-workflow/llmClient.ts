@@ -95,9 +95,11 @@ export function getDocumentLlmMaxConcurrency() {
   return llmMaxConcurrency;
 }
 
-function isTransientLlmError(error: unknown): boolean {
+export function isTransientLlmError(error: unknown): boolean {
   const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
-  return /connection error|econnrefused|econnreset|fetch failed|network|socket|eai_again|enotfound|etimedout|429|502|503|504|rate ?limit|too many requests|overloaded|服务繁忙|连接失败/iu.test(text);
+  // abort/timeout 纳入瞬态：provider 层硬超时（响应头已回但 body 挂起时 AbortSignal.timeout 触发 abort）
+  // 属服务端 stall 类瞬态故障，重试一次大概率恢复；用户主动中止已在调用点按 signal.aborted 先行拦截，不受影响
+  return /connection error|econnrefused|econnreset|fetch failed|network|socket|eai_again|enotfound|etimedout|429|502|503|504|rate ?limit|too many requests|overloaded|服务繁忙|连接失败|abort|timeout|timed ?out/iu.test(text);
 }
 
 /** 上下文超长错误识别（deepseek 输入超窗口返回 400）：供调用方做「缩减输入后降级重试」，

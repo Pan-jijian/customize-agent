@@ -5,7 +5,7 @@
  * 底层 LLM 调用通过 invokeLlm 注入桩（模块内部词法绑定无法被 vi.mock 拦截）。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, type DocumentJsonSchema } from './llmClient';
+import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, isTransientLlmError, type DocumentJsonSchema } from './llmClient';
 import type { DocumentGenerationDiagnostics } from './types';
 
 // 无活跃模型配置：callDocumentLlm 观测累计发生在 provider 调用之前，
@@ -197,5 +197,33 @@ describe('callDocumentLlm 上下文观测（3.4 inputChars + L0-L3 分层累计�
   it('contextLayerChars 过滤空段并求和（空字符串/false/undefined 自动忽略）', () => {
     expect(contextLayerChars(['甲乙', '', false, undefined, '丙丁'])).toBe(4);
     expect(contextLayerChars([])).toBe(0);
+  });
+});
+
+describe('isTransientLlmError（瞬态错误识别，驱动重试一次）', () => {
+  it('超时/abort 类错误判瞬态：硬超时 abort 后应重试一次', () => {
+    // OpenAI SDK 超时 abort 抛 APIUserAbortError
+    expect(isTransientLlmError(new Error('This operation was aborted'))).toBe(true);
+    // AbortSignal.timeout 原生 reason
+    expect(isTransientLlmError(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }))).toBe(true);
+    // fetch 层超时文案
+    expect(isTransientLlmError(new Error('fetch failed: request timed out'))).toBe(true);
+    expect(isTransientLlmError(new Error('Request timeout after 600000ms'))).toBe(true);
+  });
+
+  it('原有瞬态错误识别不回归', () => {
+    expect(isTransientLlmError(new Error('fetch failed'))).toBe(true);
+    expect(isTransientLlmError(new Error('connection error: ECONNRESET'))).toBe(true);
+    expect(isTransientLlmError(new Error('429 rate limit exceeded'))).toBe(true);
+    expect(isTransientLlmError(new Error('HTTP 502 Bad Gateway'))).toBe(true);
+    expect(isTransientLlmError(new Error('服务繁忙，请稍后重试'))).toBe(true);
+    expect(isTransientLlmError(new Error('连接失败'))).toBe(true);
+  });
+
+  it('非瞬态错误不误判：欠费与上下文超长各有独立处理路径', () => {
+    expect(isTransientLlmError(new Error('402 Insufficient Balance'))).toBe(false);
+    expect(isTransientLlmError(new Error("This model's maximum context length is 131072 tokens"))).toBe(false);
+    expect(isTransientLlmError(new Error('无效 JSON：第 12 行解析失败'))).toBe(false);
+    expect(isTransientLlmError(new Error('用户中止'))).toBe(false);
   });
 });

@@ -17,6 +17,7 @@ export type {
 export { DEFAULT_CAPABILITIES } from './interface.js';
 export { MODEL_THINKING_PROFILES, thinkingCapabilityForModel, thinkingDisableBody } from './thinking.js';
 export { DeepSeekProvider } from './providers/deepseek.js';
+export { hardTimeoutSignal } from './providers/openai-base.js';
 export { OpenAIProvider } from './providers/openai.js';
 export { AnthropicProvider } from './providers/anthropic.js';
 export { GoogleProvider } from './providers/google.js';
