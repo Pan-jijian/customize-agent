@@ -54,3 +54,27 @@ describe('fallbackStructureForSections 块目标分配（4.12.17）', () => {
     }
   });
 });
+
+describe('fallbackStructureForSections 人材机三小节独立成块（h16）', () => {
+  it('人/材/机保障体系三节各自独立成块（H3），不被同域 bigram 合并吞并', () => {
+    const sections = [
+      '确保人的保障体系与措施',
+      '确保材的保障体系与措施',
+      '确保机的保障体系与措施',
+      '劳动力配置计划与高峰期人数安排',
+    ];
+    const structure = fallbackStructureForSections(sections, '确保人、材、机的保障体系与措施', 6000);
+    // 三节同落「综合管理」域且 bigram 重叠 ≥0.75，修复前被合并成单块；修复后 3 个独立块 + 非标准小节块
+    const triadBlocks = structure.blocks.filter(block => /^确保[人材机](?:员|力|料|械|工)?的保障体系与措施$/u.test(block.title));
+    expect(triadBlocks.length).toBe(3);
+    for (const block of triadBlocks) {
+      expect(block.subPoints.length).toBe(1);
+      expect(block.subPoints[0].title).toBe(block.title);
+    }
+  });
+
+  it('非资源三小节章不受影响：同域可合并细目保持原行为', () => {
+    const structure = fallbackStructureForSections(['三检制度落实', '隐蔽工程验收'], '测试章', 2400);
+    expect(structure.blocks.length).toBeGreaterThanOrEqual(1);
+  });
+});

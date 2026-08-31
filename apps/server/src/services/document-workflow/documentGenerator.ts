@@ -16,6 +16,7 @@ import { evidenceMatchesFact } from './factMatching';
 import { plannedStructurePrompt, extractGeneratedSections } from './markdownComposer';
 import { buildDocumentBudget, documentTextLength } from './budget';
 import { sectionContentIntegrityIssues, crossChapterConsistencyIssues, processSpecConflictIssues, applyDeterministicConsistencyFixes } from './qualityValidation';
+import { ambiguousEitherOrIssues, basicInfoScheduleFieldIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, foundationFormResidueIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripDuplicateParagraphs, stripDuplicateTables, stripOverviewRecapBodyLines, supportSystemConflictIssues } from './documentIntegrityChecks';
 import { buildDocumentBlueprintContext, buildDocumentBlueprintStructure, buildChapterScopedProjectContext, composeScopedProjectContext } from './documentBlueprint';
 import { enrichConstructionOrgOutline } from './constructionOrgCatalog';
 import { validateBidStructureBeforeGeneration, extractEvaluationCriteriaItems, chapterCriteriaText, prioritizeOverviewSections } from './constructionBidStructure';
@@ -1690,19 +1691,42 @@ export async function generateDocumentDraft(input: { templateId: string; require
         : chapterDraftsFinal.filter((chapter, index) => index % Math.max(2, Math.round(1 / samplingRate)) === 0);
       const sampledCount = sampledChapters.length;
       const runGlobalReview = () => withProgressHeartbeat(() => reviewGlobalConsistency({ template, chapters: sampledChapters, chapterReviews: [], promptTexts: reviewPromptTexts, requirement: input.requirement, projectContext, diagnostics: generationDiagnostics, signal: input.signal }));
-      // 确定性跨章数值冲突（crossChapterConsistencyIssues / processSpecConflictIssues）：正文出现与资料
-      // 建设规模/估算价/结构层规格不一致的取值时，确定性检测比 LLM 审查更精确；此前只在导出校验阶段暴露、
-      // 生成流程内无修复机会，用户只能看到“导出门禁未通过”后手动继续生成（历史缺陷，且重跑生成必然复现——
-      // LLM 依据同样资料会再次写出同样数值，导致“继续生成”按钮永远失败）。此处并入修复闭环统一修复。
+      // 确定性冲突检测（crossChapterConsistencyIssues / processSpecConflictIssues + documentIntegrityChecks
+      // h13/h14/h15 检测家族）：正文出现与资料建设规模/估算价/结构层规格不一致的取值、劳动力/设备数量跨章矛盾、
+      // 两可表述、基坑深度未锁定、危大清单不一致、表格/段落重复等问题时，确定性检测比 LLM 审查更精确；
+      // 此前只在导出校验阶段暴露、生成流程内无修复机会，用户只能看到“导出门禁未通过”后手动继续生成
+      // （历史缺陷，且重跑生成必然复现——LLM 依据同样资料会再次写出同样数值，导致“继续生成”按钮永远失败）。
+      // 此处并入修复闭环统一修复，与导出校验同源同阈值（检测定位=修复定位）。
       const runDeterministicConsistencyCheck = async () => {
         const fullMarkdown = chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
+        // 概况复述语义兑底（与导出校验 documentFinalValidation 同口径：候选句 vs 概况章正文 bge 余弦）
+        const recapCandidates = overviewRecapCandidates(fullMarkdown);
+        const recapSimilarity = await buildSemanticSimilarity(recapCandidates.sentences, recapCandidates.overviewBody ? [recapCandidates.overviewBody] : []);
         return [
           ...(await crossChapterConsistencyIssues(fullMarkdown, preliminaryFactsModel, canonicalFacts.scopeConflicts)).filter(issue => /跨章一致性冲突/u.test(issue.message)),
           ...(await processSpecConflictIssues(fullMarkdown, preliminaryFactsModel)).filter(issue => issue.level === 'error'),
+          ...resourceConsistencyIssues(fullMarkdown),
+          ...nodeScheduleConsistencyIssues(fullMarkdown),
+          ...crossSectionNumericConflictIssues(fullMarkdown),
+          ...foundationFormResidueIssues(fullMarkdown),
+          ...ambiguousEitherOrIssues(fullMarkdown),
+          ...excavationDepthLockIssues(fullMarkdown),
+          ...dangerousListConsistencyIssues(fullMarkdown),
+          ...basicInfoScheduleFieldIssues(fullMarkdown),
+          ...duplicateTableIssues(fullMarkdown),
+          ...duplicateParagraphIssues(fullMarkdown),
+          ...resourceTriadSectionHierarchyIssues(fullMarkdown),
+          ...await supportSystemConflictIssues(fullMarkdown),
+          ...await sixHundredPercentCoverageIssues(fullMarkdown),
+          ...overviewRecapIssues(fullMarkdown, { semanticSimilarity: recapSimilarity }),
         ].map(issue => `${issue.message}；${issue.suggestion || ''}`);
       };
       const globalReview = await runGlobalReview();
-      globalConsistencyIssues = [...new Set([...globalReview.issues, ...(await runDeterministicConsistencyCheck())])];
+      // LLM 审查 issue 与确定性检测 issue 分离：确定性部分在每轮复检/定点修复后全量重跑替换，
+      // 不得合并保留已修复问题的旧快照（历史缺陷：确定性修复已生效但旧快照残留，
+      // 被 finalize 包装为「跨章一致性复核」error 硬阻断导出）
+      let llmReviewIssues = globalReview.issues;
+      globalConsistencyIssues = [...new Set([...llmReviewIssues, ...(await runDeterministicConsistencyCheck())])];
       // 跨章一致性冲突修复闭环：按冲突描述中的正确口径对点名章节做 fact_conflict 定向修复，再复检；
       // 无任何 patch 落地的轮次立即停止，避免空转消耗 LLM 预算
       for (let repairRound = 0; repairRound < 2 && globalConsistencyIssues.length > 0; repairRound += 1) {
@@ -1727,14 +1751,27 @@ export async function generateDocumentDraft(input: { templateId: string; require
             });
             if (valueHits) return true;
             const layer = issue.match(/正文([^配比厚度\s]{1,6}?)(?:配比|厚度)/u)?.[1];
-            return Boolean(layer && chapter.content.includes(layer));
+            if (layer && chapter.content.includes(layer)) return true;
+            // h15 通用定位：issue 引号内文本（≥6 字）或数值+单位出现在本章正文即关联
+            //（documentIntegrityChecks 检测族的 message 不含「不一致的表述」前缀，
+            // 历史缺陷：劳动力矛盾/设备数量矛盾等无法定位章节，检测空转永不进修复循环）
+            const quotedHit = [...issue.matchAll(/“([^”]{6,80})”/gu)].some(match => normalizedChapterContent.includes(match[1].replace(/\s+/gu, '')));
+            if (quotedHit) return true;
+            return [...issue.matchAll(/(\d[\d,，.]*)\s*(?:人|台|日|个|次|天|月|套|具|处|项|条)/gu)].some(match => normalizedChapterContent.includes(match[0].replace(/\s+/gu, '')));
           });
           return related.length > 0 ? [{ chapter, related }] : [];
         });
         const repairedChapterResults = await Promise.allSettled(repairChapterTargets.map(({ chapter, related }) => withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `global-consistency-repair:${chapter.id}`, () => repairChapterByQuality({
           template,
           chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence || [], missingFacts: chapter.missingFacts || [], sections: chapter.sections },
-          issues: related.map(issue => `${issue}；请严格按冲突描述中给出的资料口径修正本章对应表述，不得引入新的数值；与资料口径一致的既有表述（含分层/子项数值）不得改动。`),
+          issues: related.map(issue => {
+            // 重复类冲突（表格/段落重复）的修复指令是删除冗余而非按资料口径修正数值；
+            // 其余冲突严格按资料口径修正（h15：修复指令与冲突类型对齐，避免 LLM 对重复类 issue 乱改数值）
+            const repairInstruction = /重复/u.test(issue)
+              ? '请删除本冲突描述的重复内容（保留首次出现的完整版本），不得改动其余正文。'
+              : '请严格按冲突描述中给出的资料口径修正本章对应表述，不得引入新的数值；与资料口径一致的既有表述（含分层/子项数值）不得改动。';
+            return `${issue}；${repairInstruction}`;
+          }),
           promptTexts: repairPromptTexts,
           requirement: input.requirement,
           forbidDrawingImages: true,
@@ -1757,7 +1794,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
         if (appliedCount === 0) break;
         emitProgress(chapterDraftsFinal);
         const reReview = await runGlobalReview();
-        globalConsistencyIssues = [...new Set([...reReview.issues, ...(await runDeterministicConsistencyCheck())])];
+        llmReviewIssues = reReview.issues;
+        globalConsistencyIssues = [...new Set([...llmReviewIssues, ...(await runDeterministicConsistencyCheck())])];
         upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-review', status: globalConsistencyIssues.length > 0 ? 'failed' : 'success', message: globalConsistencyIssues.length > 0 ? `跨章一致性复检：仍有 ${globalConsistencyIssues.length} 个冲突` : '跨章一致性复检通过' }, { subtitle: '全局一致性审查' }));
         emitProgress(chapterDraftsFinal);
       }
@@ -1765,16 +1803,38 @@ export async function generateDocumentDraft(input: { templateId: string; require
       // 不依赖 LLM 定位能力——repairChapterByQuality 约束“无法安全定位的问题不要生成 patch”，数值冲突
       // 修复器常因无法在正文定位错误数值而不产出 patch，残留冲突会被导出门禁硬阻断形成“继续生成”死循环
       const deterministicFix = await applyDeterministicConsistencyFixes(chapterDraftsFinal, preliminaryFactsModel, canonicalFacts.scopeConflicts);
-      if (deterministicFix.fixedCount > 0) {
-        // 修复后重算：确定性数值冲突快照必须用最新检测结果替换，不得合并保留已修复问题的旧快照
+      // h15：重复内容确定性删除（重复表格/重复段落/概况复述句），结构冗余删除比 LLM 定位更可靠；
+      // 三个删除步骤顺序执行且互不重叠（后一步的输入是前一步删除后的文本）
+      const dedupeFullMarkdown = chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
+      const dedupeRecapCandidates = overviewRecapCandidates(dedupeFullMarkdown);
+      const dedupeRecapSimilarity = await buildSemanticSimilarity(dedupeRecapCandidates.sentences, dedupeRecapCandidates.overviewBody ? [dedupeRecapCandidates.overviewBody] : []);
+      let removedTableLines = 0;
+      let removedParagraphLines = 0;
+      let removedRecapLines = 0;
+      for (const chapter of chapterDraftsFinal) {
+        const beforeLines = chapter.content.split(/\r?\n/u).length;
+        const tableResult = stripDuplicateTables(chapter.content);
+        const paraResult = stripDuplicateParagraphs(tableResult.markdown);
+        const recapResult = stripOverviewRecapBodyLines(paraResult.markdown, dedupeRecapSimilarity);
+        const totalRemoved = beforeLines - recapResult.split(/\r?\n/u).length;
+        if (totalRemoved > 0) {
+          removedTableLines += tableResult.removedCount;
+          removedParagraphLines += paraResult.removedCount;
+          removedRecapLines += totalRemoved - tableResult.removedCount - paraResult.removedCount;
+          chapter.content = recapResult;
+        }
+      }
+      if (deterministicFix.fixedCount > 0 || removedTableLines > 0 || removedParagraphLines > 0 || removedRecapLines > 0) {
+        // 修复后重算：确定性检测快照必须用最新检测结果替换，不得合并保留已修复问题的旧快照
         //（历史缺陷：修复已生效但旧快照残留，被 finalize 包装为「跨章一致性复核」error 硬阻断导出）
-        globalConsistencyIssues = [
-          ...new Set([
-            ...globalConsistencyIssues.filter(issue => !/^跨章一致性冲突|^工序规格冲突/u.test(issue)),
-            ...(await runDeterministicConsistencyCheck()),
-          ]),
-        ];
-        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-deterministic-fix', status: 'success', message: `跨章一致性数值定点修复：${deterministicFix.fixedCount} 处（${deterministicFix.details.slice(0, 4).join('、')}）`, details: deterministicFix.details.slice(4) }, { subtitle: '跨章一致性修复' }));
+        globalConsistencyIssues = [...new Set([...llmReviewIssues, ...(await runDeterministicConsistencyCheck())])];
+        const fixParts = [
+          deterministicFix.fixedCount > 0 ? `数值 ${deterministicFix.fixedCount} 处` : '',
+          removedTableLines > 0 ? `重复表格 ${removedTableLines} 行` : '',
+          removedParagraphLines > 0 ? `重复段落 ${removedParagraphLines} 行` : '',
+          removedRecapLines > 0 ? `概况复述句 ${removedRecapLines} 行` : '',
+        ].filter(Boolean).join('、');
+        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-deterministic-fix', status: 'success', message: `跨章一致性定点修复：${fixParts}${deterministicFix.details.slice(0, 4).length > 0 ? `（${deterministicFix.details.slice(0, 4).join('、')}）` : ''}`, details: deterministicFix.details.slice(4) }, { subtitle: '跨章一致性修复' }));
         emitProgress(chapterDraftsFinal);
       }
       const sampledStage = sampledCount < chapterDraftsFinal.length ? { ...globalReview.stage, message: `${globalReview.stage.message || '全局一致性审查完成'}（抽检 ${sampledCount}/${chapterDraftsFinal.length} 章）` } : globalReview.stage;

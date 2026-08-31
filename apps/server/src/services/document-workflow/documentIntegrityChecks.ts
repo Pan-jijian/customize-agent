@@ -1048,7 +1048,43 @@ const CROSS_SECTION_ANCHORS = [
   },
   {
     key: 'firstaid', label: '急救箱数量', unit: '套/个', kind: 'number' as const,
-    patterns: [/急救箱[^。；;\n]{0,24}?(\d+)\s*(?:套|个)/gu],
+    patterns: [/急救箱[^。；;\n|]{0,24}?(\d+)\s*(?:套|个)/gu],
+  },
+  // h15（评分报告青天高风险「核心设备型号与数量前后完全不一致」）：机械设备投入计划 vs
+  // 平面布置/临时用电负荷表多处台数矛盾（塔吊 2vs1、升降机 4vs1、汽车吊 2vs1、钢筋加工设备 1vs4、圆盘锯 1vs6）。
+  // 反向模式覆盖「2台TC6015塔式起重机」数值前置形态；正向模式覆盖「塔式起重机TC6015共2台」型号夹中间形态
+  {
+    key: 'towerCrane', label: '塔式起重机（塔吊）数量', unit: '台', kind: 'number' as const,
+    patterns: [
+      /(?:塔式起重机|塔吊)[^。；;\n|]{0,30}?(\d+)\s*台/gu,
+      /(\d+)\s*台[^。；;\n|]{0,16}?(?:塔式起重机|塔吊)/gu,
+    ],
+  },
+  {
+    key: 'hoist', label: '施工升降机数量', unit: '台', kind: 'number' as const,
+    patterns: [
+      /施工升降机[^。；;\n|]{0,30}?(\d+)\s*台/gu,
+      /(\d+)\s*台[^。；;\n|]{0,16}?施工升降机/gu,
+    ],
+  },
+  {
+    key: 'truckCrane', label: '汽车起重机（汽车吊）数量', unit: '台', kind: 'number' as const,
+    patterns: [
+      /(?:汽车起重机|汽车吊)[^。；;\n|]{0,30}?(\d+)\s*台/gu,
+      /(\d+)\s*台[^。；;\n|]{0,16}?(?:汽车起重机|汽车吊)/gu,
+    ],
+  },
+  {
+    key: 'rebarCutter', label: '钢筋切断机数量', unit: '台', kind: 'number' as const,
+    patterns: [/钢筋切断机[^。；;\n|]{0,24}?(\d+)\s*台/gu],
+  },
+  {
+    key: 'rebarBender', label: '钢筋弯曲机数量', unit: '台', kind: 'number' as const,
+    patterns: [/钢筋弯曲机[^。；;\n|]{0,24}?(\d+)\s*台/gu],
+  },
+  {
+    key: 'circularSaw', label: '圆盘锯数量', unit: '台', kind: 'number' as const,
+    patterns: [/圆盘锯[^。；;\n|]{0,24}?(\d+)\s*台/gu],
   },
 ] as const;
 
@@ -1277,6 +1313,187 @@ function stripAwardLeadVerb(award: string): string {
   return result;
 }
 
+// ── 19. 表格重复（h15）：同一文档内出现表头/首列高度重合的两张表属复制粘贴残留 ──
+// 青天评分报告实测：「危大工程全流程闭环管控表」同一章节出现两张（第二张删减关键信息），
+// 属多模板拼接未清理痕迹；全文无冗余重复是形式格式类评审硬要求。
+// 判定：表头归一化完全相同，或表头相似度 ≥0.7 且首列重合 ≥60%；表格行/标题行不入段落重复池。
+
+interface MarkdownTableBlock { startLine: number; endLine: number; header: string[]; firstCol: string[]; bodyChars: number; raw: string[] }
+
+function extractMarkdownTables(markdown: string): MarkdownTableBlock[] {
+  const lines = markdown.split(/\r?\n/u);
+  const tables: MarkdownTableBlock[] = [];
+  const cells = (row: string) => row.trim().replace(/^\|/u, '').replace(/\|$/u, '').split('|').map(cell => cell.trim());
+  let cursor = 0;
+  while (cursor < lines.length) {
+    if (!/^\s*\|/u.test(lines[cursor])) { cursor += 1; continue; }
+    let end = cursor;
+    while (end < lines.length && /^\s*\|/u.test(lines[end])) end += 1;
+    const block = lines.slice(cursor, end);
+    // 标准表：第二行是分隔行（|---|:---|），数据行至少 1 行
+    if (block.length >= 3 && /^\s*\|[\s:|-]+\|/u.test(block[1] || '')) {
+      const header = cells(block[0]).map(cell => cell.replace(/[*_`]/gu, '').trim());
+      const dataRows = block.slice(2);
+      tables.push({
+        startLine: cursor,
+        endLine: end - 1,
+        header,
+        firstCol: dataRows.map(row => cells(row)[0]?.replace(/[*_`]/gu, '').trim() || '').filter(Boolean),
+        bodyChars: dataRows.join('').length,
+        raw: block,
+      });
+    }
+    cursor = end;
+  }
+  return tables;
+}
+
+function jaccard(left: string[], right: string[]): number {
+  if (left.length === 0 || right.length === 0) return 0;
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  const intersection = [...leftSet].filter(item => rightSet.has(item)).length;
+  return intersection / new Set([...leftSet, ...rightSet]).size;
+}
+
+export function duplicateTableIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const tables = extractMarkdownTables(markdown);
+  if (tables.length < 2) return issues;
+  for (let left = 0; left < tables.length; left += 1) {
+    for (let right = left + 1; right < tables.length; right += 1) {
+      const a = tables[left];
+      const b = tables[right];
+      const headerSame = a.header.length > 0 && a.header.length === b.header.length && a.header.every((cell, index) => cell === b.header[index]);
+      const headerSim = jaccard(a.header, b.header);
+      const firstColSim = jaccard(a.firstCol, b.firstCol);
+      if (!headerSame && !(headerSim >= 0.7 && firstColSim >= 0.6)) continue;
+      // 同源单表跨页重复（分页复制导致的连续相同表）与不同表自然相似须区分：
+      // 两表相邻且原始文本完全一致属同表重复渲染，不计冲突
+      if (b.startLine === a.endLine + 1 && a.raw.join('\n') === b.raw.join('\n')) continue;
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'style',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `表格重复：第 ${a.startLine + 1}~${a.endLine + 1} 行表格（表头：${a.header.slice(0, 3).join('|')}）与第 ${b.startLine + 1}~${b.endLine + 1} 行表格高度重复（表头重合 ${Math.round(headerSim * 100)}%、首列重合 ${Math.round(firstColSim * 100)}%）`,
+        suggestion: '同一文档内同主题表格只保留信息最全的一张：删除重复表格（保留字段与数据行更多的那张），删除后核对章节表格计划仍被覆盖。',
+      });
+    }
+  }
+  return issues.slice(0, 3);
+}
+
+/** 表格重复确定性删除（检测定位=修复定位）：保留信息量大的那张（数据行字符多者），删除其余重复表 */
+export function stripDuplicateTables(markdown: string): { markdown: string; removedCount: number } {
+  const tables = extractMarkdownTables(markdown);
+  if (tables.length < 2) return { markdown, removedCount: 0 };
+  const lines = markdown.split(/\r?\n/u);
+  const removed = new Set<number>();
+  for (let left = 0; left < tables.length; left += 1) {
+    for (let right = left + 1; right < tables.length; right += 1) {
+      const a = tables[left];
+      const b = tables[right];
+      if (removed.has(a.startLine) || removed.has(b.startLine)) continue;
+      const headerSame = a.header.length > 0 && a.header.length === b.header.length && a.header.every((cell, index) => cell === b.header[index]);
+      const headerSim = jaccard(a.header, b.header);
+      const firstColSim = jaccard(a.firstCol, b.firstCol);
+      if (!headerSame && !(headerSim >= 0.7 && firstColSim >= 0.6)) continue;
+      if (b.startLine === a.endLine + 1 && a.raw.join('\n') === b.raw.join('\n')) continue;
+      // 保留 bodyChars 大者（信息更全），删除另一张
+      const [keep, drop] = a.bodyChars >= b.bodyChars ? [a, b] : [b, a];
+      for (let line = drop.startLine; line <= drop.endLine; line += 1) removed.add(line);
+      void keep;
+    }
+  }
+  if (removed.size === 0) return { markdown, removedCount: 0 };
+  return {
+    markdown: lines.filter((_, index) => !removed.has(index)).join('\n'),
+    removedCount: removed.size,
+  };
+}
+
+// ── 20. 段落完全重复（h15）：同一长段落（≥40 字）全文出现 ≥2 次属复制粘贴残留 ──
+// 青天评分报告实测：「危险源辨识覆盖基坑支护、装配式构件吊装……」段落与表格前段落完全重复；
+// 判定只收「归一化后完全相等」的段落（长度 ≥40 字），表格行/标题行不入池，零语义成本零误伤。
+
+const DUPLICATE_PARAGRAPH_MIN_CHARS = 40;
+
+function paragraphFingerprint(paragraph: string): string | undefined {
+  const normalized = paragraph.replace(/\s+/gu, '');
+  return normalized.length >= DUPLICATE_PARAGRAPH_MIN_CHARS ? normalized : undefined;
+}
+
+export function duplicateParagraphIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const lines = markdown.split(/\r?\n/u);
+  const seen = new Map<string, number>();
+  let buffer: string[] = [];
+  const flush = () => {
+    const fingerprint = paragraphFingerprint(buffer.join(''));
+    if (fingerprint) {
+      const count = (seen.get(fingerprint) || 0) + 1;
+      seen.set(fingerprint, count);
+    }
+    buffer = [];
+  };
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) { flush(); continue; }
+    // 标题行/表格行不入池（标题重复由 headingDuplicateIssues 管，表格由 duplicateTableIssues 管）
+    if (/^#{1,6}\s/u.test(trimmed) || /^\s*\|/u.test(trimmed)) { flush(); continue; }
+    if (/^[-*•]\s/u.test(trimmed)) { flush(); buffer.push(trimmed); flush(); continue; }
+    buffer.push(trimmed);
+  }
+  flush();
+  const duplicates = [...seen.entries()].filter(([, count]) => count >= 2);
+  for (const [fingerprint, count] of duplicates.slice(0, 3)) {
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'style',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      message: `段落完全重复 ${count} 次：“${fingerprint.slice(0, 40)}…”`,
+      suggestion: '同一段落正文只保留首次出现处，删除其余重复段落；确需前后呼应时改写为差异化表述并压缩篇幅。',
+    });
+  }
+  return issues;
+}
+
+/** 段落完全重复确定性删除：保留首次出现，删除后续完全相同段落（标题行/表格行/分隔行不动） */
+export function stripDuplicateParagraphs(markdown: string): { markdown: string; removedCount: number } {
+  const lines = markdown.split(/\r?\n/u);
+  const seen = new Set<string>();
+  const drop = new Set<number>();
+  let buffer: string[] = [];
+  let bufferLines: number[] = [];
+  const flush = () => {
+    const fingerprint = paragraphFingerprint(buffer.join(''));
+    if (fingerprint) {
+      if (seen.has(fingerprint)) {
+        bufferLines.forEach(index => drop.add(index));
+      } else {
+        seen.add(fingerprint);
+      }
+    }
+    buffer = [];
+    bufferLines = [];
+  };
+  lines.forEach((line, index) => {
+    const trimmed = line.trim();
+    if (!trimmed) { flush(); return; }
+    if (/^#{1,6}\s/u.test(trimmed) || /^\s*\|/u.test(trimmed)) { flush(); return; }
+    if (/^[-*•]\s/u.test(trimmed)) { flush(); buffer = [trimmed]; bufferLines = [index]; flush(); return; }
+    buffer.push(trimmed);
+    bufferLines.push(index);
+  });
+  flush();
+  if (drop.size === 0) return { markdown, removedCount: 0 };
+  return { markdown: lines.filter((_, index) => !drop.has(index)).join('\n'), removedCount: drop.size };
+}
+
 export function fabricatedAwardIssues(markdown: string, factsModel: DocumentFactsModel, tenderRequirements?: TenderRequirementModel): ValidationIssue[] {
   const whitelist = new Set<string>();
   // 白名单来源 1：绑定资料质量/项目/进度事实中的奖项表述（招标文件原文出现的奖项）
@@ -1309,5 +1526,79 @@ export function fabricatedAwardIssues(markdown: string, factsModel: DocumentFact
     message: `奖项表述与招标文件白名单不符：正文出现 ${[...fabricated].join('、')}，均未出现在招标文件评分项要求或绑定资料中`,
     suggestion: '创优目标必须以招标文件原文为准逐字落位（如「确保黄山杯」），禁止自行编造或替换为其他奖项名称；白名单外的奖项表述一律删除或替换为招标原文奖项。',
   }];
+}
+
+// ── h16. 人材机三合一章结构层级检测（第五章层级错位缺陷） ──
+// 「确保人、材、机的保障体系与措施」章必须拆为 人/材/机 三个二级小节；
+// 材/机保障体系内容不得以三级/四级标题形式挂在「人的保障体系」小节下（真实生成缺陷：
+// 任务卡仅 1 条细目走整章 compact-fallback 路径，LLM 自由拆分时把材/机保障体系降级为 H4
+// 挂在“5.1 确保人的保障体系与措施”之下形成层级错位）。
+// 纯结构判定（标题主语与父级主语比对），不涉内容语义判断。
+
+const RESOURCE_TRIAD_CHAPTER_RE = /人[、,，]材[、,，]机/u;
+const RESOURCE_TRIAD_SUBJECT_SECTION_RE = /(?:确保\s*)?([人材机])(?:员|力|料|械|工)?\s*的保障体系与措施/u;
+
+/** H3/H4 标题主语提取：标准形态（“材的保障体系与措施”）优先；退化形态按语义词映射（劳动力→人、材料→材、机械/设备→机） */
+function resourceTriadSubject(title: string): string | undefined {
+  const standard = title.match(RESOURCE_TRIAD_SUBJECT_SECTION_RE)?.[1];
+  if (standard) return standard;
+  if (/劳动力|人员|作业人员|劳务/u.test(title)) return '人';
+  if (/材料|物资|周转/u.test(title)) return '材';
+  if (/机械|设备|机具|塔吊|起重机/u.test(title)) return '机';
+  return undefined;
+}
+
+export function resourceTriadSectionHierarchyIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const lines = markdown.split(/\r?\n/u);
+  // 章区间切分（## 到下一个 ##）
+  for (let chapterStart = 0; chapterStart < lines.length; chapterStart += 1) {
+    const h2 = /^##\s+(.+)$/u.exec(lines[chapterStart].trim());
+    if (!h2) continue;
+    if (!RESOURCE_TRIAD_CHAPTER_RE.test(h2[1])) continue;
+    let chapterEnd = lines.length;
+    for (let next = chapterStart + 1; next < lines.length; next += 1) {
+      if (/^##\s+/u.test(lines[next].trim())) { chapterEnd = next; break; }
+    }
+    const h3Subjects: Array<{ subject: string | undefined; title: string }> = [];
+    let currentH3: { subject: string | undefined; title: string } | undefined;
+    for (let index = chapterStart + 1; index < chapterEnd; index += 1) {
+      const h3 = /^###\s+(.+)$/u.exec(lines[index].trim());
+      const h4 = /^####\s+(.+)$/u.exec(lines[index].trim());
+      if (h3) {
+        currentH3 = { subject: resourceTriadSubject(h3[1]), title: h3[1].trim() };
+        h3Subjects.push(currentH3);
+        continue;
+      }
+      if (h4 && currentH3?.subject) {
+        const subject = resourceTriadSubject(h4[1]);
+        if (subject && subject !== currentH3.subject) {
+          issues.push({
+            level: 'error',
+            severity: 'blocker',
+            category: 'structure',
+            owner: 'llm',
+            repairability: 'llm_repairable',
+            message: `人材机章层级错位：小节“${h4[1].trim()}”挂在“${currentH3.title}”之下（${subject === '人' ? '人' : subject === '材' ? '材' : '机'}的保障体系应独立成二级小节，不得并入${currentH3.subject === '人' ? '人' : currentH3.subject === '材' ? '材' : '机'}的保障体系）`,
+            suggestion: `将“${h4[1].trim()}”提升为独立二级小节，或将其内容合并到对应主题的二级小节。`,
+          });
+        }
+      }
+    }
+    const subjects = new Set(h3Subjects.map(item => item.subject).filter(Boolean) as string[]);
+    const triadComplete = ['人', '材', '机'].every(subject => subjects.has(subject));
+    if (h3Subjects.length < 3 || !triadComplete) {
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'structure',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `人材机章结构不完整：“${h2[1].trim()}”仅 ${h3Subjects.length} 个二级小节（人/材/机的保障体系未全部独立成节）`,
+        suggestion: '拆分为“确保人的保障体系与措施”“确保材的保障体系与措施”“确保机的保障体系与措施”三个二级小节。',
+      });
+    }
+  }
+  return issues;
 }
 

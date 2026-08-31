@@ -4,7 +4,7 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, basicInfoScheduleFieldIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, excavationDepthLockIssues, fabricatedAwardIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, sixHundredPercentCoverageIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, basicInfoScheduleFieldIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, fabricatedAwardIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripDuplicateParagraphs, stripDuplicateTables } from './documentIntegrityChecks';
 import type { DocumentFactsModel, TenderRequirementModel } from './types';
 
 vi.mock('./semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
@@ -432,5 +432,108 @@ describe('resourceConsistencyIssues（h14 反向劳动力口径）', () => {
   it('单一口径无矛盾 → 不报', () => {
     const issues = resourceConsistencyIssues('主体阶段投入劳动力约110人，装饰阶段投入劳动力约105人。');
     expect(issues).toEqual([]);
+  });
+});
+
+describe('duplicateTableIssues / stripDuplicateTables（h15 表格重复）', () => {
+  const tableA = ['| 序号 | 设备名称 | 数量 |', '| --- | --- | --- |', '| 1 | 塔式起重机 | 2 |', '| 2 | 施工升降机 | 3 |'].join('\n');
+  const tableB = ['| 序号 | 设备名称 | 数量 |', '| --- | --- | --- |', '| 1 | 塔式起重机 | 2 |'].join('\n');
+
+  it('两张表头完全相同的表格 → 报重复', () => {
+    const issues = duplicateTableIssues(`第一章\n${tableA}\n\n正文。\n${tableB}`);
+    expect(issues.length).toBeGreaterThanOrEqual(1);
+    expect(issues[0].message).toContain('表格重复');
+  });
+
+  it('相邻同源同文本表格（分页复制）→ 豁免', () => {
+    const issues = duplicateTableIssues(`\n${tableA}\n${tableA}\n`);
+    expect(issues).toEqual([]);
+  });
+
+  it('stripDuplicateTables 保留信息量大者并删除另一张', () => {
+    const { markdown, removedCount } = stripDuplicateTables(`\n${tableA}\n\n正文段落。\n${tableB}\n`);
+    expect(removedCount).toBeGreaterThan(0);
+    // 数据行更多（bodyChars 更大）的 tableA 保留；tableB 为 tableA 子集，删除后该数据行只出现 1 次
+    expect(markdown).toContain('| 2 | 施工升降机 | 3 |');
+    expect(markdown.split('| 1 | 塔式起重机 | 2 |').length - 1).toBe(1);
+    // 正文段落不受影响
+    expect(markdown).toContain('正文段落。');
+  });
+});
+
+describe('duplicateParagraphIssues / stripDuplicateParagraphs（h15 段落完全重复）', () => {
+  const longParagraph = '危险源辨识覆盖基坑支护、装配式构件吊装、脚手架搭设、临时用电、高处作业等全部作业活动，并按作业活动逐项明确风险等级与控制措施。';
+
+  it('同一长段落（≥40 字）出现 2 次 → 报完全重复', () => {
+    const issues = duplicateParagraphIssues(`${longParagraph}\n\n${longParagraph}`);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('段落完全重复');
+  });
+
+  it('标题行与表格行重复不入池 → 不误报', () => {
+    const markdown = ['## 施工部署', '## 施工部署', '| a | b |', '| - | - |', '| a | b |'].join('\n');
+    expect(duplicateParagraphIssues(markdown)).toEqual([]);
+  });
+
+  it('stripDuplicateParagraphs 保留首次出现删除后续完全重复段落', () => {
+    const { markdown, removedCount } = stripDuplicateParagraphs(`段落开头。\n\n${longParagraph}\n\n中间句。\n\n${longParagraph}\n\n结尾句。`);
+    expect(removedCount).toBeGreaterThan(0);
+    expect(markdown.split(longParagraph).length - 1).toBe(1);
+    expect(markdown).toContain('中间句。');
+    expect(markdown).toContain('结尾句。');
+  });
+});
+
+describe('resourceTriadSectionHierarchyIssues（h16 人材机三合一章结构层级）', () => {
+  const triadChapter = [
+    '## 第五章 确保人、材、机的保障体系与措施',
+    '### 5.1 确保人的保障体系与措施',
+    '正文内容。',
+    '### 5.2 确保材的保障体系与措施',
+    '正文内容。',
+    '### 5.3 确保机的保障体系与措施',
+    '正文内容。',
+    '## 第六章 其他',
+  ].join('\n');
+
+  it('人/材/机三个二级小节齐整 → 零缺陷', () => {
+    expect(resourceTriadSectionHierarchyIssues(triadChapter)).toEqual([]);
+  });
+
+  it('材/机保障体系降级为 H4 挂在「人的保障体系」下 → 报层级错位 blocker', () => {
+    const markdown = [
+      '## 第五章 确保人、材、机的保障体系与措施',
+      '### 5.1 确保人的保障体系与措施',
+      '#### 5.1.1 材的保障体系与措施',
+      '#### 5.1.2 机的保障体系与措施',
+      '正文内容。',
+    ].join('\n');
+    const issues = resourceTriadSectionHierarchyIssues(markdown);
+    expect(issues.length).toBeGreaterThanOrEqual(1);
+    expect(issues.some(issue => /层级错位/u.test(issue.message) && issue.severity === 'blocker')).toBe(true);
+  });
+
+  it('仅 1 个二级小节 → 报结构不完整 blocker', () => {
+    const markdown = ['## 第五章 确保人、材、机的保障体系与措施', '### 5.1 确保人的保障体系与措施', '正文内容。'].join('\n');
+    const issues = resourceTriadSectionHierarchyIssues(markdown);
+    expect(issues.some(issue => /结构不完整/u.test(issue.message) && issue.severity === 'blocker')).toBe(true);
+  });
+
+  it('非三合一形态章不受影响', () => {
+    const markdown = ['## 第三章 确保质量的保障体系与措施', '### 3.1 质量目标与验收标准', '正文内容。'].join('\n');
+    expect(resourceTriadSectionHierarchyIssues(markdown)).toEqual([]);
+  });
+
+  it('H4 主语与父 H3 主语一致（如劳动力配置）→ 不误报', () => {
+    const markdown = [
+      '## 第五章 确保人、材、机的保障体系与措施',
+      '### 5.1 确保人的保障体系与措施',
+      '#### 5.1.1 劳动力配置与实名制管理',
+      '### 5.2 确保材的保障体系与措施',
+      '#### 5.2.1 材料进场验收与检测',
+      '### 5.3 确保机的保障体系与措施',
+      '#### 5.3.1 机械设备进场与维护保养',
+    ].join('\n');
+    expect(resourceTriadSectionHierarchyIssues(markdown)).toEqual([]);
   });
 });

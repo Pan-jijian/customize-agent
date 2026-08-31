@@ -129,3 +129,58 @@ describe('validateBidStructureBeforeGeneration 碎片条目不补挂（补挂层
     expect(allSections).toContain('黄山杯');
   });
 });
+
+describe('validateBidStructureBeforeGeneration 人材机三合一章强制独立成节（h16）', () => {
+  it('章退化为仅章标题单小节 → 补挂人/材/机三个标准二级小节', () => {
+    const chapters = [chapter('确保人、材、机的保障体系与措施', ['确保人、材、机的保障体系与措施'])];
+    const result = validateBidStructureBeforeGeneration({
+      template: { id: 'tpl-x', name: '测试施组', chapters, version: 1, updatedAt: 0 } as never,
+      chapters,
+    });
+    const sections = result.enrichedChapters[0].sections || [];
+    expect(sections).toContain('确保人的保障体系与措施');
+    expect(sections).toContain('确保材的保障体系与措施');
+    expect(sections).toContain('确保机的保障体系与措施');
+    // 章标题本身不是合法小节，已被排除
+    expect(sections).not.toContain('确保人、材、机的保障体系与措施');
+  });
+
+  it('已有部分标准小节 → 只补缺失主语', () => {
+    const chapters = [chapter('确保人、材、机的保障体系与措施', ['确保人的保障体系与措施', '劳动力配置计划与高峰期人数安排'])];
+    const result = validateBidStructureBeforeGeneration({
+      template: { id: 'tpl-x', name: '测试施组', chapters, version: 1, updatedAt: 0 } as never,
+      chapters,
+    });
+    const sections = result.enrichedChapters[0].sections || [];
+    expect(sections.filter(section => section === '确保人的保障体系与措施').length).toBe(1);
+    expect(sections).toContain('确保材的保障体系与措施');
+    expect(sections).toContain('确保机的保障体系与措施');
+    // 非标准形态小节保留
+    expect(sections).toContain('劳动力配置计划与高峰期人数安排');
+  });
+
+  it('三节已齐 → 不重复补挂（每主语恰好一条）', () => {
+    const chapters = [chapter('确保人、材、机的保障体系与措施', ['确保人的保障体系与措施', '确保材的保障体系与措施', '确保机的保障体系与措施'])];
+    const result = validateBidStructureBeforeGeneration({
+      template: { id: 'tpl-x', name: '测试施组', chapters, version: 1, updatedAt: 0 } as never,
+      chapters,
+    });
+    const sections = result.enrichedChapters[0].sections || [];
+    // 结构组自动补挂会追加其他必查小节（如劳动力配置计划），断言聚焦三主语不重复
+    expect(sections.filter(section => /^确保[人材机](?:员|力|料|械|工)?的保障体系与措施$/u.test(section)).length).toBe(3);
+    expect(sections.filter(section => section === '确保人的保障体系与措施').length).toBe(1);
+    expect(sections.filter(section => section === '确保材的保障体系与措施').length).toBe(1);
+    expect(sections.filter(section => section === '确保机的保障体系与措施').length).toBe(1);
+  });
+
+  it('非三合一形态章不触发补挂', () => {
+    const chapters = [chapter('确保安全文明生产的管理体系与措施', ['安全生产管理与教育培训要求'])];
+    const result = validateBidStructureBeforeGeneration({
+      template: { id: 'tpl-x', name: '测试施组', chapters, version: 1, updatedAt: 0 } as never,
+      chapters,
+    });
+    const sections = result.enrichedChapters[0].sections || [];
+    // 核心断言：非三合一章不得补挂人材机三小节（结构组补挂的其他必查小节与本题无关）
+    expect(sections.some(section => /^确保[人材机](?:员|力|料|械|工)?的保障体系与措施$/u.test(section))).toBe(false);
+  });
+});

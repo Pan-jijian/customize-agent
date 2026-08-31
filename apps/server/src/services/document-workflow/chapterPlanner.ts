@@ -102,6 +102,14 @@ function sectionDomain(sectionTitle: string) {
   return '综合管理';
 }
 
+/** 人材机三合一章资源三小节判定（结构补挂产物）：
+ * 「确保人/材/机的保障体系与措施」必须各自独立成主题块（H3）与 H4 要点，
+ * 不得被语义域分组/聚类/兜底挂接合并吞并（历史缺陷：三节同落「综合管理」域且 bigram 重叠 ≥0.75，
+ * 被合并成单 H4，材/机保障体系降级挂在「确保人的保障体系与措施」H3 之下形成层级错位） */
+function isResourceTriadSection(title: string) {
+  return /^(?:确保\s*)?[人材机](?:员|力|料|械|工)?\s*的保障体系与措施$/u.test(title);
+}
+
 /** 主题块内 H4 要点上限：超过则切分新块，控制单次调用输出量 */
 const MAX_SUB_POINTS_PER_BLOCK = 6;
 /** 主题块最小/最大目标字数：上限 4000 与成稿侧 maxTokens = 目标×1.5 ≤ 6000 对应，
@@ -174,8 +182,9 @@ function ensureSectionCoverage(inputSections: string[], blocks: PlannedChapterBl
       }
     }
     // 评标必查细目兜底保真：无论相似度多高都不得并入既有 H4，必须新增独立 H4 保留原标题，
-    // 否则“项目主要施工内容/危大工程/应急预案”等必查词会被语义合并吞掉，目录失分
-    if (isCriticalSection(section)) {
+    // 否则“项目主要施工内容/危大工程/应急预案”等必查词会被语义合并吞掉，目录失分；
+    // 人材机三小节同理（结构补挂产物必须独立 H4，不得被 bigram 归并挂接进他节）
+    if (isCriticalSection(section) || isResourceTriadSection(section)) {
       const targetBlock = bestBlock || enriched[enriched.length - 1];
       if (targetBlock) {
         targetBlock.subPoints.push({ title: section, sources: [section] });
@@ -200,7 +209,11 @@ function ensureSectionCoverage(inputSections: string[], blocks: PlannedChapterBl
 /** 确定性回退结构：LLM 规划失败时按语义域分组，域内高相似细目合并进同一 H4（每块 ≤6 个 H4） */
 export function fallbackStructureForSections(inputSections: string[], chapterTitle: string, targetWords: number): PlannedChapterStructure {
   const byDomain = new Map<string, string[]>();
+  // 人材机三小节 bypass 语义域分组，各自独立成块（H3）：三节词面同构（bigram 重叠 ≥0.75）且同落
+  // 「综合管理」域，混域处理必然被合并吞并（层级错位根因）
+  const triadSections: string[] = [];
   for (const section of inputSections) {
+    if (isResourceTriadSection(section)) { triadSections.push(section); continue; }
     const key = sectionDomain(section);
     const items = byDomain.get(key) || [];
     items.push(section);
@@ -212,7 +225,7 @@ export function fallbackStructureForSections(inputSections: string[], chapterTit
     for (const section of items) {
       const last = merged[merged.length - 1];
       const lastSource = last ? last.sources[last.sources.length - 1] : '';
-      if (!isCriticalSection(section) && last && (sameSectionText(section, lastSource) || bigramOverlap(section, lastSource) >= 0.75)) {
+      if (!isCriticalSection(section) && !isResourceTriadSection(section) && last && (sameSectionText(section, lastSource) || bigramOverlap(section, lastSource) >= 0.75)) {
         last.sources.push(section);
         if (section.length > last.title.length) last.title = section;
       } else {
@@ -221,7 +234,7 @@ export function fallbackStructureForSections(inputSections: string[], chapterTit
     }
     return merged;
   };
-  const blocks: PlannedChapterBlock[] = [];
+  const blocks: PlannedChapterBlock[] = triadSections.map(section => ({ title: section, subPoints: [{ title: section, sources: [section] }], facts: [], targetWords: MIN_BLOCK_TARGET_WORDS }));
   for (const items of byDomain.values()) {
     const mergedPoints = mergeDomainSections(items);
     for (let offset = 0; offset < mergedPoints.length; offset += MAX_SUB_POINTS_PER_BLOCK) {
@@ -308,7 +321,10 @@ function clusterBlockCandidates(inputSections: string[], similarity: SemanticSim
   // 必查细目并入语义域分组参与聚类，块内 H4 保真由规划 prompt 规则（必查关键词必须独立 H4）
   // 与 ensureSectionCoverage 必查兜底（未映射必查必新增独立 H4）双重保证
   const byDomain = new Map<string, string[]>();
+  // 人材机三小节强制独立成块（结构补挂产物必须各自成 H3，禁止语义聚类与其他细目同块）
+  const triadBlocks: string[][] = [];
   for (const section of inputSections) {
+    if (isResourceTriadSection(section)) { triadBlocks.push([section]); continue; }
     const key = sectionDomain(section);
     const items = byDomain.get(key) || [];
     items.push(section);
@@ -333,7 +349,7 @@ function clusterBlockCandidates(inputSections: string[], similarity: SemanticSim
     }
     domainBlocks.push(...blocks);
   }
-  return domainBlocks;
+  return [...triadBlocks, ...domainBlocks];
 }
 
 /** 单块 LLM 输出 → PlannedChapterBlock：sources 仅保留能与块细目对齐的原文，防编造；无效返回 undefined */

@@ -402,6 +402,35 @@ export function validateBidStructureBeforeGeneration(input: {
     }
   }
 
+  // 人材机三合一章强制独立成节（真实生成缺陷：模板该章常退化为单小节甚至仅章标题，
+  // 主题块规划走整章 compact-fallback 路径，LLM 自由拆分时把材/机保障体系降级为 H4 挂在
+  // “人的保障体系与措施”H3 之下形成层级错位；此处确定性补挂人/材/机三个标准二级小节，
+  // 保证主题块按 3 节规划、逐节成稿。仅结构补挂，不删非标准形态小节）
+  const resourceTriadSectionRe = /^(?:确保\s*)?([人材机])(?:员|力|料|械|工)?\s*的保障体系与措施$/u;
+  for (const chapter of enriched) {
+    if (!/人[、,，]材[、,，]机/u.test(chapter.title)) continue;
+    const subjects = new Set<string>();
+    const kept: string[] = [];
+    for (const section of chapter.sections) {
+      // 章标题本身不是合法小节（章=节退化源头），排除
+      if (normalize(section) === normalize(chapter.title)) continue;
+      const match = resourceTriadSectionRe.exec(section.trim());
+      if (match) {
+        // 同主语重复小节只保留第一个（去重）
+        if (!subjects.has(match[1])) {
+          subjects.add(match[1]);
+          kept.push(section.trim());
+        }
+      } else {
+        kept.push(section);
+      }
+    }
+    for (const subject of ['人', '材', '机']) {
+      if (!subjects.has(subject)) kept.push(`确保${subject}的保障体系与措施`);
+    }
+    if (kept.length !== chapter.sections.length) chapter.sections = kept;
+  }
+
   // 评分标准条目承接审计：招标文件评审条目必须被章节结构承接；
   // 未承接条目自动补为小节（挂靠公共特征词最多的章节），保证评分标准要求的内容不会被整篇遗漏
   // 注意：审计与承载章打分必须基于 input.chapters（与调用方构建语义相似度闭包时的缓存 key 同源），

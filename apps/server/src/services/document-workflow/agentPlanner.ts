@@ -271,8 +271,11 @@ export function planChapterTask(input: { plan: AgentDocumentPlan; chapter: Docum
   const sections = chapterPlan.sections.map(section => {
     // 退化小节兜底（真实生成回归）：模板无预设小节的章节，planDocument 用章节标题充当唯一小节；
     // 概括性标题（如「确保人、材、机的保障体系与措施」）token 化后几乎不可能与证据/图谱文本词面命中，
-    // 但章节级证据/图谱上下文天然属于该小节（章=节），不得因词面未命中而判「缺少事实、图谱或证据支撑」
-    const degradedSection = chapterPlan.sections.length === 1 && section.title === input.chapter.title;
+    // 但章节级证据/图谱上下文天然属于该小节（章=节），不得因词面未命中而判「缺少事实、图谱或证据支撑」。
+    // 人材机三合一章结构补挂的三小节同理：人/材/机保障体系小节词面可能无法命中证据/图谱，
+    // 但该章证据天然属于三个保障体系小节，不得因词面未命中而判未就绪（否则结构补挂反而阻断章节任务）
+    const degradedSection = (chapterPlan.sections.length === 1 && section.title === input.chapter.title)
+      || (/人[、,，]材[、,，]机/u.test(input.chapter.title) && /^(?:确保\s*)?[人材机](?:员|力|料|械|工)?\s*的保障体系与措施$/u.test(section.title));
     const sectionFacts = input.context.facts.filter(fact => section.evidenceQueries.some(query => factMatches(fact, query)) || section.requiredFacts.some(query => factMatches(fact, query))).slice(0, 24);
     let sectionEvidence = input.evidence.filter(item => section.evidenceQueries.some(query => evidenceMatches(item, query))).slice(0, 24);
     let graphNodes = section.requiredGraphNodes.flatMap(query => graphNodeSummary(input.context.baseProjectGraph, query)).slice(0, 12);
