@@ -274,6 +274,34 @@ describe('round-23 P0-2 奖项名称忠实性检测（requirementsCoverageIssues
     const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
     expect(issues.filter(issue => issue.message.includes('杜撰'))).toEqual([]);
   });
+
+  it('奖惩管理词汇不误报杜撰（4.12.13 真实生成回归：奖励/奖金/奖惩/不奖励）', async () => {
+    const markdown = [
+      '## 创优奖惩机制',
+      '技术负责人每月编制创优资金使用台账，逐笔登记奖励发放、整改投入与检测费用支出。',
+      '合同约定创优奖励300万元，该金额作为项目创优专项激励资金。',
+      '班组自检记录完整且一次验收合格奖励200元/周；漏检每次扣100元。',
+      '创优目标实现奖励项目创优奖金的20%；未实现扣减绩效工资的30%。',
+      '项目部将该条款作为创优管理的合同刚性约束，建立与合同奖惩挂钩的内部考核体系。',
+      '承包人提出的合理化建议降低了合同价格的，按合同约定不奖励。',
+    ].join('\n');
+    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
+    expect(issues.filter(issue => issue.message.includes('杜撰'))).toEqual([]);
+  });
+
+  it('奖惩词汇与真杜撰奖项并存时只报真杜撰（4.12.13）', async () => {
+    const markdown = '## 质量目标\n逐笔登记奖励发放，确保获得庐州杯。';
+    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
+    const fabrication = issues.filter(issue => issue.message.includes('杜撰'));
+    expect(fabrication).toHaveLength(1);
+    expect(fabrication[0].message).toContain('庐州杯');
+  });
+
+  it('通用词“奖项”不误报杜撰（4.12.13：创优目标与奖项申报）', async () => {
+    const markdown = '## 创优目标\n本项目创优目标与奖项申报路径一致，确保获得黄山杯。';
+    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
+    expect(issues.filter(issue => issue.message.includes('杜撰'))).toEqual([]);
+  });
 });
 
 // ============ 评分报告问题2：商务纪律条款提取过滤与分类兜底 ============

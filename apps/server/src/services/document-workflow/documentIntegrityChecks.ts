@@ -1227,17 +1227,24 @@ export function excavationDepthLockIssues(markdown: string): ValidationIssue[] {
   const normalized = markdown.replace(/\s+/gu, '');
   const pitHits = normalized.match(/基坑|开挖|支护/gu) || [];
   if (pitHits.length < 3) return [];
-  // 表格行「| 基坑开挖 | 深度8m |」经空白归一后同样命中（深度后 0~10 字内数字）
-  const depthValueRe = /(?:基坑|开挖|地下室|槽底)[^。；，,]{0,14}(?:深度|标高)[^。；，,]{0,10}\d+(?:\.\d+)?/gu;
-  const depthMentionRe = /(?:深度|标高)[^。；，,]{0,10}\d+(?:\.\d+)?/gu;
-  if (depthValueRe.test(normalized) || depthMentionRe.test(normalized)) return [];
+  // 4.12.12 真实生成回归：正文「开挖深度按基坑支护设计图纸确定」实为未锁定数值，但
+  // 通用危大阈值「开挖深度超过3m」「单次开挖深度不大于1.5m」「深度2倍距离」被误判为
+  // 项目深度数值导致漏报——确定式窗口过滤：深度/标高后直接跟数值（约/为/达/：允许）
+  // 才算锁定；比较式（超过/大于/小于/不大于…）、按图式（按/依据/详见）、倍数式（倍，
+  // 数字后窗口内）全部排除
+  const depthWindows = normalized.matchAll(/(?:深度|标高)[^。；，,]{0,12}-?\d+(?:\.\d+)?[^。；，,]{0,6}/gu);
+  for (const match of depthWindows) {
+    const window = match[0];
+    if (/(?:超过|大于|小于|不[大低小]于|不低于|按|倍|依据|详见|参考|示意|每)/u.test(window)) continue;
+    return [];
+  }
   return [{
     level: 'error',
     severity: 'blocker',
     category: 'fact_consistency',
     owner: 'llm',
     repairability: 'llm_repairable',
-    message: '基坑深度数值未锁定：正文已有基坑支护/开挖成稿内容，但全文未出现「深度/标高+数值」表述，危大工程分级判定失去依据',
+    message: '基坑深度数值未锁定：正文已有基坑支护/开挖成稿内容，但全文未出现「深度/标高+数值」的确定性表述（比较式阈值如「超过3m」不视为锁定），危大工程分级判定失去依据',
     suggestion: '从绑定资料（地质勘察报告/基坑支护设计图/基础平面图）锁定基坑开挖深度数值（如 5.85m）写入基坑支护小节；深度 ≥5m 的深基坑须同步标注危大工程分级与专家论证要求，禁止以「按图纸确定」回避深度数值。',
   }];
 }
@@ -1247,28 +1254,47 @@ export function excavationDepthLockIssues(markdown: string): ValidationIssue[] {
 // 替代招标要求奖项，评标否决级硬伤）。白名单为空（提取失败）时不报：宁漏报不误报，
 // 提取失败有显性 stage 警示，不得在无基准时阻断交付。──
 
-const AWARD_NAME_RE = /[\u4e00-\u9fa5]{2,10}(?:杯|奖)/gu;
+// 4.12.13 真实生成回归：{2,10}汉字+「奖」贪婪前缀把奖惩管理/奖项申报词汇误判为具名奖项——
+// 「逐笔登记奖励发放」「创优奖金」「建立与合同奖惩挂钩」「按合同约定不奖励」「奖项申报」被截断为
+// 「逐笔登记奖」「创优奖」「建立与合同奖」「按合同约定不奖」「创优目标与奖」，造成 8 处假阻断与修复空转。
+// 负向前瞻排除「奖」后紧跟励/金/惩/罚/项的语素续接形态；真奖项名（黄山杯/鲁班奖）不受影响
+const AWARD_NAME_RE = /[\u4e00-\u9fa5]{2,10}(?:杯|奖)(?![励金惩罚项])/gu;
 /** 通用目标类表述不判杜撰：省优/市优/优质工程/文明工地等非具名目标 */
 const GENERIC_AWARD_RE = /优质工程|文明工地|样板|标准化|观摩|示范|精品工程|结构优质|省优|市优/u;
+
+/**
+ * 剥离奖项名前导动词/承诺词（"确保获得黄山杯"→"黄山杯"），循环剥离直至稳定。
+ * 与 tenderRequirements.stripAwardLeadVerb 同口径：贪婪前缀把承诺动词吞入奖项名，
+ * 白名单"确保黄山杯"与正文"确保获得黄山杯"口径分裂导致误报。
+ */
+function stripAwardLeadVerb(award: string): string {
+  let result = award;
+  for (;;) {
+    const stripped = result.replace(/^(?:争创|争取|力争|争获|确保|获得|创建|力创|评为|荣获|标为|目标为|承诺|为)/u, '');
+    if (stripped === result || !stripped) break;
+    result = stripped;
+  }
+  return result;
+}
 
 export function fabricatedAwardIssues(markdown: string, factsModel: DocumentFactsModel, tenderRequirements?: TenderRequirementModel): ValidationIssue[] {
   const whitelist = new Set<string>();
   // 白名单来源 1：绑定资料质量/项目/进度事实中的奖项表述（招标文件原文出现的奖项）
   for (const fact of [...factsModel.quality, ...factsModel.project, ...factsModel.schedule]) {
     const text = stringifyFactValue(fact.value);
-    for (const match of text.matchAll(AWARD_NAME_RE)) whitelist.add(match[0]);
+    for (const match of text.matchAll(AWARD_NAME_RE)) whitelist.add(stripAwardLeadVerb(match[0]));
   }
   // 白名单来源 2：评分项要求提取的奖项类文本（创优目标/特殊质量标准/奖项条款）
   if (tenderRequirements?.extracted) {
     const items = [...(tenderRequirements.awardObjectives || []), ...(tenderRequirements.specialQualityStandards || []), ...(tenderRequirements.awardClauses || [])];
     for (const item of items) {
-      for (const match of (item.text || '').matchAll(AWARD_NAME_RE)) whitelist.add(match[0]);
+      for (const match of (item.text || '').matchAll(AWARD_NAME_RE)) whitelist.add(stripAwardLeadVerb(match[0]));
     }
   }
   if (whitelist.size === 0) return [];
   const fabricated = new Set<string>();
   for (const match of markdown.matchAll(AWARD_NAME_RE)) {
-    const award = match[0];
+    const award = stripAwardLeadVerb(match[0]);
     if (whitelist.has(award)) continue;
     if (GENERIC_AWARD_RE.test(award)) continue;
     fabricated.add(award);

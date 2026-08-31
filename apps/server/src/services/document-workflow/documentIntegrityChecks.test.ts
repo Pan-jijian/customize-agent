@@ -351,6 +351,18 @@ describe('excavationDepthLockIssues（h14 基坑深度数值锁定）', () => {
     expect(excavationDepthLockIssues(markdown)).toEqual([]);
   });
 
+  it('比较式阈值/按图式/倍数式不视为锁定（4.12.12 真实生成回归）→ 报阻断', () => {
+    const markdown = '基坑开挖深度超过3m后观测频次调整为每日1次。\n单次开挖深度不大于1.5m，支护随挖随撑。\n开挖深度按基坑支护设计图纸确定。\n调查范围按基坑开挖深度2倍距离控制。';
+    const issues = excavationDepthLockIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('基坑深度数值未锁定');
+  });
+
+  it('「深度约5.85m」「标高-2.500m」确定式 → 不报', () => {
+    const markdown = '基坑开挖深度约5.85m，支护采用放坡喷锚。\n槽底标高-2.500m，土方开挖分层进行。\n基坑周边设置防护栏杆。';
+    expect(excavationDepthLockIssues(markdown)).toEqual([]);
+  });
+
   it('无基坑工程内容 → 不检测', () => {
     expect(excavationDepthLockIssues('本工程为装饰装修项目，主要内容为室内装修与外立面翻新。')).toEqual([]);
   });
@@ -383,6 +395,30 @@ describe('fabricatedAwardIssues（h14 奖项白名单）', () => {
   it('评分项要求提取的奖项进入白名单', () => {
     const requirements = { extracted: true, awardObjectives: [{ text: '创优目标：确保黄山杯', coreTerms: [] }], awardClauses: [], specialQualityStandards: [] } as unknown as TenderRequirementModel;
     expect(fabricatedAwardIssues('质量目标：确保黄山杯。', factsModel([]), requirements)).toEqual([]);
+  });
+
+  it('奖惩管理词汇不误报为奖项（4.12.13 真实生成回归：奖励/奖金/奖惩/不奖励）', () => {
+    const markdown = [
+      '技术负责人每月25日前编制创优资金使用台账，逐笔登记奖励发放、整改投入、检测费用与资料制作支出。',
+      '合同约定创优奖励300万元，该金额作为项目创优专项激励资金。',
+      '班组自检记录完整且一次验收合格奖励200元/周；漏检每次扣100元。',
+      '创优目标实现奖励项目创优奖金的20%；未实现扣减绩效工资的30%。',
+      '项目部将该条款作为创优管理的合同刚性约束，建立与合同奖惩挂钩的内部考核体系。',
+      '承包人提出的合理化建议降低了合同价格的，按合同约定不奖励。',
+    ].join('\n');
+    expect(fabricatedAwardIssues(markdown, factsModel(['质量标准：合格，确保黄山杯']))).toEqual([]);
+  });
+
+  it('奖惩词汇与真杜撰奖项并存时只报真杜撰', () => {
+    const markdown = '逐笔登记奖励发放，确保获得鲁班奖。';
+    const issues = fabricatedAwardIssues(markdown, factsModel(['质量标准：合格，确保黄山杯']));
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('鲁班奖');
+  });
+
+  it('通用词“奖项”不误报为具名奖项（4.12.13：创优目标与奖项申报）', () => {
+    const markdown = '创优目标与奖项申报路径一致，确保获得黄山杯。';
+    expect(fabricatedAwardIssues(markdown, factsModel(['质量标准：合格，确保黄山杯']))).toEqual([]);
   });
 });
 

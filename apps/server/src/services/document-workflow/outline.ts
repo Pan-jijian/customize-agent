@@ -57,7 +57,8 @@ export function isTenderClauseFragmentTitle(title: string) {
   if (/^\d{1,4}\s*[a-zA-Z]/u.test(normalized)) return true;
   // 评标程序动作碎片（4.12.12 真实生成回归）：「确定评标价」「确定有效评标价」——
   // 评标委员会程序步骤被误提取为评分条目；技术标小节不会以评标价确定动作命名
-  if (/^(?:确定|计算|比较|推荐|审查|否决)(?:有效)?评标价/u.test(normalized)) return true;
+  // （4.12.13 扩围：真实生成仍漏拦「确定评标基准价」——「基准」夹在动作与「价」之间）
+  if (/^(?:确定|计算|比较|推荐|审查|否决)(?:有效)?评标(?:基准)?价/u.test(normalized)) return true;
   if (/^(?:其他要求|需要补充的其他内容|相当于或不低于|补充条款|建议编制要求|投标须知|评标办法)/u.test(normalized)) return true;
   return false;
 }

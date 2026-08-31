@@ -86,6 +86,8 @@ describe('isTenderClauseFragmentTitle（招标条款碎片判别）', () => {
   it('评标程序动作碎片命中（4.12.12：「确定评标价」类）', () => {
     expect(isTenderClauseFragmentTitle('确定评标价')).toBe(true);
     expect(isTenderClauseFragmentTitle('确定有效评标价')).toBe(true);
+    expect(isTenderClauseFragmentTitle('确定评标基准价')).toBe(true);
+    expect(isTenderClauseFragmentTitle('计算评标基准价')).toBe(true);
     expect(isTenderClauseFragmentTitle('确定施工部署')).toBe(false);
   });
 

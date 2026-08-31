@@ -785,6 +785,12 @@ export async function requirementsCoverageIssues(
       // stripAwardLeadVerb 模块级函数与 requirementAnchorCoverage 共用保证口径一致）
       const namedAwards = new Set<string>();
       for (const match of normalized.matchAll(/[杯奖]/gu)) {
+        // 4.12.13 真实生成回归：「奖」后紧跟励/金/惩/罚是「奖励/奖金/奖惩/奖罚」语素续接、
+        // 紧跟「项」是通用词「奖项」（如「创优目标与奖项申报」），均非具名奖项——
+        // 8 处假阻断全部来自奖惩管理/奖项申报词汇被截断为「XX奖」，修复者无错可修导致修复空转；
+        // 杯字无此形态不检查
+        const afterChar = normalized[(match.index || 0) + 1];
+        if (match[0] === '奖' && afterChar !== undefined && /[励金惩罚项]/u.test(afterChar)) continue;
         const end = (match.index || 0) + 1;
         // 窗口取杯/奖字之前 12 字符（end-13 起、end-1 止，排除杯/奖字本身避免重复拼字）
         const before = normalized.slice(Math.max(0, end - 13), end - 1);
