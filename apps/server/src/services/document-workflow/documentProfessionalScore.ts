@@ -1,5 +1,5 @@
 import type { DocumentDraftChapter } from './types';
-import { duplicateParagraphIssues, fillerParagraphIssues, processParameterDensityIssues, tableCompletenessIssues, reviewResponseIssues, sectionCardStructureIssues } from './constructionOrgAudit';
+import { duplicateParagraphIssues, fillerParagraphIssues, processParameterDensityIssues, tableCompletenessIssues, sectionCardStructureIssues } from './constructionOrgAudit';
 import { PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
 import { fillerDensityReport } from './tenderBidChecks';
 import type { TenderBidTemplatingReport } from './tenderBidScoring';
@@ -107,7 +107,7 @@ function tableScore(chapters: DocumentDraftChapter[], markdown = ''): { score: n
 
 /** 5. 废话率（反比）：叠加 docx 套话密度口径（核心章节套话占比 ≤10%，超标线性扣分） */
 async function fillerScore(chapters: DocumentDraftChapter[]): Promise<{ score: number; detail: string }> {
-  const fillerIssues = fillerParagraphIssues(chapters);
+  const fillerIssues = await fillerParagraphIssues(chapters);
   const fillerHits = chapters.reduce((total, chapter) => {
     const count = (chapter.content.match(/本小节围绕|交底覆盖率按100%|24小时内形成整改责任|按施工准备→过程实施→检查验收→问题整改→资料归档的闭环组织|按作业条件确认→技术交底→过程实施|依据本项目已确认资料中的项目边界/gu) || []).length;
     return total + count;
@@ -126,7 +126,9 @@ function duplicationScore(chapters: DocumentDraftChapter[]): { score: number; de
   return { score, detail: `重复段落问题 ${duplicateIssues.length} 项` };
 }
 
-/** 7. 评标响应度 */
+/** 7. 评标响应度：招标硬性要求响应检测统一由 tenderRequirements.ts 锚点级语义通道
+ * （requirementsCoverageIssues）承担，本维度仅保留评分用的词面响应率快照，
+ * 不再复用已删除的 constructionOrgAudit.reviewResponseIssues（阶段五 5.3 口径分裂治理） */
 function reviewResponseScore(chapters: DocumentDraftChapter[], markdown = ''): { score: number; detail: string } {
   const wholeText = markdown || chapters.map(chapter => chapter.content).join('\n\n');
   const responseItems: Array<{ label: string; pattern: RegExp }> = [
@@ -136,10 +138,10 @@ function reviewResponseScore(chapters: DocumentDraftChapter[], markdown = ''): {
     { label: '安全目标', pattern: /安全.{0,8}目标|文明.{0,8}目标/u },
     { label: '项目经理', pattern: /项目经理|项目负责人/u },
   ];
-  const reviewIssues = reviewResponseIssues(chapters, markdown);
   const hit = responseItems.filter(item => item.pattern.test(wholeText));
+  const missed = responseItems.filter(item => !item.pattern.test(wholeText));
   const score = clamp((hit.length / responseItems.length) * 100);
-  return { score, detail: `招标硬性要求响应 ${hit.length}/${responseItems.length} 项${reviewIssues.length ? `（未响应：${reviewIssues.map(issue => issue.message.replace(/未检测到对招标硬性要求的响应：/u, '')).join('、')}）` : ''}` };
+  return { score, detail: `招标硬性要求响应 ${hit.length}/${responseItems.length} 项${missed.length ? `（未响应：${missed.map(item => item.label).join('、')}）` : ''}` };
 }
 
 export async function buildProfessionalScoreReport(chapters: DocumentDraftChapter[], markdown = '', options: { templating?: TenderBidTemplatingReport } = {}): Promise<ProfessionalScoreReport> {
@@ -164,7 +166,7 @@ export async function buildProfessionalScoreReport(chapters: DocumentDraftChapte
   // docx 模板化降档：重度模板化直接压到合格线以下，中度压到良好线以下（模板化是核心降档判定）
   const cappedTotal = options.templating?.level === 'heavy' ? Math.min(total, 54) : options.templating?.level === 'medium' ? Math.min(total, 69) : total;
   const grade: ProfessionalScoreReport['grade'] = cappedTotal >= 85 ? '专业' : cappedTotal >= 70 ? '良好' : cappedTotal >= 55 ? '合格' : '待提升';
-  const topIssues = [...duplicateParagraphIssues(chapters), ...fillerParagraphIssues(chapters), ...processParameterDensityIssues(chapters), ...sectionCardStructureIssues(chapters)]
+  const topIssues = [...duplicateParagraphIssues(chapters), ...await fillerParagraphIssues(chapters), ...processParameterDensityIssues(chapters), ...sectionCardStructureIssues(chapters)]
     .slice(0, 5)
     .map(issue => issue.message);
   const weakDimensions = dimensions.filter(dimension => dimension.score < 70).map(dimension => `${dimension.label}（${dimension.score}分）`);

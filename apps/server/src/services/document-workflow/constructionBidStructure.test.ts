@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DocumentTemplateChapter } from './types';
-import { concatenatedSectionTitleFixes, prioritizeOverviewSections, representativeTitleForPattern } from './constructionBidStructure';
+import { concatenatedSectionTitleFixes, extractEvaluationCriteriaItems, prioritizeOverviewSections, representativeTitleForPattern, validateBidStructureBeforeGeneration } from './constructionBidStructure';
 import { cleanSectionTitleArtifacts, normalizePlannedSections } from './promptRuleExtraction';
 
 const chapter = (title: string, sections: string[]): DocumentTemplateChapter => ({
@@ -82,5 +82,50 @@ describe('prioritizeOverviewSections（概况小节置首）', () => {
     ]);
     expect(result[0].sections).toEqual(['a', 'b']);
     expect(result[1].sections).toEqual(['x', '编制说明', 'y']);
+  });
+});
+
+describe('extractEvaluationCriteriaItems 条款碎片过滤（真实生成回归：碎片条目补挂阻断章节任务）', () => {
+  it('条款碎片条目不提取为评分标准条目', () => {
+    const items = extractEvaluationCriteriaItems([
+      '1.委员会确定中标人后向招标人提交评标报告。',
+      '2.7.3项规定不得修改。',
+      '3.如我方中标，我方承诺：响应全部条款。',
+      '4.相当于或不低于以下品牌的要求。',
+      '5.00天，计划完成时间：540日历天。',
+      '6.确保黄山杯奖项创建目标实现。',
+      '7.针对工程项目整体理解的要求。',
+    ]);
+    expect(items.map(item => item.title)).toEqual(['黄山杯奖项创建目标实现', '工程项目整体理解的要求']);
+  });
+
+  it('合法评分条目标题不受影响', () => {
+    const items = extractEvaluationCriteriaItems([
+      '1.拟采用的新技术、新工艺。',
+      '2.确保黄山杯。',
+    ]);
+    expect(items.map(item => item.title)).toEqual(['拟采用的新技术、新工艺', '黄山杯']);
+  });
+});
+
+describe('validateBidStructureBeforeGeneration 碎片条目不补挂（补挂层拦截）', () => {
+  it('评分条目标题为条款碎片时不补入章节 sections', () => {
+    const chapters = [
+      chapter('确保人、材、机的保障体系与措施', ['劳动力配置计划与高峰期人数安排']),
+      chapter('确保安全文明生产的管理体系与措施', ['安全生产管理与教育培训要求']),
+    ];
+    const result = validateBidStructureBeforeGeneration({
+      template: { id: 'tpl-x', name: '测试施组', chapters, version: 1, updatedAt: 0 } as never,
+      chapters,
+      evaluationItems: [
+        { index: 1, text: '委员会确定中标人', title: '1委员会确定中' },
+        { index: 2, text: '如我方中标，我方承诺', title: '如我方中标，我方承诺：' },
+        { index: 3, text: '确保黄山杯', title: '黄山杯' },
+      ],
+    });
+    const allSections = result.enrichedChapters.flatMap(item => item.sections || []);
+    expect(allSections).not.toContain('1委员会确定中');
+    expect(allSections).not.toContain('如我方中标，我方承诺：');
+    expect(allSections).toContain('黄山杯');
   });
 });

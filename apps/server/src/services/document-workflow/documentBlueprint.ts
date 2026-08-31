@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 import { constructionOrgBlueprintRuleLines, constructionOrgProjectTypePrompt } from './constructionOrgQualityRules';
 import type { DocumentFact, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict } from './types';
-import { stringifyFactValue } from './utils';
+import { stringifyFactValue, systemConstraintLine } from './utils';
 import { selectByScore, factImportanceScore } from './selection';
 
 type BlueprintFactsModel = Pick<DocumentFactsModel, 'project' | 'schedule' | 'quality' | 'safety' | 'resources' | 'preciseFacts' | 'bills' | 'drawings' | 'rules' | 'specifications'>;
@@ -149,9 +149,9 @@ export function buildDocumentBlueprintContext(input: { template: DocumentTemplat
     `事实覆盖矩阵：\n${coverageMatrix.join('\n')}`,
     `知识库确认覆盖矩阵：\n${supportMatrix.join('\n')}`,
     constructionOrgProjectPrompt,
-    '证据引用约束：工期、质量目标、招标范围、金额、工程量、验收要求等项目专属事实必须来自可信基础事实主表或绑定材料，系统暂未确认的数字和参数不得编造；标准规范编号、法律法规名称属于公共专业知识，可依据现行有效版本直接引用，不要求材料提供，但不得虚构编号或引用已废止版本。',
-    '跨章一致性要求：所有章节必须共用同一套工期、质量、范围、资源和验收口径；不得在不同章节写出相互矛盾的项目基础信息。',
-    '总述数据使用约束：可信基础事实主表中的工程地点、建设规模（总建筑面积）、计划工期、改造范围等总述数据，只在项目概况/工程概况类章节集中交代；其他章节不得以“本项目为……”开头复述完整概况段，确需数据支撑时只引用所需的具体数字。',
+    systemConstraintLine('证据引用约束：工期、质量目标、招标范围、金额、工程量、验收要求等项目专属事实必须来自可信基础事实主表或绑定材料，系统暂未确认的数字和参数不得编造；标准规范编号、法律法规名称属于公共专业知识，可依据现行有效版本直接引用，不要求材料提供，但不得虚构编号或引用已废止版本。'),
+    systemConstraintLine('跨章一致性要求：所有章节必须共用同一套工期、质量、范围、资源和验收口径；不得在不同章节写出相互矛盾的项目基础信息。'),
+    systemConstraintLine('总述数据使用约束：可信基础事实主表中的工程地点、建设规模（总建筑面积）、计划工期、改造范围等总述数据，只在项目概况/工程概况类章节集中交代；其他章节不得以"本项目为……"开头复述完整概况段，确需数据支撑时只引用所需的具体数字。'),
     ...(input.scopeConflicts?.length ? [`【源级口径冲突裁决（最高优先级约束）】资料文件中存在同口径数值冲突，必须按下述裁决执行：\n${numericScopeConflictLines(input.scopeConflicts).join('\n')}`] : []),
     ...(input.referenceLines?.length ? [`同类工程质量参考（软性参考，事实仍以知识库证据为准）：\n${input.referenceLines.join('\n')}`] : []),
     `章节专业任务卡：\n${chapterLines.join('\n')}`,

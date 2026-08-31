@@ -15,6 +15,7 @@ import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
 import { extractSection, stringifyFactValue } from './utils';
 import { fiveElementBlockStats } from './tenderBidChecks';
+import { buildSemanticGate } from './semanticGate';
 
 export function isExportBlockingIssue(issue: ValidationIssue) {
   return EXPORT_BLOCKING_ISSUE_RE.test(issue.message);
@@ -784,17 +785,70 @@ const SCALE_GAP_WORDS_RE = /占地|用地|地下|地上|办公|生活|附属|辅
 const SCALE_PREFIX_WORDS_RE = /办公区|生活区|加工区|施工区|堆场|门卫|配电|泵房|锅炉房|车库|车棚|岗亭|传达|警卫|样板房|售楼|门房|地下室|楼层|单层|每层|架空|雨棚/u;
 const COST_GAP_WORDS_RE = /暂列|暂估|费率|税率|利润|规费|安全文明|措施费|人工费|材料费|机械费|管理费|暂定/u;
 
-function scopedNumericEntries(text: string, scopeRe: RegExp, unitRe: RegExp, gapWords?: RegExp, prefixWords?: RegExp) {
+// 阶段五语义升级：范围词/费用词 gap 语义扩围——词面未命中但语义属"子项/专项口径"的上下文
+// 由语义 gate 承接（semanticGate 统一入口），检测与确定性修复双侧同口径，杜绝"检测排除修复改写"的口径分裂。
+const SCALE_GAP_SEMANTIC_PROTOTYPES = [
+  '地下建筑面积与地上建筑面积的分项指标',
+  '配套用房与附属用房的建筑面积',
+  '占地面积与绿化面积的用地指标',
+] as const;
+const SCALE_GAP_LEGAL_PROTOTYPES = [
+  '总建筑面积的总体规模指标',
+  '建设规模的总量数值',
+] as const;
+const COST_GAP_SEMANTIC_PROTOTYPES = [
+  '暂列金额与暂估价的子项费用',
+  '人工费与材料费的分项费用',
+] as const;
+const COST_GAP_LEGAL_PROTOTYPES = [
+  '合同估算价的总金额口径',
+  '投资估算的总体金额',
+] as const;
+
+async function buildScaleGapGate(embedDocuments?: (texts: string[]) => Promise<number[][]>) {
+  return buildSemanticGate({
+    prototypes: [...SCALE_GAP_SEMANTIC_PROTOTYPES],
+    negativePrototypes: [...SCALE_GAP_LEGAL_PROTOTYPES],
+    embedDocuments,
+  });
+}
+
+async function buildCostGapGate(embedDocuments?: (texts: string[]) => Promise<number[][]>) {
+  return buildSemanticGate({
+    prototypes: [...COST_GAP_SEMANTIC_PROTOTYPES],
+    negativePrototypes: [...COST_GAP_LEGAL_PROTOTYPES],
+    embedDocuments,
+  });
+}
+
+async function scopedNumericEntries(text: string, scopeRe: RegExp, unitRe: RegExp, gapWords?: RegExp, prefixWords?: RegExp, gapGate?: (texts: string[]) => Promise<boolean[]>) {
   const entries: Array<{ value: string; unit: string; scope: string }> = [];
   const skipped: Array<{ value: string; unit: string; scope: string; context: string }> = [];
   const seen = new Set<string>();
   const pattern = new RegExp(`(?:${scopeRe.source})(?:[^\\n。；;，,]{0,14}?)(\\d{2,}(?:[.,]\\d+)?\\s*万?)\\s*(${unitRe.source})`, 'giu');
-  for (const match of text.matchAll(pattern)) {
+  const matches = [...text.matchAll(pattern)];
+  // 语义扩围：词面 gap/prefix 均未命中的候选做语义复核，语义属范围词/费用词 → 同样跳过比对
+  const uncertain = gapGate
+    ? matches
+      .filter(match => {
+        const gap = match[0].slice(0, match[0].indexOf(match[1]));
+        const prefix = text.slice(Math.max(0, (match.index ?? 0) - 16), match.index ?? 0);
+        return !((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)));
+      })
+      .map(match => {
+        const gap = match[0].slice(0, match[0].indexOf(match[1]));
+        const prefix = text.slice(Math.max(0, (match.index ?? 0) - 16), match.index ?? 0);
+        return { index: match.index ?? 0, context: `${prefix}${gap}`.replace(/\s+/gu, '').slice(-24) };
+      })
+    : [];
+  const uncertainFlags = uncertain.length > 0 ? await gapGate!(uncertain.map(item => item.context)) : [];
+  const semanticSkip = new Set(uncertain.filter((_, index) => uncertainFlags[index]).map(item => item.index));
+  for (const match of matches) {
     const value = match[1].replace(/[,，]/gu, '').replace(/\s+/gu, '');
     const unit = match[2];
     const gap = match[0].slice(0, match[0].indexOf(match[1]));
     const prefix = text.slice(Math.max(0, (match.index ?? 0) - 16), match.index ?? 0);
-    if ((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix))) {
+    if ((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)) || semanticSkip.has(match.index ?? 0)) {
       skipped.push({ value, unit, scope: match[0].slice(0, gap.length).replace(/\s+/gu, ''), context: `${prefix}${gap}`.replace(/\s+/gu, '').slice(-24) });
       continue;
     }
@@ -813,16 +867,17 @@ function scopedNumericEntries(text: string, scopeRe: RegExp, unitRe: RegExp, gap
 // 修复器会把正文正确的“单体建筑面积 28570.36㎡”反向改成占地面积值（round-21 S6 实测：
 // 跨章一致性修复 18 处 28570.36→10970，正文 9 处“总建筑面积 10970㎡”均为反向改错产物）。
 // 混合口径时必须取“建筑面积”口径词引导的数值；无“占地/用地”字样时保持原“首个匹配”语义。
-function resolveScaleExpectation(text: string) {
-  const { entries } = scopedNumericEntries(text, SCALE_SCOPE_RE, SCALE_UNIT_RE, SCALE_GAP_WORDS_RE, SCALE_PREFIX_WORDS_RE);
-  // “总”字归一：scope 可能是“建筑面积”或“总建筑面积”，同口径
-  const areaEntry = entries.find(entry => entry.scope.replace(/^总/u, '') === '建筑面积');
-  // 占地/用地语境只认“建筑面积”词引导的数值：混合口径中占地数值是独立口径，不得作为建筑总量期望值；
-  // 找不到建筑口径条目时返回 undefined（调用方跳过修复/比对），禁止回退首个数值（round-21 S6 实测：
-  // 截断事实“建设规模：项目总占地面积约10970平方米”单条目被当作建筑总量期望，
-  // 修复器把正文正确的 28570.36 反向改成 10970，共 16 处）
-  if (/占地|用地/u.test(text)) return areaEntry;
-  return entries[0];
+function resolveScaleExpectation(text: string, scaleGapGate?: (texts: string[]) => Promise<boolean[]>) {
+  return scopedNumericEntries(text, SCALE_SCOPE_RE, SCALE_UNIT_RE, SCALE_GAP_WORDS_RE, SCALE_PREFIX_WORDS_RE, scaleGapGate).then(({ entries }) => {
+    // “总”字归一：scope 可能是“建筑面积”或“总建筑面积”，同口径
+    const areaEntry = entries.find(entry => entry.scope.replace(/^总/u, '') === '建筑面积');
+    // 占地/用地语境只认“建筑面积”词引导的数值：混合口径中占地数值是独立口径，不得作为建筑总量期望值；
+    // 找不到建筑口径条目时返回 undefined（调用方跳过修复/比对），禁止回退首个数值（round-21 S6 实测：
+    // 截断事实“建设规模：项目总占地面积约10970平方米”单条目被当作建筑总量期望，
+    // 修复器把正文正确的 28570.36 反向改成 10970，共 16 处）
+    if (/占地|用地/u.test(text)) return areaEntry;
+    return entries[0];
+  });
 }
 
 // 数值归一化到统一基准（元 / ㎡），使“35000㎡”与“3.5万㎡”、“35000万元”与“3.5亿元”可等价比较
@@ -846,8 +901,10 @@ const SCALE_UNIT_RE = /㎡|m²|m2|平方米/u;
 const COST_SCOPE_RE = /合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|工程总投资|总投资|工程造价/u;
 const COST_UNIT_RE = /万元|亿元/u;
 
-export function crossChapterConsistencyIssues(markdown: string, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[], analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
+export async function crossChapterConsistencyIssues(markdown: string, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[], analyses?: Map<string, ProfessionalDepthAnalysis>, embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
+  const scaleGapGate = await buildScaleGapGate(embedDocuments);
+  const costGapGate = await buildCostGapGate(embedDocuments);
   // 校验基准与生成裁决同源：源级同口径冲突的裁决值（补疑修正后的胜出数值）优先作为期望口径，
   // 避免事实主表候选排序差异导致检查基准与裁决基准不一致（历史缺陷：正文全用胜出值时因主表取出败选值而误报）；
   // low 置信度裁决锚定弱，不作校验基准（与生成侧“不参与确定性改写”同口径）
@@ -880,10 +937,12 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
   const areaResolution = scopeWinner('area');
   // 期望口径事实须能解析出建筑总量数值才可作基准：截断/占地口径事实（“建设规模：项目总占地面积约10970平方米”）
   // 解析不出建筑总量（resolveScaleExpectation 返回 undefined），跳过继续找下一条（round-21 S6 反向改错兜底）
-  const expectedScale = areaResolution ?? factsModel.project.map(normalizedFactValue).find(value => /建设规模|建筑面积/u.test(value) && resolveScaleExpectation(value));
+  const scaleFactCandidates = factsModel.project.map(normalizedFactValue).filter(value => /建设规模|建筑面积/u.test(value));
+  const scaleResolutions = await Promise.all(scaleFactCandidates.map(value => resolveScaleExpectation(value, scaleGapGate)));
+  const expectedScale = areaResolution ?? scaleFactCandidates.find((_, index) => scaleResolutions[index] !== undefined);
   if (expectedScale) {
-    const scaleMain = areaResolution ? numericEntryFromResolution(areaResolution) : resolveScaleExpectation(expectedScale);
-    const { entries: scaleMatches, skipped: scaleSkipped } = scopedNumericEntries(markdown, SCALE_SCOPE_RE, SCALE_UNIT_RE, SCALE_GAP_WORDS_RE, SCALE_PREFIX_WORDS_RE);
+    const scaleMain = areaResolution ? numericEntryFromResolution(areaResolution) : await resolveScaleExpectation(expectedScale, scaleGapGate);
+    const { entries: scaleMatches, skipped: scaleSkipped } = await scopedNumericEntries(markdown, SCALE_SCOPE_RE, SCALE_UNIT_RE, SCALE_GAP_WORDS_RE, SCALE_PREFIX_WORDS_RE, scaleGapGate);
     if (scaleMain) {
       const scaleConflicts = scaleMatches.filter(entry => scaledNumericValue(entry) !== scaledNumericValue(scaleMain));
       if (scaleConflicts.length >= 1) issues.push({ level: 'error', message: `跨章一致性冲突：正文出现与资料建设规模不一致的表述 ${scaleConflicts.slice(0, 6).map(entry => `${entry.value}${entry.unit}`).join('、')}`, suggestion: `请统一使用资料中的建设规模口径：${expectedScale.slice(0, 80)}` });
@@ -912,8 +971,8 @@ export function crossChapterConsistencyIssues(markdown: string, factsModel: Docu
   const costResolution = scopeWinner('cost');
   const expectedCost = costResolution ?? factsModel.project.map(normalizedFactValue).find(value => /合同估算|投资估算|最高投标限价|招标控制价|总投资|工程造价/u.test(value));
   if (expectedCost) {
-    const costMain = costResolution ? numericEntryFromResolution(costResolution) : scopedNumericEntries(expectedCost, COST_SCOPE_RE, COST_UNIT_RE, COST_GAP_WORDS_RE).entries[0];
-    const costMatches = scopedNumericEntries(markdown, COST_SCOPE_RE, COST_UNIT_RE, COST_GAP_WORDS_RE).entries;
+    const costMain = costResolution ? numericEntryFromResolution(costResolution) : (await scopedNumericEntries(expectedCost, COST_SCOPE_RE, COST_UNIT_RE, COST_GAP_WORDS_RE, undefined, costGapGate)).entries[0];
+    const costMatches = (await scopedNumericEntries(markdown, COST_SCOPE_RE, COST_UNIT_RE, COST_GAP_WORDS_RE, undefined, costGapGate)).entries;
     if (costMain) {
       const costConflicts = costMatches.filter(entry => scaledNumericValue(entry) !== scaledNumericValue(costMain));
       if (costConflicts.length >= 1) issues.push({ level: 'error', message: `跨章一致性冲突：正文出现与资料估算价不一致的表述 ${costConflicts.slice(0, 6).map(entry => `${entry.value}${entry.unit}`).join('、')}`, suggestion: `请统一使用资料中的估算价口径：${expectedCost.slice(0, 80)}` });
@@ -932,12 +991,33 @@ const SPEC_LAYER_RE = /找平层|抹灰层|防水层|保温层|结合层|垫层|
 // 层名后“采用 1:3 水泥砂浆厚 20mm”是标准规格句式，数值仍属当前层
 const SPEC_ACTION_RE = /铺设|施工|浇筑|粘贴|铺贴|涂抹|完成|进行|待|设置|铺装|挂网|喷涂|灌注/u;
 
+// 阶段五语义升级：动作词语义扩围——词面未命中但语义属“施工过程/工序动作”的 gap 由语义 gate 承接，
+// 检测与确定性修复共用同一归属规则（collectLayerNumbers），语义扩围同口径生效。
+const SPEC_ACTION_SEMANTIC_PROTOTYPES = [
+  '施工过程与工序动作的先后描述',
+  '铺设浇筑完成后再进行的工序',
+] as const;
+const SPEC_ACTION_LEGAL_PROTOTYPES = [
+  '结构层的厚度与配比参数',
+  '找平层厚20毫米的规格',
+] as const;
+
+async function buildSpecActionGate(embedDocuments?: (texts: string[]) => Promise<number[][]>) {
+  return buildSemanticGate({
+    prototypes: [...SPEC_ACTION_SEMANTIC_PROTOTYPES],
+    negativePrototypes: [...SPEC_ACTION_LEGAL_PROTOTYPES],
+    embedDocuments,
+  });
+}
+
 /** 层名→归属数值（含位置）的收集：检测与确定性定点修复共用同一套归属规则，保证“检测定位=修复定位” */
-function collectLayerNumbers(text: string): Array<{ layer: string; span: [number, number]; raw: string; kind: 'thickness' | 'ratio' }> {
+async function collectLayerNumbers(text: string, actionGate?: (texts: string[]) => Promise<boolean[]>): Promise<Array<{ layer: string; span: [number, number]; raw: string; kind: 'thickness' | 'ratio' }>> {
   const claims: Array<{ layer: string; span: [number, number]; raw: string; kind: 'thickness' | 'ratio' }> = [];
   const matches = [...text.matchAll(SPEC_LAYER_RE)];
   const usedRanges: Array<[number, number]> = [];
   const isUsed = (start: number, end: number) => usedRanges.some(([s, e]) => start < e && end > s);
+  // 语义扩围候选：gap 非空且词面动作词未命中的归属登记，语义确认“工序动作”后撤销该归属
+  const uncertainGaps: Array<{ key: string; gap: string }> = [];
   // 在窗口内按方向取第一个/最后一个“未被占用且与层名之间无施工动作”的数值，命中即登记占用，
   // 保证一个数值只归属一个层（多层连续描述“找平层 20mm、防水层 2mm、保温层 130mm”各取各值）
   const claim = (window: string, offset: number, re: RegExp, direction: 'first' | 'last', layer: string, kind: 'thickness' | 'ratio') => {
@@ -949,6 +1029,7 @@ function collectLayerNumbers(text: string): Array<{ layer: string; span: [number
       if (isUsed(absStart, absEnd)) continue;
       const gap = direction === 'first' ? window.slice(0, m.index ?? 0) : window.slice((m.index ?? 0) + m[0].length);
       if (SPEC_ACTION_RE.test(gap)) continue;
+      if (actionGate && gap.trim()) uncertainGaps.push({ key: `${layer}|${absStart}|${absEnd}`, gap });
       usedRanges.push([absStart, absEnd]);
       claims.push({ layer, span: [absStart, absEnd], raw: m[0], kind });
       return;
@@ -974,13 +1055,19 @@ function collectLayerNumbers(text: string): Array<{ layer: string; span: [number
     claim(after, layerEnd, /(\d+(?:\.\d+)?)\s*mm/gu, 'first', layer, 'thickness');
     claim(before, prevLayerEnd, /(\d+(?:\.\d+)?)\s*mm/gu, 'last', layer, 'thickness');
   }
+  // 语义复核：gap 语义属施工动作的归属撤销（该数值属其他层/施工过程，当前层不得占用）
+  if (actionGate && uncertainGaps.length > 0) {
+    const flags = await actionGate(uncertainGaps.map(item => item.gap));
+    const actionKeys = new Set(uncertainGaps.filter((_, index) => flags[index]).map(item => item.key));
+    return claims.filter(claim => !actionKeys.has(`${claim.layer}|${claim.span[0]}|${claim.span[1]}`));
+  }
   return claims;
 }
 
-function layeredSpecEntries(text: string) {
+async function layeredSpecEntries(text: string, actionGate?: (texts: string[]) => Promise<boolean[]>) {
   const entries: Array<{ layer: string; ratio?: string; thickness?: number }> = [];
   const seen = new Set<string>();
-  for (const claim of collectLayerNumbers(text)) {
+  for (const claim of await collectLayerNumbers(text, actionGate)) {
     const ratio = claim.kind === 'ratio' ? claim.raw.match(/(\d+:\d+(?:\.\d+)?)/u)?.[1] : undefined;
     const thicknessMatch = claim.kind === 'thickness' ? claim.raw.match(/(\d+(?:\.\d+)?)/u)?.[1] : undefined;
     const thickness = thicknessMatch ? Number(thicknessMatch) : undefined;
@@ -992,15 +1079,16 @@ function layeredSpecEntries(text: string) {
   return entries;
 }
 
-export function processSpecConflictIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+export async function processSpecConflictIssues(markdown: string, factsModel: DocumentFactsModel, embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
+  const actionGate = await buildSpecActionGate(embedDocuments);
   const sourceText = [
     ...factsModel.specifications,
     ...factsModel.quality,
     ...factsModel.preciseFacts,
     ...factsModel.bills,
   ].map(normalizedFactValue).join('\n');
-  const sourceEntries = layeredSpecEntries(sourceText);
+  const sourceEntries = await layeredSpecEntries(sourceText, actionGate);
   if (sourceEntries.length === 0) return issues;
   // 资料侧同一结构层出现多个不同规格时口径不唯一，跳过该层（无法确定性裁决）
   const sourceByLayer = new Map<string, typeof sourceEntries>();
@@ -1009,7 +1097,7 @@ export function processSpecConflictIssues(markdown: string, factsModel: Document
     list.push(entry);
     sourceByLayer.set(entry.layer, list);
   }
-  const bodyEntries = layeredSpecEntries(markdown);
+  const bodyEntries = await layeredSpecEntries(markdown, actionGate);
   const reported = new Set<string>();
   for (const [layer, sources] of sourceByLayer) {
     const sourceRatios = [...new Set(sources.map(entry => entry.ratio).filter(Boolean))];
@@ -1041,8 +1129,12 @@ export function processSpecConflictIssues(markdown: string, factsModel: Document
 // （collectLayerNumbers / scopedNumericEntries）定位错误数值并确定性替换为资料口径，
 // 保证“检测定位=修复定位”，不依赖 LLM 定位能力。
 
-/** 与 processSpecConflictIssues / crossChapterConsistencyIssues 完全同源的修复目标口径 */
-function deterministicFixTargets(factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[]) {
+/** 与 processSpecConflictIssues / crossChapterConsistencyIssues 完全同源的修复目标口径；
+ * 语义 gates 随 targets 携带，供 fixChapterDeterministic 复用——修复侧与检测侧同口径语义扩围（防"检测排除修复改写"） */
+async function deterministicFixTargets(factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[], embedDocuments?: (texts: string[]) => Promise<number[][]>) {
+  const scaleGapGate = await buildScaleGapGate(embedDocuments);
+  const costGapGate = await buildCostGapGate(embedDocuments);
+  const actionGate = await buildSpecActionGate(embedDocuments);
   const sourceText = [
     ...factsModel.specifications,
     ...factsModel.quality,
@@ -1050,7 +1142,7 @@ function deterministicFixTargets(factsModel: DocumentFactsModel, scopeConflicts?
     ...factsModel.bills,
   ].map(normalizedFactValue).join('\n');
   const sourceByLayer = new Map<string, { ratios: string[]; thicknesses: number[] }>();
-  for (const entry of layeredSpecEntries(sourceText)) {
+  for (const entry of await layeredSpecEntries(sourceText, actionGate)) {
     const list = sourceByLayer.get(entry.layer) || { ratios: [], thicknesses: [] };
     if (entry.ratio && !list.ratios.includes(entry.ratio)) list.ratios.push(entry.ratio);
     if (Number.isFinite(entry.thickness) && !list.thicknesses.includes(entry.thickness as number)) list.thicknesses.push(entry.thickness as number);
@@ -1069,21 +1161,26 @@ function deterministicFixTargets(factsModel: DocumentFactsModel, scopeConflicts?
   };
   const areaResolution = scopeWinner('area');
   // 与检测侧同源校验：期望口径事实须可解析出建筑总量数值（截断占地事实跳过），保证“检测定位=修复定位”
-  const expectedScale = areaResolution ?? factsModel.project.map(normalizedFactValue).find(value => /建设规模|建筑面积/u.test(value) && resolveScaleExpectation(value));
+  const scaleFactCandidates = factsModel.project.map(normalizedFactValue).filter(value => /建设规模|建筑面积/u.test(value));
+  const scaleResolutions = await Promise.all(scaleFactCandidates.map(value => resolveScaleExpectation(value, scaleGapGate)));
+  const expectedScale = areaResolution ?? scaleFactCandidates.find((_, index) => scaleResolutions[index] !== undefined);
   const costResolution = scopeWinner('cost');
   const expectedCost = costResolution ?? factsModel.project.map(normalizedFactValue).find(value => /合同估算|投资估算|最高投标限价|招标控制价|总投资|工程造价/u.test(value));
   return {
     specTargets,
-    scaleTarget: expectedScale ? (areaResolution ? numericEntryFromResolution(areaResolution) : resolveScaleExpectation(expectedScale)) : undefined,
-    costTarget: expectedCost ? (costResolution ? numericEntryFromResolution(costResolution) : scopedNumericEntries(expectedCost, COST_SCOPE_RE, COST_UNIT_RE, COST_GAP_WORDS_RE).entries[0]) : undefined,
+    scaleTarget: expectedScale ? (areaResolution ? numericEntryFromResolution(areaResolution) : await resolveScaleExpectation(expectedScale, scaleGapGate)) : undefined,
+    costTarget: expectedCost ? (costResolution ? numericEntryFromResolution(costResolution) : (await scopedNumericEntries(expectedCost, COST_SCOPE_RE, COST_UNIT_RE, COST_GAP_WORDS_RE, undefined, costGapGate)).entries[0]) : undefined,
+    scaleGapGate,
+    costGapGate,
+    actionGate,
   };
 }
 
 /** 单章定点修复：span 基于原始 text 收集，替换从后往前执行避免偏移 */
-function fixChapterDeterministic(text: string, targets: ReturnType<typeof deterministicFixTargets>): { content: string; fixedCount: number; details: string[] } {
+async function fixChapterDeterministic(text: string, targets: Awaited<ReturnType<typeof deterministicFixTargets>>): Promise<{ content: string; fixedCount: number; details: string[] }> {
   const replacements: Array<{ start: number; end: number; replacement: string; detail: string }> = [];
   // 结构层规格：collectLayerNumbers 与检测共用归属规则，定位到的错误数值必为检测所报冲突，直接替换为资料口径
-  for (const claim of collectLayerNumbers(text)) {
+  for (const claim of await collectLayerNumbers(text, targets.actionGate)) {
     const target = targets.specTargets.get(claim.layer);
     if (!target) continue;
     if (claim.kind === 'ratio' && target.ratio) {
@@ -1097,14 +1194,31 @@ function fixChapterDeterministic(text: string, targets: ReturnType<typeof determ
   }
   // 建设规模/估算价：与检测同源模式带 span 重新匹配，败选数值替换为期望口径（单位保留原样）。
   // 同源口径词防护（q1a）：口径词与数值之间（gap）或紧前上下文（prefix）混入子项/专项口径词时
-  // 跳过替换——确定性只碰同词形紧邻数值，跨口径形态交 LLM 规模口径复核（防错改优先于盲修复）
-  const collectScopeSpans = (target: { value: string; unit: string } | undefined, scopeRe: RegExp, unitRe: RegExp, kindLabel: string, gapWords?: RegExp, prefixWords?: RegExp) => {
+  // 跳过替换——确定性只碰同词形紧邻数值，跨口径形态交 LLM 规模口径复核（防错改优先于盲修复）；
+  // 语义扩围与 scopedNumericEntries 同口径（gapGate 语义属子项/费用词 → 同样跳过）
+  const collectScopeSpans = async (target: { value: string; unit: string } | undefined, scopeRe: RegExp, unitRe: RegExp, kindLabel: string, gapWords?: RegExp, prefixWords?: RegExp, gapGate?: (texts: string[]) => Promise<boolean[]>) => {
     if (!target) return;
     const pattern = new RegExp(`(?:${scopeRe.source})(?:[^\\n。；;，,]{0,14}?)(\\d{2,}(?:[.,]\\d+)?\\s*万?)\\s*(${unitRe.source})`, 'giu');
-    for (const match of text.matchAll(pattern)) {
+    const matches = [...text.matchAll(pattern)];
+    const uncertain = gapGate
+      ? matches
+        .filter(match => {
+          const gap = match[0].slice(0, match[0].indexOf(match[1]));
+          const prefix = text.slice(Math.max(0, (match.index ?? 0) - 16), match.index ?? 0);
+          return !((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)));
+        })
+        .map(match => {
+          const gap = match[0].slice(0, match[0].indexOf(match[1]));
+          const prefix = text.slice(Math.max(0, (match.index ?? 0) - 16), match.index ?? 0);
+          return { index: match.index ?? 0, context: `${prefix}${gap}`.replace(/\s+/gu, '').slice(-24) };
+        })
+      : [];
+    const uncertainFlags = uncertain.length > 0 ? await gapGate!(uncertain.map(item => item.context)) : [];
+    const semanticSkip = new Set(uncertain.filter((_, index) => uncertainFlags[index]).map(item => item.index));
+    for (const match of matches) {
       const gap = match[0].slice(0, match[0].indexOf(match[1]));
       const prefix = text.slice(Math.max(0, (match.index ?? 0) - 16), match.index ?? 0);
-      if ((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix))) continue;
+      if ((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)) || semanticSkip.has(match.index ?? 0)) continue;
       const entry = { value: match[1].replace(/[,，]/gu, '').replace(/\s+/gu, ''), unit: match[2] };
       if (scaledNumericValue(entry) === scaledNumericValue(target)) continue;
       const start = (match.index ?? 0) + match[0].indexOf(match[1]);
@@ -1113,8 +1227,8 @@ function fixChapterDeterministic(text: string, targets: ReturnType<typeof determ
       replacements.push({ start, end, replacement: target.value, detail: `${kindLabel} ${entry.value}${entry.unit}→${target.value}${entry.unit}` });
     }
   };
-  collectScopeSpans(targets.scaleTarget, SCALE_SCOPE_RE, SCALE_UNIT_RE, '建设规模', SCALE_GAP_WORDS_RE, SCALE_PREFIX_WORDS_RE);
-  collectScopeSpans(targets.costTarget, COST_SCOPE_RE, COST_UNIT_RE, '估算价', COST_GAP_WORDS_RE);
+  await collectScopeSpans(targets.scaleTarget, SCALE_SCOPE_RE, SCALE_UNIT_RE, '建设规模', SCALE_GAP_WORDS_RE, SCALE_PREFIX_WORDS_RE, targets.scaleGapGate);
+  await collectScopeSpans(targets.costTarget, COST_SCOPE_RE, COST_UNIT_RE, '估算价', COST_GAP_WORDS_RE, undefined, targets.costGapGate);
   if (replacements.length === 0) return { content: text, fixedCount: 0, details: [] };
   replacements.sort((a, b) => b.start - a.start);
   let content = text;
@@ -1123,13 +1237,13 @@ function fixChapterDeterministic(text: string, targets: ReturnType<typeof determ
 }
 
 /** 确定性定点修复兜底：LLM 定向修复未消除的数值口径冲突，按检测同源归属规则直接替换为资料口径（原地修改 chapters 内容） */
-export function applyDeterministicConsistencyFixes(chapters: Array<Pick<DocumentDraftChapter, 'id' | 'title' | 'content'>>, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[]): { fixedCount: number; details: string[] } {
-  const targets = deterministicFixTargets(factsModel, scopeConflicts);
+export async function applyDeterministicConsistencyFixes(chapters: Array<Pick<DocumentDraftChapter, 'id' | 'title' | 'content'>>, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[], embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<{ fixedCount: number; details: string[] }> {
+  const targets = await deterministicFixTargets(factsModel, scopeConflicts, embedDocuments);
   if (targets.specTargets.size === 0 && !targets.scaleTarget && !targets.costTarget) return { fixedCount: 0, details: [] };
   let fixedCount = 0;
   const details: string[] = [];
   for (const chapter of chapters) {
-    const fix = fixChapterDeterministic(chapter.content, targets);
+    const fix = await fixChapterDeterministic(chapter.content, targets);
     if (fix.fixedCount > 0) {
       chapter.content = fix.content;
       fixedCount += fix.fixedCount;
@@ -1142,10 +1256,10 @@ export function applyDeterministicConsistencyFixes(chapters: Array<Pick<Document
 /** 全文级确定性定点修复：覆盖章节正文之外的合成区（封面信息块/基本信息表/附录）中的败选数值。
  * 章节级修复只改章节正文，合成区由 facts 生成，败选值残留时修复器在章节正文找不到目标、fixedCount=0，
  * 检测重跑仍报错，导出门禁永久阻断（历史缺陷：用户环境建设规模败选值 10970㎡ 进入封面合成区形成死循环） */
-export function applyDeterministicConsistencyFixesToMarkdown(markdown: string, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[]): { markdown: string; fixedCount: number; details: string[] } {
-  const targets = deterministicFixTargets(factsModel, scopeConflicts);
+export async function applyDeterministicConsistencyFixesToMarkdown(markdown: string, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[], embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<{ markdown: string; fixedCount: number; details: string[] }> {
+  const targets = await deterministicFixTargets(factsModel, scopeConflicts, embedDocuments);
   if (targets.specTargets.size === 0 && !targets.scaleTarget && !targets.costTarget) return { markdown, fixedCount: 0, details: [] };
-  const fix = fixChapterDeterministic(markdown, targets);
+  const fix = await fixChapterDeterministic(markdown, targets);
   return { markdown: fix.content, fixedCount: fix.fixedCount, details: fix.details };
 }
 

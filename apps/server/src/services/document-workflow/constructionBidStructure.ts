@@ -1,5 +1,5 @@
 import type { DocumentTemplate, DocumentTemplateChapter } from './types';
-import { displayChapterTitle } from './outline';
+import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
 import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgCatalog';
 
 /**
@@ -204,7 +204,16 @@ export function extractEvaluationCriteriaItems(texts: string[]): EvaluationCrite
     if (/AI|大模型|评审|评分|分值|分项|子项|满分|得分|投标人须|详见|招标文件/u.test(raw)) continue;
     if (/公共资源|电子交易|加密|投标|开标|评标委员会/u.test(raw)) continue;
     const index = Number(match[1]);
-    if (!items.has(index)) items.set(index, { index, text: raw, title: cleanEvaluationItemTitle(raw) });
+    if (!items.has(index)) {
+      const cleanedTitle = cleanEvaluationItemTitle(raw);
+      // 条款碎片过滤（真实生成回归）：评标办法文本被序号切分后的条款碎片
+      // （「1委员会确定中」「7.3项规定」「00天，计划完成时间：」「如我方中标，我方承诺：」等）
+      // 不是评分标准条目；提取为条目后会被承接审计补挂成小节 → 碎片小节无事实/证据支撑
+      // → 章节任务未就绪失败。原文与清理标题任一命中即不提取（编号粘连/剥离两种形态）
+      if (cleanedTitle && isTenderClauseFragmentTitle(cleanedTitle)) continue;
+      if (isTenderClauseFragmentTitle(raw)) continue;
+      items.set(index, { index, text: raw, title: cleanedTitle });
+    }
   }
   return [...items.values()];
 }
@@ -403,6 +412,10 @@ export function validateBidStructureBeforeGeneration(input: {
     for (const { item } of criteriaAudit.uncovered) {
       const sectionTitle = item.title;
       if (!sectionTitle) continue;
+      // 条款碎片不补挂（补挂回路二次治理）：评分条目标题若为招标条款碎片
+      // （编号残留/承诺断言/委员会动作等），补挂进章节后无证据支撑会阻断章节任务；
+      // 二次过滤（documentGenerator 补挂后）为最终兜底，此处提前拦截避免补挂噪音
+      if (isTenderClauseFragmentTitle(sectionTitle)) continue;
       const carrierIndex = chapterTexts.reduce((best, text, index) => {
         // 挂靠评分：语义相似度可用时用余弦打分；否则用条目标题的显式包含计数兜底
         const score = input.semanticSimilarity ? input.semanticSimilarity(sectionTitle, text) : (text.includes(normalize(sectionTitle)) ? 1 : 0);

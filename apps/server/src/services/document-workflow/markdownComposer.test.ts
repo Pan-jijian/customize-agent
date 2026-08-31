@@ -1,135 +1,338 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { DocumentDraftChapter, DocumentTemplate, GeneratedDocumentDraft, PromptDocumentRuleSet } from './types';
+import {
+  applyPromptDocumentRules,
+  cleanFormalSourcePhrases,
+  composeDocumentMarkdown,
+  ensureFormalToc,
+  extractGeneratedSections,
+  findChapterBlock,
+  hasInlineListCollision,
+  inferChapterSectionsFromMarkdown,
+  mergeTableLineBreaks,
+  normalizeInlineListBreaks,
+  normalizeMarkdownTableDividers,
+  normalizeProductionText,
+  normalizeTenderSourcePageRefs,
+  normalizeTertiaryHeadings,
+  plannedStructureIssues,
+  plannedStructurePrompt,
+  promptDocumentRuleIssues,
+  removeAdjacentDuplicateHeadings,
+  removeUnwantedDrawingImages,
+  sanitizeFormalMarkdown,
+  sectionDuplicateIssues,
+  sectionHeadingIssues,
+  sourcePhraseIssues,
+  stripMarkdownDocumentFence,
+  tertiaryHeadingIssues,
+} from './markdownComposer';
+
+vi.mock('@customize-agent/knowledge', () => {
+  class LocalTransformersEmbeddingProvider {}
+  return { LocalTransformersEmbeddingProvider };
+});
+
 /**
- * h13c normalizeProductionText 清洗单测：平方笔误（「28570.36平方2.8」形态）与
- * 「原则上」原则词清洗；前瞻边界验证不破坏「平方公里」类合法词。
+ * 指令型标题语义 gate 注入的确定性嵌入：
+ * 指令/说明类词面（如何/编写/注意事项/按需/要求/判断）→ [1,0] 命中正例原型；
+ * 合法小节词面（危大工程/安全措施/质量验收/成品保护）→ [0,1] 命中负例原型（放行）；
+ * 其余 → [0,0] 不触发语义扩围。
  */
-import { describe, expect, it } from 'vitest';
-import { mergeTableLineBreaks, normalizeProductionText, normalizeTenderSourcePageRefs, sanitizeFormalMarkdown, sectionDuplicateIssues, sectionHeadingIssues } from './markdownComposer';
+const embedDocuments = async (texts: string[]) => texts.map(text => {
+  const legalLike = /危大工程|安全措施|质量验收|检测要求|成品保护/u.test(text);
+  const instructionLike = !legalLike && /如何|编写|注意事项|按需|说明|要求|判断/u.test(text);
+  return [instructionLike ? 1 : 0, legalLike ? 1 : 0];
+});
 
-describe('normalizeProductionText 平方笔误清洗（h13c）', () => {
-  it('「28570.36平方2.8」→ 残留数字一并吸收，仅保留平方米', () => {
-    expect(normalizeProductionText('单体建筑面积28570.36平方2.8')).toBe('单体建筑面积28570.36平方米');
-  });
+function chapterOf(overrides: Partial<DocumentDraftChapter> = {}): DocumentDraftChapter {
+  return { id: 'ch-1', title: '工程概况', content: '', evidence: [], missingFacts: [], ...overrides };
+}
 
-  it('「28570.36平方」无残片 → 平方米', () => {
-    expect(normalizeProductionText('单体建筑面积28570.36平方，其中地上24783.39平方米。')).toContain('28570.36平方米');
-  });
+function ruleSetOf(overrides: Partial<PromptDocumentRuleSet> = {}): PromptDocumentRuleSet {
+  return { forbiddenTerms: [], preferredTerms: [], requiredTables: [], ...overrides };
+}
 
-  it('「平方公里」合法词不被破坏', () => {
-    expect(normalizeProductionText('项目占地约1.5平方公里。')).toContain('1.5平方公里');
+describe('removeUnwantedDrawingImages', () => {
+  it('forbid 为 true 时移除图纸图片行', () => {
+    const markdown = '正文段落。\n\n![总平面图示意](images/plan.png)\n\n后续内容。';
+    const result = removeUnwantedDrawingImages(markdown, true);
+    expect(result).not.toContain('![总平面图示意]');
+    expect(result).toContain('正文段落。');
+    expect(removeUnwantedDrawingImages(markdown, false)).toBe(markdown);
   });
 });
 
-describe('normalizeProductionText 原则词清洗（h13c）', () => {
-  it('「原则上」被移除', () => {
-    expect(normalizeProductionText('模板拆除原则上按先支后拆顺序进行。')).toBe('模板拆除按先支后拆顺序进行。');
-  });
-
-  it('无原则词文本原样返回', () => {
-    expect(normalizeProductionText('模板拆除按先支后拆顺序进行。')).toBe('模板拆除按先支后拆顺序进行。');
-  });
-});
-
-describe('sanitizeFormalMarkdown H4 词尾严格重复清洗（4.12.5）', () => {
-  it('「现场条件现场条件」尾部等长重复 → 去重', () => {
-    expect(sanitizeFormalMarkdown('#### 现场条件现场条件')).toBe('#### 现场条件');
-  });
-
-  it('「要点要点」→ 去重', () => {
-    expect(sanitizeFormalMarkdown('#### 要点要点')).toBe('#### 要点');
-  });
-
-  it('语义级粘连「现场踏勘施工条件现场条件」不做词面硬改（交 Reviewer）', () => {
-    expect(sanitizeFormalMarkdown('#### 现场踏勘施工条件现场条件')).toBe('#### 现场踏勘施工条件现场条件');
-  });
-
-  it('合法标题「安全文明施工与安全管理」不被误清洗', () => {
-    expect(sanitizeFormalMarkdown('#### 安全文明施工与安全管理')).toBe('#### 安全文明施工与安全管理');
+describe('normalizeProductionText', () => {
+  it('单位上标与运算符号归一', () => {
+    expect(normalizeProductionText('面积 28570.36 m2')).toBe('面积 28570.36 平方米'); // 现状锁定：m2→平方米 替换后保留原空格
+    expect(normalizeProductionText('体积 100 m3')).toBe('体积 100 立方米'); // 现状锁定：m3→立方米 替换后保留原空格
+    expect(normalizeProductionText('600 × 300 × 10')).toBe('600×300×10');
+    expect(normalizeProductionText('± 0.000')).toBe('±0.000');
+    expect(normalizeProductionText('原则上应保证质量')).toBe('应保证质量');
   });
 });
 
-describe('sectionHeadingIssues H4 标题治理标记（4.12.5）', () => {
-  it('词尾粘连标题标记为疑似重复', () => {
-    const issues = sectionHeadingIssues('### 现场踏勘\n#### 现场踏勘施工条件现场条件');
-    expect(issues.some(issue => issue.message.includes('疑似词尾粘连'))).toBe(true);
+describe('normalizeTenderSourcePageRefs', () => {
+  it('页码引用归一为相关资料', () => {
+    expect(normalizeTenderSourcePageRefs('详见 PDF 第 5-8 页')).toBe('详见 相关资料');
+    expect(normalizeTenderSourcePageRefs('依据招标文件第 3 页')).toBe('依据招标文件相关资料');
   });
 
-  it('H4 与三级小节同名标记', () => {
-    const issues = sectionHeadingIssues('### 安全管理\n#### 安全管理');
-    expect(issues.some(issue => issue.message.includes('同名'))).toBe(true);
+  it('专业图纸页数归一为图纸表述', () => {
+    expect(normalizeTenderSourcePageRefs('给排水工程（共12页）')).toBe('给排水工程施工图纸'); // L65 专业工程+页数整体归一为“X施工图纸”
+    expect(normalizeTenderSourcePageRefs('装饰工程施工图纸（共30页）')).toBe('装饰工程施工图纸');
+  });
+});
+
+describe('hasInlineListCollision / normalizeInlineListBreaks', () => {
+  it('连续行内列表标记判定冲突', () => {
+    expect(hasInlineListCollision('措施包括 1. 准备工作 2. 实施检查')).toBe(true);
+    expect(hasInlineListCollision('规格 1.5mm 与 2.0mm')).toBe(false);
   });
 
-  it('含豁免词的合理标题不误报', () => {
-    const issues = sectionHeadingIssues('### 安全文明施工\n#### 安全文明施工与安全管理');
+  it('句末标点后列表标记拆行', () => {
+    expect(normalizeInlineListBreaks('流程说明。1. 第一步')).toBe('流程说明。\n1. 第一步');
+  });
+});
+
+describe('normalizeMarkdownTableDividers', () => {
+  it('裸表头自动补分隔行', () => {
+    const result = normalizeMarkdownTableDividers('| 名称 | 单位 |\n| 钢筋 | t |');
+    expect(result).toContain('| --- | --- |');
+    expect(result).toContain('| 钢筋 | t |');
+  });
+
+  it('数据行列数补齐到表头列数', () => {
+    const result = normalizeMarkdownTableDividers('| 名称 | 单位 | 数量 |\n|---|---|---|\n| 钢筋 | t |');
+    expect(result).toContain('| 钢筋 | t |  |');
+  });
+});
+
+describe('stripMarkdownDocumentFence', () => {
+  it('剥离代码围栏', () => {
+    expect(stripMarkdownDocumentFence('```markdown\n# 标题\n正文\n```')).toBe('# 标题\n正文');
+    expect(stripMarkdownDocumentFence('# 无围栏标题')).toBe('# 无围栏标题');
+  });
+});
+
+describe('cleanFormalSourcePhrases / sourcePhraseIssues', () => {
+  it('正文来源罗列话术被删除', () => {
+    const result = cleanFormalSourcePhrases('本工程根据招标文件、补疑澄清文件、设计图纸及工程量清单，确定工期为540日历天。');
+    expect(result).toBe('确定工期为540日历天。'); // 现状锁定：SOURCE_ENUMERATION_PHRASE_RE 连同“本工程”前缀一起消费
+  });
+
+  it('编制依据小节豁免集中罗列', () => {
+    const markdown = '## 编制依据\n依据招标文件、设计图纸、现行规范。';
+    expect(cleanFormalSourcePhrases(markdown)).toBe(markdown);
+  });
+
+  it('来源罗列与粗体表名标记问题', () => {
+    const issues = sourcePhraseIssues('依据招标文件、设计图纸，确定工期。\n\n**施工进度计划表**');
+    expect(issues.some(item => item.message.includes('资料来源罗列话术'))).toBe(true);
+    expect(issues.some(item => item.message.includes('粗体段落充当表名'))).toBe(true);
+  });
+});
+
+describe('sectionHeadingIssues', () => {
+  it('H4 与三级小节同名报结构重复', () => {
+    const issues = sectionHeadingIssues('### 1.1 施工准备\n\n#### 施工准备\n正文。');
+    expect(issues.some(item => item.message.includes('与本章三级小节同名'))).toBe(true);
+  });
+
+  it('H4 词尾粘连与过长多主题报错', () => {
+    const issues = sectionHeadingIssues('#### 现场条件现场条件\n\n#### 施工现场安全生产文明施工与质量管理综合措施详解');
+    expect(issues.some(item => item.message.includes('词尾粘连'))).toBe(true);
+    expect(issues.some(item => item.message.includes('过长疑似多主题拼接'))).toBe(true);
+  });
+
+  it('专业工程方案标准命名豁免过长判定', () => {
+    const issues = sectionHeadingIssues('#### 给排水及消防水系统安装工程施工方案');
     expect(issues).toHaveLength(0);
   });
+});
 
-  it('超长拼接标题标记', () => {
-    const issues = sectionHeadingIssues('#### 地下车库顶板防水与外墙保温一体化施工工艺');
-    expect(issues.some(issue => issue.message.includes('过长'))).toBe(true);
+describe('sectionDuplicateIssues', () => {
+  it('跨小节重复句占比超阈值报重复', () => {
+    const repeated = [
+      '现场设置专职安全员每日巡查，发现隐患立即整改并复查销项，确保施工全过程安全受控。',
+      '项目部每周组织一次综合安全检查，重点核查临时用电、临边防护与消防设施状态，检查记录归档备查。',
+      '所有进场作业人员必须完成三级安全教育培训并考核合格，特种作业人员持有效证件方可上岗作业。',
+    ];
+    // 现状锁定：句子按指纹 Set 去重（相同句只计 1 个指纹），需两节重合 ≥3 个不同句才满足 overlap >= 3（L364）
+    const markdown = ['## 第一章 工程概况', '### 1.1 施工准备', ...repeated, '### 1.2 现场布置', ...repeated, '### 1.3 临时用电', ...repeated].join('\n\n');
+    const issues = sectionDuplicateIssues(markdown);
+    expect(issues.some(item => item.message.includes('正文重复'))).toBe(true);
   });
 });
 
-describe('sectionDuplicateIssues 跨节重复检测（4.12.5）', () => {
-  it('两节 3 句以上长句重合判定重复', () => {
-    const s1 = '混凝土浇筑完成后应及时覆盖养护并做好测温记录，养护时间不得少于十四天。';
-    const s2 = '模板支撑体系必须经过验算合格后方可进行混凝土浇筑施工。';
-    const s3 = '每批次进场原材料必须按规定见证取样送检合格后方可使用。';
-    const md = `## 第一章\n### 1.1 施工准备\n${s1}\n${s2}\n${s3}\n### 1.2 现场管理\n${s1}\n${s2}\n${s3}`;
-    const issues = sectionDuplicateIssues(md);
-    expect(issues.some(issue => issue.message.includes('正文重复'))).toBe(true);
+describe('mergeTableLineBreaks', () => {
+  it('表格单元格断行合并进上一数据行', () => {
+    const result = mergeTableLineBreaks('| 名称 | 数量 |\n| 钢筋 | 100 |\n吨 | 说明 | 备注'); // 断行判定需 ≥2 个竖线（L389）且上一行是完整表格行（首尾 |）
+    expect(result).toContain('100吨；说明');
   });
 
-  it('内容不同不误报', () => {
-    const md = '## 第一章\n### 1.1 施工准备\n混凝土浇筑完成后应及时覆盖养护并做好测温记录，养护时间不得少于十四天。\n### 1.2 现场管理\n现场材料按规格分类堆放并设置标识牌，易燃易爆材料单独存放并配备消防器材。';
-    expect(sectionDuplicateIssues(md)).toHaveLength(0);
+  it('断行紧跟分隔行时转为独立表格行', () => {
+    const result = mergeTableLineBreaks('| 名称 | 单位 |\n|---|---|\n钢筋 | t | 备注');
+    expect(result).toContain('| 钢筋 | t |');
   });
 });
 
-describe('mergeTableLineBreaks 表格断行合并（4.12.6）', () => {
-  it('危大工程表单元格换行断行合并回上一行（专项方案审批列现场）', () => {
-    const md = `| 危大工程名称 | 工程参数 | 危大类别 | 专项方案审批 |
-| --- | --- | --- | --- |
-| 基坑土方开挖与支护 | 地下1层，开挖深度超过5m，采用放坡喷锚支护 | 超过一定规模危大工程 | 施工单位技术负责人审核签字并加盖单位公章， |
-总监理工程师审查签字并加盖执业印章 | 组织不少于5名专家论证 |`;
-    const result = mergeTableLineBreaks(md);
-    expect(result).toContain('施工单位技术负责人审核签字并加盖单位公章，总监理工程师审查签字并加盖执业印章；组织不少于5名专家论证 |');
-    expect((result.match(/\n/gu) || []).length).toBe(2);
+describe('sanitizeFormalMarkdown', () => {
+  it('粗体表名转 H4 且内部话术行被过滤', () => {
+    const markdown = '**施工进度计划表**\n\n该小节围绕内容进行补充说明。\n\n正文正常内容。';
+    const result = sanitizeFormalMarkdown(markdown);
+    expect(result).toContain('#### 施工进度计划表');
+    expect(result).not.toContain('该小节围绕');
+    expect(result).toContain('正文正常内容。');
   });
 
-  it('正文中单竖线非表格行不误合并', () => {
-    const md = '## 第一章\n\n本工程采用流水施工。\n\n| 项目 | 内容 |\n| --- | --- |\n| 名称 | 徽光阁 |';
-    const result = mergeTableLineBreaks(md);
-    expect(result).toContain('本工程采用流水施工。');
-    expect(result).toContain('| 名称 | 徽光阁 |');
+  it('行内伪标题拆行为独立标题行', () => {
+    const result = sanitizeFormalMarkdown('复查记录留存影像资料。### 危大工程专项施工方案审批流程'); // 拆行正则要求句末标点后直接接 #（L434），无半角点
+    expect(result).toContain('影像资料。');
+    expect(result).toContain('### 危大工程专项施工方案审批流程');
   });
 
-  it('分隔行后断行转为表格行而非合并进分隔行（保护表格结构）', () => {
-    const md = '| 危大工程名称 | 工程参数 | 危大类别 | 专项方案审批 |\n| --- | --- | --- | --- |\n总监理工程师审查签字并加盖执业印章 | 组织不少于5名专家论证 |';
-    const result = mergeTableLineBreaks(md);
-    // 分隔行必须原样保留，不得被断行污染成畸形数据行
-    expect(result).toContain('| --- | --- | --- | --- |');
-    // 断行转为以 | 开头的表格行，内容零丢失
-    expect(result).toContain('| 总监理工程师审查签字并加盖执业印章 | 组织不少于5名专家论证 |');
+  it('工作流后台话术整行删除', () => {
+    const result = sanitizeFormalMarkdown('本节内容围绕知识库证据组织。\n\n正文正常内容。');
+    expect(result).not.toContain('知识库证据');
+    expect(result).toContain('正文正常内容。');
   });
 });
 
-describe('normalizeTenderSourcePageRefs 残缺页码残片清洗（4.12.6）', () => {
-  it('残缺「PDF 第」残片删除，保留前文本', () => {
-    expect(normalizeTenderSourcePageRefs('日期：2026年8月19 日PDF 第')).toBe('日期：2026年8月19 日');
-    expect(normalizeTenderSourcePageRefs('合肥师范学院招标代理：安徽省招标集团股份有限公司日期：2026年8月19日PDF 第')).toBe('合肥师范学院招标代理：安徽省招标集团股份有限公司日期：2026年8月19日');
+describe('removeAdjacentDuplicateHeadings', () => {
+  it('双标题叠加降级保留内层标题', () => {
+    expect(removeAdjacentDuplicateHeadings('## ### 施工准备')).toBe('### 施工准备');
   });
 
-  it('完整「PDF 第X页」仍归一为相关资料', () => {
-    expect(normalizeTenderSourcePageRefs('详见招标文件 PDF 第 5 页')).toContain('相关资料');
+  it('相邻重复标题只保留首个', () => {
+    const result = removeAdjacentDuplicateHeadings('## 施工准备\n\n## 施工准备\n\n正文。');
+    expect(result).toBe('## 施工准备\n\n正文。');
+  });
+});
+
+describe('extractGeneratedSections', () => {
+  it('提取三级小节并过滤指令式标题', () => {
+    const sections = extractGeneratedSections('### 工程概况\n\n### 是否涉及施工内容判断\n\n### 施工部署');
+    expect(sections).toEqual(['工程概况', '施工部署']);
+  });
+});
+
+describe('normalizeTertiaryHeadings / tertiaryHeadingIssues', () => {
+  it('H4 自动补 X.Y.Z 编号', () => {
+    const result = normalizeTertiaryHeadings('## 第一章 工程概况\n\n### 1.1 施工准备\n\n#### 施工机械配置');
+    expect(result).toContain('#### 1.1.1 施工机械配置');
   });
 
-  it('空格数字完整引用「PDF 第 3 页」归一（不落入残片删除误删成「 3 页」）', () => {
-    expect(normalizeTenderSourcePageRefs('详见招标文件PDF 第 3 页')).toBe('详见招标文件相关资料');
-    expect(normalizeTenderSourcePageRefs('详见招标文件PDF  第   8  页')).toBe('详见招标文件相关资料');
+  it('缺失编号的 H4 报编号问题', () => {
+    const issues = tertiaryHeadingIssues('### 1.1 施工准备\n\n#### 施工机械配置');
+    expect(issues.some(item => item.message.includes('缺少 1.1.x 编号'))).toBe(true);
+  });
+});
+
+describe('inferChapterSectionsFromMarkdown', () => {
+  it('从正文提取章节小节', () => {
+    const sections = inferChapterSectionsFromMarkdown('## 第一章 工程概况\n\n### 1.1 施工准备\n正文。', [{ title: '工程概况', sections: ['施工准备'] }]);
+    expect(sections[0]!.some(item => item.includes('施工准备'))).toBe(true);
+  });
+});
+
+describe('applyPromptDocumentRules', () => {
+  it('requiredTables 注入对应章节', () => {
+    const result = applyPromptDocumentRules('## 第一章 工程概况\n\n正文内容。', ruleSetOf({ requiredTables: ['应急物资配置表'] }));
+    expect(result).toContain('应急物资配置表');
+    expect(result).toContain('| 控制项目 |');
   });
 
-  it('全角数字保留原样、页码范围经 L60 兜底归一（与 cleanInlineFactValue 同口径）', () => {
-    expect(normalizeTenderSourcePageRefs('详见招标文件PDF 第３页')).toBe('详见招标文件PDF 第３页');
-    expect(normalizeTenderSourcePageRefs('详见招标文件PDF 第 5-8 页')).toBe('详见招标文件相关资料');
+  it('forbiddenTerms 整行删除与 preferredTerms 替换', () => {
+    const result = applyPromptDocumentRules('报价明细表内容。\n施工方负责组织施工。', ruleSetOf({ forbiddenTerms: ['报价明细表'], preferredTerms: [{ from: '施工方', to: '我公司' }] }));
+    expect(result).not.toContain('报价明细表');
+    expect(result).toContain('我公司负责组织施工。');
+  });
+
+  it('无 rules 时执行默认禁词替换', () => {
+    expect(applyPromptDocumentRules('承包人案编制要求')).toContain('方案编制要求');
+  });
+});
+
+describe('ensureFormalToc', () => {
+  it('生成目录页并收录小节', () => {
+    const result = ensureFormalToc('## 第一章 工程概况\n\n### 1.1 施工准备\n正文。', [{ title: '工程概况', sections: ['施工准备'], content: '' }]);
+    expect(result).toContain('## 目录');
+    expect(result).toContain('1.1 施工准备');
+  });
+});
+
+describe('findChapterBlock', () => {
+  it('定位章节区间', () => {
+    const block = findChapterBlock('## 第一章 工程概况\n\n正文内容。', '工程概况');
+    expect(block?.body).toContain('正文内容。');
+    expect(findChapterBlock('无章节', '工程概况')).toBeUndefined();
+  });
+});
+
+describe('plannedStructurePrompt / plannedStructureIssues', () => {
+  const template: DocumentTemplate = {
+    id: 'tpl-1', name: '施工组织设计模板', description: '', category: 'document', outputTitle: '施工组织设计',
+    chapters: [{ id: 'ch-1', title: '工程概况', purpose: '', queries: [], requiredFacts: [], sections: ['施工准备'], tableSections: ['进度计划表'] }],
+  };
+
+  it('渲染规划结构与表格规划', () => {
+    const prompt = plannedStructurePrompt(template);
+    expect(prompt).toContain('工程概况');
+    expect(prompt).toContain('规划小节：施工准备');
+    expect(prompt).toContain('表格小节：进度计划表');
+  });
+
+  it('缺表格章节报必要表格缺失', () => {
+    const issues = plannedStructureIssues('## 第一章 工程概况\n正文。', template);
+    expect(issues.some(item => item.message.includes('缺少必要的正式表格'))).toBe(true);
+  });
+});
+
+describe('promptDocumentRuleIssues', () => {
+  it('封面/目录/关键词/禁用词逐项检出', async () => {
+    const issues = await promptDocumentRuleIssues('正文内容。', ruleSetOf({
+      coverPolicy: 'required',
+      tocPolicy: 'required',
+      requiredKeywords: ['文明施工'],
+      forbiddenTerms: ['后台话术'],
+    }), embedDocuments);
+    expect(issues.some(item => item.message.includes('缺少提示词要求的封面'))).toBe(true);
+    expect(issues.some(item => item.message.includes('缺少提示词要求的目录'))).toBe(true);
+    expect(issues.some(item => item.message.includes('文明施工'))).toBe(true);
+    const hitIssues = await promptDocumentRuleIssues('正文包含后台话术。', ruleSetOf({ forbiddenTerms: ['后台话术'] }), embedDocuments);
+    expect(hitIssues.some(item => item.message.includes('后台话术'))).toBe(true);
+  });
+
+  it('无 rules 返回空数组', async () => {
+    expect(await promptDocumentRuleIssues('正文。', undefined, embedDocuments)).toEqual([]);
+  });
+
+  it('弱词根指令标题经语义复核命中：如何编写类标题报指令标题', async () => {
+    const issues = await promptDocumentRuleIssues('## 如何编写施工方案\n\n正文内容。', ruleSetOf(), embedDocuments);
+    expect(issues.some(item => item.message.includes('疑似提示词指令标题'))).toBe(true);
+  });
+
+  it('弱词根但语义合法的标题零误杀：是否设置安全防护设施不报', async () => {
+    const issues = await promptDocumentRuleIssues('## 是否设置安全防护设施\n\n正文内容。', ruleSetOf(), embedDocuments);
+    expect(issues.some(item => item.message.includes('疑似提示词指令标题'))).toBe(false);
+  });
+});
+
+describe('composeDocumentMarkdown', () => {
+  it('端到端合成封面/目录/章节正文', () => {
+    const markdown = composeDocumentMarkdown({
+      templateId: 'tpl-1',
+      templateName: '施工组织设计模板',
+      title: '施工组织设计',
+      requirement: '',
+      facts: { 项目名称: '合肥项目' },
+      chapters: [chapterOf({ content: '### 1.1 施工准备\n现场按计划组织施工准备。' })],
+    } as unknown as Omit<GeneratedDocumentDraft, 'markdown'>);
+    expect(markdown).toContain('施工组织设计');
+    expect(markdown).toContain('## 目录');
+    expect(markdown).toContain('第一章 工程概况');
+    expect(markdown).toContain('施工准备');
   });
 });

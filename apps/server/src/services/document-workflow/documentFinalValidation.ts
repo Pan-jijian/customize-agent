@@ -82,8 +82,8 @@ export async function buildStandardFinalValidationIssues(input: {
     ...paragraphOpeningRepeatIssues(input.markdown),
     // Q8 叠词重复表述（L1 封闭结构提取 + 确定性去重）
     ...repeatedWordIssues(input.markdown),
-    // Q3 商务条款数据入正文（商务词封闭集，徽光阁实测暂列金额 60 万入正文）
-    ...commercialDataInBodyIssues(input.markdown),
+    // Q3 商务条款数据入正文（商务词封闭集确定性 + 变体弱词语义复核，徽光阁实测暂列金额 60 万入正文）
+    ...await commercialDataInBodyIssues(input.markdown),
     ...overviewRecapIssues(input.markdown, { semanticSimilarity: overviewSimilarity }),
     ...closurePhraseDensityCapIssues(input.markdown),
     // C1 参数概念多口径冲突（bge 概念自组织聚类 + 同簇数值冲突）
@@ -106,11 +106,11 @@ export async function buildStandardFinalValidationIssues(input: {
     ...genericProfessionalContentIssues(input.chapters, analyses),
     ...managementMeasureNumberIssues(input.chapters, analyses),
     ...await closedLoopDensityIssues(input.markdown),
-    ...crossChapterConsistencyIssues(input.markdown, input.factsModel, input.scopeConflicts, analyses),
-    ...processSpecConflictIssues(input.markdown, input.factsModel),
+    ...await crossChapterConsistencyIssues(input.markdown, input.factsModel, input.scopeConflicts, analyses),
+    ...await processSpecConflictIssues(input.markdown, input.factsModel),
     ...evidenceUsageCoverageIssues(input.markdown, input.factsModel),
     ...await paragraphGenericIssues(input.markdown, input.professionalDepthClassifier),
-    ...constructionOrgGenericLanguageIssues(input.chapters),
+    ...await constructionOrgGenericLanguageIssues(input.chapters),
     ...constructionOrgControlLoopIssues(input.chapters),
     ...constructionOrgProfessionalChainIssues({ markdown: input.markdown, factsModel: input.factsModel, chapters: input.chapters }),
     ...constructionOrgConsistencyIssues(input.markdown, input.factsModel),
@@ -141,7 +141,7 @@ export async function buildStandardFinalValidationIssues(input: {
     ...degenerateContentIssues(input.markdown, input.chapters),
     ...plannedAutoSpecGateIssues(input.markdown, input.template),
     ...plannedStructureIssues(input.markdown, input.template),
-    ...promptDocumentRuleIssues(input.markdown, input.promptDocumentRules),
+    ...await promptDocumentRuleIssues(input.markdown, input.promptDocumentRules),
     // round-18 E11：安徽省属地适配与政策合规（创优目标/四节一环保量化/工伤保险），
     // 排在末尾使修复循环 slice 截断时让位高优先级 blocker；round-20 S1 已加语义判定（async）
     ...await localAdaptationKeywordIssues(input.markdown, input.factsModel),

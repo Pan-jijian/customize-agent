@@ -727,19 +727,87 @@ export function stripForbiddenPlaceholderSentences(content: string) {
 /** 商务评标纪律承诺句确定性删除（与 FORBIDDEN_PLACEHOLDER_PHRASES 同构治理）：
  * 正式技术标中此类承诺绝无合法用途，整句删除后由商务文件另行承载。
  * 判定复用 utils 单一来源词表 + 纪律语境句级兜底（覆盖「实行严格的纪律管理，确保投标活动
- * 合法合规」类无禁词词面变体——评分报告问题2实测原文）。 */
+ * 合法合规」类无禁词词面变体——评分报告问题2实测原文）。
+ * 标题行不再豁免（评分报告 P1 实测：「### 对与评标活动有关的工作人员的纪律要求」6 个纪律小节
+ * 标题曾因标题豁免整行放行）——标题命中即整行删除，正文保留并入上一小节；
+ * 表格行保留豁免（表格内容由商务数据检测独立治理）。 */
 export function stripBidDisciplineSentences(content: string) {
   if (!BID_DISCIPLINE_PHRASES.some(phrase => content.includes(phrase)) && !/纪律|廉洁/u.test(content)) return content;
   return content
     .split('\n')
     .map(line => {
-      if (/^\s*#{1,6}\s/u.test(line) || /^\s*\|/u.test(line)) return line;
+      const trimmed = line.trim();
+      const isHeading = /^#{1,6}\s/u.test(trimmed);
+      if (/^\s*\|/u.test(trimmed)) return line;
+      if (isHeading) {
+        // 标题行命中纪律判定 → 整行删除（标题文字本身就是泄漏主体，不保留空壳标题）
+        return isBidDisciplineSentence(trimmed.replace(/^#{1,6}\s+/u, '')) ? '' : line;
+      }
       return line
         .split(/(?<=[。；;])/u)
         .filter(segment => !isBidDisciplineSentence(segment))
         .join('');
     })
     .join('\n');
+}
+
+/**
+ * 投标程序/评标纪律句语义召回词形：评标澄清/评审争议/中标公示/清单计量报价/实质性响应类
+ * 无禁词词面变体（evidenceContentSafety.ts 原型集同口径），词面命中仅触发语义复核不直接判定——
+ * 判定由 buildBidProcedureJudge 语义模型完成（评分报告 P1 实测 6 个纪律小节标题无任何禁词词面）。
+ */
+const BID_PROCEDURE_STRIP_HINTS_RE = /评标|投标|行贿|打招呼|递条子|廉洁|串标|围标|弄虚作假|干扰评标|纪律|澄清|中标|报价|清单计量|评审|保证金|开标|递交/u;
+
+/**
+ * 投标程序/评标纪律句语义增强清洗（生成后兜底第二道防线）：词面召回（禁写词 + 无禁词词面变体
+ * 语境词）→ 语义模型判定（与证据层 buildBidProcedureJudge 同口径双向比对）→ 确定性判定兜底。
+ * 主生成链路（documentGenerator 章节写作）在同步确定性清洗后追加本函数；
+ * 语义模型恒可用：judge 构建失败直接抛出，无"语义不可用跳过过滤"的降级分支。
+ */
+export async function stripBidDisciplineSentencesSemantic(content: string, judge: (texts: string[]) => Promise<boolean[]>): Promise<string> {
+  if (!BID_PROCEDURE_STRIP_HINTS_RE.test(content)) return content;
+  const lines = content.split('\n');
+  // 候选展开：标题行整行候选（命中删整行），正文行按句拆分候选（命中只删该句，防同行施工合法句误伤）
+  const candidates: Array<{ lineIndex: number; text: string; wholeLine: boolean }> = [];
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const trimmed = lines[lineIndex].trim();
+    if (!trimmed || /^\s*\|/u.test(trimmed)) continue;
+    if (/^#{1,6}\s/u.test(trimmed)) {
+      const text = trimmed.replace(/^#{1,6}\s+/u, '');
+      if (BID_PROCEDURE_STRIP_HINTS_RE.test(text)) candidates.push({ lineIndex, text, wholeLine: true });
+      continue;
+    }
+    for (const segment of lines[lineIndex].split(/(?<=[。；;])/u)) {
+      const text = segment.trim();
+      if (text && BID_PROCEDURE_STRIP_HINTS_RE.test(text)) candidates.push({ lineIndex, text, wholeLine: false });
+    }
+  }
+  if (candidates.length === 0) return content;
+  const verdicts = await judge(candidates.map(candidate => candidate.text));
+  const dropWholeLines = new Set<number>();
+  const dropSegmentsByLine = new Map<number, Set<string>>();
+  for (let position = 0; position < candidates.length; position += 1) {
+    const candidate = candidates[position];
+    // 确定性判定兜底（禁写词出现本身即删除）；语义命中同样删除（无禁词词面变体靠语义捕获）
+    if (!(isBidDisciplineSentence(candidate.text) || verdicts[position])) continue;
+    if (candidate.wholeLine) {
+      dropWholeLines.add(candidate.lineIndex);
+      continue;
+    }
+    const segments = dropSegmentsByLine.get(candidate.lineIndex) || new Set<string>();
+    segments.add(candidate.text);
+    dropSegmentsByLine.set(candidate.lineIndex, segments);
+  }
+  if (dropWholeLines.size === 0 && dropSegmentsByLine.size === 0) return content;
+  return lines.map((line, lineIndex) => {
+    if (dropWholeLines.has(lineIndex)) return '';
+    const dropSegments = dropSegmentsByLine.get(lineIndex);
+    if (!dropSegments) return line;
+    return line
+      .split(/(?<=[。；;])/u)
+      .filter(segment => !dropSegments.has(segment.trim()))
+      .join('');
+  }).join('\n');
 }
 
 
@@ -998,18 +1066,66 @@ export function stripTenderClauseFragmentHeadings(content: string) {
 }
 
 /**
- * 剥离 LLM 数据一致性自查过程泄漏：以「上表/本表」开头且含「一致/修正为」的整段属
- * 写手把表格口径推算过程写进正文（如「与 180 人不一致，故将合计行…修正为 130 人」），
- * 自查推算不得进入成品正文，段落整体删除（历史缺陷：自查注释与表格数值矛盾直接进正文）。
+ * 数据一致性自查/约束文字泄漏段落判定（段落级整段删除）：
+ * 1. 以「上表/本表」开头且含「一致/修正为」的自查推算段——写手把表格口径推算过程写进正文
+ *    （如「与 180 人不一致，故将合计行…修正为 130 人」，历史缺陷：自查注释与表格数值矛盾直接进正文）；
+ * 2. 约束指令文字被写手复述进正文（评分报告 N2 实测：「全文不再出现 180 人」「正文不得出现跨章冲突」）——
+ *    「全文/正文/文中 + 不再出现/不得出现」句式与「跨章冲突不得出现」类表述在正式正文中无合法用途。
  */
+function isDataConsistencyLeakParagraph(singleLine: string): boolean {
+  const text = singleLine.trim();
+  if (/^(?:上表|本表)/u.test(text) && /(?:一致|修正为)/u.test(text)) return true;
+  if (/(?:全文|正文|文中)(?:不再出现|不得出现|不得再出现|不应出现|不会再出现)/u.test(text)) return true;
+  if (/不得出现跨章冲突|跨章冲突不得出现|不得与其他章节(?:矛盾|冲突)/u.test(text)) return true;
+  return false;
+}
+
 export function stripDataConsistencyLeakSentences(content: string) {
   const paragraphs = content.split(/\n\s*\n/u);
-  const kept = paragraphs.filter(paragraph => {
-    const singleLine = paragraph.replace(/\n/gu, '');
-    return !(/^(?:上表|本表)/u.test(singleLine.trim()) && /(?:一致|修正为)/u.test(singleLine));
-  });
+  const kept = paragraphs.filter(paragraph => !isDataConsistencyLeakParagraph(paragraph.replace(/\n/gu, '')));
   if (kept.length === paragraphs.length) return content;
   return kept.join('\n\n');
+}
+
+/** 跨小节重复句合并最短字数：≥30 字长句在跨小节完全重复时合并（评分报告 N4/P3：5.1 与 5.6、68/69 行整句重复） */
+const MIN_CROSS_SECTION_DUPLICATE_SENTENCE_CHARS = 30;
+
+/**
+ * 跨小节整句重复合并：清洗管道只处理小节标题级重复（dedupeRepeatedSubsections），
+ * 跨小节整句重复（5.1 vs 5.6 同一长句两处出现、68/69 行相邻重复）无检测（评分报告 N4）。
+ * 规则：≥30 字长句（去除空白后）首次出现的小节保留，其他小节中的完全重复句删除；
+ * 同一小节内重复保留（可能为有意强调），标题行/表格行不参与。
+ */
+export function dedupeCrossSectionDuplicateSentences(content: string): string {
+  const lines = content.split('\n');
+  const firstSectionBySentence = new Map<string, string>();
+  let currentSection = '';
+  let changed = false;
+  const result = lines.map(line => {
+    const trimmed = line.trim();
+    if (/^#{1,6}\s/u.test(trimmed)) {
+      currentSection = trimmed;
+      return line;
+    }
+    if (!trimmed || /^\s*\|/u.test(trimmed)) return line;
+    const kept = line.split(/(?<=[。；;])/u).filter(segment => {
+      const text = segment.replace(/\s+/gu, '');
+      if (text.length < MIN_CROSS_SECTION_DUPLICATE_SENTENCE_CHARS) return true;
+      const firstSection = firstSectionBySentence.get(text);
+      if (firstSection === undefined) {
+        firstSectionBySentence.set(text, currentSection);
+        return true;
+      }
+      // 同一小节内重复保留；跨小节重复句删除（保留首次出现小节）
+      if (firstSection === currentSection) return true;
+      changed = true;
+      return false;
+    });
+    if (kept.length !== line.split(/(?<=[。；;])/u).length) changed = true;
+    return kept.join('');
+  });
+  if (!changed) return content;
+  return result.join('\n');
 }
 
 export function finalizeChapterContentQuality(content: string, chapter: Pick<DocumentTemplateChapter, 'title' | 'sections'>) {
@@ -1030,6 +1146,7 @@ export function finalizeChapterContentQuality(content: string, chapter: Pick<Doc
   cleaned = cleanChineseWordBreakSpaces(cleaned);
   cleaned = normalizeWorkPackageLabels(cleaned);
   cleaned = ensureWorkPackageOverviewLabels(cleaned);
+  cleaned = dedupeCrossSectionDuplicateSentences(cleaned);
   cleaned = cleaned.replace(/\n{3,}/gu, '\n\n');
   cleaned = stripTenderClauseFragmentHeadings(cleaned);
   return stripDataConsistencyLeakSentences(cleaned).trim();
@@ -1038,7 +1155,7 @@ export function finalizeChapterContentQuality(content: string, chapter: Pick<Doc
 /** 最终组装路径的重复/空壳兜底清理：rebuildFinalMarkdown 不再逐章跑 finalizeChapterContentQuality，
  * 补跑同 H3 重复 H4 去重与空壳小节删除，避免 Final Gate 补写与章节拼接残留的重复/空壳进入成品文档。 */
 export function finalizeFinalMarkdownStructure(markdown: string): string {
-  return stripDataConsistencyLeakSentences(stripTenderClauseFragmentHeadings(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(normalizeWorkPackageLabels(cleanChineseWordBreakSpaces(splitGluedTableHeaderLines(rewriteWorkPackageTerminology(markdown))))))));
+  return stripDataConsistencyLeakSentences(stripTenderClauseFragmentHeadings(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(normalizeWorkPackageLabels(cleanChineseWordBreakSpaces(splitGluedTableHeaderLines(rewriteWorkPackageTerminology(dedupeCrossSectionDuplicateSentences(markdown)))))))));
 }
 
 export function promptMatchesChapter(prompt: ResolvedPromptContent, _chapter: DocumentTemplateChapter) {

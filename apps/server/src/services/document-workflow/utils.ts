@@ -238,6 +238,19 @@ export function throwIfAborted(signal?: AbortSignal) {
 }
 
 /**
+ * 系统约束行统一前缀：所有注入 projectContext/写作提示词的约束指令必须加此前缀，
+ * 声明"仅指导写作、禁止写入正文、禁止复述本句"——根治元话语泄漏（评分报告 N2：
+ * "第一第二第三""不得出现跨章冲突""不再出现180人"等约束文字被写手复述进正文）。
+ * 单一来源：documentBlueprint 约束行、tenderRequirementsWritingRules、修复指令、
+ * 写作主控提示词组装处同口径复用，禁止各处私造第二份前缀。
+ */
+export const SYSTEM_CONSTRAINT_PREFIX = '【系统约束——仅指导写作，禁止写入正文，禁止复述本句】';
+
+export function systemConstraintLine(text: string): string {
+  return `${SYSTEM_CONSTRAINT_PREFIX}${text}`;
+}
+
+/**
  * 商务投标函内容禁写词（投标/评标纪律、廉洁承诺类）：属商务文件/投标函内容，技术标中出现
  * 既降专业性又属评标敏感表述（评分报告问题2），技术标只保留技术与管理承诺。
  * 单一来源词表：清洗层（stripBidDisciplineSentences）、检测层（agentPlanner 禁写话术）、

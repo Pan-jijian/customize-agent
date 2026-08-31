@@ -5,11 +5,12 @@
  */
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
+import type * as NodeFsModule from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
 vi.mock('node:fs', async importOriginal => {
-  const actual = await importOriginal<typeof import('node:fs')>();
+  const actual = await importOriginal<typeof NodeFsModule>();
   return { ...actual, appendFileSync: vi.fn(actual.appendFileSync) };
 });
 

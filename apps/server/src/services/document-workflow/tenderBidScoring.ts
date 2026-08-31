@@ -157,11 +157,12 @@ function normalizationScore(issues: ValidationIssue[]) {
 
 /**
  * 低雷同性：空话禁用词命中率 + 模糊应答词（附录一第 3 类，零出现要求）+ 套话密度超标扣分
- * （docx L156：核心章节套话占比≤10%）+ 重复句式率（≥12 字符正文句去标点后重复比例）
+ * （docx L156：核心章节套话占比≤10%）+ 重复句式率（≥12 字符正文句去标点后重复比例）。
+ * 模糊应答扣分走语义复核口径（vagueSemanticSentences）：「力争上游/左右对称」等合法句词面命中不扣分。
  */
 function uniquenessScore(markdown: string, filler: Awaited<ReturnType<typeof fillerDensityReport>>) {
   const forbiddenHits = FORBIDDEN_EMPTY_PHRASES.filter(phrase => markdown.includes(phrase)).length;
-  const vagueHitCount = vagueResponseHits(markdown).reduce((sum, hit) => sum + hit.count, 0);
+  const vagueHitCount = filler.vagueSemanticSentences;
   const fillerPenalty = Math.max(0, filler.ratio - 0.1) * 100;
   const sentences = markdown
     .split(/\n+/u)

@@ -24,8 +24,8 @@ const INTERNAL_TERM_ANCHORS: Array<{ anchor: string; required: RegExp }> = [
   { anchor: '证据摘要中未包含', required: /证据摘要/u },
 ] as const;
 
-/** 内部话术精确词兜底（L1 封闭集字面召回：确定性匹配） */
-const INTERNAL_TERM_EXACT_RE = /工作包|事实卡|事实主表|后台数据库/u;
+/** 内部话术精确词兜底（L1 封闭集字面召回：确定性匹配，/g 收集全部命中词供一次性定向修复） */
+const INTERNAL_TERM_EXACT_RE = /工作包|事实卡|事实主表|后台数据库/gu;
 
 /** 目录裸标题行（无 # 前缀的数字编号标题，如“2.12 主要分部分项工程施工方案”）：不参与正文句子语义匹配 */
 const TOC_LINE_RE = /^\d+(?:\.\d+)*\s+\S+/u;
@@ -48,7 +48,7 @@ export async function internalTerminologyAnchorIssues(markdown: string): Promise
       category: 'format',
       owner: 'system',
       repairability: 'llm_repairable',
-      message: `正式正文仍包含后台内部术语“${exactHits[0]}”，需要按上下文语义改写为正式术语`,
+      message: `正式正文仍包含后台内部术语“${exactHits.join('”“')}”，需要按上下文语义改写为正式术语`,
       suggestion: '请结合语境改写：“拆除工程工作包”→“拆除工程”，“按工作包逐项说明”→“按专业工程逐项说明”；禁止出现生成系统后台概念。',
     });
   }

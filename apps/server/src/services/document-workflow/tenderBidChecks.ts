@@ -1,4 +1,5 @@
 import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
+import { buildSemanticGate } from './semanticGate';
 
 /**
  * 招标技术标确定性检查层（对标《施工组织设计全维度校验提示词（修订完整版）》判定标尺）。
@@ -15,7 +16,38 @@ export const VAGUE_RESPONSE_PHRASES = [
   '基本满足', '大致符合', '力争', '原则上', '大概', '左右', '尽可能', '尽量满足',
 ] as const;
 
-/** 模糊应答词命中明细（含出现次数），供评分扣分与报告定位 */
+/** 模糊应答词面召回（词根级，仅召回不判定）：「基本能够满足」「大致可以符合」「力争上游」「左右对称」
+ * 等变体均召回，语义 gate 复核后才计扣分——词面短语级判定会漏掉变体、误杀「力争上游/左右对称」合法句 */
+const VAGUE_RESPONSE_LEXICAL_HINTS_RE = /基本|大致|力争|原则上|大概|左右|尽可能|尽量/u;
+
+/** 模糊应答语义原型（正例）：应答性模糊承诺表述基准（补词面变体漏网，如「基本能够满足」「完全符合要求」语境依赖型） */
+const VAGUE_RESPONSE_SEMANTIC_PROTOTYPES = [
+  '基本满足招标文件要求',
+  '大致符合相关规范标准',
+  '力争达到优良质量标准',
+  '原则上按照规范执行',
+  '尽可能保证工程质量',
+  '尽量满足工期要求',
+] as const;
+
+/** 模糊应答合法语境原型（负例保护）：含模糊词但语义属具体描述/正面表述，不得计扣分（力争上游/左右对称） */
+const VAGUE_LEGAL_CONTEXT_PROTOTYPES = [
+  '结构构件左右对称布置',
+  '平面布置左右对称合理',
+  '力争上游的企业精神',
+] as const;
+
+/** 构建模糊应答语义 gate：词面召回 + 语义复核（semanticGate 统一入口，禁止自行实现嵌入逻辑） */
+export async function buildVagueResponseGate(embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<(texts: string[]) => Promise<boolean[]>> {
+  return buildSemanticGate({
+    prototypes: [...VAGUE_RESPONSE_SEMANTIC_PROTOTYPES],
+    negativePrototypes: [...VAGUE_LEGAL_CONTEXT_PROTOTYPES],
+    lexicalHints: VAGUE_RESPONSE_LEXICAL_HINTS_RE,
+    embedDocuments,
+  });
+}
+
+/** 模糊应答词命中明细（含出现次数），供评分报告定位（词面口径，评分扣分走语义复核口径） */
 export function vagueResponseHits(markdown: string) {
   return VAGUE_RESPONSE_PHRASES.filter(phrase => markdown.includes(phrase))
     .map(phrase => ({ phrase, count: markdown.split(phrase).length - 1 }));
@@ -36,15 +68,21 @@ export type TemplatingLevel = 'heavy' | 'medium' | 'light';
 export interface FillerDensityReport {
   /** 核心段落总句数（≥12 字正文句） */
   totalSentences: number;
-  /** 套话句数（与套话语义原型 bge 余弦 ≥ 阈值的句子 + 模糊应答词命中句） */
+  /** 套话句数（套话语义原型命中句 + 模糊应答语义复核命中句） */
   fillerSentences: number;
   /** 套话占比 */
   ratio: number;
   /** 模板化等级：≥40% 重度 / 20%-40% 中度 / <20% 轻度（docx L23 阈值） */
   level: TemplatingLevel;
+  /** 模糊应答词面召回候选句数（词面命中仅召回，不直接计扣分） */
+  vagueCandidateSentences: number;
+  /** 模糊应答语义确认句数（语义 gate 复核命中，评分扣分口径） */
+  vagueSemanticSentences: number;
 }
 
-/** 套话密度统计：核心章节（全文口径，评分器可传核心段落子集）套话句占比 */
+/** 套话密度统计：核心章节（全文口径，评分器可传核心段落子集）套话句占比。
+ * 模糊应答词面命中仅召回（「力争上游」「左右对称」等合法句不得误计），
+ * 句子级语义 gate 复核命中才计套话句（语义模型恒可用，无降级分支）。 */
 export async function fillerDensityReport(
   markdown: string,
   embedDocuments?: (texts: string[]) => Promise<number[][]>,
@@ -56,13 +94,18 @@ export async function fillerDensityReport(
     .map(sentence => sentence.trim())
     .filter(sentence => sentence.length >= 12);
   const fillerSimilarity = await buildSemanticSimilarity(sentences, [...FILLER_SEMANTIC_QUERIES], embedDocuments);
-  const fillerSentences = sentences.filter(sentence =>
+  // 模糊应答：词根级词面召回 → 语义 gate 复核（正例命中且严格高于合法语境负例分才计套话句）
+  const vagueGate = await buildVagueResponseGate(embedDocuments);
+  const vagueFlags = await vagueGate(sentences);
+  const vagueCandidateSentences = sentences.filter(sentence => VAGUE_RESPONSE_LEXICAL_HINTS_RE.test(sentence)).length;
+  const vagueSemanticSentences = vagueFlags.filter(Boolean).length;
+  const fillerSentences = sentences.filter((sentence, index) =>
     FILLER_SEMANTIC_QUERIES.some(query => fillerSimilarity(sentence, query) >= SEMANTIC_COVERAGE_THRESHOLD)
-    || VAGUE_RESPONSE_PHRASES.some(phrase => sentence.includes(phrase)),
+    || vagueFlags[index],
   ).length;
   const ratio = sentences.length ? fillerSentences / sentences.length : 0;
   const level: TemplatingLevel = ratio >= 0.4 ? 'heavy' : ratio >= 0.2 ? 'medium' : 'light';
-  return { totalSentences: sentences.length, fillerSentences, ratio, level };
+  return { totalSentences: sentences.length, fillerSentences, ratio, level, vagueCandidateSentences, vagueSemanticSentences };
 }
 
 // ── 3. 措施五要素闭合（方案＋流程＋责任人＋时间节点＋验收标准，bge 语义判定，缺 2 项以上判不完整） ──

@@ -16,6 +16,7 @@ import { documentTextLength } from './budget';
 import { repairChapterByQuality } from './rolePipeline';
 import { finalizeChapterContentQuality } from './documentGeneratorHelpers';
 import { QINGTIAN_REVIEW_SYSTEM, qingtianBlockReviewPrompt, qingtianFixInstructionFor } from './qingtianReviewSpec';
+import { collectDocumentHeadings, formatKnownConflictLines, sanitizeIssueLocation, scanCrossChapterDataConflicts } from './crossChapterDataScan';
 
 export interface QingtianReviewIssue {
   dimension: string;
@@ -193,8 +194,9 @@ function locateChapterByIssue(issue: QingtianReviewIssue, chapters: DocumentDraf
   return -1;
 }
 
-/** 单块评审：一次 LLM 调用产出结构化问题清单；失败显式记录并返回 undefined */
-async function reviewDocumentBlock(chapters: DocumentDraftChapter[], context: { projectName: string; requirement?: string; tenderContext?: string; blockIndex: number; blockTotal: number }, diagnostics?: DocumentGenerationDiagnostics, signal?: AbortSignal): Promise<QingtianBlockReviewResult | undefined> {
+/** 单块评审：一次 LLM 调用产出结构化问题清单；失败显式记录并返回 undefined。
+ * 输出后置校验：location 与全文标题集合比对（LLM 幻觉定位标注"待核"），阻断错误定位进入修复与评分报告。 */
+async function reviewDocumentBlock(chapters: DocumentDraftChapter[], context: { projectName: string; requirement?: string; tenderContext?: string; knownConflictLines?: string; headings: string[]; blockIndex: number; blockTotal: number }, diagnostics?: DocumentGenerationDiagnostics, signal?: AbortSignal): Promise<QingtianBlockReviewResult | undefined> {
   const blockContent = chapters.map(chapter => `### ${chapter.title}\n${chapter.content}`).join('\n\n');
   const reviewed = await callDocumentLlmJson<QingtianBlockReviewResult>(QINGTIAN_REVIEW_SYSTEM, qingtianBlockReviewPrompt({ ...context, chapterTitles: chapters.map(chapter => chapter.title), blockContent }), {
     maxTokens: 1800,
@@ -207,7 +209,7 @@ async function reviewDocumentBlock(chapters: DocumentDraftChapter[], context: { 
   });
   if (!reviewed) return undefined;
   return {
-    issues: (reviewed.issues || []).map(issue => ({ ...issue, riskLevel: normalizeRiskLevel(issue.riskLevel) })),
+    issues: (reviewed.issues || []).map(issue => ({ ...issue, location: sanitizeIssueLocation(issue.location, context.headings), riskLevel: normalizeRiskLevel(issue.riskLevel) })),
     templatingLevel: reviewed.templatingLevel,
   };
 }
@@ -248,12 +250,15 @@ export async function runFullDimensionReview(input: FullDimensionReviewInput): P
   const result: FullDimensionReviewResult = { reviewed: false, reviewCalls: 0, repairCalls: 0, reReviewCalls: 0, issuesFound: 0, fixedCount: 0, remainingIssues: [], templatingLevels: [], repairedChapters: [] };
   const blocks = splitChaptersIntoReviewBlocks(chapters);
   if (blocks.length === 0) return result;
+  // ── 0. 确定性前置：跨章数据矛盾预扫描（分块盲区补足）+ 全文标题集合（输出定位后置校验基准）──
+  const knownConflictLines = formatKnownConflictLines(scanCrossChapterDataConflicts(chapters));
+  const headings = collectDocumentHeadings(chapters);
   // ── 1. 分块评审（每块一次调用，单块失败显式记录并跳过，其余块继续）──
   const allIssues: QingtianReviewIssue[] = [];
   for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
     const block = blocks[blockIndex];
     onStage?.({ status: 'running', message: `全维度评审：第 ${blockIndex + 1}/${blocks.length} 块（${block.map(chapter => chapter.title).join('、')}）`, details: [] });
-    const reviewed = await run(() => reviewDocumentBlock(block, { projectName: projectName || '本项目', requirement, tenderContext, blockIndex: blockIndex + 1, blockTotal: blocks.length }, diagnostics, signal));
+    const reviewed = await run(() => reviewDocumentBlock(block, { projectName: projectName || '本项目', requirement, tenderContext, knownConflictLines, headings, blockIndex: blockIndex + 1, blockTotal: blocks.length }, diagnostics, signal));
     result.reviewCalls += 1;
     if (!reviewed) {
       if (diagnostics && !/qingtian-review/u.test(diagnostics.llm.lastError || '')) {
@@ -316,7 +321,7 @@ export async function runFullDimensionReview(input: FullDimensionReviewInput): P
   for (let blockIndex = 0; blockIndex < reReviewBlocks.length; blockIndex += 1) {
     const block = reReviewBlocks[blockIndex];
     onStage?.({ status: 'running', message: `全维度评审复评：第 ${blockIndex + 1}/${reReviewBlocks.length} 块（${block.map(chapter => chapter.title).join('、')}）`, details: [] });
-    const reReviewed = await run(() => reviewDocumentBlock(block, { projectName: projectName || '本项目', requirement, blockIndex: blockIndex + 1, blockTotal: reReviewBlocks.length }, diagnostics, signal));
+    const reReviewed = await run(() => reviewDocumentBlock(block, { projectName: projectName || '本项目', requirement, knownConflictLines, headings, blockIndex: blockIndex + 1, blockTotal: reReviewBlocks.length }, diagnostics, signal));
     result.reReviewCalls += 1;
     if (!reReviewed) {
       onStage?.({ status: 'failed', message: `全维度评审复评：第 ${blockIndex + 1}/${reReviewBlocks.length} 块无响应，跳过`, details: [] });

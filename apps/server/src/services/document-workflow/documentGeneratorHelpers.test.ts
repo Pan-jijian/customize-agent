@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chapterGenerationTargets, cleanChineseWordBreakSpaces, cleanInlineFactValue, finalizeFinalMarkdownStructure, normalizeWorkPackageLabels, splitGluedTableHeaderLines, stripBidDisciplineSentences } from './documentGeneratorHelpers';
+import { chapterGenerationTargets, cleanChineseWordBreakSpaces, cleanInlineFactValue, dedupeCrossSectionDuplicateSentences, finalizeFinalMarkdownStructure, normalizeWorkPackageLabels, splitGluedTableHeaderLines, stripBidDisciplineSentences, stripBidDisciplineSentencesSemantic, stripDataConsistencyLeakSentences } from './documentGeneratorHelpers';
 
 describe('chapterGenerationTargets（提示词篇幅目标完整下达）', () => {
   it('长文模式：提示词章预算必须完整下达，不被 upper 硬顶与结构估算压制', () => {
@@ -300,9 +300,13 @@ describe('stripBidDisciplineSentences 商务评标纪律承诺句清洗（4.12.6
     expect(stripBidDisciplineSentences(content)).toBe(content);
   });
 
-  it('标题行与表格行不参与句子清洗', () => {
+  it('标题行不再豁免：纪律标题整行删除，表格行保留豁免', () => {
+    // 评分报告 P1 实测：6 个纪律小节标题曾因标题豁免整行放行
     const content = '#### 评标纪律\n| 项目 | 内容 |\n| 廉洁承诺 | 见商务文件 |';
-    expect(stripBidDisciplineSentences(content)).toBe(content);
+    const result = stripBidDisciplineSentences(content);
+    expect(result).not.toContain('评标纪律');
+    expect(result).toContain('| 项目 | 内容 |');
+    expect(result).toContain('| 廉洁承诺 | 见商务文件 |');
   });
 
   it('无禁词词面变体（评分报告问题2原文）整句删除', () => {
@@ -317,5 +321,85 @@ describe('stripBidDisciplineSentences 商务评标纪律承诺句清洗（4.12.6
   it('技术标合法纪律表述（劳动纪律）不误删', () => {
     const content = '项目部严格执行劳动纪律与考勤管理制度，各班组按时参加班前安全交底。';
     expect(stripBidDisciplineSentences(content)).toBe(content);
+  });
+});
+
+// ============ 阶段三 3.3：清洗管道补盲 ============
+
+describe('stripBidDisciplineSentencesSemantic 语义增强清洗（3.3）', () => {
+  it('无禁词词面变体（评审争议/澄清配合类）靠语义命中删除', async () => {
+    const content = '### 评审争议处理与澄清配合\n本项目评审过程中如有争议按招标文件规定程序处理。施工现场按分区管理执行。';
+    // "评审争议处理与澄清配合"标题与"评审过程中如有争议"句命中语义 → 删除；施工句保留
+    const result = await stripBidDisciplineSentencesSemantic(content, async texts => texts.map(text => /评审|评标/u.test(text)));
+    expect(result).not.toContain('评审争议处理');
+    expect(result).not.toContain('按招标文件规定程序处理');
+    expect(result).toContain('施工现场按分区管理执行');
+  });
+
+  it('确定性兜底：禁写词句子即使语义判 false 也删除', async () => {
+    const content = '我公司不向评标委员会成员行贿。施工现场按分区管理执行。';
+    const result = await stripBidDisciplineSentencesSemantic(content, async () => [false, false]);
+    expect(result).not.toContain('行贿');
+    expect(result).toContain('施工现场按分区管理执行');
+  });
+
+  it('施工合法纪律句（劳动纪律）语义与确定性均放行', async () => {
+    const content = '项目部严格执行劳动纪律与考勤管理制度，各班组按时参加班前安全交底。';
+    const result = await stripBidDisciplineSentencesSemantic(content, async () => [false]);
+    expect(result).toBe(content);
+  });
+});
+
+describe('stripDataConsistencyLeakSentences 约束文字泄漏扩展（3.3）', () => {
+  it('「全文不再出现 180 人」类约束复述段整段删除', () => {
+    const content = '质量保证措施完善。\n\n全文不再出现 180 人峰值表述，统一按 130 人口径执行。\n\n安全措施到位。';
+    const result = stripDataConsistencyLeakSentences(content);
+    expect(result).not.toContain('不再出现');
+    expect(result).toContain('质量保证措施完善');
+    expect(result).toContain('安全措施到位');
+  });
+
+  it('「不得出现跨章冲突」约束复述段整段删除', () => {
+    const content = '本方案施工部署合理。\n\n正文不得出现跨章冲突，各章节数据必须保持一致。\n\n进度计划详见附图。';
+    const result = stripDataConsistencyLeakSentences(content);
+    expect(result).not.toContain('跨章冲突');
+    expect(result).toContain('施工部署合理');
+    expect(result).toContain('进度计划详见附图');
+  });
+
+  it('上表/本表口径自查段（原有规则）仍删除', () => {
+    const content = '上表合计行 130 人与 180 人不一致，故将合计行修正为 130 人。';
+    expect(stripDataConsistencyLeakSentences(content)).not.toContain('修正为');
+  });
+});
+
+describe('dedupeCrossSectionDuplicateSentences 跨小节整句重复合并（3.3）', () => {
+  const longSentence = '本工程总建筑面积 28570.36 平方米，其中地上建筑面积 24783.39 平方米，地下建筑面积 3786.97 平方米，结构形式为框架剪力墙结构。';
+
+  it('同长句跨小节重复：保留首次出现小节，删除后续小节重复句', () => {
+    const content = `### 5.1 项目概况\n${longSentence}\n### 5.6 结构设计\n${longSentence}\n本节说明结构选型。`;
+    const result = dedupeCrossSectionDuplicateSentences(content);
+    const occurrences = result.split(longSentence).length - 1;
+    expect(occurrences).toBe(1);
+    expect(result).toContain('### 5.1 项目概况');
+    expect(result).toContain('本节说明结构选型');
+  });
+
+  it('同一小节内重复句保留（可能为有意强调）', () => {
+    const content = `### 5.1 项目概况\n${longSentence}${longSentence}`;
+    const result = dedupeCrossSectionDuplicateSentences(content);
+    expect(result.split(longSentence).length - 1).toBe(2);
+  });
+
+  it('短句（<30 字）不参与跨小节去重', () => {
+    const content = '### 5.1 项目概况\n质量目标为合格。\n### 5.6 结构设计\n质量目标为合格。';
+    expect(dedupeCrossSectionDuplicateSentences(content)).toBe(content);
+  });
+
+  it('标题行与表格行不参与判定', () => {
+    const content = `### 5.1 项目概况\n${longSentence}\n| 项目 | 内容 |\n| 说明 | ${longSentence} |`;
+    const result = dedupeCrossSectionDuplicateSentences(content);
+    // 正文句与表格单元格不算跨小节重复
+    expect(result).toContain(`| 说明 | ${longSentence} |`);
   });
 });

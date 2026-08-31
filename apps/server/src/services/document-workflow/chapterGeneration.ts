@@ -14,6 +14,7 @@ import { constructionOrgBonusModulePrompt, constructionOrgChapterRulePrompt } fr
 import { buildProcessKnowledgePrompt, matchProcessKnowledgeCards } from './constructionProcessKnowledge';
 import { criticalSectionBlockerMinChars, currentSectionBlock, ensureGroupTertiaryShell, ensureTertiarySectionShell, groupHasMajorConstructionSection, isCriticalDeepSection, isGeneralManagementSection, keySectionWritingRequirement, majorContentPollutionIssue, mergeDuplicateWorkPackageSubsections, outputTokensForChapter, parseMajorConstructionPackages, repairMajorContentWorkPackageLabels, sectionContentBody, sectionStructureIssue } from './chapterPostProcessing';
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE, QUANTIFIED_FACT_RE } from './parameterPatterns';
+import { buildSemanticGate } from './semanticGate';
 import type { PlannedChapterStructure } from './chapterPlanner';
 import { cleanFactValue, isActionableFactValue } from './documentFactTrace';
 import { DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE, chapterAnchoredRules, sectionAnchoredRules } from './writingSpec';
@@ -329,8 +330,33 @@ interface SectionFactCard {
 }
 
 const DETAIL_FACT_RE = /计划工期|合同工期|建设地点|建设规模|质量标准|招标范围|施工范围|工作内容|项目特征|材料|设备|规格|型号|数量|单位|做法|节点|系统|管径|标高|尺寸|厚度|强度|等级|验收|检测|试验|安全|文明|扬尘|环保|消防|临时用电|临水|排水|交叉施工|地下管线|有限空间|危大|专项方案|专家论证|进度节点|保修|移交/iu;
+// 阶段五语义升级：强词（COMMERCIAL_SENSITIVE_RE）纯行保留确定性过滤；变体弱词（材料价格/商务报价类）
+// 仅词面召回，语义复核确认商务语义才过滤；允许事实（估算价/限价类）词面放行 + 语义负例保护。
 const COMMERCIAL_SENSITIVE_RE = /报价明细|综合单价|税率|增值税|利润|结算|预留金|暂列金额|暂估价/u;
 const ALLOWED_COMMERCIAL_FACT_RE = /合同估算价|合同估算价格|投资估算|估算价格|工程估算价|最高投标限价|招标控制价/u;
+/** 商务变体弱召回：词面命中仅召回，语义复核确认商务语义才过滤（词面变体漏网治理） */
+const COMMERCIAL_VARIANT_HINT_RE = /材料价格|商务报价|投标总价|合同总价|工程总价/u;
+
+/** 商务行语义原型（正例）：报价/单价类商务数据表述基准 */
+const COMMERCIAL_LINE_SEMANTIC_PROTOTYPES = [
+  '暂列金额与暂估价的报价明细',
+  '综合单价与清单合价的商务数据',
+  '材料价格与商务报价的商务条款',
+] as const;
+/** 允许事实语义原型（负例保护）：估算价/限价类项目公开信息不得误过滤 */
+const COMMERCIAL_LINE_LEGAL_PROTOTYPES = [
+  '合同估算价与投资估算的项目信息',
+  '最高投标限价与招标控制价的公开信息',
+] as const;
+
+/** 构建商务行语义 gate（semanticGate 统一入口）：混合/变体行语义裁决 */
+async function buildCommercialLineGate(embedDocuments?: (texts: string[]) => Promise<number[][]>) {
+  return buildSemanticGate({
+    prototypes: [...COMMERCIAL_LINE_SEMANTIC_PROTOTYPES],
+    negativePrototypes: [...COMMERCIAL_LINE_LEGAL_PROTOTYPES],
+    embedDocuments,
+  });
+}
 
 function normalizeFactUsageText(value: string) {
   return stringifyFactValue(value).replace(/\s+/gu, '').replace(/[，。,.;；:：、（）()【】[\]《》“”"'`]/gu, '');
@@ -386,10 +412,12 @@ function factLineUsages(line: string, markdown: string) {
   return tokens.filter(token => normalizedMarkdown.includes(token)).length;
 }
 
-export function buildSectionFactCard(sectionTitle: string, evidence: DocumentEvidence[]): SectionFactCard {
+export async function buildSectionFactCard(sectionTitle: string, evidence: DocumentEvidence[], embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<SectionFactCard> {
   const items: SectionFactCardItem[] = [];
   const seen = new Set<string>();
   const sectionTokens = tokenizeForRelevance(sectionTitle).filter(token => token.length >= 2);
+  // 先收集清洗后的候选行（含来源元数据），商务行过滤统一在收集后做语义批量判定
+  const rawLines: Array<{ line: string; filePath: string; roleId?: string }> = [];
   for (const item of evidence) {
     for (const rawLine of stringifyFactValue(item.content).split(/\r?\n/u)) {
       // 与 documentFactTrace 已修口径贯通：先清洗指向值（见XXX）、表格尾巴、标题混合值，再判断可执行性
@@ -397,17 +425,32 @@ export function buildSectionFactCard(sectionTitle: string, evidence: DocumentEvi
       if (line.length < 4 || line.length > 280) continue;
       if (!isActionableFactValue(line)) continue;
       if (isNoisyFactLine(line)) continue;
-      if (COMMERCIAL_SENSITIVE_RE.test(line) && !ALLOWED_COMMERCIAL_FACT_RE.test(line)) continue;
-      const quantified = QUANTIFIED_FACT_RE.test(line);
-      const detailed = DETAIL_FACT_RE.test(line);
-      const sectionRelated = sectionTokens.some(token => line.includes(token));
-      if (!quantified && !detailed && !sectionRelated) continue;
-      const key = normalizeFactUsageText(line).slice(0, 160);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      items.push({ text: line, sourceFile: item.filePath, roleId: item.roleId, quantified });
-      if (items.length >= 16) break;
+      rawLines.push({ line, filePath: item.filePath, roleId: item.roleId });
     }
+  }
+  // 商务行语义过滤：强词纯行确定性过滤（保留原行为）；含允许词面或变体词的混合/变体行由语义 gate 裁决
+  const gate = await buildCommercialLineGate(embedDocuments);
+  const uncertain = rawLines.filter(({ line }) => {
+    const hasSensitive = COMMERCIAL_SENSITIVE_RE.test(line);
+    const hasAllowed = ALLOWED_COMMERCIAL_FACT_RE.test(line);
+    const hasVariant = COMMERCIAL_VARIANT_HINT_RE.test(line);
+    return (hasSensitive && (hasAllowed || hasVariant)) || (hasVariant && !hasSensitive);
+  });
+  const uncertainFlags = uncertain.length > 0 ? await gate(uncertain.map(({ line }) => line)) : [];
+  const semanticSkip = new Set(uncertain.filter((_, index) => uncertainFlags[index]).map(({ line }) => line));
+  for (const { line, filePath, roleId } of rawLines) {
+    const hasSensitive = COMMERCIAL_SENSITIVE_RE.test(line);
+    const hasAllowed = ALLOWED_COMMERCIAL_FACT_RE.test(line);
+    const hasVariant = COMMERCIAL_VARIANT_HINT_RE.test(line);
+    if ((hasSensitive && !hasAllowed && !hasVariant) || semanticSkip.has(line)) continue;
+    const quantified = QUANTIFIED_FACT_RE.test(line);
+    const detailed = DETAIL_FACT_RE.test(line);
+    const sectionRelated = sectionTokens.some(token => line.includes(token));
+    if (!quantified && !detailed && !sectionRelated) continue;
+    const key = normalizeFactUsageText(line).slice(0, 160);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push({ text: line, sourceFile: filePath, roleId, quantified });
     if (items.length >= 16) break;
   }
   const lines = items.map(item => `- ${item.text}（来源：${path.basename(item.sourceFile)}${item.roleId ? `，角色：${item.roleId}` : ''}）`);
@@ -468,7 +511,7 @@ export function compactSectionProjectContext(projectContext: string, maxChars = 
 
 export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number; allowLenientStructureGate?: boolean; tablePlanInstruction?: string }) {
   const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
-  const sectionFactCard = buildSectionFactCard(input.sectionTitle, sectionEvidence);
+  const sectionFactCard = await buildSectionFactCard(input.sectionTitle, sectionEvidence);
   const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 3500, 9000), requiredFacts: input.chapter.requiredFacts });
   // 工作包级小节（项目主要施工内容/主要分部分项工程施工方案/主要施工方法）：从项目图谱/上下文识别工作包，匹配工艺知识卡，注入工序链与工艺参数参考
   const majorConstructionPackages = (MAJOR_CONTENT_SECTION_RE.test(input.sectionTitle) || DIVISION_SECTION_RE.test(input.sectionTitle)) ? parseMajorConstructionPackages(input.projectContext, sectionEvidence) : [];
@@ -600,7 +643,7 @@ async function buildFocusedSectionDraft(input: Parameters<typeof buildLlmSection
     : evidenceForSection(input.sectionTitle, input.chapter, input.evidence))
     .filter((item, index, array) => array.findIndex(candidate => candidate.filePath === item.filePath && candidate.content === item.content) === index)
     .slice(0, 24);
-  const sectionFactCard = buildSectionFactCard(input.sectionTitle, sectionEvidence);
+  const sectionFactCard = await buildSectionFactCard(input.sectionTitle, sectionEvidence);
   const evidenceText = sectionEvidence
     // 超长证据（CAD 父块全文等）头部盲截会丢失尾部标高/坡率等关键参数：改用关键参数窗口提取（fix6 渲染层同口径）
     .map((item, index) => `${index + 1}. ${extractKeyParameterWindows(cleanEvidenceText(item.content), 900)}`)
@@ -659,7 +702,7 @@ async function supplementSectionContent(input: Parameters<typeof buildLlmSection
   const effectiveTargetWords = Math.max(input.targetWords, safeMinChars);
   const missing = effectiveTargetWords - currentLength;
   const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
-  const sectionFactCard = buildSectionFactCard(input.sectionTitle, sectionEvidence);
+  const sectionFactCard = await buildSectionFactCard(input.sectionTitle, sectionEvidence);
   if (missing <= Math.max(260, Math.floor(input.targetWords * 0.12))) return input.currentContent;
   const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, sectionEvidence), { maxChars: evidencePromptBudgetForTarget(Math.min(input.targetWords, 2600), 3500, 9000), requiredFacts: input.chapter.requiredFacts });
   const patchTarget = Math.max(500, missing);

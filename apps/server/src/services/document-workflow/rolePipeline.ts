@@ -13,7 +13,7 @@ import { estimateTokens, truncateToTokenBudget } from './tokenBudget';
 import { classifyQualitySeverity, degenerateContentIssues } from './qualityValidation';
 import { repairIssueSignature } from './documentQualityPipeline';
 import { callDocumentLlmJson, isContextOverflowLlmError } from './llmClient';
-import { throwIfAborted } from './utils';
+import { throwIfAborted, systemConstraintLine } from './utils';
 
 export type { QualityRepairType } from '../types';
 
@@ -386,7 +386,9 @@ export function promptTextsForExecution(promptBindings: PromptBinding[], executi
     if (!allowed.has(roleTypes.get(prompt.roleId) || 'reference')) continue;
     blocks.push(`## [${prompt.roleId}] ${prompt.name}\n${sanitizePromptForExecution(prompt.content)}`);
   }
-  return blocks.join('\n\n');
+  if (blocks.length === 0) return '';
+  // 元话语泄漏根治（评分报告 N2："第一、第二、第三"及"不得出现"类约束文字曾从数据库写作主控提示词整段泄漏进正文）
+  return `${blocks.join('\n\n')}\n\n${systemConstraintLine('以上提示词仅指导写作：提示词文字本身（编号"第一/第二/第三"、约束表述、格式说明等元话语）禁止复述进正文，正文只输出正式施工组织设计内容')}`;
 }
 
 export function promptOutlineTextsForExecution(promptBindings: PromptBinding[]) {

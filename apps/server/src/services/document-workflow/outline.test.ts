@@ -1,0 +1,208 @@
+import { describe, expect, it } from 'vitest';
+import {
+  displayChapterTitle,
+  effectiveTemplateChapters,
+  extractExplicitOutlineFromSources,
+  formalChapterTitle,
+  hasExplicitOutlineBlock,
+  isExplicitOutlineClosingLine,
+  isExplicitOutlineOpeningLine,
+  isTenderClauseFragmentTitle,
+  isValidGeneratedChapterTitle,
+  normalizeGeneratedChapterTitle,
+  uniqueTemplateChapters,
+} from './outline';
+import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
+import type { DocumentTemplate, DocumentTemplateChapter } from './types';
+
+const chapter = (id: string, title: string, sections: string[] = []): DocumentTemplateChapter => ({ id, title, purpose: '', queries: [], requiredFacts: [], sections });
+
+describe('isTenderClauseFragmentTitle（招标条款碎片判别）', () => {
+  it('条件从句碎片命中', () => {
+    expect(isTenderClauseFragmentTitle('如我方中标，我方承诺响应')).toBe(true);
+  });
+
+  it('承诺断言碎片命中', () => {
+    expect(isTenderClauseFragmentTitle('我方承诺按招标文件要求执行')).toBe(true);
+  });
+
+  it('评标委员会动作碎片命中', () => {
+    expect(isTenderClauseFragmentTitle('委员会确定中标候选人')).toBe(true);
+  });
+
+  it('条款编号残留命中', () => {
+    expect(isTenderClauseFragmentTitle('3项规定')).toBe(true);
+    expect(isTenderClauseFragmentTitle('56m15：内容')).toBe(true);
+    expect(isTenderClauseFragmentTitle('4对与评标活动有关的事宜')).toBe(true);
+  });
+
+  it('带百分比条款命中', () => {
+    expect(isTenderClauseFragmentTitle('偏差率不超过5%')).toBe(true);
+  });
+
+  it('兜底短语命中', () => {
+    expect(isTenderClauseFragmentTitle('其他要求')).toBe(true);
+    expect(isTenderClauseFragmentTitle('需要补充的其他内容')).toBe(true);
+  });
+
+  it('数字+时间单位+逗号碎片命中（真实生成回归：「00天，计划完成时间：」）', () => {
+    expect(isTenderClauseFragmentTitle('00天，计划完成时间：')).toBe(true);
+    expect(isTenderClauseFragmentTitle('30日历天、计划完成时间')).toBe(true);
+    expect(isTenderClauseFragmentTitle('2个月完成主体结构')).toBe(false);
+  });
+
+  it('补充条款类兜底短语命中（真实生成回归：模板静态 sections 混入「补充条款」）', () => {
+    expect(isTenderClauseFragmentTitle('补充条款')).toBe(true);
+    expect(isTenderClauseFragmentTitle('建议编制要求如下')).toBe(true);
+    expect(isTenderClauseFragmentTitle('投标须知')).toBe(true);
+  });
+
+  it('正常章节标题不命中', () => {
+    expect(isTenderClauseFragmentTitle('工程概况')).toBe(false);
+    expect(isTenderClauseFragmentTitle('施工部署与施工流水组织')).toBe(false);
+  });
+
+  it('空标题视为碎片', () => {
+    expect(isTenderClauseFragmentTitle('')).toBe(true);
+  });
+});
+
+describe('显式大纲块识别', () => {
+  it('hasExplicitOutlineBlock 识别 OUTLINE/章节大纲 标签', () => {
+    expect(hasExplicitOutlineBlock('<OUTLINE>\n第一章 工程概况\n</OUTLINE>')).toBe(true);
+    expect(hasExplicitOutlineBlock('<章节大纲>\n工程概况\n</章节大纲>')).toBe(true);
+    expect(hasExplicitOutlineBlock('普通正文无大纲。')).toBe(false);
+  });
+
+  it('isExplicitOutlineOpeningLine / ClosingLine', () => {
+    expect(isExplicitOutlineOpeningLine('<OUTLINE>')).toBe(true);
+    expect(isExplicitOutlineOpeningLine('<大纲>')).toBe(true);
+    expect(isExplicitOutlineOpeningLine('正文')).toBe(false);
+    expect(isExplicitOutlineClosingLine('</OUTLINE>')).toBe(true);
+    expect(isExplicitOutlineClosingLine('</大纲>')).toBe(true);
+  });
+});
+
+describe('extractExplicitOutlineFromSources（显式大纲提取）', () => {
+  it('从 OUTLINE 块提取章节标题', () => {
+    const chapters = extractExplicitOutlineFromSources([{ text: '<OUTLINE>\n第一章 工程概况\n第二章 施工部署\n</OUTLINE>', source: 's1' }]);
+    expect(chapters.map(item => item.title)).toEqual(['工程概况', '施工部署']);
+    expect(chapters[0].id).toContain('s1');
+  });
+
+  it('宽松格式（大纲：…END）提取', () => {
+    const chapters = extractExplicitOutlineFromSources([{ text: '大纲：\n工程概况\n施工部署', source: 's2' }]);
+    expect(chapters.map(item => item.title)).toEqual(['工程概况', '施工部署']);
+  });
+
+  it('章节不足 2 个返回空', () => {
+    expect(extractExplicitOutlineFromSources([{ text: '<OUTLINE>\n第一章 工程概况\n</OUTLINE>', source: 's3' }])).toHaveLength(0);
+  });
+
+  it('无大纲返回空', () => {
+    expect(extractExplicitOutlineFromSources([{ text: '普通正文。', source: 's4' }])).toHaveLength(0);
+  });
+
+  it('条款碎片标题被过滤', () => {
+    const chapters = extractExplicitOutlineFromSources([{ text: '<OUTLINE>\n第一章 工程概况\n第二章 如我方中标，我方承诺\n第三章 施工部署\n</OUTLINE>', source: 's5' }]);
+    expect(chapters.map(item => item.title)).toEqual(['工程概况', '施工部署']);
+  });
+});
+
+describe('displayChapterTitle / normalizeGeneratedChapterTitle（标题规范化）', () => {
+  it('剥离章节序号与编号前缀', () => {
+    expect(displayChapterTitle('第一章 工程概况')).toBe('工程概况');
+    expect(displayChapterTitle('1.1 编制依据')).toBe('编制依据');
+    expect(displayChapterTitle('（一）施工部署')).toBe('施工部署');
+    expect(displayChapterTitle('### 施工部署')).toBe('施工部署');
+  });
+
+  it('normalizeGeneratedChapterTitle 合并空白并剥标点', () => {
+    expect(normalizeGeneratedChapterTitle('第一章  工程概况 ')).toBe('工程概况');
+    expect(normalizeGeneratedChapterTitle('、工程概况')).toBe('工程概况');
+  });
+});
+
+describe('isValidGeneratedChapterTitle（生成标题合法性）', () => {
+  it('正常标题通过', () => {
+    expect(isValidGeneratedChapterTitle('工程概况')).toBe(true);
+    expect(isValidGeneratedChapterTitle('主要分部分项工程施工方案')).toBe(true);
+  });
+
+  it('过短/过长/空标题拒绝', () => {
+    expect(isValidGeneratedChapterTitle('')).toBe(false);
+    expect(isValidGeneratedChapterTitle('A')).toBe(false);
+    expect(isValidGeneratedChapterTitle('很'.repeat(51))).toBe(false);
+  });
+
+  it('标题符号/表格/占位符拒绝', () => {
+    expect(isValidGeneratedChapterTitle('### 工程概况')).toBe(false);
+    expect(isValidGeneratedChapterTitle('| 表格标题 |')).toBe(false);
+    expect(isValidGeneratedChapterTitle('。工程概况')).toBe(false);
+    expect(isValidGeneratedChapterTitle('{变量} 概况')).toBe(false);
+    expect(isValidGeneratedChapterTitle('工程概况。')).toBe(false);
+  });
+
+  it('指令式与保留词标题拒绝', () => {
+    expect(isValidGeneratedChapterTitle('目录')).toBe(false);
+    expect(isValidGeneratedChapterTitle('说明')).toBe(false);
+    expect(isValidGeneratedChapterTitle('按需生成')).toBe(false);
+  });
+
+  it('污染标题拒绝', () => {
+    expect(isValidGeneratedChapterTitle('详见资料说明')).toBe(false);
+    expect(isValidGeneratedChapterTitle('完全满足评审要求')).toBe(false);
+  });
+});
+
+describe('formalChapterTitle（正式章节编号）', () => {
+  it('按索引生成第X章标题', () => {
+    expect(formalChapterTitle(0, '工程概况')).toBe('第一章 工程概况');
+    expect(formalChapterTitle(9, '工程概况')).toBe('第十章 工程概况');
+    expect(formalChapterTitle(10, '工程概况')).toBe('第十一章 工程概况');
+    expect(formalChapterTitle(19, '工程概况')).toBe('第二十章 工程概况');
+    expect(formalChapterTitle(20, '工程概况')).toBe('第二十一章 工程概况');
+  });
+});
+
+describe('uniqueTemplateChapters（模板章节去重）', () => {
+  it('同名章节去重并规范化标题', () => {
+    const chapters = [chapter('c1', '第一章 工程概况'), chapter('c2', '工程概况')];
+    const result = uniqueTemplateChapters(chapters.map(item => ({ ...item })));
+    expect(result).toHaveLength(1);
+    expect(result[0].title).toBe('工程概况');
+  });
+
+  it('污染标题被过滤', () => {
+    const chapters = [chapter('c1', '工程概况'), chapter('c2', '见资料说明')];
+    const result = uniqueTemplateChapters(chapters.map(item => ({ ...item })));
+    expect(result.map(item => item.title)).toEqual(['工程概况']);
+  });
+
+  it('preserveExplicitOutline 保留重复标题', () => {
+    const chapters = [chapter('c1', '工程概况'), chapter('c2', '工程概况')];
+    const result = uniqueTemplateChapters(chapters.map(item => ({ ...item })), { preserveExplicitOutline: true });
+    expect(result).toHaveLength(2);
+  });
+});
+
+describe('effectiveTemplateChapters（有效章节计算）', () => {
+  const template = (chapters: DocumentTemplateChapter[]): DocumentTemplate => ({ id: 't1', name: '施工组织设计', outputTitle: '', description: '', category: '', chapters });
+
+  it('无 spec 时仅做去重规范化', () => {
+    const result = effectiveTemplateChapters(template([chapter('c1', '第一章 工程概况'), chapter('c2', '工程概况')]));
+    expect(result).toHaveLength(1);
+    expect(result[0].title).toBe('工程概况');
+  });
+
+  it('有 spec 时注入 generationHint 到 queries', () => {
+    const spec: AutoDocumentSpecPackage = {
+      id: 's1', name: '施工组织设计', description: '', factFields: [], chapterMode: 'fixed',
+      chapterRules: [{ id: 'c1', title: '工程概况', required: true, order: 1, generationHint: '必须写清建设规模' }],
+      dynamicChapterRule: { source: 'fact_group' }, gateRules: [],
+    };
+    const result = effectiveTemplateChapters(template([chapter('c1', '工程概况')]), spec);
+    expect(result[0].queries).toContain('必须写清建设规模');
+    expect(result[0].queries).toContain('工程概况');
+  });
+});

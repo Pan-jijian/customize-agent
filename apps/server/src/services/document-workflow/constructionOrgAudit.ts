@@ -1,5 +1,6 @@
 import type { DocumentDraftChapter, ValidationIssue } from './types';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
+import { buildSemanticGate } from './semanticGate';
 
 export { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 
@@ -8,14 +9,15 @@ export { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
  *
  * 原有校验器只查"有没有数字"，本组校验器查"什么数字、什么段落、什么表格"：
  * 1. duplicateParagraphIssues      —— 跨小节重复段落检测（同段出现在多个小节）
- * 2. fillerParagraphIssues         —— 废话段落模式检测（模板化空话）
+ * 2. fillerParagraphIssues         —— 废话段落模式检测（模板化空话，正则召回+语义复核）
  * 3. processParameterDensityIssues —— 工艺参数密度（区分概况数字与工艺参数）
  * 4. sectionCardStructureIssues    —— 工作包三段式结构完整性
  * 5. tableCompletenessIssues       —— 表格空字段检测
- * 6. reviewResponseIssues          —— 招标硬性要求响应检测
+ * （原 6. reviewResponseIssues 已删除：招标硬性要求响应检测统一由 tenderRequirements.ts
+ *   锚点级语义通道（requirementsCoverageIssues）承担，消除两处实现口径分裂——阶段五 5.3）
  */
 
-/** 废话段模式库：与既有 16 短语词表互补，覆盖 LLM 常见的整句式空话 */
+/** 废话段模式库：正则只做召回（短路优化），语义判定由 FILLER_PARAGRAPH_SEMANTIC_PROTOTYPES 语义 gate 完成（阶段五） */
 const FILLER_PARAGRAPH_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /本小节围绕.+展开，结合绑定项目资料/u, label: '模板化开篇套话' },
   { pattern: /明确适用范围、控制目标、责任岗位与过程要求/u, label: '泛化目标罗列' },
@@ -36,18 +38,49 @@ const FILLER_PARAGRAPH_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /建立(?:健全)?(?:完善)?(?:的)?(?:管理)?体系(?:和|，)?(?:落实|确保|保证)/u, label: '体系空话' },
 ];
 
+/** 废话段模式合并召回正则：命中仅触发语义复核（不直接判定） */
+const FILLER_PARAGRAPH_LEXICAL_RE = new RegExp(FILLER_PARAGRAPH_PATTERNS.map(item => `(?:${item.pattern.source})`).join('|'), 'u');
+
+/** 废话段语义原型（正例）：与 17 条模式 label 同口径的套话表述基准（bge 余弦 ≥ 阈值判定套话） */
+const FILLER_PARAGRAPH_SEMANTIC_PROTOTYPES = [
+  '本小节围绕以下内容展开并结合绑定项目资料',
+  '明确适用范围控制目标责任岗位与过程要求',
+  '实施前应完成资料核对技术交底和作业条件确认',
+  '交底覆盖率按100%控制',
+  '关键问题在24小时内形成整改责任',
+  '按施工准备过程实施检查验收问题整改资料归档的闭环组织',
+  '依据本项目已确认资料中的项目边界',
+  '执行日巡查周复核和节点验收制度',
+  '一般问题7日内闭环',
+  '由项目经理技术负责人和专职安全员联合复核',
+  '确保与总体施工部署工期计划和验收要求保持一致',
+  '结合现场实际情况合理组织安排',
+  '严格执行国家现行有关规范标准',
+  '做到文明施工安全生产质量第一',
+  '确保工程质量和安全进度',
+  '建立健全管理体系并落实相关制度',
+] as const;
+
+/** 具体量化措施语义原型（负例保护）：含套话词面但语义属落地措施不得误判套话 */
+const FILLER_LEGAL_PROTOTYPES = [
+  '每道工序完成后由质检员实测实量并记录数据',
+  '混凝土浇筑完成后每天洒水养护不少于两次',
+  '每周组织不少于一次的现场安全专项检查',
+] as const;
+
+/** 构建废话段语义 gate：正则召回 + 语义复核（semanticGate 统一入口） */
+async function buildFillerParagraphGate(embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<(texts: string[]) => Promise<boolean[]>> {
+  return buildSemanticGate({
+    prototypes: [...FILLER_PARAGRAPH_SEMANTIC_PROTOTYPES],
+    negativePrototypes: [...FILLER_LEGAL_PROTOTYPES],
+    lexicalHints: FILLER_PARAGRAPH_LEXICAL_RE,
+    embedDocuments,
+  });
+}
+
 const WORK_PACKAGE_SECTION_PATTERNS = [/主要分部分项工程施工方案/u, /主要施工方法/u, /主要施工内容/u, /施工方案/u];
 
 const BASIC_FACT_RE = /(?:建筑面积|面积|总建筑面积)[约]?\s*\d+(?:\.\d+)?\s*(?:㎡|m²)|计划工期\s*\d+|日历天|地上\s*\d+\s*层|框架结构|质量标准[:：]?\s*合格/giu;
-
-/** 招标文件硬性要求关键词（评标响应检查基准） */
-const REVIEW_RESPONSE_ITEMS: Array<{ key: string; patterns: RegExp[] }> = [
-  { key: '质量标准', patterns: [/质量标准|质量要求|合格率/u] },
-  { key: '计划工期', patterns: [/计划工期|工期要求|合同工期|日历天/u] },
-  { key: '缺陷责任期/保修', patterns: [/缺陷责任期|保修|质保/u] },
-  { key: '安全文明目标', patterns: [/安全.*目标|文明.*目标|安全事故.*零/u] },
-  { key: '项目经理要求', patterns: [/项目经理|项目负责人|注册建造师/u] },
-];
 
 function extractSectionBlocks(content: string): Array<{ heading: string; body: string }> {
   const lines = content.split('\n');
@@ -124,16 +157,27 @@ export function duplicateParagraphIssues(chapters: DocumentDraftChapter[]): Vali
   return issues;
 }
 
-/** 2. 废话段落模式检测 */
-export function fillerParagraphIssues(chapters: DocumentDraftChapter[]): ValidationIssue[] {
+/** 2. 废话段落模式检测：正则召回 → 句级语义复核（bge 余弦 ≥ 阈值才计命中），具体量化措施负例放行 */
+export async function fillerParagraphIssues(
+  chapters: DocumentDraftChapter[],
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
+  const judge = await buildFillerParagraphGate(embedDocuments);
   for (const chapter of chapters) {
     const blocks = extractSectionBlocks(chapter.content);
     const chapterHits: string[] = [];
     for (const block of blocks) {
-      for (const { pattern, label } of FILLER_PARAGRAPH_PATTERNS) {
-        if (pattern.test(block.body) && !chapterHits.includes(label)) chapterHits.push(label);
-      }
+      const sentences = block.body.split(/[。；;]/u).map(sentence => sentence.trim()).filter(sentence => sentence.length >= 12);
+      if (sentences.length === 0) continue;
+      const flags = await judge(sentences);
+      sentences.forEach((sentence, index) => {
+        if (!flags[index]) return;
+        // 语义确认后按句内命中的召回模式归 label（正则仅召回，label 归属保持确定性）
+        for (const { pattern, label } of FILLER_PARAGRAPH_PATTERNS) {
+          if (pattern.test(sentence) && !chapterHits.includes(label)) chapterHits.push(label);
+        }
+      });
     }
     if (chapterHits.length >= 3) {
       issues.push({
@@ -284,30 +328,13 @@ export function tableCompletenessIssues(chapters: DocumentDraftChapter[], markdo
   return issues;
 }
 
-/** 6. 招标硬性要求响应检测 */
-export function reviewResponseIssues(chapters: DocumentDraftChapter[], markdown = ''): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-  const wholeText = markdown || chapters.map(chapter => chapter.content).join('\n\n');
-  for (const item of REVIEW_RESPONSE_ITEMS) {
-    if (item.patterns.some(pattern => pattern.test(wholeText))) continue;
-    issues.push({
-      level: 'warning',
-      severity: 'warning',
-      message: `未检测到对招标硬性要求的响应：${item.key}`,
-      suggestion: '招标文件中的工期、质量、保修、安全目标等硬性要求必须在施工组织设计中明确响应并落实责任。',
-    });
-  }
-  return issues;
-}
-
-/** 全部审计校验器聚合 */
-export function constructionOrgProfessionalAuditIssues(chapters: DocumentDraftChapter[], markdown = ''): ValidationIssue[] {
+/** 全部审计校验器聚合（异步：废话段检测走语义复核；招标硬性要求响应由 tenderRequirements 锚点级语义通道承担） */
+export async function constructionOrgProfessionalAuditIssues(chapters: DocumentDraftChapter[], markdown = '', embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<ValidationIssue[]> {
   return [
     ...duplicateParagraphIssues(chapters),
-    ...fillerParagraphIssues(chapters),
+    ...await fillerParagraphIssues(chapters, embedDocuments),
     ...processParameterDensityIssues(chapters),
     ...sectionCardStructureIssues(chapters),
     ...tableCompletenessIssues(chapters, markdown),
-    ...reviewResponseIssues(chapters, markdown),
   ];
 }

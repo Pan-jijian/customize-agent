@@ -39,7 +39,7 @@ import { buildDocumentTelemetryReport } from './documentTelemetry';
 import { retrievalCoverageIssues } from './documentEvidenceRetrieval';
 import { extractFacts, extractFactsWithLlm, extractPreciseFactsFromEvidence, extractProjectBasicFactsFromEvidence, extractStructuredFacts, extractStructuredTables, buildFactsModel, shouldRunLlmFactExtraction } from './factsModel';
 import { applyScopeConflictResolutions, buildCanonicalFacts, detectNumericScopeConflicts } from './factGovernance';
-import { comparableSectionHeadingMatches, extractSection, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
+import { comparableSectionHeadingMatches, extractSection, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE, systemConstraintLine } from './utils';
 import { formalTextGateIssues } from './agentWorkflow';
 import { displayStage, upsertProgressStage } from './progress';
 import { buildLlmSectionContent, buildValidationIssues, criticalSectionBlockerMinChars } from './chapterGeneration';
@@ -461,7 +461,7 @@ async function buildFullValidationIssues(input: {
     finalMarkdown.includes('WRITER_MISSING_SECTION') || finalMarkdown.includes('Writer 未完成') ? [{ level: 'error' as const, severity: 'blocker' as const, category: 'structure' as const, owner: 'system' as const, message: '最终正文仍包含未完成小节标记', suggestion: '必须重新补写对应小节并删除 WRITER_MISSING_SECTION/Writer 未完成。' }] : [],
     criticalSectionDepthIssues(finalChapterDrafts),
     criticalSectionFactDensityIssues(finalChapterDrafts),
-    constructionOrgProfessionalAuditIssues(finalChapterDrafts, finalMarkdown).map(issue => issue.level === 'error' ? { ...issue, severity: 'blocker' as const } : issue),
+    (await constructionOrgProfessionalAuditIssues(finalChapterDrafts, finalMarkdown)).map(issue => issue.level === 'error' ? { ...issue, severity: 'blocker' as const } : issue),
   ).map(issue => issue.level === 'error' ? { ...issue, severity: issue.severity || 'blocker' } : issue);
 }
 
@@ -639,12 +639,13 @@ export async function finalizeGeneration(p: {
   validationIssues = collectValidationIssueGroups(validationIssues, [
     ...(missingChapterCount > 0 ? [{ level: 'error' as const, severity: 'blocker' as const, message: `部分章节生成失败：${missingChapterCount} 章`, suggestion: failedChapterMessages.join('；') || '请检查模型调用、知识库检索和事实抽取配置后重新生成失败章节。' }] : []),
   ]);
-  validationIssues = collectValidationIssueGroups(validationIssues, chapterDrafts.flatMap(chapter => {
+  const factUsageWarnings = await Promise.all(chapterDrafts.map(async chapter => {
     const templateChapter = effectiveChapters.find(item => item.id === chapter.id);
-    if (!templateChapter) return [];
-    const issues = chapterSectionFactUsageIssues({ chapter: templateChapter, content: chapter.content, evidence: chapter.evidence || [] });
+    if (!templateChapter) return [] as Array<{ level: 'warning'; message: string; suggestion: string }>;
+    const issues = await chapterSectionFactUsageIssues({ chapter: templateChapter, content: chapter.content, evidence: chapter.evidence || [] });
     return issues.length > 0 ? [{ level: 'warning' as const, message: `${chapter.title} 小节事实或量化参数落位可继续优化：${issues.slice(0, 5).join('；')}`, suggestion: '建议在 Agent Writer 阶段扩大定向证据，不得在导出阶段补写。' }] : [];
   }));
+  validationIssues = collectValidationIssueGroups(validationIssues, factUsageWarnings.flat());
 
   const assets: DocumentAsset[] = [];
   // chapterGenerationStages 是各章成稿的最终版 stage（success/failed），progressStages 里还残留同 identity 的
@@ -689,14 +690,14 @@ export async function finalizeGeneration(p: {
   // 跨章一致性数值定点修复兜底：导出阶段用完整事实主表口径做最后一次确定性对齐，覆盖生成流程未修掉的
   // 数值冲突（finalize 口径与生成阶段 preliminaryFactsModel 可能不同）；“检测定位=修复定位”，
   // 修复后重建 finalMarkdown 再进入最终校验，避免残留冲突被导出门禁硬阻断
-  const finalDeterministicFix = applyDeterministicConsistencyFixes(finalChapterDrafts, factsModel, scopeConflicts);
+  const finalDeterministicFix = await applyDeterministicConsistencyFixes(finalChapterDrafts, factsModel, scopeConflicts);
   // 全文级定点修复探测：封面信息块/基本信息表等合成区由 facts 生成，章节修复覆盖不到；败选数值残留会
   // 被重跑检测持续拦截形成死循环（历史缺陷：用户环境建设规模败选值 10970㎡ 留在封面，修复器在章节
   // 正文找不到目标 fixedCount=0，导出门禁永久阻断）
-  const needsMarkdownFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts).fixedCount > 0;
+  const needsMarkdownFix = (await applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts)).fixedCount > 0;
   if (finalDeterministicFix.fixedCount > 0 || needsMarkdownFix) {
     finalMarkdown = finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template));
-    const postRebuildFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
+    const postRebuildFix = await applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
     if (postRebuildFix.fixedCount > 0) finalMarkdown = postRebuildFix.markdown;
     const totalFixed = finalDeterministicFix.fixedCount + postRebuildFix.fixedCount;
     const totalDetails = [...new Set([...finalDeterministicFix.details, ...postRebuildFix.details])];
@@ -1115,7 +1116,9 @@ export async function finalizeGeneration(p: {
       'emergency-depth': ['【应急预案小节补强】', '该章节应急预案小节未达到可落地深度（详见缺陷描述：缺字数或缺三要素之一）。', '请以局部 patch 方式补写缺失要素：应急组织体系（领导小组/抢险队与职责）、应急处置程序与演练安排（含响应分级与处置流程）、应急物资保障（清单与配置数量）；总字数不少于 300 字，内容必须绑定本项目风险特征。只补写该小节缺失要素，不得删除已有内容。'].join('\n'),
     };
     // 兜底：未识别消息特征时按通用结构修复处理（避免空指令 patch 无效果）
-    return instructions[blockerIssueCodeFor(message)] || ['【交付阻断缺陷定向修复】', '该章节正文存在交付阻断级缺陷，详见缺陷描述。', '请以局部 patch 方式修复：结合缺陷描述定位相关文本，删除错误内容或按专业规范改写，保持其余内容与事实数据不变。只修改相关句子。'].join('\n');
+    const instruction = instructions[blockerIssueCodeFor(message)] || ['【交付阻断缺陷定向修复】', '该章节正文存在交付阻断级缺陷，详见缺陷描述。', '请以局部 patch 方式修复：结合缺陷描述定位相关文本，删除错误内容或按专业规范改写，保持其余内容与事实数据不变。只修改相关句子。'].join('\n');
+    // 元话语泄漏根治（评分报告 N2）：修复指令本身（"不得出现X/不再出现X"等约束文字）曾整段泄漏进正文
+    return `${instruction}\n${systemConstraintLine('本修复指令仅指导局部修改：指令文字本身（含"不得出现/不再出现/禁止出现"等约束表述）禁止写入正文，正文只输出修复后的正式内容')}`;
   };
   const locateChapterIndex = (issue: ValidationIssue): number => {
     // F2 章节锚点：校验器已知缺陷所在章节时附 chapterId/sectionTitle，优先直连定位——
@@ -1355,7 +1358,7 @@ export async function finalizeGeneration(p: {
       { match: /本地创优目标缺失|四节一环保量化指标缺失|工伤保险表述缺失/u, label: '本地适配与政策合规关键词', detect: async markdown => (await localAdaptationKeywordIssues(markdown, factsModel)).map(item => item.message) },
       { match: /生成后事实反查失败/u, label: '生成后事实反查失败', detect: async markdown => (await generatedFactVerificationIssuesAsync(markdown, factsModel, { scopeClassifier: factTokenScopeClassifier })).filter(item => /生成后事实反查失败/u.test(item.message)).map(item => item.message) },
       { match: /正文存在叠词重复表述/u, label: '叠词重复表述', detect: async markdown => repeatedWordIssues(markdown).map(item => item.message), delete: async content => { const next = collapseRepeatedWords(content); return { content: next, removed: next === content ? 0 : 1 }; } },
-      { match: /正文出现商务条款数据/u, label: '商务条款数据', detect: async markdown => commercialDataInBodyIssues(markdown).map(item => item.message), delete: async content => { const next = stripCommercialDataSentences(content); return { content: next, removed: next === content ? 0 : 1 }; } },
+      { match: /正文出现商务条款数据/u, label: '商务条款数据', detect: async markdown => (await commercialDataInBodyIssues(markdown)).map(item => item.message), delete: async content => { const next = stripCommercialDataSentences(content); return { content: next, removed: next === content ? 0 : 1 }; } },
       { match: /清单项落位不足/u, label: '清单项落位不足', detect: async markdown => (await boqPlacementIssues(markdown, finalChapterDrafts, factsModel)).map(item => item.message) },
       { match: /可靠精确参数使用不足/u, label: '可靠精确参数使用不足', detect: async markdown => (await preciseFactUsageIssues(markdown, factsModel, finalChapterDrafts)).filter(item => /关键参数抽查/u.test(item.message)).map(item => item.message) },
       { match: /施工阶段划分口径不统一/u, label: '施工阶段划分口径', detect: async markdown => (await stagePhrasingIssues(markdown)).map(item => item.message) },
@@ -1474,12 +1477,12 @@ export async function finalizeGeneration(p: {
   }
   // Final Gate 补写小节由 LLM 生成，可能引入新的跨章数值冲突（生成阶段修复闭环不覆盖补写内容）：
   // 导出前做最后一次确定性定点修复，修复后重建 finalMarkdown 并重算校验组，避免补写残留冲突被导出门禁硬阻断
-  const postFinalGateFix = applyDeterministicConsistencyFixes(finalChapterDrafts, factsModel, scopeConflicts);
+  const postFinalGateFix = await applyDeterministicConsistencyFixes(finalChapterDrafts, factsModel, scopeConflicts);
   // 全文级定点修复同 finalize 入口处：封面/信息表合成区的败选数值章节修复覆盖不到，必须同步修复
-  const needsPostGateMarkdownFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts).fixedCount > 0;
+  const needsPostGateMarkdownFix = (await applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts)).fixedCount > 0;
   if (postFinalGateFix.fixedCount > 0 || needsPostGateMarkdownFix) {
     finalMarkdown = finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template));
-    const postRebuildMarkdownFix = applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
+    const postRebuildMarkdownFix = await applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
     if (postRebuildMarkdownFix.fixedCount > 0) finalMarkdown = postRebuildMarkdownFix.markdown;
     await recomputeFinalValidationBundle();
     const totalFixed = postFinalGateFix.fixedCount + postRebuildMarkdownFix.fixedCount;
@@ -1552,7 +1555,7 @@ export async function finalizeGeneration(p: {
     ...(await reviewDataConsistency(finalMarkdown, { signal, diagnostics: generationDiagnostics })).map(conflict => dataConsistencyConflictIssue(conflict)),
     ...await supportSystemConflictIssues(finalMarkdown),
     ...dangerousListConsistencyIssues(finalMarkdown),
-    ...commercialDataInBodyIssues(finalMarkdown),
+    ...await commercialDataInBodyIssues(finalMarkdown),
     ...repeatedWordIssues(finalMarkdown),
   ].filter(issue => issue.level === 'error');
   if (preDeliveryIssues.length > 0) {
@@ -1574,7 +1577,7 @@ export async function finalizeGeneration(p: {
       { code: 'data-consistency', detect: async markdown => (await reviewDataConsistency(markdown, { signal, diagnostics: generationDiagnostics })).map(conflict => dataConsistencyConflictIssue(conflict).message) },
       { code: 'support-conflict', detect: async markdown => (await supportSystemConflictIssues(markdown)).map(item => item.message) },
       { code: 'dangerous-list-inconsistent', detect: markdown => dangerousListConsistencyIssues(markdown).map(item => item.message) },
-      { code: 'commercial-data', detect: markdown => commercialDataInBodyIssues(markdown).map(item => item.message), delete: async content => { const next = stripCommercialDataSentences(content); return { content: next, removed: next === content ? 0 : 1 }; } },
+      { code: 'commercial-data', detect: async markdown => (await commercialDataInBodyIssues(markdown)).map(item => item.message), delete: async content => { const next = stripCommercialDataSentences(content); return { content: next, removed: next === content ? 0 : 1 }; } },
       { code: 'repeated-word', detect: markdown => repeatedWordIssues(markdown).map(item => item.message), delete: async content => { const next = collapseRepeatedWords(content); return { content: next, removed: next === content ? 0 : 1 }; } },
     ];
     for (const issue of preDeliveryIssues) {

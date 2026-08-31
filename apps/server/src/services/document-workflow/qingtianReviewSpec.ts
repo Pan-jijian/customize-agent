@@ -69,13 +69,17 @@ export const QINGTIAN_REVIEW_SYSTEM = [
   '6. 招标对标材料中已明确的数字事实与硬性要求（工程规模、工期、质量目标、创优要求、绿色等级、智慧工地等级、装配率、危大工程参数等），必须逐项核对正文表述是否一致：不一致、矛盾、缺失响应的必须报出；正文出现的合规数值（高温停工阈值、危大判定线、专家论证程序等）必须与国家规范与对标材料核对，错误必报',
 ].join('\n');
 
-/** 分块评审用户提示词：注入块内章节标题、招标对标材料与正文块 */
-export function qingtianBlockReviewPrompt(input: { projectName: string; requirement?: string; tenderContext?: string; blockIndex: number; blockTotal: number; chapterTitles: string[]; blockContent: string }): string {
+/** 分块评审用户提示词：注入块内章节标题、招标对标材料、确定性跨章矛盾预扫描清单与正文块 */
+export function qingtianBlockReviewPrompt(input: { projectName: string; requirement?: string; tenderContext?: string; knownConflictLines?: string; blockIndex: number; blockTotal: number; chapterTitles: string[]; blockContent: string }): string {
   const tenderBlock = input.tenderContext ? `【招标对标材料（核对基准，不得偏离）】\n${input.tenderContext}` : (input.requirement ? `招标文件要求摘要：${input.requirement}` : '');
+  const conflictBlock = input.knownConflictLines
+    ? `【确定性跨章数据一致性预扫描（系统预检出的全文疑似矛盾清单，补足分块评审盲区）】\n${input.knownConflictLines}\n以上为确定性扫描的疑似矛盾：逐项核对正文，确认为真实矛盾（同一口径多值/体系并存）必须按数据逻辑维度报出并给出正确定位；确认口径合法（不同对象/组合表述/非关键字段）的不报。`
+    : '';
   return [
     `评审对象：${input.projectName} 施工组织设计正文（分块评审第 ${input.blockIndex}/${input.blockTotal} 块）`,
     `本块章节：${input.chapterTitles.join('、')}`,
     tenderBlock,
+    conflictBlock,
     '',
     '请按系统提示词中的校验标准逐维度评审以下正文块，输出本块全部检出问题：',
     '',

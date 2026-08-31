@@ -2,11 +2,43 @@ import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplateChapter,
 import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgCatalog';
 import { DIVISION_PROCESS_LABEL_RE, DIVISION_SECTION_QUALITY, DIVISION_SECTION_RE } from './writingSpec';
 import { hasProcessSequenceExpression } from './utils';
+import { buildSemanticGate } from './semanticGate';
 
+/** 空话词表：词面只做召回（短路优化），语义判定由语义 gate 复核完成（阶段五——"精心组织"类口号
+ * 出现在具体措施语境（如"精心组织劳动力进场"）不得误报空泛套话） */
 export const CONSTRUCTION_ORG_GENERIC_PHRASES = [
   '精心组织', '科学管理', '精益求精', '全力保障', '高效推进', '力争一流',
   '最大限度', '显著提升', '大力落实', '充分确保', '严格把控',
 ];
+
+/** 空话词表合并召回正则 */
+const CONSTRUCTION_ORG_GENERIC_LEXICAL_RE = new RegExp(CONSTRUCTION_ORG_GENERIC_PHRASES.join('|'), 'u');
+
+/** 空泛套话语义原型（正例）：无实质动作的口号式表述基准（bge 余弦 ≥ 阈值判定空话） */
+const CONSTRUCTION_ORG_GENERIC_SEMANTIC_PROTOTYPES = [
+  '精心组织科学管理确保工程质量',
+  '严格把控质量安全进度各项指标',
+  '最大限度提升项目管理水平',
+  '全力保障项目顺利推进',
+  '大力落实各项管理措施',
+] as const;
+
+/** 具体措施语义原型（负例保护）：含空话词面但语义属落地动作不得误报 */
+const CONSTRUCTION_ORG_GENERIC_LEGAL_PROTOTYPES = [
+  '精心组织劳动力分批进场并登记交底',
+  '每道工序完成后实测实量并记录数据',
+  '混凝土浇筑后每天洒水养护不少于两次',
+] as const;
+
+/** 构建空话语义 gate：词面召回 + 语义复核（semanticGate 统一入口） */
+async function buildGenericPhraseGate(embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<(texts: string[]) => Promise<boolean[]>> {
+  return buildSemanticGate({
+    prototypes: [...CONSTRUCTION_ORG_GENERIC_SEMANTIC_PROTOTYPES],
+    negativePrototypes: [...CONSTRUCTION_ORG_GENERIC_LEGAL_PROTOTYPES],
+    lexicalHints: CONSTRUCTION_ORG_GENERIC_LEXICAL_RE,
+    embedDocuments,
+  });
+}
 
 const CONTROL_LOOP_RULES: Array<{ pattern: RegExp; label: string; required: string[]; prompt: string }> = [
   { pattern: /质量|验收|隐蔽|样板|通病/u, label: '质量闭环', required: ['自检', '互检', '交接检', '整改', '复查', '归档'], prompt: '质量类内容必须形成“自检—互检—交接检—整改—复查—资料归档”闭环。' },
@@ -89,14 +121,27 @@ export function constructionOrgProjectTypePrompt(input: { templateName: string; 
   return prompts.length ? `【专业工序链约束】\n${prompts.map(prompt => `- ${prompt}`).join('\n')}` : '';
 }
 
-export function constructionOrgGenericLanguageIssues(chapters: DocumentDraftChapter[]): ValidationIssue[] {
+export async function constructionOrgGenericLanguageIssues(
+  chapters: DocumentDraftChapter[],
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
+  const judge = await buildGenericPhraseGate(embedDocuments);
   for (const chapter of chapters) {
-    const hits = CONSTRUCTION_ORG_GENERIC_PHRASES.filter(phrase => chapter.content.includes(phrase));
-    if (hits.length > 0) {
+    const sentences = chapter.content.split(/[。；;\n]/u).map(sentence => sentence.trim()).filter(sentence => sentence.length >= 8);
+    if (sentences.length === 0) continue;
+    const flags = await judge(sentences);
+    const hits = new Set<string>();
+    sentences.forEach((sentence, index) => {
+      if (!flags[index]) return;
+      for (const phrase of CONSTRUCTION_ORG_GENERIC_PHRASES) {
+        if (sentence.includes(phrase)) hits.add(phrase);
+      }
+    });
+    if (hits.size > 0) {
       issues.push({
         level: 'warning',
-        message: `${chapter.title} 存在施工组织设计空泛套话：${[...new Set(hits)].slice(0, 8).join('、')}`,
+        message: `${chapter.title} 存在施工组织设计空泛套话：${[...hits].slice(0, 8).join('、')}`,
         suggestion: '请按“责任岗位+执行动作+量化标准+检查频次+整改时限+复查销项”重写相关措施。',
       });
     }

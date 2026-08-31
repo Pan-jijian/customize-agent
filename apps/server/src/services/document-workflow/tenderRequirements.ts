@@ -3,7 +3,7 @@ import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
 import { documentTextLength } from './budget';
 import { cleanPdfHeadingNoise } from './factsModel';
 import { buildSemanticSimilarity, type SemanticSimilarityFn } from './semanticSimilarity';
-import { isBidDisciplineSentence } from './utils';
+import { isBidDisciplineSentence, systemConstraintLine } from './utils';
 
 /**
  * 招标文件“要求与标准”层：把招标绑定资料中的文本性评分项要求（创优目标/绿色等级/特殊质量标准/
@@ -38,18 +38,20 @@ export const REQUIREMENTS_JSON_SCHEMA: DocumentJsonSchema = {
   required: ['awardObjectives', 'specialQualityStandards', 'awardClauses', 'systematicBenchmarks', 'prohibitionNotes'],
   properties: {
     // round-21 S6：maxLength 整体放宽（历史缺陷：奖项条款/评标办法原文单条常超旧上限 60/80 字符，
-    // 模型忠实引用原文即触发 schema 校验失败 → callDocumentLlmJson 返回 undefined → 空模型 → skipped）
-    awardObjectives: { type: 'array', maxItems: 6, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 120 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
-    specialQualityStandards: { type: 'array', maxItems: 6, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 120 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
-    awardClauses: { type: 'array', maxItems: 6, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 200 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
+    // 模型忠实引用原文即触发 schema 校验失败 → callDocumentLlmJson 返回 undefined → 空模型 → skipped）；
+    // maxItems 放宽（真实生成回归：条款条数超上限时模型会自行截断丢弃尾部条款——上限应仅防失控，
+    // 不应成为条款丢失源；提取后仍在 cleanItems 按 text 去重）
+    awardObjectives: { type: 'array', maxItems: 10, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 120 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
+    specialQualityStandards: { type: 'array', maxItems: 10, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 120 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
+    awardClauses: { type: 'array', maxItems: 10, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 200 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
     greenBuildingGrade: { type: 'object', properties: { text: { type: 'string', minLength: 2, maxLength: 120 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } },
     smartSiteGrade: { type: 'object', properties: { text: { type: 'string', minLength: 2, maxLength: 120 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } },
     assemblyRate: { type: 'object', properties: { text: { type: 'string', minLength: 2, maxLength: 120 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } },
-    systematicBenchmarks: { type: 'array', maxItems: 8, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 120 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
+    systematicBenchmarks: { type: 'array', maxItems: 10, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 120 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
     // 投标人须知前附表响应条款（施组响应类实质条款；投标程序类不提取）
-    frontScheduleClauses: { type: 'array', maxItems: 12, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 200 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
+    frontScheduleClauses: { type: 'array', maxItems: 20, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 200 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
     dateFabricationProhibited: { type: 'boolean' },
-    prohibitionNotes: { type: 'array', maxItems: 8, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 200 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
+    prohibitionNotes: { type: 'array', maxItems: 12, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 200 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
     pageLimit: { type: 'object', properties: { text: { type: 'string', minLength: 2, maxLength: 120 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } },
     evaluationScheme: { type: 'object', properties: { text: { type: 'string', minLength: 4, maxLength: 400 }, coreTerms: { type: 'array', maxItems: 6, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } },
   },
@@ -121,9 +123,11 @@ export async function extractTenderRequirements(
 ): Promise<TenderRequirementModel> {
   const empty = emptyTenderRequirements(false);
   if (!evidence || evidence.length === 0) return empty;
-  // 分片阈值：每片约 10 万字符（deepseek 64k token 上下文安全余量内），
-  // 按原文顺序累计分片——不是截断丢弃，而是全部内容分片完整进入提取，片间结果合并
-  const SOURCE_SLICE_CHARS = 100000;
+  // 分片阈值：每片约 4 万字符（注意力聚焦粒度，非上下文容量限制——DeepSeek-V4-Pro 上下文 1M token，
+  // 不存在截断；真实生成回归根因是注意力稀释：招标文件 12 万字符分 2 片进主提取，黄山杯实质条款
+  // （专用合同条款 5.1.1「确保黄山杯/300万元/二星级」）被前后海量噪声稀释漏提，且全程无任何信号）。
+  // 按原文顺序累计分片——不是截断丢弃，而是全部内容分片完整进入提取，片间结果并集合并。
+  const SOURCE_SLICE_CHARS = 40000;
   let sourceLines: string[] = [];
   let sourceChars = 0;
   const slices: string[][] = [];
@@ -214,10 +218,13 @@ export async function extractTenderRequirements(
     };
   }
 
+  // 分片结果并集合并（真实生成回归加固）：各片都是全文子集，任何片提到即保留——
+  // 不能用窄通道的 mergeTenderRequirements（主结果优先）：4 万字符分 3 片后同一字段
+  // （如 frontScheduleClauses/awardClauses）跨片分布，「前片优先」会把后片补充整体丢弃。
   let merged: TenderRequirementModel | undefined;
   for (const slice of slices) {
     const result = await extractSlice(slice);
-    merged = merged ? mergeTenderRequirements(merged, result) : result;
+    merged = merged ? mergeTenderRequirementSlices(merged, result) : result;
   }
   return merged || empty;
 }
@@ -239,7 +246,63 @@ const MANDATORY_CLAUSE_SEMANTIC_FEATURES = [
   '质量目标必须确保达到合格或优良标准的要求',
 ];
 
-/** 必提条款语义召回：证据切片全量参与（无数量截断）与语义特征集余弦相似度 ≥0.5 为候选，按最高相似度排序（去重保序） */
+/**
+ * 必提条款词形提示（召回兜底，仅用于证据定位非语义判断）：语义召回受 bge 相似度阈值 0.5
+ * 与嵌入质量影响，短条必提条款切片可能低分漏网（真实生成回归：黄山杯条款位于专用合同条款
+ * 5.1.1 长段落切片，语义特征相似度可能不足）——词形命中的切片直接纳入窄通道输入，
+ * 由 LLM 小输入提取过滤无关内容。
+ */
+const MANDATORY_CLAUSE_LEXICAL_HINTS = /确保|争创|创优|获得.{0,10}[杯奖]|优质工程奖|绿色建筑|星级|智慧工地|装配率|装配式|六个百分百|四节一环保/u;
+
+/** 要求类语义特征集（主提取有用数据预筛用）：覆盖创优/等级/质量/工期/人员/分包/付款等
+ * 施组响应类条款语义——主提取不再全量吞入招标文件（12 万+字符中约半数属投标程序/清单/
+ * 目录/格式类无用内容，稀释模型注意力），仅召回与要求语义相近的切片进提取输入 */
+const REQUIREMENT_SEMANTIC_FEATURES = [
+  ...MANDATORY_CLAUSE_SEMANTIC_FEATURES,
+  '计划工期与工期延误违约赔偿条款',
+  '质量目标必须达到合格或优良标准',
+  '安全文明施工与扬尘治理要求',
+  '项目经理与关键人员配置要求',
+  '分包与转包限制条款',
+  '材料设备采购与进场验收要求',
+  '付款方式与资金安排条款',
+  '缺陷责任期与质量保证金条款',
+];
+
+/** 主提取预筛义务词形：含施组响应类要求语气的切片直接保留（保宽不保窄，误杀条款是灾难）。
+ * 严谨化（真实生成回归）：不采用宽泛的「应…满足|符合」模式——投标程序条款大量含该模式，
+ * 会放行无用内容；聚焦奖项/等级/质量/工期/安全/材料工艺/人员管理六类施组实质响应词形 */
+const OBLIGATION_LEXICAL_HINTS = /确保|争创|创优|优质工程奖|获得.{0,10}[杯奖]|鲁班奖|绿色建筑|星级|智慧工地|装配率|装配式|六个百分百|四节一环保|达到.{0,6}(合格|优良)|质量标准|验收标准|特殊要求|按最高标准执行|按计划|违约金|工期延误|计划工期|日历天|安全文明|文明施工|扬尘|实名制|劳资专管|承插型盘扣|钢板防护网|商品砼|预拌砂浆|见证取样|送样|项目经理|技术负责人|分包|转包|履约担保|质保金|缺陷责任期|施工组织方案|施工进度计划|专项施工方案|施工工艺|须达到|必须达到|不低于|不少于|不得超过|不得超出/u;
+
+/** 纯投标程序/格式表格词形：仅当切片无义务词形且无语义命中时才据此剔除（三条件齐备才删，防误杀）。
+ * 不含「中标通知书」——其常出现于合同文件组成清单等要求类上下文，误剔会连带丢要求条款 */
+const PROGRAM_PROCEDURE_HINTS = /盖单位章|签字或盖章|年月日|投标总价|汇总表|计日工表|综合单价分析|单价小计|未计价材料费|开标时间|开标地点|递交截止|投标截止|解密|电子交易系统|保证金账户|开户银行|投标保证金|异议|投诉|技术热线|评标委员会由.{0,10}人|评标委员会组成|资格审查|四库一平台|保函|担保机构|受益人|开立人|签字盖章|密封|正本.{0,4}副本|联合体|清标/u;
+
+/**
+ * 主提取有用数据预筛（上下文聚焦治理）：招标文件全量直读中约半数切片属投标程序/清单/
+ * 目录/格式类内容，与「要求与标准」提取无关——全量吞入既浪费上下文又稀释模型注意力
+ * （真实生成回归：12 万字符全量分片下黄山杯等短条款被前后噪声稀释漏提）。
+ * 预筛保守设计：义务词形或语义命中即保留；仅「无义务词形 + 无语义命中 + 纯程序词形」
+ * 三条件齐备才剔除；预筛零命中回退全量（防误杀导致零输入）。
+ */
+export async function preselectTenderRequirementEvidence(evidence: DocumentEvidence[]): Promise<DocumentEvidence[]> {
+  if (evidence.length <= 1) return evidence;
+  const texts = evidence.map(item => cleanPdfHeadingNoise(`${item.sectionTitle || ''}\n${item.content || ''}`));
+  const similarity = await buildSemanticSimilarity(REQUIREMENT_SEMANTIC_FEATURES, texts);
+  const kept = evidence.filter((item, index) => {
+    const text = texts[index];
+    if (OBLIGATION_LEXICAL_HINTS.test(text)) return true;
+    const semanticScore = Math.max(...REQUIREMENT_SEMANTIC_FEATURES.map(feature => similarity(feature, text)));
+    if (semanticScore >= 0.45) return true;
+    if (PROGRAM_PROCEDURE_HINTS.test(text)) return false;
+    return true;
+  });
+  if (kept.length === 0) return evidence;
+  return kept;
+}
+
+/** 必提条款语义召回：证据切片全量参与（无数量截断）与语义特征集余弦相似度 ≥0.5 为候选，
+ * 按最高相似度排序（去重保序）；词形命中切片无条件纳入（兜底），避免 bge 低分漏网 */
 export async function filterMandatoryClauseEvidence(evidence: DocumentEvidence[]): Promise<DocumentEvidence[]> {
   if (evidence.length === 0) return [];
   const candidates = evidence;
@@ -247,7 +310,7 @@ export async function filterMandatoryClauseEvidence(evidence: DocumentEvidence[]
   const similarity = await buildSemanticSimilarity(MANDATORY_CLAUSE_SEMANTIC_FEATURES, texts);
   const scored = candidates
     .map((item, index) => ({ item, text: texts[index], score: Math.max(...MANDATORY_CLAUSE_SEMANTIC_FEATURES.map(feature => similarity(feature, texts[index]))) }))
-    .filter(entry => entry.score >= 0.5)
+    .filter(entry => entry.score >= 0.5 || MANDATORY_CLAUSE_LEXICAL_HINTS.test(entry.text))
     .sort((a, b) => b.score - a.score);
   const selected = scored;
   const seen = new Set<string>();
@@ -262,15 +325,18 @@ export async function filterMandatoryClauseEvidence(evidence: DocumentEvidence[]
   return result;
 }
 
-/** 必提字段是否整体缺失（奖项/绿色/智慧工地/装配/体系基准全空才触发窄通道，避免无要求项目空跑） */
+/** 必提字段是否缺失：任一必提字段为空即触发窄通道补提（真实生成回归：主提取已拿到
+ * 绿色/智慧工地/装配率但漏提「确保黄山杯」奖项条款时，旧的全空判定为 false → 窄通道整体
+ * 被跳过 → 奖项零落位且零响应检测无警报）。窄通道前提是语义召回存在候选证据
+ * （filterMandatoryClauseEvidence ≥0.5），无要求项目召回无候选不会触发 LLM 空跑。 */
 export function missingMandatoryFields(model: TenderRequirementModel | undefined): boolean {
   if (!model) return true;
   return (
-    model.awardObjectives.length === 0 &&
-    model.awardClauses.length === 0 &&
-    !model.greenBuildingGrade &&
-    !model.smartSiteGrade &&
-    !model.assemblyRate &&
+    model.awardObjectives.length === 0 ||
+    model.awardClauses.length === 0 ||
+    !model.greenBuildingGrade ||
+    !model.smartSiteGrade ||
+    !model.assemblyRate ||
     model.systematicBenchmarks.length === 0
   );
 }
@@ -293,6 +359,42 @@ export function mergeTenderRequirements(main: TenderRequirementModel, narrow: Te
     evaluationScheme: main.evaluationScheme || narrow.evaluationScheme,
     dateFabricationProhibited: main.dateFabricationProhibited || narrow.dateFabricationProhibited,
     extracted: main.extracted || narrow.extracted,
+  };
+}
+
+/** 列表字段并集合并（按 text 去重保序） */
+function unionItems(a: TenderRequirementItem[], b: TenderRequirementItem[]): TenderRequirementItem[] {
+  const seen = new Set<string>();
+  const result: TenderRequirementItem[] = [];
+  for (const item of [...a, ...b]) {
+    if (seen.has(item.text)) continue;
+    seen.add(item.text);
+    result.push(item);
+  }
+  return result;
+}
+
+/**
+ * 主提取分片结果并集合并：各片都是同一份资料的子集，任何片提到即保留（列表字段按 text 去重，
+ * 标量字段取第一个非空值）——与窄通道合并的「主结果优先」语义不同。
+ */
+export function mergeTenderRequirementSlices(a: TenderRequirementModel, b: TenderRequirementModel): TenderRequirementModel {
+  const first = (x: TenderRequirementItem | undefined, y: TenderRequirementItem | undefined) => x || y;
+  return {
+    ...a,
+    awardObjectives: unionItems(a.awardObjectives, b.awardObjectives),
+    specialQualityStandards: unionItems(a.specialQualityStandards, b.specialQualityStandards),
+    awardClauses: unionItems(a.awardClauses, b.awardClauses),
+    greenBuildingGrade: first(a.greenBuildingGrade, b.greenBuildingGrade),
+    smartSiteGrade: first(a.smartSiteGrade, b.smartSiteGrade),
+    assemblyRate: first(a.assemblyRate, b.assemblyRate),
+    systematicBenchmarks: unionItems(a.systematicBenchmarks, b.systematicBenchmarks),
+    frontScheduleClauses: unionItems(a.frontScheduleClauses, b.frontScheduleClauses),
+    prohibitionNotes: unionItems(a.prohibitionNotes, b.prohibitionNotes),
+    pageLimit: first(a.pageLimit, b.pageLimit),
+    evaluationScheme: first(a.evaluationScheme, b.evaluationScheme),
+    dateFabricationProhibited: a.dateFabricationProhibited || b.dateFabricationProhibited,
+    extracted: a.extracted || b.extracted,
   };
 }
 
@@ -342,10 +444,12 @@ export function tenderRequirementsWritingRules(model: TenderRequirementModel | u
   itemLine('禁止性/约束性要求（正文不得违反）', model.prohibitionNotes);
   if (model.pageLimit) lines.push(`篇幅建议：${model.pageLimit.text}，注意控制篇幅与语言精练度。`);
   if (model.evaluationScheme) {
-    lines.push(`评标办法（章节结构的最强约束）：${model.evaluationScheme.text}。正文章节结构必须逐项覆盖技术文件详细评审内容项，各评审项内容要对应到具体章节并做到针对性强、可落地；语言精练、不重复堆砌。`);
+    // 评标办法改系统侧消费：章节结构已按评标办法生成，正文不得复述评标办法、分值构成、评审程序
+    // （评分报告 N3：评标办法原文注入写手 projectContext 后被整段复述进正文）
+    lines.push(`评标办法已由系统消费为章节结构（六章），正文不得复述评标办法原文、分值构成与评审程序；各评审项内容要对应到具体章节并做到针对性强、可落地。`);
   }
   if (lines.length === 0) return '';
-  return `【招标文件评分项要求（系统从绑定资料提取，必须逐条响应，零响应即评标失分）】\n${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}`;
+  return `【招标文件评分项要求（系统从绑定资料提取，必须逐条响应，零响应即评标失分）】\n${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}\n${systemConstraintLine('以上为系统提取的评分项要求内容：实质要求（奖项名称、数字参数、等级指标等）必须显性响应进正文；本段提示词文字本身（编号、括号说明等元话语）禁止复述进正文')}`;
 }
 
 /**
@@ -437,25 +541,112 @@ export async function classifyRequirementResponsiveness(items: Array<{ kind: str
   return new Map(trimmed.map((_, index) => [index, forcedProgrammatic.has(index) ? false : (judged.get(index) ?? true)]));
 }
 
+/** 锚点或选型判定 schema（一次批量调用判定部分响应条款的锚点是否为"任一即可"关系） */
+const ANCHOR_ALTERNATIVE_JSON_SCHEMA: DocumentJsonSchema = {
+  type: 'object',
+  required: ['results'],
+  properties: {
+    results: {
+      type: 'array',
+      required: true,
+      minItems: 1,
+      items: {
+        type: 'object',
+        required: true,
+        properties: {
+          index: { type: 'number', required: true },
+          alternative: { type: 'boolean', required: true },
+        },
+      },
+    },
+  },
+};
+
 /**
- * 字面锚点命中：语义相似度未过阈值时，专有名词（coreTerms）、数字参数、具名奖项/等级在正文字面出现即视为已响应。
- * 黄山杯实测：正文含「黄山杯」字面且切片在索引中，但 bge 余弦仅 0.50 < 0.6 被误报零响应——
- * 语义通道对短专有名词区分度不足，字面兜底只认锚点词（长度≥2 的 coreTerms / 数字+单位 / XX杯奖星），
- * 不认任意长句，避免通用短语字面重合造成漏检。
+ * 锚点或选型批量判定（300万根治防误报）：条款锚点为"或/及/任选其一"关系
+ * （如"省级或国家级奖项""A、B、C任选一项"）时，部分锚点命中不算部分响应；
+ * 并列承诺/金额+奖项共存条款（"确保黄山杯，支付300万元"）必须全部锚点命中。
+ * 分类调用失败时保守判定非或选型（宁报部分响应不漏检——评标失分风险大于多余修复成本）。
  */
-function literalAnchorHit(item: TenderRequirementItem, normalizedMarkdown: string): boolean {
+export async function classifyAnchorAlternativeClauses(
+  items: Array<{ text: string; missingAnchors: string[] }>,
+  options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {},
+): Promise<Map<number, boolean>> {
+  const trimmed = items.filter(item => item.text.trim());
+  if (trimmed.length === 0) return new Map();
+  const raw = await callDocumentLlmJson<{ results?: Array<{ index?: number; alternative?: boolean }> }>(
+    [
+      '你是招标要求条款锚点关系判定器。',
+      '对每条条款判定其锚点之间的关系：',
+      '- alternative=true：条款锚点为"或/及/任选其一"关系（如"省级或国家级奖项""A、B、C任选"），满足任一锚点即算完整响应',
+      '- alternative=false：条款锚点必须全部满足（并列承诺、金额与奖项共存条款），缺任一锚点即部分响应',
+      '只输出 JSON，不得输出其他内容。',
+    ].join('\n'),
+    trimmed.map((item, index) => `${index + 1}. 条款：${item.text}\n   未命中锚点：${item.missingAnchors.join('、') || '（无）'}`).join('\n'),
+    {
+      maxTokens: 1000,
+      temperature: 0.1,
+      signal: options.signal,
+      diagnostics: options.diagnostics,
+      schema: ANCHOR_ALTERNATIVE_JSON_SCHEMA,
+      taskKind: 'structuredGeneration',
+    },
+  );
+  if (!raw?.results?.length) return new Map(trimmed.map((_, index) => [index, false]));
+  const judged = new Map<number, boolean>();
+  for (const entry of raw.results) {
+    if (typeof entry.index === 'number') judged.set(entry.index, entry.alternative === true);
+  }
+  return new Map(trimmed.map((_, index) => [index, judged.get(index) ?? false]));
+}
+
+/**
+ * 剥离奖项名前导动词/承诺词（"为争创黄山杯"→"黄山杯"），循环剥离直至稳定。
+ * requirementAnchorCoverage 与奖项杜撰检测共用，保证锚点提取口径一致
+ * （具名奖项正则贪婪会吞入前导动词，如"确保黄山杯"整体成锚，与 coreTerms"黄山杯"口径分裂导致误报）。
+ */
+function stripAwardLeadVerb(award: string): string {
+  let result = award;
+  for (;;) {
+    const stripped = result.replace(/^(?:争创|争取|力争|争获|确保|获得|创建|力创|评为|荣获|标为|目标为|承诺|为)/u, '');
+    if (stripped === result || !stripped) break;
+    result = stripped;
+  }
+  return result;
+}
+
+/**
+ * 条款锚点覆盖判定（300万缺失根治，评分报告可优化项）：条款内全部关键锚点
+ * （每个 coreTerms 专有名词、每个"数字+单位"、每个具名奖项/等级）必须各自字面命中正文。
+ * 原 literalAnchorHit 任一锚点命中即放行整条条款——"确保黄山杯，支付300万元"条款中
+ * "黄山杯"命中即整体放行，条款内数字参数"300万元"静默漏检（正文黄山杯13处/300万0处）。
+ * 字面兜底保留（黄山杯实测 bge 0.50 < 0.6 被误报零响应——语义通道对短专有名词区分度不足），
+ * 但升级为锚点全覆盖：全部命中才算完全响应，部分命中报"部分响应"定向补写缺失锚点。
+ */
+function requirementAnchorCoverage(item: TenderRequirementItem, normalizedMarkdown: string): { total: number; hit: string[]; missing: string[] } {
+  const text = item.text.replace(/\s+/gu, '');
+  const anchors = new Set<string>();
+  // 专有名词：coreTerms 全部作为锚点（长度≥2；「或/及」条款的锚点必要性由 LLM 或选型判定兜底）
   for (const term of item.coreTerms) {
     const clean = term.replace(/\s+/gu, '');
-    if (clean.length >= 2 && normalizedMarkdown.includes(clean)) return true;
+    if (clean.length >= 2) anchors.add(clean);
   }
-  const text = item.text.replace(/\s+/gu, '');
-  // 数字参数：数字+单位组合字面命中（正文数字繁多，纯数字不作锚点；单位词表限工程条款常用单位）
-  const numberAnchor = /(?:\d+(?:\.\d+)?\s*(?:%|％|天|日|万元|亿元|元|米|m|M|mm|毫米|层|年|个|月|周|小时|分钟|项|处|台|套|辆|人|家|次|遍|道|吨|kPa|MPa))/giu.exec(text);
-  if (numberAnchor && normalizedMarkdown.includes(numberAnchor[0].replace(/\s+/gu, ''))) return true;
-  // 具名奖项/等级：条款原文里的「XX杯/XX奖/XX星」锚点字面命中（「级」后缀过宽不取，靠 coreTerms/数字锚点覆盖）
-  const namedAnchor = /[\u4e00-\u9fa5]{2,6}[杯奖星]/gu.exec(text);
-  if (namedAnchor && normalizedMarkdown.includes(namedAnchor[0])) return true;
-  return false;
+  // 数字参数：每个"数字+单位"组合都是独立锚点（正文数字繁多，纯数字不作锚点；单位词表限工程条款常用单位）
+  for (const match of text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:%|％|天|日|万元|亿元|元|米|m|M|mm|毫米|层|年|个|月|周|小时|分钟|项|处|台|套|辆|人|家|次|遍|道|吨|kPa|MPa))/giu)) {
+    anchors.add(match[0].replace(/\s+/gu, ''));
+  }
+  // 具名奖项/等级：条款原文里的「XX杯/XX奖/XX星」锚点（「级」后缀过宽不取，靠 coreTerms/数字锚点覆盖）；
+  // 正则贪婪会吞入前导动词（"确保黄山杯"），stripAwardLeadVerb 循环剥离保证与 coreTerms 口径一致
+  for (const match of text.matchAll(/[\u4e00-\u9fa5]{2,6}[杯奖星]/gu)) {
+    const award = stripAwardLeadVerb(match[0]);
+    if (/^[\u4e00-\u9fa5]{2,7}$/u.test(award)) anchors.add(award);
+  }
+  const hit: string[] = [];
+  const missing: string[] = [];
+  for (const anchor of anchors) {
+    (normalizedMarkdown.includes(anchor) ? hit : missing).push(anchor);
+  }
+  return { total: anchors.size, hit, missing };
 }
 
 /**
@@ -476,6 +667,7 @@ export async function requirementsCoverageIssues(
   // 程序性/实质性语义分类：程序性条款（开标时间/保证金账户等）不参与零响应检测
   const responsiveness = await classifyRequirementResponsiveness(items.map(item => ({ kind: item.kind, text: item.item.text })), { signal: options.signal, diagnostics: options.diagnostics });
   const targets = options.bodyTexts && options.bodyTexts.length > 0 ? [...chapterLines, ...options.bodyTexts] : chapterLines;
+  const partialResponseCandidates: Array<{ item: TenderRequirementItem; kind: string; bestSimilarity: number; hit: string[]; missing: string[] }> = [];
   for (const [index, { kind, item }] of items.entries()) {
     if (responsiveness.get(index) === false) continue;
     const query = tenderRequirementSemanticQuery(item);
@@ -485,8 +677,16 @@ export async function requirementsCoverageIssues(
       if (score > bestSimilarity) bestSimilarity = score;
     }
     if (bestSimilarity >= 0.6) continue;
-    // 字面锚点兜底：语义未过阈值但专有名词/数字参数/具名奖项字面命中时视为已响应（黄山杯 0.50 误报修复）
-    if (literalAnchorHit(item, normalized)) continue;
+    // 字面锚点兜底升级（300万缺失根治）：语义未过阈值时，条款内全部关键锚点
+    // （coreTerms 专有名词/数字+单位/具名奖项）各自字面命中才算完全响应（黄山杯 0.50 误报修复保留）
+    const coverage = requirementAnchorCoverage(item, normalized);
+    if (coverage.total > 0 && coverage.missing.length === 0) continue;
+    if (coverage.hit.length > 0) {
+      // 部分响应候选：锚点部分命中（实测"确保黄山杯，支付300万元"条款：黄山杯命中、300万元缺失），
+      // "或/及"条款（任一锚点即可）由 LLM 批量判定兜底防误报
+      partialResponseCandidates.push({ item, kind, bestSimilarity, hit: coverage.hit, missing: coverage.missing });
+      continue;
+    }
     issues.push({
       level: 'error',
       severity: 'blocker',
@@ -497,6 +697,25 @@ export async function requirementsCoverageIssues(
       suggestion: `招标文件明确要求的${kind}必须显性响应：在对应章节补写“${item.text}”及配套保证措施。`,
     });
   }
+  // 部分响应：LLM 批量判定锚点是否"或/及"关系（任一即可），非或选型报部分响应定向补写缺失锚点
+  if (partialResponseCandidates.length > 0) {
+    const alternatives = await classifyAnchorAlternativeClauses(
+      partialResponseCandidates.map(candidate => ({ text: candidate.item.text, missingAnchors: candidate.missing })),
+      { signal: options.signal, diagnostics: options.diagnostics },
+    );
+    for (const [candidateIndex, candidate] of partialResponseCandidates.entries()) {
+      if (alternatives.get(candidateIndex)) continue;
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'structure',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `评分项要求部分响应：${candidate.kind}“${candidate.item.text}”已命中“${candidate.hit.join('、')}”，但缺少“${candidate.missing.join('、')}”（最佳语义相似度 ${candidate.bestSimilarity.toFixed(2)}）`,
+        suggestion: `条款内全部关键数据与奖项必须逐项显性响应：在对应章节补写“${candidate.missing.join('、')}”对应内容（缺一即部分响应）。`,
+      });
+    }
+  }
   // round-23 P0-2 兜底：正文出现要求模型之外的具名奖项（“XX杯/XX奖”）时提示替换/杜撰风险
   // （外部评分否决级实测：“确保黄山杯”被写作层写成“争创庐州杯”）。通用词形检测不硬编码
   // 奖项名；“优质工程/样板工程”等通用荣誉措辞不算具名奖项，不误报。
@@ -505,16 +724,8 @@ export async function requirementsCoverageIssues(
     if (modelAwardTexts.length > 0) {
       // 奖项名主体提取：从「杯/奖」向左取 12 字窗口，杯/奖字左邻成对引号/括号内汉字段优先
       // （“黄山杯”/（庐州杯）——窗口正则会吞入前置从句词导致主体识别失败），否则回溯连续汉字段；
-      // 提取后拼回杯/奖字保证奖项名完整（“庐州杯”而非“庐州”），再循环剥离前导动词（“为争创黄山杯”→“黄山杯”）
-      const stripAwardVerb = (award: string) => {
-        let result = award;
-        for (;;) {
-          const stripped = result.replace(/^(?:争创|争取|力争|争获|确保|获得|创建|力创|评为|荣获|标为|目标为|承诺|为)/u, '');
-          if (stripped === result || !stripped) break;
-          result = stripped;
-        }
-        return result;
-      };
+      // 提取后拼回杯/奖字保证奖项名完整（“庐州杯”而非“庐州”），再剥离前导动词（“为争创黄山杯”→“黄山杯”，
+      // stripAwardLeadVerb 模块级函数与 requirementAnchorCoverage 共用保证口径一致）
       const namedAwards = new Set<string>();
       for (const match of normalized.matchAll(/[杯奖]/gu)) {
         const end = (match.index || 0) + 1;
@@ -523,7 +734,7 @@ export async function requirementsCoverageIssues(
         const inside = before.match(/(?:（|\(|\u201c)([\u4e00-\u9fa5]{2,6})$/u);
         const body = inside ? inside[1] : before.match(/[\u4e00-\u9fa5]{2,6}$/u)?.[0];
         if (!body) continue;
-        const award = stripAwardVerb(body) + match[0];
+        const award = stripAwardLeadVerb(body) + match[0];
         if (!/^[\u4e00-\u9fa5]{2,7}$/u.test(award)) continue;
         namedAwards.add(award);
       }

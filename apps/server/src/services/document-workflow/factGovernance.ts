@@ -6,7 +6,7 @@ import { stableHash, stringifyFactValue } from './utils';
 import { recordArbitrationCases } from './workflowCaseLog';
 import { loadWorkflowRules, workflowRulesHash, type WorkflowRulesConfig } from './workflowRules';
 
-export type FactValueType = 'duration' | 'money' | 'location' | 'organization' | 'standard' | 'identifier' | 'scale' | 'text';
+export type FactValueType = 'duration' | 'money' | 'location' | 'organization' | 'standard' | 'identifier' | 'scale' | 'count' | 'percentage' | 'award' | 'text';
 
 export interface FieldSpec {
   key: string;
@@ -45,6 +45,12 @@ export const PROJECT_BASIC_FIELD_SPECS: FieldSpec[] = [
   { key: 'schedule_requirement', label: '计划工期', aliases: ['计划工期', '合同工期', '总工期', '工期', '实施周期', '服务期限'], valueType: 'duration' },
   { key: 'quality_standard', label: '质量标准', aliases: ['质量标准', '质量目标', '验收标准', '服务标准'], valueType: 'standard' },
   { key: 'project_investment_estimate', label: '合同估算价', aliases: ['合同估算价', '合同估算价格', '投资估算', '估算价格', '最高投标限价', '招标控制价', '预算金额'], valueType: 'money' },
+  // P2/N1 治理扩围（评分报告劳动力四处矛盾/装配率 30 vs 38.4/支护放坡喷锚 vs 灌注桩根因）：
+  // 原主表不含劳动力高峰/装配率/支护形式/创优奖惩字段，各章写作独立取数，冲突检测无从触发
+  { key: 'labor_peak', label: '劳动力高峰人数', aliases: ['劳动力高峰', '高峰期劳动力', '高峰人数', '劳动力峰值', '高峰期人数', '劳动力配置'], valueType: 'count' },
+  { key: 'assembly_rate', label: '装配率', aliases: ['装配率', '装配式建筑占比', '装配式比例', '装配式建筑面积占比'], valueType: 'percentage' },
+  { key: 'foundation_support_form', label: '基坑支护形式', aliases: ['基坑支护形式', '基坑支护方式', '支护形式', '支护方式'], valueType: 'text' },
+  { key: 'award_clause', label: '创优奖惩条款', aliases: ['创优奖惩', '优质优价', '创优目标', '奖惩条款', '创优奖项'], valueType: 'award' },
 ];
 
 function isReferenceOnly(value: string) {
@@ -89,11 +95,28 @@ function valueTypeScore(value: string, spec: FieldSpec) {
     case 'scale':
       if (/\d+(?:\.\d+)?\s*(?:㎡|平方米|m²|米|m|层|栋|座|万元|元)/iu.test(value)) return { rejected: false, score: 30, reason: '包含规模数值或单位' };
       return { rejected: false, score: 5, reason: '规模字段为文本描述' };
+    case 'count':
+      if (!/\d+(?:\.\d+)?\s*人/u.test(value)) return { rejected: true, score: -80, reason: '缺少明确人数数值' };
+      if (/面积|工期|金额|报价|万元/u.test(value)) return { rejected: true, score: -70, reason: '人数字段混入其他量纲' };
+      return { rejected: false, score: 40, reason: '包含明确人数数值' };
+    case 'percentage':
+      if (!/\d+(?:\.\d+)?\s*(?:%|％)/u.test(value)) return { rejected: true, score: -80, reason: '缺少百分比数值' };
+      if (/工期|金额|报价/u.test(value)) return { rejected: true, score: -70, reason: '百分比字段混入其他量纲' };
+      return { rejected: false, score: 40, reason: '包含百分比数值' };
+    case 'award':
+      if (!/(?:杯|奖|万元|优质优价)/u.test(value)) return { rejected: true, score: -70, reason: '缺少奖项或奖惩金额特征' };
+      if (/评标|保证金|报价明细|综合单价/u.test(value)) return { rejected: true, score: -90, reason: '奖项字段串入评标条款' };
+      return { rejected: false, score: 40, reason: '包含奖项/奖惩金额特征' };
     default:
       if (spec.key === 'project_name') {
         if (/存在部位|风险等级|管控措施|监测频次|闭环要求|序号|内容|范围|不适用/u.test(value)) return { rejected: true, score: -90, reason: '项目名称字段串位或表头噪声' };
         if (!/项目|工程|学院|宿舍|楼|校区|施工总承包/u.test(value)) return { rejected: true, score: -70, reason: '项目名称缺少工程名称特征' };
         return { rejected: false, score: 35, reason: '符合项目名称特征' };
+      }
+      if (spec.key === 'foundation_support_form') {
+        if (!/支护|放坡|锚|桩|喷|开挖|护坡/u.test(value)) return { rejected: true, score: -70, reason: '基坑支护形式缺少支护工艺特征' };
+        if (/监测|监测频次|闭环/u.test(value)) return { rejected: true, score: -80, reason: '支护形式字段串入监测管控内容' };
+        return { rejected: false, score: 30, reason: '包含支护工艺特征' };
       }
       return { rejected: false, score: value.length >= 2 ? 10 : -20, reason: '文本字段' };
   }

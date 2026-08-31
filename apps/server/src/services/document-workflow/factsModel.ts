@@ -11,6 +11,7 @@ import { callDocumentLlmJson } from './llmClient';
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE } from './parameterPatterns';
 import { stringifyFactValue, throwIfAborted } from './utils';
 import { buildSemanticSimilarity } from './semanticSimilarity';
+import { evidenceSafetyKey } from './evidenceContentSafety';
 
 export function extractFacts(template: DocumentTemplate, evidence: DocumentEvidence[], spec?: AutoDocumentSpecPackage): Record<string, string> {
   const facts: Record<string, string> = {};
@@ -215,7 +216,9 @@ function conflictComparableFactValue(value: unknown, profile: DocumentDomainProf
 function conflictComparableField(key: string, profile: DocumentDomainProfile) {
   const field = factFieldForLabel(profile, key);
   if (field) return field.cardinality === 'single' && field.conflictPolicy !== 'ignore' && field.conflictPolicy !== 'allow_multiple';
-  return /项目名称|工程名称|招标人|建设地点|建筑面积|结构形式|层数|工期|质量标准|合同价格形式|绿色建筑等级|投标有效期|质保期/u.test(key);
+  // P2/N1 治理扩围：劳动力高峰/装配率/支护形式/创优奖惩纳入冲突可比较字段
+  // （原仅面积/结构形式等，劳动力四处矛盾、装配率 30 vs 38.4、支护放坡喷锚 vs 灌注桩无从检出）
+  return /项目名称|工程名称|招标人|建设地点|建筑面积|结构形式|层数|工期|质量标准|合同价格形式|绿色建筑等级|投标有效期|质保期|劳动力高峰|装配率|支护形式|创优奖惩/u.test(key);
 }
 
 export async function detectFactConflicts(facts: DocumentFact[], spec?: AutoDocumentSpecPackage, profile: DocumentDomainProfile = DEFAULT_DOCUMENT_DOMAIN_PROFILE, embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<string[]> {
@@ -287,6 +290,14 @@ const PROJECT_BASIC_FACT_PATTERNS = [
   { fieldId: 'schedule_requirement', key: '计划工期', fieldName: '周期要求', pattern: /(?:(?:计划工期|合同工期|总工期)[：:\s为是约]*|工期[：:\s为是约]+)([^\n。；;]{0,40}?\d+(?:\.\d+)?\s*(?:日历天|天|个月|月|年)(?:[^\n。；;]{0,30})?)/u },
   { fieldId: 'quality_standard', key: '质量标准', fieldName: '质量标准', pattern: /质量标准[：:\s为是]+([^\n。；;]{1,60})/u },
   { fieldId: 'project_investment_estimate', key: '合同估算价格', fieldName: '项目投资估算', pattern: /(?:合同估算价格|合同估算价|投资估算|估算价格|工程估算价|项目估算价|最高投标限价|招标控制价)[：:\s为是约]+([^\n。；;]{0,80}?\d+(?:\.\d+)?\s*(?:万元|元))/u },
+  // P2/N1 治理扩围（评分报告劳动力四处矛盾/装配率口径不一/支护形式矛盾/300万奖惩条款缺失）：
+  // 原主表不含劳动力高峰/装配率/支护形式/创优奖惩提取，各章写作独立取数，canonical 裁决无从触发
+  { fieldId: 'labor_peak', key: '劳动力高峰人数', fieldName: '劳动力高峰人数', pattern: /(?:劳动力|用工|作业人员|施工人员)[^。；;\n]{0,40}?(?:高峰|峰值)[^。；;\n]{0,20}?(\d+(?:\.\d+)?\s*人)/u },
+  { fieldId: 'labor_peak', key: '劳动力高峰人数', fieldName: '劳动力高峰人数', pattern: /(?:高峰(?:期)?(?:劳动力|用工|人数|作业人员)|高峰期人数)[^。；;\n]{0,20}?(\d+(?:\.\d+)?\s*人)/u },
+  { fieldId: 'assembly_rate', key: '装配率', fieldName: '装配率', pattern: /(?:装配率|装配式建筑占比|装配式比例|装配式建筑面积占比)[^。；;\n]{0,16}?(\d+(?:\.\d+)?\s*%)/u },
+  { fieldId: 'foundation_support_form', key: '基坑支护形式', fieldName: '基坑支护形式', pattern: /(?:基坑支护(?:形式|方式|方案)?|支护(?:形式|方式))[^。；;\n]{0,10}?(?:采用|为|：|:|\s)([^。；;\n]{2,60})/u },
+  { fieldId: 'award_clause', key: '创优奖惩条款', fieldName: '创优奖惩条款', pattern: /(?:创优(?:目标|奖惩)?|优质优价)[^。；;\n]{0,60}?(\d+(?:\.\d+)?\s*万元)/u },
+  { fieldId: 'award_clause', key: '创优奖惩条款', fieldName: '创优奖惩条款', pattern: /(?:确保|争创|力争|争获)?[\u4e00-\u9fa5]{2,6}[杯奖][^。；;\n]{0,60}?(\d+(?:\.\d+)?\s*万元)/u },
 ];
 
 export function isValidProjectBasicFactValue(fieldId: string | undefined, rawValue: unknown) {
@@ -301,6 +312,10 @@ export function isValidProjectBasicFactValue(fieldId: string | undefined, rawVal
   if (fieldId === 'project_scope') return value.length <= 220 && !/^[（(]\s*\d+[)）]/u.test(value) && !/具备.{0,24}(?:证书|考核合格|安全生产考核)/u.test(value) && !/^见(?:招标|投标人|前附)/u.test(value);
   if (fieldId === 'project_code') return /^[A-Za-z0-9\-_.（）()]+$/u.test(value);
   if (fieldId === 'project_investment_estimate') return value.length <= 100 && /\d+(?:\.\d+)?\s*(?:万元|元)/u.test(value);
+  if (fieldId === 'labor_peak') return value.length <= 40 && /\d+(?:\.\d+)?\s*人/u.test(value);
+  if (fieldId === 'assembly_rate') return value.length <= 20 && /\d+(?:\.\d+)?\s*%/u.test(value);
+  if (fieldId === 'foundation_support_form') return value.length <= 60 && /支护|放坡|锚|桩|喷|开挖|护坡/u.test(value);
+  if (fieldId === 'award_clause') return value.length <= 120 && /\d+(?:\.\d+)?\s*万元/u.test(value) && !/评标|保证金/u.test(value);
   return value.length <= 220;
 }
 
@@ -310,9 +325,15 @@ export function extractProjectBasicFactsFromEvidence(evidence: DocumentEvidence[
   for (const item of evidence) {
     // round-23 P0-3：正则通道同样先清 PDF 标题标记噪声（“平方\n\n### 米”→“平方米”），
     // 否则 project_scale pattern [^\n。；;] 停在“平方”后换行，产出缺“米”截断值
-    const normalizedContent = cleanPdfHeadingNoise(normalizeOcrFactText(item.content));
-    const lines = normalizedContent.split(/\r?\n/u).flatMap(line => {
-      const compact = line.replace(/\s+/gu, ' ').trim();
+    const cleanedContent = cleanPdfHeadingNoise(stringifyFactValue(item.content));
+    // 行拆分前的有意跨行合并（PDF 常在数字与单位之间换行，如“540\n日历天”“28570.36平方\n米”）；
+    // 其余空白归一限定行内。历史缺陷：normalizeOcrFactText 把全部换行并成空格后整文退化为单行，
+    // 商务行过滤误跳过整个文件，且字段值贪婪吞并后续字段（“项目名称：X\n建设地点：Y”值被污染）
+    const joinedContent = cleanedContent
+      .replace(/(\d)\s*\r?\n\s*(日历天|天|个月|月|年|万元|元|㎡|平方米|米|m|mm|MPa|kPa|%)/giu, '$1$2')
+      .replace(/([\d，,.]+(?:平方|立方|㎡|m²|m2|m)?)\s*\r?\n\s*(米|m|㎡|m2|m²)/gu, '$1$2');
+    const lines = joinedContent.split(/\r?\n/u).flatMap(line => {
+      const compact = normalizeOcrFactText(line);
       return compact.length > 260 ? compact.split(/(?=\d+(?:\.\d+)?\s*[^\s：:]{2,12}[：:])/u) : [compact];
     }).filter(Boolean);
     for (const line of lines) {
@@ -346,7 +367,9 @@ export function extractPreciseFactsFromEvidence(evidence: DocumentEvidence[], pr
   const seen = new Set<string>();
   for (const item of evidence) {
     const sourceContext = `${item.roleId || ''} ${item.processingType || ''} ${item.filePath} ${item.sectionTitle || ''}`;
-    const sourceLooksUseful = /drawing|table|bill|boq|draw|data|sheet|spec|standard|record|report|表格|数据|规格|参数|标准|记录|报告|清单|图纸|说明/u.test(sourceContext);
+    // 英文关键词加词边界并细化 data→structured_data：历史缺陷中裸子串 data/spec/draw 会误命中
+    // 文件路径（“/data/招标文件.txt”“inspection 报告.pdf”），使低分无关证据绕过低分跳过豁免
+    const sourceLooksUseful = /structured_data|\bdraw(?:ing)?\b|\btable\b|\bbill\b|\bboq\b|\bsheet\b|\bspec\b|\bstandard\b|\brecord\b|\breport\b|表格|数据|规格|参数|标准|记录|报告|清单|图纸|说明/u.test(sourceContext);
     if (!sourceLooksUseful && item.score < 0.75) continue;
     const content = stringifyFactValue(item.content).replace(/\s+/gu, ' ');
     for (const match of content.matchAll(PRECISE_TOKEN_RE)) {
@@ -453,7 +476,9 @@ function addFieldNeed(needs: ChapterFactNeed[], profile: DocumentDomainProfile, 
 export function buildChapterFactNeeds(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; spec?: AutoDocumentSpecPackage; profile?: DocumentDomainProfile; promptTexts?: string; requirement?: string; plan?: { requiredContents?: string[]; evidenceNeeds?: string[] } }) {
   const profile = input.profile || DEFAULT_DOCUMENT_DOMAIN_PROFILE;
   const needs: ChapterFactNeed[] = [];
-  const chapterContext = [input.template.name, input.template.outputTitle, input.chapter.title, input.chapter.purpose, ...(input.chapter.sections || [])].filter(Boolean).join(' ');
+  // requiredFacts 纳入章节上下文：模板声明的事实字段名应参与 profile/spec 关联判定（历史缺陷：
+  // chapterContext 不含 requiredFacts，profile 关联只能靠标题/目的/小节命中，模板声明字段丢失别名检索增强）
+  const chapterContext = [input.template.name, input.template.outputTitle, input.chapter.title, input.chapter.purpose, ...(input.chapter.sections || []), ...(input.chapter.requiredFacts || [])].filter(Boolean).join(' ');
   const specRule = input.spec?.chapterRules.find(rule => rule.id === input.chapter.id || rule.title === input.chapter.title);
   for (const fact of input.chapter.requiredFacts || []) addNeed(needs, profile, { label: fact, category: factFieldForLabel(profile, fact)?.category || 'required', required: true, source: 'template' });
   for (const section of input.chapter.sections || []) addNeed(needs, profile, { label: section, category: 'section', required: false, source: 'section', queries: needQueries(section, [input.chapter.title]) });
@@ -517,8 +542,9 @@ function evidenceMatchesNeed(item: DocumentEvidence, need: ChapterFactNeed, prof
   return need.queries.some(query => query.length >= 2 && text.includes(query));
 }
 
-export function resolveChapterFactNeeds(input: { needs: ChapterFactNeed[]; factsModel: DocumentFactsModel; evidence?: DocumentEvidence[]; profile?: DocumentDomainProfile }) {
+export function resolveChapterFactNeeds(input: { needs: ChapterFactNeed[]; factsModel: DocumentFactsModel; evidence?: DocumentEvidence[]; profile?: DocumentDomainProfile; excludedEvidenceKeys?: Set<string> }) {
   const profile = input.profile || DEFAULT_DOCUMENT_DOMAIN_PROFILE;
+  const excludedKeys = input.excludedEvidenceKeys;
   const factPool = uniqueFacts([
     ...input.factsModel.factIndex.parameterFacts,
     ...input.factsModel.factIndex.tableFacts,
@@ -528,7 +554,11 @@ export function resolveChapterFactNeeds(input: { needs: ChapterFactNeed[]; facts
   ]);
   return input.needs.map<ResolvedFactNeed>(need => {
     const matchedFacts = uniqueFacts(factPool.filter(fact => factMatchesNeed(fact, need, profile))).sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
-    const matchedEvidence = (input.evidence || []).filter(item => evidenceMatchesNeed(item, need, profile));
+    // 证据内容安全：被输入层过滤排除的证据（投标/评标纪律、评标办法、商务报价类）不得回填为章节事实需要证据
+    const matchedEvidence = (input.evidence || []).filter(item =>
+      !excludedKeys?.has(evidenceSafetyKey(item))
+      && evidenceMatchesNeed(item, need, profile),
+    );
     const bestConfidence = Math.max(0, ...matchedFacts.map(fact => fact.confidence || 0));
     const status: ResolvedFactNeed['status'] = matchedFacts.length === 0 && matchedEvidence.length === 0
       ? 'missing'

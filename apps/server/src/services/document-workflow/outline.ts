@@ -35,7 +35,9 @@ export function isTenderClauseFragmentTitle(title: string) {
   if (/^\d+(?:[（(]\d+[)）])?\s*目/u.test(normalized)) return true;
   if (/^\d+\s*对(?:与|于)/u.test(normalized)) return true;
   if (/^\d{1,4}[a-zA-Z]{0,3}\d{0,4}\s*[：:]/u.test(normalized)) return true;
-  if (/^(?:其他要求|需要补充的其他内容|相当于或不低于)/u.test(normalized)) return true;
+  // 数字+时间单位+逗号碎片（「00天，计划完成时间：」类，PDF 条款被逗号切分混入标题）
+  if (/^\d{1,4}\s*(?:个)?(?:日历天|天|日|月|年)[，,、]/u.test(normalized)) return true;
+  if (/^(?:其他要求|需要补充的其他内容|相当于或不低于|补充条款|建议编制要求|投标须知|评标办法)/u.test(normalized)) return true;
   return false;
 }
 

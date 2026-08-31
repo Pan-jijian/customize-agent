@@ -2,6 +2,7 @@ import type { DocumentFactsModel, ValidationIssue } from './types';
 import { documentTextLength } from './budget';
 import { stringifyFactValue } from './utils';
 import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
+import { buildSemanticGate } from './semanticGate';
 
 /**
  * 文档数据与逻辑一致性校验器组（外部验收报告 8 风险点对应的确定性防线）：
@@ -792,18 +793,69 @@ export function collapseRepeatedWords(content: string): string {
 }
 
 // ── 12. 商务条款数据入正文检测（Q3）：施组正文禁止出现商务数据封闭集，出现即评审失分（徽光阁实测：暂列金额 60 万入正文） ──
+// 阶段五语义升级：强词（COMMERCIAL_TERM_RE）与数字式（COMMERCIAL_RATE_RE）保留确定性判定（出现即商务数据）；
+// 变体弱词（材料价格/商务报价类）仅词面召回，句级语义复核（semanticGate 统一入口）确认商务语义才计命中；
+// 允许事实（合同估算价/投资估算类）作负例保护，混合句由语义裁决归属。
 
 const COMMERCIAL_TERM_RE = /暂列金额|暂估价|报价明细|综合单价|清单合价|预留金|投标报价/u;
 const COMMERCIAL_RATE_RE = /(?:税率|增值税)[^。；;\n]{0,12}\d/u;
+/** 允许入正文的项目商务事实（资料落位口径）：词面负例保护，不得误报为商务条款泄漏 */
+const COMMERCIAL_ALLOWED_FACT_RE = /合同估算价|合同估算价格|投资估算|估算价格|工程估算价|最高投标限价|招标控制价/u;
+/** 商务变体弱召回：词面命中仅召回，语义复核确认商务语义才计命中（词面变体漏网治理） */
+const COMMERCIAL_VARIANT_HINT_RE = /材料价格|商务报价|投标总价|合同总价|工程总价/u;
 
-export function commercialDataInBodyIssues(markdown: string): ValidationIssue[] {
+/** 商务条款语义原型（正例）：报价/单价类商务数据表述基准 */
+const COMMERCIAL_SEMANTIC_PROTOTYPES = [
+  '暂列金额与暂估价的报价明细',
+  '综合单价与清单合价的商务数据',
+  '投标报价与费率标准的商务条款',
+] as const;
+/** 允许事实语义原型（负例保护）：估算价/限价类项目公开信息与约束说明不得误报 */
+const COMMERCIAL_LEGAL_PROTOTYPES = [
+  '合同估算价与投资估算的项目信息',
+  '最高投标限价与招标控制价的公开信息',
+  '商务数据不得写入施工组织设计正文的约束说明',
+] as const;
+
+/** 构建商务语义 gate（semanticGate 统一入口）：变体/混合句语义裁决 */
+async function buildCommercialGate(embedDocuments?: (texts: string[]) => Promise<number[][]>) {
+  return buildSemanticGate({
+    prototypes: [...COMMERCIAL_SEMANTIC_PROTOTYPES],
+    negativePrototypes: [...COMMERCIAL_LEGAL_PROTOTYPES],
+    embedDocuments,
+  });
+}
+
+export async function commercialDataInBodyIssues(markdown: string, embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<ValidationIssue[]> {
   const hits: string[] = [];
+  const gate = await buildCommercialGate(embedDocuments);
+  const candidates: string[] = [];
   for (const line of markdown.split(/\r?\n/u)) {
     const trimmed = line.trim();
     // 排除标题行与表格行：项目基本信息表/清单表格中的商务字段属资料落位，不在正文禁令范围
     if (/^#{1,6}\s/u.test(trimmed) || /^\s*\|/u.test(trimmed)) continue;
-    if (COMMERCIAL_TERM_RE.test(line)) hits.push(...(line.match(COMMERCIAL_TERM_RE) || []));
+    if (!COMMERCIAL_TERM_RE.test(line) && !COMMERCIAL_RATE_RE.test(line) && !COMMERCIAL_VARIANT_HINT_RE.test(line)) continue;
     if (COMMERCIAL_RATE_RE.test(line)) hits.push('税率/增值税');
+    for (const sentence of line.split(/(?<=[。；;])\s*/u)) {
+      const terms = sentence.match(COMMERCIAL_TERM_RE) || [];
+      const hasAllowed = COMMERCIAL_ALLOWED_FACT_RE.test(sentence);
+      const hasVariant = COMMERCIAL_VARIANT_HINT_RE.test(sentence);
+      // 强词纯句确定性杀（保留原行为）；含允许词面或变体词的混合句/变体句进入语义复核
+      if (terms.length > 0 && !hasAllowed && !hasVariant) {
+        hits.push(...terms);
+      } else if ((terms.length > 0 && (hasAllowed || hasVariant)) || (hasVariant && terms.length === 0)) {
+        candidates.push(sentence);
+      }
+    }
+  }
+  if (candidates.length > 0) {
+    const flags = await gate(candidates);
+    candidates.forEach((sentence, index) => {
+      if (!flags[index]) return;
+      const terms = sentence.match(COMMERCIAL_TERM_RE) || [];
+      const variants = sentence.match(COMMERCIAL_VARIANT_HINT_RE) || [];
+      hits.push(...(terms.length > 0 ? terms : variants));
+    });
   }
   const unique = [...new Set(hits)].slice(0, 4);
   if (unique.length === 0) return [];

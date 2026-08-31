@@ -4,6 +4,7 @@ import { WORK_PACKAGE_SECTION_RE } from './utils';
 import { displayChapterTitle, formalChapterTitle, isTenderClauseFragmentTitle, normalizeGeneratedChapterTitle } from './outline';
 import { composeEnhancedCoverMarkdown } from './composeAppendices';
 import { FORBIDDEN_PROMPT_PHRASES } from './tenderBidScoring';
+import { buildSemanticGate } from './semanticGate';
 
 export function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
   if (!forbid) return markdown;
@@ -15,6 +16,27 @@ const RAW_SOURCE_LINE_RE = /^\s*(?:#{1,6}\s*)?(?:PDF\s*第\s*\d+\s*页|rule\b|�
 const ASCII_FLOW_LINE_RE = /^\s*(?:[│┃┆┊┌┐└┘├┤┬┴┼─━╭╮╰╯]|[↓↑→←⇒⇨➡])+\s*$/gmu;
 const INSTRUCTION_HEADING_RE = /^#{2,6}\s+(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用)|^#{2,6}\s+(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:如|若|如果)(?:涉及|不涉及|适用|不适用)|^#{2,6}\s+.*(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成)|^#{2,6}\s+.*(?:按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|说明要求|注意事项)\s*$/gmu;
 const INSTRUCTION_TITLE_RE = /^(?:\d+(?:\.\d+)*\s*)?(?:[-—–]\s*)?(?:(?:判断|判定|识别|确认)?是否(?:涉及|涉|需要|适用).*|(?:如|若|如果)(?:涉及|不涉及|适用|不适用).*|.*(?:根据|结合).{0,12}(?:实际情况|项目情况|资料情况).{0,8}(?:判断|确定|编写|生成).*|.*(?:按需(?:生成|编写)|视情况|判断后|生成要求|编写要求|说明要求|注意事项))\s*$/u;
+// 阶段五语义升级：指令型标题弱词根召回（INSTRUCTION_HEADING_RE 强句式保留确定性），
+// 词根命中标题由语义 gate 复核确认"指令/说明类"语义才报问题（防误杀正常小节标题）
+const INSTRUCTION_WEAK_HINT_RE = /注意事项|如何|怎么写|按需|视情况|是否/u;
+const INSTRUCTION_HEADING_SEMANTIC_PROTOTYPES = [
+  '如何编写施工方案的写作说明标题',
+  '根据项目情况判断的注意事项标题',
+  '按需生成的编写要求与说明标题',
+] as const;
+const INSTRUCTION_HEADING_LEGAL_PROTOTYPES = [
+  '危大工程专项施工方案与安全措施',
+  '质量验收标准与检测要求',
+  '成品保护与移交管理措施',
+] as const;
+
+async function buildInstructionHeadingGate(embedDocuments?: (texts: string[]) => Promise<number[][]>) {
+  return buildSemanticGate({
+    prototypes: [...INSTRUCTION_HEADING_SEMANTIC_PROTOTYPES],
+    negativePrototypes: [...INSTRUCTION_HEADING_LEGAL_PROTOTYPES],
+    embedDocuments,
+  });
+}
 
 function instructionTitleCandidate(value: string) {
   return value
@@ -1034,10 +1056,24 @@ export function plannedStructurePrompt(template: DocumentTemplate) {
   ].filter(Boolean).join('\n')).join('\n');
 }
 
-export function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumentRuleSet): ValidationIssue[] {
+export async function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumentRuleSet, embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<ValidationIssue[]> {
   if (!rules) return [];
   const issues: ValidationIssue[] = [];
+  // 指令型标题检测：强句式（INSTRUCTION_HEADING_RE）确定性命中 + 弱词根召回语义复核（semanticGate 统一入口），
+  // 防"如何写/注意事项"类变体漏网，同时防正常小节标题误杀
   const instructionHeadings = [...markdown.matchAll(INSTRUCTION_HEADING_RE)].map(match => (match[0] || '').replace(/^#{2,6}\s+/u, '').trim()).filter(Boolean);
+  // /g 正则的 test() 会累积 lastIndex，语义召回过滤用无全局标志副本
+  const instructionHeadingTest = new RegExp(INSTRUCTION_HEADING_RE.source, 'mu');
+  const weakCandidates = [...markdown.matchAll(/^#{2,6}\s+(.+)$/gmu)]
+    .map(match => ({ raw: match[0] || '', title: match[1]?.replace(/^\d+(?:\.\d+)*[、.．\s]*\s*/u, '').trim() || '' }))
+    .filter(item => item.title && !instructionHeadingTest.test(item.raw) && INSTRUCTION_WEAK_HINT_RE.test(item.title));
+  if (weakCandidates.length > 0) {
+    const gate = await buildInstructionHeadingGate(embedDocuments);
+    const flags = await gate(weakCandidates.map(item => item.title));
+    weakCandidates.forEach((item, index) => {
+      if (flags[index]) instructionHeadings.push(item.title);
+    });
+  }
   if (instructionHeadings.length > 0) issues.push({ level: 'error', message: `正文存在疑似提示词指令标题：${instructionHeadings.slice(0, 5).join('、')}`, suggestion: '请删除或改写为正式施工组织设计小节标题。' });
   const hasCover = /document-cover|^#\s+/mu.test(markdown);
   const hasToc = /^##\s+目录\s*$/mu.test(markdown);
