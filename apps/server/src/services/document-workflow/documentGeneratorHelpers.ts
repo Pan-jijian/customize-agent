@@ -1312,6 +1312,23 @@ export function optimizeChapterEvidence(chapter: DocumentTemplateChapter, eviden
   return selectEvidenceByBudget(scored, options, diagnostics);
 }
 
+/**
+ * 4.12.16 语义排序前置词面粗筛：章节证据全量本地 bge 嵌入是检索段 CPU 瓶颈
+ * （6 章全并发 × 每章 ~1.5 万条 ≈ 9 万条推理，真实生成实测 20+ 分钟、61 分钟仅 3/6 章成稿）。
+ * 先按词面/重要性分数（与 optimizeChapterEvidence baseScore 同口径）取 topN 候选，
+ * 仅候选池进入嵌入；未入池条目语义分为 0 退回 baseScore 口径，证据全量保留不丢。
+ * 默认 3000（注入预算上限 ~300 条切片的 10 倍冗余），env DOCUMENT_SEMANTIC_TOP_CANDIDATES 可调。
+ */
+export function preselectSemanticCandidates(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[], topN: number): DocumentEvidence[] {
+  if (topN <= 0 || evidence.length <= topN) return evidence;
+  const scored = evidence.map(item => ({
+    item,
+    lexical: evidencePromptImportance(item, chapter.requiredFacts) * processingTypeWeightForChapter(chapter, item.processingType) + chapterTextScore(chapter, item),
+  }));
+  scored.sort((left, right) => right.lexical - left.lexical);
+  return scored.slice(0, topN).map(entry => entry.item);
+}
+
 export function compactChapterQueries(chapter: DocumentTemplateChapter, queries: string[], chapterBasicQueries: string[]) {
   const sectionQuery = (chapter.sections || []).slice(0, 10).join(' ');
   const requiredFactQuery = chapter.requiredFacts.slice(0, 10).join(' ');

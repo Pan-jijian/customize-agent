@@ -535,7 +535,7 @@ export async function planChapterStructure(input: {
   const planned = (await planChapterStructureWithLlm(input).catch(error => {
     const failed: PlannedChapterStructure = { blocks: [], coveredSections: [], fallbackSections: [], llmPlanned: false, llmFailure: error instanceof Error ? error.message : String(error) };
     return failed;
-  })) ?? { blocks: [], coveredSections: [], fallbackSections: [], llmPlanned: false, llmFailure: 'LLM 调用异常' };
+  })) ?? { blocks: [], coveredSections: [], fallbackSections: [], llmPlanned: false, llmFailure: '输入细目 ≤8 条，跳过 LLM 规划（设计行为）' };
   if (planned.blocks.length > 0) return planned;
   const inputSections = cleanInputSections(input.chapter);
   const fallback = fallbackStructureForSections(inputSections, input.chapter.title, input.targetWords);

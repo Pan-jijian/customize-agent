@@ -30,17 +30,21 @@ export const SEMANTIC_COVERAGE_THRESHOLD = 0.6;
 const embedCache = new Map<string, number[]>();
 let embedCacheHits = 0;
 let embedCacheMisses = 0;
-// 4.12.12 分层阈值：≤64 字的短文本（章节标题/评分条目/查询词）高频重复值得缓存；
-// 长文本（证据切片/正文句）高度唯一，不查不写缓存避免挤占 LRU 容量
-const EMBED_CACHE_MAX_TEXT_CHARS = 64;
+// 4.12.16 缓存阈值放开：证据切片（semanticEvidenceText 截断 600 字）是嵌入量最大的调用方，
+// 6 章全并发 × 每章 ~1.5 万条 ≈ 9 万条 CPU 推理，实测检索段 20+ 分钟（真实生成 61 分钟仅 3/6 章成稿）。
+// 章节证据池高度重叠（同一批资料切片），跨章缓存命中可省 5/6 嵌入量；
+// 阈值升到 2000 覆盖证据切片与查询词，正文长句（>2000 字）仍不缓存避免挤占
+const EMBED_CACHE_MAX_TEXT_CHARS = 2000;
 
 function embedCacheEnabled() {
   return process.env.DOCUMENT_EMBED_CACHE !== '0';
 }
 
 function embedCacheMaxSize() {
-  const size = Number(process.env.DOCUMENT_EMBED_CACHE_SIZE || 2000);
-  return Number.isFinite(size) && size > 0 ? size : 2000;
+  // 4.12.16：容量 2000 → 40000。证据切片全量入缓存后，单文档 6 章 × 每章 3000 语义候选（粗筛后）
+  // ≈ 1.8 万条 × 600 字，跨章去重后唯一切片约 1 万；4 万容量覆盖一次完整生成且不逐出高频短文本
+  const size = Number(process.env.DOCUMENT_EMBED_CACHE_SIZE || 40000);
+  return Number.isFinite(size) && size > 0 ? size : 40000;
 }
 
 /** 单测隔离：清空缓存与计数器（模块级状态跨测试共享，必须显式清理） */

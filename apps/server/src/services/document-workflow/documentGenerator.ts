@@ -43,7 +43,7 @@ import { chapterSectionFactUsageIssues, reviewGlobalConsistency } from './chapte
 import { buildRuntimePromptRules, cleanSectionTitleArtifacts, extractPromptStructuralRules, normalizePlannedSections, planChapterSectionsWithLlm, runtimePromptRulesPrompt } from './promptRuleExtraction';
 import { retrieveWebEvidence, webAccessPrompt } from './webResearchService';
 import { finalizeGeneration } from './documentPipeline';
-import { anchorTitleForSection, chapterCompletionStatus, chapterGenerationTargets, collectProjectBasicEvidence, compactChapterQueries, finalizeChapterContentQuality, hasDepthWarningIssues, kbIndexHealth, optimizeChapterEvidence, PROJECT_BASIC_FACT_QUERIES, qualityFirstEvidenceItemLimit, repairTargetWordsForSection, resolveChapterPromptExecution, resolveDocumentGenerationEvidenceLimit, retrieveSectionEvidence, searchWeightsForChapter, semanticEvidenceText, stripBidDisciplineSentencesSemantic } from './documentGeneratorHelpers';
+import { anchorTitleForSection, chapterCompletionStatus, chapterGenerationTargets, collectProjectBasicEvidence, compactChapterQueries, finalizeChapterContentQuality, hasDepthWarningIssues, kbIndexHealth, optimizeChapterEvidence, preselectSemanticCandidates, PROJECT_BASIC_FACT_QUERIES, qualityFirstEvidenceItemLimit, repairTargetWordsForSection, resolveChapterPromptExecution, resolveDocumentGenerationEvidenceLimit, retrieveSectionEvidence, searchWeightsForChapter, semanticEvidenceText, stripBidDisciplineSentencesSemantic } from './documentGeneratorHelpers';
 import { buildProjectGraph } from './projectGraph';
 import { referenceQualityTargetLines, referenceWritingSkeletonLines } from './templateReferenceService';
 import { buildScopedProjectIntelligence, constructionOrganizationPrompt } from './projectIntelligence';
@@ -882,8 +882,13 @@ export async function generateDocumentDraft(input: { templateId: string; require
     // 写作链证据安全过滤：投标/评标纪律、评标办法、商务报价类证据（含搜索召回/深召回路径）不进写手与事实需求链
     if (excludedEvidenceKeys.size > 0) scopedEvidence = scopedEvidence.filter(item => !excludedEvidenceKeys.has(evidenceSafetyKey(item)));
     // P1 语义排序：章节证据按“章查询 ↔ 证据文本”本地 bge-small 余弦排序（语义主键，证据全量保留、无预算截断）。
-    // 候选池全量参与语义排序（本地 bge 批量推理，无数量压力），排序只影响注入顺序不影响去留
-    const semanticPool = scopedEvidence;
+    // 4.12.16 候选池词面粗筛：全量 ~1.5 万条本地嵌入是检索段 CPU 瓶颈（实测 20+ 分钟），
+    // 先按词面/重要性分数取 topN 候选（默认 3000），仅候选池嵌入，未入池条目语义分为 0 退回 baseScore 口径
+    const semanticTopCandidates = (() => {
+      const raw = Number(process.env.DOCUMENT_SEMANTIC_TOP_CANDIDATES);
+      return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 3000;
+    })();
+    const semanticPool = preselectSemanticCandidates(chapter, scopedEvidence, semanticTopCandidates);
     const chapterSemanticSimilarity = await buildSemanticSimilarity([chapterCriteriaText(chapter)], semanticPool.map(semanticEvidenceText));
     let evidence = optimizeChapterEvidence(chapter, scopedEvidence, { preservePinned: true, semantic: { similarity: chapterSemanticSimilarity, queryText: chapterCriteriaText(chapter) } }, generationDiagnostics);
     // 源级同口径裁决前置到证据切片：资料原文（如招标正文 4645㎡）被补疑修正后，进入写作 LLM 的切片必须先改写成裁决值，
