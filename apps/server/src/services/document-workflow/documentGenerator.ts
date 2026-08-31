@@ -634,7 +634,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-blueprint', status: 'success', message: '已生成全局事实主表与文档蓝图，后续章节和小节将共用同一套专业约束', details: documentBlueprintContext.split('\n').slice(0, 12) }, { subtitle: '全局蓝图' }));
   }
   const documentBudget = buildDocumentBudget({ requirement: input.requirement, promptTexts, template, chapters: effectiveChapters, spec: documentSpec });
-  const plannedDocument = planDocument({ template, context: agentWorkflow, title: template.name });
+  const plannedDocument = await planDocument({ template, context: agentWorkflow, title: template.name });
   agentWorkflow.documentPlan = plannedDocument.plan;
   agentWorkflow.nodes.push(plannedDocument.node);
   upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'agent-document-planner', status: 'success', message: plannedDocument.node.outputSummary || 'Agent 文档规划完成', details: plannedDocument.plan.chapters.map(chapter => `${chapter.title}：${chapter.sections.length} 条细目`) }, { subtitle: 'Agent Document Planner', order: progressStages.length }));

@@ -4,6 +4,7 @@ import type { PlannedChapterStructure } from './chapterPlanner';
 import { BID_DISCIPLINE_PHRASES, extractSection, hasProcessSequenceExpression, isBidDisciplineSentence, stableHash, stringifyFactValue } from './utils';
 import { documentTextLength } from './budget';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
+import { buildSemanticSimilarity } from './semanticSimilarity';
 
 export interface AgentSectionPlan {
   title: string;
@@ -110,25 +111,75 @@ function graphNodeSummary(graph: ProjectGraph, query: string) {
   return nodes.filter(node => normalizeText(node).includes(normalizedQuery) || query.split(/[\s、，,；;：:（）()【】[-]+/u).filter(token => token.length >= 2).some(token => normalizeText(node).includes(normalizeText(token))));
 }
 
+/** 语义查询扩展类别：keywords 为附加检索查询词（领域知识），prototype 为类别语义原型（供 bge 嵌入判别）。 */
+const QUERY_EXPANSION_CATEGORIES = [
+  { keywords: '安全 文明 危大 风险 应急 临边 洞口 消防 临电 高处 起重 吊装 基坑 脚手架 模板 支护 图纸 施工说明 审查意见', prototype: '安全生产 文明施工 危大工程 应急预案 风险管控' },
+  { keywords: '工期 日历天 节点 进度 计划 开工 竣工 关键线路', prototype: '施工工期 进度计划 关键节点 开工时间 竣工时间' },
+  { keywords: '质量 验收 合格 标准 规范 检验批 隐蔽 复试 样板', prototype: '质量验收 质量目标 检验批 隐蔽工程 材料复试' },
+  { keywords: '清单 工程量 材料 设备 机械 劳动力 规格 型号 数量 单位', prototype: '人材机资源 劳动力配置 材料供应 设备机械 工程量清单' },
+  { keywords: '工程名称 项目名称 建设地点 建筑面积 建设规模 招标范围 施工范围', prototype: '工程概况 项目概况 建设地点 建设规模 招标范围' },
+  { keywords: '施工 组织 部署 区段 流水 作业面 工序 穿插 图纸 清单', prototype: '施工部署 流水施工 施工区段 工序穿插' },
+];
+
+/** 语义类别判定阈值：标题嵌入与类别原型嵌入的余弦 ≥ 此值即附加该类查询词（多挂查询词仅拓宽检索面，漏挂由退化小节兜底保护） */
+const QUERY_EXPANSION_CATEGORY_THRESHOLD = 0.35;
+
+/** 语义查询扩展开关：DOCUMENT_QUERY_EXPANSION_SEMANTIC=0 回退纯正则（确定性兜底仍保留） */
+function queryExpansionSemanticEnabled() {
+  return process.env.DOCUMENT_QUERY_EXPANSION_SEMANTIC !== '0';
+}
+
+/**
+ * 标题 → 查询类别语义分类（bge 嵌入余弦判别，正则仅作降级兜底）：
+ * 标题形态不可枚举（「确保人、材、机的保障体系与措施」「人机料保障体系」等），
+ * 正则枚举必然滞后于新形态；语义模型按类别原型判别，新形态标题只要语义属于资源/工期/质量等类别即附加对应查询词。
+ * 嵌入失败/模型不可用返回空 Map（调用方回退确定性正则）；标题嵌入复用全局 LRU 缓存。
+ */
+async function classifyQueryExpansionTitles(titles: string[], embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<Map<string, string[]>> {
+  const classified = new Map<string, string[]>();
+  if (titles.length === 0) return classified;
+  const prototypes = QUERY_EXPANSION_CATEGORIES.map(category => category.prototype);
+  let similarity: (leftText: string, rightText: string) => number;
+  try {
+    similarity = await buildSemanticSimilarity(titles, prototypes, embedDocuments);
+  } catch {
+    return classified;
+  }
+  for (const title of titles) {
+    const matched: string[] = [];
+    for (const category of QUERY_EXPANSION_CATEGORIES) {
+      if (similarity(title, category.prototype) >= QUERY_EXPANSION_CATEGORY_THRESHOLD) matched.push(category.keywords);
+    }
+    if (matched.length > 0) classified.set(title, matched);
+  }
+  return classified;
+}
+
+/** 确定性查询扩展（降级兜底）：正则命中标题关键词时附加类别查询词。
+ * 仅作语义分类失败/关闭时的兜底，不作为主判据（标题形态不可枚举，正则只能覆盖已知形态）。 */
 function semanticQueryExpansions(title: string) {
   const queries: string[] = [];
   if (/重点|难点|危大|风险|安全|应急/u.test(title)) queries.push('安全 文明 危大 风险 应急 临边 洞口 消防 临电 高处 起重 吊装 基坑 脚手架 模板 支护 图纸 施工说明 审查意见');
   if (/工期|进度|节点|计划/u.test(title)) queries.push('工期 日历天 节点 进度 计划 开工 竣工 关键线路');
   if (/质量|验收|标准|实测|通病/u.test(title)) queries.push('质量 验收 合格 标准 规范 检验批 隐蔽 复试 样板');
-  // 「人、材、机」顿号形态必须兼容：/人材机/ 匹配连续字符，标题常用顿号分隔，未命中则资源类章节
-  // 失去兜底查询（真实生成回归：章节任务未就绪根因之一）
+  // 「人、材、机」顿号形态兼容：/人材机/ 匹配连续字符，标题常用顿号分隔，兜底不得漏
   if (/资源|材料|机械|设备|人材机|人[、,，]材[、,，]机/u.test(title)) queries.push('清单 工程量 材料 设备 机械 劳动力 规格 型号 数量 单位');
   if (/概况|说明|依据|范围/u.test(title)) queries.push('工程名称 项目名称 建设地点 建筑面积 建设规模 招标范围 施工范围');
   if (/部署|施工|流水|区段|组织/u.test(title)) queries.push('施工 组织 部署 区段 流水 作业面 工序 穿插 图纸 清单');
   return queries;
 }
 
-function sectionQueries(chapter: DocumentTemplateChapter, sectionTitle: string) {
+function sectionQueries(chapter: DocumentTemplateChapter, sectionTitle: string, chapterExpansions: string[], sectionExpansions: string[]) {
+  // 语义分类与确定性正则取并集：语义负责新形态标题，正则负责模型不可用时的兜底
+  const regexChapterExpansions = semanticQueryExpansions(chapter.title);
+  const regexSectionExpansions = semanticQueryExpansions(sectionTitle);
   return [...new Set([
     chapter.title,
     sectionTitle,
-    ...semanticQueryExpansions(chapter.title),
-    ...semanticQueryExpansions(sectionTitle),
+    ...chapterExpansions,
+    ...sectionExpansions,
+    ...regexChapterExpansions.filter(query => !chapterExpansions.includes(query)),
+    ...regexSectionExpansions.filter(query => !sectionExpansions.includes(query)),
     ...(chapter.queries || []),
     ...(chapter.requiredFacts || []),
   ].filter(Boolean))];
@@ -154,17 +205,31 @@ function sectionMinChars(title: string) {
   return 420;
 }
 
-export function planDocument(input: { template: DocumentTemplate; context: AgentWorkflowContext; title?: string }): { plan: AgentDocumentPlan; node: AgentWorkflowNode } {
+export async function planDocument(input: { template: DocumentTemplate; context: AgentWorkflowContext; title?: string; embedDocuments?: (texts: string[]) => Promise<number[][]> }): Promise<{ plan: AgentDocumentPlan; node: AgentWorkflowNode }> {
   const startedAt = Date.now();
-  const chapters = input.template.chapters.map(chapter => {
+  const chapterShapes = input.template.chapters.map(chapter => {
     const sectionTitles = chapter.sections?.length ? chapter.sections : [chapter.title];
+    return {
+      chapter,
+      sectionTitles,
+      requiredFacts: [...new Set([...(chapter.requiredFacts || []), chapter.title])],
+      evidenceQueries: [...new Set([chapter.title, ...(chapter.queries || []), ...(chapter.requiredFacts || [])])],
+    };
+  });
+  // 语义查询类别分类：章节标题 + 小节标题一次性批量嵌入判别（复用全局 LRU 缓存），失败回退确定性正则
+  const classificationTitles = [...new Set([...chapterShapes.map(item => item.chapter.title), ...chapterShapes.flatMap(item => item.sectionTitles)])];
+  const semanticExpansions = queryExpansionSemanticEnabled()
+    ? await classifyQueryExpansionTitles(classificationTitles, input.embedDocuments)
+    : new Map<string, string[]>();
+  const chapters = chapterShapes.map(({ chapter, sectionTitles, requiredFacts, evidenceQueries }) => {
+    const chapterExpansions = semanticExpansions.get(chapter.title) || [];
     return {
       chapterId: chapter.id,
       title: chapter.title,
       purpose: chapter.purpose || sectionObjective(chapter.title),
-      requiredFacts: [...new Set([...(chapter.requiredFacts || []), chapter.title])],
+      requiredFacts,
       requiredGraphNodes: [chapter.title],
-      evidenceQueries: [...new Set([chapter.title, ...(chapter.queries || []), ...(chapter.requiredFacts || [])])],
+      evidenceQueries,
       qualityRules: ['项目专属事实必须来自锁定资料范围，不得混入其他项目名称', '法规规范等公共知识不受锁定范围限制', '不得出现后台话术和兜底措辞', '章节必须覆盖规划小节'],
       forbiddenPhrases: FORMAL_FORBIDDEN_PHRASES,
       sections: sectionTitles.map(sectionTitle => ({
@@ -172,7 +237,7 @@ export function planDocument(input: { template: DocumentTemplate; context: Agent
         objective: sectionObjective(sectionTitle),
         requiredFacts: [...new Set([sectionTitle, ...(chapter.requiredFacts || [])])],
         requiredGraphNodes: [sectionTitle],
-        evidenceQueries: sectionQueries(chapter, sectionTitle),
+        evidenceQueries: sectionQueries(chapter, sectionTitle, chapterExpansions, semanticExpansions.get(sectionTitle) || []),
         forbiddenPhrases: FORMAL_FORBIDDEN_PHRASES,
         minChars: sectionMinChars(sectionTitle),
       })),
