@@ -115,7 +115,9 @@ function semanticQueryExpansions(title: string) {
   if (/重点|难点|危大|风险|安全|应急/u.test(title)) queries.push('安全 文明 危大 风险 应急 临边 洞口 消防 临电 高处 起重 吊装 基坑 脚手架 模板 支护 图纸 施工说明 审查意见');
   if (/工期|进度|节点|计划/u.test(title)) queries.push('工期 日历天 节点 进度 计划 开工 竣工 关键线路');
   if (/质量|验收|标准|实测|通病/u.test(title)) queries.push('质量 验收 合格 标准 规范 检验批 隐蔽 复试 样板');
-  if (/资源|材料|机械|人材机|设备/u.test(title)) queries.push('清单 工程量 材料 设备 机械 劳动力 规格 型号 数量 单位');
+  // 「人、材、机」顿号形态必须兼容：/人材机/ 匹配连续字符，标题常用顿号分隔，未命中则资源类章节
+  // 失去兜底查询（真实生成回归：章节任务未就绪根因之一）
+  if (/资源|材料|机械|设备|人材机|人[、,，]材[、,，]机/u.test(title)) queries.push('清单 工程量 材料 设备 机械 劳动力 规格 型号 数量 单位');
   if (/概况|说明|依据|范围/u.test(title)) queries.push('工程名称 项目名称 建设地点 建筑面积 建设规模 招标范围 施工范围');
   if (/部署|施工|流水|区段|组织/u.test(title)) queries.push('施工 组织 部署 区段 流水 作业面 工序 穿插 图纸 清单');
   return queries;
@@ -196,9 +198,17 @@ export function planChapterTask(input: { plan: AgentDocumentPlan; chapter: Docum
   if (!chapterPlan) throw new Error(`缺少章节计划：${input.chapter.title}`);
   const facts = input.context.facts.filter(fact => chapterPlan.evidenceQueries.some(query => factMatches(fact, query)) || chapterPlan.requiredFacts.some(query => factMatches(fact, query)));
   const sections = chapterPlan.sections.map(section => {
+    // 退化小节兜底（真实生成回归）：模板无预设小节的章节，planDocument 用章节标题充当唯一小节；
+    // 概括性标题（如「确保人、材、机的保障体系与措施」）token 化后几乎不可能与证据/图谱文本词面命中，
+    // 但章节级证据/图谱上下文天然属于该小节（章=节），不得因词面未命中而判「缺少事实、图谱或证据支撑」
+    const degradedSection = chapterPlan.sections.length === 1 && section.title === input.chapter.title;
     const sectionFacts = input.context.facts.filter(fact => section.evidenceQueries.some(query => factMatches(fact, query)) || section.requiredFacts.some(query => factMatches(fact, query))).slice(0, 24);
-    const sectionEvidence = input.evidence.filter(item => section.evidenceQueries.some(query => evidenceMatches(item, query))).slice(0, 24);
-    const graphNodes = section.requiredGraphNodes.flatMap(query => graphNodeSummary(input.context.baseProjectGraph, query)).slice(0, 12);
+    let sectionEvidence = input.evidence.filter(item => section.evidenceQueries.some(query => evidenceMatches(item, query))).slice(0, 24);
+    let graphNodes = section.requiredGraphNodes.flatMap(query => graphNodeSummary(input.context.baseProjectGraph, query)).slice(0, 12);
+    if (degradedSection) {
+      if (sectionEvidence.length === 0) sectionEvidence = input.evidence.slice(0, 24);
+      if (graphNodes.length === 0) graphNodes = graphNodeSummary(input.context.baseProjectGraph, input.chapter.title).slice(0, 12);
+    }
     const issues: ValidationIssue[] = [];
     const isPublicKnowledgeSection = /法律法规|法规|规章|规范标准|标准规范|行业标准|现行规范|编制依据/u.test(section.title);
     if (!isPublicKnowledgeSection && sectionEvidence.length === 0 && sectionFacts.length === 0 && graphNodes.length === 0) issues.push({ level: 'error', severity: 'blocker', category: 'evidence_coverage', owner: 'system', message: `${section.title} 缺少事实、图谱或证据支撑`, suggestion: '应先定向检索和抽取事实，不能生成占位正文。' });
