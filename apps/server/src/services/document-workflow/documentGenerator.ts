@@ -16,10 +16,10 @@ import { evidenceMatchesFact } from './factMatching';
 import { plannedStructurePrompt, extractGeneratedSections } from './markdownComposer';
 import { buildDocumentBudget, documentTextLength } from './budget';
 import { sectionContentIntegrityIssues, crossChapterConsistencyIssues, processSpecConflictIssues, applyDeterministicConsistencyFixes } from './qualityValidation';
-import { buildDocumentBlueprintContext, buildDocumentBlueprintStructure, buildChapterScopedProjectContext } from './documentBlueprint';
+import { buildDocumentBlueprintContext, buildDocumentBlueprintStructure, buildChapterScopedProjectContext, composeScopedProjectContext } from './documentBlueprint';
 import { enrichConstructionOrgOutline } from './constructionOrgCatalog';
 import { validateBidStructureBeforeGeneration, extractEvaluationCriteriaItems, chapterCriteriaText, prioritizeOverviewSections } from './constructionBidStructure';
-import { buildSemanticSimilarity } from './semanticSimilarity';
+import { buildSemanticSimilarity, snapshotEmbedCacheStats } from './semanticSimilarity';
 import { partitionEvidenceByContentSafety, evidenceSafetyKey, filterOffTopicSectionsForChapters, buildBidProcedureJudge } from './evidenceContentSafety';
 import { emptyTenderRequirements, extractTenderRequirements, filterMandatoryClauseEvidence, hasTenderRequirements, mergeTenderRequirements, missingMandatoryFields, normalizeChapterTitleLine, preselectTenderRequirementEvidence, readCachedTenderRequirements, routeTenderRequirementsToChapters, tenderRequirementsCacheKey, tenderRequirementCheckItems, tenderRequirementSemanticQuery, tenderRequirementsSummary, tenderRequirementsWritingRules, writeCachedTenderRequirements } from './tenderRequirements';
 import { applyRequirementSectionAdditions, calibrateOutlineSectionsToRequirements } from './requirementCalibration';
@@ -623,7 +623,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
   const slimChapterContextEnabled = process.env.DOCUMENT_CONTEXT_SLIM_CHAPTER !== '0';
   const chapterScopedProjectContext = (chapter: DocumentTemplateChapter) => {
     if (!slimChapterContextEnabled) return projectContext;
-    return [baseProjectContext, buildChapterScopedProjectContext({ chapterTitle: displayChapterTitle(chapter.title), structure: documentBlueprintStructure, requirementRules: tenderWritingRulesText })].filter(Boolean).join('\n\n');
+    // 3.1 消除 projectUnderstanding.prompt 双份注入：promptTexts（generationControlPrompt 成分）已全链路提供
+    // projectUnderstanding.prompt，章级 scoped 只保留 constructionOrgContext（不在任何 promptTexts 变体中）+ 章级蓝图
+    return composeScopedProjectContext({
+      constructionOrgContext,
+      scopedBlueprint: buildChapterScopedProjectContext({ chapterTitle: displayChapterTitle(chapter.title), structure: documentBlueprintStructure, requirementRules: tenderWritingRulesText }),
+    });
   };
   if (!scopedIntelligence) {
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'document-blueprint', status: 'success', message: '已生成全局事实主表与文档蓝图，后续章节和小节将共用同一套专业约束', details: documentBlueprintContext.split('\n').slice(0, 12) }, { subtitle: '全局蓝图' }));
@@ -1138,12 +1143,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
           }
           emitProgress(chapterDrafts);
           llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-planned-block-draft:${chapter.id}`, () =>
-            buildPlannedChapterContent({ template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: chapterScopedProjectContext(chapter), requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal }, plannedStructure)
+            buildPlannedChapterContent({ template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: chapterScopedProjectContext(chapter), requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, scopedProjectContext: slimChapterContextEnabled, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal }, plannedStructure)
           ));
         }
       } else if (useSectionFirst) {
         llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-section-draft:${chapter.id}`, () =>
-          buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext: chapterScopedProjectContext(chapter), requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts }), allowPartialResult: false, compactProjectContext: true, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal })
+          buildSectionParallelChapterContent({ template, chapter, evidence, missingFacts, promptTexts: agentEnhancedPromptTexts, projectContext: chapterScopedProjectContext(chapter), requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, projectRoot, modelName: getActiveModelWithProvider()?.model.name, materialContextHash: stableHash({ materialFilePaths, promptTexts: chapterPromptTexts }), allowPartialResult: false, compactProjectContext: true, scopedProjectContext: slimChapterContextEnabled, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: generationDiagnostics, signal: input.signal })
         ));
       } else {
         llmContent = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-draft:${chapter.id}`, () =>
@@ -1439,6 +1444,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
           promptTexts: [plannedPromptTextsRef || agentEnhancedPromptTexts, repairInstruction].filter(Boolean).join('\n\n'),
           projectContext: chapterScopedProjectContext(chapter),
           compactProjectContext: true,
+          scopedProjectContext: slimChapterContextEnabled,
           requirement: input.requirement,
           roleContext,
           targetWords: repairTargetWords,
@@ -1462,6 +1468,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
             promptTexts: repairInstruction,
             projectContext: chapterScopedProjectContext(chapter),
             compactProjectContext: true,
+            scopedProjectContext: slimChapterContextEnabled,
             requirement: input.requirement,
             roleContext,
             targetWords: repairTargetWords,
@@ -1789,8 +1796,20 @@ export async function generateDocumentDraft(input: { templateId: string; require
   {
     const evidenceStats = generationDiagnostics.evidence;
     const llmStats = generationDiagnostics.llm;
+    // 3.3 bge 嵌入全局 LRU 缓存统计：快照并入 diagnostics.semantic，供命中率验收（目标 >50%）
+    const embedStats = snapshotEmbedCacheStats();
+    generationDiagnostics.semantic = embedStats;
+    const embedTotal = embedStats.embedCacheHits + embedStats.embedCacheMisses;
+    const embedHitRate = embedTotal > 0 ? Math.round(embedStats.embedCacheHits * 10000 / embedTotal) / 100 : null;
     const cacheTotal = (llmStats.promptCacheHitTokens || 0) + (llmStats.promptCacheMissTokens || 0);
     const cacheHitRate = cacheTotal > 0 ? Math.round((llmStats.promptCacheHitTokens || 0) * 10000 / cacheTotal) / 100 : null;
+    // 3.4 上下文分层占比（L0 system 恒定/L1 任务级/L2 章级/L3 小节级）：供 A1/A2/A5 分层瘦身前后对比验收
+    const layerStats = llmStats.layerChars;
+    const layerTotal = layerStats ? layerStats.l0 + layerStats.l1 + layerStats.l2 + layerStats.l3 : 0;
+    const layerPercent = (value: number) => layerTotal > 0 ? Math.round(value * 10000 / layerTotal) / 100 : 0;
+    const layerReport = layerStats && layerTotal > 0
+      ? `上下文分层：L0 system 恒定 ${layerStats.l0} 字（${layerPercent(layerStats.l0)}%）、L1 任务级 ${layerStats.l1} 字（${layerPercent(layerStats.l1)}%）、L2 章级 ${layerStats.l2} 字（${layerPercent(layerStats.l2)}%）、L3 小节级 ${layerStats.l3} 字（${layerPercent(layerStats.l3)}%）`
+      : '上下文分层：本次生成未采集 L0-L3 分层统计';
     upsertProgressStage(progressStages, displayStage({
       type: 'validation',
       roleId: 'budget-trim-report',
@@ -1801,9 +1820,13 @@ export async function generateDocumentDraft(input: { templateId: string; require
         `检索：${evidenceStats.searchQueries} 组查询，耗时 ${Math.round(evidenceStats.searchMs / 1000)} 秒`,
         `LLM：${llmStats.calls} 次调用，失败 ${llmStats.failures} 次，重试 ${llmStats.retries} 次，schema 校验失败 ${llmStats.schemaFailures} 次`,
         `LLM 上下文输入：${llmStats.inputChars || 0} 字符（system+user），输入 ${llmStats.inputTokens || 0} token / 输出 ${llmStats.outputTokens || 0} token`,
+        layerReport,
         cacheHitRate === null
           ? '上下文缓存：提供商未返回 prefix cache 指标（prompt_cache_hit/miss_tokens），无法观测命中率'
           : `上下文缓存：命中 ${llmStats.promptCacheHitTokens} token / 未命中 ${llmStats.promptCacheMissTokens} token（命中率 ${cacheHitRate}%）——未命中占比高说明固定前缀未收敛，system/user 分离（A5）后应显著上升`,
+        embedHitRate === null
+          ? 'bge 嵌入缓存：本次生成无嵌入调用'
+          : `bge 嵌入缓存：命中 ${embedStats.embedCacheHits} 条 / 未命中 ${embedStats.embedCacheMisses} 条（命中率 ${embedHitRate}%，全局 LRU 容量 ${process.env.DOCUMENT_EMBED_CACHE_SIZE || 2000}）`,
         '防爆兜底类软限制（保留并逐项记录裁剪量）：selectEvidenceByBudget 的 maxItems/maxChars、uniqueEvidence 噪声过滤、evidenceBundlePrompt 的 maxChars、块级证据 top-k 截断、块级 facts 截断',
         '语义取舍类软限制（已迁移本地语义模型）：evaluationTexts 词面过滤→条目对象化、criterionFeatures 二字滑窗→bge-small 余弦、章节证据字符硬截→语义排序取 top-k',
         'LLM 输出侧：schema 校验（截断位置可诊断）、空响应重试提示词收敛、块成稿 maxTokens 按目标字数 1:1.2（不走 thinking ×6 放大）',

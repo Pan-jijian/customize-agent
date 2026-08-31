@@ -41,6 +41,18 @@ describe('internalTerminologyAnchorIssues', () => {
     expect(issues[0]!.message).toContain('后台数据库');
   });
 
+  it('L1 精确词命中「落位」（真实生成回归：清单项落位元话语泄漏进正文）', async () => {
+    const issues = await internalTerminologyAnchorIssues('本专业工程主要清单项落位如下：土方外运及基坑支护工程。');
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('落位');
+  });
+
+  it('L1 精确词命中「峰值口径」（真实生成回归：数据一致性修复要求写入正文）', async () => {
+    const issues = await internalTerminologyAnchorIssues('各阶段劳动力配置与分阶段投入明细表保持一致，不得出现其他峰值口径。');
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('峰值口径');
+  });
+
   it('L3 语义锚点命中句子时报内部话术问题', async () => {
     const issues = await internalTerminologyAnchorIssues(HIT_SENTENCE);
     expect(issues).toHaveLength(1);

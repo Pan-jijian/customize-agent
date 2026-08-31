@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DocumentDraftChapter, DocumentTemplate, GeneratedDocumentDraft, PromptDocumentRuleSet } from './types';
 import {
+  L0_WRITER_SYSTEM_PREFIX,
+  FORMAL_WRITING_RULES,
+  SECTION_GENERATION_SAFETY_RULES,
   applyPromptDocumentRules,
   cleanFormalSourcePhrases,
   composeDocumentMarkdown,
@@ -26,6 +29,7 @@ import {
   sourcePhraseIssues,
   stripMarkdownDocumentFence,
   tertiaryHeadingIssues,
+  writerSystemPrefix,
 } from './markdownComposer';
 
 vi.mock('@customize-agent/knowledge', () => {
@@ -334,5 +338,34 @@ describe('composeDocumentMarkdown', () => {
     expect(markdown).toContain('## 目录');
     expect(markdown).toContain('第一章 工程概况');
     expect(markdown).toContain('施工准备');
+  });
+});
+
+describe('L0_WRITER_SYSTEM_PREFIX（3.2 Writer 类 system 前缀统一）', () => {
+  it('L0 恒定前缀 = 专家身份 + 正式写作规则 + 小节安全规则', () => {
+    expect(L0_WRITER_SYSTEM_PREFIX.startsWith('你是施工组织设计文档写作专家。')).toBe(true);
+    expect(L0_WRITER_SYSTEM_PREFIX).toContain(FORMAL_WRITING_RULES);
+    expect(L0_WRITER_SYSTEM_PREFIX).toContain(SECTION_GENERATION_SAFETY_RULES);
+  });
+
+  it('writerSystemPrefix 默认返回 L0 前缀', () => {
+    const original = process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    delete process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    try {
+      expect(writerSystemPrefix('legacy')).toBe(L0_WRITER_SYSTEM_PREFIX);
+    } finally {
+      if (original !== undefined) process.env.DOCUMENT_L0_SYSTEM_PREFIX = original;
+    }
+  });
+
+  it('DOCUMENT_L0_SYSTEM_PREFIX=0 时回退 legacy 前缀（恢复原有 system 分布）', () => {
+    const original = process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    process.env.DOCUMENT_L0_SYSTEM_PREFIX = '0';
+    try {
+      expect(writerSystemPrefix('你是专业文档的小节生成专家。')).toBe('你是专业文档的小节生成专家。');
+    } finally {
+      if (original !== undefined) process.env.DOCUMENT_L0_SYSTEM_PREFIX = original;
+      else delete process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    }
   });
 });

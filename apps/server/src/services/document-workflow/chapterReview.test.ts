@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { chapterSectionFactUsageIssues, chunkTextForReview, reviewGlobalConsistency } from './chapterReview';
+import { buildSectionFactCard } from './chapterGeneration';
 import type * as LlmClientModule from './llmClient';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from './types';
 
@@ -154,5 +155,52 @@ describe('reviewGlobalConsistency', () => {
       diagnostics: DIAGNOSTICS,
       signal: controller.signal,
     })).rejects.toThrow('用户中止');
+  });
+});
+
+describe('buildSectionFactCard 量化参数落位清单（4.1 两步生成第一步）', () => {
+  it('默认在任务卡事实行之外注入词粒度精确参数清单', async () => {
+    const card = await buildSectionFactCard('工程概况', [evidenceItem({ content: '计划工期540日历天。\n混凝土强度等级C35，给水管DN300，管径300mm。' })], embedDocuments);
+    expect(card.prompt).toContain('【当前小节写作任务卡】');
+    expect(card.prompt).toContain('【量化参数落位清单】');
+    expect(card.preciseTokens).toContain('540日历天');
+    expect(card.preciseTokens).toContain('C35');
+    expect(card.preciseTokens).toContain('DN300');
+    expect(card.preciseTokens).toContain('300mm');
+    expect(card.prompt).toContain('540日历天');
+  });
+
+  it('事实行无法构成任务卡时清单仍独立注入', async () => {
+    // 「工作表」行被事实卡噪声过滤，但词粒度参数仍可从证据提取
+    const card = await buildSectionFactCard('工程概况', [evidenceItem({ content: '工作表 DN300 管线' })], embedDocuments);
+    expect(card.items).toEqual([]);
+    expect(card.preciseTokens).toContain('DN300');
+    expect(card.prompt).not.toContain('【当前小节写作任务卡】');
+    expect(card.prompt).toContain('【量化参数落位清单】');
+  });
+
+  it('报价明细类商务行参数不进入清单', async () => {
+    const card = await buildSectionFactCard('工程概况', [evidenceItem({ content: '投标报价明细：综合单价450元。' })], embedDocuments);
+    expect(card.preciseTokens).toEqual([]);
+    expect(card.prompt).not.toContain('【量化参数落位清单】');
+  });
+
+  it('OCR 噪声行参数不进入清单', async () => {
+    const card = await buildSectionFactCard('工程概况', [evidenceItem({ content: 'OCR识别错误：管径为DN300。' })], embedDocuments);
+    expect(card.preciseTokens).toEqual([]);
+  });
+
+  it('DOCUMENT_SECTION_QUANT_PLAN=0 时回退为不注入清单', async () => {
+    const previous = process.env.DOCUMENT_SECTION_QUANT_PLAN;
+    process.env.DOCUMENT_SECTION_QUANT_PLAN = '0';
+    try {
+      const card = await buildSectionFactCard('工程概况', [evidenceItem()], embedDocuments);
+      expect(card.preciseTokens).toEqual([]);
+      expect(card.prompt).not.toContain('【量化参数落位清单】');
+      expect(card.prompt).toContain('【当前小节写作任务卡】');
+    } finally {
+      if (previous === undefined) delete process.env.DOCUMENT_SECTION_QUANT_PLAN;
+      else process.env.DOCUMENT_SECTION_QUANT_PLAN = previous;
+    }
   });
 });

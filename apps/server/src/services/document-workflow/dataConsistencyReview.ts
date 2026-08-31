@@ -78,7 +78,8 @@ export async function reviewDataConsistency(markdown: string, options: { signal?
       '给定全文含数值的句子/表格行清单（编号与内容），找出互相矛盾的数值对：',
       '- 同一口径必须一致而实际数值不同：劳动力峰值多处不一致、同一面积两处数字不同、总工期与分项工期冲突、同一节点日期两处不一致、表格合计与明细之和不等、人数×工期与总工日不自洽；',
       '- 只报确定的矛盾（itemA 与 itemB 明确矛盾且置信度 ≥0.8），不得臆造；',
-      '- 不同口径的数值不算矛盾：建筑面积 vs 占地面积、不同施工阶段的各期人数、不同单位的表述；',
+      '- 不同口径的数值不算矛盾：建筑面积 vs 占地面积、不同单位的表述；分阶段各期人数互比不算矛盾（各阶段人数不同是正常配置）；',
+      '- 但总量控制上限与分阶段峰值必须自洽：“高峰期总人数控制在X人/高峰总人数X人以内/控制在X人以下”与任何“高峰投入Y人/阶段高峰Y人/峰值Y人”（Y>X）构成矛盾，必须上报；',
       'itemA/itemB 必须是清单中真实出现的原文片段（逐字引用编号对应句子或表格行的关键片段，含数值）。',
       '只输出 JSON，不得输出其他内容。',
     ].join('\n'),
@@ -108,7 +109,7 @@ export function dataConsistencyConflictIssue(conflict: DataConsistencyConflict):
     owner: 'llm',
     repairability: 'llm_repairable',
     message: `数据一致性矛盾（${conflict.kind}）：${conflict.description}（原文 A：“${conflict.itemA.slice(0, 60)}” ↔ 原文 B：“${conflict.itemB.slice(0, 60)}”）`,
-    suggestion: '全文数据口径必须唯一：以绑定资料（图纸/清单/招标文件）为准选定唯一值，统一矛盾数值对，删除或修正其余矛盾表述。',
+    suggestion: '全文数据必须一致：以绑定资料（图纸/清单/招标文件）为准选定唯一值，统一矛盾数值对，删除或修正其余矛盾表述。禁止将本缺陷描述与修复要求本身写入正文，输出仅限正文内容。',
   };
 }
 
@@ -119,6 +120,16 @@ export function conflictNumericKey(message: string): string {
     .filter(token => token.length >= 2))]
     .sort((a, b) => Number(a) - Number(b))
     .join('|');
+}
+
+/** 批量化复检（数据一致性修复轮末统一重审用）：一次全文审查后按数值对签名判定各 issue 消息是否仍残留。
+ * 与 per-issue 复检的逐字比对口径不同：修复会改写矛盾句原文，逐字比对在批量化下必然误判；
+ * 改用冲突数值对签名比对——签名仍在即矛盾未消除（宁多勿漏，残留由后续防线兜底）。 */
+export async function reviewDataConsistencyBatched(markdown: string, issueMessages: string[], options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {}): Promise<string[]> {
+  const conflicts = await reviewDataConsistency(markdown, options);
+  if (conflicts.length === 0) return [];
+  const conflictKeys = new Set(conflicts.map(conflict => conflictNumericKey(dataConsistencyConflictIssue(conflict).message)).filter(Boolean));
+  return issueMessages.filter(message => conflictKeys.has(conflictNumericKey(message)));
 }
 
 /**

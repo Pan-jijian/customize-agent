@@ -5,7 +5,18 @@
  * 底层 LLM 调用通过 invokeLlm 注入桩（模块内部词法绑定无法被 vi.mock 拦截）。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { callDocumentLlmJsonWithRetry, isContextOverflowLlmError, type DocumentJsonSchema } from './llmClient';
+import { callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, type DocumentJsonSchema } from './llmClient';
+import type { DocumentGenerationDiagnostics } from './types';
+
+// 无活跃模型配置：callDocumentLlm 观测累计发生在 provider 调用之前，
+// mock 掉 configService 让 getActiveModelWithProvider 返回 undefined，避免触碰真实配置存储
+vi.mock('@/services/common/configService', () => ({
+  getConfigStore: () => ({
+    load: () => ({ models: { reasoning: { active: '', list: [] }, action: { active: '', list: [] }, reader: { active: '', list: [] } }, providers: {} }),
+  }),
+}));
+
+const bareDiagnostics = () => ({ llm: { calls: 0, failures: 0, maxActive: 0, retries: 0, inputChars: 0 } }) as unknown as DocumentGenerationDiagnostics;
 
 const schema: DocumentJsonSchema = {
   type: 'object',
@@ -99,5 +110,39 @@ describe('isContextOverflowLlmError（上下文超长识别，含 JSON 输出截
   it('瞬态错误不误判为上下文超长（走瞬时重试而非降级重试）', () => {
     expect(isContextOverflowLlmError('fetch failed')).toBe(false);
     expect(isContextOverflowLlmError('429 too many requests')).toBe(false);
+  });
+});
+
+describe('callDocumentLlm 上下文观测（3.4 inputChars + L0-L3 分层累计）', () => {
+  it('calls/inputChars/layerChars 一次性累计（无活跃模型同样观测，不触发 provider）', async () => {
+    const diagnostics = bareDiagnostics();
+    const content = await callDocumentLlm('系统段', '用户段', false, {
+      diagnostics,
+      contextLayers: { l0: 3, l1: 4, l2: 5, l3: 6 },
+    });
+    expect(content).toBeUndefined();
+    expect(diagnostics.llm.calls).toBe(1);
+    expect(diagnostics.llm.inputChars).toBe('系统段'.length + '用户段'.length);
+    expect(diagnostics.llm.layerChars).toEqual({ l0: 3, l1: 4, l2: 5, l3: 6 });
+  });
+
+  it('多次调用分层字符逐次累加，未传层保持 0', async () => {
+    const diagnostics = bareDiagnostics();
+    await callDocumentLlm('s', 'p', false, { diagnostics, contextLayers: { l1: 5 } });
+    await callDocumentLlm('s', 'p', false, { diagnostics, contextLayers: { l2: 7 } });
+    expect(diagnostics.llm.layerChars).toEqual({ l0: 0, l1: 5, l2: 7, l3: 0 });
+    expect(diagnostics.llm.calls).toBe(2);
+  });
+
+  it('未传 contextLayers 时 layerChars 保持未初始化', async () => {
+    const diagnostics = bareDiagnostics();
+    await callDocumentLlm('s', 'p', false, { diagnostics });
+    expect(diagnostics.llm.inputChars).toBe(2);
+    expect(diagnostics.llm.layerChars).toBeUndefined();
+  });
+
+  it('contextLayerChars 过滤空段并求和（空字符串/false/undefined 自动忽略）', () => {
+    expect(contextLayerChars(['甲乙', '', false, undefined, '丙丁'])).toBe(4);
+    expect(contextLayerChars([])).toBe(0);
   });
 });

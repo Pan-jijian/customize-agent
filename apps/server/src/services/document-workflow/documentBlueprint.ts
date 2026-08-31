@@ -238,6 +238,13 @@ export function buildChapterScopedProjectContext(input: {
   return lines.join('\n');
 }
 
+/** 章级 scoped 上下文组装（3.1）：消除 projectUnderstanding.prompt 双份注入——
+ * projectUnderstanding.prompt 已由 promptTexts（generationControlPrompt 成分）全链路提供，
+ * 章级上下文只保留 constructionOrgContext（不在任何 promptTexts 变体中）+ 章级 scoped 蓝图 */
+export function composeScopedProjectContext(input: { constructionOrgContext?: string; scopedBlueprint: string }): string {
+  return [input.constructionOrgContext, input.scopedBlueprint].filter(Boolean).join('\n\n');
+}
+
 export function buildDocumentBlueprintContext(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string; referenceLines?: string[]; scopeConflicts?: NumericScopeConflict[] }) {
   // 去重后按重要性评分排序，保留最重要的核心事实（而非静默截断）
   const coreFactsResult = selectCoreFacts(input.factsModel);

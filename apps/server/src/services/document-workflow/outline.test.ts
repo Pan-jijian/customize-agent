@@ -51,6 +51,23 @@ describe('isTenderClauseFragmentTitle（招标条款碎片判别）', () => {
     expect(isTenderClauseFragmentTitle('2个月完成主体结构')).toBe(false);
   });
 
+  it('数字+参数列表碎片命中（真实生成回归：「5厘米，其余均为2.0厘米」目录畸形条目）', () => {
+    expect(isTenderClauseFragmentTitle('5厘米，其余均为2.0厘米')).toBe(true);
+  });
+
+  it('数字粘连名词碎片命中（真实生成回归：「1人员及职责」等目录畸形条目）', () => {
+    expect(isTenderClauseFragmentTitle('1人员及职责')).toBe(true);
+    expect(isTenderClauseFragmentTitle('2同招标公告发布媒介')).toBe(true);
+    expect(isTenderClauseFragmentTitle('1分为分割')).toBe(true);
+    // 量词开头合法标题不误伤
+    expect(isTenderClauseFragmentTitle('2个月完成主体结构')).toBe(false);
+    expect(isTenderClauseFragmentTitle('1层地下室结构施工')).toBe(false);
+  });
+
+  it('截断句碎片命中（真实生成回归：标题以未闭合书名号结尾）', () => {
+    expect(isTenderClauseFragmentTitle('本招标项目公共建筑根据《民用建筑设计统一标准》（')).toBe(true);
+  });
+
   it('补充条款类兜底短语命中（真实生成回归：模板静态 sections 混入「补充条款」）', () => {
     expect(isTenderClauseFragmentTitle('补充条款')).toBe(true);
     expect(isTenderClauseFragmentTitle('建议编制要求如下')).toBe(true);

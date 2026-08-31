@@ -526,7 +526,8 @@ export interface DocumentPerformanceMetric {
 export interface DocumentGenerationDiagnostics {
   strategy: DocumentGenerationStrategy;
   metrics: DocumentPerformanceMetric[];
-    llm: { calls: number; failures: number; maxActive: number; lastError?: string; retries: number; failureStreak?: number; schemaFailures?: number; thinkingWarning?: string; promptCacheHitTokens?: number; promptCacheMissTokens?: number; inputTokens?: number; outputTokens?: number; inputChars?: number };
+    llm: { calls: number; failures: number; maxActive: number; lastError?: string; retries: number; failureStreak?: number; schemaFailures?: number; thinkingWarning?: string; promptCacheHitTokens?: number; promptCacheMissTokens?: number; inputTokens?: number; outputTokens?: number; inputChars?: number; patchGuardHits?: number; patchGuardRejects?: number; qingtianDedupeHits?: number; qingtianDedupeSkipped?: number; layerChars?: { l0: number; l1: number; l2: number; l3: number } };
+    semantic: { embedCacheHits: number; embedCacheMisses: number };
   evidence: { raw: number; used: number; filteredNoise: number; budgetDropped: number; avgNoiseScore: number; avgFactDensity: number; searchQueries: number; searchMs: number; contextChars: number };
   quality: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number };
 }

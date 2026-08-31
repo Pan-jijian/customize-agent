@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compactSectionProjectContext } from './chapterGeneration';
+import { compactScopedProjectContext, compactSectionProjectContext } from './chapterGeneration';
 
 /**
  * 评分项要求段置顶保护回归（4.12.x 正文丢「确保黄山杯」根因之一）：
@@ -67,5 +67,59 @@ describe('compactSectionProjectContext（评分项要求段置顶保护）', () 
     // 要求段与事实段均在输出中
     expect(result.indexOf('【招标文件评分项要求')).toBeGreaterThanOrEqual(0);
     expect(result.indexOf('可信基础事实主表')).toBeGreaterThanOrEqual(0);
+  });
+});
+
+/**
+ * 3.5 scoped 专用紧凑化回归：章级 scoped 上下文含「章节专业任务卡」「章节实施方案」章级专用段
+ * （内容行为 `- ` 缩进行，不匹配 structured 行特征），通用紧凑化会截丢；专用函数必须整段保留，
+ * 矩阵段/全局段等其他 body 部分按预算截断。
+ */
+describe('compactScopedProjectContext（3.5 scoped 专用紧凑化）', () => {
+  const globalBlock = '【全局文档蓝图与一致性约束】\n文档类型画像：施工组织设计；评分重点：技术方案、进度\n文档目标：合肥某工程施工组织设计';
+  const factsBlock = '可信基础事实主表（本章相关）：\n- 建设地点：合肥市瑶海区\n- 计划工期：365日历天\n- 合同估算价：3000万元';
+  const matrixBlock = '事实覆盖矩阵：\n1. 工程概况：全部覆盖\n2. 施工进度计划：部分覆盖\n知识库确认覆盖矩阵：\n1. 工程概况：全部/正文\n2. 施工进度计划：部分/正文';
+  const taskCardBlock = '章节专业任务卡：\n章节任务卡：施工进度计划\n- 必须覆盖事实域：工期、进度、资源\n- 围绕总工期和关键线路组织';
+  const executionPlanBlock = '章节实施方案：\n章节实施方案：施工进度计划\n- 写作模式：正文；资料支撑度：部分\n- 章节目标：说明资源保障、穿插施工、纠偏机制';
+  const scopedContext = [globalBlock, factsBlock, matrixBlock, taskCardBlock, executionPlanBlock].join('\n');
+
+  it('任务卡段与实施方案段整段保留（通用紧凑化会截丢的内容）', () => {
+    const result = compactScopedProjectContext(scopedContext, 800);
+    expect(result).toContain('章节专业任务卡：');
+    expect(result).toContain('章节任务卡：施工进度计划');
+    expect(result).toContain('围绕总工期和关键线路组织');
+    expect(result).toContain('章节实施方案：');
+    expect(result).toContain('写作模式：正文');
+  });
+
+  it('事实主表段整段保留（含最后一条事实）', () => {
+    const result = compactScopedProjectContext(scopedContext, 800);
+    expect(result).toContain('可信基础事实主表（本章相关）');
+    expect(result).toContain('合同估算价：3000万元');
+  });
+
+  it('矩阵段/全局段按预算截断（保留段优先占用预算）', () => {
+    // body 需超过 max(400, maxChars - 保护段) 预算下限才触发截断：构造长矩阵段 + 收紧预算
+    const longMatrix = `事实覆盖矩阵：\n${Array.from({ length: 30 }, (_, index) => `${index + 1}. 章节${index}：部分覆盖`).join('\n')}`;
+    const result = compactScopedProjectContext(`${globalBlock}\n${factsBlock}\n${longMatrix}\n${taskCardBlock}\n${executionPlanBlock}`, 600);
+    // 保护段（事实主表+任务卡+实施方案）优先占用预算，body（矩阵/全局）被截断
+    expect(result).toContain('（上下文已截断，完整信息见绑定材料与证据）');
+    // 任务卡内容完整保留（宁超预算不丢专业展开方向）
+    expect(result).toContain('围绕总工期和关键线路组织');
+    expect(result).toContain('章节实施方案：');
+  });
+
+  it('评分项要求段与 scoped 段共存时全部置顶保留', () => {
+    const requirements = '【招标文件评分项要求（系统从绑定资料提取，必须逐条响应，零响应即评标失分）】\n1. 创优目标：确保黄山杯。';
+    const result = compactScopedProjectContext(`${scopedContext}\n${requirements}`, 900);
+    expect(result).toContain('确保黄山杯');
+    expect(result).toContain('章节专业任务卡：');
+    expect(result).toContain('合同估算价：3000万元');
+  });
+
+  it('无 scoped 专用段时退化为事实主表+要求保护（与通用紧凑化同口径）', () => {
+    const result = compactScopedProjectContext(`${globalBlock}\n${factsBlock}`, 600);
+    expect(result).toContain('可信基础事实主表（本章相关）');
+    expect(result).not.toContain('章节专业任务卡：');
   });
 });

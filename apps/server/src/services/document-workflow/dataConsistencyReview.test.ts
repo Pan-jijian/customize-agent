@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { callDocumentLlmJson } from './llmClient';
 import type * as LlmClientModule from './llmClient';
-import { buildDataConsistencyReviewCached, conflictNumericKey, dataConsistencyConflictIssue, numericSentencesForReview, reviewDataConsistency, type DataConsistencyConflict } from './dataConsistencyReview';
+import { buildDataConsistencyReviewCached, conflictNumericKey, dataConsistencyConflictIssue, numericSentencesForReview, reviewDataConsistency, reviewDataConsistencyBatched, type DataConsistencyConflict } from './dataConsistencyReview';
 import type { DocumentGenerationDiagnostics } from './types';
 
 vi.mock('./llmClient', async () => {
@@ -100,7 +100,47 @@ describe('dataConsistencyConflictIssue（转交付阻断 issue）', () => {
     expect(issue.message).toContain('数据一致性矛盾（labor）');
     expect(issue.message).toContain('“高峰期80人”');
     expect(issue.message).toContain('“高峰期120人”');
-    expect(issue.suggestion).toContain('数据口径必须唯一');
+    expect(issue.suggestion).toContain('全文数据必须一致');
+    expect(issue.suggestion).toContain('禁止将本缺陷描述与修复要求本身写入正文');
+  });
+});
+
+describe('reviewDataConsistencyBatched（修复轮末统一重审）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('一次全文审查判定全部 issue：签名重合即残留', async () => {
+    const issueA = dataConsistencyConflictIssue(conflict({ kind: 'labor', itemA: '高峰期80人', itemB: '高峰期120人', confidence: 0.9 })).message;
+    const issueB = dataConsistencyConflictIssue(conflict({ kind: 'area', itemA: '建筑面积4368m2', itemB: '建筑面积5200m2', confidence: 0.9 })).message;
+    llmMock.mockResolvedValue({
+      conflicts: [
+        conflict({ kind: 'labor', itemA: '高峰期80人', itemB: '高峰期120人', confidence: 0.9 }),
+      ],
+    });
+    const remaining = await reviewDataConsistencyBatched('高峰期投入80人。\n高峰期投入120人。', [issueA, issueB]);
+    expect(remaining).toEqual([issueA]);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('修复改写原文但数值对未变 → 仍判残留（宁多勿漏）', async () => {
+    const issueA = dataConsistencyConflictIssue(conflict({ kind: 'labor', itemA: '高峰期80人', itemB: '高峰期120人', confidence: 0.9 })).message;
+    // 修复后正文改写句式但数值对保留：签名比对不受逐字变化影响
+    llmMock.mockResolvedValue({
+      conflicts: [
+        conflict({ kind: 'labor', itemA: '现场高峰时段投入80人', itemB: '高峰期投入120人', confidence: 0.9 }),
+      ],
+    });
+    const remaining = await reviewDataConsistencyBatched('现场高峰时段投入80人。\n高峰期投入120人。', [issueA]);
+    expect(remaining).toEqual([issueA]);
+  });
+
+  it('当前审查无矛盾 → 全部消除', async () => {
+    const issueA = dataConsistencyConflictIssue(conflict({ confidence: 0.9 })).message;
+    llmMock.mockResolvedValue({ conflicts: [] });
+    const remaining = await reviewDataConsistencyBatched('高峰期投入80人。\n高峰期投入120人。', [issueA]);
+    expect(remaining).toEqual([]);
+    expect(llmMock).toHaveBeenCalledTimes(1);
   });
 });
 

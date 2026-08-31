@@ -63,7 +63,7 @@ export interface AgentReviewResult {
   repairable: boolean;
 }
 
-const FORMAL_FORBIDDEN_PHRASES = [
+export const FORMAL_FORBIDDEN_PHRASES = [
   '知识库', '系统暂未', '项目资料暂未', '资料未明确', '暂未明确', '待确认', '待资料复核', '待系统', '未检索到', '资料不足', '无法确认', '建议补充', '不适用', 'COL', '可核验信息',
   // 内部术语（词面标记）：术语合法性属语义判断，这里只做确定性 flag 触发 Repairer 按上下文语义改写，
   // 不做词面替换（“工作包”按语境应改写为“拆除工程/专业工程”等，逐词替换必然产生语义错误）

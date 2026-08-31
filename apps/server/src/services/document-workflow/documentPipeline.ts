@@ -22,7 +22,7 @@ import { constructionSystemCoverageIssues } from './constructionSystemCoverage';
 import { dangerousApplicabilityIssues } from './dangerousApplicability';
 import { stagePhrasingIssues } from './stagePhrasing';
 import { emergencySectionDepthIssues } from './emergencySectionDepth';
-import { buildDataConsistencyReviewCached, conflictNumericKey, dataConsistencyConflictIssue, reviewDataConsistency } from './dataConsistencyReview';
+import { buildDataConsistencyReviewCached, conflictNumericKey, dataConsistencyConflictIssue, reviewDataConsistency, reviewDataConsistencyBatched } from './dataConsistencyReview';
 import { buildStandardFinalValidationIssues } from './documentFinalValidation';
 import { buildDocumentProfileReport } from './documentProfiles';
 import { buildKnowledgeCoverageReport, knowledgeCoverageIssues } from './documentKnowledgeCoverage';
@@ -42,7 +42,7 @@ import { applyScopeConflictResolutions, buildCanonicalFacts, detectNumericScopeC
 import { comparableSectionHeadingMatches, extractSection, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE, systemConstraintLine } from './utils';
 import { formalTextGateIssues } from './agentWorkflow';
 import { displayStage, upsertProgressStage } from './progress';
-import { buildLlmSectionContent, buildValidationIssues, criticalSectionBlockerMinChars } from './chapterGeneration';
+import { buildLlmSectionContent, buildValidationIssues, criticalSectionBlockerMinChars, normalizeFactUsageText } from './chapterGeneration';
 import { chapterSectionFactUsageIssues } from './chapterReview';
 import { factCoverageIssues, factsWithEvidenceSource, criticalSectionBlockerLine, finalizeChapterContentQuality, finalizeFinalMarkdownStructure, normalizeProjectBasicInfoTable, partialChapterStatus, projectBasicPlaceholderIssues, slowMetricSummary, uncoveredImportantFacts, validateDraft } from './documentGeneratorHelpers';
 import { constructionOrgProfessionalAuditIssues } from './constructionOrgAudit';
@@ -518,6 +518,13 @@ function throttleExecutionStages(stages: DocumentExecutionStage[], limit = 300):
   return [...head, summary, ...tail];
 }
 
+/** 4.2 确定性一致性修复收敛（3 处→2 处）：finalize 入口的章节级修复默认去掉——其成果会被后续
+ * Final Gate 补写/评审轮修复的正文变更破坏，且 Final Gate 后必跑一次兜底，入口修复边际价值被覆盖。
+ * DOCUMENT_FINALIZE_ENTRY_FIX=1 恢复入口章节级修复（回退开关）。 */
+export function finalizeEntryConsistencyFixEnabled() {
+  return process.env.DOCUMENT_FINALIZE_ENTRY_FIX === '1';
+}
+
 export async function finalizeGeneration(p: {
   chapterDrafts: DocumentDraftChapter[];
   chapterDraftsByOrder: Array<DocumentDraftChapter | undefined>;
@@ -689,10 +696,12 @@ export async function finalizeGeneration(p: {
   });
   let finalMarkdown = finalizeDocumentMarkdown(composeDocumentMarkdown({ templateId: template.id, templateName: template.name, title: template.outputTitle, requirement: requirement || '', projectRoot, projectId, exportSettings: template.exportSettings, generationSettings: template.generationSettings, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems: [...new Set(missingItems)], validation, validationIssues, executionStages, exportGate: { passed: false, blockingIssues: [], checklist: [] }, assets, partialChapters: [], checkpointChapters: finalChapterDrafts, generatedAt: Date.now() }, { forbidDrawingImages: false, promptRules: promptDocumentRules }), finalChapterDrafts, { forbidDrawingImages: false, promptRules: promptDocumentRules }).markdown;
   finalMarkdown = finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(finalMarkdown, structuredFacts), projectMaterialSummary)))), template));
-  // 跨章一致性数值定点修复兜底：导出阶段用完整事实主表口径做最后一次确定性对齐，覆盖生成流程未修掉的
-  // 数值冲突（finalize 口径与生成阶段 preliminaryFactsModel 可能不同）；“检测定位=修复定位”，
-  // 修复后重建 finalMarkdown 再进入最终校验，避免残留冲突被导出门禁硬阻断
-  const finalDeterministicFix = await applyDeterministicConsistencyFixes(finalChapterDrafts, factsModel, scopeConflicts);
+  // 4.2 确定性一致性修复收敛（3 处→2 处）：finalize 入口的章节级修复默认去掉，其成果会被后续
+  // Final Gate 补写/评审轮修复的正文变更破坏，且 Final Gate 后必跑一次兜底（入口修复边际价值被覆盖）。
+  // DOCUMENT_FINALIZE_ENTRY_FIX=1 恢复入口章节级修复。
+  const finalDeterministicFix = finalizeEntryConsistencyFixEnabled()
+    ? await applyDeterministicConsistencyFixes(finalChapterDrafts, factsModel, scopeConflicts)
+    : { fixedCount: 0, details: [] as string[] };
   // 全文级定点修复探测：封面信息块/基本信息表等合成区由 facts 生成，章节修复覆盖不到；败选数值残留会
   // 被重跑检测持续拦截形成死循环（历史缺陷：用户环境建设规模败选值 10970㎡ 留在封面，修复器在章节
   // 正文找不到目标 fixedCount=0，导出门禁永久阻断）
@@ -724,6 +733,9 @@ export async function finalizeGeneration(p: {
   const initialDataConsistencyReviewTask = dataConsistencySnapshotEnabled ? reviewDataConsistencyCached(finalMarkdown) : undefined;
   // 防 unhandled rejection：主流程若先因 abort 抛出而无人 await 任务，此 catch 吸收 rejection（消费点仍正常传播）
   initialDataConsistencyReviewTask?.catch(() => undefined);
+  // 数据一致性复检批量化开关：data-consistency 复检为全文 LLM 审查（N 条冲突 per-issue 复检 = N 次全文审查），
+  // 开启后修复循环跳过单条复检，交付前轮末统一重审一次（数值对签名比对）判定残留；=0 恢复 per-issue 复检
+  const dataConsistencyBatchReviewEnabled = process.env.DOCUMENT_DATA_CONSISTENCY_BATCH_REVIEW !== '0';
   validationIssues = await buildFullValidationIssues({ documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier });
 
   let qualityBundle = await buildQualityReportBundle({ finalChapterDrafts, effectiveChapters, factsModel, allEvidence, finalMarkdown, validationIssues, retrievalCoverageReports, includeRetrievalCoverage: true, template });
@@ -767,6 +779,11 @@ export async function finalizeGeneration(p: {
       .sort((a, b) => Number(b.critical) - Number(a.critical));
     if (emptySectionIssues.length === 0) break;
     const repairDetails: string[] = [];
+    // D2 同款：按章分组 + 跨章并行——同章空小节合并为一个补写组内串行（单写者），跨章组批量并行
+    // （限幅 DOCUMENT_FINAL_GATE_REPAIR_CONCURRENCY，默认 3）；正文替换每次迭代读取最新章内容，
+    // 避免同章多小节修复互相覆盖（历史缺陷：展开旧章对象会丢掉同章前一节刚落位的补写）
+    const locatedEmptyGroups: Array<{ chapterIndex: number; items: Array<{ issue: ValidationIssue; chapterTitle: string; sectionTitle: string }> }> = [];
+    const locatedEmptyGroupByChapter = new Map<number, number>();
     for (const { issue, chapterTitle: parsedChapterTitle, sectionTitle } of emptySectionIssues) {
       let chapterTitle = parsedChapterTitle;
       let chapterIndex = chapterTitle ? finalChapterDrafts.findIndex(chapter => chapter.title === chapterTitle || chapterTitle.includes(chapter.title) || chapter.title.includes(chapterTitle)) : -1;
@@ -787,6 +804,24 @@ export async function finalizeGeneration(p: {
         continue;
       }
       chapterTitle = chapterTitle || draftChapter.title;
+      const existingIndex = locatedEmptyGroupByChapter.get(chapterIndex);
+      if (existingIndex === undefined) {
+        locatedEmptyGroupByChapter.set(chapterIndex, locatedEmptyGroups.length);
+        locatedEmptyGroups.push({ chapterIndex, items: [{ issue, chapterTitle, sectionTitle }] });
+      } else {
+        locatedEmptyGroups[existingIndex].items.push({ issue, chapterTitle, sectionTitle });
+      }
+    }
+    const finalGateRepairConcurrency = Math.max(1, Math.min(6, Number(process.env.DOCUMENT_FINAL_GATE_REPAIR_CONCURRENCY || 3)));
+    for (let groupOffset = 0; groupOffset < locatedEmptyGroups.length; groupOffset += finalGateRepairConcurrency) {
+      const batch = locatedEmptyGroups.slice(groupOffset, groupOffset + finalGateRepairConcurrency);
+      await Promise.all(batch.map(async ({ chapterIndex, items }) => {
+        const draftChapter = finalChapterDrafts[chapterIndex];
+        // 定位阶段已验证 templateChapter 存在，此处非空断言安全
+        const templateChapter = effectiveChapters.find(chapter => chapter.id === draftChapter.id || chapter.title === draftChapter.title)!;
+        // 同章空小节组内串行：与改造前 per-issue 串行语义一致（每节独立补写与验收）
+        for (const { issue, chapterTitle, sectionTitle } of items) {
+          const latestChapter = finalChapterDrafts[chapterIndex];
       const runningRepairStage = displayStage({ type: 'llm_review', roleId: `agent-final-gate-repair-${draftChapter.id}`, status: 'running', message: `Final Gate 正在补写空小节：${chapterTitle} / ${sectionTitle}`, details: repairDetails }, { subtitle: 'Final Gate Repair' });
       upsertProgressStage(progressStages, runningRepairStage);
       upsertProgressStage(finalGateRepairStages, runningRepairStage);
@@ -807,6 +842,8 @@ export async function finalizeGeneration(p: {
         promptTexts,
         projectContext: p.chapterScopedContext ? p.chapterScopedContext(templateChapter) : p.projectContext,
         compactProjectContext: true,
+        // 3.5 scoped 专用紧凑化：只有走章级 scoped 上下文（chapterScopedContext）时才用专用紧凑函数
+        scopedProjectContext: Boolean(p.chapterScopedContext),
         requirement,
         roleContext: 'Final Gate 空小节定向修复',
         targetWords: repairTargetWords,
@@ -817,39 +854,41 @@ export async function finalizeGeneration(p: {
         signal,
         allowLenientStructureGate: true,
       }));
-      let repaired = false;
-      // 深度不足类修复必须达到关键小节 blocker 字数才允许替换：防止把原本更长的正文换成更短的补写稿，
-      // 导致修复轮次被浪费在无效替换上（曾出现 1800+ 字小节被换成 1200 字稿后仍不足 1760 的倒退）
-      const depthAcceptMinChars = /正文不足|缺少[“"'].+[”"']小节|小节缺失或标题结构异常/u.test(issue.message) ? criticalMinChars : 0;
-      if (generated && documentTextLength(generated) >= (depthAcceptMinChars || 80)) {
-        // “小节缺失或标题结构异常”必须按标准 ### 结构追加修复：可比标题若命中 H4 级承接块（如主题块成稿的
-        // “#### 2.5.1 主要分部分项工程施工方案”），原地替换会造成 ### 结构要求与 #### 标题层级倒置，
-        // 校验器精确定位持续落空、修复永不收敛；统一追加“### 标准锚点”小节
-        const forceAppend = /小节缺失或标题结构异常/u.test(issue.message);
-        const nextContent = forceAppend ? draftChapter.content : replaceMarkdownSection(draftChapter.content, sectionTitle, generated);
-        repaired = !forceAppend && nextContent !== draftChapter.content;
-        if (!repaired && (forceAppend || /(?:缺少规划小节|缺少[“"'].+[”"']小节)/u.test(issue.message))) {
-          // 规划小节在正文中完全缺失：无原块可替换，将补写正文追加为新的三级小节
-          const appended = `${draftChapter.content.replace(/\s+$/u, '')}\n\n### ${sectionTitle}\n\n${generated.replace(/^#{2,6}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]+\n+/u, '').trim()}\n`;
-          repaired = true;
-          finalChapterDrafts[chapterIndex] = { ...draftChapter, content: finalizeChapterContentQuality(appended, templateChapter) };
-          repairedSectionKeys.add(`${chapterTitle}::${sectionTitle}`);
-          repairDetails.push(`成功：${chapterTitle}/${sectionTitle}（${documentTextLength(generated)}字，追加为缺失小节）`);
-        } else if (repaired) {
-          finalChapterDrafts[chapterIndex] = { ...draftChapter, content: finalizeChapterContentQuality(nextContent, templateChapter) };
-          repairedSectionKeys.add(`${chapterTitle}::${sectionTitle}`);
-          repairDetails.push(`成功：${chapterTitle}/${sectionTitle}（${documentTextLength(generated)}字）`);
-        } else {
-          repairDetails.push(`失败：${chapterTitle}/${sectionTitle}（未定位到原小节块）`);
+          let repaired = false;
+          // 深度不足类修复必须达到关键小节 blocker 字数才允许替换：防止把原本更长的正文换成更短的补写稿，
+          // 导致修复轮次被浪费在无效替换上（曾出现 1800+ 字小节被换成 1200 字稿后仍不足 1760 的倒退）
+          const depthAcceptMinChars = /正文不足|缺少[“"'].+[”"']小节|小节缺失或标题结构异常/u.test(issue.message) ? criticalMinChars : 0;
+          if (generated && documentTextLength(generated) >= (depthAcceptMinChars || 80)) {
+            // “小节缺失或标题结构异常”必须按标准 ### 结构追加修复：可比标题若命中 H4 级承接块（如主题块成稿的
+            // “#### 2.5.1 主要分部分项工程施工方案”），原地替换会造成 ### 结构要求与 #### 标题层级倒置，
+            // 校验器精确定位持续落空、修复永不收敛；统一追加“### 标准锚点”小节
+            const forceAppend = /小节缺失或标题结构异常/u.test(issue.message);
+            const nextContent = forceAppend ? latestChapter.content : replaceMarkdownSection(latestChapter.content, sectionTitle, generated);
+            repaired = !forceAppend && nextContent !== latestChapter.content;
+            if (!repaired && (forceAppend || /(?:缺少规划小节|缺少[“"'].+[”"']小节)/u.test(issue.message))) {
+              // 规划小节在正文中完全缺失：无原块可替换，将补写正文追加为新的三级小节
+              const appended = `${latestChapter.content.replace(/\s+$/u, '')}\n\n### ${sectionTitle}\n\n${generated.replace(/^#{2,6}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]+\n+/u, '').trim()}\n`;
+              repaired = true;
+              finalChapterDrafts[chapterIndex] = { ...latestChapter, content: finalizeChapterContentQuality(appended, templateChapter) };
+              repairedSectionKeys.add(`${chapterTitle}::${sectionTitle}`);
+              repairDetails.push(`成功：${chapterTitle}/${sectionTitle}（${documentTextLength(generated)}字，追加为缺失小节）`);
+            } else if (repaired) {
+              finalChapterDrafts[chapterIndex] = { ...latestChapter, content: finalizeChapterContentQuality(nextContent, templateChapter) };
+              repairedSectionKeys.add(`${chapterTitle}::${sectionTitle}`);
+              repairDetails.push(`成功：${chapterTitle}/${sectionTitle}（${documentTextLength(generated)}字）`);
+            } else {
+              repairDetails.push(`失败：${chapterTitle}/${sectionTitle}（未定位到原小节块）`);
+            }
+          } else {
+            const generatedChars = documentTextLength(generated || '');
+            repairDetails.push(`失败：${chapterTitle}/${sectionTitle}（${generatedChars > 0 && generatedChars < (depthAcceptMinChars || 80) ? `补写仅 ${generatedChars} 字，未达 ${depthAcceptMinChars || 80} 字验收线` : generationDiagnostics.llm.lastError || '空响应'}）`);
+          }
+          const completedRepairStage = displayStage({ type: 'llm_review', roleId: `agent-final-gate-repair-${draftChapter.id}`, status: repaired ? 'success' : 'failed', message: repaired ? `Final Gate 空小节修复完成：${chapterTitle} / ${sectionTitle}` : `Final Gate 空小节修复失败：${chapterTitle} / ${sectionTitle}`, details: repairDetails }, { subtitle: 'Final Gate Repair' });
+          upsertProgressStage(progressStages, completedRepairStage);
+          upsertProgressStage(finalGateRepairStages, completedRepairStage);
+          emitProgress(finalChapterDrafts, progressStages);
         }
-      } else {
-        const generatedChars = documentTextLength(generated || '');
-        repairDetails.push(`失败：${chapterTitle}/${sectionTitle}（${generatedChars > 0 && generatedChars < (depthAcceptMinChars || 80) ? `补写仅 ${generatedChars} 字，未达 ${depthAcceptMinChars || 80} 字验收线` : generationDiagnostics.llm.lastError || '空响应'}）`);
-      }
-      const completedRepairStage = displayStage({ type: 'llm_review', roleId: `agent-final-gate-repair-${draftChapter.id}`, status: repaired ? 'success' : 'failed', message: repaired ? `Final Gate 空小节修复完成：${chapterTitle} / ${sectionTitle}` : `Final Gate 空小节修复失败：${chapterTitle} / ${sectionTitle}`, details: repairDetails }, { subtitle: 'Final Gate Repair' });
-      upsertProgressStage(progressStages, completedRepairStage);
-      upsertProgressStage(finalGateRepairStages, completedRepairStage);
-      emitProgress(finalChapterDrafts, progressStages);
+      }));
     }
     finalMarkdown = finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template));
     await recomputeFinalValidationBundle();
@@ -1136,8 +1175,8 @@ export async function finalizeGeneration(p: {
       'fabricated-date': ['【编造开工日期定向修复】', '该章节正文出现招标资料未提供、且违反“以开工令时间为准”条款的具体日历日期。', '请以局部 patch 方式删除该具体日期，统一改写为“以开工令时间为准”；如为进度计划节点，必须标注为计划推算节点并保持与总工期一致。只修改相关句子。'].join('\n'),
       'field-value-mismatch': ['【字段数值错配定向修复】', '该章节正文将总占地面积误作建筑面积（或其他相近槽位混淆）。', '请以局部 patch 方式按绑定资料口径修正该数值并保持字段标签正确：总占地面积与建筑面积必须分开表述，不得互换数值。只修改相关句子。'].join('\n'),
       'area-arithmetic': ['【面积算术一致性定向修复】', '该章节正文同一语句内地上+地下面积之和不等于单体建筑面积。', '请以局部 patch 方式按绑定资料口径统一三者数值，使地上+地下=总/单体面积，删除错误数值表述。只修改相关句子。'].join('\n'),
-      'labor-contradiction': ['【劳动力口径定向修复】', '该章节正文“高峰期 X 人”与分阶段投入明细表峰值矛盾（缺陷描述中的数值对即矛盾数字）。', '请以局部 patch 方式以分阶段明细表为准统一劳动力峰值口径：正文峰值表述与表格数据必须一致，删除矛盾数字或调整表格。只修改相关句子。'].join('\n'),
-      'data-consistency': ['【数据一致性矛盾定向修复】', '该章节正文存在数据口径矛盾（缺陷描述中的原文 A 与原文 B 为矛盾数值对，必须统一）。', '请以局部 patch 方式统一口径：以绑定资料（图纸/工程量清单/招标文件）为准选定唯一数值，将矛盾数值对中的错误表述删除或修正为一致值；资料未明确的改为定性表述（如“按规范要求取值”），禁止编造。只修改相关数值所在句子。'].join('\n'),
+      'labor-contradiction': ['【劳动力数据定向修复】', '该章节正文“高峰期 X 人”与分阶段投入明细表峰值矛盾（缺陷描述中的数值对即矛盾数字）。', '请以局部 patch 方式以分阶段明细表为准统一劳动力峰值数据：正文峰值表述与表格数据必须一致，删除矛盾数字或调整表格。只修改相关句子。禁止将本缺陷描述与修复要求本身写入正文，输出仅限正文内容。'].join('\n'),
+      'data-consistency': ['【数据一致性矛盾定向修复】', '该章节正文存在数据矛盾（缺陷描述中的原文 A 与原文 B 为矛盾数值对，必须统一）。', '请以局部 patch 方式统一数据：以绑定资料（图纸/工程量清单/招标文件）为准选定唯一数值，将矛盾数值对中的错误表述删除或修正为一致值；资料未明确的改为定性表述（如“按规范要求取值”），禁止编造。只修改相关数值所在句子。禁止将本缺陷描述与修复要求本身写入正文，输出仅限正文内容。'].join('\n'),
       'support-conflict': ['【支护体系一致性定向修复】', '该章节正文放坡喷锚类与灌注桩排桩类两套支护体系并存。', '请以局部 patch 方式统一为一种支护体系（以图纸/地质条件为准），删除另一种体系的表述，并补充基坑开挖深度数值支撑危大分级判定。只修改相关句子。'].join('\n'),
       'dangerous-list-inconsistent': ['【危大清单一致性定向修复】', '该章节正文存在多处危大工程辨识清单且项名/数量不一致。', '请以局部 patch 方式将两处清单合并统一：项名、数量与分级表述唯一且一致，删除重复清单。只修改相关列表。'].join('\n'),
       'six-hundred-percent': ['【六个百分百逐项补写】', '该章节正文的扬尘治理措施未逐项覆盖“六个百分百”全部六项。', '请以局部 patch 方式逐条补齐缺失项（工地周边100%围挡、物料堆放100%覆盖、出入车辆100%冲洗、施工现场地面100%硬化、拆迁工地100%湿法作业、渣土车辆100%密闭运输），每项一句落实措施。不新增小节。若本项目无拆迁工程，对“拆迁工地100%湿法作业”必须显式说明不适用原因（如“本项目无拆迁工程，不涉及拆迁工地湿法作业”），不得省略该项。'].join('\n'),
@@ -1310,6 +1349,9 @@ export async function finalizeGeneration(p: {
   // round-19：全文重建函数与修复指令/章节定位函数提升到修复循环外，
   // 供 blocker 修复循环与交付前最终修复轮（全维度评审轮之后的 E4/E7/E11 回归兜底）复用同一口径
   const rebuildFinalMarkdownFromChapters = () => finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template));
+  // 2.2 跨系统去重：收集本轮修复成功的 blocker 缺陷签名（code+归一化原文），供全维度评审轮
+  // 判定「同一缺陷已由确定性系统修复」时跳过重复 LLM 修复（两阶段灰度：observe 计数/enforce 跳过）
+  const resolvedBlockerSignatures = new Set<string>();
   if (blockerContentIssues.length > 0) {
     let blockerFixPatches = 0;
     // 复检器注册表（F2 同源复检）：match 匹配缺陷消息 → detect 在修复后全文上重跑同源检测，
@@ -1491,9 +1533,15 @@ export async function finalizeGeneration(p: {
               // 修复后立即重建全文并同源复检（闭环核心：不复检就无法确认缺陷是否真正消除）
               finalMarkdown = rebuildFinalMarkdownFromChapters();
               if (rechecker) {
-                // 同 code 过滤：检测器一次返回同类全部消息（如本地适配检测器一次报创优/四节一环保/工伤保险三类），
-                // 不复检口径必须只判定当前修复的缺陷类别，否则修复 A 后被 B 污染误判失败
-                remaining = (await rechecker.detect(finalMarkdown)).filter(message => blockerIssueCodeFor(message) === blockerIssueCodeFor(issue.message));
+                if (dataConsistencyBatchReviewEnabled && blockerIssueCodeFor(issue.message) === 'data-consistency') {
+                  // 数据一致性批量化复检：该复检为全文 LLM 审查，逐条复检会造成 N 条冲突 N 次全文审查；
+                  // 修复后跳过单条复检，残留矛盾由交付前轮重新收集并修复（第二轮修复机会保留闭环语义）
+                  remaining = [];
+                } else {
+                  // 同 code 过滤：检测器一次返回同类全部消息（如本地适配检测器一次报创优/四节一环保/工伤保险三类），
+                  // 不复检口径必须只判定当前修复的缺陷类别，否则修复 A 后被 B 污染误判失败
+                  remaining = (await rechecker.detect(finalMarkdown)).filter(message => blockerIssueCodeFor(message) === blockerIssueCodeFor(issue.message));
+                }
               } else if (repairedBlocker.appliedCount > 0) remaining = [];
               if (remaining.length === 0) break;
             } else if (attempt === 0) {
@@ -1520,6 +1568,14 @@ export async function finalizeGeneration(p: {
             }
           }
           const blockerFixed = remaining.length === 0;
+          if (blockerFixed) {
+            // 2.2 跨系统去重：修复成功即收集缺陷签名（code + 消息引号原文归一化）。
+            // 引号原文缺失的消息（如 source-phrase 仅报行号）无可靠对齐锚点，保守不参与去重
+            const quotedOriginal = /“([^”]+)”/u.exec(issue.message)?.[1];
+            if (quotedOriginal) {
+              resolvedBlockerSignatures.add(`${blockerIssueCodeFor(issue.message)}\u0000${normalizeFactUsageText(quotedOriginal)}`);
+            }
+          }
           if (!blockerFixed && !repairFailureReason) {
             // 两轮均产出 patch 但复检仍残留：修复方式与缺陷特征不匹配
             repairFailureReason = 'patch 已应用但未消除缺陷（修复方式不匹配）';
@@ -1569,6 +1625,7 @@ export async function finalizeGeneration(p: {
     requirement,
     projectName: projectMaterialSummary?.projectName || '',
     tenderContext: buildTenderReviewContext({ factsModel, evaluationCriteriaItems, tenderRequirements }),
+    resolvedBlockerSignatures,
     diagnostics: generationDiagnostics,
     signal,
     heartbeat: withProgressHeartbeat,
@@ -1620,6 +1677,10 @@ export async function finalizeGeneration(p: {
     ...await commercialDataInBodyIssues(finalMarkdown),
     ...repeatedWordIssues(finalMarkdown),
   ].filter(issue => issue.level === 'error');
+  // 批量化复检轮末统一重审基准：本轮回 data-consistency 缺陷消息集（修复跳过 per-issue 复检后按数值对签名比对残留）
+  const preDeliveryDataConsistencyMessages = preDeliveryIssues
+    .filter(issue => blockerIssueCodeFor(issue.message) === 'data-consistency')
+    .map(issue => issue.message);
   if (preDeliveryIssues.length > 0) {
     let preDeliveryFixPatches = 0;
     // round-20 S3：交付前修复轮收口——指令/章节定位复用块外 blockerFixInstructionFor/locateChapterIndex 单一来源，
@@ -1642,79 +1703,104 @@ export async function finalizeGeneration(p: {
       { code: 'commercial-data', detect: async markdown => (await commercialDataInBodyIssues(markdown)).map(item => item.message), delete: async content => { const next = stripCommercialDataSentences(content); return { content: next, removed: next === content ? 0 : 1 }; } },
       { code: 'repeated-word', detect: markdown => repeatedWordIssues(markdown).map(item => item.message), delete: async content => { const next = collapseRepeatedWords(content); return { content: next, removed: next === content ? 0 : 1 }; } },
     ];
+    // D2 同款：按章分组 + 跨章并行——同章 issue 合并为一个修复任务组内串行（单写者），跨章组批量并行
+    // （限幅 DOCUMENT_PREDELIVERY_FIX_CONCURRENCY，默认 3）；定位失败的缺陷保持原语义静默跳过
+    const locatedPreDeliveryGroups: Array<{ chapterIndex: number; issues: ValidationIssue[] }> = [];
+    const locatedPreDeliveryGroupByChapter = new Map<number, number>();
     for (const issue of preDeliveryIssues) {
-      const rechecker = preDeliveryRecheckers.find(item => item.code === blockerIssueCodeFor(issue.message));
       const chapterIndex = locateChapterIndex(issue);
       if (chapterIndex < 0) continue;
-      const draftChapter = finalChapterDrafts[chapterIndex];
-      const templateChapter = effectiveChapters.find(chapter => chapter.id === draftChapter.id || chapter.title === draftChapter.title);
-      const runningStage = displayStage({ type: 'llm_review', roleId: `agent-predelivery-fix-${draftChapter.id}`, status: 'running', message: `交付前定向修复：${draftChapter.title}`, details: [issue.message] }, { subtitle: '交付前修复' });
-      upsertProgressStage(progressStages, runningStage);
-      upsertProgressStage(finalGateRepairStages, runningStage);
-      emitProgress(finalChapterDrafts, progressStages);
-      let remaining: string[] = [issue.message];
-      let attempt: number;
-      // 修复失败原因归类（h7 修复失败治理）：与 blocker 修复循环同口径，随失败 stage 上报前端
-      let repairFailureReason = '';
-      for (attempt = 0; attempt < 2 && remaining.length > 0; attempt += 1) {
-        const instruction = attempt === 0
-          ? blockerFixInstructionFor(issue.message)
-          : ['【修复未生效升级重试】', `上一轮修复后复检仍存在 ${remaining.length} 处同类缺陷（复检证据：${remaining.slice(0, 2).join('；')}），说明上一轮修复方式与缺陷特征不匹配或 patch 未落位。`, '本轮必须更换修复方式：先精确定位问题句，再整体替换该句（不得只改个别词），替换后的文本必须完全符合下列要求：', blockerFixInstructionFor(issue.message)].join('\n');
-        const repairedPreDelivery = await withProgressHeartbeat(() => repairChapterByQuality({
-          template,
-          chapter: { id: draftChapter.id, title: draftChapter.title, content: finalChapterDrafts[chapterIndex].content, evidence: draftChapter.evidence, missingFacts: draftChapter.missingFacts, sections: draftChapter.sections },
-          issues: [issue.message, issue.suggestion || ''],
-          promptTexts: instruction,
-          requirement,
-          forbidDrawingImages: false,
-          diagnostics: generationDiagnostics,
-          signal,
-        }));
-        if (repairedPreDelivery.content && repairedPreDelivery.content !== finalChapterDrafts[chapterIndex].content) {
-          finalChapterDrafts[chapterIndex] = { ...finalChapterDrafts[chapterIndex], content: templateChapter ? finalizeChapterContentQuality(repairedPreDelivery.content, templateChapter) : repairedPreDelivery.content };
-          preDeliveryFixPatches += repairedPreDelivery.appliedCount;
-          finalMarkdown = rebuildFinalMarkdownFromChapters();
-          if (rechecker) {
-            // 复检口径（preDelivery 专用精确匹配）：检测器一次返回全文同类全部消息
-            // （如数据一致性检测器一次报全文全部矛盾对），其他章节位置的同类缺陷由各自的
-            // issue 循环单独修复；逐条原文比对只判定「当前这条缺陷是否消除」，
-            // 避免修复 A 后被其他位置的 B 污染误判失败（历史缺陷：误报 failed stage）
-            remaining = (await rechecker.detect(finalMarkdown)).filter(message => message === issue.message);
-          } else if (repairedPreDelivery.appliedCount > 0) remaining = [];
-          if (remaining.length === 0) break;
-        } else if (attempt === 0) {
-          // 首轮未产出 patch 升级重试一次（与 blocker 修复循环同口径），
-          // 避免缺词补写类缺陷因首轮定位犹豫空手后一轮即失败
-          continue;
-        } else {
-          // 升级轮仍未产生任何变更：交给确定性删除兜底
-          // F4 诊断分层：LLM 已产出 patch 但锚点全部失配（补表类常见）≠ 完全未产出
-          repairFailureReason = repairedPreDelivery.producedCount > 0
-            ? `patch 已产出 ${repairedPreDelivery.producedCount} 条但均未应用（锚点失配或结构校验拒绝）`
-            : '定位失败或输出无效（未产出 patch）';
-          break;
+      const existingIndex = locatedPreDeliveryGroupByChapter.get(chapterIndex);
+      if (existingIndex === undefined) {
+        locatedPreDeliveryGroupByChapter.set(chapterIndex, locatedPreDeliveryGroups.length);
+        locatedPreDeliveryGroups.push({ chapterIndex, issues: [issue] });
+      } else {
+        locatedPreDeliveryGroups[existingIndex].issues.push(issue);
+      }
+    }
+    const preDeliveryFixConcurrency = Math.max(1, Math.min(6, Number(process.env.DOCUMENT_PREDELIVERY_FIX_CONCURRENCY || 3)));
+    for (let groupOffset = 0; groupOffset < locatedPreDeliveryGroups.length; groupOffset += preDeliveryFixConcurrency) {
+      const batch = locatedPreDeliveryGroups.slice(groupOffset, groupOffset + preDeliveryFixConcurrency);
+      await Promise.all(batch.map(async ({ chapterIndex, issues }) => {
+        const draftChapter = finalChapterDrafts[chapterIndex];
+        const templateChapter = effectiveChapters.find(chapter => chapter.id === draftChapter.id || chapter.title === draftChapter.title);
+        // 同章 issue 组内串行修复：与改造前 per-issue 串行语义一致（每 issue 独立修复闭环与复检）
+        for (const issue of issues) {
+          const rechecker = preDeliveryRecheckers.find(item => item.code === blockerIssueCodeFor(issue.message));
+          const runningStage = displayStage({ type: 'llm_review', roleId: `agent-predelivery-fix-${draftChapter.id}`, status: 'running', message: `交付前定向修复：${draftChapter.title}`, details: [issue.message] }, { subtitle: '交付前修复' });
+          upsertProgressStage(progressStages, runningStage);
+          upsertProgressStage(finalGateRepairStages, runningStage);
+          emitProgress(finalChapterDrafts, progressStages);
+          let remaining: string[] = [issue.message];
+          let attempt: number;
+          // 修复失败原因归类（h7 修复失败治理）：与 blocker 修复循环同口径，随失败 stage 上报前端
+          let repairFailureReason = '';
+          for (attempt = 0; attempt < 2 && remaining.length > 0; attempt += 1) {
+            const instruction = attempt === 0
+              ? blockerFixInstructionFor(issue.message)
+              : ['【修复未生效升级重试】', `上一轮修复后复检仍存在 ${remaining.length} 处同类缺陷（复检证据：${remaining.slice(0, 2).join('；')}），说明上一轮修复方式与缺陷特征不匹配或 patch 未落位。`, '本轮必须更换修复方式：先精确定位问题句，再整体替换该句（不得只改个别词），替换后的文本必须完全符合下列要求：', blockerFixInstructionFor(issue.message)].join('\n');
+            const repairedPreDelivery = await withProgressHeartbeat(() => repairChapterByQuality({
+              template,
+              chapter: { id: draftChapter.id, title: draftChapter.title, content: finalChapterDrafts[chapterIndex].content, evidence: draftChapter.evidence, missingFacts: draftChapter.missingFacts, sections: draftChapter.sections },
+              issues: [issue.message, issue.suggestion || ''],
+              promptTexts: instruction,
+              requirement,
+              forbidDrawingImages: false,
+              diagnostics: generationDiagnostics,
+              signal,
+            }));
+            if (repairedPreDelivery.content && repairedPreDelivery.content !== finalChapterDrafts[chapterIndex].content) {
+              finalChapterDrafts[chapterIndex] = { ...finalChapterDrafts[chapterIndex], content: templateChapter ? finalizeChapterContentQuality(repairedPreDelivery.content, templateChapter) : repairedPreDelivery.content };
+              preDeliveryFixPatches += repairedPreDelivery.appliedCount;
+              finalMarkdown = rebuildFinalMarkdownFromChapters();
+              if (rechecker) {
+                if (dataConsistencyBatchReviewEnabled && blockerIssueCodeFor(issue.message) === 'data-consistency') {
+                  // 数据一致性批量化复检：跳过单条全文审查，轮末统一重审一次判定残留（数值对签名比对）
+                  remaining = [];
+                } else {
+                  // 复检口径（preDelivery 专用精确匹配）：检测器一次返回全文同类全部消息
+                  // （如数据一致性检测器一次报全文全部矛盾对），其他章节位置的同类缺陷由各自的
+                  // issue 循环单独修复；逐条原文比对只判定「当前这条缺陷是否消除」，
+                  // 避免修复 A 后被其他位置的 B 污染误判失败（历史缺陷：误报 failed stage）
+                  remaining = (await rechecker.detect(finalMarkdown)).filter(message => message === issue.message);
+                }
+              } else if (repairedPreDelivery.appliedCount > 0) remaining = [];
+              if (remaining.length === 0) break;
+            } else if (attempt === 0) {
+              // 首轮未产出 patch 升级重试一次（与 blocker 修复循环同口径），
+              // 避免缺词补写类缺陷因首轮定位犹豫空手后一轮即失败
+              continue;
+            } else {
+              // 升级轮仍未产生任何变更：交给确定性删除兜底
+              // F4 诊断分层：LLM 已产出 patch 但锚点全部失配（补表类常见）≠ 完全未产出
+              repairFailureReason = repairedPreDelivery.producedCount > 0
+                ? `patch 已产出 ${repairedPreDelivery.producedCount} 条但均未应用（锚点失配或结构校验拒绝）`
+                : '定位失败或输出无效（未产出 patch）';
+              break;
+            }
+          }
+          // 确定性删除兜底（与 blocker 修复循环同源）：二修仍失败且可确定性定位的类型直接删除问题内容
+          if (remaining.length > 0 && rechecker?.delete) {
+            const deleted = await rechecker.delete(finalChapterDrafts[chapterIndex].content, issue.message);
+            if (deleted.removed > 0) {
+              finalChapterDrafts[chapterIndex] = { ...finalChapterDrafts[chapterIndex], content: deleted.content };
+              preDeliveryFixPatches += deleted.removed;
+              finalMarkdown = rebuildFinalMarkdownFromChapters();
+              // 与 LLM 修复复检同口径：只判定当前缺陷原文是否消除，其他位置同类缺陷不计入
+              remaining = (await rechecker.detect(finalMarkdown)).filter(message => message === issue.message);
+            }
+          }
+          const preDeliveryFixed = remaining.length === 0;
+          if (!preDeliveryFixed && !repairFailureReason) {
+            // 两轮均产出 patch 但复检仍残留：修复方式与缺陷特征不匹配
+            repairFailureReason = 'patch 已应用但未消除缺陷（修复方式不匹配）';
+          }
+          const completedPreDeliveryStage = displayStage({ type: 'llm_review', roleId: `agent-predelivery-fix-${draftChapter.id}`, status: preDeliveryFixed ? 'success' : 'failed', message: preDeliveryFixed ? `交付前定向修复完成：${draftChapter.title}（${attempt} 轮内复检通过）` : `交付前定向修复未生效：${draftChapter.title}（${attempt} 轮 LLM 修复${rechecker?.delete ? '+确定性删除' : ''}后复检仍有 ${remaining.length} 处；失败原因：${repairFailureReason}）`, details: [issue.message, ...(preDeliveryFixed ? [] : [`复检残留：${remaining.slice(0, 3).join('；')}`])] }, { subtitle: '交付前修复' });
+          upsertProgressStage(progressStages, completedPreDeliveryStage);
+          upsertProgressStage(finalGateRepairStages, completedPreDeliveryStage);
+          emitProgress(finalChapterDrafts, progressStages);
         }
-      }
-      // 确定性删除兜底（与 blocker 修复循环同源）：二修仍失败且可确定性定位的类型直接删除问题内容
-      if (remaining.length > 0 && rechecker?.delete) {
-        const deleted = await rechecker.delete(finalChapterDrafts[chapterIndex].content, issue.message);
-        if (deleted.removed > 0) {
-          finalChapterDrafts[chapterIndex] = { ...finalChapterDrafts[chapterIndex], content: deleted.content };
-          preDeliveryFixPatches += deleted.removed;
-          finalMarkdown = rebuildFinalMarkdownFromChapters();
-          // 与 LLM 修复复检同口径：只判定当前缺陷原文是否消除，其他位置同类缺陷不计入
-          remaining = (await rechecker.detect(finalMarkdown)).filter(message => message === issue.message);
-        }
-      }
-      const preDeliveryFixed = remaining.length === 0;
-      if (!preDeliveryFixed && !repairFailureReason) {
-        // 两轮均产出 patch 但复检仍残留：修复方式与缺陷特征不匹配
-        repairFailureReason = 'patch 已应用但未消除缺陷（修复方式不匹配）';
-      }
-      const completedPreDeliveryStage = displayStage({ type: 'llm_review', roleId: `agent-predelivery-fix-${draftChapter.id}`, status: preDeliveryFixed ? 'success' : 'failed', message: preDeliveryFixed ? `交付前定向修复完成：${draftChapter.title}（${attempt} 轮内复检通过）` : `交付前定向修复未生效：${draftChapter.title}（${attempt} 轮 LLM 修复${rechecker?.delete ? '+确定性删除' : ''}后复检仍有 ${remaining.length} 处；失败原因：${repairFailureReason}）`, details: [issue.message, ...(preDeliveryFixed ? [] : [`复检残留：${remaining.slice(0, 3).join('；')}`])] }, { subtitle: '交付前修复' });
-      upsertProgressStage(progressStages, completedPreDeliveryStage);
-      upsertProgressStage(finalGateRepairStages, completedPreDeliveryStage);
-      emitProgress(finalChapterDrafts, progressStages);
+      }));
     }
     // 确定性删除兜底统一收口（仅概况复述/内部话术可确定性定位；缺词类只能补写，无法删除）
     if (preDeliveryRecapTools) {
@@ -1728,6 +1814,18 @@ export async function finalizeGeneration(p: {
     if (strippedTerminology !== finalMarkdown) {
       finalMarkdown = strippedTerminology;
       preDeliveryFixPatches += 1;
+    }
+    // 数据一致性批量化复检轮末统一重审：本轮回 data-consistency 缺陷修复已跳过 per-issue 全文审查，
+    // 在确定性删除收口后对最终正文跑一次全文审查，按数值对签名判定各缺陷是否消除（口径与原 per-issue
+    // 复检一致：只判本轮缺陷，修复新引入的其他矛盾不计入）；残留以 failed stage 上报，交付门禁由确定性检测器兜底
+    if (dataConsistencyBatchReviewEnabled && preDeliveryDataConsistencyMessages.length > 0) {
+      const remainingBatch = await reviewDataConsistencyBatched(finalMarkdown, preDeliveryDataConsistencyMessages, { signal, diagnostics: generationDiagnostics });
+      if (remainingBatch.length > 0) {
+        const batchRecheckStage = displayStage({ type: 'llm_review', roleId: 'agent-predelivery-data-consistency-batch-recheck', status: 'failed', message: `交付前数据一致性轮末统一重审：${preDeliveryDataConsistencyMessages.length - remainingBatch.length}/${preDeliveryDataConsistencyMessages.length} 处矛盾已消除，${remainingBatch.length} 处仍残留`, details: remainingBatch.slice(0, 5) }, { subtitle: '交付前修复' });
+        upsertProgressStage(progressStages, batchRecheckStage);
+        upsertProgressStage(finalGateRepairStages, batchRecheckStage);
+        emitProgress(finalChapterDrafts, progressStages);
+      }
     }
     if (preDeliveryFixPatches > 0) {
       await recomputeFinalValidationBundle();

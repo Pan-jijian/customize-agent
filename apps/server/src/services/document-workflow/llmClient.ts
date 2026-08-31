@@ -7,7 +7,13 @@ import { stableHash } from './utils';
 const DOCUMENT_LLM_PROVIDER_CACHE = new Map<string, ReturnType<typeof createProvider>>();
 let activeDocumentLlmCalls = 0;
 
-const LLM_RETRY_DELAY_MS = 1200;
+// 瞬态重试退避：1200ms 基数 + 0-800ms jitter。全并发架构下批量瞬态失败（429/5xx）会同步重试形成
+// 端点风暴，jitter 打散重试相位；上限 2s 仍远小于章节降级链的分钟级代价
+const LLM_RETRY_DELAY_BASE_MS = 1200;
+const LLM_RETRY_DELAY_JITTER_MS = 800;
+function retryDelayMs(): number {
+  return LLM_RETRY_DELAY_BASE_MS + Math.floor(Math.random() * LLM_RETRY_DELAY_JITTER_MS);
+}
 
 /**
  * 全局 LLM 并发上限：用户既定决策——LLM 并发调用不应受限制（实测模型端点并发量高，不会因并发限流）。
@@ -179,11 +185,26 @@ export function decideThinkingPolicy(taskKind: DocumentLlmTaskKind, modelName: s
   return { disableThinking: true, budgetMode: 'compact' };
 }
 
-export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind } = {}): Promise<string | undefined> {
+/** 上下文分层键：L0=system 恒定段 / L1=任务级指令 / L2=章级段 / L3=小节级段（3.4 分层统计口径） */
+export type ContextLayerKey = 'l0' | 'l1' | 'l2' | 'l3';
+
+/** 调用点各层字符数求和（组装处同源表达式传入；空段自动忽略） */
+export function contextLayerChars(parts: Array<string | undefined | false>): number {
+  return parts.filter((part): part is string => Boolean(part)).reduce((sum, part) => sum + part.length, 0);
+}
+
+export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; contextLayers?: Partial<Record<ContextLayerKey, number>> } = {}): Promise<string | undefined> {
   if (options.diagnostics) {
     options.diagnostics.llm.calls += 1;
-    // 上下文输入观测：system + user 字符总量（分层占比随 A2 章级 scoped 落地后细分）
+    // 上下文输入观测：system + user 字符总量 + L0-L3 分层统计（3.4：分层占比供上下文瘦身前后对比验收）
     options.diagnostics.llm.inputChars = (options.diagnostics.llm.inputChars || 0) + system.length + prompt.length;
+    if (options.contextLayers) {
+      const layers = options.diagnostics.llm.layerChars ?? (options.diagnostics.llm.layerChars = { l0: 0, l1: 0, l2: 0, l3: 0 });
+      layers.l0 += options.contextLayers.l0 || 0;
+      layers.l1 += options.contextLayers.l1 || 0;
+      layers.l2 += options.contextLayers.l2 || 0;
+      layers.l3 += options.contextLayers.l3 || 0;
+    }
   }
   const release = await acquireLlmSlot(options.signal);
   if (options.diagnostics) options.diagnostics.llm.maxActive = Math.max(options.diagnostics.llm.maxActive, activeDocumentLlmCalls);
@@ -256,7 +277,7 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
         if (options.signal?.aborted) throw new Error('用户中止', { cause: error });
         if ((error !== EMPTY_CONTENT && !isTransientLlmError(error)) || attempt >= maxAttempts) break;
         if (options.diagnostics) options.diagnostics.llm.retries += 1;
-        await new Promise<void>(resolve => { setTimeout(resolve, LLM_RETRY_DELAY_MS); });
+        await new Promise<void>(resolve => { setTimeout(resolve, retryDelayMs()); });
       }
     }
     llmFailureStreak += 1;
@@ -376,7 +397,7 @@ function recordJsonValidationFailure(diagnostics: DocumentGenerationDiagnostics 
 
 /** F1 重试循环核心：JSON 解析/schema 校验失败重试一次（失败原因回注提示词），二次仍失败才放弃。
  * invokeLlm 可注入（单测注入 mock，生产绑定 callDocumentLlm）——模块内部词法绑定无法被 vi.mock 拦截 */
-export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string } } = {}, invokeLlm: (attemptSystem: string, attemptPrompt: string) => Promise<string | undefined> = (attemptSystem, attemptPrompt) => callDocumentLlm(attemptSystem, attemptPrompt, true, { maxTokens: options.maxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost, taskKind: options.taskKind })): Promise<T | undefined> {
+export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>> } = {}, invokeLlm: (attemptSystem: string, attemptPrompt: string) => Promise<string | undefined> = (attemptSystem, attemptPrompt) => callDocumentLlm(attemptSystem, attemptPrompt, true, { maxTokens: options.maxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost, taskKind: options.taskKind, contextLayers: options.contextLayers })): Promise<T | undefined> {
   // 历史缺陷：规划/审查/修复类 jsonOnly 调用一次失败即放弃，造成章节降级与后续数轮无效修复；
   // 失败原因回注提示词让模型收敛，秒级重试代价远小于分钟级降级链
   const maxJsonAttempts = 1;
@@ -421,6 +442,6 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
   return undefined;
 }
 
-export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string } } = {}): Promise<T | undefined> {
+export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>> } = {}): Promise<T | undefined> {
   return callDocumentLlmJsonWithRetry(system, prompt, options);
 }

@@ -190,6 +190,17 @@ describe('resourceConsistencyIssues（h7 劳动力数据一致性 5 模式）', 
     expect(resourceConsistencyIssues(markdown)).toEqual([]);
   });
 
+  it('模式 6：控制上限 260 与阶段高峰 300/350 并存 → 报不自洽（真实生成回归：峰值差值 <30% 仍须拦截）', () => {
+    const markdown = '施工高峰期总人数控制在260人。基础及地下室施工阶段高峰投入约220人；主体结构及装配式施工阶段高峰投入约300人；装饰装修及机电安装阶段高峰投入约350人。';
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => /劳动力数据矛盾/u.test(issue.message) && /控制上限/u.test(issue.message))).toBe(true);
+  });
+
+  it('模式 6：控制上限高于全部峰值 → 不报', () => {
+    const markdown = '施工高峰期总人数控制在400人。主体结构及装配式施工阶段高峰投入约300人；装饰装修及机电安装阶段高峰投入约350人。';
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
+  });
+
   it('岗位配置表（岗位+职责+持证）不视为劳动力表：与分阶段表并存不报假矛盾', () => {
     // 岗位定员（施工员3人）与劳动力峰值（95人）是两个口径，不得互查
     const staffTable = ['| 岗位 | 人数 | 主要职责 | 持证要求 |', '| --- | --- | --- | --- |', '| 项目经理 | 1 | 全面负责 | 建造师证 |', '| 施工员 | 3 | 工序组织 | 岗位证书 |'].join('\n');

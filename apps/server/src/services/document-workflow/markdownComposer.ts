@@ -558,6 +558,22 @@ export const SECTION_GENERATION_SAFETY_RULES = [
   '不得以“本项目为……”开头复述项目概况段（工程地点、面积、工期、保留商铺等总述信息只在项目概况/工程概况类章节出现）；本小节直接写专业内容，需要数据时只引用所需数字。',
 ].join('\n');
 
+/**
+ * 3.2 Writer 类 system 恒定前缀：整章/小节/focused/补写四类 Writer 的 system 统一以此为前缀，
+ * 任务差异段紧随其后——跨调用类型共享 prefix cache（DeepSeek 前缀缓存按 system 头部收敛）。
+ * 任务差异段只描述输出形态，不重复恒定写作规则。
+ */
+export const L0_WRITER_SYSTEM_PREFIX = [
+  '你是施工组织设计文档写作专家。',
+  FORMAL_WRITING_RULES,
+  SECTION_GENERATION_SAFETY_RULES,
+].join('\n\n');
+
+/** 3.2 回退开关：DOCUMENT_L0_SYSTEM_PREFIX=0 时返回各调用点传入的 legacy 前缀（恢复原有 system 分布） */
+export function writerSystemPrefix(legacyPrefix: string): string {
+  return process.env.DOCUMENT_L0_SYSTEM_PREFIX === '0' ? legacyPrefix : L0_WRITER_SYSTEM_PREFIX;
+}
+
 function hasSectionNumber(section: string) {
   const match = /^\s*(\d+)\.(\d+)[.．、]?\s+(.+)$/u.exec(section);
   if (!match) return false;

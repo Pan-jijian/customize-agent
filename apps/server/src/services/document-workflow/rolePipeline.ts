@@ -11,8 +11,9 @@ import { FORMAL_WRITING_RULES, WORKFLOW_PHRASE_RE, removeUnwantedDrawingImages, 
 import { documentTextLength } from './budget';
 import { estimateTokens, truncateToTokenBudget } from './tokenBudget';
 import { classifyQualitySeverity, degenerateContentIssues } from './qualityValidation';
+import { deterministicDefectPrecheck } from './patchGuard';
 import { repairIssueSignature } from './documentQualityPipeline';
-import { callDocumentLlmJson, isContextOverflowLlmError } from './llmClient';
+import { callDocumentLlmJson, contextLayerChars, isContextOverflowLlmError } from './llmClient';
 import { throwIfAborted, systemConstraintLine } from './utils';
 
 export type { QualityRepairType } from '../types';
@@ -49,7 +50,8 @@ export function createGenerationDiagnostics(strategy: DocumentGenerationStrategy
   return {
     strategy,
     metrics: [],
-    llm: { calls: 0, failures: 0, maxActive: 0, retries: 0, failureStreak: 0, schemaFailures: 0, promptCacheHitTokens: 0, promptCacheMissTokens: 0, inputTokens: 0, outputTokens: 0, inputChars: 0 },
+    llm: { calls: 0, failures: 0, maxActive: 0, retries: 0, failureStreak: 0, schemaFailures: 0, promptCacheHitTokens: 0, promptCacheMissTokens: 0, inputTokens: 0, outputTokens: 0, inputChars: 0, layerChars: { l0: 0, l1: 0, l2: 0, l3: 0 } },
+    semantic: { embedCacheHits: 0, embedCacheMisses: 0 },
     evidence: { raw: 0, used: 0, filteredNoise: 0, budgetDropped: 0, avgNoiseScore: 0, avgFactDensity: 0, searchQueries: 0, searchMs: 0, contextChars: 0 },
     quality: { blockingCount: 0, importantCount: 0, minorCount: 0, repairedCount: 0 },
   };
@@ -170,7 +172,7 @@ function applyChapterPatch(input: { content: string; patch: ChapterMarkdownPatch
   return { content: next, applied: next !== input.content };
 }
 
-export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }>; maxTokens?: number }) {
+export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }>; maxTokens?: number; patchGuard?: { observeOnly: boolean; diagnostics?: DocumentGenerationDiagnostics } }) {
   throwIfAborted(input.signal);
   const repairType = input.repairType || classifyQualityRepairType(input.issues);
   const contextBlock = input.contextChapters?.length
@@ -210,16 +212,51 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     ? evidencePromptBudgetForTarget(Math.min(documentTextLength(input.chapter.content), 10000), 6000, 14000)
     : undefined;
   const failure: { value?: string } = {};
-  let result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(evidenceBundle && evidenceBudget ? `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: evidenceBudget })}` : ''), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, outFailure: failure });
+  // 3.4 上下文分层统计（L0-L3）：口径同写作侧——L0 system 恒定段 / L1 任务级（主控提示词、用户要求、
+  // 问题清单）/ L2 章级（模板、章节、周边上下文、当前章节 Markdown）/ L3 小节级（证据摘要）。
+  // 与 buildUserPrompt 组装同源表达式，降级重试按压缩后证据各自统计
+  const contextLayersFor = (evidenceText: string) => ({
+    l0: systemPrompt.length,
+    l1: contextLayerChars([
+      input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
+      input.requirement ? `用户要求：${input.requirement}` : '',
+      `需要局部修复的问题：\n${input.issues.map(item => `- ${item}`).join('\n')}`,
+    ]),
+    l2: contextLayerChars([
+      `模板：${input.template.name}`,
+      `章节：${input.chapter.title}`,
+      '当前章节 Markdown：',
+      input.chapter.content,
+      contextBlock,
+    ]),
+    l3: contextLayerChars([evidenceText]),
+  });
+  const evidenceText = evidenceBundle && evidenceBudget ? `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: evidenceBudget })}` : '';
+  let result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(evidenceText), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, outFailure: failure, contextLayers: contextLayersFor(evidenceText) });
   if (!result && evidenceBundle && isContextOverflowLlmError(failure.value)) {
     // 上下文超长降级重试：证据压缩到极小预算（3000 字符），优先保住修复任务本身
-    result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(`本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: 3000 })}`), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
+    const compactEvidenceText = `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: 3000 })}`;
+    result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(compactEvidenceText), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, contextLayers: contextLayersFor(compactEvidenceText) });
   }
   throwIfAborted(input.signal);
   let content = input.chapter.content;
   let appliedCount = 0;
   const patches = Array.isArray(result?.patches) ? result!.patches! : [];
   for (const patch of patches) {
+    // 评审轮 patch 前置校验（2.1）：replacement 预检四类确定性缺陷（来源罗列句/内部术语/绝对日期/叠词）；
+    // observe 模式命中只计数照常应用（采集数据），enforce 模式命中拒绝该 patch 并计数（阻断已知坏内容重入）
+    if (input.patchGuard && patch.replacement?.trim()) {
+      const guardHits = deterministicDefectPrecheck(patch.replacement);
+      if (guardHits.length > 0) {
+        const guardDiag = input.patchGuard.diagnostics;
+        if (input.patchGuard.observeOnly) {
+          if (guardDiag) guardDiag.llm.patchGuardHits = (guardDiag.llm.patchGuardHits ?? 0) + 1;
+        } else {
+          if (guardDiag) guardDiag.llm.patchGuardRejects = (guardDiag.llm.patchGuardRejects ?? 0) + 1;
+          continue;
+        }
+      }
+    }
     const applied = applyChapterPatch({ content, patch, title: input.chapter.title, forbidDrawingImages: input.forbidDrawingImages });
     content = applied.content;
     if (applied.applied) appliedCount += 1;

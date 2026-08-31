@@ -17,7 +17,7 @@ import { buildSemanticGate } from './semanticGate';
 
 // ── 1. 编造开工日期检测（R5）：招标以开工令为准时，正文不得自设具体日历日期 ──
 
-const CALENDAR_DATE_RE = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/gu;
+export const CALENDAR_DATE_RE = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/gu;
 const RESOURCE_DATE_LIKE_ANCHOR_RE = /进度计划|里程碑|节点安排|验收时间|完成日期|竣工日期|移交日期|合同签订/u;
 
 /** 收集 factsModel 中出现的全部具体日历日期（绑定资料中明确给出的日期才是合法日期） */
@@ -105,8 +105,8 @@ export function fieldValueMismatchIssues(markdown: string, factsModel: DocumentF
       category: 'fact_consistency',
       owner: 'llm',
       repairability: 'llm_repairable',
-      message: `字段-数值错配：“${label} ${match[2]}㎡”将总占地面积误作${label}（绑定资料${label}口径为 ${correctValues}㎡）`,
-      suggestion: `总占地面积与建筑面积是两个独立字段，必须严格区分：将“${label} ${match[2]}㎡”改为资料口径“${label} ${correctValues}㎡”，总占地面积保持独立表述。`,
+      message: `字段-数值错配：“${label} ${match[2]}㎡”将总占地面积误作${label}（绑定资料${label}数值为 ${correctValues}㎡）`,
+      suggestion: `总占地面积与建筑面积是两个独立字段，必须严格区分：将“${label} ${match[2]}㎡”改为资料数值“${label} ${correctValues}㎡”，总占地面积保持独立表述。`,
     });
   }
   return issues.slice(0, 3);
@@ -133,7 +133,7 @@ export function areaArithmeticIssues(markdown: string): ValidationIssue[] {
         owner: 'llm',
         repairability: 'llm_repairable',
         message: `面积算术矛盾：地上 ${above}㎡ + 地下 ${underground}㎡ = ${sum}㎡，与同句“单体建筑面积 ${total}㎡”不符（差 ${Math.abs(sum - total).toFixed(2)}㎡）`,
-        suggestion: `地上与地下面积之和必须等于单体建筑面积：按绑定资料口径统一三者数值，删除错误数值表述。`,
+        suggestion: `地上与地下面积之和必须等于单体建筑面积：按绑定资料统一三者数值，删除错误数值表述。`,
       });
     }
   }
@@ -265,7 +265,7 @@ export function resourceConsistencyIssues(markdown: string): ValidationIssue[] {
       if (diff > 0.3) {
         laborIssue(
           `劳动力数据矛盾：正文“${a.text}”（${a.value} 人）与“${b.text}”（${b.value} 人）互斥（相差 ${Math.round(diff * 100)}%）`,
-          '劳动力峰值口径必须全文唯一：以分阶段投入明细表为准统一正文各处峰值表述，删除矛盾数字。',
+          '劳动力峰值数据必须全文唯一：以分阶段投入明细表为准统一正文各处峰值表述，删除矛盾数字。',
         );
         i = bodyPeaks.length;
         break;
@@ -280,7 +280,7 @@ export function resourceConsistencyIssues(markdown: string): ValidationIssue[] {
     if (diff > 0.3) {
       laborIssue(
         `劳动力数据矛盾：分阶段投入明细表峰值 ${min} 人与另一劳动力表峰值 ${max} 人互斥（相差 ${Math.round(diff * 100)}%）`,
-        '劳动力峰值口径必须全文唯一：统一各劳动力表格的峰值数据，删除矛盾表格数字。',
+        '劳动力峰值数据必须全文唯一：统一各劳动力表格的峰值数据，删除矛盾表格数字。',
       );
     }
   }
@@ -293,7 +293,26 @@ export function resourceConsistencyIssues(markdown: string): ValidationIssue[] {
       const maxText = bodyPeaks.find(entry => entry.value === maxBodyPeak)?.text || '';
       laborIssue(
         `劳动力数据矛盾：正文表述“${maxText}”达 ${maxBodyPeak} 人，而分阶段投入明细表最大峰值为 ${tablePeak} 人（超出 ${Math.round(((maxBodyPeak - tablePeak) / tablePeak) * 100)}%）`,
-        '劳动力投入口径必须全文统一：以分阶段明细表为准复核正文峰值表述，删除与表格矛盾的“高峰期 X 人”措辞或调整表格数据。',
+        '劳动力投入数据必须全文统一：以分阶段明细表为准复核正文峰值表述，删除与表格矛盾的“高峰期 X 人”措辞或调整表格数据。',
+      );
+    }
+  }
+  // 模式 6：总量控制上限 vs 峰值（真实生成回归：正文「高峰期总人数控制在260人」与
+  // 「主体阶段高峰投入约300人/装饰阶段高峰投入约350人」并存——控制上限语义下超限即矛盾，
+  // 不设差值百分比阈值；模式 1 的 30% 互斥阈值对「上限 vs 阶段峰值」场景过宽会漏报 260 vs 350）
+  const controlCaps: number[] = [];
+  for (const match of markdown.matchAll(/(?:高峰期|高峰|峰值)[^。；;\n]{0,16}?控制(?:在|为|到)?(?:约)?\s*([\d,]+)\s*人(?:以内|以下|之内)?/gu)) {
+    const value = Number(match[1].replace(/[,，]/gu, ''));
+    if (Number.isFinite(value) && value > 0) controlCaps.push(value);
+  }
+  if (controlCaps.length > 0) {
+    const cap = Math.max(...controlCaps);
+    const exceedingPeaks = [...bodyPeaks, ...(tablePeak !== undefined ? [{ value: tablePeak }] : [])].filter(entry => entry.value > cap);
+    if (exceedingPeaks.length > 0) {
+      const exceed = Math.max(...exceedingPeaks.map(entry => entry.value));
+      laborIssue(
+        `劳动力数据矛盾：正文“高峰期总人数控制在${cap}人”的上限表述与峰值表述 ${exceed} 人不自洽（阶段高峰投入超出控制上限 ${Math.round(((exceed - cap) / cap) * 100)}%）`,
+        '总量控制上限与各阶段峰值必须自洽：阶段高峰人数不得超过全文宣称的高峰控制人数；以分阶段投入明细表为准修正控制目标或各阶段峰值表述。',
       );
     }
   }
@@ -771,7 +790,7 @@ export async function selfUnderminingCandidateIssues(markdown: string): Promise<
 
 // ── 11. 叠词重复检测（Q8 前半）：同一双字词紧邻重复（“执行执行”“进行进行”），L1 封闭结构提取 + 确定性去重 ──
 
-const REPEATED_WORD_RE = /([\u4e00-\u9fa5]{2})\1/gu;
+export const REPEATED_WORD_RE = /([\u4e00-\u9fa5]{2})\1/gu;
 
 export function repeatedWordIssues(markdown: string): ValidationIssue[] {
   const hits = [...new Set(markdown.match(REPEATED_WORD_RE) || [])].slice(0, 3);

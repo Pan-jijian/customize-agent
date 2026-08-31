@@ -1,6 +1,7 @@
 /**
- * semanticSimilarity 单测：注入 embedDocuments 的余弦相似度闭包（数量校验/向量缓存/未命中兜底）
- * 与本地语义提供者单例。本地模型实例经 vi.mock 替换，避免加载 Transformers.js 重依赖。
+ * semanticSimilarity 单测：注入 embedDocuments 的余弦相似度闭包（数量校验/向量缓存/未命中兜底）、
+ * 本地语义提供者单例、3.3 全局 LRU 缓存（命中计数/淘汰/关闭开关）。本地模型实例经 vi.mock 替换，
+ * 避免加载 Transformers.js 重依赖。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -15,7 +16,7 @@ vi.mock('@customize-agent/knowledge', () => {
   return { LocalTransformersEmbeddingProvider };
 });
 
-import { buildSemanticSimilarity, getLocalSemanticProvider, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
+import { buildSemanticSimilarity, clearEmbedCacheForTest, getLocalSemanticProvider, SEMANTIC_COVERAGE_THRESHOLD, snapshotEmbedCacheStats } from './semanticSimilarity';
 
 describe('SEMANTIC_COVERAGE_THRESHOLD', () => {
   it('语义承接判定阈值 0.6', () => {
@@ -27,6 +28,7 @@ describe('buildSemanticSimilarity', () => {
   beforeEach(() => {
     const scope = globalThis as { __semanticProviderInstances?: unknown[] };
     scope.__semanticProviderInstances = [];
+    clearEmbedCacheForTest();
   });
 
   it('空输入返回恒 0 函数且不调用嵌入', async () => {
@@ -47,8 +49,9 @@ describe('buildSemanticSimilarity', () => {
   });
 
   it('缓存外文本返回 0（不重复嵌入）', async () => {
-    // texts = [...leftTexts, ...rightTexts] 共 4 条（缓存前不去重），需返回 4 条向量
-    const embed = vi.fn(async () => [[1, 0], [0, 1], [1, 0], [0, 1]]);
+    // 全局 LRU 缓存按文本去重后批量嵌入：left+right 拼接的 4 条中「甲/乙」各出现 2 次，
+    // miss 文本去重为 2 条，embed 只收到 2 条文本
+    const embed = vi.fn(async () => [[1, 0], [0, 1]]);
     const similarity = await buildSemanticSimilarity(['甲', '乙'], ['甲', '乙'], embed);
     expect(similarity('甲', '乙')).toBe(0);
     expect(similarity('丙', '甲')).toBe(0);
@@ -69,5 +72,63 @@ describe('getLocalSemanticProvider', () => {
     expect(second).toBe(first);
     const scope = globalThis as { __semanticProviderInstances?: unknown[] };
     expect(scope.__semanticProviderInstances).toHaveLength(1);
+  });
+});
+
+describe('3.3 全局 LRU 缓存', () => {
+  beforeEach(() => {
+    clearEmbedCacheForTest();
+  });
+
+  it('跨构建点命中：相同文本第二次构建不再调用嵌入且计数命中', async () => {
+    const embed = vi.fn(async (texts: string[]) => texts.map((text, index) => [index + 1, 0]));
+    await buildSemanticSimilarity(['甲'], ['乙'], embed);
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(snapshotEmbedCacheStats()).toEqual({ embedCacheHits: 0, embedCacheMisses: 2 });
+    await buildSemanticSimilarity(['甲'], ['乙'], embed);
+    // 第二次构建全部命中缓存，embed 不再被调用
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(snapshotEmbedCacheStats()).toEqual({ embedCacheHits: 2, embedCacheMisses: 2 });
+  });
+
+  it('部分命中：只对 miss 子集调用嵌入', async () => {
+    const embed = vi.fn(async (texts: string[]) => texts.map((text) => (text === '丙' ? [9, 0] : [1, 0])));
+    await buildSemanticSimilarity(['甲'], ['乙'], embed);
+    await buildSemanticSimilarity(['甲'], ['丙'], embed);
+    expect(embed).toHaveBeenCalledTimes(2);
+    // 第二次构建的文本为 [甲, 丙]：甲命中、丙 miss
+    expect(embed.mock.calls[1][0]).toEqual(['丙']);
+    expect(snapshotEmbedCacheStats()).toEqual({ embedCacheHits: 1, embedCacheMisses: 3 });
+  });
+
+  it('LRU 淘汰：超出容量后最久未用条目被逐出', async () => {
+    process.env.DOCUMENT_EMBED_CACHE_SIZE = '2';
+    try {
+      const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0]));
+      // 第 1 次：[甲,乙] 全 miss，缓存 {甲,乙}
+      await buildSemanticSimilarity(['甲'], ['乙'], embed);
+      // 第 2 次：[甲,丙]：甲命中（移到尾部）、丙 miss；写丙后缓存超容量逐出最旧=乙 → {甲,丙}
+      await buildSemanticSimilarity(['甲'], ['丙'], embed);
+      // 第 3 次：[乙,甲]：乙已逐出（miss 重嵌）、甲命中
+      await buildSemanticSimilarity(['乙'], ['甲'], embed);
+      expect(embed).toHaveBeenCalledTimes(3);
+      expect(embed.mock.calls[2][0]).toEqual(['乙']);
+      expect(snapshotEmbedCacheStats()).toEqual({ embedCacheHits: 2, embedCacheMisses: 4 });
+    } finally {
+      delete process.env.DOCUMENT_EMBED_CACHE_SIZE;
+    }
+  });
+
+  it('DOCUMENT_EMBED_CACHE=0 关闭缓存：每次构建都全量嵌入且不计数', async () => {
+    process.env.DOCUMENT_EMBED_CACHE = '0';
+    try {
+      const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0]));
+      await buildSemanticSimilarity(['甲'], ['乙'], embed);
+      await buildSemanticSimilarity(['甲'], ['乙'], embed);
+      expect(embed).toHaveBeenCalledTimes(2);
+      expect(snapshotEmbedCacheStats()).toEqual({ embedCacheHits: 0, embedCacheMisses: 0 });
+    } finally {
+      delete process.env.DOCUMENT_EMBED_CACHE;
+    }
   });
 });

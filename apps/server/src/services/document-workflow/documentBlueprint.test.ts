@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildDocumentBlueprintStructure, buildChapterScopedProjectContext } from './documentBlueprint';
+import { buildDocumentBlueprintStructure, buildChapterScopedProjectContext, composeScopedProjectContext } from './documentBlueprint';
 import type { DocumentFact, DocumentFactsModel, DocumentTemplate } from './types';
 
 /**
@@ -131,5 +131,23 @@ describe('buildChapterScopedProjectContext（章级 scoped 组装）', () => {
     // 全量蓝图字符串应包含全部任务卡与全部事实，章级 scoped 剔除他章后明显更短
     expect(scoped.length).toBeGreaterThan(0);
     expect(scoped).not.toContain('章节专业任务卡：\n章节任务卡：工程质量保证措施');
+  });
+});
+
+describe('composeScopedProjectContext（3.1 projectUnderstanding.prompt 双份注入消除）', () => {
+  it('只拼接 constructionOrgContext + 章级 scoped 蓝图（不含项目理解「章节资料使用计划」段）', () => {
+    const scoped = composeScopedProjectContext({
+      constructionOrgContext: '【施工组织专项约束】本工程按总承包模式组织施工。',
+      scopedBlueprint: '可信基础事实主表（本章相关）：\n- 计划工期：540 日历天\n章节专业任务卡：\n章节任务卡：施工进度计划',
+    });
+    expect(scoped).toContain('【施工组织专项约束】');
+    expect(scoped).toContain('可信基础事实主表（本章相关）');
+    expect(scoped).toContain('章节专业任务卡');
+    // projectUnderstanding.prompt 特征段（双份注入源）不得出现——已由 promptTexts 提供
+    expect(scoped).not.toContain('章节资料使用计划');
+  });
+
+  it('constructionOrgContext 为空时只输出 scoped 蓝图', () => {
+    expect(composeScopedProjectContext({ scopedBlueprint: '章级蓝图' })).toBe('章级蓝图');
   });
 });

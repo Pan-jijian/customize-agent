@@ -1080,11 +1080,31 @@ function isDataConsistencyLeakParagraph(singleLine: string): boolean {
   return false;
 }
 
+/** 句子级泄漏判别（真实生成回归，合肥师范 4.12.8）：数据一致性修复轮把修复要求本身写入正文的
+ * 泄漏句式，按句删除、保留同段其余正文（段落级整段删除会误伤「编制范围覆盖…」等有效内容）。 */
+function isDataConsistencyLeakSentence(sentence: string): boolean {
+  if (/不得出现其他[^。；\n]{0,12}口径/u.test(sentence)) return true;
+  if (/[^。；\n]{0,10}口径必须(?:唯一|一致|统一)/u.test(sentence)) return true;
+  return false;
+}
+
 export function stripDataConsistencyLeakSentences(content: string) {
   const paragraphs = content.split(/\n\s*\n/u);
-  const kept = paragraphs.filter(paragraph => !isDataConsistencyLeakParagraph(paragraph.replace(/\n/gu, '')));
-  if (kept.length === paragraphs.length) return content;
-  return kept.join('\n\n');
+  const kept: string[] = [];
+  let changed = false;
+  for (const paragraph of paragraphs) {
+    const singleLine = paragraph.replace(/\n/gu, '');
+    if (isDataConsistencyLeakParagraph(singleLine)) {
+      changed = true;
+      continue;
+    }
+    const sentences = paragraph.split(/(?<=[。！？!?；;])/u);
+    const survived = sentences.filter(sentence => !isDataConsistencyLeakSentence(sentence.replace(/\n/gu, '').trim()));
+    if (survived.length !== sentences.length) changed = true;
+    kept.push(survived.join(''));
+  }
+  if (!changed) return content;
+  return kept.filter(Boolean).join('\n\n');
 }
 
 /** 跨小节重复句合并最短字数：≥30 字长句在跨小节完全重复时合并（评分报告 N4/P3：5.1 与 5.6、68/69 行整句重复） */

@@ -82,6 +82,32 @@ describe('stripTenderClauseFragmentHeadings 正文脏 H3 行剥离', () => {
     const content = '### 进度计划与工期保障\n进度正文。';
     expect(stripTenderClauseFragmentHeadings(content)).toBe(content);
   });
+
+  it('真实生成回归：带编号前缀的三类畸形标题行剥离，行下正文保留', () => {
+    const content = [
+      '### 3.2 新技术、新工艺、新材料、新设备的应用',
+      '四新正文。',
+      '### 3.3 5厘米，其余均为2.0厘米',
+      '本小节针对招标文件及补疑文件中关于构造尺寸的技术要求进行专项落位。',
+      '### 3.5 本招标项目公共建筑根据《民用建筑设计统一标准》（',
+      '公共建筑标准响应正文。',
+      '### 5.1 1人员及职责',
+      '人员职责正文。',
+      '### 6.6 2同招标公告发布媒介',
+      '信息公示正文。',
+      '### 6.7 1分为分割',
+      '分割管控正文。',
+    ].join('\n');
+    const cleaned = stripTenderClauseFragmentHeadings(content);
+    expect(cleaned).not.toContain('### 3.3 5厘米');
+    expect(cleaned).not.toContain('### 3.5 本招标项目公共建筑');
+    expect(cleaned).not.toContain('### 5.1 1人员及职责');
+    expect(cleaned).not.toContain('### 6.6 2同招标公告发布媒介');
+    expect(cleaned).not.toContain('### 6.7 1分为分割');
+    // 行下正文保留，正常标题不受影响
+    expect(cleaned).toContain('本小节针对招标文件及补疑文件中关于构造尺寸的技术要求进行专项落位。');
+    expect(cleaned).toContain('### 3.2 新技术、新工艺、新材料、新设备的应用');
+  });
 });
 
 describe('stripDataConsistencyLeakSentences 表格口径自查泄漏剥离', () => {
@@ -108,5 +134,19 @@ describe('stripDataConsistencyLeakSentences 表格口径自查泄漏剥离', () 
   it('无泄漏段时原样返回', () => {
     const content = '| 施工阶段 | 阶段高峰人数 |\n| --- | --- |\n| 主体结构阶段 | 160 |';
     expect(stripDataConsistencyLeakSentences(content)).toBe(content);
+  });
+
+  it('句子级剥离「不得出现其他峰值口径」句，同段其余正文保留（真实生成回归）', () => {
+    const content = '劳动力投入按分阶段投入明细表统一控制，各阶段劳动力配置与分阶段投入明细表保持一致，不得出现其他峰值口径。编制范围覆盖土方外运及基坑支护、地基与基础等全部清单内容。';
+    const cleaned = stripDataConsistencyLeakSentences(content);
+    expect(cleaned).not.toContain('不得出现其他峰值口径');
+    expect(cleaned).toContain('编制范围覆盖土方外运及基坑支护、地基与基础等全部清单内容。');
+  });
+
+  it('句子级剥离「口径必须唯一」句，正常「管线口径」句保留', () => {
+    const content = '按设计图纸确定给水管线口径并完成试压。全文数据口径必须唯一，不得遗漏。';
+    const cleaned = stripDataConsistencyLeakSentences(content);
+    expect(cleaned).not.toContain('口径必须唯一');
+    expect(cleaned).toContain('按设计图纸确定给水管线口径并完成试压。');
   });
 });
