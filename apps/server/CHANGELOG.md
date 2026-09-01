@@ -1,5 +1,27 @@
 # server
 
+## 4.14.0
+
+### Minor Changes
+
+- 文档工作流缓存命中率优化（P0/P1 全量落地）：
+
+  **P0 立即止血（证据输入瘦身）**
+
+  - P0-1：章级 Planner 证据注入补上块目标字数动态预算（floor 5000/ceiling 12000），堵住规划调用无上限全量注入漏洞（实测单次输入数十万字符的最大路径）
+  - P0-2：全流程 13 个调用点统一共享 L0 system 公共前缀（`DOCUMENT_L0_COMMON_PREFIX` + `docSystemPrefix`），规划/生成/评审/修复跨类型调用首次获得长共享前缀；`DOCUMENT_L0_SYSTEM_PREFIX=0` 回退开关保留
+  - P0-3：两步生成第二步证据预算降为基准 60%（T0 关键参数层全量保留，零丢失原则不受影响）；`DOCUMENT_TWO_STEP_SLIM=0` 关闭
+  - P0-4：证据预算系数 12→8、默认 ceiling 36000→24000（`DOCUMENT_EVIDENCE_BUDGET_RATIO/CEILING` 可调），三档预算收紧（40k/28k/18k）
+
+  **P1 结构性降本**
+
+  - P1-1：全局一致性修复复检瘦身——确定性检测每轮必做（零 LLM 成本驱动轮次判定），LLM 复检仅最后一轮或确定性清零时执行一次，带 stale 标志防空转 break 旧快照残留
+  - P1-2：修复 patch 空白容错定位——originalText 精确匹配失败后按空白归一化正则唯一命中兜底（多命中仍拒绝），消除"patch 产出但锚点失配全部落空"的空转轮次
+  - P1-3：同前缀请求相邻调度——发射窗口（默认 120ms，`DOCUMENT_PREFIX_SCHEDULE_WINDOW_MS`）内按 system+user 稳定段指纹排序发射，同前缀请求背靠背命中 prefix cache；并发度不变仅排序变化
+  - P1-4：截断 JSON 确定性修复——maxTokens 截断输出回退到最后一个完整元素边界并补齐闭合括号，修复成功免整轮重试（历史 32 次 schema 失败主要形态）；修复产物解析失败仍走失败原因回注重试
+
+  工作流版本 bump 至 v8（旧 checkpoint 不再复用），附带 `.dbg/verify-cache-optimization.py` 真实生成 A/B 对账脚本。
+
 ## 4.13.2
 
 ### Patch Changes
