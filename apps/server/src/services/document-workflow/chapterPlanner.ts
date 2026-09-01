@@ -1,9 +1,10 @@
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from './types';
-import { buildEvidenceBundle, evidenceBundlePrompt } from './evidence';
+import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
 import { callDocumentLlmJson, contextLayerChars, type DocumentJsonSchema } from './llmClient';
 import { buildSemanticSimilarity, type SemanticSimilarityFn } from './semanticSimilarity';
 import { displayChapterTitle } from './outline';
 import { CRITICAL_SECTION_ANCHORS, isCriticalSectionTitle } from './writingSpec';
+import { docSystemPrefix } from './markdownComposer';
 
 /**
  * 章级规划者（Chapter Planner）：把模板/OUTLINE 显式提供的细目清单重排为「三级主题块 + H4 要点」结构，
@@ -422,9 +423,16 @@ export async function planChapterStructureWithLlm(input: {
   // 阶段 2：逐块小调用（输出 ≤2000 token，远离 8192 共享输出池），块间并发、块级失败隔离
   const planBlockWithLlm = async (sections: string[], blockIndex: number): Promise<{ blocks: PlannedChapterBlock[]; llmPlanned: boolean; failure?: string }> => {
     const blockEvidence = blockEvidenceForSections(sections, input.evidence);
-    const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, blockEvidence));
+    // 规划调用只做合并决策 + facts 摘取（0~2 条短句），证据按块目标字数动态预算（floor 5000/ceiling 12000）：
+    // 此前无预算上限全量注入，是规划调用输入超大的根因（实测单次输入可达数十万字符），
+    // T0 关键参数层由 evidenceBundlePrompt 全量保留，零丢失保护不受预算影响
+    const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, blockEvidence), {
+      maxChars: evidencePromptBudgetForTarget(halfTarget, 5000, 12000),
+      requiredFacts: input.chapter.requiredFacts,
+      diagnostics: input.diagnostics,
+    });
     const promptLines = [
-      '你是专业施工组织设计文档结构规划专家。',
+      docSystemPrefix('你是专业施工组织设计文档结构规划专家。'),
       '任务：把一个主题块内的输入细目重排为 H4 要点结构；语义相近、内容连贯的细目必须合并进同一个 H4 要点。',
       '硬性规则：',
       `1. 合并决策：语义相近、内容连贯的输入细目必须合并进同一个 H4 要点；H4 要点标题必须重写为更概括、更专业的标题（16 字以内），不得直接照抄任一输入细目标题；每个 H4 要点的 sources 字段逐字列出它所覆盖的全部输入细目标题，不得改写、不得遗漏、不得重复映射。例外：含评标必查关键词的输入细目（${CRITICAL_SECTION_ANCHORS.join('/')}等）必须保留为独立 H4 要点，不得与其他细目合并吞并，其 H4 标题必须保留该关键词。`,

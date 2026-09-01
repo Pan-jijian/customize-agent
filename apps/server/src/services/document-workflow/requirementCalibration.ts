@@ -2,6 +2,7 @@ import type { DocumentTemplateChapter } from './types';
 import { callDocumentLlmJson } from './llmClient';
 import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
 import { cleanSectionTitleArtifacts, isInvalidPlannedSectionTitle, normalizePlannedSectionTitle, sectionTitleEquivalent } from './promptRuleExtraction';
+import { docSystemPrefix } from './markdownComposer';
 
 /**
  * C2 大纲要求校准：评分项要求在结构层显性承接（创优目标与奖惩/绿色等级/智慧工地/装配率等必提要求，
@@ -56,7 +57,7 @@ export async function calibrateOutlineSectionsToRequirements(input: {
     .map(chapter => `【${displayChapterTitle(chapter.title)}】\n${(chapter.sections || []).filter(Boolean).map(section => `- ${section}`).join('\n') || '（本章暂无预设小节）'}`)
     .join('\n\n');
   const result = await callDocumentLlmJson<{ additions?: Array<{ chapterTitle?: string; sections?: string[] }> }>(
-    REQUIREMENT_CALIBRATION_SYSTEM,
+    docSystemPrefix(REQUIREMENT_CALIBRATION_SYSTEM),
     [
       `文档模板：${input.templateName}`,
       `招标评分项要求摘要（必须逐条在结构层显性承接）：\n${input.requirementSummary.map(item => `- ${item}`).join('\n')}`,

@@ -17,6 +17,7 @@ import { normalizeFactUsageText } from './chapterGeneration';
 import { repairChapterByQuality } from './rolePipeline';
 import { finalizeChapterContentQuality } from './documentGeneratorHelpers';
 import { QINGTIAN_REVIEW_SYSTEM, qingtianBlockReviewPrompt, qingtianFixInstructionFor } from './qingtianReviewSpec';
+import { docSystemPrefix } from './markdownComposer';
 import { collectDocumentHeadings, formatKnownConflictLines, sanitizeIssueLocation, scanCrossChapterDataConflicts } from './crossChapterDataScan';
 
 export interface QingtianReviewIssue {
@@ -199,7 +200,7 @@ function locateChapterByIssue(issue: QingtianReviewIssue, chapters: DocumentDraf
  * 输出后置校验：location 与全文标题集合比对（LLM 幻觉定位标注"待核"），阻断错误定位进入修复与评分报告。 */
 async function reviewDocumentBlock(chapters: DocumentDraftChapter[], context: { projectName: string; requirement?: string; tenderContext?: string; knownConflictLines?: string; headings: string[]; blockIndex: number; blockTotal: number }, diagnostics?: DocumentGenerationDiagnostics, signal?: AbortSignal): Promise<QingtianBlockReviewResult | undefined> {
   const blockContent = chapters.map(chapter => `### ${chapter.title}\n${chapter.content}`).join('\n\n');
-  const reviewed = await callDocumentLlmJson<QingtianBlockReviewResult>(QINGTIAN_REVIEW_SYSTEM, qingtianBlockReviewPrompt({ ...context, chapterTitles: chapters.map(chapter => chapter.title), blockContent }), {
+  const reviewed = await callDocumentLlmJson<QingtianBlockReviewResult>(docSystemPrefix(QINGTIAN_REVIEW_SYSTEM), qingtianBlockReviewPrompt({ ...context, chapterTitles: chapters.map(chapter => chapter.title), blockContent }), {
     maxTokens: 1800,
     temperature: 0.1,
     signal,

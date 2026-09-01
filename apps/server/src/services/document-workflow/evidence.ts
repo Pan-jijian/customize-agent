@@ -392,14 +392,18 @@ export interface EvidencePromptOptions {
   diagnostics?: DocumentGenerationDiagnostics;
 }
 
-export function evidencePromptBudgetForTarget(targetWords?: number, floorChars = 8000, ceilingChars = 36000) {
+export function evidencePromptBudgetForTarget(targetWords?: number, floorChars = 8000, ceilingChars = 24000) {
   const words = Number.isFinite(targetWords) && targetWords! > 0 ? Math.ceil(targetWords!) : 1200;
-  // 事实/字数比：每目标字配 12 字符证据（含结构化开销），证据不足是空话灌水的直接原因；
-  // 天花板按 env 可调（DOCUMENT_EVIDENCE_BUDGET_CEILING），默认 36000 让深召回的 42K-72K 证据尽可能全量注入，
-  // 替代旧的 18K 过度保守上限（旧上限丢弃 60%-85% 召回内容）
+  // 事实/字数比：每目标字配 8 字符证据（含结构化开销），证据不足是空话灌水的直接原因；
+  // 实测 12 字符/字时单次调用输入可达 36K 字符证据（占输入大头），8 字符/字在 T0 全量保留
+  // 前提下仍可覆盖关键参数；比例按 env 可调（DOCUMENT_EVIDENCE_BUDGET_RATIO）
+  // 天花板按 env 可调（DOCUMENT_EVIDENCE_BUDGET_CEILING），默认 24000 平衡「深召回注入」与
+  // 「单次输入体积」（T0 关键参数层全量保留不受影响，T1 片段缩量、T2 目录追溯零丢失）
   const configuredCeiling = Number(process.env.DOCUMENT_EVIDENCE_BUDGET_CEILING);
   const ceiling = Number.isFinite(configuredCeiling) && configuredCeiling > 0 ? Math.floor(configuredCeiling) : ceilingChars;
-  const dynamic = Math.ceil(words * 12);
+  const configuredRatio = Number(process.env.DOCUMENT_EVIDENCE_BUDGET_RATIO);
+  const ratio = Number.isFinite(configuredRatio) && configuredRatio > 0 ? configuredRatio : 8;
+  const dynamic = Math.ceil(words * ratio);
   return Math.max(floorChars, Math.min(ceiling, dynamic));
 }
 

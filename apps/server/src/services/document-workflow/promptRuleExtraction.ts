@@ -3,6 +3,7 @@ import { documentTextLength } from './budget';
 import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
 import { callDocumentLlmJson } from './llmClient';
 import { displayChapterTitle } from './outline';
+import { docSystemPrefix } from './markdownComposer';
 import { concatenatedSectionTitleFixes } from './constructionBidStructure';
 
 /** 清单层小节标题清洗（确定性结构清洗）：
@@ -506,7 +507,7 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
   const overviewChapter = input.chapterIndex === 0 || /编制说明|工程概况|项目概况/u.test(input.chapter.title);
   const planOnce = async (orderFeedback: string) => {
     const result = await callDocumentLlmJson<{ sections?: string[] }>([
-      '你是专业文档结构规划专家。',
+      docSystemPrefix('你是专业文档结构规划专家。'),
       '只根据用户提示词、章节标题和真实绑定资料规划本章二级小节；不得使用"目标与范围、资料依据、实施内容、质量控制"等通用占位小节凑数。',
       '施工组织、技术措施、资源配置、质量、安全、工期、材料、设备、劳动力、危大工程等核心章节必须拆成足够的专业工作面，不得只输出两个泛化小节。',
       '不得把提示词条件句或短语碎片作为小节标题，例如"判断是否涉、是否涉及、如涉及、雨季、冬季、高温、台风、大风等特殊气候"。',

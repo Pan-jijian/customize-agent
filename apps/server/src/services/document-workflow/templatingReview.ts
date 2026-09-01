@@ -2,6 +2,7 @@ import { callDocumentLlmJson } from './llmClient';
 import type { DocumentGenerationDiagnostics } from './types';
 import type { TenderBidTemplatingReport } from './tenderBidScoring';
 import { fourNewTechCheck } from './tenderBidChecks';
+import { docSystemPrefix } from './markdownComposer';
 
 /**
  * A2 Reviewer 语义级复核（对标 docx 判定标尺中确定性正则无法覆盖的语义级判定）：
@@ -60,7 +61,7 @@ export async function reviewTemplatingSemantics(input: {
     '返回 JSON：{"issues":["问题1","问题2"]}',
   ];
   try {
-    const result = await callDocumentLlmJson<{ issues?: string[] }>(TEMPLATING_REVIEW_SYSTEM, contextLines.join('\n\n'), {
+    const result = await callDocumentLlmJson<{ issues?: string[] }>(docSystemPrefix(TEMPLATING_REVIEW_SYSTEM), contextLines.join('\n\n'), {
       maxTokens: 1200,
       temperature: 0.1,
       signal: input.signal,

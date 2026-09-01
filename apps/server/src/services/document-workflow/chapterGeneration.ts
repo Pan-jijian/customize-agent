@@ -4,7 +4,7 @@ import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentFact
 import type { DocumentBudget } from './budget';
 import { documentTextLength } from './budget';
 import { buildEvidenceBundle, buildEvidenceLayers, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget, extractKeyParameterWindows } from './evidence';
-import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, removeUnwantedDrawingImages, sanitizeFormalMarkdown, writerSystemPrefix } from './markdownComposer';
+import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, docSystemPrefix, removeUnwantedDrawingImages, sanitizeFormalMarkdown, writerSystemPrefix } from './markdownComposer';
 import { callDocumentLlm, callDocumentLlmJson, contextLayerChars, getDocumentLlmFailureStreak, getDocumentLlmMaxConcurrency } from './llmClient';
 import { dedupeRepeatedSubsections, findDuplicateH4Titles, stringifyFactValue, throwIfAborted } from './utils';
 import { measureGenerationStep } from './rolePipeline';
@@ -151,7 +151,7 @@ async function buildChapterFactOutline(input: { template: DocumentTemplate; chap
     ? input.sections.map((section, index) => `${index + 1}. ${section}`).join('\n')
     : '（本章无预设小节，请按材料自然归纳 2-5 个主题作为大纲小节）';
   const system = [
-    '你是文档事实规划专家。先通读绑定材料，再为本章每个小节列出「可写事实」，供 Writer 逐条落位。',
+    docSystemPrefix('你是文档事实规划专家。先通读绑定材料，再为本章每个小节列出「可写事实」，供 Writer 逐条落位。'),
     '事实必须逐字来自绑定材料：数值、单位、标准编号必须原样保留，不得改写、换算或编造；不得把写作要求当作事实。',
     'quantifiedFacts 放含数字/单位/编号的事实；missingFacts 放该小节需要但材料中确实找不到的事实（供 Writer 用公共专业知识补做法，禁止编造具体值）。',
     '只返回 JSON，不要返回 markdown。',
@@ -246,6 +246,8 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
   let outlineBlock = '';
   let outline: ChapterFactOutline | undefined;
   let stillMissingFacts = new Set<string>();
+  // P0-3 两步瘦身：跟踪当前证据池（P4 定向补充检索会扩充），大纲成功后第二步按降档预算重建证据
+  let outlineEvidence = evidence;
   if (twoStepEnabled) {
     outline = await buildChapterFactOutline({ template, chapter, sections: chapter.sections?.filter(Boolean) || [], requiredFacts: chapter.requiredFacts, missingFacts, promptTexts, evidenceText, signal: options.signal, diagnostics: options.diagnostics });
     if (outline) {
@@ -257,6 +259,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
         const fresh = supplements.filter(item => !evidence.some(existing => existing.filePath === item.filePath && (existing.sectionTitle || '') === (item.sectionTitle || '')));
         if (fresh.length > 0) {
           const mergedEvidence = [...evidence, ...fresh];
+          outlineEvidence = mergedEvidence;
           evidenceText = evidenceBundlePrompt(buildEvidenceBundle(chapter, mergedEvidence), { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars), requiredFacts: chapter.requiredFacts, skipT0: sharedFactLayer, diagnostics: options.diagnostics });
           // 覆盖判断基于合并后证据池：原证据已覆盖的事实不算缺失，避免误标
           stillMissingFacts = new Set(allOutlinedMissing.filter(fact => !factCoveredByEvidence(fact, mergedEvidence)));
@@ -270,6 +273,15 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
         stillMissingFacts = new Set(allOutlinedMissing);
       }
       outlineBlock = renderChapterFactOutline(outline, stillMissingFacts);
+      // P0-3 两步瘦身：事实大纲已产出可写事实清单（facts + quantifiedFacts），第二步写作只需
+      // 大纲事实对应的细节原文；证据预算降为基准的 60%——T0 关键参数层全量保留（零丢失原则），
+      // T1 高相关片段缩量，T2 目录索引保留全貌与追溯。两步路径第二步输入与第一步相当，
+      // 降档后两步总输入收敛到单步路径水平；DOCUMENT_TWO_STEP_SLIM=0 关闭
+      if (process.env.DOCUMENT_TWO_STEP_SLIM !== '0') {
+        const slimBudget = Math.floor(evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars) * 0.6);
+        const supplementNote = evidenceText.split('\n\n【定向补充检索】')[1];
+        evidenceText = evidenceBundlePrompt(buildEvidenceBundle(chapter, outlineEvidence), { maxChars: slimBudget, requiredFacts: chapter.requiredFacts, skipT0: sharedFactLayer, diagnostics: options.diagnostics }) + (supplementNote ? `\n\n【定向补充检索】${supplementNote}` : '');
+      }
     }
   }
   const userFactBlock = userRequirementFactsPrompt(requirement);

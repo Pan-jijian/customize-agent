@@ -3,7 +3,7 @@ import { callDocumentLlm, callDocumentLlmJson, contextLayerChars } from './llmCl
 import { displayStage } from './progress';
 import { throwIfAborted } from './utils';
 import { buildSectionFactCard, evidenceForSection, sectionFactUsageIssue } from './chapterGeneration';
-import { extractGeneratedSections } from './markdownComposer';
+import { extractGeneratedSections, docSystemPrefix } from './markdownComposer';
 
 export async function chapterSectionFactUsageIssues(input: { chapter: DocumentTemplateChapter; content: string; evidence: DocumentEvidence[] }, embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<string[]> {
   // 结构口径：按最终 markdown 中实际存在的 ### 小节标题检查，模板细目只作为写作清单。
@@ -80,7 +80,7 @@ export async function reviewGlobalConsistency(input: { template: DocumentTemplat
   throwIfAborted(input.signal); const summaries = input.chapters.map(ch => { const p = ch.content.replace(/#{1,6}\s+/gu,'').replace(/\*\*/gu,'').replace(/\|/gu,' ').replace(/[\n\r]+/gu,' ').trim(); const digest = numericDigestForChapter(ch.content); return `章节：${ch.title}\n数值口径清单：${digest || '（未提取到总量口径数字）'}\n正文摘要：${p.slice(0,600)}`; });
   const text = summaries.join('\n\n---\n\n'); const plan = adaptiveReviewPlan({ totalChars: text.length, chapterCount: input.chapters.length, chunkChars: 16000, phase: 'global' });
   const chunks = chunkTextForReview(text, 16000).slice(0, plan.chunks);
-  const reviewPrompt = '你是专业文档审查专家。检查跨章节数值一致性。每个章节都附带“数值口径清单”（从正文确定性提取的总量口径数字）。只报告确定性矛盾，两类：(1) 两章之间同一口径的数值互相矛盾；(2) 正文数值与项目上下文中的资料口径或裁决口径明确不符。每条冲突必须包含：章节名+冲突数值+正确口径（正确口径必须取自项目上下文中的资料或裁决，不得自行编造）。资料未提供某口径不构成冲突，不得报告；各章表述一致但资料未明确的字段不得报告；各章一致的表述不得报告。只返回 JSON。';
+  const reviewPrompt = docSystemPrefix('你是专业文档审查专家。检查跨章节数值一致性。每个章节都附带“数值口径清单”（从正文确定性提取的总量口径数字）。只报告确定性矛盾，两类：(1) 两章之间同一口径的数值互相矛盾；(2) 正文数值与项目上下文中的资料口径或裁决口径明确不符。每条冲突必须包含：章节名+冲突数值+正确口径（正确口径必须取自项目上下文中的资料或裁决，不得自行编造）。资料未提供某口径不构成冲突，不得报告；各章表述一致但资料未明确的字段不得报告；各章一致的表述不得报告。只返回 JSON。');
   // P3 耗时优化：projectContext 移出 per-chunk user 注入——历史每个 chunk 的 user 都重复拼入全量
   // 项目上下文（可达数万字，4 chunks 即 4 倍），且 user 首部随 chunk 变化导致 prefix cache 无法命中；
   // 改为提取数值口径清单注入 system：跨 chunk 前缀恒定（A5a prefix cache 全命中），公共上下文只付一次成本

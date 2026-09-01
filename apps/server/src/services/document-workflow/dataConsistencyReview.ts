@@ -1,6 +1,7 @@
 import type { DocumentGenerationDiagnostics, ValidationIssue } from './types';
 import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
 import { stableHash } from './utils';
+import { docSystemPrefix } from './markdownComposer';
 
 /**
  * L3.5 数据一致性 LLM 审查层（h7）：
@@ -74,7 +75,7 @@ export async function reviewDataConsistency(markdown: string, options: { signal?
   if (numericLines.length < 2) return [];
   const raw = await callDocumentLlmJson<{ conflicts?: DataConsistencyConflict[] }>(
     [
-      '你是施工组织设计数据一致性审查器。',
+      docSystemPrefix('你是施工组织设计数据一致性审查器。'),
       '给定全文含数值的句子/表格行清单（编号与内容），找出互相矛盾的数值对：',
       '- 同一口径必须一致而实际数值不同：劳动力峰值多处不一致、同一面积两处数字不同、总工期与分项工期冲突、同一节点日期两处不一致、表格合计与明细之和不等、人数×工期与总工日不自洽；',
       '- 只报确定的矛盾（itemA 与 itemB 明确矛盾且置信度 ≥0.8），不得臆造；',

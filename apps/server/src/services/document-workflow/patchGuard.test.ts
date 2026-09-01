@@ -114,3 +114,37 @@ describe('repairChapterByQuality patchGuard', () => {
     expect(result.content).toContain('工作包');
   });
 });
+
+describe('repairChapterByQuality P1-2 空白容错定位', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('originalText 复述空白差异（换行折叠为空格）时唯一命中即应用', async () => {
+    const multiLineChapter = { ...chapter, content: '## 工程概况\n\n施工组织总平面\n\n布置按以下原则执行。' } as unknown as DocumentDraftChapter;
+    // LLM 复述把正文换行写成单空格：精确匹配失败，空白容错唯一命中后应用
+    llmMock.mockResolvedValue({ patches: [{ originalText: '施工组织总平面 布置按以下原则执行。', replacement: '施工组织总平面布置按三条原则执行。' }] });
+    const result = await repairChapterByQuality({ template, chapter: multiLineChapter, issues: ['需要修复'], promptTexts: '提示词', forbidDrawingImages: false });
+    expect(result.appliedCount).toBe(1);
+    expect(result.content).toContain('施工组织总平面布置按三条原则执行。');
+  });
+
+  it('空白容错后多处命中时拒绝应用（唯一性保护不变）', async () => {
+    const dupChapter = { ...chapter, content: '## 工程概况\n\n阶段一\n投入三百人。\n\n阶段二结束。\n\n阶段一\n投入三百人。' } as unknown as DocumentDraftChapter;
+    // 复述用单空格、正文两处都是换行：精确匹配失败，模糊模式命中 2 处 → 拒绝
+    llmMock.mockResolvedValue({ patches: [{ originalText: '阶段一 投入三百人。', replacement: '阶段一投入三百五十人。' }] });
+    const result = await repairChapterByQuality({ template, chapter: dupChapter, issues: ['需要修复'], promptTexts: '提示词', forbidDrawingImages: false });
+    expect(result.appliedCount).toBe(0);
+    expect(result.producedCount).toBe(1);
+    expect(result.content).toBe(dupChapter.content);
+  });
+
+  it('复述漏词（实质差异）不匹配不应用（安全边界）', async () => {
+    const multiLineChapter = { ...chapter, content: '## 工程概况\n\n施工组织总平面\n\n布置按以下原则执行。' } as unknown as DocumentDraftChapter;
+    // 复述漏掉「以下」：模糊模式无法匹配，patch 不应用（空白容错不放大为漏词容错）
+    llmMock.mockResolvedValue({ patches: [{ originalText: '施工组织总平面 布置按原则执行。', replacement: '施工组织总平面布置按三条原则执行。' }] });
+    const result = await repairChapterByQuality({ template, chapter: multiLineChapter, issues: ['需要修复'], promptTexts: '提示词', forbidDrawingImages: false });
+    expect(result.appliedCount).toBe(0);
+    expect(result.content).toBe(multiLineChapter.content);
+  });
+});

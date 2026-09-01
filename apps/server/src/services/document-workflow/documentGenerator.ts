@@ -1826,6 +1826,9 @@ export async function generateDocumentDraft(input: { templateId: string; require
       }
       // 跨章一致性冲突修复闭环：按冲突描述中的正确口径对点名章节做 fact_conflict 定向修复，再复检；
       // 无任何 patch 落地的轮次立即停止，避免空转消耗 LLM 预算
+      // P1-1 复检瘦身：确定性复检每轮必做（零 LLM 成本）；LLM 复检仅最后一轮或确定性清零时执行一次，
+      // stale 标志标记「跳过 LLM 复检」的轮次，防空转 break 时旧快照残留被 finalize 包装为 error 硬阻断
+      let llmReviewStale = false;
       for (let repairRound = 0; repairRound < 2 && globalConsistencyIssues.length > 0; repairRound += 1) {
         upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-repair', status: 'running', message: `跨章一致性冲突第 ${repairRound + 1} 轮定向修复（${globalConsistencyIssues.length} 个冲突）` }, { subtitle: '跨章一致性修复' }));
         emitProgress(chapterDraftsFinal);
@@ -1888,11 +1891,24 @@ export async function generateDocumentDraft(input: { templateId: string; require
             appliedCount += 1;
           }
         });
-        if (appliedCount === 0) break;
+        if (appliedCount === 0) {
+          // 本轮无 patch 落地、正文未变：若上一轮跳过 LLM 复检，需补一次刷新快照，
+          // 避免已修复的 LLM issue 旧快照残留被 finalize 包装为「跨章一致性复核」error 硬阻断
+          if (llmReviewStale) llmReviewIssues = (await runGlobalReview()).issues;
+          break;
+        }
         emitProgress(chapterDraftsFinal);
-        const reReview = await runGlobalReview();
-        llmReviewIssues = reReview.issues;
-        globalConsistencyIssues = [...new Set([...llmReviewIssues, ...(await runDeterministicConsistencyCheck())])];
+        // P1-1 复检瘦身：确定性检测每轮必做（零 LLM 成本，驱动下一轮判定）；LLM 复检仅最后一轮
+        // 或确定性冲突清零时执行一次——LLM issue 是否已修复无法确定性判定，但无需每轮重复全文大输入调用
+        const deterministicRecheck = await runDeterministicConsistencyCheck();
+        const finalRound = repairRound === 1;
+        if (finalRound || deterministicRecheck.length === 0) {
+          llmReviewIssues = (await runGlobalReview()).issues;
+          llmReviewStale = false;
+        } else {
+          llmReviewStale = true;
+        }
+        globalConsistencyIssues = [...new Set([...llmReviewIssues, ...deterministicRecheck])];
         upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-review', status: globalConsistencyIssues.length > 0 ? 'failed' : 'success', message: globalConsistencyIssues.length > 0 ? `跨章一致性复检：仍有 ${globalConsistencyIssues.length} 个冲突` : '跨章一致性复检通过' }, { subtitle: '全局一致性审查' }));
         emitProgress(chapterDraftsFinal);
       }

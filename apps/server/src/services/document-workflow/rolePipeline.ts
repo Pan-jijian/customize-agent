@@ -7,7 +7,7 @@ import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, Do
 import { readPromptContents, type ResolvedPromptContent } from './templateStore';
 import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
 import { hasExplicitOutlineBlock, isExplicitOutlineClosingLine, isExplicitOutlineOpeningLine } from './outline';
-import { FORMAL_WRITING_RULES, WORKFLOW_PHRASE_RE, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
+import { FORMAL_WRITING_RULES, WORKFLOW_PHRASE_RE, docSystemPrefix, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentTextLength } from './budget';
 import { estimateTokens, truncateToTokenBudget } from './tokenBudget';
 import { classifyQualitySeverity, degenerateContentIssues } from './qualityValidation';
@@ -139,6 +139,13 @@ function uniqueTextRange(content: string, patch: ChapterMarkdownPatch) {
   // 唯一性判定必须排除「未找到」情况：indexOf 返回 -1 时 -1 === -1 为 true，
   // 历史 bug 会把不存在的 originalText 当作唯一定位返回 → replace 静默无效果 → applied=false
   if (originalText && content.includes(originalText) && content.indexOf(originalText) === content.lastIndexOf(originalText)) return originalText;
+  // P1-2 空白容错兜底：LLM 复述的 originalText 与正文空白细节常有出入（换行折叠/全角空格/多余空格），
+  // 精确匹配失败即整条 patch 落空（历史缺陷：补表/缺词类 patch 产出后全部失配，修复空转轮次）；
+  // 空白归一化正则唯一命中才应用，命中多处仍拒绝，局部替换安全性不变
+  if (originalText && originalText.length >= 8 && originalText.length <= 500) {
+    const fuzzyRange = uniqueWhitespaceTolerantRange(content, originalText);
+    if (fuzzyRange) return fuzzyRange;
+  }
   const targetStart = patch.targetStart?.trim();
   const targetEnd = patch.targetEnd?.trim();
   if (!targetStart || !targetEnd) return undefined;
@@ -149,6 +156,22 @@ function uniqueTextRange(content: string, patch: ChapterMarkdownPatch) {
   const endOffset = endIndex + targetEnd.length;
   const range = content.slice(startIndex, endOffset);
   return content.indexOf(range) === content.lastIndexOf(range) ? range : undefined;
+}
+
+// P1-2：originalText 空白容错定位——按空白切分后各段正则转义、段间以 \s+ 连接（复述与正文的空白
+// 形态差异均可容错，复述漏词/加词不匹配）；全局搜索唯一命中才返回实际命中文本（保留正文真实空白），
+// 使 applyChapterPatch 的 replace 使用正文原文字符串
+function uniqueWhitespaceTolerantRange(content: string, originalText: string): string | undefined {
+  const parts = originalText.split(/\s+/u).filter(part => part.length > 0);
+  if (parts.length < 2) return undefined;
+  const patternSource = parts.map(part => part.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('\\s+');
+  let hitRange: string | undefined;
+  const pattern = new RegExp(patternSource, 'gu');
+  for (const match of content.matchAll(pattern)) {
+    if (hitRange !== undefined) return undefined;
+    hitRange = match[0];
+  }
+  return hitRange;
 }
 
 function patchLengthBudget(content: string) {
@@ -233,7 +256,7 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     ? buildEvidenceBundle({ id: input.chapter.id, title: input.chapter.title, purpose: input.chapter.title, queries: [], requiredFacts: [] }, input.chapter.evidence)
     : undefined;
   const systemPrompt = [
-    '你是章节局部修复专家。只返回 JSON patch，不返回完整章节，不重写无问题内容。',
+    docSystemPrefix('你是章节局部修复专家。只返回 JSON patch，不返回完整章节，不重写无问题内容。'),
     repairTypeInstruction(repairType),
     FORMAL_WRITING_RULES,
     input.forbidDrawingImages ? '图片类资料只作为文本事实来源，禁止插入图片或 Markdown 图片语法。' : '',

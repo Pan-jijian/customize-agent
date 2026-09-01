@@ -29,11 +29,11 @@ export interface GenerationBudget {
 
 /** 按平均章节目标字数确定每章证据预算区间 */
 function evidenceBudgetRange(avgChapterTarget: number): { floorChars: number; ceilingChars: number } {
-  // round-20 S5/W7 P6-1：证据预算三档放开——证据不足是空话灌水的直接原因，完整信息注入优先；
-  // 上限按 env DOCUMENT_EVIDENCE_BUDGET_CEILING 可覆盖（evidencePromptBudgetForTarget 内生效）
-  if (avgChapterTarget >= 6000) return { floorChars: 14000, ceilingChars: 52000 };
-  if (avgChapterTarget >= 3000) return { floorChars: 11000, ceilingChars: 36000 };
-  return { floorChars: 8000, ceilingChars: 24000 };
+  // P0-4 预算收紧：真实运行实测输入大头为证据注入（单次平均 315K token），T0 关键参数层全量保留
+  // 前提下 T1 片段适度缩量（T2 目录索引零丢失追溯）；上限按 env DOCUMENT_EVIDENCE_BUDGET_CEILING 可覆盖
+  if (avgChapterTarget >= 6000) return { floorChars: 14000, ceilingChars: 40000 };
+  if (avgChapterTarget >= 3000) return { floorChars: 11000, ceilingChars: 28000 };
+  return { floorChars: 8000, ceilingChars: 18000 };
 }
 
 export function buildGenerationBudget(input: {

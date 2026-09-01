@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DocumentDraftChapter, DocumentTemplate, GeneratedDocumentDraft, PromptDocumentRuleSet } from './types';
 import {
   L0_WRITER_SYSTEM_PREFIX,
+  DOCUMENT_L0_COMMON_PREFIX,
+  docSystemPrefix,
   FORMAL_WRITING_RULES,
   SECTION_GENERATION_SAFETY_RULES,
   applyPromptDocumentRules,
@@ -344,10 +346,34 @@ describe('composeDocumentMarkdown', () => {
 });
 
 describe('L0_WRITER_SYSTEM_PREFIX（3.2 Writer 类 system 前缀统一）', () => {
-  it('L0 恒定前缀 = 专家身份 + 正式写作规则 + 小节安全规则', () => {
-    expect(L0_WRITER_SYSTEM_PREFIX.startsWith('你是施工组织设计文档写作专家。')).toBe(true);
+  it('L0 恒定前缀 = 公共前缀 + 专家身份 + 正式写作规则 + 小节安全规则', () => {
+    expect(L0_WRITER_SYSTEM_PREFIX.startsWith(DOCUMENT_L0_COMMON_PREFIX)).toBe(true);
+    expect(L0_WRITER_SYSTEM_PREFIX).toContain('你是施工组织设计文档写作专家。');
     expect(L0_WRITER_SYSTEM_PREFIX).toContain(FORMAL_WRITING_RULES);
     expect(L0_WRITER_SYSTEM_PREFIX).toContain(SECTION_GENERATION_SAFETY_RULES);
+  });
+
+  it('docSystemPrefix 默认返回公共前缀 + 角色身份（跨类型共享第一段）', () => {
+    const original = process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    delete process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    try {
+      const prefix = docSystemPrefix('你是章节局部修复专家。');
+      expect(prefix.startsWith(DOCUMENT_L0_COMMON_PREFIX)).toBe(true);
+      expect(prefix).toContain('你是章节局部修复专家。');
+    } finally {
+      if (original !== undefined) process.env.DOCUMENT_L0_SYSTEM_PREFIX = original;
+    }
+  });
+
+  it('docSystemPrefix 在 DOCUMENT_L0_SYSTEM_PREFIX=0 时回退 legacy 前缀', () => {
+    const original = process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    process.env.DOCUMENT_L0_SYSTEM_PREFIX = '0';
+    try {
+      expect(docSystemPrefix('新角色。', '旧前缀。')).toBe('旧前缀。');
+    } finally {
+      if (original !== undefined) process.env.DOCUMENT_L0_SYSTEM_PREFIX = original;
+      else delete process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    }
   });
 
   it('writerSystemPrefix 默认返回 L0 前缀', () => {

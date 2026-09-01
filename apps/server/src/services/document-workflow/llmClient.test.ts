@@ -5,7 +5,7 @@
  * 底层 LLM 调用通过 invokeLlm 注入桩（模块内部词法绑定无法被 vi.mock 拦截）。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, isTransientLlmError, type DocumentJsonSchema } from './llmClient';
+import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, isTransientLlmError, repairTruncatedJson, type DocumentJsonSchema } from './llmClient';
 import type { DocumentGenerationDiagnostics } from './types';
 
 // 无活跃模型配置：callDocumentLlm 观测累计发生在 provider 调用之前，
@@ -225,5 +225,60 @@ describe('isTransientLlmError（瞬态错误识别，驱动重试一次）', () 
     expect(isTransientLlmError(new Error("This model's maximum context length is 131072 tokens"))).toBe(false);
     expect(isTransientLlmError(new Error('无效 JSON：第 12 行解析失败'))).toBe(false);
     expect(isTransientLlmError(new Error('用户中止'))).toBe(false);
+  });
+});
+
+describe('repairTruncatedJson（P1-4 截断 JSON 确定性修复）', () => {
+  it('顶层对象截断：回退到最后一个完整元素并补闭合括号', () => {
+    expect(repairTruncatedJson('{"a":1,"b":2,"c":3')).toBe('{"a":1,"b":2}');
+    expect(JSON.parse(repairTruncatedJson('{"a":1,"b":2,"c":3')!)).toEqual({ a: 1, b: 2 });
+  });
+
+  it('嵌套对象截断（截断在字符串值中间）：丢弃残缺元素补齐闭合', () => {
+    const repaired = repairTruncatedJson('{"blocks":[{"title":"A"},{"title":"施工总平面布置按以');
+    expect(repaired).toBe('{"blocks":[{"title":"A"}]}');
+    expect(JSON.parse(repaired!)).toEqual({ blocks: [{ title: 'A' }] });
+  });
+
+  it('数组元素截断（数字中间）：保留完整元素', () => {
+    const repaired = repairTruncatedJson('{"blocks":[{"a":1},{"b":2},{"c":3');
+    expect(repaired).toBe('{"blocks":[{"a":1},{"b":2}]}');
+  });
+
+  it('引号内花括号不干扰括号栈', () => {
+    const repaired = repairTruncatedJson('{"note":"函数 {a} 使用","other":"截断');
+    expect(repaired).toBe('{"note":"函数 {a} 使用"}');
+  });
+
+  it('首元素残缺（无完整元素边界）返回 undefined', () => {
+    expect(repairTruncatedJson('{"blocks":[')).toBeUndefined();
+    expect(repairTruncatedJson('{"a":')).toBeUndefined();
+  });
+
+  it('括号平衡（非截断语法错误）返回 undefined，不做语法猜测', () => {
+    expect(repairTruncatedJson('{"a":1,}')).toBeUndefined();
+  });
+
+  it('嵌套对象内层截断：回退到内层最后完整元素（cut 不含逗号，无 trailing comma）', () => {
+    expect(repairTruncatedJson('{"a":{"b":1,"c":"残缺')).toBe('{"a":{"b":1}}');
+  });
+});
+
+describe('callDocumentLlmJsonWithRetry（P1-4 截断修复免重试）', () => {
+  it('截断输出确定性修复成功且满足 schema → 不重试直接返回', async () => {
+    const invoke = vi.fn().mockResolvedValueOnce('{"patches": [{"replacement": "x"}, {"replacement": "残缺截断');
+    const result = await callDocumentLlmJsonWithRetry<{ patches: unknown[] }>('system', 'prompt', { schema }, invoke);
+    expect(result?.patches).toHaveLength(1);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('截断修复产物不满足 schema（minItems 不足）→ 仍走失败原因回注重试', async () => {
+    const invoke = vi.fn()
+      .mockResolvedValueOnce('{"patches": [')
+      .mockResolvedValueOnce('{"patches": [{}]}');
+    const result = await callDocumentLlmJsonWithRetry<{ patches: unknown[] }>('system', 'prompt', { schema }, invoke);
+    expect(result?.patches).toHaveLength(1);
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke.mock.calls[1][1]).toContain('重试修正');
   });
 });

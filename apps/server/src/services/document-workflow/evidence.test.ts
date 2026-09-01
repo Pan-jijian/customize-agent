@@ -272,8 +272,9 @@ describe('buildEvidenceBundle', () => {
 
 describe('evidencePromptBudgetForTarget', () => {
   it('按字数动态计算并受 floor/ceiling 约束', () => {
-    expect(evidencePromptBudgetForTarget()).toBe(14400);
-    expect(evidencePromptBudgetForTarget(1000)).toBe(12000);
+    // P0-4：每目标字 8 字符（12 → 8 收紧），无字数时按 1200 基准
+    expect(evidencePromptBudgetForTarget()).toBe(9600);
+    expect(evidencePromptBudgetForTarget(1000)).toBe(8000);
     expect(evidencePromptBudgetForTarget(100)).toBe(8000);
   });
 });

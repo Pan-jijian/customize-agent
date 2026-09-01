@@ -559,11 +559,28 @@ export const SECTION_GENERATION_SAFETY_RULES = [
 ].join('\n');
 
 /**
- * 3.2 Writer 类 system 恒定前缀：整章/小节/focused/补写四类 Writer 的 system 统一以此为前缀，
- * 任务差异段紧随其后——跨调用类型共享 prefix cache（DeepSeek 前缀缓存按 system 头部收敛）。
+ * 3.2 文档工作流 L0 公共前缀：所有文档生成相关 LLM 调用（Writer/事实大纲/结构规划/评审/修复/
+ * 规则抽取/招标提取/大纲校准/模板化复核）共享的第一段 system。内容只放跨任务通用的硬约束
+ * （事实安全、后台话术禁令、输出契约），角色身份与任务规则由各调用点紧随其后追加——
+ * 跨调用类型共享 prefix cache（DeepSeek 前缀缓存按 system 头部收敛）。
+ * 历史缺陷：14+ 种调用类型各用独立 system 开头，跨类型前缀零命中（实测命中率仅 25%）。
+ */
+export const DOCUMENT_L0_COMMON_PREFIX = [
+  '你是专业施工组织设计文档生成智能体，承担文档结构规划、正文写作、质量评审与局部修复任务。',
+  '通用硬约束：',
+  '1. 项目专属事实（工期、金额、工程量、建设规模、人名、公司、品牌、供应商、材料规格、日期节点）必须来自绑定材料，不得编造；公共专业知识（法律法规名称、标准规范编号、通用施工工艺与行业惯例）可依据现行有效版本直接引用，但不得虚构编号或引用已废止版本。',
+  '2. 输出中不得出现后台流程话术（知识库、检索、资料类型、提示词角色、规范包、事实字段、缺失项、校验结果、资料未提供、未检索到等）。',
+  '3. 严格遵守调用点给出的输出契约：JSON 调用只返回 JSON，正文调用遵循 Markdown 结构要求。',
+].join('\n');
+
+/**
+ * 3.2 Writer 类 system 恒定前缀：公共前缀 + 写作专家身份 + 正式写作规则 + 小节安全规则，
+ * 整章/小节/focused/补写四类 Writer 的 system 统一以此为前缀，任务差异段紧随其后——
+ * 跨调用类型共享 prefix cache（DeepSeek 前缀缓存按 system 头部收敛）。
  * 任务差异段只描述输出形态，不重复恒定写作规则。
  */
 export const L0_WRITER_SYSTEM_PREFIX = [
+  DOCUMENT_L0_COMMON_PREFIX,
   '你是施工组织设计文档写作专家。',
   FORMAL_WRITING_RULES,
   SECTION_GENERATION_SAFETY_RULES,
@@ -572,6 +589,13 @@ export const L0_WRITER_SYSTEM_PREFIX = [
 /** 3.2 回退开关：DOCUMENT_L0_SYSTEM_PREFIX=0 时返回各调用点传入的 legacy 前缀（恢复原有 system 分布） */
 export function writerSystemPrefix(legacyPrefix: string): string {
   return process.env.DOCUMENT_L0_SYSTEM_PREFIX === '0' ? legacyPrefix : L0_WRITER_SYSTEM_PREFIX;
+}
+
+/** 3.2 非 Writer 调用点（规划/评审/修复/提取/校准）统一挂接公共前缀：role 为该调用点角色身份与任务规则，
+ * 与 Writer 家族共享 DOCUMENT_L0_COMMON_PREFIX 第一段，跨类型 prefix cache 从零命中变为全类型共享。
+ * DOCUMENT_L0_SYSTEM_PREFIX=0 时回退 legacyPrefix（缺省即 role 本身） */
+export function docSystemPrefix(role: string, legacyPrefix?: string): string {
+  return process.env.DOCUMENT_L0_SYSTEM_PREFIX === '0' ? (legacyPrefix ?? role) : [DOCUMENT_L0_COMMON_PREFIX, role].join('\n\n');
 }
 
 function hasSectionNumber(section: string) {

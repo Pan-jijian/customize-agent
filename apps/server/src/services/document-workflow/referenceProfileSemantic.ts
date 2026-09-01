@@ -13,6 +13,7 @@
  */
 import { getLocalSemanticProvider } from './semanticSimilarity';
 import { callDocumentLlmJson } from './llmClient';
+import { docSystemPrefix } from './markdownComposer';
 
 export interface SemanticProfileEnrichment {
   /** embedding 段落语义去重率：余弦 ≥0.85 的段落对占比（0-1），识别同义改写型重复（正则骨架去重的盲区） */
@@ -107,10 +108,10 @@ async function llmBlockAnnotations(blocks: string[]): Promise<Array<{ batch: Blo
     const batchBlocks = sampled.slice(start, start + ANNOTATE_BATCH_SIZE);
     const prompt = batchBlocks.map((block, index) => `【块${index}】${block.slice(0, 400)}`).join('\n');
     const result = await callDocumentLlmJson<{ blocks?: Array<{ fiveElementComplete?: boolean; arrowChain?: boolean }> }>(
-      '你是施工组织设计质量标注专家。逐块判定（只依据该块文本，不联想上下文）：\n'
+      docSystemPrefix('你是施工组织设计质量标注专家。逐块判定（只依据该块文本，不联想上下文）：\n'
       + '1. fiveElementComplete：该块是否同时具备措施五要素——方案（制定/编制/建立/采用…制度、方案、措施）、流程（工序/步骤/顺序）、责任人（项目经理/技术负责人/施工员/质检员/安全员等具体岗位）、时间节点（每日/每周/每月/不少于X次/24小时等量化频次）、验收标准（验收/整改/复查/销项/闭环/合格）。五要素齐备才判 true，缺任一要素判 false。\n'
       + '2. arrowChain：该块是否描述施工工序先后关系或流程推进顺序（含"先…再…后…"自然语言表述，不要求出现"→"符号）。\n'
-      + '只输出 JSON，格式：{"blocks":[{"fiveElementComplete":true,"arrowChain":false}]}，与输入块顺序一一对应。',
+      + '只输出 JSON，格式：{"blocks":[{"fiveElementComplete":true,"arrowChain":false}]}，与输入块顺序一一对应。'),
       prompt,
       { maxTokens: 4000, temperature: 0, disableThinkingBoost: true },
     );
@@ -131,8 +132,8 @@ async function llmQualityNotes(text: string, headingStructure: string[]): Promis
   try {
     const sample = text.slice(0, 12000);
     const result = await callDocumentLlmJson<{ highlights?: string[]; weaknesses?: string[]; benchmarkable?: string }>(
-      '你是施工组织设计评审专家。基于提供的参考施组样本（节选），输出质量点评 JSON：\n'
-      + '{"highlights":["值得对标的亮点，每条≤40字，最多5条"],"weaknesses":["明显短板，每条≤40字，最多5条"],"benchmarkable":"一段≤80字的最值得对标点总结"}。只输出 JSON。',
+      docSystemPrefix('你是施工组织设计评审专家。基于提供的参考施组样本（节选），输出质量点评 JSON：\n'
+      + '{"highlights":["值得对标的亮点，每条≤40字，最多5条"],"weaknesses":["明显短板，每条≤40字，最多5条"],"benchmarkable":"一段≤80字的最值得对标点总结"}。只输出 JSON。'),
       `章节结构：${headingStructure.slice(0, 12).join(' / ')}\n\n样本节选：\n${sample}`,
       { maxTokens: 1200, temperature: 0, disableThinkingBoost: true },
     );

@@ -4,8 +4,9 @@ import type { DocumentEvidence, DocumentExecutionStage, DocumentGenerationDiagno
 import { callDocumentLlmJson } from './llmClient';
 import { runWithAdaptiveConcurrency, stableHash, throwIfAborted } from './utils';
 import { displayStage } from './progress';
+import { docSystemPrefix } from './markdownComposer';
 
-const SYSTEM_PROMPT = [
+const SYSTEM_PROMPT_BASE = [
   '通读以下项目资料（招标文件、工程量清单、图纸设计说明、补疑文件等），',
   '输出一个 JSON 对象，描述你对该项目的完整理解。',
   '',
@@ -286,7 +287,7 @@ export async function buildProjectGraph(input: {
   async function callDomain(domain: ProjectGraphDomain, extraReasons: string[] = []): Promise<ProjectGraph | undefined> {
     const evidence = selectDomainEvidence(sorted, domain, extraReasons.length ? 64000 : 52000);
     const raw = await callDocumentLlmJson<ProjectGraph>(
-      `${SYSTEM_PROMPT}\n\n当前只抽取分域：${DOMAIN_PROMPTS[domain].title}。其他字段可以返回空数组，但本分域相关字段必须尽最大能力从证据中抽取。${extraReasons.length ? `\n本次定向修复原因：${extraReasons.join('；')}` : ''}`,
+      `${docSystemPrefix(SYSTEM_PROMPT_BASE)}\n\n当前只抽取分域：${DOMAIN_PROMPTS[domain].title}。其他字段可以返回空数组，但本分域相关字段必须尽最大能力从证据中抽取。${extraReasons.length ? `\n本次定向修复原因：${extraReasons.join('；')}` : ''}`,
       buildDomainPrompt(evidence, domain, hints),
       { temperature: extraReasons.length ? 0 : 0.1, signal: input.signal, diagnostics: input.diagnostics },
     );

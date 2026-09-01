@@ -86,6 +86,37 @@ function releaseLlmSlot() {
   }
 }
 
+// P1-3 缓存友好调度（不降并发）：发射窗口内到达的请求按「system + user 稳定段」指纹排序后发射，
+// 同前缀请求背靠背发出——服务端按到达顺序串行 prefill，前一个请求写入的 prefix cache 由下一个
+// 同前缀请求命中（历史：各章平铺并发下同前缀请求被其他章节请求打散，缓存写入后错过命中窗口）。
+// 窗口默认 120ms（DOCUMENT_PREFIX_SCHEDULE_WINDOW_MS，0=关闭），仅改变发射顺序，并发度与总时长不变。
+interface ScheduledLlmLaunch {
+  fingerprint: string;
+  launch: () => void;
+}
+let scheduleBuffer: ScheduledLlmLaunch[] = [];
+let scheduleTimer: NodeJS.Timeout | null = null;
+const prefixScheduleWindowMs = (() => {
+  const raw = Number(process.env.DOCUMENT_PREFIX_SCHEDULE_WINDOW_MS);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 120;
+})();
+
+function schedulePrefixFriendlyLaunch(fingerprint: string, launch: () => void) {
+  if (prefixScheduleWindowMs <= 0) {
+    launch();
+    return;
+  }
+  scheduleBuffer.push({ fingerprint, launch });
+  if (scheduleTimer) return;
+  scheduleTimer = setTimeout(() => {
+    scheduleTimer = null;
+    const batch = scheduleBuffer;
+    scheduleBuffer = [];
+    batch.sort((a, b) => (a.fingerprint < b.fingerprint ? -1 : a.fingerprint > b.fingerprint ? 1 : 0));
+    for (const item of batch) item.launch();
+  }, prefixScheduleWindowMs);
+}
+
 /** P1-9 失败 streak 隔离：优先取 per-generation diagnostics 的 streak（多文档并发生成互不降级），无 diagnostics 时回退全局值 */
 export function getDocumentLlmFailureStreak(diagnostics?: { llm?: { failureStreak?: number } }) {
   return diagnostics?.llm?.failureStreak ?? llmFailureStreak;
@@ -243,10 +274,23 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
     const EMPTY_CONTENT = Symbol('empty-content');
     const attemptOnce = async (maxTokensArg: number | undefined, thinkingTrimmingHint = false): Promise<string> => {
       if (options.signal?.aborted) throw new Error('用户中止');
-      const response = await provider.chat([
-        { role: 'system', content: jsonOnly ? `${system}\n只返回 JSON，不要返回 markdown。` : system },
-        { role: 'user', content: thinkingTrimmingHint ? `${prompt}\n\n（重要：缩短思考过程，直接给出最终结论。）` : prompt },
-      ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: maxTokensArg, signal: options.signal, disableThinking: decision.disableThinking });
+      // P1-3 指纹：system 全文 + user 稳定段（前 2000 字符，D2 重排后覆盖模板/章节/要求）——
+      // 同前缀请求经调度器相邻发射，最大化 prefix cache 命中
+      const prefixFingerprint = stableHash(`${system}\n${prompt.slice(0, 2000)}`);
+      const response = await new Promise<Awaited<ReturnType<typeof provider.chat>>>((resolve, reject) => {
+        schedulePrefixFriendlyLaunch(prefixFingerprint, () => {
+          if (options.signal?.aborted) {
+            reject(new Error('用户中止'));
+            return;
+          }
+          provider.chat([
+            { role: 'system', content: jsonOnly ? `${system}\n只返回 JSON，不要返回 markdown。` : system },
+            { role: 'user', content: thinkingTrimmingHint ? `${prompt}\n\n（重要：缩短思考过程，直接给出最终结论。）` : prompt },
+          ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: maxTokensArg, signal: options.signal, disableThinking: decision.disableThinking })
+            .then(resolve)
+            .catch((error: unknown) => reject(error instanceof Error ? error : new Error(String(error))));
+        });
+      });
       const content = response.content?.trim() ?? '';
       if (content) {
         // usage 指标累计（仅成功路径；失败/空响应无有效 usage 不累计）
@@ -394,6 +438,71 @@ export function describeJsonParseFailure(raw: string): string {
   return `JSON 语法错误，出错位置响应末段：${tail}`;
 }
 
+/**
+ * P1-4 截断 JSON 确定性修复：maxTokens 截断（历史 32 次 schema 失败的主要形态）时，
+ * 回退到最后一个「完整元素」边界（该层级最后逗号前）并补齐闭合括号，使 JSON.parse 成功，
+ * 避免整轮重试（截断丢掉的残缺尾部元素由上层覆盖校验/门禁兜底）；
+ * 修复产物解析失败或边界不存在（首元素即残缺）返回 undefined，交由重试循环兜底，不做语法猜测
+ */
+export function repairTruncatedJson(raw: string): string | undefined {
+  // 剥离 fenced 包裹后从首个 { 或 [ 开始扫描；截断 JSON 末尾本就没有闭合括号，
+  // 不能用 extractJsonPayload 的 lastIndexOf('}') 截断——那会丢掉截断信息
+  const trimmed = raw.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu)?.[1]?.trim();
+  const body = fenced ?? trimmed;
+  const braceStart = body.indexOf('{');
+  const bracketStart = body.indexOf('[');
+  const startIndex = braceStart < 0 ? bracketStart : bracketStart < 0 ? braceStart : Math.min(braceStart, bracketStart);
+  if (startIndex < 0) return undefined;
+  const jsonish = body.slice(startIndex);
+  const stack: Array<'object' | 'array'> = [];
+  let inString = false;
+  let escaped = false;
+  // 各容器层级的最后一个完整元素逗号位置（该层级已写入至少一个完整值）
+  const lastCommaByDepth: number[] = [];
+  for (let i = 0; i < jsonish.length; i += 1) {
+    const ch = jsonish[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '{' || ch === '[') {
+      stack.push(ch === '{' ? 'object' : 'array');
+      continue;
+    }
+    if (ch === '}' || ch === ']') {
+      stack.pop();
+      continue;
+    }
+    if (ch === ',') lastCommaByDepth[stack.length - 1] = i;
+  }
+  if (stack.length === 0) return undefined;
+  // 修复边界 = 最深的有完整元素的层级；首元素残缺（截断发生在第一个值中间）无安全边界
+  let cutDepth = -1;
+  for (let depth = stack.length - 1; depth >= 0; depth -= 1) {
+    if (lastCommaByDepth[depth] !== undefined) { cutDepth = depth; break; }
+  }
+  if (cutDepth < 0) return undefined;
+  const cut = lastCommaByDepth[cutDepth];
+  const head = jsonish.slice(0, cut);
+  // 需闭合的容器：从最外层到 cutDepth 层（cut 逗号位于 cutDepth 层容器内，该层及其外层容器
+  // 均未闭合；更深层容器在 cut 前已闭合，残缺尾部元素整体丢弃无需闭合）
+  const closers: string[] = [];
+  for (let depth = cutDepth; depth >= 0; depth -= 1) {
+    closers.push(stack[depth] === 'object' ? '}' : ']');
+  }
+  const repaired = `${head}${closers.join('')}`;
+  try {
+    JSON.parse(repaired);
+    return repaired;
+  } catch {
+    return undefined;
+  }
+}
+
 /** schema 校验失败记录：写入 diagnostics 供进度展示与测试断言（lastError 覆盖为可诊断原因） */
 function recordJsonValidationFailure(diagnostics: DocumentGenerationDiagnostics | undefined, message: string) {
   if (!diagnostics) return;
@@ -447,6 +556,32 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
       }
       return parsed;
     } catch {
+      // P1-4：截断类失败先做确定性修复（回退到最后一个完整元素边界并补齐闭合括号），
+      // 修复成功按修复产物走 schema 校验并直接返回，避免整轮重试（截断丢掉的残缺尾部
+      // 元素由上层覆盖校验/门禁兜底）；修复失败仍走下方失败原因回注重试。
+      // 注意用原始响应而非 extractJsonPayload 结果：后者 lastIndexOf('}') 截断会丢掉截断信息
+      const repairedPayload = repairTruncatedJson(response);
+      if (repairedPayload) {
+        try {
+          const repairedParsed = JSON.parse(repairedPayload) as T;
+          if (options.schema) {
+            const repairErrors = validateJsonAgainstSchema(repairedParsed, options.schema);
+            if (repairErrors.length === 0) return repairedParsed;
+            // 截断修复产物不满足 schema（如数组元素数不足）：按 schema 失败走重试
+            const repairMessage = `JSON Schema 校验失败：${repairErrors.join('；')}`;
+            lastFailure = repairMessage;
+            recordJsonValidationFailure(options.diagnostics, repairMessage);
+            if (attempt >= maxJsonAttempts) {
+              if (options.outFailure) options.outFailure.value = repairMessage;
+              return undefined;
+            }
+            continue;
+          }
+          return repairedParsed;
+        } catch {
+          // 修复产物仍非法：落入下方原解析失败处理
+        }
+      }
       const message = `JSON 解析失败：${describeJsonParseFailure(payload)}`;
       lastFailure = message;
       // 截断类失败：重试放大 maxTokens（默认调用闭包读取 retryMaxTokens），否则同额度重试必再截断

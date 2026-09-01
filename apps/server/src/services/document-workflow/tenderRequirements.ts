@@ -6,6 +6,7 @@ import { documentTextLength } from './budget';
 import { cleanPdfHeadingNoise } from './factsModel';
 import { buildSemanticSimilarity, type SemanticSimilarityFn } from './semanticSimilarity';
 import { isBidDisciplineSentence, stableHash, systemConstraintLine } from './utils';
+import { docSystemPrefix } from './markdownComposer';
 
 /**
  * 招标文件“要求与标准”层：把招标绑定资料中的文本性评分项要求（创优目标/绿色等级/特殊质量标准/
@@ -175,7 +176,7 @@ export async function extractTenderRequirements(
     ].join('\n');
     const result = await callDocumentLlmJson<RawTenderRequirements>(
       [
-        '你是招标文件“要求与标准”结构化提取器。',
+        docSystemPrefix('你是招标文件“要求与标准”结构化提取器。'),
         '从施工项目绑定资料（招标文件/合同条款/技术标准/检查规范等）中提取文本性评分项要求——这些是评标专家会核对文档是否响应、且影响否决与得分的实质要求。',
         '只提取资料中明确写出的要求，绝不臆造；资料没有该类别时输出空数组或缺省。',
         'coreTerms 是用于在正文中核对该要求是否被响应的核心词（2-4 个），必须选最能代表该要求的专有名词/等级/体系名（如“黄山杯”“二星级”“六个百分百”），不要泛化词。',
@@ -574,7 +575,7 @@ export async function classifyRequirementResponsiveness(items: Array<{ kind: str
   });
   const raw = await callDocumentLlmJson<{ results?: Array<{ index?: number; responsive?: boolean }> }>(
     [
-      '你是招标文件要求项程序性/实质性分类器。',
+      docSystemPrefix('你是招标文件要求项程序性/实质性分类器。'),
       '对每个要求项判定其是否属于施工组织设计正文必须响应的实质要求：',
       '- 实质要求（responsive=true）：创优目标与奖项、质量/工期/安全/环保目标、绿色建筑/智慧工地/装配式等级、扬尘治理、四节一环保、人员与分包要求、付款履约约束等施组需写入或遵守的条款',
       '- 程序性条款（responsive=false）：开标时间地点、保证金账户、投标文件递交/解密方式、评标委员会组成、投标有效期等纯投标程序信息',
@@ -633,7 +634,7 @@ export async function classifyAnchorAlternativeClauses(
   if (trimmed.length === 0) return new Map();
   const raw = await callDocumentLlmJson<{ results?: Array<{ index?: number; alternative?: boolean }> }>(
     [
-      '你是招标要求条款锚点关系判定器。',
+      docSystemPrefix('你是招标要求条款锚点关系判定器。'),
       '对每条条款判定其锚点之间的关系：',
       '- alternative=true：条款锚点为"或/及/任选其一"关系（如"省级或国家级奖项""A、B、C任选"），满足任一锚点即算完整响应',
       '- alternative=false：条款锚点必须全部满足（并列承诺、金额与奖项共存条款），缺任一锚点即部分响应',

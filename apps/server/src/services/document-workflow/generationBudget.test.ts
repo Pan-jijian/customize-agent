@@ -84,24 +84,24 @@ describe('buildGenerationBudget 并发预算', () => {
 });
 
 describe('buildGenerationBudget 证据预算', () => {
-  it('平均章节 ≥6000 字 → 14k-52k 高档', () => {
+  it('平均章节 ≥6000 字 → 14k-40k 高档', () => {
     // 10 章 60000 字 → avg 6000
     const budget = buildGenerationBudget(budgetInput({ targetWords: 60000, chapters: Array.from({ length: 10 }, (_, i) => chapter(`第${i}章`)) }));
     expect(budget.evidenceFloorChars).toBe(14000);
-    expect(budget.evidenceCeilingChars).toBe(52000);
+    expect(budget.evidenceCeilingChars).toBe(40000);
   });
 
-  it('平均章节 3000-5999 字 → 11k-36k 中档', () => {
+  it('平均章节 3000-5999 字 → 11k-28k 中档', () => {
     // 10 章 40000 字 → avg 4000
     const budget = buildGenerationBudget(budgetInput({ targetWords: 40000, chapters: Array.from({ length: 10 }, (_, i) => chapter(`第${i}章`)) }));
     expect(budget.evidenceFloorChars).toBe(11000);
-    expect(budget.evidenceCeilingChars).toBe(36000);
+    expect(budget.evidenceCeilingChars).toBe(28000);
   });
 
-  it('平均章节 <3000 字 → 8k-24k 低档', () => {
+  it('平均章节 <3000 字 → 8k-18k 低档', () => {
     const budget = buildGenerationBudget(budgetInput({ targetWords: 10000 }));
     expect(budget.evidenceFloorChars).toBe(8000);
-    expect(budget.evidenceCeilingChars).toBe(24000);
+    expect(budget.evidenceCeilingChars).toBe(18000);
   });
 
   it('targetWords 为 0 时按 1200 字兜底 → 低档', () => {
@@ -239,7 +239,7 @@ describe('previewGenerationBudgetForTemplate', () => {
     expect(preview.chapterConcurrency).toBe(3);
     expect(preview.reviewConcurrency).toBe(3);
     expect(preview.evidenceFloorChars).toBe(11000); // avg 4000 → 中档
-    expect(preview.evidenceCeilingChars).toBe(36000);
+    expect(preview.evidenceCeilingChars).toBe(28000);
     expect(preview.repairRoundBudget).toBe(2);
     expect(preview.triggers.length).toBeGreaterThan(0);
   });
