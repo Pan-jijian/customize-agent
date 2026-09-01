@@ -55,8 +55,6 @@ export const REQUIREMENTS_JSON_SCHEMA: DocumentJsonSchema = {
     frontScheduleClauses: { type: 'array', maxItems: 20, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 200 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
     dateFabricationProhibited: { type: 'boolean' },
     prohibitionNotes: { type: 'array', maxItems: 12, items: { type: 'object', required: true, properties: { text: { type: 'string', minLength: 2, maxLength: 200 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } } },
-    pageLimit: { type: 'object', properties: { text: { type: 'string', minLength: 2, maxLength: 120 }, coreTerms: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } },
-    evaluationScheme: { type: 'object', properties: { text: { type: 'string', minLength: 4, maxLength: 400 }, coreTerms: { type: 'array', maxItems: 6, items: { type: 'string', maxLength: 24 } }, source: { type: 'string', maxLength: 80 } } },
   },
 };
 
@@ -77,8 +75,6 @@ interface RawTenderRequirements {
   frontScheduleClauses?: RawRequirementItem[];
   dateFabricationProhibited?: boolean;
   prohibitionNotes?: RawRequirementItem[];
-  pageLimit?: RawRequirementItem;
-  evaluationScheme?: RawRequirementItem;
 }
 
 function cleanItem(raw: RawRequirementItem | undefined): TenderRequirementItem | undefined {
@@ -131,10 +127,18 @@ export async function extractTenderRequirements(
   // （专用合同条款 5.1.1「确保黄山杯/300万元/二星级」）被前后海量噪声稀释漏提，且全程无任何信号）。
   // 按原文顺序累计分片——不是截断丢弃，而是全部内容分片完整进入提取，片间结果并集合并。
   const SOURCE_SLICE_CHARS = 40000;
+  // round-26 必提条款置顶：词形命中必提条款的切片排到第一片开头——4 万字符分片下黄金条款
+  // （专用合同条款 5.1.1「黄山杯/300万/二星级/基本级」同片）曾落第 3 片被噪声稀释漏提，
+  // 窄通道整片补提仍漏（真实生成回归：必提字段缺失告警）。稳定排序保组内原文顺序。
+  const orderedEvidence = [...evidence].sort((a, b) => {
+    const aText = `${a.sectionTitle || ''}\n${a.content || ''}`;
+    const bText = `${b.sectionTitle || ''}\n${b.content || ''}`;
+    return Number(MANDATORY_CLAUSE_LEXICAL_HINTS.test(bText)) - Number(MANDATORY_CLAUSE_LEXICAL_HINTS.test(aText));
+  });
   let sourceLines: string[] = [];
   let sourceChars = 0;
   const slices: string[][] = [];
-  for (const item of evidence) {
+  for (const item of orderedEvidence) {
     if (!item.content || !(item.content as string).trim()) continue;
     // round-23 P0-3：提取输入清 PDF 标题标记噪声（“平方\n\n### 米”夹断句会诱导模型输出截断坏值）
     const line = `【${item.filePath || '资料'}｜${item.sectionTitle || '正文'}】\n${cleanPdfHeadingNoise(item.content)}`;
@@ -153,7 +157,7 @@ export async function extractTenderRequirements(
     if (!sourceTexts.trim()) return empty;
     const sourceHash = tenderRequirementsSourceHash(sourceTexts);
     // round-21 S6 修复：三处根因一并治理（历史缺陷：无输出骨架时模型自由发挥输出 coreTerms 罗列清单内容、
-    // 2600 maxTokens 截断 finish_reason=length、评标办法正文因证据预算单文件上限截断进不了输入）。
+    // 2600 maxTokens 截断 finish_reason=length、长正文因证据预算单文件上限截断进不了输入）。
     // ① prompt 内嵌 JSON 字段骨架（schema 仅代码侧后置校验，模型此前看不到字段结构）；
     // ② maxTokens 5000→16000（全量输入对应更大 JSON，输出截断会直接丢字段）；
     // ③ 排除指令：工程量清单项目特征不是评分项要求（输入混入清单内容时模型会罗列 coreTerms）。
@@ -169,9 +173,7 @@ export async function extractTenderRequirements(
       '  "systematicBenchmarks": [{ "text": "...", "coreTerms": [], "source": "..." }],',
       '  "frontScheduleClauses": [{ "text": "...", "coreTerms": [], "source": "..." }],',
       '  "dateFabricationProhibited": false,',
-      '  "prohibitionNotes": [{ "text": "...", "coreTerms": [], "source": "..." }],',
-      '  "pageLimit": { "text": "...", "coreTerms": [], "source": "..." },',
-      '  "evaluationScheme": { "text": "...", "coreTerms": [], "source": "..." }',
+      '  "prohibitionNotes": [{ "text": "...", "coreTerms": [], "source": "..." }]',
       '}',
     ].join('\n');
     const result = await callDocumentLlmJson<RawTenderRequirements>(
@@ -183,8 +185,6 @@ export async function extractTenderRequirements(
         'dateFabricationProhibited：资料写明“以开工令为准/开工日期以监理开工令为准/不得自定开工日期”时为 true，否则 false。',
         'systematicBenchmarks 提取体系化基准要求（如“扬尘治理六个百分百”“四节一环保”），单条零散要求放 prohibitionNotes。',
         'frontScheduleClauses：从“投标人须知前附表/投标人须知”章节提取施工组织设计必须响应的实质条款——计划工期与质量要求、创优目标与奖惩（如“确保黄山杯，支付300万元”）、缺陷责任期与质保金、履约担保、工期延误赔偿、项目经理/关键人员要求、分包限制、装配式/绿色建筑/智慧工地等级、安全文明与扬尘要求、付款方式（影响资金安排）。只提取施组正文需要写入或必须遵守的条款；投标程序类条款（开标时间地点、保证金账户、投标文件递交/解密方式、评标委员会组成等纯程序信息）一律不提取。',
-        'pageLimit：资料含篇幅/编制要求（如“不超过 50 页”）时提取。',
-        'evaluationScheme：从评标办法章节提取结构性评分信息——评标办法类型、分值构成（技术文件/商务文件/报价文件分值）、技术文件详细评审内容项（逐项列出）、评分档位线（一般/良好/优秀分值区间）。text 用“；”分隔罗列原文关键信息；资料无评标办法章节时省略。',
         '工程量清单的项目特征描述不是评分项要求，不要提取。',
         skeleton,
         '只返回 JSON。',
@@ -214,8 +214,6 @@ export async function extractTenderRequirements(
       frontScheduleClauses: cleanItems(result.frontScheduleClauses).filter(item => !isBidDisciplineSentence(item.text)),
       dateFabricationProhibited: result.dateFabricationProhibited === true,
       prohibitionNotes: cleanItems(result.prohibitionNotes).filter(item => !isBidDisciplineSentence(item.text)),
-      pageLimit: cleanItem(result.pageLimit),
-      evaluationScheme: cleanItem(result.evaluationScheme),
       extracted: true,
       sourceHash,
     };
@@ -256,6 +254,205 @@ const MANDATORY_CLAUSE_SEMANTIC_FEATURES = [
  * 由 LLM 小输入提取过滤无关内容。
  */
 const MANDATORY_CLAUSE_LEXICAL_HINTS = /确保|争创|创优|获得.{0,10}[杯奖]|优质工程奖|绿色建筑|星级|智慧工地|装配率|装配式|六个百分百|四节一环保/u;
+
+// ---------------------------------------------------------------------------
+// round-26 评分项要求字段级定向补提闭环：主提取（大输入注意力稀释）+ 窄通道整片补提（噪声切片）
+// 两重 LLM 提取均为概率性，真实生成回归「必提字段缺失告警」（招标文件 5.1.1 切片含全部
+// 6 字段原文仍漏提）。闭环覆盖全部评分项要求字段（必提 6 字段 + 特殊质量/前附表/禁编/
+// 禁止性；评标办法/篇幅要求按项目需求不提取，不在闭环内），任一字段缺失即触发：字段级
+// 缺口检测 → 每字段句级窗口裁剪（命中句 ±2 句，输入从万级字符聚焦到百级）→ 缺失字段
+// 合并一次小输入 LLM 提取 → 最多 2 轮；窗口无证据的字段判定「资料无此要求」降级为
+// 信息提示（不再误告警）。
+// ---------------------------------------------------------------------------
+
+/** 必提字段（漏提后果否决级：创优/奖项/绿色/智慧工地/装配率/体系基准） */
+export type MandatoryFieldName = 'awardObjectives' | 'awardClauses' | 'greenBuildingGrade' | 'smartSiteGrade' | 'assemblyRate' | 'systematicBenchmarks';
+
+/** 全部评分项要求字段（字段级补提闭环覆盖全集，非仅必提 6 字段；评标办法/篇幅要求按项目需求不提取） */
+export type RequirementFieldName = MandatoryFieldName | 'specialQualityStandards' | 'frontScheduleClauses' | 'dateFabricationProhibited' | 'prohibitionNotes';
+
+/** 必提字段规格：字段级召回词形（句级窗口定位）与中文名（提示词/进度消息） */
+const MANDATORY_FIELD_SPECS: Record<MandatoryFieldName, { label: string; lexical: RegExp }> = {
+  awardObjectives: { label: '创优目标', lexical: /创优|争创|确保获得|确保.{0,8}[杯奖]|优质工程奖/u },
+  awardClauses: { label: '奖项条款', lexical: /获得.{0,12}[杯奖]|支付.{0,10}万|不予支付|奖项的约定/u },
+  greenBuildingGrade: { label: '绿色建筑等级', lexical: /绿色建筑.{0,20}(?:等级|星级|标准|要求)|[一二三]星级/u },
+  smartSiteGrade: { label: '智慧工地等级', lexical: /智慧工地.{0,20}(?:等级|要求|基本级|优良级|良好级)/u },
+  assemblyRate: { label: '装配率', lexical: /装配率.{0,20}(?:%|不低于|不少于|为|要求)|装配式.{0,20}装配率/u },
+  systematicBenchmarks: { label: '体系基准', lexical: /六个百分百|四节一环保|文明施工专项费用|围挡出入口.{0,12}冲洗|扬尘.{0,12}(?:冲洗|防治|治理)/u },
+};
+
+/** 常规字段规格：窗口定位词形 + 定向提取提示。窗口词形宁宽勿窄——窗口只是 LLM 聚焦输入，
+ * 最终提取仍由模型判定，误召回窗口无损失（窗口无该字段内容时模型输出空） */
+const OPTIONAL_FIELD_SPECS: Record<Exclude<RequirementFieldName, MandatoryFieldName>, { label: string; lexical: RegExp; hint: string }> = {
+  specialQualityStandards: { label: '特殊质量标准', lexical: /特殊质量标准|质量标准和要求的约定|质量要求.{0,12}(?:为|是|满足)/u, hint: '特殊质量标准与质量要求条款（除创优/等级外的实质质量约束）' },
+  frontScheduleClauses: { label: '前附表响应条款', lexical: /计划工期|日历天|缺陷责任期|履约担保|质保金|工期延误|项目经理|技术负责人|分包|转包|付款方式/u, hint: '投标人须知前附表施组响应实质条款（工期/质量/创优奖惩/人员/分包/付款等）' },
+  dateFabricationProhibited: { label: '禁编日期条款', lexical: /开工令|以开工令|不得.{0,12}(?:自定|自行确定|编造)/u, hint: '以开工令为准的禁编日期条款（布尔字段）' },
+  prohibitionNotes: { label: '禁止性要求', lexical: /不得|禁止|严禁|不允许/u, hint: '禁止/不得类条款与零散约束要求' },
+};
+
+/** 全部评分项要求字段规格（缺口检测/窗口定位/进度消息统一口径） */
+const REQUIREMENT_FIELD_SPECS: Record<RequirementFieldName, { label: string; lexical: RegExp }> = {
+  ...MANDATORY_FIELD_SPECS,
+  ...OPTIONAL_FIELD_SPECS,
+};
+
+/** 必提字段名清单（缺失告警分级用：必提缺失=告警，常规缺失=提示） */
+export const MANDATORY_FIELD_NAMES: readonly MandatoryFieldName[] = ['awardObjectives', 'awardClauses', 'greenBuildingGrade', 'smartSiteGrade', 'assemblyRate', 'systematicBenchmarks'];
+
+/** 字段中文名（进度消息/告警展示统一口径） */
+export function requirementFieldLabel(name: RequirementFieldName): string {
+  return REQUIREMENT_FIELD_SPECS[name].label;
+}
+
+/** 必提字段缺失清单：列表字段空或标量字段空即缺失，全齐返回空数组 */
+export function mandatoryFieldGaps(model: TenderRequirementModel | undefined): MandatoryFieldName[] {
+  if (!model) return [...MANDATORY_FIELD_NAMES];
+  const gaps: MandatoryFieldName[] = [];
+  if (model.awardObjectives.length === 0) gaps.push('awardObjectives');
+  if (model.awardClauses.length === 0) gaps.push('awardClauses');
+  if (!model.greenBuildingGrade) gaps.push('greenBuildingGrade');
+  if (!model.smartSiteGrade) gaps.push('smartSiteGrade');
+  if (!model.assemblyRate) gaps.push('assemblyRate');
+  if (model.systematicBenchmarks.length === 0) gaps.push('systematicBenchmarks');
+  return gaps;
+}
+
+/** 全部评分项要求字段缺失清单：任一字段无内容即缺失（所有评分项要求必须全部提取，非仅必提字段） */
+export function requirementFieldGaps(model: TenderRequirementModel | undefined): RequirementFieldName[] {
+  if (!model) return ['awardObjectives', 'specialQualityStandards', 'awardClauses', 'greenBuildingGrade', 'smartSiteGrade', 'assemblyRate', 'systematicBenchmarks', 'frontScheduleClauses', 'dateFabricationProhibited', 'prohibitionNotes'];
+  const gaps: RequirementFieldName[] = [];
+  if (model.awardObjectives.length === 0) gaps.push('awardObjectives');
+  if (model.specialQualityStandards.length === 0) gaps.push('specialQualityStandards');
+  if (model.awardClauses.length === 0) gaps.push('awardClauses');
+  if (!model.greenBuildingGrade) gaps.push('greenBuildingGrade');
+  if (!model.smartSiteGrade) gaps.push('smartSiteGrade');
+  if (!model.assemblyRate) gaps.push('assemblyRate');
+  if (model.systematicBenchmarks.length === 0) gaps.push('systematicBenchmarks');
+  if (model.frontScheduleClauses.length === 0) gaps.push('frontScheduleClauses');
+  if (!model.dateFabricationProhibited) gaps.push('dateFabricationProhibited');
+  if (model.prohibitionNotes.length === 0) gaps.push('prohibitionNotes');
+  return gaps;
+}
+
+/** 句级窗口裁剪：按句子边界切分（PDF 切片常见 ###/换行噪声），字段词形命中的句子取 ±2 句窗口，
+ * 每字段最多 6 个窗口——把万级字符切片聚焦到条款句级，消除整片噪声对窄通道二次提取的稀释 */
+function collectFieldWindows(evidence: DocumentEvidence[], spec: { lexical: RegExp }): string[] {
+  const windows: string[] = [];
+  for (const item of evidence) {
+    const text = cleanPdfHeadingNoise(`${item.sectionTitle || ''}\n${item.content || ''}`);
+    if (!spec.lexical.test(text)) continue;
+    const sentences = text.split(/(?<=[。；;！？!?])|\n/u).map(s => s.trim()).filter(s => s.length > 0);
+    for (let i = 0; i < sentences.length; i += 1) {
+      if (!spec.lexical.test(sentences[i])) continue;
+      const start = Math.max(0, i - 2);
+      const end = Math.min(sentences.length, i + 3);
+      const window = sentences.slice(start, end).join('').trim();
+      if (window && !windows.includes(window)) windows.push(window);
+    }
+  }
+  return windows.slice(0, 6);
+}
+
+/** 字段级提取 JSON 骨架：仅要求缺失字段（schema 无 required，缺字段即省略） */
+const REQUIREMENT_FIELD_SKELETONS: Record<RequirementFieldName, string> = {
+  awardObjectives: '"awardObjectives": [{ "text": "创优目标原文", "coreTerms": ["核心词"], "source": "来源文件" }]',
+  awardClauses: '"awardClauses": [{ "text": "条款原文", "coreTerms": [], "source": "..." }]',
+  greenBuildingGrade: '"greenBuildingGrade": { "text": "...", "coreTerms": [], "source": "..." }',
+  smartSiteGrade: '"smartSiteGrade": { "text": "...", "coreTerms": [], "source": "..." }',
+  assemblyRate: '"assemblyRate": { "text": "...", "coreTerms": [], "source": "..." }',
+  systematicBenchmarks: '"systematicBenchmarks": [{ "text": "...", "coreTerms": [], "source": "..." }]',
+  specialQualityStandards: '"specialQualityStandards": [{ "text": "...", "coreTerms": [], "source": "..." }]',
+  frontScheduleClauses: '"frontScheduleClauses": [{ "text": "...", "coreTerms": [], "source": "..." }]',
+  dateFabricationProhibited: '"dateFabricationProhibited": true',
+  prohibitionNotes: '"prohibitionNotes": [{ "text": "...", "coreTerms": [], "source": "..." }]',
+};
+
+const GAP_EXTRACTION_JSON_SCHEMA: DocumentJsonSchema = {
+  type: 'object',
+  properties: REQUIREMENTS_JSON_SCHEMA.properties,
+};
+
+/**
+ * 评分项要求字段级定向补提：对缺失字段（全部评分项要求字段，非仅必提 6 字段）做句级窗口
+ * 聚焦提取（一次 LLM 调用覆盖全部缺失字段，输入为字段窗口合集，规模远小于整片窄通道），
+ * 最多 2 轮；返回补齐后模型与残余状态。
+ * - stillGaps：窗口证据存在但 2 轮提取后仍缺失（真漏提，需告警）
+ * - noEvidenceGaps：全量证据中该字段无窗口命中（资料无此要求或召回失效，降级提示）
+ */
+export async function extractRequirementFieldGaps(
+  model: TenderRequirementModel,
+  evidence: DocumentEvidence[],
+  options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {},
+): Promise<{ model: TenderRequirementModel; stillGaps: RequirementFieldName[]; noEvidenceGaps: RequirementFieldName[] }> {
+  let current = model;
+  let gaps = requirementFieldGaps(current);
+  const noEvidenceGaps: RequirementFieldName[] = [];
+  for (let round = 0; round < 2 && gaps.length > 0; round += 1) {
+    const windowsByField = new Map<RequirementFieldName, string[]>();
+    for (const field of gaps) {
+      if (noEvidenceGaps.includes(field)) continue;
+      const windows = collectFieldWindows(evidence, REQUIREMENT_FIELD_SPECS[field]);
+      if (windows.length === 0) {
+        noEvidenceGaps.push(field);
+        continue;
+      }
+      windowsByField.set(field, windows);
+    }
+    if (windowsByField.size === 0) break;
+    const sectionLines = [...windowsByField.entries()].map(([field, windows]) => (
+      `【缺失字段：${REQUIREMENT_FIELD_SPECS[field].label}】\n${windows.map((w, i) => `条款窗口${i + 1}：${w}`).join('\n')}`
+    ));
+    const skeletonLines = [...windowsByField.keys()].map(field => `  ${REQUIREMENT_FIELD_SKELETONS[field]},`).join('\n');
+    // 常规字段提取口径提示（必提字段语义已由窗口内容自明，无需额外口径说明）
+    const hintLines = [...windowsByField.keys()].flatMap(field => {
+      const hint = (OPTIONAL_FIELD_SPECS as Partial<Record<RequirementFieldName, { hint: string }>>)[field]?.hint;
+      return hint ? [`  ${REQUIREMENT_FIELD_SPECS[field].label}：${hint}`] : [];
+    });
+    const result = await callDocumentLlmJson<RawTenderRequirements>(
+      [
+        docSystemPrefix('你是招标文件评分项要求定向提取器。'),
+        '从以下条款窗口中提取缺失的评分项要求字段——每条窗口都是招标/合同文件相关条款的原文片段，字段内容必须忠实引用原文，绝不臆造或改写。',
+        ...(hintLines.length > 0 ? ['各字段提取口径：', ...hintLines] : []),
+        '窗口中没有对应字段内容时，该字段输出空数组 [] 或省略；绝不输出未要求的其他字段。',
+        'coreTerms 是用于在正文中核对该要求是否被响应的核心词（2-4 个），必须选最能代表该要求的专有名词/等级/体系名，不要泛化词。',
+        'dateFabricationProhibited：窗口内容写明「以开工令为准」类禁编日期条款时为 true，否则省略。',
+        '必须输出且仅输出一个 JSON 对象，字段结构如下：',
+        '{',
+        skeletonLines,
+        '}',
+      ].join('\n'),
+      sectionLines.join('\n\n'),
+      {
+        maxTokens: 8000,
+        temperature: 0.1,
+        signal: options.signal,
+        diagnostics: options.diagnostics,
+        schema: GAP_EXTRACTION_JSON_SCHEMA,
+        taskKind: 'structuredGeneration',
+      },
+    );
+    if (result) {
+      const extracted: TenderRequirementModel = {
+        awardObjectives: cleanItems(result.awardObjectives),
+        specialQualityStandards: cleanItems(result.specialQualityStandards),
+        awardClauses: cleanItems(result.awardClauses),
+        greenBuildingGrade: cleanItem(result.greenBuildingGrade),
+        smartSiteGrade: cleanItem(result.smartSiteGrade),
+        assemblyRate: cleanItem(result.assemblyRate),
+        systematicBenchmarks: cleanItems(result.systematicBenchmarks),
+        frontScheduleClauses: cleanItems(result.frontScheduleClauses),
+        dateFabricationProhibited: result.dateFabricationProhibited === true,
+        prohibitionNotes: cleanItems(result.prohibitionNotes),
+        extracted: true,
+      };
+      current = mergeTenderRequirements(current, extracted);
+    }
+    gaps = requirementFieldGaps(current);
+  }
+  // stillGaps 仅保留「窗口证据存在但 2 轮提取后仍缺失」的真漏提字段；
+  // 无窗口命中的字段（资料无此要求/召回失效）归 noEvidenceGaps，不进 stillGaps（语义互斥，调用方免二次过滤）
+  return { model: current, stillGaps: gaps.filter(name => !noEvidenceGaps.includes(name)), noEvidenceGaps };
+}
 
 /** 要求类语义特征集（主提取有用数据预筛用）：覆盖创优/等级/质量/工期/人员/分包/付款等
  * 施组响应类条款语义——主提取不再全量吞入招标文件（12 万+字符中约半数属投标程序/清单/
@@ -333,15 +530,7 @@ export async function filterMandatoryClauseEvidence(evidence: DocumentEvidence[]
  * 被跳过 → 奖项零落位且零响应检测无警报）。窄通道前提是语义召回存在候选证据
  * （filterMandatoryClauseEvidence ≥0.5），无要求项目召回无候选不会触发 LLM 空跑。 */
 export function missingMandatoryFields(model: TenderRequirementModel | undefined): boolean {
-  if (!model) return true;
-  return (
-    model.awardObjectives.length === 0 ||
-    model.awardClauses.length === 0 ||
-    !model.greenBuildingGrade ||
-    !model.smartSiteGrade ||
-    !model.assemblyRate ||
-    model.systematicBenchmarks.length === 0
-  );
+  return mandatoryFieldGaps(model).length > 0;
 }
 
 /** 主提取与窄通道提取字段级合并：主结果非空字段优先（主输入覆盖全文），窄通道仅补齐缺失字段 */
@@ -358,8 +547,6 @@ export function mergeTenderRequirements(main: TenderRequirementModel, narrow: Te
     systematicBenchmarks: pick(main.systematicBenchmarks, narrow.systematicBenchmarks),
     frontScheduleClauses: pick(main.frontScheduleClauses, narrow.frontScheduleClauses),
     prohibitionNotes: pick(main.prohibitionNotes, narrow.prohibitionNotes),
-    pageLimit: main.pageLimit || narrow.pageLimit,
-    evaluationScheme: main.evaluationScheme || narrow.evaluationScheme,
     dateFabricationProhibited: main.dateFabricationProhibited || narrow.dateFabricationProhibited,
     extracted: main.extracted || narrow.extracted,
   };
@@ -394,8 +581,6 @@ export function mergeTenderRequirementSlices(a: TenderRequirementModel, b: Tende
     systematicBenchmarks: unionItems(a.systematicBenchmarks, b.systematicBenchmarks),
     frontScheduleClauses: unionItems(a.frontScheduleClauses, b.frontScheduleClauses),
     prohibitionNotes: unionItems(a.prohibitionNotes, b.prohibitionNotes),
-    pageLimit: first(a.pageLimit, b.pageLimit),
-    evaluationScheme: first(a.evaluationScheme, b.evaluationScheme),
     dateFabricationProhibited: a.dateFabricationProhibited || b.dateFabricationProhibited,
     extracted: a.extracted || b.extracted,
   };
@@ -414,8 +599,7 @@ export function hasTenderRequirements(model: TenderRequirementModel | undefined)
     model.systematicBenchmarks.length > 0 ||
     model.frontScheduleClauses.length > 0 ||
     model.dateFabricationProhibited ||
-    model.prohibitionNotes.length > 0 ||
-    Boolean(model.evaluationScheme)
+    model.prohibitionNotes.length > 0
   );
 }
 
@@ -427,7 +611,10 @@ export function hasTenderRequirements(model: TenderRequirementModel | undefined)
 // 提取 prompt / bge 召回特征集变更时递增版本号强制全体失效。
 // ---------------------------------------------------------------------------
 
-const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v1';
+// round-26 v2：字段级定向补提闭环覆盖全部评分项要求字段（非仅必提 6 字段），且移除
+// 评标办法/篇幅要求两个字段（按项目需求不提取）——提取字段集与补提口径均变化，
+// 旧缓存整体失效重提。
+const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v2';
 
 function tenderRequirementsCacheRoot(projectRoot?: string) {
   const root = path.join(process.env.HOME || process.cwd(), '.customize-agent', 'cache', 'document-workflow', stableHash(projectRoot || 'default'));
@@ -500,12 +687,6 @@ export function tenderRequirementsWritingRules(model: TenderRequirementModel | u
     lines.push('禁止编造开工日期：招标文件以开工令时间为准，正文不得自行设定具体日历开工日期，一律表述为“以开工令时间为准”。');
   }
   itemLine('禁止性/约束性要求（正文不得违反）', model.prohibitionNotes);
-  if (model.pageLimit) lines.push(`篇幅建议：${model.pageLimit.text}，注意控制篇幅与语言精练度。`);
-  if (model.evaluationScheme) {
-    // 评标办法改系统侧消费：章节结构已按评标办法生成，正文不得复述评标办法、分值构成、评审程序
-    // （评分报告 N3：评标办法原文注入写手 projectContext 后被整段复述进正文）
-    lines.push(`评标办法已由系统消费为章节结构（六章），正文不得复述评标办法原文、分值构成与评审程序；各评审项内容要对应到具体章节并做到针对性强、可落地。`);
-  }
   if (lines.length === 0) return '';
   return `【招标文件评分项要求（系统从绑定资料提取，必须逐条响应，零响应即评标失分）】\n${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}\n${systemConstraintLine('以上为系统提取的评分项要求内容：实质要求（奖项名称、数字参数、等级指标等）必须显性响应进正文；本段提示词文字本身（编号、括号说明等元话语）禁止复述进正文')}`;
 }
@@ -900,9 +1081,7 @@ export function tenderRequirementsSummary(model: TenderRequirementModel | undefi
   if (model.assemblyRate) summary.push(`装配率：${model.assemblyRate.text}`);
   if (model.systematicBenchmarks.length) summary.push(`体系基准 ${model.systematicBenchmarks.length} 条：${model.systematicBenchmarks.map(item => item.text).join('、')}`);
   if (model.frontScheduleClauses.length) summary.push(`前附表响应条款 ${model.frontScheduleClauses.length} 条：${model.frontScheduleClauses.map(item => item.text).slice(0, 8).join('、')}`);
-  if (model.evaluationScheme) summary.push(`评标办法：${model.evaluationScheme.text.slice(0, 80)}`);
   if (model.dateFabricationProhibited) summary.push('禁编日期：以开工令为准');
-  if (model.pageLimit) summary.push(`篇幅建议：${model.pageLimit.text}`);
   if (!model.extracted) summary.push('评分项要求未提取（无绑定资料或模型不可用），零响应检测跳过');
   return summary;
 }

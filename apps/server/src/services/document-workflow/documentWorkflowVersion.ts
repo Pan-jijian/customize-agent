@@ -1,10 +1,10 @@
 import type { DocumentWorkflowVersion } from './types';
 
 export const DOCUMENT_WORKFLOW_VERSION: DocumentWorkflowVersion = {
-  // round-26（P0/P1 缓存优化）：L0 全流程公共前缀（P0-2）+ 规划证据预算（P0-1）+ 两步瘦身（P0-3）+
-  // 证据预算收紧（P0-4）+ 评审复检瘦身（P1-1）+ patch 空白容错（P1-2）+ 同前缀相邻调度（P1-3）+
-  // 截断 JSON 确定性修复（P1-4）；system/user 输入结构整体变化，bump 使旧 checkpoint（旧前缀缓存快照）不再被复用
-  version: 'professional-document-workflow-v8',
+  // round-26（评分项要求提取治理）：字段级定向补提闭环覆盖全部评分项要求字段（P0/P1 缓存优化
+  // L0 公共前缀/证据预算/两步瘦身/评审瘦身/patch 容错/同前缀调度/截断修复）+ 评标办法/篇幅要求
+  // 字段从提取链路移除——评分项要求提取结果口径变化，bump 使旧 checkpoint（旧提取结果快照）不再被复用
+  version: 'professional-document-workflow-v9',
   rules: [
     'complete-local-knowledge-assumption',
     'knowledge-coverage-recovery',

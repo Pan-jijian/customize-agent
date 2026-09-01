@@ -13,7 +13,7 @@ import type * as LlmClientModule from './llmClient';
 import { callDocumentLlmJson } from './llmClient';
 import { validateJsonAgainstSchema } from './llmClient';
 import { buildSemanticSimilarity } from './semanticSimilarity';
-import { emptyTenderRequirements, extractTenderRequirements, filterMandatoryClauseEvidence, hasTenderRequirements, mergeTenderRequirements, mergeTenderRequirementSlices, missingMandatoryFields, preselectTenderRequirementEvidence, readCachedTenderRequirements, requirementsCoverageIssues, tenderRequirementsCacheKey, tenderRequirementsWritingRules, writeCachedTenderRequirements, classifyRequirementResponsiveness, classifyAnchorAlternativeClauses, REQUIREMENTS_JSON_SCHEMA } from './tenderRequirements';
+import { emptyTenderRequirements, extractTenderRequirements, extractRequirementFieldGaps, filterMandatoryClauseEvidence, hasTenderRequirements, mandatoryFieldGaps, mergeTenderRequirements, mergeTenderRequirementSlices, missingMandatoryFields, preselectTenderRequirementEvidence, readCachedTenderRequirements, requirementFieldGaps, requirementsCoverageIssues, tenderRequirementsCacheKey, tenderRequirementsWritingRules, writeCachedTenderRequirements, classifyRequirementResponsiveness, classifyAnchorAlternativeClauses, REQUIREMENTS_JSON_SCHEMA } from './tenderRequirements';
 import { stableHash } from './utils';
 import type { DocumentEvidence, TenderRequirementModel } from './types';
 
@@ -32,8 +32,6 @@ const realModelOutput = {
   systematicBenchmarks: [],
   dateFabricationProhibited: true,
   prohibitionNotes: [{ text: '计划工期：开工之日（以开工令时间为准）起，540个日历天。', coreTerms: ['开工令'], source: '招标文件.pdf' }],
-  pageLimit: { text: '编制篇幅:施工组织设计的篇幅不超过50页（不含封面和目录）。', coreTerms: ['50页'], source: '招标文件.pdf' },
-  evaluationScheme: { text: '评标办法采用综合评估法（模式3）；分值构成：技术文件5分、商务文件10分、报价文件85分；优秀得4.5分≤F≤5分。', coreTerms: ['综合评估法', '模式3', '技术文件5分'], source: '招标文件.pdf' },
 };
 
 describe('extractTenderRequirements 回归（round-21 S6：schema 超长失败修复）', () => {
@@ -57,11 +55,9 @@ describe('extractTenderRequirements 回归（round-21 S6：schema 超长失败�
     expect(hasTenderRequirements(model)).toBe(true);
     expect(model.awardClauses.length).toBe(1);
     expect(model.awardClauses[0].text).toContain('300万元');
-    expect(model.evaluationScheme?.text).toContain('综合评估法');
     expect(model.dateFabricationProhibited).toBe(true);
     const rules = tenderRequirementsWritingRules(model);
     expect(rules).toContain('黄山杯');
-    expect(rules).toContain('评标办法');
   });
 
   it('LLM 返回 undefined 时返回空模型（零响应降级，不抛错）', async () => {
@@ -128,6 +124,107 @@ describe('round-23 P0-1 必提条款窄通道召回/缺失判定/合并', () => 
     const withGreenOnly = { ...emptyTenderRequirements(true), greenBuildingGrade: { text: '二星级', coreTerms: ['二星级'] } };
     expect(missingMandatoryFields(withGreenOnly)).toBe(true);
     expect(missingMandatoryFields(fullModel)).toBe(false);
+  });
+
+  // ============ round-26 字段级缺口检测与定向补提闭环 ============
+  it('mandatoryFieldGaps：字段级缺失清单（空模型全 6 字段，部分缺失仅列缺失项，全齐空数组）', () => {
+    expect(mandatoryFieldGaps(undefined)).toEqual(['awardObjectives', 'awardClauses', 'greenBuildingGrade', 'smartSiteGrade', 'assemblyRate', 'systematicBenchmarks']);
+    expect(mandatoryFieldGaps(emptyTenderRequirements(true))).toEqual(['awardObjectives', 'awardClauses', 'greenBuildingGrade', 'smartSiteGrade', 'assemblyRate', 'systematicBenchmarks']);
+    const withAwardOnly = { ...emptyTenderRequirements(true), awardObjectives: [{ text: '确保黄山杯', coreTerms: ['黄山杯'] }] };
+    expect(mandatoryFieldGaps(withAwardOnly)).toEqual(['awardClauses', 'greenBuildingGrade', 'smartSiteGrade', 'assemblyRate', 'systematicBenchmarks']);
+    const missingAssembly = { ...fullModel, assemblyRate: undefined };
+    expect(mandatoryFieldGaps(missingAssembly)).toEqual(['assemblyRate']);
+    expect(mandatoryFieldGaps(fullModel)).toEqual([]);
+  });
+
+  it('requirementFieldGaps：全字段缺失清单（覆盖全部评分项要求字段，评标办法/篇幅不在其中）', () => {
+    // 空模型：全部 10 个评分项要求字段（必提 6 + 特殊质量/前附表/禁编/禁止性）均为缺失
+    expect(requirementFieldGaps(undefined)).toEqual([
+      'awardObjectives', 'specialQualityStandards', 'awardClauses', 'greenBuildingGrade', 'smartSiteGrade',
+      'assemblyRate', 'systematicBenchmarks', 'frontScheduleClauses', 'dateFabricationProhibited', 'prohibitionNotes',
+    ]);
+    // 常规字段齐全 → 空清单；缺任一常规字段 → 只列该字段（非仅必提字段）
+    const completeOptional = {
+      ...fullModel,
+      specialQualityStandards: [{ text: '特殊质量标准：按最高标准执行。', coreTerms: ['最高标准'] }],
+      frontScheduleClauses: [{ text: '计划工期：540日历天。', coreTerms: ['540日历天'] }],
+      dateFabricationProhibited: true,
+      prohibitionNotes: [{ text: '不得转包。', coreTerms: ['转包'] }],
+    };
+    expect(requirementFieldGaps(completeOptional)).toEqual([]);
+    expect(requirementFieldGaps({ ...completeOptional, specialQualityStandards: [] })).toEqual(['specialQualityStandards']);
+    expect(requirementFieldGaps({ ...completeOptional, dateFabricationProhibited: false })).toEqual(['dateFabricationProhibited']);
+  });
+
+  it('extractRequirementFieldGaps：窗口聚焦提取补齐缺失字段（LLM 一次调用覆盖全部有窗口的缺失字段）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    const model = { ...fullModel, awardClauses: [], assemblyRate: undefined };
+    mocked.mockResolvedValueOnce({
+      awardClauses: [{ text: '获得“黄山杯”的，支付该项300万元。', coreTerms: ['300万元'] }],
+      assemblyRate: { text: '装配率：30%。', coreTerms: ['30%'] },
+    });
+    const gapEvidence: DocumentEvidence[] = [
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款数据表5.1.1', score: 1, content: '关于工程奖项的约定：本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元；本工程有装配式技术要求，装配率为30%。' },
+    ];
+    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
+    expect(result.stillGaps).toEqual([]);
+    // 证据中无窗口命中的 4 个常规字段归 noEvidenceGaps（资料无此要求，非漏提）
+    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'frontScheduleClauses', 'dateFabricationProhibited', 'prohibitionNotes']);
+    expect(result.model.awardClauses.length).toBe(1);
+    expect(result.model.awardClauses[0].text).toContain('300万元');
+    expect(result.model.assemblyRate?.text).toContain('30%');
+    expect(result.model.awardObjectives.length).toBe(1);
+  });
+
+  it('extractRequirementFieldGaps：常规字段（特殊质量标准/前附表/禁止性/禁编）缺失同样触发补提', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    // fullModel 缺 4 个常规字段 → 全部进入补提窗口
+    const model = { ...fullModel };
+    mocked.mockResolvedValueOnce({
+      specialQualityStandards: [{ text: '特殊质量标准和要求：按最高标准执行。', coreTerms: ['最高标准'] }],
+      prohibitionNotes: [{ text: '不得转包、违法分包。', coreTerms: ['转包'] }],
+      dateFabricationProhibited: true,
+      frontScheduleClauses: [{ text: '不得转包、违法分包。', coreTerms: ['转包'] }],
+    });
+    const gapEvidence: DocumentEvidence[] = [
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款', score: 1, content: '特殊质量标准和要求：按最高标准执行；不得转包、违法分包；开工日期以开工令为准。' },
+    ];
+    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
+    expect(result.stillGaps).toEqual([]);
+    expect(result.noEvidenceGaps).toEqual([]);
+    expect(result.model.specialQualityStandards.length).toBe(1);
+    expect(result.model.prohibitionNotes.length).toBe(1);
+    expect(result.model.dateFabricationProhibited).toBe(true);
+    expect(result.model.frontScheduleClauses.length).toBe(1);
+  });
+
+  it('extractRequirementFieldGaps：窗口无证据字段判定「资料无此要求」（不误告警、不空跑 LLM）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    const model = { ...fullModel, greenBuildingGrade: undefined };
+    const gapEvidence: DocumentEvidence[] = [
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知', score: 1, content: '开标时间为2026年5月15日9时，评标委员会由5人组成。' },
+    ];
+    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
+    // stillGaps 与 noEvidenceGaps 互斥：全部缺口无窗口命中 → 全归 noEvidence，无真漏提告警
+    expect(result.stillGaps).toEqual([]);
+    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'greenBuildingGrade', 'frontScheduleClauses', 'dateFabricationProhibited', 'prohibitionNotes']);
+    expect(result.model.greenBuildingGrade).toBeUndefined();
+    expect(mocked).not.toHaveBeenCalled();
+  });
+
+  it('extractRequirementFieldGaps：LLM 两轮均提取失败仍缺失（真漏提告警，不无限循环）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    const model = { ...fullModel, awardObjectives: [] };
+    // 两轮 LLM 均返回空（输出有效但未含该字段）
+    mocked.mockResolvedValue({});
+    const gapEvidence: DocumentEvidence[] = [
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款', score: 1, content: '创优目标：本项目确保获得“黄山杯”。' },
+    ];
+    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
+    // 仅创优目标窗口证据存在但提取失败 → stillGaps；其余 4 常规字段无窗口 → noEvidenceGaps
+    expect(result.stillGaps).toEqual(['awardObjectives']);
+    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'frontScheduleClauses', 'dateFabricationProhibited', 'prohibitionNotes']);
+    expect(mocked).toHaveBeenCalledTimes(2);
   });
 
   it('filterMandatoryClauseEvidence 词形兜底：语义召回全低分时，必提词形命中切片仍保留（真实生成回归：黄山杯长段落切片 bge 低分漏网）', async () => {
@@ -417,22 +514,9 @@ describe('2.3 锚点全覆盖响应检测（requirementsCoverageIssues）', () =
   });
 });
 
-// ============ 阶段三 3.1/3.2：写作规则约束封装与评标办法系统侧消费 ============
+// ============ 阶段三 3.1/3.2：写作规则约束封装 ============
 
-describe('3.2 评标办法系统侧消费与约束封装（tenderRequirementsWritingRules）', () => {
-  it('evaluationScheme 原文（综合评估法/分值构成）不再注入写作规则，仅保留系统侧说明', () => {
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      evaluationScheme: { text: '评标办法采用综合评估法（模式3）；分值构成：技术文件5分、商务文件10分、报价文件85分。', coreTerms: ['综合评估法'], source: '招标文件.pdf' },
-    };
-    const rules = tenderRequirementsWritingRules(model);
-    expect(rules).toContain('评标办法');
-    expect(rules).not.toContain('综合评估法');
-    expect(rules).not.toContain('模式3');
-    expect(rules).not.toContain('技术文件5分');
-    expect(rules).toContain('不得复述评标办法');
-  });
-
+describe('3.1/3.2 写作规则约束封装（tenderRequirementsWritingRules）', () => {
   it('写作规则尾部携带系统约束声明（禁止复述提示词文字）', () => {
     const model: TenderRequirementModel = {
       ...emptyTenderRequirements(true),

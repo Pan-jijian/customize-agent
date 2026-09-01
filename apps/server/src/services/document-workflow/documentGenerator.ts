@@ -22,7 +22,7 @@ import { enrichConstructionOrgOutline } from './constructionOrgCatalog';
 import { validateBidStructureBeforeGeneration, extractEvaluationCriteriaItems, chapterCriteriaText, prioritizeOverviewSections } from './constructionBidStructure';
 import { buildSemanticSimilarity, snapshotEmbedCacheStats } from './semanticSimilarity';
 import { partitionEvidenceByContentSafety, evidenceSafetyKey, filterOffTopicSectionsForChapters, buildBidProcedureJudge } from './evidenceContentSafety';
-import { emptyTenderRequirements, extractTenderRequirements, filterMandatoryClauseEvidence, hasTenderRequirements, mergeTenderRequirements, missingMandatoryFields, normalizeChapterTitleLine, preselectTenderRequirementEvidence, readCachedTenderRequirements, routeTenderRequirementsToChapters, tenderRequirementsCacheKey, tenderRequirementCheckItems, tenderRequirementSemanticQuery, tenderRequirementsSummary, tenderRequirementsWritingRules, writeCachedTenderRequirements } from './tenderRequirements';
+import { emptyTenderRequirements, extractRequirementFieldGaps, extractTenderRequirements, filterMandatoryClauseEvidence, hasTenderRequirements, MANDATORY_FIELD_NAMES, mandatoryFieldGaps, mergeTenderRequirements, missingMandatoryFields, normalizeChapterTitleLine, preselectTenderRequirementEvidence, readCachedTenderRequirements, requirementFieldGaps, requirementFieldLabel, routeTenderRequirementsToChapters, tenderRequirementsCacheKey, tenderRequirementCheckItems, tenderRequirementSemanticQuery, tenderRequirementsSummary, tenderRequirementsWritingRules, writeCachedTenderRequirements } from './tenderRequirements';
 import { applyRequirementSectionAdditions, calibrateOutlineSectionsToRequirements } from './requirementCalibration';
 import { buildFactTokenScopeClassifier } from './factTokenClassifier';
 import { buildProfessionalDepthClassifier } from './professionalDepthClassifier';
@@ -404,20 +404,51 @@ export async function generateDocumentDraft(input: { templateId: string; require
         // 黄山杯/绿色等级/智慧工地等短条必提条款漏提（外部评分否决级：全文零落位且写作层杜撰替代奖项）。
         // 召回由本地 bge 语义模型完成（语义特征集余弦排序取 top-k），语义提取仍归 LLM 独立小输入，字段级合并补齐主结果缺失字段。
         const mandatoryEvidence = await filterMandatoryClauseEvidence(tenderFileEvidence);
-        if (mandatoryEvidence.length > 0 && missingMandatoryFields(tenderRequirements)) {
+        const initialGaps = mandatoryFieldGaps(tenderRequirements);
+        if (mandatoryEvidence.length > 0 && initialGaps.length > 0) {
           const narrowRequirements = await withProgressHeartbeat(() => extractTenderRequirements(mandatoryEvidence, { signal: input.signal }));
           if (hasTenderRequirements(narrowRequirements)) {
             tenderRequirements = mergeTenderRequirements(tenderRequirements, narrowRequirements);
             upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'tender-mandatory-extraction', status: 'success', message: '必提条款窄通道补提完成（主提取漏提字段已补齐）', details: tenderRequirementsSummary(narrowRequirements) }, { subtitle: '评分项要求提取', order: progressStages.length }));
             emitProgress();
-            // 补提后必提字段仍缺失（提取失败静默治理）：窄通道成功但字段没补全时显性警示，
-            // 避免「黄山杯零落位且全程无任何信号」再次发生（真实生成回归教训）
-            if (missingMandatoryFields(tenderRequirements)) {
-              upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'tender-mandatory-extraction', status: 'skipped', message: '必提条款窄通道补提后仍有必提字段缺失（奖项/绿色等级/智慧工地/装配率等至少一项未提取到）', details: ['请检查招标文件相关条款的切片完整性与提取输入；正文将无法显性响应该必提要求'] }, { subtitle: '评分项要求提取', order: progressStages.length }));
-              emitProgress();
-            }
-          } else {
-            upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'tender-mandatory-extraction', status: 'skipped', message: '必提条款窄通道提取未获得有效结果（召回证据存在但 LLM 提取失败）', details: ['请检查 LLM 可用性与提取输入质量；必提字段缺失将影响正文显性响应'] }, { subtitle: '评分项要求提取', order: progressStages.length }));
+          }
+        }
+        // round-26 字段级定向补提闭环（独立于窄通道，覆盖全部评分项要求字段——必提 6 字段 +
+        // 特殊质量/前附表/禁编/禁止性；评标办法/篇幅要求按项目需求不提取）：
+        // 主提取+窄通道后仍缺失的字段，做句级窗口聚焦提取（真实生成回归：招标文件 5.1.1 切片
+        // 含全部字段原文，主提取+窄通道两轮均漏提）。窗口无证据的字段判定「资料无此要求」，
+        // 降级为信息提示而非告警；证据存在但 LLM 仍漏提的字段分级告警（必提=告警，常规=提示）。
+        const fieldGapsBefore = requirementFieldGaps(tenderRequirements);
+        if (fieldGapsBefore.length > 0 && tenderFileEvidence.length > 0) {
+          const gapResult = await withProgressHeartbeat(() => extractRequirementFieldGaps(tenderRequirements, tenderFileEvidence, { signal: input.signal }));
+          tenderRequirements = gapResult.model;
+          const noEvidence = gapResult.noEvidenceGaps;
+          // stillGaps 与 noEvidenceGaps 语义互斥（见 extractRequirementFieldGaps）：stillGaps 即窗口证据存在但 LLM 仍漏提的真漏提字段
+          const missingByEvidence = gapResult.stillGaps;
+          if (gapResult.stillGaps.length === 0) {
+            upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'tender-field-gap-extraction', status: 'success', message: '评分项要求字段定向补提完成（字段级聚焦提取，全部评分项要求字段已提取）', details: tenderRequirementsSummary(tenderRequirements) }, { subtitle: '评分项要求提取', order: progressStages.length }));
+            emitProgress();
+          }
+          const isMandatory = (name: string) => (MANDATORY_FIELD_NAMES as readonly string[]).includes(name);
+          if (missingByEvidence.length > 0) {
+            const stillMandatory = missingByEvidence.filter(isMandatory);
+            const stillOptional = missingByEvidence.filter(name => !isMandatory(name));
+            const parts = [
+              stillMandatory.length > 0 ? `必提字段 ${stillMandatory.map(name => requirementFieldLabel(name as (typeof MANDATORY_FIELD_NAMES)[number])).join('、')}` : '',
+              stillOptional.length > 0 ? `常规字段 ${stillOptional.map(name => requirementFieldLabel(name as (typeof MANDATORY_FIELD_NAMES)[number])).join('、')}` : '',
+            ].filter(Boolean);
+            upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'tender-field-gap-missing', status: 'skipped', message: `字段定向补提后仍缺失：${parts.join('；')}（条款窗口证据存在但 LLM 提取失败）`, details: ['请检查 LLM 可用性与输出质量；正文将无法显性响应上述评分项要求'] }, { subtitle: '评分项要求提取', order: progressStages.length }));
+            emitProgress();
+          }
+          if (noEvidence.length > 0) {
+            const noEvidenceMandatory = noEvidence.filter(isMandatory);
+            const noEvidenceOptional = noEvidence.filter(name => !isMandatory(name));
+            const parts = [
+              noEvidenceMandatory.length > 0 ? `必提字段 ${noEvidenceMandatory.map(name => requirementFieldLabel(name as (typeof MANDATORY_FIELD_NAMES)[number])).join('、')}` : '',
+              noEvidenceOptional.length > 0 ? `常规字段 ${noEvidenceOptional.map(name => requirementFieldLabel(name as (typeof MANDATORY_FIELD_NAMES)[number])).join('、')}` : '',
+            ].filter(Boolean);
+            // roleId 独立于上方缺失告警 stage：同 roleId 会被 upsert 覆盖互吞（两分支可同时存在）
+            upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'tender-field-gap-no-evidence', status: 'skipped', message: `${parts.join('；')}：招标资料中未找到对应条款（判定为无此要求，非漏提）`, details: ['若项目实际存在该要求，请检查招标文件相关章节切片完整性'] }, { subtitle: '评分项要求提取', order: progressStages.length }));
             emitProgress();
           }
         }
