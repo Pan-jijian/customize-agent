@@ -9,8 +9,8 @@ import { dedupeQuantityFacts, filterConstructionSteps } from './chapterGeneratio
 import type { DocumentEvidence, DocumentFact, DocumentTemplate, ProjectGraph } from './types';
 import { stableHash } from './utils';
 
-const INTELLIGENCE_VERSION = 'project-intelligence-v9' as const;
-const SCOPE_VERSION = 'material-scope-v4' as const;
+const INTELLIGENCE_VERSION = 'project-intelligence-v10' as const;
+const SCOPE_VERSION = 'material-scope-v5' as const;
 
 export interface ProjectIntelligenceFileAsset {
   relativePath: string;
@@ -152,10 +152,13 @@ function cleanSignal(text: string) {
   return text
     .replace(/资料参数行摘要\s*[:：]?/gu, '')
     .replace(/#{1,6}\s*/gu, ' ')
+    // 标题残留：井号后直接接中文（如「##徽光阁项目」），无空白的 markdown 拼接噪音
+    .replace(/[#＃]{1,6}(?=[\u4e00-\u9fa5])/gu, ' ')
     .replace(/(?:PDF\s*)?第\s*\d+\s*页(?:\s*共\s*\d+\s*页)?/giu, ' ')
     .replace(/资料类型\s*[:：]\s*[^\s；;]+/giu, ' ')
     .replace(/MIME\s*[:：]\s*[^\s；;]+/giu, ' ')
     .replace(/文件大小\s*[:：]\s*[^\s；;]+/giu, ' ')
+    .replace(/(?:项目编号|招标编号|备案编号|工程编号)\s*[:：]\s*[^\s；;，。]+/giu, ' ')
     .replace(/\s+/gu, ' ')
     .trim();
 }
@@ -164,13 +167,20 @@ function isNonBodySentence(sentence: string) {
   return /投标函|保证金|开标|评标|交易系统|账户|协议书|示范文本|报价|税率|利润|我方已仔细研究|中标|签订合同|专用账户监管|联合体投标|注册建造师|安全生产考核合格证书|安全生产许可证|营业执照|资质要求|投标人资格|资格审查|资格后审|资格预审|业绩要求|信誉要求|财务要求|投标有效期|投标截止|递交投标文件|递交电子投标文件|获取招标文件|获取方式|获取时间|踏勘现场|投标预备会|备选投标方案|分包内容|电子交易系统|电子服务系统|联系方式|联系人|邮编|技术支持|全流程电子化交易|异议|投诉|评标委员会|评标办法|公告发布|媒介|咨询电话|拨打电话|招标工程量清单|最高投标限价|不可竞争费|招标总说明|招标需求|招标范围|招标控制价|编制补疑|计价依据|计价定额|措施项目费|暂列金额|投标总价|综合单价|计价格式|取费标准|清单编制说明|招标文件正文|招标图纸目录|投标人/u.test(sentence);
 }
 
-function extractContentFacts(signals: string[]) {
+// 文件头/文档属性元数据句：编号、类型、大小、名称等与施工正文无关的登记信息
+function isMetadataSentence(sentence: string) {
+  return /^(?:项目编号|招标编号|备案编号|工程编号|资料名称|文档名称|文件名称|文档类型|文件类型|创建时间|修改时间|编制单位|编制日期)\s*[:：]/u.test(sentence)
+    || /^[#＃]{1,6}/u.test(sentence);
+}
+
+export function extractContentFacts(signals: string[]) {
   const facts = new Set<string>();
   for (const signal of signals) {
     for (const raw of signal.split(/[。；;\n]/u)) {
       const sentence = cleanSignal(raw);
       if (sentence.length < 12 || sentence.length > 180) continue;
       if (isNonBodySentence(sentence)) continue;
+      if (isMetadataSentence(sentence)) continue;
       if (/(项目|工程|道路|桥梁|园林|交通|结构|排水|照明|绿化|工期|质量|安全|危大|材料|机械|劳动力|验收|规范|清单|工程量|施工)/u.test(sentence)) facts.add(sentence);
       if (facts.size >= 18) break;
     }
@@ -270,7 +280,7 @@ function buildIntentIndex(files: ProjectIntelligenceFileAsset[]): ProjectIntelli
   }))));
 }
 
-function chapterIntentTags(title: string, sections: string[] = []) {
+export function chapterIntentTags(title: string, sections: string[] = []) {
   const text = `${title}\n${sections.join('\n')}`;
   const tags = new Set<string>();
   const add = (tag: string, re: RegExp) => { if (re.test(text)) tags.add(tag); };
@@ -278,14 +288,15 @@ function chapterIntentTags(title: string, sections: string[] = []) {
   add('质量验收', /质量|验收|复试|见证|控制点/u);
   add('安全危大', /安全|危大|风险|应急/u);
   add('施工部署', /部署|总平面|施工组织|现场/u);
-  add('施工方法', /施工方案|施工方法|分部分项|工艺/u);
-  add('人材机', /人材机|劳动力|材料|机械|周转/u);
+  add('施工方法', /施工方案|施工方法|分部分项|工艺|新技术|新工艺/u);
+  add('人材机', /人材机|劳动力|材料|机械|周转|人、材、机|人员设备/u);
   add('环境文明', /环保|文明|扬尘|绿色/u);
-  add('工程概况', /概况|工程特点|重点|难点/u);
+  // 「整体理解/工程理解」：施组第一章「针对工程项目整体理解」；「重点|难点」：重点难点章
+  add('工程概况', /概况|工程特点|重点|难点|整体理解|项目理解|工程理解|项目概况/u);
   return [...tags];
 }
 
-function evidenceFromIntentIndex(input: { template: DocumentTemplate; entries: ProjectIntelligenceIntentEntry[]; selected: Set<string> }) {
+export function evidenceFromIntentIndex(input: { template: DocumentTemplate; entries: ProjectIntelligenceIntentEntry[]; selected: Set<string> }) {
   const evidenceByChapterId: Record<string, DocumentEvidence[]> = {};
   for (const chapter of input.template.chapters) {
     const tags = chapterIntentTags(chapter.title, chapter.sections || []);
@@ -392,7 +403,17 @@ export function readProjectIntelligence(projectRoot: string): ProjectIntelligenc
   }
 }
 
-function mergeProjectGraphs(base: ProjectGraph, enhanced: ProjectGraph): ProjectGraph {
+/** 施组生成无关的缺口声称（确定性排除，防残留注入生成上下文）：
+ * 评标办法/评审属商务程序性内容（对施组编制无用）；地质勘察/土壤氡检测经
+ * 本工程确认为非必需资料——此类「缺失」不构成施组资料缺口，无论 LLM 图谱是否产出 */
+const IRRELEVANT_GAP_RE = /评标办法|评标(?:委员会|细则)|评分档位|分值构成|评审|地质勘察|地勘|土壤氡/u;
+
+/** gap 文本是否属施组无关缺口（评标办法/地质勘察类），用于图谱合并与生成注入两处过滤 */
+export function isIrrelevantProjectGap(gap: string): boolean {
+  return IRRELEVANT_GAP_RE.test(gap.replace(/\s+/gu, ' '));
+}
+
+export function mergeProjectGraphs(base: ProjectGraph, enhanced: ProjectGraph): ProjectGraph {
   const mergeItems = <T,>(left: T[], right: T[]) => {
     const map = new Map<string, T>();
     for (const item of [...left, ...right]) {
@@ -401,17 +422,74 @@ function mergeProjectGraphs(base: ProjectGraph, enhanced: ProjectGraph): Project
     }
     return [...map.values()];
   };
+  const works = mergeItems(base.works, enhanced.works);
+  const methods = mergeItems(base.methods, enhanced.methods);
+  const resources = mergeItems(base.resources, enhanced.resources);
+  const schedule = mergeItems(base.schedule, enhanced.schedule);
+  const standards = mergeItems(base.standards, enhanced.standards);
+  const siteConditions = mergeItems(base.siteConditions, enhanced.siteConditions);
+  const risks = mergeItems(base.risks, enhanced.risks);
+  // LLM 图谱磁盘缓存命中时不经 normalize 重校验，category 误标「评标办法」的条目会残留
+  // （内容多为装配率/业绩证明等真实要求，已在其他类别覆盖）——此处确定性兜底清除
+  const requirements = mergeItems(base.requirements, enhanced.requirements).filter(item => !item.category.includes('评标'));
+  const addendumChanges = mergeItems(base.addendumChanges, enhanced.addendumChanges);
+  // 已解决缺口确定性清理：gap 声称「某事实未找到」，但合并图谱已含该事实（如 schedule
+  // 已有「540个日历天」）时移除 gap，避免「工期未找到」类误导进入生成上下文
+  const knownTerms = [
+    ...schedule.flatMap(item => [item.duration, item.milestone].filter(Boolean) as string[]),
+    ...standards.flatMap(item => [item.code, item.description].filter(Boolean) as string[]),
+    ...siteConditions.flatMap(item => [item.condition, item.impact].filter(Boolean) as string[]),
+  ].map(term => term.replace(/\s+/gu, ''));
+  // 泛化声称矛盾检查：gap 声称「未提供 X」，但合并图谱 X 对应类别已有事实（确定性 base
+  // 图谱或 LLM 图谱）→ 假声称移除。LLM 每轮 gap 输出不稳定（曾对事实已有内容声称
+  // 「未提供建设规模/工程量清单/施工进度计划」），必须以图谱事实为准兜底。
+  // 主题词刻意不覆盖「劳动力」：劳动力计划确属投标人自编、招标资料通常缺失的真实缺口
+  const gapClaimSatisfied = (text: string): boolean => {
+    const claims: Array<[RegExp, number]> = [
+      [/建设规模|建筑面积|投资额|层数|建设内容/u, works.length],
+      [/招标范围|施工范围/u, works.length],
+      [/工程量/u, resources.length],
+      [/设备表|设备名称|设备参数|规格型号/u, resources.length],
+      [/进度计划|工期安排|开工日期|竣工日期|开工令/u, schedule.length],
+      [/施工方法|工艺流程|施工方案/u, methods.length],
+      [/验收标准|验收要求|验收清单/u, standards.length],
+      [/补疑|澄清|答疑|变更信息/u, requirements.length + addendumChanges.length],
+      [/项目风险|安全风险|风险提示/u, risks.length],
+    ];
+    return claims.some(([pattern, count]) => pattern.test(text) && count > 0);
+  };
+  const gaps = [...new Set([...(base.gaps || []), ...(enhanced.gaps || [])])].filter(gap => {
+    const text = gap.replace(/\s+/gu, ' ');
+    // 施组无关缺口（评标办法/评审/地质勘察）：确定性排除，不进图谱、不注入生成上下文
+    if (isIrrelevantProjectGap(text)) return false;
+    if (!/未找到|未直接出现|未提供|未在资料|未体现|未明确/u.test(text)) return true;
+    // 括号声明（如「计划工期（540个日历天）」）：括号内每个片段均已被图谱事实覆盖 → 移除
+    const claim = text.match(/[（(]([^（()）]{2,60})[）)]/u)?.[1] || '';
+    if (claim) {
+      const segments = claim.split(/[、,，]/u).map(segment => segment.replace(/\s+/gu, '')).filter(segment => segment.length >= 4);
+      if (segments.length > 0 && segments.every(segment => knownTerms.some(term => term.includes(segment)))) return false;
+      // 举例/部分承认型括号（如「（如建筑面积、层数、投资额等）」「（仅提及高温消防轴流通风机）」）
+      // 不构成事实声明，不能阻断泛化声称清理；纯事实声明括号未被覆盖时保守保留
+      if (!/^(?:如|例如|比如|诸如|仅提及|仅有|只有|含|包括)/u.test(claim)) return true;
+    }
+    // 无括号的泛化声称：图谱对应类别已有事实即移除（如「未提供计划工期……原文证据」而 schedule 已有 540 天）
+    if (/计划工期/u.test(text) && schedule.length > 0) return false;
+    if (/质量标准/u.test(text) && standards.length > 0) return false;
+    if (/建设地点/u.test(text) && siteConditions.length > 0) return false;
+    if (gapClaimSatisfied(text)) return false;
+    return true;
+  });
   return {
-    works: mergeItems(base.works, enhanced.works),
-    methods: mergeItems(base.methods, enhanced.methods),
-    resources: mergeItems(base.resources, enhanced.resources),
-    schedule: mergeItems(base.schedule, enhanced.schedule),
-    standards: mergeItems(base.standards, enhanced.standards),
-    risks: mergeItems(base.risks, enhanced.risks),
-    requirements: mergeItems(base.requirements, enhanced.requirements),
-    siteConditions: mergeItems(base.siteConditions, enhanced.siteConditions),
-    addendumChanges: mergeItems(base.addendumChanges, enhanced.addendumChanges),
-    gaps: [...new Set([...(base.gaps || []), ...(enhanced.gaps || [])])],
+    works,
+    methods,
+    resources,
+    schedule,
+    standards,
+    siteConditions,
+    risks,
+    requirements,
+    addendumChanges,
+    gaps,
     generatedAt: enhanced.generatedAt || Date.now(),
   };
 }
@@ -609,8 +687,10 @@ export async function buildProjectIntelligence(projectRoot: string): Promise<Pro
   const files: ProjectIntelligenceFileAsset[] = kbFiles.map(file => {
     const root = topLevelGroup(file.relativePath);
     const roles = fileRoles(file.relativePath);
-    const chunks = project.listChunks({ relativePath: file.relativePath, limit: 16 });
-    const summarySignals = chunks.map(chunk => cleanSignal(String(chunk.content || ''))).filter(Boolean).slice(0, 12);
+    // 步长抽样（上限 64 块并强制含最后一块）：前缀 16 块覆盖不到文件中部/尾部的
+    // 工期、质量标准等核心条款，是图谱缺口（如「计划工期 540 天未找到」）的直接根因
+    const chunks = project.listChunksSampled({ relativePath: file.relativePath, sampleSize: 64 });
+    const summarySignals = chunks.map(chunk => cleanSignal(String(chunk.content || ''))).filter(Boolean).slice(0, 48);
     const excludeReason = bodyExclusionReason(file.relativePath);
     const isSpreadsheet = /\.(?:xlsx?|csv|tsv)$/iu.test(file.relativePath);
     const contentFacts = excludeReason ? [] : isSpreadsheet ? extractSpreadsheetFacts(chunks) : extractContentFacts(summarySignals);

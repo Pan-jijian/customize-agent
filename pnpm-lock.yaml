@@ -168,10 +168,10 @@ importers:
         specifier: ^6.3.2
         version: 6.3.2(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@customize-agent/knowledge':
-        specifier: ^4.1.2
+        specifier: ^4.2.0
         version: link:../../packages/knowledge
       '@customize-agent/llm':
-        specifier: ^3.1.0
+        specifier: ^3.1.2
         version: link:../../packages/llm
       '@customize-agent/runtime':
         specifier: ^3.1.0

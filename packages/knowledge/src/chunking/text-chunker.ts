@@ -16,7 +16,6 @@ export interface TextChunk {
 export interface ChunkConfig {
   maxChunkSize: number;
   overlap: number;
-  headerInjection: boolean;
 }
 
 type ChunkKind = 'text' | 'table' | 'data' | 'code' | 'metadata';
@@ -42,16 +41,16 @@ type CodeLanguageConfig = {
 };
 
 const DEFAULT_CONFIGS: Record<FileCategory, ChunkConfig> = {
-  document: { maxChunkSize: 800, overlap: 100, headerInjection: true },
-  spreadsheet: { maxChunkSize: 1000, overlap: 120, headerInjection: true },
-  image: { maxChunkSize: 512, overlap: 0, headerInjection: true },
-  cad: { maxChunkSize: 600, overlap: 80, headerInjection: true },
-  code: { maxChunkSize: 1000, overlap: 120, headerInjection: true },
-  data: { maxChunkSize: 600, overlap: 80, headerInjection: true },
-  web: { maxChunkSize: 800, overlap: 100, headerInjection: true },
-  diagram: { maxChunkSize: 512, overlap: 0, headerInjection: true },
-  archive: { maxChunkSize: 500, overlap: 50, headerInjection: false },
-  other: { maxChunkSize: 500, overlap: 50, headerInjection: false },
+  document: { maxChunkSize: 800, overlap: 100 },
+  spreadsheet: { maxChunkSize: 1000, overlap: 120 },
+  image: { maxChunkSize: 512, overlap: 0 },
+  cad: { maxChunkSize: 600, overlap: 80 },
+  code: { maxChunkSize: 1000, overlap: 120 },
+  data: { maxChunkSize: 600, overlap: 80 },
+  web: { maxChunkSize: 800, overlap: 100 },
+  diagram: { maxChunkSize: 512, overlap: 0 },
+  archive: { maxChunkSize: 500, overlap: 50 },
+  other: { maxChunkSize: 500, overlap: 50 },
 };
 
 const RECURSIVE_SEPARATORS = [
@@ -90,7 +89,7 @@ export class TextChunker {
     if (source.length === 0) return [];
 
     const config = DEFAULT_CONFIGS[file.category];
-    const normalized = this.withHeader(source, file, config);
+    const normalized = source;
     const rawCandidates = this.createCandidates(normalized, file, config);
     const candidates = this.enforceCandidateLimit(rawCandidates, config);
 
@@ -543,11 +542,6 @@ export class TextChunker {
       }
       return stack.map(item => item.title).join(' > ') || section.title;
     });
-  }
-
-  private withHeader(text: string, file: ClassifiedFile, config: ChunkConfig): string {
-    if (!config.headerInjection) return text;
-    return `资料类型: ${file.category}/${file.format}\n\n${text}`;
   }
 
   private createChunk(index: number, candidate: ChunkCandidate, file: ClassifiedFile, metadata: Record<string, unknown>): TextChunk {

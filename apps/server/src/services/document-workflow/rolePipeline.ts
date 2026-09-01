@@ -130,6 +130,8 @@ interface ChapterMarkdownPatch {
   targetEnd?: string;
   replacement?: string;
   reason?: string;
+  /** A1：系统锚点直连模式——anchorIndex 对应调用方传入 anchorTexts 的序号，LLM 只输出改写文本不复述原文 */
+  anchorIndex?: number;
 }
 
 function uniqueTextRange(content: string, patch: ChapterMarkdownPatch) {
@@ -172,12 +174,59 @@ function applyChapterPatch(input: { content: string; patch: ChapterMarkdownPatch
   return { content: next, applied: next !== input.content };
 }
 
-export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }>; maxTokens?: number; patchGuard?: { observeOnly: boolean; diagnostics?: DocumentGenerationDiagnostics } }) {
+/** 压缩空白（含换行）后做锚点匹配，将匹配区间映射回原文本执行替换。
+ * 锚点出现多次时全部替换（全文统一口径：同一矛盾原文必须同改），替换方向从后往前避免偏移。 */
+function replaceAllAnchorOccurrences(content: string, anchorCompact: string, replacement: string): string {
+  // 压缩串字符 → 原文本位置映射（替换定位用）
+  const rawPositions: number[] = [];
+  let compact = '';
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index];
+    if (/\s/u.test(char)) continue;
+    compact += char;
+    rawPositions.push(index);
+  }
+  const hits: Array<{ start: number; end: number }> = [];
+  let from = 0;
+  for (;;) {
+    const hit = compact.indexOf(anchorCompact, from);
+    if (hit < 0) break;
+    hits.push({ start: rawPositions[hit], end: rawPositions[hit + anchorCompact.length - 1] + 1 });
+    from = hit + anchorCompact.length;
+  }
+  let next = content;
+  for (const { start, end } of hits.reverse()) {
+    next = next.slice(0, start) + replacement + next.slice(end);
+  }
+  return next;
+}
+
+/** A1：系统锚点直连替换——检测器消息引号原文即精确锚点，归一化定位后替换，LLM 不复述原文。
+ * 消除「LLM 自述 originalText 与正文细微差异失配 → producedCount>0 但 appliedCount=0」的修复无效根因。 */
+function applyAnchorPatch(input: { content: string; anchor: string; replacement?: string; title: string; forbidDrawingImages: boolean }) {
+  const replacement = input.replacement?.trim();
+  const budget = patchLengthBudget(input.content);
+  if (!replacement || replacement.length > budget) return { content: input.content, applied: false };
+  if (input.forbidDrawingImages && /!\[[^\]]*\]\([^)]*\)/iu.test(replacement)) return { content: input.content, applied: false };
+  const anchorCompact = input.anchor.replace(/\s+/gu, '');
+  if (anchorCompact.length < 4) return { content: input.content, applied: false };
+  const contentCompact = input.content.replace(/\s+/gu, '');
+  if (!contentCompact.includes(anchorCompact)) return { content: input.content, applied: false };
+  const next = replaceAllAnchorOccurrences(input.content, anchorCompact, replacement);
+  if (!markdownStructureValid(next, input.title)) return { content: input.content, applied: false };
+  if (documentTextLength(next) < Math.floor(documentTextLength(input.content) * 0.65)) return { content: input.content, applied: false };
+  return { content: sanitizeFormalMarkdown(removeUnwantedDrawingImages(next, input.forbidDrawingImages)), applied: next !== input.content };
+}
+
+export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }>; maxTokens?: number; patchGuard?: { observeOnly: boolean; diagnostics?: DocumentGenerationDiagnostics }; anchorTexts?: string[] }) {
   throwIfAborted(input.signal);
   const repairType = input.repairType || classifyQualityRepairType(input.issues);
   const contextBlock = input.contextChapters?.length
     ? `\n\n周边章节上下文（仅用于衔接，禁止改动其中内容）：\n${input.contextChapters.map(c => `【${c.title}】\n${c.content}`).join('\n\n')}`
     : '';
+  // A1：系统锚点直连模式——检测器消息携带的引号原文即精确锚点（已从正文摘录），
+  // 修复器不再要求 LLM 复述 originalText（历史缺陷：复述与正文细微差异失配 → patch 全部落空）
+  const anchorMode = (input.anchorTexts?.length || 0) > 0;
   // 证据注入预算：与写作侧同口径（evidencePromptBudgetForTarget）。历史缺陷：修复器全量注入每章
   // 2.8万-3.3万字符证据 → 超上下文窗口 400 失败 → 修复闭环瘫痪（真实生成 75 次失败、瞬态重试 0 次）
   const evidenceBundle = input.chapter.evidence.length
@@ -188,38 +237,47 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     repairTypeInstruction(repairType),
     FORMAL_WRITING_RULES,
     input.forbidDrawingImages ? '图片类资料只作为文本事实来源，禁止插入图片或 Markdown 图片语法。' : '',
-    '每个 patch 必须能通过 originalText 或 targetStart/targetEnd 在原章节中唯一定位；replacement 只替换该局部片段。',
+    anchorMode
+      ? '系统已提供需要改写/删除的目标原文清单（按序号对应）。目标原文已从正文精确摘录，你只需逐条输出改写后的替换文本；replacement 只输出改写后的正文内容，禁止复述或修改目标原文以外的任何内容。如某条目标原文当前已不存在或无需修改，跳过该条不输出。'
+      : '每个 patch 必须能通过 originalText 或 targetStart/targetEnd 在原章节中唯一定位；replacement 只替换该局部片段。',
     '只修复列出的问题，不得整章重写，不得删除无问题小节，不得改变一级/二级章节结构。',
     '如问题涉及缺少正式表格，replacement 必须包含 Markdown 表名、表头、分隔线和至少一行数据；不得只写“见下表”或空表。',
     '如问题涉及缺失关键词/要素（缺词补写类），选取相关小节最后一个完整句子作为 originalText，replacement 为该句加补充句，保证定位唯一；不得因“原文找不到该关键词”而放弃产出 patch。',
     '如问题涉及提示词要求的关键词或禁用内容，只在相关段落自然补齐或替换，不得堆砌关键词。',
     '禁止新增证据摘要中没有的信息；无法安全定位的问题不要生成 patch。',
-    '返回 JSON：{"patches":[{"originalText":"原局部文本","targetStart":"定位起始文本","targetEnd":"定位结束文本","replacement":"替换后的局部文本","reason":"修复原因"}]}',
+    anchorMode
+      ? '返回 JSON：{"patches":[{"anchorIndex":0,"replacement":"改写后的正文文本","reason":"修复原因"}]}（anchorIndex 为目标原文序号，从 0 开始）'
+      : '返回 JSON：{"patches":[{"originalText":"原局部文本","targetStart":"定位起始文本","targetEnd":"定位结束文本","replacement":"替换后的局部文本","reason":"修复原因"}]}',
     // A5a 前缀缓存：可变 promptTexts 已移入 user 首部，system 保持恒定（跨章共享 prefix cache）
   ].filter(Boolean).join('\n\n');
+  // D2（4.12.23）缓存收敛：user prompt 重排为「稳定段前置、可变段后置」——
+  // 模板/章节/要求/指令/证据/正文/周边上下文对同章多次修复调用完全稳定，仅 issue 清单与锚点清单
+  // 每条调用不同；可变段移到最后，同章 N 个 issue 的 N 次调用共享 ~99% 前缀，prefix cache 命中率最大化
   const buildUserPrompt = (evidenceText: string) => [
-    input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
     `模板：${input.template.name}`,
     `章节：${input.chapter.title}`,
     input.requirement ? `用户要求：${input.requirement}` : '',
-    `需要局部修复的问题：\n${input.issues.map(item => `- ${item}`).join('\n')}`,
+    input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
     evidenceText,
     '当前章节 Markdown：',
     input.chapter.content,
     contextBlock,
+    anchorMode ? `系统提供的目标原文（改写对象，按序号对应）：\n${input.anchorTexts!.map((text, index) => `${index}. “${text}”`).join('\n')}` : '',
+    `需要局部修复的问题：\n${input.issues.map(item => `- ${item}`).join('\n')}`,
   ].filter(Boolean).join('\n\n');
   const evidenceBudget = evidenceBundle
     ? evidencePromptBudgetForTarget(Math.min(documentTextLength(input.chapter.content), 10000), 6000, 14000)
     : undefined;
   const failure: { value?: string } = {};
   // 3.4 上下文分层统计（L0-L3）：口径同写作侧——L0 system 恒定段 / L1 任务级（主控提示词、用户要求、
-  // 问题清单）/ L2 章级（模板、章节、周边上下文、当前章节 Markdown）/ L3 小节级（证据摘要）。
-  // 与 buildUserPrompt 组装同源表达式，降级重试按压缩后证据各自统计
+  // 问题清单、锚点清单）/ L2 章级（模板、章节、周边上下文、当前章节 Markdown）/ L3 小节级（证据摘要）。
+  // 与 buildUserPrompt 组装同源表达式，降级重试按压缩后证据各自统计（D2 重排后顺序同步）
   const contextLayersFor = (evidenceText: string) => ({
     l0: systemPrompt.length,
     l1: contextLayerChars([
-      input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
       input.requirement ? `用户要求：${input.requirement}` : '',
+      input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
+      anchorMode ? `系统提供的目标原文（改写对象，按序号对应）：\n${input.anchorTexts!.map((text, index) => `${index}. “${text}”`).join('\n')}` : '',
       `需要局部修复的问题：\n${input.issues.map(item => `- ${item}`).join('\n')}`,
     ]),
     l2: contextLayerChars([
@@ -255,6 +313,16 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
           if (guardDiag) guardDiag.llm.patchGuardRejects = (guardDiag.llm.patchGuardRejects ?? 0) + 1;
           continue;
         }
+      }
+    }
+    // A1：锚点直连分支——系统锚点定位（归一化匹配），LLM 只输出 replacement，无复述失配问题
+    if (anchorMode && typeof patch.anchorIndex === 'number') {
+      const anchor = input.anchorTexts?.[patch.anchorIndex];
+      if (anchor) {
+        const applied = applyAnchorPatch({ content, anchor, replacement: patch.replacement, title: input.chapter.title, forbidDrawingImages: input.forbidDrawingImages });
+        content = applied.content;
+        if (applied.applied) appliedCount += 1;
+        continue;
       }
     }
     const applied = applyChapterPatch({ content, patch, title: input.chapter.title, forbidDrawingImages: input.forbidDrawingImages });

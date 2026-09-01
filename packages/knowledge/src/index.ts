@@ -3,6 +3,7 @@
 
 export { TextChunker, type ChunkConfig, type TextChunk } from './chunking/text-chunker.js';
 export { FileClassifier } from './classification/classifier.js';
+export { cleanExtractedText, type TextCleaningInput, type TextCleaningResult, type TextCleanStats } from './cleaning/text-cleaner.js';
 export { DedupEngine, type MinHashSignature, type SimilarityMatch } from './dedup/dedup-engine.js';
 export { RelationshipDetector } from './dedup/relationship-detector.js';
 export { HashEmbeddingProvider, LocalTransformersEmbeddingProvider, OpenAICompatibleEmbeddingProvider, createEmbeddingProviderFromEnvironment, type EmbeddingProvider, type LocalTransformersEmbeddingOptions, type OpenAICompatibleEmbeddingOptions } from './embedding/embedding-provider.js';

@@ -41,6 +41,33 @@ function seedManager(manager: KnowledgeBaseManager, relativePath = 'limit-source
   });
 }
 
+function seedCustom(manager: KnowledgeBaseManager, relativePath: string, texts: string[]): void {
+  const now = Date.now();
+  const record: IndexStateRecord = {
+    relativePath,
+    category: 'document',
+    format: 'markdown',
+    contentHash: `hash-${relativePath}-custom`,
+    fileSize: texts.length * 100,
+    mtime: now,
+    chunkCount: texts.length,
+    collectionName: 'documents',
+    indexedAt: now,
+    lastVerifiedAt: now,
+    status: 'active',
+  };
+  manager.store.upsertRecord(record);
+  manager.store.replaceChunks(relativePath, texts.map((text, index) => ({
+    index,
+    text,
+    startChar: index * 10,
+    endChar: index * 10 + 10,
+    tokenCount: 20,
+    sectionTitle: `小节 ${index}`,
+    metadata: {},
+  })), { category: 'document', format: 'markdown', collectionName: 'documents' });
+}
+
 describe('knowledge search limit behavior', () => {
   it('keyword search defaults to the scoped corpus size instead of a fixed top-10 limit', () => {
     const manager = new KnowledgeBaseManager({
@@ -100,5 +127,22 @@ describe('knowledge search limit behavior', () => {
 
     const multiExplicit = await multi.search(projectRoot, '统一检索词', { scope: 'project', limit: 12, generationMode: true });
     expect(multiExplicit.results).toHaveLength(12);
+  });
+
+  it('字母数字与汉字连续查询串按边界拆词，「C35混凝土」命中清单特征块', () => {
+    const manager = new KnowledgeBaseManager({
+      scope: 'project',
+      projectRoot: path.join(os.tmpdir(), `kb-split-project-${Date.now()}`),
+      projectId: `kb-split-project-${Date.now()}`,
+      storageRoot: path.join(os.tmpdir(), `kb-split-storage-${Date.now()}`),
+    });
+    manager.initialize();
+    // 清单特征块：精确含「混凝土强度等级：C35」
+    seedCustom(manager, 'bill.md', ['满堂基础 混凝土种类：商品混凝土 混凝土强度等级：C35，P8 抗渗']);
+    // 干扰块：大量「混凝土」但无 C35
+    seedCustom(manager, 'green.md', ['绿色建筑评价标准 GB50378-2019 设计依据 混凝土 建筑材料 节能 环保 混凝土 构件 混凝土 结构']);
+    const results = manager.search('C35混凝土', 5);
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0]?.relativePath).toContain('bill.md');
   });
 });

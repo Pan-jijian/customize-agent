@@ -362,7 +362,7 @@ export async function retrievePlannedMaterialEvidence(input: {
     ).selected;
     for (const query of kindQueries) {
       if (input.signal?.aborted) throw new Error('aborted');
-      const result = await input.manager.search(input.projectRoot, query, { scope: 'project', filters: { filePaths }, limit: input.limitPerQuery, weights: { keyword: 0.68, vector: 0.25, rewrite: 0.85, hybridBonus: 0.3 }, generationMode: false });
+      const result = await input.manager.search(input.projectRoot, query, { scope: 'project', filters: { filePaths }, limit: input.limitPerQuery, weights: { keyword: 0.68, vector: 0.25, rewrite: 0.85, hybridBonus: 0.3 }, generationMode: true, disableReranker: true });
       evidence.push(...result.results.filter(item => filePaths.includes(item.filePath)).map(item => ({
         chapterId: input.chapter.id,
         filePath: item.filePath,

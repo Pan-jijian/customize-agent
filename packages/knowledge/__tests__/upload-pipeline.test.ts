@@ -320,7 +320,12 @@ EOF`;
     const result = await extractor.extract(file);
     expect(result.metadata.extractionMode).toBe('builtin_cad_structural');
     expect(result.text).toContain('MyLayer');
+    // 图纸节点锚定行保留（文件溯源），标注文本直接入列、不再带图元属性包装
     expect(result.text).toContain('图纸节点: test.dxf');
+    expect(result.text).toContain('Hello DXF 徽光阁项目施工总平面图及结构加固设计说明');
+    expect(result.text).not.toContain('| 实体类型:');
+    expect(result.text).not.toContain('└── 标注文本:');
+    expect(result.text).not.toContain('坐标:');
   });
 
   it('extracts SVG correctly', async () => {
@@ -453,14 +458,15 @@ export class MyClass {
     }
   });
 
-  it('includes file metadata header in chunks', () => {
+  it('keeps chunks free of injected file metadata headers', () => {
     const text = 'Short content for testing.';
     const absPath = createTestFile('code/test-header.ts', 'placeholder');
     const file = classify(absPath, 'code/test-header.ts');
     const chunks = chunker.chunk(text, file);
     expect(chunks.length).toBeGreaterThan(0);
     expect(chunks[0].text).not.toContain('文件: code/test-header.ts');
-    expect(chunks[0].text).toContain('资料类型: code/typescript');
+    // 资料类型头部不再注入切片文本（元数据通道承载，避免稀释检索语义）
+    expect(chunks[0].text).not.toContain('资料类型:');
   });
 
   it('handles empty text gracefully', () => {
@@ -570,6 +576,40 @@ describe('IndexStateStore', () => {
     expect(stored.length).toBe(2);
     expect(stored[0].content).toBe('Chunk zero content');
     expect(stored[1].chunkIndex).toBe(1);
+  });
+
+  it('listChunksSampled 步长均匀取样且强制含最后一块', () => {
+    const chunks = Array.from({ length: 100 }, (_, i) => ({
+      index: i,
+      text: `chunk-${i} 内容`,
+      startChar: 0,
+      endChar: 10,
+      tokenCount: 5,
+      metadata: { chunkType: 'child', chunkKind: 'text', parentId: 'p-sampled', splitStrategy: 'test' },
+    }));
+    store.replaceChunks('docs/sampled.txt', chunks, { category: 'document', format: 'plaintext', collectionName: 'test-collection' });
+
+    const sampled = store.listChunksSampled({ relativePath: 'docs/sampled.txt', sampleSize: 10 });
+    // step=10：chunk 0/10/.../90 共 10 块 + 最后一块 99
+    expect(sampled.length).toBe(11);
+    expect(sampled.some(chunk => chunk.chunkIndex === 99)).toBe(true);
+    expect(sampled.some(chunk => chunk.chunkIndex === 1)).toBe(false);
+    expect(sampled.some(chunk => chunk.chunkIndex === 50)).toBe(true);
+  });
+
+  it('listChunksSampled 小文件不超量取样（全量返回）', () => {
+    const chunks = Array.from({ length: 5 }, (_, i) => ({
+      index: i,
+      text: `small-${i}`,
+      startChar: 0,
+      endChar: 5,
+      tokenCount: 2,
+      metadata: { chunkType: 'child', chunkKind: 'text', parentId: 'p-small', splitStrategy: 'test' },
+    }));
+    store.replaceChunks('docs/small-sampled.txt', chunks, { category: 'document', format: 'plaintext', collectionName: 'test-collection' });
+
+    const sampled = store.listChunksSampled({ relativePath: 'docs/small-sampled.txt', sampleSize: 64 });
+    expect(sampled.length).toBe(5);
   });
 
   it('handles parent chunks grouping', () => {
@@ -1116,8 +1156,8 @@ Line 4: This is the fourth line of text for testing.`;
     const file = classifier.classify(absPath, 'tmp-consistency.txt', fs.statSync(absPath));
     const chunks = chunker.chunk(text, file);
 
-    // Chunker 通过 withHeader() 预置了资料类型头部，因此位置引用的是头部+文本
-    const fullText = `资料类型: ${file.category}/${file.format}\n\n${text}`;
+    // 切片文本无头部注入，位置引用与源文本一致
+    const fullText = text;
 
     for (const chunk of chunks) {
       expect(chunk.startChar).toBeGreaterThanOrEqual(0);

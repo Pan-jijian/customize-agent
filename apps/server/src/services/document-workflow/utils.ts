@@ -162,6 +162,28 @@ export function comparableSectionHeadingMatches(headingTitle: string, sectionTit
   return comparableHeading.includes(comparableTitle) || comparableTitle.includes(comparableHeading);
 }
 
+/** C2 备用稿标题确定性对齐：整章平铺备用成稿（buildLlmChapterContent 平铺路径）后，
+ * 把正文 H3/H4 标题行对齐到规划小节标题——LLM 常改写小节标题（增删修饰词/换连接词），
+ * Reviewer 按规划标题定位失败产生「未匹配到独立小节标题」误报且精修轮空转；
+ * 按可比标题口径（comparableSectionHeadingMatches）将近似标题替换为规划标题原文，
+ * 同一规划标题只对齐一处（后续近似标题保持原样，避免多节共用同名标题），无法匹配的保持原样交由检测器报缺 */
+export function alignSectionHeadingsToPlan(markdown: string, plannedSections: string[]): string {
+  const uniqueTitles = [...new Set(plannedSections.filter(Boolean))];
+  if (uniqueTitles.length === 0) return markdown;
+  const usedTitles = new Set<string>();
+  return markdown.split('\n').map(line => {
+    if (!/^\s*#{3,4}\s+/u.test(line)) return line;
+    const currentTitle = sectionHeadingTitleText(line);
+    if (!currentTitle) return line;
+    const matched = uniqueTitles.find(title => !usedTitles.has(title) && comparableSectionHeadingMatches(currentTitle, title));
+    if (!matched || matched === currentTitle) return line;
+    const headingPrefix = /^(\s*#{3,4}\s+)/u.exec(line)?.[1];
+    if (!headingPrefix) return line;
+    usedTitles.add(matched);
+    return `${headingPrefix}${matched}`;
+  }).join('\n');
+}
+
 function extractSectionFuzzy(content: string, sectionTitle: string) {
   const lines = content.split('\n');
   const normalizedTitle = sectionHeadingTitleText(sectionTitle).replace(/\s+/gu, '').toLowerCase();

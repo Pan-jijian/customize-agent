@@ -1,5 +1,139 @@
 # server
 
+## 4.13.2
+
+### Patch Changes
+
+- `mergeProjectGraphs`：LLM 图谱磁盘缓存命中时不经 normalize 重校验，category 误标「评标办法」的 requirements 条目会残留——合并处确定性兜底清除（内容如装配率/业绩证明已在其他类别覆盖）。
+
+## 4.13.1
+
+### Patch Changes
+
+- 修复项目图谱 gap 质量退化与评标办法残留注入（全链条）：
+  - `buildBaseProjectGraph`：META_FACT_KEYS 误排除「资料内容事实」导致确定性 base 图谱恒空，gap 清理失去确定性锚点；修复后 base 图谱由正文事实构建
+  - `mergeProjectGraphs`：新增泛化声称矛盾检查（gap 声称「未提供建设规模/工程量/进度计划/施工方法/验收标准/补疑澄清/风险」等而图谱对应类别已有事实时移除）；举例/部分承认型括号（如「（如建筑面积、层数…）」「（仅提及…）」）不再阻断清理
+  - `isIrrelevantProjectGap`：IRRELEVANT_GAP_RE 覆盖「评审」变体（如「技术文件详细评审内容项未在提供的资料中明确出现」）
+  - `buildProjectGraph` prompt：gaps 字段约束「证据中已出现的内容不得声称未提供」；requirementsAddendum 域不再强制抽取评标办法/评分细则/评审内容项（评标办法属商务程序性内容，对施组编制无用）
+
+## 4.13.0
+
+### Minor Changes
+
+- 入库清洗与图谱缺口治理：CAD 图元枚举降噪、文件头去除、施组无关 gap 过滤
+
+  - CAD 语义节点输出改造：逐实体枚举的图元属性包装（图层/块/实体类型/坐标/关联对象/状态）替换为「图纸节点锚定 + 纯标注文本」列表，消除 32000+ 图纸块的结构模板噪音，恢复「混凝土强度」等实质查询的语义召回
+  - 文件头去除：extractor 成功路径不再拼接「资料类型/MIME/文件大小」元数据头，chunker 不再注入资料类型头部（元数据通道承载），切片文本更纯净
+  - 清洗兜底（K3）：新增 CAD 图元属性枚举行规则（管道符表格形态「| 图层:| 实体类型:| 坐标:」与「└── 标注文本:」），覆盖专业转换器/历史版本产物形态
+  - 图谱缺口治理：新增 isIrrelevantProjectGap 确定性过滤（评标办法/地质勘察/土壤氡类施组无关缺口），图谱合并与生成注入双处生效，防止无关缺口残留注入生成上下文
+
+### Patch Changes
+
+- Updated dependencies
+  - @customize-agent/knowledge@4.2.0
+
+## 4.12.29
+
+### Patch Changes
+
+- 已解决缺口清理增强：括号声明按分段匹配图谱事实（多标准合并声明如「LY/T 1923-2010、DB34/T1264-2010」），无括号泛化声称（「未提供计划工期…」）按图谱类别覆盖移除，防止误导性缺口注入章节生成上下文。
+
+## 4.12.28
+
+### Patch Changes
+
+- 项目图谱合并增加「已解决缺口」确定性清理：图谱已含对应事实（如 schedule 已有「540 个日历天」）时移除「工期未找到」类 gap，避免误导性缺口提示进入生成上下文。
+
+## 4.12.27
+
+### Patch Changes
+
+- 项目理解缓存真实数据修复：意图证据章节映射失效（真实施组模板 6 章仅 2 章拿到证据）、图谱证据前缀 16 块取样覆盖盲区（工期/质量标准等核心条款进缺口）、contentFacts 元数据噪音（编号/资料类型/标题残留）。knowledge 包新增 listChunksSampled 步长均匀取样（强制含最后一块），server 侧 chapterIntentTags 标签扩展、cleanSignal 增强、isMetadataSentence 过滤。
+- Updated dependencies
+  - @customize-agent/knowledge@4.1.5
+
+## 4.12.26
+
+### Patch Changes
+
+- 入库清洗扩展至图纸/清单专门噪声（K3）：
+
+  - 图纸图框标题栏信息行（图号/比例/日期/设计/制图/审核签名行，负向词保护设计说明等实质标题）
+  - CAD 属性行（图层/颜色/线型/块名等转换产物）
+  - 清单纯报价表格段（费汇总/暂估单价/规费/税金/计日工标题 + 段内金额行 ≥2 双重证据；分部分项清单的名称/特征/工程量是施组核心数据，绝不删）
+  - 清单扉页签章段（工程量清单标题 + 造价签章证据）
+  - 新增 bill 文档类型判定（文件名/文首清单特征），清单规则适用于清单文件与招标文件内清单章节
+
+- Updated dependencies
+  - @customize-agent/knowledge@4.1.4
+
+## 4.12.25
+
+### Patch Changes
+
+- 修复 DeepSeek prefix cache 命中率与入库数据质量两大问题：
+
+  **缓存命中率修复（F 系列）**
+
+  - F1/F2：factCoverageContext 与 missingFacts 从 L3 块级变化段上移 L2 章级共享段（章级恒定值不再每块重复注入）
+  - F3：capFactCoverageContext 预算封顶（默认 26000 字符按行完整截断，DOCUMENT_FACT_COVERAGE_CAP=0 关闭）——全局资料事实索引全量注入是 L3 爆炸主因
+  - F5/F9：块路径与逐小节管线首块预热循环——首块单独执行建立共享前缀缓存，后续并发块命中（规避 cache 写入秒级延迟导致并发互盲）
+  - F6：两步生成大纲调用前缀收敛（章级恒定段前置）+ contextLayers 分层统计
+  - F7/F8：规划轮与全局审查调用 contextLayers 补齐（unlayeredChars 归因）
+
+  **入库前数据清洗（K1，源头治理）**
+
+  - 新增 text-cleaner 模块：解析完成后、分块入库前移除确定性噪声
+  - 通用：页眉/页脚高重复行、纯页码行、目录区段、连续空行
+  - 招标文件：投标函格式模板段、泛化引用行
+  - 补疑/答疑：零信息回复行；图纸：无汉字纯坐标数字行
+  - 保守策略：多重证据判定、30% 整体回退保护、KB_TEXT_CLEANING=0 关闭、清洗统计 写入索引记录
+
+  **入库前内容无关数据清洗（K2，章节/段落级）**
+
+  - 合同通用条款整章（标题 + 规模证据 + 止于专用合同条款边界，专用条款与协议书保留）
+  - 招标公告程序段（文件获取/递交/开标，段内含时间地点证据才删）
+  - 评标商务评审细则段（段内出现技术评审/施组关键词则整体保留，宁多勿丢）
+  - 章节级删除置信度高：不参与 30% 行级回退判定，仅保留 10% 极端防全删
+
+- Updated dependencies
+  - @customize-agent/knowledge@4.1.3
+
+## 4.12.24
+
+### Patch Changes
+
+- 修复生成链路 KB 检索阻塞事件循环：章节主检索/深召回/基础事实/材料证据改为 generationMode=true（跳过 LLM 查询扩展，省 LLM 预算）+ disableReranker=true（cross-encoder 在 transformers v3 无 worker proxy，ONNX Run 主线程同步执行阻塞 HTTP 响应 20-60 分钟；降级为纯 JS 确定性重排 heuristicRerank）；小节级证据检索保留交叉编码重排但跳过 LLM 扩展
+
+## 4.12.23
+
+### Patch Changes
+
+- 文档生成修复链确定性化与费用治理（A/B/C/D 四模块）：
+
+  - A 修复链确定性化：检测器消息引号原文直连修复器锚点（LLM 只输出 replacement 不再复述 originalText，消除复述失配）；跨章数值矛盾（劳动力峰值/节点工期/材料设备数量）确定性定点替换接入跨章循环、blocker/交付前修复轮与导出门禁；internal-term 补 L1 精确词直删通道与 rechecker 删除兜底；labor-contradiction 类缺陷确定性修复优先跳过 LLM 轮次
+  - B 观感治理：跨章一致性修复 running stage 收口、修复 stage 文案携带缺陷 code 与轮次、roleId 追加 issue code、overview-recap 定位兜底四词封闭集、recomputeFinalValidationBundle 剔除确定性删除已生效的旧 issue 快照、data-consistency 数值对签名本地复检替代假性成功
+  - C 整章备用治理：备用成稿优先保持主题块 H4 结构（紧凑重试）；备用稿标题按可比标题口径确定性对齐回规划标题；块级失败隔离（失败块单独重试并插回，成功块不再被整章重写作废）；compactFallbackUsed 时「未匹配到独立小节标题」不触发精修空转
+  - D 费用治理：章级 T0 关键事实层上移 L2 共享段（同章各块 prefix cache 共享命中，块级证据 skipT0）；修复 prompt 稳定段前置、issue 清单后置；修复轮缺陷清单去重
+
+## 4.12.22
+
+### Patch Changes
+
+- LLM prefix 缓存收敛（P5）：buildLlmChapterContent / buildLlmSectionContent / buildFocusedSectionDraft 的 prompt 重排为「章内共享段前置、块级/节级变化段后置」，同章并发调用共享更长可缓存前缀；修复主题块 factsHint 重复注入（roleContext 与 factCoverageContext 各注一次）；新增未分层调用输入字符统计（unlayeredChars）并在预算裁剪报告输出占比，用于归因分层统计之外的输入大头。
+
+## 4.12.21
+
+### Patch Changes
+
+- 文档完整性检测器误报修复：
+
+  - 设备数量反向模式型号字符集收窄，阻断「施工电梯 2 台、汽车吊 1 台」枚举句跨标点误采；负向声明句（不再出现/不得出现等）行级豁免
+  - 施工升降机检测词扩围（施工电梯同物异名），消除漏检
+  - 劳动力检测：高峰列优先于平均列、分工种人数明细表（无高峰列）与峰值表不互查、模式 1 阶段限定（不同施工阶段峰值不互斥）、总口径 ≥ 阶段峰值豁免
+  - 表格重复第三条改用文本 cell 双向覆盖度 ≥0.6，排除纯数字 cell，互补表（统计表 vs 投入计划表）不再误报，「删减版子表」不再漏报
+  - documentGenerator 表格执行率补表闭环后追加确定性删除轮，消除补表引入的重复表格残留
+
 ## 4.12.20
 
 ### Patch Changes

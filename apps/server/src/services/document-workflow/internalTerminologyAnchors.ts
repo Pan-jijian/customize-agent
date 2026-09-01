@@ -33,6 +33,10 @@ const INTERNAL_TERM_ANCHORS: Array<{ anchor: string; required: RegExp }> = [
  * 导出供评审轮 patch 前置校验（patchGuard）复用同一词集，禁止各文件私造第二份词表。 */
 export const INTERNAL_TERM_EXACT_RE = /工作包|事实卡|事实主表|后台数据库|落位|峰值口径|控制口径|数据口径/gu;
 
+/** L1 精确词非全局副本（删除侧判定用）：/g 正则 test 会推进 lastIndex，复用全局词表必须重置；
+ * 非全局副本避免删除循环中状态串扰（历史缺陷：全局 lastIndex 未重置导致隔次误判） */
+const INTERNAL_TERM_EXACT_TEST_RE = /工作包|事实卡|事实主表|后台数据库|落位|峰值口径|控制口径|数据口径/u;
+
 /** 目录裸标题行（无 # 前缀的数字编号标题，如“2.12 主要分部分项工程施工方案”）：不参与正文句子语义匹配 */
 const TOC_LINE_RE = /^\d+(?:\.\d+)*\s+\S+/u;
 
@@ -111,14 +115,17 @@ export async function stripInternalTerminologySentences(markdown: string): Promi
     if (/^\s*\|/u.test(trimmed)) return true;
     return TOC_LINE_RE.test(trimmed) && trimmed.length <= 40 && !/[。！？!?；;，,：:]/.test(trimmed);
   };
-  // 候选句收集与检测器同口径：行级豁免后按句末标点拆句，锚定词前置过滤
+  // 候选句收集与检测器同口径：行级豁免后按句末标点拆句，锚定词前置过滤；
+  // A3（4.12.23）：L1 精确词通道并入——句含 L1 精确词（落位/工作包/事实卡等）但无 L3 锚定词的句子
+  // 同样删除（检测器 L1 字面召回会报 issue，删除侧却删不掉，历史缺陷：「逐项落位到具体管理动作」
+  // 「按下表落位」「按阶段落位的应用点」三处残留进导出门禁）
   const candidateLines: Array<{ index: number; sentences: string[] }> = [];
   lines.forEach((line, index) => {
     if (protectedLine(line)) return;
     const parts = line
       .split(/(?<=[。！？!?；;])/u)
       .map(part => part.trim())
-      .filter(part => part.length >= 8 && part.length <= 80 && INTERNAL_TERM_ANCHORS.some(item => item.required.test(part)));
+      .filter(part => part.length >= 8 && part.length <= 80 && (INTERNAL_TERM_ANCHORS.some(item => item.required.test(part)) || INTERNAL_TERM_EXACT_TEST_RE.test(part)));
     if (parts.length > 0) candidateLines.push({ index, sentences: parts });
   });
   const allCandidates = candidateLines.flatMap(item => item.sentences).slice(0, 200);
@@ -132,6 +139,8 @@ export async function stripInternalTerminologySentences(markdown: string): Promi
   allCandidates.forEach((sentence, index) => {
     const vector = sentenceVectors[index];
     if (!vector || vector.length === 0) return;
+    // A3：L1 精确词命中句直接删除（语义匹配不可靠时 L1 字面召回兜底，检测/删除同口径）
+    if (INTERNAL_TERM_EXACT_TEST_RE.test(sentence)) { hitSet.add(sentence); return; }
     const maxSim = Math.max(...anchorVectors.map(anchor => dot(vector, anchor)));
     if (maxSim >= 0.62) hitSet.add(sentence);
   });

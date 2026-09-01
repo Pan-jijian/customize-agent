@@ -404,6 +404,23 @@ export class IndexStateStore {
     return Number(row?.count || 0);
   }
 
+  // 均匀步长取样：对超长文件按 chunk_index 取模抽样并强制含最后一块，
+  // 避免 listChunks 前缀取样导致的文件中部/尾部关键信息（工期、质量标准等）覆盖缺失
+  listChunksSampled(options: { collectionName?: string; relativePath?: string; sampleSize?: number } = {}): StoredChunk[] {
+    const sampleSize = Number(options.sampleSize) || 32;
+    const total = this.countChunks(options);
+    if (total <= sampleSize) return this.listChunks(options);
+    const step = Math.ceil(total / sampleSize);
+    const { where, params } = this.chunkQueryParts(options);
+    const whereClause = where ? `${where} AND` : 'WHERE';
+    const rows = this.db.prepare(`
+      SELECT rowid, * FROM kb_chunks
+      ${whereClause} (chunk_index % ? = 0 OR chunk_index = ?)
+      ORDER BY relative_path, chunk_index
+    `).all(...params, step, total - 1) as Array<Record<string, unknown>>;
+    return rows.map(row => this.rowToChunk(row, 0));
+  }
+
   listChunksByContentBudget(options: { collectionName?: string; relativePath?: string; maxContentChars?: number } = {}): StoredChunk[] {
     const maxContentChars = Number(options.maxContentChars);
     if (!Number.isFinite(maxContentChars) || maxContentChars <= 0) return this.listChunks(options);
@@ -1173,6 +1190,13 @@ export class IndexStateStore {
     const terms = new Set(normalized ? [normalized] : []);
     for (const term of normalized.split(/[\s,，。；;：:、]+/u).filter(Boolean)) {
       terms.add(term);
+      // 「C35混凝土」「GB55015规范」类字母数字与汉字连续串：按边界拆出独立 token。
+      // 整串只能作 trigram 短语匹配（要求三字组在文档中连续出现），清单特征
+      // 「强度等级：C35」与查询串「C35混凝土」永远无法短语命中，精确项「c35」被淹没，
+      // 导致「C35混凝土」检索返回大量仅命中「混凝土」的低相关文档
+      for (const part of term.split(/([\p{Script=Han}]+)/u).filter(part => part.length > 0)) {
+        if (part !== term) terms.add(part);
+      }
       for (const gram of this.chineseNgrams(term)) terms.add(gram);
     }
     for (const gram of this.chineseNgrams(normalized)) terms.add(gram);

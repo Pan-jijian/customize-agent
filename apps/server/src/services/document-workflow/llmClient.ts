@@ -206,6 +206,10 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
       layers.l1 += options.contextLayers.l1 || 0;
       layers.l2 += options.contextLayers.l2 || 0;
       layers.l3 += options.contextLayers.l3 || 0;
+    } else {
+      // P5 可观测：未传 contextLayers 的调用（项目图谱/全局审查/定向修复等）单独累计，
+      // 用于归因「分层统计之外」的输入大头——历史缺陷：3719 万字符输入中 478 万字符无法归层
+      options.diagnostics.llm.unlayeredChars = (options.diagnostics.llm.unlayeredChars || 0) + system.length + prompt.length;
     }
   }
   const release = await acquireLlmSlot(options.signal);

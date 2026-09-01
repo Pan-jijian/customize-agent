@@ -221,7 +221,9 @@ function factValue(fact: DocumentFact) {
   return stringifyFactValue(fact.value).replace(/\s+/gu, ' ').trim();
 }
 
-const META_FACT_KEYS = new Set(['资料文件', '资料组', '资料角色', '资料内容事实', '章节意图候选', '项目名称候选']);
+// 元数据键不参与确定性图谱构建；「资料内容事实」是正文事实，保留（否则 base 图谱恒空，
+// gap 清理失去确定性锚点，只能依赖不稳定的 LLM 图谱输出）
+const META_FACT_KEYS = new Set(['资料文件', '资料组', '资料角色', '章节意图候选', '项目名称候选']);
 
 export function buildBaseProjectGraph(input: { facts: DocumentFact[]; materialSnapshot: AgentMaterialSnapshot; requirement?: string }): ProjectGraph {
   const facts = input.facts.filter(fact => !META_FACT_KEYS.has(fact.key) && factValue(fact));

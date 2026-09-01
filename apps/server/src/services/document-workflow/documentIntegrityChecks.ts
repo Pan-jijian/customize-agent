@@ -150,6 +150,27 @@ const PEAK_LABOR_RE = /(?:高峰期|高峰|峰值)[^。；;\n]{0,20}?(?:约)?\s*
 // 导致跨口径矛盾漏检——反向口径（劳动力/作业人员词在前、数字在后）并入同一提取池
 const LABOR_COUNT_RE = /(?:劳动力|作业人员|施工人员)[^。；;\n]{0,16}?(?:约)?\s*([\d,]+)\s*人/g;
 
+// 阶段限定词（长词优先避免子串混淆）：不同施工阶段的峰值天然不同（地下结构 220 vs 室外工程 90 不互斥），
+// 仅同阶段或无阶段限定的峰值才参与互斥比较（真实生成「220 vs 90」误报根因）。
+// A2（4.12.23）提取为模块级：检测器与确定性修复器共用同一阶段归属口径，避免双份实现漂移。
+const LABOR_STAGE_LIMIT_WORDS = ['基坑与基础', '二次结构与砌体', '地下结构', '主体结构', '装饰装修', '机电安装', '室外工程', '收尾调试', '基坑', '基础'] as const;
+
+/** 劳动力峰值数字位置 → 阶段限定词（与检测器 resourceConsistencyIssues 模式 1 同源同口径） */
+function laborPeakStageOf(markdown: string, index: number): string | undefined {
+  // 向前取最近句边界（。；；换行）内的片段再找阶段词——固定 30 字符窗口够不到
+  // 「地下结构阶段投入钢筋工60人、木工80人、混凝土工40人、架子工20人，高峰人数约」这种长前缀
+  const before = markdown.slice(0, index);
+  const boundary = Math.max(before.lastIndexOf('。'), before.lastIndexOf('；'), before.lastIndexOf(';'), before.lastIndexOf('\n'));
+  const segment = markdown.slice(Math.max(0, boundary + 1), index);
+  let best: string | undefined;
+  let bestPos = -1;
+  for (const word of LABOR_STAGE_LIMIT_WORDS) {
+    const pos = segment.lastIndexOf(word);
+    if (pos > bestPos) { bestPos = pos; best = word; }
+  }
+  return best;
+}
+
 /** 单个表格块的结构解析结果（表头定位 + 人数列数据行抽取，与 qualityValidation 聚合口径一致） */
 interface LaborTableBlock {
   /** 人员数量列数据行（仅该列数值） */
@@ -160,6 +181,8 @@ interface LaborTableBlock {
   detailSum: number;
   /** 表峰值（该表人数列最大值） */
   peak: number;
+  /** 表头含「高峰/峰值」列（阶段峰值口径表；无高峰列的分工种人数表不入多表峰值互查池） */
+  hasPeakCol: boolean;
 }
 
 /** 从 markdown 表格中识别劳动力相关表格块（表头结构识别，非内容词判定） */
@@ -203,7 +226,10 @@ function collectLaborTableBlocks(markdown: string): LaborTableBlock[] {
     }
     // 列位置判定：表头中必须有人员数量列（分阶段列用于峰值表识别；合计表允许无分阶段列）
     const stageCol = headerCells.findIndex(cell => STAGE_COL_RE.test(cell));
-    const countCol = headerCells.findIndex(cell => COUNT_COL_RE.test(cell));
+    // 峰值口径列优先：「阶段平均人数」与「阶段高峰人数」并存时取高峰列，
+    // 否则表峰值取到平均人数（190 人）而非真实高峰（230 人），与分工种人数表（60 人）形成假矛盾（真实生成误报根因）
+    const peakCol = headerCells.findIndex(cell => /高峰|峰值/u.test(cell) && COUNT_COL_RE.test(cell));
+    const countCol = peakCol >= 0 ? peakCol : headerCells.findIndex(cell => COUNT_COL_RE.test(cell));
     if (countCol < 0) continue;
     if (stageCol >= 0 && stageCol === countCol) continue;
     // 岗位配置表排除：表头含「岗位」且含「职责/持证/职称」的表格是项目组织岗位编制表
@@ -232,7 +258,7 @@ function collectLaborTableBlocks(markdown: string): LaborTableBlock[] {
     }
     if (countCells.length === 0 && totalCell === undefined) continue;
     const peak = Math.max(...(countCells.length > 0 ? countCells : [totalCell || 0]));
-    blocks.push({ countCells, totalCell, detailSum, peak });
+    blocks.push({ countCells, totalCell, detailSum, peak, hasPeakCol: peakCol >= 0 });
   }
   return blocks;
 }
@@ -245,12 +271,16 @@ function tablePeakLabor(markdown: string): number | undefined {
 
 export function resourceConsistencyIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  const bodyPeaks: Array<{ value: number; text: string }> = [];
+  const bodyPeaks: Array<{ value: number; text: string; stage?: string }> = [];
+  // 阶段归属判定复用模块级 laborPeakStageOf（A2：检测/修复同源同口径）
   // h14：峰值口径与反向劳动力口径同池提取（评分报告 P2 三口径并存漏检根因）
   for (const pattern of [PEAK_LABOR_RE, LABOR_COUNT_RE]) {
     for (const match of markdown.matchAll(pattern)) {
       const value = Number(match[1].replace(/[,，]/gu, ''));
-      if (Number.isFinite(value) && value > 0) bodyPeaks.push({ value, text: match[0].trim().slice(0, 40) });
+      // laborPeakStageOf 定位数字位置（非模式起点）：「峰值表述统一为：地下结构阶段220人」的阶段词
+      // 在模式起点之后，用起点定位会取不到阶段限定（真实生成误报根因）
+      const valueIndex = match.index + match[0].indexOf(match[1]);
+      if (Number.isFinite(value) && value > 0) bodyPeaks.push({ value, text: match[0].trim().slice(0, 40), stage: laborPeakStageOf(markdown, valueIndex) });
     }
   }
   const tableBlocks = collectLaborTableBlocks(markdown);
@@ -264,10 +294,17 @@ export function resourceConsistencyIssues(markdown: string): ValidationIssue[] {
     message,
     suggestion,
   });
-  // 模式 1：正文峰值全量互查——多处「高峰期 X 人」相差 >30% 即互斥
+  // 模式 1：正文峰值全量互查——多处「高峰期 X 人」相差 >30% 即互斥（阶段限定不同的峰值除外）
   for (let i = 0; i < bodyPeaks.length; i += 1) {
     for (let j = i + 1; j < bodyPeaks.length; j += 1) {
       const [a, b] = [bodyPeaks[i], bodyPeaks[j]];
+      if (a.stage && b.stage && a.stage !== b.stage) continue;
+      // 总口径（无阶段限定）vs 阶段口径：总人数 ≥ 阶段峰值属正常关系（「按施工高峰配置总人数约180人」
+      // vs 室外工程阶段高峰 90 人），仅总人数低于阶段峰值 10% 以上才进入互斥比较（真实生成误报根因）
+      if (!a.stage !== !b.stage) {
+        const [total, staged] = a.stage ? [b, a] : [a, b];
+        if (total.value >= staged.value * 0.9) continue;
+      }
       const diff = Math.abs(a.value - b.value) / Math.max(a.value, b.value);
       if (diff > 0.3) {
         laborIssue(
@@ -279,10 +316,12 @@ export function resourceConsistencyIssues(markdown: string): ValidationIssue[] {
       }
     }
   }
-  // 模式 2：多表峰值互查——多张劳动力表峰值相差 >30% 即互斥
-  if (tablePeaks.length >= 2) {
-    const max = Math.max(...tablePeaks);
-    const min = Math.min(...tablePeaks);
+  // 模式 2：多表峰值互查——仅比较表头含「高峰/峰值」列的口径表；
+  // 分工种人数明细表（表头仅「人数」列，60 人为工种人数非阶段总人数）与阶段峰值表不可比（真实生成误报根因）
+  const peakColTablePeaks = tableBlocks.filter(block => block.hasPeakCol).map(block => block.peak);
+  if (peakColTablePeaks.length >= 2) {
+    const max = Math.max(...peakColTablePeaks);
+    const min = Math.min(...peakColTablePeaks);
     const diff = Math.abs(max - min) / max;
     if (diff > 0.3) {
       laborIssue(
@@ -1052,26 +1091,29 @@ const CROSS_SECTION_ANCHORS = [
   },
   // h15（评分报告青天高风险「核心设备型号与数量前后完全不一致」）：机械设备投入计划 vs
   // 平面布置/临时用电负荷表多处台数矛盾（塔吊 2vs1、升降机 4vs1、汽车吊 2vs1、钢筋加工设备 1vs4、圆盘锯 1vs6）。
-  // 反向模式覆盖「2台TC6015塔式起重机」数值前置形态；正向模式覆盖「塔式起重机TC6015共2台」型号夹中间形态
+  // 反向模式覆盖「2台TC6015塔式起重机」数值前置形态；正向模式覆盖「塔式起重机TC6015共2台」型号夹中间形态。
+  // 反向模式中间仅允许型号类字符（字母数字/斜杠/短横），排除枚举标点：
+  // 「施工电梯2台、汽车吊1台」的「2台、汽车吊」曾把 2 误采为汽车吊数量（真实生成误报根因）
   {
     key: 'towerCrane', label: '塔式起重机（塔吊）数量', unit: '台', kind: 'number' as const,
     patterns: [
       /(?:塔式起重机|塔吊)[^。；;\n|]{0,30}?(\d+)\s*台/gu,
-      /(\d+)\s*台[^。；;\n|]{0,16}?(?:塔式起重机|塔吊)/gu,
+      /(\d+)\s*台[A-Za-z0-9/\-–—～~]{0,16}\s{0,2}(?:塔式起重机|塔吊)/gu,
     ],
   },
   {
-    key: 'hoist', label: '施工升降机数量', unit: '台', kind: 'number' as const,
+    // 「施工电梯」与「施工升降机」同物异名（真实生成两词并存，仅收前者漏检 L605 2台 vs L787 1台 矛盾）
+    key: 'hoist', label: '施工升降机（施工电梯）数量', unit: '台', kind: 'number' as const,
     patterns: [
-      /施工升降机[^。；;\n|]{0,30}?(\d+)\s*台/gu,
-      /(\d+)\s*台[^。；;\n|]{0,16}?施工升降机/gu,
+      /(?:施工升降机|施工电梯)[^。；;\n|]{0,30}?(\d+)\s*台/gu,
+      /(\d+)\s*台[A-Za-z0-9/\-–—～~]{0,16}\s{0,2}(?:施工升降机|施工电梯)/gu,
     ],
   },
   {
     key: 'truckCrane', label: '汽车起重机（汽车吊）数量', unit: '台', kind: 'number' as const,
     patterns: [
       /(?:汽车起重机|汽车吊)[^。；;\n|]{0,30}?(\d+)\s*台/gu,
-      /(\d+)\s*台[^。；;\n|]{0,16}?(?:汽车起重机|汽车吊)/gu,
+      /(\d+)\s*台[A-Za-z0-9/\-–—～~]{0,16}\s{0,2}(?:汽车起重机|汽车吊)/gu,
     ],
   },
   {
@@ -1090,6 +1132,11 @@ const CROSS_SECTION_ANCHORS = [
 
 const ENUMERATION_VALUE_RE = /\d+(?:\.\d+)?\s*(?:mm|kVA|次|具|台|套|个)\s*[/／]\s*\d+/u;
 
+// 否定声明句豁免：「现场统一配置1台汽车起重机，本章及后续章节不再出现“汽车吊2台”等
+// 与施工部署不一致的数量表述」属 LLM 一致性声明，句内数值是引用旧矛盾值而非事实口径，
+// 曾导致汽车吊 2vs1 误报（真实生成实测）
+const NEGATIVE_DECLARATION_RE = /不再出现|不得出现|严禁出现|避免出现|不采用|未采用|予以删除|已删除|取消|纠正为|更正为/u;
+
 export function crossSectionNumericConflictIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   for (const anchor of CROSS_SECTION_ANCHORS) {
@@ -1100,6 +1147,11 @@ export function crossSectionNumericConflictIssues(markdown: string): ValidationI
         const raw = match[0].slice(0, 40);
         // 并列枚举豁免：「50mm/70mm」「C30/C35」属同句多规格正常枚举，不判冲突
         if (ENUMERATION_VALUE_RE.test(raw)) continue;
+        // 否定声明句豁免：match 所在行含「不再出现」等声明词时不计入口径池
+        const lineStart = markdown.lastIndexOf('\n', match.index) + 1;
+        let lineEnd = markdown.indexOf('\n', match.index);
+        if (lineEnd === -1) lineEnd = markdown.length;
+        if (NEGATIVE_DECLARATION_RE.test(markdown.slice(lineStart, lineEnd))) continue;
         values.add(match[1]);
         raws.push(raw);
       }
@@ -1394,6 +1446,24 @@ function jaccard(left: string[], right: string[]): number {
   return intersection / new Set([...leftSet, ...rightSet]).size;
 }
 
+/** 小表数据单元格在大表中的覆盖比例（多重集按出现次数计，识别「删减版子表」形态：
+ * 真重复表的小表几乎完全被大表覆盖；同主题互补表（统计表 vs 投入计划表）两表各有大量独有单元格，覆盖度低） */
+function cellCoverage(small: string[], large: string[]): number {
+  if (small.length === 0) return 0;
+  const pool = [...large];
+  let covered = 0;
+  for (const cell of small) {
+    const index = pool.indexOf(cell);
+    if (index >= 0) { pool.splice(index, 1); covered += 1; }
+  }
+  return covered / small.length;
+}
+
+// 纯数字单元格（含人数/台数单位）：互补表共享峰值/人数数字是「口径一致」的体现，
+// 不能作为重复证据；真重复表的文本内容 cell 整列复制才是复制粘贴特征
+const NUMERIC_CELL_RE = /^[\d,，.]+\s*(?:人|个|台|具|套|处|支|辆|班|组|项)?$/u;
+const textCellsOf = (cells: string[]) => cells.filter(cell => !NUMERIC_CELL_RE.test(cell));
+
 export function duplicateTableIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const tables = extractMarkdownTables(markdown);
@@ -1409,10 +1479,16 @@ export function duplicateTableIssues(markdown: string): ValidationIssue[] {
       // 不得仅凭表头相同判重复（旧文档实测：表头 100% 重合但首列 0%~11% 的三组被误报）。
       // 真重复形态（青天实测）：①完全一致连续表（数据行 100% 重合）②第二次缺列的高度重复表
       //（表头相似 ≥0.7 且首列重合 ≥0.6）③同主题不同表头结构（「分阶段劳动力投入计划表」出现两次，
-      // 表头相似仅 0.11 但首列同批阶段重合 ≥0.6 且数据重合 ≥0.15）；「相邻同表豁免」已移除——
-      // 生成系统无分页渲染场景，连续出现的相同表格就是复制粘贴缺陷。
+      // 表头相似仅 0.11 但首列同批阶段重合 ≥0.6）——③改用文本 cell 双向覆盖度 ≥0.6（原数据重合 ≥0.15
+      // 把「统计表 vs 投入计划表」这类同主题互补表误判为重复；文本 cell 排除纯数字 cell，
+      // 互补表共享平均/高峰人数数字是口径一致的体现而非重复证据；双向 max 覆盖「删减版子表」形态——
+      // 粘贴时删列的复制表（cell 数少）与带全列的原表（cell 数多）互为覆盖方向）
       const dataSim = jaccard(a.dataCells, b.dataCells);
-      if (!(headerSame && dataSim >= 0.6) && !(headerSim >= 0.7 && firstColSim >= 0.6) && !(firstColSim >= 0.6 && dataSim >= 0.15)) continue;
+      const dataCoverage = Math.max(
+        cellCoverage(textCellsOf(a.dataCells), textCellsOf(b.dataCells)),
+        cellCoverage(textCellsOf(b.dataCells), textCellsOf(a.dataCells)),
+      );
+      if (!(headerSame && dataSim >= 0.6) && !(headerSim >= 0.7 && firstColSim >= 0.6) && !(firstColSim >= 0.6 && dataCoverage >= 0.6)) continue;
       issues.push({
         level: 'error',
         severity: 'blocker',
@@ -1446,8 +1522,14 @@ export function stripDuplicateTables(markdown: string): { markdown: string; remo
       const headerSim = jaccard(a.header, b.header);
       const firstColSim = jaccard(a.firstCol, b.firstCol);
       const dataSim = jaccard(a.dataCells, b.dataCells);
+      // 双向覆盖（与 duplicateTableIssues 同口径）：粘贴时删列的复制表（cell 数少）与带全列的原表
+      // 互为覆盖方向，单向按 cell 数选小表会把「删减版子表」漏删
+      const dataCoverage = Math.max(
+        cellCoverage(textCellsOf(a.dataCells), textCellsOf(b.dataCells)),
+        cellCoverage(textCellsOf(b.dataCells), textCellsOf(a.dataCells)),
+      );
       // 与 duplicateTableIssues 同判定口径（检测定位=修复定位）：同结构不同内容表不删
-      if (!(headerSame && dataSim >= 0.6) && !(headerSim >= 0.7 && firstColSim >= 0.6) && !(firstColSim >= 0.6 && dataSim >= 0.15)) continue;
+      if (!(headerSame && dataSim >= 0.6) && !(headerSim >= 0.7 && firstColSim >= 0.6) && !(firstColSim >= 0.6 && dataCoverage >= 0.6)) continue;
       // 保留 bodyChars 大者（信息更全），删除另一张
       const [keep, drop] = a.bodyChars >= b.bodyChars ? [a, b] : [b, a];
       for (let line = drop.startLine; line <= drop.endLine; line += 1) removed.add(line);
@@ -1647,5 +1729,189 @@ export function resourceTriadSectionHierarchyIssues(markdown: string): Validatio
     }
   }
   return issues;
+}
+
+// ── A2（4.12.23）：跨章数值矛盾确定性修复 ──────────────────────────────────
+// 「检测定位=修复定位」扩展：检测器家族（resourceConsistencyIssues /
+// nodeScheduleConsistencyIssues / crossSectionNumericConflictIssues）已锁定矛盾
+// 数值对与权威口径（表格优先），此处同源定点替换，不再依赖 LLM 定位能力。
+// 历史缺陷：LLM 修复跨章数值矛盾时 patch 锚点常失配（260/160、60/70、300/310 等
+// 矛盾残留进导出门禁形成 33 阻断），修复轮次被浪费在无效 LLM 调用上。
+// 零误伤原则：只修复检测器同阈值会报的矛盾对，且权威口径（表格）存在才修复；
+// 无法确定权威口径的场景（如两处正文互斥无表格）保持不动，交 LLM 修复路径。
+
+export interface NumericConsistencyFixResult {
+  markdown: string;
+  fixedCount: number;
+  details: string[];
+}
+
+/** 从后往前应用定点替换（避免索引偏移；detail 去重保序） */
+function applySpanReplacements(markdown: string, replacements: Array<{ start: number; end: number; replacement: string; detail: string }>): { markdown: string; fixedCount: number; details: string[] } {
+  if (replacements.length === 0) return { markdown, fixedCount: 0, details: [] };
+  const sorted = [...replacements].sort((a, b) => b.start - a.start);
+  let next = markdown;
+  let fixedCount = 0;
+  const details: string[] = [];
+  for (const item of sorted) {
+    next = next.slice(0, item.start) + item.replacement + next.slice(item.end);
+    fixedCount += 1;
+    details.push(item.detail);
+  }
+  return { markdown: next, fixedCount, details: [...new Set(details)].slice(0, 8) };
+}
+
+/** 劳动力峰值确定性修复：正文总口径峰值/控制上限与分阶段投入明细表峰值矛盾 → 正文数字改为表格峰值。
+ * 与检测器同源同阈值：>30% 才矛盾、阶段限定峰值不参与（laborPeakStageOf 同源判定）。 */
+function fixLaborPeakConflicts(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const tablePeak = tablePeakLabor(markdown);
+  if (tablePeak === undefined) return { markdown, fixedCount: 0, details: [] };
+  const replacements: Array<{ start: number; end: number; replacement: string; detail: string }> = [];
+  const collect = (pattern: RegExp) => {
+    for (const match of markdown.matchAll(pattern)) {
+      const value = Number(match[1].replace(/[,，]/gu, ''));
+      if (!Number.isFinite(value) || value <= 0) continue;
+      const valueIndex = match.index + match[0].indexOf(match[1]);
+      // 与检测器模式 3 同源：仅无阶段限定的总口径峰值与表峰值比较；差值 ≤30% 不矛盾
+      if (laborPeakStageOf(markdown, valueIndex)) continue;
+      if (value <= tablePeak * 1.3) continue;
+      replacements.push({ start: valueIndex, end: valueIndex + match[1].length, replacement: String(tablePeak), detail: `劳动力峰值 ${value}人→${tablePeak}人（以分阶段投入明细表为准）` });
+    }
+  };
+  collect(PEAK_LABOR_RE);
+  collect(LABOR_COUNT_RE);
+  // 与检测器模式 6 同源：总量控制上限低于表格峰值即不自洽 → 上限改为表格峰值
+  for (const match of markdown.matchAll(/(?:高峰期|高峰|峰值)[^。；;\n]{0,16}?控制(?:在|为|到)?(?:约)?\s*([\d,]+)\s*人(?:以内|以下|之内)?/gu)) {
+    const value = Number(match[1].replace(/[,，]/gu, ''));
+    if (!Number.isFinite(value) || value <= 0) continue;
+    if (value >= tablePeak) continue;
+    const valueIndex = match.index + match[0].indexOf(match[1]);
+    replacements.push({ start: valueIndex, end: valueIndex + match[1].length, replacement: String(tablePeak), detail: `劳动力控制上限 ${value}人→${tablePeak}人（与分阶段投入明细表峰值自洽）` });
+  }
+  return applySpanReplacements(markdown, replacements);
+}
+
+/** 节点工期确定性修复：总进度计划表内日期为权威口径，全文其他位置同节点日期相差 ≥5 天 → 改为权威值。
+ * 与检测器 nodeScheduleConsistencyIssues 同源同阈值（≥5 天才互斥）；找不到总进度计划表标题时不动。 */
+function fixNodeScheduleConflicts(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const lines = markdown.split(/\r?\n/u);
+  const tableRowLineRe = /^\|.+\|$/u;
+  // 行字符 span（替换定位用）
+  const lineSpans: Array<{ start: number; end: number }> = [];
+  let lineOffset = 0;
+  for (const line of lines) {
+    lineSpans.push({ start: lineOffset, end: lineOffset + line.length });
+    lineOffset += line.length + 1;
+  }
+  // 1. 定位总进度计划表（表格块上方 6 行内含「总进度计划」标题），提取块内节点日期为权威口径
+  const authorityByKey = new Map<string, number>();
+  const authoritySpans: Array<{ start: number; end: number }> = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!tableRowLineRe.test(lines[index].trim())) continue;
+    const blockStart = index;
+    while (index < lines.length && tableRowLineRe.test(lines[index].trim())) index += 1;
+    const blockEnd = index;
+    const headerProbe = lines.slice(Math.max(0, blockStart - 6), blockStart).join('\n');
+    if (!/总进度计划|施工总进度|总进度安排/u.test(headerProbe)) continue;
+    const blockText = lines.slice(blockStart, blockEnd).join('\n');
+    for (const sample of extractNodeScheduleDays(blockText)) {
+      // 权威表内同节点多样本取最大日（防块内噪音样本压低权威口径）
+      const existing = authorityByKey.get(sample.key);
+      if (existing === undefined || sample.day > existing) authorityByKey.set(sample.key, sample.day);
+    }
+    authoritySpans.push({ start: lineSpans[blockStart].start, end: lineSpans[blockEnd - 1].end });
+  }
+  if (authorityByKey.size === 0) return { markdown, fixedCount: 0, details: [] };
+  // 2. 与 extractNodeScheduleDays 同源的三个形态正则（带 index 定位），非权威表内的矛盾样本定点替换
+  const replacements: Array<{ start: number; end: number; replacement: string; detail: string }> = [];
+  const keyOf = (text: string) => SCHEDULE_NODE_ANCHORS.find(anchor => anchor.re.test(text))?.key;
+  const outsideAuthority = (position: number) => !authoritySpans.some(span => position >= span.start && position <= span.end);
+  const pushReplacement = (nodeText: string, day: number, dayStart: number, dayEnd: number, raw: string) => {
+    const key = keyOf(nodeText);
+    if (key === undefined || !Number.isFinite(day) || day < 1 || day > 3000) return;
+    const authority = authorityByKey.get(key);
+    if (authority === undefined) return;
+    if (Math.abs(day - authority) < 5) return;
+    if (!outsideAuthority(dayStart)) return;
+    replacements.push({ start: dayStart, end: dayEnd, replacement: String(authority), detail: `节点“${SCHEDULE_NODE_ANCHORS.find(anchor => anchor.key === key)?.label || key}”工期 ${day}日→${authority}日（以总进度计划表为准）` });
+  };
+  for (const match of markdown.matchAll(/第(\d{2,3})日[^。；;\n]{0,14}?完成[^。；;\n]{0,12}?(基坑支护及土方外运|装饰装修及幕墙|机电安装及智能化调试|室外工程及竣工验收|地下结构出正负零|主体结构封顶|正负零|封顶)/gu)) {
+    const dayStart = match.index + match[0].indexOf(match[1]);
+    pushReplacement(match[2], Number(match[1]), dayStart, dayStart + match[1].length, match[0].slice(0, 40));
+  }
+  for (const match of markdown.matchAll(/(基坑支护|正负零|封顶|装饰装修|机电安装|竣工验收)(?:(?!(?:第\d{2,3}[日天]|，|、)).){0,8}?完成[^。；;\n]{0,10}?第(\d{2,3})[日天]/gu)) {
+    const dayStart = match.index + match[0].indexOf(match[2]);
+    pushReplacement(match[1], Number(match[2]), dayStart, dayStart + match[2].length, match[0].slice(0, 40));
+  }
+  for (const match of markdown.matchAll(/(主体(?:结构)?封顶)(?:(?!(?:第\d{2,3}[日天]|，|、|完成)).){0,20}?第(\d{2,3})日/gu)) {
+    const dayStart = match.index + match[0].indexOf(match[2]);
+    pushReplacement(match[1], Number(match[2]), dayStart, dayStart + match[2].length, match[0].slice(0, 40));
+  }
+  return applySpanReplacements(markdown, replacements);
+}
+
+/** 材料/设备数量确定性修复：表格行数值为权威口径，正文矛盾数值（差异 >20%）改为表格值。
+ * 与检测器 crossSectionNumericConflictIssues 同源（同锚点/同豁免：并列枚举、否定声明句）；
+ * 表格口径不唯一（多表互相矛盾）时不动，交 LLM 修复路径。 */
+function fixCrossSectionNumericConflicts(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const replacements: Array<{ start: number; end: number; replacement: string; detail: string }> = [];
+  for (const anchor of CROSS_SECTION_ANCHORS) {
+    if (anchor.kind !== 'number') continue;
+    const tableValues = new Set<number>();
+    const bodyValues = new Set<number>();
+    for (const pattern of anchor.patterns) {
+      for (const match of markdown.matchAll(pattern)) {
+        const raw = match[0].slice(0, 40);
+        if (ENUMERATION_VALUE_RE.test(raw)) continue;
+        const lineStart = markdown.lastIndexOf('\n', match.index) + 1;
+        let lineEnd = markdown.indexOf('\n', match.index);
+        if (lineEnd === -1) lineEnd = markdown.length;
+        const line = markdown.slice(lineStart, lineEnd);
+        if (NEGATIVE_DECLARATION_RE.test(line)) continue;
+        const value = Number(match[1]);
+        if (!Number.isFinite(value) || value <= 0) continue;
+        if (/^\s*\|/u.test(line)) tableValues.add(value);
+        else bodyValues.add(value);
+      }
+    }
+    // 表格口径唯一才作为权威；正文存在与权威差异 >20% 的值才修复（与检测器同阈值）
+    if (tableValues.size !== 1) continue;
+    const authority = [...tableValues][0];
+    if (![...bodyValues].some(value => Math.abs(value - authority) > authority * 0.2)) continue;
+    for (const pattern of anchor.patterns) {
+      for (const match of markdown.matchAll(pattern)) {
+        const raw = match[0].slice(0, 40);
+        if (ENUMERATION_VALUE_RE.test(raw)) continue;
+        const lineStart = markdown.lastIndexOf('\n', match.index) + 1;
+        let lineEnd = markdown.indexOf('\n', match.index);
+        if (lineEnd === -1) lineEnd = markdown.length;
+        const line = markdown.slice(lineStart, lineEnd);
+        if (NEGATIVE_DECLARATION_RE.test(line)) continue;
+        if (/^\s*\|/u.test(line)) continue;
+        const value = Number(match[1]);
+        if (!Number.isFinite(value) || value <= 0) continue;
+        if (Math.abs(value - authority) <= authority * 0.2) continue;
+        const valueIndex = match.index + match[0].indexOf(match[1]);
+        replacements.push({ start: valueIndex, end: valueIndex + match[1].length, replacement: String(authority), detail: `${anchor.label} ${value}${anchor.unit}→${authority}${anchor.unit}（以表格口径为准）` });
+      }
+    }
+  }
+  return applySpanReplacements(markdown, replacements);
+}
+
+/** A2 总入口：跨章数值矛盾确定性修复（劳动力峰值 → 节点工期 → 材料/设备数量，顺序执行互不重叠） */
+export function applyNumericConsistencyDeterministicFixes(markdown: string): NumericConsistencyFixResult {
+  let next = markdown;
+  let fixedCount = 0;
+  const details: string[] = [];
+  for (const step of [fixLaborPeakConflicts, fixNodeScheduleConflicts, fixCrossSectionNumericConflicts]) {
+    const result = step(next);
+    if (result.markdown !== next) {
+      next = result.markdown;
+      fixedCount += result.fixedCount;
+      details.push(...result.details);
+    }
+  }
+  return { markdown: next, fixedCount, details: details.slice(0, 12) };
 }
 

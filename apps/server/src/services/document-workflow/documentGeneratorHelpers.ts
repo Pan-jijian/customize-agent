@@ -153,7 +153,7 @@ export async function collectProjectBasicEvidence(input: { manager: ReturnType<t
   // 基础事实查询并行化（原为 5 组查询串行，每次都是一次检索往返）
   const queryResults = await Promise.all(PROJECT_BASIC_FACT_QUERIES.map(async query => {
     throwIfAborted(input.signal);
-    const result = await input.manager.search(input.projectRoot, query, { scope: 'project', filters: { filePaths: input.scopedFilePaths }, limit: 10, weights: { keyword: 0.65, vector: 0.25, rewrite: 0.8, hybridBonus: 0.2 }, generationMode: false });
+    const result = await input.manager.search(input.projectRoot, query, { scope: 'project', filters: { filePaths: input.scopedFilePaths }, limit: 10, weights: { keyword: 0.65, vector: 0.25, rewrite: 0.8, hybridBonus: 0.2 }, generationMode: true, disableReranker: true });
     return result.results.filter(item => scopedFileSet.has(item.filePath) && projectBasicFactScore(`${item.sectionTitle || ''}\n${item.content}`) > 0).map(item => ({
       chapterId: 'project-basic',
       filePath: item.filePath,
@@ -1366,9 +1366,11 @@ export async function retrieveSectionEvidence(input: { manager: ReturnType<typeo
     filters: { filePaths: input.scopedFilePaths },
     limit: 20,
     weights: searchWeightsForChapter(query),
-    generationMode: false,
-    // 小节级检索打开 LocalReranker 交叉编码（历史缺陷：disableReranker 跳过交叉编码后，召回主键退化为关键词/向量混合分，
-    // 小节级 top-5 证据相关性下降，承接/证据取舍被迫依赖正则词面），rerank 后分数作为小节证据排序主键
+    // E1：生成场景检索跳过 LLM 查询扩展（省 LLM 预算，正文生成已占满 LLM 信号量）；
+    // 保留 LocalReranker 交叉编码（历史缺陷：disableReranker 跳过交叉编码后，召回主键退化为
+    // 关键词/向量混合分，小节级 top-5 证据相关性下降，承接/证据取舍被迫依赖正则词面），
+    // rerank 后分数作为小节证据排序主键——小节证据按需逐组检索，单组 30 候选重排为短时阻塞可容忍
+    generationMode: true,
   });
   return selectEvidenceByBudget(result.results
     .filter(item => input.scopedFilePaths.includes(item.filePath))

@@ -386,6 +386,8 @@ export interface EvidencePromptOptions {
   maxChars?: number;
   /** 模板要求覆盖的事实：注入排序时对命中项加权，保证关键参数块不被高分泛化块挤出预算 */
   requiredFacts?: string[];
+  /** D1 共享卡片上移：T0 关键事实层已由调用方注入 L2 共享段时跳过，避免同章各块重复注入 */
+  skipT0?: boolean;
   /** 分层统计出口：写入 T0/T1/T2 字符量与省略量，供真实生成对账 */
   diagnostics?: DocumentGenerationDiagnostics;
 }
@@ -488,9 +490,11 @@ export interface EvidenceLayers {
  *   事实行总量超过预算 60% 时按重要性排序裁剪并记录，防占满预算挤掉全部上下文）；
  * - T1 高相关证据原文：资源层 35% + 文本层 65% 按剩余预算填充，每文件至少 1 条；
  * - T2 证据目录：未进 T1 的片段一行索引，证据池全貌可见（数据本身不删除，后续检索/校验继续参与）。
+ * skipT0（D1 共享卡片上移）：章级共享事实层已由调用方单独注入 L2 共享段时，此处跳过 T0，
+ * 避免同章各块重复注入同一份全量事实行（块级调用输入 token 大头）。
  */
-export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | undefined, requiredFacts: string[]): EvidenceLayers {
-  const t0FactLines = [...new Set(bundle.textEvidence.flatMap(item => extractKeyFactLines(item.content).split('\n').filter(Boolean)))];
+export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | undefined, requiredFacts: string[], skipT0 = false): EvidenceLayers {
+  const t0FactLines = skipT0 ? [] : [...new Set(bundle.textEvidence.flatMap(item => extractKeyFactLines(item.content).split('\n').filter(Boolean)))];
   const t0Budget = maxChars ? Math.floor(maxChars * 0.6) : undefined;
   let t0Lines = t0FactLines;
   let t0Trimmed = 0;
@@ -550,7 +554,7 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
 export function evidenceBundlePrompt(bundle: EvidenceBundle, options: EvidencePromptOptions = {}) {
   const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.ceil(options.maxChars!) : undefined;
   const requiredFacts = options.requiredFacts || [];
-  const layers = buildEvidenceLayers(bundle, maxChars, requiredFacts);
+  const layers = buildEvidenceLayers(bundle, maxChars, requiredFacts, Boolean(options.skipT0));
   if (options.diagnostics) {
     // T0/T1/T2 分层统计：供每次真实生成对账（重要数据零丢失断言 + 裁剪可观测）
     const evidenceDiagnostics = options.diagnostics.evidence;

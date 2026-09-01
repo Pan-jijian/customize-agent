@@ -3,7 +3,7 @@ import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecT
 import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ProjectGraphTablePlan, ResolvedFactNeed, ValidationIssue } from './types';
 import type { DocumentBudget } from './budget';
 import { documentTextLength } from './budget';
-import { buildEvidenceBundle, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget, extractKeyParameterWindows } from './evidence';
+import { buildEvidenceBundle, buildEvidenceLayers, cleanEvidenceText, evidenceBundlePrompt, evidencePromptBudgetForTarget, extractKeyParameterWindows } from './evidence';
 import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, removeUnwantedDrawingImages, sanitizeFormalMarkdown, writerSystemPrefix } from './markdownComposer';
 import { callDocumentLlm, callDocumentLlmJson, contextLayerChars, getDocumentLlmFailureStreak, getDocumentLlmMaxConcurrency } from './llmClient';
 import { dedupeRepeatedSubsections, findDuplicateH4Titles, stringifyFactValue, throwIfAborted } from './utils';
@@ -15,7 +15,7 @@ import { buildProcessKnowledgePrompt, matchProcessKnowledgeCards } from './const
 import { criticalSectionBlockerMinChars, currentSectionBlock, ensureGroupTertiaryShell, ensureTertiarySectionShell, groupHasMajorConstructionSection, isCriticalDeepSection, isGeneralManagementSection, keySectionWritingRequirement, majorContentPollutionIssue, mergeDuplicateWorkPackageSubsections, outputTokensForChapter, parseMajorConstructionPackages, repairMajorContentWorkPackageLabels, sectionContentBody, sectionStructureIssue } from './chapterPostProcessing';
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE, QUANTIFIED_FACT_RE } from './parameterPatterns';
 import { buildSemanticGate } from './semanticGate';
-import type { PlannedChapterStructure } from './chapterPlanner';
+import type { PlannedChapterBlock, PlannedChapterStructure } from './chapterPlanner';
 import { cleanFactValue, isActionableFactValue } from './documentFactTrace';
 import { DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE, chapterAnchoredRules, sectionAnchoredRules } from './writingSpec';
 
@@ -117,6 +117,28 @@ export function userRequirementFactsPrompt(requirement?: string) {
   ].join('\n');
 }
 
+/**
+ * F3 事实覆盖清单预算封顶：factCoverageContext 的「全局资料事实索引全量注入」是块级输入 L3 爆炸
+ * 的主因（真实生成单章索引可达数十万字符，同章每块全量注入一次）。按行完整截断到字符预算，
+ * 前端段（事实要求/角色事实/基础事实卡片）天然优先保留；DOCUMENT_FACT_COVERAGE_CAP=0 关闭封顶。
+ * 被截断的事实索引仍存在于绑定材料证据中（evidenceText 按块相关性注入），不影响事实落位兜底。
+ */
+export function capFactCoverageContext(text: string): string {
+  const configured = Number(process.env.DOCUMENT_FACT_COVERAGE_CAP);
+  // DOCUMENT_FACT_COVERAGE_CAP=0 显式关闭封顶（全量注入）；未配置或非法值走默认预算 26000
+  if (configured === 0) return text;
+  const cap = Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 26000;
+  if (!text || text.length <= cap) return text;
+  const kept: string[] = [];
+  let total = 0;
+  for (const line of text.split('\n')) {
+    if (total + line.length + 1 > cap) break;
+    kept.push(line);
+    total += line.length + 1;
+  }
+  return `${kept.join('\n')}\n（本章事实索引过长已截断，其余事实见绑定材料与证据，正文以材料为准）`;
+}
+
 /** 两步生成第一步产出的事实大纲 */
 interface ChapterFactOutline {
   sections: Array<{ title?: string; facts?: string[]; quantifiedFacts?: string[]; missingFacts?: string[] }>;
@@ -138,16 +160,40 @@ async function buildChapterFactOutline(input: { template: DocumentTemplate; chap
     // A5a 前缀缓存：可变提示词从 system 移入 user（system 恒定化，跨调用共享 prefix cache）
     input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
     `文档模板：${input.template.name}`,
-    `章节标题：${input.chapter.title}`,
+    // F6 前缀收敛：块路径下「章节标题/预设小节/绑定材料」均为块级变化值（每块一次大纲规划），
+    // 章级恒定段（章节目的/事实要求/缺失事实/JSON 指令）前置——同章各块大纲调用共享前缀延续至
+    // 「章节标题」处才分叉（历史顺序下章节标题紧随模板名，恒定段全在分叉点后不可共享）
     `章节目的：${input.chapter.purpose}`,
-    `预设小节：\n${sectionLines}`,
     input.requiredFacts.length ? `模板要求覆盖的事实：${input.requiredFacts.join('、')}` : '',
     input.missingFacts.length ? `当前检索未充分命中的事实（如材料中确实没有，写入对应小节的 missingFacts）：${input.missingFacts.join('、')}` : '',
-    `绑定材料：\n${input.evidenceText}`,
     '返回 JSON：{"sections":[{"title":"小节名","facts":["可写事实（必须来自材料）"],"quantifiedFacts":["含数值/单位/编号的事实（必须原样）"],"missingFacts":["该小节需要但材料缺失的事实"]}]}',
+    // ── 块级变化段起点（同章各块以下内容互不相同；保持其在 prompt 尾部，共享前缀到此为止恒定）──
+    `章节标题：${input.chapter.title}`,
+    `预设小节：\n${sectionLines}`,
+    `绑定材料：\n${input.evidenceText}`,
   ].filter(Boolean).join('\n\n');
+  // F6 分层统计：与上方 prompt 组装同源表达式（l0 system 恒定段 / l1 任务级恒定指令 /
+  // l2 章级共享段 / l3 块级变化段），供「可缓存前缀 vs 不可缓存变化段」占比验收
+  const contextLayers = {
+    l0: system.length,
+    l1: contextLayerChars([
+      input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
+    ]),
+    l2: contextLayerChars([
+      `文档模板：${input.template.name}`,
+      `章节目的：${input.chapter.purpose}`,
+      input.requiredFacts.length ? `模板要求覆盖的事实：${input.requiredFacts.join('、')}` : '',
+      input.missingFacts.length ? `当前检索未充分命中的事实（如材料中确实没有，写入对应小节的 missingFacts）：${input.missingFacts.join('、')}` : '',
+      '返回 JSON：{"sections":[{"title":"小节名","facts":["可写事实（必须来自材料）"],"quantifiedFacts":["含数值/单位/编号的事实（必须原样）"],"missingFacts":["该小节需要但材料缺失的事实"]}]}',
+    ]),
+    l3: contextLayerChars([
+      `章节标题：${input.chapter.title}`,
+      `预设小节：\n${sectionLines}`,
+      `绑定材料：\n${input.evidenceText}`,
+    ]),
+  };
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const outline = await callDocumentLlmJson<ChapterFactOutline>(system, prompt, { maxTokens: 1600, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
+    const outline = await callDocumentLlmJson<ChapterFactOutline>(system, prompt, { maxTokens: 1600, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, contextLayers });
     if (outline && Array.isArray(outline.sections) && outline.sections.length > 0) return outline;
   }
   return undefined;
@@ -184,11 +230,14 @@ function factCoveredByEvidence(fact: string, evidence: DocumentEvidence[]): bool
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; disableThinkingBoost?: boolean; compactProjectContext?: boolean; scopedProjectContext?: boolean } = {}) {
+export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; disableThinkingBoost?: boolean; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   // 证据注入预算与 generationBudget 的证据区间（7k-26k 档）对齐：未显式传入时保持旧默认，
   // 由 documentGenerator 主路径统一传入按章节目标字计算的 floor/ceiling
-  let evidenceText = evidenceBundlePrompt(bundle, { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars), requiredFacts: chapter.requiredFacts, diagnostics: options.diagnostics });
+  // D1 共享卡片上移：sharedFactLayerText（章级 T0 事实层）已注入 L2 共享段时，块级证据跳过 T0，
+  // 避免同章各块重复注入同一份全量事实行（块级调用输入 token 大头，prefix cache 命中率提升）
+  const sharedFactLayer = Boolean(options.sharedFactLayerText);
+  let evidenceText = evidenceBundlePrompt(bundle, { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars), requiredFacts: chapter.requiredFacts, skipT0: sharedFactLayer, diagnostics: options.diagnostics });
   // 两步生成（事实大纲 → 写作）：第一步先让 LLM 基于绑定材料规划可写事实清单，
   // 第二步按大纲逐条落位写作，根治「要求具体但证据碎片化导致空话灌水」的不稳定。
   // env DOCUMENT_TWO_STEP_GENERATION=0 显式关闭；大纲阶段失败退化为单步生成（非模板兜底）
@@ -208,7 +257,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
         const fresh = supplements.filter(item => !evidence.some(existing => existing.filePath === item.filePath && (existing.sectionTitle || '') === (item.sectionTitle || '')));
         if (fresh.length > 0) {
           const mergedEvidence = [...evidence, ...fresh];
-          evidenceText = evidenceBundlePrompt(buildEvidenceBundle(chapter, mergedEvidence), { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars), requiredFacts: chapter.requiredFacts, diagnostics: options.diagnostics });
+          evidenceText = evidenceBundlePrompt(buildEvidenceBundle(chapter, mergedEvidence), { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars), requiredFacts: chapter.requiredFacts, skipT0: sharedFactLayer, diagnostics: options.diagnostics });
           // 覆盖判断基于合并后证据池：原证据已覆盖的事实不算缺失，避免误标
           stillMissingFacts = new Set(allOutlinedMissing.filter(fact => !factCoveredByEvidence(fact, mergedEvidence)));
           if (stillMissingFacts.size < allOutlinedMissing.length) {
@@ -249,40 +298,52 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
   const prompt = [
     promptTexts ? `配置写作主控提示词：\n${promptTexts}` : '',
     `文档模板：${template.name}`,
-    `章节标题：${chapter.title}`,
+    // P5 前缀缓存收敛：章内各块共享的恒定段全部前置（主控提示词/模板/用户要求/项目上下文/通用生成要求），
+    // 块级变化段（章节标题、章级指令、角色上下文、字数预算、绑定材料）统一后置——
+    // 同章主题块并发成稿时前缀逐块分叉是缓存命中率低的根因之一（实测命中率 29%，仅 system 层命中）
     `章节目的：${chapter.purpose}`,
-    sectionInstruction,
-    sectionBudgetInstruction,
-    tablePlanInstruction,
-    constructionOrgRuleInstruction,
-    constructionOrgBonusInstruction,
-    ...anchoredRuleInstructions,
     requirement ? `用户要求：${requirement}` : '',
     userFactBlock,
     // 块级调用必须压缩上下文：planned 块路径按块并发成稿，每块全量注入 projectContext（蓝图+事实主表+图谱映射）
     // 会让单块输入 token 数倍于输出预算，实测单块调用 30~40 分钟（真实性能缺陷：徽光阁 3 章块草稿累计 112 分钟）；
     // 压缩只保留结构化事实行与蓝图约束行，专业叙述由块级证据承载
     projectContext ? `上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${compactProjectContextText}` : '',
-    roleContext ? roleContext : '',
+    // D1 共享卡片上移：章级 T0 关键事实层置于 L2 共享段——同章各块值完全相同，
+    // 共享前缀变长 → prefix cache 命中率提升；块级证据（L3 尾部）只带块相关 T1 片段
+    options.sharedFactLayerText || '',
+    // F1/F2 章级恒定段上移 L2：factCoverageContext（事实覆盖与参数落位要求）与 missingFacts
+    // 均为章级构建一次、同章各块值完全相同，历史缺陷误置于 L3 块级变化段——同章各块前缀在
+    // 此处即分叉，L3 占比 95%+（其中 factCoverageContext 全量事实索引为大头），prefix cache
+    // 命中率仅 26-29%；上移后同章各块共享前缀显著变长，命中率应大幅回升
     options.factCoverageContext || '',
     missingFacts.length ? `需要特别补足的信息：${missingFacts.join('、')}` : '',
-    outlineBlock,
     '请生成可直接导出的 Markdown 章节，要求：',
+    '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的项目专属事实；法律法规名称、标准规范编号等公共知识可依据现行有效版本直接引用。',
+    '- 将材料要点自然融入正文；不要输出系统证据清单、中间分析过程或后台流程话术。',
+    SECTION_GENERATION_SAFETY_RULES,
+    // ── 块级变化段起点（同章各块以下内容互不相同；保持其在 prompt 尾部，共享前缀到此为止恒定）──
+    `章节标题：${chapter.title}`,
     `- 保留章节标题；内容不少于 ${options.minWords || 1000} 字${options.targetWords ? `，目标约 ${options.targetWords} 字` : ''}${options.maxWords ? `，最多不超过 ${options.maxWords} 字` : ''}。`,
     chapter.sections?.length ? '- 必须完整包含已规划小节；不要新增未规划的二级小节。' : '- 未预设小节时，不要为了凑结构强行新增小节。',
     chapter.tablePlans?.length ? '- 本章存在结构化表格规划时，必须输出正式 Markdown 表格；表头必须严格使用规划字段，不得擅自改字段、删字段或增加后台溯源列。' : chapter.tableSections?.length ? `- 以下小节可使用表格辅助表达：${chapter.tableSections.join('、')}。` : '',
     chapter.tablePlans?.length ? '- 表格字段值必须优先来自项目图谱、可信事实和绑定材料；projectFactOnly 字段不得编造，也不得写任何固定占位话术。' : '',
-    '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的项目专属事实；法律法规名称、标准规范编号等公共知识可依据现行有效版本直接引用。',
-    '- 将材料要点自然融入正文；不要输出系统证据清单、中间分析过程或后台流程话术。',
-    SECTION_GENERATION_SAFETY_RULES,
+    sectionInstruction,
+    sectionBudgetInstruction,
+    tablePlanInstruction,
+    constructionOrgRuleInstruction,
+    constructionOrgBonusInstruction,
+    ...anchoredRuleInstructions,
+    roleContext ? roleContext : '',
+    outlineBlock,
     '',
     evidenceText ? '绑定材料：' : '',
     evidenceText,
     options.userWriterRules ? `\n【用户写作指令——必须严格遵守】\n${options.userWriterRules}` : '',
   ].filter(Boolean).join('\n');
-  // 3.4 上下文分层统计（L0-L3）：与上方 prompt 组装同源表达式，口径 = L0 system 恒定段 / L1 任务级指令
-  // （主控提示词、用户要求、写作规范）/ L2 章级段（模板、章标题、章级指令与共享上下文）/ L3 小节级段
-  // （角色上下文、缺失事实、事实大纲、绑定材料），供上下文分层瘦身前后占比对比验收
+  // 3.4 上下文分层统计（L0-L3）：与上方 prompt 组装同源表达式；P5 前缀收敛后口径 =
+  // L0 system 恒定段 / L1 任务级恒定指令 / L2 章级共享段（L0-L2 为章内各块共享的 prompt 前缀，
+  // DeepSeek prefix cache 可命中部分）/ L3 块级变化段（章内各块互不相同，置于 prompt 尾部不可缓存），
+  // 供「可缓存前缀 vs 不可缓存变化段」占比验收
   const contextLayers = {
     l0: system.length,
     l1: contextLayerChars([
@@ -290,34 +351,37 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
       requirement ? `用户要求：${requirement}` : '',
       userFactBlock,
       '请生成可直接导出的 Markdown 章节，要求：',
+      '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的项目专属事实；法律法规名称、标准规范编号等公共知识可依据现行有效版本直接引用。',
+      '- 将材料要点自然融入正文；不要输出系统证据清单、中间分析过程或后台流程话术。',
+      SECTION_GENERATION_SAFETY_RULES,
+    ]),
+    l2: contextLayerChars([
+      `文档模板：${template.name}`,
+      `章节目的：${chapter.purpose}`,
+      projectContext ? `上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${compactProjectContextText}` : '',
+      // D1：章级共享 T0 事实层计入 L2（同章各块值相同 → 可缓存前缀组成部分）
+      options.sharedFactLayerText || '',
+      // F1/F2：章级恒定段计入 L2（同章各块值相同 → 可缓存前缀组成部分）
+      options.factCoverageContext || '',
+      missingFacts.length ? `需要特别补足的信息：${missingFacts.join('、')}` : '',
+    ]),
+    l3: contextLayerChars([
+      `章节标题：${chapter.title}`,
       `- 保留章节标题；内容不少于 ${options.minWords || 1000} 字${options.targetWords ? `，目标约 ${options.targetWords} 字` : ''}${options.maxWords ? `，最多不超过 ${options.maxWords} 字` : ''}。`,
       chapter.sections?.length ? '- 必须完整包含已规划小节；不要新增未规划的二级小节。' : '- 未预设小节时，不要为了凑结构强行新增小节。',
       chapter.tablePlans?.length ? '- 本章存在结构化表格规划时，必须输出正式 Markdown 表格；表头必须严格使用规划字段，不得擅自改字段、删字段或增加后台溯源列。' : chapter.tableSections?.length ? `- 以下小节可使用表格辅助表达：${chapter.tableSections.join('、')}。` : '',
       chapter.tablePlans?.length ? '- 表格字段值必须优先来自项目图谱、可信事实和绑定材料；projectFactOnly 字段不得编造，也不得写任何固定占位话术。' : '',
-      '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的项目专属事实；法律法规名称、标准规范编号等公共知识可依据现行有效版本直接引用。',
-      '- 将材料要点自然融入正文；不要输出系统证据清单、中间分析过程或后台流程话术。',
-      SECTION_GENERATION_SAFETY_RULES,
-      options.userWriterRules ? `\n【用户写作指令——必须严格遵守】\n${options.userWriterRules}` : '',
-    ]),
-    l2: contextLayerChars([
-      `文档模板：${template.name}`,
-      `章节标题：${chapter.title}`,
-      `章节目的：${chapter.purpose}`,
       sectionInstruction,
       sectionBudgetInstruction,
       tablePlanInstruction,
       constructionOrgRuleInstruction,
       constructionOrgBonusInstruction,
       ...anchoredRuleInstructions,
-      projectContext ? `上下文/历史记忆（仅作偏好、历史纠偏和连续性参考；如与知识库证据冲突，以知识库证据为准）：\n${compactProjectContextText}` : '',
-      options.factCoverageContext || '',
-    ]),
-    l3: contextLayerChars([
       roleContext ? roleContext : '',
-      missingFacts.length ? `需要特别补足的信息：${missingFacts.join('、')}` : '',
       outlineBlock,
       evidenceText ? '绑定材料：' : '',
       evidenceText,
+      options.userWriterRules ? `\n【用户写作指令——必须严格遵守】\n${options.userWriterRules}` : '',
     ]),
   };
   const content = await callDocumentLlm(system, prompt, false, { maxTokens: options.maxTokens, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost, contextLayers });
@@ -683,23 +747,27 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
     `文档模板：${input.template.name}`,
     `章节标题：${input.chapter.title}`,
-    `当前二级小节：${input.sectionTitle}`,
+    // P5 前缀缓存收敛：同章各小节共享段（用户要求/项目上下文/角色/缺失事实/结构锁定/安全规则）全部前置，
+    // 节级变化段（小节标题、任务卡、事实卡、专项规则、工艺知识、字数预算、绑定材料）统一后置——
+    // 同章小节并发成稿时前缀逐节分叉是命中率低的根因之一，共享段收敛后同章 30+ 小节可命中同一前缀
     input.requirement ? `用户要求：${input.requirement}` : '',
     userRequirementFactsPrompt(input.requirement),
     input.projectContext ? `上下文：\n${compactProjectContextText}` : '',
     input.factCoverageContext || '',
+    input.roleContext,
+    input.missingFacts.length ? `需要特别补足的信息：${input.missingFacts.join('、')}` : '',
+    '本章节结构已由系统按模板和提示词锁定；不得删除、重命名、合并或重排当前节标题；每个节下必须自然展开三级小节，三级小节承载正文。',
+    SECTION_GENERATION_SAFETY_RULES,
+    // ── 节级变化段起点（同章各小节以下内容互不相同；保持其在 prompt 尾部，共享前缀到此为止恒定）──
+    `当前二级小节：${input.sectionTitle}`,
     professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
     input.tablePlanInstruction || '',
     sectionFactCard.prompt,
-    input.roleContext,
-    input.missingFacts.length ? `需要特别补足的信息：${input.missingFacts.join('、')}` : '',
-    input.qualityFeedback ? `上轮小节未通过质量检查，必须修正：${input.qualityFeedback}` : '',
     // 专项写法规则单点注入：从 writingSpec 查表（含分部分项专项要求），三管线同源同口径
     ...sectionAnchoredRules(input.sectionTitle),
     processKnowledgePrompt,
     `请只生成当前节内容，使用“### ${input.sectionTitle}”作为节标题；正文必须下沉到若干“#### 三级小节标题”下面，不得在 ### 标题后直接写大段正文。目标约 ${input.targetWords} 字${input.maxWords ? `，最多不超过 ${input.maxWords} 字` : ''}。`,
-    '本章节结构已由系统按模板和提示词锁定；不得删除、重命名、合并或重排当前节标题；每个节下必须自然展开三级小节，三级小节承载正文。',
-    SECTION_GENERATION_SAFETY_RULES,
+    input.qualityFeedback ? `上轮小节未通过质量检查，必须修正：${input.qualityFeedback}` : '',
     evidenceText ? `绑定材料：\n${evidenceText}` : '',
   ].filter(Boolean).join('\n\n');
   const system = [
@@ -710,14 +778,15 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     // 「工艺流程：」被 maxTokens 截断）。中文约 1.5 token/字，按 2.6 倍系数 + 2800 下限留足
     // H4 标题与 markdown 结构开销；正文总量仍由 prompt 的 maxWords 约束，不因池放大而灌水
   ].filter(Boolean).join('\n\n');
-  // 3.4 上下文分层统计（L0-L3）：与上方 prompt 组装同源表达式（口径同整章 Writer）
+  // 3.4 上下文分层统计（L0-L3）：与上方 prompt 组装同源表达式；P5 前缀收敛后口径 =
+  // L0 system 恒定段 / L1 任务级恒定指令 / L2 章级共享段（L0-L2 为同章各小节共享的 prompt 前缀，
+  // DeepSeek prefix cache 可命中部分）/ L3 节级变化段（同章各小节互不相同，置于 prompt 尾部不可缓存）
   const contextLayers = {
     l0: system.length,
     l1: contextLayerChars([
       input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
       input.requirement ? `用户要求：${input.requirement}` : '',
       userRequirementFactsPrompt(input.requirement),
-      `请只生成当前节内容，使用“### ${input.sectionTitle}”作为节标题；正文必须下沉到若干“#### 三级小节标题”下面，不得在 ### 标题后直接写大段正文。目标约 ${input.targetWords} 字${input.maxWords ? `，最多不超过 ${input.maxWords} 字` : ''}。`,
       '本章节结构已由系统按模板和提示词锁定；不得删除、重命名、合并或重排当前节标题；每个节下必须自然展开三级小节，三级小节承载正文。',
       SECTION_GENERATION_SAFETY_RULES,
     ]),
@@ -726,16 +795,17 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
       `章节标题：${input.chapter.title}`,
       input.projectContext ? `上下文：\n${compactProjectContextText}` : '',
       input.factCoverageContext || '',
-      professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
-      input.tablePlanInstruction || '',
-      ...sectionAnchoredRules(input.sectionTitle),
-      processKnowledgePrompt,
+      input.roleContext,
+      input.missingFacts.length ? `需要特别补足的信息：${input.missingFacts.join('、')}` : '',
     ]),
     l3: contextLayerChars([
       `当前二级小节：${input.sectionTitle}`,
+      professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
+      input.tablePlanInstruction || '',
       sectionFactCard.prompt,
-      input.roleContext,
-      input.missingFacts.length ? `需要特别补足的信息：${input.missingFacts.join('、')}` : '',
+      ...sectionAnchoredRules(input.sectionTitle),
+      processKnowledgePrompt,
+      `请只生成当前节内容，使用“### ${input.sectionTitle}”作为节标题；正文必须下沉到若干“#### 三级小节标题”下面，不得在 ### 标题后直接写大段正文。目标约 ${input.targetWords} 字${input.maxWords ? `，最多不超过 ${input.maxWords} 字` : ''}。`,
       input.qualityFeedback ? `上轮小节未通过质量检查，必须修正：${input.qualityFeedback}` : '',
       evidenceText ? `绑定材料：\n${evidenceText}` : '',
     ]),
@@ -849,42 +919,47 @@ async function buildFocusedSectionDraft(input: Parameters<typeof buildLlmSection
     writerSystemPrefix('你是专业文档节内小节 Writer。只生成一个指定节，不生成整章。\n\n' + FORMAL_WRITING_RULES + '\n\n' + SECTION_GENERATION_SAFETY_RULES),
     '必须直接输出 Markdown：先输出指定 ### 节标题，再在其下生成若干 #### 三级小节承载正文；不得在 ### 后直接写大段正文；不得解释过程，不得输出资料不足、待确认、兜底等话术。',
   ].join('\n\n');
-  // 3.4 上下文分层统计（L0-L3）：与上方 prompt 组装同源表达式（口径同整章 Writer）
+  // 3.4 上下文分层统计（L0-L3）：与上方 prompt 组装同源表达式；P5 前缀收敛后口径 =
+  // L0 system 恒定段 / L1 任务级恒定指令 / L2 章级共享段（L0-L2 为同章各小节共享的 prompt 前缀，
+  // DeepSeek prefix cache 可命中部分）/ L3 节级变化段（同章各小节互不相同，置于 prompt 尾部不可缓存）
   const contextLayers = {
     l0: system.length,
     l1: contextLayerChars([
       input.requirement ? `用户要求：${input.requirement}` : '',
-      keySectionWritingRequirement(input.sectionTitle),
-      `目标正文约 ${input.targetWords} 字，最多 ${input.maxWords || Math.ceil(input.targetWords * 1.18)} 字。正文必须分布在 #### 三级小节下，包含对象范围、执行措施、检查验收和资料闭环；没有精确数值时写正式过程控制，不编造数值。`,
       '禁止写“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列话术；直接写项目事实、施工内容、控制措施和验收要求。',
-      isGeneralManagementSection(input.sectionTitle) ? '该小节属于施工组织设计通用管理小节：允许基于项目基础事实、招标范围、工期质量目标、现场组织要求和施工总承包管理逻辑形成正式措施，但不得编造具体姓名、品牌、型号、金额或不存在的日期。' : '',
     ]),
     l2: contextLayerChars([
       `章节标题：${input.chapter.title}`,
+    ]),
+    l3: contextLayerChars([
+      `指定节标题：### ${input.sectionTitle}`,
+      keySectionWritingRequirement(input.sectionTitle),
       professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
       // 专项写法规则单点注入：与逐小节/整章管线同源（writingSpec 查表）
       ...sectionAnchoredRules(input.sectionTitle),
       input.tablePlanInstruction || '',
-    ]),
-    l3: contextLayerChars([
-      `指定节标题：### ${input.sectionTitle}`,
       sectionFactCard.prompt,
+      `目标正文约 ${input.targetWords} 字，最多 ${input.maxWords || Math.ceil(input.targetWords * 1.18)} 字。正文必须分布在 #### 三级小节下，包含对象范围、执行措施、检查验收和资料闭环；没有精确数值时写正式过程控制，不编造数值。`,
+      isGeneralManagementSection(input.sectionTitle) ? '该小节属于施工组织设计通用管理小节：允许基于项目基础事实、招标范围、工期质量目标、现场组织要求和施工总承包管理逻辑形成正式措施，但不得编造具体姓名、品牌、型号、金额或不存在的日期。' : '',
       input.qualityFeedback || '',
       evidenceText ? `压缩证据：\n${evidenceText}` : '',
     ]),
   };
   const content = await callDocumentLlm(system, [
     `章节标题：${input.chapter.title}`,
-    `指定节标题：### ${input.sectionTitle}`,
+    // P5 前缀缓存收敛：跨小节共享段前置（章节标题/用户要求/通用禁语），节级变化段统一后置——
+    // focused writer 被逐小节管线并发调用，共享前缀越长同章小节命中越多
     input.requirement ? `用户要求：${input.requirement}` : '',
-    professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
+    '禁止写“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列话术；直接写项目事实、施工内容、控制措施和验收要求。',
+    // ── 节级变化段起点（同章各小节以下内容互不相同；保持其在 prompt 尾部）──
+    `指定节标题：### ${input.sectionTitle}`,
     keySectionWritingRequirement(input.sectionTitle),
+    professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
     // 专项写法规则单点注入：与逐小节/整章管线同源（writingSpec 查表）
     ...sectionAnchoredRules(input.sectionTitle),
     input.tablePlanInstruction || '',
     sectionFactCard.prompt,
     `目标正文约 ${input.targetWords} 字，最多 ${input.maxWords || Math.ceil(input.targetWords * 1.18)} 字。正文必须分布在 #### 三级小节下，包含对象范围、执行措施、检查验收和资料闭环；没有精确数值时写正式过程控制，不编造数值。`,
-    '禁止写“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列话术；直接写项目事实、施工内容、控制措施和验收要求。',
     isGeneralManagementSection(input.sectionTitle) ? '该小节属于施工组织设计通用管理小节：允许基于项目基础事实、招标范围、工期质量目标、现场组织要求和施工总承包管理逻辑形成正式措施，但不得编造具体姓名、品牌、型号、金额或不存在的日期。' : '',
     input.qualityFeedback || '',
     evidenceText ? `压缩证据：\n${evidenceText}` : '',
@@ -1280,7 +1355,15 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
     }
   };
   const llmSectionLimit = targets.length;
-  for (let offset = 0; offset < llmSectionLimit;) {
+  // F9 缓存预热：首个小节单独执行，先建立 L0-L2 共享前缀缓存（与 F5 主题块管线同构——
+  // DeepSeek prefix cache 写入存在秒级延迟，历史全并发方案下同章各小节同时发出、互相无法
+  // 命中彼此前缀）；首节失败不阻断后续小节（失败小节由下方重试循环处理）
+  if (llmSectionLimit > 0) {
+    throwIfAborted(input.signal);
+    const first = await runSection({ ...targets[0], index: 0 });
+    results[0] = first;
+  }
+  for (let offset = 1; offset < llmSectionLimit;) {
     throwIfAborted(input.signal);
     // 连续失败≥2 时批次降为串行，避免失败率高的模型被无脑并发反复击穿
     const batchSize = getDocumentLlmFailureStreak(input.diagnostics) >= 5 ? 1 : concurrency;
@@ -1356,7 +1439,7 @@ export async function buildQualifiedSectionSupplement(input: Parameters<typeof b
  * 单块质检（H4 锚点完整性 + 字数下限）失败整块重试一次；要点 ≥4 的块仍失败时对半拆为子块再试
  * （自愈仍在块级管线内，不降级逐小节）；仍有块失败时返回 undefined，由上层走整章单次生成兜底。
  */
-export async function buildPlannedChapterContent(input: {
+export interface PlannedChapterContentInput {
   template: DocumentTemplate;
   chapter: DocumentTemplateChapter;
   evidence: DocumentEvidence[];
@@ -1376,7 +1459,22 @@ export async function buildPlannedChapterContent(input: {
   onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void;
   diagnostics?: DocumentGenerationDiagnostics;
   signal?: AbortSignal;
-}, structure: PlannedChapterStructure): Promise<string | undefined> {
+}
+
+/** C3 块级失败隔离结果：部分块失败时返回已成功块 + 失败块清单，由上层只重试失败块，
+ * 不再整章降级重写（历史缺陷：单块质检未达标 → 整章平铺备用 → 全文字数雪崩） */
+export interface PlannedChapterContentResult {
+  /** 按 structure.blocks 顺序的块成稿正文（失败块为 undefined） */
+  sections: Array<string | undefined>;
+  /** 成稿失败的主题块（含原 index），供上层块级隔离重试 */
+  failedBlocks: Array<{ index: number; block: PlannedChapterBlock }>;
+  /** 全部块成稿成功 */
+  allSucceeded: boolean;
+  /** 成功块拼接的章节 Markdown（含章标题外壳；失败块缺失时不包含该块正文） */
+  markdown: string;
+}
+
+export async function buildPlannedChapterContent(input: PlannedChapterContentInput, structure: PlannedChapterStructure): Promise<PlannedChapterContentResult | undefined> {
   const blocks = structure.blocks;
   if (blocks.length === 0) return undefined;
   // 表格计划按主题块挂接：块内 subPoint 覆盖的源细目标题命中的表挂到该块；未命中必写表挂最后一块兜底，保证必写表不丢失
@@ -1393,6 +1491,9 @@ export async function buildPlannedChapterContent(input: {
   const configuredConcurrency = Number(process.env.DOCUMENT_PLANNED_BLOCK_CONCURRENCY || blocks.length);
   const concurrency = Math.max(1, Math.min(blocks.length, getDocumentLlmMaxConcurrency(), Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : blocks.length));
   const results: Array<string | undefined> = new Array(blocks.length).fill(undefined);
+  // D1 共享卡片上移：章级 T0 关键事实层提取一次、同章各块共享注入（各块值完全相同 → prefix cache 共享命中），
+  // 块级证据跳过 T0（skipT0）只带块相关 T1 片段——N 个块各注入一份全量事实行是块级调用输入 token 的大头
+  const sharedFactLayerText = buildEvidenceLayers(buildEvidenceBundle(input.chapter, input.evidence), evidencePromptBudgetForTarget(input.targetWords), input.chapter.requiredFacts || []).t0Text;
   const writeBlock = async (block: (typeof blocks)[number], index: number): Promise<string | undefined> => {
     const sectionTitles = block.subPoints.map(point => point.title);
     // 块级证据：全章证据按块标题与要点关键词相关性排序（只排序不丢弃，全量保留进输入）+ 块标题定向检索补充
@@ -1436,7 +1537,11 @@ export async function buildPlannedChapterContent(input: {
           // 改为目标字数 ×1.5 且下限 3200（2200 字正文 ≈ 3300~4400 token + 思考空间，仍低于 8192 共享池）
           maxTokens: Math.max(3200, Math.ceil(block.targetWords * 1.5)),
           disableThinkingBoost: true,
-          factCoverageContext: `${input.factCoverageContext || ''}${factsHint ? `\n${factsHint}` : ''}`,
+          // D1：章级共享 T0 事实层由 sharedFactLayerText 注入（L2 共享段，同章各块完全相同），块级证据 skipT0
+          sharedFactLayerText,
+          // P5 去重：factsHint 已并入 blockRoleContext（roleContext 参数）注入，此处再拼会导致
+          // 同一块专属事实清单在 prompt 中重复出现两次（浪费输入 token 且稀释前缀缓存）
+          factCoverageContext: input.factCoverageContext || '',
           twoStep: false,
           signal: input.signal,
           diagnostics: input.diagnostics,
@@ -1492,13 +1597,27 @@ export async function buildPlannedChapterContent(input: {
     // p3-s3 块级 checkpoint：块成稿完成即上报（partialSections 按 index 序保留已完成块），供 documentGenerator 节流写盘快照，中断续跑不重生成
     if (results[index]) input.onSectionProgress?.({ completed: results.filter(Boolean).length, total: blocks.length, sectionTitle: block.title, phase: 'complete', partialSections: [...results] });
   };
-  for (let offset = 0; offset < blocks.length; offset += concurrency) {
+  // F5 缓存预热：首个块单独执行，先建立 L0-L2 共享前缀缓存（DeepSeek prefix cache 写入存在秒级延迟），
+  // 后续块并发发出时即可命中共享前缀；历史全并发方案下同章各块同时发出、互相无法命中彼此前缀，
+  // 是命中率低的成因之一。首块失败不阻断后续块（失败块由 C3 隔离重试闭环处理）
+  if (blocks.length > 0) {
+    throwIfAborted(input.signal);
+    await runBlock(blocks[0], 0);
+  }
+  for (let offset = 1; offset < blocks.length; offset += concurrency) {
     throwIfAborted(input.signal);
     const batch = blocks.slice(offset, offset + concurrency);
     await Promise.all(batch.map((block, index) => runBlock(block, offset + index)));
   }
-  if (results.some(content => !content)) return undefined;
-  const body = results.join('\n\n');
-  if (!body.trim()) return undefined;
-  return sanitizeFormalMarkdown(removeUnwantedDrawingImages(`## ${input.chapter.title}\n\n${body}`, input.forbidDrawingImages));
+  if (results.every(content => !content)) return undefined;
+  const failedBlocks = blocks
+    .map((block, index) => ({ index, block }))
+    .filter(({ index }) => !results[index]);
+  const markdown = sanitizeFormalMarkdown(removeUnwantedDrawingImages(`## ${input.chapter.title}\n\n${results.filter(Boolean).join('\n\n')}`, input.forbidDrawingImages));
+  if (failedBlocks.length === 0) return { sections: results, failedBlocks, allSucceeded: true, markdown };
+  // C3 块级失败隔离：部分块失败时返回已成功块与失败块清单，由上层只重试失败块，不再整章降级
+  if (input.diagnostics && failedBlocks.length > 0) {
+    input.diagnostics.llm.lastError = `规划块部分失败：${failedBlocks.map(({ block }) => block.title).join('、')}`;
+  }
+  return { sections: results, failedBlocks, allSucceeded: false, markdown };
 }

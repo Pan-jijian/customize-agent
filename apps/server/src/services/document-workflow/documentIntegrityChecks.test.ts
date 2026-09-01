@@ -144,10 +144,12 @@ describe('localAdaptationKeywordIssues（W2 纯语义判定）', () => {
 });
 
 describe('resourceConsistencyIssues（h7 劳动力数据一致性 5 模式）', () => {
-  const laborTable = (rows: string[]) => ['| 施工阶段 | 投入人数 |', '| --- | --- |', ...rows].join('\n');
+  const laborTable = (rows: string[]) => ['| 施工阶段 | 阶段高峰人数 |', '| --- | --- |', ...rows].join('\n');
 
   it('模式 1：正文两处高峰值相差 >30% → 报互斥', () => {
-    const issues = resourceConsistencyIssues('施工高峰期投入150人组织流水作业。主体结构施工高峰期约80人连续施工。');
+    // 两个峰值均无阶段限定（同总口径）：150 vs 80 相差 46.7% 互斥。
+    //（若一个带阶段限定则走「总口径 ≥ 阶段峰值属正常关系」豁免，见下条总口径用例）
+    const issues = resourceConsistencyIssues('施工高峰期投入150人组织流水作业。施工高峰期约80人连续施工。');
     expect(issues.some(issue => /劳动力数据矛盾/u.test(issue.message) && /互斥/u.test(issue.message))).toBe(true);
   });
 
@@ -155,11 +157,39 @@ describe('resourceConsistencyIssues（h7 劳动力数据一致性 5 模式）', 
     expect(resourceConsistencyIssues('施工高峰期投入150人组织流水作业。主体结构施工高峰期约140人连续施工。')).toEqual([]);
   });
 
+  it('模式 1：不同施工阶段的峰值不互斥（地下结构 220 vs 室外工程 90，真实生成误报回归）', () => {
+    const markdown = '地下结构阶段投入钢筋工60人、木工80人、混凝土工40人、架子工20人，高峰人数约220人；室外工程阶段投入铺装工30人、绿化工20人、管网工25人，高峰人数约90人。各阶段劳动力峰值表述统一为：地下结构阶段220人、室外工程阶段90人。';
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('模式 1：总口径人数 ≥ 阶段峰值属正常关系（总配置 180 vs 室外工程 90）→ 不报', () => {
+    const markdown = '劳动力保障方面，按施工高峰配置总人数约180人。室外工程阶段投入铺装工30人、管网工25人，高峰人数约90人。';
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('模式 1：总口径人数低于阶段峰值 10% 以上 → 报互斥', () => {
+    const markdown = '按施工高峰配置总人数约90人。主体结构阶段投入钢筋工60人、木工80人，高峰人数约220人。';
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => /劳动力数据矛盾/u.test(issue.message) && /互斥/u.test(issue.message))).toBe(true);
+  });
+
   it('模式 2：两张劳动力表峰值相差 >30% → 报互斥', () => {
     // 表格块间以空行分隔（Markdown 表格语义：无空行会被聚合为同一表格块）
     const markdown = [laborTable(['| 基础阶段 | 120 |', '| 主体阶段 | 80 |']), laborTable(['| 装修阶段 | 300 |'])].join('\n\n');
     const issues = resourceConsistencyIssues(markdown);
     expect(issues.some(issue => /劳动力数据矛盾/u.test(issue.message) && /另一劳动力表峰值/u.test(issue.message))).toBe(true);
+  });
+
+  it('模式 2：分工种人数明细表（无高峰列）与阶段峰值表不互查（60 vs 230 真实生成误报回归）', () => {
+    const byTradeTable = ['| 施工阶段 | 工种 | 人数 | 主要工作内容 |', '| --- | --- | --- | --- |', '| 主体结构 | 钢筋工、木工 | 60 | 现浇结构 |'].join('\n');
+    const markdown = [byTradeTable, laborTable(['| 主体结构 | 230 |'])].join('\n\n');
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('高峰列优先：平均/高峰人数并存时表峰值取高峰列（不取平均列 120 误报正文 230）', () => {
+    const avgPeakTable = ['| 施工阶段 | 阶段平均人数 | 阶段高峰人数 |', '| --- | --- | --- |', '| 主体结构 | 120 | 230 |'].join('\n');
+    const markdown = `${avgPeakTable}\n\n主体结构阶段高峰人数约230人。`;
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
   });
 
   it('模式 3：正文峰值显著超过表峰值 → 报（保留原口径）', () => {
@@ -260,6 +290,28 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
   it('同锚点数值差异 ≤20% → 不报', () => {
     const markdown = '潜水泵8台。现场配置潜水泵7台。';
     expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('枚举误采豁免：「施工电梯2台、汽车吊1台」不把 2 误采为汽车吊数量（真实生成误报回归）', () => {
+    const markdown = '主体结构阶段配置塔吊1台、施工电梯2台、汽车吊1台用于装配式构件吊装。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('否定声明句豁免：不再出现“汽车吊2台”的引用值不计入口径池（真实生成误报回归）', () => {
+    const markdown = '现场垂直运输设备统一配置1台汽车起重机。本章及后续章节不再出现“汽车吊2台”“1台8t汽车吊”等与施工部署不一致的数量表述。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('施工电梯与施工升降机异名同口径：2台 vs 1台 矛盾检出（真实生成漏检回归）', () => {
+    const markdown = '主体结构阶段配置施工电梯2台。资源保障方面配置施工电梯1台。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /施工升降机/u.test(issue.message))).toBe(true);
+  });
+
+  it('反向模式型号字符形态仍检出：「4台SC200/200施工升降机」与「施工电梯2台」矛盾', () => {
+    const markdown = '装饰装修阶段配置4台SC200/200施工升降机。主体结构阶段配置施工电梯2台。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /施工升降机/u.test(issue.message))).toBe(true);
   });
 });
 
@@ -462,11 +514,12 @@ describe('duplicateTableIssues / stripDuplicateTables（h15 表格重复）', ()
     expect(issues[0].message).toContain('表格重复');
   });
 
-  it('同主题不同表头结构（青天实测：分阶段劳动力计划表出现两次）→ 报重复', () => {
-    // 真实形态：资源总表（单值）与第二次出现的劳动力表（表头结构不同、缺调配原则列），
-    // 表头相似仅 ~0.4 但首列同批阶段、数值高度重合 → 第三条「首列 ≥0.6 且数据 ≥0.15」命中
-    const laborA = ['| 施工阶段 | 投入工种数 | 阶段平均人数 | 阶段高峰人数 | 劳动力总量(工日) |', '| --- | --- | --- | --- | --- |', '| 基坑与基础 | 4 | 85 | 120 | 5100 |', '| 主体结构 | 5 | 160 | 220 | 19200 |', '| 二次结构与砌体 | 3 | 90 | 130 | 8100 |', '| 装饰装修 | 4 | 120 | 160 | 14400 |', '| 机电安装 | 4 | 70 | 100 | 8400 |'].join('\n');
-    const laborB = ['| 施工阶段 | 主要工种 | 阶段平均人数 | 阶段高峰人数 | 主要工作内容 |', '| --- | --- | --- | --- | --- |', '| 基坑与基础 | 土方工、钢筋工、混凝土工 | 85 | 120 | 土方开挖、钢筋绑扎 |', '| 主体结构 | 钢筋工、木工、混凝土工 | 160 | 220 | 现浇结构、吊装 |', '| 装饰装修 | 抹灰工、油漆工 | 120 | 160 | 抹灰、幕墙安装 |', '| 机电安装 | 电工、管道工 | 70 | 100 | 机电安装 |'].join('\n');
+  it('同主题不同表头结构（青天实测：分阶段劳动力计划表出现两次，删减版子表）→ 报重复', () => {
+    // 真实形态：区间版原表（信息全、含调配原则列）与删减版子表（表头结构不同、区间值拆为平均/高峰单值列），
+    // 表头相似仅 ~0.25 但首列同批阶段、文本 cell 双向覆盖度 100% → 第三条「首列 ≥0.6 且文本覆盖 ≥0.6」命中
+    //（互补表形态如「统计表 vs 投入计划表」共享纯数字但文本 cell 大量独有，双向覆盖 <0.6 不命中）
+    const laborA = ['| 施工阶段 | 工种 | 人数 | 主要工作内容 | 调配原则 |', '| --- | --- | --- | --- | --- |', '| 基坑与基础 | 土方工、钢筋工、混凝土工 | 85～120 | 土方开挖、钢筋绑扎 | 按工序流水调配 |', '| 主体结构 | 钢筋工、木工、混凝土工 | 160～220 | 现浇结构、构件吊装 | 两班倒作业 |', '| 二次结构与砌体 | 砌筑工、抹灰工 | 90～130 | 砌体施工、构造柱 | 与主体穿插 |', '| 装饰装修 | 抹灰工、油漆工 | 120～160 | 抹灰、幕墙安装 | 多楼层平行 |', '| 机电安装 | 电工、管道工 | 70～100 | 机电管线安装 | 跟随土建进度 |'].join('\n');
+    const laborB = ['| 施工阶段 | 主要工种 | 阶段平均人数 | 阶段高峰人数 | 主要工作内容 |', '| --- | --- | --- | --- | --- |', '| 基坑与基础 | 土方工、钢筋工、混凝土工 | 85 | 120 | 土方开挖、钢筋绑扎 |', '| 主体结构 | 钢筋工、木工、混凝土工 | 160 | 220 | 现浇结构、构件吊装 |', '| 装饰装修 | 抹灰工、油漆工 | 120 | 160 | 抹灰、幕墙安装 |', '| 机电安装 | 电工、管道工 | 70 | 100 | 机电管线安装 |'].join('\n');
     const issues = duplicateTableIssues(`${laborA}\n\n${laborB}`);
     expect(issues.length).toBeGreaterThanOrEqual(1);
     expect(issues[0].message).toContain('表格重复');

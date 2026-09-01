@@ -1,5 +1,5 @@
 import type { ChapterReviewSummary, DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from './types';
-import { callDocumentLlm, callDocumentLlmJson } from './llmClient';
+import { callDocumentLlm, callDocumentLlmJson, contextLayerChars } from './llmClient';
 import { displayStage } from './progress';
 import { throwIfAborted } from './utils';
 import { buildSectionFactCard, evidenceForSection, sectionFactUsageIssue } from './chapterGeneration';
@@ -86,7 +86,9 @@ export async function reviewGlobalConsistency(input: { template: DocumentTemplat
   // 改为提取数值口径清单注入 system：跨 chunk 前缀恒定（A5a prefix cache 全命中），公共上下文只付一次成本
   const contextDigest = numericContextDigest(input.projectContext || '');
   const systemPrompt = [reviewPrompt, contextDigest ? `【资料口径基准（冲突判定基准：正确口径必须取自此处，不得自行编造）】\n${contextDigest}` : ''].join('\n\n');
-  const chunkReviews = await Promise.all(chunks.map(chunk => callDocumentLlmJson<{ issues?: string[] }>(systemPrompt, `${input.promptTexts}\n\n${chunk}\n\n返回 JSON：{"issues":[]}`, { maxTokens: 1000, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics })));
+  // F8 分层统计：system 恒定段（l0，跨 chunk 恒定 prefix cache）/ promptTexts（l1，任务级恒定）/
+  // 块级变化段（l3：chunk 摘要与 JSON 指令）。与 prompt 组装同源表达式，供占比验收
+  const chunkReviews = await Promise.all(chunks.map(chunk => callDocumentLlmJson<{ issues?: string[] }>(systemPrompt, `${input.promptTexts}\n\n${chunk}\n\n返回 JSON：{"issues":[]}`, { maxTokens: 1000, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics, contextLayers: { l0: systemPrompt.length, l1: contextLayerChars([input.promptTexts]), l3: contextLayerChars([chunk, '\n\n返回 JSON：{"issues":[]}']) } })));
   const issues = mergeUniqueStrings(chunkReviews.flatMap(r => Array.isArray(r?.issues) ? r.issues : []));
   return { issues, stage: displayStage({ type: 'llm_review', roleId: 'global-consistency-review', status: issues.length > 0 ? 'failed' : 'success', message: issues.length > 0 ? `全局一致性审查完成：发现 ${issues.length} 个跨章问题` : '全局一致性审查通过' }, { subtitle: '全局一致性审查' }) };
 }

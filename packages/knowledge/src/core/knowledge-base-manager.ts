@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { TextChunker } from '../chunking/text-chunker.js';
 import { FileClassifier } from '../classification/classifier.js';
+import { cleanExtractedText } from '../cleaning/text-cleaner.js';
 import { ALL_CATEGORIES, DEFAULT_CATEGORY_DIRS, GLOBAL_KNOWLEDGE_DIR, USER_DATA_DIR } from '../constants.js';
 import { DedupEngine } from '../dedup/dedup-engine.js';
 import { RelationshipDetector } from '../dedup/relationship-detector.js';
@@ -228,13 +229,37 @@ export class KnowledgeBaseManager {
         });
         continue;
       }
-      const normalizedHash = this.dedup.normalizedHash(extraction.text);
+      // K1 入库前清洗（源头治理）：解析完成后、分块入库前移除确定性噪声（页眉页脚/目录/页码/
+      // 招标格式模板段/补疑套话/图纸坐标行），入库的即干净数据；保守策略（多重证据 + 30% 回退保护），
+      // 清洗统计写入 warnings 供索引记录追溯；KB_TEXT_CLEANING=0 关闭清洗
+      const cleaning = cleanExtractedText({ text: extraction.text, category: file.category, fileName: file.relativePath });
+      const cleanedText = cleaning.text.trim().length > 0 ? cleaning.text : extraction.text;
+      if (cleaning.removedChars > 0) {
+        const cleaningDetail = [
+          cleaning.stats.headerFooterLines > 0 ? `页眉页脚 ${cleaning.stats.headerFooterLines}` : '',
+          cleaning.stats.tocRegionLines > 0 ? `目录 ${cleaning.stats.tocRegionLines}` : '',
+          cleaning.stats.pageNumberLines > 0 ? `页码 ${cleaning.stats.pageNumberLines}` : '',
+          cleaning.stats.tenderFormatLines > 0 ? `招标格式 ${cleaning.stats.tenderFormatLines}` : '',
+          cleaning.stats.tenderGenericLines > 0 ? `泛化引用 ${cleaning.stats.tenderGenericLines}` : '',
+          cleaning.stats.clarificationLines > 0 ? `补疑套话 ${cleaning.stats.clarificationLines}` : '',
+          cleaning.stats.cadNoiseLines > 0 ? `图纸坐标 ${cleaning.stats.cadNoiseLines}` : '',
+          cleaning.stats.contractGeneralClauseLines > 0 ? `合同通用条款 ${cleaning.stats.contractGeneralClauseLines}` : '',
+          cleaning.stats.announcementProcedureLines > 0 ? `公告程序段 ${cleaning.stats.announcementProcedureLines}` : '',
+          cleaning.stats.businessReviewLines > 0 ? `商务评审细则 ${cleaning.stats.businessReviewLines}` : '',
+          cleaning.stats.cadTitleBlockLines > 0 ? `图框信息 ${cleaning.stats.cadTitleBlockLines}` : '',
+          cleaning.stats.cadAttributeLines > 0 ? `CAD属性 ${cleaning.stats.cadAttributeLines}` : '',
+          cleaning.stats.billPricingLines > 0 ? `清单报价表 ${cleaning.stats.billPricingLines}` : '',
+          cleaning.stats.billTitlePageLines > 0 ? `清单扉页 ${cleaning.stats.billTitlePageLines}` : '',
+        ].filter(Boolean).join('、');
+        extraction.warnings.push(`入库清洗移除噪声 ${cleaning.removedLines} 行（${cleaningDetail}）`);
+      }
+      const normalizedHash = this.dedup.normalizedHash(cleanedText);
       const normalizedDuplicate = !duplicate && normalizedHash
         ? this.store.findNormalizedDuplicate(normalizedHash, file.relativePath)
         : undefined;
       this.updateJobsForFile(file.relativePath, 'CHUNKING', Math.min(80, basePercent + 10), `正在切片 ${file.relativePath}`);
       this.reportProgress({ stage: 'chunking', percent: Math.min(80, basePercent + 10), message: `正在切片 ${file.relativePath}`, filePath: file.relativePath });
-      const chunks = this.chunker.chunk(extraction.text, file, extraction.metadata);
+      const chunks = this.chunker.chunk(cleanedText, file, extraction.metadata);
       this.reportProgress({ stage: 'chunking', percent: Math.min(84, basePercent + 14), message: `切片完成：${chunks.length} 块`, filePath: file.relativePath, chunkCount: chunks.length });
       this.store.upsertFileHash({
         contentHash: hash,
@@ -530,6 +555,10 @@ export class KnowledgeBaseManager {
 
   listChunks(options: { relativePath?: string; limit?: number } = {}) {
     return this.store.listChunks(options);
+  }
+
+  listChunksSampled(options: { relativePath?: string; sampleSize?: number } = {}) {
+    return this.store.listChunksSampled(options);
   }
 
   getFileDetail(relativePath: string, options: { maxChunkContentChars?: number } = {}) {
@@ -871,6 +900,9 @@ export class KnowledgeBaseManager {
       let rerankBoost = 0;
       if (phrase && content.includes(phrase)) rerankBoost += 160;
       if (normalizedPhrase.length >= 4 && normalizedContent.includes(normalizedPhrase)) rerankBoost += 220;
+      // 时间类查询下，含具体日期/时刻的 chunk 是精确答案（如「获取时间：2026年8月13日」），
+      // 应优先于仅含规则条款的程序句（「距投标截止时间不足15日」类无具体时间）
+      if (/(时间|日期|工期|截止|开标|获取|递交)/u.test(query) && /20\d{2}年\d{1,2}月\d{1,2}日|\d{1,2}时\d{1,2}分/u.test(item.content)) rerankBoost += 60;
       const titleText = `${item.titlePath ?? ''}\n${item.sectionTitle ?? ''}`.toLowerCase();
       const normalizedTitle = this.normalizeSearchText(titleText);
       let matchedTermCount = 0;
@@ -885,13 +917,16 @@ export class KnowledgeBaseManager {
         }
         if (matchedTitle) rerankBoost += 22;
       }
-      if (matchedTermCount >= 2) rerankBoost += matchedTermCount * 18;
+      if (matchedTermCount >= 2) rerankBoost += matchedTermCount * 30;
       for (const label of factLabels) {
         const normalizedLabel = this.normalizeSearchText(label);
         if (normalizedContent.includes(normalizedLabel)) rerankBoost += 80;
         if (normalizedTitle.includes(normalizedLabel)) rerankBoost += 120;
       }
-      if (item.chunkKind === 'table') rerankBoost += wantsTable ? 25 : -80;
+      // 表格块惩罚仅针对「无任何查询词命中」的表格（清单特征块命中查询词时应保留竞争力）；
+      // 表格行（清单特征「混凝土强度等级：C35」）在向量空间天然弱势，RRF 名次扁平下
+      // 若再吃 -80 惩罚，会被普通段落（绿建专篇）挤到后面，丢失精确词命中优势
+      if (item.chunkKind === 'table') rerankBoost += wantsTable ? 25 : (matchedTermCount > 0 ? -10 : -80);
       if (item.chunkKind === 'metadata') rerankBoost += wantsDrawing ? 60 : -100;
       if (item.chunkKind === 'data') rerankBoost += wantsData ? 30 : -12;
       if (/\.(?:dwg|dxf)(?:$|[?#])/iu.test(item.filePath)) {
@@ -899,7 +934,9 @@ export class KnowledgeBaseManager {
         if (this.isLowQualityCadText(item.content)) rerankBoost -= wantsDrawing ? 60 : 160;
       }
       if (/工作表：|COL\d+|专业工程暂估价计价表|分部分项工程量清单计价表|材料（工程设备）暂估单价一览表/u.test(item.content)) {
-        rerankBoost -= wantsTable ? 35 : 140;
+        // 计价表行无查询词命中是纯标题噪音（-140）；命中查询词的清单特征行
+        // （「混凝土强度等级：C35」）是用户直接目标，仅轻惩罚维持正文优先
+        rerankBoost -= wantsTable ? 35 : (matchedTermCount > 0 ? 20 : 140);
       }
       if (/第\s*\d+\s*页\s*共\s*\d+\s*页|PDF\s*第\s*\d+\s*页/iu.test(item.content) && factLabels.length > 0) rerankBoost -= 12;
       const score = item.score + rerankBoost;
@@ -928,8 +965,12 @@ export class KnowledgeBaseManager {
 
   private queryTerms(query: string): string[] {
     const base = query.toLowerCase().split(/[\s,，。；;：:、]+/u).filter(Boolean);
+    // 字母数字与汉字连续串按边界拆词（与 store.expandSearchTerms 的边界拆分一致）：
+    // 「C35混凝土」须拆出「c35」「混凝土」，重排层才能识别清单特征块的双词命中，
+    // 否则 terms 只有整串连写短语，对「强度等级：C35」类特征块零命中、错吃 table 惩罚
+    const splitParts = base.flatMap(term => term.split(/([\p{Script=Han}]+)/u).filter(part => part.length > 0));
     const labels = this.queryFactLabels(query).map(label => label.toLowerCase());
-    return [...new Set([...base, ...labels].filter(term => term.length > 0))];
+    return [...new Set([...base, ...splitParts, ...labels].filter(term => term.length > 0))];
   }
 
   private queryFactLabels(query: string): string[] {
@@ -943,6 +984,9 @@ export class KnowledgeBaseManager {
     if (/招标范围|工程范围|承包范围|施工范围/u.test(query)) labels.push('招标范围', '工程承包范围', '施工范围');
     if (/建设单位|招标人|项目业主/u.test(query)) labels.push('招标人', '项目业主', '建设单位');
     if (/临水|临电|临时水电|水电接引|接驳点|挂表计量|施工水电/u.test(query)) labels.push('临水临电', '临时水电接引', '施工水电接引费', '接驳点挂表计量', '挂表计量');
+    if (/获取时间|获取方式/u.test(query)) labels.push('获取时间', '招标文件获取时间');
+    if (/投标截止|截止时间/u.test(query)) labels.push('投标截止时间', '投标文件递交的截止时间');
+    if (/开标时间|开标地点|开标/u.test(query)) labels.push('开标时间和地点', '开标时间', '开标地点');
     if (/场地限制|材料堆场|办公区|生活区|加工区/u.test(query)) labels.push('场地限制', '不具备材料堆场', '搭设加工区', '搭设办公区', '搭设生活区');
     if (/拆除|修补|破损处|改造维修/u.test(query)) labels.push('改造维修项目', '拆除内容比较多', '破损处进行修补');
     return [...new Set(labels)];

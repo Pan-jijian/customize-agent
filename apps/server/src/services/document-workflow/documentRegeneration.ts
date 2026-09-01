@@ -38,6 +38,7 @@ export async function regenerateDocumentChapter(input: { templateId: string; cha
       filters: { filePaths: scopedFilePaths },
       limit: Math.min(requestedEvidencePerChapter, 12),
       weights: { keyword: 0.4, vector: 0.45, rewrite: 0.75, hybridBonus: 0.15 },
+      generationMode: true,
     });
     rawEvidence.push(...result.results
       .filter((item: KbSearchResult) => evidenceInScope(projectRoot, item.filePath, boundFilePaths))

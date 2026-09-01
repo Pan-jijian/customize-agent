@@ -132,7 +132,7 @@ export class ContentExtractor {
       .slice(0, 50);
     const text = unique.join('\n');
     return {
-      text: text ? [this.metadataOnlyText(file), text].join('\n') : this.metadataOnlyText(file),
+      text: text ?? this.metadataOnlyText(file),
       metadata: {
         extractionMode: 'builtin_text_clipping',
         vectorizable: true,
@@ -343,14 +343,13 @@ export class ContentExtractor {
       }
       metadata.contentCoverage = 'dxf_semantic_layer_block_annotations';
       metadata.characterDataCount = characterDataCount;
-      const semanticNodes = this.buildCadSemanticNodes(file, uniqueLayers, uniqueBlocks, uniqueEntityTypes, textEntities);
+      const semanticNodes = this.buildCadSemanticNodes(file, textEntities);
       return {
         text: [
-          this.metadataOnlyText(file),
           `CAD DXF 图层: ${uniqueLayers.join(', ')}`,
           `CAD DXF 块/符号: ${uniqueBlocks.join(', ')}`,
           `CAD DXF 实体类型: ${uniqueEntityTypes.join(', ')}`,
-          'CAD 语义图纸节点:',
+          'CAD 语义标注文本:',
           ...semanticNodes,
         ].join('\n'),
         metadata,
@@ -374,7 +373,6 @@ export class ContentExtractor {
       metadata.contentCoverage = 'step_products_materials_entities_names';
       return {
         text: [
-          this.metadataOnlyText(file),
           `STEP 产品/零件:\n${products.join('\n')}`,
           `STEP 材料: ${materials.join(', ')}`,
           `STEP 实体类型: ${uniqueStepEntities.join(', ')}`,
@@ -396,7 +394,7 @@ export class ContentExtractor {
       metadata.entityTypes = uniqueIgesTypes.slice(0, 80);
       metadata.contentCoverage = 'iges_entity_names_types';
       return {
-        text: [this.metadataOnlyText(file), `IGES 实体类型: ${uniqueIgesTypes.join(', ')}`, `IGES 实体/名称:\n${names.join('\n')}`].join('\n'),
+        text: [`IGES 实体类型: ${uniqueIgesTypes.join(', ')}`, `IGES 实体/名称:\n${names.join('\n')}`].join('\n'),
         metadata,
         warnings,
       };
@@ -454,7 +452,7 @@ export class ContentExtractor {
     if (!hasCharacterData) warnings.push(`${file.format} 内置 CAD 解析器未提取到字符数据（仅 ${characterDataCount} 个可读字符），图纸内容未入库`);
     else warnings.push(`${file.format} 内置 DWG→DXF 转换未成功，已使用低置信度可读标注/标题块兜底抽取并过滤疑似乱码 ${filteredCount} 条；该结果仅作为兜底证据，不应等同于完整图层、块、标注和尺寸语义解析`);
     return {
-      text: hasCharacterData ? [this.metadataOnlyText(file), `CAD 图纸可读标注/标题块/属性:\n${readable.join('\n')}`].join('\n') : this.metadataOnlyText(file),
+      text: hasCharacterData ? `CAD 图纸可读标注/标题块/属性:\n${readable.join('\n')}` : this.metadataOnlyText(file),
       metadata,
       warnings,
     };
@@ -496,14 +494,13 @@ export class ContentExtractor {
     }
     metadata.contentCoverage = 'dxf_semantic_layer_block_annotations';
     metadata.characterDataCount = characterDataCount;
-    const semanticNodes = this.buildCadSemanticNodes(file, uniqueLayers, uniqueBlocks, uniqueEntityTypes, textEntities);
+    const semanticNodes = this.buildCadSemanticNodes(file, textEntities);
     return {
       text: [
-        this.metadataOnlyText(file),
         `CAD DXF 图层: ${uniqueLayers.join(', ')}`,
         `CAD DXF 块/符号: ${uniqueBlocks.join(', ')}`,
         `CAD DXF 实体类型: ${uniqueEntityTypes.join(', ')}`,
-        'CAD 语义图纸节点:',
+        'CAD 语义标注文本:',
         ...semanticNodes,
       ].join('\n'),
       metadata,
@@ -511,21 +508,15 @@ export class ContentExtractor {
     };
   }
 
-  private buildCadSemanticNodes(file: ClassifiedFile, layers: string[], blocks: string[], entityTypes: string[], texts: CadAnnotation[]): string[] {
+  private buildCadSemanticNodes(file: ClassifiedFile, texts: CadAnnotation[]): string[] {
+    // 图纸语义节点 = 文件名锚定 + 纯标注文本列表。逐实体枚举的图元属性包装
+    // （图层/块/实体类型/坐标/关联对象/状态）是重复结构模板噪音，会稀释检索语义
+    // （如「混凝土强度 C35」被「实体类型:|坐标:(…)」图元罗列干扰）；图层/块/实体
+    // 类型汇总已在 CAD DXF 汇总行体现，此处只保留图纸真实文字（图名/说明/尺寸标注值）
     const fileName = path.basename(file.relativePath);
-    const defaultLayer = layers[0] ?? '未命名图层';
-    const defaultBlock = blocks[0] ?? '全局模型空间';
-    const defaultEntity = entityTypes.find(type => /DIMENSION|TEXT|MTEXT|LEADER/u.test(type)) ?? entityTypes[0] ?? 'UNKNOWN';
-    const annotations = texts.length > 0 ? texts : [{ text: '未提取到文字标注', layer: defaultLayer, block: defaultBlock, entityType: defaultEntity }];
-    return annotations.map((annotation, index) => {
-      const nearest = this.findNearestCadAnnotation(annotation, annotations);
-      const layer = annotation.layer ?? layers[index % Math.max(1, layers.length)] ?? defaultLayer;
-      const block = annotation.block ?? blocks[index % Math.max(1, blocks.length)] ?? defaultBlock;
-      const entity = annotation.entityType ?? this.inferCadEntityType(annotation.text, defaultEntity);
-      const status = /关键|critical|尺寸|dim|mm|cm|m\b|°|φ|Φ|R\d/iu.test(annotation.text) ? '关键尺寸/约束候选' : '普通标注';
-      const position = annotation.x != null && annotation.y != null ? ` | 坐标: (${annotation.x.toFixed(2)}, ${annotation.y.toFixed(2)})` : '';
-      return [`图纸节点: ${fileName} | 图层: ${layer} | 块: ${block} | 实体类型: ${entity}${position}`, `└── 标注文本: ${annotation.text} | 关联对象: ${nearest ? `邻近标注 ${nearest.text}` : '空间邻近候选'} | 状态: ${status}`].join('\n');
-    });
+    const annotations = texts.filter(item => item.text && item.text.trim().length > 0);
+    if (annotations.length === 0) return [`图纸节点: ${fileName} | 未提取到文字标注`];
+    return [`图纸节点: ${fileName}`, ...annotations.map(item => item.text)];
   }
 
   private extractDxfTextAnnotations(raw: string): CadAnnotation[] {
@@ -546,21 +537,6 @@ export class ContentExtractor {
         y: Number(/(?:^|\r?\n)\s*20\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]),
       }].map(item => ({ ...item, x: Number.isFinite(item.x) ? item.x : undefined, y: Number.isFinite(item.y) ? item.y : undefined }));
     });
-  }
-
-  private findNearestCadAnnotation(target: CadAnnotation, annotations: CadAnnotation[]): CadAnnotation | undefined {
-    if (target.x == null || target.y == null) return undefined;
-    return annotations
-      .filter(item => item !== target && item.x != null && item.y != null)
-      .map(item => ({ item, distance: Math.hypot((item.x ?? 0) - target.x!, (item.y ?? 0) - target.y!) }))
-      .sort((a, b) => a.distance - b.distance)[0]?.item;
-  }
-
-  private inferCadEntityType(text: string, fallback: string): string {
-    if (/\b\d+(?:\.\d+)?\s*(?:mm|cm|m)\b|φ|Φ|R\d/iu.test(text)) return '线性尺寸/半径尺寸';
-    if (/°|angle|角度/iu.test(text)) return '角度尺寸';
-    if (/note|说明|备注/iu.test(text)) return '文字说明';
-    return fallback;
   }
 
   private async tryConvertDwgWithBundledWasm(filePath: string): Promise<{ dxfText?: string; tool: string; warnings: string[] }> {

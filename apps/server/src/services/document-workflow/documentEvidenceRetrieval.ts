@@ -163,7 +163,11 @@ export async function retrieveDeepChapterEvidence(input: {
       filters: { filePaths: input.scopedFilePaths },
       limit,
       weights: { keyword: 0.62, vector: 0.32, rewrite: 0.9, hybridBonus: 0.28 },
-      generationMode: false,
+      // E1/E2：深召回为生成场景检索——跳过 LLM 查询扩展并降级为确定性重排（heuristicRerank），
+      // cross-encoder 在 transformers v3 无 worker proxy，ONNX Run 在主线程同步执行，
+      // 多章节并发深召回叠加时阻塞事件循环数十分钟
+      generationMode: true,
+      disableReranker: true,
     });
     return mapSearchResults({ chapter: input.chapter, results: result.results.filter(item => input.scopedFilePaths.includes(item.filePath)), fileRoleByPath: input.fileRoleByPath, fileProcessingByPath: input.fileProcessingByPath, boost: entry.boost, source: entry.source });
   }, { kind: 'deepRetrieval', highRisk: input.highRisk });

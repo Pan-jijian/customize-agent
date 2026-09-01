@@ -1,6 +1,6 @@
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from './types';
 import { buildEvidenceBundle, evidenceBundlePrompt } from './evidence';
-import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
+import { callDocumentLlmJson, contextLayerChars, type DocumentJsonSchema } from './llmClient';
 import { buildSemanticSimilarity, type SemanticSimilarityFn } from './semanticSimilarity';
 import { displayChapterTitle } from './outline';
 import { CRITICAL_SECTION_ANCHORS, isCriticalSectionTitle } from './writingSpec';
@@ -450,6 +450,25 @@ export async function planChapterStructureWithLlm(input: {
     // 块间并发共享 diagnostics.llm.lastError：失败原因经 outFailure 独立带出（每块各自的对象，无竞态），
     // 不读共享 lastError 避免前序块/并发块写下的陈旧错误串号
     const blockFailure: { value?: string } = {};
+    // F7 分层统计：system 恒定段（l0）/ 章级共享段（l2：模板/章标题/用户要求/图谱/蓝图/上下文/角色，
+    // 同章各块规划调用值完全相同）/ 块级变化段（l3：块证据与块细目清单）。与 prompt 组装同源表达式
+    const contextLayers = {
+      l0: promptLines.join(LF).length,
+      l2: contextLayerChars([
+        `文档模板：${input.template.name}`,
+        `章节标题：${input.chapter.title}`,
+        input.requirement ? `用户要求：${input.requirement}` : '',
+        input.graphContext ? `项目图谱（本章定向）：${input.graphContext}` : '',
+        input.blueprintContext ? `文档蓝图（本章任务卡与实施方案）：${input.blueprintContext}` : '',
+        input.projectContext ? `上下文：${input.projectContext}` : '',
+        input.roleContext ? `角色要求：${input.roleContext}` : '',
+      ]),
+      l3: contextLayerChars([
+        evidenceText ? `真实绑定资料：${evidenceText}` : '',
+        `输入细目清单（本主题块共 ${sections.length} 条，必须全部覆盖，允许合并进同一 H4）：${sections.join('、')}`,
+        `请输出 1 个主题块，1~${MAX_SUB_POINTS_PER_BLOCK} 个 H4 要点，确保所有输入细目被覆盖。`,
+      ]),
+    };
     const result = await callDocumentLlmJson<PlannerBlockPlan>(promptLines.join(LF), userLines.filter(Boolean).join(LF + LF), {
       maxTokens: BLOCK_PLAN_MAX_TOKENS,
       temperature: 0.1,
@@ -458,6 +477,7 @@ export async function planChapterStructureWithLlm(input: {
       schema: BLOCK_PLAN_SCHEMA,
       disableThinkingBoost: true,
       outFailure: blockFailure,
+      contextLayers,
     });
     if (!result) {
       // 透传 llmClient/schema 校验记录的失败原因（空响应/限流/超时/截断位置/缺失字段），避免「LLM 无响应」不可诊断
