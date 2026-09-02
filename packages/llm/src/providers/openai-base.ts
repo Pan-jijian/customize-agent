@@ -293,6 +293,9 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
       // DeepSeek 等厂商在 usage 中额外返回 prefix cache 指标（prompt_cache_hit_tokens/miss_tokens），
       // OpenAI SDK 的 CompletionUsage 类型不含这些字段，按扩展字段安全读取透传给上层做缓存命中率观测
       const rawUsage = response.usage as (OpenAI.Completions.CompletionUsage & Record<string, unknown>) | undefined;
+      // 推理 token 观测（DeepSeek V3.1+ completion_tokens_details.reasoning_tokens）：生成任务要求关闭思考，
+      // 非零说明 disableThinking 未生效——空响应/正文截断类缺陷的根因观测点
+      const details = rawUsage?.completion_tokens_details as { reasoning_tokens?: number } | undefined;
       return createLLMResponse({
         content: msg.content ?? '',
         thinkingContent: msg.reasoning_content,
@@ -302,6 +305,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
           completionTokens: rawUsage.completion_tokens,
           promptCacheHitTokens: typeof rawUsage.prompt_cache_hit_tokens === 'number' ? rawUsage.prompt_cache_hit_tokens : undefined,
           promptCacheMissTokens: typeof rawUsage.prompt_cache_miss_tokens === 'number' ? rawUsage.prompt_cache_miss_tokens : undefined,
+          reasoningTokens: typeof details?.reasoning_tokens === 'number' ? details.reasoning_tokens : undefined,
         } : undefined,
       });
     }, { signal: options?.signal });

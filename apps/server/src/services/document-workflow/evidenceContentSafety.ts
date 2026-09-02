@@ -147,7 +147,7 @@ function normalizeSectionTitleKey(title: string) {
  * 3. 程序词 × 管理词组合（评标/投标/开标/中标/评审 + 纪律/监督/争议/澄清/公示等）。
  * 施工合法小节（劳动纪律/质量纪律/安全纪律/技术澄清）不含程序词，零误杀。
  */
-function isHardBannedSectionTitle(title: string): boolean {
+export function isHardBannedSectionTitle(title: string): boolean {
   const normalized = title.trim().replace(/\s+/gu, '');
   if (!normalized) return true;
   if (isTenderClauseFragmentTitle(normalized)) return true;
@@ -155,7 +155,43 @@ function isHardBannedSectionTitle(title: string): boolean {
   if (BID_PROCEDURE_SEMANTIC_PROTOTYPES.some(prototype => normalizeSectionTitleKey(prototype) === key)) return true;
   const hasProcedure = /评标|投标|开标|中标|评审|保证金|串标|围标|廉洁|询标|递交/u.test(normalized);
   const hasGovernance = /纪律|监督|争议|澄清|程序|行为|管控|限制|接触|公示|承诺|响应|办法/u.test(normalized);
-  return hasProcedure && hasGovernance;
+  if (hasProcedure && hasGovernance) return true;
+  // 资格审查类小节硬黑名单（目录污染根因）：模板自带「具备有效的营业执照」「具备有效的资质证书、
+  // 具备有效的安全生产许可证」「财务状况证明」「业绩证明」等投标人资格条件小节属招标文件资格审查
+  // 内容，非施工组织设计正文。词面组合本身禁出现（不依赖语义模型），施工技术语境词放行防误杀
+  // （真实生成回归：6.6/6.7 资格条件小节穿透两级大纲过滤进入最终目录）
+  return isQualificationSectionTitle(normalized);
+}
+
+/**
+ * 资格类小节标题判定（isHardBannedSectionTitle 的资格类分支独立导出）：
+ * 供生成后检测器（bidderQualificationSectionIssues）与确定性删除同源复用——
+ * 生成前大纲过滤与生成后 Final Gate 检测必须同一口径，防「过滤已拦但检测放行」的口径漂移。
+ */
+export function isQualificationSectionTitle(title: string): boolean {
+  const normalized = title.trim().replace(/\s+/gu, '');
+  if (!normalized) return false;
+  const hasQualification = /营业执照|资质证书|安全生产许可证|资格预审|资格审查|资质审查|财务状况|业绩证明|业绩要求|银行资信|审计报告|信用记录|信用评价|不良行为记录|联合体投标|联合体协议/u.test(normalized);
+  if (!hasQualification) return false;
+  const hasTechnicalContext = /施工|技术|方案|措施|管理|控制|验收|工艺|流程|计划|组织|进度|质量|工期|文明|绿色|环保|节能|材料|设备|机械|人员|劳务|检验|检测|试验|保证|落实|制度/u.test(normalized);
+  return !hasTechnicalContext;
+}
+
+/**
+ * 投标人资格条件类要求条款判定（与 isHardBannedSectionTitle 资格类词面同源，作用于要求条款而非小节标题）：
+ * 招标文件资格审查条款（「投标人资质要求：具备有效的营业执照…」「财务状况要求…」等）属投标人资格条件，
+ * 不是施组技术正文应响应的实质要求——路由/写作规则注入/零响应检测/大纲校准全部排除。
+ * 双信号判定：投标人资格语境锚定词 + 资格条件词；无锚定不判定（正文合法提到「安全生产许可证」不误伤）。
+ * 真实生成回归根因：合肥师范「投标人资质要求：具备有效的营业执照…」被语义分类为 responsive →
+ * 路由到安全文明章 → 写作时新增 6.6/6.7 资格条件小节，目录与正文双重污染。
+ */
+export function isBidderQualificationText(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/gu, '');
+  if (!normalized) return false;
+  const hasBidderAnchor = /投标人|投标方|承包人资格|资格要求|资格审查|资格预审|资质要求|资质条件|资质等级|资格条件|财务状况|业绩要求|业绩证明|信用要求|联合体/u.test(normalized);
+  if (!hasBidderAnchor) return false;
+  const hasQualificationTerm = /营业执照|资质证书|安全生产许可证|级及以上资质|财务状况|财务报告|审计报告|银行资信|业绩证明|类似业绩|信用记录|信用评价|不良行为记录|投标保证金|履约保证金/u.test(normalized);
+  return hasQualificationTerm;
 }
 
 /**

@@ -2,6 +2,7 @@ import type { DocumentTemplateChapter } from './types';
 import { callDocumentLlmJson } from './llmClient';
 import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
 import { cleanSectionTitleArtifacts, isInvalidPlannedSectionTitle, normalizePlannedSectionTitle, sectionTitleEquivalent } from './promptRuleExtraction';
+import { isBidderQualificationText, isHardBannedSectionTitle } from './evidenceContentSafety';
 import { docSystemPrefix } from './markdownComposer';
 
 /**
@@ -82,6 +83,9 @@ export async function calibrateOutlineSectionsToRequirements(input: {
       // 条款碎片提前拦截（与大纲主题过滤同口径，如"1委员会确定中"）：下游 filterOffTopicSectionsForChapters
       // 是最终兜底，此处提前拦截避免碎片小节进入写作计划
       if (isTenderClauseFragmentTitle(title)) continue;
+      // 资格条件类新增小节拒绝（目录污染防线三）：校准 LLM 偶发把资格审查条款转成小节标题
+      // （「具备有效的营业执照」），即使摘要层已过滤资格条款，此处仍按标题词面硬拦截
+      if (isBidderQualificationText(title) || isHardBannedSectionTitle(title)) continue;
       if ((chapter.sections || []).some(existing => sectionTitleEquivalent(existing, title))) continue;
       if (cleaned.some(existing => sectionTitleEquivalent(existing, title))) continue;
       cleaned.push(title);

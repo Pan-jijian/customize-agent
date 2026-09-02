@@ -297,6 +297,27 @@ export function markdownRowValue(parsedRows: Map<string, [string, string]>, patt
   return undefined;
 }
 
+/** P5（评分报告合肥师范4）：基本信息表“质量标准”只写“合格”而创优目标（确保黄山杯）落在
+ * 创优目标事实/正文中——质量标准行补全创优目标短语，与正文创优响应同口径。
+ * 仅在明确“确保X杯/奖/优质工程”表述存在且质量值未含创优词时附加，无创优目标项目零变化。 */
+const AWARD_OBJECTIVE_IN_TEXT_RE = /(?:黄山杯|鲁班奖|白玉兰杯|钱江杯|扬子杯|安济杯|长安杯|汾水杯|省优|市优|国优|优质工程|确保[^。；;|，,\n]{0,10}(?:杯|奖))/u;
+
+function awardObjectivePhrase(facts: DocumentFact[], fullMarkdown: string): string | undefined {
+  const texts: string[] = [];
+  for (const fact of facts) {
+    const fieldText = `${fact.fieldId || ''}${fact.key || ''}${fact.fieldName || ''}`;
+    if (/创优|优质优价|奖项|奖惩|award/u.test(fieldText)) texts.push(cleanInlineFactValue(stringifyFactValue(fact.value || '')));
+  }
+  texts.push(fullMarkdown);
+  for (const text of texts) {
+    const match = /(?:确保|争创|力争|确保获得)[^。；;|，,\n]{0,12}(?:杯|奖|优质工程)/u.exec(text);
+    if (!match) continue;
+    const phrase = match[0].trim();
+    if (phrase.length >= 5 && phrase.length <= 24) return phrase;
+  }
+  return undefined;
+}
+
 export function projectBasicInfoRows(facts: DocumentFact[], existingMarkdown = '', fullMarkdown = existingMarkdown) {
   const parsedRows = parseProjectBasicRowsFromMarkdown(existingMarkdown);
   const canonical = buildCanonicalFacts({ facts, markdown: fullMarkdown });
@@ -330,6 +351,12 @@ export function projectBasicInfoRows(facts: DocumentFact[], existingMarkdown = '
     ['质量标准', ...pickCanonical('quality_standard', [/质量标准|quality_standard/u])],
     ['合同估算价', ...pickCanonical('project_investment_estimate', [/合同估算|投资估算|最高投标限价|招标控制价|project_investment_estimate/u])],
   ];
+  // P5（评分报告合肥师范4）：质量标准行补全创优目标（正文写“确保黄山杯”而汇总表只写“合格”）
+  const qualityRow = rows.find(([label]) => label === '质量标准');
+  if (qualityRow && qualityRow[1] && !AWARD_OBJECTIVE_IN_TEXT_RE.test(qualityRow[1])) {
+    const objective = awardObjectivePhrase(facts, fullMarkdown);
+    if (objective && !qualityRow[1].includes(objective)) qualityRow[1] = `${qualityRow[1]}，${objective}`;
+  }
   return rows.filter(([, value]) => Boolean(value)).map(([label, value, source]) => [label, value, source || '项目资料'] as [string, string, string]);
 }
 

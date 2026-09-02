@@ -3,6 +3,7 @@ import { documentTextLength } from './budget';
 import { stringifyFactValue } from './utils';
 import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
 import { buildSemanticGate } from './semanticGate';
+import { isQualificationSectionTitle } from './evidenceContentSafety';
 
 /**
  * 文档数据与逻辑一致性校验器组（外部验收报告 8 风险点对应的确定性防线）：
@@ -1654,6 +1655,34 @@ export function fabricatedAwardIssues(markdown: string, factsModel: DocumentFact
     repairability: 'llm_repairable',
     message: `奖项表述与招标文件白名单不符：正文出现 ${[...fabricated].join('、')}，均未出现在招标文件评分项要求或绑定资料中`,
     suggestion: '创优目标必须以招标文件原文为准逐字落位（如「确保黄山杯」），禁止自行编造或替换为其他奖项名称；白名单外的奖项表述一律删除或替换为招标原文奖项。',
+  }];
+}
+
+// ── 18b. 投标人资格内容串章检测（评分报告 P1）──
+// 「具备有效的营业执照」「具备有效的资质证书、具备有效的安全生产许可证」等资格审查小节
+// 属招标文件资格文件内容，非施工组织设计正文。生成前大纲已有四道防线（大纲黑名单/校准验证/
+// 要求条款过滤/响应性分类），生成后 Final Gate 再设同口径检测器：写手自创小节穿透生成前过滤时，
+// 由交付阻断修复轮的确定性删除兜底。判定与 isQualificationSectionTitle 同源，防口径漂移。
+
+export function bidderQualificationSectionIssues(markdown: string): ValidationIssue[] {
+  const lines = markdown.split(/\r?\n/u);
+  const hitTitles = new Set<string>();
+  for (const line of lines) {
+    const heading = /^(#{2,4})\s+(.+)$/u.exec(line.trim());
+    if (!heading) continue;
+    const title = heading[2].trim();
+    if (isQualificationSectionTitle(title)) hitTitles.add(title);
+  }
+  if (hitTitles.size === 0) return [];
+  const titles = [...hitTitles];
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'structure',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: `正文出现投标人资格内容小节：${titles.slice(0, 3).map(title => `“${title}”`).join('、')}${titles.length > 3 ? ' 等' : ''}（资格审查内容不属于施工组织设计，属资格文件/商务文件范畴）`,
+    suggestion: '删除资格内容小节（标题与正文整体删除），不得以改写、合并、降级方式保留；正文如需提及安全生产许可证等证照，只能以施工管理口径表述（如“按规定持证上岗”），不得成节铺陈资格核验内容。',
   }];
 }
 

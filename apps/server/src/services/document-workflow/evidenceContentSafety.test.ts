@@ -11,7 +11,7 @@ vi.mock('@customize-agent/knowledge', () => {
   return { LocalTransformersEmbeddingProvider };
 });
 
-import { buildBidProcedureJudge, filterOffTopicSections, filterOffTopicSectionsForChapters, partitionEvidenceByContentSafety } from './evidenceContentSafety';
+import { buildBidProcedureJudge, filterOffTopicSections, filterOffTopicSectionsForChapters, isBidderQualificationText, partitionEvidenceByContentSafety } from './evidenceContentSafety';
 import type { DocumentEvidence, DocumentTemplateChapter } from './types';
 
 const STRONG_BID_RE = /评标|投标|澄清|评审|中标|保证金|开标|递交|廉洁|行贿|串标|围标|报价|清单计量/u;
@@ -175,6 +175,49 @@ describe('filterOffTopicSections', () => {
     const sections = ['劳动纪律与班组作业管理制度', '质量纪律与验收标准要求', '图纸疑问与技术澄清管理'];
     const result = await filterOffTopicSections({ sections, chapterTitle: '施工管理', embedDocuments: zeroEmbed });
     expect(result).toEqual(sections);
+  });
+
+  it('资格审查类小节硬剔除（目录污染回归：6.6/6.7 资格条件小节）', async () => {
+    const zeroEmbed = async (texts: string[]) => texts.map(() => [0, 0]);
+    const sections = ['具备有效的营业执照', '具备有效的资质证书、具备有效的安全生产许可证', '财务状况证明与审计报告要求', '投标人业绩证明与信用记录'];
+    const result = await filterOffTopicSections({ sections, chapterTitle: '施工管理', embedDocuments: zeroEmbed });
+    expect(result).toEqual([]);
+  });
+
+  it('资格审查类零误杀：含施工技术语境的合法小节放行', async () => {
+    const zeroEmbed = async (texts: string[]) => texts.map(() => [0, 0]);
+    const sections = ['绿色施工保证措施', '材料设备进场检验与验收制度', '质量管理体系与保证措施', '机械设备进场与维护保养计划'];
+    const result = await filterOffTopicSections({ sections, chapterTitle: '施工管理', embedDocuments: zeroEmbed });
+    expect(result).toEqual(sections);
+  });
+});
+
+describe('isBidderQualificationText（投标人资格条件类要求条款判定，目录污染防线）', () => {
+  it('投标人资质要求条款命中（合肥师范目录污染根因原文）', () => {
+    expect(isBidderQualificationText('投标人资质要求：具备有效的营业执照，具备有效的建筑工程施工总承包叁级及以上资质，具备有效的安全生产许可证')).toBe(true);
+  });
+
+  it('财务状况/业绩/信用要求条款命中', () => {
+    expect(isBidderQualificationText('财务状况要求：提供近三年经审计的财务报告')).toBe(true);
+    expect(isBidderQualificationText('投标人业绩要求：近五年具有类似工程业绩证明')).toBe(true);
+    expect(isBidderQualificationText('信用要求：投标人无不良行为记录')).toBe(true);
+  });
+
+  it('联合体与保证金类条款命中', () => {
+    expect(isBidderQualificationText('联合体投标的，须提交联合体协议')).toBe(false); // 无资格条件词不算
+    expect(isBidderQualificationText('投标保证金：人民币 50 万元')).toBe(false); // 无锚定词（保证金自身非锚定）
+    expect(isBidderQualificationText('投标人须提交投标保证金：人民币 50 万元')).toBe(true);
+  });
+
+  it('实质技术条款零误伤（无锚定或资格条件词不命中）', () => {
+    expect(isBidderQualificationText('投标人须确保黄山杯')).toBe(false);
+    expect(isBidderQualificationText('投标人须配备不少于 3 名专职安全生产管理人员')).toBe(false);
+    expect(isBidderQualificationText('合同工期 540 日历天')).toBe(false);
+    expect(isBidderQualificationText('发包人是否提供支付担保：是，发包人向承包人提供签约合同价8%的工程款支付担保')).toBe(false);
+  });
+
+  it('施工技术语境安全生产许可证表述不命中（正文合法提到）', () => {
+    expect(isBidderQualificationText('施工现场特种作业人员持证上岗，安全生产许可证在有效期内')).toBe(false);
   });
 });
 

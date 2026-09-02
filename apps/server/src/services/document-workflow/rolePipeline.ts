@@ -134,6 +134,16 @@ interface ChapterMarkdownPatch {
   anchorIndex?: number;
 }
 
+/** A1 锚点规格：字符串为普通锚点（引号摘录）；对象支持补写定位与整节重写两种确定性锚点 */
+export interface AnchorSpec {
+  /** 定位锚点原文（检测器引号摘录或系统确定性生成） */
+  text: string;
+  /** 区间结束锚点（结构重写类）：text 起始到 endText（不含）整体替换为 replacement */
+  endText?: string;
+  /** 补写定位模式：replacement 必须以锚点原文开头逐字保留，随后追加补写内容 */
+  append?: boolean;
+}
+
 function uniqueTextRange(content: string, patch: ChapterMarkdownPatch) {
   const originalText = patch.originalText?.trim();
   // 唯一性判定必须排除「未找到」情况：indexOf 返回 -1 时 -1 === -1 为 true，
@@ -185,9 +195,20 @@ function markdownStructureValid(content: string, title: string) {
 }
 
 function applyChapterPatch(input: { content: string; patch: ChapterMarkdownPatch; title: string; forbidDrawingImages: boolean }) {
-  const replacement = input.patch.replacement?.trim();
+  const rawReplacement = input.patch.replacement?.trim() ?? '';
   const budget = patchLengthBudget(input.content);
-  if (!replacement || replacement.length > budget) return { content: input.content, applied: false };
+  // 删除类 patch：replacement 为空字符串即删除语义（如资格串章小节删除/来源罗列句删除），
+  // 历史缺陷：空 replacement 被预算校验拒绝 → LLM 想删除的内容永远删不掉 → 修复空转
+  if (rawReplacement.length === 0) {
+    const range = uniqueTextRange(input.content, input.patch);
+    if (!range || range.length > budget) return { content: input.content, applied: false };
+    const next = sanitizeFormalMarkdown(input.content.replace(range, ''));
+    if (!markdownStructureValid(next, input.title)) return { content: input.content, applied: false };
+    if (documentTextLength(next) < Math.floor(documentTextLength(input.content) * 0.65)) return { content: input.content, applied: false };
+    return { content: next, applied: next !== input.content };
+  }
+  const replacement = rawReplacement;
+  if (replacement.length > budget) return { content: input.content, applied: false };
   if (input.forbidDrawingImages && /!\[[^\]]*\]\([^)]*\)/iu.test(replacement)) return { content: input.content, applied: false };
   const range = uniqueTextRange(input.content, input.patch);
   if (!range || range.length > budget) return { content: input.content, applied: false };
@@ -197,10 +218,8 @@ function applyChapterPatch(input: { content: string; patch: ChapterMarkdownPatch
   return { content: next, applied: next !== input.content };
 }
 
-/** 压缩空白（含换行）后做锚点匹配，将匹配区间映射回原文本执行替换。
- * 锚点出现多次时全部替换（全文统一口径：同一矛盾原文必须同改），替换方向从后往前避免偏移。 */
-function replaceAllAnchorOccurrences(content: string, anchorCompact: string, replacement: string): string {
-  // 压缩串字符 → 原文本位置映射（替换定位用）
+/** 压缩空白串 + 字符 → 原文位置映射（锚点定位用，多处共享） */
+function compactContentMap(content: string) {
   const rawPositions: number[] = [];
   let compact = '';
   for (let index = 0; index < content.length; index += 1) {
@@ -209,6 +228,13 @@ function replaceAllAnchorOccurrences(content: string, anchorCompact: string, rep
     compact += char;
     rawPositions.push(index);
   }
+  return { compact, rawPositions };
+}
+
+/** 压缩空白（含换行）后做锚点匹配，将匹配区间映射回原文本执行替换。
+ * 锚点出现多次时全部替换（全文统一口径：同一矛盾原文必须同改），替换方向从后往前避免偏移。 */
+function replaceAllAnchorOccurrences(content: string, anchorCompact: string, replacement: string): string {
+  const { compact, rawPositions } = compactContentMap(content);
   const hits: Array<{ start: number; end: number }> = [];
   let from = 0;
   for (;;) {
@@ -224,24 +250,129 @@ function replaceAllAnchorOccurrences(content: string, anchorCompact: string, rep
   return next;
 }
 
+/** 命中片段扩展为整句（表格行内命中按整行扩展，避免替换半个句子/半个表格行残留碎片） */
+function expandToLineOrSentence(content: string, start: number, end: number): { start: number; end: number } {
+  const lineStart = content.lastIndexOf('\n', start - 1) + 1;
+  const lineEndIndex = content.indexOf('\n', end);
+  const lineEnd = lineEndIndex < 0 ? content.length : lineEndIndex;
+  if (/^\s*\|/.test(content.slice(lineStart, lineEnd))) {
+    return { start: lineStart, end: lineEnd };
+  }
+  let sentenceStart = lineStart;
+  const prefix = content.slice(lineStart, start);
+  const prevBreak = Math.max(prefix.lastIndexOf('。'), prefix.lastIndexOf('；'), prefix.lastIndexOf(';'));
+  if (prevBreak >= 0) sentenceStart = lineStart + prevBreak + 1;
+  let sentenceEnd = lineEnd;
+  const suffix = content.slice(end, lineEnd);
+  const nextBreaks = [suffix.indexOf('。'), suffix.indexOf('；'), suffix.indexOf(';')].filter(index => index >= 0);
+  if (nextBreaks.length > 0) sentenceEnd = end + Math.min(...nextBreaks) + 1;
+  return { start: sentenceStart, end: sentenceEnd };
+}
+
+/** 锚点片段唯一命中定位：完整锚点失配时（表格行管道符被抹除/引号复述略改），
+ * 逐级缩短锚点前缀（步长 4）寻找正文中唯一命中的片段，扩展为整句/整行范围替换。
+ * 零覆盖类锚点（引号原文本就不在正文）不命中，由调用方确定性锚点兜底。 */
+function uniqueAnchorFragmentRange(content: string, anchorCompact: string, minLen: number): { start: number; end: number } | undefined {
+  const { compact, rawPositions } = compactContentMap(content);
+  for (let len = anchorCompact.length; len >= minLen; len -= 4) {
+    const fragment = anchorCompact.slice(0, len);
+    const hit = compact.indexOf(fragment);
+    if (hit < 0 || hit !== compact.lastIndexOf(fragment)) continue;
+    const startRaw = rawPositions[hit];
+    const endRaw = rawPositions[hit + len - 1] + 1;
+    return expandToLineOrSentence(content, startRaw, endRaw);
+  }
+  return undefined;
+}
+
 /** A1：系统锚点直连替换——检测器消息引号原文即精确锚点，归一化定位后替换，LLM 不复述原文。
- * 消除「LLM 自述 originalText 与正文细微差异失配 → producedCount>0 但 appliedCount=0」的修复无效根因。 */
-function applyAnchorPatch(input: { content: string; anchor: string; replacement?: string; title: string; forbidDrawingImages: boolean }) {
-  const replacement = input.replacement?.trim();
-  const budget = patchLengthBudget(input.content);
-  if (!replacement || replacement.length > budget) return { content: input.content, applied: false };
-  if (input.forbidDrawingImages && /!\[[^\]]*\]\([^)]*\)/iu.test(replacement)) return { content: input.content, applied: false };
+ * 消除「LLM 自述 originalText 与正文细微差异失配 → producedCount>0 但 appliedCount=0」的修复无效根因。
+ * appendMode（补写定位）：锚点是章节末尾定位句，replacement 以锚点开头逐字保留并追加补写内容；
+ * replacement 不以锚点开头时系统自动补锚点前缀（历史缺陷：LLM 不复述锚点 → patch 全部被拒 → 修复空转）。
+ * 删除模式（replacement 为空字符串）：删除锚点命中的全部整句/整行（删除污染小节/来源罗列句的确定性路径）。 */
+function applyAnchorPatch(input: { content: string; anchor: string; replacement?: string; title: string; forbidDrawingImages: boolean; appendMode?: boolean }) {
+  const rawReplacement = input.replacement?.trim() ?? '';
   const anchorCompact = input.anchor.replace(/\s+/gu, '');
   if (anchorCompact.length < 4) return { content: input.content, applied: false };
   const contentCompact = input.content.replace(/\s+/gu, '');
-  if (!contentCompact.includes(anchorCompact)) return { content: input.content, applied: false };
-  const next = replaceAllAnchorOccurrences(input.content, anchorCompact, replacement);
+  // 补写模式预算放大：追加内容只会使正文变长，无破坏性；常规模式保持原有防整章重写约束
+  const budget = input.appendMode
+    ? Math.max(4000, Math.min(24000, Math.ceil(documentTextLength(input.content) * 1.2)))
+    : patchLengthBudget(input.content);
+  // 删除模式：replacement 为空字符串，锚点必须精确命中，删除全部命中的整句/整行（多处出现全删）
+  if (rawReplacement.length === 0) {
+    if (!contentCompact.includes(anchorCompact)) return { content: input.content, applied: false };
+    const { compact, rawPositions } = compactContentMap(input.content);
+    const hits: number[] = [];
+    let from = 0;
+    for (;;) {
+      const hit = compact.indexOf(anchorCompact, from);
+      if (hit < 0) break;
+      hits.push(hit);
+      from = hit + anchorCompact.length;
+    }
+    const ranges = hits.map(hit => expandToLineOrSentence(input.content, rawPositions[hit], rawPositions[hit + anchorCompact.length - 1] + 1));
+    let next = input.content;
+    for (const range of ranges.reverse()) next = next.slice(0, range.start) + next.slice(range.end);
+    if (!markdownStructureValid(next, input.title)) return { content: input.content, applied: false };
+    if (documentTextLength(next) < Math.floor(documentTextLength(input.content) * 0.65)) return { content: input.content, applied: false };
+    return { content: sanitizeFormalMarkdown(next), applied: next !== input.content };
+  }
+  let replacement = rawReplacement;
+  if (replacement.length > budget) return { content: input.content, applied: false };
+  if (input.forbidDrawingImages && /!\[[^\]]*\]\([^)]*\)/iu.test(replacement)) return { content: input.content, applied: false };
+  // 补写模式定位句保留守卫：replacement 必须以锚点句开头逐字保留（定位句是正文既有内容，不得丢失）；
+  // LLM 输出不含锚点前缀时自动补前缀（锚点原文 + 补写内容），消除「复述失配 → patch 全被拒」空转
+  if (input.appendMode && !replacement.replace(/\s+/gu, '').startsWith(anchorCompact)) {
+    replacement = `${input.anchor}${replacement}`;
+  }
+  let next: string;
+  if (contentCompact.includes(anchorCompact)) {
+    next = replaceAllAnchorOccurrences(input.content, anchorCompact, replacement);
+  } else {
+    // 模糊回退：锚点片段唯一命中 → 整句/整行替换（历史缺陷：锚点失配整条 patch 落空，修复空转轮次）
+    const fragmentRange = uniqueAnchorFragmentRange(input.content, anchorCompact, 8);
+    if (!fragmentRange) return { content: input.content, applied: false };
+    next = input.content.slice(0, fragmentRange.start) + replacement + input.content.slice(fragmentRange.end);
+  }
   if (!markdownStructureValid(next, input.title)) return { content: input.content, applied: false };
   if (documentTextLength(next) < Math.floor(documentTextLength(input.content) * 0.65)) return { content: input.content, applied: false };
   return { content: sanitizeFormalMarkdown(removeUnwantedDrawingImages(next, input.forbidDrawingImages)), applied: next !== input.content };
 }
 
-export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }>; maxTokens?: number; patchGuard?: { observeOnly: boolean; diagnostics?: DocumentGenerationDiagnostics }; anchorTexts?: string[] }) {
+/** A1 区间锚点整节重写：标题行（startAnchor）到结束锚点（endText 起始，不含）整体替换为 replacement。
+ * 结构类缺陷（主要施工内容结构/重复小节合并）句子级 patch 修不了结构，锚点=小节标题行+下一同级标题，
+ * LLM 只输出该小节改写后的完整正文（含标题行），杜绝「补写段与旧正文并存」的重复污染。 */
+function applyAnchorRangePatch(input: { content: string; startAnchor: string; endAnchor?: string; replacement?: string; title: string; forbidDrawingImages: boolean }) {
+  const replacement = input.replacement?.trim();
+  // 整节重写预算：DeepSeek 输出池上限 8192 token（约 5500 中文字），replacement 超 9000 字符必被截断
+  // → 上限 9000 字符对齐输出池；调用方对超长小节（>7000 字符）不启用区间重写，避免截断产生残缺小节
+  const budget = Math.max(2600, Math.min(9000, Math.ceil(documentTextLength(input.content) * 0.95)));
+  if (!replacement || replacement.length > budget) return { content: input.content, applied: false };
+  if (input.forbidDrawingImages && /!\[[^\]]*\]\([^)]*\)/iu.test(replacement)) return { content: input.content, applied: false };
+  const startCompact = input.startAnchor.replace(/\s+/gu, '');
+  if (startCompact.length < 4) return { content: input.content, applied: false };
+  // 标题行保留守卫：replacement 必须逐字包含锚点标题行，防止整节重写丢小节标题
+  if (!replacement.replace(/\s+/gu, '').includes(startCompact)) return { content: input.content, applied: false };
+  const { compact, rawPositions } = compactContentMap(input.content);
+  const startHit = compact.indexOf(startCompact);
+  if (startHit < 0) return { content: input.content, applied: false };
+  const startRaw = rawPositions[startHit];
+  let endRaw = input.content.length;
+  if (input.endAnchor) {
+    const endCompact = input.endAnchor.replace(/\s+/gu, '');
+    if (endCompact.length < 4) return { content: input.content, applied: false };
+    const endHit = compact.indexOf(endCompact, startHit + startCompact.length);
+    if (endHit < 0) return { content: input.content, applied: false };
+    endRaw = rawPositions[endHit];
+  }
+  const next = input.content.slice(0, startRaw) + replacement + input.content.slice(endRaw);
+  if (!markdownStructureValid(next, input.title)) return { content: input.content, applied: false };
+  if (documentTextLength(next) < Math.floor(documentTextLength(input.content) * 0.65)) return { content: input.content, applied: false };
+  return { content: sanitizeFormalMarkdown(removeUnwantedDrawingImages(next, input.forbidDrawingImages)), applied: next !== input.content };
+}
+
+export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }>; maxTokens?: number; patchGuard?: { observeOnly: boolean; diagnostics?: DocumentGenerationDiagnostics }; anchorTexts?: Array<string | AnchorSpec> }) {
   throwIfAborted(input.signal);
   const repairType = input.repairType || classifyQualityRepairType(input.issues);
   const contextBlock = input.contextChapters?.length
@@ -250,6 +381,15 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
   // A1：系统锚点直连模式——检测器消息携带的引号原文即精确锚点（已从正文摘录），
   // 修复器不再要求 LLM 复述 originalText（历史缺陷：复述与正文细微差异失配 → patch 全部落空）
   const anchorMode = (input.anchorTexts?.length || 0) > 0;
+  const anchorSpecs = (input.anchorTexts || []).map(text => (typeof text === 'string' ? { text } : text));
+  const anchorListLine = (spec: AnchorSpec, index: number) => {
+    const original = input.anchorTexts?.[index];
+    const isRange = typeof original === 'object' && original.append !== true;
+    const marker = spec.append ? '【补写定位】' : isRange ? '【整节重写】' : '';
+    return `${index}. ${marker}“${spec.text}”${isRange && spec.endText !== undefined ? `（截至“${spec.endText}”之前，结尾标题不替换）` : ''}`;
+  };
+  const hasAppendAnchor = (input.anchorTexts || []).some(spec => typeof spec === 'object' && spec.append === true);
+  const hasRangeAnchor = (input.anchorTexts || []).some(spec => typeof spec === 'object' && spec.append !== true);
   // 证据注入预算：与写作侧同口径（evidencePromptBudgetForTarget）。历史缺陷：修复器全量注入每章
   // 2.8万-3.3万字符证据 → 超上下文窗口 400 失败 → 修复闭环瘫痪（真实生成 75 次失败、瞬态重试 0 次）
   const evidenceBundle = input.chapter.evidence.length
@@ -261,9 +401,13 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     FORMAL_WRITING_RULES,
     input.forbidDrawingImages ? '图片类资料只作为文本事实来源，禁止插入图片或 Markdown 图片语法。' : '',
     anchorMode
-      ? '系统已提供需要改写/删除的目标原文清单（按序号对应）。目标原文已从正文精确摘录，你只需逐条输出改写后的替换文本；replacement 只输出改写后的正文内容，禁止复述或修改目标原文以外的任何内容。如某条目标原文当前已不存在或无需修改，跳过该条不输出。'
+      ? ['系统已提供需要改写/删除的目标原文清单（按序号对应）。目标原文已从正文精确摘录，你只需逐条输出改写后的替换文本；replacement 只输出改写后的正文内容，禁止复述或修改目标原文以外的任何内容。如某条目标原文当前已不存在或无需修改，跳过该条不输出。',
+        hasAppendAnchor ? '标注【补写定位】的目标原文是章节内的定位句：replacement 必须以该目标原文开头逐字保留，随后追加补写内容；禁止删除或改写目标原文本身。' : '',
+        hasRangeAnchor ? '标注【整节重写】的目标原文是小节标题行：replacement 必须以该标题行开头（逐字保留标题行），随后输出该小节改写后的完整正文（含修复后的结构与全部保留事实），不得输出该小节以外的任何内容；清单中给出的“截至”标题行不属于替换范围，不得出现在 replacement 中。' : '',
+      ].filter(Boolean).join('\n')
       : '每个 patch 必须能通过 originalText 或 targetStart/targetEnd 在原章节中唯一定位；replacement 只替换该局部片段。',
     '只修复列出的问题，不得整章重写，不得删除无问题小节，不得改变一级/二级章节结构。',
+    '如某条修复的本质是删除（删除污染小节/来源罗列句/资格内容），replacement 直接输出空字符串 ""（系统按删除语义处理锚点/原文区间）；改写类修复不得输出空字符串。',
     '如问题涉及缺少正式表格，replacement 必须包含 Markdown 表名、表头、分隔线和至少一行数据；不得只写“见下表”或空表。',
     '如问题涉及缺失关键词/要素（缺词补写类），选取相关小节最后一个完整句子作为 originalText，replacement 为该句加补充句，保证定位唯一；不得因“原文找不到该关键词”而放弃产出 patch。',
     '如问题涉及提示词要求的关键词或禁用内容，只在相关段落自然补齐或替换，不得堆砌关键词。',
@@ -285,11 +429,13 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     '当前章节 Markdown：',
     input.chapter.content,
     contextBlock,
-    anchorMode ? `系统提供的目标原文（改写对象，按序号对应）：\n${input.anchorTexts!.map((text, index) => `${index}. “${text}”`).join('\n')}` : '',
+    anchorMode ? `系统提供的目标原文（改写对象，按序号对应）：\n${anchorSpecs.map((spec, index) => anchorListLine(spec, index)).join('\n')}` : '',
     `需要局部修复的问题：\n${input.issues.map(item => `- ${item}`).join('\n')}`,
   ].filter(Boolean).join('\n\n');
+  // 证据注入预算固定化：与正文长度解耦（历史缺陷：预算随正文长度每轮变化 → 修复调用前缀在
+  // 证据处提前分叉，同章多次修复的 prefix cache 命中率被压低；恒定预算下同章前缀完全稳定）
   const evidenceBudget = evidenceBundle
-    ? evidencePromptBudgetForTarget(Math.min(documentTextLength(input.chapter.content), 10000), 6000, 14000)
+    ? evidencePromptBudgetForTarget(8000, 6000, 14000)
     : undefined;
   const failure: { value?: string } = {};
   // 3.4 上下文分层统计（L0-L3）：口径同写作侧——L0 system 恒定段 / L1 任务级（主控提示词、用户要求、
@@ -300,7 +446,7 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     l1: contextLayerChars([
       input.requirement ? `用户要求：${input.requirement}` : '',
       input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
-      anchorMode ? `系统提供的目标原文（改写对象，按序号对应）：\n${input.anchorTexts!.map((text, index) => `${index}. “${text}”`).join('\n')}` : '',
+      anchorMode ? `系统提供的目标原文（改写对象，按序号对应）：\n${anchorSpecs.map((spec, index) => anchorListLine(spec, index)).join('\n')}` : '',
       `需要局部修复的问题：\n${input.issues.map(item => `- ${item}`).join('\n')}`,
     ]),
     l2: contextLayerChars([
@@ -313,11 +459,11 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     l3: contextLayerChars([evidenceText]),
   });
   const evidenceText = evidenceBundle && evidenceBudget ? `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: evidenceBudget, diagnostics: input.diagnostics })}` : '';
-  let result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(evidenceText), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, outFailure: failure, contextLayers: contextLayersFor(evidenceText) });
+  let result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(evidenceText), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, outFailure: failure, contextLayers: contextLayersFor(evidenceText), prefixKey: `repair:${input.chapter.id}` });
   if (!result && evidenceBundle && isContextOverflowLlmError(failure.value)) {
     // 上下文超长降级重试：证据压缩到极小预算（3000 字符），优先保住修复任务本身
     const compactEvidenceText = `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: 3000, diagnostics: input.diagnostics })}`;
-    result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(compactEvidenceText), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, contextLayers: contextLayersFor(compactEvidenceText) });
+    result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(compactEvidenceText), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, contextLayers: contextLayersFor(compactEvidenceText), prefixKey: `repair:${input.chapter.id}` });
   }
   throwIfAborted(input.signal);
   let content = input.chapter.content;
@@ -338,14 +484,21 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
         }
       }
     }
-    // A1：锚点直连分支——系统锚点定位（归一化匹配），LLM 只输出 replacement，无复述失配问题
-    if (anchorMode && typeof patch.anchorIndex === 'number') {
-      const anchor = input.anchorTexts?.[patch.anchorIndex];
-      if (anchor) {
-        const applied = applyAnchorPatch({ content, anchor, replacement: patch.replacement, title: input.chapter.title, forbidDrawingImages: input.forbidDrawingImages });
-        content = applied.content;
-        if (applied.applied) appliedCount += 1;
-        continue;
+    // A1：锚点直连分支——系统锚点定位（归一化匹配），LLM 只输出 replacement，无复述失配问题；
+    // anchorIndex 宽容字符串（LLM JSON 偶发 "0" 形态，历史缺陷：字符串序号落入普通 patch 路径全部失配）
+    if (anchorMode && patch.anchorIndex !== undefined && patch.anchorIndex !== null) {
+      const index = Number(patch.anchorIndex);
+      const spec = Number.isInteger(index) ? anchorSpecs[index] : undefined;
+      if (spec && spec.text) {
+        const anchorApplied = spec.endText !== undefined
+          ? applyAnchorRangePatch({ content, startAnchor: spec.text, endAnchor: spec.endText, replacement: patch.replacement, title: input.chapter.title, forbidDrawingImages: input.forbidDrawingImages })
+          : applyAnchorPatch({ content, anchor: spec.text, replacement: patch.replacement, title: input.chapter.title, forbidDrawingImages: input.forbidDrawingImages, appendMode: spec.append === true });
+        content = anchorApplied.content;
+        if (anchorApplied.applied) {
+          appliedCount += 1;
+          continue;
+        }
+        // 锚点路径失败回退普通 patch 路径（模糊 originalText 定位）再试一次，不直接丢弃该条 patch
       }
     }
     const applied = applyChapterPatch({ content, patch, title: input.chapter.title, forbidDrawingImages: input.forbidDrawingImages });

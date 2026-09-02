@@ -166,13 +166,16 @@ export function comparableSectionHeadingMatches(headingTitle: string, sectionTit
  * 把正文 H3/H4 标题行对齐到规划小节标题——LLM 常改写小节标题（增删修饰词/换连接词），
  * Reviewer 按规划标题定位失败产生「未匹配到独立小节标题」误报且精修轮空转；
  * 按可比标题口径（comparableSectionHeadingMatches）将近似标题替换为规划标题原文，
- * 同一规划标题只对齐一处（后续近似标题保持原样，避免多节共用同名标题），无法匹配的保持原样交由检测器报缺 */
-export function alignSectionHeadingsToPlan(markdown: string, plannedSections: string[]): string {
+ * 同一规划标题只对齐一处（后续近似标题保持原样，避免多节共用同名标题），无法匹配的保持原样交由检测器报缺。
+ * headingLevel（C2 全路径扩展）：3 只对齐 H3、4 只对齐 H4——主题块管线 H3 块标题与 H4 要点标题
+ * 混排对齐会跨级误配（如「施工部署」块标题把「施工部署与流水组织」H4 改写掉），分层对齐规避 */
+export function alignSectionHeadingsToPlan(markdown: string, plannedSections: string[], headingLevel?: 3 | 4): string {
   const uniqueTitles = [...new Set(plannedSections.filter(Boolean))];
   if (uniqueTitles.length === 0) return markdown;
+  const levelRe = headingLevel === 3 ? /^\s*###\s+/u : headingLevel === 4 ? /^\s*####\s+/u : /^\s*#{3,4}\s+/u;
   const usedTitles = new Set<string>();
   return markdown.split('\n').map(line => {
-    if (!/^\s*#{3,4}\s+/u.test(line)) return line;
+    if (!levelRe.test(line)) return line;
     const currentTitle = sectionHeadingTitleText(line);
     if (!currentTitle) return line;
     const matched = uniqueTitles.find(title => !usedTitles.has(title) && comparableSectionHeadingMatches(currentTitle, title));

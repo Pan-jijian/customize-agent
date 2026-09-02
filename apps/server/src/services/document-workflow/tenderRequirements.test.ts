@@ -512,6 +512,33 @@ describe('2.3 锚点全覆盖响应检测（requirementsCoverageIssues）', () =
     ]);
     expect(judged.get(0)).toBe(false);
   });
+
+  it('语义命中放行前金额锚点检查（评分报告合肥师范4：黄山杯已写但300万元未落位）', async () => {
+    // 语义通道恒高（旧逻辑直接放行），条款内金额锚点“300万元”缺失 → 报部分响应定向补写
+    const markdown = '## 质量目标\n本项目确保获得“黄山杯”。';
+    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: () => 0.8 });
+    const partial = issues.filter(issue => issue.message.includes('部分响应'));
+    expect(partial.length).toBe(1);
+    expect(partial[0].level).toBe('error');
+    expect(partial[0].severity).toBe('blocker');
+    expect(partial[0].message).toContain('300万元');
+  });
+
+  it('语义命中且金额锚点已落位（300万元）→ 放行不报', async () => {
+    const markdown = '## 质量目标\n本项目确保获得“黄山杯”，获得“黄山杯”的支付该项300万元。';
+    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: () => 0.8 });
+    expect(issues.filter(issue => issue.message.includes('部分响应'))).toEqual([]);
+  });
+
+  it('条款无金额锚点（如装配率 30%）时语义命中直接放行，不触发锚点检查', async () => {
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      assemblyRate: { text: '装配率：30%。', coreTerms: ['30%'], source: '招标文件.pdf' },
+    };
+    const markdown = '## 新技术\n本项目装配率30%。';
+    const issues = await requirementsCoverageIssues(markdown, model, { semanticSimilarity: () => 0.8 });
+    expect(issues).toEqual([]);
+  });
 });
 
 // ============ 阶段三 3.1/3.2：写作规则约束封装 ============

@@ -29,6 +29,9 @@ export interface LLMResponse {
     promptCacheHitTokens?: number;
     /** 上下文缓存未命中 token 数（首次请求为 miss，后续前缀一致的请求转为 hit） */
     promptCacheMissTokens?: number;
+    /** 推理模型思维链 token 数（DeepSeek completion_tokens_details.reasoning_tokens）；
+     * 生成任务要求关闭思考，非零说明 disableThinking 未生效（空响应/正文截断根因观测） */
+    reasoningTokens?: number;
   };
   /** 厂商特有扩展字段（如 x-openai-*, x-anthropic-* 前缀命名空间） */
   vendorExtensions?: Record<string, unknown>;

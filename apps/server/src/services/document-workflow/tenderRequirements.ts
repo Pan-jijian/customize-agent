@@ -6,6 +6,7 @@ import { documentTextLength } from './budget';
 import { cleanPdfHeadingNoise } from './factsModel';
 import { buildSemanticSimilarity, type SemanticSimilarityFn } from './semanticSimilarity';
 import { isBidDisciplineSentence, stableHash, systemConstraintLine } from './utils';
+import { isBidderQualificationText } from './evidenceContentSafety';
 import { docSystemPrefix } from './markdownComposer';
 
 /**
@@ -682,7 +683,8 @@ export function tenderRequirementsWritingRules(model: TenderRequirementModel | u
   if (model.smartSiteGrade) lines.push(`智慧工地等级要求：${model.smartSiteGrade.text}，智慧工地建设方案须达到该等级。`);
   if (model.assemblyRate) lines.push(`装配率要求：${model.assemblyRate.text}，装配式施工方案须覆盖水平构件与相关部品。`);
   itemLine('体系基准要求（必须逐项覆盖表述，不得零散遗漏）', model.systematicBenchmarks);
-  itemLine('投标人须知前附表响应条款（施组必须逐条响应或遵守，零响应即评标失分）', model.frontScheduleClauses);
+  // 资格条件类前附表条款不注入写作规则（目录污染防线二：写作 LLM 不读「具备有效的营业执照」就不会新增资格条件小节）
+  itemLine('投标人须知前附表响应条款（施组必须逐条响应或遵守，零响应即评标失分）', model.frontScheduleClauses.filter(item => !isBidderQualificationText(item.text)));
   if (model.dateFabricationProhibited) {
     lines.push('禁止编造开工日期：招标文件以开工令时间为准，正文不得自行设定具体日历开工日期，一律表述为“以开工令时间为准”。');
   }
@@ -750,9 +752,12 @@ export async function classifyRequirementResponsiveness(items: Array<{ kind: str
   // 商务纪律类条款确定性兜底（评分报告问题2）：投标/评标纪律承诺、廉洁承诺类条款属商务投标函
   // 内容，无论 LLM 分类结果如何一律 responsive=false——不进入零响应检测、不注入写作规则。
   // 词表与 utils.isBidDisciplineSentence 同口径（提取层已过滤，此处兜底提取漏网与 merge 残留）。
+  // 投标人资格条件类条款同兜底（目录污染根因）：「投标人资质要求：具备有效的营业执照…」等
+  // 资格审查条款一律 responsive=false——不路由、不注入写作规则（历史缺陷：被语义分类为
+  // responsive 路由到安全文明章 → 写作新增 6.6/6.7 资格条件小节，目录与正文双重污染）
   const forcedProgrammatic = new Set<number>();
   trimmed.forEach((item, index) => {
-    if (isBidDisciplineSentence(item.text)) forcedProgrammatic.add(index);
+    if (isBidDisciplineSentence(item.text) || isBidderQualificationText(item.text)) forcedProgrammatic.add(index);
   });
   const raw = await callDocumentLlmJson<{ results?: Array<{ index?: number; responsive?: boolean }> }>(
     [
@@ -915,7 +920,22 @@ export async function requirementsCoverageIssues(
       const score = options.semanticSimilarity(query, target);
       if (score > bestSimilarity) bestSimilarity = score;
     }
-    if (bestSimilarity >= 0.6) continue;
+    if (bestSimilarity >= 0.6) {
+      // 语义命中仅证明主题已响应；条款内金额参数仍须逐锚点字面落位（评分报告合肥师范4：
+      // 正文黄山杯 13 处但“支付300万元”零落位，语义阈值放行导致金额缺失静默漏检）。
+      // 仅金额类锚点（万元/亿元/元）做放行前检查——时间/数量类数字锚点误报面大不在此检查
+      const moneyAnchors = new Set<string>();
+      for (const moneyMatch of item.text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:万元|亿元|元))/giu)) moneyAnchors.add(moneyMatch[0].replace(/\s+/gu, ''));
+      if (moneyAnchors.size > 0) {
+        const missingMoney = [...moneyAnchors].filter(anchor => !normalized.includes(anchor));
+        if (missingMoney.length > 0) {
+          const coverage = requirementAnchorCoverage(item, normalized);
+          partialResponseCandidates.push({ item, kind, bestSimilarity, hit: coverage.hit, missing: coverage.missing });
+          continue;
+        }
+      }
+      continue;
+    }
     // 字面锚点兜底升级（300万缺失根治）：语义未过阈值时，条款内全部关键锚点
     // （coreTerms 专有名词/数字+单位/具名奖项）各自字面命中才算完全响应（黄山杯 0.50 误报修复保留）
     const coverage = requirementAnchorCoverage(item, normalized);
@@ -1080,7 +1100,9 @@ export function tenderRequirementsSummary(model: TenderRequirementModel | undefi
   if (model.smartSiteGrade) summary.push(`智慧工地等级：${model.smartSiteGrade.text}`);
   if (model.assemblyRate) summary.push(`装配率：${model.assemblyRate.text}`);
   if (model.systematicBenchmarks.length) summary.push(`体系基准 ${model.systematicBenchmarks.length} 条：${model.systematicBenchmarks.map(item => item.text).join('、')}`);
-  if (model.frontScheduleClauses.length) summary.push(`前附表响应条款 ${model.frontScheduleClauses.length} 条：${model.frontScheduleClauses.map(item => item.text).slice(0, 8).join('、')}`);
+  // 资格条件类前附表条款不入校准摘要（目录污染防线：校准 LLM 读到「具备有效的营业执照」会新增资格条件小节）
+  const responsiveScheduleClauses = model.frontScheduleClauses.filter(item => !isBidderQualificationText(item.text));
+  if (responsiveScheduleClauses.length) summary.push(`前附表响应条款 ${responsiveScheduleClauses.length} 条：${responsiveScheduleClauses.map(item => item.text).slice(0, 8).join('、')}`);
   if (model.dateFabricationProhibited) summary.push('禁编日期：以开工令为准');
   if (!model.extracted) summary.push('评分项要求未提取（无绑定资料或模型不可用），零响应检测跳过');
   return summary;

@@ -112,8 +112,8 @@ function schedulePrefixFriendlyLaunch(fingerprint: string, launch: () => void) {
     scheduleTimer = null;
     const batch = scheduleBuffer;
     scheduleBuffer = [];
-    batch.sort((a, b) => (a.fingerprint < b.fingerprint ? -1 : a.fingerprint > b.fingerprint ? 1 : 0));
-    for (const item of batch) item.launch();
+    const ordered = sortScheduledLaunches(batch);
+    for (const item of ordered) item.launch();
   }, prefixScheduleWindowMs);
 }
 
@@ -226,7 +226,23 @@ export function contextLayerChars(parts: Array<string | undefined | false>): num
   return parts.filter((part): part is string => Boolean(part)).reduce((sum, part) => sum + part.length, 0);
 }
 
-export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; contextLayers?: Partial<Record<ContextLayerKey, number>> } = {}): Promise<string | undefined> {
+/**
+ * P1-3 缓存调度指纹：调用方显式 prefixKey（章级/节级缓存分组键）优先——同章各块/各小节请求
+ * 共享 L0-L2 前缀，经调度器背靠背发射即可命中；缺省回退旧启发式（system + user 前 2000 字符）。
+ * 历史缺陷：写作 prompt 首位是 6101 字符主控提示词，前 2000 字符对所有请求完全相同，
+ * 指纹失去区分度 → 调度退化为无序发射 → 章级共享段（L2）设计命中率落空。
+ * 提取为纯函数供单测覆盖分组正确性（同 key 聚合/跨 key 隔离/无 key 回退）。
+ */
+export function llmPrefixFingerprint(system: string, prompt: string, prefixKey?: string): string {
+  return prefixKey ? prefixKey : stableHash(`${system}\n${prompt.slice(0, 2000)}`);
+}
+
+/** 缓存友好发射调度器主体：窗口内收集请求并按指纹排序后按序发射（sort 提取供纯函数单测） */
+export function sortScheduledLaunches<T extends { fingerprint: string }>(batch: T[]): T[] {
+  return [...batch].sort((a, b) => (a.fingerprint < b.fingerprint ? -1 : a.fingerprint > b.fingerprint ? 1 : 0));
+}
+
+export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; contextLayers?: Partial<Record<ContextLayerKey, number>>; prefixKey?: string } = {}): Promise<string | undefined> {
   if (options.diagnostics) {
     options.diagnostics.llm.calls += 1;
     // 上下文输入观测：system + user 字符总量 + L0-L3 分层统计（3.4：分层占比供上下文瘦身前后对比验收）
@@ -274,9 +290,7 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
     const EMPTY_CONTENT = Symbol('empty-content');
     const attemptOnce = async (maxTokensArg: number | undefined, thinkingTrimmingHint = false): Promise<string> => {
       if (options.signal?.aborted) throw new Error('用户中止');
-      // P1-3 指纹：system 全文 + user 稳定段（前 2000 字符，D2 重排后覆盖模板/章节/要求）——
-      // 同前缀请求经调度器相邻发射，最大化 prefix cache 命中
-      const prefixFingerprint = stableHash(`${system}\n${prompt.slice(0, 2000)}`);
+      const prefixFingerprint = llmPrefixFingerprint(system, prompt, options.prefixKey);
       const response = await new Promise<Awaited<ReturnType<typeof provider.chat>>>((resolve, reject) => {
         schedulePrefixFriendlyLaunch(prefixFingerprint, () => {
           if (options.signal?.aborted) {
@@ -301,6 +315,9 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
           stats.outputTokens = (stats.outputTokens || 0) + response.usage.completionTokens;
           stats.promptCacheHitTokens = (stats.promptCacheHitTokens || 0) + (response.usage.promptCacheHitTokens || 0);
           stats.promptCacheMissTokens = (stats.promptCacheMissTokens || 0) + (response.usage.promptCacheMissTokens || 0);
+          // 推理 token 观测：生成任务要求关闭思考，reasoningTokens>0 说明 disableThinking 未生效
+          // （空响应/正文截断类缺陷的根因观测点，4a）
+          if (response.usage.reasoningTokens) stats.reasoningTokens = (stats.reasoningTokens || 0) + response.usage.reasoningTokens;
         }
         return content;
       }
@@ -381,8 +398,16 @@ export interface DocumentJsonSchema {
 
 /** 校验单个值：返回错误明细（含字段路径，如 $.blocks[2].subPoints[0].title），供诊断透传 */
 function validateSchemaField(value: unknown, field: DocumentJsonSchemaField, path: string): string[] {
-  const actualType = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
-  if (actualType !== field.type) return [`字段 ${path} 类型错误（期望 ${field.type}，得到 ${actualType}）`];
+  let actualType = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
+  // 数字字符串宽容：LLM 结构化输出常把数值写成字符串（如 count:"320"），严格类型检查会拒绝整份
+  // 输出并触发重试直至失败（计划数据主表 schema 失败 6 次即此根因）；字符串可无损转 number 时按 number 接受，
+  // 数值归一化由消费方（buildPlanDataMaster 等）完成
+  if (field.type === 'number' && actualType === 'string') {
+    const trimmed = String(value).trim();
+    const parsed = Number(trimmed);
+    if (trimmed !== '' && Number.isFinite(parsed)) actualType = 'number';
+  }
+  if (actualType !== field.type) return [`字段 ${path} 类型错误（期望 ${field.type}，得到 ${Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value}）`];
   const errors: string[] = [];
   if (field.type === 'string') {
     const text = value as string;
@@ -520,7 +545,7 @@ export function amplifiedTruncationMaxTokens(current?: number): number {
   return Math.ceil((current || 2000) * 1.5);
 }
 
-export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>> } = {}, invokeLlm?: (attemptSystem: string, attemptPrompt: string) => Promise<string | undefined>): Promise<T | undefined> {
+export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>>; prefixKey?: string } = {}, invokeLlm?: (attemptSystem: string, attemptPrompt: string) => Promise<string | undefined>): Promise<T | undefined> {
   // 历史缺陷：规划/审查/修复类 jsonOnly 调用一次失败即放弃，造成章节降级与后续数轮无效修复；
   // 失败原因回注提示词让模型收敛，秒级重试代价远小于分钟级降级链。
   // 4.12.12 收敛：JSON 截断类失败重试时放大 maxTokens（截断根因多为 token 上限不足，同额度重试必再截断——
@@ -528,7 +553,7 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
   const maxJsonAttempts = 2;
   let lastFailure: string | undefined;
   let retryMaxTokens = options.maxTokens;
-  const invoke = invokeLlm ?? ((attemptSystem: string, attemptPrompt: string) => callDocumentLlm(attemptSystem, attemptPrompt, true, { maxTokens: retryMaxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost, taskKind: options.taskKind, contextLayers: options.contextLayers }));
+  const invoke = invokeLlm ?? ((attemptSystem: string, attemptPrompt: string) => callDocumentLlm(attemptSystem, attemptPrompt, true, { maxTokens: retryMaxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost, taskKind: options.taskKind, contextLayers: options.contextLayers, prefixKey: options.prefixKey }));
   for (let attempt = 0; attempt <= maxJsonAttempts; attempt += 1) {
     if (options.signal?.aborted) return undefined;
     const attemptPrompt = attempt === 0 ? prompt : `${prompt}\n\n（重试修正：上一次输出未通过——${lastFailure ?? '输出无效'}。请重新输出完整合法的 JSON，只返回 JSON。）`;
@@ -547,6 +572,9 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
           const message = `JSON Schema 校验失败：${errors.join('；')}`;
           lastFailure = message;
           recordJsonValidationFailure(options.diagnostics, message);
+          // 缺失字段类失败同样多为输出长度压力（模型为压预算省略字段），放大 maxTokens 重试
+          //（历史缺陷：只对「JSON 被截断」放大，缺失字段类同额度重试仍缺字段，主表 6 次失败即此）
+          if (message.includes('缺失字段')) retryMaxTokens = amplifiedTruncationMaxTokens(retryMaxTokens);
           if (attempt >= maxJsonAttempts) {
             if (options.outFailure) options.outFailure.value = message;
             return undefined;
@@ -571,6 +599,7 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
             const repairMessage = `JSON Schema 校验失败：${repairErrors.join('；')}`;
             lastFailure = repairMessage;
             recordJsonValidationFailure(options.diagnostics, repairMessage);
+            if (repairMessage.includes('缺失字段')) retryMaxTokens = amplifiedTruncationMaxTokens(retryMaxTokens);
             if (attempt >= maxJsonAttempts) {
               if (options.outFailure) options.outFailure.value = repairMessage;
               return undefined;
@@ -599,6 +628,6 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
   return undefined;
 }
 
-export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>> } = {}): Promise<T | undefined> {
+export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>>; prefixKey?: string } = {}): Promise<T | undefined> {
   return callDocumentLlmJsonWithRetry(system, prompt, options);
 }

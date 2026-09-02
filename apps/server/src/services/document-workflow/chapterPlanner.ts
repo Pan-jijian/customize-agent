@@ -486,6 +486,7 @@ export async function planChapterStructureWithLlm(input: {
       disableThinkingBoost: true,
       outFailure: blockFailure,
       contextLayers,
+      prefixKey: `plan-block:${input.chapter.id}`,
     });
     if (!result) {
       // 透传 llmClient/schema 校验记录的失败原因（空响应/限流/超时/截断位置/缺失字段），避免「LLM 无响应」不可诊断

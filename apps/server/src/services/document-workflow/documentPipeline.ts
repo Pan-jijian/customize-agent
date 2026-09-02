@@ -12,7 +12,8 @@ import { validateFactConsistency } from '../document-validation/factConsistencyS
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown, SOURCE_ENUMERATION_PHRASE_RE } from './markdownComposer';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from './budget';
 import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown, markdownTableQualityIssues, generatedFactVerificationIssuesAsync, boqPlacementIssues, preciseFactUsageIssues } from './qualityValidation';
-import { areaArithmeticIssues, applyNumericConsistencyDeterministicFixes, bodySentencesForSemantic, collapseRepeatedWords, commercialDataInBodyIssues, dangerousListConsistencyIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, localAdaptationKeywordIssues, overviewRecapCandidates, overviewRecapIssues, repeatedWordIssues, resourceConsistencyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, stripCommercialDataBodyLines, stripCommercialDataSentences, stripOverviewRecapBodyLines, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { areaArithmeticIssues, applyNumericConsistencyDeterministicFixes, bidderQualificationSectionIssues, bodySentencesForSemantic, collapseRepeatedWords, commercialDataInBodyIssues, dangerousListConsistencyIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, localAdaptationKeywordIssues, overviewRecapCandidates, overviewRecapIssues, repeatedWordIssues, resourceConsistencyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, stripCommercialDataBodyLines, stripCommercialDataSentences, stripOverviewRecapBodyLines, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { isQualificationSectionTitle } from './evidenceContentSafety';
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { normalizeChapterTitleLine, requirementsCoverageIssues, tenderRequirementCheckItems, tenderRequirementSemanticQuery } from './tenderRequirements';
 import { constructionOrgMajorContentIssues } from './constructionOrgQualityRules';
@@ -1168,6 +1169,7 @@ export async function finalizeGeneration(p: {
     { code: 'dangerous-list-missing', match: /危大工程辨识清单遗漏|未编制危大工程辨识清单/u },
     { code: 'repeated-word', match: /正文存在叠词重复表述/u },
     { code: 'commercial-data', match: /正文出现商务条款数据/u },
+    { code: 'qualification-mixed', match: /投标人资格内容小节/u },
     { code: 'boq-placement', match: /清单项落位不足/u },
     { code: 'precise-param', match: /可靠精确参数使用不足/u },
     { code: 'stage-phrasing', match: /施工阶段划分口径不统一/u },
@@ -1204,6 +1206,7 @@ export async function finalizeGeneration(p: {
       'dangerous-list-missing': ['【危大工程辨识清单补全】', '正文已出现危大工程适用前提（基坑深度/脚手架高度/起重设备等），但辨识清单遗漏适用项或全文未编制辨识清单，遗漏即合规硬伤。', '请以局部 patch 方式按建办质〔2018〕31号补全辨识：将遗漏项写入危大工程辨识清单并标注分级，超过一定规模的专项施工方案注明专家论证要求；清单项名与全文其他清单保持唯一一致。只修改清单相关段落。'].join('\n'),
       'repeated-word': ['【叠词重复表述定向修复】', '该章节正文存在同一双字词紧邻重复（如“执行执行”“进行进行”）。', '请以局部 patch 方式删除紧邻重复字词，保持语句完整通顺；其余内容与事实数据不得改动。'].join('\n'),
       'commercial-data': ['【商务条款数据定向清理】', '该章节正文出现商务条款数据（暂列金额/暂估价/综合单价/税率等），施组正文禁止出现商务数据。', '请以局部 patch 方式删除含商务数据的句子：句中的商务数字（金额/单价/税率）一律删除，不得改写为其他商务表述；如删除后语义不完整，改写为定性表述（如“按合同约定执行”）。只修改相关句子。'].join('\n'),
+      'qualification-mixed': ['【投标人资格内容串章删除】', '该章节正文包含资格审查内容小节（营业执照/资质证书/安全生产许可证/财务状况等），属资格文件/商务文件内容，不属于施工组织设计正文。', '请以局部 patch 方式整体删除该小节：replacement 输出为空字符串（删除语义），锚点或 originalText 定位该小节标题行起至下一同级/上级标题行前的全部内容（含标题行）；删除后正文不得残留资格核验、资质证照年检、财务状况证明等表述。只删除该小节，不得改动其他内容。'].join('\n'),
       'boq-placement': ['【清单项落位定向补写】', '该章节对应专业工程的工程量清单项在正文零落位或落位率不足，零落位即评审失分。', '请以局部 patch 方式在“主要施工内容”小节按专业工程分组补写未落位清单项（缺陷描述中已列明细，最多 30 项，其余同类项按已列名称分组归并）：每条写“施工概况：”工程名称+工程量+作业条件；“施工流程：”不少于 4 个环节的工序顺序表达（形式由模型自然选择：顺序词叙述、编号步骤、有序/无序列表或箭头链均可）；“施工方法：”至少 4 个带单位工艺参数。清单项名称必须逐字引用缺陷描述中的原文（不得改写为近似词），参数必须来自缺陷描述或绑定资料，禁止编造。不新增小节标题。'].join('\n'),
       'precise-param': ['【关键参数落位定向补写】', '该章节正文缺少资料中的关键工程参数（工期/面积/强度等级/材料规格/规范编号，缺陷描述中已列缺失参数）。', '请以局部 patch 方式将缺失的关键参数自然补入相关句子：参数值必须与资料一致，不得编造；补写后保持原句结构不变。只修改相关句子。'].join('\n'),
       'stage-phrasing': ['【阶段口径统一定向修复】', '该章节正文存在多种互异的施工阶段划分口径（详见缺陷描述中的划分句原文），口径互异即自相矛盾。', '请以局部 patch 方式统一口径：以总进度计划/施工部署章节的阶段划分为唯一口径，其余划分句逐字对齐或删除；划分句保留必要的阶段名称与工序对应关系，不得丢失事实。只修改相关句子。'].join('\n'),
@@ -1257,7 +1260,21 @@ export async function finalizeGeneration(p: {
       }
       case 'fact-verification': {
         const tokenPart = (message.split('数字')[1] || '').trim();
-        return tokenPart ? finalChapterDrafts.findIndex(chapter => tokenPart.split(/[、,，\s]+/u).some(token => token && (chapter.content || '').includes(token))) : -1;
+        if (!tokenPart) return -1;
+        const tokens = tokenPart.split(/[、,，\s]+/u).filter(Boolean);
+        // 数值 token 优先定位：消息「540天」与正文「540个日历天」单位/表述差异不阻断定位
+        //（历史缺陷：整 token 失配 → 定位失败 → 修复从未派发 → 反查失败缺陷穿透门禁）
+        const extractNumber = (token: string): string => {
+          const match = /^\d[\d,，]*(?:\.\d+)?/u.exec(token);
+          return match ? match[0] : '';
+        };
+        const numberTokens = [...new Set(tokens.map(extractNumber).filter(token => token.length >= 2))];
+        if (numberTokens.length > 0) {
+          const byNumber = finalChapterDrafts.findIndex(chapter => numberTokens.some(token => normalizedBody(chapter).includes(token)));
+          if (byNumber >= 0) return byNumber;
+        }
+        // 空白归一化定位：正文“540 天”与消息“540天”的空白差异曾导致整轮定位失败
+        return finalChapterDrafts.findIndex(chapter => tokens.some(token => token && normalizedBody(chapter).includes(token.replace(/\s+/gu, ''))));
       }
       case 'major-content-structure':
         return finalChapterDrafts.findIndex(chapter => /项目主要施工内容|主要施工内容/u.test(`${chapter.title} ${(chapter.sections || []).join(' ')}`) || /^#{3,4}\s+(?:\d+(?:\.\d+)*\s+)?(?:项目)?主要施工\s*内容/gmu.test(chapter.content || ''));
@@ -1325,6 +1342,12 @@ export async function finalizeGeneration(p: {
       case 'commercial-data': {
         const terms = (message.split('：')[1] || '').split(/[、,，]/u).map(term => term.trim()).filter(Boolean);
         return finalChapterDrafts.findIndex(chapter => terms.some(term => term && (chapter.content || '').includes(term)));
+      }
+      case 'qualification-mixed': {
+        // 资格串章消息携带小节标题（“具备有效的营业执照”等）：定位含该标题的章节；
+        // 标题可能带编号前缀（6.6 具备…），用引号内标题词面反查最可靠
+        const quotedTitles = [...message.matchAll(/“([^”]{2,40})”/gu)].map(match => match[1]);
+        return finalChapterDrafts.findIndex(chapter => quotedTitles.some(title => (chapter.content || '').includes(title)));
       }
       case 'boq-placement':
         // 清单补写落到"主要施工内容"章节（复用主要施工内容定位逻辑）
@@ -1469,6 +1492,39 @@ export async function finalizeGeneration(p: {
       { match: /生成后事实反查失败/u, label: '生成后事实反查失败', detect: async markdown => (await generatedFactVerificationIssuesAsync(markdown, factsModel, { scopeClassifier: factTokenScopeClassifier })).filter(item => /生成后事实反查失败/u.test(item.message)).map(item => item.message) },
       { match: /正文存在叠词重复表述/u, label: '叠词重复表述', detect: async markdown => repeatedWordIssues(markdown).map(item => item.message), delete: async content => { const next = collapseRepeatedWords(content); return { content: next, removed: next === content ? 0 : 1 }; } },
       { match: /正文出现商务条款数据/u, label: '商务条款数据', detect: async markdown => (await commercialDataInBodyIssues(markdown)).map(item => item.message), delete: async content => { const next = stripCommercialDataSentences(content); return { content: next, removed: next === content ? 0 : 1 }; } },
+      {
+        // h17：资格串章确定性删除（评分报告 P1 收口）——资格内容小节整块删除，
+        // 检测与删除同源（isQualificationSectionTitle），LLM patch 删不动时也不残留进导出门禁
+        match: /投标人资格内容小节/u,
+        label: '投标人资格内容串章',
+        detect: async markdown => bidderQualificationSectionIssues(markdown).map(item => item.message),
+        delete: async (content: string): Promise<{ content: string; removed: number }> => {
+          const lines = content.split(/\r?\n/u);
+          let removed = 0;
+          const kept: string[] = [];
+          let skipUntilLevel: number | undefined;
+          for (const line of lines) {
+            const heading = /^(#{2,4})\s+(.+)$/u.exec(line.trim());
+            if (skipUntilLevel !== undefined) {
+              if (heading && heading[1].length <= skipUntilLevel) {
+                // 到达下一同级/上级标题行：恢复保留
+                skipUntilLevel = undefined;
+                kept.push(line);
+                continue;
+              }
+              // 删除区间内：标题行以下内容全部丢弃（含子标题）
+              continue;
+            }
+            if (heading && isQualificationSectionTitle(heading[2].trim())) {
+              removed += 1;
+              skipUntilLevel = heading[1].length;
+              continue;
+            }
+            kept.push(line);
+          }
+          return removed > 0 ? { content: kept.join('\n'), removed } : { content, removed: 0 };
+        },
+      },
       { match: /清单项落位不足/u, label: '清单项落位不足', detect: async markdown => (await boqPlacementIssues(markdown, finalChapterDrafts, factsModel)).map(item => item.message) },
       { match: /可靠精确参数使用不足/u, label: '可靠精确参数使用不足', detect: async markdown => (await preciseFactUsageIssues(markdown, factsModel, finalChapterDrafts)).filter(item => /关键参数抽查/u.test(item.message)).map(item => item.message) },
       { match: /施工阶段划分口径不统一/u, label: '施工阶段划分口径', detect: async markdown => (await stagePhrasingIssues(markdown)).map(item => item.message) },
@@ -1536,7 +1592,9 @@ export async function finalizeGeneration(p: {
           // 定点替换（applyNumericConsistencyDeterministicFixes），成功即跳过 LLM 轮次。
           // 历史缺陷：LLM 修复数值矛盾时 patch 锚点失配率高（260/160 等矛盾残留进导出门禁），
           // 修复轮次空转浪费 LLM 预算；「检测定位=修复定位」让确定性路径先行。
-          if (issueCode === 'labor-contradiction') {
+          // A2.1 扩展：数值类矛盾 code 全量先行（劳动力/节点工期/跨节数值），不只 labor-contradiction——
+          // 评分报告 P2/P3（装配率 38.4% 孤立值、劳动力 180 vs 120）同属可定点替换的数值矛盾
+          if (['labor-contradiction', 'data-consistency', 'param-conflict', 'area-arithmetic', 'field-value-mismatch'].includes(issueCode)) {
             const deterministicFix = applyNumericConsistencyDeterministicFixes(finalChapterDrafts[chapterIndex].content);
             if (deterministicFix.fixedCount > 0) {
               finalChapterDrafts[chapterIndex] = { ...finalChapterDrafts[chapterIndex], content: deterministicFix.markdown };
@@ -1555,7 +1613,119 @@ export async function finalizeGeneration(p: {
           }
           // A1：检测器消息引号原文即精确锚点，直连修复器——LLM 只输出改写文本，不再复述 originalText
           //（历史缺陷：LLM 自述 originalText 与正文细微差异失配 → patch 全部落空，修复 4 连失败）
-          const anchorTexts = [...issue.message.matchAll(/“([^”]{6,80})”/gu)].map(match => match[1]);
+          // A1.2 锚点治理：①只保留正文真实存在的锚点（零覆盖类缺陷引号原文=招标要求原文/系统名，本就不在正文）；
+          // ②每轮 attempt 从当前消息（首轮=原始缺陷消息，升级轮=缺陷消息+复检残留消息）重提取锚点，
+          // 正文已被上一轮修改后旧锚点不再复用；③补写类缺陷（引号原文在正文零命中）注入确定性锚点=
+          // 小节末尾句（补写定位）；④结构类缺陷注入确定性区间锚点=小节标题行+下一同级标题（整节重写）
+          const SUPPLEMENT_APPEND_CODES = new Set(['requirement-unresponded', 'six-hundred-percent', 'system-zero-coverage', 'boq-placement', 'green-quant', 'work-injury', 'local-award', 'emergency-depth', 'dangerous-list-missing', 'precise-param']);
+          const STRUCTURE_SECTION_CODES = new Set(['major-content-structure', 'major-content-dirty', 'major-content-flow', 'major-content-method', 'major-content-dup']);
+          // 在 content 的 [sectionRe 命中标题, 下一同级标题) 区间内从后往前找定位句（补写落位到目标小节内）
+          const sectionTailSentence = (content: string, sectionRe: RegExp): string | undefined => {
+            const lines = content.split(/\r?\n/u).map(line => line.trim());
+            let sectionStart = -1;
+            let sectionLevel = 3;
+            lines.forEach((line, index) => {
+              const heading = /^(#{2,4})\s/u.exec(line);
+              if (heading && sectionRe.test(line)) { sectionStart = index; sectionLevel = heading[1].length; }
+            });
+            if (sectionStart < 0) return undefined;
+            const levelRe = new RegExp(`^#{1,${sectionLevel}}\\s`);
+            let sectionEnd = lines.length;
+            for (let index = sectionStart + 1; index < lines.length; index += 1) {
+              if (levelRe.test(lines[index])) { sectionEnd = index; break; }
+            }
+            for (let index = sectionEnd - 1; index > sectionStart; index -= 1) {
+              const sentenceMatch = [...lines[index].matchAll(/[^。；;]+[。；;]/gu)].pop();
+              if (sentenceMatch) {
+                const sentence = sentenceMatch[0].trim();
+                if (sentence.length >= 12 && sentence.length <= 80) return sentence;
+              }
+            }
+            return undefined;
+          };
+          const chapterTailSentence = (content: string): string | undefined => {
+            const lines = content.split(/\r?\n/u).map(line => line.trim());
+            for (let index = lines.length - 1; index >= 0; index -= 1) {
+              const line = lines[index];
+              if (!line || /^#{1,6}\s/u.test(line) || /^\s*\|/u.test(line) || /^\s*[-*]\s/u.test(line)) continue;
+              const sentenceMatch = [...line.matchAll(/[^。；;]+[。；;]/gu)].pop();
+              if (sentenceMatch) {
+                const sentence = sentenceMatch[0].trim();
+                if (sentence.length >= 12 && sentence.length <= 80) return sentence;
+              }
+            }
+            return undefined;
+          };
+          // 结构类区间锚点：小节标题行 + 下一同级/上级标题行（endText 不含在替换范围内）
+          const sectionRangeAnchor = (content: string, sectionRe: RegExp): { text: string; endText?: string } | undefined => {
+            const lines = content.split(/\r?\n/u).map(line => line.trim());
+            const startIndex = lines.findIndex(line => /^#{2,4}\s/u.test(line) && sectionRe.test(line));
+            if (startIndex < 0) return undefined;
+            const startLine = lines[startIndex];
+            const level = (/^(#{2,4})\s/u.exec(startLine) || [])[1] || '###';
+            const levelRe = new RegExp(`^#{1,${level.length}}\\s`);
+            for (let index = startIndex + 1; index < lines.length; index += 1) {
+              if (levelRe.test(lines[index])) return { text: startLine, endText: lines[index] };
+            }
+            return { text: startLine };
+          };
+          const anchorSpecsForAttempt = (messages: string[], code: string): Array<string | { text: string; endText?: string; append?: boolean }> => {
+            const content = finalChapterDrafts[chapterIndex].content;
+            const contentCompact = content.replace(/\s+/gu, '');
+            const specs: Array<string | { text: string; endText?: string; append?: boolean }> = [];
+            const push = (text: string) => {
+              const compact = text.replace(/\s+/gu, '');
+              if (compact.length < 6 || compact.length > 80 || !contentCompact.includes(compact)) return;
+              if (specs.some(existing => (typeof existing === 'string' ? existing : existing.text).replace(/\s+/gu, '') === compact)) return;
+              specs.push(text);
+            };
+            for (const message of messages) {
+              for (const match of message.matchAll(/[“【]([^”】]{6,80})[”】]/gu)) push(match[1]);
+            }
+            if (specs.length > 0) return specs.slice(0, 4);
+            // 补写类：引号原文在正文零命中（招标要求原文/系统名）→ 确定性补写定位锚点
+            if (SUPPLEMENT_APPEND_CODES.has(code)) {
+              const tail = code === 'boq-placement'
+                ? sectionTailSentence(content, /^#{2,4}\s+(?:\d+(?:\.\d+)*\s+)?(?:项目)?主要施工\s*内容/u) || chapterTailSentence(content)
+                : chapterTailSentence(content);
+              if (tail) return [{ text: tail, append: true }];
+              return [];
+            }
+            // 结构类：句子级 patch 修不了结构 → 确定性区间锚点（整节重写）；
+            // 超长小节（>7000 字符）不启用区间重写——DeepSeek 8192 token 输出池必截断，截断产物比不修更糟
+            if (STRUCTURE_SECTION_CODES.has(code)) {
+              const range = sectionRangeAnchor(content, /^#{2,4}\s+(?:\d+(?:\.\d+)*\s+)?(?:项目)?主要施工\s*内容/u);
+              if (range) {
+                const lines = content.split(/\r?\n/u);
+                const startLineIndex = lines.findIndex(line => line.trim() === range.text);
+                const endLineIndex = range.endText ? lines.findIndex((line, index) => index > startLineIndex && line.trim() === range.endText) : lines.length;
+                const sectionLength = lines.slice(startLineIndex, endLineIndex >= 0 ? endLineIndex : lines.length).join('\n').length;
+                if (sectionLength <= 7000) return [range];
+              }
+            }
+            // 同名小节重复：引号标题存在但整句替换修不了结构 → 相邻重复小节整区间重写
+            if (code === 'duplicate-subsection') {
+              for (const match of issue.message.matchAll(/“([^”]{2,60})”/gu)) {
+                const title = match[1].trim();
+                const lines = content.split(/\r?\n/u).map(line => line.trim());
+                const headingIndexes: number[] = [];
+                lines.forEach((line, index) => {
+                  if (/^#{3,4}\s/u.test(line) && (line.includes(title) || title.includes(line.replace(/^#{3,4}\s+/u, '')))) headingIndexes.push(index);
+                });
+                if (headingIndexes.length < 2) continue;
+                const level = (/^(#{3,4})\s/u.exec(lines[headingIndexes[0]]) || [])[1] || '####';
+                const levelRe = new RegExp(`^#{1,${level.length}}\\s`);
+                const first = headingIndexes[0];
+                const second = headingIndexes[1];
+                // 仅相邻重复（两标题之间无其他同级标题）做整区间重写，避免吞掉无关小节
+                if (lines.slice(first + 1, second).some(line => levelRe.test(line))) continue;
+                const nextIndex = lines.findIndex((line, index) => index > second && levelRe.test(line));
+                const sectionLength = lines.slice(first, nextIndex >= 0 ? nextIndex : lines.length).join('\n').length;
+                if (sectionLength <= 7000) return [{ text: lines[first], endText: nextIndex >= 0 ? lines[nextIndex] : undefined }];
+              }
+            }
+            return [];
+          };
           const runningStage = displayStage({ type: 'llm_review', roleId: `agent-blocker-fix-${draftChapter.id}-${issueCode || 'unclassified'}`, status: 'running', message: `正在修复交付阻断缺陷：${draftChapter.title}（${issueCode || '未分类'}）`, details: [issue.message] }, { subtitle: '交付阻断修复' });
           upsertProgressStage(progressStages, runningStage);
           upsertProgressStage(finalGateRepairStages, runningStage);
@@ -1570,6 +1740,10 @@ export async function finalizeGeneration(p: {
             const instruction = attempt === 0
               ? blockerFixInstructionFor(issue.message)
               : ['【修复未生效升级重试】', `上一轮修复后复检仍存在 ${remaining.length} 处同类缺陷（复检证据：${remaining.slice(0, 2).join('；')}），说明上一轮修复方式与缺陷特征不匹配或 patch 未落位。`, '本轮必须更换修复方式：先精确定位问题句，再整体替换该句（不得只改个别词），替换后的文本必须完全符合下列要求：', blockerFixInstructionFor(issue.message)].join('\n');
+            // A1.2：每轮从当前消息重提取锚点（首轮=缺陷消息，升级轮=缺陷消息+复检残留）并过滤正文不存在的锚点
+            const attemptAnchorSpecs = anchorSpecsForAttempt(attempt === 0 ? [issue.message] : [issue.message, ...remaining.slice(0, 2)], issueCode);
+            // 整节重写判定：对象锚点且非补写模式（endText 可缺省——小节到章尾时无结束标题）
+            const hasRangeAnchor = attemptAnchorSpecs.some(spec => typeof spec === 'object' && !spec.append);
             const repairedBlocker = await withProgressHeartbeat(() => repairChapterByQuality({
               template,
               chapter: { id: draftChapter.id, title: draftChapter.title, content: finalChapterDrafts[chapterIndex].content, evidence: draftChapter.evidence, missingFacts: draftChapter.missingFacts, sections: draftChapter.sections },
@@ -1579,7 +1753,10 @@ export async function finalizeGeneration(p: {
               forbidDrawingImages: false,
               diagnostics: generationDiagnostics,
               signal,
-              anchorTexts: anchorTexts.length > 0 ? anchorTexts.slice(0, 4) : undefined,
+              anchorTexts: attemptAnchorSpecs.length > 0 ? attemptAnchorSpecs : undefined,
+              // 整节重写类 patch 需要最大输出池（replacement 覆盖整个小节正文）；8192 为 DeepSeek 官方输出上限，
+              // 超出会被 API 拒绝（历史缺陷：openai 兼容工厂报告的 16384 对 deepseek 无效）
+              maxTokens: hasRangeAnchor ? 8192 : undefined,
             }));
             if (repairedBlocker.content && repairedBlocker.content !== finalChapterDrafts[chapterIndex].content) {
               finalChapterDrafts[chapterIndex] = { ...finalChapterDrafts[chapterIndex], content: templateChapter ? finalizeChapterContentQuality(repairedBlocker.content, templateChapter) : repairedBlocker.content };

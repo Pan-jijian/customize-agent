@@ -4,7 +4,7 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, basicInfoScheduleFieldIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, fabricatedAwardIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripDuplicateParagraphs, stripDuplicateTables } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, fabricatedAwardIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripDuplicateParagraphs, stripDuplicateTables } from './documentIntegrityChecks';
 import type { DocumentFactsModel, TenderRequirementModel } from './types';
 
 vi.mock('./semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
@@ -616,5 +616,59 @@ describe('resourceTriadSectionHierarchyIssues（h16 人材机三合一章结构�
       '#### 5.3.1 机械设备进场与维护保养',
     ].join('\n');
     expect(resourceTriadSectionHierarchyIssues(markdown)).toEqual([]);
+  });
+});
+
+describe('bidderQualificationSectionIssues（h17 投标人资格内容串章）', () => {
+  it('6.6/6.7 资格小节（营业执照/资质证书）→ 报 blocker', () => {
+    const markdown = [
+      '## 第六章 确保安全文明生产的管理体系与措施',
+      '### 6.5 扬尘治理与环境保护措施',
+      '正文内容。',
+      '### 6.6 具备有效的营业执照',
+      '我公司持有市场监督管理部门核发的有效营业执照。',
+      '### 6.7 具备有效的资质证书、具备有效的安全生产许可证',
+      '资质证书、安全生产许可证的现场核验管理。',
+    ].join('\n');
+    const issues = bidderQualificationSectionIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].severity).toBe('blocker');
+    expect(issues[0].message).toContain('具备有效的营业执照');
+    expect(issues[0].message).toContain('具备有效的资质证书');
+  });
+
+  it('施工管理口径的证照表述（持证上岗）→ 不报', () => {
+    const markdown = [
+      '## 第六章 确保安全文明生产的管理体系与措施',
+      '### 6.1 安全生产管理与教育培训',
+      '特种作业人员必须持证上岗，安全生产许可证按国家规定办理并在现场公示。',
+    ].join('\n');
+    expect(bidderQualificationSectionIssues(markdown)).toEqual([]);
+  });
+
+  it('财务状况类资格小节标题 → 报 blocker', () => {
+    const markdown = [
+      '## 第二章 针对工程项目整体理解',
+      '### 2.1 项目概况与整体理解',
+      '正文内容。',
+      '### 2.2 财务状况证明',
+      '我公司近三年财务状况良好。',
+    ].join('\n');
+    const issues = bidderQualificationSectionIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('财务状况证明');
+  });
+
+  it('材料成本控制小节（含技术语境词）→ 不报', () => {
+    const markdown = [
+      '## 第五章 确保人、材、机的保障体系与措施',
+      '### 5.1 材料成本控制措施',
+      '加强材料核算与成本控制。',
+    ].join('\n');
+    expect(bidderQualificationSectionIssues(markdown)).toEqual([]);
+  });
+
+  it('无资格内容 → 不报', () => {
+    expect(bidderQualificationSectionIssues('## 第一章 工程概况\n正文内容。')).toEqual([]);
   });
 });

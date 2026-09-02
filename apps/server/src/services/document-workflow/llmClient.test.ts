@@ -5,7 +5,7 @@
  * 底层 LLM 调用通过 invokeLlm 注入桩（模块内部词法绑定无法被 vi.mock 拦截）。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, isTransientLlmError, repairTruncatedJson, type DocumentJsonSchema } from './llmClient';
+import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, isTransientLlmError, llmPrefixFingerprint, repairTruncatedJson, sortScheduledLaunches, type DocumentJsonSchema } from './llmClient';
 import type { DocumentGenerationDiagnostics } from './types';
 
 // 无活跃模型配置：callDocumentLlm 观测累计发生在 provider 调用之前，
@@ -280,5 +280,34 @@ describe('callDocumentLlmJsonWithRetry（P1-4 截断修复免重试）', () => {
     expect(result?.patches).toHaveLength(1);
     expect(invoke).toHaveBeenCalledTimes(2);
     expect(invoke.mock.calls[1][1]).toContain('重试修正');
+  });
+});
+
+describe('llmPrefixFingerprint（P1-3 章级缓存分组键）', () => {
+  it('显式 prefixKey 直接作为指纹（同章请求聚合）', () => {
+    expect(llmPrefixFingerprint('system', 'prompt-a', 'writer-block:ch-2')).toBe('writer-block:ch-2');
+    expect(llmPrefixFingerprint('system', 'prompt-b', 'writer-block:ch-2')).toBe('writer-block:ch-2');
+  });
+
+  it('跨章 prefixKey 指纹互不相同（调度器按章隔离，同章背靠背）', () => {
+    const chapterA = llmPrefixFingerprint('system', 'prompt', 'writer-block:ch-1');
+    const chapterB = llmPrefixFingerprint('system', 'prompt', 'writer-block:ch-2');
+    expect(chapterA).not.toBe(chapterB);
+  });
+
+  it('无 prefixKey 回退旧启发式（system + user 前 2000 字符哈希）', () => {
+    const first = llmPrefixFingerprint('sys-a', '同一主控提示词开头'.repeat(500));
+    const second = llmPrefixFingerprint('sys-a', '同一主控提示词开头'.repeat(500) + '（后段章级差异）');
+    // 历史缺陷：前 2000 字符相同 → 指纹相同 → 调度无区分度；该启发式仅作回退保留
+    expect(first).toBe(second);
+  });
+
+  it('同前缀请求排序后背靠背相邻，不同前缀隔离', () => {
+    const ordered = sortScheduledLaunches([
+      { fingerprint: 'writer-block:ch-2', launch: () => {} },
+      { fingerprint: 'writer-block:ch-1', launch: () => {} },
+      { fingerprint: 'writer-block:ch-2', launch: () => {} },
+    ]);
+    expect(ordered.map(item => item.fingerprint)).toEqual(['writer-block:ch-1', 'writer-block:ch-2', 'writer-block:ch-2']);
   });
 });

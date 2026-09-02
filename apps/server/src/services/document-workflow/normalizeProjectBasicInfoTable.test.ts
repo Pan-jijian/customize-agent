@@ -173,3 +173,54 @@ describe('normalizeProjectBasicInfoTable 旧表删除边界回归', () => {
     expect(result).toContain('项目基本信息表');
   });
 });
+
+describe('normalizeProjectBasicInfoTable 质量标准行创优目标补全（P5 评分报告合肥师范4）', () => {
+  const markdownWithAwardBody = `## 第一章 工程重点难点及危大工程的保障体系
+
+### 1.1 编制说明与工程概况
+
+本施工组织设计针对徽光阁项目施工编制，编制深度满足指导现场施工的要求。
+
+## 第三章 确保工期与质量的保障体系与措施、确保安全生产的管理体系与措施
+
+### 3.1 质量目标与验收标准
+
+本工程质量目标为合格，确保黄山杯。项目部建立创优管理体系，落实创优奖惩措施。`;
+
+  it('质量标准事实只写“合格”且创优目标事实存在 → 汇总表补全“合格，确保黄山杯”', () => {
+    const facts = [...PROJECT_FACTS, makeFact('award_clause', '创优目标：确保黄山杯，支付300万元')];
+    const result = normalizeProjectBasicInfoTable(markdownWithAwardBody, facts);
+    expect(result).toContain('| 质量标准 | 合格，确保黄山杯 |');
+  });
+
+  it('无创优目标事实但正文含“确保黄山杯” → 同样补全（正文口径兜底）', () => {
+    const result = normalizeProjectBasicInfoTable(markdownWithAwardBody, PROJECT_FACTS);
+    expect(result).toContain('| 质量标准 | 合格，确保黄山杯 |');
+  });
+
+  it('质量标准值已含创优目标 → 不重复补全', () => {
+    const facts = [...PROJECT_FACTS, makeFact('award_clause', '创优目标：确保黄山杯')];
+    const factsWithAwardQuality = facts.map(fact => fact.key === 'quality_standard' ? { ...fact, value: '合格，确保黄山杯' } : fact);
+    const result = normalizeProjectBasicInfoTable(markdownWithAwardBody, factsWithAwardQuality);
+    expect(result).toContain('| 质量标准 | 合格，确保黄山杯 |');
+    expect((result.match(/确保黄山杯/g) || []).length).toBeLessThan(3);
+  });
+
+  it('无创优目标项目 → 质量标准行保持原值零变化', () => {
+    const markdown = `## 第一章 工程重点难点及危大工程的保障体系
+
+### 1.1 编制说明与工程概况
+
+本施工组织设计针对徽光阁项目施工编制。`;
+    const result = normalizeProjectBasicInfoTable(markdown, PROJECT_FACTS);
+    expect(result).toContain('| 质量标准 | 合格 |');
+    expect(result).not.toContain('合格，');
+  });
+
+  it('“确保黄山杯，支付300万元”逗号续接 → 只取“确保黄山杯”短语，金额不入表', () => {
+    const facts = [...PROJECT_FACTS, makeFact('award_clause', '创优目标：确保黄山杯，支付300万元')];
+    const result = normalizeProjectBasicInfoTable(markdownWithAwardBody, facts);
+    expect(result).toContain('| 质量标准 | 合格，确保黄山杯 |');
+    expect(result).not.toContain('300万元 |');
+  });
+});

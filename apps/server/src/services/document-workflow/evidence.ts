@@ -388,6 +388,13 @@ export interface EvidencePromptOptions {
   requiredFacts?: string[];
   /** D1 共享卡片上移：T0 关键事实层已由调用方注入 L2 共享段时跳过，避免同章各块重复注入 */
   skipT0?: boolean;
+  /** 块级相关性加权：主题块管线按块标题/要点 token 命中给证据加分，让预算花在块相关证据上
+   * （历史缺陷：块证据按块相关性排序后传入，但 T1 选取内部按 requiredFacts 重要性重排，
+   * 块排序被覆盖——同章各块注入几乎相同的 T1，块级差异化注入落空） */
+  rankBoost?: (item: DocumentEvidence) => number;
+  /** A2 块级增量压缩：只选取块相关性命中（rankBoost>0）的证据片段；命中为空时回退全量选取，
+   * 章级全貌由 L2 章级证据池承载——块级 L3 只带块专属增量（1k-3k 字符） */
+  onlyRankBoosted?: boolean;
   /** 分层统计出口：写入 T0/T1/T2 字符量与省略量，供真实生成对账 */
   diagnostics?: DocumentGenerationDiagnostics;
 }
@@ -497,7 +504,7 @@ export interface EvidenceLayers {
  * skipT0（D1 共享卡片上移）：章级共享事实层已由调用方单独注入 L2 共享段时，此处跳过 T0，
  * 避免同章各块重复注入同一份全量事实行（块级调用输入 token 大头）。
  */
-export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | undefined, requiredFacts: string[], skipT0 = false): EvidenceLayers {
+export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | undefined, requiredFacts: string[], skipT0 = false, rankBoost?: (item: DocumentEvidence) => number, onlyRankBoosted = false): EvidenceLayers {
   const t0FactLines = skipT0 ? [] : [...new Set(bundle.textEvidence.flatMap(item => extractKeyFactLines(item.content).split('\n').filter(Boolean)))];
   const t0Budget = maxChars ? Math.floor(maxChars * 0.6) : undefined;
   let t0Lines = t0FactLines;
@@ -517,7 +524,13 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
   if (remaining !== undefined && maxCharsValue !== undefined && remaining < Math.min(2000, maxCharsValue)) {
     remaining = Math.min(2000, maxCharsValue);
   }
-  const resourcePrompt = selectEvidenceForPrompt(bundle.resources, remaining ? Math.floor(remaining * 0.35) : undefined, (item, index) => [
+  // A2 资源层增量过滤：onlyRankBoosted 时同样只保留块相关命中（rankBoost>0）的结构化资源，
+  // 命中为空回退全量（与文本层同口径——资源 snippets 泄漏非块相关内容同样是块级 L3 变化段膨胀来源）
+  const filteredResources = onlyRankBoosted && rankBoost
+    ? bundle.resources.filter(res => res.snippets.some(snippet => rankBoost({ chapterId: bundle.chapterId, filePath: res.filePath, score: res.score, content: snippet } as DocumentEvidence) > 0))
+    : bundle.resources;
+  const resourcesForPrompt = filteredResources.length > 0 ? filteredResources : bundle.resources;
+  const resourcePrompt = selectEvidenceForPrompt(resourcesForPrompt, remaining ? Math.floor(remaining * 0.35) : undefined, (item, index) => [
     `- 资料：${readableSourceLabel(item, index)}`,
     `  资料类型：${item.kind}`,
     `  正文用途：${item.contentUse}`,
@@ -525,12 +538,16 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
     item.snippets.length ? `  可用内容：${item.snippets.map(cleanEvidenceText).filter(Boolean).join(' / ')}` : '',
   ].filter(Boolean).join('\n'), item => item.score);
   // 文本证据保留结构化换行（表格、键值对、清单行），不做单行压缩——单行压缩会把多列表格变成文字墙
-  const textPrompt = selectEvidenceForPrompt(bundle.textEvidence, remaining ? Math.floor(remaining * 0.65) : undefined, (item, index) => {
+  // A2 块级增量压缩：onlyRankBoosted 时只选取块相关性命中（rankBoost>0）的文本证据，
+  // 命中为空回退全量选取（块相关证据不足时保证正文仍有证据支撑，不牺牲事实安全）
+  const boostedTextEvidence = onlyRankBoosted && rankBoost ? bundle.textEvidence.filter(item => rankBoost(item) > 0) : bundle.textEvidence;
+  const textEvidencePool = onlyRankBoosted && boostedTextEvidence.length === 0 ? bundle.textEvidence : boostedTextEvidence;
+  const textPrompt = selectEvidenceForPrompt(textEvidencePool, remaining ? Math.floor(remaining * 0.65) : undefined, (item, index) => {
     const body = cleanEvidenceText(item.content);
     // 超长证据（CAD 父块全文等）截断前先做关键参数窗口提取：头部盲截会丢失尾部标高/坡率等真实设计参数
     const truncated = body.length > 1200 ? extractKeyParameterWindows(body, 1200) : body;
     return `${readableSourceLabel(item, index)}\n类型：${item.processingType || 'reference'}\n章节/片段：${item.sectionTitle?.replace(FILE_NAME_RE, '') || '资料片段'}\n内容：\n${truncated}`;
-  }, item => evidencePromptImportance(item, requiredFacts));
+  }, item => evidencePromptImportance(item, requiredFacts) + (rankBoost ? rankBoost(item) : 0));
   const t1Parts: string[] = [];
   if (resourcePrompt.lines.length) t1Parts.push(`结构化资料：\n${resourcePrompt.lines.join('\n')}`);
   if (textPrompt.lines.length) t1Parts.push(`文本/附件片段：\n${textPrompt.lines.join('\n\n---\n\n')}`);
@@ -558,7 +575,7 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
 export function evidenceBundlePrompt(bundle: EvidenceBundle, options: EvidencePromptOptions = {}) {
   const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.ceil(options.maxChars!) : undefined;
   const requiredFacts = options.requiredFacts || [];
-  const layers = buildEvidenceLayers(bundle, maxChars, requiredFacts, Boolean(options.skipT0));
+  const layers = buildEvidenceLayers(bundle, maxChars, requiredFacts, Boolean(options.skipT0), options.rankBoost, Boolean(options.onlyRankBoosted));
   if (options.diagnostics) {
     // T0/T1/T2 分层统计：供每次真实生成对账（重要数据零丢失断言 + 裁剪可观测）
     const evidenceDiagnostics = options.diagnostics.evidence;
@@ -568,4 +585,31 @@ export function evidenceBundlePrompt(bundle: EvidenceBundle, options: EvidencePr
     evidenceDiagnostics.omittedChars += layers.stats.omittedChars;
   }
   return [bundle.summary, layers.omittedNote, layers.t0Text, layers.t1Text, layers.t2Text].filter(Boolean).join('\n\n');
+}
+
+/**
+ * A1 章级证据池：T0 关键事实层（数值参数全量零丢失）+ 章级 T1 摘要池（每证据一行要点摘要）+
+ * T2 目录索引，一次构建后同章各块共享注入 L2——同章各块值完全相同 → prefix cache 共享命中；
+ * 块级 L3 只保留块相关增量（A2 onlyRankBoosted），全章证据概貌由本池承载。
+ * 摘要池预算上限 env DOCUMENT_CHAPTER_POOL_CHARS（默认 8000 字符）。
+ */
+export function buildChapterEvidencePool(bundle: EvidenceBundle, requiredFacts: string[], maxChars: number): string {
+  const poolChars = Number.isFinite(maxChars) && maxChars > 0 ? Math.floor(maxChars) : 8000;
+  const t0Budget = Math.floor(poolChars * 0.5);
+  const layers = buildEvidenceLayers(bundle, t0Budget, requiredFacts, false);
+  const remaining = Math.max(1500, poolChars - layers.t0Text.length);
+  const pool = selectEvidenceForPrompt(bundle.textEvidence, remaining, (item, index) => {
+    const body = cleanEvidenceText(item.content);
+    const digest = body.length > 300 ? `${body.slice(0, 300)}…` : body;
+    return `- [${index}] ${readableSourceLabel(item)}｜${digest}`;
+  }, item => evidencePromptImportance(item, requiredFacts));
+  const poolText = pool.lines.length
+    ? `【章级证据摘要池——全章证据要点概览（正文事实必须以关键事实层与绑定材料为准，摘要仅供定位材料方向）】\n${pool.lines.join('\n')}`
+    : '';
+  // 目录索引限行：目录用途是追溯定位，不占写作输入大头
+  const catalogLines = pool.omittedItems.slice(0, 40).map((item, index) => evidenceCatalogLine(item, index));
+  const catalogText = catalogLines.length
+    ? `【证据目录——未进摘要池的片段索引（正文写作不使用目录内容；完整片段仍参与后续检索与质量校验）】\n${catalogLines.join('\n')}`
+    : '';
+  return [layers.t0Text, poolText, catalogText].filter(Boolean).join('\n\n');
 }

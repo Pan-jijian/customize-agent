@@ -1348,11 +1348,16 @@ export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 't
     : cleanedMarkdown;
   const normalizedMarkdown = sortChapterSectionsByNumber(promoteSameTitleWrapperSections(normalizeTertiaryHeadings(sanitizeFormalMarkdown(policyMarkdown))));
   const inferredSections = inferChapterSectionsFromMarkdown(normalizedMarkdown, chapters);
+  // C1 目录确定性：目录=生成前规划大纲。正文提取的 H3（inferredSections）不再覆盖规划 sections——
+  // 正文 H3 被 LLM 改写（增删修饰词/换连接词/加"（一）"后缀）后提取进目录是目录污染的直接源头；
+  // 仅当章节无规划小节时才用正文提取兜底（未规划章节目录不能为空）
   const finalizedChapters = chapters.map((chapter, index) => ({
     ...chapter,
-    sections: inferredSections[index]?.length ? inferredSections[index] : chapter.sections || [],
+    sections: (chapter.sections || []).filter(Boolean).length > 0 ? chapter.sections : (inferredSections[index]?.length ? inferredSections[index] : []),
   }));
-  const tocAppliedMarkdown = options.promptRules?.tocPolicy === 'required' ? ensureFormalToc(normalizedMarkdown, finalizedChapters) : normalizeFormalChapterHeadings(normalizedMarkdown, finalizedChapters);
+  // C1 目录确定性：只要未明确禁止目录，一律用确定性目录替换正文目录页（含 LLM 写的脏目录）——
+  // 历史缺陷：仅 tocPolicy==='required' 时替换，unspecified 场景下 LLM 目录原样保留（目录与正文标题不一致）
+  const tocAppliedMarkdown = options.promptRules?.tocPolicy !== 'forbidden' ? ensureFormalToc(normalizedMarkdown, finalizedChapters) : normalizeFormalChapterHeadings(normalizedMarkdown, finalizedChapters);
   const finalizedMarkdown = applyPromptDocumentRules(sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(tocAppliedMarkdown))), options.promptRules);
   return { markdown: finalizedMarkdown, chapters: finalizedChapters };
 }

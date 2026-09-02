@@ -208,6 +208,7 @@ async function reviewDocumentBlock(chapters: DocumentDraftChapter[], context: { 
     schema: REVIEW_SCHEMA,
     taskKind: 'structuredGeneration',
     disableThinkingBoost: true,
+    prefixKey: 'full-dimension-review',
   });
   if (!reviewed) return undefined;
   return {

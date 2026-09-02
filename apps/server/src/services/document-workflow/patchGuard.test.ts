@@ -148,3 +148,69 @@ describe('repairChapterByQuality P1-2 空白容错定位', () => {
     expect(result.content).toBe(multiLineChapter.content);
   });
 });
+
+describe('repairChapterByQuality 删除类 patch（空 replacement）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('锚点模式：replacement 为空字符串 → 删除锚点命中的整句', async () => {
+    const padding = '本项目为合肥师范项目，总建筑面积28570平方米，主要建设内容为教学楼、实验楼与附属配套工程。'.repeat(4);
+    const content = `## 工程概况\n\n${padding}\n\n本句为来源罗列话术，根据招标文件与工程量清单编制。\n\n正文继续。`;
+    const delChapter = { ...chapter, content } as unknown as DocumentDraftChapter;
+    llmMock.mockResolvedValue({ patches: [{ anchorIndex: 0, replacement: '' }] });
+    const result = await repairChapterByQuality({ template, chapter: delChapter, issues: ['需要删除来源罗列句'], promptTexts: '提示词', forbidDrawingImages: false, anchorTexts: ['本句为来源罗列话术，根据招标文件与工程量清单编制。'] });
+    expect(result.appliedCount).toBe(1);
+    expect(result.content).not.toContain('来源罗列话术');
+    expect(result.content).toContain('正文继续。');
+  });
+
+  it('普通模式：originalText 定位 + 空 replacement → 删除该区间', async () => {
+    const padding = '本项目为合肥师范项目，总建筑面积28570平方米，主要建设内容为教学楼、实验楼与附属配套工程。'.repeat(4);
+    const delChapter = { ...chapter, content: `## 工程概况\n\n${padding}\n\n要删除的句子。\n\n正文继续。` } as unknown as DocumentDraftChapter;
+    llmMock.mockResolvedValue({ patches: [{ originalText: '要删除的句子。', replacement: '' }] });
+    const result = await repairChapterByQuality({ template, chapter: delChapter, issues: ['需要删除'], promptTexts: '提示词', forbidDrawingImages: false });
+    expect(result.appliedCount).toBe(1);
+    expect(result.content).not.toContain('要删除的句子');
+  });
+
+  it('删除过多内容导致正文缩水超 35% → 拒绝（安全边界不变）', async () => {
+    const bigDelete = '该段为需要删除的冗长内容，共计数百字，删除后正文长度将显著缩短。'.repeat(20);
+    const delChapter = { ...chapter, content: `## 工程概况\n\n${bigDelete}\n\n正文。` } as unknown as DocumentDraftChapter;
+    llmMock.mockResolvedValue({ patches: [{ originalText: bigDelete, replacement: '' }] });
+    const result = await repairChapterByQuality({ template, chapter: delChapter, issues: ['需要删除'], promptTexts: '提示词', forbidDrawingImages: false });
+    expect(result.appliedCount).toBe(0);
+  });
+});
+
+describe('repairChapterByQuality 补写模式锚点前缀自动补齐', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('LLM 不复述锚点 → 系统自动补锚点前缀后应用（历史空转根治）', async () => {
+    const appendChapter = { ...chapter, content: '## 工程概况\n\n本项目为合肥师范项目，工程质量目标为确保黄山杯。' } as unknown as DocumentDraftChapter;
+    // 补写定位：锚点=末尾定位句；LLM 只输出补写内容、不复述锚点
+    llmMock.mockResolvedValue({ patches: [{ anchorIndex: 0, replacement: '同时按规定为作业人员办理工伤保险。' }] });
+    const result = await repairChapterByQuality({
+      template, chapter: appendChapter, issues: ['需要补写工伤保险表述'], promptTexts: '提示词', forbidDrawingImages: false,
+      anchorTexts: [{ text: '本项目为合肥师范项目，工程质量目标为确保黄山杯。', append: true }],
+    });
+    expect(result.appliedCount).toBe(1);
+    // 锚点原文保留 + 补写内容追加
+    expect(result.content).toContain('工程质量目标为确保黄山杯。');
+    expect(result.content).toContain('同时按规定为作业人员办理工伤保险。');
+  });
+
+  it('LLM 已复述锚点前缀 → 直接应用不重复拼接', async () => {
+    const appendChapter = { ...chapter, content: '## 工程概况\n\n本项目为合肥师范项目，工程质量目标为确保黄山杯。' } as unknown as DocumentDraftChapter;
+    llmMock.mockResolvedValue({ patches: [{ anchorIndex: 0, replacement: '本项目为合肥师范项目，工程质量目标为确保黄山杯。同时按规定为作业人员办理工伤保险。' }] });
+    const result = await repairChapterByQuality({
+      template, chapter: appendChapter, issues: ['需要补写'], promptTexts: '提示词', forbidDrawingImages: false,
+      anchorTexts: [{ text: '本项目为合肥师范项目，工程质量目标为确保黄山杯。', append: true }],
+    });
+    expect(result.appliedCount).toBe(1);
+    expect(result.content).toContain('同时按规定为作业人员办理工伤保险。');
+    expect((result.content.match(/工伤保险/gu) || []).length).toBe(1);
+  });
+});

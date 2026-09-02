@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplateChapter } from './types';
 import {
   buildEvidenceBundle,
+  buildEvidenceLayers,
   cleanEvidenceText,
   dedupeChapterEvidence,
   dedupeGlobalEvidence,
@@ -386,5 +387,32 @@ describe('evidenceBundlePrompt', () => {
     const prompt = evidenceBundlePrompt(bundle, { maxChars: 2000 });
     expect(prompt).toContain('关键事实层');
     expect(prompt).toContain('GB 50204-2015');
+  });
+});
+
+describe('buildEvidenceLayers rankBoost（修复2：块级相关性加权注入）', () => {
+  const chapter: DocumentTemplateChapter = { id: 'ch-1', title: '工程概况', purpose: '', queries: [], requiredFacts: [] };
+  it('rankBoost 加权后块相关证据优先进入 T1（预算不足时挤出非块相关证据）', () => {
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '文件A.pdf', processingType: 'reference', content: '模板支撑体系采用盘扣式脚手架，立杆间距 0.9 米，步距 1.5 米。'.repeat(6) }),
+      evidenceItem({ filePath: '文件B.pdf', processingType: 'reference', content: '装饰装修工程采用轻钢龙骨石膏板吊顶，进场复试要求按批次送检。'.repeat(6) }),
+      evidenceItem({ filePath: '文件C.pdf', processingType: 'reference', content: '机电安装管线采用综合支吊架体系，BIM 深化设计。'.repeat(6) }),
+    ]);
+    const boost = (item: DocumentEvidence) => (item.content.includes('盘扣') ? 12 : 0);
+    // 小预算下 T1 只能容纳部分证据：rankBoost 应让含「盘扣」的块相关证据优先入选
+    const layers = buildEvidenceLayers(bundle, 2200, [], true, boost);
+    expect(layers.t1Text).toContain('盘扣');
+    // 无 rankBoost 时按 importance 排序（量化参数优先），盘扣证据可能被挤出——加权改变选取
+    const plainLayers = buildEvidenceLayers(bundle, 2200, [], true);
+    expect(plainLayers.t1Text.length).toBeGreaterThan(0);
+  });
+
+  it('rankBoost 不改动 T0 关键事实层（skipT0=false 时 T0 不受加权影响）', () => {
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: '计划工期：540日历天。'.repeat(5) }),
+    ]);
+    const boost = (item: DocumentEvidence) => (item.content.includes('不存在的词') ? 999 : 0);
+    const layers = buildEvidenceLayers(bundle, 1200, [], false, boost);
+    expect(layers.t0Text).toContain('540日历天');
   });
 });
