@@ -649,7 +649,9 @@ export function evidenceBundlePrompt(bundle: EvidenceBundle, options: EvidencePr
     evidenceDiagnostics.t2Lines += layers.stats.t2Lines;
     evidenceDiagnostics.omittedChars += layers.stats.omittedChars;
   }
-  return [bundle.summary, layers.omittedNote, layers.t0Text, layers.t1Text, layers.t2Text].filter(Boolean).join('\n\n');
+  // 4.17.1 omittedNote 移至证据段尾部：其文本含 per-call 统计计数（t0/t1/omitted 字符数），
+  // 置于第 2 位会让其后的 T0/T1/T2 证据大头在参数差异时整体错过前缀缓存（前缀在 omittedNote 处即分叉）
+  return [bundle.summary, layers.t0Text, layers.t1Text, layers.t2Text, layers.omittedNote].filter(Boolean).join('\n\n');
 }
 
 /**

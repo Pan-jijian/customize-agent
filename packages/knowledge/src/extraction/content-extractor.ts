@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveAndImport, resolvePackage } from './module-resolver.js';
 import { createOcrProvider, type OcrProvider } from './ocr-providers.js';
+import { decodeTextBuffer, normalizeSymbolicPua } from './text-encoding.js';
 import type { ClassifiedFile } from '../types.js';
 
 /** 文件内容提取结果 */
@@ -96,8 +97,10 @@ export class ContentExtractor {
       Object.assign(metadata, result.metadata);
       warnings.push(...result.warnings);
     } else if (this.isTextReadable(file)) {
-      text = fs.readFileSync(file.absolutePath, 'utf8');
+      const decoded = decodeTextBuffer(fs.readFileSync(file.absolutePath));
+      text = decoded.text;
       metadata.extractionMode = 'plain_text';
+      metadata.encoding = decoded.encoding;
       metadata.vectorizable = true;
 
     } else {
@@ -274,7 +277,8 @@ export class ContentExtractor {
   }
 
   private cleanExtractedText(value: string, file: ClassifiedFile): string {
-    const normalized = [...value]
+    // 符号字体私用区字符（CAD SHX 直径符号、PDF Wingdings 选项框等）统一映射回标准符号
+    const normalized = [...normalizeSymbolicPua(value)]
       .filter(char => {
         const code = char.charCodeAt(0);
         // U+FFFF 非字符：PDF 表单空白下划线/占位符的提取产物，无检索意义，统一剔除
@@ -306,7 +310,7 @@ export class ContentExtractor {
     const warnings: string[] = [];
     const ext = path.extname(file.absolutePath).toLowerCase();
 
-    if (ext === '.dxf') return await this.extractDxf(file, fs.readFileSync(file.absolutePath, 'utf8'), metadata);
+    if (ext === '.dxf') return await this.extractDxf(file, decodeTextBuffer(fs.readFileSync(file.absolutePath)).text, metadata);
     if (ext === '.dwg') {
       const converted = await this.tryConvertDwgToDxf(file.absolutePath);
       if (converted?.dxfText) {
@@ -318,7 +322,7 @@ export class ContentExtractor {
     }
 
     if (file.format === 'autocad' && ext === '.dxf') {
-      const raw = fs.readFileSync(file.absolutePath, 'utf8');
+      const raw = decodeTextBuffer(fs.readFileSync(file.absolutePath)).text;
       const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
       const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 500);
       const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
@@ -358,7 +362,7 @@ export class ContentExtractor {
     }
 
     if (file.format === 'step') {
-      const raw = fs.readFileSync(file.absolutePath, 'utf8');
+      const raw = decodeTextBuffer(fs.readFileSync(file.absolutePath)).text;
       const products = this.matchAll(raw, /PRODUCT\s*\(\s*'([^']*)'\s*,\s*'([^']*)'/giu).slice(0, 300);
       const materials = this.matchAll(raw, /MATERIAL[^']*'([^']+)'/giu).slice(0, 120);
       const entities = this.matchAll(raw, /#\d+\s*=\s*([A-Z0-9_]+)/gu).slice(0, 1000);
@@ -384,7 +388,7 @@ export class ContentExtractor {
     }
 
     if (file.format === 'iges') {
-      const raw = fs.readFileSync(file.absolutePath, 'utf8');
+      const raw = decodeTextBuffer(fs.readFileSync(file.absolutePath)).text;
       const names = this.matchAll(raw, /'([^']{2,120})'/gu).slice(0, 500);
       const entityTypes = this.matchAll(raw, /^\s*(\d{3,4})\s*,/gmu).slice(0, 1000);
       const uniqueIgesTypes = Array.from(new Set(entityTypes));
@@ -828,7 +832,8 @@ export class ContentExtractor {
   }
 
   private extractDelimitedText(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
-    const raw = fs.readFileSync(file.absolutePath, 'utf8');
+    const decoded = decodeTextBuffer(fs.readFileSync(file.absolutePath));
+    const raw = decoded.text;
     const delimiter = file.format === 'tsv' ? '\t' : ',';
     const rows = raw.split(/\r?\n/u).filter(line => line.trim().length > 0);
     const header = rows[0] ? this.parseDelimitedLine(rows[0], delimiter) : [];
@@ -844,6 +849,7 @@ export class ContentExtractor {
         extractionMode: 'delimited_text_structured',
         semanticExtractionMode: 'delimited_markdown_table',
         vectorizable: true,
+        encoding: decoded.encoding,
         delimiter: file.format === 'tsv' ? 'tab' : 'comma',
         rowCount: rows.length,
         columnCount: header.length,

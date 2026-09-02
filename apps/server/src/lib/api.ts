@@ -292,6 +292,33 @@ export async function deleteKbSelection(relativePaths: string[], folderPaths: st
   });
 }
 
+/** 导出所选文件/文件夹已解析后的分块文本（单文件返回 txt，多文件返回 zip） */
+export async function exportKbParsedContent(options: { relativePaths: string[]; folderPaths: string[]; projectRoot?: string }) {
+  const response = await fetch('/api/kb/files/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
+  });
+  if (!response.ok) {
+    let message = `导出失败 (${response.status})`;
+    try {
+      const data = (await response.json()) as { error?: string };
+      if (data?.error) message = data.error;
+    } catch { /* 非 JSON 响应，使用默认错误信息 */ }
+    throw new Error(message);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const match = /filename\*=(?:UTF-8'')?([^;]+)/iu.exec(disposition);
+  const fileName = match?.[1] ? decodeURIComponent(match[1]) : 'kb-export.txt';
+  return {
+    blob,
+    fileName,
+    exported: Number(response.headers.get('x-export-count') || 0),
+    skipped: Number(response.headers.get('x-export-skipped') || 0),
+  };
+}
+
 export async function deleteAllKbFiles(projectRoot?: string) {
   return fetchJson<{ success: boolean; deleted?: number }>('/api/kb/files', {
     method: 'DELETE', headers: { 'Content-Type': 'application/json' },

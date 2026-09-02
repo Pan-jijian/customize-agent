@@ -4,9 +4,9 @@ import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { Table, Button, Input, Select, Tag, Modal, Space, App, Dropdown } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined, MoreOutlined, PlusOutlined } from '@ant-design/icons';
+import { SearchOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FolderOutlined, FolderOpenOutlined, FileOutlined, FileTextOutlined, FileImageOutlined, FileExcelOutlined, FileWordOutlined, CodeOutlined, GlobalOutlined, DatabaseOutlined, HddOutlined, MoreOutlined, PlusOutlined, DownloadOutlined } from '@ant-design/icons';
 import { ChevronRight, ChevronDown } from 'lucide-react';
-import { getJob, getKbFiles, getKbOperations, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, reindexKbFile, PartialUploadError, type KbFileItem, type KbOperationRecord } from '@/lib/api';
+import { getJob, getKbFiles, getKbOperations, deleteKbFile, deleteKbFiles, deleteKbSelection, deleteAllKbFiles, uploadKbFiles, reindexKb, reindexKbFile, exportKbParsedContent, PartialUploadError, type KbFileItem, type KbOperationRecord } from '@/lib/api';
 import { formatBytes, categoryLabel } from '@/lib/utils';
 import styles from './style.module.scss';
 
@@ -379,6 +379,29 @@ export default function FilesPage() {
     });
   };
 
+  // 导出所选文件/文件夹在知识库中已解析、分块后的文本内容（单文件为 txt，多文件为 zip）
+  const handleExportParsed = async () => {
+    if (selectedFilePaths.length === 0 && selectedFolderPaths.length === 0) return;
+    const hide = message.loading(t('exporting'), 0);
+    try {
+      const { blob, fileName, exported, skipped } = await exportKbParsedContent({ relativePaths: selectedFilePaths, folderPaths: selectedFolderPaths });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      if (skipped > 0) message.warning(t('exportParsedSkipped').replace('{count}', String(skipped)));
+      else message.success(t('exportParsedSuccess').replace('{count}', String(exported)));
+    } catch (error) {
+      message.error(error instanceof Error && error.message ? error.message : t('exportParsedFailed'));
+    } finally {
+      hide();
+    }
+  };
+
   const filtered = useMemo(() => searchQuery
     ? files.filter((f) => f.relativePath.toLowerCase().includes(searchQuery.toLowerCase()))
     : files, [searchQuery, files]);
@@ -685,6 +708,11 @@ export default function FilesPage() {
             {t('showingMatchingFiles').replace('{count}', String(filtered.length))}
           </div>
           <Space size={8}>
+            {selectedFileCount > 0 && (
+              <Button size="small" icon={<DownloadOutlined />} onClick={() => void handleExportParsed()} className="rounded-lg">
+                {t('exportParsed')} ({selectedFileCount})
+              </Button>
+            )}
             {selectedFileCount > 0 && (
               <Button danger size="small" icon={<DeleteOutlined />} onClick={() => handleBulkDelete('selected')} className="rounded-lg">
                 {t('deleteSelected')} ({selectedFileCount})

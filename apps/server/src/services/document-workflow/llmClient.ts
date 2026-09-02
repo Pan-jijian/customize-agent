@@ -106,12 +106,25 @@ function releaseLlmSlot() {
 // 3.3 窗口自适应：在飞请求 ≥16 时窗口 120ms → 500ms（高并发期到达密度高，宽窗口聚合更多同指纹
 // 请求再统一排序发射，命中窗口更大）；低并发保持 120ms 快发射。
 // DOCUMENT_PREFIX_SCHEDULE_WINDOW_MS 显式设置时优先（保留覆盖能力，0=关闭调度）。
+// 4.17.1 前缀预热（实测驱动的根因修复）：DeepSeek prefix cache 在请求完成后才落盘，
+// 并发到达的同前缀请求互相看不到对方的前缀单元 → 实测并发同前缀全部 0% 命中（远端真实生成
+// 命中率因此崩到 ~30%）；预热=同指纹家族并发发射前先发 maxTokens=1 的纯前缀轻量请求落盘，
+// 实测预热后并发全部命中 94%+。DOCUMENT_PREFIX_WARMUP=0 关闭预热（回退为排序后直接并发发射）。
 interface ScheduledLlmLaunch {
   fingerprint: string;
   launch: () => void;
+  /** 前缀预热请求（maxTokens=1，内容=共享前缀本体）；仅组内 ≥2 请求且该前缀未预热过时触发 */
+  warmup?: () => Promise<void>;
+  /** 预热前缀本体 hash：warmed 判定的真实 key（同 fingerprint 跨文档前缀不同，不能按 fingerprint 记预热状态） */
+  warmupKey?: string;
 }
 let scheduleBuffer: ScheduledLlmLaunch[] = [];
 let scheduleTimer: NodeJS.Timeout | null = null;
+/** 已预热前缀集合（key=前缀本体 hash，进程级；前缀已落盘的家族后续窗口直接并发发射） */
+const warmedPrefixKeys = new Set<string>();
+function prefixWarmupEnabled() {
+  return process.env.DOCUMENT_PREFIX_WARMUP !== '0';
+}
 const PREFIX_SCHEDULE_DEFAULT_WINDOW_MS = 120;
 const PREFIX_SCHEDULE_ADAPTIVE_THRESHOLD = 16;
 const PREFIX_SCHEDULE_ADAPTIVE_WINDOW_MS = 500;
@@ -128,21 +141,53 @@ function currentPrefixScheduleWindowMs(): number {
   return prefixScheduleWindowFor(activeDocumentLlmCalls, prefixScheduleWindowOverride);
 }
 
-function schedulePrefixFriendlyLaunch(fingerprint: string, launch: () => void) {
+function schedulePrefixFriendlyLaunch(fingerprint: string, launch: () => void, warmup?: () => Promise<void>, warmupKey?: string) {
   const windowMs = currentPrefixScheduleWindowMs();
   if (windowMs <= 0) {
     launch();
     return;
   }
-  scheduleBuffer.push({ fingerprint, launch });
+  scheduleBuffer.push({ fingerprint, launch, warmup, warmupKey });
   if (scheduleTimer) return;
   scheduleTimer = setTimeout(() => {
     scheduleTimer = null;
     const batch = scheduleBuffer;
     scheduleBuffer = [];
-    const ordered = sortScheduledLaunches(batch);
-    for (const item of ordered) item.launch();
+    flushScheduledLaunches(batch);
   }, windowMs);
+}
+
+/** 窗口攒批发射：指纹排序分组后，组内 ≥2 请求且前缀未预热 → 先预热落盘再并发发射；否则直接并发发射（导出供单测） */
+export function flushScheduledLaunches(batch: ScheduledLlmLaunch[]) {
+  const ordered = sortScheduledLaunches(batch);
+  const groups: ScheduledLlmLaunch[][] = [];
+  for (const item of ordered) {
+    const last = groups[groups.length - 1];
+    if (last && last[0]!.fingerprint === item.fingerprint) last.push(item);
+    else groups.push([item]);
+  }
+  for (const group of groups) {
+    const candidate = group.find(item => item.warmup && item.warmupKey);
+    const needWarmup = prefixWarmupEnabled()
+      && group.length >= 2
+      && candidate?.warmup
+      && candidate.warmupKey
+      && !warmedPrefixKeys.has(candidate.warmupKey);
+    if (!needWarmup) {
+      for (const item of group) item.launch();
+      continue;
+    }
+    const warmupKey = candidate.warmupKey!;
+    warmedPrefixKeys.add(warmupKey);
+    void candidate.warmup!()
+      .catch(() => {
+        // 预热失败（瞬态网络等）：移除预热标记供后续窗口重试；正式请求照常发射，退化为无预热并发
+        warmedPrefixKeys.delete(warmupKey);
+      })
+      .then(() => {
+        for (const item of group) item.launch();
+      });
+  }
 }
 
 /** P1-9 失败 streak 隔离：优先取 per-generation diagnostics 的 streak（多文档并发生成互不降级），无 diagnostics 时回退全局值 */
@@ -331,6 +376,34 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
     const attemptOnce = async (maxTokensArg: number | undefined, thinkingTrimmingHint = false): Promise<string> => {
       if (options.signal?.aborted) throw new Error('用户中止');
       const prefixFingerprint = llmPrefixFingerprint(system, prompt, options.prefixKey);
+      // 4.17.1 前缀预热素材：共享前缀 = prompt 截断到 L3 变化段起点（contextLayers.l3 同源口径），
+      // system 与正式发射逐字节一致（含 jsonOnly 后缀）；前缀 <500 字符无预热价值（不足 64-token 块粒度收益）
+      const warmup = (() => {
+        const l3Chars = options.contextLayers?.l3 || 0;
+        if (l3Chars <= 0 || l3Chars >= prompt.length) return undefined;
+        const warmupSystem = jsonOnly ? `${system}\n只返回 JSON，不要返回 markdown。` : system;
+        const warmupPrefix = prompt.slice(0, prompt.length - l3Chars);
+        if (warmupPrefix.length < 500) return undefined;
+        const warmupKey = stableHash(`${warmupSystem}\n${warmupPrefix}`);
+        return {
+          warmupKey,
+          warmup: () => {
+            const bucket = options.diagnostics ? callBreakdownBucket(options.diagnostics, options.prefixKey) : undefined;
+            if (bucket) { bucket.calls += 1; bucket.inputChars += warmupSystem.length + warmupPrefix.length; }
+            return provider.chat([
+              { role: 'system', content: warmupSystem },
+              { role: 'user', content: warmupPrefix },
+            ], { temperature: 0, maxTokens: 1, signal: options.signal, disableThinking: decision.disableThinking })
+              .then(warmResp => {
+                if (bucket && warmResp.usage) {
+                  bucket.cacheHitTokens += warmResp.usage.promptCacheHitTokens || 0;
+                  bucket.cacheMissTokens += warmResp.usage.promptCacheMissTokens || 0;
+                }
+              })
+              .then(() => undefined);
+          },
+        };
+      })();
       const response = await new Promise<Awaited<ReturnType<typeof provider.chat>>>((resolve, reject) => {
         schedulePrefixFriendlyLaunch(prefixFingerprint, () => {
           if (options.signal?.aborted) {
@@ -343,7 +416,7 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
           ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: maxTokensArg, signal: options.signal, disableThinking: decision.disableThinking })
             .then(resolve)
             .catch((error: unknown) => reject(error instanceof Error ? error : new Error(String(error))));
-        });
+        }, warmup?.warmup, warmup?.warmupKey);
       });
       const content = response.content?.trim() ?? '';
       if (content) {

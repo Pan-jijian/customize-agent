@@ -5,7 +5,7 @@
  * 底层 LLM 调用通过 invokeLlm 注入桩（模块内部词法绑定无法被 vi.mock 拦截）。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, isTransientLlmError, llmPrefixFingerprint, prefixScheduleWindowFor, repairTruncatedJson, retryDelayMs, sortScheduledLaunches, type DocumentJsonSchema } from './llmClient';
+import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, flushScheduledLaunches, isContextOverflowLlmError, isTransientLlmError, llmPrefixFingerprint, prefixScheduleWindowFor, repairTruncatedJson, retryDelayMs, sortScheduledLaunches, type DocumentJsonSchema } from './llmClient';
 import type { DocumentGenerationDiagnostics } from './types';
 
 // 无活跃模型配置：callDocumentLlm 观测累计发生在 provider 调用之前，
@@ -401,5 +401,82 @@ describe('prefixScheduleWindowFor（3.3 调度窗口自适应）', () => {
     expect(prefixScheduleWindowFor(64, 250)).toBe(250);
     expect(prefixScheduleWindowFor(64, 0)).toBe(0);
     expect(prefixScheduleWindowFor(1, 250)).toBe(250);
+  });
+});
+
+describe('flushScheduledLaunches（4.17.1 前缀预热调度）', () => {
+  // DeepSeek prefix cache 请求完成后才落盘，并发同前缀实测全部 0% 命中；
+  // 预热（maxTokens=1 纯前缀先行落盘）后并发实测全部命中 94%+。调度语义：组内 ≥2 且前缀未预热 → 先预热再并发发射。
+  const item = (fingerprint: string, events: string[], tag: string, withWarmup = true) => ({
+    fingerprint,
+    launch: () => { events.push(`launch:${tag}`); },
+    warmup: withWarmup ? () => { events.push(`warmup:${tag}`); return Promise.resolve(); } : undefined,
+    warmupKey: withWarmup ? `${fingerprint}:${tag}` : undefined,
+  });
+
+  it('组内 ≥2 请求：先预热一次，完成后再发射组内全部请求', async () => {
+    const events: string[] = [];
+    flushScheduledLaunches([
+      item('fam-a', events, 'a1'),
+      item('fam-a', events, 'a2'),
+      item('fam-b', events, 'b1'),
+    ]);
+    // 同步快照（数组引用会被后续微任务 push 污染，断言用快照）：fam-a 预热同步启动，fam-b 单请求组直接发射
+    const syncSnapshot = [...events];
+    expect(syncSnapshot).toEqual(['warmup:a1', 'launch:b1']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    // fam-a 预热完成后再发射 a1/a2
+    expect(events).toEqual(['warmup:a1', 'launch:b1', 'launch:a1', 'launch:a2']);
+  });
+
+  it('同前缀已预热（warmupKey 相同）时直接并发发射，不再预热', async () => {
+    const events: string[] = [];
+    const shared = 'fam-c:c-shared';
+    const mk = (tag: string) => ({
+      fingerprint: 'fam-c',
+      launch: () => { events.push(`launch:${tag}`); },
+      warmup: () => { events.push(`warmup:${tag}`); return Promise.resolve(); },
+      warmupKey: shared,
+    });
+    flushScheduledLaunches([mk('c1'), mk('c2')]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(events).toEqual(['warmup:c1', 'launch:c1', 'launch:c2']);
+    events.length = 0;
+    // 第二窗口同前缀：已预热 → 直接发射
+    flushScheduledLaunches([mk('c3'), mk('c4')]);
+    expect(events).toEqual(['launch:c3', 'launch:c4']);
+  });
+
+  it('单请求组与无 warmup 素材的组直接发射，不触发预热', async () => {
+    const events: string[] = [];
+    flushScheduledLaunches([
+      item('fam-d', events, 'd1'),
+      item('fam-d', events, 'd2', false), // 无 warmup 素材（无 contextLayers.l3 口径）
+      item('fam-e', events, 'e1'),
+    ]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    // fam-d 组内无可用 warmup（d2 无素材、d1 有）→ 有候选 d1，组内 ≥2 → 预热 d1 后发射
+    expect(events.filter(e => e.startsWith('warmup:'))).toEqual(['warmup:d1']);
+    expect(events.filter(e => e.startsWith('launch:'))).toEqual(['launch:e1', 'launch:d1', 'launch:d2']);
+  });
+
+  it('预热失败：正式请求照常发射（退化为无预热并发）', async () => {
+    const events: string[] = [];
+    flushScheduledLaunches([
+      {
+        fingerprint: 'fam-f',
+        launch: () => { events.push('launch:f1'); },
+        warmup: () => { events.push('warmup:f1'); return Promise.reject(new Error('network')); },
+        warmupKey: 'fam-f:f1',
+      },
+      {
+        fingerprint: 'fam-f',
+        launch: () => { events.push('launch:f2'); },
+        warmup: () => Promise.resolve(),
+        warmupKey: 'fam-f:f1',
+      },
+    ]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(events).toEqual(['warmup:f1', 'launch:f1', 'launch:f2']);
   });
 });
