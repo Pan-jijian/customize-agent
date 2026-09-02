@@ -7,18 +7,28 @@ function rulesOf(overrides: Partial<PromptDocumentRuleSet> = {}): PromptDocument
   return { forbiddenTerms: [], preferredTerms: [], requiredTables: [], ...overrides };
 }
 
-describe('finalizeDocumentMarkdown 目录确定性（C1：目录=大纲，不从正文提取）', () => {
-  it('目录使用规划 sections，正文 H3 被 LLM 改写时目录不被污染', () => {
+describe('finalizeDocumentMarkdown 目录确定性（4.17.2：目录=成稿正文，不从规划大纲提取）', () => {
+  it('目录跟随成稿正文：正文 H3 与规划不一致时目录同步正文（消除目录-正文漂移）', () => {
     const { markdown } = finalizeDocumentMarkdown(
       '## 第一章 工程概况\n\n### 1.1 施工准备（细化后）\n正文甲。\n\n### 1.2 部署方案\n正文乙。',
       [{ title: '工程概况', sections: ['施工准备', '施工部署'], content: '## 第一章 工程概况\n\n### 1.1 施工准备（细化后）\n正文甲。\n\n### 1.2 部署方案\n正文乙。' }],
       { promptRules: rulesOf({ tocPolicy: 'required' }) },
     );
-    // 目录区块只收录规划标题，不含正文改写标题
+    // 目录区块只收录成稿正文标题：正文改写什么目录显示什么，规划中未写出的「施工部署」不产生幽灵条目
+    const tocBlock = markdown.split('## 目录')[1]?.split('<div class="page-break">')[0] || '';
+    expect(tocBlock).toContain('施工准备（细化后）');
+    expect(tocBlock).toContain('部署方案');
+    expect(tocBlock).not.toContain('施工部署');
+  });
+
+  it('正文无 H3 时回退规划小节兜底（未展开成 H3 的章节目录不能为空）', () => {
+    const { markdown } = finalizeDocumentMarkdown(
+      '## 第一章 工程概况\n\n正文无小节标题直接成段。',
+      [{ title: '工程概况', sections: ['施工准备'], content: '## 第一章 工程概况\n\n正文无小节标题直接成段。' }],
+      { promptRules: rulesOf({ tocPolicy: 'required' }) },
+    );
     const tocBlock = markdown.split('## 目录')[1]?.split('<div class="page-break">')[0] || '';
     expect(tocBlock).toContain('施工准备');
-    expect(tocBlock).toContain('施工部署');
-    expect(tocBlock).not.toContain('细化后');
   });
 
   it('tocPolicy 未指定时，LLM 写的脏目录同样被确定性目录替换', () => {

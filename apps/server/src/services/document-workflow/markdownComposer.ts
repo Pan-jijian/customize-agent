@@ -1155,8 +1155,14 @@ export function ensureFormalToc(markdown: string, chapters: Array<Pick<DocumentD
     // 供 chapter.sections 缺失时 extractGeneratedSections 从正文提取二级小节兜底；
     // 有 sections 的章节也不能短路返回原始 chapter，否则目录章节结构对不上正文。
     const chapterRange = bodyMarkdown.slice(current.index, next?.index ?? bodyMarkdown.length);
-    const sections = chapter.sections?.length ? undefined : extractGeneratedSections(chapterRange);
-    return sections?.length ? { ...chapter, sections, content: chapterRange } : { ...chapter, content: chapterRange };
+    // 4.17.2 目录=成稿正文（庐江实测修正）：目录不再以规划大纲为源——成稿清洗链会改写正文标题
+    // （replaceForbiddenFormalPhrases 把「1.3 …见招标公告」正文改写为「…按已确认的招标边界和施工
+    // 条件执行」，大纲源目录与正文标题必然漂移且大纲自带污染碎片）；正文 H3 已过 isInstructionLikeTitle
+    // 同口径清洗（4.17.2 判别器扩围后与大纲出口同源），目录直接从最终正文提取，正文改写什么目录就
+    // 显示什么。正文无 H3 时回退规划小节兜底（未展开成 H3 的章节目录不能为空）。
+    const bodySections = extractGeneratedSections(chapterRange);
+    const sections = bodySections.length > 0 ? bodySections : (chapter.sections?.length ? chapter.sections : []);
+    return { ...chapter, sections, content: chapterRange };
   });
   const toc = composeTocMarkdown(tocChapters);
   const tocMatch = /^##\s+目录\s*$/mu.exec(normalizedMarkdown);
@@ -1365,14 +1371,15 @@ export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 't
     : cleanedMarkdown;
   const normalizedMarkdown = sortChapterSectionsByNumber(promoteSameTitleWrapperSections(normalizeTertiaryHeadings(sanitizeFormalMarkdown(policyMarkdown))));
   const inferredSections = inferChapterSectionsFromMarkdown(normalizedMarkdown, chapters);
-  // C1 目录确定性：目录=生成前规划大纲。正文提取的 H3（inferredSections）不再覆盖规划 sections——
-  // 正文 H3 被 LLM 改写（增删修饰词/换连接词/加"（一）"后缀）后提取进目录是目录污染的直接源头；
-  // 仅当章节无规划小节时才用正文提取兜底（未规划章节目录不能为空）
+  // 章节 sections 保持规划大纲源（供承接审计/一致性校验等下游消费方使用）；
+  // 目录渲染源为成稿正文 H3（见 ensureFormalToc 4.17.2 修正）——正文 H3 被 LLM 改写
+  // （增删修饰词/换连接词）不再是目录污染源，因为目录只从清洗后的最终正文提取，
+  // 正文无 H3 时才回退规划小节兜底
   const finalizedChapters = chapters.map((chapter, index) => ({
     ...chapter,
     sections: (chapter.sections || []).filter(Boolean).length > 0 ? chapter.sections : (inferredSections[index]?.length ? inferredSections[index] : []),
   }));
-  // C1 目录确定性：只要未明确禁止目录，一律用确定性目录替换正文目录页（含 LLM 写的脏目录）——
+  // 目录确定性：只要未明确禁止目录，一律用确定性目录替换正文目录页（含 LLM 写的脏目录）——
   // 历史缺陷：仅 tocPolicy==='required' 时替换，unspecified 场景下 LLM 目录原样保留（目录与正文标题不一致）
   const tocAppliedMarkdown = options.promptRules?.tocPolicy !== 'forbidden' ? ensureFormalToc(normalizedMarkdown, finalizedChapters) : normalizeFormalChapterHeadings(normalizedMarkdown, finalizedChapters);
   const finalizedMarkdown = applyPromptDocumentRules(sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(tocAppliedMarkdown))), options.promptRules);

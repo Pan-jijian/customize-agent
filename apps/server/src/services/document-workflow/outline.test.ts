@@ -142,6 +142,37 @@ describe('isTenderClauseFragmentTitle（招标条款碎片判别）', () => {
     expect(isTenderClauseFragmentTitle('起重机械配置与垂直运输方案')).toBe(false);
     expect(isTenderClauseFragmentTitle('具备条件的先行施工区段安排')).toBe(false);
   });
+
+  it('4.17.2 条款义务陈述句命中（庐江实测：「本招标项目经理不得同时兼任…」招标附表条款截断混入目录）', () => {
+    expect(isTenderClauseFragmentTitle('本招标项目经理不得同时兼任本招标项目技术负责')).toBe(true);
+    expect(isTenderClauseFragmentTitle('投标人不得以他人名义投标')).toBe(true);
+    expect(isTenderClauseFragmentTitle('承包人必须投保建筑工程一切险')).toBe(true);
+    expect(isTenderClauseFragmentTitle('项目经理不得同时兼任两个项目')).toBe(true);
+  });
+
+  it('4.17.2 条款指向句命中（庐江实测：「项目经理业绩具体要求见招标公告」混入目录）', () => {
+    expect(isTenderClauseFragmentTitle('项目经理业绩具体要求见招标公告')).toBe(true);
+    expect(isTenderClauseFragmentTitle('投标保证金缴纳详见招标文件')).toBe(true);
+    expect(isTenderClauseFragmentTitle('资格评审标准详见投标人须知前附表')).toBe(true);
+    // 合法小节标题不以“见××”结尾
+    expect(isTenderClauseFragmentTitle('招标公告发布的媒介要求')).toBe(false);
+  });
+
+  it('4.17.2 数字+短串+顿号碎片命中（庐江实测：「4示媒介、期限」——「4. 公示媒介、期限」"公"字丢失）', () => {
+    expect(isTenderClauseFragmentTitle('4示媒介、期限')).toBe(true);
+    expect(isTenderClauseFragmentTitle('4.3 4示媒介、期限')).toBe(true);
+    // 顿号前是合法短标题时不得误伤
+    expect(isTenderClauseFragmentTitle('塔吊、人货电梯等垂直运输设备布置')).toBe(false);
+  });
+
+  it('4.17.2 多级编号合法标题不误伤（庐江实测：「1.2 质量管理体系」被残留二级编号误判为数字粘连碎片）', () => {
+    expect(isTenderClauseFragmentTitle('1.2 质量管理体系')).toBe(false);
+    expect(isTenderClauseFragmentTitle('2.3 资源配置计划')).toBe(false);
+    expect(isTenderClauseFragmentTitle('2.3.1 测量放线')).toBe(false);
+    expect(isTenderClauseFragmentTitle('4.2 质量管理体系与质量保证措施')).toBe(false);
+    // 多级编号条款残留仍被拦截（编号后无分隔符/空白，不进剥离分支）
+    expect(isTenderClauseFragmentTitle('3项规定')).toBe(true);
+  });
 });
 
 describe('显式大纲块识别', () => {

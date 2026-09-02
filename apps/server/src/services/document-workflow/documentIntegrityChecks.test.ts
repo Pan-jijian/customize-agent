@@ -313,6 +313,28 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
     const issues = crossSectionNumericConflictIssues(markdown);
     expect(issues.some(issue => /施工升降机/u.test(issue.message))).toBe(true);
   });
+
+  it('4.17.2 总工期口径矛盾：「45日历天」与「210日历天」并存检出（庐江实测跨项目串染）', () => {
+    const markdown = '工期控制以45日历天为唯一基准。关键节点按210日历天总工期倒排。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /计划总工期/u.test(issue.message) && /45日历天 与 210日历天/u.test(issue.message))).toBe(true);
+  });
+
+  it('4.17.2 工期顺延口径不入池：「顺延不超过30日历天」与总工期 210 并存不误报', () => {
+    const markdown = '如遇不可抗力，工期相应顺延不超过30日历天。计划工期210日历天。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('4.17.2 项目编号矛盾：50062 与 50112 并存检出（庐江实测）', () => {
+    const markdown = '项目编号 2026ANNGZ50062。本工程招标项目编号为2026ANNGZ50112。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /项目编号/u.test(issue.message) && /50062/u.test(issue.message) && /50112/u.test(issue.message))).toBe(true);
+  });
+
+  it('4.17.2 不邻接标签的编号不采：业绩项目编号不与本项目编号误比', () => {
+    const markdown = '项目经理同类业绩项目2020ANNGZ11223已竣工验收。本项目编号为2026ANNGZ50112。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
 });
 
 describe('foundationFormResidueIssues（h13 桩基表述残留）', () => {
