@@ -115,6 +115,17 @@ function groupFiles(files: KnowledgeFile[]) {
   return groups;
 }
 
+/** 4.17.3 召回侧多项目指纹防御：同一资料集内出现 ≥2 个不同项目编号（20xxAANNGZxxxxx 族形态）
+ * 即判定多项目资料混放（用户“两份项目数据互相污染”的召回侧根因通道）。同项目编号跨文件
+ * 重复出现（招标文件+补疑+清单同号）按 Set 去重，不误伤单项目多文件场景。 */
+function distinctProjectNos(files: KnowledgeFile[]) {
+  const seen = new Set<string>();
+  for (const file of files) {
+    for (const matched of file.relativePath.match(/\b\d{4}[A-Z]{2,}\d{4,}\b/gu) || []) seen.add(matched);
+  }
+  return [...seen];
+}
+
 export function resolveAgentMaterialScope(projectRoot: string, template: DocumentTemplate, requirement = ''): AgentMaterialScope {
   const active = listKnowledgeFiles(projectRoot).filter(isUsableKnowledgeFile);
   const bindings = templateProjectBindings(template);
@@ -132,6 +143,21 @@ export function resolveAgentMaterialScope(projectRoot: string, template: Documen
     if (scored.length === 1 || (scored.length > 1 && scored[0].score > scored[1].score)) {
       const selectedRoots = [scored[0].root];
       const selectedFiles = scored[0].files.map(file => file.relativePath);
+      // 4.17.3 多项目指纹阻断：唯一匹配资料组内混放多份项目资料（≥2 个不同项目编号）时不得静默放行，
+      // 必须阻断并提示用户拆分资料组（与「多资料组阻断」语义一致，覆盖同目录混放形态）
+      const mixedProjectNos = distinctProjectNos(scored[0].files);
+      if (mixedProjectNos.length >= 2) {
+        return {
+          selectedRoots: [],
+          selectedFiles: [],
+          totalAvailableFiles: active.length,
+          ambiguous: true,
+          locked: false,
+          reason: `资料组「${scored[0].root}」内检测到 ${mixedProjectNos.length} 个不同项目编号（${mixedProjectNos.join('、')}），疑似多份项目资料混放，已阻断生成避免跨项目污染`,
+          rejectedRoots,
+          scopeHash: stableHash({ ambiguous: true, mixedProjectNos }),
+        };
+      }
       return {
         selectedRoots,
         selectedFiles,
@@ -160,6 +186,20 @@ export function resolveAgentMaterialScope(projectRoot: string, template: Documen
 
   if (boundRoots.length === 1) {
     const selectedFiles = baseFiles.map(file => file.relativePath);
+    // 4.17.3 多项目指纹阻断：模板绑定唯一资料组内混放多份项目资料时同样阻断（与需求匹配分支同源）
+    const mixedProjectNos = distinctProjectNos(baseFiles);
+    if (mixedProjectNos.length >= 2) {
+      return {
+        selectedRoots: [],
+        selectedFiles: [],
+        totalAvailableFiles: active.length,
+        ambiguous: true,
+        locked: false,
+        reason: `模板绑定资料组「${boundRoots[0]}」内检测到 ${mixedProjectNos.length} 个不同项目编号（${mixedProjectNos.join('、')}），疑似多份项目资料混放，已阻断生成避免跨项目污染`,
+        rejectedRoots,
+        scopeHash: stableHash({ ambiguous: true, mixedProjectNos }),
+      };
+    }
     return {
       selectedRoots: boundRoots,
       selectedFiles,

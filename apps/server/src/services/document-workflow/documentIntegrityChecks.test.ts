@@ -4,7 +4,7 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, fabricatedAwardIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractScheduleAuthority, fabricatedAwardIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables } from './documentIntegrityChecks';
 import type { DocumentDraftChapter, DocumentFactsModel, TenderRequirementModel } from './types';
 
 vi.mock('./semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
@@ -334,6 +334,45 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
   it('4.17.2 不邻接标签的编号不采：业绩项目编号不与本项目编号误比', () => {
     const markdown = '项目经理同类业绩项目2020ANNGZ11223已竣工验收。本项目编号为2026ANNGZ50112。';
     expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('4.17.3 外部权威裁决：45/210 两套体系各带表格时，factsModel 锁定工期 210 为准确定性替换权威（庐江实测修复节点 failed 根因）', () => {
+    // 第四章 45 天体系（含 45 天进度表）+ 其他章 210 天体系（含 210 天计划表）：
+    // 表格口径不唯一 → 旧实现零产出 → LLM 修复无法裁决 → 修复节点 failed
+    const markdown = [
+      '工期控制以45日历天为唯一基准。',
+      '| 施工阶段 | 开始 | 结束 |',
+      '| --- | --- | --- |',
+      '| 竣工清理 | 第44日 | 第45日 |',
+      '关键节点按210日历天总工期倒排。',
+      '| 计划工期 | 210日历天 |',
+    ].join('\n');
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { scheduleAuthority: 210 });
+    expect(fix.fixedCount).toBeGreaterThan(0);
+    expect(fix.markdown).toContain('工期控制以210日历天为唯一基准');
+    expect(fix.markdown).not.toContain('45日历天');
+    expect(fix.details.some(detail => detail.includes('以绑定资料计划工期为准'))).toBe(true);
+  });
+
+  it('4.17.3 无外部权威时保持旧行为：表格唯一值仍为权威（表格210 + 正文45 → 45改210）', () => {
+    const markdown = '工期控制以45日历天为唯一基准。\n| 计划工期 | 210日历天 |';
+    const fix = applyNumericConsistencyDeterministicFixes(markdown);
+    expect(fix.fixedCount).toBeGreaterThan(0);
+    expect(fix.markdown).toContain('工期控制以210日历天为唯一基准');
+  });
+
+  it('4.17.3 extractScheduleAuthority：计划工期事实卡提取日历天数值', () => {
+    const factsModel = {
+      schedule: [{ key: '计划工期', fieldId: 'schedule_requirement', value: '计划工期：以开工令下发之日起计算，210日历天' }],
+    } as unknown as DocumentFactsModel;
+    expect(extractScheduleAuthority(factsModel)).toBe(210);
+  });
+
+  it('4.17.3 extractScheduleAuthority：事实卡缺工期字段时返回 undefined', () => {
+    const factsModel = {
+      schedule: [{ key: '开工日期', fieldId: 'schedule_requirement', value: '2026年9月23日' }],
+    } as unknown as DocumentFactsModel;
+    expect(extractScheduleAuthority(factsModel)).toBeUndefined();
   });
 });
 

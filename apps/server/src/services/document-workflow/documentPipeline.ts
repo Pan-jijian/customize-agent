@@ -12,7 +12,7 @@ import { validateFactConsistency } from '../document-validation/factConsistencyS
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown, SOURCE_ENUMERATION_PHRASE_RE } from './markdownComposer';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from './budget';
 import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown, markdownTableQualityIssues } from './qualityValidation';
-import { areaArithmeticIssues, applyNumericConsistencyDeterministicFixes, commercialDataInBodyIssues, dangerousListConsistencyIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, localAdaptationKeywordIssues, overviewRecapCandidates, overviewRecapIssues, repeatedWordIssues, resourceConsistencyIssues, sixHundredPercentCoverageIssues, stripCommercialDataBodyLines, stripOverviewRecapBodyLines, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { areaArithmeticIssues, applyNumericConsistencyDeterministicFixes, commercialDataInBodyIssues, dangerousListConsistencyIssues, extractScheduleAuthority, fabricatedStartDateIssues, fieldValueMismatchIssues, localAdaptationKeywordIssues, overviewRecapCandidates, overviewRecapIssues, repeatedWordIssues, resourceConsistencyIssues, sixHundredPercentCoverageIssues, stripCommercialDataBodyLines, stripOverviewRecapBodyLines, supportSystemConflictIssues } from './documentIntegrityChecks';
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { internalTerminologyAnchorIssues, stripInternalTerminologySentences } from './internalTerminologyAnchors';
 import { buildDataConsistencyReviewCached, conflictNumericKey, dataConsistencyConflictIssue, reviewDataConsistency, reviewDataConsistencyBatched, semanticChoiceConflicts, semanticChoiceConflictIssue } from './dataConsistencyReview';
@@ -640,6 +640,9 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   for (const fact of governedStructuredFacts) facts[fact.key] = `${stringifyFactValue(fact.value)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
 
   const factsModel = await buildFactsModel(governedStructuredFacts, structuredTables, missingItems, documentSpec, domainProfile);
+  // 4.17.3 计划总工期权威口径：factsModel 计划工期事实卡作为全文工期确定性修复的裁决基准
+  //（庐江实测：45 vs 210 两套体系各自带表格，表格口径不唯一导致修复零产出、修复节点 failed）
+  const scheduleAuthority = extractScheduleAuthority(factsModel);
   const chapterReadiness = evaluateChapterReadiness(chapterDrafts, documentSpec);
   const validation = validateDraft(chapterDrafts, governedStructuredFacts, template);
   validation.warnings = [...validation.warnings, ...readiness.warnings];
@@ -1501,7 +1504,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
           // A2.1 扩展：数值类矛盾 code 全量先行（劳动力/节点工期/跨节数值），不只 labor-contradiction——
           // 评分报告 P2/P3（装配率 38.4% 孤立值、劳动力 180 vs 120）同属可定点替换的数值矛盾
           if (['labor-contradiction', 'data-consistency', 'param-conflict', 'area-arithmetic', 'field-value-mismatch'].includes(issueCode)) {
-            const deterministicFix = applyNumericConsistencyDeterministicFixes(finalChapterDrafts[chapterIndex].content);
+            const deterministicFix = applyNumericConsistencyDeterministicFixes(finalChapterDrafts[chapterIndex].content, { scheduleAuthority });
             if (deterministicFix.fixedCount > 0) {
               finalChapterDrafts[chapterIndex] = { ...finalChapterDrafts[chapterIndex], content: deterministicFix.markdown };
               blockerFixPatches += deterministicFix.fixedCount;
@@ -1751,7 +1754,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     if (postRebuildMarkdownFix.fixedCount > 0) finalMarkdown = postRebuildMarkdownFix.markdown;
     // A2 收口：跨章数值矛盾（劳动力峰值/节点工期/材料设备数量）确定性定点替换，
     // 在 rebuild 之后执行（rebuild 会用章草稿重建正文，之前的全文级修复必须在此之后落地）
-    const postGateNumericFix = applyNumericConsistencyDeterministicFixes(finalMarkdown);
+    const postGateNumericFix = applyNumericConsistencyDeterministicFixes(finalMarkdown, { scheduleAuthority });
     if (postGateNumericFix.fixedCount > 0) finalMarkdown = postGateNumericFix.markdown;
     await recomputeFinalValidationBundle();
     const totalFixed = postFinalGateFix.fixedCount + postRebuildMarkdownFix.fixedCount + postGateNumericFix.fixedCount;
@@ -1761,7 +1764,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // A2 兜底：postFinalGateFix 分支未触发（无败选数值修复）时，跨章数值矛盾也必须定点收口
   //（nodeScheduleConsistencyIssues/crossSectionNumericConflictIssues 不属于 scopeConflicts 家族，
   // 未修复的节点工期/设备数量矛盾会穿透最终门禁——本次 33 阻断的构成大头）
-  const finalNumericFix = applyNumericConsistencyDeterministicFixes(finalMarkdown);
+  const finalNumericFix = applyNumericConsistencyDeterministicFixes(finalMarkdown, { scheduleAuthority });
   if (finalNumericFix.fixedCount > 0) {
     finalMarkdown = finalNumericFix.markdown;
     await recomputeFinalValidationBundle();
@@ -1905,7 +1908,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
           // A2/A4：跨章数值矛盾确定性优先（与 blocker 修复循环同源）——权威口径锁定后定点替换，
           // 成功即跳过 LLM 轮次（历史缺陷：交付前轮 LLM 修复数值矛盾锚点失配，矛盾残留进导出门禁）
           if (issueCode === 'labor-contradiction') {
-            const deterministicFix = applyNumericConsistencyDeterministicFixes(finalChapterDrafts[chapterIndex].content);
+            const deterministicFix = applyNumericConsistencyDeterministicFixes(finalChapterDrafts[chapterIndex].content, { scheduleAuthority });
             if (deterministicFix.fixedCount > 0) {
               finalChapterDrafts[chapterIndex] = { ...finalChapterDrafts[chapterIndex], content: deterministicFix.markdown };
               preDeliveryFixPatches += deterministicFix.fixedCount;

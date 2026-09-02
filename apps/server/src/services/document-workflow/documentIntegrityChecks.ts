@@ -717,7 +717,10 @@ export function overviewRecapIssues(markdown: string, options: { semanticSimilar
     owner: 'llm',
     repairability: 'llm_repairable',
     message: `项目概况段跨章复述不得出现：概况章外有 ${recaps.length} 处以“本项目为/本工程为”等总述开头整段复述概况内容：${recaps.map(recap => `“${recap}…”`).join('、')}`,
-    suggestion: '总述数据只在工程概况类小节集中交代一次：其他章节直接写本章内容，仅可引用所需的具体数字（如“45日历天总工期”），不得复述完整概况段。',
+    // 4.17.3 示例数值泄漏根治：suggestion 会随缺陷消息注入修复指令，Repairer 曾把示例数值
+    // （“45日历天总工期”）照抄进正文 → 修复后复检残留 → 修复节点 failed 恶性循环。
+    // 修复指令示例一律去数值：只示范句式形态，具体数字必须来自绑定材料。
+    suggestion: '总述数据只在工程概况类小节集中交代一次：其他章节直接写本章内容，仅可引用所需的具体数字（如计划工期天数），不得复述完整概况段。',
   });
   return issues;
 }
@@ -1097,6 +1100,9 @@ const CROSS_SECTION_ANCHORS = [
   {
     key: 'scheduleDays', label: '计划总工期', unit: '日历天', kind: 'number' as const,
     patterns: [
+      // 4.17.3 表格行口径补盲：正/反向模式字符类均排除竖线，表格行「| 计划工期 | 210日历天 |」
+      // 的工期值从不入池（表格值永远做不了权威，修复恒零产出）；行首竖线形态专门收集表格口径
+      /^\s*\|\s*计划工期\s*\|\s*(\d{1,4})\s*个?\s*日历天\s*\|/gum,
       /(?:计划工期|合同工期|工期总日历天数|工期控制|工期目标|总工期)[^。；;\n|]{0,12}?(\d{1,4})\s*个?\s*日历天/gu,
       /(\d{1,4})\s*个?\s*日历天[^。；;\n|]{0,8}?(?:总工期|倒排|分解|为唯一|完成)/gu,
     ],
@@ -1272,7 +1278,9 @@ export function basicInfoScheduleFieldIssues(markdown: string): ValidationIssue[
       owner: 'llm',
       repairability: 'llm_repairable',
       message: `基本信息表「计划工期」字段错填违约条款文字：“${value.slice(0, 40)}”`,
-      suggestion: '「计划工期」字段应填日历天数值（与招标文件前附表一致，如「540个日历天」）；工期延误违约条款文字应放在工期风险管控章节，不得占用基本信息表字段。',
+      // 4.17.3 示例数值泄漏根治：suggestion 注入修复指令，示例数值（「540个日历天」）曾引导
+      // Repairer 照抄他项目工期；示例一律去数值，仅保留“与招标文件前附表一致”的取值指引。
+      suggestion: '「计划工期」字段应填日历天数值（与招标文件前附表一致）；工期延误违约条款文字应放在工期风险管控章节，不得占用基本信息表字段。',
     });
   }
   return issues.slice(0, 2);
@@ -1352,7 +1360,9 @@ export function excavationDepthLockIssues(markdown: string): ValidationIssue[] {
     owner: 'llm',
     repairability: 'llm_repairable',
     message: '基坑深度数值未锁定：正文已有基坑支护/开挖成稿内容，但全文未出现「深度/标高+数值」的确定性表述（比较式阈值如「超过3m」不视为锁定），危大工程分级判定失去依据',
-    suggestion: '从绑定资料（地质勘察报告/基坑支护设计图/基础平面图）锁定基坑开挖深度数值（如 5.85m）写入基坑支护小节；深度 ≥5m 的深基坑须同步标注危大工程分级与专家论证要求，禁止以「按图纸确定」回避深度数值。',
+    // 4.17.3 示例数值泄漏根治：suggestion 注入修复指令，示例数值（5.85m）曾引导 Repairer
+    // 照抄他项目基坑深度；示例一律去数值，仅保留取值指引。
+    suggestion: '从绑定资料（地质勘察报告/基坑支护设计图/基础平面图）锁定基坑开挖深度数值写入基坑支护小节；深度 ≥5m 的深基坑须同步标注危大工程分级与专家论证要求，禁止以「按图纸确定」回避深度数值。',
   }];
 }
 
@@ -1796,15 +1806,22 @@ export interface NumericConsistencyFixResult {
 /** 从后往前应用定点替换（避免索引偏移；detail 去重保序） */
 function applySpanReplacements(markdown: string, replacements: Array<{ start: number; end: number; replacement: string; detail: string }>): { markdown: string; fixedCount: number; details: string[] } {
   if (replacements.length === 0) return { markdown, fixedCount: 0, details: [] };
-  const sorted = [...replacements].sort((a, b) => b.start - a.start);
-  let next = markdown;
+  // 4.17.3 重叠 span 治理：同一数值被正/反向模式双命中（如「45日历天为唯一」同时命中
+  // 工期控制正向与「N日历天+为唯一」反向模式）时旧降序逐条 slice 会产生「45→2100」错位；
+  // 升序单次遍历按原始坐标拼接，重叠 span（start < 已应用区间末）跳过，只应用第一条
+  const sorted = [...replacements].sort((a, b) => a.start - b.start || a.end - b.end);
+  let next = '';
+  let cursor = 0;
   let fixedCount = 0;
   const details: string[] = [];
   for (const item of sorted) {
-    next = next.slice(0, item.start) + item.replacement + next.slice(item.end);
+    if (item.start < cursor || item.end <= item.start) continue;
+    next += markdown.slice(cursor, item.start) + item.replacement;
+    cursor = item.end;
     fixedCount += 1;
     details.push(item.detail);
   }
+  next += markdown.slice(cursor);
   return { markdown: next, fixedCount, details: [...new Set(details)].slice(0, 8) };
 }
 
@@ -1899,8 +1916,11 @@ function fixNodeScheduleConflicts(markdown: string): { markdown: string; fixedCo
 
 /** 材料/设备数量确定性修复：表格行数值为权威口径，正文矛盾数值（差异 >20%）改为表格值。
  * 与检测器 crossSectionNumericConflictIssues 同源（同锚点/同豁免：并列枚举、否定声明句）；
- * 表格口径不唯一（多表互相矛盾）时不动，交 LLM 修复路径。 */
-function fixCrossSectionNumericConflicts(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+ * 表格口径不唯一（多表互相矛盾）时不动，交 LLM 修复路径。
+ * 4.17.3 权威口径扩展：计划总工期锚点支持外部锁定口径（factsModel 计划工期事实卡）——
+ * 庐江实测 45 vs 210 两套体系各自带表格，表格值不唯一导致确定性修复零产出、LLM 修复无法裁决、
+ * 修复节点 failed；外部锁定口径（招标文件前附表值）优先级高于表格值。 */
+function fixCrossSectionNumericConflicts(markdown: string, authorities?: Record<string, number>): { markdown: string; fixedCount: number; details: string[] } {
   const replacements: Array<{ start: number; end: number; replacement: string; detail: string }> = [];
   for (const anchor of CROSS_SECTION_ANCHORS) {
     if (anchor.kind !== 'number') continue;
@@ -1921,9 +1941,12 @@ function fixCrossSectionNumericConflicts(markdown: string): { markdown: string; 
         else bodyValues.add(value);
       }
     }
-    // 表格口径唯一才作为权威；正文存在与权威差异 >20% 的值才修复（与检测器同阈值）
-    if (tableValues.size !== 1) continue;
-    const authority = [...tableValues][0];
+    // 权威优先级：外部锁定口径（factsModel 计划工期）> 表格唯一值；正文存在与权威差异 >20% 的值才修复（与检测器同阈值）
+    const externalAuthority = authorities?.[anchor.key];
+    const authority = externalAuthority !== undefined && externalAuthority > 0 ? externalAuthority
+      : tableValues.size === 1 ? [...tableValues][0]
+      : undefined;
+    if (authority === undefined) continue;
     if (![...bodyValues].some(value => Math.abs(value - authority) > authority * 0.2)) continue;
     for (const pattern of anchor.patterns) {
       for (const match of markdown.matchAll(pattern)) {
@@ -1939,19 +1962,48 @@ function fixCrossSectionNumericConflicts(markdown: string): { markdown: string; 
         if (!Number.isFinite(value) || value <= 0) continue;
         if (Math.abs(value - authority) <= authority * 0.2) continue;
         const valueIndex = match.index + match[0].indexOf(match[1]);
-        replacements.push({ start: valueIndex, end: valueIndex + match[1].length, replacement: String(authority), detail: `${anchor.label} ${value}${anchor.unit}→${authority}${anchor.unit}（以表格口径为准）` });
+        const source = externalAuthority !== undefined && externalAuthority > 0 ? '以绑定资料计划工期为准' : '以表格口径为准';
+        replacements.push({ start: valueIndex, end: valueIndex + match[1].length, replacement: String(authority), detail: `${anchor.label} ${value}${anchor.unit}→${authority}${anchor.unit}（${source}）` });
       }
     }
   }
   return applySpanReplacements(markdown, replacements);
 }
 
+/** 计划总工期权威口径提取：factsModel 计划工期事实卡（schedule_requirement「计划工期」字段）
+ * 或 canonical 锁定值的日历天数值。4.17.3 庐江实测：45 vs 210 两套体系并存时表格口径不唯一，
+ * 必须以绑定资料提取的锁定工期为准做确定性替换（修复节点 failed 根因之一）。
+ * 事实卡值为混合口径长句（“计划工期：…起，210日历天”）时取首个「N日历天」数值。 */
+export function extractScheduleAuthority(factsModel?: DocumentFactsModel | null): number | undefined {
+  const extract = (raw: string): number | undefined => {
+    const match = raw.match(/(\d{1,4})\s*个?\s*日历天/u);
+    if (!match) return undefined;
+    const value = Number(match[1]);
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  };
+  for (const fact of factsModel?.schedule ?? []) {
+    const label = `${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`;
+    if (!/工期|周期/u.test(label)) continue;
+    const found = extract(stringifyFactValue(fact.value));
+    if (found !== undefined) return found;
+  }
+  const canonicalSchedule = factsModel?.canonical?.schedule ?? {};
+  for (const entry of Object.values(canonicalSchedule)) {
+    const item = Array.isArray(entry) ? entry[0] : entry;
+    if (!item || !/工期|周期/u.test(item.label)) continue;
+    const found = extract(item.value);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
 /** A2 总入口：跨章数值矛盾确定性修复（劳动力峰值 → 节点工期 → 材料/设备数量，顺序执行互不重叠） */
-export function applyNumericConsistencyDeterministicFixes(markdown: string): NumericConsistencyFixResult {
+export function applyNumericConsistencyDeterministicFixes(markdown: string, options?: { scheduleAuthority?: number }): NumericConsistencyFixResult {
   let next = markdown;
   let fixedCount = 0;
   const details: string[] = [];
-  for (const step of [fixLaborPeakConflicts, fixNodeScheduleConflicts, fixCrossSectionNumericConflicts]) {
+  const authorities = options?.scheduleAuthority !== undefined && options.scheduleAuthority > 0 ? { scheduleDays: options.scheduleAuthority } : undefined;
+  for (const step of [fixLaborPeakConflicts, fixNodeScheduleConflicts, (text: string) => fixCrossSectionNumericConflicts(text, authorities)]) {
     const result = step(next);
     if (result.markdown !== next) {
       next = result.markdown;

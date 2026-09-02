@@ -6,7 +6,7 @@
 import type { DocumentDraftChapter, DocumentExecutionStage, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict } from './types';
 import { displayStage, upsertProgressStage } from './progress';
 import { buildSemanticSimilarity, snapshotEmbedCacheStats } from './semanticSimilarity';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, foundationFormResidueIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, stripOverviewRecapBodyLines, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractScheduleAuthority, foundationFormResidueIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, stripOverviewRecapBodyLines, supportSystemConflictIssues } from './documentIntegrityChecks';
 import { applyDeterministicConsistencyFixes, crossChapterConsistencyIssues, processSpecConflictIssues } from './qualityValidation';
 import { reviewGlobalConsistency } from './chapterReview';
 import { tablePlanExecutionGaps } from './constructionOrgTablePlan';
@@ -430,9 +430,11 @@ export async function runGlobalConsistencyReviewLoop(input: {
     const deterministicFix = await applyDeterministicConsistencyFixes(chapterDraftsFinal, preliminaryFactsModel, scopeConflicts);
     // A2 收口：LLM 定向修复轮可能重新引入跨章数值矛盾（劳动力峰值/节点工期/材料设备数量），
     // 导出前与检测器同源定点替换兜底（与修复循环前置的口径一致，形成「前置降轮次 + 后置清零」闭环）
+    // 4.17.3：注入计划总工期权威口径（factsModel 锁定值），45 vs 210 类两套体系并存时确定性裁决
+    const scheduleAuthority = extractScheduleAuthority(preliminaryFactsModel);
     let postNumericFixCount = 0;
     for (const chapter of chapterDraftsFinal) {
-      const numericFix = applyNumericConsistencyDeterministicFixes(chapter.content);
+      const numericFix = applyNumericConsistencyDeterministicFixes(chapter.content, { scheduleAuthority });
       if (numericFix.fixedCount > 0) {
         chapter.content = numericFix.markdown;
         postNumericFixCount += numericFix.fixedCount;
