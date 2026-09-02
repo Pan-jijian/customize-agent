@@ -355,14 +355,13 @@ export interface KbSearchResult {
   facets?: Record<string, string | number | string[]>;
 }
 
-export async function searchKb(query: string, opts?: { projectRoot?: string; category?: string; limit?: number; weights?: { keyword?: number; vector?: number; rewrite?: number; hybridBonus?: number } }) {
+export async function searchKb(query: string, opts?: { projectRoot?: string; category?: string; limit?: number; weights?: { keyword?: number; vector?: number; hybridBonus?: number } }) {
   const params = new URLSearchParams({ q: query });
   if (opts?.projectRoot) params.set('projectRoot', opts.projectRoot);
   if (opts?.category) params.set('category', opts.category);
   if (opts?.limit) params.set('limit', String(opts.limit ?? 20));
   if (opts?.weights?.keyword != null) params.set('keywordWeight', String(opts.weights.keyword));
   if (opts?.weights?.vector != null) params.set('vectorWeight', String(opts.weights.vector));
-  if (opts?.weights?.rewrite != null) params.set('rewriteWeight', String(opts.weights.rewrite));
   if (opts?.weights?.hybridBonus != null) params.set('hybridBonus', String(opts.weights.hybridBonus));
   return fetchJson<{ results: KbSearchResult[]; total: number; queryTimeMs?: number; debug?: { originalQuery?: string; rewrittenQueries?: string[]; weights?: Record<string, number>; recallCounts?: Record<string, number>; reranker?: string } }>(`/api/kb/search?${params}`);
 }

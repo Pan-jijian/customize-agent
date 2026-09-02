@@ -12,6 +12,7 @@ import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE } from './parameterPatterns';
 import { stringifyFactValue, throwIfAborted } from './utils';
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { evidenceSafetyKey } from './evidenceContentSafety';
+import { filterFactsByProjectScope, type ProjectMaterialScope } from './projectMaterialScope';
 
 export function extractFacts(template: DocumentTemplate, evidence: DocumentEvidence[], spec?: AutoDocumentSpecPackage): Record<string, string> {
   const facts: Record<string, string> = {};
@@ -20,6 +21,42 @@ export function extractFacts(template: DocumentTemplate, evidence: DocumentEvide
     if (hit) facts[field.name] = `${hit.content.replace(/\s+/gu, ' ')}（来源：${hit.filePath}，角色：${hit.roleId || '未标注'}）`;
   }
   return facts;
+}
+
+/** 表格工作簿磁盘解析进程内缓存（key=绝对路径+roleId，mtime+size 校验失效）：生成准备与 finalize
+ *  两次全量抽取解析同一批表文件，缓存命中零磁盘 IO/零 XLSX 解析；文件内容变化自动失效。
+ *  env DOCUMENT_TABLE_PARSE_CACHE=0 关闭（回退逐次解析） */
+const workbookTablesCache = new Map<string, { mtimeMs: number; size: number; tables: StructuredTableFact[] }>();
+
+function parseWorkbookTables(absolute: string, item: DocumentEvidence): StructuredTableFact[] {
+  const workbook = XLSX.readFile(absolute, { cellDates: true, sheetStubs: false });
+  const tables: StructuredTableFact[] = [];
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    const matrix = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, raw: false, defval: '' }).map(row => row.map(cell => String(cell).trim()));
+    const nonEmpty = matrix.filter(row => row.some(Boolean));
+    if (nonEmpty.length < 2) continue;
+    const headerIndex = nonEmpty.findIndex(row => row.filter(Boolean).length >= 2);
+    if (headerIndex < 0) continue;
+    const headers = nonEmpty[headerIndex].filter(Boolean);
+    const rows = nonEmpty.slice(headerIndex + 1).map(row => row.slice(0, headers.length)).filter(row => row.some(Boolean));
+    if (rows.length === 0) continue;
+    tables.push({ tableType: item.roleId || 'table', sheet: sheetName, headers, rows, sourceFile: item.filePath, sourceRange: sheet['!ref'] });
+  }
+  return tables;
+}
+
+function parseWorkbookTablesCached(absolute: string, item: DocumentEvidence): StructuredTableFact[] {
+  if (process.env.DOCUMENT_TABLE_PARSE_CACHE === '0') return parseWorkbookTables(absolute, item);
+  const stat = fs.statSync(absolute);
+  const key = `${absolute}:${item.roleId || 'table'}`;
+  const cached = workbookTablesCache.get(key);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.tables;
+  const tables = parseWorkbookTables(absolute, item);
+  // 软上限防长期驻留进程无限增长（单项目表文件通常数十个，超限全清重建即可）
+  if (workbookTablesCache.size > 500) workbookTablesCache.clear();
+  workbookTablesCache.set(key, { mtimeMs: stat.mtimeMs, size: stat.size, tables });
+  return tables;
 }
 
 export function extractStructuredTables(evidence: DocumentEvidence[]): StructuredTableFact[] {
@@ -34,19 +71,7 @@ export function extractStructuredTables(evidence: DocumentEvidence[]): Structure
     const ext = path.extname(item.filePath).toLowerCase();
     if (fs.existsSync(absolute) && ['.xlsx', '.xls', '.csv'].includes(ext)) {
       try {
-        const workbook = XLSX.readFile(absolute, { cellDates: true, sheetStubs: false });
-        for (const sheetName of workbook.SheetNames) {
-          const sheet = workbook.Sheets[sheetName];
-          const matrix = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, raw: false, defval: '' }).map(row => row.map(cell => String(cell).trim()));
-          const nonEmpty = matrix.filter(row => row.some(Boolean));
-          if (nonEmpty.length < 2) continue;
-          const headerIndex = nonEmpty.findIndex(row => row.filter(Boolean).length >= 2);
-          if (headerIndex < 0) continue;
-          const headers = nonEmpty[headerIndex].filter(Boolean);
-          const rows = nonEmpty.slice(headerIndex + 1).map(row => row.slice(0, headers.length)).filter(row => row.some(Boolean));
-          if (rows.length === 0) continue;
-          tables.push({ tableType: item.roleId || 'table', sheet: sheetName, headers, rows, sourceFile: item.filePath, sourceRange: sheet['!ref'] });
-        }
+        tables.push(...parseWorkbookTablesCached(absolute, item));
         continue;
       } catch {
         // 回退到文本解析
@@ -396,6 +421,125 @@ export function extractPreciseFactsFromEvidence(evidence: DocumentEvidence[], pr
     }
   }
   return facts.slice(0, 240);
+}
+
+/** 1.1 事实净化门计数（截断清洗/丢弃/编号回源补全），经 diagnostics.factSanitize 进进度页后台诊断 */
+export interface FactSanitizeStats {
+  truncated: number;
+  dropped: number;
+  repaired: number;
+}
+
+/** 值内污染形态（合肥师范样本实锤）：表格碎片竖线（工程名称=“土建与装饰工程|||||标段：|||||第46页共47页”）、
+ *  页码（第46页共47页）、markdown 标题标记（质量目标=“### 1.1项目概况…”）、参数行摘要标记；
+ *  命中即视为污染起点，从该处截断保留前缀 */
+const FACT_VALUE_POLLUTION_RE = /\||第\s*\d+\s*页|共\s*\d+\s*页|[#＃]{1,6}|资料参数行摘要/u;
+
+/** 叙述段拒收白名单：规模/范围/工期/周期类字段允许长窗混合口径值（fieldExtractionPattern 上限 220），
+ *  其余字段值长 >120 字符视为“叙述段”型脏值（模型会把整段公告原文当事实写进标题/正文） */
+const SANITIZE_LONG_TEXT_FIELD_RE = /规模|范围|工期|周期|project_scope|project_scale/iu;
+
+/** 编号类字段值字符集（与 isValidProjectBasicFactValue project_code 分支一致） */
+const SANITIZE_CODE_VALUE_RE = /^[A-Za-z0-9\-_.（）()]+$/u;
+
+/** 编号回源标签：编号截断补全只在标签语境中取候选（实锤：项目编号 2026AF 截断自 2026AFAGZ50906） */
+const SANITIZE_CODE_LABEL_RE = /(?:招标项目编号|项目编号|工程编号|标段编号|合同编号|编号)[：:为是]*([A-Za-z0-9][A-Za-z0-9\-_.（）()]{3,79})/gu;
+
+function isSanitizeCodeField(fact: DocumentFact) {
+  return fact.fieldId === 'project_code' || /编号|代码/u.test(`${fact.fieldName || ''}${fact.key || ''}`);
+}
+
+/** 证据全文编号 token 索引（标签语境）：PDF 常在编号中间换行/分栏把值截短，
+ *  全文去空白后标签后的完整 token 即回源候选；按出现频次降序、同频次取较短者（保守补全） */
+function buildLabeledCodeTokenIndex(evidence: DocumentEvidence[]) {
+  const index = new Map<string, number>();
+  for (const item of evidence) {
+    const content = cleanPdfHeadingNoise(stringifyFactValue(item.content)).replace(/\s+/gu, '');
+    for (const match of content.matchAll(SANITIZE_CODE_LABEL_RE)) {
+      const token = match[1];
+      if (token) index.set(token, (index.get(token) || 0) + 1);
+    }
+  }
+  return index;
+}
+
+/** 1.1 事实净化门：本地事实池统一出口脏值过滤。
+ *  三层规则：① 污染截断——值内出现表格碎片/页码/标题标记时从污染点截断，残余 <2 字符或形态非法则丢弃；
+ *  ② 叙述段拒收——非长文本白名单字段值长 >120 字符直接丢弃；
+ *  ③ 编号回源补全——编号类字段值是证据标签语境中更长编号 token 的真前缀（长度差 ≥2）时补全。
+ *  计数经 stats 累加（不静默丢弃）；env DOCUMENT_FACT_SANITIZE=0 由调用方回退直通。 */
+export function sanitizeExtractedFacts(facts: DocumentFact[], evidence: DocumentEvidence[], stats: FactSanitizeStats): DocumentFact[] {
+  let codeIndex: Map<string, number> | undefined;
+  const result: DocumentFact[] = [];
+  for (const fact of facts) {
+    const raw = stringifyFactValue(fact.value).trim();
+    if (!raw) continue;
+    const pollution = FACT_VALUE_POLLUTION_RE.exec(raw);
+    let value = raw;
+    if (pollution) value = raw.slice(0, pollution.index).replace(/[\s：:，,、;；\-—|]+$/u, '').trim();
+    const truncated = value !== raw;
+    if (value.length < 2) {
+      stats.dropped += 1;
+      continue;
+    }
+    const codeField = isSanitizeCodeField(fact);
+    if (codeField && !SANITIZE_CODE_VALUE_RE.test(value)) {
+      stats.dropped += 1;
+      continue;
+    }
+    if (value.length > 120 && !SANITIZE_LONG_TEXT_FIELD_RE.test(`${fact.fieldId || ''} ${fact.fieldName || ''} ${fact.key || ''}`)) {
+      stats.dropped += 1;
+      continue;
+    }
+    let repaired = false;
+    if (codeField && value.length >= 4) {
+      codeIndex ||= buildLabeledCodeTokenIndex(evidence);
+      const candidates = [...codeIndex.entries()].filter(([token]) => token.length >= value.length + 2 && token.startsWith(value));
+      const best = candidates.sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0]?.[0];
+      if (best) {
+        value = best;
+        repaired = true;
+      }
+    }
+    if (truncated) stats.truncated += 1;
+    if (repaired) stats.repaired += 1;
+    result.push(value === raw ? fact : { ...fact, value });
+  }
+  return result;
+}
+
+/** 本地事实池统一入口：生成准备（writerEvidence 版）与 finalize（allEvidence 版）两处抽取点
+ *  共用同一组本地抽取器调用 + 项目范围过滤，消除双写漂移；structuredTables 经进程内工作簿
+ *  解析缓存（workbookTablesCache），同一批表文件两次调用间零重复磁盘 IO。
+ *  1.1 事实净化门：出口对三类事实统一过 sanitizeExtractedFacts（表格碎片/页码/标题标记截断、
+ *  叙述段拒收、编号截断回源补全），计数进 diagnostics.factSanitize（进度页后台诊断可观测）；
+ *  env DOCUMENT_FACT_SANITIZE=0 回退直通（行为保持）。 */
+export function extractLocalFactPool(input: {
+  evidence: DocumentEvidence[];
+  template: DocumentTemplate;
+  spec?: AutoDocumentSpecPackage;
+  profile?: DocumentDomainProfile;
+  scope?: ProjectMaterialScope;
+  diagnostics?: DocumentGenerationDiagnostics;
+}): { localFacts: DocumentFact[]; projectBasicFacts: DocumentFact[]; preciseFacts: DocumentFact[]; structuredTables: StructuredTableFact[]; factSanitize: FactSanitizeStats } {
+  const pool = {
+    localFacts: filterFactsByProjectScope(extractStructuredFacts(input.evidence, input.template, input.spec), input.scope),
+    projectBasicFacts: filterFactsByProjectScope(extractProjectBasicFactsFromEvidence(input.evidence), input.scope),
+    preciseFacts: filterFactsByProjectScope(extractPreciseFactsFromEvidence(input.evidence, input.profile || DEFAULT_DOCUMENT_DOMAIN_PROFILE), input.scope),
+    structuredTables: filterFactsByProjectScope(extractStructuredTables(input.evidence), input.scope),
+  };
+  const factSanitize: FactSanitizeStats = { truncated: 0, dropped: 0, repaired: 0 };
+  if (process.env.DOCUMENT_FACT_SANITIZE === '0') return { ...pool, factSanitize };
+  pool.localFacts = sanitizeExtractedFacts(pool.localFacts, input.evidence, factSanitize);
+  pool.projectBasicFacts = sanitizeExtractedFacts(pool.projectBasicFacts, input.evidence, factSanitize);
+  pool.preciseFacts = sanitizeExtractedFacts(pool.preciseFacts, input.evidence, factSanitize);
+  if (input.diagnostics && (factSanitize.truncated > 0 || factSanitize.dropped > 0 || factSanitize.repaired > 0)) {
+    const target = (input.diagnostics.factSanitize ||= { truncated: 0, dropped: 0, repaired: 0 });
+    target.truncated += factSanitize.truncated;
+    target.dropped += factSanitize.dropped;
+    target.repaired += factSanitize.repaired;
+  }
+  return { ...pool, factSanitize };
 }
 
 export function buildSchemaFacts(facts: DocumentFact[], spec?: AutoDocumentSpecPackage) {

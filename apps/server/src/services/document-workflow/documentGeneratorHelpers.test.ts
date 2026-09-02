@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { chapterGenerationTargets, cleanChineseWordBreakSpaces, cleanInlineFactValue, dedupeCrossSectionDuplicateSentences, finalizeFinalMarkdownStructure, normalizeWorkPackageLabels, splitGluedTableHeaderLines, stripBidDisciplineSentences, stripBidDisciplineSentencesSemantic, stripDataConsistencyLeakSentences } from './documentGeneratorHelpers';
+import { afterEach, describe, expect, it } from 'vitest';
+import { chapterGenerationTargets, cleanChineseWordBreakSpaces, cleanInlineFactValue, callBreakdownTopDetails, callBreakdownTopSummary, dedupeCrossSectionDuplicateSentences, phaseWaterfallDetails, finalizeFinalMarkdownStructure, normalizeWorkPackageLabels, splitGluedTableHeaderLines, stripBidDisciplineSentences, stripBidDisciplineSentencesSemantic, stripDataConsistencyLeakSentences } from './documentGeneratorHelpers';
 
 describe('chapterGenerationTargets（提示词篇幅目标完整下达）', () => {
   it('长文模式：提示词章预算必须完整下达，不被 upper 硬顶与结构估算压制', () => {
@@ -401,5 +401,86 @@ describe('dedupeCrossSectionDuplicateSentences 跨小节整句重复合并（3.3
     const result = dedupeCrossSectionDuplicateSentences(content);
     // 正文句与表格单元格不算跨小节重复
     expect(result).toContain(`| 说明 | ${longSentence} |`);
+  });
+});
+
+describe('dedupeCrossSectionDuplicateSentences 跨章同名小节序号化（1.5 双补盲之句子级）', () => {
+  afterEach(() => {
+    delete process.env.DOCUMENT_CROSS_CHAPTER_DEDUP;
+  });
+
+  // 实锤漏网句（方案 1.5：9 种句子各出现 2 次之一）
+  const crossChapterSentence = '混凝土浇筑采用分层连续浇筑，每层厚度不超过500mm，振捣棒插入间距不大于400mm，养护不少于14天。';
+
+  it('同名小节跨章再现：序号化为不同小节，完全重复句跨章删除（保留首现）', () => {
+    const content = `### 施工方法\n${crossChapterSentence}\n### 施工方法\n${crossChapterSentence}`;
+    const result = dedupeCrossSectionDuplicateSentences(content);
+    expect(result.split(crossChapterSentence).length - 1).toBe(1);
+    // 标题行本身不动
+    expect(result.split('### 施工方法').length - 1).toBe(2);
+  });
+
+  it('env DOCUMENT_CROSS_CHAPTER_DEDUP=0 回退：同名小节按同小节判定，重复句保留', () => {
+    process.env.DOCUMENT_CROSS_CHAPTER_DEDUP = '0';
+    const content = `### 施工方法\n${crossChapterSentence}\n### 施工方法\n${crossChapterSentence}`;
+    const result = dedupeCrossSectionDuplicateSentences(content);
+    expect(result.split(crossChapterSentence).length - 1).toBe(2);
+  });
+
+  it('不同名小节行为不变：跨小节重复句仍删除', () => {
+    const content = `### 5.1 施工准备\n${crossChapterSentence}\n### 5.2 施工方法\n${crossChapterSentence}`;
+    const result = dedupeCrossSectionDuplicateSentences(content);
+    expect(result.split(crossChapterSentence).length - 1).toBe(1);
+  });
+});
+
+describe('callBreakdownTopSummary / callBreakdownTopDetails（4.1 per-调用分量 Top5 展示）', () => {
+  const bucket = (calls: number, inputChars: number, l3Chars = 0, cacheHitTokens = 0, cacheMissTokens = 0) => ({ calls, inputChars, l3Chars, cacheHitTokens, cacheMissTokens });
+
+  it('按输入字符降序取 Top5，message 摘要为「key 次数/万字」', () => {
+    const breakdown = {
+      'repair:c1': bucket(2, 120000, 80000),
+      'draft:c2': bucket(1, 50000),
+      '(none)': bucket(6, 30000),
+      small1: bucket(1, 100),
+      small2: bucket(1, 50),
+      small3: bucket(1, 10),
+    };
+    const summary = callBreakdownTopSummary(breakdown);
+    expect(summary).toBe('repair:c1 2次/12.0万字，draft:c2 1次/5.0万字，(none) 6次/3.0万字，small1 1次/0.0万字，small2 1次/0.0万字');
+    expect(summary).not.toContain('small3');
+  });
+
+  it('details 五维度完整行：L3 字符与缓存命中率（无缓存数据省略缓存段）', () => {
+    const details = callBreakdownTopDetails({
+      'repair:c1': bucket(2, 120000, 80000, 700, 300),
+      'draft:c2': bucket(1, 50000, 0, 0, 0),
+    });
+    expect(details).toEqual([
+      'repair:c1：2 次，输入 12.0 万字（L3 8.0 万字），缓存命中 70%（700/1000 token）',
+      'draft:c2：1 次，输入 5.0 万字（L3 0.0 万字）',
+    ]);
+  });
+
+  it('空/undefined breakdown 回退空串与空数组', () => {
+    expect(callBreakdownTopSummary(undefined)).toBe('');
+    expect(callBreakdownTopDetails(undefined)).toEqual([]);
+  });
+});
+
+describe('phaseWaterfallDetails（4.2 阶段耗时瀑布完整展示）', () => {
+  it('仅保留 phase:* 条目并按开始时间排序，格式为「name：秒 秒」', () => {
+    const details = phaseWaterfallDetails([
+      { name: 'chapter-draft:c2', startedAt: 500, endedAt: 900, durationMs: 400 },
+      { name: 'phase:draft', startedAt: 200, endedAt: 61200, durationMs: 61000 },
+      { name: 'phase:plan', startedAt: 100, endedAt: 1600, durationMs: 1500 },
+      { name: 'phase:finalize', startedAt: 70000, endedAt: 80500, durationMs: 10500 },
+    ]);
+    expect(details).toEqual(['phase:plan：1.5 秒', 'phase:draft：61.0 秒', 'phase:finalize：10.5 秒']);
+  });
+
+  it('无 phase:* 条目返回空数组', () => {
+    expect(phaseWaterfallDetails([{ name: 'chapter-draft:c1', startedAt: 1, endedAt: 2, durationMs: 1 }])).toEqual([]);
+    expect(phaseWaterfallDetails([])).toEqual([]);
   });
 });

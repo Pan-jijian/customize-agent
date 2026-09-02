@@ -50,14 +50,14 @@ describe('子进程模式（runInChildProcess）', () => {
     expect(upsertKbOperation).toHaveBeenCalledWith('/proj-idx', expect.objectContaining({ id: 'job-1', type: 'reindex', stage: 'uploading', status: 'processing', message: '索引任务已进入后台队列' }));
 
     child.stdout.emit('data', Buffer.from('line one\nImage too small to scale!!\nLine cannot be recognized!!\nline two'));
+    // 输出日志按 500ms 窗口合并节流，exit 前兜底冲刷：断言在 exit 后进行
+    child.emit('exit', 0);
+    const result = await promise;
     // 噪声行被清洗，剩余行合并进 message
     expect(upsertKbOperation).toHaveBeenCalledWith('/proj-idx', expect.objectContaining({
       id: 'job-1', stage: 'parsing', status: 'processing', percent: 5,
       message: '后台索引输出：line one\nline two',
     }));
-
-    child.emit('exit', 0);
-    const result = await promise;
     expect(result).toEqual({ success: true });
     expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-idx');
     expect(isKnowledgeIndexing('/proj-idx')).toBe(false);
@@ -68,11 +68,12 @@ describe('子进程模式（runInChildProcess）', () => {
     vi.mocked(fork).mockReturnValue(child as never);
     const promise = enqueueKnowledgeIndex({ id: 'job-2', projectRoot: '/proj-idx2' });
     child.stderr.emit('data', Buffer.from('  warning: bad glyph  \n'));
+    // 节流窗口内不立即写日志，exit 触发兜底冲刷后可见
+    child.emit('exit', 0);
+    await promise;
     expect(upsertKbOperation).toHaveBeenCalledWith('/proj-idx2', expect.objectContaining({
       id: 'job-2', message: '后台索引错误输出：warning: bad glyph',
     }));
-    child.emit('exit', 0);
-    await promise;
   });
 
   it('exit 非 0：写入错误日志并返回失败', async () => {

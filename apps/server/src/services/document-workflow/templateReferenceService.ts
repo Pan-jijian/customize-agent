@@ -119,6 +119,8 @@ async function doRecomputeStaleProfiles(): Promise<void> {
   const stale = records.filter(item => item.status === 'ready' && item.profileVersion !== PROFILE_VERSION);
   if (stale.length === 0) return;
   let changed = false;
+  // 单文件单次提取：画像重算与语义补充共用同一份文本（OCR/大文件提取昂贵，重复提取=双倍耗时）
+  const extracted: Array<{ record: TemplateReferenceRecord; text: string }> = [];
   for (const record of stale) {
     const filePath = path.join(referencesRoot(), record.filePath);
     if (!fs.existsSync(filePath)) continue;
@@ -127,6 +129,7 @@ async function doRecomputeStaleProfiles(): Promise<void> {
       record.qualityProfile = await buildReferenceQualityProfile(text);
       record.profileVersion = PROFILE_VERSION;
       changed = true;
+      extracted.push({ record, text });
     } catch {
       // 保留旧画像与版本标记，下次读取重试
     }
@@ -134,17 +137,14 @@ async function doRecomputeStaleProfiles(): Promise<void> {
   if (changed) writeIndex(records);
   // 语义画像补充层（embedding+LLM 离线标注）后台异步构建：不阻塞 GET 列表响应，
   // 失败静默降级保留正则层画像；语义层不参与评分公式，构建间隙读取旧语义无影响
-  for (const record of stale) {
-    const filePath = path.join(referencesRoot(), record.filePath);
-    if (record.status === 'ready' && fs.existsSync(filePath)) void enrichRecordSemantics(record, filePath);
-  }
+  for (const { record, text } of extracted) void enrichRecordSemantics(record, text);
 }
 
 /** 语义画像补充（后台异步，不阻塞上传返回）：embedding 去重 + LLM 批注 + LLM 点评，
- * 完成后重读索引更新对应记录；失败静默降级，参考库保持正则层画像可用 */
-async function enrichRecordSemantics(record: TemplateReferenceRecord, storedPath: string): Promise<void> {
+ * 完成后重读索引更新对应记录；失败静默降级，参考库保持正则层画像可用。
+ * text 由调用方传入（同一文件只提取一次，调用方已完成提取）。 */
+async function enrichRecordSemantics(record: TemplateReferenceRecord, text: string): Promise<void> {
   try {
-    const text = await extractReferenceText(storedPath);
     const semantic = await buildSemanticProfileEnrichment(text, record.qualityProfile?.headingStructure || []);
     if (!semantic) return;
     const records = readIndex();
@@ -196,8 +196,8 @@ export async function addTemplateReference(input: {
     record.status = 'ready';
     if (record.typeSource === 'auto') record.projectType = suggestProjectType(text);
     writeIndex(records);
-    // 语义画像补充（embedding+LLM 离线标注）：后台异步构建，不阻塞上传返回
-    void enrichRecordSemantics(record, storedPath);
+    // 语义画像补充（embedding+LLM 离线标注）：后台异步构建，不阻塞上传返回；复用上方已提取文本，不再二次提取
+    void enrichRecordSemantics(record, text);
   } catch (error) {
     record.status = 'failed';
     record.errorMessage = error instanceof Error ? error.message : '解析失败';

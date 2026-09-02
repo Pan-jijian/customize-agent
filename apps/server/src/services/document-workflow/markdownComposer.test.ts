@@ -376,13 +376,22 @@ describe('L0_WRITER_SYSTEM_PREFIX（3.2 Writer 类 system 前缀统一）', () =
     }
   });
 
-  it('writerSystemPrefix 默认返回 L0 前缀', () => {
+  it('writerSystemPrefix 默认返回统一前缀（3.1：L0+FORMAL 公共段前置，身份句后移）', () => {
     const original = process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    const originalUnified = process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX;
     delete process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    delete process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX;
     try {
-      expect(writerSystemPrefix('legacy')).toBe(L0_WRITER_SYSTEM_PREFIX);
+      const prefix = writerSystemPrefix('legacy');
+      expect(prefix.startsWith(DOCUMENT_L0_COMMON_PREFIX)).toBe(true);
+      expect(prefix).toContain(FORMAL_WRITING_RULES);
+      expect(prefix).toContain('你是施工组织设计文档写作专家。');
+      expect(prefix).toContain(SECTION_GENERATION_SAFETY_RULES);
+      // 3.1 关键结构：FORMAL 完整规则在身份句之前（公共段前置，角色差异句后移）
+      expect(prefix.indexOf(FORMAL_WRITING_RULES)).toBeLessThan(prefix.indexOf('你是施工组织设计文档写作专家。'));
     } finally {
       if (original !== undefined) process.env.DOCUMENT_L0_SYSTEM_PREFIX = original;
+      if (originalUnified !== undefined) process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX = originalUnified;
     }
   });
 
@@ -394,6 +403,42 @@ describe('L0_WRITER_SYSTEM_PREFIX（3.2 Writer 类 system 前缀统一）', () =
     } finally {
       if (original !== undefined) process.env.DOCUMENT_L0_SYSTEM_PREFIX = original;
       else delete process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    }
+  });
+
+  it('3.1 全类型 system 前缀前 2000 字符逐字节一致（快照）', () => {
+    const original = process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    const originalUnified = process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX;
+    delete process.env.DOCUMENT_L0_SYSTEM_PREFIX;
+    delete process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX;
+    try {
+      const head = [DOCUMENT_L0_COMMON_PREFIX, FORMAL_WRITING_RULES].join('\n\n');
+      expect(head.length).toBeGreaterThanOrEqual(2000);
+      const samples = [
+        writerSystemPrefix('legacy'),
+        docSystemPrefix('你是章节局部修复专家。'),
+        docSystemPrefix('你是施工组织设计数据一致性审查器。'),
+        docSystemPrefix('你是专业施工组织设计文档结构规划专家。'),
+        docSystemPrefix('你是招标文件“要求与标准”结构化提取器。'),
+      ];
+      for (const system of samples) {
+        expect(system.slice(0, 2000)).toBe(head.slice(0, 2000));
+      }
+    } finally {
+      if (original !== undefined) process.env.DOCUMENT_L0_SYSTEM_PREFIX = original;
+      if (originalUnified !== undefined) process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX = originalUnified;
+      else delete process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX;
+    }
+  });
+
+  it('3.1 DOCUMENT_UNIFIED_SYSTEM_PREFIX=0 回退为仅 L0 公共前缀开头', () => {
+    const original = process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX;
+    process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX = '0';
+    try {
+      expect(docSystemPrefix('你是章节局部修复专家。')).toBe([DOCUMENT_L0_COMMON_PREFIX, '你是章节局部修复专家。'].join('\n\n'));
+    } finally {
+      if (original !== undefined) process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX = original;
+      else delete process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX;
     }
   });
 });

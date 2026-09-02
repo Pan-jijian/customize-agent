@@ -171,6 +171,11 @@ export function isHardBannedSectionTitle(title: string): boolean {
 export function isQualificationSectionTitle(title: string): boolean {
   const normalized = title.trim().replace(/\s+/gu, '');
   if (!normalized) return false;
+  // 1.4 形态 A 句式级判别（与 outline.ts isTenderClauseFragmentTitle 同口径，防「生成前已拦、生成后放行」口径漂移）：
+  // 先去小节编号前缀（6.6 具备有效的…），资格义务句式覆盖词表外证照（如「具备有效的食品经营许可证」）
+  const stripped = normalized.replace(/^\d{1,3}(?:[.．]\d{1,3})*[、.．]?/u, '');
+  if (/^具备(?:有效|相应|满足)/u.test(stripped)) return true;
+  if (/^(?:须|应|需|得)?提供[^，,。；]{0,12}(?:证明|材料|文件|证件|证书|报告)/u.test(stripped)) return true;
   const hasQualification = /营业执照|资质证书|安全生产许可证|资格预审|资格审查|资质审查|财务状况|业绩证明|业绩要求|银行资信|审计报告|信用记录|信用评价|不良行为记录|联合体投标|联合体协议/u.test(normalized);
   if (!hasQualification) return false;
   const hasTechnicalContext = /施工|技术|方案|措施|管理|控制|验收|工艺|流程|计划|组织|进度|质量|工期|文明|绿色|环保|节能|材料|设备|机械|人员|劳务|检验|检测|试验|保证|落实|制度/u.test(normalized);

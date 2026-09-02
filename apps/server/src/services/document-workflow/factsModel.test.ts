@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE } from '../document-core/documentDomainProfileService';
-import type { DocumentEvidence, DocumentFact, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter } from './types';
+import type { DocumentEvidence, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from './types';
 import {
   buildChapterFactNeeds,
   buildFactsModel,
@@ -12,6 +12,7 @@ import {
   cleanPdfHeadingNoise,
   extractFacts,
   extractFactsWithLlm,
+  extractLocalFactPool,
   extractPreciseFactsFromEvidence,
   extractProjectBasicFactsFromEvidence,
   extractStructuredFacts,
@@ -24,6 +25,7 @@ import {
   normalizedFactValue,
   reliableFactForTarget,
   resolveChapterFactNeeds,
+  sanitizeExtractedFacts,
   shouldRunLlmFactExtraction,
 } from './factsModel';
 
@@ -579,5 +581,117 @@ describe('buildFactsModel', () => {
     expect(proceduralCall).toBeTruthy();
     expect(proceduralCall![0]).toHaveLength(2);
     expect(proceduralCall![1]).toHaveLength(8);
+  });
+});
+
+describe('sanitizeExtractedFacts（1.1 事实净化门）', () => {
+  const stats = () => ({ truncated: 0, dropped: 0, repaired: 0 });
+
+  it('表格碎片与页码从污染点截断并保留前缀', () => {
+    const s = stats();
+    const facts = [
+      factOf({ key: '工程名称', fieldName: '工程名称', value: '土建与装饰工程|||||标段：|||||第46页共47页' }),
+      factOf({ key: '建设地点', fieldName: '建设地点', value: '合肥市经开区第46页共47页' }),
+    ];
+    const result = sanitizeExtractedFacts(facts, [], s);
+    expect(result.map(item => item.value)).toEqual(['土建与装饰工程', '合肥市经开区']);
+    expect(s).toMatchObject({ truncated: 2, dropped: 0, repaired: 0 });
+  });
+
+  it('标题标记起头的叙述原文直接丢弃', () => {
+    const s = stats();
+    const result = sanitizeExtractedFacts([
+      factOf({ key: '质量目标', fieldName: '质量目标', value: '### 1.1项目概况与招标范围：本项目位于合肥市' }),
+    ], [], s);
+    expect(result).toHaveLength(0);
+    expect(s.dropped).toBe(1);
+  });
+
+  it('截断后残余不足 2 字符丢弃', () => {
+    const s = stats();
+    const result = sanitizeExtractedFacts([factOf({ key: '工程名称', value: '甲|第46页共47页' })], [], s);
+    expect(result).toHaveLength(0);
+    expect(s.dropped).toBe(1);
+  });
+
+  it('非白名单字段值长 >120 字符的叙述段拒收，长文本白名单字段放行', () => {
+    const s = stats();
+    const result = sanitizeExtractedFacts([
+      factOf({ key: '质量目标', fieldName: '质量目标', value: '优'.repeat(150) }),
+      factOf({ key: '建设规模', fieldName: '建设规模', fieldId: 'project_scale', value: '总'.repeat(150) }),
+    ], [], s);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.fieldId).toBe('project_scale');
+    expect(s.dropped).toBe(1);
+  });
+
+  it('编号截断回源补全：证据标签语境存在更长完整编号时取完整值', () => {
+    const s = stats();
+    const evidence = [evidenceItem({ content: '项目编号：2026AFAGZ50906\n招标人：合肥市某局' })];
+    const result = sanitizeExtractedFacts([
+      factOf({ key: '项目编号', fieldName: '项目编号', fieldId: 'project_code', value: '2026AF' }),
+    ], evidence, s);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.value).toBe('2026AFAGZ50906');
+    expect(s.repaired).toBe(1);
+  });
+
+  it('编号跨行截断场景回源（PDF 编号中间换行）', () => {
+    const s = stats();
+    const evidence = [evidenceItem({ content: '项目编号：2026AF\nAGZ50906' })];
+    const result = sanitizeExtractedFacts([
+      factOf({ key: '项目编号', fieldId: 'project_code', value: '2026AF' }),
+    ], evidence, s);
+    expect(result[0]!.value).toBe('2026AFAGZ50906');
+    expect(s.repaired).toBe(1);
+  });
+
+  it('编号无更长候选时保持原值，编号含非法字符丢弃', () => {
+    const s = stats();
+    const result = sanitizeExtractedFacts([
+      factOf({ key: '项目编号', fieldId: 'project_code', value: '2026AF' }),
+      factOf({ key: '标段编号', value: '2026AF：标段' }),
+    ], [evidenceItem({ content: '招标人：合肥市某局' })], s);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.value).toBe('2026AF');
+    expect(s).toMatchObject({ dropped: 1, repaired: 0 });
+  });
+
+  it('干净事实原样保留且计数为零', () => {
+    const s = stats();
+    const facts = [factOf(), factOf({ key: '质量标准', value: '合格' })];
+    const result = sanitizeExtractedFacts(facts, [], s);
+    expect(result).toEqual(facts);
+    expect(s).toMatchObject({ truncated: 0, dropped: 0, repaired: 0 });
+  });
+});
+
+describe('extractLocalFactPool 净化门接线', () => {
+  afterEach(() => {
+    delete process.env.DOCUMENT_FACT_SANITIZE;
+  });
+
+  it('默认开启：项目编号截断值回源补全，计数进 diagnostics.factSanitize', () => {
+    const diagnostics = {} as unknown as DocumentGenerationDiagnostics;
+    const pool = extractLocalFactPool({
+      evidence: [evidenceItem({ content: '项目编号：2026AF\n项目编号：2026AFAGZ50906。' })],
+      template: templateOf(),
+      diagnostics,
+    });
+    const codes = pool.projectBasicFacts.filter(item => item.fieldId === 'project_code').map(item => item.value);
+    expect(codes).toEqual(['2026AFAGZ50906', '2026AFAGZ50906']);
+    expect(pool.factSanitize.repaired).toBe(1);
+    expect(diagnostics.factSanitize).toMatchObject({ repaired: 1 });
+  });
+
+  it('env DOCUMENT_FACT_SANITIZE=0 回退直通', () => {
+    process.env.DOCUMENT_FACT_SANITIZE = '0';
+    const pool = extractLocalFactPool({
+      evidence: [evidenceItem({ content: '项目编号：2026AF\n项目编号：2026AFAGZ50906。' })],
+      template: templateOf(),
+    });
+    const codes = pool.projectBasicFacts.filter(item => item.fieldId === 'project_code').map(item => item.value);
+    expect(codes).toEqual(['2026AF', '2026AFAGZ50906']);
+    expect(pool.factSanitize).toMatchObject({ truncated: 0, dropped: 0, repaired: 0 });
   });
 });

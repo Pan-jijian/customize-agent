@@ -1,7 +1,8 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getMultiProjectManager, getProjectRoot } from '@/services/knowledge/kbService';
 
-/** 知识库搜索 API：支持 keyword/vector/rewrite 权重配置的混合搜索 */
+/** 知识库搜索 API：支持 keyword/vector/hybridBonus 权重配置的混合搜索。
+ * 注：rewrite 权重刻意不下放——llmProvider 未接入时查询重写恒为单查询，rewrite 权重恒不生效（见 kbService.ts P1-10 注释）。 */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
   try {
@@ -17,7 +18,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const weights = {
       keyword: readWeight(req.query.keywordWeight),
       vector: readWeight(req.query.vectorWeight),
-      rewrite: readWeight(req.query.rewriteWeight),
       hybridBonus: readWeight(req.query.hybridBonus),
     };
     const result = await getMultiProjectManager().search(projectRoot, q, { limit, weights });

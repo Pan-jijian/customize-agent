@@ -230,7 +230,7 @@ function factCoveredByEvidence(fact: string, evidence: DocumentEvidence[]): bool
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; disableThinkingBoost?: boolean; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; planDataMasterText?: string } = {}) {
+export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; disableThinkingBoost?: boolean; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; planDataMasterText?: string; decisionLockText?: string } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   // 证据注入预算与 generationBudget 的证据区间（7k-26k 档）对齐：未显式传入时保持旧默认，
   // 由 documentGenerator 主路径统一传入按章节目标字计算的 floor/ceiling
@@ -318,6 +318,8 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     userFactBlock,
     // B2 计划数据主表注入 L1：全项目共享一次的恒定段（计划类数值唯一数据源，同章各块值完全相同 → prefix cache 共享命中）
     options.planDataMasterText || '',
+    // 1.2 关键决策锁注入（全项目恒定段，与主表同位：垂直运输/模板体系等封闭类目锁定值，各调用逐字节一致）
+    options.decisionLockText || '',
     // 块级调用必须压缩上下文：planned 块路径按块并发成稿，每块全量注入 projectContext（蓝图+事实主表+图谱映射）
     // 会让单块输入 token 数倍于输出预算，实测单块调用 30~40 分钟（真实性能缺陷：徽光阁 3 章块草稿累计 112 分钟）；
     // 压缩只保留结构化事实行与蓝图约束行，专业叙述由块级证据承载
@@ -369,6 +371,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
       requirement ? `用户要求：${requirement}` : '',
       userFactBlock,
       options.planDataMasterText || '',
+      options.decisionLockText || '',
       '请生成可直接导出的 Markdown 章节，要求：',
       '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的项目专属事实；法律法规名称、标准规范编号等公共知识可依据现行有效版本直接引用。',
       '- 将材料要点自然融入正文；不要输出系统证据清单、中间分析过程或后台流程话术。',
@@ -752,7 +755,7 @@ export function compactScopedProjectContext(projectContext: string, maxChars = 2
   return truncate(compactBody, maxChars);
 }
 
-export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; scopedProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number; allowLenientStructureGate?: boolean; tablePlanInstruction?: string; planDataMasterText?: string; sharedFactLayerText?: string; sectionRankBoost?: (item: DocumentEvidence) => number }) {
+export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; scopedProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number; allowLenientStructureGate?: boolean; tablePlanInstruction?: string; planDataMasterText?: string; decisionLockText?: string; sharedFactLayerText?: string; sectionRankBoost?: (item: DocumentEvidence) => number }) {
   const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
   const sectionFactCard = await buildSectionFactCard(input.sectionTitle, sectionEvidence);
   // A2 块级增量压缩（小节管线对齐主题块管线口径）：章级 T0 关键事实层与摘要池已由
@@ -781,6 +784,8 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     userRequirementFactsPrompt(input.requirement),
     // B2 计划数据主表注入 L1：全项目共享一次的恒定段（同章各小节值完全相同 → prefix cache 共享命中）
     input.planDataMasterText || '',
+    // 1.2 关键决策锁注入（全项目恒定段，与主表同位）
+    input.decisionLockText || '',
     input.projectContext ? `上下文：\n${compactProjectContextText}` : '',
     input.factCoverageContext || '',
     // D1/A1 章级证据池上移 L2：同章各小节值完全相同 → prefix cache 共享命中；节级 L3 只带节相关增量（A2）
@@ -819,6 +824,7 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
       input.requirement ? `用户要求：${input.requirement}` : '',
       userRequirementFactsPrompt(input.requirement),
       input.planDataMasterText || '',
+      input.decisionLockText || '',
       '本章节结构已由系统按模板和提示词锁定；不得删除、重命名、合并或重排当前节标题；每个节下必须自然展开三级小节，三级小节承载正文。',
       SECTION_GENERATION_SAFETY_RULES,
     ]),
@@ -989,6 +995,7 @@ async function buildFocusedSectionDraft(input: Parameters<typeof buildLlmSection
     input.requirement ? `用户要求：${input.requirement}` : '',
     // B2 计划数据主表注入：focused 降级路径同样以主表为计划类数值唯一口径
     input.planDataMasterText || '',
+    input.decisionLockText || '',
     '禁止写“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列话术；直接写项目事实、施工内容、控制措施和验收要求。',
     // ── 节级变化段起点（同章各小节以下内容互不相同；保持其在 prompt 尾部）──
     `指定节标题：### ${input.sectionTitle}`,
@@ -1074,6 +1081,7 @@ async function supplementSectionContent(input: Parameters<typeof buildLlmSection
     input.requirement ? `用户要求：${input.requirement}` : '',
     // B2 计划数据主表注入：补写计划类内容时数值仍以主表为唯一口径
     input.planDataMasterText || '',
+    input.decisionLockText || '',
     input.factCoverageContext || '',
     professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
     sectionFactCard.prompt,
@@ -1197,7 +1205,7 @@ function groupSectionTargets(targets: ReturnType<typeof sectionTargets>, maxGrou
   }
   return groups;
 }
-export async function buildSectionGroupChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; compactProjectContext?: boolean; scopedProjectContext?: boolean; planDataMasterText?: string; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
+export async function buildSectionGroupChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; compactProjectContext?: boolean; scopedProjectContext?: boolean; planDataMasterText?: string; decisionLockText?: string; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   const targets = sectionTargets(input.chapter, input.targetWords);
   if ((input.chapter.sections || []).filter(Boolean).length > 0) return buildSectionParallelChapterContent(input);
   if (targets.length < 2) return undefined;
@@ -1281,6 +1289,7 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
             compactProjectContext: input.compactProjectContext,
             scopedProjectContext: input.scopedProjectContext,
             planDataMasterText: input.planDataMasterText,
+            decisionLockText: input.decisionLockText,
             tablePlanInstruction: buildSectionTablePlanInstruction(input.chapter, item.title, item.title === unassignedHostTitle ? unassignedPlans : []),
             signal: activeSignal,
             diagnostics: input.diagnostics,
@@ -1320,6 +1329,7 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
           maxTokens: outputTokensForChapter(Math.floor(groupTargetWords * 0.45), groupTargetWords),
           // B2 计划数据主表注入 L1（全项目共享一次的恒定段）
           planDataMasterText: input.planDataMasterText,
+          decisionLockText: input.decisionLockText,
           factCoverageContext: `${input.factCoverageContext || ''}\n本轮输出多个节时，每个 ### 节下必须至少有一个 #### 三级小节承载正文。#### 标题只允许使用该 ### 节下已规划的小节名，禁止新造标题；只写本节标题覆盖的内容，不得重复本章其他节内容。`,
           twoStep: false,
           signal: input.signal,
@@ -1354,7 +1364,7 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(`## ${input.chapter.title}\n\n${body}`, input.forbidDrawingImages));
 }
 
-export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; materialContextHash?: string; allowPartialResult?: boolean; compactProjectContext?: boolean; scopedProjectContext?: boolean; planDataMasterText?: string; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
+export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; materialContextHash?: string; allowPartialResult?: boolean; compactProjectContext?: boolean; scopedProjectContext?: boolean; planDataMasterText?: string; decisionLockText?: string; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   const targets = sectionTargets(input.chapter, input.targetWords);
   if (targets.length < 2) return undefined;
   const configuredSectionConcurrency = Number(process.env.DOCUMENT_SECTION_CONCURRENCY || targets.length || 1);
@@ -1511,6 +1521,8 @@ export interface PlannedChapterContentInput {
   scopedProjectContext?: boolean;
   /** B2 计划数据主表注入文本（L1 恒定段，全项目共享一次） */
   planDataMasterText?: string;
+  /** 1.2 关键决策锁注入文本（全项目恒定段，与主表同位） */
+  decisionLockText?: string;
   sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>;
   /** 块级进度回调：块成稿完成即触发（phase='complete'，partialSections 为已完成块正文），供 checkpoint 快照写盘 */
   onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void;
@@ -1557,7 +1569,18 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
   // 且只保留块相关命中片段（onlyRankBoosted）——块级 L3 从 7k-26k 压缩到 1k-3k
   const blockEvidenceCeiling = Number(process.env.DOCUMENT_BLOCK_EVIDENCE_CHARS || 3000);
   const blockEvidenceCeilingChars = Number.isFinite(blockEvidenceCeiling) && blockEvidenceCeiling > 0 ? Math.floor(blockEvidenceCeiling) : 3000;
+  // 2.4 主题块失败降级提前：单块成稿时间预算（默认 180s）——超时后不再投入第二轮尝试/拆半自愈，
+  // 块快速判失败转上层紧凑备用成稿，避免单块串行重试链拖垮整章耗时（实测单块最高 27 分钟）；
+  // DOCUMENT_BLOCK_FALLBACK_TIMEOUT_MS 可调，=0 回退为无时间预算（旧行为）
+  const blockFallbackTimeoutMs = (() => {
+    const raw = Number(process.env.DOCUMENT_BLOCK_FALLBACK_TIMEOUT_MS ?? 180000);
+    if (raw === 0) return Number.POSITIVE_INFINITY;
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 180000;
+  })();
   const writeBlock = async (block: (typeof blocks)[number], index: number): Promise<string | undefined> => {
+    // 2.4 单块成稿时间预算起点：超时后跳过后续重试与拆半，快速判失败转上层紧凑备用成稿
+    const blockStartedAt = Date.now();
+    const blockTimedOut = () => Date.now() - blockStartedAt > blockFallbackTimeoutMs;
     const sectionTitles = block.subPoints.map(point => point.title);
     // 块级证据：全章证据按块标题与要点关键词相关性排序（只排序不丢弃，全量保留进输入）+ 块标题定向检索补充
     const blockTokens = tokenizeForRelevance(`${block.title} ${sectionTitles.join(' ')}`).filter(token => token.length >= 2);
@@ -1586,7 +1609,19 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     const blockRoleContext = [factsHint, `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下 H4 要点逐点写出实施性正文，H4 标题必须与给定标题完全一致，不得改名、合并或遗漏；每个 H4 必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题：\n${coverageList}`].filter(Boolean).join('\n\n');
     let lastMissing: string[] = [];
     let lastDuplicates: string[] = [];
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    // 2.6 补写上限收紧：块级写作/反馈重试循环上限显式化（默认 2，与既有行为一致；
+    // DOCUMENT_BLOCK_MAX_ATTEMPTS 可调，=0 回退旧值 2）——上限超出即判失败转上层紧凑备用
+    const blockMaxAttempts = (() => {
+      const raw = Number(process.env.DOCUMENT_BLOCK_MAX_ATTEMPTS ?? 2);
+      if (raw === 0) return 2;
+      return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 2;
+    })();
+    for (let attempt = 0; attempt < blockMaxAttempts; attempt += 1) {
+      // 2.4 超时检查：首轮质检未达标但已超时间预算时，不再投入第二轮 LLM 尝试
+      if (attempt > 0 && blockTimedOut()) {
+        if (input.diagnostics) input.diagnostics.llm.lastError = `规划块成稿超时（>${Math.round((Date.now() - blockStartedAt) / 1000)}s）：${block.title}，跳过重试转紧凑备用`;
+        break;
+      }
       // 第二轮反馈针对性列出缺失/重复 H4 标题，让重试有的放矢，避免通用反馈反复缺失要点后被迫拆半/整章降级
       const feedback = attempt === 0 ? '' : [
         '【上一轮未通过质检】',
@@ -1596,7 +1631,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         '总字数不少于目标字数。',
       ].filter(Boolean).join('');
       try {
-        const content = await buildLlmChapterContent(input.template, blockChapter, blockEvidence, input.missingFacts, input.promptTexts, input.projectContext, input.requirement, feedback ? `${blockRoleContext}\n\n${feedback}` : blockRoleContext, {
+        // 2.6 串行链观测拆解：块内每次写作调用单独记 measure（含 attempt 序），
+        // 定位 chapter-planned-block-draft 总段内 写作/重试/拆半 各环节的耗时分布（观测恒开，只记数据）
+        const writeCall = () => buildLlmChapterContent(input.template, blockChapter, blockEvidence, input.missingFacts, input.promptTexts, input.projectContext, input.requirement, feedback ? `${blockRoleContext}\n\n${feedback}` : blockRoleContext, {
           forbidDrawingImages: input.forbidDrawingImages,
           compactProjectContext: input.compactProjectContext,
           scopedProjectContext: input.scopedProjectContext,
@@ -1623,10 +1660,14 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           factCoverageContext: input.factCoverageContext || '',
           // B2 计划数据主表注入 L1（全项目共享一次的恒定段）
           planDataMasterText: input.planDataMasterText,
+          decisionLockText: input.decisionLockText,
           twoStep: false,
           signal: input.signal,
           diagnostics: input.diagnostics,
         });
+        const content = input.diagnostics
+          ? await measureGenerationStep(input.diagnostics, `block-draft:${input.chapter.id}:${index}:a${attempt}`, writeCall)
+          : await writeCall();
         if (!content) continue;
         const stripped = content.replace(/^##\s+.+$/mu, '').trim();
         const normalized = ensureGroupTertiaryShell(sectionTitles, stripped);
@@ -1660,7 +1701,8 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
       }
     }
     // 自愈拆半：要点 ≥4 的块两次尝试仍未达标时，对半拆为两个子块各自成稿（仍在块级管线内，不降级逐小节）
-    if (block.subPoints.length >= 4) {
+    // 2.4 超时检查：已超时间预算时跳过拆半自愈（拆半会再叠加最多 4 次串行 LLM 调用），快速判失败转紧凑备用
+    if (block.subPoints.length >= 4 && !blockTimedOut()) {
       const mid = Math.ceil(block.subPoints.length / 2);
       const halfTarget = Math.max(800, Math.floor(block.targetWords / 2));
       // 拆半后子块标题加（一）/（二）后缀，避免两个半块补出相同 H3 外壳造成标题重复

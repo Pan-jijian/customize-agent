@@ -188,6 +188,15 @@ export class IndexStateStore {
     return rows.map(row => this.rowToRecord(row));
   }
 
+  /** 仅取去重后的集合名：走 idx_kb_state_collection 索引，比 listRecords 全行扫描+对象映射廉价得多 */
+  listCollectionNames(): string[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT collection_name FROM kb_index_state
+      WHERE status != 'deleted'
+    `).all() as Array<Record<string, unknown>>;
+    return rows.map(row => String(row.collection_name));
+  }
+
   enqueueIndexJob(job: { id: string; relativePath: string; message?: string }): KnowledgeIndexJob {
     const now = Date.now();
     this.db.prepare(`

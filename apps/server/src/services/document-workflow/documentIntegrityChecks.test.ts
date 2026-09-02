@@ -3,9 +3,9 @@
  * 六个百分百与本地适配三项的纯语义判定——本地 bge 恒可用（本地 ONNX 推理），判定语义全权由 bge 负责，
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, fabricatedAwardIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripDuplicateParagraphs, stripDuplicateTables } from './documentIntegrityChecks';
-import type { DocumentFactsModel, TenderRequirementModel } from './types';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ambiguousEitherOrIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, fabricatedAwardIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables } from './documentIntegrityChecks';
+import type { DocumentDraftChapter, DocumentFactsModel, TenderRequirementModel } from './types';
 
 vi.mock('./semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
 
@@ -670,5 +670,109 @@ describe('bidderQualificationSectionIssues（h17 投标人资格内容串章）'
 
   it('无资格内容 → 不报', () => {
     expect(bidderQualificationSectionIssues('## 第一章 工程概况\n正文内容。')).toEqual([]);
+  });
+});
+
+/** 1.5 双补盲之语义级：跨章语义重复段检测与确定性 strip（语义通道 mock） */
+describe('crossChapterSemanticDuplicateIssues / strip（1.5 跨章语义重复）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+  afterEach(() => {
+    delete process.env.DOCUMENT_CROSS_CHAPTER_DEDUP;
+  });
+
+  function draftChapter(overrides: Partial<DocumentDraftChapter> = {}): DocumentDraftChapter {
+    return { id: 'ch-1', title: '第一章 工程概况', content: '', evidence: [], missingFacts: [], ...overrides };
+  }
+
+  /** 按文本对查表注入确定性相似度（未登记对返回 0.1 低相似） */
+  function mockPairSimilarity(entries: Array<{ a: string; b: string; score: number }>): void {
+    buildSimilarityMock.mockResolvedValue(((left: string, right: string) => {
+      for (const entry of entries) {
+        if ((left.includes(entry.a) && right.includes(entry.b)) || (left.includes(entry.b) && right.includes(entry.a))) return entry.score;
+      }
+      return 0.1;
+    }) as SimilarityFn);
+  }
+
+  // 低密度同义段（纯文字、无数值参数）与高密度同义段（含大量数值/符号）——措辞不同内容同质
+  const plainPara = '混凝土浇筑采用分层连续的方式进行浇筑作业，振捣要求密实并及时覆盖养护，养护期间安排专人定期洒水保持表面湿润状态，确保混凝土强度增长与外观质量满足设计及现行规范要求。';
+  const densePara = '混凝土浇筑采用分层连续浇筑工艺，每层厚度不超过500mm，振捣棒插入间距不大于400mm，养护时间不少于14天，坍落度控制在180±20mm范围，入模温度控制在5℃~30℃，确保C35强度与P6抗渗等级满足设计要求。';
+
+  it('跨章语义雷同段（≥0.82）检出：保留信息密度高者，issue 定位低密度方章（密度优先于章序）', async () => {
+    mockPairSimilarity([{ a: '分层连续浇筑', b: '分层连续的方式', score: 0.88 }]);
+    const chapters = [
+      draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: plainPara }),
+      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: densePara }),
+    ];
+    const issues = await crossChapterSemanticDuplicateIssues(chapters);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].severity).toBe('blocker');
+    // 低密度方（首现章 ch-1）为删除方：密度高者保留优先于章序靠前
+    expect(issues[0].chapterId).toBe('ch-1');
+    expect(issues[0].message).toContain('跨章语义重复');
+    expect(issues[0].message).toContain('0.88');
+    expect(issues[0].message).toContain('第一章 工程概况');
+    expect(issues[0].message).toContain('第二章 施工方案');
+  });
+
+  it('逐字相等的跨章段落对排除（归整段重复通道，不双报）', async () => {
+    mockSimilarity(0.95);
+    const chapters = [
+      draftChapter({ id: 'ch-1', content: densePara }),
+      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: densePara }),
+    ];
+    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
+  });
+
+  it('相似度低于 0.82 阈值不报（阈值边界）', async () => {
+    mockPairSimilarity([{ a: '分层连续浇筑', b: '分层连续的方式', score: 0.7 }]);
+    const chapters = [
+      draftChapter({ id: 'ch-1', content: plainPara }),
+      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: densePara }),
+    ];
+    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
+  });
+
+  it('同章内语义雷同段不纳入（章内重复由章级清洗与评审治理）', async () => {
+    mockPairSimilarity([{ a: '分层连续浇筑', b: '分层连续的方式', score: 0.9 }]);
+    const chapters = [draftChapter({ id: 'ch-1', content: `${plainPara}\n\n${densePara}` })];
+    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
+  });
+
+  it('短段落（去空白 <60 字）不入池，不报', async () => {
+    mockSimilarity(0.95);
+    const shortPara = '混凝土浇筑后应及时养护。';
+    const chapters = [
+      draftChapter({ id: 'ch-1', content: shortPara }),
+      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: `${shortPara}略有不同的措辞补充。` }),
+    ];
+    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
+  });
+
+  it('strip 删除低密度方整段，保留高密度方，返回删除段数', async () => {
+    mockPairSimilarity([{ a: '分层连续浇筑', b: '分层连续的方式', score: 0.88 }]);
+    const chapters = [
+      draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: plainPara }),
+      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: `### 2.1 混凝土施工工艺\n\n${densePara}` }),
+    ];
+    const removed = await stripCrossChapterSemanticDuplicateParagraphs(chapters);
+    expect(removed).toBe(1);
+    expect(chapters[0].content).toBe('');
+    expect(chapters[1].content).toContain(densePara);
+    expect(chapters[1].content).toContain('### 2.1 混凝土施工工艺');
+  });
+
+  it('env DOCUMENT_CROSS_CHAPTER_DEDUP=0 回退：检测与 strip 均不动作（且不调用语义模型）', async () => {
+    process.env.DOCUMENT_CROSS_CHAPTER_DEDUP = '0';
+    mockPairSimilarity([{ a: '分层连续浇筑', b: '分层连续的方式', score: 0.95 }]);
+    const chapters = [
+      draftChapter({ id: 'ch-1', content: plainPara }),
+      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: densePara }),
+    ];
+    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
+    expect(await stripCrossChapterSemanticDuplicateParagraphs(chapters)).toBe(0);
+    expect(buildSimilarityMock).not.toHaveBeenCalled();
   });
 });

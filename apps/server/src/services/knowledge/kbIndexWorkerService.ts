@@ -53,15 +53,34 @@ function runInChildProcess(job: IndexJob, operationId: string, operationType: 'u
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: process.env,
     });
-    child.stdout?.on('data', chunk => {
+    // 子进程 stdout/stderr 按 chunk 触发（OCR 噪声下每秒可达数十次），upsertKbOperation 每次都要全量读写
+    // JSONL，直接透传会造成严重写放大。按 500ms 窗口合并追加（stdout/stderr 分开合并以保留原有前缀语义），
+    // 进程退出/出错前兜底冲刷保证不丢日志。
+    const pendingByPrefix = new Map<string, string[]>();
+    let flushTimer: NodeJS.Timeout | null = null;
+    const flushOutput = () => {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      for (const [prefix, lines] of pendingByPrefix) {
+        if (lines.length === 0) continue;
+        upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'parsing', status: 'processing', percent: 5, message: `${prefix}${lines.join('\n').slice(-1000)}` });
+      }
+      pendingByPrefix.clear();
+    };
+    const queueOutput = (chunk: unknown, prefix: string) => {
       const message = normalizeWorkerOutput(chunk);
-      if (message) upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'parsing', status: 'processing', percent: 5, message: `后台索引输出：${message.slice(-1000)}` });
-    });
-    child.stderr?.on('data', chunk => {
-      const message = normalizeWorkerOutput(chunk);
-      if (message) upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'parsing', status: 'processing', percent: 5, message: `后台索引错误输出：${message.slice(-1000)}` });
-    });
+      if (!message) return;
+      const lines = pendingByPrefix.get(prefix) ?? [];
+      lines.push(message);
+      pendingByPrefix.set(prefix, lines);
+      if (!flushTimer) {
+        flushTimer = setTimeout(flushOutput, 500);
+        flushTimer.unref?.();
+      }
+    };
+    child.stdout?.on('data', chunk => queueOutput(chunk, '后台索引输出：'));
+    child.stderr?.on('data', chunk => queueOutput(chunk, '后台索引错误输出：'));
     child.on('error', error => {
+      flushOutput();
       const message = error instanceof Error ? error.message : String(error);
       upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'error', status: 'error', percent: 100, message, error: message });
       resolve({ success: false, error: message });
@@ -71,6 +90,7 @@ function runInChildProcess(job: IndexJob, operationId: string, operationType: 'u
       if (msg?.type === 'log' && msg?.patch) upsertKbOperation(job.projectRoot, msg.patch);
     });
     child.on('exit', code => {
+      flushOutput();
       if (code === 0) resolve({ success: true });
       else {
         const message = `知识库后台进程退出，退出码 ${code ?? 'unknown'}`;

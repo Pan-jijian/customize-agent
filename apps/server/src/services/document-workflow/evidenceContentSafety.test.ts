@@ -11,7 +11,7 @@ vi.mock('@customize-agent/knowledge', () => {
   return { LocalTransformersEmbeddingProvider };
 });
 
-import { buildBidProcedureJudge, filterOffTopicSections, filterOffTopicSectionsForChapters, isBidderQualificationText, partitionEvidenceByContentSafety } from './evidenceContentSafety';
+import { buildBidProcedureJudge, filterOffTopicSections, filterOffTopicSectionsForChapters, isBidderQualificationText, isQualificationSectionTitle, partitionEvidenceByContentSafety } from './evidenceContentSafety';
 import type { DocumentEvidence, DocumentTemplateChapter } from './types';
 
 const STRONG_BID_RE = /评标|投标|澄清|评审|中标|保证金|开标|递交|廉洁|行贿|串标|围标|报价|清单计量/u;
@@ -246,5 +246,24 @@ describe('buildBidProcedureJudge（阶段三 3.3 清洗层语义判定器，与�
   it('空输入返回空结果', async () => {
     const judge = await buildBidProcedureJudge(embedDocuments);
     await expect(judge([])).resolves.toEqual([]);
+  });
+});
+
+describe('isQualificationSectionTitle（1.4 形态 A 句式级资格条款判别）', () => {
+  it('资格义务句式命中（与 outline.ts isTenderClauseFragmentTitle 同口径，防生成前后口径漂移）', () => {
+    expect(isQualificationSectionTitle('具备有效的营业执照')).toBe(true);
+    // 带小节编号前缀（实锤 6.6 形态：heading 原文含编号）
+    expect(isQualificationSectionTitle('6.6 具备有效的营业执照')).toBe(true);
+    expect(isQualificationSectionTitle('6.7 具备有效的资质证书、具备有效的安全生产许可证')).toBe(true);
+    // 词表外证照由句式分支兜住（词面黑名单只覆盖已知证照名）
+    expect(isQualificationSectionTitle('具备有效的食品经营许可证')).toBe(true);
+    expect(isQualificationSectionTitle('须提供财务状况证明文件')).toBe(true);
+  });
+
+  it('技术语境标题不误杀', () => {
+    expect(isQualificationSectionTitle('施工机械配备计划')).toBe(false);
+    expect(isQualificationSectionTitle('具备条件的先行施工区段安排')).toBe(false);
+    // 词面命中但带技术语境：原逻辑放行（如「安全生产许可证管理制度」）
+    expect(isQualificationSectionTitle('安全生产许可证管理制度')).toBe(false);
   });
 });

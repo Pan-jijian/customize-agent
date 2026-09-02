@@ -60,6 +60,13 @@ export function isTenderClauseFragmentTitle(title: string) {
   // （4.12.13 扩围：真实生成仍漏拦「确定评标基准价」——「基准」夹在动作与「价」之间）
   if (/^(?:确定|计算|比较|推荐|审查|否决)(?:有效)?评标(?:基准)?价/u.test(normalized)) return true;
   if (/^(?:其他要求|需要补充的其他内容|相当于或不低于|补充条款|建议编制要求|投标须知|评标办法)/u.test(normalized)) return true;
+  // 资格条款义务句式（1.4 形态 A，实锤：「6.6 具备有效的营业执照」「6.7 具备有效的资质证书、具备有效的安全生产许可证」
+  // 混入目录）：词面黑名单（isQualificationSectionTitle）只覆盖已知证照名，句式级判别覆盖词表外证照
+  // （如「具备有效的食品经营许可证」）；施组小节标题不会以资格义务动词开头命名。与 isQualificationSectionTitle 同口径
+  // 多级编号残留剥离：cleanOutlineTitle 只剥单层「数字+分隔符」，「6.7 具备…」剥后残留「7 具备…」，句式判别前再剥一次
+  const clauseNormalized = normalized.replace(/^\d{1,3}(?:[.．]\d{1,3})*\s*/u, '');
+  if (/^具备(?:有效|相应|满足)/u.test(clauseNormalized)) return true;
+  if (/^(?:须|应|需|得)?提供[^，,。；]{0,12}(?:证明|材料|文件|证件|证书|报告)/u.test(clauseNormalized)) return true;
   // 条款编号残留扩展（4.12.14 真实生成回归）：「4款、第5.3款和第6.5款的规定先向招标人提出」——
   // 「数字+款」条款编号开头与「3项规定」「2（3）目」同族；「第X款…向…提出/告知/通知」为条款句尾
   // 动作而非小节标题（技术标小节不会以条款编号「款」开头命名）

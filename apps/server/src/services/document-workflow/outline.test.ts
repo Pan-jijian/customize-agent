@@ -126,6 +126,22 @@ describe('isTenderClauseFragmentTitle（招标条款碎片判别）', () => {
   it('空标题视为碎片', () => {
     expect(isTenderClauseFragmentTitle('')).toBe(true);
   });
+
+  it('1.4 形态 A：资格条款义务句式命中（实锤 6.6/6.7 资格条款混入目录）', () => {
+    expect(isTenderClauseFragmentTitle('具备有效的营业执照')).toBe(true);
+    expect(isTenderClauseFragmentTitle('6.6 具备有效的营业执照')).toBe(true);
+    expect(isTenderClauseFragmentTitle('6.7 具备有效的资质证书、具备有效的安全生产许可证')).toBe(true);
+    // 词表外证照（isQualificationSectionTitle 词面黑名单覆盖不到）同样被句式拦截
+    expect(isTenderClauseFragmentTitle('具备有效的食品经营许可证')).toBe(true);
+    expect(isTenderClauseFragmentTitle('须提供财务状况证明文件')).toBe(true);
+    expect(isTenderClauseFragmentTitle('提供银行资信证明材料')).toBe(true);
+  });
+
+  it('1.4 形态 A：合法施组标题不被资格句式误杀', () => {
+    expect(isTenderClauseFragmentTitle('施工部署与施工流水组织')).toBe(false);
+    expect(isTenderClauseFragmentTitle('起重机械配置与垂直运输方案')).toBe(false);
+    expect(isTenderClauseFragmentTitle('具备条件的先行施工区段安排')).toBe(false);
+  });
 });
 
 describe('显式大纲块识别', () => {

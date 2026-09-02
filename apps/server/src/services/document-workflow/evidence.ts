@@ -74,6 +74,30 @@ function extractKeyFactPhrases(line: string): string {
   return phrases && phrases.length > 0 ? [...new Set(phrases)].join('；') : line.slice(0, 160);
 }
 
+/**
+ * 2.1 T0 白名单字段（与 factsModel 项目事实字段口径同源）：项目级关键事实
+ * （名称/编号/主体/地点/规模/范围/工期/质量/安全/造价/结构/层数/基础/抗震/绿建/装配/支护/质保/投标有效期，≤20 类）。
+ * 白名单外的关键事实行（工艺参数/规范编号等）不再占用 T0 全量保留特权，降级进 T1 按相关度排序——
+ * 只降层不删除（零丢失原则：完整证据池继续参与检索与质量校验）。
+ */
+const T0_WHITELIST_FIELD_RE = /项目名称|工程名称|项目编号|招标项目编号|标段编号|招标人|建设单位|发包人|建设地点|工程地点|建设规模|建筑面积|招标范围|计划工期|合同工期|总工期|周期要求|质量标准|质量目标|安全目标|安全生产|合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|工程估算价|结构形式|层数|建筑高度|基础形式|抗震设防|绿色建筑等级|装配率|支护形式|质保期|质量保修|投标有效期/u;
+
+/** T0 白名单行值截断上限（防「值截断回源」前的长叙述段型事实行占满 T0 预算） */
+const T0_WHITELIST_LINE_MAX_CHARS = 200;
+
+/** 2.1 单次写作调用证据注入硬顶（字符）：实测 L3 变化段占比 80.6%（目标 ≤50%），证据注入是 L3 大头 */
+const DOCUMENT_EVIDENCE_HARD_CAP_CHARS = 8000;
+
+/** T0 白名单瘦身开关（2.1）：默认开启；env DOCUMENT_T0_WHITELIST=0 回退 T0 全量保留并解除 8000 硬顶 */
+export function t0WhitelistEnabled(): boolean {
+  return process.env.DOCUMENT_T0_WHITELIST !== '0';
+}
+
+/** T0 白名单行形态整理：超长行截断至 200 字符（保留字段名与值首部，防叙述段占层） */
+function truncateT0WhitelistLine(line: string): string {
+  return line.length > T0_WHITELIST_LINE_MAX_CHARS ? `${line.slice(0, T0_WHITELIST_LINE_MAX_CHARS)}…` : line;
+}
+
 export function sanitizeEvidenceContent(filePath: string, content: string) {
   const ext = path.extname(filePath).toLowerCase();
   const cleaned = cleanEvidenceText(content)
@@ -344,11 +368,26 @@ function emptyEvidenceByKind(): Record<ResourceEvidence['kind'], ResourceEvidenc
   return { map: [], image: [], table: [], document: [], spreadsheet: [], text: [], attachment: [] };
 }
 
+/** 3.4 证据确定性全序比较器：(filePath, 小节标题, 内容长度, 内容全文)——与输入数组顺序无关；
+ * 同证据池（检索召回序/并发完成序抖动）多次组装输出逐字节一致，消除"同输入不同 prompt"的隐性前缀分叉 */
+function compareEvidenceDeterministic(left: DocumentEvidence, right: DocumentEvidence): number {
+  if (left.filePath !== right.filePath) return left.filePath < right.filePath ? -1 : 1;
+  const leftSection = left.sectionTitle || '';
+  const rightSection = right.sectionTitle || '';
+  if (leftSection !== rightSection) return leftSection < rightSection ? -1 : 1;
+  if (left.content.length !== right.content.length) return left.content.length - right.content.length;
+  if (left.content !== right.content) return left.content < right.content ? -1 : 1;
+  return 0;
+}
+
 /** 构建章节证据包，将原始证据分类为文本片段和结构化资源（图片、表格、文档、地图等） */
 export function buildEvidenceBundle(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[]): EvidenceBundle {
-  const textEvidence = evidence;
+  // 3.4 确定性组装：输入证据先按 (filePath, 小节, 内容) 全序归一化——下游 T0/T1/T2 各层
+  // 组装与省略清单全部继承该确定顺序，同证据池多次组装输出逐字节一致
+  const orderedEvidence = [...evidence].sort(compareEvidenceDeterministic);
+  const textEvidence = orderedEvidence;
   const resourceMap = new Map<string, ResourceEvidence>();
-  for (const item of evidence) {
+  for (const item of orderedEvidence) {
     const kind = resourceKind(item.filePath, item.processingType);
     const existing = resourceMap.get(item.filePath);
     const resource: ResourceEvidence = existing || {
@@ -411,7 +450,13 @@ export function evidencePromptBudgetForTarget(targetWords?: number, floorChars =
   const configuredRatio = Number(process.env.DOCUMENT_EVIDENCE_BUDGET_RATIO);
   const ratio = Number.isFinite(configuredRatio) && configuredRatio > 0 ? configuredRatio : 8;
   const dynamic = Math.ceil(words * ratio);
-  return Math.max(floorChars, Math.min(ceiling, dynamic));
+  const budget = Math.max(floorChars, Math.min(ceiling, dynamic));
+  // 2.1 单次写作调用证据注入 8000 字符硬顶（实测 L3 变化段占比 80.6% 的输入大头）；
+  // DOCUMENT_EVIDENCE_BUDGET_CEILING 显式设置优先于硬顶；DOCUMENT_T0_WHITELIST=0 回退时同步解除
+  const hardCap = (Number.isFinite(configuredCeiling) && configuredCeiling > 0) || !t0WhitelistEnabled()
+    ? Number.POSITIVE_INFINITY
+    : DOCUMENT_EVIDENCE_HARD_CAP_CHARS;
+  return Math.min(budget, hardCap);
 }
 
 function appendWithinBudget(parts: string[], next: string, state: { chars: number; omitted: number }, maxChars?: number) {
@@ -505,7 +550,14 @@ export interface EvidenceLayers {
  * 避免同章各块重复注入同一份全量事实行（块级调用输入 token 大头）。
  */
 export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | undefined, requiredFacts: string[], skipT0 = false, rankBoost?: (item: DocumentEvidence) => number, onlyRankBoosted = false): EvidenceLayers {
-  const t0FactLines = skipT0 ? [] : [...new Set(bundle.textEvidence.flatMap(item => extractKeyFactLines(item.content).split('\n').filter(Boolean)))];
+  const whitelistEnabled = t0WhitelistEnabled();
+  const allFactLines = skipT0 ? [] : [...new Set(bundle.textEvidence.flatMap(item => extractKeyFactLines(item.content).split('\n').filter(Boolean)))];
+  // 2.1 T0 白名单瘦身：T0 只保留项目级白名单字段行（值截断 200 字符）；白名单外事实行
+  // （工艺参数/规范编号等）降级进 T1 文本层前段按相关度排序——降层不删除，完整证据池继续参与检索与校验
+  const t0FactLines = whitelistEnabled
+    ? allFactLines.filter(line => T0_WHITELIST_FIELD_RE.test(line)).map(truncateT0WhitelistLine)
+    : allFactLines;
+  const demotedFactLines = whitelistEnabled ? allFactLines.filter(line => !T0_WHITELIST_FIELD_RE.test(line)) : [];
   const t0Budget = maxChars ? Math.floor(maxChars * 0.6) : undefined;
   let t0Lines = t0FactLines;
   let t0Trimmed = 0;
@@ -542,7 +594,19 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
   // 命中为空回退全量选取（块相关证据不足时保证正文仍有证据支撑，不牺牲事实安全）
   const boostedTextEvidence = onlyRankBoosted && rankBoost ? bundle.textEvidence.filter(item => rankBoost(item) > 0) : bundle.textEvidence;
   const textEvidencePool = onlyRankBoosted && boostedTextEvidence.length === 0 ? bundle.textEvidence : boostedTextEvidence;
-  const textPrompt = selectEvidenceForPrompt(textEvidencePool, remaining ? Math.floor(remaining * 0.65) : undefined, (item, index) => {
+  // 2.1 降级事实行：占 T1 文本层预算前段，按重要性排序填充；超预算行省略计数（降层不删除——
+  // 完整事实仍在证据池，继续参与检索与质量校验）
+  const textLayerBudget = remaining ? Math.floor(remaining * 0.65) : undefined;
+  let demotedText = '';
+  let textEvidenceBudget = textLayerBudget;
+  if (demotedFactLines.length > 0) {
+    const demotedSelection = selectByScore(demotedFactLines, line => textImportanceScore(line), { maxChars: textLayerBudget }, 't0-demoted-fact-lines');
+    if (demotedSelection.selected.length > 0) {
+      demotedText = `工艺参数与规范事实行（按相关度排序）：\n${demotedSelection.selected.map(line => `- ${line}`).join('\n')}${demotedSelection.dropped.length > 0 ? `\n（另有 ${demotedSelection.dropped.length} 行因预算省略，完整事实仍参与检索与质量校验）` : ''}`;
+      if (textEvidenceBudget !== undefined) textEvidenceBudget = Math.max(0, textEvidenceBudget - demotedText.length);
+    }
+  }
+  const textPrompt = selectEvidenceForPrompt(textEvidencePool, textEvidenceBudget, (item, index) => {
     const body = cleanEvidenceText(item.content);
     // 超长证据（CAD 父块全文等）截断前先做关键参数窗口提取：头部盲截会丢失尾部标高/坡率等真实设计参数
     const truncated = body.length > 1200 ? extractKeyParameterWindows(body, 1200) : body;
@@ -550,6 +614,7 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
   }, item => evidencePromptImportance(item, requiredFacts) + (rankBoost ? rankBoost(item) : 0));
   const t1Parts: string[] = [];
   if (resourcePrompt.lines.length) t1Parts.push(`结构化资料：\n${resourcePrompt.lines.join('\n')}`);
+  if (demotedText) t1Parts.push(demotedText);
   if (textPrompt.lines.length) t1Parts.push(`文本/附件片段：\n${textPrompt.lines.join('\n\n---\n\n')}`);
   const t1Text = t1Parts.join('\n\n');
   const t2Items = [...resourcePrompt.omittedItems, ...textPrompt.omittedItems];

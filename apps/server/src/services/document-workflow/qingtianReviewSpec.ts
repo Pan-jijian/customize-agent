@@ -76,18 +76,20 @@ export function qingtianBlockReviewPrompt(input: { projectName: string; requirem
     ? `【确定性跨章数据一致性预扫描（系统预检出的全文疑似矛盾清单，补足分块评审盲区）】\n${input.knownConflictLines}\n以上为确定性扫描的疑似矛盾：逐项核对正文，确认为真实矛盾（同一口径多值/体系并存）必须按数据逻辑维度报出并给出正确定位；确认口径合法（不同对象/组合表述/非关键字段）的不报。`
     : '';
   return [
-    `评审对象：${input.projectName} 施工组织设计正文（分块评审第 ${input.blockIndex}/${input.blockTotal} 块）`,
-    `本块章节：${input.chapterTitles.join('、')}`,
+    // 3.2 前缀稳定化：稳定段（项目名/招标基准/预扫描清单/评审指令/输出契约）前置，
+    // per-block 变化段（块序号/本块章节/正文块）移至尾部——同文档 N 块评审共享前缀，
+    // 第 2 块起命中 prefix cache（历史缺陷：块序号在首行，前缀从第一行即分叉）
+    `评审对象：${input.projectName} 施工组织设计正文（全文分块评审）`,
     tenderBlock,
     conflictBlock,
     '',
     '请按系统提示词中的校验标准逐维度评审以下正文块，输出本块全部检出问题：',
+    'JSON 结构：{"issues":[{"dimension":"维度名（合规红线/内容质量/数据逻辑/内容完整/本地适配/模板化/围串标残留）","location":"问题所在章节标题","quote":"问题原文片段（正文原句，20-80字）","riskLevel":"否决级/高风险/中风险/低风险","basis":"对标依据（规范或维度条款）","description":"问题描述（含量化依据）"}],"templatingLevel":"重度/中度/轻度/无"}',
     '',
+    `本块为第 ${input.blockIndex}/${input.blockTotal} 块，包含章节：${input.chapterTitles.join('、')}`,
     '<正文块>',
     input.blockContent,
     '</正文块>',
-    '',
-    'JSON 结构：{"issues":[{"dimension":"维度名（合规红线/内容质量/数据逻辑/内容完整/本地适配/模板化/围串标残留）","location":"问题所在章节标题","quote":"问题原文片段（正文原句，20-80字）","riskLevel":"否决级/高风险/中风险/低风险","basis":"对标依据（规范或维度条款）","description":"问题描述（含量化依据）"}],"templatingLevel":"重度/中度/轻度/无"}',
   ].filter(Boolean).join('\n');
 }
 

@@ -11,7 +11,21 @@ let activeDocumentLlmCalls = 0;
 // 端点风暴，jitter 打散重试相位；上限 2s 仍远小于章节降级链的分钟级代价
 const LLM_RETRY_DELAY_BASE_MS = 1200;
 const LLM_RETRY_DELAY_JITTER_MS = 800;
-function retryDelayMs(): number {
+// 2.7 服务端过载退避增强：503/overloaded 类错误改指数退避（2s→4s→8s，上限 30s + 0-1s jitter）——
+// 过载期固定 1.2-2s 密集重试会加剧服务端压力与排队（实测 503 重试 13 次）；
+// 上限 30s 仍远低于章节降级链的分钟级代价；DOCUMENT_LLM_RETRY_BACKOFF=0 回退固定退避
+const LLM_OVERLOAD_BACKOFF_BASE_MS = 2000;
+const LLM_OVERLOAD_BACKOFF_CAP_MS = 30000;
+function isOverloadedLlmError(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  return /503|overloaded|服务繁忙/iu.test(text);
+}
+/** 重试退避时长（导出供单测）：503/overloaded 指数退避，其余瞬态固定退避 */
+export function retryDelayMs(error?: unknown, attempt = 0): number {
+  if (process.env.DOCUMENT_LLM_RETRY_BACKOFF !== '0' && error && isOverloadedLlmError(error)) {
+    const backoff = Math.min(LLM_OVERLOAD_BACKOFF_CAP_MS, LLM_OVERLOAD_BACKOFF_BASE_MS * 2 ** Math.max(0, attempt));
+    return backoff + Math.floor(Math.random() * 1000);
+  }
   return LLM_RETRY_DELAY_BASE_MS + Math.floor(Math.random() * LLM_RETRY_DELAY_JITTER_MS);
 }
 
@@ -89,20 +103,34 @@ function releaseLlmSlot() {
 // P1-3 缓存友好调度（不降并发）：发射窗口内到达的请求按「system + user 稳定段」指纹排序后发射，
 // 同前缀请求背靠背发出——服务端按到达顺序串行 prefill，前一个请求写入的 prefix cache 由下一个
 // 同前缀请求命中（历史：各章平铺并发下同前缀请求被其他章节请求打散，缓存写入后错过命中窗口）。
-// 窗口默认 120ms（DOCUMENT_PREFIX_SCHEDULE_WINDOW_MS，0=关闭），仅改变发射顺序，并发度与总时长不变。
+// 3.3 窗口自适应：在飞请求 ≥16 时窗口 120ms → 500ms（高并发期到达密度高，宽窗口聚合更多同指纹
+// 请求再统一排序发射，命中窗口更大）；低并发保持 120ms 快发射。
+// DOCUMENT_PREFIX_SCHEDULE_WINDOW_MS 显式设置时优先（保留覆盖能力，0=关闭调度）。
 interface ScheduledLlmLaunch {
   fingerprint: string;
   launch: () => void;
 }
 let scheduleBuffer: ScheduledLlmLaunch[] = [];
 let scheduleTimer: NodeJS.Timeout | null = null;
-const prefixScheduleWindowMs = (() => {
+const PREFIX_SCHEDULE_DEFAULT_WINDOW_MS = 120;
+const PREFIX_SCHEDULE_ADAPTIVE_THRESHOLD = 16;
+const PREFIX_SCHEDULE_ADAPTIVE_WINDOW_MS = 500;
+const prefixScheduleWindowOverride = (() => {
   const raw = Number(process.env.DOCUMENT_PREFIX_SCHEDULE_WINDOW_MS);
-  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 120;
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : undefined;
 })();
+/** 3.3 调度窗口决策（导出供单测）：显式 env 覆盖优先；否则按在飞请求数自适应（≥16 → 500ms） */
+export function prefixScheduleWindowFor(activeCalls: number, override?: number): number {
+  if (override !== undefined) return override;
+  return activeCalls >= PREFIX_SCHEDULE_ADAPTIVE_THRESHOLD ? PREFIX_SCHEDULE_ADAPTIVE_WINDOW_MS : PREFIX_SCHEDULE_DEFAULT_WINDOW_MS;
+}
+function currentPrefixScheduleWindowMs(): number {
+  return prefixScheduleWindowFor(activeDocumentLlmCalls, prefixScheduleWindowOverride);
+}
 
 function schedulePrefixFriendlyLaunch(fingerprint: string, launch: () => void) {
-  if (prefixScheduleWindowMs <= 0) {
+  const windowMs = currentPrefixScheduleWindowMs();
+  if (windowMs <= 0) {
     launch();
     return;
   }
@@ -114,7 +142,7 @@ function schedulePrefixFriendlyLaunch(fingerprint: string, launch: () => void) {
     scheduleBuffer = [];
     const ordered = sortScheduledLaunches(batch);
     for (const item of ordered) item.launch();
-  }, prefixScheduleWindowMs);
+  }, windowMs);
 }
 
 /** P1-9 失败 streak 隔离：优先取 per-generation diagnostics 的 streak（多文档并发生成互不降级），无 diagnostics 时回退全局值 */
@@ -237,6 +265,13 @@ export function llmPrefixFingerprint(system: string, prompt: string, prefixKey?:
   return prefixKey ? prefixKey : stableHash(`${system}\n${prompt.slice(0, 2000)}`);
 }
 
+/** 4.1 per-调用分量观测桶：按 prefixKey 分组惰性创建（无 prefixKey 归入 '(none)'） */
+function callBreakdownBucket(diagnostics: DocumentGenerationDiagnostics, prefixKey?: string) {
+  const breakdown = diagnostics.llm.callBreakdown ?? (diagnostics.llm.callBreakdown = {});
+  const key = prefixKey || '(none)';
+  return breakdown[key] ?? (breakdown[key] = { calls: 0, inputChars: 0, l3Chars: 0, cacheHitTokens: 0, cacheMissTokens: 0 });
+}
+
 /** 缓存友好发射调度器主体：窗口内收集请求并按指纹排序后按序发射（sort 提取供纯函数单测） */
 export function sortScheduledLaunches<T extends { fingerprint: string }>(batch: T[]): T[] {
   return [...batch].sort((a, b) => (a.fingerprint < b.fingerprint ? -1 : a.fingerprint > b.fingerprint ? 1 : 0));
@@ -247,6 +282,11 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
     options.diagnostics.llm.calls += 1;
     // 上下文输入观测：system + user 字符总量 + L0-L3 分层统计（3.4：分层占比供上下文瘦身前后对比验收）
     options.diagnostics.llm.inputChars = (options.diagnostics.llm.inputChars || 0) + system.length + prompt.length;
+    // 4.1 per-调用分量观测：按 prefixKey 分组累计 次数/输入字符/L3 字符（cache token 在 usage 成功路径累计）
+    const bucket = callBreakdownBucket(options.diagnostics, options.prefixKey);
+    bucket.calls += 1;
+    bucket.inputChars += system.length + prompt.length;
+    bucket.l3Chars += options.contextLayers?.l3 || 0;
     if (options.contextLayers) {
       const layers = options.diagnostics.llm.layerChars ?? (options.diagnostics.llm.layerChars = { l0: 0, l1: 0, l2: 0, l3: 0 });
       layers.l0 += options.contextLayers.l0 || 0;
@@ -315,6 +355,10 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
           stats.outputTokens = (stats.outputTokens || 0) + response.usage.completionTokens;
           stats.promptCacheHitTokens = (stats.promptCacheHitTokens || 0) + (response.usage.promptCacheHitTokens || 0);
           stats.promptCacheMissTokens = (stats.promptCacheMissTokens || 0) + (response.usage.promptCacheMissTokens || 0);
+          // 4.1 per-调用分量：缓存命中/未命中 token 同组累计（仅成功路径有有效 usage）
+          const bucket = callBreakdownBucket(options.diagnostics, options.prefixKey);
+          bucket.cacheHitTokens += response.usage.promptCacheHitTokens || 0;
+          bucket.cacheMissTokens += response.usage.promptCacheMissTokens || 0;
           // 推理 token 观测：生成任务要求关闭思考，reasoningTokens>0 说明 disableThinking 未生效
           // （空响应/正文截断类缺陷的根因观测点，4a）
           if (response.usage.reasoningTokens) stats.reasoningTokens = (stats.reasoningTokens || 0) + response.usage.reasoningTokens;
@@ -344,7 +388,8 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
         if (options.signal?.aborted) throw new Error('用户中止', { cause: error });
         if ((error !== EMPTY_CONTENT && !isTransientLlmError(error)) || attempt >= maxAttempts) break;
         if (options.diagnostics) options.diagnostics.llm.retries += 1;
-        await new Promise<void>(resolve => { setTimeout(resolve, retryDelayMs()); });
+        // 2.7：503/overloaded 类错误按重试序指数退避（2s→4s→8s，上限 30s），其余瞬态保持固定退避
+        await new Promise<void>(resolve => { setTimeout(resolve, retryDelayMs(error, attempt)); });
       }
     }
     llmFailureStreak += 1;

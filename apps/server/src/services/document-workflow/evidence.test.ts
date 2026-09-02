@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplateChapter } from './types';
 import {
   buildEvidenceBundle,
@@ -272,11 +272,26 @@ describe('buildEvidenceBundle', () => {
 });
 
 describe('evidencePromptBudgetForTarget', () => {
-  it('按字数动态计算并受 floor/ceiling 约束', () => {
-    // P0-4：每目标字 8 字符（12 → 8 收紧），无字数时按 1200 基准
-    expect(evidencePromptBudgetForTarget()).toBe(9600);
+  afterEach(() => {
+    delete process.env.DOCUMENT_T0_WHITELIST;
+    delete process.env.DOCUMENT_EVIDENCE_BUDGET_CEILING;
+  });
+
+  it('按字数动态计算并受 floor/ceiling 约束（2.1：默认受 8000 硬顶）', () => {
+    // P0-4：每目标字 8 字符（12 → 8 收紧），无字数时按 1200 基准；2.1：硬顶 8000 压顶 9600
+    expect(evidencePromptBudgetForTarget()).toBe(8000);
     expect(evidencePromptBudgetForTarget(1000)).toBe(8000);
     expect(evidencePromptBudgetForTarget(100)).toBe(8000);
+  });
+
+  it('DOCUMENT_EVIDENCE_BUDGET_CEILING 显式设置优先于 8000 硬顶', () => {
+    process.env.DOCUMENT_EVIDENCE_BUDGET_CEILING = '20000';
+    expect(evidencePromptBudgetForTarget()).toBe(9600);
+  });
+
+  it('DOCUMENT_T0_WHITELIST=0 回退时同步解除 8000 硬顶', () => {
+    process.env.DOCUMENT_T0_WHITELIST = '0';
+    expect(evidencePromptBudgetForTarget()).toBe(9600);
   });
 });
 
@@ -345,10 +360,11 @@ describe('evidenceBundlePrompt', () => {
 
   it('每文件至少 1 条 T1 片段（文件覆盖公平性）', () => {
     const bundle = buildEvidenceBundle(chapter, [
-      evidenceItem({ filePath: '高分手头文件.pdf', score: 0.99, content: '项目名称：合肥市某区安置房项目，建设地点：合肥市蜀山区，计划工期：540日历天，质量标准：合格，符合国家验收规范要求，内容填充一。'.repeat(10) }),
+      evidenceItem({ filePath: '高分手头文件.pdf', score: 0.99, content: '项目名称：合肥市某区安置房项目，建设地点：合肥市蜀山区，计划工期：540日历天，质量标准 ：合格，符合国家验收规范要求，内容填充一。'.repeat(10) }),
       evidenceItem({ filePath: '低分关键文件.pdf', score: 0.2, content: '基坑底标高：15.65，开挖深度：5.85m。' }),
     ]);
-    const prompt = evidenceBundlePrompt(bundle, { maxChars: 1200 });
+    // 2.1：降级事实行段占 T1 文本层预算前段，预算适当放宽仍验证双文件覆盖公平性
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 1500 });
     expect(prompt).toContain('文本/附件片段');
     // 两个文件的 top-1 片段都进入 T1（内容块计数 ≥2，而非高分单文件霸占预算）
     expect((prompt.match(/^内容：$/gm) || []).length).toBeGreaterThanOrEqual(2);
@@ -380,13 +396,70 @@ describe('evidenceBundlePrompt', () => {
     expect(prompt).toContain('计划工期：540日历天');
   });
 
-  it('标准规范编号行进入 T0 事实层', () => {
+  it('标准规范编号行降级 T1 事实行段注入（2.1 白名单：非项目级字段不占 T0）', () => {
     const bundle = buildEvidenceBundle(chapter, [
       evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: '主体结构施工执行 GB 50204-2015《混凝土结构工程施工质量验收规范》，填充叙述内容以构成完整段落文本。'.repeat(5) }),
     ]);
     const prompt = evidenceBundlePrompt(bundle, { maxChars: 2000 });
-    expect(prompt).toContain('关键事实层');
+    // 白名单模式：规范编号行非项目级白名单字段 → T0 无白名单行时不渲染关键事实层标题
+    expect(prompt).not.toContain('关键事实层');
+    // 规范编号行降级进 T1 事实行段注入（降层不删除）
+    expect(prompt).toContain('工艺参数与规范事实行');
     expect(prompt).toContain('GB 50204-2015');
+  });
+});
+
+describe('T0 白名单瘦身（2.1）', () => {
+  const chapter: DocumentTemplateChapter = { id: 'ch-1', title: '工程概况', purpose: '', queries: [], requiredFacts: [] };
+
+  afterEach(() => {
+    delete process.env.DOCUMENT_T0_WHITELIST;
+  });
+
+  it('白名单字段行进 T0，工艺参数/规范编号行降级 T1（T0 不含工艺行）', () => {
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: '建设地点：合肥市蜀山区。\n计划工期：540日历天。\n混凝土每层浇筑厚度不超过500mm。\n主体结构执行 GB 50204-2015 规范。' }),
+    ]);
+    const layers = buildEvidenceLayers(bundle, 5000, []);
+    expect(layers.t0Text).toContain('建设地点：合肥市蜀山区');
+    expect(layers.t0Text).toContain('计划工期：540日历天');
+    expect(layers.t0Text).not.toContain('浇筑厚度');
+    expect(layers.t0Text).not.toContain('GB 50204-2015');
+    expect(layers.t1Text).toContain('浇筑厚度');
+    expect(layers.t1Text).toContain('GB 50204-2015');
+  });
+
+  it('白名单行值超 200 字符截断（防叙述段占满 T0）', () => {
+    const longScale = `建设规模：${Array.from({ length: 35 }, (_, i) => `第${i + 1}栋建筑面积${1000 + i}㎡`).join('，')}。`;
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: longScale }),
+    ]);
+    const layers = buildEvidenceLayers(bundle, 5000, []);
+    const scaleLine = layers.t0Text.split('\n').find(line => line.includes('建设规模')) || '';
+    expect(scaleLine).toContain('…');
+    expect(scaleLine.length).toBeLessThanOrEqual(204);
+  });
+
+  it('env DOCUMENT_T0_WHITELIST=0 回退：工艺参数行恢复 T0 全量保留', () => {
+    process.env.DOCUMENT_T0_WHITELIST = '0';
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: '计划工期：540日历天。\n混凝土每层浇筑厚度不超过500mm。' }),
+    ]);
+    const layers = buildEvidenceLayers(bundle, 5000, []);
+    expect(layers.t0Text).toContain('浇筑厚度');
+    expect(layers.t1Text).not.toContain('工艺参数与规范事实行');
+  });
+
+  it('降级行超预算时省略计数提示（数据不删除，仍参与检索校验）', () => {
+    const fillerLines = Array.from({ length: 30 }, (_, i) => `第${i + 1}段填充叙述内容以占据文本层预算空间。`).join('\n');
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: `计划工期：540日历天。\n${fillerLines}` }),
+      evidenceItem({ filePath: '图纸.dwg', processingType: 'drawing', content: Array.from({ length: 20 }, (_, i) => `基坑第${i + 1}区开挖深度5.85m，坡率1:1.0。`).join('\n') }),
+    ]);
+    // 极小预算：降级行无法全部容纳 → 省略提示出现（T0 白名单行仍在）
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 400 });
+    expect(prompt).toContain('计划工期：540日历天');
+    expect(prompt).toContain('行因预算省略');
   });
 });
 
@@ -414,5 +487,44 @@ describe('buildEvidenceLayers rankBoost（修复2：块级相关性加权注入�
     const boost = (item: DocumentEvidence) => (item.content.includes('不存在的词') ? 999 : 0);
     const layers = buildEvidenceLayers(bundle, 1200, [], false, boost);
     expect(layers.t0Text).toContain('540日历天');
+  });
+});
+
+describe('3.4 证据文本确定性组装（同证据池乱序输入 → 输出逐字节一致）', () => {
+  const chapter: DocumentTemplateChapter = { id: 'ch-1', title: '工程概况', purpose: '', queries: [], requiredFacts: [] };
+
+  const pool: DocumentEvidence[] = [
+    evidenceItem({ filePath: '招标文件.pdf', sectionTitle: '投标人须知', score: 8, content: '计划工期：540日历天。\n建设地点：合肥市蜀山区。\n质量标准：合格。' }),
+    evidenceItem({ filePath: '清单.xlsx', sectionTitle: '分部分项', score: 8, content: '混凝土浇筑采用分层连续浇筑，每层厚度不超过500mm。' }),
+    evidenceItem({ filePath: '图纸.dwg', sectionTitle: '基础平面', score: 8, content: '基坑底标高：15.65，筏板厚度 1200mm。' }),
+    evidenceItem({ filePath: '招标文件.pdf', sectionTitle: '合同条款', score: 8, content: '质量保修期：地基基础与主体结构为设计使用年限。' }),
+    evidenceItem({ filePath: '补疑.pdf', score: 8, content: '答：现场垂直运输采用 63 塔吊。' }),
+  ];
+
+  it('同证据池不同输入顺序，bundle 各层输出逐字节一致', () => {
+    const reversed = [...pool].reverse();
+    const rotated = [...pool.slice(2), ...pool.slice(0, 2)];
+    const bundleA = buildEvidenceBundle(chapter, pool);
+    const bundleB = buildEvidenceBundle(chapter, reversed);
+    const bundleC = buildEvidenceBundle(chapter, rotated);
+    const layersA = buildEvidenceLayers(bundleA, 5000, []);
+    const layersB = buildEvidenceLayers(bundleB, 5000, []);
+    const layersC = buildEvidenceLayers(bundleC, 5000, []);
+    for (const key of ['t0Text', 't1Text', 't2Text', 'omittedNote'] as const) {
+      expect(layersB[key]).toBe(layersA[key]);
+      expect(layersC[key]).toBe(layersA[key]);
+    }
+    expect(bundleB.summary).toBe(bundleA.summary);
+    // 资源层 snippets 聚合顺序同样确定（同文件多条片段的拼接序）
+    expect(JSON.stringify(bundleB.resources)).toBe(JSON.stringify(bundleA.resources));
+  });
+
+  it('同分证据 T1 选取顺序确定（预算裁剪边界处结果一致）', () => {
+    // 小预算制造裁剪边界：同分证据（score 全 8）的取舍必须逐字节可复现
+    const layersA = buildEvidenceLayers(buildEvidenceBundle(chapter, pool), 900, []);
+    const layersB = buildEvidenceLayers(buildEvidenceBundle(chapter, [...pool].reverse()), 900, []);
+    expect(layersB.t1Text).toBe(layersA.t1Text);
+    expect(layersB.t2Text).toBe(layersA.t2Text);
+    expect(layersB.stats).toEqual(layersA.stats);
   });
 });

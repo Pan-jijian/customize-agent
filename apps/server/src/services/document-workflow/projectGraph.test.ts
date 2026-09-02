@@ -28,15 +28,25 @@ const evidence = (overrides: Partial<DocumentEvidence> = {}): DocumentEvidence =
 /** 每个用例独立临时 projectRoot：缓存 key 由 projectRoot 哈希派生，隔离用例间缓存复用 */
 let tempRoot = '';
 
+/**
+ * 从 system 中提取分域标记「当前只抽取分域：{title}」的 title（projectGraph.ts callDomain 拼接）。
+ * 3.1 system 前缀统一后 FORMAL_WRITING_RULES 全文进入 system（含「项目基本信息表」等词），
+ * 直接 system.includes 路由会被前缀文本污染，改按分域标记路由与调用点同源、不受前缀变化影响。
+ */
+function domainTitleOf(system: string): string {
+  return /当前只抽取分域：(.+?)。/u.exec(system)?.[1] || '';
+}
+
 /** 六域各返回一类节点（含来源文件），满足 validation 全部要求 */
 function mockFullDomains() {
   llmJsonMock.mockImplementation(async (system: string) => {
-    if (system.includes('项目基本信息')) return { works: [{ name: '土方开挖', scope: '基坑土方开挖与运输', sourceFiles: ['/data/招标文件.docx'], relatedItems: [] }] };
-    if (system.includes('关键施工方法')) return { methods: [{ name: '分层开挖法', steps: ['定位', '开挖'], applicableWorks: ['土方开挖'], sourceFiles: ['/data/招标文件.docx'] }] };
-    if (system.includes('材料、设备')) return { resources: [{ name: '水泥', type: 'material', spec: 'P.O42.5', quantity: '100', unit: '吨', sourceFiles: ['/data/招标文件.docx'] }] };
-    if (system.includes('工期节点')) return { schedule: [{ milestone: '开工', duration: '420日历天', startDate: '2026-01-01', endDate: '2026-12-31', sourceFiles: ['/data/招标文件.docx'] }], standards: [{ code: 'GB50300', description: '质量验收标准', sourceFiles: ['/data/招标文件.docx'] }] };
-    if (system.includes('现场条件')) return { risks: [{ risk: '地下管线复杂', level: 'high', mitigation: '先探后挖', sourceFiles: ['/data/招标文件.docx'] }] };
-    if (system.includes('招标管理要求')) return { requirements: [{ category: '评标办法', detail: '技术评分合理价格法', sourceFiles: ['/data/招标文件.docx'] }] };
+    const domainTitle = domainTitleOf(system);
+    if (domainTitle.includes('项目基本信息')) return { works: [{ name: '土方开挖', scope: '基坑土方开挖与运输', sourceFiles: ['/data/招标文件.docx'], relatedItems: [] }] };
+    if (domainTitle.includes('关键施工方法')) return { methods: [{ name: '分层开挖法', steps: ['定位', '开挖'], applicableWorks: ['土方开挖'], sourceFiles: ['/data/招标文件.docx'] }] };
+    if (domainTitle.includes('材料、设备')) return { resources: [{ name: '水泥', type: 'material', spec: 'P.O42.5', quantity: '100', unit: '吨', sourceFiles: ['/data/招标文件.docx'] }] };
+    if (domainTitle.includes('工期节点')) return { schedule: [{ milestone: '开工', duration: '420日历天', startDate: '2026-01-01', endDate: '2026-12-31', sourceFiles: ['/data/招标文件.docx'] }], standards: [{ code: 'GB50300', description: '质量验收标准', sourceFiles: ['/data/招标文件.docx'] }] };
+    if (domainTitle.includes('现场条件')) return { risks: [{ risk: '地下管线复杂', level: 'high', mitigation: '先探后挖', sourceFiles: ['/data/招标文件.docx'] }] };
+    if (domainTitle.includes('招标管理要求')) return { requirements: [{ category: '评标办法', detail: '技术评分合理价格法', sourceFiles: ['/data/招标文件.docx'] }] };
     return undefined;
   });
 }
@@ -79,7 +89,7 @@ describe('buildProjectGraph', () => {
 
   it('归一化：非法条目过滤、超长截断、来源文件按路径或 basename 校验、枚举回退', async () => {
     llmJsonMock.mockImplementation(async (system: string) => {
-      if (system.includes('项目基本信息')) {
+      if (domainTitleOf(system).includes('项目基本信息')) {
         return {
           works: [
             { name: 'x'.repeat(300), scope: '范围描述', sourceFiles: ['/data/招标文件.docx', '/data/不存在.pdf', '/elsewhere/招标文件.docx'], relatedItems: [] },
@@ -143,7 +153,7 @@ describe('buildProjectGraph', () => {
 
   it('单域 LLM 抛错（非中止）→ 记录域失败原因，其余域成功仍产出图谱', async () => {
     llmJsonMock.mockImplementation(async (system: string) => {
-      if (system.includes('现场条件')) throw new Error('domain boom');
+      if (domainTitleOf(system).includes('现场条件')) throw new Error('domain boom');
       return { works: [{ name: '土方开挖', scope: '基坑土方开挖与运输', sourceFiles: ['/data/招标文件.docx'], relatedItems: [] }], schedule: [{ milestone: '开工', duration: '420日历天', startDate: '', endDate: '', sourceFiles: ['/data/招标文件.docx'] }], standards: [{ code: 'GB50300', description: '质量验收标准', sourceFiles: ['/data/招标文件.docx'] }], resources: [{ name: '水泥', type: 'material', spec: '', quantity: '', unit: '', sourceFiles: ['/data/招标文件.docx'] }] };
     });
     const result = await buildProjectGraph({ evidence: [evidence()], projectRoot: tempRoot });

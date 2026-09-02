@@ -16,7 +16,82 @@ import { constructionSystemCoverageIssues } from './constructionSystemCoverage';
 import { dangerousApplicabilityIssues } from './dangerousApplicability';
 import { stagePhrasingIssues } from './stagePhrasing';
 import { emergencySectionDepthIssues } from './emergencySectionDepth';
+import { displayChapterTitle } from './outline';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, TenderRequirementModel, ValidationIssue } from './types';
+
+/**
+ * 1.4 形态 B：跨章同名 H3 小节检测（各章独立并发成稿、章间无标题归属感知的串章实锤：
+ * 「周边环境、管线与既有建构筑物保护」同现 1.3 与 6.4，「竣工清理、验收移交与保修」同现 1.4 与 6.5）。
+ * 去编号后同名小节标题跨章出现即报；归属章按模板计划匹配裁决（模板 sections 含同名小节的章为归属章），
+ * 模板未安排时首现章保留；模板计划本身多章安排同名小节（有意分工）不纳入。
+ * 短通用标题（去编号 <8 字符，如「质量控制」「安全措施」）跨章重复属正常分工，不纳入（防误报）。
+ * env DOCUMENT_TITLE_ALIGNMENT_CHECK=0 回退。
+ */
+export function crossChapterDuplicateSectionIssues(chapters: DocumentDraftChapter[], templateChapters: DocumentTemplateChapter[]): ValidationIssue[] {
+  if (process.env.DOCUMENT_TITLE_ALIGNMENT_CHECK === '0') return [];
+  const normalizeSection = (raw: string) => raw.replace(/^\d+(?:\.\d+)*[、.．\s]*/u, '').replace(/[\s,，、]/gu, '');
+  // 成稿章标题归一化索引（模板章 → 成稿章按标题映射）
+  const chapterIndexByTitle = new Map<string, number>();
+  chapters.forEach((chapter, index) => {
+    const key = displayChapterTitle(chapter.title).replace(/[\s,，、]/gu, '');
+    if (key && !chapterIndexByTitle.has(key)) chapterIndexByTitle.set(key, index);
+  });
+  // 每章 H3 小节标题（去编号）→ 出现的章位列表 + 首现原文（消息展示用）
+  const ownersByTitle = new Map<string, number[]>();
+  const rawByTitle = new Map<string, string>();
+  chapters.forEach((chapter, chapterIndex) => {
+    const seen = new Set<string>();
+    for (const line of (chapter.content || '').split(/\r?\n/u)) {
+      const heading = /^###\s+(.+?)\s*$/u.exec(line.trim());
+      if (!heading) continue;
+      const key = normalizeSection(heading[1]);
+      if (key.length < 8 || seen.has(key)) continue;
+      seen.add(key);
+      if (!rawByTitle.has(key)) rawByTitle.set(key, heading[1].replace(/^\d+(?:\.\d+)*[、.．\s]*/u, '').trim());
+      const list = ownersByTitle.get(key) || [];
+      list.push(chapterIndex);
+      ownersByTitle.set(key, list);
+    }
+  });
+  // 模板计划小节归属索引（同 normalize 口径）：title → 安排该小节的模板章对应成稿章位列表
+  const plannedChapterIndexesByTitle = new Map<string, number[]>();
+  templateChapters.forEach(templateChapter => {
+    const chapterIndex = chapterIndexByTitle.get(displayChapterTitle(templateChapter.title).replace(/[\s,，、]/gu, ''));
+    if (chapterIndex === undefined) return;
+    for (const section of templateChapter.sections || []) {
+      const key = normalizeSection(section);
+      if (key.length < 8) continue;
+      const list = plannedChapterIndexesByTitle.get(key) || [];
+      if (!list.includes(chapterIndex)) list.push(chapterIndex);
+      plannedChapterIndexesByTitle.set(key, list);
+    }
+  });
+  const issues: ValidationIssue[] = [];
+  for (const [title, chapterIndexes] of ownersByTitle) {
+    if (chapterIndexes.length < 2) continue;
+    const planned = plannedChapterIndexesByTitle.get(title) || [];
+    // 模板计划多章安排同名小节 = 有意分工，不属串章漂移
+    if (planned.length >= 2) continue;
+    const ownerIndex = planned.length === 1 ? planned[0] : chapterIndexes[0];
+    const displayTitle = rawByTitle.get(title) || title;
+    for (const chapterIndex of chapterIndexes) {
+      if (chapterIndex === ownerIndex) continue;
+      const chapter = chapters[chapterIndex];
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'structure',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        chapterId: chapter.id,
+        sectionTitle: displayTitle,
+        message: `跨章同名小节：“${displayTitle}”已在「${chapters[ownerIndex].title}」落位，本章（「${chapter.title}」）同名小节属跨章串章重复，须改写归并`,
+        suggestion: '同一主题小节全文只保留一处（归属章）；非归属章的同名小节：内容与本章主题相关则改写标题为可区分的具体主题并归并内容，与本章无关则整节删除（含标题行）；修复后全文不得再出现跨章同名小节。',
+      });
+    }
+  }
+  return issues;
+}
 
 export async function buildStandardFinalValidationIssues(input: {
   markdown: string;
@@ -82,6 +157,8 @@ export async function buildStandardFinalValidationIssues(input: {
     // h17：投标人资格内容串章（评分报告 P1：营业执照/资质证书/安全生产许可证小节属资格文件内容，
     // 非施组正文；与生成前大纲过滤 isQualificationSectionTitle 同源，穿透生成前防线时由阻断修复轮确定性删除兜底）
     ...bidderQualificationSectionIssues(input.markdown),
+    // 1.4 形态 B：跨章同名 H3 小节（各章独立成稿串章实锤 1.3↔6.4、1.4↔6.5），归属按模板计划匹配章裁决
+    ...crossChapterDuplicateSectionIssues(input.chapters, input.effectiveChapters || input.template.chapters || []),
     // h13d：基本信息表「计划工期」字段违约词校验（工期行误填违约条款文字）
     ...basicInfoScheduleFieldIssues(input.markdown),
     // h15：表格/段落完全重复（青天高风险「重复表格 2 张、重复段落」；结构冗余删除兜底与生成闭环同源）

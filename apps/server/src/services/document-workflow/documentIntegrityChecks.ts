@@ -1,4 +1,4 @@
-import type { DocumentFactsModel, TenderRequirementModel, ValidationIssue } from './types';
+import type { DocumentDraftChapter, DocumentFactsModel, TenderRequirementModel, ValidationIssue } from './types';
 import { documentTextLength } from './budget';
 import { stringifyFactValue } from './utils';
 import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
@@ -1942,5 +1942,119 @@ export function applyNumericConsistencyDeterministicFixes(markdown: string): Num
     }
   }
   return { markdown: next, fixedCount, details: details.slice(0, 12) };
+}
+
+// ── 22. 跨章语义重复（1.5 双补盲之语义级）：措辞不同但内容同质的跨章段落 ──
+// 各章独立并发成稿 + 共享同批章级证据，不同章产出语义雷同段落（实锤：同工艺参数段在多章换措辞复现）。
+// 逐字整段重复已由 duplicateParagraphIssues（≥40 字归一化相等）兜住，本检测只抓"非逐字但语义雷同"形态：
+// 段落级（去空白 ≥60 字）跨章 bge 两两余弦 ≥0.82 命中；归一化相等的对跳过（避免与整段重复双报双删）。
+// env DOCUMENT_CROSS_CHAPTER_DEDUP=0 整体回退（检测与 strip 同源同开关）。
+
+const CROSS_CHAPTER_SEMANTIC_DUP_MIN_CHARS = 60;
+const CROSS_CHAPTER_SEMANTIC_DUP_THRESHOLD = 0.82;
+
+interface CrossChapterSemanticDupPair {
+  /** 保留方（信息密度高者；同密度取章序靠前者） */
+  keep: { chapterIndex: number; paragraphIndex: number };
+  /** 删除方 */
+  drop: { chapterIndex: number; paragraphIndex: number };
+  similarity: number;
+  paragraphPreview: string;
+}
+
+/** 段落信息密度：数值/字母/工程符号占比（密度高者承载更多事实参数，删除时保留） */
+function paragraphInfoDensity(text: string): number {
+  const compact = text.replace(/\s+/gu, '');
+  if (!compact.length) return 0;
+  const dense = (compact.match(/[0-9A-Za-z%℃°±×÷≥≤.]/gu) || []).length;
+  return dense / compact.length;
+}
+
+/** 章正文段落提取：空行分块，标题行/表格行/列表行所在块不入池（结构与 duplicateParagraphIssues 同口径） */
+function crossChapterDupParagraphs(chapters: DocumentDraftChapter[]) {
+  const pool: Array<{ chapterIndex: number; paragraphIndex: number; text: string; normalized: string }> = [];
+  chapters.forEach((chapter, chapterIndex) => {
+    const blocks = (chapter.content || '').split(/\n\s*\n/u);
+    blocks.forEach((block, paragraphIndex) => {
+      const text = block.trim();
+      if (!text) return;
+      if (/^#{1,6}\s/um.test(text) || /^\s*\|/um.test(text) || /^[-*•]\s/um.test(text)) return;
+      const normalized = text.replace(/\s+/gu, '');
+      if (normalized.length < CROSS_CHAPTER_SEMANTIC_DUP_MIN_CHARS) return;
+      pool.push({ chapterIndex, paragraphIndex, text, normalized });
+    });
+  });
+  return pool;
+}
+
+/** 跨章语义重复对检出（检测与 strip 共用同源核心）：bge 全量段落两两比对，逐字相等对排除 */
+async function findCrossChapterSemanticDupPairs(chapters: DocumentDraftChapter[]): Promise<CrossChapterSemanticDupPair[]> {
+  if (process.env.DOCUMENT_CROSS_CHAPTER_DEDUP === '0') return [];
+  const pool = crossChapterDupParagraphs(chapters);
+  if (pool.length < 2) return [];
+  const similarity = await buildSemanticSimilarity(pool.map(item => item.normalized), pool.map(item => item.normalized));
+  const pairs: CrossChapterSemanticDupPair[] = [];
+  const droppedKeys = new Set<string>();
+  for (let i = 0; i < pool.length; i += 1) {
+    for (let j = i + 1; j < pool.length; j += 1) {
+      const left = pool[i];
+      const right = pool[j];
+      // 只跨章判定（章内语义重复由章级清洗与 LLM 评审治理）；逐字相等属整段重复通道，不双报
+      if (left.chapterIndex === right.chapterIndex || left.normalized === right.normalized) continue;
+      const score = similarity(left.normalized, right.normalized);
+      if (score < CROSS_CHAPTER_SEMANTIC_DUP_THRESHOLD) continue;
+      // 保留信息密度高者；同密度保留章序靠前者（先成稿章优先）
+      const leftDensity = paragraphInfoDensity(left.text);
+      const rightDensity = paragraphInfoDensity(right.text);
+      const keepLeft = leftDensity > rightDensity || (leftDensity === rightDensity && left.chapterIndex <= right.chapterIndex);
+      const keep = keepLeft ? left : right;
+      const drop = keepLeft ? right : left;
+      const dropKey = `${drop.chapterIndex}:${drop.paragraphIndex}`;
+      if (droppedKeys.has(dropKey)) continue;
+      droppedKeys.add(dropKey);
+      pairs.push({
+        keep: { chapterIndex: keep.chapterIndex, paragraphIndex: keep.paragraphIndex },
+        drop: { chapterIndex: drop.chapterIndex, paragraphIndex: drop.paragraphIndex },
+        similarity: score,
+        paragraphPreview: drop.normalized.slice(0, 40),
+      });
+    }
+  }
+  return pairs;
+}
+
+/** 跨章语义重复检测（命中即报，进全局一致性轮修复闭环与交付校验展示） */
+export async function crossChapterSemanticDuplicateIssues(chapters: DocumentDraftChapter[]): Promise<ValidationIssue[]> {
+  const pairs = await findCrossChapterSemanticDupPairs(chapters);
+  return pairs.map(pair => ({
+    level: 'error' as const,
+    severity: 'blocker' as const,
+    category: 'structure' as const,
+    owner: 'llm' as const,
+    repairability: 'llm_repairable' as const,
+    chapterId: chapters[pair.drop.chapterIndex]?.id,
+    message: `跨章语义重复：「${chapters[pair.keep.chapterIndex]?.title || '?'}」与「${chapters[pair.drop.chapterIndex]?.title || '?'}」存在内容高度雷同段落（相似度 ${pair.similarity.toFixed(2)}）：“${pair.paragraphPreview}…”`,
+    suggestion: '同一内容全文只保留一处（保留信息密度高者）；删除或改写本章的雷同段落，与本章主题相关的独有信息归并后，不得与他章段落语义重复。',
+  }));
+}
+
+/** 跨章语义重复确定性 strip：保留信息密度高者所在段落，删除低密度方整段（原地改 chapters，返回删除段数） */
+export async function stripCrossChapterSemanticDuplicateParagraphs(chapters: DocumentDraftChapter[]): Promise<number> {
+  const pairs = await findCrossChapterSemanticDupPairs(chapters);
+  if (pairs.length === 0) return 0;
+  let removed = 0;
+  for (const pair of pairs) {
+    const chapter = chapters[pair.drop.chapterIndex];
+    if (!chapter) continue;
+    const blocks = (chapter.content || '').split(/\n\s*\n/u);
+    // 段落索引与提取时同口径（空行分块）；目标块删除（整块语义重复，非删句）
+    if (pair.drop.paragraphIndex >= blocks.length) continue;
+    const target = blocks[pair.drop.paragraphIndex].trim().replace(/\s+/gu, '');
+    if (target.length < CROSS_CHAPTER_SEMANTIC_DUP_MIN_CHARS) continue;
+    blocks.splice(pair.drop.paragraphIndex, 1);
+    chapter.content = blocks.join('\n\n');
+    removed += 1;
+  }
+  return removed;
 }
 

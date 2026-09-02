@@ -24,11 +24,26 @@ describe('qingtianBlockReviewPrompt（分块评审提示词）', () => {
     const prompt = qingtianBlockReviewPrompt({ projectName: 'A工程', blockIndex: 2, blockTotal: 5, chapterTitles: ['工程概况', '施工部署'], blockContent: '正文内容。' });
     expect(prompt).toContain('A工程');
     expect(prompt).toContain('第 2/5 块');
-    expect(prompt).toContain('本块章节：工程概况、施工部署');
+    expect(prompt).toContain('包含章节：工程概况、施工部署');
     expect(prompt).toContain('<正文块>');
     expect(prompt).toContain('正文内容。');
     expect(prompt).toContain('</正文块>');
     expect(prompt).toContain('JSON 结构');
+  });
+
+  it('3.2 前缀稳定化：不同块序号的 prompt 共享稳定前缀（块序号/章节清单移至尾部）', () => {
+    const base = { projectName: 'A工程', tenderContext: '工期540日历天', blockTotal: 5, blockContent: '正文内容。' };
+    const promptA = qingtianBlockReviewPrompt({ ...base, blockIndex: 1, chapterTitles: ['工程概况'] });
+    const promptB = qingtianBlockReviewPrompt({ ...base, blockIndex: 3, chapterTitles: ['施工部署', '质量管理'] });
+    // 稳定段（项目名/招标基准/评审指令/JSON 契约）逐字节一致
+    const stableHeadA = promptA.slice(0, promptA.indexOf('本块为第'));
+    const stableHeadB = promptB.slice(0, promptB.indexOf('本块为第'));
+    expect(stableHeadA).toBe(stableHeadB);
+    expect(stableHeadA).toContain('A工程');
+    expect(stableHeadA).toContain('JSON 结构');
+    // 变化段（块序号/章节清单）位于正文块之前紧邻处
+    expect(promptA.indexOf('本块为第 1/5 块')).toBeLessThan(promptA.indexOf('<正文块>'));
+    expect(promptB).toContain('本块为第 3/5 块，包含章节：施工部署、质量管理');
   });
 
   it('tenderContext 优先作为对标材料', () => {

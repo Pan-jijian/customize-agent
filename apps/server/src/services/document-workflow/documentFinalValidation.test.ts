@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildStandardFinalValidationIssues } from './documentFinalValidation';
+import { beforeEach, describe, expect, it, vi, afterEach } from 'vitest';
+import { buildStandardFinalValidationIssues, crossChapterDuplicateSectionIssues } from './documentFinalValidation';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type * as LlmClientModule from './llmClient';
 import type { ProfessionalDepthClassifier } from './professionalDepthClassifier';
@@ -151,5 +151,75 @@ describe('buildStandardFinalValidationIssues', () => {
     });
     expect(Array.isArray(issues)).toBe(true);
     expect(buildSemanticSimilarityMock).toHaveBeenCalled();
+  });
+});
+
+/** 1.4 形态 B：跨章同名 H3 小节检测（归属按模板计划匹配章裁决） */
+describe('crossChapterDuplicateSectionIssues（1.4 跨章同名 H3 检测）', () => {
+  afterEach(() => {
+    delete process.env.DOCUMENT_TITLE_ALIGNMENT_CHECK;
+  });
+
+  it('实锤形态：同名小节同现 1.3 与 6.4，模板计划归属第一章 → 第六章被报串章', () => {
+    const chapters = [
+      draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: '### 1.1 项目概况\n概况正文。\n### 1.3 周边环境、管线与既有建构筑物保护\n第一章的周边环境正文。' }),
+      draftChapter({ id: 'ch-6', title: '第六章 施工安全保证措施', content: '### 6.1 安全管理体系\n安全管理正文。\n### 6.4 周边环境、管线与既有建构筑物保护\n第六章串章正文。' }),
+    ];
+    const templateChapters: DocumentTemplate['chapters'] = [
+      { id: 't-1', title: '工程概况', purpose: '', queries: [], requiredFacts: [], sections: ['项目概况', '周边环境、管线与既有建构筑物保护'] },
+      { id: 't-6', title: '施工安全保证措施', purpose: '', queries: [], requiredFacts: [], sections: ['安全管理体系'] },
+    ];
+    const issues = crossChapterDuplicateSectionIssues(chapters, templateChapters);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].chapterId).toBe('ch-6');
+    expect(issues[0].message).toContain('跨章同名小节');
+    expect(issues[0].message).toContain('周边环境、管线与既有建构筑物保护');
+    expect(issues[0].message).toContain('第一章 工程概况');
+  });
+
+  it('模板计划多章安排同名小节 = 有意分工，不报', () => {
+    const chapters = [
+      draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: '### 1.1 绿色施工与环境保护措施\n第一章正文。' }),
+      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: '### 2.1 绿色施工与环境保护措施\n第二章正文。' }),
+    ];
+    const templateChapters: DocumentTemplate['chapters'] = [
+      { id: 't-1', title: '工程概况', purpose: '', queries: [], requiredFacts: [], sections: ['绿色施工与环境保护措施'] },
+      { id: 't-2', title: '施工方案', purpose: '', queries: [], requiredFacts: [], sections: ['绿色施工与环境保护措施'] },
+    ];
+    expect(crossChapterDuplicateSectionIssues(chapters, templateChapters)).toEqual([]);
+  });
+
+  it('模板未安排同名小节 → 首现章保留，后续章报串章', () => {
+    const chapters = [
+      draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: '### 1.4 竣工清理、验收移交与保修\n第一章正文。' }),
+      draftChapter({ id: 'ch-6', title: '第六章 施工安全保证措施', content: '### 6.5 竣工清理、验收移交与保修\n第六章串章正文。' }),
+    ];
+    const issues = crossChapterDuplicateSectionIssues(chapters, []);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].chapterId).toBe('ch-6');
+  });
+
+  it('短通用标题（去编号 <8 字符）跨章重复属正常分工，不报', () => {
+    const chapters = [
+      draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: '### 1.1 质量控制\n第一章质量控制正文。' }),
+      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: '### 2.1 质量控制\n第二章质量控制正文。' }),
+    ];
+    expect(crossChapterDuplicateSectionIssues(chapters, [])).toEqual([]);
+  });
+
+  it('章内同名 H3 重复不计跨章（章内重复由 duplicate-subsection 通道治理）', () => {
+    const chapters = [
+      draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: '### 1.1 周边环境、管线与既有建构筑物保护\n甲段。\n### 1.2 周边环境、管线与既有建构筑物保护\n乙段。' }),
+    ];
+    expect(crossChapterDuplicateSectionIssues(chapters, [])).toEqual([]);
+  });
+
+  it('env DOCUMENT_TITLE_ALIGNMENT_CHECK=0 整体回退', () => {
+    process.env.DOCUMENT_TITLE_ALIGNMENT_CHECK = '0';
+    const chapters = [
+      draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: '### 1.3 周边环境、管线与既有建构筑物保护\n甲。' }),
+      draftChapter({ id: 'ch-6', title: '第六章 安全措施', content: '### 6.4 周边环境、管线与既有建构筑物保护\n乙。' }),
+    ];
+    expect(crossChapterDuplicateSectionIssues(chapters, [])).toEqual([]);
   });
 });

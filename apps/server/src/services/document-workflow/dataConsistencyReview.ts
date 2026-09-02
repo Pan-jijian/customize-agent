@@ -2,6 +2,8 @@ import type { DocumentGenerationDiagnostics, ValidationIssue } from './types';
 import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
 import { stableHash } from './utils';
 import { docSystemPrefix } from './markdownComposer';
+import type { DecisionLockEntry } from './decisionLock';
+import { decisionLockCategoryMeta, decisionMentionNegated } from './decisionLock';
 
 /**
  * L3.5 数据一致性 LLM 审查层（h7）：
@@ -49,7 +51,17 @@ const CONFLICTS_JSON_SCHEMA: DocumentJsonSchema = {
   },
 };
 
-/** 全文数值句提取（L1 确定性结构提取）：含数值的正文句与表格行，采样上限 200 条 */
+/** 2.5 数值审查采样上限（200 → 120，全文 LLM 审查输入减半）：
+ * 默认 120；DOCUMENT_CONSISTENCY_SAMPLE_LIMIT 可调，=0 回退旧值 200 */
+function consistencySampleLimit(): number {
+  const raw = process.env.DOCUMENT_CONSISTENCY_SAMPLE_LIMIT;
+  if (raw === undefined || raw === '') return 120;
+  if (raw === '0') return 200;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 120;
+}
+
+/** 全文数值句提取（L1 确定性结构提取）：含数值的正文句与表格行，按数值密度优先采样（默认上限 120 条） */
 export function numericSentencesForReview(markdown: string): string[] {
   const sentences: string[] = [];
   for (const line of markdown.split(/\r?\n/u)) {
@@ -66,7 +78,17 @@ export function numericSentencesForReview(markdown: string): string[] {
       if (sentence.length >= 6 && sentence.length <= 160 && /[\d]/u.test(sentence)) sentences.push(sentence);
     }
   }
-  return [...new Set(sentences)].slice(0, 200);
+  const unique = [...new Set(sentences)];
+  const limit = consistencySampleLimit();
+  if (unique.length <= limit) return unique;
+  // 2.5 数值密度优先采样：句中数值 token 多者优先保留（数值矛盾多发于多数值句）；
+  // 截取后恢复原文顺序输出，保证 prompt 输入顺序自然且逐字节确定
+  return unique
+    .map((sentence, index) => ({ sentence, index, density: (sentence.match(/[\d,]+(?:\.\d+)?/gu) || []).length }))
+    .sort((left, right) => right.density - left.density || left.index - right.index)
+    .slice(0, limit)
+    .sort((left, right) => left.index - right.index)
+    .map(entry => entry.sentence);
 }
 
 /** 全文数据一致性批量审查：数值句清单 → LLM 输出矛盾清单 JSON（置信度 <0.7 丢弃，最多 6 条） */
@@ -131,6 +153,72 @@ export async function reviewDataConsistencyBatched(markdown: string, issueMessag
   if (conflicts.length === 0) return [];
   const conflictKeys = new Set(conflicts.map(conflict => conflictNumericKey(dataConsistencyConflictIssue(conflict).message)).filter(Boolean));
   return issueMessages.filter(message => conflictKeys.has(conflictNumericKey(message)));
+}
+
+/**
+ * 1.3 语义矛盾检测（确定性闭集比对，零 LLM 成本）：工艺路线/机械选型/材料供应这类
+ * "实体-选择"矛盾不含数值差异，数值审查层（reviewDataConsistency）完全盲区
+ * （实锤：决策应锁塔吊但后章写施工电梯）。检测与 1.2 决策锁同源——类目 relevance/选项别名/否定口径
+ * 全部复用 decisionLock 单一事实源：句子命中类目且出现锁外选项别名（非否定语境）即冲突。
+ * 闭集空间可枚举，不引入 bge 语义召回——锁构建侧同样按别名计分，双源口径漂移比边际召回更要命。
+ * env DOCUMENT_SEMANTIC_CHOICE_CHECK=0 回退（返回空清单）。
+ */
+export interface SemanticChoiceConflict {
+  /** 决策锁类目 id（vertical_transport/formwork/concrete_supply/scaffold/foundation_support/earthwork_haul） */
+  categoryId: string;
+  /** 类目中文名（消息展示用） */
+  label: string;
+  /** 锁定取值集 */
+  lockedValues: string[];
+  /** 正文出现的锁外取值 */
+  offValue: string;
+  /** 冲突原句（修复锚点） */
+  sentence: string;
+}
+
+export function semanticChoiceConflicts(markdown: string, decisionLock: DecisionLockEntry[]): SemanticChoiceConflict[] {
+  if (process.env.DOCUMENT_SEMANTIC_CHOICE_CHECK === '0') return [];
+  if (decisionLock.length === 0) return [];
+  const conflicts: SemanticChoiceConflict[] = [];
+  const seen = new Set<string>();
+  for (const line of markdown.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    // 标题行/表格行跳过：标题由 1.4 专轮治理，表格单元格语义碎片化不参与整句判定
+    if (!trimmed || /^#{1,6}\s/u.test(trimmed) || /^\|/u.test(trimmed)) continue;
+    for (const part of trimmed.split(/(?<=[。；;])/u)) {
+      const sentence = part.trim();
+      if (sentence.length < 6 || sentence.length > 200) continue;
+      for (const entry of decisionLock) {
+        const meta = decisionLockCategoryMeta(entry.id);
+        if (!meta || !meta.relevance.test(sentence)) continue;
+        const lockedSet = new Set(entry.values);
+        for (const option of meta.options) {
+          // 锁内取值合法（同目多值共存时提任一个都不算冲突）；锁外取值出现即冲突（锁契约：只能采用锁定值）
+          if (lockedSet.has(option.value) || !option.aliases.test(sentence)) continue;
+          // 否定语境不算冲突："不采用自拌混凝土"与锁定商品混凝土一致
+          if (decisionMentionNegated(sentence, option.aliases)) continue;
+          const key = `${entry.id} ${option.value} ${sentence}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          conflicts.push({ categoryId: entry.id, label: entry.label, lockedValues: entry.values, offValue: option.value, sentence });
+        }
+      }
+    }
+  }
+  return conflicts;
+}
+
+/** 语义矛盾条目转交付阻断 ValidationIssue（消息携带锁定值/冲突值与引号原句——修复指令锚点与章节定位同源） */
+export function semanticChoiceConflictIssue(conflict: SemanticChoiceConflict): ValidationIssue {
+  return {
+    level: 'error',
+    severity: 'blocker',
+    category: 'fact_consistency',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: `语义矛盾（${conflict.label}）：项目关键决策已锁定为「${conflict.lockedValues.join('、')}」，正文出现「${conflict.offValue}」冲突表述：“${conflict.sentence.slice(0, 60)}”`,
+    suggestion: '与已锁定决策冲突的表述必须统一为锁定值（或整句删除）；禁止保留两套并存的技术路线/机械选型/供应方式。禁止将本缺陷描述与修复要求本身写入正文，输出仅限正文内容。',
+  };
 }
 
 /**

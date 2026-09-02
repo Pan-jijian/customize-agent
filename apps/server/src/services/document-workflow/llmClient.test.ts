@@ -5,7 +5,7 @@
  * 底层 LLM 调用通过 invokeLlm 注入桩（模块内部词法绑定无法被 vi.mock 拦截）。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, isTransientLlmError, llmPrefixFingerprint, repairTruncatedJson, sortScheduledLaunches, type DocumentJsonSchema } from './llmClient';
+import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, isContextOverflowLlmError, isTransientLlmError, llmPrefixFingerprint, prefixScheduleWindowFor, repairTruncatedJson, retryDelayMs, sortScheduledLaunches, type DocumentJsonSchema } from './llmClient';
 import type { DocumentGenerationDiagnostics } from './types';
 
 // 无活跃模型配置：callDocumentLlm 观测累计发生在 provider 调用之前，
@@ -200,6 +200,31 @@ describe('callDocumentLlm 上下文观测（3.4 inputChars + L0-L3 分层累计�
   });
 });
 
+describe('callDocumentLlm per-调用分量观测（4.1 callBreakdown 按 prefixKey 分组）', () => {
+  it('同 prefixKey 聚合累计 次数/输入字符/L3 字符；跨 key 隔离', async () => {
+    const diagnostics = bareDiagnostics();
+    await callDocumentLlm('系统一', '正文一', false, { diagnostics, prefixKey: 'repair:c1', contextLayers: { l3: 10 } });
+    await callDocumentLlm('系统二', '正文二', false, { diagnostics, prefixKey: 'repair:c1', contextLayers: { l3: 20 } });
+    await callDocumentLlm('系统三', '正文三', false, { diagnostics, prefixKey: 'draft:c2', contextLayers: { l3: 5 } });
+    const breakdown = diagnostics.llm.callBreakdown!;
+    expect(Object.keys(breakdown)).toHaveLength(2);
+    expect(breakdown['repair:c1']).toMatchObject({
+      calls: 2,
+      inputChars: '系统一'.length + '正文一'.length + '系统二'.length + '正文二'.length,
+      l3Chars: 30,
+      cacheHitTokens: 0,
+      cacheMissTokens: 0,
+    });
+    expect(breakdown['draft:c2']).toMatchObject({ calls: 1, l3Chars: 5 });
+  });
+
+  it('无 prefixKey 归入 (none)；未传 contextLayers 时 l3Chars 为 0', async () => {
+    const diagnostics = bareDiagnostics();
+    await callDocumentLlm('甲乙', '丙丁', false, { diagnostics });
+    expect(diagnostics.llm.callBreakdown?.['(none)']).toMatchObject({ calls: 1, inputChars: 4, l3Chars: 0 });
+  });
+});
+
 describe('isTransientLlmError（瞬态错误识别，驱动重试一次）', () => {
   it('超时/abort 类错误判瞬态：硬超时 abort 后应重试一次', () => {
     // OpenAI SDK 超时 abort 抛 APIUserAbortError
@@ -309,5 +334,72 @@ describe('llmPrefixFingerprint（P1-3 章级缓存分组键）', () => {
       { fingerprint: 'writer-block:ch-2', launch: () => {} },
     ]);
     expect(ordered.map(item => item.fingerprint)).toEqual(['writer-block:ch-1', 'writer-block:ch-2', 'writer-block:ch-2']);
+  });
+});
+
+describe('retryDelayMs（2.7 503 过载指数退避）', () => {
+  const overloaded = new Error('503 Server Overloaded');
+  const transient429 = new Error('429 Too Many Requests');
+
+  it('503 过载按重试序指数退避 2s→4s→8s（jitter 为 0 时）', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      expect(retryDelayMs(overloaded, 0)).toBe(2000);
+      expect(retryDelayMs(overloaded, 1)).toBe(4000);
+      expect(retryDelayMs(overloaded, 2)).toBe(8000);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('指数退避上限 30s', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      expect(retryDelayMs(overloaded, 10)).toBe(30000);
+      // jitter 满幅时不超过 31s
+      vi.mocked(Math.random).mockReturnValue(0.999);
+      expect(retryDelayMs(overloaded, 10)).toBeLessThanOrEqual(30999);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('非过载瞬态错误保持固定退避（1200ms 基数）', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      expect(retryDelayMs(transient429, 5)).toBe(1200);
+      expect(retryDelayMs(undefined, 0)).toBe(1200);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('DOCUMENT_LLM_RETRY_BACKOFF=0 回退固定退避', () => {
+    process.env.DOCUMENT_LLM_RETRY_BACKOFF = '0';
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      expect(retryDelayMs(overloaded, 2)).toBe(1200);
+    } finally {
+      delete process.env.DOCUMENT_LLM_RETRY_BACKOFF;
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe('prefixScheduleWindowFor（3.3 调度窗口自适应）', () => {
+  it('低并发保持 120ms 默认窗口', () => {
+    expect(prefixScheduleWindowFor(0)).toBe(120);
+    expect(prefixScheduleWindowFor(15)).toBe(120);
+  });
+
+  it('在飞 ≥16 时窗口扩至 500ms', () => {
+    expect(prefixScheduleWindowFor(16)).toBe(500);
+    expect(prefixScheduleWindowFor(64)).toBe(500);
+  });
+
+  it('env 显式覆盖优先（含 0=关闭调度）', () => {
+    expect(prefixScheduleWindowFor(64, 250)).toBe(250);
+    expect(prefixScheduleWindowFor(64, 0)).toBe(0);
+    expect(prefixScheduleWindowFor(1, 250)).toBe(250);
   });
 });

@@ -78,6 +78,9 @@ export class KnowledgeBaseManager {
   private queryExpansionActive = 0;
   private readonly queryExpansionWaiters: Array<() => void> = [];
   private onProgress?: (progress: KnowledgeIndexProgress) => void;
+  /** 集合名缓存：避免每次向量搜索都全表扫描 kb_index_state；TTL 兜底 worker 子进程跨进程写入的新集合 */
+  private collectionNamesCache: { names: Set<string>; fetchedAt: number } | null = null;
+  private static readonly COLLECTION_NAMES_TTL_MS = 2000;
 
   constructor(options: KnowledgeBaseManagerOptions) {
     this.scope = options.scope;
@@ -227,6 +230,7 @@ export class KnowledgeBaseManager {
           errorMessage: metadataOnly ? undefined : reason,
           metadataJson: JSON.stringify({ mimeType: file.mimeType, ...extraction.metadata, warnings: extraction.warnings, metadataOnly }),
         });
+        this.noteCollectionName(collectionName);
         continue;
       }
       // K1 入库前清洗（源头治理）：解析完成后、分块入库前移除确定性噪声（页眉页脚/目录/页码/
@@ -344,6 +348,7 @@ export class KnowledgeBaseManager {
         format: file.format,
         collectionName,
       });
+      this.noteCollectionName(collectionName);
       vectorRelativePaths.push(file.relativePath);
       changedCollectionNames.add(collectionName);
       this.updateJobsForFile(file.relativePath, options.vectorMode === 'defer' ? 'SUCCESS' : 'INDEXING', options.vectorMode === 'defer' ? 100 : 85, options.vectorMode === 'defer' ? '解析和切片已完成' : '等待向量入库');
@@ -526,7 +531,7 @@ export class KnowledgeBaseManager {
   }
 
   async semanticSearch(query: string, options: { limit?: number; filters?: SearchFilters; collections?: string[] } = {}): Promise<FederatedResult> {
-    for (const record of this.store.listRecords()) this.ensureVectorStore(record.collectionName);
+    this.ensureAllVectorStores();
     const queryEmbedding = await this.embeddingProvider.embedQuery(query);
     const search = new FederationSearch(this.vectorStores);
     try {
@@ -605,10 +610,17 @@ export class KnowledgeBaseManager {
     return this.validateUploadRelativePath(targetRelativePath ? this.normalizeRelativePath(targetRelativePath) : this.defaultUploadRelativePath(fileName));
   }
 
+  /**
+   * @deprecated 生产上传链路已切换为 stageUploadedFilePaths + 后台索引 worker（不落内存 buffer、支持上传会话等待）。
+   * 本同步路径仅保留给测试与 CLI 使用；新代码请走 stageUploadedFilePaths。
+   */
   async uploadFile(fileName: string, content: Buffer, targetRelativePath?: string, onProgress?: (progress: KnowledgeIndexProgress) => void, options: { vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
     return this.uploadFiles([{ fileName, content, targetRelativePath }], onProgress, options);
   }
 
+  /**
+   * @deprecated 生产上传链路已切换为 stageUploadedFilePaths（路径落盘，不占内存）。仅测试/CLI 使用。
+   */
   async stageUploadedFiles(files: Array<{ fileName: string; content: Buffer; targetRelativePath?: string }>, operationId = `upload-${Date.now()}`) {
     this.initialize();
     const jobs = [];
@@ -638,6 +650,9 @@ export class KnowledgeBaseManager {
     return jobs;
   }
 
+  /**
+   * @deprecated 同步上传+索引一体化旧路径，仅测试/CLI 使用；生产请用 stageUploadedFilePaths + 后台 worker。
+   */
   async uploadFiles(files: Array<{ fileName: string; content: Buffer; targetRelativePath?: string }>, onProgress?: (progress: KnowledgeIndexProgress) => void, options: { vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
     const jobs = await this.stageUploadedFiles(files);
     return this.incrementalIndex({ onProgress, vectorMode: options.vectorMode, onlyRelativePaths: jobs.map(job => job.relativePath) });
@@ -687,6 +702,8 @@ export class KnowledgeBaseManager {
   }
 
   async indexVectors(options: { collectionName?: string; relativePath?: string; relativePaths?: string[]; cleanupCollectionNames?: Iterable<string>; limit?: number; rebuild?: boolean } = {}): Promise<VectorIndexResult[]> {
+    // 先清扫此前删除失败的孤儿向量（重试幂等，失败留队下次再试）
+    await this.sweepOrphanVectors();
     const pendingRelativePaths = !options.rebuild && !options.relativePath && !options.relativePaths?.length
       ? this.consumePendingVectorRelativePaths()
       : [];
@@ -1169,6 +1186,20 @@ export class KnowledgeBaseManager {
     this.vectorStores.set(collectionName, new HNSWVectorStore(collectionName, path.join(this.vectorRoot, `${safeName}.hnsw`), this.embeddingProvider.dimensions));
   }
 
+  /** 本进程写入新记录时即时补充集合名缓存（不等 TTL），保证紧随其后的搜索立即可见 */
+  private noteCollectionName(collectionName: string): void {
+    this.collectionNamesCache?.names.add(collectionName);
+  }
+
+  /** 为全部已知集合确保向量存储已加载；集合名集合带 2s TTL 缓存，避免每次搜索全表扫描 */
+  private ensureAllVectorStores(): void {
+    const now = Date.now();
+    if (!this.collectionNamesCache || now - this.collectionNamesCache.fetchedAt > KnowledgeBaseManager.COLLECTION_NAMES_TTL_MS) {
+      this.collectionNamesCache = { names: new Set(this.store.listCollectionNames()), fetchedAt: now };
+    }
+    for (const name of this.collectionNamesCache.names) this.ensureVectorStore(name);
+  }
+
   private async deleteVectorFile(collectionName: string, relativePath: string): Promise<void> {
     this.ensureVectorStore(collectionName);
     try {
@@ -1176,7 +1207,48 @@ export class KnowledgeBaseManager {
     } catch (error) {
       this.store.setMetadata('vector_index_status', 'error');
       this.store.setMetadata('vector_index_error', error instanceof Error ? error.message : String(error));
+      // 删除失败会留下孤儿向量（已删文件的内容仍可被召回），登记待清扫队列由 indexVectors 重试
+      this.noteOrphanVector(collectionName, relativePath);
     }
+  }
+
+  /** 登记删除失败的孤儿向量（去重、限量 500 条防止 metadata 膨胀） */
+  private noteOrphanVector(collectionName: string, relativePath: string): void {
+    const pending = this.listOrphanVectors();
+    if (pending.some(item => item.collectionName === collectionName && item.relativePath === relativePath)) return;
+    pending.push({ collectionName, relativePath });
+    this.store.setMetadata('vector_orphan_pending', JSON.stringify(pending.slice(-500)));
+  }
+
+  private listOrphanVectors(): Array<{ collectionName: string; relativePath: string }> {
+    const raw = this.store.getMetadata('vector_orphan_pending');
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((item): item is { collectionName: string; relativePath: string } =>
+        typeof item === 'object' && item !== null
+        && typeof (item as { collectionName?: unknown }).collectionName === 'string'
+        && typeof (item as { relativePath?: unknown }).relativePath === 'string');
+    } catch {
+      return [];
+    }
+  }
+
+  /** 清扫孤儿向量：重试删除此前失败的条目，成功的出队，仍失败的留待下次（best-effort，不阻断索引主流程） */
+  private async sweepOrphanVectors(): Promise<void> {
+    const pending = this.listOrphanVectors();
+    if (pending.length === 0) return;
+    const remaining: Array<{ collectionName: string; relativePath: string }> = [];
+    for (const item of pending) {
+      this.ensureVectorStore(item.collectionName);
+      try {
+        await this.vectorStores.get(item.collectionName)?.deleteByFilePath(item.relativePath);
+      } catch {
+        remaining.push(item);
+      }
+    }
+    this.store.setMetadata('vector_orphan_pending', remaining.length > 0 ? JSON.stringify(remaining) : '');
   }
 
   private consumePendingVectorRelativePaths(): string[] {
@@ -1195,7 +1267,7 @@ export class KnowledgeBaseManager {
 
   private async ensureVectorIndexFresh(chunkCount: number, options: { changedRelativePaths?: string[]; changedCollectionNames?: Set<string>; deletesApplied?: number; rebuild?: boolean } = {}): Promise<void> {
     if (chunkCount === 0) return;
-    for (const record of this.store.listRecords()) this.ensureVectorStore(record.collectionName);
+    this.ensureAllVectorStores();
     if (options.rebuild || [...this.vectorStores.values()].some(store => store.needsRebuild?.())) {
       await this.indexVectors({ rebuild: true });
       return;

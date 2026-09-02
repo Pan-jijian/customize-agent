@@ -1142,16 +1142,28 @@ const MIN_CROSS_SECTION_DUPLICATE_SENTENCE_CHARS = 30;
  * 跨小节整句重复（5.1 vs 5.6 同一长句两处出现、68/69 行相邻重复）无检测（评分报告 N4）。
  * 规则：≥30 字长句（去除空白后）首次出现的小节保留，其他小节中的完全重复句删除；
  * 同一小节内重复保留（可能为有意强调），标题行/表格行不参与。
+ * 1.5 扩展（跨章完全重复句漏网实锤：同名小节字符串相等被误判"同小节保留"）——同名标题第 N 次出现
+ * 序号化为不同小节（章间无标题归属感知时两章常出现同名小节，如 1.3↔6.4），确保跨章重复句被清除；
+ * env DOCUMENT_CROSS_CHAPTER_DEDUP=0 回退为原同名字符串判定。
  */
 export function dedupeCrossSectionDuplicateSentences(content: string): string {
+  const crossChapterDedupEnabled = process.env.DOCUMENT_CROSS_CHAPTER_DEDUP !== '0';
   const lines = content.split('\n');
   const firstSectionBySentence = new Map<string, string>();
+  const sectionOccurrences = new Map<string, number>();
   let currentSection = '';
   let changed = false;
   const result = lines.map(line => {
     const trimmed = line.trim();
     if (/^#{1,6}\s/u.test(trimmed)) {
-      currentSection = trimmed;
+      if (crossChapterDedupEnabled) {
+        // 同名标题第 N 次出现序号化：不同位置的同名小节（跨章串章产物）视为不同小节，句级去重不被"同小节保留"豁免
+        const occurrence = sectionOccurrences.get(trimmed) || 0;
+        sectionOccurrences.set(trimmed, occurrence + 1);
+        currentSection = occurrence === 0 ? trimmed : `${trimmed}#${occurrence}`;
+      } else {
+        currentSection = trimmed;
+      }
       return line;
     }
     if (!trimmed || /^\s*\|/u.test(trimmed)) return line;
@@ -1459,6 +1471,39 @@ export function slowMetricSummary(metrics: DocumentGenerationDiagnostics['metric
     .slice(0, 5)
     .map(metric => `${metric.name} ${Math.round(metric.durationMs / 1000)}秒`)
     .join('，');
+}
+
+/** 4.1 per-调用分量 Top5 排序（按输入字符降序；同值保持插入序，V8 稳定排序保证确定性） */
+function callBreakdownTop(breakdown: DocumentGenerationDiagnostics['llm']['callBreakdown'], topN = 5) {
+  if (!breakdown) return [];
+  return Object.entries(breakdown)
+    .sort((a, b) => b[1].inputChars - a[1].inputChars)
+    .slice(0, topN);
+}
+
+/** 4.1 per-调用分量 Top 摘要：进度页后台诊断 message 压缩展示（prefixKey 次数/输入万字） */
+export function callBreakdownTopSummary(breakdown: DocumentGenerationDiagnostics['llm']['callBreakdown'], topN = 5) {
+  return callBreakdownTop(breakdown, topN)
+    .map(([key, item]) => `${key} ${item.calls}次/${(item.inputChars / 10000).toFixed(1)}万字`)
+    .join('，');
+}
+
+/** 4.2 阶段耗时瀑布：phase:* 主流程阶段按开始时间排序逐行展示（完整瀑布，补齐既有 Top5 慢步骤之外的阶段视图） */
+export function phaseWaterfallDetails(metrics: DocumentGenerationDiagnostics['metrics']) {
+  return metrics
+    .filter(metric => metric.name.startsWith('phase:'))
+    .sort((a, b) => a.startedAt - b.startedAt)
+    .map(metric => `${metric.name}：${(metric.durationMs / 1000).toFixed(1)} 秒`);
+}
+
+/** 4.1 per-调用分量 Top 详情：五维度完整行（details 逐行展示 次数/输入字符/L3 字符/缓存命中 token） */
+export function callBreakdownTopDetails(breakdown: DocumentGenerationDiagnostics['llm']['callBreakdown'], topN = 5) {
+  return callBreakdownTop(breakdown, topN)
+    .map(([key, item]) => {
+      const total = item.cacheHitTokens + item.cacheMissTokens;
+      const cacheText = total > 0 ? `，缓存命中 ${Math.round((item.cacheHitTokens / total) * 100)}%（${item.cacheHitTokens}/${total} token）` : '';
+      return `${key}：${item.calls} 次，输入 ${(item.inputChars / 10000).toFixed(1)} 万字（L3 ${(item.l3Chars / 10000).toFixed(1)} 万字）${cacheText}`;
+    });
 }
 
 export function resolveDocumentGenerationEvidenceLimit(project: EvidenceLimitProject, scopedFilePaths: string[], requestedLimit?: number): number {
