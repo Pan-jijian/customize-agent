@@ -56,7 +56,7 @@ export default tseslint.config(
     },
   },
   {
-    // 测试文件不纳入 tsconfig（tsconfig exclude **/*.test.ts），关闭 project service 与依赖类型信息的规则
+    // 测试文件关闭 project service（类型信息依赖 tsc 检查，lint 阶段无需），并放宽部分 typed 规则
     files: ["**/*.test.ts", "**/*.spec.ts"],
     languageOptions: {
       parserOptions: {
