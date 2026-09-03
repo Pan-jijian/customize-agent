@@ -1,6 +1,7 @@
 import type { DocumentDraftChapter, ValidationIssue } from './types';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 import { buildSemanticGate } from './semanticGate';
+import { hasProcessSequenceExpression, workPackageContentElementsComplete } from './utils';
 
 export { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 
@@ -11,7 +12,7 @@ export { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
  * 1. duplicateParagraphIssues      —— 跨小节重复段落检测（同段出现在多个小节）
  * 2. fillerParagraphIssues         —— 废话段落模式检测（模板化空话，正则召回+语义复核）
  * 3. processParameterDensityIssues —— 工艺参数密度（区分概况数字与工艺参数）
- * 4. sectionCardStructureIssues    —— 工作包三段式结构完整性
+  * 4. sectionCardStructureIssues    —— 工作包内容要素完整性（4.17.9 呈现形式不限，标签不强制）
  * 5. tableCompletenessIssues       —— 表格空字段检测
  * （原 6. reviewResponseIssues 已删除：招标硬性要求响应检测统一由 tenderRequirements.ts
  *   锚点级语义通道（requirementsCoverageIssues）承担，消除两处实现口径分裂——阶段五 5.3）
@@ -254,27 +255,33 @@ export function processParameterDensityIssues(chapters: DocumentDraftChapter[]):
   return issues;
 }
 
-/** 4. 工作包三段式结构完整性（概况/流程/方法） */
+/** 4. 工作包内容要素完整性（作业对象与工程量/工序顺序/施工方法；呈现形式不限，标签不强制） */
 export function sectionCardStructureIssues(chapters: DocumentDraftChapter[]): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   for (const chapter of chapters) {
-    const blocks = extractSectionBlocks(chapter.content);
-    for (const block of blocks) {
-      if (!/主要分部分项工程施工方案|主要施工方法/u.test(block.heading)) continue;
-      const subPackages = block.body.split(/^####\s+/gmu).slice(1).map(item => item.trim()).filter(Boolean);
+    // 盲区根治：不再复用 extractSectionBlocks（其把 #### 子包行也切为新块，方案节 body 恒为空、
+    // subPackages 恒为 []，本节检查从未真正生效——测试注释记录的已知缺陷）。
+    // 直接按行解析：定位 ### 方案节标题 → 取到下一 H2/H3 为止的节 body → 节内切 #### 子包逐一检查
+    const lines = chapter.content.split('\n');
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index].trim();
+      if (!/^#{3}\s+[^\n]*(?:主要分部分项工程施工方案|主要施工方法)/u.test(line)) continue;
+      let end = lines.length;
+      for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+        if (/^#{2,3}\s+/u.test(lines[cursor].trim())) { end = cursor; break; }
+      }
+      const sectionBody = lines.slice(index + 1, end).join('\n');
+      const subPackages = sectionBody.split(/^####\s+/gmu).slice(1).map(item => item.trim()).filter(Boolean);
       if (subPackages.length === 0) continue;
-      const incomplete = subPackages.filter(pkg => {
-        const hasScope = /(?:施工)?(?:概况|范围)[:：]\s*\S/u.test(pkg) || /工程量|范围/u.test(pkg);
-        const hasProcess = /(?:施工)?(?:流程|工序|顺序)[:：]\s*\S/u.test(pkg) || /→/u.test(pkg);
-        const hasMethod = /(?:施工)?方法[:：]\s*\S/u.test(pkg);
-        return !hasScope || !hasProcess || !hasMethod;
-      });
+      // 三要素判定统一走 utils.workPackageContentElementsComplete（与结构门禁/专项验收同口径，
+      // 历史缺陷：本处正则漏“作业对象|部位”“验收标准|检测”等词，自然成文块被误报要素缺失）
+      const incomplete = subPackages.filter(pkg => !workPackageContentElementsComplete(pkg));
       if (incomplete.length > 0) {
         issues.push({
           level: 'warning',
           severity: 'warning',
-          message: `${chapter.title} / ${block.heading} 有 ${incomplete.length}/${subPackages.length} 个分部分项未按"概况/流程/方法"三段式展开`,
-          suggestion: '参照"项目主要施工内容"工作包写法：概况=对象+工程量，流程=→工序链，方法=工艺参数+检测验收。',
+          message: `${chapter.title} / ${line.replace(/^#{3}\s+(?:\d+(?:\.\d+)*\s+)?/u, '')} 有 ${incomplete.length}/${subPackages.length} 个分部分项内容要素不全（作业对象与工程量/工序顺序/施工方法至少缺一）`,
+          suggestion: '每个分项方案需覆盖作业对象与工程量、工序安排、施工方法三方面要素，可分段用“施工概况/工艺流程/施工方法”标签组织，也可自然成文；工序顺序表达形式不限（顺序词叙述、编号步骤、列表或箭头链均可）。',
         });
       }
     }

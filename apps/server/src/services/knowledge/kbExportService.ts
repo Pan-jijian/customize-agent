@@ -54,11 +54,24 @@ export function trimChunkOverlap(prev: string, next: string): string {
 }
 
 /**
+ * 剥离 CAD 图纸块内的解析元数据行，只保留图纸真实文字：
+ * - 图层/块/实体类型汇总行是解析产物（供检索语义），对阅读者无价值
+ * - 「CAD 语义标注文本:」节标题与「未提取到文字标注」空图纸标记同理
+ * - 「图纸节点: xxx」文件锚定行保留（导出后仍能识别来源图纸）
+ */
+const CAD_METADATA_LINE_RE = /^CAD DXF (?:图层|块\/符号|实体类型):|^CAD 语义标注文本:$|^图纸节点: .*\| 未提取到文字标注$/u;
+
+export function stripCadMetadataLines(content: string): string {
+  if (!content.includes('CAD')) return content;
+  return content.split('\n').filter(line => !CAD_METADATA_LINE_RE.test(line.trim())).join('\n');
+}
+
+/**
  * 将已解析分块按顺序拼接为可正常阅读的完整文本：
  * 保留块内原有段落结构，块间用空行过渡，相邻块重叠去重。
  */
 export function mergeChunksToReadableText(chunks: Array<Pick<StoredChunk, 'content'>>): string {
-  const texts = chunks.map(chunk => String(chunk.content ?? '').trim()).filter(Boolean);
+  const texts = chunks.map(chunk => stripCadMetadataLines(String(chunk.content ?? '')).trim()).filter(Boolean);
   const merged: string[] = [];
   for (const text of texts) {
     const prev = merged[merged.length - 1];

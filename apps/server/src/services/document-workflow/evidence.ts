@@ -436,6 +436,10 @@ export interface EvidencePromptOptions {
   onlyRankBoosted?: boolean;
   /** 分层统计出口：写入 T0/T1/T2 字符量与省略量，供真实生成对账 */
   diagnostics?: DocumentGenerationDiagnostics;
+  /** 4.17.6 跳过 T2 目录：写作/大纲类调用只消费事实（T0 全量 + T1 高相关片段），
+   * 目录是逐调用不同的不可缓存变化段，跳过可把块级 L3 再压 ~7.4K 字符；
+   * 目录的追溯定位语义由章级证据摘要池（L2 共享段）与 repair 轮承载，完整证据仍参与检索与校验 */
+  skipT2Catalog?: boolean;
 }
 
 export function evidencePromptBudgetForTarget(targetWords?: number, floorChars = 8000, ceilingChars = 24000) {
@@ -462,7 +466,12 @@ export function evidencePromptBudgetForTarget(targetWords?: number, floorChars =
 function appendWithinBudget(parts: string[], next: string, state: { chars: number; omitted: number }, maxChars?: number) {
   const normalized = next.trim();
   if (!normalized) return;
-  if (!Number.isFinite(maxChars) || !maxChars || state.chars + normalized.length <= maxChars) {
+  // 4.17.7 修复：maxChars=0 必须视为"预算已耗尽、不再追加"而非"无预算限制"。
+  // 历史缺陷：demoted 事实行吃满 T1 文本层预算后 textEvidenceBudget 归零，`!maxChars` 把 0 判为
+  // falsy → 视为无限制 → 全部文本证据原文注入，repair/outline L3 从 ~2K 爆炸到 17万-27万字符，
+  // 前缀缓存命中率被压到 1-32%（真实生成实测 38.5% 的主因）
+  const budgetExhausted = Number.isFinite(maxChars) && maxChars === 0;
+  if (maxChars === undefined || maxChars === null || (!budgetExhausted && state.chars + normalized.length <= maxChars)) {
     parts.push(normalized);
     state.chars += normalized.length;
     return;
@@ -515,11 +524,26 @@ function selectEvidenceForPrompt<T extends { filePath: string }>(items: T[], max
   return { lines: selected, omittedItems: ranked.filter(item => !selectedKeys.has(item)), omitted: state.omitted };
 }
 
-/** T2 证据目录行：未全文注入的片段一行索引（来源标签 + 首段要点），保证证据池全貌可见、编号可回溯 */
-function evidenceCatalogLine(item: DocumentEvidence | ResourceEvidence, index: number) {
+/** T2 证据目录行：未全文注入的片段一行压缩摘要（来源标签 + 300 字要点摘要，与章级证据摘要池同口径），
+ * 保证证据池重要数据以摘要形式可见、编号可回溯——历史缺陷：60 字首行索引让被省略证据的
+ * 关键事实对写作/修复 LLM 不可见（封顶丢数据），正文缺失材料事实拉低评分。
+ * 摘要采用首尾拼接（头部 70% + 尾部 30%）：纯头部截断会让尾部关键参数（标高/坡率/结论句）
+ * 永久不可见（与 extractKeyParameterWindows 同源历史缺陷）；CAD 父块类超长内容走关键参数窗口提取 */
+function evidenceCatalogLine(item: DocumentEvidence | ResourceEvidence, index: number, digestChars = 300) {
   const snippetText = 'content' in item ? item.content : (item.snippets[0] || '');
-  const firstLine = cleanEvidenceText(snippetText).split('\n').map(line => line.trim()).filter(Boolean)[0] || '';
-  const digest = firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine;
+  const cleaned = cleanEvidenceText(snippetText).replace(/\s+/gu, ' ').trim();
+  let digest: string;
+  if (cleaned.length > digestChars) {
+    digest = cleaned.length > 4000
+      ? extractKeyParameterWindows(cleaned, digestChars)
+      : (() => {
+        const headChars = Math.floor(digestChars * 0.7);
+        const tailChars = digestChars - headChars - 1;
+        return `${cleaned.slice(0, headChars)}…${cleaned.slice(-tailChars)}`;
+      })();
+  } else {
+    digest = cleaned;
+  }
   return `- [${index}] ${readableSourceLabel(item)}${digest ? `｜${digest}` : ''}`;
 }
 
@@ -549,7 +573,7 @@ export interface EvidenceLayers {
  * skipT0（D1 共享卡片上移）：章级共享事实层已由调用方单独注入 L2 共享段时，此处跳过 T0，
  * 避免同章各块重复注入同一份全量事实行（块级调用输入 token 大头）。
  */
-export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | undefined, requiredFacts: string[], skipT0 = false, rankBoost?: (item: DocumentEvidence) => number, onlyRankBoosted = false): EvidenceLayers {
+export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | undefined, requiredFacts: string[], skipT0 = false, rankBoost?: (item: DocumentEvidence) => number, onlyRankBoosted = false, skipT2Catalog = false): EvidenceLayers {
   const whitelistEnabled = t0WhitelistEnabled();
   const allFactLines = skipT0 ? [] : [...new Set(bundle.textEvidence.flatMap(item => extractKeyFactLines(item.content).split('\n').filter(Boolean)))];
   // 2.1 T0 白名单瘦身：T0 只保留项目级白名单字段行（值截断 200 字符）；白名单外事实行
@@ -618,9 +642,22 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
   if (textPrompt.lines.length) t1Parts.push(`文本/附件片段：\n${textPrompt.lines.join('\n\n---\n\n')}`);
   const t1Text = t1Parts.join('\n\n');
   const t2Items = [...resourcePrompt.omittedItems, ...textPrompt.omittedItems];
-  const t2Lines = t2Items.map((item, index) => evidenceCatalogLine(item, index));
+  // 2.2 T2 目录限行（对齐章级证据摘要池目录 40 行口径）：真实生成实测单章证据池 3k+ 条时，
+  // 无限制目录行达 3252 行/284K 字符，占单次调用 L3 证据注入的 97.5%（预算 8000 的输出被撑到
+  // 291K）——目录是全输入不可缓存段（L3），逐行 300 字摘要全部注入即"封顶丢数据"的变相膨胀；
+  // 按重要性保留前 N 条压缩摘要（重要数据以摘要形式可见），其余仅计数不注入，完整证据仍参与
+  // 后续检索与质量校验。env DOCUMENT_EVIDENCE_CATALOG_MAX_LINES 可调，默认 40
+  const catalogMaxLinesValue = Number(process.env.DOCUMENT_EVIDENCE_CATALOG_MAX_LINES || 40);
+  const catalogMaxLines = Number.isFinite(catalogMaxLinesValue) && catalogMaxLinesValue > 0 ? Math.floor(catalogMaxLinesValue) : 40;
+  // 4.17.6 skipT2Catalog（写作/大纲类调用跳过目录）：目录是逐行压缩摘要的不可缓存变化段
+  // （每调用证据池不同 → 前缀在目录处必然分叉），节级/块级写作与事实大纲只消费事实本身
+  // （T0 关键事实层全量 + T1 高相关片段），目录的追溯定位语义由章级证据摘要池（L2 共享段）与
+  // repair 轮承载——写作侧跳过目录可把块级 L3 再压 ~7.4K 字符（40 行 × 300 字摘要）。
+  // 完整证据不删除：仍参与后续检索与质量校验（零丢失原则不变）。
+  const t2ItemsSkipped = skipT2Catalog ? [] : t2Items;
+  const t2Lines = t2ItemsSkipped.slice(0, catalogMaxLines).map((item, index) => evidenceCatalogLine(item, index));
   const t2Text = t2Lines.length
-    ? `【证据目录——未全文注入的片段索引（正文写作不使用目录内容；目录供覆盖检索与修复追溯，完整片段仍参与后续检索与质量校验）】\n${t2Lines.join('\n')}`
+    ? `【证据目录——未全文注入的片段压缩摘要（按重要性保留前 ${t2Lines.length} 条${t2Items.length > t2Lines.length ? `，另有 ${t2Items.length - t2Lines.length} 条未注入` : ''}；正文可引用摘要内事实，不得编造摘要外的细节；完整片段仍参与后续检索与质量校验）】\n${t2Lines.join('\n')}`
     : '';
   const omittedChars = t2Items.reduce((sum, item) => sum + ('content' in item ? item.content.length : (item.snippets[0] || '').length), 0);
   const stats: EvidenceLayerStats = {
@@ -640,7 +677,7 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
 export function evidenceBundlePrompt(bundle: EvidenceBundle, options: EvidencePromptOptions = {}) {
   const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.ceil(options.maxChars!) : undefined;
   const requiredFacts = options.requiredFacts || [];
-  const layers = buildEvidenceLayers(bundle, maxChars, requiredFacts, Boolean(options.skipT0), options.rankBoost, Boolean(options.onlyRankBoosted));
+  const layers = buildEvidenceLayers(bundle, maxChars, requiredFacts, Boolean(options.skipT0), options.rankBoost, Boolean(options.onlyRankBoosted), Boolean(options.skipT2Catalog));
   if (options.diagnostics) {
     // T0/T1/T2 分层统计：供每次真实生成对账（重要数据零丢失断言 + 裁剪可观测）
     const evidenceDiagnostics = options.diagnostics.evidence;
@@ -673,8 +710,9 @@ export function buildChapterEvidencePool(bundle: EvidenceBundle, requiredFacts: 
   const poolText = pool.lines.length
     ? `【章级证据摘要池——全章证据要点概览（正文事实必须以关键事实层与绑定材料为准，摘要仅供定位材料方向）】\n${pool.lines.join('\n')}`
     : '';
-  // 目录索引限行：目录用途是追溯定位，不占写作输入大头
-  const catalogLines = pool.omittedItems.slice(0, 40).map((item, index) => evidenceCatalogLine(item, index));
+  // 目录索引限行：目录用途是追溯定位，不占写作输入大头；digest 保持 60 字短索引语义
+  // （与 L3 块级 T2 目录的 300 字压缩摘要区分：全章要点概貌已由上方摘要池承载）
+  const catalogLines = pool.omittedItems.slice(0, 40).map((item, index) => evidenceCatalogLine(item, index, 60));
   const catalogText = catalogLines.length
     ? `【证据目录——未进摘要池的片段索引（正文写作不使用目录内容；完整片段仍参与后续检索与质量校验）】\n${catalogLines.join('\n')}`
     : '';

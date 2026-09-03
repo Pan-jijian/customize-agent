@@ -70,7 +70,7 @@ function parseMultipart(req: NextApiRequest): Promise<{ fields: MultipartFields;
   });
 }
 
-const SKIPPED_UPLOAD_FILE_PATTERN = /(^|\/)\.DS_Store$|(^|\/)Thumbs\.db$|(^|\/)__MACOSX\/|\.bak$/iu;
+const SKIPPED_UPLOAD_FILE_PATTERN = /(^|\/)\.DS_Store$|(^|\/)Thumbs\.db$|(^|\/)__MACOSX\/|\.bak$|(^|\/)~\$/iu;
 
 function uploadedFileName(file: FormidableFile): string {
   return file.originalFilename || file.newFilename || 'uploaded-file';

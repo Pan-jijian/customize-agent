@@ -528,3 +528,81 @@ describe('3.4 证据文本确定性组装（同证据池乱序输入 → 输出�
     expect(layersB.stats).toEqual(layersA.stats);
   });
 });
+
+describe('T2 证据目录压缩摘要限行（2.2）', () => {
+  const chapter: DocumentTemplateChapter = { id: 'ch-1', title: '工程概况', purpose: '', queries: [], requiredFacts: [] };
+
+  function bigPool(count: number): DocumentEvidence[] {
+    return Array.from({ length: count }, (_item, i) => evidenceItem({
+      filePath: `招标文件${(i % 20) + 1}.pdf`,
+      sectionTitle: `条款 ${i}`,
+      score: 0.5 + (i % 100) / 1000,
+      content: i % 5 === 0
+        ? `计划工期：540日历天。质量标准：合格。第 ${i} 条：本工程基坑开挖深度 5.85m，支护形式为放坡+喷锚，坡率 1:1.0，坑底标高 15.65，相关要求按设计图纸与规范执行。`
+        : `第 ${i} 条：施工组织设计应按规范编制，内容包括施工部署、进度计划、质量保证措施、安全生产、文明施工等内容。`,
+    }));
+  }
+
+  it('大证据池下 T2 目录限行（默认 40 行），总输出不再被目录撑爆', () => {
+    // 真实生成实测：单章 3244 条证据时无限制目录 3252 行/284K 字符，占 L3 证据注入 97.5%
+    const bundle = buildEvidenceBundle(chapter, bigPool(3244));
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 8000, requiredFacts: [] });
+    const t2Lines = prompt.split('\n').filter(line => line.startsWith('- [')).length;
+    expect(t2Lines).toBeLessThanOrEqual(40);
+    // 目录限行后总输出收敛到预算量级（T0 60% + T1 余量 + 40 行压缩摘要 ≈ 15K 内）
+    expect(prompt.length).toBeLessThan(16000);
+  });
+
+  it('目录行携带 300 字压缩摘要（被省略证据的关键事实仍可见，替代 60 字索引）', () => {
+    const bundle = buildEvidenceBundle(chapter, [
+      evidenceItem({ filePath: '基坑支护图.dwg', score: 9, content: '图纸说明：本工程基坑开挖深度 5.85m。'.repeat(30) + '坡率 1:1.0，坑底标高 15.65(基坑底标高)。' }),
+      evidenceItem({ filePath: '补疑.pdf', score: 8, content: '第 1 条：现场垂直运输采用 63 塔吊。第 2 条：混凝土采用商品混凝土。'.repeat(8) }),
+      ...bigPool(60),
+    ]);
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 800, requiredFacts: [] });
+    // 60 字索引看不到的尾部关键参数（基坑底标高），300 字摘要可见
+    expect(prompt).toContain('基坑底标高');
+    expect(prompt).toContain('证据目录');
+  });
+
+  it('DOCUMENT_EVIDENCE_CATALOG_MAX_LINES 可调目录行数上限', () => {
+    process.env.DOCUMENT_EVIDENCE_CATALOG_MAX_LINES = '10';
+    const bundle = buildEvidenceBundle(chapter, bigPool(500));
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 8000, requiredFacts: [] });
+    const t2Lines = prompt.split('\n').filter(line => line.startsWith('- [')).length;
+    expect(t2Lines).toBeLessThanOrEqual(10);
+    delete process.env.DOCUMENT_EVIDENCE_CATALOG_MAX_LINES;
+  });
+
+  it('skipT2Catalog 跳过目录：输出不含目录段但 T0/T1 事实不变（4.17.6 前缀缓存压缩）', () => {
+    const bundle = buildEvidenceBundle(chapter, bigPool(300));
+    const withCatalog = evidenceBundlePrompt(bundle, { maxChars: 8000, requiredFacts: [] });
+    const withoutCatalog = evidenceBundlePrompt(bundle, { maxChars: 8000, requiredFacts: [], skipT2Catalog: true });
+    // 目录段整体消失（写作/大纲类调用只消费事实本身，追溯语义由章级证据摘要池承载）
+    expect(withCatalog).toContain('证据目录');
+    expect(withoutCatalog).not.toContain('证据目录');
+    // 跳过目录不改变 T0/T1 注入的事实内容（零丢失原则：只裁目录、不裁事实）
+    const factsOf = (prompt: string) => prompt.split('证据目录')[0].split('文本/附件片段：')[0];
+    expect(factsOf(withoutCatalog)).toBe(factsOf(withCatalog));
+    // 输出显著收敛（300 条证据池的 40 行 × 300 字目录 ≈ 12K 字符被 裁掉）
+    expect(withoutCatalog.length).toBeLessThan(withCatalog.length);
+    expect(withCatalog.length - withoutCatalog.length).toBeGreaterThan(3000);
+  });
+
+  it('demoted 事实行吃满 T1 预算后文本证据不再全量注入（4.17.7 零预算爆炸修复）', () => {
+    // 真实生成回归：招标文件数值行（白名单外事实行）大量存在时 demoted 段吃满 T1 文本层预算，
+    // textEvidenceBudget 归零；旧实现把 0 当"无限制"→ 全部证据原文注入 → repair/outline L3 爆炸
+    // 至 17万-27万字符（真实生成实测缓存命中率 38.5% 的主因）
+    const denseFacts = Array.from({ length: 200 }, (_v, i) => evidenceItem({
+      filePath: `答疑澄清${(i % 40) + 1}.pdf`,
+      score: 0.9,
+      content: `第 ${i} 条：本工程基坑开挖深度 5.85m，坡率 1:${(i % 3) + 0.5}，坑底标高 15.65，计划工期 540 日历天，质量标准合格，混凝土强度 C30。`,
+    }));
+    const bundle = buildEvidenceBundle(chapter, denseFacts);
+    const prompt = evidenceBundlePrompt(bundle, { maxChars: 1500, requiredFacts: [], skipT2Catalog: true });
+    // 预算硬约束：总输出收敛在预算量级（T0 ≤60% + T1 余量 + 段前缀），不得全量注入
+    expect(prompt.length).toBeLessThan(6000);
+    // 事实行仍按重要性保留（零丢失原则下关键事实可见）
+    expect(prompt).toContain('基坑开挖深度');
+  });
+});

@@ -86,4 +86,28 @@ describe('renderDecisionLock', () => {
     expect(first).toBe(second);
     expect(first).toContain('垂直运输方式');
   });
+
+  it('互斥类目（基坑支护）多源冲突只锁最高分唯一值（4.17.8 支护打架根治）', () => {
+    // 真实生成回归（4.17.7）：放坡喷锚证据 4 处 + 灌注桩排桩证据 1 处并存，旧逻辑多值全锁 →
+    // 写作 LLM 各章任选其一，正文放坡喷锚类 4 段 vs 灌注桩排桩类 1 段跨章打架
+    const slope1 = evidenceOf('基坑边坡采用放坡开挖，坡率 1:1.0。', { filePath: '/data/招标文件.txt' });
+    const slope2 = evidenceOf('基坑放坡开挖。', { filePath: '/data/招标文件.txt' });
+    const pile = evidenceOf('基坑支护采用灌注桩排桩支护。', { filePath: '/data/基坑支护设计图纸.dwg' });
+    const entries = buildDecisionLock({ facts: [], evidence: [slope1, slope2, pile] });
+    const support = entries.find(entry => entry.id === 'foundation_support');
+    expect(support).toBeDefined();
+    // 图纸权重 80 > 招标文件 90×2 条？——图纸与招标文件权重同为 80/90，得分累加后放坡更高时锁放坡；
+    // 无论锁哪个，互斥类目只允许一个值（旧逻辑会出现两个值并存）
+    expect(support!.values.length).toBe(1);
+    expect(renderDecisionLock(entries)).toContain('基坑支护形式');
+  });
+
+  it('非互斥类目（垂直运输）多值共存锁定语义保留', () => {
+    const a = evidenceOf('垂直运输采用塔吊。', { filePath: '/data/招标文件.txt' });
+    const b = evidenceOf('人员运输采用施工电梯。', { filePath: '/data/招标文件.txt' });
+    const entries = buildDecisionLock({ facts: [], evidence: [a, b] });
+    const transport = entries.find(entry => entry.id === 'vertical_transport');
+    expect(transport).toBeDefined();
+    expect(transport!.values.length).toBe(2);
+  });
 });

@@ -160,6 +160,40 @@ describe('cleanExtractedText 图纸噪声清洗', () => {
     const result = cleanExtractedText({ text, category: 'document' });
     expect(result.text).toContain('12345.678');
   });
+
+  it('CAD 图纸高重复标注行不删（标注重复是数据非页眉页脚），非图纸文件仍删', () => {
+    // 门窗编号/材料规格随楼层重复标注是图纸数据本身，不得当页眉页脚误删
+    const cadText = [
+      '图纸节点: 门窗表.dwg',
+      '基础平面布置图',
+      ...Array.from({ length: 5 }, () => 'FM1524'),
+      'C35 混凝土垫层',
+    ].join('\n');
+    const cadResult = cleanExtractedText({ text: cadText, category: 'cad' });
+    expect(cadResult.text).toContain('FM1524');
+    expect(cadResult.stats.headerFooterLines).toBe(0);
+    // 非图纸文件同类高重复行仍按页眉页脚删除（类型分流回归）
+    const docResult = cleanExtractedText({ text: cadText, category: 'document' });
+    expect(docResult.text).not.toContain('FM1524');
+    expect(docResult.stats.headerFooterLines).toBeGreaterThanOrEqual(5);
+  });
+
+  it('CAD 图纸纯数字标注行不删（尺寸/标高值非页码），非图纸文件大文件仍删', () => {
+    const lines = [
+      ...Array.from({ length: 25 }, (_, index) => `平面图标注行 ${index + 1}：文字说明内容段落。`),
+      '100',
+      '2100',
+      '2.900',
+    ].join('\n');
+    const cadResult = cleanExtractedText({ text: lines, category: 'cad' });
+    expect(cadResult.text).toContain('100');
+    expect(cadResult.text).toContain('2100');
+    expect(cadResult.stats.pageNumberLines).toBe(0);
+    // 非图纸文件大文件纯数字行仍按页码删除（类型分流回归）
+    const docResult = cleanExtractedText({ text: lines, category: 'document' });
+    expect(docResult.text).not.toContain('2100');
+    expect(docResult.stats.pageNumberLines).toBeGreaterThanOrEqual(1);
+  });
 });
 
 describe('cleanExtractedText 内容无关数据清洗（K2 章节/段落级）', () => {

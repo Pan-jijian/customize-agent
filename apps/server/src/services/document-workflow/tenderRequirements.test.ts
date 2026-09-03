@@ -162,18 +162,22 @@ describe('round-23 P0-1 必提条款窄通道召回/缺失判定/合并', () => 
     mocked.mockResolvedValueOnce({
       awardClauses: [{ text: '获得“黄山杯”的，支付该项300万元。', coreTerms: ['300万元'] }],
       assemblyRate: { text: '装配率：30%。', coreTerms: ['30%'] },
+      frontScheduleClauses: [{ text: '获得“黄山杯”的，支付该项300万元。', coreTerms: ['黄山杯', '300万元'] }],
     });
     const gapEvidence: DocumentEvidence[] = [
       { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款数据表5.1.1', score: 1, content: '关于工程奖项的约定：本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元；本工程有装配式技术要求，装配率为30%。' },
     ];
     const result = await extractRequirementFieldGaps(model, gapEvidence, {});
     expect(result.stillGaps).toEqual([]);
-    // 证据中无窗口命中的 4 个常规字段归 noEvidenceGaps（资料无此要求，非漏提）
-    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'frontScheduleClauses', 'dateFabricationProhibited', 'prohibitionNotes']);
+    // 证据中无窗口命中的 3 个常规字段归 noEvidenceGaps（资料无此要求，非漏提）；
+    // 前附表词形覆盖创优奖惩（黄山杯/支付300万元）→ 窗口命中参与补提，不再失明
+    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'dateFabricationProhibited', 'prohibitionNotes']);
     expect(result.model.awardClauses.length).toBe(1);
     expect(result.model.awardClauses[0].text).toContain('300万元');
     expect(result.model.assemblyRate?.text).toContain('30%');
     expect(result.model.awardObjectives.length).toBe(1);
+    expect(result.model.frontScheduleClauses.length).toBe(1);
+    expect(result.model.frontScheduleClauses[0].text).toContain('300万元');
   });
 
   it('extractRequirementFieldGaps：常规字段（特殊质量标准/前附表/禁止性/禁编）缺失同样触发补提', async () => {
@@ -221,10 +225,29 @@ describe('round-23 P0-1 必提条款窄通道召回/缺失判定/合并', () => 
       { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款', score: 1, content: '创优目标：本项目确保获得“黄山杯”。' },
     ];
     const result = await extractRequirementFieldGaps(model, gapEvidence, {});
-    // 仅创优目标窗口证据存在但提取失败 → stillGaps；其余 4 常规字段无窗口 → noEvidenceGaps
-    expect(result.stillGaps).toEqual(['awardObjectives']);
-    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'frontScheduleClauses', 'dateFabricationProhibited', 'prohibitionNotes']);
+    // 创优目标与前附表窗口证据均存在但提取失败 → stillGaps；其余 3 常规字段无窗口 → noEvidenceGaps
+    expect(result.stillGaps).toEqual(['awardObjectives', 'frontScheduleClauses']);
+    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'dateFabricationProhibited', 'prohibitionNotes']);
     expect(mocked).toHaveBeenCalledTimes(2);
+  });
+
+  it('extractRequirementFieldGaps：前附表词形覆盖创优奖惩条款（300万根治：无工期/人员词形时窗口定位不失明）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    // fullModel 缺 4 个常规字段；证据只有创优奖惩条款（无计划工期/项目经理/分包等旧词形）
+    const model = { ...fullModel };
+    mocked.mockResolvedValueOnce({
+      frontScheduleClauses: [{ text: '本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元。', coreTerms: ['黄山杯', '300万元'] }],
+    });
+    const gapEvidence: DocumentEvidence[] = [
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知前附表', score: 1, content: '创优目标与奖惩：本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元（工程量清单中已单独列项）。' },
+    ];
+    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
+    // 前附表窗口命中 → 发起补提而非判「资料无此要求」；其余 3 字段无窗口 → noEvidenceGaps
+    expect(mocked).toHaveBeenCalledTimes(1);
+    expect(result.stillGaps).toEqual([]);
+    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'dateFabricationProhibited', 'prohibitionNotes']);
+    expect(result.model.frontScheduleClauses.length).toBe(1);
+    expect(result.model.frontScheduleClauses[0].text).toContain('300万元');
   });
 
   it('filterMandatoryClauseEvidence 词形兜底：语义召回全低分时，必提词形命中切片仍保留（真实生成回归：黄山杯长段落切片 bge 低分漏网）', async () => {

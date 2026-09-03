@@ -27,6 +27,10 @@ export interface DecisionCategoryMeta {
   /** 类目相关句召回（句子不含任一类目词不进入计分） */
   relevance: RegExp;
   options: Array<{ value: string; aliases: RegExp }>;
+  /** 互斥类目：取值物理互斥（模板体系/混凝土供应/基坑支护），多值共存时只能锁最高分唯一值。
+   * 4.17.8 修复：历史缺陷——互斥类目多值全部锁定（放坡+喷锚+灌注桩并存），写作 LLM 按锁
+   * 规则各章任选其一，支护/模板体系跨章打架（真实生成 4.17.7 门禁：放坡喷锚类 4 段 vs 灌注桩 1 段） */
+  exclusive?: boolean;
 }
 
 /** 封闭决策类目表：垂直运输/模板体系/混凝土供应/脚手架/基坑支护/土方外运 */
@@ -46,6 +50,7 @@ const DECISION_CATEGORIES: DecisionCategoryMeta[] = [
     id: 'formwork',
     label: '模板体系',
     relevance: /模板/u,
+    exclusive: true,
     options: [
       { value: '木胶合板模板', aliases: /木胶合板|覆膜胶合板|胶合板模板|木模板/ },
       { value: '钢模板', aliases: /钢模板|定型钢模/ },
@@ -58,6 +63,7 @@ const DECISION_CATEGORIES: DecisionCategoryMeta[] = [
     id: 'concrete_supply',
     label: '混凝土供应',
     relevance: /混凝土/u,
+    exclusive: true,
     options: [
       { value: '商品混凝土（预拌）', aliases: /商品混凝土|预拌混凝土/ },
       { value: '自拌混凝土', aliases: /自拌混凝土|现场拌制混凝土|现场搅拌混凝土/ },
@@ -80,6 +86,7 @@ const DECISION_CATEGORIES: DecisionCategoryMeta[] = [
     id: 'foundation_support',
     label: '基坑支护形式',
     relevance: /基坑|支护/u,
+    exclusive: true,
     options: [
       { value: '放坡开挖', aliases: /放坡/ },
       { value: '土钉墙支护', aliases: /土钉墙|土钉支护/ },
@@ -175,6 +182,12 @@ export function buildDecisionLock(input: { facts: DocumentFact[]; evidence: Docu
       .sort((a, b) => b.score - a.score || b.mentions - a.mentions || (a.value < b.value ? -1 : 1));
     const top = ranked[0];
     if (!top || top.bestWeight < 60) continue;
+    // 4.17.8 互斥类目唯一化：模板/混凝土/支护体系物理互斥，只锁最高分唯一值（同分取名字典序，保逐字节一致）。
+    // 非互斥类目（垂直运输塔吊+电梯、土方外运自卸+场内平衡）保持多值共存锁定语义
+    if (category.exclusive) {
+      entries.push({ id: category.id, label: category.label, values: [top.value] });
+      continue;
+    }
     const threshold = Math.max(60, top.score * 0.4);
     const values = ranked.filter(item => item.score >= threshold).slice(0, 3).map(item => item.value);
     if (values.length > 0) entries.push({ id: category.id, label: category.label, values });

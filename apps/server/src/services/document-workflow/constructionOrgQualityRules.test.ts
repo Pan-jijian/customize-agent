@@ -195,10 +195,10 @@ describe('constructionOrgMajorContentIssues（项目主要施工内容门禁）'
     expect(issues[0].message).toContain('专业工程不足');
   });
 
-  it('工作包缺三段标签报 blocker', () => {
+  it('工作包内容要素不全报 warning（4.17.9 标签不再是硬性要求）', () => {
     const content = `### 2.3 项目主要施工内容\n${goodPackage(1, '室外道排工程')}\n${goodPackage(2, '屋面维修工程')}\n${goodPackage(3, '外墙装饰工程')}\n${goodPackage(4, '安装工程')}\n#### 2.3.5 土方开挖工程\n施工概况：范围明确。\n施工流程：放线→开挖。`;
     const issues = constructionOrgMajorContentIssues([chapter('项目主要施工内容', content)]);
-    expect(issues.some(issue => issue.message.includes('缺少施工概况/施工流程/施工方法'))).toBe(true);
+    expect(issues.some(issue => issue.level === 'warning' && issue.message.includes('内容要素不全'))).toBe(true);
   });
 
   it('脏事实进入工作包报污染 blocker', () => {
@@ -296,10 +296,10 @@ describe('constructionOrgDivisionSectionIssues（分部分项专项验收器）'
     expect(issues[0].message).toContain('建议扩充');
   });
 
-  it('分项缺三段标签报 blocker', () => {
+  it('分项内容要素不全报 warning（4.17.9 标签不再是硬性要求）', () => {
     const content = `### 主要分部分项工程施工方案\n${divisionPackage(1, '土方开挖')}\n${divisionPackage(2, '基础工程')}\n${divisionPackage(3, '主体结构')}\n${divisionPackage(4, '防水工程')}\n#### 分项5 装饰装修\n施工概况：装饰范围明确。\n工艺流程：基层处理→面层施工。`;
     const issues = constructionOrgDivisionSectionIssues([chapter('主要分部分项工程施工方案', content)]);
-    expect(issues.some(issue => issue.message.includes('缺少施工概况/工艺流程/施工方法'))).toBe(true);
+    expect(issues.some(issue => issue.level === 'warning' && issue.message.includes('内容要素不全'))).toBe(true);
   });
 
   it('脏事实/空话进入分项报 blocker', () => {

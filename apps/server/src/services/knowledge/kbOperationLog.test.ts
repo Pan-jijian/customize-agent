@@ -187,10 +187,10 @@ describe('启动恢复与容错', () => {
     expect(recovered?.updatedAt).toBeGreaterThan(2000);
   });
 
-  it('恢复只发生在进程内首次读取：后续新 processing 记录不再被改写', () => {
-    // 先触发一次读取（空日志），使 recoveredRoots 标记该项目
+  it('进程内新提交的 processing 记录不被误判为中断', () => {
+    // 先触发一次读取（空日志）
     expect(listKbOperations('/proj-recovery-2')).toEqual([]);
-    // 新写入的 processing 记录不被误判为中断
+    // 新写入的 processing 记录（updatedAt 晚于进程启动时刻）不被误判为重启遗留
     upsertKbOperation('/proj-recovery-2', { id: 'op-q', type: 'reindex', title: '重建', stage: 'chunking', status: 'processing' });
     const active = listActiveKbOperations('/proj-recovery-2');
     expect(active.map(item => item.id)).toEqual(['op-q']);

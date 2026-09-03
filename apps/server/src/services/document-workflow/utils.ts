@@ -25,6 +25,21 @@ export function hasProcessSequenceExpression(text: string): boolean {
   return false;
 }
 
+/**
+ * 工作包三要素完整性判定（4.17.9 内容要素检查，呈现形式不限）：
+ * 作业对象与工程量 / 工序顺序 / 施工方法三方面要素至少各有一处实质内容，
+ * 不再按“施工概况/施工流程/施工方法”标签字面判定——无标签但写法正确的块不应被拒。
+ * 三处验收器（chapterPostProcessing 结构门禁 / constructionOrgQualityRules 专项验收 /
+ * constructionOrgAudit 分部分项审计）共用本判定，避免三要素正则复制粘贴漂移
+ * （历史缺陷：audit 侧漏“作业对象|部位”“验收标准|检测”等词导致口径不一致、自然成文块误报缺失）。
+ */
+export function workPackageContentElementsComplete(block: string): boolean {
+  const hasScope = /(?:施工)?(?:概况|范围)[:：]\s*\S|工程量|作业对象|部位/u.test(block);
+  const hasProcess = /(?:施工)?(?:流程|工序|顺序)[:：]\s*\S/u.test(block) || hasProcessSequenceExpression(block);
+  const hasMethod = /(?:施工)?方法[:：]\s*\S|工艺参数|验收标准|检测|试验|记录/u.test(block);
+  return hasScope && hasProcess && hasMethod;
+}
+
 /** 小节标题去重归一化：剥离编号前缀与括号标注后比较（“1.3.2 室外雨污分流改造”与“1.3.12 室外雨污分流改造”视为同一要点）。
  * 供块成稿质检的重复 H4 检测与成稿后处理的重复小节去重共用，避免两处口径漂移。 */
 export function normalizeSubsectionTitleForDedup(title: string): string {

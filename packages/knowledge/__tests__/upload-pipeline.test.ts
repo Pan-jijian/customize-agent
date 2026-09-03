@@ -290,7 +290,8 @@ export function getUser(id: number): User {
   });
 
   it('extracts DXF CAD data correctly', async () => {
-    // 最小 DXF，包含一个图层和文本实体（字符数据需 ≥32，否则按无字符数据不入库处理）
+    // 最小 DXF，包含一个图层和文本实体（判空口径只统计标注文本，
+    // 标注字符数需 ≥32，图层/块名不计入，否则按无字符数据不入库处理）
     const dxf = `0
 SECTION
 2
@@ -310,7 +311,7 @@ MyLayer
 20
 200
 1
-Hello DXF 徽光阁项目施工总平面图及结构加固设计说明
+Hello DXF 徽光阁项目施工总平面图及结构加固设计说明与混凝土工程主要做法
 0
 ENDSEC
 0
@@ -326,6 +327,111 @@ EOF`;
     expect(result.text).not.toContain('| 实体类型:');
     expect(result.text).not.toContain('└── 标注文本:');
     expect(result.text).not.toContain('坐标:');
+  });
+
+  it('extracts ATTRIB block attributes, multi-part MTEXT and numeric annotations from DXF', async () => {
+    // ATTRIB 是门窗表/材料表数据载体（此前实体过滤遗漏导致整表数据丢失）；
+    // MTEXT 组码 3 续段必须与组码 1 按序拼接；纯数字标注行（尺寸/标高值）是真实数据
+    const dxf = `0
+SECTION
+2
+ENTITIES
+0
+ATTRIB
+8
+DoorTable
+2
+门窗编号
+1
+FM1524
+0
+ATTRIB
+8
+DoorTable
+2
+材质
+1
+钢质防火门
+0
+MTEXT
+8
+TextLayer
+10
+100
+20
+200
+1
+  1
+3
+100
+0
+TEXT
+8
+TextLayer
+10
+150
+20
+250
+1
+2100
+0
+TEXT
+8
+TextLayer
+10
+180
+20
+280
+1
+本工程图纸设计总说明：混凝土强度等级 C35，砌体采用 MU10 砖 M5 砂浆。
+0
+ENDSEC
+0
+EOF`;
+    const absPath = createTestFile('cad/attrib-test.dxf', dxf);
+    const file = makeClassifiedFile({ absolutePath: absPath, relativePath: 'cad/attrib-test.dxf', category: 'cad', format: 'autocad', mimeType: 'application/dxf' });
+    const result = await extractor.extract(file);
+    // 2 个 ATTRIB + 1 个 MTEXT + 2 个 TEXT 全部提取
+    expect(result.metadata.textEntityCount).toBe(5);
+    // 属性标签与值成对入库（门窗表列名 + 数据值）
+    expect(result.text).toContain('门窗编号 FM1524');
+    expect(result.text).toContain('材质 钢质防火门');
+    // MTEXT 多段拼接：组码 1「  1」+ 组码 3「100」→ 清洗后「1100」
+    expect(result.text).toContain('1100');
+    // 纯数字标注值入库（标高/尺寸数据，非内部噪声）
+    expect(result.text).toContain('2100');
+    // 常规 TEXT 说明文字完整保留
+    expect(result.text).toContain('混凝土强度等级 C35');
+  });
+
+  it('rejects DXF with only layers/blocks and no annotations (empty drawing)', async () => {
+    // 只有图层/块结构、无任何文字标注的图纸视为空数据不入库——判空口径只统计标注文本，
+    // 图层/块名是 CAD 内部结构信息，不得撑起字符数让空图纸错误入库
+    const dxf = `0
+SECTION
+2
+ENTITIES
+0
+LINE
+8
+LoadBearingWallLayer
+0
+CIRCLE
+8
+ElectricalConduitLayer
+0
+POLYLINE
+8
+FoundationDetailLayer
+0
+ENDSEC
+0
+EOF`;
+    const absPath = createTestFile('cad/empty.dxf', dxf);
+    const file = makeClassifiedFile({ absolutePath: absPath, relativePath: 'cad/empty.dxf', category: 'cad', format: 'autocad', mimeType: 'application/dxf' });
+    const result = await extractor.extract(file);
+    expect(result.metadata.contentCoverage).toBe('cad_no_extractable_text');
+    expect(result.warnings.some(warning => warning.includes('未提取到字符数据'))).toBe(true);
   });
 
   it('extracts SVG correctly', async () => {

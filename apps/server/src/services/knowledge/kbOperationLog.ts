@@ -45,36 +45,50 @@ function writeAll(projectRoot: string, records: KbOperationRecord[]) {
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, `${records.slice(-200).map(record => JSON.stringify(record)).join('\n')}\n`, 'utf8');
   fs.renameSync(tmp, file);
+  // 同步本实例缓存的文件 mtime，避免刚写盘又被本实例误判为“外部改写”而重复读盘
+  const cached = logCache.get(projectRoot);
+  if (cached) cached.mtimeMs = logFileMtimeMs(file);
 }
 
-/** 已完成启动恢复的项目根目录：进程内每个项目只在首次读取时恢复一次 */
-const recoveredRoots = new Set<string>();
+/** 进程启动时刻：仅将 updatedAt 早于该时刻的 processing 记录视为“重启遗留”任务。
+ * Next.js 按需编译（dev）或 chunk 分割下，本模块可能被多个 API 路由各自实例化，
+ * 模块级 Set/Map 无法跨实例共享，恢复判定必须依赖记录时间戳，天然幂等且不会误标新任务。 */
+const PROCESS_START_AT = Date.now();
+
+interface LogCacheEntry { mtimeMs: number; records: KbOperationRecord[] }
 
 /** 进程内日志缓存：单写者模型（子进程日志经 IPC 转发、主进程统一落盘）下，
- * 每个项目只读一次磁盘，后续 upsert/查询都走内存，避免每次调用全量 readAll + JSON.parse 的读写放大 */
-const logCache = new Map<string, KbOperationRecord[]>();
+ * 以文件 mtime 为准缓存磁盘内容，mtime 变化（本实例或其他 bundle 实例写盘）时重读，
+ * 避免多个模块实例各自维护缓存、全量写盘互相覆盖导致读到过期任务状态。 */
+const logCache = new Map<string, LogCacheEntry>();
 
-/** 读取项目日志（含启动恢复）。首次访问读磁盘并触发中断恢复，之后命中内存缓存。
- * 外部直接改写日志文件（如 clearKbOperations 删除文件）后需同步清理缓存。 */
+function logFileMtimeMs(file: string): number {
+  try { return fs.statSync(file).mtimeMs; } catch { return 0; }
+}
+
+/** 读取项目日志（含启动恢复）。文件 mtime 未变时命中内存缓存；
+ * 外部直接改写日志文件（如 clearKbOperations 删除文件）后 mtime 归零，同样触发重读。 */
 function cachedRecords(projectRoot: string): KbOperationRecord[] {
-  let records = logCache.get(projectRoot);
-  if (!records) {
-    records = readAllRecovered(projectRoot);
-    logCache.set(projectRoot, records);
-  }
+  const file = logPath(projectRoot);
+  const mtimeMs = logFileMtimeMs(file);
+  const cached = logCache.get(projectRoot);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.records;
+  const records = readAllRecovered(projectRoot);
+  logCache.set(projectRoot, { mtimeMs: logFileMtimeMs(file), records });
   return records;
 }
 
 /**
- * 读取任务日志并在进程启动后首次读取时恢复中断任务。
+ * 读取任务日志并把“重启遗留”的 processing 记录标记为中断。
  * 任务实际运行在当前进程内，日志仅持久化到磁盘；进程退出（重启/被杀）后
- * 遗留的 processing 记录永远不会再被更新，前端会持续显示"有任务在跑"。
- * 因此每个进程首次读取某项目日志时，把残留 processing 记录标记为中断。
+ * 遗留的 processing 记录永远不会再被更新，前端会持续显示“有任务在跑”。
+ * 仅标记 updatedAt 早于本进程启动时刻的记录：本进程刚提交、正在运行的新任务
+ * 必须跳过，否则 worker 首条 IPC 日志触发其他 bundle 实例的首次读取时，
+ * 会把新任务误标为“服务重启导致任务中断”，前端轮询到 error 后弹报错。
  */
 function readAllRecovered(projectRoot: string): KbOperationRecord[] {
   const records = readAll(projectRoot);
-  if (recoveredRoots.has(projectRoot)) return records;
-  const interrupted = records.filter(record => record.status === 'processing');
+  const interrupted = records.filter(record => record.status === 'processing' && record.updatedAt < PROCESS_START_AT);
   if (interrupted.length > 0) {
     const now = Date.now();
     for (const record of interrupted) {
@@ -86,7 +100,6 @@ function readAllRecovered(projectRoot: string): KbOperationRecord[] {
     }
     writeAll(projectRoot, records);
   }
-  recoveredRoots.add(projectRoot);
   return records;
 }
 

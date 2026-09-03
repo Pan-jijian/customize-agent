@@ -2,7 +2,7 @@ import type { DocumentEvidence } from './types';
 import { cleanEvidenceText } from './evidence';
 import { documentTextLength } from './budget';
 import { displayChapterTitle } from './outline';
-import { hasProcessSequenceExpression } from './utils';
+import { hasProcessSequenceExpression, workPackageContentElementsComplete } from './utils';
 import { criticalSectionBlockerMinChars as criticalSectionBlockerMinCharsFromSpec, isCriticalDeepSectionTitle } from './writingSpec';
 
 export function sectionContentBody(content: string) {
@@ -84,7 +84,8 @@ export function mergeDuplicateWorkPackageSubsections(content: string): string {
       if (deleted.has(named)) continue;
       const titleShared = sharedGramCount(workPackage.titleGrams, named.titleGrams);
       if (titleShared < 2) continue;
-      // 三段式对应段至少两段语义重合（每段共享非停用 bigram ≥4）才判定同一工作包；低重叠多为跨工作包同名泛词（室内/改造/安装）
+      // 对应要素段至少两段语义重合（每段共享非停用 bigram ≥4）才判定同一工作包；低重叠多为跨工作包同名泛词（室内/改造/安装）。
+      // 无标签自然成文块最多作为单段参与比较，不会触发“两段重合”误判合并
       const segmentOverlaps = Math.min(workPackage.segGrams.length, named.segGrams.length);
       const overlapping = Array.from({ length: segmentOverlaps }, (_item, index) => sharedMeaningfulGramCount(workPackage.segGrams[index], named.segGrams[index])).filter(count => count >= 4).length;
       if (overlapping < 2) continue;
@@ -139,8 +140,9 @@ function hasMajorConstructionContentStructure(content: string) {
   const body = sectionContentBody(content);
   const packageCount = (body.match(/^####\s+(?:\d+\.\d+\.\d+\s+)?[一二三四五六七八九十\d]*[、.．]?\s*\S+/gmu) || []).length
     || (body.match(/^[一二三四五六七八九十]+、\S+/gmu) || []).length;
-  const conceptCount = ['施工概况', '施工流程', '施工方法'].filter(keyword => body.includes(keyword)).length;
-  return packageCount >= 3 && conceptCount === 3 && /→|->|测量|放线|验收|复试|检测|闭环/u.test(body);
+  // 4.17.9 内容要素检查（呈现形式不限）：三要素判定统一走 utils.workPackageContentElementsComplete，
+  // 不再要求“施工概况/施工流程/施工方法”标签字面齐全（与写作提示词、专项验收器同口径）
+  return packageCount >= 3 && workPackageContentElementsComplete(body);
 }
 
 type MajorConstructionPackage = { name: string; scope: string; quantities: string[]; process: string[]; acceptance: string[] };
@@ -279,10 +281,10 @@ export function majorContentPollutionIssue(blockBody: string) {
   return /资料内容事实|(?:^#{2,3}|^#{5,6})\s+|\*\*[^*]+\*\*|未尽事宜|专业施工内容统筹|招标范围还包含|具备有效的.*资质|安全生产考核合格证书|注册建造师|联合体投标|项目经理要求|投标人资格|投标人资质|营业执照|安全生产许可证|资格审查|资格后审|中标通知书|签订合同|电子交易系统|投标保证金|评标办法|踏勘现场|投标预备会/mu.test(blockBody);
 }
 
-/** 确定性补全“项目主要施工内容”小节内工作包的三段标签：
- * 门禁要求每个工作包块必须含“施工概况/施工流程/施工方法”，LLM 偶尔漏写个别标签导致整节被拒；
- * 本函数把块内无标签文本按顺序归入缺失标签（流程优先取含“→”的行），
- * 不生成新内容、不重排已有标签行，修复后由调用方复查结构门禁决定是否采用 */
+/** 确定性补全“项目主要施工内容”小节内工作包的要素标签（4.17.9 兼容处理，标签非强制）：
+ * 内容要素不全的块被结构门禁拒绝后，本函数把块内无标签文本按顺序归入标签（流程优先取含“→”的行），
+ * 不生成新内容、不重排已有标签行，修复后由调用方复查结构门禁决定是否采用；
+ * 无标签但要素齐全的块不会触发结构门禁，本函数不会被调用 */
 export function repairMajorContentWorkPackageLabels(content: string) {
   if (!/项目主要施工内容/u.test(content)) return content;
   const lines = content.split(/\r?\n/u);
@@ -378,7 +380,9 @@ export function sectionStructureIssue(sectionTitle: string, content: string) {
     if (!hasTertiarySubsections(content, sectionTitle)) return `${sectionTitle} 缺少施工工作包三级小节`;
     if (!hasMajorConstructionContentStructure(block)) return `${sectionTitle} 未按施工工作包展开`;
     const packageBlocks = block.split(/^####\s+/gmu).slice(1).map(item => item.trim()).filter(Boolean);
-    if (packageBlocks.some(item => !item.includes('施工概况') || !item.includes('施工流程') || !item.includes('施工方法'))) return `${sectionTitle} 存在工作包结构不完整`;
+    // 4.17.9 内容要素检查（呈现形式不限）：每个工作包块必须覆盖作业对象与工程量/工序顺序/施工方法三方面要素，
+    // 不再按“施工概况/施工流程/施工方法”标签字面判定——无标签但写法正确的块不应被拒（写作提示词与验收器同口径）
+    if (packageBlocks.some(item => !workPackageContentElementsComplete(item))) return `${sectionTitle} 存在工作包内容要素不全`;
     // 脏事实/标题污染：针对去掉节标题后的正文检查；非法标题层级（## 二级、### 三级、##### 五级等）必须行首锚定，
     // #### 四级标题是本节合法的工作包标题，不得误判（否则本节永远回退兜底）
     const blockBody = sectionContentBody(block);
@@ -393,6 +397,9 @@ export function sectionStructureIssue(sectionTitle: string, content: string) {
     })) return `${sectionTitle} 存在工作包工序顺序表达缺失`;
     if (packageBlocks.some(item => {
       const method = item.match(/施工方法[:：]([\s\S]*?)(?=\n施工|$)/u)?.[1] || '';
+      // 4.17.9 无标签形态（自然成文）：方法要素强弱由上方内容要素检查（hasMethod）把关，
+      // 本检查只针对“施工方法：”标签形态的方法段，避免空提取把无标签块恒判“过弱”
+      if (!/施工方法[:：]/u.test(item)) return false;
       if (/安全生产考核合格证书|联合体投标|注册建造师|投标人资格|资质要求|营业执照|安全生产许可证/u.test(method)) return true;
       if (method.length < 30) return true;
       // 方法段必须是“怎么做”的叙述：含施工动作/机具/检测动作词；
@@ -451,8 +458,8 @@ export function keySectionWritingRequirement(sectionTitle: string) {
   ].join('\n');
   if (/项目主要施工内容/u.test(sectionTitle)) return [
     '关键小节结构要求：必须参照优秀施工组织设计的“主要施工内容”写法，按当前项目资料识别专业工程/分部分项工作包，不得只写综合概述。',
-    '每个工作包固定采用段落式三段：施工概况、施工流程、施工方法；不得使用 Markdown 表格，避免导出时产生表格分隔线残留。',
-    '施工概况必须写清对象范围、工程量或规模、材料设备规格、施工部位；施工流程必须有明确的工序顺序表达（形式由模型自然选择：顺序词叙述、编号步骤、有序/无序列表或箭头链均可）；施工方法必须写工艺做法、穿插组织、质量验收、检测复试、资料闭环。',
+    '每个工作包必须覆盖作业对象与工程量、工序顺序、施工方法三方面要素，呈现形式不限（段落式叙述、带标签分点、自然成文均可）；不得使用 Markdown 表格，避免导出时产生表格分隔线残留。',
+    '作业对象与工程量须写清对象范围、工程量或规模、材料设备规格、施工部位；工序顺序必须有明确的顺序表达（形式由模型自然选择：顺序词叙述、编号步骤、有序/无序列表或箭头链均可）；施工方法须写工艺做法、穿插组织、质量验收、检测复试、资料闭环。',
     '工作包类别必须从资料事实中识别，可覆盖但不限于结构加固、消防、装饰、水电、通风空调、弱电智能化、室外道排、屋面、立面、附属工程。',
   ].join('\n');
   if (/主要分部分项工程施工方案|主要施工方法/u.test(sectionTitle)) return [

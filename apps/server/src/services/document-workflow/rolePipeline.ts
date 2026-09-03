@@ -7,7 +7,7 @@ import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, Do
 import { readPromptContents, type ResolvedPromptContent } from './templateStore';
 import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
 import { hasExplicitOutlineBlock, isExplicitOutlineClosingLine, isExplicitOutlineOpeningLine } from './outline';
-import { FORMAL_WRITING_RULES, WORKFLOW_PHRASE_RE, docSystemPrefix, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
+import { WORKFLOW_PHRASE_RE, docSystemPrefix, removeUnwantedDrawingImages, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentTextLength } from './budget';
 import { estimateTokens, truncateToTokenBudget } from './tokenBudget';
 import { classifyQualitySeverity, degenerateContentIssues } from './qualityValidation';
@@ -396,9 +396,12 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     ? buildEvidenceBundle({ id: input.chapter.id, title: input.chapter.title, purpose: input.chapter.title, queries: [], requiredFacts: [] }, input.chapter.evidence)
     : undefined;
   const systemPrompt = [
+    // 2.2 L0 重组：docSystemPrefix 已内置 FORMAL_WRITING_RULES（unifiedSystemHead），
+    // 不再重复拼接（历史缺陷：修复器 system 双重注入 FORMAL 全文 ~2950 字符，每轮修复白付
+    // 一次规则成本；删除后规则仍由统一前缀承载，回退模式 DOCUMENT_L0_SYSTEM_PREFIX=0 下
+    // 由 repairTypeInstruction 与锚点指令承担约束）
     docSystemPrefix('你是章节局部修复专家。只返回 JSON patch，不返回完整章节，不重写无问题内容。'),
     repairTypeInstruction(repairType),
-    FORMAL_WRITING_RULES,
     input.forbidDrawingImages ? '图片类资料只作为文本事实来源，禁止插入图片或 Markdown 图片语法。' : '',
     anchorMode
       ? ['系统已提供需要改写/删除的目标原文清单（按序号对应）。目标原文已从正文精确摘录，你只需逐条输出改写后的替换文本；replacement 只输出改写后的正文内容，禁止复述或修改目标原文以外的任何内容。如某条目标原文当前已不存在或无需修改，跳过该条不输出。',
@@ -420,6 +423,34 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
   // D2（4.12.23）缓存收敛：user prompt 重排为「稳定段前置、可变段后置」——
   // 模板/章节/要求/指令/证据/正文/周边上下文对同章多次修复调用完全稳定，仅 issue 清单与锚点清单
   // 每条调用不同；可变段移到最后，同章 N 个 issue 的 N 次调用共享 ~99% 前缀，prefix cache 命中率最大化
+  // 4.17.6 正文锚点裁剪：anchorMode 下正文只保留各锚点周边窗口（每锚点 ±500 字符，拼接去重叠），
+  // 把 repair L3 的正文段从全章 8-12K 压到 ~2-3K——锚点模式定位只依赖锚点句与周边上下文，
+  // 全章正文对本轮修复无消费价值且是 repair 输入大头；非锚点模式保持全章（定位需要全章搜索）
+  const chapterBody = (() => {
+    if (!anchorMode || anchorSpecs.length === 0) return input.chapter.content;
+    const WINDOW = 500;
+    const compactMap = compactContentMap(input.chapter.content);
+    const compact = compactMap.compact;
+    const rawPositions = compactMap.rawPositions;
+    const windows: Array<{ start: number; end: number }> = [];
+    for (const spec of anchorSpecs) {
+      const anchorCompact = spec.text.replace(/\s+/gu, '');
+      const hit = compact.indexOf(anchorCompact);
+      if (hit < 0) continue;
+      const start = Math.max(0, hit - WINDOW);
+      const end = Math.min(compact.length, hit + anchorCompact.length + WINDOW);
+      const last = windows[windows.length - 1];
+      if (last && start <= last.end) last.end = Math.max(last.end, end);
+      else windows.push({ start, end });
+    }
+    if (windows.length === 0) return input.chapter.content;
+    const slices = windows.map(w => {
+      const rawStart = rawPositions[w.start] ?? w.start;
+      const rawEnd = rawPositions[w.end] ?? w.end;
+      return input.chapter.content.slice(rawStart, rawEnd).trim();
+    });
+    return `（正文已按修复锚点裁剪，仅保留锚点周边上下文）\n${slices.join('\n\n…\n\n')}`;
+  })();
   const buildUserPrompt = (evidenceText: string) => [
     `模板：${input.template.name}`,
     `章节：${input.chapter.title}`,
@@ -427,15 +458,20 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
     evidenceText,
     '当前章节 Markdown：',
-    input.chapter.content,
+    chapterBody,
     contextBlock,
     anchorMode ? `系统提供的目标原文（改写对象，按序号对应）：\n${anchorSpecs.map((spec, index) => anchorListLine(spec, index)).join('\n')}` : '',
     `需要局部修复的问题：\n${input.issues.map(item => `- ${item}`).join('\n')}`,
   ].filter(Boolean).join('\n\n');
   // 证据注入预算固定化：与正文长度解耦（历史缺陷：预算随正文长度每轮变化 → 修复调用前缀在
   // 证据处提前分叉，同章多次修复的 prefix cache 命中率被压低；恒定预算下同章前缀完全稳定）
+  // 4.17.6 修复证据压缩：repair 只修缺陷清单（缺陷已带引号原文锚点与具体问题），证据只作
+  // 事实兜底最小集（~1.5K 字符），T2 目录跳过——repair L3 从 ~24K 压到 ~4K（含裁剪后正文），
+  // 是 prefix cache 命中率 90% 目标参数之一；env DOCUMENT_REPAIR_EVIDENCE_CHARS 可调
+  const repairEvidenceCharsValue = Number(process.env.DOCUMENT_REPAIR_EVIDENCE_CHARS || 1500);
+  const repairEvidenceChars = Number.isFinite(repairEvidenceCharsValue) && repairEvidenceCharsValue > 0 ? Math.floor(repairEvidenceCharsValue) : 1500;
   const evidenceBudget = evidenceBundle
-    ? evidencePromptBudgetForTarget(8000, 6000, 14000)
+    ? Math.min(repairEvidenceChars, evidencePromptBudgetForTarget(8000, 6000, 14000))
     : undefined;
   const failure: { value?: string } = {};
   // 3.4 上下文分层统计（L0-L3）：口径同写作侧——L0 system 恒定段 / L1 任务级（主控提示词、用户要求、
@@ -453,16 +489,16 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
       `模板：${input.template.name}`,
       `章节：${input.chapter.title}`,
       '当前章节 Markdown：',
-      input.chapter.content,
+      chapterBody,
       contextBlock,
     ]),
     l3: contextLayerChars([evidenceText]),
   });
-  const evidenceText = evidenceBundle && evidenceBudget ? `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: evidenceBudget, diagnostics: input.diagnostics })}` : '';
+  const evidenceText = evidenceBundle && evidenceBudget ? `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: evidenceBudget, skipT2Catalog: true, diagnostics: input.diagnostics })}` : '';
   let result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(evidenceText), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, outFailure: failure, contextLayers: contextLayersFor(evidenceText), prefixKey: `repair:${input.chapter.id}` });
   if (!result && evidenceBundle && isContextOverflowLlmError(failure.value)) {
     // 上下文超长降级重试：证据压缩到极小预算（3000 字符），优先保住修复任务本身
-    const compactEvidenceText = `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: 3000, diagnostics: input.diagnostics })}`;
+    const compactEvidenceText = `本章证据摘要：\n${evidenceBundlePrompt(evidenceBundle, { maxChars: 3000, skipT2Catalog: true, diagnostics: input.diagnostics })}`;
     result = await callDocumentLlmJson<{ patches?: ChapterMarkdownPatch[] }>(systemPrompt, buildUserPrompt(compactEvidenceText), { maxTokens: input.maxTokens ?? 8000, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, contextLayers: contextLayersFor(compactEvidenceText), prefixKey: `repair:${input.chapter.id}` });
   }
   throwIfAborted(input.signal);

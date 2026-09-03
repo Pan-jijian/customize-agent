@@ -1,10 +1,54 @@
 import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
-import { buildExportZip, mergeChunksToReadableText, trimChunkOverlap, txtEntryNameFor, txtFileNameFor, exportZipFileName } from './kbExportService';
+import { buildExportZip, mergeChunksToReadableText, trimChunkOverlap, txtEntryNameFor, txtFileNameFor, exportZipFileName, stripCadMetadataLines } from './kbExportService';
 
 const chunk = (content: string) => ({ content } as never);
 
+describe('stripCadMetadataLines', () => {
+  it('剥离 CAD 解析元数据行，保留图纸节点锚定行与真实标注', () => {
+    const content = [
+      'CAD DXF 图层: LATRINE, WALL, WINDOW',
+      'CAD DXF 块/符号: A-BLOCK',
+      'CAD DXF 实体类型: TEXT, MTEXT, LINE',
+      'CAD 语义标注文本:',
+      '图纸节点: 机房工程_t3.dwg',
+      '30*3mm',
+      'FM1524 钢质防火门',
+    ].join('\n');
+    expect(stripCadMetadataLines(content)).toBe('图纸节点: 机房工程_t3.dwg\n30*3mm\nFM1524 钢质防火门');
+  });
+
+  it('剥离「未提取到文字标注」空图纸标记，结果为空', () => {
+    const content = [
+      'CAD DXF 图层: A',
+      'CAD DXF 实体类型: TEXT',
+      'CAD 语义标注文本:',
+      '图纸节点: 空图.dwg | 未提取到文字标注',
+    ].join('\n');
+    expect(stripCadMetadataLines(content).trim()).toBe('');
+  });
+
+  it('非 CAD 内容不受影响', () => {
+    const content = '普通文档正文，包含 CAD 关键词但无元数据行。';
+    expect(stripCadMetadataLines(content)).toBe(content);
+  });
+});
+
 describe('mergeChunksToReadableText', () => {
+  it('CAD 图纸分块导出时剥离元数据行、保留图纸真实文字', () => {
+    const text = mergeChunksToReadableText([
+      chunk('CAD DXF 图层: A, B\nCAD 语义标注文本:\n图纸节点: 总平面图.dwg\n尺寸 1100'),
+    ]);
+    expect(text).toBe('图纸节点: 总平面图.dwg\n尺寸 1100');
+  });
+
+  it('CAD 空图纸（仅元数据与空标记）导出为空，交由上层跳过', () => {
+    const text = mergeChunksToReadableText([
+      chunk('CAD DXF 图层: A\nCAD DXF 实体类型: TEXT\nCAD 语义标注文本:\n图纸节点: 空图.dwg | 未提取到文字标注'),
+    ]);
+    expect(text).toBe('');
+  });
+
   it('按顺序拼接分块，块间以空行过渡', () => {
     const text = mergeChunksToReadableText([chunk('第一段内容。'), chunk('第二段内容。')]);
     expect(text).toBe('第一段内容。\n\n第二段内容。');

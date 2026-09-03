@@ -27,14 +27,18 @@ async function kbFilesExportHandler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   // 文件夹展开：前缀匹配其下所有已入库文件（与删除 API 的展开逻辑一致）
+  // 注意：prefix 为空（选中根目录）时匹配全部文件
   const listedFiles = listKnowledgeFiles(projectRoot);
   const folderFiles = folderTargets.flatMap(folder => {
     const prefix = folder.replace(/^\/+|\/+$/gu, '');
     return listedFiles
-      .filter(file => file.relativePath === prefix || file.relativePath.startsWith(`${prefix}/`))
+      .filter(file => prefix === '' || file.relativePath === prefix || file.relativePath.startsWith(`${prefix}/`))
       .map(file => file.relativePath);
   });
-  const targets = Array.from(new Set([...fileTargets, ...folderFiles])).sort((a, b) => a.localeCompare(b));
+  // Office 锁文件（~$ 前缀）是 Word 打开文档时的临时文件，内容为乱码，不入导出
+  const targets = Array.from(new Set([...fileTargets, ...folderFiles]))
+    .filter(relativePath => !/(^|\/)~\$/u.test(relativePath))
+    .sort((a, b) => a.localeCompare(b));
   if (targets.length === 0) return res.status(400).json({ error: 'no files matched' });
   if (targets.length > EXPORT_LIMITS.maxFiles) {
     return res.status(400).json({ error: `导出文件数 ${targets.length} 超过上限 ${EXPORT_LIMITS.maxFiles}，请缩小选择范围` });

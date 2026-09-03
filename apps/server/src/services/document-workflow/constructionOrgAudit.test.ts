@@ -125,7 +125,7 @@ describe('processParameterDensityIssues（工艺参数密度）', () => {
   });
 });
 
-describe('sectionCardStructureIssues（分部分项三段式结构）', () => {
+describe('sectionCardStructureIssues（分部分项内容要素完整性）', () => {
   it('方案节无 #### 子包时跳过检查（锁定现状）', () => {
     const content = '### 主要分部分项工程施工方案\n本方案总述。';
     expect(sectionCardStructureIssues([chapter('主要分部分项工程施工方案', content)])).toHaveLength(0);
@@ -134,9 +134,32 @@ describe('sectionCardStructureIssues（分部分项三段式结构）', () => {
   it('非方案小节不检查', () => {
     expect(sectionCardStructureIssues([chapter('工程概况', '### 工程概况\n内容。')])).toHaveLength(0);
   });
-  // 已知盲区缺陷（补测发现，待修复）：extractSectionBlocks 把 #### 子包行拆为独立块，
-  // 方案节 block.body 恒为空，subPackages 恒为 []——缺三段标签的子包实际不会报警。
-  // 预期行为：### 主要分部分项工程施工方案 下 #### 子包缺「施工方法」应报 warning。
+
+  it('盲区根治：### 方案节下 #### 子包缺内容要素应报 warning（历史盲区：extractSectionBlocks 把 #### 行切为新块导致 subPackages 恒空）', () => {
+    const content = [
+      '### 主要分部分项工程施工方案',
+      '#### 屋面防水施工',
+      '施工概况：本项目屋面面积约 3000㎡。',
+      '施工流程：基层清理→找平→铺贴卷材。',
+      '#### 外窗更换',
+      '施工概况：外窗约 600 樘。',
+    ].join('\n');
+    const issues = sectionCardStructureIssues([chapter('主要分部分项工程施工方案', content)]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.level).toBe('warning');
+    expect(issues[0]?.message).toContain('内容要素不全');
+  });
+
+  it('子包三要素齐全不报警（自然成文形态：无标签但要素齐）', () => {
+    const content = [
+      '### 主要分部分项工程施工方案',
+      '#### 屋面防水施工',
+      '本项目屋面部位面积约 3000㎡，采用 SBS 卷材施工。',
+      '工序顺序：先基层清理，再涂刷基层处理剂，随后铺贴卷材，然后做闭水试验。',
+      '验收标准：搭接宽度不小于 100mm，闭水试验 24h 无渗漏。',
+    ].join('\n');
+    expect(sectionCardStructureIssues([chapter('主要分部分项工程施工方案', content)])).toHaveLength(0);
+  });
 });
 
 describe('tableCompletenessIssues（表格空字段检测）', () => {

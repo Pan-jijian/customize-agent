@@ -50,7 +50,7 @@ describe('DEFAULT_WORKFLOW_RULES', () => {
 
   it('divisionQuality 阈值与生成侧判定常量一致', () => {
     const quality = DEFAULT_WORKFLOW_RULES.writingSpec.divisionQuality;
-    expect(quality).toEqual({ blockerMinPackages: 3, minPackages: 5, minParamsPerPackage: 4, minArrowChainLength: 4, minPackageChars: 150, balanceRatio: 1 / 3 });
+    expect(quality).toEqual({ blockerMinPackages: 3, minPackages: 5, minParamsPerPackage: 4, minPackageChars: 150, balanceRatio: 1 / 3 });
   });
 
   it('blockerMinChars 四档门槛齐备', () => {

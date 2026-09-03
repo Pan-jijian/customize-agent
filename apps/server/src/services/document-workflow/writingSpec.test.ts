@@ -73,7 +73,6 @@ describe('DIVISION_SECTION_QUALITY', () => {
     expect(DIVISION_SECTION_QUALITY.blockerMinPackages).toBe(3);
     expect(DIVISION_SECTION_QUALITY.minPackages).toBe(5);
     expect(DIVISION_SECTION_QUALITY.minParamsPerPackage).toBe(4);
-    expect(DIVISION_SECTION_QUALITY.minArrowChainLength).toBe(4);
     expect(DIVISION_SECTION_QUALITY.minPackageChars).toBe(150);
     expect(DIVISION_SECTION_QUALITY.balanceRatio).toBe(1 / 3);
   });

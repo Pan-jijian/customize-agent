@@ -286,7 +286,11 @@ const MANDATORY_FIELD_SPECS: Record<MandatoryFieldName, { label: string; lexical
  * 最终提取仍由模型判定，误召回窗口无损失（窗口无该字段内容时模型输出空） */
 const OPTIONAL_FIELD_SPECS: Record<Exclude<RequirementFieldName, MandatoryFieldName>, { label: string; lexical: RegExp; hint: string }> = {
   specialQualityStandards: { label: '特殊质量标准', lexical: /特殊质量标准|质量标准和要求的约定|质量要求.{0,12}(?:为|是|满足)/u, hint: '特殊质量标准与质量要求条款（除创优/等级外的实质质量约束）' },
-  frontScheduleClauses: { label: '前附表响应条款', lexical: /计划工期|日历天|缺陷责任期|履约担保|质保金|工期延误|项目经理|技术负责人|分包|转包|付款方式/u, hint: '投标人须知前附表施组响应实质条款（工期/质量/创优奖惩/人员/分包/付款等）' },
+  // 词形与提取指引口径对齐（in4/300万根治）：提取指引要求 frontScheduleClauses 提取
+  // 「创优目标与奖惩（如确保黄山杯，支付300万元）」——旧词形不含杯/奖/支付万/创优，
+  // 主提取漏掉该字段时 collectFieldWindows 窗口定位失明，判「资料无此要求」降级提示，
+  // 条款永久丢失且无告警。宁宽勿窄：窗口仅聚焦输入，误召回由 LLM 判空，无损失
+  frontScheduleClauses: { label: '前附表响应条款', lexical: /计划工期|日历天|缺陷责任期|履约担保|质保金|工期延误|项目经理|技术负责人|分包|转包|付款方式|支付.{0,10}万|[杯奖]|创优|奖项/u, hint: '投标人须知前附表施组响应实质条款（工期/质量/创优奖惩/人员/分包/付款等）' },
   dateFabricationProhibited: { label: '禁编日期条款', lexical: /开工令|以开工令|不得.{0,12}(?:自定|自行确定|编造)/u, hint: '以开工令为准的禁编日期条款（布尔字段）' },
   prohibitionNotes: { label: '禁止性要求', lexical: /不得|禁止|严禁|不允许/u, hint: '禁止/不得类条款与零散约束要求' },
 };
@@ -615,7 +619,9 @@ export function hasTenderRequirements(model: TenderRequirementModel | undefined)
 // round-26 v2：字段级定向补提闭环覆盖全部评分项要求字段（非仅必提 6 字段），且移除
 // 评标办法/篇幅要求两个字段（按项目需求不提取）——提取字段集与补提口径均变化，
 // 旧缓存整体失效重提。
-const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v2';
+// v3（in4/300万根治）：前附表窗口词形覆盖创优奖惩（支付X万/杯/奖/创优），修复窗口定位失明
+// 判「资料无此要求」的缺失结果——旧缓存可能已固化该缺失，整体失效重提。
+const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v3';
 
 function tenderRequirementsCacheRoot(projectRoot?: string) {
   const root = path.join(process.env.HOME || process.cwd(), '.customize-agent', 'cache', 'document-workflow', stableHash(projectRoot || 'default'));

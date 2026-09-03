@@ -29,7 +29,7 @@ export function isCriticalSectionTitle(title: string) {
 export const MAJOR_CONTENT_SECTION_RE = new RegExp(DEFAULT_WRITING_SPEC.majorContentSection, 'u');
 export const DIVISION_SECTION_RE = new RegExp(DEFAULT_WRITING_SPEC.divisionSection, 'u');
 
-/** 分部分项三段式标签：写作提示词与历史生成内容存在“工艺流程/施工流程”两种写法，验收器两口径兼容 */
+/** 分部分项工序标签（工艺流程/施工流程 两种写法兼容）：仅作为内容要素判定的可选形式之一，非强制标签 */
 export const DIVISION_PROCESS_LABEL_RE = new RegExp(DEFAULT_WRITING_SPEC.divisionProcessLabel, 'u');
 
 // ═══════ 专项写法规则（迁自 chapterGeneration 硬编码提示词，单点化） ═══════
@@ -93,8 +93,6 @@ export const DIVISION_SECTION_QUALITY = {
   minPackages: DEFAULT_WRITING_SPEC.divisionQuality.minPackages,
   /** 每个分项方案正文必须落位的工艺参数最少数量（与专项提示词口径一致） */
   minParamsPerPackage: DEFAULT_WRITING_SPEC.divisionQuality.minParamsPerPackage,
-  /** 方法段正文必须包含的箭头工序链最少环节数（与专项提示词口径一致） */
-  minArrowChainLength: DEFAULT_WRITING_SPEC.divisionQuality.minArrowChainLength,
   /** 每个分项方案正文最少字数（去空白）：低于该值判正文过短（blocker），门窗维修/立面修补等小分项同样要求写足 */
   minPackageChars: DEFAULT_WRITING_SPEC.divisionQuality.minPackageChars,
   /** 分项深度均衡阈值：最短分项不足最长分项该比例时给扩充建议（warning，不阻断） */

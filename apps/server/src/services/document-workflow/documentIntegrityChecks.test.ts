@@ -4,7 +4,7 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractScheduleAuthority, fabricatedAwardIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixPlaceholderTableCells, fixQualityAssuranceCoverage, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables } from './documentIntegrityChecks';
 import type { DocumentDraftChapter, DocumentFactsModel, TenderRequirementModel } from './types';
 
 vi.mock('./semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
@@ -373,6 +373,183 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
       schedule: [{ key: '开工日期', fieldId: 'schedule_requirement', value: '2026年9月23日' }],
     } as unknown as DocumentFactsModel;
     expect(extractScheduleAuthority(factsModel)).toBeUndefined();
+  });
+
+  it('4.17.4 extractAssemblyRateAuthority：装配率事实卡提取百分比', () => {
+    const factsModel = {
+      project: [{ key: '装配率', fieldId: 'assembly_rate', value: '30%' }],
+    } as unknown as DocumentFactsModel;
+    expect(extractAssemblyRateAuthority(factsModel)).toBe(30);
+  });
+
+  it('4.17.4 extractAssemblyRateAuthority：招标要求文本回退提取', () => {
+    const factsModel = {
+      tenderRequirements: { assemblyRate: { text: '装配式技术要求，装配率为30%' } },
+    } as unknown as DocumentFactsModel;
+    expect(extractAssemblyRateAuthority(factsModel)).toBe(30);
+  });
+
+  it('4.17.4 extractProjectScaleSummary：面积+层数摘要', () => {
+    const factsModel = {
+      project: [{ key: '单体建筑面积', fieldName: '单体建筑面积', value: '单体建筑面积28570.36平方米' }],
+      drawings: [{ key: '设计说明', fieldName: '', value: '地上6层，地下1层，建筑消防高度28.90米' }],
+    } as unknown as DocumentFactsModel;
+    expect(extractProjectScaleSummary(factsModel)).toBe('建筑面积28570.36平方米、地上6层、地下1层');
+  });
+
+  it('4.17.4 fixNodeScheduleConflicts：365 节点体系统一缩放到总工期 540 体系', () => {
+    const markdown = [
+      '## 总工期控制基准与阶段划分',
+      '| 施工阶段 | 开始时间 | 结束时间 | 持续时间 |',
+      '| --- | --- | --- | --- |',
+      '| 施工准备与临时设施 | 开工令下发后第1日 | 开工令下发后第15日 | 15日 |',
+      '| 土方开挖与基础施工 | 开工令下发后第16日 | 开工令下发后第75日 | 60日 |',
+      '| 主体结构施工 | 开工令下发后第76日 | 开工令下发后第210日 | 135日 |',
+      '| 竣工验收合格 | 开工令下发后第356日 | 开工令下发后第365日 | 10日 |',
+      '计划工期：开工之日起，540个日历天。',
+      '项目部按竣工验收合格（第365日）的节点组织施工。',
+    ].join('\n');
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { scheduleAuthority: 540 });
+    expect(fix.markdown).toContain('第540日');
+    expect(fix.markdown).toContain('竣工验收合格（第540日）');
+    expect(fix.markdown).not.toContain('第365日');
+    // 三列表链式自洽：持续列=结束-开始+1
+    const row = fix.markdown.match(/\| 主体结构施工 \| 开工令下发后第(\d+)日 \| 开工令下发后第(\d+)日 \| (\d+)日 \|/u);
+    expect(row).not.toBeNull();
+    expect(Number(row![3])).toBe(Number(row![2]) - Number(row![1]) + 1);
+  });
+
+  it('4.17.4 fixNodeScheduleConflicts：非权威表节点日期对齐权威表', () => {
+    const markdown = [
+      '## 总工期控制基准与阶段划分',
+      '| 施工阶段 | 开始时间 | 结束时间 | 持续时间 |',
+      '| --- | --- | --- | --- |',
+      '| 土方开挖与基础施工 | 开工令下发后第16日 | 开工令下发后第75日 | 60日 |',
+      '| 主体结构施工 | 开工令下发后第76日 | 开工令下发后第210日 | 135日 |',
+      '| 竣工验收合格 | 开工令下发后第356日 | 开工令下发后第365日 | 10日 |',
+      '### 关键施工节点控制计划表',
+      '| 关键节点 | 计划完成时间 |',
+      '| --- | --- |',
+      '| 基坑开挖与支护完成 | 开工后第45日 |',
+      '| 基础结构完成 | 开工后第90日 |',
+      '| 主体结构封顶 | 开工后第180日 |',
+      '| 竣工验收合格 | 开工后第330日 |',
+    ].join('\n');
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { scheduleAuthority: 365 });
+    expect(fix.markdown).toContain('| 基坑开挖与支护完成 | 开工后第75日 |');
+    expect(fix.markdown).toContain('| 基础结构完成 | 开工后第75日 |');
+    expect(fix.markdown).toContain('| 主体结构封顶 | 开工后第210日 |');
+    expect(fix.markdown).toContain('| 竣工验收合格 | 开工后第365日 |');
+  });
+
+  it('4.17.4 fixCrossSectionNumericConflicts：装配率 38.4% 回退为招标锁定 30%', () => {
+    const markdown = '本工程装配率不低于30%，实际装配率为38.4%，满足装配率38.4%的要求。';
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { assemblyRateAuthority: 30 });
+    expect(fix.fixedCount).toBeGreaterThan(0);
+    expect(fix.markdown).not.toContain('38.4%');
+  });
+
+  it('4.17.4 fixCrossSectionNumericConflicts：塔吊多表 2台 vs 1台 取保守台数统一', () => {
+    const markdown = [
+      '| 关键节点 | 投入资源 |',
+      '| --- | --- |',
+      '| 主体结构封顶 | 塔式起重机2台、施工升降机2台 |',
+      '| 主体结构封顶 | 塔吊1台、施工升降机2台 |',
+      '主体施工阶段投入塔式起重机2台。',
+    ].join('\n');
+    const fix = applyNumericConsistencyDeterministicFixes(markdown);
+    expect(fix.fixedCount).toBeGreaterThan(0);
+    expect(fix.markdown).not.toContain('塔式起重机2台');
+    expect(fix.markdown).toContain('塔式起重机1台');
+  });
+
+  it('4.17.4 fixNodeScheduleConflicts：形态A不跨「）→（」节点分隔误采（施工准备22日保持）', () => {
+    // 合肥师范实测错位源：第22日（施工准备行）跨「）→…完成…→」误采为封顶工期 22→311
+    const markdown = [
+      '## 总进度计划表',
+      '| 施工阶段 | 完成日 |',
+      '| --- | --- |',
+      '| 主体结构封顶 | 第311日 |',
+      '| 竣工验收合格 | 开工令下发后第540日 |',
+      '项目部按“施工准备与临时设施完成（开工令下发后第22日）→土方开挖与基础施工完成（第75日）→主体结构封顶（第210日）→砌体与二次结构完成（第255日）”的节点组织施工。',
+    ].join('\n');
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { scheduleAuthority: 540 });
+    expect(fix.markdown).toContain('开工令下发后第22日');
+    expect(fix.markdown).toContain('主体结构封顶（第311日）');
+    expect(fix.markdown).not.toContain('开工令下发后第311日');
+  });
+
+  it('4.17.4 fixNodeScheduleConflicts：形态D竣工验收节点倒序式 365→540', () => {
+    const markdown = [
+      '## 总进度计划表',
+      '| 施工阶段 | 完成日 |',
+      '| --- | --- |',
+      '| 竣工验收 | 第540日 |',
+      '主体结构封顶节点第311日与竣工验收节点第365日为刚性控制点，滞后超过3日即启动纠偏。',
+    ].join('\n');
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { scheduleAuthority: 540 });
+    expect(fix.markdown).toContain('竣工验收节点第540日');
+    expect(fix.markdown).toContain('主体结构封顶节点第311日');
+    expect(fix.markdown).not.toContain('竣工验收节点第365日');
+  });
+
+  it('4.17.4 fixCrossSectionNumericConflicts：装配率长窗口「计算为38.4%」回退 30%', () => {
+    const markdown = '装配率按安徽省《装配式建筑评价技术标准》DB34/T 3830-2025计算为38.4%。';
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { assemblyRateAuthority: 30 });
+    expect(fix.fixedCount).toBeGreaterThan(0);
+    expect(fix.markdown).not.toContain('38.4%');
+    expect(fix.markdown).toContain('计算为30%');
+  });
+
+  it('4.17.4 fixCrossSectionNumericConflicts：反向模式不误伤独立指标54.0%', () => {
+    const markdown = '内隔墙非砌筑比例达到54.0%，装配率按安徽省《装配式建筑评价技术标准》DB34/T 3830-2025计算为38.4%。';
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { assemblyRateAuthority: 30 });
+    expect(fix.markdown).not.toContain('38.4%');
+    expect(fix.markdown).toContain('54.0%');
+  });
+
+  it('4.17.4 fixAdjacentPhraseDuplication：数字短短语（第311日）双现/抗渗等级P8，地）不折叠', () => {
+    const markdown = '项目部按“施工准备与临时设施完成（开工令下发后第311日）→主体结构封顶（第311日）”组织施工。底板、外墙混凝土抗渗等级P8，地下室顶板混凝土标号C35、抗渗等级P8，地上各层顶板C30，墙C35，柱C50。';
+    const fix = fixAdjacentPhraseDuplication(markdown);
+    expect((fix.markdown.match(/第311日/g) || []).length).toBe(2);
+    expect((fix.markdown.match(/抗渗等级P8/g) || []).length).toBe(2);
+    expect(fix.markdown).toContain('地上各层顶板C30');
+  });
+
+  it('4.17.4 fixAdjacentPhraseDuplication：热负荷三连粘连折叠', () => {
+    const markdown = '中央空调夏季冷负荷182.5kW，冬季热负荷71.2kW182.5kW，冬季热负荷71.2kW182.5kW，冬季热负荷71.2kW。';
+    const fix = fixAdjacentPhraseDuplication(markdown);
+    expect(fix.markdown).toBe('中央空调夏季冷负荷182.5kW，冬季热负荷71.2kW。');
+  });
+
+  it('4.17.4 fixAdjacentPhraseDuplication：应急人员句隔位重复折叠', () => {
+    const markdown = '应急抢险人员按主体结构与装饰装修穿插施工阶段高峰阶段应急抢险人员按主体结构与装饰装修穿插施工阶段高峰人数186人的16%配置，不少于30人的16%配置，不少于30人。';
+    const fix = fixAdjacentPhraseDuplication(markdown);
+    expect((fix.markdown.match(/不少于30人/g) || []).length).toBeLessThanOrEqual(2);
+    expect((fix.markdown.match(/按主体结构与装饰装修穿插施工阶段高峰/g) || []).length).toBe(1);
+  });
+
+  it('4.17.4 fixPlaceholderTableCells：6.1 一览表套话填充 factsModel 数据', () => {
+    const markdown = '| 工程名称 | 建设地点 | 建设规模 | 计划工期 |\n| --- | --- | --- | --- |\n| 某项目 | 某地 | 按施工图设计文件确定 | 按合同约定工期执行 |';
+    const fix = fixPlaceholderTableCells(markdown, { areaSummary: '建筑面积28570.36平方米、地上6层、地下1层', scheduleDays: 540 });
+    expect(fix.markdown).toContain('建筑面积28570.36平方米、地上6层、地下1层');
+    expect(fix.markdown).toContain('540个日历天');
+    expect(fix.markdown).not.toContain('按施工图设计文件确定');
+  });
+
+  it('4.17.4 fixQualityAssuranceCoverage：6.1 块缺失质量保障术语时补全协同段', () => {
+    const markdown = '### 6.1 施工部署与施工流水组织\n安全文明生产管理体系以施工部署和流水组织为运行载体。\n### 6.2 后续小节\n内容。';
+    const fix = fixQualityAssuranceCoverage(markdown);
+    expect(fix.fixedCount).toBe(1);
+    expect(fix.markdown).toContain('三检制');
+    expect(fix.markdown).toContain('样板引路');
+    expect(fix.markdown).toContain('见证取样');
+  });
+
+  it('4.17.4 fixQualityAssuranceCoverage：术语已覆盖时不动', () => {
+    const markdown = '### 6.1 施工部署与施工流水组织\n实行三检制、样板引路制度、隐蔽验收与见证取样管理。\n### 6.2 后续小节\n内容。';
+    const fix = fixQualityAssuranceCoverage(markdown);
+    expect(fix.fixedCount).toBe(0);
   });
 });
 

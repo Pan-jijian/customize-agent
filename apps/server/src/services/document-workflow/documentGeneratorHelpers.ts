@@ -57,6 +57,10 @@ export function validateDraft(chapters: DocumentDraftChapter[], _structuredFacts
 
 export function chapterCompletionStatus(chars: number, _targetWords: number, issues: string[] = []): DocumentExecutionStage['status'] {
   if (chars <= 0 || issues.some(issue => /未返回有效章节正文|生成失败/u.test(issue))) return 'failed';
+  // 4.17.8 收紧写作结构门禁（章节成稿验收线）：空小节/缺少规划小节是结构完整性硬缺陷，
+  // 写作侧产出该缺陷即如实标记 failed（不再对"结构不完整但正文非空"的章节标 success）——
+  // 质量问题在写作阶段显性暴露，由单轮修复兜底后转导出门禁阻断，修复是辅助不是主力
+  if (issues.some(issue => /空小节|缺少规划小节/u.test(issue))) return 'failed';
   return 'success';
 }
 
@@ -951,56 +955,10 @@ function removeEmptySubSectionHeadings(content: string) {
   return result.join('\n');
 }
 
-function ensureWorkPackageOverviewLabels(content: string) {
-  const lines = content.split(/\r?\n/u);
-  const result: string[] = [];
-  const labelPattern = /^(施工概况|施工流程|施工方法)[:：]/u;
-  let inMainContent = false;
-  let atPackageStart = false;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const trimmed = line.trim();
-    if (/^###\s+/u.test(trimmed)) {
-      // 工作包型关键小节（主要施工内容/分部分项方案/主要施工方法）统一启用首行标签规范化：
-      // 历史缺陷：八度实测“主要分部分项工程施工方案”补写稿无“施工概况”标签被专项验收器阻断（同小节只覆盖“项目主要施工内容”）
-      inMainContent = WORK_PACKAGE_SECTION_RE.test(trimmed);
-      atPackageStart = false;
-      result.push(line);
-      continue;
-    }
-    if (/^##\s+/u.test(trimmed)) {
-      inMainContent = false;
-      atPackageStart = false;
-      result.push(line);
-      continue;
-    }
-    if (!inMainContent) {
-      result.push(line);
-      continue;
-    }
-    if (/^####\s+/u.test(trimmed)) {
-      atPackageStart = true;
-      result.push(line);
-      continue;
-    }
-    if (/^#{1,6}\s+/u.test(trimmed)) {
-      atPackageStart = false;
-      result.push(line);
-      continue;
-    }
-    if (atPackageStart && trimmed) {
-      result.push(labelPattern.test(trimmed) ? line : `施工概况：${trimmed}`);
-      atPackageStart = false;
-      continue;
-    }
-    result.push(line);
-  }
-  return result.join('\n');
-}
-
-/** 工作包三段式标签归一化：LLM 补写稿常输出畸形标签形态——“施工概况：**施工概况**：”重复标签、
+/** 工作包标签归一化（4.17.9 兼容处理，标签非强制但 LLM 输出标签时须归正常形态）：
+ * LLM 补写稿常输出畸形标签形态——“施工概况：**施工概况**：”重复标签、
  * “**施工流程**：/**施工方法**：”粗体伪标签——粗体命中分部分项验收器脏事实正则、方法段提取正则
- * 拿不到冒号后内容（九度实测缺陷：10 个分项被报脏事实+缺箭头链 blocker）。归一为纯文本标签形态。 */
+ * 拿不到冒号后内容（九度实测缺陷：10 个分项被报脏事实+缺工序顺序表达 blocker）。归一为纯文本标签形态。 */
 export function normalizeWorkPackageLabels(markdown: string): string {
   let normalized = markdown;
   for (let pass = 0; pass < 3; pass += 1) {
@@ -1203,8 +1161,9 @@ export function finalizeChapterContentQuality(content: string, chapter: Pick<Doc
   cleaned = dedupeRepeatedSubsections(cleaned);
   cleaned = removeEmptySubSectionHeadings(cleaned);
   cleaned = cleanChineseWordBreakSpaces(cleaned);
+  // 4.17.9 已移除 ensureWorkPackageOverviewLabels：其把工作包块首行自然成文强制改写为“施工概况：”标签形态，
+  // 与“写法正确即可、不固定写法”口径相悖；且验收器已改为内容要素判定，无标签块不再被阻断，该清洗环节已无存在理由
   cleaned = normalizeWorkPackageLabels(cleaned);
-  cleaned = ensureWorkPackageOverviewLabels(cleaned);
   cleaned = dedupeCrossSectionDuplicateSentences(cleaned);
   // 4.12.12：跨层级（H2/H3 同名）整块去重与同小节内相邻块重复去重（评分报告「同名小节重复」/「整段重复三遍」根因治理）
   cleaned = dedupeCrossLevelHeadingDuplicates(cleaned);

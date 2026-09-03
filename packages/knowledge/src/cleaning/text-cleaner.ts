@@ -460,15 +460,16 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
       continue;
     }
 
-    // 3. 页眉/页脚/图框标题栏高重复行
-    if (isHeaderFooterLine(trimmed, lineCounts.get(trimmed) ?? 1)) {
+    // 3. 页眉/页脚/图框标题栏高重复行（CAD 豁免：图纸标注重复出现是数据本身——
+    // 门窗编号「FM1524」、材料规格等会随楼层重复标注，非页眉页脚；CAD 图框噪声已由 K3 规则覆盖）
+    if (!isCad && isHeaderFooterLine(trimmed, lineCounts.get(trimmed) ?? 1)) {
       drop(line, s => { s.headerFooterLines += 1; });
       index += 1;
       continue;
     }
 
-    // 4. 纯页码行
-    if (isPageNumberLine(trimmed, totalLines)) {
+    // 4. 纯页码行（CAD 豁免：图纸纯数字行是尺寸/标高/门窗表数值，非页码）
+    if (!isCad && isPageNumberLine(trimmed, totalLines)) {
       drop(line, s => { s.pageNumberLines += 1; });
       index += 1;
       continue;

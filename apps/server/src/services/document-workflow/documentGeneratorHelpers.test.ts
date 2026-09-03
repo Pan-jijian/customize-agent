@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chapterGenerationTargets, cleanChineseWordBreakSpaces, cleanInlineFactValue, callBreakdownTopDetails, callBreakdownTopSummary, dedupeCrossSectionDuplicateSentences, phaseWaterfallDetails, finalizeFinalMarkdownStructure, normalizeWorkPackageLabels, splitGluedTableHeaderLines, stripBidDisciplineSentences, stripBidDisciplineSentencesSemantic, stripDataConsistencyLeakSentences } from './documentGeneratorHelpers';
+import { chapterCompletionStatus, chapterGenerationTargets, cleanChineseWordBreakSpaces, cleanInlineFactValue, callBreakdownTopDetails, callBreakdownTopSummary, dedupeCrossSectionDuplicateSentences, phaseWaterfallDetails, finalizeFinalMarkdownStructure, normalizeWorkPackageLabels, splitGluedTableHeaderLines, stripBidDisciplineSentences, stripBidDisciplineSentencesSemantic, stripDataConsistencyLeakSentences } from './documentGeneratorHelpers';
 
 describe('chapterGenerationTargets（提示词篇幅目标完整下达）', () => {
   it('长文模式：提示词章预算必须完整下达，不被 upper 硬顶与结构估算压制', () => {
@@ -482,5 +482,19 @@ describe('phaseWaterfallDetails（4.2 阶段耗时瀑布完整展示）', () => 
   it('无 phase:* 条目返回空数组', () => {
     expect(phaseWaterfallDetails([{ name: 'chapter-draft:c1', startedAt: 1, endedAt: 2, durationMs: 1 }])).toEqual([]);
     expect(phaseWaterfallDetails([])).toEqual([]);
+  });
+});
+
+describe('chapterCompletionStatus 写作结构门禁收紧（4.17.8 章节成稿验收线）', () => {
+  it('正文非空且无结构缺陷 → success（正常成稿不受影响）', () => {
+    expect(chapterCompletionStatus(2400, 2200, ['小节事实密度需优化：技术管理组织'])).toBe('success');
+  });
+  it('空小节/缺少规划小节结构缺陷 → failed（写作侧结构不达标即如实失败，不再标 success 甩给修复链）', () => {
+    expect(chapterCompletionStatus(2400, 2200, ['工程概况 空小节：项目特点、重点、难点分析'])).toBe('failed');
+    expect(chapterCompletionStatus(2400, 2200, ['进度计划 缺少规划小节：施工总进度计划表'])).toBe('failed');
+  });
+  it('空正文或生成失败 → failed（原有口径不变）', () => {
+    expect(chapterCompletionStatus(0, 2200, [])).toBe('failed');
+    expect(chapterCompletionStatus(2400, 2200, ['未返回有效章节正文'])).toBe('failed');
   });
 });

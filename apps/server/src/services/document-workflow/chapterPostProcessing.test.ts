@@ -157,10 +157,15 @@ describe('sectionStructureIssue（项目主要施工内容节结构门禁）', (
     expect(sectionStructureIssue('项目主要施工内容', '### 2.3 项目主要施工内容\n只有概述没有工作包。')).toContain('缺少施工工作包三级小节');
   });
 
-  it('工作包缺三段标签报结构不完整', () => {
+  it('工作包缺工序要素报内容要素不全（4.17.9 标签不再是硬性要求）', () => {
     const content = `### 2.3 项目主要施工内容\n${goodPackage(1, '室外道排工程')}\n${goodPackage(2, '屋面维修工程')}\n#### 2.3.3 外墙装饰工程\n施工概况：范围。\n施工方法：机械作业。`;
     const issue = sectionStructureIssue('项目主要施工内容', content);
-    expect(issue).toContain('结构不完整');
+    expect(issue).toContain('内容要素不全');
+  });
+
+  it('无标签但三要素齐全的块通过（呈现形式不限）', () => {
+    const content = `### 2.3 项目主要施工内容\n${goodPackage(1, '室外道排工程')}\n${goodPackage(2, '屋面维修工程')}\n#### 2.3.3 外墙装饰工程\n外墙装饰改造范围明确，作业对象为全部外立面，工程量约3200㎡。施工顺序为先基层清理，再放线定位，随后分层刮涂，最后养护并逐层验收记录。采用电动吊篮配合人工分层作业，胶缝宽度控制在8mm内，垂直度偏差不超过3mm，验收合格后形成检测记录归档闭环。`;
+    expect(sectionStructureIssue('项目主要施工内容', content)).toBe('');
   });
 
   it('脏话术进入工作包报污染', () => {
@@ -204,7 +209,7 @@ describe('小节分类与写作要求', () => {
 
   it('keySectionWritingRequirement 按小节类型下发', () => {
     expect(keySectionWritingRequirement('项目特点、重点、难点分析')).toContain('项目特点分析');
-    expect(keySectionWritingRequirement('项目主要施工内容')).toContain('三段');
+    expect(keySectionWritingRequirement('项目主要施工内容')).toContain('三方面要素');
     expect(keySectionWritingRequirement('主要分部分项工程施工方案')).toContain('专业工程');
     expect(keySectionWritingRequirement('普通小节')).toBe('');
   });

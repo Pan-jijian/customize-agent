@@ -6,7 +6,7 @@
 import type { DocumentDraftChapter, DocumentExecutionStage, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict } from './types';
 import { displayStage, upsertProgressStage } from './progress';
 import { buildSemanticSimilarity, snapshotEmbedCacheStats } from './semanticSimilarity';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractScheduleAuthority, foundationFormResidueIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, stripOverviewRecapBodyLines, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, fixAdjacentPhraseDuplication, fixPlaceholderTableCells, fixQualityAssuranceCoverage, foundationFormResidueIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, stripOverviewRecapBodyLines, supportSystemConflictIssues } from './documentIntegrityChecks';
 import { applyDeterministicConsistencyFixes, crossChapterConsistencyIssues, processSpecConflictIssues } from './qualityValidation';
 import { reviewGlobalConsistency } from './chapterReview';
 import { tablePlanExecutionGaps } from './constructionOrgTablePlan';
@@ -134,7 +134,7 @@ export async function dedupeAfterTableFix(input: {
 
 /**
  * 表格执行率确定性核验：表格计划（治理决策）必须真实落为 markdown 表格；
- * 执行率显著不足的章节进入定向补表修复闭环（最多 2 轮），保证表格数量与计划一致。
+ * 执行率显著不足的章节进入定向补表修复闭环（单轮，失败即放弃），保证表格数量与计划一致。
  * 返回 tableFixApplied 供调用侧判断补表后去重是否触发（未落地时正文未变，重复执行去重无意义）。
  */
 export async function repairTableExecutionGaps(input: {
@@ -154,7 +154,9 @@ export async function repairTableExecutionGaps(input: {
   // 补表 patch 是否真正落地（供补表后去重的触发判断：未落地时正文未变，重复执行去重无意义）
   let tableFixApplied = false;
   if (tableGaps.length > 0) {
-    for (let round = 0; round < 2 && tableGaps.length > 0; round += 1) {
+    // 4.17.8 每章单轮修复：补表修复只跑一轮，失败即放弃（残留缺口转导出门禁）——
+    // 2 轮循环与首轮失败重试是修复 token 主力军的组成部分（同一章节缺表重复消耗全文上下文）
+    for (let round = 0; round < 1 && tableGaps.length > 0; round += 1) {
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-repair', status: 'running', message: `表格执行率修复第 ${round + 1} 轮（${tableGaps.length} 个章节缺表）` }, { subtitle: '表格执行率修复' }));
       emitProgress(chapterDraftsFinal);
       let appliedCount = 0;
@@ -192,23 +194,7 @@ export async function repairTableExecutionGaps(input: {
           // 致 patches 解析失败、修复空手（历史缺陷：补表 patch 未应用）；每张表按 1200 token 预留
           maxTokens: Math.min(12000, Math.max(6000, gap.plans.length * 1200)),
         })));
-        const firstRoundError = generationDiagnostics?.llm.lastError;
-        if (!repaired.content || repaired.content === draft.content) {
-          // 改6：首轮 patch 未应用时重试一轮——收敛为逐表追加形态（锚定归属小节末句、每表一个 patch），
-          // 规避多表 JSON 截断与 patch 定位失败两类历史失败形态；仍走 LLM 补表，不做代码拼表格兜底
-          repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `table-execution-repair-retry:${draft.id}`, () => repairChapterByQuality({
-            template,
-            chapter: baseChapter,
-            issues: [`${baseIssue}\n上一轮补表 patch 未能落位（${firstRoundError || 'patch 未应用'}）。改为逐表追加：每张缺失表单独输出一个 patch，originalText 锚定该表应归属小节（${gap.plans.map(plan => plan.moduleTitle).filter(Boolean).join('、')}）最后一个完整句子，replacement 为该句后追加引导叙述与完整 markdown 表格（表名、表头、分隔线、至少一行数据）；不得重写其他正文，不得输出空表或“见下表”。`],
-            promptTexts: repairPromptTexts,
-            requirement,
-            forbidDrawingImages: true,
-            repairType: 'table_numeric',
-            diagnostics: generationDiagnostics,
-            signal,
-            maxTokens: Math.min(12000, Math.max(6000, gap.plans.length * 1200)),
-          })));
-        }
+        // 4.17.8 补表失败重试删除：每章单次尝试（失败即放弃）——重试轮是修复 token 主力军的组成部分
         return repaired;
       };
       const repairedTableResults = await Promise.allSettled(gapTargets.map(target => repairTableGap(target)));
@@ -431,10 +417,13 @@ export async function runGlobalConsistencyReviewLoop(input: {
     // A2 收口：LLM 定向修复轮可能重新引入跨章数值矛盾（劳动力峰值/节点工期/材料设备数量），
     // 导出前与检测器同源定点替换兜底（与修复循环前置的口径一致，形成「前置降轮次 + 后置清零」闭环）
     // 4.17.3：注入计划总工期权威口径（factsModel 锁定值），45 vs 210 类两套体系并存时确定性裁决
+    // 4.17.4：追加装配率权威口径（38.4% vs 招标锁定 30%）与工程规模摘要（6.1 一览表套话填充）
     const scheduleAuthority = extractScheduleAuthority(preliminaryFactsModel);
+    const assemblyRateAuthority = extractAssemblyRateAuthority(preliminaryFactsModel);
+    const scaleSummary = extractProjectScaleSummary(preliminaryFactsModel);
     let postNumericFixCount = 0;
     for (const chapter of chapterDraftsFinal) {
-      const numericFix = applyNumericConsistencyDeterministicFixes(chapter.content, { scheduleAuthority });
+      const numericFix = applyNumericConsistencyDeterministicFixes(chapter.content, { scheduleAuthority, assemblyRateAuthority });
       if (numericFix.fixedCount > 0) {
         chapter.content = numericFix.markdown;
         postNumericFixCount += numericFix.fixedCount;
@@ -448,24 +437,36 @@ export async function runGlobalConsistencyReviewLoop(input: {
     let removedTableLines = 0;
     let removedParagraphLines = 0;
     let removedRecapLines = 0;
+    let phraseFixCount = 0;
+    let placeholderFixCount = 0;
+    let qaCoverageFixCount = 0;
     for (const chapter of chapterDraftsFinal) {
       const beforeLines = chapter.content.split(/\r?\n/u).length;
       const tableResult = stripDuplicateTables(chapter.content);
       const paraResult = stripDuplicateParagraphs(tableResult.markdown);
       const recapResult = stripOverviewRecapBodyLines(paraResult.markdown, dedupeRecapSimilarity);
-      const totalRemoved = beforeLines - recapResult.split(/\r?\n/u).length;
-      if (totalRemoved > 0) {
+      // 4.17.4 确定性清洗链：句内重复短语折叠 → 6.1 一览表套话数据填充 → 6.1 质量保障内容补全
+      const phraseResult = fixAdjacentPhraseDuplication(recapResult);
+      const placeholderResult = fixPlaceholderTableCells(phraseResult.markdown, { areaSummary: scaleSummary, scheduleDays: scheduleAuthority });
+      const qaCoverageResult = fixQualityAssuranceCoverage(placeholderResult.markdown);
+      const finalLines = qaCoverageResult.markdown.split(/\r?\n/u).length;
+      const totalRemoved = beforeLines - finalLines;
+      const extraFixes = (phraseResult.fixedCount - 0) + placeholderResult.fixedCount + qaCoverageResult.fixedCount;
+      phraseFixCount += phraseResult.fixedCount;
+      placeholderFixCount += placeholderResult.fixedCount;
+      qaCoverageFixCount += qaCoverageResult.fixedCount;
+      if (totalRemoved > 0 || extraFixes > 0) {
         removedTableLines += tableResult.removedCount;
         removedParagraphLines += paraResult.removedCount;
         removedRecapLines += totalRemoved - tableResult.removedCount - paraResult.removedCount;
-        chapter.content = recapResult;
+        chapter.content = qaCoverageResult.markdown;
       }
     }
     // 1.5 语义级跨章重复 strip（保留信息密度高者，删除低密度方整段）：逐字重复已由上面 strip 处理，
     // 此处清"措辞不同内容同质"的跨章雷同段；与检测器同源于 findCrossChapterSemanticDupPairs，删除后复检自然清零
     const removedSemanticDupParagraphs = await stripCrossChapterSemanticDuplicateParagraphs(chapterDraftsFinal);
     globalDedupRan = true;
-    if (deterministicFix.fixedCount > 0 || postNumericFixCount > 0 || removedTableLines > 0 || removedParagraphLines > 0 || removedRecapLines > 0 || removedSemanticDupParagraphs > 0) {
+    if (deterministicFix.fixedCount > 0 || postNumericFixCount > 0 || removedTableLines > 0 || removedParagraphLines > 0 || removedRecapLines > 0 || removedSemanticDupParagraphs > 0 || phraseFixCount > 0 || placeholderFixCount > 0 || qaCoverageFixCount > 0) {
       // 修复后重算：确定性检测快照必须用最新检测结果替换，不得合并保留已修复问题的旧快照
       //（历史缺陷：修复已生效但旧快照残留，被 finalize 包装为「跨章一致性复核」error 硬阻断导出）
       globalConsistencyIssues = [...new Set([...llmReviewIssues, ...(await runDeterministicConsistencyCheck())])];

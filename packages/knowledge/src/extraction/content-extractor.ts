@@ -23,7 +23,10 @@ type PdfTextItem = { str: string; x: number; y: number; width: number; height: n
 type CadAnnotation = { text: string; x?: number; y?: number; layer?: string; block?: string; entityType?: string };
 
 const CAD_INTERNAL_TOKEN_RE = /\b(?:TDbPipe|TDbPipeValve|TDbPipeFitting|TDbWellh|AcDb[\w:]+|Dwg\w+|ObjectId|Handle|ByLayer|Continuous|Model|Layout\d*|MLEADERSTYLE|AppInfoHistory|AppInfoDataList|ObjectDBX|Classes|DICTIONARYVARP|ObjFreeSpaceP|AuxHeaderT|\$AUDIT_BAD_\w+)\b/giu;
-const CAD_INTERNAL_LINE_RE = /^(?:TDb\w+|AcDb[\w:]+|\$AUDIT_BAD_\w+|[A-F0-9]{8,}|\d+|Model|Layout\d*|ByLayer|Continuous|MLEADERSTYLE|ObjectDBX)$/iu;
+// 注意：不再整行排除纯数字（\d+）——真实图纸的尺寸标注/标高/门窗表数值常为纯数字行
+// （如「100」「2.900」），整行排除会误杀图纸数据；图层/块名等内部纯数字标识在提取处
+// 单独排除（extractDxf 的 layers/blocks 过滤），不受此正则影响
+const CAD_INTERNAL_LINE_RE = /^(?:TDb\w+|AcDb[\w:]+|\$AUDIT_BAD_\w+|[A-F0-9]{8,}|Model|Layout\d*|ByLayer|Continuous|MLEADERSTYLE|ObjectDBX)$/iu;
 /** DWG 二进制误读产生的 C1 控制字符（U+0080-U+009F，如 GBK 半字节），正常图纸标注不会出现 */
 const CAD_C1_CONTROL_RE = /[\u0080-\u009F]/gu;
 /** AutoCAD 控制码：%%c=Φ、%%d=°、%%p=±、%%132 等数字码=Φ，统一解码为可读符号 */
@@ -276,6 +279,11 @@ export class ContentExtractor {
     return cleaned.length >= 2 && !CAD_INTERNAL_LINE_RE.test(cleaned) && /[\p{Script=Han}\p{Letter}\d]/u.test(cleaned) && !this.isLikelyGarbledCadText(cleaned);
   }
 
+  /** 图层/块名可读性：在通用可读性过滤外，排除纯数字名称（默认图层「0」等 CAD 内部标识） */
+  private isUsableCadName(value: string): boolean {
+    return this.isReadableCadValue(value) && !/^-?\d+(?:\.\d+)?$/u.test(value.trim());
+  }
+
   private cleanExtractedText(value: string, file: ClassifiedFile): string {
     // 符号字体私用区字符（CAD SHX 直径符号、PDF Wingdings 选项框等）统一映射回标准符号
     const normalized = [...normalizeSymbolicPua(value)]
@@ -323,9 +331,9 @@ export class ContentExtractor {
 
     if (file.format === 'autocad' && ext === '.dxf') {
       const raw = decodeTextBuffer(fs.readFileSync(file.absolutePath)).text;
-      const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
+      const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).filter(value => this.isUsableCadName(value)).slice(0, 300);
       const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 500);
-      const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
+      const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).filter(value => this.isUsableCadName(value)).slice(0, 300);
       const entityTypes = this.matchAll(raw, /\n\s*0\s*\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1000);
       const uniqueLayers = Array.from(new Set(layers));
       const uniqueBlocks = Array.from(new Set(blocks));
@@ -337,9 +345,11 @@ export class ContentExtractor {
       metadata.blockNames = uniqueBlocks.slice(0, 80);
       metadata.entityTypeCount = uniqueEntityTypes.length;
       metadata.entityTypes = uniqueEntityTypes.slice(0, 80);
-      const characterDataCount = this.countCadCharacterData([...textEntities.map(annotation => annotation.text), ...uniqueLayers, ...uniqueBlocks]);
+      // 判空口径只统计标注文本：图层/块名是 CAD 内部结构信息，图纸「空数据」= 无文字标注。
+      // 把图层/块名计入字符数会让空图纸（仅图层结构、无任何标注）错误入库
+      const characterDataCount = this.countCadCharacterData(textEntities.map(annotation => annotation.text));
       if (characterDataCount < MIN_CAD_CHARACTER_DATA) {
-        // 图纸无字符数据（无文字标注、图层/块名均为内部默认值），不入库
+        // 图纸无字符数据（无文字标注），不入库——空数据图纸直接过滤，仅元数据可查
         metadata.contentCoverage = 'cad_no_extractable_text';
         metadata.characterDataCount = characterDataCount;
         warnings.push(`${file.format} DXF 未提取到字符数据（仅 ${characterDataCount} 个可读字符），图纸内容未入库`);
@@ -413,7 +423,7 @@ export class ContentExtractor {
     // OLE 属性集（<prop_set ...>）是 DWG 文件内部的二进制属性结构，不含图纸标注字符，
     // 属于解析噪声而非字符数据，直接排除（不锚定行首：误读字符可能混在片段开头）
     const withoutPropSets = binaryFragments.filter(value => !/<prop_set\b/u.test(value));
-    let readable = withoutPropSets.filter(value => this.isReadableCadValue(value)).slice(0, 5000);
+    let readable = withoutPropSets.filter(value => this.isUsableCadName(value)).slice(0, 5000);
     // 文档级字符词频过滤：真实标注文字在图纸中会重复出现（标题/图层/图名等），
     // 随机二进制噪声片段中每个字符几乎只出现一次（孤立字符）；短片段若全部由
     // 孤立字符构成即为随机噪声，丢弃
@@ -465,17 +475,23 @@ export class ContentExtractor {
   private async extractDxf(file: ClassifiedFile, raw: string, metadata: Record<string, unknown>): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     const warnings: string[] = [];
     let parsed: unknown;
-    try {
-      const mod = await resolveAndImport('dxf-parser') as { default?: new () => { parseSync: (text: string) => unknown } } & (new () => { parseSync: (text: string) => unknown });
-      const Parser = mod.default ?? mod;
-      parsed = new Parser().parseSync(raw);
-    } catch {
-      warnings.push('dxf-parser 解析失败，已使用 DXF 文本结构抽取回退');
+    // dxf-parser 对缺少坐标组码的残缺实体（无 10/20 的 LINE/CIRCLE/POLYLINE）存在解析
+    // 死循环缺陷，无限循环不抛异常、try-catch 无法兜住；其解析结果仅用于 metadata 标记，
+    // 不参与文本提取。无任何标注实体的图纸（空图纸）必然判空不入库，跳过 parseSync
+    // 避免触发库死循环；含标注实体的图纸按正常路径解析
+    if (/(?:^|\r?\n)\s*0\s*\r?\n(?:TEXT|MTEXT|DIMENSION|LEADER|ATTRIB)\b/u.test(raw)) {
+      try {
+        const mod = await resolveAndImport('dxf-parser') as { default?: new () => { parseSync: (text: string) => unknown } } & (new () => { parseSync: (text: string) => unknown });
+        const Parser = mod.default ?? mod;
+        parsed = new Parser().parseSync(raw);
+      } catch {
+        warnings.push('dxf-parser 解析失败，已使用 DXF 文本结构抽取回退');
+      }
     }
 
-    const layers = this.matchAll(raw, /(?:^|\r?\n)\s*8\s*\r?\n([^\r\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
+    const layers = this.matchAll(raw, /(?:^|\r?\n)\s*8\s*\r?\n([^\r\n]+)/gu).filter(value => this.isUsableCadName(value)).slice(0, 300);
     const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 5000);
-    const blocks = this.matchAll(raw, /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/gu).filter(value => this.isReadableCadValue(value)).slice(0, 300);
+    const blocks = this.matchAll(raw, /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/gu).filter(value => this.isUsableCadName(value)).slice(0, 300);
     const entityTypes = this.matchAll(raw, /(?:^|\r?\n)\s*0\s*\r?\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1200);
     const uniqueLayers = Array.from(new Set(layers));
     const uniqueBlocks = Array.from(new Set(blocks));
@@ -488,7 +504,9 @@ export class ContentExtractor {
     metadata.entityTypeCount = uniqueEntityTypes.length;
     metadata.entityTypes = uniqueEntityTypes.slice(0, 80);
     metadata.parsedByDxfParser = Boolean(parsed);
-    const characterDataCount = this.countCadCharacterData([...textEntities.map(annotation => annotation.text), ...uniqueLayers, ...uniqueBlocks]);
+    // 判空口径只统计标注文本：图层/块名是 CAD 内部结构信息，图纸「空数据」= 无文字标注。
+    // 把图层/块名计入字符数会让空图纸（仅图层结构、无任何标注）错误入库
+    const characterDataCount = this.countCadCharacterData(textEntities.map(annotation => annotation.text));
     if (characterDataCount < MIN_CAD_CHARACTER_DATA) {
       // 图纸无字符数据（无文字标注、图层/块名均为内部默认值），不入库
       metadata.contentCoverage = 'cad_no_extractable_text';
@@ -524,19 +542,36 @@ export class ContentExtractor {
   }
 
   private extractDxfTextAnnotations(raw: string): CadAnnotation[] {
-    const entities = raw.split(/(?:^|\r?\n)\s*0\s*\r?\n/u).filter(section => /^(?:TEXT|MTEXT|DIMENSION|LEADER)/u.test(section.trim()));
+    // ATTRIB（块属性）是门窗表/材料表/标题栏数据的载体（块插入时的属性值实体），
+    // 此前遗漏导致整表数据丢失（真实图纸回归：门窗表仅剩零散标注）
+    const entities = raw.split(/(?:^|\r?\n)\s*0\s*\r?\n/u).filter(section => /^(?:TEXT|MTEXT|DIMENSION|LEADER|ATTRIB)/u.test(section.trim()));
     return entities.flatMap(section => {
-      const text = this.cleanCadReadableText(/(?:^|\r?\n)\s*(?:1|3)\s*\r?\n([^\r\n]+)/u.exec(section)?.[1] ?? '');
+      const entityType = section.trim().split(/\s+/u)[0];
+      let rawText: string;
+      if (entityType === 'ATTRIB') {
+        // 属性实体：组码 2 是属性标签名（门窗表/材料表的列名），组码 1 是属性值，
+        // 标签与值是独立语义字段（「型号 M1021」「高度 2100」），空格连接而非续段拼接
+        const tag = /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim() ?? '';
+        const value = /(?:^|\r?\n)\s*1\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim() ?? '';
+        rawText = `${tag} ${value}`;
+      } else {
+        // MTEXT 多段文本：组码 1 是首段（≤255 字符），组码 3 是后续续段（每段 ≤250 字符），
+        // 必须按序拼接才是完整文字（此前只取首个组码 1/3，多段标注丢失大半内容）；
+        // DIMENSION 组码 1/3 是显式尺寸文字与后缀，TEXT/LEADER 组码 3 罕见但同按序收集
+        rawText = [...section.matchAll(/(?:^|\r?\n)\s*(?:1|3)\s*\r?\n([^\r\n]+)/gu)].map(match => match[1]).join('');
+      }
+      const text = this.cleanCadReadableText(rawText);
       if (!text || !this.isReadableCadValue(text)) return [];
       // 图层/块名同样要过可读性过滤：DXF 里 GBK 误读（Ïä¹ñ）或纯数字/内部
       // 标识（11、AcDb...）会直接混进节点文本，不合格时置空由语义节点回退
       const layer = /(?:^|\r?\n)\s*8\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim() ?? '';
-      const block = /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim() ?? '';
+      // ATTRIB 的组码 2 是属性标签名而非块名，不可当块名使用
+      const block = entityType === 'ATTRIB' ? '' : /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim() ?? '';
       return [{
         text,
         layer: layer && this.isReadableCadValue(layer) ? layer : undefined,
         block: block && this.isReadableCadValue(block) ? block : undefined,
-        entityType: section.trim().split(/\s+/u)[0],
+        entityType,
         x: Number(/(?:^|\r?\n)\s*10\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]),
         y: Number(/(?:^|\r?\n)\s*20\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]),
       }].map(item => ({ ...item, x: Number.isFinite(item.x) ? item.x : undefined, y: Number.isFinite(item.y) ? item.y : undefined }));
