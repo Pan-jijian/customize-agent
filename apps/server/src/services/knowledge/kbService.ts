@@ -1,5 +1,5 @@
-import { computeProjectId, getProjectKbPath, IndexStateStore, MultiProjectManager } from '@customize-agent/knowledge';
-import Database from 'better-sqlite3';
+import { computeProjectId, getProjectKbPath, IndexStateStore, loadBetterSqlite3, MultiProjectManager } from '@customize-agent/knowledge';
+import type Database from 'better-sqlite3';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
@@ -43,7 +43,7 @@ function isInternalResidualProject(projectRoot: string): boolean {
 export function getKnownProjectRoots(): string[] {
   const registryPath = path.join(getStorageRoot(), 'projects', 'registry.db');
   if (!fs.existsSync(registryPath)) return [];
-  const db = new Database(registryPath, { readonly: true });
+  const db = new (loadBetterSqlite3())(registryPath, { readonly: true });
   try {
     const rows = db.prepare('SELECT project_root FROM project_registry ORDER BY last_opened_at DESC').all() as Array<{ project_root: string }>;
     return rows.map(r => path.resolve(r.project_root)).filter(root => !isInternalResidualProject(root));

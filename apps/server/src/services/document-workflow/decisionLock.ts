@@ -10,7 +10,6 @@ import { stringifyFactValue } from './utils';
  * （否定句不计分），多源取值按来源权威度裁决（补疑/澄清 > 招标文件 > 清单/图纸 > 规范 > 其他，
  * 与 scopeConflicts 源级裁决口径同源），同目多值共存（塔吊+施工电梯同属垂直运输）时全部锁定。
  * 决策表渲染为恒定文本注入所有章写作 prompt 恒定段（同文档各调用逐字节一致 → 同时利好 prefix cache）。
- * env DOCUMENT_DECISION_LOCK=0 整体回退（返回空表，不注入）。
  */
 
 /** 决策锁条目：封闭类目 + 锁定取值集（按证据支持力度降序） */
@@ -159,7 +158,6 @@ function mentionClauses(text: string) {
  * 多值共存 = 得分 ≥ max(60, 类目最高分 × 0.4) 的选项全部锁定（≤3 个，按得分降序、同分按值名排序保逐字节一致）。
  */
 export function buildDecisionLock(input: { facts: DocumentFact[]; evidence: DocumentEvidence[] }): DecisionLockEntry[] {
-  if (process.env.DOCUMENT_DECISION_LOCK === '0') return [];
   const mentions = collectDecisionMentions(input.facts, input.evidence);
   const entries: DecisionLockEntry[] = [];
   for (const category of DECISION_CATEGORIES) {

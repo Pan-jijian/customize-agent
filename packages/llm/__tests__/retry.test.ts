@@ -22,6 +22,9 @@ describe('isRetryableError', () => {
     expect(isRetryableError(new Error('ETIMEDOUT'))).toBe(true);
     expect(isRetryableError(new Error('network error'))).toBe(true);
     expect(isRetryableError(new Error('fetch failed'))).toBe(true);
+    // undici 传输层超时终止（stall 实测形态）与 SDK 包装文案
+    expect(isRetryableError(new Error('terminated'))).toBe(true);
+    expect(isRetryableError(new Error('Connection error.'))).toBe(true);
   });
 
   it('400 错误不应重试', () => {

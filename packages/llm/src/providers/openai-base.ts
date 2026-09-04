@@ -14,21 +14,11 @@ import { thinkingDisableBody } from '../thinking.js';
  *   - countTokens / healthCheck
  *   - chat / chatStream 模板方法
  * 子类仅需声明 name + capabilities + 默认值，可选覆盖 _extractToolCalls / _processDelta。
+ *
+ * 超时策略：客户端不设时间限制，完全错误驱动——服务端故障/限流返回 HTTP 状态码，
+ * 连接失败抛网络错误，偶发 stall 由 Node 内置 undici 的默认 headers/body 超时（300s）
+ * 以明确超时错误返回，均被 withRetry 的瞬态判定覆盖重试。
  */
-
-/**
- * LLM 请求硬超时（毫秒）：OpenAI SDK 内建 timeout 仅在响应头到达前生效（fetch resolve 后即清除计时器），
- * 服务端回完响应头后 body 挂起（实测 DeepSeek HTTP/2 长请求 stall）会让 Promise 永久悬挂，
- * 文档流水线修复循环随之卡死。硬超时用 AbortSignal.timeout 与调用方 signal 组合，
- * 覆盖「响应头已回但 body 不结束」场景；超时 abort 由上层瞬态错误识别重试一次。
- */
-const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 600_000;
-
-export function hardTimeoutSignal(signal?: AbortSignal): AbortSignal {
-  const raw = Number(process.env.LLM_REQUEST_TIMEOUT_MS);
-  const timeoutMs = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LLM_REQUEST_TIMEOUT_MS;
-  return signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
-}
 export abstract class OpenAICompatProvider implements ILLMProvider {
   abstract readonly name: string;
   abstract readonly capabilities: ModelCapabilities;
@@ -258,7 +248,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
 
   private async _postChat(messages: Message[], options?: ChatOptions): Promise<OpenAI.Chat.Completions.ChatCompletion> {
     const body = this._buildRequestBody(messages, options);
-    if (!this.directEndpoint) return this.client.chat.completions.create(body as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming, { signal: hardTimeoutSignal(options?.signal) });
+    if (!this.directEndpoint) return this.client.chat.completions.create(body as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming, { signal: options?.signal });
     const first = await this._postDirectChat(body, options);
     if (first.ok) return first.response;
     if (!/temperature.*default|unsupported.*temperature|Unsupported value: 'temperature'/iu.test(first.error)) throw new Error(first.error);
@@ -273,7 +263,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
       body: JSON.stringify(body),
-      signal: hardTimeoutSignal(options?.signal),
+      signal: options?.signal,
     });
     const text = await response.text();
     if (!response.ok) return { ok: false, error: `OpenAI-compatible chat endpoint error (${response.status}): ${text}` };
@@ -330,7 +320,7 @@ export abstract class OpenAICompatProvider implements ILLMProvider {
         const stream = await this.client.chat.completions.create({
           ...this._buildRequestBody(messages, options),
           stream: true,
-        } as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming, { signal: hardTimeoutSignal(options?.signal) });
+        } as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming, { signal: options?.signal });
 
         let content = '';
         this._thinkingContent = '';

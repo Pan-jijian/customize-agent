@@ -11,6 +11,7 @@ export { ContentExtractor, type ExtractionResult } from './extraction/content-ex
 export { CommandExternalExtractor, ExternalExtractorRegistry, type CommandExternalExtractorOptions, type ExternalExtractionResult, type ExternalExtractor, type ExternalExtractorCapability } from './extraction/external-extractor.js';
 
 export { ChangeTracker } from './core/change-tracker.js';
+export { loadBetterSqlite3, type SqliteDatabase } from './core/sqlite-loader.js';
 export { KnowledgeFileScanner, type DiskFileStat } from './core/file-scanner.js';
 export { IndexStateStore, type ChunkSearchResult, type FileHashRecord, type FileRelationship, type StoredChunk } from './core/index-state-store.js';
 export { KnowledgeBaseManager, type KnowledgeBaseManagerOptions, type KnowledgeIndexProgress } from './core/knowledge-base-manager.js';

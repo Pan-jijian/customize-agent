@@ -5,7 +5,6 @@
  * 请求串行处理（单次推理占满 worker 线程，并发只叠加内存无吞吐收益），模型懒加载一次常驻。
  */
 import { parentPort } from 'node:worker_threads';
-import { pipeline } from '@huggingface/transformers';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -29,7 +28,15 @@ function loadRanker(): Promise<unknown> {
         fs.mkdirSync(cacheDir, { recursive: true });
       }
       process.env.TRANSFORMERS_CACHE = cacheDir;
-      return pipeline('text-classification', process.env.KB_RERANKER_MODEL || 'Xenova/bge-reranker-base', { dtype: 'q8' } as never);
+      // 同 local-reranker.ts：transformers 硬依赖 onnxruntime-node/sharp，必须动态导入，
+      // 否则绑定缺失的平台（Windows + npm≥11.6）在本 worker 线程加载期直接崩溃。
+      const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<{ pipeline?: (task: string, model: string, options?: Record<string, unknown>) => Promise<unknown> }>;
+      const mod = await dynamicImport('@huggingface/transformers').catch(error => {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`rerank 依赖 @huggingface/transformers 未安装或无法解析：${message}`);
+      });
+      if (!mod.pipeline) throw new Error('Transformers.js pipeline is unavailable');
+      return mod.pipeline('text-classification', process.env.KB_RERANKER_MODEL || 'Xenova/bge-reranker-base', { dtype: 'q8' } as never);
     })().catch(error => {
       rankerPromise = null;
       loadDisabledUntil = Date.now() + 60_000;

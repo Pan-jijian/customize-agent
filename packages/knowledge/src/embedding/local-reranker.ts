@@ -1,4 +1,3 @@
-import { pipeline } from '@huggingface/transformers';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,7 +44,18 @@ export class LocalReranker {
       }
       process.env.TRANSFORMERS_CACHE = cacheDir;
 
-      const pipe = await pipeline('text-classification', this.modelName, {
+      // transformers 必须动态导入：它硬依赖 onnxruntime-node/sharp 原生绑定，静态导入会让
+      // knowledge 包在模块加载期崩溃（Windows 上 npm≥11.6 阻止这两者的安装脚本，绑定缺失时
+      // require 直接抛错），连带 kb-index-worker 启动失败报「kb-worker 报错退出」。
+      // 动态导入把失败收敛到 rerank 路径内部，由调用方 catch 回落启发式重排。
+      const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<{ pipeline?: (task: string, model: string, options?: Record<string, unknown>) => Promise<unknown> }>;
+      const mod = await dynamicImport('@huggingface/transformers').catch(error => {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`rerank 依赖 @huggingface/transformers 未安装或无法解析：${message}`);
+      });
+      if (!mod.pipeline) throw new Error('Transformers.js pipeline is unavailable');
+
+      const pipe = await mod.pipeline('text-classification', this.modelName, {
         dtype: 'q8',
       } as any);
 

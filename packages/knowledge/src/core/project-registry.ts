@@ -1,4 +1,5 @@
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
+import { loadBetterSqlite3 } from './sqlite-loader.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ProjectInfo, ProjectStatus } from '../types.js';
@@ -9,7 +10,7 @@ export class ProjectRegistry {
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    this.db = new Database(dbPath);
+    this.db = new (loadBetterSqlite3())(dbPath);
     this.db.pragma('journal_mode = WAL');
     // P1-8 SQLite 并发读加固：显式 busy_timeout，registry.db 并发读写竞争由等待兜底而非立即抛锁
     this.db.pragma('busy_timeout = 10000');

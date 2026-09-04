@@ -18,9 +18,29 @@ type HnswModule = { HierarchicalNSW: new (space: string, dimensions: number) => 
 type StoredVectorDocument = Omit<VectorDocument, 'embedding'> & { embedding?: number[] };
 const require = createRequire(import.meta.url);
 
+/**
+ * hnswlib-node 原生绑定可用性探测（模块级缓存：同一进程中加载失败一次即视为不可用）。
+ * 远端用户 npm 安装时 install 脚本可能被 npm allow-scripts 安全策略阻断（Windows/Linux 无预编译产物），
+ * 或平台 ABI 不匹配，此时 require 会抛出——向量检索降级为不可用，文本索引与上传流程不受影响。
+ */
+let hnswLibLoadFailed = false;
+/** 探测 hnswlib-node 原生绑定是否可加载（结果模块级缓存，供向量化流程提前降级） */
+export function isHnswNativeAvailable(): boolean {
+  if (hnswLibLoadFailed) return false;
+  try {
+    require('hnswlib-node');
+    return true;
+  } catch {
+    hnswLibLoadFailed = true;
+    console.warn('[hnsw] hnswlib-node native 绑定不可用，向量索引已降级为文本检索（可执行 npm rebuild hnswlib-node 或 pnpm doctor:hnsw 恢复）');
+    return false;
+  }
+}
+
 /** HNSW（分层可导航小世界图）向量存储，基于 hnswlib-node 实现的高效近似最近邻搜索 */
 export class HNSWVectorStore implements VectorStoreInterface {
   private index?: HierarchicalNSW;
+  private unavailable = false;
   private deletedSinceRebuild = 0;
   private dirty = false;
   private readonly documents = new Map<number, StoredVectorDocument>();
@@ -34,9 +54,13 @@ export class HNSWVectorStore implements VectorStoreInterface {
   ) {}
 
   async ensureCollection(): Promise<void> {
-    if (this.index) return;
+    if (this.index || this.unavailable) return;
     fs.mkdirSync(path.dirname(this.indexPath), { recursive: true });
     this.loadDocuments();
+    if (!isHnswNativeAvailable()) {
+      this.unavailable = true;
+      return;
+    }
     const mod = require('hnswlib-node') as HnswModule;
     this.index = new mod.HierarchicalNSW('cosine', this.dimensions);
     const indexExists = fs.existsSync(this.indexPath);
@@ -60,6 +84,7 @@ export class HNSWVectorStore implements VectorStoreInterface {
 
   async upsert(documents: VectorDocument[], options: VectorWriteOptions = {}): Promise<void> {
     await this.ensureCollection();
+    if (this.unavailable) return;
     for (const document of documents) {
       const rowid = Number(document.metadata.sqlite_rowid);
       if (!Number.isFinite(rowid) || rowid <= 0) throw new Error(`HNSW 向量写入缺少有效 sqlite_rowid: ${document.id}`);
@@ -82,7 +107,7 @@ export class HNSWVectorStore implements VectorStoreInterface {
     this.deletedSinceRebuild = 0;
     this.dirty = false;
     this.index = undefined;
-    await this.ensureCollection();
+    if (!this.unavailable) await this.ensureCollection();
   }
 
   async deleteByFilePath(filePath: string, options: VectorWriteOptions = {}): Promise<void> {
@@ -91,6 +116,7 @@ export class HNSWVectorStore implements VectorStoreInterface {
 
   async deleteByFilePaths(filePaths: string[], options: VectorWriteOptions = {}): Promise<void> {
     await this.ensureCollection();
+    if (this.unavailable) return;
     const rowids = new Set<number>();
     for (const filePath of filePaths) {
       const tracked = this.rowidsByFilePath.get(filePath);
@@ -117,16 +143,19 @@ export class HNSWVectorStore implements VectorStoreInterface {
 
   async flush(): Promise<void> {
     await this.ensureCollection();
+    if (this.unavailable) return;
     if (this.dirty) this.persist();
   }
 
   needsRebuild(): boolean {
+    if (this.unavailable) return false;
     const total = this.documents.size + this.deletedSinceRebuild;
     return total >= 1000 && this.deletedSinceRebuild / total > 0.25;
   }
 
   async search(query: VectorSearchQuery): Promise<VectorSearchResult[]> {
     await this.ensureCollection();
+    if (this.unavailable) return [];
     const hasFilter = !!query.where && Object.keys(query.where).length > 0;
     const candidateK = hasFilter ? Math.min(this.documents.size, Math.max(query.topK * 10, query.topK + 50)) : query.topK;
     const result = this.index!.searchKnn(query.queryEmbedding, candidateK);
@@ -148,6 +177,7 @@ export class HNSWVectorStore implements VectorStoreInterface {
   }
 
   private persist(): void {
+    if (this.unavailable) return;
     this.index!.writeIndexSync(this.indexPath);
     fs.writeFileSync(this.metadataPath(), JSON.stringify({ deletedSinceRebuild: this.deletedSinceRebuild, documents: [...this.documents.entries()] }), 'utf8');
     this.dirty = false;

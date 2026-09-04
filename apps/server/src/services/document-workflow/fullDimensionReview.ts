@@ -13,7 +13,6 @@ import type { DocumentDraftChapter, DocumentGenerationDiagnostics, DocumentTempl
 import type { DocumentJsonSchema } from './llmClient';
 import { callDocumentLlmJson } from './llmClient';
 import { documentTextLength } from './budget';
-import { normalizeFactUsageText } from './chapterGeneration';
 import { repairChapterByQuality } from './rolePipeline';
 import { finalizeChapterContentQuality } from './documentGeneratorHelpers';
 import { QINGTIAN_REVIEW_SYSTEM, qingtianBlockReviewPrompt, qingtianFixInstructionFor } from './qingtianReviewSpec';
@@ -227,9 +226,6 @@ export interface FullDimensionReviewInput {
    * 评审轮零检出根因修复（round-21 S6）——不注入对标材料时评审模型无招标依据可对照，
    * 只能按通用规范空评且“不确定的不报”，实测 5 块评审零检出而外部评分检出 207 条 */
   tenderContext?: string;
-  /** 2.2 跨系统去重：blocker 修复循环已修复成功的缺陷签名（code+归一化原文），
-   * 与评审 issue 原文比对命中时按 DOCUMENT_CROSS_SYSTEM_DEDUPE 跳过重复 LLM 修复 */
-  resolvedBlockerSignatures?: Set<string>;
   diagnostics?: DocumentGenerationDiagnostics;
   signal?: AbortSignal;
   /** 心跳包装（与生成管线一致，长任务期间保持进度推送） */
@@ -251,7 +247,7 @@ export interface FullDimensionReviewResult {
 }
 
 export async function runFullDimensionReview(input: FullDimensionReviewInput): Promise<FullDimensionReviewResult> {
-  const { template, chapters, effectiveChapters, requirement, projectName, tenderContext, resolvedBlockerSignatures, diagnostics, signal, heartbeat, onStage } = input;
+  const { template, chapters, effectiveChapters, requirement, projectName, tenderContext, diagnostics, signal, heartbeat, onStage } = input;
   const run = <T>(task: () => Promise<T>): Promise<T> => (heartbeat ? heartbeat(task) : task());
   const result: FullDimensionReviewResult = { reviewed: false, reviewCalls: 0, repairCalls: 0, reReviewCalls: 0, issuesFound: 0, fixedCount: 0, remainingIssues: [], templatingLevels: [], repairedChapters: [] };
   const blocks = splitChaptersIntoReviewBlocks(chapters);
@@ -262,18 +258,6 @@ export async function runFullDimensionReview(input: FullDimensionReviewInput): P
   // 2.1 patch 前置校验开关（两阶段灰度）：observe 只观测命中（默认）、enforce 拒绝坏 patch、0 关闭
   const patchGuardMode = process.env.DOCUMENT_QINGTIAN_PATCH_GUARD || 'observe';
   const patchGuard = patchGuardMode === '0' ? undefined : { observeOnly: patchGuardMode !== 'enforce', diagnostics };
-  // 2.2 跨系统去重开关（两阶段灰度）：observe 只计数重复修复（默认）、enforce 跳过重复 LLM 修复、0 关闭
-  const dedupeMode = process.env.DOCUMENT_CROSS_SYSTEM_DEDUPE || 'observe';
-  const isResolvedByBlocker = (issue: QingtianReviewIssue): boolean => {
-    if (dedupeMode === '0' || !resolvedBlockerSignatures || resolvedBlockerSignatures.size === 0) return false;
-    const normalizedQuote = normalizeFactUsageText(issue.quote);
-    for (const signature of resolvedBlockerSignatures) {
-      if (signature.endsWith(`\u0000${normalizedQuote}`)) return true;
-    }
-    return false;
-  };
-  // enforce 模式跳过的 issue（已由确定性系统修复）降为中低风险清单进报告展示
-  const dedupeSkippedIssues: QingtianReviewIssue[] = [];
   // ── 1. 分块评审（每块一次调用，单块失败显式记录并跳过，其余块继续）──
   const allIssues: QingtianReviewIssue[] = [];
   for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
@@ -303,15 +287,6 @@ export async function runFullDimensionReview(input: FullDimensionReviewInput): P
   const chapterIssueGroups: Array<{ chapterIndex: number; issues: QingtianReviewIssue[] }> = [];
   for (const issue of rankedIssues) {
     if (issue.riskLevel !== '否决级' && issue.riskLevel !== '高风险') continue;
-    // 2.2 跨系统去重：与 blocker 已修缺陷签名比对，observe 计数（照常修复）、enforce 跳过重复 LLM 修复
-    if (isResolvedByBlocker(issue)) {
-      if (dedupeMode === 'enforce') {
-        if (diagnostics) diagnostics.llm.qingtianDedupeSkipped = (diagnostics.llm.qingtianDedupeSkipped ?? 0) + 1;
-        dedupeSkippedIssues.push(issue);
-        continue;
-      }
-      if (diagnostics) diagnostics.llm.qingtianDedupeHits = (diagnostics.llm.qingtianDedupeHits ?? 0) + 1;
-    }
     const chapterIndex = locateChapterByIssue(issue, chapters);
     if (chapterIndex < 0) continue;
     const group = chapterIssueGroups.find(item => item.chapterIndex === chapterIndex);
@@ -362,8 +337,6 @@ export async function runFullDimensionReview(input: FullDimensionReviewInput): P
   }
   // 中低风险问题不修复，直接进入剩余清单供交付报告展示
   remainingIssues.push(...rankedIssues.filter(issue => issue.riskLevel === '中风险' || issue.riskLevel === '低风险'));
-  // 2.2 enforce 跳过的问题（已由确定性系统修复）降级并入剩余清单，供报告展示去重证据
-  remainingIssues.push(...dedupeSkippedIssues);
   result.remainingIssues = dedupeQingtianIssues(remainingIssues);
   result.reviewed = true;
   onStage?.({ status: 'success', message: `全维度评审完成：${blocks.length} 块评审检出 ${result.issuesFound} 处问题，修复 ${result.fixedCount} 处 patch，剩余 ${result.remainingIssues.length} 处`, details: result.remainingIssues.slice(0, 6).map(issue => `[${issue.riskLevel}][${issue.dimension}]${issue.description.slice(0, 40)}`) });

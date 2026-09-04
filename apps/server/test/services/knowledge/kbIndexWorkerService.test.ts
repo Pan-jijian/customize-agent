@@ -26,7 +26,7 @@ function createFakeChild() {
 
 type FakeChild = ReturnType<typeof createFakeChild>;
 
-const WORKER_PATH = path.resolve(process.cwd(), 'scripts/kb-index-worker.cjs');
+const WORKER_PATH = expect.stringContaining('kb-index-worker.cjs');
 
 beforeEach(() => {
   vi.mocked(fork).mockReset();
@@ -76,25 +76,47 @@ describe('子进程模式（runInChildProcess）', () => {
     }));
   });
 
-  it('exit 非 0：写入错误日志并返回失败', async () => {
+  it('exit 非 0 且无任何 IPC 上报：自动切换进程内索引并完成', async () => {
     const child = createFakeChild();
     vi.mocked(fork).mockReturnValue(child as never);
+    const project = { getStats: vi.fn(() => ({})) };
+    vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(async () => project) } as never);
+    vi.mocked(runIndexLoop).mockResolvedValue({ vectorStatus: { status: 'ready' } } as never);
     const promise = enqueueKnowledgeIndex({ id: 'job-3', projectRoot: '/proj-idx3' });
     child.emit('exit', 1);
     const result = await promise;
+    // 子进程启动即失败：进程内兜底，上传不再报「知识库后台进程退出」
+    expect(result.success).toBe(true);
+    expect(runIndexLoop).toHaveBeenCalled();
+    expect(upsertKbOperation).toHaveBeenCalledWith('/proj-idx3', expect.objectContaining({ id: 'job-3', stage: 'parsing', status: 'processing', message: expect.stringContaining('已自动切换为主进程内索引') }));
+    expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-idx3');
+  });
+
+  it('exit 非 0 且已上报过 IPC（运行中途崩溃）：仍按失败处理', async () => {
+    const child = createFakeChild();
+    vi.mocked(fork).mockReturnValue(child as never);
+    const promise = enqueueKnowledgeIndex({ id: 'job-3b', projectRoot: '/proj-idx3b' });
+    child.emit('message', { type: 'log', patch: { id: 'job-3b', type: 'reindex', title: '重建', stage: 'chunking', status: 'processing', percent: 30, message: '分块中' } });
+    child.emit('exit', 1);
+    const result = await promise;
     expect(result).toEqual({ success: false, error: '知识库后台进程退出，退出码 1' });
-    expect(upsertKbOperation).toHaveBeenCalledWith('/proj-idx3', expect.objectContaining({ id: 'job-3', stage: 'error', status: 'error', percent: 100, error: '知识库后台进程退出，退出码 1' }));
+    expect(upsertKbOperation).toHaveBeenCalledWith('/proj-idx3b', expect.objectContaining({ id: 'job-3b', stage: 'error', status: 'error', percent: 100, error: '知识库后台进程退出，退出码 1' }));
     expect(startProjectIntelligenceBuild).not.toHaveBeenCalled();
   });
 
-  it('子进程 spawn 失败（error 事件）：返回错误', async () => {
+  it('子进程 spawn 失败（error 事件）：自动切换进程内索引并完成', async () => {
     const child = createFakeChild();
     vi.mocked(fork).mockReturnValue(child as never);
+    const project = { getStats: vi.fn(() => ({})) };
+    vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(async () => project) } as never);
+    vi.mocked(runIndexLoop).mockResolvedValue({ vectorStatus: { status: 'ready' } } as never);
     const promise = enqueueKnowledgeIndex({ id: 'job-4', projectRoot: '/proj-idx4' });
     child.emit('error', new Error('spawn ENOENT'));
     const result = await promise;
-    expect(result).toEqual({ success: false, error: 'spawn ENOENT' });
-    expect(upsertKbOperation).toHaveBeenCalledWith('/proj-idx4', expect.objectContaining({ id: 'job-4', stage: 'error', status: 'error', error: 'spawn ENOENT' }));
+    expect(result.success).toBe(true);
+    expect(runIndexLoop).toHaveBeenCalled();
+    expect(upsertKbOperation).toHaveBeenCalledWith('/proj-idx4', expect.objectContaining({ id: 'job-4', stage: 'parsing', status: 'processing', message: expect.stringContaining('已自动切换为主进程内索引') }));
+    expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-idx4');
   });
 
   it('IPC 消息转发操作日志补丁（单写者）', async () => {
@@ -133,17 +155,17 @@ describe('进程内模式（runInProcess）', () => {
     expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-inproc');
   });
 
-  it('vectorStatus 错误：返回失败并写入错误日志', async () => {
+  it('vectorStatus 错误：向量降级不阻断，操作以 warning 完成', async () => {
     process.env.CUSTOMIZE_AGENT_DISABLE_KB_CHILD_PROCESS = '1';
     const project = { getStats: vi.fn(() => ({})) };
     vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(async () => project) } as never);
     vi.mocked(runIndexLoop).mockResolvedValue({ vectorStatus: { status: 'error', error: 'HNSWLib 向量入库失败' } } as never);
     const promise = enqueueKnowledgeIndex({ id: 'job-7', projectRoot: '/proj-inproc2' });
     const result = await promise;
-    expect(result.success).toBe(false);
-    expect(result.error).toBe('HNSWLib 向量入库失败');
-    expect(upsertKbOperation).toHaveBeenCalledWith('/proj-inproc2', expect.objectContaining({ id: 'job-7', stage: 'error', status: 'error', error: 'HNSWLib 向量入库失败' }));
-    expect(startProjectIntelligenceBuild).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.warning).toBe('HNSWLib 向量入库失败');
+    expect(upsertKbOperation).toHaveBeenCalledWith('/proj-inproc2', expect.objectContaining({ id: 'job-7', stage: 'done', status: 'warning', error: 'HNSWLib 向量入库失败' }));
+    expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-inproc2');
   });
 
   it('索引抛错：触发 failPendingIndexJobs 并写入错误日志', async () => {

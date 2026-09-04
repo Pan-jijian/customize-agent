@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveAndImport, resolvePackage } from './module-resolver.js';
 import { createOcrProvider, type OcrProvider } from './ocr-providers.js';
-import { decodeTextBuffer, normalizeSymbolicPua } from './text-encoding.js';
+import { decodeTextBuffer, filterOcrGraphicNoiseLines, hasForeignScriptGarbledText, normalizeSymbolicPua } from './text-encoding.js';
 import type { ClassifiedFile } from '../types.js';
 
 /** 文件内容提取结果 */
@@ -1085,11 +1085,38 @@ export class ContentExtractor {
         };
       }
     } catch {
-      if (ext === '.xls') return this.extractLegacyOfficeBinary(file);
-      // 降级到下方 ZIP 文件内容提取
+      // xlsx 解析失败：降级到下方统一兜底（按真实文件头判定路径）
     }
-    if (ext === '.xls') return this.extractLegacyOfficeBinary(file);
+    // 扩展名为 .xls 但真实内容是 OpenXML ZIP（常见 Word 文档伪装表格扩展名）：
+    // 二进制字符串抽取会把 ZIP 流误读成 GBK 乱码汉字（每个字都不同，可读性过滤无法识别），
+    // 必须先按 ZIP 内 XML 解析。
+    if (ext === '.xls') {
+      if (this.isZipOpenXmlFile(file.absolutePath)) return this.extractZipDisguisedSpreadsheet(file);
+      return this.extractLegacyOfficeBinary(file);
+    }
     return this.extractOfficeZip(file);
+  }
+
+  /**
+   * 表格扩展名（.xls/.xlsx）但真实内容为 OpenXML ZIP 的文件：优先按 Word 文档（word/document.xml）
+   * 解析，否则退化为 ZIP 内 XML 通用提取。避免把 ZIP 二进制流当字符串抽取产生 GBK 误读乱码。
+   */
+  private async extractZipDisguisedSpreadsheet(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
+    const warning = `文件扩展名为 ${path.extname(file.absolutePath) || '未知'}，但真实格式为 OpenXML ZIP，已按 ZIP 内 XML 解析`;
+    try {
+      const docxMarkdown = await this.extractDocxStyleTreeMarkdown(file.absolutePath);
+      if (docxMarkdown.trim()) {
+        return {
+          text: docxMarkdown,
+          metadata: { extractionMode: 'docx_xml_style_tree_markdown', vectorizable: true, realOfficeContainer: 'openxml_zip_disguised_spreadsheet' },
+          warnings: [warning],
+        };
+      }
+    } catch {
+      // 无 word/document.xml 或解析失败：降级为通用 ZIP XML 提取
+    }
+    const zip = await this.extractOfficeZip(file);
+    return { ...zip, warnings: [warning, ...zip.warnings] };
   }
 
   private async extractDocxStyleTreeMarkdown(filePath: string): Promise<string> {
@@ -1308,6 +1335,22 @@ export class ContentExtractor {
     }
   }
 
+  /** PDF 页渲染图的外部引擎识别（仅取纯文本行，不带版面前缀）；未配置或失败返回 undefined */
+  private async tryPaddleOcrPageText(imgPath: string): Promise<string | undefined> {
+    const command = process.env.CUSTOMIZE_PADDLE_OCR_CMD || process.env.PADDLE_OCR_CMD;
+    if (!command) return undefined;
+    const result = spawnSync(command, [imgPath], { encoding: 'utf8', timeout: 0, maxBuffer: 50 * 1024 * 1024, shell: true });
+    const stdout = this.filterOcrNativeNoise(result.stdout || '');
+    if (result.status !== 0 || !stdout.trim()) return undefined;
+    try {
+      const parsed = JSON.parse(stdout) as Array<{ text?: string }>;
+      const text = parsed.map(item => item.text ?? '').filter(Boolean).join('\n');
+      return text.trim() || undefined;
+    } catch {
+      return stdout.trim() || undefined;
+    }
+  }
+
   private filterOcrNativeNoise(value: string): string {
     return value.split(/\r?\n/u).map(line => line.trim()).filter(line => line && !OCR_NATIVE_NOISE_PATTERNS.some(pattern => pattern.test(line))).join('\n');
   }
@@ -1358,9 +1401,32 @@ export class ContentExtractor {
 
     try {
       const raw = fs.readFileSync(file.absolutePath);
-      const text = await this.extractPdfText(raw);
-      if (this.hasUsablePdfText(text)) {
-        metadata.contentCoverage = 'pdf_text_streams_layout_markdown';
+      const { text: pdfLayerText, garbledPages, emptyGraphicPages, pageCount } = await this.extractPdfText(raw);
+      let text = pdfLayerText;
+      const ocrCandidatePages = [...new Set([...garbledPages, ...emptyGraphicPages])].sort((a, b) => a - b);
+      // 先判定文本层是否可用（页均密度门槛会把“只有图框文字的图纸 PDF”判为不足）；
+      // 文本层不足时直接走全页 hybrid OCR，跳过乱码页单独 OCR：
+      // 既避免重复 OCR，也避免“garbled provider A dispose 后 hybrid provider B 再建”的双 provider 序列
+      // 触发 onnxruntime GC 析构竞态（实测导致 SIGABRT）。
+      if (this.hasUsablePdfText(text, pageCount) && ocrCandidatePages.length > 0) {
+        metadata.garbledTextLayerPages = garbledPages;
+        if (emptyGraphicPages.length > 0) metadata.emptyTextLayerPages = emptyGraphicPages;
+        const ocr = await this.extractPdfGarbledPagesOcr(file, ocrCandidatePages);
+        if (ocr.pageTexts.length > 0) {
+          text = this.mergePdfOcrPages(text, ocr.pageTexts);
+          metadata.ocrAugmentedPages = ocr.pageTexts.map(page => page.page);
+          metadata.contentCoverage = 'pdf_text_streams_layout_markdown_with_page_ocr';
+        }
+        warnings.push(`PDF 第 ${garbledPages.join('、')} 页文本层为 CID 字体乱码（缺 ToUnicode 映射），已剔除${ocr.pageTexts.length > 0 ? '并改用 OCR' : '，OCR 替换未成功'}`);
+        if (emptyGraphicPages.length > 0) warnings.push(`PDF 第 ${emptyGraphicPages.join('、')} 页文本层为空但页面含图形内容，已尝试 OCR 补提`);
+        warnings.push(...ocr.warnings);
+      } else if (ocrCandidatePages.length > 0 && !this.hasUsablePdfText(text, pageCount)) {
+        metadata.garbledTextLayerPages = garbledPages;
+        if (emptyGraphicPages.length > 0) metadata.emptyTextLayerPages = emptyGraphicPages;
+        warnings.push(`PDF 第 ${ocrCandidatePages.join('、')} 页文本层不可用（乱码或空白图形页），文本层整体不足，改由全页 OCR 覆盖`);
+      }
+      if (this.hasUsablePdfText(text, pageCount)) {
+        metadata.contentCoverage = metadata.contentCoverage ?? 'pdf_text_streams_layout_markdown';
         metadata.pdfExtractor = 'pdfjs-dist';
         metadata.ocrSkippedReason = 'pdf_text_stream_quality_sufficient';
         return { text: [this.metadataOnlyText(file), this.toMarkdownDocument(text)].join('\n\n'), metadata, warnings };
@@ -1386,9 +1452,103 @@ export class ContentExtractor {
     };
   }
 
-  private hasUsablePdfText(text: string): boolean {
+  /**
+   * 对文本层乱码页做选择性 OCR（CID 字体缺 ToUnicode 映射时 pdfjs 输出外来文字乱码）。
+   * 只渲染并识别指定页码，避免对整本 PDF 做全量 OCR。
+   */
+  private async extractPdfGarbledPagesOcr(file: ClassifiedFile, pageNumbers: number[]): Promise<{ pageTexts: Array<{ page: number; text: string }>; warnings: string[] }> {
+    const warnings: string[] = [];
+    const pageTexts: Array<{ page: number; text: string }> = [];
+    const tmpDir = fs.mkdtempSync(path.join(this.getTempRoot(), 'kb-pdf-garbled-'));
+    try {
+      const dpi = this.getPdfOcrDpi();
+      let images = this.tryRenderWithPyMuPDF(file.absolutePath, tmpDir, dpi, pageNumbers);
+      if (!images) images = await this.tryRenderWithPdfJs(file, tmpDir);
+      if (!images || images.length === 0) {
+        warnings.push('PDF 乱码页 OCR 渲染失败（PyMuPDF 与 pdfjs 均不可用），乱码页文本已剔除');
+        return { pageTexts, warnings };
+      }
+      let provider: OcrProvider | null = null;
+      try {
+        for (const pageNo of pageNumbers) {
+          const imgPath = images[pageNo - 1];
+          if (!imgPath) continue;
+          try {
+            const dimensions = await this.readImageDimensions(imgPath);
+            if (!dimensions || this.isTooSmallForOcr(dimensions.width, dimensions.height)) {
+              warnings.push(`PDF 第 ${pageNo} 页渲染图尺寸过小，OCR 已跳过`);
+              continue;
+            }
+            // 外部引擎优先（CUSTOMIZE_PADDLE_OCR_CMD 配置时），失败回退内置 provider（PP-OCRv5 ONNX → tesseract）
+            const externalText = await this.tryPaddleOcrPageText(imgPath);
+            let ocrText: string;
+            if (externalText) {
+              ocrText = this.cleanOcrText(externalText);
+            } else {
+              provider ??= await createOcrProvider();
+              const ocrResult = await provider.recognize({ data: new Uint8Array(0), width: dimensions.width, height: dimensions.height, channels: 0, filePath: imgPath });
+              ocrText = this.cleanOcrText(ocrResult.text);
+            }
+            if (ocrText) {
+              // 页级最低质量门槛：纯图形页（图纸图框、LOGO 页）OCR 产物为零散噪声碎片，
+              // 汉字过少、文本过短或有效行占比过低时整页丢弃，避免“伪文本”噪声入库
+              const hanCount = (ocrText.match(/[\p{Script=Han}]/gu) ?? []).length;
+              if (hanCount >= 4 && this.normalizedTextLength(ocrText) >= 12 && this.ocrMeaningfulLineRatio(ocrText) >= 0.5) pageTexts.push({ page: pageNo, text: ocrText });
+              else warnings.push(`PDF 第 ${pageNo} 页 OCR 结果均为图形噪声或无有效文字，已丢弃`);
+            } else {
+              warnings.push(`PDF 第 ${pageNo} 页 OCR 未识别到文字`);
+            }
+          } catch (error) {
+            warnings.push(`PDF 第 ${pageNo} 页 OCR 失败: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      } finally {
+        if (provider) await provider.dispose();
+      }
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 清理失败不影响结果 */ }
+    }
+    return { pageTexts, warnings };
+  }
+
+  /** 将 OCR 页文本按页码合并回文本层输出（乱码页已在 extractPdfText 中被剔除，OCR 页补齐缺口） */
+  private mergePdfOcrPages(text: string, ocrPages: Array<{ page: number; text: string }>): string {
+    const ocrByPage = new Map(ocrPages.map(page => [page.page, page.text]));
+    const sections: Array<{ page: number; text: string }> = [];
+    let currentPage = 0;
+    let buffer: string[] = [];
+    const flush = (): void => {
+      const body = buffer.join('\n').trim();
+      if (currentPage > 0 && body) sections.push({ page: currentPage, text: body });
+      buffer = [];
+    };
+    for (const line of text.split('\n')) {
+      const match = line.match(/^## PDF 第 (\d+) 页/);
+      if (match) {
+        flush();
+        currentPage = Number(match[1]);
+      } else {
+        buffer.push(line);
+      }
+    }
+    flush();
+    for (const [page, ocrText] of ocrByPage) sections.push({ page, text: ocrText });
+    sections.sort((a, b) => a.page - b.page);
+    return sections
+      .map(section => `## PDF 第 ${section.page} 页${ocrByPage.has(section.page) ? '（OCR）' : ''}\n\n${section.text}`)
+      .join('\n\n');
+  }
+
+  private hasUsablePdfText(text: string, pageCount?: number): boolean {
     const normalized = text.replace(/\s+/gu, ' ').trim();
     if (normalized.length < Number(process.env.CUSTOMIZE_KB_PDF_TEXT_MIN_CHARS || 80)) return false;
+    // CAD 导出图纸 PDF 的文本层只有图框/标题栏零星文字（正文为矢量线），多页文档页均密度极低；
+    // 这种情况不能算“文本层足够”，否则整本图纸只有几百字符入库、正文全部丢失。
+    // 阈值：多页（>1 页）且页均 < 100 可见字符时判不足，转入 hybrid OCR 路径（正常文档页均数百到上千字符不受影响）。
+    if (pageCount && pageCount > 1) {
+      const perPageChars = normalized.replace(/\s+/gu, '').length / pageCount;
+      if (perPageChars < 100) return false;
+    }
     const replacementRatio = (normalized.match(/[\uFFFD�]/gu)?.length ?? 0) / normalized.length;
     const visibleRatio = (normalized.match(/[\p{L}\p{N}\p{Script=Han}]/gu)?.length ?? 0) / normalized.length;
     return replacementRatio < 0.02 && visibleRatio > 0.35;
@@ -1484,36 +1644,45 @@ export class ContentExtractor {
           warnings.push(`PDF 第 ${i + 1} 页渲染图片尺寸过小（${dimensions.width}x${dimensions.height}），已跳过 OCR`);
           continue;
         }
-        const provider = await getOcrProvider();
-        const ocrResult = await provider.recognize({
-          data: new Uint8Array(0),
-          width: dimensions.width, height: dimensions.height, channels: 0,
-          filePath: imgPath,
-        });
-
-        let ocrText = this.cleanOcrText(ocrResult.text);
-        let ocrScore = this.scoreOcrText(ocrText);
+        // 外部引擎优先（CUSTOMIZE_PADDLE_OCR_CMD 配置时），失败回退内置 provider（PP-OCRv5 ONNX → tesseract）
+        const externalText = await this.tryPaddleOcrPageText(imgPath);
+        let ocrText: string;
+        let ocrScore: number;
         let strategy = renderer;
-        if (ocrResult.warnings?.length) warnings.push(...ocrResult.warnings.map(item => `OCR 警告: ${item}`));
+        if (externalText) {
+          ocrText = this.cleanOcrText(externalText);
+          ocrScore = this.scoreOcrText(ocrText);
+          strategy = 'paddleocr-external';
+        } else {
+          const provider = await getOcrProvider();
+          const ocrResult = await provider.recognize({
+            data: new Uint8Array(0),
+            width: dimensions.width, height: dimensions.height, channels: 0,
+            filePath: imgPath,
+          });
+          ocrText = this.cleanOcrText(ocrResult.text);
+          ocrScore = this.scoreOcrText(ocrText);
+          if (ocrResult.warnings?.length) warnings.push(...ocrResult.warnings.map(item => `OCR 警告: ${item}`));
 
-        if (this.shouldRetryPdfOcrAtHigherDpi(ocrText, ocrScore)) {
-          const retry = getHighDpiImage(i);
-          if (retry) {
-            const retryDimensions = await this.readImageDimensions(retry.imagePath);
-            if (retryDimensions && !this.isTooSmallForOcr(retryDimensions.width, retryDimensions.height)) {
-              const retryResult = await provider.recognize({
-                data: new Uint8Array(0),
-                width: retryDimensions.width, height: retryDimensions.height, channels: 0,
-                filePath: retry.imagePath,
-              });
-              const retryText = this.cleanOcrText(retryResult.text);
-              const retryScore = this.scoreOcrText(retryText);
-              if (retryResult.warnings?.length) warnings.push(...retryResult.warnings.map(item => `OCR 重试警告: ${item}`));
-              if (retryScore > ocrScore || (!ocrText && retryText)) {
-                ocrText = retryText;
-                ocrScore = retryScore;
-                strategy = retry.strategy;
-                ocrRetryPages.push(i + 1);
+          if (this.shouldRetryPdfOcrAtHigherDpi(ocrText, ocrScore)) {
+            const retry = getHighDpiImage(i);
+            if (retry) {
+              const retryDimensions = await this.readImageDimensions(retry.imagePath);
+              if (retryDimensions && !this.isTooSmallForOcr(retryDimensions.width, retryDimensions.height)) {
+                const retryResult = await provider.recognize({
+                  data: new Uint8Array(0),
+                  width: retryDimensions.width, height: retryDimensions.height, channels: 0,
+                  filePath: retry.imagePath,
+                });
+                const retryText = this.cleanOcrText(retryResult.text);
+                const retryScore = this.scoreOcrText(retryText);
+                if (retryResult.warnings?.length) warnings.push(...retryResult.warnings.map(item => `OCR 重试警告: ${item}`));
+                if (retryScore > ocrScore || (!ocrText && retryText)) {
+                  ocrText = retryText;
+                  ocrScore = retryScore;
+                  strategy = retry.strategy;
+                  ocrRetryPages.push(i + 1);
+                }
               }
             }
           }
@@ -1541,7 +1710,11 @@ export class ContentExtractor {
     metadata.ocrRetryPages = ocrRetryPages;
     metadata.ocrStrategies = ocrStrategies;
     metadata.failedPages = failedPages;
-    metadata.ocrProvider = (ocrProvider as OcrProvider | null)?.id ?? 'unknown';
+    const usedStrategies = ocrStrategies.map(item => item.strategy);
+    const builtinId = (ocrProvider as OcrProvider | null)?.id ?? 'unknown';
+    metadata.ocrProvider = usedStrategies.includes('paddleocr-external')
+      ? (usedStrategies.every(strategy => strategy === 'paddleocr-external') ? 'paddleocr-external' : `paddleocr-external + ${builtinId}`)
+      : builtinId;
 
     if (failedPages.length > 0) {
       warnings.push(`PDF 部分页解析失败: ${failedPages.map((p) => `${p.page}:${p.reason}`).join('; ')}`);
@@ -1555,15 +1728,51 @@ export class ContentExtractor {
     };
   }
 
-  /** PyMuPDF 渲染（默认 200 DPI，低质量页可自适应提高） */
-  private tryRenderWithPyMuPDF(pdfPath: string, outputDir: string, dpi = this.getPdfOcrDpi()): string[] | null {
+  /**
+   * 查找可用的 python 解释器（必须能 import fitz，即 PyMuPDF）。
+   * 服务器 PATH 中的 python3 可能未安装 PyMuPDF，导致渲染静默降级到 pdfjs（低质量图 → OCR 碎片），
+   * 因此按候选列表逐个探测，返回第一个可用的解释器路径。
+   */
+  private findPyMuPDFInterpreter(): string | null {
+    const candidates = [
+      process.env.CUSTOMIZE_KB_PYMUPDF_PYTHON,
+      '/usr/bin/python3',
+      '/opt/homebrew/bin/python3',
+      '/usr/local/bin/python3',
+      'python3',
+    ].filter((candidate): candidate is string => !!candidate);
+    for (const candidate of candidates) {
+      try {
+        const probe = spawnSync(candidate, ['-c', 'import fitz'], { encoding: 'utf-8', timeout: 15_000 });
+        if (probe.status === 0) return candidate;
+      } catch {
+        // 继续探测下一个候选
+      }
+    }
+    return null;
+  }
+
+  /** PyMuPDF 渲染（默认 200 DPI，低质量页可自适应提高）；pages 指定时只渲染这些页码 */
+  private tryRenderWithPyMuPDF(pdfPath: string, outputDir: string, dpi = this.getPdfOcrDpi(), pages?: number[]): string[] | null {
     try {
+      const python = this.findPyMuPDFInterpreter();
+      if (!python) return null;
       const workerScript = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'render_pdf_pages.py');
-      spawnSync('python3', [workerScript, pdfPath, outputDir, String(dpi)], {
+      const args = [workerScript, pdfPath, outputDir, String(dpi)];
+      if (pages?.length) args.push(pages.join(','));
+      spawnSync(python, args, {
         encoding: 'utf-8', timeout: 60_000, maxBuffer: 1024 * 1024,
       });
       // 检查输出文件（即使 Python 非零退出码也可能已渲染部分页面）
       const images: string[] = [];
+      if (pages?.length) {
+        // 指定页码模式：按页码位置收集（稀疏数组），调用方用 images[page-1] 取值
+        for (const pageNo of pages) {
+          const p = path.join(outputDir, `page-${pageNo}.png`);
+          if (fs.existsSync(p) && fs.statSync(p).size > 100) images[pageNo - 1] = p;
+        }
+        return images.some(Boolean) ? images : null;
+      }
       for (let i = 1; i <= 999; i++) {
         const p = path.join(outputDir, `page-${i}.png`);
         if (fs.existsSync(p) && fs.statSync(p).size > 100) images.push(p);
@@ -1631,17 +1840,37 @@ export class ContentExtractor {
     const cjkCount = (text.match(/[\p{Script=Han}]/gu) ?? []).length;
     const latinCount = (text.match(/[A-Za-z]/g) ?? []).length;
     const replacementCount = (text.match(/[�□]/gu) ?? []).length;
+    // 噪声碎片识别：汉字密度极低且存在长连续拉丁字母串（CAD 单线矢量字被 tesseract 误读的典型形态），
+    // 强制低分触发 300DPI 重试或外部引擎路径，避免噪声文本被误判为高质量结果
+    const hanDensity = normalizedLength > 0 ? cjkCount / normalizedLength : 0;
+    const longLatinRun = (text.match(/[A-Za-z]{8,}/g) ?? []).join('').length;
+    if (hanDensity < 0.08 && longLatinRun > 100) return -1;
     return cjkCount * 8 + normalizedLength - latinCount * 0.8 - replacementCount * 10;
   }
 
+  /**
+   * OCR 页有效行占比：行内汉字 >= 2 且（行足够长 / 含中文句读 / 含领域信号词）才计为有效行。
+   * 用于剔除纯图形页（图框、LOGO）OCR 出的零散噪声碎片。
+   */
+  private ocrMeaningfulLineRatio(text: string): number {
+    const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+    if (lines.length === 0) return 0;
+    const meaningful = lines.filter(line => {
+      const han = (line.match(/[\p{Script=Han}]/gu) ?? []).length;
+      if (han < 2) return false;
+      return line.length >= 8 || /[，。；：、（）]/u.test(line) || /工程|项目|施工|设计|说明|材料|图纸|要求|标注|单位|数量|序号|名称|详见/u.test(line);
+    }).length;
+    return meaningful / lines.length;
+  }
+
   private cleanOcrText(value: string): string {
-    return String(value ?? '')
+    return filterOcrGraphicNoiseLines(String(value ?? '')
       .replace(/[ \t]+/gu, ' ')
       .replace(/([\p{Script=Han}])\s+([\p{Script=Han}])/gu, '$1$2')
       .replace(/([\p{Script=Han}])\s+([，。；：！？、）】》])/gu, '$1$2')
       .replace(/([（【《])\s+([\p{Script=Han}])/gu, '$1$2')
       .replace(/\n{3,}/gu, '\n\n')
-      .trim();
+      .trim());
   }
 
   /** 加载图片像素数据（依赖 sharp） */
@@ -1669,8 +1898,13 @@ export class ContentExtractor {
     return width < 8 || height < 8 || width * height < 128;
   }
 
-  private async extractPdfText(buffer: Buffer): Promise<string> {
+  private async extractPdfText(buffer: Buffer): Promise<{ text: string; garbledPages: number[]; emptyGraphicPages: number[]; pageCount: number }> {
     let pdfjsText = '';
+    const garbledPages: number[] = [];
+    // 文本层为空但页面存在绘制内容（扫描图页 / CAD 矢量图页）的页码：正文是图形而非文本层，
+    // 同样需要选择性 OCR 兜底，否则整页信息完全丢失
+    const emptyGraphicPages: number[] = [];
+    let pageCount = 0;
     // 第一层：pdfjs-dist 文本提取（处理压缩内容流、CJK 字体、现代 PDF）
     try {
       const mod = await resolveAndImport('pdfjs-dist/legacy/build/pdf.mjs') as any;
@@ -1678,6 +1912,7 @@ export class ContentExtractor {
       const doc = await loadingTask.promise;
       const pages: string[] = [];
       const pageLimit = doc.numPages;
+      pageCount = doc.numPages;
       for (let i = 1; i <= pageLimit; i++) {
         const page = await doc.getPage(i);
         const content = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: true });
@@ -1685,14 +1920,25 @@ export class ContentExtractor {
           .map((item: unknown) => this.toPdfTextItem(item))
           .filter((item: PdfTextItem | undefined): item is PdfTextItem => !!item && item.str.trim().length > 0);
         const pageText = this.layoutPdfTextItems(items, i);
-
-        if (pageText.trim()) pages.push(pageText.trim());
+        if (!pageText.trim()) {
+          // 空文本层页不可直接跳过：扫描图页/CAD 矢量图页的文本层为空但页面有真实内容。
+          // 仅当页面存在绘制内容（图片/矢量描边）时才记入 OCR 候选，纯空白页不触发 OCR
+          if (await this.pdfPageHasDrawableContent(page)) emptyGraphicPages.push(i);
+          continue;
+        }
+        // CAD 导出的 PDF 缺 ToUnicode CMap 的 CID 字体输出外来文字乱码页：剔除并记录，
+        // 由 extractPdf 对这些页做选择性 OCR 兜底（乱码字符均为“合法字母”，可读性过滤无法识别）
+        if (hasForeignScriptGarbledText(pageText)) {
+          garbledPages.push(i);
+          continue;
+        }
+        pages.push(pageText.trim());
       }
       await doc.destroy();
       pdfjsText = pages.join('\n\n').trim();
 
     } catch (e) {
-      if (process.env.KB_DEBUG === '1') console.warn('[kb] pdfjs-dist extraction failed:', (e as Error).message);
+      // pdfjs-dist 提取失败不致命，继续下一层解析
     }
 
     // 第二层：pdf-parse（兼容旧版 PDF），适配 v1.x 函数导出 和 v2.x 类导出
@@ -1717,20 +1963,26 @@ export class ContentExtractor {
       if (pdfParse) {
         const result = await pdfParse(buffer);
         const parseText = (result?.text ?? '').trim();
-        if (pdfjsText && parseText && this.normalizedTextLength(parseText) > this.normalizedTextLength(pdfjsText) * 1.08) return [pdfjsText, '## PDF 备用解析文本', parseText].join('\n\n');
-        if (parseText && !pdfjsText) return parseText;
+        // pdfjs 已检出乱码页时跳过 pdf-parse 长文本合并：pdf-parse 无法按页过滤同一乱码，
+        // 其“更长”的文本往往正是乱码来源；pdfjs 全部页面均为乱码页时返回空文本走 OCR 路径
+        if (garbledPages.length === 0) {
+          if (pdfjsText && parseText && this.normalizedTextLength(parseText) > this.normalizedTextLength(pdfjsText) * 1.08) return { text: [pdfjsText, '## PDF 备用解析文本', parseText].join('\n\n'), garbledPages, emptyGraphicPages, pageCount };
+          if (parseText && !pdfjsText) return { text: parseText, garbledPages, emptyGraphicPages, pageCount };
+        } else if (parseText && !pdfjsText) {
+          return { text: '', garbledPages, emptyGraphicPages, pageCount };
+        }
       }
     } catch {
       // pdfjs 结果已可用时忽略备用解析器失败
     }
 
-    if (pdfjsText) return pdfjsText;
+    if (pdfjsText) return { text: pdfjsText, garbledPages, emptyGraphicPages, pageCount };
 
     // 第三层：raw regex 回退（未压缩的古老 PDF）
     const raw = buffer.toString('latin1');
     const matches = Array.from(raw.matchAll(/\(([^()]{2,500})\)\s*T[jJ]/gu), match => match[1] ?? '')
       .concat(Array.from(raw.matchAll(/\[([^\]]{2,2000})\]\s*TJ/gu), match => match[1] ?? ''));
-    return matches
+    const rawText = matches
       .map(value => value.replace(/\\([()\\])/gu, '$1').replace(/\\n|\\r/gu, ' '))
       .join('\n')
       .split('')
@@ -1740,6 +1992,28 @@ export class ContentExtractor {
       })
       .join('')
       .trim();
+    return { text: rawText, garbledPages, emptyGraphicPages, pageCount };
+  }
+
+  /**
+   * 判断空文本层页是否存在绘制内容（图片或矢量描边）。
+   * 纯空白页（无绘制操作或仅 setGState 等状态操作）返回 false，不触发 OCR；
+   * 扫描图页（paintImageXObject）与 CAD 矢量图页（constructPath/stroke/fill）返回 true。
+   * 操作编号为 pdfjs OPS 常量（跨版本稳定）：
+   * fill=9 eoFill=10 stroke=11 constructPath=22 paintImageMaskXObject=83
+   * paintImageMaskXObjectRepeat=84 paintImageXObject=85 paintInlineImageXObject=86 paintSolidColorImageMask=91
+   */
+  private async pdfPageHasDrawableContent(page: unknown): Promise<boolean> {
+    try {
+      const record = page as { getOperatorList?: () => Promise<{ fnArray?: number[] }> };
+      const ops = await record.getOperatorList?.();
+      const fnArray = ops?.fnArray;
+      if (!fnArray || fnArray.length === 0) return false;
+      const drawOps = new Set([9, 10, 11, 22, 83, 84, 85, 86, 91]);
+      return fnArray.some(fn => drawOps.has(fn));
+    } catch {
+      return false;
+    }
   }
 
   private normalizedTextLength(value: string): number {

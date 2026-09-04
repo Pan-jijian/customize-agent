@@ -94,14 +94,27 @@ function detectDocKind(fileName: string, head: string): DocKind {
   return 'other';
 }
 
-/** 页眉/页脚/图框标题栏高重复行：全文出现 ≥3 次 + 长度 4-60 + 非表格行 + 非列表项 + 非表头 */
+/**
+ * 页眉/页脚/图框标题栏高重复行：全文出现 ≥6 次 + 长度 4-60 + 非表格行 + 非列表项 + 非完整句
+ * + 非技术参数行 + 非表头。
+ * 阈值 ≥6 而非更低：真页眉页脚几乎每页出现（次数≈页数）；而正文跨页重复的规格参数行/章节
+ * 短标题（如设备参数表随章节重复）一般仅出现 3-5 次，低阈值会误删正文数据（宁多勿丢红线）。
+ */
 function isHeaderFooterLine(trimmed: string, count: number): boolean {
-  if (count < 3) return false;
-  if (trimmed.length < 4 || trimmed.length > 60) return false;
-  if (trimmed.includes('|')) return false;
-  if (/^[-*•·]\s|^\d+[、.．]\s/u.test(trimmed)) return false;
+  if (count < 6) return false;
+  // 剥离 markdown 标题前缀（extractor 行级 markdown 化会给短行加 ### 前缀）后再判定内容形态：
+  // 否则列表项/编号保护正则失效（"### 1、xxx" 不匹配 /^\d+[、.．]/）
+  const core = trimmed.replace(/^#{1,6}\s+/u, '').trim();
+  if (core.length < 4 || core.length > 60) return false;
+  if (core.includes('|')) return false;
+  // 列表项/编号保护：剥离前缀后重新判定（列表符号、数字顿号/点号、括号编号条目）
+  if (/^[-*•·]|^\d+[、.．]|^[（(]?\d+[）)]/u.test(core)) return false;
+  // 完整句保护：以句末标点结尾的正文句不删（页眉/页脚极少是完整句）
+  if (/[。；;！？!?]$/u.test(core)) return false;
+  // 技术参数保护：规格参数行（技术符号/数值+单位/★标注）是数据，不删
+  if (/[℃°Ω±≤≥×★]|\d+\s*(?:kV|kVA|MPa|kN|mm|cm|km|Hz|dB|mW|MW|W|V|A|℃|%|m|s|h)/u.test(core)) return false;
   // 表头保护：短行含表头关键词（纯文本格式清单/表格每页重复的表头）保留
-  if (trimmed.length < 12 && /序号|名称|单位|数量|金额|备注|编码/u.test(trimmed)) return false;
+  if (core.length < 12 && /序号|名称|单位|数量|金额|备注|编码/u.test(core)) return false;
   return true;
 }
 

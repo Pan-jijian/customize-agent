@@ -314,9 +314,214 @@ export class TesseractJsProvider implements OcrProvider {
   }
 }
 
+// ─── PaddleOCR.js（ONNX Runtime PP-OCRv5，模型随 npm 包发布） ──────
+
+function paddleModelDir(): string {
+  // env 显式指定时信任用户配置（目录缺失由 available 检查暴露，不回退掩盖错误）
+  if (process.env.CUSTOMIZE_PADDLE_MODEL_DIR) return process.env.CUSTOMIZE_PADDLE_MODEL_DIR;
+  return path.resolve(knowledgeDir, '..', '..', 'models', 'paddleocr');
+}
+
+function toArrayBuffer(buffer: Buffer): ArrayBuffer {
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+}
+
+type PaddleOcrServiceLike = {
+  recognize(input: { width: number; height: number; data: Uint8Array }, options?: unknown): Promise<unknown>;
+  processRecognition(recognition: unknown, options?: unknown): { text?: string; confidence?: number; lines?: Array<Array<{ text?: string; confidence?: number; box?: unknown }>> };
+  destroy(): Promise<unknown>;
+};
+
+/**
+ * PP-OCRv5 mobile 推理引擎（paddleocr.js + onnxruntime-node）。
+ * 模型二进制位于 models/paddleocr 并随 npm 包发布，下游用户零配置；
+ * 对 CAD 单线矢量字、扫描图纸等 tesseract 弱项场景识别质量显著更高。
+ * 识别失败时自动降级 tesseract.js（兜底不丢失解析能力）。
+ */
+export class PaddleOcrJsProvider implements OcrProvider {
+  readonly id = 'paddleocr.js';
+  private _available: boolean | null = null;
+  private service: PaddleOcrServiceLike | null = null;
+  private servicePromise: Promise<PaddleOcrServiceLike> | null = null;
+  private serviceLock: Promise<void> = Promise.resolve();
+  private warnings: string[] = [];
+  private tesseractFallback: TesseractJsProvider | null = null;
+
+  get available(): boolean {
+    if (this._available !== null) return this._available;
+    try {
+      resolvePackage('paddleocr');
+      resolvePackage('onnxruntime-node');
+    } catch {
+      this._available = false;
+      return false;
+    }
+    const modelDir = paddleModelDir();
+    this._available = ['PP-OCRv5_mobile_det_infer.onnx', 'PP-OCRv5_mobile_rec_infer.onnx', 'ppocrv5_dict.txt']
+      .every(name => fs.existsSync(path.join(modelDir, name)));
+    return this._available;
+  }
+
+  getWarnings(): string[] {
+    return [...new Set(this.warnings)].slice(-20);
+  }
+
+  private pushWarning(message: string) {
+    const text = message.trim();
+    if (!text) return;
+    this.warnings.push(text);
+    if (this.warnings.length > 50) this.warnings = this.warnings.slice(-50);
+  }
+
+  async recognize(input: { data: Uint8Array; width: number; height: number; channels?: number; filePath?: string }): Promise<OcrResult> {
+    try {
+      return await this.recognizeWithPaddle(input);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.pushWarning(`paddleocr.js 推理失败（${message}），已降级 tesseract.js`);
+      const fallback = this.tesseractFallback ??= new TesseractJsProvider();
+      if (fallback.available) return fallback.recognize(input);
+      throw error;
+    }
+  }
+
+  private async recognizeWithPaddle(input: { data: Uint8Array; width: number; height: number; channels?: number; filePath?: string }): Promise<OcrResult> {
+    let width = input.width;
+    let height = input.height;
+    let data = input.data;
+
+    if (input.filePath && fs.existsSync(input.filePath)) {
+      const sharpMod = await resolveAndImport('sharp');
+      const sharpFn = (sharpMod as any).default ?? sharpMod;
+      const decoded = await sharpFn(input.filePath).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+      width = decoded.info.width;
+      height = decoded.info.height;
+      data = new Uint8Array(decoded.data.buffer, decoded.data.byteOffset, decoded.data.byteLength);
+    }
+
+    if (width < 8 || height < 8 || width * height < 128) {
+      return { text: '', confidence: 0, regions: [], warnings: [`image too small for OCR: ${width}x${height}`] };
+    }
+    if (!data || data.length === 0) {
+      return { text: '', confidence: 0, regions: [], warnings: ['paddleocr.js: 无可用像素数据'] };
+    }
+
+    // onnxruntime session 并发调用不安全，与 tesseract provider 同样用串行锁
+    let unlock!: () => void;
+    const nextLock = new Promise<void>(resolve => { unlock = resolve; });
+    const currentLock = this.serviceLock;
+    this.serviceLock = currentLock.then(() => nextLock).catch(() => nextLock);
+    await currentLock;
+    try {
+      const service = await this.getService();
+      const recognition = await this.recognizeWithTimeout(service, { width, height, data });
+      const processed = service.processRecognition(recognition);
+      const text = (processed.text ?? '').trim();
+      const lineResults = (processed.lines ?? []).flat();
+      const regions: OcrRegion[] = lineResults
+        .filter(item => item?.text?.trim())
+        .map(item => {
+          const box = (item.box ?? {}) as Record<string, unknown>;
+          const bx = Number(box.x ?? 0);
+          const by = Number(box.y ?? 0);
+          const bw = Number(box.width ?? 0);
+          const bh = Number(box.height ?? 0);
+          return {
+            text: item.text!.trim(),
+            confidence: Number(item.confidence ?? 0),
+            box: { x: bx, y: by, width: bw, height: bh },
+          };
+        });
+      return { text, confidence: Number(processed.confidence ?? 0), regions, warnings: this.getWarnings() };
+    } finally {
+      unlock();
+    }
+  }
+
+  private async recognizeWithTimeout(service: PaddleOcrServiceLike, pixels: { width: number; height: number; data: Uint8Array }) {
+    const timeoutMs = 180_000;
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        service.recognize(pixels),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(`OCR recognition timed out after ${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
+    } catch (error) {
+      await this.resetService().catch(() => undefined);
+      throw error;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  private async getService(): Promise<PaddleOcrServiceLike> {
+    if (this.service) return this.service;
+    if (!this.servicePromise) {
+      this.servicePromise = this.createService().catch(error => {
+        this.servicePromise = null;
+        throw error;
+      });
+    }
+    this.service = await this.servicePromise;
+    return this.service;
+  }
+
+  private async createService(): Promise<PaddleOcrServiceLike> {
+    const paddleMod = await resolveAndImport<Record<string, unknown>>('paddleocr');
+    const PaddleOcrService = paddleMod?.PaddleOcrService as { createInstance?: (options: Record<string, unknown>) => Promise<PaddleOcrServiceLike> } | undefined;
+    if (!PaddleOcrService || typeof PaddleOcrService.createInstance !== 'function') {
+      throw new Error('paddleocr 包缺少 PaddleOcrService.createInstance');
+    }
+    const ort = await resolveAndImport('onnxruntime-node');
+    const modelDir = paddleModelDir();
+    const detModel = fs.readFileSync(path.join(modelDir, 'PP-OCRv5_mobile_det_infer.onnx'));
+    const recModel = fs.readFileSync(path.join(modelDir, 'PP-OCRv5_mobile_rec_infer.onnx'));
+    const dictText = fs.readFileSync(path.join(modelDir, 'ppocrv5_dict.txt'), 'utf8');
+    // 字典末行是空格字符（模型把空格识别为最后一类），trimEnd 会误删；只去掉尾随空行
+    const dictLines = dictText.split(/\r?\n/);
+    while (dictLines.length > 0 && dictLines[dictLines.length - 1] === '') dictLines.pop();
+    return PaddleOcrService.createInstance({
+      ort,
+      modelPreset: 'PP-OCRv5_mobile',
+      detection: { modelBuffer: toArrayBuffer(detModel) },
+      recognition: { modelBuffer: toArrayBuffer(recModel), charactersDictionary: dictLines },
+    });
+  }
+
+  private async resetService() {
+    // 只置空引用，不调 service.destroy()：paddleocr.js 的 destroy 内部调 onnxruntime
+    // InferenceSession.release()，释放底层 OrtSession 后 JS 对象仍存活，GC 触发
+    // InferenceSessionWrap 析构会再次释放同一指针 → double free → SIGABRT
+    // （libc++abi/malloc: pointer being freed was not allocated）。
+    // 正确做法是把 session 生命周期交给 GC 单次回收。
+    this.service = null;
+    this.servicePromise = null;
+  }
+
+  async dispose(): Promise<void> {
+    let unlock!: () => void;
+    const nextLock = new Promise<void>(resolve => { unlock = resolve; });
+    const currentLock = this.serviceLock;
+    this.serviceLock = currentLock.then(() => nextLock).catch(() => nextLock);
+    await currentLock;
+    try {
+      await this.resetService();
+      if (this.tesseractFallback) await this.tesseractFallback.dispose();
+    } finally {
+      unlock();
+    }
+  }
+}
+
 // ─── 工厂 ───────────────────────────────────────────────────────
 
 export async function createOcrProvider(): Promise<OcrProvider> {
+  // 优先 PP-OCRv5 ONNX 引擎（质量显著优于 tesseract，模型随包发布）；不可用时回退 tesseract.js
+  const paddle = new PaddleOcrJsProvider();
+  if (paddle.available) return paddle;
+
   const tess = new TesseractJsProvider();
   if (tess.available) return tess;
 

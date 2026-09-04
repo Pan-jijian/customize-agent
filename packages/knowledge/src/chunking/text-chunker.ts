@@ -112,9 +112,13 @@ export class TextChunker {
       const parentId = `p${parentIndex}`;
       const parts = this.mergeLeadingHeader(this.recursiveSplit(section.text, config.maxChunkSize));
       const merged = this.mergeParts(parts, config.maxChunkSize, config.overlap);
+      // 顺序锚定定位（而非从头 indexOf）：图纸/表格类文本存在大量重复标注（如“Φ10@200”、
+      // 参数行随章节重复），从头 indexOf(part 前缀) 会命中首次出现的相同文本，导致
+      // start_char 大幅跳变/回退、相邻块出现虚假间隙。lookBehind 回溯窗口覆盖
+      // mergeParts 的 overlap 重叠长度上限，保证重叠块命中真实起点。
+      const offsets = this.chunkPartStartOffsets(section.text, merged, 4096);
       merged.forEach((part, childIndex) => {
-        const localStart = section.text.indexOf(part.replace(/^\s+/u, '').slice(0, 40));
-        const startChar = section.startChar + Math.max(0, localStart);
+        const startChar = section.startChar + (offsets[childIndex] ?? 0);
         candidates.push({
           text: part,
           startChar,
@@ -150,9 +154,10 @@ export class TextChunker {
         })));
       }
       const sectionTitle = this.extractSectionTitle(block.text) ?? '表格数据';
-      for (const [childIndex, part] of this.splitMarkdownTable(block.text, config.maxChunkSize).entries()) {
-        const localStart = Math.max(0, block.text.indexOf(part.slice(0, 40)));
-        const startChar = block.startChar + localStart;
+      const tableParts = this.splitMarkdownTable(block.text, config.maxChunkSize);
+      const offsets = this.chunkPartStartOffsets(block.text, tableParts, 4096);
+      tableParts.forEach((part, childIndex) => {
+        const startChar = block.startChar + (offsets[childIndex] ?? 0);
         candidates.push({
           text: part,
           startChar,
@@ -166,7 +171,7 @@ export class TextChunker {
           rowRange: this.extractMarkdownTableRowRange(part),
           parentText: block.text,
         });
-      }
+      });
       cursor = block.startChar + block.text.length;
     });
     const afterStart = cursor;
@@ -184,18 +189,23 @@ export class TextChunker {
   private createDataCandidates(text: string, config: ChunkConfig): ChunkCandidate[] {
     const sections = text.split(/\n(?=[\w.[\]-]+[:：]\s)|\n{2,}/u).map(part => part.trim()).filter(Boolean);
     const parts = sections.length > 1 ? sections : this.recursiveSplit(text, config.maxChunkSize);
-    return this.mergeParts(parts, config.maxChunkSize, config.overlap).map((part, index) => ({
-      text: part,
-      startChar: Math.max(0, text.indexOf(part.slice(0, 40))),
-      endChar: Math.max(0, text.indexOf(part.slice(0, 40))) + part.length,
-      sectionTitle: this.extractSectionTitle(part),
-      titlePath: this.extractSectionTitle(part),
-      kind: 'data',
-      parentId: `data-0`,
-      parentIndex: 0,
-      childIndex: index,
-      parentText: text,
-    }));
+    const merged = this.mergeParts(parts, config.maxChunkSize, config.overlap);
+    const offsets = this.chunkPartStartOffsets(text, merged, 4096);
+    return merged.map((part, index) => {
+      const startChar = offsets[index] ?? 0;
+      return {
+        text: part,
+        startChar,
+        endChar: startChar + part.length,
+        sectionTitle: this.extractSectionTitle(part),
+        titlePath: this.extractSectionTitle(part),
+        kind: 'data',
+        parentId: `data-0`,
+        parentIndex: 0,
+        childIndex: index,
+        parentText: text,
+      };
+    });
   }
 
   private createCodeCandidates(text: string, file: ClassifiedFile, config: ChunkConfig): ChunkCandidate[] {
@@ -205,8 +215,10 @@ export class TextChunker {
       ? this.splitCodeByLanguage(text, languageConfig)
       : this.splitCodeByStructuralFallback(text);
     const parts = blocks.length > 1 ? blocks : this.recursiveSplit(text, config.maxChunkSize);
-    return this.mergeParts(parts, config.maxChunkSize, config.overlap).map((part, index) => {
-      const startChar = Math.max(0, text.indexOf(part.slice(0, 40)));
+    const merged = this.mergeParts(parts, config.maxChunkSize, config.overlap);
+    const offsets = this.chunkPartStartOffsets(text, merged, 4096);
+    return merged.map((part, index) => {
+      const startChar = offsets[index] ?? 0;
       return {
         text: part,
         startChar,
@@ -305,6 +317,13 @@ export class TextChunker {
 
     for (const section of sections) {
       if (!current) {
+        current = { ...section };
+        continue;
+      }
+      // 二级标题节（如 “## PDF 第 N 页（OCR）”）是文档顶级结构边界，不与前一节合并：
+      // 否则页/章内容会被并入其他节，section_title 错挂到上一节首标题，用户按标题浏览时找不到该页内容
+      if (/^#{2}\s/u.test(section.text.trim())) {
+        merged.push(current);
         current = { ...section };
         continue;
       }
@@ -485,14 +504,29 @@ export class TextChunker {
     return separatorIndex > 0 ? separatorIndex + 1 : 0;
   }
 
-  /** 计算切分片段在原文本中的起始偏移（顺序扫描，避免共享表头前缀导致 indexOf 重复命中） */
-  private chunkPartStartOffsets(text: string, parts: string[]): number[] {
+  /** 在 text 中从 fromIndex 起顺序定位 part：完整匹配 → 60 字符前缀 → -1。
+   * 完整匹配失败源于分块拼接符（\n）与原文分隔符（\n\n 或词级切分）不一致；
+   * 不做首行退化：词级首行（如“敷设方式”）在重复文本中会命中极早的相同词，
+   * 导致偏移大幅回退，宁缺失该块的精确定位（由调用方单调推进兑底）。 */
+  private locateInSection(text: string, part: string, fromIndex: number): number {
+    let index = text.indexOf(part, fromIndex);
+    if (index < 0 && part.length > 60) index = text.indexOf(part.slice(0, 60), fromIndex);
+    return index;
+  }
+  
+  /** 计算切分片段在原文本中的起始偏移（顺序扫描，避免共享表头前缀导致 indexOf 重复命中）。
+   * lookBehind > 0 时从 cursor 向前回溯该窗口搜索：overlap 重叠块的起点在前一块终点之前
+   * （重叠长度上限 400 字符），不回溯会导致完整匹配失败退化为前缀匹配而定位偏差。
+   * 定位失败时按“紧跟上一块”推进 cursor：保证偏移单调递增，避免重复文本下
+   * 所有失败块退化到同一位置（旧实现曾出现 start 全部归 0 的震荡）。 */
+  private chunkPartStartOffsets(text: string, parts: string[], lookBehind = 0): number[] {
     const offsets: number[] = [];
     let cursor = 0;
     for (const part of parts) {
-      const index = text.indexOf(part, cursor);
+      const fromIndex = lookBehind > 0 ? Math.max(0, cursor - lookBehind) : cursor;
+      const index = this.locateInSection(text, part, fromIndex);
       offsets.push(index >= 0 ? index : cursor);
-      cursor = index >= 0 ? index + part.length : cursor;
+      cursor = index >= 0 ? index + part.length : cursor + part.length;
     }
     return offsets;
   }
@@ -516,14 +550,19 @@ export class TextChunker {
           }));
         }
       }
-      return this.splitByWindow(candidate.text, config.maxChunkSize, config.overlap).map((text, index) => ({
-        ...candidate,
-        text,
-        childIndex: candidate.childIndex + index,
-        startChar: candidate.startChar + Math.max(0, candidate.text.indexOf(text.slice(0, 40))),
-        endChar: candidate.startChar + Math.max(0, candidate.text.indexOf(text.slice(0, 40))) + text.length,
-        rowRange: candidate.rowRange ? `${candidate.rowRange}#${index + 1}` : undefined,
-      }));
+      const windows = this.splitByWindow(candidate.text, config.maxChunkSize, config.overlap);
+      const offsets = this.chunkPartStartOffsets(candidate.text, windows, 4096);
+      return windows.map((text, index) => {
+        const startChar = candidate.startChar + (offsets[index] ?? 0);
+        return {
+          ...candidate,
+          text,
+          childIndex: candidate.childIndex + index,
+          startChar,
+          endChar: startChar + text.length,
+          rowRange: candidate.rowRange ? `${candidate.rowRange}#${index + 1}` : undefined,
+        };
+      });
     });
   }
 
@@ -546,11 +585,14 @@ export class TextChunker {
 
   private createChunk(index: number, candidate: ChunkCandidate, file: ClassifiedFile, metadata: Record<string, unknown>): TextChunk {
     const text = candidate.text.trim();
+    // endChar 按 trim 后文本计算（原用未 trim 的 part.length，尾部换行/空白会虚增偏移 2 字符，
+    // 导致相邻块 start_char/end_char 出现虚假间隙，破坏元数据精准性）
+    const endChar = candidate.startChar + text.length;
     return {
       index,
       text,
       startChar: candidate.startChar,
-      endChar: candidate.endChar,
+      endChar,
       tokenCount: this.estimateTokens(text),
       sectionTitle: candidate.sectionTitle ?? this.extractSectionTitle(text),
       metadata: {
@@ -564,7 +606,7 @@ export class TextChunker {
         sectionTitle: candidate.sectionTitle ?? this.extractSectionTitle(text),
         titlePath: candidate.titlePath ?? candidate.sectionTitle ?? this.extractSectionTitle(text),
         startChar: candidate.startChar,
-        endChar: candidate.endChar,
+        endChar,
         splitStrategy: 'recursive_parent_child_v2',
         parentText: candidate.childIndex === 0 ? candidate.parentText : undefined,
       },

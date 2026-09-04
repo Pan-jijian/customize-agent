@@ -1118,8 +1118,8 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
   if (isGeneralManagementSection(input.sectionTitle)) {
     const focused = await buildFocusedSectionDraft({
       ...input,
-      targetWords: Math.max(620, Math.floor(input.targetWords * 0.75)),
-      maxWords: Math.ceil(Math.max(620, Math.floor(input.targetWords * 0.75)) * 1.22),
+      targetWords: input.targetWords,
+      maxWords: Math.ceil(input.targetWords * 1.22),
       qualityFeedback: `本小节使用 focused writer 优先成稿。必须直接输出“### ${input.sectionTitle}”及正式正文。`,
     }).catch(error => {
       if (input.diagnostics) input.diagnostics.llm.lastError = `focused writer 异常：${input.chapter.title} / ${input.sectionTitle} / ${error instanceof Error ? error.message : String(error)}`;
@@ -1138,7 +1138,8 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
     let taskError: string | undefined;
     const maxAttempts = task.total > 1 ? 2 : 3;
     for (let attempt = 0; attempt < maxAttempts && !taskContent; attempt += 1) {
-      const retryTargetWords = attempt === 0 ? task.targetWords : Math.max(560, Math.floor(task.targetWords * (attempt === 1 ? 0.85 : 0.7)));
+      // 达标契约：重试保持同一目标字数，不降标（0.85/0.7 折扣删除）
+      const retryTargetWords = task.targetWords;
       try {
         taskContent = await buildLlmSectionContent({
           ...input,
@@ -1159,8 +1160,8 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
           taskContent = await buildFocusedSectionDraft({
             ...input,
             sectionTitle: task.sectionTitle,
-            targetWords: Math.max(520, Math.floor(retryTargetWords * 0.85)),
-            maxWords: Math.ceil(Math.max(520, Math.floor(retryTargetWords * 0.85)) * 1.18),
+            targetWords: retryTargetWords,
+            maxWords: Math.ceil(retryTargetWords * 1.18),
             qualityFeedback: `前序 Writer 未完成${taskError ? `（被拒原因：${taskError}）` : ''}。本轮使用轻量定向 Writer，只完成“${input.sectionTitle}”正式正文，逐条修正被拒原因。`,
           });
         } catch (error) {
@@ -1590,18 +1591,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
   // 且只保留块相关命中片段（onlyRankBoosted）——块级 L3 从 7k-26k 压缩到 1k 量级
   const blockEvidenceCeiling = Number(process.env.DOCUMENT_BLOCK_EVIDENCE_CHARS || 1000);
   const blockEvidenceCeilingChars = Number.isFinite(blockEvidenceCeiling) && blockEvidenceCeiling > 0 ? Math.floor(blockEvidenceCeiling) : 1000;
-  // 2.4 主题块失败降级提前：单块成稿时间预算（默认 180s）——超时后不再投入第二轮尝试/拆半自愈，
-  // 块快速判失败转上层紧凑备用成稿，避免单块串行重试链拖垮整章耗时（实测单块最高 27 分钟）；
-  // DOCUMENT_BLOCK_FALLBACK_TIMEOUT_MS 可调，=0 回退为无时间预算（旧行为）
-  const blockFallbackTimeoutMs = (() => {
-    const raw = Number(process.env.DOCUMENT_BLOCK_FALLBACK_TIMEOUT_MS ?? 180000);
-    if (raw === 0) return Number.POSITIVE_INFINITY;
-    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 180000;
-  })();
   const writeBlock = async (block: (typeof blocks)[number], index: number): Promise<string | undefined> => {
-    // 2.4 单块成稿时间预算起点：超时后跳过后续重试与拆半，快速判失败转上层紧凑备用成稿
-    const blockStartedAt = Date.now();
-    const blockTimedOut = () => Date.now() - blockStartedAt > blockFallbackTimeoutMs;
     const sectionTitles = block.subPoints.map(point => point.title);
     // 块级证据：全章证据按块标题与要点关键词相关性排序（只排序不丢弃，全量保留进输入）+ 块标题定向检索补充
     const blockTokens = tokenizeForRelevance(`${block.title} ${sectionTitles.join(' ')}`).filter(token => token.length >= 2);
@@ -1638,11 +1628,6 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
       return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 2;
     })();
     for (let attempt = 0; attempt < blockMaxAttempts; attempt += 1) {
-      // 2.4 超时检查：首轮质检未达标但已超时间预算时，不再投入第二轮 LLM 尝试
-      if (attempt > 0 && blockTimedOut()) {
-        if (input.diagnostics) input.diagnostics.llm.lastError = `规划块成稿超时（>${Math.round((Date.now() - blockStartedAt) / 1000)}s）：${block.title}，跳过重试转紧凑备用`;
-        break;
-      }
       // 第二轮反馈针对性列出缺失/重复 H4 标题，让重试有的放矢，避免通用反馈反复缺失要点后被迫拆半/整章降级
       const feedback = attempt === 0 ? '' : [
         '【上一轮未通过质检】',
@@ -1660,12 +1645,13 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           scopedProjectContext: input.scopedProjectContext,
           // F9：章级角色上下文上移 L2 共享段（同章各块完全相同 → prefix cache 共享命中）
           chapterLevelContext: input.roleContext || '',
-          minWords: Math.floor(block.targetWords * 0.6),
+          // 达标契约：minWords = 块目标（不打折）。实测 deepseek-v4-pro 单次可稳定输出 4000~6300 字，
+          // 提示词"不少于 X 字"即必然达标；0.6 折扣是历史人为降标，是"初稿不达标→补写"链的源头
+          minWords: block.targetWords,
           targetWords: block.targetWords,
           maxWords: Math.ceil(block.targetWords * 1.1),
-          // p3-s2 修正：deepseek 思考 token 与正文共享输出池，1:1.2 小预算被思考耗尽导致空响应/正文截断，
-          // 块成稿大面积失败触发整章降级（实测：2/3 章降级，交付置信度 46%）；
-          // 改为目标字数 ×1.5 且下限 3200（2200 字正文 ≈ 3300~4400 token + 思考空间，仍低于 8192 共享池）
+          // deepseek 思考 token 与正文共享输出池，目标字数 ×1.5 且下限 3200 留足输出空间
+          //（实测 6300 字仅耗 4202 token，8192 共享池富余充足）
           maxTokens: Math.max(3200, Math.ceil(block.targetWords * 1.5)),
           disableThinkingBoost: true,
           // D1：章级共享 T0 事实层由 sharedFactLayerText 注入（L2 共享段，同章各块完全相同），块级证据 skipT0
@@ -1702,10 +1688,10 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         const missing = sectionTitles.filter(title => !withBlockShell.includes(title));
         // 同 H3 内同名 H4 重复展开同样视为质检不达标（实测一轮输出三轮相同改造项/危大工程三连），阻断重复进入二轮后处理
         const duplicates = findDuplicateH4Titles(withBlockShell);
-        // 4.12.17 质检字数阈值 0.5 → 0.4：单块目标 4000 字时模型自然输出 1600~2000 字（44%~50%），
-        // 0.5 阈值（2000 字）恰好卡在自然输出上方，实测 4/6 章大面积块判失败 → 整章紧凑降级 → 全文字数雪崩；
-        // 0.4 阈值放行自然输出区间，字数缺口交由章节/交付前定向补写轮补齐（补写目标仍按章口径）
-        if (chars >= Math.max(400, Math.floor(block.targetWords * 0.4)) && missing.length === 0 && duplicates.length === 0) {
+        // 达标契约：质检阈值 = 0.9×块目标。minWords 已不打折（提示词硬要求写满目标字数），
+        // 实测模型单次输出 4000~6300 字无压力——"自然输出仅 44%"是历史 minWords 折扣导致的伪观测，
+        // 折扣拆除后 0.9 阈值即必然达标；字数缺口不再交由补写轮补齐（补写轮已删除）
+        if (chars >= Math.floor(block.targetWords * 0.9) && missing.length === 0 && duplicates.length === 0) {
           return withBlockShell;
         }
         lastMissing = missing;
@@ -1715,7 +1701,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         if (attempt === 1 && missing.length === 0 && duplicates.length > 0) {
           const deduped = dedupeRepeatedSubsections(withBlockShell);
           const dedupedChars = documentTextLength(deduped);
-          if (dedupedChars >= Math.max(400, Math.floor(block.targetWords * 0.4))) {
+          if (dedupedChars >= Math.floor(block.targetWords * 0.9)) {
             return deduped;
           }
         }
@@ -1725,8 +1711,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
       }
     }
     // 自愈拆半：要点 ≥4 的块两次尝试仍未达标时，对半拆为两个子块各自成稿（仍在块级管线内，不降级逐小节）
-    // 2.4 超时检查：已超时间预算时跳过拆半自愈（拆半会再叠加最多 4 次串行 LLM 调用），快速判失败转紧凑备用
-    if (block.subPoints.length >= 4 && !blockTimedOut()) {
+    if (block.subPoints.length >= 4) {
       const mid = Math.ceil(block.subPoints.length / 2);
       const halfTarget = Math.max(800, Math.floor(block.targetWords / 2));
       // 拆半后子块标题加（一）/（二）后缀，避免两个半块补出相同 H3 外壳造成标题重复

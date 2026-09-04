@@ -2,7 +2,8 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
+import { loadBetterSqlite3 } from '@customize-agent/knowledge';
 import { previewPromptRules } from '../../services/document-workflow/promptRuleExtraction';
 
 type RegistryRow = Record<string, unknown>;
@@ -30,7 +31,7 @@ function isInternalResidualProject(projectRoot: string): boolean {
 
 /** 打开项目注册表数据库 */
 function openRegistry(readonly: boolean) {
-  return fs.existsSync(registryPath) ? new Database(registryPath, { readonly }) : null;
+  return fs.existsSync(registryPath) ? new (loadBetterSqlite3())(registryPath, { readonly }) : null;
 }
 
 /** 获取所有允许访问的项目根目录集合（排除内部残留项目） */

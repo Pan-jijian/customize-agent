@@ -1,6 +1,5 @@
 import type { DocumentGenerationDiagnostics, ValidationIssue } from './types';
 import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
-import { stableHash } from './utils';
 import { docSystemPrefix } from './markdownComposer';
 import type { DecisionLockEntry } from './decisionLock';
 import { decisionLockCategoryMeta, decisionMentionNegated } from './decisionLock';
@@ -136,32 +135,12 @@ export function dataConsistencyConflictIssue(conflict: DataConsistencyConflict):
   };
 }
 
-/** 矛盾消息数值对签名（复检同源判定用）：提取全部数字 token 去重排序拼接（出现次数不影响签名） */
-export function conflictNumericKey(message: string): string {
-  return [...new Set([...message.matchAll(/[\d,]+(?:\.\d+)?/gu)]
-    .map(match => match[0].replace(/[,，]/gu, ''))
-    .filter(token => token.length >= 2))]
-    .sort((a, b) => Number(a) - Number(b))
-    .join('|');
-}
-
-/** 批量化复检（数据一致性修复轮末统一重审用）：一次全文审查后按数值对签名判定各 issue 消息是否仍残留。
- * 与 per-issue 复检的逐字比对口径不同：修复会改写矛盾句原文，逐字比对在批量化下必然误判；
- * 改用冲突数值对签名比对——签名仍在即矛盾未消除（宁多勿漏，残留由后续防线兜底）。 */
-export async function reviewDataConsistencyBatched(markdown: string, issueMessages: string[], options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {}): Promise<string[]> {
-  const conflicts = await reviewDataConsistency(markdown, options);
-  if (conflicts.length === 0) return [];
-  const conflictKeys = new Set(conflicts.map(conflict => conflictNumericKey(dataConsistencyConflictIssue(conflict).message)).filter(Boolean));
-  return issueMessages.filter(message => conflictKeys.has(conflictNumericKey(message)));
-}
-
 /**
  * 1.3 语义矛盾检测（确定性闭集比对，零 LLM 成本）：工艺路线/机械选型/材料供应这类
  * "实体-选择"矛盾不含数值差异，数值审查层（reviewDataConsistency）完全盲区
  * （实锤：决策应锁塔吊但后章写施工电梯）。检测与 1.2 决策锁同源——类目 relevance/选项别名/否定口径
  * 全部复用 decisionLock 单一事实源：句子命中类目且出现锁外选项别名（非否定语境）即冲突。
  * 闭集空间可枚举，不引入 bge 语义召回——锁构建侧同样按别名计分，双源口径漂移比边际召回更要命。
- * env DOCUMENT_SEMANTIC_CHOICE_CHECK=0 回退（返回空清单）。
  */
 export interface SemanticChoiceConflict {
   /** 决策锁类目 id（vertical_transport/formwork/concrete_supply/scaffold/foundation_support/earthwork_haul） */
@@ -177,7 +156,6 @@ export interface SemanticChoiceConflict {
 }
 
 export function semanticChoiceConflicts(markdown: string, decisionLock: DecisionLockEntry[]): SemanticChoiceConflict[] {
-  if (process.env.DOCUMENT_SEMANTIC_CHOICE_CHECK === '0') return [];
   if (decisionLock.length === 0) return [];
   const conflicts: SemanticChoiceConflict[] = [];
   const seen = new Set<string>();
@@ -221,24 +199,3 @@ export function semanticChoiceConflictIssue(conflict: SemanticChoiceConflict): V
   };
 }
 
-/**
- * D3 快照复用工厂：同一正文的重复审查（blocker 复检 / 交付前轮 / 交付前复检）只跑一次 LLM。
- * 三防线防脏设计：
- * ① 正文哈希门禁——markdown 任一字节变化（修复 patch 落位后）即作废重跑，杜绝复用陈旧矛盾清单；
- * ② 快照写入门禁——仅当本次调用未产生 LLM 错误（diagnostics.llm.lastError 未变化）才写快照，
- *    LLM 瞬态失败返回空清单与「确实无矛盾」不可区分，失败场景不写快照、后续调用重跑，宁可少复用不可脏复用；
- * ③ 内存级生命周期——快照是工厂闭包局部变量，不跨生成任务共享。
- */
-export function buildDataConsistencyReviewCached(input: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics }) {
-  let snapshot: { markdownHash: string; conflicts: DataConsistencyConflict[] } | undefined;
-  return async (markdown: string): Promise<DataConsistencyConflict[]> => {
-    const markdownHash = stableHash(markdown);
-    if (snapshot?.markdownHash === markdownHash) return snapshot.conflicts;
-    // 调用前清空 lastError 哨兵：reviewDataConsistency 内部仅失败路径写 lastError（llmClient 契约），
-    // 调用后仍为空即本次审查成功（含数值句不足 2 条不调 LLM 的确定性短路）
-    if (input.diagnostics) input.diagnostics.llm.lastError = undefined;
-    const conflicts = await reviewDataConsistency(markdown, { signal: input.signal, diagnostics: input.diagnostics });
-    if (input.diagnostics?.llm.lastError === undefined) snapshot = { markdownHash, conflicts };
-    return conflicts;
-  };
-}

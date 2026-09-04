@@ -14,7 +14,7 @@ import type { LLMSearchProvider } from '../llm/llm-search-provider.js';
 import { FederationSearch, type FederatedResult, type FederatedSearchItem, type RetrievalWeights, type SearchFilters } from '../search/federation-search.js';
 import type { ClassifiedFile, DiffResult, IndexStateRecord, KBScope, KnowledgeBaseStats, ProjectConfig } from '../types.js';
 import { CollectionManager } from '../vector/collection-manager.js';
-import { HNSWVectorStore } from '../vector/hnsw-vector-store.js';
+import { HNSWVectorStore, isHnswNativeAvailable } from '../vector/hnsw-vector-store.js';
 import type { VectorStoreInterface } from '../vector/types.js';
 import { VectorIndexer, type VectorIndexResult } from '../vector/vector-indexer.js';
 import { ChangeTracker } from './change-tracker.js';
@@ -376,7 +376,7 @@ export class KnowledgeBaseManager {
     if (options.vectorMode !== 'defer') {
       for (const file of filesToIndex) {
         if (vectorStatus.status === 'error') this.updateJobsForFile(file.relativePath, 'ERROR', 100, 'HNSWLib 向量入库失败', vectorStatus.error);
-        else this.updateJobsForFile(file.relativePath, 'SUCCESS', 100, '解析、切片和向量索引完成');
+        else this.updateJobsForFile(file.relativePath, 'SUCCESS', 100, vectorStatus.status === 'unavailable' ? '解析和切片已完成（向量索引不可用，文本检索正常）' : '解析、切片和向量索引完成');
       }
     }
     const vectorDeferred = options.vectorMode === 'defer';
@@ -702,6 +702,16 @@ export class KnowledgeBaseManager {
   }
 
   async indexVectors(options: { collectionName?: string; relativePath?: string; relativePaths?: string[]; cleanupCollectionNames?: Iterable<string>; limit?: number; rebuild?: boolean } = {}): Promise<VectorIndexResult[]> {
+    // 原生绑定缺失（npm allow-scripts 阻断 install 脚本、平台无预编译产物或 ABI 不匹配）时
+    // 向量化直接降级：文本索引与上传流程照常成功，向量状态标记 unavailable 供 UI 提示
+    if (!isHnswNativeAvailable()) {
+      const message = 'hnswlib-node native 绑定不可用，向量索引已降级（文本检索不受影响，可执行 npm rebuild hnswlib-node 恢复语义检索）';
+      this.store.setMetadata('vector_index_status', 'unavailable');
+      this.store.setMetadata('vector_index_error', message);
+      this.store.setMetadata('last_vector_index_at', String(Date.now()));
+      this.reportProgress({ stage: 'vectorizing', percent: 99, message, chunkCount: this.getStats().chunkCount, vectorStatus: this.getVectorStatus() });
+      return [];
+    }
     // 先清扫此前删除失败的孤儿向量（重试幂等，失败留队下次再试）
     await this.sweepOrphanVectors();
     const pendingRelativePaths = !options.rebuild && !options.relativePath && !options.relativePaths?.length

@@ -74,6 +74,9 @@ function isInvalidTitle(title: string, chapterTitle: string) {
   if (normalized === normalizePlannedTitle(chapterTitle)) return true;
   if (/^(?:目录|章节|大纲|要求|说明|注意|输出|格式|示例|占位|提示|概述|总体要求)$/u.test(normalized)) return true;
   if (/如需|应由|大模型|提示词|上下文|OUTLINE|JSON|小节标题/u.test(normalized)) return true;
+  // 评分项标题污染拦截：评分细目泄漏进目录时产生「2技术文件施工组织5分赋分」类标题，
+  // 评分项只可写进正文内容，禁止作为小节/要点标题（生成缺陷实证：6.6 节标题被评分项顶替）
+  if (/\d+\s*分(?:赋分|评[分判]|得)?|赋分|评分细则|评[分判]标准/u.test(normalized)) return true;
   if (/(.)\1/u.test(normalized)) return true;
   return false;
 }

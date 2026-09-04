@@ -6,13 +6,13 @@ function pageRepeat(line: string, count: number): string {
 }
 
 describe('cleanExtractedText 通用噪声清洗', () => {
-  it('删除全文高重复行（页眉/页脚）', () => {
+  it('删除全文高重复行（页眉/页脚，≥6 次）', () => {
     const body = '第一章 编制依据\n本施工组织设计依据招标文件、施工图纸及国家现行规范编制。\n';
-    const text = body + pageRepeat('某某项目施工总承包招标文件', 5);
+    const text = body + pageRepeat('某某项目施工总承包招标文件', 6);
     const result = cleanExtractedText({ text });
     expect(result.text).not.toContain('某某项目施工总承包招标文件');
     expect(result.text).toContain('第一章 编制依据');
-    expect(result.stats.headerFooterLines).toBe(5);
+    expect(result.stats.headerFooterLines).toBe(6);
   });
 
   it('高重复但含表格管道符的行不误删', () => {
@@ -28,6 +28,29 @@ describe('cleanExtractedText 通用噪声清洗', () => {
     const text = pageRepeat(line, 4);
     const result = cleanExtractedText({ text });
     expect(result.text).toBe(text);
+  });
+
+  it('跨页重复的正文规格参数行不误删（编号/完整句/技术参数/★ 保护）', () => {
+    // 设备参数表等正文随章节跨页重复 3-5 次，曾因「≥3 次高重复」被误判为页眉页脚删除
+    const repeated = [
+      pageRepeat('### （3）端子式双电源冗余供电，支持冗余电源间的无缝切换；', 5),
+      pageRepeat('### 拯救等；', 5),
+      pageRepeat('### 公共安全视频监控区域', 3),
+      pageRepeat('### 符号标志板', 3),
+    ].join('\n\n');
+    const singles = [
+      '### （7）耐盐雾试验',
+      '### 1、防护等级 IP66',
+      '### 其中标★技术指标项',
+    ].join('\n\n');
+    const result = cleanExtractedText({ text: `${singles}\n\n${repeated}` });
+    expect(result.text).toContain('端子式双电源冗余供电');
+    expect(result.text).toContain('拯救等；');
+    expect(result.text).toContain('公共安全视频监控区域');
+    expect(result.text).toContain('符号标志板');
+    expect(result.text).toContain('防护等级');
+    expect(result.text).toContain('★技术指标项');
+    expect(result.removedLines).toBe(0);
   });
 
   it('删除纯页码行（大文件），小文件保护不删', () => {
@@ -166,7 +189,7 @@ describe('cleanExtractedText 图纸噪声清洗', () => {
     const cadText = [
       '图纸节点: 门窗表.dwg',
       '基础平面布置图',
-      ...Array.from({ length: 5 }, () => 'FM1524'),
+      ...Array.from({ length: 6 }, () => 'FM1524'),
       'C35 混凝土垫层',
     ].join('\n');
     const cadResult = cleanExtractedText({ text: cadText, category: 'cad' });
@@ -175,7 +198,7 @@ describe('cleanExtractedText 图纸噪声清洗', () => {
     // 非图纸文件同类高重复行仍按页眉页脚删除（类型分流回归）
     const docResult = cleanExtractedText({ text: cadText, category: 'document' });
     expect(docResult.text).not.toContain('FM1524');
-    expect(docResult.stats.headerFooterLines).toBeGreaterThanOrEqual(5);
+    expect(docResult.stats.headerFooterLines).toBeGreaterThanOrEqual(6);
   });
 
   it('CAD 图纸纯数字标注行不删（尺寸/标高值非页码），非图纸文件大文件仍删', () => {

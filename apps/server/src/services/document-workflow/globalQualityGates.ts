@@ -9,6 +9,7 @@ import { buildSemanticSimilarity, snapshotEmbedCacheStats } from './semanticSimi
 import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, fixAdjacentPhraseDuplication, fixPlaceholderTableCells, fixQualityAssuranceCoverage, foundationFormResidueIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, stripOverviewRecapBodyLines, supportSystemConflictIssues } from './documentIntegrityChecks';
 import { applyDeterministicConsistencyFixes, crossChapterConsistencyIssues, processSpecConflictIssues } from './qualityValidation';
 import { reviewGlobalConsistency } from './chapterReview';
+import { dataConsistencyConflictIssue, reviewDataConsistency } from './dataConsistencyReview';
 import { tablePlanExecutionGaps } from './constructionOrgTablePlan';
 import { measureGenerationStep, repairChapterByQuality } from './rolePipeline';
 
@@ -181,7 +182,7 @@ export async function repairTableExecutionGaps(input: {
         const baseChapter = { id: draft.id, title: draft.title, content: draft.content, evidence: scopedEvidence.length ? scopedEvidence : draft.evidence, missingFacts: draft.missingFacts || [], sections: draft.sections };
         const baseIssue = `计划表格缺失（计划 ${gap.planned} 张，实际仅 ${gap.actual} 张）：${gap.plans.map(plan => `${plan.title}（表头：${plan.fields.map(field => field.name).join('、')}）`).join('；')}。必须按表头字段补齐这些 markdown 表格并紧跟相关小节输出，不得删除已有正文；每个表格前须有 1～2 句引导叙述说明表格作用与关键结论，表格不能替代小节正文；deriveFromProject 字段基于项目工程量、总工期与工序流水按定额工效推导具体数值，projectFactOnly 字段不得编造。`;
         // 并行修复共享 diagnostics.llm.lastError，重试提示中的失败原因存在轻微串章竞争（仅影响诊断文案，不影响修复正确性）
-        let repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `table-execution-repair:${draft.id}`, () => repairChapterByQuality({
+        const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `table-execution-repair:${draft.id}`, () => repairChapterByQuality({
           template,
           chapter: baseChapter,
           issues: [baseIssue],
@@ -235,7 +236,7 @@ export async function repairTableExecutionGaps(input: {
 
 /**
  * 全局一致性审查闭环：LLM 全文审查 + 确定性检测同源合并 → 数值定点替换（前置降轮次）→
- * 跨章冲突 LLM 定向修复（默认 1 轮，DOCUMENT_GLOBAL_REVIEW_ROUNDS=2 恢复双轮，按章并行）→ 确定性定点修复（后置清零）→ 确定性去重。
+ * 跨章冲突 LLM 定向修复（单轮按章并行，不留多轮回退路径）→ 确定性定点修复（后置清零）→ 确定性去重。
  * 审查发现的确定性数值冲突先进入定向修复闭环（修复→复检），仍有残留才注入导出校验升级为阻断。
  * 返回 issues（供 finalize 注入导出校验）与 dedupRan（供补表后去重判断：内容未变时 stripDuplicate* 幂等，可安全跳过）。
  */
@@ -266,6 +267,23 @@ export async function runGlobalConsistencyReviewLoop(input: {
       : chapterDraftsFinal.filter((chapter, index) => index % Math.max(2, Math.round(1 / samplingRate)) === 0);
     const sampledCount = sampledChapters.length;
     const runGlobalReview = () => withProgressHeartbeat(() => reviewGlobalConsistency({ template, chapters: sampledChapters, chapterReviews: [], promptTexts: reviewPromptTexts, requirement, projectContext, diagnostics: generationDiagnostics, signal }));
+    // v3 阶段 2：统一一致性审查——全局一致性 LLM 审查与数据一致性数值矛盾审查并行合并为单一问题清单。
+    // reviewDataConsistency 不再单独跑一轮（历史：初稿完成后另起一轮全文数值审查，再转 blocker 修复），
+    // 矛盾清单直接并入统一问题清单冻结（初稿即修复基准，阶段 3 只消费清单不再重审全文）。
+    const runUnifiedLlmReview = async (): Promise<{ issues: string[]; stage: Awaited<ReturnType<typeof runGlobalReview>>['stage'] }> => {
+      const fullReviewMarkdown = chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
+      const [globalResult, dataConflicts] = await Promise.all([
+        runGlobalReview(),
+        reviewDataConsistency(fullReviewMarkdown, { diagnostics: generationDiagnostics, signal }),
+      ]);
+      return {
+        issues: [...new Set([...globalResult.issues, ...dataConflicts.map(conflict => {
+          const issue = dataConsistencyConflictIssue(conflict);
+          return `${issue.message}；${issue.suggestion || ''}`;
+        })])],
+        stage: globalResult.stage,
+      };
+    };
     // 确定性冲突检测（crossChapterConsistencyIssues / processSpecConflictIssues + documentIntegrityChecks
     // h13/h14/h15 检测家族）：正文出现与资料建设规模/估算价/结构层规格不一致的取值、劳动力/设备数量跨章矛盾、
     // 两可表述、基坑深度未锁定、危大清单不一致、表格/段落重复等问题时，确定性检测比 LLM 审查更精确；
@@ -298,7 +316,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
         ...(await crossChapterSemanticDuplicateIssues(chapterDraftsFinal)),
       ].map(issue => `${issue.message}；${issue.suggestion || ''}`);
     };
-    const globalReview = await runGlobalReview();
+    const globalReview = await runUnifiedLlmReview();
     // LLM 审查 issue 与确定性检测 issue 分离：确定性部分在每轮复检/定点修复后全量重跑替换，
     // 不得合并保留已修复问题的旧快照（历史缺陷：确定性修复已生效但旧快照残留，
     // 被 finalize 包装为「跨章一致性复核」error 硬阻断导出）
@@ -323,9 +341,9 @@ export async function runGlobalConsistencyReviewLoop(input: {
     // P1-1 复检瘦身：确定性复检每轮必做（零 LLM 成本）；LLM 复检仅最后一轮或确定性清零时执行一次，
     // stale 标志标记「跳过 LLM 复检」的轮次，防空转 break 时旧快照残留被 finalize 包装为 error 硬阻断
     let llmReviewStale = false;
-    // 2.3 评审轮合并：全局一致性 LLM 定向修复 2 轮 → 默认 1 轮（采样率模型已具备，单轮即可覆盖）；
-    // DOCUMENT_GLOBAL_REVIEW_ROUNDS=2 恢复双轮。轮次上限收敛为 1-2 闭区间，防 env 误配放大 LLM 预算
-    const globalReviewRounds = Math.max(1, Math.min(2, Number(process.env.DOCUMENT_GLOBAL_REVIEW_ROUNDS || 1) || 1));
+    // v3 阶段 3：统一修复模式——问题清单冻结后每缺陷只修一次，固定单轮修复（一次修复 + 末尾统一复检一次）；
+    // 旧 DOCUMENT_GLOBAL_REVIEW_ROUNDS env 多轮开关已删除（不留回退路径）
+    const globalReviewRounds = 1;
     for (let repairRound = 0; repairRound < globalReviewRounds && globalConsistencyIssues.length > 0; repairRound += 1) {
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-repair', status: 'running', message: `跨章一致性冲突第 ${repairRound + 1} 轮定向修复（${globalConsistencyIssues.length} 个冲突）` }, { subtitle: '跨章一致性修复' }));
       emitProgress(chapterDraftsFinal);
@@ -391,7 +409,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
       if (appliedCount === 0) {
         // 本轮无 patch 落地、正文未变：若上一轮跳过 LLM 复检，需补一次刷新快照，
         // 避免已修复的 LLM issue 旧快照残留被 finalize 包装为「跨章一致性复核」error 硬阻断
-        if (llmReviewStale) llmReviewIssues = (await runGlobalReview()).issues;
+        if (llmReviewStale) llmReviewIssues = (await runUnifiedLlmReview()).issues;
         break;
       }
       emitProgress(chapterDraftsFinal);
@@ -401,7 +419,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
       // 2.3：末轮判定跟随 env 轮次上限（单轮模式下首轮即末轮，LLM 复检保留一次）
       const finalRound = repairRound === globalReviewRounds - 1;
       if (finalRound || deterministicRecheck.length === 0) {
-        llmReviewIssues = (await runGlobalReview()).issues;
+        llmReviewIssues = (await runUnifiedLlmReview()).issues;
         llmReviewStale = false;
       } else {
         llmReviewStale = true;

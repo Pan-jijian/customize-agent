@@ -1,0 +1,23 @@
+{
+  "name": "@customize-agent/bsqlite3-win32-x64",
+  "version": "1.0.0",
+  "description": "better-sqlite3 12.10.0 prebuilt native binding for win32-x64 (redistributed from official GitHub releases)",
+  "main": "index.js",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "license": "MIT",
+  "files": [
+    "index.js",
+    "prebuilds/"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -522,7 +522,7 @@ export interface DocumentPerformanceMetric {
 export interface DocumentGenerationDiagnostics {
   strategy: DocumentGenerationStrategy;
   metrics: DocumentPerformanceMetric[];
-    llm: { calls: number; failures: number; maxActive: number; lastError?: string; lastInfo?: string; retries: number; failureStreak?: number; schemaFailures?: number; thinkingWarning?: string; promptCacheHitTokens?: number; promptCacheMissTokens?: number; reasoningTokens?: number; inputTokens?: number; outputTokens?: number; inputChars?: number; patchGuardHits?: number; patchGuardRejects?: number; qingtianDedupeHits?: number; qingtianDedupeSkipped?: number; layerChars?: { l0: number; l1: number; l2: number; l3: number }; unlayeredChars?: number;
+    llm: { calls: number; failures: number; maxActive: number; lastError?: string; lastInfo?: string; retries: number; failureStreak?: number; schemaFailures?: number; thinkingWarning?: string; promptCacheHitTokens?: number; promptCacheMissTokens?: number; reasoningTokens?: number; inputTokens?: number; outputTokens?: number; inputChars?: number; patchGuardHits?: number; patchGuardRejects?: number; layerChars?: { l0: number; l1: number; l2: number; l3: number }; unlayeredChars?: number;
     /** 4.1 per-调用分量观测：按 prefixKey 分组累计 次数/输入字符/L3 字符/缓存命中/未命中 token（无 prefixKey 归入 '(none)'），进度页后台诊断展示 Top5 输入大头 */
     callBreakdown?: Record<string, { calls: number; inputChars: number; l3Chars: number; cacheHitTokens: number; cacheMissTokens: number }> };
     semantic: { embedCacheHits: number; embedCacheMisses: number };

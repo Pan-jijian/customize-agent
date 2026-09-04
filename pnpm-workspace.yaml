@@ -2,6 +2,13 @@ packages:
   - "apps/*"
   - "packages/*"
 
+# 统一 onnxruntime-node 到 1.27.0：transformers@3.8.x 精确锁 1.21.0，
+# 与顶层 paddleocr.js 使用的 1.27.0 同进程共存会导致两个 libonnxruntime
+# dylib 同时加载，native 内存状态错乱 → InferenceSessionWrap 析构 double free
+# → SIGABRT（vectorizing 中途崩溃）
+overrides:
+  onnxruntime-node: 1.27.0
+
 peerDependencyRules:
   allowAny:
     - tree-sitter

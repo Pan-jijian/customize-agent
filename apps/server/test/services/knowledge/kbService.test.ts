@@ -18,6 +18,7 @@ vi.mock('better-sqlite3', () => ({
 vi.mock('@customize-agent/knowledge', async () => {
   const { mkdtempSync } = await import('node:fs');
   const { join } = await import('node:path');
+  const { default: Database } = await import('better-sqlite3');
   let kbDataDir = '';
   class FakeIndexStateStore {
     listRecords() { return (globalThis as Globals).__kbIndexRecords ?? []; }
@@ -37,6 +38,7 @@ vi.mock('@customize-agent/knowledge', async () => {
     }),
     IndexStateStore: FakeIndexStateStore,
     MultiProjectManager: FakeMultiProjectManager,
+    loadBetterSqlite3: () => Database,
   };
 });
 vi.mock('os', async () => {

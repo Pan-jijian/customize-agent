@@ -201,9 +201,10 @@ export function getDocumentLlmMaxConcurrency() {
 
 export function isTransientLlmError(error: unknown): boolean {
   const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
-  // abort/timeout 纳入瞬态：provider 层硬超时（响应头已回但 body 挂起时 AbortSignal.timeout 触发 abort）
-  // 属服务端 stall 类瞬态故障，重试一次大概率恢复；用户主动中止已在调用点按 signal.aborted 先行拦截，不受影响
-  return /connection error|econnrefused|econnreset|fetch failed|network|socket|eai_again|enotfound|etimedout|429|502|503|504|rate ?limit|too many requests|overloaded|服务繁忙|连接失败|abort|timeout|timed ?out/iu.test(text);
+  // 瞬态口径：网络错误 / HTTP 状态码 / undici 传输层超时终止（stall 时 headers、body 超时以
+  // "terminated" 报错；SDK 包装成 "Connection error."）——偶发故障重试一次大概率恢复；
+  // 用户主动中止已在调用点按 signal.aborted 先行拦截，不受影响
+  return /connection error|econnrefused|econnreset|fetch failed|network|socket|eai_again|enotfound|etimedout|429|502|503|504|rate ?limit|too many requests|overloaded|服务繁忙|连接失败|abort|timeout|timed ?out|terminated/iu.test(text);
 }
 
 /** 上下文超长错误识别（deepseek 输入超窗口返回 400）：供调用方做「缩减输入后降级重试」，
@@ -375,6 +376,9 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
     const EMPTY_CONTENT = Symbol('empty-content');
     const attemptOnce = async (maxTokensArg: number | undefined, thinkingTrimmingHint = false): Promise<string> => {
       if (options.signal?.aborted) throw new Error('用户中止');
+      // 无客户端时间限制：调用仅受用户中止信号约束；服务端故障、偶发 stall（undici 默认
+      // headers/body 超时 300s 后以明确错误返回）与 HTTP 状态码/网络错误一起由错误驱动重试处理
+      const callSignal = options.signal;
       const prefixFingerprint = llmPrefixFingerprint(system, prompt, options.prefixKey);
       // 4.17.1 前缀预热素材：共享前缀 = prompt 截断到 L3 变化段起点（contextLayers.l3 同源口径），
       // system 与正式发射逐字节一致（含 jsonOnly 后缀）；前缀 <500 字符无预热价值（不足 64-token 块粒度收益）
@@ -393,7 +397,7 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
             return provider.chat([
               { role: 'system', content: warmupSystem },
               { role: 'user', content: warmupPrefix },
-            ], { temperature: 0, maxTokens: 1, signal: options.signal, disableThinking: decision.disableThinking })
+            ], { temperature: 0, maxTokens: 1, signal: callSignal, disableThinking: decision.disableThinking })
               .then(warmResp => {
                 if (bucket && warmResp.usage) {
                   bucket.cacheHitTokens += warmResp.usage.promptCacheHitTokens || 0;
@@ -405,40 +409,42 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
         };
       })();
       const response = await new Promise<Awaited<ReturnType<typeof provider.chat>>>((resolve, reject) => {
-        schedulePrefixFriendlyLaunch(prefixFingerprint, () => {
-          if (options.signal?.aborted) {
-            reject(new Error('用户中止'));
-            return;
+          schedulePrefixFriendlyLaunch(prefixFingerprint, () => {
+            if (options.signal?.aborted) {
+              reject(new Error('用户中止'));
+              return;
+            }
+            provider.chat([
+              { role: 'system', content: jsonOnly ? `${system}\n只返回 JSON，不要返回 markdown。` : system },
+              { role: 'user', content: thinkingTrimmingHint ? `${prompt}\n\n（重要：缩短思考过程，直接给出最终结论。）` : prompt },
+            ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: maxTokensArg, signal: callSignal, disableThinking: decision.disableThinking })
+              .then(resolve)
+              .catch((error: unknown) => {
+                reject(error instanceof Error ? error : new Error(String(error)));
+              });
+          }, warmup?.warmup, warmup?.warmupKey);
+        });
+        const content = response.content?.trim() ?? '';
+        if (content) {
+          // usage 指标累计（仅成功路径；失败/空响应无有效 usage 不累计）
+          // prompt_cache_hit/miss_tokens 为 DeepSeek prefix cache 指标，用于验证 system/user 分离的缓存收益
+          if (options.diagnostics && response.usage) {
+            const stats = options.diagnostics.llm;
+            stats.inputTokens = (stats.inputTokens || 0) + response.usage.promptTokens;
+            stats.outputTokens = (stats.outputTokens || 0) + response.usage.completionTokens;
+            stats.promptCacheHitTokens = (stats.promptCacheHitTokens || 0) + (response.usage.promptCacheHitTokens || 0);
+            stats.promptCacheMissTokens = (stats.promptCacheMissTokens || 0) + (response.usage.promptCacheMissTokens || 0);
+            // 4.1 per-调用分量：缓存命中/未命中 token 同组累计（仅成功路径有有效 usage）
+            const bucket = callBreakdownBucket(options.diagnostics, options.prefixKey);
+            bucket.cacheHitTokens += response.usage.promptCacheHitTokens || 0;
+            bucket.cacheMissTokens += response.usage.promptCacheMissTokens || 0;
+            // 推理 token 观测：生成任务要求关闭思考，reasoningTokens>0 说明 disableThinking 未生效
+            // （空响应/正文截断类缺陷的根因观测点，4a）
+            if (response.usage.reasoningTokens) stats.reasoningTokens = (stats.reasoningTokens || 0) + response.usage.reasoningTokens;
           }
-          provider.chat([
-            { role: 'system', content: jsonOnly ? `${system}\n只返回 JSON，不要返回 markdown。` : system },
-            { role: 'user', content: thinkingTrimmingHint ? `${prompt}\n\n（重要：缩短思考过程，直接给出最终结论。）` : prompt },
-          ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: maxTokensArg, signal: options.signal, disableThinking: decision.disableThinking })
-            .then(resolve)
-            .catch((error: unknown) => reject(error instanceof Error ? error : new Error(String(error))));
-        }, warmup?.warmup, warmup?.warmupKey);
-      });
-      const content = response.content?.trim() ?? '';
-      if (content) {
-        // usage 指标累计（仅成功路径；失败/空响应无有效 usage 不累计）
-        // prompt_cache_hit/miss_tokens 为 DeepSeek prefix cache 指标，用于验证 system/user 分离的缓存收益
-        if (options.diagnostics && response.usage) {
-          const stats = options.diagnostics.llm;
-          stats.inputTokens = (stats.inputTokens || 0) + response.usage.promptTokens;
-          stats.outputTokens = (stats.outputTokens || 0) + response.usage.completionTokens;
-          stats.promptCacheHitTokens = (stats.promptCacheHitTokens || 0) + (response.usage.promptCacheHitTokens || 0);
-          stats.promptCacheMissTokens = (stats.promptCacheMissTokens || 0) + (response.usage.promptCacheMissTokens || 0);
-          // 4.1 per-调用分量：缓存命中/未命中 token 同组累计（仅成功路径有有效 usage）
-          const bucket = callBreakdownBucket(options.diagnostics, options.prefixKey);
-          bucket.cacheHitTokens += response.usage.promptCacheHitTokens || 0;
-          bucket.cacheMissTokens += response.usage.promptCacheMissTokens || 0;
-          // 推理 token 观测：生成任务要求关闭思考，reasoningTokens>0 说明 disableThinking 未生效
-          // （空响应/正文截断类缺陷的根因观测点，4a）
-          if (response.usage.reasoningTokens) stats.reasoningTokens = (stats.reasoningTokens || 0) + response.usage.reasoningTokens;
+          return content;
         }
-        return content;
-      }
-      throw EMPTY_CONTENT;
+        throw EMPTY_CONTENT;
     };
     // 瞬态错误/空响应重试一次：连接失败、限流、5xx 或思考耗尽预算导致的空响应
     // 直接导致章节降级和后续数轮无效修复，秒级重试代价远小于分钟级降级链；成功路径不重试，重试遵守 AbortSignal

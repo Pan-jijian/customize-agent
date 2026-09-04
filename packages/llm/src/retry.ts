@@ -21,11 +21,12 @@ function abortError() {
 export function isRetryableError(err: unknown): boolean {
   if (err instanceof Error) {
     const msg = err.message.toLowerCase();
-    // 网络错误
+    // 网络错误（含 undici 传输层：连接失败 / headers、body 超时终止 "terminated"）
     if (msg.includes('econnrefused') || msg.includes('econnreset') ||
         msg.includes('etimedout') || msg.includes('enotfound') ||
         msg.includes('network') || msg.includes('abort') ||
-        msg.includes('fetch failed')) {
+        msg.includes('fetch failed') || msg.includes('terminated') ||
+        msg.includes('connection error')) {
       return true;
     }
     // HTTP 状态码匹配

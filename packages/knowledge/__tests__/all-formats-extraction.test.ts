@@ -397,6 +397,23 @@ describe('Garbled text filtering', () => {
     expect(result.text).not.toContain('罍');
     expect(result.text).toContain('拆除工程量清单');
   });
+
+  it('parses OpenXML ZIP disguised as .xls by XML content instead of binary strings', async () => {
+    // 真实故障样本：Word 文档（docx/ZIP）被改名 .xls 上传，二进制字符串抽取把 ZIP 流
+    // 误读为 GBK 乱码汉字（每个字都不同，可读性过滤无法识别），必须按 ZIP 内 XML 解析
+    const jszipMod = await resolveAndImport('jszip');
+    const JSZip = ((jszipMod as Record<string, unknown>).default ?? jszipMod) as { new (): { file: (name: string, data: string) => void; generateAsync: (opts: { type: string }) => Promise<Buffer> } };
+    const zip = new JSZip();
+    zip.file('word/document.xml', '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>门卫土建工程施工做法说明</w:t></w:r></w:p><w:p><w:r><w:t>砌体工程砂浆强度等级符合设计要求</w:t></w:r></w:p></w:body></w:document>');
+    zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types/>');
+    const zipBuf = await zip.generateAsync({ type: 'nodebuffer' });
+    const file = makeFile('sheets/disguised-docx.xls', zipBuf);
+    const result = await extractor.extract(file);
+    expect(result.text).toContain('门卫土建工程施工做法说明');
+    expect(result.text).toContain('砌体工程砂浆强度等级符合设计要求');
+    expect(result.text).not.toMatch(/[灢漏撿爛]/u); // 无 GBK 误读乱码
+    expect(String(result.warnings.join(' '))).toContain('真实格式为 OpenXML ZIP');
+  });
 });
 
 // ─── 8.6 图纸无字符数据不入库 ─────────────────────────

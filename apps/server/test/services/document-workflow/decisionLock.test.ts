@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { DocumentEvidence, DocumentFact } from '@/services/document-workflow/types';
 import { buildDecisionLock, renderDecisionLock } from '@/services/document-workflow/decisionLock';
 
@@ -9,10 +9,6 @@ function evidenceOf(content: string, overrides: Partial<DocumentEvidence> = {}):
 function factOf(overrides: Partial<DocumentFact> = {}): DocumentFact {
   return { key: '垂直运输', value: '塔吊', sourceFile: '/data/招标文件.txt', roleId: 'project_basic_fact', confidence: 0.9, ...overrides };
 }
-
-afterEach(() => {
-  delete process.env.DOCUMENT_DECISION_LOCK;
-});
 
 describe('buildDecisionLock', () => {
   it('证据支撑的类目被锁定为对应取值', () => {
@@ -57,12 +53,6 @@ describe('buildDecisionLock', () => {
     });
     const support = entries.find(item => item.id === 'foundation_support');
     expect(support?.values).toContain('土钉墙支护');
-  });
-
-  it('env DOCUMENT_DECISION_LOCK=0 整体回退', () => {
-    process.env.DOCUMENT_DECISION_LOCK = '0';
-    const entries = buildDecisionLock({ facts: [], evidence: [evidenceOf('垂直运输采用塔吊。')] });
-    expect(entries).toEqual([]);
   });
 });
 

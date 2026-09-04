@@ -51,9 +51,12 @@ function writeAll(projectRoot: string, records: KbOperationRecord[]) {
 }
 
 /** 进程启动时刻：仅将 updatedAt 早于该时刻的 processing 记录视为“重启遗留”任务。
+ * 必须用 process.uptime() 反推真实进程启动时刻，而非模块加载时刻 Date.now()：
  * Next.js 按需编译（dev）或 chunk 分割下，本模块可能被多个 API 路由各自实例化，
- * 模块级 Set/Map 无法跨实例共享，恢复判定必须依赖记录时间戳，天然幂等且不会误标新任务。 */
-const PROCESS_START_AT = Date.now();
+ * 若取模块加载时刻，任务提交后才首次编译的 bundle 实例会把“正在运行的新任务”
+ * （其 updatedAt 早于该实例的加载时刻）误标为“服务重启导致任务中断”。
+ * uptime 反推值在同一进程内所有实例一致，天然幂等且不会误标新任务。 */
+const PROCESS_START_AT = Math.round(Date.now() - process.uptime() * 1000);
 
 interface LogCacheEntry { mtimeMs: number; records: KbOperationRecord[] }
 
@@ -121,7 +124,10 @@ export function upsertKbOperation(projectRoot: string, patch: Omit<Partial<KbOpe
     chunkCount: patch.chunkCount ?? current?.chunkCount,
     textLength: patch.textLength ?? current?.textLength,
     extractionMode: patch.extractionMode ?? current?.extractionMode,
-    error: patch.error ?? current?.error,
+    // 补丁明确处于非错误状态（processing/success）时清空残留 error：
+    // 恢复逻辑的误标/历史错误一旦残留，后续正常运行补丁（不含 error 字段）会一直携带
+    // 旧错误信息，导致成功任务仍显示失败原因。
+    error: patch.status && patch.status !== 'error' ? undefined : patch.error ?? current?.error,
     details: patch.details ?? current?.details,
     createdAt: current?.createdAt ?? now,
     updatedAt: now,

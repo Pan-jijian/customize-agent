@@ -1,4 +1,5 @@
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
+import { loadBetterSqlite3 } from './sqlite-loader.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { TextChunk } from '../chunking/text-chunker.js';
@@ -112,7 +113,7 @@ export class IndexStateStore {
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    this.db = new Database(dbPath);
+    this.db = new (loadBetterSqlite3())(dbPath);
     this.db.pragma('journal_mode = WAL');
     // P1-8 SQLite 并发读加固：显式 busy_timeout（kb.db 大库并发读曾出现 SQLITE_READONLY 瞬态，
     // WAL 模式下写锁升级竞争由 busy_timeout 兜底等待，避免立即抛锁错误）

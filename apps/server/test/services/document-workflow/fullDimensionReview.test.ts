@@ -216,69 +216,6 @@ describe('runFullDimensionReview', () => {
       delete process.env.DOCUMENT_QINGTIAN_PATCH_GUARD;
     }
   });
-
-  it('2.2 去重 observe（默认）：命中已修签名照常修复并计数 qingtianDedupeHits', async () => {
-    const diagnostics = mockDiagnostics();
-    const quote = '本工程按工作包组织施工。';
-    llmMock
-      .mockResolvedValueOnce({ issues: [{ dimension: '内容质量', location: '工程概况', quote, riskLevel: '高风险', basis: '内容质量维度', description: '后台内部术语' }], templatingLevel: '无' })
-      .mockResolvedValueOnce({ issues: [], templatingLevel: '无' });
-    repairMock.mockResolvedValue({ content: '修复后正文', appliedCount: 1, producedCount: 1, repairType: 'quality' as never });
-    const chapters = [makeChapter('1', '工程概况', '一般来说，本项目按照常规施工组织。'.repeat(40))];
-    await runFullDimensionReview({
-      template: {} as DocumentTemplate,
-      chapters,
-      effectiveChapters: [{ id: '1', title: '工程概况' }] as unknown as DocumentTemplateChapter[],
-      // 签名 = code + 归一化原文（句读空白剥离）
-      resolvedBlockerSignatures: new Set([`internal-term\u0000本工程按工作包组织施工`]),
-      diagnostics,
-    });
-    expect(repairMock).toHaveBeenCalledTimes(1);
-    expect(diagnostics.llm.qingtianDedupeHits).toBe(1);
-    expect(diagnostics.llm.qingtianDedupeSkipped).toBeUndefined();
-  });
-
-  it('2.2 去重 enforce：命中已修签名的高风险 issue 跳过 LLM 修复并降级进剩余清单', async () => {
-    process.env.DOCUMENT_CROSS_SYSTEM_DEDUPE = 'enforce';
-    try {
-      const diagnostics = mockDiagnostics();
-      const quote = '本工程按工作包组织施工。';
-      llmMock.mockResolvedValueOnce({ issues: [{ dimension: '内容质量', location: '工程概况', quote, riskLevel: '高风险', basis: '内容质量维度', description: '后台内部术语' }], templatingLevel: '无' });
-      const chapters = [makeChapter('1', '工程概况', '一般来说，本项目按照常规施工组织。'.repeat(40))];
-      const result = await runFullDimensionReview({
-        template: {} as DocumentTemplate,
-        chapters,
-        effectiveChapters: [{ id: '1', title: '工程概况' }] as unknown as DocumentTemplateChapter[],
-        resolvedBlockerSignatures: new Set([`internal-term\u0000本工程按工作包组织施工`]),
-        diagnostics,
-      });
-      expect(repairMock).not.toHaveBeenCalled();
-      expect(diagnostics.llm.qingtianDedupeSkipped).toBe(1);
-      expect(diagnostics.llm.qingtianDedupeHits).toBeUndefined();
-      expect(result.remainingIssues.some(issue => issue.quote === quote)).toBe(true);
-    } finally {
-      delete process.env.DOCUMENT_CROSS_SYSTEM_DEDUPE;
-    }
-  });
-
-  it('2.2 去重：原文片段未命中签名时正常修复且不计数', async () => {
-    const diagnostics = mockDiagnostics();
-    llmMock
-      .mockResolvedValueOnce({ issues: [{ dimension: '模板化', location: '工程概况', quote: '一般来说，本项目按照常规施工组织。', riskLevel: '高风险', basis: '模板化判定', description: '通用句式残留' }], templatingLevel: '无' })
-      .mockResolvedValueOnce({ issues: [], templatingLevel: '无' });
-    repairMock.mockResolvedValue({ content: '修复后正文', appliedCount: 1, producedCount: 1, repairType: 'quality' as never });
-    const chapters = [makeChapter('1', '工程概况', '一般来说，本项目按照常规施工组织。'.repeat(40))];
-    await runFullDimensionReview({
-      template: {} as DocumentTemplate,
-      chapters,
-      effectiveChapters: [{ id: '1', title: '工程概况' }] as unknown as DocumentTemplateChapter[],
-      resolvedBlockerSignatures: new Set(['internal-term\u0000本工程按工作包组织施工']),
-      diagnostics,
-    });
-    expect(repairMock).toHaveBeenCalledTimes(1);
-    expect(diagnostics.llm.qingtianDedupeHits).toBeUndefined();
-    expect(diagnostics.llm.qingtianDedupeSkipped).toBeUndefined();
-  });
 });
 
 describe('qingtianReviewValidationIssues（W8 门禁接驳）', () => {

@@ -3,12 +3,11 @@
  * 数值句提取（L1 确定性结构提取）/ 矛盾转交付阻断 issue / 矛盾数值签名 / LLM 批量审查。
  * LLM 通道全部 mock（避免真实网络调用）。
  */
-import { beforeEach, describe, expect, it, vi, afterEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { callDocumentLlmJson } from '@/services/document-workflow/llmClient';
 import type * as LlmClientModule from '@/services/document-workflow/llmClient';
-import { buildDataConsistencyReviewCached, conflictNumericKey, dataConsistencyConflictIssue, numericSentencesForReview, reviewDataConsistency, reviewDataConsistencyBatched, semanticChoiceConflicts, semanticChoiceConflictIssue, type DataConsistencyConflict } from '@/services/document-workflow/dataConsistencyReview';
+import { dataConsistencyConflictIssue, numericSentencesForReview, reviewDataConsistency, semanticChoiceConflicts, semanticChoiceConflictIssue, type DataConsistencyConflict } from '@/services/document-workflow/dataConsistencyReview';
 import type { DecisionLockEntry } from '@/services/document-workflow/decisionLock';
-import type { DocumentGenerationDiagnostics } from '@/services/document-workflow/types';
 
 vi.mock('@/services/document-workflow/llmClient', async () => {
   const actual = await vi.importActual<typeof LlmClientModule>('@/services/document-workflow/llmClient');
@@ -68,17 +67,6 @@ describe('numericSentencesForReview（L1 数值句提取）', () => {
   });
 });
 
-describe('conflictNumericKey（矛盾数值签名）', () => {
-  it('提取全部数字 token 排序拼接', () => {
-    const message = '数据一致性矛盾（labor）：峰值80人与120人不符（原文 A：“高峰期80人” ↔ 原文 B：“高峰期120人”）';
-    expect(conflictNumericKey(message)).toBe('80|120');
-  });
-
-  it('无数字 token → 空串（去重时跳过）', () => {
-    expect(conflictNumericKey('数据一致性矛盾（other）：表述口径不一致。')).toBe('');
-  });
-});
-
 describe('reviewDataConsistency（LLM 批量审查）', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -130,108 +118,8 @@ describe('dataConsistencyConflictIssue（转交付阻断 issue）', () => {
   });
 });
 
-describe('reviewDataConsistencyBatched（修复轮末统一重审）', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('一次全文审查判定全部 issue：签名重合即残留', async () => {
-    const issueA = dataConsistencyConflictIssue(conflict({ kind: 'labor', itemA: '高峰期80人', itemB: '高峰期120人', confidence: 0.9 })).message;
-    const issueB = dataConsistencyConflictIssue(conflict({ kind: 'area', itemA: '建筑面积4368m2', itemB: '建筑面积5200m2', confidence: 0.9 })).message;
-    llmMock.mockResolvedValue({
-      conflicts: [
-        conflict({ kind: 'labor', itemA: '高峰期80人', itemB: '高峰期120人', confidence: 0.9 }),
-      ],
-    });
-    const remaining = await reviewDataConsistencyBatched('高峰期投入80人。\n高峰期投入120人。', [issueA, issueB]);
-    expect(remaining).toEqual([issueA]);
-    expect(llmMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('修复改写原文但数值对未变 → 仍判残留（宁多勿漏）', async () => {
-    const issueA = dataConsistencyConflictIssue(conflict({ kind: 'labor', itemA: '高峰期80人', itemB: '高峰期120人', confidence: 0.9 })).message;
-    // 修复后正文改写句式但数值对保留：签名比对不受逐字变化影响
-    llmMock.mockResolvedValue({
-      conflicts: [
-        conflict({ kind: 'labor', itemA: '现场高峰时段投入80人', itemB: '高峰期投入120人', confidence: 0.9 }),
-      ],
-    });
-    const remaining = await reviewDataConsistencyBatched('现场高峰时段投入80人。\n高峰期投入120人。', [issueA]);
-    expect(remaining).toEqual([issueA]);
-  });
-
-  it('当前审查无矛盾 → 全部消除', async () => {
-    const issueA = dataConsistencyConflictIssue(conflict({ confidence: 0.9 })).message;
-    llmMock.mockResolvedValue({ conflicts: [] });
-    const remaining = await reviewDataConsistencyBatched('高峰期投入80人。\n高峰期投入120人。', [issueA]);
-    expect(remaining).toEqual([]);
-    expect(llmMock).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('buildDataConsistencyReviewCached（D3 快照复用三防线）', () => {
-  const textA = '高峰期投入80人组织施工。\n高峰期投入120人组织施工。';
-  const textB = '高峰期投入80人组织施工。\n高峰期投入200人组织施工。';
-  const diagnostics = () => ({ llm: { lastError: undefined } }) as unknown as DocumentGenerationDiagnostics;
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('正文哈希门禁：同一正文两次调用只跑一次 LLM（命中复用）', async () => {
-    llmMock.mockResolvedValue({ conflicts: [conflict({ confidence: 0.9 })] });
-    const cached = buildDataConsistencyReviewCached({ diagnostics: diagnostics() });
-    const first = await cached(textA);
-    const second = await cached(textA);
-    expect(first).toHaveLength(1);
-    expect(second).toEqual(first);
-    expect(llmMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('正文哈希门禁：正文任一字节变化即作废重跑', async () => {
-    llmMock.mockResolvedValue({ conflicts: [] });
-    const cached = buildDataConsistencyReviewCached({ diagnostics: diagnostics() });
-    await cached(textA);
-    await cached(textB);
-    expect(llmMock).toHaveBeenCalledTimes(2);
-  });
-
-  it('写入门禁：LLM 失败（lastError 被写入）不写快照，后续调用重跑', async () => {
-    const diag = diagnostics();
-    llmMock.mockImplementation(async (_system: string, _prompt: string, options?: { diagnostics?: { llm: { lastError?: string } } }) => {
-      if (options?.diagnostics) options.diagnostics.llm.lastError = '模拟 LLM 瞬态失败';
-      return undefined;
-    });
-    const cached = buildDataConsistencyReviewCached({ diagnostics: diag });
-    expect(await cached(textA)).toEqual([]);
-    expect(await cached(textA)).toEqual([]);
-    expect(llmMock).toHaveBeenCalledTimes(2);
-  });
-
-  it('写入门禁：成功且空结果写空快照，复用空清单不再重跑', async () => {
-    llmMock.mockResolvedValue({ conflicts: [] });
-    const cached = buildDataConsistencyReviewCached({ diagnostics: diagnostics() });
-    expect(await cached(textA)).toEqual([]);
-    expect(await cached(textA)).toEqual([]);
-    expect(llmMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('不同工厂实例快照隔离（内存级生命周期，不跨任务共享）', async () => {
-    llmMock.mockResolvedValue({ conflicts: [conflict({ confidence: 0.9 })] });
-    const first = buildDataConsistencyReviewCached({ diagnostics: diagnostics() });
-    const second = buildDataConsistencyReviewCached({ diagnostics: diagnostics() });
-    await first(textA);
-    await second(textA);
-    expect(llmMock).toHaveBeenCalledTimes(2);
-  });
-});
-
 /** 1.3 语义矛盾检测（决策锁"实体-选择"冲突，确定性闭集比对零 LLM） */
 describe('semanticChoiceConflicts（1.3 语义矛盾检测）', () => {
-  afterEach(() => {
-    delete process.env.DOCUMENT_SEMANTIC_CHOICE_CHECK;
-  });
-
   const verticalLock: DecisionLockEntry[] = [{ id: 'vertical_transport', label: '垂直运输方式', values: ['塔式起重机'] }];
 
   it('决策锁=塔吊，正文写施工电梯 → 检出（实锤场景）', () => {
@@ -279,11 +167,6 @@ describe('semanticChoiceConflicts（1.3 语义矛盾检测）', () => {
 
   it('空决策锁 → 不报', () => {
     expect(semanticChoiceConflicts('人员上下通过施工电梯往返各楼层。', [])).toEqual([]);
-  });
-
-  it('env DOCUMENT_SEMANTIC_CHOICE_CHECK=0 整体回退', () => {
-    process.env.DOCUMENT_SEMANTIC_CHOICE_CHECK = '0';
-    expect(semanticChoiceConflicts('人员上下通过施工电梯往返各楼层。', verticalLock)).toEqual([]);
   });
 });
 

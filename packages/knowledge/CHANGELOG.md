@@ -1,5 +1,67 @@
 # @customize-agent/knowledge
 
+## 4.4.4
+
+### Patch Changes
+
+- 修复 PDF 空文本层图形页（扫描图/CAD 矢量图页）整页内容丢失：空文本层页若存在绘制内容（图片/矢量描边）则进入选择性 OCR 候选兜底；切分器对 "## PDF 第 N 页（OCR）" 强标题节强制独立，防止 section_title 错挂到前一节标题。
+
+## 4.4.3
+
+### Patch Changes
+
+- 修复 Windows 远端上传失败：better-sqlite3 原生绑定缺失自动补位 + transformers 动态加载
+
+  - 根因：npm≥11.6 阻止安装脚本 / prebuild-install 从 GitHub 下载失败 / 无编译工具链时，better-sqlite3 绑定缺失，上传直接报 "Could not locate the bindings file"，kb-worker 报错退出
+  - knowledge 新增 sqlite-loader：首次使用时探测绑定可用性，缺失则从分平台预编译绑定包（@customize-agent/bsqlite3-<platform>-<arch>，随 optionalDependencies 从 npm registry 安装）自动补位恢复，用户零操作
+  - 新增 6 个分平台绑定包（darwin/linux/win32 × arm64/x64），绑定源自 better-sqlite3 v12.10.0 官方 GitHub Releases 预编译产物（MIT 再分发）
+  - local-reranker / rerank-worker-thread 的 @huggingface/transformers 静态导入改为动态加载：其硬依赖 onnxruntime-node/sharp 绑定缺失的平台不再因模块加载期崩溃而拖垮 knowledge 包加载，失败收敛到 rerank 路径内部并由调用方回落启发式重排
+  - server 侧 kbService / prompt API 同步改用 loadBetterSqlite3 适配
+
+## 4.4.2
+
+### Patch Changes
+
+- fix(kb): 修复远端用户上传文件时「kb-worker 退出」导致索引失败的问题——三层防护
+
+  - **向量索引降级不阻断上传**：hnswlib-node 原生绑定不可用时（npm allow-scripts 安全策略阻断 install 脚本、平台无预编译产物或 ABI 不匹配），向量化自动降级为 unavailable 状态，文本解析与切片照常入库，上传以 warning 完成，关键词检索不受影响；`HNSWVectorStore` 全部读写接口在降级态无异常 no-op
+  - **后台索引子进程进程内兜底**：worker 脚本按多候选路径解析（cwd 及本模块逐级向上，不再强依赖启动目录）；子进程启动即失败（spawn 失败 / 未上报任何 IPC 即退出）时自动切换为主进程内索引，远端环境差异不再使上传报「知识库后台进程退出，退出码 1」
+  - **向量失败非致命**：向量入库错误（含 embedding 失败）不再把整个上传操作标记为失败，操作状态以 warning 完成并保留降级原因，供文件管理界面提示
+
+## 4.4.1
+
+### Patch Changes
+
+- 修复三类数据完整性问题：
+
+  - **切片偏移顺序锚定**：图纸/表格类文本存在大量重复标注（CAD 标注、参数行），旧实现从头 `indexOf(part 前缀)` 定位会命中首次出现的相同文本，导致 `start_char` 大幅跳变/回退、相邻块出现虚假间隙（实测 DWG 间隙高达 42448 字符）。改为顺序锚定（cursor 跟随 + overlap 回溯窗口 + 前缀退化 + 失败单调推进），偏移不再回退。
+  - **知识库任务误标修复**：`PROCESS_START_AT` 原取模块加载时刻，Next.js dev 按需编译下任务提交后才编译的 bundle 实例会把正在运行的新任务误标为"服务重启导致任务中断"（实测全量重索引 45% 时被误标 error）。改用 `process.uptime()` 反推真实进程启动时刻；同时运行中补丁（processing/success）清空残留 error 字段，避免成功任务携带旧错误信息。
+
+## 4.4.0
+
+### Minor Changes
+
+- feat(knowledge): paddleocr.js ONNX OCR 引擎接入与 npm 打包适配——CAD 图纸识别质量与后台索引稳定性根治
+
+  - 新增 PP-OCRv5 mobile ONNX 引擎（paddleocr.js + onnxruntime-node），det/rec 模型与字典随 npm 包发布（files 含 models/），下游用户零配置可用；三引擎链：外部 Python（CUSTOMIZE_PADDLE_OCR_CMD）→ paddleocr.js ONNX → tesseract.js 兜底
+  - 修复 paddleocr.js destroy() 内部调 onnxruntime InferenceSession.release() 后 GC 析构二次释放同一指针导致 SIGABRT（double free）：resetService 只置空引用，session 生命周期交给 GC 单次回收
+  - 修复 PDF 文本层可用性判定：多页 PDF 页均可见字符 <100 判文本层不足（CAD 图纸仅图框文字不再误走文本层优先路径导致 1 块 712 字符丢数据）
+  - 修复文本层不足时双 provider 序列重建引发的 onnxruntime GC 析构竞态崩溃：跳过乱码页单独 OCR，直接走 hybrid 全页 OCR 单 provider 路径
+  - 修复知识库后台索引 worker 退出阶段 native 模块析构 SIGABRT（主进程误报「退出码 unknown」把成功任务覆盖为失败）：索引完成后 shutdown + SIGKILL 自终结绕过 teardown，主进程按 receivedDone 防护判定成功
+  - 修复 onnxruntime-node 双版本同进程共存崩溃：transformers 精确锁 1.21.0 与顶层 paddleocr 使用的 1.27.0 同时加载两个 libonnxruntime dylib，native 内存状态错乱致 InferenceSessionWrap GC 析构 SIGABRT；pnpm-workspace.yaml overrides 统一到 1.27.0（transformers 3.8 仅用 create/session.run/dispose API，完全兼容）
+  - 修复文本清洗页眉页脚误删正文（绝对数据不丢失红线）：跨页重复的规格参数行（设备参数表等，出现 3-5 次）被「≥3 次高重复」误判删除；阈值收紧为 ≥6 次 + 新增 markdown 前缀剥离、句末标点完整句保护、括号编号条目保护、技术参数（℃/±/★/数值+单位）保护
+  - 修复切片 endChar 元数据口径：按 trim 后文本长度计算（原用未 trim 的 part.length 尾部空白虚增 2 字符，破坏相邻块 start_char/end_char 连续性）
+
+## 4.3.8
+
+### Patch Changes
+
+- 修复 PDF 提取中 OCR 图形噪声导致的伪乱码文本入库问题：
+
+  - 新增 `filterOcrGraphicNoiseLines`：过滤 LOGO、图框线等纯图形区域被 OCR 误识别出的符号混排噪声行（如 `< ] 人人 AL 已忌 | | 三 | ra | \ 几 L AN`），同时保护正常工程标注行（编号行、领域信号行、工程符号行）
+  - 乱码页选择性 OCR 增加页级最低质量门槛（汉字数、文本长度、有效行占比三重判定），纯图形页 OCR 噪声碎片整页丢弃
+  - PyMuPDF 渲染增加 python 解释器自动探测（`findPyMuPDFInterpreter`），服务器 PATH 中 python3 无 fitz 时自动回退到系统解释器，避免静默降级到 pdfjs 低质量渲染导致 OCR 出碎片
+
 ## 4.3.7
 
 ### Patch Changes

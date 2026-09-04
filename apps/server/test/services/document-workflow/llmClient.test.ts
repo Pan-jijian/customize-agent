@@ -226,7 +226,7 @@ describe('callDocumentLlm per-调用分量观测（4.1 callBreakdown 按 prefixK
 });
 
 describe('isTransientLlmError（瞬态错误识别，驱动重试一次）', () => {
-  it('超时/abort 类错误判瞬态：硬超时 abort 后应重试一次', () => {
+  it('超时/abort 类错误判瞬态：传输层超时后应重试一次', () => {
     // OpenAI SDK 超时 abort 抛 APIUserAbortError
     expect(isTransientLlmError(new Error('This operation was aborted'))).toBe(true);
     // AbortSignal.timeout 原生 reason
@@ -234,6 +234,9 @@ describe('isTransientLlmError（瞬态错误识别，驱动重试一次）', () 
     // fetch 层超时文案
     expect(isTransientLlmError(new Error('fetch failed: request timed out'))).toBe(true);
     expect(isTransientLlmError(new Error('Request timeout after 600000ms'))).toBe(true);
+    // undici headers/body 默认超时（stall 场景实测形态）与 SDK 包装文案
+    expect(isTransientLlmError(Object.assign(new Error('terminated'), { name: 'TypeError' }))).toBe(true);
+    expect(isTransientLlmError(new Error('Connection error.'))).toBe(true);
   });
 
   it('原有瞬态错误识别不回归', () => {
