@@ -8,6 +8,7 @@ export { DedupEngine, type MinHashSignature, type SimilarityMatch } from './dedu
 export { RelationshipDetector } from './dedup/relationship-detector.js';
 export { HashEmbeddingProvider, LocalTransformersEmbeddingProvider, OpenAICompatibleEmbeddingProvider, createEmbeddingProviderFromEnvironment, type EmbeddingProvider, type LocalTransformersEmbeddingOptions, type OpenAICompatibleEmbeddingOptions } from './embedding/embedding-provider.js';
 export { ContentExtractor, type ExtractionResult } from './extraction/content-extractor.js';
+export { detectSmartTableHeader, locateTableColumns, scoreTableHeaderRow, type SmartTableHeader } from './extraction/table-header-detect.js';
 export { CommandExternalExtractor, ExternalExtractorRegistry, type CommandExternalExtractorOptions, type ExternalExtractionResult, type ExternalExtractor, type ExternalExtractorCapability } from './extraction/external-extractor.js';
 
 export { ChangeTracker } from './core/change-tracker.js';

@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveAndImport, resolvePackage } from './module-resolver.js';
 import { createOcrProvider, type OcrProvider } from './ocr-providers.js';
 import { decodeTextBuffer, filterOcrGraphicNoiseLines, hasForeignScriptGarbledText, normalizeSymbolicPua } from './text-encoding.js';
+import { detectSmartTableHeader } from './table-header-detect.js';
 import type { ClassifiedFile } from '../types.js';
 
 /** 文件内容提取结果 */
@@ -871,15 +872,19 @@ export class ContentExtractor {
     const raw = decoded.text;
     const delimiter = file.format === 'tsv' ? '\t' : ',';
     const rows = raw.split(/\r?\n/u).filter(line => line.trim().length > 0);
-    const header = rows[0] ? this.parseDelimitedLine(rows[0], delimiter) : [];
-    const tableRows = rows.slice(1).map(line => this.parseDelimitedLine(line, delimiter));
+    // F1 智能表头行检测（与 xlsx 路径同源）：标题行不再被当表头，表头列名保留真实语义
+    const matrix = rows.map(line => this.parseDelimitedLine(line, delimiter));
+    const smart = detectSmartTableHeader(matrix);
+    const header = smart.headers;
+    const tableRows = matrix.slice(smart.headerIndex + 1);
     const markdown = this.toMarkdownTable(header, tableRows);
     const legacyKv = tableRows.flatMap((values, rowIndex) => values.map((value, colIndex) => {
       const column = header[colIndex] || `COL${colIndex + 1}`;
       return `R${rowIndex + 2}C${colIndex + 1} ${column}: ${value}`;
     }));
+    const titleNote = smart.titleLines.length ? `｜表标题：${smart.titleLines.join(' ')}` : '';
     return {
-      text: [this.metadataOnlyText(file), '工作表：默认', markdown, '表格路径声明', ...legacyKv].join('\n\n'),
+      text: [this.metadataOnlyText(file), `工作表：默认${titleNote}`, markdown, '表格路径声明', ...legacyKv].join('\n\n'),
       metadata: {
         extractionMode: 'delimited_text_structured',
         semanticExtractionMode: 'delimited_markdown_table',
@@ -1066,13 +1071,29 @@ export class ContentExtractor {
           if (values.some(Boolean)) matrix.push(values);
         }
         if (matrix.length > 0) {
-          const header = matrix[0] ?? [];
+          // F1 智能表头行检测：标题行（E.1 分部分项工程量清单计价表）不再被当表头，
+          // 真实列名保留（序号/项目编码/项目名称/项目特征描述/计量单位/工程量），多级表头拼接
+          const smart = detectSmartTableHeader(matrix);
+          const header = smart.headers;
+          const titleNote = smart.titleLines.length ? `表标题：${smart.titleLines.join(' ')}` : '';
           // 表格分页：为了防止超大 Excel 导致单块过大，将其每 500 行分为一个独立的 Markdown Table。
           const chunkSize = 500;
-          for (let i = 1; i < matrix.length; i += chunkSize) {
+          for (let i = smart.headerIndex + 1; i < matrix.length; i += chunkSize) {
             const rows = matrix.slice(i, i + chunkSize);
             const sheetSuffix = matrix.length > chunkSize ? ` (第 ${Math.floor(i/chunkSize) + 1} 部分)` : '';
-            sheetTexts.push([`工作表：${name}${sheetSuffix}`, this.toMarkdownTable(header, rows)].join('\n\n'));
+            const titlePrefix = i === smart.headerIndex + 1 && titleNote ? `｜${titleNote}` : '';
+            sheetTexts.push([`工作表：${name}${sheetSuffix}${titlePrefix}`, this.toMarkdownTable(header, rows)].join('\n\n'));
+          }
+          // F3 KV 展开（对齐 CSV 路径 legacyKv）：数据行「R#C# 列名: 值」全文展开，
+          // 保障向量检索可按真实列名召回行级参数；前 400 数据行封顶防超大清单块爆炸
+          const kvLimit = 400;
+          const dataRows = matrix.slice(smart.headerIndex + 1);
+          const kvLines = dataRows.slice(0, kvLimit).flatMap((values, rowIndex) => values.map((value, colIndex) => {
+            const column = header[colIndex] || `COL${colIndex + 1}`;
+            return `R${rowIndex + 2}C${colIndex + 1} ${column}: ${value}`;
+          }));
+          if (kvLines.length > 0) {
+            sheetTexts.push([`工作表：${name}｜表格路径声明`, ...kvLines, ...(dataRows.length > kvLimit ? [`（KV 展开已截断至前 ${kvLimit} 行，完整数据见上方 Markdown 表格）`] : [])].join('\n'));
           }
         }
       }

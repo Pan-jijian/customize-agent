@@ -40,7 +40,7 @@ describe('DEFAULT_WORKFLOW_RULES', () => {
     const spec = DEFAULT_WORKFLOW_RULES.writingSpec;
     expect(Object.keys(spec)).toEqual(['criticalSectionAnchors', 'majorContentSection', 'divisionSection', 'divisionProcessLabel', 'criticalDeepSections', 'blockerMinChars', 'divisionQuality', 'writeRules']);
     expect(spec.criticalSectionAnchors.length).toBeGreaterThan(0);
-    expect(spec.majorContentSection).toBe('项目主要施工内容');
+    expect(spec.majorContentSection).toBe('项目主要施工\\s*内容|主要施工\\s*内容');
     expect(spec.divisionSection.length).toBeGreaterThan(0);
     expect(spec.divisionProcessLabel.length).toBeGreaterThan(0);
     expect(spec.criticalDeepSections.length).toBeGreaterThan(0);
@@ -92,7 +92,7 @@ describe('loadWorkflowRules', () => {
     writeOverride(root, { writingSpec: { criticalSectionAnchors: ['危大工程'] } });
     const rules = loadWorkflowRules(root);
     expect(rules.writingSpec.criticalSectionAnchors).toEqual(['危大工程']);
-    expect(rules.writingSpec.majorContentSection).toBe('项目主要施工内容');
+    expect(rules.writingSpec.majorContentSection).toBe('项目主要施工\\s*内容|主要施工\\s*内容');
   });
 
   it('覆盖文件 JSON 损坏时静默回退默认配置，不阻断', () => {

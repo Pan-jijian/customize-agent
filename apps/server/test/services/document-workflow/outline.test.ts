@@ -229,6 +229,13 @@ describe('displayChapterTitle / normalizeGeneratedChapterTitle（标题规范化
     expect(normalizeGeneratedChapterTitle('第一章  工程概况 ')).toBe('工程概况');
     expect(normalizeGeneratedChapterTitle('、工程概况')).toBe('工程概况');
   });
+
+  it('P5 复选框/选项符号剥离（评分报告目录「8.2 ☑电子保函」串章回归）', () => {
+    expect(displayChapterTitle('8.2 ☑电子保函')).toBe('电子保函');
+    expect(displayChapterTitle('☑ 施工总进度计划')).toBe('施工总进度计划');
+    expect(displayChapterTitle('✓□质量保证措施')).toBe('质量保证措施');
+    expect(displayChapterTitle('○ 施工部署')).toBe('施工部署');
+  });
 });
 
 describe('isValidGeneratedChapterTitle（生成标题合法性）', () => {

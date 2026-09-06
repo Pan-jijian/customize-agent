@@ -27,6 +27,7 @@ const BID_PROCEDURE_SEMANTIC_PROTOTYPES = [
   '评审争议处理与投标澄清配合程序',
   '评审结果确认与中标公示流程',
   '评标办法与分值构成说明',
+  '异常低价评审与计算方式说明',
   '清单计量与报价口径约定',
   '投标文件实质性响应要求',
   '投标保证金缴纳与退还程序',
@@ -52,7 +53,7 @@ const CONSTRUCTION_SEMANTIC_PROTOTYPES = [
  * （实测评分报告原文"我公司对参与本项目投标及施工组织设计编制的工作人员实行严格的
  * 纪律管理"无任何禁词词面；"评审争议处理与澄清配合"标题同理）。
  */
-const BID_PROCEDURE_LEXICAL_HINTS_RE = /评标|投标|行贿|打招呼|递条子|廉洁|串标|围标|弄虚作假|干扰评标|纪律|澄清|中标|报价|清单计量|评审|保证金|开标|递交|争议/u;
+const BID_PROCEDURE_LEXICAL_HINTS_RE = /评标|投标|行贿|打招呼|递条子|廉洁|串标|围标|弄虚作假|干扰评标|纪律|澄清|中标|报价|清单计量|评审|保证金|开标|递交|争议|异常低价|评标基准价/u;
 
 /** 语义判定阈值：与 SEMANTIC_COVERAGE_THRESHOLD 同值（bge 余弦 ≥0.6 视为语义命中） */
 const EVIDENCE_SAFETY_THRESHOLD = 0.6;
@@ -153,9 +154,19 @@ export function isHardBannedSectionTitle(title: string): boolean {
   if (isTenderClauseFragmentTitle(normalized)) return true;
   const key = normalizeSectionTitleKey(normalized);
   if (BID_PROCEDURE_SEMANTIC_PROTOTYPES.some(prototype => normalizeSectionTitleKey(prototype) === key)) return true;
-  const hasProcedure = /评标|投标|开标|中标|评审|保证金|串标|围标|廉洁|询标|递交/u.test(normalized);
+  // 农民工工资保证金/工资保证金是工资保障章合法施工内容，非商务条款：程序词检测前先剥离，
+  // 防「工资保证金缴纳与退还管理办法」（保证金+办法）被通用程序+治理双词分支误杀（P1 回归根因）
+  const procedureText = normalized.replace(/农民工工资保证金|工资保证金/gu, '');
+  const hasProcedure = /评标|投标|开标|中标|评审|保证金|串标|围标|廉洁|询标|递交/u.test(procedureText);
   const hasGovernance = /纪律|监督|争议|澄清|程序|行为|管控|限制|接触|公示|承诺|响应|办法/u.test(normalized);
   if (hasProcedure && hasGovernance) return true;
+  // 商务条款小节硬黑名单（评分报告 P5 目录「8.2 ☑电子保函」串章根因 + P3「异常低价计算方式」回归）：
+  // 电子保函/投标保证金/履约担保/异常低价类小节属商务文件内容，非施组技术正文；
+  // 农民工工资保证金是工资保障章合法施工内容，技术语境词（农民工/工资/专用账户/实名）豁免，不得误杀。
+  if (/异常低价|评标基准价/u.test(normalized)) return true;
+  if (/电子保函|保函|投标保证金|履约担保|履约保证金|保证金(?:的)?(?:缴纳|退还|提交|方式)/u.test(normalized)) {
+    if (!/农民工|工资|专用账户|实名|考勤|劳资/u.test(normalized)) return true;
+  }
   // 资格审查类小节硬黑名单（目录污染根因）：模板自带「具备有效的营业执照」「具备有效的资质证书、
   // 具备有效的安全生产许可证」「财务状况证明」「业绩证明」等投标人资格条件小节属招标文件资格审查
   // 内容，非施工组织设计正文。词面组合本身禁出现（不依赖语义模型），施工技术语境词放行防误杀

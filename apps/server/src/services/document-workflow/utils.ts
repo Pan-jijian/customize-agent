@@ -40,13 +40,34 @@ export function workPackageContentElementsComplete(block: string): boolean {
   return hasScope && hasProcess && hasMethod;
 }
 
+/** 工作包要素门槛（4.18.6 三要素硬门）：结构门禁的降级放行不得绕过三要素——
+ * 每包作业对象与工程量/工序顺序/施工方法三要素必须齐全（直接复用 workPackageContentElementsComplete，
+ * 两处口径单点同源）；4.19 的“至少 2 要素”门槛实测放行“只有作业对象”型工作包直达交付（轮7），
+ * 收紧为三要素齐全后降级验收与专项验收/结构门禁口径统一。 */
+export function workPackageElementsMeetLenientGate(block: string): boolean {
+  return workPackageContentElementsComplete(block);
+}
+
 /** 小节标题去重归一化：剥离编号前缀与括号标注后比较（“1.3.2 室外雨污分流改造”与“1.3.12 室外雨污分流改造”视为同一要点）。
  * 供块成稿质检的重复 H4 检测与成稿后处理的重复小节去重共用，避免两处口径漂移。 */
 export function normalizeSubsectionTitleForDedup(title: string): string {
   return title
-    .replace(/^\d+(?:\.\d+)*\s*/u, '')
+    // 去编号前缀（容忍“1 主体结构工程”与“1. 主体结构工程”两种形态）
+    .replace(/^\d+(?:\.\d+)*[.．]?\s*/u, '')
     .replace(/[（(][^（）()]*[）)]/gu, '')
-    .replace(/[\s:：、。，,;；/|—-]/gu, '');
+    .replace(/[\s:：、。，,;；/|—-]/gu, '')
+    // 稳定版：剥离「工程」尾缀（与验收器 duplicateTitles 口径同源）——「主体结构工程」与「主体结构」
+    // 属同一专业工程小节，标题只差尾缀时不得判为清单外/缺失（轮4 实测“主要分部分项施工方案”块
+    // 输出“主要分部分项工程施工方案”变体标题被精确匹配误杀 → 章失败）
+    .replace(/工程$/u, '');
+}
+
+/** 标题同源宽松比较（稳定版）：剥离全部「工程」字样后比较，容忍“主要分部分项施工方案”与
+ * “主要分部分项工程施工方案”这类中间变体（H3 块标题微调是模型常态，精确匹配会把变体标题当
+ * 串章骨架误杀 → 块质检不达标 → 重试/拆半耗尽 → 章失败；误容忍代价仅是多一个 H3，会被
+ * finalize 标题对齐归一，远小于误杀代价） */
+export function looseTitleFamilyMatch(left: string, right: string): boolean {
+  return left.replace(/工程/gu, '') === right.replace(/工程/gu, '');
 }
 
 /** 同一 H3 小节范围内出现 ≥2 次的归一化 H4 标题（返回原样标题文本）：
@@ -107,7 +128,150 @@ export function dedupeRepeatedSubsections(content: string): string {
   return result.join('\n');
 }
 
-// 按标题定位正文小节：精确模式（默认）按“标题行含目标字符串 + 同级/上级标题定界”返回整节（含标题行）；
+/** 4.19 块成稿清单外标题检测（串章骨架/自由发挥防线）：
+ * 主题块成稿只允许输出「块标题 H3」与「本块要点清单内 H4」；
+ * 命中本章其他块标题（串章复制）或不在本块要点清单（自由发挥）的 H3/H4 均为清单外标题。
+ * 与块标题同名的 H4 已由 coverageList 排除出 sectionTitles，命中时同样视为清单外（H3 外壳直接承担）。
+ * allowedExtraTitles：本块要点承载的评分细目原标题白名单（sources）——第七次回归实证：单要点块模型按证据
+ * 写出细目原标题 H4（如块「项目理解与编制边界」输出「#### 编制说明与工程概况」），内容归位却被误杀
+ * 整块作废 → 章失败；细目标题属于本块合法承接范围，不算清单外（串章其他块标题拦截优先，不因此放宽） */
+export function findExtraneousBlockTitles(markdown: string, blockTitle: string, sectionTitles: string[], otherBlockTitles: string[], allowedExtraTitles: string[] = []): string[] {
+  const normalizedBlockTitle = normalizeSubsectionTitleForDedup(blockTitle);
+  const normalizedSections = new Set(sectionTitles.map(normalizeSubsectionTitleForDedup).filter(Boolean));
+  const normalizedOthers = new Set(otherBlockTitles.map(normalizeSubsectionTitleForDedup).filter(Boolean));
+  const normalizedAllowed = new Set(allowedExtraTitles.map(normalizeSubsectionTitleForDedup).filter(Boolean));
+  const extraneous: string[] = [];
+  for (const rawLine of markdown.split(/\r?\n/u)) {
+    const heading = /^(#{3,4})\s+(.+)$/u.exec(rawLine.trim());
+    if (!heading) continue;
+    const raw = heading[2].trim();
+    const normalized = normalizeSubsectionTitleForDedup(raw);
+    if (!normalized) continue;
+    if (heading[1].length === 3) {
+      // 稳定版：H3 块标题用同源宽松比较（looseTitleFamilyMatch）——“主要分部分项施工方案”块输出
+      // “主要分部分项工程施工方案”变体不再判清单外（轮4 实测该变体被误杀 → 重试/拆半耗尽 → 章失败）
+      if (normalized !== normalizedBlockTitle && !looseTitleFamilyMatch(normalized, normalizedBlockTitle)) extraneous.push(raw);
+      continue;
+    }
+    if (normalizedOthers.has(normalized) || (!normalizedSections.has(normalized) && !normalizedAllowed.has(normalized))) extraneous.push(raw);
+  }
+  return extraneous;
+}
+
+/** 4.19 块成稿清单外标题块确定性删除：H3 只保留块标题块，H4 只保留本块要点清单内标题块，
+ * 其余（串章骨架/自由发挥）整块连同正文与表格删除。与 findExtraneousBlockTitles 同判定口径（含细目标题白名单）。 */
+export function removeExtraneousBlockSections(markdown: string, blockTitle: string, sectionTitles: string[], allowedExtraTitles: string[] = []): string {
+  const normalizedBlockTitle = normalizeSubsectionTitleForDedup(blockTitle);
+  const normalizedSections = new Set(sectionTitles.map(normalizeSubsectionTitleForDedup).filter(Boolean));
+  const normalizedAllowed = new Set(allowedExtraTitles.map(normalizeSubsectionTitleForDedup).filter(Boolean));
+  const output: string[] = [];
+  let dropping = false;
+  for (const rawLine of markdown.split(/\r?\n/u)) {
+    const heading = /^(#{3,4})\s+(.+)$/u.exec(rawLine.trim());
+    if (heading) {
+      const normalized = normalizeSubsectionTitleForDedup(heading[2].trim());
+      if (heading[1].length === 3) {
+        dropping = normalized !== normalizedBlockTitle && !looseTitleFamilyMatch(normalized, normalizedBlockTitle);
+      } else {
+        dropping = Boolean(normalized) && !normalizedSections.has(normalized) && !normalizedAllowed.has(normalized);
+      }
+    }
+    if (!dropping) output.push(rawLine);
+  }
+  return output.join('\n');
+}
+
+/** 4.19.1 块成稿清单外标题确定性修复（标题层对齐、正文零丢失）：
+ * 质检兜底优先级「确定性修复 > LLM 重试」——清单外 H3/H4 只删除标题行、保留全部正文，
+ * 避免「整块删除 → 字数不足 → 重试 → 块死亡 → 章失败 → 整次生成作废」的浪费链
+ * （第七次回归实证：内容合格块仅因标题形式被判失败，整块删除后字数掉档，用户时间与 token 全部浪费）。
+ * 串章骨架残留正文由 finalize 阶段跨 H3 同名 H4 清理与全局一致性跨章重复段检测兜底。
+ * 原块标题 H3 被删（模型写错 H3）时，开头补回块标题 H3 外壳。 */
+export function stripExtraneousBlockHeadings(markdown: string, blockTitle: string, sectionTitles: string[], allowedExtraTitles: string[] = []): string {
+  const normalizedBlockTitle = normalizeSubsectionTitleForDedup(blockTitle);
+  const normalizedSections = new Set(sectionTitles.map(normalizeSubsectionTitleForDedup).filter(Boolean));
+  const normalizedAllowed = new Set(allowedExtraTitles.map(normalizeSubsectionTitleForDedup).filter(Boolean));
+  const output: string[] = [];
+  for (const rawLine of markdown.split(/\r?\n/u)) {
+    const heading = /^(#{3,4})\s+(.+)$/u.exec(rawLine.trim());
+    if (heading) {
+      const normalized = normalizeSubsectionTitleForDedup(heading[2].trim());
+      if (heading[1].length === 3) {
+        // 块标题 H3 保留（含“工程”变体，与判定口径 looseTitleFamilyMatch 同源）；清单外 H3（串章/写错）删标题行，正文并入块标题外壳下
+        if (normalized === normalizedBlockTitle || looseTitleFamilyMatch(normalized, normalizedBlockTitle)) {
+          output.push(rawLine);
+        }
+        continue;
+      }
+      // 清单外 H4（含串章其他块标题/自由发挥）：删标题行，正文保留
+      if (normalized && !normalizedSections.has(normalized) && !normalizedAllowed.has(normalized)) continue;
+    }
+    output.push(rawLine);
+  }
+  const result = output.join('\n');
+  // 原 H3 写错被删时正文裸挂在章标题下，补回块标题外壳
+  return /^###\s+\S+/mu.test(result.trim()) ? result : `### ${blockTitle}\n\n${result}`.trim();
+}
+
+/** 跨 H3 同名 H4 属合法结构的泛化小节名（各分项工程通用）：施工准备/质量控制等，跨 H3 重复全部保留 */
+const GENERIC_H4_TITLE_WHITELIST = new Set([
+  '施工准备', '施工要点', '质量控制', '质量要求', '质量保证措施', '质量控制措施', '质量通病防治',
+  '安全措施', '安全要求', '安全管理措施', '安全技术交底', '技术交底', '注意事项', '验收要求', '验收标准',
+  '成品保护', '环境保护', '文明施工', '进度控制', '工期保障', '材料管理', '机械管理', '人员管理',
+  '组织管理', '应急预案', '应急措施', '劳动力配置', '机械设备配置',
+]);
+
+/** 4.19 跨 H3 同名 H4 串章骨架删除（finalize 兜底）：
+ * 主题块成稿照抄其他块骨架时，串章 H4 与正确位置 H4 分属不同 H3，dedupeRepeatedSubsections 只做同 H3
+ * 去重，跨 H3 同名全部漏网（真实回归：6.4 块输出 6.1.1/6.3.1/6.3.2 同名 H4，目录小节串章实锤）。
+ * 规则：H4 名与章内任一 H3 名相同 → 删除该 H4 块（H4 不得与 H3 同名，由 H3 外壳直接承担）；
+ * H4 名跨 H3 重复且非泛化词白名单 → 保留首次出现，删除后续串章副本。
+ * 章级作用域（## 分章）：跨章同名小节（1.4↔6.4 等）不受影响。 */
+export function dedupeCrossSectionSkeletonH4s(markdown: string): string {
+  const lines = markdown.split(/\r?\n/u);
+  const chapterStarts: number[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^##\s+/u.test(lines[index].trim())) chapterStarts.push(index);
+  }
+  if (chapterStarts.length === 0) return markdown;
+  const drops = new Set<number>();
+  for (let chapterIndex = 0; chapterIndex < chapterStarts.length; chapterIndex += 1) {
+    const start = chapterStarts[chapterIndex];
+    const end = chapterStarts[chapterIndex + 1] ?? lines.length;
+    const h3Titles = new Set<string>();
+    const h4Blocks: Array<{ line: number; name: string }> = [];
+    for (let index = start; index < end; index += 1) {
+      const heading = /^(#{3,4})\s+(.+)$/u.exec(lines[index].trim());
+      if (!heading) continue;
+      const name = normalizeSubsectionTitleForDedup(heading[2].trim());
+      if (!name) continue;
+      if (heading[1].length === 3) {
+        h3Titles.add(name);
+      } else {
+        h4Blocks.push({ line: index, name });
+      }
+    }
+    const seenNames = new Map<string, number>();
+    for (const block of h4Blocks) {
+      const prior = seenNames.get(block.name);
+      seenNames.set(block.name, block.line);
+      const isH3Name = h3Titles.has(block.name);
+      const isGeneric = GENERIC_H4_TITLE_WHITELIST.has(block.name);
+      const shouldDrop = isH3Name || (!isGeneric && prior !== undefined);
+      if (!shouldDrop) continue;
+      let blockEnd = end;
+      for (let index = block.line + 1; index < end; index += 1) {
+        if (/^#{2,4}\s+/u.test(lines[index].trim())) {
+          blockEnd = index;
+          break;
+        }
+      }
+      for (let index = block.line; index < blockEnd; index += 1) drops.add(index);
+    }
+  }
+  if (drops.size === 0) return markdown;
+  return lines.filter((_, index) => !drops.has(index)).join('\n');
+}
 // fuzzy 模式按归一化标题模糊匹配（剥离编号/空白/常见泛化词）返回最长命中正文（不含标题行）。
 // 供关键小节深度/密度检查（documentPipeline）与 Reviewer 小节定位（agentPlanner）共用，避免三处重复实现漂移。
 export function extractSection(content: string, title: string, options: { fuzzy?: boolean } = {}): string {
@@ -296,7 +460,10 @@ export function systemConstraintLine(text: string): string {
  * 单一来源词表：清洗层（stripBidDisciplineSentences）、检测层（agentPlanner 禁写话术）、
  * 提取层（tenderRequirements 纪律条款过滤）同口径复用，禁止各文件私造第二份词表。
  */
-export const BID_DISCIPLINE_PHRASES = ['评标纪律', '投标纪律', '行贿', '打招呼', '递条子', '廉洁承诺', '廉洁自律', '串标', '围标', '弄虚作假', '干扰评标'] as const;
+// 「异常低价」「评标基准价」属异常低价评审/评标办法商务条款术语（评分报告 P3 串章回归根因：
+// 「异常低价计算方式」小节在目录与正文穿透全部既有过滤——无评标/投标词面、语义相似度不足），
+// 与投标纪律类同属商务文件内容，技术标禁写。
+export const BID_DISCIPLINE_PHRASES = ['评标纪律', '投标纪律', '行贿', '打招呼', '递条子', '廉洁承诺', '廉洁自律', '串标', '围标', '弄虚作假', '干扰评标', '异常低价', '评标基准价'] as const;
 
 /**
  * 商务纪律类句子判定：句子含禁写词，或同时含「纪律/廉洁」与商务语境词（投标/评标/行贿/串标/围标/弄虚作假），

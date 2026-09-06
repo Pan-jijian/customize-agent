@@ -1,16 +1,16 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { computeProjectId } from '@customize-agent/knowledge';
+import { computeProjectId, locateTableColumns, scoreTableHeaderRow } from '@customize-agent/knowledge';
 import { getMultiProjectManager, getStorageRoot, listKnowledgeFiles } from '../knowledge/kbService';
-import { upsertKbOperation } from '../knowledge/kbOperationLog';
+import { upsertKbOperation, type KbOperationStage } from '../knowledge/kbOperationLog';
 import { buildBaseProjectGraph, buildAgentMaterialSnapshot, resolveAgentMaterialScope } from './agentWorkflow';
 import { buildProjectGraph } from './projectGraph';
 import { dedupeQuantityFacts, filterConstructionSteps } from './chapterGeneration';
 import type { DocumentEvidence, DocumentFact, DocumentTemplate, ProjectGraph } from './types';
 import { stableHash } from './utils';
 
-const INTELLIGENCE_VERSION = 'project-intelligence-v10' as const;
-const SCOPE_VERSION = 'material-scope-v5' as const;
+const INTELLIGENCE_VERSION = 'project-intelligence-v11' as const;
+const SCOPE_VERSION = 'material-scope-v6' as const;
 
 export interface ProjectIntelligenceFileAsset {
   relativePath: string;
@@ -82,6 +82,8 @@ export interface ProjectIntelligenceCache {
   chapterIntentIndex: ProjectIntelligenceIntentEntry[];
   projectGraph: ProjectGraph;
   projectGraphMessage: string;
+  /** LLM 图谱增强失败时降级为确定性 base 图谱落盘（缓存仍可用，自愈机制会在后续构建中重试增强） */
+  graphDegraded?: boolean;
   constructionOrganizationGraph: ConstructionOrganizationGraph;
   blueprint: {
     projectNames: string[];
@@ -124,6 +126,13 @@ function scopePath(projectRoot: string, scopeHash: string) {
   return path.join(intelligenceDir(projectRoot), 'scopes', `${scopeHash}.json`);
 }
 
+/** 原子写 JSON：先写临时文件再 rename 替换，防进程中断留下半写文件（读取侧 JSON.parse 失败会拒绝缓存）。 */
+function writeJsonAtomic(filePath: string, data: unknown) {
+  const tmp = `${filePath}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, filePath);
+}
+
 function topLevelGroup(relativePath: string) {
   return relativePath.split(/[\\/]/u).filter(Boolean)[0];
 }
@@ -163,6 +172,16 @@ function cleanSignal(text: string) {
     .trim();
 }
 
+/** 抽样块信号保留策略：保留前 limit-4 + 最后 4 条非空信号。
+ * 步长抽样强制含文件最后一块（尾部常含工期、质量标准等核心条款），若仅取前 limit 条会
+ * 把尾块信号裁掉，使「强制含最后一块」的抽样修复被抵消。 */
+export function sampledSignals(chunks: Array<{ content?: string }>, limit = 48): string[] {
+  const signals = chunks.map(chunk => cleanSignal(String(chunk.content || ''))).filter(Boolean);
+  if (signals.length <= limit) return signals;
+  const head = limit - 4;
+  return [...signals.slice(0, head), ...signals.slice(-4)];
+}
+
 function isNonBodySentence(sentence: string) {
   return /投标函|保证金|开标|评标|交易系统|账户|协议书|示范文本|报价|税率|利润|我方已仔细研究|中标|签订合同|专用账户监管|联合体投标|注册建造师|安全生产考核合格证书|安全生产许可证|营业执照|资质要求|投标人资格|资格审查|资格后审|资格预审|业绩要求|信誉要求|财务要求|投标有效期|投标截止|递交投标文件|递交电子投标文件|获取招标文件|获取方式|获取时间|踏勘现场|投标预备会|备选投标方案|分包内容|电子交易系统|电子服务系统|联系方式|联系人|邮编|技术支持|全流程电子化交易|异议|投诉|评标委员会|评标办法|公告发布|媒介|咨询电话|拨打电话|招标工程量清单|最高投标限价|不可竞争费|招标总说明|招标需求|招标范围|招标控制价|编制补疑|计价依据|计价定额|措施项目费|暂列金额|投标总价|综合单价|计价格式|取费标准|清单编制说明|招标文件正文|招标图纸目录|投标人/u.test(sentence);
 }
@@ -182,9 +201,9 @@ export function extractContentFacts(signals: string[]) {
       if (isNonBodySentence(sentence)) continue;
       if (isMetadataSentence(sentence)) continue;
       if (/(项目|工程|道路|桥梁|园林|交通|结构|排水|照明|绿化|工期|质量|安全|危大|材料|机械|劳动力|验收|规范|清单|工程量|施工)/u.test(sentence)) facts.add(sentence);
-      if (facts.size >= 18) break;
+      if (facts.size >= 24) break;
     }
-    if (facts.size >= 18) break;
+    if (facts.size >= 24) break;
   }
   return [...facts];
 }
@@ -209,9 +228,15 @@ function cleanBoqFeature(text: string) {
 
 // 工程量清单 EXCEL 被索引为 Markdown 表格（每行以 | 分隔），按行抽取「项目名称 + 项目特征描述 + 工程量」。
 // 这些是真实的施工方法参数、材料规格与工程量，比纯文本抽取更适合驱动施工工作包。
-function extractSpreadsheetFacts(chunks: Array<{ content?: string }>): string[] {
+// F2 语义列定位：表头行按列关键词识别（序号/项目名称/项目特征描述…）并建立列映射，
+// 行级提取按列名而非 body[N] 硬编码取值——历史上标题行被当表头后（列名全变 COL2~COL15），
+// 名称/特征/工程量全部错位导致提取完全失败；大表分块后表头行只在首块出现，列映射跨 chunk 延续。
+export function extractSpreadsheetFacts(chunks: Array<{ content?: string }>): string[] {
   const facts = new Set<string>();
   const HEADER_NOISE = /工程名称|序号|项目编码|项目名称|项目特征|计量\s*单位|工程量|金额|综合单价|合价|人工费|机械费|暂估价|分部小计|本页|续表|合计|汇总/u;
+  // 无表头信息时回退旧 body[N] 列位（保持历史行为，不丢数据）
+  const LEGACY_COLUMNS = { seq: 0, name: 2, feature: 3, unit: 4, quantity: 5 };
+  let activeColumns: Record<string, number> | null = null;
   for (const chunk of chunks) {
     const text = String(chunk.content || '');
     for (const line of text.split(/\r?\n/u)) {
@@ -220,11 +245,17 @@ function extractSpreadsheetFacts(chunks: Array<{ content?: string }>): string[] 
       const cells = trimmed.split('|').map(cell => cell.trim());
       if (cells.length < 7) continue;
       const body = cells.slice(1, -1);
-      const seq = body[0] || '';
-      const name = body[2] || '';
-      const feature = body[3] || '';
-      const unit = body[4] || '';
-      const quantity = body[5] || '';
+      // 表头行识别：命中 ≥2 个清单列关键词组且序号列非纯整数 → 重建语义列映射（不参与抽取）
+      if (scoreTableHeaderRow(body) >= 4 && !/^\d+$/.test(body[0] || '')) {
+        activeColumns = locateTableColumns(body);
+        continue;
+      }
+      const cols = activeColumns ?? LEGACY_COLUMNS;
+      const seq = (cols.seq ?? 0) >= 0 ? body[cols.seq ?? 0] || '' : body[0] || '';
+      const name = (cols.name ?? 2) >= 0 ? body[cols.name ?? 2] || '' : body[2] || '';
+      const feature = (cols.feature ?? 3) >= 0 ? body[cols.feature ?? 3] || '' : body[3] || '';
+      const unit = (cols.unit ?? 4) >= 0 ? body[cols.unit ?? 4] || '' : body[4] || '';
+      const quantity = (cols.quantity ?? 5) >= 0 ? body[cols.quantity ?? 5] || '' : body[5] || '';
       // 仅收录数据行：序号为纯整数，且项目名称与项目特征描述非空
       if (!/^\d+$/.test(seq)) continue;
       if (!name || !feature) continue;
@@ -235,24 +266,45 @@ function extractSpreadsheetFacts(chunks: Array<{ content?: string }>): string[] 
       const fact = `${name}：${featureClean.slice(0, 80)}${quantityPart ? `｜${quantityPart}` : ''}`;
       if (fact.replace(/[^0-9a-zA-Z\u4e00-\u9fa5]/gu, '').length < 4) continue;
       facts.add(fact);
-      if (facts.size >= 40) return [...facts];
+      if (facts.size >= 60) return [...facts];
     }
   }
   return [...facts];
 }
 
+/** 意图 → 关键词表：标签判定（intentTagsForText）与证据相关性评分（intentRelevance）共用同一词表，
+ * 保证「文件打上某意图标签」⇔「该文件的事实对该意图有相关性」两处口径一致 */
+const INTENT_KEYWORDS: Record<string, string[]> = {
+  '工期进度': ['工期', '进度', '计划', '节点', '流水', '穿插', '日历天'],
+  '质量验收': ['质量', '验收', '检验', '试验', '复试', '见证', '取样', '规范', '标准'],
+  '安全危大': ['安全', '危大', '风险', '脚手架', '深基坑', '吊装', '临电', '消防', '应急'],
+  '施工部署': ['部署', '总平面', '临设', '场地', '施工组织', '施工顺序'],
+  '施工方法': ['施工方法', '施工工艺', '道路', '桥梁', '排水', '照明', '园林', '绿化', '交通', '结构'],
+  '人材机': ['劳动力', '材料', '机械', '设备', '周转', '进场', '资源'],
+  '环境文明': ['环保', '扬尘', '文明', '噪声', '水土保持', '绿色施工'],
+  '工程概况': ['项目', '工程', '建设地点', '建设规模', '招标范围', '发包人要求'],
+};
+
+/** 事实对意图的相关性评分：关键词命中（长词权重更高）+ 数值驱动事实加权。
+ * 旧实现分数硬编码递减（0.82 - index*0.025），与内容无关且无关事实混入索引。 */
+export function intentRelevance(intent: string, fact: string): number {
+  const keywords = INTENT_KEYWORDS[intent];
+  if (!keywords) return 0;
+  let score = 0;
+  for (const keyword of keywords) {
+    if (fact.includes(keyword)) score += keyword.length >= 4 ? 2 : 1;
+  }
+  // 数值仅对已命中关键词的事实加权（数字本身无意图，避免纯数字句变相关）
+  if (score > 0 && /\d/u.test(fact)) score += 1;
+  return score;
+}
+
 function intentTagsForText(relativePath: string, facts: string[]) {
   const text = `${relativePath}\n${facts.join('\n')}`;
   const tags = new Set<string>();
-  const add = (tag: string, re: RegExp) => { if (re.test(text)) tags.add(tag); };
-  add('工期进度', /工期|进度|节点|计划|流水|穿插/u);
-  add('质量验收', /质量|验收|检验|试验|复试|见证取样|规范|标准/u);
-  add('安全危大', /安全|危大|风险|脚手架|深基坑|吊装|临电|消防/u);
-  add('施工部署', /部署|总平面|临设|场地|组织|施工顺序/u);
-  add('施工方法', /施工方法|施工工艺|道路|桥梁|排水|照明|园林|绿化|交通|结构/u);
-  add('人材机', /劳动力|材料|机械|设备|周转|进场|资源/u);
-  add('环境文明', /环保|扬尘|文明|噪声|水土保持|绿色施工/u);
-  add('工程概况', /项目|工程|建设地点|建设规模|招标范围|发包人要求/u);
+  for (const [tag, keywords] of Object.entries(INTENT_KEYWORDS)) {
+    if (keywords.some(keyword => text.includes(keyword))) tags.add(tag);
+  }
   return [...tags];
 }
 
@@ -270,14 +322,23 @@ function chapterHintsForFile(relativePath: string, facts: string[]) {
 }
 
 function buildIntentIndex(files: ProjectIntelligenceFileAsset[]): ProjectIntelligenceIntentEntry[] {
-  return files.flatMap(file => file.intentTags.flatMap(intent => file.contentFacts.slice(0, 10).map((fact, index) => ({
-    intent,
-    filePath: file.relativePath,
-    title: file.fileName,
-    content: fact,
-    score: 0.82 - index * 0.025,
-    roleId: file.roles[0],
-  }))));
+  return files.flatMap(file => file.intentTags.flatMap(intent => {
+    // 相关性评分排序：只保留与意图关键词命中的事实（旧实现无条件取前 10 条，无关事实混入
+    // 且硬编码递减分数使尾部关键事实排序靠后），按评分降序取前 12 条
+    return file.contentFacts
+      .map(fact => ({ fact, relevance: intentRelevance(intent, fact) }))
+      .filter(item => item.relevance > 0)
+      .sort((a, b) => b.relevance - a.relevance)
+      .slice(0, 12)
+      .map((item, index) => ({
+        intent,
+        filePath: file.relativePath,
+        title: file.fileName,
+        content: item.fact,
+        score: Math.min(0.96, 0.6 + item.relevance * 0.08) - index * 0.005,
+        roleId: file.roles[0],
+      }));
+  }));
 }
 
 export function chapterIntentTags(title: string, sections: string[] = []) {
@@ -388,17 +449,40 @@ function normalizeCachedIntelligence(projectRoot: string, raw: Partial<ProjectIn
     constructionOrganizationGraph,
   };
   if (raw.version !== INTELLIGENCE_VERSION || !raw.constructionOrganizationGraph || raw.sourceHash !== cachedHash) {
-    fs.writeFileSync(cachePath(projectRoot), JSON.stringify(normalized, null, 2));
+    writeJsonAtomic(cachePath(projectRoot), normalized);
   }
   return normalized;
+}
+
+/** 惰性自愈节流窗口：读取时发现缓存失效/损坏/降级即触发后台重建，同一项目 1 分钟内不重复触发
+ * （构建进行中由并发守卫合并），使旧项目的脏缓存无需手动操作即可自我修复 */
+const SELF_HEAL_THROTTLE_MS = 60_000;
+const selfHealTriggeredAt = new Map<string, number>();
+
+function triggerSelfHeal(projectRoot: string) {
+  const now = Date.now();
+  const last = selfHealTriggeredAt.get(projectRoot) || 0;
+  if (now - last < SELF_HEAL_THROTTLE_MS) return;
+  selfHealTriggeredAt.set(projectRoot, now);
+  startProjectIntelligenceBuild(projectRoot);
 }
 
 export function readProjectIntelligence(projectRoot: string): ProjectIntelligenceCache | undefined {
   const file = cachePath(projectRoot);
   if (!fs.existsSync(file)) return undefined;
   try {
-    return normalizeCachedIntelligence(projectRoot, JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<ProjectIntelligenceCache>);
+    const normalized = normalizeCachedIntelligence(projectRoot, JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<ProjectIntelligenceCache>);
+    if (!normalized) {
+      // 缓存存在但失效（文件集变化/版本升级）：惰性自愈重建，避免长期停留在降级路径
+      triggerSelfHeal(projectRoot);
+      return undefined;
+    }
+    // LLM 增强降级的缓存：后台重试补齐（缓存仍可用，直接返回）
+    if (normalized.graphDegraded) triggerSelfHeal(projectRoot);
+    return normalized;
   } catch {
+    // 半写/损坏文件：自愈重建（原子写已防止新增半写，历史损坏文件在此覆盖）
+    triggerSelfHeal(projectRoot);
     return undefined;
   }
 }
@@ -669,8 +753,16 @@ export function constructionOrganizationPrompt(graph?: ConstructionOrganizationG
   ].filter(Boolean).join('\n');
 }
 
+/** 文件角色 → 图谱证据配额：招标类资料优先级最高（决定施工范围/工期/质量等核心条款），
+ * 清单类条目事实密集，普通资料基础配额（旧实现统一取前 10 条，重要文件证据不足） */
+function evidenceQuotaForFile(file: ProjectIntelligenceFileAsset): number {
+  if (file.roles.includes('tender_requirement')) return 15;
+  if (file.roles.includes('boq')) return 12;
+  return 8;
+}
+
 function projectEvidenceFromFiles(files: ProjectIntelligenceFileAsset[]): DocumentEvidence[] {
-  return files.flatMap(file => file.contentFacts.slice(0, 10).map((content, index) => ({
+  return files.flatMap(file => file.contentFacts.slice(0, evidenceQuotaForFile(file)).map((content, index) => ({
     chapterId: 'project-intelligence',
     filePath: file.relativePath,
     content,
@@ -681,16 +773,18 @@ function projectEvidenceFromFiles(files: ProjectIntelligenceFileAsset[]): Docume
   })));
 }
 
-export async function buildProjectIntelligence(projectRoot: string): Promise<ProjectIntelligenceCache> {
+export async function buildProjectIntelligence(projectRoot: string, onProgress?: (stage: string, percent: number, message: string) => void): Promise<ProjectIntelligenceCache> {
+  onProgress?.('files', 15, '正在扫描已入库文件并抽样提取内容事实');
   const project = await getMultiProjectManager().getProject(projectRoot);
   const kbFiles = listKnowledgeFiles(projectRoot).filter(file => file.status !== 'disk' && file.status !== 'error' && Number(file.indexedAt || 0) > 0 && Number(file.chunkCount || 0) > 0);
   const files: ProjectIntelligenceFileAsset[] = kbFiles.map(file => {
     const root = topLevelGroup(file.relativePath);
     const roles = fileRoles(file.relativePath);
     // 步长抽样（上限 64 块并强制含最后一块）：前缀 16 块覆盖不到文件中部/尾部的
-    // 工期、质量标准等核心条款，是图谱缺口（如「计划工期 540 天未找到」）的直接根因
+    // 工期、质量标准等核心条款，是图谱缺口（如「计划工期 540 天未找到」）的直接根因；
+    // 信号保留策略见 sampledSignals（前 44 + 尾 4，防尾部信号被 slice 裁掉）
     const chunks = project.listChunksSampled({ relativePath: file.relativePath, sampleSize: 64 });
-    const summarySignals = chunks.map(chunk => cleanSignal(String(chunk.content || ''))).filter(Boolean).slice(0, 48);
+    const summarySignals = sampledSignals(chunks);
     const excludeReason = bodyExclusionReason(file.relativePath);
     const isSpreadsheet = /\.(?:xlsx?|csv|tsv)$/iu.test(file.relativePath);
     const contentFacts = excludeReason ? [] : isSpreadsheet ? extractSpreadsheetFacts(chunks) : extractContentFacts(summarySignals);
@@ -717,13 +811,29 @@ export async function buildProjectIntelligence(projectRoot: string): Promise<Pro
   });
   const facts = files.flatMap(buildFileFacts);
   const chapterIntentIndex = buildIntentIndex(files);
+  onProgress?.('facts', 45, `内容事实与章节意图索引已提取：${facts.length} 条事实、${chapterIntentIndex.length} 条章节意图证据`);
   const materialScope = { selectedRoots: [...new Set(files.map(file => file.root).filter(Boolean))] as string[], selectedFiles: files.map(file => file.relativePath), totalAvailableFiles: files.length, ambiguous: false, locked: true, reason: '项目入库完成后预计算的项目级资料范围', rejectedRoots: [], scopeHash: sourceHash(files) };
   const materialSnapshot = buildAgentMaterialSnapshot(projectRoot, materialScope);
   const baseProjectGraph = buildBaseProjectGraph({ facts, materialSnapshot });
-  const enhancedResult = await buildProjectGraph({ evidence: projectEvidenceFromFiles(files), projectRoot, requirement: '项目入库后预计算项目图谱', templateId: 'project-intelligence' });
-  if (!enhancedResult.graph) throw new Error(`项目图谱预计算失败：${enhancedResult.stage.message || enhancedResult.stage.status}`);
-  const projectGraph = mergeProjectGraphs(baseProjectGraph, enhancedResult.graph);
-  const projectGraphMessage = enhancedResult.stage.message || '项目图谱已预计算';
+  onProgress?.('graph', 65, '正在构建项目图谱（LLM 分域结构化提取，确定性 base 图谱兑底）');
+  let projectGraph: ProjectGraph;
+  let projectGraphMessage: string;
+  let graphDegraded = false;
+  try {
+    const enhancedResult = await buildProjectGraph({ evidence: projectEvidenceFromFiles(files), projectRoot, requirement: '项目入库后预计算项目图谱', templateId: 'project-intelligence' });
+    if (!enhancedResult.graph) throw new Error(`项目图谱预计算失败：${enhancedResult.stage.message || enhancedResult.stage.status}`);
+    projectGraph = mergeProjectGraphs(baseProjectGraph, enhancedResult.graph);
+    projectGraphMessage = enhancedResult.stage.message || '项目图谱已预计算';
+  } catch (error) {
+    // 确定性降级：LLM 图谱失败不阻断缓存落盘（旧实现直接 throw，缓存写不出来，每次生成都走
+    // 临时重建更慢更易失败）；base 图谱由确定性事实构建仍可支撑生成，自愈机制会在后续构建中重试 LLM 增强
+    const message = error instanceof Error ? error.message : String(error);
+    projectGraph = baseProjectGraph;
+    projectGraphMessage = `项目图谱降级为确定性基础图谱（LLM 增强失败：${message}），将在下次构建时自动重试增强`;
+    graphDegraded = true;
+    console.warn('[project-intelligence] graph enhancement failed, degraded to base graph', message);
+  }
+  onProgress?.('assembly', 85, '正在汇总蓝图、施工组织图谱与缓存落盘');
   const constructionOrganizationGraph = buildConstructionOrganizationGraph(projectGraph, files);
   const cache: ProjectIntelligenceCache = {
     version: INTELLIGENCE_VERSION,
@@ -737,6 +847,7 @@ export async function buildProjectIntelligence(projectRoot: string): Promise<Pro
     chapterIntentIndex,
     projectGraph,
     projectGraphMessage,
+    graphDegraded: graphDegraded || undefined,
     constructionOrganizationGraph,
     blueprint: {
       projectNames: [...new Set(facts.filter(fact => /项目名称/u.test(fact.key)).map(fact => fact.value))].slice(0, 8),
@@ -747,7 +858,7 @@ export async function buildProjectIntelligence(projectRoot: string): Promise<Pro
       signals: files.flatMap(file => file.contentFacts.slice(0, 2)).slice(0, 24),
     },
   };
-  fs.writeFileSync(cachePath(projectRoot), JSON.stringify(cache, null, 2));
+  writeJsonAtomic(cachePath(projectRoot), cache);
   return cache;
 }
 
@@ -782,7 +893,7 @@ function buildMaterialScopeSnapshot(input: { projectRoot: string; template: Docu
       signals: files.flatMap(file => file.contentFacts.slice(0, 2)).slice(0, 24),
     },
   };
-  fs.writeFileSync(scopePath(input.projectRoot, input.scopeHash), JSON.stringify(snapshot, null, 2));
+  writeJsonAtomic(scopePath(input.projectRoot, input.scopeHash), snapshot);
   return snapshot;
 }
 
@@ -822,14 +933,66 @@ export function buildScopedProjectIntelligence(input: { projectRoot: string; tem
   };
 }
 
+/** 构建进行中的项目集合（promise 供同步等待方复用结果）：多次触发合并为串行重跑，防并发构建
+ * （上传分批入队的队列排空触发、自愈触发与手动 API 触发重叠时，多个 buildProjectIntelligence
+ * 并发跑 LLM 图谱并写同一缓存文件竞态） */
+const buildInFlight = new Map<string, Promise<ProjectIntelligenceCache>>();
+const buildPending = new Set<string>();
+
+function notifyBuildProgress(projectRoot: string, id: string, patch: { stage: KbOperationStage; status: 'processing' | 'success' | 'error'; percent: number; message: string; error?: string }) {
+  upsertKbOperation(projectRoot, { id, type: 'reindex', title: '项目理解缓存', ...patch });
+}
+
 export function startProjectIntelligenceBuild(projectRoot: string) {
+  if (buildInFlight.has(projectRoot)) {
+    // 构建进行中：标记待重跑，当前构建结束后串行再跑一次（合并期间所有触发为一次重跑，
+    // 保证落盘缓存基于触发时刻最新的文件列表）
+    buildPending.add(projectRoot);
+    return;
+  }
   const id = `project-intelligence-${Date.now()}`;
-  upsertKbOperation(projectRoot, { id, type: 'reindex', title: '项目理解缓存', stage: 'generating', status: 'processing', percent: 5, message: '正在构建项目级蓝图、图谱、事实索引和章节意图索引' });
-  void buildProjectIntelligence(projectRoot).then(cache => {
-    upsertKbOperation(projectRoot, { id, type: 'reindex', title: '项目理解缓存', stage: 'done', status: 'success', percent: 100, message: `项目理解缓存完成：${cache.fileCount} 份资料，${cache.facts.length} 条事实，${cache.chapterIntentIndex.length} 条章节意图证据` });
+  notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent: 5, message: '正在构建项目级蓝图、图谱、事实索引和章节意图索引' });
+  const run = buildProjectIntelligence(projectRoot, (stage, percent, message) => {
+    notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent, message });
+  });
+  buildInFlight.set(projectRoot, run);
+  void run.then(cache => {
+    notifyBuildProgress(projectRoot, id, { stage: 'done', status: 'success', percent: 100, message: `项目理解缓存完成：${cache.fileCount} 份资料，${cache.facts.length} 条事实，${cache.chapterIntentIndex.length} 条章节意图证据` });
   }).catch(error => {
     const message = error instanceof Error ? error.message : String(error);
-    upsertKbOperation(projectRoot, { id, type: 'reindex', title: '项目理解缓存', stage: 'error', status: 'error', percent: 100, message, error: message });
+    notifyBuildProgress(projectRoot, id, { stage: 'error', status: 'error', percent: 100, message, error: message });
     console.warn('[project-intelligence] build failed', message);
+  }).finally(() => {
+    buildInFlight.delete(projectRoot);
+    if (buildPending.delete(projectRoot)) {
+      startProjectIntelligenceBuild(projectRoot);
+    }
   });
+}
+
+/** 同步构建（API POST 非 async 模式）：构建进行中时复用其结果（不重复启动），否则启动并等待；
+ * 与排空触发/自愈触发的后台构建共享同一并发守卫，避免并发写同一缓存文件 */
+export async function buildProjectIntelligenceSync(projectRoot: string): Promise<ProjectIntelligenceCache> {
+  const inflight = buildInFlight.get(projectRoot);
+  if (inflight) return inflight;
+  const id = `project-intelligence-${Date.now()}`;
+  notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent: 5, message: '正在构建项目级蓝图、图谱、事实索引和章节意图索引' });
+  const run = buildProjectIntelligence(projectRoot, (stage, percent, message) => {
+    notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent, message });
+  });
+  buildInFlight.set(projectRoot, run);
+  try {
+    const cache = await run;
+    notifyBuildProgress(projectRoot, id, { stage: 'done', status: 'success', percent: 100, message: `项目理解缓存完成：${cache.fileCount} 份资料，${cache.facts.length} 条事实，${cache.chapterIntentIndex.length} 条章节意图证据` });
+    return cache;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    notifyBuildProgress(projectRoot, id, { stage: 'error', status: 'error', percent: 100, message, error: message });
+    throw error;
+  } finally {
+    buildInFlight.delete(projectRoot);
+    if (buildPending.delete(projectRoot)) {
+      startProjectIntelligenceBuild(projectRoot);
+    }
+  }
 }

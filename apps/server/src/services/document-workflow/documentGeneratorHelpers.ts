@@ -10,7 +10,7 @@ import { buildCanonicalFacts } from './factGovernance';
 import { mergeTableLineBreaks, normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTenderSourcePageRefs, removeAdjacentDuplicateHeadings, dedupeCrossLevelHeadingDuplicates, dedupeRepeatedBlocksWithinSections } from './markdownComposer';
 import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
 import { collectSectionContentGaps } from './qualityValidation';
-import { BID_DISCIPLINE_PHRASES, dedupeRepeatedSubsections, isBidDisciplineSentence, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
+import { BID_DISCIPLINE_PHRASES, dedupeCrossSectionSkeletonH4s, dedupeRepeatedSubsections, isBidDisciplineSentence, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from './utils';
 import { promptTextsForResolvedPrompts } from './rolePipeline';
 import { criticalSectionBlockerMinChars } from './chapterPostProcessing';
 
@@ -1176,7 +1176,7 @@ export function finalizeChapterContentQuality(content: string, chapter: Pick<Doc
 /** 最终组装路径的重复/空壳兜底清理：rebuildFinalMarkdown 不再逐章跑 finalizeChapterContentQuality，
  * 补跑同 H3 重复 H4 去重与空壳小节删除，避免 Final Gate 补写与章节拼接残留的重复/空壳进入成品文档。 */
 export function finalizeFinalMarkdownStructure(markdown: string): string {
-  return stripDataConsistencyLeakSentences(stripTenderClauseFragmentHeadings(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(dedupeCrossLevelHeadingDuplicates(dedupeRepeatedBlocksWithinSections(normalizeWorkPackageLabels(cleanChineseWordBreakSpaces(splitGluedTableHeaderLines(rewriteWorkPackageTerminology(dedupeCrossSectionDuplicateSentences(markdown)))))))))));
+  return stripDataConsistencyLeakSentences(stripTenderClauseFragmentHeadings(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(dedupeCrossSectionSkeletonH4s(dedupeCrossLevelHeadingDuplicates(dedupeRepeatedBlocksWithinSections(normalizeWorkPackageLabels(cleanChineseWordBreakSpaces(splitGluedTableHeaderLines(rewriteWorkPackageTerminology(dedupeCrossSectionDuplicateSentences(markdown))))))))))));
 }
 
 export function promptMatchesChapter(prompt: ResolvedPromptContent, _chapter: DocumentTemplateChapter) {
@@ -1246,7 +1246,10 @@ export function uncoveredImportantFacts(markdown: string, facts: DocumentFact[],
     if (!significantFactValue(valueText)) return false;
     if (/第\s*\d+\s*页|新版交易系统|操作帮助|见招标公告|未尽事宜|详见图纸|招标文件补疑|政府相关文件|规范等其它资料/u.test(`${labelText}${valueText}${fact.sourceFile || ''}`)) return false;
     return /项目名称|工程名称|项目编号|招标项目编号|招标人|建设单位|发包人|建设地点|建设规模|招标范围|计划工期|合同工期|质量标准|质量目标/u.test(labelText)
-      || (/危大|安全|资源|材料|机械|设备/u.test(labelText) && !/^\d+(?:\.\d+)?\s*(?:mm|cm|m|㎡|m²|m3|m³|%|元|万元)?$/iu.test(valueText));
+      || (/危大|安全|资源|材料|机械|设备/u.test(labelText) && !/^\d+(?:\.\d+)?\s*(?:mm|cm|m|㎡|m²|m3|m³|%|元|万元)?$/iu.test(valueText))
+      // B5 关键精确参数落位（丰乐镇第三轮实测：可靠精确参数抽查 1/10，1.4天/103㎡/106㎡ 未落位）：
+      // 高价值单位参数（面积/长度/强度/管径/天数等）与 preciseFactUsageIssues 关键参数抽查同源，纳入事实落位轮
+      || (/面积|占地|建筑面积|长度|宽度|高度|厚度|深度|强度|等级|坡度|管径|直径|规格|跨度|天数|工期|周长|体积|重量/u.test(labelText) && /^\d+(?:\.\d+)?\s*(?:㎡|m²|m2|m³|m3|m|mm|cm|km|MPa|kPa|kN|天|日历天|日|级|%|台|套|座|个|t|kg)/iu.test(valueText));
   });
   const seen = new Set<string>();
   const missing: Array<{ fact: DocumentFact; label: string; value: string }> = [];

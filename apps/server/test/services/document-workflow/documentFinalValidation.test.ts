@@ -152,6 +152,43 @@ describe('buildStandardFinalValidationIssues', () => {
     expect(Array.isArray(issues)).toBe(true);
     expect(buildSemanticSimilarityMock).toHaveBeenCalled();
   });
+
+  // F14 终检兑底：规格错位在导出前最后防线拦截（修复链漏修时兑底）；权威映射缺失静默跳过
+  it('终检 factsModel 带 specAuthorityMap：正文「垫层 C35」vs 权威 C15 → 报规格错位', async () => {
+    const { scopeClassifier, professionalDepthClassifier } = classifierMocks();
+    const issues = await buildStandardFinalValidationIssues({
+      markdown: '# 第一章 工程概况\n\n垫层采用C35商品混凝土浇筑。',
+      chapters: [draftChapter({ content: '垫层采用C35商品混凝土浇筑。' })],
+      factsModel: {
+        ...emptyFactsModel,
+        specAuthorityMap: {
+          混凝土强度等级: [
+            { location: '垫层', spec: 'C15', quantity: '125.80m3', sourceFile: '清单.xls' },
+            { location: '基础', spec: 'C30', quantity: '86.40m3', sourceFile: '清单.xls' },
+          ],
+        },
+      },
+      template,
+      promptBindings: [],
+      factTokenScopeClassifier: scopeClassifier,
+      professionalDepthClassifier,
+    });
+    expect(issues.some(item => item.message.includes('规格错位') && item.message.includes('C35'))).toBe(true);
+  });
+
+  it('终检 specAuthorityMap 缺失 → 规格错位检测静默跳过不误报', async () => {
+    const { scopeClassifier, professionalDepthClassifier } = classifierMocks();
+    const issues = await buildStandardFinalValidationIssues({
+      markdown: '# 第一章 工程概况\n\n垫层采用C35商品混凝土浇筑。',
+      chapters: [draftChapter({ content: '垫层采用C35商品混凝土浇筑。' })],
+      factsModel: emptyFactsModel,
+      template,
+      promptBindings: [],
+      factTokenScopeClassifier: scopeClassifier,
+      professionalDepthClassifier,
+    });
+    expect(issues.some(item => item.message.includes('规格错位'))).toBe(false);
+  });
 });
 
 /** 1.4 形态 B：跨章同名 H3 小节检测（归属按模板计划匹配章裁决） */

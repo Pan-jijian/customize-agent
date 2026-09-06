@@ -10,16 +10,20 @@ import {
   asStringArray,
   comparableSectionHeadingMatches,
   comparableSectionTitleText,
+  dedupeCrossSectionSkeletonH4s,
   dedupeRepeatedSubsections,
   extractSection,
   findDuplicateH4Titles,
+  findExtraneousBlockTitles,
   hasProcessSequenceExpression,
   isBidDisciplineSentence,
   normalizeSubsectionTitleForDedup,
+  removeExtraneousBlockSections,
   runWithAdaptiveConcurrency,
   safePlanId,
   stableHash,
   stringifyFactValue,
+  stripExtraneousBlockHeadings,
   throwIfAborted,
 } from '@/services/document-workflow/utils';
 
@@ -65,6 +69,12 @@ describe('normalizeSubsectionTitleForDedup', () => {
     expect(normalizeSubsectionTitleForDedup('1.3.2 室外雨污分流改造')).toBe('室外雨污分流改造');
     expect(normalizeSubsectionTitleForDedup('室外雨污分流改造（一期）')).toBe('室外雨污分流改造');
     expect(normalizeSubsectionTitleForDedup('室外 雨污：分流 改造')).toBe('室外雨污分流改造');
+  });
+
+  it('剥离「工程」尾缀（稳定版：与验收器 duplicateTitles 口径同源，防标题变体误杀）', () => {
+    expect(normalizeSubsectionTitleForDedup('主体结构工程')).toBe('主体结构');
+    expect(normalizeSubsectionTitleForDedup('1. 主体结构工程')).toBe('主体结构');
+    expect(normalizeSubsectionTitleForDedup('土方外运及基坑支护工程')).toBe('土方外运及基坑支护');
   });
 });
 
@@ -114,6 +124,206 @@ describe('dedupeRepeatedSubsections', () => {
   it('无重复时原样保留', () => {
     const content = '### 施工准备\n#### 场地平整\n正文';
     expect(dedupeRepeatedSubsections(content)).toBe(content);
+  });
+});
+
+describe('findExtraneousBlockTitles（块成稿清单外标题检测）', () => {
+  it('串章骨架 H4 与自由发挥 H4 均判清单外，本块要点与块标题合法', () => {
+    const markdown = [
+      '### 周边环境与管线保护管控',
+      '#### 周边环境、管线与既有建构筑物保护',
+      '正文一',
+      '#### 施工部署与施工流水组织',
+      '串章正文',
+      '#### 安全防护设施与高处作业管控',
+      '自由发挥正文',
+    ].join('\n');
+    const extra = findExtraneousBlockTitles(markdown, '周边环境与管线保护管控', ['周边环境、管线与既有建构筑物保护'], ['施工部署与施工流水组织', '文明施工与扬尘噪声管控']);
+    expect(extra).toEqual(['施工部署与施工流水组织', '安全防护设施与高处作业管控']);
+  });
+
+  it('串章 H3（非块标题）判清单外', () => {
+    const markdown = ['### 文明施工与绿色施工管控', '正文', '### 周边环境与管线保护管控', '正文二'].join('\n');
+    const extra = findExtraneousBlockTitles(markdown, '周边环境与管线保护管控', [], []);
+    expect(extra).toEqual(['文明施工与绿色施工管控']);
+  });
+
+  it('本块要点全部输出时清单外为空', () => {
+    const markdown = ['### 围挡冲洗与渣土运输管控', '#### 围挡冲洗台与渣土管控', '正文'].join('\n');
+    expect(findExtraneousBlockTitles(markdown, '围挡冲洗与渣土运输管控', ['围挡冲洗台与渣土管控'], ['安全文明生产管理体系与措施'])).toEqual([]);
+  });
+
+  it('评分细目原标题 H4（sources 白名单）不算清单外——第七次回归：单要点块写细目标题属内容归位', () => {
+    const markdown = ['### 项目理解与编制边界', '#### 编制说明与工程概况', '细目正文'].join('\n');
+    // 要点标题=块标题（H3 直接承担），模型按证据写出细目原标题「编制说明与工程概况」→ 白名单命中，不判清单外
+    expect(findExtraneousBlockTitles(markdown, '项目理解与编制边界', ['项目理解与编制边界'], ['工程特点与施工条件分析'], ['编制说明与工程概况'])).toEqual([]);
+    // 未命中白名单时仍判清单外（自由发挥不放宽）
+    expect(findExtraneousBlockTitles(markdown, '项目理解与编制边界', ['项目理解与编制边界'], ['工程特点与施工条件分析'], ['其他细目'])).toEqual(['编制说明与工程概况']);
+    // 命中本章其他块标题时仍拦截（串章防线不因白名单放宽）
+    expect(findExtraneousBlockTitles('### 项目理解与编制边界\n#### 工程特点与施工条件分析\n串章', '项目理解与编制边界', ['项目理解与编制边界'], ['工程特点与施工条件分析'], ['工程特点与施工条件分析'])).toEqual(['工程特点与施工条件分析']);
+  });
+
+  it('H3 块标题“工程”变体不算清单外（稳定版：轮4 实测“主要分部分项施工方案”块输出变体标题被误杀）', () => {
+    const markdown = ['### 主要分部分项工程施工方案', '#### 模板工程施工方法', '正文'].join('\n');
+    expect(findExtraneousBlockTitles(markdown, '主要分部分项施工方案', ['模板工程施工方法'], [])).toEqual([]);
+    // 尾缀变体同样容忍（归一化尾缀剥离 + 同源宽松比较双保险）
+    const markdown2 = ['### 施工部署工程', '正文'].join('\n');
+    expect(findExtraneousBlockTitles(markdown2, '施工部署', [], [])).toEqual([]);
+    // 真串章 H3 仍拦截（宽松比较不放宽串章防线）
+    expect(findExtraneousBlockTitles(markdown, '施工部署', ['模板工程施工方法'], [])).toEqual(['主要分部分项工程施工方案']);
+  });
+});
+
+describe('removeExtraneousBlockSections（块成稿清单外标题块删除）', () => {
+  it('串章 H4 块连同正文删除，本块要点与块标题保留', () => {
+    const markdown = [
+      '### 周边环境与管线保护管控',
+      '#### 周边环境、管线与既有建构筑物保护',
+      '正文一',
+      '#### 施工部署与施工流水组织',
+      '串章正文',
+      '| 表头 | 列 |',
+      '| --- | --- |',
+      '| 行 | 1 |',
+    ].join('\n');
+    const result = removeExtraneousBlockSections(markdown, '周边环境与管线保护管控', ['周边环境、管线与既有建构筑物保护']);
+    expect(result).toContain('正文一');
+    expect(result).not.toContain('串章正文');
+    expect(result).not.toContain('表头');
+    expect(result).not.toContain('施工部署与施工流水组织');
+  });
+
+  it('串章 H3 整块删除', () => {
+    const markdown = ['### 文明施工与绿色施工管控', '串章正文', '### 周边环境与管线保护管控', '正文二'].join('\n');
+    const result = removeExtraneousBlockSections(markdown, '周边环境与管线保护管控', []);
+    expect(result).not.toContain('串章正文');
+    expect(result).toContain('正文二');
+  });
+
+  it('评分细目原标题 H4 块（sources 白名单）保留，其余清单外仍删除', () => {
+    const markdown = [
+      '### 项目理解与编制边界',
+      '#### 编制说明与工程概况',
+      '细目正文',
+      '#### 自由发挥小节',
+      '自由发挥正文',
+    ].join('\n');
+    const result = removeExtraneousBlockSections(markdown, '项目理解与编制边界', ['项目理解与编制边界'], ['编制说明与工程概况']);
+    expect(result).toContain('细目正文');
+    expect(result).toContain('编制说明与工程概况');
+    expect(result).not.toContain('自由发挥正文');
+    expect(result).not.toContain('自由发挥小节');
+  });
+});
+
+describe('stripExtraneousBlockHeadings（标题层确定性修复：删标题留正文，正文零丢失）', () => {
+  it('清单外 H4 删标题行、正文保留；白名单细目标题与块标题 H3 保留', () => {
+    const markdown = [
+      '### 项目理解与编制边界',
+      '#### 编制说明与工程概况',
+      '细目正文',
+      '#### 自由发挥小节',
+      '自由发挥正文',
+    ].join('\n');
+    const result = stripExtraneousBlockHeadings(markdown, '项目理解与编制边界', ['项目理解与编制边界'], ['编制说明与工程概况']);
+    expect(result).toContain('细目正文');
+    expect(result).toContain('自由发挥正文');
+    expect(result).not.toContain('#### 自由发挥小节');
+    expect(result).toContain('#### 编制说明与工程概况');
+    expect(result).toContain('### 项目理解与编制边界');
+  });
+
+  it('清单外 H3（写错块标题）删标题行、正文并入并补回块标题外壳', () => {
+    const markdown = ['### 编制说明与工程概况', '正文一', '正文二'].join('\n');
+    const result = stripExtraneousBlockHeadings(markdown, '项目理解与编制边界', ['项目理解与编制边界'], []);
+    expect(result).toContain('### 项目理解与编制边界');
+    expect(result).not.toContain('### 编制说明与工程概况');
+    expect(result).toContain('正文一');
+    expect(result).toContain('正文二');
+  });
+});
+
+describe('dedupeCrossSectionSkeletonH4s（跨 H3 同名 H4 串章骨架删除）', () => {
+  it('跨 H3 同名 H4 保留首次、删除串章副本（真实回归 6.4 串章形态）', () => {
+    const markdown = [
+      '## 第六章 安全文明生产',
+      '### 安全文明施工部署与流水组织',
+      '#### 施工部署与施工流水组织',
+      '正文一',
+      '### 文明施工与绿色施工管控',
+      '#### 文明施工与扬尘噪声管控',
+      '正文二',
+      '#### 红线外土方覆盖扬尘防治',
+      '正文三',
+      '### 周边环境与管线保护管控',
+      '#### 周边环境、管线与既有建构筑物保护',
+      '正文四',
+      '#### 施工部署与施工流水组织',
+      '串章一',
+      '#### 文明施工与扬尘噪声管控',
+      '串章二',
+      '#### 红线外土方覆盖扬尘防治',
+      '串章三',
+    ].join('\n');
+    const result = dedupeCrossSectionSkeletonH4s(markdown);
+    expect(result).toContain('正文一');
+    expect(result).toContain('正文二');
+    expect(result).toContain('正文三');
+    expect(result).toContain('正文四');
+    expect(result).not.toContain('串章一');
+    expect(result).not.toContain('串章二');
+    expect(result).not.toContain('串章三');
+  });
+
+  it('H4 与章内任一 H3 同名即删除该 H4 块', () => {
+    const markdown = [
+      '## 第三章 新技术',
+      '### 智慧工地基本级实施',
+      '#### 智慧工地基本级实施',
+      '与 H3 同名正文',
+      '### BIM管线综合与机房深化排布',
+      '#### BIM管线综合与机房深化排布技术应用',
+      '正文二',
+    ].join('\n');
+    const result = dedupeCrossSectionSkeletonH4s(markdown);
+    expect(result).not.toContain('与 H3 同名正文');
+    expect(result).toContain('正文二');
+  });
+
+  it('泛化词白名单（施工准备）跨 H3 重复合法保留', () => {
+    const markdown = [
+      '## 第二章 重点难点',
+      '### 土方开挖工程',
+      '#### 施工准备',
+      '土方准备正文',
+      '### 钢筋工程',
+      '#### 施工准备',
+      '钢筋准备正文',
+    ].join('\n');
+    const result = dedupeCrossSectionSkeletonH4s(markdown);
+    expect(result).toContain('土方准备正文');
+    expect(result).toContain('钢筋准备正文');
+  });
+
+  it('跨章同名小节不受影响（章级作用域）', () => {
+    const markdown = [
+      '## 第一章 整体理解',
+      '### 周边环境与既有设施保护',
+      '#### 周边环境与管线保护',
+      '第一章正文',
+      '## 第六章 安全文明',
+      '### 周边环境与管线保护管控',
+      '#### 周边环境与管线保护',
+      '第六章正文',
+    ].join('\n');
+    const result = dedupeCrossSectionSkeletonH4s(markdown);
+    expect(result).toContain('第一章正文');
+    expect(result).toContain('第六章正文');
+  });
+
+  it('无重复时原样保留', () => {
+    const markdown = '## 第一章\n### 编制说明与工程概况\n#### 项目基本信息表\n正文';
+    expect(dedupeCrossSectionSkeletonH4s(markdown)).toBe(markdown);
   });
 });
 
@@ -328,5 +538,18 @@ describe('isBidDisciplineSentence（评分报告问题2：商务纪律句判定�
     expect(isBidDisciplineSentence('高温季节调整作息时间，保障作业人员休息纪律。')).toBe(false);
     expect(isBidDisciplineSentence('本工程创优目标为确保黄山杯。')).toBe(false);
     expect(isBidDisciplineSentence('项目部组织全员开展安全生产教育培训。')).toBe(false);
+  });
+});
+
+describe('isBidDisciplineSentence（评分报告 P3 异常低价串章回归）', () => {
+  it('「异常低价计算方式」小节句命中禁写词表', () => {
+    expect(isBidDisciplineSentence('异常低价计算方式见招标文件评标办法。')).toBe(true);
+    expect(isBidDisciplineSentence('本节介绍异常低价的评审认定标准。')).toBe(true);
+    expect(isBidDisciplineSentence('评标基准价计算规则详见评标办法。')).toBe(true);
+  });
+
+  it('施工语境合法表述不误伤（低价不等于异常低价评审条款）', () => {
+    expect(isBidDisciplineSentence('采用低价环保材料降低施工成本。')).toBe(false);
+    expect(isBidDisciplineSentence('优化施工方案以降低材料损耗与机械台班费用。')).toBe(false);
   });
 });

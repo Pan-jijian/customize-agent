@@ -381,7 +381,13 @@ export default function DocumentsPage() {
           subSteps: stageDetailsToSubSteps(stage, status, index),
         } satisfies FlowStep;
       });
-      if (record.status === 'generating' && steps.length > 0 && steps.at(-1)?.status === 'finish') steps[steps.length - 1] = { ...steps[steps.length - 1], status: 'process' as const };
+      if (record.status === 'generating' && steps.length > 0 && steps.every(step => step.status !== 'process')) {
+        // 快照内所有步骤均已完成（并发章节全部成稿、下一阶段 stage 尚未写入的时间窗），
+        // 追加收尾占位节点保持 loading 指示——不篡改已完成章节节点：
+        // 历史缺陷：把“最后一步 finish”直接改成 process，并发章节下最后一章的节点明明已
+        // 成稿（消息显示已生成 N 字）却永久转圈，或与中间 running 节点叠加出现双转圈
+        steps.push({ key: `finishing-${steps.length}`, title: '生成收尾中', subtitle: '', description: '章节已全部生成，正在执行全局一致性审查与质量校验。', status: 'process' as const, icon: <LoadingOutlined />, subSteps: [] });
+      }
       const activeKey = record.status === 'generating' ? steps.at(-1)?.key || 'prepare' : (record.status === 'failed' || record.status === 'aborted') ? steps.find(step => step.status === 'error')?.key || steps.at(-1)?.key || 'prepare' : 'done';
       return { steps, activeKey };
     }

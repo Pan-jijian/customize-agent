@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { CanonicalFact as GovernedCanonicalFact, CanonicalFactModel, DocumentFact, NumericScopeConflict, ProjectGraph } from './types';
+import type { CanonicalFact as GovernedCanonicalFact, CanonicalFactModel, DocumentEvidence, DocumentFact, NumericScopeConflict, ProjectGraph } from './types';
 import { cleanPdfHeadingNoise, normalizeOcrFactText } from './factsModel';
 import { stableHash, stringifyFactValue } from './utils';
 import { recordArbitrationCases } from './workflowCaseLog';
@@ -50,7 +50,24 @@ export const PROJECT_BASIC_FIELD_SPECS: FieldSpec[] = [
   { key: 'labor_peak', label: '劳动力高峰人数', aliases: ['劳动力高峰', '高峰期劳动力', '高峰人数', '劳动力峰值', '高峰期人数', '劳动力配置'], valueType: 'count' },
   { key: 'assembly_rate', label: '装配率', aliases: ['装配率', '装配式建筑占比', '装配式比例', '装配式建筑面积占比'], valueType: 'percentage' },
   { key: 'foundation_support_form', label: '基坑支护形式', aliases: ['基坑支护形式', '基坑支护方式', '支护形式', '支护方式'], valueType: 'text' },
+  // 4.19 危大判定闭环：基坑开挖深度槽位（图纸标注 -5.150 坡底线/-7.100 电梯井 → 5.15m/7.1m），
+  // 危大/超危大分级判定的前提参数；缺此槽位时深度事实进不了主表，危大交叉质检无从触发；
+  // 坡底线/坑底是图纸语义标注的常见字段名，需纳入别名才能被 fieldSpecForFact 命中
+  { key: 'excavation_depth', label: '基坑开挖深度', aliases: ['基坑开挖深度', '基坑深度', '开挖深度', '基坑底标高', '坑底标高', '坡底线', '坑底'], valueType: 'text' },
   { key: 'award_clause', label: '创优奖惩条款', aliases: ['创优奖惩', '优质优价', '创优目标', '奖惩条款', '创优奖项'], valueType: 'award' },
+];
+
+// 基坑支护形式封闭词表（单一来源）：图纸标注命中词 → 事实标准形式。
+// 补抽产出映射与 foundation_support_form 验收域均从此派生，新增形式只需在此登记，
+// 从结构上消灭「产出词表与验收正则分处两地不同步」类缺陷
+//（4.19 实测：补抽产出「土钉墙」被验收正则拒收，槽位仍空）
+export const SUPPORT_FORM_LEXICON: Array<{ pattern: RegExp; form: string }> = [
+  { pattern: /土钉/u, form: '土钉墙' },
+  { pattern: /锚杆|锚索/u, form: '锚杆支护' },
+  { pattern: /喷锚/u, form: '喷锚支护' },
+  { pattern: /放坡/u, form: '放坡开挖' },
+  { pattern: /地下连续墙/u, form: '地下连续墙' },
+  { pattern: /支护桩/u, form: '支护桩' },
 ];
 
 function isReferenceOnly(value: string) {
@@ -114,9 +131,17 @@ function valueTypeScore(value: string, spec: FieldSpec) {
         return { rejected: false, score: 35, reason: '符合项目名称特征' };
       }
       if (spec.key === 'foundation_support_form') {
-        if (!/支护|放坡|锚|桩|喷|开挖|护坡/u.test(value)) return { rejected: true, score: -70, reason: '基坑支护形式缺少支护工艺特征' };
+        // 验收域 = 封闭词表标准形式/命中词 ∪ 通用支护特征词（覆盖 LLM 抽取的复合形式如「放坡+喷锚」「挂网喷浆」）
+        const supportFormAccepted = SUPPORT_FORM_LEXICON.some(item => item.pattern.test(value) || value.includes(item.form))
+          || /支护|放坡|锚|桩|喷|开挖|护坡/u.test(value);
+        if (!supportFormAccepted) return { rejected: true, score: -70, reason: '基坑支护形式缺少支护工艺特征' };
         if (/监测|监测频次|闭环/u.test(value)) return { rejected: true, score: -80, reason: '支护形式字段串入监测管控内容' };
         return { rejected: false, score: 30, reason: '包含支护工艺特征' };
+      }
+      if (spec.key === 'excavation_depth') {
+        if (!/\d+(?:\.\d+)?/u.test(value)) return { rejected: true, score: -70, reason: '基坑开挖深度缺少数值' };
+        if (/监测|监测频次|闭环|验收|支护桩/u.test(value)) return { rejected: true, score: -80, reason: '开挖深度字段串入监测管控内容' };
+        return { rejected: false, score: 30, reason: '包含开挖深度数值' };
       }
       return { rejected: false, score: value.length >= 2 ? 10 : -20, reason: '文本字段' };
   }
@@ -185,7 +210,135 @@ export function collectStructuredFactCandidates(facts: DocumentFact[]) {
       sourceName: fact.sourceFile || fact.sourceRef?.sectionTitle || 'structured_fact',
     }, spec));
   }
+  // 4.19 基坑深度标注抽取：图纸语义标注「-5.150 坡底线」「-7.100(电梯井)」类事实无「基坑开挖深度」
+  // 字段名，fieldSpecForFact 无法命中；按标注形态（坡底线/坑底/电梯井 + 标高数值）识别为
+  // excavation_depth 候选，取标高绝对值最大值作为开挖深度（电梯井最深），危大判定前提得以进入主表
+  const depthSpec = PROJECT_BASIC_FIELD_SPECS.find(item => item.key === 'excavation_depth');
+  if (depthSpec) {
+    for (const fact of facts) {
+      // 已带 excavation_depth fieldId 的事实走首轮 fieldSpecForFact 直配（图纸标注补抽产物），
+      // 此处再采样会产出嵌套值的重复候选（「5.15m（图纸标注：5.15m（图纸标注：…））」），跳过
+      if (fact.fieldId === 'excavation_depth') continue;
+      const value = stringifyFactValue(fact.value);
+      const text = `${fact.fieldId || ''}${fact.key || ''}${fact.fieldName || ''} ${value}`;
+      if (!/坡底线|坑底|电梯井|坑底标高/u.test(text)) continue;
+      const depths = [...value.matchAll(/-?(\d+(?:\.\d{1,3})?)(?=[^0-9.]|$)/gu)].map(match => Math.abs(Number(match[1]))).filter(item => Number.isFinite(item) && item > 0.5 && item < 50);
+      if (depths.length === 0) continue;
+      const maxDepth = Math.max(...depths);
+      candidates.push(scoreFactCandidate({
+        fieldKey: 'excavation_depth',
+        label: depthSpec.label,
+        value: `${maxDepth}m（图纸标注：${value.slice(0, 60)}）`,
+        sourceType: 'structured_fact',
+        sourceName: fact.sourceFile || fact.sourceRef?.sectionTitle || 'drawing_annotation',
+      }, depthSpec));
+    }
+  }
   return candidates;
+}
+
+// ── 4.19 图纸标注事实补抽：CAD 语义标注文本（「-5.150\n坡底线」「钢管土钉开孔大样」）无字段名，
+// LLM 动态 schema 抽取无法命中 → 危大判定/支护形式槽位无输入，正文深度只能由 LLM 推断产生偏差
+//（真实回归实测：资料标注 -5.150，正文写「约4.8m」）。确定性按标注形态提取为 DocumentFact
+//（fieldId 直配 spec.key），经 collectStructuredFactCandidates 进入 canonical 主表。──
+
+const DRAWING_ANNOTATION_DEPTH_LABEL_RE = /坡底线|坑底标高|基坑底标高|开挖深度|基坑深度/u;
+const DRAWING_ANNOTATION_FORM_RE = new RegExp(SUPPORT_FORM_LEXICON.map(item => item.pattern.source).join('|'), 'u');
+// 比较式/相对量条文排除（与 excavationDepthLockIssues 窗口排除同源）：37 号令危大目录条文
+//（「开挖深度16m及以上的人工挖孔桩工程」）经幕墙 DWG 引用混入图纸证据，命中「开挖深度」标签
+// 被误采为项目深度、压过真实坡底线标注（真实回归：-5.150 坡底线 → 16m 污染 canonical，
+// 正文深度无法锁定）。比较式阈值（超过/不小于…）与「以上|以下」相对量均非标注绝对值，整行不采。
+const DRAWING_ANNOTATION_DEPTH_COMPARISON_RE = /(?:超过|大于|小于|不[大低小]于|不低于|及以上|及以下|以上|以下)/u;
+
+/**
+ * 从图纸类证据中提取基坑深度标注与支护形式词为事实。
+ * 形态约束（防 CAD 噪声数字误采）：
+ * - 深度：标注词行（坡底线/坑底标高…）本行数值；无数值时回看上一行纯数值行（CAD 标注「-5.150\n坡底线」分两行）；
+ *   排除「坑底H-1500」形态（集水井大样的 H 标注，非标高语义），绝对值限 1~50m。
+ * - 支护形式：命中词行采样（钢管土钉/钢花管土钉 → 土钉墙；锚杆/锚索/放坡/喷锚/支护桩同理），
+ *   同词多行去重；未命中不产出（宁缺毋滥）。
+ */
+export function extractDrawingAnnotationFacts(evidence: Array<Pick<DocumentEvidence, 'content' | 'filePath' | 'processingType' | 'roleId' | 'sectionTitle'>>): DocumentFact[] {
+  const facts: DocumentFact[] = [];
+  const depthSamples = new Map<string, { value: number; context: string }>();
+  const formSamples = new Map<string, { form: string; context: string }>();
+  for (const item of evidence) {
+    const content = String(item.content || '');
+    const source = item.filePath || item.sectionTitle || 'drawing_annotation';
+    const isDrawingEvidence = item.processingType === 'drawing' || /dwg|图纸|CAD/iu.test(`${item.filePath || ''} ${item.sectionTitle || ''}`);
+    if (!isDrawingEvidence && !/CAD 语义标注/u.test(content)) continue;
+    if (!DRAWING_ANNOTATION_DEPTH_LABEL_RE.test(content) && !DRAWING_ANNOTATION_FORM_RE.test(content)) continue;
+    const lines = content.split(/\r?\n/u);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index].trim();
+      if (!line) continue;
+      // 深度标注：标注词行取本行范围内数值的绝对值最大者（防「1# 基坑开挖深度 5.2m」误采编号 1、
+      // 「坡比 1:0.75」误采比值）；本行无范围值且上一行为纯数值行时回看上一行
+      //（CAD 标注「-5.150\n坡底线」分两行形态）；比较式条文行（危大目录阈值/相对量）不采
+      if (DRAWING_ANNOTATION_DEPTH_LABEL_RE.test(line) && !/坑底H/u.test(line) && !DRAWING_ANNOTATION_DEPTH_COMPARISON_RE.test(line)) {
+        const inRange = (numberValue: number) => Number.isFinite(numberValue) && numberValue >= 1 && numberValue < 50;
+        const lineValues = [...line.matchAll(/-?(\d+(?:\.\d{1,3})?)/gu)]
+          .filter(match => {
+            const matchIndex = match.index ?? 0;
+            const prev = line[matchIndex - 1];
+            const next = line[matchIndex + match[0].length];
+            return prev !== ':' && next !== ':' && next !== '#';
+          })
+          .map(match => Math.abs(Number(match[1])))
+          .filter(inRange);
+        let value = lineValues.length > 0 ? Math.max(...lineValues) : Number.NaN;
+        let fromPrevLine = false;
+        if (!Number.isFinite(value) && index > 0 && /^-?[\d.,]+\s*$/u.test(lines[index - 1].trim())) {
+          const prevValue = Math.abs(Number(lines[index - 1].trim().replace(/,/gu, '')));
+          if (inRange(prevValue)) {
+            value = prevValue;
+            fromPrevLine = true;
+          }
+        }
+        if (Number.isFinite(value)) {
+          const context = (fromPrevLine ? `${lines[index - 1].trim()} ${line}` : line).replace(/[|]/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, 48);
+          const key = `${source}:${value.toFixed(2)}`;
+          if (!depthSamples.has(key)) depthSamples.set(key, { value, context });
+        }
+      }
+      // 支护形式词采样：一行可含多形式（如「放坡 + 锚杆」），按封闭词表逐词独立采样防漏
+      if (DRAWING_ANNOTATION_FORM_RE.test(line)) {
+        const forms = SUPPORT_FORM_LEXICON.filter(item => item.pattern.test(line)).map(item => item.form);
+        for (const form of forms) {
+          if (!formSamples.has(form)) formSamples.set(form, { form, context: line.replace(/\s+/gu, ' ').slice(0, 60) });
+        }
+      }
+    }
+  }
+  if (depthSamples.size > 0) {
+    const maxDepth = Math.max(...[...depthSamples.values()].map(item => item.value));
+    const context = [...depthSamples.values()].map(item => item.context).slice(0, 3).join('；');
+    facts.push({
+      key: '基坑开挖深度',
+      fieldId: 'excavation_depth',
+      fieldName: '基坑开挖深度',
+      value: `${maxDepth}m（图纸标注：${context}）`,
+      sourceFile: '图纸标注',
+      roleId: 'drawing',
+      processingType: 'drawing',
+      confidence: 90,
+    });
+  }
+  if (formSamples.size > 0) {
+    const forms = [...formSamples.values()];
+    const context = forms.map(item => item.context).slice(0, 3).join('；');
+    facts.push({
+      key: '基坑支护形式',
+      fieldId: 'foundation_support_form',
+      fieldName: '基坑支护形式',
+      value: `${forms.map(item => item.form).join('、')}（图纸标注：${context}）`,
+      sourceFile: '图纸标注',
+      roleId: 'drawing',
+      processingType: 'drawing',
+      confidence: 90,
+    });
+  }
+  return facts;
 }
 
 export function collectMarkdownTableCandidates(markdown: string, sourceName = 'generated_markdown') {

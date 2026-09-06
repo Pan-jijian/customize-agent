@@ -95,6 +95,9 @@ function isHardExportBlockingIssue(issue: ValidationIssue) {
   // round-20 S5/W8：评审轮问题按 category 直通硬阻断（复评残留的否决级/高风险），不再依赖消息正则
   if (governedIssue.category === 'qingtian_review') return true;
   if (governedIssue.level === 'error' && governedIssue.severity === 'blocker' && /placeholder|source|style|format|structure/u.test(String(governedIssue.category || ''))) return true;
+  // 4.19 危大闭环新检查器直通：危大分级/支护形式/设备进场的确定性判定（category=fact_consistency）
+  // 消息锚点为三组新检查器专用前缀，不影响历史 fact_consistency 消息的白名单把关（宁漏报不误报）
+  if (governedIssue.level === 'error' && governedIssue.category === 'fact_consistency' && /危大工程判定缺失|超危大工程判定缺失|支护形式与资料矛盾|支护形式未落地|设备进场时间荒谬|设备进场工序倒挂/u.test(issue.message)) return true;
   if (/提示词要求|疑似提示词指令标题|适用性自相矛盾|不得出现/u.test(issue.message)) return true;
   if (/目录与正文/u.test(issue.message)) return false;
   if (/配置要求缺少必要内容/u.test(issue.message)) return issue.level === 'error';
@@ -402,33 +405,46 @@ function normalizeStructureTitle(title: string) {
     .trim();
 }
 
-function collectTocSectionTitles(markdown: string) {
+function collectTocSectionEntries(markdown: string) {
   const match = TOC_BLOCK_RE.exec(markdown);
   if (!match) return [];
   return match[1].split(LINE_SPLIT_RE)
-    .map(line => /^\s*\d+\.\d+\s+(.+)$/u.exec(line.trim()))
+    .map(line => /^\s*(\d+\.\d+)\s+(.+)$/u.exec(line.trim()))
     .filter((matchItem): matchItem is RegExpExecArray => Boolean(matchItem))
-    .map(matchItem => normalizeStructureTitle(matchItem[1] || ''))
-    .filter(Boolean);
+    .map(matchItem => ({ number: matchItem[1] || '', title: normalizeStructureTitle(matchItem[2] || '') }))
+    .filter(entry => entry.title);
 }
 
-function collectBodySectionTitles(markdown: string) {
-  return [...markdown.matchAll(/^#{2,4}\s+(\d+\.\d+\s+.+)$/gmu)]
-    .map(match => normalizeStructureTitle(match[1] || ''))
-    .filter(Boolean);
+function collectBodySectionEntries(markdown: string) {
+  // 只收集 H3 节标题（### X.Y）：finalize 归一后正文二级小节统一为 ###，H4（工作包/三级小节）
+  // 一律是 #### X.Y.Z 三位编号，不得计入节集合，否则目录与正文节数守恒校验会被工作包 H4 干扰
+  return [...markdown.matchAll(/^###\s+(\d+\.\d+)\s+(.+)$/gmu)]
+    .map(match => ({ number: match[1] || '', title: normalizeStructureTitle(match[2] || '') }))
+    .filter(entry => entry.title);
 }
 
 export function tocBodyConsistencyIssues(markdown: string): ValidationIssue[] {
-  const tocSections = collectTocSectionTitles(markdown);
-  const bodySections = collectBodySectionTitles(markdown);
-  if (tocSections.length === 0 || bodySections.length === 0) return [];
-  const bodySet = new Set(bodySections);
-  const tocSet = new Set(tocSections);
-  const missingInBody = tocSections.filter(title => !bodySet.has(title));
-  const missingInToc = bodySections.filter(title => !tocSet.has(title));
+  const tocEntries = collectTocSectionEntries(markdown);
+  const bodyEntries = collectBodySectionEntries(markdown);
+  if (tocEntries.length === 0 || bodyEntries.length === 0) return [];
+  const tocTitles = tocEntries.map(entry => entry.title);
+  const bodyTitles = bodyEntries.map(entry => entry.title);
+  const bodySet = new Set(bodyTitles);
+  const tocSet = new Set(tocTitles);
+  const missingInBody = tocTitles.filter(title => !bodySet.has(title));
+  const missingInToc = bodyTitles.filter(title => !tocSet.has(title));
   const issues: ValidationIssue[] = [];
   if (missingInBody.length > 0) issues.push({ level: 'error', message: `目录与正文不一致，目录小节未在正文中找到：${[...new Set(missingInBody)].join('、')}`, suggestion: '建议以最终清洗后的正文二级标题为准重新生成目录。' });
   if (missingInToc.length > 0) issues.push({ level: 'error', message: `目录与正文不一致，正文小节未进入目录：${[...new Set(missingInToc)].join('、')}`, suggestion: '建议重新生成目录，确保正文二级小节完整进入目录。' });
+  // 4.19 编号归一根治：此前只比对去编号后的标题名集合，编号错位（正文 4.2 重复、4.6 缺失、
+  // 目录 4.4 与正文 4.4 名称不一致）永远抓不到。新增「编号↔名称」对应校验与节数守恒。
+  const bodyByNumber = new Map(bodyEntries.map(entry => [entry.number, entry.title]));
+  const tocNumberSet = new Set(tocEntries.map(entry => entry.number));
+  const mismatched = tocEntries.filter(entry => bodyByNumber.has(entry.number) && bodyByNumber.get(entry.number) !== entry.title);
+  const orphanBody = bodyEntries.filter(entry => !tocNumberSet.has(entry.number));
+  if (tocEntries.length !== bodyEntries.length) issues.push({ level: 'error', message: `目录与正文小节数量不一致：目录 ${tocEntries.length} 节、正文 ${bodyEntries.length} 节`, suggestion: '正文 H3 编号必须连续单调且与目录一一对应；出现重复编号、跳号或丢节时以正文实际结构重建目录。' });
+  if (mismatched.length > 0) issues.push({ level: 'error', message: `目录与正文同一编号对应不同小节：${mismatched.slice(0, 5).map(entry => `${entry.number} 目录「${entry.title}」/正文「${bodyByNumber.get(entry.number)}」`).join('、')}`, suggestion: '目录必须按正文 H3 实际编号与标题生成，同一编号不得对应不同小节名称。' });
+  if (orphanBody.length > 0) issues.push({ level: 'error', message: `正文小节编号未出现在目录中：${orphanBody.slice(0, 5).map(entry => `${entry.number} ${entry.title}`).join('、')}`, suggestion: '目录编号与正文编号必须全集一致。' });
   return issues;
 }
 
@@ -478,6 +494,25 @@ export function formalContentIntegrityIssues(markdown: string): ValidationIssue[
 
 export function formalHeadingHierarchyIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  // P5 复选框符号残留检测：☑/✓ 等招标文件选项符号混入小节标题（目录「8.2 ☑电子保函」串章回归），
+  // 大纲三通道清洗（outline.ts stripCheckboxSymbols）为前置防线，此处为成稿兑底——穿透时进修复循环
+  {
+    const pollutedHeadings = [...markdown.matchAll(/^#{2,4}\s+(.+)$/gmu)]
+      .map(match => (match[1] || '').trim())
+      .filter(title => /[☑✓✔☐□☒○●◉◇◆]/u.test(title))
+      .slice(0, 6);
+    if (pollutedHeadings.length > 0) {
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'structure',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `小节标题残留复选框/选项符号（☑/✓ 等招标文件符号）：“${pollutedHeadings.join('”、“')}”`,
+        suggestion: '删除标题中的复选框符号（☑✓✔☐□等）；标题主体若属商务文件内容（如“电子保函”），整个小节删除，技术标不得出现商务条款小节。',
+      });
+    }
+  }
   const firstBodyChapter = markdown.search(/^##\s+第[一二三四五六七八九十百千万\d]+章\s+/mu);
   const bodyMarkdown = firstBodyChapter >= 0 ? markdown.slice(firstBodyChapter) : markdown.replace(/^##\s+目录[\s\S]*?(?=^##\s+第[一二三四五六七八九十百千万\d]+章\s+)/mu, '');
   const illegalH2 = [...bodyMarkdown.matchAll(/^##\s+(.+)$/gmu)]
@@ -924,9 +959,22 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
     // 剥离表格行：进度计划表中的分项持续时间（"第1日~第7日 7日历天"）是计划分解数据，
     // 不是总工期口径表述，不得与资料工期比对
     const nonTableMarkdown = markdown.split('\n').filter(line => !/^\s*\|/u.test(line.trim())).join('\n');
-    const durationMatches = durationValues(nonTableMarkdown);
-    const conflicting = expectedDuration ? durationMatches.filter(item => item !== expectedDuration && /日历天/u.test(item)) : [];
-    if (expectedDuration && conflicting.length >= 2) issues.push({ level: 'warning', message: `跨章一致性冲突：正文出现与资料工期不一致的表述 ${conflicting.slice(0, 6).join('、')}`, suggestion: `请统一使用资料中的工期口径：${expectedSchedule}` });
+    // 4.19 工期冲突升 error（与面积/估算价口径同构：数字级不一致是低级错误，不得以表述误差放过）：
+    // 带上下文窗口匹配，排除合法口径——顺延/延长条款（「不超过」「顺延」）、进度分解区间（「第N日~」）、
+    // 子项分层工期（基坑/主体/装饰等阶段工期与总工期天然分层，不互斥）；
+    // 窗口排除数字防贪婪回溯（「计划工期210日历天」窗口吞 210 后捕获组拿到 0 造成假冲突）；
+    // 子项豁免需含锚点前 8 字符（「基础施工工期45日历天」的子项词在锚点前，match[0] 只有「工期45日历天」）
+    const durationConflictRe = /(?:计划工期|合同工期|总工期|工期|施工周期)[^\d。；;\n|]{0,18}(\d{1,4})\s*日历天/gu;
+    const conflicting: string[] = [];
+    for (const match of nonTableMarkdown.matchAll(durationConflictRe)) {
+      const beforeAnchor = nonTableMarkdown.slice(Math.max(0, (match.index || 0) - 8), match.index || 0);
+      const context = beforeAnchor + match[0];
+      if (/顺延|延长|展期|不超过|不大于|最多|累计|第\d+日/u.test(context)) continue;
+      if (/基坑|支护|桩基|土方|基础|主体|装饰|装修|安装|室外|分项|分阶段|阶段|关键线路|单层|每层|地下室|砌体|二次结构|收尾|调试/u.test(context)) continue;
+      const value = `${match[1]}日历天`;
+      if (value !== expectedDuration && !conflicting.includes(value)) conflicting.push(value);
+    }
+    if (expectedDuration && conflicting.length >= 1) issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `跨章一致性冲突：正文出现与资料工期不一致的表述 ${conflicting.slice(0, 6).join('、')}`, suggestion: `请统一使用资料中的工期口径：${expectedSchedule}` });
   }
   // round-14 零误伤：质量目标词面未命中时由 bge 语义兑底（质量章节覆盖验收闭环语义即视为质量体系已体现），
   // 调用方未提供语义分析时保留词面判定（质量目标章节为模板固定结构，四词词表命中率极高，残余风险由 warning 级事实值反查兑底）
@@ -1032,6 +1080,14 @@ async function collectLayerNumbers(text: string, actionGate?: (texts: string[]) 
       if (isUsed(absStart, absEnd)) continue;
       const gap = direction === 'first' ? window.slice(0, m.index ?? 0) : window.slice((m.index ?? 0) + m[0].length);
       if (SPEC_ACTION_RE.test(gap)) continue;
+      // 层厚度物理合理边界：构造层（找平/面层/防水/保温/结合/垫层等）厚度物理区间 (0,1000)mm。
+      // 窗口内首个 mm 数值可能是平整度偏差/瓷砖规格等非厚度语义（4.19.5 真实回归：
+      // 「面层…2000mm」被误当厚度权威，确定性修复把正文 20mm/9mm 批量替换为 2000mm，
+      // 制造「每层厚度7～2000mm」错误参数被青天评审报高风险）——超界值跳过继续找下一个候选
+      if (kind === 'thickness') {
+        const rawValue = Number(m[1] ?? '');
+        if (!Number.isFinite(rawValue) || rawValue <= 0 || rawValue >= 1000) continue;
+      }
       if (actionGate && gap.trim()) uncertainGaps.push({ key: `${layer}|${absStart}|${absEnd}`, gap });
       usedRanges.push([absStart, absEnd]);
       claims.push({ layer, span: [absStart, absEnd], raw: m[0], kind });
@@ -1383,6 +1439,10 @@ function collectFactVerificationCandidates(markdown: string): FactVerificationCa
     const tokenLine = markdown.slice(lineStart, lineEnd < 0 ? markdown.length : lineEnd);
     if (/^\s*\|/u.test(tokenLine.trim())) continue;
     const context = markdown.slice(Math.max(0, tokenIndex - 36), Math.min(markdown.length, tokenIndex + token.length + 36));
+    // B7 合同条款引用豁免（丰乐镇第七轮实测）：违约金阶梯（「延期超过28天…超过56天解除合同」）、
+    // 缺陷责任期（「缺陷责任期24个月」）等合同条款引用数字是招标/合同原文的忠实落位，
+    // 不属编造数字，不进资料事实反查池（提取侧合同条款本就未入事实主表，反查必失败）
+    if (/违约金|延期竣工|解除合同|缺陷责任期|质量保证金|质保金|履约保证金|保修期/u.test(context)) continue;
     // token 前导近邻窗口（16 字）：scope 升级的关键词封闭匹配限定在近邻，杜绝远距离上下文误升级（round-14 零误伤）
     const prefix = markdown.slice(Math.max(0, tokenIndex - 16), tokenIndex);
     candidates.push({ token, normalizedToken, context, prefix });

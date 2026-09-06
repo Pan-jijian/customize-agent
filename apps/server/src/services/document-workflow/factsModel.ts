@@ -4,7 +4,8 @@ import * as XLSX from 'xlsx';
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
 import { getProjectKbRoot, getProjectRoot } from '../knowledge/kbService';
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE, factFieldForLabel, isDiagnosticFactValue, isForbiddenFactValue, isLowConfidenceFactValue, type DocumentDomainProfile, type FactFieldProfile } from '../document-core/documentDomainProfileService';
-import type { ChapterFactNeed, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ResolvedFactNeed, StructuredTableFact } from './types';
+import { detectSmartTableHeader, locateTableColumns } from '@customize-agent/knowledge';
+import type { ChapterFactNeed, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ResolvedFactNeed, SpecAuthorityMap, StructuredTableFact } from './types';
 import { evidenceSatisfiesSpecField, specFactTargets } from './factMatching';
 import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { callDocumentLlmJson } from './llmClient';
@@ -36,10 +37,11 @@ function parseWorkbookTables(absolute: string, item: DocumentEvidence): Structur
     const matrix = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, raw: false, defval: '' }).map(row => row.map(cell => String(cell).trim()));
     const nonEmpty = matrix.filter(row => row.some(Boolean));
     if (nonEmpty.length < 2) continue;
-    const headerIndex = nonEmpty.findIndex(row => row.filter(Boolean).length >= 2);
-    if (headerIndex < 0) continue;
-    const headers = nonEmpty[headerIndex].filter(Boolean);
-    const rows = nonEmpty.slice(headerIndex + 1).map(row => row.slice(0, headers.length)).filter(row => row.some(Boolean));
+    // F1 智能表头行检测（与 knowledge 包提取器同源）：标题行不再被当表头，
+    // 真实列名（序号/项目编码/项目名称/项目特征描述/计量单位/工程量）保留完整列宽
+    const smart = detectSmartTableHeader(nonEmpty);
+    const headers = smart.headers;
+    const rows = nonEmpty.slice(smart.headerIndex + 1).map(row => row.slice(0, headers.length)).filter(row => row.some(Boolean));
     if (rows.length === 0) continue;
     tables.push({ tableType: item.roleId || 'table', sheet: sheetName, headers, rows, sourceFile: item.filePath, sourceRange: sheet['!ref'] });
   }
@@ -86,6 +88,112 @@ export function extractStructuredTables(evidence: DocumentEvidence[]): Structure
     tables.push({ tableType: item.roleId || 'table', headers: rows[0], rows: rows.slice(1), sourceFile: item.filePath, sourceRange: item.sectionTitle });
   }
   return tables;
+}
+
+/** F4 清单行级条目事实：清单表每数据行产出「条目名（部位）→ 特征描述（含规格）→ 工程量」事实，
+ *  以列名语义定位取值（不再是 body[N] 硬编码）。行级事实进入 factsModel 主链路后，
+ *  「不同分部分项使用不同规格」有了确定性依据——写作/检测/修复三环节共用同一权威。 */
+export function extractBillItemFacts(tables: StructuredTableFact[]): DocumentFact[] {
+  const facts: DocumentFact[] = [];
+  const HEADER_NOISE = /工程名称|序号|项目编码|项目名称|项目特征|计量\s*单位|工程量|金额|综合单价|合价|人工费|机械费|暂估价|分部小计|本页|续表|合计|汇总/u;
+  for (const table of tables) {
+    const columns = locateTableColumns(table.headers);
+    if ((columns.name ?? -1) < 0 && (columns.feature ?? -1) < 0) continue;
+    const hasSeqColumn = (columns.seq ?? -1) >= 0;
+    for (const row of table.rows) {
+      const seq = hasSeqColumn ? (row[columns.seq ?? 0] || '').trim() : '';
+      const name = (columns.name ?? -1) >= 0 ? (row[columns.name ?? 0] || '').trim() : '';
+      const feature = (columns.feature ?? -1) >= 0 ? (row[columns.feature ?? 0] || '').trim() : '';
+      const unit = (columns.unit ?? -1) >= 0 ? (row[columns.unit ?? 0] || '').trim() : '';
+      const quantity = (columns.quantity ?? -1) >= 0 ? (row[columns.quantity ?? 0] || '').trim() : '';
+      // 仅收录数据行：序号为纯整数（无序号列的表不按序号过滤），且项目名称与项目特征描述非空
+      if (hasSeqColumn && !/^\d+$/.test(seq)) continue;
+      if (!name || !feature) continue;
+      if (HEADER_NOISE.test(`${name}${feature}`)) continue;
+      const quantityPart = quantity && unit ? `${quantity}${unit}` : quantity || unit;
+      facts.push({
+        key: `清单条目：${name}`,
+        fieldName: '清单条目',
+        fieldId: 'bill_item',
+        value: `${feature.slice(0, 160)}${quantityPart ? `｜工程量：${quantityPart}` : ''}`,
+        sourceFile: table.sourceFile,
+        roleId: 'bill_of_quantities',
+        processingType: 'bill_of_quantities',
+        confidence: 0.92,
+        sourceRef: { filePath: table.sourceFile, roleId: 'bill_of_quantities', processingType: 'bill_of_quantities', sectionTitle: table.sheet },
+      });
+    }
+  }
+  return facts;
+}
+
+/** 规格维度标签词表：特征描述「1.混凝土种类:商品混凝土 2.混凝土强度等级:C30」分句后的标签
+ *  命中即作为 specAuthorityMap 维度键 */
+const SPEC_DIMENSION_LABELS = ['混凝土强度等级', '砂浆强度等级', '抗渗等级', '钢筋牌号', '钢筋级别', '砖规格', '砌块强度等级', '混凝土种类', '砂浆种类', '垫层材料种类', '找平层厚度', '保护层厚度', '防水层厚度', '卷材厚度', '镀锌层厚度', '保温层厚度', '垫层厚度', '找坡层厚度', '防水等级', '抗裂等级', '耐火等级', '强度等级'];
+const SPEC_TOKEN_RE = /C\d{2,3}|M\d+(?:\.\d+)?|P\d{1,2}|HRB\d{3,4}|HPB\d{3}|Q\d{3}|MU\d+|A\d+(?:\.\d+)?|B\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*mm/u;
+
+/** 特征描述分句：按「；」拆段，去掉「1.」序号前缀，再按首个冒号拆「标签:值」 */
+function splitFeatureSegments(feature: string): Array<{ label: string; value: string }> {
+  const segments: Array<{ label: string; value: string }> = [];
+  for (const part of feature.split(/[；;]/u)) {
+    const cleaned = part.replace(/^\s*\d+[.、]\s*/u, '').trim();
+    const colon = cleaned.search(/[:：]/u);
+    if (colon > 0) {
+      const label = cleaned.slice(0, colon).trim();
+      const value = cleaned.slice(colon + 1).trim();
+      if (label.length >= 2 && label.length <= 20 && value) segments.push({ label, value });
+    }
+  }
+  return segments;
+}
+
+/** F11 规格-部位权威映射聚合：从清单行级事实解析「规格维度标签 → 部位-规格」对照，
+ *  同物多规格（垫层 C15/主体 C35）的确定性权威依据，供写作注入、错位检测、修复对齐共用。
+ *  无分句结构（如「C30商品混凝土」）时以规格 token 兜底归维。 */
+export function buildSpecAuthorityMap(billItemFacts: DocumentFact[]): SpecAuthorityMap {
+  const map: SpecAuthorityMap = {};
+  const addPlacement = (dimension: string, location: string, spec: string, quantity: string, sourceFile: string) => {
+    if (!dimension || !spec) return;
+    const cleanSpec = spec.replace(/[，,。\s]+$/u, '').slice(0, 40);
+    const existing = map[dimension] ||= [];
+    if (!existing.some(item => item.location === location && item.spec === cleanSpec)) {
+      existing.push({ location, spec: cleanSpec, quantity: quantity || undefined, sourceFile });
+    }
+  };
+  for (const fact of billItemFacts) {
+    const location = (fact.key || '').replace(/^清单条目：/u, '');
+    if (!location) continue;
+    const value = stringifyFactValue(fact.value);
+    const quantity = /｜工程量：(.+)$/u.exec(value)?.[1] ?? '';
+    const feature = value.replace(/｜工程量：.+$/u, '');
+    const segments = splitFeatureSegments(feature);
+    let matched = false;
+    for (const { label, value: segValue } of segments) {
+      if (SPEC_DIMENSION_LABELS.some(dimension => label.includes(dimension))) {
+        matched = true;
+        addPlacement(label, location, segValue, quantity, fact.sourceFile);
+        continue;
+      }
+      // 标签非维度词但值本身是规格 token（如「垫层材料种类:商品混凝土 C30」异常形态）
+      const specToken = segValue.match(SPEC_TOKEN_RE)?.[0];
+      if (specToken && specToken !== segValue) addPlacement('混凝土强度等级', location, specToken, quantity, fact.sourceFile);
+    }
+    // 无分句结构兜底：特征值整体含规格 token 时按 token 归维
+    if (!matched) {
+      const tokens = feature.match(SPEC_TOKEN_RE) || [];
+      for (const token of tokens) {
+        const dimension = /^C\d{2,3}$/.test(token) ? '混凝土强度等级'
+          : /^M\d/.test(token) ? '砂浆强度等级'
+          : /^P\d/.test(token) ? '抗渗等级'
+          : /mm$/.test(token) ? '厚度规格'
+          : /^HRB/.test(token) || /^HPB/.test(token) ? '钢筋牌号'
+          : /^MU/.test(token) ? '砌块强度等级'
+          : '规格';
+        addPlacement(dimension, location, token, quantity, fact.sourceFile);
+      }
+    }
+  }
+  return map;
 }
 
 export function fieldExtractionPattern(name: string) {
@@ -574,7 +682,10 @@ function buildEvidenceFactIndex(facts: DocumentFact[], preciseFacts: DocumentFac
     .filter((fact, index, array) => array.findIndex(item => item.sourceFile === fact.sourceFile && item.value === fact.value && item.key === fact.key) === index)
     .slice(0, 360);
   const tableFacts = reliableFacts.filter(fact => fact.processingType === 'table' || /table|sheet|表格|清单|明细|数据|参数行摘要/u.test(factText(fact)));
-  const drawingFacts = reliableFacts.filter(fact => fact.processingType === 'drawing' || /drawing|draw|dwg|图纸|设计|尺寸|标高|管径|做法/u.test(factText(fact)));
+  // D3 图纸口径修正：只保留真实图纸来源（processingType 标注或来源文件名/角色含图纸类词）——
+  // 历史口径把「设计/尺寸/标高/管径/做法」等纯文本（说明文件里的尺寸描述）也算入图纸，
+  // 图纸池被文本类事实灌水，清单 vs 图纸的优先级对比失真（用户确认：清单数据精度更高，图纸仅兑底）
+  const drawingFacts = reliableFacts.filter(fact => fact.processingType === 'drawing' || /drawing|dwg|图纸|施工图|设计图|平面图|剖面图|大样图|详图/u.test(factText(fact)));
   return { reliableFacts: reliableFacts.slice(0, 500), parameterFacts, tableFacts: tableFacts.slice(0, 240), drawingFacts: drawingFacts.slice(0, 240), billFacts: billFacts.slice(0, 240), diagnostics: diagnostics.slice(0, 120) };
 }
 
@@ -691,13 +802,20 @@ export function resolveChapterFactNeeds(input: { needs: ChapterFactNeed[]; facts
   const excludedKeys = input.excludedEvidenceKeys;
   const factPool = uniqueFacts([
     ...input.factsModel.factIndex.parameterFacts,
+    // F4 清单行级条目事实（条目名[部位]→特征[规格]→工程量）：与 parameterFacts 并列的主链路事实源，
+    // 同物多规格按部位区分使用的确定性依据
+    ...(input.factsModel.billItemFacts || []),
+    ...input.factsModel.factIndex.billFacts,
     ...input.factsModel.factIndex.tableFacts,
     ...input.factsModel.factIndex.drawingFacts,
-    ...input.factsModel.factIndex.billFacts,
     ...input.factsModel.factIndex.reliableFacts,
   ]);
   return input.needs.map<ResolvedFactNeed>(need => {
-    const matchedFacts = uniqueFacts(factPool.filter(fact => factMatchesNeed(fact, need, profile))).sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+    // D2 清单优先：同置信度下清单来源（bill_of_quantities/structured_data/清单/BOQ）等效 +0.05——
+    // 历史排序只看 confidence，图纸事实数量级碾压（图纸 4207 chunks vs 清单 657）时清单数据被淹没，
+    // 正文大量「按设计图纸执行」式概括话术；+0.05 温和偏移只影响同档竞争次序，不影响 bestConfidence 判定
+    const billLikeBoost = (fact: DocumentFact) => (fact.processingType === 'bill_of_quantities' || fact.processingType === 'structured_data' || /bill|boq|清单/u.test(factText(fact)) ? 0.05 : 0);
+    const matchedFacts = uniqueFacts(factPool.filter(fact => factMatchesNeed(fact, need, profile))).sort((a, b) => ((b.confidence || 0) + billLikeBoost(b)) - ((a.confidence || 0) + billLikeBoost(a)));
     // 证据内容安全：被输入层过滤排除的证据（投标/评标纪律、评标办法、商务报价类）不得回填为章节事实需要证据
     const matchedEvidence = (input.evidence || []).filter(item =>
       !excludedKeys?.has(evidenceSafetyKey(item))
@@ -719,7 +837,10 @@ export function factsForChapterNeeds(resolvedNeeds: ResolvedFactNeed[]) {
 
 export function factNeedsCoveragePrompt(resolvedNeeds: ResolvedFactNeed[]) {
   const lines = resolvedNeeds.map(item => {
-    const factLines = item.facts.slice(0, 5).map(fact => `${fact.key || fact.fieldName || item.need.label}=${cleanFactForPrompt(fact.value)}${fact.sourceFile ? `（${path.basename(fact.sourceFile)}）` : ''}`);
+    // F12 多规格多样性：同 need 匹配多规格（C15/C30/C35）时按 value 去重后再取前 5，
+    // 避免同一规格重复占位把其他规格挤出窗口（历史实现直接 slice 前 5 条）
+    const dedupedFacts = item.facts.filter((fact, index, array) => array.findIndex(candidate => stringifyFactValue(candidate.value) === stringifyFactValue(fact.value)) === index);
+    const factLines = dedupedFacts.slice(0, 5).map(fact => `${fact.key || fact.fieldName || item.need.label}=${cleanFactForPrompt(fact.value)}${fact.sourceFile ? `（${path.basename(fact.sourceFile)}）` : ''}`);
     const evidenceLines = item.facts.length ? [] : (item.evidence || []).slice(0, 2).map(evidence => `证据片段：${cleanFactForPrompt(evidence.content).slice(0, 160)}${evidence.filePath ? `（${path.basename(evidence.filePath)}）` : ''}`);
     return `- ${item.need.required ? '必须' : '相关'}｜${item.need.label}｜${item.status}${factLines.length || evidenceLines.length ? `：${[...factLines, ...evidenceLines].join('；')}` : '：未在已解析资料中确认'}`;
   });
@@ -771,6 +892,10 @@ export async function buildFactsModel(facts: DocumentFact[], tables: StructuredT
       && !isDiagnosticFactValue(profile, text);
   });
   const billFacts = facts.filter(fact => fact.processingType === 'table' || fact.processingType === 'structured_data' || fact.processingType === 'bill_of_quantities' || /bill|boq|table|sheet|data|表格|列表|明细|数据/u.test(`${fact.roleId} ${fact.sourceFile}`));
+  // F4 清单行级条目事实：行级「条目名（部位）→特征（规格）→工程量」直接产物，与散装事实池分开保存
+  const billItemFacts = extractBillItemFacts(tables).slice(0, 600);
+  // F11 规格-部位权威映射：同物多规格按部位区分使用的确定性依据（写作注入/错位检测/修复对齐共用）
+  const specAuthorityMap = buildSpecAuthorityMap(billItemFacts);
   const projectFacts = splitMixedScaleFacts(facts.filter(fact => /项目名称|工程名称|项目编号|招标项目编号|招标人|建设单位|发包人|建设地点|建设规模|招标范围|计划工期|合同工期|周期要求|质量标准|合同估算|投资估算|最高投标限价|招标控制价/u.test(`${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`))).slice(0, 80);
   const factIndex = buildEvidenceFactIndex(facts, preciseFacts, billFacts, profile);
   return {
@@ -787,6 +912,8 @@ export async function buildFactsModel(facts: DocumentFact[], tables: StructuredT
     specifications: byProcessing('specification'),
     schemaFacts: buildSchemaFacts(facts, spec),
     factIndex,
+    billItemFacts,
+    specAuthorityMap,
     missing: [...new Set(missingItems)],
     conflicts: await detectFactConflicts(facts, spec, profile),
   };

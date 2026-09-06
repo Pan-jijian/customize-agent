@@ -1,9 +1,25 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { computeProjectId } from '@customize-agent/knowledge';
 import { buildBaseProjectGraph } from '@/services/document-workflow/agentWorkflow';
 import type { ConstructionOrganizationGraph, ProjectIntelligenceIntentEntry } from '@/services/document-workflow/projectIntelligence';
-import { chapterIntentTags, constructionOrganizationPrompt, evidenceFromIntentIndex, extractContentFacts, isIrrelevantProjectGap, mergeProjectGraphs, readProjectIntelligence } from '@/services/document-workflow/projectIntelligence';
+
+vi.mock('@/services/knowledge/kbOperationLog', () => ({ upsertKbOperation: vi.fn() }));
+// 守卫测试用真实 startProjectIntelligenceBuild：仅 mock 外部依赖 getMultiProjectManager/listKnowledgeFiles 控制构建时序
+// （partial self-mock 替换 buildProjectIntelligence 无效——同模块内部互调是词法引用，不经导出命名空间）
+vi.mock('@/services/knowledge/kbService', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/services/knowledge/kbService')>();
+  return { ...actual, getMultiProjectManager: vi.fn(), listKnowledgeFiles: vi.fn(), getStorageRoot: vi.fn() };
+});
+// LLM 图谱构建为外部模块：降级落盘测试用 reject 模拟 LLM 失败
+vi.mock('@/services/document-workflow/projectGraph', () => ({ buildProjectGraph: vi.fn() }));
+
+import { buildProjectIntelligence, buildProjectIntelligenceSync, chapterIntentTags, constructionOrganizationPrompt, evidenceFromIntentIndex, extractContentFacts, extractSpreadsheetFacts, intentRelevance, isIrrelevantProjectGap, mergeProjectGraphs, readProjectIntelligence, sampledSignals, startProjectIntelligenceBuild } from '@/services/document-workflow/projectIntelligence';
+import { buildProjectGraph } from '@/services/document-workflow/projectGraph';
+import { getMultiProjectManager, getStorageRoot, listKnowledgeFiles } from '@/services/knowledge/kbService';
+import { upsertKbOperation } from '@/services/knowledge/kbOperationLog';
 
 function graphOf(): ConstructionOrganizationGraph {
   return {
@@ -32,6 +48,11 @@ function graphOf(): ConstructionOrganizationGraph {
     evidenceRankingHints: ['优先使用工程量清单、图纸设计说明、技术规范'],
   };
 }
+
+// 每个测试独立的临时存储根：缓存/scope 快照落盘不污染真实知识库目录
+beforeEach(() => {
+  vi.mocked(getStorageRoot).mockReturnValue(path.join(os.tmpdir(), `intel-test-${Date.now()}-${Math.random()}`));
+});
 
 describe('constructionOrganizationPrompt', () => {
   it('无图谱或无工作包返回空串', () => {
@@ -291,5 +312,311 @@ describe('buildBaseProjectGraph 确定性内容事实参与图谱构建', () => 
     expect(graph.schedule.some(item => item.duration.includes('540'))).toBe(true);
     expect(graph.resources.some(item => item.spec.includes('C35'))).toBe(true);
     expect(graph.gaps).toEqual([]);
+  });
+});
+
+describe('extractSpreadsheetFacts 语义列定位（F2）', () => {
+  /** 15 列偏移 markdown 表 chunk：标题行 + 真表头 + 数据行 */
+  function offset15Chunk(): string {
+    return [
+      '| E.1 分部分项工程量清单计价表 | | | | | | | | | | | | | | |',
+      '| 序号 | 项目编码 | | | 项目名称 | 项目特征描述 | | | | 计量单位 | | | 工程量 | | |',
+      '| 1 | 010101001001 | | | 垫层 | 1.混凝土强度等级:C15 | | | | m3 | | | 125.80 | | |',
+      '| 2 | 010502001001 | | | 矩形柱 | 1.混凝土强度等级:C35 | | | | m3 | | | 86.40 | | |',
+    ].join('\n');
+  }
+
+  it('15 列偏移表：表头行按列关键词识别，名称/特征/工程量按语义列提取（非 body[2]/body[3]）', () => {
+    const facts = extractSpreadsheetFacts([{ content: offset15Chunk() }]);
+    expect(facts).toContain('垫层：1.混凝土强度等级:C15｜125.80m3');
+    expect(facts).toContain('矩形柱：1.混凝土强度等级:C35｜86.40m3');
+  });
+
+  it('标题行（仅命中「工程量」一组）不误判为表头：其后的真表头重建列映射', () => {
+    const facts = extractSpreadsheetFacts([{ content: offset15Chunk() }]);
+    expect(facts.length).toBe(2);
+  });
+
+  it('大表分块：表头只在首 chunk，列映射跨 chunk 延续', () => {
+    const headerChunk = [
+      '| 序号 | 项目编码 | | | 项目名称 | 项目特征描述 | | | | 计量单位 | | | 工程量 | | |',
+      '| 1 | 010101001001 | | | 垫层 | 1.混凝土强度等级:C15 | | | | m3 | | | 125.80 | | |',
+    ].join('\n');
+    const dataChunk = [
+      '| 2 | 010502001001 | | | 矩形柱 | 1.混凝土强度等级:C35 | | | | m3 | | | 86.40 | | |',
+    ].join('\n');
+    const facts = extractSpreadsheetFacts([{ content: headerChunk }, { content: dataChunk }]);
+    expect(facts).toContain('垫层：1.混凝土强度等级:C15｜125.80m3');
+    expect(facts).toContain('矩形柱：1.混凝土强度等级:C35｜86.40m3');
+  });
+
+  it('无表头 chunk（旧形态直接数据行）→ 回退历史 body[N] 列位不丢数据', () => {
+    const chunk = [
+      '| 1 | | 垫层 | 1.混凝土强度等级:C15 | m3 | 125.80 | |',
+    ].join('\n');
+    const facts = extractSpreadsheetFacts([{ content: chunk }]);
+    expect(facts).toContain('垫层：1.混凝土强度等级:C15｜125.80m3');
+  });
+
+  it('表头行本身与序号非整数行不产出事实', () => {
+    const chunk = [
+      '| 序号 | 项目编码 | | | 项目名称 | 项目特征描述 | | | | 计量单位 | | | 工程量 | | |',
+      '| 分部小计 | | | | 本页小计 | 汇总本表 | | | | | | | | | |',
+    ].join('\n');
+    expect(extractSpreadsheetFacts([{ content: chunk }])).toEqual([]);
+  });
+});
+
+describe('startProjectIntelligenceBuild 并发守卫', () => {
+  beforeEach(() => {
+    vi.mocked(getMultiProjectManager).mockReset();
+    vi.mocked(listKnowledgeFiles).mockReset();
+    vi.mocked(listKnowledgeFiles).mockReturnValue([] as never);
+    vi.mocked(buildProjectGraph).mockReset();
+    vi.mocked(upsertKbOperation).mockReset();
+  });
+
+  /** 从 upsertKbOperation 调用序列中取 percent === 5 的次数（= 真实构建启动次数：
+   * 每次启动恰好写一条 5% 初始日志，中间进度日志均为 percent > 5） */
+  const startCount = () => vi.mocked(upsertKbOperation).mock.calls.filter(call => (call[1] as { percent?: number }).percent === 5).length;
+
+  it('无并发时正常触发一次构建，失败后不重跑（无待重跑标记）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(() => Promise.reject(new Error('项目不存在'))) } as never);
+      startProjectIntelligenceBuild('/proj-guard-once');
+      expect(startCount()).toBe(1);
+      expect(upsertKbOperation).toHaveBeenCalledWith('/proj-guard-once', expect.objectContaining({ id: expect.any(String), type: 'reindex', title: '项目理解缓存', stage: 'generating', status: 'processing', percent: 5 }));
+      await vi.waitFor(() => expect(upsertKbOperation).toHaveBeenCalledWith('/proj-guard-once', expect.objectContaining({ stage: 'error', status: 'error', error: '项目不存在' })));
+      expect(startCount()).toBe(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('构建进行中多次触发合并为一次串行重跑（不并发构建，不写竞态）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      let calls = 0;
+      let rejectFirst!: (reason: Error) => void;
+      vi.mocked(getMultiProjectManager).mockReturnValue({
+        getProject: vi.fn(() => {
+          calls += 1;
+          // 首次构建挂起（模拟 LLM 图谱长任务），重跑时立即失败
+          return calls === 1
+            ? new Promise<never>((_resolve, reject) => { rejectFirst = reject; })
+            : Promise.reject(new Error('项目不存在'));
+        }),
+      } as never);
+      // 首次触发启动构建；随后两次触发仅标记待重跑，不启动新构建
+      startProjectIntelligenceBuild('/proj-guard');
+      startProjectIntelligenceBuild('/proj-guard');
+      startProjectIntelligenceBuild('/proj-guard');
+      expect(startCount()).toBe(1);
+      // 进行中的构建失败结束：期间多次触发合并为一次串行重跑
+      rejectFirst(new Error('项目不存在'));
+      await vi.waitFor(() => expect(startCount()).toBe(2));
+      await vi.waitFor(() => expect(vi.mocked(upsertKbOperation).mock.calls.filter(call => (call[1] as { stage?: string }).stage === 'error').length).toBe(2));
+      // 重跑结束后不再有第三次触发
+      expect(startCount()).toBe(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('构建失败后待重跑标记仍生效（finally 兜底不吞重跑）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(() => Promise.reject(new Error('LLM 前置失败'))) } as never);
+      startProjectIntelligenceBuild('/proj-guard-fail');
+      startProjectIntelligenceBuild('/proj-guard-fail');
+      expect(startCount()).toBe(1);
+      await vi.waitFor(() => expect(startCount()).toBe(2));
+      await vi.waitFor(() => expect(upsertKbOperation).toHaveBeenCalledWith('/proj-guard-fail', expect.objectContaining({ stage: 'error', status: 'error', error: 'LLM 前置失败' })));
+      expect(startCount()).toBe(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('sampledSignals 尾块信号保留', () => {
+  it('信号数不超过上限时全部保留', () => {
+    const chunks = Array.from({ length: 10 }, (_, i) => ({ content: `信号内容第${i}条，含施工质量要求` }));
+    expect(sampledSignals(chunks)).toHaveLength(10);
+  });
+
+  it('超过上限时保留前 limit-4 + 最后 4 条（尾块信号不被裁掉）', () => {
+    const chunks = Array.from({ length: 60 }, (_, i) => ({ content: `正文信号第${i}条施工内容` }));
+    const signals = sampledSignals(chunks);
+    expect(signals).toHaveLength(48);
+    expect(signals[0]).toContain('第0条');
+    expect(signals[43]).toContain('第43条');
+    // 最后 4 条为文档尾部信号（旧实现 slice(0,48) 会丢失）
+    expect(signals[44]).toContain('第56条');
+    expect(signals[47]).toContain('第59条');
+  });
+
+  it('空内容块被过滤后再计上限', () => {
+    const chunks = [{ content: '' }, { content: '   ' }, ...Array.from({ length: 50 }, (_, i) => ({ content: `有效信号第${i}条` }))];
+    const signals = sampledSignals(chunks);
+    expect(signals).toHaveLength(48);
+    expect(signals).not.toContain('');
+  });
+});
+
+describe('intentRelevance 意图相关性评分', () => {
+  it('关键词命中加权：长词权重高于短词', () => {
+    const longHit = intentRelevance('工期进度', '本工程计划工期为540日历天');
+    const shortHit = intentRelevance('工期进度', '施工进度节点按计划推进');
+    expect(longHit).toBeGreaterThan(shortHit);
+  });
+
+  it('数值驱动事实额外加权（工期天数/工程量数字）', () => {
+    const withNumber = intentRelevance('工期进度', '本工程计划工期为540日历天');
+    const withoutNumber = intentRelevance('工期进度', '本工程计划工期见招标文件');
+    expect(withNumber).toBeGreaterThan(withoutNumber);
+  });
+
+  it('无关事实评分为 0（不再混入意图索引）', () => {
+    expect(intentRelevance('安全危大', '投标截止时间为2026年9月10日')).toBe(0);
+    expect(intentRelevance('未知意图', '任意内容')).toBe(0);
+  });
+});
+
+describe('buildProjectIntelligence LLM 失败降级落盘', () => {
+  const kbFile = { relativePath: '资料/招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok', indexedAt: 123, category: 'document', format: 'pdf', mtime: 0 };
+
+  it('LLM 图谱构建失败：降级为确定性 base 图谱落盘，缓存仍可用且标记 graphDegraded', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      vi.mocked(listKnowledgeFiles).mockReturnValue([kbFile] as never);
+      vi.mocked(getMultiProjectManager).mockReturnValue({
+        getProject: vi.fn(async () => ({ listChunksSampled: () => [{ content: '计划工期：开工之日起540个日历天，质量标准为合格，总建筑面积28570.36平方米' }] })),
+      } as never);
+      vi.mocked(buildProjectGraph).mockRejectedValue(new Error('LLM 服务不可用'));
+      const root = `/proj-degrade-${Date.now()}`;
+      const cache = await buildProjectIntelligence(root);
+      expect(cache.graphDegraded).toBe(true);
+      expect(cache.projectGraphMessage).toContain('降级');
+      expect(cache.projectGraphMessage).toContain('LLM 增强失败');
+      // 确定性图谱仍含事实驱动的工期节点
+      expect(cache.projectGraph.schedule.some(item => String(item.duration).includes('540'))).toBe(true);
+      // 缓存已落盘（原子写），且可被 readProjectIntelligence 读取
+      const onDisk = JSON.parse(fs.readFileSync(path.join(getStorageRoot(), 'projects', computeProjectId(root), 'project-intelligence', 'project-intelligence.json'), 'utf8'));
+      expect(onDisk.graphDegraded).toBe(true);
+      expect(readProjectIntelligence(root)).toBeDefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('readProjectIntelligence 惰性自愈重建', () => {
+  const cacheFile = (projectRoot: string) => path.join(getStorageRoot(), 'projects', computeProjectId(projectRoot), 'project-intelligence', 'project-intelligence.json');
+
+  it('缓存存在但文件集不匹配：拒绝使用并触发后台重建', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const getProject = vi.fn(() => Promise.reject(new Error('自愈构建失败（预期）')));
+      vi.mocked(getMultiProjectManager).mockReturnValue({ getProject } as never);
+      const root = `/proj-selfheal-${Date.now()}`;
+      fs.mkdirSync(path.dirname(cacheFile(root)), { recursive: true });
+      fs.writeFileSync(cacheFile(root), JSON.stringify({
+        version: 'project-intelligence-v11',
+        projectGraph: { works: [] },
+        files: [{ relativePath: 'ghost.txt', contentHash: 'x', chunkCount: 1, status: 'ok' }],
+        facts: [], chapterIntentIndex: [],
+      }));
+      expect(readProjectIntelligence(root)).toBeUndefined();
+      // 自愈已触发：后台构建启动（getProject 被调用）
+      await vi.waitFor(() => expect(getProject).toHaveBeenCalled());
+      // 节流：1 分钟内再次读取不重复触发（第二次 read 不新增构建调用）
+      const callsBefore = getProject.mock.calls.length;
+      expect(readProjectIntelligence(root)).toBeUndefined();
+      expect(getProject.mock.calls.length).toBe(callsBefore);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('graphDegraded 降级缓存：仍可用，同时后台重试补齐 LLM 增强', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const kbFile = { relativePath: '资料/招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok', indexedAt: 123, category: 'document', format: 'pdf', mtime: 0 };
+      vi.mocked(listKnowledgeFiles).mockReturnValue([kbFile] as never);
+      vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(() => Promise.reject(new Error('重试失败（预期）'))) } as never);
+      const root = `/proj-degraded-heal-${Date.now()}`;
+      fs.mkdirSync(path.dirname(cacheFile(root)), { recursive: true });
+      fs.writeFileSync(cacheFile(root), JSON.stringify({
+        version: 'project-intelligence-v11',
+        projectGraph: { works: [] },
+        graphDegraded: true,
+        files: [{ relativePath: '资料/招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok' }],
+        facts: [], chapterIntentIndex: [],
+        constructionOrganizationGraph: { workPackages: [], controlMatrix: [], qualityControls: [], safetyControls: [], resourcePlans: [], acceptanceRecords: [], evidenceRankingHints: [] },
+      }));
+      const cache = readProjectIntelligence(root);
+      expect(cache).toBeDefined();
+      expect(cache?.graphDegraded).toBe(true);
+      // 后台重试已触发（getProject 被调用），且不阻塞缓存读取
+      await vi.waitFor(() => expect(vi.mocked(getMultiProjectManager).mock.calls.length).toBeGreaterThan(0));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('buildProjectIntelligenceSync 同步构建并发守卫', () => {
+  beforeEach(() => {
+    vi.mocked(getMultiProjectManager).mockReset();
+    vi.mocked(listKnowledgeFiles).mockReset();
+    vi.mocked(listKnowledgeFiles).mockReturnValue([] as never);
+    vi.mocked(buildProjectGraph).mockReset();
+    vi.mocked(upsertKbOperation).mockReset();
+  });
+
+  it('构建进行中时复用同一构建（不重复启动，不并发写）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      let calls = 0;
+      let releaseGet!: (project: { listChunksSampled: () => never[] }) => void;
+      vi.mocked(getMultiProjectManager).mockReturnValue({
+        getProject: vi.fn(() => {
+          calls += 1;
+          return new Promise(resolve => { releaseGet = resolve; });
+        }),
+      } as never);
+      const root = `/proj-sync-guard-${Date.now()}`;
+      startProjectIntelligenceBuild(root);
+      const syncPromise = buildProjectIntelligenceSync(root);
+      expect(calls).toBe(1);
+      // 释放挂起：两种触发路径共享同一构建，完成后同步等待方拿到结果
+      releaseGet({ listChunksSampled: () => [] } as never);
+      const cache = await syncPromise;
+      expect(cache.fileCount).toBe(0);
+      expect(calls).toBe(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('buildProjectIntelligence 进度回调', () => {
+  beforeEach(() => {
+    vi.mocked(getMultiProjectManager).mockReset();
+    vi.mocked(listKnowledgeFiles).mockReset();
+    vi.mocked(listKnowledgeFiles).mockReturnValue([] as never);
+    vi.mocked(buildProjectGraph).mockReset();
+    vi.mocked(upsertKbOperation).mockReset();
+  });
+
+  it('onProgress 各阶段回调按顺序触发（files → facts → graph）', async () => {
+    const stages: string[] = [];
+    vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(async () => ({ listChunksSampled: () => [] })) } as never);
+    vi.mocked(buildProjectGraph).mockResolvedValue({ graph: { works: [], methods: [], resources: [], schedule: [], standards: [], risks: [], requirements: [], siteConditions: [], addendumChanges: [], gaps: [], generatedAt: 0 }, stage: { roleId: 'x', status: 'success' } } as never);
+    const root = `/proj-progress-${Date.now()}`;
+    await buildProjectIntelligence(root, (stage) => { stages.push(stage); });
+    expect(stages).toEqual(['files', 'facts', 'graph', 'assembly']);
   });
 });

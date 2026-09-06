@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { boqRowTraceIssues, buildBoqRowTraces, buildDocumentFactTraces, cleanFactValue, factTraceIssues, isActionableFactValue, isActionableTraceFact } from '@/services/document-workflow/documentFactTrace';
-import type { DocumentFact, DocumentFactsModel } from '@/services/document-workflow/types';
+import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces, buildDocumentFactTraces, cleanFactValue, factTraceIssues, isActionableFactValue, isActionableTraceFact } from '@/services/document-workflow/documentFactTrace';
+import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel } from '@/services/document-workflow/types';
 
 function factsModel(project: DocumentFact[] = [], preciseFacts: DocumentFact[] = [], tables: DocumentFactsModel['tables'] = []): DocumentFactsModel {
   return {
@@ -202,5 +202,156 @@ describe('isActionableTraceFact（可执行落位义务判定）', () => {
   });
   it('实质事实保留', () => {
     expect(isActionableTraceFact({ label: '计划工期', value: '540日历天', status: 'unplaced', confidence: 1 })).toBe(true);
+  });
+});
+
+describe('boqDivisionCoverageIssues（P2/P4 清单分项覆盖义务）', () => {
+  const methodChapter = (content: string): DocumentDraftChapter => ({
+    id: 'ch-method', title: '第二章 主要分部分项工程施工方法', content, evidence: [], missingFacts: [],
+  });
+  const chapters = (content: string): DocumentDraftChapter[] => [methodChapter(content)];
+  const boqModel = factsModel([], [], [{
+    tableType: '清单',
+    headers: ['序号', '项目编码', '项目名称', '工程量', '单位'],
+    rows: [
+      ['1', '010101001001', '道路工程施工', '3800', 'm2'],
+      ['2', '040203001001', '污水管网铺设', '2170', 'm'],
+      ['3', '040204001001', '排水沟砌筑', '860', 'm'],
+      ['4', '040205001001', '沟塘清淤', '1200', 'm3'],
+      ['5', '010401001001', '公共厕所', '1', '座'],
+      ['6', '050307001001', '挖一般土方', '5600', 'm3'],
+    ],
+    sourceFile: '清单.xlsx',
+  }]);
+
+  it('公厕/污水管网/排水沟/沟塘清淤缺失 → error/blocker 且锚定施工方法章（评分报告 P2/P4）', () => {
+    const markdown = [
+      '## 第二章 主要分部分项工程施工方法',
+      '### 2.1 道路工程施工方法',
+      '道路工程按测量放线→路基整平→面层铺筑工序施工。',
+      '### 2.2 铺装与绿化工程施工方法',
+      '铺装与绿化按设计图纸施工。',
+    ].join('\n');
+    const issues = boqDivisionCoverageIssues(markdown, chapters(markdown), boqModel);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.severity).toBe('blocker');
+    expect(issues[0]?.chapterId).toBe('ch-method');
+    expect(issues[0]?.message).toContain('污水管网');
+    expect(issues[0]?.message).toContain('排水沟');
+    expect(issues[0]?.message).toContain('公共厕所');
+  });
+
+  it('分项全覆盖 → 零报告', () => {
+    const markdown = [
+      '## 第二章 主要分部分项工程施工方法',
+      '### 2.1 道路工程施工方法',
+      '道路工程按测量放线→路基整平→面层铺筑工序施工。',
+      '### 2.2 污水管网与排水沟施工方法',
+      '污水管网按沟槽开挖→管道铺设→闭水试验工序施工；排水沟采用砖砌。',
+      '### 2.3 沟塘清淤与公共厕所施工方法',
+      '沟塘清淤采用机械清淤；公共厕所按基础→主体→装饰工序施工。',
+    ].join('\n');
+    expect(boqDivisionCoverageIssues(markdown, chapters(markdown), boqModel)).toEqual([]);
+  });
+
+  it('无施工方法章 → 不产生覆盖义务（零报告）', () => {
+    const noMethodChapters = [{ id: 'ch-1', title: '第一章 工程概况', content: '道路工程施工。', evidence: [], missingFacts: [] }];
+    expect(boqDivisionCoverageIssues('道路工程施工。', noMethodChapters, boqModel)).toEqual([]);
+  });
+
+  it('纯工序行（挖一般土方）不单独产生覆盖义务', () => {
+    // 仅挖一般土方未覆盖（无实体词分项缺失）→ 零报告
+    const markdown = [
+      '## 第二章 主要分部分项工程施工方法',
+      '### 2.1 道路工程施工方法',
+      '道路工程施工。',
+      '### 2.2 污水管网与排水沟施工方法',
+      '污水管网铺设；排水沟砌筑。',
+      '### 2.3 沟塘清淤与公共厕所施工方法',
+      '沟塘清淤；公共厕所施工。',
+    ].join('\n');
+    expect(boqDivisionCoverageIssues(markdown, chapters(markdown), boqModel)).toEqual([]);
+  });
+
+  it('宽泛词分项（给水/排水/基础类通用词）不产生覆盖义务 → 零报告', () => {
+    const broadModel = factsModel([], [], [{
+      tableType: '清单',
+      headers: ['序号', '项目编码', '项目名称', '工程量', '单位'],
+      rows: [
+        ['1', '050101001001', '给水系统', '1', '项'],
+        ['2', '050201001001', '排水系统', '1', '项'],
+        ['3', '010101001001', '基础工程', '1', '项'],
+      ],
+      sourceFile: '清单.xlsx',
+    }]);
+    const markdown = [
+      '## 第二章 主要分部分项工程施工方法',
+      '### 2.1 道路与基础施工方法',
+      '道路工程按测量放线→路基整平→面层铺筑工序施工，基础施工满足设计要求。',
+    ].join('\n');
+    // 宽泛词在施工方法章几乎必然出现，词面命中不足以证明对应分项已覆盖，不产生义务（P4 防误判漏检）
+    expect(boqDivisionCoverageIssues(markdown, chapters(markdown), broadModel)).toEqual([]);
+  });
+
+  it('公厕同义双向覆盖：清单「公共厕所」×正文「公厕」与反向形态均算已覆盖', () => {
+    const aliasModel = (name: string): DocumentFactsModel => factsModel([], [], [{
+      tableType: '清单',
+      headers: ['序号', '项目编码', '项目名称', '工程量', '单位'],
+      rows: [['1', '040501004001', name, '1', '座']],
+      sourceFile: '清单.xlsx',
+    }]);
+    const bodyGongce = ['## 第二章 主要分部分项工程施工方法', '### 2.1 公厕施工方法', '公厕按基础→主体→装饰工序施工。'].join('\n');
+    const bodyPublicToilet = ['## 第二章 主要分部分项工程施工方法', '### 2.1 公共厕所施工方法', '公共厕所按基础→主体→装饰工序施工。'].join('\n');
+    expect(boqDivisionCoverageIssues(bodyGongce, chapters(bodyGongce), aliasModel('公共厕所'))).toEqual([]);
+    expect(boqDivisionCoverageIssues(bodyPublicToilet, chapters(bodyPublicToilet), aliasModel('公厕'))).toEqual([]);
+  });
+
+  it('清单「公厕」正文两种同义形式均未出现 → 报覆盖缺失', () => {
+    const model = factsModel([], [], [{
+      tableType: '清单',
+      headers: ['序号', '项目编码', '项目名称', '工程量', '单位'],
+      rows: [['1', '040501004001', '公厕', '1', '座']],
+      sourceFile: '清单.xlsx',
+    }]);
+    const markdown = [
+      '## 第二章 主要分部分项工程施工方法',
+      '### 2.1 道路工程施工方法',
+      '道路工程按测量放线→路基整平→面层铺筑工序施工。',
+    ].join('\n');
+    const issues = boqDivisionCoverageIssues(markdown, chapters(markdown), model);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain('公厕');
+  });
+
+  it('清单「菜地整治」正文零命中 → 报覆盖缺失（丰乐镇第五版 P4 漏检修复）', () => {
+    const model = factsModel([], [], [{
+      tableType: '清单',
+      headers: ['序号', '项目编码', '项目名称', '工程量', '单位'],
+      rows: [['1', '040501005001', '菜地整治', '1500', 'm2']],
+      sourceFile: '清单.xlsx',
+    }]);
+    const markdown = [
+      '## 第二章 主要分部分项工程施工方法',
+      '### 2.1 道路工程施工方法',
+      '道路工程按测量放线→路基整平→面层铺筑工序施工。',
+    ].join('\n');
+    const issues = boqDivisionCoverageIssues(markdown, chapters(markdown), model);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain('菜地');
+  });
+
+  it('清单「菜地整治」× 正文「小菜园」同义覆盖 → 零报告', () => {
+    const model = factsModel([], [], [{
+      tableType: '清单',
+      headers: ['序号', '项目编码', '项目名称', '工程量', '单位'],
+      rows: [['1', '040501005001', '菜地整治', '1500', 'm2']],
+      sourceFile: '清单.xlsx',
+    }]);
+    const markdown = [
+      '## 第二章 主要分部分项工程施工方法',
+      '### 2.1 小菜园施工方法',
+      '小菜园按场地平整→种植土回填→菜畦修筑工序施工。',
+    ].join('\n');
+    expect(boqDivisionCoverageIssues(markdown, chapters(markdown), model)).toEqual([]);
   });
 });

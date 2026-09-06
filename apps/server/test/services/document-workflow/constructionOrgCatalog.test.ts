@@ -71,8 +71,14 @@ describe('enrichConstructionOrgOutline（施组大纲富化）', () => {
     // 补足必备小节“项目主要施工内容”
     const overview = enriched.find(item => item.title === '工程概况');
     expect(overview?.sections).toContain('项目主要施工内容');
-    // purpose 注入模块挂靠说明
-    expect(enriched.some(item => item.purpose.includes('系统已按施工组织设计标准模块库挂靠'))).toBe(true);
+    // 纯结构守护：挂靠只新增 H3 标题，不向 purpose/queries/requiredFacts/tableSections 注入任何内容
+    for (const item of enriched) {
+      const source = chapters.find(sourceChapter => sourceChapter.id === item.id);
+      expect(item.purpose).toBe(source?.purpose || '');
+      expect(item.queries).toEqual(source?.queries || []);
+      expect(item.requiredFacts).toEqual(source?.requiredFacts || []);
+      expect(item.tableSections).toEqual(source?.tableSections || []);
+    }
   });
 
   it('无处安放的可选模块进入 unattached 报告（宁多勿丢）', () => {

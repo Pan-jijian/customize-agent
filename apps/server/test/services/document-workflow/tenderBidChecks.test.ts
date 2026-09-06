@@ -4,7 +4,7 @@
  * 另有阶段五模糊应答语义升级单测：词面命中仅召回，语义 gate 复核才计套话句（负例零误杀）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildVagueResponseGate, fillerDensityReport, fiveElementBlockStats } from '@/services/document-workflow/tenderBidChecks';
+import { buildVagueResponseGate, difficultyCountermeasureReport, fillerDensityReport, fiveElementBlockStats } from '@/services/document-workflow/tenderBidChecks';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({
   buildSemanticSimilarity: vi.fn(),
@@ -108,5 +108,37 @@ describe('fillerDensityReport 模糊应答语义复核（阶段五 5.2）', () =
     const report = await fillerDensityReport('建筑平面采用左右对称的布局形式组织功能分区。');
     expect(report.vagueSemanticSentences).toBe(0);
     expect(report.fillerSentences).toBe(0);
+  });
+
+  it('fillerSentenceDetails：命中句原文进入明细（模板化修复闭环锚点源），重复句去重', async () => {
+    mockSimilarity(0.9);
+    const report = await fillerDensityReport('精心组织科学管理确保工程质量。\n精心组织科学管理确保工程质量。\n严格执行相关规范和设计要求。');
+    expect(report.fillerSentences).toBe(3);
+    expect(report.fillerSentenceDetails).toContain('精心组织科学管理确保工程质量');
+    expect(report.fillerSentenceDetails).toContain('严格执行相关规范和设计要求');
+    expect(report.fillerSentenceDetails.filter(item => item === '精心组织科学管理确保工程质量')).toHaveLength(1);
+    expect(report.fillerSentenceDetails.length).toBeLessThanOrEqual(40);
+  });
+});
+
+describe('difficultyCountermeasureReport 条目明细（重难点修复锚点源）', () => {
+  const KEY_DIFFICULTY_MARKDOWN = '### 工程重点难点分析\n\n基坑降水难度大因周边道路沉降风险高需控制变形在5mm以内。\n\n工期紧张需要多班组穿插且材料进场协调难度较大。';
+
+  it('entries 带归因/量化双达标标志（检测定位=修复定位）', async () => {
+    mockSimilarity(0.9);
+    const report = await difficultyCountermeasureReport(KEY_DIFFICULTY_MARKDOWN);
+    expect(report.entries).toHaveLength(2);
+    expect(report.entries[0].attributed).toBe(true);
+    expect(report.entries[0].quantified).toBe(true);
+    expect(report.entries[1].attributed).toBe(true);
+    expect(report.entries[1].quantified).toBe(false);
+    expect(report.entries[1].text).toContain('工期紧张');
+  });
+
+  it('归因缺失条目 attributed=false（供修复指令区分缺归因/缺量化）', async () => {
+    mockSimilarity(0.1);
+    const report = await difficultyCountermeasureReport(KEY_DIFFICULTY_MARKDOWN);
+    expect(report.entries[0].attributed).toBe(false);
+    expect(report.entries[0].quantified).toBe(true);
   });
 });

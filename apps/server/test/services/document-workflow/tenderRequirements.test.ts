@@ -13,7 +13,7 @@ import type * as LlmClientModule from '@/services/document-workflow/llmClient';
 import { callDocumentLlmJson } from '@/services/document-workflow/llmClient';
 import { validateJsonAgainstSchema } from '@/services/document-workflow/llmClient';
 import { buildSemanticSimilarity } from '@/services/document-workflow/semanticSimilarity';
-import { emptyTenderRequirements, extractTenderRequirements, extractRequirementFieldGaps, filterMandatoryClauseEvidence, hasTenderRequirements, mandatoryFieldGaps, mergeTenderRequirements, mergeTenderRequirementSlices, missingMandatoryFields, preselectTenderRequirementEvidence, readCachedTenderRequirements, requirementFieldGaps, requirementsCoverageIssues, tenderRequirementsCacheKey, tenderRequirementsWritingRules, writeCachedTenderRequirements, classifyRequirementResponsiveness, classifyAnchorAlternativeClauses, REQUIREMENTS_JSON_SCHEMA } from '@/services/document-workflow/tenderRequirements';
+import { emptyTenderRequirements, extractTenderRequirements, extractRequirementFieldGaps, filterMandatoryClauseEvidence, hasTenderRequirements, mandatoryFieldGaps, mergeTenderRequirements, mergeTenderRequirementSlices, missingMandatoryFields, preselectTenderRequirementEvidence, readCachedTenderRequirements, requirementFieldGaps, requirementsCoverageIssues, tenderRequirementsCacheKey, tenderRequirementsWritingRules, writeCachedTenderRequirements, classifyRequirementResponsiveness, classifyAnchorAlternativeClauses, fixScoringRequirementResponses, REQUIREMENTS_JSON_SCHEMA } from '@/services/document-workflow/tenderRequirements';
 import { stableHash } from '@/services/document-workflow/utils';
 import type { DocumentEvidence, TenderRequirementModel } from '@/services/document-workflow/types';
 
@@ -658,5 +658,79 @@ describe('B 阶段 提取结果磁盘缓存（防脏双门禁+哈希失效）', 
   it('缓存 miss：未写入时返回 undefined（走真实提取链）', () => {
     const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
     expect(readCachedTenderRequirements(tempRoot, key)).toBeUndefined();
+  });
+});
+
+// ============ B1/B2 评分项响应确定性补写（第十次回归：双判脱节 + 空泛补写） ============
+
+describe('评分项响应确定性补写（fixScoringRequirementResponses）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('classifyRequirementResponsiveness：同输入二次调用命中缓存（LLM 只调一次，检测/路由/补写三处双判一致）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }, { index: 1, responsive: false }] });
+    const items = [
+      { kind: '前附表响应条款', text: '项目经理具备建筑工程专业二级及以上注册建造师，并持有安全生产考核合格证书（B证）。' },
+      { kind: '前附表响应条款', text: '本项目开标时间为2026年5月15日9时，投标文件递交截止时间同开标时间。' },
+    ];
+    const first = await classifyRequirementResponsiveness(items);
+    const second = await classifyRequirementResponsiveness(items);
+    expect(mocked).toHaveBeenCalledTimes(1);
+    expect(first.get(0)).toBe(true);
+    expect(first.get(1)).toBe(false);
+    expect(second.get(0)).toBe(true);
+    expect(second.get(1)).toBe(false);
+  });
+
+  it('部分响应条款补写条款全文（不再产出 missing 锚点拼接的空泛句）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      awardClauses: [{ text: '本项目确保获得鲁班奖，获得鲁班奖的支付奖励100万元。', coreTerms: ['鲁班奖', '100万元'], source: '招标文件.pdf' }],
+    };
+    const chapters = [
+      { title: '## 第六章 质量与创优管理', content: '本项目创优目标为确保获得鲁班奖，配套创优管理制度。' },
+    ];
+    // 条款 query（coreTerms 拼接）与章节标题语义相似度 0.7 命中路由；正文缺「100万元」锚点 → 部分响应
+    const similarity = (query: string, title: string) => (query.includes('鲁班奖') && title.includes('质量') ? 0.7 : 0);
+    const result = await fixScoringRequirementResponses({ chapters, model, similarity });
+    expect(result.fixedCount).toBe(1);
+    expect(chapters[0].content).toContain('获得鲁班奖的支付奖励100万元');
+    expect(chapters[0].content).not.toContain('相关内容严格按招标文件要求执行');
+  });
+
+  it('零响应条款同样补写条款全文（锚点全落位）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      awardClauses: [{ text: '本项目确保获得鲁班奖，获得鲁班奖的支付奖励100万元。', coreTerms: ['鲁班奖', '100万元'], source: '招标文件.pdf' }],
+    };
+    const chapters = [
+      { title: '## 第六章 质量与创优管理', content: '质量目标为合格，质量保证体系健全。' },
+    ];
+    const similarity = (query: string, title: string) => (query.includes('鲁班奖') && title.includes('质量') ? 0.7 : 0);
+    const result = await fixScoringRequirementResponses({ chapters, model, similarity });
+    expect(result.fixedCount).toBe(1);
+    expect(chapters[0].content).toContain('招标要求响应（奖项条款）：本项目确保获得鲁班奖');
+  });
+
+  it('商务口径条款（暂列金额）确定性补写豁免（防补写后即被商务词清洗删除的闭环）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      awardClauses: [{ text: '本项目暂列金额为1000万元（税金另计），其中包含300万元优质优价费。', coreTerms: ['暂列金额', '1000万元'], source: '招标文件.pdf' }],
+    };
+    const chapters = [
+      { title: '## 第六章 合同与造价管理', content: '工程造价管理措施。' },
+    ];
+    const similarity = (query: string, title: string) => (query.includes('暂列金额') && title.includes('造价') ? 0.7 : 0);
+    const result = await fixScoringRequirementResponses({ chapters, model, similarity });
+    expect(result.fixedCount).toBe(0);
+    expect(chapters[0].content).not.toContain('暂列金额');
   });
 });

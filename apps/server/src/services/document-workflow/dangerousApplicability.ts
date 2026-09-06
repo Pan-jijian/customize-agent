@@ -15,8 +15,8 @@ const extractNumberNear = (body: string, pattern: RegExp): number | undefined =>
   return Number.isFinite(value) && value > 0 ? value : undefined;
 };
 
-/** 危大工程封闭集项：适用前提判定 + 辨识别名 */
-const DANGEROUS_APPLICABLE_ITEMS = [
+/** 危大工程封闭集项：适用前提判定 + 辨识别名（导出供确定性修复器 fixHazardIdentificationGaps 同源复用） */
+export const DANGEROUS_APPLICABLE_ITEMS = [
   {
     name: '基坑支护与降水工程',
     aliases: ['基坑支护', '基坑工程', '降排水', '降水井'],
@@ -62,8 +62,8 @@ const DANGEROUS_APPLICABLE_ITEMS = [
   },
 ] as const;
 
-/** 危大辨识区：含"危大"关键词行前后各 6 行（清单式列举覆盖别名） */
-function extractDangerZone(markdown: string): string {
+/** 危大辨识区：含"危大"关键词行前后各 6 行（清单式列举覆盖别名；导出供修复器同源复用） */
+export function extractDangerZone(markdown: string): string {
   const lines = markdown.split(/\r?\n/u);
   const zone: string[] = [];
   lines.forEach((line, index) => {

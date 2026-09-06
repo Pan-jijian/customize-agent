@@ -67,8 +67,7 @@ const COMPLIANCE_ITEM_QUERIES = [
   '绿色施工措施与评价',
 ] as const;
 
-/** 编制规范性：复用已有确定性检查（目录层级/表格规范/跨章数据一致/结构完整）的消息口径 */
-const NORMALIZATION_ISSUE_RE = /目录|层级|编号|表格|表头|分隔线|跨章|数据一致|数值口径|页码|空小节|缺少|缺失|缺节/u;
+/** 编制规范性匹配正则定义在 normalizationScore 上方（B7 口径修正） */
 
 function normalizeHeadingTitle(title: string) {
   return title
@@ -142,16 +141,30 @@ function complianceScore(markdown: string, anyBlockMatches: (query: string) => b
  * 无参考库样本时回退每 1500 字 1 块的历史口径 */
 async function executabilityScore(markdown: string, referenceCompleteBlocks?: number) {
   const { blocks, completeBlocks } = await fiveElementBlockStats(markdown);
-  const target = Math.max(6, Math.ceil(referenceCompleteBlocks ?? documentTextLength(markdown) / 1500));
+  // B6 基准口径修正（丰乐镇第三/五轮实测）：参考库样本五要素块为 0 时属 PDF 提取无信号
+  // 而非真实天花板，若直接取 0 会被 Math.max(6,…) 钳成 target=6（第三轮钻空子得 62 分），
+  // 无样本时又回退每 1500 字 1 块（第五轮 target=34 反而更严），同一评分器两轮口径倒挂；
+  // 0 块基准一律视为无信号回退字数口径，保证同一文档类型下评分口径稳定。
+  const effectiveReference = referenceCompleteBlocks && referenceCompleteBlocks > 0 ? referenceCompleteBlocks : undefined;
+  const target = Math.max(6, Math.ceil(effectiveReference ?? documentTextLength(markdown) / 1500));
   const density = Math.min(1, completeBlocks / target);
   const fiveElementRate = blocks ? completeBlocks / blocks : 0;
   return Math.round((density * 0.7 + fiveElementRate * 0.3) * 100);
 }
 
-/** 编制规范性：复用已有确定性检查消息（目录层级/表格规范/跨章数据一致/结构完整） */
+/** 编制规范性：复用已有确定性检查消息（目录层级/表格规范/结构完整）
+ * B7 口径修正（丰乐镇第七轮实测）：旧正则把「跨章一致性复核」（数据矛盾/规格错位/表格重复，
+ * 属事实一致性维度）与「事实一致性冲突」（提取侧噪声，消息内含「招标图纸目录」等字样）
+ * 全部计入编制规范性，每条 -8 导致 normalization 恒 0 分；收窄为纯格式结构类消息
+ * （目录/层级/编号/表头/分隔线/页码/空小节/缺规划小节/小节只有标题），
+ * 负向排除事实一致性/评分响应/参数密度/预案深度/属地适配/专业评分类消息。 */
+const NORMALIZATION_ISSUE_RE = /目录|层级|编号|表格|表头|分隔线|页码|空小节|缺少规划小节|小节只有标题|缺节/u;
+const NORMALIZATION_EXCLUDE_RE = /跨章一致性复核|事实一致性冲突|事实冲突|评分项要求|可靠精确参数|应急预案|属地创优|工伤保险|专业评分|深度不足|事实反查|存在多个值/u;
+
 function normalizationScore(issues: ValidationIssue[]) {
-  const normErrors = issues.filter(issue => issue.level === 'error' && NORMALIZATION_ISSUE_RE.test(issue.message)).length;
-  const normWarnings = issues.filter(issue => issue.level === 'warning' && NORMALIZATION_ISSUE_RE.test(issue.message)).length;
+  const isNormalizationIssue = (issue: ValidationIssue) => !NORMALIZATION_EXCLUDE_RE.test(issue.message) && NORMALIZATION_ISSUE_RE.test(issue.message);
+  const normErrors = issues.filter(issue => issue.level === 'error' && isNormalizationIssue(issue)).length;
+  const normWarnings = issues.filter(issue => issue.level === 'warning' && isNormalizationIssue(issue)).length;
   return Math.max(0, 100 - normErrors * 8 - Math.min(normWarnings * 3, 30));
 }
 

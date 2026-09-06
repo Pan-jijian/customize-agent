@@ -12,11 +12,13 @@ import { validateFactConsistency } from '../document-validation/factConsistencyS
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from './budget';
 import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown, markdownTableQualityIssues } from './qualityValidation';
-import { applyNumericConsistencyDeterministicFixes, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, stripCommercialDataBodyLines } from './documentIntegrityChecks';
+import { applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixFinishThickness, fixLaborPeakConflict, fixSelfUnderminingCandidates, fixTocFromBody, mergeTableLineResidues, planDataMasterAuthorities, stripCommercialDataBodyLines, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters } from './documentIntegrityChecks';
+import type { PlanDataMaster } from './planDataMaster';
 import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
 import { semanticChoiceConflicts, semanticChoiceConflictIssue } from './dataConsistencyReview';
 import { buildDecisionLock } from './decisionLock';
 import { buildStandardFinalValidationIssues, crossChapterDuplicateSectionIssues } from './documentFinalValidation';
+import { fixEmptyScoringResponses, fixScoringRequirementResponses } from './tenderRequirements';
 import { buildDocumentProfileReport } from './documentProfiles';
 import { buildKnowledgeCoverageReport, knowledgeCoverageIssues } from './documentKnowledgeCoverage';
 import { buildDocumentFactTraces, factTraceIssues } from './documentFactTrace';
@@ -31,7 +33,7 @@ import { DOCUMENT_WORKFLOW_VERSION } from './documentWorkflowVersion';
 import { buildDocumentTelemetryReport } from './documentTelemetry';
 import { retrievalCoverageIssues } from './documentEvidenceRetrieval';
 import { extractFacts, extractFactsWithLlm, extractLocalFactPool, buildFactsModel, shouldRunLlmFactExtraction } from './factsModel';
-import { applyScopeConflictResolutions, buildCanonicalFacts, detectNumericScopeConflicts } from './factGovernance';
+import { applyScopeConflictResolutions, buildCanonicalFactModel, buildCanonicalFacts, detectNumericScopeConflicts, extractDrawingAnnotationFacts } from './factGovernance';
 import { extractSection, stringifyFactValue, throwIfAborted } from './utils';
 import { formalTextGateIssues } from './agentWorkflow';
 import { displayStage, upsertProgressStage } from './progress';
@@ -461,6 +463,8 @@ export interface FinalizeGenerationInput {
   factTokenScopeClassifier: FactTokenScopeClassifier;
   /** 专业深度语义分类器（round-14，生成前预构建）：章节专业深度/缺项/套话/闭环/依赖语义判定（本地 bge 恒可用） */
   professionalDepthClassifier: ProfessionalDepthClassifier;
+  /** B1 计划数据主表（生成前锁定口径）：交付前确定性清洗的节点工期/机械台数权威 */
+  planDataMaster?: PlanDataMaster;
 }
 
 export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<GeneratedDocumentDraft> {
@@ -469,7 +473,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     progressStages, documentSpec, projectMaterialSummary, domainProfile, documentBudget,
     input, generationDiagnostics, promptTexts, promptBindings, promptDocumentRules, projectRoot, projectId, readiness,
     factExtractionPromptTexts, hasExplicitOutline, missingItems, retrievalCoverageReports, failedChapterMessages,
-    webResearchReport, indexHealth, agentWorkflow, globalConsistencyIssues, scopeConflicts, writingTaskBrief, evaluationCriteriaItems, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, emitProgress, withProgressHeartbeat,
+    webResearchReport, indexHealth, agentWorkflow, globalConsistencyIssues, scopeConflicts, writingTaskBrief, evaluationCriteriaItems, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, planDataMaster, emitProgress, withProgressHeartbeat,
   } = p;
   const { signal, requirement } = input;
 
@@ -510,18 +514,29 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     }
   }
   for (const stage of llmExtraction.stages) upsertProgressStage(progressStages, stage);
-  const structuredFacts = filterFactsByProjectScope(factsWithEvidenceSource([...localFacts, ...projectBasicFacts, ...preciseFacts, ...llmExtraction.facts], allEvidence), projectMaterialScope);
+  // 4.19 图纸标注事实补抽（finalize 同源接入）：生成准备阶段接入的 CAD 语义标注（坡底线/钢管土钉）
+  // 只喂了 Writer 输入；finalize 重建事实主表未接入 → 危大/支护形式检查器输入槽位全空（真实回归实测：
+  // 正文深度/支护形式留白、canonical 空）。与 documentGenerator L299 同口径确定性补抽并入主表链。
+  const drawingAnnotationFacts = extractDrawingAnnotationFacts(allEvidence);
+  const structuredFacts = filterFactsByProjectScope(factsWithEvidenceSource([...localFacts, ...projectBasicFacts, ...preciseFacts, ...llmExtraction.facts, ...drawingAnnotationFacts], allEvidence), projectMaterialScope);
   // 源级同口径冲突裁决回写：裁决值统一进入事实主表与确定性校验基准，避免正文被主表败选值误导（如 4645㎡ 与 4646㎡ 并存）
   const governedStructuredFacts = applyScopeConflictResolutions(structuredFacts, scopeConflicts ?? detectNumericScopeConflicts(structuredFacts));
   for (const fact of governedStructuredFacts) facts[fact.key] = `${stringifyFactValue(fact.value)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;
 
   const factsModel = await buildFactsModel(governedStructuredFacts, structuredTables, missingItems, documentSpec, domainProfile);
+  // 4.19 canonical 主表构建（finalize 同源接入）：危大判定/支护形式一致性检查器消费 factsModel.canonical
+  // 的 excavation_depth/foundation_support_form 槽位（byKey）；此前 finalize 从未构建 canonical，
+  // 补抽事实即使进入主表也无 canonical 索引 → excavationHazardClassificationIssues 永远无输入
+  const canonicalFactsModel = buildCanonicalFactModel({ facts: governedStructuredFacts, projectRoot, requirement: requirement || '', templateId: template.id });
+  factsModel.canonical = canonicalFactsModel;
   // 4.17.3 计划总工期权威口径：factsModel 计划工期事实卡作为全文工期确定性修复的裁决基准
   //（庐江实测：45 vs 210 两套体系各自带表格，表格口径不唯一导致修复零产出、修复节点 failed）
   const scheduleAuthority = extractScheduleAuthority(factsModel);
   // 4.17.4：装配率权威口径（38.4% vs 招标锁定 30%）与工程规模摘要（6.1 一览表套话填充）
   const assemblyRateAuthority = extractAssemblyRateAuthority(factsModel);
   const scaleSummary = extractProjectScaleSummary(factsModel);
+  // B1 支护体系权威（图纸/地质槽位 foundation_support_form）：交付前确定性裁决依据
+  const supportAuthority = extractSupportSystemAuthority(factsModel);
   const chapterReadiness = evaluateChapterReadiness(chapterDrafts, documentSpec);
   const validation = validateDraft(chapterDrafts, governedStructuredFacts, template);
   validation.warnings = [...validation.warnings, ...readiness.warnings];
@@ -603,11 +618,11 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     return { ...chapter, sections: chapter.sections || [], content: finalizeChapterContentQuality(chapter.content, templateChapter) };
   });
   let finalMarkdown = finalizeDocumentMarkdown(composeDocumentMarkdown({ templateId: template.id, templateName: template.name, title: template.outputTitle, requirement: requirement || '', projectRoot, projectId, exportSettings: template.exportSettings, generationSettings: template.generationSettings, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems: [...new Set(missingItems)], validation, validationIssues, executionStages, exportGate: { passed: false, blockingIssues: [], checklist: [] }, assets, partialChapters: [], checkpointChapters: finalChapterDrafts, generatedAt: Date.now() }, { forbidDrawingImages: false, promptRules: promptDocumentRules }), finalChapterDrafts, { forbidDrawingImages: false, promptRules: promptDocumentRules }).markdown;
-  finalMarkdown = finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(finalMarkdown, structuredFacts), projectMaterialSummary)))), template));
+  finalMarkdown = fixTocFromBody(finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(finalMarkdown, structuredFacts), projectMaterialSummary)))), template))).markdown;
   // round-19：全文重建函数（章草稿 → finalMarkdown 标准化管道）单一定义：
   // 确定性修复后重建/Final Gate 补写后重建/事实落位后重建/表格修复后重建/post-gate 重建共用同一口径，
   // 消除 5 处 300+ 字符重复表达式（历史遗留：rebuild 定义在修复循环后才出现，前面的重建只能内联复制）
-  const rebuildFinalMarkdownFromChapters = () => finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template));
+  const rebuildFinalMarkdownFromChapters = () => fixTocFromBody(finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template, requirement, projectRoot, projectId, facts, structuredFacts, factsModel, chapters: finalChapterDrafts, sources, missingItems, validation, validationIssues, executionStages, assets, promptDocumentRules }), structuredFacts), projectMaterialSummary)))), template))).markdown;
 
   const canonicalFacts = buildCanonicalFacts({ facts: structuredFacts, markdown: finalMarkdown });
   if (canonicalFacts.size > 0) executionStages.push({ type: 'fact_extraction', roleId: 'canonical-facts', status: 'success', message: `已决策可信基础事实 ${canonicalFacts.size} 项`, details: [...canonicalFacts.values()].map(fact => `${fact.label}=${fact.value}（${fact.source}，confidence=${fact.confidence}）`).slice(0, 12) });
@@ -644,18 +659,22 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 重要事实落位补写轮（P1-3）：结构缺陷修复收敛后，若项目基础字段类硬数据仍未落位（建筑面积、标段数、编号、工期等），
   // 按事实标签映射目标章节做一轮定向 patch 落位（保持数值口径，不新增小节、不改表头结构）。
   // 十度实测缺陷：建设规模“建筑面积约为4646㎡”、招标范围“本项目分为1个标段”未落位直达交付（针对性维度 68 分）
-  const importantUnplacedFacts = uncoveredImportantFacts(finalMarkdown, [...structuredFacts, ...factsModel.preciseFacts]);
+  const importantUnplacedFacts = uncoveredImportantFacts(finalMarkdown, [...structuredFacts, ...factsModel.preciseFacts], { maxItems: 60 });
   if (importantUnplacedFacts.length > 0) {
     // 标签→章节关键词映射：项目基础字段 → 概况/基本信息章；工期 → 进度部署章；质量 → 质量章；危大安全 → 安全章；资源材料机械 → 资源投入章
     const factChapterMatchers: Array<[RegExp, RegExp]> = [
       [/项目名称|工程名称|项目编号|招标人|建设单位|发包人|建设地点|建设规模|招标范围|施工范围/u, /概况|基本信息|概述|总述|简介/u],
-      [/计划工期|合同工期/u, /工期|进度|施工部署|总体部署|流水/u],
+      [/计划工期|合同工期|天数/u, /工期|进度|施工部署|总体部署|流水/u],
       [/质量标准|质量目标/u, /质量/u],
       [/危大|安全/u, /安全/u],
       [/资源|材料|机械|设备|机具/u, /资源|投入|物资|机械|设备|机具|周转/u],
+      // B5 关键精确参数落位：面积/长度/强度/管径等工程参数 → 概况章或施工方法章（与 preciseFactUsageIssues 关键参数抽查同源）
+      [/面积|占地|建筑面积|长度|宽度|高度|厚度|深度|强度|等级|坡度|管径|直径|规格|跨度|周长|体积|重量/u, /概况|施工方法|主要施工|方案/u],
     ];
     const chapterFactGroups = new Map<string, Array<{ label: string; value: string }>>();
     const unmatchedFacts: string[] = [];
+    // B5 参数落位限幅：每组最多 12 条，防参数池过大时 LLM patch 膨胀（每章一次调用，组内超限丢弃并记录）
+    const droppedParamFacts: string[] = [];
     for (const item of importantUnplacedFacts) {
       const matcher = factChapterMatchers.find(([labelRe]) => labelRe.test(item.label));
       const targetChapter = matcher ? finalChapterDrafts.find(chapter => matcher[1].test(chapter.title)) : undefined;
@@ -664,6 +683,10 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
         continue;
       }
       const group = chapterFactGroups.get(targetChapter.id) || [];
+      if (group.length >= 12) {
+        droppedParamFacts.push(`${item.label}=${item.value}`);
+        continue;
+      }
       group.push({ label: item.label, value: item.value });
       chapterFactGroups.set(targetChapter.id, group);
     }
@@ -673,7 +696,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
       if (chapterIndex < 0) continue;
       const draftChapter = finalChapterDrafts[chapterIndex];
       const templateChapter = effectiveChapters.find(chapter => chapter.id === draftChapter.id || chapter.title === draftChapter.title);
-      const runningStage = displayStage({ type: 'llm_review', roleId: `agent-fact-landing-${chapterId}`, status: 'running', message: `正在落位 ${factsGroup.length} 条重要事实：${draftChapter.title}`, details: [...factsGroup.map(item => `${item.label}=${item.value}`), ...unmatchedFacts.map(item => `跳过：${item}（无匹配章节）`)] }, { subtitle: '事实落位修复' });
+      const runningStage = displayStage({ type: 'llm_review', roleId: `agent-fact-landing-${chapterId}`, status: 'running', message: `正在落位 ${factsGroup.length} 条重要事实：${draftChapter.title}`, details: [...factsGroup.map(item => `${item.label}=${item.value}`), ...unmatchedFacts.map(item => `跳过：${item}（无匹配章节）`), ...droppedParamFacts.map(item => `超限跳过：${item}`)] }, { subtitle: '事实落位修复' });
       upsertProgressStage(progressStages, runningStage);
       upsertProgressStage(finalGateRepairStages, runningStage);
       emitProgress(finalChapterDrafts, progressStages);
@@ -715,7 +738,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     let tableFixPatches = 0;
     // D2：按章分组 + 跨章并行——同章表格组内串行（每表独立修复闭环，组内后表以最新章内容为输入），
     // 跨章组批量并行（指令生成并行，限幅 DOCUMENT_TABLE_FIX_CONCURRENCY，默认 2）；每章单写者零覆盖
-    const tableGroups: Array<Array<{ chapterIndex: number; issueIndex: number; message: string; suggestion: string; tableAnchor: string }>> = [];
+    const tableGroups: Array<Array<{ chapterIndex: number; issueIndex: number; message: string; suggestion: string; tableAnchor: string; rowAnchor: string }>> = [];
     const tableGroupIndexByChapter = new Map<number, number>();
     for (let issueIndex = 0; issueIndex < tableDefectIssues.length; issueIndex += 1) {
       const issue = tableDefectIssues[issueIndex];
@@ -731,7 +754,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
           })
         : -1;
       if (chapterIndex < 0) continue;
-      const entry = { chapterIndex, issueIndex, message: issue.message, suggestion: issue.suggestion || '', tableAnchor };
+      const entry = { chapterIndex, issueIndex, message: issue.message, suggestion: issue.suggestion || '', tableAnchor, rowAnchor };
       const existingIndex = tableGroupIndexByChapter.get(chapterIndex);
       if (existingIndex === undefined) {
         tableGroupIndexByChapter.set(chapterIndex, tableGroups.length);
@@ -744,7 +767,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     for (let groupOffset = 0; groupOffset < tableGroups.length; groupOffset += tableFixConcurrency) {
       const batch = tableGroups.slice(groupOffset, groupOffset + tableFixConcurrency);
       await Promise.all(batch.map(async entries => {
-        for (const { chapterIndex, issueIndex, message, suggestion, tableAnchor } of entries) {
+        for (const { chapterIndex, issueIndex, message, suggestion, tableAnchor, rowAnchor } of entries) {
           // 组内后表以最新章内容为输入（含此前已落位的同章表格 patch），与改造前 per-table 串行语义一致
           const draftChapter = finalChapterDrafts[chapterIndex];
           const templateChapter = effectiveChapters.find(chapter => chapter.id === draftChapter.id || chapter.title === draftChapter.title);
@@ -786,8 +809,12 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
             finalChapterDrafts[chapterIndex] = { ...draftChapter, content: templateChapter ? finalizeChapterContentQuality(nextContent, templateChapter) : nextContent };
             tableFixPatches += 1;
           }
-          // 修复结果判定：同源复检该表头锚点是否仍存在表格数据缺陷
-          const stillDefective = markdownTableQualityIssues(nextContent).some(item => item.level === 'error' && /空单元格|占位符单元格|列数不一致/u.test(item.message) && item.message.includes(tableAnchor));
+          // 修复结果判定：同源复检该表头锚点下的原缺陷行是否仍存在表格数据缺陷。
+          // 行级判定（4.19 真实回归）：此前按「表头锚点表内任一占位符残留」判整表失败——LLM 按指令只修
+          // 原缺陷行（钢筋行 420t/批），同表其他行的同类缺陷（砌体行约650m³/批）导致已修复节点误判
+          // 「未生效」（5-2/6-3/6-4 三节点 failed，前两版全成功）。原缺陷行不再检出同类缺陷即视为修复
+          // 成功；同表其他行的残留缺陷由导出门禁阻断，不在此重复判定
+          const stillDefective = markdownTableQualityIssues(nextContent).some(item => item.level === 'error' && /空单元格|占位符单元格|列数不一致/u.test(item.message) && item.message.includes(tableAnchor) && (!rowAnchor || item.message.includes(rowAnchor)));
           const completedTableStage = displayStage({ type: 'llm_review', roleId: `agent-table-fix-${draftChapter.id}-${issueIndex}`, status: stillDefective ? 'failed' : 'success', message: stillDefective ? `表格数据修复未生效：${draftChapter.title}` : `表格数据修复完成：${draftChapter.title}`, details: [message] }, { subtitle: '表格数据修复' });
           upsertProgressStage(progressStages, completedTableStage);
           upsertProgressStage(finalGateRepairStages, completedTableStage);
@@ -811,11 +838,50 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 修复后重算校验组，避免残留冲突被导出门禁硬阻断。章节级修复原地改正文后重建全文，
   // 全文级修复覆盖封面/信息表合成区的败选数值（章节修复覆盖不到），最后定点替换跨章数值矛盾。
   const stage5ChapterFix = await applyDeterministicConsistencyFixes(finalChapterDrafts, factsModel, scopeConflicts);
-  if (stage5ChapterFix.fixedCount > 0) finalMarkdown = rebuildFinalMarkdownFromChapters();
+  // B1 语义重复交付前兜底：补表/门禁规则修复后可能再引入雷同段，交付前最后一次迭代收敛 strip
+  const stage5SemanticDup = await stripCrossChapterSemanticDuplicateParagraphs(finalChapterDrafts);
+  // B1 评分项响应强制：交付前对零命中/部分响应的实质条款按路由责任章节补写响应句（锚点同源判定）
+  const stage5ScoringFix = await fixScoringRequirementResponses({
+    chapters: finalChapterDrafts, model: tenderRequirements, similarity: requirementsSimilarity, signal,
+  });
+  if (stage5ChapterFix.fixedCount > 0 || stage5SemanticDup > 0 || stage5ScoringFix.fixedCount > 0) finalMarkdown = rebuildFinalMarkdownFromChapters();
+  if (stage5ScoringFix.fixedCount > 0) {
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'scoring-requirement-fix', status: 'success', message: `评分项响应确定性补写 ：${stage5ScoringFix.fixedCount} 条（${stage5ScoringFix.details.slice(0, 3).join('、')}）`, details: stage5ScoringFix.details.slice(3) }, { subtitle: '交付前确 定性清洗' }));
+  }
+  // B6 交付前确定性清洗（丰乐镇第五轮实测）：跨章表格去重/断行残片合并/叠词收敛此前只有
+  // 检测器无修复器——「工程名称表两处重复」「延长有效作业时间 |残行」「分部分项叠词误报」
+  // 被导出门禁硬阻断且修复轮循环无效；检测定位=修复定位同源，章节级原地修复后统一重建全文，
+  // 重建发生在全文级数值修复之前，避免覆盖 stage5MarkdownFix/stage5NumericFix 的修复成果。
+  const stage5TableDup = stripDuplicateTablesAcrossChapters(finalChapterDrafts);
+  let stage5ResidueCount = 0;
+  let stage5FinishFixCount = 0;
+  let stage5LaborFixCount = 0;
+  let stage5SelfFixCount = 0;
+  let stage5EmptyRespCount = 0;
+  for (const chapter of finalChapterDrafts) {
+    const residueFix = mergeTableLineResidues(chapter.content);
+    if (residueFix.fixedCount > 0) { chapter.content = residueFix.markdown; stage5ResidueCount += residueFix.fixedCount; }
+    chapter.content = collapseRepeatedWords(chapter.content);
+    // A21 装饰层厚度/劳动力峰值/自伤句式/空响应句（丰乐镇第七轮实测）：
+    // 装饰层厚度 200mm 串染（抹面/打底/坐浆）、总人数 vs 高峰人数多口径、
+    // 「未采用新技术」自伤句、LLM 自由发挥的空响应句——检测定位=修复定位同源，章节级原地修
+    const finishFix = fixFinishThickness(chapter.content);
+    if (finishFix.fixedCount > 0) { chapter.content = finishFix.markdown; stage5FinishFixCount += finishFix.fixedCount; }
+    const laborFix = fixLaborPeakConflict(chapter.content);
+    if (laborFix.fixedCount > 0) { chapter.content = laborFix.markdown; stage5LaborFixCount += laborFix.fixedCount; }
+    const selfFix = fixSelfUnderminingCandidates(chapter.content);
+    if (selfFix.fixedCount > 0) { chapter.content = selfFix.markdown; stage5SelfFixCount += selfFix.fixedCount; }
+    const emptyRespFix = fixEmptyScoringResponses(chapter.content);
+    if (emptyRespFix.fixedCount > 0) { chapter.content = emptyRespFix.markdown; stage5EmptyRespCount += emptyRespFix.fixedCount; }
+  }
+  if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5LaborFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0) {
+    finalMarkdown = rebuildFinalMarkdownFromChapters();
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'deterministic-surface-fix', status: 'success', message: `交付前确定性清洗：跨章表格去重 ${stage5TableDup.removedCount} 行、断行残片合并 ${stage5ResidueCount} 处、装饰层厚度修复 ${stage5FinishFixCount} 处、劳动力峰值统一 ${stage5LaborFixCount} 处、自伤句式改写 ${stage5SelfFixCount} 处、空响应句改写 ${stage5EmptyRespCount} 处、叠词收敛` }, { subtitle: '交付前确定性清洗' }));
+  }
   const stage5MarkdownFix = await applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
   if (stage5MarkdownFix.fixedCount > 0) finalMarkdown = stage5MarkdownFix.markdown;
   // 跨章数值矛盾（劳动力峰值/节点工期/材料设备数量）确定性定点替换：检测定位=修复定位同源
-  const stage5NumericFix = applyNumericConsistencyDeterministicFixes(finalMarkdown, { scheduleAuthority, assemblyRateAuthority });
+  const stage5NumericFix = applyNumericConsistencyDeterministicFixes(finalMarkdown, { scheduleAuthority, assemblyRateAuthority, ...planDataMasterAuthorities(planDataMaster), supportAuthority });
   if (stage5NumericFix.fixedCount > 0) finalMarkdown = stage5NumericFix.markdown;
   if (stage5ChapterFix.fixedCount > 0 || stage5MarkdownFix.fixedCount > 0 || stage5NumericFix.fixedCount > 0) {
     await recomputeFinalValidationBundle();
@@ -823,7 +889,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     const totalDetails = [...new Set([...stage5ChapterFix.details, ...stage5MarkdownFix.details, ...stage5NumericFix.details])];
     upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'deterministic-consistency-fix', status: 'success', message: `交付前确定性清洗：${totalFixed} 处（${totalDetails.slice(0, 4).join('、')}）`, details: totalDetails.slice(4) }, { subtitle: '交付前确定性清洗' }));
   }
-  // 来源罗列话术确定性清洗兜底（十一度实测缺陷）：patch 类修复更新章节内容后若未触发 rebuild，最终校验用
+  // 来源罗列话术确定性清洗兜底（十一度实测缺陷）：patch 类修复更新章节内容后若 未触发 rebuild，最终校验用
   // markdown 可能残留“依据招标文件…”罗列句被导出门禁硬阻断；交付前用与导出侧一致的清洗函数兜底再重算
   const cleanedFinalMarkdown = cleanFormalSourcePhrases(finalMarkdown);
   if (cleanedFinalMarkdown !== finalMarkdown) {
@@ -883,6 +949,32 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     finalMarkdown = repairedTableMarkdown.markdown;
     await recomputeFinalValidationBundle();
   }
+  // B6 评审轮后表面修复兜底（丰乐镇第六轮实测）：全维度评审轮 patch 重写章节会再引入
+  // 表格断行残片（「优先保障关键村 |」独立残行），stage5 修复链早于评审轮覆盖不到；
+  // 最终导出前对全文再跑一遍残行合并+叠词收敛（与检测器同口径，零成本零误伤）。
+  // A21 扩展（丰乐镇第七轮实测）：评审轮 patch 同样会再引入表格重复/装饰层 200mm 串染/
+  // 劳动力多口径/自伤句式/空响应句，一并纳入评审轮后兜底，与 stage5 链同源。
+  let surfaceFixRound2Result = mergeTableLineResidues(collapseRepeatedWords(finalMarkdown));
+  surfaceFixRound2Result = { markdown: stripDuplicateTables(surfaceFixRound2Result.markdown).markdown, fixedCount: surfaceFixRound2Result.fixedCount };
+  const surfaceFinishFix = fixFinishThickness(surfaceFixRound2Result.markdown);
+  if (surfaceFinishFix.fixedCount > 0) surfaceFixRound2Result.markdown = surfaceFinishFix.markdown;
+  const surfaceLaborFix = fixLaborPeakConflict(surfaceFixRound2Result.markdown);
+  if (surfaceLaborFix.fixedCount > 0) surfaceFixRound2Result.markdown = surfaceLaborFix.markdown;
+  const surfaceSelfFix = fixSelfUnderminingCandidates(surfaceFixRound2Result.markdown);
+  if (surfaceSelfFix.fixedCount > 0) surfaceFixRound2Result.markdown = surfaceSelfFix.markdown;
+  const surfaceEmptyRespFix = fixEmptyScoringResponses(surfaceFixRound2Result.markdown);
+  if (surfaceEmptyRespFix.fixedCount > 0) surfaceFixRound2Result.markdown = surfaceEmptyRespFix.markdown;
+  if (surfaceFixRound2Result.markdown !== finalMarkdown) {
+    finalMarkdown = surfaceFixRound2Result.markdown;
+    await recomputeFinalValidationBundle();
+  }
+  // B2 目录与正文一致性兜底：目录按最终正文 H2/H3 实际结构重建（fixTocFromBody 无改动时零成本），
+  // 修复后再重算校验组，保证交付门禁与评分基于目录一致的最终成稿
+  const tocConsistencyFix = fixTocFromBody(finalMarkdown);
+  if (tocConsistencyFix.fixedCount > 0) {
+    finalMarkdown = tocConsistencyFix.markdown;
+    await recomputeFinalValidationBundle();
+  }
   const reviewChecklist = buildDocumentReviewChecklist({ exportGate: finalExportGate, qualityReport, repairStrategies });
   const finalQualitySummary = qualitySeveritySummary(validationIssues);
   // 4.12.12：质量口径对齐——最终质量汇总须先累加进 diagnostics 再构建 telemetry（此前 telemetry
@@ -907,7 +999,9 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     }
     return stage;
   });
-  finalStages.push(displayStage({ type: 'validation', roleId: 'agent-final-gate', status: finalExportGate.passed ? 'success' : 'failed', message: finalExportGate.passed ? 'Agent 最终门禁通过' : `Agent 最终门禁阻断 ${blockingCount} 个问题`, details: finalExportGate.blockingIssues.slice(0, 12).map(issue => issue.message) }, { subtitle: 'Agent 最终门禁' }));
+  // 门禁 details 全量持久化：阻断问题逐条落盘不截断（第九次回归实测 39 条阻断只落 12 条，
+  // 生成后审查无法按执行阶段复盘全部阻断根因；检测器侧已各自限幅、阻断总数有界，无膨胀风险）
+  finalStages.push(displayStage({ type: 'validation', roleId: 'agent-final-gate', status: finalExportGate.passed ? 'success' : 'failed', message: finalExportGate.passed ? 'Agent 最终门禁通过' : `Agent 最终门禁阻断 ${blockingCount} 个问题`, details: finalExportGate.blockingIssues.map(issue => issue.message) }, { subtitle: 'Agent 最终门禁' }));
   const confidenceBelowFloor = qualityReport.deliveryProbability < 70;
   finalStages.push(displayStage({ type: 'validation', roleId: 'document-delivery-score', status: qualityReport.passed ? 'success' : finalExportGate.passed ? 'skipped' : 'failed', message: finalExportGate.passed && !qualityReport.passed ? `${qualityReport.summary}${confidenceBelowFloor ? '；置信度低于 70%，建议完成续修后再交付归档' : '（导出门禁已通过，作为后续优化建议归档）'}` : qualityReport.summary, details: confidenceBelowFloor && finalExportGate.passed ? [...qualityReport.actions, '续修建议：交付置信度低于 70% 门槛，建议按交付复核清单补齐短板维度后重新生成或续修。'] : qualityReport.actions }, { subtitle: '交付评分' }));
   finalStages.push(displayStage({ type: 'validation', roleId: 'document-professional-score', status: professionalScore.grade === '专业' || professionalScore.grade === '良好' ? 'success' : 'skipped', message: professionalScore.summary, details: [...professionalScore.dimensions.map(dimension => `${dimension.label}：${dimension.score} 分（${dimension.detail}）`), ...professionalScore.topIssues.map(issue => `待修复：${issue}`)] }, { subtitle: '专业度评分' }));

@@ -167,7 +167,7 @@ function factTraceLine(fact: DocumentFact, index: number) {
 }
 
 /** 构建结构化蓝图：与 buildDocumentBlueprintContext 同源数据，供章级 scoped 上下文精确裁剪 */
-export function buildDocumentBlueprintStructure(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string; referenceLines?: string[]; scopeConflicts?: NumericScopeConflict[] }): DocumentBlueprintStructure {
+export function buildDocumentBlueprintStructure(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string; scopeConflicts?: NumericScopeConflict[] }): DocumentBlueprintStructure {
   const coreFactsResult = selectCoreFacts(input.factsModel);
   const coreFacts = coreFactsResult.selected;
   const droppedFactNote = coreFactsResult.dropped.length > 0
@@ -202,7 +202,6 @@ export function buildDocumentBlueprintStructure(input: { template: DocumentTempl
     systemConstraintLine('跨章一致性要求：所有章节必须共用同一套工期、质量、范围、资源和验收口径；不得在不同章节写出相互矛盾的项目基础信息。'),
     systemConstraintLine('总述数据使用约束：可信基础事实主表中的工程地点、建设规模（总建筑面积）、计划工期、改造范围等总述数据，只在项目概况/工程概况类章节集中交代；其他章节不得以"本项目为……"开头复述完整概况段，确需数据支撑时只引用所需的具体数字。'),
     ...(input.scopeConflicts?.length ? [`【源级口径冲突裁决（最高优先级约束）】资料文件中存在同口径数值冲突，必须按下述裁决执行：\n${numericScopeConflictLines(input.scopeConflicts).join('\n')}`] : []),
-    ...(input.referenceLines?.length ? [`同类工程质量参考（软性参考，事实仍以知识库证据为准）：\n${input.referenceLines.join('\n')}`] : []),
   ].filter(Boolean);
   // 覆盖矩阵与确认矩阵是"章→事实域索引"性质的全貌概览（体积小），章级上下文保留全量，
   // 便于 LLM 理解整体结构而不会引入他章正文事实
@@ -245,7 +244,7 @@ export function composeScopedProjectContext(input: { constructionOrgContext?: st
   return [input.constructionOrgContext, input.scopedBlueprint].filter(Boolean).join('\n\n');
 }
 
-export function buildDocumentBlueprintContext(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string; referenceLines?: string[]; scopeConflicts?: NumericScopeConflict[] }) {
+export function buildDocumentBlueprintContext(input: { template: DocumentTemplate; chapters: DocumentTemplateChapter[]; factsModel: BlueprintFactsModel; requirement?: string; scopeConflicts?: NumericScopeConflict[] }) {
   // 去重后按重要性评分排序，保留最重要的核心事实（而非静默截断）
   const coreFactsResult = selectCoreFacts(input.factsModel);
   const coreFacts = coreFactsResult.selected;
@@ -277,7 +276,6 @@ export function buildDocumentBlueprintContext(input: { template: DocumentTemplat
     systemConstraintLine('跨章一致性要求：所有章节必须共用同一套工期、质量、范围、资源和验收口径；不得在不同章节写出相互矛盾的项目基础信息。'),
     systemConstraintLine('总述数据使用约束：可信基础事实主表中的工程地点、建设规模（总建筑面积）、计划工期、改造范围等总述数据，只在项目概况/工程概况类章节集中交代；其他章节不得以"本项目为……"开头复述完整概况段，确需数据支撑时只引用所需的具体数字。'),
     ...(input.scopeConflicts?.length ? [`【源级口径冲突裁决（最高优先级约束）】资料文件中存在同口径数值冲突，必须按下述裁决执行：\n${numericScopeConflictLines(input.scopeConflicts).join('\n')}`] : []),
-    ...(input.referenceLines?.length ? [`同类工程质量参考（软性参考，事实仍以知识库证据为准）：\n${input.referenceLines.join('\n')}`] : []),
     `章节专业任务卡：\n${chapterLines.join('\n')}`,
     `章节实施方案：\n${executionPlans.join('\n')}`,
     ...droppedFactNote,

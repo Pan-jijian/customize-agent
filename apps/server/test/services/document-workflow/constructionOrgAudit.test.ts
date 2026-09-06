@@ -5,7 +5,7 @@ vi.mock('@customize-agent/knowledge', () => {
   return { LocalTransformersEmbeddingProvider };
 });
 
-import { constructionOrgProfessionalAuditIssues, duplicateParagraphIssues, fillerParagraphIssues, processParameterDensityIssues, sectionCardStructureIssues, tableCompletenessIssues } from '@/services/document-workflow/constructionOrgAudit';
+import { constructionOrgProfessionalAuditIssues, duplicateParagraphIssues, fillerParagraphIssues, fillerSentenceTargets, processParameterDensityIssues, sectionCardStructureIssues, tableCompletenessIssues } from '@/services/document-workflow/constructionOrgAudit';
 import type { DocumentDraftChapter } from '@/services/document-workflow/types';
 
 const chapter = (title: string, content: string): DocumentDraftChapter => ({ id: title, title, content, evidence: [], missingFacts: [] });
@@ -87,6 +87,45 @@ describe('fillerParagraphIssues（废话段落模式检测，正则召回+语义
   });
 });
 
+describe('fillerSentenceTargets（套话句修复锚点提取：检测定位=修复定位）', () => {
+  it('套话句定位：输出命中句原文与小节归属（模板化修复闭环锚点源）', async () => {
+    const content = '#### 管理措施\n本小节围绕现场管理展开，结合绑定项目资料。\n具体做法：每日巡查并记录。';
+    const targets = await fillerSentenceTargets([chapter('管理措施', content)], embedDocuments);
+    expect(targets).toHaveLength(1);
+    expect(targets[0].sentence).toContain('本小节围绕现场管理展开');
+    expect(targets[0].section).toBe('管理措施');
+    expect(targets[0].chapterId).toBe('管理措施');
+  });
+
+  it('具体量化措施句不进入锚点清单（负例零误杀）', async () => {
+    const content = '#### 质量控制\n每道工序完成后由质检员实测实量并记录数据，验收合格后进入下道工序。';
+    expect(await fillerSentenceTargets([chapter('质量控制', content)], embedDocuments)).toHaveLength(0);
+  });
+
+  it('每章锚点限幅 12 句（修复输入有界）', async () => {
+    const fillerSentences = [
+      '本小节围绕现场管理展开，结合绑定项目资料。',
+      '实施前应完成资料核对、技术交底和作业条件确认。',
+      '交底覆盖率按100%控制。',
+      '关键问题在24小时内形成整改责任。',
+      '按施工准备→过程实施→检查验收→问题整改→资料归档的闭环组织。',
+      '执行日巡查、周复核和节点验收制度。',
+      '一般问题7日内闭环。',
+      '确保与总体施工部署、工期计划和验收要求保持一致。',
+      '结合现场实际情况合理组织安排。',
+      '严格执行国家现行有关规范标准。',
+      '做到文明施工安全生产。',
+      '确保工程质量安全。',
+      '建立健全管理体系并落实制度。',
+    ];
+    const content = `#### 管理措施\n${fillerSentences.join('\n')}`;
+    const targets = await fillerSentenceTargets([chapter('管理措施', content)], embedDocuments);
+    expect(targets.length).toBeGreaterThan(0);
+    expect(targets.length).toBeLessThanOrEqual(12);
+    expect(new Set(targets.map(target => target.sentence)).size).toBe(targets.length);
+  });
+});
+
 describe('processParameterDensityIssues（工艺参数密度）', () => {
   const workPackageChapter = (heading: string, body: string) => chapter('主要分部分项工程施工方案', `### ${heading}\n${body}`);
 
@@ -135,7 +174,7 @@ describe('sectionCardStructureIssues（分部分项内容要素完整性）', ()
     expect(sectionCardStructureIssues([chapter('工程概况', '### 工程概况\n内容。')])).toHaveLength(0);
   });
 
-  it('盲区根治：### 方案节下 #### 子包缺内容要素应报 warning（历史盲区：extractSectionBlocks 把 #### 行切为新块导致 subPackages 恒空）', () => {
+  it('盲区根治：### 方案节下 #### 子包缺内容要素应报 blocker（历史盲区：extractSectionBlocks 把 #### 行切为新块导致 subPackages 恒空）', () => {
     const content = [
       '### 主要分部分项工程施工方案',
       '#### 屋面防水施工',
@@ -146,7 +185,7 @@ describe('sectionCardStructureIssues（分部分项内容要素完整性）', ()
     ].join('\n');
     const issues = sectionCardStructureIssues([chapter('主要分部分项工程施工方案', content)]);
     expect(issues).toHaveLength(1);
-    expect(issues[0]?.level).toBe('warning');
+    expect(issues[0]?.severity).toBe('blocker');
     expect(issues[0]?.message).toContain('内容要素不全');
   });
 

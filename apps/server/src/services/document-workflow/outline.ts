@@ -3,8 +3,15 @@ import type { DocumentTemplate, DocumentTemplateChapter } from './types';
 import { CN_NUMERAL_RE } from './constants';
 import { violatesConfiguredChapterTitleFilter, violatesConfiguredChapterTitleForbiddenFilter } from './templateStore';
 
+/** 复选框/对勾/圈符：招标文件选项符号，不属合法中文小节标题字符（评分报告 P5：目录「8.2 ☑电子保函」
+ * 串章回归根因——投标保证金条款原文连同复选框符号被 LLM 带入小节标题）；
+ * 大纲提取/显式章节/规划标题三通道统一剥离（单一来源，禁止各文件私造第二份符号表） */
+function stripCheckboxSymbols(title: string) {
+  return title.replace(/[☑✓✔☐□☒○●◉◇◆]/gu, '');
+}
+
 function cleanOutlineTitle(title: string) {
-  let cleaned = title.trim();
+  let cleaned = stripCheckboxSymbols(title.trim());
   let prev = '';
   while (cleaned !== prev) {
     prev = cleaned;
@@ -203,7 +210,7 @@ export function extractExplicitOutlineFromSources(sources: Array<{ text?: string
 }
 
 export function displayChapterTitle(title: string) {
-  let cleaned = title.replace(/^#+\s*/u, '').trim();
+  let cleaned = stripCheckboxSymbols(title.replace(/^#+\s*/u, '').trim());
   let prev = '';
   while (cleaned && cleaned !== prev) {
     prev = cleaned;

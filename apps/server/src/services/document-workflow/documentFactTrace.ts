@@ -1,4 +1,4 @@
-import type { BoqRowTrace, DocumentFact, DocumentFactTrace, DocumentFactsModel, ValidationIssue } from './types';
+import type { BoqRowTrace, DocumentDraftChapter, DocumentFact, DocumentFactTrace, DocumentFactsModel, ValidationIssue } from './types';
 import { stringifyFactValue } from './utils';
 
 function normalize(value: string) {
@@ -141,8 +141,17 @@ export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsMod
     const unitCol = headers.findIndex(h => /单位/u.test(h));
 
     for (const row of table.rows) {
-      const itemName = nameCol >= 0 ? (row[nameCol] || '') : '';
-      const itemCode = codeCol >= 0 ? (row[codeCol] || '') : '';
+      let itemName = nameCol >= 0 ? (row[nameCol] || '') : '';
+      let itemCode = codeCol >= 0 ? (row[codeCol] || '') : '';
+      // 行内形状识别兜底（与 boqPlacementIssues 同源）：清单表证据丢失表头行时（headers 是首行数据），
+      // 用清单编码形态定位编码列，编码后一格即项目名称列（清单表列序：序号|项目编码|项目名称|项目特征|单位|工程量）
+      if (!itemName && !itemCode) {
+        const codeIdx = row.findIndex(cell => /^\d{10,12}$/u.test(cell) || /^[A-Z]{1,3}\d{8,}$/u.test(cell));
+        if (codeIdx >= 0) {
+          itemCode = row[codeIdx] || '';
+          itemName = row[codeIdx + 1] || '';
+        }
+      }
       const quantity = qtyCol >= 0 ? (row[qtyCol] || '') : '';
       const unit = unitCol >= 0 ? (row[unitCol] || '') : '';
 
@@ -191,4 +200,66 @@ export function boqRowTraceIssues(traces: BoqRowTrace[], options: { maxIssues?: 
   }
 
   return issues;
+}
+
+// ═══════ 清单分项 → 施工方法章覆盖义务（评分报告 P2/P4 修复） ═══════
+// 根因：boqPlacementIssues 只看总落位率（60% 阈值），公厕/过路涵/污水管网/排水沟/沟塘清淤/小菜园类
+// 专项分项被土方/道路等大宗条目稀释漏检——分项整体缺失不影响总落位率达标。
+// 本检测器按实体词判定覆盖义务：噪声行（计价类）与纯工序行（动词引导的清单行是分项内部工序）不产生义务，
+// 组名携带的任一实体词在施工方法类章节正文零命中 → 该分项整体缺失 → error/blocker 进修复循环。
+
+/** 施工方法章覆盖义务的清单分项实体词（乡村/市政人居环境分项 + 通用专业实体词） */
+const DIVISION_ENTITY_RE = /公厕|厕所|过路涵|涵洞|涵管|污水|排水沟|水沟|清淤|沟塘|小菜园|菜园|菜地|花池|树池|挡墙|护栏|路灯|检查井|化粪池|泵站|生态池|生态塘|护坡|驳岸|栈道|步道|管网|管道|道路|铺装|绿化|景观|基础|结构|防水|屋面|外墙|内墙|地面|门窗|栏杆|电梯|电气|给水|排水|消防|通风|空调|智能化|幕墙|基坑/u;
+/** 宽泛实体词：施工方法章几乎必然出现（基础施工/道路工程/给排水系统等语境词），词面命中不足以证明
+ * 对应清单分项已覆盖——不产生分项级覆盖义务（P4 修复：「排水沟砌筑」若用宽泛词「排水」判定会被
+ * 方法章「排水坡度」类字样误判已覆盖致漏检，宽泛词只作词面线索不作覆盖证据） */
+const BROAD_DIVISION_ENTITY_RE = /^(?:管网|管道|道路|铺装|绿化|景观|基础|结构|防水|屋面|外墙|内墙|地面|门窗|栏杆|电梯|电气|给水|排水|消防|通风|空调|智能化|幕墙|基坑)$/u;
+/** 公厕类同义形式：清单写「公厕」正文写「公共厕所」属同义覆盖（词面包含判定兜不住的反向形态）；
+ * 菜地类同义形式：清单「菜地整治」正文写「小菜园」属同义覆盖 */
+const ENTITY_ALIASES: Record<string, string[]> = { '公厕': ['公共厕所', '厕所'], '厕所': ['公厕', '公共厕所'], '菜地': ['菜园', '小菜园'], '菜园': ['菜地'], '小菜园': ['菜地'] };
+/** 纯工序行（动词引导的清单行属分项内部工序，不单独产生覆盖义务） */
+const PURE_PROCESS_NAME_RE = /^(?:挖|回填|运|运输|拆除|清理|浇筑|绑扎|安装|铺设|砌筑|抹灰|刷|喷|摊铺|碾压|夯实|整平|找平|支模|搭设|检测|试验|防腐|除锈)/u;
+/** 计价类噪声行（与 billItemSkeletonNames 同口径） */
+const BILL_ENTITY_NOISE_RE = /计价|费用|税金|规费|暂列|暂估|合计|汇总|小计|措施项目|其他项目|税金项目/u;
+
+/** 清单分项覆盖缺失检测（评分报告 P2 公厕整体遗漏 / P4 施工方法分项不全） */
+export function boqDivisionCoverageIssues(markdown: string, chapters: DocumentDraftChapter[], factsModel: DocumentFactsModel): ValidationIssue[] {
+  const tables = factsModel.tables || [];
+  if (tables.length === 0) return [];
+  const methodChapters = chapters.filter(chapter => /施工方法|施工方案|施工工艺|主要施工内容|分部分项/u.test(chapter.title));
+  const methodText = methodChapters.map(chapter => chapter.content || '').join('\n');
+  // 无施工方法类章节时不产生覆盖义务（义务锚定在该章，章不存在则不追溯）
+  if (!methodText) return [];
+  const normalizedMethod = normalize(methodText);
+  const traces = buildBoqRowTraces(markdown, factsModel);
+  const missing: string[] = [];
+  const seen = new Set<string>();
+  for (const trace of traces) {
+    const name = (trace.itemName || '').trim();
+    if (!name || BILL_ENTITY_NOISE_RE.test(name) || PURE_PROCESS_NAME_RE.test(name)) continue;
+    const entities = [...name.matchAll(new RegExp(DIVISION_ENTITY_RE.source, 'gu'))].map(match => match[0]);
+    if (entities.length === 0) continue;
+    // 宽泛词不产生覆盖义务：仅保留专有实体词作覆盖证据（防「排水」类通用词串染误判覆盖）
+    const strongEntities = entities.filter(entity => !BROAD_DIVISION_ENTITY_RE.test(entity));
+    if (strongEntities.length === 0) continue;
+    // 任一专有实体词在施工方法章命中（含公厕/公共厕所同义形式）即视为该分项已覆盖
+    const hitInMethod = (entity: string) => normalizedMethod.includes(normalize(entity))
+      || (ENTITY_ALIASES[entity] || []).some(alias => normalizedMethod.includes(normalize(alias)));
+    if (strongEntities.some(hitInMethod)) continue;
+    const key = name.slice(0, 12);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    missing.push(`${name.slice(0, 30)}${trace.quantity ? ` ${trace.quantity}${trace.unit}` : ''}`);
+  }
+  if (missing.length === 0) return [];
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'evidence_coverage',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    chapterId: methodChapters[0]?.id,
+    message: `施工方法章分项覆盖缺失：${missing.slice(0, 6).join('；')}${missing.length > 6 ? ` 等共 ${missing.length} 个清单分项` : ''}`,
+    suggestion: '施工方法章必须逐项覆盖工程量清单中的全部分部分项（含公厕/过路涵/污水管网/排水沟/沟塘清淤/小菜园等专项分项）：为每个缺失分项补齐施工方法小节（施工概况/施工流程/施工方法三要素齐全），禁止只写道路、铺装、绿化等大类而遗漏清单独有分项。',
+  }];
 }

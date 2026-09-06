@@ -374,6 +374,18 @@ export interface CanonicalFactModel {
   scopeConflicts: NumericScopeConflict[];
 }
 
+/** 规格-部位权威映射条目：同一规格维度（如混凝土强度等级）在不同部位的不同规格，
+ *  是「同物多规格按分部分项区分使用」的确定性权威依据（来源：清单行级条目→特征描述） */
+export interface SpecPlacement {
+  location: string;
+  spec: string;
+  quantity?: string;
+  sourceFile: string;
+}
+
+/** 规格维度标签（混凝土强度等级/砂浆强度等级/…） → 部位-规格列表 */
+export type SpecAuthorityMap = Record<string, SpecPlacement[]>;
+
 export interface DocumentFactsModel {
   project: DocumentFact[];
   schedule: DocumentFact[];
@@ -388,6 +400,10 @@ export interface DocumentFactsModel {
   specifications: DocumentFact[];
   schemaFacts: Record<string, DocumentFact[]>;
   factIndex: EvidenceFactIndex;
+  /** 清单行级条目事实（条目名[部位]→特征描述[规格]→工程量），行级提取直接产物 */
+  billItemFacts?: DocumentFact[];
+  /** 规格-部位权威映射：同物多规格按部位区分使用的确定性依据 */
+  specAuthorityMap?: SpecAuthorityMap;
   missing: string[];
   conflicts: string[];
   canonical?: CanonicalFactModel;

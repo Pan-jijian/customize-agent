@@ -1,13 +1,13 @@
 import { closedLoopDensityIssues, plannedAutoSpecGateIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
-import { boqRowTraceIssues, buildBoqRowTraces } from './documentFactTrace';
+import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces } from './documentFactTrace';
 import { chapterDependencyIssues, documentDeliveryScoreIssues, evidenceUsageCoverageIssues, paragraphGenericIssues } from './documentDeliveryReport';
 import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues } from './markdownComposer';
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
 import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgDivisionSectionIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
-import { ambiguousEitherOrIssues, areaArithmeticIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, closurePhraseDensityCapIssues, collapseRepeatedWords, commercialDataInBodyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, fabricatedAwardIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, paragraphOpeningRepeatIssues, repeatedWordIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, stripCommercialDataSentences, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, areaArithmeticIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, closurePhraseDensityCapIssues, collapseRepeatedWords, commercialDataInBodyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, equipmentEntryTimingIssues, excavationDepthLockIssues, excavationHazardClassificationIssues, extractSupportSystemAuthority, fabricatedAwardIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, paragraphOpeningRepeatIssues, repeatedWordIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCommercialDataSentences, supportFormFactConsistencyIssues, supportSystemConflictIssues } from './documentIntegrityChecks';
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { normalizeChapterTitleLine, requirementsCoverageIssues, tenderRequirementCheckItems, tenderRequirementSemanticQuery } from './tenderRequirements';
 import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
@@ -146,12 +146,25 @@ export async function buildStandardFinalValidationIssues(input: {
     ...nodeScheduleConsistencyIssues(input.markdown),
     // h13：跨节数值口径冲突（XPS/垫层/变压器/模板周转/砌块/灭火器/潜水泵/急救箱确定性锚点）
     ...crossSectionNumericConflictIssues(input.markdown),
+    // 4.18.10 清单红线权威比对（丰乐镇第五版实测）：绿化养护期（P1 正文一年 vs 清单两年）/
+    // 路灯数量（P3 正文 20 套 vs 清单 118 套）——清单权威单向判定，正文矛盾即 blocker；
+    // 无对应清单条目不检测（不误伤无清单项目），分型号明细按总数口径与清单比对
+    ...greeningMaintenanceMismatchIssues(input.markdown, input.factsModel),
+    ...streetLightCountMismatchIssues(input.markdown, input.factsModel),
+    // F14：规格错位终检兑底（正文规格 vs 清单权威按部位比对；权威映射缺失时静默跳过）
+    ...specLocationMismatchIssues(input.markdown, input.factsModel.specAuthorityMap),
     // h13：桩基表述残留（地基与基础无桩基工序但全文残留桩基表述）
     ...foundationFormResidueIssues(input.markdown),
     // h14：关键设计决策两可表述阻断（评分报告 P4「桩基（或独立基础/筏板基础按图纸实施）」）
     ...ambiguousEitherOrIssues(input.markdown),
     // h14：基坑深度数值锁定（评分报告 P1 资料有 5.85m 正文 0 处，危大分级失去依据）
     ...excavationDepthLockIssues(input.markdown),
+    // 4.19：危大分级判定交叉质检（资料深度 ≥3m 必标危大、≥5m 必标超危大+专家论证）
+    ...excavationHazardClassificationIssues(input.markdown, input.factsModel),
+    // 4.19：支护形式事实一致性（资料外支护体系词阻断 + 资料支护形式反向完整性落地）
+    ...supportFormFactConsistencyIssues(input.markdown, input.factsModel),
+    // 4.19：设备进场时间合理性（尾期进场荒谬 + 基坑阶段设备工序倒挂）
+    ...equipmentEntryTimingIssues(input.markdown, input.factsModel),
     // h14：奖项白名单（正文具名奖项必须来自招标要求/绑定资料，杜撰奖项即阻断）
     ...fabricatedAwardIssues(input.markdown, input.factsModel, input.tenderRequirements),
     // h17：投标人资格内容串章（评分报告 P1：营业执照/资质证书/安全生产许可证小节属资格文件内容，
@@ -166,7 +179,7 @@ export async function buildStandardFinalValidationIssues(input: {
     ...duplicateParagraphIssues(input.markdown),
     // h16：人材机三合一章结构层级（第五章层级错位缺陷：材/机保障体系降级 H4 挂在 5.1 下）
     ...resourceTriadSectionHierarchyIssues(input.markdown),
-    ...await supportSystemConflictIssues(input.markdown),
+    ...await supportSystemConflictIssues(input.markdown, extractSupportSystemAuthority(input.factsModel)),
     ...dangerousListConsistencyIssues(input.markdown),
     ...await sixHundredPercentCoverageIssues(input.markdown),
     ...await selfUnderminingCandidateIssues(input.markdown),
@@ -236,5 +249,8 @@ export async function buildStandardFinalValidationIssues(input: {
     // round-18 E11：安徽省属地适配与政策合规（创优目标/四节一环保量化/工伤保险），
     // 排在末尾使修复循环 slice 截断时让位高优先级 blocker；round-20 S1 已加语义判定（async）
     ...await localAdaptationKeywordIssues(input.markdown, input.factsModel),
+    // P2/P4 清单分项覆盖义务（评分报告公厕/过路涵/污水管网/排水沟/沟塘清淤/小菜园整体缺失）：
+    // 排在末位与 E11 同原则——让位高优先级 blocker，修复循环截断时不被优先处理
+    ...boqDivisionCoverageIssues(input.markdown, input.chapters, input.factsModel),
   ];
 }

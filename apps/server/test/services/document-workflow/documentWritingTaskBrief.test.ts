@@ -157,14 +157,16 @@ describe('buildWritingTaskBrief', () => {
       tenderRequirements: makeTenderRequirements([{ text: '质量标准：确保黄山杯' }]),
     });
     expect(brief.documentType).toBe('施工组织设计');
-    // 固定 5 条 + 前附表响应 + 招标硬性要求 + 规模事实卡 + 可信基础事实卡 = 9 条
-    expect(brief.globalWritingFocus).toHaveLength(9);
+    // 固定 5 条 + B5 属地创优 + B5 表格一致性 + 前附表响应 + 招标硬性要求 + 规模事实卡 + 可信基础事实卡 = 11 条
+    expect(brief.globalWritingFocus).toHaveLength(11);
     expect(brief.globalWritingFocus[0]).toContain('模板化空话');
-    expect(brief.globalWritingFocus[5]).toContain('投标人须知前附表响应条款');
-    expect(brief.globalWritingFocus[5]).toContain('确保黄山杯');
-    expect(brief.globalWritingFocus[7]).toContain('项目规模事实卡');
-    expect(brief.globalWritingFocus[7]).toContain('建设规模=总建筑面积 28570.36㎡');
-    expect(brief.globalWritingFocus[8]).toContain('项目可信基础事实');
+    expect(brief.globalWritingFocus[5]).toContain('属地创优目标');
+    expect(brief.globalWritingFocus[6]).toContain('表格数据一致性');
+    expect(brief.globalWritingFocus[7]).toContain('投标人须知前附表响应条款');
+    expect(brief.globalWritingFocus[7]).toContain('确保黄山杯');
+    expect(brief.globalWritingFocus[9]).toContain('项目规模事实卡');
+    expect(brief.globalWritingFocus[9]).toContain('建设规模=总建筑面积 28570.36㎡');
+    expect(brief.globalWritingFocus[10]).toContain('项目可信基础事实');
   });
 
   it('规模事实卡只收录规模口径事实（前 8 条），非规模事实不进卡', () => {
@@ -192,7 +194,7 @@ describe('buildWritingTaskBrief', () => {
       templateName: '某项目施工组织设计',
     });
     expect(brief.documentType).toBe('施工组织设计');
-    expect(brief.globalWritingFocus).toHaveLength(6); // 固定 5 条 + 招标硬性要求
+    expect(brief.globalWritingFocus).toHaveLength(8); // 固定 5 条 + B5 属地创优 + B5 表格一致性 + 招标硬性要求
     const chapter = brief.chapters[0];
     expect(chapter.drawingTargets).toEqual([]);
     expect(chapter.gaps).toEqual([]);

@@ -415,109 +415,18 @@ export function buildTypeProfiles(): ReferenceTypeProfile[] {
   return profiles.sort((a, b) => b.sourceCount - a.sourceCount);
 }
 
-// ═══════ 蓝图注入（T5）：生成过程中把同类工程画像作为软性质量参考 ═══════
-
-/**
- * 生成「同类工程质量参考」段落（注入文档蓝图，随章节生成与审查全链路生效）。
- * 防负面干扰设计：
- * - 只按"形"给软性参考，明确"项目专属数字与参数仍以知识库证据为准"，与事实红线同向；
- * - 量化目标按本项目目标字数与参考样本平均字数折减，避免小项目被大工程典型值误导；
- * - 用户上传的每份参考均视为优质样本，1 份样本同样给出量化目标与结构参考；
- * - 无同类型样本时返回空数组，不注入任何内容。
- */
-export function referenceQualityTargetLines(input: { templateName: string; chapterTitles: string[]; requirement?: string; targetWords: number }): string[] {
-  const type = suggestProjectType([input.templateName, ...input.chapterTitles, input.requirement].filter(Boolean).join(' '));
-  const ready = listTemplateReferencesByType(type).filter(item => item.status === 'ready' && item.qualityProfile);
-  if (ready.length === 0) return [];
-  const profiles = ready.map(item => item.qualityProfile!);
-  const sourceCount = ready.length;
-  const avgWords = average(profiles.map(item => item.wordCount));
-  const scale = avgWords > 0 ? Math.max(0.3, Math.min(2, input.targetWords / avgWords)) : 1;
-  const headingGroups = profiles.map(item => (item.headingStructure || []).map(title => ({ value: title })));
-  const headingCounts = mergeCounts(headingGroups);
-  const frequentHeadings = headingCounts.filter(item => item.count >= Math.ceil(sourceCount / 2)).slice(0, 12);
-  const paramGroups = profiles.map(item => (item.paramTokens || []).map(token => ({ value: token.token, weight: token.count })));
-  const paramCounts = mergeCounts(paramGroups);
-  const lines: string[] = [
-    `同类工程（${type}）参考特征（来自 ${sourceCount} 份优秀入围文件画像，仅供软性参考；任何项目专属数字与参数仍必须以知识库证据为准，为对齐特征而编造参数、虚构表格或堆砌无意义内容严格禁止）：`,
-  ];
-  const aggregated = aggregateProfileMetrics(profiles);
-  const paramDensity = aggregated.paramDensity.avg;
-  const arrowChain = aggregated.arrowChainCoverage.avg;
-  const tablesPerSection = aggregated.sectionCount.avg > 0 ? aggregated.tableCount.avg / aggregated.sectionCount.avg : 0;
-  const avgSectionWords = aggregated.avgSectionWords.avg;
-  lines.push(`- 工艺参数密度参考：约 ${(paramDensity * scale).toFixed(1)} 个/千字（同类工程画像均值 ${paramDensity.toFixed(1)}，已按本项目篇幅折减）；参数应来自已确认事实与专业知识，不得编造。`);
-  // 工序链覆盖率参考与对标评分同口径取 8% 下限：参考样本多为扫描/简版文件该特征偏弱，
-  // 直接注入真实均值会把生成侧软目标拉到门禁线以下（十度实测：真实样本均值 1.4%，生成侧门禁要求 8%）
-  const arrowChainFloor = Math.max(arrowChain, 0.08);
-  lines.push(`- 工序顺序表达覆盖率参考：含工序顺序表达（顺序词叙述/编号步骤/有序无序列表/箭头链任一形式，形式由模型自然选择）的段落占比不低于 ${Math.round(arrowChainFloor * 100)}%（同类工程画像均值 ${Math.round(arrowChain * 100)}%，已按生成侧门禁取下限）；施工与流程小节宜用工序顺序表达串联工艺步骤。`);
-  lines.push(`- 表格参考：同类工程平均每章约 ${tablesPerSection.toFixed(1)} 张正式表格（在事实允许的前提下合理配置）。`);
-  lines.push(`- 章节体量参考：同类工程平均约 ${Math.round(aggregated.sectionCount.avg)} 章、平均每章约 ${avgSectionWords} 字；实际以模板章节与篇幅目标为准。`);
-  if (frequentHeadings.length > 0) {
-    lines.push(`- 典型章节结构参考（出现于半数以上样本，仅供结构参考，不强制）：${frequentHeadings.map(item => item.value).join('、')}`);
-  }
-  if (paramCounts.length > 0) {
-    lines.push(`- 高频工艺参数种类参考：${paramCounts.slice(0, 12).map(item => item.value).join('、')}（同类型优秀样本中出现频次最高的工艺参数词条，施工方法小节可按专业实际与通用规范自然使用这些参数种类；项目专属数值必须来自知识库证据，不得为凑密度编造）。`);
-  }
-  return lines;
-}
-
-/**
- * 写法骨架切片（方案4/E5）：画像量化统计只告诉生成器“参数密度要多少”，
- * 没告诉它“范文逐分项怎么展开才像范文”。本函数从画像结构数据聚合“写法骨架”描述——
- * 章节推进序列、分层展开深度、方案章节典型组织与分部分项内容要素展开模式（4.17.9 呈现形式不限）。
- * 只描述展开模式，不复制样本原文数值与句子，避免参考文件成为事实污染源。
- */
-export function referenceWritingSkeletonLines(input: { templateName: string; chapterTitles: string[]; requirement?: string }): string[] {
-  const type = suggestProjectType([input.templateName, ...input.chapterTitles, input.requirement].filter(Boolean).join(' '));
-  const ready = listTemplateReferencesByType(type).filter(item => item.status === 'ready' && item.qualityProfile);
-  if (ready.length === 0) return [];
-  const profiles = ready.map(item => item.qualityProfile!);
-  const half = Math.ceil(ready.length / 2);
-  // 章节推进骨架：出现于半数以上样本的一级章节标题，按样本中平均出现位置排序 → 典型章序（非频次序）
-  const positionSums = new Map<string, { sum: number; count: number }>();
-  const titleCounts = new Map<string, number>();
-  for (const profile of profiles) {
-    const seenInFile = new Set<string>();
-    (profile.headingStructure || []).forEach((title, index) => {
-      titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
-      if (seenInFile.has(title)) return;
-      seenInFile.add(title);
-      const entry = positionSums.get(title) || { sum: 0, count: 0 };
-      entry.sum += index;
-      entry.count += 1;
-      positionSums.set(title, entry);
-    });
-  }
-  const skeletonHeadings = [...titleCounts.entries()]
-    .filter(([, count]) => count >= half)
-    .sort((a, b) => {
-      const pa = positionSums.get(a[0])!;
-      const pb = positionSums.get(b[0])!;
-      return pa.sum / pa.count - pb.sum / pb.count;
-    })
-    .map(([title]) => title)
-    .slice(0, 10);
-  const totalSections = profiles.reduce((sum, item) => sum + item.sectionCount, 0);
-  const totalSubsections = profiles.reduce((sum, item) => sum + (item.subsectionCount || 0), 0);
-  const totalSubitems = profiles.reduce((sum, item) => sum + (item.subitemCount || 0), 0);
-  const lines: string[] = ['- 写法骨架参考（同类优秀样本的展开模式，仅供结构参照；样本中的任何数值与原文句子都不得复制）：'];
-  if (skeletonHeadings.length >= 3) {
-    lines.push(`- 章节推进骨架：${skeletonHeadings.join(' → ')}（出现于半数以上样本的一级章节按典型顺序排列，仅作结构参照，不强制）。`);
-  }
-  if (totalSections > 0) {
-    lines.push(`- 分层展开深度：同类样本平均每章约 ${(totalSubsections / totalSections).toFixed(1)} 个二级小节、${(totalSubitems / totalSections).toFixed(1)} 个三级子目——范文把方案分层展开到具体措施条目，而不是整段综述概括。`);
-  }
-  const schemeTitles = skeletonHeadings.filter(title => /施工方案|施工方法|施工内容|施工部署|分部分项/u.test(title)).slice(0, 4);
-  if (schemeTitles.length > 0) {
-    lines.push(`- 方案章节典型组织：同类样本中方案类章节以「${schemeTitles.join('」「')}」等标题独立成章，逐分项展开，不并入项目概况章节。`);
-  }
-  // 分部分项展开模式骨架：常见组织方式为按“作业对象与工程量→工序安排→施工方法”三要素逐分项展开（呈现形式不限，作为范文印证）
-  lines.push('- 分部分项展开模式：同类样本常见按“施工概况（作业对象、部位、工程量）→工艺流程（工序顺序表达串联关键工序）→施工方法（工具机具、材料规格、工艺参数、验收标准）”三要素逐分项展开（标签只是常见组织方式之一，呈现形式不限）；方法段正文以工序顺序表达（形式由模型自然选择：顺序词叙述、编号步骤、有序/无序列表或箭头链均可）串联连续工序，工艺参数落位在方法叙述中而非单独罗列清单。');
-  return lines;
-}
+// ═══════ 蓝图注入（T5，已下线）：历史裁决——参考库只做事后对标，不参与生成中注入 ═══════
+// referenceQualityTargetLines / referenceWritingSkeletonLines 已删除：样本不足时量化目标是失真信号
+// （历史负向：硬抬门禁值 8%、诱导凑参数、类型失配引导），写作质量由写作层硬约束把关。
+// 参考库保留的消费点：事后对标（referenceBenchmarkForType/buildTypeProfiles）与大纲建议（referenceStructureSuggestion）。
 
 // ═══════ 大纲建议（T6）：模板章节与同类工程典型结构对比，缺失高频章节给出建议 ═══════
+
+/** 大纲建议最小样本数：1 份样本的"典型章节"是噪音（≥50% 样本 = 1/1），默认 3，env 可调 */
+function referenceSuggestMinSamples() {
+  const value = Number(process.env.DOCUMENT_REFERENCE_SUGGEST_MIN_SAMPLES);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 3;
+}
 
 /** 归一化章节标题（去"第X章/第X篇/编号"前缀），用于与参考画像标题对比 */
 export function normalizeHeadingTitle(title: string): string {
@@ -528,7 +437,8 @@ export function normalizeHeadingTitle(title: string): string {
 export function referenceStructureSuggestion(input: { templateName: string; chapterTitles: string[] }): { projectType: ReferenceProjectType; sourceCount: number; missingHeadings: Array<{ title: string; ratio: number }> } | undefined {
   const type = suggestProjectType([input.templateName, ...input.chapterTitles].join(' '));
   const ready = listTemplateReferencesByType(type).filter(item => item.status === 'ready' && item.qualityProfile);
-  if (ready.length === 0) return undefined;
+  // 最小样本门槛：1 份样本的"典型章节"是噪音（≥50% 样本 = 1/1），默认 3，env DOCUMENT_REFERENCE_SUGGEST_MIN_SAMPLES 可调
+  if (ready.length < referenceSuggestMinSamples()) return undefined;
   const profiles = ready.map(item => item.qualityProfile!);
   const headingGroups = profiles.map(item => (item.headingStructure || []).map(title => ({ value: title })));
   const headingCounts = mergeCounts(headingGroups);

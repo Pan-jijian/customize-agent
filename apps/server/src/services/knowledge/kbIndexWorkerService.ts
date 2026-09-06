@@ -209,7 +209,6 @@ export function enqueueKnowledgeIndex(job: IndexJob): Promise<WorkerResult> {
         } else {
           upsertKbOperation(job.projectRoot, { id: operationId, type: operationType, title: operationTitle, stage: 'done', status: 'success', percent: 100, message: job.relativePath ? '单文件重新解析完成，正在后台更新项目理解缓存' : '知识库后台索引完成，正在后台更新项目理解缓存', filePath: job.relativePath, fileName: job.relativePath?.split('/').pop() });
         }
-        startProjectIntelligenceBuild(job.projectRoot);
       }
       return result;
     });
@@ -218,8 +217,15 @@ export function enqueueKnowledgeIndex(job: IndexJob): Promise<WorkerResult> {
   const promise = previous ? previous.promise.then(runCurrent, runCurrent) : runCurrent();
   const entry: ActiveIndexJob = { operationId, promise, startedAt: previous?.startedAt ?? Date.now() };
   activeJobs.set(job.projectRoot, entry);
-  // 仅当仍是最新链节时才清理，避免前一任务的 finally 误删后排队的新任务
-  void promise.finally(() => {
+  // 仅当仍是最新链节时才清理，避免前一任务的 finally 误删后排队的新任务；
+  // 项目理解缓存的触发点收敛到链式队列排空时刻（而非每个 job 完成都触发）：
+  // 中途触发会让缓存构建只基于部分已入库文件（上传 N 文件 N 次触发）、LLM 图谱重复全量重跑、
+  // 并发写同一缓存文件竞态——入库中即出现「项目理解缓存」操作的根因
+  void promise.then(result => {
+    if (activeJobs.get(job.projectRoot) !== entry) return;
+    activeJobs.delete(job.projectRoot);
+    if (result.success) startProjectIntelligenceBuild(job.projectRoot);
+  }, () => {
     if (activeJobs.get(job.projectRoot) === entry) activeJobs.delete(job.projectRoot);
   });
   return promise;

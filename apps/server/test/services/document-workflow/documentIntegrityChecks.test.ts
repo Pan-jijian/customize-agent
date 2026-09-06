@@ -4,8 +4,8 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixPlaceholderTableCells, fixQualityAssuranceCoverage, foundationFormResidueIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables } from '@/services/document-workflow/documentIntegrityChecks';
-import type { DocumentDraftChapter, DocumentFactsModel, TenderRequirementModel } from '@/services/document-workflow/types';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixPlaceholderTableCells, fixQualityAssuranceCoverage, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables } from '@/services/document-workflow/documentIntegrityChecks';
+import type { DocumentDraftChapter, DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel } from '@/services/document-workflow/types';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
 
@@ -45,6 +45,21 @@ describe('sixHundredPercentCoverageIssues（W2 纯语义判定）', () => {
     const issues = await sixHundredPercentCoverageIssues('环保措施\n施工现场加强环保管理。');
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('扬尘治理六个百分百');
+  });
+
+  it('后部扬尘句被均匀采样跳过时也不漏判（4.19.3 真实回归：6.2.2 小节「物料堆放100%覆盖」5/6 误报）', async () => {
+    // 按 query/候选句内容成对返回相似度：同主题对高、异主题对低（模拟真实 bge 语义区分）
+    buildSimilarityMock.mockResolvedValue(((left: string, right: string) => {
+      for (const word of ['围挡', '物料堆放', '冲洗', '硬化', '湿法', '密闭']) {
+        if (left.includes(word) && right.includes(word)) return 0.85;
+      }
+      return 0.1;
+    }) as SimilarityFn);
+    // 450 句无关内容 + 六项句：总句数 456 → 均匀采样 stride=2 跳过奇数 index（物料句在末位 455 被跳过，修复前必报缺失）
+    const filler = Array.from({ length: 450 }, (_, index) => `第${index + 1}项安全管理制度要求作业人员持证上岗并完成三级安全教育。`).join('\n');
+    const markdown = `环保措施\n${filler}\n施工工地周边设置围挡封闭管理，实现工地周边100%围挡。\n出入车辆冲洗设施清洗出场，实现出入车辆100%冲洗。\n施工现场场地地面硬化，实现施工现场地面100%硬化。\n湿法作业洒水降尘，实现拆迁工地100%湿法作业。\n渣土车辆密闭运输防止遗撒，实现渣土车辆100%密闭运输。\n物料堆放覆盖防尘，实现物料堆放100%覆盖。`;
+    const issues = await sixHundredPercentCoverageIssues(markdown);
+    expect(issues).toEqual([]);
   });
 
   it('非施组类文档（无扬尘内容）→ 不检测', async () => {
@@ -258,6 +273,22 @@ describe('nodeScheduleConsistencyIssues（h13 节点工期口径互查）', () =
     expect(issues.some(issue => /主体结构封顶/u.test(issue.message) && /300日 与 210日/u.test(issue.message))).toBe(true);
   });
 
+  it('「开工后第N日」倒序式（绝对日）不因节点名后「后」排除被误杀', () => {
+    const markdown = '主体封顶节点锁定在开工后第210日。第300日完成主体结构封顶。';
+    const issues = nodeScheduleConsistencyIssues(markdown);
+    expect(issues.some(issue => /主体结构封顶/u.test(issue.message) && /300日 与 210日/u.test(issue.message))).toBe(true);
+  });
+
+  it('「封顶后第10日」相对量句（节点名后紧跟「后」）不采为节点日期', () => {
+    const markdown = '第300日完成主体结构封顶。主体结构封顶后第10日拆除模板。';
+    expect(nodeScheduleConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('设备表行「主体封顶 | 商品混凝土泵送 | 开工后第158日进场」不采为节点日期', () => {
+    const markdown = '第300日完成主体结构封顶。主体封顶 | 商品混凝土泵送 | 开工后第158日进场。';
+    expect(nodeScheduleConsistencyIssues(markdown)).toEqual([]);
+  });
+
   it('准备阶段句（场地清表施工准备）不误采为节点', () => {
     const markdown = '第15日完成场地清表、临建搭设和基坑支护施工准备。第60日完成基坑支护及土方外运。';
     expect(nodeScheduleConsistencyIssues(markdown)).toEqual([]);
@@ -273,7 +304,8 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
   it('XPS 厚度 30mm vs 130mm（>20% 差异）→ 报数量矛盾', () => {
     const markdown = '挤塑聚苯乙烯泡沫塑料板（XPS）30mm。屋面采用130mm厚挤塑聚苯板。';
     const issues = crossSectionNumericConflictIssues(markdown);
-    expect(issues.some(issue => /挤塑聚苯板/u.test(issue.message) && /30mm 与 130mm/u.test(issue.message))).toBe(true);
+    // 数值顺序不敏感：未标注部位值后注入部位组（Set 插入序在后）
+    expect(issues.some(issue => /挤塑聚苯板/u.test(issue.message) && /30mm/u.test(issue.message) && /130mm/u.test(issue.message))).toBe(true);
   });
 
   it('垫层混凝土 C15 vs C20（标号类直接互斥）→ 报参数矛盾', () => {
@@ -626,6 +658,42 @@ describe('ambiguousEitherOrIssues（h14 两可表述阻断）', () => {
   it('确定的支护决策表述 → 不报', () => {
     expect(ambiguousEitherOrIssues('基坑支护采用放坡+喷锚，坡面挂网喷护。')).toEqual([]);
   });
+
+  it('「A或B」直陈两可「按专项方案放坡或支护」→ 报阻断（外部评审 P1）', () => {
+    const issues = ambiguousEitherOrIssues('应急处理：按专项方案放坡或支护，分层开挖。');
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('放坡或支护');
+  });
+
+  it('决策词被左组吞并「采用钢板桩或排桩」→ 仍报阻断', () => {
+    const issues = ambiguousEitherOrIssues('基坑支护采用钢板桩或排桩，垂直开挖。');
+    expect(issues.length).toBe(1);
+  });
+
+  it('「土钉墙或支护桩」两可 → 报阻断', () => {
+    const issues = ambiguousEitherOrIssues('本工程拟采用土钉墙或支护桩方案。');
+    expect(issues.length).toBe(1);
+  });
+
+  it('无决策词并列工序「土方开挖或回填前」→ 不误报', () => {
+    expect(ambiguousEitherOrIssues('土方开挖或回填前应设置临边防护。')).toEqual([]);
+  });
+
+  it('词族外枚举「集水井或排水沟」→ 不误报', () => {
+    expect(ambiguousEitherOrIssues('坑底设置集水井或排水沟，明排降水。')).toEqual([]);
+  });
+
+  it('无决策词并列「基坑支护或开挖施工顺序」→ 不误报', () => {
+    expect(ambiguousEitherOrIssues('本工程基坑支护或开挖施工顺序按现场进度调整。')).toEqual([]);
+  });
+
+  it('管线保护措施「钢板桩或槽钢挡护」→ 不误报（4.19.3 真实回归：非主支护体系决策）', () => {
+    expect(ambiguousEitherOrIssues('对平行于基坑边的管线，采用钢板桩或槽钢挡护，挡护高度超出管线顶面不少于300mm。')).toEqual([]);
+  });
+
+  it('管线保护措施「钢板桩/槽钢」斜杠形态 → 不误报', () => {
+    expect(ambiguousEitherOrIssues('对平行于基坑边的管线，采用钢板桩/槽钢挡护。')).toEqual([]);
+  });
 });
 
 describe('excavationDepthLockIssues（h14 基坑深度数值锁定）', () => {
@@ -650,6 +718,63 @@ describe('excavationDepthLockIssues（h14 基坑深度数值锁定）', () => {
 
   it('「深度约5.85m」「标高-2.500m」确定式 → 不报', () => {
     const markdown = '基坑开挖深度约5.85m，支护采用放坡喷锚。\n槽底标高-2.500m，土方开挖分层进行。\n基坑周边设置防护栏杆。';
+    expect(excavationDepthLockIssues(markdown)).toEqual([]);
+  });
+
+  it('「标高以上300mm」「坑底标高以下200mm」相对量表述不视为锁定（4.19 真实生成回归：清底厚度曾被误判为深度）→ 报阻断', () => {
+    const markdown = '基坑采用放坡开挖，分层分段开挖至设计标高以上300mm，人工清底。\n基坑周边设置防护栏杆与排水沟，支护随挖随撑。';
+    const issues = excavationDepthLockIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('基坑深度数值未锁定');
+    const markdownBelow = '基坑采用放坡开挖，机械开挖至坑底标高以下200mm，人工清底。\n基坑周边设置防护栏杆，支护随挖随撑。';
+    expect(excavationDepthLockIssues(markdownBelow).length).toBe(1);
+  });
+
+  it('偏差句「标高偏差控制在±5」「基底标高偏差0～-50mm」不视为锁定（4.19.3 真实回归：质控允许值被误判为深度）→ 报阻断', () => {
+    const markdown = '基坑采用放坡开挖，支护随挖随撑。\n标高偏差控制在±5，基底标高偏差0～-50mm，无扰动土。\n基坑周边设置防护栏杆与排水沟。';
+    const issues = excavationDepthLockIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('基坑深度数值未锁定');
+  });
+
+  it('偏差句与确定式深度共存 → 不报（偏差不干扰真实锁定）', () => {
+    const markdown = '基坑开挖深度5.15m，支护采用放坡喷锚。\n标高偏差控制在±5，基底标高偏差0～-50mm。\n土方开挖分层进行，支护随挖随撑。';
+    expect(excavationDepthLockIssues(markdown)).toEqual([]);
+  });
+
+  it('时间数形态「坑底标高后24h内完成垫层」不视为锁定（4.19.3 真实回归：垫层时限被误判为深度）→ 报阻断', () => {
+    const markdown = '基坑采用放坡开挖，支护随挖随撑。\n土方分层开挖，开挖至坑底标高后24h内完成垫层封闭。\n基坑周边设置防护栏杆与排水沟。';
+    const issues = excavationDepthLockIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('基坑深度数值未锁定');
+  });
+
+  it('时间数形态与确定式深度共存 → 不报（时间句不干扰真实锁定）', () => {
+    const markdown = '基坑开挖深度5.15m，支护采用放坡喷锚。\n开挖至坑底标高后24h内完成垫层封闭。\n土方开挖分层进行，支护随挖随撑。';
+    expect(excavationDepthLockIssues(markdown)).toEqual([]);
+  });
+
+  it('零标高基准句「现状地面标高与设计±0.000对应绝对标高」不视为锁定（4.19.3 真实回归）→ 报阻断', () => {
+    const markdown = '基坑采用放坡开挖，支护随挖随撑。\n现状地面标高与设计±0.000对应绝对标高存在局部差异。\n基坑周边设置防护栏杆与排水沟。';
+    const issues = excavationDepthLockIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('基坑深度数值未锁定');
+  });
+
+  it('零标高基准句与确定式深度共存 → 不报（基准句不干扰真实锁定）', () => {
+    const markdown = '基坑开挖深度5.15m，支护采用放坡喷锚。\n现状地面标高与设计±0.000对应绝对标高存在局部差异。\n土方开挖分层进行，支护随挖随撑。';
+    expect(excavationDepthLockIssues(markdown)).toEqual([]);
+  });
+
+  it('水位相对句「标高低于水池最低水位500mm」不视为锁定（4.19.5 真实回归：降水井水位控制值被误判为深度）→ 报阻断', () => {
+    const markdown = '基坑采用放坡开挖，支护随挖随撑。\n降水井运行期间观测井内标高低于水池最低水位500mm。\n基坑周边设置防护栏杆与排水沟。';
+    const issues = excavationDepthLockIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('基坑深度数值未锁定');
+  });
+
+  it('水位相对句与确定式深度共存 → 不报（水位句不干扰真实锁定）', () => {
+    const markdown = '基坑开挖深度5.15m，支护采用放坡喷锚。\n降水井运行期间观测井内标高低于水池最低水位500mm。\n土方开挖分层进行，支护随挖随撑。';
     expect(excavationDepthLockIssues(markdown)).toEqual([]);
   });
 
@@ -1012,5 +1137,405 @@ describe('crossChapterSemanticDuplicateIssues / strip（1.5 跨章语义重复�
     expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
     expect(await stripCrossChapterSemanticDuplicateParagraphs(chapters)).toBe(0);
     expect(buildSimilarityMock).not.toHaveBeenCalled();
+  });
+});
+
+// ═══════ F14 同物多规格按部位口径（crossSectionNumericConflictIssues 部位豁免） ═══════
+// 历史实现「不同标号直接互斥」逼 LLM 修复轮把多规格归一成一种（用户实锤：全文只用一种规格）；
+// 改造后仅同一部位语境（或无部位标注）出现多值才判互斥，跨部位差异（垫层 C15/主体 C35）合法。
+
+describe('crossSectionNumericConflictIssues 部位语境豁免（F14）', () => {
+  it('不同部位不同标号（垫层 C15 + 主体 C35）→ 0 冲突（跨部位合法）', () => {
+    const markdown = '垫层混凝土强度等级为C15。主体结构梁板柱混凝土强度等级为C35。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('同一部位两套标号（垫层 C15 + 垫层 C20）→ 1 blocker（同部位互斥）', () => {
+    const markdown = '垫层混凝土强度等级为C15。垫层部位混凝土强度等级为C20。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.level).toBe('error');
+    expect(issues[0]?.message).toContain('混凝土强度等级');
+    // 修复建议不再要求全文单一口径，而是限定同一部位
+    expect(issues[0]?.suggestion).toContain('不同部位允许不同规格');
+  });
+
+  it('外墙 A5.0 + 内墙 A3.5（砌块）→ 0 冲突（内外墙部位区分，长词优先命中）', () => {
+    const markdown = '外墙砌块强度等级为A5.0。内墙砌块强度等级为A3.5。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('外墙 A5.0 + 外墙 A3.5 → 1 blocker（同部位互斥）', () => {
+    const markdown = '外墙砌块强度等级为A5.0。外墙砌块强度等级为A3.5。';
+    expect(crossSectionNumericConflictIssues(markdown)).toHaveLength(1);
+  });
+
+  it('XPS 屋面 50mm + 墙面 130mm → 0 冲突（number 类跨部位豁免）', () => {
+    const markdown = '屋面采用50mm厚挤塑聚苯板。墙面采用130mm厚挤塑聚苯板。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('XPS 屋面 50mm + 屋面 130mm → 1 blocker（number 类同部位互斥）', () => {
+    const markdown = '屋面采用50mm厚挤塑聚苯板。屋面另采用130mm厚挤塑聚苯板。';
+    expect(crossSectionNumericConflictIssues(markdown)).toHaveLength(1);
+  });
+
+  it('灭火器总量 40具（无部位）+ 办公区 4具/库房 2具 → 0 冲突（总量与分区配置属不同口径，F5）', () => {
+    // 三句分行：部位词窗口仅扫本行前 16 字符，不分行会让「办公区」串进「库房」窗口
+    const markdown = '现场配置干粉灭火器40具。\n办公区配置干粉灭火器4具。\n库房配置干粉灭火器2具。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('无部位标注的灭火器 40具 vs 4具 → 1 blocker（同组互斥）', () => {
+    const markdown = '现场配置干粉灭火器40具。另配置干粉灭火器4具。';
+    expect(crossSectionNumericConflictIssues(markdown)).toHaveLength(1);
+  });
+
+  it('灭火器型号 MF/ABC4（型号数字无数词「具」）→ 不采池，不产生虚假冲突（F5）', () => {
+    const markdown = '现场配置干粉灭火器40具，型号为MF/ABC4。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('并列枚举「50mm/70mm」→ 不判冲突（同句多规格正常枚举，ENUMERATION_VALUE_RE 豁免）', () => {
+    const markdown = '屋面采用50mm/70mm厚挤塑聚苯板。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('否定声明句豁免：一致性声明句内数值不入口径池', () => {
+    const markdown = '现场统一配置40具干粉灭火器，本章不再出现“灭火器4具”等不一致表述。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+});
+
+// ═══════ F14 规格写错部位检测（specLocationMismatchIssues） ═══════
+
+describe('specLocationMismatchIssues 规格错位检测（F14）', () => {
+  function authorityMap(): SpecAuthorityMap {
+    return {
+      混凝土强度等级: [
+        { location: '垫层', spec: 'C15', quantity: '125.80m3', sourceFile: '清单.xls' },
+        { location: '基础', spec: 'C30', quantity: '86.40m3', sourceFile: '清单.xls' },
+        { location: '梁板柱', spec: 'C35', quantity: '300m3', sourceFile: '清单.xls' },
+      ],
+    };
+  }
+
+  it('正文「垫层 C35」vs 权威 C15 → 1 blocker（规格写错部位）', () => {
+    const markdown = '垫层采用C35商品混凝土浇筑，浇筑完成后及时养护。';
+    const issues = specLocationMismatchIssues(markdown, authorityMap());
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain('规格错位');
+    expect(issues[0]?.message).toContain('C35');
+  });
+
+  it('正文「垫层 C15」与权威一致 → 0', () => {
+    const markdown = '垫层采用C15商品混凝土浇筑，浇筑完成后及时养护。';
+    expect(specLocationMismatchIssues(markdown, authorityMap())).toEqual([]);
+  });
+
+  it('正文「基础 C30」「梁板柱 C35」与权威一致 → 0', () => {
+    const markdown = '基础采用C30商品混凝土浇筑。梁板柱采用C35商品混凝土浇筑。';
+    expect(specLocationMismatchIssues(markdown, authorityMap())).toEqual([]);
+  });
+
+  it('权威映射缺失（无清单项目）→ 静默跳过不误伤', () => {
+    expect(specLocationMismatchIssues('垫层采用C15商品混凝土。', undefined)).toEqual([]);
+  });
+
+  it('单 placement 维度 → 跳过（无多规格对照价值）', () => {
+    const map: SpecAuthorityMap = {
+      混凝土强度等级: [{ location: '垫层', spec: 'C15', quantity: '', sourceFile: '清单.xls' }],
+    };
+    expect(specLocationMismatchIssues('垫层采用C35商品混凝土。', map)).toEqual([]);
+  });
+
+  it('规格类型不可推导（「商品混凝土」非 C/M/P 型）→ 跳过', () => {
+    const map: SpecAuthorityMap = {
+      混凝土种类: [
+        { location: '垫层', spec: '商品混凝土', quantity: '', sourceFile: '清单.xls' },
+        { location: '基础', spec: '防水混凝土', quantity: '', sourceFile: '清单.xls' },
+      ],
+    };
+    expect(specLocationMismatchIssues('垫层采用水下混凝土。', map)).toEqual([]);
+  });
+
+  it('类型隔离：混凝土维度只比对 C 标号，不误报「垫层…HRB400 钢筋」', () => {
+    const markdown = '垫层内配置HRB400钢筋，混凝土强度等级为C15。';
+    expect(specLocationMismatchIssues(markdown, authorityMap())).toEqual([]);
+  });
+});
+
+// ═══════ F6 劳动力口径隔离（resourceConsistencyIssues） ═══════
+// 历史缺陷：管理口径（18人）与全员峰值（286人）、不同工种（钢筋工60/木工80）被当同口径互斥误报；
+// 改造后仅同组互查：管理 vs 管理、同工种 vs 同工种、峰值 vs 峰值。
+
+describe('resourceConsistencyIssues 管理/全员/工种口径隔离（F6）', () => {
+  it('管理人员 18人 vs 高峰期 286人 → 0 冲突（管理 vs 全员不同口径）', () => {
+    const markdown = '项目部管理人员及施工人员约18人。施工高峰期投入全员286人。';
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('钢筋工 60人 vs 木工 80人 → 0 冲突（不同工种不同口径）', () => {
+    const markdown = '劳动力配置钢筋工60人。劳动力配置木工80人。';
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('钢筋工 60人 vs 钢筋工 90人 → 1 blocker（同工种两套口径互斥）', () => {
+    const markdown = '劳动力配置钢筋工60人。劳动力配置钢筋工90人。';
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain('劳动力数据矛盾');
+  });
+
+  it('管理人员 18人 vs 管理人员 40人 → 1 blocker（管理组内同口径互查）', () => {
+    const markdown = '项目部管理人员及施工人员约18人。项目部管理人员及施工人员约40人。';
+    expect(resourceConsistencyIssues(markdown)).toHaveLength(1);
+  });
+
+  it('无阶段限定总峰值 180人 vs 阶段峰值 90人 → 0（总人数 ≥ 阶段峰值正常关系，非 F6 场景回归）', () => {
+    const markdown = '按施工高峰配置总人数约180人。室外工程阶段高峰90人。';
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('无阶段限定峰值 180人 vs 286人 → 1 blocker（同组同口径互斥，非 F6 场景回归）', () => {
+    const markdown = '施工高峰期投入约180人。施工高峰时段达286人。';
+    expect(resourceConsistencyIssues(markdown)).toHaveLength(1);
+  });
+});
+
+// ═══════ F15 修复器不跨部位归一（applyNumericConsistencyDeterministicFixes） ═══════
+
+describe('applyNumericConsistencyDeterministicFixes 部位豁免（F15）', () => {
+  it('分区配置 4具/2具与总量 40具 均不与权威 40 矛盾 → 零修复（不把分区归一成总量）', () => {
+    const markdown = '办公区配置干粉灭火器4具。\n生活区配置干粉灭火器2具。\n全场合计配置灭火器40具。';
+    const result = applyNumericConsistencyDeterministicFixes(markdown, { machineAuthorities: { extinguisher: 40 } });
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toContain('办公区配置干粉灭火器4具');
+    expect(result.markdown).toContain('生活区配置干粉灭火器2具');
+  });
+
+  it('无部位标注的 30具 与权威 40 矛盾 → 仅替换无部位值，分区 4具 保留', () => {
+    const markdown = '全场配置灭火器30具，办公区配置灭火器4具。';
+    const result = applyNumericConsistencyDeterministicFixes(markdown, { machineAuthorities: { extinguisher: 40 } });
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('全场配置灭火器40具');
+    expect(result.markdown).toContain('办公区配置灭火器4具');
+  });
+
+  it('权威缺失 → 零修复', () => {
+    const markdown = '全场配置灭火器30具。';
+    const result = applyNumericConsistencyDeterministicFixes(markdown, {});
+    expect(result.fixedCount).toBe(0);
+  });
+});
+
+// ═══════ P1 劳动力矛盾检测回归（评分报告「20人 vs 86人」漏检根因治理） ═══════
+
+describe('resourceConsistencyIssues 评分报告 P1 回归', () => {
+  it('「按高峰期总人数20人配置专职安全员2名」的 20 入 peak 组（安全员属后一个数字，不再误划管理组）', () => {
+    const markdown = '按高峰期总人数20人配置专职安全员2名。施工高峰期投入86人。';
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('劳动力数据矛盾') && issue.message.includes('互斥'))).toBe(true);
+  });
+
+  it('箭头链「32人→86人→48人」只取链上峰值 86，链内低峰阶段值不互相误报', () => {
+    expect(resourceConsistencyIssues('劳动力按32人→86人→48人分阶段投入。')).toEqual([]);
+  });
+
+  it('箭头链峰值 86 vs 正文总人数 20 → 报互斥（评分报告 P1 核心矛盾）', () => {
+    const markdown = '按施工高峰配置总人数约20人。劳动力按32人→86人→48人分阶段投入。';
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('互斥'))).toBe(true);
+  });
+
+  it('语境词前的管理口径不参与链计算（18 入管理组 + 箭头链峰值 86 入 peak 组）', () => {
+    const markdown = '项目部管理人员及施工人员18人，劳动力按32人→86人→48人分阶段投入。项目部管理人员及施工人员约40人。';
+    const issues = resourceConsistencyIssues(markdown);
+    // 管理组 18 vs 40 互查命中（若 18 被链吞掉则漏报）
+    expect(issues.some(issue => issue.message.includes('18') && issue.message.includes('40'))).toBe(true);
+  });
+
+  it('P1 多链同行：同一行两条阶段链独立入池（第二链峰值与同阶段宣称冲突可报）', () => {
+    const markdown = '地下结构阶段劳动力按32人→86人→48人分阶段投入；装饰装修阶段20人→50人→30人分阶段投入。\n装饰装修阶段高峰人数约30人。';
+    const issues = resourceConsistencyIssues(markdown);
+    // 装饰装修阶段链峰值 50 与同阶段宣称 30 互斥（仅处理首链则第二链静默漏检）
+    expect(issues.some(issue => issue.message.includes('50') && issue.message.includes('30') && /互斥/u.test(issue.message))).toBe(true);
+  });
+
+  it('阶段劳动力形态（无高峰词）提取入池：跨阶段 20 vs 300 → 不报', () => {
+    expect(resourceConsistencyIssues('装饰装修阶段投入20人。主体结构阶段约300人。')).toEqual([]);
+  });
+
+  it('阶段劳动力形态同阶段互斥：装饰装修 20 vs 300 → 报', () => {
+    const issues = resourceConsistencyIssues('装饰装修阶段投入20人。装饰装修阶段高峰期约300人。');
+    expect(issues.some(issue => /互斥/u.test(issue.message))).toBe(true);
+  });
+
+  it('模式 7：宣称总人数 20 与班组加总算式 27 同句自相矛盾 → 报', () => {
+    const markdown = '道路浇筑班组投入20人，班组加总道路浇筑8＋铺装6＋排水沟砌筑5＋机动2×4=27人。';
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('班组加总'))).toBe(true);
+  });
+
+  it('模式 7：算式左侧求和 ≠ 结果 → 报（算术层确定性）', () => {
+    const markdown = '班组人数按道路浇筑8＋铺装6＋排水沟砌筑5=21人配置。';
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('左侧求和'))).toBe(true);
+  });
+
+  it('模式 7：算式自洽且无宣称冲突 → 零报告', () => {
+    expect(resourceConsistencyIssues('班组加总道路浇筑8＋铺装6＋排水沟砌筑5＋机动2×4=27人。')).toEqual([]);
+  });
+
+  it('模式 7：近似措辞（约）宣称口径宽容不计入比较', () => {
+    expect(resourceConsistencyIssues('投入约20人，班组加总8＋6＋5＋8=27人。')).toEqual([]);
+  });
+
+  it('模式 7：算式左侧各项带“人”字仍参与求和（修复静默漏检）', () => {
+    const markdown = '道路浇筑班组投入30人，班组加总道路浇筑8人＋铺装6人＋排水沟砌筑5人=19人。';
+    const issues = resourceConsistencyIssues(markdown);
+    // 左侧各项以“人”结尾时原实现取不到末位数字 → 整条算式静默漏检（宣称 30 vs 加总 19 矛盾漏报）
+    expect(issues.some(issue => issue.message.includes('班组加总'))).toBe(true);
+  });
+});
+
+describe('清单红线权威比对（丰乐镇第五版实测 P1 养护期 / P3 路灯）', () => {
+  const model = (bills: Array<{ key?: string; fieldName?: string; value: string }> = [], billItemFacts: Array<{ key?: string; fieldName?: string; value: string }> = []) => ({
+    project: [], schedule: [], quality: [], safety: [], resources: [], tables: [], bills,
+    drawings: [], rules: [], specifications: [], schemaFacts: {}, factIndex: {}, missing: [], conflicts: [], preciseFacts: [], billItemFacts,
+  }) as unknown as DocumentFactsModel;
+
+  describe('extractGreeningMaintenanceAuthority（清单养护期权威提取）', () => {
+    it('清单条目「二级养护，养护两年」→ 2', () => {
+      expect(extractGreeningMaintenanceAuthority(model([{ fieldName: '喷播植草（灌木）籽', value: '二级养护，养护两年' }]))).toBe(2);
+    });
+
+    it('阿拉伯数字「养护2年」→ 2', () => {
+      expect(extractGreeningMaintenanceAuthority(model([{ fieldName: '草坪养护', value: '养护2年' }]))).toBe(2);
+    });
+
+    it('label 含完整短语（绿化养护期两年）→ 2', () => {
+      expect(extractGreeningMaintenanceAuthority(model([{ fieldName: '绿化养护期两年', value: '按规范执行' }]))).toBe(2);
+    });
+
+    it('清单行级条目（billItemFacts）特征描述「养护两年｜工程量」→ 2（数据源补齐）', () => {
+      expect(extractGreeningMaintenanceAuthority(model([], [{ key: '清单条目：喷播植草（灌木）籽', fieldName: '清单条目', value: '二级养护，养护两年｜工程量：2860m2' }]))).toBe(2);
+    });
+
+    it('天单位养护（混凝土养护14天）不采 → undefined', () => {
+      expect(extractGreeningMaintenanceAuthority(model([{ fieldName: '混凝土', value: '养护14天' }]))).toBeUndefined();
+    });
+
+    it('无养护期事实 → undefined', () => {
+      expect(extractGreeningMaintenanceAuthority(model([]))).toBeUndefined();
+    });
+  });
+
+  describe('greeningMaintenanceMismatchIssues（正文 vs 清单红线）', () => {
+    it('清单养护两年 × 正文二级养护一年 → blocker（评分报告 P1）', () => {
+      const issues = greeningMaintenanceMismatchIssues('绿化工程二级养护一年，养护期满后移交。', model([{ fieldName: '喷播植草（灌木）籽', value: '二级养护，养护两年' }]));
+      expect(issues).toHaveLength(1);
+      expect(issues[0]?.severity).toBe('blocker');
+      expect(issues[0]?.message).toContain('绿化养护期');
+    });
+
+    it('正文养护两年与清单一致 → 零报告', () => {
+      expect(greeningMaintenanceMismatchIssues('绿化工程二级养护两年。', model([{ fieldName: '喷播植草（灌木）籽', value: '二级养护，养护两年' }]))).toEqual([]);
+    });
+
+    it('无清单养护期事实 → 零报告（不误伤无清单项目）', () => {
+      expect(greeningMaintenanceMismatchIssues('绿化工程二级养护一年。', model([]))).toEqual([]);
+    });
+
+    it('正文无养护期表述 → 零报告', () => {
+      expect(greeningMaintenanceMismatchIssues('绿化工程按设计施工。', model([{ fieldName: '喷播植草（灌木）籽', value: '二级养护，养护两年' }]))).toEqual([]);
+    });
+
+    it('否定声明句豁免：修复轮「统一为两年，不再出现养护一年」→ 零报告（防死循环）', () => {
+      expect(greeningMaintenanceMismatchIssues('绿化养护期统一为两年，本章不再出现养护一年等矛盾表述。', model([{ fieldName: '喷播植草（灌木）籽', value: '二级养护，养护两年' }]))).toEqual([]);
+    });
+  });
+
+  describe('extractStreetLightAuthority（清单路灯数量权威提取）', () => {
+    it('清单路灯多行 103套+15套 → 118', () => {
+      expect(extractStreetLightAuthority(model([
+        { fieldName: '太阳能路灯', value: '103套' },
+        { fieldName: '太阳能路灯', value: '15套' },
+      ]))).toBe(118);
+    });
+
+    it('清单单位「盏」→ 118（照明工程标准单位兑底）', () => {
+      expect(extractStreetLightAuthority(model([
+        { fieldName: '太阳能路灯', value: '103盏' },
+        { fieldName: '太阳能路灯', value: '15盏' },
+      ]))).toBe(118);
+    });
+
+    it('行级条目「｜工程量：103套」段提取，特征描述「套」字样不误采 → 103', () => {
+      expect(extractStreetLightAuthority(model([], [
+        { key: '清单条目：太阳能路灯', fieldName: '清单条目', value: '1.灯杆高4.5m，含基础，防护等级IP65｜工程量：103套' },
+      ]))).toBe(103);
+    });
+
+    it('行级条目与散装事实同源重复 → 分层取用只计一次（118 非 236）', () => {
+      expect(extractStreetLightAuthority(
+        model(
+          [{ fieldName: '太阳能路灯', value: '103套' }, { fieldName: '太阳能路灯', value: '15套' }],
+          [{ key: '清单条目：太阳能路灯', fieldName: '清单条目', value: '1.灯杆高4.5m｜工程量：103套' }, { key: '清单条目：太阳能路灯', fieldName: '清单条目', value: '1.灯杆高6m｜工程量：15套' }],
+        ),
+      )).toBe(118);
+    });
+
+    it('无路灯条目 → undefined', () => {
+      expect(extractStreetLightAuthority(model([{ fieldName: '道路铺装', value: '3800平方米' }]))).toBeUndefined();
+    });
+  });
+
+  describe('streetLightCountMismatchIssues（正文 vs 清单红线）', () => {
+    it('清单 118 套 × 正文分型号 17套+3套 → blocker（评分报告 P3）', () => {
+      const issues = streetLightCountMismatchIssues('路灯采用100W LED 共17套、120W LED 共3套。', model([
+        { fieldName: '太阳能路灯', value: '103套' },
+        { fieldName: '太阳能路灯', value: '15套' },
+      ]));
+      expect(issues).toHaveLength(1);
+      expect(issues[0]?.severity).toBe('blocker');
+      expect(issues[0]?.message).toContain('路灯数量');
+    });
+
+    it('正文分型号 103+15 与清单一致 → 零报告', () => {
+      expect(streetLightCountMismatchIssues('路灯共103套、庭院路灯15套。', model([
+        { fieldName: '太阳能路灯', value: '103套' },
+        { fieldName: '太阳能路灯', value: '15套' },
+      ]))).toEqual([]);
+    });
+
+    it('正文单值 118 套 → 零报告', () => {
+      expect(streetLightCountMismatchIssues('路灯共118套。', model([{ fieldName: '太阳能路灯', value: '118套' }]))).toEqual([]);
+    });
+
+    it('清单单位盏 × 正文套一致 → 零报告（跨单位同口径）', () => {
+      expect(streetLightCountMismatchIssues('路灯共118套。', model([
+        { fieldName: '太阳能路灯', value: '103盏' },
+        { fieldName: '太阳能路灯', value: '15盏' },
+      ]))).toEqual([]);
+    });
+
+    it('「分批/每批 X 套」批次口径跳过 → 零报告（评分报告正文 366 行形态防误报）', () => {
+      expect(streetLightCountMismatchIssues('路灯分2批进场，每批10套。', model([
+        { fieldName: '太阳能路灯', value: '103套' },
+        { fieldName: '太阳能路灯', value: '15套' },
+      ]))).toEqual([]);
+    });
+
+    it('否定声明句豁免：修复轮「不再出现路灯17套」→ 零报告（防死循环）', () => {
+      expect(streetLightCountMismatchIssues('路灯配置统一按清单执行，不再出现路灯17套等矛盾表述。', model([
+        { fieldName: '太阳能路灯', value: '103套' },
+        { fieldName: '太阳能路灯', value: '15套' },
+      ]))).toEqual([]);
+    });
+
+    it('无清单路灯条目 → 零报告', () => {
+      expect(streetLightCountMismatchIssues('路灯共17套。', model([]))).toEqual([]);
+    });
   });
 });

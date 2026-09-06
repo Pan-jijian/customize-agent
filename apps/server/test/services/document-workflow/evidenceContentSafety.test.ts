@@ -11,7 +11,7 @@ vi.mock('@customize-agent/knowledge', () => {
   return { LocalTransformersEmbeddingProvider };
 });
 
-import { buildBidProcedureJudge, filterOffTopicSections, filterOffTopicSectionsForChapters, isBidderQualificationText, isQualificationSectionTitle, partitionEvidenceByContentSafety } from '@/services/document-workflow/evidenceContentSafety';
+import { buildBidProcedureJudge, filterOffTopicSections, filterOffTopicSectionsForChapters, isBidderQualificationText, isHardBannedSectionTitle, isQualificationSectionTitle, partitionEvidenceByContentSafety } from '@/services/document-workflow/evidenceContentSafety';
 import type { DocumentEvidence, DocumentTemplateChapter } from '@/services/document-workflow/types';
 
 const STRONG_BID_RE = /评标|投标|澄清|评审|中标|保证金|开标|递交|廉洁|行贿|串标|围标|报价|清单计量/u;
@@ -265,5 +265,31 @@ describe('isQualificationSectionTitle（1.4 形态 A 句式级资格条款判别
     expect(isQualificationSectionTitle('具备条件的先行施工区段安排')).toBe(false);
     // 词面命中但带技术语境：原逻辑放行（如「安全生产许可证管理制度」）
     expect(isQualificationSectionTitle('安全生产许可证管理制度')).toBe(false);
+  });
+});
+
+describe('isHardBannedSectionTitle（P3 异常低价 / P5 电子保函 商务条款小节黑名单）', () => {
+  it('「异常低价计算方式」小节标题硬拦截（评分报告 P3 串章回归）', () => {
+    expect(isHardBannedSectionTitle('异常低价计算方式')).toBe(true);
+    expect(isHardBannedSectionTitle('3.1 异常低价计算方式')).toBe(true);
+    expect(isHardBannedSectionTitle('评标基准价计算')).toBe(true);
+  });
+
+  it('「8.2 ☑电子保函」类商务条款小节标题硬拦截（评分报告 P5）', () => {
+    expect(isHardBannedSectionTitle('8.2 ☑电子保函')).toBe(true);
+    expect(isHardBannedSectionTitle('电子保函')).toBe(true);
+    expect(isHardBannedSectionTitle('投标保证金的缴纳与退还')).toBe(true);
+    expect(isHardBannedSectionTitle('履约担保条款')).toBe(true);
+  });
+
+  it('农民工工资保证金技术语境放行（工资保障章合法内容不误杀）', () => {
+    expect(isHardBannedSectionTitle('农民工工资保证金专用账户管理制度')).toBe(false);
+    expect(isHardBannedSectionTitle('工资保证金与实名制考勤')).toBe(false);
+    expect(isHardBannedSectionTitle('工资保证金缴纳与退还管理办法')).toBe(false);
+  });
+
+  it('施工技术小节标题不受商务黑名单影响', () => {
+    expect(isHardBannedSectionTitle('基坑支护与土方开挖施工方法')).toBe(false);
+    expect(isHardBannedSectionTitle('劳动力配置与高峰期组织措施')).toBe(false);
   });
 });

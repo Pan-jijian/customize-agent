@@ -213,6 +213,23 @@ describe('队列编排', () => {
     expect(getActiveKnowledgeIndex('/proj-chain')).toBeUndefined();
   });
 
+  it('链式队列排空后才触发项目理解缓存构建：中途 job 完成不触发（入库中即构建的根因修复）', async () => {
+    const childA = createFakeChild();
+    const childB = createFakeChild();
+    vi.mocked(fork).mockReturnValueOnce(childA as never).mockReturnValueOnce(childB as never);
+    const p1 = enqueueKnowledgeIndex({ id: 'job-1', projectRoot: '/proj-chain-intel' });
+    const p2 = enqueueKnowledgeIndex({ id: 'job-2', projectRoot: '/proj-chain-intel' });
+    childA.emit('exit', 0);
+    await p1;
+    // 第一个 job 完成但队列还有 job-2 待消费：不得触发（旧实现每个 job 完成都触发，
+    // 缓存构建只基于部分已入库文件且重复跑 LLM 图谱）
+    expect(startProjectIntelligenceBuild).not.toHaveBeenCalled();
+    childB.emit('exit', 0);
+    await p2;
+    await vi.waitFor(() => expect(startProjectIntelligenceBuild).toHaveBeenCalledTimes(1));
+    expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-chain-intel');
+  });
+
   it('startKnowledgeIndex 触发后台入队', async () => {
     const child = createFakeChild();
     vi.mocked(fork).mockReturnValue(child as never);

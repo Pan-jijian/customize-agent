@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { buildProjectIntelligence, readProjectIntelligence, startProjectIntelligenceBuild } from '@/services/document-workflow/projectIntelligence';
+import { buildProjectIntelligenceSync, readProjectIntelligence, startProjectIntelligenceBuild } from '@/services/document-workflow/projectIntelligence';
 import { getProjectRoot } from '@/services/knowledge/kbService';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -15,7 +15,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         startProjectIntelligenceBuild(projectRoot);
         return res.status(202).json({ success: true, accepted: true });
       }
-      const cache = await buildProjectIntelligence(projectRoot);
+      // 同步构建与后台构建（排空触发/自愈触发）共享并发守卫：进行中时复用其结果，防并发写同一缓存文件
+      const cache = await buildProjectIntelligenceSync(projectRoot);
       return res.status(200).json({ success: true, cache: { version: cache.version, createdAt: cache.createdAt, fileCount: cache.fileCount, factCount: cache.facts.length, intentCount: cache.chapterIntentIndex.length, graph: { works: cache.projectGraph.works.length, methods: cache.projectGraph.methods.length, resources: cache.projectGraph.resources.length, risks: cache.projectGraph.risks.length }, message: cache.projectGraphMessage } });
     }
     return res.status(405).json({ error: 'Method not allowed' });

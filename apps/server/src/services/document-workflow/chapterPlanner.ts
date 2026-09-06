@@ -3,7 +3,7 @@ import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarge
 import { callDocumentLlmJson, contextLayerChars, type DocumentJsonSchema } from './llmClient';
 import { buildSemanticSimilarity, type SemanticSimilarityFn } from './semanticSimilarity';
 import { displayChapterTitle } from './outline';
-import { CRITICAL_SECTION_ANCHORS, isCriticalSectionTitle } from './writingSpec';
+import { CRITICAL_SECTION_ANCHORS, DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE, isCriticalSectionTitle } from './writingSpec';
 import { docSystemPrefix } from './markdownComposer';
 
 /**
@@ -185,10 +185,24 @@ function ensureSectionCoverage(inputSections: string[], blocks: PlannedChapterBl
         }
       }
     }
+    // 容器小节与人材机三小节独立成块（H3 块标题）而非 H4 要点——H4 要点形态三缺陷（轮7 实测）：
+    // 目录缺评标必查词（H4 不入目录）、骨架工作包 H4 与容器小节同级层级混淆、
+    // 单要点预算被 12+ 工作包摊薄（22 个 H4 挤 2527 字 → 每包仅 100~300 字）；
+    // 范围仅限工作包容器（项目主要施工内容/主要分部分项工程施工方案）+ 人材机三小节——
+    // 非容器必查细目（危大工程/应急预案等）保持原 H4 挂接行为，不引入 3600 保底虚胖；
+    // 先从既有块剥离同名映射（容器小节独占），再尾插独立块——保持块序稳定（目录顺序不变），
+    // 且避免 dedupeCrossBlockOverlaps 按块序 claim 时前块先占导致新块 sources 被剥离整块删除
+    if (isResourceTriadSection(section) || MAJOR_CONTENT_SECTION_RE.test(section) || DIVISION_SECTION_RE.test(section)) {
+      for (const other of enriched) {
+        other.subPoints = other.subPoints.filter(point => !sameSectionText(point.title, section) && !point.sources.some(source => sameSectionText(source, section)));
+      }
+      enriched.push({ title: section, subPoints: [{ title: section, sources: [section] }], facts: [], targetWords: MIN_BLOCK_TARGET_WORDS });
+      fallbackSections.push(section);
+      continue;
+    }
     // 评标必查细目兜底保真：无论相似度多高都不得并入既有 H4，必须新增独立 H4 保留原标题，
-    // 否则“项目主要施工内容/危大工程/应急预案”等必查词会被语义合并吞掉，目录失分；
-    // 人材机三小节同理（结构补挂产物必须独立 H4，不得被 bigram 归并挂接进他节）
-    if (isCriticalSection(section) || isResourceTriadSection(section)) {
+    // 否则"危大工程/应急预案"等必查词会被语义合并吞掉，目录失分
+    if (isCriticalSection(section)) {
       const targetBlock = bestBlock || enriched[enriched.length - 1];
       if (targetBlock) {
         targetBlock.subPoints.push({ title: section, sources: [section] });
@@ -214,10 +228,14 @@ function ensureSectionCoverage(inputSections: string[], blocks: PlannedChapterBl
 export function fallbackStructureForSections(inputSections: string[], chapterTitle: string, targetWords: number): PlannedChapterStructure {
   const byDomain = new Map<string, string[]>();
   // 人材机三小节 bypass 语义域分组，各自独立成块（H3）：三节词面同构（bigram 重叠 ≥0.75）且同落
-  // 「综合管理」域，混域处理必然被合并吞并（层级错位根因）
+  // 「综合管理」域，混域处理必然被合并吞并（层级错位根因）；工作包容器小节（项目主要施工内容/
+  // 主要分部分项工程施工方案）同理独立成块——H4 要点形态会目录缺词、层级混淆、预算摊薄（轮7 实测）；
+  // 非容器必查细目（危大工程/应急预案等）不独立成块，按语义域正常分组（非容器无 3600 保底需求）
   const triadSections: string[] = [];
+  const containerSections: string[] = [];
   for (const section of inputSections) {
     if (isResourceTriadSection(section)) { triadSections.push(section); continue; }
+    if (MAJOR_CONTENT_SECTION_RE.test(section) || DIVISION_SECTION_RE.test(section)) { containerSections.push(section); continue; }
     const key = sectionDomain(section);
     const items = byDomain.get(key) || [];
     items.push(section);
@@ -238,7 +256,7 @@ export function fallbackStructureForSections(inputSections: string[], chapterTit
     }
     return merged;
   };
-  const blocks: PlannedChapterBlock[] = triadSections.map(section => ({ title: section, subPoints: [{ title: section, sources: [section] }], facts: [], targetWords: MIN_BLOCK_TARGET_WORDS }));
+  const blocks: PlannedChapterBlock[] = [...triadSections, ...containerSections].map(section => ({ title: section, subPoints: [{ title: section, sources: [section] }], facts: [], targetWords: MIN_BLOCK_TARGET_WORDS }));
   for (const items of byDomain.values()) {
     const mergedPoints = mergeDomainSections(items);
     for (let offset = 0; offset < mergedPoints.length; offset += MAX_SUB_POINTS_PER_BLOCK) {
@@ -272,6 +290,10 @@ function allocateBlockTargetWords(blocks: PlannedChapterBlock[], targetWords: nu
     const base = Math.max(1200, Math.floor(targetWords / Math.max(1, blocks.length)));
     const weighted = Math.floor((base * 0.75) + (targetWords * 0.25) * (block.subPoints.length / totalPoints));
     block.targetWords = Math.min(MAX_BLOCK_TARGET_WORDS, Math.max(MIN_BLOCK_TARGET_WORDS, weighted));
+    // 容器小节块预算保底：工作包容器（项目主要施工内容/主要分部分项工程施工方案）内部
+    // 承载 12 个骨架工作包三要素正文（每包 ≥300 字），块预算低于 3600 时工作包被摊薄
+    //（轮7 实测 22 个 H4 挤 2527 字块 → 每包仅 100~300 字）；3600×1.5=5400 ≤ 成稿 maxTokens 6000 安全
+    if (MAJOR_CONTENT_SECTION_RE.test(block.title) || DIVISION_SECTION_RE.test(block.title)) block.targetWords = Math.min(MAX_BLOCK_TARGET_WORDS, Math.max(block.targetWords, 3600));
   }
 }
 
@@ -395,9 +417,10 @@ function blockEvidenceForSections(sections: string[], evidence: DocumentEvidence
 }
 
 /**
- * 章级 LLM 规划（p3-s1 逐主题块小步规划）：输入细目 ≤8 条时不调用 Planner（逐节路径更高效），由调用方判断；
- * 细目先经语义聚类切分为块候选，再逐块一次小调用产出该块 H4 结构（输出 ≤2000 token），
- * 块间并发、块级失败隔离（失败块由语义域确定性结构接管），合并后统一覆盖校验。
+ * 章级 LLM 规划（p3-s1 逐主题块小步规划）：细目先经语义聚类切分为块候选，再逐块一次小调用产出该块 H4 结构
+ * （输出 ≤2000 token），块间并发、块级失败隔离（失败块由语义域确定性结构接管），合并后统一覆盖校验。
+ * 彻底 LLM 化：不再按输入细目数量跳过规划——细目少（≤8）时同样由 LLM 规划，杜绝确定性回退路径的
+ * 「主题块标题=细目标题」同名结构（历史缺陷：H3/H4 同名诱发模型重复展开 → 重复 H4 质检卡死 → 章阻断）。
  * 返回 undefined 表示规划失败，调用方走 fallbackStructureForSections。
  */
 export async function planChapterStructureWithLlm(input: {
@@ -418,7 +441,6 @@ export async function planChapterStructureWithLlm(input: {
   diagnostics?: DocumentGenerationDiagnostics;
 }): Promise<PlannedChapterStructure | undefined> {
   const inputSections = cleanInputSections(input.chapter);
-  if (inputSections.length <= 8) return undefined;
   // 阶段 1：块候选聚类（本地 bge 语义域贪心聚类，嵌入失败直接抛出）
   const similarity = await buildSemanticSimilarity(inputSections, inputSections, input.semanticEmbedder);
   const clusters = clusterBlockCandidates(inputSections, similarity);
@@ -512,7 +534,15 @@ export async function planChapterStructureWithLlm(input: {
   allocateBlockTargetWords(blocks, input.targetWords);
   const merged = ensureSectionCoverage(inputSections, blocks);
   const deduped = dedupeCrossBlockOverlaps(merged);
-  return { ...deduped, llmPlanned: results.some(result => result.llmPlanned), llmFailure: failures.length > 0 ? `块级降级（${failures.join('；')}）` : undefined };
+  // 4.19 块标题级去重：LLM 逐块独立规划时，不同细目簇常被命名为同名主题块（真实回归：
+  // 第六章「安全文明生产管理体系与措施」块 ×2、第二章「重点难点与危大工程保障」块 ×2），
+  // 同名块各自成稿产出两个同名 H3（finalize 仅去 H3 重复，目录规划镜像 sections 仍残留重复）。
+  // 归一化同名块后块 subPoints 并入前块（同主题合并），杜绝同名 H3 双写与规划镜像重复。
+  // 合并/拆半后重跑目标分配：合并把块数与点数集中，原 allocate 结果（相加目标）膨胀至
+  // 0.9×目标质检阈值超出模型单块自然输出（真实回归：2113/1927 字两轮不达标 → 章生成失败）
+  const dedupedTitles = dedupeBlockTitleDuplicates(deduped);
+  allocateBlockTargetWords(dedupedTitles.blocks, input.targetWords);
+  return { ...dedupedTitles, llmPlanned: results.some(result => result.llmPlanned), llmFailure: failures.length > 0 ? `块级降级（${failures.join('；')}）` : undefined };
 }
 
 /**
@@ -535,6 +565,71 @@ export function dedupeCrossBlockOverlaps(structure: PlannedChapterStructure): Pl
       })
       .filter(point => point.sources.length > 0),
   }));
+  return { ...structure, blocks };
+}
+
+/** 4.19 块标题级去重：归一化（去空白）同名的主题块合并——后块 subPoints 去重后并入前块（同名 H4 去重后追加），
+ * facts 合并，coveredSections/fallbackSections 同并。同名块各自成稿会产出两个同名 H3 双写内容，
+ * 目录规划镜像 sections 也会残留重复（真实回归：第六章/第二章各一对同名块实锤）。
+ * 合并块 >3 点时对半拆为带（一）（二）后缀的主题块（每块 ≤3 点）：目标字数相加膨胀后
+ * 0.9×目标质检阈值超出模型单块自然输出（真实回归：2113/1927 字两轮不达标 → 章生成失败）；
+ * 拆后调用方重跑 allocateBlockTargetWords 重分配，单块目标回落可达成 */
+export function dedupeBlockTitleDuplicates(structure: PlannedChapterStructure): PlannedChapterStructure {
+  // 先按归一化标题分组（保序），再逐组合并/拆半，避免拆半插入导致 seen 索引错位
+  const groups: Array<{ blocks: PlannedChapterBlock[] }> = [];
+  const groupIndex = new Map<string, number>();
+  for (const block of structure.blocks) {
+    const key = block.title.replace(/\s+/gu, '');
+    if (!key) {
+      groups.push({ blocks: [block] });
+      continue;
+    }
+    const existingIndex = groupIndex.get(key);
+    if (existingIndex === undefined) {
+      groupIndex.set(key, groups.length);
+      groups.push({ blocks: [block] });
+      continue;
+    }
+    groups[existingIndex].blocks.push(block);
+  }
+  const blocks: PlannedChapterBlock[] = [];
+  for (const group of groups) {
+    if (group.blocks.length === 1) {
+      blocks.push({ ...group.blocks[0], subPoints: [...group.blocks[0].subPoints] });
+      continue;
+    }
+    const existing = group.blocks[0];
+    const mergedSubPoints: PlannedChapterSubPoint[] = [];
+    const mergedFacts: string[] = [];
+    for (const block of group.blocks) {
+      for (const point of block.subPoints) {
+        const pointKey = point.title.replace(/\s+/gu, '');
+        if (mergedSubPoints.some(merged => merged.title.replace(/\s+/gu, '') === pointKey)) continue;
+        mergedSubPoints.push(point);
+      }
+      for (const fact of block.facts) {
+        if (!mergedFacts.includes(fact)) mergedFacts.push(fact);
+      }
+    }
+    const mergedTarget = group.blocks.reduce((sum, block) => sum + block.targetWords, 0);
+    if (mergedSubPoints.length <= 3) {
+      blocks.push({ ...existing, subPoints: mergedSubPoints, facts: mergedFacts, targetWords: mergedTarget });
+      continue;
+    }
+    // 拆半（每块 ≤3 点）：标题加中文序号后缀，目录镜像与正文 H3 一致（与拆半自愈同形态）
+    const partSize = Math.ceil(mergedSubPoints.length / Math.ceil(mergedSubPoints.length / 3));
+    const suffixes = ['一', '二', '三', '四', '五'];
+    for (let index = 0, part = 0; index < mergedSubPoints.length; index += partSize, part += 1) {
+      blocks.push({
+        ...existing,
+        title: `${existing.title}（${suffixes[part]}）`,
+        subPoints: mergedSubPoints.slice(index, index + partSize),
+        facts: part === 0 ? mergedFacts : [],
+        // 目标暂记合并总量，由调用方重跑 allocateBlockTargetWords 按点数重分配（拆分块不膨胀）
+        targetWords: mergedTarget,
+      });
+    }
+  }
   return { ...structure, blocks };
 }
 
@@ -586,7 +681,7 @@ export async function planChapterStructure(input: {
   const planned = (await planChapterStructureWithLlm(input).catch(error => {
     const failed: PlannedChapterStructure = { blocks: [], coveredSections: [], fallbackSections: [], llmPlanned: false, llmFailure: error instanceof Error ? error.message : String(error) };
     return failed;
-  })) ?? { blocks: [], coveredSections: [], fallbackSections: [], llmPlanned: false, llmFailure: '输入细目 ≤8 条，跳过 LLM 规划（设计行为）' };
+  })) ?? { blocks: [], coveredSections: [], fallbackSections: [], llmPlanned: false, llmFailure: 'LLM 规划未返回有效结构' };
   if (planned.blocks.length > 0) return planned;
   const inputSections = cleanInputSections(input.chapter);
   const fallback = fallbackStructureForSections(inputSections, input.chapter.title, input.targetWords);

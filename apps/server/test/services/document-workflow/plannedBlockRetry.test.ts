@@ -108,7 +108,9 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
   it('两轮不达标 → 返回失败块隔离清单（成功块保留，不整章降级重写）', async () => {
     const failingBlock: PlannedChapterBlock = { title: '沉降观测专项', subPoints: [{ title: '观测点布设', sources: ['s5'] }], facts: [], targetWords: 500 };
     llmMock.mockImplementation(async (_system: string, prompt: string) => {
-      if (prompt.includes('沉降观测专项')) return shortContent;
+      // 用 coverageList 格式特征（#### 观测点布设）区分块：禁词清单（forbiddenTitlesLine）会把其他块
+      // 标题作为裸词注入每个块的 prompt，按块标题字符串判断会误匹配（4.19 串章防线引入后）
+      if (prompt.includes('#### 观测点布设')) return shortContent;
       return passingContent([H4A, H4B, H4C, H4D], 150);
     });
     const diag = mockDiagnostics();
@@ -121,15 +123,65 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
     expect(result?.markdown).toContain(H4A);
   });
 
-  it('二轮仍重复 H4 但字数达标 → 确定性去重兜底成稿（结构性重复不整块作废）', async () => {
+  it('重复 H4 但字数达标 → 确定性去重兜底成稿（首轮即兜底，结构性重复不整块作废）', async () => {
     const duplicated = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map(title => `#### ${title}\n\n${'施'.repeat(130)}`).join('\n\n')}\n\n#### ${H4A}\n\n${'施'.repeat(130)}`;
     llmMock.mockResolvedValue(duplicated);
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
-    // 首轮 duplicates 不达标 → 二轮仍重复 → 确定性去重后字数达标 → 成稿
+    // 首轮 duplicates 不达标 → 确定性去重兜底（删第二次 H4A）后字数达标 → 成稿（不再耗二轮）
     expect(result?.allSucceeded).toBe(true);
-    expect(llmMock).toHaveBeenCalledTimes(2);
+    expect(llmMock).toHaveBeenCalledTimes(1);
     const dedupedCount = (result?.markdown.match(/控制点布设/gu) || []).length;
     expect(dedupedCount).toBe(1);
+  });
+  
+  it('清单外 H4 但字数达标 → 确定性修复（删标题留正文）成稿（第五次回归：4083 字块因清单外标题失败）', async () => {
+    // 字数充足、要点齐全，但多了 1 个清单外 H4（模型自由发挥/标题微调）
+    const extraneousContent = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map(title => `#### ${title}\n\n${'施'.repeat(130)}`).join('\n\n')}\n\n#### 沉降观测智能化\n\n${'施'.repeat(130)}`;
+    llmMock.mockResolvedValue(extraneousContent);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+    // 清单外 H4 标题被删，其余保留
+    expect(result?.markdown).not.toContain('沉降观测智能化');
+    expect(result?.markdown).toContain(H4D);
+  });
+  
+  it('清单外 H4 删标题留正文 → 正文零丢失，字数不减首轮通过（第七次回归：1084 字块不浪费）', async () => {
+    // 单要点块写错形态：4 个要点各 120 字 + 1 个清单外 H4 200 字，总字数充足
+    const content = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map(title => `#### ${title}\n\n${'施'.repeat(120)}`).join('\n\n')}\n\n#### 自由发挥一\n\n${'施'.repeat(200)}`;
+    llmMock.mockResolvedValue(content);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+    expect(result?.markdown).not.toContain('#### 自由发挥一');
+    // 自由发挥正文保留（确定性修复不浪费内容）
+    const chars = (result?.markdown.match(/施/gu) || []).length;
+    expect(chars).toBeGreaterThanOrEqual(4 * 120 + 200);
+  });
+  
+  it('清单外 H4 删标题留正文后字数仍不足 → 二轮反馈重试（真实缺口才重试）', async () => {
+    // 要点正文薄（各 25 字）+ 两个自由发挥各 100 字：删标题后总字数仍 <0.9×500=450 → 二轮
+    const thinContent = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map(title => `#### ${title}\n\n${'施'.repeat(25)}`).join('\n\n')}\n\n#### 自由发挥一\n\n${'施'.repeat(100)}\n\n#### 自由发挥二\n\n${'施'.repeat(100)}`;
+    llmMock
+      .mockResolvedValueOnce(thinContent)
+      .mockResolvedValueOnce(passingContent([H4A, H4B, H4C, H4D], 150));
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(2);
+    // 二轮反馈点名清单外标题
+    expect(llmMock.mock.calls[1][1]).toContain('自由发挥一');
+  });
+
+  it('单要点块写评分细目原标题 H4 → sources 白名单豁免，首轮通过（第七次回归：项目理解与编制边界块）', async () => {
+    // 要点标题=块标题（H3 直接承担），模型按证据写出细目原标题「编制说明与工程概况」→
+    // sources 白名单豁免 extraneous 判定，1084 字达标直接成稿（修复前：误杀 → 整块作废 → 章失败）
+    const singlePointBlock: PlannedChapterBlock = { title: '项目理解与编制边界', subPoints: [{ title: '项目理解与编制边界', sources: ['编制说明与工程概况'] }], facts: [], targetWords: 1200 };
+    const content = `### 项目理解与编制边界\n\n#### 编制说明与工程概况\n\n${'施'.repeat(1084)}`;
+    llmMock.mockResolvedValue(content);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure({ blocks: [singlePointBlock] }));
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+    expect(result?.markdown).toContain('编制说明与工程概况');
   });
 
   it('要点 ≥4 两轮不达标 → 拆半自愈：两个子块同标准成稿拼接', async () => {

@@ -347,6 +347,30 @@ describe('startGenerateDocumentTask', () => {
     expect(record.error).toBe('模型调用失败');
   });
 
+  it('finalize 抛错 → 磁盘快照滞后时不误标已成功章节（catch 用内存最新 stages）', async () => {
+    const stageA = { type: 'chapter_generation' as const, roleId: 'chapter_generation', status: 'success' as const, message: '第一章已成稿' };
+    const stageB = { type: 'chapter_generation' as const, roleId: 'chapter_generation', status: 'running' as const, message: '第二章生成中' };
+    vi.mocked(generateDocumentDraft).mockImplementation(async (input) => {
+      input.onProgress?.([stageA, stageB], { chapters: [{ id: 'c1', title: '第一章', content: '检查点内容'.repeat(50), evidence: [], missingFacts: [], sections: ['1'] }] });
+      return new Promise<GeneratedDocumentDraft>((_resolve, reject) => {
+        reject(new Error('OUTLINE 指定 2 章，实际只生成 1 章'));
+      });
+    });
+    const { taskId, documentId } = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    const promise = getGenerateTask(taskId)!.promise;
+    // 模拟磁盘快照滞后：最后一次进度写盘丢失，磁盘停留在「第一章仍 running」的旧快照
+    const savedBefore = getGeneratedDocument(documentId, '/proj')!;
+    saveGeneratedDocument({ ...savedBefore, executionStages: [{ ...stageA, status: 'running' as const }, stageB] }, '/proj');
+    const record = await promise;
+    expect(record.status).toBe('warning');
+    const saved = getGeneratedDocument(documentId, '/proj')!;
+    const chapterStages = (saved.executionStages || []).filter(stage => stage.type === 'chapter_generation');
+    expect(chapterStages).toHaveLength(2);
+    // 已成功章节不被旧快照误标 failed，仅真正 running 的章节标 failed
+    expect(chapterStages[0]!.status).toBe('success');
+    expect(chapterStages[1]!.status).toBe('failed');
+  });
+
   it('用户中止 → aborted', async () => {
     vi.mocked(generateDocumentDraft).mockRejectedValue(new Error('用户中止'));
     const { taskId } = startGenerateDocumentTask({ templateId: 't1' }, '/proj');

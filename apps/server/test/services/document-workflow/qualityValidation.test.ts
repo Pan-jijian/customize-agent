@@ -3,7 +3,22 @@
  * 均为 L2 确定性结构检测，无需语义通道。
  */
 import { describe, expect, it } from 'vitest';
-import { evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalPlaceholderIssues } from '@/services/document-workflow/qualityValidation';
+import { applyDeterministicConsistencyFixesToMarkdown, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, processSpecConflictIssues } from '@/services/document-workflow/qualityValidation';
+import type { DocumentFactsModel } from '@/services/document-workflow/types';
+
+/** 工序规格事实卡 mock（specifications 单条，其余数组空） */
+function specFactsModel(specValue: string): DocumentFactsModel {
+  return {
+    project: [], schedule: [], quality: [], safety: [], resources: [], tables: [],
+    drawings: [], rules: [], bills: [], preciseFacts: [], schemaFacts: {}, factIndex: {},
+    missing: [], conflicts: [],
+    specifications: [{ key: '工艺规格', fieldName: '', value: specValue, sourceFile: '清单.xlsx', roleId: 'specification', confidence: 90 }],
+    canonical: { byKey: {} },
+  } as unknown as DocumentFactsModel;
+}
+
+// 语义 gate 全零向量：不触发动作词扩围/撤销，归属判定走确定性词面路径
+const embedDocuments = async (texts: string[]) => texts.map(() => [0, 0]);
 
 describe('formalContentIntegrityIssues 截断词表扩展（h13c）', () => {
   it('以「复查合格后」结尾且无句号 → 报截断句', () => {
@@ -67,5 +82,60 @@ describe('evaluationCriteriaCoreKeywords（4.12.12 核心词剥离残余条款�
   it('无编号标题核心词不受影响', () => {
     const keywords = evaluationCriteriaCoreKeywords('确保黄山杯奖项创建目标实现');
     expect(keywords.some(keyword => keyword.includes('黄山杯'))).toBe(true);
+  });
+});
+
+describe('collectLayerNumbers 层厚度物理边界（4.19.5 真实回归：面层…2000mm 误当厚度权威）', () => {
+  it('资料「面层平整度偏差不大于2000mm」+ 正文「面层厚度20mm」→ 不报冲突（2000 非厚度语义不成权威）', async () => {
+    const issues = await processSpecConflictIssues('地面面层厚度20mm，随打随抹平。', specFactsModel('面层平整度偏差不大于2000mm'), embedDocuments);
+    expect(issues).toHaveLength(0);
+  });
+
+  it('修复侧同源：正文 20mm 不被批量替换为 2000mm', async () => {
+    const fixed = await applyDeterministicConsistencyFixesToMarkdown('地面面层厚度20mm，随打随抹平。', specFactsModel('面层平整度偏差不大于2000mm'), undefined, embedDocuments);
+    expect(fixed.fixedCount).toBe(0);
+    expect(fixed.markdown).toContain('20mm');
+  });
+
+  it('正常厚度（找平层 20mm vs 正文 15mm）仍报冲突并确定性替换', async () => {
+    const issues = await processSpecConflictIssues('找平层厚度15mm，随浇随抹。', specFactsModel('找平层厚20mm'), embedDocuments);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('20mm');
+    const fixed = await applyDeterministicConsistencyFixesToMarkdown('找平层厚度15mm，随浇随抹。', specFactsModel('找平层厚20mm'), undefined, embedDocuments);
+    expect(fixed.markdown).toContain('20mm');
+    expect(fixed.markdown).not.toContain('15mm');
+  });
+
+  it('边界内大厚度（垫层 800mm，<1000）仍参与一致性判定', async () => {
+    const issues = await processSpecConflictIssues('混凝土垫层厚200mm。', specFactsModel('垫层厚800mm'), embedDocuments);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('800mm');
+  });
+});
+
+describe('formalHeadingHierarchyIssues（P5 复选框符号残留检测）', () => {
+  it('小节标题残留 ☑ 符号 → error/blocker（评分报告目录「8.2 ☑电子保函」串章回归）', () => {
+    const markdown = [
+      '## 目录',
+      '',
+      '## 第一章 工程概况',
+      '### 1.1 编制依据',
+      '## 第八章 其他说明',
+      '### 8.1 农民工工资支付保障',
+      '### 8.2 ☑电子保函',
+    ].join('\n');
+    const issues = formalHeadingHierarchyIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('复选框') && issue.severity === 'blocker')).toBe(true);
+  });
+
+  it('✓/□/○ 等变体符号同样命中', () => {
+    const markdown = ['## 第一章 工程概况', '### 1.1 编制依据', '### ✓1.2 施工部署', '### □1.3 质量保证措施'].join('\n');
+    const issues = formalHeadingHierarchyIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('复选框'))).toBe(true);
+  });
+
+  it('干净标题零报告', () => {
+    const markdown = ['## 第一章 工程概况', '### 1.1 编制依据', '### 1.2 施工部署'].join('\n');
+    expect(formalHeadingHierarchyIssues(markdown)).toEqual([]);
   });
 });

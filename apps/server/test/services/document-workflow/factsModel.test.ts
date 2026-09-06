@@ -4,12 +4,14 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AutoDocumentSpecPackage } from '@/services/document-core/autoDocumentSpecTypes';
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE } from '@/services/document-core/documentDomainProfileService';
-import type { DocumentEvidence, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from '@/services/document-workflow/types';
+import type { DocumentEvidence, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, StructuredTableFact } from '@/services/document-workflow/types';
 import {
   buildChapterFactNeeds,
   buildFactsModel,
   buildSchemaFacts,
+  buildSpecAuthorityMap,
   cleanPdfHeadingNoise,
+  extractBillItemFacts,
   extractFacts,
   extractFactsWithLlm,
   extractLocalFactPool,
@@ -498,6 +500,20 @@ describe('resolveChapterFactNeeds / factsForChapterNeeds', () => {
     expect(resolved.every(item => item.status === 'satisfied')).toBe(true);
     expect(factsForChapterNeeds(resolved)).toHaveLength(1);
   });
+
+  it('D2：同置信度下清单来源事实优先于图纸来源', () => {
+    // 历史排序只看 confidence：图纸事实数量级碾压时清单数据被淹没（图纸 4207 chunks vs 清单 657），
+    // 正文大量「按设计图纸执行」式概括话术；清单来源 +0.05 温和偏移后同档竞争清单先呈现
+    const needs = [
+      { id: 'n1', label: '钢筋规格', category: 'parameter', required: true, queries: ['钢筋规格'], source: 'template' as const },
+    ];
+    const drawingFact = factOf({ key: '钢筋规格', value: 'HPB300直径8mm', sourceFile: '/x/结构设计图.dwg', processingType: 'drawing', roleId: 'drawing', confidence: 0.8 });
+    const billFact = factOf({ key: '钢筋规格', value: 'HPB300直径8mm钢筋', sourceFile: '/x/工程量清单.xlsx', processingType: 'table', roleId: 'bill', confidence: 0.8 });
+    const resolved = resolveChapterFactNeeds({ needs, factsModel: emptyModel([drawingFact, billFact]), evidence: [] });
+    expect(resolved[0]!.facts).toHaveLength(2);
+    expect(resolved[0]!.facts[0]!.sourceFile).toContain('清单');
+    expect(resolved[0]!.facts[1]!.sourceFile).toContain('设计图');
+  });
 });
 
 describe('factNeedsCoveragePrompt', () => {
@@ -553,6 +569,18 @@ describe('buildFactsModel', () => {
     expect(model.factIndex.tableFacts.map(item => item.key)).toContain('工程量清单');
     expect(model.factIndex.drawingFacts.map(item => item.key)).toContain('管径');
     expect(model.factIndex.parameterFacts.map(item => item.key)).toContain('计划工期');
+  });
+
+  it('D3：纯文本类尺寸/管径/做法不进图纸池（只保留真实图纸来源）', async () => {
+    // 历史口径 /设计|尺寸|标高|管径|做法/ 把说明文件里的尺寸描述也算入图纸，图纸池被文本灌水，
+    // 清单 vs 图纸优先级失真（用户确认：清单精度更高，图纸仅兑底）；新口径只认 processingType 或图纸类来源词
+    const facts = [
+      factOf({ key: '管径', value: 'DN100', sourceFile: '/x/说明.txt', processingType: 'reference', roleId: 'spec' }),
+      factOf({ key: '做法', value: '水泥砂浆抹灰墙面', sourceFile: '/x/g.txt', processingType: 'reference', roleId: 'spec' }),
+      factOf({ key: '尺寸', value: '60mm', sourceFile: '/x/f.txt', processingType: 'drawing', roleId: 'drawing' }),
+    ];
+    const model = await buildFactsModel(facts);
+    expect(model.factIndex.drawingFacts.map(item => item.key)).toEqual(['尺寸']);
   });
 
   it('conflicts 冲突检测与 missing 去重', async () => {
@@ -693,5 +721,179 @@ describe('extractLocalFactPool 净化门接线', () => {
     const codes = pool.projectBasicFacts.filter(item => item.fieldId === 'project_code').map(item => item.value);
     expect(codes).toEqual(['2026AF', '2026AFAGZ50906']);
     expect(pool.factSanitize).toMatchObject({ truncated: 0, dropped: 0, repaired: 0 });
+  });
+});
+
+describe('extractBillItemFacts（F4 清单行级事实）', () => {
+  /** 15 列偏移清单表：名称/特征/单位/工程量列全部不在历史硬编码列位 */
+  function offset15Table(): StructuredTableFact {
+    return {
+      tableType: 'bill',
+      headers: ['序号', '项目编码', '', '', '项目名称', '项目特征描述', '', '', '', '计量单位', '', '', '工程量', '', ''],
+      rows: [
+        ['1', '010101001001', '', '', '垫层', '1.混凝土种类:商品混凝土；2.混凝土强度等级:C15', '', '', '', 'm3', '', '', '125.80', '', ''],
+        ['2', '010502001001', '', '', '矩形柱', '1.混凝土种类:商品混凝土；2.混凝土强度等级:C35', '', '', '', 'm3', '', '', '86.40', '', ''],
+      ],
+      sourceFile: '清单.xls',
+    };
+  }
+
+  it('15 列偏移表：按语义列定位提取名称/特征/工程量三元组', () => {
+    const facts = extractBillItemFacts([offset15Table()]);
+    expect(facts).toHaveLength(2);
+    expect(facts[0]).toMatchObject({
+      key: '清单条目：垫层',
+      fieldId: 'bill_item',
+      value: '1.混凝土种类:商品混凝土；2.混凝土强度等级:C15｜工程量：125.80m3',
+      processingType: 'bill_of_quantities',
+    });
+    expect(facts[1]?.key).toBe('清单条目：矩形柱');
+    expect(facts[1]?.value).toContain('C35');
+  });
+
+  it('序号非纯整数的行（分部小计/合计行）不入事实池', () => {
+    const table = offset15Table();
+    table.rows = [
+      ...table.rows,
+      ['分部小计', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
+      ['', '合计', '', '', '合计', '本页合计', '', '', '', '', '', '', '', '', ''],
+    ];
+    const facts = extractBillItemFacts([table]);
+    expect(facts).toHaveLength(2);
+  });
+
+  it('项目名称或项目特征描述为空的行不入池', () => {
+    const table = offset15Table();
+    table.rows = [
+      ['3', '010101003001', '', '', '', '1.混凝土强度等级:C15', '', '', '', 'm3', '', '', '10', '', ''],
+      ['4', '010101004001', '', '', '基础', '', '', '', '', 'm3', '', '', '20', '', ''],
+    ];
+    const facts = extractBillItemFacts([table]);
+    expect(facts).toHaveLength(0);
+  });
+
+  it('无序号列的表（非清单类表）：不按序号过滤，名称+特征齐全即收录', () => {
+    const table: StructuredTableFact = {
+      tableType: 'material',
+      headers: ['项目名称', '项目特征描述', '计量单位', '工程量'],
+      rows: [
+        ['SBS防水卷材', '1.厚度:4mm', '㎡', '500'],
+        ['镀锌钢管', '1.规格:DN100', 'm', '120'],
+      ],
+      sourceFile: '材料表.csv',
+    };
+    const facts = extractBillItemFacts([table]);
+    expect(facts).toHaveLength(2);
+    expect(facts[0]?.value).toBe('1.厚度:4mm｜工程量：500㎡');
+  });
+
+  it('表头噪声行（合计/汇总行被当数据行）由 HEADER_NOISE 过滤', () => {
+    const table = offset15Table();
+    table.rows = [['5', '', '', '', '合计', '汇总本表工程量', '', '', '', '', '', '', '', '', '']];
+    const facts = extractBillItemFacts([table]);
+    expect(facts).toHaveLength(0);
+  });
+
+  it('特征描述超长截断到 160 字符', () => {
+    const table = offset15Table();
+    table.rows = [['9', '010101009001', '', '', '直形墙', `1.混凝土强度等级:C30；2.${'长描述'.repeat(60)}`, '', '', '', 'm3', '', '', '30', '', '']];
+    const facts = extractBillItemFacts([table]);
+    expect(facts).toHaveLength(1);
+    const featurePart = (facts[0]?.value || '').replace(/｜工程量：.+$/u, '');
+    expect(featurePart.length).toBeLessThanOrEqual(160);
+  });
+});
+
+describe('buildSpecAuthorityMap（F11 规格-部位权威映射）', () => {
+  function billFact(name: string, feature: string, quantity = '125.80m3'): DocumentFact {
+    return {
+      key: `清单条目：${name}`,
+      fieldName: '清单条目',
+      fieldId: 'bill_item',
+      value: `${feature}｜工程量：${quantity}`,
+      sourceFile: '清单.xls',
+      roleId: 'bill_of_quantities',
+      processingType: 'bill_of_quantities',
+      confidence: 0.92,
+    };
+  }
+
+  it('多规格按部位聚合：垫层 C15/基础 C30/矩形柱 C35 → 混凝土强度等级 3 placements', () => {
+    const map = buildSpecAuthorityMap([
+      billFact('垫层', '1.混凝土种类:商品混凝土；2.混凝土强度等级:C15'),
+      billFact('基础', '1.混凝土种类:商品混凝土；2.混凝土强度等级:C30'),
+      billFact('矩形柱', '1.混凝土种类:商品混凝土；2.混凝土强度等级:C35'),
+    ]);
+    expect(map['混凝土强度等级']).toHaveLength(3);
+    expect(map['混凝土强度等级']).toMatchObject([
+      { location: '垫层', spec: 'C15', quantity: '125.80m3' },
+      { location: '基础', spec: 'C30' },
+      { location: '矩形柱', spec: 'C35' },
+    ]);
+  });
+
+  it('同部位同规格去重（同名条目多行合并为一条 placement）', () => {
+    const map = buildSpecAuthorityMap([
+      billFact('垫层', '2.混凝土强度等级:C15', '60m3'),
+      billFact('垫层', '2.混凝土强度等级:C15', '40m3'),
+    ]);
+    expect(map['混凝土强度等级']).toHaveLength(1);
+  });
+
+  it('多维度分句：混凝土种类与强度等级各成一维', () => {
+    const map = buildSpecAuthorityMap([
+      billFact('垫层', '1.混凝土种类:商品混凝土；2.混凝土强度等级:C15'),
+    ]);
+    expect(map['混凝土强度等级']?.[0]?.spec).toBe('C15');
+    expect(map['混凝土种类']?.[0]?.spec).toBe('商品混凝土');
+  });
+
+  it('分句序号前缀（「1.」「2、」）剥离后标签仍命中', () => {
+    const map = buildSpecAuthorityMap([
+      billFact('垫层', '1.垫层材料种类:碎石；2、混凝土强度等级:C15'),
+    ]);
+    expect(map['混凝土强度等级']?.[0]?.spec).toBe('C15');
+    expect(map['垫层材料种类']?.[0]?.spec).toBe('碎石');
+  });
+
+  it('无分句结构兜底：特征整体含规格 token 时按 token 归维', () => {
+    const map = buildSpecAuthorityMap([
+      billFact('垫层', 'C15商品混凝土'),
+    ]);
+    expect(map['混凝土强度等级']?.[0]).toMatchObject({ location: '垫层', spec: 'C15' });
+  });
+
+  it('厚度 token 归「厚度规格」维度', () => {
+    const map = buildSpecAuthorityMap([
+      billFact('垫层', '4mm厚SBS防水卷材'),
+    ]);
+    expect(map['厚度规格']?.[0]?.spec).toBe('4mm');
+  });
+
+  it('无规格 token 的事实（土壤类别）→ 空 map', () => {
+    const map = buildSpecAuthorityMap([
+      billFact('挖一般土方', '1.土壤类别:三类土'),
+    ]);
+    expect(map).toEqual({});
+  });
+
+  it('标签命中维度但值非规格 token（如「商品混凝土」）→ 按标签归维，不产生 token 兜底重复', () => {
+    const map = buildSpecAuthorityMap([
+      billFact('垫层', '1.混凝土种类:商品混凝土'),
+    ]);
+    expect(map['混凝土种类']).toHaveLength(1);
+    // matched=true 后不再走 token 兜底，「混凝土」不含 C/M/P token，无额外维度
+    expect(Object.keys(map)).toEqual(['混凝土种类']);
+  });
+
+  it('规格值尾部标点清洗（「C30。」尾随句号）', () => {
+    const map = buildSpecAuthorityMap([
+      billFact('基础', '2.混凝土强度等级:C30。'),
+    ]);
+    expect(map['混凝土强度等级']?.[0]?.spec).toBe('C30');
+  });
+
+  it('空事实列表 → 空 map', () => {
+    expect(buildSpecAuthorityMap([])).toEqual({});
   });
 });

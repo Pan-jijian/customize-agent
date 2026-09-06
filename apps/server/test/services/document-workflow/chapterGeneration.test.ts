@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { capFactCoverageContext } from '@/services/document-workflow/chapterGeneration';
+import { buildChapterFactCoverageContext, capFactCoverageContext } from '@/services/document-workflow/chapterGeneration';
+import type { DocumentEvidence, DocumentTemplateChapter, SpecAuthorityMap } from '@/services/document-workflow/types';
 
 describe('capFactCoverageContext', () => {
   it('短文本不截断，原样返回', () => {
@@ -50,5 +51,71 @@ describe('capFactCoverageContext', () => {
     } finally {
       delete process.env.DOCUMENT_FACT_COVERAGE_CAP;
     }
+  });
+});
+
+describe('buildChapterFactCoverageContext 部位绑定式注入（F12）', () => {
+  function chapterOf(): DocumentTemplateChapter {
+    return { id: 'ch-1', title: '地基与基础工程', purpose: '', queries: [], requiredFacts: [] } as unknown as DocumentTemplateChapter;
+  }
+
+  function placement(location: string, spec: string): SpecAuthorityMap['x'][number] {
+    return { location, spec, quantity: '100m3', sourceFile: '清单.xls' };
+  }
+
+  function coverageContext(map?: SpecAuthorityMap): string {
+    return buildChapterFactCoverageContext({
+      chapter: chapterOf(),
+      roleFacts: [],
+      evidence: [] as DocumentEvidence[],
+      missingFacts: [],
+      specAuthorityMap: map,
+    });
+  }
+
+  it('多规格维度渲染为「部位:规格」对照表段，并附硬规则（禁止归一/写错部位视同数据错误）', () => {
+    const context = coverageContext({
+      混凝土强度等级: [placement('垫层', 'C15'), placement('基础', 'C30'), placement('梁板柱', 'C35')],
+    });
+    expect(context).toContain('本章材料规格-部位对照表');
+    expect(context).toContain('- 混凝土强度等级：垫层:C15｜基础:C30｜梁板柱:C35');
+    expect(context).toContain('禁止全文统一为一种规格');
+    expect(context).toContain('写错部位视同数据错误');
+  });
+
+  it('无 specAuthorityMap → 不注入对照表段（历史行为不变）', () => {
+    const context = coverageContext();
+    expect(context).not.toContain('材料规格-部位对照表');
+  });
+
+  it('单 placement 维度（无多规格混淆风险）→ 不注入', () => {
+    const context = coverageContext({
+      混凝土强度等级: [placement('垫层', 'C15')],
+    });
+    expect(context).not.toContain('材料规格-部位对照表');
+  });
+
+  it('同部位同规格去重后不足 2 个 → 不注入', () => {
+    const context = coverageContext({
+      混凝土强度等级: [placement('垫层', 'C15'), placement('垫层', 'C15')],
+    });
+    expect(context).not.toContain('材料规格-部位对照表');
+  });
+
+  it('单维度超过 8 个部位 → 截断到 8 个（防 token 爆炸）', () => {
+    const placements = Array.from({ length: 10 }, (_, index) => placement(`部位${index}`, `C${20 + index}`));
+    const context = coverageContext({ 混凝土强度等级: placements });
+    expect(context).toContain('部位0:C20');
+    expect(context).toContain('部位7:C27');
+    expect(context).not.toContain('部位8:C28');
+  });
+
+  it('多维度各自渲染（混凝土强度等级 + 砂浆强度等级）', () => {
+    const context = coverageContext({
+      混凝土强度等级: [placement('垫层', 'C15'), placement('基础', 'C30')],
+      砂浆强度等级: [placement('砌体', 'M5'), placement('抹灰', 'M10')],
+    });
+    expect(context).toContain('- 混凝土强度等级：垫层:C15｜基础:C30');
+    expect(context).toContain('- 砂浆强度等级：砌体:M5｜抹灰:M10');
   });
 });

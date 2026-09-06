@@ -199,7 +199,37 @@ export async function fillerParagraphIssues(
   return issues;
 }
 
-/** 3. 工艺参数密度：区分概况数字（面积/工期/层数）与工艺参数（mm/MPa/间距/偏差/试验） */
+/**
+ * 套话句修复锚点提取：与 fillerParagraphIssues 同源语义 gate，逐章逐块逐句输出命中句原文（含小节定位），
+ * 供模板化修复闭环（globalQualityGates.repairTemplatingIssues）做锚点直连修复。
+ * 检测定位 = 修复定位：命中句原文直接作为 repairChapterByQuality 的 anchorTexts，
+ * 修复器不重新定位（历史缺陷：修复器在整章复述定位套话句 → patch 全部落空 → 套话占比永不收敛）。
+ * 限幅：每章 12 句、全文 60 条（修复输入有界，防大文档锚点清单爆炸）。
+ */
+export async function fillerSentenceTargets(
+  chapters: DocumentDraftChapter[],
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<Array<{ chapterId?: string; chapterTitle: string; section: string; sentence: string }>> {
+  const targets: Array<{ chapterId?: string; chapterTitle: string; section: string; sentence: string }> = [];
+  const judge = await buildFillerParagraphGate(embedDocuments);
+  for (const chapter of chapters) {
+    let chapterCount = 0;
+    const seen = new Set<string>();
+    for (const block of extractSectionBlocks(chapter.content)) {
+      const sentences = block.body.split(/[。；;]/u).map(sentence => sentence.trim()).filter(sentence => sentence.length >= 12);
+      if (sentences.length === 0) continue;
+      const flags = await judge(sentences);
+      for (let index = 0; index < sentences.length; index += 1) {
+        if (!flags[index] || seen.has(sentences[index]) || chapterCount >= 12) continue;
+        seen.add(sentences[index]);
+        chapterCount += 1;
+        targets.push({ chapterId: chapter.id, chapterTitle: chapter.title, section: block.heading || chapter.title, sentence: sentences[index] });
+      }
+    }
+    if (targets.length >= 60) break;
+  }
+  return targets.slice(0, 60);
+}
 export function processParameterDensityIssues(chapters: DocumentDraftChapter[]): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   for (const chapter of chapters) {
@@ -278,8 +308,10 @@ export function sectionCardStructureIssues(chapters: DocumentDraftChapter[]): Va
       const incomplete = subPackages.filter(pkg => !workPackageContentElementsComplete(pkg));
       if (incomplete.length > 0) {
         issues.push({
-          level: 'warning',
-          severity: 'warning',
+          // 4.18.6 要素不全由 warning 升级 blocker：与专项验收/结构门禁同口径硬拦截，
+          // 缺任一要素的分项方案必须打回修复，不再直达交付（轮7 实测：要素不全块整包交付）
+          level: 'error',
+          severity: 'blocker',
           message: `${chapter.title} / ${line.replace(/^#{3}\s+(?:\d+(?:\.\d+)*\s+)?/u, '')} 有 ${incomplete.length}/${subPackages.length} 个分部分项内容要素不全（作业对象与工程量/工序顺序/施工方法至少缺一）`,
           suggestion: '每个分项方案需覆盖作业对象与工程量、工序安排、施工方法三方面要素，可分段用“施工概况/工艺流程/施工方法”标签组织，也可自然成文；工序顺序表达形式不限（顺序词叙述、编号步骤、列表或箭头链均可）。',
         });

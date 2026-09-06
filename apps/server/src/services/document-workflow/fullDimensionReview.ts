@@ -54,9 +54,12 @@ interface QingtianBlockReviewResult {
 /** 分块评审预算：单块基础字数上限（超长文档按块数上限自适应放大）、最大块数、修复章数、复评块数 */
 const REVIEW_BLOCK_MAX_CHARS = 9000;
 const REVIEW_BLOCK_MAX = 7;
-const REVIEW_REPAIR_CHAPTER_MAX = 3;
+// B7 修复吞吐提升（丰乐镇第七轮实测）：全维度评审检出 72 处问题但只修 7 处（3 章 × 至多
+// 3 条）——每轮生成的否决级/高风险残留大量入导出门禁阻断，修复吞吐是 90+ 目标的硬瓶颈；
+// 章节上限 3→8、每章问题 3→6（每章一次调用，增量成本约 5 次 LLM 调用）
+const REVIEW_REPAIR_CHAPTER_MAX = 8;
 const REVIEW_REREVIEW_BLOCK_MAX = 2;
-const REVIEW_ISSUES_PER_REPAIR = 3;
+const REVIEW_ISSUES_PER_REPAIR = 6;
 const REVIEW_RISK_ORDER: Record<QingtianReviewIssue['riskLevel'], number> = { '否决级': 0, '高风险': 1, '中风险': 2, '低风险': 3 };
 
 const REVIEW_SCHEMA: DocumentJsonSchema = {

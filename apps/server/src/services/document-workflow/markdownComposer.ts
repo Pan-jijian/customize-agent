@@ -3,7 +3,6 @@ import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
 import { WORK_PACKAGE_SECTION_RE } from './utils';
 import { displayChapterTitle, formalChapterTitle, isTenderClauseFragmentTitle, normalizeGeneratedChapterTitle } from './outline';
 import { composeEnhancedCoverMarkdown } from './composeAppendices';
-import { FORBIDDEN_PROMPT_PHRASES } from './tenderBidScoring';
 import { buildSemanticGate } from './semanticGate';
 
 export function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
@@ -522,7 +521,7 @@ export const MARKDOWN_TABLE_FORMAT_RULES = [
 export const TENDER_BID_WRITING_RULES = [
   '【内容落地五要素】每项管控措施必须写全五要素：方案 + 流程 + 责任人 + 时间节点 + 验收标准；责任人落到具体岗位（项目经理/技术负责人/施工员/质检员/安全员/材料员等），检查频次量化到每日/每周/每月/不少于X次，整改落到“整改→复查→销项”闭环。禁止只写“加强、落实、确保”式无责任、无标准、无频次的空话。',
   '【闭环句式密度硬约束】全文每 1500 字至少 1 段完整闭环句式：同一自然段内必须同时出现责任岗位（项目经理/技术负责人/施工员/质检员/安全员/材料员/试验员等）+ 检查频次（每日/每周/每月/不少于X次/定期）+ 整改闭环（整改/复查/销项/复验）三要素，缺一不可；禁止措施段落只有频次数字而无责任岗位，或只有岗位口号而无量化频次。',
-  `【空话禁用词】以下词语直接禁写，一律替换为“责任岗位 + 执行动作 + 量化标准 + 检查频次 + 整改闭环”句式：${FORBIDDEN_PROMPT_PHRASES.join('、')}；并避免“合理、充分、完善、切实、尽量、适时”等单字虚词作为措施句核心动词。`,
+  '【空话禁用】措施句不得使用无动作对象、无量化标准的宣传口号式短语作为核心表述，不得以单字虚词（合理、充分、完善、切实、尽量、适时）作为措施句核心动词；一律改写为“责任岗位 + 执行动作 + 量化标准 + 检查频次 + 整改闭环”句式。',
   '【评分点响应】段落首句先回应本节评分点或招标评审关键词，再展开具体措施；一段只写一个主题，避免多个得分点混在大段文字中；三级标题尽量直接放置评分关键词。',
   '【数据表格化】关键数据（建筑面积、层数、总工期、开工竣工节点、设备型号数量、管理人员配置、劳动力人数、材料批次、养护天数、检测频次、检验批划分）优先用表格呈现，不藏在正文大段文字中；正文中数据密集型内容（多组对比数值、多岗位职责分工、多阶段资源配置、多节点工期安排、多类管控指标、多工种劳动力分配）宁可多用表格，直观性优于纯文字叙述。表格前必须有 1～2 句引导叙述说明表格作用与关键结论，表格不能替代小节正文。每张表格应有说明性标题或表前引导句点名用途；同一主题同一数据不得重复堆叠凑数，但内容较多的主题可合理分组为多张表。',
   '【工艺参数密度】正文每 1000 字至少落位 6 处带单位的量化工艺参数（如 20mm、C30、0.5MPa、养护 28 天、搭接长度 500mm、压实度 95%、含水率 3%），均匀分布在各章节而非集中在个别小节；参数必须来自绑定材料或行业通用规范值，不得编造。',
@@ -962,12 +961,34 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
     result = re.test(result) ? result.replace(re, `## ${formalChapterTitle(index, chapter.title)}`) : result;
   });
   const lines = result.split(/\r?\n/u);
+  // 4.19 编号归一根治（合肥师范实测：正文 2.2/4.2 重复、4.6 缺失、目录与正文编号漂移）：
+  // ①H4→H3 升级此前依赖流式处理时序状态 hasRealActiveSection——同一输入不同时机产出不同结构，
+  //   finalize 链上多次归一后目录与正文漂移；改为两阶段扫描：先按章预计算「本章是否含真实 H3 小节」，
+  //   升级判断用章级常量，输出幂等。
+  // ②正文 H3 编号此前混用「规划索引+1」与「顺序+1」两种口径——plannedIndex 命中时编号回退到规划位置，
+  //   导致编号重复与跳号；改为恒按出现顺序单调递增，规划索引只用于标题名归一，不参与编号计算。
+  const chapterLineIndexes: number[] = [];
+  lines.forEach((line, lineIndex) => {
+    if (/^##\s+第[一二三四五六七八九十百千万\d]+章\s+/u.test(line.trim())) chapterLineIndexes.push(lineIndex);
+  });
+  const chapterHasRealSection = chapterLineIndexes.map((start, chapterIndex) => {
+    const end = chapterLineIndexes[chapterIndex + 1] ?? lines.length;
+    let inToc = false;
+    return lines.slice(start + 1, end).some(line => {
+      const trimmed = line.trim();
+      if (inToc) {
+        if (/^<div class="page-break"><\/div>$/u.test(trimmed)) inToc = false;
+        return false;
+      }
+      if (/^##\s+目录\s*$/u.test(trimmed)) { inToc = true; return false; }
+      return /^##\s+.+/u.test(trimmed) || /^###\s+.+/u.test(trimmed);
+    });
+  });
   let chapterIndex = -1;
   let sectionIndex = 0;
   let tertiaryIndex = 0;
   let activeSourceSection = '';
   let activeSourceSectionTitle = '';
-  let hasRealActiveSection = false;
   let emittedSectionKeys = new Set<string>();
   const plannedSectionIndex = (title: string) => {
     const sections = chapters[chapterIndex]?.sections || [];
@@ -979,7 +1000,7 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
     if (!cleanTitle || isInstructionLikeTitle(title) || isInstructionLikeTitle(cleanTitle)) return '';
     const plannedIndex = plannedSectionIndex(cleanTitle);
     const plannedSections = chapters[chapterIndex]?.sections || [];
-    const nextIndex = plannedIndex >= 0 ? plannedIndex + 1 : sectionIndex + 1;
+    const nextIndex = sectionIndex + 1;
     const sectionKey = plannedIndex >= 0 ? normalizePlannedSectionTitle(plannedSections[plannedIndex]) : normalizePlannedSectionTitle(cleanTitle);
     if (emittedSectionKeys.has(sectionKey)) {
       sectionIndex = nextIndex;
@@ -1021,26 +1042,24 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
       tertiaryIndex = 0;
       activeSourceSection = '';
       activeSourceSectionTitle = '';
-      hasRealActiveSection = false;
       emittedSectionKeys = new Set<string>();
       return line;
     }
     const h2ChineseSection = /^##\s+第[一二三四五六七八九十百千万\d]+节\s+(.+)$/u.exec(trimmed);
-    if (chapterIndex >= 0 && h2ChineseSection) { hasRealActiveSection = true; return normalizeSectionHeading(h2ChineseSection[1] || ''); }
+    if (chapterIndex >= 0 && h2ChineseSection) return normalizeSectionHeading(h2ChineseSection[1] || '');
     const h2SingleNumberedSection = /^##\s+\d+[.．、]\s+(.+)$/u.exec(trimmed);
-    if (chapterIndex >= 0 && h2SingleNumberedSection) { hasRealActiveSection = true; return normalizeSectionHeading(h2SingleNumberedSection[1] || ''); }
+    if (chapterIndex >= 0 && h2SingleNumberedSection) return normalizeSectionHeading(h2SingleNumberedSection[1] || '');
     const h2NumberedSection = /^##\s+(\d+)\.(\d+)\s+(.+)$/u.exec(trimmed);
-    if (chapterIndex >= 0 && h2NumberedSection) { hasRealActiveSection = true; return normalizeSectionHeading(h2NumberedSection[3] || '', `${h2NumberedSection[1]}.${h2NumberedSection[2]}`); }
+    if (chapterIndex >= 0 && h2NumberedSection) return normalizeSectionHeading(h2NumberedSection[3] || '', `${h2NumberedSection[1]}.${h2NumberedSection[2]}`);
     const h2PlainSection = /^##\s+(.+)$/u.exec(trimmed);
     if (chapterIndex >= 0 && h2PlainSection) {
       const plainTitle = displayChapterTitle(h2PlainSection[1] || '');
       if (/^本章目录$/u.test(plainTitle)) return '';
       if (/^附录/u.test(plainTitle)) return line;
-      hasRealActiveSection = true;
       return normalizeSectionHeading(plainTitle);
     }
     const section = /^###\s+(?:(\d+)\.(\d+)\s+)?(.+)$/u.exec(trimmed);
-    if (chapterIndex >= 0 && section) { hasRealActiveSection = true; return normalizeSectionHeading(section[3] || '', section[1] && section[2] ? `${section[1]}.${section[2]}` : undefined); }
+    if (chapterIndex >= 0 && section) return normalizeSectionHeading(section[3] || '', section[1] && section[2] ? `${section[1]}.${section[2]}` : undefined);
     const h3NumberedAsSection = /^####\s+(\d+)\.(\d+)(?!\.)\s+(.+)$/u.exec(trimmed);
     if (chapterIndex >= 0 && h3NumberedAsSection) {
       const candidateTitle = displayChapterTitle(h3NumberedAsSection[3] || '');
@@ -1050,7 +1069,7 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
       // 带两位编号的 H4 升级为 H3 仅限「LLM 全程用 #### X.Y 代替 H3」的误写场景：
       // 章内出现过真实 H3（###/## 节标题）后，一律视为小节内四级标题——否则工作包型小节下的
       // 工作包 H4（4.1/9.0 等）会被升成 H3，把目录结构撑爆
-      if (!hasRealActiveSection && !inWorkPackageSection && (isPlannedSection || plannedSectionsEmpty)) return normalizeSectionHeading(h3NumberedAsSection[3] || '', `${h3NumberedAsSection[1]}.${h3NumberedAsSection[2]}`);
+      if (!chapterHasRealSection[chapterIndex] && !inWorkPackageSection && (isPlannedSection || plannedSectionsEmpty)) return normalizeSectionHeading(h3NumberedAsSection[3] || '', `${h3NumberedAsSection[1]}.${h3NumberedAsSection[2]}`);
       return emitTertiary(candidateTitle, activeSourceSection);
     }
     const tertiary = /^####\s+(?:(\d+)\.(\d+)\.(\d+)\s+)?(.+)$/u.exec(trimmed);
@@ -1374,7 +1393,9 @@ export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 't
         ? removeCoverBlock(cleanedMarkdown)
         : removeCoverBlock(removeTocBlock(cleanedMarkdown))
     : cleanedMarkdown;
-  const normalizedMarkdown = sortChapterSectionsByNumber(promoteSameTitleWrapperSections(normalizeTertiaryHeadings(sanitizeFormalMarkdown(policyMarkdown))));
+  // 4.19 归一单次化：主链显式归一一次（normalizeFormalChapterHeadings 已幂等），infer/ensureFormalToc
+  // 内部归一是幂等重放不再产生漂移；目录源与成稿正文同一次归一结果
+  const normalizedMarkdown = sortChapterSectionsByNumber(promoteSameTitleWrapperSections(normalizeTertiaryHeadings(sanitizeFormalMarkdown(normalizeFormalChapterHeadings(policyMarkdown, chapters)))));
   const inferredSections = inferChapterSectionsFromMarkdown(normalizedMarkdown, chapters);
   // 章节 sections 保持规划大纲源（供承接审计/一致性校验等下游消费方使用）；
   // 目录渲染源为成稿正文 H3（见 ensureFormalToc 4.17.2 修正）——正文 H3 被 LLM 改写

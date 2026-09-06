@@ -195,10 +195,10 @@ describe('constructionOrgMajorContentIssues（项目主要施工内容门禁）'
     expect(issues[0].message).toContain('专业工程不足');
   });
 
-  it('工作包内容要素不全报 warning（4.17.9 标签不再是硬性要求）', () => {
+  it('工作包内容要素不全报 blocker（三要素硬门槛）', () => {
     const content = `### 2.3 项目主要施工内容\n${goodPackage(1, '室外道排工程')}\n${goodPackage(2, '屋面维修工程')}\n${goodPackage(3, '外墙装饰工程')}\n${goodPackage(4, '安装工程')}\n#### 2.3.5 土方开挖工程\n施工概况：范围明确。\n施工流程：放线→开挖。`;
     const issues = constructionOrgMajorContentIssues([chapter('项目主要施工内容', content)]);
-    expect(issues.some(issue => issue.level === 'warning' && issue.message.includes('内容要素不全'))).toBe(true);
+    expect(issues.some(issue => issue.severity === 'blocker' && issue.message.includes('内容要素不全'))).toBe(true);
   });
 
   it('脏事实进入工作包报污染 blocker', () => {
@@ -277,6 +277,22 @@ describe('constructionOrgDivisionSectionIssues（分部分项专项验收器）'
     expect(constructionOrgDivisionSectionIssues([chapter('工程概况', '内容。')])).toHaveLength(0);
   });
 
+  it('章标题无锚定词、正文 H4 形态关键小节（#### 3.1.1 主要分部分项工程施工方案）走全文兜底验证', () => {
+    // 轮7 实测：planner 历史管线把关键小节规划为 H4 要点，章 sections 无锚定词 → 候选为空，
+    // 验收器整条跳过导致该小节无人把关（5 个分项、缺 8 个骨架名、无任何报错）；
+    // 修复后候选为空时全文兜底提取（H3/H4 双兼容），分项不足必须被拦截
+    const content = `### 3.1 施工方案\n#### 3.1.1 主要分部分项工程施工方案\n${[divisionPackage(1, '土方开挖'), divisionPackage(2, '基础工程')].join('\n')}`;
+    const issues = constructionOrgDivisionSectionIssues([chapter('施工方案总体部署', content)]);
+    expect(issues.some(issue => issue.severity === 'blocker' && issue.message.includes('分项不足'))).toBe(true);
+  });
+
+  it('H4 形态关键小节内容完整走全文兜底不误报缺失', () => {
+    const content = `### 3.1 施工方案\n#### 3.1.1 主要分部分项工程施工方案\n${fiveDivision}`;
+    const issues = constructionOrgDivisionSectionIssues([chapter('施工方案总体部署', content)]);
+    // 兜底提取到小节内容并完成验证（5 个分项完整），不再报「小节缺失或标题结构异常」
+    expect(issues.some(issue => issue.message.includes('缺失'))).toBe(false);
+  });
+
   it('完整 5 分项无问题', () => {
     const content = `### 主要分部分项工程施工方案\n${fiveDivision}`;
     expect(constructionOrgDivisionSectionIssues([chapter('主要分部分项工程施工方案', content)])).toHaveLength(0);
@@ -296,10 +312,10 @@ describe('constructionOrgDivisionSectionIssues（分部分项专项验收器）'
     expect(issues[0].message).toContain('建议扩充');
   });
 
-  it('分项内容要素不全报 warning（4.17.9 标签不再是硬性要求）', () => {
+  it('分项内容要素不全报 blocker（三要素硬门槛）', () => {
     const content = `### 主要分部分项工程施工方案\n${divisionPackage(1, '土方开挖')}\n${divisionPackage(2, '基础工程')}\n${divisionPackage(3, '主体结构')}\n${divisionPackage(4, '防水工程')}\n#### 分项5 装饰装修\n施工概况：装饰范围明确。\n工艺流程：基层处理→面层施工。`;
     const issues = constructionOrgDivisionSectionIssues([chapter('主要分部分项工程施工方案', content)]);
-    expect(issues.some(issue => issue.level === 'warning' && issue.message.includes('内容要素不全'))).toBe(true);
+    expect(issues.some(issue => issue.severity === 'blocker' && issue.message.includes('内容要素不全'))).toBe(true);
   });
 
   it('脏事实/空话进入分项报 blocker', () => {
