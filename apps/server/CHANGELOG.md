@@ -1,5 +1,21 @@
 # server
 
+## 4.18.10
+
+### Patch Changes
+
+- fix(document-workflow): 丰乐镇真实模板第八轮修复
+
+  - normalization 评分口径修正：跨章一致性复核/事实一致性冲突等事实维度问题不再误计入编制规范性（tenderBidScoring）
+  - 装饰层工艺厚度异常检测+确定性修复：抹面/打底/找平/坐浆 200mm 串染除 10（documentIntegrityChecks）
+  - 劳动力峰值口径统一：总人数 vs 高峰人数多口径按多数口径确定性收敛（documentIntegrityChecks）
+  - 自伤句式 A21 形态改写（未采用新技术）与正向声明句豁免（documentIntegrityChecks）
+  - 评分响应空响应句确定性改写：价格调整/注册建造师/绿化养护三分支 + 空响应句修复器（tenderRequirements）
+  - 体系基准要求六项词面兜底：扬尘治理六个百分百总称条款词面命中 ≥4 判响应（tenderRequirements）
+  - 合同条款引用数字反查豁免：违约金阶梯/缺陷责任期等不再进事实反查池（qualityValidation）
+  - 全维度评审修复吞吐提升：修复章上限 3→8、每章问题 3→6（fullDimensionReview）
+  - 评审轮后表面修复兜底扩展：表格去重/装饰层厚度/劳动力峰值/自伤句式/空响应句（documentPipeline）
+
 ## 4.18.9
 
 ### Patch Changes

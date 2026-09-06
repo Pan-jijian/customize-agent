@@ -171,7 +171,7 @@ importers:
         specifier: ^6.3.2
         version: 6.3.2(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@customize-agent/knowledge':
-        specifier: ^4.4.3
+        specifier: ^4.4.5
         version: link:../../packages/knowledge
       '@customize-agent/llm':
         specifier: ^3.1.2
