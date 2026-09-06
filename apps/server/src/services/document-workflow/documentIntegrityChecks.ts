@@ -255,7 +255,6 @@ function laborPeakStageOf(markdown: string, index: number): string | undefined {
     })
     .pop();
   if (generic && (generic.index ?? 0) > bestPos) {
-    bestPos = generic.index ?? 0;
     best = generic[0];
   }
   return best;
