@@ -1711,10 +1711,14 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     // F9：章级角色上下文（评分项要求路由/数据口径约束）拆出上移 L2 共享段（同章各块完全相同），
     // 块级 roleContext 只保留块专属段（factsHint/coverageList）——共享前缀变长，命中率回升
     const forbiddenTitlesLine = otherBlockTitleSet.size > 0 ? `严禁将以下属于本章其他小节的标题作为本节任何标题输出（H3 仅允许「${block.title}」，H4 仅允许上面清单中的标题）：${[...otherBlockTitleSet].join('、')}。` : '';
-    const blockRoleContext = [factsHint, blockSkeletonPrompt, `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下清单逐点写出实施性正文，标题必须与给定标题完全一致，不得改名、合并或遗漏；每个要点必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题：\n${coverageList}${forbiddenTitlesLine ? `\n${forbiddenTitlesLine}` : ''}`].filter(Boolean).join('\n\n');
+    // A22 单要点大块拆半分工指令（丰乐镇第九轮）：两半块共享同一 H4 要点，靠 halfFocus
+    // 划定内容边界（前半=总体构成/框架，后半=具体展开/实施），防止两半块产出雷同正文
+    const halfFocusLine = block.halfFocus ? `\n${block.halfFocus}` : '';
+    const blockRoleContext = [factsHint, blockSkeletonPrompt, `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下清单逐点写出实施性正文，标题必须与给定标题完全一致，不得改名、合并或遗漏；每个要点必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题：\n${coverageList}${forbiddenTitlesLine ? `\n${forbiddenTitlesLine}` : ''}${halfFocusLine}`].filter(Boolean).join('\n\n');
     let lastMissing: string[] = [];
     let lastDuplicates: string[] = [];
     let lastExtraneous: string[] = [];
+    let lastChars = 0;
     // 2.6 补写上限收紧：块级写作/反馈重试循环上限显式化（默认 2，与既有行为一致；
     // DOCUMENT_BLOCK_MAX_ATTEMPTS 可调，=0 回退旧值 2）——上限超出即判失败转上层紧凑备用
     const blockMaxAttempts = (() => {
@@ -1730,7 +1734,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         lastDuplicates.length ? `重复展开的 H4 要点标题：${lastDuplicates.join('、')}。同一小节内相同要点被重复展开多轮，必须只保留一轮完整展开，其余重复小节连同标题整体删除，不得以换编号方式重复同一内容。` : '',
         lastExtraneous.length ? `清单外标题（属于本章其他小节或不在本节要点清单内）：${lastExtraneous.join('、')}。这些标题连同其正文整块删除，本节只允许输出上面清单中的 H4 标题与「${block.title}」H3 标题。` : '',
         lastMissing.length === 0 && lastDuplicates.length === 0 && lastExtraneous.length === 0 ? '必须完整包含每个 H4 要点标题并展开正文，不得合并或遗漏要点。' : '',
-        '总字数不少于目标字数。',
+        // A22 缺口数字反馈（丰乐镇第九轮）：只报“不少于目标字数”不报缺口时模型输出不升反降
+        //（第八轮实测 1742→1377 字）；带当前字数与缺口数字的反馈比笼统指令收敛有效得多
+        lastChars > 0 ? `当前输出仅 ${lastChars} 字，距目标 ${block.targetWords} 字还缺 ${Math.max(0, block.targetWords - lastChars)} 字，必须逐点展开到不少于 ${Math.floor(block.targetWords * 0.9)} 字。` : '总字数不少于目标字数。',
       ].filter(Boolean).join('');
       try {
         // 2.6 串行链观测拆解：块内每次写作调用单独记 measure（含 attempt 序），
@@ -1792,6 +1798,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           skeletonMissing = blockSkeletonNames.filter(name => !headingLines.some(line => normalizeSubsectionTitleForDedup(line).includes(normalizeSubsectionTitleForDedup(name))));
         }
         const chars = documentTextLength(withBlockShell);
+        lastChars = chars;
         // 稳定版：骨架小缺口豁免阻断（缺口 ≤2 个包时交全卷修复链 enforceWorkPackageSkeletons 锚点直连补写兑底，
         // 补 1-2 个包成功率高）——历史缺陷：差 1-2 个包导致整块重试/拆半耗尽 → 章失败 → 修复链根本没机会跑；
         // 缺口 >2 仍阻断（骨架大面积缺失说明写作未遵循骨架要求，重试/拆半有价值）

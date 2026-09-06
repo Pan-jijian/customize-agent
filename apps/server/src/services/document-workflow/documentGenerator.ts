@@ -37,7 +37,7 @@ import { buildGenerationBudget, type GenerationBudget } from './generationBudget
 import { buildProjectMaterialProfile, buildProjectUnderstanding, expandProjectMaterialBindings, materialKindMaps, materialRoleId, retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from './projectMaterialProfile';
 import { buildChapterFactCoverageContext, buildLlmChapterContent, buildPlannedChapterContent, buildSectionParallelChapterContent, capFactCoverageContext, evidenceForSection, outputTokensForChapter } from './chapterGeneration';
 import type { PlannedChapterContentInput, PlannedChapterContentResult } from './chapterGeneration';
-import { planChapterStructure, type PlannedChapterStructure } from './chapterPlanner';
+import { planChapterStructure, splitSinglePointOversizedBlocks, type PlannedChapterStructure } from './chapterPlanner';
 import { QUANTIFIED_FACT_RE } from './parameterPatterns';
 import { chapterSectionFactUsageIssues } from './chapterReview';
 import { buildRuntimePromptRules, cleanSectionTitleArtifacts, extractPromptStructuralRules, normalizePlannedSections, planAdditionalSectionsWithLlm, planChapterSectionsWithLlm, runtimePromptRulesPrompt } from './promptRuleExtraction';
@@ -1323,9 +1323,12 @@ export async function generateDocumentDraft(input: { templateId: string; require
         const chapterTitleForBlueprint = displayChapterTitle(chapter.title);
         const blueprintChapterLines = documentBlueprintContext.split('\n').filter(line => line.includes(chapterTitleForBlueprint));
         const plannedBlueprintContext = blueprintChapterLines.length > 0 ? blueprintChapterLines.join('\n') : documentBlueprintContext;
-        const plannedStructure = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-plan:${chapter.id}`, () =>
+        const plannedStructureRaw = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `chapter-plan:${chapter.id}`, () =>
           planChapterStructure({ template, chapter, evidence, projectContext, requirement: input.requirement, roleContext, targetWords: effectiveTargetWords, graphContext: chapterTaskResult.task.graphContext, blueprintContext: plannedBlueprintContext, signal: input.signal, diagnostics: generationDiagnostics })
         ));
+        // A22 单要点大块确定性拆分（丰乐镇第八轮失败实测）：规划器产出单要点 3600 字大块时
+        // 模型单次输出达不到达标线且无拆半退路 → 章失败；规划层即拆为两个半块（目标减半+分工指令）
+        const plannedStructure = splitSinglePointOversizedBlocks(plannedStructureRaw);
         if (plannedStructure.blocks.length > 0) {
           plannedStructureRef = plannedStructure;
           const plannedPromptTexts = [chapterPromptTexts, chapterTaskPromptForPlannedStructure(chapterTaskResult.task, plannedStructure)].filter(Boolean).join('\n\n');

@@ -40,6 +40,9 @@ export interface PlannedChapterBlock {
   facts: string[];
   /** 本块目标字数（1200~2200） */
   targetWords: number;
+  /** 单要点大块拆分后的半块内容分工指令（第九轮）：两半块共享同一要点时靠此指令区分
+   * 内容边界（前半=总体构成/框架，后半=具体展开/实施），防止两半块产出雷同正文 */
+  halfFocus?: string;
 }
 
 export interface PlannedChapterStructure {
@@ -52,6 +55,25 @@ export interface PlannedChapterStructure {
   llmPlanned: boolean;
   /** LLM 规划未命中原因（诊断与进度展示用） */
   llmFailure?: string;
+}
+
+/** 单要点大块确定性拆分（丰乐镇第九轮方案）：规划器产出 subPoints===1 且 targetWords>2400 的
+ * 大块时（如「项目主要施工内容」3600 字），模型单次稳定输出 1400~1900 字达不到 0.9×目标达标线，
+ * 且要点=1 不满足 writeBlock 拆半自愈条件（要点≥2）→ 两次尝试+两轮隔离重试全耗尽 → 章失败
+ *（第八轮真实模板实测）。规划层即拆为两个半块：目标减半、共享同一要点，靠 H3 子标题（一）（二）
+ * 与 halfFocus 内容分工指令区分，半块达标线落在模型单次输出能力内。 */
+export function splitSinglePointOversizedBlocks(structure: PlannedChapterStructure): PlannedChapterStructure {
+  const oversized = structure.blocks.some(block => block.subPoints.length === 1 && block.targetWords > 2400);
+  if (!oversized) return structure;
+  const blocks = structure.blocks.flatMap(block => {
+    if (block.subPoints.length !== 1 || block.targetWords <= 2400) return [block];
+    const halfTarget = Math.max(1200, Math.floor(block.targetWords / 2));
+    return [
+      { ...block, title: `${block.title}（一）`, targetWords: halfTarget, halfFocus: '本部分为该主题的前半部分，聚焦总体构成与组织框架：逐项列明构成要素、总体规模指标与组织方式；只写本部分内容，不得涉及后半部分的具体展开。' },
+      { ...block, title: `${block.title}（二）`, targetWords: halfTarget, halfFocus: '本部分为该主题的后半部分，聚焦具体展开与实施要求：逐项展开实施内容、工艺要求与衔接安排；只写本部分内容，不得重复前半部分的总体框架。' },
+    ];
+  });
+  return { ...structure, blocks };
 }
 
 const LF = String.fromCharCode(10);

@@ -1159,6 +1159,48 @@ export async function selfUnderminingCandidateIssues(markdown: string): Promise<
 
 // ── 11. 叠词重复检测（Q8 前半）：同一双字词紧邻重复（“执行执行”“进行进行”），L1 封闭结构提取 + 确定性去重 ──
 
+/** 确定性修复结果统一口径：修复后全文 + 修复处数（fixedCount===0 等价于同源检测器零命中） */
+export interface DeterministicFixOutcome {
+  markdown: string;
+  fixedCount: number;
+}
+
+/** 节点内闭环修复（丰乐镇第九轮方案）：修复器修复后重复运行自身直至零命中或轮次上限——
+ * 检测定位=修复定位同源，fixedCount===0 等价于该节点负责的问题清零；修复本身可能引入新形态
+ *（修复 A 后 A 的新命中），单遍修复无法收敛。轮次上限 + 无进展跳出双保险防死循环。
+ * 只修复完成才返回（或达到上限），替代“单遍修复后无条件进入下一节点”的直线模式。 */
+export function runFixUntilClean(fix: (markdown: string) => DeterministicFixOutcome, markdown: string, maxRounds = 3): DeterministicFixOutcome {
+  let current = markdown;
+  let total = 0;
+  for (let round = 0; round < maxRounds; round += 1) {
+    const result = fix(current);
+    if (result.fixedCount === 0) break;
+    current = result.markdown;
+    total += result.fixedCount;
+  }
+  return { markdown: current, fixedCount: total };
+}
+
+/** 链级收敛循环（丰乐镇第九轮方案）：整链修复器按序跑完后复查——任一修复器有新命中即整链重跑，
+ * 修复器互相引入的问题（A 修复后 B 新命中）在链循环中收敛，而不是堆到最后一个节点兑底；
+ * 无进展即跳出（防互搏死循环）。 */
+export function runDeterministicChainUntilConverged(fixers: Array<(markdown: string) => DeterministicFixOutcome>, markdown: string, maxRounds = 3): DeterministicFixOutcome {
+  let current = markdown;
+  let total = 0;
+  for (let round = 0; round < maxRounds; round += 1) {
+    let roundTotal = 0;
+    for (const fix of fixers) {
+      const result = fix(current);
+      if (result.fixedCount === 0) continue;
+      current = result.markdown;
+      roundTotal += result.fixedCount;
+    }
+    if (roundTotal === 0) break;
+    total += roundTotal;
+  }
+  return { markdown: current, fixedCount: total };
+}
+
 // B6 负向语境豁免（丰乐镇第五轮实测）：「全部分部分项内容」中的「部(2)分(3)部(4)分(5)」
 // 被字符级叠词检测误判为「部分部分」（行业标准术语分部分项被误报且收敛修复会破坏术语）；
 // 匹配前为「分」或匹配后为「项」的紧邻重复属「分部分项」术语内部，不判叠词也不收敛。

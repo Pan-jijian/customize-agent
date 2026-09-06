@@ -102,7 +102,9 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
     const retryPrompt = llmMock.mock.calls[1][1];
     expect(retryPrompt).toContain('上一轮未通过质检');
     expect(retryPrompt).toContain(H4B);
-    expect(retryPrompt).toContain('总字数不少于目标字数');
+    // A22 缺口数字反馈：重试轮带「当前 N 字…还缺 K 字」与 0.9×目标达标线数字
+    expect(retryPrompt).toContain('距目标 500 字还缺');
+    expect(retryPrompt).toContain('必须逐点展开到不少于 450 字');
   });
 
   it('两轮不达标 → 返回失败块隔离清单（成功块保留，不整章降级重写）', async () => {

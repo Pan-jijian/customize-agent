@@ -12,7 +12,7 @@ import { validateFactConsistency } from '../document-validation/factConsistencyS
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from './budget';
 import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown, markdownTableQualityIssues } from './qualityValidation';
-import { applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixFinishThickness, fixLaborPeakConflict, fixSelfUnderminingCandidates, fixTocFromBody, mergeTableLineResidues, planDataMasterAuthorities, stripCommercialDataBodyLines, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters } from './documentIntegrityChecks';
+import { applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixFinishThickness, fixLaborPeakConflict, fixSelfUnderminingCandidates, fixTocFromBody, mergeTableLineResidues, planDataMasterAuthorities, runDeterministicChainUntilConverged, runFixUntilClean, stripCommercialDataBodyLines, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters } from './documentIntegrityChecks';
 import type { PlanDataMaster } from './planDataMaster';
 import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
 import { semanticChoiceConflicts, semanticChoiceConflictIssue } from './dataConsistencyReview';
@@ -859,19 +859,21 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   let stage5SelfFixCount = 0;
   let stage5EmptyRespCount = 0;
   for (const chapter of finalChapterDrafts) {
-    const residueFix = mergeTableLineResidues(chapter.content);
+    // 节点内闭环（丰乐镇第九轮方案）：每个确定性修复器修复后重跑自身直至零命中，
+    // 修复完成才进入下一修复器——替代“单遍修复后无条件走下一节点”的直线模式
+    const residueFix = runFixUntilClean(md => { const r = mergeTableLineResidues(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (residueFix.fixedCount > 0) { chapter.content = residueFix.markdown; stage5ResidueCount += residueFix.fixedCount; }
     chapter.content = collapseRepeatedWords(chapter.content);
     // A21 装饰层厚度/劳动力峰值/自伤句式/空响应句（丰乐镇第七轮实测）：
     // 装饰层厚度 200mm 串染（抹面/打底/坐浆）、总人数 vs 高峰人数多口径、
     // 「未采用新技术」自伤句、LLM 自由发挥的空响应句——检测定位=修复定位同源，章节级原地修
-    const finishFix = fixFinishThickness(chapter.content);
+    const finishFix = runFixUntilClean(md => { const r = fixFinishThickness(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (finishFix.fixedCount > 0) { chapter.content = finishFix.markdown; stage5FinishFixCount += finishFix.fixedCount; }
-    const laborFix = fixLaborPeakConflict(chapter.content);
+    const laborFix = runFixUntilClean(md => { const r = fixLaborPeakConflict(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (laborFix.fixedCount > 0) { chapter.content = laborFix.markdown; stage5LaborFixCount += laborFix.fixedCount; }
-    const selfFix = fixSelfUnderminingCandidates(chapter.content);
+    const selfFix = runFixUntilClean(md => { const r = fixSelfUnderminingCandidates(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (selfFix.fixedCount > 0) { chapter.content = selfFix.markdown; stage5SelfFixCount += selfFix.fixedCount; }
-    const emptyRespFix = fixEmptyScoringResponses(chapter.content);
+    const emptyRespFix = runFixUntilClean(md => { const r = fixEmptyScoringResponses(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (emptyRespFix.fixedCount > 0) { chapter.content = emptyRespFix.markdown; stage5EmptyRespCount += emptyRespFix.fixedCount; }
   }
   if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5LaborFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0) {
@@ -954,16 +956,17 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 最终导出前对全文再跑一遍残行合并+叠词收敛（与检测器同口径，零成本零误伤）。
   // A21 扩展（丰乐镇第七轮实测）：评审轮 patch 同样会再引入表格重复/装饰层 200mm 串染/
   // 劳动力多口径/自伤句式/空响应句，一并纳入评审轮后兜底，与 stage5 链同源。
-  let surfaceFixRound2Result = mergeTableLineResidues(collapseRepeatedWords(finalMarkdown));
-  surfaceFixRound2Result = { markdown: stripDuplicateTables(surfaceFixRound2Result.markdown).markdown, fixedCount: surfaceFixRound2Result.fixedCount };
-  const surfaceFinishFix = fixFinishThickness(surfaceFixRound2Result.markdown);
-  if (surfaceFinishFix.fixedCount > 0) surfaceFixRound2Result.markdown = surfaceFinishFix.markdown;
-  const surfaceLaborFix = fixLaborPeakConflict(surfaceFixRound2Result.markdown);
-  if (surfaceLaborFix.fixedCount > 0) surfaceFixRound2Result.markdown = surfaceLaborFix.markdown;
-  const surfaceSelfFix = fixSelfUnderminingCandidates(surfaceFixRound2Result.markdown);
-  if (surfaceSelfFix.fixedCount > 0) surfaceFixRound2Result.markdown = surfaceSelfFix.markdown;
-  const surfaceEmptyRespFix = fixEmptyScoringResponses(surfaceFixRound2Result.markdown);
-  if (surfaceEmptyRespFix.fixedCount > 0) surfaceFixRound2Result.markdown = surfaceEmptyRespFix.markdown;
+  // 第九轮链级收敛：单遍兜底升级为链循环——任一修复器有新命中即整链重跑，
+  // 修复器互相引入的问题在链中收敛，不再依赖“最后一个节点单遍修所有”的直线兜底。
+  const surfaceFixRound2Result = runDeterministicChainUntilConverged([
+    md => { const r = mergeTableLineResidues(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    md => { const next = collapseRepeatedWords(md); return { markdown: next, fixedCount: next === md ? 0 : 1 }; },
+    md => { const r = stripDuplicateTables(md); return { markdown: r.markdown, fixedCount: r.removedCount }; },
+    md => { const r = fixFinishThickness(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    md => { const r = fixLaborPeakConflict(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    md => { const r = fixSelfUnderminingCandidates(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    md => { const r = fixEmptyScoringResponses(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+  ], finalMarkdown, 3);
   if (surfaceFixRound2Result.markdown !== finalMarkdown) {
     finalMarkdown = surfaceFixRound2Result.markdown;
     await recomputeFinalValidationBundle();

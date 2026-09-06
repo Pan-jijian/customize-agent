@@ -56,10 +56,18 @@ const REVIEW_BLOCK_MAX_CHARS = 9000;
 const REVIEW_BLOCK_MAX = 7;
 // B7 修复吞吐提升（丰乐镇第七轮实测）：全维度评审检出 72 处问题但只修 7 处（3 章 × 至多
 // 3 条）——每轮生成的否决级/高风险残留大量入导出门禁阻断，修复吞吐是 90+ 目标的硬瓶颈；
-// 章节上限 3→8、每章问题 3→6（每章一次调用，增量成本约 5 次 LLM 调用）
-const REVIEW_REPAIR_CHAPTER_MAX = 8;
+// 章节上限 3→8、每章问题 3→6（每章一次调用，增量成本约 5 次 LLM 调用）。
+// 第九轮修复-复评闭环：章数上限彻底移除（全部有问题的章都进修复），每章问题 6→12；
+// 修复后复评仍有否决/高风险则继续下一轮修复，直至清零或轮次上限（默认 3，
+// DOCUMENT_QINGTIAN_REVIEW_ROUNDS 可调），复评问题数不减少即提前退出（防死循环）。
 const REVIEW_REREVIEW_BLOCK_MAX = 2;
-const REVIEW_ISSUES_PER_REPAIR = 6;
+const REVIEW_ISSUES_PER_REPAIR = 12;
+/** 修复-复评闭环轮次上限（环境变量可调；=0 回退默认 3） */
+const REVIEW_ROUNDS_MAX = (() => {
+  const raw = Number(process.env.DOCUMENT_QINGTIAN_REVIEW_ROUNDS ?? 3);
+  if (raw === 0) return 3;
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 3;
+})();
 const REVIEW_RISK_ORDER: Record<QingtianReviewIssue['riskLevel'], number> = { '否决级': 0, '高风险': 1, '中风险': 2, '低风险': 3 };
 
 const REVIEW_SCHEMA: DocumentJsonSchema = {
@@ -286,60 +294,78 @@ export async function runFullDimensionReview(input: FullDimensionReviewInput): P
     result.reviewed = true;
     return result;
   }
-  // ── 3. 定向修复：仅否决级/高风险进修复（中低风险只报告），每章一次调用合并至多 3 条问题 ──
-  const chapterIssueGroups: Array<{ chapterIndex: number; issues: QingtianReviewIssue[] }> = [];
-  for (const issue of rankedIssues) {
-    if (issue.riskLevel !== '否决级' && issue.riskLevel !== '高风险') continue;
-    const chapterIndex = locateChapterByIssue(issue, chapters);
-    if (chapterIndex < 0) continue;
-    const group = chapterIssueGroups.find(item => item.chapterIndex === chapterIndex);
-    if (group) {
-      if (group.issues.length < REVIEW_ISSUES_PER_REPAIR) group.issues.push(issue);
-    } else if (chapterIssueGroups.length < REVIEW_REPAIR_CHAPTER_MAX) {
-      chapterIssueGroups.push({ chapterIndex, issues: [issue] });
+  // ── 3. 修复-复评闭环（第九轮方案）：否决级/高风险全量进修复（不限章数），修复后复评，
+  // 复评仍有否决/高风险则继续下一轮修复——每个节点（评审/修复/复评）自己的问题清干净
+  // 才允许收尾；轮次上限 + 无进展提前退出双保险防死循环。 ──
+  const lowRiskIssues = rankedIssues.filter(issue => issue.riskLevel !== '否决级' && issue.riskLevel !== '高风险');
+  let pendingBlockers = rankedIssues.filter(issue => issue.riskLevel === '否决级' || issue.riskLevel === '高风险');
+  let prevRemainingCount = Number.MAX_SAFE_INTEGER;
+  for (let round = 0; round < REVIEW_ROUNDS_MAX && pendingBlockers.length > 0; round += 1) {
+    // 按章分组：全部有检出问题的章都进修复，每章一次调用合并至多 REVIEW_ISSUES_PER_REPAIR 条
+    const chapterIssueGroups: Array<{ chapterIndex: number; issues: QingtianReviewIssue[] }> = [];
+    for (const issue of pendingBlockers) {
+      const chapterIndex = locateChapterByIssue(issue, chapters);
+      if (chapterIndex < 0) continue;
+      const group = chapterIssueGroups.find(item => item.chapterIndex === chapterIndex);
+      if (group) {
+        if (group.issues.length < REVIEW_ISSUES_PER_REPAIR) group.issues.push(issue);
+      } else {
+        chapterIssueGroups.push({ chapterIndex, issues: [issue] });
+      }
     }
-  }
-  for (const group of chapterIssueGroups) {
-    const chapter = chapters[group.chapterIndex];
-    const templateChapter = effectiveChapters.find(item => item.id === chapter.id || item.title === chapter.title);
-    onStage?.({ status: 'running', message: `全维度评审修复：${chapter.title}（${group.issues.length} 处）`, details: group.issues.map(issue => `[${issue.riskLevel}]${issue.description.slice(0, 48)}`) });
-    const repaired = await run(() => repairChapterByQuality({
-      template,
-      chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence, missingFacts: chapter.missingFacts, sections: chapter.sections },
-      issues: group.issues.map(issue => `[${issue.riskLevel}][${issue.dimension}] ${issue.description}（原文：${issue.quote}）`),
-      promptTexts: qingtianFixInstructionFor(group.issues),
-      requirement,
-      forbidDrawingImages: false,
-      diagnostics,
-      signal,
-      patchGuard,
-    }));
-    result.repairCalls += 1;
-    const applied = Boolean(repaired.content && repaired.content !== chapter.content);
-    if (applied) {
-      chapters[group.chapterIndex] = { ...chapter, content: templateChapter ? finalizeChapterContentQuality(repaired.content, templateChapter) : repaired.content };
-      result.fixedCount += repaired.appliedCount;
-      result.repairedChapters.push(chapter.title);
+    if (chapterIssueGroups.length === 0) break;
+    let roundApplied = 0;
+    for (const group of chapterIssueGroups) {
+      const chapter = chapters[group.chapterIndex];
+      const templateChapter = effectiveChapters.find(item => item.id === chapter.id || item.title === chapter.title);
+      onStage?.({ status: 'running', message: `全维度评审修复（第 ${round + 1} 轮）：${chapter.title}（${group.issues.length} 处）`, details: group.issues.map(issue => `[${issue.riskLevel}]${issue.description.slice(0, 48)}`) });
+      const repaired = await run(() => repairChapterByQuality({
+        template,
+        chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence, missingFacts: chapter.missingFacts, sections: chapter.sections },
+        issues: group.issues.map(issue => `[${issue.riskLevel}][${issue.dimension}] ${issue.description}（原文：${issue.quote}）`),
+        promptTexts: qingtianFixInstructionFor(group.issues),
+        requirement,
+        forbidDrawingImages: false,
+        diagnostics,
+        signal,
+        patchGuard,
+      }));
+      result.repairCalls += 1;
+      const applied = Boolean(repaired.content && repaired.content !== chapter.content);
+      if (applied) {
+        chapters[group.chapterIndex] = { ...chapter, content: templateChapter ? finalizeChapterContentQuality(repaired.content, templateChapter) : repaired.content };
+        result.fixedCount += repaired.appliedCount;
+        result.repairedChapters.push(chapter.title);
+        roundApplied += 1;
+      }
+      onStage?.({ status: applied ? 'success' : 'failed', message: applied ? `全维度评审修复完成：${chapter.title}（${repaired.appliedCount} 处 patch）` : `全维度评审修复未生效：${chapter.title}`, details: group.issues.map(issue => `[${issue.riskLevel}]${issue.description.slice(0, 48)}`) });
     }
-    onStage?.({ status: applied ? 'success' : 'failed', message: applied ? `全维度评审修复完成：${chapter.title}（${repaired.appliedCount} 处 patch）` : `全维度评审修复未生效：${chapter.title}`, details: group.issues.map(issue => `[${issue.riskLevel}]${issue.description.slice(0, 48)}`) });
+    // 修复全部未生效时继续循环无意义（修复器已无力修复，残留交给门禁报告）
+    if (roundApplied === 0) break;
+    // 复评：修复章最新内容重新分段评审（≤2 块），确认否决级/高风险问题是否消除
+    const repairedChapterIds = new Set<string>(chapterIssueGroups.map(group => chapters[group.chapterIndex].id));
+    const reReviewBlocks = splitChaptersIntoReviewBlocks(chapters.filter(chapter => repairedChapterIds.has(chapter.id)), REVIEW_BLOCK_MAX_CHARS, REVIEW_REREVIEW_BLOCK_MAX);
+    const nextBlockers: QingtianReviewIssue[] = [];
+    for (let blockIndex = 0; blockIndex < reReviewBlocks.length; blockIndex += 1) {
+      const block = reReviewBlocks[blockIndex];
+      onStage?.({ status: 'running', message: `全维度评审复评（第 ${round + 1} 轮）：第 ${blockIndex + 1}/${reReviewBlocks.length} 块（${block.map(chapter => chapter.title).join('、')}）`, details: [] });
+      const reReviewed = await run(() => reviewDocumentBlock(block, { projectName: projectName || '本项目', requirement, knownConflictLines, headings, blockIndex: blockIndex + 1, blockTotal: reReviewBlocks.length }, diagnostics, signal));
+      result.reReviewCalls += 1;
+      if (!reReviewed) {
+        onStage?.({ status: 'failed', message: `全维度评审复评：第 ${blockIndex + 1}/${reReviewBlocks.length} 块无响应，跳过`, details: [] });
+        continue;
+      }
+      nextBlockers.push(...(reReviewed.issues || []).filter(issue => normalizeRiskLevel(issue.riskLevel) === '否决级' || normalizeRiskLevel(issue.riskLevel) === '高风险'));
+    }
+    pendingBlockers = dedupeQingtianIssues(nextBlockers);
+    // 无进展提前退出：非首轮复评残留不减少 → 继续修徒增调用（修复轮已无边际收益）
+    if (round >= 1 && pendingBlockers.length >= prevRemainingCount) break;
+    prevRemainingCount = pendingBlockers.length;
   }
-  // ── 4. 复评：修复章最新内容重新分段评审（≤2 块），确认否决级/高风险问题是否消除 ──
+  // ── 4. 残留：闭环循环结束后的否决/高风险残留 + 中低风险（只报告不修复）──
   const remainingIssues: QingtianReviewIssue[] = [];
-  const repairedChapterIds = new Set<string>(chapterIssueGroups.map(group => chapters[group.chapterIndex].id));
-  const reReviewBlocks = splitChaptersIntoReviewBlocks(chapters.filter(chapter => repairedChapterIds.has(chapter.id)), REVIEW_BLOCK_MAX_CHARS, REVIEW_REREVIEW_BLOCK_MAX);
-  for (let blockIndex = 0; blockIndex < reReviewBlocks.length; blockIndex += 1) {
-    const block = reReviewBlocks[blockIndex];
-    onStage?.({ status: 'running', message: `全维度评审复评：第 ${blockIndex + 1}/${reReviewBlocks.length} 块（${block.map(chapter => chapter.title).join('、')}）`, details: [] });
-    const reReviewed = await run(() => reviewDocumentBlock(block, { projectName: projectName || '本项目', requirement, knownConflictLines, headings, blockIndex: blockIndex + 1, blockTotal: reReviewBlocks.length }, diagnostics, signal));
-    result.reReviewCalls += 1;
-    if (!reReviewed) {
-      onStage?.({ status: 'failed', message: `全维度评审复评：第 ${blockIndex + 1}/${reReviewBlocks.length} 块无响应，跳过`, details: [] });
-      continue;
-    }
-    remainingIssues.push(...(reReviewed.issues || []).filter(issue => normalizeRiskLevel(issue.riskLevel) === '否决级' || normalizeRiskLevel(issue.riskLevel) === '高风险'));
-  }
-  // 中低风险问题不修复，直接进入剩余清单供交付报告展示
-  remainingIssues.push(...rankedIssues.filter(issue => issue.riskLevel === '中风险' || issue.riskLevel === '低风险'));
+  remainingIssues.push(...pendingBlockers);
+  remainingIssues.push(...lowRiskIssues);
   result.remainingIssues = dedupeQingtianIssues(remainingIssues);
   result.reviewed = true;
   onStage?.({ status: 'success', message: `全维度评审完成：${blocks.length} 块评审检出 ${result.issuesFound} 处问题，修复 ${result.fixedCount} 处 patch，剩余 ${result.remainingIssues.length} 处`, details: result.remainingIssues.slice(0, 6).map(issue => `[${issue.riskLevel}][${issue.dimension}]${issue.description.slice(0, 40)}`) });
