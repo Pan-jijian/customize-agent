@@ -309,10 +309,18 @@ export function markdownRowValue(parsedRows: Map<string, [string, string]>, patt
 const AWARD_OBJECTIVE_IN_TEXT_RE = /(?:黄山杯|鲁班奖|白玉兰杯|钱江杯|扬子杯|安济杯|长安杯|汾水杯|省优|市优|国优|优质工程|确保[^。；;|，、,\n]{0,10}(?:杯|奖))/u;
 
 function awardObjectivePhrase(facts: DocumentFact[], fullMarkdown: string): string | undefined {
+  // 权威否定校验（丰乐镇第五轮）：招标文件「创优目标☑无」时不得杜撰创优短语——
+  // 事实层明确否定（无/不设类）时阻断；无任何创优事实时保留正文口径兜底（第 3 轮设计），
+  // 不强制要求创优事实存在（正文兜底场景：事实未提取但正文已写「确保黄山杯」）
+  const awardFacts = facts.filter(fact => /创优|优质优价|奖项|奖惩|award/u.test(`${fact.fieldId || ''}${fact.key || ''}${fact.fieldName || ''}`));
+  const hasExplicitNoAward = awardFacts.some(fact => {
+    const value = cleanInlineFactValue(stringifyFactValue(fact.value || ''));
+    return Boolean(value) && /^(?:无|否|不设|未设|无创优|无奖项|不作|不要求|不设创优)$/u.test(value.trim());
+  });
+  if (hasExplicitNoAward) return undefined;
   const texts: string[] = [];
-  for (const fact of facts) {
-    const fieldText = `${fact.fieldId || ''}${fact.key || ''}${fact.fieldName || ''}`;
-    if (/创优|优质优价|奖项|奖惩|award/u.test(fieldText)) texts.push(cleanInlineFactValue(stringifyFactValue(fact.value || '')));
+  for (const fact of awardFacts) {
+    texts.push(cleanInlineFactValue(stringifyFactValue(fact.value || '')));
   }
   texts.push(fullMarkdown);
   for (const text of texts) {
@@ -339,13 +347,17 @@ export function projectBasicInfoRows(facts: DocumentFact[], existingMarkdown = '
     ].map(cleanProjectBasicCell).filter(value => value && isValidProjectBasicFactValue('project_name', value));
     return candidates[0] ? [candidates[0], '项目资料'] as [string, string] : undefined;
   };
-  const pickCanonical = (key: string, fallbackPatterns: RegExp[]) => {
+  const pickCanonical = (key: string, fallbackPatterns: RegExp[]): [string, string] => {
     const fact = canonical.get(key);
     if (fact) {
       const value = cleanProjectBasicCell(fact.value);
       if (value && isValidProjectBasicFactValue(key, value)) return [value, fact.source || '项目资料'] as [string, string];
     }
-    return markdownRowValue(parsedRows, fallbackPatterns) || (key === 'project_name' ? fallbackProjectName() : undefined) || ['', ''];
+    // 固化环路切断（丰乐镇第五轮）：旧 markdown 信息表捞值必须过同口径校验，
+    // 脏值（编号粘连/创优截断/错源规模）不得自我复制固化回新表
+    const fallbackRow = markdownRowValue(parsedRows, fallbackPatterns);
+    if (fallbackRow && isValidProjectBasicFactValue(key, fallbackRow[0])) return [fallbackRow[0], fallbackRow[1] || '项目资料'];
+    return (key === 'project_name' ? fallbackProjectName() : undefined) || ['', ''];
   };
   const rows: Array<[string, string, string]> = [
     ['项目名称', ...pickCanonical('project_name', [/项目名称|工程名称|project_name/u])],
@@ -729,12 +741,19 @@ export function replaceForbiddenFormalPhrases(content: string) {
     .replace(/施工方(?!案|法|式|针|向|面)/gu, '承包人')
     .replace(/按图纸/gu, '依据经确认的设计文件和图纸内容组织实施')
     .replace(/按设计要求/gu, '依据设计文件明确的构造、材料、尺寸和验收要求执行')
-    .replace(/按(?:资料|文件|说明|方案|规范|标准|要求)/gu, '依据本项目已确认资料、技术文件和验收标准')
+    // round-27 污染根治：此前的替换产物「依据本项目已确认资料、技术文件和验收标准」
+    // 含系统内部话术「已确认资料」（写作硬约束第 5 条明令禁止），与内部话术检测器互相打架，
+    // 丰乐镇实测直接进成品（小菜园围栏/机械设备进出场两处）；仅模糊来源词
+    // 「按资料/按文件/按说明」需要替换（指向不明），「按方案/按规范/按标准/按要求」是正常施组表述不再替换
+    .replace(/按(?:资料|文件|说明)/gu, '按设计文件及批准的施工方案要求')
     .replace(/满足(?:相关|有关)?要求/gu, '满足本项目已明确的质量、安全、技术和验收控制要求')
     .replace(/本节(?:将|主要|重点)?/gu, '')
     .replace(/本章将/gu, '')
-    .replace(/根据需要|视情况|结合实际情况/gu, '结合已确认资料、现场条件和审批后的施工组织安排')
-    .replace(/相关要求/gu, '本项目已明确的质量、安全、技术和验收要求');
+    .replace(/根据需要|视情况|结合实际情况/gu, '根据现场实际情况和审批后的施工安排确定')
+    .replace(/相关要求/gu, '本项目已明确的质量、安全、技术和验收要求')
+    // round-27：替换产物尾部词形去重（「按文件要求」替换后与后续「要求」粘连成「要求要求」）
+    .replace(/要求要求/gu, '要求')
+    .replace(/确定确定/gu, '确定');
 }
 
 // 正式正文中绝无合法用途的占位/系统话术：包含此类话术的句子整句删除，

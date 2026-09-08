@@ -80,6 +80,15 @@ describe('normalizeProductionText', () => {
     expect(normalizeProductionText('± 0.000')).toBe('±0.000');
     expect(normalizeProductionText('原则上应保证质量')).toBe('应保证质量');
   });
+
+  it('砂浆/混凝土标号不被误换为面积单位（round-27：灌 M2.5 曾变成灌平方米.5）', () => {
+    expect(normalizeProductionText('卵石灌 M2.5 混合砂浆')).toBe('卵石灌 M2.5 混合砂浆');
+    expect(normalizeProductionText('M7.5 预拌水泥砂浆')).toBe('M7.5 预拌水泥砂浆');
+    expect(normalizeProductionText('C30 商品混凝土')).toBe('C30 商品混凝土');
+    // 真实面积单位仍正常归一（裸 m² 无词边界不转换属既有行为，m2 形态必转）
+    expect(normalizeProductionText('垫层 24.7 m2')).toBe('垫层 24.7 平方米');
+    expect(normalizeProductionText('散水 2.74 m2')).toBe('散水 2.74 平方米');
+  });
 });
 
 describe('normalizeTenderSourcePageRefs', () => {

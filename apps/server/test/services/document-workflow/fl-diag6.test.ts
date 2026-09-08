@@ -13,7 +13,9 @@ const embedDocuments = async (texts: string[]) => texts.map(text => {
 });
 
 describe('fl6-diag', () => {
-  it('executability root cause', async () => {
+  // 诊断推演测试依赖 /tmp/fl5-md.md 与 /tmp/fl3-md.md 手工放置的诊断文件（零断言、纯 console 推演），
+  // 沙箱/CI 环境无此文件，转 skip 防误报（诊断结论已归档于丰乐镇第八轮）
+  it.skip('executability root cause', async () => {
     const md = readFileSync('/tmp/fl5-md.md', 'utf8');
     const stats = await fiveElementBlockStats(md, embedDocuments);
     console.log('BLOCKS:', stats.blocks, 'COMPLETE:', stats.completeBlocks, 'CLOSED:', stats.closedLoopBlocks);

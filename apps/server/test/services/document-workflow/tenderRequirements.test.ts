@@ -783,7 +783,8 @@ describe('评分项响应确定性补写（fixScoringRequirementResponses）', (
     const similarity = (query: string, title: string) => (query.includes('鲁班奖') && title.includes('质量') ? 0.7 : 0);
     const result = await fixScoringRequirementResponses({ chapters, model, similarity });
     expect(result.fixedCount).toBe(1);
-    expect(chapters[0].content).toContain('招标要求响应（奖项条款）：本项目确保获得鲁班奖');
+    // round-27：补写段首格式由内部术语「招标要求响应（奖项条款）」改为正式表述「按招标文件要求」
+    expect(chapters[0].content).toContain('按招标文件要求：本项目确保获得鲁班奖');
   });
 
   it('商务口径条款（暂列金额）确定性补写豁免（防补写后即被商务词清洗删除的闭环）', async () => {
@@ -800,5 +801,25 @@ describe('评分项响应确定性补写（fixScoringRequirementResponses）', (
     const result = await fixScoringRequirementResponses({ chapters, model, similarity });
     expect(result.fixedCount).toBe(0);
     expect(chapters[0].content).not.toContain('暂列金额');
+  });
+
+  it('商务响应条款（履约保证金金额）补写只落定性句，不抄条款原文商务参数（round-27：中标金额的2% 曾进技术标正文）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: '履约保证金金额：中标金额的2%；提交期限：签订合同前；退还时限：履约保证金有效期满7日内退还。', coreTerms: ['履约保证金', '中标金额'], source: '招标文件.pdf' }],
+    };
+    const chapters = [
+      { title: '## 第一章 工程概况', content: '本工程计划工期90日历天。' },
+    ];
+    const similarity = (query: string, title: string) => (query.includes('履约保证金') && title.includes('概况') ? 0.7 : 0);
+    const result = await fixScoringRequirementResponses({ chapters, model, similarity });
+    expect(result.fixedCount).toBe(1);
+    // 定性响应句落位，商务参数（百分比/金额）不抄入正文，内部格式词不出现
+    expect(chapters[0].content).toContain('履约保证金按招标文件约定的金额');
+    expect(chapters[0].content).not.toContain('中标金额的2%');
+    expect(chapters[0].content).not.toContain('招标要求响应');
+    expect(chapters[0].content).not.toContain('前附表响应条款');
   });
 });

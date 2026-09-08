@@ -4,6 +4,8 @@ import type { BillOfQuantitiesResult, BoqChunkRow } from '../billOfQuantitiesPar
 import type { DocumentEvidence, DocumentFact } from '../types';
 import {
   alignChapterContentToBlueprint,
+  alignChapterSectionsToBlueprint,
+  alignPlannedSectionsToBlueprint,
   blueprintCitationConsistencyIssues,
   blueprintPlanAuthorities,
   buildBlueprintData,
@@ -17,13 +19,16 @@ import {
   deriveLaborFromBoq,
   deriveMilestonesFromBoq,
   deriveSpecAuthoritiesFromBoq,
+  extractBasisRegulations,
   extractContractFromFacts,
   extractDecisionLockEntries,
+  extractLocationFromFacts,
   extractRedLineFacts,
   extractVillageCount,
   fallbackWorkPackagesFromExisting,
   findBlueprintChapter,
   judgeHazardousWorks,
+  renderBlueprintChapterAuthorityCard,
   renderBlueprintChapterSlice,
   renderBlueprintDataText,
   renderBlueprintMustCiteValues,
@@ -162,6 +167,68 @@ describe('清单解析完整性（阶段 0 数据源）', () => {
     ]);
     expect(picked).toEqual(['丰乐镇工程量清单.xls']);
   });
+
+  it('清单三层结构识别：单位工程（2.3 公厕）独立为分部，其内部子分部（0101 土石方工程）降级为分节', () => {
+    const chunks: BoqChunkRow[] = [
+      {
+        chunkIndex: 0,
+        sectionTitle: '表格数据',
+        content: [
+          '工程名称：马老郢等 标段： 工作表：1.1 第1页 共1页',
+          '| 序号 | 项目编码 | COL3 | 项目名称 | 项目特征描述 | 计量单位 | COL7 | 工程量 | 金额 |',
+          '|  | 二 |  | 排水工程 |',
+          '|  | 2.1 |  | 马老郢 |',
+          '| 1 | 040101002002 |  | 挖沟槽土方 | 1．沟槽深度：1.5m以内 | m3 |  | 60 |',
+          '|  | 2.3 |  | 公厕 |',
+          '|  | 0101 |  | 土石方工程 |',
+          '| 2 | 010101001001 |  | 平整场地 | 1．部位：公厕基础 | m2 |  | 120 |',
+          '|  | 0104 |  | 砌筑工程 |',
+          '| 3 | 010401001001 |  | 砖基础 | 1．砖品种：MU10 | m3 |  | 30 |',
+          '第1页 共1页',
+        ].join('\n'),
+      },
+    ];
+    const result = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
+    const trench = result.entries.find(entry => entry.name === '挖沟槽土方');
+    expect(trench?.section).toBe('排水工程');
+    expect(trench?.subsection).toBe('马老郢');
+    expect(trench?.sectionKind).toBe('plain');
+    const leveling = result.entries.find(entry => entry.name === '平整场地');
+    expect(leveling?.section).toBe('公厕');
+    expect(leveling?.subsection).toBe('土石方工程');
+    expect(leveling?.sectionKind).toBe('unit-project');
+    const brick = result.entries.find(entry => entry.name === '砖基础');
+    expect(brick?.section).toBe('公厕');
+    expect(brick?.subsection).toBe('砌筑工程');
+    expect(brick?.sectionKind).toBe('unit-project');
+  });
+
+  it('普通 x.y 子目链不误判单位工程（1.1 新建混凝土道路 后跟 1.2 而非纯数字编码）', () => {
+    const chunks: BoqChunkRow[] = [
+      {
+        chunkIndex: 0,
+        sectionTitle: '表格数据',
+        content: [
+          '工程名称：马老郢等 标段： 工作表：1.1 第1页 共1页',
+          '| 序号 | 项目编码 | COL3 | 项目名称 | 项目特征描述 | 计量单位 | COL7 | 工程量 | 金额 |',
+          '|  | 一 |  | 道路工程 |',
+          '|  | 1.1 |  | 新建混凝土道路 |',
+          '| 1 | 040101001001 |  | 挖一般土方 | 1．土壤类别：综合类 | m3 |  | 100 |',
+          '|  | 1.2 |  | 入户路 |',
+          '| 2 | 040203007002 |  | 水泥混凝土 | 1．厚度：10cm | m2 |  | 50 |',
+          '第1页 共1页',
+        ].join('\n'),
+      },
+    ];
+    const result = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
+    const earth = result.entries.find(entry => entry.name === '挖一般土方');
+    expect(earth?.section).toBe('道路工程');
+    expect(earth?.subsection).toBe('新建混凝土道路');
+    expect(earth?.sectionKind).toBe('plain');
+    const concrete = result.entries.find(entry => entry.name === '水泥混凝土');
+    expect(concrete?.section).toBe('道路工程');
+    expect(concrete?.subsection).toBe('入户路');
+  });
 });
 
 describe('L1a 红线事实确定性提取', () => {
@@ -173,6 +240,70 @@ describe('L1a 红线事实确定性提取', () => {
     const provision = facts.find(fact => fact.key === '暂列金额');
     expect(provision?.value).toBe('10万元');
     expect(provision?.amount).toBe(true);
+  });
+
+  it('extractBasisRegulations：书名号法规提取去重，跨行截断残名清洗（换行/### 符号）', () => {
+    const text = [
+      '本招标项目依据《中华人民共和国招标投标法》《建设工程质量管理条例》组织。',
+      '### 10.3 《保障农民工工资支付条例》（国令第724号）《工程建',
+      '### 设领域农民工工资专用账户管理暂行办法》等有关法规。',
+      '《中华人民共和国招标投标法实',
+      '### 施条例》与《合肥市公共资源交易管理条例》共同适用。',
+      '《关于优化进皖建设工程企业信息登记服务和管理有关工作的通知》不列入。',
+      '《纳税人跨县（市、区）提供建筑服务增值税征收管理暂行办法》超长税务残名不列入。',
+    ].join('\n');
+    const regs = extractBasisRegulations(text);
+    expect(regs).toContain('《中华人民共和国招标投标法》');
+    expect(regs).toContain('《建设工程质量管理条例》');
+    expect(regs).toContain('《保障农民工工资支付条例》（国令第724号）');
+    expect(regs).toContain('《中华人民共和国招标投标法实施条例》');
+    expect(regs).toContain('《合肥市公共资源交易管理条例》');
+    expect(regs).not.toContain(expect.stringContaining('通知'));
+    expect(regs).not.toContain(expect.stringContaining('工程建要求设'));
+    expect(regs).not.toContain(expect.stringContaining('纳税人'));
+  });
+
+  it('章级锚点卡：编制依据域渲染法规清单与工程类型规范编号（工程概况章命中）', () => {
+    const boq = parseFixture();
+    const { data } = buildBlueprintData({
+      boq,
+      basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 《建设工程质量管理条例》（国务院令第279号）',
+      projectName: '丰乐镇建设项目',
+    });
+    const outline = buildBlueprintOutline({ chapterTitles: ['工程概况'], boq, docType: '单位工程施工组织设计' });
+    const card = renderBlueprintChapterAuthorityCard(outline.chapters[0]!, data);
+    expect(card).toContain('《建设工程质量管理条例》（国务院令第279号）');
+    // fixture 工作包含道路/排水/绿化 → 对应规范编号必须出现
+    expect(card).toContain('CJJ 1-2008');
+    expect(card).toContain('GB 50268-2008');
+    expect(card).toContain('CJJ 82-2012');
+    // 非工程类型规范不得出现（无亮化/房建分部）
+    expect(card).not.toContain('CJJ 89-2012');
+    expect(card).not.toContain('GB 50300-2013');
+  });
+
+  it('章级锚点卡：编制依据域恒注入国家法律法规清单（带文号）与地方性法规（round-27 不再空写类别话术）', () => {
+    const boq = parseFixture();
+    const { data } = buildBlueprintData({
+      boq,
+      basicFacts: '项目名称：丰乐镇建设项目 建设地点：安徽省合肥市肥西县 工期：360日历天',
+      projectName: '丰乐镇建设项目',
+    });
+    const outline = buildBlueprintOutline({ chapterTitles: ['编制说明与工程概况'], boq, docType: '单位工程施工组织设计' });
+    const card = renderBlueprintChapterAuthorityCard(outline.chapters[0]!, data);
+    // 国家法律法规恒注入（法规名+文号）
+    expect(card).toContain('《中华人民共和国建筑法》（主席令第91号公布，2019年修正）');
+    expect(card).toContain('《建设工程安全生产管理条例》（国务院令第393号）');
+    expect(card).toContain('《保障农民工工资支付条例》（国务院令第724号）');
+    // 地方性法规按建设地点（安徽省合肥市）匹配
+    expect(card).toContain('《安徽省建筑市场管理条例》');
+    expect(card).toContain('《合肥市城市绿化管理条例》');
+  });
+
+  it('extractLocationFromFacts：建设地点提取（地方性法规匹配输入）', () => {
+    expect(extractLocationFromFacts('项目名称：某项目 建设地点：安徽省合肥市肥西县 工期：90日历天')).toBe('安徽省合肥市肥西县');
+    expect(extractLocationFromFacts('建设地点： 上海市浦东新区\n工期：30天')).toBe('上海市浦东新区');
+    expect(extractLocationFromFacts('无地点事实')).toBe('');
   });
 });
 
@@ -361,6 +492,176 @@ describe('渲染函数（执行层输入）', () => {
     const pipeSub = chapter.subSections.find(section => section.title === '排水工程');
     expect(pipeSub?.workPackages[0]?.processChain).toContain('混凝土管道DN200');
     expect(pipeSub?.workPackages[0]?.coveredSeqs).toEqual([2, 4]);
+  });
+
+  it('施工方法章小节构建：单位工程（公厕）聚合子分部为子工作包，不再平铺独立小节', () => {
+    const chunks: BoqChunkRow[] = [
+      {
+        chunkIndex: 0,
+        sectionTitle: '表格数据',
+        content: [
+          '工程名称：马老郢等 标段： 工作表：1.1 第1页 共1页',
+          '| 序号 | 项目编码 | COL3 | 项目名称 | 项目特征描述 | 计量单位 | COL7 | 工程量 | 金额 |',
+          '|  | 一 |  | 道路工程 |',
+          '| 1 | 040101001001 |  | 挖一般土方 | 1．土壤类别：综合类 | m3 |  | 100 |',
+          '|  | 2.3 |  | 公厕 |',
+          '|  | 0101 |  | 土石方工程 |',
+          '| 2 | 010101001001 |  | 平整场地 | 1．部位：公厕基础 | m2 |  | 120 |',
+          '|  | 0104 |  | 砌筑工程 |',
+          '| 3 | 010401001001 |  | 砖基础 | 1．砖品种：MU10 | m3 |  | 30 |',
+          '|  | 八 |  | 其他 |',
+          '| 4 | 011201001001 |  | 墙面彩绘 | 1．原墙面水泥砂浆层铲除 | m2 |  | 40 |',
+          '| 5 | 040205012002 |  | 仿木护栏 | 1．预制混凝土仿木护栏 | m |  | 105 |',
+          '第1页 共1页',
+        ].join('\n'),
+      },
+    ];
+    const boq = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
+    const outline = buildBlueprintOutline({ chapterTitles: ['主要分部分项工程施工方案'], boq, docType: '单位工程施工组织设计' });
+    const chapter = outline.chapters[0]!;
+    // 小节 = 道路工程 + 公厕工程（单位工程聚合）+ 环境整治工程（「其他」更名），不再出现「土石方工程」等独立小节
+    expect(chapter.subSections.map(section => section.title)).toEqual(['道路工程', '公厕', '环境整治工程']);
+    const toilet = chapter.subSections.find(section => section.title === '公厕');
+    expect(toilet?.workPackages.map(workPackage => workPackage.name)).toEqual(['土石方工程', '砌筑工程']);
+    // 子工作包 coveredSeqs 记录各自条目
+    const earthwork = toilet?.workPackages.find(workPackage => workPackage.name === '土石方工程');
+    expect(earthwork?.coveredSeqs).toEqual([2]);
+    const masonry = toilet?.workPackages.find(workPackage => workPackage.name === '砌筑工程');
+    expect(masonry?.coveredSeqs).toEqual([3]);
+    const env = chapter.subSections.find(section => section.title === '环境整治工程');
+    expect(env?.workPackages[0]?.coveredSeqs).toEqual([4, 5]);
+  });
+
+  it('施工方法章子分部名规范化：措施项目/其他装饰工程/墙柱面装饰（round-27 清单计量口径名不进大纲）', () => {
+    const chunks: BoqChunkRow[] = [
+      {
+        chunkIndex: 0,
+        sectionTitle: '表格数据',
+        content: [
+          '工程名称：马老郢等 标段： 工作表：1.1 第1页 共1页',
+          '| 序号 | 项目编码 | COL3 | 项目名称 | 项目特征描述 | 计量单位 | COL7 | 工程量 | 金额 |',
+          '|  | 2.3 |  | 公厕 |',
+          '|  | 0117 |  | 措施项目 |',
+          '| 1 | 011701002001 |  | 外脚手架 | 1．搭设部位：外墙 | m2 |  | 122 |',
+          '| 2 | 011703001001 |  | 整体化粪池 | 1．成品玻璃钢 | 座 |  | 2 |',
+          '|  | 0114 |  | 其他装饰工程 |',
+          '| 3 | 011406002001 |  | 洗漱台 | 1．大理石 | m2 |  | 0.56 |',
+          '|  | 0112 |  | 墙、柱面装饰与隔断、幕墙工程 |',
+          '| 4 | 011203001001 |  | 零星墙面抹灰 | 1．部位：内墙 | m2 |  | 53 |',
+          '第1页 共1页',
+        ].join('\n'),
+      },
+    ];
+    const boq = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
+    const outline = buildBlueprintOutline({ chapterTitles: ['主要分部分项工程施工方案'], boq, docType: '单位工程施工组织设计' });
+    const chapter = outline.chapters[0]!;
+    const toilet = chapter.subSections.find(section => section.title === '公厕');
+    expect(toilet?.workPackages.map(workPackage => workPackage.name)).toEqual(['模板、脚手架及化粪池安装工程', '零星装饰工程', '墙柱面装饰工程']);
+  });
+
+  it('施工方法章小节更名后覆盖校验仍通过（seq 全集判定不受小节名影响）', () => {
+    const chunks: BoqChunkRow[] = [
+      {
+        chunkIndex: 0,
+        sectionTitle: '表格数据',
+        content: [
+          '工程名称：马老郢等 标段： 工作表：1.1 第1页 共1页',
+          '| 序号 | 项目编码 | COL3 | 项目名称 | 项目特征描述 | 计量单位 | COL7 | 工程量 | 金额 |',
+          '|  | 八 |  | 其他 |',
+          '| 1 | 011201001001 |  | 墙面彩绘 | 1．原墙面水泥砂浆层铲除 | m2 |  | 40 |',
+          '第1页 共1页',
+        ].join('\n'),
+      },
+    ];
+    const boq = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天', projectName: '丰乐镇建设项目' });
+    const outline = buildBlueprintOutline({
+      chapterTitles: ['主要分部分项工程施工方案', '物资与机械劳动力配置计划', '质量保证措施', '安全保证措施', '工期保证措施', '文明施工与环境保护', '施工总平面布置', '重难点分析及保证措施'],
+      boq,
+      docType: '单位工程施工组织设计',
+    });
+    const blueprint = {
+      meta: { version: '2.0.0', docType: '单位工程施工组织设计', createdAt: '2026-09-06', sourceMaterials: [] },
+      data,
+      outline,
+      validation: { passed: false, checks: [] },
+      diagnostics: { stage: '阶段 D', standardBlocksLoaded: 0, standardBlockGaps: [], laborDerivationBasis: '', llmCalls: 0, fallbackUsed: [], warnings: [], durationMs: 0 },
+    };
+    const report = validateBlueprint(blueprint, boq);
+    const coverage = report.checks.find(check => check.name === '3. 覆盖校验');
+    expect(coverage?.passed).toBe(true);
+  });
+});
+
+describe('蓝图权威分部结构 → 规划小节校准（round-27 第二章小节根因）', () => {
+  function buildFuleshanLikeOutline() {
+    // 模拟丰乐镇形态：顶层分部（中文数字/名称）+ 公厕单位工程（内部子分部）
+    const chunks: BoqChunkRow[] = [
+      {
+        chunkIndex: 0,
+        sectionTitle: '表格数据',
+        content: [
+          '工程名称：丰乐镇 标段： 工作表：1.1 第1页 共1页',
+          '| 序号 | 项目编码 | COL3 | 项目名称 | 项目特征描述 | 计量单位 | COL7 | 工程量 | 金额 |',
+          '|  | 一 |  | 道路工程 |',
+          '| 1 | 040101001001 |  | 挖一般土方 | 1．土壤类别：综合类 | m3 |  | 100 |',
+          '|  | 二 |  | 排水工程 |',
+          '| 2 | 040501004001 |  | 塑料管铺设 | 1．DN200 | m |  | 8205 |',
+          '|  | 2.3 |  | 公厕 |',
+          '|  | 0101 |  | 土石方工程 |',
+          '| 3 | 010101001001 |  | 平整场地 | 1．部位：公厕基础 | m2 |  | 120 |',
+          '|  | 0104 |  | 砌筑工程 |',
+          '| 4 | 010401001001 |  | 砖基础 | 1．砖品种：MU10 | m3 |  | 30 |',
+          '|  | 0111 |  | 门窗工程 |',
+          '| 5 | 011101001001 |  | 铝合金门 | 1．材质：铝合金 | m2 |  | 18 |',
+          '|  | 八 |  | 其他 |',
+          '| 6 | 011201001001 |  | 墙面彩绘 | 1．原墙面水泥砂浆层铲除 | m2 |  | 40 |',
+          '第1页 共1页',
+        ].join('\n'),
+      },
+    ];
+    const boq = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
+    const outline = buildBlueprintOutline({ chapterTitles: ['主要施工方法'], boq, docType: '单位工程施工组织设计' });
+    return { boq, outline };
+  }
+
+  it('LLM 规划混入子分部名与「其他」时整体替换为蓝图权威分部小节（总述小节保留在前）', () => {
+    const { outline } = buildFuleshanLikeOutline();
+    const blueprintChapter = outline.chapters[0]!;
+    const llmSections = ['总体施工部署与流程安排', '道路工程', '排水工程', '其他', '土石方工程', '砌筑工程', '门窗工程'];
+    const result = alignChapterSectionsToBlueprint({ title: '主要施工方法', sections: llmSections }, blueprintChapter);
+    expect(result.report?.replacedWithBlueprint).toBe(true);
+    expect(result.sections[0]).toBe('总体施工部署与流程安排');
+    expect(result.sections).toContain('道路工程');
+    expect(result.sections).toContain('排水工程');
+    expect(result.sections).toContain('公厕');
+    expect(result.sections).toContain('环境整治工程'); // 「其他」→环境整治工程（蓝图权威名）
+    expect(result.sections).not.toContain('其他');
+    expect(result.sections).not.toContain('土石方工程'); // 子分部降级为公厕小节内工作包
+    expect(result.sections).not.toContain('砌筑工程');
+    expect(result.sections).not.toContain('门窗工程');
+    expect(result.report?.removed).toEqual(expect.arrayContaining(['其他', '土石方工程', '砌筑工程', '门窗工程']));
+  });
+
+  it('LLM 规划与清单名重合度 < 2 时不校准（保留原规划）', () => {
+    const { outline } = buildFuleshanLikeOutline();
+    const blueprintChapter = outline.chapters[0]!;
+    const llmSections = ['总体施工部署与流程安排', '关键工序技术控制要点', '质量安全与成品保护措施'];
+    const result = alignChapterSectionsToBlueprint({ title: '主要施工方法', sections: llmSections }, blueprintChapter);
+    expect(result.report).toBeUndefined();
+    expect(result.sections).toEqual(llmSections);
+  });
+
+  it('非施工方法类章节零变化；蓝图无该章时零变化', () => {
+    const { outline } = buildFuleshanLikeOutline();
+    const qualitySections = ['质量目标与质量管理体系', '关键工序质量控制措施'];
+    const result = alignPlannedSectionsToBlueprint([
+      { title: '质量保证措施', sections: qualitySections },
+      { title: '施工总平面布置', sections: ['总平面布置原则'] },
+    ], outline);
+    expect(result.reports).toHaveLength(0);
+    expect(result.chapters[0].sections).toEqual(qualitySections);
+    expect(result.chapters[1].sections).toEqual(['总平面布置原则']);
   });
 });
 

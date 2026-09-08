@@ -130,4 +130,13 @@ describe('planChapterTask 退化小节兜底（结构推理：章=节时章节�
     expect(task.sections.every(section => !section.ready)).toBe(true);
     expect(task.ready).toBe(false);
   });
+
+  it('校准同步：chapter.sections 含校准后小节时任务以校准后小节为准（plan 旧小节不得残留）', async () => {
+    const multiChapter = { id: 'ch-1', title: '主要施工方法', sections: ['总述', '环境整治工程'], queries: [], requiredFacts: [], purpose: '' };
+    const { plan } = await planDocument({ template: minimalTemplate([multiChapter]), context: minimalContext(), embedDocuments: protoWordEmbed });
+    // 蓝图校准后：小节替换为权威分部结构（「总述」→「施工部署总述」、新增「道路工程」），plan 仍持有旧小节
+    const alignedChapter = { ...multiChapter, sections: ['施工部署总述', '环境整治工程', '道路工程'] };
+    const { task } = planChapterTask({ plan, chapter: alignedChapter, context: minimalContext(), evidence: [] });
+    expect(task.sections.map(section => section.title)).toEqual(['施工部署总述', '环境整治工程', '道路工程']);
+  });
 });

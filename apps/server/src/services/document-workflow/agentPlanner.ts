@@ -268,25 +268,40 @@ export function planChapterTask(input: { plan: AgentDocumentPlan; chapter: Docum
   const chapterPlan = input.plan.chapters.find(item => item.chapterId === input.chapter.id) || input.plan.chapters.find(item => item.title === input.chapter.title);
   if (!chapterPlan) throw new Error(`缺少章节计划：${input.chapter.title}`);
   const facts = input.context.facts.filter(fact => chapterPlan.evidenceQueries.some(query => factMatches(fact, query)) || chapterPlan.requiredFacts.some(query => factMatches(fact, query)));
-  const sections = chapterPlan.sections.map(section => {
+  // round-27 校准同步：蓝图权威分部结构校准（alignPlannedSectionsToBlueprint）发生在 planDocument 之后，
+  // chapter.sections 已含校准后小节（子分部降级、「其他」更名），任务小节必须以 chapter.sections 为准，
+  // 不得沿用 plan 内旧小节（历史遗漏：章节任务提示词强制输出旧小节名，与写作层校准后小节冲突）
+  const sectionTitles = (input.chapter.sections?.length ? input.chapter.sections : chapterPlan.sections.map(section => section.title)).filter(title => Boolean(title) && title.trim().length > 0);
+  const sections = sectionTitles.map(title => {
+    const planSection = chapterPlan.sections.find(section => section.title === title);
+    // 校准新增小节（plan 中无对应元数据）用章节级泛型元数据兜底，与 planDocument 同口径生成
+    const base: AgentSectionPlan = planSection || {
+      title,
+      objective: sectionObjective(title),
+      requiredFacts: [...new Set([title, ...(input.chapter.requiredFacts || [])])],
+      requiredGraphNodes: [title],
+      evidenceQueries: sectionQueries(input.chapter, title, [], []),
+      forbiddenPhrases: FORMAL_FORBIDDEN_PHRASES,
+      minChars: sectionMinChars(title),
+    };
     // 退化小节兜底（真实生成回归）：模板无预设小节的章节，planDocument 用章节标题充当唯一小节；
     // 概括性标题（如「确保人、材、机的保障体系与措施」）token 化后几乎不可能与证据/图谱文本词面命中，
     // 但章节级证据/图谱上下文天然属于该小节（章=节），不得因词面未命中而判「缺少事实、图谱或证据支撑」。
     // 人材机三合一章结构补挂的三小节同理：人/材/机保障体系小节词面可能无法命中证据/图谱，
     // 但该章证据天然属于三个保障体系小节，不得因词面未命中而判未就绪（否则结构补挂反而阻断章节任务）
-    const degradedSection = (chapterPlan.sections.length === 1 && section.title === input.chapter.title)
-      || (/人[、,，]材[、,，]机/u.test(input.chapter.title) && /^(?:确保\s*)?[人材机](?:员|力|料|械|工)?\s*的保障体系与措施$/u.test(section.title));
-    const sectionFacts = input.context.facts.filter(fact => section.evidenceQueries.some(query => factMatches(fact, query)) || section.requiredFacts.some(query => factMatches(fact, query))).slice(0, 24);
-    let sectionEvidence = input.evidence.filter(item => section.evidenceQueries.some(query => evidenceMatches(item, query))).slice(0, 24);
-    let graphNodes = section.requiredGraphNodes.flatMap(query => graphNodeSummary(input.context.baseProjectGraph, query)).slice(0, 12);
+    const degradedSection = (sectionTitles.length === 1 && title === input.chapter.title)
+      || (/人[、,，]材[、,，]机/u.test(input.chapter.title) && /^(?:确保\s*)?[人材机](?:员|力|料|械|工)?\s*的保障体系与措施$/u.test(title));
+    const sectionFacts = input.context.facts.filter(fact => base.evidenceQueries.some(query => factMatches(fact, query)) || base.requiredFacts.some(query => factMatches(fact, query))).slice(0, 24);
+    let sectionEvidence = input.evidence.filter(item => base.evidenceQueries.some(query => evidenceMatches(item, query))).slice(0, 24);
+    let graphNodes = base.requiredGraphNodes.flatMap(query => graphNodeSummary(input.context.baseProjectGraph, query)).slice(0, 12);
     if (degradedSection) {
       if (sectionEvidence.length === 0) sectionEvidence = input.evidence.slice(0, 24);
       if (graphNodes.length === 0) graphNodes = graphNodeSummary(input.context.baseProjectGraph, input.chapter.title).slice(0, 12);
     }
     const issues: ValidationIssue[] = [];
-    const isPublicKnowledgeSection = /法律法规|法规|规章|规范标准|标准规范|行业标准|现行规范|编制依据/u.test(section.title);
-    if (!isPublicKnowledgeSection && sectionEvidence.length === 0 && sectionFacts.length === 0 && graphNodes.length === 0) issues.push({ level: 'error', severity: 'blocker', category: 'evidence_coverage', owner: 'system', message: `${section.title} 缺少事实、图谱或证据支撑`, suggestion: '应先定向检索和抽取事实，不能生成占位正文。' });
-    return { ...section, factIds: sectionFacts.map(fact => stableHash({ key: fact.key, value: stringifyFactValue(fact.value), sourceFile: fact.sourceFile }).slice(0, 12)), evidenceIds: sectionEvidence.map(item => stableHash({ filePath: item.filePath, content: item.content.slice(0, 160), score: item.score }).slice(0, 12)), graphNodeIds: graphNodes.map(node => stableHash(node).slice(0, 12)), ready: issues.length === 0, issues };
+    const isPublicKnowledgeSection = /法律法规|法规|规章|规范标准|标准规范|行业标准|现行规范|编制依据/u.test(title);
+    if (!isPublicKnowledgeSection && sectionEvidence.length === 0 && sectionFacts.length === 0 && graphNodes.length === 0) issues.push({ level: 'error', severity: 'blocker', category: 'evidence_coverage', owner: 'system', message: `${title} 缺少事实、图谱或证据支撑`, suggestion: '应先定向检索和抽取事实，不能生成占位正文。' });
+    return { ...base, title, factIds: sectionFacts.map(fact => stableHash({ key: fact.key, value: stringifyFactValue(fact.value), sourceFile: fact.sourceFile }).slice(0, 12)), evidenceIds: sectionEvidence.map(item => stableHash({ filePath: item.filePath, content: item.content.slice(0, 160), score: item.score }).slice(0, 12)), graphNodeIds: graphNodes.map(node => stableHash(node).slice(0, 12)), ready: issues.length === 0, issues };
   });
   const issues = sections.flatMap(section => section.issues);
   const task = {

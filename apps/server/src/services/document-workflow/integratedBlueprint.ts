@@ -7,6 +7,7 @@ import type { CanonicalFactModel, DocumentEvidence, DocumentFact, DocumentGenera
 import { cleanPdfHeadingNoise } from './factsModel';
 import { stringifyFactValue, normalizeSubsectionTitleForDedup } from './utils';
 import { displayChapterTitle } from './outline';
+import { parseChineseNumber } from './budget';
 import { DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE, isCriticalSectionTitle } from './writingSpec';
 import { loadBoqChunksFromKb, parseBillOfQuantities, pickBillOfQuantityFiles } from './billOfQuantitiesParser';
 import type { BillOfQuantitiesResult, BoqEntry } from './billOfQuantitiesParser';
@@ -46,6 +47,8 @@ export interface BlueprintProject {
   name: string;
   scope: string;
   works: string[];
+  /** 建设地点（基本事实提取，用于地方性法规/气候口径匹配） */
+  location?: string;
 }
 
 export interface BlueprintContract {
@@ -215,6 +218,9 @@ export interface BlueprintData {
   constructionDeployment: BlueprintDeployment;
   /** L3 重难点逐项列明（十项评审⑩硬要求） */
   keyDifficulties: BlueprintDifficulty[];
+  /** 编制依据法规清单（从招标文件/基本事实确定性提取书名号法规及文号，注入编制依据小节；
+   * 提取为空时写作层降级公共知识法规清单） */
+  basisRegulations: string[];
   drawingNote: string;
 }
 
@@ -1185,6 +1191,80 @@ export function extractContractFromFacts(basicFacts: string, boq: BillOfQuantiti
   return { totalDays, qualityStandard, pricingFile, estimatedAmount };
 }
 
+/** 编制依据法规清单（确定性提取）：从招标文件/基本事实文本提取书名号法规名及文号形态，
+ * 去重、过滤通知/意见类事务性文件、限 14 条。丰乐镇实测：招标文件含《建设工程质量管理条例》
+ * 《保障农民工工资支付条例》（国令第724号）《合肥市公共资源交易管理条例》等，提取后注入
+ * 编制依据小节，正文不再空写「国家现行法律、行政法规」类别话术。 */
+export function extractBasisRegulations(text: string): string[] {
+  if (!text) return [];
+  const found: string[] = [];
+  const seen = new Set<string>();
+  // 书名号法规 + 就近文号（国令第N号/令第N号/〔YYYY〕N号；全/半角括号同构消费完整后缀）
+  const bookRe = /《([^《》]{2,40}(?:法|条例|办法|规程|规范|标准))》(?:[（(][^）)]{0,24}?(?:国令|令|主席令|〔\d{4}〕)[^）)]{0,24}?[)）])?/gu;
+  for (const match of text.matchAll(bookRe)) {
+    // PDF 跨行截断清洗：书名号内换行/空白/markdown 标题符号为截断残迹（丰乐镇实测
+    // 「中华人民共和国招标投标法实\n\n### 施条例」→ 清洗为「实施条例」）
+    const raw = match[1].replace(/[\s#]/gu, '').trim();
+    // 过滤：排除事务性通知/意见与跨行截断残名（截断错序清洗后会产生超长错字残名，如
+    // 「工程建要求设领域农民工工资专用账户管理暂行办法」，法规名正常不超过 20 字）
+    if (/通知|意见|公示|公告/u.test(raw)) continue;
+    if (raw.length < 4 || raw.length > 20) continue;
+    const suffix = (match[0].match(/[（(]([^）)]{0,24}?(?:国令|令|主席令|〔\d{4}〕)[^）)]{0,24}?)[)）]/u) || [])[1];
+    const item = suffix ? `《${raw}》（${suffix.trim()}）` : `《${raw}》`;
+    if (seen.has(item)) continue;
+    seen.add(item);
+    found.push(item);
+    if (found.length >= 14) break;
+  }
+  return found;
+}
+
+/** 建设地点提取（基本事实文本；地方性法规与气候口径匹配的输入） */
+export function extractLocationFromFacts(basicFacts: string): string {
+  if (!basicFacts) return '';
+  // [ \t] 不吞换行；非贪婪+前瞻在下一字段词（工期等）或分隔符处截断：跨行贪婪会把下一行字段文本误捕为地点
+  const match = /建设地点[：: \t|]*([^。；;\n|]{2,40}?)(?=[，,。；;\n|]|工期|质量标准|合同估算)/u.exec(basicFacts);
+  if (!match) return '';
+  return match[1].trim().replace(/[，,、\s]+$/gu, '');
+}
+
+/** 国家法律法规确定性清单（公共知识，现行有效；编制依据小节必须列出法规名称及文号，
+ * 不得空写「国家现行法律、行政法规」类别话术） */
+function constructionLawAndRegulations(): string[] {
+  return [
+    '《中华人民共和国建筑法》（主席令第91号公布，2019年修正）',
+    '《中华人民共和国招标投标法》（主席令第21号公布，2017年修正）',
+    '《中华人民共和国安全生产法》（主席令第70号公布，2021年修正）',
+    '《建设工程质量管理条例》（国务院令第279号公布，2019年修订）',
+    '《建设工程安全生产管理条例》（国务院令第393号）',
+    '《保障农民工工资支付条例》（国务院令第724号）',
+    '《建设工程勘察设计管理条例》（国务院令第293号公布，2017年修订）',
+    '《生产安全事故报告和调查处理条例》（国务院令第493号）',
+  ];
+}
+
+/** 地方性法规确定性清单（按建设地点省/市匹配；地方性法规文号不恒写，名称必须列出） */
+function localRegulationsByLocation(location: string): string[] {
+  const regulations: string[] = [];
+  if (/安徽|合肥/u.test(location)) {
+    regulations.push(
+      '《安徽省建筑市场管理条例》（安徽省人民代表大会常务委员会公告）',
+      '《安徽省建设工程质量管理办法》（安徽省人民政府令）',
+      '《安徽省安全生产条例》（安徽省人民代表大会常务委员会公告）',
+    );
+  }
+  if (/合肥/u.test(location)) {
+    regulations.push(
+      '《合肥市建设工程施工安全管理办法》（合肥市人民政府令）',
+      '《合肥市城市绿化管理条例》（合肥市人民代表大会常务委员会公告）',
+    );
+  }
+  if (regulations.length === 0) {
+    regulations.push('工程所在地现行地方性法规与政府规章');
+  }
+  return regulations;
+}
+
 /** 阶段 A 主入口：data 参数桶构建（L1a 直填 / L1b 参考资产 / L2 区间推导 / L3 确定性组织规划） */
 export function buildBlueprintData(input: {
   boq: BillOfQuantitiesResult;
@@ -1221,6 +1301,7 @@ export function buildBlueprintData(input: {
       name: input.projectName || '（待提取：项目名称）',
       scope: boq.villages.length > 0 ? `${boq.villages.length} 个自然村分组（${boq.villages.map(village => village.villageGroup).join('、')}）` : '',
       works,
+      location: extractLocationFromFacts(input.basicFacts || ''),
     },
     contract: { totalDays: contract.totalDays, qualityStandard: contract.qualityStandard, pricingFile: contract.pricingFile, estimatedAmount: contract.estimatedAmount || undefined },
     climate: { rainySeason: '6-8月', highTemp: '7-8月', winter: '12-2月' },
@@ -1240,6 +1321,7 @@ export function buildBlueprintData(input: {
     standardBlocks: standard.blocks,
     constructionDeployment,
     keyDifficulties,
+    basisRegulations: extractBasisRegulations(`${input.basicFacts || ''}\n${evidenceText}`),
     drawingNote: '总平面布置图/横道图/组织机构图为后期人工配图，蓝图只规划对应章节正文内容',
   };
   return { data, diagnostics: { standardBlocksLoaded: standard.blocks.filter(block => !block.gap).length, standardBlockGaps: standard.gaps } };
@@ -1267,14 +1349,38 @@ function resolveChapterActivation(docType: string, chapterTitle: string): boolea
   return true;
 }
 
-/** 阶段 B：模板章节目录 → 蓝图大纲（评审承接声明 + 工作包骨架挂接） */
-export function buildBlueprintOutline(input: {
-  chapterTitles: string[];
-  boq: BillOfQuantitiesResult;
-  docType: string;
-}): BlueprintOutline {
-  const { chapterTitles, boq } = input;
-  // 清单分部 → 工作包骨架（覆盖校验依据：每个清单条目归属某工作包）
+/** 清单分部名 → 大纲小节名规范化（丰乐镇实测：清单「八、其他」分部把房前屋后整理/墙面彩绘/杆线整治/
+ * 仿木护栏等环境整治条目归入「其他」——计量分部名不是大纲小节名，按条目内容确定性归纳更名；
+ * round-27 扩展：房建定额子分部名同样需要规范化——「其他装饰工程」→零星装饰工程、
+ * 「措施项目」（模板/脚手架/化粪池费用分部）→按条目归纳、「墙柱面装饰与隔断幕墙工程」无幕墙时去幕墙措辞） */
+function normalizeConstructionSectionTitle(section: string, entries: BoqEntry[]): string {
+  const trimmed = section.trim();
+  if (!trimmed) return '未分部条目';
+  if (/^其他$|^其他工程$/u.test(trimmed)) {
+    const names = entries.map(entry => entry.name);
+    if (names.some(name => /彩绘|护栏|围栏|小品|标识|标牌|墙面|整治/u.test(name))) return '环境整治工程';
+    if (names.some(name => /绿化|栽植|铺装|种植/u.test(name))) return '景观附属工程';
+    if (names.some(name => /拆除|清理|清淤|清运/u.test(name))) return '清理整治工程';
+    return '零星工程';
+  }
+  if (/^其他装饰/u.test(trimmed)) return '零星装饰工程';
+  if (/^措施项目$/u.test(trimmed)) {
+    const names = entries.map(entry => entry.name);
+    if (names.some(name => /化粪池|吊装|安装/u.test(name))) return '模板、脚手架及化粪池安装工程';
+    return '模板与脚手架工程';
+  }
+  if (/墙[、,]?柱面装饰/u.test(trimmed)) {
+    const hasCurtainWall = entries.some(entry => /幕墙|隔断/u.test(entry.name));
+    return hasCurtainWall ? trimmed : '墙柱面装饰工程';
+  }
+  return trimmed;
+}
+
+/** 施工方法章小节构建：顶层小节 = 清单分部/单位工程（计量分部名规范化后的大纲小节）；
+ * 单位工程（如「2.3 公厕」）内部子分部聚合为小节下子工作包（作为小节内主题块要点），
+ * 不再平铺成独立小节（历史缺陷：公厕 15 个子分部升级为 15 个章级小节，房建通用分部名
+ * 「门窗工程/墙柱面装饰与隔断幕墙工程」混入美丽乡村项目大纲） */
+function buildConstructionMethodSubSections(boq: BillOfQuantitiesResult, chapterId: string): BlueprintSubSection[] {
   const sectionGroups = new Map<string, BoqEntry[]>();
   for (const entry of boq.entries) {
     const key = entry.section || '未分部条目';
@@ -1282,12 +1388,49 @@ export function buildBlueprintOutline(input: {
     list.push(entry);
     sectionGroups.set(key, list);
   }
-  const workPackagesBySection = new Map<string, BlueprintWorkPackage[]>();
+  const subSections: BlueprintSubSection[] = [];
+  let subIndex = 0;
   for (const [section, entries] of sectionGroups) {
-    const workPackage = buildWorkPackageFromBoqSection(section, entries);
-    workPackagesBySection.set(section, [workPackage]);
+    const title = normalizeConstructionSectionTitle(section, entries);
+    const isUnitProject = entries.some(entry => entry.sectionKind === 'unit-project');
+    const packages: BlueprintWorkPackage[] = [];
+    if (isUnitProject) {
+      // 单位工程小节：内部子分部（subsection）各为一个工作包，小节内按子分部展开要点
+      const bySub = new Map<string, BoqEntry[]>();
+      for (const entry of entries) {
+        const key = entry.subsection || title;
+        const list = bySub.get(key) || [];
+        list.push(entry);
+        bySub.set(key, list);
+      }
+      for (const [subName, subEntries] of bySub) {
+        // round-27：子分部名同走清单分部名规范化（措施项目→模板脚手架工程、其他装饰工程→零星装饰工程）
+        packages.push(buildWorkPackageFromBoqSection(normalizeConstructionSectionTitle(subName, subEntries), subEntries));
+      }
+    } else {
+      packages.push(buildWorkPackageFromBoqSection(title, entries));
+    }
+    subIndex += 1;
+    subSections.push({
+      id: `${chapterId}.${subIndex}`,
+      title,
+      targetWords: 2400,
+      requiredParams: packages.flatMap(workPackage => Object.keys(workPackage.quantities).slice(0, 5).map(quantityName => ({ path: `data.quantities.${quantityName}`, mode: 'must_cite' as const, strict: true }))),
+      scoredItems: ['评标分项：主要施工方法（1.5）'],
+      tablePlans: ['主要工程量一览表'],
+      workPackages: packages,
+    });
   }
-  const allWorkPackages = [...workPackagesBySection.values()].flat();
+  return subSections;
+}
+
+/** 阶段 B：模板章节目录 → 蓝图大纲（评审承接声明 + 工作包骨架挂接） */
+export function buildBlueprintOutline(input: {
+  chapterTitles: string[];
+  boq: BillOfQuantitiesResult;
+  docType: string;
+}): BlueprintOutline {
+  const { chapterTitles, boq } = input;
   const chapters: BlueprintChapter[] = chapterTitles.map((title, index) => {
     const id = String(index + 1);
     const scoredItems = EVALUATION_CARRY_TABLE.filter(row => row.chapterPattern.test(title)).map(row => `${row.item}（评审权重 ${row.weight}）`);
@@ -1295,21 +1438,9 @@ export function buildBlueprintOutline(input: {
     // 丰乐镇三期验收实测：泛匹配「主要施工」把「拟投入的主要施工机械、设备计划」误判为施工方法章，
     // 23 个清单分部串入机械章（4.1 道路工程…4.23 管网工程）；机械章无「分部分项/施工方案/施工方法」完整词，泛词已删除
     const isConstructionChapter = /主要分部分项|施工方案|施工方法/u.test(title);
-    const subSections: BlueprintSubSection[] = isConstructionChapter
-      ? [...workPackagesBySection.entries()].map(([section, packages], subIndex) => ({
-          id: `${id}.${subIndex + 1}`,
-          title: section,
-          targetWords: 2400,
-          requiredParams: packages.flatMap(workPackage => Object.keys(workPackage.quantities).slice(0, 5).map(quantityName => ({ path: `data.quantities.${quantityName}`, mode: 'must_cite' as const, strict: true }))),
-          scoredItems: ['评标分项：主要施工方法（1.5）'],
-          tablePlans: ['主要工程量一览表'],
-          workPackages: packages,
-        }))
-      : [];
+    const subSections: BlueprintSubSection[] = isConstructionChapter ? buildConstructionMethodSubSections(boq, id) : [];
     return { id, title, isActive: resolveChapterActivation(input.docType, title), requiredParams: [], scoredItems, subSections };
   });
-  // 覆盖声明：清单全部分部已被工作包覆盖（校验层按 coveredSeqs 兜底）
-  void allWorkPackages;
   return { chapters };
 }
 
@@ -1475,20 +1606,13 @@ function validateBlueprintCoverage(blueprint: IntegratedBlueprint, boq?: BillOfQ
   const errors: string[] = [];
   const allPackages = blueprint.outline.chapters.flatMap(chapter => chapter.subSections).flatMap(section => section.workPackages);
   if (boq) {
-    const coveredByVillage = new Map<string, Set<number>>();
+    // 清单条目零丢失：每条目的 seq 必须被某工作包 coveredSeqs 覆盖（按 seq 全集判定，
+    // 不按 workPackage.name 与分部名匹配——小节名规范化（「其他」→「环境整治工程」）后名字会变）
+    const coveredSeqs = new Set<number>();
     for (const workPackage of allPackages) {
-      for (const seq of workPackage.coveredSeqs) {
-        const village = workPackage.name;
-        const set = coveredByVillage.get(village) || new Set<number>();
-        set.add(seq);
-        coveredByVillage.set(village, set);
-      }
+      for (const seq of workPackage.coveredSeqs) coveredSeqs.add(seq);
     }
-    // 清单条目零丢失：每条目所属分部的 work_package 必须覆盖其 seq
-    const missing = boq.entries.filter(entry => {
-      const covered = coveredByVillage.get(entry.section || '未分部条目');
-      return !covered || !covered.has(entry.seq);
-    });
+    const missing = boq.entries.filter(entry => !coveredSeqs.has(entry.seq));
     if (missing.length > 0) {
       errors.push(`清单条目零丢失校验失败：${missing.length} 条未被工作包覆盖（如序号 ${missing.slice(0, 5).map(entry => entry.seq).join('、')}）`);
     }
@@ -1575,6 +1699,7 @@ export function validateBlueprint(blueprint: IntegratedBlueprint, boq?: BillOfQu
 /** 参数桶渲染：全文恒定段（各章写作 prompt 注入，同文档逐字节一致 → prefix cache 可命中） */
 export function renderBlueprintDataText(data: BlueprintData): string {
   const lines: string[] = ['【一体化蓝图参数桶——全项目口径唯一权威源，正文引用必须与此一致，不得自行推导不同数值】'];
+  lines.push('计划类数值（劳动力人数/工期/工程量/养护期）必须且只能引用以下锚点值：禁止将各工种人数相加推导峰值、禁止按定额自行估算、禁止改写锚点数值。');
   lines.push(`- 项目：${data.project.name}（${data.project.scope}）`);
   if (data.contract.totalDays > 0) lines.push(`- 总工期：${data.contract.totalDays} 日历天`);
   if (data.contract.qualityStandard) lines.push(`- 质量标准：${data.contract.qualityStandard}`);
@@ -1631,8 +1756,128 @@ export function renderBlueprintDataText(data: BlueprintData): string {
   return lines.join('\n');
 }
 
-/** 章切片渲染：该章 sub_sections + work_packages 展开为「本项目专属事实」文本（执行层只读切片写作） */
-export function renderBlueprintChapterSlice(chapter: BlueprintChapter): string {
+/** 区间口径单值收敛（中值，四舍五入）：写作层只渲染单值，区间端点不泄漏（端点泄漏是机械/工种多口径矛盾源） */
+function blueprintMidValue(min: number | undefined, max: number | undefined, fallback: number): number {
+  if (min !== undefined && max !== undefined) return Math.round((min + max) / 2);
+  if (max !== undefined) return max;
+  if (min !== undefined) return min;
+  return fallback;
+}
+
+/** 章级数值锚点规则：锚点域 → 章标题命中正则（确定性零 LLM）。
+ * 与全文参数桶分工：参数桶承载全项目口径全景（L1 恒定段），锚点卡只携带本章必须引用的数值，
+ * 聚焦注入章切片尾部——LLM 写作本章时锚点值处于注意力核心区，抑制自编数值倾向。
+ * 新增锚点域按「锚点外置」原则只在此表声明，渲染与对齐共用同源口径。 */
+export const CHAPTER_AUTHORITY_ANCHORS: Array<{
+  id: string;
+  /** 章标题命中该正则才注入锚点域 */
+  chapterPattern: RegExp;
+  /** 渲染锚点行（返回空数组则本章不注入该域） */
+  render: (data: BlueprintData) => string[];
+}> = [
+  {
+    id: 'contract_days',
+    chapterPattern: /进度|工期|总体|部署|概况|工程|计划/u,
+    render: data => (data.contract.totalDays > 0 ? [`- 总工期：${data.contract.totalDays} 日历天`] : []),
+  },
+  {
+    id: 'labor',
+    chapterPattern: /劳动力|人员|资源|进度|工期|部署|概况/u,
+    render: data => {
+      const rows: string[] = [];
+      if (data.resources.labor.peakValue > 0) {
+        rows.push(`- 劳动力峰值：${data.resources.labor.peakValue} 人（全项目唯一峰值口径，不得自设其他峰值）`);
+      }
+      if (data.resources.labor.byPhase.length > 0) {
+        rows.push(`- 分阶段劳动力投入：${data.resources.labor.byPhase.slice(0, 10).map(item => `${item.phase} ${blueprintMidValue(item.min, item.max, 0)} 人`).join('、')}${data.resources.labor.byPhase.length > 10 ? ' 等' : ''}`);
+      }
+      if (data.resources.labor.byTrade.length > 0) {
+        rows.push(`- 工种配置（高峰同时在场，与峰值同口径）：${data.resources.labor.byTrade.map(item => `${item.trade} ${blueprintMidValue(item.min, item.max, 1)} 人`).join('、')}`);
+      }
+      return rows;
+    },
+  },
+  {
+    id: 'equipment',
+    chapterPattern: /机械|设备|资源/u,
+    render: data => {
+      if (data.resources.equipment.length === 0) return [];
+      return [`- 主要机械：${data.resources.equipment.map(item => `${item.name}${item.spec ? `（${item.spec}）` : ''} ${blueprintMidValue(item.quantity, undefined, Math.max(item.quantity ?? 0, 1))} 台`).join('、')}`];
+    },
+  },
+  {
+    id: 'maintenance_redline',
+    chapterPattern: /绿化|种植|养护|苗木|技能|培训|成品保护|质量/u,
+    render: data => data.redLineFacts
+      .filter(fact => !fact.amount && /养护|路灯/u.test(fact.key))
+      .map(fact => `- 评审红线事实（必须逐条出现且数值一致）：${fact.key}=${fact.value}`),
+  },
+  {
+    id: 'village_count',
+    chapterPattern: /概况|工程|总体/u,
+    render: data => data.redLineFacts
+      .filter(fact => !fact.amount && fact.key === '自然村数量')
+      .map(fact => `- 评审红线事实（必须逐条出现且数值一致）：${fact.key}=${fact.value}`),
+  },
+  {
+    id: 'basis_regulations',
+    chapterPattern: /编制|工程概况|项目概况|概况|说明/u,
+    render: data => {
+      const rows: string[] = [];
+      // 编制依据法规三段式（round-27 编制依据根因修复）：
+      // 1) 招标文件原文提取法规（项目专属，带文号）；2) 国家法律法规确定性清单（恒注入，带文号）；
+      // 3) 地方性法规按建设地点匹配（恒注入）。编制依据小节必须列出具体法规名及文号，
+      // 不得空写「国家现行法律、行政法规」「地方法规规章」类别话术（丰乐镇实测缺陷）
+      if (data.basisRegulations.length > 0) {
+        rows.push(`- 招标文件引用法规（编制依据小节必须列出法规名称及文号）：${data.basisRegulations.join('、')}`);
+      }
+      rows.push(`- 国家法律法规（现行有效，编制依据小节必须列出法规名称及文号）：${constructionLawAndRegulations().join('、')}`);
+      rows.push(`- 地方性法规与政府规章（工程所在地，编制依据小节必须列出法规名称）：${localRegulationsByLocation(data.project.location || '').join('、')}`);
+      // 施工验收规范标准（公共知识按工程类型确定性映射，仅列与本工程分部对应的现行规范及编号）
+      const standards = constructionAcceptanceStandards(data.project.works);
+      if (standards.length > 0) {
+        rows.push(`- 施工验收规范标准（现行有效，编制依据小节必须列出规范名称及编号）：${standards.join('、')}`);
+      }
+      return rows;
+    },
+  },
+];
+
+/** 施工验收规范编号按工程类型确定性映射（公共知识：现行有效规范及编号，仅列与本工程分部对应的条目） */
+function constructionAcceptanceStandards(works: string[]): string[] {
+  const STANDARDS_BY_WORK: Array<{ pattern: RegExp; standard: string }> = [
+    { pattern: /道路|路面|路基|土石方/u, standard: '《城镇道路工程施工与质量验收规范》（CJJ 1-2008）' },
+    { pattern: /排水|管道|管网|给排/u, standard: '《给水排水管道工程施工及验收规范》（GB 50268-2008）' },
+    { pattern: /绿化|景观|苗木|栽植|草坪|喷播|小菜园/u, standard: '《园林绿化工程施工及验收规范》（CJJ 82-2012）' },
+    { pattern: /亮化|路灯|照明/u, standard: '《城市道路照明工程施工及验收规程》（CJJ 89-2012）' },
+    { pattern: /砌筑|混凝土|门窗|屋面|装饰|天棚|公厕|建筑/u, standard: '《建筑工程施工质量验收统一标准》（GB 50300-2013）' },
+    { pattern: /基坑|沟槽|地基/u, standard: '《建筑地基基础工程施工质量验收标准》（GB 50202-2018）' },
+  ];
+  const standards: string[] = [];
+  for (const rule of STANDARDS_BY_WORK) {
+    if (works.some(work => rule.pattern.test(work)) && !standards.includes(rule.standard)) standards.push(rule.standard);
+  }
+  return standards.slice(0, 6);
+}
+
+/** 章级数值锚点卡：本章必须引用的计划类数值聚焦渲染（写作层强约束，禁止自行推导/加总/估算）。
+ * 章标题未命中任何锚点域时返回空串（非数值章不注入，避免长文稀释注意力）。 */
+export function renderBlueprintChapterAuthorityCard(chapter: BlueprintChapter, data: BlueprintData): string {
+  const lines: string[] = [];
+  for (const anchor of CHAPTER_AUTHORITY_ANCHORS) {
+    if (!anchor.chapterPattern.test(chapter.title)) continue;
+    lines.push(...anchor.render(data));
+  }
+  if (lines.length === 0) return '';
+  return [
+    '【本章数值锚点——计划类数值必须且只能引用以下锚点值；禁止将各工种人数相加推导峰值、禁止按定额自行估算、禁止改写或自设任何计划类数值】',
+    ...lines,
+  ].join('\n');
+}
+
+/** 章切片渲染：该章 sub_sections + work_packages 展开为「本项目专属事实」文本（执行层只读切片写作）。
+ * data 传入时尾部追加章级数值锚点卡（本章必须引用的计划类数值聚焦强约束）。 */
+export function renderBlueprintChapterSlice(chapter: BlueprintChapter, data?: BlueprintData): string {
   const lines: string[] = [`【第 ${chapter.id} 章「${chapter.title}」蓝图切片——以下项目专属事实由蓝图冻结锁定，正文必须一致引用】`];
   for (const subSection of chapter.subSections) {
     lines.push(`\n## ${subSection.id} ${subSection.title}（目标 ${subSection.targetWords ?? 2400} 字）`);
@@ -1649,7 +1894,8 @@ export function renderBlueprintChapterSlice(chapter: BlueprintChapter): string {
       if (workPackage.standards.length > 0) lines.push(`- 规范依据：${workPackage.standards.join('；')}`);
     }
   }
-  return lines.join('\n');
+  const authorityCard = data ? renderBlueprintChapterAuthorityCard(chapter, data) : '';
+  return [lines.join('\n'), authorityCard].filter(Boolean).join('\n\n');
 }
 
 /** 正则元字符转义（蓝图引用对齐锚定词安全） */
@@ -1664,6 +1910,67 @@ export function findBlueprintChapter(blueprint: IntegratedBlueprint, chapterTitl
   return blueprint.outline.chapters.find(chapter => chapterTitle.includes(chapter.title) || chapter.title.includes(chapterTitle));
 }
 
+/** 清单原始分部名形态（LLM 规划未经规范化直透大纲时识别） */
+const BOQ_RAW_SECTION_NAME_RE = /^(?:其他|其他工程|其他装饰工程?|措施项目|墙[、,]?柱面装饰(?:与隔断[、,]?幕墙工程)?)$/u;
+
+export interface BlueprintSectionAlignmentReport {
+  chapterTitle: string;
+  /** 子分部/工作包名升级为章级小节（应降级为分部小节内工作包展开） */
+  removed: string[];
+  /** 清单相关小节整体替换为蓝图权威分部小节 */
+  replacedWithBlueprint: boolean;
+  /** 替换后的最终小节清单 */
+  finalSections: string[];
+}
+
+/**
+ * 蓝图权威分部结构 → 规划小节校准（round-27 第二章小节根因修复）：
+ * LLM 小节规划只看证据文本，清单分部名与子分部名同列时会把单位工程子分部
+ * （土石方/砌筑/混凝土/门窗等）升级为章级小节、「其他」分部名直透大纲——
+ * 蓝图 outline 是清单分部的确定性权威（分部=小节、子分部=工作包、「其他/措施项目」已规范化）。
+ * 校准策略（仅施工方法类章节、蓝图该章有分部小节时）：
+ * - LLM 规划小节与清单名重合度 < 2 → 保留原规划（不破坏正常规划）；
+ * - 重合度 ≥ 2 → 非清单总述小节保留在前，清单相关小节整体替换为蓝图权威分部小节（蓝图顺序）。
+ */
+export function alignChapterSectionsToBlueprint(chapter: { title: string; sections: string[] }, blueprintChapter: BlueprintChapter): { sections: string[]; report?: BlueprintSectionAlignmentReport } {
+  const rawSections = chapter.sections.map(section => section.trim()).filter(Boolean);
+  if (rawSections.length === 0 || blueprintChapter.subSections.length === 0) return { sections: rawSections };
+  const authoritative = blueprintChapter.subSections.map(section => section.title);
+  const packageNames = new Set(blueprintChapter.subSections.flatMap(section => section.workPackages.map(workPackage => workPackage.name)));
+  const entryNames = new Set(blueprintChapter.subSections.flatMap(section => section.workPackages.flatMap(workPackage => [...Object.keys(workPackage.quantities), ...workPackage.processChain])));
+  const overlapsBlueprintName = (title: string) => Boolean(
+    authoritative.find(name => title === name || (title.length >= 2 && (title.includes(name) || name.includes(title))))
+    || [...packageNames].find(name => title === name || (title.length >= 2 && (title.includes(name) || name.includes(title))))
+    || [...entryNames].find(name => title === name),
+  );
+  const isBoqRelated = (title: string) => BOQ_RAW_SECTION_NAME_RE.test(title) || overlapsBlueprintName(title);
+  const blueprintRelated = rawSections.filter(isBoqRelated);
+  if (blueprintRelated.length < 2) return { sections: rawSections };
+  // 总述类小节保留在前；清单相关小节整体替换为蓝图权威分部小节（工作包在分部小节内展开）
+  const generalSections = rawSections.filter(title => !isBoqRelated(title)).filter(title => !authoritative.some(name => name.includes(title) || title.includes(name)));
+  const finalSections = [...new Set([...generalSections, ...authoritative])];
+  const removed = rawSections.filter(title => isBoqRelated(title) && !authoritative.includes(title));
+  return {
+    sections: finalSections,
+    report: { chapterTitle: chapter.title, removed, replacedWithBlueprint: true, finalSections },
+  };
+}
+
+/** 蓝图权威分部结构 → 全部章节规划小节校准（仅施工方法类章节生效；无报告章节零变化） */
+export function alignPlannedSectionsToBlueprint(chapters: Array<{ title: string; sections: string[] }>, outline: BlueprintOutline): { chapters: Array<{ title: string; sections: string[] }>; reports: BlueprintSectionAlignmentReport[] } {
+  const reports: BlueprintSectionAlignmentReport[] = [];
+  const aligned = chapters.map(chapter => {
+    if (!/主要分部分项|施工方案|施工方法/u.test(chapter.title)) return chapter;
+    const blueprintChapter = outline.chapters.find(candidate => candidate.title === chapter.title || chapter.title.includes(candidate.title) || candidate.title.includes(chapter.title));
+    if (!blueprintChapter) return chapter;
+    const result = alignChapterSectionsToBlueprint(chapter, blueprintChapter);
+    if (result.report) reports.push(result.report);
+    return { ...chapter, sections: result.sections };
+  });
+  return { chapters: aligned, reports };
+}
+
+
 /** 蓝图引用对齐（二期切换）：章成稿后 must_cite+strict 参数数值与蓝图不一致时确定性回填
  * （只替换数字本身、不动句式，与 planDataMaster 对齐同构；权威源为蓝图 data）；
  * 未出现（missing）仅报告不阻断（缺口数字反馈与修复链兜底）。
@@ -1673,8 +1980,18 @@ export function alignChapterContentToBlueprint(markdown: string, chapter: Bluepr
   const missing: string[] = [];
   let result = markdown;
   const mustCiteStrict = chapter.subSections.flatMap(section => section.requiredParams.filter(param => param.mode === 'must_cite' && param.strict));
+  // 域级锚点（章标题命中即对齐，不依赖 requiredParams 声明）：劳动力峰值/养护期是写作层高频自编数值，
+  // 蓝图权威为唯一口径——章标题命中域即强制对齐（检测定位=修复定位同源锚点，与数值锚点卡注入同域）。
+  const domainAnchors: BlueprintRequiredParam[] = [];
+  if (/劳动力|人员|资源|进度|工期|部署|概况/u.test(chapter.title) && data.resources.labor.peakValue > 0) {
+    domainAnchors.push({ path: 'data.resources.labor.peak_value', mode: 'must_cite', strict: true });
+  }
+  if (/绿化|种植|养护|苗木|技能|培训|成品保护|质量/u.test(chapter.title)) {
+    domainAnchors.push({ path: 'data.redline.greening_maintenance', mode: 'must_cite', strict: true });
+  }
+  const alignedParams = [...mustCiteStrict, ...domainAnchors];
   const seen = new Set<string>();
-  for (const param of mustCiteStrict) {
+  for (const param of alignedParams) {
     if (seen.has(param.path)) continue;
     seen.add(param.path);
     if (param.path === 'data.contract.total_days') {
@@ -1706,6 +2023,44 @@ export function alignChapterContentToBlueprint(markdown: string, chapter: Bluepr
         return line.replace(rawValue, String(quantity.value));
       });
       if (!matched) missing.push(`${quantityName} ${quantity.value}${unit}`);
+      continue;
+    }
+    if (param.path === 'data.resources.labor.peak_value') {
+      const peakValue = data.resources.labor.peakValue;
+      if (peakValue <= 0) continue;
+      // 峰值形态覆盖：「高峰人数 N 人」「峰值 N 人」「劳动力总人数 N 人」「各专业班组高峰人数合计为 N 人」
+      // ——只替换数值本身、不动句式（「合计为/控制在」等隔断词不阻断锚定，替换后句式仍成立）
+      const peakRe = /(?:高峰(?:期)?(?:人数)?|峰值|劳动力(?:总人数|峰值)|各专业班组高峰人数)[^。；;\n]{0,24}?(?:约)?\s*([\d,]+)\s*人/gu;
+      let matched = false;
+      result = result.replace(peakRe, (line, rawValue: string) => {
+        matched = true;
+        const value = Number(String(rawValue).replace(/,/g, ''));
+        if (!Number.isFinite(value) || value === peakValue || value <= 0) return line;
+        fixed.push({ anchor: '劳动力峰值', from: `${rawValue}人`, to: `${peakValue}人` });
+        return line.replace(rawValue, String(peakValue));
+      });
+      if (!matched) missing.push(`劳动力峰值 ${peakValue} 人`);
+      continue;
+    }
+    if (param.path === 'data.redline.greening_maintenance') {
+      // 养护期权威：redLineFacts「绿化养护期=二级养护，养护二年」提取年数，正文「养护…X年」与权威不一致时回填
+      const maintenanceFact = data.redLineFacts.find(fact => /养护/u.test(fact.key));
+      if (!maintenanceFact) continue;
+      const authorityMatch = /养护[^。；;|]{0,10}?([一二两三四五六七八九十]+|\d{1,2})\s*年/u.exec(maintenanceFact.value);
+      if (!authorityMatch) continue;
+      const authorityYears = parseChineseNumber(authorityMatch[1] ?? '');
+      if (authorityYears === undefined || !Number.isFinite(authorityYears) || authorityYears <= 0) continue;
+      const yearRe = /养护[^。；;\n|]{0,16}?([一二两三四五六七八九十]+|\d{1,2})\s*年/gu;
+      let matched = false;
+      result = result.replace(yearRe, (line, rawValue: string) => {
+        matched = true;
+        const value = parseChineseNumber(rawValue);
+        if (value === undefined || !Number.isFinite(value) || value === authorityYears || value <= 0) return line;
+        fixed.push({ anchor: '养护期', from: `${rawValue}年`, to: `${authorityYears}年` });
+        return line.replace(rawValue, String(authorityYears));
+      });
+      if (!matched) missing.push(`养护期 ${authorityYears} 年`);
+      continue;
     }
   }
   return { markdown: result, fixed, missing };
@@ -2210,6 +2565,9 @@ export function blueprintCitationConsistencyIssues(markdown: string, data: Bluep
   return issues;
 }
 
+/** 值尾部编号粘连检测（与 scoreFactCandidate 拒收同口径）：「90日历天2.9」形态的 PDF 编号串行残留 */
+const TRAILING_CLAUSE_NOISE_RE = /(?<=[日天])\s*[0-9]+(?:\.[0-9]+)?(?=[\s]*(?:招标|建设|质量|合同|项目|工程|资金|投标|开标|评标|付款|工期|开工|计划|计价|现场|资质|标段|[0-9]{1,3}[.、．]|[，,。；;]|$))/u;
+
 /** 渲染 canonical 基本事实为紧凑文本（蓝图构建输入：建设规模/总工期/质量标准等口径来源；
  * 三期收口：原 planDataMaster.renderBasicFactsForMaster 移入蓝图模块） */
 export function renderBasicFactsForBlueprint(canonical: CanonicalFactModel): string {
@@ -2217,7 +2575,14 @@ export function renderBasicFactsForBlueprint(canonical: CanonicalFactModel): str
     .filter(fact => Boolean(fact && fact.label && fact.value))
     .sort((left, right) => (right.priority || 0) - (left.priority || 0));
   if (entries.length === 0) return '';
-  return entries.slice(0, 60).map(fact => `- ${fact.label}：${fact.value}`).join('\n');
+  return entries.slice(0, 60).map(fact => {
+    // 蓝图输入源头清洗：值尾部编号粘连（PDF 编号串行残留）截断到干净段，
+    // 防止「90日历天2.9招标范围：…」污染总工期/合同估算价提取（信息表污染同源根因）
+    const value = String(fact.value);
+    const noise = TRAILING_CLAUSE_NOISE_RE.exec(value);
+    const cleaned = noise ? value.slice(0, noise.index).trim() : value;
+    return `- ${fact.label}：${cleaned}`;
+  }).join('\n');
 }
 
 // ═══════════════════════════════ 主入口：阶段 0 → A → B → C → D ═══════════════════════════════

@@ -50,7 +50,7 @@ import { chapterTaskPrompt, chapterTaskPromptForPlannedStructure, planChapterTas
 import { arbitrateFactPool, buildCanonicalFactModel, extractDrawingAnnotationFacts, governEvidenceValues, PROJECT_BASIC_FIELD_SPECS, renderScopeOverrideAnchors } from './factGovernance';
 import { buildChapterReadinessPlan } from './chapterReadiness';
 import { chineseTokenMatch } from './textMatch';
-import { alignChapterContentToBlueprint, buildChapterStructureFromBlueprint, buildIntegratedBlueprint, findBlueprintChapter, renderBasicFactsForBlueprint, renderBlueprintChapterSlice, renderBlueprintDataText, renderBlueprintMustCiteValues, saveBlueprintAsset, splitSinglePointOversizedBlocks } from './integratedBlueprint';
+import { alignChapterContentToBlueprint, alignPlannedSectionsToBlueprint, buildChapterStructureFromBlueprint, buildIntegratedBlueprint, findBlueprintChapter, renderBasicFactsForBlueprint, renderBlueprintChapterSlice, renderBlueprintDataText, renderBlueprintMustCiteValues, saveBlueprintAsset, splitSinglePointOversizedBlocks } from './integratedBlueprint';
 import type { IntegratedBlueprint, PlannedChapterStructure } from './integratedBlueprint';
 import { dedupeAfterTableFix, enforcePlannedSectionCompleteness, enforceWorkPackageSkeletons, repairTableExecutionGaps, reportBudgetTrimAudit, runGlobalConsistencyReviewLoop } from './globalQualityGates';
 
@@ -159,8 +159,11 @@ export async function generateDocumentDraft(input: { templateId: string; require
     '1. 禁止编造时间事实：开工日期、竣工日期、工期起止等未在项目资料中确认的日期一律不得写入正文；进度表述改用“开工后第 N 天”“第 N 周”等相对口径，或引用资料中已确认的日期。',
     '2. 禁止商务数据：暂列金额、暂估价、综合单价、清单合价、税率、投标报价等商务条款数据不得写入施工组织设计正文，商务口径只允许出现在项目信息表中。',
     '3. 禁止资料来源罗列话术：不得出现“根据/依据招标文件、工程量清单、图纸及答疑”式来源罗列句，直接陈述项目事实与施工安排；编制依据小节可集中列出依据文件。',
+    // round-26：编制依据必须列出具体法规名称及文号（丰乐镇实测缺陷：只写「国家现行法律、行政法规」
+    // 类别话术被判内容空泛；法规名与文号属公共知识，可依据现行有效版本直接引用）
+    '3b. 编制依据小节必须列出具体法规名称及文号：国家法律法规条目列出《中华人民共和国建筑法》（主席令第91号公布，2019年修正）、《建设工程质量管理条例》（国务院令第279号公布，2019年修订）等具体名称及文号；地方性法规与政府规章条目按工程所在地列出具体名称（如《安徽省建筑市场管理条例》《合肥市城市绿化管理条例》）；规范标准条目列出《建筑工程施工质量验收统一标准》（GB 50300-2013）等具体编号；招标文件原文引用的法规按其原文列出。不得只写“国家现行法律、行政法规”“现行规范标准”“地方法规规章”等类别话术。',
     '4. 禁止跨章复述概况：除“工程概况/项目概况”章节外，其余章节不得以“本项目为/本工程为”开头整段复述项目总体概况，应直接展开本章主题内容。',
-    '5. 禁止后台内部话术：不得出现“工作包”“WRITER_MISSING_SECTION”“已确认资料”等系统内部术语与兜底话术，一律改写为正式施工组织设计表述。',
+    '5. 禁止后台内部话术：不得出现“工作包”“WRITER_MISSING_SECTION”“已确认资料”等系统内部术语与兜底话术，一律改写为正式施工组织设计表述；不得模仿补写器格式书写“招标要求响应（前附表响应条款）”“按上述条款执行”等条款响应条幅——招标文件要求按正式表述落位各章节（如“本工程履约保证金按招标文件约定提交”）。',
     // round-21 S6：合规数值红线——安全/职业健康/危大工程章节是外部评审高危失分区（历史缺陷：
     // 高温停工写成 42℃、危大判定线张冠李戴、专家论证程序缺签章、同一监测指标两处数值矛盾），
     // 通用法规阈值前置到写作约束，从源头杜绝编造
@@ -169,10 +172,16 @@ export async function generateDocumentDraft(input: { templateId: string; require
     '  b. 危大工程判定线按住建部令第37号及建办质〔2018〕31号：基坑（槽）土方开挖、支护、降水，开挖深度超过3m（含3m）属危大工程，超过5m（含5m）属超过一定规模（需专家论证）；模板支撑搭设高度8m及以上或搭设跨度18m及以上属超过一定规模；落地式钢管脚手架搭设高度24m及以上属危大工程、50m及以上属超过一定规模，悬挑式脚手架分段架体搭设高度20m及以上属超过一定规模；采用非常规起重设备方法且单件起吊重量10kN及以上属危大工程、100kN及以上属超过一定规模。判定必须给出本项目对应参数（开挖深度/支撑高度/搭设高度/起吊重量），参数未在资料中确认的不得自行判定为危大或超危大。证据中含基坑底标高、±0.000对应绝对标高、垫层底标高等数值的，必须直接引用并据此给出开挖深度具体数值（开挖深度=地面标高-坑底标高），不得仅写“开挖深度超过3m”而不给数值；标高、坡率（如1:1.5）等设计参数应写入基坑支护与土方开挖相关小节。',
     '  c. 专家论证程序按住建部令第37号：超过一定规模的危大工程专项方案应组织不少于5名符合专业要求的专家（从地方住建主管部门专家库选取）论证；修改后的方案由施工单位技术负责人审核签字、加盖单位公章，并由总监理工程师审查签字、加盖执业印章后方可实施。',
     '  d. 监测预警值单一口径：同一监测指标（基坑位移速率、沉降预警值等）全文只能出现一个数值口径，不得前后矛盾；预警值优先引用设计文件明确值，无设计要求时按现行监测技术标准选取并注明依据。',
-    '  e. 自设数值自洽：自设的防护尺寸、频次、时间节点等数值必须与同章及跨章表述一致，且尽量引用现行规范依据；无规范依据的自设值不得写成硬性规定。',
+    '  e. 自设数值自洽：自设的防护尺寸、频次、时间节点等数值必须与同章及跨章表述一致，且尽量引用现行规范依据；无规范依据的自设值不得写成硬性规定。工期缓冲/预留天数的用途（如"竣工验收缓冲""工序衔接缓冲"）全文只能有一个口径，不得一处写竣工验收缓冲、另一处写工序衔接缓冲。',
     // round-25：表格口径自查泄漏治理（历史缺陷：写手把「合计行与明细不一致，故修正为…」的推算过程写进正文，
     // 与表格数值自相矛盾直接进成品）——自查过程必须留在推理中，正文只呈现自洽的最终数值
     '7. 禁止数据自查话术：不得把表格口径推算、数据一致性自查过程写入正文（如"上表合计行…与…不一致，故…修正为…"），表格与正文数值必须直接自洽；不得把招标条款编号碎片（如"3项规定""1委员会确定中""56m15：…"）作为小节标题。',
+    // round-27：清单口径词泄漏治理（丰乐镇实测「措施项目工程量按清单口径为」「土方工程按清单汇总口径控制」——
+    // 计量文件内部口径词按条抄入正文，评标人视角即口径推算话术）
+    '7b. 禁止清单计量口径话术：不得出现"按清单口径""按清单汇总口径""清单口径为""按清单逐项""分部小计""本页小计"等工程量清单计量文件内部口径表述；工程量直接以正式施工组织设计口径陈述（"本工程土方挖方总量为…m³"），不得说明数值的清单来源或口径换算过程。',
+    // round-27：小节标题污染治理（丰乐镇实测「4.1 每个单位工程独立制表（一）（二）」「8.3 业主确认环节与
+    // 计量签证的前置管控措施」等模板说明性/商务口径标题被写成小节——小节标题必须是正式施组主题表述）
+    '7c. 小节标题规范：小节标题必须是正式施工组织设计主题表述，禁止把模板说明性文字（"每个单位工程独立制表""制表（一）（二）"）、指令性文字（"详见XX""另见XX""按要求填写"）或商务口径词（"计量签证""计价""结算"）作为小节标题；章节编号必须连续（如 5.1、5.2、5.3），不得跳号。',
     // 评分报告问题2：纪律承诺段（「对参与本项目投标及施工组织设计编制的工作人员实行严格的纪律管理，
     // 确保投标活动合法合规」）被 LLM 写入正文——投标/评标纪律属商务投标函内容，技术标出现即降专业性
     '8. 禁止商务投标函内容：投标/评标纪律承诺、廉洁承诺、廉洁自律、行贿、串标、围标、弄虚作假、干扰评标等商务投标函条款与承诺一律不得写入施工组织设计正文（招标文件中的此类条款属商务文件应响应内容，不是技术标内容）；本节只写技术方案与管理措施，不得以承诺句形式响应此类条款。'].join('\n');
@@ -861,6 +870,31 @@ export async function generateDocumentDraft(input: { templateId: string; require
     }, { subtitle: '一体化蓝图' }));
     emitProgress();
   }
+  // 蓝图权威分部结构 → 规划小节校准（round-27 第二章小节根因修复）：LLM 小节规划会把单位工程
+  // 子分部（土石方/砌筑/混凝土/门窗等）升级为章级小节、「其他」分部名直透大纲——蓝图 outline
+  // 是清单分部确定性权威（分部=小节、子分部=工作包），蓝图构建成功后对施工方法类章节校准
+  if (integratedBlueprint) {
+    const alignment = alignPlannedSectionsToBlueprint(effectiveChapters.map(chapter => ({ title: chapter.title, sections: chapter.sections || [] })), integratedBlueprint.outline);
+    if (alignment.reports.length > 0) {
+      const appliedMap = new Map(alignment.chapters.map(chapter => [chapter.title, chapter.sections]));
+      effectiveChapters = effectiveChapters.map(chapter => {
+        const alignedSections = appliedMap.get(chapter.title);
+        return alignedSections && JSON.stringify(alignedSections) !== JSON.stringify(chapter.sections || []) ? { ...chapter, sections: alignedSections } : chapter;
+      });
+      template = { ...template, chapters: effectiveChapters };
+      upsertProgressStage(progressStages, displayStage({
+        type: 'validation',
+        roleId: 'blueprint-section-alignment',
+        status: 'success',
+        message: `清单分部结构校准：${alignment.reports.length} 个施工方法类章节小节已按蓝图权威分部结构对齐`,
+        details: alignment.reports.flatMap(report => [
+          `${report.chapterTitle}：最终小节 ${report.finalSections.join('、')}`,
+          ...(report.removed.length > 0 ? [`${report.chapterTitle} 子分部/未规范名降级：${report.removed.join('、')}（正文在分部小节内按工作包展开）`] : []),
+        ]),
+      }, { subtitle: '清单分部结构校准', order: progressStages.length }));
+      emitProgress();
+    }
+  }
   // 蓝图接管（三期收口：旧 planDataMaster/decisionLock 管线已删除，蓝图是唯一计划类数值权威源）：
   // 四道校验通过的蓝图，其参数桶渲染文本注入各章写作；章切片渲染文本逐章注入执行层
   // （同章各块值相同 → 章内 prefix cache 共享前缀）；蓝图缺失/校验失败时参数桶为空、各章按证据独立成稿
@@ -874,6 +908,21 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const batchTasks = await Promise.all(chapterBatch.map(async (chapter, batchIndex): Promise<(() => Promise<void>) | undefined> => {
     const chapterOrder = chapterOffset + batchIndex;
     throwIfAborted(input.signal);
+    // 蓝图权威缺失阻断（源头治理）：蓝图构建失败/校验未通过时参数桶与数值锚点卡不注入，
+    // 数值密集型章（劳动力/资源/进度）失去唯一权威源——按节点级把关原则直接阻断，
+    // 拒绝「按证据独立成稿」静默产出自编数值（劳动力 625/42 三套口径的历史根因）
+    if (!blueprintActive && /劳动力|资源配置|资源|进度计划|进度|工期/u.test(chapter.title)) {
+      progressStages.push(displayStage({
+        type: 'chapter_generation',
+        roleId: 'chapter_generation',
+        status: 'failed',
+        message: `${displayChapterTitle(chapter.title)} 依赖一体化蓝图参数桶权威（劳动力/资源/进度类数值），蓝图校验未通过，已按节点级把关阻断生成`,
+        details: ['蓝图四道校验未全部通过或构建异常时，数值密集型章禁止无权威成稿', '请检查清单解析与蓝图构建诊断后重试'],
+        progress: { current: chapterOrder + 1, total: effectiveChapters.length, label: '章节阻断' },
+      }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder }));
+      emitProgress();
+      throw new Error(`${displayChapterTitle(chapter.title)} 依赖一体化蓝图参数桶权威，蓝图校验未通过，已按节点级把关阻断生成`);
+    }
     const chapterStartedAt = Date.now();
     const chapterProgressIndex = progressStages.length;
     let latestChapterStageForProgress: DocumentExecutionStage | undefined;
@@ -1263,7 +1312,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
     const chapterMaxChars = Math.ceil(targetPlan.maxWords * (documentBudget.maxChars ? 1.05 : 1));
     // 二期蓝图接管：本章章切片渲染文本 + 参数桶权威文本（蓝图活跃时替换主表口径）
     const chapterBlueprintSlice = blueprintActive ? findBlueprintChapter(integratedBlueprint!, chapter.title) : undefined;
-    const blueprintSliceText = chapterBlueprintSlice ? renderBlueprintChapterSlice(chapterBlueprintSlice) : '';
+    // 章切片尾部追加章级数值锚点卡（本章必须引用的计划类数值聚焦强约束，写作层抑制自编数值）
+    const blueprintSliceText = chapterBlueprintSlice && integratedBlueprint ? renderBlueprintChapterSlice(chapterBlueprintSlice, integratedBlueprint.data) : '';
     const blueprintMustCiteHint = chapterBlueprintSlice && integratedBlueprint ? renderBlueprintMustCiteValues(chapterBlueprintSlice, integratedBlueprint.data) : '';
     const targetWords = targetPlan.roundTarget;
     // 达标契约：minWords = 目标（不打折）。0.68 折扣是历史人为降标，是"初稿不达标→补写"链的源头；

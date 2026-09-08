@@ -502,6 +502,9 @@ export function minimumSectionCount(chapter: DocumentTemplateChapter, targetWord
 }
 
 export function fallbackSectionsForChapter(chapterTitle: string) {
+  // 编制说明/工程概况类章种子（丰乐镇第十三轮）：编制依据小节为施组必备首节，
+  // LLM 零规划时 catch-all 兜底会漏掉编制依据——首节硬种子保证章节结构即含编制依据
+  if (/编制说明|工程概况|项目概况/u.test(chapterTitle)) return ['编制依据', '工程概况', '工程特点与重难点分析', '施工部署与总体安排', '施工准备与资源投入'];
   if (/质量/u.test(chapterTitle)) return ['质量目标与质量管理体系', '关键工序质量控制措施', '材料设备进场验收与检验', '质量检查试验与验收程序', '质量通病防治与整改闭环', '成品保护与资料管理'];
   if (/安全/u.test(chapterTitle)) return ['安全生产管理体系', '危险源辨识与分级管控', '现场安全防护措施', '临时用电与机械设备安全管理', '应急处置与安全检查整改', '安全教育培训与交底'];
   if (/工期|进度/u.test(chapterTitle)) return ['总工期目标与节点安排', '施工进度计划编制原则', '关键线路与工序穿插安排', '资源投入与工期保障措施', '进度偏差纠偏与动态调整', '工期风险识别与应对措施'];

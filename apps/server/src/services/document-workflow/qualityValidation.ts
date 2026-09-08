@@ -608,14 +608,20 @@ export function markdownTableQualityIssues(markdown: string): ValidationIssue[] 
     const placeholderCellRow = dataRows.find(row => row.some((cell, cellIndex) => {
       if (!/^(?:—+|-+|-|\/|N\/A|n\/a|待定|待补充|待确认|待查|待补|若干|暂无|无数据)$/u.test(cell) && !/^约\d/u.test(cell)) return false;
       // 合计/小计/总计/累计行的“—”为不适用语义，豁免；其余占位词（若干/约/待定等）任何行均不豁免
-      return !(/^(?:合计|小计|总计|累计)/u.test(row[0] || '') && /^(?:—+|-+)$/u.test(cell) && cellIndex > 0);
+      if (/^(?:合计|小计|总计|累计)/u.test(row[0] || '') && /^(?:—+|-+)$/u.test(cell) && cellIndex > 0) return false;
+      // 规格型号列的“—”为「机具无型号」不适用语义，豁免（丰乐镇实测：蛙式打夯机无规格型号，
+      // 源资料不提供型号；强制填报会诱导 LLM 修复轮编造型号（HW-60），破坏参数溯源）
+      if (/^(?:—+|-+)$/u.test(cell) && /规格型号|规格|型号/u.test(header[cellIndex] || '')) return false;
+      return true;
     }));
     if (placeholderCellRow) {
       // 提取真正触发缺陷的单元格（与检测口径一致：合计行“—”豁免，不进入消息定位）
       const isTotalRow = /^(?:合计|小计|总计|累计)/u.test(placeholderCellRow[0] || '');
       const placeholderCell = placeholderCellRow.find((cell, cellIndex) => {
         if (!/^(?:—+|-+|-|\/|N\/A|n\/a|待定|待补充|待确认|待查|待补|若干|暂无|无数据)$/u.test(cell) && !/^约\d/u.test(cell)) return false;
-        return !(isTotalRow && /^(?:—+|-+)$/u.test(cell) && cellIndex > 0);
+        if (isTotalRow && /^(?:—+|-+)$/u.test(cell) && cellIndex > 0) return false;
+        if (/^(?:—+|-+)$/u.test(cell) && /规格型号|规格|型号/u.test(header[cellIndex] || '')) return false;
+        return true;
       }) || '';
       issues.push({ level: 'error', message: `表格存在占位符单元格：${header.join('、')}（“${placeholderCellRow[0] || ''}”行“${placeholderCell}”）`, suggestion: '正式交付表格不得用“—/若干/约/待定”等占位或模糊表达代替具体数据；应从资料补齐具体数值。' });
     }

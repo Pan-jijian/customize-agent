@@ -451,12 +451,19 @@ export function isValidProjectBasicFactValue(fieldId: string | undefined, rawVal
   if (!fieldId || !value || value.length > 260) return false;
   if (/###|第\s*\d+\s*页|共\s*\d+\s*页|律师代理费|投标文件的编制|备选投标方案|投标将被否决|投标人提供|投标有效期|电子交易系统|公共资源交易监督管理部门|中标候选|评标委员会|实质性内容作出响应/u.test(value)) return false;
   if (/签章|盖章|联系人|联系电话|电话|邮箱|解密|开标|评标|保证金|交易系统|空白|填写|上传|下载|递交/u.test(value)) return false;
-  if (fieldId === 'schedule_requirement') return value.length <= 90 && /\d+(?:\.\d+)?\s*(?:日历天|天|个月|月|年)/u.test(value);
+  // 丰乐镇第五轮加固：计划工期值尾部编号粘连（「90日历天2.9招标范围」PDF 编号串行残留）拒收，
+  // 与 scoreFactCandidate 拒收同口径——信息表不再自我复制固化脏值
+  if (fieldId === 'schedule_requirement') return value.length <= 90 && /\d+(?:\.\d+)?\s*(?:日历天|天|个月|月|年)/u.test(value) && !/(?<=[日天])\s*[0-9]+(?:\.[0-9]+)?(?=[\s]*(?:招标|建设|质量|合同|项目|工程|资金|投标|开标|评标|付款|工期|开工|计划|计价|现场|资质|标段|[，,。；;]|$))/u.test(value);
+  // 质量标准只允许短词（合格/优良/一次验收合格）：逗号拼接创优残句（「合格，确保创优目标与奖」）拒收，
+  // 创优目标由创优事实行承载，不进质量标准行
   if (fieldId === 'quality_standard') return value.length <= 40 && /合格|优良|一次性验收|国家.*验收|达到/u.test(value) && !/工期|投标|技术标准|\d[.．、]/u.test(value);
   if (fieldId === 'owner') return value.length >= 4 && value.length <= 80 && /公司|局|委员会|中心|处|院|所|校|集团|有限|股份|责任|管理/u.test(value) && !/将报|监督管理部门|投标人|中标|负责解释|见招标|详见|空白|填写/u.test(value);
   if (fieldId === 'project_location') return value.length <= 120 && !/见招标公告|详见|投标/u.test(value);
   if (fieldId === 'project_scope') return value.length <= 220 && !/^[（(]\s*\d+[)）]/u.test(value) && !/具备.{0,24}(?:证书|考核合格|安全生产考核)/u.test(value) && !/^见(?:招标|投标人|前附)/u.test(value);
-  if (fieldId === 'project_code') return /^[A-Za-z0-9\-_.（）()]+$/u.test(value);
+  // 项目编号拒收「2026AEEGZ500482.3」形态（编号+PDF 序号粘连）与过短/过长值
+  if (fieldId === 'project_code') return /^[A-Za-z0-9\-_.（）()]+$/u.test(value) && value.length <= 80 && !/\.\d+$/u.test(value);
+  // 建设规模错源拒收（丰乐镇第五轮：招标范围内容错抽为建设规模——招标文件无此条款时不得采值）
+  if (fieldId === 'project_scale') return value.length <= 100 && /(?:m²|㎡|平方米|m2|km|米|公里|亩|公顷|栋|幢|座|处|户|层|个)/u.test(value) && !/招标范围/u.test(value);
   if (fieldId === 'project_investment_estimate') return value.length <= 100 && /\d+(?:\.\d+)?\s*(?:万元|元)/u.test(value);
   if (fieldId === 'labor_peak') return value.length <= 40 && /\d+(?:\.\d+)?\s*人/u.test(value);
   if (fieldId === 'assembly_rate') return value.length <= 20 && /\d+(?:\.\d+)?\s*%/u.test(value);

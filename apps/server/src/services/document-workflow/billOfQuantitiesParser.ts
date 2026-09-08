@@ -33,6 +33,8 @@ export interface BoqEntry {
   section: string;
   /** 所属分节（如「新建混凝土道路」） */
   subsection: string;
+  /** 分部类型：unit-project=单位工程（如清单「2.3 公厕」，其内部子分部聚合为小节下工作包要点）；plain=普通分部 */
+  sectionKind?: 'unit-project' | 'plain';
   /** 所属自然村分组（清单表头「工程名称」） */
   villageGroup: string;
   /** 所在页码（markdown 源可回溯） */
@@ -180,6 +182,15 @@ export function parseBillOfQuantities(input: { chunks: BoqChunkRow[]; sourceFile
   let carryover = '';
   let section = '';
   let subsection = '';
+  let sectionKind: 'unit-project' | 'plain' = 'plain';
+  // 清单三层结构识别（丰乐镇实测：清单分部分节编码存在三种层级——中文数字=顶层分部（一、道路工程）、
+  // x.y=子目或单位工程（1.1 新建混凝土道路 / 2.3 公厕）、纯数字=单位工程内部子分部（0101 土石方工程）。
+  // 历史缺陷：状态机把「2.3 公厕」当 subsection 丢弃层级，把「0101 土石方工程」等子分部升级为顶层
+  // section → 蓝图大纲把公厕 15 个子分部平铺成 15 个独立小节（门窗工程/幕墙工程等房建通用分部名）。
+  // 预扫描分节行序列做前瞻判定：x.y 行后跟纯数字行 → 单位工程（section=单位工程名），其内部纯数字
+  // 行降级为 subsection；主循环按同一行序对齐分类结果
+  const sectionRowKinds = classifySectionRows(collectSectionRowCodes(markdownChunks));
+  let sectionRowIndex = -1;
   // 工作表编号继承：无编号的续页 chunk 归属上一 chunk 的工作表（同 sheet 的 chunk 按序相邻）
   let lastSheetId = '';
   for (const chunk of markdownChunks) {
@@ -232,6 +243,7 @@ export function parseBillOfQuantities(input: { chunks: BoqChunkRow[]; sourceFile
             quantity: Number.isFinite(quantity) ? quantity : 0,
             section,
             subsection,
+            sectionKind,
             villageGroup,
             page: rowPage,
             sourceFile,
@@ -240,12 +252,21 @@ export function parseBillOfQuantities(input: { chunks: BoqChunkRow[]; sourceFile
           };
           if (entry.seq > 0) markdownEntries.push(entry);
         } else if (/^[一二三四五六七八九十\d]+(?:\.\d+)?$/u.test(cells[2] ?? '') && !(cells[1] ?? '') && (cells[4] ?? '') && cells[4] !== '分部小计') {
-          // 分部/分节标题行（序号列空、编码列「一/二/…/6/1.1」）：后续条目归属该分部分节
-          if ((cells[2] ?? '').includes('.')) {
-            subsection = cells[4];
-          } else {
+          // 分部/分节标题行（序号列空、编码列「一/二/…/6/1.1」）：按预扫描层级判定分类赋值，
+          // 后续条目归属该分部分节
+          sectionRowIndex += 1;
+          const kind = sectionRowKinds[sectionRowIndex] ?? ((cells[2] ?? '').includes('.') ? 'subsection' : 'section');
+          if (kind === 'unit-project') {
+            // 单位工程（如「2.3 公厕」）：作为独立顶层分部，其内部子分部降级为分节
             section = cells[4];
             subsection = '';
+            sectionKind = 'unit-project';
+          } else if (kind === 'section') {
+            section = cells[4];
+            subsection = '';
+            sectionKind = 'plain';
+          } else {
+            subsection = cells[4];
           }
         }
       }
@@ -440,8 +461,60 @@ function assignSections(entries: BoqEntry[], markdownEntries: BoqEntry[]): void 
     if (nearest) {
       entry.section = nearest.section;
       entry.subsection = nearest.subsection;
+      entry.sectionKind = nearest.sectionKind;
     }
   }
+}
+
+/** 预扫描：按 chunk 顺序收集分节行编码序列（与主循环同源行解析，仅做层级前瞻判定用） */
+function collectSectionRowCodes(markdownChunks: BoqChunkRow[]): string[] {
+  const codes: string[] = [];
+  let carryover = '';
+  for (const chunk of markdownChunks) {
+    const lines = chunk.content.split('\n');
+    let buffer = carryover;
+    carryover = '';
+    for (const line of lines) {
+      if (line.startsWith('|')) {
+        if (buffer.trim()) buffer = line; // 上一行未闭合截断残段，丢弃
+        else buffer = line;
+      } else if (buffer) {
+        buffer += line;
+      } else {
+        continue;
+      }
+      if (!buffer.endsWith('|')) continue;
+      const cells = buffer.split('|').map(cell => cell.trim());
+      buffer = '';
+      if (/^[一二三四五六七八九十\d]+(?:\.\d+)?$/u.test(cells[2] ?? '') && !(cells[1] ?? '') && (cells[4] ?? '') && cells[4] !== '分部小计') {
+        codes.push(cells[2] ?? '');
+      }
+    }
+    if (buffer.trim()) carryover = buffer;
+  }
+  return codes;
+}
+
+/** 分节行层级分类：中文数字=顶层分部；x.y 行前瞻下一分节行是否纯数字（单位工程子分部编码形态）
+ * ——是则当前行为单位工程，否则为普通子目；纯数字行在单位工程内部为子分部（subsection），否则为顶层分部 */
+function classifySectionRows(codes: string[]): Array<'section' | 'subsection' | 'unit-project'> {
+  const kinds: Array<'section' | 'subsection' | 'unit-project'> = [];
+  let inUnitProject = false;
+  for (let i = 0; i < codes.length; i++) {
+    const code = codes[i] ?? '';
+    if (code.includes('.')) {
+      const next = i + 1 < codes.length ? codes[i + 1] ?? '' : '';
+      const isUnitProject = /^\d+$/u.test(next) && next.length >= 2;
+      kinds.push(isUnitProject ? 'unit-project' : 'subsection');
+      inUnitProject = isUnitProject;
+    } else if (/^\d+$/u.test(code)) {
+      kinds.push(inUnitProject ? 'subsection' : 'section');
+    } else {
+      kinds.push('section');
+      inUnitProject = false;
+    }
+  }
+  return kinds;
 }
 
 /** 按村庄分组（保持插入序） */

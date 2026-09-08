@@ -6,7 +6,7 @@
 import type { DocumentDraftChapter, DocumentExecutionStage, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict } from './types';
 import { displayStage, upsertProgressStage } from './progress';
 import { buildSemanticSimilarity, snapshotEmbedCacheStats } from './semanticSimilarity';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthFromFacts, excavationDepthLockIssues, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixAdjacentPhraseDuplication, fixAmbiguousEitherOrCandidates, fixForbiddenConfigurationTerms, fixFormulaResidues, fixHazardIdentificationGaps, fixHeaderlessTables, fixInternalTerminology, fixMetaDiscourseDeclarations, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSelfUnderminingCandidates, fixSixHundredPercentCoverage, formulaResidueIssues, foundationFormResidueIssues, laborPeakConflictIssues, metaDiscourseDeclarationIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters, stripOverviewRecapBodyLines, supportSystemConflictIssues, tablePeakLaborWithChainFallback, waterLaborPeakAssociationIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, duplicateTableRowIssues, excavationDepthFromFacts, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixAdjacentPhraseDuplication, fixAmbiguousEitherOrCandidates, fixForbiddenConfigurationTerms, fixFormulaResidues, fixGreeningMaintenanceMismatch, fixHazardIdentificationGaps, fixHeaderlessTables, fixInternalTerminology, fixMetaDiscourseDeclarations, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSelfUnderminingCandidates, fixSixHundredPercentCoverage, formulaResidueIssues, foundationFormResidueIssues, laborPeakConflictIssues, metaDiscourseDeclarationIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters, stripInternalDuplicateTableRows, stripOverviewRecapBodyLines, supportSystemConflictIssues, tablePeakLaborWithChainFallback, waterLaborPeakAssociationIssues } from './documentIntegrityChecks';
 import { blueprintCitationConsistencyIssues, blueprintPlanAuthorities, type BlueprintData } from './integratedBlueprint';
 import { applyDeterministicConsistencyFixes, collectSectionContentGaps, crossChapterConsistencyIssues, processSpecConflictIssues } from './qualityValidation';
 import { professionalSectionTaskCard } from './promptRuleExtraction';
@@ -110,13 +110,14 @@ export async function dedupeAfterTableFix(input: {
   for (const chapter of chapterDraftsFinal) {
     const beforeLines = chapter.content.split(/\r?\n/u).length;
     const tableResult = stripDuplicateTables(chapter.content);
-    const paraResult = stripDuplicateParagraphs(tableResult.markdown);
+    const tableRowDupResult = stripInternalDuplicateTableRows(tableResult.markdown);
+    const paraResult = stripDuplicateParagraphs(tableRowDupResult.markdown);
     const recapResult = stripOverviewRecapBodyLines(paraResult.markdown, postTableFixRecapSimilarity);
     const totalRemoved = beforeLines - recapResult.split(/\r?\n/u).length;
     if (totalRemoved > 0) {
-      postRemovedTableLines += tableResult.removedCount;
+      postRemovedTableLines += tableResult.removedCount + tableRowDupResult.removedCount;
       postRemovedParagraphLines += paraResult.removedCount;
-      postRemovedRecapLines += totalRemoved - tableResult.removedCount - paraResult.removedCount;
+      postRemovedRecapLines += totalRemoved - tableResult.removedCount - tableRowDupResult.removedCount - paraResult.removedCount;
       chapter.content = recapResult;
     }
   }
@@ -721,6 +722,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
         ...dangerousListConsistencyIssues(fullMarkdown),
         ...basicInfoScheduleFieldIssues(fullMarkdown),
         ...duplicateTableIssues(fullMarkdown),
+        ...duplicateTableRowIssues(fullMarkdown),
         ...duplicateParagraphIssues(fullMarkdown),
         ...resourceTriadSectionHierarchyIssues(fullMarkdown),
         ...await supportSystemConflictIssues(fullMarkdown, supportAuthority),
@@ -907,6 +909,8 @@ export async function runGlobalConsistencyReviewLoop(input: {
     }
     // h15：重复内容确定性删除（重复表格/重复段落/概况复述句），结构冗余删除比 LLM 定位更可靠；
     // 三个删除步骤顺序执行且互不重叠（后一步的输入是前一步删除后的文本）
+    // B2 绿化养护期权威（与 stage5 链同源）：factsModel 清单/精确事实抽取养护年限，无权威时修复器静默跳过
+    const greeningMaintenanceAuthority = extractGreeningMaintenanceAuthority(preliminaryFactsModel);
     const dedupeFullMarkdown = chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
     const dedupeRecapCandidates = overviewRecapCandidates(dedupeFullMarkdown);
     const dedupeRecapSimilarity = await buildSemanticSimilarity(dedupeRecapCandidates.sentences, dedupeRecapCandidates.overviewBody ? [dedupeRecapCandidates.overviewBody] : []);
@@ -914,6 +918,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
     let removedParagraphLines = 0;
     let removedRecapLines = 0;
     let phraseFixCount = 0;
+    let maintenanceFixCount = 0;
     let placeholderFixCount = 0;
     let qaCoverageFixCount = 0;
     // A4 跨章重复表删除（丰乐镇实测）：同一关键节点表复制粘贴到 4 个章节时逐章去重永不命中，
@@ -923,23 +928,26 @@ export async function runGlobalConsistencyReviewLoop(input: {
     for (const chapter of chapterDraftsFinal) {
       const beforeLines = chapter.content.split(/\r?\n/u).length;
       const tableResult = stripDuplicateTables(chapter.content);
-      const paraResult = stripDuplicateParagraphs(tableResult.markdown);
+      const tableRowDupResult = stripInternalDuplicateTableRows(tableResult.markdown);
+      const paraResult = stripDuplicateParagraphs(tableRowDupResult.markdown);
       const recapResult = stripOverviewRecapBodyLines(paraResult.markdown, dedupeRecapSimilarity);
       // 4.17.4 确定性清洗链：句内重复短语折叠 → 6.1 一览表套话数据填充 → 6.1 质量保障内容补全
       const phraseResult = fixAdjacentPhraseDuplication(recapResult);
       const placeholderResult = fixPlaceholderTableCells(phraseResult.markdown, { areaSummary: scaleSummary, scheduleDays: scheduleAuthority });
       const qaCoverageResult = fixQualityAssuranceCoverage(placeholderResult.markdown);
-      const finalLines = qaCoverageResult.markdown.split(/\r?\n/u).length;
+      const maintenanceResult = fixGreeningMaintenanceMismatch(qaCoverageResult.markdown, greeningMaintenanceAuthority);
+      const finalLines = maintenanceResult.markdown.split(/\r?\n/u).length;
       const totalRemoved = beforeLines - finalLines;
-      const extraFixes = (phraseResult.fixedCount - 0) + placeholderResult.fixedCount + qaCoverageResult.fixedCount;
+      const extraFixes = (phraseResult.fixedCount - 0) + placeholderResult.fixedCount + qaCoverageResult.fixedCount + maintenanceResult.fixedCount;
       phraseFixCount += phraseResult.fixedCount;
       placeholderFixCount += placeholderResult.fixedCount;
       qaCoverageFixCount += qaCoverageResult.fixedCount;
+      maintenanceFixCount += maintenanceResult.fixedCount;
       if (totalRemoved > 0 || extraFixes > 0) {
-        removedTableLines += tableResult.removedCount;
+        removedTableLines += tableResult.removedCount + tableRowDupResult.removedCount;
         removedParagraphLines += paraResult.removedCount;
-        removedRecapLines += totalRemoved - tableResult.removedCount - paraResult.removedCount;
-        chapter.content = qaCoverageResult.markdown;
+        removedRecapLines += totalRemoved - tableResult.removedCount - tableRowDupResult.removedCount - paraResult.removedCount;
+        chapter.content = maintenanceResult.markdown;
       }
     }
     // 1.5 语义级跨章重复 strip（保留信息密度高者，删除低密度方整段）：逐字重复已由上面 strip 处理，
@@ -997,7 +1005,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
       }
     }
     globalDedupRan = true;
-    if (deterministicFix.fixedCount > 0 || postNumericFixCount > 0 || removedTableLines > 0 || removedParagraphLines > 0 || removedRecapLines > 0 || removedSemanticDupParagraphs > 0 || phraseFixCount > 0 || placeholderFixCount > 0 || qaCoverageFixCount > 0 || selfUnderminingFixCount > 0 || hazardGapFixCount > 0 || sixHundredFixCount > 0 || internalTermFixCount > 0 || headerlessTableFixCount > 0 || ambiguousEitherOrFixCount > 0 || forbiddenConfigFixCount > 0) {
+    if (deterministicFix.fixedCount > 0 || postNumericFixCount > 0 || removedTableLines > 0 || removedParagraphLines > 0 || removedRecapLines > 0 || removedSemanticDupParagraphs > 0 || phraseFixCount > 0 || placeholderFixCount > 0 || qaCoverageFixCount > 0 || selfUnderminingFixCount > 0 || hazardGapFixCount > 0 || sixHundredFixCount > 0 || internalTermFixCount > 0 || headerlessTableFixCount > 0 || ambiguousEitherOrFixCount > 0 || forbiddenConfigFixCount > 0 || maintenanceFixCount > 0) {
       // 修复后重算：确定性检测快照必须用最新检测结果替换，不得合并保留已修复问题的旧快照
       //（历史缺陷：修复已生效但旧快照残留，被 finalize 包装为「跨章一致性复核」error 硬阻断导出）
       deterministicIssues = await runDeterministicConsistencyCheck();
@@ -1016,6 +1024,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
         headerlessTableFixCount > 0 ? `无表头表格补齐 ${headerlessTableFixCount} 处` : '',
         ambiguousEitherOrFixCount > 0 ? `两可表述归一 ${ambiguousEitherOrFixCount} 处` : '',
         forbiddenConfigFixCount > 0 ? `配置污染清洗 ${forbiddenConfigFixCount} 处` : '',
+        maintenanceFixCount > 0 ? `绿化养护期统一 ${maintenanceFixCount} 处` : '',
       ].filter(Boolean).join('、');
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'global-consistency-deterministic-fix', status: 'success', message: `跨章一致性定点修复：${fixParts}${deterministicFix.details.slice(0, 4).length > 0 ? `（${deterministicFix.details.slice(0, 4).join('、')}）` : ''}`, details: deterministicFix.details.slice(4) }, { subtitle: '跨章一致性修复' }));
       emitProgress(chapterDraftsFinal);

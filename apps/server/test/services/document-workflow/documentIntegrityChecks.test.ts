@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixParagraphOpeningRepeats, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSixHundredPercentCoverage, fixTableBorneContentSections, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
+import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
 import type { DocumentDraftChapter, DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel } from '@/services/document-workflow/types';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
@@ -1654,6 +1655,47 @@ describe('清单红线权威比对（丰乐镇第五版实测 P1 养护期 / P3 
     it('无养护期事实 → undefined', () => {
       expect(extractGreeningMaintenanceAuthority(model([]))).toBeUndefined();
     });
+
+    it('混合口径频率投票：两年 3 条 vs 一年 1 条 → 2（丰乐镇实测红花酢浆草一年为个别条目，不得升格为全文权威）', () => {
+      const facts = [
+        { fieldName: '喷播植草（灌木）籽', value: '二级养护，养护两年' },
+        { fieldName: '紫花地丁', value: '二级养护，养护两年' },
+        { fieldName: '白三叶', value: '二级养护，养护两年' },
+        { fieldName: '红花酢浆草', value: '二级养护，养护一年' },
+      ];
+      expect(extractGreeningMaintenanceAuthority(model(facts))).toBe(2);
+    });
+
+    it('混合口径并列时取大值（两年与一年各 1 条 → 2，投标口径更安全）', () => {
+      const facts = [
+        { fieldName: '红花酢浆草', value: '二级养护，养护一年' },
+        { fieldName: '喷播植草（灌木）籽', value: '二级养护，养护两年' },
+      ];
+      expect(extractGreeningMaintenanceAuthority(model(facts))).toBe(2);
+    });
+
+    it('同一条事实含多处养护期描述全部计入投票', () => {
+      const facts = [{ fieldName: '绿化养护汇总', value: '红花酢浆草养护一年，其余苗木养护两年，草籽养护两年' }];
+      expect(extractGreeningMaintenanceAuthority(model(facts))).toBe(2);
+    });
+
+    it('跨源优先级保留：bills 命中即权威（不采 billItemFacts 更晚值）', () => {
+      const facts = model(
+        [{ fieldName: '绿化养护', value: '二级养护，养护两年' }],
+        [{ key: '清单条目：红花酢浆草', fieldName: '清单条目', value: '二级养护，养护一年｜工程量：90m2' }],
+      );
+      expect(extractGreeningMaintenanceAuthority(facts)).toBe(2);
+    });
+
+    it('清单行级条目源内投票：两年 3 条 vs 一年 1 条 → 2（丰乐镇清单条目分布）', () => {
+      const itemFacts = [
+        { key: '清单条目：喷播植草（灌木）籽', fieldName: '清单条目', value: '二级养护，养护两年｜工程量：19400m2' },
+        { key: '清单条目：红花酢浆草', fieldName: '清单条目', value: '二级养护，养护一年｜工程量：90m2' },
+        { key: '清单条目：紫花地丁', fieldName: '清单条目', value: '二级养护，养护两年｜工程量：5000m2' },
+        { key: '清单条目：白三叶', fieldName: '清单条目', value: '二级养护，养护两年｜工程量：3000m2' },
+      ];
+      expect(extractGreeningMaintenanceAuthority(model([], itemFacts))).toBe(2);
+    });
   });
 
   describe('greeningMaintenanceMismatchIssues（正文 vs 清单红线）', () => {
@@ -2007,5 +2049,29 @@ describe('fixTableBorneContentSections（B3 表格承载正文修复）', () => 
     ].join('\n');
     const result = fixTableBorneContentSections(markdown);
     expect(result.fixedCount).toBe(0);
+  });
+});
+
+describe('markdownTableQualityIssues 规格型号列「—」豁免（丰乐镇实测：蛙式打夯机无型号，修复轮编造 HW-60）', () => {
+  const table = (specValue: string, qtyValue = '1台') => [
+    '| 道路工程机械名称 | 规格型号 | 数量 |',
+    '| --- | --- | --- |',
+    `| 挖掘机 | 0.6~1.0m³ | 1台 |`,
+    `| 蛙式打夯机 | ${specValue} | ${qtyValue} |`,
+  ].join('\n');
+
+  it('规格型号列「—」不判占位符（机具无型号合法）', () => {
+    const issues = markdownTableQualityIssues(table('—'));
+    expect(issues.filter(issue => issue.message.includes('占位符'))).toEqual([]);
+  });
+
+  it('非规格型号列「—」仍判占位符（如数量列）', () => {
+    const issues = markdownTableQualityIssues(table('0.6~1.0m³', '—'));
+    expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
+  });
+
+  it('规格型号列「若干」仍判占位符（只有破折号豁免，模糊词不豁免）', () => {
+    const issues = markdownTableQualityIssues(table('若干'));
+    expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
   });
 });

@@ -915,7 +915,7 @@ function stripAwardLeadVerb(award: string): string {
  * 字面兜底保留（黄山杯实测 bge 0.50 < 0.6 被误报零响应——语义通道对短专有名词区分度不足），
  * 但升级为锚点全覆盖：全部命中才算完全响应，部分命中报"部分响应"定向补写缺失锚点。
  */
-function requirementAnchorCoverage(item: TenderRequirementItem, normalizedMarkdown: string): { total: number; hit: string[]; missing: string[] } {
+function requirementAnchorCoverage(item: TenderRequirementItem, normalizedMarkdown: string, options?: { skipNumericAnchors?: boolean }): { total: number; hit: string[]; missing: string[] } {
   const text = item.text.replace(/\s+/gu, '');
   const anchors = new Set<string>();
   // 专有名词：coreTerms 全部作为锚点（长度≥2；「或/及」条款的锚点必要性由 LLM 或选型判定兜底）
@@ -923,9 +923,12 @@ function requirementAnchorCoverage(item: TenderRequirementItem, normalizedMarkdo
     const clean = term.replace(/\s+/gu, '');
     if (clean.length >= 2) anchors.add(clean);
   }
-  // 数字参数：每个"数字+单位"组合都是独立锚点（正文数字繁多，纯数字不作锚点；单位词表限工程条款常用单位）
-  for (const match of text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:%|％|天|日|万元|亿元|元|米|m|M|mm|毫米|层|年|个|月|周|小时|分钟|项|处|台|套|辆|人|家|次|遍|道|吨|kPa|MPa))/giu)) {
-    anchors.add(match[0].replace(/\s+/gu, ''));
+  // 数字参数：每个"数字+单位"组合都是独立锚点（正文数字繁多，纯数字不作锚点；单位词表限工程条款常用单位）。
+  // round-27：商务条款（保证金金额/付款时限/违约金利率）的数字参数不强制落位技术标正文，skipNumericAnchors 跳过
+  if (!options?.skipNumericAnchors) {
+    for (const match of text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:%|％|天|日|万元|亿元|元|米|m|M|mm|毫米|层|年|个|月|周|小时|分钟|项|处|台|套|辆|人|家|次|遍|道|吨|kPa|MPa))/giu)) {
+      anchors.add(match[0].replace(/\s+/gu, ''));
+    }
   }
   // 具名奖项/等级：条款原文里的「XX杯/XX奖/XX星」锚点（「级」后缀过宽不取，靠 coreTerms/数字锚点覆盖）；
   // 正则贪婪会吞入前导动词（"确保黄山杯"），stripAwardLeadVerb 循环剥离保证与 coreTerms 口径一致
@@ -987,22 +990,25 @@ export async function requirementsCoverageIssues(
     if (bestSimilarity >= 0.6) {
       // 语义命中仅证明主题已响应；条款内金额参数仍须逐锚点字面落位（评分报告合肥师范4：
       // 正文黄山杯 13 处但“支付300万元”零落位，语义阈值放行导致金额缺失静默漏检）。
-      // 仅金额类锚点（万元/亿元/元）做放行前检查——时间/数量类数字锚点误报面大不在此检查
-      const moneyAnchors = new Set<string>();
-      for (const moneyMatch of item.text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:万元|亿元|元))/giu)) moneyAnchors.add(moneyMatch[0].replace(/\s+/gu, ''));
-      if (moneyAnchors.size > 0) {
-        const missingMoney = [...moneyAnchors].filter(anchor => !normalized.includes(anchor));
-        if (missingMoney.length > 0) {
-          const coverage = requirementAnchorCoverage(item, normalized);
-          partialResponseCandidates.push({ item, kind, bestSimilarity, hit: coverage.hit, missing: coverage.missing });
-          continue;
+      // 仅金额类锚点（万元/亿元/元）做放行前检查——时间/数量类数字锚点误报面大不在此检查。
+      // round-27：商务条款金额参数不强制落位技术标（只做定性响应），跳过金额锚点检查
+      if (!isCommercialResponseClause(item.text)) {
+        const moneyAnchors = new Set<string>();
+        for (const moneyMatch of item.text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:万元|亿元|元))/giu)) moneyAnchors.add(moneyMatch[0].replace(/\s+/gu, ''));
+        if (moneyAnchors.size > 0) {
+          const missingMoney = [...moneyAnchors].filter(anchor => !normalized.includes(anchor));
+          if (missingMoney.length > 0) {
+            const coverage = requirementAnchorCoverage(item, normalized);
+            partialResponseCandidates.push({ item, kind, bestSimilarity, hit: coverage.hit, missing: coverage.missing });
+            continue;
+          }
         }
       }
       continue;
     }
     // 字面锚点兜底升级（300万缺失根治）：语义未过阈值时，条款内全部关键锚点
     // （coreTerms 专有名词/数字+单位/具名奖项）各自字面命中才算完全响应（黄山杯 0.50 误报修复保留）
-    const coverage = requirementAnchorCoverage(item, normalized);
+    const coverage = requirementAnchorCoverage(item, normalized, { skipNumericAnchors: isCommercialResponseClause(item.text) });
     if (coverage.total > 0 && coverage.missing.length === 0) continue;
     if (coverage.hit.length > 0) {
       // 部分响应候选：锚点部分命中（实测"确保黄山杯，支付300万元"条款：黄山杯命中、300万元缺失），
@@ -1184,6 +1190,28 @@ export { documentTextLength };
 const SCORING_FIX_COMMERCIAL_SKIP_RE = /暂列金额|暂估价|报价明细|综合单价|清单合价|预留金|投标报价|综合税率|增值税|税率/u;
 const SCORING_FIX_PAYMENT_TERM_RE = /预付款|支付担保|履约保证金|工程款担保/u;
 
+// round-27 污染根治（丰乐镇实测：成品出现「招标要求响应（前附表响应条款）：履约保证金金额：
+// 中标金额的2%；…」「发包人逾期支付进度款的违约金…LPR」等商务条款原文被逐条抄入技术标正文）——
+// 商务条款的金额/时限/利率参数属商务文件内容，技术标只做定性响应：
+// 检测侧数字锚点豁免（不强制 2%/14天/LPR 落位正文），补写侧不抄条款原文只写定性落实句
+const COMMERCIAL_RESPONSE_RE = /履约保证金|保证金账户|中标金额|进度款|工程款|付款|结清|结算|违约金|贷款市场报价利率|LPR|最高投标限价|工程结算价款|预付款|支付担保|保函/u;
+
+function isCommercialResponseClause(text: string) {
+  return COMMERCIAL_RESPONSE_RE.test(text);
+}
+
+/** 商务条款定性响应句（技术标口径：只声明按约定执行，不落商务参数） */
+function commercialClauseResponse(text: string): string {
+  if (/违约金|贷款市场报价利率|LPR/u.test(text)) return '本工程工期延误违约金按招标文件约定条款执行，进度计划与纠偏措施见工期章节。';
+  if (/保证金/u.test(text)) return '本工程履约保证金按招标文件约定的金额、提交期限与退还时限执行，可按约定以保函形式替代。';
+  if (/预付款/u.test(text)) return '本工程预付款的支付、扣回与使用按招标文件约定执行，专款用于施工准备。';
+  if (/支付担保/u.test(text)) return '本工程发包人工程款支付担保按招标文件约定执行，担保办结后我方按约组织进场施工。';
+  if (/扬尘/u.test(text)) return '本工程扬尘污染防治费用与建筑工人实名制管理费用按招标文件约定列入费用计划并专款专用。';
+  if (/结清|结算|付款|进度款|工程款/u.test(text)) return '本工程进度款、竣工结算款与最终结清款的支付审批时限按招标文件约定执行。';
+  if (/最高投标限价/u.test(text)) return '本工程相关费用按招标文件约定列入计划并专款专用。';
+  return '本工程相关商务条款按招标文件约定执行。';
+}
+
 /**
  * B1 评分项响应确定性补写兜底：交付前对零命中/部分响应的实质条款，按路由责任章节末尾补写响应句。
  * 判定与 requirementsCoverageIssues 同源锚点口径（requirementAnchorCoverage）；
@@ -1218,7 +1246,7 @@ export async function fixScoringRequirementResponses(input: {
     if (!route && fallbackChapterTitle) route = { kind, item, chapterTitle: fallbackChapterTitle, score: 0 };
     if (!route) continue;
     if (SCORING_FIX_COMMERCIAL_SKIP_RE.test(item.text) && !SCORING_FIX_PAYMENT_TERM_RE.test(item.text)) continue;
-    const coverage = requirementAnchorCoverage(item, normalizedAcc);
+    const coverage = requirementAnchorCoverage(item, normalizedAcc, { skipNumericAnchors: isCommercialResponseClause(item.text) });
     // 锚点全覆盖且锚点非空 → 已响应（锚点空条款由语义通道判定，确定性补写不越权）
     if (coverage.total > 0 && coverage.missing.length === 0) continue;
     const chapter = chapters.find(entry => normalizeChapterTitleLine(entry.title) === route.chapterTitle);
@@ -1227,15 +1255,21 @@ export async function fixScoringRequirementResponses(input: {
     // 「混凝土工程量、总价包干相关内容严格按招标文件要求执行」「4%相关内容」类空泛句——
     // 第十次回归实测：全维度评审报「实质性要求空泛响应/仅以X%指代」阻断；且数字锚点提取破碎
     // （“中标金额的2％”拆出 2%/4% 残片）导致指代不清。条款全文补写锚点全落位、无指代歧义。
+    // round-27 例外：商务条款（保证金金额/付款时限/违约金利率）只写定性响应句，不抄条款原文——
+    // 商务参数属商务文件内容，技术标出现即污染（丰乐镇实测「中标金额的2%」「LPR」进正文）
     // A7 无要求条款豁免（丰乐镇实测）：绿色建筑等级要求值为「无」时套用“承诺严格落实”产生逻辑矛盾
     // （无要求却承诺落实）且属套话；改为“无强制要求”直述，不额外承诺超范围事项
     const noRequirement = /(?:要求|等级|标准)[：:]\s*无\s*$/u.test(item.text.trim());
     // B5 补写句式差异化（丰乐镇第三轮实测）：全条款统一「我方承诺严格落实本项要求，并配置相应的
     // 管理措施与实施保障」同一句式，全维度评审判「模板化承诺句式/实质性响应缺失」阻断；
-    // 按条款关键词生成差异化落实句，条款实质内容由条款全文承载，落位句只声明执行边界不重复套话
-    const paragraph = noRequirement
-      ? `招标要求响应（${kind}）：${item.text}，本项无强制要求，施工按现行国家及地方相关标准执行。`
-      : `招标要求响应（${kind}）：${item.text}。${scoringResponseTail(item.text)}`;
+    // 按条款关键词生成差异化落实句，条款实质内容由条款全文承载，落位句只声明执行边界不重复套话。
+    // round-27：段首统一改「按招标文件要求」正式表述（历史格式「招标要求响应（前附表响应条款）」
+    // 含内部术语「前附表响应条款」，丰乐镇实测成品中连现 6 处）
+    const paragraph = isCommercialResponseClause(item.text)
+      ? `按招标文件约定：${commercialClauseResponse(item.text)}`
+      : (noRequirement
+        ? `按招标文件要求：${item.text}，本项无强制要求，施工按现行国家及地方相关标准执行。`
+        : `按招标文件要求：${item.text}。${scoringResponseTail(item.text)}`);
     chapter.content = `${chapter.content.replace(/\s+$/u, '')}\n\n${paragraph}`;
     normalizedAcc += paragraph.replace(/\s+/gu, '');
     fixedCount += 1;

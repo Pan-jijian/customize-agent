@@ -1666,7 +1666,7 @@ export function fixMetaDiscourseDeclarations(markdown: string): { markdown: stri
   }
   // 清理删除残留：连续标点收敛（「，，」→「，」、句尾「，。」→「。」、句首逗号删除、空行去重）
   const before = result;
-  result = result.replace(/，+/gu, '，').replace(/，(?=[。；;\n])/gu, '').replace(/(?:^|[。；;\n])\s*，/gu, (_full, prefix: string) => prefix).replace(/([。；;])\1+/gu, '$1').replace(/^[。；;\s]+/u, '').replace(/\\n{3,}/gu, '\\n\\n');
+  result = result.replace(/，+/gu, '，').replace(/，(?=[。；;\n])/gu, '').replace(/(?:^|[。；;\n])\s*，/gu, (_full, prefix: string) => prefix).replace(/([。；;])\1+/gu, '$1').replace(/^[。；;\s]+/u, '').replace(/\n{3,}/gu, '\n\n');
   if (result !== before) fixedCount += 1;
   if (fixedCount > 0) details.push(`元话语声明句清洗 ${fixedCount} 处`);
   return { markdown: result, fixedCount: fixedCount > 0 ? 1 : 0, details };
@@ -1757,17 +1757,32 @@ export function fixLaborPeakConflict(markdown: string, laborPeakAuthority?: numb
     const authorityTotalRe = /(高峰期总人数|劳动力总人数|总人数)(\d+)人/gu;
     const authorityPeakRe = /(高峰(?:期)?人数)(\d+)人/gu;
     let result = markdown;
-    const replaced: string[] = [];
+    const replaced = new Set<string>();
     if (totalValue !== laborPeakAuthority && drift(totalValue) > 0.3) {
       const next = result.replace(authorityTotalRe, (_full, prefix: string, value: string) => Number(value) === totalValue ? `${prefix}${laborPeakAuthority}人` : _full);
-      if (next !== result) { result = next; replaced.push(`${totalValue}人`); }
+      if (next !== result) { result = next; replaced.add(`${totalValue}人`); }
     }
     if (peakValue !== laborPeakAuthority && drift(peakValue) > 0.3) {
       const next = result.replace(authorityPeakRe, (_full, prefix: string, value: string) => Number(value) === peakValue ? `${prefix}${laborPeakAuthority}人` : _full);
-      if (next !== result) { result = next; replaced.push(`${peakValue}人`); }
+      if (next !== result) { result = next; replaced.add(`${peakValue}人`); }
     }
+    // 形态扩展（丰乐镇第六轮）：「各专业班组高峰人数合计为625人」「高峰期劳动力总人数控制在42人」
+    // 等隔断词形态与表格峰值行（| 劳动力峰值 | 42 人 |）不入原紧邻正则——与检测器模式1/6 同形态覆盖
+    // （检测定位=修复定位），与权威差 >30% 的口径值统一替换为蓝图权威值
+    const extendedPeakRe = /(各专业班组高峰人数|高峰期劳动力总人数|高峰(?:期)?人数|峰值(?:需求|人数)?)(?:合计为|控制在|为|约)?(\d+)人/gu;
+    const tablePeakRe = /\|\s*(?:劳动力峰值|高峰(?:期)?人数|峰值人数)\s*\|\s*(\d+)\s*人\s*\|/gu;
+    result = result.replace(extendedPeakRe, (_full, prefix: string, value: string) => {
+      const num = Number(value);
+      if (num > 0 && num !== laborPeakAuthority && drift(num) > 0.3) { replaced.add(`${num}人`); return `${prefix}${laborPeakAuthority}人`; }
+      return _full;
+    });
+    result = result.replace(tablePeakRe, (_full, value: string) => {
+      const num = Number(value);
+      if (num > 0 && num !== laborPeakAuthority && drift(num) > 0.3) { replaced.add(`${num}人`); return _full.replace(value, String(laborPeakAuthority)); }
+      return _full;
+    });
     if (result !== markdown) {
-      return { markdown: result, fixedCount: 1, details: [`劳动力峰值统一：${replaced.join('/')}→${laborPeakAuthority}人（以蓝图劳动力峰值为准）`] };
+      return { markdown: result, fixedCount: 1, details: [`劳动力峰值统一：${[...replaced].join('/')}→${laborPeakAuthority}人（以蓝图劳动力峰值为准）`] };
     }
     return { markdown, fixedCount: 0, details: [] };
   }
@@ -2158,21 +2173,60 @@ function cnNumberToArabic(raw: string): number | undefined {
  * 「养护」且邻接「X年」（含中文数字）时提取；「混凝土养护 14 天」类天单位不采。
  * 数据源：billItemFacts（清单行级条目，value=特征｜工程量）优先、bills/preciseFacts 散装事实兜底、
  * project 招标范围类事实卡最后——首命中即返回，多源重复无副作用。 */
+/** 绿化养护期确定性修复（检测定位=修复定位）：正文「养护…X年」与清单权威年数不一致时
+ * 统一替换为权威值（只替换数字/中文数字本身、不动句式）。
+ * 养护期属清单实质性条款——丰乐镇实测「养护期按一年执行」残留因修复全靠 LLM 轮而漏改，
+ * 确定性替换覆盖正文与表格行两种形态（字符类排除竖线保持表格行值不被吞）。 */
+export function fixGreeningMaintenanceMismatch(markdown: string, authorityYears: number | undefined): { markdown: string; fixedCount: number; details: string[] } {
+  if (authorityYears === undefined || authorityYears <= 0) return { markdown, fixedCount: 0, details: [] };
+  const yearRe = /养护[^。；;\n|]{0,16}?([一二两三四五六七八九十]+|\d{1,2})\s*年/gu;
+  let result = markdown;
+  const replaced = new Set<string>();
+  result = result.replace(yearRe, (line, rawValue: string) => {
+    const value = cnNumberToArabic(rawValue);
+    if (value === undefined || value === authorityYears || value <= 0) return line;
+    replaced.add(`${rawValue}年`);
+    return line.replace(rawValue, String(authorityYears));
+  });
+  if (result === markdown) return { markdown, fixedCount: 0, details: [] };
+  return { markdown: result, fixedCount: 1, details: [`绿化养护期统一：${[...replaced].join('/')}→${authorityYears}年（以工程量清单养护期为准）`] };
+}
+
 export function extractGreeningMaintenanceAuthority(factsModel?: DocumentFactsModel | null): number | undefined {
-  const yearRe = /养护[^。；;|]{0,10}?([一二两三四五六七八九十]+|\d{1,2})\s*年/u;
-  const sources = [
-    ...(factsModel?.bills ?? []),
-    ...(factsModel?.billItemFacts ?? []),
-    ...(factsModel?.preciseFacts ?? []),
-    ...(factsModel?.project ?? []),
-  ];
-  for (const fact of sources) {
-    const label = `${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`;
-    const value = stringifyFactValue(fact.value);
-    const match = yearRe.exec(value) || yearRe.exec(label);
-    if (!match) continue;
-    const years = cnNumberToArabic(match[1] ?? '');
-    if (years !== undefined && years > 0 && years <= 20) return years;
+  // 清单养护期可能混合口径（丰乐镇实测：红花酢浆草条目「养护一年」22 处 vs 其他苗木/草籽条目
+  // 「养护两年」82 处）。首个命中即返回会把个别条目的口径（一年）升格为全文权威，修复器随后把
+  // 主体条目（两年）全部改错。改为频率投票取众数：多数条目口径才是工程权威；并列时取大值
+  // （养护期长在投标口径更安全）。
+  const yearRe = /养护[^。；;|]{0,10}?([一二两三四五六七八九十]+|\d{1,2})\s*年/gu;
+  // 跨源保持原优先级（bills > billItemFacts > preciseFacts > project）：首个有命中的源即权威域；
+  // 源内频率投票取众数（丰乐镇实测：清单条目混合口径 82 处「养护两年」vs 22 处「养护一年」，
+  // 首命中即返回会把个别条目的口径升格为全文权威），并列时取大值（养护期长在投标口径更安全）
+  const sourceGroups = [factsModel?.bills ?? [], factsModel?.billItemFacts ?? [], factsModel?.preciseFacts ?? [], factsModel?.project ?? []];
+  const collectInto = (text: string, votes: Map<number, number>) => {
+    for (const match of text.matchAll(yearRe)) {
+      const years = cnNumberToArabic(match[1] ?? '');
+      if (years !== undefined && years > 0 && years <= 20) votes.set(years, (votes.get(years) || 0) + 1);
+    }
+  };
+  const bestOf = (votes: Map<number, number>): number | undefined => {
+    let best: number | undefined;
+    let bestCount = 0;
+    for (const [years, count] of votes) {
+      if (count > bestCount || (count === bestCount && best !== undefined && years > best)) {
+        best = years;
+        bestCount = count;
+      }
+    }
+    return best;
+  };
+  for (const group of sourceGroups) {
+    const votes = new Map<number, number>();
+    for (const fact of group) {
+      const label = `${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`;
+      collectInto(stringifyFactValue(fact.value), votes);
+      collectInto(label, votes);
+    }
+    if (votes.size > 0) return bestOf(votes);
   }
   return undefined;
 }
@@ -2939,7 +2993,7 @@ function stripAwardLeadVerb(award: string): string {
 // 属多模板拼接未清理痕迹；全文无冗余重复是形式格式类评审硬要求。
 // 判定：表头归一化完全相同，或表头相似度 ≥0.7 且首列重合 ≥60%；表格行/标题行不入段落重复池。
 
-interface MarkdownTableBlock { startLine: number; endLine: number; header: string[]; firstCol: string[]; dataCells: string[]; bodyChars: number; raw: string[] }
+interface MarkdownTableBlock { startLine: number; endLine: number; header: string[]; firstCol: string[]; dataRows: string[][]; dataCells: string[]; bodyChars: number; raw: string[] }
 
 const TABLE_SEPARATOR_RE = /^\s*\|[\s:|-]+\|/u;
 /** 数据行与表头相似度达到该阈值时视为「无分隔行的重复粘贴表头」，在块内切分新表 */
@@ -2972,6 +3026,7 @@ function extractMarkdownTables(markdown: string): MarkdownTableBlock[] {
         endLine: cursor + dataEnd - 1,
         header: currentHeader,
         firstCol: dataRows.map(row => cells(row)[0]?.replace(/[*_`]/gu, '').trim() || '').filter(Boolean),
+        dataRows: dataRows.map(row => cells(row).map(cell => cell.replace(/[*_`]/gu, '').trim())),
         dataCells: dataRows.flatMap(row => cells(row).map(cell => cell.replace(/[*_`]/gu, '').trim())).filter(Boolean),
         bodyChars: dataRows.join('').length,
         raw: block.slice(tableStart, dataEnd),
@@ -3032,6 +3087,98 @@ function cellCoverage(small: string[], large: string[]): number {
 // 不能作为重复证据；真重复表的文本内容 cell 整列复制才是复制粘贴特征
 const NUMERIC_CELL_RE = /^[\d,，.]+\s*(?:人|个|台|具|套|处|支|辆|班|组|项)?$/u;
 const textCellsOf = (cells: string[]) => cells.filter(cell => !NUMERIC_CELL_RE.test(cell));
+
+/** 表内数据行重复检测（丰乐镇实测：表头一遍 + 数据两遍连成一张 23 行大表，duplicateTableIssues 仅做表间判定检测不到）。
+ * 特征：后半数据行序列与前半按序匹配（首列相等且行 jaccard ≥0.5），且重复段行数 ≥2——
+ * 工程内容表两遍粘贴时工程名序列完全一致，首列相等是强约束（防互补表/统计表误伤）。
+ * 与 stripInternalDuplicateTableRows 同判定口径（检测定位=修复定位）。 */
+export function duplicateTableRowIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const tables = extractMarkdownTables(markdown);
+  for (const table of tables) {
+    const rows = table.dataRows;
+    if (rows.length < 4) continue;
+    // 找重复段：back 每行按序在 front 中找到「首列相等且行 jaccard ≥0.5」的匹配
+    const rowFirstCol = (row: string[]) => (row[0] || '').trim();
+    const rowSim = (left: string[], right: string[]) => jaccard(left, right);
+    for (let split = Math.floor(rows.length / 2); split <= Math.ceil(rows.length / 2); split += 1) {
+      const front = rows.slice(0, split);
+      const back = rows.slice(split);
+      if (front.length < 2 || back.length < 2) continue;
+      let matched = 0;
+      let lastMatch = -1;
+      for (const backRow of back) {
+        const col = rowFirstCol(backRow);
+        if (!col) continue;
+        for (let j = lastMatch + 1; j < front.length; j += 1) {
+          if (rowFirstCol(front[j]) === col && rowSim(backRow, front[j]) >= 0.5) {
+            matched += 1;
+            lastMatch = j;
+            break;
+          }
+        }
+      }
+      const ratio = matched / back.length;
+      if (ratio < 0.8) continue;
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'style',
+        owner: 'llm',
+        repairability: 'local_deterministic',
+        message: `表格内部数据行重复：第 ${table.startLine + 1}~${table.endLine + 1} 行表格（表头：${table.header.slice(0, 3).join('|')}）数据行两遍粘贴（${split} 行 + ${back.length} 行，重复匹配率 ${Math.round(ratio * 100)}%）`,
+        suggestion: `删除第二遍重复数据行（保留第一遍 ${split} 行），删除后表格仅保留一份完整数据。`,
+      });
+      break;
+    }
+  }
+  return issues;
+}
+
+/** 表内数据行重复确定性删除（检测定位=修复定位）：删除表内第二遍重复粘贴的数据行。
+ * 只删重复段、保留表头与第一遍数据行；行删除按原行号映射回全文（表格块内部行区间）。 */
+export function stripInternalDuplicateTableRows(markdown: string): { markdown: string; removedCount: number; details: string[] } {
+  const lines = markdown.split(/\r?\n/u);
+  const removed = new Set<number>();
+  const details: string[] = [];
+  const tables = extractMarkdownTables(markdown);
+  const rowFirstCol = (row: string[]) => (row[0] || '').trim();
+  const rowSim = (left: string[], right: string[]) => jaccard(left, right);
+  for (const table of tables) {
+    const rows = table.dataRows;
+    if (rows.length < 4) continue;
+    for (let split = Math.floor(rows.length / 2); split <= Math.ceil(rows.length / 2); split += 1) {
+      const front = rows.slice(0, split);
+      const back = rows.slice(split);
+      if (front.length < 2 || back.length < 2) continue;
+      let matched = 0;
+      let lastMatch = -1;
+      for (const backRow of back) {
+        const col = rowFirstCol(backRow);
+        if (!col) continue;
+        for (let j = lastMatch + 1; j < front.length; j += 1) {
+          if (rowFirstCol(front[j]) === col && rowSim(backRow, front[j]) >= 0.5) {
+            matched += 1;
+            lastMatch = j;
+            break;
+          }
+        }
+      }
+      if (matched / back.length < 0.8) continue;
+      // 数据行在表格块内的物理行号：表头+分隔行占 2 行，数据行从 startLine+2 起
+      const backStartLine = table.startLine + 2 + split;
+      for (let line = backStartLine; line <= table.endLine; line += 1) removed.add(line);
+      details.push(`第 ${table.startLine + 1}~${table.endLine + 1} 行表格删除 ${back.length} 行重复数据行`);
+      break;
+    }
+  }
+  if (removed.size === 0) return { markdown, removedCount: 0, details };
+  return {
+    markdown: lines.filter((_, index) => !removed.has(index)).join('\n'),
+    removedCount: removed.size,
+    details,
+  };
+}
 
 export function duplicateTableIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];

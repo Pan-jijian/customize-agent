@@ -12,7 +12,7 @@ import { validateFactConsistency } from '../document-validation/factConsistencyS
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, dedupeTertiaryH4Titles, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from './budget';
 import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown, markdownTableQualityIssues, headingUncoveredEngineeringItems } from './qualityValidation';
-import { applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixFinishThickness, fixFormulaResidues, fixLaborPeakConflict, fixMetaDiscourseDeclarations, fixParagraphOpeningRepeats, fixSelfUnderminingCandidates, fixTableBorneContentSections, fixTruncatedSentenceArtifacts, fixTocFromBody, mergeTableLineResidues, runDeterministicChainUntilConverged, runFixUntilClean, stripCommercialDataBodyLines, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters } from './documentIntegrityChecks';
+import { applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixFinishThickness, fixGreeningMaintenanceMismatch, fixFormulaResidues, fixLaborPeakConflict, fixMetaDiscourseDeclarations, fixParagraphOpeningRepeats, fixSelfUnderminingCandidates, fixTableBorneContentSections, fixTruncatedSentenceArtifacts, fixTocFromBody, mergeTableLineResidues, runDeterministicChainUntilConverged, runFixUntilClean, stripCommercialDataBodyLines, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters, stripInternalDuplicateTableRows } from './documentIntegrityChecks';
 import { fixInternalTermHeadingPhrases, internalTerminologyAnchorIssues, stripInternalTerminologySentences } from './internalTerminologyAnchors';
 import { semanticChoiceConflicts, semanticChoiceConflictIssue } from './dataConsistencyReview';
 import { blueprintPlanAuthorities, extractDecisionLockEntries } from './integratedBlueprint';
@@ -68,14 +68,15 @@ const REQUIRED_TEXT_SUPPLEMENTS: Array<{ words: string[]; basisItem: string }> =
 ];
 
 /** 编制依据类别段落标题行与五类条目（总控提示词总纲要求按类别列出）：招标文件及补疑补遗/国家法律法规/
- * 国家行业地方现行规范标准/地方法规规章/企业管理体系五类；资料未明确法规编号时只写类别
- * 不编造法规名（总纲口径），不把工程量清单、施工图纸内容搬入编制依据正文 */
+ * 国家行业地方现行规范标准/地方法规规章/企业管理体系五类；法律法规条目按公共知识列出具体法规名及文号
+ * （丰乐镇实测缺陷：只写「国家现行法律、行政法规」类别话术被判内容空泛），不把工程量清单、
+ * 施工图纸内容搬入编制依据正文 */
 const REQUIRED_BASIS_CATEGORIES_TITLE = '**编制依据**：本施工组织设计的编制依据按以下类别列出：';
 const REQUIRED_BASIS_CATEGORIES_ITEMS = [
   '- 招标文件及补疑补遗：本项目招标文件及招标补疑、澄清文件（招标文件与澄清、修正文件不一致的，以澄清、修正文件为准）；',
-  '- 国家法律法规：与工程建设相关的国家现行法律、行政法规；',
-  '- 国家/行业/地方现行规范标准：与本工程相关的国家、行业及地方现行施工验收规范、标准与规程；',
-  '- 地方法规规章：工程所在地现行地方性法规与政府规章；',
+  '- 国家法律法规：《中华人民共和国建筑法》（2019年修正）、《中华人民共和国招标投标法》（2017年修正）、《中华人民共和国安全生产法》（2021年修正）、《中华人民共和国民法典》（2020年）、《建设工程质量管理条例》（国务院令第279号，2019年修订）、《建设工程安全生产管理条例》（国务院令第393号）、《保障农民工工资支付条例》（国务院令第724号）；',
+  '- 国家/行业/地方现行规范标准：《建筑工程施工质量验收统一标准》（GB 50300-2013）及与本工程各分部分项工程对应的现行施工验收规范、标准与规程；',
+  '- 地方法规规章：工程所在地现行地方性法规与政府规章（招标文件引用的地方性法规按其原文列出）；',
   '- 企业管理体系：公司质量、环境、职业健康安全管理体系文件及企业施工工艺标准。',
 ];
 
@@ -91,7 +92,10 @@ export function supplementRequiredTexts(markdown: string, template: DocumentTemp
   // 「包括国家法律法规、地方法规及现行规范」一句笼统话时，missingRequiredTexts 已为空 → 原逻辑
   // 静默漏注入，总纲要求的五类清单全丢；类别词 ≥3 命中才认定类别已列出
   const basisCategoryHit = BASIS_CATEGORY_TERMS.filter(term => markdown.includes(term)).length;
-  const basisTermRelevant = missingRequiredTexts.includes('编制依据') || missingRequiredTexts.includes('国家法律法规') || missingRequiredTexts.includes('地方法规') || markdown.includes('编制依据');
+  // 施组类恒注入（丰乐镇第十三轮）：编制依据五类清单是总纲硬要求，LLM 零提及（无标题无词形）时
+  // 原触发条件静默跳过导致清单全丢——模板为施组类或正文已出现编制说明/工程概况章节即触发
+  const isConstructionDoc = /编制说明|工程概况|施工准备/u.test(markdown);
+  const basisTermRelevant = isConstructionDoc || missingRequiredTexts.includes('编制依据') || missingRequiredTexts.includes('国家法律法规') || missingRequiredTexts.includes('地方法规') || markdown.includes('编制依据');
   const needBasisBlock = basisCategoryHit < 3 && basisTermRelevant;
   if (missingRequiredTexts.length === 0 && !needBasisBlock) return markdown;
   const supplementItems = REQUIRED_TEXT_SUPPLEMENTS
@@ -106,8 +110,10 @@ export function supplementRequiredTexts(markdown: string, template: DocumentTemp
     ? [REQUIRED_BASIS_CATEGORIES_TITLE, ...items].join('\n')
     : items.join('\n').replace(/；$/u, '。');
   // 锚点优先「编制依据」小节标题（LLM 已写标题但类别缺失时注入标题下），退「编制说明与工程概况」小节
+  // 锚点扩展：编制依据 / 编制说明（与工程概况）/ 工程概况 / 项目概况 小节标题（LLM 写变体标题也能注入标题下）
   const anchor = /^(?:###|####)\s+(?:[\d.]+[\s\u00a0]*)?编制依据$/mu.exec(markdown)
-    ?? /^(?:###|####)\s+(?:[\d.]+[\s\u00a0]*)?编制说明与工程概况$/mu.exec(markdown);
+    ?? /^(?:###|####)\s+(?:[\d.]+[\s\u00a0]*)?编制说明(?:与工程概况)?$/mu.exec(markdown)
+    ?? /^(?:###|####)\s+(?:[\d.]+[\s\u00a0]*)?(?:工程概况|项目概况)$/mu.exec(markdown);
   if (anchor) {
     // 注入到编制依据/编制说明小节标题行之后
     const insertAt = markdown.indexOf('\n', anchor.index) + 1;
@@ -179,9 +185,15 @@ function repairTableBlockLines(rawLines: string[]): { lines: string[]; removed: 
   // 4. 零星空单元格/占位符单元格 → 删除所在数据行（4.12.12 扩围：—/若干/约/待定/N/A 占位与
   // 空单元格同口径确定性删行，消除 LLM 修复不收敛的表格占位符残留；合计/小计/总计/累计行豁免）
   const PLACEHOLDER_CELL_RE = /^(?:—+|-+|\/|N\/A|n\/a|待定|待补充|待确认|待查|待补|若干|暂无|无数据)$/u;
+  // 规格型号列的“—”为「机具无型号」不适用语义（蛙式打夯机等小型机具），与合计行同口径豁免，
+  // 不删行——删行会丢失真实投入的机具信息，且与检测层/注入层豁免口径一致（三层一致化）
+  const isSpecModelColumn = (col: number) => /规格型号|规格|型号/u.test(rows[0][col] || '');
   for (let rowIndex = rows.length - 1; rowIndex > dividerIndex; rowIndex -= 1) {
     if (/^(?:合计|小计|总计|累计)/u.test(rows[rowIndex][0] || '')) continue;
-    if (!rows[rowIndex].some(cell => cell === '' || PLACEHOLDER_CELL_RE.test(cell))) continue;
+    if (!rows[rowIndex].some((cell, col) => {
+      if (isSpecModelColumn(col) && /^(?:—+|-+)$/u.test(cell)) return false;
+      return cell === '' || PLACEHOLDER_CELL_RE.test(cell);
+    })) continue;
     rows.splice(rowIndex, 1);
     changed = true;
     removed += 1;
@@ -827,7 +839,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
             `缺陷表格原文（只允许修改这一张表，逐格修复；不得改动其他表格与小节）：\n${defectTableBlock.slice(0, 2000)}`,
             '请以局部 patch 方式修复该表格：每一列都必须有具体数据值。数据优先取自本章正文与证据摘要；正文与证据未直接给出时，按施工组织设计专业惯例给出具体数值或明确口径（如按班组工具配置估算台数），并保持数值单位一致、行列表头对齐。',
             '若表格首行就是分隔线（缺表头行），必须依据表格数据内容补写一行业务表头（每列一个业务字段名），再紧跟分隔线；表头不得使用泛化字段名。',
-            '合计/小计/总计/累计行的空单元格一律填“—”（不适用语义）；其余单元格一律不得为空、不得用占位符。',
+            '合计/小计/总计/累计行的空单元格一律填“—”（不适用语义）；规格型号列中无规格型号的小型机具（蛙式打夯机等）可填“—”（机具无型号，合法）；其余单元格一律不得为空、不得用占位符，不得凭空编造型号。',
             '若表头第一列是表名（如“竣工清理与移交计划表”），把表名移到表格上方正文叙述中，表头从业务列名开始，并同步校正数据行列对齐。',
             '保持表头结构与列数不变，不得新增、删除或合并小节；只修改缺陷表格相关局部文本。',
           ].join('\n');
@@ -885,6 +897,9 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 章节级频率投票修复器与全文级定点替换修复器共用同一权威口径，检测器也按该口径豁免——
   // 否则修复器把正文对齐蓝图后，表格互查检测器又会把正文拉回表峰值，形成修复循环拉扯
   const laborPeakAuthority = blueprintPlanAuthorities(blueprintData).laborPeakAuthority;
+  // B2 绿化养护期权威（丰乐镇实测「养护一年」漏网）：养护期红线事实无章级锚定时，
+  // 从 factsModel 清单/精确事实抽取权威养护年限，与检测器同源（extractGreeningMaintenanceAuthority）
+  const greeningMaintenanceAuthority = extractGreeningMaintenanceAuthority(factsModel);
   // B1 语义重复交付前兜底：补表/门禁规则修复后可能再引入雷同段，交付前最后一次迭代收敛 strip
   const stage5SemanticDup = await stripCrossChapterSemanticDuplicateParagraphs(finalChapterDrafts);
   // B1 评分项响应强制：交付前对零命中/部分响应的实质条款按路由责任章节补写响应句（锚点同源判定）
@@ -911,6 +926,8 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   let stage5OpeningFixCount = 0;
   let stage5TruncatedFixCount = 0;
   let stage5TableProseFixCount = 0;
+  let stage5TableRowDupCount = 0;
+  let stage5MaintenanceFixCount = 0;
   for (const chapter of finalChapterDrafts) {
     // 节点内闭环（丰乐镇第九轮方案）：每个确定性修复器修复后重跑自身直至零命中，
     // 修复完成才进入下一修复器——替代“单遍修复后无条件走下一节点”的直线模式
@@ -924,6 +941,14 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     if (finishFix.fixedCount > 0) { chapter.content = finishFix.markdown; stage5FinishFixCount += finishFix.fixedCount; }
     const laborFix = runFixUntilClean(md => { const r = fixLaborPeakConflict(md, laborPeakAuthority); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (laborFix.fixedCount > 0) { chapter.content = laborFix.markdown; stage5LaborFixCount += laborFix.fixedCount; }
+    // B7 表内重复行确定性删除（丰乐镇实测「工程内容表两遍粘贴」）：同一表内的重复段
+    // 跨章去重检测不到，与 duplicateTableRowIssues 同口径（检测定位=修复定位）
+    const tableRowDupFix = runFixUntilClean(md => { const r = stripInternalDuplicateTableRows(md); return { markdown: r.markdown, fixedCount: r.removedCount }; }, chapter.content, 2);
+    if (tableRowDupFix.fixedCount > 0) { chapter.content = tableRowDupFix.markdown; stage5TableRowDupCount += tableRowDupFix.fixedCount; }
+    // B8 绿化养护期确定性统一（丰乐镇实测「养护一年」漏网）：正文养护年限与清单权威不符时
+    // 确定性替换（与 fixGreeningMaintenanceMismatch 同源），无权威时静默跳过
+    const maintenanceFix = runFixUntilClean(md => { const r = fixGreeningMaintenanceMismatch(md, greeningMaintenanceAuthority); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
+    if (maintenanceFix.fixedCount > 0) { chapter.content = maintenanceFix.markdown; stage5MaintenanceFixCount += maintenanceFix.fixedCount; }
     // B1/B2 段首机械重复剥离与截断句残留收敛（丰乐镇实测）：检测定位=修复定位同源，
     // 章节级原地修复，节点内闭环（修复后重跑自身直至零命中）
     const openingFix = runFixUntilClean(md => { const r = fixParagraphOpeningRepeats(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
@@ -945,9 +970,9 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     const atlasRefFix = runFixUntilClean(md => { const r = stripAtlasReferencePhrases(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (atlasRefFix.fixedCount > 0) { chapter.content = atlasRefFix.markdown; stage5AtlasRefCount += atlasRefFix.fixedCount; }
   }
-  if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5LaborFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0 || stage5AtlasRefCount > 0 || stage5MetaFixCount > 0 || stage5FormulaFixCount > 0 || stage5OpeningFixCount > 0 || stage5TruncatedFixCount > 0) {
+  if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5LaborFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0 || stage5AtlasRefCount > 0 || stage5MetaFixCount > 0 || stage5FormulaFixCount > 0 || stage5OpeningFixCount > 0 || stage5TruncatedFixCount > 0 || stage5TableRowDupCount > 0 || stage5MaintenanceFixCount > 0) {
     finalMarkdown = rebuildFinalMarkdownFromChapters();
-    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'deterministic-surface-fix', status: 'success', message: `交付前确定性清洗：跨章表格去重 ${stage5TableDup.removedCount} 行、断行残片合并 ${stage5ResidueCount} 处、装饰层厚度修复 ${stage5FinishFixCount} 处、劳动力峰值统一 ${stage5LaborFixCount} 处、段首机械重复剥离 ${stage5OpeningFixCount} 处、截断句残留收敛 ${stage5TruncatedFixCount} 处、元话语声明清洗 ${stage5MetaFixCount} 处、公式形态清洗 ${stage5FormulaFixCount} 处、自伤句式改写 ${stage5SelfFixCount} 处、空响应句改写 ${stage5EmptyRespCount} 处、图集引用清洗 ${stage5AtlasRefCount} 处、叠词收敛` }, { subtitle: '交付前确定性清洗' }));
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'deterministic-surface-fix', status: 'success', message: `交付前确定性清洗：跨章表格去重 ${stage5TableDup.removedCount} 行、断行残片合并 ${stage5ResidueCount} 处、装饰层厚度修复 ${stage5FinishFixCount} 处、劳动力峰值统一 ${stage5LaborFixCount} 处、段首机械重复剥离 ${stage5OpeningFixCount} 处、截断句残留收敛 ${stage5TruncatedFixCount} 处、元话语声明清洗 ${stage5MetaFixCount} 处、公式形态清洗 ${stage5FormulaFixCount} 处、自伤句式改写 ${stage5SelfFixCount} 处、空响应句改写 ${stage5EmptyRespCount} 处、图集引用清洗 ${stage5AtlasRefCount} 处、表内重复行删除 ${stage5TableRowDupCount} 行、绿化养护期统一 ${stage5MaintenanceFixCount} 处、叠词收敛` }, { subtitle: '交付前确定性清洗' }));
   }
   const stage5MarkdownFix = await applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
   if (stage5MarkdownFix.fixedCount > 0) finalMarkdown = stage5MarkdownFix.markdown;
@@ -1055,6 +1080,9 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     md => { const r = stripDuplicateTables(md); return { markdown: r.markdown, fixedCount: r.removedCount }; },
     md => { const r = fixFinishThickness(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
     md => { const r = fixLaborPeakConflict(md, laborPeakAuthority); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    // B7/B8 评审轮后兜底（与 stage5 链同源）：评审轮 patch 会再引入表内重复行与养护期多口径
+    md => { const r = stripInternalDuplicateTableRows(md); return { markdown: r.markdown, fixedCount: r.removedCount }; },
+    md => { const r = fixGreeningMaintenanceMismatch(md, greeningMaintenanceAuthority); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
     // B1/B2/B3 评审轮后兜底（与 stage5 链同源）：评审轮 patch 会再引入段首机械重复、
     // 截断句残留与关键小节表格承载正文，一并纳入链循环收敛
     md => { const r = fixParagraphOpeningRepeats(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },

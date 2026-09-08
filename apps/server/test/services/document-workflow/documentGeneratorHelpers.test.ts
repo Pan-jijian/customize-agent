@@ -1,5 +1,26 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chapterCompletionStatus, chapterGenerationTargets, cleanChineseWordBreakSpaces, cleanInlineFactValue, callBreakdownTopDetails, callBreakdownTopSummary, dedupeCrossSectionDuplicateSentences, phaseWaterfallDetails, finalizeFinalMarkdownStructure, normalizeWorkPackageLabels, splitGluedTableHeaderLines, stripBidDisciplineSentences, stripBidDisciplineSentencesSemantic, stripDataConsistencyLeakSentences } from '@/services/document-workflow/documentGeneratorHelpers';
+import { chapterCompletionStatus, chapterGenerationTargets, cleanChineseWordBreakSpaces, cleanInlineFactValue, callBreakdownTopDetails, callBreakdownTopSummary, dedupeCrossSectionDuplicateSentences, phaseWaterfallDetails, finalizeFinalMarkdownStructure, normalizeWorkPackageLabels, splitGluedTableHeaderLines, stripBidDisciplineSentences, stripBidDisciplineSentencesSemantic, stripDataConsistencyLeakSentences, replaceForbiddenFormalPhrases } from '@/services/document-workflow/documentGeneratorHelpers';
+
+describe('replaceForbiddenFormalPhrases（round-27：替换产物不得注入后台话术）', () => {
+  it('模糊来源词替换为正式表述，不含「已确认资料」内部话术', () => {
+    expect(replaceForbiddenFormalPhrases('管道安装按资料施工')).toBe('管道安装按设计文件及批准的施工方案要求施工');
+    expect(replaceForbiddenFormalPhrases('按文件要求执行')).toBe('按设计文件及批准的施工方案要求执行');
+    expect(replaceForbiddenFormalPhrases('按图纸施工')).toBe('依据经确认的设计文件和图纸内容组织实施施工');
+  });
+
+  it('正常施组表述「按规范/按方案/按要求」不再被替换', () => {
+    expect(replaceForbiddenFormalPhrases('按现行规范执行')).toBe('按现行规范执行');
+    expect(replaceForbiddenFormalPhrases('按批准的施工方案实施')).toBe('按批准的施工方案实施');
+    expect(replaceForbiddenFormalPhrases('结合实际情况确定')).toBe('根据现场实际情况和审批后的施工安排确定');
+  });
+
+  it('替换产物全文不含系统内部话术', () => {
+    const output = replaceForbiddenFormalPhrases('按资料施工，视情况调整');
+    expect(output).not.toContain('已确认资料');
+    expect(output).not.toContain('工作包');
+  });
+});
+
 
 describe('chapterGenerationTargets（提示词篇幅目标完整下达）', () => {
   it('长文模式：提示词章预算必须完整下达，不被 upper 硬顶与结构估算压制', () => {
