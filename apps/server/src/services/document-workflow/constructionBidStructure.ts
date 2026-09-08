@@ -202,7 +202,10 @@ export function extractEvaluationCriteriaItems(texts: string[]): EvaluationCrite
     // 汉字阈值 4→3：短条目（如“确保黄山杯”清理后仅 3 字）必须保留，否则创优类条目被静默丢弃零承接
     if (!/[\u4e00-\u9fa5]{3}/u.test(raw) && !/[杯奖]/u.test(raw)) continue;
     if (/AI|大模型|评审|评分|分值|分项|子项|满分|得分|投标人须|详见|招标文件/u.test(raw)) continue;
-    if (/公共资源|电子交易|加密|投标|开标|评标委员会|评标价|中标候选|中标人/u.test(raw)) continue;
+    // 商务/评标程序类条目过滤（4.19.13）：与证据内容安全分区同口径——评标办法章节的纯程序条款
+    // （评标程序/异常低价计算方式/电子保函/保证金/资格审查）属商务评审内容，不属于施工组织设计正文
+    // 响应范围；证据层已断流（写作链拿不到证据），承接审计若继续要求承接必然永久误报无法收敛
+    if (/公共资源|电子交易|加密|投标|开标|评标委员会|评标价|中标候选|中标人|评标程序|评标流程|异常低价|保函|保证金|资格审查|资格后审/u.test(raw)) continue;
     const index = Number(match[1]);
     if (!items.has(index)) {
       const cleanedTitle = cleanEvaluationItemTitle(raw);

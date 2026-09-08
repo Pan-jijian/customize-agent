@@ -939,8 +939,39 @@ export function containsForeignProject(value: string, currentPlace: string): boo
  * 项目名称候选按地名排除其他项目）。当前项目名来自正则通道「项目名称」事实，
  * 无法确定时仅做乱码过滤（不误杀）。
  */
+/** 4.19.13 身份类事实值域白名单：项目名称必须含「项目/工程」字样且无表格噪声（金额/合计/序号/页码）
+ * （「2生态池(4T/D)」「分部小计」为清单/图纸内容误抽）；招标人必须含机构后缀
+ * （「将报公共资源交易监督管理部门」为叙述句误抽）。脏值剔除后不再被「事实未落位」反向要求落位。
+ * 含表格单元格引用噪声（R6C3/COL3）的值不裁决（噪声规则已单独处理，长残留不重复误杀）。 */
+function sanitizeIdentityFact(fact: DocumentFact): DocumentFact {
+  const label = `${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`;
+  const value = normalizeOcrFactText(stringifyFactValue(fact.value)).trim();
+  if (!value) return fact;
+  if (/项目名称|工程名称|project_name/u.test(label)) {
+    // 程序性叙述句（联系人/电话等）交由冲突机制裁决（bge 语义复核兑底，用户可见报出），
+    // 白名单只静默丢弃清单/图纸碎片类脏值（「2生态池(4T/D)」「分部小计」）
+    if (PROCEDURAL_LEXICAL_HINTS_RE.test(value)) return fact;
+    const normalized = value.replace(/^(?:项目|工程)名称[：:]\s*/u, '').trim();
+    // 噪声判定必须词级（序号/合计/金额/第N页/共N页），单字符类会把「合肥市」的「合」误判为噪声
+    const valid = /项目|工程/u.test(normalized) && !/(?:[|｜]|序号|合计|金额|第\d*页|共\d*页)/u.test(normalized) && normalized.length >= 3 && normalized.length <= 80;
+    if (!valid) return { ...fact, value: '' };
+  }
+  if (/招标人|建设单位|发包人|tenderee/u.test(label)) {
+    if (TABLE_CELL_NOISE_RE.test(value)) return fact;
+    const normalized = value.replace(/^招标人[：:]\s*/u, '').trim();
+    const valid = /(?:政府|公司|局|委员会|集团|学院|大学|中心|研究院|设计院|事务所|管理处|指挥部|医院|学校|村委会|居委会)(?:[（(][^)）]*[)）])?$/u.test(normalized) && normalized.length <= 60;
+    if (!valid) return { ...fact, value: '' };
+  }
+  return fact;
+}
+
 export function sanitizeFactPool(facts: DocumentFact[]): DocumentFact[] {
-  const cleaned = facts.filter(fact => !isMojibakeFactValue(fact));
+  // 身份事实值域白名单前置：脏项目名（清单/图纸误抽值）不得成为地名定位基准，
+  // 否则 currentPlace 取不到地名会短路后续项目范围隔离（白名单失效）
+  const cleaned = facts
+    .filter(fact => !isMojibakeFactValue(fact))
+    .map(sanitizeIdentityFact)
+    .filter(fact => stringifyFactValue(fact.value).trim().length > 0);
   const projectNameFact = cleaned.find(fact =>
     (fact.key === '项目名称' || fact.fieldId === 'project_name')
     && stringifyFactValue(fact.value).trim().length >= 6);

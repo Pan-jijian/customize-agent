@@ -18,7 +18,7 @@ import { dangerousApplicabilityIssues } from './dangerousApplicability';
 import { stagePhrasingIssues } from './stagePhrasing';
 import { emergencySectionDepthIssues } from './emergencySectionDepth';
 import { displayChapterTitle } from './outline';
-import { blueprintCitationConsistencyIssues } from './integratedBlueprint';
+import { blueprintCitationConsistencyIssues, blueprintPlanAuthorities } from './integratedBlueprint';
 import type { BlueprintData } from './integratedBlueprint';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, TenderRequirementModel, ValidationIssue } from './types';
 
@@ -146,7 +146,7 @@ export async function buildStandardFinalValidationIssues(input: {
     ...fabricatedStartDateIssues(input.markdown, input.factsModel),
     ...fieldValueMismatchIssues(input.markdown, input.factsModel),
     ...areaArithmeticIssues(input.markdown),
-    ...resourceConsistencyIssues(input.markdown),
+    ...resourceConsistencyIssues(input.markdown, { laborPeakAuthority: input.blueprintData ? blueprintPlanAuthorities(input.blueprintData).laborPeakAuthority : undefined }),
     // h13：节点工期口径互查（基坑支护/封顶/装饰多套第N日口径）
     ...nodeScheduleConsistencyIssues(input.markdown),
     // h13：跨节数值口径冲突（XPS/垫层/变压器/模板周转/砌块/灭火器/潜水泵/急救箱确定性锚点）

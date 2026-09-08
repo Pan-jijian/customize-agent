@@ -704,7 +704,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
       return [
         ...(await crossChapterConsistencyIssues(fullMarkdown, preliminaryFactsModel, scopeConflicts)).filter(issue => /跨章一致性冲突/u.test(issue.message)),
         ...(await processSpecConflictIssues(fullMarkdown, preliminaryFactsModel)).filter(issue => issue.level === 'error'),
-        ...resourceConsistencyIssues(fullMarkdown),
+        ...resourceConsistencyIssues(fullMarkdown, { laborPeakAuthority: blueprintPlanAuthorities(blueprintData).laborPeakAuthority }),
         ...laborPeakConflictIssues(fullMarkdown),
         // F16 用水高峰人数 vs 劳动力峰值跨字段关联（临时用水人数必须与劳动力峰值同口径）
         ...waterLaborPeakAssociationIssues(fullMarkdown),

@@ -4,7 +4,7 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSixHundredPercentCoverage, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixParagraphOpeningRepeats, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSixHundredPercentCoverage, fixTableBorneContentSections, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import type { DocumentDraftChapter, DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel } from '@/services/document-workflow/types';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
@@ -1888,6 +1888,124 @@ describe('fixQuantityAuthorityConflicts（G3 清单工程量权威定点校正�
   it('生态池部位量豁免：「生态池外围栽植色带90m²」不被「栽植色带」汇总值误改', () => {
     const markdown = '生态池外围栽植色带90m²，配套金属扶手、栏杆、栏板224m。';
     const result = fixQuantityAuthorityConflicts(markdown, [{ name: '栽植色带', value: 552, unit: 'm²' }]);
+    expect(result.fixedCount).toBe(0);
+  });
+});
+
+describe('fixParagraphOpeningRepeats（B1 段首机械重复确定性修复）', () => {
+  it('同构段首句重复 4 段 → 首现保留、后续剥离公共前缀到冒号边界', () => {
+    const opening = '招标要求响应（前附表响应条款）：计划开工日期：';
+    const markdown = [
+      `${opening}2026年9月1日，计划竣工日期：2027年3月31日。`,
+      `${opening}2026年9月2日，计划竣工日期：2027年4月30日。`,
+      `${opening}2026年9月3日，计划竣工日期：2027年5月31日。`,
+      `${opening}2026年9月4日，计划竣工日期：2027年6月30日。`,
+    ].join('\n');
+    const result = fixParagraphOpeningRepeats(markdown);
+    expect(result.fixedCount).toBe(3);
+    // 固定开场前缀只剩首现段一处
+    expect((result.markdown.match(/招标要求响应（前附表响应条款）：/gu) || []).length).toBe(1);
+    // 后续段保留差异化正文
+    expect(result.markdown).toContain('2026年9月2日，计划竣工日期：2027年4月30日。');
+    expect(result.markdown).toContain('2026年9月4日，计划竣工日期：2027年6月30日。');
+  });
+
+  it('段首句完全相同（剥离后无差异正文）→ 零改动', () => {
+    const sentence = '本工程严格按照施工组织设计组织施工，确保工程质量合格。';
+    const markdown = Array.from({ length: 4 }, () => sentence).join('\n');
+    const result = fixParagraphOpeningRepeats(markdown);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(markdown);
+  });
+
+  it('同构段首句仅 2 段 → 不触发（重复组阈值 3）', () => {
+    const opening = '招标要求响应（前附表响应条款）：计划开工日期：';
+    const markdown = [
+      `${opening}2026年9月1日，计划竣工日期：2027年3月31日。`,
+      `${opening}2026年9月2日，计划竣工日期：2027年4月30日。`,
+    ].join('\n');
+    const result = fixParagraphOpeningRepeats(markdown);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('短句（不足 18 字）不参与提取 → 不动', () => {
+    const markdown = [
+      '本工程按期开工。',
+      '本工程按期开工。',
+      '本工程按期开工。',
+    ].join('\n');
+    const result = fixParagraphOpeningRepeats(markdown);
+    expect(result.fixedCount).toBe(0);
+  });
+});
+
+describe('fixTruncatedSentenceArtifacts（B2 截断句残留确定性修复）', () => {
+  it('列表引导句双重冒号与列表项行尾冒号残留收敛', () => {
+    const markdown = [
+      '**编制依据**：招标文件与补疑补遗按以下类别列出： ：',
+      '- 招标文件及补疑补遗：招标文件、答疑纪要、补疑补遗文件；：',
+      '施工方案。：详见施工组织设计。',
+    ].join('\n');
+    const result = fixTruncatedSentenceArtifacts(markdown);
+    expect(result.fixedCount).toBe(3);
+    expect(result.markdown).not.toContain('： ：');
+    expect(result.markdown).not.toContain('；：');
+    expect(result.markdown).not.toContain('。：');
+    expect(result.markdown).not.toContain('：：');
+    expect(result.markdown).toContain('按以下类别列出：');
+    expect(result.markdown).toContain('补疑补遗文件；');
+  });
+
+  it('无残留 → 零改动', () => {
+    const markdown = ['编制依据：招标文件。', '- 招标文件及补疑补遗：招标文件。'].join('\n');
+    const result = fixTruncatedSentenceArtifacts(markdown);
+    expect(result).toEqual({ markdown, fixedCount: 0, details: [] });
+  });
+});
+
+describe('fixTableBorneContentSections（B3 表格承载正文修复）', () => {
+  it('关键小节全表格正文 → 表格行改写段落插入标题后，表格保留', () => {
+    const markdown = [
+      '### 1.2 项目主要施工内容',
+      '',
+      '| 分部分项工程 | 工程内容 | 单位 | 工程量 |',
+      '| --- | --- | --- | --- |',
+      '| 道路工程 | 沥青混凝土路面 | m² | 12000 |',
+      '| 道路工程 | 路床碾压 | m² | 15000 |',
+      '| 排水工程 | 钢筋混凝土管铺设 | m | 800 |',
+    ].join('\n');
+    const result = fixTableBorneContentSections(markdown);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('本项目主要施工内容包括：道路工程的沥青混凝土路面12000m²、路床碾压15000m²；排水工程的钢筋混凝土管铺设800m。');
+    // 表格保留
+    expect(result.markdown).toContain('| 道路工程 | 沥青混凝土路面 | m² | 12000 |');
+    // 段落插入在标题之后
+    expect(result.markdown.indexOf('本项目主要施工内容包括：')).toBeLessThan(result.markdown.indexOf('| 分部分项工程 |'));
+  });
+
+  it('表格前已有成段正文 → 不动（正文已承载主体内容）', () => {
+    const markdown = [
+      '### 1.2 项目主要施工内容',
+      '',
+      '本项目主要包括道路工程与排水工程两大专业内容，其中道路工程涵盖路基处理、路面铺装与人行道施工，排水工程涵盖管道铺设与检查井砌筑等施工内容。',
+      '',
+      '| 分部分项工程 | 工程内容 | 单位 | 工程量 |',
+      '| --- | --- | --- | --- |',
+      '| 道路工程 | 沥青混凝土路面 | m² | 12000 |',
+    ].join('\n');
+    const result = fixTableBorneContentSections(markdown);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('非关键小节标题 → 不动', () => {
+    const markdown = [
+      '### 2.1 施工进度计划',
+      '',
+      '| 阶段 | 工期 | 劳动力 |',
+      '| --- | --- | --- |',
+      '| 主体结构 | 120天 | 150人 |',
+    ].join('\n');
+    const result = fixTableBorneContentSections(markdown);
     expect(result.fixedCount).toBe(0);
   });
 });

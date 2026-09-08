@@ -403,8 +403,12 @@ export function tablePeakLaborWithChainFallback(markdown: string): number | unde
   return chainMax;
 }
 
-export function resourceConsistencyIssues(markdown: string): ValidationIssue[] {
+export function resourceConsistencyIssues(markdown: string, options?: { laborPeakAuthority?: number }): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  // D1 三层锚点优先级：蓝图 labor.peakValue（造价锚定）> 分阶段投入明细表峰值 > 正文表述。
+  // 蓝图权威存在时正文峰值对齐蓝图即为合法终态，与表峰值的差异不再互斥——否则检测器会把
+  // 确定性修复器刚对齐的蓝图值再拉回表峰值，形成「蓝图检测 ↔ 表格互查」修复循环拉扯
+  const laborPeakAuthority = options?.laborPeakAuthority;
   const bodyPeaks: Array<{ value: number; text: string; stage?: string; group: 'management' | 'trade' | 'peak'; trade?: string }> = [];
   const chainHandledKeys = new Set<string>();
   // 阶段归属判定复用模块级 laborPeakStageOf（A2：检测/修复同源同口径）
@@ -477,7 +481,9 @@ export function resourceConsistencyIssues(markdown: string): ValidationIssue[] {
       if (diff > 0.3) {
         laborIssue(
           `劳动力数据矛盾：正文“${a.text}”（${a.value} 人）与“${b.text}”（${b.value} 人）互斥（相差 ${Math.round(diff * 100)}%）`,
-          '劳动力峰值数据必须全文唯一：以分阶段投入明细表为准统一正文各处峰值表述，删除矛盾数字。',
+          laborPeakAuthority !== undefined && laborPeakAuthority > 0
+            ? `劳动力峰值数据必须全文唯一：以蓝图劳动力峰值 ${laborPeakAuthority} 人为准统一正文各处峰值表述，删除矛盾数字。`
+            : '劳动力峰值数据必须全文唯一：以分阶段投入明细表为准统一正文各处峰值表述，删除矛盾数字。',
         );
         i = bodyPeaks.length;
         break;
@@ -507,7 +513,11 @@ export function resourceConsistencyIssues(markdown: string): ValidationIssue[] {
     : undefined;
   if (tablePeak !== undefined && maxBodyPeak > 0) {
     const threshold = tablePeak * 1.3;
-    if (maxBodyPeak > threshold) {
+    // D1 蓝图权威豁免：正文峰值已对齐蓝图劳动力峰值时不与表峰值互查——蓝图是造价锚定最高权威，
+    // 表峰值与蓝图的差异属表格口径问题（确定性修复器以蓝图值为准统一正文），
+    // 若继续互查会把已对齐的正文再拉回表峰值，与蓝图引用检测形成修复循环
+    const alignedToBlueprint = laborPeakAuthority !== undefined && laborPeakAuthority > 0 && maxBodyPeak === laborPeakAuthority;
+    if (maxBodyPeak > threshold && !alignedToBlueprint) {
       const maxText = peakGroupPeaks.find(entry => entry.value === maxBodyPeak)?.text || '';
       laborIssue(
         `劳动力数据矛盾：正文表述“${maxText}”达 ${maxBodyPeak} 人，而分阶段投入明细表最大峰值为 ${tablePeak} 人（超出 ${Math.round(((maxBodyPeak - tablePeak) / tablePeak) * 100)}%）`,
@@ -994,6 +1004,158 @@ export function paragraphOpeningRepeatIssues(markdown: string): ValidationIssue[
   return issues.slice(0, 3);
 }
 
+/**
+ * B1（丰乐镇实测「招标要求响应（前附表响应条款）：计划开工日期：2026年9月…」重复 4 次）：
+ * 段首固定开场机械重复确定性修复——与检测器 paragraphOpeningRepeatIssues 同源提取段首句
+ * 与指纹分组，重复组（>=3）内剥离全组公共前缀（截到最后一个冒号边界，冒号含入前缀）：
+ * 首现段保留完整句，后续段仅删固定开场前缀、保留差异化正文。公共前缀 <4 字或剥离后
+ * 剩余 <10 字不动（防误伤短句与碎片句）。owner:llm 修复定位能力不足时由本函数确定性收口。
+ */
+export function fixParagraphOpeningRepeats(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const groups = new Map<string, Array<{ sentence: string; start: number; end: number }>>();
+  for (const match of markdown.matchAll(PARAGRAPH_START_RE)) {
+    const sentence = match[1].trim();
+    const fingerprint = sentence.replace(/[\d,，.。%％㎡m2²]/gu, '').slice(0, 16);
+    if (fingerprint.length < 10) continue;
+    const group = groups.get(fingerprint) || [];
+    const offset = (match.index ?? 0) + match[0].indexOf(match[1]);
+    group.push({ sentence, start: offset, end: offset + match[1].length });
+    groups.set(fingerprint, group);
+  }
+  const replacements: Array<{ start: number; end: number; replacement: string }> = [];
+  for (const group of groups.values()) {
+    if (group.length < 3) continue;
+    // 全组公共前缀（按字符逐位比较）
+    const first = group[0].sentence;
+    let prefixLen = first.length;
+    for (const item of group.slice(1)) {
+      let common = 0;
+      const max = Math.min(prefixLen, item.sentence.length);
+      while (common < max && first[common] === item.sentence[common]) common += 1;
+      prefixLen = common;
+    }
+    // 前缀截到最后一个冒号边界（词内截断回退到冒号，含冒号入前缀）
+    const boundary = first.slice(0, prefixLen).lastIndexOf('：');
+    const prefix = first.slice(0, boundary >= 0 ? boundary + 1 : prefixLen);
+    if (prefix.length < 4) continue;
+    for (let index = 1; index < group.length; index += 1) {
+      const item = group[index];
+      const rest = item.sentence.slice(prefix.length).trim();
+      if (rest.length < 10) continue;
+      replacements.push({ start: item.start, end: item.end, replacement: rest });
+    }
+  }
+  if (replacements.length === 0) return { markdown, fixedCount: 0, details: [] };
+  const fixed = applySpanReplacements(markdown, replacements.map(item => ({ ...item, detail: '段首固定开场剥离' })));
+  return { markdown: fixed.markdown, fixedCount: fixed.fixedCount, details: [`段首固定开场剥离 ${fixed.fixedCount} 处`] };
+}
+
+/**
+ * B2（丰乐镇实测）：截断句残留确定性修复——列表引导句双重冒号「： ：」、列表项行尾
+ * 冒号残留「；：」「。：」与双冒号「：：」确定性收敛；引导句以冒号收尾/列表项以分号收尾
+ * 属 Markdown 列表合法形态，由检测器侧列表行与列表引导句豁免承担（与修复器同源同口径）。
+ */
+export function fixTruncatedSentenceArtifacts(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const steps: Array<[RegExp, string]> = [
+    [/：\s*：/gu, '：'],
+    [/；：/gu, '；'],
+    [/。：/gu, '。'],
+    [/：：/gu, '：'],
+  ];
+  let result = markdown;
+  let fixedCount = 0;
+  for (const [re, to] of steps) {
+    const before = result;
+    result = result.replace(re, to);
+    fixedCount += (before.match(new RegExp(re.source, 'gu')) || []).length;
+  }
+  if (result === markdown) return { markdown, fixedCount: 0, details: [] };
+  return { markdown: result, fixedCount, details: [`截断句残留清洗 ${fixedCount} 处`] };
+}
+
+/**
+ * B3（丰乐镇实测「1.2 项目主要施工内容」表格承载专业工程正文）：关键小节表格承载正文
+ * 确定性兜底——检测器 majorContentGovernanceIssues 判「小节正文全为表格」即 error，
+ * LLM 表格→段落改写定位失败时由本函数收口：从表格行确定性生成段落叙述
+ * （分部分项工程分组 → 「X的Y量单位、Z量单位；」），插入小节标题之后、表格之前，
+ * 表格保留（正式工程量表属合法要求）。只覆盖「作业对象与工程量」维度，
+ * 工序/方法两维由三要素检测继续驱动 LLM 补写。
+ */
+export function fixTableBorneContentSections(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const lines = markdown.split(/\r?\n/u);
+  const tableRowRe = /^\s*\|.+\|\s*$/u;
+  const rowsToProse = (tableLines: string[]): string | undefined => {
+    const cellsOf = (row: string) => row.split('|').map(item => item.trim()).slice(1, -1);
+    const clean = (cell: string) => cell.replace(/[*_`~]/gu, '').trim();
+    let header: string[] | undefined;
+    const dataRows: string[][] = [];
+    for (const line of tableLines) {
+      const cells = cellsOf(line).map(clean);
+      if (cells.every(cell => /^:?-{3,}:?$/u.test(cell))) continue;
+      if (header === undefined) { header = cells; continue; }
+      dataRows.push(cells);
+    }
+    if (!header || dataRows.length === 0) return undefined;
+    const colIndex = (re: RegExp) => header.findIndex(cell => re.test(cell));
+    const groupCol = colIndex(/分部分项|专业工程|工程名称|项目名称/u);
+    const contentCol = colIndex(/工程内容|施工内容|工作内容|名称/u);
+    const unitCol = colIndex(/单位/u);
+    const qtyCol = colIndex(/工程量|数量/u);
+    const groups = new Map<string, string[]>();
+    const solo: string[] = [];
+    for (const row of dataRows) {
+      const group = groupCol >= 0 && row[groupCol] ? row[groupCol] : '';
+      const content = contentCol >= 0 ? (row[contentCol] || '') : (groupCol >= 0 ? (row[groupCol] || '') : '');
+      const qty = qtyCol >= 0 ? (row[qtyCol] || '') : '';
+      const unit = unitCol >= 0 ? (row[unitCol] || '') : '';
+      const phrase = `${content}${qty}${unit}`;
+      if (!content && !qty) continue;
+      if (group) {
+        const list = groups.get(group) || [];
+        list.push(phrase);
+        groups.set(group, list);
+      } else {
+        solo.push(phrase);
+      }
+    }
+    if (groups.size === 0 && solo.length === 0) return undefined;
+    const parts = [...groups.entries()].map(([group, phrases]) => `${group}的${phrases.join('、')}`);
+    if (solo.length > 0) parts.push(solo.join('、'));
+    return `本项目主要施工内容包括：${parts.join('；')}。`;
+  };
+  const insertions: Array<{ lineIndex: number; paragraph: string; title: string }> = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const heading = /^(#{2,4})\s+(.+)$/u.exec(lines[index].trim());
+    if (!heading || !/主要施工内容|主要施工方法/u.test(heading[2])) continue;
+    const level = heading[1].length;
+    let end = index + 1;
+    for (; end < lines.length; end += 1) {
+      const next = /^(#{1,6})\s+/u.exec(lines[end].trim());
+      if (next && next[1].length <= level) break;
+    }
+    const body = lines.slice(index + 1, end);
+    const tableLines = body.filter(line => tableRowRe.test(line.trim()));
+    if (tableLines.length < 3) continue;
+    const proseChars = body.filter(line => !tableRowRe.test(line.trim())).join('').replace(/[\s#*_`>-]/gu, '').length;
+    if (proseChars >= 50) continue;
+    const paragraph = rowsToProse(tableLines);
+    if (!paragraph) continue;
+    insertions.push({ lineIndex: index, paragraph, title: heading[2].trim() });
+  }
+  if (insertions.length === 0) return { markdown, fixedCount: 0, details: [] };
+  const out: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    out.push(lines[index]);
+    const hit = insertions.find(item => item.lineIndex === index);
+    if (hit) out.push('', hit.paragraph);
+  }
+  return {
+    markdown: out.join('\n'),
+    fixedCount: insertions.length,
+    details: insertions.map(item => `「${item.title}」表格改写段落兜底`),
+  };
+}
+
 // ── 8b. 项目概况段跨章复述（L1 结构召回 + L3 语义判定，两段式）：
 // 总述数据（总建筑面积/建设规模/计划工期/改造范围等）只在工程概况类小节集中交代，
 // 其他小节不得以“本项目为……”整段复述（十四/十五度实测：正文 11 处“本项目为”复述概况段）。
@@ -1151,7 +1313,10 @@ const SELF_UNDERMINING_QUERIES = [
 // 界定/保护承诺），被 bge 语义召回归入自伤候选（与「专项设计文件尚未完成」原型相似度
 // ≥0.6），修复轮改写反而引入新词面；正向声明句不进候选，保持原文。
 // R9 八轮扩围：「分项验收…监理工程师签字确认后归档」为验收闭环正向句（实测被误召回），同样豁免。
-const POSITIVE_SELF_REFERENCE_RE = /编制范围为[^。；;]{0,40}?所界定的全部施工内容|作为施工组织的控制性约束条件|分项验收[，,]?验收记录经监理工程师签字确认后归档/u;
+// 4.19.13 扩围：合规文件引用句（「执行合建〔2020〕29号文件，以保函等方式替代工程质量保证金」）
+// 是施组对招标文件实质条款（缺陷责任期/质保金/履约担保）的正向响应，被 bge 语义召回与
+// 「依据承诺函后续跟踪完善」原型相似度≥0.6 误判自伤；引用文件号+落实动词形态豁免。
+const POSITIVE_SELF_REFERENCE_RE = /编制范围为[^。；;]{0,40}?所界定的全部施工内容|作为施工组织的控制性约束条件|分项验收[，,]?验收记录经监理工程师签字确认后归档|(?:执行|按|依据|按照)[^。；;]{0,10}?(?:〔|【)?20\d{2}(?:〕|】)?\s*\d+\s*号\s*(?:文件|办法|规定)?/u;
 
 export async function selfUnderminingCandidateIssues(markdown: string): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
@@ -1501,7 +1666,7 @@ export function fixMetaDiscourseDeclarations(markdown: string): { markdown: stri
   }
   // 清理删除残留：连续标点收敛（「，，」→「，」、句尾「，。」→「。」、句首逗号删除、空行去重）
   const before = result;
-  result = result.replace(/，+/gu, '，').replace(/，(?=[。；;\n])/gu, '').replace(/(?:^|[。；;\n])\s*，/gu, (_full, prefix: string) => prefix).replace(/([。；;])\1+/gu, '$1').replace(/^[。；;\s]+/u, '').replace(/\n{3,}/gu, '\n\n');
+  result = result.replace(/，+/gu, '，').replace(/，(?=[。；;\n])/gu, '').replace(/(?:^|[。；;\n])\s*，/gu, (_full, prefix: string) => prefix).replace(/([。；;])\1+/gu, '$1').replace(/^[。；;\s]+/u, '').replace(/\\n{3,}/gu, '\\n\\n');
   if (result !== before) fixedCount += 1;
   if (fixedCount > 0) details.push(`元话语声明句清洗 ${fixedCount} 处`);
   return { markdown: result, fixedCount: fixedCount > 0 ? 1 : 0, details };
@@ -1561,7 +1726,7 @@ export function fixFormulaResidues(markdown: string): { markdown: string; fixedC
   return { markdown: result, fixedCount: fixedCount > 0 ? 1 : 0, details };
 }
 
-export function fixLaborPeakConflict(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+export function fixLaborPeakConflict(markdown: string, laborPeakAuthority?: number): { markdown: string; fixedCount: number; details: string[] } {
   const totalMatches = [...markdown.matchAll(/高峰期总人数(\d+)人|劳动力总人数(\d+)人|总人数(\d+)人/gu)];
   const peakMatches = [...markdown.matchAll(/高峰(?:期)?人数(\d+)人|峰值(?:需求|人数)?[为约]?(\d+)人/gu)];
   if (totalMatches.length === 0 || peakMatches.length === 0) return { markdown, fixedCount: 0, details: [] };
@@ -1583,6 +1748,29 @@ export function fixLaborPeakConflict(markdown: string): { markdown: string; fixe
   if (totalWinner === undefined || peakWinner === undefined) return { markdown, fixedCount: 0, details: [] };
   const [totalValue, totalFreq] = totalWinner;
   const [peakValue, peakFreq] = peakWinner;
+  // D1 三层锚点优先级：蓝图劳动力峰值（造价锚定）> 分阶段明细表峰值 > 正文表述。
+  // 蓝图权威存在时频率投票让位——与权威差 >30% 的口径值替换为权威值（与
+  // fixLaborPeakConflicts 同阈值同方向，防两个修复器口径打架互相拉扯）；差 <=30% 的
+  // 口径不动（近似口径不强行统一，交给蓝图引用一致性检测严格相等裁决）
+  if (laborPeakAuthority !== undefined && laborPeakAuthority > 0) {
+    const drift = (value: number) => Math.abs(value - laborPeakAuthority) / Math.max(value, laborPeakAuthority);
+    const authorityTotalRe = /(高峰期总人数|劳动力总人数|总人数)(\d+)人/gu;
+    const authorityPeakRe = /(高峰(?:期)?人数)(\d+)人/gu;
+    let result = markdown;
+    const replaced: string[] = [];
+    if (totalValue !== laborPeakAuthority && drift(totalValue) > 0.3) {
+      const next = result.replace(authorityTotalRe, (_full, prefix: string, value: string) => Number(value) === totalValue ? `${prefix}${laborPeakAuthority}人` : _full);
+      if (next !== result) { result = next; replaced.push(`${totalValue}人`); }
+    }
+    if (peakValue !== laborPeakAuthority && drift(peakValue) > 0.3) {
+      const next = result.replace(authorityPeakRe, (_full, prefix: string, value: string) => Number(value) === peakValue ? `${prefix}${laborPeakAuthority}人` : _full);
+      if (next !== result) { result = next; replaced.push(`${peakValue}人`); }
+    }
+    if (result !== markdown) {
+      return { markdown: result, fixedCount: 1, details: [`劳动力峰值统一：${replaced.join('/')}→${laborPeakAuthority}人（以蓝图劳动力峰值为准）`] };
+    }
+    return { markdown, fixedCount: 0, details: [] };
+  }
   if (totalValue === peakValue) return { markdown, fixedCount: 0, details: [] };
   const winner = peakFreq >= totalFreq ? peakValue : totalValue;
   const loser = peakFreq >= totalFreq ? totalValue : peakValue;

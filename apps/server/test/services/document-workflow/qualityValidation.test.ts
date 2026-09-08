@@ -156,3 +156,30 @@ describe('collectSectionContentGaps 分部章容器小节豁免（4.19.3 回归�
     expect(gaps.some(gap => gap.reason === 'missing_planned_section' && /项目主要施工内容/u.test(gap.sectionTitle))).toBe(true);
   });
 });
+
+describe('formalContentIntegrityIssues 列表形态豁免（B2）', () => {
+  it('列表引导句行尾冒号不判截断', () => {
+    const issues = formalContentIntegrityIssues('**编制依据**：招标文件与补疑补遗按以下类别列出：');
+    expect(issues.some(issue => /疑似截断句/u.test(issue.message))).toBe(false);
+  });
+
+  it('列表项行尾分号不判截断', () => {
+    const issues = formalContentIntegrityIssues('- 招标文件及补疑补遗：招标文件、答疑纪要、补疑补遗文件；');
+    expect(issues.some(issue => /疑似截断句/u.test(issue.message))).toBe(false);
+  });
+
+  it('数字列表行行尾冒号不判截断', () => {
+    const issues = formalContentIntegrityIssues('1. 招标文件及补疑补遗：招标文件、答疑纪要；');
+    expect(issues.some(issue => /疑似截断句/u.test(issue.message))).toBe(false);
+  });
+
+  it('普通段落行尾冒号且无引导词仍判截断（豁免不误伤）', () => {
+    const issues = formalContentIntegrityIssues('施工现场平面布置原则：');
+    expect(issues.some(issue => /疑似截断句/u.test(issue.message))).toBe(true);
+  });
+
+  it('普通段落以「如下」结尾无句号仍判截断', () => {
+    const issues = formalContentIntegrityIssues('本工程主要施工内容如下');
+    expect(issues.some(issue => /疑似截断句/u.test(issue.message))).toBe(true);
+  });
+});

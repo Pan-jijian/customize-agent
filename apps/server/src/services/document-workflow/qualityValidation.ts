@@ -481,7 +481,12 @@ export function formalContentIntegrityIssues(markdown: string): ValidationIssue[
   if (orphan) issues.push({ level: 'warning', message: `正文存在孤立字或残缺段落：${orphan}`, suggestion: '请删除残缺行或重新生成所在小节。' });
   // 截断句词表（合肥师范实测：复查合格后/设计风/验收三处行尾截断）：
   // 正常成稿不会以这些词收尾且无句号；连接词/动作词/名词三类截断形态全部收口
-  const unfinished = lines.filter(line => /[，、；：和与在为对将]$/u.test(line) || /(通过|包括|如下|主要包括|验收|合格后|复查合格后|设计风|确认后|具体如下|应符合|不少于|以及|且应|不得少于)$/u.test(line)).slice(0, 3);
+  // B2 豁免（与确定性修复器 fixTruncatedSentenceArtifacts 同源同口径）：
+  // Markdown 列表行（- 行、数字/括号列表行）行尾分号/冒号属列表合法形态，
+  // 列表引导句（句尾冒号且含按以下/如下/包括/分为/包含/列出）是列表合法开场，均不得判截断
+  const listLineRe = /^(?:[-*+]\s+|[（(]?\d+[）).、]\s*)/u;
+  const listLeadInRe = /(?:按以下|如下|包括|分为|包含|列出).*[:：]$/u;
+  const unfinished = lines.filter(line => !listLineRe.test(line) && !listLeadInRe.test(line) && (/[，、；：和与在为对将]$/u.test(line) || /(通过|包括|如下|主要包括|验收|合格后|复查合格后|设计风|确认后|具体如下|应符合|不少于|以及|且应|不得少于)$/u.test(line))).slice(0, 3);
   for (const item of unfinished) {
     issues.push({ level: 'warning', message: `正文存在疑似截断句：${item}`, suggestion: '请补完整该段落，避免以连接词、逗号、冒号或无句号的动作词结尾。' });
   }

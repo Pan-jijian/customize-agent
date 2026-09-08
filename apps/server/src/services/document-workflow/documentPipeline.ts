@@ -12,7 +12,7 @@ import { validateFactConsistency } from '../document-validation/factConsistencyS
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, dedupeTertiaryH4Titles, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from './budget';
 import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown, markdownTableQualityIssues, headingUncoveredEngineeringItems } from './qualityValidation';
-import { applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixFinishThickness, fixFormulaResidues, fixLaborPeakConflict, fixMetaDiscourseDeclarations, fixSelfUnderminingCandidates, fixTocFromBody, mergeTableLineResidues, runDeterministicChainUntilConverged, runFixUntilClean, stripCommercialDataBodyLines, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters } from './documentIntegrityChecks';
+import { applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixFinishThickness, fixFormulaResidues, fixLaborPeakConflict, fixMetaDiscourseDeclarations, fixParagraphOpeningRepeats, fixSelfUnderminingCandidates, fixTableBorneContentSections, fixTruncatedSentenceArtifacts, fixTocFromBody, mergeTableLineResidues, runDeterministicChainUntilConverged, runFixUntilClean, stripCommercialDataBodyLines, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters } from './documentIntegrityChecks';
 import { fixInternalTermHeadingPhrases, internalTerminologyAnchorIssues, stripInternalTerminologySentences } from './internalTerminologyAnchors';
 import { semanticChoiceConflicts, semanticChoiceConflictIssue } from './dataConsistencyReview';
 import { blueprintPlanAuthorities, extractDecisionLockEntries } from './integratedBlueprint';
@@ -881,6 +881,10 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 修复后重算校验组，避免残留冲突被导出门禁硬阻断。章节级修复原地改正文后重建全文，
   // 全文级修复覆盖封面/信息表合成区的败选数值（章节修复覆盖不到），最后定点替换跨章数值矛盾。
   const stage5ChapterFix = await applyDeterministicConsistencyFixes(finalChapterDrafts, factsModel, scopeConflicts);
+  // D1 劳动力峰值三层锚点统一：蓝图 labor.peakValue（造价锚定）> 分阶段投入明细表峰值 > 正文表述。
+  // 章节级频率投票修复器与全文级定点替换修复器共用同一权威口径，检测器也按该口径豁免——
+  // 否则修复器把正文对齐蓝图后，表格互查检测器又会把正文拉回表峰值，形成修复循环拉扯
+  const laborPeakAuthority = blueprintPlanAuthorities(blueprintData).laborPeakAuthority;
   // B1 语义重复交付前兜底：补表/门禁规则修复后可能再引入雷同段，交付前最后一次迭代收敛 strip
   const stage5SemanticDup = await stripCrossChapterSemanticDuplicateParagraphs(finalChapterDrafts);
   // B1 评分项响应强制：交付前对零命中/部分响应的实质条款按路由责任章节补写响应句（锚点同源判定）
@@ -904,6 +908,9 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   let stage5AtlasRefCount = 0;
   let stage5MetaFixCount = 0;
   let stage5FormulaFixCount = 0;
+  let stage5OpeningFixCount = 0;
+  let stage5TruncatedFixCount = 0;
+  let stage5TableProseFixCount = 0;
   for (const chapter of finalChapterDrafts) {
     // 节点内闭环（丰乐镇第九轮方案）：每个确定性修复器修复后重跑自身直至零命中，
     // 修复完成才进入下一修复器——替代“单遍修复后无条件走下一节点”的直线模式
@@ -915,8 +922,14 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     // 「未采用新技术」自伤句、LLM 自由发挥的空响应句——检测定位=修复定位同源，章节级原地修
     const finishFix = runFixUntilClean(md => { const r = fixFinishThickness(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (finishFix.fixedCount > 0) { chapter.content = finishFix.markdown; stage5FinishFixCount += finishFix.fixedCount; }
-    const laborFix = runFixUntilClean(md => { const r = fixLaborPeakConflict(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
+    const laborFix = runFixUntilClean(md => { const r = fixLaborPeakConflict(md, laborPeakAuthority); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (laborFix.fixedCount > 0) { chapter.content = laborFix.markdown; stage5LaborFixCount += laborFix.fixedCount; }
+    // B1/B2 段首机械重复剥离与截断句残留收敛（丰乐镇实测）：检测定位=修复定位同源，
+    // 章节级原地修复，节点内闭环（修复后重跑自身直至零命中）
+    const openingFix = runFixUntilClean(md => { const r = fixParagraphOpeningRepeats(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
+    if (openingFix.fixedCount > 0) { chapter.content = openingFix.markdown; stage5OpeningFixCount += openingFix.fixedCount; }
+    const truncatedFix = runFixUntilClean(md => { const r = fixTruncatedSentenceArtifacts(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
+    if (truncatedFix.fixedCount > 0) { chapter.content = truncatedFix.markdown; stage5TruncatedFixCount += truncatedFix.fixedCount; }
     // F17/F18 元话语声明句与公式形态残留（远端客户反馈「公式直接输入正文」根治）：
     // 声明≠数据、公式≠值——交付前确定性清洗，与检测器同源同模式（清洗后重算校验组）
     const metaFix = runFixUntilClean(md => { const r = fixMetaDiscourseDeclarations(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
@@ -932,15 +945,23 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     const atlasRefFix = runFixUntilClean(md => { const r = stripAtlasReferencePhrases(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (atlasRefFix.fixedCount > 0) { chapter.content = atlasRefFix.markdown; stage5AtlasRefCount += atlasRefFix.fixedCount; }
   }
-  if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5LaborFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0 || stage5AtlasRefCount > 0 || stage5MetaFixCount > 0 || stage5FormulaFixCount > 0) {
+  if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5LaborFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0 || stage5AtlasRefCount > 0 || stage5MetaFixCount > 0 || stage5FormulaFixCount > 0 || stage5OpeningFixCount > 0 || stage5TruncatedFixCount > 0) {
     finalMarkdown = rebuildFinalMarkdownFromChapters();
-    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'deterministic-surface-fix', status: 'success', message: `交付前确定性清洗：跨章表格去重 ${stage5TableDup.removedCount} 行、断行残片合并 ${stage5ResidueCount} 处、装饰层厚度修复 ${stage5FinishFixCount} 处、劳动力峰值统一 ${stage5LaborFixCount} 处、元话语声明清洗 ${stage5MetaFixCount} 处、公式形态清洗 ${stage5FormulaFixCount} 处、自伤句式改写 ${stage5SelfFixCount} 处、空响应句改写 ${stage5EmptyRespCount} 处、图集引用清洗 ${stage5AtlasRefCount} 处、叠词收敛` }, { subtitle: '交付前确定性清洗' }));
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'deterministic-surface-fix', status: 'success', message: `交付前确定性清洗：跨章表格去重 ${stage5TableDup.removedCount} 行、断行残片合并 ${stage5ResidueCount} 处、装饰层厚度修复 ${stage5FinishFixCount} 处、劳动力峰值统一 ${stage5LaborFixCount} 处、段首机械重复剥离 ${stage5OpeningFixCount} 处、截断句残留收敛 ${stage5TruncatedFixCount} 处、元话语声明清洗 ${stage5MetaFixCount} 处、公式形态清洗 ${stage5FormulaFixCount} 处、自伤句式改写 ${stage5SelfFixCount} 处、空响应句改写 ${stage5EmptyRespCount} 处、图集引用清洗 ${stage5AtlasRefCount} 处、叠词收敛` }, { subtitle: '交付前确定性清洗' }));
   }
   const stage5MarkdownFix = await applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
   if (stage5MarkdownFix.fixedCount > 0) finalMarkdown = stage5MarkdownFix.markdown;
   // 跨章数值矛盾（劳动力峰值/节点工期/材料设备数量）确定性定点替换：检测定位=修复定位同源
   const stage5NumericFix = applyNumericConsistencyDeterministicFixes(finalMarkdown, { scheduleAuthority, assemblyRateAuthority, ...blueprintPlanAuthorities(blueprintData), supportAuthority });
   if (stage5NumericFix.fixedCount > 0) finalMarkdown = stage5NumericFix.markdown;
+  // B3 表格承载正文确定性兜底（丰乐镇实测「1.2 项目主要施工内容」全表格小节）：
+  // 关键小节正文全为表格时从表格行确定性生成段落叙述插入标题后（表格保留），
+  // 覆盖 majorContentGovernanceIssues 的 error blocker，全文级一次收敛
+  const stage5TableProseFix = fixTableBorneContentSections(finalMarkdown);
+  if (stage5TableProseFix.fixedCount > 0) { finalMarkdown = stage5TableProseFix.markdown; stage5TableProseFixCount = stage5TableProseFix.fixedCount; }
+  if (stage5TableProseFix.fixedCount > 0) {
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'table-borne-prose-fix', status: 'success', message: `表格承载正文段落改写兜底：${stage5TableProseFix.fixedCount} 处（${stage5TableProseFix.details.slice(0, 3).join('、')}）`, details: stage5TableProseFix.details.slice(3) }, { subtitle: '交付前确定性清洗' }));
+  }
   if (stage5ChapterFix.fixedCount > 0 || stage5MarkdownFix.fixedCount > 0 || stage5NumericFix.fixedCount > 0) {
     await recomputeFinalValidationBundle();
     const totalFixed = stage5ChapterFix.fixedCount + stage5MarkdownFix.fixedCount + stage5NumericFix.fixedCount;
@@ -1033,7 +1054,12 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     md => { const next = collapseRepeatedWords(md); return { markdown: next, fixedCount: next === md ? 0 : 1 }; },
     md => { const r = stripDuplicateTables(md); return { markdown: r.markdown, fixedCount: r.removedCount }; },
     md => { const r = fixFinishThickness(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
-    md => { const r = fixLaborPeakConflict(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    md => { const r = fixLaborPeakConflict(md, laborPeakAuthority); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    // B1/B2/B3 评审轮后兜底（与 stage5 链同源）：评审轮 patch 会再引入段首机械重复、
+    // 截断句残留与关键小节表格承载正文，一并纳入链循环收敛
+    md => { const r = fixParagraphOpeningRepeats(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    md => { const r = fixTruncatedSentenceArtifacts(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    md => { const r = fixTableBorneContentSections(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
     // F17/F18 评审轮后兜底（与 stage5 链同源）：评审轮 patch 会再引入元话语声明句与公式形态
     md => { const r = fixMetaDiscourseDeclarations(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
     md => { const r = fixFormulaResidues(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
