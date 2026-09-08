@@ -292,4 +292,12 @@ describe('isHardBannedSectionTitle（P3 异常低价 / P5 电子保函 商务条
     expect(isHardBannedSectionTitle('基坑支护与土方开挖施工方法')).toBe(false);
     expect(isHardBannedSectionTitle('劳动力配置与高峰期组织措施')).toBe(false);
   });
+
+  it('声明句截断小节硬拦截（round-27 丰乐镇实测：「我公司对该表提供的内容及相关资料均属」直透成小节名）', () => {
+    expect(isHardBannedSectionTitle('我公司对该表提供的内容及相关资料均属')).toBe(true);
+    expect(isHardBannedSectionTitle('投标人就招标文件提供的数据真实性负责')).toBe(true);
+    // 正常承诺小节（无承接声明结尾、无程序词）不误杀
+    expect(isHardBannedSectionTitle('服务承诺与售后保障')).toBe(false);
+    expect(isHardBannedSectionTitle('对业主的服务承诺')).toBe(false);
+  });
 });

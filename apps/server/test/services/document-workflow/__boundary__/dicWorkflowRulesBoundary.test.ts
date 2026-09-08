@@ -228,7 +228,7 @@ describe('loadWorkflowRules', () => {
 });
 describe('workflowRulesHash', () => {
   it('默认配置哈希锁定', () => {
-    expect(workflowRulesHash()).toEqual("bbdcd5c87c4d78e70b504794fe75c42edcaa5823");
+    expect(workflowRulesHash()).toEqual("b9a31f35259723509544f9d6f8576206b42722ba");
   });
   it('覆盖后哈希变化', () => {
     const root = '/tmp/pr2-boundary-hash-' + process.pid;
@@ -236,8 +236,8 @@ describe('workflowRulesHash', () => {
     fs.mkdirSync(path.join(root, '.customize-agent'), { recursive: true });
     fs.writeFileSync(path.join(root, '.customize-agent', 'workflow-rules.json'), '{"factGovernance":{"weakAnchorGapThreshold":21}}');
     const h = workflowRulesHash(root);
-    expect(h).toEqual("006e1eaf9585579c0fd1a39302379be28b553eca");
-    expect(h === "bbdcd5c87c4d78e70b504794fe75c42edcaa5823").toEqual(false);
+    expect(h).toEqual("7f6f47958b52a1c7f0b47b67691e36a10fe99cea");
+    expect(h === "b9a31f35259723509544f9d6f8576206b42722ba").toEqual(false);
     fs.rmSync(root, { recursive: true, force: true });
   });
   it('同配置不同 root 哈希一致', () => {

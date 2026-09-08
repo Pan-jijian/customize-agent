@@ -38,6 +38,14 @@ const MAJOR_CONTENT_WRITE_RULES = [DEFAULT_WRITING_SPEC.writeRules.majorContent]
 
 const DIVISION_WRITE_RULES = [DEFAULT_WRITING_SPEC.writeRules.division];
 
+/** 劳动力配置章：工种构成/分阶段投入必须锚点口径（合计=峰值唯一约束，丰乐镇实测 5.1/5.4 三套矛盾口径根因） */
+const LABOR_CHAPTER_RE = /劳动力|工种/u;
+const LABOR_WRITE_RULES = [DEFAULT_WRITING_SPEC.writeRules.labor];
+
+/** 物资材料章：材料型号规格是清单事实数据，必须锚点口径（丰乐镇实测材料表 LLM 编造规格根因） */
+const MATERIAL_CHAPTER_RE = /主要材料|材料资源|物资/u;
+const MATERIAL_WRITE_RULES = [DEFAULT_WRITING_SPEC.writeRules.material];
+
 /** 小节锚定写法规则统一入口：按标题查表，返回应注入的专项规则行（无命中返回空数组） */
 export function sectionAnchoredRules(sectionTitle: string): string[] {
   const rules: string[] = [];
@@ -54,13 +62,18 @@ export function sectionAnchoredRules(sectionTitle: string): string[] {
 export function chapterAnchoredRules(chapterTitle: string, sections: string[]): string[] {
   const seen = new Set<string>();
   const rules: string[] = [];
-  for (const candidate of [chapterTitle, ...(sections || [])]) {
-    for (const rule of sectionAnchoredRules(candidate)) {
-      if (seen.has(rule)) continue;
-      seen.add(rule);
-      rules.push(rule);
-    }
+  const candidates = [chapterTitle, ...(sections || [])];
+  const pushUnique = (rule: string) => {
+    if (!rule || seen.has(rule)) return;
+    seen.add(rule);
+    rules.push(rule);
+  };
+  for (const candidate of candidates) {
+    for (const rule of sectionAnchoredRules(candidate)) pushUnique(rule);
   }
+  // 章级整体判别（章节标题+小节清单任一命中即注入）：
+  if (candidates.some(candidate => LABOR_CHAPTER_RE.test(candidate))) LABOR_WRITE_RULES.forEach(pushUnique);
+  if (candidates.some(candidate => MATERIAL_CHAPTER_RE.test(candidate))) MATERIAL_WRITE_RULES.forEach(pushUnique);
   return rules;
 }
 

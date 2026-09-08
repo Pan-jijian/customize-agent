@@ -1236,10 +1236,16 @@ describe('J4 表格行豁免', () => {
 });
 
 describe('J5 村名/分部语境豁免', () => {
-  it.each(['村', '郢', '组', '庄', '岗', '塘', '圩', '集', '坝', '区', '段', '栋', '楼', '池'])('J5 名称前 12 字含“%s”豁免', (hint) => {
+  it.each(['郢', '庄', '岗', '塘', '圩', '坝', '池', '井'])('J5 名称前 12 字含“%s”豁免（D2 收紧词表）', (hint) => {
     const md = `马老${hint}分项级配碎石18949.52m³。`;
     const result = fixQuantityAuthorityConflicts(md, [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
     expect(result.markdown).toBe(md);
+  });
+  it.each(['村', '组', '集', '区', '段', '栋', '楼'])('J5 收紧剔除词“%s”12 字内 → 不再豁免 → 替换（D2 反漂移）', (hint) => {
+    const md = `马老${hint}分项级配碎石18949.52m³。`;
+    const result = fixQuantityAuthorityConflicts(md, [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
+    expect(result.markdown).toBe(`马老${hint}分项级配碎石20931.02m³。`);
+    expect(result.fixedCount).toBe(1);
   });
   it('J5 段落级村名豁免（村名距条目名超 12 字）', () => {
     const md = '本段落涉及殷郢组等多个自然村。本分项工程量为：级配碎石18949.52m³。';
@@ -1287,10 +1293,10 @@ describe('J7 24 字窗口截断', () => {
 });
 
 describe('J8 阈值与跳过', () => {
-  it('J8 差异 ≤2% 四舍五入口径差不动', () => {
+  it('J8 D2 零豁免：差异 0.87% 四舍五入口径差替换', () => {
     const result = fixQuantityAuthorityConflicts('级配碎石20750m³。', [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
-    expect(result.markdown).toBe('级配碎石20750m³。');
-    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe('级配碎石20931.02m³。');
+    expect(result.fixedCount).toBe(1);
   });
   it('J8 与权威相等跳过', () => {
     const result = fixQuantityAuthorityConflicts('级配碎石20931.02m³。', [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
@@ -1440,10 +1446,10 @@ describe('K1 第1步 劳动力峰值（fixLaborPeakConflicts）', () => {
     expect(result.markdown).toBe('施工高峰期总人数186人。');
     expect(result.fixedCount).toBe(1);
   });
-  it('K1 差异 ≤30% 不动', () => {
+  it('K1 D2 零豁免：差异 19%（150 vs 186）替换', () => {
     const result = applyNumericConsistencyDeterministicFixes('施工高峰期总人数150人。', { laborPeakAuthority: 186 });
-    expect(result.markdown).toBe('施工高峰期总人数150人。');
-    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe('施工高峰期总人数186人。');
+    expect(result.fixedCount).toBe(1);
   });
   it('K1 偏低方向（62 vs 186）同样替换', () => {
     const result = applyNumericConsistencyDeterministicFixes('高峰，投入62人。', { laborPeakAuthority: 186 });

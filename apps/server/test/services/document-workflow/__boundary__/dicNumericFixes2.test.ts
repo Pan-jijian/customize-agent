@@ -19,10 +19,10 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
       expect(result.details[0]).toContain('100人→200人');
     });
 
-    it('J2 差异 ≤30% 不替换（160 vs 200 = 20%）', () => {
+    it('J2 D2 零豁免：差异 20%（160 vs 200）替换', () => {
       const result = fixes('高峰期投入总人数160人。', { laborPeakAuthority: 200 });
-      expect(result.markdown).toBe('高峰期投入总人数160人。');
-      expect(result.fixedCount).toBe(0);
+      expect(result.markdown).toBe('高峰期投入总人数200人。');
+      expect(result.fixedCount).toBe(1);
     });
 
     it('J3 阶段限定峰值不参与总口径替换（主体结构阶段）', () => {
@@ -203,11 +203,11 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
       expect(result.details[0]).toContain('以工程量清单汇总值为准');
     });
 
-    it('J23 差异 ≤2% 视为四舍五入口径差不动', () => {
+    it('J23 D2 零豁免：差异 0.27% 四舍五入口径差同样替换', () => {
       const md = '级配碎石铺设18949.52m²。';
       const result = fixes(md, { quantityAuthorities: [{ name: '级配碎石', value: 19000, unit: 'm²' }] });
-      expect(result.markdown).toBe(md);
-      expect(result.fixedCount).toBe(0);
+      expect(result.markdown).toBe('级配碎石铺设19000m²。');
+      expect(result.fixedCount).toBe(1);
     });
 
     it('J24 名称前 12 字内含村名特征词 → 分村分表合法量不归一', () => {

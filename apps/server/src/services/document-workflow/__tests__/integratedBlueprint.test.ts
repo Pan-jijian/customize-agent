@@ -17,6 +17,7 @@ import {
   decisionMentionNegated,
   deriveEarthworkBalanceFromBoq,
   deriveLaborFromBoq,
+  deriveMaterialsPlanFromBoq,
   deriveMilestonesFromBoq,
   deriveSpecAuthoritiesFromBoq,
   extractBasisRegulations,
@@ -321,6 +322,49 @@ describe('L2 计划推导（确定性区间，不硬锁具体值）', () => {
     }
   });
 
+  it('劳动力工种构成：合计恒等于峰值（写作层工种表唯一口径，不得自设构成）', () => {
+    const labor = deriveLaborFromBoq(parseFixture(), 360);
+    expect(labor.composition.length).toBeGreaterThan(0);
+    const sum = labor.composition.reduce((acc, item) => acc + item.count, 0);
+    expect(sum).toBe(labor.peakValue);
+    for (const item of labor.composition) {
+      expect(item.count).toBeGreaterThanOrEqual(1);
+      expect(item.basis).toContain('唯一口径');
+    }
+  });
+
+  it('劳动力分阶段投入：各阶段同时在场人数 ≤ 峰值，亮化收尾阶段兜底存在', () => {
+    const labor = deriveLaborFromBoq(parseFixture(), 360);
+    expect(labor.byPhase.length).toBeGreaterThan(0);
+    for (const item of labor.byPhase) {
+      const mid = Math.round(((item.min ?? 0) + (item.max ?? item.min ?? 0)) / 2);
+      expect(mid).toBeLessThanOrEqual(labor.peakValue); // 阶段人数不得超峰值
+      expect((item.max ?? 0)).toBeLessThanOrEqual(labor.peakValue);
+    }
+    // 亮化分部量少不达劳动桶门槛时，收尾阶段按峰值 20% 兜底（阶段表不缺收尾行）
+    expect(labor.byPhase.some(item => item.phase.includes('亮化'))).toBe(true);
+  });
+
+  it('劳动力阶段封顶：推导超峰值的阶段收敛到峰值（丰乐镇景观绿化 1119 人荒谬值根因）', () => {
+    const chunks: BoqChunkRow[] = [{
+      chunkIndex: 0,
+      sectionTitle: '表格数据',
+      content: [
+        '工程名称：马老郢等 标段： 工作表：1.1 第1页 共1页',
+        '| 序号 | 项目编码 | COL3 | 项目名称 | 项目特征描述 | 计量单位 | COL7 | 工程量 | 金额 |',
+        '|  | 三 |  | 绿化工程 |',
+        '| 1 | 050102001001 |  | 绿化养护 | 1．养护等级：二级养护两年 | m2 |  | 5000000 |',
+        '第1页 共1页',
+      ].join('\n'),
+    }];
+    const boq = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
+    const labor = deriveLaborFromBoq(boq, 360);
+    const landscape = labor.byPhase.find(item => item.phase.includes('景观'));
+    expect(landscape).toBeDefined();
+    expect(landscape!.max).toBe(labor.peakValue); // 封顶后阶段上限 = 峰值
+    expect(landscape!.min).toBe(labor.peakValue);
+  });
+
   it('里程碑：分部工程量权重分配，总和 ≤ 总工期', () => {
     const milestones = deriveMilestonesFromBoq(parseFixture(), 360);
     expect(milestones.length).toBeGreaterThan(0);
@@ -464,6 +508,44 @@ describe('回退路径（任何失败不阻断生成）', () => {
   it('fallbackWorkPackagesFromExisting：无有效输入不 throw，返回数组', () => {
     const packages = fallbackWorkPackagesFromExisting('', []);
     expect(Array.isArray(packages)).toBe(true);
+  });
+});
+
+describe('物资计划规格提取（材料型号规格是清单事实数据，丰乐镇材料表编造根因）', () => {
+  it('清单条目明确的规格参数确定性提取（强度等级/管径/功率/厚度），无规格条目不编造', () => {
+    const chunks: BoqChunkRow[] = [{
+      chunkIndex: 0,
+      sectionTitle: '表格数据',
+      content: [
+        '工程名称：马老郢等 标段： 工作表：1.1 第1页 共1页',
+        '| 序号 | 项目编码 | COL3 | 项目名称 | 项目特征描述 | 计量单位 | COL7 | 工程量 | 金额 |',
+        '| 1 | 040801001001 |  | 混凝土管道DN200 | 1．规格：DN200 2．垫层：C20商品混凝土定型基础 | m |  | 50 |',
+        '| 2 | 040202001001 |  | 级配碎石垫层 | 1．厚度：10cm | m2 |  | 120 |',
+        '| 3 | 040805001001 |  | LED路灯 | 1．功率：60W 2．灯杆高度：6m | 套 |  | 83 |',
+        '| 4 | 011201001001 |  | 仿木护栏 | 1．预制混凝土仿木护栏 | m |  | 105 |',
+        '第1页 共1页',
+      ].join('\n'),
+    }];
+    const boq = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
+    const plan = deriveMaterialsPlanFromBoq(boq);
+    const pipe = plan.find(item => item.name.includes('DN200'));
+    expect(pipe?.spec).toContain('DN200');
+    expect(pipe?.spec).toContain('C20');
+    const gravel = plan.find(item => item.name.includes('级配碎石'));
+    expect(gravel?.spec).toContain('10cm'); // 厚度：10cm
+    const light = plan.find(item => item.name.includes('LED路灯'));
+    expect(light?.spec).toContain('60W');
+    const rail = plan.find(item => item.name.includes('仿木护栏'));
+    expect(rail?.spec).toBeUndefined(); // 无规格条目不得编造
+  });
+
+  it('参数桶物资计划行携带规格：名称（规格）数量单位', () => {
+    const boq = parseFixture();
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' });
+    const text = renderBlueprintDataText(data);
+    const materialLine = text.split('\n').find(line => line.includes('物资计划'))!;
+    expect(materialLine).toBeDefined();
+    expect(materialLine).toContain('混凝土管道DN200（C20 DN200）');
   });
 });
 
@@ -643,13 +725,33 @@ describe('蓝图权威分部结构 → 规划小节校准（round-27 第二章�
     expect(result.report?.removed).toEqual(expect.arrayContaining(['其他', '土石方工程', '砌筑工程', '门窗工程']));
   });
 
-  it('LLM 规划与清单名重合度 < 2 时不校准（保留原规划）', () => {
+  it('规划小节与蓝图分部名重叠少时仍无条件接管（round-27 实测修正：原重合度 <2 门槛静默放行）', () => {
     const { outline } = buildFuleshanLikeOutline();
     const blueprintChapter = outline.chapters[0]!;
     const llmSections = ['总体施工部署与流程安排', '关键工序技术控制要点', '质量安全与成品保护措施'];
     const result = alignChapterSectionsToBlueprint({ title: '主要施工方法', sections: llmSections }, blueprintChapter);
-    expect(result.report).toBeUndefined();
-    expect(result.sections).toEqual(llmSections);
+    expect(result.report?.replacedWithBlueprint).toBe(true);
+    expect(result.sections[0]).toBe('总体施工部署与流程安排');
+    expect(result.sections).toContain('道路工程');
+    expect(result.sections).toContain('公厕');
+    expect(result.report?.removed).toEqual(expect.arrayContaining(['关键工序技术控制要点', '质量安全与成品保护措施']));
+  });
+
+  it('丰乐镇实测回归：截断声明句与宽泛工艺小节被移除，蓝图分部接管（round-27 实测缺陷）', () => {
+    const { outline } = buildFuleshanLikeOutline();
+    const blueprintChapter = outline.chapters[0]!;
+    const llmSections = ['主要分部分项工程施工方案', '周边环境、管线与既有建构筑物保护', '我公司对该表提供的内容及相关资料均属', '市政工程专项施工工艺', '道路工程专项施工方法', '绿化种植与养护施工方法'];
+    const result = alignChapterSectionsToBlueprint({ title: '主要施工方法', sections: llmSections }, blueprintChapter);
+    expect(result.report?.replacedWithBlueprint).toBe(true);
+    // 总述小节保留在前，其余全部为蓝图权威分部
+    expect(result.sections[0]).toBe('主要分部分项工程施工方案');
+    expect(result.sections.slice(1)).toEqual(expect.arrayContaining(['道路工程', '排水工程', '公厕', '环境整治工程']));
+    // 截断声明句、串章小节、宽泛工艺小节、蓝图变体名一律移除
+    expect(result.sections).not.toContain('我公司对该表提供的内容及相关资料均属');
+    expect(result.sections).not.toContain('周边环境、管线与既有建构筑物保护');
+    expect(result.sections).not.toContain('市政工程专项施工工艺');
+    expect(result.sections).not.toContain('道路工程专项施工方法');
+    expect(result.sections).not.toContain('绿化种植与养护施工方法');
   });
 
   it('非施工方法类章节零变化；蓝图无该章时零变化', () => {
@@ -1020,20 +1122,31 @@ describe('P3.6 源头修复（A1 工期锚点 / A2 村数正则 / A3 序号前�
     expect(blueprint.data.project.name).toBe('2026年度丰乐镇20个美丽宜居自然村建设项目');
   });
 
-  it('A4 参数桶渲染不泄漏区间端点：工种配置渲染单值人数、机械台数只渲染单值', () => {
+  it('A4 参数桶渲染不泄漏区间端点：工种构成渲染单值人数、机械台数只渲染单值', () => {
     const boq = parseFixture();
     const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' });
     const text = renderBlueprintDataText(data);
-    const tradeLine = text.split('\n').find(line => line.includes('工种配置'))!;
+    const tradeLine = text.split('\n').find(line => line.includes('工种构成'))!;
     expect(tradeLine).toBeDefined();
-    // D 组值化（丰乐镇第 3 轮）：工种配置行归一化单值人数（区间中值），不再只渲染名单
+    // 丰乐镇第 4 轮：工种构成行 = composition 归一化单值人数（合计恒等于峰值），不再只渲染名单
     expect(/[^\d]\d+\s*人/u.test(tradeLine.split('：')[1]!)).toBe(true); // 工种行含单值人数
     expect(/\d+\s*~\s*\d+\s*人/u.test(tradeLine)).toBe(false); // 人数不含区间端点
+    expect(tradeLine).toContain(`合计=${data.resources.labor.peakValue} 人`);
     expect(tradeLine).not.toContain('不另设工种数值');
     const machineLine = text.split('\n').find(line => line.includes('主要机械'))!;
     expect(machineLine).toBeDefined();
     expect(/\d+\s*~\s*\d+\s*台/u.test(machineLine)).toBe(false); // 台数不含区间端点
     expect(/\d+\s*台/u.test(machineLine)).toBe(true); // 台数为单值口径
+  });
+
+  it('A4b 章锚点卡：劳动力章注入工种构成锚点，物资章注入主要材料锚点（含规格）', () => {
+    const boq = parseFixture();
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' });
+    const outline = buildBlueprintOutline({ chapterTitles: ['劳动力、机械设备及主要材料资源配置计划'], boq, docType: '单位工程施工组织设计' });
+    const card = renderBlueprintChapterAuthorityCard(outline.chapters[0]!, data);
+    expect(card).toContain('工种构成（合计=');
+    expect(card).toContain('主要材料（');
+    expect(card).toContain('DN200');
   });
 
   it('A5 决策锁数据条目完备性硬检查：删掉 contract_days 锁条目 → 内部一致性校验失败（空壳锁根治）', () => {
@@ -1051,5 +1164,67 @@ describe('P3.6 源头修复（A1 工期锚点 / A2 村数正则 / A3 序号前�
     const consistency = report.checks.find(check => check.name === '4. 内部一致性校验');
     expect(consistency?.passed).toBe(false);
     expect(consistency?.message).toContain('contract_days');
+  });
+});
+
+describe('blueprintCitationConsistencyIssues：蓝图引用一致性（D2 零漂移豁免同源 + 误报豁免）', () => {
+  function citationData() {
+    const boq = parseFixture();
+    const data = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：90日历天 质量标准：合格', projectName: '丰乐镇建设项目' }).data;
+    data.contract.totalDays = 90;
+    data.resources.labor.peakValue = 176;
+    data.redLineFacts = [{ key: '自然村数量', value: '20个', source: '清单' }];
+    data.quantities = {
+      '塑料管铺设': { value: 8205.53, unit: 'm' },
+      '挖一般土方': { value: 4187.38, unit: 'm³' },
+      '回填方': { value: 4270, unit: 'm³' },
+      '级配碎石': { value: 20931.02, unit: 'm²' },
+      '水泥混凝土': { value: 20872.82, unit: 'm²' },
+      '人行道板安砌': { value: 264.8, unit: 'm²' },
+      '塑料检查井': { value: 555, unit: '座' },
+      '立柱': { value: 2400, unit: 'mm' },
+    };
+    return data;
+  }
+  it('劳动力峰值不一致（199 vs 176，11.6% 微漂移）→ error', () => {
+    const issues = blueprintCitationConsistencyIssues('施工高峰期投入199人。', citationData());
+    expect(issues.some(item => item.message.includes('劳动力峰值'))).toBe(true);
+  });
+  it('劳动力峰值一致 → 零报告', () => {
+    expect(blueprintCitationConsistencyIssues('施工高峰期投入176人。', citationData())).toEqual([]);
+  });
+  it('分区数学豁免：「每个片区包含4个自然村」不报村数冲突', () => {
+    const issues = blueprintCitationConsistencyIssues('项目部将20个自然村划分为5个施工片区，每个片区包含4个自然村。', citationData());
+    expect(issues.some(item => item.message.includes('自然村数量'))).toBe(false);
+  });
+  it('真实村数冲突仍报：本项目涉及9个自然村', () => {
+    const issues = blueprintCitationConsistencyIssues('本项目涉及9个自然村。', citationData());
+    expect(issues.some(item => item.message.includes('自然村数量'))).toBe(true);
+  });
+  it('阶段细分豁免：「总工期按施工准备与清杂拆除7天」不报工期冲突', () => {
+    const issues = blueprintCitationConsistencyIssues('总工期按施工准备与清杂拆除7天、管网施工30天、道路面层施工20天。', citationData());
+    expect(issues.some(item => item.message.includes('工期'))).toBe(false);
+  });
+  it('真实工期冲突仍报：总工期为7日历天', () => {
+    const issues = blueprintCitationConsistencyIssues('总工期为7日历天。', citationData());
+    expect(issues.some(item => item.message.includes('工期'))).toBe(true);
+  });
+  it('分部量句句级豁免：全句多数条目大幅差异 → 不报工程量冲突', () => {
+    const markdown = '景观工程主要工程量包括挖一般土方146.93m³、级配碎石480.5m²、水泥混凝土572.3m²、人行道板安砌114.8m²。';
+    expect(blueprintCitationConsistencyIssues(markdown, citationData())).toEqual([]);
+  });
+  it('村名/分部语境豁免：化粪池语境下塑料管铺设7.8m 不报（与修复器同源）', () => {
+    const markdown = '公厕室外管网工程包括整体化粪池2座、砌筑检查井2座、塑料管铺设7.8m。';
+    expect(blueprintCitationConsistencyIssues(markdown, citationData())).toEqual([]);
+  });
+  it('规格句豁免：围墙立柱间距不大于1200mm 不报工程量冲突', () => {
+    expect(blueprintCitationConsistencyIssues('围墙立柱间距不大于1200mm。', citationData())).toEqual([]);
+  });
+  it('单位右边界：公厕塑料管铺设直径不小于10mm 的 m 子串不误匹配', () => {
+    expect(blueprintCitationConsistencyIssues('公厕塑料管铺设直径不小于10mm。', citationData())).toEqual([]);
+  });
+  it('真实工程量冲突仍报：孤立句塑料管铺设7.8m', () => {
+    const issues = blueprintCitationConsistencyIssues('本分项工程量为塑料管铺设7.8m。', citationData());
+    expect(issues.some(item => item.message.includes('工程量'))).toBe(true);
   });
 });

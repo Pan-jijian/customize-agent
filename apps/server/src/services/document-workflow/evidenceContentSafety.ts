@@ -139,6 +139,11 @@ function normalizeSectionTitleKey(title: string) {
   return title.replace(/[\s\p{P}\p{S}]+/gu, '').toLowerCase();
 }
 
+/** 声明句截断小节（真实生成回归）：招标文件表格声明句被 LLM 截断成小节名
+ * （「我公司对该表提供的内容及相关资料均属」等），主语+承担声明形态，非施工技术内容；
+ * 「投标承诺函」「对业主的承诺」等正常承诺小节不含承接声明结尾，零误杀 */
+const DECLARATION_FRAGMENT_SECTION_RE = /^(?:我公司|本公司|我方|投标人|供应商|承包人)(?:就|对)[^，。；]{0,22}(?:均属|属实|真实有效|承担|负责|无异议|为准)$/u;
+
 /**
  * 小节标题硬黑名单判定（确定性，黑名单语义——该词面组合本身禁出现，不依赖语义模型；
  * 真实生成回归：语义模型不可用（恒零承接）或章主题相似度干扰时语义判定放行纪律小节，
@@ -152,6 +157,7 @@ export function isHardBannedSectionTitle(title: string): boolean {
   const normalized = title.trim().replace(/\s+/gu, '');
   if (!normalized) return true;
   if (isTenderClauseFragmentTitle(normalized)) return true;
+  if (DECLARATION_FRAGMENT_SECTION_RE.test(normalized)) return true;
   const key = normalizeSectionTitleKey(normalized);
   if (BID_PROCEDURE_SEMANTIC_PROTOTYPES.some(prototype => normalizeSectionTitleKey(prototype) === key)) return true;
   // 农民工工资保证金/工资保证金是工资保障章合法施工内容，非商务条款：程序词检测前先剥离，

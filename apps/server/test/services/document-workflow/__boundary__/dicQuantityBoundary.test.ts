@@ -12,7 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import {
-  LIST_SEPARATORS, NUMERIC_FORMATS, SPEC_WORDS, UNIT_GROUPS, VILLAGE_WORDS,
+  LIST_SEPARATORS, NUMERIC_FORMATS, SPEC_WORDS, UNIT_GROUPS, VILLAGE_WORDS, VILLAGE_WORDS_REMOVED,
   caseName, contextTemplates, mulberry32, parenStates, product, seededSamples,
 } from './boundaryKit';
 
@@ -54,11 +54,11 @@ describe('G3-A 数值格式×单位全组合（替换正确性）', () => {
   });
 });
 
-describe('G3-B 差异率谱系（2% 阈值边界）', () => {
+describe('G3-B 差异率谱系（D2 零漂移豁免）', () => {
   const cases: Array<{ pct: number; expectFix: boolean }> = [
     { pct: 0, expectFix: false },
-    { pct: 1, expectFix: false },
-    { pct: 2, expectFix: false },
+    { pct: 1, expectFix: true },
+    { pct: 2, expectFix: true },
     { pct: 2.1, expectFix: true },
     { pct: 3, expectFix: true },
     { pct: 10, expectFix: true },
@@ -146,7 +146,9 @@ describe('G3-C4 村名语境豁免（窗口 12 字 × 段落级）', () => {
     return {
       label: caseName('G3-C4 窗口村名豁免', { word, pos }),
       markdown: `马老${word}村${filler}${BASE.name}40${BASE.unit}。`,
-      expectExempt: pos !== '超出窗口13字' || PARA_WORDS.includes(word),
+      // D2 收紧：窗口豁免词（池/井）无段落级兜底——「12字边界」filler 11 字+「村」1 字
+      // 使词距名称 13 字（窗口外），仅段落词（郢庄岗塘圩坝）靠段落级豁免继续豁免
+      expectExempt: pos === '紧邻名称' || PARA_WORDS.includes(word),
     };
   }));
   it.each(windowRows)('$label', ({ markdown, expectExempt }) => {
@@ -154,11 +156,21 @@ describe('G3-C4 村名语境豁免（窗口 12 字 × 段落级）', () => {
     if (expectExempt) expect(result.fixedCount).toBe(0);
     else assertSingleFix(markdown, '40', BASE, result);
   });
+  const removedRows = (VILLAGE_WORDS_REMOVED as readonly string[]).map(word => ({
+    label: caseName('G3-C4 收紧剔除词窗口内修复', { word }),
+    markdown: `马老${word}村${BASE.name}40${BASE.unit}。`,
+  }));
+  it.each(removedRows)('$label', ({ markdown }) => {
+    const result = fixQuantityAuthorityConflicts(markdown, [BASE]);
+    assertSingleFix(markdown, '40', BASE, result);
+  });
   const paraRows = VILLAGE_WORDS.map(word => ({
     label: caseName('G3-C4 段落村名豁免', { word }),
     // 村名列表只含被测词（避免固定「张大郢」干扰段落级判定）
     markdown: `殷${word}组、五星等自然村组，主要作业内容为整体化粪池安装、${BASE.name}铺设及配套土方开挖回填。本分项工程量为：砌筑检查井2座；${BASE.name}40${BASE.unit}；回填方42.12m³。`,
-    expectExempt: ['郢', '庄', '岗', '塘', '圩', '坝'].includes(word),
+    // 池/井行：正文固定语境「整体化粪池安装」「砌筑检查井2座」触发窗口豁免（12 字内）
+    // ——该形态无法探测段落级词表对池/井的覆盖（窗口豁免已先行命中），期望豁免
+    expectExempt: ['郢', '庄', '岗', '塘', '圩', '坝', '池', '井'].includes(word),
   }));
   it.each(paraRows)('$label', ({ markdown, expectExempt }) => {
     const result = fixQuantityAuthorityConflicts(markdown, [BASE]);

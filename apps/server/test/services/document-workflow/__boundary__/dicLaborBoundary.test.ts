@@ -535,3 +535,42 @@ describe('N12 历史缺陷回归形态', () => {
     expect(issues[0].message).toContain('110');
   });
 });
+
+describe('N10-B fixLaborPeakConflict：蓝图权威零漂移豁免（D2）', () => {
+  it('N10-B1 微漂移 11.6%（199 vs 176）在旧 30% 豁免内也确定性替换', () => {
+    const result = fixLaborPeakConflict('施工高峰期投入199人。', 176);
+    expect(result.fixedCount).toBeGreaterThan(0);
+    expect(result.markdown).not.toContain('199');
+    expect(result.markdown).toContain('176');
+  });
+  it('N10-B2 峰值语境句内连带值全修：「峰值统一按199人控制，各阶段同时在场人数均不得超过199人」', () => {
+    const result = fixLaborPeakConflict('全项目劳动力峰值统一按199人控制，各阶段同时在场人数均不得超过199人。', 176);
+    expect(result.markdown).not.toContain('199');
+    expect(result.markdown).toContain('176');
+  });
+  it('N10-B3 阶段语境值 > 权威时收口（阶段人数不得超过总峰值）', () => {
+    const result = fixLaborPeakConflict('景观与绿化阶段投入199人，其中绿化工102人。', 176);
+    expect(result.markdown).toContain('投入176人');
+    expect(result.markdown).toContain('绿化工102人'); // 工种口径不动
+  });
+  it('N10-B4 阶段语境值 < 权威为合法阶段明细，不动', () => {
+    const result = fixLaborPeakConflict('施工准备阶段投入22人。', 176);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toContain('22人');
+  });
+  it('N10-B5 表格峰值行（行内含峰值语境词）数值修复', () => {
+    const markdown = '| 主体施工阶段 | 开工后第16日至第75日 | 199人 | 12个班组 | 达到劳动力峰值，各专业班组全部进场 |';
+    const result = fixLaborPeakConflict(markdown, 176);
+    expect(result.markdown).toContain('176人');
+    expect(result.markdown).not.toContain('199人');
+  });
+  it('N10-B6 管理口径不动、峰值口径修复同句并存', () => {
+    const result = fixLaborPeakConflict('管理人员18人，施工高峰期199人。', 176);
+    expect(result.markdown).toContain('管理人员18人');
+    expect(result.markdown).toContain('高峰期176人');
+  });
+  it('N10-B7 与权威同值不动', () => {
+    const result = fixLaborPeakConflict('施工高峰期176人。', 176);
+    expect(result.fixedCount).toBe(0);
+  });
+});

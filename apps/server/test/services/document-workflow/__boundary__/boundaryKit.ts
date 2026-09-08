@@ -62,8 +62,13 @@ export function parenStates(name: string): string[] {
 /** 否定/豁免引导词（检测器普遍需要跳过否定声明句） */
 export const NEGATION_PREFIXES = ['无', '未', '不', '非', '免', '禁止', '不得', '无需'] as const;
 
-/** 村名/分村语境特征词（分村分表量豁免） */
-export const VILLAGE_WORDS = ['郢', '组', '庄', '岗', '塘', '圩', '集', '坝', '村', '段', '栋', '楼', '池'] as const;
+/** 村名/分村语境特征词（分村分表量豁免）——D2 收紧后窗口词表：
+ * 剔除「组/集/村/段/栋/楼/分/区」宽泛单字（「本分项工程量为…」的「分」误伤总口径真实冲突），
+ * 新增「井」覆盖公厕分部语境（砌筑检查井2座、塑料管铺设7.8m 分村分表合法量） */
+export const VILLAGE_WORDS = ['郢', '庄', '岗', '塘', '圩', '坝', '池', '井'] as const;
+
+/** D2 收紧剔除的宽泛单字（12 字窗口内不再豁免，反向矩阵验证确定性修复） */
+export const VILLAGE_WORDS_REMOVED = ['组', '集', '村', '段', '栋', '楼', '分', '区'] as const;
 
 /** 规格限定词（分规格量豁免） */
 export const SPEC_WORDS = ['直径450', '直径630', 'DN200', 'DN110', 'Φ16', 'φ10'] as const;

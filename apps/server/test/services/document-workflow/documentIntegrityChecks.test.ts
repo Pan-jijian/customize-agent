@@ -1841,10 +1841,11 @@ describe('fixQuantityAuthorityConflicts（G3 清单工程量权威定点校正�
     expect(result.fixedCount).toBe(0);
   });
 
-  it('差异不超过2%视为四舍五入口径差不动', () => {
+  it('D2 零漂移豁免：微漂移（4190.5 vs 4187.38，差 0.07%）同样定点替换为清单汇总值', () => {
     const markdown = '挖一般土方4190.5m³。';
     const result = fixQuantityAuthorityConflicts(markdown, authorities);
-    expect(result.fixedCount).toBe(0);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('挖一般土方4187.38m³');
   });
 
   it('大幅漂移同样校正（拆除路面 633 vs 权威 2134）', () => {
@@ -2073,5 +2074,23 @@ describe('markdownTableQualityIssues 规格型号列「—」豁免（丰乐镇�
   it('规格型号列「若干」仍判占位符（只有破折号豁免，模糊词不豁免）', () => {
     const issues = markdownTableQualityIssues(table('若干'));
     expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
+  });
+});
+
+describe('applyNumericConsistencyDeterministicFixes（D2 劳动力峰值零漂移豁免）', () => {
+  it('微漂移 199 vs 176（11.6%）确定性替换（30% 豁免移除回归）', () => {
+    const result = applyNumericConsistencyDeterministicFixes('施工高峰期投入199人。', { laborPeakAuthority: 176 });
+    expect(result.fixedCount).toBeGreaterThan(0);
+    expect(result.markdown).toContain('176人');
+    expect(result.markdown).not.toContain('199人');
+  });
+  it('微漂移 180 vs 176（2.2%）同样替换', () => {
+    const result = applyNumericConsistencyDeterministicFixes('高峰期约180人。', { laborPeakAuthority: 176 });
+    expect(result.markdown).toContain('176人');
+  });
+  it('阶段限定明细（22人）不与权威互比，保留；峰值口径仍修复', () => {
+    const result = applyNumericConsistencyDeterministicFixes('施工准备阶段投入22人，高峰期199人。', { laborPeakAuthority: 176 });
+    expect(result.markdown).toContain('22人');
+    expect(result.markdown).not.toContain('199人');
   });
 });

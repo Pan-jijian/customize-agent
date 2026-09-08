@@ -19,7 +19,7 @@ import {
   fixQuantityAuthorityConflicts,
   tablePeakLabor,
 } from '@/services/document-workflow/documentIntegrityChecks';
-import { NUMERIC_FORMATS, VILLAGE_WORDS } from './boundaryKit';
+import { NUMERIC_FORMATS, VILLAGE_WORDS, VILLAGE_WORDS_REMOVED } from './boundaryKit';
 
 // 探测锁定的行为表：各格式在 4 个入口的真实解析结果
 // area: '地上f㎡地下f㎡单体建筑面积f㎡' 报数（|2v-v| > max(1, v*0.001)）
@@ -33,7 +33,7 @@ const FORMAT_BEHAVIOR: Array<{ f: string; area: number; table: number | 'undef';
   { f: '0.5', area: 0, table: 'undef', labor: 1, qty: 1 },
   { f: '0.05', area: 0, table: 'undef', labor: 1, qty: 1 },
   { f: '10', area: 1, table: 10, labor: 1, qty: 1 },
-  { f: '99', area: 1, table: 99, labor: 1, qty: 0 },
+  { f: '99', area: 1, table: 99, labor: 1, qty: 1 }, // D2 零漂移豁免：99 vs 100 差 1% 也修复
   { f: '999', area: 1, table: 999, labor: 1, qty: 1 },
   { f: '1000', area: 1, table: 1000, labor: 1, qty: 1 },
   { f: '1,000', area: 1, table: 1000, labor: 1, qty: 1 },
@@ -166,8 +166,8 @@ describe('M6 面积算术：单位写法互认矩阵', () => {
 
 // 段落级豁免词表（探测锁定）：段落含这些村词 → 即使名称前 12 字窗口无村词也豁免
 const PARAGRAPH_EXEMPT_WORDS = ['郢', '庄', '岗', '塘', '圩', '坝'] as const;
-// 仅窗口豁免词表：窗口内有村词豁免、窗口外修复
-const WINDOW_ONLY_WORDS = ['组', '集', '村', '段', '栋', '楼', '池'] as const;
+// 仅窗口豁免词表（D2 收紧后）：窗口内有村词豁免、窗口外修复（池/井非段落级词）
+const WINDOW_ONLY_WORDS = ['池', '井'] as const;
 
 describe('M7 清单量校正：村名词豁免窗口', () => {
   it.each(VILLAGE_WORDS)('M7 名称前 12 字内含「%s」→ 分村量豁免 → 50 不动', (word) => {
@@ -177,6 +177,11 @@ describe('M7 清单量校正：村名词豁免窗口', () => {
   });
   it.each(WINDOW_ONLY_WORDS)('M7 仅窗口豁免词「%s」距名称超 12 字 → 不豁免 → 修复 100', (word) => {
     const result = fixQuantityAuthorityConflicts(`马老${word}村，主要工程量包括其他条目若干。C.1项铺装 50m。`, [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('C.1项铺装 100m');
+  });
+  it.each(VILLAGE_WORDS_REMOVED)('M7 收紧剔除词「%s」12 字窗口内 → 不再豁免 → 修复 100（D2 反漂移）', (word) => {
+    const result = fixQuantityAuthorityConflicts(`马老${word}区C.1项铺装 50m。`, [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('C.1项铺装 100m');
   });

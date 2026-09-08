@@ -226,11 +226,12 @@ describe('Q8 渲染层公式值化与 byTrade 单值', () => {
     expect(text).toContain('- 劳动力峰值：155 人（造价锚定口径唯一峰值，各章必须引用该值，不得自设其他峰值）');
   });
 
-  it('工种配置行归一化单值（区间中值），不再输出「不另设工种数值」表述', () => {
-    expect(text).toContain('瓦工 50 人');
-    expect(text).toContain('管道工 5 人');
-    expect(text).toContain('绿化工 7 人');
-    expect(text).toContain('电工 1 人');
+  it('工种构成行归一化（合计=峰值 155，写作层唯一口径；区间中值之和与峰值脱节是丰乐镇三套矛盾口径根因）', () => {
+    expect(text).toContain('工种构成（合计=155 人');
+    expect(text).toContain('瓦工 123 人');
+    expect(text).toContain('管道工 12 人');
+    expect(text).toContain('绿化工 17 人');
+    expect(text).toContain('电工 3 人');
     expect(text).not.toContain('不另设工种数值');
   });
 });

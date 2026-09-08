@@ -80,6 +80,9 @@ export interface BlueprintLabor {
   peakBasis: string;
   byPhase: Array<{ phase: string; min?: number; max?: number; basis: string }>;
   byTrade: Array<{ trade: string; min?: number; max?: number; basis: string }>;
+  /** 工种构成唯一口径：按工种工程量区间中值比例收敛，合计恒等于 peakValue
+   * （写作层工种表唯一数据源；区间中值之和与峰值自相矛盾是丰乐镇三套矛盾口径根因） */
+  composition: Array<{ trade: string; count: number; basis: string }>;
 }
 
 export interface BlueprintEquipmentItem {
@@ -95,6 +98,8 @@ export interface BlueprintMaterialPlanItem {
   name: string;
   quantity?: number;
   unit: string;
+  /** 清单明确给出的型号/规格/参数（混凝土强度等级/管径/功率/厚度/尺寸，确定性提取；写作层必须原样引用，不得自编规格） */
+  spec?: string;
   batchDesc?: string;
   basis: string;
 }
@@ -631,17 +636,66 @@ export function deriveLaborFromBoq(boq: BillOfQuantitiesResult, totalDays: numbe
     const max = Math.max(min, Math.round((phaseWorkdaysMax / duration) * 1.6));
     byPhase.push({
       phase: group.label,
-      min,
-      max,
-      basis: `阶段条目工程量约 ${Math.round(phaseEntries.reduce((sum, entry) => sum + entry.quantity, 0))} × 经验工效区间 ÷ 阶段 ${duration} 天（不均匀系数 1.3~1.6）`,
+      // 阶段同时在场人数按峰值封顶（丰乐镇实测景观绿化阶段推导 1119 人 > 峰值 176 人荒谬值；
+      // 封顶后至少一个阶段达到峰值，与「分阶段投入最大值=峰值」的评审口径自洽）
+      min: Math.min(min, peakValue),
+      max: Math.min(max, peakValue),
+      basis: `阶段条目工程量约 ${Math.round(phaseEntries.reduce((sum, entry) => sum + entry.quantity, 0))} × 经验工效区间 ÷ 阶段 ${duration} 天（不均匀系数 1.3~1.6，同时在场人数按峰值 ${peakValue} 人封顶）`,
     });
   }
+  // 亮化与收尾阶段兜底：亮化分部条目量少时不达劳动桶门槛（安装工程 unit「项」系数 0）该阶段被跳过，
+  // 而收尾（零星收尾+撤场）是任何工程必经阶段——按峰值 20% 确定性兜底，阶段表不缺收尾行
+  if (byPhase.length > 0 && !byPhase.some(item => item.phase.includes('亮化'))) {
+    const tail = Math.max(1, Math.round(peakValue * 0.2));
+    byPhase.push({
+      phase: '亮化与收尾工程',
+      min: tail,
+      max: tail,
+      basis: `收尾阶段零星作业兜底（峰值 ${peakValue} 人的 20%），不参与工日推导`,
+    });
+  }
+  // 工种构成唯一口径：按工种区间中值比例收敛到合计=峰值（丰乐镇实测区间中值 97+72+1+1+102=273
+  // 与峰值 176 自相矛盾——写作层忠实使用后 5.1 节与 5.4 节三套矛盾口径；floor 1 + 最大余数法分配）
+  const tradeMids = byTradeResult.map(item => ({ trade: item.trade, mid: Math.max(1, Math.round(((item.min ?? 1) + (item.max ?? item.min ?? 1)) / 2)) }));
+  const tradeMidTotal = tradeMids.reduce((sum, item) => sum + item.mid, 0) || 1;
+  const quotas = tradeMids.map(item => ({ trade: item.trade, quota: (item.mid * peakValue) / tradeMidTotal }));
+  const counts = quotas.map(item => ({ trade: item.trade, count: Math.max(1, Math.floor(item.quota)) }));
+  let compositionDelta = peakValue - counts.reduce((sum, item) => sum + item.count, 0);
+  if (compositionDelta > 0) {
+    // 最大余数法：差额按配额小数部分降序逐个 +1（合计精确等于峰值）
+    const order = quotas.map((item, index) => ({ index, frac: item.quota - Math.floor(item.quota) })).sort((left, right) => right.frac - left.frac);
+    for (let k = 0; compositionDelta > 0 && k < order.length; k += 1) {
+      const slot = order[k];
+      if (!slot) continue;
+      const target = counts[slot.index];
+      if (!target) continue;
+      target.count += 1;
+      compositionDelta -= 1;
+    }
+  } else if (compositionDelta < 0) {
+    // 工种过多且峰值过小：按配额升序压减 count>1 的工种，保证合计仍等于峰值
+    const order = quotas.map((item, index) => ({ index, quota: item.quota })).sort((left, right) => left.quota - right.quota);
+    for (let k = 0; compositionDelta < 0 && k < order.length; k += 1) {
+      const slot = order[k];
+      if (!slot) continue;
+      const target = counts[slot.index];
+      if (!target || target.count <= 1) continue;
+      target.count -= 1;
+      compositionDelta += 1;
+    }
+  }
+  const composition: BlueprintLabor['composition'] = counts.map(item => ({
+    trade: item.trade,
+    count: item.count,
+    basis: `工种构成唯一口径：按工种工程量区间中值比例收敛（合计恒等于峰值 ${peakValue} 人）`,
+  }));
   return {
     peak,
     peakValue,
     peakBasis,
     byPhase,
     byTrade: byTradeResult,
+    composition,
   };
 }
 
@@ -673,14 +727,21 @@ export function deriveEquipmentFromBoq(boq: BillOfQuantitiesResult): BlueprintEq
   return result;
 }
 
-/** L2：物资需用量计划 = 清单条目汇总（主要材料按名称聚合，十项评审②硬要求） */
+/** L2：物资需用量计划 = 清单条目汇总（主要材料按名称聚合，十项评审②硬要求）；
+ * 型号/规格/参数从清单条目特征原文确定性提取（丰乐镇实测材料表「级配碎石10cm厚」
+ * 「UPVC管DN110」由 LLM 编造口径——清单明确的规格是事实数据，必须由蓝图承载而非模型自编） */
 export function deriveMaterialsPlanFromBoq(boq: BillOfQuantitiesResult): BlueprintMaterialPlanItem[] {
-  const byName = new Map<string, { quantity: number; unit: string }>();
+  const byName = new Map<string, { quantity: number; unit: string; spec?: string }>();
   for (const entry of boq.entries) {
     if (!entry.name || entry.quantity <= 0) continue;
+    const spec = extractMaterialSpec(`${entry.name} ${entry.description}`);
     const existing = byName.get(entry.name);
-    if (existing) existing.quantity += entry.quantity;
-    else byName.set(entry.name, { quantity: entry.quantity, unit: entry.unit });
+    if (existing) {
+      existing.quantity += entry.quantity;
+      if (!existing.spec && spec) existing.spec = spec;
+    } else {
+      byName.set(entry.name, { quantity: entry.quantity, unit: entry.unit, spec: spec || undefined });
+    }
   }
   return [...byName.entries()]
     .sort((left, right) => right[1].quantity - left[1].quantity)
@@ -689,9 +750,32 @@ export function deriveMaterialsPlanFromBoq(boq: BillOfQuantitiesResult): Bluepri
       name,
       quantity: Math.round(item.quantity * 1000) / 1000,
       unit: item.unit,
+      spec: item.spec,
       batchDesc: '按施工段分批进场',
       basis: '清单汇总 + 进度匹配',
     }));
+}
+
+/** 材料规格特征白名单（确定性零 LLM）：只认清单语境明确的型号参数形态，
+ * 不抓长度/深度/标高类通用数值——写作层材料表必须原样引用这些规格，不得自编 */
+const MATERIAL_SPEC_PATTERNS: RegExp[] = [
+  /C\d{2,3}/u, // 混凝土/砂浆强度等级（C20/C25）
+  /DN\d{2,4}/iu, // 公称直径（DN110/DN200）
+  /Φ\d+(?:\.\d+)?/u, // 直径符号（Φ10）
+  /\d+(?:\.\d+)?\s*(?:kW|W)/iu, // 功率（60W/1.5kW）
+  /厚(?:度)?[：:]*\s*\d+(?:\.\d+)?\s*(?:mm|cm)/u, // 厚度（厚10cm/厚度：10cm）
+  /\d+\s*[×xX]\s*\d+(?:\s*[×xX]\s*\d+)?\s*(?:mm|cm)?/u, // 外形尺寸（1000×100×300）
+];
+
+function extractMaterialSpec(text: string): string {
+  const found: string[] = [];
+  for (const pattern of MATERIAL_SPEC_PATTERNS) {
+    const match = pattern.exec(text);
+    if (!match || !match[0]) continue;
+    if (found.some(item => item.includes(match[0]!) || match[0]!.includes(item))) continue;
+    found.push(match[0]);
+  }
+  return found.join(' ');
 }
 
 /** L2：里程碑按工程分部工程量权重分配总工期（prep 前导工作封顶 8%，总和 ≤ 总工期） */
@@ -1711,12 +1795,13 @@ export function renderBlueprintDataText(data: BlueprintData): string {
     lines.push(`- 劳动力峰值：${data.resources.labor.peakValue} 人（造价锚定口径唯一峰值，各章必须引用该值，不得自设其他峰值）`);
   }
   if (data.resources.labor.byPhase.length > 0) {
-    // 丰乐镇第 3 轮：byPhase 为分阶段计划表数据源，各阶段单值人数与峰值同口径（区间中值收敛）
+    // 丰乐镇第 3 轮：byPhase 为分阶段计划表数据源，各阶段单值人数与峰值同口径（区间中值收敛，数据层已按峰值封顶）
     lines.push(`- 分阶段劳动力投入（各阶段同时在场人数，分阶段计划表数据源）：${data.resources.labor.byPhase.map(item => `${item.phase} ${Math.round(((item.min ?? 0) + (item.max ?? item.min ?? 0)) / 2)} 人`).join('、')}`);
   }
-  if (data.resources.labor.byTrade.length > 0) {
-    // 丰乐镇第 3 轮：渲染归一化单值（区间中值）供工种配置表引用；仅名单曾迫使两张表全现编互斥
-    lines.push(`- 工种配置（高峰同时在场人数，与劳动力峰值同口径）：${data.resources.labor.byTrade.map(item => `${item.trade} ${Math.round(((item.min ?? 1) + (item.max ?? item.min ?? 1)) / 2)} 人`).join('、')}`);
+  if (data.resources.labor.composition.length > 0) {
+    // 丰乐镇第 4 轮：工种构成唯一口径 = composition（合计恒等于峰值）；区间中值曾被误标为
+    // 「高峰同时在场人数」注入（97+72+1+1+102=273 与峰值 176 自相矛盾 → 写作层三套矛盾口径）
+    lines.push(`- 工种构成（合计=${data.resources.labor.peakValue} 人，写作层工种表唯一数据源，不得自设构成）：${data.resources.labor.composition.map(item => `${item.trade} ${item.count} 人`).join('、')}`);
   }
   if (data.resources.equipment.length > 0) {
     // P3.6 台数只渲染单值：区间端点泄漏是机械台数多口径矛盾源；有权威台数用台数，否则取区间中值
@@ -1724,7 +1809,7 @@ export function renderBlueprintDataText(data: BlueprintData): string {
     lines.push(`- 主要机械：${data.resources.equipment.map(item => `${item.name}${item.spec ? `（${item.spec}）` : ''} ${equipmentCount(item)} 台`).join('、')}`);
   }
   if (data.materialsPlan.length > 0) {
-    lines.push(`- 物资计划（清单汇总）：${data.materialsPlan.slice(0, 12).map(item => `${item.name} ${item.quantity ?? ''}${item.unit}`).join('、')}${data.materialsPlan.length > 12 ? ' 等' : ''}`);
+    lines.push(`- 物资计划（清单汇总，规格为清单明确给出的型号参数）：${data.materialsPlan.slice(0, 12).map(item => `${item.name}${item.spec ? `（${item.spec}）` : ''} ${item.quantity ?? ''}${item.unit}`).join('、')}${data.materialsPlan.length > 12 ? ' 等' : ''}`);
   }
   if (data.inspectionBatches.length > 0) {
     lines.push(`- 检验批划分：${data.inspectionBatches.map(item => `${item.scope}——${item.planDesc}`).join('；')}`);
@@ -1791,8 +1876,8 @@ export const CHAPTER_AUTHORITY_ANCHORS: Array<{
       if (data.resources.labor.byPhase.length > 0) {
         rows.push(`- 分阶段劳动力投入：${data.resources.labor.byPhase.slice(0, 10).map(item => `${item.phase} ${blueprintMidValue(item.min, item.max, 0)} 人`).join('、')}${data.resources.labor.byPhase.length > 10 ? ' 等' : ''}`);
       }
-      if (data.resources.labor.byTrade.length > 0) {
-        rows.push(`- 工种配置（高峰同时在场，与峰值同口径）：${data.resources.labor.byTrade.map(item => `${item.trade} ${blueprintMidValue(item.min, item.max, 1)} 人`).join('、')}`);
+      if (data.resources.labor.composition.length > 0) {
+        rows.push(`- 工种构成（合计=${data.resources.labor.peakValue} 人，工种表唯一数据源，各工种人数与合计不得改写）：${data.resources.labor.composition.map(item => `${item.trade} ${item.count} 人`).join('、')}`);
       }
       return rows;
     },
@@ -1803,6 +1888,14 @@ export const CHAPTER_AUTHORITY_ANCHORS: Array<{
     render: data => {
       if (data.resources.equipment.length === 0) return [];
       return [`- 主要机械：${data.resources.equipment.map(item => `${item.name}${item.spec ? `（${item.spec}）` : ''} ${blueprintMidValue(item.quantity, undefined, Math.max(item.quantity ?? 0, 1))} 台`).join('、')}`];
+    },
+  },
+  {
+    id: 'materials',
+    chapterPattern: /物资|材料|资源|采购/u,
+    render: data => {
+      if (data.materialsPlan.length === 0) return [];
+      return [`- 主要材料（名称、型号规格、数量必须与此一致；清单明确给出的规格是事实数据，未列材料不得自编型号规格）：${data.materialsPlan.slice(0, 15).map(item => `${item.name}${item.spec ? `（${item.spec}）` : ''} ${item.quantity ?? ''}${item.unit}`).join('、')}${data.materialsPlan.length > 15 ? ' 等' : ''}`];
     },
   },
   {
@@ -1903,6 +1996,17 @@ function escapeRegexForAlign(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
+/** 单位变体归一（与修复器 quantityUnitVariants 同源，零漂移实测）：清单单位 m2/m3/t 与正文
+ *  上标写法（m²/㎡/m³）同义——检测正则只认一种写法时，上标值不入候选，分部拆分豁免
+ *  （压膜 404.4+730=1134.4）无法触发导致误报「压膜 404.4」 */
+function quantityUnitDetectVariants(unit: string): string {
+  const normalized = unit.trim().toLowerCase();
+  if (/(?:m2|m²|㎡)/.test(normalized)) return '(?:㎡|m²|m2)';
+  if (/(?:m3|m³)/.test(normalized)) return '(?:m³|m3)';
+  if (normalized === 't' || normalized === '吨') return '(?:吨|t)';
+  return escapeRegexForAlign(unit);
+}
+
 /** 章切片匹配：按模板章标题在蓝图大纲中定位章切片（构建时 title 即模板原始标题） */
 export function findBlueprintChapter(blueprint: IntegratedBlueprint, chapterTitle: string): BlueprintChapter | undefined {
   const exact = blueprint.outline.chapters.find(chapter => chapter.title === chapterTitle);
@@ -1910,8 +2014,10 @@ export function findBlueprintChapter(blueprint: IntegratedBlueprint, chapterTitl
   return blueprint.outline.chapters.find(chapter => chapterTitle.includes(chapter.title) || chapter.title.includes(chapterTitle));
 }
 
-/** 清单原始分部名形态（LLM 规划未经规范化直透大纲时识别） */
-const BOQ_RAW_SECTION_NAME_RE = /^(?:其他|其他工程|其他装饰工程?|措施项目|墙[、,]?柱面装饰(?:与隔断[、,]?幕墙工程)?)$/u;
+/** 施工方法类章节的总述小节形态：保留在蓝图权威分部小节之前（章首总述，最多 2 个）；
+ * 不含总述词的非分部小节（串章小节、截断声明句、子分部名、「其他/措施项目」原始分部名）
+ * 一律移除，由蓝图权威分部接管 */
+const GENERAL_SECTION_NAME_RE = /总述|综述|概述|编制说明|施工准备|施工部署|总体施工(?:方案|工艺|方法)|主要分部分项工程/u;
 
 export interface BlueprintSectionAlignmentReport {
   chapterTitle: string;
@@ -1926,11 +2032,15 @@ export interface BlueprintSectionAlignmentReport {
 /**
  * 蓝图权威分部结构 → 规划小节校准（round-27 第二章小节根因修复）：
  * LLM 小节规划只看证据文本，清单分部名与子分部名同列时会把单位工程子分部
- * （土石方/砌筑/混凝土/门窗等）升级为章级小节、「其他」分部名直透大纲——
+ * （土石方/砌筑/混凝土/门窗等）升级为章级小节、「其他」分部名与截断声明句直透大纲——
  * 蓝图 outline 是清单分部的确定性权威（分部=小节、子分部=工作包、「其他/措施项目」已规范化）。
- * 校准策略（仅施工方法类章节、蓝图该章有分部小节时）：
- * - LLM 规划小节与清单名重合度 < 2 → 保留原规划（不破坏正常规划）；
- * - 重合度 ≥ 2 → 非清单总述小节保留在前，清单相关小节整体替换为蓝图权威分部小节（蓝图顺序）。
+ * 校准策略（施工方法类章节、蓝图该章有分部小节时，无条件接管）：
+ * - 章首总述小节（总述/概述/施工部署/总体施工方案等，不含蓝图分部名）保留在前（最多 2 个）；
+ * - 其余小节全部由蓝图权威分部替换（蓝图顺序；工作包在分部小节内展开）；
+ * - 串章小节（周边环境保护等）、截断声明句、子分部名均被移除（内容归属其正确章节）。
+ * round-27 实测修正：原「重合度 ≥2 才校准」门槛在规划小节与蓝图分部名重叠少时直接放行
+ * （丰乐镇实测仅 1 个小节重叠 → 校准静默失效，截断声明句「我公司对该表提供的内容及相关资料
+ * 均属」与宽泛工艺小节直透成稿）；改为无条件接管后蓝图分部名即正文小节唯一权威。
  */
 export function alignChapterSectionsToBlueprint(chapter: { title: string; sections: string[] }, blueprintChapter: BlueprintChapter): { sections: string[]; report?: BlueprintSectionAlignmentReport } {
   const rawSections = chapter.sections.map(section => section.trim()).filter(Boolean);
@@ -1943,13 +2053,15 @@ export function alignChapterSectionsToBlueprint(chapter: { title: string; sectio
     || [...packageNames].find(name => title === name || (title.length >= 2 && (title.includes(name) || name.includes(title))))
     || [...entryNames].find(name => title === name),
   );
-  const isBoqRelated = (title: string) => BOQ_RAW_SECTION_NAME_RE.test(title) || overlapsBlueprintName(title);
-  const blueprintRelated = rawSections.filter(isBoqRelated);
-  if (blueprintRelated.length < 2) return { sections: rawSections };
-  // 总述类小节保留在前；清单相关小节整体替换为蓝图权威分部小节（工作包在分部小节内展开）
-  const generalSections = rawSections.filter(title => !isBoqRelated(title)).filter(title => !authoritative.some(name => name.includes(title) || title.includes(name)));
+  // 章首总述：含总述词且不含蓝图任何分部/工作包名（与蓝图重叠的小节由权威分部替换，不视为总述）；
+  // 「其他/措施项目」等清单原始分部名不含总述词，自然落入 removed 被权威分部替换
+  const isGeneral = (title: string) => GENERAL_SECTION_NAME_RE.test(title) && !overlapsBlueprintName(title);
+  const generalSections = rawSections.filter(isGeneral).slice(0, 2);
   const finalSections = [...new Set([...generalSections, ...authoritative])];
-  const removed = rawSections.filter(title => isBoqRelated(title) && !authoritative.includes(title));
+  const kept = new Set(finalSections);
+  const removed = rawSections.filter(title => !kept.has(title));
+  // 小节未发生任何变化时不产生报告（模板小节与蓝图分部完全一致的章节零变化）
+  if (removed.length === 0 && JSON.stringify(finalSections) === JSON.stringify(rawSections)) return { sections: rawSections };
   return {
     sections: finalSections,
     report: { chapterTitle: chapter.title, removed, replacedWithBlueprint: true, finalSections },
@@ -2143,7 +2255,9 @@ export function blueprintPlanAuthorities(data?: BlueprintData): {
   const quantityAuthorities: Array<{ name: string; value: number; unit: string }> = [];
   for (const [name, quantity] of Object.entries(data?.quantities ?? {})) {
     if (!quantity || !Number.isFinite(quantity.value) || quantity.value < 10) continue;
-    if (/台|套/u.test(quantity.unit)) continue;
+    // 台/套类仅命中设备权威映射（提升泵/潜水泵）的跳过防重复——一般路灯 118 套等
+    // 材料类套条目必须入权威（零漂移实测：正文 83+7 拆分口径漂移 23.7% 无人锁定）
+    if (/台|套/u.test(quantity.unit) && EQUIPMENT_QUANTITY_AUTHORITY_RE.some(item => item.re.test(name))) continue;
     if (!/[\u4e00-\u9fa5]{3,}/u.test(name)) continue;
     quantityAuthorities.push({ name, value: quantity.value, unit: quantity.unit });
   }
@@ -2523,6 +2637,11 @@ export function blueprintCitationConsistencyIssues(markdown: string, data: Bluep
   if (data.contract.totalDays > 0) {
     const dayRe = /(?:总工期|施工工期|合同工期|工期)(?:为|约|共计|控制)?[^\n。；;]{0,20}?(\d+(?:\.\d+)?)\s*(?:日历)?天/gu;
     for (const match of nonTable.matchAll(dayRe)) {
+      // 阶段细分豁免（与修复器 dayRe 同源）：数值前窗口含「按|阶段|拆除|清杂|准备」是
+      // 阶段细分表述（「总工期按施工准备与清杂拆除7天」）而非总工期，不报冲突
+      const dayWindow = nonTable.slice(match.index ?? 0, (match.index ?? 0) + match[0].length);
+      const dayDigitAt = dayWindow.indexOf(String(match[1]));
+      if (dayDigitAt > 0 && /按|阶段|拆除|清杂|准备/u.test(dayWindow.slice(0, dayDigitAt))) continue;
       const value = Number(match[1]);
       if (value > 0 && value !== data.contract.totalDays) {
         issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `蓝图引用冲突：正文出现与蓝图不一致的工期表述 ${value}日历天`, suggestion: `请统一使用蓝图总工期：${data.contract.totalDays} 日历天` });
@@ -2531,9 +2650,17 @@ export function blueprintCitationConsistencyIssues(markdown: string, data: Bluep
     }
   }
   for (const fact of data.redLineFacts.filter(item => !item.amount && item.key !== '自然村数量')) {
-    const escaped = escapeRegexForAlign(fact.value.trim());
-    if (!escaped) continue;
-    if (!new RegExp(escaped, 'u').test(markdown)) {
+    // 子串片段匹配（零漂移实测）：事实值为多段串（「二级养护，养护二年」「一般路灯 100W LED
+    // 高4.5m 含基础」）时全串匹配必失败——按标点切片段，任一实质片段在正文出现即视为已体现；
+    // 泛化空壳片段（其他/具体详见/满足设计要求/纯编号）剔除，防误判体现
+    const parts = String(fact.value)
+      .split(/[，。；、（）()\]【】：:\s\n[]+/u)
+      .map(part => part.trim())
+      .filter(part => part.length >= 3
+        && !/^[\d.]+$/u.test(part)
+        && !/^(?:其他|具体详见|满足设计要求|设计图纸|图集|招标文件|政府相关文件|规范等|资料)$/u.test(part));
+    if (parts.length === 0) continue;
+    if (!parts.some(part => markdown.includes(part))) {
       issues.push({ level: 'warning', severity: 'warning', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `蓝图红线事实缺口：正文未体现「${fact.key}=${fact.value}」`, suggestion: `请在对应章节补写该红线事实（数值必须与蓝图一致）` });
     }
   }
@@ -2543,6 +2670,11 @@ export function blueprintCitationConsistencyIssues(markdown: string, data: Bluep
   if (villageAuthority > 0) {
     const villageRe = /(\d+)\s*个(?:美丽宜居)?自然村(?!分组)/gu;
     for (const match of nonTable.matchAll(villageRe)) {
+      // 分区数学豁免（与修复器 villageRe 同源）：数值前 16 字含片区/分为/分成/划分为/每组/每片
+      // 是分区数学（「每个片区包含4个自然村」20=5×4）而非村数冲突，不报
+      const villageBefore = nonTable.slice(Math.max(0, (match.index ?? 0) - 16), match.index ?? 0);
+      // 分配口径豁免（零漂移实测）：「每台覆盖4个自然村」「每个组3个自然村」是资源分配语境
+      if (/片区|分为|分成|划分为|每组|每片|每台|每个|各台|各车|每村/u.test(villageBefore)) continue;
       const value = Number(match[1]);
       if (value > 0 && value !== villageAuthority) {
         issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `蓝图红线事实冲突：正文出现与蓝图不一致的自然村数量 ${value} 个`, suggestion: `请统一使用蓝图自然村数量：${villageAuthority} 个自然村` });
@@ -2550,17 +2682,114 @@ export function blueprintCitationConsistencyIssues(markdown: string, data: Bluep
       }
     }
   }
-  for (const [name, quantity] of Object.entries(data.quantities)) {
+  // 工程量冲突检测：与 fixQuantityAuthorityConflicts 同源豁免（村名/分部语境 + 规格限定 +
+  // 分部量句句级豁免）——检测定位=修复定位，修复器豁免的合法形态检测器不得报错，
+  // 否则分部量（公厕塑料管铺设7.8m）被误报为冲突且 LLM 修复轮修不掉，导出门禁残留阻断
+  const quantityCandidates: Array<{ name: string; value: number; unit: string; authorityValue: number; ns: number }> = [];
+  // 长名优先 + occupied 防重叠（与修复器 fixQuantityAuthorityConflicts 同源）：蓝图
+  // 「塑料管铺设」与「塑料管」并存时，正文「塑料管铺设8205.53m」只归长条目，不被短名
+  // 「塑料管 7525.01」误报（零漂移实测误报根因）
+  const quantityEntries = Object.entries(data.quantities).sort((a, b) => b[0].length - a[0].length);
+  const quantityOccupied: Array<{ start: number; end: number }> = [];
+  for (const [name, quantity] of quantityEntries) {
     if (!quantity || quantity.value <= 0) continue;
     const unit = quantity.unit || '';
-    const valueRe = new RegExp(`${escapeRegexForAlign(name)}[^\n。；;]{0,40}?(\\d+(?:\\.\\d+)?)\\s*${unit ? escapeRegexForAlign(unit) : ''}`, 'gu');
+    // 单位变体归一（与修复器 quantityUnitVariants 同源，零漂移实测）：清单 m2/m3/t 与正文
+    // 上标写法（m²/㎡/m³）同义——未归一时上标值不入候选、分部拆分豁免无法触发（压膜 404.4 误报根因）；
+    // 右边界断言排除「直径不小于10m」类 10mm 的 m 子串误匹配（丰乐镇实测误报根因）
+    const unitSuffix = unit ? `${quantityUnitDetectVariants(unit)}(?![0-9A-Za-z])` : '';
+    const valueRe = new RegExp(`${escapeRegexForAlign(name)}[^\n。；;]{0,40}?(\\d+(?:\\.\\d+)?)\\s*${unitSuffix}`, 'gu');
     for (const match of nonTable.matchAll(valueRe)) {
+      const ns = match.index ?? 0;
+      const ne = ns + name.length;
+      if (quantityOccupied.some(o => ns < o.end && ne > o.start)) continue;
+      quantityOccupied.push({ start: ns, end: ne });
+      // 规格句豁免：名称与数值间出现间距/直径等规格限定词是规格表述非工程量
+      // （「立柱间距不大于1200」「直径不小于10m」丰乐镇实测误报根因）
+      const windowText = nonTable.slice(ns, ns + match[0].length);
+      const digitAt = windowText.lastIndexOf(String(match[1]));
+      if (digitAt > 0 && /(?:间距|不大于|不小于|≥|≤|直径|宽度|厚度|高度|深度|坡度)[^0-9]*$/u.test(windowText.slice(0, digitAt))) continue;
+      // 村名/分部语境豁免（与修复器 VILLAGE_LOCATION_HINT_RE 同源）：名称前 12 字内含
+      // 村级地名/分部特征词是分村分表合法量（「化粪池2座…塑料管铺设7.8m」的 池 语境）
+      const prefix = nonTable.slice(Math.max(0, ns - 12), ns);
+      if (/[郢庄岗塘圩坝池井]/u.test(prefix)) continue;
+      // 段落级村名豁免（与修复器 VILLAGE_PARAGRAPH_HINT_RE 同源）：村名列表距条目名远超 12 字窗口
+      // 时整段不报（“殷郢组…本分项工程量为：…挖基坑土方42.12m³”分村合法量）
+      const paraStartIdx = nonTable.lastIndexOf('\n\n', ns);
+      const paraFrom = paraStartIdx === -1 ? 0 : paraStartIdx + 2;
+      const paraEndIdx = nonTable.indexOf('\n\n', ns);
+      const paraTo = paraEndIdx === -1 ? nonTable.length : paraEndIdx;
+      if (/[郢庄岗塘圩坝]/u.test(nonTable.slice(paraFrom, paraTo))) continue;
+      // 规格限定词豁免（与修复器 SPEC_QUALIFIER_RE 同源：前置直径450/后置DN200）
+      if (/(?:直径|DN|Φ|φ)\\s*\\d+/u.test(nonTable.slice(Math.max(0, ns - 8), ns))) continue;
+      if (/(?:直径|DN|Φ|φ)\\s*\\d+/u.test(nonTable.slice(ns + name.length, ns + name.length + 8))) continue;
       const value = Number(match[1]);
-      if (value > 0 && value !== quantity.value) {
-        issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `蓝图引用冲突：正文出现与蓝图不一致的工程量 ${name} ${value}${unit}`, suggestion: `请统一使用蓝图工程量：${name} ${quantity.value}${unit}` });
-        break;
+      if (!Number.isFinite(value) || value <= 0 || value === quantity.value) continue;
+      quantityCandidates.push({ name, value, unit, authorityValue: quantity.value, ns });
+    }
+  }
+  // 分部量句句级豁免（与修复器同源）：句内与各自权威差异 >50% 的候选 ≥2 且多于 ≤50% 候选时，
+  // 判为分部/分表量列举句（「挖一般土方146.93/级配碎石480.5/水泥混凝土572.3…」分部量句），整句不报
+  const sentenceOf = (at: number): { start: number; end: number } => {
+    const back = Math.max(nonTable.lastIndexOf('。', at), nonTable.lastIndexOf('\n', at));
+    let fwd1 = nonTable.indexOf('。', at);
+    if (fwd1 === -1) fwd1 = nonTable.length;
+    let fwd2 = nonTable.indexOf('\n', at);
+    if (fwd2 === -1) fwd2 = nonTable.length;
+    return { start: back + 1, end: Math.min(fwd1, fwd2) + 1 };
+  };
+  const driftOf = (item: (typeof quantityCandidates)[number]) => Math.abs(item.value - item.authorityValue) / item.authorityValue;
+  // 分部拆分豁免（零漂移实测）：同名称多个不同值存在子集和等于权威（压膜 404.4+730=1134.4、
+  // 道路+景观分部量）是分部量拆分合法口径，不报冲突；数值×100 取整消除浮点误差
+  const subsetSumExists = (nums: number[], target: number): boolean => {
+    if (nums.length > 10) return false;
+    const scaled = nums.map(num => Math.round(num * 100));
+    const goal = Math.round(target * 100);
+    for (let mask = 1; mask < (1 << scaled.length); mask += 1) {
+      let sum = 0;
+      let count = 0;
+      for (let bit = 0; bit < scaled.length; bit += 1) {
+        if ((mask & (1 << bit)) !== 0) { sum += scaled[bit]; count += 1; }
+      }
+      if (count >= 2 && sum === goal) return true;
+    }
+    return false;
+  };
+  const splitExemptNames = new Set<string>();
+  {
+    const byName = new Map<string, number[]>();
+    for (const c of quantityCandidates) {
+      const list = byName.get(c.name) ?? [];
+      list.push(c.value);
+      byName.set(c.name, list);
+    }
+    for (const [name, values] of byName) {
+      const unique = [...new Set(values)];
+      if (unique.length >= 2 && subsetSumExists(unique, quantityCandidates.find(c => c.name === name)?.authorityValue ?? 0)) {
+        splitExemptNames.add(name);
       }
     }
+  }
+  const reportedQuantityNames = new Set<string>();
+  for (const candidate of quantityCandidates) {
+    const sentence = sentenceOf(candidate.ns);
+    // 单体量句豁免（与修复器同源，零漂移实测）：「单座公厕…回填方68.68m³」是单体分项量，
+    // 公厕/化粪池语境常在本句或前一句（「作业对象为单座公厕基础及化粪池基坑。主要工程量为…」）——
+    // 窗口取段落起点至当前句末；「公厕」单字过泛（四章跨单位工程列举句「公厕外脚手架」
+    // 会误伤同段真实冲突），仅用单座/化粪池等单体强特征词
+    const monoParaStart = nonTable.lastIndexOf('\n\n', candidate.ns);
+    const monoParaFrom = monoParaStart === -1 ? 0 : monoParaStart + 2;
+    if (/(?:单体|单座|单栋|单幢|每座|每栋|化粪池)/u.test(nonTable.slice(monoParaFrom, sentence.end))) continue;
+    const peers = quantityCandidates.filter(other => other !== candidate && other.ns >= sentence.start && other.ns < sentence.end);
+    const large = [candidate, ...peers].filter(item => driftOf(item) > 0.5).length;
+    const small = [candidate, ...peers].filter(item => driftOf(item) <= 0.5).length;
+    if (large >= 2 && large > small) continue;
+    if (splitExemptNames.has(candidate.name)) continue;
+    // 同名条目只报一条（多位置同一漂移不刷屏），但不同名称冲突必须全部上报——
+    // 首条即 break 会让后续条目冲突漏报（零漂移实测：塑料管先报后路灯 83 永久漏网）
+    if (reportedQuantityNames.has(candidate.name)) continue;
+    reportedQuantityNames.add(candidate.name);
+    issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `蓝图引用冲突：正文出现与蓝图不一致的工程量 ${candidate.name} ${candidate.value}${candidate.unit}`, suggestion: `请统一使用蓝图工程量：${candidate.name} ${candidate.authorityValue}${candidate.unit}` });
   }
   return issues;
 }
