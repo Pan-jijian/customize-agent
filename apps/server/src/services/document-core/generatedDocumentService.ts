@@ -9,7 +9,6 @@ import { DOCUMENT_WORKFLOW_VERSION } from '../document-workflow/documentWorkflow
 import { computeProjectId } from '@customize-agent/knowledge';
 import { getProjectKbRoot, getProjectRoot } from '../knowledge/kbService';
 import { documentTextLength } from '../document-workflow/budget';
-import { extractPreviousVersionSignals, isSameProjectPreviousVersion } from '../document-workflow/previousVersionInheritance';
 import { upsertKbOperation } from '../knowledge/kbOperationLog';
 
 export type GeneratedDocumentStatus = 'generating' | 'completed' | 'completed_with_issues' | 'warning' | 'failed' | 'aborted';
@@ -518,7 +517,6 @@ function documentOperationDetails(stages: GeneratedDocumentRecord['executionStag
     stage.type === 'role_binding' ||
     stage.roleId === 'runtime-prompt-rules' ||
     stage.roleId === 'document-readiness' ||
-    stage.type === 'export_ready' ||
     stage.status === 'failed',
   );
   return important.flatMap(stage => [
@@ -599,35 +597,6 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
   const controller = new AbortController();
   const taskRef: { current?: GenerateTask } = {};
   const resumeChapters = reusableCheckpointChapters(existing, input, resolvedProjectRoot);
-  // 版本继承（评分报告 v4 回退治理）：无章节复用的全新生成时，提取上一版成稿三层信号
-  // （结构/关键口径/已知问题）注入生成管线，防止上一版人工修好的成果在新版本回退；
-  // env DOCUMENT_INHERIT_PREVIOUS=0 关闭；最新已完成版本从历史记录读取（排除当前文档自身），
-  // 且必须模板+需求同源（防同一项目根下其他招标文件的成稿串染）
-  let previousSignals = null as ReturnType<typeof extractPreviousVersionSignals>;
-  if (resumeChapters.length === 0 && process.env.DOCUMENT_INHERIT_PREVIOUS !== '0') {
-    const latestPrevious = listGeneratedDocuments(resolvedProjectRoot).find(item =>
-      (item.status === 'completed' || item.status === 'completed_with_issues')
-      && item.id !== (existing?.id || documentId)
-      && isSameProjectPreviousVersion(item, input));
-    if (latestPrevious) {
-      const previousRecord = getGeneratedDocument(latestPrevious.id, resolvedProjectRoot);
-      previousSignals = previousRecord ? extractPreviousVersionSignals(previousRecord) : null;
-      if (previousSignals) {
-        const current = getGeneratedDocument(documentId, resolvedProjectRoot);
-        if (current && current.status === 'generating') {
-          saveGeneratedDocument({
-            ...current,
-            executionStages: [...(current.executionStages || []), {
-              type: 'validation',
-              roleId: 'previous-version-inheritance',
-              status: 'success',
-              message: `版本继承：提取上一版《${previousSignals.versionTitle}》结构 ${previousSignals.structureLines.length} 项、关键口径 ${previousSignals.factLines.length} 条、已知问题 ${previousSignals.issueLines.length} 项作为生成参照`,
-            }],
-          }, resolvedProjectRoot);
-        }
-      }
-    }
-  }
   // 内存最新进度快照：catch 链需要标记未完成阶段时必须用内存最新 stages，不能读磁盘旧快照——
   // 进度写盘有节流（minProgressSaveInterval），磁盘 stages 滞后会把已成功章节标成 failed（状态传播错乱）
   let lastProgressStages: GeneratedDocumentRecord['executionStages'] | undefined;
@@ -637,7 +606,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
   const minProgressSaveInterval = Math.max(1_000, Math.min(15_000, Number(process.env.DOCUMENT_PROGRESS_SAVE_INTERVAL_MS ?? 5_000)));
   // 阶段签名未变（如周期性心跳）时的保底写盘间隔，避免每 30s 心跳全量写盘
   const minProgressHeartbeatSaveInterval = Math.max(30_000, Math.min(300_000, Number(process.env.DOCUMENT_PROGRESS_HEARTBEAT_SAVE_INTERVAL_MS ?? 60_000)));
-  const promise = generateDocumentDraft({ ...input, projectRoot: resolvedProjectRoot, resumeChapters, previousSignals: previousSignals || undefined, signal: controller.signal, onProgress: (stages, checkpoint) => {
+  const promise = generateDocumentDraft({ ...input, projectRoot: resolvedProjectRoot, resumeChapters, signal: controller.signal, onProgress: (stages, checkpoint) => {
     try {
       if (taskRef.current) taskRef.current.lastProgressAt = Date.now();
       lastProgressStages = stages;

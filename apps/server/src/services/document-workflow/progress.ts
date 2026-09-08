@@ -1,23 +1,14 @@
 import type { DocumentExecutionStage } from './types';
 
-export function stageTitle(type: DocumentExecutionStage['type'], roleId?: string) {
-  // Agent Reviewer / Agent Repairer 节点区分展示：不能都叫“LLM 审查优化”，
-  // 前者是审查节点（LLM 审查），后者是修复优化节点（LLM 优化）
-  if (type === 'llm_review') {
-    if (roleId?.startsWith('agent-reviewer')) return 'LLM 审查';
-    if (roleId?.startsWith('agent-repairer')) return 'LLM 优化';
-  }
+export function stageTitle(type: DocumentExecutionStage['type'], _roleId?: string) {
   const titles: Record<DocumentExecutionStage['type'], string> = {
     role_binding: '项目角色配置绑定',
     knowledge_retrieval: '知识库证据检索',
     file_understanding: '项目资料理解',
     fact_extraction: '事实抽取',
     chapter_generation: '章节正文生成',
-    asset_generation: '生成资源处理',
     llm_review: 'LLM 审查优化',
     validation: '内容优化与质量校验',
-    formatting: '正式排版整理',
-    export_ready: '导出就绪检查',
     reference: '资料增强',
   };
   return titles[type];
@@ -25,9 +16,7 @@ export function stageTitle(type: DocumentExecutionStage['type'], roleId?: string
 
 export function stageRoleDisplayName(roleId?: string) {
   const names: Record<string, string> = {
-    'knowledge-base': '知识库', 'document-readiness': '生成准备度检查', 'quality-repair': '质量补写', 'export-gate': '导出门禁',
-    'final-format': '正式排版', 'llm-json': 'LLM 事实抽取',
-    'llm-review': 'LLM 审查', 'document-workflow': '最终规范校验',
+    'knowledge-base': '知识库', 'document-readiness': '生成准备度检查', 'llm-json': 'LLM 事实抽取',
   };
   return roleId ? names[roleId] : undefined;
 }
@@ -39,7 +28,7 @@ export function displayStage(stage: DocumentExecutionStage, overrides: Partial<D
 
 export function upsertProgressStage(stages: DocumentExecutionStage[], stage: DocumentExecutionStage): number {
   const identity = (item: DocumentExecutionStage) => {
-    const chapterScoped = item.type === 'chapter_generation' || /^agent-(?:reviewer|repairer|chapter-task|final-gate-repair)-/u.test(item.roleId || '');
+    const chapterScoped = item.type === 'chapter_generation' || /^agent-chapter-task-/u.test(item.roleId || '');
     return chapterScoped
       ? [item.type, item.roleId || '', item.promptId || '', item.subtitle || '', item.order ?? ''].join('::')
       : [item.type, item.roleId || '', item.promptId || ''].join('::');

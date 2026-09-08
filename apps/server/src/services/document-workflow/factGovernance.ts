@@ -162,6 +162,14 @@ export function scoreFactCandidate(candidate: Omit<FactCandidate, 'confidence' |
     confidence -= 100;
     reasons.push('大段条款或 Markdown 噪声');
   }
+  // 丰乐镇第 3 轮实测：值尾部编号粘连（“90日历天2.9”）是 PDF 章节编号串行残留（“2.8计划工期：
+  // 90日历天 2.9招标范围”），即使绕过事实净化进入候选也必须直接拒收，避免压过干净同值候选
+  // 写入基本信息表（宁缺毋滥：只有脏候选时该字段不入选）
+  if (/(?<=[日天])\s*[0-9]+(?:\.[0-9]+)?(?=[\s]*(?:招标|建设|质量|合同|项目|工程|资金|投标|开标|评标|付款|工期|开工|计划|计价|现场|资质|标段|[0-9]{1,3}[.、．]|[，,。；;]|$))/u.test(value)) {
+    rejected = true;
+    confidence -= 100;
+    reasons.push('值尾部编号粘连，疑似 PDF 编号串行残留');
+  }
   if (containsOtherField(value, spec)) {
     confidence -= 45;
     reasons.push('包含其他字段名，疑似字段串位');
@@ -447,7 +455,15 @@ function governedFactFromDocumentFact(fact: DocumentFact, key: string, label: st
     sourceType,
     sourceFile: fact.sourceFile,
     sourceRef: fact.sourceRef?.sectionTitle,
-    confidence: Math.round((fact.confidence || 0.5) * 100),
+    // 丰乐镇第 3 轮实测：规则抽取事实（processingType=rule）的 confidence 是命中得分非概率
+    // （实测 1344.6/2728.4 等），直接乘 100 后压过语义抽取（reference）的概率型置信度，
+    // 导致脏值（“90日历天2.9”）进入 canonical 与基本信息表；得分型 rule（conf>1）钳到 0.5，
+    // 低于概率型 reference 正常区间（0.8~0.99），reference 缺失时 rule 值仍可兜底入选
+    confidence: (() => {
+      const raw = Number(fact.confidence) || 0.5;
+      const clamped = fact.processingType === 'rule' && raw > 1 ? 0.5 : Math.min(raw, 0.99);
+      return Math.round(clamped * 100);
+    })(),
     priority: factPriority(sourceType),
     locked: factPriority(sourceType) >= 80,
     selectedReason: '按资料来源优先级和字段置信度决策',
@@ -863,6 +879,50 @@ export function applyScopeConflictResolutions(facts: DocumentFact[], conflicts: 
     }
     return changed ? { ...fact, value } : fact;
   });
+}
+
+/**
+ * 事实池裁决收敛：三来源（入库缓存/生成补抽/图纸标注）拼接后统一口径，使 Planner 链
+ * （agentWorkflow facts → 章节任务书）与 canonical 链（事实主表）同源，任务书不再携带败选值。
+ * 1) 数值口径冲突（面积/造价/工期/层数/车位）：复用 detectNumericScopeConflicts + applyScopeConflictResolutions
+ *    （与 canonical 同规则，补疑/答疑/澄清类修正文件权威最高，败选值改写为胜选值）；
+ * 2) 单值口径字段冲突（项目名称/质量标准/劳动力高峰/装配率/支护形式/创优奖惩等）：
+ *    同 fieldId（缺失时按 key）分组，组内多不同值按来源优先级（补疑 > 合同 > 招标 > 清单 > 图纸 > 其他）
+ *    保留最高优先级单值，败选值丢弃；
+ * 3) 同组同归一化值去重（保留优先级高者，优先级相同保留更精炼短值）；
+ * 4) 多值事实（清单条目/材料规格/风险点等）不在单值口径正则内，保留多值不受影响。
+ */
+export function arbitrateFactPool(facts: DocumentFact[], projectRoot?: string): DocumentFact[] {
+  if (facts.length <= 1) return facts;
+  const conflicts = detectNumericScopeConflicts(facts, loadWorkflowRules(projectRoot));
+  const resolved = applyScopeConflictResolutions(facts, conflicts);
+  const singleValueRe = /项目名称|工程名称|招标人|建设单位|建设地点|质量标准|合同价格形式|绿色建筑等级|投标有效期|质保期|劳动力高峰|装配率|支护形式|创优奖惩|结构形式|总层数|建筑层数|建筑面积|建设规模|计划工期|合同工期|总工期/u;
+  const isSingleValueFact = (fact: DocumentFact) => singleValueRe.test(`${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`);
+  const groupKeyOf = (fact: DocumentFact) => fact.fieldId || fact.key || fact.fieldName || '';
+  const winners = new Map<string, DocumentFact>();
+  for (const fact of resolved) {
+    if (!isSingleValueFact(fact)) continue;
+    const groupKey = groupKeyOf(fact);
+    const current = winners.get(groupKey);
+    if (!current) { winners.set(groupKey, fact); continue; }
+    const rank = (candidate: DocumentFact) => {
+      const priority = sourceFilePriority(candidate.sourceFile, candidate.roleId);
+      const normalized = normalizeOcrFactText(stringifyFactValue(candidate.value));
+      return { priority, normalized };
+    };
+    const a = rank(current);
+    const b = rank(fact);
+    const better = b.priority > a.priority || (b.priority === a.priority && b.normalized !== a.normalized && b.normalized.length < a.normalized.length);
+    if (better) winners.set(groupKey, fact);
+  }
+  if (winners.size === 0) return resolved;
+  const dropped = new Set<DocumentFact>();
+  for (const fact of resolved) {
+    if (!isSingleValueFact(fact)) continue;
+    if (winners.get(groupKeyOf(fact)) !== fact) dropped.add(fact);
+  }
+  if (dropped.size === 0) return resolved;
+  return resolved.filter(fact => !dropped.has(fact));
 }
 
 export function buildCanonicalFactModel(input: { facts: DocumentFact[]; markdown?: string; projectGraph?: ProjectGraph; requiredKeys?: string[]; projectRoot?: string; requirement?: string; templateId?: string }): CanonicalFactModel {

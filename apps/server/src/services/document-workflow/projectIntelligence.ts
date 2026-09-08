@@ -3,14 +3,14 @@ import * as path from 'node:path';
 import { computeProjectId, locateTableColumns, scoreTableHeaderRow } from '@customize-agent/knowledge';
 import { getMultiProjectManager, getStorageRoot, listKnowledgeFiles } from '../knowledge/kbService';
 import { upsertKbOperation, type KbOperationStage } from '../knowledge/kbOperationLog';
-import { buildBaseProjectGraph, buildAgentMaterialSnapshot, resolveAgentMaterialScope } from './agentWorkflow';
+import { buildBaseProjectGraph, buildAgentMaterialSnapshot, resolveAgentMaterialScope, type AgentMaterialScope } from './agentWorkflow';
 import { buildProjectGraph } from './projectGraph';
 import { dedupeQuantityFacts, filterConstructionSteps } from './chapterGeneration';
 import type { DocumentEvidence, DocumentFact, DocumentTemplate, ProjectGraph } from './types';
-import { stableHash } from './utils';
+import { filterBidDisciplineFacts, stableHash } from './utils';
 
-const INTELLIGENCE_VERSION = 'project-intelligence-v11' as const;
-const SCOPE_VERSION = 'material-scope-v6' as const;
+const INTELLIGENCE_VERSION = 'project-intelligence-v12' as const;
+const SCOPE_VERSION = 'material-scope-v7' as const;
 
 export interface ProjectIntelligenceFileAsset {
   relativePath: string;
@@ -85,14 +85,6 @@ export interface ProjectIntelligenceCache {
   /** LLM 图谱增强失败时降级为确定性 base 图谱落盘（缓存仍可用，自愈机制会在后续构建中重试增强） */
   graphDegraded?: boolean;
   constructionOrganizationGraph: ConstructionOrganizationGraph;
-  blueprint: {
-    projectNames: string[];
-    roots: string[];
-    usableFiles: number;
-    excludedFiles: number;
-    intentTags: string[];
-    signals: string[];
-  };
 }
 
 export interface MaterialScopeSnapshot {
@@ -108,7 +100,6 @@ export interface MaterialScopeSnapshot {
   projectGraph: ProjectGraph;
   constructionOrganizationGraph: ConstructionOrganizationGraph;
   evidenceByChapterId: Record<string, DocumentEvidence[]>;
-  blueprint: ProjectIntelligenceCache['blueprint'];
 }
 
 function intelligenceDir(projectRoot: string) {
@@ -809,7 +800,9 @@ export async function buildProjectIntelligence(projectRoot: string, onProgress?:
       chapterHints,
     };
   });
-  const facts = files.flatMap(buildFileFacts);
+  // 内容安全源头过滤：投标/评标纪律、商务报价类句子不入库事实池（与生成链证据内容安全分区同口径，
+  // 词面判定确定性无 LLM 依赖），避免纪律类事实经缓存通道污染 Planner 任务书与写作上下文
+  const facts = filterBidDisciplineFacts(files.flatMap(buildFileFacts));
   const chapterIntentIndex = buildIntentIndex(files);
   onProgress?.('facts', 45, `内容事实与章节意图索引已提取：${facts.length} 条事实、${chapterIntentIndex.length} 条章节意图证据`);
   const materialScope = { selectedRoots: [...new Set(files.map(file => file.root).filter(Boolean))] as string[], selectedFiles: files.map(file => file.relativePath), totalAvailableFiles: files.length, ambiguous: false, locked: true, reason: '项目入库完成后预计算的项目级资料范围', rejectedRoots: [], scopeHash: sourceHash(files) };
@@ -849,14 +842,6 @@ export async function buildProjectIntelligence(projectRoot: string, onProgress?:
     projectGraphMessage,
     graphDegraded: graphDegraded || undefined,
     constructionOrganizationGraph,
-    blueprint: {
-      projectNames: [...new Set(facts.filter(fact => /项目名称/u.test(fact.key)).map(fact => fact.value))].slice(0, 8),
-      roots: [...new Set(files.map(file => file.root).filter(Boolean))] as string[],
-      usableFiles: files.filter(file => file.usableForBody).length,
-      excludedFiles: files.filter(file => !file.usableForBody).length,
-      intentTags: [...new Set(files.flatMap(file => file.intentTags))],
-      signals: files.flatMap(file => file.contentFacts.slice(0, 2)).slice(0, 24),
-    },
   };
   writeJsonAtomic(cachePath(projectRoot), cache);
   return cache;
@@ -884,14 +869,6 @@ function buildMaterialScopeSnapshot(input: { projectRoot: string; template: Docu
     projectGraph,
     constructionOrganizationGraph,
     evidenceByChapterId,
-    blueprint: {
-      projectNames: [...new Set(facts.filter(fact => /项目名称/u.test(fact.key)).map(fact => fact.value))].slice(0, 8),
-      roots: [...new Set(files.map(file => file.root).filter(Boolean))] as string[],
-      usableFiles: files.filter(file => file.usableForBody).length,
-      excludedFiles: files.filter(file => !file.usableForBody).length,
-      intentTags: [...new Set(files.flatMap(file => file.intentTags))],
-      signals: files.flatMap(file => file.contentFacts.slice(0, 2)).slice(0, 24),
-    },
   };
   writeJsonAtomic(scopePath(input.projectRoot, input.scopeHash), snapshot);
   return snapshot;
@@ -910,10 +887,10 @@ function readMaterialScopeSnapshot(projectRoot: string, scopeHash: string): Mate
   }
 }
 
-export function buildScopedProjectIntelligence(input: { projectRoot: string; template: DocumentTemplate; requirement?: string }) {
+export function buildScopedProjectIntelligence(input: { projectRoot: string; template: DocumentTemplate; requirement?: string; materialScope?: AgentMaterialScope }) {
   const cache = readProjectIntelligence(input.projectRoot);
   if (!cache) return undefined;
-  const scope = resolveAgentMaterialScope(input.projectRoot, input.template, input.requirement || '');
+  const scope = input.materialScope || resolveAgentMaterialScope(input.projectRoot, input.template, input.requirement || '');
   if (scope.ambiguous || !scope.locked || scope.selectedFiles.length === 0) return undefined;
   const scopeHash = stableHash({ version: SCOPE_VERSION, selectedFiles: scope.selectedFiles.slice().sort(), templateId: input.template.id, chapters: input.template.chapters.map(chapter => ({ id: chapter.id, title: chapter.title, sections: chapter.sections || [] })) });
   const snapshot = readMaterialScopeSnapshot(input.projectRoot, scopeHash)
@@ -929,7 +906,6 @@ export function buildScopedProjectIntelligence(input: { projectRoot: string; tem
     projectGraph: snapshot.projectGraph,
     constructionOrganizationGraph: snapshot.constructionOrganizationGraph,
     constructionOrganizationContext: constructionOrganizationPrompt(snapshot.constructionOrganizationGraph),
-    blueprint: snapshot.blueprint,
   };
 }
 

@@ -12,6 +12,7 @@ import {
   ensureFormalToc,
   dedupeCrossLevelHeadingDuplicates,
   dedupeRepeatedBlocksWithinSections,
+  dedupeTertiaryH4Titles,
   extractGeneratedSections,
   findChapterBlock,
   hasInlineListCollision,
@@ -497,5 +498,41 @@ describe('dedupeRepeatedBlocksWithinSections（4.12.12 同小节相邻块重复�
     const markdown = '### 施工方法\n分层开挖，随挖随撑。\n分层开挖，随挖随撑。';
     const result = dedupeRepeatedBlocksWithinSections(markdown);
     expect(result.split('分层开挖，随挖随撑。').length - 1).toBe(2);
+  });
+});
+
+describe('dedupeTertiaryH4Titles（F4 H4-H3 同名确定性重命名）', () => {
+  it('H4 与 H3 同名 → 追加「要点」（丰乐镇第五轮 2.24.2 绿化工程实测）', () => {
+    const markdown = [
+      '### 绿化工程',
+      '绿化工程施工内容说明。',
+      '#### 2.24.2 绿化工程',
+      '本小节内容。',
+    ].join('\n');
+    const result = dedupeTertiaryH4Titles(markdown);
+    expect(result.markdown).toContain('#### 2.24.2 绿化工程要点');
+    expect(result.markdown).toContain('### 绿化工程\n');
+    expect(result.fixedCount).toBe(1);
+  });
+
+  it('H4 去编号后与 H3 同名（无编号形态）同样重命名', () => {
+    const markdown = '### 质量控制\n正文。\n#### 质量控制\n正文二。';
+    const result = dedupeTertiaryH4Titles(markdown);
+    expect(result.markdown).toContain('#### 质量控制要点');
+    expect(result.fixedCount).toBe(1);
+  });
+
+  it('不同名 H4 不触碰、H3 标题不触碰', () => {
+    const markdown = '### 绿化工程\n正文。\n#### 2.24.3 苗木养护\n正文二。';
+    const result = dedupeTertiaryH4Titles(markdown);
+    expect(result.markdown).toBe(markdown);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('追加「要点」后不再与 H3 同名（同源复检零命中）', () => {
+    const markdown = '### 绿化工程\n#### 绿化工程\n正文。';
+    const first = dedupeTertiaryH4Titles(markdown);
+    const second = dedupeTertiaryH4Titles(first.markdown);
+    expect(second.fixedCount).toBe(0);
   });
 });

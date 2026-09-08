@@ -8,7 +8,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildPlannedChapterContent } from '@/services/document-workflow/chapterGeneration';
 import { createGenerationDiagnostics } from '@/services/document-workflow/rolePipeline';
-import type { PlannedChapterBlock, PlannedChapterStructure } from '@/services/document-workflow/chapterPlanner';
+import type { PlannedChapterBlock, PlannedChapterStructure } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from '@/services/document-workflow/types';
 import type * as LlmClientModule from '@/services/document-workflow/llmClient';
 
@@ -38,8 +38,8 @@ function mockDiagnostics(): DocumentGenerationDiagnostics {
   return createGenerationDiagnostics({ mode: 'fast', enableChapterReview: false, enableGlobalReview: false, enableDocumentBudgetExpansion: false, enableFinalQualityReview: false });
 }
 
-function makeChapter(): DocumentTemplateChapter {
-  return { id: 'ch-1', title: '施工测量', sections: [H4A], requiredFacts: [], tablePlans: [] } as unknown as DocumentTemplateChapter;
+function makeChapter(overrides: Partial<DocumentTemplateChapter> = {}): DocumentTemplateChapter {
+  return { id: 'ch-1', title: '施工测量', sections: [H4A], requiredFacts: [], tablePlans: [], ...overrides } as unknown as DocumentTemplateChapter;
 }
 
 function makeBlock(overrides: Partial<PlannedChapterBlock> = {}): PlannedChapterBlock {
@@ -198,5 +198,34 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
     expect(llmMock).toHaveBeenCalledTimes(4);
     expect(result?.markdown).toContain(H4A);
     expect(result?.markdown).toContain(H4D);
+  });
+
+  it('4.19.5 回归：分部章容器块走总述提示词（不锁骨架不写三段式），正文直接展开成稿', async () => {
+    // 容器块（「主要分部分项工程施工方案」在「主要施工方法」章内）是全章总述小节：
+    // 修复前按三段式 divisionPrompt 展开 → LLM 把本章全部分部名写成 H4（清单外）+三段标签重复 → 章阻断
+    const containerBlock: PlannedChapterBlock = { title: '主要分部分项工程施工方案', subPoints: [{ title: '主要分部分项工程施工方案', sources: ['主要分部分项工程施工方案'] }], facts: [], targetWords: 3600 };
+    llmMock.mockResolvedValue(`### 主要分部分项工程施工方案\n\n${'施'.repeat(3300)}`);
+    const result = await buildPlannedChapterContent(makeInput({ chapter: makeChapter({ title: '主要施工方法' }) }), makeStructure({ blocks: [containerBlock] }));
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+    const prompt = llmMock.mock.calls[0][1];
+    // 总述提示词下发（四部分组织），不注入单分部三段式提示
+    expect(prompt).toContain('分部分项工程施工方案总述');
+    expect(prompt).toContain('四、质量、安全与进度接口');
+    expect(prompt).not.toContain('【分部分项施工方案三段式】');
+  });
+
+  it('4.19.5 回归：分部章容器块输出清单外 H4 → 标题剥离正文保留，字数达标成稿', async () => {
+    // 总述块模型仍写出分部名 H4（历史习惯）时：块质检确定性修复删标题行保留正文，字数达标即通过
+    const containerBlock: PlannedChapterBlock = { title: '主要分部分项工程施工方案', subPoints: [{ title: '主要分部分项工程施工方案', sources: ['主要分部分项工程施工方案'] }], facts: [], targetWords: 3600 };
+    const strayH4s = `### 主要分部分项工程施工方案\n\n#### 道路工程\n\n${'施'.repeat(500)}\n\n#### 排水工程\n\n${'施'.repeat(500)}\n\n${'施'.repeat(2400)}`;
+    llmMock.mockResolvedValue(strayH4s);
+    const result = await buildPlannedChapterContent(makeInput({ chapter: makeChapter({ title: '主要施工方法' }) }), makeStructure({ blocks: [containerBlock] }));
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+    // 清单外 H4 标题行删除，正文全部保留
+    expect(result?.markdown).not.toContain('#### 道路工程');
+    expect(result?.markdown).not.toContain('#### 排水工程');
+    expect((result?.markdown.match(/施/gu) || []).length).toBeGreaterThanOrEqual(3400);
   });
 });

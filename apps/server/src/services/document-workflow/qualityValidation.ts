@@ -13,7 +13,8 @@ import { displayChapterTitle } from './outline';
 import { mergeTableLineBreaks } from './markdownComposer';
 import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
-import { extractSection, stringifyFactValue } from './utils';
+import { extractSection, stringifyFactValue, WORK_PACKAGE_SECTION_RE } from './utils';
+import { DIVISION_SECTION_RE } from './writingSpec';
 import { fiveElementBlockStats } from './tenderBidChecks';
 import { buildSemanticGate } from './semanticGate';
 
@@ -129,7 +130,12 @@ export function headingDuplicateIssues(markdown: string): ValidationIssue[] {
     for (const line of lines) {
       const headingMatch = /^####\s+(.+)$/u.exec(line.trim());
       if (!headingMatch) continue;
-      const key = headingMatch[1].replace(/^\d+(?:\.\d+)*\s*/u, '').replace(/\s+/gu, '');
+      // 带编号 H4（「2.1.1 施工流程」）由编号保证目录唯一性：分项工程模板化小节
+      // （施工概况/施工流程/施工方法）去编号后同名属正常结构，不判重复（误报实锤：
+      // 第二章 26 个分项 61 个编号 H4 被误报「施工流程出现 21 次」，触发无效修复轮）；
+      // 无编号 H4 去编号后同名仍判重复（历史缺陷：同章 4 个无编号「工程难点分析」）
+      if (/^\d+(?:\.\d+)*/u.test(headingMatch[1])) continue;
+      const key = headingMatch[1].replace(/\s+/gu, '');
       if (key.length < 2) continue;
       counts.set(key, (counts.get(key) || 0) + 1);
     }
@@ -640,7 +646,7 @@ export function tableSpamIssues(markdown: string): ValidationIssue[] {
   const duplicated = [...byHeader.entries()].filter(([, count]) => count >= 3);
   if (duplicated.length > 0) {
     const sample = blocks.find(block => byHeader.get(block.headerKey) === duplicated[0]?.[1])?.headerText || '';
-    issues.push({ level: 'warning', message: `同主题表格重复堆叠：${duplicated.length} 组相同表头出现 3 次及以上（如：${sample}）`, suggestion: '同一主题表格全文只出现一次，禁止拆成多张碎表重复堆叠凑数；请合并同类表格或删除重复内容。' });
+    issues.push({ level: 'warning', category: 'table', message: `同主题表格重复堆叠：${duplicated.length} 组相同表头出现 3 次及以上（如：${sample}）`, suggestion: '同一主题表格全文只出现一次，禁止拆成多张碎表重复堆叠凑数；请合并同类表格或删除重复内容。' });
   }
   // 连续堆叠两类形态：表格块之间只有空行无正文分隔；单块内多条分隔线（多张表连写不换行）
   let stacked = 0;
@@ -652,7 +658,7 @@ export function tableSpamIssues(markdown: string): ValidationIssue[] {
     if (between.every(line => line.trim() === '')) stacked += 1;
   }
   for (const block of blocks) if (block.dividerCount >= 2) stacked += block.dividerCount - 1;
-  if (stacked >= 2) issues.push({ level: 'warning', message: `表格连续堆叠：${stacked} 处相邻表格无正文分隔`, suggestion: '表格之间应有正文引导叙述，禁止连续堆叠多张表格凑数。' });
+  if (stacked >= 2) issues.push({ level: 'warning', category: 'table', message: `表格连续堆叠：${stacked} 处相邻表格无正文分隔`, suggestion: '表格之间应有正文引导叙述，禁止连续堆叠多张表格凑数。' });
   return issues;
 }
 
@@ -752,8 +758,12 @@ export function collectSectionContentGaps(markdown: string, chapters: Array<Pick
   const seen = new Set<string>();
   for (const chapter of chapters) {
     const source = chapter.content?.trim() ? chapter.content : markdown;
-    // 附录小节由导出层自动归集注入 markdown 尾部，不进入章节草稿 content，也不应由 Writer 成稿，跳过规划小节校验
-    const plannedSections = (chapter.sections || []).filter(section => !/^(?:施工概况|施工流程|施工方法)$/u.test(normalizeSectionTitleForGap(section)) && !/^附录/u.test(section.trim()));
+    // 附录小节由导出层自动归集注入 markdown 尾部，不进入章节草稿 content，也不应由 Writer 成稿，跳过规划小节校验；
+    // 4.19.3：分部章（「主要施工方法」等）的工作包型容器小节（「主要分部分项工程施工方案」）内容由各分部块承担，
+    // 容器块空壳被确定性删除后不报 missing_planned_section（与三要素小节同口径豁免）
+    const plannedSections = (chapter.sections || []).filter(section => !/^(?:施工概况|施工流程|施工方法)$/u.test(normalizeSectionTitleForGap(section))
+      && !(DIVISION_SECTION_RE.test(chapter.title) && WORK_PACKAGE_SECTION_RE.test(section.trim()))
+      && !/^附录/u.test(section.trim()));
     for (const section of plannedSections) {
       const normalized = normalizeSectionTitleForGap(section);
       const found = sectionBodyForTitle(source, section);
@@ -784,6 +794,9 @@ export function sectionContentIntegrityIssues(markdown: string, chapters: Array<
     .filter(gap => gap.reason === 'empty' || gap.reason === 'missing_planned_section')
     .map(gap => ({
       level: 'error' as const,
+      // 结构完整性检查器产出显式标注 structure：评分层按 category 白名单归属编制规范性，
+      // 不再依赖消息关键词猜测（「图纸目录」「图集编号」等事实/规范类消息词面误中问题）
+      category: 'structure' as const,
       message: gap.message,
       suggestion: gap.reason === 'missing_planned_section' ? '必须补充该规划小节正式正文，不得缺节导出。' : '必须补充与该小节相关的材料事实和必要内容，达到正文完整度要求。',
     }));
@@ -1829,6 +1842,44 @@ export function formalPlaceholderIssues(markdown: string): ValidationIssue[] {
   if (/【本小节生成未达标，需重新生成】/u.test(markdown)) issues.push({ level: 'error', message: '生成未完成：存在未达标小节，需要重新生成或补写后才能导出', suggestion: '请重新生成未达标小节，禁止将占位内容作为正式正文。' });
   for (const pattern of FORMAL_PLACEHOLDER_PATTERNS) {
     if (pattern.test(markdown)) issues.push({ level: 'warning', message: `存在占位式表达：${pattern.source}`, suggestion: '请改写为来自资料的准确事实；资料确实未提供时，改写为正式管理措施，不留空值或“见资料/按文件”。' });
+  }
+  return issues;
+}
+
+/** 小节标题工程类别存在性检测（丰乐镇第 3 轮实测）：工程量清单章节汇总行名称
+ * （如「墙、柱面装饰与隔断、幕墙工程」）被 LLM 照抄为小节标题，但小节正文实际只施工
+ * 墙面装饰（无幕墙/隔断/柱面装饰分项）——标题列出的工程类别必须在小节正文有对应
+ * 施工内容。H3/H4 标题以「工程」结尾且含「、/与/及」分隔多词段时，逐词段核对小节
+ * 正文（本标题至下一同级/上级标题之间）命中情况，未覆盖词段报 error 由修复轮改名。
+ * 词段 <2 字不参与核对（单字工程词误报风险高）。 */
+export function headingUncoveredEngineeringItems(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const lines = markdown.split(/\r?\n/u);
+  const headings: Array<{ index: number; level: number; title: string }> = [];
+  lines.forEach((line, index) => {
+    const match = /^(#{3,4})\s+([^\n]+)$/u.exec(line.trim());
+    if (!match) return;
+    headings.push({ index, level: match[1].length, title: match[2].trim() });
+  });
+  for (let h = 0; h < headings.length; h += 1) {
+    const { index, level, title } = headings[h];
+    const core = title.replace(/^[\d.]+[\s\u00a0]*/u, '').replace(/\s*工程\s*$/u, '');
+    if (!core || !/[、与及]/u.test(core)) continue;
+    const parts = core.split(/[、与及]/u).map(part => part.trim()).filter(part => part.length >= 2);
+    if (parts.length < 2) continue;
+    // 小节正文边界：到下一同级（H2 时含所有下级）或更高级标题；无后续标题则到文末
+    let end = lines.length;
+    for (let k = h + 1; k < headings.length; k += 1) {
+      if (headings[k].level <= level) { end = headings[k].index; break; }
+    }
+    const body = lines.slice(index + 1, end).join('\n');
+    const uncovered = parts.filter(part => !body.includes(part));
+    if (uncovered.length === 0) continue;
+    issues.push({
+      level: 'error',
+      message: `小节标题「${title}」含本小节正文未覆盖的工程类别：${uncovered.join('、')}`,
+      suggestion: '标题中的工程类别必须在小节正文有对应施工内容；请将标题改为与实际施工内容一致的名称，不得照抄工程量清单章节汇总行名称。',
+    });
   }
   return issues;
 }

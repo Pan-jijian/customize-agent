@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { runDeterministicChainUntilConverged, runFixUntilClean } from '@/services/document-workflow/documentIntegrityChecks';
-import { splitSinglePointOversizedBlocks } from '@/services/document-workflow/chapterPlanner';
-import type { PlannedChapterStructure } from '@/services/document-workflow/chapterPlanner';
+import { splitSinglePointOversizedBlocks } from '@/services/document-workflow/integratedBlueprint';
+import type { PlannedChapterStructure } from '@/services/document-workflow/integratedBlueprint';
 
 describe('runFixUntilClean 节点内闭环', () => {
   it('零命中立即收敛（单轮返回）', () => {
@@ -97,12 +97,12 @@ describe('splitSinglePointOversizedBlocks 单要点大块拆分', () => {
 
   it('单要点且目标>2400 的块拆为两个半块（目标减半、共享要点、带分工指令）', () => {
     const structure = baseStructure([
-      { title: '项目主要施工内容', subPoints: [{ title: '主要施工内容', sources: ['s1'] }], facts: ['f1'], targetWords: 3600 },
+      { title: '编制说明与工程概况', subPoints: [{ title: '编制说明', sources: ['s1'] }], facts: ['f1'], targetWords: 3600 },
     ]);
     const result = splitSinglePointOversizedBlocks(structure);
     expect(result.blocks.length).toBe(2);
-    expect(result.blocks[0].title).toBe('项目主要施工内容（一）');
-    expect(result.blocks[1].title).toBe('项目主要施工内容（二）');
+    expect(result.blocks[0].title).toBe('编制说明与工程概况（一）');
+    expect(result.blocks[1].title).toBe('编制说明与工程概况（二）');
     expect(result.blocks[0].targetWords).toBe(1800);
     expect(result.blocks[1].targetWords).toBe(1800);
     expect(result.blocks[0].subPoints).toHaveLength(1);
@@ -112,6 +112,16 @@ describe('splitSinglePointOversizedBlocks 单要点大块拆分', () => {
     expect(result.blocks[0].halfFocus).not.toBe(result.blocks[1].halfFocus);
     // 目标字数总和守恒
     expect(result.blocks[0].targetWords + result.blocks[1].targetWords).toBe(3600);
+  });
+
+  it('关键施工容器块不拆半（halfFocus 与三要素硬要求冲突的根因修复）', () => {
+    const structure = baseStructure([
+      { title: '项目主要施工内容', subPoints: [{ title: '主要施工内容', sources: ['s1'] }], facts: ['f1'], targetWords: 3600 },
+    ]);
+    const result = splitSinglePointOversizedBlocks(structure);
+    expect(result.blocks.length).toBe(1);
+    expect(result.blocks[0].title).toBe('项目主要施工内容');
+    expect(result.blocks[0].targetWords).toBe(3600);
   });
 
   it('目标≤2400 或要点≥2 的块不拆分', () => {
@@ -132,13 +142,14 @@ describe('splitSinglePointOversizedBlocks 单要点大块拆分', () => {
     expect(splitSinglePointOversizedBlocks(structure)).toBe(structure);
   });
 
-  it('混合场景：只拆超限单要点块，其余原样保留', () => {
+  it('混合场景：只拆超限普通单要点块，容器块与其余原样保留', () => {
     const structure = baseStructure([
-      { title: '项目主要施工内容', subPoints: [{ title: '主要施工内容', sources: ['s1'] }], facts: ['f1'], targetWords: 3600 },
+      { title: '编制说明与工程概况', subPoints: [{ title: '编制说明', sources: ['s1'] }], facts: ['f1'], targetWords: 3600 },
+      { title: '项目主要施工内容', subPoints: [{ title: '主要施工内容', sources: ['s1'] }], facts: [], targetWords: 3600 },
       { title: '正常块', subPoints: [{ title: 'a', sources: ['s1'] }], facts: [], targetWords: 1200 },
     ]);
     const result = splitSinglePointOversizedBlocks(structure);
-    expect(result.blocks.length).toBe(3);
-    expect(result.blocks.map(block => block.title)).toEqual(['项目主要施工内容（一）', '项目主要施工内容（二）', '正常块']);
+    expect(result.blocks.length).toBe(4);
+    expect(result.blocks.map(block => block.title)).toEqual(['编制说明与工程概况（一）', '编制说明与工程概况（二）', '项目主要施工内容', '正常块']);
   });
 });

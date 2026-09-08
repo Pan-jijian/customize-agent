@@ -12,10 +12,10 @@ import { normalizePlannedSections, professionalSectionTaskCard } from './promptR
 import { groupTablePlansForSections, sectionTablePlans, sectionTablePlansPrompt, tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
 import { constructionOrgBonusModulePrompt, constructionOrgChapterRulePrompt } from './constructionOrgQualityRules';
 import { buildProcessKnowledgePrompt, matchProcessKnowledgeCards } from './constructionProcessKnowledge';
-import { criticalSectionBlockerMinChars, currentSectionBlock, ensureGroupTertiaryShell, ensureTertiarySectionShell, groupHasMajorConstructionSection, isCriticalDeepSection, isGeneralManagementSection, keySectionWritingRequirement, majorContentPollutionIssue, mergeDuplicateWorkPackageSubsections, outputTokensForChapter, parseMajorConstructionPackages, repairMajorContentWorkPackageLabels, sectionContentBody, sectionStructureIssue, stripMarkdownTableBlocks, workPackageCrossSectionIssue, workPackageSkeletonPrompt, workPackageSkeletonTitles } from './chapterPostProcessing';
+import { criticalSectionBlockerMinChars, currentSectionBlock, ensureGroupTertiaryShell, ensureTertiarySectionShell, groupHasMajorConstructionSection, isCriticalDeepSection, isGeneralManagementSection, keySectionWritingRequirement, majorContentPollutionIssue, matchBlockSkeletonNames, mergeDuplicateWorkPackageSubsections, outputTokensForChapter, parseMajorConstructionPackages, repairMajorContentWorkPackageLabels, sectionContentBody, sectionStructureIssue, stripMarkdownTableBlocks, workPackageCrossSectionIssue, workPackageSkeletonPrompt, workPackageSkeletonTitles } from './chapterPostProcessing';
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE, QUANTIFIED_FACT_RE } from './parameterPatterns';
 import { buildSemanticGate } from './semanticGate';
-import type { PlannedChapterBlock, PlannedChapterStructure } from './chapterPlanner';
+import type { PlannedChapterBlock, PlannedChapterStructure } from './integratedBlueprint';
 import { cleanFactValue, isActionableFactValue } from './documentFactTrace';
 import { DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE, chapterAnchoredRules, sectionAnchoredRules } from './writingSpec';
 
@@ -251,7 +251,7 @@ function factCoveredByEvidence(fact: string, evidence: DocumentEvidence[]): bool
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; disableThinkingBoost?: boolean; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; planDataMasterText?: string; decisionLockText?: string; skipT2Catalog?: boolean } = {}) {
+export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; disableThinkingBoost?: boolean; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; blueprintDataText?: string; blueprintSliceText?: string; skipT2Catalog?: boolean } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   // 证据注入预算与 generationBudget 的证据区间（7k-26k 档）对齐：未显式传入时保持旧默认，
   // 由 documentGenerator 主路径统一传入按章节目标字计算的 floor/ceiling
@@ -353,10 +353,10 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     `章节目的：${chapter.purpose}`,
     requirement ? `用户要求：${requirement}` : '',
     userFactBlock,
-    // B2 计划数据主表注入 L1：全项目共享一次的恒定段（计划类数值唯一数据源，同章各块值完全相同 → prefix cache 共享命中）
-    options.planDataMasterText || '',
-    // 1.2 关键决策锁注入（全项目恒定段，与主表同位：垂直运输/模板体系等封闭类目锁定值，各调用逐字节一致）
-    options.decisionLockText || '',
+    // B2 一体化蓝图参数桶注入 L1：全项目共享一次的恒定段（计划类数值唯一权威源，同章各块值完全相同 → prefix cache 共享命中）
+    options.blueprintDataText || '',
+    // 章切片注入（章级恒定段，同章各块值相同 → 章内共享前缀）
+    options.blueprintSliceText || '',
     // 块级调用必须压缩上下文：planned 块路径按块并发成稿，每块全量注入 projectContext（蓝图+事实主表+图谱映射）
     // 会让单块输入 token 数倍于输出预算，实测单块调用 30~40 分钟（真实性能缺陷：徽光阁 3 章块草稿累计 112 分钟）；
     // 压缩只保留结构化事实行与蓝图约束行，专业叙述由块级证据承载
@@ -407,8 +407,8 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
       promptTexts ? `配置写作主控提示词：\n${promptTexts}` : '',
       requirement ? `用户要求：${requirement}` : '',
       userFactBlock,
-      options.planDataMasterText || '',
-      options.decisionLockText || '',
+      options.blueprintDataText || '',
+      options.blueprintSliceText || '',
       '请生成可直接导出的 Markdown 章节，要求：',
       '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的项目专属事实；法律法规名称、标准规范编号等公共知识可依据现行有效版本直接引用。',
       '- 将材料要点自然融入正文；不要输出系统证据清单、中间分析过程或后台流程话术。',
@@ -815,7 +815,7 @@ function excavationHazardRuleCard(sectionTitle: string, projectContext: string, 
   ].join('\n');
 }
 
-export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; scopedProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number; allowLenientStructureGate?: boolean; tablePlanInstruction?: string; planDataMasterText?: string; decisionLockText?: string; sharedFactLayerText?: string; sectionRankBoost?: (item: DocumentEvidence) => number }) {
+export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; skeletonProjectContext?: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; scopedProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number; allowLenientStructureGate?: boolean; tablePlanInstruction?: string; blueprintDataText?: string; blueprintSliceText?: string; sharedFactLayerText?: string; sectionRankBoost?: (item: DocumentEvidence) => number }) {
   const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
   const sectionFactCard = await buildSectionFactCard(input.sectionTitle, sectionEvidence);
   // A2 块级增量压缩（小节管线对齐主题块管线口径）：章级 T0 关键事实层与摘要池已由
@@ -832,11 +832,12 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     ? (input.scopedProjectContext ? compactScopedProjectContext(input.projectContext) : compactSectionProjectContext(input.projectContext))
     : input.projectContext;
   // 工作包级小节（项目主要施工内容/主要分部分项工程施工方案/主要施工方法）：从项目图谱/上下文识别工作包，匹配工艺知识卡，注入工序链与工艺参数参考
-  const majorConstructionPackages = (MAJOR_CONTENT_SECTION_RE.test(input.sectionTitle) || DIVISION_SECTION_RE.test(input.sectionTitle)) ? parseMajorConstructionPackages(input.projectContext, sectionEvidence) : [];
+  const skeletonContext = input.skeletonProjectContext ?? input.projectContext;
+  const majorConstructionPackages = (MAJOR_CONTENT_SECTION_RE.test(input.sectionTitle) || DIVISION_SECTION_RE.test(input.sectionTitle)) ? parseMajorConstructionPackages(skeletonContext, sectionEvidence) : [];
   const processKnowledgeCards = majorConstructionPackages.length > 0 ? matchProcessKnowledgeCards(majorConstructionPackages.map(pkg => pkg.name)) : [];
   const processKnowledgePrompt = processKnowledgeCards.length > 0 ? buildProcessKnowledgePrompt(processKnowledgeCards, majorConstructionPackages.map(pkg => pkg.name)) : '';
   // 骨架锁定（稳定版）：识别到足够工作包时把小节内部 #### 标题锁死为系统清单，LLM 只填内容不编结构
-  const workPackageSkeleton = (MAJOR_CONTENT_SECTION_RE.test(input.sectionTitle) || DIVISION_SECTION_RE.test(input.sectionTitle)) ? workPackageSkeletonPrompt(input.projectContext, sectionEvidence) : '';
+  const workPackageSkeleton = (MAJOR_CONTENT_SECTION_RE.test(input.sectionTitle) || DIVISION_SECTION_RE.test(input.sectionTitle)) ? workPackageSkeletonPrompt(skeletonContext, sectionEvidence) : '';
   const prompt = [
     input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
     `文档模板：${input.template.name}`,
@@ -846,10 +847,10 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     // 同章小节并发成稿时前缀逐节分叉是命中率低的根因之一，共享段收敛后同章 30+ 小节可命中同一前缀
     input.requirement ? `用户要求：${input.requirement}` : '',
     userRequirementFactsPrompt(input.requirement),
-    // B2 计划数据主表注入 L1：全项目共享一次的恒定段（同章各小节值完全相同 → prefix cache 共享命中）
-    input.planDataMasterText || '',
-    // 1.2 关键决策锁注入（全项目恒定段，与主表同位）
-    input.decisionLockText || '',
+    // B2 一体化蓝图参数桶注入 L1：全项目共享一次的恒定段（同章各小节值完全相同 → prefix cache 共享命中）
+    input.blueprintDataText || '',
+    // 章切片注入（章级恒定段，同章各小节值相同 → 章内共享前缀）
+    input.blueprintSliceText || '',
     input.projectContext ? `上下文：\n${compactProjectContextText}` : '',
     input.factCoverageContext || '',
     // D1/A1 章级证据池上移 L2：同章各小节值完全相同 → prefix cache 共享命中；节级 L3 只带节相关增量（A2）
@@ -888,8 +889,8 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
       input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
       input.requirement ? `用户要求：${input.requirement}` : '',
       userRequirementFactsPrompt(input.requirement),
-      input.planDataMasterText || '',
-      input.decisionLockText || '',
+      input.blueprintDataText || '',
+      input.blueprintSliceText || '',
       '本章节结构已由系统按模板和提示词锁定；不得删除、重命名、合并或重排当前节标题；每个节下必须自然展开三级小节，三级小节承载正文。',
       SECTION_GENERATION_SAFETY_RULES,
     ]),
@@ -1080,9 +1081,9 @@ async function buildFocusedSectionDraft(input: Parameters<typeof buildLlmSection
     // P5 前缀缓存收敛：跨小节共享段前置（章节标题/用户要求/通用禁语），节级变化段统一后置——
     // focused writer 被逐小节管线并发调用，共享前缀越长同章小节命中越多
     input.requirement ? `用户要求：${input.requirement}` : '',
-    // B2 计划数据主表注入：focused 降级路径同样以主表为计划类数值唯一口径
-    input.planDataMasterText || '',
-    input.decisionLockText || '',
+    // B2 一体化蓝图参数桶注入：focused 降级路径同样以参数桶为计划类数值唯一口径
+    input.blueprintDataText || '',
+    input.blueprintSliceText || '',
     '禁止写“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列话术；直接写项目事实、施工内容、控制措施和验收要求。',
     // ── 节级变化段起点（同章各小节以下内容互不相同；保持其在 prompt 尾部）──
     `指定节标题：### ${input.sectionTitle}`,
@@ -1166,9 +1167,9 @@ async function supplementSectionContent(input: Parameters<typeof buildLlmSection
     `章节标题：${input.chapter.title}`,
     `当前小节：${input.sectionTitle}`,
     input.requirement ? `用户要求：${input.requirement}` : '',
-    // B2 计划数据主表注入：补写计划类内容时数值仍以主表为唯一口径
-    input.planDataMasterText || '',
-    input.decisionLockText || '',
+    // B2 一体化蓝图参数桶注入：补写计划类内容时数值仍以参数桶为唯一口径
+    input.blueprintDataText || '',
+    input.blueprintSliceText || '',
     input.factCoverageContext || '',
     professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
     sectionFactCard.prompt,
@@ -1293,7 +1294,7 @@ function groupSectionTargets(targets: ReturnType<typeof sectionTargets>, maxGrou
   }
   return groups;
 }
-export async function buildSectionGroupChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; compactProjectContext?: boolean; scopedProjectContext?: boolean; planDataMasterText?: string; decisionLockText?: string; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
+export async function buildSectionGroupChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; compactProjectContext?: boolean; scopedProjectContext?: boolean; blueprintDataText?: string; blueprintSliceText?: string; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   const targets = sectionTargets(input.chapter, input.targetWords);
   if ((input.chapter.sections || []).filter(Boolean).length > 0) return buildSectionParallelChapterContent(input);
   if (targets.length < 2) return undefined;
@@ -1376,8 +1377,8 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
             factCoverageContext: input.factCoverageContext,
             compactProjectContext: input.compactProjectContext,
             scopedProjectContext: input.scopedProjectContext,
-            planDataMasterText: input.planDataMasterText,
-            decisionLockText: input.decisionLockText,
+            blueprintDataText: input.blueprintDataText,
+            blueprintSliceText: input.blueprintSliceText,
             tablePlanInstruction: buildSectionTablePlanInstruction(input.chapter, item.title, item.title === unassignedHostTitle ? unassignedPlans : []),
             signal: activeSignal,
             diagnostics: input.diagnostics,
@@ -1415,9 +1416,9 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
           targetWords: groupTargetWords,
           maxWords: Math.ceil(groupTargetWords * 1.08),
           maxTokens: outputTokensForChapter(Math.floor(groupTargetWords * 0.45), groupTargetWords),
-          // B2 计划数据主表注入 L1（全项目共享一次的恒定段）
-          planDataMasterText: input.planDataMasterText,
-          decisionLockText: input.decisionLockText,
+          // B2 一体化蓝图参数桶注入 L1（全项目共享一次的恒定段）
+          blueprintDataText: input.blueprintDataText,
+          blueprintSliceText: input.blueprintSliceText,
           factCoverageContext: `${input.factCoverageContext || ''}\n本轮输出多个节时，每个 ### 节下必须至少有一个 #### 三级小节承载正文。#### 标题只允许使用该 ### 节下已规划的小节名，禁止新造标题；只写本节标题覆盖的内容，不得重复本章其他节内容。`,
           twoStep: false,
           signal: input.signal,
@@ -1452,7 +1453,7 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(`## ${input.chapter.title}\n\n${body}`, input.forbidDrawingImages));
 }
 
-export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; materialContextHash?: string; allowPartialResult?: boolean; compactProjectContext?: boolean; scopedProjectContext?: boolean; planDataMasterText?: string; decisionLockText?: string; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
+export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; skeletonProjectContext?: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; materialContextHash?: string; allowPartialResult?: boolean; compactProjectContext?: boolean; scopedProjectContext?: boolean; blueprintDataText?: string; blueprintSliceText?: string; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   const targets = sectionTargets(input.chapter, input.targetWords);
   if (targets.length < 2) return undefined;
   const configuredSectionConcurrency = Number(process.env.DOCUMENT_SECTION_CONCURRENCY || targets.length || 1);
@@ -1601,6 +1602,10 @@ export interface PlannedChapterContentInput {
   missingFacts: string[];
   promptTexts: string;
   projectContext: string;
+  /** 骨架提取专用完整上下文（工作包骨架锁定/工艺知识匹配用）：章节写作上下文中 context 瘦身
+   * 裁剪后不含招标范围/图谱包段，导致 majorConstructionSkeletonNames 三来源全部哑火 → 骨架锁定不触发；
+   * 提供时骨架提取改用此完整上下文，其余写作段仍用瘦身 context */
+  skeletonProjectContext?: string;
   requirement?: string;
   roleContext?: string;
   targetWords: number;
@@ -1609,10 +1614,12 @@ export interface PlannedChapterContentInput {
   factCoverageContext?: string;
   compactProjectContext?: boolean;
   scopedProjectContext?: boolean;
-  /** B2 计划数据主表注入文本（L1 恒定段，全项目共享一次） */
-  planDataMasterText?: string;
-  /** 1.2 关键决策锁注入文本（全项目恒定段，与主表同位） */
-  decisionLockText?: string;
+  /** B2 一体化蓝图参数桶注入文本（L1 恒定段，全项目共享一次） */
+  blueprintDataText?: string;
+  /** 二期蓝图接管：章切片渲染文本（章级恒定段，同章各块值相同 → 章内共享前缀） */
+  blueprintSliceText?: string;
+  /** 二期蓝图接管：must_cite+strict 参数数值清单（块质检第二轮反馈挂接，未引用时定向重试） */
+  blueprintMustCiteHint?: string;
   sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>;
   /** 块级进度回调：块成稿完成即触发（phase='complete'，partialSections 为已完成块正文），供 checkpoint 快照写盘 */
   onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void;
@@ -1631,6 +1638,22 @@ export interface PlannedChapterContentResult {
   allSucceeded: boolean;
   /** 成功块拼接的章节 Markdown（含章标题外壳；失败块缺失时不包含该块正文） */
   markdown: string;
+}
+
+/** 4.19.5 分部章容器块总述提示词（丰乐镇第二轮验收）：分部章容器块（「主要分部分项工程施工方案」在
+ * 「主要施工方法」章内）是全章总述小节——各分部方案已在本章其他小节展开，容器块不得复写任何单个
+ * 分部工程的三段式方案，也不得使用本章其他小节标题。正文直接展开（无需四级标题），按
+ * 分部划分/总体部署/组织资源/质量安全进度接口四部分组织；禁止 Markdown 表格（块质检对关键小节
+ * 确定性剥表）与空泛原则表述。 */
+export function divisionContainerOverviewPrompt(targetWords: number): string {
+  return [
+    '【分部分项工程施工方案总述】本节为本章各分部分项工程施工方案的总体概述小节：各分部工程的具体施工方案已在本章其他小节逐项展开，本节不得复写任何单个分部工程的三段式方案，也不得把本章其他小节（各分部工程方案）标题作为本节任何标题。正文直接展开、无需四级标题，禁止 Markdown 表格，按以下四部分组织：',
+    '一、分部工程划分与专业分组：按专业分组（如道路、排水、景观绿化、电气照明、公建配套等）列明本章覆盖的分部工程范围与作业内容，说明各专业间的相互关系；',
+    '二、施工总体部署：施工分区与流水段划分、总体施工顺序安排、关键线路与节点控制、各专业施工穿插衔接原则；',
+    '三、施工组织与资源配置：按专业划分的施工队伍与作业面安排、总体资源投入与调配原则、多专业协调管理机制；',
+    '四、质量、安全与进度接口：各分部工程间的成品保护与工序交接安排、总体质量控制与检测验收安排、安全文明施工总体要求。',
+    `每部分不少于 ${Math.floor(targetWords / 4)} 字，全文合计不少于 ${targetWords} 字；结合本项目资料中的具体工程内容（单体、部位、专业、工程量）展开，禁止空泛原则表述。`,
+  ].join('\n');
 }
 
 export async function buildPlannedChapterContent(input: PlannedChapterContentInput, structure: PlannedChapterStructure): Promise<PlannedChapterContentResult | undefined> {
@@ -1694,9 +1717,49 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     // 该 H4 小节的骨架由修复链 enforceWorkPackageSkeletons 阶段 0 补建 + 锚点直连补写兜底；
     // 历史缺陷（轮4 实测）：块内 H4 命中即整块锁骨架，scopeEngineeringNames 把证据里的约束文本
     //（工程量/系统约束/不得编造等）当工作包名，块质检要求模型输出垃圾标题 → 两轮+拆半全失败 → 章失败
-    const keySectionKind = MAJOR_CONTENT_SECTION_RE.test(block.title) ? 'major' : DIVISION_SECTION_RE.test(block.title) ? 'division' : '';
-    const blockSkeletonNames = keySectionKind ? workPackageSkeletonTitles(input.projectContext, blockEvidence) : [];
-    const blockSkeletonPrompt = keySectionKind ? workPackageSkeletonPrompt(input.projectContext, blockEvidence) : '';
+    // P2.5 骨架锁定兑底：块标题本身是工作包级小节，或本章标题是「主要施工方法」类分部章
+    //（块标题为分部名，如「道路工程」）时锁定骨架——分部章的块标题不匹配 DIVISION_SECTION_RE，
+    // 历史缺陷（丰乐镇第十轮实测）：「主要施工方法」章 23 个蓝图分部名块因 keySectionKind 为空
+    // 从不触发骨架锁定，三来源提取又哑火（图谱包被项目名过滤/招标范围叙述式提取不足/证据无清单正文）→
+    // 整章自由发挥丢分部结构
+    const keySectionKind = MAJOR_CONTENT_SECTION_RE.test(block.title) ? 'major' : (DIVISION_SECTION_RE.test(block.title) || DIVISION_SECTION_RE.test(input.chapter.title)) ? 'division' : '';
+    // 4.19.5 回归（丰乐镇第二轮验收）：分部章容器块（「主要分部分项工程施工方案」在「主要施工方法」章内）
+    // 是全章总述小节，不得套用单分部三段式 divisionPrompt——历史缺陷：容器块按三段式展开时 LLM 把本章全部
+    // 分部名写成 H4（清单外）+ 每分部三段标签重复展开（重复）→ 两轮重试+确定性兑底全灭 → 章阻断；
+    // 容器块改发总述提示词（不锁骨架、正文直接展开、禁止使用其他小节标题），清单外 H4 由块质检确定性修复剥离。
+    const isDivisionChapterContainer = DIVISION_SECTION_RE.test(input.chapter.title) && DIVISION_SECTION_RE.test(block.title);
+    // 骨架提取专用完整上下文：瘦身 context 缺招标范围/图谱包段时骨架名提取哑火，回退到完整上下文
+    const skeletonContext = input.skeletonProjectContext ?? input.projectContext;
+    // 拆半自愈子块只要求自身 subPoints 内的骨架名：半块字数预算（≥1800 字）物理装不下全部
+    // 工作包 × 三要素，历史缺陷是半块质检要求全量骨架名 → 两半块各写全部包 → 必败；
+    // 主块（subPoints 已骨架展开）与骨架名同源，过滤后仍是全量名
+    const blockSkeletonNamesRaw = keySectionKind && !isDivisionChapterContainer ? workPackageSkeletonTitles(skeletonContext, blockEvidence) : [];
+    // P2.7 骨架名一律按块要点标题过滤（单要点分部块修复，P0 验收实测）：
+    // 原实现 subPoints 仅 1 个时全量保留章级工作包骨架名 → 「主要施工方法」章每个分部块
+    // （小菜园/门窗工程等）被要求写全章级工作包（终端--白水塘、景观工程等）→ 与
+    // coverageList「同名要点由 H3 外壳承担、无需四级标题」矛盾 → 两轮重试全灭 → 章失败。
+    // 统一按 subPoints 标题包含匹配过滤：单要点分部块匹配不到章级工作包名 → 空 →
+    // divisionPrompt 三段式接管；容器块 subPoints 已骨架展开（同源）→ 全量保留；
+    // 过滤后不足 minCount(3) 视为无骨架可锁（与 workPackageSkeletonPrompt 内部
+    // minCount 语义对齐，1-2 个骨架名时提示词不注入但质检仍要求是历史不对称残留）
+    const subPointSkeletonNames = block.subPoints.map(point => point.title).filter(Boolean);
+    const matchedSkeletonNames = isDivisionChapterContainer ? [] : matchBlockSkeletonNames(blockSkeletonNamesRaw, subPointSkeletonNames);
+    // P2.5 骨架名兑底：三来源提取不足 minCount（3）时，用块规划层 subPoints 标题兜底——
+    // 块规划与蓝图 outline 分部名同源（P1.3 已把 outline 分部名展开进容器块 subPoints），
+    // 是「主要施工方法」章在证据不足时唯一可靠的骨架来源；兜底不足时骨架锁定整体回退软约束
+    const blockSkeletonNames = isDivisionChapterContainer
+      ? []
+      : (matchedSkeletonNames.length > 0
+        ? matchedSkeletonNames
+        : (blockSkeletonNamesRaw.length < 3 && subPointSkeletonNames.length >= 3 ? subPointSkeletonNames : []));
+    const blockSkeletonPrompt = keySectionKind ? workPackageSkeletonPrompt(skeletonContext, blockEvidence, 3, blockSkeletonNames) : '';
+    // P2.5 分部块三段式结构：蓝图分部章（如「主要施工方法」）的分部块（标题=清单分部名，如「道路工程」）
+    // subPoints 仅同名 1 个、无 H4 骨架可锁——按施工概况/施工流程/施工方法三段标签锁写作结构，
+    // 与容器块骨架锁定的三要素要求同口径（历史缺陷：分部块自由发挥写成叙述体丢三要素）
+    const divisionThreeSegmentPrompt = keySectionKind === 'division' && blockSkeletonNames.length === 0 && !isDivisionChapterContainer
+      ? '【分部分项施工方案三段式】本节为一个分部分项工程的施工方案，必须且只能按“施工概况/施工流程/施工方法”三段标签逐段写出（三段缺一不可，禁止 Markdown 表格）：\n施工概况：作业对象与部位、工程量或规模、材料设备规格型号（数量类数值优先取工程量清单数据）；\n施工流程：工序先后顺序清晰（顺序词/箭头链/编号步骤任一形式）；\n施工方法：工艺做法、工艺参数（数值+单位）、验收检测与记录闭环。\n数值来源优先级：工程量、材料规格、设备型号等数量类数值优先取工程量清单数据；清单未覆盖的参数（标高、坡率、构造做法等）才取图纸数据；禁止“按设计图纸执行”“详见设计图纸”“按设计文件确定”式概括话术——必须落到具体数值或具体规范条文。'
+      : '';
+    const divisionContainerPrompt = isDivisionChapterContainer ? divisionContainerOverviewPrompt(block.targetWords) : '';
     const blockChapter = { ...input.chapter, title: block.title, sections: sectionTitles, tablePlans: blockTablePlans[index] || [] };
     const factsHint = block.facts.length
       ? `【本主题块专属事实（只能在本节使用，不得重复出现在本章其他节）】${block.facts.map(item => `- ${item}`).join('\n')}`
@@ -1714,7 +1777,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     // A22 单要点大块拆半分工指令（丰乐镇第九轮）：两半块共享同一 H4 要点，靠 halfFocus
     // 划定内容边界（前半=总体构成/框架，后半=具体展开/实施），防止两半块产出雷同正文
     const halfFocusLine = block.halfFocus ? `\n${block.halfFocus}` : '';
-    const blockRoleContext = [factsHint, blockSkeletonPrompt, `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下清单逐点写出实施性正文，标题必须与给定标题完全一致，不得改名、合并或遗漏；每个要点必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题：\n${coverageList}${forbiddenTitlesLine ? `\n${forbiddenTitlesLine}` : ''}${halfFocusLine}`].filter(Boolean).join('\n\n');
+    const blockRoleContext = [factsHint, blockSkeletonPrompt, divisionContainerPrompt, divisionThreeSegmentPrompt, `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下清单逐点写出实施性正文，标题必须与给定标题完全一致，不得改名、合并或遗漏；每个要点必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题：\n${coverageList}${forbiddenTitlesLine ? `\n${forbiddenTitlesLine}` : ''}${halfFocusLine}`].filter(Boolean).join('\n\n');
     let lastMissing: string[] = [];
     let lastDuplicates: string[] = [];
     let lastExtraneous: string[] = [];
@@ -1734,6 +1797,8 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         lastDuplicates.length ? `重复展开的 H4 要点标题：${lastDuplicates.join('、')}。同一小节内相同要点被重复展开多轮，必须只保留一轮完整展开，其余重复小节连同标题整体删除，不得以换编号方式重复同一内容。` : '',
         lastExtraneous.length ? `清单外标题（属于本章其他小节或不在本节要点清单内）：${lastExtraneous.join('、')}。这些标题连同其正文整块删除，本节只允许输出上面清单中的 H4 标题与「${block.title}」H3 标题。` : '',
         lastMissing.length === 0 && lastDuplicates.length === 0 && lastExtraneous.length === 0 ? '必须完整包含每个 H4 要点标题并展开正文，不得合并或遗漏要点。' : '',
+        // 二期蓝图接管：must_cite+strict 数值清单挂进第二轮反馈（未引用/数值不一致时定向重试）
+        input.blueprintMustCiteHint ? `【蓝图锁定数值检查】正文必须逐条出现以下蓝图锁定数值且与给定值完全一致：${input.blueprintMustCiteHint}。` : '',
         // A22 缺口数字反馈（丰乐镇第九轮）：只报“不少于目标字数”不报缺口时模型输出不升反降
         //（第八轮实测 1742→1377 字）；带当前字数与缺口数字的反馈比笼统指令收敛有效得多
         lastChars > 0 ? `当前输出仅 ${lastChars} 字，距目标 ${block.targetWords} 字还缺 ${Math.max(0, block.targetWords - lastChars)} 字，必须逐点展开到不少于 ${Math.floor(block.targetWords * 0.9)} 字。` : '总字数不少于目标字数。',
@@ -1770,9 +1835,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           // P5 去重：factsHint 已并入 blockRoleContext（roleContext 参数）注入，此处再拼会导致
           // 同一块专属事实清单在 prompt 中重复出现两次（浪费输入 token 且稀释前缀缓存）
           factCoverageContext: input.factCoverageContext || '',
-          // B2 计划数据主表注入 L1（全项目共享一次的恒定段）
-          planDataMasterText: input.planDataMasterText,
-          decisionLockText: input.decisionLockText,
+          // B2 一体化蓝图参数桶注入 L1（全项目共享一次的恒定段）
+          blueprintDataText: input.blueprintDataText,
+          blueprintSliceText: input.blueprintSliceText,
           twoStep: false,
           signal: input.signal,
           diagnostics: input.diagnostics,
@@ -1821,8 +1886,11 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         const duplicates = findDuplicateH4Titles(withBlockShell);
         // 4.19 清单外标题（串章骨架/自由发挥）视为质检不达标：H3 只允许块标题、H4 只允许本块要点标题；
         // 本块要点承载的评分细目原标题（sources）入白名单——单要点块模型按证据写出细目原标题 H4 属内容归位，
-        // 不算清单外（第七次回归实证：块「项目理解与编制边界」输出「#### 编制说明与工程概况」被误杀 → 章失败）
-        const extraneous = findExtraneousBlockTitles(withBlockShell, block.title, sectionTitles, [...otherBlockTitleSet], [...block.subPoints.flatMap(point => point.sources), ...blockSkeletonNames]);
+        // 不算清单外（第七次回归实证：块「项目理解与编制边界」输出「#### 编制说明与工程概况」被误杀 → 章失败）；
+        // P2.7 三段式标签入白名单（P0 验收实测）：divisionThreeSegmentPrompt 要求按「施工概况/施工流程/施工方法」
+        // 三段标签逐段写出，模型按 H4 标签展开属结构合规，原白名单不含三段标签 → 被误判清单外 → 章失败
+        const divisionLabelAllowList = divisionThreeSegmentPrompt ? ['施工概况', '施工流程', '施工方法'] : [];
+        const extraneous = findExtraneousBlockTitles(withBlockShell, block.title, sectionTitles, [...otherBlockTitleSet], [...block.subPoints.flatMap(point => point.sources), ...blockSkeletonNames, ...divisionLabelAllowList]);
         // 达标契约：质检阈值 = 0.9×块目标。minWords 已不打折（提示词硬要求写满目标字数），
         // 实测模型单次输出 4000~6300 字无压力——"自然输出仅 44%"是历史 minWords 折扣导致的伪观测，
         // 折扣拆除后 0.9 阈值即必然达标；字数缺口不再交由补写轮补齐（补写轮已删除）
@@ -1839,7 +1907,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         if (missing.length === 0) {
           // 4.19.1 确定性修复优先：先同 H3 重复 H4 去重，再清单外标题行剥离（正文零丢失），
           // 修复后字数达标即通过——标题层问题由代码确定性修复，不因整块删除掉档触发重试/失败
-          const repaired = stripExtraneousBlockHeadings(dedupeRepeatedSubsections(withBlockShell), block.title, sectionTitles, block.subPoints.flatMap(point => point.sources));
+          const repaired = stripExtraneousBlockHeadings(dedupeRepeatedSubsections(withBlockShell), block.title, sectionTitles, [...block.subPoints.flatMap(point => point.sources), ...divisionLabelAllowList]);
           const repairedChars = documentTextLength(repaired);
           if (repairedChars >= Math.floor(block.targetWords * 0.9)) {
             if (input.diagnostics && (extraneous.length > 0 || duplicates.length > 0)) input.diagnostics.llm.lastInfo = `块标题层已确定性修复：${block.title}（清单外 ${extraneous.length} 个、重复 H4 ${duplicates.length} 个；${chars}→${repairedChars} 字）`;
@@ -1889,8 +1957,8 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           factCoverageContext: input.factCoverageContext,
           compactProjectContext: input.compactProjectContext,
           scopedProjectContext: input.scopedProjectContext,
-          planDataMasterText: input.planDataMasterText,
-          decisionLockText: input.decisionLockText,
+          blueprintDataText: input.blueprintDataText,
+          blueprintSliceText: input.blueprintSliceText,
           signal: input.signal,
           diagnostics: input.diagnostics,
         }, perPointAttempts)));

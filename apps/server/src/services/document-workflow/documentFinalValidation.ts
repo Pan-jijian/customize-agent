@@ -1,4 +1,5 @@
 import { closedLoopDensityIssues, plannedAutoSpecGateIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
+import { majorContentGovernanceIssues } from './constructionOrgQualityRules';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
 import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces } from './documentFactTrace';
@@ -17,6 +18,8 @@ import { dangerousApplicabilityIssues } from './dangerousApplicability';
 import { stagePhrasingIssues } from './stagePhrasing';
 import { emergencySectionDepthIssues } from './emergencySectionDepth';
 import { displayChapterTitle } from './outline';
+import { blueprintCitationConsistencyIssues } from './integratedBlueprint';
+import type { BlueprintData } from './integratedBlueprint';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, TenderRequirementModel, ValidationIssue } from './types';
 
 /**
@@ -110,10 +113,12 @@ export async function buildStandardFinalValidationIssues(input: {
   tenderRequirements?: TenderRequirementModel;
   /** 评分项要求↔章节语义相似度函数（本地 bge 余弦），变体表述响应兜底 */
   requirementsSimilarity?: (leftText: string, rightText: string) => number;
-  /** 总量口径语义分类器（round-13）：事实反查的口径归属语义复核（本地 bge 恒可用） */
+  /** 总量口径语义分类器（round-13）：事实反查口径归属语义复核（本地 bge 恒可用） */
   factTokenScopeClassifier: FactTokenScopeClassifier;
   /** 专业深度语义分类器（round-14）：章节专业深度/缺项/套话/闭环/依赖的语义判定（本地 bge 恒可用） */
   professionalDepthClassifier: ProfessionalDepthClassifier;
+  /** 一体化蓝图参数桶（生成前锁定口径）：蓝图引用冲突终检兑底（实时 finalMarkdown 重跑，替除生成阶段全卷快照） */
+  blueprintData?: BlueprintData;
 }): Promise<ValidationIssue[]> {
   const factVerification = await generatedFactVerificationIssuesAsync(input.markdown, input.factsModel, { scopeClassifier: input.factTokenScopeClassifier });
   // W4/P3 评分项要求正文级语义检测：要求项 ↔（章节标题 + 正文句）同闭包 embedding，
@@ -153,6 +158,10 @@ export async function buildStandardFinalValidationIssues(input: {
     ...streetLightCountMismatchIssues(input.markdown, input.factsModel),
     // F14：规格错位终检兑底（正文规格 vs 清单权威按部位比对；权威映射缺失时静默跳过）
     ...specLocationMismatchIssues(input.markdown, input.factsModel.specAuthorityMap),
+    // 4.19.9 蓝图引用冲突终检兑底（与 globalQualityGates 生成阶段同源检测器的实时 finalMarkdown 重跑）：
+    // 生成阶段全卷快照消息已在 recomputeFinalValidationBundle 中剔除，终稿蓝图口径冲突由本实时版唯一报告
+    //（第五轮实测：终稿已把塑料管拆为 DN200 污水管 8205.53m / DN110 雨水管 7525.01m 两口径后，旧快照仍报单一蓝图冲突）
+    ...(input.blueprintData ? blueprintCitationConsistencyIssues(input.markdown, input.blueprintData).filter(issue => issue.level === 'error') : []),
     // h13：桩基表述残留（地基与基础无桩基工序但全文残留桩基表述）
     ...foundationFormResidueIssues(input.markdown),
     // h14：关键设计决策两可表述阻断（评分报告 P4「桩基（或独立基础/筏板基础按图纸实施）」）
@@ -221,6 +230,8 @@ export async function buildStandardFinalValidationIssues(input: {
     ...constructionOrgChapterDataCoverageIssues(input.chapters, input.factsModel),
     ...constructionOrgMajorContentIssues(input.chapters, input.markdown),
     ...constructionOrgDivisionSectionIssues(input.chapters, input.markdown),
+    // G2 关键小节清单口径治理（禁表格承载正文 + 禁清单内部口径词，与生成闭环同源）
+    ...majorContentGovernanceIssues(input.markdown),
     ...constructionOrgBonusModuleIssues(input.chapters),
     ...chapterDependencyIssues(input.chapters, analyses),
     ...documentDeliveryScoreIssues(input.markdown, input.chapters, input.factsModel, analyses),

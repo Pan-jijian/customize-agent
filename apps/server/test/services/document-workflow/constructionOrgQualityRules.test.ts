@@ -11,6 +11,8 @@ import {
   constructionOrgMajorContentIssues,
   constructionOrgProfessionalChainIssues,
   constructionOrgProjectTypePrompt,
+  majorContentGovernanceIssues,
+  perPackageContentElementIssues,
 } from '@/services/document-workflow/constructionOrgQualityRules';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplateChapter, EvidenceFactIndex } from '@/services/document-workflow/types';
 
@@ -356,5 +358,141 @@ describe('constructionOrgDivisionSectionIssues（分部分项专项验收器）'
     expect(issues.length).toBe(1);
     expect(issues[0].severity).toBe('blocker');
     expect(issues[0].message).toContain('缺失');
+  });
+});
+
+describe('perPackageContentElementIssues（G1 逐专业工程三要素判定）', () => {
+  it('平铺式缺「作业对象与工程量」报 blocker 并点名缺维', () => {
+    const markdown = `## 第一章 工程概况
+
+### 1.2 项目主要施工内容
+
+本工程雨水管网施工按“测量放线→沟槽开挖→管道安装→回填压实→闭水试验”顺序组织，采用波纹管承插连接，试验压力0.1MPa，检测合格后验收归档。
+`;
+    const issues = perPackageContentElementIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].severity).toBe('blocker');
+    expect(issues[0].message).toContain('作业对象与工程量');
+    expect(issues[0].message).not.toContain('工序顺序');
+    expect(issues[0].message).not.toContain('施工方法');
+  });
+
+  it('标签型 H4 组织缺概况时整块判定报缺维（2.14 楼地面装饰工程形态）', () => {
+    const markdown = `## 第二章 主要施工方法
+
+### 2.14 楼地面装饰工程
+
+#### 2.14.1 施工流程
+基层清理→找平→铺贴→勾缝→养护。
+
+#### 2.14.2 施工方法
+采用干硬性水泥砂浆找平，缝宽3mm，平整度偏差不超过2mm，完成后洒水养护并验收记录。
+`;
+    const issues = perPackageContentElementIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('作业对象与工程量');
+  });
+
+  it('专业工程型 H4 逐块判定：仅缺方法的块被点名', () => {
+    const markdown = `## 第一章 工程概况
+
+### 1.2 项目主要施工内容
+
+#### 1.2.1 道路工程
+作业对象为村内道路硬化，工程量20931.02平方米，工序按“路基处理→碎石摊铺→碾压→混凝土浇筑”顺序组织，采用振动压路机碾压，压实度检测不低于93%并形成验收记录。
+
+#### 1.2.2 亮化工程
+作业对象为村内路灯，共118套。
+`;
+    const issues = perPackageContentElementIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('亮化工程');
+    expect(issues[0].message).toContain('工序顺序');
+  });
+
+  it('三要素齐全（自然成文）不误报', () => {
+    const markdown = `## 第二章 主要施工方法
+
+### 2.7 亮化工程
+本工程亮化工程覆盖20个自然村，主要工程量包括太阳能路灯118套。施工流程按“基础定位放线→基坑开挖→基础浇筑→立杆安装→调试亮灯”顺序组织，采用混凝土C20基础、螺栓预埋连接，垂直度偏差不超过杆高的0.5%，调试合格后形成验收记录。
+`;
+    expect(perPackageContentElementIssues(markdown)).toEqual([]);
+  });
+
+  it('非关键小节不参与判定', () => {
+    const markdown = `## 第三章 质量保证措施
+
+### 3.1 质量目标
+本项目质量目标为合格。
+`;
+    expect(perPackageContentElementIssues(markdown)).toEqual([]);
+  });
+});
+
+describe('majorContentGovernanceIssues（G2 清单口径治理）', () => {
+  it('关键小节含 Markdown 表格报 blocker', () => {
+    const markdown = `## 第一章 工程概况
+
+### 1.2 项目主要施工内容
+
+| 名称 | 单位 | 数量 |
+| --- | --- | --- |
+| 级配碎石 | m² | 20931.02 |
+`;
+    const issues = majorContentGovernanceIssues(markdown);
+    expect(issues.length).toBeGreaterThan(0);
+    expect(issues.some(issue => issue.message.includes('表格'))).toBe(true);
+  });
+
+  it('关键小节含「分部小计」报 blocker', () => {
+    const markdown = `## 第一章 工程概况
+
+### 1.2 项目主要施工内容
+
+道路工程分部小计 20931.02m²，其中级配碎石摊铺 18949.52m²。
+`;
+    const issues = majorContentGovernanceIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('清单内部口径词'))).toBe(true);
+  });
+
+  it('弱口径词「合计」无工程量单位不误报（合计投入 60 人）', () => {
+    const markdown = `## 第一章 工程概况
+
+### 1.2 项目主要施工内容
+
+本工程高峰投入劳动力合计60人，作业对象与工程量、工序顺序、施工方法要素齐全。
+`;
+    expect(majorContentGovernanceIssues(markdown)).toEqual([]);
+  });
+
+  it('非关键小节的「合计」不受管辖', () => {
+    const markdown = `## 第五章 资源保障
+
+### 5.1 劳动力配置
+
+现场劳动力合计投入120人，分两班作业。
+`;
+    expect(majorContentGovernanceIssues(markdown)).toEqual([]);
+  });
+
+  it('「措施项目」作为专业工程类别名词不误报（2.18 措施项目小节）', () => {
+    const markdown = `## 第二章 主要施工方法
+
+### 2.18 措施项目
+
+本工程措施项目主要包括临时设施、施工降排水、脚手架搭设与安全防护等，作业对象与工程量、工序顺序、施工方法要素齐全。
+`;
+    expect(majorContentGovernanceIssues(markdown)).toEqual([]);
+  });
+
+  it('「措施项目费」属清单计价口径仍报 blocker', () => {
+    const markdown = `## 第一章 工程概况
+
+### 1.2 项目主要施工内容
+
+本工程措施项目费按分部分项工程费的比例计取，措施项目清单详见报价文件。
+`;
+    const issues = majorContentGovernanceIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('清单内部口径词'))).toBe(true);
   });
 });

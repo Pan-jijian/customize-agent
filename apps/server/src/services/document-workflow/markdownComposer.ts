@@ -330,6 +330,33 @@ export function sectionHeadingIssues(markdown: string): ValidationIssue[] {
   return issues.slice(0, 20);
 }
 
+/**
+ * H4 与三级小节同名确定性重命名（丰乐镇第五轮 F4 实测）：sectionHeadingIssues 同名标记为
+ * llm_repairable，但修复轮 patch 焦点在正文句，标题行残留进交付（「#### 2.24.2 绿化工程」
+ * 与同章「### 绿化工程」同名）。同名属结构重复（H4 与父级 H3 同名让目录出现两级完全相同的标题），
+ * 确定性追加「要点」二字消除重复且零内容损失（工程文档「XX要点」是自然子主题标题）；
+ * 判定口径与检测器同源：去编号后与全文 H3 标题（去编号）完全一致。
+ */
+export function dedupeTertiaryH4Titles(markdown: string): { markdown: string; fixedCount: number } {
+  const lines = markdown.split(/\r?\n/u);
+  const tertiaryTitles = new Set<string>();
+  for (const line of lines) {
+    const match = /^###\s+(.+)$/u.exec(line.trim());
+    if (match) tertiaryTitles.add(match[1].trim().replace(/^\d+(?:\.\d+)*\s*/u, ''));
+  }
+  let fixedCount = 0;
+  const next = lines.map(line => {
+    const match = /^(####\s+)(.*)$/u.exec(line);
+    if (!match) return line;
+    const title = match[2].trim();
+    const plain = title.replace(/^\d+(?:\.\d+)*\s*/u, '').trim();
+    if (!plain || !tertiaryTitles.has(plain) && !tertiaryTitles.has(title)) return line;
+    fixedCount += 1;
+    return `${match[1]}${title}要点`;
+  }).join('\n');
+  return { markdown: next, fixedCount };
+}
+
 /** 句级指纹归一：去空白与标点，保留汉字/字母/数字，用于跨节重复判定（确定性判定，内容改写归 Reviewer）。 */
 function sentenceFingerprint(sentence: string) {
   return sentence.replace(/[\s\p{P}]+/gu, '').toLowerCase();
@@ -514,6 +541,7 @@ export const MARKDOWN_TABLE_FORMAT_RULES = [
   '表格名称/标题不得占用表格单元格（如“竣工清理与移交计划表”作为表头第一格导致整表错位）；表名写在表格上方的正文叙述中，表内第一行从表头列名开始。',
   '正文表格不得展示后台溯源列或系统过程列，如“资料来源/说明”“资料来源/证明”“知识库来源”等。',
   '项目名称、项目编号、招标人/业主/建设单位、建设地点、建设规模、计划工期、质量标准、合同估算价等项目基础信息，只能在项目基本信息表中集中输出一次；后续章节如需引用，应写入正文或专业表格的业务字段，不得重复生成项目基础信息键值表。',
+  '表头差异化硬约束：全文各表格表头不得完全相同——各章同构控制表（如“关键节点|计划完成时间|责任岗位|投入资源|检查频次|滞后纠偏措施”）必须加本章主题限定，如首列表名改为“进度关键节点”“质量关键节点”“劳动力关键节点”等主题词，或表前引导句点名用途；禁止全文 3 处及以上完全相同的表头堆叠（同表头多表属模板化凑数形态，评标低分项）。',
 ].join('\n');
 
 /** 招标技术标评审写作方法论（《施组设计汇总方案.md》高频评审逻辑 + 用户“青天大模型 AI 评标”提示词提炼）：
@@ -560,6 +588,10 @@ export const SECTION_GENERATION_SAFETY_RULES = [
   '禁止编造具体日期：开工日期、竣工日期、具体某月某日只有在绑定材料明确提供时才可写入；材料未提供具体日期时，进度安排一律用相对工期表达（如"开工令下发后第7日""第1日～第7日"），不得写"2026年8月8日"等绝对日期。',
   '小节应有实质正文；除非用户或模板明确要求纯表格，否则表格只能作为辅助表达，不能整节只有表格。',
   '不得用通用兜底段落、空泛管理话术或后台缺料说明冒充正文；信息不足时只写已有事实、适用边界和待复核口径。',
+  // 丰乐镇第 3 轮实测：清单章节汇总行套名（墙、柱面装饰与隔断、幕墙工程）被照抄为小节标题，
+  // 标题含本项目未实施的工程类别（幕墙）；图集编号（15D501/11J900 等）资料未提供被 LLM 编造
+  '小节标题中的工程类别必须在本节正文有对应施工内容；不得照抄工程量清单章节汇总行名称，本项目未实施的工程类别不得出现在标题与正文中。',
+  '除非绑定材料明确提供图集编号，否则不得写“执行/参照XX图集”类引用；做法描述直接写构造层次与材料规格。',
 ].join('\n');
 
 /**
@@ -1313,7 +1345,7 @@ export function plannedStructureIssues(markdown: string, template: DocumentTempl
       continue;
     }
     const body = block.heading + block.body;
-    if (chapter.tableSections?.length && !hasMarkdownTable(body)) issues.push({ level: 'warning', message: `${chapter.title} 缺少必要的正式表格`, suggestion: '建议按模板 tableSections/tableRequirements 在对应小节补充正式 Markdown 表格。' });
+    if (chapter.tableSections?.length && !hasMarkdownTable(body)) issues.push({ level: 'warning', category: 'table', message: `${chapter.title} 缺少必要的正式表格`, suggestion: '建议按模板 tableSections/tableRequirements 在对应小节补充正式 Markdown 表格。' });
   }
   return issues;
 }

@@ -1,6 +1,8 @@
 import type { DocumentDraftChapter, ValidationIssue } from './types';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 import { buildSemanticGate } from './semanticGate';
+import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
+import { buildVagueResponseGate, FILLER_SEMANTIC_QUERIES } from './tenderBidChecks';
 import { hasProcessSequenceExpression, workPackageContentElementsComplete } from './utils';
 
 export { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
@@ -200,10 +202,14 @@ export async function fillerParagraphIssues(
 }
 
 /**
- * 套话句修复锚点提取：与 fillerParagraphIssues 同源语义 gate，逐章逐块逐句输出命中句原文（含小节定位），
+ * 套话句修复锚点提取：与检测器 fillerDensityReport（tenderBidChecks）同源判定——
+ * 同一批 FILLER_SEMANTIC_QUERIES 语义查询 + 同一模糊应答 gate，逐句输出命中句原文（含小节定位），
  * 供模板化修复闭环（globalQualityGates.repairTemplatingIssues）做锚点直连修复。
  * 检测定位 = 修复定位：命中句原文直接作为 repairChapterByQuality 的 anchorTexts，
  * 修复器不重新定位（历史缺陷：修复器在整章复述定位套话句 → patch 全部落空 → 套话占比永不收敛）。
+ * 三期修复：此前定位器与检测器不同源（17 条正则召回前置 gate vs 检测器全句池语义判定），
+ * 检测器报 32.3% 而定位器仅召回 1-2 章锚点 → 修复轮空转（实测仅 2 次修复调用）。
+ * 句池口径与 fillerDensityReport 一致（过滤标题/表格/列表行，按。；; 切句，≥12 字）。
  * 限幅：每章 12 句、全文 60 条（修复输入有界，防大文档锚点清单爆炸）。
  */
 export async function fillerSentenceTargets(
@@ -211,20 +217,35 @@ export async function fillerSentenceTargets(
   embedDocuments?: (texts: string[]) => Promise<number[][]>,
 ): Promise<Array<{ chapterId?: string; chapterTitle: string; section: string; sentence: string }>> {
   const targets: Array<{ chapterId?: string; chapterTitle: string; section: string; sentence: string }> = [];
-  const judge = await buildFillerParagraphGate(embedDocuments);
+  const vagueGate = await buildVagueResponseGate(embedDocuments);
   for (const chapter of chapters) {
+    // 句池构建：与 fillerDensityReport 同口径（标题/表格/列表行不进句池），并记录每句所在小节用于定位
+    const candidates: Array<{ sentence: string; section: string }> = [];
+    let currentSection = chapter.title;
+    for (const line of chapter.content.split('\n')) {
+      const trimmed = line.trim();
+      const heading = /^#{3,4}\s+(.+)$/u.exec(trimmed);
+      if (heading) { currentSection = heading[1].trim(); continue; }
+      if (!trimmed || /^\s*(#{1,6}\s+|\||[-*+]\s|>)/u.test(trimmed)) continue;
+      for (const raw of line.split(/[。；;]/u)) {
+        const sentence = raw.trim();
+        if (sentence.length >= 12) candidates.push({ sentence, section: currentSection });
+      }
+    }
+    if (candidates.length === 0) continue;
+    const sentences = candidates.map(item => item.sentence);
+    // 与 fillerDensityReport 同源判定：套话语义查询 bge 余弦 + 模糊应答语义复核
+    const fillerSimilarity = await buildSemanticSimilarity(sentences, [...FILLER_SEMANTIC_QUERIES], embedDocuments);
+    const vagueFlags = await vagueGate(sentences);
     let chapterCount = 0;
     const seen = new Set<string>();
-    for (const block of extractSectionBlocks(chapter.content)) {
-      const sentences = block.body.split(/[。；;]/u).map(sentence => sentence.trim()).filter(sentence => sentence.length >= 12);
-      if (sentences.length === 0) continue;
-      const flags = await judge(sentences);
-      for (let index = 0; index < sentences.length; index += 1) {
-        if (!flags[index] || seen.has(sentences[index]) || chapterCount >= 12) continue;
-        seen.add(sentences[index]);
-        chapterCount += 1;
-        targets.push({ chapterId: chapter.id, chapterTitle: chapter.title, section: block.heading || chapter.title, sentence: sentences[index] });
-      }
+    for (let index = 0; index < sentences.length; index += 1) {
+      const isFiller = FILLER_SEMANTIC_QUERIES.some(query => fillerSimilarity(sentences[index], query) >= SEMANTIC_COVERAGE_THRESHOLD)
+        || vagueFlags[index];
+      if (!isFiller || seen.has(sentences[index]) || chapterCount >= 12) continue;
+      seen.add(sentences[index]);
+      chapterCount += 1;
+      targets.push({ chapterId: chapter.id, chapterTitle: chapter.title, section: candidates[index].section, sentence: sentences[index] });
     }
     if (targets.length >= 60) break;
   }

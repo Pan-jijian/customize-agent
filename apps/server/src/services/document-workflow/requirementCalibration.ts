@@ -97,6 +97,28 @@ export async function calibrateOutlineSectionsToRequirements(input: {
     validated.push({ chapterTitle: chapter.title, sections: capped });
     if (totalCount >= MAX_TOTAL_ADDITIONS) break;
   }
+  // P3.3 属地合规必提项确定性补挂：创优目标/工伤保险属评审硬要求，LLM 偶发漏补（实测只补 3 节）
+  // 时按评分项摘要词面确定性补挂到语义宿主章（质量章/安全文明章），与 LLM 新增同构去重。
+  // 摘要未提及不补（以招标要求为准，不凭空新增属地条款）
+  const DETERMINISTIC_REQUIRED_SECTIONS: Array<{ summaryRe: RegExp; coverageRe: RegExp; sectionTitle: string; hostRe: RegExp; fallbackHostRe: RegExp }> = [
+    { summaryRe: /创优|优质工程|优质结构|文明工地|争创|质量目标/u, coverageRe: /创优|优质工程|优质结构|文明工地/u, sectionTitle: '创优目标与奖惩承诺', hostRe: /质量|创优/u, fallbackHostRe: /安全|文明|环保|绿色/u },
+    { summaryRe: /工伤保险|意外伤害保险|社会保险/u, coverageRe: /工伤保险|劳动保障|意外伤害/u, sectionTitle: '工伤保险与劳动保障', hostRe: /安全|文明|保障|职业健康|劳保/u, fallbackHostRe: /质量/u },
+  ];
+  for (const rule of DETERMINISTIC_REQUIRED_SECTIONS) {
+    if (!input.requirementSummary.some(item => rule.summaryRe.test(item))) continue;
+    const coveredAnywhere = input.chapters.some(chapter => (chapter.sections || []).some(section => rule.coverageRe.test(section)));
+    if (coveredAnywhere) continue;
+    const host = input.chapters.find(chapter => rule.hostRe.test(displayChapterTitle(chapter.title)))
+      || input.chapters.find(chapter => rule.fallbackHostRe.test(displayChapterTitle(chapter.title)))
+      || input.chapters[0];
+    if (!host) continue;
+    const existingAddition = validated.find(item => item.chapterTitle === host.title);
+    if (existingAddition) {
+      if (!existingAddition.sections.some(section => sectionTitleEquivalent(section, rule.sectionTitle))) existingAddition.sections.push(rule.sectionTitle);
+    } else {
+      validated.push({ chapterTitle: host.title, sections: [rule.sectionTitle] });
+    }
+  }
   return validated;
 }
 

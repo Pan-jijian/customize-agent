@@ -6,9 +6,10 @@
 import type { DocumentDraftChapter, DocumentExecutionStage, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict } from './types';
 import { displayStage, upsertProgressStage } from './progress';
 import { buildSemanticSimilarity, snapshotEmbedCacheStats } from './semanticSimilarity';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthFromFacts, excavationDepthLockIssues, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixAdjacentPhraseDuplication, fixAmbiguousEitherOrCandidates, fixForbiddenConfigurationTerms, fixHazardIdentificationGaps, fixHeaderlessTables, fixInternalTerminology, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSelfUnderminingCandidates, fixSixHundredPercentCoverage, foundationFormResidueIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, planDataMasterAuthorities, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters, stripOverviewRecapBodyLines, supportSystemConflictIssues, tablePeakLaborWithChainFallback } from './documentIntegrityChecks';
-import type { PlanDataMaster } from './planDataMaster';
-import { applyDeterministicConsistencyFixes, crossChapterConsistencyIssues, processSpecConflictIssues } from './qualityValidation';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthFromFacts, excavationDepthLockIssues, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixAdjacentPhraseDuplication, fixAmbiguousEitherOrCandidates, fixForbiddenConfigurationTerms, fixFormulaResidues, fixHazardIdentificationGaps, fixHeaderlessTables, fixInternalTerminology, fixMetaDiscourseDeclarations, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSelfUnderminingCandidates, fixSixHundredPercentCoverage, formulaResidueIssues, foundationFormResidueIssues, laborPeakConflictIssues, metaDiscourseDeclarationIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters, stripOverviewRecapBodyLines, supportSystemConflictIssues, tablePeakLaborWithChainFallback, waterLaborPeakAssociationIssues } from './documentIntegrityChecks';
+import { blueprintCitationConsistencyIssues, blueprintPlanAuthorities, type BlueprintData } from './integratedBlueprint';
+import { applyDeterministicConsistencyFixes, collectSectionContentGaps, crossChapterConsistencyIssues, processSpecConflictIssues } from './qualityValidation';
+import { professionalSectionTaskCard } from './promptRuleExtraction';
 import { reviewGlobalConsistency } from './chapterReview';
 import { dataConsistencyConflictIssue, reviewDataConsistency } from './dataConsistencyReview';
 import { tablePlanExecutionGaps } from './constructionOrgTablePlan';
@@ -16,6 +17,8 @@ import { measureGenerationStep, repairChapterByQuality } from './rolePipeline';
 import { fillerSentenceTargets } from './constructionOrgAudit';
 import { difficultyCountermeasureReport, fillerDensityReport } from './tenderBidChecks';
 import { missingWorkPackageSkeletonTitles, stripEmptyWorkPackageHeadings, stripTablesInSection, workPackageSkeletonTitles } from './chapterPostProcessing';
+import { DIVISION_SECTION_RE } from './writingSpec';
+import { majorContentGovernanceIssues, perPackageContentElementIssues } from './constructionOrgQualityRules';
 
 export type EmitProgressFn = (checkpointChapters?: DocumentDraftChapter[], stages?: DocumentExecutionStage[]) => void;
 export type WithProgressHeartbeatFn = <T>(work: () => Promise<T>) => Promise<T>;
@@ -283,6 +286,9 @@ export async function repairTemplatingIssues(input: {
     const needsFillerFix = filler.ratio >= 0.1 || filler.vagueSemanticSentences > 0;
     const needsDifficultyFix = difficulty.countermeasures > 0 && difficulty.ratio < 0.5;
     if (!needsFillerFix && !needsDifficultyFix) break;
+    // F2 回滚保护：修复前正文快照——历史缺陷（丰乐镇第五轮）：修复后套话句占比 27.5%→32.0%
+    // 不降反升（LLM 重写产出的新句仍命中语义原型），带病修复不如不修
+    const roundSnapshot = new Map(chapterDraftsFinal.map(chapter => [chapter.id, chapter.content]));
     const sentenceTargets = needsFillerFix ? await fillerSentenceTargets(chapterDraftsFinal) : [];
     // 重难点缺要素条目锚点：归一化（去空白）包含匹配定位到具体章节
     const difficultyTargets = needsDifficultyFix
@@ -325,6 +331,9 @@ export async function repairTemplatingIssues(input: {
         signal,
         anchorTexts: [...target.sentences, ...target.difficulty.map(item => item.text)],
         maxTokens: 6000,
+        // F2 套话重写需要项目事实支撑：证据预算专用放大（默认 1500 字符最小集不足以支撑
+        // 60 条套话句具体化重写，重写后仍是套话的根源之一）
+        evidenceChars: 5000,
       })));
     };
     const results = await Promise.allSettled(targets.map(target => repairOne(target)));
@@ -344,6 +353,22 @@ export async function repairTemplatingIssues(input: {
     emitProgress(chapterDraftsFinal);
     if (appliedCount === 0) {
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: 'failed', message: `模板化修复第 ${round + 1} 轮：修复 patch 未落地（${targets.length} 章锚点失配或 LLM 未产出）`, details: [`套话句占比 ${(filler.ratio * 100).toFixed(1)}% 未收敛，重难点双达标 ${(difficulty.ratio * 100).toFixed(0)}%`] }, { subtitle: '模板化修复' }));
+      break;
+    }
+    // F2 回滚判定：修复后同源复检——套话占比上升且重难点双达标未提升时回滚本轮全部修改
+    //（修复变差不可接受；重难点达标提升可抵偿套话占比小幅上升，保留修复）
+    const recheckMarkdown = chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
+    const recheckFiller = await fillerDensityReport(recheckMarkdown);
+    const recheckDifficulty = await difficultyCountermeasureReport(recheckMarkdown);
+    const fillerWorse = recheckFiller.ratio > filler.ratio + 0.01;
+    const difficultyBetter = recheckDifficulty.ratio > difficulty.ratio + 0.01;
+    if (fillerWorse && !difficultyBetter) {
+      for (const chapter of chapterDraftsFinal) {
+        const snapshot = roundSnapshot.get(chapter.id);
+        if (snapshot !== undefined) chapter.content = snapshot;
+      }
+      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: 'failed', message: `模板化修复第 ${round + 1} 轮：修复后套话句占比 ${(recheckFiller.ratio * 100).toFixed(1)}% > 修复前 ${(filler.ratio * 100).toFixed(1)}%，已回滚本轮修改`, details: ['LLM 重写未收敛，回滚保留修复前正文'] }, { subtitle: '模板化修复' }));
+      emitProgress(chapterDraftsFinal);
       break;
     }
     templatingFixApplied = true;
@@ -397,9 +422,28 @@ export async function enforceWorkPackageSkeletons(input: {
   // 且评标目录项丢失
   const majorSkeletonNames = workPackageSkeletonTitles(projectContext, chapterDraftsFinal.flatMap(chapter => chapter.evidence || []));
   if (majorSkeletonNames.length > 0) {
-    const hasMajorHeading = chapterDraftsFinal.some(chapter => chapter.content.split('\n').some(line => KEY_SECTION_HEADING.test(line.trim())));
-    if (!hasMajorHeading) {
-      const host = chapterDraftsFinal.find(chapter => /整体理解|工程概况|项目理解|招标范围|编制边界|现场踏勘|施工界面/u.test(chapter.title)) || chapterDraftsFinal[0];
+    // 章内补建（三期验收回归）：逐章检查「该章规划了关键小节但成稿缺失」——历史实现只做全文级检查，
+    // 第一章已有「项目主要施工内容」时第二章缺「主要分部分项工程施工方案」永远检测不到（轮 9 实测）；
+    // 补建位置 = 该章末尾（带章号.序号编号，与目录/正文节集合口径一致）
+    const KEY_PLANNED_SECTION_RE = /项目主要施工内容|主要施工内容|主要分部分项工程施工方案|主要分部分项施工方案|主要施工方法/u;
+    for (const chapter of chapterDraftsFinal) {
+      const hasKeyHeading = chapter.content.split('\n').some(line => KEY_SECTION_HEADING.test(line.trim()));
+      if (hasKeyHeading) continue;
+      const planned = (chapter.sections || []).find(section => KEY_PLANNED_SECTION_RE.test(section));
+      if (!planned) continue;
+      if (!Array.isArray(chapter.sections)) chapter.sections = [];
+      const existingIndex = chapter.sections.findIndex(section => KEY_PLANNED_SECTION_RE.test(section));
+      const sectionOrdinal = existingIndex >= 0 ? existingIndex + 1 : chapter.sections.length + 1;
+      const heading = `### ${chapterDraftsFinal.indexOf(chapter) + 1}.${sectionOrdinal} ${planned}`;
+      chapter.content = `${chapter.content.replace(/\s+$/u, '')}\n\n${heading}\n`;
+      skeletonFixApplied = true;
+    }
+    // 全文兑底（历史路径）：全文无任何关键小节且无章规划它时，补建「### 项目主要施工内容」到语义宿主章
+    // （宿主判定补充施工方法类章——轮 9 实测「主要施工方法」章未被旧正则命中导致补建挂错宿主）
+    const hasKeyHeadingAnywhere = chapterDraftsFinal.some(chapter => chapter.content.split('\n').some(line => KEY_SECTION_HEADING.test(line.trim())));
+    const hasPlannedAnywhere = chapterDraftsFinal.some(chapter => (chapter.sections || []).some(section => KEY_PLANNED_SECTION_RE.test(section)));
+    if (!hasKeyHeadingAnywhere && !hasPlannedAnywhere) {
+      const host = chapterDraftsFinal.find(chapter => /整体理解|工程概况|项目理解|招标范围|编制边界|现场踏勘|施工界面|主要施工方法|施工方案/u.test(chapter.title)) || chapterDraftsFinal[0];
       if (host) {
         const hostIndex = chapterDraftsFinal.indexOf(host);
         if (!Array.isArray(host.sections)) host.sections = [];
@@ -411,8 +455,19 @@ export async function enforceWorkPackageSkeletons(input: {
       }
     }
   }
-  // 确定性第一遍：表格剥离 + 空正文包剥离（零 LLM 成本，先清污染再算缺失）
-  // 稳定版：空正文工作包（标题存在正文 <80 字）同样确定性删除——补写判定只看标题缺失（轮3 实测
+  // 确定性第一遍（G2 收口）：关键小节表格剥离无条件执行——关键小节禁表格是硬规则，
+  // 不依赖骨架清单（丰乐镇第五轮实测：骨架名提取为空时全量清单表穿透交付，制造跨章工程量口径漂移）
+  for (const chapter of chapterDraftsFinal) {
+    let content = chapter.content;
+    for (const headingLine of chapter.content.split('\n').map(line => line.trim()).filter(line => KEY_SECTION_HEADING.test(line))) {
+      const sectionTitle = headingLine.replace(/^#{3,4}\s+(?:\d+(?:\.\d+)*\s+)?/u, '');
+      const stripped = stripTablesInSection(content, sectionTitle, majorSkeletonNames);
+      if (stripped !== content) { content = stripped; strippedCount += 1; }
+    }
+    chapter.content = content;
+  }
+  // 确定性第二遍：空正文包剥离（依赖骨架清单——无清单时不做空包判定，避免误删正文）
+  // 稳定版：空正文工作包（标题存在正文 <80 字）确定性删除——补写判定只看标题缺失（轮3 实测
   // 12 个骨架包中 4 个正文为空漏补），删除后按“标题缺失”口径锚点直连补写，复用现有补写链路；
   // 骨架名与阶段 0/补写轮同源（全卷清单 majorSkeletonNames）——单章 evidence 不含招标范围时
   // 该章关键小节的空包/串位表会漏剥（与补写轮全卷口径漂移）
@@ -422,8 +477,10 @@ export async function enforceWorkPackageSkeletons(input: {
     let content = chapter.content;
     for (const headingLine of chapter.content.split('\n').map(line => line.trim()).filter(line => KEY_SECTION_HEADING.test(line))) {
       const sectionTitle = headingLine.replace(/^#{3,4}\s+(?:\d+(?:\.\d+)*\s+)?/u, '');
-      const stripped = stripTablesInSection(content, sectionTitle, names);
-      if (stripped !== content) { content = stripped; strippedCount += 1; }
+      // 4.19.11 分部章容器小节（「主要分部分项工程施工方案」在「主要施工方法」章内）豁免工作包骨架
+      // 剥离：容器块是全章总述小节（4.19.5 定调），无工作包 H4 骨架；骨架名若命中 LLM 自由发挥的 H4
+      // 会整块误剥总述正文（与补写轮同口径豁免，口径与写作层 isDivisionChapterContainer 同源）
+      if (DIVISION_SECTION_RE.test(chapter.title) && DIVISION_SECTION_RE.test(sectionTitle)) continue;
       const emptiesStripped = stripEmptyWorkPackageHeadings(content, sectionTitle, names);
       if (emptiesStripped !== content) { content = emptiesStripped; strippedCount += 1; }
     }
@@ -439,6 +496,12 @@ export async function enforceWorkPackageSkeletons(input: {
       const entries = chapter.content.split('\n').map(line => line.trim()).filter(line => KEY_SECTION_HEADING.test(line))
         .flatMap(headingLine => {
           const sectionTitle = headingLine.replace(/^#{3,4}\s+(?:\d+(?:\.\d+)*\s+)?/u, '');
+          // 4.19.11 分部章容器小节豁免骨架补写（丰乐镇第十二轮实测）：容器块是全章总述小节
+          // （4.19.5 规划层不展开骨架、写作层总述提示词「无需四级标题」），补写轮却按关键小节
+          // 口径把「绿化工程」等工作包 H4 补进容器块 → 总述小节被工作包骨架污染 + 补写 LLM
+          // 重写时截断原总述正文（「工程、小菜园」断裂残片）→ 终稿 2.24.1「绿化工程要点」
+          // 标题与总述内容错位。口径与写作层 isDivisionChapterContainer 同源（分部章+容器标题）
+          if (DIVISION_SECTION_RE.test(chapter.title) && DIVISION_SECTION_RE.test(sectionTitle)) return [];
           const missing = missingWorkPackageSkeletonTitles(chapter.content, sectionTitle, names);
           return missing.length > 0 ? [{ headingLine, sectionTitle, missing }] : [];
         });
@@ -494,6 +557,85 @@ export async function enforceWorkPackageSkeletons(input: {
 }
 
 /**
+ * 缺规划小节补写收口（F1）：规划大纲小节（chapter.sections）在成稿中缺失（写作侧小节留空/节级质检拒）时，
+ * 章节节点 failed 但达标契约下不再有章级补写循环 → 终稿缺节、评分「缺少规划小节」error 硬扣分。
+ * 修复链兜底：以章末标题行为锚点直连补写，系统下发缺节标题（带章号.序号编号）+专属专业任务卡，
+ * LLM 只补写该节正式正文（单轮，失败不阻断，阻断权留给终检 blocker）——与工作包骨架收口同口径。
+ * 历史缺陷（丰乐镇第五轮）：劳动力安排计划章「资源配置计划」小节留空无修复，终稿缺节 -8 分。
+ */
+export async function enforcePlannedSectionCompleteness(input: {
+  chapterDraftsFinal: DocumentDraftChapter[];
+  template: DocumentTemplate;
+  repairPromptTexts: string;
+  requirement?: string;
+  signal?: AbortSignal;
+  generationDiagnostics: DocumentGenerationDiagnostics;
+  progressStages: DocumentExecutionStage[];
+  emitProgress: EmitProgressFn;
+  withProgressHeartbeat: WithProgressHeartbeatFn;
+}): Promise<{ plannedSectionFixApplied: boolean }> {
+  const { chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat } = input;
+  // 缺失判定与写作期/导出期检查器同源（collectSectionContentGaps 全量跑，只取 missing_planned_section 口径），
+  // 补写目标 = 检查器会报「缺少规划小节」的小节，不多不少；
+  // 丰乐镇第 2 轮实测扩展：规划小节只有标题或表格无正文（planned empty，如扬尘治理六个百分百/环境污染物管控指标
+  // 只有表格无正文）同样进补写目标——写作侧留表格、修复链无人补正文段落，终检报「小节只有标题或表格无正文」-8 分/条
+  const gaps = collectSectionContentGaps('', chapterDraftsFinal).filter(gap => gap.reason === 'missing_planned_section' || (gap.reason === 'empty' && gap.planned));
+  const targets = chapterDraftsFinal.flatMap(chapter => {
+    const chapterGaps = gaps.filter(gap => gap.chapterTitle === chapter.title);
+    if (chapterGaps.length === 0) return [];
+    const sectionTitles = chapterGaps.map(gap => ({ title: gap.sectionTitle, emptyOnly: gap.reason === 'empty' }));
+    // 章末标题行作为补写定位锚点（append 模式：新小节插入该锚点之后）
+    const lastHeadingLine = chapter.content.split('\n').map(line => line.trim()).filter(line => /^#{2,4}\s/u.test(line)).pop();
+    if (!lastHeadingLine) return [];
+    return [{ chapter, sectionTitles, lastHeadingLine }];
+  });
+  if (targets.length === 0) return { plannedSectionFixApplied: false };
+  upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'planned-section-repair', status: 'running', message: `缺规划小节补写（${targets.length} 章缺失）` }, { subtitle: '缺节补写收口' }));
+  emitProgress(chapterDraftsFinal);
+  const chapterIndexByTitle = new Map(chapterDraftsFinal.map((chapter, index) => [chapter.title, index]));
+  const repairOne = async (target: (typeof targets)[number]) => {
+    const chapterIndex = chapterIndexByTitle.get(target.chapter.title) ?? chapterDraftsFinal.indexOf(target.chapter);
+    const parts = target.sectionTitles.map(({ title: sectionTitle, emptyOnly }) => {
+      const sectionOrdinal = ((target.chapter.sections || []).findIndex(section => section === sectionTitle) + 1) || ((target.chapter.sections || []).length + 1);
+      const heading = `### ${chapterIndex + 1}.${sectionOrdinal} ${sectionTitle}`;
+      if (emptyOnly) return `本章小节「${sectionTitle}」只有标题或表格无正式正文：必须在既有小节标题下补写正式正文段落（正文写在表格前后均可），不得新增同名小节标题、不得删除或改动已有表格与数值。\n${professionalSectionTaskCard(target.chapter.title, sectionTitle)}`;
+      return `本章正文缺少规划小节「${sectionTitle}」：必须在章末新增小节标题「${heading}」（标题一字不差）并写入正式正文。\n${professionalSectionTaskCard(target.chapter.title, sectionTitle)}`;
+    });
+    return withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `planned-section-repair:${target.chapter.id}`, () => repairChapterByQuality({
+      template,
+      chapter: { id: target.chapter.id, title: target.chapter.title, content: target.chapter.content, evidence: target.chapter.evidence || [], missingFacts: target.chapter.missingFacts || [], sections: target.chapter.sections },
+      issues: [...parts, '已有内容一律不得改动，不得删除任何已有小节、表格与数值参数；新增小节之外不得改动。'],
+      promptTexts: repairPromptTexts,
+      requirement,
+      forbidDrawingImages: true,
+      diagnostics: generationDiagnostics,
+      signal,
+      // 补写定位锚点 = 章末标题行：replacement 必须逐字保留锚点后在章末追加补写小节
+      anchorTexts: [{ text: target.lastHeadingLine, append: true }],
+      maxTokens: 6000,
+    })));
+  };
+  const results = await Promise.allSettled(targets.map(target => repairOne(target)));
+  let appliedCount = 0;
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      if (signal?.aborted) throw result.reason;
+      console.error('[gen] planned section repair failed:', result.reason);
+      return;
+    }
+    const repaired = result.value;
+    const { chapter } = targets[index];
+    if (repaired.content && repaired.content !== chapter.content) {
+      chapter.content = repaired.content;
+      appliedCount += 1;
+    }
+  });
+  emitProgress(chapterDraftsFinal);
+  upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'planned-section-repair', status: appliedCount > 0 ? 'success' : 'failed', message: appliedCount > 0 ? `缺规划小节补写完成：补写 ${appliedCount} 章` : '缺规划小节补写：修复 patch 未落地（锚点失配或 LLM 未产出）' }, { subtitle: '缺节补写收口' }));
+  return { plannedSectionFixApplied: appliedCount > 0 };
+}
+
+/**
  * 全局一致性审查闭环：LLM 全文审查 + 确定性检测同源合并 → 数值定点替换（前置降轮次）→
  * 跨章冲突 LLM 定向修复（单轮按章并行，不留多轮回退路径）→ 确定性定点修复（后置清零）→ 确定性去重。
  * 审查发现的确定性数值冲突先进入定向修复闭环（修复→复检），仍有残留才注入导出校验升级为阻断。
@@ -514,10 +656,10 @@ export async function runGlobalConsistencyReviewLoop(input: {
   progressStages: DocumentExecutionStage[];
   emitProgress: EmitProgressFn;
   withProgressHeartbeat: WithProgressHeartbeatFn;
-  /** B1 计划数据主表（生成前锁定口径）：节点工期/机械台数权威注入确定性修复 */
-  planDataMaster?: PlanDataMaster;
+  /** 一体化蓝图（生成前锁定口径）：节点工期/机械台数权威注入确定性修复 */
+  blueprintData?: BlueprintData;
 }): Promise<{ issues: string[]; dedupRan: boolean }> {
-  const { chapterDraftsFinal, template, reviewPromptTexts, repairPromptTexts, requirement, signal, projectContext, generationDiagnostics, preliminaryFactsModel, scopeConflicts, progressStages, emitProgress, withProgressHeartbeat, planDataMaster } = input;
+  const { chapterDraftsFinal, template, reviewPromptTexts, repairPromptTexts, requirement, signal, projectContext, generationDiagnostics, preliminaryFactsModel, scopeConflicts, progressStages, emitProgress, withProgressHeartbeat, blueprintData } = input;
   let globalConsistencyIssues: string[] = [];
   // 跨章一致性阶段的确定性去重是否已执行（供补表后去重判断：内容未变时 stripDuplicate* 幂等，可安全跳过）
   let globalDedupRan = false;
@@ -563,6 +705,12 @@ export async function runGlobalConsistencyReviewLoop(input: {
         ...(await crossChapterConsistencyIssues(fullMarkdown, preliminaryFactsModel, scopeConflicts)).filter(issue => /跨章一致性冲突/u.test(issue.message)),
         ...(await processSpecConflictIssues(fullMarkdown, preliminaryFactsModel)).filter(issue => issue.level === 'error'),
         ...resourceConsistencyIssues(fullMarkdown),
+        ...laborPeakConflictIssues(fullMarkdown),
+        // F16 用水高峰人数 vs 劳动力峰值跨字段关联（临时用水人数必须与劳动力峰值同口径）
+        ...waterLaborPeakAssociationIssues(fullMarkdown),
+        // F17/F18 元话语声明句与公式形态残留（远端客户反馈「公式直接输入正文」根治）
+        ...metaDiscourseDeclarationIssues(fullMarkdown),
+        ...formulaResidueIssues(fullMarkdown),
         ...nodeScheduleConsistencyIssues(fullMarkdown),
         ...crossSectionNumericConflictIssues(fullMarkdown),
         // F14 规格错位检测：正文规格 vs 清单权威映射（specAuthorityMap），确定性可判且无权威时静默跳过
@@ -580,6 +728,13 @@ export async function runGlobalConsistencyReviewLoop(input: {
         ...overviewRecapIssues(fullMarkdown, { semanticSimilarity: recapSimilarity }),
         // 1.5 语义级跨章重复（措辞不同内容同质的跨章段落，bge ≥0.82）：并入既有去重收口，与 strip 同源
         ...(await crossChapterSemanticDuplicateIssues(chapterDraftsFinal)),
+        // 三期收口：蓝图引用一致性质检（权威源=蓝图参数桶）——总工期/关键工程量不一致 error 进修复链，
+        // 红线事实缺口 warning 由章级对齐缺口观测兑底（不进入修复轮）
+        ...(blueprintData ? blueprintCitationConsistencyIssues(fullMarkdown, blueprintData).filter(issue => issue.level === 'error') : []),
+        // G1 关键小节逐专业工程三要素判定（缺哪维报哪维，修复轮定向补写）
+        ...perPackageContentElementIssues(fullMarkdown),
+        // G2 关键小节清单口径治理（禁表格承载正文 + 禁清单内部口径词）
+        ...majorContentGovernanceIssues(fullMarkdown),
       ].map(issue => `${issue.message}；${issue.suggestion || ''}`);
     };
     const globalReview = await runUnifiedLlmReview();
@@ -599,7 +754,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
     // 无法在正文定位错误数值 → 不产出 patch → 空转轮次，矛盾残留被导出门禁硬阻断）
     let preDeterministicFixCount = 0;
     for (const chapter of chapterDraftsFinal) {
-      const numericFix = applyNumericConsistencyDeterministicFixes(chapter.content, { ...planDataMasterAuthorities(planDataMaster), supportAuthority });
+      const numericFix = applyNumericConsistencyDeterministicFixes(chapter.content, { ...blueprintPlanAuthorities(blueprintData), supportAuthority });
       if (numericFix.fixedCount > 0) {
         chapter.content = numericFix.markdown;
         preDeterministicFixCount += numericFix.fixedCount;
@@ -660,7 +815,11 @@ export async function runGlobalConsistencyReviewLoop(input: {
           // 其余冲突严格按资料口径修正（h15：修复指令与冲突类型对齐，避免 LLM 对重复类 issue 乱改数值）
           const repairInstruction = /重复/u.test(issue)
             ? '请删除本冲突描述的重复内容（保留首次出现的完整版本），不得改动其余正文。'
-            : /基坑深度数值未锁定/u.test(issue)
+            : /缺少三要素/u.test(issue)
+              ? '请按冲突描述中列出的缺失要素定向补写：只补缺失要素的内容（作业对象与工程量/工序顺序/施工方法），不得删除或改动已有正文；补写的工程量数值必须取工程量清单汇总值，不得编造。'
+              : /清单内部口径词|不应使用 Markdown 表格/u.test(issue)
+                ? '请删除本冲突描述中点名的清单内部口径内容（“分部小计/本页小计/合计/按实/暂估”等口径行或承载专业工程正文的 Markdown 表格），把表格中的项目总量数据改写为段落式连贯叙述（数值保持不变），不得改动其余正文。'
+                : /基坑深度数值未锁定/u.test(issue)
               ? (excavationDepthAuthority !== undefined
                 ? `请在本章基坑支护/开挖小节写出确定性的基坑开挖深度表述：本工程基坑开挖深度为 ${excavationDepthAuthority}m（权威口径来自图纸标注，严禁写其他深度数值或「按图纸确定」类回避表述），并同步保留既有危大工程分级标注。`
                 : '请从本章证据摘要中的图纸标注/勘察资料锁定基坑开挖深度数值，以确定性表述写入基坑支护小节（严禁「按图纸确定」类回避表述），不得编造数值。')
@@ -730,12 +889,14 @@ export async function runGlobalConsistencyReviewLoop(input: {
     const scheduleAuthority = extractScheduleAuthority(preliminaryFactsModel);
     const assemblyRateAuthority = extractAssemblyRateAuthority(preliminaryFactsModel);
     const scaleSummary = extractProjectScaleSummary(preliminaryFactsModel);
-    // B1 主表权威（进度节点/机械台数）与 factsModel 权威（总工期/装配率）并列注入
-    const masterAuthorities = planDataMasterAuthorities(planDataMaster);
-    // A3 劳动力峰值跨章权威（丰乐镇实测）：分阶段明细表在第五章、峰值表述在第一章，
-    // 逐章调用 fixLaborPeakConflicts 时本章无表 → 权威永远缺失 → 正文 68 人 vs 表 20 人矛盾残留阻断。
-    // 此处从全文（含全部章节 + 已拼接前的中间态）提取一次表峰值（表缺失时回退高峰表述最大值）作为跨章权威。
-    const laborPeakAuthority = tablePeakLaborWithChainFallback(chapterDraftsFinal.map(chapter => chapter.content).join('\n\n'));
+    // B1 蓝图权威（进度节点/机械台数）与 factsModel 权威（总工期/装配率）并列注入
+    const masterAuthorities = blueprintPlanAuthorities(blueprintData);
+    // A3 劳动力峰值跨章权威（丰乐镇实测）：蓝图 peakValue（造价锚定口径，量级可靠）优先；
+    // 蓝图不可用时回退全文表峰值扫描（表缺失时回退高峰表述最大值）。丰乐镇第 3 轮：
+    // 蓝图荒谬值已被造价锚定校验拦截，峰值不再出现正文自编 71 与蓝图 1222 两套口径。
+    const laborPeakAuthority = (masterAuthorities.laborPeakAuthority && masterAuthorities.laborPeakAuthority > 0)
+      ? masterAuthorities.laborPeakAuthority
+      : tablePeakLaborWithChainFallback(chapterDraftsFinal.map(chapter => chapter.content).join('\n\n'));
     let postNumericFixCount = 0;
     for (const chapter of chapterDraftsFinal) {
       const numericFix = applyNumericConsistencyDeterministicFixes(chapter.content, { scheduleAuthority, assemblyRateAuthority, ...masterAuthorities, supportAuthority, laborPeakAuthority });

@@ -1,7 +1,7 @@
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplateChapter, ValidationIssue } from './types';
 import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgCatalog';
-import { DIVISION_PROCESS_LABEL_RE, DIVISION_SECTION_QUALITY, DIVISION_SECTION_RE } from './writingSpec';
-import { hasProcessSequenceExpression, workPackageContentElementsComplete } from './utils';
+import { DIVISION_PROCESS_LABEL_RE, DIVISION_SECTION_QUALITY, DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE } from './writingSpec';
+import { hasProcessSequenceExpression, workPackageContentElementFlags, workPackageContentElementsComplete } from './utils';
 import { buildSemanticGate } from './semanticGate';
 
 /** 空话词表：词面只做召回（短路优化），语义判定由语义 gate 复核完成（阶段五——"精心组织"类口号
@@ -324,7 +324,9 @@ export function constructionOrgBonusModuleIssues(chapters: DocumentDraftChapter[
  * 否则只取到小节标题行本身 */
 function extractDivisionSection(content: string) {
   const lines = content.split('\n');
-  const start = lines.findIndex(line => /^#{3,4}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]*?(?:主要分部分项工程施工方案|主要施工方法)[^\n]*$/u.test(line.trim()));
+  // 候选过滤用 DIVISION_SECTION_RE（含「主要分部分项施工方案」变体），提取正则必须同源包含变体，
+  // 否则变体标题命中候选但提取落空，误报「小节缺失」blocker（轮4 实测变体标题成稿出现）
+  const start = lines.findIndex(line => /^#{3,4}\s+(?:\d+(?:\.\d+)*\s+)?[^\n]*?(?:主要分部分项(?:工程)?施工方案|主要施工方法)[^\n]*$/u.test(line.trim()));
   if (start < 0) return '';
   let end = lines.length;
   for (let index = start + 1; index < lines.length; index += 1) {
@@ -415,6 +417,153 @@ export function constructionOrgDivisionSectionIssues(chapters: DocumentDraftChap
       continue;
     }
     validateContent(chapter.title, content);
+  }
+  return issues;
+}
+
+// ═══════ 关键小节逐包三要素检测（G1，生成闭环确定性链挂载）═══════
+// 丰乐镇第五轮实测：楼地面装饰工程/给排水采暖燃气工程只有「施工流程/施工方法」标签 H4、
+// 缺「作业对象与工程量」；「项目主要施工内容」只有一个 H4 把全部专业工程混装。
+// 现有评分侧验收器按 #### 切块判定，标签型 H4 被切为单维块恒报「要素不全」且无法给出缺维定位；
+// 本检测器按「专业工程块」聚合判定：标签型 H4 归入父 H3 块整体判定（缺哪维报哪维），
+// 专业工程型 H4 逐块判定，平铺式（无 H4）整块判定——与「呈现形式不限」口径一致。
+
+/** 标签型 H4：三要素组织标签，本身只承担一维，不独立判定（如「#### 施工流程」） */
+const ELEMENT_LABEL_H4_RE = /^####\s+(?:\d+(?:\.\d+)*\s+)?(?:施工概况|施工流程|施工方法|工艺流程)(?:[:：]|\s*$)/u;
+
+/** 三要素缺维诊断文案（空串=齐全） */
+function missingElementLabels(flags: { scope: boolean; process: boolean; method: boolean }): string {
+  const missing: string[] = [];
+  if (!flags.scope) missing.push('作业对象与工程量');
+  if (!flags.process) missing.push('工序顺序');
+  if (!flags.method) missing.push('施工方法');
+  return missing.join('、');
+}
+
+/** 提取关键小节块（供 G1/G2 共用）：支持两种形态——
+ * ①「### 1.2 项目主要施工内容」H3 关键小节（内部 H4 为专业工程，整节一块）；
+ * ②「## 第二章 主要施工方法」H2 关键章（内部「### 分部」逐块，如 2.14 楼地面装饰工程）。 */
+function criticalPackageSectionBlocks(markdown: string): Array<{ title: string; bodyLines: string[] }> {
+  const lines = markdown.split(/\r?\n/u);
+  const blocks: Array<{ title: string; bodyLines: string[] }> = [];
+  const nextHeadingAtOrAbove = (from: number, maxLevel: number): number => {
+    for (let cursor = from; cursor < lines.length; cursor += 1) {
+      const heading = /^(#{1,6})\s+/u.exec(lines[cursor].trim());
+      if (heading && heading[1].length <= maxLevel) return cursor;
+    }
+    return lines.length;
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    const h2 = /^##\s+(.+)$/u.exec(lines[index].trim());
+    if (h2) {
+      const title = h2[1].trim();
+      if (!MAJOR_CONTENT_SECTION_RE.test(title) && !DIVISION_SECTION_RE.test(title)) continue;
+      const chapterEnd = nextHeadingAtOrAbove(index + 1, 2);
+      const inner = lines.slice(index + 1, chapterEnd);
+      const h3s = inner.map((line, offset) => ({ line: line.trim(), offset })).filter(item => /^###\s+/u.test(item.line));
+      if (h3s.length === 0) {
+        blocks.push({ title, bodyLines: inner });
+        continue;
+      }
+      for (let part = 0; part < h3s.length; part += 1) {
+        const start = h3s[part].offset;
+        const end = part + 1 < h3s.length ? h3s[part + 1].offset : inner.length;
+        blocks.push({ title: h3s[part].line.replace(/^###\s+/u, ''), bodyLines: inner.slice(start + 1, end) });
+      }
+      continue;
+    }
+    const h3 = /^###\s+(.+)$/u.exec(lines[index].trim());
+    if (h3) {
+      const title = h3[1].trim();
+      if (!MAJOR_CONTENT_SECTION_RE.test(title) && !DIVISION_SECTION_RE.test(title)) continue;
+      const end = nextHeadingAtOrAbove(index + 1, 3);
+      blocks.push({ title, bodyLines: lines.slice(index + 1, end) });
+    }
+  }
+  return blocks;
+}
+
+/** G1：关键小节逐专业工程三要素判定——缺哪维报哪维（error blocker，供修复循环定向补写） */
+export function perPackageContentElementIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const pushIssue = (title: string, pkgName: string, missing: string) => {
+    const scopeHint = missing.includes('作业对象') ? '作业对象与工程量（本项目部位、规模/工程量、系统边界，工程量取工程量清单汇总值）' : '';
+    const processHint = missing.includes('工序') ? '工序顺序（先后清晰，至少 1 处不少于 4 个环节的工序顺序表达）' : '';
+    const methodHint = missing.includes('施工方法') ? '施工方法（工具机具、工艺参数、验收闭环）' : '';
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      message: pkgName ? `「${title}」${pkgName}专业工程块缺少三要素：${missing}` : `「${title}」小节缺少三要素：${missing}`,
+      suggestion: `请在「${pkgName || title}」补写缺失要素：${[scopeHint, processHint, methodHint].filter(Boolean).join('；')}。呈现形式不限，可分段用“施工概况/施工流程/施工方法”标签组织，也可自然成文。`,
+    });
+  };
+  for (const block of criticalPackageSectionBlocks(markdown)) {
+    const h4s = block.bodyLines
+      .map((line, offset) => ({ line: line.trim(), offset }))
+      .filter(item => /^####\s+/u.test(item.line));
+    if (h4s.length === 0) {
+      // 平铺式：整块判定（呈现形式不限——段落式三要素齐全即放行）
+      const flags = workPackageContentElementFlags(block.bodyLines.join('\n'));
+      const missing = missingElementLabels(flags);
+      if (missing) pushIssue(block.title, '', missing);
+      continue;
+    }
+    const labelOnly = h4s.every(item => ELEMENT_LABEL_H4_RE.test(item.line));
+    if (labelOnly) {
+      // 标签型组织（如 2.14 施工流程/施工方法 两 H4）：父块整体判定，缺维精确报出
+      const flags = workPackageContentElementFlags(block.bodyLines.join('\n'));
+      const missing = missingElementLabels(flags);
+      if (missing) pushIssue(block.title, '', missing);
+      continue;
+    }
+    // 专业工程型 H4：逐块判定；标签型 H4 跳过独立判定
+    for (let index = 0; index < h4s.length; index += 1) {
+      const startOffset = h4s[index].offset;
+      const endOffset = index + 1 < h4s.length ? h4s[index + 1].offset : block.bodyLines.length;
+      if (ELEMENT_LABEL_H4_RE.test(h4s[index].line)) continue;
+      const pkgTitle = h4s[index].line.replace(/^####\s+(?:\d+(?:\.\d+)*\s+)?/u, '').replace(/[:：]\s*$/u, '');
+      const body = block.bodyLines.slice(startOffset, endOffset).join('\n');
+      const flags = workPackageContentElementFlags(body);
+      const missing = missingElementLabels(flags);
+      if (missing) pushIssue(block.title, pkgTitle, missing);
+    }
+  }
+  return issues;
+}
+
+// ═══════ 主要施工内容清单口径治理（G2，生成闭环+评分侧同源挂载）═══════
+// 丰乐镇第五轮实测：「项目主要施工内容」把整份工程量清单搬进正文（含「分部小计」「按实」等
+// 清单计价表内部口径），制造跨章工程量口径漂移（2.1 道路工程 5 项数值与清单权威值不符）。
+// 关键小节禁表格是既有硬规则（majorContent 提示词），此处补齐生成闭环的确定性拦截。
+
+/** G2：关键小节清单口径治理——禁表格承载主体内容 + 禁清单内部口径词 */
+export function majorContentGovernanceIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  for (const block of criticalPackageSectionBlocks(markdown)) {
+    const body = block.bodyLines.join('\n');
+    if (!body.trim()) continue;
+    if (/^\s*\|.+\|\s*$/mu.test(body)) {
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        message: `「${block.title}」小节不应使用 Markdown 表格承载专业工程正文`,
+        suggestion: '主要施工内容/主要施工方法应采用三级小节与段落式专业工程写法：每个专业工程一个 #### 小节，覆盖作业对象与工程量、工序顺序、施工方法三方面要素；表格数据改写成连贯叙述。',
+      });
+    }
+    const strongHits = [...new Set((body.match(/[^\n]{0,18}(?:分部小计|本页小计|按实|暂估|综合单价|规费|税金)[^\n]{0,18}/gu) || []).map(item => item.trim()))];
+    // 「措施项目」是工程类别名词的合法用法（2.18 措施项目小节、2.24 分部分项方案列举），
+    // 仅当与清单计价语境共现（措施项目费 / 措施项目+清单/计价/费）才属清单内部口径（丰乐镇实测误报）
+    const measureHits = [...new Set((body.match(/[^\n]{0,18}(?:措施项目费|措施项目[^\n]{0,8}(?:清单|计价|费率))[^\n]{0,18}/gu) || []).map(item => item.trim()))];
+    const weakHits = [...new Set((body.match(/[^\n]{0,10}(?:合计|小计)[^\n]{0,16}(?:㎡|m²|m2|m³|m3|吨|t|项|处|座|樘)/gu) || []).map(item => item.trim()))];
+    const jargonHits = [...new Set([...strongHits, ...measureHits, ...weakHits])];
+    if (jargonHits.length > 0) {
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        message: `「${block.title}」小节正文含工程量清单内部口径词：${jargonHits.slice(0, 6).join('；')}`,
+        suggestion: '“分部小计/本页小计/合计/按实/暂估/综合单价/措施项目费/规费/税金”等清单计价表专用口径不得进入正式正文：工程量只写清单汇总的项目总量（数值与工程量清单一致），删除全部清单内部口径行。',
+      });
+    }
   }
   return issues;
 }

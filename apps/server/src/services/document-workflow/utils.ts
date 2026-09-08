@@ -33,11 +33,19 @@ export function hasProcessSequenceExpression(text: string): boolean {
  * constructionOrgAudit 分部分项审计）共用本判定，避免三要素正则复制粘贴漂移
  * （历史缺陷：audit 侧漏“作业对象|部位”“验收标准|检测”等词导致口径不一致、自然成文块误报缺失）。
  */
+/** 工作包三要素逐维判定：作业对象与工程量 / 工序顺序 / 施工方法三要素分别判定，
+ * 供检测器逐块给出「缺哪一维」的精确诊断（丰乐镇实测：楼地面装饰工程只有流程/方法两个 H4、
+ * 缺作业对象与工程量，整块布尔判定只能报「不完整」，修复轮无从定向补齐）。 */
+export function workPackageContentElementFlags(block: string): { scope: boolean; process: boolean; method: boolean } {
+  const scope = /(?:施工)?(?:概况|范围)[:：]\s*\S|工程量|作业对象|部位/u.test(block);
+  const process = /(?:施工)?(?:流程|工序|顺序)[:：]\s*\S/u.test(block) || hasProcessSequenceExpression(block);
+  const method = /(?:施工)?方法[:：]\s*\S|工艺参数|验收标准|检测|试验|记录/u.test(block);
+  return { scope, process, method };
+}
+
 export function workPackageContentElementsComplete(block: string): boolean {
-  const hasScope = /(?:施工)?(?:概况|范围)[:：]\s*\S|工程量|作业对象|部位/u.test(block);
-  const hasProcess = /(?:施工)?(?:流程|工序|顺序)[:：]\s*\S/u.test(block) || hasProcessSequenceExpression(block);
-  const hasMethod = /(?:施工)?方法[:：]\s*\S|工艺参数|验收标准|检测|试验|记录/u.test(block);
-  return hasScope && hasProcess && hasMethod;
+  const flags = workPackageContentElementFlags(block);
+  return flags.scope && flags.process && flags.method;
 }
 
 /** 工作包要素门槛（4.18.6 三要素硬门）：结构门禁的降级放行不得绕过三要素——
@@ -213,13 +221,25 @@ export function stripExtraneousBlockHeadings(markdown: string, blockTitle: strin
   return /^###\s+\S+/mu.test(result.trim()) ? result : `### ${blockTitle}\n\n${result}`.trim();
 }
 
-/** 跨 H3 同名 H4 属合法结构的泛化小节名（各分项工程通用）：施工准备/质量控制等，跨 H3 重复全部保留 */
+/** 跨 H3 同名 H4 属合法结构的泛化小节名（各分项工程通用）：施工准备/质量控制等，跨 H3 重复全部保留。
+ * 4.19.3 回归：主题块成稿规范要求每个分部工程块固定输出「施工概况/施工流程/施工方法」三要素 H4，
+ * 三者未入白名单时被 dedupeCrossSectionSkeletonH4s 误判为串章骨架整块删除（标题+正文一并丢失），
+ * 22 个分部块被掏空后 removeEmptySubSectionHeadings 连 H3 一并删除，终稿第二章仅剩 4 块——必须保留。 */
 const GENERIC_H4_TITLE_WHITELIST = new Set([
   '施工准备', '施工要点', '质量控制', '质量要求', '质量保证措施', '质量控制措施', '质量通病防治',
   '安全措施', '安全要求', '安全管理措施', '安全技术交底', '技术交底', '注意事项', '验收要求', '验收标准',
   '成品保护', '环境保护', '文明施工', '进度控制', '工期保障', '材料管理', '机械管理', '人员管理',
   '组织管理', '应急预案', '应急措施', '劳动力配置', '机械设备配置',
+  '施工概况', '施工流程', '施工方法',
 ]);
+
+/** 编号形态 H4（「3 绿化工程」「三、绿化工程」「2.3 道路工程」等分组/编号组织结构）：与裸标题 H3
+ * 同名是结构性引用而非同名复制，不按 H4↔H3 同名串章规则删除（4.19.6 回归：容器块总述「3 绿化工程」
+ * 被判与分部 H3「绿化工程」同名 → H4 块删除范围延伸至下一标题 → 全部总述正文连坐丢失）。 */
+const NUMBERED_H4_RE = /^(?:\d+(?:\.\d+)*|[一二三四五六七八九十]+)[、.．\s:：-]/u;
+
+/** 工作包型容器小节（全章总述）：天然引用全章分部名，其内 H4 不按 H4↔H3 同名串章规则删除 */
+const CONTAINER_H3_RE = /主要分部分项工程施工方案|项目主要施工内容/u;
 
 /** 4.19 跨 H3 同名 H4 串章骨架删除（finalize 兜底）：
  * 主题块成稿照抄其他块骨架时，串章 H4 与正确位置 H4 分属不同 H3，dedupeRepeatedSubsections 只做同 H3
@@ -239,23 +259,32 @@ export function dedupeCrossSectionSkeletonH4s(markdown: string): string {
     const start = chapterStarts[chapterIndex];
     const end = chapterStarts[chapterIndex + 1] ?? lines.length;
     const h3Titles = new Set<string>();
-    const h4Blocks: Array<{ line: number; name: string }> = [];
+    const h4Blocks: Array<{ line: number; name: string; rawTitle: string; parentH3: string }> = [];
+    let currentH3 = '';
     for (let index = start; index < end; index += 1) {
       const heading = /^(#{3,4})\s+(.+)$/u.exec(lines[index].trim());
       if (!heading) continue;
-      const name = normalizeSubsectionTitleForDedup(heading[2].trim());
+      const rawTitle = heading[2].trim();
+      const name = normalizeSubsectionTitleForDedup(rawTitle);
       if (!name) continue;
       if (heading[1].length === 3) {
         h3Titles.add(name);
+        currentH3 = name;
       } else {
-        h4Blocks.push({ line: index, name });
+        h4Blocks.push({ line: index, name, rawTitle, parentH3: currentH3 });
       }
     }
     const seenNames = new Map<string, number>();
     for (const block of h4Blocks) {
       const prior = seenNames.get(block.name);
       seenNames.set(block.name, block.line);
-      const isH3Name = h3Titles.has(block.name);
+      // 4.19.6 回归（丰乐镇第二轮验收，容器块 3447 字总述被连坐删除）：
+      // 编号形态 H4（「3 绿化工程」等分组编号组织）与容器总述小节（「主要分部分项工程施工方案」）内
+      // 引用全章分部名的 H4，与章内同名 H3 是结构性引用而非同名复制，不得按 H4↔H3 同名串章规则整块删除
+      // （H4 块删除范围延伸到下一标题，正文段落一并丢失 → 容器块空壳 → 空壳标题清理连标题删掉）
+      const numberedH4 = NUMBERED_H4_RE.test(block.rawTitle);
+      const insideContainerH3 = CONTAINER_H3_RE.test(block.parentH3);
+      const isH3Name = h3Titles.has(block.name) && !numberedH4 && !insideContainerH3;
       const isGeneric = GENERIC_H4_TITLE_WHITELIST.has(block.name);
       const shouldDrop = isH3Name || (!isGeneric && prior !== undefined);
       if (!shouldDrop) continue;
@@ -445,7 +474,7 @@ export function throwIfAborted(signal?: AbortSignal) {
  * 系统约束行统一前缀：所有注入 projectContext/写作提示词的约束指令必须加此前缀，
  * 声明"仅指导写作、禁止写入正文、禁止复述本句"——根治元话语泄漏（评分报告 N2：
  * "第一第二第三""不得出现跨章冲突""不再出现180人"等约束文字被写手复述进正文）。
- * 单一来源：documentBlueprint 约束行、tenderRequirementsWritingRules、修复指令、
+ * 单一来源：rolePipeline/tenderRequirements 约束行、修复指令、
  * 写作主控提示词组装处同口径复用，禁止各处私造第二份前缀。
  */
 export const SYSTEM_CONSTRAINT_PREFIX = '【系统约束——仅指导写作，禁止写入正文，禁止复述本句】';
@@ -475,6 +504,14 @@ export function isBidDisciplineSentence(text: string): boolean {
   if (BID_DISCIPLINE_PHRASES.some(phrase => text.includes(phrase))) return true;
   if (text.includes('廉洁从业')) return true;
   return /纪律|廉洁/u.test(text) && /投标|评标|行贿|串标|围标|弄虚作假/u.test(text);
+}
+
+/**
+ * 纪律类事实过滤（入库抽取与生成拼接点共用同一口径）：key+value 拼接后按禁写词表判定，
+ * 命中即不入事实池——纪律类事实经缓存通道污染 Planner 任务书与写作上下文的源头断流。
+ */
+export function filterBidDisciplineFacts<T extends { key?: string; value: string | number }>(facts: T[]): T[] {
+  return facts.filter(fact => !isBidDisciplineSentence(`${fact.key || ''} ${String(fact.value)}`));
 }
 
 export function adaptiveConcurrency(input: { total: number; kind: 'chapter' | 'search' | 'deepRetrieval' | 'sectionRepair' | 'llmRepair'; targetWords?: number; highRisk?: boolean }) {

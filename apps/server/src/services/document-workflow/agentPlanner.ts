@@ -1,6 +1,6 @@
 import type { AgentWorkflowContext, AgentWorkflowNode } from './agentWorkflow';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentFact, DocumentTemplate, DocumentTemplateChapter, ProjectGraph, ValidationIssue } from './types';
-import type { PlannedChapterStructure } from './chapterPlanner';
+import type { PlannedChapterStructure } from './integratedBlueprint';
 import { BID_DISCIPLINE_PHRASES, extractSection, hasProcessSequenceExpression, isBidDisciplineSentence, stableHash, stringifyFactValue } from './utils';
 import { documentTextLength } from './budget';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
@@ -486,8 +486,12 @@ export function reviewChapterDraft(input: { task: AgentChapterTask; draft: Docum
 export function buildTargetedRepairInstruction(input: { task: AgentChapterTask; review: AgentReviewResult; plannedMode?: boolean }) {
   if (!input.review.repairable) return '';
   // 规划驱动模式：只修复列出的问题并保持主题块+H4 两层结构，不附「逐条 ### 输出细目」指令，防止修复时重新拆节
+  // F4（丰乐镇第五轮实测）：H4 标题缺陷（同名/过长/粘连）修复死锁——检测器要求压缩标题、
+  // 修复指令又要求「H4 标题不变」，LLM 收到矛盾指令永不收敛；问题清单含 H4 标题缺陷时
+  // 对相应 H4 标题开改写例外（三级标题仍不变），其余场景保持原标题锁定
+  const headingFixNeeded = input.review.issues.some(issue => /^H4 标题/u.test(issue.message));
   const plannedConstraint = input.plannedMode
-    ? '【结构约束】本章采用主题块成稿模式，必须保持现有三级主题块与 H4 要点标题不变；只修复列出的问题，不得新增小节、不得拆分或合并现有小节、不得把评分细目展开为独立标题。'
+    ? `【结构约束】本章采用主题块成稿模式，必须保持现有三级主题块标题不变；只修复列出的问题，不得新增小节、不得拆分或合并现有小节、不得把评分细目展开为独立标题。${headingFixNeeded ? '问题清单含 H4 标题缺陷：允许对相应 H4 要点标题做定向改写（压缩为单一主题短标题或消除与三级小节同名），标题改动不得影响该 H4 覆盖的评分细目正文内容。' : 'H4 要点标题保持不变。'}`
     : chapterTaskPrompt(input.task);
   return [
     '【Agent 定向修复任务】',

@@ -475,7 +475,7 @@ export interface ExportGateResult {
 }
 
 export interface DocumentExecutionStage {
-  type: 'role_binding' | 'knowledge_retrieval' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'asset_generation' | 'llm_review' | 'validation' | 'formatting' | 'export_ready' | 'reference';
+  type: 'role_binding' | 'knowledge_retrieval' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'llm_review' | 'validation' | 'reference';
   roleId: string;
   promptId?: string;
   status: 'running' | 'success' | 'skipped' | 'failed';

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { internalTerminologyAnchorIssues, stripInternalTerminologySentences } from '@/services/document-workflow/internalTerminologyAnchors';
+import { fixInternalTermHeadingPhrases, internalTerminologyAnchorIssues, stripInternalTerminologySentences } from '@/services/document-workflow/internalTerminologyAnchors';
 
 // 语义嵌入可控模拟：文本含「已确认资料」（锚点「本项目已确认资料」「根据已确认资料」的原型词）
 // 或「应急物资」时返回 [2,0]，其余返回 [0,0]。
@@ -138,5 +138,57 @@ describe('stripInternalTerminologySentences', () => {
     const markdown = '## 依据本项目已确认资料编写说明\n\n| 依据本项目已确认资料编写说明 | 保留 |\n|------|------|\n\n1.2 依据本项目已确认资料';
     const result = await stripInternalTerminologySentences(markdown);
     expect(result).toBe(markdown);
+  });
+
+  it('A4：锚定词候选句超 200 条时 L1 精确词句不受限幅仍全删', async () => {
+    // 200+ 条含锚定词「本项目资料」的候选句把语义候选槽位占满，尾部 L1 句不得被截断漏删
+    const anchorSentences = Array.from({ length: 205 }, (_, index) => `本项目资料第${index}项内容按程序办理。`).join('\n');
+    const markdown = `${anchorSentences}\n各阶段劳动力投入均以71人为上限，不再另行出现其他峰值口径。`;
+    const result = await stripInternalTerminologySentences(markdown);
+    expect(result).not.toContain('峰值口径');
+    // L3 零向量不命中：锚定词句全部保留
+    expect(result).toContain('本项目资料第204项内容按程序办理。');
+  });
+
+  it('A5：L1 词所在超长句（>80 字全逗号无句号）仍整句删除', async () => {
+    // 丰乐镇第 2 轮实测形态：长段落全逗号无句号，fragment 超 80 字被长度窗过滤漏删
+    const longSentence = `各阶段工种人数由技术负责人依据工程量清单中一般路灯100W LED高4.5m共24套、120W LED高4.5m共3套、墙面彩绘270m²、入户路宽度1.5m等工程量，按定额工效逐项推导，项目经理审核后锁定全项目劳动力峰值71人，全项目各阶段劳动力投入均以71人为同时在场人数上限，不再另行出现其他峰值口径。`;
+    const markdown = `劳动力配置如下所述。\n${longSentence}\n各阶段工种人数按实际作业面需求动态配置。`;
+    const result = await stripInternalTerminologySentences(markdown);
+    expect(result).not.toContain('峰值口径');
+    // 长句内其他句（不含 L1 词）不受影响
+    expect(result).toContain('各阶段工种人数按实际作业面需求动态配置。');
+  });
+});
+
+describe('fixInternalTermHeadingPhrases', () => {
+  it('标题行内「落位」确定性替换为「落实」（丰乐镇第五轮 10.3.2 实测）', () => {
+    const markdown = '#### 10.3.2 分区管理与责任落位\n正文句保留落位不替换。';
+    const result = fixInternalTermHeadingPhrases(markdown);
+    expect(result.markdown).toContain('#### 10.3.2 分区管理与责任落实');
+    expect(result.markdown).toContain('正文句保留落位不替换。');
+    expect(result.fixedCount).toBe(1);
+  });
+
+  it('非标题行「落位」不替换（正文句交 stripInternalTerminologySentences 删除链）', () => {
+    const markdown = '各专业工程主要清单项逐项落位到具体管理动作。';
+    const result = fixInternalTermHeadingPhrases(markdown);
+    expect(result.markdown).toBe(markdown);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('标题行其他 L1 精确词（工作包）无安全词面替换不触碰', () => {
+    const markdown = '#### 2.3.1 拆除工程工作包\n### 3.1 质量控制要点落位';
+    const result = fixInternalTermHeadingPhrases(markdown);
+    expect(result.markdown).toContain('#### 2.3.1 拆除工程工作包');
+    expect(result.markdown).toContain('### 3.1 质量控制要点落实');
+    expect(result.fixedCount).toBe(1);
+  });
+
+  it('无命中标题时 fixedCount 为 0 且原样返回', () => {
+    const markdown = '#### 2.1.1 施工准备\n正文内容。';
+    const result = fixInternalTermHeadingPhrases(markdown);
+    expect(result.markdown).toBe(markdown);
+    expect(result.fixedCount).toBe(0);
   });
 });

@@ -28,6 +28,7 @@ import {
   reliableFactForTarget,
   resolveChapterFactNeeds,
   sanitizeExtractedFacts,
+  sanitizeFactPool,
   shouldRunLlmFactExtraction,
 } from '@/services/document-workflow/factsModel';
 
@@ -870,6 +871,20 @@ describe('buildSpecAuthorityMap（F11 规格-部位权威映射）', () => {
     expect(map['厚度规格']?.[0]?.spec).toBe('4mm');
   });
 
+  it('4.19.7 回归：非维度标签值含 mm/MU token 按 token 类型归维，不混入混凝土强度等级维度', () => {
+    // 丰乐镇第三轮验收：「有梁板」条目特征无标签分句（如「板厚120mm」）时，旧逻辑把
+    // 120mm 归入「混凝土强度等级」维度 → F14 按维度首 placement 的 C 标号 pattern 扫描
+    // 「有梁板」附近正文 → C30 被误判与权威 120mm 不一致（跨类型误比对）
+    const map = buildSpecAuthorityMap([
+      billFact('垫层', '2.混凝土强度等级:C20'),
+      billFact('有梁板', '板厚120mm'),
+      billFact('砌筑渠道', 'MU10标准砖'),
+    ]);
+    expect(map['混凝土强度等级']?.map(item => item.spec)).toEqual(['C20']);
+    expect(map['厚度规格']?.[0]).toMatchObject({ location: '有梁板', spec: '120mm' });
+    expect(map['砌块强度等级']?.[0]?.spec).toBe('MU10');
+  });
+
   it('无规格 token 的事实（土壤类别）→ 空 map', () => {
     const map = buildSpecAuthorityMap([
       billFact('挖一般土方', '1.土壤类别:三类土'),
@@ -895,5 +910,36 @@ describe('buildSpecAuthorityMap（F11 规格-部位权威映射）', () => {
 
   it('空事实列表 → 空 map', () => {
     expect(buildSpecAuthorityMap([])).toEqual({});
+  });
+});
+
+describe('sanitizeFactPool（P3.2 乱码过滤+项目范围隔离）', () => {
+  it('乱码事实丢弃：CJK 扩展区字符与表格单元格引用噪声', () => {
+    const mojibake = factOf({ key: '招标范围', value: '帉䝷搌陓笍免鬐' });
+    const cellNoise = factOf({ key: '图纸目录', value: 'R6C3COL3：上海开艺设计集团有限公司' });
+    const normal = factOf({ key: '质量标准', value: '工程质量符合国家验收规范合格标准' });
+    expect(sanitizeFactPool([mojibake, cellNoise, normal])).toEqual([normal]);
+  });
+
+  it('项目名称候选跨项目串染过滤：舒城项目事实丢弃、当前项目保留', () => {
+    const current = factOf({ key: '项目名称', fieldId: 'project_name', value: '2026年度丰乐镇20个美丽宜居自然村建设项目' });
+    const foreign = factOf({ key: '项目名称候选', value: '舒城县城镇功能活力品质提升一期项目（一标）——公共广场空间改造等提升工程' });
+    const location = factOf({ key: '建设地点', value: '丰乐镇境内各自然村' });
+    const result = sanitizeFactPool([current, foreign, location]);
+    expect(result.map(fact => fact.key)).toEqual(['项目名称', '建设地点']);
+  });
+
+  it('招标范围多项目段隔离：仅保留当前项目段', () => {
+    const current = factOf({ key: '项目名称', fieldId: 'project_name', value: '2026年度丰乐镇20个美丽宜居自然村建设项目' });
+    const scope = factOf({ key: '招标范围', value: '包括但不限于雨污水管网铺设、道路硬化。舒城县城镇功能活力提升项目招标范围包括土方工程、道路工程。' });
+    const result = sanitizeFactPool([current, scope]);
+    const kept = result.find(fact => fact.key === '招标范围');
+    expect(kept?.value).toContain('雨污水管网铺设');
+    expect(kept?.value).not.toContain('道路工程');
+  });
+
+  it('无项目名称事实时仅乱码过滤（不误杀跨项目候选）', () => {
+    const foreign = factOf({ key: '项目名称候选', value: '舒城县城镇功能活力品质提升一期项目' });
+    expect(sanitizeFactPool([foreign]).length).toBe(1);
   });
 });

@@ -6,7 +6,7 @@
  * LLM/语义通道全部 mock（避免真实 LLM 与本地 bge 模型调用）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AMBIGUOUS_RESIDUE_RE, enforceWorkPackageSkeletons, repairTemplatingIssues, runGlobalConsistencyReviewLoop } from '@/services/document-workflow/globalQualityGates';
+import { AMBIGUOUS_RESIDUE_RE, enforcePlannedSectionCompleteness, enforceWorkPackageSkeletons, repairTemplatingIssues, runGlobalConsistencyReviewLoop } from '@/services/document-workflow/globalQualityGates';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate } from '@/services/document-workflow/types';
 import type * as RolePipelineModule from '@/services/document-workflow/rolePipeline';
 
@@ -74,6 +74,11 @@ function makeFactsModel(): DocumentFactsModel {
 
 function mockDiagnostics(): DocumentGenerationDiagnostics {
   return { llm: { calls: 0, failures: 0, maxActive: 0, retries: 0 }, metrics: [] } as unknown as DocumentGenerationDiagnostics;
+}
+
+// 补写修复默认返回调用时原文（无 patch 落地），聚焦断言确定性编排行为
+function mockNoopRepair() {
+  repairMock.mockImplementation(async args => ({ content: args.chapter.content, appliedCount: 0, producedCount: 0, repairType: 'quality' as never }));
 }
 
 type ReviewLoopInput = Parameters<typeof runGlobalConsistencyReviewLoop>[0];
@@ -212,6 +217,38 @@ describe('repairTemplatingIssues（模板化修复闭环：套话重写 + 重难
     expect(result.templatingFixApplied).toBe(false);
     expect(repairMock).toHaveBeenCalledTimes(1);
   });
+
+  it('F2 回滚保护：修复后套话占比上升且重难点未提升 → 回滚本轮修改', async () => {
+    // 轮初检测 0.3 → 修复 → 复检 0.45（变差）→ 回滚
+    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 5, ratio: 0.45, level: 'heavy', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    difficultyMock.mockResolvedValue({ countermeasures: 0, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: false, entries: [] });
+    fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理。' }]);
+    const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理。')];
+    const before = chapters[0].content;
+    repairMock.mockResolvedValue({ content: `${before}\n加强过程管控，确保质量水平稳步提升。`, appliedCount: 1, producedCount: 1, repairType: 'quality' as never });
+    const result = await repairTemplatingIssues(makeTemplatingInput(chapters));
+    expect(result.templatingFixApplied).toBe(false);
+    // 修复变差：正文回滚到修复前，不保留重写结果
+    expect(chapters[0].content).toBe(before);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('F2 回滚豁免：套话占比上升但重难点双达标提升 → 保留修复', async () => {
+    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 4, ratio: 0.35, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    // round2 轮初检测：套话与重难点双达标 → 收敛 break（序列末尾兑底值）
+    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 0, ratio: 0.05, level: 'light', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    difficultyMock.mockResolvedValueOnce({ countermeasures: 2, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: true, entries: [{ text: '基坑降水难度大需控制。', attributed: false, quantified: false }] });
+    difficultyMock.mockResolvedValue({ countermeasures: 2, attributed: 2, quantified: 2, bothCount: 2, ratio: 1, heavyTemplated: false, entries: [] });
+    fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理。' }]);
+    const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理。基坑降水难度大需控制。')];
+    const repaired = '本工程为办公楼项目。基坑降水需将周边沉降控制在5mm以内。';
+    repairMock.mockResolvedValue({ content: repaired, appliedCount: 1, producedCount: 1, repairType: 'quality' as never });
+    const result = await repairTemplatingIssues(makeTemplatingInput(chapters));
+    expect(result.templatingFixApplied).toBe(true);
+    expect(chapters[0].content).toBe(repaired);
+  });
 });
 
 describe('enforceWorkPackageSkeletons（工作包骨架确定性收口：阶段 0 小节缺失补建）', () => {
@@ -245,10 +282,6 @@ describe('enforceWorkPackageSkeletons（工作包骨架确定性收口：阶段 
   }
 
   // 补写修复默认返回调用时原文（无 patch 落地），聚焦断言阶段 0 补建确定性行为
-  function mockNoopRepair() {
-    repairMock.mockImplementation(async args => ({ content: args.chapter.content, appliedCount: 0, producedCount: 0, repairType: 'quality' as never }));
-  }
-
   beforeEach(() => {
     vi.resetAllMocks();
     mockNoopRepair();
@@ -379,6 +412,267 @@ describe('enforceWorkPackageSkeletons（工作包骨架确定性收口：阶段 
     expect(result.skeletonFixApplied).toBe(true);
     expect(first.content).toContain('### 1.1 项目主要施工内容');
     expect(second.content).not.toContain('项目主要施工内容');
+  });
+
+  // 4.19.11 回归（丰乐镇第十二轮实测）：分部章容器小节「主要分部分项工程施工方案」被补写轮
+  // 强制注入「#### 3 绿化工程」等工作包 H4 → 总述小节被骨架污染 + 补写重写截断总述正文
+  const DIVISION_CONTAINER_CONTENT = [
+    '本工程为办公楼项目，位于市中心区域。',
+    '',
+    '### 主要分部分项工程施工方案',
+    '',
+    '本章各分部工程按专业归并为土建、机电、装饰三大专业组：土建专业组涵盖地基与基础工程、主体结构工程，机电专业组涵盖电气工程、给排水工程、通风与空调，装饰专业组涵盖装饰装修工程、幕墙工程，各组间通过工序交接与成品保护安排衔接。',
+  ].join('\n');
+
+  it('分部章容器块（总述正文无 H4）：补写轮豁免，不注入工作包 H4，总述正文完整保留', async () => {
+    const division = makeChapter('ch-2', '主要施工方法', DIVISION_CONTAINER_CONTENT);
+    division.evidence = makeScopeEvidence();
+    const input = makeSkeletonInput({ chapterDraftsFinal: [division] });
+    const result = await enforceWorkPackageSkeletons(input);
+    // 容器块是总述小节（无需 H4 骨架）：骨架清单可用也不得补写（历史缺陷：注入「#### 3 幕墙工程」等 H4）
+    expect(repairMock).not.toHaveBeenCalled();
+    expect(result.skeletonFixApplied).toBe(false);
+    expect(division.content).toContain('本章各分部工程按专业归并为土建、机电、装饰三大专业组');
+    expect(division.content.match(/^####/gmu)).toBeNull();
+  });
+
+  it('豁免只针对分部章容器块：同章「项目主要施工内容」小节仍触发骨架补写', async () => {
+    const division = makeChapter('ch-2', '主要施工方法', [
+      '### 项目主要施工内容',
+      '',
+      '本项目主要施工内容覆盖土建与机电各专业工程。',
+      '',
+      ...DIVISION_CONTAINER_CONTENT.split('\n'),
+    ].join('\n'));
+    division.evidence = makeScopeEvidence();
+    const input = makeSkeletonInput({ chapterDraftsFinal: [division] });
+    await enforceWorkPackageSkeletons(input);
+    // 仅「项目主要施工内容」进入补写轮（容器块豁免）；锚点不含容器块标题行
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const firstCall = repairMock.mock.calls[0][0];
+    expect(firstCall.anchorTexts).toEqual([{ text: '### 项目主要施工内容', append: true }]);
+    expect(firstCall.issues[0]).toContain('#### 1 土方外运及基坑支护工程');
+    expect(division.content).toContain('本章各分部工程按专业归并为土建、机电、装饰三大专业组');
+  });
+
+  it('非分部章容器小节（异常挂载）：豁免不生效，仍按关键小节补写（口径精确到分部章）', async () => {
+    const host = makeChapter('ch-1', '工程概况', [
+      '本工程为办公楼项目，位于市中心区域。',
+      '',
+      ...DIVISION_CONTAINER_CONTENT.split('\n'),
+    ].join('\n'));
+    host.evidence = makeScopeEvidence();
+    const input = makeSkeletonInput({ chapterDraftsFinal: [host] });
+    await enforceWorkPackageSkeletons(input);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const firstCall = repairMock.mock.calls[0][0];
+    expect(firstCall.anchorTexts).toEqual([{ text: '### 主要分部分项工程施工方案', append: true }]);
+  });
+
+  it('分部章容器块内自由发挥 H4 不误剥（剥离轮豁免）：总述正文连同 H4 全部保留', async () => {
+    const division = makeChapter('ch-2', '主要施工方法', [
+      '本工程为办公楼项目，位于市中心区域。',
+      '',
+      '### 主要分部分项工程施工方案',
+      '',
+      '#### 3 幕墙工程',
+      '',
+      '本章各分部工程按专业归并为土建、机电、装饰三大专业组。',
+    ].join('\n'));
+    division.evidence = makeScopeEvidence();
+    const input = makeSkeletonInput({ chapterDraftsFinal: [division] });
+    await enforceWorkPackageSkeletons(input);
+    // 剥离轮豁免：容器块内 H4（哪怕命中骨架名且正文不足）不得按空工作包剥离（总述小节无工作包口径）
+    expect(division.content).toContain('#### 3 幕墙工程');
+    expect(division.content).toContain('本章各分部工程按专业归并为土建、机电、装饰三大专业组');
+  });
+});
+
+describe('enforcePlannedSectionCompleteness（缺规划小节补写收口：F1）', () => {
+  function makePlannedInput(overrides: Partial<Parameters<typeof enforcePlannedSectionCompleteness>[0]> = {}) {
+    return {
+      chapterDraftsFinal: [
+        makeChapter('ch-1', '劳动力安排计划', [
+          '## 劳动力安排计划',
+          '',
+          '### 1.1 劳动力组织与实名制管理',
+          '实名制管理覆盖全部进场人员，先入场登记再安全教育，随后考勤打卡，最后工资代发。',
+          '',
+          '### 1.2 分阶段劳动力投入与动态调配',
+          '施工准备阶段投入施工人员约四十人，主体施工阶段高峰约一百二十人，收尾阶段逐步退场。',
+          '',
+          '### 1.3 劳动力保障与工资支付措施',
+          '设立农民工工资专户，按月足额支付工资，保障劳动力稳定。',
+        ].join('\n')),
+      ],
+      template: {} as DocumentTemplate,
+      repairPromptTexts: '修复提示',
+      requirement: undefined,
+      signal: undefined,
+      generationDiagnostics: mockDiagnostics(),
+      progressStages: [],
+      emitProgress: vi.fn(),
+      withProgressHeartbeat: async <T,>(task: () => Promise<T>) => task(),
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockNoopRepair();
+  });
+
+  it('规划小节缺失：以章末标题行为锚点发起补写，issues 含编号标题与专属任务卡', async () => {
+    const chapter = makeChapter('ch-1', '劳动力安排计划', [
+      '## 劳动力安排计划',
+      '',
+      '### 1.1 劳动力组织与实名制管理',
+      '实名制管理覆盖全部进场人员，先入场登记再安全教育，随后考勤打卡，最后工资代发。',
+      '',
+      '### 1.2 分阶段劳动力投入与动态调配',
+      '施工准备阶段投入施工人员约四十人，主体施工阶段高峰约一百二十人，收尾阶段逐步退场。',
+      '',
+      '### 1.3 劳动力保障与工资支付措施',
+      '设立农民工工资专户，按月足额支付工资，保障劳动力稳定。',
+    ].join('\n'));
+    chapter.sections = ['资源配置计划', '劳动力组织与实名制管理', '分阶段劳动力投入与动态调配', '劳动力保障与工资支付措施'];
+    const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
+    const result = await enforcePlannedSectionCompleteness(input);
+    expect(result.plannedSectionFixApplied).toBe(false);
+    // 缺「资源配置计划」触发 1 次补写调用，锚点 = 章末标题行（append 模式）
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const firstCall = repairMock.mock.calls[0][0];
+    expect(firstCall.chapter.title).toBe('劳动力安排计划');
+    expect(firstCall.anchorTexts).toEqual([{ text: '### 1.3 劳动力保障与工资支付措施', append: true }]);
+    // 编号口径：缺节在 sections 中第 1 位 → ### 1.1（章序 1）
+    expect(firstCall.issues[0]).toContain('### 1.1 资源配置计划');
+    // 专属任务卡：劳动力章 × 资源配置计划 组合规则注入
+    expect(firstCall.issues[0]).toContain('只写劳动力资源');
+    expect(firstCall.issues[0]).toContain('工种结构与人数');
+  });
+
+  it('修复 patch 落地：章节正文被替换且返回 true', async () => {
+    const chapter = makeChapter('ch-1', '劳动力安排计划', [
+      '## 劳动力安排计划',
+      '',
+      '### 1.1 劳动力组织与实名制管理',
+      '实名制管理覆盖全部进场人员，先入场登记再安全教育，随后考勤打卡，最后工资代发。',
+      '',
+      '### 1.2 分阶段劳动力投入与动态调配',
+      '施工准备阶段投入施工人员约四十人，主体施工阶段高峰约一百二十人，收尾阶段逐步退场。',
+      '',
+      '### 1.3 劳动力保障与工资支付措施',
+      '设立农民工工资专户，按月足额支付工资，保障劳动力稳定。',
+    ].join('\n'));
+    chapter.sections = ['资源配置计划', '劳动力组织与实名制管理', '分阶段劳动力投入与动态调配', '劳动力保障与工资支付措施'];
+    repairMock.mockImplementation(async args => ({
+      content: `${args.chapter.content}\n\n### 1.1 资源配置计划\n钢筋工十五人、木工二十人，分阶段进退场。`,
+      appliedCount: 1,
+      producedCount: 1,
+      repairType: 'quality' as never,
+    }));
+    const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
+    const result = await enforcePlannedSectionCompleteness(input);
+    expect(result.plannedSectionFixApplied).toBe(true);
+    expect(chapter.content).toContain('### 1.1 资源配置计划');
+  });
+
+  it('无缺失小节：零 LLM 调用、返回 false', async () => {
+    const chapter = makeChapter('ch-1', '劳动力安排计划', [
+      '## 劳动力安排计划',
+      '',
+      '### 1.1 资源配置计划',
+      '钢筋工十五人、木工二十人，分阶段进退场。',
+      '',
+      '### 1.2 劳动力组织与实名制管理',
+      '实名制管理覆盖全部进场人员。',
+    ].join('\n'));
+    chapter.sections = ['资源配置计划', '劳动力组织与实名制管理'];
+    const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
+    const result = await enforcePlannedSectionCompleteness(input);
+    expect(result.plannedSectionFixApplied).toBe(false);
+    expect(repairMock).not.toHaveBeenCalled();
+  });
+
+  it('三要素豁免小节缺失不触发补写（与导出期检查器同口径）', async () => {
+    const chapter = makeChapter('ch-1', '工程概况', [
+      '## 工程概况',
+      '',
+      '### 1.1 项目主要施工内容',
+      '本工程包括道路工程与排水工程，各分部分项有序组织施工。',
+    ].join('\n'));
+    chapter.sections = ['施工概况', '项目主要施工内容'];
+    const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
+    const result = await enforcePlannedSectionCompleteness(input);
+    expect(result.plannedSectionFixApplied).toBe(false);
+    // 「施工概况」属三要素豁免小节（collectSectionContentGaps 口径），不发起补写
+    expect(repairMock).not.toHaveBeenCalled();
+  });
+
+  it('补写失败（修复返回原内容）：不阻断、返回 false', async () => {
+    const chapter = makeChapter('ch-1', '劳动力安排计划', [
+      '## 劳动力安排计划',
+      '',
+      '### 1.1 劳动力组织与实名制管理',
+      '实名制管理覆盖全部进场人员，先入场登记再安全教育，随后考勤打卡，最后工资代发。',
+      '',
+      '### 1.2 分阶段劳动力投入与动态调配',
+      '施工准备阶段投入施工人员约四十人，主体施工阶段高峰约一百二十人，收尾阶段逐步退场。',
+      '',
+      '### 1.3 劳动力保障与工资支付措施',
+      '设立农民工工资专户，按月足额支付工资，保障劳动力稳定。',
+    ].join('\n'));
+    chapter.sections = ['资源配置计划', '劳动力组织与实名制管理', '分阶段劳动力投入与动态调配', '劳动力保障与工资支付措施'];
+    const before = chapter.content;
+    const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
+    const result = await enforcePlannedSectionCompleteness(input);
+    expect(result.plannedSectionFixApplied).toBe(false);
+    expect(chapter.content).toBe(before);
+  });
+
+  it('规划小节只有表格无正文（planned empty）：触发补写，指令为既有小节内补正文而非新增同名小节', async () => {
+    const chapter = makeChapter('ch-1', '确保文明施工的技术组织措施', [
+      '## 确保文明施工的技术组织措施',
+      '',
+      '### 1.1 扬尘治理六个百分百落实措施',
+      '| 污染源 | 控制指标 |',
+      '| --- | --- |',
+      '| 施工扬尘 | 100%围挡 |',
+      '| 物料扬尘 | 100%覆盖 |',
+    ].join('\n'));
+    chapter.sections = ['扬尘治理六个百分百落实措施', '环境污染物管控指标与监测'];
+    const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
+    const result = await enforcePlannedSectionCompleteness(input);
+    // 环境污染物小节连标题都没有（缺节）+ 扬尘小节纯表格（planned empty）：两类都进补写目标
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const firstCall = repairMock.mock.calls[0][0];
+    // 纯表格小节：指令必须是既有小节内补写正文，禁止新增同名小节标题
+    const emptyIssue = firstCall.issues.find(issue => issue.includes('扬尘治理六个百分百落实措施'));
+    expect(emptyIssue).toBeDefined();
+    expect(emptyIssue).toContain('只有标题或表格无正式正文');
+    expect(emptyIssue).toContain('不得新增同名小节标题');
+    // 缺节小节：指令仍是章末新增小节标题
+    const missingIssue = firstCall.issues.find(issue => issue.includes('环境污染物管控指标与监测'));
+    expect(missingIssue).toBeDefined();
+    expect(missingIssue).toContain('新增小节标题');
+    expect(result.plannedSectionFixApplied).toBe(false);
+  });
+
+  it('非规划小节（planned=false）空小节不触发补写', async () => {
+    const chapter = makeChapter('ch-1', '确保文明施工的技术组织措施', [
+      '## 确保文明施工的技术组织措施',
+      '',
+      '### 1.1 噪声控制措施',
+      '| 污染源 | 控制指标 |',
+      '| --- | --- |',
+      '| 施工噪声 | 昼间≤70dB(A) |',
+    ].join('\n'));
+    // sections 未包含该小节：actual 空小节 planned=false，不入补写目标
+    chapter.sections = [];
+    const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
+    const result = await enforcePlannedSectionCompleteness(input);
+    expect(result.plannedSectionFixApplied).toBe(false);
+    expect(repairMock).not.toHaveBeenCalled();
   });
 });
 

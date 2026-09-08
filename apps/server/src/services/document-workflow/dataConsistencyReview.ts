@@ -1,8 +1,8 @@
 import type { DocumentGenerationDiagnostics, ValidationIssue } from './types';
 import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
 import { docSystemPrefix } from './markdownComposer';
-import type { DecisionLockEntry } from './decisionLock';
-import { decisionLockCategoryMeta, decisionMentionNegated } from './decisionLock';
+import type { DecisionLockEntry } from './integratedBlueprint';
+import { decisionLockCategoryMeta, decisionMentionNegated } from './integratedBlueprint';
 
 /**
  * L3.5 数据一致性 LLM 审查层（h7）：

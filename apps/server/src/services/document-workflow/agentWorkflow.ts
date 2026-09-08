@@ -289,8 +289,8 @@ export function buildBaseProjectGraph(input: { facts: DocumentFact[]; materialSn
   };
 }
 
-export function createAgentWorkflowContext(input: { template: DocumentTemplate; requirement?: string; projectRoot: string; facts: DocumentFact[]; projectGraph?: ProjectGraph; projectGraphSource?: string }): AgentWorkflowContext {
-  const materialScope = resolveAgentMaterialScope(input.projectRoot, input.template, input.requirement || '');
+export function createAgentWorkflowContext(input: { template: DocumentTemplate; requirement?: string; projectRoot: string; facts: DocumentFact[]; projectGraph?: ProjectGraph; projectGraphSource?: string; materialScope?: AgentMaterialScope }): AgentWorkflowContext {
+  const materialScope = input.materialScope || resolveAgentMaterialScope(input.projectRoot, input.template, input.requirement || '');
   if (materialScope.ambiguous || !materialScope.locked || materialScope.selectedFiles.length === 0) {
     throw new Error(`资料范围未锁定：${materialScope.reason}`);
   }
@@ -343,11 +343,16 @@ export function throttleAgentWorkflowNodes(context: AgentWorkflowContext, limit 
 export function agentWorkflowStages(context: AgentWorkflowContext): DocumentExecutionStage[] {
   const graphNode = context.nodes.find(node => node.type === 'project_graph');
   const precomputed = Boolean(graphNode?.metrics?.precomputed);
-  return [
+  const stages: DocumentExecutionStage[] = [
     displayStage({ type: 'validation', roleId: 'agent-material-scope', status: 'success', message: `资料范围已锁定：${context.materialScope.selectedRoots.join('、')}`, details: [`${context.materialScope.reason}`, `入选资料：${context.materialScope.selectedFiles.length}/${context.materialScope.totalAvailableFiles}`, `已排除资料组：${context.materialScope.rejectedRoots.slice(0, 8).join('、') || '无'}`] }, { subtitle: 'Agent 资料范围锁定' }),
     displayStage({ type: 'knowledge_retrieval', roleId: 'agent-material-snapshot', status: 'success', message: `资料快照已固定：${context.materialSnapshot.totalFiles} 份资料、${context.materialSnapshot.totalChunks} 个切片`, details: context.materialSnapshot.files.slice(0, 10).map(file => `${file.root}｜${file.fileName}｜${file.chunkCount}切片`) }, { subtitle: 'Agent 资料快照' }),
-    displayStage({ type: 'file_understanding', roleId: precomputed ? 'agent-project-graph-cache' : 'agent-project-graph-runtime', status: 'success', message: precomputed ? `已复用预处理完整项目图谱：${context.baseProjectGraph.works.length}工程 ${context.baseProjectGraph.resources.length}资源 ${context.baseProjectGraph.schedule.length}工期 ${context.baseProjectGraph.standards.length}标准` : `运行期项目图谱草案已建立：${context.baseProjectGraph.works.length}工程 ${context.baseProjectGraph.resources.length}资源 ${context.baseProjectGraph.schedule.length}工期 ${context.baseProjectGraph.standards.length}标准`, details: precomputed ? [`完整图谱来自入库后 project-intelligence 预处理`, `事实数：${context.facts.length}`] : [`缓存缺失时用于资料范围和 Planner 预备分析；正式完整项目图谱会随后由 LLM 构建`, `事实数：${context.facts.length}`] }, { subtitle: precomputed ? 'Agent 完整项目图谱缓存' : 'Agent 项目图谱预备分析' }),
   ];
+  // 图谱复用信息已由「项目理解缓存 / Scope 快照」节点完整展示（工程/工法/资源/来源），不重复展示图谱缓存节点；
+  // 仅缓存缺失的运行期草案需单独展示（临时构建路径）
+  if (!precomputed) {
+    stages.push(displayStage({ type: 'file_understanding', roleId: 'agent-project-graph-runtime', status: 'success', message: `运行期项目图谱草案已建立：${context.baseProjectGraph.works.length}工程 ${context.baseProjectGraph.resources.length}资源 ${context.baseProjectGraph.schedule.length}工期 ${context.baseProjectGraph.standards.length}标准`, details: ['缓存缺失时用于资料范围和 Planner 预备分析；正式完整项目图谱会随后由 LLM 构建', `事实数：${context.facts.length}`] }, { subtitle: 'Agent 项目图谱预备分析' }));
+  }
+  return stages;
 }
 
 export function formalTextGateIssues(markdown: string): ValidationIssue[] {

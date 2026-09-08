@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { BLOCKING_CHAPTER_ISSUE_RE, QUALITY_REPAIR_INSTRUCTIONS, QUALITY_REPAIR_TYPE_RULES, REPAIRABLE_QUALITY_ISSUE_RE } from '../constants';
 import { listDocumentRoles } from '../document-core/documentRoleService';
 import type { QualityRepairType } from '../types';
-import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplate, DocumentTemplateChapter, PromptBinding } from './types';
+import type { DocumentDraftChapter, DocumentEvidence, DocumentGenerationDiagnostics, DocumentGenerationStrategy, DocumentTemplate, DocumentTemplateChapter, PromptBinding } from './types';
 import { readPromptContents, type ResolvedPromptContent } from './templateStore';
 import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
 import { hasExplicitOutlineBlock, isExplicitOutlineClosingLine, isExplicitOutlineOpeningLine } from './outline';
@@ -12,7 +12,6 @@ import { documentTextLength } from './budget';
 import { estimateTokens, truncateToTokenBudget } from './tokenBudget';
 import { classifyQualitySeverity, degenerateContentIssues } from './qualityValidation';
 import { deterministicDefectPrecheck } from './patchGuard';
-import { repairIssueSignature } from './documentQualityPipeline';
 import { callDocumentLlmJson, contextLayerChars, isContextOverflowLlmError } from './llmClient';
 import { throwIfAborted, systemConstraintLine } from './utils';
 
@@ -372,7 +371,7 @@ function applyAnchorRangePatch(input: { content: string; startAnchor: string; en
   return { content: sanitizeFormalMarkdown(removeUnwantedDrawingImages(next, input.forbidDrawingImages)), applied: next !== input.content };
 }
 
-export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }>; maxTokens?: number; patchGuard?: { observeOnly: boolean; diagnostics?: DocumentGenerationDiagnostics }; anchorTexts?: Array<string | AnchorSpec> }) {
+export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }>; maxTokens?: number; patchGuard?: { observeOnly: boolean; diagnostics?: DocumentGenerationDiagnostics }; anchorTexts?: Array<string | AnchorSpec>; evidenceChars?: number }) {
   throwIfAborted(input.signal);
   const repairType = input.repairType || classifyQualityRepairType(input.issues);
   const contextBlock = input.contextChapters?.length
@@ -466,9 +465,10 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
   // 证据注入预算固定化：与正文长度解耦（历史缺陷：预算随正文长度每轮变化 → 修复调用前缀在
   // 证据处提前分叉，同章多次修复的 prefix cache 命中率被压低；恒定预算下同章前缀完全稳定）
   // 4.17.6 修复证据压缩：repair 只修缺陷清单（缺陷已带引号原文锚点与具体问题），证据只作
-  // 事实兜底最小集（~1.5K 字符），T2 目录跳过——repair L3 从 ~24K 压到 ~4K（含裁剪后正文），
+  // 事实兑底最小集（~1.5K 字符），T2 目录跳过——repair L3 从 ~24K 压到 ~4K（含裁剪后正文），
   // 是 prefix cache 命中率 90% 目标参数之一；env DOCUMENT_REPAIR_EVIDENCE_CHARS 可调
-  const repairEvidenceCharsValue = Number(process.env.DOCUMENT_REPAIR_EVIDENCE_CHARS || 1500);
+  // F2：套话重写类修复专用放大（evidenceChars 参数），默认最小集不足支撑句级具体化重写
+  const repairEvidenceCharsValue = Number(input.evidenceChars ?? process.env.DOCUMENT_REPAIR_EVIDENCE_CHARS ?? 1500);
   const repairEvidenceChars = Number.isFinite(repairEvidenceCharsValue) && repairEvidenceCharsValue > 0 ? Math.floor(repairEvidenceCharsValue) : 1500;
   const evidenceBudget = evidenceBundle
     ? Math.min(repairEvidenceChars, evidencePromptBudgetForTarget(8000, 6000, 14000))
@@ -544,83 +544,6 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
   // producedCount（F4）：LLM 已产出但未应用的 patch 条数，供修复循环区分「未产出 patch」与
   // 「产出但锚点失配未应用」两种失败诊断（历史缺陷：补表类 patch 锚点失配全部落空仍报“未产出”）
   return { content, appliedCount, producedCount: patches.length, repairType };
-}
-
-function summarizeRepairIssue(issue: string) {
-  return issue
-    .replace(/【修复任务包】/gu, '')
-    .split(/\r?\n/u)
-    .map(line => line.replace(/^(?:修复类型|修复对象|问题|要求|输出要求)：/u, '').trim())
-    .filter(Boolean)[0]
-    ?.slice(0, 80) || '质量问题';
-}
-
-export async function repairMarkdownByQuality(input: { markdown: string; template: DocumentTemplate; chapters: DocumentDraftChapter[]; promptTexts: string; requirement?: string; issues: string[]; forbidDrawingImages: boolean; strategy?: DocumentGenerationStrategy; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; resolvedSignatures?: Set<string>; neighborContext?: Map<string, Array<{ title: string; content: string }>> }) {
-  let repairableIssues = input.issues.filter(issue => classifyQualitySeverity(issue) !== 'minor').filter(repairableQualityIssue);
-  const resolvedSigs = input.resolvedSignatures;
-  if (resolvedSigs) repairableIssues = repairableIssues.filter(issue => !resolvedSigs.has(repairIssueSignature(issue)));
-  if (repairableIssues.length === 0) return { markdown: input.markdown, chapters: input.chapters, stage: undefined as DocumentExecutionStage | undefined, resolvedSignatures: [] as string[] };
-  const candidates = input.chapters
-    .map(chapter => ({ chapter, issues: issuesForChapter(chapter, repairableIssues) }))
-    .filter(item => item.issues.length > 0);
-  if (candidates.length === 0) {
-    return {
-      markdown: input.markdown,
-      chapters: input.chapters,
-      stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'success' as const, message: `已完成质量检查，未定位到可安全局部修复的阻断问题：共 ${repairableIssues.length} 个；摘要：${repairableIssues.slice(0, 5).map(summarizeRepairIssue).join('；')}` },
-      resolvedSignatures: [] as string[],
-    };
-  }
-  const configuredConcurrency = Number(process.env.DOCUMENT_QUALITY_REPAIR_CONCURRENCY || 4);
-  const concurrency = Math.max(1, Math.min(candidates.length || 1, Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : 4));
-  const repairedById = new Map<string, string>();
-  let patchCount = 0;
-  for (let offset = 0; offset < candidates.length; offset += concurrency) {
-    throwIfAborted(input.signal);
-    const batch = candidates.slice(offset, offset + concurrency);
-    const results = await Promise.all(batch.map(async item => repairChapterByQuality({ template: input.template, chapter: item.chapter, issues: item.issues, promptTexts: input.promptTexts, requirement: input.requirement, forbidDrawingImages: input.forbidDrawingImages, diagnostics: input.diagnostics, signal: input.signal })));
-    results.forEach((result, index) => {
-      repairedById.set(batch[index].chapter.id, result.content);
-      patchCount += result.appliedCount;
-    });
-  }
-  let repairedCount = 0;
-  let rejectedShrinkCount = 0;
-  const actuallyRepairedIds = new Set<string>();
-  const repairedChapters = input.chapters.map(chapter => {
-    const content = repairedById.get(chapter.id);
-    if (!content || content === chapter.content) return chapter;
-    const beforeChars = documentTextLength(chapter.content);
-    const afterChars = documentTextLength(content);
-    if (afterChars < Math.max(1200, Math.floor(beforeChars * 0.92))) {
-      rejectedShrinkCount += 1;
-      return chapter;
-    }
-    repairedCount += 1;
-    actuallyRepairedIds.add(chapter.id);
-    return { ...chapter, content };
-  });
-  const message = repairedCount > 0
-    ? `已应用 ${patchCount} 个局部质量 patch，修复 ${repairedCount} 个章节；拒绝 ${rejectedShrinkCount} 个明显缩水 patch；未进行整章或全文重写`
-    : `已完成质量检查，未生成可唯一定位且通过校验的局部 patch：共 ${repairableIssues.length} 个，拒绝 ${rejectedShrinkCount} 个明显缩水 patch；摘要：${repairableIssues.slice(0, 5).map(summarizeRepairIssue).join('；')}`;
-  // 仅标记实际被 patch 的章节对应的问题为已解决
-  const patchedIssueSignatures = new Set<string>();
-  if (repairedCount > 0) {
-    for (const candidate of candidates) {
-      if (actuallyRepairedIds.has(candidate.chapter.id)) {
-        for (const issue of candidate.issues) {
-          patchedIssueSignatures.add(repairIssueSignature(issue));
-        }
-      }
-    }
-  }
-  const resolvedSignatures = [...patchedIssueSignatures];
-  return {
-    markdown: input.markdown,
-    chapters: repairedChapters,
-    stage: { type: 'llm_review' as const, roleId: 'quality-repair', status: 'success' as const, message },
-    resolvedSignatures,
-  };
 }
 
 export function fileScopeKeys(projectRoot: string, filePath: string) {

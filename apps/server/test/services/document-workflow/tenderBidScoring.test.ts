@@ -226,6 +226,65 @@ describe('buildTenderBidScores 编制规范性与低雷同性', () => {
     expect(scores.normalization).toBe(70);
   });
 
+  it('4.19.7 回归：category=structure 污染消息（评分项响应）不计编制规范性', async () => {
+    // classifyValidationIssue 兜底把合规类 error 标成 structure，消息无结构特征时必须剔除
+    const scores = await buildTenderBidScores({
+      markdown: '',
+      chapters: [],
+      template: null,
+      factTraces: [],
+      issues: [
+        { level: 'error', category: 'structure', message: '评分项要求未响应：前附表响应条款在正文中零命中' },
+        { level: 'error', category: 'structure', message: '属地创优目标缺失：正文未提及省市级优质工程' },
+        { level: 'error', category: 'structure', message: '工伤保险表述缺失：正文未提及工伤保险缴纳' },
+      ],
+    });
+    expect(scores.normalization).toBe(100);
+  });
+
+  it('4.19.7 回归：category=structure 结构类消息（小节只有标题）仍计分', async () => {
+    const scores = await buildTenderBidScores({
+      markdown: '',
+      chapters: [],
+      template: null,
+      factTraces: [],
+      issues: [
+        { level: 'error', category: 'structure', message: '拟投入的主要物资计划 小节只有标题或表格无正文：成品保护措施' },
+        { level: 'error', category: 'structure', message: '主要施工方法 缺少规划小节：周边环境保护' },
+      ],
+    });
+    expect(scores.normalization).toBe(84);
+  });
+
+  it('4.19.7 回归：category=table/format 直接计分，qingtian_review 不计', async () => {
+    const scores = await buildTenderBidScores({
+      markdown: '',
+      chapters: [],
+      template: null,
+      factTraces: [],
+      issues: [
+        { level: 'warning', category: 'table', message: '同主题表格重复堆叠：1 组相同表头出现 3 次及以上' },
+        { level: 'warning', category: 'format', message: '正式正文仍包含后台内部术语“工作包”' },
+        { level: 'error', category: 'qingtian_review', message: '[全维度评审·数据逻辑·高风险]同一口径高峰人数出现1222人与700人两个数值并存，且本块后文表格均采用700人' },
+      ],
+    });
+    expect(scores.normalization).toBe(94);
+  });
+
+  it('4.19.7 回归：无 category 事实落位消息（含「图纸目录」）不计编制规范性', async () => {
+    const scores = await buildTenderBidScores({
+      markdown: '',
+      chapters: [],
+      template: null,
+      factTraces: [],
+      issues: [
+        { level: 'warning', message: '已确认事实未在正文中落位：招标人=R3C1建设项目招标图纸目录：' },
+        { level: 'warning', category: 'qingtian_review', message: '[全维度评审·数据逻辑·中风险]11J900为图集编号，正文表述为国标，图集与国标性质混淆' },
+      ],
+    });
+    expect(scores.normalization).toBe(100);
+  });
+
   it('禁用词命中按词数 ×4 扣分', async () => {
     const scores = await buildTenderBidScores({
       markdown: '我单位精心组织施工。',

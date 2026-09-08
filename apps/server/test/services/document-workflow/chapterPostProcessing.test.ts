@@ -327,6 +327,13 @@ describe('工作包骨架锁定（稳定版）', () => {
     expect(names.some(name => /工程量|约束|不得|参数|数字/u.test(name))).toBe(false);
   });
 
+  it('P3.2 scopeEngineeringNames：跨项目招标范围段隔离（只提取当前项目工程名）', () => {
+    const scope = '项目名称：2026年度丰乐镇20个美丽宜居自然村建设项目。招标范围包括但不限于雨污水管网铺设、道路硬化、沟塘清淤。舒城县城镇功能活力提升项目招标范围包括土方工程、道路工程、景观工程。';
+    const names = scopeEngineeringNames(scope, []);
+    expect(names).toEqual(['雨污水管网铺设', '道路硬化', '沟塘清淤']);
+    expect(names.some(name => /土方工程|景观工程/u.test(name))).toBe(false);
+  });
+
   it('majorConstructionSkeletonNames：图谱为空时兑底招标范围提取', () => {
     const scope = '招标范围：土方外运及基坑支护工程、地基与基础工程、人防工程、主体结构工程。';
     expect(majorConstructionSkeletonNames(scope, [])).toEqual(['土方外运及基坑支护工程', '地基与基础工程', '人防工程', '主体结构工程']);

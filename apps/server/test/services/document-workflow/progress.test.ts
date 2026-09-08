@@ -10,23 +10,21 @@ function makeStage(overrides: Partial<DocumentExecutionStage> = {}): DocumentExe
 }
 
 describe('stageTitle', () => {
-  it('llm_review 按 agent 角色区分审查/优化', () => {
-    expect(stageTitle('llm_review', 'agent-reviewer-1')).toBe('LLM 审查');
-    expect(stageTitle('llm_review', 'agent-repairer-1')).toBe('LLM 优化');
+  it('llm_review 统一标题（历史 agent-reviewer/repairer 区分已随章级审查循环删除）', () => {
     expect(stageTitle('llm_review')).toBe('LLM 审查优化');
   });
 
   it('其余类型映射', () => {
     expect(stageTitle('chapter_generation')).toBe('章节正文生成');
     expect(stageTitle('role_binding')).toBe('项目角色配置绑定');
-    expect(stageTitle('export_ready')).toBe('导出就绪检查');
+    expect(stageTitle('validation')).toBe('内容优化与质量校验');
   });
 });
 
 describe('stageRoleDisplayName', () => {
   it('已知角色名映射', () => {
     expect(stageRoleDisplayName('knowledge-base')).toBe('知识库');
-    expect(stageRoleDisplayName('export-gate')).toBe('导出门禁');
+    expect(stageRoleDisplayName('document-readiness')).toBe('生成准备度检查');
   });
 
   it('未知/空角色返回 undefined', () => {
@@ -75,10 +73,10 @@ describe('upsertProgressStage', () => {
     expect(stages).toHaveLength(2);
   });
 
-  it('agent-reviewer 身份含 subtitle 与 order', () => {
+  it('agent-chapter-task 身份含 subtitle 与 order（历史 agent-reviewer 前缀已随章级审查循环删除）', () => {
     const stages: DocumentExecutionStage[] = [];
-    upsertProgressStage(stages, makeStage({ type: 'llm_review', roleId: 'agent-reviewer-a', subtitle: '章1', order: 1 }));
-    const index = upsertProgressStage(stages, makeStage({ type: 'llm_review', roleId: 'agent-reviewer-a', subtitle: '章2', order: 2 }));
+    upsertProgressStage(stages, makeStage({ type: 'validation', roleId: 'agent-chapter-task-a', subtitle: '章1', order: 1 }));
+    const index = upsertProgressStage(stages, makeStage({ type: 'validation', roleId: 'agent-chapter-task-a', subtitle: '章2', order: 2 }));
     expect(index).toBe(1);
   });
 });

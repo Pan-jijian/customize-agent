@@ -147,6 +147,44 @@ describe('finalizeFinalMarkdownStructure（改9：最终组装路径覆盖清洗
     expect(lines[1]).toBe('管理人员按岗位分工。');
     expect(lines[2]).toBe('| 岗位 | 职责 | 人数 |');
   });
+
+  it('容器块总述 H4 与正文完整保留（4.19.6 回归：总述不再被串章骨架清理连坐删除）', () => {
+    // 4.19.5 起容器块是全章总述形态，H4 分组编号引用分部名是结构性引用而非串章骨架；
+    // 4.19.6 修复前：dedupeCrossSectionSkeletonH4s 删「#### 3 绿化工程」块时删除范围延伸至下一标题，
+    // 全部总述正文连坐丢失 → removeEmptySubSectionHeadings 删空壳标题 → 3447 字总述整体消失
+    const markdown = [
+      '## 第二章 主要施工方法',
+      '### 绿化工程',
+      '#### 施工概况',
+      '绿化概况正文',
+      '### 主要分部分项工程施工方案',
+      '#### 3 绿化工程',
+      '第四组为建筑配套专业组，涵盖砌筑工程、混凝土工程等分部',
+      '### 生态池及连接路施工方法',
+      '#### 施工概况',
+      '生态池概况正文',
+    ].join('\n');
+    const result = finalizeFinalMarkdownStructure(markdown);
+    expect(result).toContain('绿化概况正文');
+    expect(result).toContain('第四组为建筑配套专业组，涵盖砌筑工程、混凝土工程等分部');
+    expect(result).toContain('主要分部分项工程施工方案');
+    expect(result).toContain('生态池概况正文');
+  });
+
+  it('容器块 H3 后有同级 H4 工作包时合法保留（正文由工作包列表展开）', () => {
+    const markdown = [
+      '## 第二章 主要施工方法',
+      '### 主要分部分项工程施工方案',
+      '#### 施工概况',
+      '概况正文',
+      '#### 施工方法',
+      '方法正文',
+    ].join('\n');
+    const result = finalizeFinalMarkdownStructure(markdown);
+    expect(result).toContain('主要分部分项工程施工方案');
+    expect(result).toContain('概况正文');
+    expect(result).toContain('方法正文');
+  });
 });
 
 describe('cleanInlineFactValue 事实值页码清洗（空格数字形态保护）', () => {

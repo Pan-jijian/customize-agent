@@ -3,7 +3,7 @@
  * 均为 L2 确定性结构检测，无需语义通道。
  */
 import { describe, expect, it } from 'vitest';
-import { applyDeterministicConsistencyFixesToMarkdown, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, processSpecConflictIssues } from '@/services/document-workflow/qualityValidation';
+import { applyDeterministicConsistencyFixesToMarkdown, collectSectionContentGaps, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, processSpecConflictIssues } from '@/services/document-workflow/qualityValidation';
 import type { DocumentFactsModel } from '@/services/document-workflow/types';
 
 /** 工序规格事实卡 mock（specifications 单条，其余数组空） */
@@ -137,5 +137,22 @@ describe('formalHeadingHierarchyIssues（P5 复选框符号残留检测）', () 
   it('干净标题零报告', () => {
     const markdown = ['## 第一章 工程概况', '### 1.1 编制依据', '### 1.2 施工部署'].join('\n');
     expect(formalHeadingHierarchyIssues(markdown)).toEqual([]);
+  });
+});
+
+describe('collectSectionContentGaps 分部章容器小节豁免（4.19.3 回归）', () => {
+  it('division 章容器小节空壳被确定性删除后不报 missing_planned_section', () => {
+    const markdown = ['## 第二章 主要施工方法', '### 绿化工程', '绿化工程正文'].join('\n');
+    const gaps = collectSectionContentGaps(markdown, [
+      { title: '主要施工方法', content: '### 绿化工程\n绿化工程正文', sections: ['绿化工程', '主要分部分项工程施工方案'] },
+    ]);
+    expect(gaps.some(gap => gap.reason === 'missing_planned_section' && /主要分部分项/u.test(gap.sectionTitle))).toBe(false);
+  });
+
+  it('非 division 章的容器小节缺失仍正常报 missing_planned_section', () => {
+    const gaps = collectSectionContentGaps('### 1.1 编制依据\n编制依据正文', [
+      { title: '工程概况', content: '### 1.1 编制依据\n编制依据正文', sections: ['项目主要施工内容'] },
+    ]);
+    expect(gaps.some(gap => gap.reason === 'missing_planned_section' && /项目主要施工内容/u.test(gap.sectionTitle))).toBe(true);
   });
 });

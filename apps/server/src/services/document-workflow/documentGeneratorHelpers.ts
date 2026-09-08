@@ -30,7 +30,7 @@ export function chapterGenerationTargets(input: { budgetTarget: number; sectionC
   // 长文模式（提示词有明确篇幅要求如「不少于5万字」）：提示词预算必须完整下达，不得被
   // upper 硬顶（7200~9800）与 structureTarget（节均 720~900 字的结构估算）双重压制，
   // 否则章预算 16667 字被压至 5200~9200 字，5 万字要求永远达不到（历史缺陷：字数卡 3.8 万）。
-  // 单次 LLM 调用的输出安全由块/节级预算（chapterPlanner/写作任务拆分）独立保证，不在章级截断目标。
+  // 单次 LLM 调用的输出安全由块/节级预算（写作任务拆分）独立保证，不在章级截断目标。
   const roundTarget = longformStrict
     ? Math.max(lower, budgetTarget)
     : Math.max(lower, Math.min(budgetTarget, structureTarget, upper));
@@ -301,10 +301,12 @@ export function markdownRowValue(parsedRows: Map<string, [string, string]>, patt
   return undefined;
 }
 
-/** P5（评分报告合肥师范4）：基本信息表“质量标准”只写“合格”而创优目标（确保黄山杯）落在
+/** P5（评分报告合肥师范4）：基本信息表“质量标准”只写“合格”而创优目标（确保黄山 杯）落在
  * 创优目标事实/正文中——质量标准行补全创优目标短语，与正文创优响应同口径。
- * 仅在明确“确保X杯/奖/优质工程”表述存在且质量值未含创优词时附加，无创优目标项目零变化。 */
-const AWARD_OBJECTIVE_IN_TEXT_RE = /(?:黄山杯|鲁班奖|白玉兰杯|钱江杯|扬子杯|安济杯|长安杯|汾水杯|省优|市优|国优|优质工程|确保[^。；;|，,\n]{0,10}(?:杯|奖))/u;
+ * 仅在明确“确保X杯/奖/优质工程”表述存在且质量值未含创优词时附加，无创优目标项目零变化。
+ * 丰乐镇第 3 轮实测：字符类必须排斥“、”——否则“确保创优目标不流于形式、奖惩承诺可追溯可执行”
+ * 被截成残句“确保创优目标不流于形式、奖”（“奖惩”首字）写入质量标准单元格。 */
+const AWARD_OBJECTIVE_IN_TEXT_RE = /(?:黄山杯|鲁班奖|白玉兰杯|钱江杯|扬子杯|安济杯|长安杯|汾水杯|省优|市优|国优|优质工程|确保[^。；;|，、,\n]{0,10}(?:杯|奖))/u;
 
 function awardObjectivePhrase(facts: DocumentFact[], fullMarkdown: string): string | undefined {
   const texts: string[] = [];
@@ -314,7 +316,7 @@ function awardObjectivePhrase(facts: DocumentFact[], fullMarkdown: string): stri
   }
   texts.push(fullMarkdown);
   for (const text of texts) {
-    const match = /(?:确保|争创|力争|确保获得)[^。；;|，,\n]{0,12}(?:杯|奖|优质工程)/u.exec(text);
+    const match = /(?:确保|争创|力争|确保获得)[^。；;|，、,\n]{0,12}(?:杯|奖|优质工程)/u.exec(text);
     if (!match) continue;
     const phrase = match[0].trim();
     if (phrase.length >= 5 && phrase.length <= 24) return phrase;
@@ -755,6 +757,26 @@ export function stripForbiddenPlaceholderSentences(content: string) {
     .join('\n');
 }
 
+/** 图集/国标做法编号引用短语确定性删除（丰乐镇第 3 轮实测）：LLM 在施工方法小节编造
+ * 「做法执行15D501图集」「做法参照国标11J900内墙18/H7」类引用（项目资料中无这些图集编号，
+ * 属于「按图纸…图集…」式非法引用话术，不得进入正式正文）；短语连同前置逗号整体删除，
+ * 保留句子其余内容，句子末尾标点不动。标题行/表格行豁免。 */
+export function stripAtlasReferencePhrases(markdown: string): { markdown: string; fixedCount: number } {
+  if (!/做法(?:执行|参照|详见|见|依据|按)/u.test(markdown)) return { markdown, fixedCount: 0 };
+  let fixedCount = 0;
+  const result = markdown
+    .split('\n')
+    .map(line => {
+      if (/^\s*#{1,6}\s/u.test(line) || /^\s*\|/u.test(line)) return line;
+      return line.replace(/(?:[，,]\s*)?(?:构造做法|节点做法|做法)(?:执行|参照|详见|见|依据|按)[^。；!！?？\n]{0,30}(?:图集|国标\s?[0-9]{1,4}[^。；!！?？\n]{0,16})(?=[。；!！?？]|$)/gu, () => {
+        fixedCount += 1;
+        return '';
+      });
+    })
+    .join('\n');
+  return { markdown: result, fixedCount };
+}
+
 /** 商务评标纪律承诺句确定性删除（与 FORBIDDEN_PLACEHOLDER_PHRASES 同构治理）：
  * 正式技术标中此类承诺绝无合法用途，整句删除后由商务文件另行承载。
  * 判定复用 utils 单一来源词表 + 纪律语境句级兜底（覆盖「实行严格的纪律管理，确保投标活动
@@ -926,11 +948,6 @@ function removeEmptySubSectionHeadings(content: string) {
       result.push(line);
       continue;
     }
-    // 工作包型关键小节标题后紧跟同级 H4 工作包是合法结构（小节正文由工作包列表展开），不得误删
-    if (WORK_PACKAGE_SECTION_RE.test(trimmed)) {
-      result.push(line);
-      continue;
-    }
     const level = heading[1].length;
     let cursor = index + 1;
     let hasBody = false;
@@ -948,8 +965,12 @@ function removeEmptySubSectionHeadings(content: string) {
       }
       cursor += 1;
     }
+    // 工作包型关键小节标题后紧跟同级 H4 工作包是合法结构（小节正文由工作包列表展开），不得误删；
+    // 4.19.3 收紧：零正文且无子层展开的空壳标题不再豁免——容器块的 H4 分部清单被串章骨架清理
+    // 整块删除后，空 H3 因无条件豁免漏网进入成品文档，被打空洞小节 warning，必须删除
+    const workPackageWithPeerH4 = WORK_PACKAGE_SECTION_RE.test(trimmed) && level === 4 && nextHeadingLevel === 4;
     // 下一标题为更深层子小节时保留；零正文且无子层展开的空壳标题删除
-    if (!hasBody && !(nextHeadingLevel > level)) continue;
+    if (!hasBody && !(nextHeadingLevel > level) && !workPackageWithPeerH4) continue;
     result.push(line);
   }
   return result.join('\n');

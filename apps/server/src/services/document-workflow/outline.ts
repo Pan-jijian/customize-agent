@@ -103,7 +103,10 @@ export function isTenderClauseFragmentTitle(title: string) {
  * 数字/工程符号构成，不会命中。工程后缀搭配（门窗K值、B级混凝土）豁免汉字-拉丁交叉规则。
  */
 export function isLikelyMojibakeTitle(title: string) {
-  const compact = title.replace(/\s+/gu, '');
+  // Markdown 强调符号不是乱码特征：先剥首尾星号再判（「**注意：**」「**注意事项**」等粗体
+  // 标题行曾被可读字符占比规则误判为乱码——4 星 + 4 字 readable=0.5 < 0.6，被 sanitize
+  // 标题过滤误删；粗体包裹合法标题应与纯文本标题同判）
+  const compact = title.replace(/\s+/gu, '').replace(/^\*+|\*+$/gu, '');
   if (!compact) return false;
   // UTF-16LE 中文被 latin1/utf8 误读的典型生僻字串（kbEvaluationService 同源特征，剔除其中
   // 攀/最/开等常用字——「开挖」「最终」等合法标题不得因单字命中被误杀），命中 ≥2 个才算乱码

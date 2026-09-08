@@ -4,7 +4,7 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixPlaceholderTableCells, fixQualityAssuranceCoverage, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables } from '@/services/document-workflow/documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSixHundredPercentCoverage, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import type { DocumentDraftChapter, DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel } from '@/services/document-workflow/types';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
@@ -134,6 +134,76 @@ describe('sixHundredPercentCoverageIssues（W2 纯语义判定）', () => {
     const issues = await sixHundredPercentCoverageIssues(markdown);
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('拆迁工地100%湿法作业');
+  });
+});
+
+describe('fixSixHundredPercentCoverage（A6 补写锚点与词面对齐）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('主锚点命中：补写句插入「六个百分百」锚点行之后', async () => {
+    mockSimilarity(0.1);
+    const markdown = '## 环境保护与文明施工\n\n### 扬尘治理措施\n\n严格执行扬尘治理六个百分百要求。\n\n### 噪声控制\n\n施工噪声达标排放。';
+    const { markdown: fixed, fixedCount } = await fixSixHundredPercentCoverage(markdown);
+    expect(fixedCount).toBe(6);
+    const anchorPos = fixed.indexOf('严格执行扬尘治理六个百分百要求。') + '严格执行扬尘治理六个百分百要求。'.length;
+    expect(fixed.slice(anchorPos, anchorPos + 30)).toContain('施工工地周边100%围挡');
+  });
+
+  it('锚点失效兜底：补写句插入最后一个扬尘小节尾部（下一标题之前）', async () => {
+    mockSimilarity(0.1);
+    const markdown = '## 环境保护与文明施工\n\n### 噪声控制\n\n施工噪声达标排放。\n\n### 扬尘治理措施\n\n施工现场加强扬尘管控。\n\n### 水土保持\n\n表土剥离集中堆放。';
+    const { markdown: fixed, fixedCount } = await fixSixHundredPercentCoverage(markdown);
+    expect(fixedCount).toBe(6);
+    const keepIndex = fixed.indexOf('### 水土保持');
+    const fillIndex = fixed.indexOf('施工工地周边100%围挡：');
+    expect(fillIndex).toBeGreaterThan(-1);
+    expect(fillIndex).toBeLessThan(keepIndex);
+  });
+
+  it('锚点失效二级兜底：无扬尘标题时回退环保/文明施工标题尾部', async () => {
+    mockSimilarity(0.1);
+    const markdown = '## 环境保护与文明施工\n\n施工现场加强环保管理。\n\n## 安全保证措施\n\n安全目标：零事故。';
+    const { markdown: fixed, fixedCount } = await fixSixHundredPercentCoverage(markdown);
+    expect(fixedCount).toBe(6);
+    const safetyIndex = fixed.indexOf('## 安全保证措施');
+    const fillIndex = fixed.indexOf('施工工地周边100%围挡：');
+    expect(fillIndex).toBeGreaterThan(-1);
+    expect(fillIndex).toBeLessThan(safetyIndex);
+  });
+
+  it('词面对齐复检：补写后 sixHundredPercentCoverageIssues 复检零缺失（R8 根因防护）', async () => {
+    // 语义通道恒低分（0.1）模拟 bge 长句稀释场景：补写句必须靠自身词面命中检测器词面正则
+    // 才能通过复检，防止「补写后复检仍缺失 → 修复轮死循环」复发
+    mockSimilarity(0.1);
+    const markdown = '## 环境保护与文明施工\n\n### 扬尘治理措施\n\n施工现场加强扬尘管控。';
+    const { markdown: fixed, fixedCount } = await fixSixHundredPercentCoverage(markdown);
+    expect(fixedCount).toBe(6);
+    const recheck = await sixHundredPercentCoverageIssues(fixed);
+    expect(recheck).toEqual([]);
+  });
+});
+
+describe('selfUnderminingCandidateIssues（R9 正向句豁免扩围）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('分项验收归档正向句不进自伤候选（语义恒高也不召回）', async () => {
+    // 语义通道恒高分：所有句都与自伤原型相似 → 豁免正则必须拦截，否则误报
+    mockSimilarity(0.9);
+    const markdown = '景观工程各分项完成后由技术负责人组织分项验收，验收记录经监理工程师签字确认后归档，作为竣工移交依据。';
+    const issues = await selfUnderminingCandidateIssues(markdown);
+    expect(issues).toEqual([]);
+  });
+
+  it('R9 分包否定式自述句（无豁免词面）仍被召回归入候选', async () => {
+    mockSimilarity(0.9);
+    const markdown = '本招标项目不允许分包。本工程不进行分包，全部施工内容由我方自行组织完成。';
+    const issues = await selfUnderminingCandidateIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('本工程不进行分包');
   });
 });
 
@@ -552,6 +622,43 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
     const markdown = '中央空调夏季冷负荷182.5kW，冬季热负荷71.2kW182.5kW，冬季热负荷71.2kW182.5kW，冬季热负荷71.2kW。';
     const fix = fixAdjacentPhraseDuplication(markdown);
     expect(fix.markdown).toBe('中央空调夏季冷负荷182.5kW，冬季热负荷71.2kW。');
+  });
+
+  it('P2.3 fixCrossSectionNumericConflicts：垫层 C30 回退清单锁定 C20（异名人行道/基础垫层保持）', () => {
+    const markdown = '垫层采用C30素混凝土浇筑。人行道混凝土垫层采用C25素砼。基础垫层采用C15素砼。';
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { codeAuthorities: { cushion: 'C20' } });
+    expect(fix.fixedCount).toBeGreaterThan(0);
+    expect(fix.markdown).toContain('垫层采用C20素混凝土浇筑');
+    expect(fix.markdown).toContain('人行道混凝土垫层采用C25素砼');
+    expect(fix.markdown).toContain('基础垫层采用C15素砼');
+    expect(fix.markdown).not.toContain('C30');
+  });
+
+  it('P2.3 fixCrossSectionNumericConflicts：潜水泵/提升泵同物异名 6台/12台 统一为锁定 4台', () => {
+    const markdown = '泵房配置潜水泵6台，备用提升泵12台。';
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { machineAuthorities: { pump: 4 } });
+    expect(fix.fixedCount).toBeGreaterThan(0);
+    expect(fix.markdown).toContain('潜水泵4台');
+    expect(fix.markdown).toContain('提升泵4台');
+    expect(fix.markdown).not.toContain('潜水泵6台');
+    expect(fix.markdown).not.toContain('提升泵12台');
+  });
+
+  it('P2.3 fixCrossSectionNumericConflicts：机动工期 预留7天 回退为锁定 2天', () => {
+    const markdown = '总工期90日历天，其中预留7天机动工期用于工序衔接与验收缓冲。';
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { slackDaysAuthority: 2 });
+    expect(fix.fixedCount).toBeGreaterThan(0);
+    expect(fix.markdown).toContain('预留2天机动工期');
+    expect(fix.markdown).not.toContain('预留7天');
+  });
+
+  it('P2.4 fixCrossSectionNumericConflicts：残留 9个自然村 统一为 20（自然村分组口径不参与）', () => {
+    const markdown = '本项目9个自然村分散施工。清单按3个自然村分组编制。';
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { villageCountAuthority: 20 });
+    expect(fix.fixedCount).toBeGreaterThan(0);
+    expect(fix.markdown).toContain('本项目20个自然村分散施工');
+    expect(fix.markdown).not.toContain('9个自然村');
+    expect(fix.markdown).toContain('按3个自然村分组');
   });
 
   it('4.17.4 fixAdjacentPhraseDuplication：应急人员句隔位重复折叠', () => {
@@ -1160,6 +1267,19 @@ describe('crossSectionNumericConflictIssues 部位语境豁免（F14）', () => 
     expect(issues[0]?.suggestion).toContain('不同部位允许不同规格');
   });
 
+  it('4.19.7 回归：垫层 C20 后「再浇筑C30」属后续工序，不误判为垫层两套口径（F14c）', () => {
+    // 丰乐镇第三轮实测：「垫层，再浇筑C30、垫层采用100厚C20」——C30 是垫层之上构件的
+    // 混凝土，20 字窗口无法区分工序，旧逻辑把 C30 误绑为垫层口径与 C20 互斥
+    const markdown = '垫层采用100厚C20混凝土浇筑，垫层，再浇筑C30混凝土。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('4.19.7 回归：垫层本部位两套标号仍报（工序豁免不放过真矛盾）', () => {
+    const markdown = '垫层采用100厚C20混凝土浇筑。垫层混凝土强度等级为C25。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /垫层混凝土强度等级/u.test(issue.message))).toBe(true);
+  });
+
   it('外墙 A5.0 + 内墙 A3.5（砌块）→ 0 冲突（内外墙部位区分，长词优先命中）', () => {
     const markdown = '外墙砌块强度等级为A5.0。内墙砌块强度等级为A3.5。';
     expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
@@ -1262,6 +1382,111 @@ describe('specLocationMismatchIssues 规格错位检测（F14）', () => {
   it('类型隔离：混凝土维度只比对 C 标号，不误报「垫层…HRB400 钢筋」', () => {
     const markdown = '垫层内配置HRB400钢筋，混凝土强度等级为C15。';
     expect(specLocationMismatchIssues(markdown, authorityMap())).toEqual([]);
+  });
+
+  function thicknessMap(): SpecAuthorityMap {
+    return {
+      厚度规格: [
+        { location: '有梁板', spec: '120mm', quantity: '300m2', sourceFile: '清单.xls' },
+        { location: '栏板', spec: '150mm', quantity: '', sourceFile: '清单.xls' },
+        { location: '栏板', spec: '200mm', quantity: '', sourceFile: '清单.xls' },
+        { location: '垫层', spec: '200mm', quantity: '', sourceFile: '清单.xls' },
+        { location: '人工清底', spec: '300mm', quantity: '', sourceFile: '清单.xls' },
+      ],
+      混凝土强度等级: [
+        { location: '垫层', spec: 'C20', quantity: '', sourceFile: '清单.xls' },
+        { location: '基础', spec: 'C30', quantity: '', sourceFile: '清单.xls' },
+      ],
+    };
+  }
+
+  it('4.19.7 回归：垫层「再浇筑C30」属后续工序，不判垫层规格错位（F14c 同步）', () => {
+    // 丰乐镇第三轮实测：「铺设级配碎石垫层，再浇筑C30水泥混凝土基层」——C30 是基层的
+    // 混凝土，40 字窗口无法区分工序，旧逻辑误判为垫层口径与权威 C20 不一致
+    const markdown = '先完成场地清理，铺设级配碎石垫层，再浇筑C30水泥混凝土基层。';
+    expect(specLocationMismatchIssues(markdown, thicknessMap())).toEqual([]);
+  });
+
+  it('4.19.7 回归：浇筑分层厚度500mm是工艺参数，不判有梁板/栏板厚度错位（F14d）', () => {
+    // 「浇筑时分层厚度不大于500mm」的 500mm 是浇筑分层厚度工艺参数，非构件厚度规格
+    const markdown = '独立基础、有梁板及栏板均采用C30商品砼，浇筑时分层厚度不大于500mm，插入式振捣棒快插慢拔。';
+    expect(specLocationMismatchIssues(markdown, thicknessMap())).toEqual([]);
+  });
+
+  it('4.19.7 回归：焊缝高度4mm是焊接参数，不判栏板厚度错位（F14d）', () => {
+    const markdown = '栏板与立柱采用焊接连接，焊缝高度不小于4mm，焊后清除焊渣并涂刷防锈漆两遍。';
+    expect(specLocationMismatchIssues(markdown, thicknessMap())).toEqual([]);
+  });
+
+  it('4.19.7 回归：两侧各200mm工作宽度是作业空间，不判人工清底厚度错位（F14e）', () => {
+    const markdown = '沟槽开挖采用挖掘机配合人工清底，槽底宽度按管外径加两侧各200mm工作宽度控制。';
+    expect(specLocationMismatchIssues(markdown, thicknessMap())).toEqual([]);
+  });
+
+  it('4.19.7 回归：有梁板厚度分别为200mm、150mm是多部位枚举，不判错位（F14d）', () => {
+    const markdown = '有梁板厚度分别为200mm、150mm、200mm，栏板厚度150mm及200mm。';
+    expect(specLocationMismatchIssues(markdown, thicknessMap())).toEqual([]);
+  });
+
+  it('4.19.7 回归：有梁板单一厚度200mm 与权威120mm 不符仍报（豁免不放过真错位）', () => {
+    const markdown = '有梁板厚度为200mm，模板体系采用木胶合板模板。';
+    const issues = specLocationMismatchIssues(markdown, thicknessMap());
+    expect(issues.some(issue => /有梁板/u.test(issue.message))).toBe(true);
+  });
+
+  it('4.19.7 回归：同维度混装不同类型 placement → pattern 按本 placement 推导，不跨类型误比对', () => {
+    // 丰乐镇第三轮验收实测：「有梁板」权威 120mm（板厚）与 C 标号维度混装时，
+    // 旧逻辑用维度首 placement 的 C 标号 pattern 扫描「有梁板」附近正文，
+    // 把强度等级 C30 误判为与权威 120mm 不一致（实为两类规格，本无矛盾）
+    const map: SpecAuthorityMap = {
+      混凝土强度等级: [
+        { location: '垫层', spec: 'C20', quantity: '', sourceFile: '清单.xls' },
+        { location: '有梁板', spec: '120mm', quantity: '', sourceFile: '清单.xls' },
+        { location: '栏板', spec: '150mm', quantity: '', sourceFile: '清单.xls' },
+      ],
+    };
+    const markdown = '有梁板采用C30混凝土浇筑，板厚120mm。';
+    expect(specLocationMismatchIssues(markdown, map)).toEqual([]);
+  });
+
+  it('4.19.7 回归：同类型规格错位仍报（C 标号写错部位检测不受影响）', () => {
+    const map: SpecAuthorityMap = {
+      混凝土强度等级: [
+        { location: '垫层', spec: 'C20', quantity: '', sourceFile: '清单.xls' },
+        { location: '有梁板', spec: '120mm', quantity: '', sourceFile: '清单.xls' },
+      ],
+    };
+    // 垫层权威 C20，正文写 C25 → 同类型错位仍报
+    const markdown = '垫层采用C25商品混凝土。';
+    const issues = specLocationMismatchIssues(markdown, map);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain('规格错位');
+  });
+
+  it('4.19.9 回归：「分别用于」前文枚举声明，后文窗口等级标号不判垫层错位（F14d 前文回溯）', () => {
+    // 丰乐镇第五轮实测：「水泥混凝土按C30、C25、C20三个强度等级分别用于道路面层、涵头及管道基础、
+    // 垫层部位，质检员逐车核查发货单标注强度等级与浇筑部位对应关系，C30混凝土坍落度按1…」
+    // 的 C30 在「垫层」后 40 字窗口内，但「分别用于」声明在前文——后文等级标号属部位对应关系说明
+    const markdown = '水泥混凝土按C30、C25、C20三个强度等级分别用于道路面层、涵头及管道基础、垫层部位，质检员逐车核查发货单标注强度等级与浇筑部位对应关系，C30混凝土坍落度按10~30mm控制。';
+    expect(specLocationMismatchIssues(markdown, thicknessMap())).toEqual([]);
+  });
+
+  it('4.19.9 回归：槽底预留200mm厚土体是工序工艺参数，不判人工清底规格错位（F14d 预留）', () => {
+    // 丰乐镇第五轮实测：「沟槽开挖采用挖掘机配合人工清底，槽底预留200mm厚土体由人工修整至设计标高」
+    // 的 200mm 是预留土层厚度工序参数，与清单权威 300mm 清底规格属不同概念
+    // 丰乐镇第五轮实测：厚度维度多个 placement（有梁板 120/栏板 150/垫层 200/人工清底 300），
+    // 正文「槽底预留200mm」被通用 mm pattern 捕获（found=200 ∉ 权威 {300}），若无「预留」豁免
+    // 将误报——单 placement fixture 会因「维度少于 2 个 placement 直接跳过」而假绿，故多 placement 复现
+    const map: SpecAuthorityMap = {
+      厚度规格: [
+        { location: '有梁板', spec: '120mm', quantity: '', sourceFile: '清单.xls' },
+        { location: '栏板', spec: '150mm', quantity: '', sourceFile: '清单.xls' },
+        { location: '垫层', spec: '200mm', quantity: '', sourceFile: '清单.xls' },
+        { location: '人工清底', spec: '300mm', quantity: '', sourceFile: '清单.xls' },
+      ],
+    };
+    const markdown = '沟槽开挖采用0.6～1.0m³挖掘机配合人工清底，槽底预留200mm厚土体由人工修整至设计标高。';
+    expect(specLocationMismatchIssues(markdown, map)).toEqual([]);
   });
 });
 
@@ -1537,5 +1762,132 @@ describe('清单红线权威比对（丰乐镇第五版实测 P1 养护期 / P3 
     it('无清单路灯条目 → 零报告', () => {
       expect(streetLightCountMismatchIssues('路灯共17套。', model([]))).toEqual([]);
     });
+  });
+});
+
+describe('fixQuantityAuthorityConflicts（G3 清单工程量权威定点校正）', () => {
+  const authorities = [
+    { name: '级配碎石', value: 20931.02, unit: 'm²' },
+    { name: '路床(槽)碾压检验', value: 19930.52, unit: 'm²' },
+    { name: '挖一般土方', value: 4187.38, unit: 'm³' },
+    { name: '拆除路面', value: 2134, unit: 'm²' },
+  ];
+
+  it('同名数值漂移替换为清单汇总值', () => {
+    const markdown = '道路工程主要工程量包括级配碎石基层18949.52m²、水泥混凝土面层18799.52m²。';
+    const result = fixQuantityAuthorityConflicts(markdown, authorities);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('级配碎石基层20931.02m²');
+  });
+
+  it('括号形态变体互配（路床(槽) ↔ 路床（槽））', () => {
+    const markdown = '路床（槽）碾压检验18429.52m²，压实度不低于93%。';
+    const result = fixQuantityAuthorityConflicts(markdown, authorities);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('路床（槽）碾压检验19930.52m²');
+  });
+
+  it('名称前含村级地名豁免（单村分表量不归一）', () => {
+    const markdown = '马老郢村路床（槽）碾压检验1436.4m²。';
+    const result = fixQuantityAuthorityConflicts(markdown, authorities);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('与权威值一致不动', () => {
+    const markdown = '挖一般土方4187.38m³。';
+    const result = fixQuantityAuthorityConflicts(markdown, authorities);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('差异不超过2%视为四舍五入口径差不动', () => {
+    const markdown = '挖一般土方4190.5m³。';
+    const result = fixQuantityAuthorityConflicts(markdown, authorities);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('大幅漂移同样校正（拆除路面 633 vs 权威 2134）', () => {
+    const markdown = '拆除路面633m²。';
+    const result = fixQuantityAuthorityConflicts(markdown, authorities);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('拆除路面2134m²');
+  });
+
+  it('名称后先出现其他单位数值时仍锁定工程量（厚度 15cm 场景）', () => {
+    const markdown = '级配碎石基层（厚度15cm）共18949.52m²。';
+    const result = fixQuantityAuthorityConflicts(markdown, authorities);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('共20931.02m²');
+  });
+
+  it('无权威清单时零改动', () => {
+    const markdown = '级配碎石基层18949.52m²。';
+    const result = fixQuantityAuthorityConflicts(markdown, []);
+    expect(result).toEqual({ markdown, fixedCount: 0, details: [] });
+  });
+
+  it('最长条目名优先：「塑料管铺设8205.53m」不被「塑料管」条目误改', () => {
+    const markdown = '本分项工程量为：塑料管铺设8205.53m；挖基坑土方42.12m³。';
+    const result = fixQuantityAuthorityConflicts(markdown, [
+      { name: '塑料管', value: 7525.01, unit: 'm' },
+      { name: '塑料管铺设', value: 8205.53, unit: 'm' },
+    ]);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toContain('塑料管铺设8205.53m');
+  });
+
+  it('规格前置豁免：「直径450塑料检查井40座」不被汇总条目「塑料检查井555座」覆盖', () => {
+    const markdown = '污水管网包含直径450塑料检查井40座、直径630塑料检查井79座。';
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: '塑料检查井', value: 555, unit: '座' }]);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toContain('直径450塑料检查井40座');
+  });
+
+  it('规格后置豁免：「波纹管DN200铺设2170m」分规格量不归一', () => {
+    const markdown = '钢带PE增强螺旋波纹管DN200铺设2170m。';
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: '钢带PE增强螺旋波纹管', value: 3200, unit: 'm' }]);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('表格行豁免：分村分表数据行不归一', () => {
+    const markdown = '| 方岗段 | 道路、铺装 | 路床碾压1436.4m²、挖一般土方359.1m³ | 土方班组1个 |';
+    const result = fixQuantityAuthorityConflicts(markdown, authorities);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('段落级村名豁免：村名列表远离条目名时整段不归一', () => {
+    const markdown = '殷郢组、张大郢、五星等自然村组，主要作业内容为整体化粪池安装、塑料管铺设及配套土方开挖回填。本分项工程量为：砌筑检查井2座；挖基坑土方42.12m³；回填方42.12m³。';
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: '挖基坑土方', value: 68.68, unit: 'm³' }, { name: '回填方', value: 15481.48, unit: 'm³' }]);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('句级口径豁免：分部量列举句（多数条目大幅差异）整句不归一', () => {
+    const markdown = '景观工程主要工程量包括挖一般土方146.93m³、级配碎石480.5m²、水泥混凝土572.3m²、人行道板安砌114.8m²、仿木护栏333m。';
+    const result = fixQuantityAuthorityConflicts(markdown, [
+      ...authorities,
+      { name: '水泥混凝土', value: 20872.82, unit: 'm²' },
+      { name: '人行道板安砌', value: 264.8, unit: 'm²' },
+      { name: '仿木护栏', value: 333, unit: 'm' },
+    ]);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toContain('挖一般土方146.93m³');
+  });
+
+  it('句级口径豁免不误杀：小差异条目与真实漂移共存时照修（2.1 道路段 3 大 4 小）', () => {
+    const markdown = '道路工程主要工程量包括挖一般土方4040.45m³、路床（槽）碾压检验18949.52m²、级配碎石基层18949.52m²，以及拆除路面633m²、拆除基层633m²、余方弃置158.25m³。';
+    const result = fixQuantityAuthorityConflicts(markdown, [
+      ...authorities,
+      { name: '拆除基层', value: 2134, unit: 'm²' },
+      { name: '余方弃置', value: 3245.5, unit: 'm³' },
+    ]);
+    expect(result.fixedCount).toBe(6);
+    expect(result.markdown).toContain('挖一般土方4187.38m³');
+    expect(result.markdown).toContain('拆除路面2134m²');
+    expect(result.markdown).toContain('余方弃置3245.5m³');
+  });
+
+  it('生态池部位量豁免：「生态池外围栽植色带90m²」不被「栽植色带」汇总值误改', () => {
+    const markdown = '生态池外围栽植色带90m²，配套金属扶手、栏杆、栏板224m。';
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: '栽植色带', value: 552, unit: 'm²' }]);
+    expect(result.fixedCount).toBe(0);
   });
 });

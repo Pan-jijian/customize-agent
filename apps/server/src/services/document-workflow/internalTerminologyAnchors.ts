@@ -125,25 +125,33 @@ export async function stripInternalTerminologySentences(markdown: string): Promi
     const parts = line
       .split(/(?<=[。！？!?；;])/u)
       .map(part => part.trim())
-      .filter(part => part.length >= 8 && part.length <= 80 && (INTERNAL_TERM_ANCHORS.some(item => item.required.test(part)) || INTERNAL_TERM_EXACT_TEST_RE.test(part)));
+      // A5（丰乐镇第 2 轮实测）：长度 8~80 过滤把 L1 词所在超长句整句排除——
+      // 长段落全逗号无句号时 fragment 超 80 字（「…均以71人为同时在场人数上限，不再另行出现其他峰值口径。」
+      // 130+ 字）被过滤漏删；L1 精确词是字面确定性删除，不受长度限制，长度窗只约束 L3 语义候选句
+      .filter(part => INTERNAL_TERM_EXACT_TEST_RE.test(part) || (part.length >= 8 && part.length <= 80 && INTERNAL_TERM_ANCHORS.some(item => item.required.test(part))));
     if (parts.length > 0) candidateLines.push({ index, sentences: parts });
   });
-  const allCandidates = candidateLines.flatMap(item => item.sentences).slice(0, 200);
+  const allCandidates = candidateLines.flatMap(item => item.sentences);
   if (allCandidates.length === 0) return markdown;
-  const provider = getLocalSemanticProvider();
-  const [sentenceVectors, anchorVectors] = await Promise.all([
-    provider.embedDocuments(allCandidates),
-    provider.embedDocuments(INTERNAL_TERM_ANCHORS.map(item => item.anchor)),
-  ]);
-  const hitSet = new Set<string>();
-  allCandidates.forEach((sentence, index) => {
-    const vector = sentenceVectors[index];
-    if (!vector || vector.length === 0) return;
-    // A3：L1 精确词命中句直接删除（语义匹配不可靠时 L1 字面召回兜底，检测/删除同口径）
-    if (INTERNAL_TERM_EXACT_TEST_RE.test(sentence)) { hitSet.add(sentence); return; }
-    const maxSim = Math.max(...anchorVectors.map(anchor => dot(vector, anchor)));
-    if (maxSim >= 0.62) hitSet.add(sentence);
-  });
+  // A4（丰乐镇第 2 轮实测）：L1 精确词句（落位/口径等）是确定性字面删除，不受候选句限幅；
+  // 此前 allCandidates.slice(0,200) 把 L1 句与 L3 语义句一起截断——66k 字成稿中锚定词句超 200 条时
+  // 后段章节的「峰值口径」句被截掉漏删（strip 后「峰值口径」仍残留 1 处，检测器照报 error）
+  const l1Sentences = allCandidates.filter(sentence => INTERNAL_TERM_EXACT_TEST_RE.test(sentence));
+  const semanticCandidates = allCandidates.filter(sentence => !INTERNAL_TERM_EXACT_TEST_RE.test(sentence)).slice(0, 200);
+  const hitSet = new Set(l1Sentences);
+  if (semanticCandidates.length > 0) {
+    const provider = getLocalSemanticProvider();
+    const [sentenceVectors, anchorVectors] = await Promise.all([
+      provider.embedDocuments(semanticCandidates),
+      provider.embedDocuments(INTERNAL_TERM_ANCHORS.map(item => item.anchor)),
+    ]);
+    semanticCandidates.forEach((sentence, index) => {
+      const vector = sentenceVectors[index];
+      if (!vector || vector.length === 0) return;
+      const maxSim = Math.max(...anchorVectors.map(anchor => dot(vector, anchor)));
+      if (maxSim >= 0.62) hitSet.add(sentence);
+    });
+  }
   if (hitSet.size === 0) return markdown;
   return lines.map((line, index) => {
     if (protectedLine(line)) return line;
@@ -153,4 +161,31 @@ export async function stripInternalTerminologySentences(markdown: string): Promi
     }
     return next;
   }).join('\n');
+}
+
+/**
+ * 标题行内部术语确定性替换（丰乐镇第五轮 F4 实测）：stripInternalTerminologySentences 的
+ * protectedLine 保护标题行（标题整行删除会破坏结构），而检测器 L1 精确词通道是全 markdown 召回——
+ * 标题行内的「落位」（如「#### 10.3.2 分区管理与责任落位」）照样报 error blocker，
+ * 修复链却无人触碰标题行 → blocker 永不收敛。「落位」是生成系统任务术语，正式标题零合法用途，
+ * 「落实」是语义安全替换（责任落位→责任落实、专项落位→专项落实）；其余 L1 精确词
+ * （工作包/事实卡/事实主表/后台数据库/峰值口径/控制口径/数据口径）无安全词面替换，
+ * 保留原样由检测器报 blocker 交 Repairer 按上下文语义改写。
+ */
+export function fixInternalTermHeadingPhrases(markdown: string): { markdown: string; fixedCount: number } {
+  let fixedCount = 0;
+  const next = markdown
+    .split(/\r?\n/u)
+    .map(line => {
+      const heading = /^(#{1,6}\s+)(.*)$/u.exec(line);
+      if (!heading) return line;
+      const title = heading[2];
+      if (!INTERNAL_TERM_EXACT_TEST_RE.test(title)) return line;
+      const replaced = title.replace(/落位/gu, '落实');
+      if (replaced === title) return line;
+      fixedCount += 1;
+      return `${heading[1]}${replaced}`;
+    })
+    .join('\n');
+  return { markdown: next, fixedCount };
 }

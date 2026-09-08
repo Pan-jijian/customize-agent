@@ -78,10 +78,35 @@ interface RawTenderRequirements {
   prohibitionNotes?: RawRequirementItem[];
 }
 
+/** 条款「无值」表述（值部分为无/勾选无/指向数据表占位）：不是实质要求，提取层必须丢弃。
+ * 真实生成回归：新版招标文件前附表10.9「创优目标 ☑无」、数据表5.1.1「绿色建筑等级
+ * 要求：无」被 LLM 忠实提取成字段值（如「绿色建筑等级要求：无」），下游把「无」当
+ * 要求响应写作；同时词形窗口召回导致字段补提误报「窗口证据存在但 LLM 提取失败」。 */
+const EMPTY_CLAUSE_VALUE_RE = /^(?:☑?\s*无|无)\s*[。；;]?\s*$|：\s*(?:☑)?\s*无\s*[。；;]?\s*$|：\s*见\s*《?[^》]{2,40}》?\s*[。；;]?\s*$/u;
+
+/** 句级无值判定：命中句的值部分为无/勾选无/纯条款名（无值部分）→ 无实质窗口可提。
+ * 用于窗口定位时跳过否定句，避免「条款名词形命中 + 值为无」被误判「窗口证据存在」。 */
+function clauseSentenceHasNoValue(sentence: string): boolean {
+  const trimmed = sentence.trim();
+  if (!trimmed) return true;
+  // 纯条款名句（编号+条款名，无冒号值部分）：如「10.9创优目标」「5.1.1特殊质量标准和要求」
+  if (/^#{0,6}\s*\d+(?:[.-]\d+)*\s*[^\s。；;：:]{1,24}$/u.test(trimmed)) return true;
+  // 勾选无（前附表表格句，如「10.9 创优目标 ☑无 □有，具体要求如下： /」）
+  if (/☑\s*无/u.test(trimmed)) return true;
+  // 「□有，具体要求如下：/」——「有」未勾选（□ 非 ☑）且具体要求为空
+  if (/□有[^。；;！？!?]{0,40}具体要求如下[：:]\s*\/?\s*$/u.test(trimmed)) return true;
+  // 值部分为无或占位指引：取最后一个「：」后的值部分判定（无冒号时整句判定）
+  const valuePart = trimmed.split('：').pop()?.trim() || trimmed;
+  if (EMPTY_CLAUSE_VALUE_RE.test(valuePart)) return true;
+  return false;
+}
+
 function cleanItem(raw: RawRequirementItem | undefined): TenderRequirementItem | undefined {
   if (!raw?.text || raw.text.trim().length < 2) return undefined;
+  const trimmed = raw.text.trim();
+  if (EMPTY_CLAUSE_VALUE_RE.test(trimmed)) return undefined;
   return {
-    text: raw.text.trim(),
+    text: trimmed,
     coreTerms: (raw.coreTerms || []).map(term => term.trim()).filter(term => term.length >= 2 && term.length <= 16).slice(0, 4),
     source: raw.source?.trim() || undefined,
   };
@@ -340,7 +365,10 @@ export function requirementFieldGaps(model: TenderRequirementModel | undefined):
 }
 
 /** 句级窗口裁剪：按句子边界切分（PDF 切片常见 ###/换行噪声），字段词形命中的句子取 ±2 句窗口，
- * 每字段最多 6 个窗口——把万级字符切片聚焦到条款句级，消除整片噪声对窄通道二次提取的稀释 */
+ * 每字段最多 6 个窗口——把万级字符切片聚焦到条款句级，消除整片噪声对窄通道二次提取的稀释。
+ * 无值句（勾选无/值为无/纯条款名句）不产生窗口：字段名被勾选为「无」时（如「创优目标 ☑无」
+ * 「关于工程奖项的约定：无」）词形虽命中但无实质内容可提，跳过即归「资料无此要求」，
+ * 避免 LLM 正确输出空数组后被误报「窗口证据存在但 LLM 提取失败」。 */
 function collectFieldWindows(evidence: DocumentEvidence[], spec: { lexical: RegExp }): string[] {
   const windows: string[] = [];
   for (const item of evidence) {
@@ -349,6 +377,7 @@ function collectFieldWindows(evidence: DocumentEvidence[], spec: { lexical: RegE
     const sentences = text.split(/(?<=[。；;！？!?])|\n/u).map(s => s.trim()).filter(s => s.length > 0);
     for (let i = 0; i < sentences.length; i += 1) {
       if (!spec.lexical.test(sentences[i])) continue;
+      if (clauseSentenceHasNoValue(sentences[i])) continue;
       const start = Math.max(0, i - 2);
       const end = Math.min(sentences.length, i + 3);
       const window = sentences.slice(start, end).join('').trim();

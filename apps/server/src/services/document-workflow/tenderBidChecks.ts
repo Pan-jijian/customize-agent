@@ -189,7 +189,7 @@ export async function fiveElementBlockStats(
 /** 归因分析语义原型：成因/风险来源表述基准（而非仅复述现象） */
 export const ATTRIBUTION_SEMANTIC_QUERY = '分析该工程难点的成因与风险来源';
 /** 量化控制目标：数值 + 单位/频次（结构判定，保留正则） */
-export const QUANTIFIED_TARGET_RE = /\d+(?:\.\d+)?\s*(?:mm|cm|m|米|℃|%|kN|MPa|次|天|小时|h|Hz|m³)/u;
+export const QUANTIFIED_TARGET_RE = /\d+(?:\.\d+)?\s*(?:mm|cm|m|米|℃|%|kN|MPa|次|天|日历天|小时|h|Hz|m³|㎡|m²|t|吨|座|套|个)/u;
 
 export interface DifficultyCountermeasureReport {
   /** 重难点章节对策条目总数 */
@@ -208,14 +208,36 @@ export interface DifficultyCountermeasureReport {
   entries: Array<{ text: string; attributed: boolean; quantified: boolean }>;
 }
 
-/** 重难点章节提取：定位"重难点/重点难点"标题段落后到下一同级标题前的内容 */
+/** 重难点章节提取：定位"重难点/重点难点"标题段落后到下一同级标题前的内容；
+ * 无独立标题小节时回退定位「重难点识别表」表格段（丰乐镇第五轮实测：重难点以表格形式
+ * 承载于工程特点小节，标题正则永远匹配不到 → 检测恒 0 条目、双达标 0% 假阴性） */
 export function extractKeyDifficultySection(markdown: string): string {
   const match = markdown.match(/#{2,3}\s*[^\n]*(?:重难点|重点难点|工程难点|难点分析)[^\n]*\n/u);
-  if (!match || match.index === undefined) return '';
-  const start = match.index + match[0].length;
-  const rest = markdown.slice(start);
-  const nextHeading = rest.search(/^#{2,3}\s+/mu);
-  return nextHeading >= 0 ? rest.slice(0, nextHeading) : rest;
+  if (match && match.index !== undefined) {
+    const start = match.index + match[0].length;
+    const rest = markdown.slice(start);
+    const nextHeading = rest.search(/^#{2,3}\s+/mu);
+    return nextHeading >= 0 ? rest.slice(0, nextHeading) : rest;
+  }
+  // 回退：表头含「重难点」列的识别表（表头行 → 至首个非表格行结束）
+  const tableHead = markdown.match(/^\|?\s*[^\n]*重难点[^\n]*\|\s*$/mu);
+  if (!tableHead || tableHead.index === undefined) return '';
+  const rest = markdown.slice(tableHead.index);
+  const lines = rest.split(/\n/u);
+  const tableLines: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (tableLines.length > 0) break;
+      continue;
+    }
+    if (!trimmed.startsWith('|')) {
+      if (tableLines.length > 0) break;
+      continue;
+    }
+    tableLines.push(line);
+  }
+  return tableLines.join('\n');
 }
 
 /** 重难点对策模板化检测：按条目（空行分段）统计"归因＋量化目标"双达标占比 */
@@ -224,7 +246,15 @@ export async function difficultyCountermeasureReport(
   embedDocuments?: (texts: string[]) => Promise<number[][]>,
 ): Promise<DifficultyCountermeasureReport> {
   const section = extractKeyDifficultySection(markdown);
-  const entries = section.split(/\n{2,}/u).filter(block => block.trim().length >= 20);
+  // 表格载体形式（重难点识别表）：每个表格数据行即一条重难点条目（表头/分隔行除外）——
+  // 与标题小节形式（空行分段）的条目口径对齐，修复闭环的条目锚点同源
+  const isTableForm = section.trim().startsWith('|');
+  const entries = isTableForm
+    ? section.split(/\n/u).filter(line => {
+      const trimmed = line.trim();
+      return trimmed.startsWith('|') && !/^\|\s*-+\s*\|/u.test(trimmed) && !/重难点/u.test(trimmed.split('|')[1] || '');
+    }).filter(line => line.trim().length >= 20)
+    : section.split(/\n{2,}/u).filter(block => block.trim().length >= 20);
   const attributionSimilarity = await buildSemanticSimilarity(entries, [ATTRIBUTION_SEMANTIC_QUERY], embedDocuments);
   let attributed = 0;
   let quantified = 0;

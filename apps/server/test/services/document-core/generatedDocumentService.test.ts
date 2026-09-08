@@ -454,7 +454,7 @@ describe('列表项派生与证据裁剪', () => {
     const record = makeRecord({ id: 'doc-x' });
     record.executionStages = [
       { type: 'validation', roleId: 'r1', status: 'success', message: '第一步' },
-      { type: 'export_ready', roleId: 'r2', status: 'success', subtitle: '导出门禁', message: '完成' },
+      { type: 'validation', roleId: 'agent-final-gate', status: 'success', subtitle: '导出门禁', message: '完成' },
     ];
     record.checkpointChapters = [
       { id: 'c1', title: '第一章', content: '内容一', evidence: [], missingFacts: [] },

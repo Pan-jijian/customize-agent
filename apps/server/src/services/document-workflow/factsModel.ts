@@ -132,6 +132,19 @@ export function extractBillItemFacts(tables: StructuredTableFact[]): DocumentFac
 const SPEC_DIMENSION_LABELS = ['混凝土强度等级', '砂浆强度等级', '抗渗等级', '钢筋牌号', '钢筋级别', '砖规格', '砌块强度等级', '混凝土种类', '砂浆种类', '垫层材料种类', '找平层厚度', '保护层厚度', '防水层厚度', '卷材厚度', '镀锌层厚度', '保温层厚度', '垫层厚度', '找坡层厚度', '防水等级', '抗裂等级', '耐火等级', '强度等级'];
 const SPEC_TOKEN_RE = /C\d{2,3}|M\d+(?:\.\d+)?|P\d{1,2}|HRB\d{3,4}|HPB\d{3}|Q\d{3}|MU\d+|A\d+(?:\.\d+)?|B\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*mm/u;
 
+/** 规格 token → 维度名（buildSpecAuthorityMap 归维口径统一）：标签缺失时按 token 类型归维，
+ *  禁止一律归「混凝土强度等级」——F14 检测按维度首 placement 推导 pattern 时跨类型误比对
+ *  （「有梁板权威 120mm 与正文 C30 不一致」实为板厚与强度等级两类规格，本无矛盾） */
+function specTokenDimension(token: string): string {
+  return /^C\d{2,3}$/.test(token) ? '混凝土强度等级'
+    : /^M\d/.test(token) ? '砂浆强度等级'
+    : /^P\d/.test(token) ? '抗渗等级'
+    : /mm$/.test(token) ? '厚度规格'
+    : /^HRB/.test(token) || /^HPB/.test(token) ? '钢筋牌号'
+    : /^MU/.test(token) ? '砌块强度等级'
+    : '规格';
+}
+
 /** 特征描述分句：按「；」拆段，去掉「1.」序号前缀，再按首个冒号拆「标签:值」 */
 function splitFeatureSegments(feature: string): Array<{ label: string; value: string }> {
   const segments: Array<{ label: string; value: string }> = [];
@@ -174,22 +187,16 @@ export function buildSpecAuthorityMap(billItemFacts: DocumentFact[]): SpecAuthor
         addPlacement(label, location, segValue, quantity, fact.sourceFile);
         continue;
       }
-      // 标签非维度词但值本身是规格 token（如「垫层材料种类:商品混凝土 C30」异常形态）
+      // 标签非维度词但值本身是规格 token（如「垫层材料种类:商品混凝土 C30」异常形态）：按 token 类型归维，
+      // 不得一律归「混凝土强度等级」（F14 跨类型误比对根因：120mm/MU10 混入 C 标号维度）
       const specToken = segValue.match(SPEC_TOKEN_RE)?.[0];
-      if (specToken && specToken !== segValue) addPlacement('混凝土强度等级', location, specToken, quantity, fact.sourceFile);
+      if (specToken && specToken !== segValue) addPlacement(specTokenDimension(specToken), location, specToken, quantity, fact.sourceFile);
     }
     // 无分句结构兜底：特征值整体含规格 token 时按 token 归维
     if (!matched) {
       const tokens = feature.match(SPEC_TOKEN_RE) || [];
       for (const token of tokens) {
-        const dimension = /^C\d{2,3}$/.test(token) ? '混凝土强度等级'
-          : /^M\d/.test(token) ? '砂浆强度等级'
-          : /^P\d/.test(token) ? '抗渗等级'
-          : /mm$/.test(token) ? '厚度规格'
-          : /^HRB/.test(token) || /^HPB/.test(token) ? '钢筋牌号'
-          : /^MU/.test(token) ? '砌块强度等级'
-          : '规格';
-        addPlacement(dimension, location, token, quantity, fact.sourceFile);
+        addPlacement(specTokenDimension(token), location, token, quantity, fact.sourceFile);
       }
     }
   }
@@ -206,7 +213,9 @@ export function fieldExtractionPattern(name: string) {
   // 窗口允许跨行（PDF 复制文本常在数字与单位之间换行，历史缺陷：事实值被截成
   // “单体建筑面积28570.36平方”缺“米”，正文随之产出缺单位表述）；跨行吞并由
   // extractStructuredFacts 的空白归一化 + 下一字段名截断兜底
-  const body = /规模|scale|工期|周期/iu.test(name) ? '[^。；;]{2,220}' : '[^\\n，。；;]+';
+  // 丰乐镇第 3 轮实测：规模类值含“；”分句时（“一是…；二是…；三是…”）若在“；”处
+  // 截断则建设规模事实值只留首分句（基本信息表与正文随之截断），故规模/工期类仅以句号终止
+  const body = /规模|scale|工期|周期/iu.test(name) ? '[^。]{2,220}' : '[^\n，。；;]+';
   return new RegExp(`${escaped}[：:\\s]+(${body})`, 'u');
 }
 
@@ -227,6 +236,10 @@ export function extractStructuredFacts(evidence: DocumentEvidence[], template: D
       // round-23 P0-3 补强：PDF 标题标记「###」夹在句中间（“平方\n\n### 米”）时先移除标记再归一化，
       // 否则值携带“###”进入 canonical 与写作层（实测坏值“28570.36平方2.8”传播至正文表格）
       value = cleanPdfHeadingNoise(value).replace(/\s+/gu, '');
+      // 丰乐镇第 3 轮实测编号粘连截断：PDF 章节编号“2.9招标范围”紧邻上一字段值（“计划工期：
+      // 90日历天2.9招标范围：…”）时，编号被吞入值尾部（脏值“90日历天2.9”进入事实主表与
+      // 基本信息表）；“日/天”后跟数字且其后是下一字段名/编号/标点/句尾时截断编号
+      value = value.replace(/(?<=[日天])[0-9]+(?:\.[0-9]+)?(?=(?:招标范围|质量标准|建设规模|计划工期|合同估算|项目名称|项目编号|建设地点|招标人|资金来源|投标人资格|资质要求|开标|评标|付款|计价|现场条件|开工日期|合同工期|工期要求|[0-9]{1,3}[.、．]|[，,。；;]|$))/u, '');
       const nextFieldIndex = otherFieldNames.filter(name => name !== field.name).map(name => value!.indexOf(name)).filter(index => index > 0);
       if (nextFieldIndex.length > 0) value = value.slice(0, Math.min(...nextFieldIndex));
       if (value && value.length <= 220 && !isForbiddenFactValue(DEFAULT_DOCUMENT_DOMAIN_PROFILE, value) && !isDiagnosticFactValue(DEFAULT_DOCUMENT_DOMAIN_PROFILE, value) && !facts.some(fact => fact.fieldId === field.id && fact.value === value)) {
@@ -541,7 +554,7 @@ export interface FactSanitizeStats {
 /** 值内污染形态（合肥师范样本实锤）：表格碎片竖线（工程名称=“土建与装饰工程|||||标段：|||||第46页共47页”）、
  *  页码（第46页共47页）、markdown 标题标记（质量目标=“### 1.1项目概况…”）、参数行摘要标记；
  *  命中即视为污染起点，从该处截断保留前缀 */
-const FACT_VALUE_POLLUTION_RE = /\||第\s*\d+\s*页|共\s*\d+\s*页|[#＃]{1,6}|资料参数行摘要/u;
+const FACT_VALUE_POLLUTION_RE = /\||第\s*\d+\s*页|共\s*\d+\s*页|[#＃]{1,6}| 资料参数行摘要|(?<=[日天])\s*[0-9]+(?:\.[0-9]+)?(?=[\s]*(?:招标|建设|质量|合同|项目|工程|资金|投标|开标|评标|付款|工期|开工|计划|计价|现场|资质|标段|[0-9]{1,3}[.、．]|[，,。；;]|$))/u;
 
 /** 叙述段拒收白名单：规模/范围/工期/周期类字段允许长窗混合口径值（fieldExtractionPattern 上限 220），
  *  其余字段值长 >120 字符视为“叙述段”型脏值（模型会把整段公告原文当事实写进标题/正文） */
@@ -882,7 +895,77 @@ function splitMixedScaleFacts(facts: DocumentFact[]): DocumentFact[] {
   return result;
 }
 
+// ═══════════════════ P3.2 事实池乱码过滤 + 项目范围隔离 ═══════════════════
+// 三期修复：OCR 乱码（CJK 扩展区罕见字符）与图纸目录噪声（R6C3/COL3 单元格引用）进入事实池、
+// 跨项目资料目录（knowledgeBase 混入舒城/合肥师范等目录）使「项目名称候选/招标范围」串染。
+// 入口统一清洗：乱码判定丢弃；项目名口径按正则通道「项目名称」事实做地名级隔离。
+
+/** CJK 扩展区字符（Ext A/B/C/D/E）：正式招标文档几乎不出现，出现即 OCR/编码噪声强信号 */
+const RARE_CJK_CHAR_RE = /[\u3400-\u4DBF\u{20000}-\u{3FFFF}]/gu;
+/** 表格单元格引用噪声（图纸目录/表格 OCR 残留）：R6C3 / COL3 / 第N行第N列 */
+const TABLE_CELL_NOISE_RE = /(?:R\d+C\d+|COL\d+|第\d+行第\d+列)/giu;
+
+function isMojibakeFactValue(fact: DocumentFact): boolean {
+  const value = stringifyFactValue(fact.value);
+  if (!value) return false;
+  const rareHits = [...value.matchAll(RARE_CJK_CHAR_RE)].length;
+  if (rareHits > 0) {
+    const cjkTotal = [...value.matchAll(/[\u3400-\u4DBF\u4E00-\u9FFF\u{20000}-\u{3FFFF}]/gu)].length;
+    // 短值（≤40 字符）命中扩展区字符即判乱码；长值按密度 ≥1/5 判乱码
+    if (value.length <= 40 || (cjkTotal > 0 && rareHits / cjkTotal >= 0.2)) return true;
+  }
+  // 表格单元格引用噪声：去除引用后残留正文 ≤24 字符即判目录噪声（如「R6C3COL3：上海开艺设计集团有限公司」）
+  if (TABLE_CELL_NOISE_RE.test(value) && value.replace(TABLE_CELL_NOISE_RE, '').trim().length <= 24) return true;
+  return false;
+}
+
+/** 项目名中的地名核心（XX镇/乡/县/市/区/街道/村）：跨项目隔离的比较口径（chapterPostProcessing 复用） */
+export function projectPlaceName(projectName: string): string | undefined {
+  const match = projectName.match(/([\u4e00-\u9fa5]{2,8}?(?:镇|乡|县|市|区|街道|村))/u);
+  return match?.[1];
+}
+
+/** 值中含其他项目名短语（地名+项目/工程形态，且地名与当前项目不同）即串染信号 */
+export function containsForeignProject(value: string, currentPlace: string): boolean {
+  const hits = value.matchAll(/([\u4e00-\u9fa5]{2,8}?(?:镇|乡|县|市|区|街道|村))[^。；;\n]{0,24}?(?:项目|工程)/gu);
+  for (const hit of hits) {
+    if (hit[1] !== currentPlace) return true;
+  }
+  return false;
+}
+
+/**
+ * 事实池入口清洗：乱码事实丢弃 + 项目范围隔离（招标范围按句切分只保留当前项目段、
+ * 项目名称候选按地名排除其他项目）。当前项目名来自正则通道「项目名称」事实，
+ * 无法确定时仅做乱码过滤（不误杀）。
+ */
+export function sanitizeFactPool(facts: DocumentFact[]): DocumentFact[] {
+  const cleaned = facts.filter(fact => !isMojibakeFactValue(fact));
+  const projectNameFact = cleaned.find(fact =>
+    (fact.key === '项目名称' || fact.fieldId === 'project_name')
+    && stringifyFactValue(fact.value).trim().length >= 6);
+  const currentName = projectNameFact ? normalizeOcrFactText(stringifyFactValue(projectNameFact.value)).trim() : '';
+  const currentPlace = currentName ? projectPlaceName(currentName) : undefined;
+  if (!currentPlace) return cleaned;
+  return cleaned.map(fact => {
+    const label = `${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`;
+    const value = normalizeOcrFactText(stringifyFactValue(fact.value)).trim();
+    if (!value) return fact;
+    // 招标范围类：按句切分，只保留当前项目段（含其他地名+项目形态的句丢弃）；切分后无残留则整条丢弃
+    if (/招标范围|施工范围/u.test(label)) {
+      const sentences = value.split(/[。；;\n]/u).map(sentence => sentence.trim()).filter(Boolean);
+      if (sentences.length <= 1) return containsForeignProject(value, currentPlace) ? { ...fact, value: '' } : fact;
+      const kept = sentences.filter(sentence => !containsForeignProject(sentence, currentPlace));
+      return kept.length === 0 ? { ...fact, value: '' } : { ...fact, value: kept.join('；') };
+    }
+    // 项目名称候选：值含其他项目名短语即丢弃（跨项目目录串染主通道）
+    if (/项目名称候选|项目名称|工程名称/u.test(label) && containsForeignProject(value, currentPlace)) return { ...fact, value: '' };
+    return fact;
+  }).filter(fact => stringifyFactValue(fact.value).trim().length > 0);
+}
+
 export async function buildFactsModel(facts: DocumentFact[], tables: StructuredTableFact[] = [], missingItems: string[] = [], spec?: AutoDocumentSpecPackage, profile: DocumentDomainProfile = DEFAULT_DOCUMENT_DOMAIN_PROFILE): Promise<DocumentFactsModel> {
+  facts = sanitizeFactPool(facts);
   const byKeys = (keys: string[]) => facts.filter(fact => keys.some(key => `${fact.key} ${fact.fieldName || ''}`.includes(key)));
   const byProcessing = (type: string) => facts.filter(fact => fact.processingType === type || fact.roleId.includes(type));
   const preciseFacts = facts.filter(fact => {

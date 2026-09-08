@@ -305,6 +305,33 @@ describe('dedupeCrossSectionSkeletonH4s（跨 H3 同名 H4 串章骨架删除）
     expect(result).toContain('钢筋准备正文');
   });
 
+  it('三要素骨架 H4（施工概况/施工流程/施工方法）跨 H3 重复合法保留（4.19.3 回归：分部块被掏空）', () => {
+    const markdown = [
+      '## 第二章 主要施工方法',
+      '### 道路工程',
+      '#### 施工概况',
+      '道路概况正文',
+      '#### 施工流程',
+      '道路流程正文',
+      '#### 施工方法',
+      '道路方法正文',
+      '### 排水工程',
+      '#### 施工概况',
+      '排水概况正文',
+      '#### 施工流程',
+      '排水流程正文',
+      '#### 施工方法',
+      '排水方法正文',
+    ].join('\n');
+    const result = dedupeCrossSectionSkeletonH4s(markdown);
+    expect(result).toContain('道路概况正文');
+    expect(result).toContain('道路流程正文');
+    expect(result).toContain('道路方法正文');
+    expect(result).toContain('排水概况正文');
+    expect(result).toContain('排水流程正文');
+    expect(result).toContain('排水方法正文');
+  });
+
   it('跨章同名小节不受影响（章级作用域）', () => {
     const markdown = [
       '## 第一章 整体理解',
@@ -319,6 +346,62 @@ describe('dedupeCrossSectionSkeletonH4s（跨 H3 同名 H4 串章骨架删除）
     const result = dedupeCrossSectionSkeletonH4s(markdown);
     expect(result).toContain('第一章正文');
     expect(result).toContain('第六章正文');
+  });
+
+  it('编号形态 H4 与章内 H3 同名不删除（4.19.6 回归：容器块总述「3 绿化工程」连坐删除 3447 字）', () => {
+    // 容器块总述用「#### 3 绿化工程」分组组织，与分部 H3「### 绿化工程」同名但属结构性引用；
+    // 修复前 H4 块删除范围延伸至下一标题，H4 后全部总述正文一并丢失 → 容器块空壳 → 标题也被清掉
+    const markdown = [
+      '## 第二章 主要施工方法',
+      '### 绿化工程',
+      '#### 施工概况',
+      '绿化概况正文',
+      '### 主要分部分项工程施工方案',
+      '#### 3 绿化工程',
+      '第四组为建筑配套专业组正文段一',
+      '成后方能为排水专业组的沟槽开挖正文段二',
+      '各专业组之间的工序衔接正文段三',
+      '### 生态池及连接路施工方法',
+      '#### 施工概况',
+      '生态池概况正文',
+    ].join('\n');
+    const result = dedupeCrossSectionSkeletonH4s(markdown);
+    // 总述正文与标题完整保留，不误伤容器块与后续小节
+    expect(result).toContain('#### 3 绿化工程');
+    expect(result).toContain('第四组为建筑配套专业组正文段一');
+    expect(result).toContain('成后方能为排水专业组的沟槽开挖正文段二');
+    expect(result).toContain('各专业组之间的工序衔接正文段三');
+    expect(result).toContain('### 主要分部分项工程施工方案');
+    expect(result).toContain('生态池概况正文');
+  });
+
+  it('容器总述小节内无编号 H4 引用分部名也不删除（容器块天然引用全章分部名）', () => {
+    const markdown = [
+      '## 第二章 主要施工方法',
+      '### 道路工程',
+      '#### 施工概况',
+      '道路概况正文',
+      '### 主要分部分项工程施工方案',
+      '#### 道路工程',
+      '总述引用道路分部正文',
+      '### 排水工程',
+      '#### 施工概况',
+      '排水概况正文',
+    ].join('\n');
+    const result = dedupeCrossSectionSkeletonH4s(markdown);
+    expect(result).toContain('#### 道路工程');
+    expect(result).toContain('总述引用道路分部正文');
+  });
+
+  it('裸标题 H4 与章内 H3 同名且不在容器小节内仍整块删除（既有契约不变）', () => {
+    const markdown = [
+      '## 第三章 新技术',
+      '### 智慧工地基本级实施',
+      '#### 智慧工地基本级实施',
+      '与 H3 同名正文',
+    ].join('\n');
+    const result = dedupeCrossSectionSkeletonH4s(markdown);
+    expect(result).not.toContain('与 H3 同名正文');
   });
 
   it('无重复时原样保留', () => {

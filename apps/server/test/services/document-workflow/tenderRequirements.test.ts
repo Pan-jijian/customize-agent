@@ -67,6 +67,28 @@ describe('extractTenderRequirements 回归（round-21 S6：schema 超长失败�
     expect(hasTenderRequirements(model)).toBe(false);
   });
 
+  it('无值条款表述（值为无/勾选无/数据表占位）被丢弃不入模型（真实回归：新版招标文件「绿色建筑等级要求：无」被当字段值污染下游）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    mocked.mockResolvedValueOnce({
+      awardObjectives: [{ text: '创优目标：无', coreTerms: [], source: '前附表10.9' }],
+      specialQualityStandards: [{ text: '特殊质量标准和要求：无。', coreTerms: [], source: '数据表5.1.1' }],
+      awardClauses: [{ text: '关于工程奖项的约定：本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元。', coreTerms: ['黄山杯'], source: '数据表5.1.1' }],
+      greenBuildingGrade: { text: '绿色建筑等级要求：无', coreTerms: [], source: '数据表5.1.1' },
+      smartSiteGrade: { text: '智慧工地管理要求：无', coreTerms: [], source: '数据表5.1.1' },
+      assemblyRate: { text: '装配式建筑装配率要求：无', coreTerms: [], source: '数据表5.1.1' },
+      frontScheduleClauses: [{ text: '特殊质量标准和要求：见《专用合同条款数据表》', coreTerms: [], source: '正文5.1' }],
+    });
+    const model = await extractTenderRequirements(evidence, {});
+    expect(model.awardObjectives.length).toBe(0);
+    expect(model.specialQualityStandards.length).toBe(0);
+    expect(model.awardClauses.length).toBe(1);
+    expect(model.awardClauses[0].text).toContain('300万元');
+    expect(model.greenBuildingGrade).toBeUndefined();
+    expect(model.smartSiteGrade).toBeUndefined();
+    expect(model.assemblyRate).toBeUndefined();
+    expect(model.frontScheduleClauses.length).toBe(0);
+  });
+
   it('空证据直接返回空模型', async () => {
     const model = await extractTenderRequirements([], {});
     expect(model).toEqual(emptyTenderRequirements(false));
@@ -229,6 +251,52 @@ describe('round-23 P0-1 必提条款窄通道召回/缺失判定/合并', () => 
     expect(result.stillGaps).toEqual(['awardObjectives', 'frontScheduleClauses']);
     expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'dateFabricationProhibited', 'prohibitionNotes']);
     expect(mocked).toHaveBeenCalledTimes(2);
+  });
+
+  it('extractRequirementFieldGaps：条款值为「无」的命中句不产生窗口（勾选无/值为无归「资料无此要求」，零 LLM 调用零误报）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    // 真实回归：新版招标文件前附表10.9「创优目标 ☑无」、数据表5.1.1「关于工程奖项的约定：无」
+    // 词形命中窗口，LLM 正确输出空数组，旧逻辑误报「条款窗口证据存在但 LLM 提取失败」
+    const model = {
+      ...fullModel,
+      awardObjectives: [],
+      awardClauses: [],
+      greenBuildingGrade: undefined,
+      smartSiteGrade: undefined,
+      assemblyRate: undefined,
+    };
+    const gapEvidence: DocumentEvidence[] = [
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知前附表10.9', score: 1, content: '10.9 创优目标 ☑无 □有，具体要求如下： /' },
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款数据表5.1.1', score: 1, content: '5.1.1 特殊质量标准和要求：无。关于工程奖项的约定：无。绿色建筑等级要求：无；智慧工地管理要求：无；装配式建筑装配率要求：无。' },
+    ];
+    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
+    expect(result.stillGaps).toEqual([]);
+    expect(result.noEvidenceGaps).toEqual(['awardObjectives', 'specialQualityStandards', 'awardClauses', 'greenBuildingGrade', 'smartSiteGrade', 'assemblyRate', 'frontScheduleClauses', 'dateFabricationProhibited', 'prohibitionNotes']);
+    expect(result.model.awardObjectives.length).toBe(0);
+    expect(result.model.awardClauses.length).toBe(0);
+    expect(mocked).not.toHaveBeenCalled();
+  });
+
+  it('extractRequirementFieldGaps：混合否定/肯定窗口——值为无的命中句跳过，有值条款正常参与补提', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    const model = { ...fullModel, awardObjectives: [], awardClauses: [] };
+    // 创优目标 ☑无 句被跳过（不产生窗口）；奖项约定句含「确保获得黄山杯」→ 创优目标/奖项条款/前附表窗口均有值，一次调用全部提取
+    mocked.mockResolvedValueOnce({
+      awardObjectives: [{ text: '创优目标：确保获得“黄山杯”。', coreTerms: ['黄山杯'] }],
+      awardClauses: [{ text: '获得“黄山杯”的，支付该项300万元。', coreTerms: ['300万元'] }],
+      frontScheduleClauses: [{ text: '本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元。', coreTerms: ['黄山杯', '300万元'] }],
+    });
+    const gapEvidence: DocumentEvidence[] = [
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知前附表10.9', score: 1, content: '10.9 创优目标 ☑无 □有，具体要求如下： /' },
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款数据表5.1.1', score: 1, content: '关于工程奖项的约定：本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元（工程量清单中已单独列项）。' },
+    ];
+    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
+    expect(result.stillGaps).toEqual([]);
+    // ☑无 句不产生窗口；无窗口命中的常规字段归 noEvidence，创优/奖项字段均正常补提
+    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'dateFabricationProhibited', 'prohibitionNotes']);
+    expect(result.model.awardClauses.length).toBe(1);
+    expect(result.model.awardClauses[0].text).toContain('300万元');
+    expect(result.model.awardObjectives.length).toBe(1);
   });
 
   it('extractRequirementFieldGaps：前附表词形覆盖创优奖惩条款（300万根治：无工期/人员词形时窗口定位不失明）', async () => {

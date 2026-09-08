@@ -763,6 +763,37 @@ export class IndexStateStore {
     this.db.prepare('DELETE FROM kb_relationships WHERE source_file = ? OR target_file = ?').run(relativePath, relativePath);
   }
 
+  /**
+   * 删除顶级资料组不在 keepGroups 内的全部索引数据（跨项目目录守卫）。
+   * relative_path 首个路径段为顶级资料组；knowledgeBase 目录混入其他项目资料时（历史缺陷：
+   * 丰乐镇项目 knowledgeBase 曾混入合肥师范/舒城目录，kb_chunks 跨项目占比 52%），
+   * 绑定文件清单确定的组之外的数据从索引整体清除，防止下游全库检索/事实提取串染。
+   * 根目录直放文件（无顶级组）保守保留；keepGroups 为空时不清理（无法判定权威范围）。
+   */
+  deleteChunksOutsideGroups(keepGroups: string[]): { deletedChunks: number; deletedFiles: number } {
+    if (keepGroups.length === 0) return { deletedChunks: 0, deletedFiles: 0 };
+    const groupSet = new Set(keepGroups);
+    const rows = this.db.prepare('SELECT DISTINCT relative_path FROM kb_chunks').all() as Array<{ relative_path: string }>;
+    const stalePaths: string[] = [];
+    for (const row of rows) {
+      const relativePath = String(row.relative_path);
+      const parts = relativePath.replace(/\\/gu, '/').split('/').filter(Boolean);
+      // 仅多段路径（有真实目录层级）参与组判定；根目录直放文件（单段路径）保守保留
+      const top = parts.length > 1 ? parts[0] : undefined;
+      if (top !== undefined && !groupSet.has(top)) stalePaths.push(relativePath);
+    }
+    if (stalePaths.length === 0) return { deletedChunks: 0, deletedFiles: 0 };
+    let deletedChunks = 0;
+    const tx = this.db.transaction(() => {
+      for (const relativePath of stalePaths) {
+        deletedChunks += Number((this.db.prepare('SELECT COUNT(*) AS c FROM kb_chunks WHERE relative_path = ?').get(relativePath) as { c: number }).c);
+        this.deleteRecord(relativePath);
+      }
+    });
+    tx();
+    return { deletedChunks, deletedFiles: stalePaths.length };
+  }
+
   setMetadata(key: string, value: string): void {
     this.db.prepare(`
       INSERT INTO kb_metadata (key, value) VALUES (?, ?)

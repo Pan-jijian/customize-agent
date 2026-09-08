@@ -523,7 +523,7 @@ describe('readProjectIntelligence 惰性自愈重建', () => {
       const root = `/proj-selfheal-${Date.now()}`;
       fs.mkdirSync(path.dirname(cacheFile(root)), { recursive: true });
       fs.writeFileSync(cacheFile(root), JSON.stringify({
-        version: 'project-intelligence-v11',
+        version: 'project-intelligence-v12',
         projectGraph: { works: [] },
         files: [{ relativePath: 'ghost.txt', contentHash: 'x', chunkCount: 1, status: 'ok' }],
         facts: [], chapterIntentIndex: [],
@@ -549,7 +549,7 @@ describe('readProjectIntelligence 惰性自愈重建', () => {
       const root = `/proj-degraded-heal-${Date.now()}`;
       fs.mkdirSync(path.dirname(cacheFile(root)), { recursive: true });
       fs.writeFileSync(cacheFile(root), JSON.stringify({
-        version: 'project-intelligence-v11',
+        version: 'project-intelligence-v12',
         projectGraph: { works: [] },
         graphDegraded: true,
         files: [{ relativePath: '资料/招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok' }],

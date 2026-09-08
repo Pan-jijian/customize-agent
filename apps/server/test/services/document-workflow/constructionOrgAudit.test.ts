@@ -89,7 +89,7 @@ describe('fillerParagraphIssues（废话段落模式检测，正则召回+语义
 
 describe('fillerSentenceTargets（套话句修复锚点提取：检测定位=修复定位）', () => {
   it('套话句定位：输出命中句原文与小节归属（模板化修复闭环锚点源）', async () => {
-    const content = '#### 管理措施\n本小节围绕现场管理展开，结合绑定项目资料。\n具体做法：每日巡查并记录。';
+    const content = '#### 管理措施\n本小节围绕现场管理展开，结合绑定项目资料。\n具体做法：由施工员逐项检查并形成记录台账。';
     const targets = await fillerSentenceTargets([chapter('管理措施', content)], embedDocuments);
     expect(targets).toHaveLength(1);
     expect(targets[0].sentence).toContain('本小节围绕现场管理展开');

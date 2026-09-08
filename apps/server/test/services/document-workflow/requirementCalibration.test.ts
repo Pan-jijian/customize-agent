@@ -26,9 +26,12 @@ describe('calibrateOutlineSectionsToRequirements', () => {
     expect(llmJsonMock).not.toHaveBeenCalled();
   });
 
-  it('LLM 调用失败（返回 undefined）→ 空数组（回退原规划）', async () => {
+  it('LLM 调用失败（返回 undefined）→ 属地必提项确定性补挂兑底', async () => {
     llmJsonMock.mockResolvedValue(undefined);
-    expect(await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary, templateName: '施工组织设计' })).toEqual([]);
+    // 摘要含创优目标 → 即使 LLM 失败也确定性补挂「创优目标与奖惩承诺」到质量章
+    expect(await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary, templateName: '施工组织设计' })).toEqual([
+      { chapterTitle: '第三章 质量目标与创优计划', sections: ['创优目标与奖惩承诺'] },
+    ]);
   });
 
   it('合法新增：清洗后返回，章名匹配到原章（去序号归一化）', async () => {
@@ -37,14 +40,16 @@ describe('calibrateOutlineSectionsToRequirements', () => {
     expect(result).toEqual([{ chapterTitle: '第三章 质量目标与创优计划', sections: ['创优目标与奖惩承诺'] }]);
   });
 
-  it('防幻觉：不存在的章名丢弃', async () => {
+  it('防幻觉：不存在的章名丢弃（摘要无属地必提项时不补挂）', async () => {
     llmJsonMock.mockResolvedValue({ additions: [{ chapterTitle: '第十章 不存在的章节', sections: ['某小节'] }] });
-    expect(await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary, templateName: '施工组织设计' })).toEqual([]);
+    const summaryWithoutRequired = ['绿色建筑等级要求：达到国标二星级。', '装配率要求：装配率为30%。'];
+    expect(await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary: summaryWithoutRequired, templateName: '施工组织设计' })).toEqual([]);
   });
 
-  it('防重复：与已有小节等效的新增被剔除', async () => {
+  it('防重复：与已有小节等效的新增被剔除（摘要无属地必提项时不补挂）', async () => {
     llmJsonMock.mockResolvedValue({ additions: [{ chapterTitle: '质量目标与创优计划', sections: ['质量目标'] }] });
-    expect(await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary, templateName: '施工组织设计' })).toEqual([]);
+    const summaryWithoutRequired = ['绿色建筑等级要求：达到国标二星级。'];
+    expect(await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary: summaryWithoutRequired, templateName: '施工组织设计' })).toEqual([]);
   });
 
   it('条款碎片与指令型标题被过滤（与规划同口径）', async () => {
@@ -59,9 +64,31 @@ describe('calibrateOutlineSectionsToRequirements', () => {
     expect(result[0]?.sections).toHaveLength(2);
   });
 
-  it('空 additions → 空数组', async () => {
+  it('空 additions → 空数组（摘要无属地必提项时不补挂）', async () => {
     llmJsonMock.mockResolvedValue({ additions: [] });
-    expect(await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary, templateName: '施工组织设计' })).toEqual([]);
+    const summaryWithoutRequired = ['装配率要求：装配率为30%。'];
+    expect(await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary: summaryWithoutRequired, templateName: '施工组织设计' })).toEqual([]);
+  });
+
+  it('P3.3 属地必提项确定性补挂：创优目标+工伤保险（LLM 空响应兑底）', async () => {
+    llmJsonMock.mockResolvedValue({ additions: [] });
+    const summary = ['创优目标：确保黄山杯。', '按规定办理工伤保险。', '装配率要求：装配率为30%。'];
+    const result = await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary: summary, templateName: '施工组织设计' });
+    expect(result).toEqual([
+      { chapterTitle: '第三章 质量目标与创优计划', sections: ['创优目标与奖惩承诺', '工伤保险与劳动保障'] },
+    ]);
+  });
+
+  it('P3.3 必提项补挂去重：已有承接小节/LLM 已新增时不重复补', async () => {
+    llmJsonMock.mockResolvedValue({ additions: [{ chapterTitle: '质量目标与创优计划', sections: ['创优目标与奖惩承诺'] }] });
+    const result = await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary, templateName: '施工组织设计' });
+    expect(result).toEqual([{ chapterTitle: '第三章 质量目标与创优计划', sections: ['创优目标与奖惩承诺'] }]);
+  });
+
+  it('P3.3 摘要未提及创优/工伤保险 → 不补挂', async () => {
+    llmJsonMock.mockResolvedValue({ additions: [] });
+    const summary = ['绿色建筑等级要求：达到国标二星级。', '装配率要求：装配率为30%。'];
+    expect(await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary: summary, templateName: '施工组织设计' })).toEqual([]);
   });
 });
 

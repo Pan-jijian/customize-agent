@@ -68,6 +68,29 @@ describe('B7 自伤句式 A21 形态', () => {
     expect(result.markdown).toContain('本项目工艺选择以成熟可靠为原则');
     expect(result.markdown).not.toContain('未采用');
   });
+
+  it('R9 分包否定式自述改写为自主组织正向表述', () => {
+    const md = '招标要求响应（前附表响应条款）：本招标项目不允许分包。本工程不进行分包，全部施工内容由我方自行组织完成。';
+    const result = fixSelfUnderminingCandidates(md);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('本工程全部施工任务由我公司项目部自行组织实施');
+    expect(result.markdown).not.toContain('本工程不进行分包');
+  });
+
+  it('R9 收尾赶工暗示「1个日历天」改写为按计划组织', () => {
+    const md = '路灯安装完成后逐套进行绝缘电阻测试和接地电阻测试，测试合格后由电工填写调试记录，质检员逐套验收并签字确认。亮化与收尾阶段安排1个日历天，各分组在收尾阶段同步完成路灯调试、场地清理和竣工资料整理，项目经理组织各分组施工员进行内部预验收，预验收问题清单当日下发、限时整改、复查销项后方可申请正式竣工验收。';
+    const result = fixSelfUnderminingCandidates(md);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('收尾阶段按总进度计划组织实施');
+    expect(result.markdown).not.toContain('安排1个日历天');
+  });
+
+  it('R9 收尾赶工句带折行空格形态同样命中', () => {
+    const md = '亮化与收尾阶段安排1个日历天，各分组在收尾阶段同步完成路灯调试 、场地清理和竣工资料整理，项目经理组织各分组施工员进行内部预验收，预验收问题清单当日下发、限时整改、复查销项后方可申请正式竣工验收。';
+    const result = fixSelfUnderminingCandidates(md);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).not.toContain('安排1个日历天');
+  });
 });
 
 describe('B7 评分响应空响应句改写', () => {

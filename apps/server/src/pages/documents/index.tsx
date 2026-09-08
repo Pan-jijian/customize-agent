@@ -48,9 +48,9 @@ function notifyGenerationTask() { activeGenerationTask?.listeners.forEach(l => l
 
 const STAGE_ICONS: Record<string, ReactNode> = {
   role_binding: <ApartmentOutlined />, knowledge_retrieval: <DatabaseOutlined />, file_understanding: <EyeOutlined />,
-  fact_extraction: <BulbOutlined />, chapter_generation: <FormOutlined />, asset_generation: <PictureOutlined />,
-  validation: <SafetyCertificateOutlined />, formatting: <CheckCircleOutlined />, llm_review: <ThunderboltOutlined />,
-  export_ready: <FileDoneOutlined />, reference: <PictureOutlined />,
+  fact_extraction: <BulbOutlined />, chapter_generation: <FormOutlined />,
+  validation: <SafetyCertificateOutlined />, llm_review: <ThunderboltOutlined />,
+  reference: <PictureOutlined />,
 };
 const CATEGORY_ICONS: Record<string, ReactNode> = {
   '施工组织设计': <SafetyCertificateOutlined />,
@@ -100,13 +100,12 @@ function buildTemplateFileTree(nodes: TreeApiResponseNode[]): TemplateFileTreeNo
 
 const STAGE_TITLES: Record<string, string> = {
   role_binding: '角色配置绑定', knowledge_retrieval: '知识库检索', file_understanding: '多模态文件理解',
-  fact_extraction: 'LLM 事实抽取', chapter_generation: 'LLM 章节生成', asset_generation: '多模态资源生成',
-  validation: '规则校验', formatting: '格式化排版', llm_review: 'LLM 审查优化',
-  export_ready: '导出就绪', reference: '参考资源处理',
+  fact_extraction: 'LLM 事实抽取', chapter_generation: 'LLM 章节生成',
+  validation: '规则校验', llm_review: 'LLM 审查优化',
+  reference: '参考资源处理',
 };
 const STAGE_ROLE_NAMES: Record<string, string> = {
-  'knowledge-base': '知识库', 'document-readiness': '生成准备度检查', 'quality-repair': '质量补写', 'export-gate': '导出门禁',
-  'context-memory': '项目上下文', 'final-format': '正式排版', 'multimodal-files': '多模态文件理解', 'tender_announcement': '招标公告',
+  'knowledge-base': '知识库', 'document-readiness': '生成准备度检查',
 };
 
 export default function DocumentsPage() {
@@ -362,8 +361,6 @@ export default function DocumentsPage() {
     if (type === 'chapter_generation') return <FormOutlined />;
     if (type === 'llm_review') return <ThunderboltOutlined />;
     if (type === 'validation') return <SafetyCertificateOutlined />;
-    if (type === 'formatting') return <CheckCircleOutlined />;
-    if (type === 'export_ready') return <FileDoneOutlined />;
     return <FileTextOutlined />;
   };
   const buildFlowStepsFromRecord = (record: GeneratedDocumentRecord): { steps: FlowStep[]; activeKey: string | null } => {
@@ -1323,7 +1320,7 @@ export default function DocumentsPage() {
             const benchmark = draft.reviewMetadata.qualityBenchmark;
             const quality = draft.reviewMetadata.diagnostics?.quality;
             const repairDetails = (draft.executionStages || [])
-              .filter(stage => stage.type === 'llm_review' || stage.roleId === 'quality-repair')
+              .filter(stage => stage.type === 'llm_review')
               .flatMap(stage => (stage.details || []).filter(detail => /修复|补写|补齐|改进|调整/u.test(detail)))
               .slice(0, 8);
             return (

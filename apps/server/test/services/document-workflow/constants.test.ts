@@ -19,7 +19,12 @@ describe('FILE_NAME_RE', () => {
   });
 
   it('中文/数字/括号文件名', () => {
-    expect('文件（修订版_2）.dwg'.match(FILE_NAME_RE)?.[0]).toBe('文件（修订版_2）.dwg');
+    // 真行为（M1 组真实缺陷修复后）：文件名字符类不含全角/半角括号——括号会让图片语法
+    // 「![总平面图](p.png)」被吞成畸形串。带括号文件名两种形态：
+    // 1) 扩展名前有 '）'（文件名在括号内）→ 无法匹配（null）；
+    // 2) 扩展名后接 '）'（扩展名紧跟闭括号，\b 边界成立）→ 从括号内内容开始匹配
+    expect('文件（修订版_2）.dwg'.match(FILE_NAME_RE)).toBeNull();
+    expect('文件（修订版_2.dwg）'.match(FILE_NAME_RE)?.[0]).toBe('修订版_2.dwg');
     expect('材料清单.xlsx'.match(FILE_NAME_RE)?.[0]).toBe('材料清单.xlsx');
   });
 

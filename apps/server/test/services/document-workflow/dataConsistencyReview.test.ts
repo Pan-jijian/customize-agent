@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { callDocumentLlmJson } from '@/services/document-workflow/llmClient';
 import type * as LlmClientModule from '@/services/document-workflow/llmClient';
 import { dataConsistencyConflictIssue, numericSentencesForReview, reviewDataConsistency, semanticChoiceConflicts, semanticChoiceConflictIssue, type DataConsistencyConflict } from '@/services/document-workflow/dataConsistencyReview';
-import type { DecisionLockEntry } from '@/services/document-workflow/decisionLock';
+import type { DecisionLockEntry } from '@/services/document-workflow/integratedBlueprint';
 
 vi.mock('@/services/document-workflow/llmClient', async () => {
   const actual = await vi.importActual<typeof LlmClientModule>('@/services/document-workflow/llmClient');

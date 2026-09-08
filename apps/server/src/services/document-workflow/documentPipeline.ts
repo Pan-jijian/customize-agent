@@ -9,14 +9,14 @@ import { validateDraftWithAutoSpec } from '../document-validation/documentValida
 import { validateProjectContamination } from '../document-validation/documentContaminationService';
 import { chapterReadinessIssues, evaluateChapterReadiness } from '../document-validation/chapterReadinessService';
 import { validateFactConsistency } from '../document-validation/factConsistencyService';
-import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from './markdownComposer';
+import { cleanFormalSourcePhrases, composeDocumentMarkdown, dedupeTertiaryH4Titles, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from './budget';
-import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown, markdownTableQualityIssues } from './qualityValidation';
-import { applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixFinishThickness, fixLaborPeakConflict, fixSelfUnderminingCandidates, fixTocFromBody, mergeTableLineResidues, planDataMasterAuthorities, runDeterministicChainUntilConverged, runFixUntilClean, stripCommercialDataBodyLines, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters } from './documentIntegrityChecks';
-import type { PlanDataMaster } from './planDataMaster';
-import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
+import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown, markdownTableQualityIssues, headingUncoveredEngineeringItems } from './qualityValidation';
+import { applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixFinishThickness, fixFormulaResidues, fixLaborPeakConflict, fixMetaDiscourseDeclarations, fixSelfUnderminingCandidates, fixTocFromBody, mergeTableLineResidues, runDeterministicChainUntilConverged, runFixUntilClean, stripCommercialDataBodyLines, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters } from './documentIntegrityChecks';
+import { fixInternalTermHeadingPhrases, internalTerminologyAnchorIssues, stripInternalTerminologySentences } from './internalTerminologyAnchors';
 import { semanticChoiceConflicts, semanticChoiceConflictIssue } from './dataConsistencyReview';
-import { buildDecisionLock } from './decisionLock';
+import { blueprintPlanAuthorities, extractDecisionLockEntries } from './integratedBlueprint';
+import type { BlueprintData } from './integratedBlueprint';
 import { buildStandardFinalValidationIssues, crossChapterDuplicateSectionIssues } from './documentFinalValidation';
 import { fixEmptyScoringResponses, fixScoringRequirementResponses } from './tenderRequirements';
 import { buildDocumentProfileReport } from './documentProfiles';
@@ -27,6 +27,7 @@ import { buildDocumentQualityReport, qualityReportIssues } from './documentQuali
 import { benchmarkGeneratedMarkdown } from './benchmarkQuality';
 import { buildRepairStrategies, repairStrategyIssues } from './documentRepairStrategies';
 import { repairChapterByQuality } from './rolePipeline';
+import { enforcePlannedSectionCompleteness } from './globalQualityGates';
 import { buildDocumentReviewChecklist } from './documentReviewChecklist';
 import { collectValidationIssueGroups } from './documentQualityPipeline';
 import { DOCUMENT_WORKFLOW_VERSION } from './documentWorkflowVersion';
@@ -39,7 +40,7 @@ import { formalTextGateIssues } from './agentWorkflow';
 import { displayStage, upsertProgressStage } from './progress';
 import { buildValidationIssues } from './chapterGeneration';
 import { chapterSectionFactUsageIssues } from './chapterReview';
-import { factCoverageIssues, factsWithEvidenceSource, criticalSectionBlockerLine, callBreakdownTopDetails, callBreakdownTopSummary, finalizeChapterContentQuality, finalizeFinalMarkdownStructure, normalizeProjectBasicInfoTable, partialChapterStatus, phaseWaterfallDetails, projectBasicPlaceholderIssues, slowMetricSummary, uncoveredImportantFacts, validateDraft } from './documentGeneratorHelpers';
+import { factCoverageIssues, factsWithEvidenceSource, criticalSectionBlockerLine, callBreakdownTopDetails, callBreakdownTopSummary, finalizeChapterContentQuality, finalizeFinalMarkdownStructure, normalizeProjectBasicInfoTable, partialChapterStatus, phaseWaterfallDetails, projectBasicPlaceholderIssues, slowMetricSummary, stripAtlasReferencePhrases, uncoveredImportantFacts, validateDraft } from './documentGeneratorHelpers';
 import { constructionOrgProfessionalAuditIssues } from './constructionOrgAudit';
 import { buildProfessionalScoreReport } from './documentProfessionalScore';
 import { recordDeterministicFixCases } from './workflowCaseLog';
@@ -56,30 +57,63 @@ function sanitizeContaminationCandidates(markdown: string, summary: any) {
   }, markdown);
 }
 
-/** 施组标准术语补写句：每句覆盖一组模板专业规则必要术语，仅当组内任一术语缺失时整句补写 */
-const REQUIRED_TEXT_SUPPLEMENTS: Array<{ words: string[]; sentence: string }> = [
-  { words: ['编制依据', '国家法律法规', '地方法规'], sentence: '本施工组织设计的编制依据包括国家法律法规、地方法规及现行工程建设标准、规范' },
-  { words: ['工程量清单', '项目特征', '工程量', '图纸设计说明'], sentence: '项目特征与工程量以招标工程量清单及图纸设计说明为准' },
-  { words: ['劳动力计划', '主要施工材料', '主要施工机械'], sentence: '劳动力计划、主要施工材料、主要施工机械按施工进度动态配置，详见本方案各保障章节' },
+/** 施组标准术语补写条目：每条覆盖一组模板专业规则必要术语，仅当组内任一术语缺失时整条补写。
+ * 必须以编制依据正式条目形式注入——禁止「补充说明」标题与「详见本方案各保障章节」类元话语
+ * （丰乐镇第 3 轮实测：「**编制依据补充说明**：…按施工进度动态配置，详见本方案各保障章节」
+ * 元话语块进入正式正文被判定为内容污染；术语缺失时以正式条目兜底，保证门禁词形同时不污染正文） */
+const REQUIRED_TEXT_SUPPLEMENTS: Array<{ words: string[]; basisItem: string }> = [
+  { words: ['编制依据', '国家法律法规', '地方法规'], basisItem: '本施工组织设计的编制依据包括国家法律法规、地方法规及现行工程建设标准、规范' },
+  { words: ['工程量清单', '施工图纸', '分部分项', '项目特征', '规格', '工程量', '图纸设计说明'], basisItem: '- 工程量清单及施工图纸：本项目分部分项工程量清单（项目特征、规格及工程量）与施工图纸设计说明；' },
+  { words: ['劳动力计划', '主要施工材料', '主要施工机械'], basisItem: '- 施工组织设计文件：本工程劳动力计划、主要施工材料与主要施工机械配置计划；' },
 ];
+
+/** 编制依据类别段落标题行与五类条目（总控提示词总纲要求按类别列出）：招标文件及补疑补遗/国家法律法规/
+ * 国家行业地方现行规范标准/地方法规规章/企业管理体系五类；资料未明确法规编号时只写类别
+ * 不编造法规名（总纲口径），不把工程量清单、施工图纸内容搬入编制依据正文 */
+const REQUIRED_BASIS_CATEGORIES_TITLE = '**编制依据**：本施工组织设计的编制依据按以下类别列出：';
+const REQUIRED_BASIS_CATEGORIES_ITEMS = [
+  '- 招标文件及补疑补遗：本项目招标文件及招标补疑、澄清文件（招标文件与澄清、修正文件不一致的，以澄清、修正文件为准）；',
+  '- 国家法律法规：与工程建设相关的国家现行法律、行政法规；',
+  '- 国家/行业/地方现行规范标准：与本工程相关的国家、行业及地方现行施工验收规范、标准与规程；',
+  '- 地方法规规章：工程所在地现行地方性法规与政府规章；',
+  '- 企业管理体系：公司质量、环境、职业健康安全管理体系文件及企业施工工艺标准。',
+];
+
+/** 编制依据五类清单的类别标记词（≥3 类命中即认定类别已列出；笼统句只含「国家法律法规/地方法规」
+ * 两个词形无法命中「地方法规规章」精确词形，不满足类别清单口径） */
+const BASIS_CATEGORY_TERMS = ['招标文件及补疑补遗', '国家法律法规', '现行规范标准', '地方法规规章', '企业管理体系'];
 
 /** 模板专业规则必要术语（编制依据/主要施工材料等施组标准术语）缺失时确定性补写：
  * Writer 只收到“质量控制点”弱建议，常遗漏这些术语；逐句补写保证术语出现在正文，不依赖 LLM 自觉 */
-function supplementRequiredTexts(markdown: string, template: DocumentTemplate): string {
+export function supplementRequiredTexts(markdown: string, template: DocumentTemplate): string {
   const missingRequiredTexts = autoSpecGateRequiredTexts(template).filter(item => !markdown.includes(item));
-  if (missingRequiredTexts.length === 0) return markdown;
-  const supplementSentences = REQUIRED_TEXT_SUPPLEMENTS
+  // 编制依据类别段落注入与术语缺失解耦（丰乐镇第十二轮实测）：LLM 写「编制依据」标题或只写
+  // 「包括国家法律法规、地方法规及现行规范」一句笼统话时，missingRequiredTexts 已为空 → 原逻辑
+  // 静默漏注入，总纲要求的五类清单全丢；类别词 ≥3 命中才认定类别已列出
+  const basisCategoryHit = BASIS_CATEGORY_TERMS.filter(term => markdown.includes(term)).length;
+  const basisTermRelevant = missingRequiredTexts.includes('编制依据') || missingRequiredTexts.includes('国家法律法规') || missingRequiredTexts.includes('地方法规') || markdown.includes('编制依据');
+  const needBasisBlock = basisCategoryHit < 3 && basisTermRelevant;
+  if (missingRequiredTexts.length === 0 && !needBasisBlock) return markdown;
+  const supplementItems = REQUIRED_TEXT_SUPPLEMENTS
+    // 类别段落已覆盖编制依据术语时，跳过原单句兜底（避免与类别段落重复）
+    .filter(group => (needBasisBlock ? group.words[0] !== '编制依据' : true))
     .filter(group => group.words.some(word => missingRequiredTexts.includes(word)))
-    .map(group => group.sentence);
-  if (supplementSentences.length === 0) return markdown;
-  const supplement = `\n\n**编制依据补充说明**：${supplementSentences.join('；')}。\n`;
-  const anchor = /^(?:###|####)\s+(?:[\d.]+[\s\u00a0]*)?编制说明与工程概况$/mu.exec(markdown);
+    .map(group => group.basisItem);
+  if (supplementItems.length === 0 && !needBasisBlock) return markdown;
+  const items = [...(needBasisBlock ? REQUIRED_BASIS_CATEGORIES_ITEMS : []), ...supplementItems];
+  // 条目以「；」为内部连接符，整块末尾统一句号收束（五类最后一条已句号时不命中替换）
+  const supplement = needBasisBlock
+    ? [REQUIRED_BASIS_CATEGORIES_TITLE, ...items].join('\n')
+    : items.join('\n').replace(/；$/u, '。');
+  // 锚点优先「编制依据」小节标题（LLM 已写标题但类别缺失时注入标题下），退「编制说明与工程概况」小节
+  const anchor = /^(?:###|####)\s+(?:[\d.]+[\s\u00a0]*)?编制依据$/mu.exec(markdown)
+    ?? /^(?:###|####)\s+(?:[\d.]+[\s\u00a0]*)?编制说明与工程概况$/mu.exec(markdown);
   if (anchor) {
-    // 注入到“编制说明与工程概况”小节标题行之后
+    // 注入到编制依据/编制说明小节标题行之后
     const insertAt = markdown.indexOf('\n', anchor.index) + 1;
-    return `${markdown.slice(0, insertAt)}${supplement}${markdown.slice(insertAt)}`;
+    return `${markdown.slice(0, insertAt)}${supplement}\n\n${markdown.slice(insertAt)}`;
   }
-  return `${markdown.replace(/\s+$/u, '')}\n${supplement}`;
+  return `${markdown.replace(/\s+$/u, '')}\n\n${supplement}`;
 }
 
 /** 按表头第一列锚点从 markdown 中提取缺陷表格块（表头行到最后一个连续表格行；找不到返回空串） */
@@ -335,21 +369,24 @@ async function buildFullValidationIssues(input: {
   factTokenScopeClassifier: FactTokenScopeClassifier;
   /** 专业深度语义分类器（round-14）：章节专业深度/缺项/套话/闭环/依赖的语义判定（本地 bge 恒可用） */
   professionalDepthClassifier: ProfessionalDepthClassifier;
+  /** 一体化蓝图参数桶（生成前锁定口径）：蓝图引用冲突终检兑底实时重跑（替除生成阶段全卷快照） */
+  blueprintData?: BlueprintData;
 }): Promise<ValidationIssue[]> {
-  const { documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier } = input;
+  const { documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData } = input;
   return collectValidationIssueGroups(
     applySpecGateRules(documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template.projectBindings || [], promptBindings),
     validateDraftWithAutoSpec({ markdown: finalMarkdown, spec: documentSpec, summary: projectMaterialSummary }),
     validateFactConsistency({ markdown: finalMarkdown, facts: structuredFacts, summary: projectMaterialSummary, profile: domainProfile }),
     validateProjectContamination(finalMarkdown, projectMaterialSummary),
     projectBasicPlaceholderIssues(finalMarkdown, structuredFacts),
-    await buildStandardFinalValidationIssues({ markdown: finalMarkdown, chapters: finalChapterDrafts, factsModel, template, promptBindings, promptDocumentRules, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier }),
+    await buildStandardFinalValidationIssues({ markdown: finalMarkdown, chapters: finalChapterDrafts, factsModel, template, promptBindings, promptDocumentRules, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData }),
     factCoverageIssues(finalMarkdown, [...structuredFacts, ...factsModel.preciseFacts], { maxIssues: 30 }).map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const, suggestion: '建议后续优化事实自然落位；导出阶段不因未落位的引用型或可优化事实阻断。' })),
     pageTargetIssues(template.generationSettings || template.exportSettings, finalMarkdown).filter(issue => !(documentBudget.minPages && /低于目标页数/u.test(issue.message))),
     documentBudgetIssues(documentBudget, finalMarkdown),
     plannedStructureIssues(finalMarkdown, template),
     formalTextGateIssues(finalMarkdown),
     await internalTerminologyAnchorIssues(finalMarkdown),
+    headingUncoveredEngineeringItems(finalMarkdown),
     finalMarkdown.includes('WRITER_MISSING_SECTION') || finalMarkdown.includes('Writer 未完成') ? [{ level: 'error' as const, severity: 'blocker' as const, category: 'structure' as const, owner: 'system' as const, message: '最终正文仍包含未完成小节标记', suggestion: '必须重新补写对应小节并删除 WRITER_MISSING_SECTION/Writer 未完成。' }] : [],
     criticalSectionDepthIssues(finalChapterDrafts),
     criticalSectionFactDensityIssues(finalChapterDrafts),
@@ -436,6 +473,7 @@ export interface FinalizeGenerationInput {
   documentBudget: any; generationStrategy: any; readiness: any; indexHealth: any; promptPlan: any;
   // ── 提示词与规则 ──
   promptTexts: string; reviewPromptTexts: string;
+  repairPromptTexts: string;
   factExtractionPromptTexts: string;
   promptBindings: any[]; promptDocumentRules: any;
   // ── 项目上下文 ──
@@ -463,8 +501,8 @@ export interface FinalizeGenerationInput {
   factTokenScopeClassifier: FactTokenScopeClassifier;
   /** 专业深度语义分类器（round-14，生成前预构建）：章节专业深度/缺项/套话/闭环/依赖语义判定（本地 bge 恒可用） */
   professionalDepthClassifier: ProfessionalDepthClassifier;
-  /** B1 计划数据主表（生成前锁定口径）：交付前确定性清洗的节点工期/机械台数权威 */
-  planDataMaster?: PlanDataMaster;
+  /** 一体化蓝图参数桶（生成前锁定口径）：交付前确定性清洗的节点工期/机械台数/决策锁权威（三期蓝图接管） */
+  blueprintData?: BlueprintData;
 }
 
 export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<GeneratedDocumentDraft> {
@@ -472,8 +510,8 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     chapterDraftsByOrder, chapterGenerationStagesByOrder, chapterGenerationStages, effectiveChapters, template, allEvidence, projectMaterialScope,
     progressStages, documentSpec, projectMaterialSummary, domainProfile, documentBudget,
     input, generationDiagnostics, promptTexts, promptBindings, promptDocumentRules, projectRoot, projectId, readiness,
-    factExtractionPromptTexts, hasExplicitOutline, missingItems, retrievalCoverageReports, failedChapterMessages,
-    webResearchReport, indexHealth, agentWorkflow, globalConsistencyIssues, scopeConflicts, writingTaskBrief, evaluationCriteriaItems, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, planDataMaster, emitProgress, withProgressHeartbeat,
+    factExtractionPromptTexts, hasExplicitOutline, missingItems, retrievalCoverageReports, failedChapterMessages, repairPromptTexts,
+    webResearchReport, indexHealth, agentWorkflow, globalConsistencyIssues, scopeConflicts, writingTaskBrief, evaluationCriteriaItems, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData, emitProgress, withProgressHeartbeat,
   } = p;
   const { signal, requirement } = input;
 
@@ -629,7 +667,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
 
   // 修复后重算问题组会重新计算，修复基线只保留基础累计问题，避免重复累加
   const baseValidationIssues = validationIssues;
-  validationIssues = await buildFullValidationIssues({ documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier });
+  validationIssues = await buildFullValidationIssues({ documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData });
 
   let qualityBundle = await buildQualityReportBundle({ finalChapterDrafts, effectiveChapters, factsModel, allEvidence, finalMarkdown, validationIssues, retrievalCoverageReports, includeRetrievalCoverage: true, template });
   let { knowledgeCoverage, factTraces, chapterCoverage, qualityReport, repairStrategies, finalExportGate } = qualityBundle;
@@ -648,8 +686,13 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     // B5：确定性删除已生效的旧 issue 快照必须剔除——交付前 strip 删除复述句/内部术语后，
     // 旧快照残留会让门禁虚报已消除缺陷（历史缺陷：正文已删「本项目为…」但门禁仍报概况复述）
     && !(/概况段跨章复述/u.test(issue.message) && !/本项目为|本工程为|该项目为|该工程为/u.test(finalMarkdown))
-    && !(/后台内部术语|后台内部话术/u.test(issue.message) && !/工作包|事实卡|事实主表|后台数据库|落位|峰值口径|控制口径|数据口径/u.test(finalMarkdown)));
-    validationIssues = await buildFullValidationIssues({ documentSpec, validationIssues: repairedValidationBase, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier });
+    && !(/后台内部术语|后台内部话术/u.test(issue.message) && !/工作包|事实卡|事实主表|后台数据库|落位|峰值口径|控制口径|数据口径/u.test(finalMarkdown))
+    // B8：生成阶段全卷快照消息（「跨章一致性复核/数据一致性复核」前缀）在重算时全部剔除——
+    // 规格错位/表格重复/蓝图引用冲突等检查器已在 buildStandardFinalValidationIssues 中对最新 finalMarkdown 实时重跑，
+    // 旧快照保留会导致已修复缺陷继续扣分（第五轮实测：终稿垫层全 C20 仍报 C30 错位、
+    // 塑料管已拆 DN200 污水管 8205.53m / DN110 雨水管 7525.01m 两口径仍报单一蓝图冲突）
+    && !/^(?:跨章一致性复核|数据一致性复核)：/u.test(issue.message));
+    validationIssues = await buildFullValidationIssues({ documentSpec, validationIssues: repairedValidationBase, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData });
     // 评审轮残留问题并入校验组（在导出门禁计算前），重算后 finalExportGate 即包含评审轮硬阻断
     validationIssues = [...validationIssues, ...qingtianReviewBlockingIssues];
     qualityBundle = await buildQualityReportBundle({ finalChapterDrafts, effectiveChapters, factsModel, allEvidence, finalMarkdown, validationIssues, retrievalCoverageReports, includeRetrievalCoverage: false, template });
@@ -830,7 +873,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 1.3 语义矛盾检测（决策锁"实体-选择"冲突，塔吊 vs 施工电梯类无数值矛盾）：与写作期注入同批输入
   // （623 行事实池三元组 + 同批 allEvidence）确定性重建决策锁作比对基准，检出转 blocker 并入既有修复通道；
   // 复检走统一注册表 semantic-choice 条目（与检测同源），一律不留 env 回退开关
-  const decisionLockEntries = buildDecisionLock({ facts: [...localFacts, ...projectBasicFacts, ...preciseFacts], evidence: allEvidence });
+  const decisionLockEntries = extractDecisionLockEntries({ facts: [...localFacts, ...projectBasicFacts, ...preciseFacts], evidence: allEvidence });
   if (decisionLockEntries.length > 0) {
     validationIssues = [...validationIssues, ...semanticChoiceConflicts(finalMarkdown, decisionLockEntries).map(conflict => semanticChoiceConflictIssue(conflict))];
   }
@@ -858,6 +901,9 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   let stage5LaborFixCount = 0;
   let stage5SelfFixCount = 0;
   let stage5EmptyRespCount = 0;
+  let stage5AtlasRefCount = 0;
+  let stage5MetaFixCount = 0;
+  let stage5FormulaFixCount = 0;
   for (const chapter of finalChapterDrafts) {
     // 节点内闭环（丰乐镇第九轮方案）：每个确定性修复器修复后重跑自身直至零命中，
     // 修复完成才进入下一修复器——替代“单遍修复后无条件走下一节点”的直线模式
@@ -871,19 +917,29 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     if (finishFix.fixedCount > 0) { chapter.content = finishFix.markdown; stage5FinishFixCount += finishFix.fixedCount; }
     const laborFix = runFixUntilClean(md => { const r = fixLaborPeakConflict(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (laborFix.fixedCount > 0) { chapter.content = laborFix.markdown; stage5LaborFixCount += laborFix.fixedCount; }
+    // F17/F18 元话语声明句与公式形态残留（远端客户反馈「公式直接输入正文」根治）：
+    // 声明≠数据、公式≠值——交付前确定性清洗，与检测器同源同模式（清洗后重算校验组）
+    const metaFix = runFixUntilClean(md => { const r = fixMetaDiscourseDeclarations(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
+    if (metaFix.fixedCount > 0) { chapter.content = metaFix.markdown; stage5MetaFixCount += metaFix.fixedCount; }
+    const formulaFix = runFixUntilClean(md => { const r = fixFormulaResidues(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
+    if (formulaFix.fixedCount > 0) { chapter.content = formulaFix.markdown; stage5FormulaFixCount += formulaFix.fixedCount; }
     const selfFix = runFixUntilClean(md => { const r = fixSelfUnderminingCandidates(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (selfFix.fixedCount > 0) { chapter.content = selfFix.markdown; stage5SelfFixCount += selfFix.fixedCount; }
     const emptyRespFix = runFixUntilClean(md => { const r = fixEmptyScoringResponses(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
     if (emptyRespFix.fixedCount > 0) { chapter.content = emptyRespFix.markdown; stage5EmptyRespCount += emptyRespFix.fixedCount; }
+    // 图集/国标做法编号引用清洗（丰乐镇第 3 轮实测）：LLM 编造「做法执行15D501图集」类
+    // 资料未提供的图集引用，短语级删除保留句子主体；检测定位=修复定位同源，章节级原地修
+    const atlasRefFix = runFixUntilClean(md => { const r = stripAtlasReferencePhrases(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; }, chapter.content, 2);
+    if (atlasRefFix.fixedCount > 0) { chapter.content = atlasRefFix.markdown; stage5AtlasRefCount += atlasRefFix.fixedCount; }
   }
-  if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5LaborFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0) {
+  if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5LaborFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0 || stage5AtlasRefCount > 0 || stage5MetaFixCount > 0 || stage5FormulaFixCount > 0) {
     finalMarkdown = rebuildFinalMarkdownFromChapters();
-    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'deterministic-surface-fix', status: 'success', message: `交付前确定性清洗：跨章表格去重 ${stage5TableDup.removedCount} 行、断行残片合并 ${stage5ResidueCount} 处、装饰层厚度修复 ${stage5FinishFixCount} 处、劳动力峰值统一 ${stage5LaborFixCount} 处、自伤句式改写 ${stage5SelfFixCount} 处、空响应句改写 ${stage5EmptyRespCount} 处、叠词收敛` }, { subtitle: '交付前确定性清洗' }));
+    upsertProgressStage(progressStages, displayStage({ type: 'validation', roleId: 'deterministic-surface-fix', status: 'success', message: `交付前确定性清洗：跨章表格去重 ${stage5TableDup.removedCount} 行、断行残片合并 ${stage5ResidueCount} 处、装饰层厚度修复 ${stage5FinishFixCount} 处、劳动力峰值统一 ${stage5LaborFixCount} 处、元话语声明清洗 ${stage5MetaFixCount} 处、公式形态清洗 ${stage5FormulaFixCount} 处、自伤句式改写 ${stage5SelfFixCount} 处、空响应句改写 ${stage5EmptyRespCount} 处、图集引用清洗 ${stage5AtlasRefCount} 处、叠词收敛` }, { subtitle: '交付前确定性清洗' }));
   }
   const stage5MarkdownFix = await applyDeterministicConsistencyFixesToMarkdown(finalMarkdown, factsModel, scopeConflicts);
   if (stage5MarkdownFix.fixedCount > 0) finalMarkdown = stage5MarkdownFix.markdown;
   // 跨章数值矛盾（劳动力峰值/节点工期/材料设备数量）确定性定点替换：检测定位=修复定位同源
-  const stage5NumericFix = applyNumericConsistencyDeterministicFixes(finalMarkdown, { scheduleAuthority, assemblyRateAuthority, ...planDataMasterAuthorities(planDataMaster), supportAuthority });
+  const stage5NumericFix = applyNumericConsistencyDeterministicFixes(finalMarkdown, { scheduleAuthority, assemblyRateAuthority, ...blueprintPlanAuthorities(blueprintData), supportAuthority });
   if (stage5NumericFix.fixedCount > 0) finalMarkdown = stage5NumericFix.markdown;
   if (stage5ChapterFix.fixedCount > 0 || stage5MarkdownFix.fixedCount > 0 || stage5NumericFix.fixedCount > 0) {
     await recomputeFinalValidationBundle();
@@ -930,6 +986,18 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     // 无修复但评审轮检出残留问题：不重建正文，仅重算校验组让门禁消费评审轮阻断
     await recomputeFinalValidationBundle();
   }
+  // 缺节/空小节补写终兜底（丰乐镇第 2 轮实测）：全维度评审轮 patch 重写章节可能删除规划小节
+  // （工程概况-项目管理组织机构与职责、施工总平面布置图-施工总平面布置原则与分区管理/
+  // 竣工清理验收移交与保修 3 处缺节），生成期 enforcePlannedSectionCompleteness 早于评审轮覆盖不到；
+  // 交付前对最终成稿再跑一次补写收口（缺节与纯表格空小节同口径，单轮失败即放弃，残留转门禁）
+  const plannedSectionFixFinal = await enforcePlannedSectionCompleteness({
+    chapterDraftsFinal: finalChapterDrafts, template, repairPromptTexts,
+    requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat,
+  });
+  if (plannedSectionFixFinal.plannedSectionFixApplied) {
+    finalMarkdown = rebuildFinalMarkdownFromChapters();
+    await recomputeFinalValidationBundle();
+  }
   // 4.17.8 交付前最终修复轮整体删除：其 12 类检测器与 blocker 修复循环 code map 全覆盖（检测侧单源），
   // 轮末重审/升级重试均属修复主力军化冗余——每缺陷 blocker 轮单次修复后失败即放弃，
   // 残留问题由导出门禁报告（不再进入 LLM 修复）；交付前确定性清洗（商务句/表格空单元格/数值定点）保留在下方。
@@ -958,17 +1026,33 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 劳动力多口径/自伤句式/空响应句，一并纳入评审轮后兜底，与 stage5 链同源。
   // 第九轮链级收敛：单遍兜底升级为链循环——任一修复器有新命中即整链重跑，
   // 修复器互相引入的问题在链中收敛，不再依赖“最后一个节点单遍修所有”的直线兜底。
+  // F4（丰乐镇第五轮实测）：H4-H3 同名标题与「落位」内部术语标题修复轮 patch 覆盖不到，
+  // 接入链循环确定性修复（同名 H4 追加「要点」、标题内「落位」→「落实」，与检测器同口径）
   const surfaceFixRound2Result = runDeterministicChainUntilConverged([
     md => { const r = mergeTableLineResidues(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
     md => { const next = collapseRepeatedWords(md); return { markdown: next, fixedCount: next === md ? 0 : 1 }; },
     md => { const r = stripDuplicateTables(md); return { markdown: r.markdown, fixedCount: r.removedCount }; },
     md => { const r = fixFinishThickness(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
     md => { const r = fixLaborPeakConflict(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    // F17/F18 评审轮后兜底（与 stage5 链同源）：评审轮 patch 会再引入元话语声明句与公式形态
+    md => { const r = fixMetaDiscourseDeclarations(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    md => { const r = fixFormulaResidues(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
     md => { const r = fixSelfUnderminingCandidates(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
     md => { const r = fixEmptyScoringResponses(md); return { markdown: r.markdown, fixedCount: r.fixedCount }; },
+    md => dedupeTertiaryH4Titles(md),
+    md => fixInternalTermHeadingPhrases(md),
   ], finalMarkdown, 3);
   if (surfaceFixRound2Result.markdown !== finalMarkdown) {
     finalMarkdown = surfaceFixRound2Result.markdown;
+    await recomputeFinalValidationBundle();
+  }
+  // 内部术语句子确定性删除兜底（round-19 R3 已实现未接线，丰乐镇第 2 轮实测：
+  // 「落位」「控制口径」「峰值口径」「数据口径」经 LLM 修复轮仍残留 4 词，检测器报 error blocker；
+  // 交付前接入与检测器同源同阈值的整句删除（L1 精确词 + L3 语义锚点，标题/表格/目录行豁免），
+  // 删除后重算校验组，旧 issue 快照由 recompute 内部口径剔除）
+  const strippedTerminologyMarkdown = await stripInternalTerminologySentences(finalMarkdown);
+  if (strippedTerminologyMarkdown !== finalMarkdown) {
+    finalMarkdown = strippedTerminologyMarkdown;
     await recomputeFinalValidationBundle();
   }
   // B2 目录与正文一致性兜底：目录按最终正文 H2/H3 实际结构重建（fixTocFromBody 无改动时零成本），
@@ -994,14 +1078,8 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   const templatingReview = qualityReport.templating
     ? await withProgressHeartbeat(() => reviewTemplatingSemantics({ templating: qualityReport.templating!, markdown: finalMarkdown, diagnostics: generationDiagnostics, signal }))
     : { issues: [], reviewed: false };
-  const finalStages = [...executionStages, ...finalGateRepairStages].map(stage => {
-    if (stage.type === 'validation' && stage.roleId === 'document-workflow') return { ...stage, status: blockingCount > 0 ? 'failed' as const : 'success' as const, message: `阻断 ${blockingCount}，问题 ${validationIssues.length}` };
-    if (stage.type === 'export_ready') return { ...stage, status: finalExportGate.passed ? 'success' as const : 'failed' as const, message: finalExportGate.passed ? '已准备好导出 Markdown/HTML/DOCX/PDF' : '导出门禁未通过，请完成阻断问题修复后再导出' };
-    if (finalExportGate.passed && stage.status === 'failed' && /^agent-(?:reviewer|repairer)-/u.test(stage.roleId)) {
-      return { ...stage, status: 'skipped' as const, message: `${stage.message || '章节中间审查失败'}；最终门禁已通过，历史中间态已归档` };
-    }
-    return stage;
-  });
+  // 阶段展示终态直接汇总（历史 export_ready/document-workflow/agent-reviewer-repairer 状态修正分支已随旧管线删除）
+  const finalStages = [...executionStages, ...finalGateRepairStages];
   // 门禁 details 全量持久化：阻断问题逐条落盘不截断（第九次回归实测 39 条阻断只落 12 条，
   // 生成后审查无法按执行阶段复盘全部阻断根因；检测器侧已各自限幅、阻断总数有界，无膨胀风险）
   finalStages.push(displayStage({ type: 'validation', roleId: 'agent-final-gate', status: finalExportGate.passed ? 'success' : 'failed', message: finalExportGate.passed ? 'Agent 最终门禁通过' : `Agent 最终门禁阻断 ${blockingCount} 个问题`, details: finalExportGate.blockingIssues.map(issue => issue.message) }, { subtitle: 'Agent 最终门禁' }));

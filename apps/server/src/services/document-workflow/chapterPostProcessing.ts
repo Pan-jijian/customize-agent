@@ -1,6 +1,6 @@
 import type { DocumentEvidence } from './types';
 import { cleanEvidenceText } from './evidence';
-import { extractBillItemFacts, extractStructuredTables } from './factsModel';
+import { containsForeignProject, extractBillItemFacts, extractStructuredTables, projectPlaceName } from './factsModel';
 import { documentTextLength } from './budget';
 import { displayChapterTitle } from './outline';
 import { hasProcessSequenceExpression, normalizeSubsectionTitleForDedup, workPackageContentElementsComplete } from './utils';
@@ -287,6 +287,19 @@ export function parseMajorConstructionPackages(projectContext: string, evidence:
 // LLM 自由发挥时「项目主要施工内容」小节两版波动（11:36 有 6 个专业工程小节，12:29 被重难点表占位）；
 // 骨架锁定后小节内部 #### 标题由系统从资料识别的工作包清单锁定，波动源被确定性消除。
 
+/** 列举尾巴清洗（三期验收实测）：清单/范围名「标识及其他项目等景观工程」「生态处理等污水工程」
+ * 含“等”列举残留（“等”后才是真正工程名），LLM 面对带尾巴的标题无从写“作业对象与工程量”概况段 → 三要素丢两要素；
+ * “等”后仍有 ≥3 字时取“等”后部分；“等”后尾巴太短（“生态池等工程”类总称）且“等”前 ≥3 字时取“等”前部分；
+ * 否则原样；“等电/等级”类术语（“等”前为电、“等”后为级）不是列举残留，不清洗。
+ * 必须位于 WHITE 过滤之后（“生态池等工程”依赖“工程”过白名单）且「及其他」碎片过滤之前（清洗后碎片随之消失） */
+function stripEnumTail(name: string): string {
+  const match = /^(.{1,18}?)(等)([\s\S]{2,})$/u.exec(name);
+  if (!match || match[1] === undefined || match[3] === undefined) return name;
+  if (/电$/u.test(match[1]) || /^级/u.test(match[3])) return name;
+  if (match[3].length >= 3) return match[3];
+  return match[1].length >= 3 ? match[1] : name;
+}
+
 /**
  * 招标范围确定性提取专业工程名（骨架锁定兑底通道）：PDF 清单类项目（如合肥师范）没有 Excel 目录结构，
  * 工作包图谱为空，但招标文件「招标范围」条款列明专业工程清单（顿号分隔），是权威的骨架来源；
@@ -295,10 +308,26 @@ export function parseMajorConstructionPackages(projectContext: string, evidence:
 export function scopeEngineeringNames(projectContext: string, evidence: DocumentEvidence[]): string[] {
   const texts = [projectContext, ...evidence.map(item => item.content)].filter(Boolean);
   const WHITE = /工程|安装|系统|通风|空调|智能化|装修|幕墙|屋面|土方|基坑|地基|基础|结构|电气|给排水|消防|防水|设备|管网|道路|景观|绿化|公厕|厕所|过路涵|涵|清淤|沟塘|塘|小菜园|菜园|排水沟|水沟|花池|树池|挡墙|护栏/u;
+  // P3.2 项目范围隔离：上下文/证据混入其他项目资料目录时（knowledgeBase 多项目目录实测），
+  // 「招标范围」窗口按句切分只保留当前项目段——窗口内含其他项目名短语（地名+项目形态）的句不参与工程名提取
+  const currentPlace = (() => {
+    for (const text of texts) {
+      const match = /(?:项目名称|工程名称)[：:\s为是]+([^\n。；;]{4,120})/u.exec(text);
+      if (!match) continue;
+      const place = projectPlaceName(match[1]);
+      if (place) return place;
+    }
+    return undefined;
+  })();
   for (const text of texts) {
     const idx = text.indexOf('招标范围');
     if (idx < 0) continue;
-    const window = text.slice(idx, idx + 600);
+    let window = text.slice(idx, idx + 600);
+    if (currentPlace) {
+      const sentences = window.split(/[。；;\n]/u).map(sentence => sentence.trim()).filter(Boolean);
+      const kept = sentences.filter(sentence => !containsForeignProject(sentence, currentPlace));
+      if (kept.length > 0) window = kept.join('。');
+    }
     // 剥离“招标范围为建设规模内的全部内容，具体内容详见图纸及清单。招标内容包括但不限于”类前导语；
     // 无“包括但不限于”时退化为剥离“招标范围：”前缀；再剥“……等图纸及清单范围内所有工程”类尾部噪声
     let listText = window;
@@ -314,6 +343,10 @@ export function scopeEngineeringNames(projectContext: string, evidence: Document
       .map(item => cleanMajorConstructionFact(item).replace(/["“”']/gu, ''))
       .filter(item => item.length >= 3 && item.length <= 20)
       .filter(item => WHITE.test(item))
+      // 列举尾巴清洗：WHITE 之后（依赖原文含“工程/景观”类词过白名单）、反例之前
+      // （「标识及其他项目等景观工程」→「景观工程」后才不命中「及其他」碎片过滤）
+      .map(item => stripEnumTail(item))
+      .filter(item => item.length >= 3 && item.length <= 20)
       // 反例过滤（轮4 实测）：招标范围窗口内的写作约束文本（工程量/系统约束——仅指导写作/不得编造等）
       // 含「工程/系统」等白名单词会被误提为工作包名，块质检强制模型输出垃圾标题 → 章失败；
       // 约束性文本与专业工程名词汇特征互斥（约束/不得/仅指导/集中交代/参数/数字/矛盾/工程量）
@@ -323,7 +356,12 @@ export function scopeEngineeringNames(projectContext: string, evidence: Document
       // 被误提为工作包名 → 块质检强制模型输出垃圾标题 → “缺工作包 vs 清单外”死循环章失败；
       // 谓词开头的碎片不是工程名，含“以下/以上/如下”的叙述残留一并过滤
       .filter(item => !/^(?:包括|涵盖|重点实施|实施|建设范围覆盖|本项目建设|主要包含|主要实施|具体包括|分别为|共计|包含|涉及)/u.test(item))
-      .filter(item => !/以下|以上|如下|详见|具体内容/u.test(item));
+      .filter(item => !/以下|以上|如下|详见|具体内容/u.test(item))
+      // 三期验收实测：「是否考虑现场道路」等招标答疑疑问句碎片（“是否”开头）含「道路」白名单词
+      // 被误提为工作包名 → 模型面对疑问句标题无从写“作业对象与工程量”概况段 → 三要素丢两要素；
+      // 「水沟及其他所有构筑物拆除」类含“及其他”的叙述组合不是独立工程名
+      .filter(item => !/^是否/u.test(item))
+      .filter(item => !/及其他|以及其他/u.test(item));
     const result: string[] = [];
     for (const item of items) {
       const compact = item.replace(/\s+/gu, '');
@@ -367,16 +405,21 @@ export function majorConstructionSkeletonNames(projectContext: string, evidence:
   const scopeNames = scopeEngineeringNames(projectContext, evidence);
   const billNames = billItemSkeletonNames(evidence);
   const merged: string[] = [];
-  const push = (name: string): boolean => {
+  const push = (rawName: string): boolean => {
+    const name = stripEnumTail(rawName.trim());
     const compact = name.replace(/\s+/gu, '');
     if (!compact) return false;
     // B7 统一工作包名合法性过滤（丰乐镇第七轮章失败实测）：图谱/范围/清单三来源均可能
     // 混入句子碎片与项目名，push 前统一拦截谓词开头碎片、含“以下/以上”的叙述残留、
     // 纯项目名形态（“XX建设项目”），保证骨架锁定与块质检清单不含垃圾标题；
     // 骨架名被全部过滤时 workPackageSkeletonTitles 返回空，骨架锁定自动回退软约束（安全兜底）
-    if (/^(?:包括|涵盖|重点实施|实施以下|建设范围覆盖|本项目建设|主要包含|主要实施|具体包括|分别为|共计|包含|涉及)/u.test(compact)) return false;
-    if (/以下|以上|如下|详见|具体内容/u.test(compact)) return false;
+    if (/^(?:包括|涵盖|重点实施|实施以下|建设范围覆盖|本项目建设|主要包含|主要实施|具体包括|分别为|共计|包含|涉及|是否)/u.test(compact)) return false;
+    if (/以下|以上|如下|详见|具体内容|及其他|以及其他/u.test(compact)) return false;
     if (/^\d{4}年度/u.test(compact)) return false;
+    // P2.7 图纸名残片过滤（P0 验收实测）：图签 OCR「工程名称终端--白水塘、双塘设计阶段
+    // 施工图」被图谱误认为工作包名 → 所有 division 块被强加「设计阶段施工图」骨架 → 章失败；
+    // 工作包名不可能含图纸名形态（施工图/平面图/图集等），含者必为图纸残片或叙述残留
+    if (/施工图|设计图|详图|平面图|剖面图|立面图|大样图|图集/u.test(compact)) return false;
     if (compact.length > 20) return false;
     if (merged.some(existing => {
       const existingCompact = existing.replace(/\s+/gu, '');
@@ -423,8 +466,8 @@ export function majorConstructionSkeletonNames(projectContext: string, evidence:
  * 示例数值仅示意写法，必须标注不得照抄（历史缺陷：示例数值跨项目串染）。
  * 同时附带否定性约束：禁止 Markdown 表格、禁止重难点表/节点计划表串入本小节。
  */
-export function workPackageSkeletonPrompt(projectContext: string, evidence: DocumentEvidence[], minCount = 3): string {
-  const names = majorConstructionSkeletonNames(projectContext, evidence);
+export function workPackageSkeletonPrompt(projectContext: string, evidence: DocumentEvidence[], minCount = 3, namesOverride?: string[]): string {
+  const names = namesOverride ?? majorConstructionSkeletonNames(projectContext, evidence);
   if (names.length < minCount) return '';
   const skeleton = names.map((name, index) => `#### ${index + 1} ${name}`).join('\n');
   return [
@@ -442,6 +485,23 @@ export function workPackageSkeletonPrompt(projectContext: string, evidence: Docu
 export function workPackageSkeletonTitles(projectContext: string, evidence: DocumentEvidence[], minCount = 3): string[] {
   const names = majorConstructionSkeletonNames(projectContext, evidence);
   return names.length >= minCount ? names : [];
+}
+
+/**
+ * P2.7 块级骨架名过滤（单要点分部块修复，P0 验收实测）：只保留与块要点标题互相包含的骨架名。
+ * 「主要施工方法」章分部块（subPoints 仅同名 1 个，如「小菜园」）原逻辑全量保留章级工作包骨架名
+ * （终端--白水塘、景观工程等）→ 每个分部块被要求写全章级工作包 → 与 coverageList「同名要点由
+ * H3 外壳承担」矛盾 → 两轮重试全灭 → 章失败。统一过滤后：单要点分部块匹配不到章级工作包名 →
+ * 空 → divisionPrompt 三段式接管；容器块 subPoints 已骨架展开（同源）→ 全量保留。
+ * 过滤后不足 minCount 视为无骨架可锁（与 workPackageSkeletonTitles 同口径）。
+ */
+export function matchBlockSkeletonNames(rawNames: string[], subPointTitles: string[], minCount = 3): string[] {
+  const matched = rawNames.filter(name => subPointTitles.some(title => {
+    const titleNorm = normalizeSubsectionTitleForDedup(title);
+    const nameNorm = normalizeSubsectionTitleForDedup(name);
+    return titleNorm.includes(nameNorm) || nameNorm.includes(titleNorm);
+  }));
+  return matched.length >= minCount ? matched : [];
 }
 
 /** 确定性剥离 Markdown 表格块（关键小节禁止表格承载正文）：删除整张表格行；表格前后独立空行同步清理 */
@@ -717,7 +777,10 @@ export function ensureGroupTertiaryShell(groupSections: string[], content: strin
     if (/项目主要施工内容/u.test(section)) continue;
     const escaped = section.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
     normalized = normalized.replace(new RegExp(`(^###\\s+(?:\\d+\\.\\d+\\s+)?${escaped}\\s*\\n)([\\s\\S]*?)(?=^###\\s+|^##\\s+|$)`, 'gmu'), (_match, heading: string, body: string) => {
-      if (/^####\\s+\\S+/mu.test(body)) return `${heading}${body}`;
+      if (/^####\s+\S+/mu.test(body)) return `${heading}${body}`;
+      // 修复注记：原实现为正则字面量双重转义（/^####\\s+\\S+/mu 匹配字面反斜杠+s），
+      // H4 检测恒 false，已有 H4 的组节块被误走同名分支空行归一；修正为单转义后
+      // 已有 H4 的组节块原样保留（与注释意图一致，避免成稿空行漂移）
       // 彻底修复同名结构：H3 标题已与组标题同名时，H3 即承担该小节标题，不再补同名 H4
       //（历史缺陷：补出「### X → #### X」同名外壳，诱发模型重复展开同名 H4 → 重复质检卡死 → 章阻断）
       const headingTitle = heading.replace(/^#{1,6}[\s]*/, '').replace(/^\d+(?:\.\d+)*[\s]*/, '').trim();

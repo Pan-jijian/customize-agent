@@ -152,17 +152,25 @@ async function executabilityScore(markdown: string, referenceCompleteBlocks?: nu
   return Math.round((density * 0.7 + fiveElementRate * 0.3) * 100);
 }
 
-/** 编制规范性：复用已有确定性检查消息（目录层级/表格规范/结构完整）
- * B7 口径修正（丰乐镇第七轮实测）：旧正则把「跨章一致性复核」（数据矛盾/规格错位/表格重复，
- * 属事实一致性维度）与「事实一致性冲突」（提取侧噪声，消息内含「招标图纸目录」等字样）
- * 全部计入编制规范性，每条 -8 导致 normalization 恒 0 分；收窄为纯格式结构类消息
- * （目录/层级/编号/表头/分隔线/页码/空小节/缺规划小节/小节只有标题），
- * 负向排除事实一致性/评分响应/参数密度/预案深度/属地适配/专业评分类消息。 */
+/** 编制规范性：只计结构/表格/格式类检查器产出。
+ * B7 口径修正（丰乐镇第七轮实测）：旧正则把「跨章一致性复核」「事实一致性冲突」等
+ * 全部计入编制规范性，每条 -8 导致 normalization 恒 0 分；
+ * B7 第二轮收口（丰乐镇实测）：① 无 category 历史消息仅按格式结构词计分，事实落位
+ * （「图纸目录」）类排除；② category='structure' 有历史兜底污染（classifyValidationIssue
+ * 把评分项响应/属地创优/工伤保险等合规类 error 也标 structure），必须叠加结构类消息特征
+ * 双重确认；③ table/format 均为确定性结构检查器产出，直接计分。 */
 const NORMALIZATION_ISSUE_RE = /目录|层级|编号|表格|表头|分隔线|页码|空小节|缺少规划小节|小节只有标题|缺节/u;
-const NORMALIZATION_EXCLUDE_RE = /跨章一致性复核|事实一致性冲突|事实冲突|评分项要求|可靠精确参数|应急预案|属地创优|工伤保险|专业评分|深度不足|事实反查|存在多个值/u;
+const NORMALIZATION_EXCLUDE_RE = /跨章一致性复核|事实一致性冲突|事实冲突|评分项要求|可靠精确参数|应急预案|属地创优|工伤保险|专业评分|深度不足|事实反查|存在多个值|已确认事实未在正文中落位|事实未在正文中落位/u;
+// category='structure' 双重确认的结构类消息特征（不含「标题」宽词，避免合规类长消息误中）
+const STRUCTURE_ISSUE_RE = /缺少规划小节|小节只有标题|空小节|只有标题或表格无正文|小节内容补写未完成|小节生成未达标|同名小节|H4 标题|正文缺少章节标题|小节正文过短/u;
 
-function normalizationScore(issues: ValidationIssue[]) {
-  const isNormalizationIssue = (issue: ValidationIssue) => !NORMALIZATION_EXCLUDE_RE.test(issue.message) && NORMALIZATION_ISSUE_RE.test(issue.message);
+export function normalizationScore(issues: ValidationIssue[]) {
+  const isNormalizationIssue = (issue: ValidationIssue) => {
+    if (issue.category === 'table' || issue.category === 'format') return true;
+    if (issue.category === 'structure') return STRUCTURE_ISSUE_RE.test(issue.message);
+    if (issue.category) return false;
+    return !NORMALIZATION_EXCLUDE_RE.test(issue.message) && NORMALIZATION_ISSUE_RE.test(issue.message);
+  };
   const normErrors = issues.filter(issue => issue.level === 'error' && isNormalizationIssue(issue)).length;
   const normWarnings = issues.filter(issue => issue.level === 'warning' && isNormalizationIssue(issue)).length;
   return Math.max(0, 100 - normErrors * 8 - Math.min(normWarnings * 3, 30));
