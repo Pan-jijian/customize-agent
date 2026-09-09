@@ -274,14 +274,6 @@ describe('G3 crossChapterSemanticDuplicateIssues 保留规则', () => {
 });
 
 describe('G4 crossChapterSemanticDuplicateIssues 开关与边界', () => {
-  it('G4 DOCUMENT_CROSS_CHAPTER_DEDUP=0 → 整体回退', async () => {
-    vi.stubEnv('DOCUMENT_CROSS_CHAPTER_DEDUP', '0');
-    const chapters = [
-      chapterOf('c1', '第六章 主要施工方案', PARA_WATER_1),
-      chapterOf('c2', '第七章 质量保证措施', PARA_WATER_2),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
   it('G4 单章单段 → 不报', async () => {
     const chapters = [chapterOf('c1', '第六章 主要施工方案', PARA_WATER_1)];
     expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);

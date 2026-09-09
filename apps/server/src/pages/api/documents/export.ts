@@ -1004,6 +1004,9 @@ function archiveExportReport(record: GeneratedDocumentRecord | null, format: Exp
       repairedCount: quality?.repairedCount,
       blockingCount: quality?.blockingCount,
       gatePassed: draft?.exportGate?.passed,
+      // P18/P19 归档：自动健康诊断告警 + 修复轮热力图（跨文档缺陷热力图分析数据源）
+      healthAlerts: draft?.reviewMetadata?.telemetry?.healthAlerts,
+      repairHeat: draft?.reviewMetadata?.telemetry?.repairHeat,
     };
     const history = [...(record.exportReports || []), report].slice(-20);
     updateGeneratedDocument(record.id, { exportReports: history }, projectRoot);

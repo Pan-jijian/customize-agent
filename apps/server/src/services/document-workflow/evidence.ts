@@ -5,6 +5,7 @@ import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
 import { EVIDENCE_PARAMETER_RE, HAS_QUANTIFIED_VALUE_RE } from './parameterPatterns';
 import { evidenceMatchesFact } from './factMatching';
 import { selectByScore, textImportanceScore } from './selection';
+import { tuningProfile } from './tuningProfile';
 
 export function readableSourceLabel(item: Pick<DocumentEvidence, 'roleId' | 'processingType' | 'sectionTitle'>, index = 0) {
   const role = item.processingType === 'drawing' || item.roleId?.includes('drawing') ? '视觉资料'
@@ -85,13 +86,28 @@ const T0_WHITELIST_FIELD_RE = /项目名称|工程名称|项目编号|招标项�
 /** T0 白名单行值截断上限（防「值截断回源」前的长叙述段型事实行占满 T0 预算） */
 const T0_WHITELIST_LINE_MAX_CHARS = 200;
 
-/** 2.1 单次写作调用证据注入硬顶（字符）：实测 L3 变化段占比 80.6%（目标 ≤50%），证据注入是 L3 大头 */
-const DOCUMENT_EVIDENCE_HARD_CAP_CHARS = 8000;
+/** 2.1 单次写作调用证据注入硬顶（字符）：实测 L3 变化段占比 80.6%（目标 ≤50%），证据注入是 L3 大头；
+ * B3 放宽至 12000：表格/清单类证据在 T1 内获 4000 字符独立配额（条目级事实数据不再被硬顶截断），
+ * 普通证据预算保持原 8000 口径——总硬顶放宽仅为承载表格独立通道，不放大普通证据体积 */
+const DOCUMENT_EVIDENCE_HARD_CAP_CHARS = 12000;
 
-/** T0 白名单瘦身开关（2.1）：默认开启；env DOCUMENT_T0_WHITELIST=0 回退 T0 全量保留并解除 8000 硬顶 */
-export function t0WhitelistEnabled(): boolean {
-  return process.env.DOCUMENT_T0_WHITELIST !== '0';
+/** B3 表格/清单类证据独立注入配额（字符）：清单表格是事实数据核心载体（条目动辄百行、行级数据长），
+ * 与普通文本证据共享预算时会被每文件 6 条上限与 65% 文本层份额截断；独立配额保证条目名/特征/
+ * 工程量/单位行原样进入写作输入，超出配额部分照旧降级进 T2 目录（零丢失原则不变） */
+const TABLE_EVIDENCE_EXTRA_BUDGET_CHARS = 4000;
+
+/** B3 表格/清单类证据每文件条数放宽上限：普通证据每文件 6 条是多来源覆盖约束，
+ * 清单表格单文件条目极多（百行级），6 条上限会把清单条目截断大半；表格类放宽至 30 条 */
+const TABLE_EVIDENCE_PER_FILE_CAP = 30;
+
+/** B3 表格/清单类证据判定：processingType 为表格/清单/结构化数据，或 roleId 带清单标记 */
+function isTableEvidence(item: DocumentEvidence): boolean {
+  const type = item.processingType || '';
+  return type === 'table' || type.includes('bill') || type === 'structured_data' || Boolean(item.roleId?.includes('bill'));
 }
+
+/** T0 白名单瘦身恒开（原 DOCUMENT_T0_WHITELIST 回退已固化删除） */
+export const T0_WHITELIST_ENABLED = true;
 
 /** T0 白名单行形态整理：超长行截断至 200 字符（保留字段名与值首部，防叙述段占层） */
 function truncateT0WhitelistLine(line: string): string {
@@ -446,18 +462,18 @@ export function evidencePromptBudgetForTarget(targetWords?: number, floorChars =
   const words = Number.isFinite(targetWords) && targetWords! > 0 ? Math.ceil(targetWords!) : 1200;
   // 事实/字数比：每目标字配 8 字符证据（含结构化开销），证据不足是空话灌水的直接原因；
   // 实测 12 字符/字时单次调用输入可达 36K 字符证据（占输入大头），8 字符/字在 T0 全量保留
-  // 前提下仍可覆盖关键参数；比例按 env 可调（DOCUMENT_EVIDENCE_BUDGET_RATIO）
-  // 天花板按 env 可调（DOCUMENT_EVIDENCE_BUDGET_CEILING），默认 24000 平衡「深召回注入」与
-  // 「单次输入体积」（T0 关键参数层全量保留不受影响，T1 片段缩量、T2 目录追溯零丢失）
-  const configuredCeiling = Number(process.env.DOCUMENT_EVIDENCE_BUDGET_CEILING);
-  const ceiling = Number.isFinite(configuredCeiling) && configuredCeiling > 0 ? Math.floor(configuredCeiling) : ceilingChars;
-  const configuredRatio = Number(process.env.DOCUMENT_EVIDENCE_BUDGET_RATIO);
-  const ratio = Number.isFinite(configuredRatio) && configuredRatio > 0 ? configuredRatio : 8;
+  // 前提下仍可覆盖关键参数；比例/天花板按 DOCUMENT_TUNING_PROFILE 可调（evidenceBudgetRatio/evidenceBudgetCeiling），
+  // 默认 24000 平衡「深召回注入」与「单次输入体积」（T0 关键参数层全量保留不受影响，T1 片段缩量、T2 目录追溯零丢失）
+  const configuredCeiling = tuningProfile().evidenceBudgetCeiling;
+  const ceiling = Number.isFinite(configuredCeiling) && configuredCeiling! > 0 ? Math.floor(configuredCeiling!) : ceilingChars;
+  const configuredRatio = tuningProfile().evidenceBudgetRatio;
+  const ratio = Number.isFinite(configuredRatio) && configuredRatio! > 0 ? configuredRatio! : 8;
   const dynamic = Math.ceil(words * ratio);
   const budget = Math.max(floorChars, Math.min(ceiling, dynamic));
-  // 2.1 单次写作调用证据注入 8000 字符硬顶（实测 L3 变化段占比 80.6% 的输入大头）；
-  // DOCUMENT_EVIDENCE_BUDGET_CEILING 显式设置优先于硬顶；DOCUMENT_T0_WHITELIST=0 回退时同步解除
-  const hardCap = (Number.isFinite(configuredCeiling) && configuredCeiling > 0) || !t0WhitelistEnabled()
+  // 2.1 单次写作调用证据注入 12000 字符硬顶（B3 放宽：表格/清单类证据独立配额 4000 字符，
+  // 普通证据保持 8000 口径；实测 L3 变化段占比 80.6% 的输入大头）；
+  // evidenceBudgetCeiling 显式设置优先于硬顶
+  const hardCap = (Number.isFinite(configuredCeiling) && configuredCeiling! > 0)
     ? Number.POSITIVE_INFINITY
     : DOCUMENT_EVIDENCE_HARD_CAP_CHARS;
   return Math.min(budget, hardCap);
@@ -493,7 +509,7 @@ export function evidencePromptImportance(item: DocumentEvidence, requiredFacts: 
   return score;
 }
 
-function selectEvidenceForPrompt<T extends { filePath: string }>(items: T[], maxChars: number | undefined, render: (item: T, index: number) => string, rank: (item: T) => number) {
+function selectEvidenceForPrompt<T extends { filePath: string }>(items: T[], maxChars: number | undefined, render: (item: T, index: number) => string, rank: (item: T) => number, perFileCap = 6) {
   const state = { chars: 0, omitted: 0 };
   const selected: string[] = [];
   const selectedKeys = new Set<T>();
@@ -509,11 +525,12 @@ function selectEvidenceForPrompt<T extends { filePath: string }>(items: T[], max
       selectedKeys.add(item);
     }
   }
-  // 第二轮：按重要性继续填充（单文件最多 6 条：保留多来源覆盖，但不再强制每文件只取 1 条）
+  // 第二轮：按重要性继续填充（单文件最多 perFileCap 条：保留多来源覆盖，但不再强制每文件只取 1 条；
+  // B3 表格/清单类证据传入放宽上限，清单单文件条目不被 6 条上限截断）
   for (const item of ranked) {
     if (selectedKeys.has(item)) continue;
     const fileCount = perFile.get(item.filePath) || 0;
-    if (fileCount >= 6) continue;
+    if (fileCount >= perFileCap) continue;
     const before = selected.length;
     appendWithinBudget(selected, render(item, selected.length), state, maxChars);
     if (selected.length > before) {
@@ -574,7 +591,7 @@ export interface EvidenceLayers {
  * 避免同章各块重复注入同一份全量事实行（块级调用输入 token 大头）。
  */
 export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | undefined, requiredFacts: string[], skipT0 = false, rankBoost?: (item: DocumentEvidence) => number, onlyRankBoosted = false, skipT2Catalog = false): EvidenceLayers {
-  const whitelistEnabled = t0WhitelistEnabled();
+  const whitelistEnabled = T0_WHITELIST_ENABLED;
   const allFactLines = skipT0 ? [] : [...new Set(bundle.textEvidence.flatMap(item => extractKeyFactLines(item.content).split('\n').filter(Boolean)))];
   // 2.1 T0 白名单瘦身：T0 只保留项目级白名单字段行（值截断 200 字符）；白名单外事实行
   // （工艺参数/规范编号等）降级进 T1 文本层前段按相关度排序——降层不删除，完整证据池继续参与检索与校验
@@ -618,6 +635,11 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
   // 命中为空回退全量选取（块相关证据不足时保证正文仍有证据支撑，不牺牲事实安全）
   const boostedTextEvidence = onlyRankBoosted && rankBoost ? bundle.textEvidence.filter(item => rankBoost(item) > 0) : bundle.textEvidence;
   const textEvidencePool = onlyRankBoosted && boostedTextEvidence.length === 0 ? bundle.textEvidence : boostedTextEvidence;
+  // B3 表格/清单类证据独立注入通道：清单表格是事实数据核心载体（条目多、行级数据长），
+  // 与普通文本证据共享预算会被每文件 6 条上限与 1200 字截断挤出——表格类单独配额（独立字符预算 +
+  // 放宽每文件条数上限 + 放宽单条渲染截断），普通文本证据用扣除表格层后的剩余预算
+  const tableEvidencePool = textEvidencePool.filter(item => isTableEvidence(item));
+  const regularEvidencePool = textEvidencePool.filter(item => !isTableEvidence(item));
   // 2.1 降级事实行：占 T1 文本层预算前段，按重要性排序填充；超预算行省略计数（降层不删除——
   // 完整事实仍在证据池，继续参与检索与质量校验）
   const textLayerBudget = remaining ? Math.floor(remaining * 0.65) : undefined;
@@ -630,7 +652,27 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
       if (textEvidenceBudget !== undefined) textEvidenceBudget = Math.max(0, textEvidenceBudget - demotedText.length);
     }
   }
-  const textPrompt = selectEvidenceForPrompt(textEvidencePool, textEvidenceBudget, (item, index) => {
+  // B3 表格/清单层优先占位：清单数据（条目名/特征/工程量/单位行）必须原样进入写作输入，
+  // 不参与普通文本证据的每文件 6 条限制与 1200 字截断；超出配额条目降级进 T2 目录（零丢失原则不变）
+  let tableText = '';
+  let tableOmittedItems: DocumentEvidence[] = [];
+  if (tableEvidencePool.length > 0) {
+    const tableBudget = textEvidenceBudget !== undefined
+      ? Math.min(TABLE_EVIDENCE_EXTRA_BUDGET_CHARS, textEvidenceBudget)
+      : TABLE_EVIDENCE_EXTRA_BUDGET_CHARS;
+    const tablePrompt = selectEvidenceForPrompt(tableEvidencePool, tableBudget, (item, index) => {
+      const body = cleanEvidenceText(item.content);
+      // 表格/清单证据放宽单条截断：多行条目需完整保留（数值列宽+行数远超普通文本段）
+      const truncated = body.length > 3000 ? extractKeyParameterWindows(body, 3000) : body;
+      return `${readableSourceLabel(item, index)}\n类型：${item.processingType || 'table'}\n章节/片段：${item.sectionTitle?.replace(FILE_NAME_RE, '') || '资料片段'}\n内容（清单/表格行数据：条目名、特征、工程量与单位必须逐项照抄原值，不得改写、不得编造）：\n${truncated}`;
+    }, item => evidencePromptImportance(item, requiredFacts) + (rankBoost ? rankBoost(item) : 0), TABLE_EVIDENCE_PER_FILE_CAP);
+    tableOmittedItems = tablePrompt.omittedItems;
+    if (tablePrompt.lines.length) {
+      tableText = `表格/清单原文：\n${tablePrompt.lines.join('\n\n---\n\n')}`;
+      if (textEvidenceBudget !== undefined) textEvidenceBudget = Math.max(0, textEvidenceBudget - tableText.length);
+    }
+  }
+  const textPrompt = selectEvidenceForPrompt(regularEvidencePool, textEvidenceBudget, (item, index) => {
     const body = cleanEvidenceText(item.content);
     // 超长证据（CAD 父块全文等）截断前先做关键参数窗口提取：头部盲截会丢失尾部标高/坡率等真实设计参数
     const truncated = body.length > 1200 ? extractKeyParameterWindows(body, 1200) : body;
@@ -639,15 +681,16 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
   const t1Parts: string[] = [];
   if (resourcePrompt.lines.length) t1Parts.push(`结构化资料：\n${resourcePrompt.lines.join('\n')}`);
   if (demotedText) t1Parts.push(demotedText);
+  if (tableText) t1Parts.push(tableText);
   if (textPrompt.lines.length) t1Parts.push(`文本/附件片段：\n${textPrompt.lines.join('\n\n---\n\n')}`);
   const t1Text = t1Parts.join('\n\n');
-  const t2Items = [...resourcePrompt.omittedItems, ...textPrompt.omittedItems];
+  const t2Items = [...resourcePrompt.omittedItems, ...tableOmittedItems, ...textPrompt.omittedItems];
   // 2.2 T2 目录限行（对齐章级证据摘要池目录 40 行口径）：真实生成实测单章证据池 3k+ 条时，
   // 无限制目录行达 3252 行/284K 字符，占单次调用 L3 证据注入的 97.5%（预算 8000 的输出被撑到
   // 291K）——目录是全输入不可缓存段（L3），逐行 300 字摘要全部注入即"封顶丢数据"的变相膨胀；
   // 按重要性保留前 N 条压缩摘要（重要数据以摘要形式可见），其余仅计数不注入，完整证据仍参与
-  // 后续检索与质量校验。env DOCUMENT_EVIDENCE_CATALOG_MAX_LINES 可调，默认 40
-  const catalogMaxLinesValue = Number(process.env.DOCUMENT_EVIDENCE_CATALOG_MAX_LINES || 40);
+  // 后续检索与质量校验。evidenceCatalogMaxLines（DOCUMENT_TUNING_PROFILE）可调，默认 40
+  const catalogMaxLinesValue = tuningProfile().evidenceCatalogMaxLines || 40;
   const catalogMaxLines = Number.isFinite(catalogMaxLinesValue) && catalogMaxLinesValue > 0 ? Math.floor(catalogMaxLinesValue) : 40;
   // 4.17.6 skipT2Catalog（写作/大纲类调用跳过目录）：目录是逐行压缩摘要的不可缓存变化段
   // （每调用证据池不同 → 前缀在目录处必然分叉），节级/块级写作与事实大纲只消费事实本身

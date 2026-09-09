@@ -1,4 +1,5 @@
 import type { DocumentDraftChapter, ValidationIssue } from './types';
+import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 import { buildSemanticGate } from './semanticGate';
 import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
@@ -371,7 +372,7 @@ export function tableCompletenessIssues(chapters: DocumentDraftChapter[], markdo
       return withoutBars.length > 0; // 跳过对齐分隔行
     });
     const emptyCellCount = bodyRows.reduce((total, row) => {
-      const cells = row.split('|').slice(1, -1).map(cell => cell.trim());
+      const cells = row.split('|').slice(1, -1).map(cell => stripTableCellInvisibleChars(cell.trim()));
       return total + cells.filter(cell => cell === '' || cell === '-' || cell === '—' || cell === '/').length;
     }, 0);
     const totalCells = bodyRows.length * Math.max(1, columnCount);

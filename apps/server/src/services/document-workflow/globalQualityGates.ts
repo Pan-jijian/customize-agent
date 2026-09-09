@@ -13,7 +13,8 @@ import { professionalSectionTaskCard } from './promptRuleExtraction';
 import { reviewGlobalConsistency } from './chapterReview';
 import { dataConsistencyConflictIssue, reviewDataConsistency } from './dataConsistencyReview';
 import { tablePlanExecutionGaps } from './constructionOrgTablePlan';
-import { measureGenerationStep, repairChapterByQuality } from './rolePipeline';
+import { measureGenerationStep, repairChapterByQuality, repairPatchGuard } from './rolePipeline';
+import { withPatchRollback } from './patchRollback';
 import { fillerSentenceTargets } from './constructionOrgAudit';
 import { difficultyCountermeasureReport, fillerDensityReport } from './tenderBidChecks';
 import { missingWorkPackageSkeletonTitles, stripEmptyWorkPackageHeadings, stripTablesInSection, workPackageSkeletonTitles } from './chapterPostProcessing';
@@ -207,21 +208,38 @@ export async function repairTableExecutionGaps(input: {
         const baseChapter = { id: draft.id, title: draft.title, content: draft.content, evidence: scopedEvidence.length ? scopedEvidence : draft.evidence, missingFacts: draft.missingFacts || [], sections: draft.sections };
         const baseIssue = `计划表格缺失（计划 ${gap.planned} 张，实际仅 ${gap.actual} 张）：${gap.plans.map(plan => `${plan.title}（表头：${plan.fields.map(field => field.name).join('、')}）`).join('；')}。必须按表头字段补齐这些 markdown 表格并紧跟相关小节输出，不得删除已有正文；每个表格前须有 1～2 句引导叙述说明表格作用与关键结论，表格不能替代小节正文；deriveFromProject 字段基于项目工程量、总工期与工序流水按定额工效推导具体数值，projectFactOnly 字段不得编造。`;
         // 并行修复共享 diagnostics.llm.lastError，重试提示中的失败原因存在轻微串章竞争（仅影响诊断文案，不影响修复正确性）
-        const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `table-execution-repair:${draft.id}`, () => repairChapterByQuality({
-          template,
-          chapter: baseChapter,
-          issues: [baseIssue],
-          promptTexts: repairPromptTexts,
-          requirement,
-          forbidDrawingImages: true,
+        // P12 回滚保护：补表修复后同源复检该章计划表格缺口数（tablePlanExecutionGaps 章级隔离），
+        // 缺口不降反升（LLM 乱删既有表格）即回滚保留修复前正文
+        return withPatchRollback({
+          originalContent: draft.content,
+          repairRound: 'table-execution-repair',
           diagnostics: generationDiagnostics,
-          signal,
-          // 补表 patch 一次输出多张表（表头+分隔线+数据行+引导句），默认预算下 JSON 易截断
-          // 致 patches 解析失败、修复空手（历史缺陷：补表 patch 未应用）；每张表按 1200 token 预留
-          maxTokens: Math.min(12000, Math.max(6000, gap.plans.length * 1200)),
-        })));
+          beforeMetrics: [Math.max(0, gap.planned - gap.actual)],
+          apply: async () => {
+            const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `table-execution-repair:${draft.id}`, () => repairChapterByQuality({
+              template,
+              chapter: baseChapter,
+              issues: [baseIssue],
+              promptTexts: repairPromptTexts,
+              requirement,
+              forbidDrawingImages: true,
+              diagnostics: generationDiagnostics,
+              signal,
+              patchGuard: repairPatchGuard('table-execution-repair', generationDiagnostics),
+              // 补表 patch 一次输出多张表（表头+分隔线+数据行+引导句），默认预算下 JSON 易截断
+              // 致 patches 解析失败、修复空手（历史缺陷：补表 patch 未应用）；每张表按 1200 token 预留
+              maxTokens: Math.min(12000, Math.max(6000, gap.plans.length * 1200)),
+            })));
+            return repaired.content && repaired.content !== draft.content ? repaired.content : draft.content;
+          },
+          recheck: (content) => {
+            // 章级隔离复检：以修复后章内容替换该章草稿重算计划表格缺口（同源检测，跨章缺口不受并发修复影响）
+            const replacedDrafts = chapterDraftsFinal.map(item => item.id === draft.id ? { title: item.title, content, sections: item.sections } : item);
+            const nextGaps = tablePlanExecutionGaps(effectiveChapters, replacedDrafts).filter(item => item.chapterTitle === draft.title || item.chapterTitle === gap.chapterTitle || draft.title.includes(item.chapterTitle) || item.chapterTitle.includes(draft.title));
+            return [nextGaps.reduce((sum, item) => sum + Math.max(0, item.planned - item.actual), 0)];
+          },
+        });
         // 4.17.8 补表失败重试删除：每章单次尝试（失败即放弃）——重试轮是修复 token 主力军的组成部分
-        return repaired;
       };
       const repairedTableResults = await Promise.allSettled(gapTargets.map(target => repairTableGap(target)));
       const patchedDraftIds = new Set<string>();
@@ -233,6 +251,11 @@ export async function repairTableExecutionGaps(input: {
         }
         const repaired = result.value;
         const { gap, draft } = gapTargets[index];
+        if (repaired.rolledBack) {
+          // 修复后计划表格缺口不降反升（LLM 乱删既有表格），回滚保留修复前正文（回滚计数已入 patchGuardStats）
+          failedGapDetails.push(`${gap.chapterTitle}：修复后计划表格缺口增多，已回滚本轮修改`);
+          return;
+        }
         if (repaired.content && repaired.content !== draft.content && !patchedDraftIds.has(draft.id)) {
           draft.content = repaired.content;
           patchedDraftIds.add(draft.id);
@@ -287,8 +310,9 @@ export async function repairTemplatingIssues(input: {
     const needsFillerFix = filler.ratio >= 0.1 || filler.vagueSemanticSentences > 0;
     const needsDifficultyFix = difficulty.countermeasures > 0 && difficulty.ratio < 0.5;
     if (!needsFillerFix && !needsDifficultyFix) break;
-    // F2 回滚保护：修复前正文快照——历史缺陷（丰乐镇第五轮）：修复后套话句占比 27.5%→32.0%
-    // 不降反升（LLM 重写产出的新句仍命中语义原型），带病修复不如不修
+    // F2 回滚保护（P12 泛化）：修复前正文快照 + 同源复检 + 变差即回滚统一收敛到 withPatchRollback——
+    // 历史缺陷（丰乐镇第五轮）：修复后套话句占比 27.5%→32.0% 不降反升（LLM 重写产出的新句仍命中语义原型），
+    // 带病修复不如不修；判定语义逐字保持：套话占比上升 >1% 且重难点双达标未提升 >1% 才回滚
     const roundSnapshot = new Map(chapterDraftsFinal.map(chapter => [chapter.id, chapter.content]));
     const sentenceTargets = needsFillerFix ? await fillerSentenceTargets(chapterDraftsFinal) : [];
     // 重难点缺要素条目锚点：归一化（去空白）包含匹配定位到具体章节
@@ -330,6 +354,7 @@ export async function repairTemplatingIssues(input: {
         forbidDrawingImages: true,
         diagnostics: generationDiagnostics,
         signal,
+        patchGuard: repairPatchGuard('templating-repair', generationDiagnostics),
         anchorTexts: [...target.sentences, ...target.difficulty.map(item => item.text)],
         maxTokens: 6000,
         // F2 套话重写需要项目事实支撑：证据预算专用放大（默认 1500 字符最小集不足以支撑
@@ -337,38 +362,50 @@ export async function repairTemplatingIssues(input: {
         evidenceChars: 5000,
       })));
     };
-    const results = await Promise.allSettled(targets.map(target => repairOne(target)));
-    results.forEach((result, index) => {
-      if (result.status === 'rejected') {
-        if (signal?.aborted) throw result.reason;
-        console.error('[gen] templating repair failed:', result.reason);
-        return;
-      }
-      const repaired = result.value;
-      const { chapter } = targets[index];
-      if (repaired.content && repaired.content !== chapter.content) {
-        chapter.content = repaired.content;
-        appliedCount += 1;
-      }
+    const rollbackOutcome = await withPatchRollback({
+      originalContent: fullMarkdown,
+      repairRound: 'templating-repair',
+      diagnostics: generationDiagnostics,
+      // 修复前指标 = 循环开头对同一 fullMarkdown 的检测值（避免重复同源复检；与 recheck 计算口径同源）
+      beforeMetrics: [filler.ratio, difficulty.ratio],
+      apply: async () => {
+        const results = await Promise.allSettled(targets.map(target => repairOne(target)));
+        results.forEach((result, index) => {
+          if (result.status === 'rejected') {
+            if (signal?.aborted) throw result.reason;
+            console.error('[gen] templating repair failed:', result.reason);
+            return;
+          }
+          const repaired = result.value;
+          const { chapter } = targets[index];
+          if (repaired.content && repaired.content !== chapter.content) {
+            chapter.content = repaired.content;
+            appliedCount += 1;
+          }
+        });
+        emitProgress(chapterDraftsFinal);
+        return chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
+      },
+      // 同源复检：修复后全文重算套话句占比 + 重难点双达标率
+      recheck: async (content) => {
+        const recheckFiller = await fillerDensityReport(content);
+        const recheckDifficulty = await difficultyCountermeasureReport(content);
+        return [recheckFiller.ratio, recheckDifficulty.ratio];
+      },
+      // F2 双指标抵偿：套话占比上升 >1% 且重难点双达标未提升 >1% 才回滚
+      //（修复变差不可接受；重难点达标提升可抵偿套话占比小幅上升，保留修复）
+      shouldRollback: (before, after) => after[0] > before[0] + 0.01 && !(after[1] > before[1] + 0.01),
     });
-    emitProgress(chapterDraftsFinal);
     if (appliedCount === 0) {
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: 'failed', message: `模板化修复第 ${round + 1} 轮：修复 patch 未落地（${targets.length} 章锚点失配或 LLM 未产出）`, details: [`套话句占比 ${(filler.ratio * 100).toFixed(1)}% 未收敛，重难点双达标 ${(difficulty.ratio * 100).toFixed(0)}%`] }, { subtitle: '模板化修复' }));
       break;
     }
-    // F2 回滚判定：修复后同源复检——套话占比上升且重难点双达标未提升时回滚本轮全部修改
-    //（修复变差不可接受；重难点达标提升可抵偿套话占比小幅上升，保留修复）
-    const recheckMarkdown = chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
-    const recheckFiller = await fillerDensityReport(recheckMarkdown);
-    const recheckDifficulty = await difficultyCountermeasureReport(recheckMarkdown);
-    const fillerWorse = recheckFiller.ratio > filler.ratio + 0.01;
-    const difficultyBetter = recheckDifficulty.ratio > difficulty.ratio + 0.01;
-    if (fillerWorse && !difficultyBetter) {
+    if (rollbackOutcome.rolledBack) {
       for (const chapter of chapterDraftsFinal) {
         const snapshot = roundSnapshot.get(chapter.id);
         if (snapshot !== undefined) chapter.content = snapshot;
       }
-      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: 'failed', message: `模板化修复第 ${round + 1} 轮：修复后套话句占比 ${(recheckFiller.ratio * 100).toFixed(1)}% > 修复前 ${(filler.ratio * 100).toFixed(1)}%，已回滚本轮修改`, details: ['LLM 重写未收敛，回滚保留修复前正文'] }, { subtitle: '模板化修复' }));
+      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: 'failed', message: `模板化修复第 ${round + 1} 轮：修复后套话句占比 ${(rollbackOutcome.afterMetrics[0] * 100).toFixed(1)}% > 修复前 ${(rollbackOutcome.beforeMetrics[0] * 100).toFixed(1)}%，已回滚本轮修改`, details: ['LLM 重写未收敛，回滚保留修复前正文'] }, { subtitle: '模板化修复' }));
       emitProgress(chapterDraftsFinal);
       break;
     }
@@ -516,19 +553,42 @@ export async function enforceWorkPackageSkeletons(input: {
         const skeleton = entry.missing.map((name, nameIndex) => `#### ${nameIndex + 1} ${name}`).join('\n');
         return `第 ${index + 1} 处：「${entry.headingLine}」小节内部缺少以下工作包小节（内部结构已由系统从资料锁定）：\n${skeleton}\n请在该小节内部按上述标题逐一补齐（标题一字不差，不得增删改、合并或调序），每个工作包小节按三要素展开正式正文：作业对象与工程量（什么部位、什么规模）、工序顺序（先后顺序清晰）、施工方法（工艺做法、工艺参数、验收检测）。已有内容一律不得改动，不得删除任何已有小节与段落，不得输出 Markdown 表格。`;
       });
-      return withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `workpackage-skeleton-repair:${target.chapter.id}`, () => repairChapterByQuality({
-        template,
-        chapter: { id: target.chapter.id, title: target.chapter.title, content: target.chapter.content, evidence: target.chapter.evidence || [], missingFacts: target.chapter.missingFacts || [], sections: target.chapter.sections },
-        issues: [parts.join('\n'), '清单之外的内容一律不得改动；不得删除任何小节标题、表格与数值参数。'],
-        promptTexts: repairPromptTexts,
-        requirement,
-        forbidDrawingImages: true,
+      // P12 回滚保护：补写后同源复检该章关键小节骨架缺失总数（missingWorkPackageSkeletonTitles 同口径），
+      // 缺失不降反升（LLM 乱删已有工作包标题）即回滚保留修复前正文
+      return withPatchRollback({
+        originalContent: target.chapter.content,
+        repairRound: 'workpackage-skeleton-repair',
         diagnostics: generationDiagnostics,
-        signal,
-        // 补写定位锚点 = 小节标题行：replacement 必须逐字保留标题行后在节内追加补写小节，系统已锁定补写目标
-        anchorTexts: target.entries.map(entry => ({ text: entry.headingLine, append: true })),
-        maxTokens: 6000,
-      })));
+        beforeMetrics: [target.entries.reduce((sum, entry) => sum + entry.missing.length, 0)],
+        apply: async () => {
+          const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `workpackage-skeleton-repair:${target.chapter.id}`, () => repairChapterByQuality({
+            template,
+            chapter: { id: target.chapter.id, title: target.chapter.title, content: target.chapter.content, evidence: target.chapter.evidence || [], missingFacts: target.chapter.missingFacts || [], sections: target.chapter.sections },
+            issues: [parts.join('\n'), '清单之外的内容一律不得改动；不得删除任何小节标题、表格与数值参数。'],
+            promptTexts: repairPromptTexts,
+            requirement,
+            forbidDrawingImages: true,
+            diagnostics: generationDiagnostics,
+            signal,
+            patchGuard: repairPatchGuard('workpackage-skeleton-repair', generationDiagnostics),
+            // 补写定位锚点 = 小节标题行：replacement 必须逐字保留标题行后在节内追加补写小节，系统已锁定补写目标
+            anchorTexts: target.entries.map(entry => ({ text: entry.headingLine, append: true })),
+            maxTokens: 6000,
+          })));
+          return repaired.content && repaired.content !== target.chapter.content ? repaired.content : target.chapter.content;
+        },
+        recheck: (content) => {
+          const names = majorSkeletonNames;
+          if (names.length === 0) return [0];
+          let missing = 0;
+          for (const headingLine of content.split('\n').map(line => line.trim()).filter(line => KEY_SECTION_HEADING.test(line))) {
+            const sectionTitle = headingLine.replace(/^#{3,4}\s+(?:\d+(?:\.\d+)*\s+)?/u, '');
+            if (DIVISION_SECTION_RE.test(target.chapter.title) && DIVISION_SECTION_RE.test(sectionTitle)) continue;
+            missing += missingWorkPackageSkeletonTitles(content, sectionTitle, names).length;
+          }
+          return [missing];
+        },
+      });
     };
     const results = await Promise.allSettled(targets.map(target => repairOne(target)));
     let appliedCount = 0;
@@ -540,6 +600,11 @@ export async function enforceWorkPackageSkeletons(input: {
       }
       const repaired = result.value;
       const { chapter } = targets[index];
+      if (repaired.rolledBack) {
+        // 补写后骨架缺失不降反升（LLM 乱删已有工作包标题），回滚保留修复前正文（回滚计数已入 patchGuardStats）
+        console.error('[gen] workpackage skeleton repair rolled back:', chapter.title);
+        return;
+      }
       if (repaired.content && repaired.content !== chapter.content) {
         chapter.content = repaired.content;
         appliedCount += 1;
@@ -602,19 +667,35 @@ export async function enforcePlannedSectionCompleteness(input: {
       if (emptyOnly) return `本章小节「${sectionTitle}」只有标题或表格无正式正文：必须在既有小节标题下补写正式正文段落（正文写在表格前后均可），不得新增同名小节标题、不得删除或改动已有表格与数值。\n${professionalSectionTaskCard(target.chapter.title, sectionTitle)}`;
       return `本章正文缺少规划小节「${sectionTitle}」：必须在章末新增小节标题「${heading}」（标题一字不差）并写入正式正文。\n${professionalSectionTaskCard(target.chapter.title, sectionTitle)}`;
     });
-    return withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `planned-section-repair:${target.chapter.id}`, () => repairChapterByQuality({
-      template,
-      chapter: { id: target.chapter.id, title: target.chapter.title, content: target.chapter.content, evidence: target.chapter.evidence || [], missingFacts: target.chapter.missingFacts || [], sections: target.chapter.sections },
-      issues: [...parts, '已有内容一律不得改动，不得删除任何已有小节、表格与数值参数；新增小节之外不得改动。'],
-      promptTexts: repairPromptTexts,
-      requirement,
-      forbidDrawingImages: true,
+    // P12 回滚保护：补写后同源复检该章缺规划小节数（collectSectionContentGaps 同口径），
+    // 缺失不降反升（LLM 乱删已有小节）即回滚保留修复前正文
+    return withPatchRollback({
+      originalContent: target.chapter.content,
+      repairRound: 'planned-section-repair',
       diagnostics: generationDiagnostics,
-      signal,
-      // 补写定位锚点 = 章末标题行：replacement 必须逐字保留锚点后在章末追加补写小节
-      anchorTexts: [{ text: target.lastHeadingLine, append: true }],
-      maxTokens: 6000,
-    })));
+      beforeMetrics: [target.sectionTitles.length],
+      apply: async () => {
+        const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `planned-section-repair:${target.chapter.id}`, () => repairChapterByQuality({
+          template,
+          chapter: { id: target.chapter.id, title: target.chapter.title, content: target.chapter.content, evidence: target.chapter.evidence || [], missingFacts: target.chapter.missingFacts || [], sections: target.chapter.sections },
+          issues: [...parts, '已有内容一律不得改动，不得删除任何已有小节、表格与数值参数；新增小节之外不得改动。'],
+          promptTexts: repairPromptTexts,
+          requirement,
+          forbidDrawingImages: true,
+          diagnostics: generationDiagnostics,
+          signal,
+          patchGuard: repairPatchGuard('planned-section-repair', generationDiagnostics),
+          // 补写定位锚点 = 章末标题行：replacement 必须逐字保留锚点后在章末追加补写小节
+          anchorTexts: [{ text: target.lastHeadingLine, append: true }],
+          maxTokens: 6000,
+        })));
+        return repaired.content && repaired.content !== target.chapter.content ? repaired.content : target.chapter.content;
+      },
+      recheck: (content) => {
+        const chapterGaps = collectSectionContentGaps('', [{ title: target.chapter.title, content, sections: target.chapter.sections }]).filter(gap => gap.chapterTitle === target.chapter.title && (gap.reason === 'missing_planned_section' || (gap.reason === 'empty' && gap.planned)));
+        return [chapterGaps.length];
+      },
+    });
   };
   const results = await Promise.allSettled(targets.map(target => repairOne(target)));
   let appliedCount = 0;
@@ -626,6 +707,11 @@ export async function enforcePlannedSectionCompleteness(input: {
     }
     const repaired = result.value;
     const { chapter } = targets[index];
+    if (repaired.rolledBack) {
+      // 补写后缺规划小节数不降反升（LLM 乱删已有小节），回滚保留修复前正文（回滚计数已入 patchGuardStats）
+      console.error('[gen] planned section repair rolled back:', chapter.title);
+      return;
+    }
     if (repaired.content && repaired.content !== chapter.content) {
       chapter.content = repaired.content;
       appliedCount += 1;
@@ -771,6 +857,21 @@ export async function runGlobalConsistencyReviewLoop(input: {
     // P1-1 复检瘦身：确定性复检每轮必做（零 LLM 成本）；LLM 复检仅最后一轮或确定性清零时执行一次，
     // stale 标志标记「跳过 LLM 复检」的轮次，防空转 break 时旧快照残留被 finalize 包装为 error 硬阻断
     let llmReviewStale = false;
+    // P12 回滚保护复检：章级确定性检测器子集（与 runDeterministicConsistencyCheck 同源函数引用）——
+    // 跨章数值/语义检测需全文上下文无法章级判定，章内缺陷（重复/元话语/公式残留/三要素/清单口径）
+    // 修复后不降反升即回滚；跨章残留由轮级确定性复检（runDeterministicConsistencyCheck）兑底
+    const chapterDefectCount = (content: string): number[] => {
+      const hits = [
+        ...metaDiscourseDeclarationIssues(content),
+        ...formulaResidueIssues(content),
+        ...duplicateTableIssues(content),
+        ...duplicateTableRowIssues(content),
+        ...duplicateParagraphIssues(content),
+        ...perPackageContentElementIssues(content),
+        ...majorContentGovernanceIssues(content),
+      ];
+      return [hits.length];
+    };
     // v3 阶段 3：统一修复模式——问题清单冻结后每缺陷只修一次，固定单轮修复（一次修复 + 末尾统一复检一次）；
     // 旧 DOCUMENT_GLOBAL_REVIEW_ROUNDS env 多轮开关已删除（不留回退路径）
     const globalReviewRounds = 1;
@@ -809,33 +910,43 @@ export async function runGlobalConsistencyReviewLoop(input: {
         });
         return related.length > 0 ? [{ chapter, related }] : [];
       });
-      const repairedChapterResults = await Promise.allSettled(repairChapterTargets.map(({ chapter, related }) => withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `global-consistency-repair:${chapter.id}`, () => repairChapterByQuality({
-        template,
-        chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence || [], missingFacts: chapter.missingFacts || [], sections: chapter.sections },
-        issues: related.map(issue => {
-          // 重复类冲突（表格/段落重复）的修复指令是删除冗余而非按资料口径修正数值；
-          // 其余冲突严格按资料口径修正（h15：修复指令与冲突类型对齐，避免 LLM 对重复类 issue 乱改数值）
-          const repairInstruction = /重复/u.test(issue)
-            ? '请删除本冲突描述的重复内容（保留首次出现的完整版本），不得改动其余正文。'
-            : /缺少三要素/u.test(issue)
-              ? '请按冲突描述中列出的缺失要素定向补写：只补缺失要素的内容（作业对象与工程量/工序顺序/施工方法），不得删除或改动已有正文；补写的工程量数值必须取工程量清单汇总值，不得编造。'
-              : /清单内部口径词|不应使用 Markdown 表格/u.test(issue)
-                ? '请删除本冲突描述中点名的清单内部口径内容（“分部小计/本页小计/合计/按实/暂估”等口径行或承载专业工程正文的 Markdown 表格），把表格中的项目总量数据改写为段落式连贯叙述（数值保持不变），不得改动其余正文。'
-                : /基坑深度数值未锁定/u.test(issue)
-              ? (excavationDepthAuthority !== undefined
-                ? `请在本章基坑支护/开挖小节写出确定性的基坑开挖深度表述：本工程基坑开挖深度为 ${excavationDepthAuthority}m（权威口径来自图纸标注，严禁写其他深度数值或「按图纸确定」类回避表述），并同步保留既有危大工程分级标注。`
-                : '请从本章证据摘要中的图纸标注/勘察资料锁定基坑开挖深度数值，以确定性表述写入基坑支护小节（严禁「按图纸确定」类回避表述），不得编造数值。')
-              : /规格错位/u.test(issue)
-                ? '请按冲突描述中的工程量清单权威规格修正本章对应部位的规格表述：同一材料不同部位允许不同规格，同一部位只允许权威规格，禁止把多种规格全文归一为一种。'
-                : '请严格按冲突描述中给出的资料口径修正本章对应表述，不得引入新的数值；与资料口径一致的既有表述（含分层/子项数值）不得改动；同一材料多种规格按所属部位/分部分项分别使用，禁止全文统一为一种规格。';
-          return `${issue}；${repairInstruction}`;
-        }),
-        promptTexts: repairPromptTexts,
-        requirement,
-        forbidDrawingImages: true,
+      const repairedChapterResults = await Promise.allSettled(repairChapterTargets.map(({ chapter, related }) => withPatchRollback({
+        originalContent: chapter.content,
+        repairRound: 'global-consistency-repair',
         diagnostics: generationDiagnostics,
-        signal,
-      })))));
+        apply: async () => {
+          const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `global-consistency-repair:${chapter.id}`, () => repairChapterByQuality({
+            template,
+            chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence || [], missingFacts: chapter.missingFacts || [], sections: chapter.sections },
+            issues: related.map(issue => {
+              // 重复类冲突（表格/段落重复）的修复指令是删除冗余而非按资料口径修正数值；
+              // 其余冲突严格按资料口径修正（h15：修复指令与冲突类型对齐，避免 LLM 对重复类 issue 乱改数值）
+              const repairInstruction = /重复/u.test(issue)
+                ? '请删除本冲突描述的重复内容（保留首次出现的完整版本），不得改动其余正文。'
+                : /缺少三要素/u.test(issue)
+                  ? '请按冲突描述中列出的缺失要素定向补写：只补缺失要素的内容（作业对象与工程量/工序顺序/施工方法），不得删除或改动已有正文；补写的工程量数值必须取工程量清单汇总值，不得编造。'
+                  : /清单内部口径词|不应使用 Markdown 表格/u.test(issue)
+                    ? '请删除本冲突描述中点名的清单内部口径内容（“分部小计/本页小计/合计/按实/暂估”等口径行或承载专业工程正文的 Markdown 表格），把表格中的项目总量数据改写为段落式连贯叙述（数值保持不变），不得改动其余正文。'
+                    : /基坑深度数值未锁定/u.test(issue)
+                  ? (excavationDepthAuthority !== undefined
+                    ? `请在本章基坑支护/开挖小节写出确定性的基坑开挖深度表述：本工程基坑开挖深度为 ${excavationDepthAuthority}m（权威口径来自图纸标注，严禁写其他深度数值或「按图纸确定」类回避表述），并同步保留既有危大工程分级标注。`
+                    : '请从本章证据摘要中的图纸标注/勘察资料锁定基坑开挖深度数值，以确定性表述写入基坑支护小节（严禁「按图纸确定」类回避表述），不得编造数值。')
+                  : /规格错位/u.test(issue)
+                    ? '请按冲突描述中的工程量清单权威规格修正本章对应部位的规格表述：同一材料不同部位允许不同规格，同一部位只允许权威规格，禁止把多种规格全文归一为一种。'
+                    : '请严格按冲突描述中给出的资料口径修正本章对应表述，不得引入新的数值；与资料口径一致的既有表述（含分层/子项数值）不得改动；同一材料多种规格按所属部位/分部分项分别使用，禁止全文统一为一种规格。';
+              return `${issue}；${repairInstruction}`;
+            }),
+            promptTexts: repairPromptTexts,
+            requirement,
+            forbidDrawingImages: true,
+            diagnostics: generationDiagnostics,
+            signal,
+            patchGuard: repairPatchGuard('global-consistency-repair', generationDiagnostics),
+          })));
+          return repaired.content && repaired.content !== chapter.content ? repaired.content : chapter.content;
+        },
+        recheck: chapterDefectCount,
+      })));
       repairedChapterResults.forEach((result, index) => {
         if (result.status === 'rejected') {
           if (signal?.aborted) throw result.reason;
@@ -844,6 +955,11 @@ export async function runGlobalConsistencyReviewLoop(input: {
         }
         const repaired = result.value;
         const { chapter } = repairChapterTargets[index];
+        if (repaired.rolledBack) {
+          // 修复后章内缺陷不降反升，回滚保留修复前正文（回滚计数已入 patchGuardStats）
+          console.error('[gen] global consistency repair rolled back:', chapter.title);
+          return;
+        }
         if (repaired.content && repaired.content !== chapter.content) {
           chapter.content = repaired.content;
           appliedCount += 1;

@@ -193,10 +193,6 @@ describe('buildStandardFinalValidationIssues', () => {
 
 /** 1.4 形态 B：跨章同名 H3 小节检测（归属按模板计划匹配章裁决） */
 describe('crossChapterDuplicateSectionIssues（1.4 跨章同名 H3 检测）', () => {
-  afterEach(() => {
-    delete process.env.DOCUMENT_TITLE_ALIGNMENT_CHECK;
-  });
-
   it('实锤形态：同名小节同现 1.3 与 6.4，模板计划归属第一章 → 第六章被报串章', () => {
     const chapters = [
       draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: '### 1.1 项目概况\n概况正文。\n### 1.3 周边环境、管线与既有建构筑物保护\n第一章的周边环境正文。' }),
@@ -247,15 +243,6 @@ describe('crossChapterDuplicateSectionIssues（1.4 跨章同名 H3 检测）', (
   it('章内同名 H3 重复不计跨章（章内重复由 duplicate-subsection 通道治理）', () => {
     const chapters = [
       draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: '### 1.1 周边环境、管线与既有建构筑物保护\n甲段。\n### 1.2 周边环境、管线与既有建构筑物保护\n乙段。' }),
-    ];
-    expect(crossChapterDuplicateSectionIssues(chapters, [])).toEqual([]);
-  });
-
-  it('env DOCUMENT_TITLE_ALIGNMENT_CHECK=0 整体回退', () => {
-    process.env.DOCUMENT_TITLE_ALIGNMENT_CHECK = '0';
-    const chapters = [
-      draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: '### 1.3 周边环境、管线与既有建构筑物保护\n甲。' }),
-      draftChapter({ id: 'ch-6', title: '第六章 安全措施', content: '### 6.4 周边环境、管线与既有建构筑物保护\n乙。' }),
     ];
     expect(crossChapterDuplicateSectionIssues(chapters, [])).toEqual([]);
   });

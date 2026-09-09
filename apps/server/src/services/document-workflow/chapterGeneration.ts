@@ -18,6 +18,7 @@ import { buildSemanticGate } from './semanticGate';
 import type { PlannedChapterBlock, PlannedChapterStructure } from './integratedBlueprint';
 import { cleanFactValue, isActionableFactValue } from './documentFactTrace';
 import { DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE, chapterAnchoredRules, sectionAnchoredRules } from './writingSpec';
+import { tuningProfile } from './tuningProfile';
 
 export * from './chapterPostProcessing';
 
@@ -138,14 +139,14 @@ export function userRequirementFactsPrompt(requirement?: string) {
 /**
  * F3 事实覆盖清单预算封顶：factCoverageContext 的「全局资料事实索引全量注入」是块级输入 L3 爆炸
  * 的主因（真实生成单章索引可达数十万字符，同章每块全量注入一次）。按行完整截断到字符预算，
- * 前端段（事实要求/角色事实/基础事实卡片）天然优先保留；DOCUMENT_FACT_COVERAGE_CAP=0 关闭封顶。
+ * 前端段（事实要求/角色事实/基础事实卡片）天然优先保留；factCoverageCap（DOCUMENT_TUNING_PROFILE）可调，0 关闭封顶。
  * 被截断的事实索引仍存在于绑定材料证据中（evidenceText 按块相关性注入），不影响事实落位兜底。
  */
 export function capFactCoverageContext(text: string): string {
-  const configured = Number(process.env.DOCUMENT_FACT_COVERAGE_CAP);
-  // DOCUMENT_FACT_COVERAGE_CAP=0 显式关闭封顶（全量注入）；未配置或非法值走默认预算 26000
+  const configured = tuningProfile().factCoverageCap;
+  // factCoverageCap=0 显式关闭封顶（全量注入）；未配置或非法值走默认预算 26000
   if (configured === 0) return text;
-  const cap = Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 26000;
+  const cap = Number.isFinite(configured) && configured! > 0 ? Math.floor(configured!) : 26000;
   if (!text || text.length <= cap) return text;
   const kept: string[] = [];
   let total = 0;
@@ -174,7 +175,7 @@ async function buildChapterFactOutline(input: { template: DocumentTemplate; chap
     // F13 多规格部位绑定：同一材料多种规格（垫层 C15/主体 C35）不得合并为一种，
     // 每条规格类事实必须标注所属部位或分部分项
     'quantifiedFacts 中规格类事实（混凝土强度等级/砂浆强度等级/抗渗等级/厚度/砖规格等）必须标注所属部位或分部分项；同一材料出现多种规格时必须逐条保留各自部位，不得合并为一种规格。',
-    'quantifiedFacts 放含数字/单位/编号的事实；missingFacts 放该小节需要但材料中确实找不到的事实（供 Writer 用公共专业知识补做法，禁止编造具体值）。',
+    'quantifiedFacts 放含数字/单位/编号的事实；missingFacts 放该小节需要但材料中确实找不到的事实（供 Writer 用公共专业知识补做法与要求；补做法时不得引入任何具体数值、规格、型号、品牌、参数，此类内容一律不得出现在 missingFacts 或补做表述中）。',
     '只返回 JSON，不要返回 markdown。',
   ].filter(Boolean).join('\n\n');
   const prompt = [
@@ -228,7 +229,7 @@ function renderChapterFactOutline(outline: ChapterFactOutline, stillMissingFacts
     return [
       `### ${section.title || '正文'}`,
       facts.length ? `必须写入的事实（数值必须原样）：\n${facts.map(fact => `- ${fact}`).join('\n')}` : '',
-      missing.length ? `材料缺失（禁止编造具体值；可用公共专业知识补做法与要求）：${missing.join('、')}` : '',
+      missing.length ? `材料缺失（禁止编造具体值；可用公共专业知识补做法与要求，补做法不得引入任何数值/规格/型号/参数）：${missing.join('、')}` : '',
     ].filter(Boolean).join('\n');
   });
   return [
@@ -271,9 +272,8 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
   let evidenceText = evidenceBundlePrompt(bundle, { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars), ...evidencePromptOptions });
   // 两步生成（事实大纲 → 写作）：第一步先让 LLM 基于绑定材料规划可写事实清单，
   // 第二步按大纲逐条落位写作，根治「要求具体但证据碎片化导致空话灌水」的不稳定。
-  // env DOCUMENT_TWO_STEP_GENERATION=0 显式关闭；大纲阶段失败退化为单步生成（非模板兜底）
-  const twoStepConfigured = process.env.DOCUMENT_TWO_STEP_GENERATION;
-  const twoStepEnabled = options.twoStep !== false && twoStepConfigured !== '0' && evidence.length >= 3 && evidenceText.length > 0;
+  // （原 DOCUMENT_TWO_STEP_GENERATION 回退已固化删除：两步法恒开，options.twoStep 仍可关闭；大纲阶段失败退化为单步生成非模板兜底）
+  const twoStepEnabled = options.twoStep !== false && evidence.length >= 3 && evidenceText.length > 0;
   let outlineBlock = '';
   let outline: ChapterFactOutline | undefined;
   let stillMissingFacts = new Set<string>();
@@ -281,9 +281,9 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
   let outlineEvidence = evidence;
   if (twoStepEnabled) {
     // 4.17.6 大纲证据独立构建：事实大纲只提取可写事实（T0 关键事实层全量 + T1 高相关片段精选），
-    // 目录对大纲无消费价值且是逐调用不可缓存变化段——独立小预算（env DOCUMENT_OUTLINE_EVIDENCE_CHARS，
-    // 默认 2500 字符）跳过目录，把 outline L3 从 ~16K 压到 ~3K（前缀缓存命中率 90% 目标参数之一）
-    const outlineEvidenceCharsValue = Number(process.env.DOCUMENT_OUTLINE_EVIDENCE_CHARS || 2500);
+    // 目录对大纲无消费价值且是逐调用不可缓存变化段——独立小预算（outlineEvidenceChars，
+    // DOCUMENT_TUNING_PROFILE 可调，默认 2500 字符）跳过目录，把 outline L3 从 ~16K 压到 ~3K（前缀缓存命中率 90% 目标参数之一）
+    const outlineEvidenceCharsValue = tuningProfile().outlineEvidenceChars || 2500;
     const outlineEvidenceChars = Number.isFinite(outlineEvidenceCharsValue) && outlineEvidenceCharsValue > 0 ? Math.floor(outlineEvidenceCharsValue) : 2500;
     const outlineEvidenceText = evidenceBundlePrompt(bundle, { maxChars: outlineEvidenceChars, ...evidencePromptOptions });
     outline = await buildChapterFactOutline({ template, chapter, sections: chapter.sections?.filter(Boolean) || [], requiredFacts: chapter.requiredFacts, missingFacts, promptTexts, evidenceText: outlineEvidenceText, signal: options.signal, diagnostics: options.diagnostics });
@@ -313,8 +313,8 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
       // P0-3 两步瘦身：事实大纲已产出可写事实清单（facts + quantifiedFacts），第二步写作只需
       // 大纲事实对应的细节原文；证据预算降为基准的 60%——T0 关键参数层全量保留（零丢失原则），
       // T1 高相关片段缩量，T2 目录索引保留全貌与追溯。两步路径第二步输入与第一步相当，
-      // 降档后两步总输入收敛到单步路径水平；DOCUMENT_TWO_STEP_SLIM=0 关闭
-      if (process.env.DOCUMENT_TWO_STEP_SLIM !== '0') {
+      // 降档后两步总输入收敛到单步路径水平；（原 DOCUMENT_TWO_STEP_SLIM 回退已固化删除：0.6× 瘦身恒开）
+      {
         const slimBudget = Math.floor(evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars) * 0.6);
         const supplementNote = evidenceText.split('\n\n【定向补充检索】')[1];
         evidenceText = evidenceBundlePrompt(buildEvidenceBundle(chapter, outlineEvidence), { maxChars: slimBudget, ...evidencePromptOptions }) + (supplementNote ? `\n\n【定向补充检索】${supplementNote}` : '');
@@ -376,7 +376,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     options.chapterLevelContext || '',
     outlineBlock,
     '请生成可直接导出的 Markdown 章节，要求：',
-    '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的项目专属事实；法律法规名称、标准规范编号等公共知识可依据现行有效版本直接引用。',
+    '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的项目专属事实；任何带数值、工程量、规格、型号、品牌、参数的表述必须逐字来自绑定材料、蓝图参数桶或清单事实锁，材料中没有对应值时不得猜测填充、不得以行业惯例或公共知识为由虚构数值；公共知识豁免仅限法律法规名称、标准规范名称与编号（不带本项目数值）以及通用工艺做法表述，可依据现行有效版本直接引用。',
     '- 将材料要点自然融入正文；不要输出系统证据清单、中间分析过程或后台流程话术。',
     SECTION_GENERATION_SAFETY_RULES,
     // ── 块级变化段起点（同章各块以下内容互不相同；保持其在 prompt 尾部，共享前缀到此为止恒定）──
@@ -410,7 +410,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
       options.blueprintDataText || '',
       options.blueprintSliceText || '',
       '请生成可直接导出的 Markdown 章节，要求：',
-      '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的项目专属事实；法律法规名称、标准规范编号等公共知识可依据现行有效版本直接引用。',
+      '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的项目专属事实；任何带数值、工程量、规格、型号、品牌、参数的表述必须逐字来自绑定材料、蓝图参数桶或清单事实锁，材料中没有对应值时不得猜测填充、不得以行业惯例或公共知识为由虚构数值；公共知识豁免仅限法律法规名称、标准规范名称与编号（不带本项目数值）以及通用工艺做法表述，可依据现行有效版本直接引用。',
       '- 将材料要点自然融入正文；不要输出系统证据清单、中间分析过程或后台流程话术。',
       SECTION_GENERATION_SAFETY_RULES,
     ]),
@@ -637,8 +637,8 @@ export async function buildSectionFactCard(sectionTitle: string, evidence: Docum
   const taskCardPrompt = lines.length ? `【当前小节写作任务卡】\n小节：${sectionTitle}\n必须优先落位的资料事实：\n${lines.join('\n')}\n成稿要求：1）至少自然写入其中 2 条资料事实；2）如存在数字、规格、标准编号、数量、工期，必须至少原样写入 1 条；3）围绕“资料依据—对象范围—实施做法—检查验收/闭环”展开，不得写成“结合实际、按规范执行”的泛化空话；4）不得改写、换算或编造资料未提供的参数；5）量化参数落位硬性要求：本节正文每千字不少于 2 个不同量化参数（优先使用上方清单参数与资料原文参数），同一参数不得反复堆砌凑数，参数种类不足将被判为质量不达标打回重写。` : '';
   // 4.1 量化参数落位清单（两步生成第一步，零 LLM）：复用 extractChapterPreciseTokens 纯本地提取，
   // 在任务卡事实行（句粒度）之外单列精炼参数清单（词粒度），直接引导 LLM 逐参数落位，
-  // 弥补「事实行被整行跳过时量化参数一并丢失」的规划缺位。DOCUMENT_SECTION_QUANT_PLAN=0 回退为不注入。
-  const preciseTokens = process.env.DOCUMENT_SECTION_QUANT_PLAN === '0' ? [] : extractChapterPreciseTokens(evidence);
+  // 弥补「事实行被整行跳过时量化参数一并丢失」的规划缺位。（原 DOCUMENT_SECTION_QUANT_PLAN 回退已固化删除：注入恒开）
+  const preciseTokens = extractChapterPreciseTokens(evidence);
   const quantPlanPrompt = preciseTokens.length
     ? `【量化参数落位清单】\n本节资料中可直接落位的可靠精确参数/编号：${preciseTokens.join('、')}。这些参数来自绑定资料，不属于编造；涉及对应对象、部位、工序、材料、设备、质量验收或安全控制时必须自然写入正文，并保持原样或等价专业表达。`
     : '';
@@ -821,7 +821,7 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   // A2 块级增量压缩（小节管线对齐主题块管线口径）：章级 T0 关键事实层与摘要池已由
   // sharedFactLayerText 注入 L2 共享段，节级 L3 只带节相关命中片段（onlyRankBoosted + 1k-3k 预算）；
   // 历史缺陷：逐小节管线每节注入 3.5k-9k 字符证据且同章各节内容近似 → L3 占 79% 且前缀提前分叉
-  const blockEvidenceCeiling = Number(process.env.DOCUMENT_BLOCK_EVIDENCE_CHARS || 1000);
+  const blockEvidenceCeiling = tuningProfile().blockEvidenceChars || 1000;
   const blockEvidenceCeilingChars = Number.isFinite(blockEvidenceCeiling) && blockEvidenceCeiling > 0 ? Math.floor(blockEvidenceCeiling) : 1000;
   const sharedFactLayer = Boolean(input.sharedFactLayerText);
   // 4.17.6 节级 L3 压缩：写作只消费事实本身（T0 已由 L2 共享段承载 + T1 节相关命中片段 1K），
@@ -921,7 +921,7 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   // 被 outputTokensForChapter 的 5000 token 下限卡死（目标 2750 字需 ~5000 token 零富余，>3000 字必然截断）
   // → 补写截断 → 复审驳回 → 轮次耗尽 → 章节 failed 的确定性失败链；改为 2.6 系数直通 8192 上限，
   // 3750 字档仍有 20%+ 富余（思考已关闭时正文独占输出池，预算只保正文不保思考）
-  const llmCall = () => callDocumentLlm(system, prompt, false, { maxTokens: Math.min(8192, Math.max(2800, Math.ceil(input.targetWords * 2.6))), temperature: 0.25, signal: input.signal, diagnostics: input.diagnostics, contextLayers, prefixKey: `writer-section:${input.chapter.id}` });
+  const llmCall = () => callDocumentLlm(system, prompt, false, { maxTokens: Math.min(8192, Math.max(2800, Math.ceil(input.targetWords * 2.6))), temperature: 0, signal: input.signal, diagnostics: input.diagnostics, contextLayers, prefixKey: `writer-section:${input.chapter.id}` });
   const content = input.diagnostics
     ? await measureGenerationStep(input.diagnostics, `section-draft:${input.chapter.id}:${input.sectionTitle}`, llmCall)
     : await llmCall();
@@ -1012,7 +1012,7 @@ function writingTopicTitle(sectionTitle: string, index: number, total: number) {
 
 function writingTasksForSection(sectionTitle: string, targetWords: number): SectionWritingTask[] {
   if (/项目主要施工内容/u.test(sectionTitle)) return [{ sectionTitle, taskTitle: sectionTitle, targetWords: Math.max(targetWords, 2200), index: 1, total: 1 }];
-  const maxTaskWords = isCriticalDeepSection(sectionTitle) ? 760 : Math.max(1400, Math.floor(Number(process.env.DOCUMENT_WRITING_TASK_MAX_WORDS ?? 2800)));
+  const maxTaskWords = isCriticalDeepSection(sectionTitle) ? 760 : Math.max(1400, Math.floor(tuningProfile().writingTaskMaxWords ?? 2800));
   const taskCount = isCriticalDeepSection(sectionTitle) ? Math.max(3, Math.ceil(targetWords / maxTaskWords)) : targetWords > maxTaskWords * 1.5 ? Math.ceil(targetWords / maxTaskWords) : 1;
   const perTask = Math.max(800, Math.ceil(targetWords / taskCount));
   if (taskCount <= 1) return [{ sectionTitle, taskTitle: sectionTitle, targetWords, index: 1, total: 1 }];
@@ -1100,7 +1100,7 @@ async function buildFocusedSectionDraft(input: Parameters<typeof buildLlmSection
   ].filter(Boolean).join('\n\n'), false, {
     // focused writer 输出池扩容（与逐节写手同口径）：多 H4 结构开销下避免「工艺流程：」类截断
     maxTokens: Math.min(6000, Math.max(3000, Math.ceil(input.targetWords * 2.4))),
-    temperature: 0.2,
+    temperature: 0,
     signal: input.signal,
     diagnostics: input.diagnostics,
     contextLayers,
@@ -1177,7 +1177,7 @@ async function supplementSectionContent(input: Parameters<typeof buildLlmSection
     '请输出可直接追加或插入到本小节的补充段落；不要重复小节标题，不要解释生成过程；优先使用绑定资料中的事实和量化参数，不得输出“该小节围绕”等模板化占位句。',
     evidenceText ? `绑定材料：\n${evidenceText}` : '',
     `已有小节正文：\n${sectionContentBody(input.currentContent).slice(0, 12000)}`,
-  ].filter(Boolean).join('\n\n'), false, { maxTokens: Math.min(8192, Math.max(2800, Math.ceil(patchTarget * 2.6))), temperature: 0.25, signal: input.signal, diagnostics: input.diagnostics, contextLayers, prefixKey: `writer-supplement:${input.chapter.id}` });
+  ].filter(Boolean).join('\n\n'), false, { maxTokens: Math.min(8192, Math.max(2800, Math.ceil(patchTarget * 2.6))), temperature: 0, signal: input.signal, diagnostics: input.diagnostics, contextLayers, prefixKey: `writer-supplement:${input.chapter.id}` });
   const normalizedPatch = sanitizeFormalMarkdown(removeUnwantedDrawingImages(patch || '', input.forbidDrawingImages)).replace(/^#{3,4}\s+.*\n+/u, '').trim();
   return normalizedPatch ? `${input.currentContent.trim()}\n\n${normalizedPatch}` : input.currentContent;
 }
@@ -1239,7 +1239,7 @@ async function buildTaskBasedSectionContent(input: Parameters<typeof buildLlmSec
     }
     return taskContent ? sectionContentBody(taskContent) : undefined;
   };
-  const configuredTaskConcurrency = Number(process.env.DOCUMENT_WRITING_TASK_CONCURRENCY || 2);
+  const configuredTaskConcurrency = tuningProfile().writingTaskConcurrency || 2;
   const taskConcurrency = Math.max(1, Math.min(tasks.length, 2, Number.isFinite(configuredTaskConcurrency) ? Math.floor(configuredTaskConcurrency) : 2));
   for (let offset = 0; offset < tasks.length; offset += taskConcurrency) {
     throwIfAborted(input.signal);
@@ -1299,12 +1299,12 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
   if ((input.chapter.sections || []).filter(Boolean).length > 0) return buildSectionParallelChapterContent(input);
   if (targets.length < 2) return undefined;
   const defaultGroupSize = targets.length >= 30 ? 4 : 5;
-  const configuredGroupSize = Number(process.env.DOCUMENT_SECTION_GROUP_SIZE || defaultGroupSize);
+  const configuredGroupSize = tuningProfile().sectionGroupSize || defaultGroupSize;
   const maxGroupSize = Math.max(2, Math.min(targets.length >= 30 ? 5 : 6, Number.isFinite(configuredGroupSize) ? Math.floor(configuredGroupSize) : defaultGroupSize));
   const chapterHasMajorConstructionSection = targets.some(target => /项目主要施工内容/u.test(target.title));
   const groups = groupSectionTargets(targets, maxGroupSize);
   const defaultGroupConcurrency = 6;
-  const configuredConcurrency = Number(process.env.DOCUMENT_SECTION_GROUP_CONCURRENCY || defaultGroupConcurrency);
+  const configuredConcurrency = tuningProfile().sectionGroupConcurrency || defaultGroupConcurrency;
   // 大章节（≥30 小节）历史原因组间强制串行导致 50 小节章节耗时 50+ 分钟；
   // 组间并发默认 6（受全局 LLM 信号量约束），失败降级串行由上层失败 streak 机制兜底
   const concurrency = Math.max(1, Math.min(groups.length, getDocumentLlmMaxConcurrency(), Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : defaultGroupConcurrency));
@@ -1346,7 +1346,7 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
     const buildSectionTaskGroup = async () => {
       const parts: Array<string | undefined> = new Array(group.length);
       const failures: string[] = [];
-      const taskConcurrency = Math.max(1, Math.min(group.length, Number(process.env.DOCUMENT_SECTION_GROUP_TASK_CONCURRENCY || 4)));
+      const taskConcurrency = Math.max(1, Math.min(group.length, tuningProfile().sectionGroupTaskConcurrency || 4));
       // 全章表格计划分配：未分配必写表挂到本章最后一个小节兜底（分组链路同样保证必写表不丢失）
       const chapterAllTitles = targets.map(item => item.title);
       const unassignedPlans = unassignedSectionTablePlans(input.chapter, chapterAllTitles);
@@ -1456,7 +1456,7 @@ export async function buildSectionGroupChapterContent(input: { template: Documen
 export async function buildSectionParallelChapterContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; skeletonProjectContext?: string; requirement?: string; roleContext?: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; projectRoot?: string; modelName?: string; materialContextHash?: string; allowPartialResult?: boolean; compactProjectContext?: boolean; scopedProjectContext?: boolean; blueprintDataText?: string; blueprintSliceText?: string; sectionEvidenceProvider?: (sectionTitle: string) => Promise<DocumentEvidence[]>; onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal }) {
   const targets = sectionTargets(input.chapter, input.targetWords);
   if (targets.length < 2) return undefined;
-  const configuredSectionConcurrency = Number(process.env.DOCUMENT_SECTION_CONCURRENCY || targets.length || 1);
+  const configuredSectionConcurrency = tuningProfile().sectionConcurrency || targets.length || 1;
   const concurrency = Math.max(1, Math.min(targets.length, Number.isFinite(configuredSectionConcurrency) ? Math.floor(configuredSectionConcurrency) : (targets.length || 1)));
   const results: Array<string | undefined> = new Array(targets.length);
   const completedSections: Array<string | undefined> = new Array(targets.length);
@@ -1464,7 +1464,7 @@ export async function buildSectionParallelChapterContent(input: { template: Docu
   // D1/A1 章级证据池上移 L2（小节管线对齐主题块管线口径）：T0 关键事实层 + 章级 T1 摘要池 + T2 目录
   // 一次构建、同章各小节共享注入（各节值完全相同 → prefix cache 共享命中），节级 L3 只带节相关增量（A2）——
   // 历史缺陷：同章 N 个小节各注入一份全量事实行+全章 T1 片段是节级调用输入 token 大头，命中率长期 58% 且 L3 占 79%
-  const chapterPoolChars = Number(process.env.DOCUMENT_CHAPTER_POOL_CHARS || 8000);
+  const chapterPoolChars = tuningProfile().chapterPoolChars || 8000;
   const sharedFactLayerText = buildChapterEvidencePool(buildEvidenceBundle(input.chapter, input.evidence), input.chapter.requiredFacts || [], Number.isFinite(chapterPoolChars) ? Math.floor(chapterPoolChars) : 8000);
   // 表格计划按小节分配：未被任何小节标题承接的必写表统一挂到本章最后一个小节（收尾小节）兜底输出
   const allSectionTitles = targets.map(item => item.title);
@@ -1568,8 +1568,8 @@ function sectionSupplementQualityIssue(sectionTitle: string, content: string) {
 }
 
 export function sectionSupplementAttempts(totalTargets: number) {
-  const configured = Number(process.env.DOCUMENT_SECTION_SUPPLEMENT_ATTEMPTS ?? 2);
-  return Math.max(1, Math.min(3, Number.isFinite(configured) ? Math.floor(configured) : 2, totalTargets));
+  // （原 DOCUMENT_SECTION_SUPPLEMENT_ATTEMPTS 已固化删除：上限恒为 2）
+  return Math.max(1, Math.min(3, 2, totalTargets));
 }
 
 export async function buildQualifiedSectionSupplement(input: Parameters<typeof buildLlmSectionContent>[0], maxAttempts: number) {
@@ -1670,17 +1670,17 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     });
     return index === blocks.length - 1 ? [...own, ...unassignedPlans] : own;
   });
-  const configuredConcurrency = Number(process.env.DOCUMENT_PLANNED_BLOCK_CONCURRENCY || blocks.length);
+  const configuredConcurrency = tuningProfile().plannedBlockConcurrency || blocks.length;
   const concurrency = Math.max(1, Math.min(blocks.length, getDocumentLlmMaxConcurrency(), Number.isFinite(configuredConcurrency) ? Math.floor(configuredConcurrency) : blocks.length));
   const results: Array<string | undefined> = new Array(blocks.length).fill(undefined);
   // D1/A1 章级证据池上移 L2：T0 关键事实层 + 章级 T1 摘要池 + T2 目录一次构建、同章各块共享注入
   // （各块值完全相同 → prefix cache 共享命中），块级 L3 只带块相关增量（A2）——N 个块各注入一份
   // 全量事实行+全章 T1 片段是块级调用输入 token 的大头，也是「前三章写很久 + 命中率低」的根因之一
-  const chapterPoolChars = Number(process.env.DOCUMENT_CHAPTER_POOL_CHARS || 8000);
+  const chapterPoolChars = tuningProfile().chapterPoolChars || 8000;
   const sharedFactLayerText = buildChapterEvidencePool(buildEvidenceBundle(input.chapter, input.evidence), input.chapter.requiredFacts || [], Number.isFinite(chapterPoolChars) ? Math.floor(chapterPoolChars) : 8000);
-  // A2 块级增量压缩：块级证据预算 1k（env DOCUMENT_BLOCK_EVIDENCE_CHARS，默认 1000），
+  // A2 块级增量压缩：块级证据预算 1k（blockEvidenceChars，DOCUMENT_TUNING_PROFILE 可调，默认 1000），
   // 且只保留块相关命中片段（onlyRankBoosted）——块级 L3 从 7k-26k 压缩到 1k 量级
-  const blockEvidenceCeiling = Number(process.env.DOCUMENT_BLOCK_EVIDENCE_CHARS || 1000);
+  const blockEvidenceCeiling = tuningProfile().blockEvidenceChars || 1000;
   const blockEvidenceCeilingChars = Number.isFinite(blockEvidenceCeiling) && blockEvidenceCeiling > 0 ? Math.floor(blockEvidenceCeiling) : 1000;
   const writeBlock = async (block: (typeof blocks)[number], index: number): Promise<string | undefined> => {
     // 彻底修复同名结构：与主题块标题同名的 H4 要点由 H3 外壳直接承担，不再要求输出同名 H4
@@ -1782,13 +1782,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     let lastDuplicates: string[] = [];
     let lastExtraneous: string[] = [];
     let lastChars = 0;
-    // 2.6 补写上限收紧：块级写作/反馈重试循环上限显式化（默认 2，与既有行为一致；
-    // DOCUMENT_BLOCK_MAX_ATTEMPTS 可调，=0 回退旧值 2）——上限超出即判失败转上层紧凑备用
-    const blockMaxAttempts = (() => {
-      const raw = Number(process.env.DOCUMENT_BLOCK_MAX_ATTEMPTS ?? 2);
-      if (raw === 0) return 2;
-      return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 2;
-    })();
+    // 2.6 补写上限收紧：块级写作/反馈重试循环上限显式化（固化为 2，与既有行为一致）
+    // ——上限超出即判失败转上层紧凑备用（原 DOCUMENT_BLOCK_MAX_ATTEMPTS 已固化删除）
+    const blockMaxAttempts = 2;
     for (let attempt = 0; attempt < blockMaxAttempts; attempt += 1) {
       // 第二轮反馈针对性列出缺失/重复 H4 标题，让重试有的放矢，避免通用反馈反复缺失要点后被迫拆半/整章降级
       const feedback = attempt === 0 ? '' : [

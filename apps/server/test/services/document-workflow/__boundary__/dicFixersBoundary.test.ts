@@ -1833,17 +1833,6 @@ describe('L1 crossChapterSemanticDuplicateIssues 语义重复检测', () => {
   it('L1 单章无段落 → 不报', async () => {
     expect(await crossChapterSemanticDuplicateIssues([])).toEqual([]);
   });
-  it('L1 DOCUMENT_CROSS_CHAPTER_DEDUP=0 回退', async () => {
-    const previous = process.env.DOCUMENT_CROSS_CHAPTER_DEDUP;
-    process.env.DOCUMENT_CROSS_CHAPTER_DEDUP = '0';
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', '本工程混凝土强度等级C30，浇筑厚度200mm。'),
-      chapterOf('ch2', '第二章 施工部署', '结构层混凝土采用C30强度等级，浇筑200mm厚度控制。'),
-    ];
-    const issues = await crossChapterSemanticDuplicateIssues(chapters);
-    process.env.DOCUMENT_CROSS_CHAPTER_DEDUP = previous;
-    expect(issues).toEqual([]);
-  });
 });
 
 describe('L2 stripCrossChapterSemanticDuplicateParagraphs 跨章重复删除', () => {

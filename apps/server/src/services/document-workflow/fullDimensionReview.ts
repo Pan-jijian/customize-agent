@@ -13,7 +13,7 @@ import type { DocumentDraftChapter, DocumentGenerationDiagnostics, DocumentTempl
 import type { DocumentJsonSchema } from './llmClient';
 import { callDocumentLlmJson } from './llmClient';
 import { documentTextLength } from './budget';
-import { repairChapterByQuality } from './rolePipeline';
+import { repairChapterByQuality, repairPatchGuard } from './rolePipeline';
 import { finalizeChapterContentQuality } from './documentGeneratorHelpers';
 import { QINGTIAN_REVIEW_SYSTEM, qingtianBlockReviewPrompt, qingtianFixInstructionFor } from './qingtianReviewSpec';
 import { docSystemPrefix } from './markdownComposer';
@@ -212,7 +212,7 @@ async function reviewDocumentBlock(chapters: DocumentDraftChapter[], context: { 
   const blockContent = chapters.map(chapter => `### ${chapter.title}\n${chapter.content}`).join('\n\n');
   const reviewed = await callDocumentLlmJson<QingtianBlockReviewResult>(docSystemPrefix(QINGTIAN_REVIEW_SYSTEM), qingtianBlockReviewPrompt({ ...context, chapterTitles: chapters.map(chapter => chapter.title), blockContent }), {
     maxTokens: 1800,
-    temperature: 0.1,
+    temperature: 0,
     signal,
     diagnostics,
     schema: REVIEW_SCHEMA,
@@ -266,9 +266,9 @@ export async function runFullDimensionReview(input: FullDimensionReviewInput): P
   // ── 0. 确定性前置：跨章数据矛盾预扫描（分块盲区补足）+ 全文标题集合（输出定位后置校验基准）──
   const knownConflictLines = formatKnownConflictLines(scanCrossChapterDataConflicts(chapters));
   const headings = collectDocumentHeadings(chapters);
-  // 2.1 patch 前置校验开关（两阶段灰度）：observe 只观测命中（默认）、enforce 拒绝坏 patch、0 关闭
-  const patchGuardMode = process.env.DOCUMENT_QINGTIAN_PATCH_GUARD || 'observe';
-  const patchGuard = patchGuardMode === '0' ? undefined : { observeOnly: patchGuardMode !== 'enforce', diagnostics };
+  // 2.1 → P11 patch 前置校验统一入口（DOCUMENT_QINGTIAN_PATCH_GUARD 全局模式开关）：
+  // observe 只观测命中（默认）、enforce 拒绝坏 patch、'0' 关闭（不传 patchGuard）
+  const patchGuard = repairPatchGuard('qingtian-review-repair', diagnostics);
   // ── 1. 分块评审（每块一次调用，单块失败显式记录并跳过，其余块继续）──
   const allIssues: QingtianReviewIssue[] = [];
   for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
@@ -319,6 +319,9 @@ export async function runFullDimensionReview(input: FullDimensionReviewInput): P
       const chapter = chapters[group.chapterIndex];
       const templateChapter = effectiveChapters.find(item => item.id === chapter.id || item.title === chapter.title);
       onStage?.({ status: 'running', message: `全维度评审修复（第 ${round + 1} 轮）：${chapter.title}（${group.issues.length} 处）`, details: group.issues.map(issue => `[${issue.riskLevel}]${issue.description.slice(0, 48)}`) });
+      // P12 说明：qingtian-review-repair 不接入 withPatchRollback——本轮的变差防线已由轮级块级 LLM 复评
+      // （修复章重新分段评审，残留不减少即提前退出）承担，若按章接入 withPatchRollback 会把复评粒度从
+      // 块级（多章一次调用）退化为章级（每章一次 LLM 复评），LLM 调用成本翻倍且破坏既有闭环时序。
       const repaired = await run(() => repairChapterByQuality({
         template,
         chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence, missingFacts: chapter.missingFacts, sections: chapter.sections },

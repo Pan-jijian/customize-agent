@@ -62,9 +62,9 @@ export function shouldTriggerDeepRetrieval(input: {
     || (input.evidenceCount < 8 && input.riskLevel !== 'low');
 }
 
-export function buildDeepRetrievalQueries(chapter: DocumentTemplateChapter, requiredNeeds: string[] = []) {
+export function buildDeepRetrievalQueries(chapter: DocumentTemplateChapter, requiredNeeds: string[] = [], extraClues: string[] = []) {
   const allSections = chapter.sections || [];
-  const allFacts = [...chapter.requiredFacts, ...requiredNeeds];
+  const allFacts = [...chapter.requiredFacts, ...requiredNeeds, ...extraClues];
   // 用评分选择最重要的 sections 和 facts（而非硬截断前 N 个）
   const topSections = selectByScore(allSections, s => textImportanceScore(s), { maxItems: 16, maxChars: 1200 }, 'retrieval-sections').selected;
   const topFacts = selectByScore(allFacts, f => textImportanceScore(f), { maxItems: 16, maxChars: 1200 }, 'retrieval-facts').selected;
@@ -129,6 +129,8 @@ export async function retrieveDeepChapterEvidence(input: {
   fileRoleByPath: Map<string, string>;
   fileProcessingByPath: Map<string, string>;
   requiredNeeds?: string[];
+  /** 用户提示词语义解析出的事实线索：与 requiredNeeds 同权合入精确查询（用户显式给出的事实优先召回） */
+  extraClues?: string[];
   highRisk?: boolean;
   signal?: AbortSignal;
 }) {
@@ -146,8 +148,8 @@ export async function retrieveDeepChapterEvidence(input: {
   // 缺失事实精确查询（原 retrieveMissingFactEvidence 的职责）并入深召回：
   // 一次自适应并发批次同时覆盖精确 need 查询与广谱扩展查询，消除第二路串行检索；
   // 精确查询结果标记 required-fact-evidence 以保留预算优先/跨章节豁免语义
-  const preciseNeeds = (input.requiredNeeds || []).slice(0, 8);
-  const baseQueries = buildDeepRetrievalQueries(input.chapter, input.requiredNeeds).slice(0, maxQueries);
+  const preciseNeeds = [...new Set([...(input.requiredNeeds || []), ...(input.extraClues || [])])].slice(0, 12);
+  const baseQueries = buildDeepRetrievalQueries(input.chapter, input.requiredNeeds, input.extraClues).slice(0, maxQueries);
   const preciseQueries = preciseNeeds
     .map(need => `${input.chapter.title} ${need} ${(input.chapter.sections || []).join(' ')}`.trim())
     .filter(query => !baseQueries.includes(query));
@@ -163,11 +165,11 @@ export async function retrieveDeepChapterEvidence(input: {
       filters: { filePaths: input.scopedFilePaths },
       limit,
       weights: { keyword: 0.62, vector: 0.32, rewrite: 0.9, hybridBonus: 0.28 },
-      // E1/E2：深召回为生成场景检索——跳过 LLM 查询扩展并降级为确定性重排（heuristicRerank），
-      // cross-encoder 在 transformers v3 无 worker proxy，ONNX Run 在主线程同步执行，
-      // 多章节并发深召回叠加时阻塞事件循环数十分钟
+      // E1/E2 历史：深召回曾禁用 cross-encoder（transformers v3 主线程同步 ONNX 阻塞事件循环）；
+      // LocalReranker 已下沉常驻 worker 线程（rerank-worker-thread，KB_RERANKER_WORKER 开关），
+      // 深召回恢复交叉编码重排：清单/图纸等表格类证据在向量空间弱势，交叉编码重排可显著提升
+      // 精确数值事实（规格-数量行、标高-坡率标注）的召回排序质量；worker 不可用时自动回退启发式重排
       generationMode: true,
-      disableReranker: true,
     });
     return mapSearchResults({ chapter: input.chapter, results: result.results.filter(item => input.scopedFilePaths.includes(item.filePath)), fileRoleByPath: input.fileRoleByPath, fileProcessingByPath: input.fileProcessingByPath, boost: entry.boost, source: entry.source });
   }, { kind: 'deepRetrieval', highRisk: input.highRisk });

@@ -630,27 +630,24 @@ export const L0_WRITER_SYSTEM_PREFIX = [
  * 逐字节匹配，公共段从 ~300 字符扩到 3000+ 字符，跨任务类型（Writer/规划/评审/修复/提取/校准）
  * 前缀命中显著上升。FORMAL_WRITING_RULES 首行自带「不得覆盖用户在提示词中已明确的要求」自限声明，
  * 对 JSON 提取/评审类调用无副作用（输出契约仍由 L0 第 3 条与调用点 prompt 约束）。
- * DOCUMENT_UNIFIED_SYSTEM_PREFIX=0 回退为仅 L0 公共前缀（3.2 旧结构）。
+ * （原 DOCUMENT_UNIFIED_SYSTEM_PREFIX 回退已固化删除：统一公共段恒开）
  */
 function unifiedSystemHead(): string {
-  return process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX === '0'
-    ? DOCUMENT_L0_COMMON_PREFIX
-    : [DOCUMENT_L0_COMMON_PREFIX, FORMAL_WRITING_RULES].join('\n\n');
+  return [DOCUMENT_L0_COMMON_PREFIX, FORMAL_WRITING_RULES].join('\n\n');
 }
 
-/** 3.2 回退开关：DOCUMENT_L0_SYSTEM_PREFIX=0 时返回各调用点传入的 legacy 前缀（恢复原有 system 分布） */
-export function writerSystemPrefix(legacyPrefix: string): string {
-  if (process.env.DOCUMENT_L0_SYSTEM_PREFIX === '0') return legacyPrefix;
-  // 3.1：统一公共段（L0 + FORMAL 完整规则）前置为开头，writer 身份句后移到规则之后固定位置
+/** Writer 系统前缀：统一公共段（L0 + FORMAL 完整规则）前置为开头，writer 身份句后移到规则之后固定位置。
+ * （原 DOCUMENT_L0_SYSTEM_PREFIX legacy 回退已固化删除：统一前缀恒开，legacyPrefix 参数保留兼容调用点） */
+export function writerSystemPrefix(_legacyPrefix: string): string {
   return [unifiedSystemHead(), '你是施工组织设计文档写作专家。', SECTION_GENERATION_SAFETY_RULES].join('\n\n');
 }
 
 /** 3.2 非 Writer 调用点（规划/评审/修复/提取/校准）统一挂接公共前缀：role 为该 调用点角色身份与任务规则，
  * 与 Writer 家族共享 DOCUMENT_L0_COMMON_PREFIX 第一段，跨类型 prefix cache 从零命中变为全类型共享。
  * 3.1：公共段扩展为 L0 + FORMAL_WRITING_RULES（≥2000 字符），role 保持尾部固定位置。
- * DOCUMENT_L0_SYSTEM_PREFIX=0 时回退 legacyPrefix（缺省即 role 本身） */
-export function docSystemPrefix(role: string, legacyPrefix?: string): string {
-  return process.env.DOCUMENT_L0_SYSTEM_PREFIX === '0' ? (legacyPrefix ?? role) : [unifiedSystemHead(), role].join('\n\n');
+ * （原 DOCUMENT_L0_SYSTEM_PREFIX legacy 回退已固化删除：统一前缀恒开，legacyPrefix 参数保留兼容调用点） */
+export function docSystemPrefix(role: string, _legacyPrefix?: string): string {
+  return [unifiedSystemHead(), role].join('\n\n');
 }
 
 function hasSectionNumber(section: string) {

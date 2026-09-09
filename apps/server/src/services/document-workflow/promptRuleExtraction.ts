@@ -551,7 +551,7 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
       `请输出 ${minSections}-${maxSections} 个适合直接成稿的二级小节标题。标题必须具体、业务相关、能承载真实资料；每个标题控制在 16 个汉字以内，避免多个小节表达同一内容。核心章节不得只输出"总体部署与责任分工、实施流程与关键控制"两个泛化小节。`,
       orderFeedback,
       'JSON 格式：{"sections":["小节标题1","小节标题2"]}',
-    ].filter(Boolean).join('\n\n'), { maxTokens: 1600, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics });
+    ].filter(Boolean).join('\n\n'), { maxTokens: 1600, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
     const sections = Array.from(new Set(compoundSectionSeeds(input.chapter.title)));
     for (const title of (result?.sections || []).map(section => cleanSectionTitleArtifacts(normalizePlannedSectionTitle(section))).filter(title => !isInvalidPlannedSectionTitle(title, input.chapter.title))) {
       if (!sections.some(section => section.includes(title) || title.includes(section))) sections.push(title);
@@ -616,7 +616,7 @@ export async function planAdditionalSectionsWithLlm(input: { template: DocumentT
       `本章已有小节（结构锁定，不可修改）：${existing.join('、')}`,
       '请输出 0-3 个本章缺失的专业工作面小节标题；无缺失时返回空数组。',
       'JSON 格式：{"sections":[{"title":"小节标题","basis":"展开素材来源说明"}]}',
-    ].filter(Boolean).join('\n\n'), { maxTokens: 1200, temperature: 0.1, signal: input.signal, diagnostics: input.diagnostics });
+    ].filter(Boolean).join('\n\n'), { maxTokens: 1200, temperature: 0, signal: input.signal, diagnostics: input.diagnostics });
     const additions: string[] = [];
     for (const item of (result?.sections || [])) {
       const title = cleanSectionTitleArtifacts(normalizePlannedSectionTitle(String(item?.title || '')));

@@ -14,6 +14,7 @@ import { stringifyFactValue, throwIfAborted } from './utils';
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { evidenceSafetyKey } from './evidenceContentSafety';
 import { filterFactsByProjectScope, type ProjectMaterialScope } from './projectMaterialScope';
+import { tuningProfile } from './tuningProfile';
 
 export function extractFacts(template: DocumentTemplate, evidence: DocumentEvidence[], spec?: AutoDocumentSpecPackage): Record<string, string> {
   const facts: Record<string, string> = {};
@@ -26,7 +27,7 @@ export function extractFacts(template: DocumentTemplate, evidence: DocumentEvide
 
 /** 表格工作簿磁盘解析进程内缓存（key=绝对路径+roleId，mtime+size 校验失效）：生成准备与 finalize
  *  两次全量抽取解析同一批表文件，缓存命中零磁盘 IO/零 XLSX 解析；文件内容变化自动失效。
- *  env DOCUMENT_TABLE_PARSE_CACHE=0 关闭（回退逐次解析） */
+ *  （原 DOCUMENT_TABLE_PARSE_CACHE 回退已固化删除：缓存恒开） */
 const workbookTablesCache = new Map<string, { mtimeMs: number; size: number; tables: StructuredTableFact[] }>();
 
 function parseWorkbookTables(absolute: string, item: DocumentEvidence): StructuredTableFact[] {
@@ -49,7 +50,6 @@ function parseWorkbookTables(absolute: string, item: DocumentEvidence): Structur
 }
 
 function parseWorkbookTablesCached(absolute: string, item: DocumentEvidence): StructuredTableFact[] {
-  if (process.env.DOCUMENT_TABLE_PARSE_CACHE === '0') return parseWorkbookTables(absolute, item);
   const stat = fs.statSync(absolute);
   const key = `${absolute}:${item.roleId || 'table'}`;
   const cached = workbookTablesCache.get(key);
@@ -270,8 +270,8 @@ export function shouldRunLlmFactExtraction(existingFacts: DocumentFact[], templa
 
 export async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: string, template: DocumentTemplate, spec?: AutoDocumentSpecPackage, signal?: AbortSignal, diagnostics?: DocumentGenerationDiagnostics): Promise<{ facts: DocumentFact[]; stages: DocumentExecutionStage[] }> {
   const stages: DocumentExecutionStage[] = [{ type: 'fact_extraction', roleId: 'llm-json', status: 'skipped', message: 'LLM JSON 抽取未启用或无可用模型' }];
-  const maxChars = Math.max(12000, Math.floor(Number(process.env.DOCUMENT_FACT_EXTRACTION_MAX_CHARS ?? 45000)));
-  const maxItems = Math.max(8, Math.floor(Number(process.env.DOCUMENT_FACT_EXTRACTION_MAX_ITEMS ?? 48)));
+  const maxChars = Math.max(12000, Math.floor(tuningProfile().factExtractionMaxChars ?? 45000));
+  const maxItems = Math.max(8, Math.floor(tuningProfile().factExtractionMaxItems ?? 48));
   let chars = 0;
   const sampleParts: string[] = [];
   // 按分数排序取最重要的证据（而非前 maxItems 个）
@@ -292,7 +292,7 @@ export async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTe
   const llm = await callDocumentLlmJson<{ facts?: Array<{ fieldId?: string; fieldName?: string; key: string; value: string; sourceFile?: string; roleId?: string; processingType?: string; confidence?: number }> }>(
     promptTexts || '你是文档事实抽取器。',
     `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色；事实取舍和冲突处理遵循规范包字段说明、文件角色和提示词角色配置。\n返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","sourceFile":"...","roleId":"...","processingType":"reference","confidence":0.8}]}。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`,
-    { signal, maxTokens: 1800, temperature: 0.1, diagnostics },
+    { signal, maxTokens: 1800, temperature: 0, diagnostics },
   );
   throwIfAborted(signal);
   if (!llm?.facts?.length) return { facts: [], stages };
@@ -595,7 +595,7 @@ function buildLabeledCodeTokenIndex(evidence: DocumentEvidence[]) {
  *  三层规则：① 污染截断——值内出现表格碎片/页码/标题标记时从污染点截断，残余 <2 字符或形态非法则丢弃；
  *  ② 叙述段拒收——非长文本白名单字段值长 >120 字符直接丢弃；
  *  ③ 编号回源补全——编号类字段值是证据标签语境中更长编号 token 的真前缀（长度差 ≥2）时补全。
- *  计数经 stats 累加（不静默丢弃）；env DOCUMENT_FACT_SANITIZE=0 由调用方回退直通。 */
+ *  计数经 stats 累加（不静默丢弃）。（原 DOCUMENT_FACT_SANITIZE 回退已固化删除：净化门恒开） */
 export function sanitizeExtractedFacts(facts: DocumentFact[], evidence: DocumentEvidence[], stats: FactSanitizeStats): DocumentFact[] {
   let codeIndex: Map<string, number> | undefined;
   const result: DocumentFact[] = [];
@@ -641,7 +641,7 @@ export function sanitizeExtractedFacts(facts: DocumentFact[], evidence: Document
  *  解析缓存（workbookTablesCache），同一批表文件两次调用间零重复磁盘 IO。
  *  1.1 事实净化门：出口对三类事实统一过 sanitizeExtractedFacts（表格碎片/页码/标题标记截断、
  *  叙述段拒收、编号截断回源补全），计数进 diagnostics.factSanitize（进度页后台诊断可观测）；
- *  env DOCUMENT_FACT_SANITIZE=0 回退直通（行为保持）。 */
+ *  （原 DOCUMENT_FACT_SANITIZE 回退已固化删除：净化门恒开） */
 export function extractLocalFactPool(input: {
   evidence: DocumentEvidence[];
   template: DocumentTemplate;
@@ -657,7 +657,6 @@ export function extractLocalFactPool(input: {
     structuredTables: filterFactsByProjectScope(extractStructuredTables(input.evidence), input.scope),
   };
   const factSanitize: FactSanitizeStats = { truncated: 0, dropped: 0, repaired: 0 };
-  if (process.env.DOCUMENT_FACT_SANITIZE === '0') return { ...pool, factSanitize };
   pool.localFacts = sanitizeExtractedFacts(pool.localFacts, input.evidence, factSanitize);
   pool.projectBasicFacts = sanitizeExtractedFacts(pool.projectBasicFacts, input.evidence, factSanitize);
   pool.preciseFacts = sanitizeExtractedFacts(pool.preciseFacts, input.evidence, factSanitize);

@@ -12,6 +12,7 @@ import { evaluateDocumentReadiness } from '../document-validation/documentReadin
 import type { DocumentTemplate, ProjectBinding, PromptBinding } from './types';
 import { templateProjectBindings } from './projectMaterialProfile';
 import { charsPerPageForSettings, explicitLengthTargets } from './budget';
+import { tuningProfile } from './tuningProfile';
 import { referenceStructureSuggestion as buildReferenceStructureSuggestion } from './templateReferenceService';
 
 export type PromptExecutionCategory = 'writer' | 'chapter' | 'extraction' | 'formatting' | 'reference';
@@ -465,7 +466,7 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
       evidenceCount: previewEvidenceCount,
       targetWords: previewTargetWords,
       hasVeryLargeExplicitChapter: previewChapters.some(chapter => (chapter.sections || []).filter(Boolean).length >= 30),
-      configuredChapterConcurrency: Number(process.env.DOCUMENT_CHAPTER_CONCURRENCY || 0),
+      configuredChapterConcurrency: tuningProfile().chapterConcurrency || 0,
     });
   } catch {
     // 策略预估失败不影响模板校验主流程

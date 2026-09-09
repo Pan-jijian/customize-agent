@@ -68,15 +68,6 @@ describe('planDocument 语义查询扩展（语义模型判别为主，正则仅
     expect(plan.chapters[0].sections[0].evidenceQueries).toContain(RESOURCE_QUERY);
   });
 
-  it('DOCUMENT_QUERY_EXPANSION_SEMANTIC=0 → 不调用语义模型，正则兜底仍生效', async () => {
-    vi.stubEnv('DOCUMENT_QUERY_EXPANSION_SEMANTIC', '0');
-    const embedSpy = vi.fn(protoWordEmbed);
-    const template = minimalTemplate([{ id: 'ch-1', title: '确保人、材、机的保障体系与措施', sections: [], queries: [], requiredFacts: [], purpose: '' }]);
-    const { plan } = await planDocument({ template, context: minimalContext(), embedDocuments: embedSpy });
-    expect(embedSpy).not.toHaveBeenCalled();
-    expect(plan.chapters[0].sections[0].evidenceQueries).toContain(RESOURCE_QUERY);
-  });
-
   it('连续形态「人材机」标题正则仍命中（回归保护）', async () => {
     const template = minimalTemplate([{ id: 'ch-1', title: '人材机保障体系', sections: [], queries: [], requiredFacts: [], purpose: '' }]);
     const { plan } = await planDocument({ template, context: minimalContext(), embedDocuments: protoWordEmbed });

@@ -464,10 +464,6 @@ describe('dedupeCrossSectionDuplicateSentences 跨小节整句重复合并（3.3
 });
 
 describe('dedupeCrossSectionDuplicateSentences 跨章同名小节序号化（1.5 双补盲之句子级）', () => {
-  afterEach(() => {
-    delete process.env.DOCUMENT_CROSS_CHAPTER_DEDUP;
-  });
-
   // 实锤漏网句（方案 1.5：9 种句子各出现 2 次之一）
   const crossChapterSentence = '混凝土浇筑采用分层连续浇筑，每层厚度不超过500mm，振捣棒插入间距不大于400mm，养护不少于14天。';
 
@@ -477,13 +473,6 @@ describe('dedupeCrossSectionDuplicateSentences 跨章同名小节序号化（1.5
     expect(result.split(crossChapterSentence).length - 1).toBe(1);
     // 标题行本身不动
     expect(result.split('### 施工方法').length - 1).toBe(2);
-  });
-
-  it('env DOCUMENT_CROSS_CHAPTER_DEDUP=0 回退：同名小节按同小节判定，重复句保留', () => {
-    process.env.DOCUMENT_CROSS_CHAPTER_DEDUP = '0';
-    const content = `### 施工方法\n${crossChapterSentence}\n### 施工方法\n${crossChapterSentence}`;
-    const result = dedupeCrossSectionDuplicateSentences(content);
-    expect(result.split(crossChapterSentence).length - 1).toBe(2);
   });
 
   it('不同名小节行为不变：跨小节重复句仍删除', () => {

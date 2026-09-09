@@ -63,7 +63,7 @@ export async function reviewTemplatingSemantics(input: {
   try {
     const result = await callDocumentLlmJson<{ issues?: string[] }>(docSystemPrefix(TEMPLATING_REVIEW_SYSTEM), contextLines.join('\n\n'), {
       maxTokens: 1200,
-      temperature: 0.1,
+      temperature: 0,
       signal: input.signal,
       diagnostics: input.diagnostics,
       taskKind: 'structuredGeneration',

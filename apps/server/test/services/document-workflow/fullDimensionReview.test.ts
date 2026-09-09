@@ -8,10 +8,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { qingtianReviewValidationIssues, runFullDimensionReview, splitChaptersIntoReviewBlocks } from '@/services/document-workflow/fullDimensionReview';
 import { qingtianBlockReviewPrompt } from '@/services/document-workflow/qingtianReviewSpec';
 import { buildExportGate } from '@/services/document-workflow/qualityValidation';
+import type * as RolePipelineModule from '@/services/document-workflow/rolePipeline';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from '@/services/document-workflow/types';
 
 vi.mock('@/services/document-workflow/llmClient', () => ({ callDocumentLlmJson: vi.fn() }));
-vi.mock('@/services/document-workflow/rolePipeline', () => ({ repairChapterByQuality: vi.fn() }));
+// repairChapterByQuality mock 化，repairPatchGuard 保留真实实现（三态 env 开关断言依赖真实行为）
+vi.mock('@/services/document-workflow/rolePipeline', async (importOriginal) => {
+  const actual = await importOriginal<typeof RolePipelineModule>();
+  return { ...actual, repairChapterByQuality: vi.fn() };
+});
 vi.mock('@/services/document-workflow/documentGeneratorHelpers', () => ({ finalizeChapterContentQuality: vi.fn((content: string) => content) }));
 
 import { callDocumentLlmJson } from '@/services/document-workflow/llmClient';
@@ -175,7 +180,7 @@ describe('runFullDimensionReview', () => {
     expect(result.remainingIssues[0].riskLevel).toBe('高风险');
   });
 
-  it('patchGuard 默认 observe：修复调用携带 observeOnly=true 与 diagnostics', async () => {
+  it('patchGuard 默认 observe：修复调用携带 observeOnly=true 与 diagnostics（P11 轮次登记）', async () => {
     const diagnostics = mockDiagnostics();
     llmMock
       .mockResolvedValueOnce({ issues: [{ dimension: '模板化', location: '工程概况', quote: '一般来说，本项目按照常规施工组织。', riskLevel: '高风险', basis: '模板化判定', description: '通用句式残留' }], templatingLevel: '无' })
@@ -184,7 +189,7 @@ describe('runFullDimensionReview', () => {
     const chapters = [makeChapter('1', '工程概况', '一般来说，本项目按照常规施工组织。'.repeat(40))];
     await runFullDimensionReview({ template: {} as DocumentTemplate, chapters, effectiveChapters: [{ id: '1', title: '工程概况' }] as unknown as DocumentTemplateChapter[], diagnostics });
     expect(repairMock).toHaveBeenCalledTimes(1);
-    expect(repairMock.mock.calls[0][0].patchGuard).toEqual({ observeOnly: true, diagnostics });
+    expect(repairMock.mock.calls[0][0].patchGuard).toEqual({ observeOnly: true, repairRound: 'qingtian-review-repair', diagnostics });
   });
 
   it('DOCUMENT_QINGTIAN_PATCH_GUARD=enforce → observeOnly=false', async () => {

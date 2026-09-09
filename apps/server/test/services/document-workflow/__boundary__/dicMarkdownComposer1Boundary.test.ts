@@ -991,25 +991,9 @@ describe('M23 规则常量与 system 前缀', () => {
     expect(system).toContain('施工组织设计文档写作专家。');
   });
 
-  it('writerSystemPrefix：DOCUMENT_L0_SYSTEM_PREFIX=0 → 回退 legacy', () => {
-    const prev = process.env.DOCUMENT_L0_SYSTEM_PREFIX;
-    process.env.DOCUMENT_L0_SYSTEM_PREFIX = '0';
-    expect(writerSystemPrefix('旧前缀')).toBe('旧前缀');
-    if (prev === undefined) delete process.env.DOCUMENT_L0_SYSTEM_PREFIX;
-    else process.env.DOCUMENT_L0_SYSTEM_PREFIX = prev;
-  });
-
   it('docSystemPrefix：默认含公共前缀与 role', () => {
     const system = docSystemPrefix('评审专家身份');
     expect(system).toContain('事实分级');
     expect(system).toContain('评审专家身份');
-  });
-
-  it('docSystemPrefix：DOCUMENT_L0_SYSTEM_PREFIX=0 → 回退 role', () => {
-    const prev = process.env.DOCUMENT_L0_SYSTEM_PREFIX;
-    process.env.DOCUMENT_L0_SYSTEM_PREFIX = '0';
-    expect(docSystemPrefix('评审专家身份')).toBe('评审专家身份');
-    if (prev === undefined) delete process.env.DOCUMENT_L0_SYSTEM_PREFIX;
-    else process.env.DOCUMENT_L0_SYSTEM_PREFIX = prev;
   });
 });

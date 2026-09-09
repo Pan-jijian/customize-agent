@@ -3,7 +3,8 @@
  * 均为 L2 确定性结构检测，无需语义通道。
  */
 import { describe, expect, it } from 'vitest';
-import { applyDeterministicConsistencyFixesToMarkdown, collectSectionContentGaps, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, processSpecConflictIssues } from '@/services/document-workflow/qualityValidation';
+import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, processSpecConflictIssues, punctuationArtifactIssues } from '@/services/document-workflow/qualityValidation';
+import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentFactsModel } from '@/services/document-workflow/types';
 
 /** 工序规格事实卡 mock（specifications 单条，其余数组空） */
@@ -181,5 +182,166 @@ describe('formalContentIntegrityIssues 列表形态豁免（B2）', () => {
   it('普通段落以「如下」结尾无句号仍判截断', () => {
     const issues = formalContentIntegrityIssues('本工程主要施工内容如下');
     expect(issues.some(issue => /疑似截断句/u.test(issue.message))).toBe(true);
+  });
+});
+
+/** 编制依据小节法规/规范完整性检测：法规由写作模型自行列写，检测只兑底「具体条目存在」（十度实测缺陷） */
+describe('basisRegulationsCoverageIssues 编制依据法规/规范完整性兑底', () => {
+  const blueprint = (location: string, basisRegulations: string[] = []): BlueprintData => ({ project: { location }, basisRegulations } as unknown as BlueprintData);
+  const section = (body: string) => `## 第一章 编制依据与说明\n${body}\n## 第二章 工程概况`;
+
+  it('完整法规清单（法+条例+规范）→ 无 issue', () => {
+    const markdown = section('依据《中华人民共和国建筑法》（主席令第91号）、《建设工程质量管理条例》（国务院令第279号）、《给水排水管道工程施工及验收规范》（GB 50268-2008）等编制。');
+    expect(basisRegulationsCoverageIssues(markdown)).toEqual([]);
+  });
+
+  it('无编制依据小节 → 静默跳过（模板结构差异不误伤）', () => {
+    expect(basisRegulationsCoverageIssues('## 第一章 工程概况\n本项目位于肥西县。')).toEqual([]);
+  });
+
+  it('只写类别话术（无书名号法规）→ 报缺少国家法律法规与条例', () => {
+    const markdown = section('本施组编制依据国家现行法律、行政法规、地方性法规及施工验收规范。');
+    const issues = basisRegulationsCoverageIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('国家法律法规'))).toBe(true);
+    expect(issues.some(issue => issue.message.includes('条例'))).toBe(true);
+  });
+
+  it('有法+条例但无验收规范 → 报缺少施工验收规范', () => {
+    const markdown = section('依据《中华人民共和国建筑法》、《建设工程质量管理条例》编制。');
+    const issues = basisRegulationsCoverageIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('验收规范'))).toBe(true);
+  });
+
+  it('规范只写编号形态（无书名号）同样通过', () => {
+    const markdown = section('依据《中华人民共和国建筑法》、《建设工程质量管理条例》，施工质量验收执行 GB 50268-2008 等现行规范。');
+    expect(basisRegulationsCoverageIssues(markdown)).toEqual([]);
+  });
+
+  it('建设地点含省/市但缺地方性法规 → 报缺少地方性法规', () => {
+    const markdown = section('依据《中华人民共和国建筑法》、《建设工程质量管理条例》、《给水排水管道工程施工及验收规范》（GB 50268-2008）编制。');
+    const issues = basisRegulationsCoverageIssues(markdown, blueprint('安徽省合肥市肥西县丰乐镇'));
+    expect(issues.some(issue => issue.message.includes('地方性法规'))).toBe(true);
+  });
+
+  it('建设地点含省且列出含省名法规 → 通过', () => {
+    const markdown = section('依据《中华人民共和国建筑法》、《建设工程质量管理条例》、《安徽省建筑市场管理条例》、《给水排水管道工程施工及验收规范》（GB 50268-2008）编制。');
+    expect(basisRegulationsCoverageIssues(markdown, blueprint('安徽省合肥市肥西县丰乐镇'))).toEqual([]);
+  });
+
+  it('招标文件引用法规全部漏写 → 报未列招标文件引用法规', () => {
+    const markdown = section('依据《中华人民共和国建筑法》、《建设工程质量管理条例》、《给水排水管道工程施工及验收规范》（GB 50268-2008）编制。');
+    const issues = basisRegulationsCoverageIssues(markdown, blueprint('', ['《合肥市公共资源交易管理条例》']));
+    expect(issues.some(issue => issue.message.includes('招标文件引用法规'))).toBe(true);
+  });
+
+  it('招标文件引用法规部分照抄 → 不阻断（≥1 条出现）', () => {
+    const markdown = section('依据《中华人民共和国建筑法》、《合肥市公共资源交易管理条例》、《给水排水管道工程施工及验收规范》（GB 50268-2008）编制。');
+    const issues = basisRegulationsCoverageIssues(markdown, blueprint('', ['《合肥市公共资源交易管理条例》']));
+    expect(issues).toEqual([]);
+  });
+});
+
+/** 资源章数值拆分一致性兑底：工种构成/机械台数/同名多规格材料拆分与蓝图权威漂移即 error（十度实测缺陷） */
+describe('resourceBreakdownConsistencyIssues 资源拆分一致性兑底', () => {
+  const bp = (labor: any, equipment: any[] = [], materialsPlan: any[] = []): BlueprintData => ({ resources: { labor, equipment }, materialsPlan } as unknown as BlueprintData);
+
+  it('工种构成与蓝图一致 → 无 issue', () => {
+    const data = bp({ composition: [{ trade: '混凝土工', count: 12, basis: '' }, { trade: '钢筋工', count: 8, basis: '' }] });
+    expect(resourceBreakdownConsistencyIssues('高峰期投入混凝土工12人、钢筋工8人。', data)).toEqual([]);
+  });
+
+  it('工种构成漂移 → 报不一致', () => {
+    const data = bp({ composition: [{ trade: '混凝土工', count: 12, basis: '' }] });
+    const issues = resourceBreakdownConsistencyIssues('高峰期投入混凝土工15人。', data);
+    expect(issues.some(issue => issue.message.includes('工种构成'))).toBe(true);
+  });
+
+  it('「钢筋混凝土工」不误命「混凝土工」（前置汉字边界跳过）', () => {
+    const data = bp({ composition: [{ trade: '混凝土工', count: 12, basis: '' }] });
+    expect(resourceBreakdownConsistencyIssues('钢筋混凝土工班组负责主体结构。', data)).toEqual([]);
+  });
+
+  it('词表含复合工种「钢筋混凝土工」时不按子串「混凝土工」重复比对', () => {
+    const data = bp({ composition: [{ trade: '钢筋混凝土工', count: 15, basis: '' }, { trade: '混凝土工', count: 12, basis: '' }] });
+    expect(resourceBreakdownConsistencyIssues('高峰期投入钢筋混凝土工15人。', data)).toEqual([]);
+  });
+
+  it('机械台数与蓝图一致 → 无 issue', () => {
+    const data = bp({ composition: [] }, [{ name: '挖掘机', quantity: 2, spec: '' }]);
+    expect(resourceBreakdownConsistencyIssues('土方阶段配置挖掘机2台。', data)).toEqual([]);
+  });
+
+  it('机械台数漂移 → 报不一致', () => {
+    const data = bp({ composition: [] }, [{ name: '挖掘机', quantity: 2, spec: '' }]);
+    const issues = resourceBreakdownConsistencyIssues('土方阶段配置挖掘机3台。', data);
+    expect(issues.some(issue => issue.message.includes('机械台数'))).toBe(true);
+  });
+
+  it('同名多规格机械按规格语境单独比对（不互串）', () => {
+    const data = bp({ composition: [] }, [{ name: '挖掘机', quantity: 2, spec: '0.6m³' }, { name: '挖掘机', quantity: 1, spec: '1.0m³' }]);
+    expect(resourceBreakdownConsistencyIssues('配置挖掘机（0.6m³）2台、挖掘机（1.0m³）1台。', data)).toEqual([]);
+  });
+
+  it('材料同名多规格拆分与蓝图一致 → 无 issue', () => {
+    const data = bp({ composition: [] }, [], [{ name: '一般路灯', spec: '100W', quantity: 109, unit: '套', basis: '' }, { name: '一般路灯', spec: '120W', quantity: 9, unit: '套', basis: '' }]);
+    expect(resourceBreakdownConsistencyIssues('一般路灯 100W 109套 + 120W 9套。', data)).toEqual([]);
+  });
+
+  it('材料拆分数量漂移 → 报不一致（丰乐镇实测 118=111+7 分配缺陷）', () => {
+    const data = bp({ composition: [] }, [], [{ name: '一般路灯', spec: '100W', quantity: 109, unit: '套', basis: '' }, { name: '一般路灯', spec: '120W', quantity: 9, unit: '套', basis: '' }]);
+    const issues = resourceBreakdownConsistencyIssues('一般路灯 100W 111套 + 120W 7套。', data);
+    expect(issues.some(issue => issue.message.includes('材料规格拆分'))).toBe(true);
+  });
+
+  it('合计行豁免（组合计 118 套不按单规格比对）', () => {
+    const data = bp({ composition: [] }, [], [{ name: '一般路灯', spec: '100W', quantity: 109, unit: '套', basis: '' }, { name: '一般路灯', spec: '120W', quantity: 9, unit: '套', basis: '' }]);
+    expect(resourceBreakdownConsistencyIssues('| 合计 | 一般路灯 100W+120W | 118套 |', data)).toEqual([]);
+  });
+
+  it('无蓝图 → 静默跳过', () => {
+    expect(resourceBreakdownConsistencyIssues('高峰期投入200人。')).toEqual([]);
+  });
+});
+
+describe('punctuationArtifactIssues（十度：断句/残句/拼接错误确定性兑底）', () => {
+  it('句读标点叠用「。；」 → error（丰乐镇实测「销项。；污水」形态）', () => {
+    const issues = punctuationArtifactIssues('整改结果由项目经理复查确认后闭合。；污水管网工程阶段同时安排土方开挖。');
+    expect(issues.some(issue => /句读标点叠用/u.test(issue.message))).toBe(true);
+    expect(issues.every(issue => issue.level === 'error')).toBe(true);
+  });
+
+  it('连续句号「。。」 → error（省略号误写形态）', () => {
+    const issues = punctuationArtifactIssues('质检员复查确认后销项。。材料员在每批材料进场后完成外观检查。');
+    expect(issues.some(issue => /句读标点叠用/u.test(issue.message))).toBe(true);
+  });
+
+  it('全角括号不闭合（拼接丢失） → error', () => {
+    const markdown = '国家法律法规包括《中华人民共和国建筑法》（主席令第91号公布，2019年修正）、《中华人民共和国招标投标法》（主席令第21号公布，2017安全生产法》（主席令第70号公布，2021年修正）。';
+    const issues = punctuationArtifactIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('全角括号不闭合'))).toBe(true);
+  });
+
+  it('书名号不闭合（拼接丢失） → error（丰乐镇实测第 80 行）', () => {
+    const markdown = '国家法律法规包括《中华人民共和国建筑法》（主席令第91号公布，2019年修正）、《中华人民共和国招标投标法》（主席令第21号公布，2017安全生产法》（主席令第70号公布，2021年修正）。';
+    const issues = punctuationArtifactIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('书名号不闭合'))).toBe(true);
+  });
+
+  it('正常成稿（括号书名号成对、无标点叠用） → 零 issue', () => {
+    const markdown = [
+      '国家法律法规包括《中华人民共和国建筑法》（主席令第91号公布，2019年修正）、《建设工程质量管理条例》（国务院令第279号）。',
+      '施工验收规范标准包括《城镇道路工程施工与质量验收规范》（CJJ 1-2008）。',
+    ].join('\n');
+    expect(punctuationArtifactIssues(markdown)).toEqual([]);
+  });
+
+  it('句号+右引号「。”」与省略号「……」不误报', () => {
+    const markdown = '标准要求：“质量合格。”踏勘发现各自然村道路宽度普遍较窄……后续逐村复核。';
+    expect(punctuationArtifactIssues(markdown)).toEqual([]);
+  });
+
+  it('表格行与标题行的标点形态不参与叠用检测（口径豁免）', () => {
+    const markdown = '## 第1章 工程概况\n| 序号 | 内容 |\n| --- | --- |\n| 1 | 建设规模：道路硬化及亮化提升。； |\n';
+    expect(punctuationArtifactIssues(markdown)).toEqual([]);
   });
 });

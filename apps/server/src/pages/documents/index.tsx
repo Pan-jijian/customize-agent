@@ -4,6 +4,7 @@ import { App, Button, Card, Col, Descriptions, Divider, Drawer, Empty, Form, Inp
 import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, HistoryOutlined, FolderOutlined, TrophyOutlined, ExclamationCircleOutlined, WarningOutlined, ArrowDownOutlined, ArrowUpOutlined } from '@ant-design/icons';
 import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFilesTree, getPromptProjects, refineGeneratedDocument, resumeGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type ExportReport, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig, type PromptProject, type RefinePlan, type RefineSelection } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
+import { analyzeDefectHeatmap, REPAIR_ROUND_LABELS } from '@/services/document-workflow/defectHeatmap';
 export interface TreeApiResponseNode {
   key: string;
   title: string;
@@ -1356,8 +1357,21 @@ export default function DocumentsPage() {
                     {report.repairedCount !== undefined && <span className="text-[var(--colorTextSecondary)]">修复 {report.repairedCount} 项{report.blockingCount !== undefined ? `（阻断 ${report.blockingCount}）` : ''}</span>}
                     {report.ruleSummary && report.ruleSummary.length > 0 && <span className="text-[var(--colorTextSecondary)]">规则 {report.ruleSummary.length} 条</span>}
                     {report.gatePassed === false && <Tag color="error" className="border-0 m-0">门禁未过</Tag>}
+                    {/* P18：自动健康诊断告警（导出时归档） */}
+                    {report.healthAlerts && report.healthAlerts.length > 0 && <Tag color="warning" className="border-0 m-0">健康告警 {report.healthAlerts.length}</Tag>}
                   </div>
                 ))}
+                {/* P19：跨文档缺陷热力图（消费导出闭环报告历史：候选退役/写作硬约束建议） */}
+                {(() => {
+                  const analysis = analyzeDefectHeatmap(exportReports);
+                  if (analysis.retireCandidates.length === 0 && analysis.constraintSuggestions.length === 0) return null;
+                  return (
+                    <NoticeBox type="info" title="跨文档缺陷热力图">
+                      {analysis.retireCandidates.length > 0 && <div>候选退役（连续 3 次零命中，可评估停用）：{analysis.retireCandidates.map(item => { const id = item.split('｜')[0]; return REPAIR_ROUND_LABELS[id] ? `${REPAIR_ROUND_LABELS[id]}（${item}）` : item; }).join('、')}</div>}
+                      {analysis.constraintSuggestions.length > 0 && <div>建议加入写作硬约束（高命中且修复失败率高）：{analysis.constraintSuggestions.map(item => { const id = item.split('｜')[0]; return REPAIR_ROUND_LABELS[id] ? `${REPAIR_ROUND_LABELS[id]}（${item}）` : item; }).join('、')}</div>}
+                    </NoticeBox>
+                  );
+                })()}
               </VerticalStack>
             </Card>
           )}

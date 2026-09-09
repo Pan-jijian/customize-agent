@@ -12,10 +12,36 @@ import { documentTextLength } from './budget';
 import { estimateTokens, truncateToTokenBudget } from './tokenBudget';
 import { classifyQualitySeverity, degenerateContentIssues } from './qualityValidation';
 import { deterministicDefectPrecheck } from './patchGuard';
+import { tuningProfile } from './tuningProfile';
 import { callDocumentLlmJson, contextLayerChars, isContextOverflowLlmError } from './llmClient';
 import { throwIfAborted, systemConstraintLine } from './utils';
 
 export type { QualityRepairType } from '../types';
+
+/**
+ * patchGuard 命中登记（P25）：按 repairRound 分组统计 hits/rejects 进 diagnostics.llm.patchGuardStats；
+ * 同时维护 patchGuardHits/patchGuardRejects 总量字段（历史观测口径兼容）。
+ */
+function recordPatchGuardHit(diagnostics: DocumentGenerationDiagnostics | undefined, repairRound: string, kind: 'hits' | 'rejects'): void {
+  if (!diagnostics) return;
+  const stats = diagnostics.llm.patchGuardStats ?? (diagnostics.llm.patchGuardStats = {});
+  const bucket = stats[repairRound] ?? (stats[repairRound] = { hits: 0, rejects: 0, rollbacks: 0 });
+  bucket[kind] += 1;
+  if (kind === 'hits') diagnostics.llm.patchGuardHits = (diagnostics.llm.patchGuardHits ?? 0) + 1;
+  else diagnostics.llm.patchGuardRejects = (diagnostics.llm.patchGuardRejects ?? 0) + 1;
+}
+
+/**
+ * 修复轮 patchGuard 统一构造（P11 全链 8 调用点共用）：
+ * DOCUMENT_QINGTIAN_PATCH_GUARD 语义扩展为全局 patchGuard 模式开关——
+ * '0' 完全关闭（不传 patchGuard）、'enforce' 拒绝坏 patch、其他（默认 observe）只计数。
+ * 渐进策略：先全链 observe 采集 patchGuardStats 按轮次分布，零误伤类别再切 enforce。
+ */
+export function repairPatchGuard(repairRound: string, diagnostics?: DocumentGenerationDiagnostics): { observeOnly: boolean; repairRound: string; diagnostics?: DocumentGenerationDiagnostics } | undefined {
+  const mode = process.env.DOCUMENT_QINGTIAN_PATCH_GUARD || 'observe';
+  if (mode === '0') return undefined;
+  return { observeOnly: mode !== 'enforce', repairRound, diagnostics };
+}
 
 export function selectDocumentGenerationStrategy(input: { template: DocumentTemplate; targetWords: number; requirement?: string; materialFileCount?: number; evidenceCount?: number }): DocumentGenerationStrategy {
   const chapterCount = input.template.chapters.length;
@@ -371,7 +397,7 @@ function applyAnchorRangePatch(input: { content: string; startAnchor: string; en
   return { content: sanitizeFormalMarkdown(removeUnwantedDrawingImages(next, input.forbidDrawingImages)), applied: next !== input.content };
 }
 
-export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }>; maxTokens?: number; patchGuard?: { observeOnly: boolean; diagnostics?: DocumentGenerationDiagnostics }; anchorTexts?: Array<string | AnchorSpec>; evidenceChars?: number }) {
+export async function repairChapterByQuality(input: { template: DocumentTemplate; chapter: DocumentDraftChapter; issues: string[]; promptTexts: string; requirement?: string; forbidDrawingImages: boolean; repairType?: QualityRepairType; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal; contextChapters?: Array<{ title: string; content: string }>; maxTokens?: number; patchGuard?: { observeOnly: boolean; repairRound?: string; diagnostics?: DocumentGenerationDiagnostics }; anchorTexts?: Array<string | AnchorSpec>; evidenceChars?: number }) {
   throwIfAborted(input.signal);
   const repairType = input.repairType || classifyQualityRepairType(input.issues);
   const contextBlock = input.contextChapters?.length
@@ -466,9 +492,9 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
   // 证据处提前分叉，同章多次修复的 prefix cache 命中率被压低；恒定预算下同章前缀完全稳定）
   // 4.17.6 修复证据压缩：repair 只修缺陷清单（缺陷已带引号原文锚点与具体问题），证据只作
   // 事实兑底最小集（~1.5K 字符），T2 目录跳过——repair L3 从 ~24K 压到 ~4K（含裁剪后正文），
-  // 是 prefix cache 命中率 90% 目标参数之一；env DOCUMENT_REPAIR_EVIDENCE_CHARS 可调
+  // 是 prefix cache 命中率 90% 目标参数之一；repairEvidenceChars（DOCUMENT_TUNING_PROFILE）可调
   // F2：套话重写类修复专用放大（evidenceChars 参数），默认最小集不足支撑句级具体化重写
-  const repairEvidenceCharsValue = Number(input.evidenceChars ?? process.env.DOCUMENT_REPAIR_EVIDENCE_CHARS ?? 1500);
+  const repairEvidenceCharsValue = input.evidenceChars ?? tuningProfile().repairEvidenceChars ?? 1500;
   const repairEvidenceChars = Number.isFinite(repairEvidenceCharsValue) && repairEvidenceCharsValue > 0 ? Math.floor(repairEvidenceCharsValue) : 1500;
   const evidenceBudget = evidenceBundle
     ? Math.min(repairEvidenceChars, evidencePromptBudgetForTarget(8000, 6000, 14000))
@@ -506,16 +532,18 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
   let appliedCount = 0;
   const patches = Array.isArray(result?.patches) ? result!.patches! : [];
   for (const patch of patches) {
-    // 评审轮 patch 前置校验（2.1）：replacement 预检四类确定性缺陷（来源罗列句/内部术语/绝对日期/叠词）；
-    // observe 模式命中只计数照常应用（采集数据），enforce 模式命中拒绝该 patch 并计数（阻断已知坏内容重入）
+    // 修复轮 patch 前置校验（2.1 → P11 全链）：replacement 预检确定性缺陷（来源罗列句/内部术语/绝对日期/叠词/
+    // 未完成小节标记/元话语声明句/公式形态残留/装饰层厚度异常/占位符/截断句双冒号）；
+    // observe 模式命中只计数照常应用（采集数据），enforce 模式命中拒绝该 patch 并计数（阻断已知坏内容重入）；
+    // P25：命中按 repairRound 分组统计进 patchGuardStats（同轮内分 hits/rejects 两类）
     if (input.patchGuard && patch.replacement?.trim()) {
       const guardHits = deterministicDefectPrecheck(patch.replacement);
       if (guardHits.length > 0) {
         const guardDiag = input.patchGuard.diagnostics;
         if (input.patchGuard.observeOnly) {
-          if (guardDiag) guardDiag.llm.patchGuardHits = (guardDiag.llm.patchGuardHits ?? 0) + 1;
+          recordPatchGuardHit(guardDiag, input.patchGuard.repairRound ?? 'unknown', 'hits');
         } else {
-          if (guardDiag) guardDiag.llm.patchGuardRejects = (guardDiag.llm.patchGuardRejects ?? 0) + 1;
+          recordPatchGuardHit(guardDiag, input.patchGuard.repairRound ?? 'unknown', 'rejects');
           continue;
         }
       }

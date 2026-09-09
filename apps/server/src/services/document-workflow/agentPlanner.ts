@@ -126,10 +126,7 @@ const QUERY_EXPANSION_CATEGORIES = [
 /** 语义类别判定阈值：标题嵌入与类别原型嵌入的余弦 ≥ 此值即附加该类查询词（多挂查询词仅拓宽检索面，漏挂由退化小节兜底保护） */
 const QUERY_EXPANSION_CATEGORY_THRESHOLD = 0.35;
 
-/** 语义查询扩展开关：DOCUMENT_QUERY_EXPANSION_SEMANTIC=0 回退纯正则（确定性兜底仍保留） */
-function queryExpansionSemanticEnabled() {
-  return process.env.DOCUMENT_QUERY_EXPANSION_SEMANTIC !== '0';
-}
+
 
 /**
  * 标题 → 查询类别语义分类（bge 嵌入余弦判别，正则仅作降级兜底）：
@@ -224,9 +221,7 @@ export async function planDocument(input: { template: DocumentTemplate; context:
   });
   // 语义查询类别分类：章节标题 + 小节标题一次性批量嵌入判别（复用全局 LRU 缓存），失败回退确定性正则
   const classificationTitles = [...new Set([...chapterShapes.map(item => item.chapter.title), ...chapterShapes.flatMap(item => item.sectionTitles)])];
-  const semanticExpansions = queryExpansionSemanticEnabled()
-    ? await classifyQueryExpansionTitles(classificationTitles, input.embedDocuments)
-    : new Map<string, string[]>();
+  const semanticExpansions = await classifyQueryExpansionTitles(classificationTitles, input.embedDocuments);
   const chapters = chapterShapes.map(({ chapter, sectionTitles, requiredFacts, evidenceQueries }) => {
     const chapterExpansions = semanticExpansions.get(chapter.title) || [];
     return {
@@ -236,7 +231,7 @@ export async function planDocument(input: { template: DocumentTemplate; context:
       requiredFacts,
       requiredGraphNodes: [chapter.title],
       evidenceQueries,
-      qualityRules: ['项目专属事实必须来自锁定资料范围，不得混入其他项目名称', '法规规范等公共知识不受锁定范围限制', '不得出现后台话术和兜底措辞', '章节必须覆盖规划小节'],
+      qualityRules: ['项目专属事实必须来自锁定资料范围，不得混入其他项目名称', '法规规范名称与编号等公共知识不受锁定范围限制，但任何数值/规格/型号/参数必须来自锁定资料', '不得出现后台话术和兜底措辞', '章节必须覆盖规划小节'],
       forbiddenPhrases: FORMAL_FORBIDDEN_PHRASES,
       sections: sectionTitles.map(sectionTitle => ({
         title: sectionTitle,
@@ -331,7 +326,7 @@ export function chapterTaskPrompt(task: AgentChapterTask) {
     task.graphContext ? `图谱上下文：\n${task.graphContext}` : '',
     factLines ? `事实卡：\n${factLines}` : '',
     `小节任务：\n${sectionLines}`,
-    '写作要求：必须严格按“小节任务”逐项输出，每个任务都必须保留完全一致的三级标题“### 小节标题”；不得合并小节、不得改写小节标题、不得省略小节；项目专属事实只使用事实卡、图谱上下文和绑定证据，法律法规、标准规范等公共知识可直接引用；不得输出后台话术、兜底措辞、待确认、不适用；缺少项目事实的小节不得编造。',
+    '写作要求：必须严格按“小节任务”逐项输出，每个任务都必须保留完全一致的三级标题“### 小节标题”；不得合并小节、不得改写小节标题、不得省略小节；项目专属事实只使用事实卡、图谱上下文和绑定证据；法律法规、标准规范名称与编号等公共知识可直接引用，但任何数值/规格/型号/参数必须来自事实卡、图谱上下文或绑定证据，禁止以行业惯例或公共知识为由虚构；不得输出后台话术、兜底措辞、待确认、不适用；缺少项目事实的小节不得编造。',
   ].filter(Boolean).join('\n\n');
 }
 
@@ -354,7 +349,7 @@ export function chapterTaskPromptForPlannedStructure(task: AgentChapterTask, str
     task.graphContext ? `图谱上下文：\n${task.graphContext}` : '',
     factLines ? `事实卡：\n${factLines}` : '',
     `主题块与 H4 要点（必须严格按此两层结构成稿）：\n${blockLines}`,
-    '写作要求：必须严格按“主题块→H4 要点”两层结构输出，三级标题与 H4 要点标题必须与给定标题完全一致，不得改名、合并或遗漏 H4 要点；每个 H4 要点必须覆盖其标注的全部评分细目内容，但不得为这些评分细目单独开设小节标题；项目专属事实只使用事实卡、图谱上下文和绑定证据，法律法规、标准规范等公共知识可直接引用；不得输出后台话术、兜底措辞、待确认、不适用；缺少项目事实的小节不得编造。',
+    '写作要求：必须严格按“主题块→H4 要点”两层结构输出，三级标题与 H4 要点标题必须与给定标题完全一致，不得改名、合并或遗漏 H4 要点；每个 H4 要点必须覆盖其标注的全部评分细目内容，但不得为这些评分细目单独开设小节标题；项目专属事实只使用事实卡、图谱上下文和绑定证据；法律法规、标准规范名称与编号等公共知识可直接引用，但任何数值/规格/型号/参数必须来自事实卡、图谱上下文或绑定证据，禁止以行业惯例或公共知识为由虚构；不得输出后台话术、兜底措辞、待确认、不适用；缺少项目事实的小节不得编造。',
   ].filter(Boolean).join('\n\n');
 }
 

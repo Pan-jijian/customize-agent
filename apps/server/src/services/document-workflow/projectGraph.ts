@@ -5,6 +5,7 @@ import { callDocumentLlmJson } from './llmClient';
 import { runWithAdaptiveConcurrency, stableHash, throwIfAborted } from './utils';
 import { displayStage } from './progress';
 import { docSystemPrefix } from './markdownComposer';
+import { tuningProfile } from './tuningProfile';
 
 const SYSTEM_PROMPT_BASE = [
   '通读以下项目资料（招标文件、工程量清单、图纸设计说明、补疑文件等），',
@@ -307,7 +308,7 @@ export async function buildProjectGraph(input: {
         failures.push(`${DOMAIN_PROMPTS[domain].title} LLM 调用失败：${err instanceof Error ? err.message : String(err)}`);
       }
       return undefined;
-    }, { kind: 'llmRepair', targetWords: 4000, concurrency: Number(process.env.DOCUMENT_PROJECT_GRAPH_DOMAIN_CONCURRENCY || 2) });
+    }, { kind: 'llmRepair', targetWords: 4000, concurrency: tuningProfile().projectGraphDomainConcurrency || 2 });
     const validGraphs = graphs.filter((graph): graph is ProjectGraph => Boolean(graph));
     return validGraphs.length ? merge(validGraphs) : undefined;
   }

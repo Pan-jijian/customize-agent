@@ -233,7 +233,7 @@ async function llmRefinePlan(provider: ChatProvider, input: { title: string; mar
   const response = await provider.chat([
     { role: 'system', content: '你是文档编辑计划助手。只返回 JSON。根据用户短提示词，判断最合适的修改范围和编辑动作。优先选择章节或小节，不要轻易选择全文。' },
     { role: 'user', content: `文档标题：${input.title}\n用户要求：${input.instruction}\n章节索引：${JSON.stringify(outline)}\n事实：${input.facts.slice(0, 20).join('；')}\n返回格式：{"scope":"section|chapter|document","action":"polish|expand|summarize|replace|delete|add|restructure|table","targetTitle":"标题","targetRange":{"start":0,"end":1},"confidence":0.8,"summary":"计划摘要"}` },
-  ], { temperature: 0.1 });
+  ], { temperature: 0 });
   try {
     const parsed = JSON.parse(cleanJson(response.content)) as Partial<RefinePlan>;
     const range = clampRange(input.markdown, parsed.targetRange);
@@ -267,7 +267,7 @@ async function refineBlock(provider: ChatProvider, input: { title: string; instr
         `当前片段：\n${input.block.content}`,
       ].filter(Boolean).join('\n\n'),
     },
-  ], { temperature: 0.2 });
+  ], { temperature: 0 });
   const content = cleanMarkdown(response.content);
   return content !== input.block.content ? content : undefined;
 }
@@ -305,7 +305,7 @@ async function refineFullDocument(provider: ChatProvider, input: { title: string
       ].filter(Boolean).join('\n\n'),
     },
   ];
-  const response = await provider.chat(messages, { temperature: 0.25 });
+  const response = await provider.chat(messages, { temperature: 0 });
   return cleanMarkdown(response.content);
 }
 

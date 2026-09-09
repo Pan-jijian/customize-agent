@@ -3,6 +3,7 @@ import { resolveProtocol } from '@customize-agent/runtime';
 import { getConfigStore } from '@/services/common/configService';
 import type { DocumentGenerationDiagnostics } from './types';
 import { stableHash } from './utils';
+import { tuningProfile } from './tuningProfile';
 
 const DOCUMENT_LLM_PROVIDER_CACHE = new Map<string, ReturnType<typeof createProvider>>();
 let activeDocumentLlmCalls = 0;
@@ -31,12 +32,12 @@ export function retryDelayMs(error?: unknown, attempt = 0): number {
 
 /**
  * 全局 LLM 并发上限：用户既定决策——LLM 并发调用不应受限制（实测模型端点并发量高，不会因并发限流）。
- * 默认完全解除上限（Number.POSITIVE_INFINITY，所有调用全并发、无排队）；DOCUMENT_LLM_MAX_CONCURRENCY
- * 可显式覆盖（正整数 = 指定上限，0 = 完全解除）。仅瞬态错误重试（429/5xx）保留端点保护语义，与并发上限无关。
+ * 默认完全解除上限（Number.POSITIVE_INFINITY，所有调用全并发、无排队）；llmMaxConcurrency
+ * （DOCUMENT_TUNING_PROFILE）可显式覆盖（正整数 = 指定上限，0 = 完全解除）。仅瞬态错误重试（429/5xx）保留端点保护语义，与并发上限无关。
  */
-const rawMaxConcurrency = Number(process.env.DOCUMENT_LLM_MAX_CONCURRENCY);
+const rawMaxConcurrency = tuningProfile().llmMaxConcurrency;
 const envMaxConcurrency = Number.isFinite(rawMaxConcurrency)
-  ? (rawMaxConcurrency === 0 ? Number.POSITIVE_INFINITY : (rawMaxConcurrency > 0 ? Math.floor(rawMaxConcurrency) : undefined))
+  ? (rawMaxConcurrency === 0 ? Number.POSITIVE_INFINITY : (rawMaxConcurrency! > 0 ? Math.floor(rawMaxConcurrency!) : undefined))
   : undefined;
 let llmMaxConcurrency: number = envMaxConcurrency ?? Number.POSITIVE_INFINITY;
 
@@ -417,7 +418,7 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
             provider.chat([
               { role: 'system', content: jsonOnly ? `${system}\n只返回 JSON，不要返回 markdown。` : system },
               { role: 'user', content: thinkingTrimmingHint ? `${prompt}\n\n（重要：缩短思考过程，直接给出最终结论。）` : prompt },
-            ], { temperature: options.temperature ?? (jsonOnly ? 0 : 0.3), maxTokens: maxTokensArg, signal: callSignal, disableThinking: decision.disableThinking })
+            ], { temperature: options.temperature ?? 0, maxTokens: maxTokensArg, signal: callSignal, disableThinking: decision.disableThinking })
               .then(resolve)
               .catch((error: unknown) => {
                 reject(error instanceof Error ? error : new Error(String(error)));

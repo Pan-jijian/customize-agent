@@ -273,24 +273,19 @@ describe('buildEvidenceBundle', () => {
 
 describe('evidencePromptBudgetForTarget', () => {
   afterEach(() => {
-    delete process.env.DOCUMENT_T0_WHITELIST;
-    delete process.env.DOCUMENT_EVIDENCE_BUDGET_CEILING;
+    delete process.env.DOCUMENT_TUNING_PROFILE;
   });
 
-  it('按字数动态计算并受 floor/ceiling 约束（2.1：默认受 8000 硬顶）', () => {
-    // P0-4：每目标字 8 字符（12 → 8 收紧），无字数时按 1200 基准；2.1：硬顶 8000 压顶 9600
-    expect(evidencePromptBudgetForTarget()).toBe(8000);
+  it('按字数动态计算并受 floor/ceiling 约束（2.1/B3：默认受 12000 硬顶，表格/清单类独立配额 4000）', () => {
+    // P0-4：每目标字 8 字符（12 → 8 收紧），无字数时按 1200 基准；B3：硬顶 8000 放宽至 12000
+    //（仅承载表格/清单类 4000 字符独立通道），无字数基准 1200×8=9600 不再被硬顶压顶
+    expect(evidencePromptBudgetForTarget()).toBe(9600);
     expect(evidencePromptBudgetForTarget(1000)).toBe(8000);
     expect(evidencePromptBudgetForTarget(100)).toBe(8000);
   });
 
-  it('DOCUMENT_EVIDENCE_BUDGET_CEILING 显式设置优先于 8000 硬顶', () => {
-    process.env.DOCUMENT_EVIDENCE_BUDGET_CEILING = '20000';
-    expect(evidencePromptBudgetForTarget()).toBe(9600);
-  });
-
-  it('DOCUMENT_T0_WHITELIST=0 回退时同步解除 8000 硬顶', () => {
-    process.env.DOCUMENT_T0_WHITELIST = '0';
+  it('evidenceBudgetCeiling 显式设置优先于 12000 硬顶', () => {
+    process.env.DOCUMENT_TUNING_PROFILE = JSON.stringify({ evidenceBudgetCeiling: 20000 });
     expect(evidencePromptBudgetForTarget()).toBe(9600);
   });
 });
@@ -412,10 +407,6 @@ describe('evidenceBundlePrompt', () => {
 describe('T0 白名单瘦身（2.1）', () => {
   const chapter: DocumentTemplateChapter = { id: 'ch-1', title: '工程概况', purpose: '', queries: [], requiredFacts: [] };
 
-  afterEach(() => {
-    delete process.env.DOCUMENT_T0_WHITELIST;
-  });
-
   it('白名单字段行进 T0，工艺参数/规范编号行降级 T1（T0 不含工艺行）', () => {
     const bundle = buildEvidenceBundle(chapter, [
       evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: '建设地点：合肥市蜀山区。\n计划工期：540日历天。\n混凝土每层浇筑厚度不超过500mm。\n主体结构执行 GB 50204-2015 规范。' }),
@@ -438,16 +429,6 @@ describe('T0 白名单瘦身（2.1）', () => {
     const scaleLine = layers.t0Text.split('\n').find(line => line.includes('建设规模')) || '';
     expect(scaleLine).toContain('…');
     expect(scaleLine.length).toBeLessThanOrEqual(204);
-  });
-
-  it('env DOCUMENT_T0_WHITELIST=0 回退：工艺参数行恢复 T0 全量保留', () => {
-    process.env.DOCUMENT_T0_WHITELIST = '0';
-    const bundle = buildEvidenceBundle(chapter, [
-      evidenceItem({ filePath: '招标文件.pdf', processingType: 'reference', content: '计划工期：540日历天。\n混凝土每层浇筑厚度不超过500mm。' }),
-    ]);
-    const layers = buildEvidenceLayers(bundle, 5000, []);
-    expect(layers.t0Text).toContain('浇筑厚度');
-    expect(layers.t1Text).not.toContain('工艺参数与规范事实行');
   });
 
   it('降级行超预算时省略计数提示（数据不删除，仍参与检索校验）', () => {
@@ -565,13 +546,13 @@ describe('T2 证据目录压缩摘要限行（2.2）', () => {
     expect(prompt).toContain('证据目录');
   });
 
-  it('DOCUMENT_EVIDENCE_CATALOG_MAX_LINES 可调目录行数上限', () => {
-    process.env.DOCUMENT_EVIDENCE_CATALOG_MAX_LINES = '10';
+  it('evidenceCatalogMaxLines 可调目录行数上限', () => {
+    process.env.DOCUMENT_TUNING_PROFILE = JSON.stringify({ evidenceCatalogMaxLines: 10 });
     const bundle = buildEvidenceBundle(chapter, bigPool(500));
     const prompt = evidenceBundlePrompt(bundle, { maxChars: 8000, requiredFacts: [] });
     const t2Lines = prompt.split('\n').filter(line => line.startsWith('- [')).length;
     expect(t2Lines).toBeLessThanOrEqual(10);
-    delete process.env.DOCUMENT_EVIDENCE_CATALOG_MAX_LINES;
+    delete process.env.DOCUMENT_TUNING_PROFILE;
   });
 
   it('skipT2Catalog 跳过目录：输出不含目录段但 T0/T1 事实不变（4.17.6 前缀缓存压缩）', () => {

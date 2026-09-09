@@ -696,10 +696,6 @@ describe('sanitizeExtractedFacts（1.1 事实净化门）', () => {
 });
 
 describe('extractLocalFactPool 净化门接线', () => {
-  afterEach(() => {
-    delete process.env.DOCUMENT_FACT_SANITIZE;
-  });
-
   it('默认开启：项目编号截断值回源补全，计数进 diagnostics.factSanitize', () => {
     const diagnostics = {} as unknown as DocumentGenerationDiagnostics;
     const pool = extractLocalFactPool({
@@ -711,17 +707,6 @@ describe('extractLocalFactPool 净化门接线', () => {
     expect(codes).toEqual(['2026AFAGZ50906', '2026AFAGZ50906']);
     expect(pool.factSanitize.repaired).toBe(1);
     expect(diagnostics.factSanitize).toMatchObject({ repaired: 1 });
-  });
-
-  it('env DOCUMENT_FACT_SANITIZE=0 回退直通', () => {
-    process.env.DOCUMENT_FACT_SANITIZE = '0';
-    const pool = extractLocalFactPool({
-      evidence: [evidenceItem({ content: '项目编号：2026AF\n项目编号：2026AFAGZ50906。' })],
-      template: templateOf(),
-    });
-    const codes = pool.projectBasicFacts.filter(item => item.fieldId === 'project_code').map(item => item.value);
-    expect(codes).toEqual(['2026AF', '2026AFAGZ50906']);
-    expect(pool.factSanitize).toMatchObject({ truncated: 0, dropped: 0, repaired: 0 });
   });
 });
 

@@ -1,4 +1,5 @@
 import { getLocalSemanticProvider } from './semanticSimilarity';
+import { stableHash } from './utils';
 import type { ValidationIssue } from './types';
 
 /**
@@ -60,6 +61,9 @@ export async function internalTerminologyAnchorIssues(markdown: string): Promise
       repairability: 'llm_repairable',
       message: `正式正文仍包含后台内部术语“${exactHits.join('”“')}”，需要按上下文语义改写为正式术语`,
       suggestion: '请结合语境改写：“拆除工程工作包”→“拆除工程”，“按工作包逐项说明”→“按专业工程逐项说明”；禁止出现生成系统后台概念。',
+      // P9 provenance：快照 issue 携带检测器身份与指纹，重算校验组时按 detectorId 剔除旧快照，
+      // 由重算链（documentPipeline det('internal-terminology-anchor')）对最新 finalMarkdown 实时重跑重新生成
+      provenance: { detectorId: 'internal-terminology-anchor', fingerprint: stableHash(markdown) },
     });
   }
   // L3 语义锚点匹配：提取正文句子（排除标题行/表格行/目录裸标题行）批量嵌入后与锚点比对。
@@ -98,6 +102,8 @@ export async function internalTerminologyAnchorIssues(markdown: string): Promise
       repairability: 'llm_repairable',
       message: `正式正文疑似包含后台内部话术（语义锚点命中 ${hits.length} 处）：${hits.map(hit => `“${hit}…”`).join('、')}`,
       suggestion: '将内部话术（已确认资料/事实卡/工作包等生成系统概念）改写为面向评标人的正式表述，仅陈述项目事实与施工内容。',
+      // P9 provenance：与 L1 精确词同 detectorId（同源检测器），重算校验组时旧快照一并剔除
+      provenance: { detectorId: 'internal-terminology-anchor', fingerprint: stableHash(markdown) },
     });
   }
   return issues;

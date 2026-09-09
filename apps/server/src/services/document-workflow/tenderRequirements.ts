@@ -218,7 +218,7 @@ export async function extractTenderRequirements(
       sourceTexts,
       {
         maxTokens: 16000,
-        temperature: 0.1,
+        temperature: 0,
         signal: options.signal,
         diagnostics: options.diagnostics,
         schema: REQUIREMENTS_JSON_SCHEMA,
@@ -458,7 +458,7 @@ export async function extractRequirementFieldGaps(
       sectionLines.join('\n\n'),
       {
         maxTokens: 8000,
-        temperature: 0.1,
+        temperature: 0,
         signal: options.signal,
         diagnostics: options.diagnostics,
         schema: GAP_EXTRACTION_JSON_SCHEMA,
@@ -815,7 +815,7 @@ export async function classifyRequirementResponsiveness(items: Array<{ kind: str
     trimmed.map((item, index) => `${index + 1}. [${item.kind}] ${item.text}`).join('\n'),
     {
       maxTokens: 2000,
-      temperature: 0.1,
+      temperature: 0,
       signal: options.signal,
       diagnostics: options.diagnostics,
       schema: RESPONSIVENESS_JSON_SCHEMA,
@@ -877,7 +877,7 @@ export async function classifyAnchorAlternativeClauses(
     trimmed.map((item, index) => `${index + 1}. 条款：${item.text}\n   未命中锚点：${item.missingAnchors.join('、') || '（无）'}`).join('\n'),
     {
       maxTokens: 1000,
-      temperature: 0.1,
+      temperature: 0,
       signal: options.signal,
       diagnostics: options.diagnostics,
       schema: ANCHOR_ALTERNATIVE_JSON_SCHEMA,

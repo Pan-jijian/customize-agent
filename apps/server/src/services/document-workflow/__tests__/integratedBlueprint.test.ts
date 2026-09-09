@@ -264,7 +264,7 @@ describe('L1a 红线事实确定性提取', () => {
     expect(regs).not.toContain(expect.stringContaining('纳税人'));
   });
 
-  it('章级锚点卡：编制依据域渲染法规清单与工程类型规范编号（工程概况章命中）', () => {
+  it('章级锚点卡：编制依据域渲染招标文件提取法规与自写要求（工程概况章命中；十度治理后不再喂确定性清单）', () => {
     const boq = parseFixture();
     const { data } = buildBlueprintData({
       boq,
@@ -273,17 +273,19 @@ describe('L1a 红线事实确定性提取', () => {
     });
     const outline = buildBlueprintOutline({ chapterTitles: ['工程概况'], boq, docType: '单位工程施工组织设计' });
     const card = renderBlueprintChapterAuthorityCard(outline.chapters[0]!, data);
+    // 招标文件提取法规（项目专属事实）仍注入照抄
     expect(card).toContain('《建设工程质量管理条例》（国务院令第279号）');
-    // fixture 工作包含道路/排水/绿化 → 对应规范编号必须出现
-    expect(card).toContain('CJJ 1-2008');
-    expect(card).toContain('GB 50268-2008');
-    expect(card).toContain('CJJ 82-2012');
-    // 非工程类型规范不得出现（无亮化/房建分部）
+    // 写作要求提示注入（法规/条例/规范由写作模型自行列写，不得空写类别话术）
+    expect(card).toContain('由写作模型自行列写');
+    // 确定性规范清单不得注入（模型自写）
+    expect(card).not.toContain('CJJ 1-2008');
+    expect(card).not.toContain('GB 50268-2008');
+    expect(card).not.toContain('CJJ 82-2012');
     expect(card).not.toContain('CJJ 89-2012');
     expect(card).not.toContain('GB 50300-2013');
   });
 
-  it('章级锚点卡：编制依据域恒注入国家法律法规清单（带文号）与地方性法规（round-27 不再空写类别话术）', () => {
+  it('章级锚点卡：编制依据域不注入国家/地方性法规确定性清单（十度治理：模型自行列写，交付前检测兑底）', () => {
     const boq = parseFixture();
     const { data } = buildBlueprintData({
       boq,
@@ -292,13 +294,13 @@ describe('L1a 红线事实确定性提取', () => {
     });
     const outline = buildBlueprintOutline({ chapterTitles: ['编制说明与工程概况'], boq, docType: '单位工程施工组织设计' });
     const card = renderBlueprintChapterAuthorityCard(outline.chapters[0]!, data);
-    // 国家法律法规恒注入（法规名+文号）
-    expect(card).toContain('《中华人民共和国建筑法》（主席令第91号公布，2019年修正）');
-    expect(card).toContain('《建设工程安全生产管理条例》（国务院令第393号）');
-    expect(card).toContain('《保障农民工工资支付条例》（国务院令第724号）');
-    // 地方性法规按建设地点（安徽省合肥市）匹配
-    expect(card).toContain('《安徽省建筑市场管理条例》');
-    expect(card).toContain('《合肥市城市绿化管理条例》');
+    // 国家/地方性法规确定性清单不得注入（模型自写）
+    expect(card).not.toContain('《中华人民共和国建筑法》');
+    expect(card).not.toContain('《安徽省建筑市场管理条例》');
+    expect(card).not.toContain('《合肥市城市绿化管理条例》');
+    // 写作要求提示必须注入
+    expect(card).toContain('由写作模型自行列写');
+    expect(card).toContain('不得空写');
   });
 
   it('extractLocationFromFacts：建设地点提取（地方性法规匹配输入）', () => {

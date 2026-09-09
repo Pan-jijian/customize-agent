@@ -17,7 +17,7 @@ vi.mock('@/services/document-workflow/qualityValidation', async importOriginal =
   return { ...actual, autoSpecGateRequiredTexts: vi.fn() };
 });
 
-import { supplementRequiredTexts } from '@/services/document-workflow/documentPipeline';
+import { supplementRequiredTexts } from '@/services/document-workflow/finalize/rebuildAndRecompute';
 import { autoSpecGateRequiredTexts, headingUncoveredEngineeringItems } from '@/services/document-workflow/qualityValidation';
 import { projectBasicInfoTableMarkdown, stripAtlasReferencePhrases } from '@/services/document-workflow/documentGeneratorHelpers';
 import { buildCanonicalFacts } from '@/services/document-workflow/factGovernance';

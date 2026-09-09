@@ -30,26 +30,26 @@ describe('capFactCoverageContext', () => {
     expect(capFactCoverageContext('')).toBe('');
   });
 
-  it('DOCUMENT_FACT_COVERAGE_CAP 自定义预算生效', () => {
-    process.env.DOCUMENT_FACT_COVERAGE_CAP = '500';
+  it('factCoverageCap 自定义预算生效', () => {
+    process.env.DOCUMENT_TUNING_PROFILE = JSON.stringify({ factCoverageCap: 500 });
     try {
       const lines = Array.from({ length: 50 }, (_, index) => `- 条目 ${index}：${'长内容'.repeat(50)}`).join('\n');
       const capped = capFactCoverageContext(lines);
       expect(capped.length).toBeLessThanOrEqual(600);
       expect(capped).toContain('本章事实索引过长已截断');
     } finally {
-      delete process.env.DOCUMENT_FACT_COVERAGE_CAP;
+      delete process.env.DOCUMENT_TUNING_PROFILE;
     }
   });
 
-  it('DOCUMENT_FACT_COVERAGE_CAP=0 关闭封顶，原样返回', () => {
-    process.env.DOCUMENT_FACT_COVERAGE_CAP = '0';
+  it('factCoverageCap=0 关闭封顶，原样返回', () => {
+    process.env.DOCUMENT_TUNING_PROFILE = JSON.stringify({ factCoverageCap: 0 });
     try {
       const lines = Array.from({ length: 1000 }, (_, index) => `- 条目 ${index}：${'长内容'.repeat(100)}`).join('\n');
       expect(lines.length).toBeGreaterThan(26000);
       expect(capFactCoverageContext(lines)).toBe(lines);
     } finally {
-      delete process.env.DOCUMENT_FACT_COVERAGE_CAP;
+      delete process.env.DOCUMENT_TUNING_PROFILE;
     }
   });
 });

@@ -696,76 +696,19 @@ describe('O8 composeDocumentMarkdown', () => {
 
 // ═══════ O9 writerSystemPrefix / docSystemPrefix ═══════
 describe('O9 writerSystemPrefix / docSystemPrefix', () => {
-  const original = process.env.DOCUMENT_L0_SYSTEM_PREFIX;
-  const originalUnified = process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX;
-  const restoreEnv = () => {
-    if (original === undefined) delete process.env.DOCUMENT_L0_SYSTEM_PREFIX;
-    else process.env.DOCUMENT_L0_SYSTEM_PREFIX = original;
-    if (originalUnified === undefined) delete process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX;
-    else process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX = originalUnified;
-  };
-
-  it('DOCUMENT_L0_SYSTEM_PREFIX=0 → 返回 legacyPrefix', () => {
-    process.env.DOCUMENT_L0_SYSTEM_PREFIX = '0';
-    try {
-      expect(writerSystemPrefix('LEGACY')).toBe('LEGACY');
-    } finally {
-      restoreEnv();
-    }
-  });
-
   it('默认 → 含 L0 公共前缀', () => {
-    process.env.DOCUMENT_L0_SYSTEM_PREFIX = '1';
-    process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX = '1';
-    try {
-      const prefix = writerSystemPrefix('LEGACY');
-      expect(prefix).toContain('事实分级');
-      expect(prefix).not.toBe('LEGACY');
-    } finally {
-      restoreEnv();
-    }
+    const prefix = writerSystemPrefix('LEGACY');
+    expect(prefix).toContain('事实分级');
+    expect(prefix).not.toBe('LEGACY');
   });
 
   it('默认 → 写作专家身份句', () => {
-    process.env.DOCUMENT_L0_SYSTEM_PREFIX = '1';
-    try {
-      expect(writerSystemPrefix('LEGACY')).toContain('你是施工组织设计文档写作专家');
-    } finally {
-      restoreEnv();
-    }
-  });
-
-  it('UNIFIED=0 → 不含 FORMAL_WRITING_RULES', () => {
-    process.env.DOCUMENT_L0_SYSTEM_PREFIX = '1';
-    process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX = '0';
-    try {
-      const prefix = writerSystemPrefix('LEGACY');
-      expect(prefix).toContain('事实分级');
-      expect(prefix).not.toContain('【内容落地五要素】');
-    } finally {
-      restoreEnv();
-    }
+    expect(writerSystemPrefix('LEGACY')).toContain('你是施工组织设计文档写作专家');
   });
 
   it('docSystemPrefix 默认 → L0 + role', () => {
-    process.env.DOCUMENT_L0_SYSTEM_PREFIX = '1';
-    process.env.DOCUMENT_UNIFIED_SYSTEM_PREFIX = '1';
-    try {
-      const prefix = docSystemPrefix('评审角色');
-      expect(prefix).toContain('评审角色');
-      expect(prefix).toContain('事实分级');
-    } finally {
-      restoreEnv();
-    }
-  });
-
-  it('docSystemPrefix =0 → legacyPrefix ?? role', () => {
-    process.env.DOCUMENT_L0_SYSTEM_PREFIX = '0';
-    try {
-      expect(docSystemPrefix('评审角色')).toBe('评审角色');
-      expect(docSystemPrefix('评审角色', 'LEGACY')).toBe('LEGACY');
-    } finally {
-      restoreEnv();
-    }
+    const prefix = docSystemPrefix('评审角色');
+    expect(prefix).toContain('评审角色');
+    expect(prefix).toContain('事实分级');
   });
 });

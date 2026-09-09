@@ -65,6 +65,33 @@ describe('deterministicDefectPrecheck', () => {
     expect(hits.some(hit => hit.includes('工作包'))).toBe(true);
     expect(hits.some(hit => hit.includes('2026年8月31日'))).toBe(true);
   });
+
+  it('未完成小节标记命中（writer-missing-section 同源口径）', () => {
+    expect(deterministicDefectPrecheck('本节内容暂未完成，标记为 WRITER_MISSING_SECTION。').some(hit => hit.includes('未完成小节标记'))).toBe(true);
+    expect(deterministicDefectPrecheck('Writer 未完成的小节。').some(hit => hit.includes('未完成小节标记'))).toBe(true);
+  });
+
+  it('元话语声明句命中（F17 同源检测函数）', () => {
+    expect(deterministicDefectPrecheck('劳动力峰值为71人，不再另行出现其他口径。')).toContain('元话语声明句');
+  });
+
+  it('公式形态残留命中（F18 同源检测函数）', () => {
+    expect(deterministicDefectPrecheck('用电负荷按 P = K1 × ΣP 计算。')).toContain('公式形态残留');
+  });
+
+  it('装饰层工艺参数异常命中（finishThickness 同源检测函数）', () => {
+    expect(deterministicDefectPrecheck('找平层厚度为200mm，坐浆厚度 120mm。').some(hit => hit.includes('装饰层工艺参数异常'))).toBe(true);
+  });
+
+  it('占位符命中（FORMAL_PLACEHOLDER_PATTERNS 同源词表）', () => {
+    expect(deterministicDefectPrecheck('本工程做法按资料确定。').some(hit => hit.includes('占位符'))).toBe(true);
+    expect(deterministicDefectPrecheck('依据本项目已确认资料确定做法。').some(hit => hit.includes('占位符'))).toBe(true);
+  });
+
+  it('截断句残留双冒号命中（B2 修复器同源口径）', () => {
+    expect(deterministicDefectPrecheck('具体分工如下：： 第一项。')).toContain('截断句残留双冒号');
+    expect(deterministicDefectPrecheck('验收标准。： 详见规范。')).toContain('截断句残留双冒号');
+  });
 });
 
 describe('repairChapterByQuality patchGuard', () => {
@@ -112,6 +139,38 @@ describe('repairChapterByQuality patchGuard', () => {
     const result = await repairChapterByQuality({ template, chapter, issues: ['需要修复'], promptTexts: '提示词', forbidDrawingImages: false });
     expect(result.appliedCount).toBe(1);
     expect(result.content).toContain('工作包');
+  });
+
+  it('P25 分组统计：observe 命中按 repairRound 写入 patchGuardStats 且总量字段同步', async () => {
+    const diagnostics = mockDiagnostics();
+    llmMock.mockResolvedValue({ patches: [{ originalText: '原文正文。', replacement: '本工程按工作包组织施工。' }] });
+    await repairChapterByQuality({
+      template, chapter, issues: ['需要修复'], promptTexts: '提示词', forbidDrawingImages: false,
+      patchGuard: { observeOnly: true, repairRound: 'fact-landing', diagnostics },
+    });
+    expect(diagnostics.llm.patchGuardStats?.['fact-landing']?.hits).toBe(1);
+    expect(diagnostics.llm.patchGuardHits).toBe(1);
+  });
+
+  it('P25 分组统计：enforce 拒绝按 repairRound 写入 rejects', async () => {
+    const diagnostics = mockDiagnostics();
+    llmMock.mockResolvedValue({ patches: [{ originalText: '原文正文。', replacement: '本工程按工作包组织施工。' }] });
+    const result = await repairChapterByQuality({
+      template, chapter, issues: ['需要修复'], promptTexts: '提示词', forbidDrawingImages: false,
+      patchGuard: { observeOnly: false, repairRound: 'qingtian-review-repair', diagnostics },
+    });
+    expect(result.appliedCount).toBe(0);
+    expect(diagnostics.llm.patchGuardStats?.['qingtian-review-repair']?.rejects).toBe(1);
+    expect(diagnostics.llm.patchGuardRejects).toBe(1);
+  });
+
+  it('P25 分组统计：无 diagnostics 时静默不统计（行为保持）', async () => {
+    llmMock.mockResolvedValue({ patches: [{ originalText: '原文正文。', replacement: '本工程按工作包组织施工。' }] });
+    const result = await repairChapterByQuality({
+      template, chapter, issues: ['需要修复'], promptTexts: '提示词', forbidDrawingImages: false,
+      patchGuard: { observeOnly: true, repairRound: 'table-repair' },
+    });
+    expect(result.appliedCount).toBe(1);
   });
 });
 

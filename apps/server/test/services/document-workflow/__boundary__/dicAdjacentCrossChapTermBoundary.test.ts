@@ -301,22 +301,6 @@ describe('DD2b stripCrossChapterSemanticDuplicateParagraphs 增量', () => {
     expect(chapters[0].content).toBe('');
     expect(chapters[1].content).toContain('混凝土C30浇筑200mm');
   });
-  it('DD2b DOCUMENT_CROSS_CHAPTER_DEDUP=0 回退（strip 返回 0）', async () => {
-    const previous = process.env.DOCUMENT_CROSS_CHAPTER_DEDUP;
-    process.env.DOCUMENT_CROSS_CHAPTER_DEDUP = '0';
-    try {
-      const chapters = [
-        chapterOf('ch1', '第一章 工程概况', `本工程混凝土C30浇筑200mm${'甲'.repeat(45)}。`),
-        chapterOf('ch2', '第二章 施工部署', `混凝土C30浇筑200mm本工程${'乙'.repeat(45)}。`),
-      ];
-      const removed = await stripCrossChapterSemanticDuplicateParagraphs(chapters);
-      expect(removed).toBe(0);
-      expect(chapters[0].content).toContain('甲甲甲');
-      expect(chapters[1].content).toContain('乙乙乙');
-    } finally {
-      process.env.DOCUMENT_CROSS_CHAPTER_DEDUP = previous;
-    }
-  });
   it('DD2b 段落间多空行分块删除后重建', async () => {
     const chapters = [
       chapterOf('ch1', '第一章 工程概况', `本工程混凝土C30浇筑200mm${'甲'.repeat(47)}。\n\n\n现场配置挖掘机3台。`),

@@ -6,6 +6,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixParagraphOpeningRepeats, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSixHundredPercentCoverage, fixTableBorneContentSections, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
+import { repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
+import { splitMarkdownTableLine, stripTableCellInvisibleChars } from '@/services/document-workflow/helpers/markdownCleanup';
 import type { DocumentDraftChapter, DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel } from '@/services/document-workflow/types';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
@@ -1149,9 +1151,6 @@ describe('crossChapterSemanticDuplicateIssues / strip（1.5 跨章语义重复�
   beforeEach(() => {
     vi.clearAllMocks();
   });
-  afterEach(() => {
-    delete process.env.DOCUMENT_CROSS_CHAPTER_DEDUP;
-  });
 
   function draftChapter(overrides: Partial<DocumentDraftChapter> = {}): DocumentDraftChapter {
     return { id: 'ch-1', title: '第一章 工程概况', content: '', evidence: [], missingFacts: [], ...overrides };
@@ -1233,18 +1232,6 @@ describe('crossChapterSemanticDuplicateIssues / strip（1.5 跨章语义重复�
     expect(chapters[0].content).toBe('');
     expect(chapters[1].content).toContain(densePara);
     expect(chapters[1].content).toContain('### 2.1 混凝土施工工艺');
-  });
-
-  it('env DOCUMENT_CROSS_CHAPTER_DEDUP=0 回退：检测与 strip 均不动作（且不调用语义模型）', async () => {
-    process.env.DOCUMENT_CROSS_CHAPTER_DEDUP = '0';
-    mockPairSimilarity([{ a: '分层连续浇筑', b: '分层连续的方式', score: 0.95 }]);
-    const chapters = [
-      draftChapter({ id: 'ch-1', content: plainPara }),
-      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: densePara }),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-    expect(await stripCrossChapterSemanticDuplicateParagraphs(chapters)).toBe(0);
-    expect(buildSimilarityMock).not.toHaveBeenCalled();
   });
 });
 
@@ -2004,6 +1991,21 @@ describe('fixTruncatedSentenceArtifacts（B2 截断句残留确定性修复）',
     const result = fixTruncatedSentenceArtifacts(markdown);
     expect(result).toEqual({ markdown, fixedCount: 0, details: [] });
   });
+
+  it('句号+分号/逗号叠用（十度实测「销项。；污水」形态）→ 收敛为句号', () => {
+    const markdown = '整改结果由项目经理复查确认后闭合。；污水管网工程阶段同时安排土方开挖。；。；';
+    const result = fixTruncatedSentenceArtifacts(markdown);
+    expect(result.markdown).not.toContain('。；');
+    expect(result.markdown).not.toContain('；。');
+    expect(result.fixedCount).toBeGreaterThan(0);
+  });
+
+  it('连续句号（省略号误写形态）→ 收敛为省略号', () => {
+    const markdown = '复查并销项。。。踏勘发现，各自然村内部道路宽度普遍在2.5m左右。';
+    const result = fixTruncatedSentenceArtifacts(markdown);
+    expect(result.markdown).toContain('销项……踏勘发现');
+    expect(result.markdown).not.toContain('。。');
+  });
 });
 
 describe('fixTableBorneContentSections（B3 表格承载正文修复）', () => {
@@ -2092,5 +2094,62 @@ describe('applyNumericConsistencyDeterministicFixes（D2 劳动力峰值零漂�
     const result = applyNumericConsistencyDeterministicFixes('施工准备阶段投入22人，高峰期199人。', { laborPeakAuthority: 176 });
     expect(result.markdown).toContain('22人');
     expect(result.markdown).not.toContain('199人');
+  });
+});
+
+describe('表格单元格不可见字符归一（十度实测缺陷：全角空格/零宽字符单元格三层全部漏网）', () => {
+  it('检测层：全角空格 \u3000 单元格判空报 error（trim 不识别）', () => {
+    const table = [
+      '| 工序名称 | 检查内容 | 责任岗位 |',
+      '| --- | --- | --- |',
+      '| 土方开挖 | 标高检查 | \u3000 |',
+    ].join('\n');
+    const issues = markdownTableQualityIssues(table);
+    expect(issues.some(issue => issue.message.includes('空单元格'))).toBe(true);
+  });
+  it('检测层：不换行空格 \u00a0 与零宽字符 \u200b 单元格同样判空报 error', () => {
+    const table = [
+      '| 工序名称 | 检查内容 | 责任岗位 |',
+      '| --- | --- | --- |',
+      '| 土方开挖 | 标高检查 | \u00a0\u200b |',
+    ].join('\n');
+    const issues = markdownTableQualityIssues(table);
+    expect(issues.some(issue => issue.message.includes('空单元格'))).toBe(true);
+  });
+  it('检测层：普通空白 trim 可识别（历史行为保持）', () => {
+    const table = [
+      '| 工序名称 | 检查内容 | 责任岗位 |',
+      '| --- | --- | --- |',
+      '| 土方开挖 | 标高检查 |   |',
+    ].join('\n');
+    const issues = markdownTableQualityIssues(table);
+    expect(issues.some(issue => issue.message.includes('空单元格'))).toBe(true);
+  });
+  it('修复层：全角空格零星空单元格数据行被确定性删除', () => {
+    const { lines, removed } = repairTableBlockLines([
+      '| 工序名称 | 检查内容 | 责任岗位 |',
+      '| --- | --- | --- |',
+      '| 土方开挖 | 标高检查 | \u3000 |',
+      '| 回填夯实 | 压实度检测 | 试验员 |',
+    ]);
+    expect(removed).toBeGreaterThan(0);
+    expect(lines.join('\n')).not.toContain('土方开挖');
+    expect(lines.join('\n')).toContain('回填夯实');
+  });
+  it('修复层：合计行全角空格单元格填「—」（行业惯例豁免语义）', () => {
+    const { lines } = repairTableBlockLines([
+      '| 项目 | 数量 | 备注 |',
+      '| --- | --- | --- |',
+      '| 合计 | \u3000 | \u00a0 |',
+    ]);
+    expect(lines.join('\n')).toContain('—');
+  });
+  it('清洗层：splitMarkdownTableLine 剥离全角空格/零宽字符', () => {
+    const cells = splitMarkdownTableLine('| 土方开挖 | 标高检查 | \u3000\u200b |');
+    expect(cells[2]).toBe('');
+    expect(cells[0]).toBe('土方开挖');
+  });
+  it('清洗层：单元格中间全角空格也剥离（数字与单位间排版空格）', () => {
+    expect(stripTableCellInvisibleChars('800\u3000米')).toBe('800米');
   });
 });

@@ -189,18 +189,4 @@ describe('buildSectionFactCard 量化参数落位清单（4.1 两步生成第一
     const card = await buildSectionFactCard('工程概况', [evidenceItem({ content: 'OCR识别错误：管径为DN300。' })], embedDocuments);
     expect(card.preciseTokens).toEqual([]);
   });
-
-  it('DOCUMENT_SECTION_QUANT_PLAN=0 时回退为不注入清单', async () => {
-    const previous = process.env.DOCUMENT_SECTION_QUANT_PLAN;
-    process.env.DOCUMENT_SECTION_QUANT_PLAN = '0';
-    try {
-      const card = await buildSectionFactCard('工程概况', [evidenceItem()], embedDocuments);
-      expect(card.preciseTokens).toEqual([]);
-      expect(card.prompt).not.toContain('【量化参数落位清单】');
-      expect(card.prompt).toContain('【当前小节写作任务卡】');
-    } finally {
-      if (previous === undefined) delete process.env.DOCUMENT_SECTION_QUANT_PLAN;
-      else process.env.DOCUMENT_SECTION_QUANT_PLAN = previous;
-    }
-  });
 });

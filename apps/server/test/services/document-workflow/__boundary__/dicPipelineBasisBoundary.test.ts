@@ -17,7 +17,7 @@ vi.mock('@/services/document-workflow/qualityValidation', async importOriginal =
   return { ...actual, autoSpecGateRequiredTexts: vi.fn() };
 });
 
-import { supplementRequiredTexts } from '@/services/document-workflow/documentPipeline';
+import { supplementRequiredTexts } from '@/services/document-workflow/finalize/rebuildAndRecompute';
 import { autoSpecGateRequiredTexts } from '@/services/document-workflow/qualityValidation';
 
 const mockedRequiredTexts = vi.mocked(autoSpecGateRequiredTexts);

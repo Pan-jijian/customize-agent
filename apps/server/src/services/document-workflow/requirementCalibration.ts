@@ -66,7 +66,7 @@ export async function calibrateOutlineSectionsToRequirements(input: {
       '请输出需要新增的小节；没有需要新增的章节不要出现在 additions 中，整体无新增则输出空数组。',
       'JSON 格式：{"additions":[{"chapterTitle":"章标题（必须与上方章节名一致）","sections":["新增小节标题"]}]}',
     ].join('\n\n'),
-    { maxTokens: 2000, temperature: 0.1, signal: input.signal },
+    { maxTokens: 2000, temperature: 0, signal: input.signal },
   );
   // 纯代码校验（防幻觉）：章名必须匹配现有章节；标题清洗归一（与规划同口径）；重复剔除；数量上限
   const validated: RequirementSectionAddition[] = [];

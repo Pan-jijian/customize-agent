@@ -118,7 +118,7 @@ beforeEach(() => {
   vi.mocked(upsertKbOperation).mockReset();
   vi.mocked(getDocumentTemplate).mockReturnValue({ id: 't1', name: '标准模板', version: 1, description: '', category: '施工组织设计', outputTitle: '施工组织设计', chapters: [] });
   delete process.env.DOCUMENT_MAX_CONCURRENT_GENERATIONS;
-  delete process.env.DOCUMENT_PERSIST_EVIDENCE_MAX_ITEMS;
+  delete process.env.DOCUMENT_TUNING_PROFILE;
 });
 
 afterAll(() => {
@@ -470,8 +470,7 @@ describe('列表项派生与证据裁剪', () => {
   });
 
   it('saveGeneratedDocument 裁剪证据条目与内容长度', () => {
-    process.env.DOCUMENT_PERSIST_EVIDENCE_MAX_ITEMS = '4';
-    process.env.DOCUMENT_PERSIST_EVIDENCE_ITEM_CHARS = '300';
+    process.env.DOCUMENT_TUNING_PROFILE = JSON.stringify({ persistEvidenceMaxItems: 4, persistEvidenceItemChars: 300 });
     const record = makeRecord();
     record.draft = makeResult();
     record.draft.checkpointChapters = [{

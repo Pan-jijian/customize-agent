@@ -9,6 +9,7 @@ import { DOCUMENT_WORKFLOW_VERSION } from '../document-workflow/documentWorkflow
 import { computeProjectId } from '@customize-agent/knowledge';
 import { getProjectKbRoot, getProjectRoot } from '../knowledge/kbService';
 import { documentTextLength } from '../document-workflow/budget';
+import { tuningProfile } from '../document-workflow/tuningProfile';
 import { upsertKbOperation } from '../knowledge/kbOperationLog';
 
 export type GeneratedDocumentStatus = 'generating' | 'completed' | 'completed_with_issues' | 'warning' | 'failed' | 'aborted';
@@ -92,6 +93,10 @@ export interface ExportReport {
   /** 审查修复记录：阻断问题数 */
   blockingCount?: number;
   gatePassed?: boolean;
+  /** P18 自动健康诊断告警（导出时从 draft.reviewMetadata.telemetry 归档） */
+  healthAlerts?: string[];
+  /** P19 修复轮热力图（导出时归档，跨文档缺陷热力图分析数据源） */
+  repairHeat?: Record<string, { hits: number; repaired: number; failed: number }>;
 }
 
 function failRunningStages(stages: GeneratedDocumentRecord['executionStages'], message: string): GeneratedDocumentRecord['executionStages'] {
@@ -435,8 +440,8 @@ export function openGeneratedAssetTarget(id: string, target: 'file' | 'directory
 }
 
 function trimChapterEvidence(chapter: DocumentDraftChapter): DocumentDraftChapter {
-  const maxItems = Math.max(4, Math.floor(Number(process.env.DOCUMENT_PERSIST_EVIDENCE_MAX_ITEMS ?? 10)));
-  const maxChars = Math.max(300, Math.floor(Number(process.env.DOCUMENT_PERSIST_EVIDENCE_ITEM_CHARS ?? 900)));
+  const maxItems = Math.max(4, Math.floor(tuningProfile().persistEvidenceMaxItems ?? 10));
+  const maxChars = Math.max(300, Math.floor(tuningProfile().persistEvidenceItemChars ?? 900));
   return {
     ...chapter,
     evidence: (chapter.evidence || []).slice(0, maxItems).map(item => ({

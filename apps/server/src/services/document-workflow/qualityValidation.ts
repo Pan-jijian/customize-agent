@@ -11,9 +11,11 @@ import { documentTextLength, estimateDocumentPages } from './budget';
 import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { displayChapterTitle } from './outline';
 import { mergeTableLineBreaks } from './markdownComposer';
+import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
+import type { BlueprintData, BlueprintEquipmentItem } from './integratedBlueprint';
 import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
-import { extractSection, stringifyFactValue, WORK_PACKAGE_SECTION_RE } from './utils';
+import { extractSection, stableHash, stringifyFactValue, WORK_PACKAGE_SECTION_RE } from './utils';
 import { DIVISION_SECTION_RE } from './writingSpec';
 import { fiveElementBlockStats } from './tenderBidChecks';
 import { buildSemanticGate } from './semanticGate';
@@ -205,7 +207,7 @@ export function evaluationCriteriaCoverageIssues(
 export function internalTerminologyIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   if (/工作包/u.test(markdown)) {
-    issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'system', message: '正式正文仍包含后台内部术语“工作包”，需要按上下文语义改写为正式术语', suggestion: '请结合语境改写：“拆除工程工作包”→“拆除工程”，“按工作包逐项说明”→“按专业工程逐项说明”；禁止出现生成系统后台概念。' });
+    issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'system', message: '正式正文仍包含后台内部术语“工作包”，需要按上下文语义改写为正式术语', suggestion: '请结合语境改写：“拆除工程工作包”→“拆除工程”，“按工作包逐项说明”→“按专业工程逐项说明”；禁止出现生成系统后台概念。', provenance: { detectorId: 'internal-terminology-anchor', fingerprint: stableHash(markdown) } });
   }
   return issues;
 }
@@ -488,7 +490,7 @@ export function formalContentIntegrityIssues(markdown: string): ValidationIssue[
   const listLeadInRe = /(?:按以下|如下|包括|分为|包含|列出).*[:：]$/u;
   const unfinished = lines.filter(line => !listLineRe.test(line) && !listLeadInRe.test(line) && (/[，、；：和与在为对将]$/u.test(line) || /(通过|包括|如下|主要包括|验收|合格后|复查合格后|设计风|确认后|具体如下|应符合|不少于|以及|且应|不得少于)$/u.test(line))).slice(0, 3);
   for (const item of unfinished) {
-    issues.push({ level: 'warning', message: `正文存在疑似截断句：${item}`, suggestion: '请补完整该段落，避免以连接词、逗号、冒号或无句号的动作词结尾。' });
+    issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'llm', repairability: 'llm_repairable', message: `正文存在疑似截断句：${item}`, suggestion: '请补完整该段落，避免以连接词、逗号、冒号或无句号的动作词结尾。' });
   }
   const longLine = lines.find(line => line.length > 380);
   if (longLine) issues.push({ level: 'warning', message: `正文存在过长段落：${longLine}`, suggestion: '请拆分为多段或表格，改善导出版式和可读性。' });
@@ -500,6 +502,43 @@ export function formalContentIntegrityIssues(markdown: string): ValidationIssue[
   if (sourcePageRef) issues.push({ level: 'error', message: `正文残留资料页码元信息：${sourcePageRef}`, suggestion: '正式投标正文应引用招标文件、施工图设计文件、工程量清单和相关专业图纸，不写 PDF 页码或资料页数。' });
   const internalTrace = lines.find(line => /仅作为内部事实提取依据|正式正文不得引用文件名|后台事实|内部事实/u.test(line));
   if (internalTrace) issues.push({ level: 'error', message: `正文残留内部处理说明：${internalTrace.slice(0, 120)}`, suggestion: '正式投标正文不得出现内部事实抽取、后台处理或文件名引用限制说明。' });
+  return issues;
+}
+
+/**
+ * 拼接/删节残留检测（十度实测缺陷：法规长列举句 LLM 输出自吞噬中间段——
+ * 「2017年修正）、《中华人民共和国」整段丢失后「2017」与「安全生产法」直接拼接、
+ * 「279号」残成「279订」、句子删除残留「。；」标点叠用，全部穿透既有防线带病交付）：
+ * - 句读标点叠用（「。；」「；。」「。，」「，。」「。。」等，句号+引号「。”」天然不在字符类）：
+ *   确定性修复器修得掉则 stage5 已修；检测残留即 error 阻断，防「修复器漏网形态」带病交付；
+ * - 全角括号/书名号全文级成对性：内容丢失拼接必然破坏成对性，零误伤强信号；
+ *   内容已丢失无法确定性恢复，error 进修复轮由 LLM 重写所在句子/小节。
+ */
+export function punctuationArtifactIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const lines = markdown.split(LINE_SPLIT_RE);
+  const punctStackRe = /。{2,}|[！？；：，、]{2,}|。[！？；：，、]|[！？；：，、]。/u;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || /^#{1,6}\s+/u.test(trimmed) || /^\s*\|/u.test(trimmed) || /^<div\b/iu.test(trimmed)) continue;
+    const match = punctStackRe.exec(trimmed);
+    if (match) {
+      const start = Math.max(0, match.index - 24);
+      const context = `${trimmed.slice(start, match.index)}【${match[0]}】${trimmed.slice(match.index + match[0].length, match.index + match[0].length + 24)}`;
+      issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'llm', repairability: 'llm_repairable', message: `正文存在句读标点叠用（拼接/删节残留）：${context}`, suggestion: '相邻句读标点（如「。；」「；。」「。。」）是删节拼接残留或省略号误写，请重写该句。' });
+    }
+  }
+  const parenPairs = [
+    { open: /（/gu, close: /）/gu, label: '全角括号' },
+    { open: /《/gu, close: /》/gu, label: '书名号' },
+  ] as const;
+  for (const { open, close, label } of parenPairs) {
+    const openCount = (markdown.match(open) || []).length;
+    const closeCount = (markdown.match(close) || []).length;
+    if (openCount === closeCount) continue;
+    const locateLine = lines.find(line => (line.match(open) || []).length !== (line.match(close) || []).length);
+    issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'llm', repairability: 'llm_repairable', message: `正文存在${label}不闭合（开 ${openCount} 处、闭 ${closeCount} 处，拼接/删节残留）：${locateLine?.trim().slice(0, 120) ?? ''}`, suggestion: `${label}成对性破坏是内容丢失拼接的确定性信号，请重写所在句子/小节，补齐或删除残缺部分。` });
+  }
   return issues;
 }
 
@@ -593,7 +632,7 @@ export function markdownTableQualityIssues(markdown: string): ValidationIssue[] 
       issues.push({ level: 'error', message: `表格分隔线位置不规范：${rows[0] || ''}`, suggestion: 'Markdown 表格必须紧跟表头输出分隔线，例如 |---|---|，中间不得插入正文或其他管道行。' });
       continue;
     }
-    const cells = rows.map(line => line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).map(cell => cell.trim()));
+    const cells = rows.map(line => line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).map(cell => stripTableCellInvisibleChars(cell.trim())));
     const header = cells[0] || [];
     const genericHeaders = header.filter(cell => /^(?:列|字段|内容|备注)\d+$/u.test(cell));
     if (genericHeaders.length > 0) issues.push({ level: 'error', message: `表格存在泛化表头：${genericHeaders.join('、')}`, suggestion: '正式投标表格必须使用业务字段表头，不得出现“列5/字段1/内容2”等临时表头。' });
@@ -624,6 +663,199 @@ export function markdownTableQualityIssues(markdown: string): ValidationIssue[] 
         return true;
       }) || '';
       issues.push({ level: 'error', message: `表格存在占位符单元格：${header.join('、')}（“${placeholderCellRow[0] || ''}”行“${placeholderCell}”）`, suggestion: '正式交付表格不得用“—/若干/约/待定”等占位或模糊表达代替具体数据；应从资料补齐具体数值。' });
+    }
+  }
+  return issues;
+}
+
+/** 提取「编制依据/编制说明」小节文本（H2-H4 或粗体标题，到下一同级/更高级标题止；找不到返回空串） */
+function extractBasisRegulationSection(markdown: string): string {
+  const lines = markdown.split(/\r?\n/u);
+  for (let i = 0; i < lines.length; i += 1) {
+    const trimmed = lines[i].trim();
+    const hashHeading = /^(#{2,4})\s+(.+)$/u.exec(trimmed);
+    const boldHeading = hashHeading ? null : /^\*\*(.+)\*\*$/u.exec(trimmed);
+    if (!hashHeading && !boldHeading) continue;
+    const title = hashHeading ? hashHeading[2] : (boldHeading?.[1] ?? '');
+    if (!/编制依据|编制说明|编制原则|编制目的/u.test(title)) continue;
+    const level = hashHeading ? hashHeading[1].length : 0;
+    const parts: string[] = [title];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const next = /^(#{1,4})\s+(.+)$/u.exec(lines[j].trim());
+      if (next && (level === 0 || next[1].length <= level)) break;
+      parts.push(lines[j]);
+    }
+    return parts.join('\n');
+  }
+  return '';
+}
+
+/** 编制依据小节法规/规范完整性检测（十度实测缺陷：LLM 有时漏写法规清单，
+ * 正文只写「国家现行法律、行政法规」类别话术；交付前确定性兑底，漏写即 error 进修复轮）。
+ * 法规/条例/规范由写作模型依据行业公共知识自行列写，本检测只校验「具体条目存在」：
+ * 国家法律、条例、验收规范三类条目各自 ≥1，建设地点含省/市时须有含该地名的书名号条目；
+ * 招标文件提取法规（项目专属事实）须至少出现一条。
+ * 无「编制依据/编制说明」小节标题时静默跳过（模板结构差异，不误伤）。 */
+export function basisRegulationsCoverageIssues(markdown: string, blueprintData?: BlueprintData): ValidationIssue[] {
+  const sectionText = extractBasisRegulationSection(markdown);
+  if (!sectionText) return [];
+  const issues: ValidationIssue[] = [];
+  const bookNames = (sectionText.match(/《[^《》]{2,40}(?:法|条例|办法|规程|规范|标准)》/gu) || []).map(entry => entry.replace(/《|》/gu, ''));
+  const bookNameOf = (entry: string) => (entry.match(/《([^》]+)》/u) || [])[1] || '';
+  // 1. 国家法律类条目 ≥1（书名号内以「法」结尾，拦截类别话术空写）
+  if (!bookNames.some(name => /法$/u.test(name))) {
+    issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: '编制依据小节缺少国家法律法规条目', suggestion: '编制依据小节必须列出具体法律名称及文号（如《中华人民共和国建筑法》），不得空写「国家现行法律、行政法规」类别话术。' });
+  }
+  // 2. 条例/办法类条目 ≥1
+  if (!bookNames.some(name => /(?:条例|办法)$/u.test(name))) {
+    issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: '编制依据小节缺少条例类条目', suggestion: '编制依据小节必须列出具体条例名称（如《建设工程质量管理条例》），不得以类别话术代替。' });
+  }
+  // 3. 施工验收规范类条目 ≥1（书名号规范/规程/标准名 或 标准编号形态）
+  const hasStandardBook = /《[^《》]{2,40}(?:规范|规程|标准)[^《》]{0,20}》/u.test(sectionText);
+  const hasStandardCode = /(?:GB|CJJ|JGJ|JTG|SL|DB|DL|YS|HG)[\s/T]*[A-Z]?[\s/]?\d{2,4}/u.test(sectionText);
+  if (!hasStandardBook && !hasStandardCode) {
+    issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: '编制依据小节缺少施工验收规范条目', suggestion: '编制依据必须包含与本工程分部对应的现行施工验收规范名称及编号（如《给水排水管道工程施工及验收规范》（GB 50268-2008））。' });
+  }
+  // 4. 地方性法规：建设地点含省/市地名时须有含该地名的书名号条目
+  const location = blueprintData?.project.location || '';
+  const regionMatch = /([\u4e00-\u9fa5]{2,10}?[省市])/u.exec(location);
+  if (regionMatch) {
+    const region = regionMatch[1];
+    if (!bookNames.some(name => name.startsWith(region) || name.includes(region))) {
+      issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `编制依据小节缺少${region}地方性法规、条例`, suggestion: `编制依据必须列出工程所在地（${region}）现行地方性法规及条例名称。` });
+    }
+  }
+  // 5. 招标文件提取法规（项目专属事实）：全部漏写 → error
+  if (blueprintData && blueprintData.basisRegulations.length > 0) {
+    const missing = blueprintData.basisRegulations.filter(item => !bookNames.includes(bookNameOf(item)));
+    if (missing.length === blueprintData.basisRegulations.length) {
+      issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `编制依据小节未列招标文件引用法规：${missing.slice(0, 3).map(item => item.replace(/（.*/u, '')).join('、')}`, suggestion: '招标文件引用的法规必须照抄进编制依据小节。' });
+    }
+  }
+  return issues;
+}
+
+/** 资源章数值拆分一致性检测（十度实测缺陷：资源配置章的工种构成人数/机械台数/同名多规格
+ * 材料拆分数量由 LLM 自行分配，与蓝图权威（清单推导）漂移后无人锁定；交付前确定性兑底，
+ * 漂移即 error 进修复轮。检测口径保守：只在「名称后紧邻 数字+单位」的明确形态上比对，
+ * 分阶段投入/工序描述等非资源表语境不检测；同名多规格条目按规格词语境单独比对，不误伤总量口径。 */
+export function resourceBreakdownConsistencyIssues(markdown: string, blueprintData?: BlueprintData): ValidationIssue[] {
+  if (!blueprintData) return [];
+  const issues: ValidationIssue[] = [];
+  /** 机械名/材料名/规格词出现位置扫描（无前置边界检查：「配置挖掘机」的「置」是合法动词语境） */
+  const findOccurrences = (text: string, word: string): number[] => {
+    const positions: number[] = [];
+    let from = 0;
+    while (from < text.length) {
+      const idx = text.indexOf(word, from);
+      if (idx === -1) break;
+      positions.push(idx);
+      from = idx + word.length;
+    }
+    return positions;
+  };
+  /** 工种词出现位置扫描：前字为汉字时仅当「前字+词」构成词表中更长的复合词
+   * （如钢筋混凝土工 ⊃ 混凝土工）才跳过该位，防复合词内子串误命中；
+   * 动词语境（投入混凝土工12人）不跳过，保证漂移检测有效 */
+  const allTrades = new Set(blueprintData.resources.labor.composition.map(item => item.trade).filter(Boolean));
+  const findTradeOccurrences = (text: string, word: string): number[] => {
+    const positions: number[] = [];
+    let from = 0;
+    while (from < text.length) {
+      const idx = text.indexOf(word, from);
+      if (idx === -1) break;
+      const prev = text[idx - 1] || '';
+      const extended = `${prev}${word}`;
+      if (/[\u4e00-\u9fa5]/u.test(prev) && [...allTrades].some(trade => trade.length > word.length && trade.includes(extended))) {
+        from = idx + word.length;
+        continue;
+      }
+      positions.push(idx);
+      from = idx + word.length;
+    }
+    return positions;
+  };
+  const equipmentCount = (item: BlueprintEquipmentItem): number => (item.quantity && item.quantity > 0 ? item.quantity : Math.round(((item.min ?? 1) + (item.max ?? item.min ?? 1)) / 2));
+  // 1. 工种构成：trade 后 12 字内「数字+人」≠ 权威 count → error
+  for (const item of blueprintData.resources.labor.composition) {
+    if (!item.trade || !Number.isFinite(item.count) || item.count <= 0) continue;
+    for (const idx of findTradeOccurrences(markdown, item.trade)) {
+      const after = markdown.slice(idx + item.trade.length, idx + item.trade.length + 12);
+      const match = /(\d+(?:\.\d+)?)\s*人/u.exec(after);
+      if (!match) continue;
+      const actual = Number(match[1]);
+      if (actual !== item.count) {
+        issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `工种构成人数与蓝图权威不一致：${item.trade} 正文 ${actual} 人，蓝图权威 ${item.count} 人`, suggestion: '工种构成表必须与蓝图工种构成唯一口径一致，各工种人数不得自行改写。' });
+        break;
+      }
+    }
+  }
+  // 2. 机械台数：同名多条目按规格语境单独比对；单条目按名称语境（正序 name 后 + 逆序 台数后）比对
+  const equipmentByName = new Map<string, BlueprintEquipmentItem[]>();
+  for (const item of blueprintData.resources.equipment) {
+    if (!item.name) continue;
+    const group = equipmentByName.get(item.name);
+    if (group) group.push(item);
+    else equipmentByName.set(item.name, [item]);
+  }
+  for (const [name, items] of equipmentByName) {
+    for (const item of items) {
+      const expected = equipmentCount(item);
+      if (!Number.isFinite(expected) || expected <= 0) continue;
+      const contexts: number[] = [];
+      if (items.length === 1) {
+        contexts.push(...findOccurrences(markdown, name));
+      } else if (item.spec) {
+        // 同名多条目：只在「该条目规格词所在句」内比对，避免同段内其他规格条目互串
+        for (const specIdx of findOccurrences(markdown, item.spec)) {
+          const lineStart = markdown.lastIndexOf('\n', specIdx) + 1;
+          let lineEnd = markdown.indexOf('\n', specIdx);
+          if (lineEnd === -1) lineEnd = markdown.length;
+          const line = markdown.slice(lineStart, lineEnd);
+          const sentenceStart = lineStart + Math.max(line.lastIndexOf('，', specIdx - lineStart) + 1, line.lastIndexOf('。', specIdx - lineStart) + 1, line.lastIndexOf('；', specIdx - lineStart) + 1);
+          if (markdown.slice(sentenceStart, lineEnd).includes(name)) contexts.push(specIdx);
+        }
+      }
+      for (const idx of contexts) {
+        const after = markdown.slice(idx + (items.length === 1 ? name.length : (item.spec || '').length), idx + (items.length === 1 ? name.length : (item.spec || '').length) + 12);
+        const match = /(\d+(?:\.\d+)?)\s*台/u.exec(after);
+        if (!match) continue;
+        const actual = Number(match[1]);
+        if (actual !== expected) {
+          issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `机械台数与蓝图权威不一致：${name}${item.spec ? `（${item.spec}）` : ''} 正文 ${actual} 台，蓝图权威 ${expected} 台`, suggestion: '机械投入计划必须与蓝图机械清单一致，台数不得自行改写。' });
+          break;
+        }
+      }
+    }
+  }
+  // 3. 材料同名多规格拆分：spec 后 6 字内数字 ≠ 该规格权威数量 → error（合计/小计行豁免）
+  const materialsByName = new Map<string, typeof blueprintData.materialsPlan>();
+  for (const item of blueprintData.materialsPlan) {
+    if (!item.name) continue;
+    const group = materialsByName.get(item.name);
+    if (group) group.push(item);
+    else materialsByName.set(item.name, [item]);
+  }
+  for (const [name, items] of materialsByName) {
+    if (items.length < 2) continue;
+    for (const item of items) {
+      if (!item.spec || !Number.isFinite(item.quantity) || (item.quantity ?? 0) <= 0) continue;
+      for (const specIdx of findOccurrences(markdown, item.spec)) {
+        const lineStart = markdown.lastIndexOf('\n', specIdx) + 1;
+        let lineEnd = markdown.indexOf('\n', specIdx);
+        if (lineEnd === -1) lineEnd = markdown.length;
+        const line = markdown.slice(lineStart, lineEnd);
+        if (/^\s*\|?\s*(?:合计|小计|总计|累计)/u.test(line)) continue;
+        if (!line.includes(name)) continue;
+        const after = markdown.slice(specIdx + item.spec.length, specIdx + item.spec.length + 6);
+        const match = /(\d+(?:\.\d+)?)/u.exec(after);
+        if (!match) continue;
+        const actual = Number(match[1]);
+        if (actual !== item.quantity) {
+          issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `材料规格拆分数量与蓝图权威不一致：${name}（${item.spec}）正文 ${actual}${item.unit}，蓝图权威 ${item.quantity}${item.unit}`, suggestion: '同名多规格材料的拆分数量必须与清单逐项一致，不得自行分配。' });
+          break;
+        }
+      }
     }
   }
   return issues;

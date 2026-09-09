@@ -1,5 +1,6 @@
 import type { DocumentDraftChapter } from './types';
 import { duplicateParagraphIssues, fillerParagraphIssues, processParameterDensityIssues, tableCompletenessIssues, sectionCardStructureIssues } from './constructionOrgAudit';
+import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
 import { PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
 import { fillerDensityReport } from './tenderBidChecks';
 import type { TenderBidTemplatingReport } from './tenderBidScoring';
@@ -96,7 +97,7 @@ function tableScore(chapters: DocumentDraftChapter[], markdown = ''): { score: n
     tableCount += 1;
     const bodyRows = tableLines.slice(1).filter(row => row.replace(/\|/gu, '').replace(/[\s\-:]/gu, '').length > 0);
     const emptyCells = bodyRows.reduce((total, row) => {
-      const cells = row.split('|').slice(1, -1).map(cell => cell.trim());
+      const cells = row.split('|').slice(1, -1).map(cell => stripTableCellInvisibleChars(cell.trim()));
       return total + cells.filter(cell => cell === '' || cell === '-' || cell === '—' || cell === '/').length;
     }, 0);
     if (emptyCells === 0) completeTables += 1;

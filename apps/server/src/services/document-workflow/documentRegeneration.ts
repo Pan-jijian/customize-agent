@@ -11,6 +11,10 @@ import { buildProjectMaterialProfile, expandProjectMaterialBindings, materialKin
 import { assertEvidenceInProjectScope, createProjectMaterialScope, filterEvidenceByProjectScope } from './projectMaterialScope';
 import { compactChapterQueries, optimizeChapterEvidence, qualityFirstEvidenceItemLimit, qualityFirstSearchQueryLimit, resolveDocumentGenerationEvidenceLimit } from './documentGeneratorHelpers';
 
+/**
+ * @deprecated 第 1 期 P20 标记废弃：单章重生成服务无 LLM（仅检索拼证据），与主生成管线（章级重写走
+ * repairChapterByQuality）口径不一致；前端零调用，保留仅作历史 API 兼容，新功能不得接入。
+ */
 export async function regenerateDocumentChapter(input: { templateId: string; chapterId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; documentId?: string; currentMarkdown?: string; existingFacts?: string[] }): Promise<DocumentDraftChapter> {
   const template = getDocumentTemplate(input.templateId);
   if (!template) throw new Error('Document template not found');
