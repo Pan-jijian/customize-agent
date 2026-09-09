@@ -49,7 +49,9 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   session.understanding.projectMaterialScope = createProjectMaterialScope(session.prepare.projectId, [...session.understanding.availableEvidenceScopePaths]);
   session.understanding.requestedEvidencePerChapter = resolveDocumentGenerationEvidenceLimit(session.understanding.project, [...session.understanding.availableEvidenceScopePaths], session.global.input.maxEvidencePerChapter);
   const indexHealthHasActionableWarning = session.understanding.indexHealth.pendingJobs > 0 || session.understanding.indexHealth.usableChunkCount === 0;
-  const rolePoolRisk = retrievalCoverageRisk({ totalChunks: Math.min(session.understanding.indexHealth.usableChunkCount, session.prepare.materialFilePaths.length * 20), loadedChunks: Math.min(session.understanding.indexHealth.usableChunkCount, session.prepare.materialFilePaths.length * 20), vectorReady: session.understanding.indexHealth.vectorStatus ? session.understanding.indexHealth.vectorStatus.status === 'ready' : undefined });
+  // 召回覆盖风险必须写回 session（章节循环与覆盖报告在阶段 4 消费）：P1 六阶段拆分搬迁时
+  // 此处仅保留局部变量导致 stageChapterLoop 读 undefined.highRisk 抛错、全部章节生成失败（4.22.0 事故）
+  session.understanding.rolePoolRisk = retrievalCoverageRisk({ totalChunks: Math.min(session.understanding.indexHealth.usableChunkCount, session.prepare.materialFilePaths.length * 20), loadedChunks: Math.min(session.understanding.indexHealth.usableChunkCount, session.prepare.materialFilePaths.length * 20), vectorReady: session.understanding.indexHealth.vectorStatus ? session.understanding.indexHealth.vectorStatus.status === 'ready' : undefined });
   upsertProgressStage(session.global.progressStages, displayStage({
     type: 'knowledge_retrieval',
     roleId: 'knowledge-index',

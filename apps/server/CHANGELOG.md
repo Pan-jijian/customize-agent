@@ -1,5 +1,11 @@
 # server
 
+## 4.22.1
+
+### Patch Changes
+
+- 修复 4.22.0 生成中止事故：P1 六阶段拆分搬迁时 rolePoolRisk 未写回 session，章节循环读 undefined.highRisk 抛错导致全部章节生成失败。stageUnderstanding 恢复写回 session.understanding.rolePoolRisk（治本），stageChapterLoop 经 resolveRolePoolRisk 零风险兑底（防御），新增回归单测覆盖两道防线。
+
 ## 4.22.0
 
 ### Minor Changes

@@ -35,6 +35,16 @@ export function retrievalCoverageRisk(input: { totalChunks: number; loadedChunks
   return { totalChunks, loadedChunks, omittedChunks, loadedRatio, highRisk: riskReasons.length > 0, riskReason: riskReasons.join('、') || undefined };
 }
 
+/**
+ * 召回覆盖风险兑底（4.22.0 修复）：阶段 1 写入失败/未执行时返回零风险兜底对象，
+ * 章节循环（stageChapterLoop）消费处不再读 undefined.highRisk 崩溃；
+ * 兜底按零风险（高风控开关关闭、深召回仍由 missingFacts/requiredMissingNeeds 触发），
+ * 阶段 1 已写入的风险对象原样返回（不覆盖真实计算结果）。
+ */
+export function resolveRolePoolRisk(risk: RetrievalCoverageRisk | undefined): RetrievalCoverageRisk {
+  return risk ?? retrievalCoverageRisk({ totalChunks: 0, loadedChunks: 0, vectorReady: undefined });
+}
+
 export function shouldTriggerDeepRetrieval(input: {
   scopedFileCount: number;
   evidenceCount: number;

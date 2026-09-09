@@ -27,7 +27,7 @@ import { alignSectionHeadingsToPlan, runWithAdaptiveConcurrency, stableHash, thr
 import { displayStage, elapsedMessage, upsertProgressStage } from '../progress';
 import { getActiveModelWithProvider } from '../llmClient';
 import { evidenceInScope, measureGenerationStep } from '../rolePipeline';
-import { buildRetrievalCoverageReport, retrieveDeepChapterEvidence, shouldTriggerDeepRetrieval } from '../documentEvidenceRetrieval';
+import { buildRetrievalCoverageReport, resolveRolePoolRisk, retrieveDeepChapterEvidence, shouldTriggerDeepRetrieval } from '../documentEvidenceRetrieval';
 import { chapterRelevanceTokens, renderBillFactLockText } from '../billFactLock';
 import { retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from '../projectMaterialProfile';
 import { buildChapterFactCoverageContext, buildLlmChapterContent, buildPlannedChapterContent, buildSectionParallelChapterContent, capFactCoverageContext, evidenceForSection, outputTokensForChapter } from '../chapterGeneration';
@@ -46,6 +46,9 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     const batchTasks = await Promise.all(chapterBatch.map(async (chapter, batchIndex): Promise<(() => Promise<void>) | undefined> => {
     const chapterOrder = chapterOffset + batchIndex;
     throwIfAborted(session.global.input.signal);
+    // 召回覆盖风险兑底（4.22.0 修复）：阶段 1 写入失败/未执行时不再让章节生成崩溃，
+    // 按零风险兑底（高风控开关关闭、深召回仍由 missingFacts/requiredMissingNeeds 触发）
+    const rolePoolRisk = resolveRolePoolRisk(session.understanding.rolePoolRisk);
     // P14 蓝图分层权威阻断（源头治理）：蓝图构建失败/校验未通过时全文参数桶不注入，
     // 数值密集型章（劳动力/资源/进度）按「本章所需权威任一不可用」判定阻断（替代整体二元 passed）——
     // 部分校验失败（如覆盖校验）不再连坐权威未受损的章节；仍拒绝「按证据独立成稿」静默产出自编数值
@@ -243,7 +246,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       session.understanding.webResearchReport.queries.push(...webResult.queries);
       session.understanding.webResearchReport.filteredCount += webResult.filtered + webResult.evidence.length;
     }
-    const sampledEvidence = resumedContent ? [] : sampleProjectMaterialEvidence({ project: session.understanding.project, chapter, plan, profile: session.prepare.projectMaterialProfile, scopedFilePaths, highRisk: session.understanding.rolePoolRisk.highRisk });
+    const sampledEvidence = resumedContent ? [] : sampleProjectMaterialEvidence({ project: session.understanding.project, chapter, plan, profile: session.prepare.projectMaterialProfile, scopedFilePaths, highRisk: rolePoolRisk.highRisk });
     // 单次过滤：rawEvidence（上方仅做过路径域过滤）与 sampledEvidence 统一在此过一次项目资料口径过滤，
     // 不再对 sampled 先预过滤再随全量二次过滤（历史冗余：同一批 sampled 证据被过滤两遍）
     if (sampledEvidence.length > 0) scopedEvidence.push(...sampledEvidence);
@@ -334,7 +337,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       evidenceCount: evidence.length,
       evidenceFileCount,
       suggestedStrategy: readinessPlan.suggestedStrategy,
-      highRisk: session.understanding.rolePoolRisk.highRisk,
+      highRisk: rolePoolRisk.highRisk,
       missingFactsCount: missingFacts.length,
       requiredMissingNeedsCount: requiredMissingNeeds.length,
       riskLevel: readinessPlan.riskLevel,
@@ -353,7 +356,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         session.global.emitProgress();
       }
       // P1-4：缺失事实与必需事实需求并入同一次深召回（原两次调用查询集高度重叠，合并后每章深召回查询数约降 40%）
-      const deepEvidence = await retrieveDeepChapterEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, scopedFilePaths, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, requiredNeeds: [...new Set([...missingFacts, ...requiredMissingNeeds])], extraClues: session.prepare.requirementSemantics?.factClues || [], highRisk: session.understanding.rolePoolRisk.highRisk || requiredMissingNeeds.length > 0, signal: session.global.input.signal }).catch(() => []);
+      const deepEvidence = await retrieveDeepChapterEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, scopedFilePaths, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, requiredNeeds: [...new Set([...missingFacts, ...requiredMissingNeeds])], extraClues: session.prepare.requirementSemantics?.factClues || [], highRisk: rolePoolRisk.highRisk || requiredMissingNeeds.length > 0, signal: session.global.input.signal }).catch(() => []);
       deepEvidenceCount = deepEvidence.length;
       if (deepEvidence.length > 0) {
         // 深召回增量合并：scopedEvidence 各来源均已过项目资料口径过滤，deepEvidence 此处过滤后直接合并；
@@ -434,12 +437,12 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       const label = missingFacts.join(' ');
       return retrieveSectionEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, sectionTitle: label, scopedFilePaths, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, signal: session.global.input.signal }).catch(() => []);
     };
-    const retrievalCoverageReport = buildRetrievalCoverageReport({ chapter, evidence, risk: session.understanding.rolePoolRisk });
+    const retrievalCoverageReport = buildRetrievalCoverageReport({ chapter, evidence, risk: rolePoolRisk });
     session.understanding.retrievalCoverageReports.push(retrievalCoverageReport);
     const chapterEvidenceFiles = new Set(evidence.map(item => item.filePath));
     const chapterEvidenceChars = evidence.reduce((sum, item) => sum + item.content.length, 0);
     const retrievalDetails = [
-      ...(session.understanding.rolePoolRisk.highRisk ? [`召回覆盖风险（${session.understanding.rolePoolRisk.riskReason || '切片未完全预加载'}）：已加载 ${session.understanding.rolePoolRisk.loadedChunks}/${session.understanding.rolePoolRisk.totalChunks}，已启用深召回`] : []),
+      ...(rolePoolRisk.highRisk ? [`召回覆盖风险（${rolePoolRisk.riskReason || '切片未完全预加载'}）：已加载 ${rolePoolRisk.loadedChunks}/${rolePoolRisk.totalChunks}，已启用深召回`] : []),
       `项目理解缓存证据：${cachedIntentEvidence.length} 条`,
       `深召回证据：${deepEvidenceCount} 条`,
       `事实覆盖：${retrievalCoverageReport.requiredFactCovered}/${retrievalCoverageReport.requiredFactTotal}`,
