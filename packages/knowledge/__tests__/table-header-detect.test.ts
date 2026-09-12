@@ -127,6 +127,17 @@ describe('detectSmartTableHeader', () => {
     expect(smart.headerIndex).toBe(0);
     expect(smart.headers).toEqual(['序号', '项目名称']);
   });
+
+  it('单元格内换行的表头（「计量\n单位」）→ headers 折叠换行、unit 列可定位（KV 列名不再断行）', () => {
+    const matrix = [
+      ['序号', '项目编码', '项目名称', '项目特征描述', '计量\n单位', '工程量'],
+      ['1', '010101001001', '垫层', '混凝土强度等级:C15', 'm3', '125.80'],
+    ];
+    const smart = detectSmartTableHeader(matrix);
+    expect(smart.headerIndex).toBe(0);
+    expect(smart.headers[4]).toBe('计量单位');
+    expect(smart.columnMap.unit).toBe(4);
+  });
 });
 
 describe('locateTableColumns', () => {
@@ -159,5 +170,10 @@ describe('locateTableColumns', () => {
   it('表头含空格（「计量 单位」）→ 精确匹配失败回 -1（现状约束：不模糊归一）', () => {
     const map = locateTableColumns(['序号', '项目名称', '计量 单位', '工程量']);
     expect(map.unit).toBe(-1);
+  });
+
+  it('表头含单元格内换行（「计量\n单位」）→ 换行折叠后精确命中（丰乐镇清单实锤）', () => {
+    const map = locateTableColumns(['序号', '项目名称', '计量\n单位', '工程量']);
+    expect(map.unit).toBe(2);
   });
 });

@@ -109,6 +109,9 @@ function isHeaderFooterLine(trimmed: string, count: number): boolean {
   const core = trimmed.replace(/^#{1,6}\s+/u, '').trim();
   if (core.length < 4 || core.length > 60) return false;
   if (core.includes('|')) return false;
+  // 表格 KV 声明行保护（extractor 生成的「R#C# 列名: 值」行级参数，供向量检索按列名召回）：
+  // 多 sheet 工作簿中相同条目会在多个 sheet 重复出现（≥6 次），曾因此被误判为页眉页脚整行删除
+  if (/^(?:表\d+\.)?R\d+C\d+\s/u.test(core)) return false;
   // 列表项/编号保护：剥离前缀后重新判定（列表符号、数字顿号/点号、括号编号条目）
   if (/^[-*•·]|^\d+[、.．]|^[（(]?\d+[）)]/u.test(core)) return false;
   // 完整句保护：以句末标点结尾的正文句不删（页眉/页脚极少是完整句）
@@ -167,20 +170,24 @@ const TENDER_FORMAT_SIGN_RE = /（盖[章章]*）|（签[字名]）|（公[章�
 /**
  * 投标文件格式模板段探测：标题行匹配格式模板特征后，向后收集段内容（至空行分隔段落结束），
  * 段内含盖章/签字标记才算模板段（标题 + 盖章标记双重证据）。
+ * 段必须遇到明确边界（空行或下一章节标题）才算闭合；docx 无空行排版提取文本缺段落边界时
+ * 收集会一路扩展到文件尾，把后续正文连带删除（宁多勿丢：未闭合不删）。
  */
 function collectTenderFormatBlock(lines: string[], start: number): number {
   if (!TENDER_FORMAT_TITLE_RE.test(lines[start]!.trim())) return start;
   let end = start + 1;
   let hasSign = false;
+  let closed = false;
   for (let j = start + 1; j < lines.length; j += 1) {
     const trimmed = lines[j]!.trim();
     if (TENDER_FORMAT_SIGN_RE.test(lines[j]!)) hasSign = true;
-    if (!trimmed) { end = j + 1; break; }
+    if (!trimmed) { end = j + 1; closed = true; break; }
     // 下一个章节标题行（「第X章/条」或中文序号）视为新段起点；纯数字序号（"1. xxx"）在
     // 格式模板段内是常见的填空条目，不中断段收集
-    if (j > start + 1 && /^(第[一二三四五六七八九十百\d]+[章节条部分]|[一二三四五六七八九十]+[、.．])/u.test(trimmed) && trimmed.length < 30) break;
+    if (j > start + 1 && /^(第[一二三四五六七八九十百\d]+[章节条部分]|[一二三四五六七八九十]+[、.．])/u.test(trimmed) && trimmed.length < 30) { closed = true; break; }
     end = j + 1;
   }
+  if (!closed) return start;
   return hasSign ? end : start;
 }
 

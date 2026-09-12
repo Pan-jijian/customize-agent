@@ -314,6 +314,298 @@ export class TesseractJsProvider implements OcrProvider {
   }
 }
 
+// ─── OCR 分栏阅读顺序重排 ─────────────────────────────────────
+//
+// PP-OCRv5（paddleocr.js）的 processRecognition 按朴素 y→x 顺序合并检测框，
+// 分栏版面会把左右栏落在同一水平带的文本交错拼进同一行，破坏句子与条款边界；
+// 表格页的「行 = 一条记录」结构反而依赖该 y 行序。这里用「竖向空白走廊检测」
+// 定位分栏切割线，且只对门控确认的「多栏正文页」按栏优先重排，表格页 / 图纸
+// 标注页保持原序；「表格样跨界带」保护则拒绝落在数据表格列间隙上的切割
+// （该间隙会重复出现「两侧短文本同行」的模式，正文栏间隙至少一侧为长文本）；
+// 重排结果再做字符多重集校验（不丢字、不重复，仅允许换序），校验失败回退
+// 原始文本。参数先验自图纸 + 正文混合语料的实测定标；输出行合并阈值按
+// 「同行错位上限 < 阈值 < 相邻行距下限」的实测区间取 0.35，页面判别
+// （表格样跨界带计数 / 行片段长度门控）保持宽松合并（0.6）下的既有标定。
+
+const OCR_COLUMN_REFLOW = {
+  /** 行内分段阈值：max(行高中位数 × factor, 图宽 × ratio) */
+  segmentGapHeightFactor: 2.2,
+  segmentGapWidthRatio: 0.03,
+  /** 输出行合并阈值：相邻 box y 差 ≤ max(4, 平均行高 × factor) 视为同一视觉行；
+      实测同行错位 ≤14px（行高 105）、相邻行距 ≥34px（行高 69），取 0.35 分离 */
+  lineMergeHeightFactor: 0.35,
+  /** 判别用块合并阈值（表格样跨界带计数 / 行片段长度门控）：保持宽松合并下的既有标定 */
+  blockMergeHeightFactor: 0.6,
+  /** 竖向走廊判据：x 网格点「无检测框覆盖」的 y 桶占比阈值 */
+  corridorClearRatio: 0.6,
+  /** 走廊最小宽度（px）与相邻走廊合并间隔（px） */
+  minCorridorWidth: 60,
+  corridorMergeGap: 16,
+  /** 最多切割数与切割间距下限 max(px, 图宽 × ratio) */
+  maxCuts: 3,
+  minCutDistance: 100,
+  minCutDistanceRatio: 0.03,
+  /** 每条切割须保证各栏 box 数下限与质量占比下限 */
+  minColumnBoxes: 4,
+  minColumnMassShare: 0.05,
+  /** 走廊检测分辨率：y 分桶数与 x 网格步长（px） */
+  yBuckets: 16,
+  xGridStep: 2,
+  /** 表格样跨界带判据：切割两侧贴靠 box 距离窗口（px）、短文本阈值（去空白字符数）、拒绝所需最小带数 */
+  tableNearDelta: 800,
+  tableShortTextLength: 16,
+  minTableLikeBands: 4,
+  /** 应用门控：box 数下限、行片段长度中位/均值下限（表格页 / 标注页在此被拦截） */
+  minBoxes: 24,
+  minMedianSegmentLength: 13,
+  minAverageSegmentLength: 25,
+} as const;
+
+interface OcrTextLine {
+  segments: OcrRegion[][];
+}
+
+export interface OcrColumnReflowResult {
+  text: string;
+  regions: OcrRegion[];
+}
+
+function stripOcrWhitespace(text: string): string {
+  return text.replace(/\s+/gu, '');
+}
+
+function sameCharacterMultiset(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  if (a === b) return true;
+  return [...a].sort().join('') === [...b].sort().join('');
+}
+
+function medianNumber(values: readonly number[]): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)]!;
+}
+
+function segmentGapForOcrBoxes(boxes: readonly OcrRegion[], imageWidth: number): number {
+  const heights = boxes.map(region => region.box.height).filter(height => Number.isFinite(height) && height > 0);
+  return Math.max(
+    medianNumber(heights) * OCR_COLUMN_REFLOW.segmentGapHeightFactor,
+    imageWidth * OCR_COLUMN_REFLOW.segmentGapWidthRatio,
+  );
+}
+
+/** y 邻近归组分行（mergeHeightFactor 控制合并粒度）；行内按 x 排序，间距超过 segmentGap 的拆为独立段 */
+function buildOcrTextLines(
+  boxes: readonly OcrRegion[],
+  segmentGap: number,
+  mergeHeightFactor: number = OCR_COLUMN_REFLOW.lineMergeHeightFactor,
+): OcrTextLine[] {
+  if (!boxes.length) return [];
+  const sorted = [...boxes].sort((a, b) => a.box.y - b.box.y || a.box.x - b.box.x);
+  const lines: OcrTextLine[] = [];
+  let current: OcrRegion[] = [sorted[0]!];
+  let averageHeight = Math.max(1, sorted[0]!.box.height);
+  const flush = () => {
+    const raw = [...current].sort((a, b) => a.box.x - b.box.x);
+    const segments: OcrRegion[][] = [[raw[0]!]];
+    for (let i = 1; i < raw.length; i++) {
+      const segment = segments[segments.length - 1]!;
+      const previous = segment[segment.length - 1]!;
+      const gap = raw[i]!.box.x - (previous.box.x + previous.box.width);
+      if (gap > segmentGap) segments.push([]);
+      segments[segments.length - 1]!.push(raw[i]!);
+    }
+    lines.push({ segments });
+  };
+  for (let i = 1; i < sorted.length; i++) {
+    const previous = current[current.length - 1]!;
+    if (Math.abs(sorted[i]!.box.y - previous.box.y) <= Math.max(4, averageHeight * mergeHeightFactor)) {
+      current.push(sorted[i]!);
+      averageHeight = current.reduce((sum, region) => sum + region.box.height, 0) / current.length;
+    } else {
+      flush();
+      current = [sorted[i]!];
+      averageHeight = Math.max(1, sorted[i]!.box.height);
+    }
+  }
+  flush();
+  return lines;
+}
+
+/**
+ * 表格样跨界带计数：同一 y 行带内，切割线两侧最贴靠 box 均为短文本的带数量。
+ * 数据表格的列间隙会重复出现「两侧短文本同行」的模式（成行记录）；
+ * 正文栏间隙 / 图签字段边界至多单发一条，不足以触发拒绝。
+ */
+function countTableLikeBands(bands: readonly OcrRegion[][], cut: number): number {
+  let count = 0;
+  for (const band of bands) {
+    let leftNear: OcrRegion | null = null;
+    let rightNear: OcrRegion | null = null;
+    for (const region of band) {
+      const rightEdge = region.box.x + region.box.width;
+      if (rightEdge <= cut) {
+        if (!leftNear || rightEdge > leftNear.box.x + leftNear.box.width) leftNear = region;
+      } else if (region.box.x >= cut) {
+        if (!rightNear || region.box.x < rightNear.box.x) rightNear = region;
+      }
+    }
+    if (!leftNear || !rightNear) continue;
+    const gapLeft = cut - (leftNear.box.x + leftNear.box.width);
+    const gapRight = rightNear.box.x - cut;
+    if (gapLeft > OCR_COLUMN_REFLOW.tableNearDelta || gapRight > OCR_COLUMN_REFLOW.tableNearDelta) continue;
+    if (
+      stripOcrWhitespace(leftNear.text).length <= OCR_COLUMN_REFLOW.tableShortTextLength &&
+      stripOcrWhitespace(rightNear.text).length <= OCR_COLUMN_REFLOW.tableShortTextLength
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/**
+ * 竖向空白走廊 → 栏切割位置。
+ * 把页面 y 方向分成若干桶，统计每个 x 网格点「无任何检测框覆盖」的桶占比；
+ * 占比超过阈值的连续 x 区间即候选走廊，取走廊中线为切割线；
+ * 切割须保证各栏 box 数 / 质量占比下限、切割间距下限，最多 maxCuts 条；
+ * 落在数据表格列间隙上的切割（表格样跨界带重复出现）被拒绝，保护表格行结构。
+ */
+function detectOcrColumnCuts(boxes: readonly OcrRegion[], imageWidth: number): number[] {
+  if (boxes.length < 16) return [];
+  const ys = boxes.map(region => region.box.y).filter(Number.isFinite);
+  if (!ys.length) return [];
+  const yMin = Math.min(...ys);
+  const yMax = Math.max(...ys);
+  const ySpan = Math.max(1, yMax - yMin);
+  const bucketCount = OCR_COLUMN_REFLOW.yBuckets;
+  const step = OCR_COLUMN_REFLOW.xGridStep;
+  const gridLength = Math.ceil(imageWidth / step) + 2;
+  const bucketOf = (y: number) => Math.min(bucketCount - 1, Math.max(0, Math.floor(((y - yMin) / ySpan) * bucketCount)));
+  const bucketHasBoxes = new Array<boolean>(bucketCount).fill(false);
+  const covered = Array.from({ length: bucketCount }, () => new Uint8Array(gridLength));
+  for (const region of boxes) {
+    if (!Number.isFinite(region.box.x) || !Number.isFinite(region.box.y)) continue;
+    const firstBucket = bucketOf(region.box.y);
+    const lastBucket = bucketOf(region.box.y + Math.max(region.box.height, 1));
+    const x0 = Math.max(0, Math.floor(region.box.x / step));
+    const x1 = Math.min(gridLength - 1, Math.ceil((region.box.x + Math.max(region.box.width, 1)) / step));
+    for (let bucket = firstBucket; bucket <= lastBucket; bucket++) {
+      bucketHasBoxes[bucket] = true;
+      covered[bucket]!.fill(1, x0, x1);
+    }
+  }
+  const clearFraction = new Float64Array(gridLength);
+  for (let x = 0; x < gridLength; x++) {
+    let clear = 0;
+    let total = 0;
+    for (let bucket = 0; bucket < bucketCount; bucket++) {
+      if (!bucketHasBoxes[bucket]) continue;
+      total++;
+      if (!covered[bucket]![x]) clear++;
+    }
+    clearFraction[x] = total ? clear / total : 0;
+  }
+  const corridors: Array<{ left: number; right: number; width: number }> = [];
+  let start = -1;
+  for (let x = 0; x <= gridLength; x++) {
+    const clear = x < gridLength && clearFraction[x]! >= OCR_COLUMN_REFLOW.corridorClearRatio;
+    if (clear) {
+      if (start < 0) start = x;
+      continue;
+    }
+    if (start >= 0) {
+      corridors.push({ left: start * step, right: x * step, width: (x - start) * step });
+      start = -1;
+    }
+  }
+  const merged: Array<{ left: number; right: number; width: number }> = [];
+  for (const corridor of corridors) {
+    const last = merged[merged.length - 1];
+    if (last && corridor.left - last.right <= OCR_COLUMN_REFLOW.corridorMergeGap) {
+      last.right = corridor.right;
+      last.width = last.right - last.left;
+    } else {
+      merged.push({ ...corridor });
+    }
+  }
+  const candidates = merged
+    .filter(corridor => corridor.width >= OCR_COLUMN_REFLOW.minCorridorWidth)
+    .sort((a, b) => b.width - a.width);
+  const minCutDistance = Math.max(OCR_COLUMN_REFLOW.minCutDistance, imageWidth * OCR_COLUMN_REFLOW.minCutDistanceRatio);
+  const bands = buildOcrTextLines(boxes, segmentGapForOcrBoxes(boxes, imageWidth), OCR_COLUMN_REFLOW.blockMergeHeightFactor).map(line => line.segments.flat());
+  const accepted: number[] = [];
+  for (const corridor of candidates) {
+    if (accepted.length >= OCR_COLUMN_REFLOW.maxCuts) break;
+    const cut = (corridor.left + corridor.right) / 2;
+    if (accepted.some(existing => Math.abs(existing - cut) < minCutDistance)) continue;
+    if (countTableLikeBands(bands, cut) >= OCR_COLUMN_REFLOW.minTableLikeBands) continue;
+    const trialCuts = [...accepted, cut].sort((a, b) => a - b);
+    const bounds = [0, ...trialCuts, imageWidth];
+    let viable = true;
+    for (let i = 0; i + 1 < bounds.length; i++) {
+      let count = 0;
+      for (const region of boxes) {
+        if (!Number.isFinite(region.box.x)) continue;
+        const center = region.box.x + region.box.width / 2;
+        if (center >= bounds[i]! && center < bounds[i + 1]!) count++;
+      }
+      if (count < OCR_COLUMN_REFLOW.minColumnBoxes || count / boxes.length < OCR_COLUMN_REFLOW.minColumnMassShare) {
+        viable = false;
+        break;
+      }
+    }
+    if (viable) accepted.push(cut);
+  }
+  return accepted.sort((a, b) => a - b);
+}
+
+/** 按切割线分栏后，栏内先 y 后 x 重新装配文本与区域顺序 */
+function assembleColumnMajorOcrText(boxes: readonly OcrRegion[], cuts: readonly number[], segmentGap: number): OcrColumnReflowResult {
+  const bounds = [0, ...cuts, Infinity];
+  const chunks: string[] = [];
+  const regions: OcrRegion[] = [];
+  for (let i = 0; i + 1 < bounds.length; i++) {
+    const column = boxes.filter(region => {
+      if (!Number.isFinite(region.box.x)) return false;
+      const center = region.box.x + region.box.width / 2;
+      return center >= bounds[i]! && center < bounds[i + 1]!;
+    });
+    if (!column.length) continue;
+    const lines = buildOcrTextLines(column, segmentGap);
+    chunks.push(lines.map(line => line.segments.map(segment => segment.map(region => region.text).join(' ')).join(' ')).join('\n'));
+    for (const line of lines) {
+      for (const segment of line.segments) {
+        for (const region of segment) regions.push(region);
+      }
+    }
+  }
+  return { text: chunks.join('\n\n'), regions };
+}
+
+/**
+ * 对「多栏正文页」按栏重排 OCR 阅读顺序。
+ * 不适用或校验失败时返回 null（调用方保留原始文本）：
+ * - box 数不足、未检出栏切割、行片段过短（表格页 / 图纸标注页在此被拦截）；
+ * - 重排后字符多重集与原文本不一致（丢字 / 重复，理论不可达，防御性兜底）。
+ */
+export function reflowOcrRegionsByColumns(regions: readonly OcrRegion[], imageWidth: number, originalText: string): OcrColumnReflowResult | null {
+  if (!Number.isFinite(imageWidth) || imageWidth <= 0) return null;
+  const boxes = regions.filter(region => region.text.trim());
+  if (boxes.length < OCR_COLUMN_REFLOW.minBoxes) return null;
+  const segmentGap = segmentGapForOcrBoxes(boxes, imageWidth);
+  const cuts = detectOcrColumnCuts(boxes, imageWidth);
+  if (!cuts.length) return null;
+  const segmentLengths = buildOcrTextLines(boxes, segmentGap, OCR_COLUMN_REFLOW.blockMergeHeightFactor)
+    .flatMap(line => line.segments.map(segment => stripOcrWhitespace(segment.map(region => region.text).join(' ')).length));
+  const medianLength = medianNumber(segmentLengths);
+  const averageLength = segmentLengths.length ? segmentLengths.reduce((sum, length) => sum + length, 0) / segmentLengths.length : 0;
+  if (medianLength < OCR_COLUMN_REFLOW.minMedianSegmentLength || averageLength < OCR_COLUMN_REFLOW.minAverageSegmentLength) return null;
+  const reflowed = assembleColumnMajorOcrText(boxes, cuts, segmentGap);
+  if (!sameCharacterMultiset(stripOcrWhitespace(reflowed.text), stripOcrWhitespace(originalText))) return null;
+  return reflowed;
+}
+
 // ─── PaddleOCR.js（ONNX Runtime PP-OCRv5，模型随 npm 包发布） ──────
 
 function paddleModelDir(): string {
@@ -416,7 +708,7 @@ export class PaddleOcrJsProvider implements OcrProvider {
       const service = await this.getService();
       const recognition = await this.recognizeWithTimeout(service, { width, height, data });
       const processed = service.processRecognition(recognition);
-      const text = (processed.text ?? '').trim();
+      const processedText = (processed.text ?? '').trim();
       const lineResults = (processed.lines ?? []).flat();
       const regions: OcrRegion[] = lineResults
         .filter(item => item?.text?.trim())
@@ -432,7 +724,14 @@ export class PaddleOcrJsProvider implements OcrProvider {
             box: { x: bx, y: by, width: bw, height: bh },
           };
         });
-      return { text, confidence: Number(processed.confidence ?? 0), regions, warnings: this.getWarnings() };
+      // 多栏正文页按栏重排阅读顺序；表格页 / 图纸标注页或校验不通过时保留原始文本
+      const reflowed = reflowOcrRegionsByColumns(regions, width, processedText);
+      return {
+        text: reflowed?.text ?? processedText,
+        confidence: Number(processed.confidence ?? 0),
+        regions: reflowed?.regions ?? regions,
+        warnings: this.getWarnings(),
+      };
     } finally {
       unlock();
     }

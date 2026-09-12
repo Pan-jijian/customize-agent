@@ -57,6 +57,10 @@ const RECURSIVE_SEPARATORS = [
   /\n(?=#{1,6}\s)/u,
   /\n{2,}/u,
   /\n(?=(?:第[一二三四五六七八九十百千万\d]+[章节条]|[一二三四五六七八九十]+、|\d+[.)、]))/u,
+  // 表格 KV 声明行边界（extractor 生成的「R#C# 列名: 值」行）：优先按行拆分。
+  // 否则大段 KV 行（多 sheet 工作簿）会降级到 /\s+/ 分隔符，把「R5C2 项目名称: xx」
+  // 拆成 "R5C2"/"项目名称:"/"xx"，行级 KV 结构被破坏，向量检索无法按列名召回参数
+  /\n(?=(?:#{1,6}\s+)?(?:表\d+\.)?R\d+C\d+\s)/u,
   /(?<=[。！？；])\s+/u,
   /(?<=[，、])\s+/u,
   /\s+/u,
@@ -469,6 +473,10 @@ export class TextChunker {
     if (separatorIndex <= 0) return this.splitBySentenceBoundary(text, maxTokens);
     const header = lines.slice(0, separatorIndex + 1);
     const rows = lines.slice(separatorIndex + 1);
+    // 无数据行的表格块（表头行+分隔行两行结构，如 docx 单行表格被表头检测回退后的
+    // 提取产物）：整块保留，绝不返回空数组——旧实现在此返回 [] 导致整块内容从分块
+    // 结果中彻底消失（20250920审查要点 docx「DOCX 表格 6」整块丢失实锤）。
+    if (rows.length === 0) return [lines.join('\n')];
     const chunks: string[] = [];
     let current: string[] = [];
     for (const row of rows) {
@@ -631,7 +639,14 @@ export class TextChunker {
   private takeOverlap(text: string, overlapTokens: number): string {
     if (overlapTokens <= 0) return '';
     const chars = overlapTokens * 4;
-    return text.slice(Math.max(0, text.length - chars));
+    const start = Math.max(0, text.length - chars);
+    if (start === 0) return text;
+    // 重叠块对齐行边界：字符级切分会把行首切开（「R238C13 COL13: 」被切成「238C13 COL13: 」
+    // 行首残缺，丰乐镇清单实锤），从切点向前回溯到最近换行，保证重叠块以完整行开始；
+    // 回溯距离限制在同一预算内（超长行场景退回原字符切点，避免 overlap 膨胀）
+    const lineStart = text.lastIndexOf('\n', start);
+    if (lineStart >= 0 && start - lineStart <= chars) return text.slice(lineStart + 1);
+    return text.slice(start);
   }
 
   private hasLongUnbrokenSegment(text: string): boolean {

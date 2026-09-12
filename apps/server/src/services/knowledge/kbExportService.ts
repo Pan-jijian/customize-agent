@@ -2,12 +2,6 @@ import * as path from 'node:path';
 import JSZip from 'jszip';
 import type { StoredChunk } from '@customize-agent/knowledge';
 
-/** 导出容量上限：防止一次导出过多文件或超大文本拖垮服务 */
-export const EXPORT_LIMITS = {
-  maxFiles: 500,
-  maxTotalChars: 60_000_000,
-} as const;
-
 /** 相邻块重叠查找窗口上限（chunker 最大 overlap 120 token ≈ 480 字符，留余量） */
 const MAX_OVERLAP_CHARS = 600;
 /** 重叠长度低于该阈值不裁剪，避免误伤自然重复的短句 */

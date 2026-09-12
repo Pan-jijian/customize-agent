@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createOcrProvider, PaddleOcrJsProvider, TesseractJsProvider } from '../src/extraction/ocr-providers.js';
+import { createOcrProvider, PaddleOcrJsProvider, TesseractJsProvider, reflowOcrRegionsByColumns, type OcrRegion } from '../src/extraction/ocr-providers.js';
 
 // ─── 设置 ────────────────────────────────────────────────────
 
@@ -83,4 +83,102 @@ describe('PaddleOcrJsProvider 推理 smoke', () => {
     expect(result.text).toContain('通信排管工程设计说明');
     expect(result.confidence).toBeGreaterThan(0.8);
   }, 120_000);
+});
+
+// ─── OCR 分栏重排（多栏正文页重排 / 表格页拦截 / 内容保全兜底） ───
+
+const makeRegion = (text: string, x: number, y: number, width: number, height = 36): OcrRegion => ({
+  text,
+  confidence: 0.95,
+  box: { x, y, width, height },
+});
+
+const prose = (side: string, index: number) =>
+  `${side}第${String(index).padStart(2, '0')}行的正文内容示例文本，用于验证多栏交错重排逻辑是否正确可靠`;
+
+const stripWhitespace = (value: string) => value.replace(/\s+/gu, '');
+
+const makeTwoColumnRegions = (): OcrRegion[] => {
+  const regions: OcrRegion[] = [];
+  for (let i = 1; i <= 14; i++) {
+    const y = 100 + (i - 1) * 60;
+    regions.push(makeRegion(prose('左栏', i), 60, y, 260));
+    regions.push(makeRegion(prose('右栏', i), 620, y, 260));
+  }
+  return regions;
+};
+
+describe('reflowOcrRegionsByColumns', () => {
+  it('双栏正文页：按栏重排不交错，字符多重集与原文一致', () => {
+    const regions = makeTwoColumnRegions();
+    const naiveText = regions.map(region => region.text).join('\n');
+    const reflowed = reflowOcrRegionsByColumns(regions, 1000, naiveText);
+    expect(reflowed).not.toBeNull();
+    // 重排后不存在一行同时包含左右栏内容
+    for (const line of reflowed!.text.split('\n')) {
+      expect(line.includes('左栏') && line.includes('右栏')).toBe(false);
+    }
+    // 左栏全部行先于右栏首行
+    expect(reflowed!.text.indexOf(prose('左栏', 14))).toBeLessThan(reflowed!.text.indexOf(prose('右栏', 1)));
+    // 区域顺序与文本顺序一致：左栏 14 个后跟右栏 14 个
+    expect(reflowed!.regions).toHaveLength(28);
+    expect(reflowed!.regions.slice(0, 14).every(region => region.text.startsWith('左栏'))).toBe(true);
+    expect(reflowed!.regions.slice(14).every(region => region.text.startsWith('右栏'))).toBe(true);
+    // 无丢字 / 重复（strip 空白后字符多重集相等）
+    expect([...stripWhitespace(reflowed!.text)].sort().join('')).toBe([...stripWhitespace(naiveText)].sort().join(''));
+  });
+
+  it('同栏相邻行（行距小于宽松合并阈值）：输出保持逐行，名称与编号不跨行错配', () => {
+    const regions: OcrRegion[] = [];
+    for (let i = 1; i <= 14; i++) regions.push(makeRegion(prose('左栏', i), 60, 100 + (i - 1) * 60, 260, 70));
+    // 右栏：每行「名称 + 编号」，行距 40px（> 0.35 × 行高 70 = 24.5，< 0.6 × 70 = 42）
+    for (let i = 1; i <= 12; i++) {
+      const nn = String(i).padStart(2, '0');
+      const y = 100 + (i - 1) * 40;
+      regions.push(makeRegion(`名称条目${nn}号规范文件`, 500, y, 120, 70));
+      regions.push(makeRegion(`编号${nn}`, 660, y, 80, 70));
+    }
+    const naiveText = regions.map(region => region.text).join('\n');
+    const reflowed = reflowOcrRegionsByColumns(regions, 1000, naiveText);
+    expect(reflowed).not.toBeNull();
+    const lines = reflowed!.text.split('\n');
+    const lineOf = (needle: string) => lines.find(line => line.includes(needle));
+    // 12 个名称条目各自成行，未被并入相邻行
+    expect(lines.filter(line => /名称条目\d\d号/u.test(line))).toHaveLength(12);
+    // 同一行的名称与编号正确配对，不跨行错配
+    expect(lineOf('名称条目01')?.includes('编号01')).toBe(true);
+    expect(lineOf('名称条目12')?.includes('编号12')).toBe(true);
+    expect(lineOf('名称条目01')?.includes('名称条目02')).toBe(false);
+    // 栏序：左栏全部行先于右栏首行
+    expect(reflowed!.text.indexOf('左栏第14行')).toBeLessThan(reflowed!.text.indexOf('名称条目01'));
+  });
+
+  it('单栏正文页：无栏切割，返回 null 保持原序', () => {
+    const regions: OcrRegion[] = [];
+    for (let i = 1; i <= 26; i++) regions.push(makeRegion(prose('单栏', i), 100, 100 + (i - 1) * 60, 700));
+    expect(reflowOcrRegionsByColumns(regions, 1000, regions.map(region => region.text).join('\n'))).toBeNull();
+  });
+
+  it('表格页（行片段过短）：门控拦截，返回 null', () => {
+    const regions: OcrRegion[] = [];
+    for (let i = 1; i <= 12; i++) {
+      const y = 80 + (i - 1) * 40;
+      regions.push(makeRegion(`R${i}`, 50, y, 40, 24));
+      regions.push(makeRegion(`项目名称${i}`, 200, y, 90, 24));
+      regions.push(makeRegion(`规格${i}`, 400, y, 80, 24));
+    }
+    expect(reflowOcrRegionsByColumns(regions, 1000, regions.map(region => region.text).join('\n'))).toBeNull();
+  });
+
+  it('内容多重集校验失败：返回 null 回退原文', () => {
+    const regions = makeTwoColumnRegions();
+    const tampered = regions.map(region => region.text).join('\n').replace('可靠', '可');
+    expect(reflowOcrRegionsByColumns(regions, 1000, tampered)).toBeNull();
+  });
+
+  it('box 数不足：返回 null', () => {
+    const regions: OcrRegion[] = [];
+    for (let i = 1; i <= 10; i++) regions.push(makeRegion(prose('左栏', i), 60, 100 + (i - 1) * 60, 260));
+    expect(reflowOcrRegionsByColumns(regions, 1000, regions.map(region => region.text).join('\n'))).toBeNull();
+  });
 });

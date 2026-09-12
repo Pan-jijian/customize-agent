@@ -108,6 +108,11 @@ const CAD_DOMAIN_SIGNAL_RE = /工程|项目|施工|建筑|结构|装饰|电气|�
 const MIN_CAD_CHARACTER_DATA = 32;
 const OCR_NATIVE_NOISE_PATTERNS = [/^Image too small to scale!!/u, /^Line cannot be recognized!!$/u];
 
+/** KV 声明行（R#C# 列名: 值）的值折叠：单元格内换行折叠为单空格（Excel Alt+Enter 换行
+ *  会把「R3C5 项目特征描述: 第一段\n第二段」拆成两行，行级 KV 结构破坏、
+ *  向量检索无法按行召回完整参数）。与 markdown 表格 escape 的换行处理一致。 */
+const foldKvCellText = (value: unknown): string => String(value ?? '').replace(/\s*\n\s*/gu, ' ');
+
 /** 文件内容提取器，支持文档、表格、图片、CAD 等多种文件格式的内容抽取 */
 export class ContentExtractor {
   async extract(file: ClassifiedFile): Promise<ExtractionResult> {
@@ -952,7 +957,7 @@ export class ContentExtractor {
     const markdown = this.toMarkdownTable(header, tableRows);
     const legacyKv = tableRows.flatMap((values, rowIndex) => values.map((value, colIndex) => {
       const column = header[colIndex] || `COL${colIndex + 1}`;
-      return `R${rowIndex + 2}C${colIndex + 1} ${column}: ${value}`;
+      return `R${rowIndex + 2}C${colIndex + 1} ${column}: ${foldKvCellText(value)}`;
     }));
     const titleNote = smart.titleLines.length ? `｜表标题：${smart.titleLines.join(' ')}` : '';
     return {
@@ -1162,7 +1167,7 @@ export class ContentExtractor {
           const dataRows = matrix.slice(smart.headerIndex + 1);
           const kvLines = dataRows.slice(0, kvLimit).flatMap((values, rowIndex) => values.map((value, colIndex) => {
             const column = header[colIndex] || `COL${colIndex + 1}`;
-            return `R${rowIndex + 2}C${colIndex + 1} ${column}: ${value}`;
+            return `R${rowIndex + 2}C${colIndex + 1} ${column}: ${foldKvCellText(value)}`;
           }));
           if (kvLines.length > 0) {
             sheetTexts.push([`工作表：${name}｜表格路径声明`, ...kvLines, ...(dataRows.length > kvLimit ? [`（KV 展开已截断至前 ${kvLimit} 行，完整数据见上方 Markdown 表格）`] : [])].join('\n'));
@@ -1240,13 +1245,18 @@ export class ContentExtractor {
         if (rows.length > 0) {
           const maxCols = Math.max(...rows.map(row => row.length), 1);
           rows.forEach(row => { while (row.length < maxCols) row.push(''); });
-          const header = rows[0] || Array(maxCols).fill('');
-          const mdTable = this.toMarkdownTable(header, rows.slice(1));
-          const declarations = rows.slice(1).flatMap((row, rowIndex) => row.map((value, colIndex) => {
+          // F1 智能表头行检测（与 xlsx/CSV 路径同源）：历史实现取 rows[0] 当表头，
+          // 首行非表头（标题行/数据行）时列名沦为上一行数据内容（「表2.R2C2 4.1.9安全耐久…」超长错误列名实锤），
+          // 真实列名丢失；检测后标题行降级注释、多级表头拼接，无列关键词表格仍回退 rows[0] 保持历史行为
+          const smart = detectSmartTableHeader(rows);
+          const header = smart.headers;
+          const titleNote = smart.titleLines.length ? `｜表标题：${smart.titleLines.join(' ')}` : '';
+          const mdTable = this.toMarkdownTable(header, rows.slice(smart.headerIndex + 1));
+          const declarations = rows.slice(smart.headerIndex + 1).flatMap((row, rowIndex) => row.map((value, colIndex) => {
             const column = header[colIndex] || `COL${colIndex + 1}`;
-            return `表${tableIndex}.R${rowIndex + 2}C${colIndex + 1} ${column}: ${value}`;
+            return `表${tableIndex}.R${rowIndex + 2}C${colIndex + 1} ${column}: ${foldKvCellText(value)}`;
           })).filter(line => !line.endsWith(': '));
-          lines.push([`DOCX 表格 ${tableIndex}`, mdTable, '表格路径声明', ...declarations].join('\n'));
+          lines.push([`DOCX 表格 ${tableIndex}${titleNote}`, mdTable, '表格路径声明', ...declarations].join('\n'));
         }
       }
     }
@@ -2229,7 +2239,17 @@ export class ContentExtractor {
 
   private toMarkdownDocument(text: string): string {
     const lines = text.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+    // OCR 页节（## PDF 第 N 页（OCR））内的行是 OCR 原始识别行（碎片行/表格行/分栏重排产物），
+    // 不是文档结构标题，一律原样保留不标题化：数字开头短行若加 ## 会产出
+    // 「## 2 起重机械安装拆卸工程三、保证…」这类假二级标题，在切分器中触发二级标题
+    // 硬边界独占一级节、页标记 section_title 被抢占（舒城信号灯 p80 实锤）。
+    let inOcrSection = false;
     return lines.map((line, index) => {
+      if (/^## PDF 第 \d+ 页/u.test(line)) {
+        inOcrSection = /（OCR）$/u.test(line);
+        return line;
+      }
+      if (inOcrSection) return line;
       if (/^#{1,6}\s/u.test(line) || /^\|/u.test(line)) return line;
       if (line.length <= 80 && !/[。！？.!?]$/u.test(line)) {
         if (index === 0) return `# ${line}`;

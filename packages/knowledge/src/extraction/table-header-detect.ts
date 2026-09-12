@@ -47,6 +47,14 @@ export function scoreTableHeaderRow(row: string[]): number {
  *  序号列非纯整数且命中子列关键词（或无数字单元格且列覆盖充分）即视为子表头，与主表头拼接 */
 const SUB_HEADER_KEYWORD_RE = /人工费|材料费|机械费|管理费|利润|综合单价|合价|其中|金额/u;
 
+/** 表头单元格规范化：trim + 折叠单元格内换行（Excel Alt+Enter/Word 折行如「计量\n单位」）。
+ *  未折叠时同时破坏两处：「计量单位」组关键词匹配失配（unit 列定位失败）、
+ *  KV 声明行「R2C6 计量\n单位: x」行内断行（丰乐镇清单实锤，行结构被拆为两行）。
+ *  普通空格保持原样（「计量 单位」维持精确匹配，不做模糊归一）。 */
+function normalizeHeaderCell(cell: unknown): string {
+  return String(cell ?? '').trim().replace(/\s*\n\s*/gu, '');
+}
+
 function isSubHeaderRow(row: string[], header: string[], seqColumn: number): boolean {
   if (seqColumn >= 0 && /^\d+$/.test(String(row[seqColumn] || '').trim())) return false;
   // 列关键词组得分 ≥4 的行是另一个表头行（同分并列场景），不是子表头
@@ -66,7 +74,7 @@ export function locateTableColumns(headers: string[]): Record<string, number> {
     let bestIndex = -1;
     let bestLength = 0;
     for (let index = 0; index < headers.length; index += 1) {
-      const cell = String(headers[index] || '').trim();
+      const cell = normalizeHeaderCell(headers[index]);
       for (const keyword of group.keywords) {
         if (cell.includes(keyword) && keyword.length > bestLength) {
           bestIndex = index;
@@ -93,7 +101,7 @@ export function detectSmartTableHeader(matrix: string[][], maxScanRows = 40): Sm
     }
   }
   const headerIndex = bestScore >= 4 ? bestIndex : 0;
-  const header = (matrix[headerIndex] || []).map(cell => String(cell ?? '').trim());
+  const header = (matrix[headerIndex] || []).map(cell => normalizeHeaderCell(cell));
   const titleLines = matrix.slice(0, headerIndex).map(row => row.filter(Boolean).join(' ').trim()).filter(Boolean);
   const columnMap = locateTableColumns(header);
   // 多级表头拼接：仅确认真表头（bestScore ≥4）时才检查下一行是否为子表头——
@@ -101,7 +109,7 @@ export function detectSmartTableHeader(matrix: string[][], maxScanRows = 40): Sm
   if (bestScore >= 4 && headerIndex + 1 < matrix.length && isSubHeaderRow(matrix[headerIndex + 1] || [], header, columnMap.seq ?? -1)) {
     const subRow = matrix[headerIndex + 1] || [];
     const merged = header.map((cell, index) => {
-      const sub = String(subRow[index] || '').trim();
+      const sub = normalizeHeaderCell(subRow[index]);
       if (!sub) return cell;
       return cell ? `${cell}_${sub}` : sub;
     });

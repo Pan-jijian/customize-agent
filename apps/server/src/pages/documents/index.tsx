@@ -939,7 +939,6 @@ export default function DocumentsPage() {
       const docxMime = docxMimeParts.join('');
       const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: docxMime };
       const ext = fmt === 'markdown' ? 'md' : fmt;
-      if (!draft.exportGate.passed) message.warning('导出门禁存在风险项，已允许导出，请下载后人工复核。');
       const payload = { documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, useClientMarkdown: true, projectRoot: draft.projectRoot || currentProjectRoot || undefined };
       const blob = await exportDocument(payload);
       dl(blob, `${draft.title}.${ext}`, mimes[fmt]);
@@ -950,6 +949,23 @@ export default function DocumentsPage() {
           if (document) setExportReports(document.exportReports || []);
         } catch { /* 报告刷新失败不影响导出 */ }
       }
+    } catch (e) { message.error(e instanceof Error ? e.message : t('common.error')); } finally { setExporting(null); }
+  };
+  // 工作流模式导出：对 failed/aborted/生成中的记录导出已有正文（不限制导出）
+  const workflowExportable = () => Boolean((workflowRecord?.editedMarkdown || workflowRecord?.markdown || workflowRecord?.draft?.markdown || '').trim());
+  const doExportRecord = async (fmt: 'markdown' | 'html' | 'pdf' | 'docx') => {
+    const record = workflowRecord;
+    if (!record) return;
+    const markdown = record.editedMarkdown || record.markdown || record.draft?.markdown || '';
+    if (!markdown.trim()) { message.warning('该记录暂无可导出的正文内容'); return; }
+    setExporting(fmt);
+    try {
+      const docxMimeParts = ['application/vnd.', 'open', 'xml', 'formats-', 'office', 'document.', 'word', 'processing', 'ml.document'];
+      const docxMime = docxMimeParts.join('');
+      const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: docxMime };
+      const ext = fmt === 'markdown' ? 'md' : fmt;
+      const blob = await exportDocument({ documentId: record.id, title: record.title, markdown, format: fmt, enforceGate: false, useClientMarkdown: true, projectRoot: record.projectRoot || currentProjectRoot || undefined });
+      dl(blob, `${record.title}.${ext}`, mimes[fmt]);
     } catch (e) { message.error(e instanceof Error ? e.message : t('common.error')); } finally { setExporting(null); }
   };
   const saveDraft = async () => {
@@ -1191,7 +1207,16 @@ export default function DocumentsPage() {
           <Button disabled={refining} loading={exporting === 'html'} onClick={() => { void doExport('html'); }}>HTML</Button>
           <Button disabled={refining} loading={exporting === 'docx'} onClick={() => { void doExport('docx'); }}>DOCX</Button>
           <Button type="primary" disabled={refining} loading={exporting === 'pdf'} onClick={() => { void doExport('pdf'); }}>PDF</Button>
-        </Space> : canResumeDraft(workflowRecord) ? <Button type="primary" icon={<PlayCircleOutlined />} loading={loading} onClick={() => { if (workflowRecord) void handleResumeDraft(workflowRecord); }}>继续生成</Button> : (loading && drawerMode === 'workflow') ? <Button danger onClick={handleAbortGeneration}>中止任务</Button> : undefined}
+        </Space> : (canResumeDraft(workflowRecord) || workflowExportable() || (loading && drawerMode === 'workflow')) ? <Space wrap>
+          {canResumeDraft(workflowRecord) && <Button type="primary" icon={<PlayCircleOutlined />} loading={loading} onClick={() => { if (workflowRecord) void handleResumeDraft(workflowRecord); }}>继续生成</Button>}
+          {workflowExportable() && <>
+            <Button icon={<DownloadOutlined />} loading={exporting === 'markdown'} onClick={() => { void doExportRecord('markdown'); }}>MD</Button>
+            <Button loading={exporting === 'html'} onClick={() => { void doExportRecord('html'); }}>HTML</Button>
+            <Button loading={exporting === 'docx'} onClick={() => { void doExportRecord('docx'); }}>DOCX</Button>
+            <Button type="primary" loading={exporting === 'pdf'} onClick={() => { void doExportRecord('pdf'); }}>PDF</Button>
+          </>}
+          {(loading && drawerMode === 'workflow') && <Button danger onClick={handleAbortGeneration}>中止任务</Button>}
+        </Space> : undefined}
       >
         <VerticalStack style={{ width: '100%' }} gap={16}>
           {/* 工作流模式：执行步骤 */}

@@ -131,6 +131,24 @@ describe('cleanExtractedText 招标文件噪声清洗', () => {
     expect(result.text).toContain('投标函格式');
   });
 
+  it('无空行排版的格式段收集未闭合时不删（防整段吞正文）', () => {
+    // docx 提取无空行排版：投标函标题后一路无空行/新章节标题，旧实现收集到文件尾整段删除；
+    // 未闭合（段边界不可靠）时不删，避免把后续实质正文连带删除
+    const text = [
+      '第一节 其他内容',
+      '一段普通正文。',
+      '投标函',
+      '致：某某招标代理有限公司',
+      '1. 我方投标报价为人民币________元。',
+      '投标人：________（盖单位章）',
+      '本段为后续实质正文内容，不属于格式模板，必须保留。',
+    ].join('\n');
+    const result = cleanExtractedText({ text, fileName: '某某项目招标文件.docx' });
+    expect(result.text).toContain('投标函');
+    expect(result.text).toContain('本段为后续实质正文内容');
+    expect(result.stats.tenderFormatLines).toBe(0);
+  });
+
   it('删除泛化引用行，含实质信息的行保留', () => {
     const text = [
       '详见投标人须知前附表',
@@ -567,5 +585,31 @@ describe('CAD 文本格式控制码还原与电子投标程序句清洗', () => 
     const result = cleanExtractedText({ text, fileName: '某某项目招标文件.pdf' });
     expect(result.text).toContain('开标地点');
     expect(result.text).toContain('投标截止时间：2026年9月4日9时30分');
+  });
+
+  it('高重复表格 KV 声明行（≥6 次）不误删（多 sheet 工作簿场景）', () => {
+    // 多 sheet 工作簿中相同行号+列名+值的 KV 行会跨 sheet 重复出现（≥6 次），
+    // 曾因此被 isHeaderFooterLine 误判为页眉页脚整行删除（真实数据：91 个 sheet 的清单删了 23052 行，含 3958 有值行）
+    const kvLines = [
+      pageRepeat('R3C4 项目名称: 道路工程', 8),
+      pageRepeat('R5C2 项目编码: 040101001001', 8),
+      pageRepeat('R5C4 项目名称: 挖一般土方', 8),
+      pageRepeat('R6C1 序号: 1', 8),
+    ].join('\n');
+    const text = `# 清单数据\n${kvLines}\n`;
+    const result = cleanExtractedText({ text });
+    expect(result.text).toContain('R3C4 项目名称: 道路工程');
+    expect(result.text).toContain('R5C2 项目编码: 040101001001');
+    expect(result.text).toContain('R5C4 项目名称: 挖一般土方');
+    expect(result.text).toContain('R6C1 序号: 1');
+    expect(result.stats.headerFooterLines).toBe(0);
+  });
+
+  it('docx 表格 KV 声明行（表N.R#C# 前缀）不误删', () => {
+    const kvLine = '表3.R2C1 序号: 1';
+    const text = `正文段落：本段为招标文件投标函格式说明，用于撑起文档内容。\n${pageRepeat(kvLine, 6)}`;
+    const result = cleanExtractedText({ text });
+    expect(result.text).toContain('表3.R2C1 序号: 1');
+    expect(result.stats.headerFooterLines).toBe(0);
   });
 });

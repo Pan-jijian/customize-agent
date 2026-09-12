@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getMultiProjectManager, getProjectRoot, listKnowledgeFiles } from '@/services/knowledge/kbService';
-import { buildExportZip, exportZipFileName, mergeChunksToReadableText, txtFileNameFor, EXPORT_LIMITS } from '@/services/knowledge/kbExportService';
+import { buildExportZip, exportZipFileName, mergeChunksToReadableText, txtFileNameFor } from '@/services/knowledge/kbExportService';
 import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
 
 export const config = {
@@ -40,24 +40,16 @@ async function kbFilesExportHandler(req: NextApiRequest, res: NextApiResponse) {
     .filter(relativePath => !/(^|\/)~\$/u.test(relativePath))
     .sort((a, b) => a.localeCompare(b));
   if (targets.length === 0) return res.status(400).json({ error: 'no files matched' });
-  if (targets.length > EXPORT_LIMITS.maxFiles) {
-    return res.status(400).json({ error: `导出文件数 ${targets.length} 超过上限 ${EXPORT_LIMITS.maxFiles}，请缩小选择范围` });
-  }
 
   const project = await getMultiProjectManager().getProject(projectRoot);
   const entries: Array<{ relativePath: string; text: string }> = [];
   let skipped = 0;
-  let totalChars = 0;
   for (const relativePath of targets) {
     const chunks = project.listChunks({ relativePath });
     const text = mergeChunksToReadableText(chunks);
     if (!text) {
       skipped++;
       continue;
-    }
-    totalChars += text.length;
-    if (totalChars > EXPORT_LIMITS.maxTotalChars) {
-      return res.status(400).json({ error: '导出文本总量超过上限，请缩小选择范围' });
     }
     entries.push({ relativePath, text });
   }
