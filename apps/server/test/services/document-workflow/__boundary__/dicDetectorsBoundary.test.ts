@@ -12,11 +12,12 @@ import {
   collapseRepeatedWords, dangerousListConsistencyIssues, extractSupportSystemAuthority,
   fabricatedStartDateIssues, fieldValueMismatchIssues, finishThicknessIssues,
   fixFinishThickness, fixLaborPeakConflict, fixSupportSystemConflicts,
+  hazardExclusionContradictionIssues,
   laborPeakConflictIssues, localAdaptationKeywordIssues, mergeTableLineResidues,
   overviewRecapCandidates, overviewRecapIssues, paragraphOpeningRepeatIssues,
   REPEATED_WORD_RE, repeatedWordIssues, resourceConsistencyIssues,
   runDeterministicChainUntilConverged, runFixUntilClean, selfUnderminingCandidateIssues,
-  sixHundredPercentCoverageIssues, stripOverviewRecapBodyLines,
+  sixHundredPercentCoverageIssues,
   supportSystemConflictIssues, tablePeakLabor, tablePeakLaborWithChainFallback,
 } from '@/services/document-workflow/documentIntegrityChecks';
 import { buildSemanticSimilarity } from '@/services/document-workflow/semanticSimilarity';
@@ -175,8 +176,8 @@ describe('A3 areaArithmeticIssues 面积算术一致性', () => {
   it('A3 自洽三元组 → 不报', () => {
     expect(areaArithmeticIssues('地上30000㎡，地下10000㎡，总建筑面积40000㎡。')).toEqual([]);
   });
-  it('A3 tolerance 内差异 → 不报（total*0.001）', () => {
-    expect(areaArithmeticIssues('地上30001㎡，地下10000㎡，总建筑面积40000㎡。')).toEqual([]);
+  it('A3 无容差：差 1 即报（40001 vs 40000）', () => {
+    expect(areaArithmeticIssues('地上30001㎡，地下10000㎡，总建筑面积40000㎡。')).toHaveLength(1);
   });
   it('A3 超 tolerance → 报', () => {
     expect(areaArithmeticIssues('地上30000㎡，地下10000㎡，总建筑面积40050㎡。')).toHaveLength(1);
@@ -280,8 +281,8 @@ describe('B3 resourceConsistencyIssues 模式1 正文峰值互查', () => {
     expectBlockIssue(issues, '劳动力数据矛盾');
     expect(issues[0].message).toContain('相差 64%');
   });
-  it('B3 相差≤30% → 不报', () => {
-    expect(resourceConsistencyIssues('高峰期投入220人。高峰期投入180人。')).toEqual([]);
+  it('B3 不同数值即报（220 vs 180）', () => {
+    expectBlockIssue(resourceConsistencyIssues('高峰期投入220人。高峰期投入180人。'), '互斥');
   });
   it('B3 管理口径 vs 峰值口径 → 不互查', () => {
     expect(resourceConsistencyIssues('劳动力配置管理人员18人，高峰期286人。')).toEqual([]);
@@ -293,8 +294,8 @@ describe('B3 resourceConsistencyIssues 模式1 正文峰值互查', () => {
     const issues = resourceConsistencyIssues('劳动力投入钢筋工60人，劳动力投入钢筋工20人。');
     expectBlockIssue(issues, '劳动力数据矛盾');
   });
-  it('B3 同工种接近 → 不报', () => {
-    expect(resourceConsistencyIssues('劳动力投入钢筋工60人，劳动力投入钢筋工55人。')).toEqual([]);
+  it('B3 同工种不同值即报（60 vs 55）', () => {
+    expectBlockIssue(resourceConsistencyIssues('劳动力投入钢筋工60人，劳动力投入钢筋工55人。'), '互斥');
   });
   it('B3 不同阶段 → 不互查', () => {
     expect(resourceConsistencyIssues('地下结构阶段高峰期220人。室外工程阶段高峰期90人。')).toEqual([]);
@@ -346,8 +347,8 @@ describe('B4 模式2 多表峰值互查', () => {
     const issues = resourceConsistencyIssues(`${peakTable(200)}\n\n${peakTable(100)}`);
     expectBlockIssue(issues, '分阶段投入明细表峰值');
   });
-  it('B4 相差25% → 不报', () => {
-    expect(resourceConsistencyIssues(`${peakTable(200)}\n\n${peakTable(150)}`)).toEqual([]);
+  it('B4 不同峰值即报（200 vs 150）', () => {
+    expectBlockIssue(resourceConsistencyIssues(`${peakTable(200)}\n\n${peakTable(150)}`), '分阶段投入明细表峰值');
   });
   it('B4 一表有高峰列一表无 → 不互查', () => {
     const plain = ['| 施工阶段 | 人数 |', '| --- | --- |', '| 主体结构 | 150 |'].join('\n');
@@ -356,8 +357,8 @@ describe('B4 模式2 多表峰值互查', () => {
   it('B4 两表峰值相同 → 不报', () => {
     expect(resourceConsistencyIssues(`${peakTable(200)}\n\n${peakTable(200)}`)).toEqual([]);
   });
-  it('B4 相差正好30% → 不报（边界锁定）', () => {
-    expect(resourceConsistencyIssues(`${peakTable(200)}\n\n${peakTable(140)}`)).toEqual([]);
+  it('B4 不同峰值即报（200 vs 140）', () => {
+    expectBlockIssue(resourceConsistencyIssues(`${peakTable(200)}\n\n${peakTable(140)}`), '分阶段投入明细表峰值');
   });
 });
 
@@ -367,11 +368,11 @@ describe('B5 模式3 正文峰值 vs 表峰值', () => {
     const issues = resourceConsistencyIssues(`高峰期投入286人。\n\n${table(100)}`);
     expectBlockIssue(issues, '分阶段投入明细表最大峰值');
   });
-  it('B5 正文≤1.3倍 → 不报', () => {
-    expect(resourceConsistencyIssues(`高峰期投入120人。\n\n${table(100)}`)).toEqual([]);
+  it('B5 正文与表峰值不同即报（120 vs 100）', () => {
+    expectBlockIssue(resourceConsistencyIssues(`高峰期投入120人。\n\n${table(100)}`), '分阶段投入明细表最大峰值');
   });
-  it('B5 正好1.3倍 → 不报（边界锁定）', () => {
-    expect(resourceConsistencyIssues(`高峰期投入130人。\n\n${table(100)}`)).toEqual([]);
+  it('B5 正文与表峰值不同即报（130 vs 100）', () => {
+    expectBlockIssue(resourceConsistencyIssues(`高峰期投入130人。\n\n${table(100)}`), '分阶段投入明细表最大峰值');
   });
   it('B5 无表 → 不比较', () => {
     expect(resourceConsistencyIssues('高峰期投入286人。')).toEqual([]);
@@ -382,12 +383,12 @@ describe('B5 模式3 正文峰值 vs 表峰值', () => {
 });
 
 describe('B6 模式6 总量控制上限 vs 峰值', () => {
-  it('B6 阶段峰值超上限 → 报', () => {
+  it('B6 阶段峰值超上限 → 报（互斥+控制上限）', () => {
     const issues = resourceConsistencyIssues('高峰期总人数控制在260人以内。主体阶段高峰投入约300人。');
-    expectBlockIssue(issues, '控制上限');
+    expect(issues.some(issue => issue.message.includes('控制上限'))).toBe(true);
   });
-  it('B6 峰值不超上限 → 不报', () => {
-    expect(resourceConsistencyIssues('高峰期总人数控制在300人。主体阶段高峰投入260人。')).toEqual([]);
+  it('B6 上限与峰值不同数值 → 报互斥', () => {
+    expectBlockIssue(resourceConsistencyIssues('高峰期总人数控制在300人。主体阶段高峰投入260人。'), '互斥');
   });
   it('B6 表峰值超上限也报', () => {
     const md = ['高峰期总人数控制在100人。', '| 施工阶段 | 人数 |', '| --- | --- |', '| 主体结构 | 150 |'].join('\n');
@@ -422,8 +423,8 @@ describe('B7 模式7 班组加总算式一致性', () => {
   it('B7 全自洽 → 不报', () => {
     expect(resourceConsistencyIssues('投入27人，道路浇筑8人＋铺装6人＋排水沟砌筑5人＋机动2×4人=27人。')).toEqual([]);
   });
-  it('B7 相差15%边界（23 vs 27 不报、22 vs 27 报）', () => {
-    expect(resourceConsistencyIssues('投入23人，道路浇筑8人＋铺装6人＋排水沟砌筑5人＋机动2×4人=27人。')).toEqual([]);
+  it('B7 无容差：23 与 22 均报', () => {
+    expectBlockIssue(resourceConsistencyIssues('投入23人，道路浇筑8人＋铺装6人＋排水沟砌筑5人＋机动2×4人=27人。'), '宣称总人数');
     expectBlockIssue(resourceConsistencyIssues('投入22人，道路浇筑8人＋铺装6人＋排水沟砌筑5人＋机动2×4人=27人。'), '宣称总人数');
   });
 });
@@ -434,8 +435,8 @@ describe('B8 模式4 合计行 vs 明细行之和', () => {
     const issues = resourceConsistencyIssues(table(40));
     expectBlockIssue(issues, '合计行 40 人与明细行之和 30 人');
   });
-  it('B8 合计差≤10% → 不报', () => {
-    expect(resourceConsistencyIssues(table(33))).toEqual([]);
+  it('B8 合计与明细和不同即报（33 vs 30）', () => {
+    expectBlockIssue(resourceConsistencyIssues(table(33)), '合计行 33 人与明细行之和 30 人');
   });
   it('B8 无合计行 → 不报', () => {
     const md = ['| 施工阶段 | 人数 |', '| --- | --- |', '| 施工准备 | 10 |', '| 主体结构 | 20 |'].join('\n');
@@ -448,16 +449,15 @@ describe('B8 模式4 合计行 vs 明细行之和', () => {
 });
 
 describe('B9 模式5 总工日量级自洽', () => {
-  it('B9 总工日超上限（>峰值×工期×1.3）→ 报', () => {
+  it('B9 总工日超算术上限 → 报', () => {
     const issues = resourceConsistencyIssues('共计20000个工日。高峰期100人。总工期90天。');
-    expectBlockIssue(issues, '总工日 20000 个与峰值 100 人×总工期 90 天不自洽');
+    expectBlockIssue(issues, '算术上限');
   });
   it('B9 区间内 → 不报', () => {
     expect(resourceConsistencyIssues('共计8000个工日。高峰期100人。总工期90天。')).toEqual([]);
   });
-  it('B9 低于下限（<峰值×工期×0.1）→ 报', () => {
-    const issues = resourceConsistencyIssues('共计500个工日。高峰期100人。总工期90天。');
-    expectBlockIssue(issues, '不自洽');
+  it('B9 低于算术上限不报（下限检查已删除）', () => {
+    expect(resourceConsistencyIssues('共计500个工日。高峰期100人。总工期90天。')).toEqual([]);
   });
   it('B9 无总量语境词不采样（偏差超5个工日）', () => {
     expect(resourceConsistencyIssues('偏差超过5个工日的即调整。高峰期100人。总工期90天。')).toEqual([]);
@@ -478,7 +478,7 @@ describe('B9 模式5 总工日量级自洽', () => {
 
 describe('C1 extractSupportSystemAuthority 支护权威提取', () => {
   const canonicalOf = (supportValue: string): DocumentFactsModel['canonical'] =>
-    ({ byKey: { foundation_support_form: factOf({ key: 'foundation_support_form', value: supportValue }) } } as DocumentFactsModel['canonical']);
+    ({ byKey: { foundation_support_form: factOf({ key: 'foundation_support_form', value: supportValue }) } } as unknown as DocumentFactsModel['canonical']);
   it('C1 无 factsModel → undefined', () => {
     expect(extractSupportSystemAuthority()).toBeUndefined();
   });
@@ -780,6 +780,74 @@ describe('D1 dangerousListConsistencyIssues 危大清单一致性', () => {
   });
 });
 
+describe('D1b hazardExclusionContradictionIssues 危大排除声明与清单矛盾（R12 舒城第二轮实测）', () => {
+  const ROW_SCAFFOLD = '| 落地式钢管脚手架 | 综合配套用房外立面施工脚手架搭设高度超过24m | 危大工程 | 综合配套用房外立面装饰装修 |';
+  const ROW_LIFT = '| 起重吊装作业 | 交通信控杆件及黄蜡石景石吊装，单件起吊重量超过10kN | 危大工程 | 梅河东路信号灯工程 |';
+  const ROW_PIT = '| 基坑（槽）土方开挖与支护 | 排水管道沟槽开挖深度按设计标高控制，局部超过3m | 危大工程 | 排水工程沟槽开挖段 |';
+
+  it('D1b 排除声明「无24m及以上脚手架」+ 清单行 24m 脚手架 → 报 blocker', () => {
+    const md = ['本工程无落地式钢管脚手架搭设高度24m及以上的危大脚手架工程。', ROW_SCAFFOLD].join('\n');
+    const issues = hazardExclusionContradictionIssues(md);
+    expectBlockIssue(issues, '危大清单与排除声明矛盾');
+    expect(issues[0].message).toContain('24m');
+    expect(issues[0].message).toContain('脚手架');
+    expect(issues[0].severity).toBe('blocker');
+    expect(issues[0].category).toBe('fact_consistency');
+  });
+
+  it('D1b 排除声明「无10kN及以上起重吊装」+ 清单行 10kN 吊装 → 报', () => {
+    const md = ['本工程无采用非常规起重设备且单件起吊重量10kN及以上的起重吊装工程。', ROW_LIFT].join('\n');
+    const issues = hazardExclusionContradictionIssues(md);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('10kN');
+    expect(issues[0].message).toContain('起重吊装');
+  });
+
+  it('D1b 真实文档形态：重复排除声明去重 → 恰好 2 条（脚手架24m、吊装10kN）', () => {
+    const md = [
+      '本工程无模板支撑搭设高度8m及以上、搭设跨度18m及以上的超规模模板工程；无落地式钢管脚手架搭设高度24m及以上的危大脚手架工程；无采用非常规起重设备且单件起吊重量10kN及以上的起重吊装工程。',
+      '本工程无落地式钢管脚手架搭设高度24m及以上的危大脚手架工程，无采用非常规起重设备且单件起吊重量10kN及以上的起重吊装工程。',
+      ROW_PIT,
+      ROW_LIFT,
+      ROW_SCAFFOLD,
+    ].join('\n');
+    const issues = hazardExclusionContradictionIssues(md);
+    expect(issues).toHaveLength(2);
+    expect(issues.some(issue => issue.message.includes('脚手架') && issue.message.includes('24m'))).toBe(true);
+    expect(issues.some(issue => issue.message.includes('起重吊装') && issue.message.includes('10kN'))).toBe(true);
+  });
+
+  it('D1b 无排除声明 → 不报（单向依赖）', () => {
+    const md = ['本工程危大工程辨识如下：', ROW_SCAFFOLD].join('\n');
+    expect(hazardExclusionContradictionIssues(md)).toEqual([]);
+  });
+
+  it('D1b 排除声明与清单行阈值不同（24m vs 30m）→ 不报', () => {
+    const md = ['本工程无落地式钢管脚手架搭设高度24m及以上的危大脚手架工程。', '| 落地式钢管脚手架 | 外立面脚手架搭设高度超过30m | 危大工程 | 综合配套用房 |'].join('\n');
+    expect(hazardExclusionContradictionIssues(md)).toEqual([]);
+  });
+
+  it('D1b 清单行声明「不属于危大工程」→ 不报（与排除声明同向）', () => {
+    const md = ['本工程无落地式钢管脚手架搭设高度24m及以上的危大脚手架工程。', '| 落地式钢管脚手架 | 搭设高度18m，未达到判危大阈值 | 不属于危大工程 | 综合配套用房 |'].join('\n');
+    expect(hazardExclusionContradictionIssues(md)).toEqual([]);
+  });
+
+  it('D1b 单位归一（排除声明 10千牛 vs 清单行 10kN）→ 报', () => {
+    const md = ['本工程无采用非常规起重设备且单件起吊重量10千牛及以上的起重吊装工程。', ROW_LIFT].join('\n');
+    expect(hazardExclusionContradictionIssues(md)).toHaveLength(1);
+  });
+
+  it('D1b 「未涉及」引导的排除声明同样纳入判定', () => {
+    const md = ['本工程未涉及搭设高度24m及以上的落地式钢管脚手架工程。', ROW_SCAFFOLD].join('\n');
+    expect(hazardExclusionContradictionIssues(md)).toHaveLength(1);
+  });
+
+  it('D1b mm/cm 单位不误匹配为 m（300mm 护栏 ≠ 脚手架阈值）', () => {
+    const md = ['本工程无搭设高度300mm及以上的脚手架防护栏杆。', '| 脚手架防护栏杆 | 高度300mm加强段 | 危大工程 | 外立面 |'].join('\n');
+    expect(hazardExclusionContradictionIssues(md)).toEqual([]);
+  });
+});
+
 describe('D2 bodySentencesForSemantic 语义候选句采样', () => {
   it('D2 基本提取', () => {
     expect(bodySentencesForSemantic('第一条施工措施说明文字。第二条施工措施说明文字。')).toHaveLength(2);
@@ -959,6 +1027,17 @@ describe('D4 localAdaptationKeywordIssues 属地适配', () => {
     const issues = await localAdaptationKeywordIssues('农民工工资按月足额发放。', facts);
     expect(issues[0].message).toContain('工伤保险表述缺失');
   });
+  it('D4 书名号法规引用不构成劳资内容 → 不报工伤', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
+    const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '江苏省南京市' })] });
+    expect(await localAdaptationKeywordIssues('编制依据：《保障农民工工资支付条例》（国务院令第724号）、现行规范标准。', facts)).toEqual([]);
+  });
+  it('D4 法规引用+正文劳资内容 → 仍报工伤', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
+    const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '江苏省南京市' })] });
+    const issues = await localAdaptationKeywordIssues('农民工工资按月足额发放，依据《保障农民工工资支付条例》执行。', facts);
+    expect(issues[0].message).toContain('工伤保险表述缺失');
+  });
 });
 
 // ── E. 段首重复/概况复述/闭环密度/自伤/叠词/残行/装饰厚度/劳动力峰值/收敛工具 ──
@@ -1075,89 +1154,34 @@ describe('E2 overviewRecapCandidates 概况复述候选', () => {
 });
 
 describe('E3 overviewRecapIssues 概况复述检测', () => {
-  const sim = (left: string, right: string) => (left.includes('50000') && right.includes('50000') ? 0.9 : 0.1);
-  const md = '## 工程概况\n本项目总建筑面积50000平方米。\n## 施工部署\n本项目为总建筑面积50000平方米的工程。';
-  it('E3 相似度达标 → 报', () => {
-    const issues = overviewRecapIssues(md, { semanticSimilarity: sim });
+  const md = '## 工程概况\n本项目为舒城花园小区项目，总建筑面积50000平方米。\n## 施工部署\n本项目为舒城花园小区项目，总建筑面积50000平方米，施工组织按分期流水安排。';
+  it('E3 概况事实逐字搬用 → 报', () => {
+    const issues = overviewRecapIssues(md);
     expectBlockIssue(issues, '项目概况段跨章复述不得出现');
-    expect(issues[0].message).toContain('本项目为总建筑面积50000平方米的工程');
+    expect(issues[0].message).toContain('本项目为舒城花园小区项目');
   });
-  it('E3 相似度低 → 不报', () => {
+  it('E3 无概况事实重合 → 不报', () => {
     const doc = '## 工程概况\n本项目总建筑面积50000平方米。\n## 施工部署\n本项目为施工管理重点工程。';
-    expect(overviewRecapIssues(doc, { semanticSimilarity: sim })).toEqual([]);
-  });
-  it('E3 未注入语义函数 → 不报', () => {
-    expect(overviewRecapIssues(md)).toEqual([]);
+    expect(overviewRecapIssues(doc)).toEqual([]);
   });
   it('E3 无候选句 → 不报', () => {
-    expect(overviewRecapIssues('## 工程概况\n本项目总建筑面积50000平方米。', { semanticSimilarity: sim })).toEqual([]);
+    expect(overviewRecapIssues('## 工程概况\n本项目总建筑面积50000平方米。')).toEqual([]);
   });
   it('E3 概况体空 → 不报', () => {
-    expect(overviewRecapIssues('本项目为总建筑面积50000平方米的工程。', { semanticSimilarity: sim })).toEqual([]);
+    expect(overviewRecapIssues('本项目为舒城花园小区项目总建筑面积50000平方米。')).toEqual([]);
   });
   it('E3 复述句最多取3处', () => {
     const doc = [
       '## 工程概况',
-      '本项目总建筑面积50000平方米。',
+      '本项目为舒城花园小区项目，总建筑面积50000平方米。',
       '## 施工部署',
-      '本项目为总建筑面积50000平方米的工程甲。',
-      '本项目为总建筑面积50000平方米的工程乙。',
-      '本项目为总建筑面积50000平方米的工程丙。',
-      '本项目为总建筑面积50000平方米的工程丁。',
+      '本项目为舒城花园小区项目，总建筑面积50000平方米，施工安排甲。',
+      '本项目为舒城花园小区项目，总建筑面积50000平方米，施工安排乙。',
+      '本项目为舒城花园小区项目，总建筑面积50000平方米，施工安排丙。',
+      '本项目为舒城花园小区项目，总建筑面积50000平方米，施工安排丁。',
     ].join('\n');
-    const issues = overviewRecapIssues(doc, { semanticSimilarity: sim });
+    const issues = overviewRecapIssues(doc);
     expect(issues[0].message).toContain('3 处');
-  });
-});
-
-describe('E4 stripOverviewRecapBodyLines 复述句行级清洗', () => {
-  const sim = (left: string, right: string) => (left.includes('50000') && right.includes('50000') ? 0.9 : 0.1);
-  it('E4 复述句整行删除', () => {
-    const md = '## 工程概况\n本项目总建筑面积50000平方米。\n## 施工部署\n本项目为总建筑面积50000平方米的工程。\n本小节部署施工组织。';
-    const cleaned = stripOverviewRecapBodyLines(md, sim);
-    expect(cleaned).not.toContain('本项目为总建筑面积50000平方米的工程');
-    expect(cleaned).toContain('本小节部署施工组织');
-    expect(cleaned).toContain('本项目总建筑面积50000平方米');
-  });
-  it('E4 非复述句保留', () => {
-    const md = '## 工程概况\n本项目总建筑面积50000平方米。\n## 施工部署\n本项目为施工管理重点工程。';
-    expect(stripOverviewRecapBodyLines(md, sim)).toBe(md);
-  });
-  it('E4 无变化返回原引用', () => {
-    const md = '普通段落内容。\n另一段普通内容。';
-    expect(stripOverviewRecapBodyLines(md, sim)).toBe(md);
-  });
-  it('E4 概况区间行不动', () => {
-    const md = '## 工程概况\n本项目为总建筑面积50000平方米的工程。';
-    expect(stripOverviewRecapBodyLines(md, sim)).toBe(md);
-  });
-  it('E4 标题行与表格行不动', () => {
-    const md = '## 工程概况\n本项目总建筑面积50000平方米。\n## 施工部署\n| 本项目为总建筑面积50000平方米的工程 |';
-    expect(stripOverviewRecapBodyLines(md, sim)).toBe(md);
-  });
-  it('E4 短句<12字不动', () => {
-    const md = '## 工程概况\n本项目总建筑面积50000平方米。\n本项目为短句。';
-    expect(stripOverviewRecapBodyLines(md, sim)).toBe(md);
-  });
-  it('E4 行内部分句删除', () => {
-    const md = '## 工程概况\n本项目总建筑面积50000平方米。\n## 施工部署\n本小节介绍部署要点。本项目为总建筑面积50000平方米的工程。后续内容继续。';
-    const cleaned = stripOverviewRecapBodyLines(md, sim);
-    expect(cleaned).not.toContain('本项目为总建筑面积50000平方米的工程');
-    expect(cleaned).toContain('本小节介绍部署要点');
-  });
-  it('E4 四形态开头均删除', () => {
-    const md = [
-      '## 工程概况',
-      '本项目总建筑面积50000平方米。',
-      '## 施工部署',
-      '本工程为总建筑面积50000平方米的工程。',
-      '该项目为总建筑面积50000平方米的工程。',
-      '该工程为总建筑面积50000平方米的工程。',
-    ].join('\n');
-    const cleaned = stripOverviewRecapBodyLines(md, sim);
-    expect(cleaned).not.toContain('本工程为总建筑面积50000平方米的工程');
-    expect(cleaned).not.toContain('该项目为总建筑面积50000平方米的工程');
-    expect(cleaned).not.toContain('该工程为总建筑面积50000平方米的工程');
   });
 });
 
@@ -1394,8 +1418,8 @@ describe('E10 laborPeakConflict 劳动力峰值口径矛盾', () => {
     expect(issues[0].message).toContain('181');
     expect(issues[0].message).toContain('86');
   });
-  it('E10 差≤20% → 不报', () => {
-    expect(laborPeakConflictIssues('高峰期总人数181人。高峰人数160人。')).toEqual([]);
+  it('E10 不同数值即报（181 vs 160）', () => {
+    expectBlockIssue(laborPeakConflictIssues('高峰期总人数181人。高峰人数160人。'), '劳动力峰值口径矛盾');
   });
   it('E10 同值 → 不报', () => {
     expect(laborPeakConflictIssues('高峰期总人数181人。高峰人数181人。')).toEqual([]);
@@ -1435,9 +1459,9 @@ describe('E10 laborPeakConflict 劳动力峰值口径矛盾', () => {
     expect(result.markdown).toBe('高峰期总人数0人。高峰人数86人。');
     expect(result.fixedCount).toBe(0);
   });
-  it('E10 20%边界（181 vs 144 → 报、181 vs 145 → 不报）', () => {
+  it('E10 无容差：144 与 145 均报', () => {
     expectBlockIssue(laborPeakConflictIssues('高峰期总人数181人。高峰人数144人。'), '劳动力峰值口径矛盾');
-    expect(laborPeakConflictIssues('高峰期总人数181人。高峰人数145人。')).toEqual([]);
+    expectBlockIssue(laborPeakConflictIssues('高峰期总人数181人。高峰人数145人。'), '劳动力峰值口径矛盾');
   });
 });
 

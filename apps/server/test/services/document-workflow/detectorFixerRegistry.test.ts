@@ -154,9 +154,9 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
       'planned-section-final',
       'commercial-strip',
       'table-deterministic-repair',
-      'post-review-surface',
       'numeric-verification',
       'requirement-verification',
+      'post-review-surface',
       'terminology-strip',
       'toc-consistency',
     ]);

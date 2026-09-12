@@ -53,11 +53,11 @@ describe('buildProcessKnowledgePrompt（工艺知识卡提示词）', () => {
     const cards = matchProcessKnowledgeCards(['土方开挖']).filter(card => card.id === 'earthwork-excavation');
     const prompt = buildProcessKnowledgePrompt(cards, ['土方开挖']);
     expect(prompt).toContain('【施工工艺知识卡】');
-    expect(prompt).toContain('工序链');
+    expect(prompt).toContain('工序序列（参考顺序）');
     expect(prompt).toContain('工艺参数（参考）');
     expect(prompt).toContain('检测验收');
     expect(prompt).toContain('规范依据');
-    expect(prompt).toContain('测量放线→标高复核');
+    expect(prompt).toContain('测量放线、标高复核');
   });
 
   it('精确匹配卡标注【直接匹配】，通用补充卡标注【项目类型通用】', () => {

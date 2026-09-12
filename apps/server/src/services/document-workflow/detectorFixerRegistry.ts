@@ -19,7 +19,7 @@ import {
   extractScheduleAuthority,
   extractSupportSystemAuthority,
 } from './documentIntegrityChecks';
-import { blueprintPlanAuthorities } from './integratedBlueprint';
+import { blueprintLaborPeakAuthority } from './authorityIndex';
 import type { BlueprintData } from './integratedBlueprint';
 import { SURFACE_FIX_STEPS } from './deterministicFixChains';
 import type { DocumentFact, DocumentFactsModel } from './types';
@@ -53,7 +53,7 @@ export const AUTHORITY_REGISTRY: readonly AuthorityEntry[] = [
   { id: 'schedule', extract: ctx => extractScheduleAuthority(ctx.factsModel) },
   { id: 'assemblyRate', extract: ctx => extractAssemblyRateAuthority(ctx.factsModel) },
   { id: 'supportSystem', extract: ctx => extractSupportSystemAuthority(ctx.factsModel) },
-  { id: 'laborPeak', extract: ctx => blueprintPlanAuthorities(ctx.blueprint).laborPeakAuthority },
+  { id: 'laborPeak', extract: ctx => blueprintLaborPeakAuthority(ctx.blueprint) },
   { id: 'greeningMaintenance', extract: ctx => extractGreeningMaintenanceAuthority(ctx.factsModel) },
   { id: 'blueprint', extract: ctx => ctx.blueprint },
   { id: 'canonicalFacts', extract: ctx => buildCanonicalFacts({ facts: ctx.structuredFacts ?? [], markdown: ctx.markdown ?? '' }) },
@@ -109,7 +109,15 @@ export const FULL_VALIDATION_DETECTORS: readonly DetectorEntry[] = [
 /** buildStandardFinalValidationIssues 终检组（documentFinalValidation.ts，按调用顺序；与 full-validation 重复的条目见下方注释） */
 export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'toc-consistency', scope: 'full-document', category: 'structure', deterministicSafe: true },
+  // L5 结构完整性门禁（sectionNumberingIssues）：正文 H3 编号连续性（章号=章序、节号 1..N 无跳号无重复），缺号=blocker
+  { id: 'section-numbering', scope: 'full-document', category: 'structure', deterministicSafe: true },
+  // L5 结构完整性门禁（sectionCountOverflowIssues）：成稿 H3 数不得超过主题块数（多节方向；缺节由 section-content-integrity 覆盖）
+  { id: 'section-count-overflow', scope: 'chapter', category: 'structure' },
   { id: 'heading-duplicate', scope: 'full-document', category: 'structure', deterministicSafe: true },
+  // WS1 结构标签残留（templatedLabelIssues）：标签标题/段首标签前缀，确定性修复器 templated-labels 兜底
+  { id: 'templated-label', scope: 'full-document', category: 'structure', deterministicSafe: true },
+  // WS1 标题完整性（titleIntegrityIssues）：残缺标题（<4 汉字）/句化标题（含逗号）/悬挂连接词结尾
+  { id: 'title-integrity', scope: 'full-document', category: 'structure' },
   { id: 'evaluation-criteria-coverage', scope: 'full-document', category: 'evidence_coverage' },
   { id: 'requirements-coverage', scope: 'full-document', category: 'evidence_coverage' },
   { id: 'fabricated-start-date', scope: 'full-document', category: 'fact_consistency', deterministicSafe: true },
@@ -122,6 +130,10 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'street-light-count-mismatch', scope: 'full-document', category: 'fact_consistency' },
   { id: 'spec-location-mismatch', scope: 'full-document', category: 'fact_consistency' },
   { id: 'blueprint-citation-consistency', scope: 'full-document', category: 'fact_consistency', authorities: ['blueprint'] },
+  // V5 P4b 跨工程同值复制（清单分组明细 groups 与正文分工程语境比对；依赖蓝图数据）
+  { id: 'cross-project-value-copy', scope: 'full-document', category: 'fact_consistency', authorities: ['blueprint'] },
+  // V5 P4b 阶段人数混用（正文「XX阶段 + N 人」 vs byPhase 推导权威）
+  { id: 'phase-labor-mixing', scope: 'full-document', category: 'fact_consistency', authorities: ['blueprint'] },
   { id: 'foundation-form-residue', scope: 'full-document', category: 'fact_consistency' },
   { id: 'ambiguous-either-or', scope: 'full-document', category: 'fact_consistency' },
   { id: 'excavation-depth-lock', scope: 'full-document', category: 'fact_consistency' },
@@ -134,12 +146,21 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'basic-info-schedule-field', scope: 'full-document', category: 'fact_consistency' },
   { id: 'duplicate-table', scope: 'full-document', category: 'table' },
   { id: 'duplicate-paragraph', scope: 'full-document', category: 'structure' },
+  { id: 'paragraph-tail-repeat', scope: 'full-document', category: 'style', deterministicSafe: true },
+  { id: 'collision-numbered-heading', scope: 'full-document', category: 'structure', deterministicSafe: true },
+  { id: 'inverted-date-range', scope: 'full-document', category: 'fact_consistency', deterministicSafe: true },
   { id: 'resource-triad-section-hierarchy', scope: 'full-document', category: 'structure' },
   { id: 'support-system-conflict', scope: 'full-document', category: 'fact_consistency', authorities: ['supportSystem'] },
   { id: 'dangerous-list-consistency', scope: 'full-document', category: 'fact_consistency' },
+  // R12 危大排除声明 vs 危大清单表格矛盾（舒城第二轮实测：声明无24m脚手架/无10kN吊装，清单表格却列为危大工程）
+  { id: 'hazard-exclusion-contradiction', scope: 'full-document', category: 'fact_consistency' },
   { id: 'six-hundred-percent-coverage', scope: 'full-document', category: 'evidence_coverage' },
   { id: 'self-undermining-candidate', scope: 'full-document', category: 'style' },
   { id: 'paragraph-opening-repeat', scope: 'full-document', category: 'style', deterministicSafe: true },
+  // WS3 工序表达形式轮换（flowFormRepeatIssues）：分部分项章相邻块同形式即违规
+  { id: 'flow-form-repeat', scope: 'full-document', category: 'style' },
+  // WS4 骨架指纹复读（skeletonFingerprintIssues）：由技术负责人组织/合格后方可/验收合格后 各全文 ≤2 次
+  { id: 'skeleton-fingerprint', scope: 'full-document', category: 'style' },
   { id: 'repeated-word', scope: 'full-document', category: 'style', deterministicSafe: true },
   { id: 'commercial-data-in-body', scope: 'full-document', category: 'scope' },
   { id: 'overview-recap', scope: 'full-document', category: 'style' },
@@ -222,9 +243,11 @@ export const AUXILIARY_DETECTORS: readonly DetectorEntry[] = [
 
 // ═══════════════════════════ 修复器声明表 ═══════════════════════════
 
-/** 确定性修复器锚定声明（与 SURFACE_FIX_STEPS 一一对应；id 即注册键） */
+/** 确定性修复器锚定声明（与 SURFACE_FIX_STEPS 一一对应；id 即注册键；顺序与 SURFACE_FIX_STEPS 严格一致） */
 export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'table-line-residue', kind: 'deterministic', anchoredTo: 'table-quality', giveUpOnFailure: true },
+  // WS1 结构标签残留清洗（标签标题行删除/段首前缀剥离，正文零丢失）
+  { id: 'templated-labels', kind: 'deterministic', anchoredTo: 'templated-label', giveUpOnFailure: true },
   { id: 'repeated-words', kind: 'deterministic', anchoredTo: 'repeated-word', giveUpOnFailure: true },
   { id: 'duplicate-tables', kind: 'deterministic', anchoredTo: 'duplicate-table', giveUpOnFailure: true },
   { id: 'finish-thickness', kind: 'deterministic', anchoredTo: 'finish-thickness', giveUpOnFailure: true },
@@ -232,6 +255,9 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'internal-table-row-dup', kind: 'deterministic', anchoredTo: 'table-spam', giveUpOnFailure: true },
   { id: 'greening-maintenance', kind: 'deterministic', anchoredTo: 'greening-maintenance-mismatch', authorities: ['greeningMaintenance'], giveUpOnFailure: true },
   { id: 'paragraph-opening-repeat', kind: 'deterministic', anchoredTo: 'paragraph-opening-repeat', giveUpOnFailure: true },
+  { id: 'paragraph-tail-repeat', kind: 'deterministic', anchoredTo: 'paragraph-tail-repeat', giveUpOnFailure: true },
+  { id: 'collision-numbered-heading', kind: 'deterministic', anchoredTo: 'collision-numbered-heading', giveUpOnFailure: true },
+  { id: 'inverted-date-range', kind: 'deterministic', anchoredTo: 'inverted-date-range', giveUpOnFailure: true },
   { id: 'truncated-sentence', kind: 'deterministic', anchoredTo: 'truncated-sentence', giveUpOnFailure: true },
   { id: 'table-borne-prose', kind: 'deterministic', anchoredTo: 'major-content-governance', giveUpOnFailure: true },
   { id: 'meta-discourse', kind: 'deterministic', anchoredTo: 'meta-discourse-declaration', giveUpOnFailure: true },
@@ -241,6 +267,12 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'atlas-reference', kind: 'deterministic', anchoredTo: 'drawing-reference', giveUpOnFailure: true },
   { id: 'tertiary-h4-dedupe', kind: 'deterministic', anchoredTo: 'tertiary-heading', giveUpOnFailure: true },
   { id: 'internal-term-heading', kind: 'deterministic', anchoredTo: 'internal-terminology-anchor', giveUpOnFailure: true },
+  // WS4 骨架指纹确定性兜底（round-2 链末尾 / 终检前最后一道：超量指纹变体轮换替换清零）
+  { id: 'skeleton-fingerprint-variants', kind: 'deterministic', anchoredTo: 'skeleton-fingerprint', giveUpOnFailure: true },
+  // WS3 工序形式确定性兜底（round-2 链、终检前最后一道：相邻同形式轮换转换清零）
+  { id: 'flow-form-variants', kind: 'deterministic', anchoredTo: 'flow-form-repeat', giveUpOnFailure: true },
+  // WS1 残缺标题确定性补全（round-2 链、终检前最后一道：正文取证 core+工程后缀补全 <4 字残缺标题）
+  { id: 'truncated-title-completion', kind: 'deterministic', anchoredTo: 'title-integrity', giveUpOnFailure: true },
 ];
 
 /**
@@ -292,9 +324,11 @@ export const FINALIZE_REPAIR_ROUNDS = [
   'planned-section-final',       // 缺节/空小节补写终兜底（enforcePlannedSectionCompleteness）
   'commercial-strip',            // 商务条款数据交付前兜底清洗（stripCommercialDataBodyLines）
   'table-deterministic-repair',  // 表格空单元格交付前确定性修复（repairTableBlocksInMarkdownDeterministically）
-  'post-review-surface',         // 评审轮后表面修复兜底（SURFACE_FIX_STEPS round-2 链）
   'numeric-verification',        // C2 正文数值 vs 资料原文确定性核对轮（stageNumericVerification）
   'requirement-verification',    // C3 生成后用户要求执行核验闭环（stageRequirementVerification）
+  // 顺序调整理由（丰乐镇 doc-1788954795698 实测）：requirement-verification 的 LLM 补写会引入句级复读，
+  // post-review-surface 若在其之前执行，补写引入的复读（17 处）无人清理 → 后置到补写轮之后兜底
+  'post-review-surface',         // 评审轮后表面修复兜底（SURFACE_FIX_STEPS round-2 链，含句级复读剥离）
   'terminology-strip',           // 内部术语句子确定性删除兜底（stripInternalTerminologySentences）
   'toc-consistency',             // 目录与正文一致性兜底（fixTocFromBody）
 ] as const;

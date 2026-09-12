@@ -46,7 +46,6 @@ vi.mock('@/services/document-workflow/generationStages/stageOutlinePlanning', ()
       mode: 'balanced',
       enableChapterReview: true,
       enableGlobalReview: false,
-      enableDocumentBudgetExpansion: false,
       enableFinalQualityReview: true,
     };
     session.planning.generationDiagnostics = { metrics: [] } as unknown as DocumentGenerationDiagnostics;

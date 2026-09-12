@@ -1,11 +1,11 @@
 /**
- * stageBlueprint：阶段 3 —— 蓝图构建/分部校准/参数桶（含并发池与跨章基础事实缓存）。
+ * stageBlueprint：阶段 3 —— 蓝图构建/参数桶（含并发池与跨章基础事实缓存）。
  * P1 六阶段拆分（方案 5.1）：由 documentGenerator.generateDocumentDraft 阶段 3 代码块机械搬迁而来，
  * 变量读写经 session 子对象显式化，业务生成语义与原巨型函数逐字一致（行为保持）。
  */
 import type { GenerationSession } from './generationSession';
 import type { IntegratedBlueprint } from '../integratedBlueprint';
-import { alignPlannedSectionsToBlueprint, buildIntegratedBlueprint, renderBasicFactsForBlueprint, renderBlueprintDataText, resolveBillOfQuantities, saveBlueprintAsset } from '../integratedBlueprint';
+import { buildIntegratedBlueprint, renderBasicFactsForBlueprint, renderBlueprintDataText, resolveBillOfQuantities, saveBlueprintAsset } from '../integratedBlueprint';
 import { buildBillFactLock } from '../billFactLock';
 import { displayStage, upsertProgressStage } from '../progress';
 import { Semaphore, runWithAdaptiveConcurrency } from '../utils';
@@ -78,9 +78,6 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
     }, { subtitle: '一体化蓝图' }));
     session.global.emitProgress();
   }
-  // 蓝图权威分部结构 → 规划小节校准（round-27 第二章小节根因修复）：LLM 小节规划会把单位工程
-  // 子分部（土石方/砌筑/混凝土/门窗等）升级为章级小节、「其他」分部名直透大纲——蓝图 outline
-  // 是清单分部确定性权威（分部=小节、子分部=工作包），蓝图构建成功后对施工方法类章节校准
   if (session.blueprint.integratedBlueprint) {
     // B1 清单事实锁构建：蓝图与清单解析同源（阶段 0 确定性解析），但 blueprint 对象不暴露完整条目库；
     // 此处单独解析一次（sqlite 读 + 纯确定性解析，仅在有清单绑定的项目触发），固化行级事实锁：
@@ -94,26 +91,6 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
     } catch (error) {
       console.error(`[blueprint] 清单事实锁构建失败（章节按证据独立成稿）：${error instanceof Error ? error.message : String(error)}`);
       session.blueprint.billFactLock = undefined;
-    }
-    const alignment = alignPlannedSectionsToBlueprint(session.planning.effectiveChapters.map(chapter => ({ title: chapter.title, sections: chapter.sections || [] })), session.blueprint.integratedBlueprint.outline);
-    if (alignment.reports.length > 0) {
-      const appliedMap = new Map(alignment.chapters.map(chapter => [chapter.title, chapter.sections]));
-      session.planning.effectiveChapters = session.planning.effectiveChapters.map(chapter => {
-        const alignedSections = appliedMap.get(chapter.title);
-        return alignedSections && JSON.stringify(alignedSections) !== JSON.stringify(chapter.sections || []) ? { ...chapter, sections: alignedSections } : chapter;
-      });
-      session.prepare.template = { ...session.prepare.template, chapters: session.planning.effectiveChapters };
-      upsertProgressStage(session.global.progressStages, displayStage({
-        type: 'validation',
-        roleId: 'blueprint-section-alignment',
-        status: 'success',
-        message: `清单分部结构校准：${alignment.reports.length} 个施工方法类章节小节已按蓝图权威分部结构对齐`,
-        details: alignment.reports.flatMap(report => [
-          `${report.chapterTitle}：最终小节 ${report.finalSections.join('、')}`,
-          ...(report.removed.length > 0 ? [`${report.chapterTitle} 子分部/未规范名降级：${report.removed.join('、')}（正文在分部小节内按工作包展开）`] : []),
-        ]),
-      }, { subtitle: '清单分部结构校准', order: session.global.progressStages.length }));
-      session.global.emitProgress();
     }
   }
   // 蓝图接管（三期收口：旧 planDataMaster/decisionLock 管线已删除，蓝图是唯一计划类数值权威源）：

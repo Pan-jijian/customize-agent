@@ -21,7 +21,78 @@ type SpreadsheetCell = { v?: unknown; w?: string; f?: string; t?: string };
 type SpreadsheetRange = { s: { r: number; c: number }; e: { r: number; c: number } };
 type SpreadsheetSheet = Record<string, SpreadsheetCell | unknown> & { '!ref'?: string; '!merges'?: SpreadsheetRange[] };
 type PdfTextItem = { str: string; x: number; y: number; width: number; height: number; fontName?: string };
-type CadAnnotation = { text: string; x?: number; y?: number; layer?: string; block?: string; entityType?: string };
+/** CAD 标注实体（DXF TEXT/MTEXT/DIMENSION/LEADER/ATTRIB 提取产物，含 10/20 组码坐标） */
+export type CadAnnotation = { text: string; x?: number; y?: number; layer?: string; block?: string; entityType?: string };
+
+/**
+ * CAD 标注布局重建（与 PDF layoutPdfTextItems 同构）：DXF 中总说明等长文本
+ * 常被拆成多个 TEXT 实体（每行一个实体、行内拆多个实体），仅按实体序输出
+ * 会导致分块入库全是碎片切片（「建筑设计总说明」仅 3 切片问题）。按实体坐标
+ * 重建「行 → 段落」结构：
+ * 1. 按 y 降序、x 升序排序；y 差在行容差内的实体归同一行，行内按 x 拼接（大间距加空格）；
+ * 2. 相邻行 y 间距超过段落阈值（2.5× 行距中位数）视为段落断裂；
+ * 3. 无坐标实体（ATTRIB 等）保持原有顺序独立输出。
+ * 容差自适应：以相邻实体 y 差中位数为基准，图纸单位未知（mm/m）时仍稳健。
+ */
+export function layoutCadAnnotations(annotations: CadAnnotation[]): string[] {
+  const positioned = annotations.filter(item => item.x !== undefined && item.y !== undefined);
+  const unpositioned = annotations.filter(item => item.x === undefined || item.y === undefined);
+  if (positioned.length === 0) return annotations.map(item => item.text);
+
+  const sorted = [...positioned].sort((a, b) => (b.y! - a.y!) || (a.x! - b.x!));
+  // 行距估计：相邻实体 y 差的非零中位数（同行实体 y 差≈0 不计入）
+  const yGaps: number[] = [];
+  for (let i = 1; i < sorted.length; i += 1) {
+    const gap = Math.abs(sorted[i - 1]!.y! - sorted[i]!.y!);
+    if (gap > 0) yGaps.push(gap);
+  }
+  yGaps.sort((a, b) => a - b);
+  const medianGap = yGaps.length > 0 ? yGaps[Math.floor(yGaps.length / 2)]! : 0;
+  const rowTolerance = Math.max(medianGap > 0 ? medianGap * 0.3 : 0, 0.01);
+  const paragraphGap = Math.max(medianGap * 2.5, 0.05);
+  const wordGap = Math.max(medianGap * 0.5, 1);
+
+  // 行聚类：y 差在容差内的实体归同一行
+  const rows: CadAnnotation[][] = [];
+  for (const item of sorted) {
+    const last = rows[rows.length - 1];
+    const lastItem = last?.[last.length - 1];
+    if (last && lastItem && Math.abs(lastItem.y! - item.y!) <= rowTolerance) last.push(item);
+    else rows.push([item]);
+  }
+
+  // 行内按 x 排序 + 大间距加空格拼接
+  const joinRow = (row: CadAnnotation[]): string => {
+    const byX = [...row].sort((a, b) => a.x! - b.x!);
+    let output = '';
+    let prevX: number | undefined;
+    for (const item of byX) {
+      if (prevX !== undefined && item.x! - prevX > wordGap) output += ' ';
+      output += item.text;
+      prevX = item.x!;
+    }
+    return output.trim();
+  };
+
+  // 段落：行距紧凑的连续行合并为一段（多行说明文字重建为段落）
+  const paragraphs: string[] = [];
+  let current: string[] = [];
+  let lastRowY: number | undefined;
+  for (const row of rows) {
+    const line = joinRow(row);
+    if (!line) continue;
+    const rowY = row[0]!.y!;
+    if (lastRowY !== undefined && lastRowY - rowY > paragraphGap) {
+      paragraphs.push(current.join('\n'));
+      current = [];
+    }
+    current.push(line);
+    lastRowY = rowY;
+  }
+  if (current.length > 0) paragraphs.push(current.join('\n'));
+
+  return [...paragraphs, ...unpositioned.map(item => item.text)];
+}
 
 const CAD_INTERNAL_TOKEN_RE = /\b(?:TDbPipe|TDbPipeValve|TDbPipeFitting|TDbWellh|AcDb[\w:]+|Dwg\w+|ObjectId|Handle|ByLayer|Continuous|Model|Layout\d*|MLEADERSTYLE|AppInfoHistory|AppInfoDataList|ObjectDBX|Classes|DICTIONARYVARP|ObjFreeSpaceP|AuxHeaderT|\$AUDIT_BAD_\w+)\b/giu;
 // 注意：不再整行排除纯数字（\d+）——真实图纸的尺寸标注/标高/门窗表数值常为纯数字行
@@ -532,14 +603,15 @@ export class ContentExtractor {
   }
 
   private buildCadSemanticNodes(file: ClassifiedFile, texts: CadAnnotation[]): string[] {
-    // 图纸语义节点 = 文件名锚定 + 纯标注文本列表。逐实体枚举的图元属性包装
+    // 图纸语义节点 = 文件名锚定 + 布局重建后的标注文本。逐实体枚举的图元属性包装
     // （图层/块/实体类型/坐标/关联对象/状态）是重复结构模板噪音，会稀释检索语义
     // （如「混凝土强度 C35」被「实体类型:|坐标:(…)」图元罗列干扰）；图层/块/实体
-    // 类型汇总已在 CAD DXF 汇总行体现，此处只保留图纸真实文字（图名/说明/尺寸标注值）
+    // 类型汇总已在 CAD DXF 汇总行体现，此处只保留图纸真实文字（图名/说明/尺寸标注值），
+    // 并按坐标重建行/段落结构（总说明类多实体文本恢复为连续段落，防碎片化入库）
     const fileName = path.basename(file.relativePath);
     const annotations = texts.filter(item => item.text && item.text.trim().length > 0);
     if (annotations.length === 0) return [`图纸节点: ${fileName} | 未提取到文字标注`];
-    return [`图纸节点: ${fileName}`, ...annotations.map(item => item.text)];
+    return [`图纸节点: ${fileName}`, ...layoutCadAnnotations(annotations)];
   }
 
   private extractDxfTextAnnotations(raw: string): CadAnnotation[] {

@@ -5,7 +5,7 @@
  * 底层 LLM 调用通过 invokeLlm 注入桩（模块内部词法绑定无法被 vi.mock 拦截）。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, flushScheduledLaunches, isContextOverflowLlmError, isTransientLlmError, llmPrefixFingerprint, prefixScheduleWindowFor, repairTruncatedJson, retryDelayMs, sortScheduledLaunches, type DocumentJsonSchema } from '@/services/document-workflow/llmClient';
+import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, flushScheduledLaunches, isContextOverflowLlmError, isTransientLlmError, llmPrefixFingerprint, prefixScheduleWindowFor, repairTruncatedJson, retryDelayMs, sortScheduledLaunches, validateJsonAgainstSchema, type DocumentJsonSchema, type DocumentJsonSchemaTruncation } from '@/services/document-workflow/llmClient';
 import type { DocumentGenerationDiagnostics } from '@/services/document-workflow/types';
 
 // 无活跃模型配置：callDocumentLlm 观测累计发生在 provider 调用之前，
@@ -308,6 +308,66 @@ describe('callDocumentLlmJsonWithRetry（P1-4 截断修复免重试）', () => {
     expect(result?.patches).toHaveLength(1);
     expect(invoke).toHaveBeenCalledTimes(2);
     expect(invoke.mock.calls[1][1]).toContain('重试修正');
+  });
+});
+
+describe('V5 P4.1 截断式校验（maxItems 超限原地截断+告警，不判失败）', () => {
+  const cappedSchema: DocumentJsonSchema = {
+    type: 'object',
+    required: ['patches'],
+    properties: { patches: { type: 'array', minItems: 1, maxItems: 2, items: { type: 'object' } } },
+  };
+
+  it('超限数组原地截断：无错误、truncations 记录明细（JSON.parse 产物引用被修改）', () => {
+    const value = { patches: [{}, {}, {}, {}] };
+    const truncations: DocumentJsonSchemaTruncation[] = [];
+    const errors = validateJsonAgainstSchema(value, cappedSchema, truncations);
+    expect(errors).toEqual([]);
+    expect(value.patches).toHaveLength(2);
+    expect(truncations).toEqual([{ path: '$.patches', maxItems: 2, originalLength: 4 }]);
+  });
+
+  it('嵌套数组截断：路径穿透到子数组（$.blocks[0].tags）', () => {
+    const nested: DocumentJsonSchema = {
+      type: 'object',
+      properties: { blocks: { type: 'array', maxItems: 1, items: { type: 'object', properties: { tags: { type: 'array', maxItems: 1, items: { type: 'string' } } } } } },
+    };
+    const value = { blocks: [{ tags: ['a', 'b'] }] };
+    const truncations: DocumentJsonSchemaTruncation[] = [];
+    const errors = validateJsonAgainstSchema(value, nested, truncations);
+    expect(errors).toEqual([]);
+    expect(value.blocks[0].tags).toEqual(['a']);
+    expect(truncations).toEqual([{ path: '$.blocks[0].tags', maxItems: 1, originalLength: 2 }]);
+  });
+
+  it('端到端：输出超 maxItems → 截断后单次调用直接返回、lastInfo 告警、不计 schemaFailures', async () => {
+    const invoke = vi.fn().mockResolvedValueOnce('{"patches": [{}, {}, {}]}');
+    const diagnostics = bareDiagnostics();
+    const result = await callDocumentLlmJsonWithRetry<{ patches: unknown[] }>('system', 'prompt', { schema: cappedSchema, diagnostics }, invoke);
+    expect(result?.patches).toHaveLength(2);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(diagnostics.llm.lastInfo).toContain('JSON Schema 截断式校验');
+    expect(diagnostics.llm.lastInfo).toContain('$.patches 3 条超上限 2');
+    expect(diagnostics.llm.schemaFailures).toBeUndefined();
+  });
+
+  it('截断修复产物超 maxItems：修复路径同样截断+告警并单次返回', async () => {
+    const invoke = vi.fn().mockResolvedValueOnce('{"patches": [{},{},{},{},{},{');
+    const diagnostics = bareDiagnostics();
+    const result = await callDocumentLlmJsonWithRetry<{ patches: unknown[] }>('system', 'prompt', { schema: cappedSchema, diagnostics }, invoke);
+    expect(result?.patches).toHaveLength(2);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(diagnostics.llm.lastInfo).toContain('$.patches 5 条超上限 2');
+  });
+
+  it('同一 schema 内 minItems 仍严格失败（截断放开不豁免条数不足）', async () => {
+    const invoke = vi.fn()
+      .mockResolvedValueOnce('{"patches": []}')
+      .mockResolvedValueOnce('{"patches": [{}]}');
+    const result = await callDocumentLlmJsonWithRetry<{ patches: unknown[] }>('system', 'prompt', { schema: cappedSchema }, invoke);
+    expect(result?.patches).toHaveLength(1);
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke.mock.calls[1][1]).toContain('条数不足');
   });
 });
 

@@ -11,7 +11,7 @@ export const PEAK_LABOR_RE = /(?:高峰期|高峰|峰值)[^。；;\n]{0,20}?(?:�
 // PEAK_LABOR_RE/LABOR_COUNT_RE 均不覆盖；阶段词自身即劳动力语境（LABOR_STAGE_LIMIT_WORDS 同族），
 // 提取值经 laborPeakStageOf 带阶段限定参与同阶段互查，不影响跨阶段隔离
 
-const LABOR_STAGE_LIMIT_WORDS = ['基坑与基础', '二次结构与砌体', '施工准备', '地下结构', '主体结构', '装饰装修', '机电安装', '室外工程', '收尾调试', '临时设施', '土方', '基坑', '基础'] as const;
+export const LABOR_STAGE_LIMIT_WORDS = ['基坑与基础', '二次结构与砌体', '施工准备', '地下结构', '主体结构', '装饰装修', '机电安装', '室外工程', '收尾调试', '临时设施', '土方', '基坑', '基础'] as const;
 
 // F6 口径隔离词表：管理口径与工种口径的劳动力数值不与总峰值互查/替换——
 // 「管理人员18人 vs 施工高峰期286人」「钢筋工60人 vs 木工80人」属不同口径正常配置（真实生成误报根因）；
@@ -422,6 +422,32 @@ export function extractProjectScaleSummary(factsModel?: DocumentFactsModel | nul
   if (floorsAbove !== undefined) parts.push(`地上${floorsAbove}层`);
   if (floorsBelow !== undefined) parts.push(`地下${floorsBelow}层`);
   return parts.length > 0 ? parts.join('、') : undefined;
+}
+
+/** 单位归一（权威单位 → 正文匹配单位集）：清单单位口径与正文写法对齐（m2/m²/㎡ 同义）。
+ * V5 P4b：自 fixers.ts 提升至权威层，检测器（crossProjectValueCopyIssues）与修复器
+ * （fixQuantityAuthorityConflicts）共用同一单位匹配口径（检测定位=修复定位，双份实现会漂移）。 */
+
+export function quantityUnitVariants(unit: string): string {
+  const normalized = unit.trim().toLowerCase();
+  if (/(?:m2|m²|㎡)/.test(normalized)) return '(?:㎡|m²|m2)';
+  if (/(?:m3|m³)/.test(normalized)) return '(?:m³|m3)';
+  if (normalized === 't' || normalized === '吨') return '(?:吨|t)';
+  return unit.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/** 名称弹性匹配模式：括号容忍半全角与可缺省
+ * （「路床(槽)碾压检验」↔「路床（槽）碾压检验」↔「路床槽碾压检验」三态互配）。
+ * V5 P4b：自 fixers.ts 提升至权威层，检测/修复共用同一名称匹配口径。 */
+
+export function flexNamePattern(name: string): string {
+  return name.split('').map(ch => {
+    // 括号双态互配（半/全角都容忍对方）——名称含全角括号时正文常写半角（“栽植色带（生态池外围一圈）”↔“栽植色带(生态池外围一圈)”）
+    if (ch === '(' || ch === '（') return '[（(]?';
+    if (ch === ')' || ch === '）') return '[）)]?';
+    if (/[.*+?^${}()|[\]\\]/u.test(ch)) return `\\${ch}`;
+    return ch;
+  }).join('');
 }
 
 /** A2 总入口：跨章数值/支护体系矛盾确定性修复（劳动力峰值 → 节点工期 → 材料/设备数量 → 支护体系，顺序执行互不重叠） */

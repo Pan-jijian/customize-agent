@@ -107,8 +107,8 @@ describe('dicFieldAreaBoundary · M 组：字段/面积/工期字段检测器', 
       expect(issues[0].message).toContain('差 1000.00㎡');
     });
 
-    it('M2 容差 max(1, 总×0.001) 内不报：差 1 不报', () => {
-      expect(areaArithmeticIssues('地上600㎡，地下399㎡，总建筑面积1000㎡。')).toEqual([]);
+    it('M2 无容差：差 1 即报（999 vs 1000）', () => {
+      expect(areaArithmeticIssues('地上600㎡，地下399㎡，总建筑面积1000㎡。').length).toBe(1);
     });
 
     it('M2 超出容差报：差 2 > 1', () => {
@@ -117,8 +117,8 @@ describe('dicFieldAreaBoundary · M 组：字段/面积/工期字段检测器', 
       expect(issues[0].message).toContain('差 2.00㎡');
     });
 
-    it('M2 大数容差随总量放大：总 100000 时差 50 不报', () => {
-      expect(areaArithmeticIssues('地上50000㎡，地下49950㎡，总建筑面积100000㎡。')).toEqual([]);
+    it('M2 大数无容差：总 100000 时差 50 即报', () => {
+      expect(areaArithmeticIssues('地上50000㎡，地下49950㎡，总建筑面积100000㎡。').length).toBe(1);
     });
 
     it('M2 大数容差：差 150 > 100 → 报', () => {

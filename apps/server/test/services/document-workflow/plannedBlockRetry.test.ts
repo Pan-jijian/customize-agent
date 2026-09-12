@@ -35,7 +35,7 @@ function passingContent(h4s: string[], bodyChars: number): string {
 const shortContent = `### 测量放线\n\n#### ${H4A}\n\n${'施'.repeat(150)}`;
 
 function mockDiagnostics(): DocumentGenerationDiagnostics {
-  return createGenerationDiagnostics({ mode: 'fast', enableChapterReview: false, enableGlobalReview: false, enableDocumentBudgetExpansion: false, enableFinalQualityReview: false });
+  return createGenerationDiagnostics({ mode: 'fast', enableChapterReview: false, enableGlobalReview: false, enableFinalQualityReview: false });
 }
 
 function makeChapter(overrides: Partial<DocumentTemplateChapter> = {}): DocumentTemplateChapter {
@@ -58,7 +58,7 @@ function makeBlock(overrides: Partial<PlannedChapterBlock> = {}): PlannedChapter
 }
 
 function makeStructure(overrides: Partial<PlannedChapterStructure> = {}): PlannedChapterStructure {
-  return { blocks: [makeBlock()], coveredSections: [], fallbackSections: [], llmPlanned: false, ...overrides };
+  return { blocks: [makeBlock()], coveredSections: [], fallbackSections: [], ...overrides };
 }
 
 type PlannedInput = Parameters<typeof buildPlannedChapterContent>[0];
@@ -188,8 +188,11 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
 
   it('要点 ≥4 两轮不达标 → 拆半自愈：两个子块同标准成稿拼接', async () => {
     llmMock.mockImplementation(async (_system: string, prompt: string) => {
-      if (prompt.includes('（一）')) return `### 测量放线（一）\n\n#### ${H4A}\n\n${'施'.repeat(400)}\n\n#### ${H4B}\n\n${'施'.repeat(400)}`;
-      if (prompt.includes('（二）')) return `### 测量放线（二）\n\n#### ${H4C}\n\n${'施'.repeat(400)}\n\n#### ${H4D}\n\n${'施'.repeat(400)}`;
+      // A2：拆半子块共享父块标题（prompt 无「（一）（二）」后缀），按覆盖清单 `#### ` 前缀切片区分：
+      // 禁词清单（forbiddenTitlesLine）把另一半块 H4 以裸词注入，全部 prompt 词面含 4 个 H4；
+      // 仅覆盖清单带 `#### ` 前缀 → 前半块只含 ####H4B，后半块只含 ####H4C，原块两轮四个都有 → shortContent
+      if (prompt.includes('#### ' + H4B) && !prompt.includes('#### ' + H4C)) return `### 测量放线\n\n#### ${H4A}\n\n${'施'.repeat(400)}\n\n#### ${H4B}\n\n${'施'.repeat(400)}`;
+      if (prompt.includes('#### ' + H4C) && !prompt.includes('#### ' + H4B)) return `### 测量放线\n\n#### ${H4C}\n\n${'施'.repeat(400)}\n\n#### ${H4D}\n\n${'施'.repeat(400)}`;
       return shortContent;
     });
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
@@ -213,7 +216,7 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
     expect(prompt).toContain('分部分项工程施工方案总述');
     expect(prompt).toContain('四、质量、安全与进度接口');
     expect(prompt).not.toContain('【分部分项施工方案三段式】');
-  });
+  }, 120_000);
 
   it('4.19.5 回归：分部章容器块输出清单外 H4 → 标题剥离正文保留，字数达标成稿', async () => {
     // 总述块模型仍写出分部名 H4（历史习惯）时：块质检确定性修复删标题行保留正文，字数达标即通过

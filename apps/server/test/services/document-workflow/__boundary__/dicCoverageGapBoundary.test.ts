@@ -2,7 +2,7 @@
  * 边界矩阵（P1 第 29 批 · FF 组）
  * 覆盖：coverage 报告提取的 documentIntegrityChecks.ts 未覆盖语句行精准选题——
  * 每条用例锚定一个此前从未执行的防御分支/豁免分支（L82/L128/L209/L323/L347/L544-550/
- * L1075/L1087/L1752/L1914-1916/L2012/L2235/L2609/L3013/L3037/L3120-3126/L3135/L3168/
+ * L1752/L1914-1916/L2012/L2235/L2609/L3013/L3037/L3120-3126/L3135/L3168/
  * L3186/L3196/L3198/L3217-3218/L3269/L3306/L3309/L3311/L3313/L3335/L3340/L3378/L3447/
  * L3510/L3523/L3618/L2038），断言按真实实现行为锁定。
  * 原则：每条用例独立断言意义；真实实现行为一律锁定，不迎合用例改实现。
@@ -22,10 +22,10 @@ import {
   resourceConsistencyIssues,
   specLocationMismatchIssues,
   stripDuplicateTables,
-  stripOverviewRecapBodyLines,
   tablePeakLabor,
 } from '@/services/document-workflow/documentIntegrityChecks';
 import { factOf, factsOf } from './boundaryKit';
+import { fixtureIndex } from '../authorityFixture';
 
 const HUGE = '9'.repeat(400); // Number(HUGE) === Infinity
 
@@ -109,28 +109,6 @@ describe('FF8 班组算式：总数为 0 或 Infinity（L550）', () => {
   });
   it('FF8 总数 400 位数字（Infinity）拦截 → 0 条', () => {
     expect(resourceConsistencyIssues(`道路浇筑8人＋铺装2人=${HUGE}人。`)).toHaveLength(0);
-  });
-});
-
-// ── FF9-FF10. stripOverviewRecapBodyLines：概况区间未闭合（L1075）/短句保留（L1087） ──
-
-const alwaysSimilar = () => 0.9;
-
-describe('FF9 概况复述清洗：概况区间未闭合', () => {
-  it('FF9 「## 工程概况」到文末无同级标题 → 全区间保护 → 原样返回', () => {
-    const markdown = '## 工程概况\n本项目为某市政道路工程。甲乙丙丁戊己庚辛壬癸。';
-    expect(stripOverviewRecapBodyLines(markdown, alwaysSimilar)).toBe(markdown);
-  });
-});
-
-describe('FF10 概况复述清洗：短句保留（L1087）', () => {
-  it('FF10 「本项目为短句」7 字 <12 → 不判复述 → 保留', () => {
-    const markdown = '## 工程概况\n本项目为某市政道路工程。甲乙丙丁戊己庚辛壬癸。子丑寅卯辰巳午未申酉戌亥。\n\n## 施工组织\n本项目为短句。';
-    expect(stripOverviewRecapBodyLines(markdown, alwaysSimilar)).toContain('本项目为短句。');
-  });
-  it('FF10 「本工程为短句」6 字 <12 → 保留', () => {
-    const markdown = '## 工程概况\n本项目为某市政道路工程。甲乙丙丁戊己庚辛壬癸。子丑寅卯辰巳午未申酉戌亥。\n\n## 施工组织\n本工程为短句。';
-    expect(stripOverviewRecapBodyLines(markdown, alwaysSimilar)).toContain('本工程为短句。');
   });
 });
 
@@ -279,12 +257,12 @@ describe('FF18 节点工期修复：相对量完成日不作为权威', () => {
   });
 });
 
-// ── FF19. nodeAuthorities 非法 offset（L3168） ──
+// ── FF19. 里程碑权威非法值（L3168） ──
 
-describe('FF19 外部节点权威注入：非法 offset', () => {
-  it('FF19 offset「第0日」day<1 → 不注入 → 正文不动', () => {
+describe('FF19 里程碑权威注入：非法天数', () => {
+  it('FF19 里程碑 value=0 → 派生器过滤不注入 → 正文不动', () => {
     const result = applyNumericConsistencyDeterministicFixes('第80日完成主体结构封顶。', {
-      nodeAuthorities: [{ node: '主体结构封顶', offset: '第0日' }],
+      authorityIndex: fixtureIndex({ milestones: [{ label: '主体结构封顶', value: 0 }] }),
     });
     expect(result.fixedCount).toBe(0);
     expect(result.markdown).toContain('第80日');
@@ -436,7 +414,7 @@ describe('FF28 数量修复：众数兜底带部位表格行跳过（L3313）', 
 describe('FF29 code 锚点：否定声明句豁免（L3335）', () => {
   it('FF29 「不再出现」行 C20 不动，另一行 C30→C15', () => {
     const result = applyNumericConsistencyDeterministicFixes('垫层C20浇筑，不再出现C35标号。\n垫层C30浇筑。', {
-      codeAuthorities: { cushion: 'C15' },
+      authorityIndex: fixtureIndex({ specs: [{ anchor: 'cushion', value: 'C15' }] }),
     });
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('垫层C20浇筑');
@@ -447,7 +425,7 @@ describe('FF29 code 锚点：否定声明句豁免（L3335）', () => {
 describe('FF30 code 锚点：权威值一致跳过（L3340）', () => {
   it('FF30 「垫层C15」已与权威一致 → 不动，仅 C20→C15', () => {
     const result = applyNumericConsistencyDeterministicFixes('垫层C15浇筑。垫层C20浇筑。', {
-      codeAuthorities: { cushion: 'C15' },
+      authorityIndex: fixtureIndex({ specs: [{ anchor: 'cushion', value: 'C15' }] }),
     });
     expect(result.fixedCount).toBe(1);
     expect((result.markdown.match(/垫层C15浇筑/g) || []).length).toBe(2);

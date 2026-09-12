@@ -15,7 +15,8 @@ import {
   tablePeakLaborWithChainFallback,
 } from '@/services/document-workflow/documentIntegrityChecks';
 import type { DocumentFact, DocumentFactsModel } from '@/services/document-workflow/types';
-import { caseName, product } from './boundaryKit';
+import { generatedFactVerificationIssues } from '@/services/document-workflow/qualityValidation';
+import { caseName, factsOf as completeFactsOf, product } from './boundaryKit';
 
 type FactsModel = DocumentFactsModel;
 const factsOf = (partial: Partial<FactsModel>): FactsModel => partial as FactsModel;
@@ -46,12 +47,12 @@ describe('A1 laborPeak 全形态组合（矛盾检测）', () => {
 describe('A2 laborPeak 20% 阈值边界', () => {
   const cases: Array<{ peak: number; total: number; expectIssue: boolean }> = [
     { peak: 100, total: 100, expectIssue: false },
-    { peak: 100, total: 120, expectIssue: false }, // diff=20 = 20% 边界（严格大于才报）
+    { peak: 100, total: 120, expectIssue: true }, // 无容差：任何不同数值即报
     { peak: 100, total: 121, expectIssue: true }, // diff=21 > 20%
-    { peak: 100, total: 80, expectIssue: false }, // 反向 diff=20 边界
+    { peak: 100, total: 80, expectIssue: true }, // 无容差：任何不同数值即报
     { peak: 100, total: 79, expectIssue: true },
     { peak: 100, total: 60, expectIssue: true },
-    { peak: 1000, total: 1199, expectIssue: false }, // 199 < 200
+    { peak: 1000, total: 1199, expectIssue: true }, // 无容差：任何不同数值即报
     { peak: 1000, total: 1201, expectIssue: true },
   ];
   it.each(cases)('A2 peak=$peak total=$total → $expectIssue', ({ peak, total, expectIssue }) => {
@@ -125,7 +126,7 @@ describe('B1 nodeSchedule 四形态两两组合 × 差值档', () => {
   };
   const formPairs = product(Object.keys(forms), Object.keys(forms)).filter(([a, b]) => a < b);
   const diffs = [
-    { label: '差4天→不报', first: 100, second: 104, expectIssue: false },
+    { label: '差4天→报（无容差）', first: 100, second: 104, expectIssue: true },
     { label: '差5天→报', first: 100, second: 105, expectIssue: true },
     { label: '差210天→报', first: 100, second: 310, expectIssue: true },
   ];
@@ -250,10 +251,10 @@ describe('D1 areaArithmetic 三元组', () => {
   it('D1 千分位正确计算', () => {
     expect(areaArithmeticIssues('地上1,000㎡、地下2,000㎡，单体建筑面积3,000㎡。')).toEqual([]);
   });
-  it('D1 0.1% 容差边界', () => {
+  it('D1 无容差：差 700 即报', () => {
     const near = (total: number, sum: number) => areaArithmeticIssues(`地上${sum}㎡、地下0㎡，单体建筑面积${total}㎡。`);
-    expect(near(700000, 700700)).toEqual([]); // 差 700 = 0.1% 边界（≤ 容差）
-    expect(near(700000, 700702).length).toBeGreaterThan(0); // 差 702 > max(1, 700)
+    expect(near(700000, 700700).length).toBeGreaterThan(0);
+    expect(near(700000, 700702).length).toBeGreaterThan(0);
   });
   it('D1 单位变体全支持', () => {
     const variants = ['㎡', 'm2', 'm²', '平方米'];
@@ -548,5 +549,34 @@ describe('J3 extractProjectScaleSummary', () => {
   it('J3 小数面积', () => {
     const model = factsOf({ project: [factOf({ key: 'p', fieldName: '单体建筑面积', value: '1234.5㎡' })] });
     expect(extractProjectScaleSummary(model)).toBe('建筑面积1234.5平方米');
+  });
+});
+
+// ── K. 生成后事实反查（阶段分解数字豁免，R11 舒城第二轮实测） ──
+
+describe('K1 generatedFactVerificationIssues 阶段分解豁免', () => {
+  const baseFacts = () => completeFactsOf({
+    project: [factOf({ fieldName: '工程名称', value: '舒城县城区道路及配套设施提升改造工程' })],
+    schedule: [factOf({ fieldName: '总工期', value: '180日历天' })],
+    quality: [factOf({ fieldName: '质量目标', value: '合格，符合国家现行施工验收规范及设计文件要求，一次性验收合格' })],
+    safety: [factOf({ fieldName: '安全目标', value: '杜绝重伤及以上安全事故，轻伤事故频率控制为零，创建安全标准化示范工地' })],
+  });
+
+  it('K1 阶段分解天数（阶段/缓冲/累计引导）不进总量口径反查池 → 无反查失败', () => {
+    const md = '本工程总工期180日历天，施工准备与三通一平阶段29天，基础工程阶段86天，竣工验收缓冲15天，各阶段累计345天。';
+    const issues = generatedFactVerificationIssues(md, baseFacts());
+    expect(issues.some(issue => issue.message.includes('生成后事实反查失败'))).toBe(false);
+  });
+
+  it('K1 对照：非阶段语境的总量口径数字缺失仍报反查失败（豁免不越界）', () => {
+    const md = '本工程总工期180日历天，围墙修复29天。';
+    const issues = generatedFactVerificationIssues(md, baseFacts());
+    expect(issues.some(issue => issue.message.includes('生成后事实反查失败') && issue.message.includes('29天'))).toBe(true);
+  });
+
+  it('K1 资料口径内的总工期数字不报（基础通道回归）', () => {
+    const md = '本工程总工期180日历天，计划按期完成全部施工内容。';
+    const issues = generatedFactVerificationIssues(md, baseFacts());
+    expect(issues.some(issue => issue.message.includes('生成后事实反查失败'))).toBe(false);
   });
 });

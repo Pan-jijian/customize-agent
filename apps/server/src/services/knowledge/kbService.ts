@@ -213,20 +213,3 @@ export async function discoverKnowledgeFiles(projectRoot: string, options: { que
 export async function shutdownKbService(): Promise<void> {
   if (manager) { await manager.shutdown(); manager = null; }
 }
-
-/**
- * B1 知识库索引与绑定文件清单同步清理（源头根除跨项目脏数据）。
- * 绑定文件清单是文档生成的权威资料范围：从清单推顶级资料组，持久化到项目 kb 元数据
- * （后续增量索引只扫这些组，跨项目目录不会再入索引），并立即清除索引中组外的全部数据。
- * 磁盘文件不动（可重新绑定恢复）；清单无顶级组时返回零清理（无权威范围不误删）。
- */
-export async function syncKbIndexWithBoundFiles(projectRoot: string, boundFilePaths: string[]): Promise<{ deletedChunks: number; deletedFiles: number }> {
-  const keepGroups = new Set<string>();
-  for (const filePath of boundFilePaths) {
-    const top = filePath.replace(/\\/gu, '/').split('/').filter(Boolean)[0];
-    if (top) keepGroups.add(top);
-  }
-  if (keepGroups.size === 0) return { deletedChunks: 0, deletedFiles: 0 };
-  const project = await getMultiProjectManager().getProject(projectRoot);
-  return project.syncIndexWithBoundGroups([...keepGroups]);
-}

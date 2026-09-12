@@ -113,7 +113,7 @@ async function llmBlockAnnotations(blocks: string[]): Promise<Array<{ batch: Blo
       + '2. arrowChain：该块是否描述施工工序先后关系或流程推进顺序（含"先…再…后…"自然语言表述，不要求出现"→"符号）。\n'
       + '只输出 JSON，格式：{"blocks":[{"fiveElementComplete":true,"arrowChain":false}]}，与输入块顺序一一对应。'),
       prompt,
-      { maxTokens: 4000, temperature: 0, disableThinkingBoost: true },
+      { maxTokens: 4000, temperature: 0 },
     );
     if (!result?.blocks || result.blocks.length === 0) break;
     const batch: BlockAnnotation[] = [];
@@ -135,7 +135,7 @@ async function llmQualityNotes(text: string, headingStructure: string[]): Promis
       docSystemPrefix('你是施工组织设计评审专家。基于提供的参考施组样本（节选），输出质量点评 JSON：\n'
       + '{"highlights":["值得对标的亮点，每条≤40字，最多5条"],"weaknesses":["明显短板，每条≤40字，最多5条"],"benchmarkable":"一段≤80字的最值得对标点总结"}。只输出 JSON。'),
       `章节结构：${headingStructure.slice(0, 12).join(' / ')}\n\n样本节选：\n${sample}`,
-      { maxTokens: 1200, temperature: 0, disableThinkingBoost: true },
+      { maxTokens: 1200, temperature: 0 },
     );
     if (!result) return undefined;
     return {

@@ -46,6 +46,12 @@ const LABOR_WRITE_RULES = [DEFAULT_WRITING_SPEC.writeRules.labor];
 const MATERIAL_CHAPTER_RE = /主要材料|材料资源|物资/u;
 const MATERIAL_WRITE_RULES = [DEFAULT_WRITING_SPEC.writeRules.material];
 
+// ═══════ 写作三源规则（M4：全局提示词与章切片共用的单点文案） ═══════
+// F 项目事实原样引用 / D 系统推导值原样引用且禁重算 / P 公共规范附编号 / 三源外不写。
+// 消费点：markdownComposer.FORMAL_WRITING_RULES（全局写作提示词，替换旧“计划类字段必须自行推导”矛盾条目）
+// 与 integratedBlueprint.renderBlueprintChapterSlice（章切片权威提示头部）。
+export const THREE_SOURCE_WRITE_RULES = DEFAULT_WRITING_SPEC.threeSourceRules;
+
 /** 小节锚定写法规则统一入口：按标题查表，返回应注入的专项规则行（无命中返回空数组） */
 export function sectionAnchoredRules(sectionTitle: string): string[] {
   const rules: string[] = [];
@@ -55,9 +61,9 @@ export function sectionAnchoredRules(sectionTitle: string): string[] {
 }
 
 /**
- * 章节级锚定规则：主题块管线的 blockChapter.sections 是 H4 要点标题（含锚定清单保真的关键词），
- * 整章管线的 chapter.sections 是规划小节——统一按「章标题+小节清单」整体判别并去重注入，
- * 保证主题块管线也能拿到与逐小节管线同源的专项规则（历史缺陷：主题块管线拿不到专项规则导致概略）
+ * 章节级锚定规则：blockChapter.sections 是主题块的 H4 要点标题（含锚定清单保真的关键词），
+ * 按「章标题+要点清单」整体判别并去重注入，
+ * 保证主题块拿到分部分项/主要施工内容专项规则（历史缺陷：仅按小节标题判别拿不到专项规则导致概略）
  */
 export function chapterAnchoredRules(chapterTitle: string, sections: string[]): string[] {
   const seen = new Set<string>();

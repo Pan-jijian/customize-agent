@@ -62,6 +62,31 @@ describe('scanCrossChapterDataConflicts 跨章数据矛盾确定性扫描（4.1�
     ];
     expect(scanCrossChapterDataConflicts(chapters)).toEqual([]);
   });
+
+  it('分阶段劳动力口径句不报（「该阶段劳动力投入N人」为阶段句非高峰取值，V5 P6 run1 实测）', () => {
+    const chapters = [
+      chapter('c1', '施工部署', '本工程劳动力高峰期为276人，分阶段投入。'),
+      chapter('c2', '进度计划', '施工准备与清杂拆除阶段劳动力投入238人，污水管网工程阶段劳动力投入242人。'),
+    ];
+    expect(scanCrossChapterDataConflicts(chapters)).toEqual([]);
+  });
+
+  it('「按蓝图推导统一为N人」声明句不报（推导口径非字段取值，V5 P6 run1 实测）', () => {
+    const chapters = [
+      chapter('c1', '施工部署', '本工程劳动力高峰期为276人。'),
+      chapter('c2', '资源配置', '该阶段劳动力按蓝图推导统一为238人。'),
+    ];
+    expect(scanCrossChapterDataConflicts(chapters)).toEqual([]);
+  });
+
+  it('阶段工期/机动工期/延误工期句不报（非总工期口径，V5 P6 run1 实测）', () => {
+    const chapters = [
+      chapter('c1', '进度计划', '本工程总工期为360日历天。'),
+      chapter('c2', '施工部署', '该阶段工期仅10天；机动工期16天。'),
+      chapter('c3', '工期保障', '若遇雨季工期延误16天，已预留调整空间。'),
+    ];
+    expect(scanCrossChapterDataConflicts(chapters)).toEqual([]);
+  });
 });
 
 describe('formatKnownConflictLines 冲突清单格式化（4.1）', () => {

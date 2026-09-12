@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DocumentTemplateChapter } from '@/services/document-workflow/types';
-import { concatenatedSectionTitleFixes, extractEvaluationCriteriaItems, prioritizeOverviewSections, representativeTitleForPattern, validateBidStructureBeforeGeneration } from '@/services/document-workflow/constructionBidStructure';
+import { extractEvaluationCriteriaItems, prioritizeOverviewSections, representativeTitleForPattern, validateBidStructureBeforeGeneration } from '@/services/document-workflow/constructionBidStructure';
 import { cleanSectionTitleArtifacts, normalizePlannedSections } from '@/services/document-workflow/promptRuleExtraction';
 
 const chapter = (title: string, sections: string[]): DocumentTemplateChapter => ({
@@ -24,28 +24,10 @@ describe('representativeTitleForPattern（改8：补挂标题拼接根因）', (
   });
 });
 
-describe('concatenatedSectionTitleFixes（粘连产物精确回退表）', () => {
-  it('粘连产物逐字映射回代表词', () => {
-    const fixes = concatenatedSectionTitleFixes();
-    expect(fixes['现场踏勘施工条件现场条件']).toBe('现场踏勘');
-    expect(fixes['编制依据编制说明']).toBe('编制依据');
-  });
-
-  it('代表词本身不在回退表内（避免二次清洗）', () => {
-    const fixes = concatenatedSectionTitleFixes();
-    expect(fixes['现场踏勘']).toBeUndefined();
-    expect(fixes['编制依据']).toBeUndefined();
-  });
-});
-
 describe('cleanSectionTitleArtifacts（清单层确定性清洗）', () => {
   it('词尾等长严格重复去重', () => {
     expect(cleanSectionTitleArtifacts('要点要点')).toBe('要点');
     expect(cleanSectionTitleArtifacts('现场条件现场条件')).toBe('现场条件');
-  });
-
-  it('补挂 bug 产生的粘连脏标题精确回退为代表词', () => {
-    expect(cleanSectionTitleArtifacts('现场踏勘施工条件现场条件')).toBe('现场踏勘');
   });
 
   it('合法标题不受影响', () => {
@@ -56,7 +38,7 @@ describe('cleanSectionTitleArtifacts（清单层确定性清洗）', () => {
 
 describe('normalizePlannedSections 清洗接入', () => {
   it('脏标题进入小节清单前被清洗', () => {
-    expect(normalizePlannedSections(['项目主要施工内容', '现场踏勘施工条件现场条件', '编制说明与工程概况'], '工程重点难点及危大工程的保障体系')).toEqual(['项目主要施工内容', '现场踏勘', '编制说明与工程概况']);
+    expect(normalizePlannedSections(['项目主要施工内容', '现场踏勘要点要点', '编制说明与工程概况'], '工程重点难点及危大工程的保障体系')).toEqual(['项目主要施工内容', '现场踏勘要点', '编制说明与工程概况']);
   });
 });
 

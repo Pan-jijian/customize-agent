@@ -368,15 +368,20 @@ function removeProjectBasicInfoTableBlocks(content: string) {
 export function normalizeProjectBasicInfoTable(content: string, facts: DocumentFact[]) {
   content = removeRedundantFormalTables(content);
   if (!/项目基本信息|项目概况|工程概况|招标范围/u.test(content)) return removeDuplicateProjectBasicInfoBlocks(normalizeBareMarkdownTables(stripProvenanceTableColumns(content)));
+  // 注入锚点 H2~H4（舒城实测：第一章标题为「## 工程概况」H2 形态，原 #{3,4} 锚点永不命中
+  // → 总控要求「项目基本信息表」整表缺失）；优先精确主题标题，退而求其次取章内第一个标题
+  const projectHeadingRe = /^(#{2,4}\s+(?:\d+\.\d+\s+)?[^\n]*(?:项目概况|工程概况|项目基本信息|招标范围)[^\n]*\n)/mu;
+  const fallbackHeadingRe = /^(#{2,4}\s+(?:\d+\.\d+\s+)?[^\n]*(?:概况|基本信息)[^\n]*\n)/mu;
+  const findProjectHeading = () => projectHeadingRe.exec(content) ?? fallbackHeadingRe.exec(content);
   if (!/\|\s*信息项\s*\|\s*内容\s*\|/u.test(content) && projectBasicFactCandidates(facts).length > 0) {
-    const firstProjectHeading = /^(#{3,4}\s+(?:\d+\.\d+\s+)?[^\n]*(?:项目概况|工程概况|项目基本信息|招标范围)[^\n]*\n)/mu.exec(content);
+    const firstProjectHeading = findProjectHeading();
     if (firstProjectHeading?.index || firstProjectHeading?.index === 0) {
       const insertAt = firstProjectHeading.index + firstProjectHeading[0].length;
       const table = `${projectBasicInfoTableMarkdown(facts, '', content)}\n\n`;
       content = `${content.slice(0, insertAt)}\n${table}${content.slice(insertAt).trimStart()}`;
     }
   }
-  const projectSection = /^(###\s+(?:\d+\.\d+\s+)?[^\n]*(?:项目概况|工程概况|项目基本信息|招标范围)[^\n]*\n)/mu.exec(content);
+  const projectSection = findProjectHeading();
   if (!projectSection?.index && projectSection?.index !== 0) return content;
   const sectionStart = projectSection.index;
   const sectionBodyStart = sectionStart + projectSection[0].length;

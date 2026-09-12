@@ -72,64 +72,22 @@ export interface RuntimePromptRuleSet extends PromptDocumentRuleSet {
   extractionTrace?: RuleExtractionTrace[];
 }
 
-export interface ProjectGraphTableFieldPlan {
+/** 规划表格字段：表头列名（来自 LLM 章节规划的表格需求，字段可为空——写作时按表名与所在小节内容确定） */
+export interface PlannedTableField {
   name: string;
-  required: boolean;
-  sourceDomain: 'project' | 'works' | 'methods' | 'resources' | 'schedule' | 'standards' | 'risks' | 'requirements' | 'siteConditions' | 'factsModel' | 'standard';
-  sourceHint: string;
-  /** projectFactOnly:资料没有不得填写；standardAllowed:按行业标准做法填写；deriveFromContext:结合图谱与上下文推导；deriveFromProject:基于项目事实（工程量/工期/工序）推导的投标人编制类字段 */
-  fallbackPolicy: 'projectFactOnly' | 'standardAllowed' | 'deriveFromContext' | 'deriveFromProject';
 }
 
-export type GovernedTableNecessity = 'must' | 'should' | 'conditional' | 'reference';
-
-export type GovernedTableOutputType = 'markdown_table' | 'checklist' | 'paragraph' | 'merged_into_existing_table' | 'skip';
-
-export type GovernedTableFallbackPolicy = 'generate_with_confirmed_facts' | 'generate_with_review_notes' | 'convert_to_text' | 'skip_with_reason';
-
-export interface GovernedTableFieldPlan extends ProjectGraphTableFieldPlan {
-  confirmed: boolean;
-  missingReason?: string;
-}
-
-export interface ProjectGraphTablePlan {
+/** 规划表格计划：来自提示词声明的必需表格与 LLM 章节规划的表格需求（统一规划产物，无静态目录匹配） */
+export interface PlannedTablePlan {
   id: string;
   title: string;
   chapterTitle: string;
-  moduleTitle: string;
+  /** 归属小节（规划产物，可空——空时按表名与小节标题语义匹配分配） */
+  section: string;
+  /** 提示词声明的必需表格（必写）；LLM 规划产出的为应写 */
   required: boolean;
   reason: string;
-  fields: ProjectGraphTableFieldPlan[];
-  sourceDomains: ProjectGraphTableFieldPlan['sourceDomain'][];
-  necessity?: GovernedTableNecessity;
-  belongsToChapter?: boolean;
-  scopeExplanation?: string;
-  triggerFacts?: string[];
-  triggerGraphNodes?: string[];
-  fillability?: {
-    requiredFieldCount: number;
-    confirmedFieldCount: number;
-    missingProjectFactFields: string[];
-    canGenerate: boolean;
-    fallbackPolicy: GovernedTableFallbackPolicy;
-  };
-  outputDecision?: {
-    shouldOutput: boolean;
-    outputType: GovernedTableOutputType;
-    decisionReason: string;
-  };
-  narrativeRequirements?: {
-    beforeTable: string[];
-    afterTable: string[];
-    controlLoop?: string[];
-  };
-  rowSeeds?: Array<{
-    rowLabel: string;
-    source: 'canonicalFact' | 'projectGraph' | 'boq' | 'standard';
-    confirmedFields: string[];
-    missingFields: string[];
-    sourceRef?: string;
-  }>;
+  fields: PlannedTableField[];
 }
 
 export interface ChapterReadinessPlan {
@@ -139,8 +97,7 @@ export interface ChapterReadinessPlan {
   riskLevel: 'low' | 'medium' | 'high';
   missingFacts: string[];
   missingEvidence: string[];
-  tableFieldGaps: string[];
-  suggestedStrategy: 'normal' | 'section_first' | 'evidence_first' | 'generate_with_review_notes';
+  suggestedStrategy: 'normal' | 'section_first' | 'evidence_first';
   reason: string;
 }
 
@@ -153,7 +110,7 @@ export interface DocumentTemplateChapter {
   sections?: string[];
   tableSections?: string[];
   tableRequirements?: string[];
-  tablePlans?: ProjectGraphTablePlan[];
+  tablePlans?: PlannedTablePlan[];
   pinnedEvidenceFilePaths?: string[];
 }
 
@@ -256,7 +213,7 @@ export interface DocumentDraftChapter {
   evidence: DocumentEvidence[];
   missingFacts: string[];
   sections?: string[];
-  tablePlans?: ProjectGraphTablePlan[];
+  tablePlans?: PlannedTablePlan[];
   /** 章节生成是否超时 */
   timedOut?: boolean;
   /** 章节生成实际耗时（毫秒） */

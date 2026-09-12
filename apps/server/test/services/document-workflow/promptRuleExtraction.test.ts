@@ -1,30 +1,43 @@
 /**
  * LLM 小节规划单测（Step 3：LLM 规划常态化）：
- * - planAdditionalSectionsWithLlm（additions-only 补规划）：basis 支撑自检、结构守恒去重、≤3 上限、空响应/失败回退；
  * - planChapterSectionsWithLlm：项目专业图谱摘要显式注入断言。
+ * - 多样性治理接入：directive/avoidSections 注入、指纹撞名核验-反馈重规划、二次核验不阻断。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { planAdditionalSectionsWithLlm, planChapterSectionsWithLlm } from '@/services/document-workflow/promptRuleExtraction';
+import { planChapterSectionsWithLlm } from '@/services/document-workflow/promptRuleExtraction';
+import { DIVERSITY_PLANNING_TEMPERATURE } from '@/services/document-workflow/diversityProfile';
 import type { DocumentEvidence, DocumentTemplate, DocumentTemplateChapter } from '@/services/document-workflow/types';
 
 const llmState = vi.hoisted(() => {
   let result: unknown;
   let error: unknown;
+  const results: unknown[] = [];
   const calls: string[] = [];
+  const systems: string[] = [];
+  const options: unknown[] = [];
+  const clear = () => { calls.length = 0; systems.length = 0; options.length = 0; results.length = 0; result = undefined; error = undefined; };
   return {
     setResult: (value: unknown) => { result = value; error = undefined; },
     setError: (value: unknown) => { error = value; result = undefined; },
+    /** 多轮调用结果序列：按调用顺序消耗（核验-反馈重规划场景） */
+    pushResult: (value: unknown) => { results.push(value); },
     calls,
-    clear: () => { calls.length = 0; result = undefined; error = undefined; },
+    systems,
+    options,
+    clear,
     get result() { return result; },
     get error() { return error; },
+    get results() { return results; },
   };
 });
 
 vi.mock('@/services/document-workflow/llmClient', () => ({
-  callDocumentLlmJson: async (_system: string, userPrompt: string, _options: unknown) => {
+  callDocumentLlmJson: async (system: string, userPrompt: string, options: unknown) => {
     llmState.calls.push(String(userPrompt));
+    llmState.systems.push(String(system));
+    llmState.options.push(options);
     if (llmState.error) throw llmState.error;
+    if (llmState.results.length > 0) return llmState.results.shift();
     return llmState.result;
   },
 }));
@@ -35,71 +48,7 @@ function chapter(overrides: Partial<DocumentTemplateChapter> = {}): DocumentTemp
   return { id: 'c1', title: '主要分部分项工程施工方案', purpose: '', queries: [], requiredFacts: [], sections: ['总体施工部署'], ...overrides };
 }
 
-function additionsInput(overrides: Partial<Parameters<typeof planAdditionalSectionsWithLlm>[0]> = {}): Parameters<typeof planAdditionalSectionsWithLlm>[0] {
-  return {
-    template,
-    chapter: chapter(),
-    evidence: [] as DocumentEvidence[],
-    promptTexts: '',
-    projectContext: '项目上下文',
-    roleContext: '写作目标',
-    maxTotalSections: 12,
-    ...overrides,
-  };
-}
-
 afterEach(() => { llmState.clear(); });
-
-describe('planAdditionalSectionsWithLlm（additions-only 补规划）', () => {
-  it('返回带支撑依据的新增专业小节', async () => {
-    llmState.setResult({ sections: [{ title: '基坑支护施工', basis: '来自绑定资料基坑支护专项方案' }] });
-    const additions = await planAdditionalSectionsWithLlm(additionsInput());
-    expect(additions).toEqual(['基坑支护施工']);
-  });
-
-  it('basis 为空/过短的小节被丢弃（无素材来源即空壳）', async () => {
-    llmState.setResult({ sections: [{ title: '基坑支护施工', basis: '   ' }, { title: '防水工程施工', basis: '来自通用施工工艺做法' }] });
-    const additions = await planAdditionalSectionsWithLlm(additionsInput());
-    expect(additions).toEqual(['防水工程施工']);
-  });
-
-  it('与已有小节语义包含关系的小节被丢弃（结构守恒去重）', async () => {
-    llmState.setResult({ sections: [{ title: '总体施工部署', basis: '来自绑定资料总体部署说明' }, { title: '基坑支护施工', basis: '来自绑定资料基坑支护专项方案' }] });
-    const additions = await planAdditionalSectionsWithLlm(additionsInput({ chapter: chapter({ sections: ['总体施工部署'] }) }));
-    expect(additions).toEqual(['基坑支护施工']);
-  });
-
-  it('最多返回 3 个新增小节', async () => {
-    llmState.setResult({
-      sections: [
-        { title: '基坑支护施工', basis: '来自绑定资料基坑支护专项方案' },
-        { title: '主体结构施工', basis: '来自通用施工工艺' },
-        { title: '防水工程施工', basis: '来自通用施工工艺' },
-        { title: '装饰装修施工', basis: '来自通用施工工艺' },
-      ],
-    });
-    const additions = await planAdditionalSectionsWithLlm(additionsInput());
-    expect(additions).toHaveLength(3);
-  });
-
-  it('已有小节数已达上限时不调用 LLM 直接返回空', async () => {
-    const additions = await planAdditionalSectionsWithLlm(additionsInput({ chapter: chapter({ sections: Array.from({ length: 12 }, (_, index) => `小节${index + 1}`) }), maxTotalSections: 12 }));
-    expect(additions).toEqual([]);
-    expect(llmState.calls).toHaveLength(0);
-  });
-
-  it('LLM 调用失败回退空数组（保留模板锁定结构）', async () => {
-    llmState.setError(new Error('llm boom'));
-    const additions = await planAdditionalSectionsWithLlm(additionsInput());
-    expect(additions).toEqual([]);
-  });
-
-  it('LLM 空响应回退空数组', async () => {
-    llmState.setResult({ sections: [] });
-    const additions = await planAdditionalSectionsWithLlm(additionsInput());
-    expect(additions).toEqual([]);
-  });
-});
 
 describe('planChapterSectionsWithLlm 图谱显式注入', () => {
   it('项目专业图谱摘要注入规划提示词', async () => {
@@ -117,5 +66,73 @@ describe('planChapterSectionsWithLlm 图谱显式注入', () => {
     const userText = llmState.calls[0];
     expect(userText).toContain('本项目专业工程与资源图谱');
     expect(userText).toContain('专业工程：基坑支护、地下室结构');
+  });
+});
+
+/** 基础输入：非首章、无锁定小节（多样性核验场景） */
+function baseInput(overrides: Partial<Parameters<typeof planChapterSectionsWithLlm>[0]> = {}): Parameters<typeof planChapterSectionsWithLlm>[0] {
+  return {
+    template,
+    chapter: chapter({ sections: [] }),
+    evidence: [] as DocumentEvidence[],
+    promptTexts: '',
+    projectContext: '',
+    roleContext: '',
+    targetWords: 3000,
+    ...overrides,
+  };
+}
+
+describe('planChapterSectionsWithLlm 多样性治理接入', () => {
+  it('directive/avoidSections 注入提示词，规划温度使用多样性规划常量', async () => {
+    llmState.setResult({ sections: ['劳动力班组梯队配置'] });
+    await planChapterSectionsWithLlm(baseInput({
+      diversity: { directive: '本章按“总承包管理视角”组织小节。', avoidSections: ['施工劳动力动态调配', '材料进场计划'] },
+    }));
+    expect(llmState.systems[0]).toContain('总承包管理视角');
+    expect(llmState.calls[0]).toContain('施工劳动力动态调配');
+    expect(llmState.calls[0]).toContain('材料进场计划');
+    expect((llmState.options[0] as { temperature?: number }).temperature).toBe(DIVERSITY_PLANNING_TEMPERATURE);
+  });
+
+  it('指纹撞名触发一轮核验反馈重规划，重命名后清零', async () => {
+    llmState.pushResult({ sections: ['施工劳动力动态调配'] });
+    llmState.pushResult({ sections: ['劳动力班组梯队配置'] });
+    const result = await planChapterSectionsWithLlm(baseInput({
+      diversity: {
+        directive: '本章按“总承包管理视角”组织小节。',
+        overlapCheck: titles => titles.includes('施工劳动力动态调配') ? ['「施工劳动力动态调配」↔历史「劳动力动态调配」'] : [],
+      },
+    }));
+    expect(llmState.calls.length).toBe(2);
+    expect(llmState.calls[1]).toContain('上一轮规划存在以下必须修正的问题');
+    expect(llmState.calls[1]).toContain('施工劳动力动态调配');
+    expect(result.sections).toContain('劳动力班组梯队配置');
+    expect(result.diversity).toEqual({ retried: true, remainingCollisions: 0 });
+  });
+
+  it('二次核验仍撞名时接受结果不阻断（remainingCollisions 上报）', async () => {
+    llmState.pushResult({ sections: ['施工劳动力动态调配'] });
+    llmState.pushResult({ sections: ['施工劳动力动态调配'] });
+    const result = await planChapterSectionsWithLlm(baseInput({
+      diversity: { directive: '本章按“总承包管理视角”组织小节。', overlapCheck: () => ['「施工劳动力动态调配」↔历史「劳动力动态调配」'] },
+    }));
+    expect(llmState.calls.length).toBe(2);
+    expect(result.sections).toContain('施工劳动力动态调配');
+    expect(result.diversity).toEqual({ retried: true, remainingCollisions: 1 });
+  });
+
+  it('首章概况小节“存在但未置首”触发重规划；完全未规划则不触发', async () => {
+    llmState.pushResult({ sections: ['施工总体部署', '工程概况与编制说明'] });
+    llmState.pushResult({ sections: ['工程概况与编制说明', '施工总体部署'] });
+    const first = await planChapterSectionsWithLlm(baseInput({ chapter: chapter({ title: '编制说明', sections: [] }), chapterIndex: 0 }));
+    expect(llmState.calls.length).toBe(2);
+    expect(llmState.calls[1]).toContain('必须置于小节清单第一位');
+    expect(first.sections[0]).toBe('工程概况与编制说明');
+
+    llmState.clear();
+    llmState.pushResult({ sections: ['施工总体部署', '资源配置计划'] });
+    await planChapterSectionsWithLlm(baseInput({ chapter: chapter({ title: '编制说明', sections: [] }), chapterIndex: 0 }));
+    expect(llmState.calls.length).toBe(1);
   });
 });

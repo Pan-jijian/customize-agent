@@ -97,10 +97,52 @@ export interface BoqChunkRow {
   sectionTitle: string;
 }
 
+/** 表格列位（表头驱动动态识别）：清单表格存在多种列序——丰乐镇 9 列带空列（项目名称在第 4 列）、
+ * 舒城 6 列紧凑形态（项目名称在第 3 列）；固定列位假设使舒城整表字段错位（特征当名称、单位当特征、
+ * 工程量数字当单位、数量列落空），须按表头行解析列索引后逐行取值 */
+interface BoqTableLayout {
+  seq: number;
+  code: number;
+  name: number;
+  description: number;
+  unit: number;
+  quantity: number;
+}
+
+/** 默认列位（丰乐镇形态）：无表头行的续页 chunk 沿用最近一次识别结果 */
+const DEFAULT_BOQ_TABLE_LAYOUT: BoqTableLayout = { seq: 1, code: 2, name: 4, description: 5, unit: 6, quantity: 8 };
+
+/** 表头行判定：含「序号」+「项目编码」两列名 */
+function isBoqHeaderRow(cells: string[]): boolean {
+  const normalized = cells.map(cell => cell.replace(/\s+/gu, ''));
+  return normalized.includes('序号') && normalized.includes('项目编码');
+}
+
+/** 表头行 → 列位（缺任一必需列名返回 undefined，保持上一布局） */
+function resolveBoqTableLayout(cells: string[]): BoqTableLayout | undefined {
+  const normalized = cells.map(cell => cell.replace(/\s+/gu, ''));
+  const indexOf = (names: string[]) => normalized.findIndex(cell => names.includes(cell));
+  const seq = indexOf(['序号']);
+  const code = indexOf(['项目编码']);
+  const name = indexOf(['项目名称']);
+  const unit = indexOf(['计量单位', '单位']);
+  const quantity = indexOf(['工程量']);
+  if (seq < 0 || code < 0 || name < 0 || unit < 0 || quantity < 0) return undefined;
+  return { seq, code, name, description: indexOf(['项目特征描述']), unit, quantity };
+}
+
+/** 分部/分节行编码形态：中文数字 / 数字（可带 x.y 子级）——12 位项目编码除外 */
+function isSectionCode(value: string): boolean {
+  return /^[一二三四五六七八九十\d]+(?:\.\d+)?$/u.test(value.trim()) && !CODE_PATTERN.test(value.trim());
+}
+
 const CODE_PATTERN = /^(?:\d{12}|(?:ZB|WB)\d{12})$/u;
-const SHEET_ID_PATTERN = /工作表：(\d+\.\d+)/u;
+// 工作表编号：x.y（丰乐镇）与纯数字（舒城多单位工程清单分册）两种形态
+const SHEET_ID_PATTERN = /工作表：(\d+(?:\.\d+)?)/u;
 const TOTAL_PAGES_PATTERN = /第1页\s*共(\d+)页/u;
 const VILLAGE_PATTERN = /工程名称：(.+?)\s*标段/u;
+// 工程名称行尾形态（无「标段」后缀）：舒城清单每文件表头「工程名称：{单位工程名}」
+const VILLAGE_NAME_PATTERN = /工程名称：([^\n|｜]{2,40}?)\s*$/mu;
 const PAGE_PATTERN = /第(\d+)页\s*共\d+页/gu;
 
 /** 读取 kb.db 中指定文件的全部 chunks（按 chunk_index 排序）；文件不存在返回空数组 */
@@ -160,7 +202,7 @@ export function parseBillOfQuantities(input: { chunks: BoqChunkRow[]; sourceFile
     if (!sheetMatch) return;
     const sheetId = sheetMatch[1];
     const existing = sheetMeta.get(sheetId);
-    const villageMatch = VILLAGE_PATTERN.exec(text);
+    const villageMatch = VILLAGE_PATTERN.exec(text) || VILLAGE_NAME_PATTERN.exec(text);
     const totalMatch = TOTAL_PAGES_PATTERN.exec(text);
     if (existing) {
       if (!existing.villageGroup && villageMatch) existing.villageGroup = villageMatch[1].trim();
@@ -191,6 +233,8 @@ export function parseBillOfQuantities(input: { chunks: BoqChunkRow[]; sourceFile
   // 行降级为 subsection；主循环按同一行序对齐分类结果
   const sectionRowKinds = classifySectionRows(collectSectionRowCodes(markdownChunks));
   let sectionRowIndex = -1;
+  // 当前表格列位（表头行刷新）：清单表格列序随来源变化，固定列位假设会造成整表字段错位
+  let tableLayout = DEFAULT_BOQ_TABLE_LAYOUT;
   // 工作表编号继承：无编号的续页 chunk 归属上一 chunk 的工作表（同 sheet 的 chunk 按序相邻）
   let lastSheetId = '';
   for (const chunk of markdownChunks) {
@@ -226,20 +270,26 @@ export function parseBillOfQuantities(input: { chunks: BoqChunkRow[]; sourceFile
       if (buffer.endsWith('|')) {
         const cells = buffer.split('|').map(cell => cell.trim());
         buffer = '';
-        const first = cells[1] ?? '';
+        // 表头行刷新列位：清单表格列序随来源变化（丰乐镇 9 列/舒城 6 列），逐表头重新识别
+        if (isBoqHeaderRow(cells)) {
+          tableLayout = resolveBoqTableLayout(cells) ?? tableLayout;
+        }
+        const seqCell = cells[tableLayout.seq] ?? '';
+        const codeCell = cells[tableLayout.code] ?? '';
+        const nameCell = cells[tableLayout.name] ?? '';
         // footer 页码行（第N页 共M页）先更新 page，后续条目行归属新页
         const rowPage = page;
         const pageInRow = rowPageMatch(cells);
         if (pageInRow) page = pageInRow;
-        if (/^\d+$/u.test(first) && CODE_PATTERN.test(cells[2] ?? '')) {
+        if (/^\d+$/u.test(seqCell) && CODE_PATTERN.test(codeCell)) {
           // 条目行：序号 + 合法项目编码
-          const quantity = Number((cells[8] ?? '').trim());
+          const quantity = Number((cells[tableLayout.quantity] ?? '').trim());
           const entry: BoqEntry = {
-            seq: Number(first),
-            code: cells[2] ?? '',
-            name: cells[4] ?? '',
-            description: cells[5] ?? '',
-            unit: cells[6] ?? '',
+            seq: Number(seqCell),
+            code: codeCell,
+            name: nameCell,
+            description: tableLayout.description >= 0 ? (cells[tableLayout.description] ?? '') : '',
+            unit: cells[tableLayout.unit] ?? '',
             quantity: Number.isFinite(quantity) ? quantity : 0,
             section,
             subsection,
@@ -251,22 +301,22 @@ export function parseBillOfQuantities(input: { chunks: BoqChunkRow[]; sourceFile
             sourceKind: 'markdown',
           };
           if (entry.seq > 0) markdownEntries.push(entry);
-        } else if (/^[一二三四五六七八九十\d]+(?:\.\d+)?$/u.test(cells[2] ?? '') && !(cells[1] ?? '') && (cells[4] ?? '') && cells[4] !== '分部小计') {
+        } else if (!seqCell && isSectionCode(codeCell) && nameCell && nameCell !== '分部小计') {
           // 分部/分节标题行（序号列空、编码列「一/二/…/6/1.1」）：按预扫描层级判定分类赋值，
           // 后续条目归属该分部分节
           sectionRowIndex += 1;
-          const kind = sectionRowKinds[sectionRowIndex] ?? ((cells[2] ?? '').includes('.') ? 'subsection' : 'section');
+          const kind = sectionRowKinds[sectionRowIndex] ?? (codeCell.includes('.') ? 'subsection' : 'section');
           if (kind === 'unit-project') {
             // 单位工程（如「2.3 公厕」）：作为独立顶层分部，其内部子分部降级为分节
-            section = cells[4];
+            section = nameCell;
             subsection = '';
             sectionKind = 'unit-project';
           } else if (kind === 'section') {
-            section = cells[4];
+            section = nameCell;
             subsection = '';
             sectionKind = 'plain';
           } else {
-            subsection = cells[4];
+            subsection = nameCell;
           }
         }
       }
@@ -301,6 +351,16 @@ export function parseBillOfQuantities(input: { chunks: BoqChunkRow[]; sourceFile
 
   // 5. 分部/分节归属回填（按序号落在最近的分部/分节标题行之后）
   assignSections(entries, markdownEntries);
+
+  // 5.1 单位工程归属兜底：整文件无分部分节结构（表格无结构行）时，表头「工程名称：X」即单位工程名，
+  // 作为全部条目 section（清单文件 = 单位工程清单的常态；缺此归属时条目在蓝图侧落入内部占位桶）
+  const fileVillageGroup = [...sheetMeta.values()].map(meta => meta.villageGroup).find(Boolean);
+  if (fileVillageGroup && entries.every(entry => !entry.section)) {
+    for (const entry of entries) {
+      entry.section = fileVillageGroup;
+      entry.sectionKind = 'unit-project';
+    }
+  }
 
   // 6. 完整性校验（每村）
   const villages: BoqVillageReport[] = [];
@@ -470,6 +530,7 @@ function assignSections(entries: BoqEntry[], markdownEntries: BoqEntry[]): void 
 function collectSectionRowCodes(markdownChunks: BoqChunkRow[]): string[] {
   const codes: string[] = [];
   let carryover = '';
+  let tableLayout = DEFAULT_BOQ_TABLE_LAYOUT;
   for (const chunk of markdownChunks) {
     const lines = chunk.content.split('\n');
     let buffer = carryover;
@@ -486,8 +547,13 @@ function collectSectionRowCodes(markdownChunks: BoqChunkRow[]): string[] {
       if (!buffer.endsWith('|')) continue;
       const cells = buffer.split('|').map(cell => cell.trim());
       buffer = '';
-      if (/^[一二三四五六七八九十\d]+(?:\.\d+)?$/u.test(cells[2] ?? '') && !(cells[1] ?? '') && (cells[4] ?? '') && cells[4] !== '分部小计') {
-        codes.push(cells[2] ?? '');
+      // 与主循环同源的表头列位识别：结构行判定同样按动态列位
+      if (isBoqHeaderRow(cells)) {
+        tableLayout = resolveBoqTableLayout(cells) ?? tableLayout;
+        continue;
+      }
+      if (!(cells[tableLayout.seq] ?? '') && isSectionCode(cells[tableLayout.code] ?? '') && (cells[tableLayout.name] ?? '') && cells[tableLayout.name] !== '分部小计') {
+        codes.push(cells[tableLayout.code] ?? '');
       }
     }
     if (buffer.trim()) carryover = buffer;
@@ -534,6 +600,63 @@ function findSheetMetaByVillage(sheetMeta: Map<string, { villageGroup: string; t
     if (meta.villageGroup === villageGroup) return { sheetId, ...meta };
   }
   return undefined;
+}
+
+/** 清单文件 → 单位工程名（招标实务：一标段多单位工程，每文件一个单位工程，文件名即单位工程名） */
+export function unitProjectNameFromFile(filePath: string): string {
+  const baseName = (filePath.split('/').pop() || filePath).replace(/\.xls$/iu, '');
+  return baseName.replace(/[\s\u00a0]+/gu, '') || '单位工程';
+}
+
+/** 多清单文件合并（阶段 0）：一个标段的多个单位工程清单文件全部并入一份解析结果——
+ * 文件即单位工程：条目 section 归一为单位工程名，文件内识别到的分节降级为 subsection（保留工作包粒度）；
+ * villageGroup 同步归一（条目键 `${villageGroup}|${seq}` 跨文件唯一化，各文件 seq 独立从 1 起）；
+ * 文件按父目录编号前缀排序（清单分册阅读顺序），无编号保持绑定顺序。
+ * 历史缺陷：旧实现取首个解析成功文件返回，一标段 13 份单位工程清单只用了 1 份（数据范围 4.9%） */
+export function mergeBillOfQuantitiesResults(parts: Array<{ filePath: string; boq: BillOfQuantitiesResult }>): BillOfQuantitiesResult {
+  const orderKey = (filePath: string) => {
+    const parent = filePath.split('/').slice(-2)[0] || '';
+    const match = /^(\d+)/u.exec(parent);
+    return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+  };
+  const ordered = [...parts].sort((left, right) => orderKey(left.filePath) - orderKey(right.filePath));
+  const entries: BoqEntry[] = [];
+  const villages: BoqVillageReport[] = [];
+  const diagnostics = { totalChunks: 0, markdownChunks: 0, declarationChunks: 0, skippedChunks: 0, droppedIncompleteRows: 0 };
+  const unitNames = new Set<string>();
+  for (const part of ordered) {
+    let unitName = unitProjectNameFromFile(part.filePath);
+    if (unitNames.has(unitName)) {
+      let suffix = 2;
+      while (unitNames.has(`${unitName}（${suffix}）`)) suffix += 1;
+      unitName = `${unitName}（${suffix}）`;
+    }
+    unitNames.add(unitName);
+    for (const entry of part.boq.entries) {
+      // 单位工程内分节降级保留（梅河东路/高清监控系统），作为单位工程小节的工作包粒度
+      entry.subsection = entry.subsection || entry.section;
+      entry.section = unitName;
+      entry.sectionKind = 'unit-project';
+      entry.villageGroup = unitName;
+      entries.push(entry);
+    }
+    for (const [index, village] of part.boq.villages.entries()) {
+      villages.push({ ...village, villageGroup: part.boq.villages.length === 1 ? unitName : `${unitName}·${village.villageGroup || `工作表${index + 1}`}` });
+    }
+    diagnostics.totalChunks += part.boq.diagnostics.totalChunks;
+    diagnostics.markdownChunks += part.boq.diagnostics.markdownChunks;
+    diagnostics.declarationChunks += part.boq.diagnostics.declarationChunks;
+    diagnostics.skippedChunks += part.boq.diagnostics.skippedChunks;
+    diagnostics.droppedIncompleteRows += part.boq.diagnostics.droppedIncompleteRows;
+  }
+  return {
+    entries,
+    villages,
+    totalEntries: entries.length,
+    sourceFile: ordered.map(part => part.filePath).join('；'),
+    complete: villages.length > 0 && villages.every(village => village.complete),
+    diagnostics,
+  };
 }
 
 /** 收集某村庄 markdown chunks 覆盖的页码集合（表头第 1 页 ∪ footer 页码 ∪ footer 页码-1） */

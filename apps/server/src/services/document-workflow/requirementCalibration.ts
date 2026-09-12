@@ -1,9 +1,10 @@
 import type { DocumentTemplateChapter } from './types';
 import { callDocumentLlmJson } from './llmClient';
-import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
-import { cleanSectionTitleArtifacts, isInvalidPlannedSectionTitle, normalizePlannedSectionTitle, sectionTitleEquivalent } from './promptRuleExtraction';
+import { displayChapterTitle, isTenderClauseFragmentTitle, normalizePlannedSectionTitle } from './outline';
+import { cleanSectionTitleArtifacts, isInvalidPlannedSectionTitle, sectionTitleEquivalent } from './promptRuleExtraction';
 import { isBidderQualificationText, isHardBannedSectionTitle } from './evidenceContentSafety';
 import { docSystemPrefix } from './markdownComposer';
+import { DIVERSITY_PLANNING_TEMPERATURE } from './diversityProfile';
 
 /**
  * C2 大纲要求校准：评分项要求在结构层显性承接（创优目标与奖惩/绿色等级/智慧工地/装配率等必提要求，
@@ -51,6 +52,8 @@ export async function calibrateOutlineSectionsToRequirements(input: {
   chapters: DocumentTemplateChapter[];
   requirementSummary: string[];
   templateName: string;
+  /** 同文档多样性画像指令（新增小节命名与全文档风格一致；评分响应刚性优先，不做撞名重规划） */
+  diversityDirective?: string;
   signal?: AbortSignal;
 }): Promise<RequirementSectionAddition[]> {
   if (input.requirementSummary.length === 0 || input.chapters.length === 0) return [];
@@ -63,10 +66,11 @@ export async function calibrateOutlineSectionsToRequirements(input: {
       `文档模板：${input.templateName}`,
       `招标评分项要求摘要（必须逐条在结构层显性承接）：\n${input.requirementSummary.map(item => `- ${item}`).join('\n')}`,
       `各章当前小节列表：\n${chapterLines}`,
+      input.diversityDirective ? `${input.diversityDirective}\n新增小节标题命名需遵循上述差异化设定（与本章已有小节命名风格一致）。` : '',
       '请输出需要新增的小节；没有需要新增的章节不要出现在 additions 中，整体无新增则输出空数组。',
       'JSON 格式：{"additions":[{"chapterTitle":"章标题（必须与上方章节名一致）","sections":["新增小节标题"]}]}',
-    ].join('\n\n'),
-    { maxTokens: 2000, temperature: 0, signal: input.signal },
+    ].filter(Boolean).join('\n\n'),
+    { maxTokens: 2000, temperature: DIVERSITY_PLANNING_TEMPERATURE, signal: input.signal },
   );
   // 纯代码校验（防幻觉）：章名必须匹配现有章节；标题清洗归一（与规划同口径）；重复剔除；数量上限
   const validated: RequirementSectionAddition[] = [];

@@ -82,7 +82,7 @@ describe('SNAPSHOT_DETECTOR_IDS 集合锁定（P9）', () => {
 
 describe('打标点断言（P9）', () => {
   it('overviewRecapIssues 携带 provenance（detectorId + 全文 stableHash 指纹）', () => {
-    const issues = overviewRecapIssues(RECAP_MD, { semanticSimilarity: () => 0.9 });
+    const issues = overviewRecapIssues(RECAP_MD);
     expect(issues).toHaveLength(1);
     expect(issues[0].provenance).toEqual({ detectorId: 'overview-recap', fingerprint: stableHash(RECAP_MD) });
   });

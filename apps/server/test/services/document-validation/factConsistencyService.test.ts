@@ -189,6 +189,40 @@ describe('comparableValue 过滤链', () => {
   });
 });
 
+describe('V5 P6 增强（run1 实测）', () => {
+  it('破折号族归一（-- 与 —— 同值）不报', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '舒城县城镇功能活力品质提升一期项目（一标）--公共广场空间改造等提升工程' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '舒城县城镇功能活力品质提升一期项目（一标）——公共广场空间改造等提升工程' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('截断等价折叠（一头一尾截断）不报', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '舒城县城镇功能活力品质提升一期项目（一标）——公共广场空间改造等' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '舒城县城镇功能活力品质提升一期项目（一标）——公共广场空间改造等提升工程' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('机构字段句子垃圾值不参与冲突（招标人）', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '招标人', value: '舒城县住房和城乡建设局' }),
+      makeFact({ key: 'b', fieldName: '招标人', value: '承包人：为了进一步贯彻安全生产方针，做好本项目安全管理和文明施工' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('项目名称字段位置提示语垃圾值不参与冲突', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '项目所在地' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '舒城县城镇功能活力品质提升一期项目（一标）——公共广场空间改造等提升工程' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+});
+
 describe('对象名称覆盖检测', () => {
   const summaryWithName = (name: string) => makeSummary({ facts: { projectName: name } });
 

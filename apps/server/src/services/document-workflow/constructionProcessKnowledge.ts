@@ -1,4 +1,4 @@
-import type { ConstructionOrgProjectType } from './constructionOrgCatalog';
+import type { ConstructionOrgProjectType } from './constructionOrgProjectTypes';
 
 /**
  * L2 知识引擎：施工工艺标准知识库。
@@ -341,7 +341,7 @@ export function buildProcessKnowledgePrompt(cards: ProcessKnowledgeCard[], packa
     const isDirect = packageNames.some(name => card.aliases.includes(name) || name === card.name);
     return [
       `${isDirect ? '【直接匹配】' : '【项目类型通用】'}${card.name}：`,
-      `- 工序链：${card.process.join('→')}`,
+      `- 工序序列（参考顺序）：${card.process.join('、')}`,
       `- 工艺参数（参考）：${card.params.join('；')}`,
       `- 检测验收：${card.acceptance.join('；')}`,
       `- 规范依据：${card.standards.join('；')}`,
@@ -349,8 +349,8 @@ export function buildProcessKnowledgePrompt(cards: ProcessKnowledgeCard[], packa
   });
   return [
     '【施工工艺知识卡】',
-    '以下为本领域常见工作包的工艺参考。写作"施工概况/施工流程/施工方法"时：',
-    '1) 工序链必须与本项目资料确认的对象匹配，可裁剪但不得照搬无关工序；',
+    '以下为本领域常见工作包的工艺参考。写作专业工程/分项方案（作业对象与工程量、工序顺序、施工方法三要素融入连贯叙述）时：',
+    '1) 工序序列必须与本项目资料确认的对象匹配，可裁剪但不得照搬无关工序；表达形式按本节指定的轮换形式自行组织，不得照抄参考序列的罗列形态；',
     '2) 工艺参数仅作为专业表达参考，只有在绑定资料明确时才写入具体数值，否则写控制方向（如"按规范控制桩位偏差"）而非编造数字；',
     '3) 检测验收必须落到记录名称（如"闭水试验记录、隐蔽验收记录、静载试验报告"）。',
     ...cardLines,

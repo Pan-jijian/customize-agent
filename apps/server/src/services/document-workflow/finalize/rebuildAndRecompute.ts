@@ -18,6 +18,7 @@ import { documentBudgetIssues, documentTextLength, pageTargetIssues } from '../b
 import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, headingUncoveredEngineeringItems } from '../qualityValidation';
 import { fixTocFromBody } from '../documentIntegrityChecks';
 import { internalTerminologyAnchorIssues } from '../internalTerminologyAnchors';
+import { auditAuthorityCoverage, authorityAuditDetails, authorityAuditSummary } from '../authorityAudit';
 import { buildStandardFinalValidationIssues } from '../documentFinalValidation';
 import { buildKnowledgeCoverageReport, knowledgeCoverageIssues } from '../documentKnowledgeCoverage';
 import { buildDocumentFactTraces, factTraceIssues } from '../documentFactTrace';
@@ -28,12 +29,12 @@ import { stripSnapshotIssues } from '../issueProvenance';
 import { collectValidationIssueGroups } from '../documentQualityPipeline';
 import { retrievalCoverageIssues } from '../documentEvidenceRetrieval';
 import { buildCanonicalFacts } from '../factGovernance';
-import { extractSection, stableHash } from '../utils';
+import { BOOK_TITLE_CITATION_RE, extractSection, stableHash } from '../utils';
 import { formalTextGateIssues } from '../agentWorkflow';
 import { displayStage, upsertProgressStage } from '../progress';
 import { buildValidationIssues } from '../chapterGeneration';
 import { chapterSectionFactUsageIssues } from '../chapterReview';
-import { factCoverageIssues, finalizeChapterContentQuality, finalizeFinalMarkdownStructure, normalizeProjectBasicInfoTable, partialChapterStatus, criticalSectionBlockerLine, projectBasicPlaceholderIssues, validateDraft } from '../documentGeneratorHelpers';
+import { factCoverageIssues, finalizeChapterContentQuality, finalizeFinalMarkdownStructure, normalizeProjectBasicInfoTable, partialChapterStatus, criticalSectionBlockerLine, projectBasicPlaceholderIssues, validateDraft, vectorStatusLabel } from '../documentGeneratorHelpers';
 import { constructionOrgProfessionalAuditIssues } from '../constructionOrgAudit';
 import { referenceBenchmarkForType } from '../templateReferenceService';
 import { suggestProjectType } from '../referenceQualityProfile';
@@ -75,9 +76,22 @@ const REQUIRED_BASIS_CATEGORIES_ITEMS = [
  * 两个词形无法命中「地方法规规章」精确词形，不满足类别清单口径） */
 const BASIS_CATEGORY_TERMS = ['招标文件及补疑补遗', '国家法律法规', '现行规范标准', '地方法规规章', '企业管理体系'];
 
+/** 工伤保险政策合规句：正文有劳资管理内容却未提工伤保险时确定性补写（舒城第二轮实测全篇 0 处
+ * 保险表述；P3.3 补挂依赖评分项摘要提及保险，未触发）。按投标响应口径写明参保义务/费用承担/凭证留存 */
+const WORK_INJURY_STATEMENT = '本项目按规定为全体作业人员办理工伤保险，保险费用由企业承担并计入投标报价，进场前完成参保手续并留存缴费凭证，务工人员工伤保险权益依法受到保障。';
+
+/** 工伤保险兜底触发条件：原始输入存在劳务/农民工/工资词形（书名号引用不计）且无保险表述 */
+const WORK_INJURY_LABOR_RE = /(?:劳务|农民工|工资)/u;
+const WORK_INJURY_COVERED_RE = /(?:工伤保险|意外伤害保险|社会保险)/u;
+
+/** 工伤保险语句锚点：优先劳资/工资类小节标题（如「5.3.1 劳动力工资支付与稳定措施」），
+ * 退章级「劳动力」标题，均无则文末追加 */
+const WORK_INJURY_SECTION_ANCHOR_RE = /^(#{2,6}\s+[^\n]*(?:劳务|农民工|用工|工资)[^\n]*\n)/mu;
+const WORK_INJURY_CHAPTER_ANCHOR_RE = /^(#{2,6}\s+[^\n]*劳动力[^\n]*\n)/mu;
+
 /** 模板专业规则必要术语（编制依据/主要施工材料等施组标准术语）缺失时确定性补写：
  * Writer 只收到“质量控制点”弱建议，常遗漏这些术语；逐句补写保证术语出现在正文，不依赖 LLM 自觉 */
-export function supplementRequiredTexts(markdown: string, template: DocumentTemplate): string {
+function supplementTemplateAndBasisTexts(markdown: string, template: DocumentTemplate): string {
   const missingRequiredTexts = autoSpecGateRequiredTexts(template).filter(item => !markdown.includes(item));
   // 编制依据类别段落注入与术语缺失解耦（丰乐镇第十二轮实测）：LLM 写「编制依据」标题或只写
   // 「包括国家法律法规、地方法规及现行规范」一句笼统话时，missingRequiredTexts 已为空 → 原逻辑
@@ -111,6 +125,23 @@ export function supplementRequiredTexts(markdown: string, template: DocumentTemp
     return `${markdown.slice(0, insertAt)}${supplement}\n\n${markdown.slice(insertAt)}`;
   }
   return `${markdown.replace(/\s+$/u, '')}\n\n${supplement}`;
+}
+
+/** 政策合规表述兜底（工伤保险）：正文存在劳资管理内容（劳务/农民工/工资词形，书名号法规引用
+ * 不计）却未提工伤保险时，确定性补写合规句到劳资/工资小节标题下（退「劳动力」章标题，再退文末）。
+ * 条件判定只用于原始输入——术语补写块会引用《保障农民工工资支付条例》，在补写后文本上判定会把
+ * 法规引用误当劳资内容而误注入（回归 dicPipelineBasisBoundary 文末收束断言）；注入目标为补写后输出。 */
+export function supplementRequiredTexts(markdown: string, template: DocumentTemplate): string {
+  const supplemented = supplementTemplateAndBasisTexts(markdown, template);
+  const plainInput = markdown.replace(BOOK_TITLE_CITATION_RE, '');
+  if (!WORK_INJURY_LABOR_RE.test(plainInput) || WORK_INJURY_COVERED_RE.test(plainInput)) return supplemented;
+  const anchor = WORK_INJURY_SECTION_ANCHOR_RE.exec(supplemented) ?? WORK_INJURY_CHAPTER_ANCHOR_RE.exec(supplemented);
+  if (anchor) {
+    // 注入到劳资/工资小节标题行之后
+    const insertAt = anchor.index + anchor[0].length;
+    return `${supplemented.slice(0, insertAt)}${WORK_INJURY_STATEMENT}\n\n${supplemented.slice(insertAt)}`;
+  }
+  return `${supplemented.replace(/\s+$/u, '')}\n\n${WORK_INJURY_STATEMENT}`;
 }
 
 export function criticalSectionFactDensityIssues(chapters: DocumentDraftChapter[]) {
@@ -335,7 +366,7 @@ export async function stageValidationPack(session: FinalizeSession): Promise<voi
   const mergedProgressStages = [...session.progressStages];
   for (const stage of session.chapterGenerationStages) upsertProgressStage(mergedProgressStages, stage);
   session.executionStages = throttleExecutionStages(mergedProgressStages);
-  upsertProgressStage(session.executionStages, displayStage({ type: 'reference', roleId: 'knowledge-usage-report', status: 'success', message: `资料使用报告：证据 ${session.allEvidence.length} 条，来源文件 ${session.sources.length} 份，结构化事实 ${session.structuredFacts.length} 条`, details: [`证据类型：${[...evidenceSourceCounts.entries()].map(([name, count]) => `${name} ${count}`).join('，') || '无'}`, `索引健康：可用切片 ${session.indexHealth.usableChunkCount} 条，待索引 ${session.indexHealth.pendingJobs} 个，向量 ${session.indexHealth.vectorStatus?.status || 'unknown'}`] }, { subtitle: '资料使用报告' }));
+  upsertProgressStage(session.executionStages, displayStage({ type: 'reference', roleId: 'knowledge-usage-report', status: 'success', message: `资料使用报告：证据 ${session.allEvidence.length} 条，来源文件 ${session.sources.length} 份，结构化事实 ${session.structuredFacts.length} 条`, details: [`证据类型：${[...evidenceSourceCounts.entries()].map(([name, count]) => `${name} ${count}`).join('，') || '无'}`, `索引健康：可用切片 ${session.indexHealth.usableChunkCount} 条，待索引 ${session.indexHealth.pendingJobs} 个，向量${vectorStatusLabel(session.indexHealth.vectorStatus?.status)}`] }, { subtitle: '资料使用报告' }));
   upsertProgressStage(session.executionStages, displayStage({ type: 'reference', roleId: 'web-research-report', status: session.webResearchReport.enabled ? 'success' : 'skipped', message: session.webResearchReport.enabled ? `联网增强：检索章节 ${new Set(session.webResearchReport.chapters).size} 个，查询 ${session.webResearchReport.queries.length} 个，使用公开资料 ${session.webResearchReport.evidenceCount} 条` : '联网增强未开启', details: session.webResearchReport.enabled ? [`检索主题：${[...new Set(session.webResearchReport.queries)].join('；') || '无'}`, `过滤结果：${session.webResearchReport.filteredCount} 条`, '公开资料仅用于通用规范、政策、工艺和措施补充，不作为项目事实来源'] : ['可在模型配置中开启联网增强'] }, { subtitle: '联网增强报告' }));
 
 }
@@ -374,6 +405,22 @@ export function stageComposeFinal(session: FinalizeSession): void {
   session.finalMarkdown = fixTocFromBody(finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(session.finalMarkdown, session.structuredFacts), session.projectMaterialSummary)))), session.template))).markdown;
 }
 
+/** V5 P5 M6 · 无主数值审计记录（确定性、零 LLM）：扫描 finalMarkdown 全部数值与 AuthorityIndex 匹配，
+ * 三分类（一致 / 登记豁免 / 无主→推导缺口·工艺缺口·未登记），报告随执行阶段与 reviewMetadata 交付；
+ * 修复轮每次重算校验组后重跑（upsert 幂等），报告始终基于最新 finalMarkdown——
+ * 未登记数应随修复收敛至 0（验收口径「无主数值审计报告=0 未登记项」）。 */
+function recordAuthorityAudit(session: FinalizeSession): void {
+  const report = auditAuthorityCoverage(session.finalMarkdown, session.blueprintData);
+  session.authorityAuditReport = report;
+  upsertProgressStage(session.executionStages, displayStage({
+    type: 'validation',
+    roleId: 'authority-audit',
+    status: report.unregisteredCount > 0 ? 'failed' : 'success',
+    message: authorityAuditSummary(report),
+    details: authorityAuditDetails(report),
+  }, { subtitle: '权威覆盖审计' }));
+}
+
 /** stageRebuildAndRecompute：rebuild/recompute 闭包单点（P9 provenance 失效机制落地处，P2 拆分，方案 5.2） */
 export async function stageRebuildAndRecompute(session: FinalizeSession): Promise<void> {
   // round-19：全文重建函数（章草稿 → finalMarkdown 标准化管道）单一定义：
@@ -391,6 +438,7 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
   session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: true, template: session.template });
   let { knowledgeCoverage, factTraces, chapterCoverage, qualityReport, repairStrategies, finalExportGate } = session.qualityBundle;
   session.validationIssues = session.qualityBundle.validationIssues;
+  recordAuthorityAudit(session);
   session.finalGateRepairStages = [];
   // round-20 S5/W8：全维度评审轮残留问题（否决级/高风险 error 阻断，中低风险 warning 展示），
   // 评审轮运行后赋值，recomputeFinalValidationBundle 重算校验组时并入，由导出门禁按 category 'qingtian_review' 硬阻断
@@ -413,5 +461,7 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
     session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: false, template: session.template });
     ({ knowledgeCoverage, factTraces, chapterCoverage, qualityReport, repairStrategies, finalExportGate } = session.qualityBundle);
     session.validationIssues = session.qualityBundle.validationIssues;
+    // P5 M6：修复轮重算后刷新无主数值审计（报告始终反映最新 finalMarkdown）
+    recordAuthorityAudit(session);
   };
 }

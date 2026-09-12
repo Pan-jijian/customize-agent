@@ -23,9 +23,9 @@ const EXECUTION_STAGE_ORDER = [
   'stageSemanticChoice',
   'stageDeterministicStage5',
   'stageQingtianReview',
-  'stagePostReviewSurface',
   'stageNumericVerification',
   'stageRequirementVerification',
+  'stagePostReviewSurface',
   'stageFinalGate',
   // P18 自动健康诊断：finalize 末尾零 LLM 成本告警（纯读 telemetry，不参与修复轮）
   'stageHealthDiagnosis',

@@ -22,6 +22,14 @@ describe('PRECISE_TOKEN_RE', () => {
     expect(matches(PRECISE_TOKEN_RE, '执行GB50204标准')).toEqual(expect.arrayContaining(['GB50204']));
     expect(matches(PRECISE_TOKEN_RE, '截面500x300')).toEqual(expect.arrayContaining(['500x300']));
   });
+
+  it('尺寸乘式不拆科学记数法/小数片段（第三轮收编：1.0×10⁻² 的 0×10、6.5x10 的 5x10）', () => {
+    expect(matches(PRECISE_TOKEN_RE, '透水系数≥1.0×10⁻²cm/s')).not.toContain('0×10');
+    expect(matches(PRECISE_TOKEN_RE, '板6.5x10')).not.toContain('5x10');
+    // 正常整数尺寸不受影响
+    expect(matches(PRECISE_TOKEN_RE, '尺寸50×10方管')).toContain('50×10');
+    expect(matches(PRECISE_TOKEN_RE, '300x300x10预埋板')).toContain('300x300x10');
+  });
 });
 
 describe('QUANTIFIED_FACT_RE / HAS_QUANTIFIED_VALUE_RE', () => {

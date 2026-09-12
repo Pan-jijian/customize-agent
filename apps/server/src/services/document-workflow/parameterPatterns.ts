@@ -8,8 +8,10 @@
  * - 工艺参数（kN/坡度/压实度等）与设备规格走本文件 PROCESS_PARAMETER_RE / DEVICE_SPEC_RE。
  */
 
-/** 精确参数/编号提取：数值+单位、尺寸乘式、标准规范编号（GB/JGJ/ISO 等） */
-export const PRECISE_TOKEN_RE = /(?:\b[A-Z]{1,8}[\w./-]*\d[\w./-]*\b|\b\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年|万元|元)\b|\b\d+\s*[×xX]\s*\d+(?:\s*[×xX]\s*\d+)?\b|\b(?:GB|GB\/T|ISO|IEC|IEEE|RFC|API|DB\d*|T\/[A-Z]+)\s*[\w.-]+\b)/giu;
+/** 精确参数/编号提取：数值+单位、尺寸乘式、标准规范编号（GB/JGJ/ISO 等）。
+ * 尺寸乘式分支带前置负向后顾 (?<![\d.])：科学记数法「1.0×10⁻²」的「0×10」与小数尺寸「6.5x10」的「5x10」
+ * 曾被误提取为独立 token（真实文档审计暴露）；整数尺寸（500x300 / 300x300x10）不受影响。 */
+export const PRECISE_TOKEN_RE = /(?:\b[A-Z]{1,8}[\w./-]*\d[\w./-]*\b|\b\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年|万元|元)\b|(?<![\d.])\b\d+\s*[×xX]\s*\d+(?:\s*[×xX]\s*\d+)?\b|\b(?:GB|GB\/T|ISO|IEC|IEEE|RFC|API|DB\d*|T\/[A-Z]+)\s*[\w.-]+\b)/giu;
 
 /** 事实行量化判断：数值+单位、管径/直径 DN/φ/Φ、标准编号 GB/JGJ */
 export const QUANTIFIED_FACT_RE = /\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年)|DN\s*\d+|φ\s*\d+|Φ\s*\d+|GB\s*\d+|JGJ\s*\d+/iu;

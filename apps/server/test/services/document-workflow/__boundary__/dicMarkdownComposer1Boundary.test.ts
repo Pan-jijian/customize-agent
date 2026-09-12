@@ -971,6 +971,15 @@ describe('M23 规则常量与 system 前缀', () => {
     expect(FORMAL_WRITING_RULES).toContain('导出格式');
   });
 
+  it('FORMAL_WRITING_RULES 含写作三源规则；旧“计划类字段自行推导”条目已删除', () => {
+    expect(FORMAL_WRITING_RULES).toContain('【写作三源规则】');
+    expect(FORMAL_WRITING_RULES).toContain('F·项目事实源');
+    expect(FORMAL_WRITING_RULES).toContain('D·系统推导源');
+    expect(FORMAL_WRITING_RULES).not.toContain('必须基于项目工程量、总工期、工序流水与定额工效推导出具体数值');
+    // 三源规则随全局写作前缀注入（Writer 家族 system 前缀共享）
+    expect(L0_WRITER_SYSTEM_PREFIX).toContain('【写作三源规则】');
+  });
+
   it('SECTION_GENERATION_SAFETY_RULES 含日期禁令', () => {
     expect(SECTION_GENERATION_SAFETY_RULES).toContain('禁止编造具体日期');
   });

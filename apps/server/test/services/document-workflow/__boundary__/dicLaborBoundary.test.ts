@@ -116,8 +116,8 @@ describe('N2 模式1：正文峰值全量互查（30%阈值/阶段门/中断）'
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('59');
   });
-  it('N2-2 30%阈值内不报：100 vs 142（29.6%）', () => {
-    expect(res('高峰期100人。高峰期142人。')).toHaveLength(0);
+  it('N2-2 不同数值即报：100 vs 142', () => {
+    expect(res('高峰期100人。高峰期142人。')).toHaveLength(1);
   });
   it('N2-3 30%阈值外报：100 vs 143（30.1%）', () => {
     const issues = res('高峰期100人。高峰期143人。');
@@ -172,9 +172,9 @@ describe('N3 模式2：多表峰值互查（hasPeakCol口径表）', () => {
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('劳动力表峰值');
   });
-  it('N3-2 两高峰列表相差29.6%不报', () => {
+  it('N3-2 两高峰列表不同数值即报（100 vs 142）', () => {
     const md = `${peakTable([['基础阶段', '100']])}\n\n${peakTable([['主体阶段', '142']])}`;
-    expect(res(md)).toHaveLength(0);
+    expect(res(md)).toHaveLength(1);
   });
   it('N3-3 单表不报（需≥2张口径表）', () => {
     expect(res(peakTable([['基础阶段', '90'], ['主体阶段', '100']]))).toHaveLength(0);
@@ -186,12 +186,12 @@ describe('N3 模式2：多表峰值互查（hasPeakCol口径表）', () => {
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('230');
   });
-  it('N3-5 合计行不计入表峰值：模式2不报（90 vs 100），仅模式4报合计行矛盾', () => {
+  it('N3-5 无容差：模式2也报（90 vs 100）+模式4报合计行 → 2 条', () => {
     const a = '| 施工阶段 | 阶段高峰人数 |\n| --- | --- |\n| 基础 | 90 |\n| 主体 | 60 |\n| 合计 | 220 |';
     const md = `${a}\n\n${peakTable([['主体阶段', '100']])}`;
     const issues = res(md);
-    expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain('合计行');
+    expect(issues).toHaveLength(2);
+    expect(issues.some(issue => issue.message.includes('合计行'))).toBe(true);
   });
 });
 
@@ -202,8 +202,8 @@ describe('N4 模式3：正文峰值 vs 表峰值（1.3阈值）', () => {
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('分阶段投入明细表');
   });
-  it('N4-2 阈值边界不报：正文130 vs 表100（恰好1.3倍）', () => {
-    expect(res(`${peakTable([['基础阶段', '100']])}\n\n高峰期130人。`)).toHaveLength(0);
+  it('N4-2 正文与表峰值不同即报（130 vs 100）', () => {
+    expect(res(`${peakTable([['基础阶段', '100']])}\n\n高峰期130人。`)).toHaveLength(1);
   });
   it('N4-3 阈值边界报：正文131 vs 表100', () => {
     expect(res(`${peakTable([['基础阶段', '100']])}\n\n高峰期131人。`)).toHaveLength(1);
@@ -226,17 +226,17 @@ describe('N5 模式4：合计行 vs 明细行之和（10%阈值）', () => {
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('合计行');
   });
-  it('N5-2 合计100 vs 明细45+50差5%不报', () => {
+  it('N5-2 合计与明细和不同即报（100 vs 95）', () => {
     const md = '| 施工阶段 | 人数 |\n| --- | --- |\n| 基础阶段 | 45 |\n| 主体阶段 | 50 |\n| 合计 | 100 |';
-    expect(res(md)).toHaveLength(0);
+    expect(res(md)).toHaveLength(1);
   });
   it('N5-3 10%阈值外报：合计100 vs 明细44+45差11%', () => {
     const md = '| 施工阶段 | 人数 |\n| --- | --- |\n| 基础阶段 | 44 |\n| 主体阶段 | 45 |\n| 合计 | 100 |';
     expect(res(md)).toHaveLength(1);
   });
-  it('N5-4 10%阈值内不报：合计100 vs 明细45+46差9%', () => {
+  it('N5-4 合计与明细和不同即报（100 vs 91）', () => {
     const md = '| 施工阶段 | 人数 |\n| --- | --- |\n| 基础阶段 | 45 |\n| 主体阶段 | 46 |\n| 合计 | 100 |';
-    expect(res(md)).toHaveLength(0);
+    expect(res(md)).toHaveLength(1);
   });
   it('N5-5 无合计行不检', () => {
     const md = '| 施工阶段 | 人数 |\n| --- | --- |\n| 基础阶段 | 40 |\n| 主体阶段 | 30 |';
@@ -265,18 +265,18 @@ describe('N6 模式5：总工日推算（峰值×工期×[0.1,1.3]区间）', ()
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('总工日');
   });
-  it('N6-3 低于下界报：500 < 100×90×0.1', () => {
-    expect(res('高峰期100人。总工期90日历天。总计500个工日。')).toHaveLength(1);
+  it('N6-3 低于算术上限不报（下限检查已删除）', () => {
+    expect(res('高峰期100人。总工期90日历天。总计500个工日。')).toHaveLength(0);
   });
-  it('N6-4 上界边界不报：11700恰好等于1.3倍', () => {
-    expect(res('高峰期100人。总工期90日历天。总计11700个工日。')).toHaveLength(0);
+  it('N6-4 超过算术上限即报：11700 > 100×90', () => {
+    expect(res('高峰期100人。总工期90日历天。总计11700个工日。')).toHaveLength(1);
   });
   it('N6-5 上界边界报：11701超出1.3倍', () => {
     expect(res('高峰期100人。总工期90日历天。总计11701个工日。')).toHaveLength(1);
   });
-  it('N6-6 下界附近：901不报、899报', () => {
+  it('N6-6 下界附近均不报：901/899 均低于算术上限', () => {
     expect(res('高峰期100人。总工期90日历天。总计901个工日。')).toHaveLength(0);
-    expect(res('高峰期100人。总工期90日历天。总计899个工日。')).toHaveLength(1);
+    expect(res('高峰期100人。总工期90日历天。总计899个工日。')).toHaveLength(0);
   });
   it('N6-7 总量语境词枚举：总/合计/总计/共四形态均采样', () => {
     for (const prefix of ['总工日合计', '合计', '总计', '共']) {
@@ -301,28 +301,28 @@ describe('N6 模式5：总工日推算（峰值×工期×[0.1,1.3]区间）', ()
 });
 
 describe('N7 模式6：总量控制上限 vs 峰值（无百分比阈值）', () => {
-  it('N7-1 上限260 vs 阶段峰值350报出（不设30%阈值）', () => {
+  it('N7-1 上限260 vs 阶段峰值350：互斥+控制上限 2 条', () => {
     const issues = res('高峰期总人数控制在260人以内。主体阶段高峰投入约350人。');
-    expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain('控制');
+    expect(issues).toHaveLength(2);
+    expect(issues.some(issue => issue.message.includes('控制'))).toBe(true);
   });
   it('N7-2 表峰值超上限报出', () => {
     const md = `${peakTable([['主体阶段', '300']])}\n\n高峰期总人数控制在260人以内。`;
     expect(res(md)).toHaveLength(1);
   });
-  it('N7-3 上限高于峰值不报', () => {
-    expect(res('高峰期总人数控制在300人以内。高峰期260人。')).toHaveLength(0);
+  it('N7-3 上限与峰值不同数值即报互斥（300 vs 260）', () => {
+    expect(res('高峰期总人数控制在300人以内。高峰期260人。')).toHaveLength(1);
   });
   it('N7-4 上限等于峰值不报（严格大于才报）', () => {
     expect(res('高峰期总人数控制在260人以内。高峰期260人。')).toHaveLength(0);
   });
-  it('N7-5 控制形态枚举：以内/以下/为/到', () => {
+  it('N7-5 控制形态枚举：互斥+控制上限各 2 条', () => {
     for (const form of ['控制在260人以内', '控制在260人以下', '控制为260人', '控制到260人']) {
-      expect(res(`高峰期总人数${form}。主体阶段高峰投入约350人。`)).toHaveLength(1);
+      expect(res(`高峰期总人数${form}。主体阶段高峰投入约350人。`)).toHaveLength(2);
     }
   });
-  it('N7-6 多上限取最大值：cap260下峰值220不报（取200会误报）', () => {
-    expect(res('高峰期总人数控制在200人以内。高峰期总人数控制在260人以内。高峰期220人。')).toHaveLength(0);
+  it('N7-6 多上限不同数值：200/260/220 互斥报 1 条', () => {
+    expect(res('高峰期总人数控制在200人以内。高峰期总人数控制在260人以内。高峰期220人。')).toHaveLength(1);
   });
   it('N7-7 管理口径值也参与上限比较', () => {
     const issues = res('高峰期管理人员40人。高峰期总人数控制在30人以内。');
@@ -345,14 +345,14 @@ describe('N8 模式7：班组加总算式一致性', () => {
   it('N8-3 「8人」末位数字放宽形态参与求和：sum27自洽不报（旧正则漏采会误报）', () => {
     expect(res('道路浇筑8人＋铺装6人＋排水沟砌筑5人＋机动8人=27人。')).toHaveLength(0);
   });
-  it('N8-4 5%阈值内不报：sum27 vs =26（差3.7%）', () => {
-    expect(res('道路浇筑8人＋铺装6人＋排水沟砌筑5人＋机动2×4=26人。')).toHaveLength(0);
+  it('N8-4 左侧求和与结果不同即报（27 vs 26）', () => {
+    expect(res('道路浇筑8人＋铺装6人＋排水沟砌筑5人＋机动2×4=26人。')).toHaveLength(1);
   });
   it('N8-5 5%阈值外报：sum27 vs =25（差7.4%）', () => {
     expect(res('道路浇筑8人＋铺装6人＋排水沟砌筑5人＋机动2×4=25人。')).toHaveLength(1);
   });
-  it('N8-6 15%阈值内不报：宣称23 vs =27（差14.8%）', () => {
-    expect(res('本工程投入23人，道路浇筑8人＋铺装6人＋排水沟砌筑5人＋机动2×4=27人。')).toHaveLength(0);
+  it('N8-6 宣称与算式结果不同即报（23 vs 27）', () => {
+    expect(res('本工程投入23人，道路浇筑8人＋铺装6人＋排水沟砌筑5人＋机动2×4=27人。')).toHaveLength(1);
   });
   it('N8-7 15%阈值外报：宣称22 vs =27（差18.5%）', () => {
     expect(res('本工程投入22人，道路浇筑8人＋铺装6人＋排水沟砌筑5人＋机动2×4=27人。')).toHaveLength(1);
@@ -384,9 +384,9 @@ describe('N9 laborPeakConflictIssues：总人数 vs 高峰人数众数互查', (
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('峰值口径');
   });
-  it('N9-2 20%阈值边界：100 vs 121报、100 vs 120不报', () => {
+  it('N9-2 无容差：121 与 120 均报', () => {
     expect(laborPeakConflictIssues('高峰期总人数100人。高峰人数121人。')).toHaveLength(1);
-    expect(laborPeakConflictIssues('高峰期总人数100人。高峰人数120人。')).toHaveLength(0);
+    expect(laborPeakConflictIssues('高峰期总人数100人。高峰人数120人。')).toHaveLength(1);
   });
   it('N9-3 同值不报：100 vs 100', () => {
     expect(laborPeakConflictIssues('高峰期总人数100人。高峰人数100人。')).toHaveLength(0);
@@ -513,10 +513,10 @@ describe('N12 历史缺陷回归形态', () => {
     const md = '| 岗位 | 职责 | 人数 |\n| --- | --- | --- |\n| 项目经理 | 全面负责 | 1 |\n| 施工员 | 现场管理 | 3 |\n\n高峰期95人。';
     expect(res(md)).toHaveLength(0);
   });
-  it('N12-3 阶段平均人数列与高峰列并存：峰值取高峰列不误报', () => {
+  it('N12-3 无容差：正文200 与表高峰列190 不同即报', () => {
     const md = '| 施工阶段 | 阶段平均人数 | 阶段高峰人数 |\n| --- | --- | --- |\n| 基础 | 100 | 190 |\n\n高峰期200人。';
     const issues = res(md);
-    expect(issues).toHaveLength(0);
+    expect(issues).toHaveLength(1);
   });
   it('N12-4 「按高峰期总人数20人配置专职安全员2名」总人数口径不误划管理组', () => {
     const issues = res('按高峰期总人数20人配置专职安全员2名。高峰期86人。');

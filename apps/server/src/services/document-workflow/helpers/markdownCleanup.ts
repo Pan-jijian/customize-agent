@@ -629,6 +629,54 @@ export function dedupeCrossSectionDuplicateSentences(content: string): string {
   return result.join('\n');
 }
 
+/** 段内整句复制去重（第十六版 C15 句级复制漏网根治）：同一段内相同句（≥20 字）连写两遍属
+ * 复制粘贴残迹（订单抽查句/盘点句/核查句连现两遍实测形态），保留首次出现句删除后续副本；
+ * 标题行/表格行不参与。与跨小节去重（dedupeCrossSectionDuplicateSentences）互补：
+ * 跨小节去重豁免「同小节重复」段内形态，本函数补上段内检测。 */
+export function dedupeRepeatedSentencesWithinBlocks(content: string): string {
+  const blocks = content.split(/\n{2,}/u);
+  let changed = false;
+  const deduped = blocks.map(block => {
+    const trimmed = block.trim();
+    if (!trimmed || /^#{1,6}\s/u.test(trimmed) || /^\s*\|/u.test(trimmed)) return block;
+    const sentences = block.split(/(?<=[。；;])/u);
+    const seen = new Set<string>();
+    const kept = sentences.filter(sentence => {
+      const text = sentence.replace(/\s+/gu, '');
+      if (text.length < 20) return true;
+      if (seen.has(text)) { changed = true; return false; }
+      seen.add(text);
+      return true;
+    });
+    return kept.join('');
+  });
+  if (!changed) return content;
+  return deduped.join('\n\n');
+}
+
+/** 同章高频同句限次（第十六版 F23 套话收敛）：同一章内逐字相同句（≥12 字）出现超过 3 次属
+ * 万能句机械堆叠（「项目经理每周检查不少于 1 次」「发现……当日整改并复查销项」类），
+ * 保留前 2 处、删除多余副本；被删位置由小节补写链按禁写清单补新内容（P8），不破坏字数达标。 */
+export function dedupeChapterFrequentSentences(content: string): string {
+  const occurrences = new Map<string, number>();
+  let changed = false;
+  const lines = content.split('\n').map(line => {
+    const trimmed = line.trim();
+    if (/^#{1,6}\s/u.test(trimmed) || /^\s*\|/u.test(trimmed)) return line;
+    const kept = line.split(/(?<=[。；;])/u).filter(segment => {
+      const text = segment.replace(/\s+/gu, '');
+      if (text.length < 12) return true;
+      const count = occurrences.get(text) || 0;
+      occurrences.set(text, count + 1);
+      if (count + 1 > 2) { changed = true; return false; }
+      return true;
+    });
+    return kept.join('');
+  });
+  if (!changed) return content;
+  return lines.join('\n');
+}
+
 export function finalizeChapterContentQuality(content: string, chapter: Pick<DocumentTemplateChapter, 'title' | 'sections'>) {
   let cleaned = rewriteWorkPackageTerminology(content);
   cleaned = repairPlannedSectionBodies(cleaned, chapter);
@@ -649,12 +697,48 @@ export function finalizeChapterContentQuality(content: string, chapter: Pick<Doc
   // 与“写法正确即可、不固定写法”口径相悖；且验收器已改为内容要素判定，无标签块不再被阻断，该清洗环节已无存在理由
   cleaned = normalizeWorkPackageLabels(cleaned);
   cleaned = dedupeCrossSectionDuplicateSentences(cleaned);
+  // 第十六版：段内整句复制去重 + 同章高频同句限次（句级复制/套话堆叠根治）
+  cleaned = dedupeRepeatedSentencesWithinBlocks(cleaned);
+  cleaned = dedupeChapterFrequentSentences(cleaned);
   // 4.12.12：跨层级（H2/H3 同名）整块去重与同小节内相邻块重复去重（评分报告「同名小节重复」/「整段重复三遍」根因治理）
   cleaned = dedupeCrossLevelHeadingDuplicates(cleaned);
   cleaned = dedupeRepeatedBlocksWithinSections(cleaned);
+  // 组件 8 章级逐字重复收口：整段完全重复（跨小节、全章范围）删除多余副本
+  cleaned = dedupeChapterDuplicateParagraphs(cleaned);
   cleaned = cleaned.replace(/\n{3,}/gu, '\n\n');
   cleaned = stripTenderClauseFragmentHeadings(cleaned);
   return stripDataConsistencyLeakSentences(cleaned).trim();
+}
+
+/** 章级整段逐字重复消除（组件 8）：同一段落（去空白后 ≥24 字指纹完全相同）在本章内
+ * 第二次及以后出现即删除，保留首次出现（逐字复读 = 复制粘贴残迹，删多余副本零信息损失）；
+ * 标题行/表格行不入池，列表项单独成段。与 dedupeRepeatedBlocksWithinSections
+ *（同小节窗口 3）互补：本函数跨小节、全章范围收口，为写作职责分工（组件 6）后的确定性兜底。 */
+export function dedupeChapterDuplicateParagraphs(content: string): string {
+  const lines = content.split('\n');
+  const seen = new Set<string>();
+  const drop = new Set<number>();
+  let buffer: string[] = [];
+  let bufferLines: number[] = [];
+  const flush = () => {
+    const normalized = buffer.join('').replace(/\s+/gu, '');
+    if (normalized.length >= 24) {
+      if (seen.has(normalized)) bufferLines.forEach(index => drop.add(index));
+      else seen.add(normalized);
+    }
+    buffer = [];
+    bufferLines = [];
+  };
+  lines.forEach((line, index) => {
+    const trimmed = line.trim();
+    if (!trimmed || /^#{1,6}\s/u.test(trimmed) || /^\s*\|/u.test(trimmed)) { flush(); return; }
+    if (/^[-*•]\s/u.test(trimmed)) { flush(); buffer = [trimmed]; bufferLines = [index]; flush(); return; }
+    buffer.push(trimmed);
+    bufferLines.push(index);
+  });
+  flush();
+  if (drop.size === 0) return content;
+  return lines.filter((_, index) => !drop.has(index)).join('\n');
 }
 
 /** 最终组装路径的重复/空壳兜底清理：rebuildFinalMarkdown 不再逐章跑 finalizeChapterContentQuality，

@@ -7,7 +7,7 @@ import type { DocumentGenerationDiagnostics } from '@/services/document-workflow
 
 function makeDiagnostics(overrides: Partial<DocumentGenerationDiagnostics> = {}): DocumentGenerationDiagnostics {
   return {
-    strategy: { mode: 'balanced', enableChapterReview: true, enableGlobalReview: true, enableDocumentBudgetExpansion: true, enableFinalQualityReview: true },
+    strategy: { mode: 'balanced', enableChapterReview: true, enableGlobalReview: true, enableFinalQualityReview: true },
     metrics: [],
     llm: { calls: 0, failures: 0, maxActive: 0, retries: 0 },
     semantic: { embedCacheHits: 0, embedCacheMisses: 0 },

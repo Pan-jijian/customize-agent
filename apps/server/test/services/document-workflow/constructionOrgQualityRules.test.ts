@@ -234,10 +234,16 @@ describe('constructionOrgMajorContentIssues（项目主要施工内容门禁）'
     expect(issues.some(issue => issue.message.includes('事实细度不足'))).toBe(true);
   });
 
-  it('用 Markdown 表格承载正文报 blocker', () => {
-    const content = `### 2.3 项目主要施工内容\n${fiveGood}\n| 项目 | 数量 |\n| --- | --- |\n| 配电箱 | 2 |`;
+  it('全表格承载正文（无实质段落文本）报 blocker', () => {
+    const content = `### 2.3 项目主要施工内容\n| 分部分项工程 | 工程内容 | 单位 | 工程量 |\n| --- | --- | --- | --- |\n| 道路工程 | 沥青混凝土路面 | m² | 12000 |\n| 道路工程 | 路床碾压 | m² | 15000 |\n| 排水工程 | 钢筋混凝土管铺设 | m | 800 |`;
     const issues = constructionOrgMajorContentIssues([chapter('项目主要施工内容', content)]);
-    expect(issues.some(issue => issue.message.includes('表格'))).toBe(true);
+    expect(issues.some(issue => issue.message.includes('表格替代专业工程正文'))).toBe(true);
+  });
+
+  it('段落正文 + 数据附表（工程量汇总）不判表格承载（与 fixTableBorneContentSections 同源口径校准）', () => {
+    const content = `### 2.3 项目主要施工内容\n${fiveGood}\n| 分部分项工程 | 单位 | 工程量 |\n| --- | --- | --- |\n| 道路工程 | m² | 12000 |\n| 排水工程 | m | 800 |`;
+    const issues = constructionOrgMajorContentIssues([chapter('项目主要施工内容', content)]);
+    expect(issues.some(issue => issue.message.includes('表格替代专业工程正文'))).toBe(false);
   });
 
   it('全部工作包无工序顺序表达报 blocker', () => {
@@ -358,6 +364,21 @@ describe('constructionOrgDivisionSectionIssues（分部分项专项验收器）'
     expect(issues.length).toBe(1);
     expect(issues[0].severity).toBe('blocker');
     expect(issues[0].message).toContain('缺失');
+  });
+
+  it('章-节两级新结构：章下 H3 小节即分项方案，不误报缺失（统一融合规划产物）', () => {
+    const divisionH3 = (name: string) => `### 2.1 ${name}\n施工概况：${name}范围明确，作业条件具备，主要工程量800m³，采用机械配合人工组织实施。\n工艺流程：测量放线→分层开挖→边坡修整→基底验槽→钎探记录。\n施工方法：采用机械开挖分层作业，边坡坡度1:1放坡，基底标高偏差控制在50mm以内，压实度不低于93%，每层验收合格后方可进入下一层作业，全部完成后形成闭水试验记录与隐蔽验收资料归档闭环。`;
+    const content = `## 主要施工方法\n${divisionH3('场地平整与土方回填方法')}\n${divisionH3('排水管道施工方法')}\n${divisionH3('交通信号施工方法')}\n${divisionH3('绿化种植施工方法')}\n## 下一章\n其他内容。`;
+    const issues = constructionOrgDivisionSectionIssues([chapter('主要施工方法', content)]);
+    // 4 个 H3 小节被识别为 4 个分项方案，不报「缺失」不报「分项不足」（阈值 blocker=3）
+    expect(issues.some(issue => issue.message.includes('缺失'))).toBe(false);
+    expect(issues.some(issue => issue.message.includes('分项不足'))).toBe(false);
+  });
+
+  it('章-节两级新结构：章下无 H3 子标题时报缺失 blocker（不假性通过）', () => {
+    const content = `## 主要施工方法\n本章采用先进施工工艺，严格按照规范组织施工。`;
+    const issues = constructionOrgDivisionSectionIssues([chapter('主要施工方法', content)]);
+    expect(issues.some(issue => issue.severity === 'blocker' && issue.message.includes('缺失'))).toBe(true);
   });
 });
 

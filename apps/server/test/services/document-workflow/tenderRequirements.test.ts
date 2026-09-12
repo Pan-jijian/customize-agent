@@ -787,7 +787,7 @@ describe('评分项响应确定性补写（fixScoringRequirementResponses）', (
     expect(chapters[0].content).toContain('按招标文件要求：本项目确保获得鲁班奖');
   });
 
-  it('商务口径条款（暂列金额）确定性补写豁免（防补写后即被商务词清洗删除的闭环）', async () => {
+  it('商务口径条款（暂列金额）补写定性响应句（第十六版：不再整条跳过，防零响应闭环断裂）', async () => {
     const mocked = vi.mocked(callDocumentLlmJson);
     mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
     const model: TenderRequirementModel = {
@@ -799,8 +799,10 @@ describe('评分项响应确定性补写（fixScoringRequirementResponses）', (
     ];
     const similarity = (query: string, title: string) => (query.includes('暂列金额') && title.includes('造价') ? 0.7 : 0);
     const result = await fixScoringRequirementResponses({ chapters, model, similarity });
-    expect(result.fixedCount).toBe(0);
-    expect(chapters[0].content).not.toContain('暂列金额');
+    expect(result.fixedCount).toBe(1);
+    // 定性响应句：含「暂列金额」词面（检测侧锚点命中），但不含商务数字参数（1000万元不落位）
+    expect(chapters[0].content).toContain('暂列金额');
+    expect(chapters[0].content).not.toContain('1000万元');
   });
 
   it('商务响应条款（履约保证金金额）补写只落定性句，不抄条款原文商务参数（round-27：中标金额的2% 曾进技术标正文）', async () => {

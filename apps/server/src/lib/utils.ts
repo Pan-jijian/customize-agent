@@ -46,3 +46,9 @@ export function categoryLabel(category: string, locale = 'zh-CN'): string {
   const map = locale === 'en-US' ? CATEGORY_LABELS_EN : CATEGORY_LABELS_ZH;
   return map[category] ?? category;
 }
+
+/** 知识库文件状态 → i18n 键：active/outdated/error/deleted 为库记录状态，disk 为未入库磁盘文件 */
+export const KB_FILE_STATUS_TEXT_KEY: Record<string, string> = {
+  active: 'common.statusIndexed', outdated: 'common.statusOutdated', error: 'common.statusAbnormal',
+  deleted: 'common.statusDeleted', disk: 'common.statusNotIndexed',
+};

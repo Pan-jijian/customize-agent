@@ -107,8 +107,8 @@ describe('O2 绿化养护期：greeningMaintenanceMismatchIssues + extractGreeni
   it('O2-2 正文与清单一致不报：两年 vs 两年', () => {
     expect(greeningMaintenanceMismatchIssues('绿化养护期两年。', authorityModel('养护两年'))).toHaveLength(0);
   });
-  it('O2-3 差异20%边界：权威10年，正文12年不报、13年报', () => {
-    expect(greeningMaintenanceMismatchIssues('绿化养护期12年。', authorityModel('养护十年'))).toHaveLength(0);
+  it('O2-3 无容差：正文12年、13年均报（权威10年）', () => {
+    expect(greeningMaintenanceMismatchIssues('绿化养护期12年。', authorityModel('养护十年'))).toHaveLength(1);
     expect(greeningMaintenanceMismatchIssues('绿化养护期13年。', authorityModel('养护十年'))).toHaveLength(1);
   });
   it('O2-4 中文数字谱系解析：一/两/十/十五', () => {
@@ -164,12 +164,12 @@ describe('O3 路灯数量：streetLightCountMismatchIssues + extractStreetLightA
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('17');
   });
-  it('O3-2 差异20%边界：权威100，正文80不报、79报', () => {
-    expect(streetLightCountMismatchIssues('路灯80套。', streetLightModel(100))).toHaveLength(0);
+  it('O3-2 无容差：正文80套、79套均报（权威100）', () => {
+    expect(streetLightCountMismatchIssues('路灯80套。', streetLightModel(100))).toHaveLength(1);
     expect(streetLightCountMismatchIssues('路灯79套。', streetLightModel(100))).toHaveLength(1);
   });
-  it('O3-3 分型号多值求和：17+3=20 vs 权威25不报（只采17会误报）', () => {
-    expect(streetLightCountMismatchIssues('路灯100W17套，路灯120W3套。', streetLightModel(25))).toHaveLength(0);
+  it('O3-3 分型号求和 20 与权威 25 不同即报', () => {
+    expect(streetLightCountMismatchIssues('路灯100W17套，路灯120W3套。', streetLightModel(25))).toHaveLength(1);
   });
   it('O3-4 单位谱系：套/盏/杆均采', () => {
     expect(streetLightCountMismatchIssues('路灯18盏。', streetLightModel(118))).toHaveLength(1);
@@ -319,24 +319,24 @@ describe('O4 基坑深度锁定与危大分级', () => {
 });
 
 describe('O5 设备进场时序：equipmentEntryTimingIssues', () => {
-  it('O5-1 尾期进场报出：第170日 vs 总工期210（80%=168）', () => {
-    const issues = equipmentEntryTimingIssues('计划工期210日历天。塔式起重机计划于第170日进场。', factsOf({}));
+  it('O5-1 已达总工期报出：第210日 vs 总工期210', () => {
+    const issues = equipmentEntryTimingIssues('计划工期210日历天。塔式起重机计划于第210日进场。', factsOf({}));
     expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain('尾期');
+    expect(issues[0].message).toContain('设备进场时间荒谬');
   });
-  it('O5-2 尾期边界：第168日恰好80%报、第167日不报', () => {
-    expect(equipmentEntryTimingIssues('计划工期210日历天。塔式起重机计划于第168日进场。', factsOf({}))).toHaveLength(1);
+  it('O5-2 已达总工期边界：第210日报、第167日不报', () => {
+    expect(equipmentEntryTimingIssues('计划工期210日历天。塔式起重机计划于第210日进场。', factsOf({}))).toHaveLength(1);
     expect(equipmentEntryTimingIssues('计划工期210日历天。塔式起重机计划于第167日进场。', factsOf({}))).toHaveLength(0);
   });
   it('O5-3 无总工期不检尾期', () => {
     expect(equipmentEntryTimingIssues('塔式起重机计划于第170日进场。', factsOf({}))).toHaveLength(0);
   });
-  it('O5-4 绑定资料工期兜底：schedule事实210日历天', () => {
+  it('O5-4 绑定资料工期兜底：schedule事实210日历天（第210日报）', () => {
     const model = factsOf({ schedule: [factOf({ key: '总工期', value: '210日历天' })] });
-    expect(equipmentEntryTimingIssues('塔式起重机计划于第170日进场。', model)).toHaveLength(1);
+    expect(equipmentEntryTimingIssues('塔式起重机计划于第210日进场。', model)).toHaveLength(1);
   });
   it.each(['进场', '投入使用', '安装', '调试'])('O5-5 进场动词谱系：%s', verb => {
-    const issues = equipmentEntryTimingIssues(`计划工期210日历天。塔式起重机第170日${verb}。`, factsOf({}));
+    const issues = equipmentEntryTimingIssues(`计划工期210日历天。塔式起重机第210日${verb}。`, factsOf({}));
     expect(issues).toHaveLength(1);
   });
   it('O5-6 设备词表外不采：发电机第170日进场不报', () => {
@@ -376,12 +376,12 @@ describe('O5 设备进场时序：equipmentEntryTimingIssues', () => {
   it('O5-16 设备表行不误采为节点（开工后第75日进场形态）', () => {
     expect(equipmentEntryTimingIssues('| 挖掘机 | 开工后第75日进场 |', factsOf({}))).toHaveLength(0);
   });
-  it('O5-17 尾期+倒挂并存报2条', () => {
-    const md = '计划工期210日历天。第60日完成基坑支护及土方外运。挖掘机第75日进场。塔式起重机第170日进场。';
+  it('O5-17 已达总工期+倒挂并存报2条', () => {
+    const md = '计划工期210日历天。第60日完成基坑支护及土方外运。挖掘机第75日进场。塔式起重机第210日进场。';
     expect(equipmentEntryTimingIssues(md, factsOf({}))).toHaveLength(2);
   });
   it('O5-18 相同句子重复去重只报一次', () => {
-    const md = '计划工期210日历天。塔式起重机第170日进场。塔式起重机第170日进场。';
+    const md = '计划工期210日历天。塔式起重机第210日进场。塔式起重机第210日进场。';
     expect(equipmentEntryTimingIssues(md, factsOf({}))).toHaveLength(1);
   });
 });

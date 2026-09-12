@@ -108,6 +108,10 @@ const STAGE_TITLES: Record<string, string> = {
 const STAGE_ROLE_NAMES: Record<string, string> = {
   'knowledge-base': '知识库', 'document-readiness': '生成准备度检查',
 };
+/** 流程步骤/执行阶段/校验级别的状态枚举 → i18n 键：内部状态码不得直出界面 */
+const FLOW_STEP_STATUS_TEXT: Record<FlowStepStatus, string> = { wait: 'common.statusWaiting', process: 'common.statusRunning', finish: 'common.statusCompleted', warning: 'common.statusReview', error: 'common.statusAbnormal' };
+const EXECUTION_STAGE_STATUS_TEXT: Record<GeneratedDocumentDraft['executionStages'][number]['status'], string> = { running: 'common.statusRunning', success: 'common.statusCompleted', skipped: 'common.statusSkipped', failed: 'common.statusFailed' };
+const VALIDATION_LEVEL_TEXT: Record<GeneratedDocumentDraft['validationIssues'][number]['level'], string> = { error: 'common.levelError', warning: 'common.levelWarning', info: 'common.levelInfo' };
 
 export default function DocumentsPage() {
   const t = useAppTranslations();
@@ -330,7 +334,6 @@ export default function DocumentsPage() {
     );
   };
   const flowIcon = (s: FlowStep) => s.status === 'process' ? <LoadingOutlined /> : s.status === 'warning' ? <SafetyCertificateOutlined style={{ color: 'var(--colorWarning)' }} /> : s.icon;
-  const antdStatus = (s: FlowStepStatus) => s === 'warning' ? 'finish' as const : s;
 
   const setSnap = (steps: FlowStep[], key: string | null, isLoading = loading) => {
     if (activeGenerationTask?.loading) { activeGenerationTask.flowSteps = steps; activeGenerationTask.activeFlowKey = key; activeGenerationTask.loading = isLoading; notifyGenerationTask(); }
@@ -1201,7 +1204,7 @@ export default function DocumentsPage() {
                   <div key={s.key} style={{ display: 'flex', gap: 10, padding: 10, border: '1px solid var(--colorBorderSecondary)', borderRadius: 10, background: index === activeFlowIndex ? 'var(--colorFillAlter)' : 'var(--colorBgContainer)' }}>
                     <span>{flowIcon(s)}</span>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <Space wrap><Text strong>{s.title}</Text><Tag color={s.status === 'finish' ? 'success' : s.status === 'error' ? 'error' : s.status === 'warning' ? 'warning' : s.status === 'process' ? 'processing' : 'default'}>{antdStatus(s.status)}</Tag>{stepDurationChip(s)}</Space>
+                      <Space wrap><Text strong>{s.title}</Text><Tag color={s.status === 'finish' ? 'success' : s.status === 'error' ? 'error' : s.status === 'warning' ? 'warning' : s.status === 'process' ? 'processing' : 'default'}>{t(FLOW_STEP_STATUS_TEXT[s.status])}</Tag>{stepDurationChip(s)}</Space>
                       <div style={{ marginTop: 4, color: 'var(--colorTextSecondary)', fontSize: 12, whiteSpace: 'pre-wrap' }}>{stepDesc(s, stepExpanded)}</div>
                       {hasMoreContent && (
                         <Button size="small" type="link" style={{ padding: 0, height: 'auto', marginTop: 6 }} onClick={() => toggleStepExpanded(s.key)}>
@@ -1471,7 +1474,7 @@ export default function DocumentsPage() {
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                         {draft.validationIssues.map(item => (
                           <div key={`${item.level}-${item.message}`} style={{ border: '1px solid var(--colorBorderSecondary)', borderRadius: 8, padding: 12 }}>
-                            <Tag color={item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'blue'}>{item.level}</Tag>
+                            <Tag color={item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'blue'}>{t(VALIDATION_LEVEL_TEXT[item.level])}</Tag>
                             <div style={{ marginTop: 6, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-all', lineHeight: 1.6 }}>{item.message}</div>
                             {item.suggestion && <div style={{ marginTop: 6, color: 'var(--colorTextSecondary)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-all' }}>{item.suggestion}</div>}
                           </div>
@@ -1490,7 +1493,7 @@ export default function DocumentsPage() {
                         <List.Item.Meta avatar={STAGE_ICONS[s.type] || <FileTextOutlined />}
                           title={<Text title={s.roleId} style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{`${s.title || STAGE_TITLES[s.type] || s.type} · ${s.roleName || s.subtitle || roleDisplayName(s.roleId)}`}</Text>}
                           description={<Text type="secondary" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{s.message}</Text>} />
-                        <Tag color={s.status === 'success' ? 'success' : s.status === 'failed' ? 'error' : s.status === 'skipped' ? 'default' : 'warning'}>{s.status}</Tag>
+                        <Tag color={s.status === 'success' ? 'success' : s.status === 'failed' ? 'error' : s.status === 'skipped' ? 'default' : 'warning'}>{t(EXECUTION_STAGE_STATUS_TEXT[s.status])}</Tag>
                       </List.Item>
                     )} />
                   },

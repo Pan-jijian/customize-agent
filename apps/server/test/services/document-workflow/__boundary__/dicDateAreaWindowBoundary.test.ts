@@ -254,8 +254,8 @@ describe('Q4 areaArithmetic 单位混合/断句/数值形态', () => {
   it('Q4-20 小数三元组差超容差 → 报（差 1.75 > 容差 1.50175）', () => {
     expect(areaArithmeticIssues('地上1000.5㎡地下500.25㎡总建筑面积1502.5㎡。').length).toBe(1);
   });
-  it('Q4-21 小数三元组差在容差内 → 不报', () => {
-    expect(areaArithmeticIssues('地上1000.5㎡地下500.25㎡总建筑面积1501.75㎡。')).toEqual([]);
+  it('Q4-21 小数三元组差 1 即报（1500.75 vs 1501.75）', () => {
+    expect(areaArithmeticIssues('地上1000.5㎡地下500.25㎡总建筑面积1501.75㎡。').length).toBe(1);
   });
   it('Q4-22 千分位+值→地下 40 窗口边界矛盾 → 报', () => {
     expect(areaArithmeticIssues(`地上10,000㎡${'、'.repeat(40)}地下5,000㎡单体建筑面积14,000㎡。`).length).toBe(1);

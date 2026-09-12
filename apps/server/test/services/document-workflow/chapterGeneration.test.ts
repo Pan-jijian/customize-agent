@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildChapterFactCoverageContext, capFactCoverageContext } from '@/services/document-workflow/chapterGeneration';
+import { assignChapterFactsToBlocks, buildChapterFactCoverageContext, capFactCoverageContext, extractEngineeringObjectNames } from '@/services/document-workflow/chapterGeneration';
 import type { DocumentEvidence, DocumentTemplateChapter, SpecAuthorityMap } from '@/services/document-workflow/types';
 
 describe('capFactCoverageContext', () => {
@@ -117,5 +117,47 @@ describe('buildChapterFactCoverageContext 部位绑定式注入（F12）', () =>
     });
     expect(context).toContain('- 混凝土强度等级：垫层:C15｜基础:C30');
     expect(context).toContain('- 砂浆强度等级：砌体:M5｜抹灰:M10');
+  });
+});
+
+describe('M4 事实分配工程归属隔离（extractEngineeringObjectNames / assignChapterFactsToBlocks）', () => {
+  function blocksOf(...titles: string[]) {
+    return titles.map(title => ({ title, subPoints: [{ title }] }));
+  }
+
+  it('工程对象提取：村/社区取最短合法词，泛称噪声词过滤', () => {
+    expect([...extractEngineeringObjectNames('小菜园村挖方 20420.39m³')]).toEqual(['小菜园村']);
+    expect([...extractEngineeringObjectNames('李庄村改造项目测量放线')]).toEqual(['李庄村']);
+    expect([...extractEngineeringObjectNames('义井乡红桥村道路工程')]).toEqual(['义井乡红桥村']);
+    expect([...extractEngineeringObjectNames('小菜园村、白水塘村各新建公厕一处')].sort()).toEqual(['白水塘村', '小菜园村'].sort());
+    expect([...extractEngineeringObjectNames('农村人居环境整治全村推进')]).toEqual([]);
+  });
+
+  it('跨工程隔离：A 村事实只落 A 村块，不落 B 村块（数值串位防线）', () => {
+    const blocks = blocksOf('小菜园村土方工程', '白水塘村土方工程');
+    const assignments = assignChapterFactsToBlocks(blocks, ['小菜园村挖方 20420.39m³']);
+    expect(assignments[0]).toEqual(['小菜园村挖方 20420.39m³']);
+    expect(assignments[1]).toEqual([]);
+  });
+
+  it('同对象归位加分：明确工程对象的行优先归本工程块', () => {
+    const blocks = blocksOf('泵站工程', '小菜园村土方工程');
+    const assignments = assignChapterFactsToBlocks(blocks, ['小菜园村泵站设备 2 台']);
+    expect(assignments[1]).toEqual(['小菜园村泵站设备 2 台']);
+    expect(assignments[0]).toEqual([]);
+  });
+
+  it('同对象互含容错：行政前缀全称与简称视为同一对象', () => {
+    const blocks = blocksOf('小菜园村土方工程');
+    const assignments = assignChapterFactsToBlocks(blocks, ['义井乡小菜园村挖方 5m³']);
+    expect(assignments[0]).toEqual(['义井乡小菜园村挖方 5m³']);
+  });
+
+  it('无对象事实行不触发隔离：按 token 分配；全块零命中不强制分配', () => {
+    const blocks = blocksOf('土方工程', '白水塘村土方工程');
+    const assignments = assignChapterFactsToBlocks(blocks, ['土方工程 回填压实度 93%', '完全无关的内容片段']);
+    expect(assignments[0]).toContain('土方工程 回填压实度 93%');
+    expect(assignments[0]).not.toContain('完全无关的内容片段');
+    expect(assignments[1]).toEqual([]);
   });
 });

@@ -40,9 +40,8 @@ function evidenceSentencesForSection(sectionTitle: string, chapter: DocumentTemp
   return sentences;
 }
 
-// P1-6 死代码清理后仅保留此导出：P0-2 确定性兜底改造的骨架生成器，
-// 由 documentGenerator 在 LLM 全故障时调用（输出带 [EVIDENCE_SKELETON] 标记并被 Review 门禁阻断）。
-// 旧扩写链路（expandChapterContent/expandChapterToTarget/supplementShortSections/replaceSectionContent/mergeSectionSupplementBody）已废弃删除。
+// LLM 全故障阻断用骨架生成器：以证据句生成带 [EVIDENCE_SKELETON] 标记的骨架草稿，
+// 供全故障场景显性失败呈现（Review 门禁按标记阻断，不进入成稿路径）。
 export function buildEvidenceOnlyChapterContent(input: { chapter: DocumentTemplateChapter; evidence: DocumentEvidence[]; targetWords: number; forbidDrawingImages: boolean }) {
   const sections = input.chapter.sections?.length ? input.chapter.sections : ['资料依据与施工对象', '主要控制措施', '检查验收与闭环管理'];
   const parts = sections.flatMap(sectionTitle => {

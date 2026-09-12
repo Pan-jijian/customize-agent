@@ -1,7 +1,7 @@
 /**
  * 第十四批边界矩阵（P 组）：文字形态族。
  * 覆盖：叠词重复与去重（P1）、表格断行残片合并（P2）、段首开场重复（P3）、
- * 概况段跨章复述与行级清洗（P4）、修复收敛循环（P5）。
+ * 概况段跨章复述（P4）、修复收敛循环（P5）。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -14,7 +14,6 @@ import {
   repeatedWordIssues,
   runDeterministicChainUntilConverged,
   runFixUntilClean,
-  stripOverviewRecapBodyLines,
 } from '@/services/document-workflow/documentIntegrityChecks';
 
 describe('P1 叠词重复：repeatedWordIssues + collapseRepeatedWords + REPEATED_WORD_RE', () => {
@@ -167,8 +166,7 @@ describe('P3 段首开场重复：paragraphOpeningRepeatIssues', () => {
   });
 });
 
-describe('P4 概况段跨章复述：overviewRecapCandidates/Issues/strip', () => {
-  const sim = (threshold: number) => (left: string, right: string) => (left === right ? 1 : threshold);
+describe('P4 概况段跨章复述：overviewRecapCandidates/Issues', () => {
   it('P4-1 概况区句子不入候选池', () => {
     const md = '## 工程概况\n本项目为某市市政道路改造工程。\n\n## 施工部署\n本章介绍施工组织。';
     const { overviewBody, sentences } = overviewRecapCandidates(md);
@@ -204,56 +202,25 @@ describe('P4 概况段跨章复述：overviewRecapCandidates/Issues/strip', () =
     expect(overviewBody).not.toContain('## 正文');
     expect(sentences).toHaveLength(1);
   });
-  it('P4-8 无相似度注入早退', () => {
-    const md = '## 工程概况\n本项目为某市市政道路改造工程。\n\n## 施工部署\n本项目为某市市政道路改造工程。';
-    expect(overviewRecapIssues(md)).toHaveLength(0);
-  });
-  it('P4-9 相似度达0.6报复述', () => {
-    const md = '## 工程概况\n本项目为某市市政道路改造工程。\n\n## 施工部署\n本项目为某市市政道路改造工程。';
-    const issues = overviewRecapIssues(md, { semanticSimilarity: sim(1) });
+  it('P4-8 项目名逐字搬用（≥8 汉字连续重合）→ 报', () => {
+    const md = '## 工程概况\n本项目为舒城县公共广场空间改造提升工程，总工期360日历天。\n\n## 施工部署\n本项目为舒城县公共广场空间改造提升工程，按分区流水组织施工。';
+    const issues = overviewRecapIssues(md);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('跨章复述');
   });
-  it('P4-10 相似度低于0.6不报', () => {
-    const md = '## 工程概况\n本项目为某市市政道路改造工程。\n\n## 施工部署\n本项目为某市市政道路改造工程。';
-    expect(overviewRecapIssues(md, { semanticSimilarity: sim(0.59) })).toHaveLength(0);
+  it('P4-9 范围清单摘抄（≥2 项逐字重合）→ 报', () => {
+    const md = '## 工程概况\n本工程主要施工内容包含公共广场改造、停车场改造、绿化工程等。\n\n## 施工部署\n本工程为综合改造工程，施工范围涉及公共广场、停车场、绿化工程等。';
+    expect(overviewRecapIssues(md)).toHaveLength(1);
+  });
+  it('P4-10 无概况事实重合的总述句 → 不报', () => {
+    const md = '## 工程概况\n本项目为某市市政道路改造工程，合同工期360日历天。\n\n## 施工部署\n本工程为多单体工程，各单体同步交叉施工。';
+    expect(overviewRecapIssues(md)).toHaveLength(0);
   });
   it('P4-11 复述句最多计3处', () => {
     const md = '## 工程概况\n本项目为某市市政道路改造工程。\n\n## 一\n本项目为某市市政道路改造工程。\n## 二\n本项目为某市市政道路改造工程。\n## 三\n本项目为某市市政道路改造工程。\n## 四\n本项目为某市市政道路改造工程。';
-    const issues = overviewRecapIssues(md, { semanticSimilarity: sim(1) });
+    const issues = overviewRecapIssues(md);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('3 处');
-  });
-  it('P4-12 strip删除达标复述句', () => {
-    const md = '## 工程概况\n本项目为某市市政道路改造工程。\n\n## 施工部署\n本项目为某市市政道路改造工程。';
-    const cleaned = stripOverviewRecapBodyLines(md, sim(1));
-    expect(cleaned).not.toContain('## 施工部署\n本项目为某市市政道路改造工程');
-  });
-  it('P4-13 strip保留不达标句', () => {
-    const md = '## 工程概况\n本项目为某市市政道路改造工程。\n\n## 施工部署\n本项目为某市市政道路改造工程。';
-    const cleaned = stripOverviewRecapBodyLines(md, sim(0.1));
-    expect(cleaned).toContain('本项目为某市市政道路改造工程。\n');
-  });
-  it('P4-14 strip概况区内句不删', () => {
-    const md = '## 工程概况\n本项目为某市市政道路改造工程。\n\n## 施工部署\n本章介绍施工组织。';
-    const cleaned = stripOverviewRecapBodyLines(md, sim(1));
-    expect(cleaned).toContain('## 工程概况\n本项目为某市市政道路改造工程。');
-  });
-  it('P4-15 strip标题行与表格行不碰', () => {
-    const md = '## 工程概况\n本项目为某市市政道路改造工程。\n\n### 本项目为标题\n| 本项目为表格 |\n\n## 施工部署\n本项目为某市市政道路改造工程。';
-    const cleaned = stripOverviewRecapBodyLines(md, sim(1));
-    expect(cleaned).toContain('### 本项目为标题');
-    expect(cleaned).toContain('| 本项目为表格 |');
-  });
-  it('P4-16 strip行内多句只删达标句', () => {
-    const md = '## 工程概况\n本项目为某市市政道路改造工程。\n\n## 施工部署\n本项目为某市市政道路改造工程。第二句保留完整内容。';
-    const cleaned = stripOverviewRecapBodyLines(md, sim(1));
-    expect(cleaned).toContain('第二句保留完整内容。');
-    expect(cleaned).not.toContain('本项目为某市市政道路改造工程。第二句');
-  });
-  it('P4-17 strip无变化返回原文引用', () => {
-    const md = '## 工程概况\n本项目为某市市政道路改造工程。\n\n## 施工部署\n本章介绍施工组织。';
-    expect(stripOverviewRecapBodyLines(md, sim(1))).toBe(md);
   });
 });
 

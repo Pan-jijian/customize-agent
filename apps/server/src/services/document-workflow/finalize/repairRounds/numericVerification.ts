@@ -4,7 +4,8 @@
  * 背景（编造数值拦截的最后一道确定性兜底）：写作侧已有温度 0 + 清单事实锁直读 + 证据注入预算放宽，
  * 但 LLM 仍可能在正文中混入材料/清单/蓝图里不存在的数值（幻觉数值、规格拆分错配、单位换算错）。
  * 本轮零 LLM 确定性提取正文数值句，与「资料原文 + 清单事实锁 + 蓝图参数桶 + 事实主表」构建的
- * 数值权威库做归一化包含匹配；未匹配数值句按章分组进入 LLM 定向修复轮（单轮，失败即放弃）。
+ * 数值权威库做归一化包含匹配；未匹配数值句按章分组进入 LLM 定向修复轮（V5 P4.2 收敛修复：
+ * 每章最多 2 轮，残留数下降才继续下一轮，不降或回滚即停止，未收敛残留转 warning 兜底不阻断交付）。
  *
  * 匹配策略宁漏勿错：白名单豁免（合规阈值句/相对进度句/过程百分比指标/纯年份）优先于报疑似——
  * 误报代价是修复轮把正确数值改坏，漏报代价是残留数值进交付；修复轮带 patchGuard 与回滚保护，
@@ -33,10 +34,11 @@ function extractNumericTokens(text: string): string[] {
   return [...new Set(matches.map(normToken))];
 }
 
-/** 数值句提取：按句分割后仅保留含数值 token 的句子（排除 Markdown 标题行） */
+/** 数值句提取：按句分割后仅保留含数值 token 的句子（排除 Markdown 标题行）。
+ * 注意：全局正则的 .test() 带 lastIndex 状态（句间泄漏会导致连续调用漏判句子），必须用无状态全量 match。 */
 function extractNumericSentences(content: string): string[] {
   const sentences = content.split(/[。；;！!？?\n]/u).map(sentence => sentence.trim()).filter(Boolean);
-  return sentences.filter(sentence => !sentence.startsWith('#') && NUMERIC_TOKEN_RE.test(sentence)).map(sentence => sentence.slice(0, 160));
+  return sentences.filter(sentence => !sentence.startsWith('#') && (sentence.match(NUMERIC_TOKEN_RE) ?? []).length > 0).map(sentence => sentence.slice(0, 160));
 }
 
 /** 白名单豁免判定：确定无疑的通用表述不报疑似（合规阈值句/相对进度句/过程百分比/纯年份） */
@@ -92,15 +94,17 @@ function buildNumericAuthority(session: FinalizeSession): Set<string> {
   return authority;
 }
 
+/** V5 P4.2 收敛修复：每章定向修复轮上限（残留数下降才继续下一轮；不降/回滚/达上限即停止，转 warning 兜底） */
+const MAX_NUMERIC_REPAIR_ROUNDS = 2;
+
 export async function stageNumericVerification(session: FinalizeSession): Promise<void> {
   const authority = buildNumericAuthority(session);
   // 权威库为空（无证据/无清单/无蓝图）时跳过本轮：没有权威可对，修复轮只会引入新的编造风险
   if (authority.size === 0) return;
-  // 章级疑似数值句提取：token 全部不在权威库且句级不豁免 → 疑似编造数值
-  const chapterSuspects = new Map<string, Array<{ sentence: string; tokens: string[] }>>();
-  for (const chapter of session.finalChapterDrafts) {
+  // 章级疑似数值句提取（全量计数口径：与收敛判定/recheck 同源，每轮修复后重算残留）
+  const collectSuspects = (content: string): Array<{ sentence: string; tokens: string[] }> => {
     const suspects: Array<{ sentence: string; tokens: string[] }> = [];
-    for (const sentence of extractNumericSentences(chapter.content)) {
+    for (const sentence of extractNumericSentences(content)) {
       if (isExemptSentence(sentence)) continue;
       const tokens = extractNumericTokens(sentence);
       if (tokens.length === 0) continue;
@@ -108,6 +112,11 @@ export async function stageNumericVerification(session: FinalizeSession): Promis
       const missingTokens = tokens.filter(token => !authority.has(token));
       if (missingTokens.length > 0) suspects.push({ sentence, tokens: missingTokens });
     }
+    return suspects;
+  };
+  const chapterSuspects = new Map<string, Array<{ sentence: string; tokens: string[] }>>();
+  for (const chapter of session.finalChapterDrafts) {
+    const suspects = collectSuspects(chapter.content);
     if (suspects.length > 0) chapterSuspects.set(chapter.id, suspects.slice(0, 12));
   }
   const totalSuspects = [...chapterSuspects.values()].reduce((sum, items) => sum + items.length, 0);
@@ -122,49 +131,68 @@ export async function stageNumericVerification(session: FinalizeSession): Promis
     const chapterIndex = session.finalChapterDrafts.findIndex(chapter => chapter.id === chapterId);
     if (chapterIndex < 0) continue;
     const draftChapter = session.finalChapterDrafts[chapterIndex];
-    const runningStage = displayStage({ type: 'llm_review', roleId: `agent-numeric-verification-${chapterId}`, status: 'running', message: `正文数值核对发现 ${suspects.length} 处疑似无来源数值，定向修复中：${draftChapter.title}`, details: suspects.map(item => `疑似：${item.sentence}（缺来源 token：${item.tokens.join('、')}）`) }, { subtitle: '数值确定性核对' });
-    upsertProgressStage(session.progressStages, runningStage);
-    upsertProgressStage(session.finalGateRepairStages, runningStage);
-    session.emitProgress(session.finalChapterDrafts, session.progressStages);
-    const numericInstruction = [
-      '【正文数值定向核对修复】',
-      '下列句子中的数值（标注「缺来源 token」）在项目绑定材料、工程量清单与蓝图中均找不到同值来源，属于疑似编造数值。请逐句核对并修复：',
-      '1. 若该数值在本章绑定证据中确实存在（仅表述口径不同），保持数值原样，只修正单位或表述；',
-      '2. 若该数值是行业通用工艺参数（如养护龄期、分层厚度），可按规范惯例保留并改为规范原文表述；',
-      '3. 其余情况必须删除该数值，改写为不带具体数值的过程控制表述（如「按设计要求」「分层碾压至压实度满足设计及规范要求」）；',
-      '禁止把疑似数值替换为另一个同样无来源的数值；禁止改动句子的非数值部分；只做局部修改，不得新增、删除或合并小节。',
-      suspects.map(item => `- 疑似句：${item.sentence}（缺来源 token：${item.tokens.join('、')}）`).join('\n'),
-    ].join('\n');
-    const numericOutcome = await withPatchRollback({
-      originalContent: draftChapter.content,
-      repairRound: 'numeric-verification',
-      diagnostics: session.generationDiagnostics,
-      apply: async () => {
-        const repaired = await session.withProgressHeartbeat(() => repairChapterByQuality({
-          template: session.template,
-          chapter: { id: draftChapter.id, title: draftChapter.title, content: draftChapter.content, evidence: draftChapter.evidence, missingFacts: draftChapter.missingFacts, sections: draftChapter.sections },
-          issues: suspects.map(item => `疑似无来源数值：${item.sentence}（token：${item.tokens.join('、')}）`),
-          promptTexts: numericInstruction,
-          requirement: session.requirement,
-          forbidDrawingImages: false,
-          diagnostics: session.generationDiagnostics,
-          signal: session.signal,
-          patchGuard: repairPatchGuard('numeric-verification', session.generationDiagnostics),
-        }));
-        return repaired.content && repaired.content !== draftChapter.content ? repaired.content : draftChapter.content;
-      },
-      recheck: (content) => {
-        const remaining = extractNumericSentences(content).filter(sentence => !isExemptSentence(sentence) && extractNumericTokens(sentence).some(token => !authority.has(token))).length;
-        return [remaining];
-      },
-    });
-    if (!numericOutcome.rolledBack && numericOutcome.content !== draftChapter.content) {
-      session.finalChapterDrafts[chapterIndex] = { ...draftChapter, content: numericOutcome.content };
-      repairedChapters += 1;
+    let chapterContent = draftChapter.content;
+    let pending = suspects;
+    let beforeCount = collectSuspects(chapterContent).length;
+    let rounds = 0;
+    let chapterRepaired = false;
+    let anyRollback = false;
+    // 残留轨迹（首计数 + 每轮修复后计数）：stage 明细与诊断展示收敛过程
+    const residualTrajectory = [beforeCount];
+    // V5 P4.2 收敛修复：残留数下降才继续下一轮（上限 2 轮）；清零/不降/回滚即停止，残留转 warning 兜底
+    while (pending.length > 0 && rounds < MAX_NUMERIC_REPAIR_ROUNDS) {
+      rounds += 1;
+      const runningStage = displayStage({ type: 'llm_review', roleId: `agent-numeric-verification-${chapterId}`, status: 'running', message: `正文数值核对发现 ${pending.length} 处疑似无来源数值，第 ${rounds} 轮定向修复中：${draftChapter.title}`, details: pending.map(item => `疑似：${item.sentence}（缺来源 token：${item.tokens.join('、')}）`) }, { subtitle: '数值确定性核对' });
+      upsertProgressStage(session.progressStages, runningStage);
+      upsertProgressStage(session.finalGateRepairStages, runningStage);
+      session.emitProgress(session.finalChapterDrafts, session.progressStages);
+      const numericInstruction = [
+        '【正文数值定向核对修复】',
+        ...(rounds > 1 ? [`本轮为第 ${rounds} 轮（最多 ${MAX_NUMERIC_REPAIR_ROUNDS} 轮）：上一轮修复后仍有残留，无法确认来源的数值必须直接删除，禁止保留或替换为其他无来源数值。`] : []),
+        '下列句子中的数值（标注「缺来源 token」）在项目绑定材料、工程量清单与蓝图中均找不到同值来源，属于疑似编造数值。请逐句核对并修复：',
+        '1. 若该数值在本章绑定证据中确实存在（仅表述口径不同），保持数值原样，只修正单位或表述；',
+        '2. 若该数值是行业通用工艺参数（如养护龄期、分层厚度），可按规范惯例保留并改为规范原文表述；',
+        '3. 其余情况必须删除该数值，改写为不带具体数值的过程控制表述（如「按设计要求」「分层碾压至压实度满足设计及规范要求」）；',
+        '禁止把疑似数值替换为另一个同样无来源的数值；禁止改动句子的非数值部分；只做局部修改，不得新增、删除或合并小节。',
+        pending.map(item => `- 疑似句：${item.sentence}（缺来源 token：${item.tokens.join('、')}）`).join('\n'),
+      ].join('\n');
+      const numericOutcome = await withPatchRollback({
+        originalContent: chapterContent,
+        repairRound: 'numeric-verification',
+        diagnostics: session.generationDiagnostics,
+        apply: async () => {
+          const repaired = await session.withProgressHeartbeat(() => repairChapterByQuality({
+            template: session.template,
+            chapter: { id: draftChapter.id, title: draftChapter.title, content: chapterContent, evidence: draftChapter.evidence, missingFacts: draftChapter.missingFacts, sections: draftChapter.sections },
+            issues: pending.map(item => `疑似无来源数值：${item.sentence}（token：${item.tokens.join('、')}）`),
+            promptTexts: numericInstruction,
+            requirement: session.requirement,
+            forbidDrawingImages: false,
+            diagnostics: session.generationDiagnostics,
+            signal: session.signal,
+            patchGuard: repairPatchGuard('numeric-verification', session.generationDiagnostics),
+          }));
+          return repaired.content && repaired.content !== chapterContent ? repaired.content : chapterContent;
+        },
+        recheck: (content) => [collectSuspects(content).length],
+      });
+      if (!numericOutcome.rolledBack && numericOutcome.content !== chapterContent) {
+        chapterContent = numericOutcome.content;
+        session.finalChapterDrafts[chapterIndex] = { ...draftChapter, content: chapterContent };
+        chapterRepaired = true;
+      }
+      if (numericOutcome.rolledBack) anyRollback = true;
+      const afterCount = collectSuspects(chapterContent).length;
+      residualTrajectory.push(afterCount);
+      // 收敛判定：清零即通过；未下降（含回滚/空修复）即停止；下降且未达上限 → 再修一轮（残留数下降才继续）
+      if (afterCount === 0 || afterCount >= beforeCount || rounds >= MAX_NUMERIC_REPAIR_ROUNDS) break;
+      beforeCount = afterCount;
+      pending = collectSuspects(chapterContent).slice(0, 12);
     }
-    const afterSuspects = extractNumericSentences((session.finalChapterDrafts[chapterIndex] || draftChapter).content).filter(sentence => !isExemptSentence(sentence) && extractNumericTokens(sentence).some(token => !authority.has(token))).length;
+    if (chapterRepaired) repairedChapters += 1;
+    const afterSuspects = collectSuspects(chapterContent).length;
     residualSuspects += afterSuspects;
-    const completedStage = displayStage({ type: 'llm_review', roleId: `agent-numeric-verification-${chapterId}`, status: numericOutcome.rolledBack ? 'failed' : afterSuspects === 0 ? 'success' : 'failed', message: numericOutcome.rolledBack ? `数值核对修复已回滚：${draftChapter.title}（修复后疑似数值增多，保留修复前正文）` : afterSuspects === 0 ? `数值核对修复完成：${draftChapter.title}（${suspects.length} 处疑似数值已处理）` : `数值核对修复部分生效：${draftChapter.title}（残留 ${afterSuspects} 处疑似数值，单轮失败即放弃）`, details: [...suspects.map(item => `疑似：${item.sentence}`), afterSuspects > 0 ? '残留项以 warning 记录，不阻断交付' : ''] }, { subtitle: '数值确定性核对' });
+    const completedStage = displayStage({ type: 'llm_review', roleId: `agent-numeric-verification-${chapterId}`, status: afterSuspects === 0 ? 'success' : 'failed', message: afterSuspects === 0 ? `数值核对修复完成：${draftChapter.title}（${suspects.length} 处疑似数值已处理，残留轨迹 ${residualTrajectory.join('→')}）` : chapterRepaired ? `数值核对修复部分生效：${draftChapter.title}（疑似数值残留轨迹 ${residualTrajectory.join('→')}，已执行 ${rounds} 轮定向修复（每章最多 ${MAX_NUMERIC_REPAIR_ROUNDS} 轮）；残留项以 warning 记录，不阻断交付）` : anyRollback ? `数值核对修复已回滚：${draftChapter.title}（修复后疑似数值增多，保留修复前正文；残留 ${afterSuspects} 处以 warning 记录，不阻断交付）` : `数值核对修复未生效：${draftChapter.title}（模型未产生有效修改；残留 ${afterSuspects} 处以 warning 记录，不阻断交付）`, details: [...suspects.map(item => `疑似：${item.sentence}`), afterSuspects > 0 ? `已执行 ${rounds} 轮定向修复，残留项以 warning 记录，不阻断交付` : ''] }, { subtitle: '数值确定性核对' });
     upsertProgressStage(session.progressStages, completedStage);
     upsertProgressStage(session.finalGateRepairStages, completedStage);
     session.emitProgress(session.finalChapterDrafts, session.progressStages);
@@ -173,5 +201,5 @@ export async function stageNumericVerification(session: FinalizeSession): Promis
     session.finalMarkdown = session.rebuildFinalMarkdown();
     await session.recomputeFinalValidationBundle();
   }
-  session.generationDiagnostics.llm.lastInfo = `正文数值确定性核对：权威库 ${authority.size} token，${totalSuspects} 处疑似无来源数值，${repairedChapters} 章完成定向修复，残留 ${residualSuspects} 处（单轮失败即放弃）`;
+  session.generationDiagnostics.llm.lastInfo = `正文数值确定性核对：权威库 ${authority.size} token，${totalSuspects} 处疑似无来源数值，${repairedChapters} 章完成定向修复，残留 ${residualSuspects} 处（每章最多 ${MAX_NUMERIC_REPAIR_ROUNDS} 轮收敛修复，未收敛残留以 warning 记录，不阻断交付）`;
 }

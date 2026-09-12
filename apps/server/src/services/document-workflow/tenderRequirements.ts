@@ -1184,17 +1184,15 @@ export { documentTextLength };
 // B1 商务口径条款确定性补写豁免：条款文本含商务词的零响应/部分响应条款跳过确定 性补写——
 // 补写原文会被交付前 stripCommercialDataBodyLines 商务词清洗删除形成无效闭环（ 补了即被删），
 // 交 LLM 修复轮改写为定性表述（如「按合同约定执行」）。词表与 documentIntegrityChecks.COMMERCIAL_TERM_RE 同源
-// B6 预付款/担保类豁免例外（丰乐镇第六轮实测）：预付款条款文本含「暂列金额」（扣除暂列金额的30%）
-// 被商务词误跳过永不补写，检测器持续报部分响应阻断；预付款补写句为定性表述（按条款执行）
-// 不含商务词，不会被清洗删除，属误跳——预付款/支付担保/保证金类条款不跳过
-const SCORING_FIX_COMMERCIAL_SKIP_RE = /暂列金额|暂估价|报价明细|综合单价|清单合价|预留金|投标报价|综合税率|增值税|税率/u;
-const SCORING_FIX_PAYMENT_TERM_RE = /预付款|支付担保|履约保证金|工程款担保/u;
+// 第十六版修复：SCORING_FIX_COMMERCIAL_SKIP_RE 整条跳过补写的逻辑已删除（商务条款零响应闭环断裂根因），
+// 商务类前附表硬性条款统一走 commercialClauseResponse 定性句补写（不抄商务参数原文）
 
 // round-27 污染根治（丰乐镇实测：成品出现「招标要求响应（前附表响应条款）：履约保证金金额：
 // 中标金额的2%；…」「发包人逾期支付进度款的违约金…LPR」等商务条款原文被逐条抄入技术标正文）——
 // 商务条款的金额/时限/利率参数属商务文件内容，技术标只做定性响应：
 // 检测侧数字锚点豁免（不强制 2%/14天/LPR 落位正文），补写侧不抄条款原文只写定性落实句
-const COMMERCIAL_RESPONSE_RE = /履约保证金|保证金账户|中标金额|进度款|工程款|付款|结清|结算|违约金|贷款市场报价利率|LPR|最高投标限价|工程结算价款|预付款|支付担保|保函/u;
+// 第十六版扩围：暂列金额/结算核减/清单异议/增值税等商务硬性条款（此前不在词表内走非商务分支抄条款原文）
+const COMMERCIAL_RESPONSE_RE = /履约保证金|保证金账户|中标金额|进度款|工程款|付款|结清|结算|违约金|贷款市场报价利率|LPR|最高投标限价|工程结算价款|预付款|支付担保|保函|暂列金额|暂估价|结算核减|造价咨询费|工程量.*异议|增值税|异地纳税人/u;
 
 function isCommercialResponseClause(text: string) {
   return COMMERCIAL_RESPONSE_RE.test(text);
@@ -1202,13 +1200,19 @@ function isCommercialResponseClause(text: string) {
 
 /** 商务条款定性响应句（技术标口径：只声明按约定执行，不落商务参数） */
 function commercialClauseResponse(text: string): string {
-  if (/违约金|贷款市场报价利率|LPR/u.test(text)) return '本工程工期延误违约金按招标文件约定条款执行，进度计划与纠偏措施见工期章节。';
+  if (/违约金|贷款市场报价利率|LPR/u.test(text)) return '本工程工期延误违约金按招标文件约定条款执行，进度计划与纠偏措施按进度管理制度落实。';
   if (/保证金/u.test(text)) return '本工程履约保证金按招标文件约定的金额、提交期限与退还时限执行，可按约定以保函形式替代。';
   if (/预付款/u.test(text)) return '本工程预付款的支付、扣回与使用按招标文件约定执行，专款用于施工准备。';
   if (/支付担保/u.test(text)) return '本工程发包人工程款支付担保按招标文件约定执行，担保办结后我方按约组织进场施工。';
   if (/扬尘/u.test(text)) return '本工程扬尘污染防治费用与建筑工人实名制管理费用按招标文件约定列入费用计划并专款专用。';
   if (/结清|结算|付款|进度款|工程款/u.test(text)) return '本工程进度款、竣工结算款与最终结清款的支付审批时限按招标文件约定执行。';
   if (/最高投标限价/u.test(text)) return '本工程相关费用按招标文件约定列入计划并专款专用。';
+  // 第十六版零响应修复：商务类前附表硬性条款逐一给技术响应句（定性声明，不含商务参数）
+  if (/暂列金额|暂估价/u.test(text)) return '本工程暂列金额按招标文件约定计入投标总价并按规定计税，暂列金额的使用范围与计价规则按合同约定执行。';
+  if (/核减|造价咨询费/u.test(text)) return '本工程竣工结算核减比例与造价咨询费承担方式按招标文件约定执行，结算编制与报审按合同约定时限办理。';
+  if (/清单.*异议|工程量.*错误|异议.*清单/u.test(text)) return '本工程开工前完成工程量清单核对，对清单工程量的异议按招标文件约定的期限与方式提出并附计算依据。';
+  if (/增值税|纳税人/u.test(text)) return '本工程按招标文件约定的计税方法执行异地纳税人增值税相关规定，计税资料与申报口径按合同约定办理。';
+  if (/投标报价.*覆盖|报价.*一切/u.test(text)) return '本工程投标报价已覆盖招标文件要求的全部工作内容，施工期间发生的工程内容均按合同约定的计量计价规则执行。';
   return '本工程相关商务条款按招标文件约定执行。';
 }
 
@@ -1245,7 +1249,10 @@ export async function fixScoringRequirementResponses(input: {
     let route = routeByItem.get(item);
     if (!route && fallbackChapterTitle) route = { kind, item, chapterTitle: fallbackChapterTitle, score: 0 };
     if (!route) continue;
-    if (SCORING_FIX_COMMERCIAL_SKIP_RE.test(item.text) && !SCORING_FIX_PAYMENT_TERM_RE.test(item.text)) continue;
+    // 第十六版修复：商务类条款不再整条跳过补写——跳过导致「检测报/补写不补」闭环断裂，
+    // 前附表硬性条款（暂列金额/核减/清单异议/增值税）零响应永无修复。
+    // round-27 污染防线保留：商务条款补写走 commercialClauseResponse 定性句（不含商务参数原文），
+    // 与技术标口径一致，不复制条款数字进正文。
     const coverage = requirementAnchorCoverage(item, normalizedAcc, { skipNumericAnchors: isCommercialResponseClause(item.text) });
     // 锚点全覆盖且锚点非空 → 已响应（锚点空条款由语义通道判定，确定性补写不越权）
     if (coverage.total > 0 && coverage.missing.length === 0) continue;
@@ -1260,6 +1267,8 @@ export async function fixScoringRequirementResponses(input: {
     // A7 无要求条款豁免（丰乐镇实测）：绿色建筑等级要求值为「无」时套用“承诺严格落实”产生逻辑矛盾
     // （无要求却承诺落实）且属套话；改为“无强制要求”直述，不额外承诺超范围事项
     const noRequirement = /(?:要求|等级|标准)[：:]\s*无\s*$/u.test(item.text.trim());
+    // 条款原文以省略号结尾（资料截断残留）时裁掉省略号，避免补写句带「……」入正文（第十六版第十一章末尾截断实锤）
+    const clauseText = item.text.trim().replace(/\.\.\.+|…+$/u, '');
     // B5 补写句式差异化（丰乐镇第三轮实测）：全条款统一「我方承诺严格落实本项要求，并配置相应的
     // 管理措施与实施保障」同一句式，全维度评审判「模板化承诺句式/实质性响应缺失」阻断；
     // 按条款关键词生成差异化落实句，条款实质内容由条款全文承载，落位句只声明执行边界不重复套话。
@@ -1268,8 +1277,8 @@ export async function fixScoringRequirementResponses(input: {
     const paragraph = isCommercialResponseClause(item.text)
       ? `按招标文件约定：${commercialClauseResponse(item.text)}`
       : (noRequirement
-        ? `按招标文件要求：${item.text}，本项无强制要求，施工按现行国家及地方相关标准执行。`
-        : `按招标文件要求：${item.text}。${scoringResponseTail(item.text)}`);
+        ? `按招标文件要求：${clauseText}，本项无强制要求，施工按现行国家及地方相关标准执行。`
+        : `按招标文件要求：${clauseText}。${scoringResponseTail(item.text)}`);
     chapter.content = `${chapter.content.replace(/\s+$/u, '')}\n\n${paragraph}`;
     normalizedAcc += paragraph.replace(/\s+/gu, '');
     fixedCount += 1;
@@ -1288,12 +1297,12 @@ function scoringResponseTail(text: string): string {
   if (/隐蔽工程/u.test(text)) return '本工程隐蔽验收按上述时限提前通知监理单位参加检查。';
   if (/预付款/u.test(text)) return '本工程预付款的支付、扣回与使用按上述条款执行，专款用于施工准备。';
   if (/扬尘/u.test(text)) return '本工程扬尘污染防治费用按上述条款列入计划并专款专用。';
-  if (/工期延误|违约金/u.test(text)) return '本工程工期与违约金管理按上述条款执行，进度计划与纠偏措施见工期章节。';
+  if (/工期延误|违约金/u.test(text)) return '本工程工期与违约金管理按上述条款执行，进度计划与纠偏措施按进度管理制度落实。';
   if (/保证金/u.test(text)) return '本工程保证金缴纳、退还与保函替代按上述条款执行。';
   if (/更换主要施工管理人员|更换项目经理/u.test(text)) return '本工程主要施工管理人员保持稳定，确需更换时提前按上述条款提交书面申请并获发包人书面同意后执行。';
-  if (/农民工工资专用账户|农民工工资/u.test(text)) return '本工程农民工工资专用账户按上述条款设立并专款专用，实名制管理与工资支付保障措施见劳动力安排计划章。';
+  if (/农民工工资专用账户|农民工工资/u.test(text)) return '本工程农民工工资专用账户按上述条款设立并专款专用，实名制管理与工资支付保障按劳动力管理制度落实。';
   if (/支付担保/u.test(text)) return '本工程发包人工程款支付担保按上述条款执行，担保办结后我方按约组织进场施工。';
-  if (/安全生产|事故/u.test(text)) return '本工程安全生产无事故目标与带班检查频次按上述条款执行，具体管控措施见安全生产章。';
+  if (/安全生产|事故/u.test(text)) return '本工程安全生产无事故目标与带班检查频次按上述条款执行，现场安全管理按安全检查与整改销项制度落实。';
   if (/工程报表|周报/u.test(text)) return '本工程每月25日前报送工程报表与下月计划、周例会前一天报送周报，由资料员按期编制报送。';
   if (/竣工资料|竣工结算/u.test(text)) return '本工程竣工资料套数与移交时限按上述条款执行，竣工结算申请与审批按约定时限办理。';
   if (/缺陷责任期|保修/u.test(text)) return '本工程缺陷责任期与保修响应时限按上述条款执行，保修期内接到通知按时限到场修复。';

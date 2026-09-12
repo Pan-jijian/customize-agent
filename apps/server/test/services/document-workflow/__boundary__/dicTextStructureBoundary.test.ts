@@ -1,7 +1,7 @@
 /**
  * 文本结构类检测器边界矩阵（P1 第 4 批）
  * 覆盖：bodySentencesForSemantic（句子采样）/ paragraphOpeningRepeatIssues（段首机械重复）/
- * overviewRecapCandidates+overviewRecapIssues+stripOverviewRecapBodyLines（概况复述）/
+ * overviewRecapCandidates+overviewRecapIssues（概况复述）/
  * closurePhraseDensityCapIssues（闭环密度）/ repeatedWordIssues+collapseRepeatedWords（叠词）/
  * mergeTableLineResidues（表格残行合并）/ duplicateParagraphIssues+stripDuplicateParagraphs（段落重复）/
  * duplicateTableIssues+stripDuplicateTables+stripDuplicateTablesAcrossChapters（表格重复）
@@ -12,7 +12,7 @@ import {
   duplicateParagraphIssues, duplicateTableIssues, mergeTableLineResidues,
   overviewRecapCandidates, overviewRecapIssues, paragraphOpeningRepeatIssues,
   repeatedWordIssues, stripDuplicateParagraphs, stripDuplicateTables,
-  stripDuplicateTablesAcrossChapters, stripOverviewRecapBodyLines,
+  stripDuplicateTablesAcrossChapters,
 } from '@/services/document-workflow/documentIntegrityChecks';
 
 // ── A. 语义判定句子提取 ──
@@ -184,71 +184,38 @@ describe('C1 overviewRecapCandidates 结构召回', () => {
   });
 });
 
-describe('C2 overviewRecapIssues 语义判定', () => {
-  const base = '## 工程概况\n本项目总建筑面积为两万六千平方米，计划工期五百四十天。\n## 施工方案\n本项目为合肥市包河区境内施工项目。';
-  const simAt = (threshold: number) => (_left: string, _right: string) => threshold;
-  it('C2 相似度 0.59 不报', () => {
-    expect(overviewRecapIssues(base, { semanticSimilarity: simAt(0.59) })).toEqual([]);
+describe('C2 overviewRecapIssues 确定性判定', () => {
+  it('C2 概况事实逐字搬用（≥8 汉字连续重合）→ 报', () => {
+    const md = '## 工程概况\n本项目为合肥市包河区花园小区项目，总建筑面积为两万六千平方米，计划工期五百四十天。\n## 施工方案\n本项目为合肥市包河区花园小区项目，总建筑面积为两万六千平方米，计划工期五百四十天。';
+    const issues = overviewRecapIssues(md);
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('跨章复述');
   });
-  it('C2 相似度 0.6 报', () => {
-    expect(overviewRecapIssues(base, { semanticSimilarity: simAt(0.6) }).length).toBe(1);
+  it('C2 范围清单摘抄（≥2 项逐字重合）→ 报', () => {
+    const md = '## 工程概况\n本工程主要施工内容包含公共广场改造、停车场改造、绿化工程等。\n## 施工方案\n本工程为综合改造工程，施工范围涉及公共广场、停车场、绿化工程等。';
+    expect(overviewRecapIssues(md).length).toBe(1);
   });
-  it('C2 相似度 0.61 报', () => {
-    expect(overviewRecapIssues(base, { semanticSimilarity: simAt(0.61) }).length).toBe(1);
+  it('C2 无概况事实重合的总述句 → 不报', () => {
+    const md = '## 工程概况\n本项目总建筑面积为两万六千平方米，计划工期五百四十天。\n## 施工方案\n本项目为合肥市包河区境内施工项目。';
+    expect(overviewRecapIssues(md)).toEqual([]);
   });
-  it('C2 未注入相似度函数不报', () => {
-    expect(overviewRecapIssues(base)).toEqual([]);
+  it('C2 范围项重合不足 2 项 → 不报', () => {
+    const md = '## 工程概况\n本项目为某市安置小区项目，施工内容含绿化工程、游步道等。\n## 施工方案\n本项目为改造工程，作业分区含铺装、绿化工程、成品保护。';
+    expect(overviewRecapIssues(md)).toEqual([]);
   });
   it('C2 无概况区不报', () => {
     const md = '## 施工方案\n本项目为合肥市包河区境内施工项目。';
-    expect(overviewRecapIssues(md, { semanticSimilarity: simAt(0.9) })).toEqual([]);
+    expect(overviewRecapIssues(md)).toEqual([]);
   });
   it('C2 复述句 4 处只收 3 处', () => {
-    const md = '## 工程概况\n概况正文内容。\n## 施工方案\n本项目为复述甲内容施工安排。\n本项目为复述乙内容施工安排。\n本项目为复述丙内容施工安排。\n本项目为复述丁内容施工安排。';
-    const issues = overviewRecapIssues(md, { semanticSimilarity: simAt(0.9) });
+    const md = '## 工程概况\n本项目为合肥市包河区花园小区项目，总建筑面积为两万六千平方米。\n## 施工方案\n本项目为合肥市包河区花园小区项目，总建筑面积为两万六千平方米。\n本项目为合肥市包河区花园小区项目，总建筑面积为两万六千平方米。\n本项目为合肥市包河区花园小区项目，总建筑面积为两万六千平方米。\n本项目为合肥市包河区花园小区项目，总建筑面积为两万六千平方米。';
+    const issues = overviewRecapIssues(md);
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('3 处');
   });
   it('C2 概况区间内开头谱系句不报', () => {
     const md = '## 工程概况\n本项目为概况区内合法句。\n## 施工方案\n本段无复述句。';
-    expect(overviewRecapIssues(md, { semanticSimilarity: simAt(0.9) })).toEqual([]);
-  });
-});
-
-describe('C3 stripOverviewRecapBodyLines 行级清洗', () => {
-  const simHigh = (_left: string, _right: string) => 0.8;
-  const simLow = (_left: string, _right: string) => 0.4;
-  it('C3 达标复述句整行删除', () => {
-    const md = '## 工程概况\n概况正文内容。\n## 施工方案\n本项目为合肥市包河区境内施工。\n保留内容行。';
-    const result = stripOverviewRecapBodyLines(md, simHigh);
-    expect(result).not.toContain('本项目为');
-    expect(result).toContain('保留内容行。');
-  });
-  it('C3 低相似度句保留', () => {
-    const md = '## 工程概况\n概况正文内容。\n## 施工方案\n本项目为合肥市包河区境内施工。';
-    expect(stripOverviewRecapBodyLines(md, simLow)).toBe(md);
-  });
-  it('C3 句长不足 12 字保留', () => {
-    const md = '## 工程概况\n概况正文内容。\n## 施工方案\n本项目为改建工程。';
-    expect(stripOverviewRecapBodyLines(md, simHigh)).toBe(md);
-  });
-  it('C3 多句行只删达标句', () => {
-    const md = '## 工程概况\n概况正文内容。\n## 施工方案\n本项目为合肥市包河区境内施工。本段正常内容保留。';
-    const result = stripOverviewRecapBodyLines(md, simHigh);
-    expect(result).not.toContain('本项目为合肥市包河区境内施工。');
-    expect(result).toContain('本段正常内容保留。');
-  });
-  it('C3 概况区间行/标题行/表格行不碰', () => {
-    const md = '## 工程概况\n本项目为概况区内合法句。\n## 施工方案\n# 本项目为标题行\n| 本项目为表格行 |\n本项目为合肥市包河区境内施工。';
-    const result = stripOverviewRecapBodyLines(md, simHigh);
-    expect(result).toContain('本项目为概况区内合法句。');
-    expect(result).toContain('# 本项目为标题行');
-    expect(result).toContain('| 本项目为表格行 |');
-    expect(result).not.toContain('本项目为合肥市包河区境内施工。');
-  });
-  it('C3 无概况区不改动', () => {
-    const md = '## 施工方案\n本项目为合肥市包河区境内施工。';
-    expect(stripOverviewRecapBodyLines(md, simHigh)).toBe(md);
+    expect(overviewRecapIssues(md)).toEqual([]);
   });
 });
 

@@ -9,9 +9,13 @@ import type { ValidationIssue } from './types';
  * （两两余弦 ≥0.6 合并为同簇，并查集）→ L2 同簇内显著不同数值判定冲突（差异 >2%，排除并列枚举）。
  * 零误伤原则：本地 bge 恒可用（本地 ONNX 推理），嵌入失败直接抛出；
  * 并列枚举（"600mm/800mm/1000mm 三种规格"）不判冲突。
+ * V5 P6 误报收口（run1 实测，三防线）：①簇级倍数门——同一参数口径偏差不可能达 4 倍以上，
+ * 超出必是跨对象 bge 误聚类（实测误报簇 4.84/6/11/13 倍全部收口，原 20 倍门有漏网）；
+ * ②单位一致性——同簇跨单位数值不可互比（「2 处] vs「22 天」误聚根因）；
+ * ③概念黑名单——对象计数类概念（自然村/标段/点位等）是对象枚举计数非参数多口径。
  */
 
-const PARAM_TOKEN_RE = /([\u4e00-\u9fa5A-Za-z0-9（）()]{1,12}?)(\d+(?:\.\d+)?)\s*(?:mm|cm|m|米|MPa|kN|kV|kW|℃|°C|元|万元|人|天|日|个|层|樘|处|套|台|t|吨)([\u4e00-\u9fa5A-Za-z0-9（）()]{0,8})/gu;
+const PARAM_TOKEN_RE = /([\u4e00-\u9fa5A-Za-z0-9（）()]{1,12}?)(\d+(?:\.\d+)?)\s*(mm|cm|m|米|MPa|kN|kV|kW|℃|°C|万元|元|人|天|日|个|层|樘|处|套|台|t|吨)([\u4e00-\u9fa5A-Za-z0-9（）()]{0,8})/gu;
 
 /** 纯通用量词表：概念归一化后仅为量词本身（无具体对象）时退出聚类——
  * 不同对象的「直径22mm」「直径48.3mm」（锚杆 vs 钢管）同词形不同对象，聚同簇必误报（合肥师范实测）。 */
@@ -20,6 +24,11 @@ const GENERIC_MEASURE_WORDS = [
   '数量', '面积', '体积', '重量', '压力', '温度', '强度', '等级', '坡度', '规格',
   '尺寸', '层数', '次数', '跨度', '半径',
 ] as const;
+
+/** 概念黑名单（run1 实测误报收口）：对象计数类概念——「13 个自然村 / 1 个标段 / 2 处踏勘点位」
+ * 是对象的枚举计数而非同一参数的多口径取值，跨对象 bge 误聚簇时数字天然异构（13 vs 1）；
+ * 此类数字一致性由跨章/审计通道把关，不参与参数口径互斥（「养护」类时长按对象天然多口径同）。 */
+const CONCEPT_BLACKLIST_RE = /自然村|村组|标段|区域|点位|养护/u;
 
 /** 概念归一化：去除单位词与标点后仅保留概念词面 */
 function normalizeConcept(concept: string): string {
@@ -35,7 +44,7 @@ function dot(left: number[], right: number[]): number {
   return sum;
 }
 
-interface ParamToken { concept: string; value: number; raw: string }
+interface ParamToken { concept: string; value: number; unit: string; raw: string }
 
 function extractParamTokens(markdown: string): ParamToken[] {
   const tokens: ParamToken[] = [];
@@ -46,13 +55,16 @@ function extractParamTokens(markdown: string): ParamToken[] {
     for (const match of trimmed.matchAll(new RegExp(PARAM_TOKEN_RE.source, 'gu'))) {
       const prefix = (match[1] || '').trim();
       const value = Number(match[2]);
-      const suffix = (match[3] || '').trim();
+      const unit = match[3] || '';
+      const suffix = (match[4] || '').trim();
       // 概念语境 = 数值前后短语去空白；语境过短（纯标点/无概念词）不参与聚类
       const concept = `${prefix}${suffix}`.replace(/[\s,，、；;：:]/gu, '');
       if (concept.length < 2 || !/[\u4e00-\u9fa5A-Za-z]{2,}/u.test(concept) || !Number.isFinite(value) || value <= 0) continue;
       // 纯通用量词概念跳过：无具体对象无从判定口径，不同对象同量词聚簇必误报
       if (GENERIC_MEASURE_WORDS.some(word => normalizeConcept(concept) === word)) continue;
-      tokens.push({ concept, value, raw: match[0] });
+      // 对象计数类概念跳过（非参数口径，见 CONCEPT_BLACKLIST_RE）
+      if (CONCEPT_BLACKLIST_RE.test(concept)) continue;
+      tokens.push({ concept, value, unit, raw: match[0] });
     }
   }
   // 去重：同 raw 只留一个（同一表述重复出现不算冲突）
@@ -115,19 +127,34 @@ export async function parameterConceptConflictIssues(markdown: string): Promise<
   const conflicts: string[] = [];
   for (const group of clusters.values()) {
     if (group.length < 2) continue;
-    const values = [...new Set(group.map(token => token.value))];
-    if (values.length < 2) continue;
-    const maxValue = Math.max(...values);
-    const minValue = Math.min(...values);
-    // 差异 >2% 才算显著冲突；同簇同值多表述不算
-    if (maxValue - minValue <= maxValue * 0.02) continue;
-    // 极端差异（>20 倍）跳过：跨对象/跨语境的 bge 误聚类（如「地下1层」vs「坡面喷射80mm」）
-    // 不可能是同一参数口径，防语义误判（合肥师范实测误报源）
-    if (maxValue > minValue * 20) continue;
-    // 排除并列枚举：任一 token 原文后紧跟"、"或"/"且同句出现另一数字+单位
-    const enumerations = group.filter(token => /[、/](?:与)?\d/u.test(token.raw));
-    if (enumerations.length >= 2) continue;
-    conflicts.push(`“${group[0].concept}”出现多个口径：${[...new Set(group.map(token => token.raw))].slice(0, 3).join('、')}`);
+    // 簇级倍数门（>4 倍整簇跳过）：同一参数口径偏差不可能达 4 倍以上，超出必是跨对象 bge
+    // 误聚类——run1 实测误报簇 4.84/6/11/13 倍全部收口（原 >20 倍门对「13 个自然村 vs
+    // 1 个标段」类跨对象计数聚簇有漏网），整簇跳过不再细分。
+    const groupMax = Math.max(...group.map(token => token.value));
+    const groupMin = Math.min(...group.map(token => token.value));
+    if (groupMax > groupMin * 4) continue;
+    // 单位一致性（run1 实测误报收口）：同簇不同单位的数值不可互比（bge 把「踏勘点位不少于
+    // 2 处」与「驻场每月不少于 22 天」误聚同簇）——按单位分组后仅同单位组内 ≥2 个显著差异值才判冲突
+    const byUnit = new Map<string, ParamToken[]>();
+    for (const token of group) {
+      const unitGroup = byUnit.get(token.unit) || [];
+      unitGroup.push(token);
+      byUnit.set(token.unit, unitGroup);
+    }
+    for (const unitGroup of byUnit.values()) {
+      if (unitGroup.length < 2) continue;
+      const values = [...new Set(unitGroup.map(token => token.value))];
+      if (values.length < 2) continue;
+      const maxValue = Math.max(...values);
+      const minValue = Math.min(...values);
+      // 差异 >2% 才算显著冲突；同簇同值多表述不算
+      if (maxValue - minValue <= maxValue * 0.02) continue;
+      // 排除并列枚举：任一 token 原文后紧跟"、"或"/"且同句出现另一数字+单位
+      const enumerations = unitGroup.filter(token => /[、/](?:与)?\d/u.test(token.raw));
+      if (enumerations.length >= 2) continue;
+      conflicts.push(`“${unitGroup[0].concept}”出现多个口径：${[...new Set(unitGroup.map(token => token.raw))].slice(0, 3).join('、')}`);
+      if (conflicts.length >= 4) break;
+    }
     if (conflicts.length >= 4) break;
   }
   if (conflicts.length === 0) return [];

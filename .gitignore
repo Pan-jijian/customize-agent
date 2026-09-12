@@ -70,3 +70,5 @@ skills/
 # Claude Code 项目文件
 .CLAUDE.md
 .publish-npm-cache/
+# 本地调试与验证运行产物（轮询日志/落盘响应）
+.dbg/

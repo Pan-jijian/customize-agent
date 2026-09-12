@@ -378,11 +378,11 @@ describe('GG25 奖项白名单：tenderRequirements 未提取', () => {
 
 // ── GG28. 众数冲突阈值 false 侧（L3287） ──
 
-describe('GG28 众数权威：差异未超 20% 不启用', () => {
-  it('GG28 两表格行 10具/11具 差异 ≤20% → 无冲突无权威 → 不动', () => {
+describe('GG28 众数权威：不同数值即启用（平手取大）', () => {
+  it('GG28 两表格行 10具/11具 不同数值 → 众数权威 11 → 10→11', () => {
     const result = applyNumericConsistencyDeterministicFixes('| 区域 | 灭火器 | 10具 |\n| 区域 | 灭火器 | 11具 |');
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toContain('10具');
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).not.toContain('10具');
     expect(result.markdown).toContain('11具');
   });
 });

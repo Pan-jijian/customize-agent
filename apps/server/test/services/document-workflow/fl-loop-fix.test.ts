@@ -92,7 +92,6 @@ describe('splitSinglePointOversizedBlocks 单要点大块拆分', () => {
     blocks,
     coveredSections: [],
     fallbackSections: [],
-    llmPlanned: true,
   });
 
   it('单要点且目标>2400 的块拆为两个半块（目标减半、共享要点、带分工指令）', () => {
@@ -101,8 +100,9 @@ describe('splitSinglePointOversizedBlocks 单要点大块拆分', () => {
     ]);
     const result = splitSinglePointOversizedBlocks(structure);
     expect(result.blocks.length).toBe(2);
-    expect(result.blocks[0].title).toBe('编制说明与工程概况（一）');
-    expect(result.blocks[1].title).toBe('编制说明与工程概况（二）');
+    // A2：拆半两半块共享同一父块标题（不加「（一）（二）」后缀，防撞名泄漏目录），靠 halfFocus 区分
+    expect(result.blocks[0].title).toBe('编制说明与工程概况');
+    expect(result.blocks[1].title).toBe('编制说明与工程概况');
     expect(result.blocks[0].targetWords).toBe(1800);
     expect(result.blocks[1].targetWords).toBe(1800);
     expect(result.blocks[0].subPoints).toHaveLength(1);
@@ -150,6 +150,6 @@ describe('splitSinglePointOversizedBlocks 单要点大块拆分', () => {
     ]);
     const result = splitSinglePointOversizedBlocks(structure);
     expect(result.blocks.length).toBe(4);
-    expect(result.blocks.map(block => block.title)).toEqual(['编制说明与工程概况（一）', '编制说明与工程概况（二）', '项目主要施工内容', '正常块']);
+    expect(result.blocks.map(block => block.title)).toEqual(['编制说明与工程概况', '编制说明与工程概况', '项目主要施工内容', '正常块']);
   });
 });

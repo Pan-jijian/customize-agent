@@ -1,4 +1,4 @@
-import { closedLoopDensityIssues, plannedAutoSpecGateIssues, basisRegulationsCoverageIssues, resourceBreakdownConsistencyIssues, punctuationArtifactIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
+import { closedLoopDensityIssues, plannedAutoSpecGateIssues, basisRegulationsCoverageIssues, resourceBreakdownConsistencyIssues, punctuationArtifactIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, sectionCountOverflowIssues, sectionNumberingIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
 import { majorContentGovernanceIssues } from './constructionOrgQualityRules';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
@@ -8,7 +8,7 @@ import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
 import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgDivisionSectionIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
-import { ambiguousEitherOrIssues, areaArithmeticIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, closurePhraseDensityCapIssues, collapseRepeatedWords, commercialDataInBodyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, equipmentEntryTimingIssues, excavationDepthLockIssues, excavationHazardClassificationIssues, extractSupportSystemAuthority, fabricatedAwardIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapCandidates, overviewRecapIssues, paragraphOpeningRepeatIssues, repeatedWordIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCommercialDataSentences, supportFormFactConsistencyIssues, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, areaArithmeticIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, closurePhraseDensityCapIssues, collapseRepeatedWords, commercialDataInBodyIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, equipmentEntryTimingIssues, excavationDepthLockIssues, excavationHazardClassificationIssues, extractSupportSystemAuthority, fabricatedAwardIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, hazardExclusionContradictionIssues, invertedDateRangeIssues, collisionNumberedHeadingIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, paragraphOpeningRepeatIssues, paragraphTailRepeatIssues, phaseLaborMixingIssues, repeatedWordIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCommercialDataSentences, supportFormFactConsistencyIssues, supportSystemConflictIssues } from './documentIntegrityChecks';
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { normalizeChapterTitleLine, requirementsCoverageIssues, tenderRequirementCheckItems, tenderRequirementSemanticQuery } from './tenderRequirements';
 import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
@@ -18,9 +18,11 @@ import { dangerousApplicabilityIssues } from './dangerousApplicability';
 import { stagePhrasingIssues } from './stagePhrasing';
 import { emergencySectionDepthIssues } from './emergencySectionDepth';
 import { displayChapterTitle } from './outline';
-import { blueprintCitationConsistencyIssues, blueprintPlanAuthorities } from './integratedBlueprint';
+import { blueprintCitationConsistencyIssues } from './integratedBlueprint';
 import type { BlueprintData } from './integratedBlueprint';
+import { blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, blueprintQuantityGroupAuthorities } from './authorityIndex';
 import { det } from './detectorFixerRegistry';
+import { flowFormRepeatIssues, skeletonFingerprintIssues, templatedLabelIssues, titleIntegrityIssues } from './templatingGovernance';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, TenderRequirementModel, ValidationIssue } from './types';
 
 /**
@@ -135,18 +137,26 @@ export async function buildStandardFinalValidationIssues(input: {
   // 空文本章节返回 undefined 不入 Map（输入边界：无内容可分析，消费方按缺失跳过，不得用全 false 替身）
   const analyses = new Map((await Promise.all(input.chapters.map(async chapter => [chapter.title, await input.professionalDepthClassifier.analyze(chapter.content)] as const)))
     .filter((entry): entry is [string, ProfessionalDepthAnalysis] => Boolean(entry[1])));
-  // 概况复述语义兑底：结构召回“本项目为”句 + bge 余弦 vs 概况章正文；空输入由恒零函数承接
-  const recapCandidates = overviewRecapCandidates(input.markdown);
-  const overviewSimilarity = await buildSemanticSimilarity(recapCandidates.sentences, recapCandidates.overviewBody ? [recapCandidates.overviewBody] : []);
   return [
     ...det('toc-consistency', () => input.promptDocumentRules?.forbidToc ? [] : [...tocHierarchyIssues(input.markdown), ...tocBodyConsistencyIssues(input.markdown)]),
+    // L5 结构完整性门禁：正文 H3 编号连续性（章号=章序、节号 1..N 连续无跳号无重复）——
+    // 降级合并重排的交付前兜底（缺号=blocker；不复用 toc-consistency 的 forbidToc 豁免，无目录也须编号连续）
+    ...det('section-numbering', () => sectionNumberingIssues(input.markdown)),
+    // L5 结构完整性门禁：成稿 H3 数不得超过主题块数（多节方向；缺节方向由 section-content-integrity 覆盖）
+    ...det('section-count-overflow', () => sectionCountOverflowIssues(input.chapters)),
     ...det('heading-duplicate', () => headingDuplicateIssues(input.markdown)),
+    // WS1 结构标签残留终检（templatedLabelIssues）：标签标题/段首标签前缀——确定性修复器
+    // fixTemplatedLabels（SURFACE_FIX_STEPS templated-labels 步）先行动作，此处兜底报告残留
+    ...det('templated-label', () => templatedLabelIssues(input.markdown)),
+    // WS1 标题完整性终检：残缺标题（「6.5 危大」<4 汉字）/句化标题（含逗号）/悬挂连接词结尾；
+    // 规划层双闸（isInvalidPlannedSectionTitle / isInvalidTitle）的交付前兜底
+    ...det('title-integrity', () => titleIntegrityIssues(input.markdown)),
     ...det('evaluation-criteria-coverage', () => evaluationCriteriaCoverageIssues(input.markdown, input.evaluationCriteriaItems || [], { semanticSimilarity: evaluationCriteriaSimilarity })),
     ...await det('requirements-coverage', () => requirementsCoverageIssues(input.markdown, input.tenderRequirements, { semanticSimilarity: requirementsSimilarityForCoverage, bodyTexts: requirementBodySentences })),
     ...det('fabricated-start-date', () => fabricatedStartDateIssues(input.markdown, input.factsModel)),
     ...det('field-value-mismatch', () => fieldValueMismatchIssues(input.markdown, input.factsModel)),
     ...det('area-arithmetic', () => areaArithmeticIssues(input.markdown)),
-    ...det('resource-consistency', () => resourceConsistencyIssues(input.markdown, { laborPeakAuthority: input.blueprintData ? blueprintPlanAuthorities(input.blueprintData).laborPeakAuthority : undefined })),
+    ...det('resource-consistency', () => resourceConsistencyIssues(input.markdown, { laborPeakAuthority: blueprintLaborPeakAuthority(input.blueprintData) })),
     // h13：节点工期口径互查（基坑支护/封顶/装饰多套第N日口径）
     ...det('node-schedule-consistency', () => nodeScheduleConsistencyIssues(input.markdown)),
     // h13：跨节数值口径冲突（XPS/垫层/变压器/模板周转/砌块/灭火器/潜水泵/急救箱确定性锚点）
@@ -162,6 +172,11 @@ export async function buildStandardFinalValidationIssues(input: {
     // 生成阶段全卷快照消息已在 recomputeFinalValidationBundle 中剔除，终稿蓝图口径冲突由本实时版唯一报告
     //（第五轮实测：终稿已把塑料管拆为 DN200 污水管 8205.53m / DN110 雨水管 7525.01m 两口径后，旧快照仍报单一蓝图冲突）
     ...det('blueprint-citation-consistency', () => input.blueprintData ? blueprintCitationConsistencyIssues(input.markdown, input.blueprintData).filter(issue => issue.level === 'error') : []),
+    // V5 P4b 跨工程同值复制终检兑底：多村/多标段清单条目分组明细（groups）与正文分工程语境比对
+    // （值恰为其他工程明细值 / 同值出现在多个工程对象语境且明细值不同）——与生成阶段检测器同源
+    ...det('cross-project-value-copy', () => crossProjectValueCopyIssues(input.markdown, blueprintQuantityGroupAuthorities(input.blueprintData))),
+    // V5 P4b 阶段人数混用终检兑底：正文「XX阶段 + N 人」vs byPhase 推导权威（阶段名命中但数值不符）
+    ...det('phase-labor-mixing', () => phaseLaborMixingIssues(input.markdown, blueprintPhaseLaborAuthorities(input.blueprintData))),
     // h13：桩基表述残留（地基与基础无桩基工序但全文残留桩基表述）
     ...det('foundation-form-residue', () => foundationFormResidueIssues(input.markdown)),
     // h14：关键设计决策两可表述阻断（评分报告 P4「桩基（或独立基础/筏板基础按图纸实施）」）
@@ -186,18 +201,32 @@ export async function buildStandardFinalValidationIssues(input: {
     // h15：表格/段落完全重复（青天高风险「重复表格 2 张、重复段落」；结构冗余删除兜底与生成闭环同源）
     ...det('duplicate-table', () => duplicateTableIssues(input.markdown)),
     ...det('duplicate-paragraph', () => duplicateParagraphIssues(input.markdown)),
+    // 第十五版报告 A①：段落内句级复读（段尾复读剥离，跨位置整段重复的段内补充口径）
+    ...det('paragraph-tail-repeat', () => paragraphTailRepeatIssues(input.markdown)),
+    // 丰乐镇 doc-1788954795698 实测：主题块切分/拆半防撞名「公厕（1）」「公厕（1）（二）」泄漏目录，
+    // 正式投标目录不允许编号后缀小节 → error 阻断 + 确定性修复器按主题域重命名/合并
+    ...det('collision-numbered-heading', () => collisionNumberedHeadingIssues(input.markdown)),
+    // 第十五版报告 A②：时间区间倒挂（「第90日至第3日」类病句，确定性剥离保留终点）
+    ...det('inverted-date-range', () => invertedDateRangeIssues(input.markdown)),
     // h16：人材机三合一章结构层级（第五章层级错位缺陷：材/机保障体系降级 H4 挂在 5.1 下）
     ...det('resource-triad-section-hierarchy', () => resourceTriadSectionHierarchyIssues(input.markdown)),
     ...await det('support-system-conflict', () => supportSystemConflictIssues(input.markdown, extractSupportSystemAuthority(input.factsModel))),
     ...det('dangerous-list-consistency', () => dangerousListConsistencyIssues(input.markdown)),
+    // R12 危大排除声明 vs 危大清单表格矛盾（舒城第二轮实测：声明无24m脚手架/无10kN吊装，
+    // 危大清单表格却列为危大工程——评标专家可直接质疑辨识可靠性，llm 修复轮二选一归并口径）
+    ...det('hazard-exclusion-contradiction', () => hazardExclusionContradictionIssues(input.markdown)),
     ...await det('six-hundred-percent-coverage', () => sixHundredPercentCoverageIssues(input.markdown)),
     ...await det('self-undermining-candidate', () => selfUnderminingCandidateIssues(input.markdown)),
     ...det('paragraph-opening-repeat', () => paragraphOpeningRepeatIssues(input.markdown)),
+    // WS3 分部分项章相邻块工序表达形式重复（写作侧 index%4 轮换指定与首轮块质检的生后验收兜底）
+    ...det('flow-form-repeat', () => flowFormRepeatIssues(input.markdown)),
+    // WS4 骨架指纹复读（由技术负责人组织 / 合格后方可 / 验收合格后 各全文 ≤2 次，round-2 确定性兜底同源清零）
+    ...det('skeleton-fingerprint', () => skeletonFingerprintIssues(input.markdown)),
     // Q8 叠词重复表述（L1 封闭结构提取 + 确定性去重）
     ...det('repeated-word', () => repeatedWordIssues(input.markdown)),
     // Q3 商务条款数据入正文（商务词封闭集确定性 + 变体弱词语义复核，徽光阁实测暂列金额 60 万入正文）
     ...await det('commercial-data-in-body', () => commercialDataInBodyIssues(input.markdown)),
-    ...det('overview-recap', () => overviewRecapIssues(input.markdown, { semanticSimilarity: overviewSimilarity })),
+    ...det('overview-recap', () => overviewRecapIssues(input.markdown)),
     ...det('closure-phrase-density-cap', () => closurePhraseDensityCapIssues(input.markdown)),
     // C1 参数概念多口径冲突（bge 概念自组织聚类 + 同簇数值冲突）
     ...await det('parameter-concept-conflict', () => parameterConceptConflictIssues(input.markdown)),

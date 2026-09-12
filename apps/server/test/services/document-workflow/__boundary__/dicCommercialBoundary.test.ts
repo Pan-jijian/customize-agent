@@ -428,8 +428,8 @@ describe('F1 nodeSchedule 六锚点形态A双口径', () => {
 });
 
 describe('F2 nodeSchedule 阈值边界', () => {
-  it('F2 差 4 天不报', () => {
-    expect(nodeScheduleConsistencyIssues('第60日完成主体结构封顶。第64日完成主体结构封顶。')).toEqual([]);
+  it('F2 差 4 天报（不同数值即矛盾）', () => {
+    expect(nodeScheduleConsistencyIssues('第60日完成主体结构封顶。第64日完成主体结构封顶。').length).toBe(1);
   });
   it('F2 差 5 天报', () => {
     expect(nodeScheduleConsistencyIssues('第60日完成主体结构封顶。第65日完成主体结构封顶。').length).toBe(1);
@@ -584,7 +584,7 @@ describe('G4 greeningMismatch 红线判定', () => {
 
 describe('G5 greeningMismatch 阈值边界与豁免', () => {
   it.each([
-    ['2', '3', true], ['2', '2', false], ['10', '13', true], ['10', '12', false], ['10', '8', false], ['10', '7', true], ['5', '6', false], ['5', '7', true],
+    ['2', '3', true], ['2', '2', false], ['10', '13', true], ['10', '12', true], ['10', '8', true], ['10', '7', true], ['5', '6', true], ['5', '7', true],
   ] as const)('G5 权威%s 正文%s 报=%s', (authority, body, expectIssue) => {
     const model = factsOf({ bills: [factOf({ value: `养护${authority}年` })] });
     const issues = greeningMaintenanceMismatchIssues(`绿化养护期${body}年。`, model);
@@ -655,11 +655,11 @@ describe('H2 streetLightMismatch 红线判定', () => {
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('20 套');
   });
-  it('H2 阈值边界（authority=100）', () => {
+  it('H2 无容差：任何不同数值即报（authority=100）', () => {
     const model = factsOf({ billItemFacts: [factOf({ fieldName: '路灯', value: '工程量：100套' })] });
-    expect(streetLightCountMismatchIssues('路灯80套。', model)).toEqual([]);
+    expect(streetLightCountMismatchIssues('路灯80套。', model).length).toBe(1);
     expect(streetLightCountMismatchIssues('路灯79套。', model).length).toBe(1);
-    expect(streetLightCountMismatchIssues('路灯120套。', model)).toEqual([]);
+    expect(streetLightCountMismatchIssues('路灯120套。', model).length).toBe(1);
     expect(streetLightCountMismatchIssues('路灯121套。', model).length).toBe(1);
   });
 });

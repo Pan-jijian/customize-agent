@@ -490,10 +490,6 @@ export async function deleteGeneratedAsset(id: string, projectRoot?: string) {
   return fetchJson<{ ok: boolean; assets: GeneratedAssetRecord[] }>(`/api/assets/generated?id=${encodeURIComponent(id)}${p}`, { method: 'DELETE' });
 }
 export async function openGeneratedAsset(id: string, target: 'file' | 'directory', projectRoot?: string) { return fetchJson<{ ok: boolean }>('/api/assets/generated', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: 'open', target, projectRoot }) }); }
-/** @deprecated 第 1 期 P20：单章重生成 API 已废弃（无 LLM、口径与主管线不一致），前端零调用；新功能请走章级修复/重写链路。 */
-export async function regenerateDocumentChapter(input: { templateId: string; chapterId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; documentId?: string; currentMarkdown?: string; existingFacts?: string[] }) {
-  return fetchJson<{ chapter: DocumentDraftChapter }>('/api/documents/chapter/regenerate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
-}
 export interface RefineSelection { start: number; end: number; text?: string; }
 export interface RefinePlan {
   scope: 'selection' | 'section' | 'chapter' | 'document';

@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { applyNumericConsistencyDeterministicFixes, fixSupportSystemConflicts } from '@/services/document-workflow/documentIntegrityChecks';
+import { fixtureIndex } from '../authorityFixture';
 
 const fixes = applyNumericConsistencyDeterministicFixes;
 
@@ -74,9 +75,9 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
       expect(result.details[0]).toContain('主体结构封顶');
     });
 
-    it('J10 nodeAuthorities 注入覆盖文档权威表：冲突 ≥5 天时权威表行也纳入对齐', () => {
+    it('J10 里程碑权威注入覆盖文档权威表：冲突 ≥5 天时权威表行也纳入对齐', () => {
       const md = '## 总进度计划\n\n| 阶段 | 完成时间 |\n| --- | --- |\n| 主体结构封顶 | 开工后第230日 |\n\n第250日完成主体结构封顶。';
-      const result = fixes(md, { nodeAuthorities: [{ node: '主体结构封顶', offset: '开工后第200日' }] });
+      const result = fixes(md, { authorityIndex: fixtureIndex({ milestones: [{ label: '主体结构封顶', value: 200 }] }) });
       expect(result.markdown).toContain('开工后第200日 |');
       expect(result.markdown).toContain('第200日完成主体结构封顶');
       expect(result.markdown).not.toContain('第230日');
@@ -104,18 +105,18 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
       expect(result.fixedCount).toBe(1);
     });
 
-    it('J13 systemMax 达 scheduleAuthority×0.9 时不缩放', () => {
+    it('J13 systemMax 90 与权威 100 不一致 → 缩放为 100', () => {
       const md = '开工后第90日完成主体结构封顶。';
       const result = fixes(md, { scheduleAuthority: 100 });
-      expect(result.markdown).toBe(md);
-      expect(result.fixedCount).toBe(0);
+      expect(result.markdown).toContain('开工后第100日完成主体结构封顶。');
+      expect(result.fixedCount).toBe(1);
     });
   });
 
   describe('fixCrossSectionNumericConflicts（经聚合器）', () => {
-    it('J14 codeAuthorities 标号替换：通用垫层 C20→C25，基础垫层部位语境豁免', () => {
+    it('J14 spec 域规格权威替换：通用垫层 C20→C25，基础垫层部位语境豁免', () => {
       const md = '垫层混凝土强度等级为C20，基础垫层混凝土强度等级为C15。';
-      const result = fixes(md, { codeAuthorities: { cushion: 'C25' } });
+      const result = fixes(md, { authorityIndex: fixtureIndex({ specs: [{ anchor: 'cushion', value: 'C25' }] }) });
       expect(result.markdown).toContain('垫层混凝土强度等级为C25');
       expect(result.markdown).toContain('基础垫层混凝土强度等级为C15');
       expect(result.fixedCount).toBe(1);
@@ -149,8 +150,8 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
       expect(result.details[0]).toContain('以表格口径为准');
     });
 
-    it('J18 machineAuthorities 外部权威展开：塔吊 2 台→3 台', () => {
-      const result = fixes('施工现场配置塔吊2台。', { machineAuthorities: { towerCrane: 3 } });
+    it('J18 authorityIndex 外部权威展开：塔吊 2 台→3 台', () => {
+      const result = fixes('施工现场配置塔吊2台。', { authorityIndex: fixtureIndex({ equipment: [{ label: '塔吊', value: 3 }] }) });
       expect(result.markdown).toBe('施工现场配置塔吊3台。');
       expect(result.fixedCount).toBe(1);
       expect(result.details[0]).toContain('以绑定资料锁定口径为准');
@@ -197,7 +198,7 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
   describe('fixQuantityAuthorityConflicts（经聚合器）', () => {
     it('J22 基本替换：正文工程量漂移 >2% → 清单汇总值', () => {
       const md = '级配碎石铺设18949.52m²，压实度符合要求。';
-      const result = fixes(md, { quantityAuthorities: [{ name: '级配碎石', value: 18000, unit: 'm²' }] });
+      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: [{ label: '级配碎石', value: 18000, unit: 'm²' }] }) });
       expect(result.markdown).toBe('级配碎石铺设18000m²，压实度符合要求。');
       expect(result.fixedCount).toBe(1);
       expect(result.details[0]).toContain('以工程量清单汇总值为准');
@@ -205,45 +206,49 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
 
     it('J23 D2 零豁免：差异 0.27% 四舍五入口径差同样替换', () => {
       const md = '级配碎石铺设18949.52m²。';
-      const result = fixes(md, { quantityAuthorities: [{ name: '级配碎石', value: 19000, unit: 'm²' }] });
+      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: [{ label: '级配碎石', value: 19000, unit: 'm²' }] }) });
       expect(result.markdown).toBe('级配碎石铺设19000m²。');
       expect(result.fixedCount).toBe(1);
     });
 
     it('J24 名称前 12 字内含村名特征词 → 分村分表合法量不归一', () => {
       const md = '殷郢组段级配碎石铺设18949.52m²。';
-      const result = fixes(md, { quantityAuthorities: [{ name: '级配碎石', value: 18000, unit: 'm²' }] });
+      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: [{ label: '级配碎石', value: 18000, unit: 'm²' }] }) });
       expect(result.markdown).toBe(md);
       expect(result.fixedCount).toBe(0);
     });
 
     it('J25 规格限定词后置（DN200）→ 分规格量不归一', () => {
       const md = '钢带PE增强螺旋波纹管DN200铺设2170m。';
-      const result = fixes(md, { quantityAuthorities: [{ name: '螺旋波纹管', value: 2000, unit: 'm' }] });
+      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: [{ label: '螺旋波纹管', value: 2000, unit: 'm' }] }) });
       expect(result.markdown).toBe(md);
       expect(result.fixedCount).toBe(0);
     });
 
-    it('J26 句级豁免：同句候选差异全部 >50% 判分部分表量列举句，整句不归一', () => {
+    it('J26 句内全不一致无总量锚点 → 不豁免 → 全部按清单归一', () => {
       const md = '挖一般土方146.93m³，级配碎石480.5m³，水泥混凝土572.3m³。';
       const result = fixes(md, {
-        quantityAuthorities: [
-          { name: '挖一般土方', value: 300, unit: 'm³' },
-          { name: '级配碎石', value: 1000, unit: 'm³' },
-          { name: '水泥混凝土', value: 1200, unit: 'm³' },
-        ],
+        authorityIndex: fixtureIndex({
+          quantity: [
+            { label: '挖一般土方', value: 300, unit: 'm³' },
+            { label: '级配碎石', value: 1000, unit: 'm³' },
+            { label: '水泥混凝土', value: 1200, unit: 'm³' },
+          ],
+        }),
       });
-      expect(result.markdown).toBe(md);
-      expect(result.fixedCount).toBe(0);
+      expect(result.markdown).toBe('挖一般土方300m³，级配碎石1000m³，水泥混凝土1200m³。');
+      expect(result.fixedCount).toBe(3);
     });
 
     it('J27 句级豁免不触发（大差异 1 条 + 小差异 1 条）→ 两条都按清单归一', () => {
       const md = '拆除路面633m²，级配碎石铺设18949.52m²，压实度符合要求。';
       const result = fixes(md, {
-        quantityAuthorities: [
-          { name: '拆除路面', value: 2134, unit: 'm²' },
-          { name: '级配碎石', value: 18000, unit: 'm²' },
-        ],
+        authorityIndex: fixtureIndex({
+          quantity: [
+            { label: '拆除路面', value: 2134, unit: 'm²' },
+            { label: '级配碎石', value: 18000, unit: 'm²' },
+          ],
+        }),
       });
       expect(result.markdown).toContain('拆除路面2134m²');
       expect(result.markdown).toContain('级配碎石铺设18000m²');
@@ -253,10 +258,12 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
     it('J28 最长条目名优先：长条目值一致时不改，短条目被 occupied 拦截', () => {
       const md = '塑料管铺设8205.53m。';
       const result = fixes(md, {
-        quantityAuthorities: [
-          { name: '塑料管铺设', value: 8205.53, unit: 'm' },
-          { name: '塑料管', value: 7525.01, unit: 'm' },
-        ],
+        authorityIndex: fixtureIndex({
+          quantity: [
+            { label: '塑料管铺设', value: 8205.53, unit: 'm' },
+            { label: '塑料管', value: 7525.01, unit: 'm' },
+          ],
+        }),
       });
       expect(result.markdown).toBe(md);
       expect(result.fixedCount).toBe(0);
@@ -264,7 +271,7 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
 
     it('J29 表格行内工程量不修（分村分表数据交修复轮）', () => {
       const md = '| 级配碎石 | 18949.52m² |';
-      const result = fixes(md, { quantityAuthorities: [{ name: '级配碎石', value: 18000, unit: 'm²' }] });
+      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: [{ label: '级配碎石', value: 18000, unit: 'm²' }] }) });
       expect(result.markdown).toBe(md);
       expect(result.fixedCount).toBe(0);
     });
@@ -281,9 +288,9 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
     });
 
     it('J31 details 上限截断：13 处替换 fixedCount 全记、details slice(0,12)', () => {
-      const entries = Array.from({ length: 13 }, (_, i) => ({ name: `清单条目${String(i + 1).padStart(2, '0')}`, value: 90, unit: 'm²' }));
+      const entries = Array.from({ length: 13 }, (_, i) => ({ label: `清单条目${String(i + 1).padStart(2, '0')}`, value: 90, unit: 'm²' }));
       const md = Array.from({ length: 13 }, (_, i) => `清单条目${String(i + 1).padStart(2, '0')}铺设100m²。`).join('\n');
-      const result = fixes(md, { quantityAuthorities: entries });
+      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: entries }) });
       expect(result.markdown).not.toContain('100m²');
       expect(result.markdown).toContain('清单条目01铺设90m²');
       // fixedCount 全记 13，但每个内部修复器的 applySpanReplacements 自身 details 去重后 slice(0,8)，
@@ -318,14 +325,14 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
   describe('节点工期边界补充', () => {
     it('J36 无「开工后」前缀的裸第N日不进体系缩放（systemMax=0）', () => {
       const md = '第300日完成主体结构封顶。';
-      const result = fixes(md, { scheduleAuthority: 400, nodeAuthorities: [{ node: '主体结构封顶', offset: '开工后第300日' }] });
+      const result = fixes(md, { scheduleAuthority: 400, authorityIndex: fixtureIndex({ milestones: [{ label: '主体结构封顶', value: 300 }] }) });
       expect(result.markdown).toBe(md);
       expect(result.fixedCount).toBe(0);
     });
 
-    it('J37 nodeAuthorities offset 取首个「第N日」：相对量形态被原样采为权威（锁定实现行为）', () => {
+    it('J37 里程碑权威节点值注入：正文 300日 → 权威 10日（锁定实现行为）', () => {
       const md = '第300日完成主体结构封顶。';
-      const result = fixes(md, { nodeAuthorities: [{ node: '主体结构封顶', offset: '主体结构封顶后第10日' }] });
+      const result = fixes(md, { authorityIndex: fixtureIndex({ milestones: [{ label: '主体结构封顶', value: 10 }] }) });
       expect(result.markdown).toBe('第10日完成主体结构封顶。');
       expect(result.fixedCount).toBe(1);
     });

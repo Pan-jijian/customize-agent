@@ -38,7 +38,7 @@ describe('DEFAULT_WORKFLOW_RULES', () => {
 
   it('writingSpec 结构完整且正则源非空', () => {
     const spec = DEFAULT_WORKFLOW_RULES.writingSpec;
-    expect(Object.keys(spec)).toEqual(['criticalSectionAnchors', 'majorContentSection', 'divisionSection', 'divisionProcessLabel', 'criticalDeepSections', 'blockerMinChars', 'divisionQuality', 'writeRules']);
+    expect(Object.keys(spec)).toEqual(['criticalSectionAnchors', 'majorContentSection', 'divisionSection', 'divisionProcessLabel', 'criticalDeepSections', 'blockerMinChars', 'divisionQuality', 'writeRules', 'threeSourceRules']);
     expect(spec.criticalSectionAnchors.length).toBeGreaterThan(0);
     expect(spec.majorContentSection).toBe('项目主要施工\\s*内容|主要施工\\s*内容');
     expect(spec.divisionSection.length).toBeGreaterThan(0);
@@ -46,6 +46,7 @@ describe('DEFAULT_WORKFLOW_RULES', () => {
     expect(spec.criticalDeepSections.length).toBeGreaterThan(0);
     expect(spec.writeRules.majorContent.length).toBeGreaterThan(0);
     expect(spec.writeRules.division.length).toBeGreaterThan(0);
+    expect(spec.threeSourceRules).toContain('【写作三源规则】');
   });
 
   it('divisionQuality 阈值与生成侧判定常量一致', () => {

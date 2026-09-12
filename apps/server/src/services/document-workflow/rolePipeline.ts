@@ -63,7 +63,6 @@ export function selectDocumentGenerationStrategy(input: { template: DocumentTemp
     mode: strict ? 'strict' : longform ? 'longform' : compact ? 'fast' : 'balanced',
     enableChapterReview: true,
     enableGlobalReview: globalReviewEnabled,
-    enableDocumentBudgetExpansion: false,
     enableFinalQualityReview: true,
     globalReviewSamplingRate: globalReviewEnabled && compact ? 0.35 : 1,
     // 修复轮次预算不再硬编码：由 buildGenerationBudget 按章节数/篇幅/资料量动态计算，

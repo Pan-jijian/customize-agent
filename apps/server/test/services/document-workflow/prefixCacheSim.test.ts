@@ -246,7 +246,7 @@ function buildDocumentCalls(p: SceneParams): SimCall[] {
       calls.push(makeCall(`ch${ch}-s${s}`, `ch${ch}-writer`, assemble(l0, l1, l2, pad(p.writerL3Chars, String(s)))));
     }
     // 3. 章级 repair（仅审查发现问题的章触发，4.17.8 起每章至多 1 轮、失败即放弃）——
-    // 章级 review（reviewChapterDraft）是纯规则引擎不发 LLM 调用，不计入 token 序列；
+    // 章级审查为纯规则引擎、不发 LLM 调用，不计入 token 序列；
     // 修复是辅助动作而非流水线固定环节：写作一次成型时 repairChapterCount=0、零修复调用
     const repairRounds = p.repairRoundsPerChapter ?? 1;
     const repairChapters = Math.min(p.repairChapterCount ?? p.chapterCount, p.chapterCount);
@@ -378,7 +378,7 @@ describe('文档级场景命中率推演（4.17.6）', () => {
   });
 
   it('代码默认值映射验收：块证据 1K/outline 2.5K/repair 1.5K 的目标结构命中率必须 ≥90%（用户硬性目标）', () => {
-    // 章级 review（reviewChapterDraft）是纯规则引擎不发 LLM 调用，评审质量与缓存零冲突；
+    // 章级审查为纯规则引擎、不发 LLM 调用，评审质量与缓存零冲突；
     // TARGET_90 即代码默认值映射场景（块证据 1K/outline 2.5K/repair 1.5K/全局评审全量正文）
     const result = simulate(buildDocumentCalls(TARGET_90), 'batched-warmup');
      

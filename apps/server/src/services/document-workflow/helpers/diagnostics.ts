@@ -124,6 +124,12 @@ export function summarizeIssueList(prefix: string, filePaths: string[], limit = 
   return [`${prefix}：${names.join('、')}${suffix}`];
 }
 
+/** 向量索引状态 → 中文标签：内部枚举（ready/pending/partial/error/unavailable）不得直出给用户的详情文本 */
+export function vectorStatusLabel(status?: string): string {
+  const labels: Record<string, string> = { ready: '就绪', pending: '待构建', partial: '部分就绪', error: '异常', unavailable: '不可用' };
+  return status ? labels[status] ?? '未知' : '未知';
+}
+
 export function kbIndexHealth(project: EvidenceLimitProject, scopedFilePaths: string[]) {
   const scoped = new Set(scopedFilePaths.filter(Boolean));
   const files = project.listFiles?.() || [];
@@ -146,7 +152,7 @@ export function kbIndexHealth(project: EvidenceLimitProject, scopedFilePaths: st
   const warnings = [
     ...unavailableWarnings,
     ...(pendingJobs > 0 ? [`仍有 ${pendingJobs} 个待索引任务，建议等待索引完成后生成`] : []),
-    ...(vectorStatus && vectorStatus.status !== 'ready' ? [`向量索引状态为 ${vectorStatus.status}，当前召回质量可能下降`] : []),
+    ...(vectorStatus && vectorStatus.status !== 'ready' ? [`向量索引状态为${vectorStatusLabel(vectorStatus.status)}，当前召回质量可能下降`] : []),
   ];
   return { scopedRecords, usablePaths, missingFiles, emptyFiles, errorFiles, pendingJobs, vectorStatus, usableChunkCount, blockingIssues, warnings };
 }

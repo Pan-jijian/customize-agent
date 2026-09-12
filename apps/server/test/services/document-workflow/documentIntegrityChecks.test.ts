@@ -4,11 +4,12 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossChapterSemanticDuplicateIssues, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixParagraphOpeningRepeats, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSixHundredPercentCoverage, fixTableBorneContentSections, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCrossChapterSemanticDuplicateParagraphs, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSixHundredPercentCoverage, fixTableBorneContentSections, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
 import { repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
 import { splitMarkdownTableLine, stripTableCellInvisibleChars } from '@/services/document-workflow/helpers/markdownCleanup';
-import type { DocumentDraftChapter, DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel } from '@/services/document-workflow/types';
+import type { DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel } from '@/services/document-workflow/types';
+import { fixtureIndex } from './authorityFixture';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
 
@@ -297,10 +298,10 @@ describe('resourceConsistencyIssues（h7 劳动力数据一致性 5 模式）', 
     expect(resourceConsistencyIssues(markdown)).toEqual([]);
   });
 
-  it('模式 5：总工日与峰值×工期不自洽 → 报', () => {
+  it('模式 5：总工日超过峰值×工期算术上限 → 报', () => {
     const markdown = '本工程总工期540日历天，施工高峰期投入120人。总用工量约90000个工日。';
     const issues = resourceConsistencyIssues(markdown);
-    expect(issues.some(issue => /总工日/u.test(issue.message) && /不自洽/u.test(issue.message))).toBe(true);
+    expect(issues.some(issue => /总工日/u.test(issue.message) && /算术上限/u.test(issue.message))).toBe(true);
   });
 
   it('模式 5：总工日量级自洽 → 不报', () => {
@@ -367,9 +368,9 @@ describe('nodeScheduleConsistencyIssues（h13 节点工期口径互查）', () =
     expect(nodeScheduleConsistencyIssues(markdown)).toEqual([]);
   });
 
-  it('同节点两套口径相差 <5 天（取整允许差）→ 不报', () => {
+  it('同节点两套口径相差 2 天 → 报（不同数值即矛盾）', () => {
     const markdown = '第60日完成主体结构封顶。进度计划表：主体结构封顶完成 | 开工后第62天。';
-    expect(nodeScheduleConsistencyIssues(markdown)).toEqual([]);
+    expect(nodeScheduleConsistencyIssues(markdown)).toHaveLength(1);
   });
 });
 
@@ -392,9 +393,9 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
     expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
   });
 
-  it('同锚点数值差异 ≤20% → 不报', () => {
+  it('同锚点相邻数值差异也报（无差异阈值豁免，十五版机械四套数字 5 vs 4 形态）', () => {
     const markdown = '潜水泵8台。现场配置潜水泵7台。';
-    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+    expect(crossSectionNumericConflictIssues(markdown).some(issue => /潜水泵/u.test(issue.message) && /8台/u.test(issue.message) && /7台/u.test(issue.message))).toBe(true);
   });
 
   it('枚举误采豁免：「施工电梯2台、汽车吊1台」不把 2 误采为汽车吊数量（真实生成误报回归）', () => {
@@ -629,7 +630,7 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
 
   it('P2.3 fixCrossSectionNumericConflicts：垫层 C30 回退清单锁定 C20（异名人行道/基础垫层保持）', () => {
     const markdown = '垫层采用C30素混凝土浇筑。人行道混凝土垫层采用C25素砼。基础垫层采用C15素砼。';
-    const fix = applyNumericConsistencyDeterministicFixes(markdown, { codeAuthorities: { cushion: 'C20' } });
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { authorityIndex: fixtureIndex({ specs: [{ anchor: 'cushion', value: 'C20' }] }) });
     expect(fix.fixedCount).toBeGreaterThan(0);
     expect(fix.markdown).toContain('垫层采用C20素混凝土浇筑');
     expect(fix.markdown).toContain('人行道混凝土垫层采用C25素砼');
@@ -639,7 +640,7 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
 
   it('P2.3 fixCrossSectionNumericConflicts：潜水泵/提升泵同物异名 6台/12台 统一为锁定 4台', () => {
     const markdown = '泵房配置潜水泵6台，备用提升泵12台。';
-    const fix = applyNumericConsistencyDeterministicFixes(markdown, { machineAuthorities: { pump: 4 } });
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { authorityIndex: fixtureIndex({ equipment: [{ label: '潜水泵', value: 4 }] }) });
     expect(fix.fixedCount).toBeGreaterThan(0);
     expect(fix.markdown).toContain('潜水泵4台');
     expect(fix.markdown).toContain('提升泵4台');
@@ -649,7 +650,7 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
 
   it('P2.3 fixCrossSectionNumericConflicts：机动工期 预留7天 回退为锁定 2天', () => {
     const markdown = '总工期90日历天，其中预留7天机动工期用于工序衔接与验收缓冲。';
-    const fix = applyNumericConsistencyDeterministicFixes(markdown, { slackDaysAuthority: 2 });
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { authorityIndex: fixtureIndex({ slackDays: 2 }) });
     expect(fix.fixedCount).toBeGreaterThan(0);
     expect(fix.markdown).toContain('预留2天机动工期');
     expect(fix.markdown).not.toContain('预留7天');
@@ -657,7 +658,7 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
 
   it('P2.4 fixCrossSectionNumericConflicts：残留 9个自然村 统一为 20（自然村分组口径不参与）', () => {
     const markdown = '本项目9个自然村分散施工。清单按3个自然村分组编制。';
-    const fix = applyNumericConsistencyDeterministicFixes(markdown, { villageCountAuthority: 20 });
+    const fix = applyNumericConsistencyDeterministicFixes(markdown, { authorityIndex: fixtureIndex({ villageCount: 20 }) });
     expect(fix.fixedCount).toBeGreaterThan(0);
     expect(fix.markdown).toContain('本项目20个自然村分散施工');
     expect(fix.markdown).not.toContain('9个自然村');
@@ -954,9 +955,10 @@ describe('resourceConsistencyIssues（h14 反向劳动力口径）', () => {
     expect(issues.some(issue => /劳动力数据矛盾/u.test(issue.message))).toBe(true);
   });
 
-  it('单一口径无矛盾 → 不报', () => {
+  it('两处劳动力数值不同 → 报互斥（无容差）', () => {
     const issues = resourceConsistencyIssues('主体阶段投入劳动力约110人，装饰阶段投入劳动力约105人。');
-    expect(issues).toEqual([]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('互斥');
   });
 });
 
@@ -1143,95 +1145,6 @@ describe('bidderQualificationSectionIssues（h17 投标人资格内容串章）'
 
   it('无资格内容 → 不报', () => {
     expect(bidderQualificationSectionIssues('## 第一章 工程概况\n正文内容。')).toEqual([]);
-  });
-});
-
-/** 1.5 双补盲之语义级：跨章语义重复段检测与确定性 strip（语义通道 mock） */
-describe('crossChapterSemanticDuplicateIssues / strip（1.5 跨章语义重复）', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  function draftChapter(overrides: Partial<DocumentDraftChapter> = {}): DocumentDraftChapter {
-    return { id: 'ch-1', title: '第一章 工程概况', content: '', evidence: [], missingFacts: [], ...overrides };
-  }
-
-  /** 按文本对查表注入确定性相似度（未登记对返回 0.1 低相似） */
-  function mockPairSimilarity(entries: Array<{ a: string; b: string; score: number }>): void {
-    buildSimilarityMock.mockResolvedValue(((left: string, right: string) => {
-      for (const entry of entries) {
-        if ((left.includes(entry.a) && right.includes(entry.b)) || (left.includes(entry.b) && right.includes(entry.a))) return entry.score;
-      }
-      return 0.1;
-    }) as SimilarityFn);
-  }
-
-  // 低密度同义段（纯文字、无数值参数）与高密度同义段（含大量数值/符号）——措辞不同内容同质
-  const plainPara = '混凝土浇筑采用分层连续的方式进行浇筑作业，振捣要求密实并及时覆盖养护，养护期间安排专人定期洒水保持表面湿润状态，确保混凝土强度增长与外观质量满足设计及现行规范要求。';
-  const densePara = '混凝土浇筑采用分层连续浇筑工艺，每层厚度不超过500mm，振捣棒插入间距不大于400mm，养护时间不少于14天，坍落度控制在180±20mm范围，入模温度控制在5℃~30℃，确保C35强度与P6抗渗等级满足设计要求。';
-
-  it('跨章语义雷同段（≥0.82）检出：保留信息密度高者，issue 定位低密度方章（密度优先于章序）', async () => {
-    mockPairSimilarity([{ a: '分层连续浇筑', b: '分层连续的方式', score: 0.88 }]);
-    const chapters = [
-      draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: plainPara }),
-      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: densePara }),
-    ];
-    const issues = await crossChapterSemanticDuplicateIssues(chapters);
-    expect(issues).toHaveLength(1);
-    expect(issues[0].severity).toBe('blocker');
-    // 低密度方（首现章 ch-1）为删除方：密度高者保留优先于章序靠前
-    expect(issues[0].chapterId).toBe('ch-1');
-    expect(issues[0].message).toContain('跨章语义重复');
-    expect(issues[0].message).toContain('0.88');
-    expect(issues[0].message).toContain('第一章 工程概况');
-    expect(issues[0].message).toContain('第二章 施工方案');
-  });
-
-  it('逐字相等的跨章段落对排除（归整段重复通道，不双报）', async () => {
-    mockSimilarity(0.95);
-    const chapters = [
-      draftChapter({ id: 'ch-1', content: densePara }),
-      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: densePara }),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
-
-  it('相似度低于 0.82 阈值不报（阈值边界）', async () => {
-    mockPairSimilarity([{ a: '分层连续浇筑', b: '分层连续的方式', score: 0.7 }]);
-    const chapters = [
-      draftChapter({ id: 'ch-1', content: plainPara }),
-      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: densePara }),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
-
-  it('同章内语义雷同段不纳入（章内重复由章级清洗与评审治理）', async () => {
-    mockPairSimilarity([{ a: '分层连续浇筑', b: '分层连续的方式', score: 0.9 }]);
-    const chapters = [draftChapter({ id: 'ch-1', content: `${plainPara}\n\n${densePara}` })];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
-
-  it('短段落（去空白 <60 字）不入池，不报', async () => {
-    mockSimilarity(0.95);
-    const shortPara = '混凝土浇筑后应及时养护。';
-    const chapters = [
-      draftChapter({ id: 'ch-1', content: shortPara }),
-      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: `${shortPara}略有不同的措辞补充。` }),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
-
-  it('strip 删除低密度方整段，保留高密度方，返回删除段数', async () => {
-    mockPairSimilarity([{ a: '分层连续浇筑', b: '分层连续的方式', score: 0.88 }]);
-    const chapters = [
-      draftChapter({ id: 'ch-1', title: '第一章 工程概况', content: plainPara }),
-      draftChapter({ id: 'ch-2', title: '第二章 施工方案', content: `### 2.1 混凝土施工工艺\n\n${densePara}` }),
-    ];
-    const removed = await stripCrossChapterSemanticDuplicateParagraphs(chapters);
-    expect(removed).toBe(1);
-    expect(chapters[0].content).toBe('');
-    expect(chapters[1].content).toContain(densePara);
-    expect(chapters[1].content).toContain('### 2.1 混凝土施工工艺');
   });
 });
 
@@ -1521,7 +1434,7 @@ describe('resourceConsistencyIssues 管理/全员/工种口径隔离（F6）', (
 describe('applyNumericConsistencyDeterministicFixes 部位豁免（F15）', () => {
   it('分区配置 4具/2具与总量 40具 均不与权威 40 矛盾 → 零修复（不把分区归一成总量）', () => {
     const markdown = '办公区配置干粉灭火器4具。\n生活区配置干粉灭火器2具。\n全场合计配置灭火器40具。';
-    const result = applyNumericConsistencyDeterministicFixes(markdown, { machineAuthorities: { extinguisher: 40 } });
+    const result = applyNumericConsistencyDeterministicFixes(markdown, { authorityIndex: fixtureIndex({ equipment: [{ label: '干粉灭火器', value: 40 }] }) });
     expect(result.fixedCount).toBe(0);
     expect(result.markdown).toContain('办公区配置干粉灭火器4具');
     expect(result.markdown).toContain('生活区配置干粉灭火器2具');
@@ -1529,7 +1442,7 @@ describe('applyNumericConsistencyDeterministicFixes 部位豁免（F15）', () =
 
   it('无部位标注的 30具 与权威 40 矛盾 → 仅替换无部位值，分区 4具 保留', () => {
     const markdown = '全场配置灭火器30具，办公区配置灭火器4具。';
-    const result = applyNumericConsistencyDeterministicFixes(markdown, { machineAuthorities: { extinguisher: 40 } });
+    const result = applyNumericConsistencyDeterministicFixes(markdown, { authorityIndex: fixtureIndex({ equipment: [{ label: '干粉灭火器', value: 40 }] }) });
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('全场配置灭火器40具');
     expect(result.markdown).toContain('办公区配置灭火器4具');
@@ -2151,5 +2064,195 @@ describe('表格单元格不可见字符归一（十度实测缺陷：全角空�
   });
   it('清洗层：单元格中间全角空格也剥离（数字与单位间排版空格）', () => {
     expect(stripTableCellInvisibleChars('800\u3000米')).toBe('800米');
+  });
+});
+
+
+describe('paragraphTailRepeatIssues / fixParagraphTailRepeats（十五版报告段内句级复读）', () => {
+  it('段内精确复读 → 检测并剥离复读句，首现保留', () => {
+    const markdown = '道路铺装工程阶段，级配碎石按10cm厚单一规格组织运输，按路床碾压检验完成顺序分批进场。运输组织按以下顺序执行。级配碎石按10cm厚单一规格组织运输，按路床碾压检验完成顺序分批进场。';
+    const issues = paragraphTailRepeatIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0]!.level).toBe('error');
+    const r = fixParagraphTailRepeats(markdown);
+    expect(r.fixedCount).toBe(1);
+    expect((r.markdown.match(/级配碎石按10cm厚单一规格组织运输，按路床碾压检验完成顺序分批进场。/gu) || []).length).toBe(1);
+    // 修复后检测清零（检测=修复同源闭环）
+    expect(paragraphTailRepeatIssues(r.markdown)).toEqual([]);
+  });
+
+  it('段尾复读丢前缀（后缀包含规则）→ 检出并剥离（十五版 L442 形态）', () => {
+    const markdown = '为此，项目部在丰乐镇域内设置1处中心材料周转场，储备不少于3天施工用量的级配碎石、中粗砂和水泥。当某一自然村施工段出现材料短缺时，材料员在1小时内向项目经理报告。在丰乐镇域内设置1处中心材料周转场，储备不少于3天施工用量的级配碎石、中粗砂和水泥。';
+    const repeats = scanParagraphTailRepeats(markdown);
+    expect(repeats.length).toBe(1);
+    expect(repeats[0]!.count).toBe(2);
+    const r = fixParagraphTailRepeats(markdown);
+    expect(r.fixedCount).toBe(1);
+    expect((r.markdown.match(/在丰乐镇域内设置1处中心材料周转场/gu) || []).length).toBe(1);
+    expect(paragraphTailRepeatIssues(r.markdown)).toEqual([]);
+  });
+
+  it('标题行无空行紧贴正文 → 不因标题过滤漏检（十五版真实文件形态）', () => {
+    const markdown = '### 3.5 主要物资运输与二次搬运组织方案\n施工准备与清杂拆除阶段，运输任务以清杂废弃物外运为主。级配碎石按10cm厚单一规格组织运输。级配碎石按10cm厚单一规格组织运输。';
+    expect(paragraphTailRepeatIssues(markdown).length).toBe(1);
+    const r = fixParagraphTailRepeats(markdown);
+    expect(r.fixedCount).toBe(1);
+    // 标题行保持原样
+    expect(r.markdown).toContain('### 3.5 主要物资运输与二次搬运组织方案');
+  });
+
+  it('表格行夹杂 → 表格行不动，散文行仍去重', () => {
+    const markdown = '材料员每周对应急物资储备情况进行1次盘点，发现数量低于储备标准时补充到位。\n| 应急物资名称 | 规格/型号 |\n| --- | --- |\n| 级配碎石 | 连续级配 |\n材料员每周对应急物资储备情况进行1次盘点，发现数量低于储备标准时补充到位。';
+    const r = fixParagraphTailRepeats(markdown);
+    expect(r.fixedCount).toBe(1);
+    expect(r.markdown).toContain('| 应急物资名称 | 规格/型号 |');
+    expect((r.markdown.match(/材料员每周对应急物资储备情况进行1次盘点，发现数量低于储备标准时补充到位。/gu) || []).length).toBe(1);
+  });
+
+  it('空行分隔的不同段落含相同句 → 不误报（跨位置整段重复由 duplicateParagraphIssues 负责）', () => {
+    const markdown = '第一段：施工员每日巡查沟槽临边防护。\n\n第二段：施工员每日巡查沟槽临边防护。';
+    expect(paragraphTailRepeatIssues(markdown)).toEqual([]);
+  });
+
+  it('短句（<15 字）重复不判复读', () => {
+    const markdown = '压实度满足设计要求。压实度满足设计要求。';
+    expect(paragraphTailRepeatIssues(markdown)).toEqual([]);
+  });
+});
+
+describe('collisionNumberedHeadingIssues / fixCollisionNumberedHeadings（防撞名编号后缀标题）', () => {
+  it('「公厕（1）」切块防撞名 → error/blocker 且按块内 H4 主题域重命名', () => {
+    const markdown = '### 公厕（1）\n\n#### 土石方工程\n\n土石方开挖按设计要求施工。\n\n### 公厕（2）\n\n#### 楼地面装饰工程\n\n地面铺贴按工艺要求施工。';
+    const issues = collisionNumberedHeadingIssues(markdown);
+    expect(issues.length).toBe(2);
+    expect(issues[0]!.level).toBe('error');
+    const r = fixCollisionNumberedHeadings(markdown);
+    expect(r.fixedCount).toBe(2);
+    expect(r.markdown).toContain('### 公厕结构与基础工程');
+    expect(r.markdown).toContain('### 公厕装饰装修工程');
+    expect(r.markdown).not.toContain('公厕（1）');
+    expect(collisionNumberedHeadingIssues(r.markdown)).toEqual([]);
+  });
+
+  it('「公厕（1）（二）」拆半变体 → 与同基线 H3 合并（整行删除）', () => {
+    const markdown = '### 公厕（1）\n\n#### 土石方工程\n\n土石方开挖按设计要求施工。\n\n### 公厕（1）（二）\n\n#### 砌筑工程\n\n砌体施工按工艺要求施工。';
+    const r = fixCollisionNumberedHeadings(markdown);
+    expect(r.fixedCount).toBe(2);
+    // 「公厕（1）」按域重命名、「公厕（1）（二）」合并进同一小节
+    expect(r.markdown).toContain('### 公厕结构与基础工程');
+    expect((r.markdown.match(/^### /gmu) || []).length).toBe(1);
+    expect(r.markdown).toContain('#### 砌筑工程');
+  });
+
+  it('正常标题不误报（图纸名「建筑设计总说明（二）」不是 H3 不触发；H3 无编号后缀不触发）', () => {
+    const markdown = '### 道路工程\n\n正文。\n\n### 排水工程\n\n正文。\n\n建筑设计总说明（二）图名在正文行。';
+    expect(collisionNumberedHeadingIssues(markdown)).toEqual([]);
+    expect(fixCollisionNumberedHeadings(markdown).fixedCount).toBe(0);
+  });
+
+  it('块内无 H4 的编号后缀 H3 → 检测仍报，修复保持原样不破坏正文', () => {
+    const markdown = '### 公厕（1）\n\n无四级标题的概述正文。';
+    expect(collisionNumberedHeadingIssues(markdown).length).toBe(1);
+    const r = fixCollisionNumberedHeadings(markdown);
+    expect(r.markdown).toBe(markdown);
+  });
+});
+
+describe('invertedDateRangeIssues / fixInvertedDateRanges（十五版报告时间区间倒挂）', () => {
+  it('「第90日至第3日」倒挂 → error/blocker 并确定性修复为仅保留终点', () => {
+    const markdown = '各自然村施工组在开工令下发后第90日至第3日完成本村施工区围挡布设。';
+    const issues = invertedDateRangeIssues(markdown);
+    expect(issues.length).toBe(1);
+    expect(issues[0]!.level).toBe('error');
+    expect(issues[0]!.severity).toBe('blocker');
+    const r = fixInvertedDateRanges(markdown);
+    expect(r.fixedCount).toBe(1);
+    expect(r.markdown).toBe('各自然村施工组在开工令下发后第3日完成本村施工区围挡布设。');
+    expect(invertedDateRangeIssues(r.markdown)).toEqual([]);
+  });
+
+  it('正常区间「第1日～第7日」不报', () => {
+    const markdown = '施工准备与清杂拆除阶段（第1日～第7日）完成临时设施布设。';
+    expect(invertedDateRangeIssues(markdown)).toEqual([]);
+  });
+
+  it('波浪线连接符「第120日～第3日」同样修复（检测器五连接符同源，V5 P6 run1 实测残留根因）', () => {
+    const markdown = '阶段性资料移交节点为开工令下发后第120日～第3日完成归档。';
+    expect(invertedDateRangeIssues(markdown).length).toBe(1);
+    const r = fixInvertedDateRanges(markdown);
+    expect(r.fixedCount).toBe(1);
+    expect(r.markdown).toBe('阶段性资料移交节点为开工令下发后第3日完成归档。');
+    expect(invertedDateRangeIssues(r.markdown)).toEqual([]);
+  });
+
+  it('多处倒挂全部修复（十五版真实文档 2 处）', () => {
+    const markdown = '段落一：开工令下发后第90日至第3日完成围挡布设。段落二：开工令下发后第90日至第3日完成警示设施布设。';
+    const r = fixInvertedDateRanges(markdown);
+    expect(r.fixedCount).toBe(2);
+    expect(r.markdown).not.toContain('第90日至');
+  });
+});
+
+describe('crossSectionNumericConflictIssues 机械/土方锚点（十五版报告四套数字）', () => {
+  it('挖掘机 5台 vs 4台 → 报数量矛盾', () => {
+    const markdown = '施工机械配置挖掘机（0.6~1.0m³）5台。沟塘清淤配置挖掘机（0.6~1.0m³）4台。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /挖掘机数量/u.test(issue.message) && /5台/u.test(issue.message) && /4台/u.test(issue.message))).toBe(true);
+  });
+
+  it('自卸汽车 5台 vs 6台 → 报数量矛盾', () => {
+    const markdown = '土方运输配置自卸汽车（8t）5台。清淤外运配置自卸汽车（8t）6台。';
+    expect(crossSectionNumericConflictIssues(markdown).some(issue => /自卸汽车数量/u.test(issue.message))).toBe(true);
+  });
+
+  it('压路机 5台 vs 2台 → 报数量矛盾', () => {
+    const markdown = '道路工程配置压路机（8~12t）5台。景观铺装配置压路机2台。';
+    expect(crossSectionNumericConflictIssues(markdown).some(issue => /压路机数量/u.test(issue.message))).toBe(true);
+  });
+
+  it('蛙式打夯机 5台 vs 6台 → 报数量矛盾', () => {
+    const markdown = '沟塘回填配置蛙式打夯机5台。道路路肩配置蛙式打夯机6台。';
+    expect(crossSectionNumericConflictIssues(markdown).some(issue => /蛙式打夯机数量/u.test(issue.message))).toBe(true);
+  });
+
+  it('混凝土搅拌运输车 2台 vs 3台 → 报数量矛盾', () => {
+    const markdown = '道路面层浇筑配置混凝土搅拌运输车2台。基础浇筑配置混凝土搅拌运输车3台。';
+    expect(crossSectionNumericConflictIssues(markdown).some(issue => /混凝土搅拌运输车数量/u.test(issue.message))).toBe(true);
+  });
+
+  it('洒水车 5台 vs 2台 → 报数量矛盾', () => {
+    const markdown = '扬尘治理配置洒水车5台。绿化养护配置洒水车2台。';
+    expect(crossSectionNumericConflictIssues(markdown).some(issue => /洒水车数量/u.test(issue.message))).toBe(true);
+  });
+
+  it('高空作业车 3台 vs 1台 → 报数量矛盾', () => {
+    const markdown = '路灯安装配置高空作业车3台。附属设施配置高空作业车1台。';
+    expect(crossSectionNumericConflictIssues(markdown).some(issue => /高空作业车数量/u.test(issue.message))).toBe(true);
+  });
+
+  it('沟塘回填方 4270m³ vs 15481.48m³ → 报双口径（十五版 B③）', () => {
+    const markdown = '本分项主要工程量为：砌筑渠道4800m，挖淤泥、流砂21273m³，回填方4270m³。回填方总量15481.48m³，采用素土分层回填。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /沟塘回填方量/u.test(issue.message) && /4270/u.test(issue.message) && /15481\.48/u.test(issue.message))).toBe(true);
+  });
+
+  it('槽底预留 200mm vs 300mm → 报矛盾（十五版 A⑤）', () => {
+    const markdown = '沟槽开挖采用挖掘机分段开挖，槽底预留200mm人工清底。管道沟槽开挖按设计图纸控制，槽底预留300mm人工清底。';
+    expect(crossSectionNumericConflictIssues(markdown).some(issue => /槽底人工清底/u.test(issue.message) && /200mm/u.test(issue.message) && /300mm/u.test(issue.message))).toBe(true);
+  });
+
+  it('距房屋 3m vs 2m 人工开挖 → 报矛盾（十五版 A⑤）', () => {
+    const markdown = '村民住宅保护按距房屋3m内采用人工开挖、禁止机械强挖的顺序执行。开挖振动导致墙体开裂风险段距房屋2m范围内采用人工开挖，控制机械振动。';
+    expect(crossSectionNumericConflictIssues(markdown).some(issue => /距房屋人工开挖/u.test(issue.message) && /3m/u.test(issue.message) && /2m/u.test(issue.message))).toBe(true);
+  });
+
+  it('「沟槽开挖边线外1.5m范围内人工开挖」非房屋距离 → 不串锚不报', () => {
+    const markdown = '沟槽开挖边线外1.5m范围内采用人工开挖，禁止机械强挖。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('同锚点同值一致 → 不报', () => {
+    const markdown = '施工机械配置挖掘机5台。沟塘清淤配置挖掘机5台。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
   });
 });

@@ -1,6 +1,7 @@
 import type { DocumentTemplate, DocumentTemplateChapter } from './types';
-import { displayChapterTitle, isInstructionLikeOutlineTitle, isTenderClauseFragmentTitle } from './outline';
-import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgCatalog';
+import { displayChapterTitle, isFragmentLikeSectionTitle, isInstructionLikeOutlineTitle, isTenderClauseFragmentTitle } from './outline';
+import { isHardBannedSectionTitle } from './evidenceContentSafety';
+import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgProjectTypes';
 
 /**
  * L1 结构引擎：评标结构知识库与前置结构校验。
@@ -92,7 +93,9 @@ export const BID_STRUCTURE_GROUPS: BidStructureGroup[] = [
   {
     id: 'safety',
     title: '安全文明施工与危大工程管控',
-    requiredSectionPatterns: [/安全/u, /危大/u],
+    // 候选词必须语义完整：单候选词「危大」是碎片（舒城实测补挂出「危大」小节标题），
+    // 「危大工程」与「危大」同判（危大工程含危大子串，覆盖不变），仅代表补挂标题不同
+    requiredSectionPatterns: [/安全/u, /危大工程|危大/u],
     chapterPatterns: [/安全|文明|风险|危大|保障|措施/u],
     remedy: '应设置安全管理与危大工程管控小节，含危险源辨识、危大清单、专项方案。',
     level: 'required',
@@ -312,20 +315,12 @@ export function representativeTitleForPattern(pattern: RegExp) {
   return firstAlternative || source;
 }
 
-/** 粘连产物 → 代表词 精确回退表：必查小节正则（候选词以 | 连接）整体剥离 | 后的粘连串，
- * 逐字映射回首个候选词。仅精确匹配才回退（不会误伤合法标题），
- * 用于清单层修复历史上由上述 bug 产生的脏小节标题。 */
-export function concatenatedSectionTitleFixes(): Record<string, string> {
-  const fixes: Record<string, string> = {};
-  for (const group of BID_STRUCTURE_GROUPS) {
-    for (const pattern of group.requiredSectionPatterns) {
-      const representative = representativeTitleForPattern(pattern);
-      // 粘连产物 = 历史 bug 的生成口径：正则 source 整体剥离 |（候选词直接拼接）
-      const concatenated = pattern.source.replace(/[\\/^$.*+?()[\]{}|]/gu, '').replace(/u$/u, '');
-      if (concatenated !== representative && !fixes[concatenated]) fixes[concatenated] = representative;
-    }
-  }
-  return fixes;
+/** 补挂小节标题判据：1-3 字纯汉字片段（「安全」「危大」「质量」）不是可交付的小节标题，
+ * 补挂时必须回退结构组标题（「安全文明施工与危大工程管控」）；合法完整标题不受影响。
+ * 舒城实测：安全组缺「危大」模式命中后补挂出「危大」碎片小节，Writer 按碎片标题成稿。 */
+export function isTooShortSectionTitle(title: string) {
+  const normalized = displayChapterTitle(title).replace(/\s+/gu, '');
+  return normalized.length > 0 && normalized.length <= 3 && /^[\u4e00-\u9fa5]+$/u.test(normalized);
 }
 
 /** 概况类小节置首（确定性结构清洗，仅调序）：
@@ -399,8 +394,13 @@ export function validateBidStructureBeforeGeneration(input: {
     const additions = diagnostic.missingSections.filter(section => !used.has(section));
     for (const section of additions) {
       used.add(section);
-      if (!target.sections.some(item => normalize(item).includes(normalize(section)) || normalize(section).includes(normalize(item)))) {
-        target.sections.push(section);
+      // 短片段候选词（1-3 字）回退结构组标题：补挂产物必须是可交付的完整小节标题
+      const sectionTitle = isTooShortSectionTitle(section) ? group.title : section;
+      // 补挂单点治理（C2）：补挂产物直接进入写作计划，补挂后无二次过滤——命中大纲过滤硬剔层
+      // （条款碎片/商务条款/资格类/程序纪律双词）即不补挂，消除「已剔除又补回」矛盾链
+      if (isHardBannedSectionTitle(sectionTitle)) continue;
+      if (!target.sections.some(item => normalize(item).includes(normalize(sectionTitle)) || normalize(sectionTitle).includes(normalize(item)))) {
+        target.sections.push(sectionTitle);
       }
     }
   }
@@ -446,11 +446,15 @@ export function validateBidStructureBeforeGeneration(input: {
     for (const { item } of criteriaAudit.uncovered) {
       const sectionTitle = item.title;
       if (!sectionTitle) continue;
-      // 条款碎片不补挂（补挂回路二次治理）：评分条目标题若为招标条款碎片
-      // （编号残留/承诺断言/委员会动作等），补挂进章节后无证据支撑会阻断章节任务；
-      // 二次过滤（documentGenerator 补挂后）为最终兜底，此处提前拦截避免补挂噪音。
-      // 4.12.12 与提取环节同口径升级为超集（冒号结尾/括号未闭合/数字参数/评标程序动作）
-      if (isInstructionLikeOutlineTitle(sectionTitle)) continue;
+      // 句子型评分条目（如招标评分表 PDF 断裂文本「5 分力投入经济合理，满足施工需要」）
+      // 不是小节标题：补挂后 Writer 按断裂句成稿，评审按模板化标题阻断（舒城实测）。
+      // 与提取环节 isFragmentLikeSectionTitle 同口径拦截（双保险）
+      if (isFragmentLikeSectionTitle(sectionTitle)) continue;
+      // 条款碎片不补挂（补挂回路单点治理，C2 质量闸前移）：评分条目标题若为招标条款碎片
+      // （编号残留/承诺断言/委员会动作）或商务/资格/程序纪律类，补挂进章节后无证据支撑会阻断章节任务。
+      // isInstructionLikeOutlineTitle（含条款碎片超集）+ isHardBannedSectionTitle（商务条款/资格类/程序纪律双词）
+      // 与大纲过滤硬剔层同口径——补挂后不再有二次过滤，此处单点拦净
+      if (isInstructionLikeOutlineTitle(sectionTitle) || isHardBannedSectionTitle(sectionTitle)) continue;
       const carrierIndex = chapterTexts.reduce((best, text, index) => {
         // 挂靠评分：语义相似度可用时用余弦打分；否则用条目标题的显式包含计数兜底
         const score = input.semanticSimilarity ? input.semanticSimilarity(sectionTitle, text) : (text.includes(normalize(sectionTitle)) ? 1 : 0);
@@ -477,6 +481,8 @@ export function validateBidStructureBeforeGeneration(input: {
         return extra.chapterPatterns.some(pattern => pattern.test(title));
       });
       const target = enriched[carrierIndex >= 0 ? carrierIndex : 0];
+      // 补挂单点治理（C2）：项目类型加分结构标题同过大纲过滤硬剔层
+      if (isHardBannedSectionTitle(extra.title)) continue;
       target.sections.push(extra.title);
     }
   }

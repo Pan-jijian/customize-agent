@@ -10,7 +10,7 @@ function normalizedFactValue(fact: DocumentFact) {
 }
 
 function trustedFactCorpus(factsModel: DocumentFactsModel) {
-  return [
+  const facts = [
     ...factsModel.project,
     ...factsModel.schedule,
     ...factsModel.quality,
@@ -21,7 +21,14 @@ function trustedFactCorpus(factsModel: DocumentFactsModel) {
     ...factsModel.drawings,
     ...factsModel.rules,
     ...factsModel.specifications,
-  ].map(normalizedFactValue).join('\n');
+  ];
+  // V5 P6 run1 实测：正文引用事实的常见形态不带字段名前缀（写「45日历天」而非「计划工期 45日历天」），
+  // 每条事实同时产出「字段名+值」整行与纯值行两个候选片段，避免整段匹配对无前缀引用全失配
+  return facts.flatMap(fact => {
+    const line = normalizedFactValue(fact);
+    const valueLine = normalizeEngineeringTextForFactMatch(stringifyFactValue(fact.value));
+    return valueLine && valueLine !== line ? [line, valueLine] : [line];
+  }).join('\n');
 }
 
 export function evidenceUsageCoverageIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
@@ -35,11 +42,23 @@ export function evidenceUsageCoverageIssues(markdown: string, factsModel: Docume
   // corpus 行经 normalizeEngineeringTextForFactMatch 归一（日历天→天、平方米→m2），正文侧必须同口径归一，
   // 否则“45日历天”与“45天”这类同义写法会误判为未使用事实
   const markdownCompact = normalizeEngineeringTextForFactMatch(markdown.replace(/\s+/gu, ''));
+  // V5 P6 run1 实测：事实模型完全为空（生成端无任何事实可用）时保留「未使用X事实」降级告警；
+  // 单个维度桶为空（如安全/资源桶无该类事实）时该维度不可评估——正文无从引用不存在的事实，跳过不报
+  const modelEmpty = [factsModel.project, factsModel.schedule, factsModel.quality, factsModel.safety, factsModel.resources, factsModel.preciseFacts, factsModel.bills, factsModel.drawings, factsModel.rules, factsModel.specifications].every(list => list.length === 0);
   const issues: ValidationIssue[] = [];
   for (const section of sections) {
     if (!section.required.test(markdown)) continue;
-    const facts = [...new Set(section.corpus.split('\n').map(line => line.replace(/\s+/gu, '').slice(0, 24)).filter(Boolean))];
-    const matched = facts.filter(fact => fact.length >= 6 && markdownCompact.includes(fact));
+    const facts = [...new Set(section.corpus.split('\n').map(line => line.replace(/\s+/gu, '')).filter(Boolean))];
+    if (facts.length === 0 && !modelEmpty) continue;
+    const matched = facts.filter(fact => {
+      if (fact.length < 6) return false;
+      if (markdownCompact.includes(fact.slice(0, 24))) return true;
+      // V5 P6 分片兜底（run1 实测：corpus 整行为「字段名+值」，正文引用无字段名前缀时工程量维度
+      // 89 条清单事实全失配）：长行前 12 字或数值+单位分片命中即视为已使用
+      if (fact.length > 24 && markdownCompact.includes(fact.slice(0, 12))) return true;
+      const numericParts = fact.match(/\d+(?:\.\d+)?(?:m2|hm2|m3|l|ml|mm|cm|km|m|kg|g|t|万元|亿元|元|天|工作天|月|年|h|min|%|permille|mpa|kpa|pa|kn|kw|mw|w|kv|v|ma|a|hz|℃|台|套|件|个|根|只|组|项|处|座|栋|层|间|批|次|人|工日|人日|亩)/gu) || [];
+      return numericParts.some(part => part.length >= 3 && markdownCompact.includes(part));
+    });
     if (matched.length === 0) issues.push({ level: 'warning', message: `证据使用覆盖率偏低：正文中未明显使用${section.label}相关事实`, suggestion: `请在相应章节中引用至少一项${section.label}事实，避免只写通用表述。` });
   }
   return issues;

@@ -8,7 +8,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { finalizeDocumentMarkdown } from '@/services/document-workflow/markdownComposer';
-import { tocBodyConsistencyIssues } from '@/services/document-workflow/qualityValidation';
+import { sectionCountOverflowIssues, sectionNumberingIssues, tocBodyConsistencyIssues } from '@/services/document-workflow/qualityValidation';
 import { workPackageElementsMeetLenientGate } from '@/services/document-workflow/utils';
 import { equipmentEntryTimingIssues, excavationDepthFromFacts, excavationHazardClassificationIssues, supportFormFactConsistencyIssues } from '@/services/document-workflow/documentIntegrityChecks';
 import { dedupePlannedSections } from '@/services/document-workflow/promptRuleExtraction';
@@ -79,6 +79,50 @@ describe('finalizeDocumentMarkdown 编号单调与幂等（A 模块）', () => {
     const pick = (markdown: string) => [...markdown.matchAll(/^###\s+(\d+\.\d+)\s+(.+)$/gmu)].map(match => `${match[1]} ${match[2]}`);
     expect(pick(second.markdown)).toEqual(pick(first.markdown));
   });
+
+  it('重复小节降级为当前小节的 H4，不消耗 H3 编号（降级合并重排）', () => {
+    const markdown = [
+      '## 第一章 编制说明与工程概况',
+      '',
+      '### 编制说明',
+      '说明正文。',
+      '',
+      '### 工程概况',
+      '概况正文。',
+      '',
+      '### 编制说明',
+      '重复出现的编制说明正文。',
+      '',
+      '### 施工部署',
+      '部署正文。',
+    ].join('\n');
+    const chapter = { title: '编制说明与工程概况', sections: ['编制说明', '工程概况', '施工部署'], content: markdown } as unknown as DocumentDraftChapter;
+    const { markdown: finalized } = finalizeDocumentMarkdown(markdown, [chapter]);
+    const h3Numbers = [...finalized.matchAll(/^###\s+(\d+\.\d+)\s+/gmu)].map(match => match[1]);
+    // 重复块降级挂到当前小节（1.2.1），施工部署保持 1.3——历史缺陷：降级块消耗编号导致 1.3 缺号、1.4 生效跳号
+    expect(h3Numbers).toEqual(['1.1', '1.2', '1.3']);
+    expect(finalized).toContain('#### 1.2.1');
+  });
+
+  it('降级合并归一后编号连续 → L5 编号门禁不报（修复↔检测闭环）', () => {
+    const markdown = [
+      '## 第一章 编制说明与工程概况',
+      '',
+      '### 编制说明',
+      '说明正文。',
+      '',
+      '### 编制说明',
+      '重复出现的编制说明正文。',
+      '',
+      '### 施工部署',
+      '部署正文。',
+    ].join('\n');
+    const chapter = { title: '编制说明与工程概况', sections: ['编制说明', '施工部署'], content: markdown } as unknown as DocumentDraftChapter;
+    const { markdown: finalized } = finalizeDocumentMarkdown(markdown, [chapter]);
+    const h3Numbers = [...finalized.matchAll(/^###\s+(\d+\.\d+)\s+/gmu)].map(match => match[1]);
+    expect(h3Numbers).toEqual(['1.1', '1.2']);
+    expect(sectionNumberingIssues(finalized)).toEqual([]);
+  });
 });
 
 // ── A-2：目录正文编号↔名称对应校验 ──
@@ -109,6 +153,142 @@ describe('tocBodyConsistencyIssues 编号对应校验（A-2）', () => {
   it('目录正文编号与名称完全一致 → 不报', () => {
     const markdown = `${tocBlock}\n## 第四章 主要施工方法\n### 4.1 编制说明\n### 4.2 工程概况\n### 4.3 施工部署\n### 4.4 基坑支护施工`;
     expect(tocBodyConsistencyIssues(markdown)).toEqual([]);
+  });
+});
+
+// ── A-3：L5 编号连续性门禁（sectionNumberingIssues）──
+
+describe('sectionNumberingIssues L5 编号连续性门禁（A-3）', () => {
+  it('编号连续（1.1/1.2/1.3）→ 不报', () => {
+    const markdown = ['## 第一章 编制说明', '### 1.1 编制说明', '### 1.2 工程概况', '### 1.3 施工部署'].join('\n');
+    expect(sectionNumberingIssues(markdown)).toEqual([]);
+  });
+
+  it('跳号（1.1/1.3）→ 报缺号 blocker', () => {
+    const markdown = ['## 第一章 编制说明', '### 1.1 编制说明', '### 1.3 施工部署'].join('\n');
+    const issues = sectionNumberingIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('小节编号缺号') && issue.message.includes('1.2'))).toBe(true);
+    expect(issues.every(issue => issue.severity === 'blocker' && issue.category === 'structure')).toBe(true);
+  });
+
+  it('重复编号（2.2 出现两次）→ 报重复', () => {
+    const markdown = ['## 第二章 施工组织', '### 2.1 施工部署', '### 2.2 基坑支护', '### 2.2 土方开挖'].join('\n');
+    const issues = sectionNumberingIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('小节编号重复') && issue.message.includes('2.2'))).toBe(true);
+  });
+
+  it('章号错位（第2章内出现 3.2）→ 报章号错位', () => {
+    const markdown = ['## 第二章 施工组织', '### 2.1 施工部署', '### 3.2 基坑支护'].join('\n');
+    const issues = sectionNumberingIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('小节编号章号错位') && issue.message.includes('3.x'))).toBe(true);
+  });
+
+  it('真实缺陷形态复现：降级合并后 1.16/1.19 跳号 → 报缺号', () => {
+    // 完整 1..24 序列中缺 1.16、1.19（跳号根因：降级块曾占用编号）
+    const numbers = Array.from({ length: 24 }, (_, index) => index + 1).filter(number => number !== 16 && number !== 19);
+    const markdown = ['## 第一章 施工组织', ...numbers.map(number => `### 1.${number} 小节${number}`)].join('\n');
+    const issues = sectionNumberingIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('小节编号缺号') && issue.message.includes('1.16') && issue.message.includes('1.19'))).toBe(true);
+  });
+
+  it('多章独立校验：第一章连续不报、第二章缺号报', () => {
+    const markdown = [
+      '## 第一章 编制说明',
+      '### 1.1 编制说明',
+      '### 1.2 工程概况',
+      '## 第二章 施工组织',
+      '### 2.1 施工部署',
+      '### 2.3 基坑支护',
+    ].join('\n');
+    const issues = sectionNumberingIssues(markdown);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('第2章');
+  });
+});
+
+// ── A-4：L5 块数守恒门禁（sectionCountOverflowIssues）──
+
+describe('sectionCountOverflowIssues L5 块数守恒门禁（A-4）', () => {
+  const makeChapter = (overrides: Record<string, unknown>): DocumentDraftChapter => ({ id: 'ch-1', title: '施工组织', content: '', sections: [], ...overrides } as unknown as DocumentDraftChapter);
+
+  it('成稿 H3 数 = 规划小节数 → 不报', () => {
+    const chapter = makeChapter({
+      sections: ['施工部署', '基坑支护施工', '土方开挖施工'],
+      content: ['## 施工组织', '### 施工部署', '正文。', '### 基坑支护施工', '正文。', '### 土方开挖施工', '正文。'].join('\n'),
+    });
+    expect(sectionCountOverflowIssues([chapter])).toEqual([]);
+  });
+
+  it('拆半对合并为一个小节（去重后 1 条 vs 正文 1 个 H3）→ 不报', () => {
+    const chapter = makeChapter({
+      title: '装饰装修工程',
+      sections: ['零星装饰工程'],
+      content: ['## 装饰装修工程', '### 零星装饰工程', '半块一正文。', '半块二正文。'].join('\n'),
+    });
+    expect(sectionCountOverflowIssues([chapter])).toEqual([]);
+  });
+
+  it('LLM 擅加节（正文 4 个 H3 > 规划 3 个）→ 报超出 + 规划外标题', () => {
+    const chapter = makeChapter({
+      sections: ['施工部署', '基坑支护施工', '土方开挖施工'],
+      content: ['## 施工组织', '### 施工部署', '正文。', '### 基坑支护施工', '正文。', '### 土方开挖施工', '正文。', '### 现场平面布置', '正文。'].join('\n'),
+    });
+    const issues = sectionCountOverflowIssues([chapter]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('成稿小节超出主题块数');
+    expect(issues[0]!.message).toContain('现场平面布置');
+    expect(issues[0]!.severity).toBe('blocker');
+    expect(issues[0]!.category).toBe('structure');
+  });
+
+  it('缺节（正文 2 个 H3 < 规划 3 个）→ 不报（缺节方向由 section-content-integrity 覆盖）', () => {
+    const chapter = makeChapter({
+      sections: ['施工部署', '基坑支护施工', '土方开挖施工'],
+      content: ['## 施工组织', '### 施工部署', '正文。', '### 基坑支护施工', '正文。'].join('\n'),
+    });
+    expect(sectionCountOverflowIssues([chapter])).toEqual([]);
+  });
+
+  it('无规划 sections 的章 → 跳过（无基准不守恒）', () => {
+    const chapter = makeChapter({
+      sections: [],
+      content: ['## 施工组织', '### 施工部署', '正文。', '### 基坑支护施工', '正文。', '### 土方开挖施工', '正文。'].join('\n'),
+    });
+    expect(sectionCountOverflowIssues([chapter])).toEqual([]);
+  });
+
+  it('分部章容器小节豁免：wrapper 提升（容器 → 多个分部块 H3）不误报', () => {
+    const chapter = makeChapter({
+      title: '主要施工方法',
+      sections: ['主要施工方法'],
+      content: ['## 主要施工方法', '### 浅基础施工', '正文。', '### 主体结构施工', '正文。', '### 装饰装修施工', '正文。'].join('\n'),
+    });
+    expect(sectionCountOverflowIssues([chapter])).toEqual([]);
+  });
+
+  it('正文附录 H3 双侧豁免：不干扰守恒计数', () => {
+    const chapter = makeChapter({
+      sections: ['施工部署'],
+      content: ['## 施工组织', '### 施工部署', '正文。', '### 附录一 材料清单', '附件正文。'].join('\n'),
+    });
+    expect(sectionCountOverflowIssues([chapter])).toEqual([]);
+  });
+
+  it('多章独立：仅超标章报（正常章不报）', () => {
+    const normal = makeChapter({
+      id: 'ch-1',
+      sections: ['施工部署', '工程概况'],
+      content: ['## 施工组织', '### 施工部署', '正文。', '### 工程概况', '正文。'].join('\n'),
+    });
+    const overflow = makeChapter({
+      id: 'ch-2',
+      title: '质量控制',
+      sections: ['质量目标'],
+      content: ['## 质量控制', '### 质量目标', '正文。', '### 质量保证措施', '正文。'].join('\n'),
+    });
+    const issues = sectionCountOverflowIssues([normal, overflow]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.chapterId).toBe('ch-2');
   });
 });
 
@@ -251,8 +431,8 @@ describe('equipmentEntryTimingIssues 设备进场时间（D 模块）', () => {
     schedule: [{ key: '计划工期', fieldId: 'schedule_requirement', value: '计划工期：210日历天' }],
   } as unknown as DocumentFactsModel;
 
-  it('总工期 210 天、挖掘机第190日进场 → 尾期进场荒谬', () => {
-    const markdown = '施工部署\n计划工期210日历天。\n挖掘机第190日进场。';
+  it('总工期 210 天、挖掘机第210日进场 → 已达总工期报荒谬', () => {
+    const markdown = '施工部署\n计划工期210日历天。\n挖掘机第210日进场。';
     const issues = equipmentEntryTimingIssues(markdown, scheduleFactsModel);
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('设备进场时间荒谬');

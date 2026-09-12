@@ -2,7 +2,7 @@
  * 边界矩阵（P1 第 31 批 · HH 组 · 大规模矩阵铺开）
  * 数值格式谱系 × 关键入口 的全组合枚举：每条用例 =（入口, 格式, 语境）组合，
  * 断言按真实实现行为推导（探测锁定的行为表），不迎合用例改实现。
- *  - M1 面积算术：18 格式矛盾句 + 自洽锚定（tolerance=max(1,total*0.001) 阈值推导）
+ *  - M1 面积算术：18 格式矛盾句 + 自洽锚定（无容差：地上+地下 ≠ 单体建筑面积即报）
  *  - M2 tablePeakLabor：18 格式单元格解析（千分位/前导零/小数/科学计数判定）
  *  - M3 劳动力峰值修复：18 格式（小数截尾解析行为锁定：1.0→捕获0跳过、0.5→捕获5）
  *  - M4 清单量定点校正：18 格式（99→2%豁免、1e3→不匹配保留、其余→修复100）
@@ -22,16 +22,16 @@ import {
 import { NUMERIC_FORMATS, VILLAGE_WORDS, VILLAGE_WORDS_REMOVED } from './boundaryKit';
 
 // 探测锁定的行为表：各格式在 4 个入口的真实解析结果
-// area: '地上f㎡地下f㎡单体建筑面积f㎡' 报数（|2v-v| > max(1, v*0.001)）
+// area: '地上f㎡地下f㎡单体建筑面积f㎡' 报数（2v ≠ v 即报）
 // table: tablePeakLabor 单元格值（undefined=不识别）
 // labor: applyNumeric('高峰期约f人。', {laborPeakAuthority:186}) fixedCount
 // qty: fixQuantityAuthorityConflicts('C.1项铺装 f m。', [{value:100}]) fixedCount
 const FORMAT_BEHAVIOR: Array<{ f: string; area: number; table: number | 'undef'; labor: number; qty: number }> = [
-  { f: '1', area: 0, table: 1, labor: 1, qty: 1 },
-  { f: '1.0', area: 0, table: 'undef', labor: 0, qty: 1 },
-  { f: '1.00', area: 0, table: 'undef', labor: 0, qty: 1 },
-  { f: '0.5', area: 0, table: 'undef', labor: 1, qty: 1 },
-  { f: '0.05', area: 0, table: 'undef', labor: 1, qty: 1 },
+  { f: '1', area: 1, table: 1, labor: 1, qty: 1 },
+  { f: '1.0', area: 1, table: 'undef', labor: 0, qty: 1 },
+  { f: '1.00', area: 1, table: 'undef', labor: 0, qty: 1 },
+  { f: '0.5', area: 1, table: 'undef', labor: 1, qty: 1 },
+  { f: '0.05', area: 1, table: 'undef', labor: 1, qty: 1 },
   { f: '10', area: 1, table: 10, labor: 1, qty: 1 },
   { f: '99', area: 1, table: 99, labor: 1, qty: 1 }, // D2 零漂移豁免：99 vs 100 差 1% 也修复
   { f: '999', area: 1, table: 999, labor: 1, qty: 1 },
@@ -40,7 +40,7 @@ const FORMAT_BEHAVIOR: Array<{ f: string; area: number; table: number | 'undef';
   { f: '10,000', area: 1, table: 10000, labor: 1, qty: 1 },
   { f: '10000.5', area: 1, table: 'undef', labor: 1, qty: 1 },
   { f: '1234.567', area: 1, table: 'undef', labor: 1, qty: 1 },
-  { f: '0001', area: 0, table: 1, labor: 1, qty: 1 },
+  { f: '0001', area: 1, table: 1, labor: 1, qty: 1 },
   { f: '010', area: 1, table: 10, labor: 1, qty: 1 },
   { f: '1e3', area: 1, table: 'undef', labor: 1, qty: 0 },
   { f: '3.0', area: 1, table: 'undef', labor: 0, qty: 1 },
@@ -50,7 +50,7 @@ const FORMAT_BEHAVIOR: Array<{ f: string; area: number; table: number | 'undef';
 // ── M1. 面积算术：格式 × 矛盾句（tolerance=max(1,total*0.001) 阈值推导） ──
 
 describe('M1 面积算术：数值格式谱系矛盾句', () => {
-  it.each(FORMAT_BEHAVIOR)('M1 「地上$f㎡地下$f㎡单体建筑面积$f㎡」→ 报 $area 条（差=|v|>max(1,v*0.001)）', ({ f, area }) => {
+  it.each(FORMAT_BEHAVIOR)('M1 「地上$f㎡地下$f㎡单体建筑面积$f㎡」→ 报 $area 条（2v≠v 即报）', ({ f, area }) => {
     expect(areaArithmeticIssues(`地上${f}㎡地下${f}㎡单体建筑面积${f}㎡`)).toHaveLength(area);
   });
   it('M1 自洽锚定：10+5=15 全格式正常解析 → 0 条', () => {
@@ -59,8 +59,8 @@ describe('M1 面积算术：数值格式谱系矛盾句', () => {
   it('M1 自洽锚定：千分位 1,000+2,000=3,000 → 0 条', () => {
     expect(areaArithmeticIssues('地上1,000㎡地下2,000㎡单体建筑面积3,000㎡')).toHaveLength(0);
   });
-  it('M1 容差下限：差 1 且 total 小 → 不报（tolerance 下限 1）', () => {
-    expect(areaArithmeticIssues('地上10㎡地下10㎡单体建筑面积19㎡')).toHaveLength(0);
+  it('M1 无容差：差 1 即报（20 vs 19）', () => {
+    expect(areaArithmeticIssues('地上10㎡地下10㎡单体建筑面积19㎡')).toHaveLength(1);
   });
   it('M1 科学计数截尾锁定：1e3 被懒匹配捕获 3 → 3+5=8 vs 1005 → 报 1 条', () => {
     expect(areaArithmeticIssues('地上1e3㎡地下5㎡单体建筑面积1005㎡')).toHaveLength(1);

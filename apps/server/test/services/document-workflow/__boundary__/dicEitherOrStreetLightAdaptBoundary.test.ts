@@ -116,14 +116,14 @@ describe('BB2 fixForbiddenConfigurationTerms 形态边界', () => {
 
 describe('BB3 streetLightCountMismatch 容差与单位深挖', () => {
   const authorityOf = (count: number): DocumentFactsModel => factsOf({ billItemFacts: [factOf({ key: '路灯', value: `路灯｜工程量：${count}套` })] });
-  it('BB3 authority=50 下界恰 20%（40套）→ 豁免', () => {
-    expect(streetLightCountMismatchIssues('路灯40套。', authorityOf(50))).toEqual([]);
+  it('BB3 authority=50 正文 40套 不同数值 → 报', () => {
+    expect(streetLightCountMismatchIssues('路灯40套。', authorityOf(50)).length).toBe(1);
   });
   it('BB3 authority=50 下界突破（39套）→ 报', () => {
     expect(streetLightCountMismatchIssues('路灯39套。', authorityOf(50)).length).toBe(1);
   });
-  it('BB3 authority=5 小数容差恰界（4套，差1≤1）→ 豁免', () => {
-    expect(streetLightCountMismatchIssues('路灯4套。', authorityOf(5))).toEqual([]);
+  it('BB3 authority=5 正文 4套 不同数值 → 报', () => {
+    expect(streetLightCountMismatchIssues('路灯4套。', authorityOf(5)).length).toBe(1);
   });
   it('BB3 authority=5 突破（3套，差2>1）→ 报', () => {
     expect(streetLightCountMismatchIssues('路灯3套。', authorityOf(5)).length).toBe(1);

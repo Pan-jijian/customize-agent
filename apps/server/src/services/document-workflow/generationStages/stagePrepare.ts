@@ -5,7 +5,7 @@
  */
 import * as path from 'node:path';
 import { computeProjectId } from '@customize-agent/knowledge';
-import { getMultiProjectManager, getProjectKbRoot, getProjectRoot, syncKbIndexWithBoundFiles } from '../../knowledge/kbService';
+import { getMultiProjectManager, getProjectKbRoot, getProjectRoot } from '../../knowledge/kbService';
 import { getConfigStore } from '../../common/configService';
 import { getProjectRoleConfig } from '../../document-core/documentRoleService';
 import { autoSpecPrompt, getOrCreateAutoDocumentSpec } from '../../document-core/autoDocumentSpecService';
@@ -105,16 +105,19 @@ export async function stagePrepare(session: GenerationSession): Promise<void> {
   }
   session.prepare.materialFilePaths = session.prepare.materialScope.selectedFiles;
   if (session.prepare.materialFilePaths.length === 0) throw new Error('模板未绑定可用项目资料包，请先在模板中绑定需要参与生成的项目文件夹。');
-  // B1 源头守卫：知识库索引与绑定文件清单同步清理——清掉 knowledgeBase 中混入的其他项目目录索引，
-  // 并持久化绑定资料组（后续增量索引只扫这些组），跨项目脏数据不再进入任何下游检索/事实提取
-  const kbSync = await session.global.withProgressHeartbeat(() => syncKbIndexWithBoundFiles(session.prepare.projectRoot, session.prepare.materialFilePaths));
-  if (kbSync.deletedFiles > 0) {
+  // B1 守卫已改为非破坏性口径隔离（4.22.3）：不再删除知识库中非绑定资料组的切片索引——
+  // 多项目资料共库是合法使用形态，生成启动时清库会导致其他项目的切片数据丢失（丰乐镇实测回归：
+  // 库内徽光阁/合肥师范学院等资料组切片被整体清空且 bound_groups 残留导致重新同步无法恢复）；
+  // 生成隔离由下游全链路 scopedFilePaths 口径过滤保证（kbIndexHealth/证据召回/事实提取均按绑定清单过滤），
+  // 此处仅提示本次生成使用的绑定资料组，不触碰库内任何其他数据
+  const boundMaterialGroups = session.prepare.materialScope.selectedRoots;
+  if (boundMaterialGroups.length > 0) {
     upsertProgressStage(session.global.progressStages, displayStage({
       type: 'validation',
       roleId: 'document-preparation',
       status: 'running',
       message: '知识库索引与绑定文件清单已同步',
-      details: [`已清除 ${kbSync.deletedFiles} 个跨项目文件的索引（${kbSync.deletedChunks} 切片），生成全程只使用绑定资料`],
+      details: [`本次生成仅使用绑定资料组：${boundMaterialGroups.join('、')}（${session.prepare.materialFilePaths.length} 份资料），库内其他资料组切片保留不清理`],
       progress: { current: 1, total: 3, label: '准备分析' },
     }, { subtitle: '生成准备', order: session.global.progressStages.length }));
     session.global.emitProgress();

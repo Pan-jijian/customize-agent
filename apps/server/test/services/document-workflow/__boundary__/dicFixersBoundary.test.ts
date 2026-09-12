@@ -5,22 +5,20 @@
  * fixInternalTerminology（内部术语清洗）/ fixHeaderlessTables（无表头表格）/
  * fixAmbiguousEitherOrCandidates（两可归一）/ fixForbiddenConfigurationTerms（禁止词清洗）/
  * fixTocFromBody（目录重建）/ fixQuantityAuthorityConflicts（清单工程量五重豁免）/
- * applyNumericConsistencyDeterministicFixes（五步管线：峰值→节点→材料设备→支护→清单）/
- * crossChapterSemanticDuplicateIssues+stripCrossChapterSemanticDuplicateParagraphs（跨章语义重复）
+ * applyNumericConsistencyDeterministicFixes（五步管线：峰值→节点→材料设备→支护→清单）
  * 原则：每条用例独立断言意义；真实实现行为一律锁定，不迎合用例改实现。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  applyNumericConsistencyDeterministicFixes, crossChapterSemanticDuplicateIssues,
+  applyNumericConsistencyDeterministicFixes,
   fixAdjacentPhraseDuplication, fixAmbiguousEitherOrCandidates,
   fixForbiddenConfigurationTerms, fixHazardIdentificationGaps,
   fixHeaderlessTables, fixInternalTerminology, fixPlaceholderTableCells,
   fixQualityAssuranceCoverage, fixQuantityAuthorityConflicts,
   fixSelfUnderminingCandidates, fixSixHundredPercentCoverage, fixTocFromBody,
-  stripCrossChapterSemanticDuplicateParagraphs,
 } from '@/services/document-workflow/documentIntegrityChecks';
 import { buildSemanticSimilarity } from '@/services/document-workflow/semanticSimilarity';
-import type { DocumentDraftChapter } from '@/services/document-workflow/types';
+import { fixtureIndex } from '../authorityFixture';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
 
@@ -1041,6 +1039,71 @@ describe('H1 公共资源交易监督管理替换', () => {
   });
 });
 
+describe('H2 数据行留白清洗（见图纸类 forbiddenTexts，舒城第二轮实测）', () => {
+  it('H2 表格行「详见图纸」→「详见施工图设计文件」', () => {
+    const result = fixForbiddenConfigurationTerms('| 屋面工程 | 檐口高度、层数 | 详见图纸 |');
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toBe('| 屋面工程 | 檐口高度、层数 | 详见施工图设计文件 |');
+    expect(result.details).toEqual(['数据行「（详）见图纸」留白 1 处']);
+  });
+  it('H2 表格行「详见设计图纸」→「详见施工图设计文件」', () => {
+    const result = fixForbiddenConfigurationTerms('| 节点做法 | 详见设计图纸 |');
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toBe('| 节点做法 | 详见施工图设计文件 |');
+  });
+  it('H2 表格行「按图纸」→「按施工图设计文件」', () => {
+    const result = fixForbiddenConfigurationTerms('| 构造做法 | 按图纸施工 |');
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toBe('| 构造做法 | 按施工图设计文件施工 |');
+  });
+  it('H2 非表格正文留白不动（分层：正文由 qualityRules 打回 LLM 重写，不在此掩盖）', () => {
+    const md = '建筑物檐口高度、层数详见图纸，基础做法按图纸施工。';
+    const result = fixForbiddenConfigurationTerms(md);
+    expect(result.markdown).toBe(md);
+    expect(result.fixedCount).toBe(0);
+    expect(result.details).toEqual([]);
+  });
+  it('H2 合法交叉引用豁免（见图纸目录/详见图纸清单）', () => {
+    const md = '| 资料名称 | 见图纸目录 |\n| 附件 | 详见图纸清单 |';
+    const result = fixForbiddenConfigurationTerms(md);
+    expect(result.markdown).toBe(md);
+    expect(result.fixedCount).toBe(0);
+  });
+  it('H2 单行多处与多行分别计数、details 逐条记录', () => {
+    const md = ['| 檐口高度 | 详见图纸 | 层数 | 详见图纸 |', '| 基础 | 按图纸 |'].join('\n');
+    const result = fixForbiddenConfigurationTerms(md);
+    expect(result.fixedCount).toBe(3);
+    const lines = result.markdown.split('\n');
+    expect(lines[0]).toBe('| 檐口高度 | 详见施工图设计文件 | 层数 | 详见施工图设计文件 |');
+    expect(lines[1]).toBe('| 基础 | 按施工图设计文件 |');
+    expect(result.details).toEqual(['数据行「（详）见图纸」留白 2 处', '数据行「按图纸」留白 1 处']);
+  });
+  it('H2 幂等：清洗后再次执行不动', () => {
+    const once = fixForbiddenConfigurationTerms('| 檐口高度 | 详见图纸 |');
+    const twice = fixForbiddenConfigurationTerms(once.markdown);
+    expect(twice.markdown).toBe(once.markdown);
+    expect(twice.fixedCount).toBe(0);
+  });
+  it('H2 表格行「按设计图纸」→「按施工图设计文件」（R8 扩展：数据行实测形态）', () => {
+    const result = fixForbiddenConfigurationTerms('| 构造做法 | 按设计图纸施工 |');
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toBe('| 构造做法 | 按施工图设计文件施工 |');
+    expect(result.details).toEqual(['数据行「按设计图纸」留白 1 处']);
+  });
+  it('H2 正文「按设计要求」→「按施工图设计文件」（R8 扩展：全文档级责任模糊式留白）', () => {
+    const result = fixForbiddenConfigurationTerms('绿化种植土换填工程量按设计要求控制。');
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toBe('绿化种植土换填工程量按施工图设计文件控制。');
+    expect(result.details).toEqual(['按设计要求留白改写 1 处']);
+  });
+  it('H2 「按设计要求」合法交叉引用豁免（目录/清单/索引/汇总）', () => {
+    const md = '按设计要求目录编制，另见按设计要求清单。';
+    const result = fixForbiddenConfigurationTerms(md);
+    expect(result.markdown).toBe(md);
+    expect(result.fixedCount).toBe(0);
+  });
+});
+
 // ── I. fixTocFromBody 目录按正文重建 ──
 
 const TOC_DOC = (toc: string, body: string) => `## 目录\n\n${toc}\n\n<div class="page-break"></div>\n\n${body}`;
@@ -1313,15 +1376,15 @@ describe('J8 阈值与跳过', () => {
 });
 
 describe('J9 句级口径豁免', () => {
-  it('J9 句内多候选全大漂移 → 分部量列举句不归一', () => {
+  it('J9 句内全不一致无总量锚点 → 不豁免 → 全部按清单归一', () => {
     const md = '本句挖一般土方146.93m³、级配碎石480.5m³、水泥混凝土572.3m³。';
     const result = fixQuantityAuthorityConflicts(md, [
       { name: '挖一般土方', value: 800, unit: 'm³' },
       { name: '级配碎石', value: 2000, unit: 'm³' },
       { name: '水泥混凝土', value: 1800, unit: 'm³' },
     ]);
-    expect(result.markdown).toBe(md);
-    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe('本句挖一般土方800m³、级配碎石2000m³、水泥混凝土1800m³。');
+    expect(result.fixedCount).toBe(3);
   });
   it('J9 句内大漂移与小差异并存 → 不触发豁免（大漂移仍修）', () => {
     const md = '拆除路面633m³，级配碎石18949.52m³。';
@@ -1509,10 +1572,10 @@ describe('K2 第2步 节点工期（fixNodeScheduleConflicts）体系缩放', ()
     expect(result.markdown).toContain('第270日');
     expect(result.markdown).toContain('第540日');
   });
-  it('K2 体系终点 ≥ 权威×0.9 → 不缩放', () => {
+  it('K2 体系终点 500 与权威 540 不同 → 缩放为 540', () => {
     const md = '开工令下发后第500日完成全部工作。';
     const result = applyNumericConsistencyDeterministicFixes(md, { scheduleAuthority: 540 });
-    expect(result.markdown).toBe(md);
+    expect(result.markdown).toBe('开工令下发后第540日完成全部工作。');
   });
   it('K2 竣工验收语境裸第N日缩放（正向）', () => {
     // 裸「第N日竣工验收」无开工令锚点 → absoluteDays 空不缩放；前置开工令锚点建立体系
@@ -1555,10 +1618,10 @@ describe('K4 权威表提取与多表对齐', () => {
     const result = applyNumericConsistencyDeterministicFixes(md);
     expect(result.markdown).toContain('主体结构封顶 | 第230日');
   });
-  it('K4 差 4 天（<5 门）不动', () => {
+  it('K4 差 4 天即替换为权威值 230', () => {
     const md = `${authorityTable}\n\n### 关键节点表\n\n| 节点 | 时间 |\n| --- | --- |\n| 主体结构封顶 | 第234日 |`;
     const result = applyNumericConsistencyDeterministicFixes(md);
-    expect(result.markdown).toContain('主体结构封顶 | 第234日');
+    expect(result.markdown).toContain('主体结构封顶 | 第230日');
   });
   it('K4 权威表自身行不动（authoritySpans 内）', () => {
     const result = applyNumericConsistencyDeterministicFixes(authorityTable);
@@ -1601,22 +1664,22 @@ describe('K5 正文三形态定点替换', () => {
 describe('K6 nodeAuthorities 注入覆盖', () => {
   it('K6 生成前锁定口径与文档权威冲突 ≥5 天 → 主表值覆盖并清空权威表 span', () => {
     const md = '### 施工总进度计划表\n\n| 节点 | 时间 |\n| --- | --- |\n| 主体结构封顶 | 开工令下发后第230日 |';
-    const result = applyNumericConsistencyDeterministicFixes(md, { nodeAuthorities: [{ node: '主体结构封顶', offset: '第300日' }] });
+    const result = applyNumericConsistencyDeterministicFixes(md, { authorityIndex: fixtureIndex({ milestones: [{ label: '主体结构封顶', value: 300 }] }) });
     expect(result.markdown).toContain('主体结构封顶 | 开工令下发后第300日');
   });
-  it('K6 注入与文档权威一致 → 不动', () => {
+  it('K6 注入与文档权威差 1 天 → 注入值覆盖', () => {
     const md = '### 施工总进度计划表\n\n| 节点 | 时间 |\n| --- | --- |\n| 主体结构封顶 | 开工令下发后第230日 |';
-    const result = applyNumericConsistencyDeterministicFixes(md, { nodeAuthorities: [{ node: '主体结构封顶', offset: '第231日' }] });
-    expect(result.markdown).toBe(md);
+    const result = applyNumericConsistencyDeterministicFixes(md, { authorityIndex: fixtureIndex({ milestones: [{ label: '主体结构封顶', value: 231 }] }) });
+    expect(result.markdown).toContain('主体结构封顶 | 开工令下发后第231日');
   });
   it('K6 节点名不匹配锚点表 → 忽略', () => {
     const md = '### 施工总进度计划表\n\n| 节点 | 时间 |\n| --- | --- |\n| 主体结构封顶 | 开工令下发后第230日 |';
-    const result = applyNumericConsistencyDeterministicFixes(md, { nodeAuthorities: [{ node: '未知节点名', offset: '第300日' }] });
+    const result = applyNumericConsistencyDeterministicFixes(md, { authorityIndex: fixtureIndex({ milestones: [{ label: '未知节点名', value: 300 }] }) });
     expect(result.markdown).toBe(md);
   });
   it('K6 偏移值超界（>3000）忽略', () => {
     const md = '### 施工总进度计划表\n\n| 节点 | 时间 |\n| --- | --- |\n| 主体结构封顶 | 开工令下发后第230日 |';
-    const result = applyNumericConsistencyDeterministicFixes(md, { nodeAuthorities: [{ node: '主体结构封顶', offset: '第9999日' }] });
+    const result = applyNumericConsistencyDeterministicFixes(md, { authorityIndex: fixtureIndex({ milestones: [{ label: '主体结构封顶', value: 9999 }] }) });
     expect(result.markdown).toBe(md);
   });
 });
@@ -1631,19 +1694,19 @@ describe('K7 第3步 材料/设备数量（fixCrossSectionNumericConflicts）外
     expect(result.markdown).toContain('装配率30%');
   });
   it('K7 自然村数量锁定（9→20）', () => {
-    const result = applyNumericConsistencyDeterministicFixes('本项目覆盖9个自然村。', { villageCountAuthority: 20 });
+    const result = applyNumericConsistencyDeterministicFixes('本项目覆盖9个自然村。', { authorityIndex: fixtureIndex({ villageCount: 20 }) });
     expect(result.markdown).toContain('20个自然村');
   });
   it('K7 机动工期锁定（10→25）', () => {
-    const result = applyNumericConsistencyDeterministicFixes('机动工期预留10天。', { slackDaysAuthority: 25 });
+    const result = applyNumericConsistencyDeterministicFixes('机动工期预留10天。', { authorityIndex: fixtureIndex({ slackDays: 25 }) });
     expect(result.markdown).toContain('预留25天');
   });
   it('K7 设备台数锁定（塔吊2→1）', () => {
-    const result = applyNumericConsistencyDeterministicFixes('现场配置塔吊2台。', { machineAuthorities: { towerCrane: 1 } });
+    const result = applyNumericConsistencyDeterministicFixes('现场配置塔吊2台。', { authorityIndex: fixtureIndex({ equipment: [{ label: '塔吊', value: 1 }] }) });
     expect(result.markdown).toBe('现场配置塔吊1台。');
   });
   it('K7 标号外部锁定（垫层C15→C20）', () => {
-    const result = applyNumericConsistencyDeterministicFixes('垫层采用C15混凝土。', { codeAuthorities: { cushion: 'C20' } });
+    const result = applyNumericConsistencyDeterministicFixes('垫层采用C15混凝土。', { authorityIndex: fixtureIndex({ specs: [{ anchor: 'cushion', value: 'C20' }] }) });
     expect(result.markdown).toContain('垫层采用C20');
   });
   it('K7 无外部权威且无表格 → 不动', () => {
@@ -1659,10 +1722,10 @@ describe('K8 表格唯一值/设备兜底/众数兜底', () => {
     const result = applyNumericConsistencyDeterministicFixes(md);
     expect(result.markdown).toContain('灭火器12具。');
   });
-  it('K8 差异 ≤20% 不动（10 vs 12）', () => {
+  it('K8 不同数值即修复（10 → 12）', () => {
     const md = '| 灭火器 | 12具 |\n\n正文配置灭火器10具。';
     const result = applyNumericConsistencyDeterministicFixes(md);
-    expect(result.markdown).toContain('灭火器10具。');
+    expect(result.markdown).toContain('灭火器12具。');
   });
   it('K8 塔吊多表冲突 → 设备兜底取保守台数', () => {
     const md = '| 塔吊 | 2台 |\n| 塔吊 | 1台 |';
@@ -1717,15 +1780,14 @@ describe('K10 第4步 支护体系（fixSupportSystemConflicts）管线集成', 
 
 describe('K11 第5步 清单工程量与管线聚合', () => {
   it('K11 quantityAuthorities 管线内生效', () => {
-    const result = applyNumericConsistencyDeterministicFixes('级配碎石18949.52m³。', { quantityAuthorities: [{ name: '级配碎石', value: 20931.02, unit: 'm³' }] });
+    const result = applyNumericConsistencyDeterministicFixes('级配碎石18949.52m³。', { authorityIndex: fixtureIndex({ quantity: [{ label: '级配碎石', value: 20931.02, unit: 'm³' }] }) });
     expect(result.markdown).toBe('级配碎石20931.02m³。');
   });
   it('K11 五步管线顺序执行互不重叠（峰值+设备+清单同文）', () => {
     const md = '高峰期总人数68人。现场配置塔吊2台。级配碎石18949.52m³。';
     const result = applyNumericConsistencyDeterministicFixes(md, {
       laborPeakAuthority: 186,
-      machineAuthorities: { towerCrane: 1 },
-      quantityAuthorities: [{ name: '级配碎石', value: 20931.02, unit: 'm³' }],
+      authorityIndex: fixtureIndex({ equipment: [{ label: '塔吊', value: 1 }], quantity: [{ label: '级配碎石', value: 20931.02, unit: 'm³' }] }),
     });
     expect(result.markdown).toBe('高峰期总人数186人。现场配置塔吊1台。级配碎石20931.02m³。');
     expect(result.fixedCount).toBe(3);
@@ -1734,10 +1796,8 @@ describe('K11 第5步 清单工程量与管线聚合', () => {
     const md = '高峰期总人数68人。现场配置塔吊2台。计划工期45日历天。机动工期预留10天。级配碎石18949.52m³。';
     const result = applyNumericConsistencyDeterministicFixes(md, {
       laborPeakAuthority: 186,
-      machineAuthorities: { towerCrane: 1 },
       scheduleAuthority: 210,
-      slackDaysAuthority: 25,
-      quantityAuthorities: [{ name: '级配碎石', value: 20931.02, unit: 'm³' }],
+      authorityIndex: fixtureIndex({ equipment: [{ label: '塔吊', value: 1 }], slackDays: 25, quantity: [{ label: '级配碎石', value: 20931.02, unit: 'm³' }] }),
     });
     expect(result.details.length).toBeLessThanOrEqual(12);
   });
@@ -1752,160 +1812,5 @@ describe('K11 第5步 清单工程量与管线聚合', () => {
     const md = '计划工期45日历天。';
     const result = applyNumericConsistencyDeterministicFixes(md, { scheduleAuthority: 0 });
     expect(result.markdown).toBe(md);
-  });
-});
-
-// ── L. crossChapterSemanticDuplicateIssues + stripCrossChapterSemanticDuplicateParagraphs ──
-
-/** 章工厂：补齐 DocumentDraftChapter 必填字段（evidence/missingFacts 不参与本检测） */
-const chapterOf = (id: string, title: string, content: string): DocumentDraftChapter => ({ id, title, content, evidence: [], missingFacts: [] });
-
-/** 60 字门槛以上字段落（CROSS_CHAPTER_SEMANTIC_DUP_MIN_CHARS=60）：
- * P1（65 字）与 P2（62 字）共享数字指纹 {30,200,14,7}，密度 P1=12/65 < P2=12/62 → 密度低者 P1 被报/删 */
-const L_P1 = '本工程混凝土强度等级为C30，浇筑厚度为200mm，养护周期为14天，防水等级为二级，抗震设防烈度为7度，结构类型为框架结构体系。';
-const L_P2 = '结构层混凝土采用C30强度等级，浇筑厚度200mm，养护周期14天，防水等级为二级，抗震设防烈度为7度，结构形式为框架结构。';
-/** P3 为 P1 去「本工程」前缀（62 字），与 P1/P2 均共享指纹 → 三章两对 */
-const L_P3 = '混凝土强度等级为C30，浇筑厚度为200mm，养护周期为14天，防水等级为二级，抗震设防烈度为7度，结构类型为框架结构体系。';
-/** 迭代收敛三段（均 60+ 字）：A∩B 第 1 轮命中（共享 30/200）删 B；A∩C 第 2 轮特殊条件命中删 C */
-const L_IA = '本工程主体结构混凝土强度30浇筑200，层高3.6米，柱距8.4米，基础埋深2.5米，外墙采用保温装饰一体板，屋面设置两道防水层，地下室侧墙设置卷材防水并砌筑保护墙。';
-const L_IB = '本工程混凝土强度等级C30，浇筑厚度200mm，施工工艺参数按统一基准执行，各分项施工方案均以此为准组织现场施工并验收。';
-const L_IC = '现场浇筑200养护14天，防水等级二级，抗震设防烈度为7度，结构采用框架结构体系，屋面防水等级为二级，建筑耐火等级为二级。';
-
-describe('L1 crossChapterSemanticDuplicateIssues 语义重复检测', () => {
-  it('L1 两章段落共享数字指纹（相似度 0.9）→ 报', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', L_P1),
-      chapterOf('ch2', '第二章 施工部署', L_P2),
-    ];
-    const issues = await crossChapterSemanticDuplicateIssues(chapters);
-    expect(issues.length).toBe(1);
-    expect(issues[0].severity).toBe('blocker');
-    // 报密度低者（P1 65 字密度 0.1846 < P2 62 字密度 0.1935）
-    expect(issues[0].chapterId).toBe('ch1');
-    expect(issues[0].message).toContain('第二章 施工部署');
-    expect(issues[0].message).toContain('0.90');
-  });
-  it('L1 数字指纹不共享 → 不报', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', '本工程混凝土强度等级C30，浇筑厚度200mm。'),
-      chapterOf('ch2', '第二章 施工部署', '现场配置挖掘机3台，管理人员5名。'),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
-  it('L1 同章两段重复 → 不报（仅跨章判定）', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', '本工程混凝土强度等级C30，浇筑厚度200mm。\n\n本工程混凝土采用C30强度，浇筑200mm厚度。'),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
-  it('L1 逐字相等对 → 不双报', async () => {
-    const text = '本工程混凝土强度等级C30，浇筑厚度200mm。';
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', text),
-      chapterOf('ch2', '第二章 施工部署', text),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
-  it('L1 段落 <60 字不入池 → 不报', async () => {
-    const short = '混凝土C30。';
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', short),
-      chapterOf('ch2', '第二章 施工部署', short),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
-  it('L1 标题/表格/列表块不入池', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', '## 施工部署\n\n本工程混凝土强度等级C30，浇筑厚度200mm。'),
-      chapterOf('ch2', '第二章 施工部署', '| 项目 | 内容 |\n| --- | --- |\n| 混凝土 | C30 |\n\n- 本工程混凝土采用C30强度，浇筑200mm厚度。'),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
-  it('L1 三章两对命中 → 报两条（drop 密度低者）', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', L_P1),
-      chapterOf('ch2', '第二章 施工部署', L_P2),
-      chapterOf('ch3', '第三章 施工方案', L_P3),
-    ];
-    const issues = await crossChapterSemanticDuplicateIssues(chapters);
-    expect(issues.length).toBeGreaterThanOrEqual(2);
-  });
-  it('L1 单章无段落 → 不报', async () => {
-    expect(await crossChapterSemanticDuplicateIssues([])).toEqual([]);
-  });
-});
-
-describe('L2 stripCrossChapterSemanticDuplicateParagraphs 跨章重复删除', () => {
-  it('L2 单对重复 → 删除低密度段', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', L_P1),
-      chapterOf('ch2', '第二章 施工部署', L_P2),
-    ];
-    const removed = await stripCrossChapterSemanticDuplicateParagraphs(chapters);
-    expect(removed).toBe(1);
-    expect(chapters[0].content).toBe('');
-  });
-  it('L2 密度高者保留（低密度章段被删）', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', L_P2), // 高密度 12/62=0.1935
-      chapterOf('ch2', '第二章 施工部署', L_P1), // 低密度 12/65=0.1846
-    ];
-    const removed = await stripCrossChapterSemanticDuplicateParagraphs(chapters);
-    expect(removed).toBe(1);
-    expect(chapters[0].content).toContain('结构层混凝土采用C30');
-    expect(chapters[1].content).toBe('');
-  });
-  it('L2 迭代收敛（首轮删除后新段落对命中）', async () => {
-    let call = 0;
-    vi.mocked(buildSemanticSimilarity).mockImplementation(async () => {
-      call += 1;
-      return (left: string, right: string): number => {
-        const specialPair = (a: string, b: string) =>
-          (a.includes('强度30浇筑200') && b.includes('浇筑200养护14')) || (b.includes('强度30浇筑200') && a.includes('浇筑200养护14'));
-        if (call >= 2 && specialPair(left, right)) return 0.9;
-        if (left === right) return 1;
-        const leftNums = new Set(left.match(/\d+/gu) || []);
-        const rightNums = new Set(right.match(/\d+/gu) || []);
-        return [...leftNums].filter(num => rightNums.has(num)).length >= 2 ? 0.9 : 0.1;
-      };
-    });
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', L_IA),
-      chapterOf('ch2', '第二章 施工部署', L_IB),
-      chapterOf('ch3', '第三章 施工方案', L_IC),
-    ];
-    const removed = await stripCrossChapterSemanticDuplicateParagraphs(chapters);
-    expect(removed).toBe(2);
-    vi.mocked(buildSemanticSimilarity).mockImplementation(CHAPTER_SIM);
-  });
-  it('L2 删除后幂等（二次 strip 0）', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', L_P1),
-      chapterOf('ch2', '第二章 施工部署', L_P2),
-    ];
-    const first = await stripCrossChapterSemanticDuplicateParagraphs(chapters);
-    expect(first).toBe(1);
-    const second = await stripCrossChapterSemanticDuplicateParagraphs(chapters);
-    expect(second).toBe(0);
-  });
-  it('L2 无重复 → 0', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', '本工程混凝土强度等级C30，浇筑厚度200mm。'),
-      chapterOf('ch2', '第二章 施工部署', '现场配置挖掘机3台，管理人员5名。'),
-    ];
-    expect(await stripCrossChapterSemanticDuplicateParagraphs(chapters)).toBe(0);
-  });
-  it('L2 同章不删、标题块不删', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', '## 混凝土工程\n\n本工程混凝土强度等级C30，浇筑厚度200mm。\n\n## 钢筋工程\n\n本工程混凝土采用C30强度，浇筑200mm厚度。'),
-    ];
-    expect(await stripCrossChapterSemanticDuplicateParagraphs(chapters)).toBe(0);
-  });
-  it('L2 空内容章不崩', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', ''),
-      chapterOf('ch2', '第二章 施工部署', ''),
-    ];
-    expect(await stripCrossChapterSemanticDuplicateParagraphs(chapters)).toBe(0);
   });
 });

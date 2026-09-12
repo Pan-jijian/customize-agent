@@ -1,9 +1,9 @@
 /**
- * chapterReadiness 单测：章节生成准备度计划（事实缺失/表格缺口/证据不足/风险分级/策略建议）。
+ * chapterReadiness 单测：章节生成准备度计划（事实缺失/证据不足/风险分级/策略建议）。
  */
 import { describe, expect, it } from 'vitest';
 import { buildChapterReadinessPlan } from '@/services/document-workflow/chapterReadiness';
-import type { DocumentTemplateChapter, DocumentEvidence, ProjectGraphTablePlan } from '@/services/document-workflow/types';
+import type { DocumentTemplateChapter, DocumentEvidence } from '@/services/document-workflow/types';
 
 function makeChapter(overrides: Partial<DocumentTemplateChapter> = {}): DocumentTemplateChapter {
   return { id: 'c1', title: '施工部署', purpose: '', queries: [], requiredFacts: [], ...overrides };
@@ -11,26 +11,6 @@ function makeChapter(overrides: Partial<DocumentTemplateChapter> = {}): Document
 
 function makeEvidence(overrides: Partial<DocumentEvidence> = {}): DocumentEvidence {
   return { chapterId: 'c1', filePath: '/f.pdf', score: 1, sectionTitle: '', content: '', ...overrides };
-}
-
-function makeTablePlan(missingProjectFactFields: string[]): ProjectGraphTablePlan {
-  return {
-    id: 't1',
-    title: '计划表',
-    chapterTitle: '施工部署',
-    moduleTitle: '模块',
-    required: true,
-    reason: '测试',
-    fields: [],
-    sourceDomains: [],
-    fillability: {
-      requiredFieldCount: 4,
-      confirmedFieldCount: 2,
-      missingProjectFactFields,
-      canGenerate: false,
-      fallbackPolicy: 'generate_with_review_notes',
-    },
-  };
 }
 
 describe('buildChapterReadinessPlan', () => {
@@ -65,17 +45,6 @@ describe('buildChapterReadinessPlan', () => {
     expect(plan.riskLevel).toBe('low');
   });
 
-  it('表格缺口 → generate_with_review_notes 策略并去重', () => {
-    const plan = buildChapterReadinessPlan({
-      chapter: makeChapter({
-        tablePlans: [makeTablePlan(['a', 'b', 'a'])],
-      }),
-      evidence: [makeEvidence(), makeEvidence(), makeEvidence()],
-    });
-    expect(plan.tableFieldGaps).toEqual(['a', 'b']);
-    expect(plan.suggestedStrategy).toBe('generate_with_review_notes');
-  });
-
   it('证据不足 → 记入缺口', () => {
     const plan = buildChapterReadinessPlan({
       chapter: makeChapter(),
@@ -87,10 +56,7 @@ describe('buildChapterReadinessPlan', () => {
 
   it('缺口 ≥5 → high 风险 + evidence_first 策略', () => {
     const plan = buildChapterReadinessPlan({
-      chapter: makeChapter({
-        requiredFacts: ['f1', 'f2', 'f3'],
-        tablePlans: [makeTablePlan(['g1', 'g2'])],
-      }),
+      chapter: makeChapter({ requiredFacts: ['f1', 'f2', 'f3', 'f4', 'f5'] }),
       evidence: [makeEvidence()],
     });
     expect(plan.riskLevel).toBe('high');

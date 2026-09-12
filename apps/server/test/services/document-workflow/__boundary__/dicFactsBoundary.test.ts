@@ -479,11 +479,11 @@ describe('G2 equipmentEntry 尾期进场阈值', () => {
     const md = '计划工期210日历天。塔式起重机第167日进场。';
     expect(equipmentEntryTimingIssues(md, factsOf({}))).toEqual([]);
   });
-  it('G2 第168日（80%）报', () => {
-    const md = '计划工期210日历天。塔式起重机第168日进场。';
+  it('G2 第210日（100%）报（消息断言）', () => {
+    const md = '计划工期210日历天。塔式起重机第210日进场。';
     const issues = equipmentEntryTimingIssues(md, factsOf({}));
     expect(issues.length).toBe(1);
-    expect(issues[0].message).toContain('尾期进场');
+    expect(issues[0].message).toContain('设备进场时间荒谬');
   });
   it('G2 第210日（100%）报', () => {
     const md = '计划工期210日历天。塔式起重机第210日进场。';
@@ -491,12 +491,12 @@ describe('G2 equipmentEntry 尾期进场阈值', () => {
   });
   const totalAnchors = ['计划工期', '合同工期', '总工期', '工期总日历天数'];
   it.each(totalAnchors)('G2 总工期锚点“$0”', (anchor) => {
-    const md = `${anchor}210日历天。塔式起重机第200日进场。`;
+    const md = `${anchor}210日历天。塔式起重机第210日进场。`;
     expect(equipmentEntryTimingIssues(md, factsOf({})).length).toBe(1);
   });
   it('G2 总工期来自 facts.schedule', () => {
     const model = factsOf({ schedule: [factOf({ value: '计划工期210日历天' })] });
-    const md = '塔式起重机第200日进场。';
+    const md = '塔式起重机第210日进场。';
     expect(equipmentEntryTimingIssues(md, model).length).toBe(1);
   });
   it('G2 总工期 29 天不识别（域外）', () => {

@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { DocumentDraftChapter, GeneratedDocumentDraft, DocumentAsset } from '../document-workflow/types';
-import { generateDocumentDraft, getDocumentTemplate } from '../document-workflow';
+import { appendFingerprintEntry, extractHeadingTitles, generateDocumentDraft, getDocumentTemplate } from '../document-workflow';
 import { collectSectionContentGaps } from '../document-workflow/qualityValidation';
 import { DOCUMENT_WORKFLOW_VERSION } from '../document-workflow/documentWorkflowVersion';
 import { computeProjectId } from '@customize-agent/knowledge';
@@ -611,7 +611,7 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
   const minProgressSaveInterval = Math.max(1_000, Math.min(15_000, Number(process.env.DOCUMENT_PROGRESS_SAVE_INTERVAL_MS ?? 5_000)));
   // 阶段签名未变（如周期性心跳）时的保底写盘间隔，避免每 30s 心跳全量写盘
   const minProgressHeartbeatSaveInterval = Math.max(30_000, Math.min(300_000, Number(process.env.DOCUMENT_PROGRESS_HEARTBEAT_SAVE_INTERVAL_MS ?? 60_000)));
-  const promise = generateDocumentDraft({ ...input, projectRoot: resolvedProjectRoot, resumeChapters, signal: controller.signal, onProgress: (stages, checkpoint) => {
+  const promise = generateDocumentDraft({ ...input, diversitySeed: documentId, projectRoot: resolvedProjectRoot, resumeChapters, signal: controller.signal, onProgress: (stages, checkpoint) => {
     try {
       if (taskRef.current) taskRef.current.lastProgressAt = Date.now();
       lastProgressStages = stages;
@@ -689,6 +689,13 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       ...completedBase,
       assets: generatedAsset ? [generatedAsset, ...(completedBase.assets || []).filter(asset => asset.id !== generatedAsset.id)] : completedBase.assets,
     }, resolvedProjectRoot);
+    // 多文档反雷同（L3）：定稿后写指纹池（只存标题与结构、无正文；失败静默不阻断主链）
+    if (completedStatus !== 'failed' && result.markdown) {
+      const headingTitles = extractHeadingTitles(result.markdown);
+      if (headingTitles.h3.length > 0 || headingTitles.h4.length > 0) {
+        appendFingerprintEntry({ documentId, templateId: record.templateId || input.templateId, h3: headingTitles.h3, h4: headingTitles.h4, createdAt: new Date().toISOString() });
+      }
+    }
     upsertGeneratedAssets(result.assets || [], documentId, resolvedProjectRoot);
     upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${record.title}`, status: record.status === 'completed' ? 'success' : record.status === 'completed_with_issues' ? 'warning' : 'error', percent: 100, message: record.status === 'completed' ? '文档生成完成，已通过导出门禁' : record.status === 'completed_with_issues' ? `文档已生成（带 ${warningIssues.length || 1} 项待复核问题，可下载后人工完善）` : `文档生成未通过导出门禁，存在 ${warningIssues.length || 1} 个阻断问题`, stages: result.executionStages, error: record.status === 'completed' || record.status === 'completed_with_issues' ? undefined : warningIssues.join('；') });
     return record;

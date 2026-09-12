@@ -205,9 +205,9 @@ describe('V2 nodeSchedule 跨形态全组合（基线未覆盖形态对）', () 
     const md = '第60日完成基坑支护及土方外运。基坑支护完成 | 第65天。';
     expect(nodeScheduleConsistencyIssues(md)).toHaveLength(1);
   });
-  it('V2-7 形态A 60 + 形态B 64（差4）→ 不报', () => {
+  it('V2-7 形态A 60 + 形态B 64（差4）→ 报（不同数值即矛盾）', () => {
     const md = '第60日完成基坑支护及土方外运。基坑支护完成 | 第64天。';
-    expect(nodeScheduleConsistencyIssues(md)).toEqual([]);
+    expect(nodeScheduleConsistencyIssues(md)).toHaveLength(1);
   });
 });
 

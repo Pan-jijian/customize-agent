@@ -93,6 +93,27 @@ export function isTenderClauseFragmentTitle(title: string) {
   // 动作而非小节标题（技术标小节不会以条款编号「款」开头命名）
   if (/^\d{1,3}\s*款/u.test(normalized)) return true;
   if (/第\d+(?:\.\d+)?款[^，,。；]{0,20}(?:向(?:招标人|发包人|监理人?|承包人)|提出|告知|通知|送达|发出)/u.test(normalized)) return true;
+  // 数据值+括号指令标题（舒城实测：「26元（保留两位小数）」——招标条款计算结果/数值参数被 LLM
+  // 直接写为小节标题；特征为数字+货币/计量单位+括号内含指令性动词（保留/计算/填写/详见/按…计），
+  // 合法施组小节标题不会以纯数据值命名，括号内更不会含指令性措辞）
+  if (/\d+(?:元|万元|㎡|m[²3]?|km|m|cm|mm|kg|t|L|㎡|立方米|平方米|公顷|亩|度|kPa|MPa)[（(](?:保留|计算|填写|详见|见|按|不得|应|须)/u.test(normalized)) return true;
+  // 冒号后条款义务句式（舒城实测：「隐蔽工程验收：所有隐蔽工程验收必须由承包人按规定」——
+  // 招标条款原文被 LLM 截断为小节标题；topic 后冒号分隔的从句含「必须由/应由/须由」义务句式，
+  // 施组小节标题不用冒号引出条款义务陈述；宽松匹配：冒号后任意内容+义务助动词即判条款碎片）
+  if (/[：:].{0,30}(?:必须由|应由|须由)/u.test(normalized)) return true;
+  // 截断介词结尾（舒城实测：「…必须由承包人按规定」「…必须由施工方按规定」——条款义务句被截断，
+  // 标题以介词/助动词「由/按/须」收尾且前文含义务标记（必须/应/须），合法标题不以截断介词结尾）
+  if (/(?:必须|应|须|需).{0,30}(?:由|按|须)$/.test(normalized)) return true;
+  // 条款编号引用句式（舒城实测：「11.5 1.1条的规定另行交纳履约保证」——合同条款
+  // 「按第X.X条的规定另行交纳履约保证(金)」被 LLM 截断为小节标题；特征为条款编号
+  // 「X.X条/款」或「第X.X条」+「的规定/约定」，施组小节标题不会引用合同条款编号）
+  if (/(?:\d+(?:\.\d+)*|第\d+(?:\.\d+)*)条(?:款)?的?(?:规定|约定)/u.test(normalized)) return true;
+  // 条款义务动作句式（舒城实测同源：「另行交纳履约保证」——「另行交纳/缴纳」为合同条款
+  // 义务动作措辞，施组小节标题不以「另行+义务动词」命名）
+  if (/另行(?:交纳|缴纳|支付|提交|办理|承担|履行)/u.test(normalized)) return true;
+  // 内部占位桶标签（舒城实测：「未分部条目」——大纲规划器内部未分桶标签被 LLM 直接写为
+  // 小节标题；「未分部/未分类/未分组/未归类/未划分」是规划器内部状态词，不构成交付标题）
+  if (/^未(?:分部|分类|分组|归类|划分|分配)/u.test(normalized)) return true;
   // 乱码标题（4.12.14 用户自跑资料回归）：资料二进制/编码误读文本被提取为章节标题混入目录
   return isLikelyMojibakeTitle(normalized);
 }
@@ -136,14 +157,109 @@ export function isInstructionLikeOutlineTitle(title: string) {
   return isTenderClauseFragmentTitle(normalized);
 }
 
+/** 规划小节标题归一化：剥章节编号前缀、句尾标点、英文括号注释等规划模型残留。
+ * （原 promptRuleExtraction 迁入：constructionBidStructure 补挂链需同口径判定，
+ * 而 promptRuleExtraction 依赖 constructionBidStructure，迁移打破循环依赖） */
+export function normalizePlannedSectionTitle(title: string) {
+  return displayChapterTitle(title.replace(/\*+/gu, ''))
+    .replace(/^第[一二三四五六七八九十百千万\d]+[章节篇部分、.．\s-]*/u, '')
+    .replace(/^\d+(?:\.\d+)*(?:[.．、]|\s)+/u, '')
+    .replace(/^[-—–]\s*/u, '')
+    .replace(/[<>]/gu, '')
+    .replace(/[：:。；;,.，]+$/gu, '')
+    // 清理规划模型残留的英文括号注释（如 "(or use numbering consistent with the outline)"），避免注释进入目录与正文标题
+    .replace(/\s*[（(][^（）()]{0,40}[a-zA-Z]{3,}[^（）()]{0,40}[)）]\s*$/u, '')
+    .trim();
+}
+
+/**
+ * 条款碎片/指令泄漏型小节标题判别（第十六版评审 B 类标题硬伤拦截）：
+ * 招标文件条款文本被截断（数字前缀残留/合同条款片段/逗号链单字结尾）或模板编排指令泄漏
+ * （「每个单位工程独立制表」）成为节标题时判定为碎片，规划器与补写链同口径剔除。
+ * （原 promptRuleExtraction 迁入，供评分条目提取、大纲出口清洗与补挂拦截共用）
+ */
+export function isFragmentLikeSectionTitle(title: string): boolean {
+  const normalized = normalizePlannedSectionTitle(title).replace(/\s+/gu, '');
+  if (!normalized) return true;
+  // 1) 数字前缀残留（「2发包人代表…」数字后直接接汉字无分隔，normalize 剥不掉）
+  if (/^\d+[^\d.．、]/u.test(normalized)) return true;
+  // 2) 合同条款文本片段泄漏（「发包人代表的任何批准、检查、证书、同意、通」类截断条款）
+  if (/^(?:发包人代表|任何批准|计量与支付|变更与索赔|缺陷责任|竣工验收程序|违约责任|争议解决|合同价格)/u.test(normalized)) return true;
+  // 2.5) 投标承诺断言句式（舒城实测：「我公司对该表提供的内容及相关资料均属实」——投标函
+  // 承诺句被评分条目提取器当条目后补挂为小节标题；施组小节标题是名词短语，不作第一人称断言）
+  if (/^(?:我(?:方|公司|单位)|本单位|本公司).{0,20}(?:承诺|保证|均属实|均真实|均有效|承担)/u.test(normalized)) return true;
+  // 3) 模板编排指令泄漏（「每个单位工程独立制表」类指令语态）
+  if (/独立制表|单独制表|分别编制|逐一编制|另行编制|单位工程独立|分单位工程/u.test(normalized)) return true;
+  // 4) 逗号链+单字截断结尾（条款列举被截断作标题，如「…、同意、通」）
+  if (/[、，,]/u.test(normalized) && normalized.length >= 10 && /^[\u4e00-\u9fa5]$/u.test(normalized.slice(-1))) {
+    const tail = normalized.split(/[、，,]/u);
+    if (tail.length >= 3 && tail[tail.length - 1].length === 1) return true;
+  }
+  // 5) 数据值+括号指令标题（舒城实测：「26元（保留两位小数）」normalize 后为「26元保留两位小数」——
+  // 招标条款计算结果被 LLM 写为小节标题；数字+货币/计量单位+括号内指令性动词）
+  if (/\d+(?:元|万元|㎡|m[²3]?|km|m|cm|mm|kg|t|L|立方米|平方米|公顷|亩|度|kPa|MPa)[（(](?:保留|计算|填写|详见|见|按|不得|应|须)/u.test(normalized)) return true;
+  // 6) 冒号后条款义务句式（舒城实测：「隐蔽工程验收：所有…必须由承包人按规定」normalize 后冒号被剥离，
+  // 但义务句式「必须由/应由/须由」保留；施组小节标题不会含条款义务陈述）
+  if (/(?:必须由|应由|须由)/u.test(normalized)) return true;
+  // 7) 截断介词结尾（舒城实测：标题以「由/按/须」收尾且前文含义务标记，合法标题不以截断介词结尾）
+  if (/(?:必须|应|须|需).{0,30}(?:由|按|须)$/.test(normalized)) return true;
+  // 8) 条款编号引用句式（舒城实测：「1.1条的规定另行交纳履约保证」——合同条款「按第X.X条
+  // 的规定另行交纳履约保证(金)」被 LLM 截断为小节标题；施组小节标题不会引用合同条款编号）
+  if (/(?:\d+(?:\.\d+)*|第\d+(?:\.\d+)*)条(?:款)?的?(?:规定|约定)/u.test(normalized)) return true;
+  // 9) 条款义务动作句式（舒城实测同源：「另行交纳履约保证」——「另行交纳/缴纳」为合同条款
+  // 义务动作措辞，施组小节标题不以「另行+义务动词」命名）
+  if (/另行(?:交纳|缴纳|支付|提交|办理|承担|履行)/u.test(normalized)) return true;
+  // 10) 内部占位桶标签（舒城实测：「未分部条目」——大纲规划器内部未分桶标签被 LLM 直接
+  // 写为小节标题；「未分部/未分类/未分组/未归类/未划分」是规划器内部状态词，非交付标题）
+  if (/^未(?:分部|分类|分组|归类|划分|分配)/u.test(normalized)) return true;
+  // 11) 句子型逗号长链（舒城实测：招标评分表 PDF 断裂文本「5 分力投入经济合理，满足施工需要」
+  // 被评分条目承接审计补挂为小节标题；施组小节标题以名词短语命名，句子长评不是标题）——
+  // 逗号分句含 ≥7 字长句字段即判句子；合法顿号列举条目（「拟采用的新技术、新工艺」）不命中
+  const commaFields = normalized.split(/[、，,]/u).filter(Boolean);
+  if (commaFields.length >= 2 && commaFields.some(field => field.length >= 7)) return true;
+  return false;
+}
+
 function isInvalidOutlineTitle(title: string) {
   return title.trim().length === 0 || isInstructionLikeOutlineTitle(title);
 }
 
-function outlineTitlesFromBlock(content: string) {
+/** OUTLINE 解析项：sectionCandidate 标记二级小节候选（多级编号 1.1 / 括号编号（1）/ 缩进行） */
+interface OutlineParsedTitle {
+  title: string;
+  sectionCandidate: boolean;
+  kind: 'numbered' | 'dotted' | 'paren' | 'indent' | 'plain';
+}
+
+const OUTLINE_DOTTED_ITEM_RE = /^[（(]?\d{1,3}(?:[.．]\d{1,3})+(?:[.．、）)]|\s+|[一-龥])/u;
+const OUTLINE_PAREN_ITEM_RE = /^[（(]\d{1,3}[)）]/u;
+const OUTLINE_INDENT_RE = /^(?: {2,}|\t)/u;
+const OUTLINE_NUMBERED_ITEM_RE = new RegExp(`^(?:第(?:\\d{1,3}|${CN_NUMERAL_RE})[章节]|\\d{1,3}[、)）]|\\d{1,3}[.．]\\s|(?:${CN_NUMERAL_RE})[、.．)）])`, 'u');
+
+/** 单行 OUTLINE 项解析：多级编号/括号编号识别为二级小节候选；同名类标记连续出现由调用侧维持平铺章语义 */
+function parseOutlineTitleLine(rawLine: string): OutlineParsedTitle | null {
+  const line = rawLine.replace(/\u3000/gu, '  ');
+  const trimmed = line.replace(/^[-*+]\s+/u, '').trim();
+  if (!trimmed) return null;
+  const title = cleanOutlineTitle(rawLine);
+  if (!title || isInvalidOutlineTitle(title)) return null;
+  if (OUTLINE_DOTTED_ITEM_RE.test(trimmed)) return { title, sectionCandidate: true, kind: 'dotted' };
+  if (OUTLINE_PAREN_ITEM_RE.test(trimmed)) return { title, sectionCandidate: true, kind: 'paren' };
+  if (OUTLINE_NUMBERED_ITEM_RE.test(trimmed)) return { title, sectionCandidate: false, kind: 'numbered' };
+  if (OUTLINE_INDENT_RE.test(line)) return { title, sectionCandidate: true, kind: 'indent' };
+  return { title, sectionCandidate: false, kind: 'plain' };
+}
+
+/**
+ * OUTLINE 块两级解析（组件 3）：`1.1 xx`、`（1）xx`、缩进行识别为二级小节候选并携带 kind，
+ * 由调用侧挂靠最近的章；纯平铺行为不变（无二级标记时逐行输出章，与旧实现逐字一致）。
+ * 多级编号 `1.1` 在预处理阶段同时作为分行标记，行内混排的 `1.1 xx` 也能被切出。
+ */
+function outlineItemsFromBlock(content: string): OutlineParsedTitle[] {
   const cnOrder = `${CN_NUMERAL_RE}`;
   const markers = [
     `第(?:\\d{1,3}|${cnOrder})[章节]\\s*`,
+    `(?:\\d{1,3}[.．]){1,2}\\d{1,3}[.．、）)]?(?=\\s|[一-龥])`,
     `(?:\\d{1,3})[、)）]\\s*`,
     `(?:\\d{1,3})[.．]\\s+(?!\\d)`,
     `(?:${cnOrder})[、.．)）]\\s*`,
@@ -158,8 +274,8 @@ function outlineTitlesFromBlock(content: string) {
   }
   return normalized
     .split(/\n|；|;/u)
-    .map(line => cleanOutlineTitle(line))
-    .filter(title => !isInvalidOutlineTitle(title));
+    .map(line => parseOutlineTitleLine(line))
+    .filter((item): item is OutlineParsedTitle => Boolean(item));
 }
 
 const OUTLINE_TAG_NAME_RE = '(?:OUTLINE|CHAPTERS?|章节(?:大纲)?|大纲|目录)';
@@ -188,17 +304,28 @@ function extractOutlineBlocks(text: string, options?: { strict?: boolean }) {
 
 function extractExplicitOutlineFromText(text: string, source: string, options?: { strict?: boolean }): DocumentTemplateChapter[] {
   const chapters: DocumentTemplateChapter[] = [];
-  const blocks = extractOutlineBlocks(text, options);
-  for (const block of blocks) {
-    for (const title of outlineTitlesFromBlock(block)) {
+  let lastChapterKind: OutlineParsedTitle['kind'] | null = null;
+  const normalizeKey = (title: string) => title.replace(/\s+/gu, '');
+  for (const block of extractOutlineBlocks(text, options)) {
+    for (const item of outlineItemsFromBlock(block)) {
+      const current = chapters[chapters.length - 1];
+      // 两级解析：二级小节标记（1.1 / （1）/ 缩进）挂靠最近的章；纯平铺行为不变——
+      // 与上一章同类的小节标记连续出现（如（1）（2）（3）连排、同级缩进连排）维持原「平铺=章」语义
+      if (current && item.sectionCandidate && lastChapterKind && lastChapterKind !== item.kind) {
+        if (normalizeKey(item.title) !== normalizeKey(current.title) && !(current.sections || []).some(section => normalizeKey(section) === normalizeKey(item.title))) {
+          current.sections = [...(current.sections || []), item.title];
+        }
+        continue;
+      }
       chapters.push({
         id: `explicit-${source}-${chapters.length + 1}`,
-        title,
-        purpose: `根据显式大纲章节生成正式正文：${title}`,
+        title: item.title,
+        purpose: `根据显式大纲章节生成正式正文：${item.title}`,
         requiredFacts: [],
         sections: [],
-        queries: [title],
+        queries: [item.title],
       });
+      lastChapterKind = item.kind;
     }
   }
   return chapters.filter(chapter => !isInvalidOutlineTitle(chapter.title));

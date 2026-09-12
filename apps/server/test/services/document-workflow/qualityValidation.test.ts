@@ -2,10 +2,17 @@
  * qualityValidation 单测：截断词表扩展 + 占位式表达。
  * 均为 L2 确定性结构检测，无需语义通道。
  */
-import { describe, expect, it } from 'vitest';
-import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, processSpecConflictIssues, punctuationArtifactIssues } from '@/services/document-workflow/qualityValidation';
+import { describe, expect, it, vi } from 'vitest';
+import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, boqPlacementIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, processSpecConflictIssues, punctuationArtifactIssues } from '@/services/document-workflow/qualityValidation';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentFactsModel } from '@/services/document-workflow/types';
+
+// 语义兜底 stub：测试环境不加载本地嵌入模型（@huggingface/transformers 缺席），
+// 返回 0 相似度使 boqPlacementIssues 的语义路径退化为「无命中」确定性行为
+vi.mock('@/services/document-workflow/semanticSimilarity', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/services/document-workflow/semanticSimilarity')>();
+  return { ...actual, buildSemanticSimilarity: async () => () => 0 };
+});
 
 /** 工序规格事实卡 mock（specifications 单条，其余数组空） */
 function specFactsModel(specValue: string): DocumentFactsModel {
@@ -20,6 +27,43 @@ function specFactsModel(specValue: string): DocumentFactsModel {
 
 // 语义 gate 全零向量：不触发动作词扩围/撤销，归属判定走确定性词面路径
 const embedDocuments = async (texts: string[]) => texts.map(() => [0, 0]);
+
+describe('boqPlacementIssues 口径行排除（V5 P6 run1 实测）', () => {
+  function tablesFactsModel(headers: string[], rows: string[][]): DocumentFactsModel {
+    return {
+      project: [], schedule: [], quality: [], safety: [], resources: [],
+      drawings: [], rules: [], bills: [], preciseFacts: [], schemaFacts: {}, factIndex: {},
+      missing: [], conflicts: [], specifications: [], canonical: { byKey: {} },
+      tables: [{ headers, rows }],
+    } as unknown as DocumentFactsModel;
+  }
+
+  it('分部小计/合计口径行与空残片行不计入分母（明细全落位不报）', async () => {
+    const model = tablesFactsModel(['项目编码', '项目名称', '单位', '工程量'], [
+      ['030901010001', '挖一般土方', 'm3', '100'],
+      ['030901010002', '回填方', 'm3', '50'],
+      ['', '分部小计', '', ''],
+      ['', '合计', '', ''],
+      ['', '', '', ''],
+    ]);
+    const issues = await boqPlacementIssues('本工程完成挖一般土方与回填方施工，铺装层改造同步推进。', [], model);
+    expect(issues).toEqual([]);
+    // 口径行未被排除时：分母 4、分部小计+合计未落位 → 2/4=50% <60% 报 error
+  });
+
+  it('真实未落位明细仍报（口径行排除不掩盖真缺陷）', async () => {
+    const model = tablesFactsModel(['项目编码', '项目名称', '单位', '工程量'], [
+      ['030901010001', '挖一般土方', 'm3', '100'],
+      ['030901010002', '混凝土管铺设', 'm', '80'],
+      ['', '分部小计', '', ''],
+    ]);
+    const issues = await boqPlacementIssues('本工程完成挖一般土方施工。', [], model);
+    expect(issues.length).toBe(1);
+    expect(issues[0]!.message).toContain('清单项落位不足');
+    expect(issues[0]!.message).toContain('/2 项');
+    expect(issues[0]!.message).toContain('混凝土管铺设');
+  });
+});
 
 describe('formalContentIntegrityIssues 截断词表扩展（h13c）', () => {
   it('以「复查合格后」结尾且无句号 → 报截断句', () => {

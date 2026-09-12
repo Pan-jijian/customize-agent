@@ -1,20 +1,19 @@
 /**
  * t4-pr PR1 组：promptRuleExtraction 纯函数族矩阵（生成器产出，真实行为锁定）。
  * 覆盖：cleanSectionTitleArtifacts / normalizePlannedSectionTitle / isInvalidPlannedSectionTitle /
- * sectionTitleEquivalent / dedupePlannedSections / minimumSectionCount / fallbackSectionsForChapter /
+ * sectionTitleEquivalent / dedupePlannedSections / minimumSectionCount /
  * normalizePlannedSections。
  */
 import { describe, expect, it } from 'vitest';
 import {
   cleanSectionTitleArtifacts,
   dedupePlannedSections,
-  fallbackSectionsForChapter,
   isInvalidPlannedSectionTitle,
   minimumSectionCount,
   normalizePlannedSections,
-  normalizePlannedSectionTitle,
   sectionTitleEquivalent,
 } from '@/services/document-workflow/promptRuleExtraction';
+import { normalizePlannedSectionTitle } from '@/services/document-workflow/outline';
 
 describe('cleanSectionTitleArtifacts', () => {
   it('无重复词尾原样', () => {
@@ -56,32 +55,10 @@ describe('cleanSectionTitleArtifacts', () => {
   it('词尾重复带前缀：现场踏勘踏勘', () => {
     expect(cleanSectionTitleArtifacts("现场踏勘踏勘")).toEqual("现场踏勘");
   });
-  it('查表回退：编制依据编制说明 → 编制依据', () => {
-    expect(cleanSectionTitleArtifacts("编制依据编制说明")).toEqual("编制依据");
-  });
-  it('查表回退：工程概况项目概况基本概况 → 工程概况', () => {
-    expect(cleanSectionTitleArtifacts("工程概况项目概况基本概况")).toEqual("工程概况");
-  });
-  it('查表回退：现场踏勘施工条件现场条件 → 现场踏勘', () => {
-    expect(cleanSectionTitleArtifacts("现场踏勘施工条件现场条件")).toEqual("现场踏勘");
-  });
-  it('查表回退：主要施工内容主要施工项目施工内容 → 主要施工内容', () => {
-    expect(cleanSectionTitleArtifacts("主要施工内容主要施工项目施工内容")).toEqual("主要施工内容");
-  });
-  it('查表回退：重点难点难点对策重难点 → 重点难点', () => {
-    expect(cleanSectionTitleArtifacts("重点难点难点对策重难点")).toEqual("重点难点");
-  });
-  it('查表回退：施工部署总体部署流水施工顺序施工区段 → 施工部署', () => {
-    expect(cleanSectionTitleArtifacts("施工部署总体部署流水施工顺序施工区段")).toEqual("施工部署");
-  });
-  it('查表回退：进度计划工期节点 → 进度计划', () => {
-    expect(cleanSectionTitleArtifacts("进度计划工期节点")).toEqual("进度计划");
-  });
-  it('查表回退：劳动力机械设备材料计划资源配置人材机 → 劳动力', () => {
-    expect(cleanSectionTitleArtifacts("劳动力机械设备材料计划资源配置人材机")).toEqual("劳动力");
-  });
-  it('查表回退：文明施工扬尘噪声绿色环保四节 → 文明施工', () => {
-    expect(cleanSectionTitleArtifacts("文明施工扬尘噪声绿色环保四节")).toEqual("文明施工");
+  // B 类删除（拼接查表回退）后行为锁定：粘连标题不再查表裁剪，只做确定性尾部重复清洗，语义级清洗交治理器
+  it('粘连标题不做查表回退（原样保留）', () => {
+    expect(cleanSectionTitleArtifacts("现场踏勘施工条件现场条件")).toEqual("现场踏勘施工条件现场条件");
+    expect(cleanSectionTitleArtifacts("编制依据编制依据")).toEqual("编制依据");
   });
 });
 describe('normalizePlannedSectionTitle', () => {
@@ -232,7 +209,12 @@ describe('isInvalidPlannedSectionTitle', () => {
     expect(isInvalidPlannedSectionTitle("施工", "施工部署与总体安排")).toEqual(true);
   });
   it('长度恰好4字符', () => {
-    expect(isInvalidPlannedSectionTitle("施工方案", "施工部署与总体安排")).toEqual(false);
+    expect(isInvalidPlannedSectionTitle("基坑支护", "施工部署与总体安排")).toEqual(false);
+  });
+  it('WS1 结构标签独立成题拒收（施工概况/施工流程/施工方法）', () => {
+    expect(isInvalidPlannedSectionTitle("施工概况", "施工部署与总体安排")).toEqual(true);
+    expect(isInvalidPlannedSectionTitle("施工流程", "施工部署与总体安排")).toEqual(true);
+    expect(isInvalidPlannedSectionTitle("施工方法", "施工部署与总体安排")).toEqual(true);
   });
   it('长度60字符', () => {
     expect(isInvalidPlannedSectionTitle("方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方方", "施工部署与总体安排")).toEqual(true);
@@ -309,14 +291,11 @@ describe('isInvalidPlannedSectionTitle', () => {
   it('指令：如不适用', () => {
     expect(isInvalidPlannedSectionTitle("如不适用放坡", "施工部署与总体安排")).toEqual(true);
   });
-  it('指令：根据实际情况判断', () => {
-    expect(isInvalidPlannedSectionTitle("根据项目实际情况判断", "施工部署与总体安排")).toEqual(true);
-  });
-  it('指令：结合项目情况确定', () => {
-    expect(isInvalidPlannedSectionTitle("结合项目情况确定编制", "施工部署与总体安排")).toEqual(true);
-  });
-  it('指令：按需生成', () => {
-    expect(isInvalidPlannedSectionTitle("按需生成", "施工部署与总体安排")).toEqual(true);
+  // D1 宽泛句式正则已随 B 类删除：宽泛指令表达不再由本过滤器拦截（职责收口治理器/定名轮/终检），仅保留核心条件句式
+  it('宽泛指令句式不再拦截（如：根据实际情况判断/结合项目情况确定/按需生成）', () => {
+    expect(isInvalidPlannedSectionTitle("根据项目实际情况判断", "施工部署与总体安排")).toEqual(false);
+    expect(isInvalidPlannedSectionTitle("结合项目情况确定编制", "施工部署与总体安排")).toEqual(false);
+    expect(isInvalidPlannedSectionTitle("按需生成", "施工部署与总体安排")).toEqual(false);
   });
   it('指令：视情况', () => {
     expect(isInvalidPlannedSectionTitle("视情况", "施工部署与总体安排")).toEqual(true);
@@ -324,17 +303,10 @@ describe('isInvalidPlannedSectionTitle', () => {
   it('指令：判断后', () => {
     expect(isInvalidPlannedSectionTitle("判断后", "施工部署与总体安排")).toEqual(true);
   });
-  it('指令：生成要求', () => {
-    expect(isInvalidPlannedSectionTitle("生成要求", "施工部署与总体安排")).toEqual(true);
-  });
-  it('指令：编写要求', () => {
-    expect(isInvalidPlannedSectionTitle("编写要求", "施工部署与总体安排")).toEqual(true);
-  });
-  it('指令：说明要求', () => {
-    expect(isInvalidPlannedSectionTitle("说明要求", "施工部署与总体安排")).toEqual(true);
-  });
-  it('指令：注意事项', () => {
-    expect(isInvalidPlannedSectionTitle("注意事项", "施工部署与总体安排")).toEqual(true);
+  it('宽泛裸词句式不再拦截（生成要求/说明要求/注意事项）', () => {
+    expect(isInvalidPlannedSectionTitle("生成要求", "施工部署与总体安排")).toEqual(false);
+    expect(isInvalidPlannedSectionTitle("说明要求", "施工部署与总体安排")).toEqual(false);
+    expect(isInvalidPlannedSectionTitle("注意事项", "施工部署与总体安排")).toEqual(false);
   });
   it('占位：目标与范围', () => {
     expect(isInvalidPlannedSectionTitle("目标与范围", "施工部署与总体安排")).toEqual(true);
@@ -502,191 +474,120 @@ describe('dedupePlannedSections', () => {
 });
 describe('minimumSectionCount', () => {
   it('0字 非核心', () => {
-    expect(minimumSectionCount({"title":"项目概况"}, 0, [], 0)).toEqual(3);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"项目概况"}, 0, [], 0)).toEqual(3);
   });
   it('3000字 非核心', () => {
-    expect(minimumSectionCount({"title":"项目概况"}, 3000, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"项目概况"}, 3000, [], 0)).toEqual(4);
   });
   it('5000字 非核心', () => {
-    expect(minimumSectionCount({"title":"项目概况"}, 5000, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"项目概况"}, 5000, [], 0)).toEqual(4);
   });
   it('8000字 非核心', () => {
-    expect(minimumSectionCount({"title":"项目概况"}, 8000, [], 0)).toEqual(5);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"项目概况"}, 8000, [], 0)).toEqual(5);
   });
   it('14000字 非核心', () => {
-    expect(minimumSectionCount({"title":"项目概况"}, 14000, [], 0)).toEqual(6);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"项目概况"}, 14000, [], 0)).toEqual(6);
   });
   it('20000字 非核心', () => {
-    expect(minimumSectionCount({"title":"项目概况"}, 20000, [], 0)).toEqual(6);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"项目概况"}, 20000, [], 0)).toEqual(6);
   });
   it('0字 核心质量', () => {
-    expect(minimumSectionCount({"title":"质量保证措施"}, 0, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"质量保证措施"}, 0, [], 0)).toEqual(4);
   });
   it('3000字 核心质量', () => {
-    expect(minimumSectionCount({"title":"质量保证措施"}, 3000, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"质量保证措施"}, 3000, [], 0)).toEqual(4);
   });
   it('8000字 核心安全', () => {
-    expect(minimumSectionCount({"title":"安全文明施工"}, 8000, [], 0)).toEqual(5);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"安全文明施工"}, 8000, [], 0)).toEqual(5);
   });
   it('14000字 核心工期', () => {
-    expect(minimumSectionCount({"title":"工期进度计划"}, 14000, [], 0)).toEqual(6);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"工期进度计划"}, 14000, [], 0)).toEqual(6);
   });
   it('5000字 核心物资', () => {
-    expect(minimumSectionCount({"title":"材料物资管理"}, 5000, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"材料物资管理"}, 5000, [], 0)).toEqual(4);
   });
   it('3000字 核心机械', () => {
-    expect(minimumSectionCount({"title":"机械设备配置"}, 3000, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"机械设备配置"}, 3000, [], 0)).toEqual(4);
   });
   it('3000字 核心劳动力', () => {
-    expect(minimumSectionCount({"title":"劳动力配置"}, 3000, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"劳动力配置"}, 3000, [], 0)).toEqual(4);
   });
   it('3000字 核心危大', () => {
-    expect(minimumSectionCount({"title":"危大工程专项"}, 3000, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"危大工程专项"}, 3000, [], 0)).toEqual(4);
   });
   it('3000字 核心文明', () => {
-    expect(minimumSectionCount({"title":"文明施工"}, 3000, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"文明施工"}, 3000, [], 0)).toEqual(4);
   });
   it('3000字 核心总平面', () => {
-    expect(minimumSectionCount({"title":"施工总平面布置"}, 3000, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工总平面布置"}, 3000, [], 0)).toEqual(4);
   });
   it('3000字 核心施工方法', () => {
-    expect(minimumSectionCount({"title":"主要施工方法"}, 3000, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"主要施工方法"}, 3000, [], 0)).toEqual(4);
   });
   it('3000字 核心专项', () => {
-    expect(minimumSectionCount({"title":"专项方案"}, 3000, [], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"专项方案"}, 3000, [], 0)).toEqual(4);
   });
   it('3000字 无参数证据', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"纯文字说明","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"纯文字说明","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
   });
   it('3000字 9个参数', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
   });
   it('3000字 10个参数', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
   });
   it('3000字 19个参数', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm；参数10=11mm；参数11=12mm；参数12=13mm；参数13=14mm；参数14=15mm；参数15=16mm；参数16=17mm；参数17=18mm；参数18=19mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm；参数10=11mm；参数11=12mm；参数12=13mm；参数13=14mm；参数14=15mm；参数15=16mm；参数16=17mm；参数17=18mm；参数18=19mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
   });
   it('3000字 20个参数', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm；参数10=11mm；参数11=12mm；参数12=13mm；参数13=14mm；参数14=15mm；参数15=16mm；参数16=17mm；参数17=18mm；参数18=19mm；参数19=20mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(5);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm；参数10=11mm；参数11=12mm；参数12=13mm；参数13=14mm；参数14=15mm；参数15=16mm；参数16=17mm；参数17=18mm；参数18=19mm；参数19=20mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(5);
   });
   it('3000字 25个参数', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm；参数10=11mm；参数11=12mm；参数12=13mm；参数13=14mm；参数14=15mm；参数15=16mm；参数16=17mm；参数17=18mm；参数18=19mm；参数19=20mm；参数20=21mm；参数21=22mm；参数22=23mm；参数23=24mm；参数24=25mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(5);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm；参数10=11mm；参数11=12mm；参数12=13mm；参数13=14mm；参数14=15mm；参数15=16mm；参数16=17mm；参数17=18mm；参数18=19mm；参数19=20mm；参数20=21mm；参数21=22mm；参数22=23mm；参数23=24mm；参数24=25mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(5);
   });
   it('8000字 20个参数', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 8000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm；参数10=11mm；参数11=12mm；参数12=13mm；参数13=14mm；参数14=15mm；参数15=16mm；参数16=17mm；参数17=18mm；参数18=19mm；参数19=20mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(5);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 8000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm；参数10=11mm；参数11=12mm；参数12=13mm；参数13=14mm；参数14=15mm；参数15=16mm；参数16=17mm；参数17=18mm；参数18=19mm；参数19=20mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(5);
   });
   it('14000字 20个参数', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 14000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm；参数10=11mm；参数11=12mm；参数12=13mm；参数13=14mm；参数14=15mm；参数15=16mm；参数16=17mm；参数17=18mm；参数18=19mm；参数19=20mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(6);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 14000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm；参数10=11mm；参数11=12mm；参数12=13mm；参数13=14mm；参数14=15mm；参数15=16mm；参数16=17mm；参数17=18mm；参数18=19mm；参数19=20mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(6);
   });
   it('8000字 10个参数', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 8000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(5);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 8000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm；参数7=8mm；参数8=9mm；参数9=10mm","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(5);
   });
   it('lockedCount抬高', () => {
-    expect(minimumSectionCount({"title":"项目概况"}, 3000, [], 6)).toEqual(6);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"项目概况"}, 3000, [], 6)).toEqual(6);
   });
   it('lockedCount超阈值', () => {
-    expect(minimumSectionCount({"title":"项目概况"}, 14000, [], 8)).toEqual(8);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"项目概况"}, 14000, [], 8)).toEqual(8);
   });
   it('lockedCount不超阈值', () => {
-    expect(minimumSectionCount({"title":"项目概况"}, 14000, [], 5)).toEqual(6);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"项目概况"}, 14000, [], 5)).toEqual(6);
   });
   it('参数跨证据合并', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm","roleId":"r","processingType":"text","sectionTitle":"第二节"}], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm；参数5=6mm；参数6=7mm","roleId":"r","processingType":"text","sectionTitle":"第二节"}], 0)).toEqual(4);
   });
   it('同参数跨证据去重', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm","roleId":"r","processingType":"text","sectionTitle":"第二节"}], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"参数0=1mm；参数1=2mm；参数2=3mm；参数3=4mm；参数4=5mm","roleId":"r","processingType":"text","sectionTitle":"第二节"}], 0)).toEqual(4);
   });
   it('参数带DN', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"DN200 管道 C30 混凝土 Φ12 钢筋","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"DN200 管道 C30 混凝土 Φ12 钢筋","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
   });
   it('参数带单位中文', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"厚度 120 毫米，长度 300 米","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"厚度 120 毫米，长度 300 米","roleId":"r","processingType":"text","sectionTitle":""}], 0)).toEqual(4);
   });
   it('sectionTitle 计入文本', () => {
-    expect(minimumSectionCount({"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"","roleId":"r","processingType":"text","sectionTitle":"参数1=12mm"}], 0)).toEqual(4);
-  });
-});
-describe('fallbackSectionsForChapter', () => {
-  it('质量章', () => {
-    expect(fallbackSectionsForChapter("质量保证措施")).toEqual(["质量目标与质量管理体系","关键工序质量控制措施","材料设备进场验收与检验","质量检查试验与验收程序","质量通病防治与整改闭环","成品保护与资料管理"]);
-  });
-  it('安全章', () => {
-    expect(fallbackSectionsForChapter("安全生产")).toEqual(["安全生产管理体系","危险源辨识与分级管控","现场安全防护措施","临时用电与机械设备安全管理","应急处置与安全检查整改","安全教育培训与交底"]);
-  });
-  it('工期章', () => {
-    expect(fallbackSectionsForChapter("施工工期")).toEqual(["总工期目标与节点安排","施工进度计划编制原则","关键线路与工序穿插安排","资源投入与工期保障措施","进度偏差纠偏与动态调整","工期风险识别与应对措施"]);
-  });
-  it('进度章', () => {
-    expect(fallbackSectionsForChapter("进度计划")).toEqual(["总工期目标与节点安排","施工进度计划编制原则","关键线路与工序穿插安排","资源投入与工期保障措施","进度偏差纠偏与动态调整","工期风险识别与应对措施"]);
-  });
-  it('物资章', () => {
-    expect(fallbackSectionsForChapter("物资采购")).toEqual(["主要材料设备需求分析","材料采购与进场计划","材料验收复试与保管","周转材料配置与使用管理","材料供应风险与保障措施"]);
-  });
-  it('材料章', () => {
-    expect(fallbackSectionsForChapter("材料管理")).toEqual(["主要材料设备需求分析","材料采购与进场计划","材料验收复试与保管","周转材料配置与使用管理","材料供应风险与保障措施"]);
-  });
-  it('机械章', () => {
-    expect(fallbackSectionsForChapter("机械设备")).toEqual(["主要机械设备配置原则","机械设备进退场计划","机械设备调度与运行管理","机械设备维护保养与安全检查","关键设备保障措施"]);
-  });
-  it('设备章', () => {
-    expect(fallbackSectionsForChapter("设备安装")).toEqual(["主要机械设备配置原则","机械设备进退场计划","机械设备调度与运行管理","机械设备维护保养与安全检查","关键设备保障措施"]);
-  });
-  it('劳动力章', () => {
-    expect(fallbackSectionsForChapter("劳动力计划")).toEqual(["劳动力配置原则","各阶段劳动力投入计划","专业工种与特种作业人员配置","劳动力动态调配措施","劳务管理与教育交底"]);
-  });
-  it('文明章', () => {
-    expect(fallbackSectionsForChapter("文明施工")).toEqual(["现场封闭与场容场貌管理","环境保护与污染防治措施","材料设备定置化管理","职业健康与消防文明管理","文明施工检查与整改"]);
-  });
-  it('环保章', () => {
-    expect(fallbackSectionsForChapter("环境保护")).toEqual(["总体部署与责任分工","实施流程与关键控制","资源配置与资料依据","质量安全与风险控制","检查验收与闭环管理","资料记录与成果移交"]);
-  });
-  it('总平面章', () => {
-    expect(fallbackSectionsForChapter("施工总平面")).toEqual(["施工总平面布置原则","临时道路与材料堆场布置","临时用水用电及排水布置","办公生活与加工区域布置","总平面动态调整与管理"]);
-  });
-  it('平面布置章', () => {
-    expect(fallbackSectionsForChapter("平面布置")).toEqual(["施工总平面布置原则","临时道路与材料堆场布置","临时用水用电及排水布置","办公生活与加工区域布置","总平面动态调整与管理"]);
-  });
-  it('危大章', () => {
-    expect(fallbackSectionsForChapter("危大工程")).toEqual(["危大工程识别与清单管理","专项施工方案编制与审批","专家论证与技术交底","现场实施监测与旁站管理","应急处置与验收销项"]);
-  });
-  it('专项章', () => {
-    expect(fallbackSectionsForChapter("专项方案")).toEqual(["危大工程识别与清单管理","专项施工方案编制与审批","专家论证与技术交底","现场实施监测与旁站管理","应急处置与验收销项"]);
-  });
-  it('施工方法章', () => {
-    expect(fallbackSectionsForChapter("施工方法")).toEqual(["总体施工部署与流程安排","主要分部分项施工方法","关键工序技术控制要点","资源配置与穿插组织","质量安全与成品保护措施"]);
-  });
-  it('施工方案章', () => {
-    expect(fallbackSectionsForChapter("施工方案")).toEqual(["总体施工部署与流程安排","主要分部分项施工方法","关键工序技术控制要点","资源配置与穿插组织","质量安全与成品保护措施"]);
-  });
-  it('主要章', () => {
-    expect(fallbackSectionsForChapter("主要分项工程")).toEqual(["总体施工部署与流程安排","主要分部分项施工方法","关键工序技术控制要点","资源配置与穿插组织","质量安全与成品保护措施"]);
-  });
-  it('默认章', () => {
-    expect(fallbackSectionsForChapter("其他章节")).toEqual(["总体部署与责任分工","实施流程与关键控制","资源配置与资料依据","质量安全与风险控制","检查验收与闭环管理","资料记录与成果移交"]);
-  });
-  it('组合词：质量安全', () => {
-    expect(fallbackSectionsForChapter("质量安全控制")).toEqual(["质量目标与质量管理体系","关键工序质量控制措施","材料设备进场验收与检验","质量检查试验与验收程序","质量通病防治与整改闭环","成品保护与资料管理"]);
-  });
-  it('组合词：工期进度', () => {
-    expect(fallbackSectionsForChapter("工期进度安排")).toEqual(["总工期目标与节点安排","施工进度计划编制原则","关键线路与工序穿插安排","资源投入与工期保障措施","进度偏差纠偏与动态调整","工期风险识别与应对措施"]);
-  });
-  it('组合词：物资材料', () => {
-    expect(fallbackSectionsForChapter("物资材料管理")).toEqual(["主要材料设备需求分析","材料采购与进场计划","材料验收复试与保管","周转材料配置与使用管理","材料供应风险与保障措施"]);
-  });
-  it('组合词：机械劳动力', () => {
-    expect(fallbackSectionsForChapter("机械劳动力配置")).toEqual(["主要机械设备配置原则","机械设备进退场计划","机械设备调度与运行管理","机械设备维护保养与安全检查","关键设备保障措施"]);
+    expect(minimumSectionCount({"id":"c1","purpose":"","queries":[],"requiredFacts":[],"title":"施工部署"}, 3000, [{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"","roleId":"r","processingType":"text","sectionTitle":"参数1=12mm"}], 0)).toEqual(4);
   });
 });
 describe('normalizePlannedSections', () => {
   it('有效列表', () => {
     expect(normalizePlannedSections(["基坑开挖与支护","降水施工"], "施工部署与总体安排")).toEqual(["基坑开挖与支护","降水施工"]);
   });
-  it('粘连标题清洗', () => {
-    expect(normalizePlannedSections(["现场踏勘施工条件现场条件","要点要点"], "施工部署与总体安排")).toEqual(["现场踏勘"]);
+  it('粘连标题不做查表回退（保留原样，语义级清洗交治理器）', () => {
+    expect(normalizePlannedSections(["现场踏勘施工条件现场条件","要点要点"], "施工部署与总体安排")).toEqual(["现场踏勘施工条件现场条件"]);
   });
   it('无效标题过滤', () => {
-    expect(normalizePlannedSections(["目录","施工方案"], "施工部署与总体安排")).toEqual(["施工方案"]);
+    expect(normalizePlannedSections(["目录","基坑开挖与支护"], "施工部署与总体安排")).toEqual(["基坑开挖与支护"]);
   });
   it('等价去重', () => {
     expect(normalizePlannedSections(["基坑开挖与支护","基坑开挖及支护"], "施工部署与总体安排")).toEqual(["基坑开挖与支护","基坑开挖及支护"]);

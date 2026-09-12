@@ -29,7 +29,6 @@ const strategy = (overrides: Partial<DocumentGenerationStrategy> = {}): Document
   mode: 'balanced',
   enableChapterReview: true,
   enableGlobalReview: true,
-  enableDocumentBudgetExpansion: false,
   enableFinalQualityReview: true,
   globalReviewSamplingRate: 1,
   ...overrides,

@@ -6,7 +6,7 @@ import { ArrowLeftOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { getKbFileDetail, openKbFileTarget, reindexKbFile, type KbFileDetail, type KbStoredChunk, type KbParentChunk } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
-import { formatBytes, categoryLabel } from '@/lib/utils';
+import { formatBytes, categoryLabel, KB_FILE_STATUS_TEXT_KEY } from '@/lib/utils';
 import styles from './style.module.scss';
 
 const { Paragraph } = Typography;
@@ -348,7 +348,7 @@ export default function KnowledgeFileDetailPage() {
           <Descriptions.Item label={t('knowledge.fileCategory')}><Space size={4}><Tag className="m-0 border-0 bg-[var(--colorFillSecondary)]">{categoryLabel(detail.file.category)}</Tag> <Tag className="m-0 border-0 bg-[var(--colorFillSecondary)]">{detail.file.format}</Tag></Space></Descriptions.Item>
           <Descriptions.Item label={t('knowledge.fileSize')}>{formatBytes(detail.file.fileSize)}</Descriptions.Item>
           <Descriptions.Item label={t('knowledge.chunkCount')}>{detail.file.chunkCount}</Descriptions.Item>
-          <Descriptions.Item label={t('knowledge.status')}><Tag color={detail.file.status === 'completed' ? 'success' : detail.file.status === 'failed' ? 'error' : 'processing'} className="m-0">{detail.file.status}</Tag></Descriptions.Item>
+          <Descriptions.Item label={t('knowledge.status')}><Tag color={detail.file.status === 'active' ? 'success' : detail.file.status === 'error' ? 'error' : detail.file.status === 'outdated' ? 'warning' : detail.file.status === 'disk' || detail.file.status === 'deleted' ? 'default' : 'processing'} className="m-0">{t(KB_FILE_STATUS_TEXT_KEY[detail.file.status] || 'common.unknown')}</Tag></Descriptions.Item>
           <Descriptions.Item label={t('knowledge.extractionMode')}>{String(meta.extractionMode ?? '-')}</Descriptions.Item>
           <Descriptions.Item label={t('knowledge.contentCoverage')}>{String(meta.contentCoverage ?? '-')}</Descriptions.Item>
           <Descriptions.Item label={t('knowledge.textLength')}>{String(meta.textLength ?? '-')}</Descriptions.Item>

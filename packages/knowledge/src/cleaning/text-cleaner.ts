@@ -68,6 +68,8 @@ export interface TextCleaningInput {
   text: string;
   /** 文件分类（classifier 的 FileCategory），用于选择清洗规则组 */
   category?: FileCategory | string;
+  /** 文件格式（classifier 的 format，如 pdf/office/autocad），用于内容性质判定（图纸 PDF 分流） */
+  format?: string;
   /** 文件名/相对路径（招标/补疑文档类型判定依据） */
   fileName?: string;
   /** 显式开关；缺省读环境变量 KB_TEXT_CLEANING（=0 关闭） */
@@ -204,6 +206,22 @@ function isCoordinateNoiseLine(trimmed: string): boolean {
   return coordMatches.length >= 2;
 }
 
+/**
+ * 图纸：短碎片行（离散标注数据行）。CAD 导出的施工图 PDF 文本层以离散短行为主：
+ * 检查井标高「20.52」、井编号+标高「17.82 18.97 W-4 C 19.86 19.45」、管径+埋深
+ * 「DN200 -20.3-0.3」——是有效工程数据而非噪声。正文文档以句末标点结尾的长句为主，
+ * 短行占比显著低于图纸（实测招标文件 10-20%、施工图 66%）。排除表格形态（含 |）
+ * 与句末标点结尾行，避免表格单元格/正文短句误判。
+ */
+function isShortFragmentLine(trimmed: string): boolean {
+  const core = trimmed.replace(/^#{1,6}\s+/u, '').trim();
+  if (core.length === 0 || core.length > 40) return false;
+  if (core.includes('|')) return false;
+  if (/[。；;！？!?]$/u.test(core)) return false;
+  const hanCount = (core.match(/[\p{Script=Han}]/gu) ?? []).length;
+  return hanCount < 5;
+}
+
 /** 图纸：图框标题栏关键词（图号/比例/日期/签名列） */
 const CAD_TITLE_BLOCK_KEY_RE = /^(图号|图别|比例|日期|阶段|版次|设计|制图|审核|校对|审定|复核)/u;
 /** 图框行负向词：含这些词的行是实质内容（设计说明/设计要求/审核意见等），不是图框信息 */
@@ -233,15 +251,18 @@ function isCadAttributeLine(trimmed: string): boolean {
 
 /**
  * 图纸：CAD 图元属性枚举行（「| 图层: X | 块: Y | 实体类型: … | 坐标: (…)」
- * 管道符表格形态或「└── 标注文本: …」图元注释行）——专业转换器/历史版本产物形态，
- * 图元属性包装与施组编制无关，「坐标/关联对象/状态」类纯图元定位信息会稀释检索语义。
- * 行首键名 + 冒号 + 短值多重特征判定；「图纸节点: 文件名」锚定行不删（文件溯源有用）。
+ * 管道符表格形态或「└── 标注文本: …」图元注释行，以及内置解析器输出的
+ * 「CAD DXF 实体类型: …」「CAD DXF 块/符号: …」汇总行）——图元属性包装与施组
+ * 编制无关，「坐标/关联对象/状态」类纯图元定位信息会稀释检索语义。
+ * 行首键名 + 冒号 + 短值多重特征判定；「图纸节点: 文件名」锚定行（文件溯源）
+ * 与「CAD DXF 图层: …」汇总行（图层名有语义）不删。
  */
 function isCadEntityPropertyLine(trimmed: string): boolean {
   if (trimmed.length > 50) return false;
   if (/^[|└\s]*(?:图层|块|实体类型|坐标|关联对象|状态)\s*[:：]/u.test(trimmed)) return true;
   if (/^└──\s*(?:标注文本\s*[:：])?/u.test(trimmed)) return true;
   if (/^图纸节点\s*[:：].{0,100}(?:图层|块|实体类型)\s*[:：]/u.test(trimmed)) return true;
+  if (/^CAD\s+DXF\s+(?:实体类型|块\/符号)\s*[:：]/u.test(trimmed)) return true;
   return false;
 }
 
@@ -261,6 +282,31 @@ const CONTRACT_SPECIAL_TITLE_RE = /专用合同条款|合同专用条款/u;
 /** 通用条款章节最小规模证据：行数 ≥50 或字符数 ≥2000（防误删同名短段） */
 const CONTRACT_CHAPTER_MIN_LINES = 50;
 const CONTRACT_CHAPTER_MIN_CHARS = 2000;
+
+/**
+ * 合同通用条款章节标题形态判定（结构锚定）：关键词只做内容确认，
+ * 触发必须落在结构上的标题位置。PDF 提取的正文句、折行半句、括号碎片
+ * 含标题词但非标题形态，不触发（丰乐镇事故回归：5 个误触发点全部为
+ * 正文句/折行半句，修复前被当作章节标题误删约 48 页）。
+ * 标题形态三选一：
+ * 1. 编号标题：「第二部分 通用合同条款」「第2章 合同通用条款」；
+ * 2. 独立短标题：整行即标题词（PDF 拆行后独立成行的标题，如「通用合同条款」），
+ *    但后接点线行（目录条目）时排除；
+ * 3. markdown 标题前缀（解析器行级 markdown 化产物）且剥离前缀后仍是上述形态。
+ */
+function isContractChapterTitleLine(trimmed: string): boolean {
+  const core = trimmed.replace(/^#{1,6}\s+/u, '').trim();
+  if (core.length > 40) return false;
+  if (/^第[一二三四五六七八九十百零两\d]+[部分编章节]/u.test(core)) return true;
+  if (/^(?:通用合同条款|合同通用条款)$/u.test(core)) return true;
+  return false;
+}
+
+/** 目录条目负向排除：独立标题词行后接点线页码行（目录排版），不作为章节标题触发 */
+function isTocEntryFollowed(lines: string[], index: number): boolean {
+  const nextTrimmed = (lines[index + 1] ?? '').trim();
+  return TOC_DOT_LINE_RE.test(nextTrimmed);
+}
 /** 招标公告程序段标题：文件获取/递交/开标等程序性小节（何时何地操作，与施组编制无关） */
 const TENDER_PROCEDURE_TITLE_RE = /招标文件的获取|投标文件的递交|投标文件递交|开标(时间|地点|方式)|投标截止/u;
 /** 程序段内容证据：段内含时间/日期/时分或「获取/递交/截止/开标 + 数字」才判定为程序段 */
@@ -269,8 +315,8 @@ const PROCEDURE_TIME_HINT_RE = /\d{4}\s*年|\d{1,2}\s*月\s*\d{1,2}\s*日|\d{1,2
 const BUSINESS_REVIEW_TITLE_RE = /商务(标)?(部分)?评审|报价评审|投标报价评审|商务部分|报价得分/u;
 /** 技术评审线索：段内出现技术评审/施组相关关键词则不删（评标办法混合排版时商务与技术相连，宁多勿丢） */
 const TECH_REVIEW_HINT_RE = /施工组织设计|技术(标)?(部分)?评审|技术部分|技术标/u;
-/** 新「第X部分/编」标题（合同通用条款章节边界；通用条款标题本身不触发） */
-const PART_TITLE_RE = /^第[一二三四五六七八九十百\d]+[部分编]/u;
+/** 新「第X部分/编/章」标题（合同通用条款章节边界；通用条款标题本身不触发） */
+const PART_TITLE_RE = /^第[一二三四五六七八九十百\d]+[部分编章节]/u;
 
 /** 清单：纯报价表格段标题（费用汇总/暂估/规费/税金/计日工——纯商务数据；
  * 分部分项工程量清单的名称/特征/工程量是施组核心数据，不在此列，绝不删） */
@@ -281,21 +327,24 @@ const BILL_PRICE_ROW_RE = /\d[\d,]*(?:\.\d+)?\s*元/u;
 const BILL_TITLE_PAGE_SIGN_RE = /造价(工程师)?|执业(印章)?|签章|编制单位|审核人|法定代表人/u;
 
 /**
- * 章节级边界收集（合同通用条款）：从标题行向后收集至「专用合同条款」或下一个「第X部分/编」
- * 标题为止，返回区段结束位置与累计字符数（规模证据由调用方判定）。
+ * 章节级边界收集（合同通用条款）：从标题行向后收集至「专用合同条款」或下一个
+ * 「第X部分/编/章」标题为止，返回区段结束位置、累计字符数与边界闭合状态。
+ * 边界未闭合（无明确结束锚点、收集到硬限制）时由调用方放弃删除（宁多勿丢）——
+ * 正文句误触发后吞到硬限制的旧行为是丰乐镇约 48 页误删的放大器。
  */
-function collectChapterRegion(lines: string[], start: number): { end: number; chars: number } {
+function collectChapterRegion(lines: string[], start: number): { end: number; chars: number; boundary: string | null } {
   let end = start + 1;
   let chars = lines[start]!.length;
+  let boundary: string | null = null;
   const hardLimit = Math.min(lines.length, start + 1500);
   for (let j = start + 1; j < hardLimit; j += 1) {
     const trimmed = lines[j]!.trim();
-    if (CONTRACT_SPECIAL_TITLE_RE.test(trimmed) && trimmed.length < 30) break;
-    if (j > start + 1 && PART_TITLE_RE.test(trimmed) && trimmed.length < 40 && !CONTRACT_GENERAL_TITLE_RE.test(trimmed)) break;
+    if (CONTRACT_SPECIAL_TITLE_RE.test(trimmed) && trimmed.length < 30) { end = j; boundary = '专用合同条款标题'; break; }
+    if (j > start + 1 && PART_TITLE_RE.test(trimmed) && trimmed.length < 40 && !CONTRACT_GENERAL_TITLE_RE.test(trimmed)) { end = j; boundary = '下一部分/编/章标题'; break; }
     end = j + 1;
     chars += lines[j]!.length;
   }
-  return { end, chars };
+  return { end, chars, boundary };
 }
 
 /**
@@ -335,8 +384,9 @@ function cleanCadControlCodes(line: string): string {
 /**
  * K2 预扫描：整篇文档一次遍历，产出「起始行 → 待删区段」映射。
  * 三条规则均要求「标题模式 + 内容/规模证据」双重确认：
- * 1. 合同通用条款章节（不限文件类型）：标题匹配 + 章节规模 ≥50 行或 ≥2000 字符，
- *    且区段止于「专用合同条款」——项目专属数据（专用条款）绝不吞并；
+ * 1. 合同通用条款章节（不限文件类型）：标题形态触发（结构锚定，正文句/折行半句不触发）
+ *    + 章节规模 ≥50 行或 ≥2000 字符 + 边界闭合（止于「专用合同条款」或下一「第X部分/编/章」标题）——
+ *    边界未闭合放弃删除，项目专属数据（专用条款）绝不吞并；
  * 2. 招标公告程序段（仅招标文件）：标题匹配 + 段内含时间/地点数字证据；
  * 3. 评标商务评审细则段（仅招标文件）：标题匹配 + 段内无技术评审/施组关键词
  *    （技术评审评分细则是施组生成的得分点依据，绝不能删）。
@@ -346,10 +396,10 @@ function collectSectionLevelNoise(lines: string[], docKind: DocKind): Map<number
   for (let i = 0; i < lines.length; i += 1) {
     const trimmed = lines[i]!.trim();
     if (!trimmed || trimmed.length > 40) continue;
-    // 1. 合同通用条款章节（通用适用）
-    if (CONTRACT_GENERAL_TITLE_RE.test(trimmed)) {
+    // 1. 合同通用条款章节（通用适用）：标题形态 + 关键词双重触发，目录条目排除
+    if (CONTRACT_GENERAL_TITLE_RE.test(trimmed) && isContractChapterTitleLine(trimmed) && !isTocEntryFollowed(lines, i)) {
       const region = collectChapterRegion(lines, i);
-      if (region.end - i >= CONTRACT_CHAPTER_MIN_LINES || region.chars >= CONTRACT_CHAPTER_MIN_CHARS) {
+      if (region.boundary !== null && (region.end - i >= CONTRACT_CHAPTER_MIN_LINES || region.chars >= CONTRACT_CHAPTER_MIN_CHARS)) {
         drops.set(i, { kind: 'contractGeneralClauseLines', end: region.end });
         // -1：让循环 ++ 后落在区段末行的下一行，继续检查该行标题（相邻区段不互跳）
         i = region.end - 1;
@@ -404,17 +454,39 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
   const enabled = input.enabled ?? process.env.KB_TEXT_CLEANING !== '0';
   if (!enabled || !input.text) return { text: input.text, removedChars: 0, removedLines: 0, stats: zeroStats() };
   const docKind = detectDocKind(input.fileName || '', input.text.slice(0, 4000));
-  const isCad = input.category === 'cad' || input.category === 'diagram';
+  // 内容性质判定（图纸 vs 文本）：category（扩展名分类）不表达内容语义——CAD 导出的
+  // 施工图 PDF 是 document/pdf 但内容性质是图纸。判定：cad/diagram 分类直接为图纸；
+  // document/pdf 双信号（含 ≥3 个页面标记「## PDF 第 N 页」时）：
+  // 1. 逗号坐标对行占比 ≥12%（坐标网格形态图纸）；
+  // 2. 短碎片行占比 ≥15%（标高/井编号/管径等离散标注行形态；实测全文：
+  //    施工图 22.4%、招标文件 8.1%、舒城 6.4%，取 15% 两侧均有 1.5 倍以上边际）
+  //    ——修复图纸 PDF 标高碎片被当普通文档按页眉页脚误删的缺陷，同时保证正常
+  //    文档不误判。K3 图纸噪声清洗按内容性质生效。
+  const lines = input.text.split(/\r?\n/u);
+  const isCadCategory = input.category === 'cad' || input.category === 'diagram';
+  let isDrawing = isCadCategory;
+  if (!isCadCategory && input.category === 'document' && input.format === 'pdf' && lines.length >= 20) {
+    let coordinateLines = 0;
+    let shortFragmentLines = 0;
+    let pageMarkers = 0;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (/^##\s*PDF 第 \d+ 页/u.test(trimmed)) { pageMarkers += 1; continue; }
+      if (isCoordinateNoiseLine(trimmed)) coordinateLines += 1;
+      if (isShortFragmentLine(trimmed)) shortFragmentLines += 1;
+    }
+    if (pageMarkers >= 3 && (coordinateLines / lines.length >= 0.12 || shortFragmentLines / lines.length >= 0.15)) isDrawing = true;
+  }
   // CAD 控制码还原前置：确定性无损替换（%%U/%%O 格式开关删除、%%%→%），
   // 不参与行级启发式删除与 30% 回退保护——纯图纸文件（标高/图元行占比高）常触发
   // 回退保护使整个清洗作废，控制码还原若挂在行级规则里会随之失效
-  const sourceText = isCad ? cleanCadControlCodes(input.text) : input.text;
-  const lines = sourceText.split(/\r?\n/u);
-  const totalLines = lines.length;
+  const sourceText = isDrawing ? cleanCadControlCodes(input.text) : input.text;
+  const sourceLines = sourceText.split(/\r?\n/u);
+  const totalLines = sourceLines.length;
 
   // 全文高重复行统计（页眉/页脚/图框标题栏判定依据）
   const lineCounts = new Map<string, number>();
-  for (const line of lines) {
+  for (const line of sourceLines) {
     const key = line.trim();
     if (!key) continue;
     lineCounts.set(key, (lineCounts.get(key) ?? 0) + 1);
@@ -424,7 +496,6 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
   const kept: string[] = [];
   let removedLines = 0;
   let removedChars = 0;
-  let sectionRemovedChars = 0;
   const drop = (line: string, counter: (stats: TextCleanStats) => void): void => {
     removedLines += 1;
     removedChars += line.length;
@@ -432,19 +503,18 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
   };
 
   // K2 章节/段落级预扫描：整篇文档一次遍历得出待删区段映射（主循环优先消费）
-  const sectionDrops = collectSectionLevelNoise(lines, docKind);
+  const sectionDrops = collectSectionLevelNoise(sourceLines, docKind);
 
   let index = 0;
-  while (index < lines.length) {
-    const line = lines[index]!;
+  while (index < sourceLines.length) {
+    const line = sourceLines[index]!;
     const trimmed = line.trim();
 
     // 0. K2 内容无关区段（章节/段落级整段删除，最高优先级，30% 回退保护兜底）
     const sectionDrop = sectionDrops.get(index);
     if (sectionDrop) {
       for (let j = index; j < sectionDrop.end; j += 1) {
-        drop(lines[j]!, s => { s[sectionDrop.kind] += 1; });
-        sectionRemovedChars += lines[j]!.length;
+        drop(sourceLines[j]!, s => { s[sectionDrop.kind] += 1; });
       }
       index = sectionDrop.end;
       continue;
@@ -452,10 +522,10 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
 
     // 1. 目录区段（「目录」标题行 + 点线占比 ≥50% + 行数 ≥4 三重证据，整区删除）
     if (TOC_TITLE_RE.test(trimmed)) {
-      const region = collectTocRegion(lines, index);
+      const region = collectTocRegion(sourceLines, index);
       const count = region.end - index;
       if (count >= 4 && region.dotLineRatio >= 0.5) {
-        for (let j = index; j < region.end; j += 1) drop(lines[j]!, s => { s.tocRegionLines += 1; });
+        for (let j = index; j < region.end; j += 1) drop(sourceLines[j]!, s => { s.tocRegionLines += 1; });
         index = region.end;
         continue;
       }
@@ -464,7 +534,7 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
     // 2. 连续空行压缩：≥3 连续空行保留 2 个（单空行是段落分隔，留给分块器）
     if (!trimmed) {
       let run = 1;
-      while (index + run < lines.length && !lines[index + run]!.trim()) run += 1;
+      while (index + run < sourceLines.length && !sourceLines[index + run]!.trim()) run += 1;
       const keepCount = Math.min(run, 2);
       for (let k = 0; k < keepCount; k += 1) kept.push('');
       const dropped = run - keepCount;
@@ -473,16 +543,16 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
       continue;
     }
 
-    // 3. 页眉/页脚/图框标题栏高重复行（CAD 豁免：图纸标注重复出现是数据本身——
-    // 门窗编号「FM1524」、材料规格等会随楼层重复标注，非页眉页脚；CAD 图框噪声已由 K3 规则覆盖）
-    if (!isCad && isHeaderFooterLine(trimmed, lineCounts.get(trimmed) ?? 1)) {
+    // 3. 页眉/页脚/图框标题栏高重复行（图纸内容豁免：图纸标注重复出现是数据本身——
+    // 门窗编号「FM1524」、材料规格等会随楼层重复标注，非页眉页脚；图纸图框噪声已由 K3 规则覆盖）
+    if (!isDrawing && isHeaderFooterLine(trimmed, lineCounts.get(trimmed) ?? 1)) {
       drop(line, s => { s.headerFooterLines += 1; });
       index += 1;
       continue;
     }
 
-    // 4. 纯页码行（CAD 豁免：图纸纯数字行是尺寸/标高/门窗表数值，非页码）
-    if (!isCad && isPageNumberLine(trimmed, totalLines)) {
+    // 4. 纯页码行（图纸内容豁免：图纸纯数字行是尺寸/标高/门窗表数值，非页码）
+    if (!isDrawing && isPageNumberLine(trimmed, totalLines)) {
       drop(line, s => { s.pageNumberLines += 1; });
       index += 1;
       continue;
@@ -490,9 +560,9 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
 
     // 5. 招标文件：投标文件格式模板段（段级）
     if (docKind === 'tender') {
-      const blockEnd = collectTenderFormatBlock(lines, index);
+      const blockEnd = collectTenderFormatBlock(sourceLines, index);
       if (blockEnd > index) {
-        for (let j = index; j < blockEnd; j += 1) drop(lines[j]!, s => { s.tenderFormatLines += 1; });
+        for (let j = index; j < blockEnd; j += 1) drop(sourceLines[j]!, s => { s.tenderFormatLines += 1; });
         index = blockEnd;
         continue;
       }
@@ -512,14 +582,14 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
       if (TENDER_EPROCEDURE_PREFIX_RE.test(trimmed)
           && !/[。；;：:！!？?]$/u.test(trimmed)) {
         let nextIdx = index + 1;
-        while (nextIdx < lines.length && !lines[nextIdx]!.trim()) nextIdx += 1;
-        if (nextIdx < lines.length && nextIdx - index <= 3) {
-          const next = lines[nextIdx]!.trim();
+        while (nextIdx < sourceLines.length && !sourceLines[nextIdx]!.trim()) nextIdx += 1;
+        if (nextIdx < sourceLines.length && nextIdx - index <= 3) {
+          const next = sourceLines[nextIdx]!.trim();
           const continuation = next.length > 0 && next.length < 80 && !TENDER_CONTINUATION_HEAD_RE.test(next);
           const joined = `${trimmed}${next}`;
           if (continuation && TENDER_EPROCEDURE_LINE_RE.test(joined) && !TENDER_TIME_PLACE_RE.test(joined)) {
             drop(line, s => { s.tenderEprocedureLines += 1; });
-            drop(lines[nextIdx]!, s => { s.tenderEprocedureLines += 1; });
+            drop(sourceLines[nextIdx]!, s => { s.tenderEprocedureLines += 1; });
             index = nextIdx + 1;
             continue;
           }
@@ -534,29 +604,29 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
       continue;
     }
 
-    // 7. 图纸：无汉字纯坐标数字行
-    if (isCad && isCoordinateNoiseLine(trimmed)) {
+    // 7. 图纸内容：无汉字纯坐标数字行
+    if (isDrawing && isCoordinateNoiseLine(trimmed)) {
       drop(line, s => { s.cadNoiseLines += 1; });
       index += 1;
       continue;
     }
 
-    // 8. 图纸：图框标题栏信息行（图号/比例/日期/签名行）
-    if (isCad && isCadTitleBlockLine(trimmed)) {
+    // 8. 图纸内容：图框标题栏信息行（图号/比例/日期/签名行）
+    if (isDrawing && isCadTitleBlockLine(trimmed)) {
       drop(line, s => { s.cadTitleBlockLines += 1; });
       index += 1;
       continue;
     }
 
-    // 9. 图纸：CAD 属性行（图层/颜色/线型）
-    if (isCad && isCadAttributeLine(trimmed)) {
+    // 9. 图纸内容：CAD 属性行（图层/颜色/线型）
+    if (isDrawing && isCadAttributeLine(trimmed)) {
       drop(line, s => { s.cadAttributeLines += 1; });
       index += 1;
       continue;
     }
 
-    // 10. 图纸：CAD 图元属性枚举行（管道符表格形态实体罗列）
-    if (isCad && isCadEntityPropertyLine(trimmed)) {
+    // 10. 图纸内容：CAD 图元属性枚举行（管道符表格形态实体罗列）
+    if (isDrawing && isCadEntityPropertyLine(trimmed)) {
       drop(line, s => { s.cadEntityPropertyLines += 1; });
       index += 1;
       continue;
@@ -567,17 +637,15 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
   }
 
   const resultText = kept.join('\n');
-  // 整体回退保护（宁多勿丢）：
-  // 1) 行级启发式删除导致剩余不足原文 30% → 判定误伤，回退原文；
-  // 2) K2 章节级删除（标题 + 规模/内容 + 边界三重证据）置信度高，不参与 30% 判定，
-  //    否则通用条款占比高的合同文件永远洗不掉；但剩余不足原文 10% 时仍整体回退（防极端全删）
+  // 整体回退保护（宁多勿丢）：清洗后剩余不足原文 30% → 判定误伤，回退原文。
+  // K2 章节级删除纳入 30% 判定：修复后 K2 只删真实通用条款章节（标题形态 + 边界闭合），
+  // 招标文件内通用条款章节占比通常 10-25%，正常删除不受影响；独立合同文件（几乎全为
+  // 通用条款）清洗后剩余不足 30% 会整体回退——该类文件本就应保留，回退是正确行为。
+  // 旧实现对 K2 豁免 30% 判定，误删 3812 行（剩余 69.5%）时保护形同虚设。
   // 回退时返回 sourceText（已做 CAD 控制码还原），保证确定性还原在回退路径同样生效
   const totalChars = sourceText.trim().length;
   const remainingRatio = totalChars > 0 ? resultText.trim().length / totalChars : 1;
-  const lineLevelRemovedChars = removedChars - sectionRemovedChars;
-  const lineLevelSafe = lineLevelRemovedChars === 0 || remainingRatio >= 0.3;
-  const extremeSafe = remainingRatio >= 0.1;
-  if (removedChars > 0 && totalChars > 2000 && (!lineLevelSafe || !extremeSafe)) {
+  if (removedChars > 0 && totalChars > 2000 && remainingRatio < 0.3) {
     return { text: sourceText, removedChars: 0, removedLines: 0, stats: zeroStats() };
   }
   return { text: resultText, removedChars, removedLines, stats };

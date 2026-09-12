@@ -1,14 +1,19 @@
 import { createHash } from 'node:crypto';
 import { documentTextLength } from './budget';
 
-// 工作包型关键小节：标题后以同级 H4 工作包（施工概况/施工流程/施工方法）展开正文。
+// 工作包型关键小节：标题后以同级 H4 工作包展开正文（历史标签形态「施工概况/施工流程/施工方法」已由
+// WS1 治理从写作层删除，模型兜底标签由 fixTemplatedLabels 删标题行保正文）。
 // 深度口径必须向下包含这些同级 H4，否则只提取到标题后的概述段，关键小节永远“深度不足”并触发破坏性修复
 export const WORK_PACKAGE_SECTION_RE = /项目主要施工内容|主要分部分项工程施工方案|主要施工方法/u;
+
+/** 书名号引用剥离：编制依据类清单会引用《保障农民工工资支付条例》等法规/文件名称，
+ * 引用法规名称不构成正文对应主题内容（劳资/工伤类词面门控前先剥离，避免纯引用文档误报） */
+export const BOOK_TITLE_CITATION_RE = /《[^》]*》/gu;
 
 /**
  * 工序顺序表达检测：施工流程/施工方法的工序顺序表达形式不限——箭头链、编号步骤、
  * 有序/无序列表、顺序词引导、连接线链任一即可，不再强制“→”箭头。
- * 用户要求写法合理即可（箭头链/列表/连接线均可），验收器只判“有无工序顺序表达”，不判形式。
+ * 本检测只判“有无工序顺序表达”，不判形式；相邻块形式重复由 flowFormRepeatIssues（WS3）单独判定。
  */
 export function hasProcessSequenceExpression(text: string): boolean {
   if (!text) return false;
@@ -68,6 +73,19 @@ export function normalizeSubsectionTitleForDedup(title: string): string {
     // 属同一专业工程小节，标题只差尾缀时不得判为清单外/缺失（轮4 实测“主要分部分项施工方案”块
     // 输出“主要分部分项工程施工方案”变体标题被精确匹配误杀 → 章失败）
     .replace(/工程$/u, '');
+}
+
+/** 工作包主题域标签（单位工程多工作包切块的语义化标题用）：按施工专业域归类，
+ * 域块标题 = 单位工程名 + 域名（「公厕结构与基础工程」），杜绝「公厕（1）（2）」防撞名泄漏目录；
+ * 匹配顺序即优先级（混合名如「模板、脚手架及化粪池安装工程」按安装域归类）。
+ * 蓝图层切块（buildThemedBlocksForSubSection）与 finalize 标题残留修复器同源引用，防口径漂移。 */
+export function workPackageThemeLabel(workPackageName: string): string {
+  if (/化粪池|给排水|采暖|燃气|管网|管道|阀门|水泵|水箱|水表|消防|喷淋|强电|弱电|电气|照明|防雷|接地|通风|空调|电梯/u.test(workPackageName)) return '机电安装工程';
+  if (/装饰|装修|门窗|屋面|防水|楼地面|墙柱面|天棚|吊顶|抹灰|油漆|涂料|栏杆|幕墙|零星/u.test(workPackageName)) return '装饰装修工程';
+  if (/土石方|土方|石方|基础|垫层|砌筑|砌体|混凝土|钢筋|模板|支护|降水|桩基/u.test(workPackageName)) return '结构与基础工程';
+  if (/道路|路基|路面|广场|铺装|绿化|景观|亮化|清淤|围墙|大门|停车|步道|边坡/u.test(workPackageName)) return '室外市政工程';
+  if (/脚手|围挡|安全防护|冬雨|临时|监测/u.test(workPackageName)) return '措施工程';
+  return '专项工程';
 }
 
 /** 标题同源宽松比较（稳定版）：剥离全部「工程」字样后比较，容忍“主要分部分项施工方案”与
@@ -224,7 +242,9 @@ export function stripExtraneousBlockHeadings(markdown: string, blockTitle: strin
 /** 跨 H3 同名 H4 属合法结构的泛化小节名（各分项工程通用）：施工准备/质量控制等，跨 H3 重复全部保留。
  * 4.19.3 回归：主题块成稿规范要求每个分部工程块固定输出「施工概况/施工流程/施工方法」三要素 H4，
  * 三者未入白名单时被 dedupeCrossSectionSkeletonH4s 误判为串章骨架整块删除（标题+正文一并丢失），
- * 22 个分部块被掏空后 removeEmptySubSectionHeadings 连 H3 一并删除，终稿第二章仅剩 4 块——必须保留。 */
+ * 22 个分部块被掏空后 removeEmptySubSectionHeadings 连 H3 一并删除，终稿第二章仅剩 4 块——必须保留。
+ * WS1 治理后标签已从写作层移除，但模型兜底仍可能产出：白名单继续保留，标签标题行由 fixTemplatedLabels
+ * 确定性删除（正文并入上级、零丢失），防 dedupe 整块误删造成正文连带丢失。 */
 const GENERIC_H4_TITLE_WHITELIST = new Set([
   '施工准备', '施工要点', '质量控制', '质量要求', '质量保证措施', '质量控制措施', '质量通病防治',
   '安全措施', '安全要求', '安全管理措施', '安全技术交底', '技术交底', '注意事项', '验收要求', '验收标准',
@@ -516,7 +536,7 @@ export function filterBidDisciplineFacts<T extends { key?: string; value: string
 
 export function adaptiveConcurrency(input: { total: number; kind: 'chapter' | 'search' | 'deepRetrieval' | 'sectionRepair' | 'llmRepair'; targetWords?: number; highRisk?: boolean }) {
   // 并发不设档位上限：全部任务同批启动（用户既定决策——模型端点并发量高，不会因并发限流），
-  // 在飞调用总量由全局 LLM 信号量统一调度（默认无上限），失败降级仍由 llmFailureStreak 独立处理
+  // 在飞调用总量由全局 LLM 信号量统一调度（默认无上限），失败由 callDocumentLlm 瞬态重试与块级失败隔离独立处理
   return Math.max(1, input.total);
 }
 

@@ -5,14 +5,38 @@ import type { ValidationIssue } from './types';
  * Q5 施工阶段划分口径一致性检测（round-17）：
  * 施组正文多处出现阶段划分句（“分三个阶段实施”“共分四个阶段”等），互异口径并存即自相矛盾、
  * 评审硬伤。与四层分离架构对齐：
- * - L1 封闭结构提取：含阶段划分动词形态（分为/划分为/共分/分…个阶段/…个阶段）的正文句；
+ * - L1 封闭结构提取 + 前置过滤：「数字+（个）阶段」声明形态且非列举收尾的正文句（P6，run1 实测收口）；
  * - L3 本地 bge 语义聚类：两两余弦 ≥0.62 合并为同口径簇（并查集），互异簇 ≥2 且簇间阶段数互异 → error；
  * - 本地 bge 恒可用（本地 ONNX 推理），嵌入失败直接抛出。
  * 修复链：llm_repairable 进交付阻断修复轮（统一口径指令），复检与检测同源（重跑本检测器）。
  */
 
-/** 阶段划分句封闭结构：含“阶段”且含划分动词形态（“分两个阶段”“划分为三阶段”“三个阶段”等） */
-const STAGE_DIVISION_RE = /分[为成]?[^。；;，,\n]{0,12}阶段|共[分设]?[^。；;，,\n]{0,12}阶段|划[分]?为[^。；;，,\n]{0,12}阶段|[二三四五六七八九十]个阶段/u;
+/** 阶段划分口径声明句封闭结构（V5 P6 前置过滤，run1 实测误报收口）：必须是「数字+（个）阶段」
+ * 阶段数形态——原「分[为成]?…阶段」动词形态把「分阶段劳动力推导值」「分阶段推进」等执行
+ * 描述句全数误抓（run1 实测池内 13 句有 12 句为误抓，生产误报 5 种互异口径）；且数字左窗
+ * 12 字内不得含顿号/逗号——防「按村分组、按阶段集中」「…配管配线和设备安装三个阶段」
+ * 列举收尾的跨顿号拼接（顿号列举的「N 个阶段」是工艺维度枚举，非总划分口径声明）。 */
+const STAGE_DIVISION_RE = /[二三四五六七八九十\d]{1,4}\s*个?\s*阶段/u;
+
+/** 阶段数字是否处于列举结构尾部：左侧 12 字窗含顿号/逗号 → 列举收尾非划分口径声明 */
+function isEnumerationTail(sentence: string, numberIndex: number): boolean {
+  return /[、，,]/u.test(sentence.slice(Math.max(0, numberIndex - 12), numberIndex));
+}
+
+/** 提取阶段划分口径声明句（L1 纯确定性前置过滤：去标题/表格行 → 句切分 → 句长 8-60 字 →
+ * 「数字+（个）阶段」形态 → 列举收尾排除）；检测与校准测试共用同一提取口径。 */
+export function extractStageDivisionSentences(markdown: string): string[] {
+  return [...new Set(markdown
+    .split(/\n+/u)
+    .filter(line => line.trim() && !/^\s*(#{1,6}\s+|\|)/u.test(line))
+    .flatMap(line => line.split(/[。；;]/u))
+    .map(sentence => sentence.replace(/\s+/gu, '').trim())
+    .filter(sentence => {
+      if (sentence.length < 8 || sentence.length > 60) return false;
+      const match = STAGE_DIVISION_RE.exec(sentence);
+      return match !== null && !isEnumerationTail(sentence, match.index);
+    }))];
+}
 
 /** 同口径簇合并阈值：短句语义聚类取 0.62，防近义表述误并（如“分三个阶段”与“按阶段施工”不应并簇） */
 const STAGE_CLUSTER_THRESHOLD = 0.62;
@@ -48,14 +72,8 @@ function clusterStageCount(group: string[]): number | null {
 }
 
 export async function stagePhrasingIssues(markdown: string): Promise<ValidationIssue[]> {
-  // L1：按句提取阶段划分句（去标题行/表格行；句长 8-60 字防整段与标题混入，句子太短无聚类意义）
-  const sentences = markdown
-    .split(/\n+/u)
-    .filter(line => line.trim() && !/^\s*(#{1,6}\s+|\|)/u.test(line))
-    .flatMap(line => line.split(/[。；;]/u))
-    .map(sentence => sentence.replace(/\s+/gu, '').trim())
-    .filter(sentence => sentence.length >= 8 && sentence.length <= 60 && STAGE_DIVISION_RE.test(sentence));
-  const unique = [...new Set(sentences)];
+  // L1：前置过滤提取阶段划分口径声明句（纯确定性层，见 extractStageDivisionSentences）
+  const unique = extractStageDivisionSentences(markdown);
   if (unique.length < 2) return [];
   // L3：语义聚类——同口径划分句互相似，互异簇（不同划分口径）才计数
   const similarity = await buildSemanticSimilarity(unique, unique);

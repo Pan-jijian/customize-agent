@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState } from 'react';
 import { useAppTranslations } from '@/components/Layout';
+import { KB_FILE_STATUS_TEXT_KEY } from '@/lib/utils';
 import { Button, Drawer, Input, App, Tag, Popconfirm, Empty, Space, Checkbox, Skeleton, Select, Divider, Spin, Segmented } from 'antd';
 import { EditOutlined, FileTextOutlined, FolderOutlined, DeleteOutlined, PlusOutlined, ImportOutlined, ExportOutlined, SendOutlined, RobotOutlined, SearchOutlined, UnorderedListOutlined, AppstoreOutlined, SafetyCertificateOutlined, CheckCircleOutlined, BookOutlined } from '@ant-design/icons';
 
@@ -751,7 +752,7 @@ export default function PromptPage() {
                       </div>
                       <Space size={4}>
                         <Tag color={file.matchedBy === 'content' ? 'purple' : file.matchedBy === 'disk' ? 'orange' : 'blue'} style={{ margin: 0 }}>{file.matchedBy === 'content' ? t('prompt.contentMatch') : file.matchedBy === 'disk' ? t('prompt.diskFile') : t('prompt.fileMatch')}</Tag>
-                        <Tag style={{ margin: 0 }}>{file.status}</Tag>
+                        <Tag style={{ margin: 0 }}>{t(KB_FILE_STATUS_TEXT_KEY[file.status] || 'common.unknown')}</Tag>
                       </Space>
                     </div>
                   ))}

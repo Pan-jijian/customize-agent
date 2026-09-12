@@ -1,18 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { parseBillOfQuantities, pickBillOfQuantityFiles } from '../billOfQuantitiesParser';
-import type { BillOfQuantitiesResult, BoqChunkRow } from '../billOfQuantitiesParser';
+import type { BillOfQuantitiesResult, BoqChunkRow, BoqEntry } from '../billOfQuantitiesParser';
 import type { DocumentEvidence, DocumentFact } from '../types';
 import {
   alignChapterContentToBlueprint,
-  alignChapterSectionsToBlueprint,
-  alignPlannedSectionsToBlueprint,
   blueprintCitationConsistencyIssues,
-  blueprintPlanAuthorities,
   buildBlueprintData,
   buildBlueprintDecisionLock,
   buildBlueprintOutline,
   buildChapterStructureFromBlueprint,
   buildIntegratedBlueprint,
+  buildWorkPackageFromBoqSection,
   decisionLockCategoryMeta,
   decisionMentionNegated,
   deriveEarthworkBalanceFromBoq,
@@ -38,6 +36,8 @@ import {
   validateBlueprint,
 } from '../integratedBlueprint';
 import type { BlueprintRedLineFact } from '../integratedBlueprint';
+import { buildAuthorityIndex } from '../authorityIndex';
+import { deriveRepairAuthorities } from '../integrity/fixers/fixers';
 import { majorConstructionSkeletonNames, scopeEngineeringNames } from '../chapterPostProcessing';
 
 /** 构造 markdown 表格清单 chunk fixture（马老郢村，工作表 1.1，共 3 页） */
@@ -551,6 +551,46 @@ describe('物资计划规格提取（材料型号规格是清单事实数据，�
   });
 });
 
+describe('工作包参数提取（清单特征留白不进入参数管线，舒城第二轮实测根因）', () => {
+  const buildEntry = (description: string): BoqEntry => ({
+    seq: 1,
+    code: '011701003001',
+    name: '建筑垂直运输',
+    description,
+    unit: 'm2',
+    quantity: 975.95,
+    section: '土石方工程',
+    subsection: '',
+    villageGroup: '舒城',
+    sourceFile: '舒城工程量清单.xls',
+    chunkIndex: 0,
+    sourceKind: 'markdown',
+  });
+
+  it('「檐口高度、层数：详见图纸」留白值跳过，真实参数保留', () => {
+    const workPackage = buildWorkPackageFromBoqSection('土石方工程', [
+      buildEntry('1．建筑物檐口高度、层数：详见图纸\n2．运距：1km'),
+    ]);
+    expect(workPackage.params.some(param => /图纸/u.test(param.value))).toBe(false);
+    expect(workPackage.params).toContainEqual({ key: '运距', value: '1km', source: 'boq' });
+  });
+
+  it('「详见设计图纸/按图纸/详见施工图纸」变体同样跳过，其余条款不受影响', () => {
+    const workPackage = buildWorkPackageFromBoqSection('土石方工程', [
+      buildEntry('1．基础做法：详见设计图纸\n2．边坡：按图纸\n3．长度：详见施工图纸\n4．土壤类别：三类土'),
+    ]);
+    expect(workPackage.params).toEqual([{ key: '土壤类别', value: '三类土', source: 'boq' }]);
+  });
+
+  it('含留白的做法条款不进入做法短语（避免留白照抄进正文）', () => {
+    const workPackage = buildWorkPackageFromBoqSection('土石方工程', [
+      buildEntry('1．做法：人机配合下管，详见图纸\n2．压实度：≥93%'),
+    ]);
+    expect(workPackage.methods.some(item => /图纸/u.test(item))).toBe(false);
+    expect(workPackage.acceptance).toContain('≥93%');
+  });
+});
+
 describe('渲染函数（执行层输入）', () => {
   it('参数桶渲染：金额类红线事实只进「商务禁区」行，不进正文口径行', () => {
     const boq = parseFixture();
@@ -576,6 +616,18 @@ describe('渲染函数（执行层输入）', () => {
     const pipeSub = chapter.subSections.find(section => section.title === '排水工程');
     expect(pipeSub?.workPackages[0]?.processChain).toContain('混凝土管道DN200');
     expect(pipeSub?.workPackages[0]?.coveredSeqs).toEqual([2, 4]);
+  });
+
+  it('章切片头部注入写作三源规则（与全局提示词共用同一份模板）', () => {
+    const boq = parseFixture();
+    const outline = buildBlueprintOutline({ chapterTitles: ['主要分部分项工 程施工方案'], boq, docType: '单位工程施工组织设计' });
+    const slice = renderBlueprintChapterSlice(outline.chapters[0]!);
+    expect(slice).toContain('【写作三源规则】');
+    expect(slice).toContain('D·系统推导源');
+    expect(slice).toContain('三源之外一律不得写入');
+    // 三源规则紧随切片头部声明、先于小节正文（章切片最先注入的强约束）
+    expect(slice.indexOf('蓝图切片')).toBeLessThan(slice.indexOf('【写作三源规则】'));
+    expect(slice.indexOf('【写作三源规则】')).toBeLessThan(slice.indexOf('\n## '));
   });
 
   it('施工方法章小节构建：单位工程（公厕）聚合子分部为子工作包，不再平铺独立小节', () => {
@@ -677,98 +729,6 @@ describe('渲染函数（执行层输入）', () => {
   });
 });
 
-describe('蓝图权威分部结构 → 规划小节校准（round-27 第二章小节根因）', () => {
-  function buildFuleshanLikeOutline() {
-    // 模拟丰乐镇形态：顶层分部（中文数字/名称）+ 公厕单位工程（内部子分部）
-    const chunks: BoqChunkRow[] = [
-      {
-        chunkIndex: 0,
-        sectionTitle: '表格数据',
-        content: [
-          '工程名称：丰乐镇 标段： 工作表：1.1 第1页 共1页',
-          '| 序号 | 项目编码 | COL3 | 项目名称 | 项目特征描述 | 计量单位 | COL7 | 工程量 | 金额 |',
-          '|  | 一 |  | 道路工程 |',
-          '| 1 | 040101001001 |  | 挖一般土方 | 1．土壤类别：综合类 | m3 |  | 100 |',
-          '|  | 二 |  | 排水工程 |',
-          '| 2 | 040501004001 |  | 塑料管铺设 | 1．DN200 | m |  | 8205 |',
-          '|  | 2.3 |  | 公厕 |',
-          '|  | 0101 |  | 土石方工程 |',
-          '| 3 | 010101001001 |  | 平整场地 | 1．部位：公厕基础 | m2 |  | 120 |',
-          '|  | 0104 |  | 砌筑工程 |',
-          '| 4 | 010401001001 |  | 砖基础 | 1．砖品种：MU10 | m3 |  | 30 |',
-          '|  | 0111 |  | 门窗工程 |',
-          '| 5 | 011101001001 |  | 铝合金门 | 1．材质：铝合金 | m2 |  | 18 |',
-          '|  | 八 |  | 其他 |',
-          '| 6 | 011201001001 |  | 墙面彩绘 | 1．原墙面水泥砂浆层铲除 | m2 |  | 40 |',
-          '第1页 共1页',
-        ].join('\n'),
-      },
-    ];
-    const boq = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
-    const outline = buildBlueprintOutline({ chapterTitles: ['主要施工方法'], boq, docType: '单位工程施工组织设计' });
-    return { boq, outline };
-  }
-
-  it('LLM 规划混入子分部名与「其他」时整体替换为蓝图权威分部小节（总述小节保留在前）', () => {
-    const { outline } = buildFuleshanLikeOutline();
-    const blueprintChapter = outline.chapters[0]!;
-    const llmSections = ['总体施工部署与流程安排', '道路工程', '排水工程', '其他', '土石方工程', '砌筑工程', '门窗工程'];
-    const result = alignChapterSectionsToBlueprint({ title: '主要施工方法', sections: llmSections }, blueprintChapter);
-    expect(result.report?.replacedWithBlueprint).toBe(true);
-    expect(result.sections[0]).toBe('总体施工部署与流程安排');
-    expect(result.sections).toContain('道路工程');
-    expect(result.sections).toContain('排水工程');
-    expect(result.sections).toContain('公厕');
-    expect(result.sections).toContain('环境整治工程'); // 「其他」→环境整治工程（蓝图权威名）
-    expect(result.sections).not.toContain('其他');
-    expect(result.sections).not.toContain('土石方工程'); // 子分部降级为公厕小节内工作包
-    expect(result.sections).not.toContain('砌筑工程');
-    expect(result.sections).not.toContain('门窗工程');
-    expect(result.report?.removed).toEqual(expect.arrayContaining(['其他', '土石方工程', '砌筑工程', '门窗工程']));
-  });
-
-  it('规划小节与蓝图分部名重叠少时仍无条件接管（round-27 实测修正：原重合度 <2 门槛静默放行）', () => {
-    const { outline } = buildFuleshanLikeOutline();
-    const blueprintChapter = outline.chapters[0]!;
-    const llmSections = ['总体施工部署与流程安排', '关键工序技术控制要点', '质量安全与成品保护措施'];
-    const result = alignChapterSectionsToBlueprint({ title: '主要施工方法', sections: llmSections }, blueprintChapter);
-    expect(result.report?.replacedWithBlueprint).toBe(true);
-    expect(result.sections[0]).toBe('总体施工部署与流程安排');
-    expect(result.sections).toContain('道路工程');
-    expect(result.sections).toContain('公厕');
-    expect(result.report?.removed).toEqual(expect.arrayContaining(['关键工序技术控制要点', '质量安全与成品保护措施']));
-  });
-
-  it('丰乐镇实测回归：截断声明句与宽泛工艺小节被移除，蓝图分部接管（round-27 实测缺陷）', () => {
-    const { outline } = buildFuleshanLikeOutline();
-    const blueprintChapter = outline.chapters[0]!;
-    const llmSections = ['主要分部分项工程施工方案', '周边环境、管线与既有建构筑物保护', '我公司对该表提供的内容及相关资料均属', '市政工程专项施工工艺', '道路工程专项施工方法', '绿化种植与养护施工方法'];
-    const result = alignChapterSectionsToBlueprint({ title: '主要施工方法', sections: llmSections }, blueprintChapter);
-    expect(result.report?.replacedWithBlueprint).toBe(true);
-    // 总述小节保留在前，其余全部为蓝图权威分部
-    expect(result.sections[0]).toBe('主要分部分项工程施工方案');
-    expect(result.sections.slice(1)).toEqual(expect.arrayContaining(['道路工程', '排水工程', '公厕', '环境整治工程']));
-    // 截断声明句、串章小节、宽泛工艺小节、蓝图变体名一律移除
-    expect(result.sections).not.toContain('我公司对该表提供的内容及相关资料均属');
-    expect(result.sections).not.toContain('周边环境、管线与既有建构筑物保护');
-    expect(result.sections).not.toContain('市政工程专项施工工艺');
-    expect(result.sections).not.toContain('道路工程专项施工方法');
-    expect(result.sections).not.toContain('绿化种植与养护施工方法');
-  });
-
-  it('非施工方法类章节零变化；蓝图无该章时零变化', () => {
-    const { outline } = buildFuleshanLikeOutline();
-    const qualitySections = ['质量目标与质量管理体系', '关键工序质量控制措施'];
-    const result = alignPlannedSectionsToBlueprint([
-      { title: '质量保证措施', sections: qualitySections },
-      { title: '施工总平面布置', sections: ['总平面布置原则'] },
-    ], outline);
-    expect(result.reports).toHaveLength(0);
-    expect(result.chapters[0].sections).toEqual(qualitySections);
-    expect(result.chapters[1].sections).toEqual(['总平面布置原则']);
-  });
-});
-
 describe('二期蓝图接管（执行层切换）', () => {
   function buildChapterSliceWithData() {
     const boq = parseFixture();
@@ -844,7 +804,7 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     return buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' }).data;
   }
 
-  it('blueprintPlanAuthorities：里程碑→节点工期权威、机械→锚点键台数（区间取中值）', () => {
+  it('修复权威派生（V5 P4）：里程碑→节点工期权威、设备实体词→锚点 key 台数（区间取中值）', () => {
     const data = buildData();
     data.milestones = [{ key: 'm1', label: '管网施工完成', duration: 45, basis: '清单分部分项' }];
     data.resources.equipment = [
@@ -852,14 +812,15 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
       { name: '钢筋弯曲机', quantity: 3, basis: '区间口径' },
       { name: '挖掘机', min: 2, max: 3, basis: '区间口径' },
     ];
-    const authorities = blueprintPlanAuthorities(data);
-    expect(authorities.nodeAuthorities).toEqual([{ node: '管网施工完成', offset: '45 天' }]);
-    expect(authorities.machineAuthorities.towerCrane).toBe(2); // round((1+2)/2)
-    expect(authorities.machineAuthorities.rebarBender).toBe(3); // quantity 优先
-    expect(authorities.machineAuthorities).not.toHaveProperty('excavator'); // 无锚点键映射的机械不注入
+    const plan = deriveRepairAuthorities(buildAuthorityIndex(data));
+    expect(plan.nodeAuthorities).toEqual([{ node: '管网施工完成', offset: '第45日' }]);
+    expect(plan.crossSectionAuthorities.towerCrane).toBe(2); // round((1+2)/2)
+    expect(plan.crossSectionAuthorities.rebarBender).toBe(3); // quantity 优先
+    // V5：实体词自动对接（20 个锚点实体词表），挖掘机不再依赖 key 白名单——自动获得修复通道
+    expect(plan.crossSectionAuthorities.excavator).toBe(3); // round((2+3)/2)
   });
 
-  it('blueprintPlanAuthorities：清单条目 → quantityAuthorities（G3 工程量权威）', () => {
+  it('修复权威派生：清单条目 → quantityAuthorities（G3 工程量权威全量投影）', () => {
     const data = buildData();
     data.quantities = {
       '级配碎石': { value: 20931.02, unit: 'm²' },
@@ -867,12 +828,12 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
       '公厕入口内墙涂料': { value: 5.2, unit: 'm²' },
       'LED 灯具': { value: 118, unit: '套' },
     };
-    const authorities = blueprintPlanAuthorities(data);
-    expect(authorities.quantityAuthorities).toEqual([
+    const plan = deriveRepairAuthorities(buildAuthorityIndex(data));
+    expect(plan.quantityAuthorities).toEqual([
       { name: '级配碎石', value: 20931.02, unit: 'm²' },
       { name: '挖一般土方', value: 4187.38, unit: 'm³' },
     ]);
-    // 值 <10 的零星量与台/套设备量不入工程量权威（设备走 machineAuthorities）
+    // 值 <10 的零星量与 <3 汉字的台/套条目不入工程量权威
   });
 
   it('buildChapterStructureFromBlueprint：蓝图章切片 → 每 sub_section 一个主题块、工作包为 H4 要点', () => {
@@ -880,7 +841,6 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     const outline = buildBlueprintOutline({ chapterTitles: ['主要分部分项工程施工方案'], boq, docType: '单位工程施工组织设计' });
     const chapter = outline.chapters[0]!;
     const structure = buildChapterStructureFromBlueprint({ blueprintChapter: chapter, inputSections: ['道路工程', '排水工程', '绿化工程'], chapterTitle: '主要分部分项工程施工方案', targetWords: 6000 });
-    expect(structure.llmPlanned).toBe(false);
     expect(structure.blocks.length).toBeGreaterThanOrEqual(chapter.subSections.length);
     expect(structure.blocks.flatMap(block => block.subPoints).map(point => point.title)).toContain('道路工程');
     expect(structure.blocks.every(block => block.targetWords >= 1200 && block.targetWords <= 4000)).toBe(true);
@@ -910,7 +870,7 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
 
   it('4.19.5 回归：分部章容器块不展开任何骨架名（保持单要点总述块，含中文编号形态骨架名）', () => {
     const structure = buildChapterStructureFromBlueprint({
-      blueprintChapter: { id: '2', title: '主要施工方法', isActive: true, requiredParams: [], scoredItems: [], subSections: [{ id: '2.5', title: '绿化工程', requiredParams: [], scoredItems: [], tablePlans: [], workPackages: [{ name: '绿化工程', kind: 'major', quantities: {}, processChain: [], methods: [], params: [], acceptance: [], standards: [], skeleton: [], source: 'boq', coveredSeqs: [] }] }] },
+      blueprintChapter: { id: '2', title: '主要施工方法', isActive: true, requiredParams: [], scoredItems: [], subSections: [{ id: '2.5', title: '绿化工程', requiredParams: [], scoredItems: [], tablePlans: [], workPackages: [{ name: '绿化工程', kind: 'major', quantities: {}, processChain: [], methods: [], params: [], acceptance: [], standards: [], source: 'boq', coveredSeqs: [] }] }] },
       inputSections: ['绿化工程', '主要分部分项工程施工方案'],
       chapterTitle: '主要施工方法',
       targetWords: 6000,
@@ -931,10 +891,11 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
         { title: '编制说明与工程概况', subPoints: [{ title: '编制说明与工程概况', sources: ['编制说明与工程概况'] }], facts: [], targetWords: 3600 },
         { title: '项目主要施工内容', subPoints: [{ title: '项目主要施工内容', sources: ['项目主要施工内容'] }], facts: [], targetWords: 3600 },
       ],
-      coveredSections: [], fallbackSections: [], llmPlanned: false,
+      coveredSections: [], fallbackSections: [],
     });
     const container = structure.blocks.find(block => block.title === '项目主要施工内容');
-    const plain = structure.blocks.find(block => block.title.startsWith('编制说明与工程概况（'));
+    // A2：拆半两半块共享父块标题（不加「（一）（二）」后缀），按标题+halfFocus 定位
+    const plain = structure.blocks.find(block => block.title === '编制说明与工程概况' && block.halfFocus);
     expect(container?.targetWords).toBe(3600);
     expect(plain?.targetWords).toBeLessThan(3600);
     expect(plain?.halfFocus).toBeDefined();
@@ -974,12 +935,45 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     expect(names.some(name => name.includes('其他项目') || name.includes('是否'))).toBe(false);
   });
 
-  it('buildChapterStructureFromBlueprint：无切片 → 语义域分组确定性兜底（llmPlanned=false）', () => {
+  it('buildChapterStructureFromBlueprint：无切片 → 语义域分组确定性兜底', () => {
     const structure = buildChapterStructureFromBlueprint({ blueprintChapter: undefined, inputSections: ['安全管理措施', '安全生产责任制', '质量验收标准', '实测实量要求', '工期纠偏措施'], chapterTitle: '安全质量保证措施', targetWords: 5000 });
-    expect(structure.llmPlanned).toBe(false);
     expect(structure.blocks.length).toBeGreaterThanOrEqual(2); // 安全/质量/工期 至少三域
     expect(structure.blocks.flatMap(block => block.subPoints).map(point => point.title)).toEqual(expect.arrayContaining(['安全管理措施', '质量验收标准', '工期纠偏措施']));
     expect(structure.fallbackSections).toEqual([]);
+  });
+
+  it('C1 收敛回归：章节小节数 0/1/2/5/30 → 规划结构恒非空（空章节整章单块兜底）', () => {
+    // sectionCount=0（模板细目被主题过滤全部剔除 + 无蓝图切片）：退化为整章单块结构，不再阻断
+    const empty = buildChapterStructureFromBlueprint({ blueprintChapter: undefined, inputSections: [], chapterTitle: '工程概况', targetWords: 5000 });
+    expect(empty.blocks.length).toBe(1);
+    expect(empty.blocks[0].title).toBe('工程概况');
+    expect(empty.blocks[0].subPoints).toEqual([]);
+    // 块目标=整章目标（封顶 4000 字）——单块成稿字数预算覆盖整章
+    expect(empty.blocks[0].targetWords).toBe(4000);
+    // 空要点块不触发拆半（拆半语义要求 subPoints.length===1）
+    expect(splitSinglePointOversizedBlocks(empty).blocks.length).toBe(1);
+    // sectionCount=1：单小节归并为一个主题块
+    const single = buildChapterStructureFromBlueprint({ blueprintChapter: undefined, inputSections: ['编制说明与工程概况'], chapterTitle: '工程概况', targetWords: 3000 });
+    expect(single.blocks.length).toBeGreaterThanOrEqual(1);
+    expect(single.blocks.flatMap(block => block.subPoints.map(point => point.title))).toEqual(expect.arrayContaining(['编制说明与工程概况']));
+    expect(single.coveredSections).toEqual(['编制说明与工程概况']);
+    expect(single.fallbackSections).toEqual([]);
+    // sectionCount=2/5：语义域分组确定性覆盖全部小节
+    for (const sections of [
+      ['安全管理措施', '质量验收标准'],
+      ['安全管理措施', '安全生产责任制', '质量验收标准', '实测实量要求', '工期纠偏措施'],
+    ]) {
+      const structure = buildChapterStructureFromBlueprint({ blueprintChapter: undefined, inputSections: sections, chapterTitle: '安全质量保证措施', targetWords: 6000 });
+      expect(structure.blocks.length).toBeGreaterThanOrEqual(1);
+      expect(structure.coveredSections).toEqual(expect.arrayContaining(sections));
+      expect(structure.fallbackSections).toEqual([]);
+    }
+    // sectionCount=30：大章全量成块、块目标不越界（1200~4000）
+    const many = Array.from({ length: 30 }, (_, index) => `质量控制点位检查与验收要求第${'一二三四五六七八九十'[index % 10]}类`);
+    const large = buildChapterStructureFromBlueprint({ blueprintChapter: undefined, inputSections: many, chapterTitle: '施工管理措施', targetWords: 12000 });
+    expect(large.blocks.length).toBeGreaterThanOrEqual(1);
+    expect(large.blocks.every(block => block.targetWords >= 1200 && block.targetWords <= 4000)).toBe(true);
+    expect(large.coveredSections.length).toBe(30);
   });
 
   it('blueprintCitationConsistencyIssues：工期/工程量与蓝图不一致 → error；红线事实缺失 → warning', () => {
@@ -1041,14 +1035,14 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     expect(authorities.cushion).toBe('C20');
   });
 
-  it('P2.3 blueprintPlanAuthorities：机动工期 = 总工期 − 里程碑总和，自然村数量取红线事实', () => {
+  it('修复权威派生：机动工期 = 总工期 − 里程碑总和，自然村数量取红线事实', () => {
     const boq = parseFixture();
     const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' });
-    const authorities = blueprintPlanAuthorities(data);
+    const plan = deriveRepairAuthorities(buildAuthorityIndex(data));
     const milestoneSum = data.milestones.reduce((sum, item) => sum + (item.duration || 0), 0);
-    expect(authorities.slackDaysAuthority).toBe(360 - milestoneSum);
-    expect(authorities.villageCountAuthority).toBe(1);
-    expect(authorities.specAuthorities).toEqual({});
+    expect(plan.crossSectionAuthorities.slackDays).toBe(360 - milestoneSum);
+    expect(plan.crossSectionAuthorities.villageCount).toBe(1);
+    expect(plan.codeAuthorities).toEqual({});
   });
 
   it('蓝图引用一致性：正文劳动力峰值与蓝图唯一口径不一致 → error，一致 → 零 error', () => {
@@ -1211,8 +1205,13 @@ describe('blueprintCitationConsistencyIssues：蓝图引用一致性（D2 零漂
     const issues = blueprintCitationConsistencyIssues('总工期为7日历天。', citationData());
     expect(issues.some(item => item.message.includes('工期'))).toBe(true);
   });
-  it('分部量句句级豁免：全句多数条目大幅差异 → 不报工程量冲突', () => {
+  it('句级豁免收紧：全句多数条目大幅差异且无一致锚点 → 逐条报工程量冲突（不同名称全部上报）', () => {
     const markdown = '景观工程主要工程量包括挖一般土方146.93m³、级配碎石480.5m²、水泥混凝土572.3m²、人行道板安砌114.8m²。';
+    const issues = blueprintCitationConsistencyIssues(markdown, citationData());
+    expect(issues.filter(item => item.message.includes('工程量')).length).toBe(4);
+  });
+  it('总量锚点+分部量句豁免：句内一致条目与不一致分部量并存 → 整句不报', () => {
+    const markdown = '主要工程量包括塑料管铺设8205.53m、级配碎石480.5m²、水泥混凝土572.3m²。';
     expect(blueprintCitationConsistencyIssues(markdown, citationData())).toEqual([]);
   });
   it('村名/分部语境豁免：化粪池语境下塑料管铺设7.8m 不报（与修复器同源）', () => {

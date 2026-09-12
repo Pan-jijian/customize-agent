@@ -36,10 +36,23 @@ import type { AutoDocumentSpecPackage } from '../../document-core/autoDocumentSp
 import type { ProjectMaterialSummary } from '../../document-core/projectMaterialService';
 import type { DocumentDomainProfile } from '../../document-core/documentDomainProfileService';
 import type { DocumentGenerationReadiness } from '../../document-validation/documentReadinessService';
-import type { BlueprintData } from '../integratedBlueprint';
+import type { BlueprintData, extractDecisionLockEntries } from '../integratedBlueprint';
 import type { SurfaceFixerContext } from '../deterministicFixChains';
 import type { BillFactLock } from '../billFactLock';
 import type { RequirementSemanticPlan } from '../requirementSemantics';
+import type { buildFactsModel } from '../factsModel';
+import type { kbIndexHealth, validateDraft } from '../documentGeneratorHelpers';
+import type { buildKnowledgeCoverageReport } from '../documentKnowledgeCoverage';
+import type { buildDocumentFactTraces } from '../documentFactTrace';
+import type { buildChapterCoverageReports } from '../documentChapterCoverage';
+import type { buildDocumentQualityReport } from '../documentQualityReport';
+import type { buildRepairStrategies } from '../documentRepairStrategies';
+import type { buildExportGate } from '../qualityValidation';
+import type { extractScheduleAuthority, extractAssemblyRateAuthority, extractProjectScaleSummary, extractSupportSystemAuthority, extractGreeningMaintenanceAuthority } from '../documentIntegrityChecks';
+import type { buildDocumentReviewChecklist } from '../documentReviewChecklist';
+import type { buildDocumentTelemetryReport } from '../documentTelemetry';
+import type { buildProfessionalScoreReport } from '../documentProfessionalScore';
+import type { AuthorityAuditReport } from '../authorityAudit';
 
 /** finalizeGeneration 输入聚合（二期结构改造：匿名参数对象命名化）。字段按职责分组。 */
 export interface FinalizeGenerationInput {
@@ -61,7 +74,7 @@ export interface FinalizeGenerationInput {
   documentSpec: AutoDocumentSpecPackage; projectMaterialProfile: ProjectMaterialProfile;
   projectMaterialSummary: ProjectMaterialSummary; domainProfile: DocumentDomainProfile;
   documentBudget: DocumentBudget; generationStrategy: DocumentGenerationStrategy;
-  readiness: DocumentGenerationReadiness; indexHealth: ReturnType<typeof import('../documentGeneratorHelpers').kbIndexHealth>; promptPlan: PromptBindingPlan;
+  readiness: DocumentGenerationReadiness; indexHealth: ReturnType<typeof kbIndexHealth>; promptPlan: PromptBindingPlan;
   // ── 提示词与规则 ──
   promptTexts: string; reviewPromptTexts: string;
   repairPromptTexts: string;
@@ -101,17 +114,17 @@ export interface FinalizeGenerationInput {
 }
 
 /** factsModel 类型（buildFactsModel 返回，canonical 在 finalize 内回写） */
-export type FinalizeFactsModel = Awaited<ReturnType<typeof import('../factsModel').buildFactsModel>>;
+export type FinalizeFactsModel = Awaited<ReturnType<typeof buildFactsModel>>;
 
 /** 质量报告组解构（knowledgeCoverage/factTraces/chapterCoverage/qualityReport/repairStrategies/finalExportGate） */
 export interface FinalizeQualityBundle {
-  knowledgeCoverage: ReturnType<typeof import('../documentKnowledgeCoverage').buildKnowledgeCoverageReport>;
-  factTraces: ReturnType<typeof import('../documentFactTrace').buildDocumentFactTraces>;
-  chapterCoverage: ReturnType<typeof import('../documentChapterCoverage').buildChapterCoverageReports>;
-  qualityReport: Awaited<ReturnType<typeof import('../documentQualityReport').buildDocumentQualityReport>>;
-  repairStrategies: ReturnType<typeof import('../documentRepairStrategies').buildRepairStrategies>;
+  knowledgeCoverage: ReturnType<typeof buildKnowledgeCoverageReport>;
+  factTraces: ReturnType<typeof buildDocumentFactTraces>;
+  chapterCoverage: ReturnType<typeof buildChapterCoverageReports>;
+  qualityReport: Awaited<ReturnType<typeof buildDocumentQualityReport>>;
+  repairStrategies: ReturnType<typeof buildRepairStrategies>;
   validationIssues: ValidationIssue[];
-  finalExportGate: ReturnType<typeof import('../qualityValidation').buildExportGate>;
+  finalExportGate: ReturnType<typeof buildExportGate>;
 }
 
 /** finalizeGeneration 跨阶段共享状态（原巨型函数闭包变量的显式化载体） */
@@ -149,7 +162,7 @@ export interface FinalizeSession {
   withProgressHeartbeat: <T>(w: () => Promise<T>, s?: DocumentExecutionStage[]) => Promise<T>;
   missingItems: string[];
   failedChapterMessages: string[];
-  indexHealth: ReturnType<typeof import('../documentGeneratorHelpers').kbIndexHealth>;
+  indexHealth: ReturnType<typeof kbIndexHealth>;
   webResearchReport: { enabled: boolean; queries: string[]; evidenceCount: number; filteredCount: number; chapters: string[] };
   hasExplicitOutline: boolean;
   retrievalCoverageReports: RetrievalCoverageReport[];
@@ -178,25 +191,28 @@ export interface FinalizeSession {
   sources: Array<{ filePath: string; count: number }>;
   qualityBundle: FinalizeQualityBundle;
   // ── 权威口径（rebuildFacts 抽取，确定性修复轮消费） ──
-  scheduleAuthority: ReturnType<typeof import('../documentIntegrityChecks').extractScheduleAuthority>;
-  assemblyRateAuthority: ReturnType<typeof import('../documentIntegrityChecks').extractAssemblyRateAuthority>;
-  scaleSummary: ReturnType<typeof import('../documentIntegrityChecks').extractProjectScaleSummary>;
-  supportAuthority: ReturnType<typeof import('../documentIntegrityChecks').extractSupportSystemAuthority>;
-  laborPeakAuthority: ReturnType<typeof import('../integratedBlueprint').blueprintPlanAuthorities>['laborPeakAuthority'];
-  greeningMaintenanceAuthority: ReturnType<typeof import('../documentIntegrityChecks').extractGreeningMaintenanceAuthority>;
+  scheduleAuthority: ReturnType<typeof extractScheduleAuthority>;
+  assemblyRateAuthority: ReturnType<typeof extractAssemblyRateAuthority>;
+  scaleSummary: ReturnType<typeof extractProjectScaleSummary>;
+  supportAuthority: ReturnType<typeof extractSupportSystemAuthority>;
+  laborPeakAuthority: number | undefined;
+  greeningMaintenanceAuthority: ReturnType<typeof extractGreeningMaintenanceAuthority>;
   surfaceFixContext: SurfaceFixerContext;
   /** 决策锁实体-选择冲突比对条目（rebuildFacts 计算，semanticChoice 消费） */
-  decisionLockEntries: ReturnType<typeof import('../integratedBlueprint').extractDecisionLockEntries>;
+  decisionLockEntries: ReturnType<typeof extractDecisionLockEntries>;
   /** finalGate 产出的最终执行阶段（返回组装消费） */
   finalStages: DocumentExecutionStage[];
   /** finalGate 产出：交付复核清单/telemetry/专业度评分/语义级模板化复核结果（返回组装消费） */
-  reviewChecklist: ReturnType<typeof import('../documentReviewChecklist').buildDocumentReviewChecklist>;
-  telemetry: ReturnType<typeof import('../documentTelemetry').buildDocumentTelemetryReport>;
-  professionalScore: Awaited<ReturnType<typeof import('../documentProfessionalScore').buildProfessionalScoreReport>>;
+  reviewChecklist: ReturnType<typeof buildDocumentReviewChecklist>;
+  telemetry: ReturnType<typeof buildDocumentTelemetryReport>;
+  professionalScore: Awaited<ReturnType<typeof buildProfessionalScoreReport>>;
   templatingReview: { issues: string[]; reviewed: boolean };
+  /** V5 P5 无主数值审计报告（M6）：正文数值 ↔ AuthorityIndex 三分类（一致/登记豁免/无主分流），
+   * 修复轮重算校验组后刷新，随 reviewMetadata 交付归档（验收口径「0 未登记项」= unattributed 为空） */
+  authorityAuditReport?: AuthorityAuditReport;
   // ── 组装产物 ──
   assets: DocumentAsset[];
-  validation: ReturnType<typeof import('../documentGeneratorHelpers').validateDraft>;
+  validation: ReturnType<typeof validateDraft>;
   // ── 方法（rebuildAndRecompute 闭包单点，修复轮消费） ──
   rebuildFinalMarkdown: () => string;
   recomputeFinalValidationBundle: () => Promise<void>;

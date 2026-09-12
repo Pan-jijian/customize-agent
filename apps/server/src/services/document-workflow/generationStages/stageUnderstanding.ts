@@ -14,14 +14,12 @@ import { filterBidDisciplineFacts, stableHash, throwIfAborted } from '../utils';
 import { displayStage, upsertProgressStage } from '../progress';
 import { buildSemanticSimilarity } from '../semanticSimilarity';
 import { chapterCriteriaText, extractEvaluationCriteriaItems, validateBidStructureBeforeGeneration } from '../constructionBidStructure';
-import { enrichConstructionOrgOutline } from '../constructionOrgCatalog';
-import { buildConstructionOrgTablePlans } from '../constructionOrgTablePlan';
 import { buildProjectUnderstanding, materialRoleId } from '../projectMaterialProfile';
 import { buildProjectGraph } from '../projectGraph';
 import { buildScopedProjectIntelligence, isIrrelevantProjectGap } from '../projectIntelligence';
 import { createAgentWorkflowContext, agentWorkflowStages } from '../agentWorkflow';
 import { planDocument } from '../agentPlanner';
-import { collectProjectBasicEvidence, kbIndexHealth, resolveDocumentGenerationEvidenceLimit, searchWeightsForChapter } from '../documentGeneratorHelpers';
+import { collectProjectBasicEvidence, kbIndexHealth, resolveDocumentGenerationEvidenceLimit, searchWeightsForChapter, vectorStatusLabel } from '../documentGeneratorHelpers';
 import { retrievalCoverageRisk } from '../documentEvidenceRetrieval';
 import { assertEvidenceInProjectScope, createProjectMaterialScope, filterEvidenceByProjectScope } from '../projectMaterialScope';
 import { buildBidProcedureJudge, evidenceSafetyKey, partitionEvidenceByContentSafety } from '../evidenceContentSafety';
@@ -57,7 +55,7 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
     roleId: 'knowledge-index',
     status: indexHealthHasActionableWarning ? 'failed' : 'success',
     message: `已读取知识索引：项目资料 ${session.understanding.indexHealth.scopedRecords.length} 份，可用切片 ${session.understanding.indexHealth.usableChunkCount} 条`,
-    details: [`项目资料：${session.understanding.evidenceScopePaths.size} 份`, `可用证据文件：${session.understanding.availableEvidenceScopePaths.size} 份`, `向量状态：${session.understanding.indexHealth.vectorStatus?.status || 'unknown'}`, ...session.understanding.indexHealth.warnings, '后续将按招标正文/清单/图纸/补疑等资料类型召回'],
+    details: [`项目资料：${session.understanding.evidenceScopePaths.size} 份`, `可用证据文件：${session.understanding.availableEvidenceScopePaths.size} 份`, `向量状态：${vectorStatusLabel(session.understanding.indexHealth.vectorStatus?.status)}`, ...session.understanding.indexHealth.warnings, '后续将按招标正文/清单/图纸/补疑等资料类型召回'],
     progress: { current: 3, total: 3, label: '索引已就绪' },
   }, { subtitle: '知识库检索', order: session.global.progressStages.length }));
   session.global.emitProgress();
@@ -182,8 +180,7 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
 
   // 构建章节→图谱节点映射：将图谱中的 works/methods/resources 按章节标题匹配
   const rawEffectiveChapters = effectiveTemplateChapters(session.prepare.template, session.prepare.documentSpec, { preserveExplicitOutline: session.prepare.hasExplicitOutline });
-  const outlineEnrichment = enrichConstructionOrgOutline({ template: session.prepare.template, chapters: rawEffectiveChapters, requirement: session.global.input.requirement });
-  const enrichedOutlineChapters = outlineEnrichment.chapters;
+  const enrichedOutlineChapters = rawEffectiveChapters;
   // 评分标准条目提取：从绑定招标材料中定位技术评审章节的编号条目（对象化，不再 slice(0,600) 词面过滤），
   // 并以本地 bge-small 嵌入构建“条目标题 ↔ 大纲章节”语义相似度函数供承接审计使用（本地 bge 恒可用，构建失败直接抛出）
   const evaluationSourceTexts = session.understanding.allEvidence
@@ -340,7 +337,7 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
       return emptyTenderRequirements(false);
     }
   })();
-  session.planning.baseEffectiveChapters = buildConstructionOrgTablePlans({ chapters: session.understanding.bidStructureAudit.enrichedChapters, projectGraph: session.understanding.projectGraph, canonicalFacts: session.understanding.canonicalFacts });
+  session.planning.baseEffectiveChapters = session.understanding.bidStructureAudit.enrichedChapters;
   session.prepare.template = { ...session.prepare.template, chapters: session.planning.baseEffectiveChapters };
   // P4 确定性并行化：planDocument（章节任务规划，纯确定性逻辑 + 本地嵌入分类，无 LLM 调用）提前启动，
   // 与下方评审条目语义构建、招标要求提取、事实主表构建等前置链并行执行，原串行位置 await 结果；

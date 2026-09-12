@@ -1,42 +1,11 @@
 /**
  * 边界矩阵（P1 第 27 批 · DD 组）
  * 覆盖：fixAdjacentPhraseDuplication 深挖增量（模式1/2/3 长度边界、整文预归一、句界、details 截断、guard 上限）/
- * crossChapterSemanticDuplicateIssues+stripCrossChapterSemanticDuplicateParagraphs 深挖增量
- * （阈值 0.82 边界、密度相等章序、同 drop 去重、同章多段降序删除、env 回退）/
  * fixInternalTerminology 规则变体与组合
  * 原则：每条用例独立断言意义；真实实现行为一律锁定，不迎合用例改实现。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  crossChapterSemanticDuplicateIssues, fixAdjacentPhraseDuplication,
-  fixInternalTerminology, stripCrossChapterSemanticDuplicateParagraphs,
-} from '@/services/document-workflow/documentIntegrityChecks';
-import { buildSemanticSimilarity } from '@/services/document-workflow/semanticSimilarity';
-import type { DocumentDraftChapter } from '@/services/document-workflow/types';
-
-vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
-
-/** 跨章语义数值指纹模拟：两段共享 ≥2 个数字串即高分（阈值 0.82） */
-const CHAPTER_SIM = async (_leftTexts: string[], _rightTexts: string[]) => (left: string, right: string): number => {
-  if (left === right) return 1;
-  const leftNums = new Set(left.match(/\d+/gu) || []);
-  const rightNums = new Set(right.match(/\d+/gu) || []);
-  const shared = [...leftNums].filter(num => rightNums.has(num)).length;
-  return shared >= 2 ? 0.9 : 0.1;
-};
-/** 可控分值模拟：共享 ≥2 数字串时返回指定分数（阈值边界测试用） */
-const SCORE_SIM = (score: number) => async (_leftTexts: string[], _rightTexts: string[]) => (left: string, right: string): number => {
-  if (left === right) return 1;
-  const leftNums = new Set(left.match(/\d+/gu) || []);
-  const rightNums = new Set(right.match(/\d+/gu) || []);
-  const shared = [...leftNums].filter(num => rightNums.has(num)).length;
-  return shared >= 2 ? score : 0.1;
-};
-const chapterOf = (id: string, title: string, content: string): DocumentDraftChapter => ({ id, title, content, evidence: [], missingFacts: [] });
-
-beforeEach(() => {
-  vi.mocked(buildSemanticSimilarity).mockImplementation(CHAPTER_SIM);
-});
+import { describe, expect, it } from 'vitest';
+import { fixAdjacentPhraseDuplication, fixInternalTerminology } from '@/services/document-workflow/documentIntegrityChecks';
 
 // ── DD1. fixAdjacentPhraseDuplication 深挖增量 ──
 
@@ -221,105 +190,6 @@ describe('DD1f details 截断与 guard 上限', () => {
     const result = fixAdjacentPhraseDuplication('施工进度施工进度。');
     expect(result.details[0]).toContain('相邻重复短语折叠');
     expect(result.details[0]).toContain('施工进度');
-  });
-});
-
-// ── DD2. 跨章语义重复深挖增量 ──
-
-describe('DD2a crossChapterSemanticDuplicateIssues 增量', () => {
-  it('DD2a 阈值边界：相似度 0.82 命中（下限含等）', async () => {
-    vi.mocked(buildSemanticSimilarity).mockImplementation(SCORE_SIM(0.82));
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', `本工程混凝土C30浇筑200mm${'甲'.repeat(45)}。`),
-      chapterOf('ch2', '第二章 施工部署', `混凝土C30浇筑200mm本工程${'乙'.repeat(45)}。`),
-    ];
-    const issues = await crossChapterSemanticDuplicateIssues(chapters);
-    expect(issues.length).toBe(1);
-  });
-  it('DD2a 阈值边界：相似度 0.81 不命中（严格小于才报）', async () => {
-    vi.mocked(buildSemanticSimilarity).mockImplementation(SCORE_SIM(0.81));
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', `本工程混凝土C30浇筑200mm${'甲'.repeat(45)}。`),
-      chapterOf('ch2', '第二章 施工部署', `混凝土C30浇筑200mm本工程${'乙'.repeat(45)}。`),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
-  it('DD2a 密度相等时章序靠前者保留（drop 章序后者）', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', `本工程混凝土C30浇筑200mm${'甲'.repeat(45)}。`),
-      chapterOf('ch2', '第二章 施工部署', `混凝土C30浇筑200mm本工程${'乙'.repeat(45)}。`),
-    ];
-    const issues = await crossChapterSemanticDuplicateIssues(chapters);
-    expect(issues.length).toBe(1);
-    expect(issues[0].chapterId).toBe('ch2');
-    expect(issues[0].message).toContain('第一章 工程概况');
-  });
-  it('DD2a 同 drop 段被多对指向只报一次（droppedKeys 去重）', async () => {
-    const chapters = [
-      chapterOf('ch0', '第零章 概况', `本工程混凝土C30浇筑200mm${'甲'.repeat(45)}。`),
-      chapterOf('ch1', '第一章 部署', `混凝土C30浇筑200mm9${'乙'.repeat(47)}。`),
-      chapterOf('ch2', '第二章 方案', `结构C30混凝土浇筑200mm养护14天抗震7度${'丙'.repeat(40)}。`),
-    ];
-    const issues = await crossChapterSemanticDuplicateIssues(chapters);
-    // ch0 密度最低被 ch1/ch2 双指向但只 drop 一次；ch1 再被 ch2 drop 一次 → 共 2 条
-    expect(issues.length).toBe(2);
-    expect(issues[0].chapterId).toBe('ch0');
-    expect(issues[1].chapterId).toBe('ch1');
-  });
-  it('DD2a issue 字段完整形态', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', `本工程混凝土C30浇筑200mm${'甲'.repeat(45)}。`),
-      chapterOf('ch2', '第二章 施工部署', `混凝土C30浇筑200mm本工程${'乙'.repeat(45)}。`),
-    ];
-    const issues = await crossChapterSemanticDuplicateIssues(chapters);
-    expect(issues[0].level).toBe('error');
-    expect(issues[0].severity).toBe('blocker');
-    expect(issues[0].category).toBe('structure');
-    expect(issues[0].owner).toBe('llm');
-    expect(issues[0].repairability).toBe('llm_repairable');
-    expect(issues[0].suggestion).toContain('全文只保留一处');
-    expect(issues[0].message).toContain('相似度');
-    expect(issues[0].message).toContain('…');
-  });
-  it('DD2a 单段池不比对（pool<2 不报）', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', `本工程混凝土C30浇筑200mm${'甲'.repeat(45)}。`),
-      chapterOf('ch2', '第二章 施工部署', ''),
-    ];
-    expect(await crossChapterSemanticDuplicateIssues(chapters)).toEqual([]);
-  });
-});
-
-describe('DD2b stripCrossChapterSemanticDuplicateParagraphs 增量', () => {
-  it('DD2b 同章多段被指向 → 段落索引降序删除无错位', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', `本工程混凝土C30浇筑200mm${'甲'.repeat(45)}。\n\n本工程混凝土C30浇筑200mm${'乙'.repeat(45)}。`),
-      chapterOf('ch2', '第二章 施工部署', `混凝土C30浇筑200mm${'丙'.repeat(28)}${'3'.repeat(20)}。`),
-    ];
-    const removed = await stripCrossChapterSemanticDuplicateParagraphs(chapters);
-    expect(removed).toBe(2);
-    expect(chapters[0].content).toBe('');
-    expect(chapters[1].content).toContain('混凝土C30浇筑200mm');
-  });
-  it('DD2b 段落间多空行分块删除后重建', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', `本工程混凝土C30浇筑200mm${'甲'.repeat(47)}。\n\n\n现场配置挖掘机3台。`),
-      chapterOf('ch2', '第二章 施工部署', `混凝土C30浇筑200mm本工程${'乙'.repeat(45)}。`),
-    ];
-    const removed = await stripCrossChapterSemanticDuplicateParagraphs(chapters);
-    // ch1 首段 62 字密度低 → 被删；多空行分块口径下其余段重建保留
-    expect(removed).toBe(1);
-    expect(chapters[0].content).toBe('现场配置挖掘机3台。');
-  });
-  it('DD2b 非重复短段（<60 不入池）不被删', async () => {
-    const chapters = [
-      chapterOf('ch1', '第一章 工程概况', `本工程混凝土C30浇筑200mm${'甲'.repeat(47)}。\n\n短段。`),
-      chapterOf('ch2', '第二章 施工部署', `混凝土C30浇筑200mm本工程${'乙'.repeat(45)}。`),
-    ];
-    const removed = await stripCrossChapterSemanticDuplicateParagraphs(chapters);
-    expect(removed).toBe(1);
-    expect(chapters[0].content).toBe('短段。');
-    expect(chapters[1].content).toContain('乙乙乙');
   });
 });
 

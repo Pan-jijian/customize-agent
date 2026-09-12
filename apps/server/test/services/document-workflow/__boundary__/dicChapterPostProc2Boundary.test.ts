@@ -4,7 +4,7 @@
  * matchBlockSkeletonNames（块级骨架名过滤）、stripMarkdownTableBlocks / workPackageCrossSectionIssue /
  * stripTablesInSection（表格剥离与串位检测）、missingWorkPackageSkeletonTitles /
  * stripEmptyWorkPackageHeadings（骨架齐全性复核与空包剥离）、majorContentPollutionIssue（脏事实污染）、
- * repairMajorContentWorkPackageLabels（要素标签确定性补全）、sectionStructureIssue（结构门禁）、
+ * sectionStructureIssue（结构门禁）、
  * ensureTertiarySectionShell / ensureGroupTertiaryShell（外壳补全）、判别函数族、
  * keySectionWritingRequirement（写法规则）、outputTokensForChapter / expansionRoundsForDeficit /
  * acceptExpandedChapter（扩写接纳判定）。
@@ -24,7 +24,6 @@ import {
   matchBlockSkeletonNames,
   missingWorkPackageSkeletonTitles,
   outputTokensForChapter,
-  repairMajorContentWorkPackageLabels,
   sectionStructureIssue,
   stripEmptyWorkPackageHeadings,
   stripMarkdownTableBlocks,
@@ -295,93 +294,7 @@ describe('X16 majorContentPollutionIssue', () => {
   });
 });
 
-describe('X17 repairMajorContentWorkPackageLabels', () => {
-  it('无「项目主要施工内容」→ 原样', () => {
-    const md = '### 其他节\n正文';
-    expect(repairMajorContentWorkPackageLabels(md)).toBe(md);
-  });
-
-  it('三标签齐全 → 原样', () => {
-    const md = [
-      '### 项目主要施工内容',
-      '#### 1 包A',
-      '施工概况：概况正文',
-      '施工流程：A→B',
-      '施工方法：浇筑养护',
-    ].join('\n');
-    expect(repairMajorContentWorkPackageLabels(md)).toBe(md);
-  });
-
-  it('缺概况：首条无标签行补为施工概况', () => {
-    const md = [
-      '### 项目主要施工内容',
-      '#### 1 包A',
-      '第一行内容',
-      '施工流程：A→B',
-      '施工方法：浇筑',
-    ].join('\n');
-    const out = repairMajorContentWorkPackageLabels(md);
-    expect(out).toContain('施工概况：第一行内容');
-  });
-
-  it('缺流程：工序顺序表达行归入流程标签', () => {
-    const md = [
-      '### 项目主要施工内容',
-      '#### 1 包A',
-      '施工概况：概况A',
-      '先开挖后回填再压实',
-      '施工方法：浇筑养护',
-    ].join('\n');
-    const out = repairMajorContentWorkPackageLabels(md);
-    expect(out).toContain('施工流程：先开挖后回填再压实');
-  });
-
-  it('缺方法：剩余无标签行合并为施工方法', () => {
-    const md = [
-      '### 项目主要施工内容',
-      '#### 1 包A',
-      '施工概况：概况A',
-      '施工流程：A→B',
-      '浇筑养护',
-      '记录归档',
-    ].join('\n');
-    const out = repairMajorContentWorkPackageLabels(md);
-    expect(out).toContain('施工方法：浇筑养护记录归档');
-  });
-
-  it('小节外工作包块不受影响', () => {
-    const md = [
-      '### 其他节',
-      '#### 1 包X',
-      '无标签正文',
-    ].join('\n');
-    expect(repairMajorContentWorkPackageLabels(md)).toBe(md);
-  });
-
-  it('H4 形态小节标题同样触发标签补全', () => {
-    const md = [
-      '#### 项目主要施工内容',
-      '#### 1 包A',
-      '第一行内容',
-      '施工流程：A→B',
-      '施工方法：浇筑',
-    ].join('\n');
-    const out = repairMajorContentWorkPackageLabels(md);
-    expect(out).toContain('施工概况：第一行内容');
-  });
-
-  it('块内无标签行全空 → 原样保留', () => {
-    const md = [
-      '### 项目主要施工内容',
-      '#### 1 包A',
-      '施工流程：A→B',
-      '施工方法：浇筑',
-    ].join('\n');
-    expect(repairMajorContentWorkPackageLabels(md)).toBe(md);
-  });
-});
-
-describe('X18 sectionStructureIssue', () => {
+describe('X17 sectionStructureIssue', () => {
   const fullPackage = (name: string) => [
     `#### ${name}`,
     '施工概况：HDPE双壁波纹管 DN300 约1200m',
@@ -429,7 +342,7 @@ describe('X18 sectionStructureIssue', () => {
   });
 });
 
-describe('X19 ensureTertiarySectionShell / ensureGroupTertiaryShell', () => {
+describe('X18 ensureTertiarySectionShell / ensureGroupTertiaryShell', () => {
   it('已有 H4 → 原样', () => {
     const md = '### 施工部署\n#### 子节\n正文';
     expect(ensureTertiarySectionShell('施工部署', md)).toBe(md);
@@ -468,7 +381,7 @@ describe('X19 ensureTertiarySectionShell / ensureGroupTertiaryShell', () => {
   });
 });
 
-describe('X20 判别函数族', () => {
+describe('X19 判别函数族', () => {
   it('groupHasMajorConstructionSection', () => {
     expect(groupHasMajorConstructionSection(['施工部署', '项目主要施工内容'])).toBe(true);
     expect(groupHasMajorConstructionSection(['施工部署', '施工平面布置'])).toBe(false);
@@ -489,7 +402,7 @@ describe('X20 判别函数族', () => {
   });
 });
 
-describe('X21 keySectionWritingRequirement', () => {
+describe('X20 keySectionWritingRequirement', () => {
   it('重点难点节 → 含归因与量化要求', () => {
     const req = keySectionWritingRequirement('项目特点、重点、难点分析');
     expect(req).toContain('成因归因句');
@@ -509,7 +422,7 @@ describe('X21 keySectionWritingRequirement', () => {
   });
 });
 
-describe('X22 outputTokensForChapter / expansionRoundsForDeficit / acceptExpandedChapter', () => {
+describe('X21 outputTokensForChapter / expansionRoundsForDeficit / acceptExpandedChapter', () => {
   it('outputTokensForChapter：正常放大 1.45 倍', () => {
     expect(outputTokensForChapter(10000)).toBe(14500);
   });

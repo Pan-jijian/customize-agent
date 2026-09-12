@@ -17,7 +17,6 @@ import {
   missingWorkPackageSkeletonTitles,
   outputTokensForChapter,
   parseMajorConstructionPackages,
-  repairMajorContentWorkPackageLabels,
   sectionContentBody,
   sectionStructureIssue,
   scopeEngineeringNames,
@@ -131,27 +130,6 @@ describe('majorContentPollutionIssue（脏事实/标题污染检查）', () => {
 
   it('正常正文不命中', () => {
     expect(majorContentPollutionIssue('#### 2.3.1 室外道排工程\n施工概况：室外雨污水管网改造，工程量1200m。\n施工流程：放线→开挖→铺设→回填。\n施工方法：采用机械开挖，分层回填压实并检测压实度。')).toBe(false);
-  });
-});
-
-describe('repairMajorContentWorkPackageLabels（三段标签确定性补全）', () => {
-  const content = '### 2.3 项目主要施工内容\n#### 2.3.1 室外道排工程\n室外雨污水管网改造，工程量1200m。\n放线→开挖→铺设→回填。\n采用机械开挖，分层回填压实。';
-
-  it('缺标签时按顺序补全（概况/流程/方法）', () => {
-    const result = repairMajorContentWorkPackageLabels(content);
-    expect(result).toContain('施工概况：室外雨污水管网改造，工程量1200m。');
-    expect(result).toContain('施工流程：放线→开挖→铺设→回填。');
-    expect(result).toContain('施工方法：采用机械开挖，分层回填压实。');
-  });
-
-  it('标签齐全的块原样保留', () => {
-    const complete = '### 2.3 项目主要施工内容\n#### 2.3.1 室外道排工程\n施工概况：范围。\n施工流程：放线→开挖。\n施工方法：机械开挖。';
-    expect(repairMajorContentWorkPackageLabels(complete)).toBe(complete);
-  });
-
-  it('不含项目主要施工内容节时原样返回', () => {
-    const other = '### 1.1 工程概况\n内容。';
-    expect(repairMajorContentWorkPackageLabels(other)).toBe(other);
   });
 });
 

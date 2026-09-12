@@ -158,16 +158,10 @@ export class KnowledgeBaseManager {
     const kbIgnore = this.scanner.loadKbIgnore(this.kbPath);
     const configIgnore = this.projectConfig?.kbignore ?? [];
     const onlyRelativePaths = options.onlyRelativePaths ? new Set(options.onlyRelativePaths) : undefined;
-    let diskFiles = onlyRelativePaths ? this.statRelativePaths([...onlyRelativePaths]) : await this.scanner.scan(this.kbPath, [...kbIgnore, ...configIgnore]);
-    // B1 跨项目目录守卫（源头）：绑定文件清单持久化的资料组之外的文件不进 diff——
-    // 防止 knowledgeBase 混入的其他项目目录在后续增量索引中重新入索引（只清索引不守扫描会反复脏）
-    const boundGroups = this.getBoundGroups();
-    if (!onlyRelativePaths && boundGroups.length > 0) {
-      diskFiles = new Map([...diskFiles.entries()].filter(([relativePath]) => {
-        const top = relativePath.replace(/\\/gu, '/').split('/').filter(Boolean)[0];
-        return top === undefined || boundGroups.includes(top);
-      }));
-    }
+    const diskFiles = onlyRelativePaths ? this.statRelativePaths([...onlyRelativePaths]) : await this.scanner.scan(this.kbPath, [...kbIgnore, ...configIgnore]);
+    // 历史 B1 守卫（绑定组扫描过滤）已废弃：残留的 bound_groups metadata 会让组外文件永久无法入索引
+    // （多项目资料共库被误清后重新同步也无法恢复），同步入口幂等清除，用户上传的其他项目资料可重新入索引
+    if (this.store.getMetadata('bound_groups')) this.store.setMetadata('bound_groups', '');
     const tracker = new ChangeTracker(this.store);
     const diff = await tracker.computeDiff(diskFiles, this.classifier, this.kbPath);
 
@@ -245,7 +239,7 @@ export class KnowledgeBaseManager {
       // K1 入库前清洗（源头治理）：解析完成后、分块入库前移除确定性噪声（页眉页脚/目录/页码/
       // 招标格式模板段/补疑套话/图纸坐标行），入库的即干净数据；保守策略（多重证据 + 30% 回退保护），
       // 清洗统计写入 warnings 供索引记录追溯；KB_TEXT_CLEANING=0 关闭清洗
-      const cleaning = cleanExtractedText({ text: extraction.text, category: file.category, fileName: file.relativePath });
+      const cleaning = cleanExtractedText({ text: extraction.text, category: file.category, format: file.format, fileName: file.relativePath });
       const cleanedText = cleaning.text.trim().length > 0 ? cleaning.text : extraction.text;
       if (cleaning.removedChars > 0) {
         const cleaningDetail = [
@@ -686,55 +680,6 @@ export class KnowledgeBaseManager {
     this.store.setMetadata('total_files_indexed', String(stats.fileCount));
     this.store.setMetadata('vector_indexed_chunks', String(stats.chunkCount));
     this.store.setMetadata('last_vector_index_at', String(Date.now()));
-  }
-
-  /** 读取绑定资料组（B1 跨项目守卫）：绑定文件清单持久化的权威组集合；无记录时返回空（不设限） */
-  private getBoundGroups(): string[] {
-    const raw = this.store.getMetadata('bound_groups');
-    if (!raw) return [];
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * B1 知识库索引与绑定文件清单同步清理（源头根除跨项目脏数据）：
-   * 1) 把绑定文件清单的顶级资料组持久化到 metadata，后续增量索引只扫这些组（防再脏）；
-   * 2) 立即清除索引中组外的全部数据（chunks/哈希/向量），下游检索不再串染；
-   * 3) 磁盘文件不动，重新绑定组外文件并同步后即可恢复。
-   * @param keepGroups 绑定文件的顶级资料组（非空才生效，空数组表示无权威范围，不清理）
-   */
-  async syncIndexWithBoundGroups(keepGroups: string[]): Promise<{ deletedChunks: number; deletedFiles: number }> {
-    this.initialize();
-    const groups = [...new Set(keepGroups.map(group => group.trim()).filter(Boolean))];
-    this.store.setMetadata('bound_groups', JSON.stringify(groups));
-    if (groups.length === 0) return { deletedChunks: 0, deletedFiles: 0 };
-    // 先取待删文件的集合名（向量侧需按 filePath 删除），再清索引记录
-    const records = this.store.listRecords();
-    const collectionByPath = new Map(records.map(record => [record.relativePath, record.collectionName]));
-    const groupSet = new Set(groups);
-    const stalePaths = records
-      .map(record => record.relativePath)
-      .filter(relativePath => {
-        const parts = relativePath.replace(/\\/gu, '/').split('/').filter(Boolean);
-        // 仅多段路径参与组判定（与 IndexStateStore.deleteChunksOutsideGroups 同口径）；根目录直放文件保留
-        const top = parts.length > 1 ? parts[0] : undefined;
-        return top !== undefined && !groupSet.has(top);
-      });
-    const staleChunkCounts = stalePaths.map(relativePath => Number(this.store.countChunks({ relativePath }) || 0));
-    for (const relativePath of stalePaths) {
-      const collectionName = collectionByPath.get(relativePath);
-      if (collectionName) await this.deleteVectorFile(collectionName, relativePath);
-      this.store.deleteRecord(relativePath);
-    }
-    const deletedChunks = staleChunkCounts.reduce((sum, count) => sum + count, 0);
-    const stats = this.getStats();
-    this.store.setMetadata('total_chunks', String(stats.chunkCount));
-    this.store.setMetadata('total_files_indexed', String(stats.fileCount));
-    return { deletedChunks, deletedFiles: stalePaths.length };
   }
 
   tagFile(relativePath: string, tags: string[]): void {

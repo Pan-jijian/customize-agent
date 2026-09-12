@@ -78,25 +78,25 @@ describe('R2 crossSection 全锚点两口径冲突报', () => {
   });
 });
 
-// ── R3. number 类 20% 阈值精确边界（maxValue*0.2） ──
+// ── R3. number 类不同数值即互斥（无差异阈值，十五版机械四套数字 5 vs 4 形态） ──
 
-describe('R3 crossSection number 类 20% 阈值边界', () => {
-  it('R3-1 差恰 20%（20 vs 24，4 ≤ 4.8）→ 不报', () => {
-    expect(crossSectionNumericConflictIssues('灭火器20具。灭火器24具。')).toEqual([]);
+describe('R3 crossSection number 类无差异阈值（不同数值即互斥）', () => {
+  it('R3-1 差恰 20%（20 vs 24）→ 报', () => {
+    expect(crossSectionNumericConflictIssues('灭火器20具。灭火器24具。').length).toBe(1);
   });
-  it('R3-2 差 24%（20 vs 26，6 > 5.2）→ 报', () => {
+  it('R3-2 差 24%（20 vs 26）→ 报', () => {
     expect(crossSectionNumericConflictIssues('灭火器20具。灭火器26具。').length).toBe(1);
   });
-  it('R3-3 差恰 20%（100 vs 125，25 ≤ 25）→ 不报', () => {
-    expect(crossSectionNumericConflictIssues('变压器100kVA。变压器125kVA。')).toEqual([]);
+  it('R3-3 差恰 20%（100 vs 125）→ 报', () => {
+    expect(crossSectionNumericConflictIssues('变压器100kVA。变压器125kVA。').length).toBe(1);
   });
-  it('R3-4 差 26%（100 vs 126，26 > 25.2）→ 报', () => {
+  it('R3-4 差 26%（100 vs 126）→ 报', () => {
     expect(crossSectionNumericConflictIssues('变压器100kVA。变压器126kVA。').length).toBe(1);
   });
-  it('R3-5 小数装配率差 20% 内 → 不报', () => {
-    expect(crossSectionNumericConflictIssues('装配率30%。装配率36%。')).toEqual([]);
+  it('R3-5 小数装配率差 20% 内 → 报', () => {
+    expect(crossSectionNumericConflictIssues('装配率30%。装配率36%。').length).toBe(1);
   });
-  it('R3-6 小数装配率差 20% 外（30 vs 38，8 > 7.6）→ 报', () => {
+  it('R3-6 小数装配率差 20% 外（30 vs 38）→ 报', () => {
     expect(crossSectionNumericConflictIssues('装配率30%。装配率38%。').length).toBe(1);
   });
 });
@@ -211,11 +211,11 @@ describe('R9 crossSection 多值与截断', () => {
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('60具');
   });
-  it('R9-2 九锚点冲突 → 截断 8 条', () => {
+  it('R9-2 九锚点冲突 → 全量报出（上限 16 防截断）', () => {
     const md = 'XPS厚度30mm。XPS厚度130mm。变压器315kVA。变压器800kVA。模板周转次数8次。模板周转使用6次。'
       + '灭火器20具。灭火器40具。潜水泵4台。潜水泵8台。急救箱3个。急救箱4个。'
       + '塔式起重机1台。塔吊2台。施工升降机4台。施工电梯1台。汽车起重机2台。汽车吊1台。';
-    expect(crossSectionNumericConflictIssues(md).length).toBe(8);
+    expect(crossSectionNumericConflictIssues(md).length).toBe(9);
   });
   it('R9-3 多锚点各自报（2 条）', () => {
     const issues = crossSectionNumericConflictIssues('XPS厚度30mm。XPS厚度130mm。灭火器20具。灭火器40具。');

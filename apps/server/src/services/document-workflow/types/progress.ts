@@ -53,7 +53,6 @@ export interface DocumentGenerationStrategy {
   mode: 'fast' | 'balanced' | 'longform' | 'strict';
   enableChapterReview: boolean;
   enableGlobalReview: boolean;
-  enableDocumentBudgetExpansion: boolean;
   enableFinalQualityReview: boolean;
   /** fast 模式全局一致性审查抽检率（0-1，1=全量审查） */
   globalReviewSamplingRate?: number;

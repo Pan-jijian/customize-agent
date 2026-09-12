@@ -487,8 +487,21 @@ describe('Y7 constructionOrgMajorContentIssues', () => {
     expect(issues[0].message).toContain('当前 4 个');
   });
 
-  it('内容含 Markdown 表格 → blocker', () => {
+  it('段落正文 + 数据附表（2 行小表）→ 不报（与 fixTableBorneContentSections 同源口径校准）', () => {
     const content = `${majorSection(5)}\n| 序号 | 内容 |\n|---|---|`;
+    const issues = constructionOrgMajorContentIssues([draftChapter('项目主要施工内容', content)]);
+    expect(issues.some(issue => issue.message.includes('Markdown 表格'))).toBe(false);
+  });
+
+  it('内容全为 Markdown 表格（无专业工程段落正文）→ blocker', () => {
+    const content = ['### 项目主要施工内容',
+      '| 序号 | 专业工程 | 内容 |',
+      '|---|---|---|',
+      '| 1 | 污水管网工程 | 沟槽开挖与管道铺设 |',
+      '| 2 | 道路工程 | 基层处理与沥青摊铺 |',
+      '| 3 | 绿化工程 | 种植土换填与苗木栽植 |',
+      '| 4 | 给排水工程 | 检查井砌筑与闭水试验 |',
+      '| 5 | 安装工程 | 管道附件安装与调试 |'].join('\n');
     const issues = constructionOrgMajorContentIssues([draftChapter('项目主要施工内容', content)]);
     expect(issues.some(issue => issue.message.includes('Markdown 表格'))).toBe(true);
   });
@@ -825,11 +838,16 @@ describe('Y9 perPackageContentElementIssues', () => {
 describe('Y10 majorContentGovernanceIssues', () => {
   const inSection = (body: string) => `### 项目主要施工内容\n${body}`;
 
-  it('正文含 Markdown 表格 → blocker', () => {
-    const issues = majorContentGovernanceIssues(inSection('| 序号 | 内容 |\n|---|---|'));
+  it('正文全为 Markdown 表格（≥3 行无实质正文）→ blocker', () => {
+    const issues = majorContentGovernanceIssues(inSection('| 序号 | 内容 |\n|---|---|\n| 1 | 沟槽开挖 |\n| 2 | 管道铺设 |'));
     expect(issues).toHaveLength(1);
     expect(issues[0].severity).toBe('blocker');
     expect(issues[0].message).toContain('Markdown 表格');
+  });
+
+  it('段落叙述 + 数据附表 → 不报（表格承载口径校准：正文已承载主体内容）', () => {
+    const issues = majorContentGovernanceIssues(inSection('沟槽开挖采用分段流水作业，管道铺设后分层回填压实，检查井砌筑随管道施工同步推进，回填压实度按规范逐层检测。\n| 序号 | 内容 |\n|---|---|\n| 1 | 沟槽开挖 |\n| 2 | 管道铺设 |'));
+    expect(issues).toEqual([]);
   });
 
   it.each(['分部小计', '本页小计', '按实', '暂估', '综合单价', '规费', '税金'])('清单口径强词 %s → blocker', (word) => {

@@ -77,7 +77,9 @@ const REVIEW_SCHEMA: DocumentJsonSchema = {
     issues: {
       type: 'array',
       required: true,
-      maxItems: 12,
+      // V5 P4d：12→30——截断式校验下超限静默丢尾部问题（评审检出量是修复吞吐的输入，丢弃尾部
+      // 即放弃修复机会）；上限仅防失控，超限仍会截断+告警（不判失败）
+      maxItems: 30,
       items: {
         type: 'object',
         required: true,
@@ -217,7 +219,6 @@ async function reviewDocumentBlock(chapters: DocumentDraftChapter[], context: { 
     diagnostics,
     schema: REVIEW_SCHEMA,
     taskKind: 'structuredGeneration',
-    disableThinkingBoost: true,
     prefixKey: 'full-dimension-review',
   });
   if (!reviewed) return undefined;

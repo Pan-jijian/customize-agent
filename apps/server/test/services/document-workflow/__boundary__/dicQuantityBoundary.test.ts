@@ -179,11 +179,11 @@ describe('G3-C4 村名语境豁免（窗口 12 字 × 段落级）', () => {
   });
 });
 
-describe('G3-C5 句级口径豁免（大差异候选数 ≥2 且占多数）', () => {
+describe('G3-C5 句级口径豁免（总量锚点 + ≥2 不一致候选）', () => {
   const peer = { name: '水泥混凝土', value: 20872.82, unit: 'm²' };
   const peerFar = { name: '仿木护栏', value: 333, unit: 'm' };
   const cases: Array<{ label: string; markdown: string; expectExempt: boolean }> = [
-    { label: '2大0小→豁免', markdown: `景观工程主要工程量包括${BASE.name}480.5${BASE.unit}、${peer.name}572.3${peer.unit}。`, expectExempt: true },
+    { label: '2大0小（无总量锚点）→不豁免', markdown: `景观工程主要工程量包括${BASE.name}480.5${BASE.unit}、${peer.name}572.3${peer.unit}。`, expectExempt: false },
     { label: '3大1小→豁免', markdown: `景观工程主要工程量包括${BASE.name}480.5${BASE.unit}、${peer.name}572.3${peer.unit}、挖一般土方146.93m³、${peerFar.name}333${peerFar.unit}。`, expectExempt: true },
     { label: '1大0小→不豁免（单条目修复）', markdown: `${BASE.name}40${BASE.unit}。`, expectExempt: false },
     { label: '1大2小→不豁免', markdown: `主要工程量包括${BASE.name}40${BASE.unit}、${peer.name}22960.1${peer.unit}、${peerFar.name}366.3${peerFar.unit}。`, expectExempt: false },

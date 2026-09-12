@@ -283,7 +283,7 @@ export function parseMajorConstructionPackages(projectContext: string, evidence:
 }
 
 // ═══════ 工作包骨架锁定（稳定版）：关键小节内部结构由系统确定性下发，LLM 只填内容不编结构 ═══════
-// 历史根因：主题块管线/整章管线对关键小节只做“标题缺失/重复/越界 + 字数”质检，不查内容要素，
+// 历史根因：成稿管线对关键小节只做“标题缺失/重复/越界 + 字数”质检，不查内容要素，
 // LLM 自由发挥时「项目主要施工内容」小节两版波动（11:36 有 6 个专业工程小节，12:29 被重难点表占位）；
 // 骨架锁定后小节内部 #### 标题由系统从资料识别的工作包清单锁定，波动源被确定性消除。
 
@@ -459,11 +459,12 @@ export function majorConstructionSkeletonNames(projectContext: string, evidence:
 /**
  * 关键小节骨架锁定提示词：识别到足够工作包时（默认 ≥3），把小节内部 #### 标题结构锁死为系统清单，
  * LLM 必须逐项展开且标题一字不差；识别不足时不注入（回退既有专项规则软约束）。
- * 三要素硬结构（4.18.6）：锁标题之上锁“施工概况/施工流程/施工方法”三段标签默认写法——
+ * 三要素硬结构（4.18.6）：锁标题之上锁“作业对象与工程量/工序顺序/施工方法”三要素内容——
  * 历史缺陷（轮7 实测）：软性“三要素形式不限”导致 Writer 输出形态混乱（有的包只有作业对象一段、
  * 有的包丢标题裸奔、两套标签形态混用、季节施工/组织机构混入工作包列表）；
- * 默认写法由系统提示词给出（用户提示词可覆盖形式），三要素齐全为硬门槛，
- * 示例数值仅示意写法，必须标注不得照抄（历史缺陷：示例数值跨项目串染）。
+ * WS1/WS3 治理修正：原“施工概况/施工流程/施工方法”三段标签默认写法已删除——要素融入连贯段落叙述、
+ * 工序表达形式按工作包序号轮换（结构入后台、表达回前台；历史缺陷：段首标签 40 处 + 同名标签 H4 三组）；
+ * 三要素齐全为硬门槛，示例数值仅示意写法，必须标注不得照抄（历史缺陷：示例数值跨项目串染）。
  * 同时附带否定性约束：禁止 Markdown 表格、禁止重难点表/节点计划表串入本小节。
  */
 export function workPackageSkeletonPrompt(projectContext: string, evidence: DocumentEvidence[], minCount = 3, namesOverride?: string[]): string {
@@ -473,9 +474,9 @@ export function workPackageSkeletonPrompt(projectContext: string, evidence: Docu
   return [
     `【小节骨架锁定】本节内部结构已由系统锁定，必须且只能按以下 ${names.length} 个工作包小节标题逐项展开（标题一字不差，不得增删改、合并或调序）：`,
     skeleton,
-    '每个工作包小节必须覆盖三方面要素：作业对象与工程量、工序顺序、施工方法（三要素缺一不可）。默认按“施工概况/施工流程/施工方法”三段标签逐段写出；若用户提示词对写法形式另有要求，以用户提示词为准，但三要素内容必须齐全。',
-    '三段标签默认写法：\n施工概况：作业对象与部位、工程量或规模、材料设备规格型号（数量类数值优先取工程量清单数据）；\n施工流程：工序先后顺序清晰（顺序词/箭头链/编号步骤任一形式）；\n施工方法：工艺做法、工艺参数（数值+单位）、验收检测与记录闭环。',
-    '写法示例（仅为形式示意，示例中的数值必须替换为本项目绑定资料中的真实数值，不得照抄示例数值）：\n施工概况：本工程室外道排范围覆盖园区内雨水、污水管网及检查井，主要工程量 HDPE 双壁波纹管 DN300 约 1200m、检查井 45 座，管材环刚度 SN8。\n施工流程：测量放线→沟槽开挖→管道基础→管道铺设→闭水试验→分层回填→压实度检测→验收。\n施工方法：沟槽机械开挖配合人工清底，槽底标高偏差控制在±20mm以内；接口采用承插式橡胶圈连接；回填每层虚铺厚度不超过300mm，压实度不低于95%，检测合格后形成记录归档闭环。',
+    '每个工作包小节必须覆盖三方面要素：作业对象与工程量、工序顺序、施工方法（三要素缺一不可），融入连贯段落叙述；禁止以“施工概况/施工流程/施工方法/工艺流程”等结构标签充当 H4 小节标题或段落开头引导。',
+    '要素写法：作业对象与工程量（作业对象与部位、工程量或规模、材料设备规格型号，数量类数值优先取工程量清单数据）；工序顺序（先后顺序清晰，形式按工作包序号轮换使用：顺序词叙述、编号步骤、有序列表、箭头链，禁止相邻工作包同一形式）；施工方法（工艺做法、工艺参数（数值+单位）、验收检测与记录闭环）。',
+    '融合叙述示例（仅为形式示意，示例中的数值必须替换为本项目绑定资料中的真实数值，不得照抄示例数值）：\n本工程室外道排范围覆盖园区内雨水、污水管网及检查井，主要工程量 HDPE 双壁波纹管 DN300 约 1200m、检查井 45 座，管材环刚度 SN8。施工按测量放线、沟槽开挖、管道基础、管道铺设、闭水试验、分层回填、压实度检测、验收的顺序组织；沟槽机械开挖配合人工清底，槽底标高偏差控制在±20mm以内，接口采用承插式橡胶圈连接，回填每层虚铺厚度不超过300mm、压实度不低于95%，检测合格后形成记录归档闭环。',
     '数值来源优先级：工程量、材料规格、设备型号等数量类数值优先取工程量清单数据；清单未覆盖的参数（标高、坡率、构造做法等）才取图纸数据；禁止“按设计图纸执行”“详见设计图纸”“按设计文件确定”式概括话术——必须落到具体数值或具体规范条文。',
     '本节禁止出现 Markdown 表格；禁止写入重难点识别表、关键施工节点控制计划表等属于其他小节的内容；禁止只写综合概述而不展开工作包。',
   ].join('\n');
@@ -492,7 +493,7 @@ export function workPackageSkeletonTitles(projectContext: string, evidence: Docu
  * 「主要施工方法」章分部块（subPoints 仅同名 1 个，如「小菜园」）原逻辑全量保留章级工作包骨架名
  * （终端--白水塘、景观工程等）→ 每个分部块被要求写全章级工作包 → 与 coverageList「同名要点由
  * H3 外壳承担」矛盾 → 两轮重试全灭 → 章失败。统一过滤后：单要点分部块匹配不到章级工作包名 →
- * 空 → divisionPrompt 三段式接管；容器块 subPoints 已骨架展开（同源）→ 全量保留。
+ * 空 → divisionElementFusionPrompt 要素融合接管；容器块 subPoints 已骨架展开（同源）→ 全量保留。
  * 过滤后不足 minCount 视为无骨架可锁（与 workPackageSkeletonTitles 同口径）。
  */
 export function matchBlockSkeletonNames(rawNames: string[], subPointTitles: string[], minCount = 3): string[] {
@@ -599,109 +600,6 @@ export function stripEmptyWorkPackageHeadings(content: string, sectionTitle: str
  * #### 四级标题是本节合法的工作包标题，不得误判 */
 export function majorContentPollutionIssue(blockBody: string) {
   return /资料内容事实|(?:^#{2,3}|^#{5,6})\s+|\*\*[^*]+\*\*|未尽事宜|专业施工内容统筹|招标范围还包含|具备有效的.*资质|安全生产考核合格证书|注册建造师|联合体投标|项目经理要求|投标人资格|投标人资质|营业执照|安全生产许可证|资格审查|资格后审|中标通知书|签订合同|电子交易系统|投标保证金|评标办法|踏勘现场|投标预备会/mu.test(blockBody);
-}
-
-/** 确定性补全“项目主要施工内容”小节内工作包的要素标签（4.17.9 兼容处理，标签非强制）：
- * 内容要素不全的块被结构门禁拒绝后，本函数把块内无标签文本按顺序归入标签（流程优先取含“→”的行），
- * 不生成新内容、不重排已有标签行，修复后由调用方复查结构门禁决定是否采用；
- * 无标签但要素齐全的块不会触发结构门禁，本函数不会被调用 */
-export function repairMajorContentWorkPackageLabels(content: string) {
-  if (!/项目主要施工内容/u.test(content)) return content;
-  const lines = content.split(/\r?\n/u);
-  const result: string[] = [];
-  let inMainSection = false;
-  let block: string[] | null = null;
-  const flushBlock = () => {
-    if (!block) return;
-    const heading = block[0];
-    const bodyLines = block.slice(1);
-    const hasOverview = bodyLines.some(line => /^施工概况[:：]?/u.test(line.trim()));
-    const hasFlow = bodyLines.some(line => /^施工流程[:：]?/u.test(line.trim()));
-    const hasMethod = bodyLines.some(line => /^施工方法[:：]?/u.test(line.trim()));
-    if (hasOverview && hasFlow && hasMethod) {
-      result.push(...block);
-      block = null;
-      return;
-    }
-    const fixed: string[] = [heading];
-    const unlabeled: string[] = [];
-    for (const line of bodyLines) {
-      if (/^(施工概况|施工流程|施工方法)[:：]/u.test(line.trim())) fixed.push(line);
-      else if (line.trim()) unlabeled.push(line);
-    }
-    if (unlabeled.length === 0) {
-      result.push(...block);
-      block = null;
-      return;
-    }
-    // 缺哪个标签补哪个：概况取首条无标签行，流程优先取含“→”的行（无法确定性造箭头时不硬补），方法取剩余行合并
-    const remaining = [...unlabeled];
-    if (!hasOverview && remaining.length) {
-      const line = remaining.shift();
-      if (line !== undefined && line.trim()) fixed.push(`施工概况：${line.trim()}`);
-    }
-    if (!hasFlow && remaining.length) {
-      // 4.19 流程行匹配扩展：不仅含“→”箭头，顺序词叙述/编号步骤等工序顺序表达行同样可归入流程标签
-      const flowIndex = remaining.findIndex(line => line.includes('→') || hasProcessSequenceExpression(line));
-      if (flowIndex >= 0) {
-        const [flow] = remaining.splice(flowIndex, 1);
-        fixed.push(`施工流程：${flow.trim()}`);
-      }
-    }
-    if (!hasMethod && remaining.length) {
-      const methodText = remaining.map(line => line.trim()).filter(Boolean).join('');
-      if (methodText) fixed.push(`施工方法：${methodText}`);
-    }
-    // 已有多余标签但仍有未归类行（如已有流程/方法标签而概况补完后剩余的正文）：原样保留在块尾，避免丢内容
-    fixed.push(...remaining.filter(line => line.trim()));
-    result.push(...fixed);
-    block = null;
-  };
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (/^##\s+/u.test(trimmed)) {
-      flushBlock();
-      block = null;
-      inMainSection = false;
-      result.push(line);
-      continue;
-    }
-    if (/^###\s+/u.test(trimmed)) {
-      flushBlock();
-      block = null;
-      inMainSection = /项目主要施工内容/u.test(trimmed);
-      result.push(line);
-      continue;
-    }
-    // H4 形态关键小节（模板实测“#### 项目主要施工内容”）：小节标题行本身不是工作包块，只翻转小节范围标记；
-    // 必须放在 !inMainSection 检查之前，否则 H4 形态下 inMainSection 恒 false 导致标签补全整体哑火
-    if (/^####\s+/u.test(trimmed) && /项目主要施工内容/u.test(trimmed)) {
-      flushBlock();
-      block = null;
-      inMainSection = true;
-      result.push(line);
-      continue;
-    }
-    if (!inMainSection) {
-      result.push(line);
-      continue;
-    }
-    if (/^####\s+/u.test(trimmed)) {
-      flushBlock();
-      block = [line];
-      continue;
-    }
-    if (/^#{1,6}\s+/u.test(trimmed)) {
-      flushBlock();
-      block = null;
-      result.push(line);
-      continue;
-    }
-    if (block) block.push(line);
-    else result.push(line);
-  }
-  flushBlock();
-  return result.join('\n');
 }
 
 export function sectionStructureIssue(sectionTitle: string, content: string) {
@@ -813,8 +711,8 @@ export function keySectionWritingRequirement(sectionTitle: string) {
   ].join('\n');
   if (/项目主要施工内容/u.test(sectionTitle)) return [
     '关键小节结构要求：必须参照优秀施工组织设计的“主要施工内容”写法，按当前项目资料识别专业工程/分部分项工作包，不得只写综合概述。',
-    '每个工作包必须覆盖作业对象与工程量、工序顺序、施工方法三方面要素（三要素缺一不可）；默认按“施工概况/施工流程/施工方法”三段标签逐段写出（若用户提示词对形式另有要求，以用户提示词为准，但三要素内容必须齐全）；不得使用 Markdown 表格，避免导出时产生表格分隔线残留。',
-    '施工概况写对象范围、工程量或规模、材料设备规格、施工部位；施工流程必须有明确的工序顺序表达（顺序词叙述、编号步骤、有序/无序列表或箭头链均可）；施工方法写工艺做法、穿插组织、工艺参数、质量验收、检测复试、资料闭环。',
+    '每个工作包必须覆盖作业对象与工程量、工序顺序、施工方法三方面要素（三要素缺一不可），融入连贯段落叙述；禁止以“施工概况/施工流程/施工方法/工艺流程”等结构标签充当 H4 小节标题或段落开头引导；不得使用 Markdown 表格，避免导出时产生表格分隔线残留。',
+    '要素写法：作业对象与工程量写对象范围、工程量或规模、材料设备规格、施工部位；工序顺序必须有明确的顺序表达，形式按工作包序号轮换使用（顺序词叙述、编号步骤、有序列表、箭头链），禁止相邻工作包同一形式、禁止通篇同一形式；施工方法写工艺做法、穿插组织、工艺参数、质量验收、检测复试、资料闭环。',
     '数值来源优先级：工程量、材料规格、设备型号等数量类数值优先取工程量清单数据；清单未覆盖的参数（标高、坡率、构造做法等）才取图纸数据；禁止“按设计图纸执行”“详见设计图纸”“按设计文件确定”式概括话术——必须落到具体数值或具体规范条文。',
     '工作包类别必须从资料事实中识别，可覆盖但不限于结构加固、消防、装饰、水电、通风空调、弱电智能化、室外道排、屋面、立面、附属工程。',
   ].join('\n');
@@ -822,7 +720,7 @@ export function keySectionWritingRequirement(sectionTitle: string) {
     '关键小节结构要求：必须按专业工程和关键工序展开，不得只写概述流程。',
     '必须覆盖资料明确的专业工程范围。',
     '必须逐项响应“项目特点、重点、难点分析”中的控制对象，写明施工范围、施工方法、工艺流程、关键控制点、检查验收和资料闭环。',
-    '每个分项工程方案必须覆盖作业对象与工程量、工序顺序、施工方法三方面要素（三要素缺一不可）；默认按“施工概况/工艺流程/施工方法”三段标签逐段写出（若用户提示词对形式另有要求，以用户提示词为准，但三要素内容必须齐全）；数值来源优先级同主要施工内容：数量类数值优先取工程量清单，清单未覆盖才取图纸数据，禁止“按设计图纸执行”式概括话术。',
+    '每个分项工程方案必须覆盖作业对象与工程量、工序顺序、施工方法三方面要素（三要素缺一不可），融入连贯段落叙述，禁止以“施工概况/工艺流程/施工方法”等结构标签充当标题或段落开头引导；工序顺序表达形式按分项序号轮换使用（顺序词叙述、编号步骤、有序列表、箭头链），禁止相邻分项同一形式；数值来源优先级同主要施工内容：数量类数值优先取工程量清单，清单未覆盖才取图纸数据，禁止“按设计图纸执行”式概括话术。',
   ].join('\n');
   return '';
 }

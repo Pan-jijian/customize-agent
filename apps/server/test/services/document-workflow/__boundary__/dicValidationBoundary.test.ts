@@ -10,18 +10,19 @@ import { chunkTextForReview } from '@/services/document-workflow/chapterReview';
 import { chapterDependencyIssues, documentDeliveryScoreIssues, evidenceUsageCoverageIssues } from '@/services/document-workflow/documentDeliveryReport';
 import { qualityReportIssues } from '@/services/document-workflow/documentQualityReport';
 import { headingDuplicateIssues } from '@/services/document-workflow/qualityValidation';
+import { factsOf } from './boundaryKit';
 
 describe('crossChapterDuplicateSectionIssues', () => {
   it('无 H3 小节', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"普通段落"},{"id":"b","title":"第二章","content":"普通段落"}], []);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"普通段落","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"普通段落","evidence":[],"missingFacts":[]}], []);
     expect(r.length).toEqual(0);
   });
   it('同章重复小节不报', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境保护措施\n正文内容### 周边环境保护措施\n正文内容"}], []);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境保护措施\n正文内容### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]}], []);
     expect(r.length).toEqual(0);
   });
   it('跨章同名 H3 报错', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境保护措施\n正文内容"},{"id":"b","title":"第二章","content":"### 周边环境保护措施\n正文内容"}], []);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]}], []);
     expect(r.length).toEqual(1);
     expect(r[0]?.level).toEqual("error");
     expect(r[0]?.severity).toEqual("blocker");
@@ -32,113 +33,103 @@ describe('crossChapterDuplicateSectionIssues', () => {
     expect(r[0]?.message.includes("跨章同名小节")).toEqual(true);
   });
   it('短标题（<8字符）不报', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 质量控制\n正文内容"},{"id":"b","title":"第二章","content":"### 质量控制\n正文内容"}], []);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 质量控制\n正文内容","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"### 质量控制\n正文内容","evidence":[],"missingFacts":[]}], []);
     expect(r.length).toEqual(0);
   });
   it('带编号标题归一后判同', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 3.1 周边环境保护措施\n正文内容"},{"id":"b","title":"第二章","content":"### 5.2 周边环境保护措施\n正文内容"}], []);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 3.1 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"### 5.2 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]}], []);
     expect(r.length).toEqual(1);
     expect(r[0]?.sectionTitle).toEqual("周边环境保护措施");
   });
   it('模板归属章不报', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境保护措施\n正文内容"},{"id":"b","title":"第二章","content":"### 周边环境保护措施\n正文内容"}], [{"title":"第一章","sections":["周边环境保护措施"]}]);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]}], [{"id":"t1","title":"第一章","purpose":"","queries":[],"requiredFacts":[],"sections":["周边环境保护措施"]}]);
     expect(r.length).toEqual(1);
   });
   it('模板归属另一章报串章', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境保护措施\n正文内容"},{"id":"b","title":"第二章","content":"### 周边环境保护措施\n正文内容"}], [{"title":"第二章","sections":["周边环境保护措施"]}]);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]}], [{"id":"t2","title":"第二章","purpose":"","queries":[],"requiredFacts":[],"sections":["周边环境保护措施"]}]);
     expect(r.length).toEqual(1);
     expect(r[0]?.chapterId).toEqual("b");
   });
   it('模板多章安排不报', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 施工组织逻辑\n正文内容"},{"id":"b","title":"第二章","content":"### 施工组织逻辑\n正文内容"}], [{"title":"第一章","sections":["施工组织逻辑"]},{"title":"第二章","sections":["施工组织逻辑"]}]);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 施工组织逻辑\n正文内容","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"### 施工组织逻辑\n正文内容","evidence":[],"missingFacts":[]}], [{"id":"t1","title":"第一章","purpose":"","queries":[],"requiredFacts":[],"sections":["施工组织逻辑"]},{"id":"t2","title":"第二章","purpose":"","queries":[],"requiredFacts":[],"sections":["施工组织逻辑"]}]);
     expect(r.length).toEqual(0);
   });
   it('三章同名报两条', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境保护措施\n正文内容"},{"id":"b","title":"第二章","content":"### 周边环境保护措施\n正文内容"},{"id":"c","title":"第三章","content":"### 周边环境保护措施\n正文内容"}], []);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]},{"id":"c","title":"第三章","content":"### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]}], []);
     expect(r.length).toEqual(2);
   });
   it('空格标点归一', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境、保护措施\n正文内容"},{"id":"b","title":"第二章","content":"### 周边环境保护，措施\n正文内容"}], []);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"### 周边环境、保护措施\n正文内容","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"### 周边环境保护，措施\n正文内容","evidence":[],"missingFacts":[]}], []);
     expect(r.length).toEqual(1);
   });
   it('H4 不算小节', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"#### 周边环境保护措施"},{"id":"b","title":"第二章","content":"#### 周边环境保护措施"}], []);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"#### 周边环境保护措施","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"#### 周边环境保护措施","evidence":[],"missingFacts":[]}], []);
     expect(r.length).toEqual(0);
   });
   it('章标题匹配模板', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第1章 编制说明","content":"### 周边环境保护措施\n正文内容"},{"id":"b","title":"第二章","content":"### 周边环境保护措施\n正文内容"}], [{"title":"编制说明","sections":["周边环境保护措施"]}]);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第1章 编制说明","content":"### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"### 周边环境保护措施\n正文内容","evidence":[],"missingFacts":[]}], [{"id":"t3","title":"编制说明","purpose":"","queries":[],"requiredFacts":[],"sections":["周边环境保护措施"]}]);
     expect(r.length).toEqual(1);
     expect(r[0]?.chapterId).toEqual("b");
   });
   it('空 content 不崩', () => {
-    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":""},{"id":"b","title":"第二章","content":""}], []);
+    const r = crossChapterDuplicateSectionIssues([{"id":"a","title":"第一章","content":"","evidence":[],"missingFacts":[]},{"id":"b","title":"第二章","content":"","evidence":[],"missingFacts":[]}], []);
     expect(r.length).toEqual(0);
   });
 });
 describe('buildChapterReadinessPlan', () => {
   it('无缺口 low/normal', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":[]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"a","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
+    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","purpose":"","queries":[],"requiredFacts":[]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"a","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
     expect(r.riskLevel).toEqual("low");
     expect(r.suggestedStrategy).toEqual("normal");
     expect(r.canGenerate).toEqual(true);
     expect(r.missingFacts).toEqual([]);
-    expect(r.reason).toEqual("章节事实、证据和表格可填性满足常规生成条件。");
+    expect(r.reason).toEqual("章节事实与证据满足常规生成条件。");
   });
   it('requiredFacts 命中不缺口', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":["180日历天"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"计划工期180日历天","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
+    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","purpose":"","queries":[],"requiredFacts":["180日历天"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"计划工期180日历天","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
     expect(r.missingFacts).toEqual([]);
   });
   it('requiredFacts 未命中缺口', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":["180日历天"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"其他内容","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
+    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","purpose":"","queries":[],"requiredFacts":["180日历天"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"其他内容","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
     expect(r.missingFacts).toEqual(["180日历天"]);
     expect(r.riskLevel).toEqual("low");
     expect(r.suggestedStrategy).toEqual("section_first");
   });
   it('事实空白匹配（sectionTitle+content）', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":["计划工期180日历天"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"","roleId":"r","processingType":"text","sectionTitle":"计划工期"},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"180日历天","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
+    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","purpose":"","queries":[],"requiredFacts":["计划工期180日历天"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"","roleId":"r","processingType":"text","sectionTitle":"计划工期"},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"180日历天","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
     expect(r.missingFacts).toEqual(["计划工期180日历天"]);
   });
   it('2 个缺口 medium', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":["f1","f2"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"x","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"y","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"z","roleId":"r","processingType":"text","sectionTitle":""}]});
+    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","purpose":"","queries":[],"requiredFacts":["f1","f2"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"x","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"y","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"z","roleId":"r","processingType":"text","sectionTitle":""}]});
     expect(r.riskLevel).toEqual("medium");
     expect(r.suggestedStrategy).toEqual("section_first");
   });
   it('5 个缺口 high', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":["f1","f2","f3","f4","f5"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"x","roleId":"r","processingType":"text","sectionTitle":""}]});
+    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","purpose":"","queries":[],"requiredFacts":["f1","f2","f3","f4","f5"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"x","roleId":"r","processingType":"text","sectionTitle":""}]});
     expect(r.riskLevel).toEqual("high");
     expect(r.suggestedStrategy).toEqual("evidence_first");
   });
   it('证据不足 3 条', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":[]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"a","roleId":"r","processingType":"text","sectionTitle":""}]});
+    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","purpose":"","queries":[],"requiredFacts":[]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"a","roleId":"r","processingType":"text","sectionTitle":""}]});
     expect(r.missingEvidence).toEqual(["章节证据数量不足"]);
     expect(r.riskLevel).toEqual("low");
   });
-  it('tableFieldGaps 触发 review_notes', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":[],"tablePlans":[{"fillability":{"missingProjectFactFields":["工程量"]}}]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"a","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
-    expect(r.tableFieldGaps).toEqual(["工程量"]);
-    expect(r.suggestedStrategy).toEqual("generate_with_review_notes");
-  });
-  it('tableFieldGaps 去重', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":[],"tablePlans":[{"fillability":{"missingProjectFactFields":["工程量","工程量"]}}]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"a","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
-    expect(r.tableFieldGaps).toEqual(["工程量"]);
-  });
   it('缺口+证据不足组合 high', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":["f1","f2","f3","f4"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"x","roleId":"r","processingType":"text","sectionTitle":""}]});
+    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","purpose":"","queries":[],"requiredFacts":["f1","f2","f3","f4"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"x","roleId":"r","processingType":"text","sectionTitle":""}]});
     expect(r.riskLevel).toEqual("high");
     expect(r.missingFacts.length).toEqual(4);
-    expect(r.tableFieldGaps.length).toEqual(0);
     expect(r.missingEvidence.length).toEqual(1);
   });
   it('事实含大小写归一', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":["C30混凝土"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c30混凝土","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
+    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","purpose":"","queries":[],"requiredFacts":["C30混凝土"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c30混凝土","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
     expect(r.missingFacts).toEqual([]);
   });
   it('reason 无缺口', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":[]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"a","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
+    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","purpose":"","queries":[],"requiredFacts":[]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"a","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
     expect(r.reason.includes("满足常规生成条件")).toEqual(true);
   });
   it('reason 有缺口', () => {
-    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","requiredFacts":["f1"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"a","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
+    const r = buildChapterReadinessPlan({"chapter":{"id":"c1","title":"施工方案","purpose":"","queries":[],"requiredFacts":["f1"]},"evidence":[{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"a","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"b","roleId":"r","processingType":"text","sectionTitle":""},{"chapterId":"c","filePath":"a.txt","score":0.9,"content":"c","roleId":"r","processingType":"text","sectionTitle":""}]});
     expect(r.reason.includes("生成前缺口")).toEqual(true);
   });
 });
@@ -195,153 +186,160 @@ describe('chunkTextForReview', () => {
 });
 describe('evidenceUsageCoverageIssues', () => {
   it('无事实模型', () => {
-    const r = evidenceUsageCoverageIssues("普通正文", {"project":[],"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = evidenceUsageCoverageIssues("普通正文", factsOf({"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r.length).toEqual(0);
   });
   it('工期事实未使用', () => {
-    const r = evidenceUsageCoverageIssues("工期相关章节内容", {"project":[],"schedule":[{"key":"计划工期","value":"180日历天","fieldName":"计划工期","sourceFile":"a","roleId":"r","confidence":0.9}],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = evidenceUsageCoverageIssues("工期相关章节内容", factsOf({"schedule":[{"key":"计划工期","value":"180日历天","fieldName":"计划工期","sourceFile":"a","roleId":"r","confidence":0.9}],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r.length).toEqual(1);
     expect(r[0]?.level).toEqual("warning");
     expect(r[0]?.message).toEqual("证据使用覆盖率偏低：正文中未明显使用工期相关事实");
   });
   it('工期事实已使用', () => {
-    const r = evidenceUsageCoverageIssues("工期180日历天", {"project":[],"schedule":[{"key":"计划工期","value":"180日历天","fieldName":"计划工期","sourceFile":"a","roleId":"r","confidence":0.9}],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
-    expect(r.length).toEqual(1);
+    const r = evidenceUsageCoverageIssues("工期180日历天", factsOf({"schedule":[{"key":"计划工期","value":"180日历天","fieldName":"计划工期","sourceFile":"a","roleId":"r","confidence":0.9}],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
+    // V5 P6 口径：正文「工期180日历天」数值+单位分片命中事实值，判已使用不报（旧口径误报未使用）
+    expect(r.length).toEqual(0);
   });
   it('质量事实已使用', () => {
-    const r = evidenceUsageCoverageIssues("质量目标合格", {"project":[],"schedule":[],"quality":[{"key":"质量标准","value":"合格","fieldName":"质量标准","sourceFile":"a","roleId":"r","confidence":0.9}],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = evidenceUsageCoverageIssues("质量目标合格", factsOf({"schedule":[],"quality":[{"key":"质量标准","value":"合格","fieldName":"质量标准","sourceFile":"a","roleId":"r","confidence":0.9}],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r.length).toEqual(1);
   });
   it('质量事实未使用', () => {
-    const r = evidenceUsageCoverageIssues("质量目标", {"project":[],"schedule":[],"quality":[{"key":"质量标准","value":"合格","fieldName":"质量标准","sourceFile":"a","roleId":"r","confidence":0.9}],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = evidenceUsageCoverageIssues("质量目标", factsOf({"schedule":[],"quality":[{"key":"质量标准","value":"合格","fieldName":"质量标准","sourceFile":"a","roleId":"r","confidence":0.9}],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r.length).toEqual(1);
     expect(r[0]?.message.includes("质量")).toEqual(true);
   });
   it('安全事实', () => {
-    const r = evidenceUsageCoverageIssues("安全文明施工", {"project":[],"schedule":[],"quality":[],"safety":[{"key":"安全风险","value":"深基坑","fieldName":"安全风险","sourceFile":"a","roleId":"r","confidence":0.9}],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = evidenceUsageCoverageIssues("安全文明施工", factsOf({"schedule":[],"quality":[],"safety":[{"key":"安全风险","value":"深基坑","fieldName":"安全风险","sourceFile":"a","roleId":"r","confidence":0.9}],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r.length).toEqual(1);
   });
   it('资源事实', () => {
-    const r = evidenceUsageCoverageIssues("资源材料设备", {"project":[],"schedule":[],"quality":[],"safety":[],"resources":[{"key":"劳动力","value":"120人","fieldName":"劳动力","sourceFile":"a","roleId":"r","confidence":0.9}],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = evidenceUsageCoverageIssues("资源材料设备", factsOf({"schedule":[],"quality":[],"safety":[],"resources":[{"key":"劳动力","value":"120人","fieldName":"劳动力","sourceFile":"a","roleId":"r","confidence":0.9}],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r.length).toEqual(1);
   });
   it('工程量事实', () => {
-    const r = evidenceUsageCoverageIssues("工程量清单", {"project":[],"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[{"key":"清单条目","value":"C30混凝土100m3","fieldName":"清单条目","sourceFile":"a","roleId":"r","confidence":0.9}],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = evidenceUsageCoverageIssues("工程量清单", factsOf({"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[{"key":"清单条目","value":"C30混凝土100m3","fieldName":"清单条目","sourceFile":"a","roleId":"r","confidence":0.9}],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r.length).toEqual(1);
   });
   it('多类别混合', () => {
-    const r = evidenceUsageCoverageIssues("工期进度质量安全资源材料劳动力工程量", {"project":[],"schedule":[{"key":"计划工期","value":"180日历天","fieldName":"计划工期","sourceFile":"a","roleId":"r","confidence":0.9}],"quality":[{"key":"质量标准","value":"合格","fieldName":"质量标准","sourceFile":"a","roleId":"r","confidence":0.9}],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
-    expect(r.length).toEqual(4);
+    const r = evidenceUsageCoverageIssues("工期进度质量安全资源材料劳动力工程量", factsOf({"schedule":[{"key":"计划工期","value":"180日历天","fieldName":"计划工期","sourceFile":"a","roleId":"r","confidence":0.9}],"quality":[{"key":"质量标准","value":"合格","fieldName":"质量标准","sourceFile":"a","roleId":"r","confidence":0.9}],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
+    // V5 P6 口径：空事实桶维度跳过（安全/资源/工程量桶空不可评估），仅工期维度报（正文未引用180日历天）
+    expect(r.length).toEqual(1);
+    expect(r[0]?.message.includes("工期")).toEqual(true);
   });
   it('事实短于6字符过滤', () => {
-    const r = evidenceUsageCoverageIssues("质量", {"project":[],"schedule":[],"quality":[{"key":"质量标准","value":"合","fieldName":"质量标准","sourceFile":"a","roleId":"r","confidence":0.9}],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = evidenceUsageCoverageIssues("质量", factsOf({"schedule":[],"quality":[{"key":"质量标准","value":"合","fieldName":"质量标准","sourceFile":"a","roleId":"r","confidence":0.9}],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r.length).toEqual(0);
   });
   it('归一化等价（日历天vs天）', () => {
-    const r = evidenceUsageCoverageIssues("工期180天", {"project":[],"schedule":[{"key":"计划工期","value":"180日历天","fieldName":"计划工期","sourceFile":"a","roleId":"r","confidence":0.9}],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
-    expect(r.length).toEqual(1);
+    const r = evidenceUsageCoverageIssues("工期180天", factsOf({"schedule":[{"key":"计划工期","value":"180日历天","fieldName":"计划工期","sourceFile":"a","roleId":"r","confidence":0.9}],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
+    // V5 P6 口径：日历天→天 归一后数值分片「180天」命中，判已使用不报（旧口径误报未使用）
+    expect(r.length).toEqual(0);
   });
   it('事实截断24字符匹配', () => {
-    const r = evidenceUsageCoverageIssues("工程量为100000000000000000000000立方米", {"project":[],"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[{"key":"清单条目","value":"100000000000000000000000立方米以上超长内容","fieldName":"清单条目","sourceFile":"a","roleId":"r","confidence":0.9}],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
-    expect(r.length).toEqual(1);
+    const r = evidenceUsageCoverageIssues("工程量为100000000000000000000000立方米", factsOf({"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[{"key":"清单条目","value":"100000000000000000000000立方米以上超长内容","fieldName":"清单条目","sourceFile":"a","roleId":"r","confidence":0.9}],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
+    // V5 P6 口径：正文含超长数字串与值行头部一致，判已使用不报（旧口径整行失配误报未使用）
+    expect(r.length).toEqual(0);
   });
   it('required 不命中不检查', () => {
-    const r = evidenceUsageCoverageIssues("无关正文", {"project":[],"schedule":[],"quality":[{"key":"质量标准","value":"合格","fieldName":"质量标准","sourceFile":"a","roleId":"r","confidence":0.9}],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = evidenceUsageCoverageIssues("无关正文", factsOf({"schedule":[],"quality":[{"key":"质量标准","value":"合格","fieldName":"质量标准","sourceFile":"a","roleId":"r","confidence":0.9}],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r.length).toEqual(0);
   });
 });
 describe('chapterDependencyIssues', () => {
   it('无 analyses 跳过', () => {
-    const r = chapterDependencyIssues([{"id":"a","title":"进度计划","content":"正文"}]);
+    const r = chapterDependencyIssues([{"title":"进度计划","content":"正文"}]);
     expect(r.length).toEqual(0);
   });
   it('无进度/质量/安全词', () => {
-    const r = chapterDependencyIssues([{"id":"a","title":"编制说明","content":"正文"}], new Map([]));
+    const r = chapterDependencyIssues([{"title":"编制说明","content":"正文"}], new Map([]));
     expect(r.length).toEqual(0);
   });
   it('进度↔资源支撑满足', () => {
-    const r = chapterDependencyIssues([{"id":"a","title":"进度计划","content":"工期内容"},{"id":"b","title":"资源配置","content":"资源内容"}], new Map([["资源配置",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":true,"construction":false}}],["进度计划",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}]]));
+    const r = chapterDependencyIssues([{"title":"进度计划","content":"工期内容"},{"title":"资源配置","content":"资源内容"}], new Map([["资源配置",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":true,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}],["进度计划",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}]]));
     expect(r.length).toEqual(0);
   });
   it('进度↔资源支撑缺失', () => {
-    const r = chapterDependencyIssues([{"id":"a","title":"进度计划","content":"工期内容"},{"id":"b","title":"资源配置","content":"资源内容"}], new Map([["资源配置",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}],["进度计划",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}]]));
+    const r = chapterDependencyIssues([{"title":"进度计划","content":"工期内容"},{"title":"资源配置","content":"资源内容"}], new Map([["资源配置",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}],["进度计划",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}]]));
     expect(r.length).toEqual(1);
     expect(r[0]?.message).toEqual("章节逻辑依赖不足：进度章节与资源章节之间缺少明显支撑关系");
   });
   it('质量↔工艺支撑满足', () => {
-    const r = chapterDependencyIssues([{"id":"a","title":"质量保证措施","content":"质量内容"},{"id":"b","title":"施工方案","content":"工艺内容"}], new Map([["施工方案",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":true}}],["质量保证措施",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}]]));
+    const r = chapterDependencyIssues([{"title":"质量保证措施","content":"质量内容"},{"title":"施工方案","content":"工艺内容"}], new Map([["施工方案",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":true},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}],["质量保证措施",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}]]));
     expect(r.length).toEqual(0);
   });
   it('质量↔工艺支撑缺失', () => {
-    const r = chapterDependencyIssues([{"id":"a","title":"质量保证措施","content":"质量内容"},{"id":"b","title":"施工方案","content":"工艺内容"}], new Map([["施工方案",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}],["质量保证措施",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}]]));
+    const r = chapterDependencyIssues([{"title":"质量保证措施","content":"质量内容"},{"title":"施工方案","content":"工艺内容"}], new Map([["施工方案",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}],["质量保证措施",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}]]));
     expect(r.length).toEqual(1);
     expect(r[0]?.message.includes("工艺控制")).toEqual(true);
   });
   it('安全支撑缺失', () => {
-    const r = chapterDependencyIssues([{"id":"a","title":"安全文明施工","content":"安全内容"}], new Map([["安全文明施工",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}]]));
+    const r = chapterDependencyIssues([{"title":"安全文明施工","content":"安全内容"}], new Map([["安全文明施工",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}]]));
     expect(r.length).toEqual(1);
     expect(r[0]?.message.includes("检查整改")).toEqual(true);
   });
   it('安全支撑满足', () => {
-    const r = chapterDependencyIssues([{"id":"a","title":"安全文明施工","content":"安全内容"}], new Map([["安全文明施工",{"contentNeeds":{"schedule":false,"quality":false,"safety":true,"resource":false,"construction":false}}]]));
+    const r = chapterDependencyIssues([{"title":"安全文明施工","content":"安全内容"}], new Map([["安全文明施工",{"contentNeeds":{"schedule":false,"quality":false,"safety":true,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}]]));
     expect(r.length).toEqual(0);
   });
   it('三依赖全缺失报三条', () => {
-    const r = chapterDependencyIssues([{"id":"a","title":"进度计划","content":"工期"},{"id":"b","title":"质量保证措施","content":"质量"},{"id":"c","title":"安全文明施工","content":"安全"},{"id":"d","title":"资源配置","content":"资源"},{"id":"e","title":"施工方案","content":"工艺"}], new Map([["资源配置",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}],["施工方案",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}],["质量保证措施",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}],["进度计划",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}],["安全文明施工",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}]]));
+    const r = chapterDependencyIssues([{"title":"进度计划","content":"工期"},{"title":"质量保证措施","content":"质量"},{"title":"安全文明施工","content":"安全"},{"title":"资源配置","content":"资源"},{"title":"施工方案","content":"工艺"}], new Map([["资源配置",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}],["施工方案",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}],["质量保证措施",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}],["进度计划",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}],["安全文明施工",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}]]));
     expect(r.length).toEqual(3);
   });
   it('章节标题含资源词归位', () => {
-    const r = chapterDependencyIssues([{"id":"a","title":"进度计划","content":"工期"},{"id":"b","title":"材料管理","content":"资源内容"}], new Map([["材料管理",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}],["进度计划",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false}}]]));
+    const r = chapterDependencyIssues([{"title":"进度计划","content":"工期"},{"title":"材料管理","content":"资源内容"}], new Map([["材料管理",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}],["进度计划",{"contentNeeds":{"schedule":false,"quality":false,"safety":false,"resource":false,"construction":false},"dimensions":{"factuality":false,"structure":false,"depth":false,"executable":false,"specificity":false,"consistency":false},"concrete":false,"closedLoop":false}]]));
     expect(r.length).toEqual(1);
   });
 });
 describe('documentDeliveryScoreIssues', () => {
   it('空输入', () => {
-    const r = documentDeliveryScoreIssues("", [], {"project":[],"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = documentDeliveryScoreIssues("", [], factsOf({"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r.length).toEqual(1);
     expect(r[0]?.level).toEqual("info");
     expect(r[0]?.message).toEqual("文档交付评分报告：总分 9/10，事实2，结构1，专业2，可执行2，证据2");
     expect(r[0]?.suggestion).toEqual("可交付，但建议继续优化证据使用覆盖率和章节依赖链路。");
   });
   it('完整高分文档', () => {
-    const r = documentDeliveryScoreIssues("第一章 施工方案\n### 施工准备\n工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容\n第二章 质量保证措施\n质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容", [{"id":"a","title":"施工方案","content":"工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容"},{"id":"b","title":"质量保证措施","content":"质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容"}], {"project":[],"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = documentDeliveryScoreIssues("第一章 施工方案\n### 施工准备\n工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容\n第二章 质量保证措施\n质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容", [{"title":"施工方案","content":"工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容工艺内容"},{"title":"质量保证措施","content":"质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容质量内容"}], factsOf({"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r[0]?.message).toEqual("文档交付评分报告：总分 10/10，事实2，结构2，专业2，可执行2，证据2");
   });
   it('事实错误扣分', () => {
-    const r = documentDeliveryScoreIssues("错误内容", [{"id":"a","title":"某章","content":"内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容"}], {"project":[],"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = documentDeliveryScoreIssues("错误内容", [{"title":"某章","content":"内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容内容"}], factsOf({"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r[0]?.message).toEqual("文档交付评分报告：总分 9/10，事实2，结构1，专业2，可执行2，证据2");
   });
   it('结构不满600字扣分', () => {
-    const r = documentDeliveryScoreIssues("第一章 施工方案\n短", [{"id":"a","title":"施工方案","content":"短"}], {"project":[],"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
+    const r = documentDeliveryScoreIssues("第一章 施工方案\n短", [{"title":"施工方案","content":"短"}], factsOf({"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
     expect(r[0]?.message).toEqual("文档交付评分报告：总分 9/10，事实2，结构1，专业2，可执行2，证据2");
   });
   it('总分>=8建议', () => {
-    const r = documentDeliveryScoreIssues("", [], {"project":[],"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}});
-    expect(r[0]?.suggestion.includes("可交付")).toEqual(true);
+    const r = documentDeliveryScoreIssues("", [], factsOf({"schedule":[],"quality":[],"safety":[],"resources":[],"preciseFacts":[],"bills":[],"drawings":[],"rules":[],"specifications":[],"specAuthorityMap":{}}));
+    expect(r[0]?.suggestion?.includes("可交付")).toEqual(true);
   });
 });
 describe('qualityReportIssues', () => {
   it('passed 无 issue', () => {
-    const r = qualityReportIssues({"passed":true,"deliveryProbability":95,"target":80,"actions":["a"]});
+    const r = qualityReportIssues({"passed":true,"deliveryProbability":95,"target":80,"overall":0.85,"summary":"","scores":{"completeness":0.9,"specificity":0.9,"compliance":0.9,"executability":0.9,"normalization":0.9,"uniqueness":0.9},"actions":["a"]});
     expect(r.length).toEqual(0);
   });
   it('未通过 issue', () => {
-    const r = qualityReportIssues({"passed":false,"deliveryProbability":60,"target":80,"actions":["补齐短板","修复阻断"]});
+    const r = qualityReportIssues({"passed":false,"deliveryProbability":60,"target":80,"overall":0.6,"summary":"","scores":{"completeness":0.6,"specificity":0.6,"compliance":0.6,"executability":0.6,"normalization":0.6,"uniqueness":0.6},"actions":["补齐短板","修复阻断"]});
     expect(r.length).toEqual(1);
     expect(r[0]?.level).toEqual("info");
     expect(r[0]?.message).toEqual("交付置信度未达目标：60% / 80%");
     expect(r[0]?.suggestion).toEqual("补齐短板 修复阻断");
   });
   it('actions 空数组', () => {
-    const r = qualityReportIssues({"passed":false,"deliveryProbability":60,"target":80,"actions":[]});
+    const r = qualityReportIssues({"passed":false,"deliveryProbability":60,"target":80,"overall":0.6,"summary":"","scores":{"completeness":0.6,"specificity":0.6,"compliance":0.6,"executability":0.6,"normalization":0.6,"uniqueness":0.6},"actions":[]});
     expect(r[0]?.suggestion).toEqual("");
   });
 });
 
 describe('headingDuplicateIssues', () => {
-  it('带编号 H4 同名不报（分项模板化小节：2.1.1/2.2.1 施工流程属正常结构）', () => {
+  it('带编号 H4 标签标题照报（2.1.1/2.2.1 施工流程：WS1 标签独立成题不再豁免）', () => {
     const r = headingDuplicateIssues('## 第二章 主要施工方法\n#### 2.1.1 施工流程\n道路工序\n#### 2.2.1 施工流程\n排水工序\n#### 2.1.2 施工方法\n道路方法');
-    expect(r.length).toEqual(0);
+    expect(r.length).toEqual(1);
+    expect(r[0]?.message.includes("施工流程")).toEqual(true);
+    expect(r[0]?.message.includes("2 次")).toEqual(true);
   });
   it('无编号 H4 同名重复仍报', () => {
     const r = headingDuplicateIssues('## 第二章 主要施工方法\n#### 施工流程\n内容一\n#### 施工流程\n内容二');
@@ -358,8 +356,9 @@ describe('headingDuplicateIssues', () => {
     const r = headingDuplicateIssues('## 第一章 编制说明\n#### 编制依据\n依据内容\n## 第二章 主要施工方法\n#### 编制依据\n方法依据');
     expect(r.length).toEqual(0);
   });
-  it('编号紧贴无空格同样豁免', () => {
+  it('编号紧贴无空格同样照报（2.1.1施工流程/2.2.1施工流程）', () => {
     const r = headingDuplicateIssues('## 第二章 主要施工方法\n#### 2.1.1施工流程\n道路工序\n#### 2.2.1施工流程\n排水工序');
-    expect(r.length).toEqual(0);
+    expect(r.length).toEqual(1);
+    expect(r[0]?.message.includes("施工流程")).toEqual(true);
   });
 });

@@ -46,13 +46,13 @@ describe('DEFAULT_WORKFLOW_RULES', () => {
     expect(DEFAULT_WORKFLOW_RULES.writingSpec.divisionQuality).toEqual({"blockerMinPackages":3,"minPackages":5,"minParamsPerPackage":4,"minPackageChars":150,"balanceRatio":0.3333333333333333});
   });
   it('writeRules.majorContent 长度', () => {
-    expect(DEFAULT_WORKFLOW_RULES.writingSpec.writeRules.majorContent.length).toEqual(1137);
+    expect(DEFAULT_WORKFLOW_RULES.writingSpec.writeRules.majorContent.length).toEqual(1150);
   });
   it('writeRules.majorContent 含清单禁词', () => {
     expect(DEFAULT_WORKFLOW_RULES.writingSpec.writeRules.majorContent.includes("分部小计") && DEFAULT_WORKFLOW_RULES.writingSpec.writeRules.majorContent.includes("综合单价")).toEqual(true);
   });
   it('writeRules.division 长度', () => {
-    expect(DEFAULT_WORKFLOW_RULES.writingSpec.writeRules.division.length).toEqual(718);
+    expect(DEFAULT_WORKFLOW_RULES.writingSpec.writeRules.division.length).toEqual(783);
   });
   it('writeRules.division 含平衡要求', () => {
     expect(DEFAULT_WORKFLOW_RULES.writingSpec.writeRules.division.includes("分项间深度必须均衡")).toEqual(true);
@@ -172,7 +172,7 @@ describe('loadWorkflowRules', () => {
     fs.writeFileSync(path.join(root, '.customize-agent', 'workflow-rules.json'), "{\"writingSpec\":{\"writeRules\":{\"majorContent\":\"自定义规则\"}}}");
     const r = loadWorkflowRules(root);
     expect(r.writingSpec.writeRules.majorContent).toEqual("自定义规则");
-    expect(r.writingSpec.writeRules.division).toEqual("【主要分部分项工程施工方案专项要求】每个“#### 分项工程方案”三级小节内容需覆盖三方面要素：①作业对象与工程量（本项目作业对象、部位、工程量）、②工序安排（先后顺序清晰）、③施工方法（工具机具、材料规格、工艺参数、验收标准）。呈现形式不限：可分段用“施工概况/工艺流程/施工方法”标签组织，也可按内容自然成文，三方面要素齐全、写法正确即可。严禁用“**分项名**”粗体行代替“#### 分项名”小节标题，也不得把多个分项合并写在一个段落里。工程量数值必须与工程量清单汇总值一致（只写项目总量，禁止写分部小计、单村分表量或估算值），严禁出现工程量清单计价表内部口径词：分部小计、本页小计、合计、小计、按实、暂估、综合单价、措施项目费、规费、税金。工序要素必须有明确的工序顺序表达，形式由模型根据内容自然选择、不做统一要求——顺序词叙述、编号步骤、有序/无序列表或箭头链（如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”）均可，每个分项方案至少 1 处不少于 4 个环节的工序顺序表达，不得只把工序顺序局限在一处标签段；每个分项方案正文必须落位至少 4 个工艺参数（mm、MPa、间距、偏差、坡度、养护天数、试验压力、搭接长度等），参数来自绑定材料或行业通用规范值，不得编造；纯设备配置型小节必须写型号、规格、容量、数量参数；不得写“按规范施工”“结合实际执行”式空话。分项间深度必须均衡：门窗维修、立面修补、设备安装等小分项同样要写足作业对象、工序与工艺参数（每个分项不少于 150 字），不得一句话带过；严禁写“其他专业工序引用相应章节内容”“详见相关章节”等自我消解语，工序安排只能在本分项方案内展开，不得另行拆节复述。");
+    expect(r.writingSpec.writeRules.division).toEqual("【主要分部分项工程施工方案专项要求】每个“#### 分项工程方案”三级小节内容需覆盖三方面要素：①作业对象与工程量（本项目作业对象、部位、工程量）、②工序安排（先后顺序清晰）、③施工方法（工具机具、材料规格、工艺参数、验收标准）。呈现形式要求：三方面要素必须融入连贯散文叙述，禁止以“施工概况/施工流程/施工方法”等结构标签充当小节标题或段落开头引导（不得使用结构标签词作为分项小节名），标签词只是后台结构概念、不得入题入文。严禁用“**分项名**”粗体行代替“#### 分项名”小节标题，也不得把多个分项合并写在一个段落里。工程量数值必须与工程量清单汇总值一致（只写项目总量，禁止写分部小计、单村分表量或估算值），严禁出现工程量清单计价表内部口径词：分部小计、本页小计、合计、小计、按实、暂估、综合单价、措施项目费、规费、税金。工序要素必须有明确的工序顺序表达，形式按小节序号轮换使用（顺序词叙述、编号步骤、有序列表、箭头链四形式；系统已为各分项小节指定形式，禁止相邻分项使用同一形式、禁止通篇同一形式，如“基层清理→放线定位→分层摊铺→碾压→压实度检测→验收”），每个分项方案至少 1 处不少于 4 个环节的工序顺序表达，不得只把工序顺序局限在一处标签段；每个分项方案正文必须落位至少 4 个工艺参数（mm、MPa、间距、偏差、坡度、养护天数、试验压力、搭接长度等），参数来自绑定材料或行业通用规范值，不得编造；纯设备配置型小节必须写型号、规格、容量、数量参数；不得写“按规范施工”“结合实际执行”式空话。分项间深度必须均衡：门窗维修、立面修补、设备安装等小分项同样要写足作业对象、工序与工艺参数（每个分项不少于 150 字），不得一句话带过；严禁写“其他专业工序引用相应章节内容”“详见相关章节”等自我消解语，工序安排只能在本分项方案内展开，不得另行拆节复述。");
     fs.rmSync(root, { recursive: true, force: true });
   });
   it('覆盖 criticalSectionAnchors 数组', () => {
@@ -228,7 +228,7 @@ describe('loadWorkflowRules', () => {
 });
 describe('workflowRulesHash', () => {
   it('默认配置哈希锁定', () => {
-    expect(workflowRulesHash()).toEqual("b9a31f35259723509544f9d6f8576206b42722ba");
+    expect(workflowRulesHash()).toEqual("5e136aeb4e90d6fe651e16c9c408d089dabbd763");
   });
   it('覆盖后哈希变化', () => {
     const root = '/tmp/pr2-boundary-hash-' + process.pid;
@@ -236,8 +236,8 @@ describe('workflowRulesHash', () => {
     fs.mkdirSync(path.join(root, '.customize-agent'), { recursive: true });
     fs.writeFileSync(path.join(root, '.customize-agent', 'workflow-rules.json'), '{"factGovernance":{"weakAnchorGapThreshold":21}}');
     const h = workflowRulesHash(root);
-    expect(h).toEqual("7f6f47958b52a1c7f0b47b67691e36a10fe99cea");
-    expect(h === "b9a31f35259723509544f9d6f8576206b42722ba").toEqual(false);
+    expect(h).toEqual("35c7769471fc5027fbf44e2ec511bb382e0299ef");
+    expect(h === "5e136aeb4e90d6fe651e16c9c408d089dabbd763").toEqual(false);
     fs.rmSync(root, { recursive: true, force: true });
   });
   it('同配置不同 root 哈希一致', () => {

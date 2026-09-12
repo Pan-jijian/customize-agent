@@ -42,13 +42,26 @@ import type { DocumentDomainProfile } from '../../document-core/documentDomainPr
 import type { AutoDocumentSpecResult } from '../../document-core/autoDocumentSpecService';
 import type { DocumentGenerationReadiness } from '../../document-validation/documentReadinessService';
 import type { RetrievalCoverageRisk } from '../documentEvidenceRetrieval';
-import type { EvaluationCriteriaItem } from '../constructionBidStructure';
+import type { EvaluationCriteriaItem, validateBidStructureBeforeGeneration } from '../constructionBidStructure';
 import type { DocumentBudget } from '../budget';
 import type { GenerationBudget } from '../generationBudget';
 import type { IntegratedBlueprint } from '../integratedBlueprint';
 import type { BillFactLock } from '../billFactLock';
 import type { RequirementSemanticPlan } from '../requirementSemantics';
 import type { Semaphore } from '../utils';
+import type { planDocument } from '../agentPlanner';
+import type { buildChapterIntentClassifier } from '../chapterIntentClassifier';
+import type { kbIndexHealth } from '../documentGeneratorHelpers';
+import type { buildWritingTaskBrief } from '../documentWritingTaskBrief';
+import type { buildBidProcedureJudge } from '../evidenceContentSafety';
+import type { buildFactTokenScopeClassifier } from '../factTokenClassifier';
+import type { extractLocalFactPool } from '../factsModel';
+import type { buildProfessionalDepthClassifier } from '../professionalDepthClassifier';
+import type { buildScopedProjectIntelligence } from '../projectIntelligence';
+import type { buildSemanticSimilarity } from '../semanticSimilarity';
+import type { routeTenderRequirementsToChapters } from '../tenderRequirements';
+import type { DiversityProfile } from '../diversityProfile';
+import type { SectionFingerprintPool } from '../sectionFingerprint';
 
 /** 生成入口输入（原 generateDocumentDraft 函数签名参数） */
 export interface GenerateDocumentDraftInput {
@@ -58,6 +71,8 @@ export interface GenerateDocumentDraftInput {
   projectRoot?: string;
   resumeChapters?: DocumentDraftChapter[];
   signal?: AbortSignal;
+  /** 多样性种子（生成启动时传 documentId；同 seed 视角稳定，跨文档按历史轮换去重） */
+  diversitySeed?: string;
   onProgress?: (stages: DocumentExecutionStage[], checkpoint?: { chapters?: DocumentDraftChapter[] }) => void;
 }
 
@@ -132,7 +147,7 @@ export interface GenerationSessionUnderstanding {
   fileRoleByPath: Map<string, string>;
   fileProcessingByPath: Map<string, string>;
   project: ProjectHandle;
-  indexHealth: ReturnType<typeof import('../documentGeneratorHelpers').kbIndexHealth>;
+  indexHealth: ReturnType<typeof kbIndexHealth>;
   availableEvidenceScopePaths: Set<string>;
   projectMaterialScope: ProjectMaterialScope;
   requestedEvidencePerChapter: number;
@@ -149,18 +164,18 @@ export interface GenerationSessionUnderstanding {
   getCachedFileDetail: (relativePath: string) => CachedFileDetail;
   searchWithCache: (query: string, scopedFilePaths: string[], limit: number, chapterTitle: string) => Promise<KbSearchResult[]>;
   writerEvidence: DocumentEvidence[];
-  bidProcedureJudge: Awaited<ReturnType<typeof import('../evidenceContentSafety').buildBidProcedureJudge>>;
+  bidProcedureJudge: Awaited<ReturnType<typeof buildBidProcedureJudge>>;
   safeProjectBasicEvidence: DocumentEvidence[];
   excludedEvidenceKeys: Set<string>;
-  earlyFactPool: ReturnType<typeof import('../factsModel').extractLocalFactPool>;
-  scopedIntelligence: ReturnType<typeof import('../projectIntelligence').buildScopedProjectIntelligence> | undefined;
+  earlyFactPool: ReturnType<typeof extractLocalFactPool>;
+  scopedIntelligence: ReturnType<typeof buildScopedProjectIntelligence> | undefined;
   preliminaryFactsModel: DocumentFactsModel;
   agentWorkflow: AgentWorkflowContext;
   projectGraph: ProjectGraph | undefined;
   canonicalFacts: CanonicalFactModel;
   chapterGraphMap: Map<string, ChapterGraphMapping>;
   evaluationItems: EvaluationCriteriaItem[];
-  bidStructureAudit: ReturnType<typeof import('../constructionBidStructure').validateBidStructureBeforeGeneration>;
+  bidStructureAudit: ReturnType<typeof validateBidStructureBeforeGeneration>;
   /** 阶段 1 尾部启动的招标要求提取链任务（阶段 2 消费） */
   tenderRequirementsTask: Promise<TenderRequirementModel>;
 }
@@ -168,7 +183,7 @@ export interface GenerationSessionUnderstanding {
 /** planning：阶段 2 产物（大纲规划/评分项路由/预算/诊断） */
 export interface GenerationSessionPlanning {
   baseEffectiveChapters: DocumentTemplateChapter[];
-  plannedDocumentTask: ReturnType<typeof import('../agentPlanner').planDocument>;
+  plannedDocumentTask: ReturnType<typeof planDocument>;
   constructionOrgContext: string | undefined;
   chapterGraphSummaryText: (chapterId: string) => string;
   baseProjectContext: string;
@@ -178,23 +193,27 @@ export interface GenerationSessionPlanning {
   plannedChapters: DocumentTemplateChapter[];
   tenderRequirements: TenderRequirementModel;
   effectiveChapters: DocumentTemplateChapter[];
-  finalBidStructureAudit: ReturnType<typeof import('../constructionBidStructure').validateBidStructureBeforeGeneration>;
-  requirementsSimilarity: Awaited<ReturnType<typeof import('../semanticSimilarity').buildSemanticSimilarity>>;
-  requirementsRoutes: Awaited<ReturnType<typeof import('../tenderRequirements').routeTenderRequirementsToChapters>>;
-  factTokenScopeClassifier: Awaited<ReturnType<typeof import('../factTokenClassifier').buildFactTokenScopeClassifier>>;
+  finalBidStructureAudit: ReturnType<typeof validateBidStructureBeforeGeneration>;
+  requirementsSimilarity: Awaited<ReturnType<typeof buildSemanticSimilarity>>;
+  requirementsRoutes: Awaited<ReturnType<typeof routeTenderRequirementsToChapters>>;
+  factTokenScopeClassifier: Awaited<ReturnType<typeof buildFactTokenScopeClassifier>>;
   /** P17 章标题意图语义分类器（阶段 4 蓝图阻断/基础事实/扬尘注入三处判定共用同一实例） */
-  chapterIntentClassifier: Awaited<ReturnType<typeof import('../chapterIntentClassifier').buildChapterIntentClassifier>>;
-  professionalDepthClassifier: Awaited<ReturnType<typeof import('../professionalDepthClassifier').buildProfessionalDepthClassifier>>;
-  writingTaskBrief: ReturnType<typeof import('../documentWritingTaskBrief').buildWritingTaskBrief>;
+  chapterIntentClassifier: Awaited<ReturnType<typeof buildChapterIntentClassifier>>;
+  professionalDepthClassifier: Awaited<ReturnType<typeof buildProfessionalDepthClassifier>>;
+  writingTaskBrief: ReturnType<typeof buildWritingTaskBrief>;
   tenderWritingRulesText: string;
   chapterScopedProjectContext: (chapter: DocumentTemplateChapter) => string;
   documentBudget: DocumentBudget;
-  plannedDocument: Awaited<ReturnType<typeof import('../agentPlanner').planDocument>>;
+  plannedDocument: Awaited<ReturnType<typeof planDocument>>;
   generationStrategy: DocumentGenerationStrategy;
   generationBudget: GenerationBudget;
   generationDiagnostics: DocumentGenerationDiagnostics;
   planPhaseStartedAt: number;
   sectionPlanningStage: DocumentExecutionStage;
+  /** 多文档反雷同：本生成多样性画像（视角×命名风格；规划/校准/定名轮共用同一指令） */
+  diversityProfile: DiversityProfile;
+  /** L3 指纹池（规划期读一次缓存：规划避让/定名轮撞名检测共用，避免反复读盘） */
+  fingerprintPool: SectionFingerprintPool;
 }
 
 /** blueprint：阶段 3 产物（蓝图/并发池/跨章基础事实缓存） */

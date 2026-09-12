@@ -9,7 +9,6 @@ import { displayChapterTitle } from '../outline';
 import { evidenceMatchesFact } from '../factMatching';
 import { selectEvidenceByBudget } from '../evidence';
 import { buildDocumentBudget } from '../budget';
-import { enrichConstructionOrgOutline, MAX_CHAPTER_SECTIONS } from '../constructionOrgCatalog';
 import { chapterCriteriaText, prioritizeOverviewSections, validateBidStructureBeforeGeneration } from '../constructionBidStructure';
 import { buildSemanticSimilarity } from '../semanticSimilarity';
 import { filterOffTopicSectionsForChapters } from '../evidenceContentSafety';
@@ -19,22 +18,24 @@ import { buildFactTokenScopeClassifier } from '../factTokenClassifier';
 import { buildChapterIntentClassifier } from '../chapterIntentClassifier';
 import { buildProfessionalDepthClassifier } from '../professionalDepthClassifier';
 import { buildWritingTaskBrief } from '../documentWritingTaskBrief';
-import { buildConstructionOrgTablePlans } from '../constructionOrgTablePlan';
+import { buildPlannedTablePlans } from '../constructionOrgTablePlan';
 import { runWithAdaptiveConcurrency } from '../utils';
 import { displayStage, upsertProgressStage } from '../progress';
 import { raiseDocumentLlmConcurrencyForScale } from '../llmClient';
 import { createGenerationDiagnostics, selectDocumentGenerationStrategy } from '../rolePipeline';
 import { buildGenerationBudget } from '../generationBudget';
-import { cleanSectionTitleArtifacts, extractPromptStructuralRules, normalizePlannedSections, planAdditionalSectionsWithLlm, planChapterSectionsWithLlm } from '../promptRuleExtraction';
+import { cleanSectionTitleArtifacts, extractPromptStructuralRules, normalizePlannedSections, planChapterSectionsWithLlm, sectionTitleEquivalent, type PlannedTableRequest } from '../promptRuleExtraction';
 import { resolveChapterPromptExecution } from '../documentGeneratorHelpers';
 import { constructionOrganizationPrompt } from '../projectIntelligence';
 import { planDocument } from '../agentPlanner';
+import { deriveDiversityProfile, loadDiversityHistory, recordDiversityUsage } from '../diversityProfile';
+import { findFingerprintCollisions, loadFingerprintPool } from '../sectionFingerprint';
 import { tuningProfile } from '../tuningProfile';
 
 export async function stageOutlinePlanning(session: GenerationSession): Promise<void> {
   session.planning.effectiveChapters = session.planning.baseEffectiveChapters;
   session.planning.constructionOrgContext = constructionOrganizationPrompt(session.understanding.scopedIntelligence?.constructionOrganizationGraph) || session.understanding.scopedIntelligence?.constructionOrganizationContext;
-  // 章节→图谱摘要文本：LLM 规划（全量规划与 additions-only 补规划）的显式图谱注入，
+  // 章节→图谱摘要文本：LLM 融合规划的显式图谱注入，
   // 让规划器知道本项目实际的专业工程/工法/资源面，而非只靠通用章节语义猜专业方向
   session.planning.chapterGraphSummaryText = (chapterId: string) => {
     const chapterGraph = session.understanding.chapterGraphMap.get(chapterId);
@@ -50,71 +51,63 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   const provisionalTemplate = { ...session.prepare.template, chapters: session.planning.effectiveChapters };
   session.planning.promptStructuralRules = extractPromptStructuralRules([session.prepare.promptTexts, session.global.input.requirement || ''].filter(Boolean).join('\n\n'), session.planning.effectiveChapters);
   session.planning.provisionalBudget = buildDocumentBudget({ requirement: session.global.input.requirement, promptTexts: session.prepare.promptTexts, template: provisionalTemplate, chapters: session.planning.effectiveChapters, spec: session.prepare.documentSpec });
-  let skippedSectionPlanningCount = 0;
+  // 统一融合规划（组件 2）：所有章同一条路——locked（用户声明：提示词强制小节 + 模板/OUTLINE 已提供小节）
+  // 置前锁定，LLM 基于提示词/资料/图谱全量规划专业工作面，融合去重后输出；小节结构只来自用户声明与
+  // LLM 规划，系统不生成任何小节。规划产物同时含本章表格需求（表名+表头字段），供表格计划构建使用
+  let lockedSectionTotal = 0;
+  let plannedSectionTotal = 0;
   let llmSectionPlanningCount = 0;
-  // 清单层标题清洗诊断（改8）：模板显式小节路径同样做确定性清洗，脏标题不再进入写作计划
+  let plannedTableRequestCount = 0;
+  const plannedTablesByChapter = new Map<string, PlannedTableRequest[]>();
+  // 清单层标题清洗诊断（改8）：锁定小节路径同样做确定性清洗，脏标题不再进入写作计划
   const sectionPlanCleanupNotes: string[] = [];
+  // 多文档反雷同 L1/L3：多样性画像（视角×命名风格，seed=documentId）与指纹避让缓存——
+  // 指纹池规划期读一次缓存（规划避让清单/定名轮撞名检测共用同一实例，避免反复读盘）；
+  // 避让对「同一 documentId 的历史条目」跳过（resume 不撞自己）
+  session.planning.diversityProfile = deriveDiversityProfile(session.global.input.diversitySeed || session.global.input.templateId, loadDiversityHistory(session.global.input.templateId));
+  recordDiversityUsage(session.global.input.templateId, session.planning.diversityProfile.id);
+  session.planning.fingerprintPool = loadFingerprintPool();
+  const fingerprintAvoidTitles = [...new Set(session.planning.fingerprintPool.entries.flatMap(entry => [...(entry.h3 || []), ...(entry.h4 || [])]))].filter(Boolean).slice(0, 60);
+  const fingerprintOverlapCheck = (titles: string[]) => findFingerprintCollisions(titles, session.planning.fingerprintPool, { excludeDocumentId: session.global.input.diversitySeed }).map(item => `「${item.title}」↔历史「${item.collidedWith}」`);
+  let diversityRetryChapterCount = 0;
+  let diversityRemainingCollisionCount = 0;
   session.planning.plannedChapters = await runWithAdaptiveConcurrency(session.planning.effectiveChapters.map((chapter, chapterIndex) => ({ chapter, chapterIndex })), async ({ chapter, chapterIndex }) => {
-    if (chapter.sections?.length) {
-      skippedSectionPlanningCount += 1;
-      const lockedSections = session.planning.promptStructuralRules.filter(rule => rule.chapterIndex === chapterIndex || (rule.chapterTitle && displayChapterTitle(rule.chapterTitle) === displayChapterTitle(chapter.title))).flatMap(rule => rule.requiredSections.sort((a, b) => (a.order || 0) - (b.order || 0)).map(section => section.title));
-      for (const raw of [...lockedSections, ...chapter.sections]) {
-        const cleaned = cleanSectionTitleArtifacts(String(raw).trim());
-        if (cleaned && cleaned !== String(raw).trim()) sectionPlanCleanupNotes.push(`${displayChapterTitle(chapter.title)}：${raw} → ${cleaned}`);
-      }
-      const mergedSections = normalizePlannedSections([...lockedSections, ...chapter.sections], chapter.title);
-      return { ...chapter, sections: mergedSections.length ? mergedSections : normalizePlannedSections(chapter.sections, chapter.title) };
+    const lockedRuleSections = session.planning.promptStructuralRules
+      .filter(rule => rule.chapterIndex === chapterIndex || (rule.chapterTitle && displayChapterTitle(rule.chapterTitle) === displayChapterTitle(chapter.title)))
+      .flatMap(rule => rule.requiredSections.slice().sort((a, b) => (a.order || 0) - (b.order || 0)).map(section => section.title));
+    const lockedSections = normalizePlannedSections([...lockedRuleSections, ...(chapter.sections || [])], chapter.title);
+    for (const raw of [...lockedRuleSections, ...(chapter.sections || [])]) {
+      const cleaned = cleanSectionTitleArtifacts(String(raw).trim());
+      if (cleaned && cleaned !== String(raw).trim()) sectionPlanCleanupNotes.push(`${displayChapterTitle(chapter.title)}：${raw} → ${cleaned}`);
     }
+    lockedSectionTotal += lockedSections.length;
     llmSectionPlanningCount += 1;
     const chapterEvidence = selectEvidenceByBudget(session.understanding.writerEvidence.filter(item => item.chapterId === chapter.id || evidenceMatchesFact(item, chapter.title)), { preservePinned: true });
     const roleContext = session.prepare.projectUnderstanding.chapterPlans.find(plan => plan.chapterId === chapter.id)?.writingGoal || '';
     const planningPromptExecution = resolveChapterPromptExecution(session.prepare.promptPlan, chapter);
-    const sections = await planChapterSectionsWithLlm({ template: provisionalTemplate, chapter, chapterIndex, evidence: chapterEvidence, promptTexts: planningPromptExecution.promptTexts, projectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: session.planning.provisionalBudget.chapterTargets.get(chapter.id) || 1200, projectGraphSummary: session.planning.chapterGraphSummaryText(chapter.id), structuralRules: session.planning.promptStructuralRules, signal: session.global.input.signal });
-    const lockedRuleDetails = session.planning.promptStructuralRules.filter(rule => rule.chapterIndex === chapterIndex || (rule.chapterTitle && displayChapterTitle(rule.chapterTitle) === displayChapterTitle(chapter.title))).flatMap(rule => rule.requiredSections.map(section => `强制小节：${section.title}`));
-    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'section-planning', promptId: planningPromptExecution.primaryPromptId, status: sections.length ? 'success' : 'failed', message: `${displayChapterTitle(chapter.title)} 小节规划${sections.length ? `生成 ${sections.length} 个小节` : '未生成可用小节'}`, details: [...planningPromptExecution.promptDetails, ...lockedRuleDetails, ...(sections.length ? sections.map(section => `规划小节：${section}`) : ['规划结果为空或被污染过滤'])] }, { subtitle: '小节规划' }));
-    if (!sections.length) throw new Error(`${displayChapterTitle(chapter.title)} 小节规划未生成可用小节`);
-    return { ...chapter, sections };
+    const planned = await planChapterSectionsWithLlm({ template: provisionalTemplate, chapter, chapterIndex, evidence: chapterEvidence, promptTexts: planningPromptExecution.promptTexts, projectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: session.planning.provisionalBudget.chapterTargets.get(chapter.id) || 1200, projectGraphSummary: session.planning.chapterGraphSummaryText(chapter.id), lockedSections, signal: session.global.input.signal, diversity: { directive: session.planning.diversityProfile.prompt, avoidSections: fingerprintAvoidTitles, overlapCheck: fingerprintOverlapCheck } });
+    if (planned.diversity?.retried) {
+      diversityRetryChapterCount += 1;
+      diversityRemainingCollisionCount += planned.diversity.remainingCollisions;
+    }
+    plannedTablesByChapter.set(chapter.id, planned.tables);
+    plannedTableRequestCount += planned.tables.length;
+    plannedSectionTotal += planned.sections.length;
+    const llmPlannedSections = planned.sections.filter(section => !lockedSections.some(locked => sectionTitleEquivalent(locked, section)));
+    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'section-planning', promptId: planningPromptExecution.primaryPromptId, status: planned.sections.length ? 'success' : 'failed', message: `${displayChapterTitle(chapter.title)} 小节规划：锁定 ${lockedSections.length} 个、LLM 规划增量 ${llmPlannedSections.length} 个${planned.tables.length ? `、表格需求 ${planned.tables.length} 项` : ''}`, details: [...planningPromptExecution.promptDetails, ...lockedSections.map(section => `锁定小节：${section}`), ...llmPlannedSections.map(section => `规划小节：${section}`), ...planned.tables.map(table => `表格需求：${table.title}${table.fields.length ? `（${table.fields.join('、')}）` : ''}`)] }, { subtitle: '小节规划' }));
+    if (!planned.sections.length) throw new Error(`${displayChapterTitle(chapter.title)} 小节规划未生成可用小节`);
+    return { ...chapter, sections: planned.sections };
   }, { kind: 'llmRepair', targetWords: session.planning.provisionalBudget.targetChars || 4000 });
   // C1：等待并行提取链结果（评分项要求——大纲要求校准与后续要求路由的输入）
   session.planning.tenderRequirements = await session.understanding.tenderRequirementsTask;
-  const plannedWithConstructionOrgOutline = enrichConstructionOrgOutline({ template: session.prepare.template, chapters: session.planning.plannedChapters, requirement: session.global.input.requirement });
-  // Step 3 LLM 规划常态化（恒开；原 DOCUMENT_SECTION_PLANNING_MODE=template-locked 回退已固化删除）：
-  // 模板已锁定小节的章节补一轮 additions-only 规划——只输出缺失的专业工作面小节（≤3、带支撑依据、
-  // 与已有小节去重、总节数 ≤ MAX_CHAPTER_SECTIONS），不产出则不新增（模板锁定结构不变）；
-  // 历史裁决：静态结构组层由挂靠规则守，项目专属专业层由 LLM+图谱规划补，是结构专业性提质的唯一杠杆
-  let plannedWithAdditions = plannedWithConstructionOrgOutline.chapters;
-  {
-    let additionsApplied = 0;
-    const additionsPlanned = await runWithAdaptiveConcurrency(plannedWithConstructionOrgOutline.chapters.map((chapter, chapterIndex) => ({ chapter, chapterIndex })), async ({ chapter }) => {
-      if (!(chapter.sections || []).length) return { chapterId: chapter.id, additions: [] as string[] };
-      const chapterEvidence = selectEvidenceByBudget(session.understanding.writerEvidence.filter(item => item.chapterId === chapter.id || evidenceMatchesFact(item, chapter.title)), { preservePinned: true });
-      const roleContext = session.prepare.projectUnderstanding.chapterPlans.find(plan => plan.chapterId === chapter.id)?.writingGoal || '';
-      const planningPromptExecution = resolveChapterPromptExecution(session.prepare.promptPlan, chapter);
-      const additions = await planAdditionalSectionsWithLlm({ template: provisionalTemplate, chapter, evidence: chapterEvidence, promptTexts: planningPromptExecution.promptTexts, projectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, projectGraphSummary: session.planning.chapterGraphSummaryText(chapter.id), maxTotalSections: MAX_CHAPTER_SECTIONS, signal: session.global.input.signal });
-      return { chapterId: chapter.id, additions };
-    }, { kind: 'llmRepair', targetWords: session.planning.provisionalBudget.targetChars || 4000 });
-    const appliedList: Array<{ chapterTitle: string; sections: string[] }> = [];
-    plannedWithAdditions = plannedWithConstructionOrgOutline.chapters.map(chapter => {
-      const additions = (additionsPlanned.find(item => item.chapterId === chapter.id)?.additions || [])
-        .filter(title => !(chapter.sections || []).some(section => section.includes(title) || title.includes(section)));
-      if (!additions.length) return chapter;
-      const budgeted = additions.slice(0, Math.max(0, MAX_CHAPTER_SECTIONS - (chapter.sections || []).length));
-      if (!budgeted.length) return chapter;
-      additionsApplied += budgeted.length;
-      appliedList.push({ chapterTitle: chapter.title, sections: budgeted });
-      return { ...chapter, sections: [...(chapter.sections || []), ...budgeted] };
-    });
-    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'section-planning-additions', status: additionsApplied > 0 ? 'success' : 'skipped', message: additionsApplied > 0 ? `专业小节补规划：为 ${appliedList.length} 个章节新增 ${additionsApplied} 个专业工作面小节` : '专业小节补规划：LLM 未产出有效增量，保留模板锁定结构', details: appliedList.length ? appliedList.map(item => `${displayChapterTitle(item.chapterTitle)}：${item.sections.join('、')}`) : ['无新增（LLM 空响应/无支撑依据/与已有小节重复）'] }, { subtitle: '专业小节补规划', order: session.global.progressStages.length }));
-    session.global.emitProgress();
-  }
   // C2 大纲要求校准：规划完成后、主题过滤前——评分项要求在结构层显性承接（创优目标与奖惩/绿色等级/智慧工地等
-  // 必提要求在大纲层就有承接小节，而非写章时临场发挥）；additions-only 输出 + 结构守恒校验（原大纲小节不可能被删），
+  // 必提要求在大纲层就有承接小节，而非写章时临场发挥）；校准只输出增量小节 + 结构守恒校验（原大纲小节不可能被删），
   // 空响应/失败/校验不通过一律回退原规划（原 DOCUMENT_REQUIREMENT_CALIBRATION 回退已固化删除：校准恒开）
-  let plannedWithCalibration = plannedWithAdditions;
+  let plannedWithCalibration = session.planning.plannedChapters;
   if (hasTenderRequirements(session.planning.tenderRequirements)) {
-    const additions = await session.global.withProgressHeartbeat(() => calibrateOutlineSectionsToRequirements({ chapters: plannedWithAdditions, requirementSummary: tenderRequirementsSummary(session.planning.tenderRequirements), templateName: session.prepare.template.name, signal: session.global.input.signal }));
+    const additions = await session.global.withProgressHeartbeat(() => calibrateOutlineSectionsToRequirements({ chapters: plannedWithCalibration, requirementSummary: tenderRequirementsSummary(session.planning.tenderRequirements), templateName: session.prepare.template.name, diversityDirective: session.planning.diversityProfile.prompt, signal: session.global.input.signal }));
     if (additions.length > 0) {
-      const calibrationResult = applyRequirementSectionAdditions(plannedWithAdditions, additions);
+      const calibrationResult = applyRequirementSectionAdditions(plannedWithCalibration, additions);
       if (calibrationResult.applied.length > 0) {
         plannedWithCalibration = calibrationResult.chapters;
         upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'outline-requirement-calibration', status: 'success', message: `大纲要求校准：新增 ${calibrationResult.applied.reduce((sum, item) => sum + item.sections.length, 0)} 个评分项承接小节（结构守恒校验通过）`, details: calibrationResult.applied.map(item => `${displayChapterTitle(item.chapterTitle)}：${item.sections.join('、')}`) }, { subtitle: '大纲要求校准', order: session.global.progressStages.length }));
@@ -136,42 +129,26 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
     const after = (plannedWithConstructionOrgRequiredSections[index]?.sections || []).length;
     return count + Math.max(0, before - after);
   }, 0);
-  // 第一道过滤（大纲规划出口）不单独打印：评标结构校验的补挂回路发生在本道过滤之后，
-  // 需与补挂后二次过滤的增量合并统计，避免「已剔除」与「又补回」的矛盾日志
-  // 标准模块挂靠报告：挂靠量不再被写死上限截断（历史缺陷：50 上限静默丢弃尾部模块小节），
-  // 无处安放的可选模块显式可见——宁多勿丢，丢失必可见
-  {
-    const outlineReport = plannedWithConstructionOrgOutline.report;
-    if (outlineReport.unattached.length > 0) {
-      upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'construction-org-outline-unattached', status: 'success', message: `标准模块挂靠：${outlineReport.totals.attachedModules} 个模块、${outlineReport.totals.sectionCount} 个小节；${outlineReport.unattached.length} 个可选模块未挂靠（无语义匹配章节，已记录）`, details: outlineReport.unattached.map(item => `未挂靠：${item.moduleTitle}（${item.sections.length} 小节，${item.level}）`) }, { subtitle: '标准模块挂靠' }));
-    } else {
-      upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'construction-org-outline-attached', status: 'success', message: `标准模块挂靠：${outlineReport.totals.attachedModules} 个模块、${outlineReport.totals.sectionCount} 个小节全部挂靠`, details: outlineReport.attached.map(item => `${item.kind === 'fallback' ? '兜底挂靠' : '挂靠'}：${item.moduleTitle} → ${item.chapterTitle}`) }, { subtitle: '标准模块挂靠' }));
-    }
-  }
+  // 大纲编辑单点统计（C2）：补挂回路（validateBidStructureBeforeGeneration）已在补挂生成点
+  // 过同一硬剔闸（isHardBannedSectionTitle），不再有「补挂后二次过滤」补丁；本道统计即最终剔除数
   // 规划后章节文本已变化，重建语义相似度缓存（同一闭包缓存 key 不可跨阶段复用）
   const finalCriteriaSimilarity = await buildSemanticSimilarity(
     session.understanding.evaluationItems.map(item => item.title),
     plannedWithConstructionOrgRequiredSections.map(chapterCriteriaText),
   );
   session.planning.finalBidStructureAudit = validateBidStructureBeforeGeneration({ template: session.prepare.template, chapters: plannedWithConstructionOrgRequiredSections, requirement: session.global.input.requirement, evaluationItems: session.understanding.evaluationItems, semanticSimilarity: finalCriteriaSimilarity });
-  session.planning.effectiveChapters = buildConstructionOrgTablePlans({ chapters: session.planning.finalBidStructureAudit.enrichedChapters, projectGraph: session.understanding.projectGraph, canonicalFacts: session.understanding.canonicalFacts });
+  // 规划表格计划构建（组件 9）：表格来源 = 提示词声明的必需表格（用户声明层，必写）+ LLM 章节规划的
+  // 表格需求（规划产物，应写）；无静态目录匹配、无系统创作——规划没有的表不出现。必需表格逐表全章
+  // 评分归属；无归属的显性提示，交由文档合成终验的必需表格兜底链（insertRequiredTable）插入
+  const plannedTableBuild = buildPlannedTablePlans({ chapters: session.planning.finalBidStructureAudit.enrichedChapters, plannedTables: plannedTablesByChapter, requiredTables: session.prepare.runtimePromptRules.requiredTables });
+  session.planning.effectiveChapters = plannedTableBuild.chapters;
+  if (plannedTableBuild.unattachedRequiredTables.length > 0) {
+    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'required-tables-unattached', status: 'success', message: `提示词必需表格归属：${plannedTableBuild.unattachedRequiredTables.length} 张未匹配到明确章节（${plannedTableBuild.unattachedRequiredTables.join('、')}），交由文档合成终验兜底插入`, details: ['未归属必需表格不做语义错挂——防止表格落到不相关章节'] }, { subtitle: '表格计划' }));
+  }
   // 改8：概况类小节置首（确定性调序，仅动小节顺序——首章以「编制说明与工程概况」类小节开篇）
   session.planning.effectiveChapters = prioritizeOverviewSections(session.planning.effectiveChapters);
-  // 补挂回路二次过滤（真实生成回归，章节任务未就绪根因）：评标结构校验的评分条目/结构组补挂
-  // 发生在大纲第一道过滤之后，会把招标条款碎片（「1委员会确定中」「相当于或不低于以下品牌」等）
-  // 重新补入章节 sections；碎片小节无事实/证据支撑 → 章节任务未就绪失败。
-  // 对补挂后的最终章节集再执行一次大纲主题过滤（确定性硬剔除层兜底，语义判定附加），
-  // 与第一道过滤合并统计后统一打印，下游写作/目录/预算无感知
-  const finalSectionFilteredChapters = await filterOffTopicSectionsForChapters(session.planning.effectiveChapters);
-  const additionalDroppedSectionCount = session.planning.effectiveChapters.reduce((count, chapter, index) => {
-    const before = (chapter.sections || []).length;
-    const after = (finalSectionFilteredChapters[index]?.sections || []).length;
-    return count + Math.max(0, before - after);
-  }, 0);
-  session.planning.effectiveChapters = finalSectionFilteredChapters as typeof session.planning.effectiveChapters;
-  const totalDroppedSectionCount = droppedSectionCount + additionalDroppedSectionCount;
-  if (totalDroppedSectionCount > 0) {
-    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'outline-topic-filter', status: 'success', message: `大纲小节主题过滤：剔除 ${totalDroppedSectionCount} 个评标纪律/商务报价类离题小节`, details: ['被剔除小节不进入写作、目录与预算计划', ...(additionalDroppedSectionCount > 0 ? [`评标结构校验补挂回路二次剔除：${additionalDroppedSectionCount} 个条款碎片/纪律小节`] : [])] }, { subtitle: '大纲主题约束', order: session.global.progressStages.length }));
+  if (droppedSectionCount > 0) {
+    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'outline-topic-filter', status: 'success', message: `大纲小节主题过滤：剔除 ${droppedSectionCount} 个评标纪律/商务报价类离题小节`, details: ['被剔除小节不进入写作、目录与预算计划'] }, { subtitle: '大纲主题约束', order: session.global.progressStages.length }));
     session.global.emitProgress();
   }
   if (session.planning.finalBidStructureAudit.issues.length > 0 || session.understanding.bidStructureAudit.issues.length > 0) {
@@ -244,7 +221,7 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   // 按文档规模提升全局 LLM 并发上限（8/16/24/32 档）：长文档调用量大，默认 4 并发会线性拉长总耗时；
   // 端点限流由瞬态重试与失败连击降级串行兜底
   raiseDocumentLlmConcurrencyForScale(budgetTargetWords);
-  upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'document-strategy', status: 'success', message: `已自动选择 ${session.planning.generationStrategy.mode} 生成策略：章节审查 ${session.planning.generationStrategy.enableChapterReview ? '启用' : '跳过'}、全局审查 ${session.planning.generationStrategy.enableGlobalReview ? `${session.planning.generationStrategy.globalReviewSamplingRate && session.planning.generationStrategy.globalReviewSamplingRate < 1 ? `抽检 ${Math.round((session.planning.generationStrategy.globalReviewSamplingRate ?? 1) * 100)}%` : '启用'}` : '跳过'}、最终质量审查 ${session.planning.generationStrategy.enableFinalQualityReview ? '启用' : '跳过'}、全文扩写 ${session.planning.generationStrategy.enableDocumentBudgetExpansion ? '启用' : '跳过'}`, details: session.planning.generationBudget.triggers }, { subtitle: '后台自动策略' }));
+  upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'document-strategy', status: 'success', message: `已自动选择 ${session.planning.generationStrategy.mode} 生成策略：章节审查 ${session.planning.generationStrategy.enableChapterReview ? '启用' : '跳过'}、全局审查 ${session.planning.generationStrategy.enableGlobalReview ? `${session.planning.generationStrategy.globalReviewSamplingRate && session.planning.generationStrategy.globalReviewSamplingRate < 1 ? `抽检 ${Math.round((session.planning.generationStrategy.globalReviewSamplingRate ?? 1) * 100)}%` : '启用'}` : '跳过'}、最终质量审查 ${session.planning.generationStrategy.enableFinalQualityReview ? '启用' : '跳过'}`, details: session.planning.generationBudget.triggers }, { subtitle: '后台自动策略' }));
   // 源级口径冲突裁决节点：向用户明示补疑修正后的统一口径，避免用户对比资料原文旧值与正文新值时误判为生成错误
   if (session.understanding.canonicalFacts.scopeConflicts.length > 0) {
     upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'scope-conflict-resolution', status: 'success', message: `源级数据口径冲突已裁决（补疑/澄清修正文件权威最高）：${session.understanding.canonicalFacts.scopeConflicts.map(conflict => conflict.resolution ? `${conflict.scope} → ${conflict.resolution}` : `${conflict.scope} → 待人工复核`).join('；')}`, details: session.understanding.canonicalFacts.scopeConflicts.flatMap(conflict => conflict.values.map(value => `来源「${value.sourceFile || '未知文件'}」取值 ${value.value}${value.unit}`)) }, { subtitle: '数据口径裁决' }));
@@ -254,7 +231,7 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
     type: 'validation',
     roleId: 'section-planning',
     status: 'success',
-    message: `小节规划：${llmSectionPlanningCount} 章由 LLM 基于${sectionPlanningSource}、项目资料理解和证据规划小节，${skippedSectionPlanningCount} 章已由模板显式提供小节并跳过规划`,
+    message: `小节规划：${llmSectionPlanningCount} 章统一融合规划（基于${sectionPlanningSource}、提示词强制小节与项目资料）——融合小节合计 ${plannedSectionTotal} 个（其中锁定 ${lockedSectionTotal} 个）、表格需求 ${plannedTableRequestCount} 项`,
     details: sectionPlanCleanupNotes.length ? [...sectionPlanCleanupNotes] : undefined,
   }, { subtitle: '小节规划策略' });
 
@@ -268,6 +245,7 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   upsertProgressStage(session.global.progressStages, displayStage({ type: 'role_binding', roleId: session.prepare.projectRoleConfigId, status: 'success', message: `已绑定项目资料 ${session.prepare.materialFilePaths.length} 份、${session.prepare.promptPlan.prompts.length} 个有效提示词；写作 ${session.prepare.promptPlan.writerPrompts.length}、章节 ${session.prepare.promptPlan.chapterPrompts.length}、抽取 ${session.prepare.promptPlan.extractionPrompts.length}；已自动抽取运行时规则 ${session.prepare.runtimePromptRules.executionSummary.length} 条${outlineMessage}`, details: [...promptPlanDetails, ...session.prepare.runtimePromptRules.executionSummary.map(item => `runtimeRule｜${item}`)] }, { subtitle: session.prepare.projectRoleConfigName, roleName: session.prepare.projectRoleConfigName }));
   upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'runtime-prompt-rules', status: 'success', message: `运行时提示词规则已抽取：${session.prepare.runtimePromptRules.executionSummary.length} 条，版本 ${session.prepare.runtimePromptRules.sourceHash}`, details: session.prepare.runtimePromptRules.executionSummary.length ? [...session.prepare.runtimePromptRules.executionSummary, `必需表格：${session.prepare.runtimePromptRules.requiredTables.join('、') || '无'}`, `必含关键词：${session.prepare.runtimePromptRules.requiredKeywords?.join('、') || '无'}`, `禁含内容：${session.prepare.runtimePromptRules.forbiddenPatterns?.join('、') || '无'}`] : ['未从提示词中识别到额外硬规则，使用系统默认质量规则'] }, { subtitle: '提示词规则执行' }));
   upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'document-readiness', status: session.prepare.readiness.ready ? 'success' : 'failed', message: '生成准备度：绑定资料已就绪', details: session.prepare.readiness.diagnostics }, { subtitle: '生成准备度检查' }));
+  upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'diversity-governance', status: 'success', message: `多文档反雷同：组织视角「${session.planning.diversityProfile.perspective}」×命名风格「${session.planning.diversityProfile.style}」；历史指纹避让 ${fingerprintAvoidTitles.length} 个标题${diversityRetryChapterCount > 0 ? `，撞名重规划 ${diversityRetryChapterCount} 章${diversityRemainingCollisionCount > 0 ? `（二次核验仍近似 ${diversityRemainingCollisionCount} 处，已接受）` : ''}` : ''}`, details: [`历史指纹池 ${session.planning.fingerprintPool.entries.length} 条（仅本机历史文档标题与结构，无正文）`, `多样性画像 ${session.planning.diversityProfile.id}`] }, { subtitle: '多样性治理' }));
   upsertProgressStage(session.global.progressStages, session.planning.sectionPlanningStage);
   session.global.emitProgress();
 }

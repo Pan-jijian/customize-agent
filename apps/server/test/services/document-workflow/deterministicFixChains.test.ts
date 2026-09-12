@@ -20,12 +20,16 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
   it('stage5 逐章链顺序与原硬编码清单一致', () => {
     expect(stage5FixSteps().map(step => step.key)).toEqual([
       'table-line-residue',
+      'templated-labels',
       'repeated-words',
       'finish-thickness',
       'labor-peak',
       'internal-table-row-dup',
       'greening-maintenance',
       'paragraph-opening-repeat',
+      'paragraph-tail-repeat',
+      'collision-numbered-heading',
+      'inverted-date-range',
       'truncated-sentence',
       'meta-discourse',
       'formula-residue',
@@ -38,6 +42,7 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
   it('round-2 全文链顺序与原硬编码清单一致', () => {
     expect(round2FixSteps().map(step => step.key)).toEqual([
       'table-line-residue',
+      'templated-labels',
       'repeated-words',
       'duplicate-tables',
       'finish-thickness',
@@ -45,6 +50,9 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'internal-table-row-dup',
       'greening-maintenance',
       'paragraph-opening-repeat',
+      'paragraph-tail-repeat',
+      'collision-numbered-heading',
+      'inverted-date-range',
       'truncated-sentence',
       'table-borne-prose',
       'meta-discourse',
@@ -53,6 +61,12 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'empty-scoring-response',
       'tertiary-h4-dedupe',
       'internal-term-heading',
+      // WS4 骨架指纹确定性兜底（round-2 链末尾、终检前最后一道）
+      'skeleton-fingerprint-variants',
+      // WS3 工序形式确定性兜底（相邻同形式轮换转换清零）
+      'flow-form-variants',
+      // WS1 残缺标题确定性补全（正文取证补全 <4 字残缺标题）
+      'truncated-title-completion',
     ]);
   });
 });

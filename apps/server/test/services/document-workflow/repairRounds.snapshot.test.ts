@@ -18,9 +18,9 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
       'planned-section-final',       // 缺节/空小节补写终兜底（enforcePlannedSectionCompleteness）
       'commercial-strip',            // 商务条款数据交付前兜底清洗（stripCommercialDataBodyLines）
       'table-deterministic-repair',  // 表格空单元格交付前确定性修复（repairTableBlocksInMarkdownDeterministically）
-      'post-review-surface',         // 评审轮后表面修复兜底（SURFACE_FIX_STEPS round-2 链）
       'numeric-verification',        // C2 正文数值 vs 资料原文确定性核对轮（stageNumericVerification）
       'requirement-verification',    // C3 生成后用户要求执行核验闭环（stageRequirementVerification）
+      'post-review-surface',         // 评审轮后表面修复兜底（SURFACE_FIX_STEPS round-2 链，含句级复读剥离；后置覆盖用户要求补写引入的复读）
       'terminology-strip',           // 内部术语句子确定性删除兜底（stripInternalTerminologySentences）
       'toc-consistency',             // 目录与正文一致性兜底（fixTocFromBody）
     ]);

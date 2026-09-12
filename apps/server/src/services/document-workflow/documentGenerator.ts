@@ -10,7 +10,7 @@ import { stageUnderstanding } from './generationStages/stageUnderstanding';
 import { stagePrepare } from './generationStages/stagePrepare';
 import { dedupeAfterTableFix, enforcePlannedSectionCompleteness, enforceWorkPackageSkeletons, repairTableExecutionGaps, reportBudgetTrimAudit, runGlobalConsistencyReviewLoop } from './globalQualityGates';
 
-export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; resumeChapters?: DocumentDraftChapter[]; signal?: AbortSignal; onProgress?: (stages: DocumentExecutionStage[], checkpoint?: { chapters?: DocumentDraftChapter[] }) => void }): Promise<GeneratedDocumentDraft> {
+export async function generateDocumentDraft(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; projectRoot?: string; resumeChapters?: DocumentDraftChapter[]; signal?: AbortSignal; diversitySeed?: string; onProgress?: (stages: DocumentExecutionStage[], checkpoint?: { chapters?: DocumentDraftChapter[] }) => void }): Promise<GeneratedDocumentDraft> {
   throwIfAborted(input.signal);
 
   // P1 六阶段拆分（方案 5.1）：阶段 0-4 已提取至 generationStages/，跨阶段共享状态经 GenerationSession 显式化。
@@ -145,5 +145,3 @@ export async function generateDocumentDraft(input: { templateId: string; require
     emitProgress: session.global.emitProgress, withProgressHeartbeat: session.global.withProgressHeartbeat,
   }));
 }
-
-export { regenerateDocumentChapter } from './documentRegeneration';

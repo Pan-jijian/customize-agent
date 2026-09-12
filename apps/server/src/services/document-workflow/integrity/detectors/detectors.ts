@@ -4,12 +4,13 @@
  */
 import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel, ValidationIssue } from '../../types';
 import { documentTextLength } from '../../budget';
-import { stableHash, stringifyFactValue } from '../../utils';
+import { BOOK_TITLE_CITATION_RE, stableHash, stringifyFactValue } from '../../utils';
 import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from '../../semanticSimilarity';
 import { buildSemanticGate } from '../../semanticGate';
 import { isQualificationSectionTitle } from '../../evidenceContentSafety';
-import { PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, TRADE_WORKER_WORD_RE, cnNumberToArabic, collectLaborTableBlocks, excavationDepthFromFacts, extractGreeningMaintenanceAuthority, extractStreetLightAuthority, laborPeakStageOf } from '../authorities/authorities';
+import { LABOR_STAGE_LIMIT_WORDS, PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, TRADE_WORKER_WORD_RE, cnNumberToArabic, collectLaborTableBlocks, excavationDepthFromFacts, extractGreeningMaintenanceAuthority, extractStreetLightAuthority, flexNamePattern, laborPeakStageOf, quantityUnitVariants } from '../authorities/authorities';
 import type { SupportSystemAuthorityKind } from '../authorities/authorities';
+import { longestCommonHanSubstring } from '../../numericalConsistency';
 
 export const CALENDAR_DATE_RE = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/gu;
 
@@ -121,8 +122,7 @@ export function areaArithmeticIssues(markdown: string): ValidationIssue[] {
     const total = Number(match[4].replace(/[,，]/gu, ''));
     if (![above, underground, total].every(Number.isFinite)) continue;
     const sum = above + underground;
-    const tolerance = Math.max(1, total * 0.001);
-    if (Math.abs(sum - total) > tolerance) {
+    if (sum !== total) {
       issues.push({
         level: 'error',
         severity: 'blocker',
@@ -147,6 +147,38 @@ const STAGE_LABOR_RE = /(?:阶段|期间)[^。；;\n]{0,12}?(?:约)?\s*([\d,]+)\
 // 导致跨口径矛盾漏检——反向口径（劳动力/作业人员词在前、数字在后）并入同一提取池
 
 export const LABOR_COUNT_RE = /(?:劳动力|作业人员|施工人员)[^。；;\n]{0,16}?(?:约)?\s*([\d,]+)\s*人/g;
+
+/**
+ * V5 P6 阶段短语提取（检测器家族共用）：数字前「X阶段」短语的阶段名归属——
+ * 修复声明回指句「…该阶段劳动力按蓝图推导统一为238人」中「该阶段」是回指不作阶段名，
+ * 需回溯实义阶段。限定在本值所在句的末逗号段内搜索（与 laborPeakStageOf 的 boundary/cut
+ * 同源，防跨句/跨列举段继承假阶段——N1-7「分阶段投入。高峰期20人」不得从「分阶段」
+ * 取到阶段名）；段内从右往左取第一个非指代候选：候选为词表词（LABOR_STAGE_LIMIT_WORDS）
+ * 缩写（「主体阶段」「装饰阶段」是「主体结构」「装饰装修」简称）不作限定（h14 契约）；
+ * 完整词表词返回本体（与 laborPeakStageOf 零漂移：P1 多链同行互查、N1-13 依赖两者
+ * 字符串相等）；自造阶段返回「X阶段」形态（N1-11/N1-12 契约）。
+ */
+function extractStagePhrase(markdown: string, lineStart: number, valueIndex: number): string | undefined {
+  const boundary = Math.max(
+    markdown.lastIndexOf('。', valueIndex),
+    markdown.lastIndexOf('；', valueIndex),
+    markdown.lastIndexOf(';', valueIndex),
+    markdown.lastIndexOf('\n', valueIndex),
+  );
+  let segment = markdown.slice(Math.max(lineStart, boundary + 1), valueIndex);
+  const cut = Math.max(segment.lastIndexOf('，'), segment.lastIndexOf(','), segment.lastIndexOf('、'));
+  if (cut >= 0) segment = segment.slice(cut + 1);
+  const candidates = [...segment.matchAll(/([^，,。；;、\n]{1,14})阶段/gu)].map(match => match[1]);
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const name = candidates[index];
+    if (!name || /^(?:该|本|此|上述|这|其|相应|各)$/u.test(name)) continue;
+    const exact = LABOR_STAGE_LIMIT_WORDS.find(word => word === name);
+    if (exact) return exact;
+    if (LABOR_STAGE_LIMIT_WORDS.some(word => word.startsWith(name))) continue;
+    return `${name}阶段`;
+  }
+  return undefined;
+}
 
 // 阶段限定词（长词优先避免子串混淆）：不同施工阶段的峰值天然不同（地下结构 220 vs 室外工程 90 不互斥），
 // 仅同阶段或无阶段限定的峰值才参与互斥比较（真实生成「220 vs 90」误报根因）。
@@ -229,6 +261,11 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
       // laborPeakStageOf 定位数字位置（非模式起点）：「峰值表述统一为：地下结构阶段220人」的阶段词
       // 在模式起点之后，用起点定位会取不到阶段限定（真实生成误报根因）
       const valueIndex = match.index + match[0].indexOf(match[1]);
+      // V5 P6 修复声明句豁免（run1 实测根因）：以蓝图为准的统一声明确认值（「该阶段劳动力按蓝图
+      // 推导统一为238人」生成器/修复器产物）不属正文口径宣称，不参与互斥池——否则 238/242/269
+      // 同批声明值两两假互斥（去阈值后差 1.7% 也报）；声明值本身与蓝图的吻合性由蓝图引用
+      // 检测器（blueprintCitationConsistencyIssues）把关，此处跳过不放行数据错误
+      if (/按蓝图[^。；;\n]{0,16}?(?:统一|调整|修正|核定)\s*(?:为|至)\s*$/u.test(markdown.slice(Math.max(0, valueIndex - 40), valueIndex))) continue;
       // P1 箭头链：语境词之后且在链尾（句边界）之内的值由链峰值口径接管（只取最大值，链内低峰阶段值不独立入池）；
       // 每行可能有多条链（逗号分段的阶段链），按链起点/链尾标识逐链入池（多链同行扩围修复）
       const chains = chainPeaksOf(line);
@@ -247,9 +284,12 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
         // 管网及附属设施施工阶段）；词表/「第N阶段」识别只覆盖房建词表与序号形态，
         // 道路管网类项目自造阶段词（管网及附属设施/道路基层/绿化栽植）需从匹配上下文直接取限定词——
         // 否则五阶段值全部错标为同一词表词，同 stage 互查报出「施工准备 22 vs 峰值 68」假矛盾（丰乐镇实测）
+        // V5 P6：阶段提取走 extractStagePhrase（回指/词表缩写/末段限定同源），STAGE 模式保持
+        // 「X阶段」后缀形态（N1-13b 契约：STAGE 形态与词表本体的字符串不等属跨形态隔离一部分）
+        const stagePhrase = extractStagePhrase(markdown, lineStart, valueIndex);
         const stage = pattern === STAGE_LABOR_RE
-          ? `${(/([^，,。；;\n]{1,14})阶段$/u.exec(markdown.slice(lineStart, match.index + 2))?.[1] ?? '')}阶段`
-          : laborPeakStageOf(markdown, valueIndex);
+          ? (stagePhrase === undefined ? '' : stagePhrase.endsWith('阶段') ? stagePhrase : `${stagePhrase}阶段`)
+          : (stagePhrase ?? laborPeakStageOf(markdown, valueIndex) ?? '');
         bodyPeaks.push({ value, text: match[0].trim().slice(0, 40), stage, group, trade });
       }
     }
@@ -264,7 +304,7 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
     message,
     suggestion,
   });
-  // 模式 1：正文峰值全量互查——多处「高峰期 X 人」相差 >30% 即互斥（阶段限定不同的峰值除外）。
+  // 模式 1：正文峰值全量互查——多处「高峰期 X 人」不同数值即互斥（阶段限定不同的峰值除外）。
   // F6 口径隔离：仅同组互查——管理 vs 管理、工种 vs 同工种、峰值 vs 峰值；
   // 「管理人员18人 vs 高峰期286人」是管理 vs 全员两套合法口径不互斥，「钢筋工60 vs 木工80」不同工种不互斥
   // （真实生成误报根因：18 vs 286、60 vs 80 被当同口径互斥）
@@ -275,13 +315,13 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
       if (a.group === 'trade' && a.trade !== b.trade) continue;
       if (a.stage && b.stage && a.stage !== b.stage) continue;
       // 总口径（无阶段限定）vs 阶段口径：总人数 ≥ 阶段峰值属正常关系（「按施工高峰配置总人数约180人」
-      // vs 室外工程阶段高峰 90 人），仅总人数低于阶段峰值 10% 以上才进入互斥比较（真实生成误报根因）
+      // vs 室外工程阶段高峰 90 人），总人数低于阶段峰值即矛盾进入互斥比较（真实生成误报根因）
       if (!a.stage !== !b.stage) {
         const [total, staged] = a.stage ? [b, a] : [a, b];
-        if (total.value >= staged.value * 0.9) continue;
+        if (total.value >= staged.value) continue;
       }
       const diff = Math.abs(a.value - b.value) / Math.max(a.value, b.value);
-      if (diff > 0.3) {
+      if (a.value !== b.value) {
         laborIssue(
           `劳动力数据矛盾：正文“${a.text}”（${a.value} 人）与“${b.text}”（${b.value} 人）互斥（相差 ${Math.round(diff * 100)}%）`,
           laborPeakAuthority !== undefined && laborPeakAuthority > 0
@@ -300,7 +340,7 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
     const max = Math.max(...peakColTablePeaks);
     const min = Math.min(...peakColTablePeaks);
     const diff = Math.abs(max - min) / max;
-    if (diff > 0.3) {
+    if (max !== min) {
       laborIssue(
         `劳动力数据矛盾：分阶段投入明细表峰值 ${min} 人与另一劳动力表峰值 ${max} 人互斥（相差 ${Math.round(diff * 100)}%）`,
         '劳动力峰值数据必须全文唯一：统一各劳动力表格的峰值数据，删除矛盾表格数字。',
@@ -315,12 +355,11 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
     ? Math.max(...tableBlocks.filter(block => !block.hasTradeCol).map(block => block.peak))
     : undefined;
   if (tablePeak !== undefined && maxBodyPeak > 0) {
-    const threshold = tablePeak * 1.3;
     // D1 蓝图权威豁免：正文峰值已对齐蓝图劳动力峰值时不与表峰值互查——蓝图是造价锚定最高权威，
     // 表峰值与蓝图的差异属表格口径问题（确定性修复器以蓝图值为准统一正文），
     // 若继续互查会把已对齐的正文再拉回表峰值，与蓝图引用检测形成修复循环
     const alignedToBlueprint = laborPeakAuthority !== undefined && laborPeakAuthority > 0 && maxBodyPeak === laborPeakAuthority;
-    if (maxBodyPeak > threshold && !alignedToBlueprint) {
+    if (maxBodyPeak > tablePeak && !alignedToBlueprint) {
       const maxText = peakGroupPeaks.find(entry => entry.value === maxBodyPeak)?.text || '';
       laborIssue(
         `劳动力数据矛盾：正文表述“${maxText}”达 ${maxBodyPeak} 人，而分阶段投入明细表最大峰值为 ${tablePeak} 人（超出 ${Math.round(((maxBodyPeak - tablePeak) / tablePeak) * 100)}%）`,
@@ -330,7 +369,7 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
   }
   // 模式 6：总量控制上限 vs 峰值（真实生成回归：正文「高峰期总人数控制在260人」与
   // 「主体阶段高峰投入约300人/装饰阶段高峰投入约350人」并存——控制上限语义下超限即矛盾，
-  // 不设差值百分比阈值；模式 1 的 30% 互斥阈值对「上限 vs 阶段峰值」场景过宽会漏报 260 vs 350）
+  // 不设差值阈值，任何超出即互斥（260 vs 350 相邻数值矛盾也必须拦截）
   const controlCaps: number[] = [];
   for (const match of markdown.matchAll(/(?:高峰期|高峰|峰值)[^。；;\n]{0,16}?控制(?:在|为|到)?(?:约)?\s*([\d,]+)\s*人(?:以内|以下|之内)?/gu)) {
     const value = Number(match[1].replace(/[,，]/gu, ''));
@@ -350,7 +389,7 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
   // 模式 7：正文班组加总算式一致性（评分报告 P1「投入 20人」与「道路浇筑8＋铺装6＋排水沟砌筑5＋
   // 机动2×4=27人」同句并存自相矛盾——班组加总 27 ≠ 宣称 20，算术层确定性校验零语义风险）：
   // 同句内「=N人」算式（左侧 ＋ 分隔各项末位数字求和，含 × 乘积项）与宣称总人数（投入/配置 N 人）
-  // 相差 >15% 即报；算式左侧求和 ≠ 右侧结果也报（同一解析两条通道）。「约/近/余/左右」近似措辞
+  // 不等即报；算式左侧求和 ≠ 右侧结果也报（同一解析两条通道）。「约/近/余/左右」近似措辞
   // 下宣称口径宽容（不计入比较），但算式本身的算术自洽仍受检。
   for (const line of markdown.split(/\r?\n/u)) {
     const trimmed = line.trim();
@@ -375,7 +414,7 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
       const total = Number(resultMatch[1].replace(/[,，]/gu, ''));
       if (!Number.isFinite(total) || total <= 0 || sum <= 0) continue;
       const snapshot = sentence.trim().slice(0, 60);
-      if (Math.abs(sum - total) / Math.max(sum, total) > 0.05) {
+      if (sum !== total) {
         laborIssue(
           `劳动力数据矛盾：正文班组加总算式“${snapshot}”左侧求和 ${sum} 人 ≠ 结果 ${total} 人`,
           '班组人数加总必须与合计一致：核对各班组人数或修正合计数字。',
@@ -386,7 +425,7 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
         const claimValue = Number(claimMatch[1].replace(/[,，]/gu, ''));
         const claimWindow = sentence.slice(0, claimMatch.index + claimMatch[0].length);
         const isApprox = /[约近余]|左右/u.test(claimWindow.slice(-16));
-        if (Number.isFinite(claimValue) && claimValue > 0 && !isApprox && Math.abs(claimValue - total) / Math.max(claimValue, total) > 0.15) {
+        if (Number.isFinite(claimValue) && claimValue > 0 && !isApprox && claimValue !== total) {
           laborIssue(
             `劳动力数据矛盾：正文宣称总人数 ${claimValue} 人与班组加总算式结果 ${total} 人自相矛盾（相差 ${Math.round((Math.abs(claimValue - total) / Math.max(claimValue, total)) * 100)}%）`,
             '宣称总人数必须与班组加总一致：统一总人数与各班组人数，删除矛盾数字。',
@@ -395,19 +434,19 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
       }
     }
   }
-  // 模式 4：合计行 vs 明细行之和——同一表内汇总行人数必须等于明细行人数之和（差 >10% 报）
+  // 模式 4：合计行 vs 明细行之和——同一表内汇总行人数必须等于明细行人数之和（不一致即报）
   for (const block of tableBlocks) {
     if (block.totalCell === undefined || block.countCells.length < 2) continue;
     const diff = Math.abs(block.totalCell - block.detailSum) / Math.max(block.totalCell, block.detailSum);
-    if (diff > 0.1) {
+    if (block.totalCell !== block.detailSum) {
       laborIssue(
         `劳动力数据矛盾：劳动力表合计行 ${block.totalCell} 人与明细行之和 ${block.detailSum} 人不符（差 ${Math.round(diff * 100)}%）`,
         '劳动力表合计必须等于各明细行人数之和：统一合计行与明细行数据，删除矛盾数字。',
       );
     }
   }
-  // 模式 5：总工日推算——正文「X 工日」与峰值人数×总工期天数必须有量级自洽
-  // （总工日 > 峰值×工期×1.3 或 < 峰值×工期×0.1 才报，宽松边界零误伤）
+  // 模式 5：总工日推算——正文「X 工日」不得超过峰值人数×总工期天数的算术上限
+  // （每天最多峰值人数参与，总工日 > 峰值×工期即算术不可能，必报）
   // B6 总量语境约束（丰乐镇第五轮实测）：「偏差超过 5 个工日的即调整」的 5 个工日是调配阈值，
   // 被无约束正则误采为总工日（5 vs 峰值86×90 不自洽误报）；总工日采样仅收「总/合计/总计/共」总量语境
   const totalWorkdays = [...markdown.matchAll(/(?:总|合计|总计|共)[^。；;\n|]{0,8}?([\d,]+)\s*(?:个)?工日/gu)]
@@ -419,12 +458,11 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
   if (totalWorkdays.length > 0 && maxBodyPeak > 0 && totalDays.length > 0) {
     const maxWorkdays = Math.max(...totalWorkdays);
     const maxDays = Math.max(...totalDays);
-    const upperBound = maxBodyPeak * maxDays * 1.3;
-    const lowerBound = maxBodyPeak * maxDays * 0.1;
-    if (maxWorkdays > upperBound || maxWorkdays < lowerBound) {
+    const arithmeticCeiling = maxBodyPeak * maxDays;
+    if (maxWorkdays > arithmeticCeiling) {
       laborIssue(
-        `劳动力数据矛盾：总工日 ${maxWorkdays} 个与峰值 ${maxBodyPeak} 人×总工期 ${maxDays} 天不自洽（合理区间约 ${Math.round(lowerBound)}~${Math.round(upperBound)} 个）`,
-        '总工日必须与劳动力峰值和总工期量级自洽：按各阶段人数×阶段工期重算总工日，或修正峰值人数/总工期表述。',
+        `劳动力数据矛盾：总工日 ${maxWorkdays} 个超过峰值 ${maxBodyPeak} 人×总工期 ${maxDays} 天的算术上限 ${arithmeticCeiling} 个，不可能成立`,
+        '总工日不得超过劳动力峰值×总工期的算术上限：按各阶段人数×阶段工期重算总工日，或修正峰值人数/总工期表述。',
       );
     }
   }
@@ -532,6 +570,86 @@ export function dangerousListConsistencyIssues(markdown: string): ValidationIssu
         repairability: 'llm_repairable',
         message: `危大工程辨识清单不一致：“${a.title.slice(0, 30)}”（${a.items.length} 项）与“${b.title.slice(0, 30)}”（${b.items.length} 项）存在差异：前者独有【${onlyInA.join('、') || '无'}】，后者独有【${onlyInB.join('、') || '无'}】`,
         suggestion: '全文危大工程辨识清单必须唯一且一致：合并两处清单，统一项名、数量与分级表述，避免评标专家以清单矛盾质疑辨识深度。',
+      });
+    }
+  }
+  return issues.slice(0, 3);
+}
+
+// ── 危大排除声明 vs 危大清单表格矛盾（R12，舒城第二轮实测）──
+// 实测缺陷：同一节先声明「无落地式钢管脚手架搭设高度24m及以上的危大脚手架工程」
+// 「无采用非常规起重设备且单件起吊重量10kN及以上的起重吊装工程」，随后的危大清单表格
+// 却把 24m 脚手架、10kN 吊装列为危大工程——排除声明与清单自相矛盾，评标专家可直接质疑辨识可靠性。
+// 判定口径：排除子句（无/未涉及…阈值及以上）与清单表格行按「危大类别词交集 + 参数数值单位全等」
+// 三元组比对（类别、数值、单位同时相等才判矛盾），重复排除声明按三元组去重。
+
+/** 排除声明子句（无/未涉及/不涉及/不存在 … 及以上/以上；贯穿逗号、止于句号分号换行） */
+const HAZARD_EXCLUSION_CLAUSE_RE = /(?:无|未涉及|不涉及|不存在)[^。；\n]{2,120}?(?:及以上|以上)[^。；\n]{0,80}/gu;
+
+/** 危大类别词表（住建部令第37号/建办质〔2018〕31号附件类别核心词；具体词在前保证最长匹配） */
+const HAZARD_CATEGORY_TERMS = [
+  '落地式钢管脚手架', '悬挑式脚手架', '附着式升降脚手架', '脚手架',
+  '模板支撑', '模板工程', '起重吊装', '吊装', '幕墙', '钢结构',
+  '人工挖孔', '拆除', '暗挖', '爆破', '基坑', '降排水', '降水',
+] as const;
+const HAZARD_CATEGORY_RE = new RegExp(HAZARD_CATEGORY_TERMS.join('|'), 'gu');
+
+/** 阈值参数（数值+单位；排除 mm/cm/m²/m³ 类单位误匹配，单位归一 m/kN） */
+const HAZARD_PARAM_RE = /(\d+(?:\.\d+)?)\s*(kN|千牛|米|m(?![m²³23/]))/gu;
+
+function collectHazardCategories(text: string): Set<string> {
+  HAZARD_CATEGORY_RE.lastIndex = 0;
+  const categories = new Set<string>();
+  for (const match of text.matchAll(HAZARD_CATEGORY_RE)) categories.add(match[0]);
+  return categories;
+}
+
+function extractHazardParams(text: string): Array<{ value: number; unit: string }> {
+  HAZARD_PARAM_RE.lastIndex = 0;
+  const params: Array<{ value: number; unit: string }> = [];
+  for (const match of text.matchAll(HAZARD_PARAM_RE)) {
+    params.push({ value: Number(match[1]), unit: match[2] === '米' ? 'm' : match[2] === '千牛' ? 'kN' : match[2] });
+  }
+  return params;
+}
+
+export function hazardExclusionContradictionIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const clauses: Array<{ text: string; categories: Set<string>; params: Array<{ value: number; unit: string }> }> = [];
+  HAZARD_EXCLUSION_CLAUSE_RE.lastIndex = 0;
+  for (const match of markdown.matchAll(HAZARD_EXCLUSION_CLAUSE_RE)) {
+    const categories = collectHazardCategories(match[0]);
+    const params = extractHazardParams(match[0]);
+    if (categories.size > 0 && params.length > 0) clauses.push({ text: match[0], categories, params });
+  }
+  if (clauses.length === 0) return issues;
+  const reported = new Set<string>();
+  for (const rawLine of markdown.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (!/^\|.+\|$/u.test(line) || !/危大/u.test(line)) continue;
+    // 清单行声明「不属于危大/不构成危大」时与排除声明同向，不判矛盾
+    if (/不属于危大|不构成危大|非危大|未达到危大|不是危大/u.test(line)) continue;
+    const rowCategories = collectHazardCategories(line);
+    if (rowCategories.size === 0) continue;
+    const rowParams = extractHazardParams(line);
+    if (rowParams.length === 0) continue;
+    for (const clause of clauses) {
+      const category = HAZARD_CATEGORY_TERMS.find(term => rowCategories.has(term) && clause.categories.has(term));
+      if (!category) continue;
+      const hit = rowParams.find(param => clause.params.some(other => other.unit === param.unit && Math.abs(other.value - param.value) < 1e-9));
+      if (!hit) continue;
+      const key = `${category}|${hit.unit}|${hit.value}`;
+      if (reported.has(key)) continue;
+      reported.add(key);
+      const cells = line.split('|').map(cell => cell.trim()).filter(Boolean);
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'fact_consistency',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `危大清单与排除声明矛盾：正文声明「${clause.text.replace(/\s+/gu, '').slice(0, 36)}」，危大清单表格却将「${category} ${hit.value}${hit.unit}」列为危大工程（清单行「${cells.slice(0, 2).join('：').slice(0, 40)}」）`,
+        suggestion: '排除声明与危大清单必须同口径二选一（以资料参数为准）：若资料证实存在该类别且达到判定阈值，删除正文排除声明、保留清单行并按危大工程管控；若资料不能证实，删除清单中该行及其下游专项方案/验收表述，不得两处自相矛盾。',
       });
     }
   }
@@ -695,8 +813,11 @@ export async function localAdaptationKeywordIssues(markdown: string, factsModel:
       });
     }
   }
-  // 工伤保险：劳务/农民工内容存在时必须有工伤保险缴纳表述（政策合规类，不限地域）
-  if (/劳务|农民工|工资/u.test(markdown) && !coverage.get('workInjury')) {
+  // 工伤保险：劳务/农民工内容存在时必须有工伤保险缴纳表述（政策合规类，不限地域）。
+  // 词面门控先剥离书名号引用：编制依据类别清单引用《保障农民工工资支付条例》等法规名，
+  // 引用法规名称不构成「正文存在劳资管理内容」，剥离后纯引用文档不误报
+  const laborContentText = markdown.replace(BOOK_TITLE_CITATION_RE, '');
+  if (/(?:劳务|农民工|工资)/u.test(laborContentText) && !coverage.get('workInjury')) {
     issues.push({
       level: 'error',
       severity: 'blocker',
@@ -777,14 +898,34 @@ export function overviewRecapCandidates(markdown: string): { overviewBody: strin
   return { overviewBody, sentences };
 }
 
-export function overviewRecapIssues(markdown: string, options: { semanticSimilarity?: (left: string, right: string) => number } = {}): ValidationIssue[] {
+/** 概况复述判定：与概况章正文连续重合的汉字数下限。
+ * 项目名逐字搬用实测连续重合 16 字以上；“施工组织设计/专项施工方案”等通用词最长 6 字，
+ * 8 字界线把项目名级复述与通用词区分开（工程文档不接受语义相似度分数判定）。 */
+const RECAP_VERBATIM_HAN_RUN_MIN = 8;
+/** 概况复述判定：范围项最少汉字数（“人行道”3 字起；“道路/排水”等二字通用词不计数） */
+const RECAP_SCOPE_ITEM_MIN_HAN = 3;
+
+/** 概况复述的字符级确定性判定（替代语义相似度分数）：
+ * ① 复述句与概况章正文连续 ≥8 个汉字完全相同——项目名称/整句被逐字搬用；
+ * ② 复述句摘抄 ≥2 个顿号分隔的范围项且各项在概况正文逐字出现
+ *    （如“公共广场、停车场、人行道、慢行步道”清单被搬用）。 */
+function overviewRecapHit(sentence: string, overviewHan: string) {
+  if (longestCommonHanSubstring(sentence, overviewHan) >= RECAP_VERBATIM_HAN_RUN_MIN) return true;
+  const scopeItems = sentence.split('、')
+    .map(item => (item.match(/[\p{Script=Han}]/gu) || []).join(''))
+    .filter(item => item.length >= RECAP_SCOPE_ITEM_MIN_HAN);
+  return scopeItems.filter(item => overviewHan.includes(item)).length >= 2;
+}
+
+export function overviewRecapIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const { overviewBody, sentences } = overviewRecapCandidates(markdown);
-  if (sentences.length === 0 || !overviewBody || !options.semanticSimilarity) return issues;
+  if (sentences.length === 0 || !overviewBody) return issues;
+  const overviewHan = (overviewBody.match(/[\p{Script=Han}]/gu) || []).join('');
+  if (!overviewHan) return issues;
   const recaps: string[] = [];
   for (const sentence of sentences) {
-    const similarity = options.semanticSimilarity(sentence, overviewBody);
-    if (similarity >= 0.6) recaps.push(sentence.slice(0, 36));
+    if (overviewRecapHit(sentence, overviewHan)) recaps.push(sentence.slice(0, 36));
     if (recaps.length >= 3) break;
   }
   if (recaps.length === 0) return issues;
@@ -843,6 +984,8 @@ const SELF_UNDERMINING_QUERIES = [
   '专项设计文件尚未完成，待后续补充',
   '评分指标存在缺口尚未明确',
   '依据承诺函后续跟踪完善',
+  // 第十六版漏网扩展：四新小节自曝「未采用行业认定的新技术」属明确自伤（评分含四新应用条目）
+  '本项目未采用行业认定的新技术、新工艺、新设备、新材料',
 ] as const;
 
 // A21 正向声明句豁免（丰乐镇第七轮实测）：「编制范围为…所界定的全部施工内容」
@@ -865,9 +1008,17 @@ export async function selfUnderminingCandidateIssues(markdown: string): Promise<
     .map(sentence => sentence.trim())
     .filter(sentence => sentence.length >= 12);
   if (sentences.length === 0) return issues;
+  // V5 P6 确定性负向词前置过滤（run1 实测 3/3 假召回：界面处理巡查句、隔断垂直度句、卫生器具
+  // 调试记录句均被 bge 余弦误召回）——自伤表述必然含负向词（尚未/未完成/存在缺口/待补充…），
+  // 负向词未命中的句子不进入候选（「语义仅出候选」定位不变，召回前置一道确定性闸，防误报进修复轮）。
+  // R9 契约（分包否定式自述必须召回）：「本工程不进行分包」类负面自述无通用负向词面，由
+  // 「不进行分包|不再分包|不转包」形态覆盖（fixSelfUnderminingCandidates 同源配套改写：
+  // 检测召回 ↔ 确定性修复通道一一对应，不得单向失配）
+  const UNDERMINING_NEGATIVE_RE = /尚未|未完成|未明确|未采用|未落实|未确定|未闭合|存在缺口|有待|待补充|待完善|跟踪完善|不够|不明确|缺失|缺少|缺乏|风险较大|难以保证|无法保证|正在办理|暂未|未能|需进一步|不进行分包|不再分包|不转包/u;
   const underminingSimilarity = await buildSemanticSimilarity(sentences, [...SELF_UNDERMINING_QUERIES]);
   const hits = [...new Set(sentences.filter(sentence =>
-    !POSITIVE_SELF_REFERENCE_RE.test(sentence)
+    UNDERMINING_NEGATIVE_RE.test(sentence)
+    && !POSITIVE_SELF_REFERENCE_RE.test(sentence)
     && SELF_UNDERMINING_QUERIES.some(query => underminingSimilarity(sentence, query) >= SEMANTIC_COVERAGE_THRESHOLD)))];
   if (hits.length === 0) return issues;
   for (const hit of hits) {
@@ -942,7 +1093,7 @@ export function laborPeakConflictIssues(markdown: string): ValidationIssue[] {
   const peakValues = [...markdown.matchAll(/高峰(?:期)?人数(\d+)人|峰值(?:需求|人数)?[为约]?(\d+)人/gu)].map(match => Number(match[1] || match[2])).filter(value => value > 0);
   const totalSet = [...new Set(totalValues)];
   const peakSet = [...new Set(peakValues)];
-  const conflicts = totalSet.filter(total => peakSet.some(peak => peak !== total && Math.abs(peak - total) > total * 0.2));
+  const conflicts = totalSet.filter(total => peakSet.some(peak => peak !== total));
   if (conflicts.length > 0) {
     issues.push({
       level: 'error',
@@ -954,7 +1105,7 @@ export function laborPeakConflictIssues(markdown: string): ValidationIssue[] {
       suggestion: '全文劳动力峰值只允许一个口径：统一总人数与高峰人数为同一数值，删除矛盾口径；分阶段梯次投入人数（准备阶段/主体阶段/竣工阶段）属合法动态配置，不在统一范围内。',
     });
   }
-  // F15 同工种跨表高峰人数比对：每表每工种取表内最大值（分阶段表内多行合法），跨表同工种差异 >20% → error
+  // F15 同工种跨表高峰人数比对：每表每工种取表内最大值（分阶段表内多行合法），跨表同工种不同数值 → error
   const tradePeaksByTable = new Map<string, number[]>();
   for (const block of collectLaborTableBlocks(markdown)) {
     if (!block.hasTradeCol || block.tradeCells.length === 0) continue;
@@ -969,11 +1120,7 @@ export function laborPeakConflictIssues(markdown: string): ValidationIssue[] {
       tradePeaksByTable.set(trade, list);
     }
   }
-  const tradeConflicts = [...tradePeaksByTable.entries()].filter(([, values]) => {
-    const max = Math.max(...values);
-    const min = Math.min(...values);
-    return values.length >= 2 && max - min > max * 0.2;
-  });
+  const tradeConflicts = [...tradePeaksByTable.entries()].filter(([, values]) => values.length >= 2 && new Set(values).size >= 2);
   if (tradeConflicts.length > 0) {
     issues.push({
       level: 'error',
@@ -1048,7 +1195,8 @@ export function waterLaborPeakAssociationIssues(markdown: string): ValidationIss
 
 /** 元话语声明句模式：自我声明式（不再另行…）与唯一基准式（以X为唯一控制基准） */
 
-export const META_DECLARATION_RE = /不再另行(?:出现|统计|编制|设置|单列|重复)[^。；;\n]{0,40}|以[^。；;\n]{0,16}为唯一[^。；;\n]{0,24}不再[^。；;\n]{0,20}|不再另行[^。；;\n]{0,24}/gu;
+// eslint-disable-next-line no-control-regex -- [^\u000A] 与原始 [^\n] 语义等价（编辑工具会破坏字面换行转义，改用 unicode 转义）
+export const META_DECLARATION_RE = /不再另行(?:出现|统计|编制|设置|单列|重复)[^。；;\u000A]{0,40}|以[^。；;\u000A]{0,16}为唯一[^。；;\u000A]{0,24}不再[^。；;\u000A]{0,20}|不再另行[^。；;\u000A]{0,24}/gu;
 
 /** 元话语声明句检测：命中自我声明句 → error（清洗后残留即导出门禁阻断） */
 
@@ -1249,10 +1397,6 @@ export function nodeScheduleConsistencyIssues(markdown: string): ValidationIssue
     if (!group || group.length < 2) continue;
     const days = [...new Set(group.map(sample => sample.day))];
     if (days.length < 2) continue;
-    const maxDay = Math.max(...days);
-    const minDay = Math.min(...days);
-    // 同节点多套口径相差 ≥5 天即互斥（±4 天内属表述取整允许差，防零误伤）
-    if (maxDay - minDay < 5) continue;
     const raws = [...new Set(group.map(sample => sample.raw))].slice(0, 4).join('、');
     issues.push({
       level: 'error',
@@ -1405,7 +1549,122 @@ export const CROSS_SECTION_ANCHORS = [
     key: 'circularSaw', label: '圆盘锯数量', unit: '台', kind: 'number' as const,
     patterns: [/圆盘锯[^。；;\n|]{0,24}?(\d+)\s*台/gu],
   },
+  // 十五版评分报告实测：市政机械配置四套互相矛盾的数字（挖掘机 5/4/9/1、自卸 5/6/1、压路机 5/9/1、
+  // 蛙夯 5/6/1、搅拌车 2/3、洒水车 5/2/9、高空车 3/2）未被任何一致性锚点拦截。表格行内的机械台数
+  // 是权威配置表数值，窗口允许竖线（与 scheduleDays 排除竖线的理由相反——机械总表本身就是权威源）；
+  // 窗口 40 字覆盖「挖掘机 | 斗容量… | 5台」跨列形态；正向模式排除顿号/逗号防跨枚举项误采。
+  {
+    key: 'excavator', label: '挖掘机数量', unit: '台', kind: 'number' as const,
+    patterns: [
+      /(?:履带式)?挖掘机[^。；;\n、，]{0,40}?(\d+)\s*台/gu,
+      /(\d+)\s*台[^、，。；\n|]{0,12}?(?:履带式)?挖掘机/gu,
+    ],
+  },
+  {
+    key: 'dumpTruck', label: '自卸汽车数量', unit: '台/辆', kind: 'number' as const,
+    patterns: [
+      /自卸汽车[^。；;\n、，]{0,40}?(\d+)\s*(?:台|辆)/gu,
+      /(\d+)\s*(?:台|辆)[^、，。；\n|]{0,12}?自卸汽车/gu,
+    ],
+  },
+  {
+    key: 'roller', label: '压路机数量', unit: '台', kind: 'number' as const,
+    patterns: [
+      /(?:振动)?压路机[^。；;\n、，]{0,40}?(\d+)\s*台/gu,
+      /(\d+)\s*台[^、，。；\n|]{0,12}?(?:振动)?压路机/gu,
+    ],
+  },
+  {
+    key: 'rammer', label: '蛙式打夯机数量', unit: '台', kind: 'number' as const,
+    patterns: [
+      /蛙式打夯机[^。；;\n、，]{0,40}?(\d+)\s*台/gu,
+      /(\d+)\s*台[^、，。；\n|]{0,12}?蛙式打夯机/gu,
+    ],
+  },
+  {
+    key: 'mixerTruck', label: '混凝土搅拌运输车数量', unit: '台', kind: 'number' as const,
+    patterns: [
+      /混凝土搅拌运输车[^。；;\n、，]{0,40}?(\d+)\s*台/gu,
+      /(\d+)\s*台[^、，。；\n|]{0,12}?混凝土搅拌运输车/gu,
+    ],
+  },
+  {
+    // 「混凝土搅拌运输车」是独立设备（mixerTruck 锚点），「搅拌机」不含「运输车」词不串锚
+    key: 'concreteMixer', label: '混凝土搅拌机数量', unit: '台', kind: 'number' as const,
+    patterns: [
+      /混凝土搅拌机[^。；;\n、，]{0,40}?(\d+)\s*台/gu,
+      /(\d+)\s*台[^、，。；\n|]{0,12}?混凝土搅拌机/gu,
+    ],
+  },
+  {
+    key: 'sprinkler', label: '洒水车数量', unit: '台/辆', kind: 'number' as const,
+    patterns: [
+      /洒水车[^。；;\n、，]{0,40}?(\d+)\s*(?:台|辆)/gu,
+      /(\d+)\s*(?:台|辆)[^、，。；\n|]{0,12}?洒水车/gu,
+    ],
+  },
+  {
+    key: 'aerialLift', label: '高空作业车数量', unit: '台', kind: 'number' as const,
+    patterns: [
+      /高空作业车[^。；;\n、，]{0,40}?(\d+)\s*台/gu,
+      /(\d+)\s*台[^、，。；\n|]{0,12}?高空作业车/gu,
+    ],
+  },
+  // 十五版评分报告实测：沟塘小节「回填方 4270m³」与「回填方总量 15481.48m³」双口径（同节互斥）；
+  // V5 P6 误报收口（run1 实测）：原 pattern 无塘语境约束，把各子工程的通用回填方量（930.52/
+  // 335.45/425.99/77.25…）全收集混池致跨节误报（run1 报 8 值冲突而正文无任何塘语境）——
+  // 值池强制水塘/水渠语境（沟塘/水塘/池塘/河塘/鱼塘/塘内 + 渠道/淤泥/流砂/清淤）：
+  // ① 语境词 → 回填方（可含「总量」）→ 值；② 语境词 → 显式「回填方总量」→ 值（窗口允许
+  // 句号，抓「回填方4270m³。回填方总量15481.48m³」双口径形态）；③ 值在前、语境词在后
+  // （语序反转）。run1 实测「渠道/淤泥」与任一「回填方」窗口零交集（池为空不误报）；
+  // 「XX工程回填方总量Y」类分工程总量不携带水渠语境不入池（排水工程回填方总量17258.99m3
+  // 等合法独立量不参与互斥）。
+  {
+    key: 'pondBackfill', label: '沟塘回填方量', unit: 'm³', kind: 'number' as const,
+    patterns: [
+      /(?:沟塘|水塘|池塘|河塘|鱼塘|塘内|渠道|淤泥|流砂|清淤)[^。；;\n|]{0,30}?回填方(?:总量)?[^。；;\n|]{0,16}?(\d+(?:\.\d+)?)\s*m[3³]/gu,
+      /(?:沟塘|水塘|池塘|河塘|鱼塘|塘内|渠道|淤泥|流砂|清淤)[^；;\n|]{0,30}?回填方总量[^。；;\n|]{0,16}?(\d+(?:\.\d+)?)\s*m[3³]/gu,
+      /回填方(?:总量)?[^。；;\n|]{0,16}?(\d+(?:\.\d+)?)\s*m[3³][^。；;\n|]{0,30}?(?:沟塘|水塘|池塘|河塘|鱼塘|塘内|渠道|淤泥|流砂|清淤)/gu,
+    ],
+  },
+  // 十五版评分报告实测：同章「槽底预留200mm人工清底」vs「槽底预留300mm人工清底」矛盾
+  // （机械开挖至距设计槽底标高Xmm处停止的作业范围表述不含「预留…清底」句式，不串锚）
+  {
+    key: 'trenchClearing', label: '沟槽槽底人工清底预留厚度', unit: 'mm', kind: 'number' as const,
+    patterns: [/槽底预留(\d+)mm人工清底/gu],
+  },
+  // 十五版评分报告实测：房屋保护距离「距房屋3m内采用人工开挖」vs「距房屋2m范围内采用人工开挖」双口径
+  // （「沟槽开挖边线外1.5m范围内」是边线距离非房屋距离，不匹配「距房屋」句式不串锚）
+  {
+    key: 'houseExcavation', label: '距房屋人工开挖保护距离', unit: 'm', kind: 'number' as const,
+    patterns: [/距房屋(\d+(?:\.\d+)?)m(?:内|范围内)[^。；;\n|]{0,10}?人工开挖/gu],
+  },
 ] as const;
+
+/** 锚点实体词（V5 P4 机制对接）：设备/数量类锚点 → 蓝图权威条目匹配模式。
+ * 权威派生（deriveRepairAuthorities）用本表将 equipment/quantity 域条目自动对接到 CROSS_SECTION_ANCHORS
+ * 锚点 key——新增设备入蓝图即自动获得权威通道（替代人工 key 白名单）；
+ * 新增设备锚点时在此登记实体词即完成权威对接（仅登记实体类，工期/村数/机动等非实体锚点从对应域直取）。 */
+export const CROSS_SECTION_ANCHOR_ENTITY_RE: Record<string, RegExp> = {
+  pump: /潜水泵|提升泵/u,
+  towerCrane: /塔式起重机|塔吊/u,
+  hoist: /施工升降机|施工电梯/u,
+  truckCrane: /汽车起重机|汽车吊/u,
+  rebarCutter: /钢筋切断机/u,
+  rebarBender: /钢筋弯曲机/u,
+  circularSaw: /圆盘锯/u,
+  excavator: /挖掘机/u,
+  dumpTruck: /自卸汽车|自卸车/u,
+  roller: /压路机/u,
+  rammer: /蛙式打夯机|打夯机/u,
+  mixerTruck: /混凝土搅拌运输车|搅拌车/u,
+  concreteMixer: /混凝土搅拌机/u,
+  sprinkler: /洒水车/u,
+  aerialLift: /高空作业车/u,
+  // 器具数量类实体（清单/设备域）：灭火器/急救箱数量从数量域自动对接（旧链无此通道）
+  extinguisher: /灭火器/u,
+  firstaid: /急救箱/u,
+};
 
 // ── 4.18.10 清单红线权威比对（丰乐镇实测）：绿化养护期/路灯数量 ──
 // 评分报告 P1：清单「喷播植草（灌木）籽：养护期二级养护，养护两年」vs 正文多处「二级养护一年」
@@ -1431,7 +1690,7 @@ export function greeningMaintenanceMismatchIssues(markdown: string, factsModel?:
     if (years !== undefined && years > 0) values.add(years);
   }
   if (values.size === 0) return [];
-  const mismatched = [...values].filter(value => Math.abs(value - authority) > authority * 0.2);
+  const mismatched = [...values].filter(value => value !== authority);
   if (mismatched.length === 0) return [];
   return [{
     level: 'error',
@@ -1444,7 +1703,7 @@ export function greeningMaintenanceMismatchIssues(markdown: string, factsModel?:
   }];
 }
 
-/** 路灯数量清单红线检测（评分报告 P3）：正文路灯套数与清单权威口径差异 >20% → blocker。
+/** 路灯数量清单红线检测（评分报告 P3）：正文路灯套数与清单权威口径不一致 → blocker。
  * 正文分型号多值（100W 17套 + 120W 3套）先求和再与清单总数比对；无清单路灯条目不检测。
  * 「分批/每批 X 套」语境值属批次口径非总数宣称，跳过防误报（评分报告正文 366 行「2批每批10套」形态）；
  * 否定声明句豁免同上——修复轮「不再出现路灯17套」类一致性声明不计入口径池防死循环。 */
@@ -1466,7 +1725,7 @@ export function streetLightCountMismatchIssues(markdown: string, factsModel?: Do
   if (values.length === 0) return [];
   // 分型号明细（100W 17套 + 120W 3套）按总数口径与清单比对
   const bodyTotal = values.length >= 2 ? values.reduce((sum, value) => sum + value, 0) : values[0] ?? 0;
-  if (Math.abs(bodyTotal - authority) <= authority * 0.2) return [];
+  if (bodyTotal === authority) return [];
   return [{
     level: 'error',
     severity: 'blocker',
@@ -1494,9 +1753,11 @@ const PROCESS_SWITCH_WORD_RE = /再浇筑|再浇|后浇筑|后浇|然后浇筑|�
 
 // F14d 工艺参数前置词豁免（丰乐镇第三轮实测）：「浇筑时分层厚度不大于500mm」的 500mm 是
 // 浇筑分层厚度工艺参数、「焊缝高度不小于4mm」的 4mm 是焊缝高度——均非该部位的构件厚度
-// 规格，与权威厚度规格不可比对，40 字窗口误绑必须豁免
+// 规格，与权威厚度规格不可比对，40 字窗口误绑必须豁免；V5 P6 补充（run1 实测）：
+// 「内厚15mm」井壁抹面工艺、「垫高不少于200mm」堆场存放工艺、「架空/离地/支垫」仓储工艺
+// ——window 含此类工艺词即豁免（均属作业/存放参数，与本部位构件规格不可比对）
 
-const PROCESS_PARAM_RE = /分层厚度|分层浇筑|分层振捣|焊缝高度|焊缝厚度|焊脚尺寸|锚固深度|保护层厚度|搭接长度|锚固长度|预留|踏步高度|踏步宽度|踏步高|踏步宽|台阶高度|台阶宽度/u;
+const PROCESS_PARAM_RE = /分层厚度|分层浇筑|分层振捣|焊缝高度|焊缝厚度|焊脚尺寸|锚固深度|保护层厚度|搭接长度|锚固长度|预留|踏步高度|踏步宽度|踏步高|踏步宽|台阶高度|台阶宽度|内厚|外厚|抹面|抹灰|粉刷|垫高|架空|离地|支垫/u;
 
 // F14d 部位枚举声明豁免（丰乐镇第三轮实测）：「有梁板厚度分别为200mm、150mm、200mm」是
 // 多部位规格枚举（不同部位允许不同规格），不是本部位单一口径，不判规格错位
@@ -1636,10 +1897,8 @@ export function crossSectionNumericConflictIssues(markdown: string): ValidationI
       } else {
         const numbers = [...values].map(Number).filter(Number.isFinite);
         if (numbers.length < 2) continue;
-        const maxValue = Math.max(...numbers);
-        const minValue = Math.min(...numbers);
-        // 数值差异 >20% 判互斥（3 vs 4、8 vs 6 这类量级差异在评审口径均属矛盾）
-        if (maxValue - minValue <= maxValue * 0.2) continue;
+        // 任何不同数值即互斥：同一设备/材料同一部位出现两套数量即口径矛盾，不设差异阈值
+        //（阈值豁免会漏报相邻数值矛盾——十五版机械四套数字「挖掘机 5台 vs 4台」形态）
         issues.push({
           level: 'error',
           severity: 'blocker',
@@ -1652,7 +1911,9 @@ export function crossSectionNumericConflictIssues(markdown: string): ValidationI
       }
     }
   }
-  return issues.slice(0, 8);
+  // 上限 16：十五版真实文档机械四套数字 7 条 + 土方/清底/房屋锚点 3 条超 8 条被截断漏报；
+  // 跨节冲突上限提高到 16 防截断（确定性检测零误伤，数量增加不放大修复风险）
+  return issues.slice(0, 16);
 }
 
 /** 规格 token 类型推断：从权威规格值推导正则，只校验同类型规格（避免「垫层…HRB400 钢筋」误比对混凝土标号） */
@@ -1660,7 +1921,9 @@ export function crossSectionNumericConflictIssues(markdown: string): ValidationI
 function specTokenPattern(spec: string): RegExp | null {
   if (/^C\d{2,3}$/.test(spec)) return /C\d{2,3}/u;
   if (/^M\d/.test(spec)) return /M\d+(?:\.\d+)?/u;
-  if (/^P\d{1,2}$/.test(spec)) return /P\d{1,2}/u;
+  // V5 P6 误报收口（run1 实测）：「AP42」「IP55」中的 P42/P55 是型号/防护等级代号子串，
+  // 非独立 P 规格 token——左边界排除拉丁字母前缀，只匹配独立 P 规格（「配电箱P65」仍命中）
+  if (/^P\d{1,2}$/.test(spec)) return /(?<![A-Za-z])P\d{1,2}/u;
   if (/^A\d+(?:\.\d+)?$/.test(spec)) return /A\d+(?:\.\d+)?/u;
   if (/^B\d+(?:\.\d+)?$/.test(spec)) return /B\d+(?:\.\d+)?/u;
   if (/^HRB/.test(spec) || /^HPB/.test(spec)) return /HRB\d{3,4}|HPB\d{3}/u;
@@ -1679,6 +1942,8 @@ function escapeRegexLiteral(value: string): string {
 export function specLocationMismatchIssues(markdown: string, specAuthorityMap?: SpecAuthorityMap): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   if (!specAuthorityMap) return issues;
+  // V5 P6 更长复合条目名碰撞豁免（run1 重建实测）备查表：全维度条目名集合
+  const allLocations = [...new Set(Object.values(specAuthorityMap).flat().map(item => item.location).filter(Boolean))];
   for (const placements of Object.values(specAuthorityMap)) {
     if (placements.length < 2) continue;
     // 同 location 同 pattern 类型的 placement 扫描结果完全一致（authoritySpecs 集合与
@@ -1697,8 +1962,19 @@ export function specLocationMismatchIssues(markdown: string, specAuthorityMap?: 
       const scanKey = `${location}|${pattern.source}`;
       if (scanned.has(scanKey)) continue;
       scanned.add(scanKey);
-      // 权威集合同类型过滤：只有与本 placement 同 pattern 类型的 spec 才可互相比较
-      const authoritySpecs = new Set(placements.filter(item => item.location === location && specTokenPattern(item.spec)?.source === pattern.source).map(item => item.spec));
+      // 权威集合同类型过滤：只有与本 placement 同 pattern 类型的 spec 才可互相比较；
+      // V5 P6 宽松 token 抽取（run1 重建实测）：特征串携尾文（「C20商品砼\n2、厚度：15cm…」——
+      // 白鸥观澜人行道混凝土垫层 WB040204009001 原文 C20/15cm/424.6m²）只取前缀 token——
+      // 整串精确匹配会把合规规格整条排除出权威集致误报（白鸥 C20 正文被公共广场 C25 权威判错位）
+      const authoritySpecs = new Set(placements
+        .filter(item => item.location === location)
+        .map(item => {
+          const exact = specTokenPattern(item.spec);
+          if (exact && exact.source === pattern.source) return item.spec;
+          const loose = new RegExp(`^(?:${pattern.source})`, 'u').exec(item.spec);
+          return loose ? loose[0] : null;
+        })
+        .filter((token): token is string => token !== null));
       const locationRe = new RegExp(`${escapeRegexLiteral(location)}[^。；;\n|]{0,40}?(${pattern.source})`, 'gu');
       for (const match of markdown.matchAll(locationRe)) {
         const found = match[1] || '';
@@ -1719,6 +1995,10 @@ export function specLocationMismatchIssues(markdown: string, specAuthorityMap?: 
         // F14e 后置语境豁免（丰乐镇第三轮实测）：「两侧各200mm工作宽度」的 200mm 是作业空间
         // 尺寸；「200mm、150mm」顿号紧随的后续数值是多部位枚举——均非本部位单一规格错位
         if (/(?:工作宽度|作业宽度|操作空间|工作面)/u.test(afterFound) || /^、\s*\d/u.test(afterFound)) continue;
+        // V5 P6 误报收口（run1 实测）：「圈梁按C20或C30分别对应不同单体」的 found C20 后紧随
+        // 「或C30」同型规格——枚举声明词（分别对应）在 match 窗口之外前文豁免不覆盖，需后置
+        // 枚举链判：found 后紧跟「或/[、,，/] + 同型规格」即属多规格枚举，不判错位
+        if (new RegExp(`^(?:或|[、,，/])\\s*(?:${pattern.source})`, 'u').test(afterFound)) continue;
         // B6 偏差值豁免（丰乐镇第五轮实测）：「槽底预留200mm人工清底，槽底标高偏差不超过±200mm」
         // 的 ±200mm 是标高偏差值，被 40 字窗口误绑为清底预留厚度（偏差与规格属不同概念）
         const contextBefore = markdown.slice(Math.max(0, (match.index || 0)), (match.index || 0) + match[0].length);
@@ -1732,6 +2012,18 @@ export function specLocationMismatchIssues(markdown: string, specAuthorityMap?: 
       // 「涵头混凝土 C25」），不是管道基础错位——found 前窗口去掉 location 自身后仍含
       // 其它部位词即跳过（含 location 自身会让正常错位恒豁免：「垫层C20」的「垫层」在词表）
       if (foundAt > location.length && /(?:涵头|面层|基层|垫层|管基|基础|梁|板|柱|墙|地坪|路面)/u.test(match[0].slice(location.length, foundAt))) continue;
+      // V5 P6 更长复合条目名碰撞豁免（run1 重建实测）：「人行道混凝土垫层（C25）」的 location
+      // 「垫层」是更长条目名「人行道混凝土垫层」（表内条目，权威 C25）的子串——短名扫描把长名
+      // 条目的合规规格判为短名错位；仅当「前方紧邻文字+短名」构成表内更长条目且 found ∈ 该长名
+      // 自身规格集时豁免（长名不匹配或其规格不一致时仍报，真错位不受影响）
+      const locationStart = match.index || 0;
+      const collisionLocation = allLocations.find(candidate =>
+        candidate.length > location.length && candidate.endsWith(location)
+        && markdown.slice(locationStart + location.length - candidate.length, locationStart + location.length) === candidate);
+      if (collisionLocation) {
+        const collisionSpecs = new Set(placements.filter(item => item.location === collisionLocation && specTokenPattern(item.spec)?.source === pattern.source).map(item => item.spec));
+        if (collisionSpecs.has(found)) continue;
+      }
       if (authoritySpecs.has(found)) continue;
         issues.push({
           level: 'error',
@@ -2039,9 +2331,9 @@ export function supportFormFactConsistencyIssues(markdown: string, factsModel: D
 }
 
 // ── 17d. 设备进场时间合理性（4.19 D-2）：全文「设备名+第N日+进场/投入使用/安装」形态——
-// ①进场日 ≥ 总工期 80% 属尾期进场荒谬（大型设备应在工程早中期进场，尾期进场无法覆盖主体施工）；
+// ①进场日达到/超过总工期属尾期进场荒谬（工程结束时设备尚未进场，绝对矛盾，不设比例阈值线）；
 // ②基坑阶段设备（挖掘机/支护类）进场日晚于基坑支护完成节点日属工序倒挂（基坑做完了设备才进场）。
-// 数值提取+阈值比较（L2 确定性层），设备名限定封闭词表防误采。──
+// 数值提取+确定性比较（L2 确定性层），设备名限定封闭词表防误采。──
 
 const EQUIPMENT_ENTRY_WORDS = ['塔式起重机', '施工升降机', '施工电梯', '汽车起重机', '汽车吊', '混凝土泵车', '混凝土泵', '挖掘机', '装载机', '推土机', '压路机', '平地机', '空压机', '注浆机', '锚杆钻机', '混凝土喷射机', '喷射机', '吊篮', '钢筋加工设备', '塔吊'] as const;
 // 基坑阶段专用设备：只服务于基坑支护/土方工序，进场日必须早于基坑支护完成节点
@@ -2085,9 +2377,9 @@ export function equipmentEntryTimingIssues(markdown: string, factsModel: Documen
   if (entries.length === 0) return [];
   const issues: ValidationIssue[] = [];
   const total = totalScheduleDays(markdown, factsModel);
-  // ①尾期进场：进场日 ≥ 总工期 80%（设备采购/进场计划矛盾，实际无法覆盖主体施工）
+  // ①尾期进场：进场日达到/超过总工期（设备未进场工程已结束，绝对矛盾）
   if (total !== undefined) {
-    const late = entries.filter(entry => entry.day >= total * 0.8);
+    const late = entries.filter(entry => entry.day >= total);
     if (late.length > 0) {
       issues.push({
         level: 'error',
@@ -2095,8 +2387,8 @@ export function equipmentEntryTimingIssues(markdown: string, factsModel: Documen
         category: 'fact_consistency',
         owner: 'llm',
         repairability: 'llm_repairable',
-        message: `设备进场时间荒谬：${late.slice(0, 3).map(entry => `「${entry.equipment} 第${entry.day}日进场」`).join('、')} 已过总工期（${total}日历天）的 80%，尾期进场无法覆盖主体施工`,
-        suggestion: `以总进度计划为准核对设备进场计划：大型施工设备应在工程早期（总工期前 30% 内）进场，${late.map(entry => entry.equipment).join('、')} 的进场日应提前至基础/主体施工开始前，删除矛盾的尾期进场表述。`,
+        message: `设备进场时间荒谬：${late.slice(0, 3).map(entry => `「${entry.equipment} 第${entry.day}日进场」`).join('、')} 已达/超过总工期（${total}日历天），工程结束时设备尚未进场`,
+        suggestion: `以总进度计划为准核对设备进场计划：大型施工设备必须在总工期结束前进场并完成使用，${late.map(entry => entry.equipment).join('、')} 的进场日应提前至工程开始阶段，删除矛盾的尾期进场表述。`,
       });
     }
   }
@@ -2358,6 +2650,129 @@ export function paragraphFingerprint(paragraph: string): string | undefined {
   return normalized.length >= DUPLICATE_PARAGRAPH_MIN_CHARS ? normalized : undefined;
 }
 
+// ── 段落内句级复读（十五版评分报告实测 7 处）：段落结尾复读本段前 1~3 句 ──
+// 各章 LLM 写作/模板化修复环节在段尾复读段内已有句子；duplicateParagraphIssues 只抓跨位置
+// 整段重复，抓不到段内句级复读。本扫描按空行分块切段、按句号切句，句（去空白 ≥15 字）在
+// 段内出现 ≥2 次即命中；检测器与确定性修复器同源复用（检测定位=修复定位）。
+
+export const PARAGRAPH_TAIL_REPEAT_MIN_CHARS = 15;
+
+/** 段落内句级复读扫描（检测器与修复器同源口径）：返回重复句及其出现次数 */
+export function scanParagraphTailRepeats(markdown: string): Array<{ sentence: string; count: number }> {
+  const results: Array<{ sentence: string; count: number }> = [];
+  const blocks = markdown.split(/\n\s*\n/u);
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+    // 剥除标题行/表格行后 join 切句（真实文件标题/表格与正文常无空行分隔，block 级过滤会漏掉整段；
+    // 且段尾复读句可能丢前缀「为此，项目部在丰乐镇域内设置…」vs「在丰乐镇域内设置…」，需后缀包含匹配）
+    const prose = trimmed
+      .split(/\n/u)
+      .filter(line => {
+        const t = line.trim();
+        return t && !/^#{1,6}\s/u.test(t) && !t.startsWith('|');
+      })
+      .join('\n');
+    const seen: Array<{ sentence: string; count: number }> = [];
+    for (const rawSentence of prose.split(/[。！？!?]/u)) {
+      const sentence = rawSentence.trim().replace(/\s+/gu, '');
+      if (sentence.length < PARAGRAPH_TAIL_REPEAT_MIN_CHARS) continue;
+      const dupIndex = seen.findIndex(entry =>
+        entry.sentence === sentence ||
+        (entry.sentence.length > sentence.length &&
+          entry.sentence.length - sentence.length <= PARAGRAPH_TAIL_REPEAT_MIN_CHARS &&
+          entry.sentence.endsWith(sentence)),
+      );
+      if (dupIndex >= 0) seen[dupIndex]!.count += 1;
+      else seen.push({ sentence, count: 1 });
+    }
+    for (const entry of seen) {
+      if (entry.count >= 2) results.push({ sentence: entry.sentence, count: entry.count });
+    }
+  }
+  return results;
+}
+
+export function paragraphTailRepeatIssues(markdown: string): ValidationIssue[] {
+  const repeats = scanParagraphTailRepeats(markdown);
+  if (repeats.length === 0) return [];
+  // 检测级别升为 error/blocker（丰乐镇 doc-1788954795698 实测 17 处句级复读带病交付）：
+  // 投标专业文档不允许同一段落内句子复读，确定性修复器（fixParagraphTailRepeats）与检测器
+  // 同源（检测定位=修复定位），post-review-surface 轮在 requirement-verification 补写后兜底剥离
+  return repeats.slice(0, 3).map(({ sentence, count }) => ({
+    level: 'error',
+    severity: 'blocker',
+    category: 'style',
+    owner: 'llm',
+    repairability: 'local_deterministic',
+    message: `段落内句子复读 ${count} 次：“${sentence.slice(0, 30)}…”`,
+    suggestion: '同一段落内相同句子只保留首次出现，删除段尾复读的重复句（确定性修复器已接入自动剥离）。',
+  }));
+}
+
+// ── H3 防撞名标题残留（丰乐镇 doc-1788954795698 实测「公厕（1）」「公厕（1）（二）」）──
+// 主题块切分/拆半的编号后缀防撞名泄漏进目录：正式投标目录不允许「（1）（2）」编号后缀小节；
+// 与确定性修复器 fixCollisionNumberedHeadings 同源（检测定位=修复定位）。
+
+export const COLLISION_NUMBERED_HEADING_RE = /^(.+?)(?:（(?:\d+|[一二三四五六七八九十]+)）)+$/u;
+
+/** H3 防撞名标题扫描（检测器与修复器同源口径）：返回编号后缀结尾的 H3 标题行与其行首偏移 */
+export function scanCollisionNumberedHeadings(markdown: string): Array<{ raw: string; index: number }> {
+  const results: Array<{ raw: string; index: number }> = [];
+  for (const match of markdown.matchAll(/^###\s+(.+)$/gmu)) {
+    const raw = match[1]!.trim();
+    if (!COLLISION_NUMBERED_HEADING_RE.test(raw)) continue;
+    results.push({ raw, index: markdown.lastIndexOf('\n', match.index ?? 0) + 1 });
+  }
+  return results;
+}
+
+export function collisionNumberedHeadingIssues(markdown: string): ValidationIssue[] {
+  const hits = scanCollisionNumberedHeadings(markdown);
+  if (hits.length === 0) return [];
+  return hits.slice(0, 3).map(({ raw }) => ({
+    level: 'error',
+    severity: 'blocker',
+    category: 'structure',
+    owner: 'llm',
+    repairability: 'local_deterministic',
+    message: `目录小节标题含防撞名编号后缀：“${raw}”`,
+    suggestion: '正式投标文件目录不允许「（1）（2）」编号后缀小节：确定性修复器已接入（按主题域重命名为语义化标题或合并同基线拆半小节）。',
+  }));
+}
+
+// ── 时间区间倒挂（十五版评分报告实测「开工令下发后第90日至第3日完成」）──
+// 「第X日至第Y日」X>Y 必为时间拼接病句（两个时间点错序拼接）；删除倒挂起点保留终点
+// 即恢复有效时间点表述，确定性可判可修。
+
+export const INVERTED_DATE_RANGE_RE = /第(\d{1,3})日(?:至|到|～|~|—|－)第(\d{1,3})日/gu;
+
+/** 倒挂时间区间扫描（检测器与修复器同源口径）：返回命中位置与原文 */
+export function scanInvertedDateRanges(markdown: string): Array<{ start: number; end: number; raw: string }> {
+  const hits: Array<{ start: number; end: number; raw: string }> = [];
+  for (const match of markdown.matchAll(INVERTED_DATE_RANGE_RE)) {
+    const startDay = Number(match[1]);
+    const endDay = Number(match[2]);
+    if (startDay <= endDay) continue;
+    hits.push({ start: match.index ?? 0, end: (match.index ?? 0) + match[0].length, raw: match[0] });
+  }
+  return hits;
+}
+
+export function invertedDateRangeIssues(markdown: string): ValidationIssue[] {
+  const hits = scanInvertedDateRanges(markdown);
+  if (hits.length === 0) return [];
+  return hits.slice(0, 3).map(({ raw }) => ({
+    level: 'error',
+    severity: 'blocker',
+    category: 'fact_consistency',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: `时间区间倒挂：“${raw}”起点大于终点，属时间拼接病句`,
+    suggestion: '删除倒挂区间起点，仅保留终点日期表述（确定性修复器已接入自动剥离）。',
+  }));
+}
+
 export function duplicateParagraphIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const lines = markdown.split(/\r?\n/u);
@@ -2535,107 +2950,185 @@ export function resourceTriadSectionHierarchyIssues(markdown: string): Validatio
   return issues;
 }
 
-// ── A2（4.12.23）：跨章数值矛盾确定性修复 ──────────────────────────────────
-// 「检测定位=修复定位」扩展：检测器家族（resourceConsistencyIssues /
-// nodeScheduleConsistencyIssues / crossSectionNumericConflictIssues）已锁定矛盾
-// 数值对与权威口径（表格优先），此处同源定点替换，不再依赖 LLM 定位能力。
-// 历史缺陷：LLM 修复跨章数值矛盾时 patch 锚点常失配（260/160、60/70、300/310 等
-// 矛盾残留进导出门禁形成 33 阻断），修复轮次被浪费在无效 LLM 调用上。
-// 零误伤原则：只修复检测器同阈值会报的矛盾对，且权威口径（表格）存在才修复；
-// 无法确定权威口径的场景（如两处正文互斥无表格）保持不动，交 LLM 修复路径。
+// ── V5 P4b. 跨工程同值复制 / 阶段人数混用检测（groups 同源，替代村名特征字启发式）──
 
-export const CROSS_CHAPTER_SEMANTIC_DUP_MIN_CHARS = 60;
-
-const CROSS_CHAPTER_SEMANTIC_DUP_THRESHOLD = 0.82;
-
-interface CrossChapterSemanticDupPair {
-  /** 保留方（信息密度高者；同密度取章序靠前者） */
-  keep: { chapterIndex: number; paragraphIndex: number };
-  /** 删除方 */
-  drop: { chapterIndex: number; paragraphIndex: number };
-  similarity: number;
-  paragraphPreview: string;
-}
-
-/** 段落信息密度：数值/字母/工程符号占比（密度高者承载更多事实参数，删除时保留） */
-
-function paragraphInfoDensity(text: string): number {
-  const compact = text.replace(/\s+/gu, '');
-  if (!compact.length) return 0;
-  const dense = (compact.match(/[0-9A-Za-z%℃°±×÷≥≤.]/gu) || []).length;
-  return dense / compact.length;
-}
-
-/** 章正文段落提取：空行分块，标题行/表格行/列表行所在块不入池（结构与 duplicateParagraphIssues 同口径） */
-
-function crossChapterDupParagraphs(chapters: DocumentDraftChapter[]) {
-  const pool: Array<{ chapterIndex: number; paragraphIndex: number; text: string; normalized: string }> = [];
-  chapters.forEach((chapter, chapterIndex) => {
-    const blocks = (chapter.content || '').split(/\n\s*\n/u);
-    blocks.forEach((block, paragraphIndex) => {
-      const text = block.trim();
-      if (!text) return;
-      if (/^#{1,6}\s/um.test(text) || /^\s*\|/um.test(text) || /^[-*•]\s/um.test(text)) return;
-      const normalized = text.replace(/\s+/gu, '');
-      if (normalized.length < CROSS_CHAPTER_SEMANTIC_DUP_MIN_CHARS) return;
-      pool.push({ chapterIndex, paragraphIndex, text, normalized });
-    });
-  });
-  return pool;
-}
-
-/** 跨章语义重复对检出（检测与 strip 共用同源核心）：bge 全量段落两两比对，逐字相等对排除 */
-
-export async function findCrossChapterSemanticDupPairs(chapters: DocumentDraftChapter[]): Promise<CrossChapterSemanticDupPair[]> {
-  const pool = crossChapterDupParagraphs(chapters);
-  if (pool.length < 2) return [];
-  const similarity = await buildSemanticSimilarity(pool.map(item => item.normalized), pool.map(item => item.normalized));
-  const pairs: CrossChapterSemanticDupPair[] = [];
-  const droppedKeys = new Set<string>();
-  for (let i = 0; i < pool.length; i += 1) {
-    for (let j = i + 1; j < pool.length; j += 1) {
-      const left = pool[i];
-      const right = pool[j];
-      // 只跨章判定（章内语义重复由章级清洗与 LLM 评审治理）；逐字相等属整段重复通道，不双报
-      if (left.chapterIndex === right.chapterIndex || left.normalized === right.normalized) continue;
-      const score = similarity(left.normalized, right.normalized);
-      if (score < CROSS_CHAPTER_SEMANTIC_DUP_THRESHOLD) continue;
-      // 保留信息密度高者；同密度保留章序靠前者（先成稿章优先）
-      const leftDensity = paragraphInfoDensity(left.text);
-      const rightDensity = paragraphInfoDensity(right.text);
-      const keepLeft = leftDensity > rightDensity || (leftDensity === rightDensity && left.chapterIndex <= right.chapterIndex);
-      const keep = keepLeft ? left : right;
-      const drop = keepLeft ? right : left;
-      const dropKey = `${drop.chapterIndex}:${drop.paragraphIndex}`;
-      if (droppedKeys.has(dropKey)) continue;
-      droppedKeys.add(dropKey);
-      pairs.push({
-        keep: { chapterIndex: keep.chapterIndex, paragraphIndex: keep.paragraphIndex },
-        drop: { chapterIndex: drop.chapterIndex, paragraphIndex: drop.paragraphIndex },
-        similarity: score,
-        paragraphPreview: drop.normalized.slice(0, 40),
+/** 跨工程同值复制检测（V5 P4b，P3.2 原设计）：多村/多标段合并项目清单条目携带分工程明细
+ * （groups=villageGroup∥section 原值），正文把 A 工程的明细值写到 B 工程语境（复制粘贴同值）
+ * 是 LLM 写作高频错误——修复器 fixQuantityAuthorityConflicts 对「值 ∈ 分组值集」精确豁免
+ * （分村分表合法量不归一），该豁免放过的同值复制错误由本检测器接手（与修复器同源 groups）。
+ *
+ * 确定性判定（零误伤，两条）：
+ * A. 同一条目的同一数值出现在 ≥2 个工程对象（组）语境，且这些组在清单中明细值不全相同——
+ *    数值不可能同时等于两个不同的明细值，至少一处是复制错误（P3.2 原设计字面判定）；
+ * B. 单组语境中，数值恰等于「其他组」的明细值（≠本组明细值）——直接复制了他家工程的数值。
+ * 组语境由名称前窗口（到句边界且 ≤24 字）内分工程明细名「唯一命中」确定——多组/无组语境
+ * 跳过（总述句合计值/跨工程列举句不建立配对）；表格行（分村分表合法承载）跳过；
+ * 名称/单位匹配复用修复器同源 helper（检测定位=修复定位）；每条目只报一条防刷屏。 */
+export function crossProjectValueCopyIssues(
+  markdown: string,
+  quantityAuthorities: Array<{ name: string; value: number; unit: string; groups?: Array<{ group: string; value: number }> }>,
+): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const matchesValue = (left: number, right: number) => Math.abs(left - right) < 1e-6;
+  for (const authority of quantityAuthorities) {
+    const detail = authority.groups ?? [];
+    if (detail.length < 2) continue;
+    // 明细值全同（各工程本来同值）：复制同值不构成跨工程错误，整体跳过
+    if (new Set(detail.map(item => Math.round(item.value * 100))).size < 2) continue;
+    const nameRe = new RegExp(flexNamePattern(authority.name), 'gu');
+    const unitRe = new RegExp(`(?<![\\dA-Za-z])(\\d(?:[\\d,]*(?:\\.\\d+)?))\\s*${quantityUnitVariants(authority.unit)}(?![0-9a-zA-Z])`, 'gui');
+    const pairings: Array<{ group: string; value: number; excerpt: string }> = [];
+    for (const nameMatch of markdown.matchAll(nameRe)) {
+      const ns = nameMatch.index ?? 0;
+      const ne = ns + nameMatch[0].length;
+      // 表格行：分村分表/分规格明细表的合法承载，不检测（与修复器同口径）
+      const lineStart = markdown.lastIndexOf('\n', ns) + 1;
+      let lineEnd = markdown.indexOf('\n', ns);
+      if (lineEnd === -1) lineEnd = markdown.length;
+      if (/^\s*\|/u.test(markdown.slice(lineStart, lineEnd))) continue;
+      // 语境组：名称前到句边界且 ≤24 字的窗口内，分工程明细名唯一命中才建立配对
+      const windowStart = Math.max(lineStart, ns - 24);
+      const before = markdown.slice(windowStart, ns);
+      const cut = Math.max(before.lastIndexOf('。'), before.lastIndexOf('；'), before.lastIndexOf(';'));
+      const subjectWindow = cut >= 0 ? before.slice(cut + 1) : before;
+      const contextGroups = detail.filter(item => item.group && subjectWindow.includes(item.group));
+      if (contextGroups.length !== 1) continue;
+      const contextGroup = contextGroups[0]!;
+      // 数值窗口（与修复器同口径）：名称后 24 字符、列举分隔符（、。；，与换行）截断，
+      // 取与合计值差异最小的「数值+单位」候选
+      const rawWindow = markdown.slice(ne, ne + 24);
+      const splitAt = Math.min(...[rawWindow.search(/[、。；，]/u), rawWindow.search(/\n/u)].filter(pos => pos >= 0).concat([rawWindow.length]));
+      const window = rawWindow.slice(0, splitAt);
+      let best: { offset: number; value: number; raw: string } | null = null;
+      for (const valueMatch of window.matchAll(unitRe)) {
+        // 规格句豁免（与修复器同源）：规格限定词紧邻尾随的数值是规格非工程量
+        if (/(?:间距|不大于|不小于|≥|≤|宽度|厚度|高度|深度|坡度)[^0-9]*$/u.test(window.slice(0, valueMatch.index ?? 0))) continue;
+        const raw = valueMatch[1];
+        const value = Number(raw.replace(/,/gu, ''));
+        if (!Number.isFinite(value) || value <= 0) continue;
+        if (best === null || Math.abs(value - authority.value) < Math.abs(best.value - authority.value)) {
+          best = { offset: ne + (valueMatch.index ?? 0) + valueMatch[0].indexOf(raw), value, raw };
+        }
+      }
+      if (!best) continue;
+      // V5 P6 误报收口（run1 实测）：「综合配套用房-安装工程投入配电箱AF 1台、照明配电箱AL1 1台、
+      // 照明配电箱AL2 1台」的名称与数值之间是子型号代号（AF/AL1/AL2）——数值属该对象子型号枚举量
+      // （1+1+1 恰为该工程条目明细值 3），非条目总量口径，与分工程明细不可比；正常量词为汉字
+      // （「共42台」的「共」）不被豁免，真复制形态（名称紧邻数值）不受影响
+      const between = markdown.slice(ne, best.offset);
+      if (/[A-Za-z]/u.test(between) && !/[\u4e00-\u9fa5]/u.test(between)) continue;
+      pairings.push({ group: contextGroup.group, value: best.value, excerpt: markdown.slice(ns, best.offset + best.raw.length) });
+    }
+    if (pairings.length === 0) continue;
+    let issuePushed = false;
+    // 判定 B：单组语境中值恰为其他组明细值（该值 ≠ 本组明细值）——直接复制了他家数值
+    for (const pairing of pairings) {
+      const own = detail.find(item => item.group === pairing.group);
+      if (!own || matchesValue(own.value, pairing.value)) continue;
+      const other = detail.find(item => item.group !== pairing.group && matchesValue(item.value, pairing.value));
+      if (!other) continue;
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'fact_consistency',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `跨工程同值复制：“${pairing.excerpt.slice(0, 40)}”在“${pairing.group}”语境处取值 ${pairing.value}${authority.unit}，该值是“${other.group}”的清单明细值（${pairing.group} 的清单明细值为 ${own.value}${authority.unit}）`,
+        suggestion: `以工程量清单分工程明细为准修正“${pairing.group}”语境：应为 ${own.value}${authority.unit}，不得沿用“${other.group}”的明细值 ${pairing.value}${authority.unit}；修复后全文该条目分工程取值必须与清单明细逐一对应。`,
       });
+      issuePushed = true;
+      break;
+    }
+    if (issuePushed) continue;
+    // 判定 A：同值出现在 ≥2 组语境且这些组明细值不同（数值不可能同时等于两个不同明细值）
+    const groupsByValue = new Map<string, Set<string>>();
+    for (const pairing of pairings) {
+      const key = pairing.value.toFixed(2);
+      const set = groupsByValue.get(key) ?? new Set<string>();
+      set.add(pairing.group);
+      groupsByValue.set(key, set);
+    }
+    for (const [key, groupSet] of groupsByValue) {
+      if (groupSet.size < 2) continue;
+      // P3.2 判定 A 语义（K3 契约）：同值出现在 ≥2 工程对象语境且这些对象的明细值互不相同
+      // → 至少一处是复制错误，不要求值本身 ∈ 某工程明细（999 双组同写须报；run1「AL共42台」
+      // 同值跨公厕/公共广场且明细 1/4/…互异，正文多处与明细矛盾属真缺陷，保留报告由 LLM 修复轮处理）
+      const hitDetail = detail.filter(item => groupSet.has(item.group));
+      if (new Set(hitDetail.map(item => Math.round(item.value * 100))).size < 2) continue;
+      const sample = pairings.find(pairing => pairing.value.toFixed(2) === key)!;
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'fact_consistency',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `跨工程同值复制：“${sample.excerpt.slice(0, 40)}”数值 ${key}${authority.unit} 同时出现在“${[...groupSet].join('”“')}”等 ${groupSet.size} 个工程对象语境，而清单明细值互不相同（${hitDetail.map(item => `${item.group} ${item.value}${authority.unit}`).join('、')}）——至少一处属跨工程同值复制`,
+        suggestion: `逐工程对象按清单明细值修正取值（${hitDetail.map(item => `${item.group} ${item.value}${authority.unit}`).join('、')}），不得多工程共用同一数值。`,
+      });
+      break;
     }
   }
-  return pairs;
+  // 上限 8：多村项目同值复制可能成簇出现，防刷屏（确定性检测零误伤，数量增加不放大修复风险）
+  return issues.slice(0, 8);
 }
 
-/** 跨章语义重复检测（命中即报，进全局一致性轮修复闭环与交付校验展示） */
-
-export async function crossChapterSemanticDuplicateIssues(chapters: DocumentDraftChapter[]): Promise<ValidationIssue[]> {
-  const pairs = await findCrossChapterSemanticDupPairs(chapters);
-  return pairs.map(pair => ({
-    level: 'error' as const,
-    severity: 'blocker' as const,
-    category: 'structure' as const,
-    owner: 'llm' as const,
-    repairability: 'llm_repairable' as const,
-    chapterId: chapters[pair.drop.chapterIndex]?.id,
-    message: `跨章语义重复：「${chapters[pair.keep.chapterIndex]?.title || '?'}」与「${chapters[pair.drop.chapterIndex]?.title || '?'}」存在内容高度雷同段落（相似度 ${pair.similarity.toFixed(2)}）：“${pair.paragraphPreview}…”`,
-    suggestion: '同一内容全文只保留一处（保留信息密度高者）；删除或改写本章的雷同段落，与本章主题相关的独有信息归并后，不得与他章段落语义重复。',
-  }));
+/** 阶段人数混用检测（V5 P4b，P3.3 原设计）：正文「XX阶段 + N 人」与蓝图分阶段劳动力推导
+ * （phaseAuthorities = byPhase 的 midValue 权威投影）比对——阶段名唯一命中且数值不符即 error。
+ * 阶段名存在但值不符 = 跨口径数字被复制/改编（确定性可判）；阶段名不存在时不判
+ * （合法细分表述与异策略阶段词无法确定性裁决，交 LLM 评审层）。
+ * 阶段名匹配用最长公共汉字子串（≥4 字）：「施工准备」↔「施工准备与清杂拆除」、
+ * 「污水管网工程」精确命中；表格行（分阶段投入明细表的合法承载，byPhase 推导源）跳过；
+ * 负向声明句（修复声明引用旧值）豁免；阶段提取与 resourceConsistencyIssues 同窗口。 */
+export function phaseLaborMixingIssues(
+  markdown: string,
+  phaseAuthorities: Array<{ phase: string; value: number; trace?: string }>,
+): ValidationIssue[] {
+  if (phaseAuthorities.length === 0) return [];
+  const issues: ValidationIssue[] = [];
+  for (const match of markdown.matchAll(STAGE_LABOR_RE)) {
+    const lineStart = markdown.lastIndexOf('\n', match.index) + 1;
+    let lineEnd = markdown.indexOf('\n', match.index);
+    if (lineEnd === -1) lineEnd = markdown.length;
+    const line = markdown.slice(lineStart, lineEnd);
+    // 表格行：分阶段投入明细表的合法承载，不检测（与 resourceConsistencyIssues 同口径）
+    if (/^\s*\|.*\|\s*$/u.test(line)) continue;
+    // 负向声明句豁免：「不再出现“XX阶段35人”」是修复声明引用旧值（与检测器家族同源）
+    if (NEGATIVE_DECLARATION_RE.test(line)) continue;
+    // V5 P6 误报豁免（run1 实测）：①最低配置声明「阶段不少于2人」（安全员配置）——数字前文含
+    // 不少于/不低于/至少/最低/不小于；②工种配置句「道路铺装阶段即安排管道工10人」——数字紧邻
+    // 前文以工种/职务词结尾（工/员/长/司机/班组）。两类均非阶段劳动力总量口径。
+    const valueIndex = (match.index ?? 0) + match[0].indexOf(match[1]);
+    const beforeNumber = markdown.slice(Math.max(lineStart, valueIndex - 12), valueIndex);
+    if (/不少于|不低于|至少|最低|不小于|≥/u.test(beforeNumber)) continue;
+    if (/(?:[\u4e00-\u9fa5]{1,3}(?:工|员|长)|司机|班组|队伍?)\s*$/u.test(beforeNumber)) continue;
+    // 阶段名提取（V5 P6 两步法）：回指句（「该阶段…统一为238人」）解析到行内最近实义阶段名
+    const stagePhrase = extractStagePhrase(markdown, lineStart, valueIndex);
+    if (!stagePhrase) continue;
+    const stagePrefix = stagePhrase.replace(/阶段$/u, '');
+    const value = Number(match[1].replace(/[,，]/gu, ''));
+    if (!Number.isFinite(value) || value <= 0) continue;
+    // 阶段名匹配：最长公共汉字子串 ≥4 字，取最长命中（多命中时最具体阶段胜出）
+    let best: { phase: string; value: number; trace?: string; score: number } | null = null;
+    for (const entry of phaseAuthorities) {
+      const score = longestCommonHanSubstring(stagePrefix, entry.phase);
+      if (score >= 4 && (best === null || score > best.score)) best = { ...entry, score };
+    }
+    if (!best) continue;
+    if (value === best.value) continue;
+    // 引号原文切片：数字前 24 字到数值/人结束（正文真实片段，供修复轮章节定位）——
+    // 两步法下阶段短语可能不在数字紧邻前文，切片锚定数字位置而非 match 起点
+    const excerpt = markdown.slice(Math.max(lineStart, valueIndex - 24), (match.index ?? 0) + match[0].length).trim();
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'fact_consistency',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      message: `阶段劳动力数据矛盾：正文“${excerpt.slice(0, 60)}”取值 ${value} 人，与蓝图分阶段劳动力推导不符（“${best.phase}”阶段应为 ${best.value} 人）`,
+      suggestion: `分阶段劳动力人数必须以蓝图推导为准：将“${best.phase}”阶段人数统一为 ${best.value} 人${best.trace ? `（依据：${best.trace}）` : ''}，删除其他口径数字。`,
+    });
+    if (issues.length >= 8) break;
+  }
+  return issues;
 }
 
-/** 跨章语义重复确定性 strip：保留信息密度高者所在段落，删除低密度方整段（原地改 chapters，返回删除段数）。
- * B1 迭代至收敛：删除一个段落后全文 bge 余弦重算，新段落对会越过阈值（实测单轮后二次 strip 仍删 11 段），
- * 单轮 strip 残留被导出门禁阻断；循环至无新 pair 或 5 轮上限（防异常数据死循环） */

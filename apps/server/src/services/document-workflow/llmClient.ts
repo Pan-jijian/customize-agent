@@ -51,11 +51,6 @@ export function raiseDocumentLlmConcurrencyForScale(_targetWords: number) {
   llmMaxConcurrency = envMaxConcurrency ?? Number.POSITIVE_INFINITY;
   return llmMaxConcurrency;
 }
-/**
- * 全局连续失败计数：成功清零、失败递增；连续失败≥5 时章节小节并发降级为串行。
- * 阈值从 2 提到 5：偶发失败（单模型瞬时抽风）不应使整体并发塌缩，只有持续性失败才降级。
- */
-let llmFailureStreak = 0;
 
 interface LlmSlotWaiter {
   resolve: (release: () => void) => void;
@@ -191,11 +186,6 @@ export function flushScheduledLaunches(batch: ScheduledLlmLaunch[]) {
   }
 }
 
-/** P1-9 失败 streak 隔离：优先取 per-generation diagnostics 的 streak（多文档并发生成互不降级），无 diagnostics 时回退全局值 */
-export function getDocumentLlmFailureStreak(diagnostics?: { llm?: { failureStreak?: number } }) {
-  return diagnostics?.llm?.failureStreak ?? llmFailureStreak;
-}
-
 export function getDocumentLlmMaxConcurrency() {
   return llmMaxConcurrency;
 }
@@ -324,7 +314,7 @@ export function sortScheduledLaunches<T extends { fingerprint: string }>(batch: 
   return [...batch].sort((a, b) => (a.fingerprint < b.fingerprint ? -1 : a.fingerprint > b.fingerprint ? 1 : 0));
 }
 
-export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; contextLayers?: Partial<Record<ContextLayerKey, number>>; prefixKey?: string } = {}): Promise<string | undefined> {
+export async function callDocumentLlm(system: string, prompt: string, jsonOnly = false, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; taskKind?: DocumentLlmTaskKind; contextLayers?: Partial<Record<ContextLayerKey, number>>; prefixKey?: string } = {}): Promise<string | undefined> {
   if (options.diagnostics) {
     options.diagnostics.llm.calls += 1;
     // 上下文输入观测：system + user 字符总量 + L0-L3 分层统计（3.4：分层占比供上下文瘦身前后对比验收）
@@ -368,7 +358,6 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
     const rawOutputCap = provider.capabilities?.maxOutputTokens || 8192;
     const outputCap = /deepseek/iu.test(modelName) ? Math.min(rawOutputCap, 8192) : rawOutputCap;
     // 思考关闭后正文独占输出池，maxTokens 直通；仅当思考不可关且与正文共享池（relaxed）时放大预算保正文。
-    // disableThinkingBoost 已废弃（思考由 disableThinking 硬关而非预算博弈），保留签名兼容存量调用点。
     const baseMaxTokens = decision.budgetMode === 'relaxed' && options.maxTokens
       ? Math.min(Math.ceil(options.maxTokens * 6), outputCap)
       : options.maxTokens;
@@ -459,8 +448,7 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
         const attemptMaxTokens = baseMaxTokens;
         const thinkingTrimmingHint = attempt === 1 && lastError === EMPTY_CONTENT;
         const content = await attemptOnce(attemptMaxTokens, thinkingTrimmingHint);
-        llmFailureStreak = 0;
-        // P1-9：per-generation streak 同步清零（成功即恢复并发），多文档互不影响
+        // P1-9：per-generation streak 成功即清零，多文档诊断互不影响
         if (options.diagnostics) options.diagnostics.llm.failureStreak = 0;
         return content;
       } catch (error) {
@@ -472,10 +460,9 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
         await new Promise<void>(resolve => { setTimeout(resolve, retryDelayMs(error, attempt)); });
       }
     }
-    llmFailureStreak += 1;
     if (options.diagnostics) {
       options.diagnostics.llm.failures += 1;
-      // P1-9：per-generation streak 同步递增，章节并发降级只作用于本生成任务
+      // P1-9：per-generation streak 递增，只作用于本生成任务的诊断
       options.diagnostics.llm.failureStreak = (options.diagnostics.llm.failureStreak || 0) + 1;
       options.diagnostics.llm.lastError = lastError instanceof Error ? lastError.message : lastError === EMPTY_CONTENT ? '空响应（思考阶段耗尽输出预算）' : String(lastError);
     }
@@ -521,8 +508,21 @@ export interface DocumentJsonSchema {
   properties: Record<string, DocumentJsonSchemaField>;
 }
 
-/** 校验单个值：返回错误明细（含字段路径，如 $.blocks[2].subPoints[0].title），供诊断透传 */
-function validateSchemaField(value: unknown, field: DocumentJsonSchemaField, path: string): string[] {
+/** V5 P4.1 截断记录：maxItems 超限数组被原地截断（截断不判失败），明细由调用方告警写入 diagnostics */
+export interface DocumentJsonSchemaTruncation {
+  /** 字段路径（如 $.issues） */
+  path: string;
+  /** 声明上限 */
+  maxItems: number;
+  /** 截断前实际条数 */
+  originalLength: number;
+}
+
+/** 校验单个值：返回错误明细（含字段路径，如 $.blocks[2].subPoints[0].title），供诊断透传。
+ * maxItems 超限为截断式校验（V5 P4.1）：原地截断实际数组（JSON.parse 产物引用，调用方直接拿到
+ * 截断后数据）并记录 truncations，不再判失败——历史缺陷：超限整份失败触发重试，而超限尾部多为
+ * 可丢弃溢出项；minItems 保持严格失败。 */
+function validateSchemaField(value: unknown, field: DocumentJsonSchemaField, path: string, truncations?: DocumentJsonSchemaTruncation[]): string[] {
   let actualType = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
   // 数字字符串宽容：LLM 结构化输出常把数值写成字符串（如 count:"320"），严格类型检查会拒绝整份
   // 输出并触发重试直至失败（计划数据主表 schema 失败 6 次即此根因）；字符串可无损转 number 时按 number 接受，
@@ -541,8 +541,11 @@ function validateSchemaField(value: unknown, field: DocumentJsonSchemaField, pat
   } else if (field.type === 'array') {
     const items = value as unknown[];
     if (field.minItems !== undefined && items.length < field.minItems) errors.push(`字段 ${path} 条数不足（期望 ≥${field.minItems}，得到 ${items.length}）`);
-    if (field.maxItems !== undefined && items.length > field.maxItems) errors.push(`字段 ${path} 条数超限（期望 ≤${field.maxItems}，得到 ${items.length}）`);
-    if (field.items) items.forEach((item, index) => errors.push(...validateSchemaField(item, field.items as DocumentJsonSchemaField, `${path}[${index}]`)));
+    if (field.maxItems !== undefined && items.length > field.maxItems) {
+      truncations?.push({ path, maxItems: field.maxItems, originalLength: items.length });
+      items.splice(field.maxItems);
+    }
+    if (field.items) items.forEach((item, index) => errors.push(...validateSchemaField(item, field.items as DocumentJsonSchemaField, `${path}[${index}]`, truncations)));
   } else if (field.type === 'object' && field.properties) {
     const record = value as Record<string, unknown>;
     for (const [key, subField] of Object.entries(field.properties)) {
@@ -551,14 +554,15 @@ function validateSchemaField(value: unknown, field: DocumentJsonSchemaField, pat
         if (subField.required) errors.push(`缺失字段 ${path}.${key}`);
         continue;
       }
-      errors.push(...validateSchemaField(subValue, subField, `${path}.${key}`));
+      errors.push(...validateSchemaField(subValue, subField, `${path}.${key}`, truncations));
     }
   }
   return errors;
 }
 
-/** 顶层对象校验：必填字段缺失 + 属性约束，错误上限 6 条防止日志爆炸 */
-export function validateJsonAgainstSchema(value: unknown, schema: DocumentJsonSchema): string[] {
+/** 顶层对象校验：必填字段缺失 + 属性约束，错误上限 6 条防止日志爆炸。
+ * maxItems 超限为截断式校验（V5 P4.1：原地截断 + truncations 记录，不产生错误），minItems 保持严格 */
+export function validateJsonAgainstSchema(value: unknown, schema: DocumentJsonSchema, truncations?: DocumentJsonSchemaTruncation[]): string[] {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return [`根节点类型错误（期望 object，得到 ${value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value}）`];
   }
@@ -573,7 +577,7 @@ export function validateJsonAgainstSchema(value: unknown, schema: DocumentJsonSc
       if (field.required) errors.push(`缺失字段 $.${key}`);
       continue;
     }
-    errors.push(...validateSchemaField(fieldValue, field, `$.${key}`));
+    errors.push(...validateSchemaField(fieldValue, field, `$.${key}`, truncations));
   }
   return errors.slice(0, 6);
 }
@@ -660,6 +664,12 @@ function recordJsonValidationFailure(diagnostics: DocumentGenerationDiagnostics 
   diagnostics.llm.lastError = message;
 }
 
+/** V5 P4.1 截断告警记录：maxItems 超限已原地截断（不判失败、不计 schemaFailures），明细写 lastInfo 可观测 */
+function recordSchemaTruncations(diagnostics: DocumentGenerationDiagnostics | undefined, truncations: DocumentJsonSchemaTruncation[]) {
+  if (!diagnostics || truncations.length === 0) return;
+  diagnostics.llm.lastInfo = `JSON Schema 截断式校验：${truncations.slice(0, 4).map(item => `${item.path} ${item.originalLength} 条超上限 ${item.maxItems}，已截断保留前 ${item.maxItems} 条`).join('；')}`;
+}
+
 /** F1 重试循环核心：JSON 解析/schema 校验失败重试（失败原因回注提示词），重试上限内仍失败才放弃。
  * invokeLlm 可注入（单测注入 mock，生产绑定 callDocumentLlm）——模块内部词法绑定无法被 vi.mock 拦截 */
 /**
@@ -670,7 +680,7 @@ export function amplifiedTruncationMaxTokens(current?: number): number {
   return Math.ceil((current || 2000) * 1.5);
 }
 
-export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>>; prefixKey?: string } = {}, invokeLlm?: (attemptSystem: string, attemptPrompt: string) => Promise<string | undefined>): Promise<T | undefined> {
+export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>>; prefixKey?: string } = {}, invokeLlm?: (attemptSystem: string, attemptPrompt: string) => Promise<string | undefined>): Promise<T | undefined> {
   // 历史缺陷：规划/审查/修复类 jsonOnly 调用一次失败即放弃，造成章节降级与后续数轮无效修复；
   // 失败原因回注提示词让模型收敛，秒级重试代价远小于分钟级降级链。
   // 4.12.12 收敛：JSON 截断类失败重试时放大 maxTokens（截断根因多为 token 上限不足，同额度重试必再截断——
@@ -678,7 +688,7 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
   const maxJsonAttempts = 2;
   let lastFailure: string | undefined;
   let retryMaxTokens = options.maxTokens;
-  const invoke = invokeLlm ?? ((attemptSystem: string, attemptPrompt: string) => callDocumentLlm(attemptSystem, attemptPrompt, true, { maxTokens: retryMaxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, disableThinkingBoost: options.disableThinkingBoost, taskKind: options.taskKind, contextLayers: options.contextLayers, prefixKey: options.prefixKey }));
+  const invoke = invokeLlm ?? ((attemptSystem: string, attemptPrompt: string) => callDocumentLlm(attemptSystem, attemptPrompt, true, { maxTokens: retryMaxTokens, temperature: options.temperature, signal: options.signal, diagnostics: options.diagnostics, taskKind: options.taskKind, contextLayers: options.contextLayers, prefixKey: options.prefixKey }));
   for (let attempt = 0; attempt <= maxJsonAttempts; attempt += 1) {
     if (options.signal?.aborted) return undefined;
     const attemptPrompt = attempt === 0 ? prompt : `${prompt}\n\n（重试修正：上一次输出未通过——${lastFailure ?? '输出无效'}。请重新输出完整合法的 JSON，只返回 JSON。）`;
@@ -692,7 +702,9 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
     try {
       const parsed = JSON.parse(payload) as T;
       if (options.schema) {
-        const errors = validateJsonAgainstSchema(parsed, options.schema);
+        const truncations: DocumentJsonSchemaTruncation[] = [];
+        const errors = validateJsonAgainstSchema(parsed, options.schema, truncations);
+        recordSchemaTruncations(options.diagnostics, truncations);
         if (errors.length > 0) {
           const message = `JSON Schema 校验失败：${errors.join('；')}`;
           lastFailure = message;
@@ -718,7 +730,9 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
         try {
           const repairedParsed = JSON.parse(repairedPayload) as T;
           if (options.schema) {
-            const repairErrors = validateJsonAgainstSchema(repairedParsed, options.schema);
+            const repairTruncations: DocumentJsonSchemaTruncation[] = [];
+            const repairErrors = validateJsonAgainstSchema(repairedParsed, options.schema, repairTruncations);
+            recordSchemaTruncations(options.diagnostics, repairTruncations);
             if (repairErrors.length === 0) return repairedParsed;
             // 截断修复产物不满足 schema（如数组元素数不足）：按 schema 失败走重试
             const repairMessage = `JSON Schema 校验失败：${repairErrors.join('；')}`;
@@ -753,6 +767,6 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
   return undefined;
 }
 
-export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; disableThinkingBoost?: boolean; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>>; prefixKey?: string } = {}): Promise<T | undefined> {
+export async function callDocumentLlmJson<T>(system: string, prompt: string, options: { maxTokens?: number; temperature?: number; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; schema?: DocumentJsonSchema; taskKind?: DocumentLlmTaskKind; outFailure?: { value?: string }; contextLayers?: Partial<Record<ContextLayerKey, number>>; prefixKey?: string } = {}): Promise<T | undefined> {
   return callDocumentLlmJsonWithRetry(system, prompt, options);
 }

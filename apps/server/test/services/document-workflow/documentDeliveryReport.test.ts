@@ -40,6 +40,24 @@ describe('evidenceUsageCoverageIssues（证据使用覆盖率）', () => {
     expect(issues.some(issue => issue.message.includes('工期'))).toBe(false);
     expect(issues.some(issue => issue.message.includes('质量'))).toBe(true);
   });
+
+  it('正文无字段名前缀引用（纯值行命中）不报（V5 P6 run1 实测）', () => {
+    const markdown = '本工程总工期为360日历天，各节点按计划推进。';
+    const model = factsModel({ schedule: [fact('计划工期', '360日历天')] });
+    expect(evidenceUsageCoverageIssues(markdown, model)).toHaveLength(0);
+  });
+
+  it('长值行 12 字分片兜底命中不报（工程量维度清单事实，V5 P6 run1 实测）', () => {
+    const markdown = '项目名称为舒城县城镇功能活力品质提升一期项目（一标）——公共广场空间改造等提升工程。';
+    const model = factsModel({ bills: [fact('项目名称', '舒城县城镇功能活力品质提升一期项目（一标）——公共广场空间改造等提升工程')] });
+    expect(evidenceUsageCoverageIssues(markdown, model)).toHaveLength(0);
+  });
+
+  it('单维度桶为空跳过（不可评估不误报，模型非空，V5 P6 run1 实测）', () => {
+    const markdown = '本工程安全管理体系完善，风险分级管控落实。';
+    const model = factsModel({ schedule: [fact('计划工期', '45日历天')] });
+    expect(evidenceUsageCoverageIssues(markdown, model)).toEqual([]);
+  });
 });
 
 describe('paragraphGenericIssues（段落空泛语义检测）', () => {

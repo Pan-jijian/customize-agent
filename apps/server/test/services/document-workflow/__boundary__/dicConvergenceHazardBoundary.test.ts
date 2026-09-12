@@ -31,7 +31,7 @@ type Fixer = (markdown: string) => DeterministicFixOutcome;
 describe('Z1 runFixUntilClean 节点内闭环修复深挖', () => {
   const shrinkAA: Fixer = markdown => (markdown.includes('AA')
     ? { markdown: markdown.replace('AA', 'A'), fixedCount: 1 }
-    : { markdown: md, fixedCount: 0 });
+    : { markdown, fixedCount: 0 });
 
   it('Z1 maxRounds=0 → 不跑任何轮', () => {
     let calls = 0;

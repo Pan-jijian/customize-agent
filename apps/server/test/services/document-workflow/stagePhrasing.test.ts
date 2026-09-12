@@ -4,7 +4,7 @@
  * 语义通道全部 mock，避免加载 Transformers.js 重依赖。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { stagePhrasingIssues } from '@/services/document-workflow/stagePhrasing';
+import { extractStageDivisionSentences, stagePhrasingIssues } from '@/services/document-workflow/stagePhrasing';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({
   buildSemanticSimilarity: vi.fn(),
@@ -71,5 +71,18 @@ describe('stagePhrasingIssues', () => {
     mockSimilarity(() => 0.1);
     // '分三个阶段' 5 字 < 8 → 过滤，仅剩 1 条长句
     expect(await stagePhrasingIssues('分三个阶段\n本工程划分为四个阶段组织。')).toEqual([]);
+  });
+
+  it('前置过滤：执行描述句/列举收尾不进入划分句池（run1 实测误报收口）', () => {
+    const markdown = [
+      '该阶段同时在场人数为276人，与蓝图分阶段劳动力推导一致。',
+      '机械调配以“按村分组、按阶段集中、按作业面轮换”为原则。',
+      '系统调试按单点调试、路段联调、平台接入三个阶段依次推进。',
+      '综合配套用房、白鸥观澜公厕和门卫四个单体工程中，土建与安装的穿插集中在预留预埋、配管配线和设备安装三个阶段。',
+      '本工程划分为四个阶段组织。',
+    ].join('\n');
+    // 「分阶段推导」无阶段数形态、「按村分组、按阶段集中」无数字、其余两句「三个阶段」左窗含顿号
+    // （列举收尾跨界拼接）——均不得进入聚类池；仅真声明句保留
+    expect(extractStageDivisionSentences(markdown)).toEqual(['本工程划分为四个阶段组织']);
   });
 });

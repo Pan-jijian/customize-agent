@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import { listKnowledgeFiles } from '../knowledge/kbService';
-import type { AgentChapterTask, AgentDocumentPlan, AgentReviewResult } from './agentPlanner';
+import type { AgentChapterTask, AgentDocumentPlan } from './agentPlanner';
 import type { DocumentExecutionStage, DocumentFact, DocumentTemplate, ProjectBinding, ProjectGraph, ValidationIssue } from './types';
 import { sectionDuplicateIssues, sectionHeadingIssues, sourcePhraseIssues } from './markdownComposer';
 import { displayStage } from './progress';
@@ -62,7 +62,6 @@ export interface AgentWorkflowContext {
   baseProjectGraph: ProjectGraph;
   documentPlan?: AgentDocumentPlan;
   chapterTasks?: AgentChapterTask[];
-  reviewResults?: Record<string, AgentReviewResult>;
   issues: ValidationIssue[];
   createdAt: number;
 }

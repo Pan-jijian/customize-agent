@@ -4,12 +4,11 @@
  * 1222 超窗校验拦截（Q4）、柴油机械临电剔除与降级定性（Q5）、milestones 权重 0 兜底（Q6）、
  * byPhase 五阶段产出（Q7）、渲染层公式符号断言与 byTrade 单值（Q8）、
  * 设备单位校验（路灯安装「项」不入高空作业车「套」）（Q9）、
- * blueprintPlanAuthorities.laborPeakAuthority 权威源回填（Q10）。
+ * blueprintLaborPeakAuthority 权威源回填（Q10）。
  * 原则：每条用例独立断言意义；真实实现行为一律锁定，不迎合用例改实现。
  */
 import { describe, expect, it } from 'vitest';
 import {
-  blueprintPlanAuthorities,
   buildBlueprintData,
   buildBlueprintOutline,
   deriveCostAnchoredLaborWindow,
@@ -19,6 +18,7 @@ import {
   renderBlueprintDataText,
   validateBlueprint,
 } from '@/services/document-workflow/integratedBlueprint';
+import { blueprintLaborPeakAuthority } from '@/services/document-workflow/authorityIndex';
 import type { BlueprintEquipmentItem, IntegratedBlueprint } from '@/services/document-workflow/integratedBlueprint';
 import type { BillOfQuantitiesResult, BoqEntry } from '@/services/document-workflow/billOfQuantitiesParser';
 
@@ -249,7 +249,7 @@ describe('Q9 设备单位一致性（「项」条目不入「套」设备桶）'
   });
 });
 
-describe('Q10 blueprintPlanAuthorities.laborPeakAuthority 权威源回填', () => {
+describe('Q10 blueprintLaborPeakAuthority 权威源回填', () => {
   it('laborPeakAuthority = 蓝图 peakValue（正文峰值表述的确定性校正源）', () => {
     const boq = boqOf([
       entry(1, '拆除砖砌体', '1．拆除方式：人工配合机械', 'm3', 200),
@@ -261,6 +261,6 @@ describe('Q10 blueprintPlanAuthorities.laborPeakAuthority 权威源回填', () =
     const basicFacts = '项目名称：测试村建设项目 计划工期：90日历天 质量标准：合格 计价依据：合造价〔2018〕13号文 合同估算价：1100万元';
     const { data } = buildBlueprintData({ boq, basicFacts, projectName: '测试村建设项目' });
     expect(data.resources.labor.peakValue).toBe(155);
-    expect(blueprintPlanAuthorities(data).laborPeakAuthority).toBe(155);
+    expect(blueprintLaborPeakAuthority(data)).toBe(155);
   });
 });

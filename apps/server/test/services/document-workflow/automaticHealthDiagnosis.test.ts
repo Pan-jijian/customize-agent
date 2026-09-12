@@ -7,7 +7,7 @@ function diagnosticsWith(overrides: {
   hit?: number; miss?: number; reasoningTokens?: number; budgetDropped?: number; raw?: number; failures?: number; calls?: number;
 }): DocumentGenerationDiagnostics {
   return {
-    strategy: { mode: 'balanced', enableChapterReview: true, enableGlobalReview: true, enableDocumentBudgetExpansion: false, enableFinalQualityReview: true },
+    strategy: { mode: 'balanced', enableChapterReview: true, enableGlobalReview: true, enableFinalQualityReview: true },
     metrics: [],
     llm: {
       calls: overrides.calls ?? 0, failures: overrides.failures ?? 0, maxActive: 1, retries: 0,

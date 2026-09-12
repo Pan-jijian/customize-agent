@@ -1,7 +1,7 @@
 /**
  * dicListParagraphClosureBoundary：危大清单一致性（dangerousListConsistencyIssues）+
  * 段首机械重复（paragraphOpeningRepeatIssues）+ 闭环句式密度（closurePhraseDensityCapIssues）+
- * 概况跨章复述（overviewRecapCandidates/Issues/stripOverviewRecapBodyLines，注入确定性相似度）+
+ * 概况跨章复述（overviewRecapCandidates/Issues，注入确定性相似度）+
  * 投标人资格串章（bidderQualificationSectionIssues）增量深挖（W 组）。
  * 覆盖增量维度（与既有批次基线互补，不重复）：
  *  - W1 危大清单：标题 7 形态谱系、归一化三规则（括号/编号/尾缀）、条目编号 7 形态谱系、
@@ -12,8 +12,7 @@
  *  - W3 闭环密度：总字数 3000/2999 边界、密度 3.0/2.67 精确边界、四词谱系、max 词选择、
  *    并列密度取词表序、空白不计入总字数；
  *  - W4 概况复述：注入相似度 0.6/0.599 精确阈值、四开头词谱系、句长 12 边界、
- *    概况区间锚定与同级标题结束、H3 不结束 H2 区间、3 处截断、slice(0,36)、
- *    stripOverviewRecapBodyLines 删除/保留/短句保留；
+ *    概况区间锚定与同级标题结束、H3 不结束 H2 区间、3 处截断、slice(0,36)。
  *  - W5 资格串章：形态A（具备有效）句式判别、词表 16 词谱系、技术语境豁免、
  *    形态B（提供+证明词）、编号前缀剥离、多标题聚合与「 等」、H2~H4 层级、H5 不收。
  * 全部为确定性正则/数值比较，无语义依赖（W4 相似度注入确定性函数）。
@@ -26,7 +25,6 @@ import {
   overviewRecapCandidates,
   overviewRecapIssues,
   paragraphOpeningRepeatIssues,
-  stripOverviewRecapBodyLines,
 } from '@/services/document-workflow/documentIntegrityChecks';
 
 // ── W1. dangerousListConsistencyIssues：危大清单一致性 ──
@@ -282,29 +280,35 @@ describe('W3 闭环密度：词谱系与 max 选择', () => {
   });
 });
 
-// ── W4. overviewRecap：概况跨章复述（注入确定性相似度） ──
+// ── W4. overviewRecap：概况跨章复述（字符级确定性判定） ──
 
-// 复述句 12 字恰阈值（"本项目为"4字+"某市安置小区项目"8字）
+// 复述句=概况事实逐字搬用（“本项目为某市安置小区项目”12 字连续重合）
 const RECAP_MD = '## 工程概况\n本项目为某市安置小区项目。\n## 施工组织\n本项目为某市安置小区项目。';
 
-describe('W4 概况复述：注入相似度精确阈值', () => {
-  it('W4-1 相似度0.6（恰阈值）→ 报', () => {
-    const issues = overviewRecapIssues(RECAP_MD, { semanticSimilarity: () => 0.6 });
+describe('W4 概况复述：确定性判定与范围项摘抄', () => {
+  it('W4-1 概况事实逐字搬用（12 字连续重合）→ 报', () => {
+    const issues = overviewRecapIssues(RECAP_MD);
     expect(issues).toHaveLength(1);
   });
-  it('W4-2 相似度0.599（<0.6）→ 不报', () => {
-    expect(overviewRecapIssues(RECAP_MD, { semanticSimilarity: () => 0.599 })).toEqual([]);
+  it('W4-2 无概况事实重合的总述句 → 不报', () => {
+    const md = '## 工程概况\n本项目为某市安置小区项目。\n## 施工组织\n本工程为多单体工程，同步交叉施工。';
+    expect(overviewRecapIssues(md)).toEqual([]);
   });
-  it('W4-3 未注入相似度函数 → 不报', () => {
-    expect(overviewRecapIssues(RECAP_MD)).toEqual([]);
+  it('W4-3 范围清单摘抄（≥2 项逐字重合）→ 报', () => {
+    const md = '## 工程概况\n本项目为合肥市包河区商业综合体项目，施工内容含玻璃幕墙安装、屋面防水、绿化工程等。\n## 施工组织\n本项目为改造工程，作业分区含幕墙拆除、屋面防水、绿化工程等。';
+    expect(overviewRecapIssues(md)).toHaveLength(1);
+  });
+  it('W4-3b 范围项重合不足 2 项 → 不报', () => {
+    const md = '## 工程概况\n本项目为某市安置小区项目，施工内容含幼儿园、社区中心等。\n## 施工组织\n本项目为改造工程，作业面含幼儿园、邻里中心。';
+    expect(overviewRecapIssues(md)).toEqual([]);
   });
   it('W4-4 无概况区（overviewBody空）→ 不报', () => {
     const md = '## 施工组织\n本项目为某安置小区项目。';
-    expect(overviewRecapIssues(md, { semanticSimilarity: () => 0.9 })).toEqual([]);
+    expect(overviewRecapIssues(md)).toEqual([]);
   });
   it('W4-5 概况区外无复述句 → 不报', () => {
-    const md = '## 工程概况\n本项目为某安置小区项目。\n## 施工组织\n本章阐述施工部署。';
-    expect(overviewRecapIssues(md, { semanticSimilarity: () => 0.9 })).toEqual([]);
+    const md = '## 工程概况\n本项目为某市安置小区项目。\n## 施工组织\n本章阐述施工部署。';
+    expect(overviewRecapIssues(md)).toEqual([]);
   });
 });
 
@@ -312,47 +316,47 @@ describe('W4 概况复述：开头词谱系与句长边界', () => {
   const OPENINGS = ['本项目为', '本工程为', '该项目为', '该工程为'] as const;
   it.each(OPENINGS)('W4-6 开头“%s”复述句 → 报', (opening) => {
     const md = `## 工程概况\n${opening}某市安置小区项目。\n## 施工组织\n${opening}某市安置小区项目。`;
-    expect(overviewRecapIssues(md, { semanticSimilarity: () => 0.9 })).toHaveLength(1);
+    expect(overviewRecapIssues(md)).toHaveLength(1);
   });
   it('W4-7 句长11字（<12）不采 → 不报', () => {
     const md = '## 工程概况\n本项目为某安置小区项目。\n## 施工组织\n本项目为某安置小区项目。';
-    expect(overviewRecapIssues(md, { semanticSimilarity: () => 0.9 })).toEqual([]);
+    expect(overviewRecapIssues(md)).toEqual([]);
   });
   it('W4-8 句长12字（恰阈值）→ 报', () => {
     const md = '## 工程概况\n本项目为某市安置小区项目。\n## 施工组织\n本项目为某市安置小区项目。';
-    expect(overviewRecapIssues(md, { semanticSimilarity: () => 0.9 })).toHaveLength(1);
+    expect(overviewRecapIssues(md)).toHaveLength(1);
   });
 });
 
 describe('W4 概况复述：区间锚定与聚合', () => {
   it('W4-9 H3（非概况词）不结束 H2 概况区间 → 区间内复述句不采 → 不报', () => {
     const md = '## 工程概况\n正文内容。\n### 项目背景\n本项目为某市安置小区项目。';
-    expect(overviewRecapIssues(md, { semanticSimilarity: () => 0.9 })).toEqual([]);
+    expect(overviewRecapIssues(md)).toEqual([]);
   });
   it('W4-9b 「### 基本信息」本身重置概况锚点 → 区间内复述句不采 → 不报', () => {
     const md = '## 工程概况\n正文内容。\n### 基本信息\n正文内容。\n本项目为某市安置小区项目。';
-    expect(overviewRecapIssues(md, { semanticSimilarity: () => 0.9 })).toEqual([]);
+    expect(overviewRecapIssues(md)).toEqual([]);
   });
   it('W4-10 同级 H2 结束概况区间 → 区间外复述句报', () => {
-    const md = '## 工程概况\n正文内容。\n## 施工部署\n本项目为某市安置小区项目。';
-    expect(overviewRecapIssues(md, { semanticSimilarity: () => 0.9 })).toHaveLength(1);
+    const md = '## 工程概况\n本项目为某市安置小区项目。\n## 施工部署\n本项目为某市安置小区项目。';
+    expect(overviewRecapIssues(md)).toHaveLength(1);
   });
   it('W4-11 3 处复述句 → message 含 3 处', () => {
     const md = '## 工程概况\n本项目为某市安置小区项目。\n## 施工组织\n本项目为某市安置小区项目。\n## 安全文明\n本项目为某市安置小区项目。\n## 质量管理\n本项目为某市安置小区项目。';
-    const issues = overviewRecapIssues(md, { semanticSimilarity: () => 0.9 });
+    const issues = overviewRecapIssues(md);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('3 处');
   });
   it('W4-12 4 处区间外复述句 → recaps 截断 3 处', () => {
     const md = '## 工程概况\n本项目为某市安置小区项目。\n## 施工组织\n本项目为某市安置小区项目。\n## 安全文明\n本项目为某市安置小区项目。\n## 质量管理\n本项目为某市安置小区项目。\n## 成本控制\n本项目为某市安置小区项目。';
-    const issues = overviewRecapIssues(md, { semanticSimilarity: () => 0.9 });
+    const issues = overviewRecapIssues(md);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('3 处');
   });
   it('W4-13 复述句 message 截断 slice(0,36)', () => {
     const long = `本项目为某市安置小区项目${'，配套齐全'.repeat(12)}`;
     const md = `## 工程概况\n${long}。\n## 施工组织\n${long}。`;
-    const issues = overviewRecapIssues(md, { semanticSimilarity: () => 0.9 });
+    const issues = overviewRecapIssues(md);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain(`${long.slice(0, 36)}…`);
   });
@@ -360,21 +364,6 @@ describe('W4 概况复述：区间锚定与聚合', () => {
     const md = '## 工程概况\n正文。\n## 施工组织\n前置内容。本项目为某市安置小区项目。';
     const { sentences } = overviewRecapCandidates(md);
     expect(sentences).toHaveLength(1);
-  });
-});
-
-describe('W4 概况复述：stripOverviewRecapBodyLines 行级清洗', () => {
-  it('W4-15 相似度达标句删除 → 输出不含该句', () => {
-    const out = stripOverviewRecapBodyLines(RECAP_MD, () => 0.9);
-    expect(out).not.toContain('本项目为某安置小区项目。\n');
-    expect(out).toContain('## 施工组织');
-  });
-  it('W4-16 相似度<0.6 保留', () => {
-    expect(stripOverviewRecapBodyLines(RECAP_MD, () => 0.5)).toBe(RECAP_MD);
-  });
-  it('W4-17 句长<12 不删', () => {
-    const md = '## 工程概况\n本项目为安置小区。\n## 施工组织\n本项目为安置小区。';
-    expect(stripOverviewRecapBodyLines(md, () => 0.9)).toBe(md);
   });
 });
 

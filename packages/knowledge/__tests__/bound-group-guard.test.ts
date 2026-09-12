@@ -2,139 +2,80 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { IndexStateStore } from '../src/core/index-state-store.js';
 import { KnowledgeBaseManager } from '../src/core/knowledge-base-manager.js';
-import type { TextChunk } from '../src/chunking/text-chunker.js';
-import type { FileCategory } from '../src/types.js';
 
 /**
- * B1 跨项目目录守卫回归测试：
- * 1. IndexStateStore.deleteChunksOutsideGroups —— 绑定资料组外的 chunk 整体清除，组内与根目录直放文件保留
- * 2. KnowledgeBaseManager.syncIndexWithBoundGroups —— 绑定组持久化到 metadata + 清理统计
- * 3. 空 keepGroups 零清理（无权威范围不误删）；损坏 metadata 容错返回空
+ * 跨项目资料共库非破坏性回归测试（4.22.3）：
+ * 历史 B1 守卫在生成启动时清除知识库中非绑定资料组的全部切片索引，多项目资料共库场景下
+ * 其他项目的切片数据被整体清空（丰乐镇实测回归：库内徽光阁/合肥师范学院等资料组切片丢失）；
+ * 且 bound_groups 持久化导致重新同步也无法恢复。现改为非破坏性口径隔离（生成链路
+ * scopedFilePaths 过滤，不再触碰库内数据），本测试验证：
+ * 1. 残留的 bound_groups metadata 在增量同步入口被幂等清除（组外文件不再被扫描过滤）
+ * 2. 多项目资料组的磁盘文件全部正常入索引（不被清除）
  */
 
 let tmpDir: string;
 let storageRoot: string;
-let dbPath: string;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-bound-group-'));
   storageRoot = path.join(tmpDir, 'storage');
   fs.mkdirSync(storageRoot, { recursive: true });
-  dbPath = path.join(storageRoot, 'test-kb.db');
 });
 
 afterEach(() => {
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
 });
 
-function makeChunk(index: number, text = '测试切片内容'): TextChunk {
-  return { index, text, startChar: 0, endChar: text.length, tokenCount: 4, metadata: {} };
-}
+const SAMPLE_TEXT = '施工组织设计编制说明。本项目位于安徽省肥西县丰乐镇，主要内容包括道路工程、排水工程、景观工程及公厕工程。'.repeat(4);
 
-function seedChunks(store: IndexStateStore, relativePaths: string[]) {
-  for (const relativePath of relativePaths) {
-    store.replaceChunks(relativePath, [makeChunk(0), makeChunk(1)], {
-      category: 'document' as FileCategory,
-      format: 'txt',
-      collectionName: 'proj-doc',
-    });
-    // 生产写入路径中 index_state 与 chunks 同步（manager 层清理依赖 listRecords）
-    store.upsertRecord({
-      category: 'document' as FileCategory,
-      format: 'txt',
-      contentHash: relativePath,
-      fileSize: 10,
-      mtime: Date.now(),
-      chunkCount: 2,
-      indexedAt: Date.now(),
-      lastVerifiedAt: Date.now(),
-      status: 'active',
-      collectionName: 'proj-doc',
-      relativePath,
-    });
-  }
-}
-
-describe('IndexStateStore.deleteChunksOutsideGroups', () => {
-  it('清除跨项目资料组 chunk，保留绑定组与根目录直放文件', () => {
-    const store = new IndexStateStore(dbPath);
-    try {
-      seedChunks(store, [
-        '9.14--2026年度丰乐镇项目/1、图纸/施工图.pdf',
-        '9.14--2026年度丰乐镇项目/4、工程量清单/清单.xls',
-        '9.4合肥师范学院项目/图纸/图纸.pdf',
-        '舒城/资料/招标文件.docx',
-        '根目录直放文件.txt',
-      ]);
-      expect(store.countChunks({ relativePath: '9.4合肥师范学院项目/图纸/图纸.pdf' })).toBe(2);
-      const result = store.deleteChunksOutsideGroups(['9.14--2026年度丰乐镇项目']);
-      expect(result).toEqual({ deletedChunks: 4, deletedFiles: 2 });
-      expect(store.countChunks({ relativePath: '9.4合肥师范学院项目/图纸/图纸.pdf' })).toBe(0);
-      expect(store.countChunks({ relativePath: '舒城/资料/招标文件.docx' })).toBe(0);
-      expect(store.countChunks({ relativePath: '9.14--2026年度丰乐镇项目/1、图纸/施工图.pdf' })).toBe(2);
-      expect(store.countChunks({ relativePath: '根目录直放文件.txt' })).toBe(2);
-    } finally {
-      store.close();
-    }
-  });
-
-  it('keepGroups 为空 → 零清理（无权威范围不误删）', () => {
-    const store = new IndexStateStore(dbPath);
-    try {
-      seedChunks(store, ['9.4合肥师范学院项目/图纸/图纸.pdf']);
-      const result = store.deleteChunksOutsideGroups([]);
-      expect(result).toEqual({ deletedChunks: 0, deletedFiles: 0 });
-      expect(store.countChunks({ relativePath: '9.4合肥师范学院项目/图纸/图纸.pdf' })).toBe(2);
-    } finally {
-      store.close();
-    }
-  });
-});
-
-describe('KnowledgeBaseManager.syncIndexWithBoundGroups', () => {
-  it('绑定组持久化到 metadata、组外数据清除并返回统计', async () => {
+describe('跨项目资料共库非破坏性回归', () => {
+  it('bound_groups 残留被幂等清除、多项目资料组全部入索引不被过滤', async () => {
     const manager = new KnowledgeBaseManager({ scope: 'global', storageRoot });
     manager.initialize();
     try {
-      seedChunks(manager.store, [
-        '9.14--2026年度丰乐镇项目/清单.xls',
-        '9.4合肥师范学院项目/图纸.pdf',
-      ]);
-      const result = await manager.syncIndexWithBoundGroups(['9.14--2026年度丰乐镇项目']);
-      expect(result.deletedFiles).toBe(1);
-      expect(result.deletedChunks).toBe(2);
-      expect(manager.store.getMetadata('bound_groups')).toBe('["9.14--2026年度丰乐镇项目"]');
-      expect(manager.store.countChunks({ relativePath: '9.4合肥师范学院项目/图纸.pdf' })).toBe(0);
-      expect(manager.store.countChunks({ relativePath: '9.14--2026年度丰乐镇项目/清单.xls' })).toBe(2);
+      // 磁盘放两个项目资料组（多项目共库形态）
+      fs.mkdirSync(path.join(manager.kbPath, '9.14--2026年度丰乐镇项目'), { recursive: true });
+      fs.mkdirSync(path.join(manager.kbPath, '9.4合肥师范学院项目'), { recursive: true });
+      fs.writeFileSync(path.join(manager.kbPath, '9.14--2026年度丰乐镇项目', '资料.txt'), SAMPLE_TEXT, 'utf8');
+      fs.writeFileSync(path.join(manager.kbPath, '9.4合肥师范学院项目', '资料.txt'), SAMPLE_TEXT, 'utf8');
+      // 模拟旧版本生成流程残留的绑定组元数据（会让组外文件永久无法入索引）
+      manager.store.setMetadata('bound_groups', JSON.stringify(['9.14--2026年度丰乐镇项目']));
+      await manager.incrementalIndex({ vectorMode: 'defer' });
+      // 残留元数据被幂等清除
+      expect(manager.store.getMetadata('bound_groups') || '').toBe('');
+      // 两个资料组的切片均保留入索引（组外文件不再被扫描过滤/清除）
+      expect(manager.store.countChunks({ relativePath: '9.14--2026年度丰乐镇项目/资料.txt' })).toBeGreaterThan(0);
+      expect(manager.store.countChunks({ relativePath: '9.4合肥师范学院项目/资料.txt' })).toBeGreaterThan(0);
     } finally {
       manager.close();
     }
   });
 
-  it('空 keepGroups 持久化为空数组且零清理', async () => {
+  it('无残留时同步正常（不报错、不写入 bound_groups）', async () => {
     const manager = new KnowledgeBaseManager({ scope: 'global', storageRoot });
     manager.initialize();
     try {
-      seedChunks(manager.store, ['9.4合肥师范学院项目/图纸.pdf']);
-      const result = await manager.syncIndexWithBoundGroups([]);
-      expect(result).toEqual({ deletedChunks: 0, deletedFiles: 0 });
-      expect(manager.store.getMetadata('bound_groups')).toBe('[]');
-      expect(manager.store.countChunks({ relativePath: '9.4合肥师范学院项目/图纸.pdf' })).toBe(2);
+      fs.mkdirSync(path.join(manager.kbPath, '9.14--2026年度丰乐镇项目'), { recursive: true });
+      fs.writeFileSync(path.join(manager.kbPath, '9.14--2026年度丰乐镇项目', '资料.txt'), SAMPLE_TEXT, 'utf8');
+      await manager.incrementalIndex({ vectorMode: 'defer' });
+      expect(manager.store.getMetadata('bound_groups') || '').toBe('');
+      expect(manager.store.countChunks({ relativePath: '9.14--2026年度丰乐镇项目/资料.txt' })).toBeGreaterThan(0);
     } finally {
       manager.close();
     }
   });
 
-  it('bound_groups metadata 损坏 → getBoundGroups 容错返回空（不设限不报错）', async () => {
+  it('损坏的 bound_groups 残留同样被幂等清除（不设限不报错）', async () => {
     const manager = new KnowledgeBaseManager({ scope: 'global', storageRoot });
     manager.initialize();
     try {
+      fs.mkdirSync(path.join(manager.kbPath, '9.4合肥师范学院项目'), { recursive: true });
+      fs.writeFileSync(path.join(manager.kbPath, '9.4合肥师范学院项目', '资料.txt'), SAMPLE_TEXT, 'utf8');
       manager.store.setMetadata('bound_groups', '{not-json');
-      seedChunks(manager.store, ['9.4合肥师范学院项目/图纸.pdf']);
-      const result = await manager.syncIndexWithBoundGroups([]);
-      expect(result).toEqual({ deletedChunks: 0, deletedFiles: 0 });
+      await manager.incrementalIndex({ vectorMode: 'defer' });
+      expect(manager.store.getMetadata('bound_groups') || '').toBe('');
+      expect(manager.store.countChunks({ relativePath: '9.4合肥师范学院项目/资料.txt' })).toBeGreaterThan(0);
     } finally {
       manager.close();
     }

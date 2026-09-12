@@ -173,6 +173,51 @@ describe('isTenderClauseFragmentTitle（招标条款碎片判别）', () => {
     // 多级编号条款残留仍被拦截（编号后无分隔符/空白，不进剥离分支）
     expect(isTenderClauseFragmentTitle('3项规定')).toBe(true);
   });
+
+  it('舒城实测：数据值+括号指令标题命中（「26元（保留两位小数）」）', () => {
+    expect(isTenderClauseFragmentTitle('26元（保留两位小数）')).toBe(true);
+    expect(isTenderClauseFragmentTitle('3.8 26元（保留两位小数）')).toBe(true);
+    expect(isTenderClauseFragmentTitle('15000元（详见清单）')).toBe(true);
+    // 合法标题不误伤
+    expect(isTenderClauseFragmentTitle('混凝土强度等级（C30）')).toBe(false);
+    expect(isTenderClauseFragmentTitle('钢筋连接方式（HRB400）')).toBe(false);
+  });
+
+  it('舒城实测：冒号后条款义务句式命中（「隐蔽工程验收：所有…必须由承包人按规定」）', () => {
+    expect(isTenderClauseFragmentTitle('隐蔽工程验收：所有隐蔽工程验收必须由承包人按规定')).toBe(true);
+    expect(isTenderClauseFragmentTitle('隐蔽工程验收：所有隐蔽工程验收必须由施工方按规定')).toBe(true);
+    expect(isTenderClauseFragmentTitle('质量验收：关键工序应由监理单位确认')).toBe(true);
+    // 合法标题不误伤（冒号后无从义务句式）
+    expect(isTenderClauseFragmentTitle('季节性施工保障：要点与措施')).toBe(false);
+  });
+
+  it('舒城实测：截断介词结尾命中（标题以「由/按/须」收尾且含义务标记）', () => {
+    expect(isTenderClauseFragmentTitle('所有隐蔽工程验收必须由')).toBe(true);
+    expect(isTenderClauseFragmentTitle('材料验收应按')).toBe(true);
+    // 合法标题不误伤（不以截断介词结尾）
+    expect(isTenderClauseFragmentTitle('费用由甲方承担')).toBe(false);
+    expect(isTenderClauseFragmentTitle('材料按计划采购')).toBe(false);
+  });
+
+  it('舒城实测：条款编号引用句式命中（「11.5 1.1条的规定另行交纳履约保证」）', () => {
+    expect(isTenderClauseFragmentTitle('11.5 1.1条的规定另行交纳履约保证')).toBe(true);
+    expect(isTenderClauseFragmentTitle('1条的规定另行交纳履约保证')).toBe(true);
+    expect(isTenderClauseFragmentTitle('按第7.3条规定执行')).toBe(true);
+    // 条款义务动作句式（不带编号引用）
+    expect(isTenderClauseFragmentTitle('另行交纳履约保证')).toBe(true);
+    // 合法标题不误伤（名词短语，无条款编号引用）
+    expect(isTenderClauseFragmentTitle('履约保证提交要求与金额口径')).toBe(false);
+    expect(isTenderClauseFragmentTitle('质量管理体系与质量保证措施')).toBe(false);
+  });
+
+  it('舒城实测：内部占位桶标签命中（「未分部条目」）', () => {
+    expect(isTenderClauseFragmentTitle('未分部条目')).toBe(true);
+    expect(isTenderClauseFragmentTitle('未分类条目')).toBe(true);
+    expect(isTenderClauseFragmentTitle('未分组内容')).toBe(true);
+    // 合法标题不误伤（「未」开头但非规划器内部状态词）
+    expect(isTenderClauseFragmentTitle('未完成工程量清单')).toBe(false);
+    expect(isTenderClauseFragmentTitle('竣工验收程序')).toBe(false);
+  });
 });
 
 describe('显式大纲块识别', () => {
