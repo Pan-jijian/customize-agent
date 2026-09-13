@@ -941,8 +941,22 @@ export async function runGlobalConsistencyReviewLoop(input: {
         chapterOffset = chapterEnd + 2;
       }
     }
-    if (arbiterResult.details.length > 0 || arbiterResult.falsePositiveGroups.length > 0) {
+    // D3 扩面收尾：裁决结论持久化为执行阶段（原仅 console.log——误报降级/无锚保留在交付闭环不可审计，
+    // 「每个 blocker 有修复路径或升级路径」要求裁决过程可溯源）；三类明细：确定性替换/误报降级/无锚留 LLM
+    if (arbiterResult.details.length > 0 || arbiterResult.falsePositiveGroups.length > 0 || arbiterResult.noAnchorGroups.length > 0) {
       console.log(`[gen] numeric-arbiter: 替换 ${arbiterResult.replacements.length} 处、误报裁决 ${arbiterResult.falsePositiveGroups.length} 组、无锚保留 ${arbiterResult.noAnchorGroups.length} 组`);
+      upsertProgressStage(progressStages, displayStage({
+        type: 'validation',
+        roleId: 'numeric-arbiter',
+        status: 'success',
+        message: `数值裁决器（清单事实锁/规格权威）：确定性硬替换 ${arbiterResult.replacements.length} 处、误报降级 ${arbiterResult.falsePositiveGroups.length} 组、无锚留 LLM 定向修复 ${arbiterResult.noAnchorGroups.length} 组`,
+        details: [
+          ...arbiterResult.details.map(item => `确定性替换：${item}`),
+          ...arbiterResult.falsePositiveGroups.map(item => `误报裁决（不同清单条目口径并存，不阻断）：${item}`),
+          ...arbiterResult.noAnchorGroups.map(item => `无确定性锚点（交 LLM 定向修复，残留由门禁兜底）：${item}`),
+        ],
+      }, { subtitle: '数值裁决' }));
+      emitProgress(chapterDraftsFinal);
     }
     if (preDeterministicFixCount > 0) {
       deterministicIssues = await runDeterministicConsistencyCheck();

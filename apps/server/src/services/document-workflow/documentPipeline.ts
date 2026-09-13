@@ -38,6 +38,7 @@ import { withPatchRollback } from './patchRollback';
 import { stripSnapshotIssues } from './issueProvenance';
 import { enforcePlannedSectionCompleteness } from './globalQualityGates';
 import { buildDocumentReviewChecklist } from './documentReviewChecklist';
+import { buildSuspensionChecklist } from './suspensionChecklist';
 import { collectValidationIssueGroups } from './documentQualityPipeline';
 import { DOCUMENT_WORKFLOW_VERSION } from './documentWorkflowVersion';
 import { buildDocumentTelemetryReport } from './documentTelemetry';
@@ -164,6 +165,8 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
       templatingReviewIssues: session.templatingReview.issues,
       /** V5 P5 无主数值审计报告（M6）：验收口径「0 未登记项」= unregisteredCount 为 0 */
       authorityAudit: session.authorityAuditReport,
+      /** C1 挂起清单（批 1）：finalGate 构建（门禁失败时）；兜底路径（session 未过 finalGate）按同一单源就地构建，保证归档与 warningIssues 置顶条同源 */
+      suspensionChecklist: session.suspensionChecklist ?? (session.qualityBundle.finalExportGate.passed ? undefined : buildSuspensionChecklist(session.qualityBundle.finalExportGate.blockingIssues, session.finalChapterDrafts)),
       writingTaskBrief: session.writingTaskBrief,
       workflowVersion: DOCUMENT_WORKFLOW_VERSION,
       telemetry: session.telemetry,

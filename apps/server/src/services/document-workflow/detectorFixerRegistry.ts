@@ -138,6 +138,9 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'resource-consistency', scope: 'full-document', category: 'fact_consistency', authorities: ['laborPeak'] },
   { id: 'node-schedule-consistency', scope: 'full-document', category: 'fact_consistency' },
   { id: 'cross-section-numeric-conflict', scope: 'full-document', category: 'fact_consistency' },
+  // D4 数值对账六类（批 1 事实溯源专项）：正文数值 vs 清单事实锁+蓝图参数桶的确定性关系型对账
+  //（合计推导/规格-数值绑定/语义槽位/近似口径/分项显式/名称口径；权威缺失的规则自行跳过）
+  { id: 'fact-reconciliation', scope: 'full-document', category: 'fact_consistency', authorities: ['blueprint'] },
   { id: 'greening-maintenance-mismatch', scope: 'full-document', category: 'fact_consistency', authorities: ['greeningMaintenance'] },
   { id: 'street-light-count-mismatch', scope: 'full-document', category: 'fact_consistency' },
   { id: 'spec-location-mismatch', scope: 'full-document', category: 'fact_consistency' },

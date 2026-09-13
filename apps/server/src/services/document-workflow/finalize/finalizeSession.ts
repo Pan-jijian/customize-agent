@@ -53,6 +53,7 @@ import type { buildDocumentReviewChecklist } from '../documentReviewChecklist';
 import type { buildDocumentTelemetryReport } from '../documentTelemetry';
 import type { buildProfessionalScoreReport } from '../documentProfessionalScore';
 import type { AuthorityAuditReport } from '../authorityAudit';
+import type { SuspensionChecklist } from '../suspensionChecklist';
 
 /** finalizeGeneration 输入聚合（二期结构改造：匿名参数对象命名化）。字段按职责分组。 */
 export interface FinalizeGenerationInput {
@@ -210,6 +211,8 @@ export interface FinalizeSession {
   /** V5 P5 无主数值审计报告（M6）：正文数值 ↔ AuthorityIndex 三分类（一致/登记豁免/无主分流），
    * 修复轮重算校验组后刷新，随 reviewMetadata 交付归档（验收口径「0 未登记项」= unattributed 为空） */
   authorityAuditReport?: AuthorityAuditReport;
+  /** C1 挂起清单（批 1 收敛责任制）：finalGate 构建（门禁失败时），reviewMetadata 归档 + warningIssues 置顶消费 */
+  suspensionChecklist?: SuspensionChecklist;
   // ── 组装产物 ──
   assets: DocumentAsset[];
   validation: ReturnType<typeof validateDraft>;

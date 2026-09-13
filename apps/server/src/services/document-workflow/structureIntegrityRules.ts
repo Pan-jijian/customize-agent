@@ -27,6 +27,8 @@ export type StructureDefectKind =
   | 'table-row-duplicate'
   | 'table-title-in-header'
   | 'table-empty'
+  | 'table-number-orphan-reference'
+  | 'table-number-duplicate'
   | 'duplicate-line'
   | 'duplicate-sentence-adjacent'
   | 'truncated-line'
@@ -342,6 +344,64 @@ function scanTables(lines: string[], result: StructureScanResult): void {
   }
 }
 
+/**
+ * A5b 表编号体系检查（批 1，全文档级专属）：正文「表N」引用必须命中同编号表实体（引用↔实体一一对应），
+ * 实体编号不得重复。纯结构判定；仅挂终检（structureIntegrityIssues）——小节级扫描不启用，避免跨节引用误报。
+ * 引用锤=动词前缀形态（按/如/见+双字动词白名单）；「据/照」等歧义单字不收录（防「数据表1/对照表1」误报），
+ * 「见」限定词首（防「意见表1份」量词形态）；实体判据=行首「表N 标题」且下一非空行为表格行（防「表1中规定…」句误判）。
+ */
+export function scanTableNumberingDefects(markdown: string): StructureDefect[] {
+  const lines = markdown.replace(/\r\n?/gu, '\n').split('\n');
+  const defects: StructureDefect[] = [];
+  const entities = new Map<number, number[]>();
+  const entityRe = /^表\s*(\d+)\s+\S/u;
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = entityRe.exec((lines[index] || '').trim());
+    if (!match) continue;
+    // 实体判据：下一非空行为表格行（表标题紧贴表格，允许中间一个空行）
+    let next = index + 1;
+    while (next < lines.length && !(lines[next] || '').trim()) next += 1;
+    if (next >= lines.length || !/^\s*\|/u.test(lines[next] || '')) continue;
+    const number = Number.parseInt(match[1], 10);
+    entities.set(number, [...(entities.get(number) || []), index + 1]);
+  }
+  for (const [number, at] of entities) {
+    if (at.length <= 1) continue;
+    defects.push({
+      kind: 'table-number-duplicate',
+      line: at[1],
+      excerpt: excerptOf((lines[at[1] - 1] || '').trim()),
+      message: `表编号重复（「表${number}」实体出现 ${at.length} 次：第 ${at.join('、')} 行）：表编号必须全篇唯一`,
+    });
+  }
+  const REFERENCE_RULES = [
+    /[按如]\s*表\s*(\d+)/gu,
+    /(?<![\u4e00-\u9fa5])见\s*表\s*(\d+)/gu,
+    /(?:参见|详见|根据|依据|按照|参照|比照|遵照|结合)\s*表\s*(\d+)/gu,
+  ];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] || '';
+    if (!line.includes('表')) continue;
+    const reported = new Set<number>();
+    for (const rule of REFERENCE_RULES) {
+      rule.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = rule.exec(line))) {
+        const number = Number.parseInt(match[1], 10);
+        if (reported.has(number) || entities.has(number)) continue;
+        reported.add(number);
+        defects.push({
+          kind: 'table-number-orphan-reference',
+          line: index + 1,
+          excerpt: excerptOf(line.trim()),
+          message: `引用了「表${number}」但正文无该编号表实体（引用与实体必须一一对应）`,
+        });
+      }
+    }
+  }
+  return defects;
+}
+
 function scanTruncatedLines(lines: string[], result: StructureScanResult): void {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i].trim();
@@ -576,6 +636,8 @@ const KIND_SUGGESTIONS: Record<StructureDefectKind, string> = {
   'table-row-duplicate': '删除重复数据行；同一数据不得在表内出现两次。',
   'table-title-in-header': '表名必须独立成行（表题），表头首格必须为列名；须定向重写该表格。',
   'table-empty': '空表须补充数据行或删除；不得交付仅表头的空表。',
+  'table-number-orphan-reference': '补建被引用的表实体或修正引用编号；表编号引用必须与实体一一对应。',
+  'table-number-duplicate': '表编号重排为全篇唯一；同一表编号不得出现两个实体。',
   'duplicate-line': '删除后出现的重复行；该段内容只能出现一次。',
   'duplicate-sentence-adjacent': '相邻重复句去重；不得同句连发两遍。',
   'truncated-line': '句尾截断须补全该句后重写；不得交付截断内容。',
@@ -587,7 +649,11 @@ const KIND_SUGGESTIONS: Record<StructureDefectKind, string> = {
 export function structureIntegrityIssues(markdown: string, options?: { includeCleanable?: boolean }): StructureIntegrityIssue[] {
   const includeCleanable = options?.includeCleanable ?? true;
   const result = scanStructureDefects(markdown);
-  const defects = includeCleanable ? [...result.blocking, ...result.cleanable] : [...result.blocking];
+  // A5b 表编号体系（全文档级专属：小节级/清理器不启用，防跨节引用误报）
+  const numberingDefects = scanTableNumberingDefects(markdown);
+  const defects = includeCleanable
+    ? [...result.blocking, ...numberingDefects, ...result.cleanable]
+    : [...result.blocking, ...numberingDefects];
   return defects.map(defect => ({
     level: 'error' as const,
     severity: 'blocker' as const,

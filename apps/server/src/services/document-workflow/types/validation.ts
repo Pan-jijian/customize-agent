@@ -6,6 +6,7 @@ import type { DocumentGenerationDiagnostics } from './progress';
 import type { WritingTaskBrief } from './core';
 import type { TenderBidTemplatingReport } from '../tenderBidScoring';
 import type { AuthorityAuditReport } from '../authorityAudit';
+import type { SuspensionChecklist } from '../suspensionChecklist';
 
 export interface ChapterCoverageReport {
   chapterId: string;
@@ -105,6 +106,8 @@ export interface DocumentReviewMetadata {
   telemetry?: DocumentTelemetryReport;
   /** V5 P5 无主数值审计报告（M6）：正文数值 ↔ AuthorityIndex 三分类（0 未登记项为验收口径） */
   authorityAudit?: AuthorityAuditReport;
+  /** C1 挂起清单（批 1 收敛责任制）：门禁未通过时的结构化精准人工清单（分类/定位/问题/建议/修复路径/检测器）；blocker 清零的可交付态为 undefined */
+  suspensionChecklist?: SuspensionChecklist;
 }
 
 export interface DocumentTelemetryReport {

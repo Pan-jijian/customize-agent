@@ -72,6 +72,10 @@ export function normalizeProductionText(markdown: string) {
     .replace(/\bkm2\b/giu, '平方千米')
     .replace(/(\d+(?:\.\d+)?)平方(?:\d+(?:\.\d+)?)?(?=\d|[，,;；)）]|\s|$)/gu, '$1平方米')
     .replace(/原则上/gu, '')
+    // A4 规格书写统一器（批 1）：数字间乘号形态（x/X/*/全角ｘＸ＊，允许水平空白）全部归一为「×」。
+    // 白名单（防误伤）：仅匹配左邻数字的形态——「X射线/X轴/AX100/SX2」等字母语境的 X 天然不命中；
+    // 数字-数字窗口覆盖 400*400、1X22、258x16、3 X 2、600x600mm、M10x100 等实测形态。不跨行（[ \t]）。
+    .replace(/(?<=\d)[ \t]*[xX*ｘＸ＊][ \t]*(?=\d)/gu, '×')
     .replace(/\s*×\s*/gu, '×')
     .replace(/\s*≤\s*/gu, '≤')
     .replace(/\s*≥\s*/gu, '≥')
@@ -188,6 +192,38 @@ function looksLikeTableHeader(line: string) {
   if (cells.length < 2) return false;
   const headerCells = cells.filter(cell => /^(?:序号|信息项|内容|控制项目|控制内容|执行要求|责任主体|检查(?:与验收)?|验收标准|备注|名称|规格(?:型号)?|单位|数量|阶段|措施|风险|应急物资名称|资源类别|投入计划|管理要求)$/u.test(cell));
   return headerCells.length >= Math.min(2, cells.length);
+}
+
+/**
+ * A5a md 源层卫生（批 1）：表格块与相邻内容之间规范为恰好一个空行（纯结构操作、幂等，不改文字）。
+ * 与导出层 normalizeLooseMarkdownTables 的插空行口径同源——源层先规范，导出层结构操作计数趋零；
+ * 块定义：连续 ≥2 行表格语法行（行首 | 或分隔线行）；单行管道文本不作为块（防误伤行内管道）。
+ */
+function normalizeTableBlockSpacing(markdown: string) {
+  const lines = markdown.split('\n');
+  const isTableLine = (line: string) => /^\s*\|/u.test(line) || isMarkdownTableDivider(line);
+  const output: string[] = [];
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index] || '';
+    if (!isTableLine(line)) {
+      output.push(line);
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end < lines.length && isTableLine(lines[end] || '')) end += 1;
+    const block = lines.slice(index, end);
+    if (block.length < 2) {
+      output.push(line);
+      index += 1;
+      continue;
+    }
+    if (output.length > 0 && (output[output.length - 1] || '').trim()) output.push('');
+    output.push(...block);
+    index = end;
+    if (index < lines.length && (lines[index] || '').trim()) output.push('');
+  }
+  return output.join('\n');
 }
 
 function startsTableRow(line: string) {
@@ -526,11 +562,17 @@ export function sanitizeFormalMarkdown(markdown: string) {
   // 内部术语不在此做正则替换：术语合法性属语义判断（如“工作包”按语境应改写为“拆除工程/专业工程”等），
   // 词面替换必然产生语义错误；治理链为 提示词禁写 → Reviewer 确定性标记（FORMAL_FORBIDDEN_PHRASES）
   // → Repairer 按上下文语义改写 → Final Gate 保险丝（internalTerminologyIssues 词面标记兜底）
-  return cleaned.split(/\r?\n/u)
+  // A5a：表格块与相邻内容间距规范（链尾执行，保证 filter 删行后的块边界同样被规范）
+  return normalizeTableBlockSpacing(cleaned.split(/\r?\n/u)
     .filter((line, index, lines) => {
-      const previousPlain = index > 0 ? displayChapterTitle((lines[index - 1] || '').trim().replace(/^#{1,6}\s+/u, '')) : '';
+      // 表格行双向豁免「指令类标题+残片短行」删除规则（批 1 A2 守恒断言实测：短表格行
+      // 「| 甲 | 乙 |」经 displayChapterTitle 后管道符不计入 isLikelyMojibakeTitle 可读字符
+      // 占比（0.4<0.6）被误判为乱码标题，其下一行短表格数据被本规则静默删除——表格行有
+      // 结构语义，既不作残片候选项（当前行）也不作指令标题来源（上一行））。
+      const previousRaw = index > 0 ? (lines[index - 1] || '').trim() : '';
+      const previousPlain = previousRaw && !/^\s*\|/u.test(previousRaw) ? displayChapterTitle(previousRaw.replace(/^#{1,6}\s+/u, '')) : '';
       const currentPlain = displayChapterTitle(line.trim().replace(/^#{1,6}\s+/u, ''));
-      if (previousPlain && previousPlain.length <= 30 && isInstructionLikeTitle(previousPlain) && currentPlain.length > 0 && currentPlain.length <= 12 && !/^#{1,6}\s/u.test(line.trim())) return false;
+      if (previousPlain && previousPlain.length <= 30 && isInstructionLikeTitle(previousPlain) && currentPlain.length > 0 && currentPlain.length <= 12 && !/^#{1,6}\s/u.test(line.trim()) && !/^\s*\|/u.test(line.trim())) return false;
       const trimmed = line.trim();
       if (!trimmed) return true;
       // 招标术语 H4 拦截：「补充条款」等招标文件术语不应作为正文小节标题（四级标题是成稿层自由产物，
@@ -562,7 +604,7 @@ export function sanitizeFormalMarkdown(markdown: string) {
     })
     .join('\n')
     .replace(/\n{3,}/gu, '\n\n')
-    .trim();
+    .trim());
 }
 
 export const MARKDOWN_TABLE_FORMAT_RULES = [

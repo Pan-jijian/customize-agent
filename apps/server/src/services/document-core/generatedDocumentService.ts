@@ -6,6 +6,7 @@ import type { DocumentDraftChapter, GeneratedDocumentDraft, DocumentAsset } from
 import { appendFingerprintEntry, extractHeadingTitles, generateDocumentDraft, getDocumentTemplate } from '../document-workflow';
 import { preflightLocalSemanticProvider } from '../document-workflow/semanticSimilarity';
 import { collectSectionContentGaps } from '../document-workflow/qualityValidation';
+import { buildSuspensionChecklist, formatSuspensionBanner } from '../document-workflow/suspensionChecklist';
 import { DOCUMENT_WORKFLOW_VERSION } from '../document-workflow/documentWorkflowVersion';
 import { computeProjectId } from '@customize-agent/knowledge';
 import { getProjectKbRoot, getProjectRoot } from '../knowledge/kbService';
@@ -88,6 +89,8 @@ export interface GeneratedDocumentRecord {
   maxEvidencePerChapter?: number;
   /** 导出后闭环报告历史（B3：归档总用时/质量对标分/规则执行摘要/修复记录，支持历史对比） */
   exportReports?: ExportReport[];
+  /** E5 修订闭环审计（批 1）：系统修订日志——唯一入口工具写入，修订必须显式声明、可审计 */
+  revisionLog?: Array<{ at: number; note?: string; replacements: number; beforeChars: number; afterChars: number; beforeWordCount: number; afterWordCount: number }>;
 }
 
 /** 导出后闭环报告：归档到记录详情，支持与历史版本对比 */
@@ -107,6 +110,22 @@ export interface ExportReport {
   healthAlerts?: string[];
   /** P19 修复轮热力图（导出时归档，跨文档缺陷热力图分析数据源） */
   repairHeat?: Record<string, { hits: number; repaired: number; failed: number }>;
+  /** A1 导出纯渲染审计（批 1）：模式/源层缺陷/渲染层结构操作计数——dry-run 误报采样与守恒断言证据 */
+  renderAudit?: ExportRenderAuditReport;
+}
+
+/** A1 导出纯渲染审计摘要（导出层写入，export.ts 同形状：响应头与归档共用，禁止两处口径分叉） */
+export interface ExportRenderAuditReport {
+  /** 开关模式：off/observe/enforce */
+  mode: string;
+  /** 源层结构性缺陷（裸表/孤立分隔线）数量与定位明细 */
+  blockerCount: number;
+  blockerCodes: string[];
+  /** 非阻断提示（如单位书写残留） */
+  notices: string[];
+  /** 渲染层结构操作计数（补分隔线/列对齐/边界截断/内联分隔线剥离/插空行/单位改写） */
+  ops: Record<string, number>;
+  opsTotal: number;
 }
 
 function failRunningStages(stages: GeneratedDocumentRecord['executionStages'], message: string): GeneratedDocumentRecord['executionStages'] {
@@ -800,11 +819,12 @@ function launchTask(job: {
     const sectionGaps = collectSectionContentGaps(result.markdown, result.chapters).filter(gap => gap.reason === 'empty');
     if (sectionGaps.length > 0) warningIssues.unshift(`小节内容补写未完成：仍有 ${sectionGaps.length} 个空洞小节，请继续生成或补充资料后重试`);
     if (!result.exportGate.passed) {
-      // V2 批3 宁缺毋假：未通过导出门禁=不放行交付，未收敛阻断清单无条件置顶（此前仅在警告为空时
-      // 补一条泛化文案，未收敛阻断在交付时不可见）；清单供 failed 后排查与基于 checkpoint 续修定位。
+      // V2 批3 宁缺毋假 + 批1 C1 挂起清单：未通过导出门禁=显式挂起不放行交付（failed）。未收敛阻断转为
+      // 结构化精准人工清单（分类/定位/问题/建议/修复路径/检测器身份）置顶——优先复用流水线归档清单
+      //（reviewMetadata.suspensionChecklist，三挂载点同一构建），兜底路径就地构建，保证 banner 与归档同源。
       const blockers = result.exportGate.blockingIssues || [];
-      const blockerListing = blockers.slice(0, 12).map((issue, index) => `${index + 1}.${issue.message}`).join('；');
-      warningIssues.unshift(`导出门禁未通过：存在 ${blockers.length} 项未收敛阻断（宁缺毋假：带病文档不作为交付件）${blockerListing ? `——${blockerListing}${blockers.length > 12 ? `；…另 ${blockers.length - 12} 项` : ''}` : ''}`);
+      const checklist = result.reviewMetadata?.suspensionChecklist ?? buildSuspensionChecklist(blockers, result.chapters);
+      warningIssues.unshift(formatSuspensionBanner(checklist));
     }
     // V2 批3 状态语义收紧（宁缺毋假）：门禁通过=completed；未通过=failed（不再以「有实质正文」粉饰为
     // completed_with_issues 带病交付——代价是偶尔拿不到文档，但拿到的每一份都通过全部门禁）。

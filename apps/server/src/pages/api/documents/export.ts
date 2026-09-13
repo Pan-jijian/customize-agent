@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import JSZip from 'jszip';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { generatedRoot, getGeneratedDocument, updateGeneratedDocument, type ExportReport, type GeneratedDocumentRecord } from '@/services/document-core/generatedDocumentService';
+import { generatedRoot, getGeneratedDocument, updateGeneratedDocument, type ExportReport, type ExportRenderAuditReport, type GeneratedDocumentRecord } from '@/services/document-core/generatedDocumentService';
 import { getProjectKbRoot, getProjectRoot } from '@/services/knowledge/kbService';
 import type { DocumentExportSettings } from '@/services/document-workflow';
 import { sanitizeFormalMarkdown } from '@/services/document-workflow/markdownComposer';
@@ -18,6 +18,62 @@ export const config = {
 };
 
 type ExportFormat = 'markdown' | 'html' | 'pdf' | 'docx';
+
+/**
+ * A1 导出纯渲染化（批 1 P0，根治方案改造域 A）：导出层不得再“造内容/改文字”兜底，三把刀语义分级——
+ * 造内容（defaultTableHeaders 假表头）→ 检测 + enforce 阻断（无表头=结构性缺陷，报错回源修复）；
+ * 文字改写（normalizePower 单位归一）→ 检测降级（归一治理属写时链 normalizeProductionText）；
+ * 结构语法保障（补分隔线/列对齐/插空行/相邻表边界截断）→ 保留为渲染层操作并审计计数。
+ * 渐进策略沿用 patchGuard 口径（DOCUMENT_QINGTIAN_PATCH_GUARD）：observe 默认只检测只计数（产物零回归，
+ * 采集误报分布）→ 真实生成连续 2 轮零误报后切 enforce。开关：DOCUMENT_EXPORT_PURE_RENDER=off|observe|enforce。
+ */
+type ExportPureRenderMode = 'off' | 'observe' | 'enforce';
+
+/** 导出层渲染审计：源层结构性缺陷（blockers）+ 非阻断提示（notices）+ 渲染层结构操作计数（ops） */
+interface ExportRenderAudit {
+  mode: ExportPureRenderMode;
+  /** 源层结构性缺陷：enforce 阻断导出；observe 照常记录（误报采样，两种模式同词文案保证可比） */
+  blockers: Array<{ code: 'bare-table' | 'orphan-separator' | 'content-not-conserved'; line: number; message: string }>;
+  /** 非阻断提示（如单位书写残留——治理在源层/写时链，不在导出层改写） */
+  notices: Array<{ code: 'unit-notation'; message: string }>;
+  /** 渲染层结构操作计数（不改变文字内容，供守恒断言与事实审计） */
+  ops: {
+    tableSeparatorAdded: number;
+    tableCellAligned: number;
+    tableBoundarySplit: number;
+    inlineSeparatorStripped: number;
+    paragraphBreakInserted: number;
+    unitRewrite: number;
+  };
+}
+
+function exportPureRenderMode(): ExportPureRenderMode {
+  const raw = (process.env.DOCUMENT_EXPORT_PURE_RENDER || 'observe').trim().toLowerCase();
+  if (raw === '0' || raw === 'off' || raw === 'false') return 'off';
+  if (raw === 'enforce') return 'enforce';
+  return 'observe';
+}
+
+function createExportRenderAudit(mode: ExportPureRenderMode = exportPureRenderMode()): ExportRenderAudit {
+  return {
+    mode,
+    blockers: [],
+    notices: [],
+    ops: { tableSeparatorAdded: 0, tableCellAligned: 0, tableBoundarySplit: 0, inlineSeparatorStripped: 0, paragraphBreakInserted: 0, unitRewrite: 0 },
+  };
+}
+
+/** 审计摘要：响应头 X-Export-Render-Audit 与 exportReports 归档共用同一形状，禁止两处口径分叉 */
+function exportRenderAuditReport(audit: ExportRenderAudit): ExportRenderAuditReport {
+  return {
+    mode: audit.mode,
+    blockerCount: audit.blockers.length,
+    blockerCodes: [...new Set(audit.blockers.map(item => item.line > 0 ? `${item.code}@L${item.line}` : item.code))].slice(0, 20),
+    notices: audit.notices.map(item => item.message).slice(0, 10),
+    ops: { ...audit.ops },
+    opsTotal: Object.values(audit.ops).reduce((sum, value) => sum + value, 0),
+  };
+}
 
 /** 将文件名中的非法字符替换为连字符，限制长度 80 字符 */
 function safeFileName(input: string) {
@@ -126,6 +182,13 @@ function normalizeMarkdownTableRow(cells: string[], columns: number) {
   return `| ${normalized.map(cell => cell.replace(/\|/gu, '\\|')).join(' | ')} |`;
 }
 
+/** 列对齐（渲染层结构操作）：规整数据行到目标列数（超列合并/缺列补空，文字不丢）；仅单元格数量被调整时计审计 */
+function normalizeTableRowAligned(cells: string[], columns: number, audit?: ExportRenderAudit) {
+  if (audit && audit.mode !== 'off' && cells.length !== columns) audit.ops.tableCellAligned += 1;
+  return normalizeMarkdownTableRow(cells, columns);
+}
+
+/** 假表头生成（observe/off 沿用历史行为；enforce 禁用——导出层不得造内容，缺表头=结构性缺陷回源修复） */
 function defaultTableHeaders(columns: number) {
   if (columns === 2) return ['信息项', '内容'];
   const headers = ['控制项目', '控制内容', '执行要求', '责任主体', '检查与验收', '备注'];
@@ -164,12 +227,17 @@ function startsFollowingTable(lines: string[], at: number) {
   return isMarkdownTableSeparator((next || '').trim());
 }
 
-function normalizeLooseMarkdownTables(input: string) {
+function normalizeLooseMarkdownTables(input: string, audit?: ExportRenderAudit) {
   const lines = input.replace(/\r?\n/gu, '\n').split('\n');
   const output: string[] = [];
+  // 审计三态：off 零开销（与历史行为逐字一致）；observe/enforce 记录缺陷与结构操作
+  const enforce = audit?.mode === 'enforce';
+  const ops = audit && audit.mode !== 'off' ? audit.ops : null;
+  const blockers = audit && audit.mode !== 'off' ? audit.blockers : null;
   for (let index = 0; index < lines.length;) {
     const line = lines[index] || '';
     const compactLine = line.replace(/([^|\n])\|\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/u, '$1');
+    if (ops && compactLine !== line) ops.inlineSeparatorStripped += 1;
     const nextIndex = lines[index + 1]?.trim() === '' ? index + 2 : index + 1;
     const separator = lines[nextIndex];
     if (looksLikeMarkdownTableRow(line) && separator !== undefined && isMarkdownTableSeparator(separator)) {
@@ -186,14 +254,18 @@ function normalizeLooseMarkdownTables(input: string) {
       }
       const columns = Math.max(2, header.length, separatorColumns, ...dataRows.map(row => row.length));
       if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
-      output.push(normalizeMarkdownTableRow(header, columns));
+      output.push(normalizeTableRowAligned(header, columns, audit));
       output.push(`| ${Array.from({ length: columns }, () => '---').join(' | ')} |`);
       index = nextIndex + 1;
       while (index < lines.length) {
         const row = lines[index] || '';
         if (!looksLikeMarkdownTableRow(row)) break;
-        if (startsFollowingTable(lines, index)) break;
-        output.push(normalizeMarkdownTableRow(splitMarkdownTableRow(row), columns));
+        if (startsFollowingTable(lines, index)) {
+          // 相邻表边界截断（结构操作计数）：下一行是「表头+分隔线」形态的新表，当前表数据区在此结束
+          if (ops) ops.tableBoundarySplit += 1;
+          break;
+        }
+        output.push(normalizeTableRowAligned(splitMarkdownTableRow(row), columns, audit));
         index += 1;
       }
       if (index < lines.length && lines[index]?.trim()) output.push('');
@@ -201,10 +273,18 @@ function normalizeLooseMarkdownTables(input: string) {
     }
     const bare = looksLikeMarkdownTableRow(line) ? collectBareTableRows(lines, index) : null;
     if (bare) {
+      // 无表头裸表格=源层结构性缺陷：observe 采样记录并沿用历史补表头（产物零回归）；enforce 不造内容改阻断
+      blockers?.push({ code: 'bare-table', line: index + 1, message: `第 ${index + 1} 行起为无表头裸表格（${bare.rows.length} 行 × ${bare.columns} 列）：导出层不补造表头，需回源补齐表头后导出` });
+      if (enforce) {
+        for (const row of bare.rows) output.push(row);
+        index = bare.next;
+        continue;
+      }
       if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
       output.push(normalizeMarkdownTableRow(defaultTableHeaders(bare.columns), bare.columns));
       output.push(`| ${Array.from({ length: bare.columns }, () => '---').join(' | ')} |`);
-      for (const row of bare.rows) output.push(normalizeMarkdownTableRow(splitMarkdownTableRow(row), bare.columns));
+      if (ops) ops.tableSeparatorAdded += 1;
+      for (const row of bare.rows) output.push(normalizeTableRowAligned(splitMarkdownTableRow(row), bare.columns, audit));
       index = bare.next;
       if (index < lines.length && lines[index]?.trim()) output.push('');
       continue;
@@ -213,10 +293,19 @@ function normalizeLooseMarkdownTables(input: string) {
       const loose = collectLooseTableRows(lines, index + 1);
       if (loose.rows.length > 0) {
         const columns = Math.max(2, splitMarkdownTableRow(line).length, ...loose.rows.map(row => splitMarkdownTableRow(row).length));
+        // 孤立分隔线（无表头）=源层结构性缺陷：与裸表同口径处置
+        blockers?.push({ code: 'orphan-separator', line: index + 1, message: `第 ${index + 1} 行为无表头的孤立分隔线（后续 ${loose.rows.length} 行表格数据）：导出层不补造表头，需回源补齐表头后导出` });
+        if (enforce) {
+          output.push(line);
+          for (const row of loose.rows) output.push(row);
+          index = loose.next;
+          continue;
+        }
         if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
         output.push(normalizeMarkdownTableRow(defaultTableHeaders(columns), columns));
         output.push(`| ${Array.from({ length: columns }, () => '---').join(' | ')} |`);
-        for (const row of loose.rows) output.push(normalizeMarkdownTableRow(splitMarkdownTableRow(row), columns));
+        if (ops) ops.tableSeparatorAdded += 1;
+        for (const row of loose.rows) output.push(normalizeTableRowAligned(splitMarkdownTableRow(row), columns, audit));
         index = loose.next;
         if (index < lines.length && lines[index]?.trim()) output.push('');
         continue;
@@ -228,10 +317,11 @@ function normalizeLooseMarkdownTables(input: string) {
   return output.join('\n').replace(/\n{3,}/gu, '\n\n');
 }
 
-/** 智能段落规范化：将单换行分隔的连续文本行转为双换行段落，避免导出时粘连 */
-function normalizeParagraphs(input: string): string {
+/** 智能段落规范化（渲染层结构操作）：单换行分隔的连续文本行转双换行段落防粘连，插入数计入审计 */
+function normalizeParagraphs(input: string, audit?: ExportRenderAudit): string {
   const lines = input.split('\n');
   const out: string[] = [];
+  const ops = audit && audit.mode !== 'off' ? audit.ops : null;
   let consecutiveText = 0;
 
   for (let i = 0; i < lines.length; i++) {
@@ -240,7 +330,10 @@ function normalizeParagraphs(input: string): string {
 
     // 空行、标题、表格、列表、代码块 → 保持原样，重置连续文本计数
     if (!trimmed || /^(#{1,6}\s|\||[-*+]\s|\d+[.、]\s|```|<div|\[\[PAGE)/u.test(trimmed)) {
-      if (consecutiveText > 1) out.push(''); // 在连续文本块后补一个空行
+      if (consecutiveText > 1) {
+        if (ops) ops.paragraphBreakInserted += 1;
+        out.push(''); // 在连续文本块后补一个空行
+      }
       out.push(line);
       consecutiveText = 0;
       continue;
@@ -256,6 +349,7 @@ function normalizeParagraphs(input: string): string {
       const thisStarts = /^[（(「『\d]/u.test(trimmed) || PARAGRAPH_START_RE.test(trimmed);
       if (prevEnds || thisStarts) {
         out.push('');
+        if (ops) ops.paragraphBreakInserted += 1;
         consecutiveText = 1;
       }
     }
@@ -266,21 +360,47 @@ function normalizeParagraphs(input: string): string {
   return out.join('\n').replace(/\n{3,}/gu, '\n\n');
 }
 
-function normalizeExportUnits(input: string) {
-  const normalizePower = (value: string) => value
-    .replace(/m\s*<sup>\s*2\s*<\/sup>/giu, 'm²')
-    .replace(/m\s*<sup>\s*3\s*<\/sup>/giu, 'm³')
-    .replace(/m\s*\^\s*2/giu, 'm²')
-    .replace(/m\s*\^\s*3/giu, 'm³')
-    .replace(/㎡/gu, 'm²')
-    .replace(/㎥/gu, 'm³')
-    // 上标化边界：数字前缀形态（100m2）含大写 M 视为单位；裸形态仅匹配小写 m——无数字前缀的
-    // 大写「M2/M3」是编号/标号（里程碑 M2 实测被换成「m²」），(?!\.\d) 排除 M2.5 砂浆标号
-    .replace(/(?<=\d)m\s*2(?![\p{L}\p{N}_])(?!\.\d)/giu, 'm²')
-    .replace(/(?<=\d)m\s*3(?![\p{L}\p{N}_])(?!\.\d)/giu, 'm³')
-    .replace(/(?<![\p{L}\p{N}_])m\s*2(?![\p{L}\p{N}_])(?!\.\d)/gu, 'm²')
-    .replace(/(?<![\p{L}\p{N}_])m\s*3(?![\p{L}\p{N}_])(?!\.\d)/gu, 'm³');
-  return normalizeParagraphs(normalizeLooseMarkdownTables(normalizePower(stripMarkdownDocumentFence(input))));
+/**
+ * 单位上标化规则表（A1：与历史 normalizePower 逐条同源，检测/改写/计数共用同一份，禁止私造第二份）：
+ * [匹配模式, 替换值]——顺序即替换顺序。
+ */
+const UNIT_REWRITE_RULES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/m\s*<sup>\s*2\s*<\/sup>/giu, 'm²'],
+  [/m\s*<sup>\s*3\s*<\/sup>/giu, 'm³'],
+  [/m\s*\^\s*2/giu, 'm²'],
+  [/m\s*\^\s*3/giu, 'm³'],
+  [/㎡/gu, 'm²'],
+  [/㎥/gu, 'm³'],
+  // 上标化边界：数字前缀形态（100m2）含大写 M 视为单位；裸形态仅匹配小写 m——无数字前缀的
+  // 大写「M2/M3」是编号/标号（里程碑 M2 实测被换成「m²」），(?!\.\d) 排除 M2.5 砂浆标号
+  [/(?<=\d)m\s*2(?![\p{L}\p{N}_])(?!\.\d)/giu, 'm²'],
+  [/(?<=\d)m\s*3(?![\p{L}\p{N}_])(?!\.\d)/giu, 'm³'],
+  [/(?<![\p{L}\p{N}_])m\s*2(?![\p{L}\p{N}_])(?!\.\d)/gu, 'm²'],
+  [/(?<![\p{L}\p{N}_])m\s*3(?![\p{L}\p{N}_])(?!\.\d)/gu, 'm³'],
+];
+
+/** 单位书写残留计数（与 UNIT_REWRITE_RULES 逐条同源）：enforce 检测与 observe 改写计数共用 */
+function countUnitRewriteOccurrences(value: string) {
+  return UNIT_REWRITE_RULES.reduce((sum, [pattern]) => sum + (value.match(pattern)?.length || 0), 0);
+}
+
+function normalizeExportUnits(input: string, audit?: ExportRenderAudit) {
+  const mode = audit?.mode || exportPureRenderMode();
+  const ops = audit && audit.mode !== 'off' ? audit.ops : null;
+  let text = stripMarkdownDocumentFence(input);
+  if (mode === 'enforce') {
+    // A1 纯渲染：导出层不再改写单位书写（归一治理属写时链 normalizeProductionText），仅检测告警
+    const residual = countUnitRewriteOccurrences(text);
+    if (residual > 0 && audit) audit.notices.push({ code: 'unit-notation', message: `正文存在 ${residual} 处未归一单位书写（m2/㎡/m^2 等）：导出纯渲染模式不改写，需在源文档或写时链修正` });
+  } else {
+    for (const [pattern, replacement] of UNIT_REWRITE_RULES) {
+      const matches = text.match(pattern);
+      if (!matches || matches.length === 0) continue;
+      text = text.replace(pattern, replacement);
+      if (ops) ops.unitRewrite += matches.length;
+    }
+  }
+  return normalizeParagraphs(normalizeLooseMarkdownTables(text, audit), audit);
 }
 
 function stripInlineMarkdown(input: string) {
@@ -824,7 +944,7 @@ function exportTablePreflightIssues(markdown: string) {
       index = rowIndex - 1;
       continue;
     }
-    if (index + 1 < lines.length && looksLikeMarkdownTableRow(lines[index + 1] || '')) issues.push(`第 ${index + 1} 行附近疑似裸表格，已尝试自动规范化`);
+    if (index + 1 < lines.length && looksLikeMarkdownTableRow(lines[index + 1] || '')) issues.push(`第 ${index + 1} 行附近疑似裸表格（缺少表头或分隔线），导出版式可能异常`);
   }
   const fenceCount = (markdown.match(/```/gu) || []).length;
   if (fenceCount % 2 === 1) issues.push('存在未闭合代码块，可能影响后续内容导出');
@@ -866,13 +986,70 @@ function normalizeExportMarkdownHeadings(markdown: string) {
     .replace(/(#{2,4}\s+[^\n]+?)\s+(#{2,4}\s+)/gu, '$1\n\n$2');
 }
 
+/**
+ * A2 内容守恒断言（去标记 diff）：导出链只允许「结构语法操作」（补分隔线/列对齐/插空行/相邻表边界截断），
+ * 不允许任何未声明的正文改写——两侧归一化（结构符/单位形态/空白全部剥离）后逐字比对；
+ * 单位形态（m2/m²/㎡/m^2/m<sup>2</sup>）属已声明改写（ops.unitRewrite 单独计数），归一后互不可见。
+ * 差异=导出链存在静默改文案通道：observe 采样记录，enforce 阻断（与 A1 同一门禁）。
+ */
+function canonicalExportText(input: string) {
+  const stripped = stripMarkdownDocumentFence(input).replace(/\r?\n/gu, '\n');
+  const lines = stripped.split('\n').filter(line => !isMarkdownTableSeparator(line.trim()) && !/^\s*```/u.test(line));
+  return lines.join('\n')
+    .replace(/m\s*<sup>\s*2\s*<\/sup>/giu, 'm2')
+    .replace(/m\s*<sup>\s*3\s*<\/sup>/giu, 'm3')
+    .replace(/m\s*\^\s*2/giu, 'm2')
+    .replace(/m\s*\^\s*3/giu, 'm3')
+    .replace(/㎡/gu, 'm2')
+    .replace(/㎥/gu, 'm3')
+    .replace(/m\s*²/giu, 'm2')
+    .replace(/m\s*³/giu, 'm3')
+    .replace(/m\s*2(?!\.\d)/giu, 'm2')
+    .replace(/m\s*3(?!\.\d)/giu, 'm3')
+    // A4 对称归一：数字间乘号形态与 normalizeProductionText 同口径（已声明改写——导出链
+    // A4 归一后两侧同形不可见；不先归一会在下一步 `*` 剥离时产生伪分歧：400*400→400400）
+    .replace(/(?<=\d)\s*[xX×*ｘＸ＊]\s*(?=\d)/gu, '×')
+    .replace(/[`*_~|#\\-]/gu, '')
+    .replace(/<[^>]*>/gu, '')
+    .replace(/\s+/gu, '');
+}
+
+/** 守恒比对：返回去标记文本是否逐字一致；不一致时给出首个分歧位置与上下文（供审计回溯） */
+function exportConservationDiff(source: string, product: string) {
+  const a = canonicalExportText(source);
+  const b = canonicalExportText(product);
+  if (a === b) return { conserved: true as const };
+  let index = 0;
+  const max = Math.min(a.length, b.length);
+  while (index < max && a[index] === b[index]) index += 1;
+  return {
+    conserved: false as const,
+    position: index,
+    sourceContext: a.slice(Math.max(0, index - 20), index + 20),
+    productContext: b.slice(Math.max(0, index - 20), index + 20),
+  };
+}
+
 function prepareExportMarkdown(rawMarkdown: string, baseline?: string) {
-  const markdown = normalizeExportMarkdownHeadings(normalizeExportUnits(sanitizeFormalMarkdown(rawMarkdown)));
+  const audit = createExportRenderAudit();
+  const markdown = normalizeExportMarkdownHeadings(normalizeExportUnits(sanitizeFormalMarkdown(rawMarkdown), audit));
   const baselineMarkdown = normalizeExportMarkdownHeadings(normalizeExportUnits(sanitizeFormalMarkdown(baseline || '')));
+  // A2 守恒断言：导出链产出与导出源去标记比对必须逐字一致（结构操作/单位声明在审计单列）
+  if (audit.mode !== 'off') {
+    const conservation = exportConservationDiff(rawMarkdown, markdown);
+    if (!conservation.conserved) {
+      audit.blockers.push({
+        code: 'content-not-conserved',
+        line: 0,
+        message: `导出链存在未声明的内容改写（去标记比对）：归一文本第 ${conservation.position} 字符附近分歧（源「${conservation.sourceContext}」→ 产物「${conservation.productContext}」）`,
+      });
+    }
+  }
   return {
     markdown,
     baselineMarkdown,
     issues: validateExportMarkdown(markdown, baselineMarkdown),
+    audit,
   };
 }
 
@@ -1000,7 +1177,7 @@ async function renderPdfBuffer(html: string, settings?: DocumentExportSettings) 
  * B3 导出后闭环报告：导出成功后归档总用时/规则执行摘要/修复记录到记录详情，
  * 支持与历史版本对比。归档失败不影响导出结果。
  */
-function archiveExportReport(record: GeneratedDocumentRecord | null, format: ExportFormat, projectRoot: string) {
+function archiveExportReport(record: GeneratedDocumentRecord | null, format: ExportFormat, projectRoot: string, renderAudit?: ExportRenderAuditReport) {
   if (!record) return;
   try {
     const draft = record.draft;
@@ -1017,6 +1194,8 @@ function archiveExportReport(record: GeneratedDocumentRecord | null, format: Exp
       // P18/P19 归档：自动健康诊断告警 + 修复轮热力图（跨文档缺陷热力图分析数据源）
       healthAlerts: draft?.reviewMetadata?.telemetry?.healthAlerts,
       repairHeat: draft?.reviewMetadata?.telemetry?.repairHeat,
+      // A1 导出纯渲染审计（dry-run 误报采样 + 守恒断言证据链）
+      ...(renderAudit ? { renderAudit } : {}),
     };
     const history = [...(record.exportReports || []), report].slice(-20);
     updateGeneratedDocument(record.id, { exportReports: history }, projectRoot);
@@ -1042,10 +1221,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const recordMarkdown = record?.editedMarkdown || record?.markdown || record?.draft?.markdown || '';
     const rawMarkdown = body.useClientMarkdown && typeof body.markdown === 'string' ? body.markdown : recordMarkdown || body.markdown || '';
     const preparedExport = prepareExportMarkdown(rawMarkdown, record?.draft?.markdown || record?.markdown || '');
-    const { markdown } = preparedExport;
+    const { markdown, audit } = preparedExport;
     const format = body.format;
     if (!format || !['markdown', 'html', 'pdf', 'docx'].includes(format)) return res.status(400).json({ error: 'INVALID_EXPORT_FORMAT', message: '请选择有效的导出格式。' });
     if (preparedExport.issues.length > 0) res.setHeader('X-Export-Content-Issues', encodeURIComponent(JSON.stringify(preparedExport.issues.slice(0, 20))));
+    // A1 导出纯渲染审计：模式 + 源层结构性缺陷（观测期采样）+ 渲染层结构操作计数；off 模式不输出
+    const renderAuditReport = audit.mode === 'off' ? undefined : exportRenderAuditReport(audit);
+    if (renderAuditReport) res.setHeader('X-Export-Render-Audit', encodeURIComponent(JSON.stringify(renderAuditReport)));
+    // A1 enforce：源层结构性缺陷（裸表/孤立分隔线）阻断导出——导出层不造内容兜底，报错回源修复
+    if (audit.mode === 'enforce' && audit.blockers.length > 0) {
+      return res.status(422).json({
+        error: 'EXPORT_SOURCE_STRUCTURAL_DEFECT',
+        message: `导出源存在结构性缺陷，已按纯渲染模式阻断（不再补造表头）：${audit.blockers.slice(0, 3).map(item => item.message).join('；')}`,
+        issues: audit.blockers.slice(0, 20),
+      });
+    }
     const exportGate = record?.draft?.exportGate || body.exportGate;
     // 导出门禁仅作为风险提示，不阻断用户导出
     const blockingIssues = exportGate?.blockingIssues?.filter(isExportBlockingIssue) || [];
@@ -1056,7 +1246,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const filename = safeFileName(title);
     // Markdown 格式直接返回文本
     if (format === 'markdown') {
-      archiveExportReport(record, format, projectRoot);
+      archiveExportReport(record, format, projectRoot, renderAuditReport);
       res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.md`)}`);
       return res.status(200).send(markdown);
@@ -1064,7 +1254,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // DOCX 格式
     if (format === 'docx') {
       const docx = await buildDocx(title, markdown, exportSettings, body.wordTemplatePath, projectRoot);
-      archiveExportReport(record, format, projectRoot);
+      archiveExportReport(record, format, projectRoot, renderAuditReport);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.docx`)}`);
       return res.status(200).send(docx);
@@ -1072,7 +1262,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // HTML 和 PDF 需要将 Markdown 渲染为 HTML
     const html = await buildExportHtml(title, markdown, exportSettings, projectRoot);
     if (format === 'html') {
-      archiveExportReport(record, format, projectRoot);
+      archiveExportReport(record, format, projectRoot, renderAuditReport);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.html`)}`);
       return res.status(200).send(html);
@@ -1080,7 +1270,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     try {
       const pdf = await renderPdfBuffer(html, exportSettings);
       const pages = pdfPageCount(pdf);
-      archiveExportReport(record, format, projectRoot);
+      archiveExportReport(record, format, projectRoot, renderAuditReport);
       res.setHeader('Content-Type', 'application/pdf');
       if (pages) res.setHeader('X-PDF-Page-Count', String(pages));
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.pdf`)}`);
@@ -1091,6 +1281,6 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 }
 
-export const __documentExportTest__ = { inlineLocalImages, resolveLocalImagePath, normalizeExportUnits, prepareExportMarkdown, stripInlineMarkdown, enhanceTocHtml, buildExportHtml, buildDocx, validateExportMarkdown };
+export const __documentExportTest__ = { inlineLocalImages, resolveLocalImagePath, normalizeExportUnits, normalizeLooseMarkdownTables, normalizeParagraphs, createExportRenderAudit, exportPureRenderMode, exportRenderAuditReport, canonicalExportText, exportConservationDiff, prepareExportMarkdown, stripInlineMarkdown, enhanceTocHtml, buildExportHtml, buildDocx, validateExportMarkdown };
 
 export default withApiErrorBoundary('api/documents/export', handler);

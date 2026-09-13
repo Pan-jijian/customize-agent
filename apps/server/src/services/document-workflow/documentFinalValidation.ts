@@ -25,6 +25,7 @@ import { blueprintEquipmentAuthorities, blueprintLaborPeakAuthority, blueprintPh
 import { det, detSafe } from './detectorFixerRegistry';
 import { structureIntegrityIssues } from './structureIntegrityRules';
 import { flowFormRepeatIssues, skeletonFingerprintIssues, templatedLabelIssues, titleIntegrityIssues } from './templatingGovernance';
+import { factReconciliationIssues } from './factReconciliation';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, TenderRequirementModel, ValidationIssue } from './types';
 
 /**
@@ -169,6 +170,9 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('node-schedule-consistency', () => nodeScheduleConsistencyIssues(input.markdown)),
     // h13：跨节数值口径冲突（XPS/垫层/变压器/模板周转/砌块/灭火器/潜水泵/急救箱确定性锚点）
     ...det('cross-section-numeric-conflict', () => crossSectionNumericConflictIssues(input.markdown)),
+    // D4 数值对账六类（批 1 事实溯源专项机制化）：合计推导/规格-数值绑定/语义槽位/近似口径/
+    // 分项显式/名称口径——正文数值 vs 清单事实锁 + 蓝图参数桶的关系型对账（权威缺失的规则自行跳过）
+    ...det('fact-reconciliation', () => factReconciliationIssues({ markdown: input.markdown, billFactLock: input.billFactLock, blueprintData: input.blueprintData, factsModel: input.factsModel })),
     // 4.18.10 清单红线权威比对（丰乐镇第五版实测）：绿化养护期（P1 正文一年 vs 清单两年）/
     // 路灯数量（P3 正文 20 套 vs 清单 118 套）——清单权威单向判定，正文矛盾即 blocker；
     // 无对应清单条目不检测（不误伤无清单项目），分型号明细按总数口径与清单比对
