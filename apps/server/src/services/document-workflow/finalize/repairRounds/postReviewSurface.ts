@@ -8,6 +8,8 @@ import { repairTableBlocksInMarkdownDeterministically } from '../../tableRepairH
 import { stripInternalTerminologySentences } from '../../internalTerminologyAnchors';
 import { enforcePlannedSectionCompleteness } from '../../globalQualityGates';
 import { SURFACE_FIX_STEPS } from '../../deterministicFixChains';
+import { fixScoringRequirementResponsesInFinalMarkdown } from '../../tenderRequirements';
+import { displayStage, upsertProgressStage } from '../../progress';
 import type { FinalizeSession } from '../finalizeSession';
 
 export async function stagePostReviewSurface(session: FinalizeSession): Promise<void> {
@@ -72,5 +74,24 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   if (tocConsistencyFix.fixedCount > 0) {
     session.finalMarkdown = tocConsistencyFix.markdown;
     await session.recomputeFinalValidationBundle();
+  }
+  // 第十六版 B 闭环终检（丰乐镇 4.26.0 实测）：前附表条款补写句在 stage5 之后仍可能被 LLM 修复轮
+  // 改写丢失（「不允许分包」→「严禁转包和违法分包」丢失锚点字面），商务清洗也只作用于 markdown
+  // 不回写章节草稿；交付前在最终成稿上做最后一次与检测器同源的确定性补写（失配条款按责任章节
+  // 行级插入、章节草稿同步），补写后重算校验组，门禁零响应/部分响应即清零
+  const scoringFixFinal = await fixScoringRequirementResponsesInFinalMarkdown({
+    markdown: session.finalMarkdown,
+    chapters: session.finalChapterDrafts,
+    model: session.tenderRequirements,
+    similarity: session.requirementsSimilarity,
+    signal: session.signal,
+    diagnostics: session.generationDiagnostics,
+  });
+  if (scoringFixFinal.fixedCount > 0) {
+    session.finalMarkdown = scoringFixFinal.markdown;
+    await session.recomputeFinalValidationBundle();
+    const finalScoringStage = displayStage({ type: 'validation', roleId: 'scoring-requirement-fix-final', status: 'success', message: `评分项响应终检补写：${scoringFixFinal.fixedCount} 条（${scoringFixFinal.details.slice(0, 3).join('、')}）`, details: scoringFixFinal.details.slice(3) }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, finalScoringStage);
+    upsertProgressStage(session.finalGateRepairStages, finalScoringStage);
   }
 }

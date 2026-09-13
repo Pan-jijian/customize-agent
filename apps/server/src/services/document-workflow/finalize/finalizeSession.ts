@@ -284,7 +284,7 @@ export function createFinalizeSession(input: FinalizeGenerationInput): FinalizeS
     supportAuthority: undefined as unknown as FinalizeSession['supportAuthority'],
     laborPeakAuthority: undefined as unknown as FinalizeSession['laborPeakAuthority'],
     greeningMaintenanceAuthority: undefined as unknown as FinalizeSession['greeningMaintenanceAuthority'],
-    surfaceFixContext: { laborPeakAuthority: undefined as never, greeningMaintenanceAuthority: undefined as never },
+    surfaceFixContext: { laborPeakAuthority: undefined as never, greeningMaintenanceAuthority: undefined as never, resourceBreakdownAuthority: undefined, supportFormAuthority: undefined },
     decisionLockEntries: [],
     finalStages: [],
     reviewChecklist: [],

@@ -17,8 +17,7 @@
     "models": "模型配置",
     "settings": "设置",
     "promptManagement": "提示词管理",
-    "systemLogs": "系统日志",
-    "templateReferences": "模板参考"
+    "systemLogs": "系统日志"
   },
   "overview": {
     "title": "系统总览",
@@ -405,12 +404,6 @@
     "rulePreviewAnalyzing": "正在识别规则…",
     "rulePreviewHint": "输入提示词内容后将自动识别规则",
     "rulePreviewNone": "未识别到规则",
-    "paradigmTitle": "参考范式",
-    "paradigmTypePlaceholder": "选择工程类型",
-    "paradigmInsert": "插入范式",
-    "paradigmEmpty": "未找到参考范式",
-    "paradigmInserted": "参考范式已插入",
-    "paradigmFailed": "参考范式获取失败",
     "send": "发送"
   },
   "assets": {

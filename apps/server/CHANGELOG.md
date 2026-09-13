@@ -1,5 +1,91 @@
 # server
 
+## 4.29.0
+
+### Minor Changes
+
+- V2 生成质量铁律批次（批 1 结构完整性 + 批 2 口径权威 + 批 3 门禁升级）与模板参考库移除
+
+  - 批 1 结构完整性统一规则（structureIntegrityRules 单一扫描源，写时质检 / 终检检测器 / 确定性清理器三处共用同一扫描，检测定位=清理定位）：
+    - 写时块质检：块成稿即扫——cleanable 类（重复行/表头/孤立编号/相邻重复句）就地确定性清理；blocking 类（句尾截断/空小节/表名混入表头/空表/标点断裂）首轮阻断 + 缺陷原文反馈定向重写，末轮放行交终检兜底
+    - 终检检测器注册（structureIntegrityIssues 安全网）+ 确定性清理器接入修复链（只清不写，零内容生成）
+    - 兜底清除：5 处历史兜底实锤 → 阻断/定向回写（零兜底写入）
+    - 写作约束包注入：结构 / 表格 / 禁写规范写入写作任务书（质量在写时）
+  - 批 2 劳动力 / 机械口径权威统一 + 素材过滤：
+    - 阶段劳动力声明扫描、机械批次冲突、开工令时序三类检测器 + 阶段劳动力确定性归一修复器（检测与修复同源口径）
+    - 素材过滤扩展：商务条款不进写作上下文
+  - 批 3 门禁升级（宁缺毋假）：
+    - detectorFixerRegistry category 强制校验（注册检测器必须声明合法 category，漏标即启动报错暴露）
+    - buildExportGate 白名单 → 黑名单式全量阻断（凡经 isHardExportBlockingIssue 判定的 error 一律阻断，仅人工兜底项豁免）
+    - generatedDocumentService：门禁未通过一律 failed（不再产出 completed_with_issues），阻断清单无条件置顶呈现——带病文档不作为交付件
+  - 模板参考库移除：template-reference 页面 / API / 服务 / 语义画像 / 基准质量模块整体删除
+
+## 4.28.0
+
+### Minor Changes
+
+- 4.28.0：生成质量修复批次 2+3（P0 交付体面 + C 套话治理 + D 细节修正 + E3/A6 运营收尾）
+
+  - P0 交付体面修复（终稿可见缺陷）：
+    - 标题切分：templatingGovernance 修复器 + markdownComposer 装配层（行内嵌标题/正文粘连切分）；deterministicFixChains 注册 3 步骤并注入 plannedSectionTitles
+    - 「按招标文件要求：」类元语言抄写句治理：豁免谓词双形态改造（detectors/fixers 同源 + 商务词表扩围）；写作规则去元语言示例（stagePrepare）
+  - C 套话与模板化治理：tenderBidChecks 检测器校准（14 原型 + 0.80 阈值 + 共享句池/判定器 + 零信息判定）；globalQualityGates 句级定点删除（stripZeroInfoSloganSentences）+ 快照顺序与触发口径；chapterGeneration block-qc 阻断 + qualityRules 写作规则黑名单；constructionOrgAudit channel 标记
+  - D 细节修正：D1 蓝图工期检测豁免扩展（计划/安排分项语境）；D2 self-undermining 三端闭环（检测豁免 + 修复器去前缀依赖扩围 + scoringResponseTail 源头正向化，统一「自主组织实施」正向表述）；D3 承接缺口取证（暂列金额/成品厕所拆除/点位名，均无需修改）
+  - E3：/api/health uptime 毫秒 → 秒口径修复（与 /api/system/stats 对齐，消除 settings 页运行时长显示放大 1000 倍）
+  - A6：无主数值审计边界严格定位/计数（消除「1.5m 落在 31.5mm 内」类子串劫持语境）+ 第四轮语境词表扩围（路灯/冠丛/蓬径/人数/保勤 + 降雨/雨量/PPR/冷水管/提升泵/扬程）；4.27.0 终稿离线复测未登记 8 → 0
+
+## 4.27.1
+
+### Patch Changes
+
+- B 闭环终收尾（4.27.1）：评分项要求检测条款原文分句兜底——coreTerms 概括短语（LLM 抽象词）与正文抄写句（条款原文全文）词面错位导致 4 条条款三轮持续误报零命中/部分响应；条款去括号举例后按标点切分实质分句（≥6 字符），全部分句字面落位正文即判完全响应（全分句命中才放行，真缺失条款不因兜底漏报）。
+
+## 4.27.0
+
+### Minor Changes
+
+- 4.27.0：批次 1 生成质量修复（事实一致性 A1-A5 + 前附表响应闭环 B）
+
+  - A1/A2 多口径数值冲突确定性裁决器：数值类冲突从 llm-patch 前置分流到确定性裁决并接入修复器 registry
+  - A3 项目人数确定性 fixer：人数谱系冲突确定性归一（子窗口豁免防误伤）
+  - A4 两可条款唯一化 fixer：「或/及」选型条款确定性收口
+  - A5 fact-landing 诊断修复：坏值提取门控（6 类）+ 前缀清洗，消除诊断噪声
+  - B 前附表条款响应闭环（零响应根治）：
+    - 商务条款定性响应句分支表补全（质量保证金/水电费/注册地/核减/清单异议等 15 分支，特异性降序防响应错位）
+    - 补写幂等（定性响应句存在性判定，防重复补写）；商务数字参数（金额/比例/时限）永不落位技术标
+    - 零响应检测商务条款降级 info（不阻断交付），定性响应句存在即通过（检测/补写/清洗三端同源口径）
+    - 终检 markdown 级补写（postReviewSurface 之后行级插入条款补写句，防 LLM 修复轮改写丢失锚点）
+    - 商务词清洗与商务数据检测双端豁免对齐（SANCTIONED_RESPONSE_SENTENCE_RE 共享谓词，修复「补了即被删/被阻断」历史 BUG）
+    - deterministicStage5 补写 stage 双写 finalGateRepairStages（消除诊断盲区）
+
+## 4.26.0
+
+### Minor Changes
+
+- 4.26.0：模板参考库整体移除 + executability 目标线固化 + generated API lite=2 轮询级裁剪
+
+  - 模板参考库整体移除（Part I）：4 个消费点均不参与生成内容生产（事后对标展示 / 1 个评分锚点 / 模板校验提示 / 页面展示），全量删除 templateReferenceService / benchmarkQuality / referenceProfileSemantic 服务与模板参考页面、API、导航入口及提示词范式插入功能；referenceQualityProfile 瘦身为仅工程类型判别（蓝图推导策略路由仍依赖 suggestProjectType）
+  - executability 目标线固化：可落地性评分目标改为单一字数口径 target = max(6, ceil(有效字数 / 1500))，移除参考库锚点分支与 effectiveReference 分支（评分口径变化，历史对标分不可比）
+  - 用户数据保留：~/.customize-agent/template-references/ 目录只读保留（references.json 与 standard-blocks.json 已备份至 .dbg/），标准板块资产机制（loadStandardBlockAssets）不受影响
+  - E2：generated 单文档 API 新增 lite=2 轮询级裁剪（status / 阶段摘要 / 计数，数十 KB 量级），轮询监控脚本切换该模式并在终结时全量落盘
+
+## 4.25.0
+
+### Minor Changes
+
+- 生成中止韧性修复：消除「快完成时被中止」的四类终止路径
+
+  中止判定收敛：服务端 isAbortError 由宽正则改为精确匹配「用户中止」+ AbortSignal 双判；前端呈现同步收敛（仅本地主动中止静默，非本地中止显性告警并标记失败节点，第三方含 "aborted" 字样的异常不再被静默吞掉）。
+  进程中断判定升级：记录与 meta 新增 ownerPid/ownerStartedAt；markStale 与轮询短路共用单源判定（宽限期 60s→180s、心跳 60s→30s 且宽限自动 clamp ≥3× 心跳），归属进程存活不判、已退出立即判（process-exited）、心跳 24h 兜底（heartbeat-lost）；中断落盘 interruptedAt/interruptionReason 并输出归因日志。
+  finalize 末期硬停治理：新增 detSafe 安全包装并替换 6 处末期语义检测器调用点，检测器基础设施异常降级为显性 warning 待复核而不作废整篇；参数概念冲突嵌入数量不一致同口径降级；embedding-provider 的 rejected pipeline 从静态缓存剔除（失败自愈）；任务启动做本地语义模型预热，模型资源问题分钟 0 快速失败（DOCUMENT_SKIP_EMBED_PREFLIGHT=1 可跳过）。
+  中止审计与前端体验：abort API 落盘 abortedAt/abortedBy/abortedStage；中断记录「继续生成」入口前置呈现（立即抛出中断文案，不再等 16 分钟「疑似卡住」）。
+  内存观测：心跳写盘内存采样、finalize 收尾 rss 超 DOCUMENT_MEMORY_ALERT_MB（默认 3072）写入 healthAlerts；CUSTOMIZE.md 补充文档生成环境变量与 NODE_OPTIONS 建议。
+
+### Patch Changes
+
+- Updated dependencies
+  - @customize-agent/knowledge@4.7.0
+
 ## 4.24.0
 
 ### Minor Changes

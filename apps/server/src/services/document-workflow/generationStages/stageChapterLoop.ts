@@ -20,6 +20,7 @@ import { chapterSectionFactUsageIssues } from '../chapterReview';
 import { retrieveWebEvidence } from '../webResearchService';
 import { buildChapterReadinessPlan } from '../chapterReadiness';
 import { buildCrossChapterDutyDeclaration } from '../chapterDutyDeclaration';
+import { WRITING_INTEGRITY_CONSTRAINTS } from '../documentWritingTaskBrief';
 import { chapterTaskPromptForPlannedStructure, planChapterTask } from '../agentPlanner';
 import { throttleAgentWorkflowNodes } from '../agentWorkflow';
 import { governEvidenceValues, renderScopeOverrideAnchors } from '../factGovernance';
@@ -35,6 +36,8 @@ import type { PlannedChapterContentInput, PlannedChapterContentResult } from '..
 import { chapterCompletionStatus, chapterGenerationTargets, compactChapterQueries, finalizeChapterContentQuality, optimizeChapterEvidence, preselectSemanticCandidates, resolveChapterPromptExecution, retrieveSectionEvidence, semanticEvidenceText, stripBidDisciplineSentencesSemantic } from '../documentGeneratorHelpers';
 import { alignChapterContentToBlueprint, buildChapterStructureFromBlueprint, chapterBlueprintAuthoritiesNeeded, chapterBlueprintAuthorityGaps, findBlueprintChapter, renderBlueprintChapterSlice, renderBlueprintMustCiteValues, splitSinglePointOversizedBlocks } from '../integratedBlueprint';
 import type { BlueprintAuthorityId, PlannedChapterStructure } from '../integratedBlueprint';
+import { blueprintPhaseLaborAuthorities } from '../authorityIndex';
+import { fixPhaseLaborValues } from '../documentIntegrityChecks';
 import { governChapterBlockNames } from '../sectionNamingGovernance';
 import { loadFingerprintPool } from '../sectionFingerprint';
 import { extractGeneratedSections } from '../markdownComposer';
@@ -283,7 +286,9 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         ].filter(Boolean).join('\n')
       : '';
     // 写作任务书不再逐章注入：其“写作目标/必须覆盖/清单目标”与 plan（项目资料理解的章节计划，源自模板+图谱、更项目专属）语义重叠，
-    // 全局写作约束由文档蓝图（projectContext）统一承载，逐章 roleContext 保留图谱提示与项目理解的章节计划即可
+    // 全局写作约束由文档蓝图（projectContext）统一承载；但 WRITING_INTEGRITY_CONSTRAINTS（结构/表格/数据口径/禁堆砌/工期时序五条红线，
+    // 与 structureIntegrityRules 检测口径同源的写作侧单源）为逐章强约束——检测器能拦的缺陷必须在写作 prompt 前置声明，
+    // 从源头不产出（重点在写时，检测与清理只作安全网），故在此逐章注入 roleContext
     const scopeOverrideAnchors = renderScopeOverrideAnchors(session.understanding.canonicalFacts.scopeConflicts);
     // W4/P3 本章责任要求项：路由到本章的评分项要求必须显性写入正文（生成侧治本，不依赖事后补写）
     const chapterRequirementContext = session.planning.requirementsRoutes.length > 0
@@ -321,7 +326,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     // 组件 6 跨章写作职责分工：职责载体 = 本章标题+规划小节 / 其余各章标题+各自小节（同一份规划产物），
     // 写作端源头确保无跨章重复（写时即不复制其他章主题），不再依赖事后按分数删重复
     const dutyDeclaration = buildCrossChapterDutyDeclaration(chapter, session.planning.effectiveChapters);
-    const roleContext = [graphRoleHint, chapterRequirementContext, forcedSectionContext, dutyDeclaration, sixHundredPercentContext, scopeOverrideAnchors.length ? `【数据口径强制约束】${scopeOverrideAnchors.join('；')}` : '', plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : '', billLockText].filter(Boolean).join('\n');
+    const roleContext = [graphRoleHint, chapterRequirementContext, forcedSectionContext, dutyDeclaration, sixHundredPercentContext, scopeOverrideAnchors.length ? `【数据口径强制约束】${scopeOverrideAnchors.join('；')}` : '', ...WRITING_INTEGRITY_CONSTRAINTS, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : '', billLockText].filter(Boolean).join('\n');
     const chapterPromptExecution = resolveChapterPromptExecution(session.prepare.promptPlan, chapter);
     if (session.prepare.promptPlan.writerPrompts.length > 0 && !chapterPromptExecution.primaryWriter) throw new Error(`${displayChapterTitle(chapter.title)} 写作主控提示词未进入章节生成阶段`);
     const chapterPromptTexts = [chapterPromptExecution.promptTexts, session.prepare.generationControlPrompt].filter(Boolean).join('\n\n');
@@ -631,6 +636,16 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           session.planning.generationDiagnostics.llm.lastInfo = `蓝图引用对齐：${chapter.title} 回填 ${aligned.fixed.length} 处（${aligned.fixed.map(item => `${item.anchor} ${item.from}→${item.to}`).join('、')}）${aligned.missing.length ? `；未引用缺口 ${aligned.missing.length} 项：${aligned.missing.join('、')}` : ''}`;
         } else if (aligned.missing.length > 0) {
           session.planning.generationDiagnostics.llm.lastInfo = `蓝图引用缺口观测：${chapter.title} 未在正文引用 ${aligned.missing.length} 项 must_cite 参数（${aligned.missing.slice(0, 6).join('、')}${aligned.missing.length > 6 ? ' 等' : ''}），由跨章一致性审查兑底`;
+        }
+      }
+      // 批2-1 写时对齐（铁律：质量在写时）：阶段劳动力数值 vs 蓝图 byPhase 权威（同源扫描+降序硬替换+复检回滚），
+      // 章内一次性消灭跨章多口径漂移（丰乐镇实测 216/85/216/216 四口径）；检测器/确定性修复轮为安全网兑底
+      if (llmContent && session.blueprint.integratedBlueprint) {
+        const phaseLaborAligned = fixPhaseLaborValues(llmContent, blueprintPhaseLaborAuthorities(session.blueprint.integratedBlueprint.data));
+        if (phaseLaborAligned.fixedCount > 0) {
+          llmContent = phaseLaborAligned.markdown;
+          const priorInfo = session.planning.generationDiagnostics.llm.lastInfo;
+          session.planning.generationDiagnostics.llm.lastInfo = `${priorInfo ? `${priorInfo}；` : ''}阶段劳动力口径对齐：${chapter.title} 回填 ${phaseLaborAligned.fixedCount} 处（${phaseLaborAligned.details.join('、')}）`;
         }
       }
       throwIfAborted(session.global.input.signal);

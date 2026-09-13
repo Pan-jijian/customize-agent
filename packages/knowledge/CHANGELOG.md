@@ -1,5 +1,17 @@
 # @customize-agent/knowledge
 
+## 4.7.0
+
+### Minor Changes
+
+- 生成中止韧性修复：消除「快完成时被中止」的四类终止路径
+
+  中止判定收敛：服务端 isAbortError 由宽正则改为精确匹配「用户中止」+ AbortSignal 双判；前端呈现同步收敛（仅本地主动中止静默，非本地中止显性告警并标记失败节点，第三方含 "aborted" 字样的异常不再被静默吞掉）。
+  进程中断判定升级：记录与 meta 新增 ownerPid/ownerStartedAt；markStale 与轮询短路共用单源判定（宽限期 60s→180s、心跳 60s→30s 且宽限自动 clamp ≥3× 心跳），归属进程存活不判、已退出立即判（process-exited）、心跳 24h 兜底（heartbeat-lost）；中断落盘 interruptedAt/interruptionReason 并输出归因日志。
+  finalize 末期硬停治理：新增 detSafe 安全包装并替换 6 处末期语义检测器调用点，检测器基础设施异常降级为显性 warning 待复核而不作废整篇；参数概念冲突嵌入数量不一致同口径降级；embedding-provider 的 rejected pipeline 从静态缓存剔除（失败自愈）；任务启动做本地语义模型预热，模型资源问题分钟 0 快速失败（DOCUMENT_SKIP_EMBED_PREFLIGHT=1 可跳过）。
+  中止审计与前端体验：abort API 落盘 abortedAt/abortedBy/abortedStage；中断记录「继续生成」入口前置呈现（立即抛出中断文案，不再等 16 分钟「疑似卡住」）。
+  内存观测：心跳写盘内存采样、finalize 收尾 rss 超 DOCUMENT_MEMORY_ALERT_MB（默认 3072）写入 healthAlerts；CUSTOMIZE.md 补充文档生成环境变量与 NODE_OPTIONS 建议。
+
 ## 4.6.0
 
 ### Minor Changes

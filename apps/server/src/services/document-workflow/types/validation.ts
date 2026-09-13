@@ -5,7 +5,6 @@
 import type { DocumentGenerationDiagnostics } from './progress';
 import type { WritingTaskBrief } from './core';
 import type { TenderBidTemplatingReport } from '../tenderBidScoring';
-import type { QualityBenchmarkResult } from '../benchmarkQuality';
 import type { AuthorityAuditReport } from '../authorityAudit';
 
 export interface ChapterCoverageReport {
@@ -106,8 +105,6 @@ export interface DocumentReviewMetadata {
   telemetry?: DocumentTelemetryReport;
   /** V5 P5 无主数值审计报告（M6）：正文数值 ↔ AuthorityIndex 三分类（0 未登记项为验收口径） */
   authorityAudit?: AuthorityAuditReport;
-  /** 质量对标：与模板参考库同工程类型基准的对比结果 */
-  qualityBenchmark?: QualityBenchmarkResult;
 }
 
 export interface DocumentTelemetryReport {

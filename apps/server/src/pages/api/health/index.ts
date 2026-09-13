@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { NextApiRequest, NextApiResponse } from 'next';
 
-const startTime = Date.now();
 const buildIdCandidates = [
   join(process.cwd(), '.next', 'BUILD_ID'),
   join(process.cwd(), 'apps', 'server', '.next', 'BUILD_ID'),
@@ -17,13 +16,15 @@ if (!processBuildId && buildIdPath) {
   }
 }
 
-/** 健康检查 API：返回服务运行状态、启动时间和构建信息 */
+/** 健康检查 API：返回服务运行状态、运行时长（秒）和构建信息 */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
   try {
     res.status(200).json({
       status: 'ok',
-      uptime: Date.now() - startTime,
+      // 4.28.0 E3 修复：原为模块加载至请求的毫秒差（Date.now() - startTime），而消费端 settings 页
+      // formatUptime 按秒换算 → 显示放大 1000 倍；改为 process.uptime()（秒），与 /api/system/stats 口径一致
+      uptime: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
       buildId: processBuildId,
       pid: process.pid,

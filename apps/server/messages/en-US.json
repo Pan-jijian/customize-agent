@@ -17,8 +17,7 @@
     "models": "Model Config",
     "settings": "Settings",
     "promptManagement": "Prompt Management",
-    "systemLogs": "System Logs",
-    "templateReferences": "Template References"
+    "systemLogs": "System Logs"
   },
   "overview": {
     "title": "System Overview",
@@ -405,12 +404,6 @@
     "rulePreviewAnalyzing": "Analyzing rules…",
     "rulePreviewHint": "Rules will be auto-detected after you enter prompt content",
     "rulePreviewNone": "No rules detected",
-    "paradigmTitle": "Reference Paradigm",
-    "paradigmTypePlaceholder": "Select project type",
-    "paradigmInsert": "Insert Paradigm",
-    "paradigmEmpty": "No reference paradigm found",
-    "paradigmInserted": "Reference paradigm inserted",
-    "paradigmFailed": "Failed to load reference paradigm",
     "send": "Send"
   },
   "assets": {

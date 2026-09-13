@@ -77,6 +77,14 @@ describe('B7 自伤句式 A21 形态', () => {
     expect(result.markdown).not.toContain('本工程不进行分包');
   });
 
+  it('R9 4.27.0 实测变体：联合体/分包响应句前缀不遮断核心句命中（去前缀依赖）', () => {
+    const md = '按招标文件要求：本招标项目不接受联合体投标；不允许分包。本工程不进行分包，全部施工内容由我方自行组织完成。';
+    const result = fixSelfUnderminingCandidates(md);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('不允许分包。本工程全部施工任务由我公司项目部自行组织实施，严禁违法分包、转包及挂靠行为。');
+    expect(result.markdown).not.toContain('本工程不进行分包');
+  });
+
   it('R9 收尾赶工暗示「1个日历天」改写为按计划组织', () => {
     const md = '路灯安装完成后逐套进行绝缘电阻测试和接地电阻测试，测试合格后由电工填写调试记录，质检员逐套验收并签字确认。亮化与收尾阶段安排1个日历天，各分组在收尾阶段同步完成路灯调试、场地清理和竣工资料整理，项目经理组织各分组施工员进行内部预验收，预验收问题清单当日下发、限时整改、复查销项后方可申请正式竣工验收。';
     const result = fixSelfUnderminingCandidates(md);

@@ -183,17 +183,19 @@ describe('repairTemplatingIssues（模板化修复闭环：套话重写 + 重难
     vi.resetAllMocks();
   });
 
-  it('套话占比超标触发锚点直连修复：套话句/缺要素条目原文进 anchorTexts，指令区分两类锚点', async () => {
+  it('套话句命中触发修复：零信息口号句确定性删除（不进 anchorTexts），缺要素条目原文进锚点', async () => {
     fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
     difficultyMock.mockResolvedValue({ countermeasures: 2, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: true, entries: [{ text: '基坑降水难度大需控制。', attributed: false, quantified: false }] });
-    fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理。' }]);
+    fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理确保工程质量。', channel: 'semantic' }]);
     repairMock.mockResolvedValue({ content: '本工程为办公楼项目。基坑降水需将周边沉降控制在5mm以内。', appliedCount: 1, producedCount: 2, repairType: 'quality' as never });
-    const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理。基坑降水难度大需控制。')];
+    const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理确保工程质量。基坑降水难度大需控制。')];
     const result = await repairTemplatingIssues(makeTemplatingInput(chapters));
     expect(result.templatingFixApplied).toBe(true);
+    // C2 确定性删除先行：零信息口号句物理移除（不进 LLM 锚点与指令）
     const firstCall = repairMock.mock.calls[0][0];
-    expect(firstCall.anchorTexts).toEqual(['精心组织科学管理。', '基坑降水难度大需控制。']);
-    expect(firstCall.issues[0]).toContain('套话句');
+    expect(firstCall.chapter.content).toBe('本工程为办公楼项目。基坑降水难度大需控制。');
+    expect(firstCall.anchorTexts).toEqual(['基坑降水难度大需控制。']);
+    expect(firstCall.issues[0]).not.toContain('套话句');
     expect(firstCall.issues[0]).toContain('重难点分析条目');
     expect(firstCall.issues[0]).toContain('不得改动');
   });
@@ -209,7 +211,7 @@ describe('repairTemplatingIssues（模板化修复闭环：套话重写 + 重难
   it('修复 patch 未落地：不进入第二轮，套话占比未收敛', async () => {
     fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
     difficultyMock.mockResolvedValue({ countermeasures: 0, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: false, entries: [] });
-    fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理。' }]);
+    fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理。', channel: 'vague' }]);
     const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理。')];
     // repairChapterByQuality 返回原文（无 patch 落地）→ 本章不应用
     repairMock.mockResolvedValue({ content: chapters[0].content, appliedCount: 0, producedCount: 0, repairType: 'quality' as never });
@@ -223,14 +225,18 @@ describe('repairTemplatingIssues（模板化修复闭环：套话重写 + 重难
     fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
     fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 5, ratio: 0.45, level: 'heavy', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
     difficultyMock.mockResolvedValue({ countermeasures: 0, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: false, entries: [] });
-    fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理。' }]);
-    const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理。')];
+    // C2 双通道：semantic 零信息口号句确定性删除 + vague 命中句保留交 LLM 重写（保证删除后仍有 LLM 目标，走修复链）
+    fillerTargetsMock.mockResolvedValue([
+      { chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理确保工程质量。', channel: 'semantic' },
+      { chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '加强过程管控确保质量水平稳步提升。', channel: 'vague' },
+    ]);
+    const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理确保工程质量。加强过程管控确保质量水平稳步提升。')];
     const before = chapters[0].content;
-    repairMock.mockResolvedValue({ content: `${before}\n加强过程管控，确保质量水平稳步提升。`, appliedCount: 1, producedCount: 1, repairType: 'quality' as never });
+    repairMock.mockResolvedValue({ content: `${before}\n统筹兼顾全面推进各项工作落实。`, appliedCount: 1, producedCount: 1, repairType: 'quality' as never });
     const result = await repairTemplatingIssues(makeTemplatingInput(chapters));
     expect(result.templatingFixApplied).toBe(false);
-    // 修复变差：正文回滚到修复前，不保留重写结果
-    expect(chapters[0].content).toBe(before);
+    // 修复变差：回滚到删除后正文——确定性删除不参与回滚（不恢复口号句，LLM 改写丢弃）
+    expect(chapters[0].content).toBe('本工程为办公楼项目。加强过程管控确保质量水平稳步提升。');
     expect(repairMock).toHaveBeenCalledTimes(1);
   });
 
@@ -241,13 +247,24 @@ describe('repairTemplatingIssues（模板化修复闭环：套话重写 + 重难
     fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 0, ratio: 0.05, level: 'light', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
     difficultyMock.mockResolvedValueOnce({ countermeasures: 2, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: true, entries: [{ text: '基坑降水难度大需控制。', attributed: false, quantified: false }] });
     difficultyMock.mockResolvedValue({ countermeasures: 2, attributed: 2, quantified: 2, bothCount: 2, ratio: 1, heavyTemplated: false, entries: [] });
-    fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理。' }]);
-    const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理。基坑降水难度大需控制。')];
+    fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理确保工程质量。', channel: 'semantic' }]);
+    const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理确保工程质量。基坑降水难度大需控制。')];
     const repaired = '本工程为办公楼项目。基坑降水需将周边沉降控制在5mm以内。';
     repairMock.mockResolvedValue({ content: repaired, appliedCount: 1, producedCount: 1, repairType: 'quality' as never });
     const result = await repairTemplatingIssues(makeTemplatingInput(chapters));
     expect(result.templatingFixApplied).toBe(true);
     expect(chapters[0].content).toBe(repaired);
+  });
+
+  it('零信息口号句确定性删除单独生效：无剩余 LLM 目标时零修复调用、fixApplied=true', async () => {
+    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 1, ratio: 0.1, level: 'light', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    difficultyMock.mockResolvedValue({ countermeasures: 0, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: false, entries: [] });
+    fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理确保工程质量。', channel: 'semantic' }]);
+    const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理确保工程质量。')];
+    const result = await repairTemplatingIssues(makeTemplatingInput(chapters));
+    expect(result.templatingFixApplied).toBe(true);
+    expect(repairMock).not.toHaveBeenCalled();
+    expect(chapters[0].content).toBe('本工程为办公楼项目。');
   });
 });
 

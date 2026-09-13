@@ -406,6 +406,34 @@ describe('E3 stripCommercial 结构保留与行级行为', () => {
   });
 });
 
+// 第十六版双端对齐 + 4.27.2 双形态改造：豁免谓词 isSanctionedResponseSentence 为函数形态（legacy 条幅 ≤120 字
+// 或「本工程/我方/本公司/按合同约定」voice 句 ≤200 字），检测与清洗共用同一谓词；统一叠加商务数字硬闸——
+// 含金额/比例/时限参数的句子不豁免（历史 BUG：豁免正则 $ 紧贴字符类而句拆后 part 带句尾标点恒不命中，
+// 补写句被本清洗删除形成「补了即被删」无效闭环）
+describe('E4 stripCommercialDataBodyLines 补写器定性响应句豁免', () => {
+  it('E4 「按招标文件约定：」定性句（含暂列金额/投标总价词面）→ 保留不删', () => {
+    const md = '按招标文件约定：本工程暂列金额按招标文件约定计入投标总价并按规定计税，暂列金额的使用范围与计价规则按合同约定执行。';
+    const result = stripCommercialDataBodyLines(md);
+    expect(result).toContain('暂列金额');
+    expect(result).toContain('按招标文件约定：');
+  });
+  it('E4 「按招标文件要求：」条幅含商务数字 → 删除（4.27.2 数字硬闸，补写句不再带数字参数）', () => {
+    expect(stripCommercialDataBodyLines('按招标文件要求：暂列金额为10万元。')).not.toContain('暂列金额');
+  });
+  it('E4 「按招标文件要求：」条幅无商务数字 → 保留（legacy 形态兼容）', () => {
+    expect(stripCommercialDataBodyLines('按招标文件要求：暂列金额的使用按约定管理。')).toContain('暂列金额');
+  });
+  it('E4 非受控污染句仍删（豁免不削弱清洗防线）', () => {
+    const result = stripCommercialDataBodyLines('本项目暂列金额为60万元。保留句。');
+    expect(result).not.toContain('暂列金额');
+    expect(result).toContain('保留句。');
+  });
+  it('E4 超 120 字受控句不豁免仍删（豁免窗口边界）', () => {
+    const md = `按招标文件约定：${'甲'.repeat(121)}暂列金额。`;
+    expect(stripCommercialDataBodyLines(md)).not.toContain('暂列金额');
+  });
+});
+
 // ── F. 节点工期口径互查（nodeScheduleConsistencyIssues）──
 
 const NODE_LABELS: Array<[string, string]> = [

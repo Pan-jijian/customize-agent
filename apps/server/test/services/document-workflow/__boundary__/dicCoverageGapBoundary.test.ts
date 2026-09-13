@@ -393,8 +393,8 @@ describe('FF27 数量修复：正文部位组豁免（L3311）', () => {
   });
 });
 
-describe('FF28 数量修复：众数兜底带部位表格行跳过（L3313）', () => {
-  it('FF28 未标注表格 12/12/2 众数=12 → 未标注 2 归一，带部位行 2 保留', () => {
+describe('FF28 数量修复：众数兜底已删除（V2 批1-4 零兜底写入）多值不动', () => {
+  it('FF28 未标注表格 12/12/2 多值冲突 → 不修复（原众数归一行为删除）', () => {
     const markdown = [
       '| 灭火器 | 12具 |',
       '| 灭火器 | 12具 |',
@@ -402,10 +402,8 @@ describe('FF28 数量修复：众数兜底带部位表格行跳过（L3313）', 
       '| 办公区 | 灭火器 | 2具 |',
     ].join('\n');
     const result = applyNumericConsistencyDeterministicFixes(markdown);
-    expect(result.fixedCount).toBe(1);
-    expect((result.markdown.match(/^\| 灭火器 \| 2具 \|$/gm) || []).length).toBe(0);
-    expect(result.markdown).toContain('| 办公区 | 灭火器 | 2具 |');
-    expect((result.markdown.match(/12具/g) || []).length).toBe(3);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(markdown);
   });
 });
 

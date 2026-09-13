@@ -12,7 +12,8 @@ import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch }
 import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
 import { extractGeneratedSections, mergeTableLineBreaks } from './markdownComposer';
 import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
-import type { BlueprintData, BlueprintEquipmentItem } from './integratedBlueprint';
+import type { BlueprintData } from './integratedBlueprint';
+import { buildResourceBreakdownAuthority, scanResourceBreakdownClaims } from './resourceBreakdownNumbers';
 import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
 import { extractSection, normalizeSubsectionTitleForDedup, stableHash, stringifyFactValue, WORK_PACKAGE_SECTION_RE } from './utils';
@@ -250,29 +251,18 @@ export function innovationTechCoverageIssues(markdown: string, outlineChapters: 
 }
 
 export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[]): ExportGateResult {
-  const hasBody = chapters.some(chapter => {
-    const body = (chapter.content || '')
-      .split(LINE_SPLIT_RE)
-      .filter(line => !/^#{1,6}\s+/u.test(line.trim()))
-      .filter(line => !/^\s*\|/u.test(line))
-      .filter(line => !/^\s*:?-{3,}:?/u.test(line))
-      .join('\n')
-      .replace(/[|*_`<>#\s]/gu, '');
-    return body.length >= 30;
-  });
   const governedIssues = issues.map(classifyValidationIssue);
   // 人工兜底项豁免（F4）：封面/页眉/页脚/附图等后期人工完善的内容不作为导出门禁阻断项，
   // 修复循环同样不消费预算处理该类缺陷；仅在 checklist 中展示供人工跟进
   const MANUAL_POSTPROCESS_ISSUE_RE = /封面|页眉|页脚|附图|图片引用|CAD图|示意图|插图/u;
   const hardBlockingIssues = governedIssues.filter(issue => issue.level === 'error' && isHardExportBlockingIssue(issue) && !MANUAL_POSTPROCESS_ISSUE_RE.test(issue.message));
   const manualPostprocessIssues = governedIssues.filter(issue => issue.level === 'error' && MANUAL_POSTPROCESS_ISSUE_RE.test(issue.message));
-  // 已生成实质正文时仍保留关键结构阻断（缺节、空小节、生成未达标、正文不足等），仅豁免其余软性门禁，避免质量门禁卡住交付。
-  // 跨章一致性（含数值口径冲突与复核残留）是用户明确的低级错误红线，有正文时同样硬阻断。
-  // round-20 S5/W8：消息正则白名单升级为 category 白名单判定（structure 结构完整/style 禁止话术/fact_consistency 数据一致性
-  // /qingtian_review 评审轮残留），根治“新检测器上线不更新门禁”陷阱——新检测器只要正确标注 category 即自动纳入硬阻断，
-  // 不再依赖手工维护消息正则清单。
-  const CRITICAL_BLOCK_CATEGORIES = new Set(['structure', 'style', 'fact_consistency', 'qingtian_review']);
-  const blockingIssues = hasBody ? hardBlockingIssues.filter(issue => CRITICAL_BLOCK_CATEGORIES.has(String(issue.category || ''))) : hardBlockingIssues;
+  // V2 批3 门禁升级（宁缺毋假）：category 白名单 → 黑名单式全量阻断——凡通过 isHardExportBlockingIssue
+  // 的 error（含 category 直通与消息白名单校准后的残留）一律硬阻断，不再按旧 category 白名单
+  // （structure/style/fact_consistency/qingtian_review）二次过滤。旧白名单与 hasBody 开关会静默放行
+  // table/format/scope/evidence_coverage/professional_chain/control_loop 类真缺陷（带病交付根因之一）；
+  // 显式豁免仅保留人工兜底类（MANUAL_POSTPROCESS_ISSUE_RE：封面/页眉页脚/附图等后期人工完善项）。
+  const blockingIssues = hardBlockingIssues;
   const checklist = [
     { key: 'no_errors', label: '无阻断级校验错误', passed: blockingIssues.length === 0 },
     { key: 'basic_facts', label: '基础事实齐全', passed: factsModel.project.length > 0 },
@@ -811,158 +801,20 @@ export function basisRegulationsCoverageIssues(markdown: string, blueprintData?:
   return issues;
 }
 
-/** 资源章数值拆分一致性检测（十度实测缺陷：资源配置章的工种构成人数/机械台数/同名多规格
- * 材料拆分数量由 LLM 自行分配，与蓝图权威（清单推导）漂移后无人锁定；交付前确定性兑底，
- * 漂移即 error 进修复轮。检测口径保守：只在「名称后紧邻 数字+单位」的明确形态上比对，
- * 分阶段投入/工序描述等非资源表语境不检测；同名多规格条目按规格词语境单独比对，不误伤总量口径。 */
+/** 资源章数值拆分一致性检测（A3 · 4.27.0）：扫描源收敛到 resourceBreakdownNumbers 单源
+ *（检测定位=修复定位；确定性修复器 fixResourceBreakdownNumbers 按同一 claims 定点硬替换）。
+ * 三类模式口径与十度/十一度既有实现一致（工种构成：桥接词白名单+群体语境豁免+阶段部署段落豁免；
+ * 机械台数：单条目锚定名称语境、同名多条目按规格语境；材料拆分：多规格+同族单位+合计行豁免）；
+ * issue 按条目 label 去重（每条目最多一条阻断，全部偏离由修复器一轮收敛）。 */
 export function resourceBreakdownConsistencyIssues(markdown: string, blueprintData?: BlueprintData): ValidationIssue[] {
-  if (!blueprintData) return [];
+  const authority = buildResourceBreakdownAuthority(blueprintData);
+  if (!authority) return [];
   const issues: ValidationIssue[] = [];
-  /** 机械名/材料名/规格词出现位置扫描（无前置边界检查：「配置挖掘机」的「置」是合法动词语境） */
-  const findOccurrences = (text: string, word: string): number[] => {
-    const positions: number[] = [];
-    let from = 0;
-    while (from < text.length) {
-      const idx = text.indexOf(word, from);
-      if (idx === -1) break;
-      positions.push(idx);
-      from = idx + word.length;
-    }
-    return positions;
-  };
-  /** 工种词出现位置扫描：前字为汉字时仅当「前字+词」构成词表中更长的复合词
-   * （如钢筋混凝土工 ⊃ 混凝土工）才跳过该位，防复合词内子串误命中；
-   * 动词语境（投入混凝土工12人）不跳过，保证漂移检测有效 */
-  const allTrades = new Set(blueprintData.resources.labor.composition.map(item => item.trade).filter(Boolean));
-  const findTradeOccurrences = (text: string, word: string): number[] => {
-    const positions: number[] = [];
-    let from = 0;
-    while (from < text.length) {
-      const idx = text.indexOf(word, from);
-      if (idx === -1) break;
-      const prev = text[idx - 1] || '';
-      const extended = `${prev}${word}`;
-      if (/[\u4e00-\u9fa5]/u.test(prev) && [...allTrades].some(trade => trade.length > word.length && trade.includes(extended))) {
-        from = idx + word.length;
-        continue;
-      }
-      positions.push(idx);
-      from = idx + word.length;
-    }
-    return positions;
-  };
-  const equipmentCount = (item: BlueprintEquipmentItem): number => (item.quantity && item.quantity > 0 ? item.quantity : Math.round(((item.min ?? 1) + (item.max ?? item.min ?? 1)) / 2));
-  // 1. 工种构成：trade 后紧邻「数字+人」≠ 权威 count → error
-  // P6 误报校准（run1 实测 3 条误报）：a) 桥接限定——数字必须紧邻工种词（中间最多 2 字且属
-  // 「为/达/共/约/计/配置/总计/合计」桥接词白名单），「绿化工程阶段…206人」中「绿化工」是
-  // 「绿化工程」子串（「程阶段」3 字阻断）不再误采；b) 群体语境豁免——工种词前至最近句边界
-  // （。；;\n，不含顿号逗号）的窗口含「作业人员/班组/分组」等群体词时属工序班组配置口径
-  // （与全项目工种构成是两套合法口径），不参与比对（run1 实测「作业人员配置普工8人、混凝土工4人」误报源）
-  const TRADE_BRIDGE_WORD_RE = /^(?:为|达|共|约|计|配置|共计|总计|合计)$/u;
-  const TRADE_GROUP_CONTEXT_RE = /作业人员|施工人员|人员配置|班组|施工组|每村|分组|编组|编入|队伍/u;
-  for (const item of blueprintData.resources.labor.composition) {
-    if (!item.trade || !Number.isFinite(item.count) || item.count <= 0) continue;
-    for (const idx of findTradeOccurrences(markdown, item.trade)) {
-      const before = markdown.slice(0, idx);
-      const sentenceStart = Math.max(before.lastIndexOf('。'), before.lastIndexOf('；'), before.lastIndexOf(';'), before.lastIndexOf('\n'));
-      if (TRADE_GROUP_CONTEXT_RE.test(before.slice(sentenceStart + 1))) continue;
-      const after = markdown.slice(idx + item.trade.length, idx + item.trade.length + 12);
-      const match = /^([^0-9]{0,2}?)(\d+(?:\.\d+)?)\s*人/u.exec(after);
-      if (!match) continue;
-      if (match[1] && !TRADE_BRIDGE_WORD_RE.test(match[1])) continue;
-      const actual = Number(match[2]);
-      if (actual !== item.count) {
-        issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `工种构成人数与蓝图权威不一致：${item.trade} 正文 ${actual} 人，蓝图权威 ${item.count} 人`, suggestion: '工种构成表必须与蓝图工种构成唯一口径一致，各工种人数不得自行改写。' });
-        break;
-      }
-    }
-  }
-  // 2. 机械台数：同名多条目按规格语境单独比对；单条目按名称语境（正序 name 后 + 逆序 台数后）比对
-  const equipmentByName = new Map<string, BlueprintEquipmentItem[]>();
-  for (const item of blueprintData.resources.equipment) {
-    if (!item.name) continue;
-    const group = equipmentByName.get(item.name);
-    if (group) group.push(item);
-    else equipmentByName.set(item.name, [item]);
-  }
-  for (const [name, items] of equipmentByName) {
-    for (const item of items) {
-      const expected = equipmentCount(item);
-      if (!Number.isFinite(expected) || expected <= 0) continue;
-      const contexts: number[] = [];
-      if (items.length === 1) {
-        contexts.push(...findOccurrences(markdown, name));
-      } else if (item.spec) {
-        // 同名多条目：只在「该条目规格词所在句」内比对，避免同段内其他规格条目互串
-        for (const specIdx of findOccurrences(markdown, item.spec)) {
-          const lineStart = markdown.lastIndexOf('\n', specIdx) + 1;
-          let lineEnd = markdown.indexOf('\n', specIdx);
-          if (lineEnd === -1) lineEnd = markdown.length;
-          const line = markdown.slice(lineStart, lineEnd);
-          const sentenceStart = lineStart + Math.max(line.lastIndexOf('，', specIdx - lineStart) + 1, line.lastIndexOf('。', specIdx - lineStart) + 1, line.lastIndexOf('；', specIdx - lineStart) + 1);
-          if (markdown.slice(sentenceStart, lineEnd).includes(name)) contexts.push(specIdx);
-        }
-      }
-      for (const idx of contexts) {
-        const after = markdown.slice(idx + (items.length === 1 ? name.length : (item.spec || '').length), idx + (items.length === 1 ? name.length : (item.spec || '').length) + 12);
-        const match = /(\d+(?:\.\d+)?)\s*台/u.exec(after);
-        if (!match) continue;
-        const actual = Number(match[1]);
-        if (actual !== expected) {
-          issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `机械台数与蓝图权威不一致：${name}${item.spec ? `（${item.spec}）` : ''} 正文 ${actual} 台，蓝图权威 ${expected} 台`, suggestion: '机械投入计划必须与蓝图机械清单一致，台数不得自行改写。' });
-          break;
-        }
-      }
-    }
-  }
-  // 3. 材料同名多规格拆分：spec 后紧邻「数字+同族单位」≠ 该规格权威数量 → error（合计/小计行豁免）
-  // P6 误报校准（run1 实测 42 条误报全源）：原提取「spec 后 6 字内首个数字」把表格复合单元格
-  // （「Φ110/DN100」）、相邻枚举项（「50W、30W」「4W、10W」）、规格/尺寸/编号数字全部误采。
-  // 校准：数字必须从规格词后紧邻位置开始（≤2 个分隔符，表格竖线不在分隔符集内），且必须携带
-  // 与条目单位同族的单位后缀——体积/面积/长度/质量/计数五族，异族单位（壁厚 mm/编号）与
-  // 无单位数字不参与比对（宁漏报不误报，残留由 LLM 评审层兜底）。
-  const MATERIAL_SPLIT_QUANTITY_RE = /^[)）、:：,，\s]{0,2}(?:混凝土|砼)?\s*(\d+(?:\.\d+)?)\s*(m3|m³|立方米|方|m2|m²|㎡|平方米|延长米|米|m|kg|千克|公斤|t|吨|套|个|块|根|只|组|件|片|樘|扇|盏|座|台|处|项|条|副|对|株)(?![A-Za-z0-9²³])/u;
-  const materialUnitFamily = (unit: string): string | null => {
-    const text = (unit || '').replace(/\s+/gu, '');
-    if (!text) return null;
-    if (/m[3³]|立方米|方/u.test(text)) return 'volume';
-    if (/m[2²]|㎡|平方米/u.test(text)) return 'area';
-    if (/m|米/u.test(text)) return 'length';
-    if (/吨|千克|公斤|kg|^t$/u.test(text)) return 'mass';
-    if (/套|个|块|根|只|组|件|片|樘|扇|盏|座|台|处|项|条|副|对|株/u.test(text)) return 'count';
-    return null;
-  };
-  const materialsByName = new Map<string, typeof blueprintData.materialsPlan>();
-  for (const item of blueprintData.materialsPlan) {
-    if (!item.name) continue;
-    const group = materialsByName.get(item.name);
-    if (group) group.push(item);
-    else materialsByName.set(item.name, [item]);
-  }
-  for (const [name, items] of materialsByName) {
-    if (items.length < 2) continue;
-    for (const item of items) {
-      if (!item.spec || !Number.isFinite(item.quantity) || (item.quantity ?? 0) <= 0) continue;
-      const expectedFamily = materialUnitFamily(item.unit || '');
-      if (!expectedFamily) continue;
-      for (const specIdx of findOccurrences(markdown, item.spec)) {
-        const lineStart = markdown.lastIndexOf('\n', specIdx) + 1;
-        let lineEnd = markdown.indexOf('\n', specIdx);
-        if (lineEnd === -1) lineEnd = markdown.length;
-        const line = markdown.slice(lineStart, lineEnd);
-        if (/^\s*\|?\s*(?:合计|小计|总计|累计)/u.test(line)) continue;
-        if (!line.includes(name)) continue;
-        const after = markdown.slice(specIdx + item.spec.length, specIdx + item.spec.length + 16);
-        const match = MATERIAL_SPLIT_QUANTITY_RE.exec(after);
-        if (!match) continue;
-        if (materialUnitFamily(match[2]) !== expectedFamily) continue;
-        const actual = Number(match[1]);
-        if (actual !== item.quantity) {
-          issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `材料规格拆分数量与蓝图权威不一致：${name}（${item.spec}）正文 ${actual}${item.unit}，蓝图权威 ${item.quantity}${item.unit}`, suggestion: '同名多规格材料的拆分数量必须与清单逐项一致，不得自行分配。' });
-          break;
-        }
-      }
-    }
+  const seen = new Set<string>();
+  for (const claim of scanResourceBreakdownClaims(markdown, authority)) {
+    if (seen.has(claim.label)) continue;
+    seen.add(claim.label);
+    issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: claim.message, suggestion: claim.suggestion });
   }
   return issues;
 }
@@ -1437,7 +1289,9 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
   // 只报 warning 提示补充口径说明；无分组词的直接多值互斥 → error 进修复链
   const equipmentScopeRe = /挖掘机|压路机|自卸车|蛙夯|搅拌车|洒水车|高空车/u;
   const equipmentMatches = new Map<string, string[]>();
-  for (const match of markdown.matchAll(new RegExp(`(${equipmentScopeRe.source})[^\\d。；;\\n|]{0,12}(\\d+)\\s*[台辆]`, 'gu'))) {
+  // gap 排除顿号/逗号（4.27.0 A3 校准）：「5台挖掘机，其中3台用于…」的分配语境不得采为「挖掘机3台」口径——
+  // 与修复器 CROSS_SECTION_ANCHORS excavator 模式（排除 、，）检测/修复口径对齐，防检测报冲突而修复看不到的拉扯
+  for (const match of markdown.matchAll(new RegExp(`(${equipmentScopeRe.source})[^\\d。；;\\n|、，]{0,12}(\\d+)\\s*[台辆]`, 'gu'))) {
     const equipment = match[1];
     const value = match[2];
     const before = markdown.slice(Math.max(0, (match.index || 0) - 20), match.index || 0);

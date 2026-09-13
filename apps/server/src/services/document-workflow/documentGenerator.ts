@@ -73,6 +73,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
       generationDiagnostics: session.planning.generationDiagnostics, preliminaryFactsModel: session.understanding.preliminaryFactsModel, scopeConflicts: session.understanding.canonicalFacts.scopeConflicts,
       progressStages: session.global.progressStages, emitProgress: session.global.emitProgress, withProgressHeartbeat: session.global.withProgressHeartbeat,
       blueprintData: session.blueprint.integratedBlueprint?.validation.passed ? session.blueprint.integratedBlueprint.data : undefined,
+      billFactLock: session.blueprint.billFactLock,
     });
     globalConsistencyIssues = reviewed.issues;
     globalDedupRan = reviewed.dedupRan;

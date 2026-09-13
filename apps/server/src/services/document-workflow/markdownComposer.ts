@@ -1,7 +1,7 @@
 import type { DocumentDraftChapter, DocumentTemplate, GeneratedDocumentDraft, PromptDocumentRuleSet, ValidationIssue } from './types';
 import { CAD_ENTITY_TOKEN_RE, FILE_NAME_RE } from './constants';
 import { WORK_PACKAGE_SECTION_RE } from './utils';
-import { SKELETON_FINGERPRINT_BAN_LINE, STRUCTURE_LABEL_BAN_LINE } from './templatingGovernance';
+import { SKELETON_FINGERPRINT_BAN_LINE, STRUCTURE_LABEL_BAN_LINE, plannedTitleMatchKey, splitSentenceLikeHeading, uncoveredHeadingRemainder } from './templatingGovernance';
 import { displayChapterTitle, formalChapterTitle, isTenderClauseFragmentTitle, normalizeGeneratedChapterTitle } from './outline';
 import { composeEnhancedCoverMarkdown } from './composeAppendices';
 import { buildSemanticGate } from './semanticGate';
@@ -59,11 +59,14 @@ function isInstructionLikeTitle(value: string) {
 export function normalizeProductionText(markdown: string) {
   return markdown
     // round-27 污染根治：(?!\.\d) 负向前瞻排除砂浆标号形态——「灌 M2.5 混合砂浆」中的 M2 是
-    // 砂浆强度等级（M2.5/M5/M7.5/M10），不是面积单位，丰乐镇实测被误换成「灌平方米.5 混合砂浆」
-    .replace(/\b(m|㎡)\s*2\b(?!\.\d)/giu, '平方米')
-    .replace(/\bm\s*[²2]\b(?!\.\d)/giu, '平方米')
-    .replace(/\b(m|㎥)\s*3\b(?!\.\d)/giu, '立方米')
-    .replace(/\bm\s*[³3]\b(?!\.\d)/giu, '立方米')
+    // 砂浆强度等级（M2.5/M5/M7.5/M10），不是面积单位，丰乐镇实测被误换成「灌平方米.5 混合砂浆」。
+    // 单位前缀限定：仅「数字(+水平空白)」前缀的 m2/m3 才视为量纲单位（面积 20 M2 → 20 平方米）；
+    // 无数字前缀的「M2/M3」是编号/标号（里程碑 M2、分段 M3——丰乐镇总进度计划表实测被误换成
+    // 「平方米」「立方米」），原样保留；[ \t]* 不跨行，避免数字行尾吞并下一行行首的编号。
+    .replace(/(\d[ \t]*)\b(m|㎡)\s*2\b(?!\.\d)/giu, '$1平方米')
+    .replace(/(\d[ \t]*)\bm\s*[²2]\b(?!\.\d)/giu, '$1平方米')
+    .replace(/(\d[ \t]*)\b(m|㎥)\s*3\b(?!\.\d)/giu, '$1立方米')
+    .replace(/(\d[ \t]*)\bm\s*[³3]\b(?!\.\d)/giu, '$1立方米')
     .replace(/\bmm2\b/giu, '平方毫米')
     .replace(/\bcm2\b/giu, '平方厘米')
     .replace(/\bkm2\b/giu, '平方千米')
@@ -150,17 +153,7 @@ function normalizeTableRowColumns(line: string, columns: number) {
 function removeEmptyMarkdownTableColumns(markdown: string) {
   const lines = markdown.split(/\r?\n/u);
   const output: string[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    if (!isMarkdownTableRow(lines[index]) || !isMarkdownTableDivider(lines[index + 1] || '')) {
-      output.push(lines[index]);
-      continue;
-    }
-    const table: string[] = [];
-    while (index < lines.length && isMarkdownTableRow(lines[index])) {
-      table.push(lines[index]);
-      index += 1;
-    }
-    index -= 1;
+  const flushTable = (table: string[]) => {
     const rows = table.map(line => line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).map(cell => cell.trim()));
     const width = Math.max(...rows.map(row => row.length));
     const keep = Array.from({ length: width }, (_, col) => rows.some((row, rowIndex) => rowIndex !== 1 && Boolean(row[col]?.trim())));
@@ -169,6 +162,23 @@ function removeEmptyMarkdownTableColumns(markdown: string) {
       return rowIndex === 1 ? dividerForColumns(cells.length) : `| ${cells.join(' | ')} |`;
     });
     output.push(...normalizedRows);
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!isMarkdownTableRow(lines[index]) || !isMarkdownTableDivider(lines[index + 1] || '')) {
+      output.push(lines[index]);
+      continue;
+    }
+    const table: string[] = [];
+    // 连续表格分块（丰乐镇实测：列数不同的两个表格紧邻时会被并成一块，短表被补出多余
+    // 空列、长表列被裁）——扫描中遇到“新表头（下一行是分隔线）”即结束当前块，
+    // 避免不同列数的表互相污染。
+    while (index < lines.length && isMarkdownTableRow(lines[index])) {
+      if (table.length > 0 && isMarkdownTableDivider(lines[index + 1] || '')) break;
+      table.push(lines[index]);
+      index += 1;
+    }
+    flushTable(table);
+    index -= 1;
   }
   return output.join('\n');
 }
@@ -203,7 +213,11 @@ export function normalizeMarkdownTableDividers(markdown: string) {
       continue;
     }
     const next = lines[index + 1] || '';
-    const columns = activeColumns || tableColumnCount(line);
+    // 表格列数抖动防护（丰乐镇实测：两个列数不同的表格相邻时，前一表格的列数会把后一表格
+    // 表头裁短，整列数据被删除）——表头行（下一行是分隔线）以自身列数为准，不继承上一表格的
+    // activeColumns；仅数据行沿用 activeColumns 兜底“缺行尾 |”的截断形态。
+    const isHeaderLine = isMarkdownTableDivider(next);
+    const columns = isHeaderLine ? tableColumnCount(line) : activeColumns || tableColumnCount(line);
     output.push(normalizeTableRowColumns(line, columns));
     if (isMarkdownTableDivider(next)) {
       output.push(dividerForColumns(columns));
@@ -516,7 +530,7 @@ export function sanitizeFormalMarkdown(markdown: string) {
     .filter((line, index, lines) => {
       const previousPlain = index > 0 ? displayChapterTitle((lines[index - 1] || '').trim().replace(/^#{1,6}\s+/u, '')) : '';
       const currentPlain = displayChapterTitle(line.trim().replace(/^#{1,6}\s+/u, ''));
-      if (previousPlain && isInstructionLikeTitle(previousPlain) && currentPlain.length > 0 && currentPlain.length <= 12 && !/^#{1,6}\s/u.test(line.trim())) return false;
+      if (previousPlain && previousPlain.length <= 30 && isInstructionLikeTitle(previousPlain) && currentPlain.length > 0 && currentPlain.length <= 12 && !/^#{1,6}\s/u.test(line.trim())) return false;
       const trimmed = line.trim();
       if (!trimmed) return true;
       // 招标术语 H4 拦截：「补充条款」等招标文件术语不应作为正文小节标题（四级标题是成稿层自由产物，
@@ -528,8 +542,23 @@ export function sanitizeFormalMarkdown(markdown: string) {
       const plain = displayChapterTitle(trimmed.replace(/^#{1,6}\s+/u, ''));
       if (/^(?:雨季|冬季|高温|台风|大风等特殊气候|雨季、冬季、高温、台风、大风等特殊气候)$/u.test(plain)) return false;
       if (plain.length <= 1) return false;
-      if (isInstructionLikeTitle(plain)) return false;
-      return !(/[，、；：和与在为对将]$/u.test(plain) || /(通过|包括|如下|主要包括)$/u.test(plain));
+      // 残缺标题/断句清理收窄（丰乐镇导出实测）：「我方须在开工前依法投保安责险…」「本工程
+      // 履约保证金按合同约定…」「当道路铺装阶段出现滞后时…」等完整正文句曾被条款碎片判别
+      // 整行删除，28 行以「；」结尾、1 行以「：」结尾的合法行被行尾标点规则删除。收窄为：
+      // isInstructionLikeTitle 仅对标题候选行（# 标题行 / ≤30 字且句末无标点的短行）生效；
+      // 「；」「：」是合法中文行尾（枚举分号/引出下文），不再删除；「，、」与引导词结尾的
+      // 残缺断句仅短行清理，且引导词结尾需后方无可承接内容才删除。
+      const isHeadingLine = /^#{1,6}\s/u.test(trimmed);
+      const isBareTitleCandidate = plain.length <= 30 && !/[。；！？]$/u.test(plain);
+      if ((isHeadingLine || isBareTitleCandidate) && isInstructionLikeTitle(plain)) return false;
+      if (/[和与在为对将]$/u.test(plain)) return false;
+      const isShortLine = plain.length <= 40;
+      if (isShortLine && /[，、]$/u.test(plain)) return false;
+      if (isShortLine && /(通过|包括|如下|主要包括)$/u.test(plain)) {
+        const nextContent = lines.slice(index + 1).map(item => item.trim()).find(item => item.length > 0) || '';
+        return /^#{1,6}\s/u.test(nextContent) || !nextContent;
+      }
+      return true;
     })
     .join('\n')
     .replace(/\n{3,}/gu, '\n\n')
@@ -1029,10 +1058,20 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
   let activeSourceSection = '';
   let activeSourceSectionTitle = '';
   let emittedSectionKeys = new Set<string>();
+  /** 当前标题行的后继正文（截至下一标题行；句化标题切分覆盖判定用） */
+  let activeFollowingBody = '';
   const plannedSectionIndex = (title: string) => {
     const sections = chapters[chapterIndex]?.sections || [];
     const key = normalizePlannedSectionTitle(title);
-    return sections.findIndex(section => normalizePlannedSectionTitle(section) === key);
+    const exact = sections.findIndex(section => normalizePlannedSectionTitle(section) === key);
+    if (exact >= 0) return exact;
+    // 4.27.2 句化标题前缀匹配（标题合并治理 · 装配层）：LLM 把规划小节标题与正文首句并写成一行
+    // （「公厕机电安装工程集中在马老郢…」179 字），精确匹配失败时按规划标题前缀命中
+    // （plannedTitleMatchKey 口径，与交付链修复器 sentence-like-heading-split 同源，余部 ≥10 字才命中）
+    const split = splitSentenceLikeHeading(title, sections);
+    if (!split) return -1;
+    const splitKey = plannedTitleMatchKey(split.plannedTitle);
+    return sections.findIndex(section => plannedTitleMatchKey(section) === splitKey);
   };
   const normalizeSectionHeading = (title: string, fallbackSourceSection?: string) => {
     const cleanTitle = normalizeTocSection(title);
@@ -1053,7 +1092,18 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
     activeSourceSection = fallbackSourceSection || `${chapterIndex + 1}.${sectionIndex}`;
     activeSourceSectionTitle = plannedIndex >= 0 ? displayChapterTitle(plannedSections[plannedIndex]) : cleanTitle;
     emittedSectionKeys.add(sectionKey);
-    return `### ${chapterIndex + 1}.${sectionIndex} ${plannedIndex >= 0 ? displayChapterTitle(plannedSections[plannedIndex]) : cleanTitle}`;
+    const headingLine = `### ${chapterIndex + 1}.${sectionIndex} ${plannedIndex >= 0 ? displayChapterTitle(plannedSections[plannedIndex]) : cleanTitle}`;
+    // 4.27.2 标题合并治理（装配层）：句化标题前缀命中规划小节时，标题还原为规划标题，续写句余部
+    // 与后继正文做覆盖判定——已被正文覆盖部分丢弃，未覆盖部分转正文行输出（内容零丢失）；
+    // 交付链另有 sentence-like-heading-split 兜底（LLM 评审轮改写标题的场合）
+    if (plannedIndex >= 0) {
+      const split = splitSentenceLikeHeading(cleanTitle, [plannedSections[plannedIndex]]);
+      if (split) {
+        const uncovered = uncoveredHeadingRemainder(split.remainder, activeFollowingBody);
+        if (uncovered) return `${headingLine}\n\n${uncovered}`;
+      }
+    }
+    return headingLine;
   };
   /** 四级标题成稿：同一 H3 小节下前 4 个编号为 #### x.y.z，其后降级为粗体（后续 sanitize 会转回 H4 并重新编号） */
   const emitTertiary = (title: string, sourceSection: string) => {
@@ -1065,8 +1115,19 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
     return tertiaryIndex <= 4 ? `#### ${chapterIndex + 1}.${sectionIndex}.${tertiaryIndex} ${title}` : `**${title}**`;
   };
   let inTocBlock = false;
-  return lines.map(line => {
+  return lines.map((line, lineIndex) => {
     const trimmed = line.trim();
+    // 标题行的后继正文采集（句化标题切分覆盖判定用；非标题行置空）
+    if (/^#{2,4}\s/u.test(trimmed)) {
+      const parts: string[] = [];
+      for (let cursor = lineIndex + 1; cursor < lines.length && parts.length < 8; cursor += 1) {
+        if (/^\s*#{1,6}\s/u.test(lines[cursor])) break;
+        parts.push(lines[cursor]);
+      }
+      activeFollowingBody = parts.join('\n');
+    } else {
+      activeFollowingBody = '';
+    }
     if (/^##\s+目录\s*$/u.test(trimmed)) {
       inTocBlock = true;
       return line;

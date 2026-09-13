@@ -2,8 +2,7 @@ import type { DocumentDraftChapter, ValidationIssue } from './types';
 import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 import { buildSemanticGate } from './semanticGate';
-import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
-import { buildVagueResponseGate, FILLER_SEMANTIC_QUERIES } from './tenderBidChecks';
+import { isFillerPoolExcludedLine, isZeroInfoSloganSentence, judgeFillerSentences } from './tenderBidChecks';
 import { hasProcessSequenceExpression, workPackageContentElementsComplete } from './utils';
 
 export { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
@@ -202,55 +201,113 @@ export async function fillerParagraphIssues(
   return issues;
 }
 
+/** 套话句修复锚点：检测定位 = 修复定位；channel 标记命中通道，semantic 通道可进入确定性删除判定 */
+export interface FillerSentenceTarget {
+  chapterId?: string;
+  chapterTitle: string;
+  section: string;
+  sentence: string;
+  /** semantic=套话语义原型命中（0.80 校准阈值）；vague=模糊应答语义复核命中 */
+  channel: 'semantic' | 'vague';
+}
+
 /**
  * 套话句修复锚点提取：与检测器 fillerDensityReport（tenderBidChecks）同源判定——
- * 同一批 FILLER_SEMANTIC_QUERIES 语义查询 + 同一模糊应答 gate，逐句输出命中句原文（含小节定位），
- * 供模板化修复闭环（globalQualityGates.repairTemplatingIssues）做锚点直连修复。
+ * 共享句池（buildFillerSentencePool 口径：过滤标题/表格/列表/引用/目录行，按。；; 切句，≥12 字）
+ * + 共享句级判定器（judgeFillerSentences），逐句输出命中句原文（含小节定位与命中通道），
+ * 供模板化修复闭环（globalQualityGates.repairTemplatingIssues）做锚点直连修复与确定性删除。
  * 检测定位 = 修复定位：命中句原文直接作为 repairChapterByQuality 的 anchorTexts，
  * 修复器不重新定位（历史缺陷：修复器在整章复述定位套话句 → patch 全部落空 → 套话占比永不收敛）。
- * 三期修复：此前定位器与检测器不同源（17 条正则召回前置 gate vs 检测器全句池语义判定），
- * 检测器报 32.3% 而定位器仅召回 1-2 章锚点 → 修复轮空转（实测仅 2 次修复调用）。
- * 句池口径与 fillerDensityReport 一致（过滤标题/表格/列表行，按。；; 切句，≥12 字）。
  * 限幅：每章 12 句、全文 60 条（修复输入有界，防大文档锚点清单爆炸）。
  */
 export async function fillerSentenceTargets(
   chapters: DocumentDraftChapter[],
   embedDocuments?: (texts: string[]) => Promise<number[][]>,
-): Promise<Array<{ chapterId?: string; chapterTitle: string; section: string; sentence: string }>> {
-  const targets: Array<{ chapterId?: string; chapterTitle: string; section: string; sentence: string }> = [];
-  const vagueGate = await buildVagueResponseGate(embedDocuments);
+): Promise<FillerSentenceTarget[]> {
+  const targets: FillerSentenceTarget[] = [];
   for (const chapter of chapters) {
-    // 句池构建：与 fillerDensityReport 同口径（标题/表格/列表行不进句池），并记录每句所在小节用于定位
+    // 句池构建：与 fillerDensityReport 同口径（标题/表格/列表/引用/目录行不进句池），并记录每句所在小节用于定位
     const candidates: Array<{ sentence: string; section: string }> = [];
     let currentSection = chapter.title;
     for (const line of chapter.content.split('\n')) {
-      const trimmed = line.trim();
-      const heading = /^#{3,4}\s+(.+)$/u.exec(trimmed);
+      const heading = /^#{3,4}\s+(.+)$/u.exec(line.trim());
       if (heading) { currentSection = heading[1].trim(); continue; }
-      if (!trimmed || /^\s*(#{1,6}\s+|\||[-*+]\s|>)/u.test(trimmed)) continue;
+      if (isFillerPoolExcludedLine(line)) continue;
       for (const raw of line.split(/[。；;]/u)) {
         const sentence = raw.trim();
         if (sentence.length >= 12) candidates.push({ sentence, section: currentSection });
       }
     }
     if (candidates.length === 0) continue;
-    const sentences = candidates.map(item => item.sentence);
-    // 与 fillerDensityReport 同源判定：套话语义查询 bge 余弦 + 模糊应答语义复核
-    const fillerSimilarity = await buildSemanticSimilarity(sentences, [...FILLER_SEMANTIC_QUERIES], embedDocuments);
-    const vagueFlags = await vagueGate(sentences);
+    const judgements = await judgeFillerSentences(candidates.map(item => item.sentence), embedDocuments);
     let chapterCount = 0;
     const seen = new Set<string>();
-    for (let index = 0; index < sentences.length; index += 1) {
-      const isFiller = FILLER_SEMANTIC_QUERIES.some(query => fillerSimilarity(sentences[index], query) >= SEMANTIC_COVERAGE_THRESHOLD)
-        || vagueFlags[index];
-      if (!isFiller || seen.has(sentences[index]) || chapterCount >= 12) continue;
-      seen.add(sentences[index]);
+    for (let index = 0; index < judgements.length; index += 1) {
+      const judgement = judgements[index];
+      if (!judgement.filler || seen.has(judgement.sentence) || chapterCount >= 12) continue;
+      seen.add(judgement.sentence);
       chapterCount += 1;
-      targets.push({ chapterId: chapter.id, chapterTitle: chapter.title, section: candidates[index].section, sentence: sentences[index] });
+      targets.push({ chapterId: chapter.id, chapterTitle: chapter.title, section: candidates[index].section, sentence: judgement.sentence, channel: judgement.semantic ? 'semantic' : 'vague' });
     }
     if (targets.length >= 60) break;
   }
   return targets.slice(0, 60);
+}
+
+/** 确定性删除句在正文中的全部出现处：去尾标点 → 行内「前导空白+句+尾标点」全局替换，
+ * 行尾无标点句按行尾匹配；仅处理非排除行（标题/表格行原样保留）；返回删除处数 */
+function removeSentenceOccurrences(lines: string[], sentence: string): number {
+  const core = sentence.replace(/[。；;]\s*$/u, '').trim();
+  if (core.length < 12) return 0;
+  const escaped = core.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const inlineRe = new RegExp(`[\\s\\u3000]*${escaped}[\\s\\u3000]*[。；;]`, 'gu');
+  const tailRe = new RegExp(`[\\s\\u3000]*${escaped}[\\s\\u3000]*$`, 'u');
+  let removed = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (isFillerPoolExcludedLine(line) || !line.includes(core)) continue;
+    const matches = line.match(inlineRe);
+    const replaced = matches && matches.length > 0 ? line.replace(inlineRe, '') : line.replace(tailRe, '');
+    if (replaced === line) continue;
+    removed += matches && matches.length > 0 ? matches.length : 1;
+    if (replaced.trim() === '') lines.splice(index, 1);
+    else lines[index] = replaced;
+  }
+  return removed;
+}
+
+/**
+ * 零信息口号句确定性删除（C2 句级定点治理）：仅删除 semantic 通道且通过零信息硬闸
+ * （isZeroInfoSloganSentence：无数字/岗位/频次/合规锚点）的命中句——删除零信息句是
+ * 无损净化，不经过 LLM（历史负效果：LLM 批量改写误报句引入同义新空话）；
+ * 其余命中句（vague 通道 / 含信息或合规承诺的 semantic 句）原样保留在 remaining，交 LLM 锚点具体化。
+ * 幂等安全：句已不存在时删除数为 0，target 回填 remaining（不丢修复锚点）。
+ */
+export function stripZeroInfoSloganSentences(
+  chapters: DocumentDraftChapter[],
+  targets: FillerSentenceTarget[],
+): { deletedCount: number; deletedSentences: string[]; remaining: FillerSentenceTarget[] } {
+  const deletedSentences: string[] = [];
+  const remaining: FillerSentenceTarget[] = [];
+  let deletedCount = 0;
+  for (const target of targets) {
+    const key = target.chapterId || target.chapterTitle;
+    const chapter = chapters.find(item => (item.id || item.title) === key);
+    if (!chapter || target.channel !== 'semantic' || !isZeroInfoSloganSentence(target.sentence)) {
+      remaining.push(target);
+      continue;
+    }
+    const lines = chapter.content.split('\n');
+    const removed = removeSentenceOccurrences(lines, target.sentence);
+    if (removed > 0) {
+      chapter.content = lines.join('\n').replace(/\n{3,}/gu, '\n\n');
+      deletedCount += removed;
+      if (!deletedSentences.includes(target.sentence)) deletedSentences.push(target.sentence);
+    } else {
+      remaining.push(target);
+    }
+  }
+  return { deletedCount, deletedSentences, remaining };
 }
 export function processParameterDensityIssues(chapters: DocumentDraftChapter[]): ValidationIssue[] {
   const issues: ValidationIssue[] = [];

@@ -36,6 +36,12 @@ export function significantFactValue(value: unknown) {
   return text;
 }
 
+/** 4.27.0 A5：字段标签前缀混入清洗（基线实测「招标人：肥西县丰乐镇人民政府」因前缀致归一化失配误报未落位；
+ *  清洗后为合法候选，落位指令与回滚复检口径一致）。 */
+export function stripFactLabelPrefix(value: string) {
+  return value.replace(/^(?:招标人|招标单位|建设单位|发包人|项目名称|工程名称|项目编号|招标项目编号|标段名称|建设地点|建设规模|招标范围|计划工期|合同工期|质量标准|质量目标)[：:]\s*/u, '');
+}
+
 /** V5 P6 run1 实测垃圾候选过滤：清单表行/图纸签章 OCR 乱串/表单残片混入「项目名称」「招标人」
  *  候选（30 条未落位中近半为不可落位的坏值）——坏值不仅制造告警噪声，还会驱动事实落位
  *  补写轮把子虚乌有的“事实”写进正文，必须在候选筛选阶段拦截。 */
@@ -55,6 +61,20 @@ export function isMisExtractedFactText(labelText: string, valueText: string) {
   if (/^(?:项目编号|招标项目编号|标段名称|询标日期)[：:]/u.test(valueText)) return true;
   // 机构字段的句子混入（招标人=「不再承担该费用」「本公司（单位）拟参加项目的投标」）
   if (/招标人|建设单位|发包人/u.test(labelText) && /投标|参加|承担|费用|协商|贯彻|方针|为了/u.test(valueText)) return true;
+  // ===== 4.27.0 A5 基线实测（agent-fact-landing-1 failed）：落位候选 7 条中 6 条为下列形态坏值，
+  // 坏值令 LLM 无法落位（factPatchCount=0→未生效），必须在候选筛选阶段拦截 =====
+  // CJK 扩展区乱码串（OCR 提取残渣「帉䝷搌陓笍免鬐」，含 Ext A 生僻字，工程文本不会使用）
+  if (/[\u3400-\u4DBF\uE000-\uF8FF]/u.test(valueText)) return true;
+  // 表格坐标残渣前缀（「R6C3COL3：上海开艺设计集团有限公司」——行列坐标粘连在真实值前）
+  if (/^[A-Z]\d[A-Z]\d/u.test(valueText)) return true;
+  // 模板占位符（招标文件模板空括号「（合同名称）」被当字段值）
+  if (/^[（(][^）)]{1,12}[）)]$/u.test(valueText) && /名称|编号|单位|日期|签章|公章|甲方|乙方/u.test(valueText)) return true;
+  // 机构/名称字段的动词引导句子碎片（「将报公共资源交易监督管理部门」）
+  if (/招标人|建设单位|发包人|项目名称|工程名称/u.test(labelText) && /^(?:将报|拟报|应按|应报|须报|须按|拟按)/u.test(valueText)) return true;
+  // 位置谓语残句（「本项目位于肥西县丰乐镇」——句子形态而非字段值，归一化后与表值「XX县XX镇」失配）
+  if (/^(?:本项目|项目|工程)(?:位于|地处|坐落在?|选址在?)/u.test(valueText)) return true;
+  // 分点长句残段（「二是水环境治理，涵盖…」——同源长句的中后段，正文生成阶段已按分项覆盖，整段落位不可行）
+  if (/^[（(]?[一二三四五六七八九十]{1,3}[）)]?是/u.test(valueText)) return true;
   return false;
 }
 
@@ -98,7 +118,8 @@ export function uncoveredImportantFacts(markdown: string, facts: DocumentFact[],
   const seen = new Set<string>();
   const missing: Array<{ fact: DocumentFact; label: string; value: string }> = [];
   for (const fact of important) {
-    const value = significantFactValue(fact.value);
+    // 4.27.0 A5：标签前缀混入值清洗后参与落位判定与指令生成（清洗口径与回滚复检一致）
+    const value = stripFactLabelPrefix(significantFactValue(fact.value));
     if (!value) continue;
     const label = fact.fieldName || fact.key || fact.fieldId || '资料事实';
     const key = `${label}:${value}`;

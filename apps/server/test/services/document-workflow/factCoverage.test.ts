@@ -83,3 +83,41 @@ describe('uncoveredImportantFacts 候选过滤（run1 实测）', () => {
     expect(missing[0]!.value).toContain('舒城县城镇功能活力品质提升一期项目');
   });
 });
+
+describe('A5 落位候选质量门控（4.27.0 基线实测 agent-fact-landing-1 failed）', () => {
+  it.each([
+    ['招标范围', '帉䝷搌陓笍免鬐', 'OCR 扩展区乱码'],
+    ['项目名称', 'R6C3COL3：上海开艺设计集团有限公司', '表格坐标残渣前缀'],
+    ['项目名称', '（合同名称）', '模板占位符'],
+    ['招标人', '将报公共资源交易监督管理部门', '机构字段动词碎片'],
+    ['招标范围', '本项目位于肥西县丰乐镇', '位置谓语残句错配'],
+    ['招标范围', '二是水环境治理，涵盖雨污水管网铺设、沟渠清淤及村内菜地整治；三是人居环境改善，主要涉及景观小品打造与房前屋后环境综合整治；具体详见本项目工程量清单、图纸以及补充答疑文件（如有）等', '分点长句残段'],
+  ])('基线坏值 %s：%s（%s）→ 过滤', (label, value) => {
+    expect(isMisExtractedFactText(label, value)).toBe(true);
+  });
+
+  it('标签前缀混入清洗：值以清洗后形态进入落位清单', () => {
+    const facts = [makeFact({ key: '招标人', processingType: 'rule', value: '招标人：肥西县丰乐镇人民政府' })];
+    const missing = uncoveredImportantFacts('工程概况正文，未含招标人信息。', facts);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]!.label).toBe('招标人');
+    expect(missing[0]!.value).toBe('肥西县丰乐镇人民政府');
+  });
+
+  it('清洗后值已在正文 → 不再判未落位（前缀致归一化失配回归）', () => {
+    const facts = [makeFact({ key: '招标人', processingType: 'rule', value: '招标人：肥西县丰乐镇人民政府' })];
+    expect(uncoveredImportantFacts('本项目招标人为肥西县丰乐镇人民政府。', facts)).toEqual([]);
+  });
+
+  it('不误杀：真实机构名/正常范围值/正常项目名/建设规模句首', () => {
+    for (const [label, value] of [
+      ['招标人', '肥西县丰乐镇人民政府'],
+      ['建设单位', '应城市住房和城乡建设局'],
+      ['招标范围', '主要施工内容包含公共广场改造、停车场改造、绿化工程'],
+      ['项目名称', '2026年度丰乐镇20个美丽宜居自然村建设项目'],
+      ['建设规模', '本项目建设范围覆盖20个自然村，重点实施以下配套基础设施工程'],
+    ]) {
+      expect(isMisExtractedFactText(label, value)).toBe(false);
+    }
+  });
+});

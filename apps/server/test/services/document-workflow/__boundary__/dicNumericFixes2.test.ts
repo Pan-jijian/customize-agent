@@ -6,7 +6,7 @@
  * 所有用例均为确定性数值提取/替换判定，无语义依赖。
  */
 import { describe, expect, it } from 'vitest';
-import { applyNumericConsistencyDeterministicFixes, fixSupportSystemConflicts } from '@/services/document-workflow/documentIntegrityChecks';
+import { applyNumericConsistencyDeterministicFixes, fixSupportSystemConflicts, fixGluedQuantityNumbers, fixOversizedDayRanges } from '@/services/document-workflow/documentIntegrityChecks';
 import { fixtureIndex } from '../authorityFixture';
 
 const fixes = applyNumericConsistencyDeterministicFixes;
@@ -141,13 +141,11 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
       expect(result.fixedCount).toBe(1);
     });
 
-    it('J17 塔吊多表冲突兜底：取保守台数 min(2,1)=1 统一表格行', () => {
+    it('J17 塔吊多表冲突不再取保守台数（V2 批1-4 零兜底写入：多值无权威不修复）', () => {
       const md = '| 设备 | 备注 |\n| --- | --- |\n| 塔吊2台 | 主体施工 |\n| 塔吊1台 | 装饰施工 |';
       const result = fixes(md);
-      expect(result.markdown).toContain('| 塔吊1台 | 主体施工 |');
-      expect(result.markdown).toContain('| 塔吊1台 | 装饰施工 |');
-      expect(result.fixedCount).toBe(1);
-      expect(result.details[0]).toContain('以表格口径为准');
+      expect(result.fixedCount).toBe(0);
+      expect(result.markdown).toBe(md);
     });
 
     it('J18 authorityIndex 外部权威展开：塔吊 2 台→3 台', () => {
@@ -335,6 +333,79 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
       const result = fixes(md, { authorityIndex: fixtureIndex({ milestones: [{ label: '主体结构封顶', value: 10 }] }) });
       expect(result.markdown).toBe('第10日完成主体结构封顶。');
       expect(result.fixedCount).toBe(1);
+    });
+  });
+});
+
+// ── K 组：误入数字粘连清洗 + 日区间超限截断（4.28.4 舒城实测）──
+
+describe('dicNumericFixes2 · K 组：误入数字粘连 / 日区间超限（舒城实测）', () => {
+  describe('fixGluedQuantityNumbers', () => {
+    it('K1 汉字+裸数字+「主要工程量」：删除误入数字并补逗号', () => {
+      const md = '施工按先测量放线、再沟槽开挖、最后CCTV检测与验收的顺序组织17679主要工程量包括挖沟槽土方1360.13m³。';
+      const result = fixGluedQuantityNumbers(md);
+      expect(result.markdown).toBe('施工按先测量放线、再沟槽开挖、最后CCTV检测与验收的顺序组织，主要工程量包括挖沟槽土方1360.13m³。');
+      expect(result.fixedCount).toBe(1);
+      expect(result.details[0]).toContain('17679');
+    });
+
+    it('K2 折行空格形态「主 要工程量」同样命中', () => {
+      const result = fixGluedQuantityNumbers('附属构筑物18860主 要工程量包括挖沟槽土方。');
+      expect(result.markdown).toBe('附属构筑物，主 要工程量包括挖沟槽土方。');
+      expect(result.fixedCount).toBe(1);
+    });
+
+    it('K3 已带逗号形态幂等（数字前逗号排除，不重复处理）', () => {
+      const md = '顺序组织，17679主要工程量包括挖沟槽土方。';
+      const result = fixGluedQuantityNumbers(md);
+      expect(result.markdown).toBe(md);
+      expect(result.fixedCount).toBe(0);
+    });
+
+    it('K4 「第」前缀数字与「工程量清单」短语不误伤', () => {
+      const md = '第17679日完成节点施工，清单17679工程量清单编制完成。';
+      const result = fixGluedQuantityNumbers(md);
+      expect(result.markdown).toBe(md);
+      expect(result.fixedCount).toBe(0);
+    });
+
+    it('K5 聚合器集成：链路自动生效', () => {
+      const result = fixes('施工按先测量放线、再沟槽开挖的顺序组织17679主要工程量包括挖沟槽土方1360.13m³。');
+      expect(result.markdown).toContain('顺序组织，主要工程量');
+      expect(result.markdown).not.toContain('17679');
+      expect(result.fixedCount).toBe(1);
+    });
+  });
+
+  describe('fixOversizedDayRanges', () => {
+    it('K6 终点超限截断：第345日至第4469日 → 第345日至第360日（舒城实测）', () => {
+      const result = fixOversizedDayRanges('第345日至第4469日为机动工期与竣工验收缓冲。', 360);
+      expect(result.markdown).toBe('第345日至第360日为机动工期与竣工验收缓冲。');
+      expect(result.fixedCount).toBe(1);
+      expect(result.details[0]).toContain('4469');
+    });
+
+    it('K7 正常区间（终点≤权威）不动', () => {
+      const md = '第238日至第344日为亮化与收尾工程阶段，第1日至第29日为施工准备阶段。';
+      const result = fixOversizedDayRanges(md, 360);
+      expect(result.markdown).toBe(md);
+      expect(result.fixedCount).toBe(0);
+    });
+
+    it('K8 分隔符波浪号原样保留 + 无权威静默跳过', () => {
+      const waved = fixOversizedDayRanges('第345日～第4469日为机动工期。', 360);
+      expect(waved.markdown).toBe('第345日～第360日为机动工期。');
+      expect(waved.fixedCount).toBe(1);
+      const noAuthority = fixOversizedDayRanges('第345日至第4469日为机动工期。');
+      expect(noAuthority.fixedCount).toBe(0);
+    });
+
+    it('K9 聚合器集成：scheduleAuthority 传入时链路生效（舒城横道图段落）', () => {
+      const md = '第238日至第344日为亮化与收尾工程阶段，第345日至第4469日为机动工期与竣工验收缓冲。';
+      const result = fixes(md, { scheduleAuthority: 360 });
+      expect(result.markdown).toContain('第345日至第360日');
+      expect(result.markdown).not.toContain('4469');
+      expect(result.markdown).toContain('第238日至第344日');
     });
   });
 });

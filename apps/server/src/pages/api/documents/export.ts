@@ -155,6 +155,15 @@ function collectLooseTableRows(lines: string[], start: number) {
   return { rows, next: index };
 }
 
+/** 相邻表格边界判定：当前行是“新表头”（下一行是分隔线，允许中间一个空行）时，
+ * 说明上一张表格的数据区已经结束——丰乐镇实测：两张列数不同的表格无空行紧邻时，
+ * 前表的数据区扫描会把后表表头吞成数据行，前表列数被拉大后整表补出空列，后表则因
+ * 表头丢失被当成裸表补出假表头（“控制项目…补充说明7”）；这里在边界处截断。 */
+function startsFollowingTable(lines: string[], at: number) {
+  const next = lines[at + 1]?.trim() === '' ? lines[at + 2] : lines[at + 1];
+  return isMarkdownTableSeparator((next || '').trim());
+}
+
 function normalizeLooseMarkdownTables(input: string) {
   const lines = input.replace(/\r?\n/gu, '\n').split('\n');
   const output: string[] = [];
@@ -171,6 +180,7 @@ function normalizeLooseMarkdownTables(input: string) {
       while (scanIndex < lines.length) {
         const row = lines[scanIndex] || '';
         if (!looksLikeMarkdownTableRow(row)) break;
+        if (startsFollowingTable(lines, scanIndex)) break;
         dataRows.push(splitMarkdownTableRow(row));
         scanIndex += 1;
       }
@@ -182,6 +192,7 @@ function normalizeLooseMarkdownTables(input: string) {
       while (index < lines.length) {
         const row = lines[index] || '';
         if (!looksLikeMarkdownTableRow(row)) break;
+        if (startsFollowingTable(lines, index)) break;
         output.push(normalizeMarkdownTableRow(splitMarkdownTableRow(row), columns));
         index += 1;
       }
@@ -263,10 +274,12 @@ function normalizeExportUnits(input: string) {
     .replace(/m\s*\^\s*3/giu, 'm³')
     .replace(/㎡/gu, 'm²')
     .replace(/㎥/gu, 'm³')
-    .replace(/(?<=\d)m\s*2(?![\p{L}\p{N}_])/giu, 'm²')
-    .replace(/(?<=\d)m\s*3(?![\p{L}\p{N}_])/giu, 'm³')
-    .replace(/(?<![\p{L}\p{N}_])m\s*2(?![\p{L}\p{N}_])/giu, 'm²')
-    .replace(/(?<![\p{L}\p{N}_])m\s*3(?![\p{L}\p{N}_])/giu, 'm³');
+    // 上标化边界：数字前缀形态（100m2）含大写 M 视为单位；裸形态仅匹配小写 m——无数字前缀的
+    // 大写「M2/M3」是编号/标号（里程碑 M2 实测被换成「m²」），(?!\.\d) 排除 M2.5 砂浆标号
+    .replace(/(?<=\d)m\s*2(?![\p{L}\p{N}_])(?!\.\d)/giu, 'm²')
+    .replace(/(?<=\d)m\s*3(?![\p{L}\p{N}_])(?!\.\d)/giu, 'm³')
+    .replace(/(?<![\p{L}\p{N}_])m\s*2(?![\p{L}\p{N}_])(?!\.\d)/gu, 'm²')
+    .replace(/(?<![\p{L}\p{N}_])m\s*3(?![\p{L}\p{N}_])(?!\.\d)/gu, 'm³');
   return normalizeParagraphs(normalizeLooseMarkdownTables(normalizePower(stripMarkdownDocumentFence(input))));
 }
 
@@ -984,22 +997,19 @@ async function renderPdfBuffer(html: string, settings?: DocumentExportSettings) 
 }
 
 /**
- * B3 导出后闭环报告：导出成功后归档总用时/质量对标分/规则执行摘要/修复记录到记录详情，
+ * B3 导出后闭环报告：导出成功后归档总用时/规则执行摘要/修复记录到记录详情，
  * 支持与历史版本对比。归档失败不影响导出结果。
  */
 function archiveExportReport(record: GeneratedDocumentRecord | null, format: ExportFormat, projectRoot: string) {
   if (!record) return;
   try {
     const draft = record.draft;
-    const benchmark = draft?.reviewMetadata?.qualityBenchmark;
     const quality = draft?.reviewMetadata?.diagnostics?.quality;
     const durationMs = record.completedAt ? Math.max(0, record.completedAt - record.createdAt) : Math.max(0, Date.now() - record.createdAt);
     const report: ExportReport = {
       format,
       exportedAt: Date.now(),
       durationMs,
-      benchmarkScore: benchmark?.overallScore,
-      benchmarkSourceCount: benchmark?.referenceSourceCount,
       ruleSummary: (draft?.promptRules?.executionSummary || []).slice(0, 12),
       repairedCount: quality?.repairedCount,
       blockingCount: quality?.blockingCount,

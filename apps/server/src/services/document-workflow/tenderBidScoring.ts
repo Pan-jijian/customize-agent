@@ -137,16 +137,11 @@ function complianceScore(markdown: string, anyBlockMatches: (query: string) => b
 }
 
 /** 可落地性：措施五要素闭合块密度（方案＋流程＋责任人＋时间节点＋验收标准，docx L93）
- * 目标基准优先取参考库同类工程完整五要素块均值（人工样本实测画像，对标口径），
- * 无参考库样本时回退每 1500 字 1 块的历史口径 */
-async function executabilityScore(markdown: string, referenceCompleteBlocks?: number) {
+ * 目标基准（4.26.0 起固化字数口径，参考库锚点已随模板参考库移除下线）：
+ * target = max(6, ceil(有效字数 / 1500))，单一逻辑无分支 */
+async function executabilityScore(markdown: string) {
   const { blocks, completeBlocks } = await fiveElementBlockStats(markdown);
-  // B6 基准口径修正（丰乐镇第三/五轮实测）：参考库样本五要素块为 0 时属 PDF 提取无信号
-  // 而非真实天花板，若直接取 0 会被 Math.max(6,…) 钳成 target=6（第三轮钻空子得 62 分），
-  // 无样本时又回退每 1500 字 1 块（第五轮 target=34 反而更严），同一评分器两轮口径倒挂；
-  // 0 块基准一律视为无信号回退字数口径，保证同一文档类型下评分口径稳定。
-  const effectiveReference = referenceCompleteBlocks && referenceCompleteBlocks > 0 ? referenceCompleteBlocks : undefined;
-  const target = Math.max(6, Math.ceil(effectiveReference ?? documentTextLength(markdown) / 1500));
+  const target = Math.max(6, Math.ceil(documentTextLength(markdown) / 1500));
   const density = Math.min(1, completeBlocks / target);
   const fiveElementRate = blocks ? completeBlocks / blocks : 0;
   return Math.round((density * 0.7 + fiveElementRate * 0.3) * 100);
@@ -273,8 +268,6 @@ export async function buildTenderBidScores(input: {
   template?: DocumentTemplate | null;
   factTraces: DocumentFactTrace[];
   issues: ValidationIssue[];
-  /** 参考库同类工程完整五要素块均值（可选）：提供时作为可落地性目标基准 */
-  referenceCompleteBlocks?: number;
   /** 单测注入的嵌入实现（替代本地模型），生产环境不传 */
   embedDocuments?: (texts: string[]) => Promise<number[][]>;
 }): Promise<TenderBidScores> {
@@ -292,7 +285,7 @@ export async function buildTenderBidScores(input: {
     completeness: completenessScore(input.markdown, input.chapters, input.template, anyBlockMatches),
     specificity: specificityScore(input.markdown, input.chapters, input.factTraces),
     compliance: complianceScore(input.markdown, anyBlockMatches),
-    executability: await executabilityScore(input.markdown, input.referenceCompleteBlocks),
+    executability: await executabilityScore(input.markdown),
     normalization: normalizationScore(input.issues),
     uniqueness: uniquenessScore(input.markdown, filler),
   };

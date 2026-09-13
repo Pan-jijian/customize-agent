@@ -48,6 +48,36 @@ function liteDocument(record: NonNullable<ReturnType<typeof getGeneratedDocument
   };
 }
 
+/** lite=2 轮询级裁剪（E2）：仅状态/阶段摘要/计数，数十 KB 量级；
+ * 供 60s 轮询监控脚本使用，避免全量 draft/正文导致的 >4MB 响应拖慢监控链路。
+ * 终结竞态提醒：轮询脚本在终结时需再发一次全量请求（不带 lite）落盘终态快照。 */
+function lite2Document(record: NonNullable<ReturnType<typeof getGeneratedDocument>>) {
+  return {
+    id: record.id,
+    templateId: record.templateId,
+    templateName: record.templateName,
+    title: record.title,
+    status: record.status,
+    wordCount: record.wordCount,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    completedAt: record.completedAt,
+    error: trimText(record.error),
+    partialChapters: (record.partialChapters || []).map(chapter => ({ id: chapter.id, title: chapter.title, status: chapter.status, chars: chapter.chars })),
+    executionStages: (record.executionStages || []).map(stage => ({
+      type: stage.type,
+      roleId: stage.roleId,
+      roleName: stage.roleName,
+      status: stage.status,
+      title: stage.title,
+      order: stage.order,
+      progress: stage.progress,
+      chapterTimedOut: stage.chapterTimedOut,
+      message: trimText(stage.message, 180),
+    })),
+  };
+}
+
 function generatedDocumentHandler(req: NextApiRequest, res: NextApiResponse) {
   const id = String(req.query.id || '');
   if (!id) return res.status(400).json({ error: 'id required' });
@@ -64,6 +94,7 @@ function generatedDocumentHandler(req: NextApiRequest, res: NextApiResponse) {
     const record = getGeneratedDocument(id, projectRoot);
     if (!record) return res.status(404).json({ error: 'Document not found' });
     if (req.query.lite === '1') return res.status(200).json({ document: liteDocument(record) });
+    if (req.query.lite === '2') return res.status(200).json({ document: lite2Document(record) });
     return res.status(200).json({ document: record });
   }
   if (req.method === 'PUT') {

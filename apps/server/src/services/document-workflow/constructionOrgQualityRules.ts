@@ -101,8 +101,8 @@ export function constructionOrgChapterRulePrompt(chapter: DocumentTemplateChapte
   const bonus = BONUS_MODULES.filter(bonusModule => bonusModule.pattern.test(title)).map(bonusModule => `- 高分补充：${bonusModule.prompt}`);
   return [
     '【施工组织设计专项写作规则】',
-    '- 禁止空话套话：不要只写“加强管理、严格控制、确保质量、精心组织、科学管理”，必须写成“责任岗位+执行动作+量化标准+检查频次+整改时限+复查销项”。',
-    '- 每项措施至少包含责任主体、执行标准、检查频次、整改闭环；项目特有数据必须来自资料或图谱。',
+    '- 禁止空话套话：不要只写“加强管理、严格控制、确保质量、精心组织、科学管理、周密部署、狠抓落实、统筹兼顾”等零信息口号（全文质检会按语义原型拦截并要求重写），必须写成“责任岗位+执行动作+量化标准+检查频次+整改时限+复查销项”。',
+    '- 落地措施范例：“由质检员每周不少于1次对级配碎石层压实度抽检，不足95%的当日返工复验”——每句措施要能回答“谁、做什么、什么标准、多久一次、不达标怎么办”；项目特有数据必须来自资料或图谱。',
     ...loops,
     ...bonus,
   ].join('\n');
@@ -276,7 +276,7 @@ export function constructionOrgMajorContentIssues(chapters: DocumentDraftChapter
     const parameterCount = (content.match(/\d+(?:\.\d+)?\s*(?:㎡|m²|mm|cm|m|MPa|kPa|%|日历天|层|台|套|个|项|批|次|小时|年)/giu) || []).length;
     const factDetailCount = (content.match(/工程量|材料|设备|范围|流程|验收|检测|复试|调试|隐蔽|检验批|资料|记录|系统|部位|接口|规格|标准/gu) || []).length;
     if (parameterCount < 2 || factDetailCount < 12) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容事实细度不足：参数 ${parameterCount} 项、事实细节 ${factDetailCount} 项`, suggestion: '主要施工内容必须落到资料已确认的范围、工程量/材料、流程、验收和记录要求；资料未明确的工具、型号、参数不得编造。' });
-    // 表格承载正文判定（与 fixTableBorneContentSections 兜底同源口径）：表格 ≥3 行且非表格实质文本 <50 字
+    // 表格承载正文判定（V2 批1-4 起零兜底：机器拼段修复器已删除，检测阻断后交写作侧约束与 LLM 定向重写）：表格 ≥3 行且非表格实质文本 <50 字
     // 才属「以表格承载正文」；段落叙述 + 数据附表（工程量/参数汇总表）是合规形态（舒城第二轮实测误报校准）
     const contentTableLines = content.split(/\r?\n/u).filter(line => /^\s*\|.+\|\s*$/u.test(line.trim()));
     const contentProseChars = content.split(/\r?\n/u).filter(line => !/^\s*\|.+\|\s*$/u.test(line.trim())).join('').replace(/[\s#*_`>-]/gu, '').length;
@@ -580,7 +580,7 @@ export function majorContentGovernanceIssues(markdown: string): ValidationIssue[
   for (const block of criticalPackageSectionBlocks(markdown)) {
     const body = block.bodyLines.join('\n');
     if (!body.trim()) continue;
-    // 表格承载正文判定（与 fixTableBorneContentSections 兜底同源口径）：表格 ≥3 行且非表格实质文本 <50 字
+    // 表格承载正文判定（V2 批1-4 起零兜底：机器拼段修复器已删除，检测阻断后交写作侧约束与 LLM 定向重写）：表格 ≥3 行且非表格实质文本 <50 字
     // 才属「以表格承载正文」；段落叙述 + 数据附表（工程量/参数汇总表）是合规形态（舒城第二轮实测误报校准）
     const bodyTableLines = body.split(/\r?\n/u).filter(line => /^\s*\|.+\|\s*$/u.test(line.trim()));
     const bodyProseChars = body.split(/\r?\n/u).filter(line => !/^\s*\|.+\|\s*$/u.test(line.trim())).join('').replace(/[\s#*_`>-]/gu, '').length;

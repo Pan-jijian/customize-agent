@@ -13,7 +13,7 @@ import type * as LlmClientModule from '@/services/document-workflow/llmClient';
 import { callDocumentLlmJson } from '@/services/document-workflow/llmClient';
 import { validateJsonAgainstSchema } from '@/services/document-workflow/llmClient';
 import { buildSemanticSimilarity } from '@/services/document-workflow/semanticSimilarity';
-import { emptyTenderRequirements, extractTenderRequirements, extractRequirementFieldGaps, filterMandatoryClauseEvidence, hasTenderRequirements, mandatoryFieldGaps, mergeTenderRequirements, mergeTenderRequirementSlices, missingMandatoryFields, preselectTenderRequirementEvidence, readCachedTenderRequirements, requirementFieldGaps, requirementsCoverageIssues, tenderRequirementsCacheKey, tenderRequirementsWritingRules, writeCachedTenderRequirements, classifyRequirementResponsiveness, classifyAnchorAlternativeClauses, fixScoringRequirementResponses, REQUIREMENTS_JSON_SCHEMA } from '@/services/document-workflow/tenderRequirements';
+import { emptyTenderRequirements, extractTenderRequirements, extractRequirementFieldGaps, filterMandatoryClauseEvidence, hasTenderRequirements, mandatoryFieldGaps, mergeTenderRequirements, mergeTenderRequirementSlices, missingMandatoryFields, preselectTenderRequirementEvidence, readCachedTenderRequirements, requirementFieldGaps, requirementsCoverageIssues, tenderRequirementsCacheKey, tenderRequirementsWritingRules, writeCachedTenderRequirements, classifyRequirementResponsiveness, classifyAnchorAlternativeClauses, fixScoringRequirementResponses, fixScoringRequirementResponsesInFinalMarkdown, fixTenderMetaLanguage, stripDuplicateResponseLines, REQUIREMENTS_JSON_SCHEMA } from '@/services/document-workflow/tenderRequirements';
 import { stableHash } from '@/services/document-workflow/utils';
 import type { DocumentEvidence, TenderRequirementModel } from '@/services/document-workflow/types';
 
@@ -783,8 +783,9 @@ describe('评分项响应确定性补写（fixScoringRequirementResponses）', (
     const similarity = (query: string, title: string) => (query.includes('鲁班奖') && title.includes('质量') ? 0.7 : 0);
     const result = await fixScoringRequirementResponses({ chapters, model, similarity });
     expect(result.fixedCount).toBe(1);
-    // round-27：补写段首格式由内部术语「招标要求响应（奖项条款）」改为正式表述「按招标文件要求」
-    expect(chapters[0].content).toContain('按招标文件要求：本项目确保获得鲁班奖');
+    // 4.27.2 语气治理：补写句为投标人口吻条款全文 + 差异化落实句，不得出现「按招标文件要求：」条幅前缀
+    expect(chapters[0].content).toContain('本项目确保获得鲁班奖，获得鲁班奖的支付奖励100万元。');
+    expect(chapters[0].content).not.toContain('按招标文件');
   });
 
   it('商务口径条款（暂列金额）补写定性响应句（第十六版：不再整条跳过，防零响应闭环断裂）', async () => {
@@ -818,10 +819,325 @@ describe('评分项响应确定性补写（fixScoringRequirementResponses）', (
     const similarity = (query: string, title: string) => (query.includes('履约保证金') && title.includes('概况') ? 0.7 : 0);
     const result = await fixScoringRequirementResponses({ chapters, model, similarity });
     expect(result.fixedCount).toBe(1);
-    // 定性响应句落位，商务参数（百分比/金额）不抄入正文，内部格式词不出现
-    expect(chapters[0].content).toContain('履约保证金按招标文件约定的金额');
+    // 定性响应句落位（4.27.2 语气治理：统一「按合同约定」），商务参数（百分比/金额）不抄入正文，内部格式词不出现
+    expect(chapters[0].content).toContain('履约保证金按合同约定的金额');
+    expect(chapters[0].content).not.toContain('按招标文件');
     expect(chapters[0].content).not.toContain('中标金额的2%');
     expect(chapters[0].content).not.toContain('招标要求响应');
     expect(chapters[0].content).not.toContain('前附表响应条款');
+  });
+
+  it('评标否决规则条款（forcedProgrammatic）：不补写进正文（4.28.x 舒城实测「一律否决其投标」曾入施组）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    // 语义分类不可用时仍强制程序性：isBidEvaluationRuleText 不经 LLM 判定
+    mocked.mockResolvedValueOnce(undefined);
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: '投标文件技术标内容明显文不对题的，评标委员会一律否决其投标。', coreTerms: ['否决投标'], source: '招标文件.pdf' }],
+    };
+    const chapters = [{ title: '## 第一章 工程概况', content: '本工程为市政道路工程。' }];
+    const result = await fixScoringRequirementResponses({ chapters, model, similarity: () => 0.7 });
+    expect(result.fixedCount).toBe(0);
+    expect(chapters[0].content).not.toContain('否决其投标');
+  });
+
+  it('classifyRequirementResponsiveness：评标否决/废标规则强制 responsive=false（LLM 未裁决也不放行）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    mocked.mockResolvedValueOnce(undefined);
+    const result = await classifyRequirementResponsiveness([
+      { kind: '前附表响应条款', text: '投标文件技术标明显文不对题或存在严重错误的，评标委员会一律否决其投标。' },
+      { kind: '前附表响应条款', text: '投标报价低于成本的，作废标处理。' },
+    ]);
+    expect(result.get(0)).toBe(false);
+    expect(result.get(1)).toBe(false);
+  });
+});
+
+// ============ 第十六版 B 闭环：商务条款定性响应分支 + 检测降级 + 终检 markdown 补写 ============
+
+describe('第十六版 B 闭环（商务分支补写/幂等/检测降级/终检 markdown 补写）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  // 实测条款文本（丰乐镇 4.26.0 报告 blocker）：商务参数不落位技术标，只做定性响应
+  const WATER_FEE_CLAUSE = '承包人投标报价已经包含水电费用，工程结算时按照发包人实际缴纳的水电费在结算价（税前）中扣除。';
+  const waterFeeModel = (): TenderRequirementModel => ({
+    ...emptyTenderRequirements(true),
+    frontScheduleClauses: [{ text: WATER_FEE_CLAUSE, coreTerms: ['水电费', '结算价'], source: '招标文件.pdf' }],
+  });
+  const costChapter = () => [{ title: '## 第六章 合同与造价管理', content: '工程造价管理措施。' }];
+  const costSimilarity = (keyword: string) => (query: string, title: string) => (query.includes(keyword) && title.includes('造价') ? 0.7 : 0);
+
+  it('质量保证金条款（实测文本）补写质量保证金定性句，不被通用保证金分支透支', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: '质量保证金：最终结算价款的3%的工程款，或由银行业金融机构、工程担保公司、保险机构出具电子保函、纸质保函等担保方式，担保/保证金额为3%的工程结算价款。', coreTerms: ['质量保证金', '3%'], source: '招标文件.pdf' }],
+    };
+    const chapters = costChapter();
+    const result = await fixScoringRequirementResponses({ chapters, model, similarity: costSimilarity('质量保证金') });
+    expect(result.fixedCount).toBe(1);
+    expect(chapters[0].content).toContain('质量保证金按合同约定的金额、担保方式与退还时限执行');
+    expect(chapters[0].content).not.toContain('履约保证金');
+    expect(chapters[0].content).not.toContain('按招标文件');
+    // 商务参数（比例/金额）不落位技术标正文
+    expect(chapters[0].content).not.toContain('3%');
+  });
+
+  it('水电费条款（实测文本）走水电费分支，泛结算分支不抢捕获', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const chapters = costChapter();
+    const result = await fixScoringRequirementResponses({ chapters, model: waterFeeModel(), similarity: costSimilarity('水电费') });
+    expect(result.fixedCount).toBe(1);
+    expect(chapters[0].content).toContain('水电费用由我方承担');
+    expect(chapters[0].content).not.toContain('进度款、竣工结算款与最终结清款');
+  });
+
+  it('核减条款（实测文本）走核减分支：响应句含核减/报审口径，不落 10% 商务比例', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: '工程结算审核核减额超过报审金额10%的，其超过10%部分的造价咨询费用由施工单位（合同乙方）承担，建设单位在支付工程结算款时予以代扣。', coreTerms: ['核减', '造价咨询费'], source: '招标文件.pdf' }],
+    };
+    const chapters = costChapter();
+    const result = await fixScoringRequirementResponses({ chapters, model, similarity: costSimilarity('核减') });
+    expect(result.fixedCount).toBe(1);
+    expect(chapters[0].content).toContain('核减额与报审金额的核对');
+    expect(chapters[0].content).not.toContain('10%');
+    expect(chapters[0].content).not.toContain('进度款、竣工结算款与最终结清款');
+  });
+
+  it('清单异议条款（实测文本）走异议分支：响应句含异议截止日期，泛结算分支不抢捕获', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: '对于发包人提供的工程量清单中工程量的错误，承包人未在招标文件规定的异议截止日期前提出异议并附计算书的，工程结算时不再调整。', coreTerms: ['异议', '工程量'], source: '招标文件.pdf' }],
+    };
+    const chapters = costChapter();
+    const result = await fixScoringRequirementResponses({ chapters, model, similarity: costSimilarity('异议') });
+    expect(result.fixedCount).toBe(1);
+    expect(chapters[0].content).toContain('异议截止日期');
+    expect(chapters[0].content).not.toContain('进度款、竣工结算款与最终结清款');
+  });
+
+  it('注册地条款（实测文本）走注册地分支：不落公告号数字，落预缴口径', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: '注册地不在合肥市行政区域范围（含四县一市）的中标人，应按照《纳税人跨县（市、区）提供建筑服务增值税征收管理暂行办法》（国家税务总局公告2016年第17号）规定，在建筑服务发生地及时足额预缴增值税。', coreTerms: ['注册地', '增值税'], source: '招标文件.pdf' }],
+    };
+    const chapters = costChapter();
+    const result = await fixScoringRequirementResponses({ chapters, model, similarity: costSimilarity('注册地') });
+    expect(result.fixedCount).toBe(1);
+    expect(chapters[0].content).toContain('注册地及纳税人身份');
+    expect(chapters[0].content).toContain('建筑服务发生地');
+    expect(chapters[0].content).not.toContain('2016');
+  });
+
+  it('商务条款幂等：正文已有对应定性句不再重复补写', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const chapters = [{ title: '## 第六章 合同与造价管理', content: '本工程水电费用由我方承担，工程结算时按合同约定在结算价中核算处理，缴费与结算资料按合同约定办理。' }];
+    const result = await fixScoringRequirementResponses({ chapters, model: waterFeeModel(), similarity: costSimilarity('水电费') });
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('商务条款幂等防护：其他条款的定性句不构成已响应（关键词不同不误判）', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const chapters = [{ title: '## 第六章 合同与造价管理', content: '本工程预付款的支付、扣回与使用按合同约定执行，专款用于施工准备。' }];
+    const result = await fixScoringRequirementResponses({ chapters, model: waterFeeModel(), similarity: costSimilarity('水电费') });
+    expect(result.fixedCount).toBe(1);
+    expect(chapters[0].content).toContain('水电费用由我方承担');
+  });
+
+  it('检测降级：商务条款定性句缺失报 info（不阻断），存在则静默通过', async () => {
+    const missing = await requirementsCoverageIssues('## 工程概况\n本工程按计划组织施工。', waterFeeModel(), { semanticSimilarity: () => 0 });
+    const biz = missing.filter(issue => issue.message.includes('商务条款定性响应'));
+    expect(biz.length).toBe(1);
+    expect(biz[0].level).toBe('info');
+    expect(biz[0].severity).toBe('warning');
+    expect(biz[0].category).toBe('evidence_coverage');
+    const ok = await requirementsCoverageIssues('## 工程概况\n本工程水电费用由我方承担，工程结算时按合同约定在结算价中核算处理，缴费与结算资料按合同约定办理。', waterFeeModel(), { semanticSimilarity: () => 0 });
+    expect(ok).toEqual([]);
+  });
+
+  it('终检 markdown 补写：锚点被 LLM 改写丢失后按路由章节行级重插（插入位在下一章标题前，章节快照同步）', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: '本招标项目不允许分包。', coreTerms: ['不允许分包'], source: '招标文件.pdf' }],
+    };
+    const markdown = ['## 第一章 工程概况', '本工程位于合肥市。', '', '## 第五章 施工组织与分包管理', '本工程严禁转包和违法分包。', '', '## 第六章 质量保证措施', '质量保证体系健全。'].join('\n');
+    const chapters = [{ title: '## 第五章 施工组织与分包管理', content: '本工程严禁转包和违法分包。' }];
+    const similarity = (query: string, title: string) => (query.includes('分包') && title.includes('分包') ? 0.7 : 0);
+    const result = await fixScoringRequirementResponsesInFinalMarkdown({ markdown, chapters, model, similarity });
+    expect(result.fixedCount).toBe(1);
+    const inserted = result.markdown.indexOf('本项目不允许分包。本工程全部施工任务由我公司项目部自行组织实施，严禁违法分包、转包及挂靠行为。');
+    expect(inserted).toBeGreaterThan(result.markdown.indexOf('## 第五章'));
+    expect(inserted).toBeLessThan(result.markdown.indexOf('## 第六章'));
+    expect(chapters[0].content).toContain('本项目不允许分包');
+    expect(result.markdown).not.toContain('按招标文件要求');
+    // 幂等：二次调用不再补写（最终成稿已含锚点）
+    const again = await fixScoringRequirementResponsesInFinalMarkdown({ markdown: result.markdown, chapters, model, similarity });
+    expect(again.fixedCount).toBe(0);
+  });
+
+  it('终检 markdown 补写：商务条款缺失定性句时补「按合同约定」定性句（检测端闭环）', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+    const markdown = '## 第二章 造价与合同管理\n工程量清单计价管理措施。';
+    const chapters = [{ title: '## 第二章 造价与合同管理', content: '工程量清单计价管理措施。' }];
+    const similarity = (query: string, title: string) => (query.includes('水电费') && title.includes('造价') ? 0.7 : 0);
+    const result = await fixScoringRequirementResponsesInFinalMarkdown({ markdown, chapters, model: waterFeeModel(), similarity });
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('本工程水电费用由我方承担');
+    expect(result.markdown).not.toContain('按招标文件');
+    expect(result.markdown).toContain('水电费');
+    expect(result.markdown).not.toContain('结算价（税前）');
+  });
+});
+
+// ============ B 闭环终收尾（4.27.1）：条款原文分句兜底（coreTerms 概括短语与抄写句词面错位） ============
+
+describe('B 闭环终收尾（条款原文分句兜底：coreTerms 词面错位误报根治）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  const zeroSimilarity = () => 0;
+  // 实测条款文本（丰乐镇 4.25/4.26/4.27 三轮持续误报的四条同族条款）
+  const QUOTE_MISSING_CLAUSE = '对于发包人提供的工程量清单中的清单项目，承包人没有报价的，发包人认为视同该项价格已经包括在其他项目中。';
+  const METER_CLAUSE = '发包人在现场安装计量装置，承包人负责施工期间的保护，并在工程移交的同时完好地移交给发包人。';
+  const REPAIR_CLAUSE = '因承包人保护不善造成计量装置损坏，承包人负责修复（包括但不限于修复费用），并承担由此造成的增加费用。';
+
+  it('漏报价条款（实测）：coreTerms 概括短语零命中但条款原文抄写落位 → 不报零响应', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce(undefined);
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: QUOTE_MISSING_CLAUSE, coreTerms: ['未报价处理', '视同已包含'], source: '招标文件.pdf' }],
+    };
+    const markdown = `## 第二章 投标报价与计量管理\n对于发包人提供的工程量清单中的清单项目，我方没有报价的，视为该项价格已经包括在其他项目中。本工程对清单项目逐项复核报价，未报价项目费用按合同约定执行，不重复计取。`;
+    const issues = await requirementsCoverageIssues(markdown, model, { semanticSimilarity: zeroSimilarity });
+    expect(issues).toEqual([]);
+  });
+
+  it('计量装置条款（实测）：部分 coreTerm 命中（保护移交缺失）+ 条款原文抄写落位 → 不报部分响应', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce(undefined);
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: METER_CLAUSE, coreTerms: ['计量装置', '保护移交'], source: '招标文件.pdf' }],
+    };
+    const markdown = `## 第二章 施工计量与现场保护\n发包人在现场安装计量装置，我方负责施工期间的保护，并在工程移交的同时完好地移交给发包人。`;
+    const issues = await requirementsCoverageIssues(markdown, model, { semanticSimilarity: zeroSimilarity });
+    expect(issues).toEqual([]);
+  });
+
+  it('修复费用条款（实测）：正文抄写句省略括号补充（短版）→ 去括号分句全落位不报', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce(undefined);
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: REPAIR_CLAUSE, coreTerms: ['修复费用'], source: '招标文件.pdf' }],
+    };
+    // 「修复费用」只在括号补充内，短版抄写句无此词面——分句去括号后「承包人负责修复」等分句全落位
+    const markdown = '## 第二章 计量装置保护管理\n因我方保护不善造成计量装置损坏，我方负责修复，并承担由此造成的增加费用。';
+    const issues = await requirementsCoverageIssues(markdown, model, { semanticSimilarity: zeroSimilarity });
+    expect(issues).toEqual([]);
+  });
+
+  it('真缺失条款（正文无条款原文）→ 仍报零响应（兜底不误放行）', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce(undefined);
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: QUOTE_MISSING_CLAUSE, coreTerms: ['未报价处理', '视同已包含'], source: '招标文件.pdf' }],
+    };
+    const issues = await requirementsCoverageIssues('## 第二章 投标报价\n本工程按计划组织施工。', model, { semanticSimilarity: zeroSimilarity });
+    const zero = issues.filter(issue => issue.message.includes('零命中'));
+    expect(zero.length).toBe(1);
+    expect(zero[0].level).toBe('error');
+    expect(zero[0].severity).toBe('blocker');
+  });
+
+  it('抄写句只落位前半条款（分句部分缺失）→ 仍报部分响应（兜底不全命中不放行）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    // 响应性分类缓存跨用例命中时首条 mock 可能被或选型判定消耗——两态均判非或选型，断言稳定
+    mocked.mockResolvedValueOnce(undefined);
+    mocked.mockResolvedValueOnce({ results: [{ index: 0, alternative: false }] });
+    const model: TenderRequirementModel = {
+      ...emptyTenderRequirements(true),
+      frontScheduleClauses: [{ text: QUOTE_MISSING_CLAUSE, coreTerms: ['清单项目', '视同已包含'], source: '招标文件.pdf' }],
+    };
+    const markdown = '## 第二章 投标报价\n对于发包人提供的工程量清单中的清单项目，我方没有报价的。';
+    const issues = await requirementsCoverageIssues(markdown, model, { semanticSimilarity: zeroSimilarity });
+    const partial = issues.filter(issue => issue.message.includes('部分响应'));
+    expect(partial.length).toBe(1);
+    expect(partial[0].severity).toBe('blocker');
+    expect(partial[0].message).toContain('视同已包含');
+  });
+});
+
+// ============ 4.27.2 交付链清理器：招标元语言剥离 + 条款响应重复行去重 ============
+
+describe('fixTenderMetaLanguage 招标元语言确定性清理（4.27.2 语气泄漏治理）', () => {
+  it('条幅前缀剥离：条款正文保留并转投标人口吻（「按招标文件要求：」不再入正文）', () => {
+    const result = fixTenderMetaLanguage('## 第二章 工程概况\n按招标文件要求：承包人负责施工期间的现场管理。');
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('我方负责施工期间的现场管理。');
+    expect(result.markdown).not.toContain('按招标文件要求');
+    expect(result.markdown).toContain('## 第二章 工程概况');
+  });
+
+  it('句内元语言替换：按招标文件约定→按合同约定 / 按上述条款→按合同约定 / 本招标项目→本项目', () => {
+    const result = fixTenderMetaLanguage('本工程预付款的支付、扣回与使用按招标文件约定执行，按上述条款办理，本招标项目严格落实。');
+    expect(result.markdown).toContain('按合同约定执行');
+    expect(result.markdown).toContain('按合同约定办理');
+    expect(result.markdown).toContain('本项目严格落实');
+    expect(result.markdown).not.toContain('按招标文件');
+    expect(result.markdown).not.toContain('按上述条款');
+  });
+
+  it('裸词豁免：编制依据「招标文件及补疑补遗」保留（只清理调用式元语言）', () => {
+    const input = '编制依据包括招标文件及补疑补遗、工程量清单与施工图纸。';
+    const result = fixTenderMetaLanguage(input);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(input);
+  });
+
+  it('空响应句残留整行删除（fixEmptyScoringResponses 未改写成功的后端兜底；不再产出兜底套话句）', () => {
+    const result = fixTenderMetaLanguage('本施工组织设计已按上述条款要求逐项落实执行。');
+    expect(result.markdown.trim()).toBe('');
+    expect(result.markdown).not.toContain('已按上述条款要求');
+    expect(result.markdown).not.toContain('严格执行合同约定的各项要求');
+  });
+
+  it('标题行豁免：小节标题含「按招标文件要求」不清理（由标题治理链负责）', () => {
+    const input = '### 2.1 按招标文件要求的响应措施\n正文内容。';
+    const result = fixTenderMetaLanguage(input);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(input);
+  });
+});
+
+describe('stripDuplicateResponseLines 条款响应重复行去重（4.27.2 重复补写治理）', () => {
+  const duplicatedSentence = '我方承诺本工程严格执行合同约定的各项要求，施工过程中强化过程控制与检查验收管理，确保工程一次成优。';
+
+  it('相同响应句重复出现（≥40 字）：仅保留首次，后续整行删除并吞尾随空行', () => {
+    const input = ['## 第五章 施工组织管理', duplicatedSentence, '', duplicatedSentence, ''].join('\n');
+    const result = stripDuplicateResponseLines(input);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown.split(duplicatedSentence).length - 1).toBe(1);
+    expect(result.markdown).not.toContain('\n\n\n');
+  });
+
+  it('短行/标题行/表格行不参与判定（零误伤防线）', () => {
+    const input = ['### 2.1 施工措施', '| 序号 | 内容 |', '| 1 | 本工程按合同约定执行 |', '本工程按合同约定执行。'].join('\n');
+    const result = stripDuplicateResponseLines(input);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(input);
+  });
+
+  it('软换行差异视为同一行（空白规范化后同文本去重）', () => {
+    const input = [duplicatedSentence, duplicatedSentence.replace('我方承诺', '我方 承诺')].join('\n');
+    const result = stripDuplicateResponseLines(input);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown.split('\n').filter(line => line.includes('确保工程一次成优')).length).toBe(1);
   });
 });

@@ -54,14 +54,115 @@ export function vagueResponseHits(markdown: string) {
 }
 
 // ── 2. 模板化套话检测：套话语义原型 + 套话密度三档（bge 余弦判定，无词表） ──
-/** 套话语义原型（跨项目可替换、无本项目专属参数的空泛表述基准） */
+/** 套话语义原型（跨项目可替换、无本项目专属参数的空泛表述基准）：14 条族式原型覆盖高频口号变体。
+ * 校准（离线实测，bge-small-zh-v1.5）：合成真口号句最高余弦 0.852~0.998、三版真实成稿内容最高 0.769，
+ * 配合 FILLER_SENTENCE_THRESHOLD=0.80 实现零误报分离（扩库前 5 原型 + 0.6 阈值口径下
+ * 任何合规成稿约 28% 管理/质量过程句落入原型语义空间，是“套话占比恒 ~27.8%”伪象的根因）。 */
 export const FILLER_SEMANTIC_QUERIES = [
   '精心组织、科学管理，确保工程质量',
   '严格执行相关规范和设计要求',
   '根据实际情况适当调整施工安排',
   '建立健全管理体系，加强过程管理',
   '全力保障项目顺利推进',
+  '加强管理、严格控制，确保工程质量达到优良标准',
+  '精心策划、周密部署，全力以赴完成任务目标',
+  '高度重视、狠抓落实，层层压实责任',
+  '统筹兼顾、合理安排，确保各项工作有序推进',
+  '严格管理、严格要求，确保一次成优',
+  '认真贯彻落实各项管理制度，不断提升管理水平',
+  '加强安全管理，杜绝各类安全事故发生',
+  '合理安排施工工序，确保工程按期完工',
+  '坚持质量第一、安全至上，认真做好各项工作',
 ] as const;
+
+/**
+ * 套话句判定阈值（0.80，离线校准值）：0.6 为「语义承接」判定阈值（条目标题↔大纲），
+ * 复用它判套话会把普通管理过程句误计为套话（恒 ~28% 占比伪象根因）；0.80 在合成口号（≥0.852）
+ * 与真实内容（≤0.769）之间完美分离（±0.03 裕度）。
+ */
+export const FILLER_SENTENCE_THRESHOLD = 0.8;
+
+/** 目录条目行（“第六章 确保工程质量的技术组织措施”式）不入句池：目录是标题文本而非正文句，
+ * 校准中曾以 0.73 成为最高分伪命中（且目录行短、无句读切分点，整行入池放大占比基数） */
+const FILLER_TOC_LINE_RE = /^\s*(?:第[一二三四五六七八九十百\d]+[章节篇]|\d+(?:\.\d+){0,3})\s+[^。；;，,]*$/u;
+
+/** 句池排除行判定（检测端与修复锚点端同源口径）：空行/标题/表格/列表/引用/目录条目行不进句池 */
+export function isFillerPoolExcludedLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return true;
+  if (/^\s*(#{1,6}\s+|\||[-*+]\s|>)/u.test(trimmed)) return true;
+  return FILLER_TOC_LINE_RE.test(trimmed);
+}
+
+/** 共享句池构建：过滤非正文行后按。；; 切句，仅保留 ≥12 字正文句（检测/修复锚点/生成期质检三端同源） */
+export function buildFillerSentencePool(markdown: string): string[] {
+  return markdown
+    .split('\n')
+    .filter(line => !isFillerPoolExcludedLine(line))
+    .flatMap(line => line.split(/[。；;]/u))
+    .map(sentence => sentence.trim())
+    .filter(sentence => sentence.length >= 12);
+}
+
+/** 句级套话判定结果：semantic=套话语义原型命中（可进入确定性删除判定）；vague=模糊应答语义复核命中（交 LLM 具体化） */
+export interface FillerSentenceJudgement {
+  sentence: string;
+  semantic: boolean;
+  vague: boolean;
+  filler: boolean;
+  /** 与套话语义原型的最高余弦（观测与校准用） */
+  similarity: number;
+}
+
+/**
+ * 共享句级套话判定器（检测端 fillerDensityReport / 修复锚点端 fillerSentenceTargets /
+ * 生成期 block-qc 扫描同源）：套话语义原型最高余弦 ≥ FILLER_SENTENCE_THRESHOLD，
+ * 或模糊应答语义 gate 复核命中，即判套话句。
+ */
+export async function judgeFillerSentences(
+  sentences: string[],
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<FillerSentenceJudgement[]> {
+  if (sentences.length === 0) return [];
+  const fillerSimilarity = await buildSemanticSimilarity(sentences, [...FILLER_SEMANTIC_QUERIES], embedDocuments);
+  const vagueGate = await buildVagueResponseGate(embedDocuments);
+  const vagueFlags = await vagueGate(sentences);
+  return sentences.map((sentence, index) => {
+    const similarity = Math.max(...FILLER_SEMANTIC_QUERIES.map(query => fillerSimilarity(sentence, query)));
+    const semantic = similarity >= FILLER_SENTENCE_THRESHOLD;
+    const vague = vagueFlags[index];
+    return { sentence, semantic, vague, filler: semantic || vague, similarity };
+  });
+}
+
+/**
+ * 零信息口号句判定（确定性删除安全前置）：通过语义套话门且无任何数字/岗位/频次/合规锚点的
+ * 短句（≤60 字）方为零信息纯口号——删除零信息句是无损净化（不损失可核查信息）；
+ * 携带任何信息（数字/岗位/频次/合规承诺）的命中句一律保留，交 LLM 具体化重写（防误删承诺实质）。
+ */
+export function isZeroInfoSloganSentence(sentence: string): boolean {
+  const compact = sentence.replace(/\s+/gu, '');
+  if (compact.length === 0 || compact.length > 60) return false;
+  if (/[0-9０-９]/u.test(compact)) return false;
+  if (/项目经理|技术负责人|施工员|质检员|专职安全员|安全员|材料员|资料员|监理|班组|责任人|岗位/u.test(compact)) return false;
+  if (/每日|每周|每月|每季|每年|每\d+|定期|不定期|不少于|不低于|至少/u.test(compact)) return false;
+  if (/合同|约定|承诺|保证金|履约|招标|投标|中标|资质|奖项|证书|备案|报审|报验|审批|签证|变更/u.test(compact)) return false;
+  return true;
+}
+
+/**
+ * 套话句扫描（block-qc 生成期质检专用）：共享句池 + 共享判定器，返回语义原型命中句原文
+ * （去重、限 20 条），供首轮阻断反馈定向重写（生成期拦截成本远低于成稿后修复）。
+ */
+export async function scanFillerSentences(
+  text: string,
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<string[]> {
+  const sentences = buildFillerSentencePool(text);
+  if (sentences.length === 0) return [];
+  const judgements = await judgeFillerSentences(sentences, embedDocuments);
+  return [...new Set(judgements.filter(item => item.semantic).map(item => item.sentence))].slice(0, 20);
+}
 
 export type TemplatingLevel = 'heavy' | 'medium' | 'light';
 
@@ -83,28 +184,17 @@ export interface FillerDensityReport {
 }
 
 /** 套话密度统计：核心章节（全文口径，评分器可传核心段落子集）套话句占比。
- * 模糊应答词面命中仅召回（「力争上游」「左右对称」等合法句不得误计），
- * 句子级语义 gate 复核命中才计套话句（语义模型恒可用，无降级分支）。 */
+ * 模糊应答词面命中仅召回（「力争上游」「左右对称」等合法句不得误计）；套话语义原型判定走
+ * FILLER_SENTENCE_THRESHOLD（0.80 校准值），句池与修复锚点/生成期质检共享（含目录行过滤）。 */
 export async function fillerDensityReport(
   markdown: string,
   embedDocuments?: (texts: string[]) => Promise<number[][]>,
 ): Promise<FillerDensityReport> {
-  const sentences = markdown
-    .split(/\n+/u)
-    .filter(line => line.trim() && !/^\s*(#{1,6}\s+|\||[-*+]\s|>)/u.test(line))
-    .flatMap(line => line.split(/[。；;]/u))
-    .map(sentence => sentence.trim())
-    .filter(sentence => sentence.length >= 12);
-  const fillerSimilarity = await buildSemanticSimilarity(sentences, [...FILLER_SEMANTIC_QUERIES], embedDocuments);
-  // 模糊应答：词根级词面召回 → 语义 gate 复核（正例命中且严格高于合法语境负例分才计套话句）
-  const vagueGate = await buildVagueResponseGate(embedDocuments);
-  const vagueFlags = await vagueGate(sentences);
+  const sentences = buildFillerSentencePool(markdown);
+  const judgements = await judgeFillerSentences(sentences, embedDocuments);
   const vagueCandidateSentences = sentences.filter(sentence => VAGUE_RESPONSE_LEXICAL_HINTS_RE.test(sentence)).length;
-  const vagueSemanticSentences = vagueFlags.filter(Boolean).length;
-  const fillerSentenceFlags = sentences.map((sentence, index) =>
-    FILLER_SEMANTIC_QUERIES.some(query => fillerSimilarity(sentence, query) >= SEMANTIC_COVERAGE_THRESHOLD)
-    || vagueFlags[index],
-  );
+  const vagueSemanticSentences = judgements.filter(item => item.vague).length;
+  const fillerSentenceFlags = judgements.map(item => item.filler);
   const fillerSentences = fillerSentenceFlags.filter(Boolean).length;
   // 套话句原文明细：按首次出现顺序去重，限 40 条——模板化修复闭环用其做锚点/诊断样本
   const fillerSentenceDetails = [...new Set(sentences.filter((_, index) => fillerSentenceFlags[index]))].slice(0, 40);

@@ -5,7 +5,6 @@
 import type { AgentWorkflowContext } from '../agentWorkflow';
 import type { ExportGateResult, ValidationIssue, DocumentReviewMetadata } from './validation';
 import type { DocumentExecutionStage, DocumentAsset } from './progress';
-import type { QualityBenchmarkResult } from '../benchmarkQuality';
 
 export interface PromptRequiredSectionRule {
   title: string;

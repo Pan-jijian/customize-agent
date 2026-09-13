@@ -8,8 +8,9 @@ import { MARKDOWN_TABLE_ROW_RE } from '../../../constants';
 import { DANGEROUS_APPLICABLE_ITEMS, extractDangerZone } from '../../dangerousApplicability';
 import { PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, SLOPE_SUPPORT_LITERAL_RE, cnNumberToArabic, flexNamePattern, laborPeakStageOf, quantityUnitVariants, tablePeakLabor } from '../authorities/authorities';
 import type { SupportSystemAuthorityKind } from '../authorities/authorities';
-import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, SIX_HUNDRED_PERCENT_ITEMS, cellCoverage, extractMarkdownTables, jaccard, judgeQueryCoverage, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanInvertedDateRanges, scanParagraphTailRepeats, sixHundredPercentLexicalHit, textCellsOf } from '../detectors/detectors';
+import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, SIX_HUNDRED_PERCENT_ITEMS, ambiguousEitherOrIssues, cellCoverage, extractMarkdownTables, isSanctionedResponseSentence, jaccard, judgeQueryCoverage, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanInvertedDateRanges, scanParagraphTailRepeats, scanPhaseLaborClaims, sixHundredPercentLexicalHit, textCellsOf } from '../detectors/detectors';
 import type { AuthorityDomain, AuthorityIndex } from '../../authorityIndex';
+import type { PhaseLaborClaim } from '../detectors/detectors';
 
 const PILE_WORD_TO_SLOPE: Array<[RegExp, string]> = [
   [/高压旋喷桩/gu, '土钉墙'],
@@ -142,105 +143,6 @@ export function fixTruncatedSentenceArtifacts(markdown: string): { markdown: str
   }
   if (result === markdown) return { markdown, fixedCount: 0, details: [] };
   return { markdown: result, fixedCount, details: [`截断句残留清洗 ${fixedCount} 处`] };
-}
-
-/**
- * B3（丰乐镇实测「1.2 项目主要施工内容」表格承载专业工程正文）：关键小节表格承载正文
- * 确定性兜底——检测器 majorContentGovernanceIssues 判「小节正文全为表格」即 error，
- * LLM 表格→段落改写定位失败时由本函数收口：从表格行确定性生成段落叙述
- * （分部分项工程分组 → 「X的Y量单位、Z量单位；」），插入小节标题之后、表格之前，
- * 表格保留（正式工程量表属合法要求）。只覆盖「作业对象与工程量」维度，
- * 工序/方法两维由三要素检测继续驱动 LLM 补写。
- */
-export function fixTableBorneContentSections(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
-  const lines = markdown.split(/\r?\n/u);
-  const tableRowRe = /^\s*\|.+\|\s*$/u;
-  const rowsToProse = (tableLines: string[]): string | undefined => {
-    const cellsOf = (row: string) => row.split('|').map(item => item.trim()).slice(1, -1);
-    const clean = (cell: string) => cell.replace(/[*_`~]/gu, '').trim();
-    let header: string[] | undefined;
-    const dataRows: string[][] = [];
-    for (const line of tableLines) {
-      const cells = cellsOf(line).map(clean);
-      if (cells.every(cell => /^:?-{3,}:?$/u.test(cell))) continue;
-      if (header === undefined) { header = cells; continue; }
-      dataRows.push(cells);
-    }
-    if (!header || dataRows.length === 0) return undefined;
-    const colIndex = (re: RegExp) => header.findIndex(cell => re.test(cell));
-    const groupCol = colIndex(/分部分项|专业工程|工程名称|项目名称/u);
-    const contentCol = colIndex(/工程内容|施工内容|工作内容|名称/u);
-    const unitCol = colIndex(/单位/u);
-    const qtyCol = colIndex(/工程量|数量/u);
-    const groups = new Map<string, string[]>();
-    const solo: string[] = [];
-    for (const row of dataRows) {
-      const group = groupCol >= 0 && row[groupCol] ? row[groupCol] : '';
-      const content = contentCol >= 0 ? (row[contentCol] || '') : (groupCol >= 0 ? (row[groupCol] || '') : '');
-      const qty = qtyCol >= 0 ? (row[qtyCol] || '') : '';
-      const unit = unitCol >= 0 ? (row[unitCol] || '') : '';
-      const phrase = `${content}${qty}${unit}`;
-      if (!content && !qty) continue;
-      if (group) {
-        const list = groups.get(group) || [];
-        list.push(phrase);
-        groups.set(group, list);
-      } else {
-        solo.push(phrase);
-      }
-    }
-    if (groups.size === 0 && solo.length === 0) return undefined;
-    const parts = [...groups.entries()].map(([group, phrases]) => `${group}的${phrases.join('、')}`);
-    if (solo.length > 0) parts.push(solo.join('、'));
-    return `本项目主要施工内容包括：${parts.join('；')}。`;
-  };
-  const insertions: Array<{ lineIndex: number; paragraph: string; title: string }> = [];
-  const tryBlock = (lineIndex: number, body: string[], title: string) => {
-    if (insertions.some(item => item.lineIndex === lineIndex)) return;
-    const tableLines = body.filter(line => tableRowRe.test(line.trim()));
-    if (tableLines.length < 3) return;
-    const proseChars = body.filter(line => !tableRowRe.test(line.trim())).join('').replace(/[\s#*_`>-]/gu, '').length;
-    if (proseChars >= 50) return;
-    const paragraph = rowsToProse(tableLines);
-    if (!paragraph) return;
-    insertions.push({ lineIndex, paragraph, title });
-  };
-  for (let index = 0; index < lines.length; index += 1) {
-    const heading = /^(#{2,4})\s+(.+)$/u.exec(lines[index].trim());
-    if (!heading || !/主要施工内容|主要施工方法|主要分部分项工程施工方案|主要分部分项施工方案/u.test(heading[2])) continue;
-    const level = heading[1].length;
-    let end = index + 1;
-    for (; end < lines.length; end += 1) {
-      const next = /^(#{1,6})\s+/u.exec(lines[end].trim());
-      if (next && next[1].length <= level) break;
-    }
-    const inner = lines.slice(index + 1, end);
-    // 章级块（主要施工方法/主要分部分项工程施工方案）逐 H3 子块判定——与检测器
-    // majorContentGovernanceIssues 的块划分同粒度：某 H3 子块全表格时在其标题后插段落，
-    // 避免「检测逐块报、兜底整章不动」的错配（舒城第二轮实测）
-    const h3s = inner.map((line, offset) => ({ line: line.trim(), offset })).filter(item => /^###\s+/u.test(item.line));
-    if (h3s.length > 0) {
-      for (let part = 0; part < h3s.length; part += 1) {
-        const start = h3s[part].offset;
-        const stop = part + 1 < h3s.length ? h3s[part + 1].offset : inner.length;
-        tryBlock(index + 1 + start, inner.slice(start + 1, stop), h3s[part].line.replace(/^###\s+/u, ''));
-      }
-      continue;
-    }
-    tryBlock(index, inner, heading[2].trim());
-  }
-  if (insertions.length === 0) return { markdown, fixedCount: 0, details: [] };
-  const out: string[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    out.push(lines[index]);
-    const hit = insertions.find(item => item.lineIndex === index);
-    if (hit) out.push('', hit.paragraph);
-  }
-  return {
-    markdown: out.join('\n'),
-    fixedCount: insertions.length,
-    details: insertions.map(item => `「${item.title}」表格改写段落兜底`),
-  };
 }
 
 // ── 9. 闭环句式密度上限（模板化）：闭环四词过度密集削弱语言精练度 ──
@@ -542,6 +444,32 @@ export function fixLaborPeakConflict(markdown: string, laborPeakAuthority?: numb
   return { markdown: result, fixedCount, details };
 }
 
+/** 阶段劳动力确定性修复（V5 P4b-2，与检测器同源单源）：scanPhaseLaborClaims 定位（双通道）
+ * → 权威值硬替换 → 复检（复检仍残留即整体回滚，返回原文本）。阶段名拼接歧义不在确定性
+ * 修复范围内（无法确定性拆分，留 LLM 修复轮改述）；调用方在章节写时就绪后立即对齐，
+ * 把跨章漂移消灭在写时。 */
+export function fixPhaseLaborValues(
+  markdown: string,
+  phaseAuthorities?: Array<{ phase: string; value: number; trace?: string }>,
+): { markdown: string; fixedCount: number; details: string[]; residualCount: number } {
+  if (!phaseAuthorities || phaseAuthorities.length === 0) return { markdown, fixedCount: 0, details: [], residualCount: 0 };
+  const { claims } = scanPhaseLaborClaims(markdown, phaseAuthorities);
+  if (claims.length === 0) return { markdown, fixedCount: 0, details: [], residualCount: 0 };
+  const sorted = [...claims].sort((left, right) => right.start - left.start);
+  let result = markdown;
+  const applied: PhaseLaborClaim[] = [];
+  let boundary = Number.POSITIVE_INFINITY;
+  for (const claim of sorted) {
+    if (claim.end > boundary) continue; // 区间重叠防护（理论不发生；保守跳过）
+    result = `${result.slice(0, claim.start)}${claim.expected}${result.slice(claim.end)}`;
+    applied.push(claim);
+    boundary = claim.start;
+  }
+  const residual = scanPhaseLaborClaims(result, phaseAuthorities);
+  if (residual.claims.length > 0) return { markdown, fixedCount: 0, details: [], residualCount: residual.claims.length };
+  return { markdown: result, fixedCount: applied.length, details: applied.map(claim => `阶段劳动力 ${claim.phase} ${claim.actual}人→${claim.expected}人`), residualCount: 0 };
+}
+
 // ── 12. 商务条款数据入正文检测（Q3）：施组正文禁止出现商务数据封闭集，出现即评审失分（徽光阁实测：暂列金额 60 万入正文） ──
 // 阶段五语义升级：强词（COMMERCIAL_TERM_RE）与数字式（COMMERCIAL_RATE_RE）保留确定性判定（出现即商务数据）；
 // 变体弱词（材料价格/商务报价类）仅词面召回，句级语义复核（semanticGate 统一入口）确认商务语义才计命中；
@@ -571,12 +499,13 @@ export function stripCommercialDataBodyLines(markdown: string): string {
     if (!COMMERCIAL_TERM_RE.test(line) && !COMMERCIAL_RATE_RE.test(line)) return line;
     const parts = line.split(/(?<=[。；;])\s*/u);
     return parts.filter(part => {
-      // 第十六版闭环修复：系统补写器标准格式的定性响应句（「按招标文件约定/要求」开头）豁免清洗——
+      // 系统补写器定性响应句豁免清洗（4.27.2 投标人口吻形态 + 旧条幅形态过渡，见谓词注释）——
       // 前附表硬性条款（暂列金额/核减/清单异议/增值税）零响应补写句含商务词面，
-      // 此前被本清洗删除形成「补了即被删」无效闭环；定性响应句不含商务数字参数，
+      // 此前因豁免正则恒不命中被本清洗删除形成「补了即被删」无效闭环；定性响应句不含商务数字参数，
       // 与 round-27 污染的条款原文抄写句（含金额/利率数字）形态可区分，豁免不削弱污染防线。
-      const normalizedPart = part.trim();
-      if (/^按招标文件(?:约定|要求)[^。；;\n]{0,120}$/u.test(normalizedPart)) return true;
+      // 历史 BUG 实锤（第十六版重建）：原正则以 `$` 紧贴字符类结尾，而句拆后 part 带句尾标点恒不匹配——
+      // 统一改用 isSanctionedResponseSentence（双形态 + 数字硬闸，可选句尾标点），与商务数据检测端同源豁免。
+      if (isSanctionedResponseSentence(part)) return true;
       return !(COMMERCIAL_TERM_RE.test(part) || COMMERCIAL_RATE_RE.test(part));
     }).join('');
   });
@@ -757,9 +686,9 @@ export interface NumericConsistencyFixResult {
   details: string[];
 }
 
-/** 从后往前应用定点替换（避免索引偏移；detail 去重保序） */
+/** 从后往前应用定点替换（避免索引偏移；detail 去重保序）；4.27.0 导出供数值裁决器按章应用跨章 span */
 
-function applySpanReplacements(markdown: string, replacements: Array<{ start: number; end: number; replacement: string; detail: string }>): { markdown: string; fixedCount: number; details: string[] } {
+export function applySpanReplacements(markdown: string, replacements: Array<{ start: number; end: number; replacement: string; detail: string }>): { markdown: string; fixedCount: number; details: string[] } {
   if (replacements.length === 0) return { markdown, fixedCount: 0, details: [] };
   // 4.17.3 重叠 span 治理：同一数值被正/反向模式双命中（如「45日历天为唯一」同时命中
   // 工期控制正向与「N日历天+为唯一」反向模式）时旧降序逐条 slice 会产生「45→2100」错位；
@@ -1016,25 +945,10 @@ function fixNodeScheduleConflicts(markdown: string, options?: { scheduleAuthorit
   return { markdown: applied.markdown, fixedCount: applied.fixedCount + (allDetails.length > 0 ? 1 : 0), details: [...allDetails, ...applied.details].slice(0, 12) };
 }
 
-/** 取出现频次最高的数值（平手取较大值，总量口径优先） */
-
-function modeOfValues(values: number[]): number | undefined {
-  const counts = new Map<number, number>();
-  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-  let best: number | undefined;
-  let bestCount = 0;
-  for (const [value, count] of counts) {
-    if (count > bestCount || (count === bestCount && best !== undefined && value > best)) {
-      best = value;
-      bestCount = count;
-    }
-  }
-  return best;
-}
-
 /** 材料/设备数量确定性修复：表格行数值为权威口径，正文矛盾数值（差异 >20%）改为表格值。
  * 与检测器 crossSectionNumericConflictIssues 同源（同锚点/同豁免：并列枚举、否定声明句）；
- * 表格口径不唯一（多表互相矛盾）时不动，交 LLM 修复路径。
+ * 表格口径不唯一（多表互相矛盾）时不动，交 LLM 修复路径（V2 批1-4：设备保守台数/同组众数
+ * 等机器盲选兜底已删除，多值冲突一律阻断交 LLM 定向修复裁决，机器不盲选口径）。
  * 4.17.3 权威口径扩展：计划总工期锚点支持外部锁定口径（factsModel 计划工期事实卡）——
  * 庐江实测 45 vs 210 两套体系各自带表格，表格值不唯一导致确定性修复零产出、LLM 修复无法裁决、
  * 修复节点 failed；外部锁定口径（招标文件前附表值）优先级高于表格值。 */
@@ -1071,26 +985,18 @@ function fixCrossSectionNumericConflicts(markdown: string, authorities?: Record<
         else bodyMatches.push({ value, group });
       }
     }
-    // 权威优先级：外部锁定口径（factsModel 计划工期/装配率等）> 表格唯一值 >
-    // 设备台数多表冲突兜底（塔吊 2台 vs 1台 时取保守台数，评分器对超配敏感）>
-    // A5 同组众数兜底（丰乐镇实测：灭火器 12具 与 2具 同属未标注部位语境且互为矛盾，检测器报
-    // 「未标注部位语境两套口径」阻断，但 tableValues={12,2} 唯一值分支永不命中 → 修复恒零产出）；
+    // 权威优先级（V2 批1-4 零兜底写入：设备保守台数/同组众数等机器盲选兜底已全部删除）：
+    // 外部锁定口径（factsModel 计划工期/装配率等）> 表格唯一值；多值冲突时无权威可依不修复——
+    // 由检测器阻断 + LLM 定向修复裁决（机器不得在多套口径中盲选一套写入，宁缺毋假）；
     // 正文/表格行存在与权威不一致的值才修复（与检测器同口径）
     const externalAuthority = authorities?.[anchor.key];
-    const equipmentFallback = externalAuthority === undefined && anchor.key === 'towerCrane' && tableValues.size > 1;
-    // A5：无部位组内存在不同数值对（检测器同口径）时启用众数权威——同一语境下总量口径唯一，
-    // 频次最高值即主流口径（丰乐镇灭火器 12具 出现 3 处表格、2具 仅 1 处）
-    const unlabeledAll = [...tableMatches, ...bodyMatches].filter(item => item.group === '').map(item => item.value);
-    const unlabeledConflict = unlabeledAll.length >= 2 && new Set(unlabeledAll).size >= 2;
-    const modeFallback = externalAuthority === undefined && !equipmentFallback && tableValues.size > 1 && unlabeledConflict ? modeOfValues(unlabeledAll) : undefined;
     const authority = externalAuthority !== undefined && externalAuthority > 0 ? externalAuthority
       : tableValues.size === 1 ? [...tableValues][0]
-      : equipmentFallback ? Math.min(...tableValues)
-      : modeFallback;
+      : undefined;
     if (authority === undefined) continue;
-    // 外部权威/设备兜底时表格行全量参与修复（多表互相矛盾时表格行本身就是要统一的对象）；
-    // A5 众数兜底仅未标注部位语境的表格行参与；F15 部位组豁免：部位组正文值不参与差异判定
-    const fixCandidates = [...bodyMatches.filter(item => item.group === ''), ...(externalAuthority !== undefined || equipmentFallback ? tableMatches : modeFallback !== undefined ? tableMatches.filter(item => item.group === '') : [])];
+    // 外部权威时表格行全量参与修复（多表互相矛盾时表格行本身就是要统一的对象）；
+    // F15 部位组豁免：部位组正文值不参与差异判定
+    const fixCandidates = [...bodyMatches.filter(item => item.group === ''), ...(externalAuthority !== undefined ? tableMatches : [])];
     if (!fixCandidates.some(item => item.value !== authority)) continue;
     for (const pattern of anchor.patterns) {
       for (const match of markdown.matchAll(pattern)) {
@@ -1101,16 +1007,14 @@ function fixCrossSectionNumericConflicts(markdown: string, authorities?: Record<
         if (lineEnd === -1) lineEnd = markdown.length;
         const line = markdown.slice(lineStart, lineEnd);
         if (NEGATIVE_DECLARATION_RE.test(line)) continue;
-        if (/^\s*\|/u.test(line) && externalAuthority === undefined && !equipmentFallback && modeFallback === undefined) continue;
+        if (/^\s*\|/u.test(line) && externalAuthority === undefined) continue;
         const value = Number(match[1]);
         if (!Number.isFinite(value) || value <= 0) continue;
         // F15 部位组豁免：正文分部位的数量配置（分区灭火器等）不做确定性归一，防止修复器制造数据矛盾
         if (!/^\s*\|/u.test(line) && locationGroupForMatch(markdown, match.index || 0, raw, lineStart) !== '') continue;
-        // A5 众数兜底仅统一未标注部位语境的表格行（带部位列的表格行保持不动）
-        if (/^\s*\|/u.test(line) && modeFallback !== undefined && locationGroupForMatch(markdown, match.index || 0, raw, lineStart) !== '') continue;
         if (value === authority) continue;
         const valueIndex = match.index + match[0].indexOf(match[1]);
-        const source = externalAuthority !== undefined && externalAuthority > 0 ? (anchor.key === 'scheduleDays' ? '以绑定资料计划工期为准' : '以绑定资料锁定口径为准') : modeFallback !== undefined ? '以未标注部位主流口径为准' : '以表格口径为准';
+        const source = externalAuthority !== undefined && externalAuthority > 0 ? (anchor.key === 'scheduleDays' ? '以绑定资料计划工期为准' : '以绑定资料锁定口径为准') : '以表格口径为准';
         replacements.push({ start: valueIndex, end: valueIndex + match[1].length, replacement: String(authority), detail: `${anchor.label} ${value}${anchor.unit}→${authority}${anchor.unit}（${source}）` });
       }
     }
@@ -1410,6 +1314,41 @@ export function deriveRepairAuthorities(index?: AuthorityIndex): RepairPlanAutho
  * 必须以绑定资料提取的锁定工期为准做确定性替换（修复节点 failed 根因之一）。
  * 事实卡值为混合口径长句（“计划工期：…起，210日历天”）时取首个「N日历天」数值。 */
 
+// ── 21c. 误入数字粘连清洗 + 日区间超限截断（4.28.4 舒城实测）──
+// ① 「…的顺序组织17679主要工程量包括…」：工程量枚举句被 4~6 位误入数字粘连（正确句式
+// 「…的顺序组织，主要工程量包括…」，数字非工程量数据——工程量数字均带单位，为上游文本
+// 拼接残片）；② 「第345日至第4469日」：日区间终点编造远超总工期权威 360 日。
+
+/** 误入数字粘连清洗：“汉字 + 4~6 位裸数字 +（主）要工程量”形态删除裸数字并补逗号分隔。
+ * 「第」前缀与已带逗号形态排除（防误伤「第300日」类正常数字与重复清洗）。 */
+export function fixGluedQuantityNumbers(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  let fixedCount = 0;
+  const details: string[] = [];
+  const next = markdown.replace(/(?<=[\u4e00-\u9fa5])(?<!第)(?<!，)(\d{4,6})(?=主?\s*要?\s*工程量(?!清单))/gu, (match: string) => {
+    fixedCount += 1;
+    if (details.length < 12) details.push(`误入数字粘连清洗：删除“${match}”并补逗号`);
+    return '，';
+  });
+  return { markdown: next, fixedCount, details };
+}
+
+/** 日区间超限截断：区间终点超出总工期权威（「第345日至第4469日」而权威 360 日）时终点截断为
+ * 权威值；起点超限或终点未超限（正常区间）不动；无权威时静默跳过。分隔符原样保留。 */
+export function fixOversizedDayRanges(markdown: string, scheduleAuthority?: number): { markdown: string; fixedCount: number; details: string[] } {
+  if (!scheduleAuthority || scheduleAuthority <= 0) return { markdown, fixedCount: 0, details: [] };
+  let fixedCount = 0;
+  const details: string[] = [];
+  const next = markdown.replace(/第(\d{1,3})日[ \t\u00a0]*(至|～|~)[ \t\u00a0]*第(\d{4,6})[ \t\u00a0]*日/gu, (match: string, startText: string, separator: string, endText: string) => {
+    const start = Number(startText);
+    const end = Number(endText);
+    if (start > scheduleAuthority || end <= scheduleAuthority) return match;
+    fixedCount += 1;
+    if (details.length < 12) details.push(`日区间超限截断：“${match.replace(/\s+/gu, '')}”→“第${startText}日${separator}第${scheduleAuthority}日”`);
+    return `第${startText}日${separator}第${scheduleAuthority}日`;
+  });
+  return { markdown: next, fixedCount, details };
+}
+
 export function applyNumericConsistencyDeterministicFixes(markdown: string, options?: {
   /** V5 P4 单一权威索引：机械/节点/规格/工程量/峰值由索引全量派生（未提供时相关步骤静默跳过） */
   authorityIndex?: AuthorityIndex;
@@ -1428,7 +1367,7 @@ export function applyNumericConsistencyDeterministicFixes(markdown: string, opti
   if (options?.scheduleAuthority !== undefined && options.scheduleAuthority > 0) authorities.scheduleDays = options.scheduleAuthority;
   if (options?.assemblyRateAuthority !== undefined && options.assemblyRateAuthority > 0) authorities.prefabRatio = options.assemblyRateAuthority;
   const laborPeakAuthority = options?.laborPeakAuthority ?? plan.laborPeakAuthority;
-  for (const step of [(text: string) => fixLaborPeakConflicts(text, laborPeakAuthority), (text: string) => fixNodeScheduleConflicts(text, { scheduleAuthority: options?.scheduleAuthority, nodeAuthorities: plan.nodeAuthorities }), (text: string) => fixCrossSectionNumericConflicts(text, authorities, plan.codeAuthorities), (text: string) => fixSupportSystemConflicts(text, options?.supportAuthority), (text: string) => fixQuantityAuthorityConflicts(text, plan.quantityAuthorities), (text: string) => fixRegulationNumberTypos(text)]) {
+  for (const step of [(text: string) => fixLaborPeakConflicts(text, laborPeakAuthority), (text: string) => fixNodeScheduleConflicts(text, { scheduleAuthority: options?.scheduleAuthority, nodeAuthorities: plan.nodeAuthorities }), (text: string) => fixCrossSectionNumericConflicts(text, authorities, plan.codeAuthorities), (text: string) => fixSupportSystemConflicts(text, options?.supportAuthority), (text: string) => fixQuantityAuthorityConflicts(text, plan.quantityAuthorities), (text: string) => fixRegulationNumberTypos(text), (text: string) => fixGluedQuantityNumbers(text), (text: string) => fixOversizedDayRanges(text, options?.scheduleAuthority)]) {
     const result = step(next);
     if (result.markdown !== next) {
       next = result.markdown;
@@ -1711,10 +1650,13 @@ export function fixSelfUnderminingCandidates(markdown: string): { markdown: stri
       to: '本项目工艺选择以成熟可靠为原则，全部采用经工程实践验证的成熟工艺、常规材料和标准化设备，确保各分项施工质量稳定可控。',
       detail: '「未采用新技术」短板自曝改写为成熟工艺正向表述',
     },
-    // R9 八轮实测两形态（丰乐镇第八轮生成逐字命中，导出门禁硬阻断残留）
+    // R9 八轮实测两形态（丰乐镇第八轮生成逐字命中，导出门禁硬阻断残留）；
+    // 4.28.0 D2 去前缀依赖扩围：4.27.0 终稿实测变体「…不接受联合体投标；不允许分包。本工程不进行分包…」，
+    // 原 from 要求「本招标项目不允许分包。」紧邻前缀，前缀一变即失配漏改——改为核心句匹配，
+    // 前文响应句保留不动；from 不吞句尾标点（替换句无尾句号，沿用原文标点，防句号丢失/双标点）
     {
-      from: /本招标项目不允许分包。本工程不进行分包，全部施工内容由我方自行组织完成。?/gu,
-      to: '本招标项目严禁转包和违法分包，本工程全部施工任务由我公司项目部自行组织实施',
+      from: /本工程不进行分包，全部施工内容由我方自行组织完成/gu,
+      to: '本工程全部施工任务由我公司项目部自行组织实施，严禁违法分包、转包及挂靠行为',
       detail: '「本工程不进行分包」否定式自述改写为自主组织正向表述',
     },
     {
@@ -1889,28 +1831,58 @@ export function fixHeaderlessTables(markdown: string): { markdown: string; fixed
   return { markdown: lines.join('\n'), fixedCount, details: fixedCount > 0 ? [`无表头表格补齐表头 ${fixedCount} 处`] : [] };
 }
 
-// ── A16 关键设计决策两可表述归一（丰乐镇第三轮实测）──────────
+// ── A16 关键设计决策两可表述归一（丰乐镇第三轮实测；4.27.0 A4 扩展）──────────
 // 阻断实测：「钢板桩或型钢支撑支护、放坡或钢板桩支护」以并列/悬置形态表述。
 // 无清单权威可锁定时按正文自身主流口径归一（全文「放坡」7处、「钢板桩」2处、「型钢」1处）：
 // 「钢板桩或型钢支撑」→「钢板桩」；「放坡或支护」→「放坡支护」；「放坡或钢板桩支护」→「1:0.5放坡加钢板桩支护」。
 // 与 ambiguousEitherOrIssues 检测器同源（检测定位=修复定位），只替换检测器会报的实测短语。
+// 4.27.0 A4 扩展：候选侧机制——supportForm 权威选定值命中 sides[1].keyword 时取选定值侧，否则默认侧；
+// 新增基线实测句式「打桩机打入或混凝土基础固定」（同文另处「立柱采用打入式安装」锚定打入侧）、
+// 「放坡或加设挡板支护」「放坡或挡板支护」（1:0.5 坡率实义锚定放坡侧）；
+// 修复后重扫检测器，无法归一的残留句式记录待复核缺口（不静默；残留仍由终检 blocking 检出）。
 
-const AMBIGUOUS_DECISION_FIXES: Array<{ from: RegExp; to: string; detail: string }> = [
-  { from: /钢板桩或型钢支撑支护/gu, to: '钢板桩支护', detail: '钢板桩型钢两可归一为钢板桩' },
-  { from: /放坡或钢板桩支护/gu, to: '1:0.5放坡加钢板桩支护', detail: '放坡钢板桩两可归一为组合支护' },
-  { from: /放坡或支护/gu, to: '放坡支护', detail: '放坡支护两可归一' },
+interface AmbiguousDecisionSide {
+  /** 归一目标文本（整短语替换） */
+  text: string;
+  /** 选定值命中正则（对 supportForm 权威值匹配） */
+  keyword: RegExp;
+}
+
+interface AmbiguousDecisionFix {
+  from: RegExp;
+  /** [默认侧, 选定值侧]：无权威选定值或权威不匹配选定值侧时取默认侧 */
+  sides: [AmbiguousDecisionSide, AmbiguousDecisionSide];
+  detail: string;
+}
+
+const AMBIGUOUS_DECISION_FIXES: AmbiguousDecisionFix[] = [
+  { from: /钢板桩或型钢支撑支护/gu, sides: [{ text: '钢板桩支护', keyword: /钢板桩/ }, { text: '型钢支撑支护', keyword: /型钢/ }], detail: '钢板桩型钢两可归一为钢板桩' },
+  { from: /放坡或钢板桩支护/gu, sides: [{ text: '1:0.5放坡加钢板桩支护', keyword: /放坡|坡率/ }, { text: '钢板桩支护', keyword: /钢板桩|排桩/ }], detail: '放坡钢板桩两可归一为组合支护' },
+  // A4 基线实测：波形梁护栏立柱安装方式两可（无清单权威，按正文主流侧默认归一）
+  { from: /打桩机打入或混凝土基础固定/gu, sides: [{ text: '打桩机打入', keyword: /打入|打桩/ }, { text: '混凝土基础固定', keyword: /混凝土基础|现浇|基础固定/ }], detail: '护栏立柱安装两可归一为打桩机打入' },
+  // A4 基线实测：沟槽支护两可（加设长形态先行，与「放坡或挡板支护」不交叠）
+  { from: /放坡或加设挡板支护/gu, sides: [{ text: '放坡支护', keyword: /放坡|坡率/ }, { text: '挡板支护', keyword: /挡板|钢板桩/ }], detail: '沟槽支护两可归一为放坡支护' },
+  { from: /放坡或挡板支护/gu, sides: [{ text: '放坡支护', keyword: /放坡|坡率/ }, { text: '挡板支护', keyword: /挡板|钢板桩/ }], detail: '沟槽支护两可归一为放坡支护' },
+  { from: /放坡或支护/gu, sides: [{ text: '放坡支护', keyword: /放坡|坡率/ }, { text: '挡板支护', keyword: /挡板|钢板桩/ }], detail: '放坡支护两可归一' },
 ];
 
-export function fixAmbiguousEitherOrCandidates(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+export function fixAmbiguousEitherOrCandidates(markdown: string, options?: { supportForm?: string }): { markdown: string; fixedCount: number; details: string[] } {
   let result = markdown;
   let fixedCount = 0;
   const details: string[] = [];
   for (const item of AMBIGUOUS_DECISION_FIXES) {
     const matches = [...result.matchAll(item.from)];
     if (matches.length === 0) continue;
-    result = result.replace(item.from, item.to);
+    const side = options?.supportForm && item.sides[1].keyword.test(options.supportForm) ? item.sides[1] : item.sides[0];
+    result = result.replace(item.from, side.text);
     fixedCount += matches.length;
     details.push(`${item.detail} ${matches.length} 处`);
+  }
+  // 缺口不静默：重扫检测器，句式表未覆盖的两可形态记录待复核清单（不参与 fixedCount 防哑火循环）
+  const residual = ambiguousEitherOrIssues(result);
+  if (residual.length > 0) {
+    const hitText = residual[0].message.replace(/^关键设计决策两可表述：/u, '').replace(/ 以并列\/悬置形态表述.*$/u, '');
+    details.push(`两可表述缺口待复核：${hitText}`);
   }
   return { markdown: result, fixedCount, details };
 }

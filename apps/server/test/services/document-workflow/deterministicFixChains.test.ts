@@ -21,9 +21,14 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
     expect(stage5FixSteps().map(step => step.key)).toEqual([
       'table-line-residue',
       'templated-labels',
+      // V2 批1 结构完整性确定性清理（与检测器 structure-integrity 同源单扫描）
+      'structure-integrity',
       'repeated-words',
       'finish-thickness',
       'labor-peak',
+      // V5 P4b-2 阶段劳动力确定性回写（与检测器 phase-labor-mixing 同源双通道扫描）
+      'phase-labor-values',
+      'resource-breakdown',
       'internal-table-row-dup',
       'greening-maintenance',
       'paragraph-opening-repeat',
@@ -34,7 +39,11 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'meta-discourse',
       'formula-residue',
       'self-undermining',
+      'ambiguous-either-or',
       'empty-scoring-response',
+      // 4.27.2 招标元语言清理 + 重复响应行去重（紧随空响应句改写，条幅剥离后重复判定同帧）
+      'tender-meta-language',
+      'duplicate-response-line',
       'atlas-reference',
     ]);
   });
@@ -43,10 +52,15 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
     expect(round2FixSteps().map(step => step.key)).toEqual([
       'table-line-residue',
       'templated-labels',
+      // V2 批1 结构完整性确定性清理（与检测器 structure-integrity 同源单扫描）
+      'structure-integrity',
       'repeated-words',
       'duplicate-tables',
       'finish-thickness',
       'labor-peak',
+      // V5 P4b-2 阶段劳动力确定性回写（与检测器 phase-labor-mixing 同源双通道扫描）
+      'phase-labor-values',
+      'resource-breakdown',
       'internal-table-row-dup',
       'greening-maintenance',
       'paragraph-opening-repeat',
@@ -54,11 +68,14 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'collision-numbered-heading',
       'inverted-date-range',
       'truncated-sentence',
-      'table-borne-prose',
       'meta-discourse',
       'formula-residue',
       'self-undermining',
+      'ambiguous-either-or',
       'empty-scoring-response',
+      // 4.27.2 招标元语言清理 + 重复响应行去重
+      'tender-meta-language',
+      'duplicate-response-line',
       'tertiary-h4-dedupe',
       'internal-term-heading',
       // WS4 骨架指纹确定性兜底（round-2 链末尾、终检前最后一道）
@@ -67,6 +84,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'flow-form-variants',
       // WS1 残缺标题确定性补全（正文取证补全 <4 字残缺标题）
       'truncated-title-completion',
+      // 4.27.2 句化标题切分（标题合并治理 · round-2 链最后：标题还原规划标题+续写句转正文）
+      'sentence-like-heading-split',
     ]);
   });
 });

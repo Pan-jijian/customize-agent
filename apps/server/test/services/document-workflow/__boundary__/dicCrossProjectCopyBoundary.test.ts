@@ -2,8 +2,9 @@
  * dicCrossProjectCopy：V5 P4b 跨工程同值复制 / 阶段人数混用检测边界矩阵（K/L 组）。
  * 覆盖：crossProjectValueCopyIssues（K1-K9）——判定 B（单组语境值恰为其他工程明细值）、
  * 判定 A（同值出现在 ≥2 工程对象语境且明细值不同）、表格行/无组/多组语境/明细值全同豁免；
- * phaseLaborMixingIssues（L1-L7）——阶段名命中值不符、值相符、阶段名不匹配、表格行、
- * 部分命中（施工准备↔施工准备与清杂拆除）、负向声明豁免、多命中取最长；
+ * phaseLaborMixingIssues（L1-L12）——阶段名命中值不符、值相符、阶段名不匹配、表格行、
+ * 部分命中（施工准备↔施工准备与清杂拆除）、负向声明豁免、多命中取最长、枚举列举通道
+ * （12:33 评审 P0-1：引导语超 12 字窗口的列举句命中/全对不报）、阶段名拼接歧义、枚举豁免；
  * 权威查询 helper（H1-H3）——blueprintQuantityGroupAuthorities / blueprintPhaseLaborAuthorities
  * 与蓝图数据的同源投影契约。全部用例为确定性判定，无语义/网络依赖。
  */
@@ -133,6 +134,52 @@ describe('dicCrossProjectCopy · L 组：阶段人数混用检测', () => {
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('道路铺装工程');
     expect(issues[0].suggestion).toContain('68');
+  });
+
+  // 12:33 评审 P0-1 真实形态：列举引导语「各阶段同时在场人数按」距数字超 12 字窗口，
+  // 旧实现整句漏检；枚举列举通道以「名称+数字+人」单元为最小匹配补位
+  const enumAuthorities = [
+    { phase: '施工准备与清杂拆除', value: 238 },
+    { phase: '污水管网工程', value: 242 },
+    { phase: '道路铺装工程', value: 269 },
+    { phase: '景观与绿化工程', value: 206 },
+    { phase: '亮化与收尾工程', value: 14 },
+  ];
+
+  it('L8 枚举列举通道（引导语超窗口）逐单元命中 → 5 条 blocker', () => {
+    const issues = phaseLaborMixingIssues('各阶段同时在场人数按施工准备与清杂拆除216人、污水管网工程85人、道路铺装工程216人、景观与绿化工程216人、亮化与收尾工程216人执行。', enumAuthorities);
+    expect(issues).toHaveLength(5);
+    expect(issues[0].message).toContain('施工准备与清杂拆除');
+    expect(issues[0].message).toContain('阶段劳动力数据矛盾');
+    expect(issues.map(item => item.suggestion).join('')).toContain('238');
+    expect(issues[issues.length - 1].message).toContain('亮化与收尾工程');
+  });
+
+  it('L9 枚举列举通道值全对 → 0 条', () => {
+    const issues = phaseLaborMixingIssues('各阶段同时在场人数按施工准备与清杂拆除238人、污水管网工程242人执行。', enumAuthorities);
+    expect(issues).toHaveLength(0);
+  });
+
+  it('L10 阶段名拼接（景观与绿化+亮化与收尾连写）→ 报「拼接」而非数值矛盾', () => {
+    const issues = phaseLaborMixingIssues('景观与绿化亮化与收尾工程阶段投入43人。', enumAuthorities);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('阶段名疑似拼接');
+    expect(issues[0].message).toContain('景观与绿化工程');
+    expect(issues[0].message).toContain('亮化与收尾工程');
+    expect(issues[0].severity).toBe('blocker');
+  });
+
+  it('L11 枚举列出工种配置句（管道工10人）→ 0 条', () => {
+    const issues = phaseLaborMixingIssues('各阶段劳动力安排：道路铺装阶段即安排管道工10人。', enumAuthorities);
+    expect(issues).toHaveLength(0);
+  });
+
+  it('L12 基础通道+枚举混合句（168/85 数值矛盾 + 43 拼接）→ 3 条按位置排序', () => {
+    const issues = phaseLaborMixingIssues('施工准备与清杂拆除阶段投入168人，污水管网工程阶段投入85人，景观与绿化亮化与收尾工程阶段投入43人。', enumAuthorities);
+    expect(issues).toHaveLength(3);
+    expect(issues[0].message).toContain('施工准备与清杂拆除');
+    expect(issues[1].message).toContain('污水管网工程');
+    expect(issues[2].message).toContain('阶段名疑似拼接');
   });
 });
 

@@ -5,7 +5,8 @@ vi.mock('@customize-agent/knowledge', () => {
   return { LocalTransformersEmbeddingProvider };
 });
 
-import { constructionOrgProfessionalAuditIssues, duplicateParagraphIssues, fillerParagraphIssues, fillerSentenceTargets, processParameterDensityIssues, sectionCardStructureIssues, tableCompletenessIssues } from '@/services/document-workflow/constructionOrgAudit';
+import { constructionOrgProfessionalAuditIssues, duplicateParagraphIssues, fillerParagraphIssues, fillerSentenceTargets, processParameterDensityIssues, sectionCardStructureIssues, stripZeroInfoSloganSentences, tableCompletenessIssues } from '@/services/document-workflow/constructionOrgAudit';
+import type { FillerSentenceTarget } from '@/services/document-workflow/constructionOrgAudit';
 import type { DocumentDraftChapter } from '@/services/document-workflow/types';
 
 const chapter = (title: string, content: string): DocumentDraftChapter => ({ id: title, title, content, evidence: [], missingFacts: [] });
@@ -95,6 +96,14 @@ describe('fillerSentenceTargets（套话句修复锚点提取：检测定位=修
     expect(targets[0].sentence).toContain('本小节围绕现场管理展开');
     expect(targets[0].section).toBe('管理措施');
     expect(targets[0].chapterId).toBe('管理措施');
+    expect(targets[0].channel).toBe('semantic');
+  });
+
+  it('目录条目行不进目标句池（与检测端同源过滤）', async () => {
+    const content = '第六章 确保工程质量的技术组织措施\n本小节围绕现场管理展开，结合绑定项目资料。';
+    const targets = await fillerSentenceTargets([chapter('管理措施', content)], embedDocuments);
+    expect(targets).toHaveLength(1);
+    expect(targets[0].sentence).toContain('本小节围绕');
   });
 
   it('具体量化措施句不进入锚点清单（负例零误杀）', async () => {
@@ -123,6 +132,57 @@ describe('fillerSentenceTargets（套话句修复锚点提取：检测定位=修
     expect(targets.length).toBeGreaterThan(0);
     expect(targets.length).toBeLessThanOrEqual(12);
     expect(new Set(targets.map(target => target.sentence)).size).toBe(targets.length);
+  });
+});
+
+describe('stripZeroInfoSloganSentences（零信息口号句确定性删除：semantic 通道 + 零信息硬闸才删）', () => {
+  const target = (sentence: string, channel: 'semantic' | 'vague' = 'semantic'): FillerSentenceTarget => ({ chapterId: '管理措施', chapterTitle: '管理措施', section: '管理措施', sentence, channel });
+
+  it('semantic 零信息口号句整句删除：行内移除、前后句保留', () => {
+    const chapters = [chapter('管理措施', '本工程为办公楼项目。精心组织科学管理确保工程质量。基坑开挖深度5m。')];
+    const result = stripZeroInfoSloganSentences(chapters, [target('精心组织科学管理确保工程质量')]);
+    expect(result.deletedCount).toBe(1);
+    expect(result.deletedSentences).toEqual(['精心组织科学管理确保工程质量']);
+    expect(result.remaining).toHaveLength(0);
+    expect(chapters[0].content).toBe('本工程为办公楼项目。基坑开挖深度5m。');
+  });
+
+  it('独立成行的口号句删除后空行丢弃（段落结构保留）', () => {
+    const chapters = [chapter('管理措施', '本工程为办公楼项目。\n精心组织科学管理确保工程质量。\n基坑开挖深度5m。')];
+    const result = stripZeroInfoSloganSentences(chapters, [target('精心组织科学管理确保工程质量')]);
+    expect(result.deletedCount).toBe(1);
+    expect(chapters[0].content).toBe('本工程为办公楼项目。\n基坑开挖深度5m。');
+  });
+
+  it('携带数字/岗位/频次/合规锚点的命中句不删除（保留交 LLM 具体化）', () => {
+    const sentences = ['严格执行规范确保压实度达到95%', '由项目经理加强管理确保工程质量', '每周组织检查确保工程质量', '承诺确保工程质量达到优良标准'];
+    const chapters = [chapter('管理措施', sentences.map(item => `${item}。`).join(''))];
+    const result = stripZeroInfoSloganSentences(chapters, sentences.map(item => target(item)));
+    expect(result.deletedCount).toBe(0);
+    expect(result.remaining).toHaveLength(4);
+  });
+
+  it('vague 通道即使零信息也不删除（通道硬闸）', () => {
+    const chapters = [chapter('管理措施', '本工程将加强管理确保一次成优，随即进入主体施工。')];
+    const result = stripZeroInfoSloganSentences(chapters, [target('加强管理确保一次成优', 'vague')]);
+    expect(result.deletedCount).toBe(0);
+    expect(result.remaining).toHaveLength(1);
+    expect(chapters[0].content).toContain('加强管理确保一次成优');
+  });
+
+  it('幂等安全：句已不存在时删除数为 0，target 回填 remaining（不丢锚点）', () => {
+    const chapters = [chapter('管理措施', '本工程为办公楼项目。')];
+    const result = stripZeroInfoSloganSentences(chapters, [target('精心组织科学管理确保工程质量')]);
+    expect(result.deletedCount).toBe(0);
+    expect(result.remaining).toHaveLength(1);
+    expect(chapters[0].content).toBe('本工程为办公楼项目。');
+  });
+
+  it('目标章节不存在时 target 保留（不静默丢失修复锚点）', () => {
+    const chapters = [chapter('管理措施', '正文内容。')];
+    const result = stripZeroInfoSloganSentences(chapters, [{ chapterId: 'missing', chapterTitle: '不存在', section: 'x', sentence: '精心组织科学管理确保工程质量', channel: 'semantic' }]);
+    expect(result.deletedCount).toBe(0);
+    expect(result.remaining).toHaveLength(1);
   });
 });
 

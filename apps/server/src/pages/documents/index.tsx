@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import * as Antd from 'antd';
 import { App, Button, Card, Col, Descriptions, Divider, Drawer, Empty, Form, Input, List, Progress, Row, Select, Skeleton, Space, Spin, Tabs, Tag, TreeSelect, Typography } from 'antd';
-import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, HistoryOutlined, FolderOutlined, TrophyOutlined, ExclamationCircleOutlined, WarningOutlined, ArrowDownOutlined, ArrowUpOutlined } from '@ant-design/icons';
+import { FileTextOutlined, ThunderboltOutlined, DownloadOutlined, SaveOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, ApartmentOutlined, DatabaseOutlined, EyeOutlined, BulbOutlined, FormOutlined, PictureOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, FileDoneOutlined, LoadingOutlined, PlayCircleOutlined, HistoryOutlined, FolderOutlined, WarningOutlined, ArrowDownOutlined, ArrowUpOutlined } from '@ant-design/icons';
 import { abortGeneratedDocument, deleteDocumentTemplate, deleteGeneratedDocument, duplicateDocumentTemplate, exportDocument, generateDocumentDraft, getGeneratedDocument, getGeneratedDocuments, getDocumentRoles, getDocumentTemplates, getKbFilesTree, getPromptProjects, refineGeneratedDocument, resumeGeneratedDocument, saveDocumentDraft, saveDocumentTemplate, updateGeneratedDocument, validateDocumentTemplate, type DocumentRole, type DocumentTemplate, type DocumentTemplateValidation, type ExportReport, type GeneratedDocumentDraft, type GeneratedDocumentRecord, type ProjectRoleConfig, type PromptProject, type RefinePlan, type RefineSelection } from '@/lib/api';
 import { useAppTranslations } from '@/components/Layout';
 import { analyzeDefectHeatmap, REPAIR_ROUND_LABELS } from '@/services/document-workflow/defectHeatmap';
@@ -45,6 +45,9 @@ interface EditHistoryItem { id: string; content: string; prompt: string; created
 interface RefinePreview { plan: RefinePlan; markdown: string; beforeSnippet?: string; afterSnippet?: string; summary?: string; changedChars?: number; prompt: string; before: string; }
 
 let activeGenerationTask: GenerationTaskState | null = null;
+/** 本地主动中止标记（handleAbortGeneration/handleAbortDraft 置位，handleGenerate catch 消费清零）：
+ * 区分『本地用户主动中止』（静默：已有 info 提示）与『非本地来源的已中止状态』（显性告警并标记失败节点） */
+let locallyAbortedGeneration = false;
 function notifyGenerationTask() { activeGenerationTask?.listeners.forEach(l => l()); }
 
 const STAGE_ICONS: Record<string, ReactNode> = {
@@ -174,6 +177,8 @@ export default function DocumentsPage() {
   const [expandPromptRuleSources, setExpandPromptRuleSources] = useState(false);
   const [preparingTemplateId, setPreparingTemplateId] = useState<string | null>(null);
   const recoveryPollRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  // 并发排队提交去重：已有任务运行时再次点击（排队提交）期间防连点
+  const queueSubmittingRef = useRef(false);
   const lastWorkflowSignatureRef = useRef('');
   const autoStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refineRequestRef = useRef(0);
@@ -235,7 +240,7 @@ export default function DocumentsPage() {
     const storageKey = activeGenStorageKey;
     const savedDocId = localStorage.getItem(storageKey);
     if (!savedDocId) return;
-    const match = drafts.find(d => d.id === savedDocId && d.status === 'generating');
+    const match = drafts.find(d => d.id === savedDocId && (d.status === 'generating' || d.status === 'queued'));
     if (!match) { localStorage.removeItem(storageKey); return; }
     // 后台轻量轮询：刷新生成记录列表，保持刷新后生成中状态同步
     const poll = setInterval(() => {
@@ -244,7 +249,7 @@ export default function DocumentsPage() {
           const { document: d } = await getGeneratedDocument(savedDocId, false, currentProjectRoot || undefined);
           if (!d) return; // 服务端未返回记录（如 meta 短路），下一轮继续
           await loadDrafts();
-          if (d.status !== 'generating') {
+          if (d.status !== 'generating' && d.status !== 'queued') {
             localStorage.removeItem(storageKey);
             clearInterval(poll);
           }
@@ -304,8 +309,8 @@ export default function DocumentsPage() {
     const h = Math.floor(m / 60), rm = m % 60;
     return rm ? `${h} 小时 ${rm} 分` : `${h} 小时`;
   };
-  const draftStatusColor = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? 'success' : s === 'completed_with_issues' ? 'warning' : s === 'warning' ? 'warning' : s === 'failed' ? 'error' : s === 'aborted' ? 'default' : 'processing';
-  const draftStatusText = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? '已完成' : s === 'completed_with_issues' ? '已完成(待复核)' : s === 'warning' ? '需复核' : s === 'failed' ? '失败' : s === 'aborted' ? '已中止' : '生成中';
+  const draftStatusColor = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? 'success' : s === 'completed_with_issues' ? 'warning' : s === 'warning' ? 'warning' : s === 'failed' ? 'error' : s === 'aborted' || s === 'queued' ? 'default' : 'processing';
+  const draftStatusText = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? '已完成' : s === 'completed_with_issues' ? '已完成(待复核)' : s === 'warning' ? '需复核' : s === 'failed' ? '失败' : s === 'aborted' ? '已中止' : s === 'queued' ? '排队中' : '生成中';
   const isDraftGenerating = (s: GeneratedDocumentRecord['status']) => s !== 'completed' && s !== 'completed_with_issues' && s !== 'warning' && s !== 'failed' && s !== 'aborted';
   const canResumeDraft = (item?: GeneratedDocumentRecord | null) => Boolean(item) && (
     item!.status === 'failed'
@@ -382,14 +387,14 @@ export default function DocumentsPage() {
           subSteps: stageDetailsToSubSteps(stage, status, index),
         } satisfies FlowStep;
       });
-      if (record.status === 'generating' && steps.length > 0 && steps.every(step => step.status !== 'process')) {
+      if ((record.status === 'generating' || record.status === 'queued') && steps.length > 0 && steps.every(step => step.status !== 'process')) {
         // 快照内所有步骤均已完成（并发章节全部成稿、下一阶段 stage 尚未写入的时间窗），
         // 追加收尾占位节点保持 loading 指示——不篡改已完成章节节点：
         // 历史缺陷：把“最后一步 finish”直接改成 process，并发章节下最后一章的节点明明已
         // 成稿（消息显示已生成 N 字）却永久转圈，或与中间 running 节点叠加出现双转圈
         steps.push({ key: `finishing-${steps.length}`, title: '生成收尾中', subtitle: '', description: '章节已全部生成，正在执行全局一致性审查与质量校验。', status: 'process' as const, icon: <LoadingOutlined />, subSteps: [] });
       }
-      const activeKey = record.status === 'generating' ? steps.at(-1)?.key || 'prepare' : (record.status === 'failed' || record.status === 'aborted') ? steps.find(step => step.status === 'error')?.key || steps.at(-1)?.key || 'prepare' : 'done';
+      const activeKey = record.status === 'generating' || record.status === 'queued' ? steps.at(-1)?.key || 'prepare' : (record.status === 'failed' || record.status === 'aborted') ? steps.find(step => step.status === 'error')?.key || steps.at(-1)?.key || 'prepare' : 'done';
       return { steps, activeKey };
     }
     return { steps: [], activeKey: null };
@@ -432,12 +437,6 @@ export default function DocumentsPage() {
     const end = timing.endedAt ?? Date.now();
     const text = fmtMs(end - timing.startedAt);
     return <Tag className="border-0 bg-[var(--colorFillSecondary)] m-0">{timing.endedAt ? text : `${text}（运行中）`}</Tag>;
-  };
-  // U3 复用：对标分格式化（workflow 模式与 editor 模式质量卡片共用）
-  const formatBenchmarkValue = (value: number, unit: 'percent' | 'count' | 'perKChars') => {
-    if (unit === 'percent') return `${(value * 100).toFixed(1)}%`;
-    if (unit === 'perKChars') return `${value.toFixed(1)}/千字`;
-    return String(Math.round(value));
   };
   // B1：有阻断项的模板，运行按钮变"先修复 N 个问题"，点击直达体检报告并滚动到卡片
   const jumpToTemplateFix = (id: string) => {
@@ -595,21 +594,6 @@ export default function DocumentsPage() {
   };
   const delDraft = async (item: GeneratedDocumentRecord) => { try { await deleteGeneratedDocument(item.id, item.projectRoot || currentProjectRoot || undefined); if (currentDocumentId === item.id) { setCurrentDocumentId(null); setDraft(null); setContent(''); } await loadDrafts(); message.success(t('common.success')); } catch { message.error(t('common.error')); } };
 
-  // T6 大纲建议：一键把参考库建议的典型章节追加到模板（只添加、不改动现有章节）
-  const addSuggestedChapters = async (item: DocumentTemplate, suggestion: NonNullable<DocumentTemplateValidation['referenceStructureSuggestion']>) => {
-    try {
-      const existingTitles = new Set(item.chapters.map(chapter => chapter.title.trim()));
-      const additions = suggestion.missingHeadings.filter(heading => !existingTitles.has(heading.title.trim()));
-      if (additions.length === 0) { message.info('建议章节已全部存在'); return; }
-      const chapters = [...item.chapters, ...additions.map(heading => ({ id: `ch-ref-${Date.now()}-${item.chapters.length}`, title: heading.title, purpose: '', queries: [], requiredFacts: [] }))];
-      const r = await saveDocumentTemplate({ ...item, chapters });
-      setTemplates(r.templates);
-      // 清除旧校验结果，模板列表更新后由校验 effect 自动刷新
-      setTemplateValidations(prev => { const next = { ...prev }; delete next[item.id]; return next; });
-      message.success(t('common.success'));
-    } catch (e) { if (e instanceof Error) message.error(e.message); }
-  };
-
   // B1/B2/U1：模板体检报告面板——分层展示阻断/警告、绑定链路图（模板→角色→提示词→状态）、策略预估
   const renderTemplateHealthPanel = (item: DocumentTemplate) => {
     const validation = templateValidations[item.id];
@@ -719,25 +703,6 @@ export default function DocumentsPage() {
                 {strategy.triggers.map(trigger => <span key={trigger} className="text-[var(--colorTextTertiary)]">· {trigger}</span>)}
               </div>
             )}
-            {/* T6 大纲建议：参考库典型章节缺失建议（仅建议、一键添加、不阻断运行） */}
-            {(() => {
-              const suggestion = validation.referenceStructureSuggestion;
-              if (!suggestion || suggestion.missingHeadings.length === 0) return null;
-              return (
-                <div className="flex flex-col gap-1.5 rounded-lg border border-purple-200 bg-purple-50/40 px-2.5 py-2 text-xs">
-                  <span className="font-bold text-[var(--colorText)]">参考库大纲建议（{suggestion.projectType} · {suggestion.sourceCount} 份同类工程画像）</span>
-                  <span className="text-[var(--colorTextSecondary)]">以下章节出现于半数以上同类工程但当前模板缺失，仅建议、不影响运行：</span>
-                  <span className="flex items-center gap-1 flex-wrap">
-                    {suggestion.missingHeadings.map(heading => (
-                      <Tag key={heading.title} className="border-0 m-0 bg-white">{heading.title} · {Math.round(heading.ratio * 100)}% 样本</Tag>
-                    ))}
-                  </span>
-                  <span>
-                    <Button size="small" type="primary" ghost icon={<PlusOutlined />} onClick={() => void addSuggestedChapters(item, suggestion)} className="rounded-md">一键添加到模板</Button>
-                  </span>
-                </div>
-              );
-            })()}
           </div>
         )}
       </div>
@@ -745,21 +710,27 @@ export default function DocumentsPage() {
   };
 
   const waitForDoc = async (docId: string, task?: GenerationTaskState) => {
-    const startedAt = Date.now();
+    const pollStartedAt = Date.now();
     let lastUpdatedAt = 0;
     let lastChangedAt = Date.now();
+    // 排队阶段不计入『生成时长』绝对超时：generationStartedAt 在首次观察到 generating 时起算
+    let generationStartedAt: number | null = null;
     let networkFailures = 0;
     const maxWaitMs = 125 * 60 * 1000;
     const maxNoProgressMs = 16 * 60 * 1000;
+    // 排队等待宽松上限：排队时长取决于前面任务数量（服务端对重启后的排队记录另有 failed 兜底标记）
+    const maxQueuedWaitMs = 6 * 60 * 60 * 1000;
     const maxNetworkFailures = 3;
     for (;;) {
       if (task?.aborted) throw new Error('用户中止');
       const controller = new AbortController();
       if (task) task.pollController = controller;
       let document: GeneratedDocumentRecord | null;
+      let responseStatus: string | undefined;
       try {
         // 携带上次看到的 updatedAt：服务端基于 meta sidecar 短路，未变化时只返回轻量状态
-        ({ document } = await getGeneratedDocument(docId, true, currentProjectRoot || undefined, controller.signal, lastUpdatedAt || undefined));
+        const response = await getGeneratedDocument(docId, true, currentProjectRoot || undefined, controller.signal, lastUpdatedAt || undefined);
+        document = response.document; responseStatus = response.status;
         networkFailures = 0;
       } catch (error) {
         if (task?.aborted) throw new Error('用户中止', { cause: error });
@@ -772,17 +743,26 @@ export default function DocumentsPage() {
       } finally {
         if (task?.pollController === controller) task.pollController = undefined;
       }
+      // 排队中（含 meta 短路仅返回 status 的轻量响应）：重置无进展计时，仅受宽松排队上限约束，避免误判『疑似卡住』
+      const isQueued = document ? document.status === 'queued' : responseStatus === 'queued';
+      if (isQueued) {
+        lastChangedAt = Date.now();
+        if (Date.now() - pollStartedAt > maxQueuedWaitMs) throw new Error('排队等待超时，请稍后刷新列表查看或取消后重新发起');
+      }
       if (!document) {
-        // meta 未变化：跳过全量应用，避免无效重渲染
-        if (Date.now() - startedAt > maxWaitMs || Date.now() - lastChangedAt > maxNoProgressMs) throw new Error('生成任务疑似卡住，请点击继续生成或重新生成');
+        // meta 未变化：跳过全量应用，避免无效重渲染（超时时引导稍后刷新：后台任务可能仍在运行）
+        if (!isQueued && (Date.now() - (generationStartedAt ?? pollStartedAt) > maxWaitMs || Date.now() - lastChangedAt > maxNoProgressMs)) throw new Error('生成任务疑似卡住，请点击继续生成或重新生成（后台任务可能仍在运行，稍后刷新可查看）');
         await new Promise(r => window.setTimeout(r, 1500));
         continue;
       }
       applyGeneratedRecordToWorkflow(document);
+      if (document.status === 'generating' && generationStartedAt === null) generationStartedAt = Date.now();
       if (document.updatedAt !== lastUpdatedAt) { lastUpdatedAt = document.updatedAt; lastChangedAt = Date.now(); }
       if ((document.status === 'completed' || document.status === 'completed_with_issues' || document.status === 'warning') && document.draft) return document;
+      // 进程层中断（markStale 判定）不再等 16 分钟『疑似卡住』超时：立即抛出服务端中断文案，恢复入口（继续生成）已就绪
+      if (document.status === 'warning' && document.error && /已中断/u.test(document.error)) throw new Error(document.error);
       if (document.status === 'failed' || document.status === 'aborted') throw new Error(document.error || (document.status === 'aborted' ? '生成已中止' : '生成失败'));
-      if (Date.now() - startedAt > maxWaitMs || Date.now() - lastChangedAt > maxNoProgressMs) throw new Error('生成任务疑似卡住，请点击继续生成或重新生成');
+      if (!isQueued && (Date.now() - (generationStartedAt ?? pollStartedAt) > maxWaitMs || Date.now() - lastChangedAt > maxNoProgressMs)) throw new Error('生成任务疑似卡住，请点击继续生成或重新生成（后台任务可能仍在运行，稍后刷新可查看）');
       await new Promise(r => window.setTimeout(r, 1500));
     }
   };
@@ -790,7 +770,23 @@ export default function DocumentsPage() {
   const handleGenerate = async (targetTemplateId = templateId) => {
     if (!targetTemplateId) return;
     if (activeGenerationTask?.aborted) activeGenerationTask = null;
-    if (activeGenerationTask?.loading) { setFlowSteps(activeGenerationTask.flowSteps); setActiveFlowKey(activeGenerationTask.activeFlowKey); setLoading(true); return; }
+    if (activeGenerationTask?.loading) {
+      // 队列语义：已有任务运行时再次点击 = 提交新的排队任务（不劫持当前工作流视图）；
+      // 防连点由 queueSubmittingRef 去重，提交成功后刷新列表并提示位次
+      if (queueSubmittingRef.current) return;
+      if (!currentProjectRoot) { message.error('未识别当前项目，请先选择或打开项目后再生成文件'); return; }
+      queueSubmittingRef.current = true;
+      try {
+        const queued = await generateDocumentDraft({ templateId: targetTemplateId, projectRoot: currentProjectRoot });
+        await loadDrafts();
+        message.info(queued.queuePosition ? `已加入生成队列（第 ${queued.queuePosition} 位）：前面任务完成后将自动开始` : '生成任务已创建');
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : '创建生成任务失败');
+      } finally {
+        queueSubmittingRef.current = false;
+      }
+      return;
+    }
     if (!currentProjectRoot) { message.error('未识别当前项目，请先选择或打开项目后再生成文件'); return; }
     setLoading(true);
     const startingSteps = flowSteps.length > 0 ? flowSteps : [{ key: 'prepare', title: '正在创建生成任务', description: '系统正在创建后台生成任务，请稍候。', status: 'process' as const, icon: <LoadingOutlined />, subSteps: [{ key: 'start', title: '准备生成任务', status: 'process' as const }] }];
@@ -803,6 +799,7 @@ export default function DocumentsPage() {
       const started = await promise;
       if (started.documentId) { localStorage.setItem(activeGenStorageKey, started.documentId); setCurrentDocumentId(started.documentId); if (activeGenerationTask?.promise === promise) activeGenerationTask.documentId = started.documentId; }
       await loadDrafts(); // 立即刷新列表，展示"生成中"记录
+      if (started.queuePosition) message.info(`已加入生成队列（第 ${started.queuePosition} 位）：前面任务完成后将自动开始`);
       const doc = started.documentId ? await waitForDoc(started.documentId, activeGenerationTask?.promise === promise ? activeGenerationTask : undefined) : undefined;
       const result = started.draft || doc?.draft;
       if (!result) throw new Error('生成结果为空');
@@ -823,12 +820,18 @@ export default function DocumentsPage() {
     } catch (error) {
       localStorage.removeItem(activeGenStorageKey);
       const msg = error instanceof Error ? error.message : t('common.error');
-      const aborted = /用户中止|abort|aborted/i.test(msg);
-      if (!aborted) setFlowSteps(prev => { const n = prev.map(s => s.status === 'process' ? { ...s, status: 'error' as const, description: msg, subSteps: updSubs(s, 'error') } : s); setSnap(n, activeFlowKey, false); return n; });
+      // 中止呈现收敛：仅『本地主动中止』静默（handleAbort 已给 info 提示）；非本地的『用户中止』
+      // （如另一窗口/标签页已中止该记录）显性告警并标记运行节点失败；其余错误一律正常报错——
+      // 历史缺陷：宽正则 /abort/i 把含 "aborted" 字样的第三方异常误判为人工中止而静默吞掉
+      const localAbort = locallyAbortedGeneration;
+      locallyAbortedGeneration = false;
+      const remoteAbort = !localAbort && msg === '用户中止';
+      if (!localAbort) setFlowSteps(prev => { const n = prev.map(s => s.status === 'process' ? { ...s, status: 'error' as const, description: msg, subSteps: updSubs(s, 'error') } : s); setSnap(n, activeFlowKey, false); return n; });
       if (activeGenerationTask?.promise === promise) { activeGenerationTask.loading = false; activeGenerationTask.error = msg; notifyGenerationTask(); activeGenerationTask = null; }
       await loadDrafts().catch(() => undefined);
-      if (!aborted) message.error(msg);
-    } finally { timers.forEach(x => window.clearTimeout(x)); setLoading(false); if (activeGenerationTask?.promise === promise) { activeGenerationTask.loading = false; notifyGenerationTask(); } }
+      if (remoteAbort) message.warning('生成任务已被中止（可能来自其他窗口）：可在列表中点击「继续生成」恢复');
+      else if (!localAbort) message.error(msg);
+    } finally { timers.forEach(x => window.clearTimeout(x)); setLoading(false); locallyAbortedGeneration = false; if (activeGenerationTask?.promise === promise) { activeGenerationTask.loading = false; notifyGenerationTask(); } }
   };
 
   const genStarted = useRef(false);
@@ -859,6 +862,9 @@ export default function DocumentsPage() {
 
   const handleAbortGeneration = () => {
     void (async () => {
+      // 标记先于服务端调用置位：轮询可能在 abort API 返回前先观察到 aborted 记录并抛『用户中止』，
+      // 不能依赖调用时序（catch 据此区分本地主动中止=静默 / 远端中止=显性告警）
+      if (activeGenerationTask) locallyAbortedGeneration = true;
       if (currentDocumentId) await abortGeneratedDocument(currentDocumentId, currentProjectRoot || undefined).catch(() => undefined);
       if (activeGenerationTask) {
         activeGenerationTask.aborted = true;
@@ -906,6 +912,7 @@ export default function DocumentsPage() {
 
   const handleAbortDraft = async (item: GeneratedDocumentRecord) => {
     if (activeGenerationTask?.loading && activeGenerationTask.documentId === item.id) {
+      locallyAbortedGeneration = true;
       activeGenerationTask.aborted = true;
       activeGenerationTask.pollController?.abort();
       activeGenerationTask.loading = false;
@@ -918,7 +925,7 @@ export default function DocumentsPage() {
     stopRecoveredGenerationPolling(item.id);
     try {
       await abortGeneratedDocument(item.id, item.projectRoot || currentProjectRoot || undefined);
-      message.success('已中止生成任务');
+      message.success(item.status === 'queued' ? '已取消排队任务' : '已中止生成任务');
     } catch {
       message.info('任务已不在运行，已刷新状态');
     } finally {
@@ -1145,7 +1152,7 @@ export default function DocumentsPage() {
                     <div className="flex items-center gap-3 mb-2">
                         <span className="font-bold text-base text-[var(--colorText)] truncate">{item.title}</span>
                         <Tag className="border-0 bg-[var(--colorFillSecondary)] m-0 shrink-0">#{index + 1}</Tag>
-                        <Tag color={draftStatusColor(item.status)} className="border-0 m-0 shrink-0">{draftStatusText(item.status)}</Tag>
+                        <Tag color={draftStatusColor(item.status)} className="border-0 m-0 shrink-0">{draftStatusText(item.status)}{item.status === 'queued' && item.queuePosition ? `（第 ${item.queuePosition} 位）` : ''}</Tag>
                     </div>
 
                     <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-[var(--colorTextSecondary)] mb-3">
@@ -1174,8 +1181,8 @@ export default function DocumentsPage() {
                   <div className={`flex shrink-0 flex-nowrap items-center gap-2 whitespace-nowrap transition-opacity ${currentDocumentId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} onClick={e => e.stopPropagation()}>
                       <Button size="small" type="primary" icon={isDraftGenerating(item.status) ? <SyncOutlined spin /> : <PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); void openDrawerForEditor(item); }} className="min-w-[72px] rounded-md justify-center">打开</Button>
                       {isDraftGenerating(item.status) && (
-                        <ConfirmPopover title="确定中止此生成任务？" onConfirm={(e) => { e?.stopPropagation(); void handleAbortDraft(item); }}>
-                          <Button size="small" danger onClick={(e) => e.stopPropagation()} className="rounded-md">中止</Button>
+                        <ConfirmPopover title={item.status === 'queued' ? '确定取消此排队任务？' : '确定中止此生成任务？'} onConfirm={(e) => { e?.stopPropagation(); void handleAbortDraft(item); }}>
+                          <Button size="small" danger onClick={(e) => e.stopPropagation()} className="rounded-md">{item.status === 'queued' ? '取消' : '中止'}</Button>
                         </ConfirmPopover>
                       )}
                       {((item.status === 'failed' || item.status === 'aborted') || (item.status === 'warning' && Boolean(item.checkpointChapters?.length) && /继续生成|重新生成|中断|卡住|未完成/u.test(item.error || item.warningIssues?.join('；') || ''))) && (
@@ -1316,57 +1323,33 @@ export default function DocumentsPage() {
             );
           })()}
 
-          {/* 工作流模式：质量对标卡（与模板参考库同工程类型基准对比） */}
-          {drawerMode === 'workflow' && workflowRecord?.draft?.reviewMetadata?.qualityBenchmark && (() => {
-            const benchmark = workflowRecord.draft.reviewMetadata.qualityBenchmark;
-            return (
-              <Card size="small" title={<Space size={6}><TrophyOutlined style={{ color: '#faad14' }} />质量对标<Tag color="gold" style={{ margin: 0 }}>{benchmark.projectType}参考</Tag></Space>} extra={<Text strong style={{ fontSize: 15, color: benchmark.overallScore >= 80 ? 'var(--colorSuccess)' : 'var(--colorWarning)' }}>{benchmark.overallScore} 分</Text>} styles={{ body: { padding: 12 } }}>
-                <VerticalStack gap={8}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>与模板参考库 {benchmark.referenceSourceCount} 份同类入围文件的质量画像对比：</Text>
-                  {benchmark.items.map(item => (
-                    <div key={item.key} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <div style={{ width: 86, fontSize: 12, color: 'var(--colorTextSecondary)', flexShrink: 0 }}>{item.label}</div>
-                      <Progress percent={Math.min(100, item.score)} size="small" status={item.passed ? 'normal' : 'exception'} style={{ flex: 1, margin: 0 }} showInfo={false} />
-                      <div style={{ width: 96, fontSize: 12, textAlign: 'right', flexShrink: 0, color: item.passed ? 'var(--colorSuccess)' : 'var(--colorWarning)' }}>
-                        {item.passed ? <CheckCircleOutlined style={{ marginRight: 4 }} /> : <ExclamationCircleOutlined style={{ marginRight: 4 }} />}
-                        {formatBenchmarkValue(item.generated, item.unit)}
-                      </div>
-                    </div>
-                  ))}
-                  <Text type="secondary" style={{ fontSize: 12 }}>基准参考值：{benchmark.items.map(item => `${item.label} ${formatBenchmarkValue(item.reference, item.unit)}`).join('；')}</Text>
-                </VerticalStack>
-              </Card>
-            );
-          })()}
-
           {/* 工作流模式：步骤出现前的加载动画 */}
           {drawerMode === 'workflow' && loading && flowSteps.length === 0 && (
             <div style={{ textAlign: 'center', padding: 40 }}><Spin /><div style={{ marginTop: 12, color: 'var(--colorTextSecondary)' }}>正在准备生成…</div></div>
           )}
 
-          {/* U3：运行后质量卡片（editor 模式：对标分 + 修复记录） */}
-          {drawerMode === 'editor' && draft?.reviewMetadata?.qualityBenchmark && (() => {
-            const benchmark = draft.reviewMetadata.qualityBenchmark;
+          {/* U3：运行后质量卡片（editor 模式：审查修复记录；对标信息随参考库移除下线） */}
+          {drawerMode === 'editor' && draft?.reviewMetadata && (() => {
             const quality = draft.reviewMetadata.diagnostics?.quality;
             const repairDetails = (draft.executionStages || [])
               .filter(stage => stage.type === 'llm_review')
               .flatMap(stage => (stage.details || []).filter(detail => /修复|补写|补齐|改进|调整/u.test(detail)))
               .slice(0, 8);
+            if (!quality && repairDetails.length === 0) return null;
             return (
-              <Card size="small" title={<Space size={6}><TrophyOutlined style={{ color: '#faad14' }} />运行质量报告<Tag color="gold" className="border-0 m-0">{benchmark.projectType}对标</Tag></Space>} extra={<Text strong style={{ fontSize: 15, color: benchmark.overallScore >= 80 ? 'var(--colorSuccess)' : 'var(--colorWarning)' }}>{benchmark.overallScore} 分</Text>} styles={{ body: { padding: 12 } }}>
+              <Card size="small" title={<Space size={6}><CheckCircleOutlined style={{ color: 'var(--colorSuccess)' }} />运行质量报告</Space>} styles={{ body: { padding: 12 } }}>
                 <VerticalStack gap={8}>
-                  <Space wrap size={6}>
-                    <Tag className="border-0 bg-[var(--colorFillSecondary)] m-0">对标库 {benchmark.referenceSourceCount} 份同类文件</Tag>
-                    {quality && <Tag color={quality.blockingCount > 0 ? 'error' : 'success'} className="border-0 m-0">审查修复 {quality.repairedCount} 项 / 问题 {quality.blockingCount + quality.importantCount + quality.minorCount} 项</Tag>}
-                    <Tag className="border-0 bg-[var(--colorFillSecondary)] m-0">{benchmark.items.filter(item => item.passed).length}/{benchmark.items.length} 指标达标</Tag>
-                  </Space>
+                  {quality && (
+                    <Space wrap size={6}>
+                      <Tag color={quality.blockingCount > 0 ? 'error' : 'success'} className="border-0 m-0">审查修复 {quality.repairedCount} 项 / 问题 {quality.blockingCount + quality.importantCount + quality.minorCount} 项</Tag>
+                    </Space>
+                  )}
                   {repairDetails.length > 0 && (
                     <div className="flex flex-col gap-1 rounded-lg border border-[var(--borderColor)] bg-[var(--colorFillQuaternary)] px-3 py-2">
                       <span className="text-xs font-medium text-[var(--colorText)]">修复记录（审查阶段自动修复的内容）</span>
                       {repairDetails.map((detail, index) => <span key={index} className="text-xs text-[var(--colorTextSecondary)]">· {detail}</span>)}
                     </div>
                   )}
-                  <Text type="secondary" style={{ fontSize: 12 }}>基准参考值：{benchmark.items.map(item => `${item.label} ${formatBenchmarkValue(item.reference, item.unit)}`).join('；')}</Text>
                 </VerticalStack>
               </Card>
             );
@@ -1381,7 +1364,6 @@ export default function DocumentsPage() {
                     <Text strong>{report.format.toUpperCase()}</Text>
                     <Tag color="blue" className="border-0 m-0">{new Date(report.exportedAt).toLocaleString()}</Tag>
                     {report.durationMs !== undefined && <span className="text-[var(--colorTextSecondary)]">总用时 {fmtMs(report.durationMs)}</span>}
-                    {report.benchmarkScore !== undefined && <span className="text-[var(--colorTextSecondary)]">质量对标 {report.benchmarkScore} 分</span>}
                     {report.repairedCount !== undefined && <span className="text-[var(--colorTextSecondary)]">修复 {report.repairedCount} 项{report.blockingCount !== undefined ? `（阻断 ${report.blockingCount}）` : ''}</span>}
                     {report.ruleSummary && report.ruleSummary.length > 0 && <span className="text-[var(--colorTextSecondary)]">规则 {report.ruleSummary.length} 条</span>}
                     {report.gatePassed === false && <Tag color="error" className="border-0 m-0">门禁未过</Tag>}

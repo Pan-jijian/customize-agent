@@ -99,13 +99,25 @@ export function templatedLabelIssues(markdown: string): ValidationIssue[] {
  * 结构标签确定性修复（SURFACE_FIX_STEPS 注册）：
  * 1) H4~H6 标签标题行删除（正文并入上级小节，形成连贯叙述）；
  * 2) 正文行首标签前缀剥离（保正文；剥离后为空的行删除）；
- * 3) 删除标题行时吞掉紧随的一个空行，防双空行残留。
+ * 3) 删除标题行时吞掉紧随的一个空行，防双空行残留；
+ * 4) 正文孤立小节标题行删除（4.28.4 舒城实测：「#### 2.7.1 路基处理」标题下正文段落之后
+ *    又出现独占一行的「路基处理」——写作 LLM 把小节名当内容输出；纯文字行归一化命中前文
+ *    已现的小节标题即整行删除）。
  */
 export function fixTemplatedLabels(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
   const lines = markdown.split(/\r?\n/u);
   const output: string[] = [];
   let removedHeadings = 0;
   let strippedPrefixes = 0;
+  let removedTitleLeaks = 0;
+  // 小节标题索引（H3~H6 归一化名 → 首现行号）：孤立标题泄漏行的判定基准
+  const titleIndex = new Map<string, number>();
+  for (let index = 0; index < lines.length; index += 1) {
+    const heading = /^(#{3,6})\s+(.+?)\s*$/u.exec(lines[index].trim());
+    if (!heading) continue;
+    const normalized = normalizeSubsectionTitleForDedup(heading[2]);
+    if (normalized && !titleIndex.has(normalized)) titleIndex.set(normalized, index);
+  }
   for (let index = 0; index < lines.length; index += 1) {
     const raw = lines[index];
     const trimmed = raw.trim();
@@ -128,6 +140,18 @@ export function fixTemplatedLabels(markdown: string): { markdown: string; fixedC
       output.push(raw);
       continue;
     }
+    // 孤立标题泄漏行：纯文字行（无标点/空白/markdown 符号）归一化命中「先前已出现的小节标题」
+    // → 该行是小节名被当正文输出（标题已存在），整行删除
+    if (/^[\u4e00-\u9fa5A-Za-z0-9]{2,24}$/u.test(trimmed)) {
+      const normalized = normalizeSubsectionTitleForDedup(trimmed);
+      const headingLine = normalized ? titleIndex.get(normalized) : undefined;
+      if (normalized && headingLine !== undefined && index > headingLine) {
+        removedTitleLeaks += 1;
+        // 前后均空行时吞掉尾随空行，防双空行残留
+        if (index + 1 < lines.length && !lines[index + 1].trim() && output.length > 0 && !output[output.length - 1].trim()) index += 1;
+        continue;
+      }
+    }
     const prefixMatch = STRUCTURE_LABEL_PREFIX_RE.exec(raw);
     if (prefixMatch) {
       const rest = raw.slice(prefixMatch[0].length);
@@ -137,11 +161,12 @@ export function fixTemplatedLabels(markdown: string): { markdown: string; fixedC
     }
     output.push(raw);
   }
-  const fixedCount = removedHeadings + strippedPrefixes;
+  const fixedCount = removedHeadings + strippedPrefixes + removedTitleLeaks;
   if (fixedCount === 0) return { markdown, fixedCount: 0, details: [] };
   const details: string[] = [];
   if (removedHeadings > 0) details.push(`结构标签标题删除 ${removedHeadings} 行（正文保留）`);
   if (strippedPrefixes > 0) details.push(`段首标签前缀剥离 ${strippedPrefixes} 处`);
+  if (removedTitleLeaks > 0) details.push(`正文孤立小节标题行删除 ${removedTitleLeaks} 行`);
   return { markdown: output.join('\n'), fixedCount, details };
 }
 
@@ -808,4 +833,103 @@ export function fixTruncatedTitleCompletion(markdown: string): TruncatedTitleFix
   }
   if (details.length === 0) return { markdown, fixedCount: 0, details: [] };
   return { markdown: lines.join('\n'), fixedCount: details.length, details };
+}
+
+// ── 句化标题切分（标题合并治理 · 装配层 markdownComposer 与交付链同源） ──
+
+/** 规划小节标题匹配键（句化标题切分专用归一化，自包含实现不反向依赖规划模块）：
+ * 剥「第X章/节」与数字编号 + 全部空白与标点——两侧（标题行片段与规划小节名）同口径比较 */
+export function plannedTitleMatchKey(title: string): string {
+  return title
+    .replace(/\*+/gu, '')
+    .replace(/^第[一二三四五六七八九十百千万零〇\d]+[章节篇部分][\s、.．:：-]*/u, '')
+    .replace(/^\d+(?:\.\d+)*(?:[.．、]|\s)+/u, '')
+    .replace(/^[-—–]\s*/u, '')
+    .replace(/[\s()（）:：.。；;,，、\-—·]/gu, '')
+    .trim();
+}
+
+/** 句化标题续写句最小长度（规范化字符数）：低于该阈值视为正常标题修饰（如「×××与保证措施」），不切分 */
+const SENTENCE_LIKE_HEADING_REMAINDER_MIN = 10;
+
+/**
+ * 句化标题切分识别（标题合并治理单源）：标题文本以规划小节标题为前缀且余部 ≥10 字（规范化）时，
+ * 视为「规划标题与正文首句并写」（丰乐镇 4.27.0 实测「公厕机电安装工程集中在马老郢…」179 字、
+ * 「村庄道路基层与面层作业覆盖9个自然村…」291 字），返回规划标题与续写句余部；
+ * 候选按规划标题长度降序（最长前缀优先）；余部不足阈值时不做前缀命中（保持既有精确匹配路径）。
+ * 切分位置用逐字符扫描确定（容忍标题内软换行空格/标点差异，如「马圩 自然村组」）。
+ */
+export function splitSentenceLikeHeading(headingText: string, plannedTitles: readonly string[]): { plannedTitle: string; remainder: string } | undefined {
+  const candidates = plannedTitles
+    .map(title => ({ title: String(title || '').trim(), key: plannedTitleMatchKey(String(title || '')) }))
+    .filter(item => item.title && item.key.length >= 4)
+    .sort((left, right) => right.key.length - left.key.length);
+  for (const candidate of candidates) {
+    for (let cut = candidate.key.length; cut <= headingText.length; cut += 1) {
+      if (plannedTitleMatchKey(headingText.slice(0, cut)) !== candidate.key) continue;
+      const remainder = headingText.slice(cut).replace(/^[\s:：.。；;,，、\-—]+/u, '');
+      if (plannedTitleMatchKey(remainder).length >= SENTENCE_LIKE_HEADING_REMAINDER_MIN) return { plannedTitle: candidate.title, remainder };
+      // 首个前缀命中点余部即最长余部（更长前缀不会再命中）：余部过短视为正常标题，不再切分该候选
+      break;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 续写句与后继正文的覆盖判定（切分修复内容零丢失防线）：续写句按句累加，
+ * 规范化（仅去空白，容忍软换行空格差异）后被后继正文包含的最长前缀句序列视为已覆盖——
+ * 全部覆盖返回空串（丢弃不重复），部分/未覆盖返回剩余整句拼接（转正文行插入）。
+ */
+export function uncoveredHeadingRemainder(remainder: string, followingBodyText: string): string {
+  const sentences = remainder.split(/(?<=[。；;！？])/u).map(part => part.trim()).filter(Boolean);
+  if (sentences.length === 0) return '';
+  const followingKey = followingBodyText.replace(/\s+/gu, '');
+  if (!followingKey) return remainder;
+  let covered = 0;
+  for (let index = 0; index < sentences.length; index += 1) {
+    const accumulated = sentences.slice(0, index + 1).join('').replace(/\s+/gu, '');
+    if (followingKey.includes(accumulated)) covered = index + 1;
+    else break;
+  }
+  return sentences.slice(covered).join('');
+}
+
+/**
+ * 句化标题切分确定性修复（4.27.2 标题合并治理 P0 · 交付链兜底）：
+ * LLM 写作层把规划小节标题与正文首句并写为一行 H3/H4（「### 2.11 公厕机电安装工程集中在马老郢…」），
+ * 标题行含长句正文属评标视角结构性硬伤。按规划小节标题前缀命中切分：
+ * 标题复原为「原编号 + 规划标题」，续写句余部与后继正文（截至下一标题行，≤6 行）做覆盖判定——
+ * 已被正文覆盖的部分丢弃，未覆盖部分转正文段落插入（内容零丢失）；
+ * 未注入规划标题（plannedSectionTitles 缺失）或标题非句化合并形态时静默跳过（零误伤）。
+ * 装配层 markdownComposer.normalizeSectionHeading 同源前缀匹配在更早环节收敛，本器为交付前兜底。
+ */
+export function fixSentenceLikeHeadingSplit(markdown: string, plannedSectionTitles?: readonly string[]): { markdown: string; fixedCount: number; details: string[] } {
+  if (!plannedSectionTitles || plannedSectionTitles.length === 0) return { markdown, fixedCount: 0, details: [] };
+  const lines = markdown.split(/\r?\n/u);
+  const out: string[] = [];
+  let fixedCount = 0;
+  const details: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index];
+    const trimmed = rawLine.trim();
+    const heading = /^(#{3,4})\s+(.+?)\s*$/u.exec(trimmed);
+    if (!heading) { out.push(rawLine); continue; }
+    const numbered = /^(\d+(?:\.\d+)*)\s+(.+)$/u.exec(heading[2]);
+    const numberPrefix = numbered ? `${numbered[1]} ` : '';
+    const titleText = numbered ? numbered[2] : heading[2];
+    const split = splitSentenceLikeHeading(titleText, plannedSectionTitles);
+    if (!split) { out.push(rawLine); continue; }
+    const bodyParts: string[] = [];
+    for (let cursor = index + 1; cursor < lines.length && bodyParts.length < 6; cursor += 1) {
+      if (/^\s*#{1,6}\s/u.test(lines[cursor])) break;
+      bodyParts.push(lines[cursor]);
+    }
+    const uncovered = uncoveredHeadingRemainder(split.remainder, bodyParts.join('\n'));
+    out.push(`${heading[1]} ${numberPrefix}${split.plannedTitle}`);
+    if (uncovered) out.push('', uncovered);
+    fixedCount += 1;
+    if (details.length < 6) details.push(`${heading[1]} ${numberPrefix}${split.plannedTitle}（续写句${uncovered ? '转正文' : '已被正文覆盖丢弃'}）`);
+  }
+  return { markdown: out.join('\n'), fixedCount, details };
 }

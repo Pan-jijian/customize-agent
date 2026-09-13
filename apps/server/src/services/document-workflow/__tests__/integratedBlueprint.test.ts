@@ -989,6 +989,16 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     expect(missing.some(issue => issue.level === 'warning' && issue.message.includes('蓝图红线事实缺口'))).toBe(true);
   });
 
+  it('D1 分项计划工期豁免：分项工程「计划工期2天」不报冲突；「总工期」显式前缀句错值仍拦', () => {
+    const data = buildData();
+    // 丰乐镇 4.27.0 实测误报形态：分项工程（亮化）的计划工期 2 天被当总工期报冲突 → 补豁免后零 error
+    const planDays = blueprintCitationConsistencyIssues('亮化工程安排在道路铺装工程完成、路基与面层强度形成后进行，计划工期2天。', data);
+    expect(planDays.filter(issue => issue.level === 'error')).toEqual([]);
+    // 「总工期/施工工期/合同工期」显式前缀句不参与「计划/安排」豁免：错值仍拦
+    expect(blueprintCitationConsistencyIssues('计划总工期为 120 天。', data).some(issue => issue.level === 'error' && issue.message.includes('蓝图引用冲突'))).toBe(true);
+    expect(blueprintCitationConsistencyIssues('本项目总工期为 300 天。', data).some(issue => issue.level === 'error' && issue.message.includes('蓝图引用冲突'))).toBe(true);
+  });
+
   it('buildBlueprintDecisionLock：数据口径条目锁定总工期/劳动力峰值/自然村数量/核心工程量', () => {
     const boq = parseFixture();
     const labor = deriveLaborFromBoq(boq, 360);

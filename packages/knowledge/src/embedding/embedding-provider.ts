@@ -172,6 +172,13 @@ export class LocalTransformersEmbeddingProvider implements EmbeddingProvider {
     if (existing) return existing;
     const created = this.createPipeline();
     LocalTransformersEmbeddingProvider.pipelines.set(this.model, created);
+    // 缓存自愈（finalize 末期硬停治理）：一次加载失败不再永久污染进程级静态缓存——
+    // rejected pipeline 从缓存清除，下次调用重新尝试加载（模型路径/依赖修复后无需重启即自愈）
+    void created.catch(() => {
+      if (LocalTransformersEmbeddingProvider.pipelines.get(this.model) === created) {
+        LocalTransformersEmbeddingProvider.pipelines.delete(this.model);
+      }
+    });
     return created;
   }
 

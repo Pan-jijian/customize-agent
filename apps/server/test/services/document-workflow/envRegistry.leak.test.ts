@@ -96,12 +96,12 @@ describe('envRegistry 泄漏防护', () => {
     }
   });
 
-  it('注册表覆盖 63 项且无重名（19 removed + 23 merged + 21 managed）', () => {
+  it('注册表覆盖 64 项且无重名（19 removed + 23 merged + 22 managed）', () => {
     const names = DOCUMENT_ENV_REGISTRY.map(entry => entry.name);
     expect(new Set(names).size).toBe(names.length);
-    expect(DOCUMENT_ENV_REGISTRY).toHaveLength(63);
+    expect(DOCUMENT_ENV_REGISTRY).toHaveLength(64);
     expect(DOCUMENT_ENV_REGISTRY.filter(entry => entry.status === 'removed')).toHaveLength(19);
     expect(DOCUMENT_ENV_REGISTRY.filter(entry => entry.status === 'merged')).toHaveLength(23);
-    expect(DOCUMENT_ENV_REGISTRY.filter(entry => entry.status === 'managed')).toHaveLength(21);
+    expect(DOCUMENT_ENV_REGISTRY.filter(entry => entry.status === 'managed')).toHaveLength(22);
   });
 });

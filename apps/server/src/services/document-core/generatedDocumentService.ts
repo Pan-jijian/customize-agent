@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { DocumentDraftChapter, GeneratedDocumentDraft, DocumentAsset } from '../document-workflow/types';
 import { appendFingerprintEntry, extractHeadingTitles, generateDocumentDraft, getDocumentTemplate } from '../document-workflow';
+import { preflightLocalSemanticProvider } from '../document-workflow/semanticSimilarity';
 import { collectSectionContentGaps } from '../document-workflow/qualityValidation';
 import { DOCUMENT_WORKFLOW_VERSION } from '../document-workflow/documentWorkflowVersion';
 import { computeProjectId } from '@customize-agent/knowledge';
@@ -12,7 +13,7 @@ import { documentTextLength } from '../document-workflow/budget';
 import { tuningProfile } from '../document-workflow/tuningProfile';
 import { upsertKbOperation } from '../knowledge/kbOperationLog';
 
-export type GeneratedDocumentStatus = 'generating' | 'completed' | 'completed_with_issues' | 'warning' | 'failed' | 'aborted';
+export type GeneratedDocumentStatus = 'queued' | 'generating' | 'completed' | 'completed_with_issues' | 'warning' | 'failed' | 'aborted';
 
 export interface GeneratedDocumentListItem {
   id: string;
@@ -42,6 +43,8 @@ export interface GeneratedDocumentListItem {
   latestMessage?: string;
   assets?: DocumentAsset[];
   partialChapters?: GeneratedDocumentDraft['partialChapters'];
+  /** 排队位次（1 起，随队列变化）：仅 status='queued' 的记录携带 */
+  queuePosition?: number;
 }
 
 export interface GeneratedDocumentRecord {
@@ -72,6 +75,16 @@ export interface GeneratedDocumentRecord {
   completedAt?: number;
   error?: string;
   warningIssues?: string[];
+  /** 任务归属进程 PID / 归属进程启动时刻：中断判定做存活探测（多实例与重启归因），任务启动与进度写盘时写入 */
+  ownerPid?: number;
+  ownerStartedAt?: number;
+  /** 进程层中断判定归档（markStaleGeneratingRecord 写入）：判定时刻与原因 */
+  interruptedAt?: number;
+  interruptionReason?: 'process-exited' | 'heartbeat-lost' | 'owner-unknown';
+  /** 人工中止审计（abortGeneratedDocument 写入）：时刻 / 来源 / 中止时正在运行的阶段 */
+  abortedAt?: number;
+  abortedBy?: string;
+  abortedStage?: string;
   maxEvidencePerChapter?: number;
   /** 导出后闭环报告历史（B3：归档总用时/质量对标分/规则执行摘要/修复记录，支持历史对比） */
   exportReports?: ExportReport[];
@@ -83,9 +96,6 @@ export interface ExportReport {
   exportedAt: number;
   /** 生成总用时（毫秒） */
   durationMs?: number;
-  /** 质量对标分（0-100） */
-  benchmarkScore?: number;
-  benchmarkSourceCount?: number;
   /** 提示词规则执行摘要 */
   ruleSummary?: string[];
   /** 审查修复记录：已修复问题数 */
@@ -104,11 +114,14 @@ function failRunningStages(stages: GeneratedDocumentRecord['executionStages'], m
 }
 
 function isAbortError(error: unknown) {
-  return error instanceof Error && /用户中止|aborted|abort/i.test(error.message);
+  // 中止判定收敛（消除误判面）：只认精确的『用户中止』文案——throwIfAborted / llmClient 信号门控是
+  // 唯一中止来源；不再用 /abort/i 宽正则（历史缺陷：任何含 "aborted" 字样的第三方异常，如 fetch
+  // DOMException "This operation was aborted"，都会被误标『已中止』，用户误以为被系统自动中止）
+  return error instanceof Error && error.message === '用户中止';
 }
 
 function fallbackFailedTitle(record: Pick<GeneratedDocumentRecord, 'title' | 'templateName'>) {
-  return record.title && record.title !== '生成中' ? record.title : `${record.templateName || '文档'}生成失败`;
+  return record.title && record.title !== '生成中' && record.title !== '排队中' ? record.title : `${record.templateName || '文档'}生成失败`;
 }
 
 function mergeDraftChapters(...sources: Array<DocumentDraftChapter[] | undefined>): DocumentDraftChapter[] {
@@ -162,11 +175,25 @@ export interface GeneratedAssetRecord extends DocumentAsset {
 interface GenerateTask {
   id: string;
   documentId: string;
+  /** 模板与项目：队列调度的同模板互斥判定（避免为判定反复读盘） */
+  templateId: string;
+  projectRoot: string;
   status: GeneratedDocumentStatus;
   controller: AbortController;
   promise: Promise<GeneratedDocumentRecord>;
   startedAt: number;
   lastProgressAt: number;
+}
+
+/** 排队中的生成请求：同模板+同项目一次只运行一个任务，前一个任务结束后由 pumpGenerationQueue 自动接续下一个 */
+interface QueuedGeneration {
+  taskId: string;
+  documentId: string;
+  templateId: string;
+  projectRoot: string;
+  requirement?: string;
+  maxEvidencePerChapter?: number;
+  enqueuedAt: number;
 }
 
 /**
@@ -178,13 +205,61 @@ interface GenerateTask {
 const globalDocumentTaskStore = globalThis as typeof globalThis & {
   __generatedDocumentTasks?: Map<string, GenerateTask>;
   __generatedDocumentProcessStartedAt?: number;
+  __generatedDocumentQueue?: QueuedGeneration[];
 };
 const tasks = (globalDocumentTaskStore.__generatedDocumentTasks ??= new Map<string, GenerateTask>());
+/** 待启动队列（与 tasks 同理必须挂 globalThis：dev 模式各 API 路由 chunk 会复制模块级变量）：
+ * 同一模板+项目连续多次生成的请求按入队顺序串行执行，前一个任务结束后自动接续下一个 */
+const generationQueue: QueuedGeneration[] = (globalDocumentTaskStore.__generatedDocumentQueue ??= []);
 const ABANDONED_RECORD_STALE_MS = Math.max(60 * 60_000, Number(process.env.DOCUMENT_ABANDONED_RECORD_STALE_MS ?? 24 * 60 * 60_000));
 /** 本进程启动时刻：用于重启后快速识别“上一次进程遗留”的 generating 记录，无需等待 24 小时阈值 */
 const PROCESS_STARTED_AT = (globalDocumentTaskStore.__generatedDocumentProcessStartedAt ??= Date.now());
-/** 宽限期：generating 记录 updatedAt 距今小于该值时不判定中断，避免误杀刚创建或仍有实例在推进的任务 */
-const RECENT_UPDATE_GRACE_MS = Math.max(30_000, Number(process.env.DOCUMENT_RECENT_UPDATE_GRACE_MS ?? 60_000));
+
+/** 心跳写盘保底间隔（阶段签名未变时的最小写盘间隔）：默认 30s，与中断宽限联动（宽限 clamp ≥3×心跳） */
+function resolveHeartbeatSaveIntervalMs() {
+  return Math.max(30_000, Math.min(300_000, Number(process.env.DOCUMENT_PROGRESS_HEARTBEAT_SAVE_INTERVAL_MS ?? 30_000)));
+}
+/** 宽限期：generating 记录 updatedAt 距今小于该值时不判定中断，避免误杀刚创建或仍有实例在推进的任务。
+ * 默认 180s 且 clamp ≥3×心跳间隔（历史缺陷：60s 心跳对 60s 宽限无裕度，事件循环被语义推理占满时
+ * 心跳延迟即触发多实例误判『生成任务已中断』）。 */
+const RECENT_UPDATE_GRACE_MS = Math.max(Math.max(30_000, Number(process.env.DOCUMENT_RECENT_UPDATE_GRACE_MS ?? 180_000)), resolveHeartbeatSaveIntervalMs() * 3);
+
+function defaultProcessAliveProbe(pid: number | undefined): boolean {
+  if (!pid || !Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM=进程存在但无信号权限（视为存活）；ESRCH=进程不存在
+    return (error as NodeJS.ErrnoException)?.code === 'EPERM';
+  }
+}
+let processAliveProbe: (pid: number | undefined) => boolean = defaultProcessAliveProbe;
+/** 单测注入：替换进程存活探测（真实 PID 语义难以构造确定性用例） */
+export function setProcessAliveProbeForTest(probe: ((pid: number | undefined) => boolean) | null) {
+  processAliveProbe = probe ?? defaultProcessAliveProbe;
+}
+
+type StaleVerdict = { stale: false } | { stale: true; reason: 'process-exited' | 'heartbeat-lost' | 'owner-unknown' };
+
+/** 中断判定单源（markStaleGeneratingRecord 与轮询短路 generatingRecordRequiresFullPoll 共用，杜绝口径漂移）：
+ * 1) 宽限期内不判；2) 有归属进程：存活→不判（跨实例保护，超 24h 兜底防 PID 复用悬挂）；已退出→立即判（process-exited）；
+ * 3) 无归属（升级前存量记录）：早于本进程启动→判；否则超 24h→判。 */
+function evaluateStaleInterruption(input: { status: GeneratedDocumentStatus; updatedAt: number; ownerPid?: number }): StaleVerdict {
+  if (input.status !== 'generating' && input.status !== 'queued') return { stale: false };
+  const now = Date.now();
+  if (now - input.updatedAt < RECENT_UPDATE_GRACE_MS) return { stale: false };
+  if (input.ownerPid) {
+    if (processAliveProbe(input.ownerPid)) {
+      if (now - input.updatedAt < ABANDONED_RECORD_STALE_MS) return { stale: false };
+      return { stale: true, reason: 'heartbeat-lost' };
+    }
+    return { stale: true, reason: 'process-exited' };
+  }
+  if (input.updatedAt < PROCESS_STARTED_AT) return { stale: true, reason: 'owner-unknown' };
+  if (now - input.updatedAt >= ABANDONED_RECORD_STALE_MS) return { stale: true, reason: 'owner-unknown' };
+  return { stale: false };
+}
 
 function generatedProjectId(projectRoot = getProjectRoot()) {
   return computeProjectId(path.resolve(projectRoot));
@@ -206,6 +281,9 @@ interface GeneratedDocumentMeta {
   updatedAt: number;
   status: GeneratedDocumentStatus;
   completedAt?: number;
+  /** 任务归属进程（轻量轮询短路的中断判活需要，避免全量读取 draft 才能判定） */
+  ownerPid?: number;
+  ownerStartedAt?: number;
 }
 
 /** 轻量元信息：轮询接口用其判断文档是否有变化，未变化时无需读取完整 draft 文件 */
@@ -215,16 +293,13 @@ export function getGeneratedDocumentMeta(id: string, projectRoot = getProjectRoo
 }
 
 function writeGeneratedDocumentMeta(record: GeneratedDocumentRecord, projectRoot: string) {
-  writeJson(draftMetaPath(record.id, projectRoot), { updatedAt: record.updatedAt, status: record.status, completedAt: record.completedAt } satisfies GeneratedDocumentMeta);
+  writeJson(draftMetaPath(record.id, projectRoot), { updatedAt: record.updatedAt, status: record.status, completedAt: record.completedAt, ownerPid: record.ownerPid, ownerStartedAt: record.ownerStartedAt } satisfies GeneratedDocumentMeta);
 }
 
-/** 判断 generating 记录是否需要绕过轻量轮询短路、强制全量读取以触发 stale 标记 */
+/** 判断 generating 记录是否需要绕过轻量轮询短路、强制全量读取以触发 stale 标记（与 markStale 共用同一判定单源） */
 export function generatingRecordRequiresFullPoll(meta: GeneratedDocumentMeta | null) {
-  if (!meta || meta.status !== 'generating') return false;
-  // 宽限期内不强制全量读取：记录近期仍在更新，说明有实例在推进生成，无需触发 stale 标记路径
-  if (Date.now() - meta.updatedAt < RECENT_UPDATE_GRACE_MS) return false;
-  if (meta.updatedAt < PROCESS_STARTED_AT) return true;
-  return Date.now() - meta.updatedAt >= ABANDONED_RECORD_STALE_MS;
+  if (!meta) return false;
+  return evaluateStaleInterruption(meta).stale;
 }
 export function generatedAssetAbsolutePath(asset: Pick<GeneratedAssetRecord, 'path'>, projectRoot = getProjectRoot()) {
   if (!asset.path) return null;
@@ -251,14 +326,18 @@ function getActiveTaskByDocumentId(documentId: string) {
 }
 
 function markStaleGeneratingRecord(record: GeneratedDocumentRecord, projectRoot = getProjectRoot()) {
-  if (record.status !== 'generating' || getActiveTaskByDocumentId(record.id)) return record;
-  // 宽限期豁免：记录近期仍在更新，说明有实例在推进生成（如 dev 多实例、断点续传恢复），不能判为中断
-  if (Date.now() - record.updatedAt < RECENT_UPDATE_GRACE_MS) return record;
-  // 进程重启后内存任务丢失：updatedAt 早于本进程启动时间的记录立即标记，无需等待长阈值
-  const staleThresholdMs = record.updatedAt < PROCESS_STARTED_AT ? 0 : ABANDONED_RECORD_STALE_MS;
-  if (Date.now() - record.updatedAt < staleThresholdMs) return record;
-  const message = '生成任务已中断，请点击继续生成或重新生成';
+  if ((record.status !== 'generating' && record.status !== 'queued') || getActiveTaskByDocumentId(record.id)) return record;
+  // 排队记录仍在本进程待启动队列中：按序等待属正常状态，不判定中断（进程退出后队列随内存消失，不再命中本分支）
+  if (record.status === 'queued' && generationQueue.some(job => job.documentId === record.id)) return record;
+  // 中断判定单源（evaluateStaleInterruption）：宽限期 → ownerPid 判活（存活不判/已死立即判）/ 存量记录走旧逻辑
+  const verdict = evaluateStaleInterruption(record);
+  if (!verdict.stale) return record;
+  // 排队中断文案区分：排队任务从未执行，引导重新发起而非『继续生成』
+  const message = record.status === 'queued'
+    ? '排队任务未执行（生成进程已退出或服务重启），请重新发起生成'
+    : '生成任务已中断，请点击继续生成或重新生成';
   const status: GeneratedDocumentStatus = record.checkpointChapters?.length ? 'warning' : 'failed';
+  console.warn(`[gen] interrupted: doc=${record.id} reason=${verdict.reason} ownerPid=${record.ownerPid ?? 'none'} lastHeartbeat=${new Date(record.updatedAt).toISOString()}`);
   const next = {
     ...record,
     title: fallbackFailedTitle(record),
@@ -266,6 +345,8 @@ function markStaleGeneratingRecord(record: GeneratedDocumentRecord, projectRoot 
     error: record.error || message,
     executionStages: failRunningStages(record.executionStages, message),
     completedAt: Date.now(),
+    interruptedAt: Date.now(),
+    interruptionReason: verdict.reason,
     warningIssues: record.checkpointChapters?.length ? [...(record.warningIssues || []), message] : record.warningIssues,
   };
   if (record.taskId) {
@@ -285,12 +366,12 @@ function markStaleGeneratingRecord(record: GeneratedDocumentRecord, projectRoot 
 export function listGeneratedDocuments(projectRoot = getProjectRoot()) {
   return readJson<GeneratedDocumentListItem[]>(indexPath(projectRoot), [])
     .map(item => {
-      if (item.status !== 'generating') return item;
+      if (item.status !== 'generating' && item.status !== 'queued') return item;
       const fullRecord = readJson<GeneratedDocumentRecord | null>(draftPath(item.id, projectRoot), null);
       if (!fullRecord) return item;
       const next = markStaleGeneratingRecord(fullRecord, projectRoot);
-      if (next !== fullRecord) return toGeneratedDocumentListItem(saveGeneratedDocument(next, projectRoot, { preserveUpdatedAt: true }));
-      return toGeneratedDocumentListItem(fullRecord);
+      const saved = next !== fullRecord ? saveGeneratedDocument(next, projectRoot, { preserveUpdatedAt: true }) : next;
+      return { ...toGeneratedDocumentListItem(saved), queuePosition: saved.status === 'queued' ? getQueuedDocumentPosition(saved.id) : undefined };
     })
     .sort((a, b) => (b.createdAt || b.updatedAt) - (a.createdAt || a.updatedAt));
 }
@@ -323,7 +404,13 @@ export function updateGeneratedDocument(id: string, patch: Partial<GeneratedDocu
 export function abortGeneratedDocument(id: string, projectRoot = getProjectRoot()) {
   const current = getGeneratedDocument(id, projectRoot);
   if (!current) return null;
-  if (current.status !== 'generating') return current;
+  if (current.status !== 'generating' && current.status !== 'queued') return current;
+  // 排队任务中止：直接从待启动队列摘除（未创建 controller/任务注册），随后触发调度让后续任务顶补
+  const fromQueue = current.status === 'queued';
+  if (fromQueue) {
+    const queuedIndex = generationQueue.findIndex(job => job.documentId === id);
+    if (queuedIndex >= 0) generationQueue.splice(queuedIndex, 1);
+  }
   for (const [key, task] of tasks) {
     if (task.documentId === id) {
       task.status = 'aborted';
@@ -332,15 +419,25 @@ export function abortGeneratedDocument(id: string, projectRoot = getProjectRoot(
     }
   }
   const message = '用户中止';
+  // 中止审计：归因『人工中止』与其余终止路径的依据（abortedAt/abortedBy/中止时所处阶段）
+  const runningStage = [...(current.executionStages || [])].reverse().find(stage => stage.status === 'running');
+  const abortedStage = fromQueue ? '生成队列' : runningStage?.subtitle || runningStage?.roleName || runningStage?.roleId;
   const executionStages = failRunningStages(current.executionStages, message);
-  const record = saveGeneratedDocument({ ...current, status: 'aborted', error: message, executionStages, completedAt: Date.now() }, projectRoot);
+  const record = saveGeneratedDocument({ ...current, status: 'aborted', error: message, executionStages, completedAt: Date.now(), abortedAt: Date.now(), abortedBy: 'user-api', abortedStage }, projectRoot);
+  console.log(`[gen] aborted by user: doc=${id} stage=${abortedStage || 'unknown'} taskId=${record.taskId || 'none'}`);
+  const operationMessage = abortedStage ? `用户中止（阶段：${abortedStage}）` : message;
   if (record.taskId) {
-    upsertDocumentOperation(projectRoot, { taskId: record.taskId, title: `生成 ${record.title}`, status: 'warning', percent: 100, message, stages: executionStages, error: message });
+    upsertDocumentOperation(projectRoot, { taskId: record.taskId, title: `生成 ${record.title}`, status: 'warning', percent: 100, message: operationMessage, stages: executionStages, error: message });
   }
+  // 摘除排队任务后立即尝试调度：容量与同模板互斥满足时后续排队任务顶补启动
+  if (fromQueue) pumpGenerationQueue();
   return record;
 }
 
 export function deleteGeneratedDocument(id: string, projectRoot = getProjectRoot()) {
+  // 删除排队中的记录时同步摘除队列请求，避免 pump 接续启动一个已被删除的文档
+  const queuedIndex = generationQueue.findIndex(job => job.documentId === id);
+  if (queuedIndex >= 0) generationQueue.splice(queuedIndex, 1);
   try {
     fs.rmSync(draftPath(id, projectRoot), { force: true });
   } catch {
@@ -507,14 +604,15 @@ function trimEvidenceContent<T extends GeneratedDocumentRecord>(record: T): T {
 
 function failGeneratingDocument(documentId: string, projectRoot: string, message: string) {
   const current = getGeneratedDocument(documentId, projectRoot);
-  if (!current || current.status !== 'generating') return current;
+  if (!current || (current.status !== 'generating' && current.status !== 'queued')) return current;
   return saveGeneratedDocument({ ...current, title: fallbackFailedTitle(current), status: 'failed', error: message, executionStages: failRunningStages(current.executionStages, message), completedAt: Date.now() }, projectRoot);
 }
 
 function activeTaskResponse(task: GenerateTask, projectRoot: string) {
   const record = getGeneratedDocument(task.documentId, projectRoot);
   if (!record || record.status !== 'generating') return null;
-  return { taskId: task.id, documentId: task.documentId, record };
+  // 统一返回结构：复用运行中任务不属于排队，queuePosition 恒为 undefined
+  return { taskId: task.id, documentId: task.documentId, record, queuePosition: undefined };
 }
 
 function documentOperationDetails(stages: GeneratedDocumentRecord['executionStages'] | undefined) {
@@ -545,60 +643,89 @@ function upsertDocumentOperation(projectRoot: string, input: { taskId: string; t
 }
 
 /** 启动异步文档生成任务，包含进度回调持久化、结果入库、资源管理，返回任务 ID 和文档 ID */
-export function startGenerateDocumentTask(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; resumeDocumentId?: string }, projectRoot = getProjectRoot()) {
-  const resolvedProjectRoot = path.resolve(projectRoot);
-  const currentProjectId = computeProjectId(resolvedProjectRoot);
-  const now = Date.now();
-  const existing = input.resumeDocumentId ? getGeneratedDocument(input.resumeDocumentId, resolvedProjectRoot) : null;
-  if (existing) {
-    const active = getActiveTaskByDocumentId(existing.id);
-    const activeResponse = active ? activeTaskResponse(active, resolvedProjectRoot) : null;
-    if (activeResponse) return activeResponse;
-  }
-  if (!existing) {
-    for (const task of tasks.values()) {
-      const active = activeTaskResponse(task, resolvedProjectRoot);
-      if (active && active.record.templateId === input.templateId && active.record.projectRoot === resolvedProjectRoot) return active;
+/** 全局并发上限（函数化：排队调度实时读取，单测可动态调整 env） */
+function maxConcurrentGenerations() {
+  return Math.max(1, Number(process.env.DOCUMENT_MAX_CONCURRENT_GENERATIONS ?? 2));
+}
+
+/** 排队位次（1 起）：不在队列中返回 undefined */
+export function getQueuedDocumentPosition(documentId: string) {
+  const index = generationQueue.findIndex(job => job.documentId === documentId);
+  return index >= 0 ? index + 1 : undefined;
+}
+
+/** 同模板+同项目互斥判定（队列调度用，基于任务注册表避免反复读盘） */
+function hasActiveTaskForTemplateProject(templateId: string, projectRoot: string) {
+  for (const task of tasks.values()) if (task.templateId === templateId && task.projectRoot === projectRoot) return true;
+  return false;
+}
+
+/** 排队调度：并发名额有空且该模板+项目无运行中任务时，按入队顺序接续启动下一个；
+ * 队首若因同模板正在运行暂不可启动则跳过（不同模板可在并发上限内并行） */
+function pumpGenerationQueue() {
+  for (;;) {
+    if (tasks.size >= maxConcurrentGenerations()) return;
+    const index = generationQueue.findIndex(job => !hasActiveTaskForTemplateProject(job.templateId, job.projectRoot));
+    if (index < 0) return;
+    const [job] = generationQueue.splice(index, 1);
+    const current = getGeneratedDocument(job.documentId, job.projectRoot);
+    if (!current || current.status !== 'queued') continue;
+    try {
+      launchTask({
+        taskId: job.taskId,
+        documentId: job.documentId,
+        resolvedProjectRoot: job.projectRoot,
+        templateId: job.templateId,
+        requirement: job.requirement ?? current.requirement,
+        maxEvidencePerChapter: job.maxEvidencePerChapter ?? current.maxEvidencePerChapter,
+        existing: null,
+        initial: {
+          ...current,
+          taskId: job.taskId,
+          title: '生成中',
+          status: 'generating',
+          error: undefined,
+          completedAt: undefined,
+          ownerPid: process.pid,
+          ownerStartedAt: PROCESS_STARTED_AT,
+          executionStages: [{ type: 'validation', roleId: 'queue-start', status: 'running', message: '排队完成，开始生成' }],
+          updatedAt: Date.now(),
+        },
+        startMessage: '排队完成，文档生成任务已启动',
+      });
+    } catch (error) {
+      // 启动失败：落 failed 记录（保留调度循环继续处理后续排队任务）
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[gen] queue launch failed: doc=${job.documentId} ${message}`);
+      const latest = getGeneratedDocument(job.documentId, job.projectRoot);
+      if (latest && latest.status === 'queued') {
+        saveGeneratedDocument({ ...latest, title: fallbackFailedTitle(latest), status: 'failed', error: message, executionStages: failRunningStages(latest.executionStages, message), completedAt: Date.now() }, job.projectRoot);
+        upsertDocumentOperation(job.projectRoot, { taskId: job.taskId, title: `生成 ${latest.templateName || latest.title}`, status: 'error', percent: 100, message, error: message });
+      }
     }
   }
-  // 全局并发上限：避免多个生成任务同时耗尽 LLM 资源；已存在的 active 任务在上方复用分支直接返回
-  const maxConcurrentGenerations = Math.max(1, Number(process.env.DOCUMENT_MAX_CONCURRENT_GENERATIONS ?? 2));
-  if (tasks.size >= maxConcurrentGenerations) {
-    throw new Error(`当前已有 ${tasks.size} 个文档生成任务在运行（上限 ${maxConcurrentGenerations}），请等待完成或中止后再运行`);
-  }
-  const documentId = existing?.id || `doc-${now}-${crypto.randomBytes(4).toString('hex')}`;
-  const taskId = `task-${now}-${crypto.randomBytes(4).toString('hex')}`;
-  const initial: GeneratedDocumentRecord = existing ? {
-    ...existing,
-    taskId,
-    status: 'generating',
-    error: undefined,
-    completedAt: undefined,
-    executionStages: [{ type: 'validation', roleId: 'resume-generation', status: 'running', message: '已重新进入生成流程；仅复用通过当前工作流版本、项目、模板、需求和导出门禁校验的章节，其余章节重新生成' }],
-    partialChapters: undefined,
-    checkpointChapters: undefined,
-    draft: undefined,
-    warningIssues: undefined,
-    updatedAt: now,
-  } : {
-    id: documentId,
-    taskId,
-    templateId: input.templateId,
-    templateVersion: getDocumentTemplate(input.templateId)?.version,
-    title: '生成中',
-    requirement: input.requirement || '',
-    maxEvidencePerChapter: input.maxEvidencePerChapter,
-    projectRoot: resolvedProjectRoot,
-    projectId: currentProjectId,
-    knowledgeBasePath: getProjectKbRoot(resolvedProjectRoot),
-    markdown: '',
-    status: 'generating',
-    assets: [],
-    createdAt: now,
-    updatedAt: now,
-  };
+}
+
+/** 任务管道（立即启动与排队接续共用）：写启动态、注册任务、运行生成、终态归档；
+ * finally 中释放并发名额并触发队列调度（任务完成后自动接续下一个排队任务） */
+function launchTask(job: {
+  taskId: string;
+  documentId: string;
+  resolvedProjectRoot: string;
+  templateId: string;
+  requirement?: string;
+  maxEvidencePerChapter?: number;
+  resumeDocumentId?: string;
+  existing: GeneratedDocumentRecord | null;
+  initial: GeneratedDocumentRecord;
+  startMessage: string;
+}) {
+  const { taskId, documentId, resolvedProjectRoot, existing, initial } = job;
+  // input 等价于原 startGenerateDocumentTask 入参：管道段内 reusableCheckpointChapters 与 generateDocumentDraft 展开依赖该变量名
+  const input = { templateId: job.templateId, requirement: job.requirement, maxEvidencePerChapter: job.maxEvidencePerChapter, resumeDocumentId: job.resumeDocumentId };
+  const now = Date.now();
   saveGeneratedDocument(initial, resolvedProjectRoot);
-  upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${initial.title}`, status: 'processing', percent: 1, message: '文档生成任务已进入后台队列', stages: initial.executionStages });
+  upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${initial.title}`, status: 'processing', percent: 1, message: job.startMessage, stages: initial.executionStages });
   const controller = new AbortController();
   const taskRef: { current?: GenerateTask } = {};
   const resumeChapters = reusableCheckpointChapters(existing, input, resolvedProjectRoot);
@@ -609,9 +736,11 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
   let lastProgressSaveAt = 0;
   let lastProgressSignature = '';
   const minProgressSaveInterval = Math.max(1_000, Math.min(15_000, Number(process.env.DOCUMENT_PROGRESS_SAVE_INTERVAL_MS ?? 5_000)));
-  // 阶段签名未变（如周期性心跳）时的保底写盘间隔，避免每 30s 心跳全量写盘
-  const minProgressHeartbeatSaveInterval = Math.max(30_000, Math.min(300_000, Number(process.env.DOCUMENT_PROGRESS_HEARTBEAT_SAVE_INTERVAL_MS ?? 60_000)));
-  const promise = generateDocumentDraft({ ...input, diversitySeed: documentId, projectRoot: resolvedProjectRoot, resumeChapters, signal: controller.signal, onProgress: (stages, checkpoint) => {
+  // 阶段签名未变（如周期性心跳）时的保底写盘间隔（默认 30s，与中断宽限联动），避免每 30s 心跳全量写盘
+  const minProgressHeartbeatSaveInterval = resolveHeartbeatSaveIntervalMs();
+  // 语义模型预热前置（fail-fast）：模型路径失效等基础设施问题在任务启动初期即暴露并结束任务，
+  // 避免生成推进到末期才因嵌入失败硬停；DOCUMENT_SKIP_EMBED_PREFLIGHT=1 可关闭
+  const promise = preflightLocalSemanticProvider().then(() => generateDocumentDraft({ ...input, diversitySeed: documentId, projectRoot: resolvedProjectRoot, resumeChapters, signal: controller.signal, onProgress: (stages, checkpoint) => {
     try {
       if (taskRef.current) taskRef.current.lastProgressAt = Date.now();
       lastProgressStages = stages;
@@ -628,6 +757,8 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
         const checkpointMarkdown = checkpointChapters?.length ? checkpointChapters.map(chapter => `# ${chapter.title}\n\n${chapter.content}`).join('\n\n') : current.markdown;
         const saved = saveGeneratedDocument(trimEvidenceContent({
           ...current,
+          ownerPid: process.pid,
+          ownerStartedAt: PROCESS_STARTED_AT,
           executionStages: stages,
           checkpointChapters,
           partialChapters: checkpoint?.chapters ? summarizeCheckpointChapters(checkpointChapters) : current.partialChapters,
@@ -636,12 +767,18 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
         }), resolvedProjectRoot);
         const latestStage = [...stages].reverse().find(stage => stage.status === 'running') || stages[stages.length - 1];
         upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${saved.templateName || saved.title}`, status: 'processing', percent: Math.max(1, Math.min(99, latestStage?.progress ? Math.round((latestStage.progress.current / Math.max(1, latestStage.progress.total)) * 90) : 30)), message: latestStage?.message || '文档生成中', stages });
+        const heartbeatSave = signature === lastProgressSignature;
         lastProgressSaveAt = nowProgress;
         lastProgressSignature = signature;
         console.log(`[gen] progress saved: ${stages.length} stages, checkpoint=${checkpointChapters?.length || 0}, doc=${documentId}`);
+        if (heartbeatSave) {
+          // P2 内存峰值观测：心跳写盘处采样，支撑 OOM 归因（与 dmesg OOM 时间线对齐）
+          const memory = process.memoryUsage();
+          console.log(`[gen] memory rss=${Math.round(memory.rss / 1048576)}MB heap=${Math.round(memory.heapUsed / 1048576)}MB doc=${documentId}`);
+        }
       }
     } catch (err) { console.error('[gen] progress save error:', err); }
-  } }).then(async result => {
+  } })).then(async result => {
     if (taskRef.current) {
       taskRef.current.lastProgressAt = Date.now();
     }
@@ -662,10 +799,17 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       .filter(message => result.exportGate.passed ? !/目录与正文不一致|表格分隔线位置不规范/u.test(message) : true);
     const sectionGaps = collectSectionContentGaps(result.markdown, result.chapters).filter(gap => gap.reason === 'empty');
     if (sectionGaps.length > 0) warningIssues.unshift(`小节内容补写未完成：仍有 ${sectionGaps.length} 个空洞小节，请继续生成或补充资料后重试`);
-    if (!result.exportGate.passed && warningIssues.length === 0) warningIssues.push('导出门禁未通过：存在未完成的硬阻断检查项');
-    // F5 状态语义：门禁通过=completed；未通过但已产出实质正文=completed_with_issues（文档可下载，问题清单随附）；
-    // 未通过且无实质正文=failed（需用户继续修复或补充资料后重试，可基于 checkpoint 增量续修）
-    const completedStatus: GeneratedDocumentStatus = result.exportGate.passed ? 'completed' : documentTextLength(markdown) >= 3000 ? 'completed_with_issues' : 'failed';
+    if (!result.exportGate.passed) {
+      // V2 批3 宁缺毋假：未通过导出门禁=不放行交付，未收敛阻断清单无条件置顶（此前仅在警告为空时
+      // 补一条泛化文案，未收敛阻断在交付时不可见）；清单供 failed 后排查与基于 checkpoint 续修定位。
+      const blockers = result.exportGate.blockingIssues || [];
+      const blockerListing = blockers.slice(0, 12).map((issue, index) => `${index + 1}.${issue.message}`).join('；');
+      warningIssues.unshift(`导出门禁未通过：存在 ${blockers.length} 项未收敛阻断（宁缺毋假：带病文档不作为交付件）${blockerListing ? `——${blockerListing}${blockers.length > 12 ? `；…另 ${blockers.length - 12} 项` : ''}` : ''}`);
+    }
+    // V2 批3 状态语义收紧（宁缺毋假）：门禁通过=completed；未通过=failed（不再以「有实质正文」粉饰为
+    // completed_with_issues 带病交付——代价是偶尔拿不到文档，但拿到的每一份都通过全部门禁）。
+    // failed 后可基于 checkpoint 增量续修重试。
+    const completedStatus: GeneratedDocumentStatus = result.exportGate.passed ? 'completed' : 'failed';
     const completedBase = trimEvidenceContent({
       ...current,
       templateName: result.templateName,
@@ -697,13 +841,14 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
       }
     }
     upsertGeneratedAssets(result.assets || [], documentId, resolvedProjectRoot);
-    upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${record.title}`, status: record.status === 'completed' ? 'success' : record.status === 'completed_with_issues' ? 'warning' : 'error', percent: 100, message: record.status === 'completed' ? '文档生成完成，已通过导出门禁' : record.status === 'completed_with_issues' ? `文档已生成（带 ${warningIssues.length || 1} 项待复核问题，可下载后人工完善）` : `文档生成未通过导出门禁，存在 ${warningIssues.length || 1} 个阻断问题`, stages: result.executionStages, error: record.status === 'completed' || record.status === 'completed_with_issues' ? undefined : warningIssues.join('；') });
+    upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${record.title}`, status: record.status === 'completed' ? 'success' : 'error', percent: 100, message: record.status === 'completed' ? '文档生成完成，已通过导出门禁' : `文档生成未通过导出门禁（宁缺毋假：带病文档不作为交付件），存在 ${warningIssues.length || 1} 个阻断问题`, stages: result.executionStages, error: record.status === 'completed' ? undefined : warningIssues.join('；') });
     return record;
   }).catch(error => {
     const current = getGeneratedDocument(documentId, resolvedProjectRoot);
     if (!current || current.status !== 'generating') return current ?? initial;
     const message = error instanceof Error ? error.message : String(error);
-    const status: GeneratedDocumentStatus = isAbortError(error) ? 'aborted' : current.checkpointChapters?.length || lastProgressMarkdown ? 'warning' : 'failed';
+    // 双判：精确中止文案 或 signal 已中止（signal 唯一中止来源=abort API，文案变化时仍正确落『已中止』）
+    const status: GeneratedDocumentStatus = isAbortError(error) || controller.signal.aborted ? 'aborted' : current.checkpointChapters?.length || lastProgressMarkdown ? 'warning' : 'failed';
     const markdown = lastProgressMarkdown || current.markdown || current.checkpointChapters?.map(chapter => `# ${chapter.title}\n\n${chapter.content}`).join('\n\n') || '';
     // 状态传播修复：用内存最新 stages 标记未完成阶段（failRunningStages 只标 running），
     // 磁盘快照滞后时已成功的章不会被误标 failed
@@ -722,11 +867,91 @@ export function startGenerateDocumentTask(input: { templateId: string; requireme
     return record;
   }).finally(() => {
     tasks.delete(taskId);
+    pumpGenerationQueue();
   });
-  const task: GenerateTask = { id: taskId, documentId, status: 'generating', controller, promise, startedAt: now, lastProgressAt: now };
+  const task: GenerateTask = { id: taskId, documentId, templateId: input.templateId, projectRoot: resolvedProjectRoot, status: 'generating', controller, promise, startedAt: now, lastProgressAt: now };
   taskRef.current = task;
   tasks.set(taskId, task);
   return { taskId, documentId, record: initial };
+}
+
+/** 启动异步文档生成任务：新请求进入排队（同模板+项目串行、完成自动接续）；恢复请求保持即时启动语义 */
+export function startGenerateDocumentTask(input: { templateId: string; requirement?: string; maxEvidencePerChapter?: number; resumeDocumentId?: string }, projectRoot = getProjectRoot()) {
+  const resolvedProjectRoot = path.resolve(projectRoot);
+  const currentProjectId = computeProjectId(resolvedProjectRoot);
+  const now = Date.now();
+  const existing = input.resumeDocumentId ? getGeneratedDocument(input.resumeDocumentId, resolvedProjectRoot) : null;
+  if (existing) {
+    const active = getActiveTaskByDocumentId(existing.id);
+    const activeResponse = active ? activeTaskResponse(active, resolvedProjectRoot) : null;
+    if (activeResponse) return activeResponse;
+    // 恢复：即时语义保持原行为（容量不足抛错、不排队）；同名排队请求让位（恢复优先）
+    if (tasks.size >= maxConcurrentGenerations()) {
+      throw new Error(`当前已有 ${tasks.size} 个文档生成任务在运行（上限 ${maxConcurrentGenerations()}），请等待完成或中止后再运行`);
+    }
+    const queuedIndex = generationQueue.findIndex(job => job.documentId === existing.id);
+    if (queuedIndex >= 0) generationQueue.splice(queuedIndex, 1);
+    const taskId = `task-${now}-${crypto.randomBytes(4).toString('hex')}`;
+    const initial: GeneratedDocumentRecord = {
+      ...existing,
+      taskId,
+      status: 'generating',
+      error: undefined,
+      completedAt: undefined,
+      interruptedAt: undefined,
+      interruptionReason: undefined,
+      abortedAt: undefined,
+      abortedBy: undefined,
+      abortedStage: undefined,
+      ownerPid: process.pid,
+      ownerStartedAt: PROCESS_STARTED_AT,
+      executionStages: [{ type: 'validation', roleId: 'resume-generation', status: 'running', message: '已重新进入生成流程；仅复用通过当前工作流版本、项目、模板、需求和导出门禁校验的章节，其余章节重新生成' }],
+      partialChapters: undefined,
+      checkpointChapters: undefined,
+      draft: undefined,
+      warningIssues: undefined,
+      updatedAt: now,
+    };
+    const launched = launchTask({ taskId, documentId: existing.id, resolvedProjectRoot, templateId: input.templateId, requirement: input.requirement, maxEvidencePerChapter: input.maxEvidencePerChapter, resumeDocumentId: input.resumeDocumentId, existing, initial, startMessage: '文档生成任务已进入后台队列' });
+    // 统一返回类型：恢复分支保持即时启动语义、不进排队，queuePosition 恒为 undefined
+    return { ...launched, queuePosition: undefined as number | undefined };
+  }
+  // 新请求：每次调用创建一份新文档并加入排队（不再复用运行中的同模板任务）；
+  // pump 在容量与同模板互斥满足时立即启动，否则等前一个任务完成后自动接续
+  const documentId = `doc-${now}-${crypto.randomBytes(4).toString('hex')}`;
+  const taskId = `task-${now}-${crypto.randomBytes(4).toString('hex')}`;
+  const template = getDocumentTemplate(input.templateId);
+  const initial: GeneratedDocumentRecord = {
+    id: documentId,
+    taskId,
+    ownerPid: process.pid,
+    ownerStartedAt: PROCESS_STARTED_AT,
+    templateId: input.templateId,
+    templateName: template?.name,
+    templateVersion: template?.version,
+    title: '排队中',
+    requirement: input.requirement || '',
+    maxEvidencePerChapter: input.maxEvidencePerChapter,
+    projectRoot: resolvedProjectRoot,
+    projectId: currentProjectId,
+    knowledgeBasePath: getProjectKbRoot(resolvedProjectRoot),
+    markdown: '',
+    status: 'queued',
+    assets: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+  generationQueue.push({ taskId, documentId, templateId: input.templateId, projectRoot: resolvedProjectRoot, requirement: input.requirement, maxEvidencePerChapter: input.maxEvidencePerChapter, enqueuedAt: now });
+  const position = getQueuedDocumentPosition(documentId) ?? 1;
+  const queuedInitial: GeneratedDocumentRecord = {
+    ...initial,
+    executionStages: [{ type: 'validation', roleId: 'queue-wait', status: 'running', message: `已加入生成队列（位次 ${position}）：同模板前一任务完成或并发名额空闲后自动开始` }],
+  };
+  saveGeneratedDocument(queuedInitial, resolvedProjectRoot);
+  upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${template?.name || '文档'}`, status: 'processing', percent: 1, message: `已加入生成队列（位次 ${position}），等待自动接续`, stages: queuedInitial.executionStages });
+  pumpGenerationQueue();
+  const started = getActiveTaskByDocumentId(documentId);
+  return { taskId, documentId, record: getGeneratedDocument(documentId, resolvedProjectRoot) || queuedInitial, queuePosition: started ? undefined : getQueuedDocumentPosition(documentId) };
 }
 
 export function getGenerateTask(taskId: string) {

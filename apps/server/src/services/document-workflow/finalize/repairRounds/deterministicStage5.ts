@@ -4,11 +4,12 @@
  * 修复器清单与顺序由 SURFACE_FIX_STEPS（deterministicFixChains）注册表单源定义。
  */
 import { applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown } from '../../qualityValidation';
-import { applyNumericConsistencyDeterministicFixes, extractGreeningMaintenanceAuthority, fixTableBorneContentSections, stripDuplicateTablesAcrossChapters, runFixUntilClean } from '../../documentIntegrityChecks';
-import { blueprintLaborPeakAuthority, buildAuthorityIndex } from '../../authorityIndex';
+import { applyNumericConsistencyDeterministicFixes, extractGreeningMaintenanceAuthority, stripDuplicateTablesAcrossChapters, runFixUntilClean } from '../../documentIntegrityChecks';
+import { blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, buildAuthorityIndex } from '../../authorityIndex';
 import { fixScoringRequirementResponses } from '../../tenderRequirements';
 import { cleanFormalSourcePhrases } from '../../markdownComposer';
 import { SURFACE_FIX_STEPS, type SurfaceFixerContext } from '../../deterministicFixChains';
+import { buildResourceBreakdownAuthority } from '../../resourceBreakdownNumbers';
 import { displayStage, upsertProgressStage } from '../../progress';
 import type { FinalizeSession } from '../finalizeSession';
 
@@ -30,7 +31,12 @@ export async function stageDeterministicStage5(session: FinalizeSession): Promis
   });
   if (stage5ChapterFix.fixedCount > 0 || stage5ScoringFix.fixedCount > 0) session.finalMarkdown = session.rebuildFinalMarkdown();
   if (stage5ScoringFix.fixedCount > 0) {
-    upsertProgressStage(session.progressStages, displayStage({ type: 'validation', roleId: 'scoring-requirement-fix', status: 'success', message: `评分项响应确定性补写 ：${stage5ScoringFix.fixedCount} 条（${stage5ScoringFix.details.slice(0, 3).join('、')}）`, details: stage5ScoringFix.details.slice(3) }, { subtitle: '交付前确 定性清洗' }));
+    // 第十六版诊断盲区修复：stage 双写 progressStages + finalGateRepairStages——
+    // 该段历史仅写 progressStages，而最终阶段列表 finalStages=executionStages+finalGateRepairStages，
+    // 导致生成后复盘无法从执行阶段看到补写是否发生（B 专题「补写器是否执行」诊断盲区根因）
+    const scoringFixStage = displayStage({ type: 'validation', roleId: 'scoring-requirement-fix', status: 'success', message: `评分项响应确定性补写：${stage5ScoringFix.fixedCount} 条（${stage5ScoringFix.details.slice(0, 3).join('、')}）`, details: stage5ScoringFix.details.slice(3) }, { subtitle: '交付前确定性清洗' });
+    upsertProgressStage(session.progressStages, scoringFixStage);
+    upsertProgressStage(session.finalGateRepairStages, scoringFixStage);
   }
   // B6 交付前确定性清洗（丰乐镇第五轮实测）：跨章表格去重/断行残片合并/叠词收敛此前只有
   // 检测器无修复器——「工程名称表两处重复」「延长有效作业时间 |残行」「分部分项叠词误报」
@@ -39,7 +45,24 @@ export async function stageDeterministicStage5(session: FinalizeSession): Promis
   const stage5TableDup = stripDuplicateTablesAcrossChapters(session.finalChapterDrafts);
   // 交付前确定性清洗链（P10 单源）：修复器清单与顺序由 SURFACE_FIX_STEPS 注册表统一定义，
   // 逐章闭环（每个修复器 runFixUntilClean 2 轮自收敛），权威口径与检测器同源注入
-  session.surfaceFixContext = { laborPeakAuthority: session.laborPeakAuthority, greeningMaintenanceAuthority: session.greeningMaintenanceAuthority };
+  session.surfaceFixContext = {
+    laborPeakAuthority: session.laborPeakAuthority,
+    // V5 P4b-2 阶段劳动力权威（蓝图 byPhase 推导投影；与检测器 phase-labor-mixing 同源，
+    // phase-labor-values 定点回写消费）
+    phaseLaborAuthorities: blueprintPhaseLaborAuthorities(session.blueprintData),
+    greeningMaintenanceAuthority: session.greeningMaintenanceAuthority,
+    // A3 资源拆分权威（蓝图资源清单推导；与检测器 resourceBreakdownConsistencyIssues 同源同扫描）
+    resourceBreakdownAuthority: buildResourceBreakdownAuthority(session.blueprintData),
+    // A4 支护形式选定值（支护体系权威映射；缺失时两可表述按正文主流侧默认归一）
+    supportFormAuthority: session.supportAuthority === 'slope' ? '放坡' : session.supportAuthority === 'pile' ? '钢板桩' : undefined,
+    // 4.27.2 句化标题切分权威（规划小节标题全集）：模板/生效章节/最终草稿三源合并去重
+    // （与装配层 markdownComposer 前缀匹配消费同一规划标题数据源），sentence-like-heading-split 消费
+    plannedSectionTitles: [...new Set([
+      ...(session.effectiveChapters || []).flatMap(chapter => chapter.sections || []),
+      ...session.template.chapters.flatMap(chapter => chapter.sections || []),
+      ...session.finalChapterDrafts.flatMap(chapter => chapter.sections || []),
+    ].filter(Boolean))],
+  };
   const surfaceFixCounts = new Map<string, number>();
   const addSurfaceFixCount = (key: string, count: number) => { if (count > 0) surfaceFixCounts.set(key, (surfaceFixCounts.get(key) ?? 0) + count); };
   for (const chapter of session.finalChapterDrafts) {
@@ -53,8 +76,13 @@ export async function stageDeterministicStage5(session: FinalizeSession): Promis
   const stage5ResidueCount = countOf('table-line-residue');
   const stage5FinishFixCount = countOf('finish-thickness');
   const stage5LaborFixCount = countOf('labor-peak');
+  const stage5PhaseLaborFixCount = countOf('phase-labor-values');
+  const stage5ResourceFixCount = countOf('resource-breakdown');
+  const stage5AmbiguousFixCount = countOf('ambiguous-either-or');
   const stage5SelfFixCount = countOf('self-undermining');
   const stage5EmptyRespCount = countOf('empty-scoring-response');
+  const stage5TenderMetaCount = countOf('tender-meta-language');
+  const stage5DupResponseCount = countOf('duplicate-response-line');
   const stage5AtlasRefCount = countOf('atlas-reference');
   const stage5MetaFixCount = countOf('meta-discourse');
   const stage5FormulaFixCount = countOf('formula-residue');
@@ -63,23 +91,17 @@ export async function stageDeterministicStage5(session: FinalizeSession): Promis
   const stage5TableRowDupCount = countOf('internal-table-row-dup');
   const stage5MaintenanceFixCount = countOf('greening-maintenance');
   const stage5TailRepeatCount = countOf('paragraph-tail-repeat');
-  if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5LaborFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0 || stage5AtlasRefCount > 0 || stage5MetaFixCount > 0 || stage5FormulaFixCount > 0 || stage5OpeningFixCount > 0 || stage5TruncatedFixCount > 0 || stage5TableRowDupCount > 0 || stage5MaintenanceFixCount > 0 || stage5TailRepeatCount > 0) {
+  if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5LaborFixCount > 0 || stage5PhaseLaborFixCount > 0 || stage5ResourceFixCount > 0 || stage5AmbiguousFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0 || stage5TenderMetaCount > 0 || stage5DupResponseCount > 0 || stage5AtlasRefCount > 0 || stage5MetaFixCount > 0 || stage5FormulaFixCount > 0 || stage5OpeningFixCount > 0 || stage5TruncatedFixCount > 0 || stage5TableRowDupCount > 0 || stage5MaintenanceFixCount > 0 || stage5TailRepeatCount > 0) {
     session.finalMarkdown = session.rebuildFinalMarkdown();
-    upsertProgressStage(session.progressStages, displayStage({ type: 'validation', roleId: 'deterministic-surface-fix', status: 'success', message: `交付前确定性清洗：跨章表格去重 ${stage5TableDup.removedCount} 行、断行残片合并 ${stage5ResidueCount} 处、装饰层厚度修复 ${stage5FinishFixCount} 处、劳动力峰值统一 ${stage5LaborFixCount} 处、段首机械重复剥离 ${stage5OpeningFixCount} 处、截断句残留收敛 ${stage5TruncatedFixCount} 处、元话语声明清洗 ${stage5MetaFixCount} 处、公式形态清洗 ${stage5FormulaFixCount} 处、自伤句式改写 ${stage5SelfFixCount} 处、空响应句改写 ${stage5EmptyRespCount} 处、图集引用清洗 ${stage5AtlasRefCount} 处、表内重复行删除 ${stage5TableRowDupCount} 行、绿化养护期统一 ${stage5MaintenanceFixCount} 处、段内句级复读剥离 ${stage5TailRepeatCount} 处、叠词收敛` }, { subtitle: '交付前确定性清洗' }));
+    upsertProgressStage(session.progressStages, displayStage({ type: 'validation', roleId: 'deterministic-surface-fix', status: 'success', message: `交付前确定性清洗：跨章表格去重 ${stage5TableDup.removedCount} 行、断行残片合并 ${stage5ResidueCount} 处、装饰层厚度修复 ${stage5FinishFixCount} 处、劳动力峰值统一 ${stage5LaborFixCount} 处、阶段劳动力统一 ${stage5PhaseLaborFixCount} 处、资源数值统一 ${stage5ResourceFixCount} 处、两可表述归一 ${stage5AmbiguousFixCount} 处、段首机械重复剥离 ${stage5OpeningFixCount} 处、截断句残留收敛 ${stage5TruncatedFixCount} 处、元话语声明清洗 ${stage5MetaFixCount} 处、公式形态清洗 ${stage5FormulaFixCount} 处、自伤句式改写 ${stage5SelfFixCount} 处、空响应句改写 ${stage5EmptyRespCount} 处、招标元语言清理 ${stage5TenderMetaCount} 处、重复响应行去重 ${stage5DupResponseCount} 行、图集引用清洗 ${stage5AtlasRefCount} 处、表内重复行删除 ${stage5TableRowDupCount} 行、绿化养护期统一 ${stage5MaintenanceFixCount} 处、段内句级复读剥离 ${stage5TailRepeatCount} 处、叠词收敛` }, { subtitle: '交付前确定性清洗' }));
   }
   const stage5MarkdownFix = await applyDeterministicConsistencyFixesToMarkdown(session.finalMarkdown, session.factsModel, session.scopeConflicts);
   if (stage5MarkdownFix.fixedCount > 0) session.finalMarkdown = stage5MarkdownFix.markdown;
   // 跨章数值矛盾（劳动力峰值/节点工期/材料设备数量）确定性定点替换：检测定位=修复定位同源
   const stage5NumericFix = applyNumericConsistencyDeterministicFixes(session.finalMarkdown, { authorityIndex: session.blueprintData ? buildAuthorityIndex(session.blueprintData) : undefined, scheduleAuthority: session.scheduleAuthority, assemblyRateAuthority: session.assemblyRateAuthority, supportAuthority: session.supportAuthority });
   if (stage5NumericFix.fixedCount > 0) session.finalMarkdown = stage5NumericFix.markdown;
-  // B3 表格承载正文确定性兜底（丰乐镇实测「1.2 项目主要施工内容」全表格小节）：
-  // 关键小节正文全为表格时从表格行确定性生成段落叙述插入标题后（表格保留），
-  // 覆盖 majorContentGovernanceIssues 的 error blocker，全文级一次收敛
-  const stage5TableProseFix = fixTableBorneContentSections(session.finalMarkdown);
-  if (stage5TableProseFix.fixedCount > 0) session.finalMarkdown = stage5TableProseFix.markdown;
-  if (stage5TableProseFix.fixedCount > 0) {
-    upsertProgressStage(session.progressStages, displayStage({ type: 'validation', roleId: 'table-borne-prose-fix', status: 'success', message: `表格承载正文段落改写兜底：${stage5TableProseFix.fixedCount} 处（${stage5TableProseFix.details.slice(0, 3).join('、')}）`, details: stage5TableProseFix.details.slice(3) }, { subtitle: '交付前确定性清洗' }));
-  }
+  // B3 表格承载正文机器拼段兜底已删除（V2 批1-4 零兜底写入）：全表格小节由检测器
+  // major-content-governance 阻断，交写作侧约束（主要施工内容须段落承载）与 LLM 定向重写
   if (stage5ChapterFix.fixedCount > 0 || stage5MarkdownFix.fixedCount > 0 || stage5NumericFix.fixedCount > 0) {
     await session.recomputeFinalValidationBundle();
     const totalFixed = stage5ChapterFix.fixedCount + stage5MarkdownFix.fixedCount + stage5NumericFix.fixedCount;

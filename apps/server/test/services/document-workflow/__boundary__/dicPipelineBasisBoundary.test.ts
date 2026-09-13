@@ -39,14 +39,32 @@ describe('supplementRequiredTexts 编制依据类别段落兜底', () => {
     expect(result).not.toContain('编制依据补充说明');
   });
 
-  it('仅笼统句（词已命中）：仍注入类别段落到「编制依据」标题下', () => {
-    const markdown = '### 1.1 编制依据\n本施工组织设计的编制依据包括国家法律法规、地方法规及现行工程建设标准、规范。';
+  it('仅写一句笼统话（1 类命中）：仍注入类别段落到「编制依据」标题下', () => {
+    const markdown = '### 1.1 编制依据\n本施工组织设计的编制依据包括国家法律法规。';
     const result = supplementRequiredTexts(markdown, TEMPLATE);
     expect(result).toContain('**编制依据**：本施工组织设计的编制依据按以下类别列出：');
     expect(result).toContain('地方法规规章');
     // 注入位置在标题之后、原文笼统句之前
     expect(result.indexOf('**编制依据**')).toBeGreaterThan(result.indexOf('### 1.1 编制依据'));
-    expect(result.indexOf('**编制依据**')).toBeLessThan(result.indexOf('本施工组织设计的编制依据包括'));
+    expect(result.indexOf('**编制依据**')).toBeLessThan(result.indexOf('本施工组织设计的编制依据包括国家法律法规'));
+  });
+
+  it('笼统句已实质覆盖 3 类（变体词形）：不重复注入（首尾双现根治）', () => {
+    const markdown = '### 1.1 编制依据\n本施工组织设计的编制依据包括国家法律法规、地方法规及现行工程建设标准、规范。';
+    expect(supplementRequiredTexts(markdown, TEMPLATE)).toBe(markdown);
+  });
+
+  it('五类变体全覆盖（丰乐镇实测文本）：不注入（文末重复块根治）', () => {
+    const markdown = '### 1.1 编制文件与现场条件核验\n本施工组织设计的编制依据包括招标及合同文件、国家法律法规、地方性法规与政府规章、现行工程建设标准规范及企业管理体系文件。';
+    expect(supplementRequiredTexts(markdown, TEMPLATE)).toBe(markdown);
+  });
+
+  it('「依据文件」变体标题：注入到该标题之后', () => {
+    const markdown = '### 1.1 依据文件与踏勘范围\n本施工组织设计的编制依据包括招标文件及现场踏勘资料。';
+    const result = supplementRequiredTexts(markdown, TEMPLATE);
+    expect(result).toContain('**编制依据**：本施工组织设计的编制依据按以下类别列出：');
+    expect(result.indexOf('**编制依据**')).toBeGreaterThan(result.indexOf('### 1.1 依据文件与踏勘范围'));
+    expect(result.indexOf('**编制依据**')).toBeLessThan(result.indexOf('本施工组织设计的编制依据包括招标文件及现场踏勘资料'));
   });
 
   it('类别已列出（≥3 类命中）：不重复注入', () => {
@@ -64,10 +82,20 @@ describe('supplementRequiredTexts 编制依据类别段落兜底', () => {
   });
 
   it('无「编制依据」标题：回退注入到「编制说明与工程概况」标题下', () => {
-    const markdown = '### 1.2 编制说明与工程概况\n本方案的编制依据包括国家法律法规、地方法规及现行规范。';
+    const markdown = '### 1.2 编制说明与工程概况\n本方案的编制依据包括国家法律法规。';
     const result = supplementRequiredTexts(markdown, TEMPLATE);
     expect(result).toContain('**编制依据**：本施工组织设计的编制依据按以下类别列出：');
     expect(result.indexOf('**编制依据**')).toBeGreaterThan(result.indexOf('### 1.2 编制说明与工程概况'));
+    expect(result.indexOf('**编制依据**')).toBeLessThan(result.indexOf('本方案的编制依据包括国家法律法规'));
+  });
+
+  it('无任何锚点标题但在 H2：插入首个非目录 H2 标题之后（不再悬浮文末）', () => {
+    mockedRequiredTexts.mockReturnValue(['编制依据']);
+    const markdown = '## 目录\n- 第一章 总体部署\n\n## 第一章 总体部署\n正文内容。';
+    const result = supplementRequiredTexts(markdown, TEMPLATE);
+    expect(result).toContain('**编制依据**：本施工组织设计的编制依据按以下类别列出：');
+    expect(result.indexOf('**编制依据**')).toBeGreaterThan(result.indexOf('## 第一章 总体部署'));
+    expect(result.indexOf('**编制依据**')).toBeLessThan(result.indexOf('正文内容。'));
   });
 
   it('无任何锚点标题：五类段落追加到文末', () => {

@@ -2,7 +2,7 @@ import { useRef, useEffect, useState } from 'react';
 import { useAppTranslations } from '@/components/Layout';
 import { KB_FILE_STATUS_TEXT_KEY } from '@/lib/utils';
 import { Button, Drawer, Input, App, Tag, Popconfirm, Empty, Space, Checkbox, Skeleton, Select, Divider, Spin, Segmented } from 'antd';
-import { EditOutlined, FileTextOutlined, FolderOutlined, DeleteOutlined, PlusOutlined, ImportOutlined, ExportOutlined, SendOutlined, RobotOutlined, SearchOutlined, UnorderedListOutlined, AppstoreOutlined, SafetyCertificateOutlined, CheckCircleOutlined, BookOutlined } from '@ant-design/icons';
+import { EditOutlined, FileTextOutlined, FolderOutlined, DeleteOutlined, PlusOutlined, ImportOutlined, ExportOutlined, SendOutlined, RobotOutlined, SearchOutlined, UnorderedListOutlined, AppstoreOutlined, SafetyCertificateOutlined, CheckCircleOutlined } from '@ant-design/icons';
 
 interface PromptProject {
   id: string; projectId: string; projectRoot?: string; projectName: string;
@@ -206,25 +206,6 @@ export default function PromptPage() {
   const [showKnowledgePicker, setShowKnowledgePicker] = useState(false);
   const [rulePreview, setRulePreview] = useState<PromptRulePreview | null>(null);
   const [rulePreviewLoading, setRulePreviewLoading] = useState(false);
-  /** 范式推荐：插入参考库章节结构 */
-  const [paradigmType, setParadigmType] = useState<string | undefined>(undefined);
-  const [paradigmLoading, setParadigmLoading] = useState(false);
-
-  const insertParadigm = async () => {
-    if (!paradigmType) return;
-    setParadigmLoading(true);
-    try {
-      const res = await fetch(`/api/template-references?action=paradigms&projectType=${encodeURIComponent(paradigmType)}`);
-      const data = await res.json() as { paradigm?: { text: string; sourceCount: number } | null };
-      if (!data.paradigm) { message.info(t('prompt.paradigmEmpty')); return; }
-      setEditContent(prev => prev.trim() ? `${prev.trim()}\n\n${data.paradigm!.text}` : data.paradigm!.text);
-      message.success(t('prompt.paradigmInserted'));
-    } catch {
-      message.error(t('prompt.paradigmFailed'));
-    } finally {
-      setParadigmLoading(false);
-    }
-  };
 
   // 编辑提示词时防抖预检：复用运行时规则抽取（纯正则），让用户知道系统将强制执行哪些硬性规则
   useEffect(() => {
@@ -670,12 +651,6 @@ export default function PromptPage() {
                 ))}
               </Space>
             )}
-            <Divider style={{ margin: '8px 0' }} />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 12, color: 'var(--colorTextSecondary)', whiteSpace: 'nowrap' }}>{t('prompt.paradigmTitle')}</span>
-              <Select size="small" allowClear placeholder={t('prompt.paradigmTypePlaceholder')} style={{ minWidth: 110 }} value={paradigmType} onChange={setParadigmType} options={['房建', '市政', '公路', '桥梁与隧道', '水利水电', '电力', '机电安装', '装饰装修', '园林绿化', '铁路', '港口与航道', '矿山冶金', '其他'].map(type => ({ value: type, label: type }))} />
-              <Button size="small" icon={<BookOutlined />} loading={paradigmLoading} disabled={!paradigmType} onClick={() => { void insertParadigm(); }}>{t('prompt.paradigmInsert')}</Button>
-            </div>
           </div>
         </div>
 

@@ -466,13 +466,19 @@ describe('B16 新技术短板自曝（句式16）', () => {
 });
 
 describe('B17 否定式自述分包（句式17）', () => {
-  it('B17 命中改写为自主组织正向表述', () => {
+  it('B17 命中改写为自主组织正向表述（核心句匹配，前文响应句与句尾标点保留）', () => {
     const result = fixSelfUnderminingCandidates('本招标项目不允许分包。本工程不进行分包，全部施工内容由我方自行组织完成。');
     expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toBe('本招标项目严禁转包和违法分包，本工程全部施工任务由我公司项目部自行组织实施');
+    expect(result.markdown).toBe('本招标项目不允许分包。本工程全部施工任务由我公司项目部自行组织实施，严禁违法分包、转包及挂靠行为。');
   });
-  it('B17 单句不命中（两句缺一）', () => {
-    expect(fixSelfUnderminingCandidates('本工程不进行分包，全部施工内容由我方自行组织完成。').fixedCount).toBe(0);
+  it('B17 4.28.0 去前缀依赖：4.27.0 实测前缀变体（联合体/分包响应句）同样命中', () => {
+    const result = fixSelfUnderminingCandidates('按招标文件要求：本招标项目不接受联合体投标；不允许分包。本工程不进行分包，全部施工内容由我方自行组织完成。');
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('不允许分包。本工程全部施工任务由我公司项目部自行组织实施，严禁违法分包、转包及挂靠行为。');
+    expect(result.markdown).not.toContain('本工程不进行分包');
+  });
+  it('B17 无核心否定句（仅前文响应句）不动', () => {
+    expect(fixSelfUnderminingCandidates('本招标项目不允许分包。本工程全部施工任务由我公司项目部自行组织实施，严禁违法分包、转包及挂靠行为。').fixedCount).toBe(0);
   });
 });
 
@@ -1716,7 +1722,7 @@ describe('K7 第3步 材料/设备数量（fixCrossSectionNumericConflicts）外
   });
 });
 
-describe('K8 表格唯一值/设备兜底/众数兜底', () => {
+describe('K8 表格唯一值权威（设备/众数兜底已删除 · V2 批1-4 零兜底写入）', () => {
   it('K8 表格唯一值作权威（灭火器 2→12）', () => {
     const md = '| 灭火器 | 12具 |\n\n正文配置灭火器2具。';
     const result = applyNumericConsistencyDeterministicFixes(md);
@@ -1727,20 +1733,22 @@ describe('K8 表格唯一值/设备兜底/众数兜底', () => {
     const result = applyNumericConsistencyDeterministicFixes(md);
     expect(result.markdown).toContain('灭火器12具。');
   });
-  it('K8 塔吊多表冲突 → 设备兜底取保守台数', () => {
+  it('K8 塔吊多表冲突 → 不再取保守台数，不修复', () => {
     const md = '| 塔吊 | 2台 |\n| 塔吊 | 1台 |';
     const result = applyNumericConsistencyDeterministicFixes(md);
-    expect(result.markdown).toContain('塔吊 | 1台');
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(md);
   });
-  it('K8 灭火器多表互斥 → 众数兜底（2具→12具）', () => {
+  it('K8 灭火器多表互斥 → 不再众数兜底，不修复', () => {
     const md = '| 灭火器 | 12具 |\n| 灭火器 | 12具 |\n| 灭火器 | 2具 |';
     const result = applyNumericConsistencyDeterministicFixes(md);
-    expect(result.markdown.match(/\| 灭火器 \| 12具 \|/gu)?.length).toBe(3);
-    expect(result.markdown).not.toContain('| 2具 |');
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(md);
   });
-  it('K8 分部位表格行不参与众数归一', () => {
+  it('K8 分部位表格行多值冲突不修复', () => {
     const md = '| 灭火器 | 12具 | 材料库 |\n| 灭火器 | 2具 | 配电箱旁 |';
     const result = applyNumericConsistencyDeterministicFixes(md);
+    expect(result.fixedCount).toBe(0);
     expect(result.markdown).toContain('2具');
   });
 });

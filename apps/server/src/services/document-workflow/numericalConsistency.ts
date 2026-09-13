@@ -62,6 +62,34 @@ export function longestCommonHanSubstring(left: string, right: string): number {
   return best;
 }
 
+/** longestCommonHanSubstring 的带位置变体：返回最长公共连续汉字子串的长度与其在 left 原文
+ * 中的下标区间 [start, end)（V5 P4b-2 阶段名拼接歧义判定用——需知道最长命中片段未覆盖的
+ * 残余前/后片段）。长度口径与 longestCommonHanSubstring 严格一致（同一 DP 与严格改进口径）。 */
+export function longestCommonHanSubstringSpan(left: string, right: string): { length: number; start: number; end: number } {
+  const aMatches = [...left.matchAll(/[\p{Script=Han}]/gu)];
+  const b = right.match(/[\p{Script=Han}]/gu) || [];
+  if (aMatches.length === 0 || b.length === 0) return { length: 0, start: 0, end: 0 };
+  let best = 0;
+  let bestI = -1;
+  const dp = new Array<number>(b.length).fill(0);
+  for (let i = 0; i < aMatches.length; i += 1) {
+    let prev = 0;
+    for (let j = 0; j < b.length; j += 1) {
+      const carry = dp[j];
+      dp[j] = aMatches[i]![0] === b[j] ? prev + 1 : 0;
+      prev = carry;
+      if (dp[j] > best) {
+        best = dp[j];
+        bestI = i;
+      }
+    }
+  }
+  if (best === 0 || bestI < 0) return { length: 0, start: 0, end: 0 };
+  const startMatch = aMatches[bestI - best + 1]!;
+  const endMatch = aMatches[bestI]!;
+  return { length: best, start: startMatch.index!, end: endMatch.index! + endMatch[0].length };
+}
+
 export interface NumericReconciliation {
   /** 与证据逐字命中（注入证据或完整证据池）的数值 token */
   confirmed: string[];

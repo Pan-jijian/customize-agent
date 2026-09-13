@@ -16,8 +16,6 @@ export async function buildDocumentQualityReport(input: {
   knowledgeCoverage: DocumentKnowledgeCoverageReport;
   factTraces: DocumentFactTrace[];
   template?: DocumentTemplate | null;
-  /** 参考库同类工程完整五要素块均值（可选）：提供时作为可落地性评分的目标基准 */
-  referenceCompleteBlocks?: number;
   /** 单测注入的嵌入实现（替代本地模型），生产环境不传 */
   embedDocuments?: (texts: string[]) => Promise<number[][]>;
 }): Promise<DocumentQualityReport> {
@@ -27,7 +25,6 @@ export async function buildDocumentQualityReport(input: {
     template: input.template,
     factTraces: input.factTraces,
     issues: input.issues,
-    referenceCompleteBlocks: input.referenceCompleteBlocks,
     embedDocuments: input.embedDocuments,
   });
   const weighted = scores.completeness * 0.30 + scores.specificity * 0.25 + scores.compliance * 0.20

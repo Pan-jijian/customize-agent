@@ -342,6 +342,29 @@ describe('resourceBreakdownConsistencyIssues 资源拆分一致性兑底', () =>
     expect(resourceBreakdownConsistencyIssues('| 合计 | 一般路灯 100W+120W | 118套 |', data)).toEqual([]);
   });
 
+  it('阶段部署段落豁免（退场期 25+10+5+3=43=阶段总数）→ 无 issue', () => {
+    const data = bp({ composition: [
+      { trade: '普工', count: 45, basis: '' },
+      { trade: '混凝土工', count: 88, basis: '' },
+      { trade: '管道工', count: 34, basis: '' },
+      { trade: '绿化工', count: 48, basis: '' },
+    ] });
+    const markdown = '亮化与收尾工程阶段投入43人，为退场收口期。普工25人负责收尾整修，混凝土工10人负责零星构件，管道工5人配合排查，绿化工3人进行场地恢复。';
+    expect(resourceBreakdownConsistencyIssues(markdown, data)).toEqual([]);
+  });
+
+  it('机械分配语境（基线「其中3台」「1台转入」）→ 不误报', () => {
+    const data = bp({ composition: [] }, [{ name: '挖掘机', quantity: 5, spec: '' }]);
+    const markdown = '施工准备与清杂拆除阶段投入全部5台挖掘机，其中3台用于房前屋后整理与清杂，2台用于拆除路面及基层。污水管网工程阶段保留5台挖掘机用于沟槽开挖，1台转入沟塘清淤。';
+    expect(resourceBreakdownConsistencyIssues(markdown, data)).toEqual([]);
+  });
+
+  it('同条目多处偏离 → 每条目最多一条 issue（label 去重）', () => {
+    const data = bp({ composition: [{ trade: '混凝土工', count: 88, basis: '' }] });
+    const issues = resourceBreakdownConsistencyIssues('投入混凝土工10人。\n\n另处混凝土工12人。', data);
+    expect(issues.filter(issue => issue.message.includes('工种构成'))).toHaveLength(1);
+  });
+
   it('无蓝图 → 静默跳过', () => {
     expect(resourceBreakdownConsistencyIssues('高峰期投入200人。')).toEqual([]);
   });

@@ -54,7 +54,9 @@ describe('Y1 constructionOrgChapterRulePrompt / BlueprintRuleLines', () => {
     const lines = constructionOrgChapterRulePrompt(tplChapter('施工方案')).split('\n');
     expect(lines).toHaveLength(3);
     expect(lines[0]).toBe('【施工组织设计专项写作规则】');
-    expect(lines[2]).toContain('每项措施至少包含');
+    // 4.28.0 C3 规则文案升级：原「每项措施至少包含责任主体…」改为落地措施范例+五问口径（去元语言示例）
+    expect(lines[2]).toContain('落地措施范例');
+    expect(lines[2]).toContain('每句措施要能回答');
   });
 
   it('质量语境 → 注入质量闭环提示词', () => {
@@ -487,7 +489,7 @@ describe('Y7 constructionOrgMajorContentIssues', () => {
     expect(issues[0].message).toContain('当前 4 个');
   });
 
-  it('段落正文 + 数据附表（2 行小表）→ 不报（与 fixTableBorneContentSections 同源口径校准）', () => {
+  it('段落正文 + 数据附表（2 行小表）→ 不报（表格承载判定口径校准）', () => {
     const content = `${majorSection(5)}\n| 序号 | 内容 |\n|---|---|`;
     const issues = constructionOrgMajorContentIssues([draftChapter('项目主要施工内容', content)]);
     expect(issues.some(issue => issue.message.includes('Markdown 表格'))).toBe(false);

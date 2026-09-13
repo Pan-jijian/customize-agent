@@ -10,7 +10,7 @@ import { buildSemanticGate } from '../../semanticGate';
 import { isQualificationSectionTitle } from '../../evidenceContentSafety';
 import { LABOR_STAGE_LIMIT_WORDS, PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, TRADE_WORKER_WORD_RE, cnNumberToArabic, collectLaborTableBlocks, excavationDepthFromFacts, extractGreeningMaintenanceAuthority, extractStreetLightAuthority, flexNamePattern, laborPeakStageOf, quantityUnitVariants } from '../authorities/authorities';
 import type { SupportSystemAuthorityKind } from '../authorities/authorities';
-import { longestCommonHanSubstring } from '../../numericalConsistency';
+import { longestCommonHanSubstring, longestCommonHanSubstringSpan } from '../../numericalConsistency';
 
 export const CALENDAR_DATE_RE = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/gu;
 
@@ -147,6 +147,13 @@ const STAGE_LABOR_RE = /(?:阶段|期间)[^。；;\n]{0,12}?(?:约)?\s*([\d,]+)\
 // 导致跨口径矛盾漏检——反向口径（劳动力/作业人员词在前、数字在后）并入同一提取池
 
 export const LABOR_COUNT_RE = /(?:劳动力|作业人员|施工人员)[^。；;\n]{0,16}?(?:约)?\s*([\d,]+)\s*人/g;
+
+// V5 P4b-2 枚举列举通道（12:33 评审 P0-1 漏检根因①）：阶段劳动力列举常写作「各阶段同时在
+// 场人数按施工准备与清杂拆除216人、污水管网工程85人…执行」——首「阶段」词与单元数字的间隔
+// 远超 STAGE_LABOR_RE 的 12 字窗口，整句漏检；本模式以「名称+数字+人」单元为最小匹配，句
+// 内含「阶段」时启用（scanPhaseLaborClaims），名称经最长公共汉字子串归属权威阶段（≥4 字）。
+// 「人次/人日」等非人数单位由尾随断言排除。
+const ENUM_LABOR_UNIT_RE = /([^、，。；;\n|]{2,24}?)(?:约|为|达|共|计)?\s*([\d,]+)\s*人(?![日次月年时均])/gu;
 
 /**
  * V5 P6 阶段短语提取（检测器家族共用）：数字前「X阶段」短语的阶段名归属——
@@ -999,6 +1006,14 @@ const SELF_UNDERMINING_QUERIES = [
 
 const POSITIVE_SELF_REFERENCE_RE = /编制范围为[^。；;]{0,40}?所界定的全部施工内容|作为施工组织的控制性约束条件|分项验收[，,]?验收记录经监理工程师签字确认后归档|(?:执行|按|依据|按照)[^。；;]{0,10}?(?:〔|【)?20\d{2}(?:〕|】)?\s*\d+\s*号\s*(?:文件|办法|规定)?/u;
 
+// 4.28.0 D2 程序性句豁免（丰乐镇 4.27.0 终稿 3 候选复核：2 误报 1 真伤）：
+// ①「检查-整改-复查销项」管理闭环句（实测「未落实到位的由责任岗位当日整改，安全员次日复查并销项」）
+//   ——「未落实」是闭环动作的触发条件而非投标短板；②「未明确事项按标准程序执行」技术处置句
+//   （实测「图纸未明确的按现行国家、行业及地方标准中较高要求执行」）——设计/标准未明确事项的
+//   执行优先级程序，非自伤。真伤「本工程不进行分包」类否定式自述不受豁免（R9 契约检测召回 ↔
+//   fixer 改写通道保持一一对应）。
+const SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE = /未落实[^。；;]{0,24}?(?:整改|复查|销项|复验)|未(?:明确|列明|注明)[^。；;]{0,36}?按[^。；;]{0,44}?执行/u;
+
 export async function selfUnderminingCandidateIssues(markdown: string): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
   const sentences = markdown
@@ -1019,6 +1034,7 @@ export async function selfUnderminingCandidateIssues(markdown: string): Promise<
   const hits = [...new Set(sentences.filter(sentence =>
     UNDERMINING_NEGATIVE_RE.test(sentence)
     && !POSITIVE_SELF_REFERENCE_RE.test(sentence)
+    && !SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE.test(sentence)
     && SELF_UNDERMINING_QUERIES.some(query => underminingSimilarity(sentence, query) >= SEMANTIC_COVERAGE_THRESHOLD)))];
   if (hits.length === 0) return issues;
   for (const hit of hits) {
@@ -1243,6 +1259,28 @@ export function formulaResidueIssues(markdown: string): ValidationIssue[] {
 export const COMMERCIAL_TERM_RE = /暂列金额|暂估价|报价明细|综合单价|清单合价|预留金|投标报价|异常低价|评标基准价/u;
 
 export const COMMERCIAL_RATE_RE = /(?:税率|增值税)[^。；;\n]{0,12}\d/u;
+
+/** 系统补写器定性响应句豁免谓词（商务词清洗 stripCommercialDataBodyLines 与商务数据检测
+ * commercialDataInBodyIssues 共用单源）——合法形态两类：
+ * ①过渡形态：「按招标文件约定/要求」开头单句（≤120 字窗口，历史成稿与 LLM 模仿残留）；
+ * ②4.27.2 投标人口吻形态：句内含系统响应标记（本工程/我方/本公司/按合同约定/按约定时限）——
+ *   商务定性响应句（「本工程…按合同约定…」）与 voice 改造后的条款抄写句均含标记。
+ * 全部形态叠加「无商务数字参数」硬闸（金额/百分比/时限数字）：承载商务数据的句子一律不豁免，
+ * 定性表述（无数字）才走豁免——前附表定性响应句不含商务数字参数，是技术标合法响应形态。
+ * 历史 BUG：豁免正则要求 $ 紧贴字符类而句拆后 part 带句尾标点恒不命中，补写句被清洗删除「补了即被删」，
+ * 检测端亦无豁免形成「补了即被阻断」——双端统一到本谓词（第十六版闭环；4.27.2 语气改造同步新形态）。 */
+const SANCTIONED_RESPONSE_LEGACY_FORM_RE = /^按招标文件(?:约定|要求)[^。；;\n]{0,120}[。；;]?$/u;
+const SANCTIONED_RESPONSE_MARKER_RE = /本工程|我方|本公司|按合同约定|按约定时限/u;
+const SANCTIONED_RESPONSE_NUMERIC_RE = /\d+(?:\.\d+)?\s*(?:%|％|万元|亿元|元|天|日|个月|年)/u;
+export function isSanctionedResponseSentence(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  // 商务数字参数硬闸（双形态共用）：金额/百分比/时限数字出现即不豁免——数据承载句不属定性响应
+  if (SANCTIONED_RESPONSE_NUMERIC_RE.test(trimmed)) return false;
+  if (SANCTIONED_RESPONSE_LEGACY_FORM_RE.test(trimmed)) return true;
+  const body = trimmed.replace(/[。；;]$/u, '');
+  return body.length > 0 && body.length <= 200 && SANCTIONED_RESPONSE_MARKER_RE.test(body);
+}
 /** 允许入正文的项目商务事实（资料落位口径）：词面负例保护，不得误报为商务条款泄漏 */
 
 const COMMERCIAL_ALLOWED_FACT_RE = /合同估算价|合同估算价格|投资估算|估算价格|工程估算价|最高投标限价|招标控制价/u;
@@ -1286,6 +1324,9 @@ export async function commercialDataInBodyIssues(markdown: string, embedDocument
     if (!COMMERCIAL_TERM_RE.test(line) && !COMMERCIAL_RATE_RE.test(line) && !COMMERCIAL_VARIANT_HINT_RE.test(line)) continue;
     if (COMMERCIAL_RATE_RE.test(line)) hits.push('税率/增值税');
     for (const sentence of line.split(/(?<=[。；;])\s*/u)) {
+      // 系统补写器定性响应句豁免（双端对齐）：与 stripCommercialDataBodyLines 清洗豁免同源谓词——
+      // 不豁免则终检补写的定性句（含词表词面）被本检测器反向阻断（补了即被阻断的错误闭环）
+      if (isSanctionedResponseSentence(sentence)) continue;
       const terms = sentence.match(COMMERCIAL_TERM_RE) || [];
       const hasAllowed = COMMERCIAL_ALLOWED_FACT_RE.test(sentence);
       const hasVariant = COMMERCIAL_VARIANT_HINT_RE.test(sentence);
@@ -1935,13 +1976,22 @@ function escapeRegexLiteral(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
+/** F14 规格错位扫描命中：issue 供检测端报告；replacement 供 A2 裁决器确定性硬替换
+ *（仅当权威规格唯一[同 pattern 类型]时提供——多义权威无唯一口径裁决，留给 LLM 定点修复） */
+export interface SpecLocationMismatchHit {
+  issue: ValidationIssue;
+  location: string;
+  replacement?: { start: number; end: number; replacement: string; detail: string };
+}
+
 /** F14 规格写错部位检测：正文规格 vs 清单权威映射（specAuthorityMap）比对——
  *  同一部位语境出现该部位权威之外的规格（垫层写成 C35 而权威 C15）→ blocker（确定性可判）；
- *  权威映射缺失或规格类型不可推导时静默跳过（不误伤无清单项目）。 */
+ *  权威映射缺失或规格类型不可推导时静默跳过（不误伤无清单项目）。
+ *  4.27.0 A2：扫描结构化（hits）——裁决器与检测端共用同一扫描口径（检测定位=修复定位）。 */
 
-export function specLocationMismatchIssues(markdown: string, specAuthorityMap?: SpecAuthorityMap): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-  if (!specAuthorityMap) return issues;
+export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?: SpecAuthorityMap): SpecLocationMismatchHit[] {
+  const hits: SpecLocationMismatchHit[] = [];
+  if (!specAuthorityMap) return hits;
   // V5 P6 更长复合条目名碰撞豁免（run1 重建实测）备查表：全维度条目名集合
   const allLocations = [...new Set(Object.values(specAuthorityMap).flat().map(item => item.location).filter(Boolean))];
   for (const placements of Object.values(specAuthorityMap)) {
@@ -2025,7 +2075,11 @@ export function specLocationMismatchIssues(markdown: string, specAuthorityMap?: 
         if (collisionSpecs.has(found)) continue;
       }
       if (authoritySpecs.has(found)) continue;
-        issues.push({
+      // 4.27.0 A2：权威规格唯一（同 pattern 类型）时可确定性裁决口径 → 附替换 span
+      const uniqueAuthority = authoritySpecs.size === 1 ? [...authoritySpecs][0] : undefined;
+      const valueStart = locationStart + foundAt;
+      hits.push({
+        issue: {
           level: 'error',
           severity: 'blocker',
           category: 'fact_consistency',
@@ -2033,12 +2087,27 @@ export function specLocationMismatchIssues(markdown: string, specAuthorityMap?: 
           repairability: 'llm_repairable',
           message: `规格错位：“${location}”使用的规格 ${found} 与工程量清单权威（${[...authoritySpecs].join('/')}）不一致`,
           suggestion: `按工程量清单将“${location}”的规格统一为 ${[...authoritySpecs].join('/')}；同一材料不同部位允许不同规格，但同一部位不得混用其他部位的规格。`,
-        });
-        if (issues.length >= 8) return issues;
+        },
+        location,
+        replacement: uniqueAuthority
+          ? {
+              start: valueStart,
+              end: valueStart + found.length,
+              replacement: uniqueAuthority,
+              detail: `规格错位“${location}” ${found}→${uniqueAuthority}（以工程量清单锁定口径为准）`,
+            }
+          : undefined,
+      });
+      if (hits.length >= 8) return hits;
       }
     }
   }
-  return issues.slice(0, 8);
+  return hits.slice(0, 8);
+}
+
+/** 检测端入口（行为保持）：扫描命中只取 issue */
+export function specLocationMismatchIssues(markdown: string, specAuthorityMap?: SpecAuthorityMap): ValidationIssue[] {
+  return scanSpecLocationMismatchHits(markdown, specAuthorityMap).map(hit => hit.issue);
 }
 
 // ── 15. 桩基表述残留（h13）：地基与基础章节施工流程无桩基工序（筏板/独立基础），
@@ -3072,62 +3141,325 @@ export function crossProjectValueCopyIssues(
   return issues.slice(0, 8);
 }
 
-/** 阶段人数混用检测（V5 P4b，P3.3 原设计）：正文「XX阶段 + N 人」与蓝图分阶段劳动力推导
- * （phaseAuthorities = byPhase 的 midValue 权威投影）比对——阶段名唯一命中且数值不符即 error。
- * 阶段名存在但值不符 = 跨口径数字被复制/改编（确定性可判）；阶段名不存在时不判
- * （合法细分表述与异策略阶段词无法确定性裁决，交 LLM 评审层）。
- * 阶段名匹配用最长公共汉字子串（≥4 字）：「施工准备」↔「施工准备与清杂拆除」、
- * 「污水管网工程」精确命中；表格行（分阶段投入明细表的合法承载，byPhase 推导源）跳过；
- * 负向声明句（修复声明引用旧值）豁免；阶段提取与 resourceConsistencyIssues 同窗口。 */
+// ── V5 P4b-2 阶段劳动力声明统一扫描（检测与确定性修复同源单源） ──
+// 12:33 评审 P0-1 三漏检根因：①「阶段…N 人」12 字窗口装不下列举引导语（「各阶段同时在场
+// 人数按施工准备与清杂拆除216人、污水管网工程85人…」整句漏检）；②两阶段名连写（「景观与
+// 绿化亮化与收尾工程」）时最长命中取到单个阶段名静默放过；③无确定性修复器，跨章漂移只能
+// 靠 LLM 修复轮。实现按「问题粒度」产出：数值不符 → claim（供确定性修复器回写）；阶段名
+// 拼接歧义 → ambiguity（无法确定性拆分，交 LLM 修复轮改述）。
+
+export interface PhaseLaborClaim {
+  /** 数值起始下标（markdown 绝对位置，供确定性替换） */
+  start: number;
+  /** 数值结束下标 */
+  end: number;
+  /** 数值文本原样（可能含千分位逗号） */
+  raw: string;
+  /** 正文取值 */
+  actual: number;
+  /** 蓝图推导权威值 */
+  expected: number;
+  /** 归属的蓝图阶段名 */
+  phase: string;
+  /** 蓝图推导依据（修复建议引用） */
+  trace?: string;
+  /** 命中通道：base=「阶段…N 人」基础通道；enumeration=「名称+数字+人」枚举列举通道 */
+  channel: 'base' | 'enumeration';
+  /** 定位切片（数值前 24 字 ~ 数值+人） */
+  excerpt: string;
+}
+
+export interface PhaseLaborAmbiguity {
+  start: number;
+  raw: string;
+  actual: number;
+  /** 连写的完整阶段短语（未含「阶段」后缀） */
+  phrase: string;
+  /** 最长命中阶段 */
+  first: { phase: string; value: number; trace?: string };
+  /** 残余前/后片段另行命中的阶段 */
+  second: { phase: string; value: number; trace?: string };
+  excerpt: string;
+}
+
+type PhaseLaborAuthority = { phase: string; value: number; trace?: string };
+
+/** 阶段短语→权威阶段归属（检测/修复同源）：最长公共汉字子串 ≥4 字取最长命中（多命中取最
+ * 具体，L7 契约）；最长命中未完整覆盖阶段短语、且残余前/后片段另命中其他权威（≥4 字）时
+ * 判为「两阶段名连写」歧义（12:33 评审 P0-1 根因②：「景观与绿化亮化与收尾工程」= 景观与
+ * 绿化工程 + 亮化与收尾工程连写，旧实现取最长命中「亮化与收尾工程」静默放过）。 */
+function matchPhaseAuthority(
+  stagePrefix: string,
+  phaseAuthorities: PhaseLaborAuthority[],
+): { best: PhaseLaborAuthority; second?: PhaseLaborAuthority } | null {
+  const prefixHanLength = (stagePrefix.match(/[\p{Script=Han}]/gu) || []).length;
+  if (prefixHanLength === 0) return null;
+  let best: PhaseLaborAuthority | null = null;
+  let bestSpan: { length: number; start: number; end: number } = { length: 0, start: 0, end: 0 };
+  for (const entry of phaseAuthorities) {
+    const span = longestCommonHanSubstringSpan(stagePrefix, entry.phase);
+    if (span.length >= 4 && (best === null || span.length > bestSpan.length)) {
+      best = entry;
+      bestSpan = span;
+    }
+  }
+  if (!best) return null;
+  if (bestSpan.length >= prefixHanLength) return { best };
+  // 残余前/后片段另命中其他权威 → 两阶段名连写；片段不足 2 汉字不参与（防假阳性）
+  const beforeRest = stagePrefix.slice(0, bestSpan.start);
+  const afterRest = stagePrefix.slice(bestSpan.end);
+  for (const fragment of [beforeRest, afterRest]) {
+    if ((fragment.match(/[\p{Script=Han}]/gu) || []).length < 2) continue;
+    for (const entry of phaseAuthorities) {
+      if (entry.phase === best.phase) continue;
+      if (longestCommonHanSubstringSpan(fragment, entry.phase).length >= 4) return { best, second: entry };
+    }
+  }
+  return { best };
+}
+
+/** 阶段劳动力声明统一扫描（检测与确定性修复同源单源）：双通道（基础「阶段…N 人」12 字窗口
+ * + 枚举列举「名称+数字+人」单元，句内含「阶段」时启用）产出与权威不符的 claim 与阶段名
+ * 拼接 ambiguity；豁免口径与旧检测器零漂移：表格行（分阶段投入明细表合法承载）、负向声明句
+ * （修复声明引用旧值）、最低配置声明（不少于/至少类）、工种配置句（工/员/长/司机/班组结尾）。
+ * 去重按数值位置（基础通道优先，枚举通道补漏）。 */
+export function scanPhaseLaborClaims(
+  markdown: string,
+  phaseAuthorities: PhaseLaborAuthority[],
+): { claims: PhaseLaborClaim[]; ambiguities: PhaseLaborAmbiguity[] } {
+  const claims: PhaseLaborClaim[] = [];
+  const ambiguities: PhaseLaborAmbiguity[] = [];
+  if (phaseAuthorities.length === 0) return { claims, ambiguities };
+  const seen = new Set<number>();
+  const record = (valueIndex: number, raw: string, stageSource: string, channel: 'base' | 'enumeration') => {
+    if (seen.has(valueIndex)) return;
+    const value = Number(raw.replace(/[,，]/gu, ''));
+    if (!Number.isFinite(value) || value <= 0) return;
+    const lineStart = markdown.lastIndexOf('\n', valueIndex) + 1;
+    let lineEnd = markdown.indexOf('\n', valueIndex);
+    if (lineEnd === -1) lineEnd = markdown.length;
+    const line = markdown.slice(lineStart, lineEnd);
+    // 表格行：分阶段投入明细表的合法承载，不检测（与 resourceConsistencyIssues 同口径）
+    if (/^\s*\|.*\|\s*$/u.test(line)) return;
+    // 负向声明句豁免：「不再出现“XX阶段35人”」是修复声明引用旧值（与检测器家族同源）
+    if (NEGATIVE_DECLARATION_RE.test(line)) return;
+    // V5 P6 误报豁免（run1 实测）：①最低配置声明「阶段不少于2人」（安全员配置）——数字前文含
+    // 不少于/不低于/至少/最低/不小于；②工种配置句「道路铺装阶段即安排管道工10人」——数字紧邻
+    // 前文以工种/职务词结尾（工/员/长/司机/班组）。两类均非阶段劳动力总量口径。
+    const beforeNumber = markdown.slice(Math.max(lineStart, valueIndex - 12), valueIndex);
+    if (/不少于|不低于|至少|最低|不小于|≥/u.test(beforeNumber)) return;
+    if (/(?:[\u4e00-\u9fa5]{1,3}(?:工|员|长)|司机|班组|队伍?)\s*$/u.test(beforeNumber)) return;
+    const match = matchPhaseAuthority(stageSource, phaseAuthorities);
+    if (!match) return;
+    const excerpt = markdown.slice(Math.max(lineStart, valueIndex - 24), Math.min(markdown.length, valueIndex + raw.length + 1)).trim();
+    if (match.second) {
+      seen.add(valueIndex);
+      ambiguities.push({
+        start: valueIndex,
+        raw,
+        actual: value,
+        phrase: stageSource,
+        first: { phase: match.best.phase, value: match.best.value, trace: match.best.trace },
+        second: { phase: match.second.phase, value: match.second.value, trace: match.second.trace },
+        excerpt,
+      });
+      return;
+    }
+    if (value === match.best.value) return;
+    seen.add(valueIndex);
+    claims.push({
+      start: valueIndex,
+      end: valueIndex + raw.length,
+      raw,
+      actual: value,
+      expected: match.best.value,
+      phase: match.best.phase,
+      trace: match.best.trace,
+      channel,
+      excerpt,
+    });
+  };
+  // 基础通道（旧 phaseLaborMixingIssues 口径）：阶段短语两步法提取（回指句回溯实义阶段），
+  // 阶段提取与 resourceConsistencyIssues 同窗口；数值定位与旧实现逐字一致（indexOf）
+  for (const match of markdown.matchAll(STAGE_LABOR_RE)) {
+    const valueIndex = (match.index ?? 0) + match[0].indexOf(match[1]);
+    const lineStart = markdown.lastIndexOf('\n', valueIndex) + 1;
+    const stagePhrase = extractStagePhrase(markdown, lineStart, valueIndex);
+    if (!stagePhrase) continue;
+    record(valueIndex, match[1], stagePhrase.replace(/阶段$/u, ''), 'base');
+  }
+  // 枚举列举通道（V5 P4b-2）：句内含「阶段」（句界=。；;，不跨行以免列举换行漏检）时启用；
+  // 「名称+数字+人」单元的引导语（「各阶段同时在场人数按施工准备与清杂拆除216人」）由最长
+  // 公共汉字子串在整段名称内归属权威阶段，与基础通道共用全部豁免与归属判定
+  for (const match of markdown.matchAll(ENUM_LABOR_UNIT_RE)) {
+    if (!match[1] || !match[2]) continue;
+    const raw = match[2];
+    const valueIndex = (match.index ?? 0) + match[0].lastIndexOf(raw);
+    if (seen.has(valueIndex)) continue;
+    const sentenceStart = Math.max(
+      markdown.lastIndexOf('。', valueIndex),
+      markdown.lastIndexOf('；', valueIndex),
+      markdown.lastIndexOf(';', valueIndex),
+    ) + 1;
+    let sentenceEnd = markdown.length;
+    for (const boundary of ['。', '；', ';']) {
+      const found = markdown.indexOf(boundary, valueIndex);
+      if (found !== -1 && found < sentenceEnd) sentenceEnd = found;
+    }
+    if (!/阶段/u.test(markdown.slice(sentenceStart, sentenceEnd))) continue;
+    record(valueIndex, raw, match[1].trim(), 'enumeration');
+  }
+  return { claims, ambiguities };
+}
+
+/** 阶段人数混用检测（V5 P4b/P4b-2）：正文阶段劳动力声明与蓝图分阶段劳动力推导（phaseAuthorities
+ * = byPhase 的 midValue 权威投影）比对——数值不符即 error；阶段名拼接歧义单独报（数值无法
+ * 归属，交 LLM 修复轮拆分改述）。表格行/负向声明句/最低配置与工种配置句豁免；上限 8 条。 */
 export function phaseLaborMixingIssues(
   markdown: string,
   phaseAuthorities: Array<{ phase: string; value: number; trace?: string }>,
 ): ValidationIssue[] {
-  if (phaseAuthorities.length === 0) return [];
+  const { claims, ambiguities } = scanPhaseLaborClaims(markdown, phaseAuthorities);
+  const found: Array<{ position: number; issue: ValidationIssue }> = [];
+  for (const claim of claims) {
+    found.push({
+      position: claim.start,
+      issue: {
+        level: 'error',
+        severity: 'blocker',
+        category: 'fact_consistency',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `阶段劳动力数据矛盾：正文“${claim.excerpt.slice(0, 60)}”取值 ${claim.actual} 人，与蓝图分阶段劳动力推导不符（“${claim.phase}”阶段应为 ${claim.expected} 人）`,
+        suggestion: `分阶段劳动力人数必须以蓝图推导为准：将“${claim.phase}”阶段人数统一为 ${claim.expected} 人${claim.trace ? `（依据：${claim.trace}）` : ''}，删除其他口径数字。`,
+      },
+    });
+  }
+  for (const ambiguity of ambiguities) {
+    found.push({
+      position: ambiguity.start,
+      issue: {
+        level: 'error',
+        severity: 'blocker',
+        category: 'fact_consistency',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `阶段名疑似拼接：正文“${ambiguity.excerpt.slice(0, 60)}”中的阶段名“${ambiguity.phrase}”同时混含“${ambiguity.first.phase}”与“${ambiguity.second.phase}”两个蓝图阶段，人数 ${ambiguity.actual} 人无法归属`,
+        suggestion: `将阶段名拆分表述：“${ambiguity.first.phase}”按 ${ambiguity.first.value} 人、“${ambiguity.second.phase}”按 ${ambiguity.second.value} 人（蓝图推导）分句列出，不得把两个阶段名连写成单一阶段。`,
+      },
+    });
+  }
+  return found.sort((left, right) => left.position - right.position).slice(0, 8).map(item => item.issue);
+}
+
+/** 机械设备分批投入台数矛盾检测（V5 P4b-2，12:33 评审 P0-2）：「首批/第一批 N 台…剩余/补充
+ * M 台」两批并存时，各批台数之和必须能等于蓝图机械汇总台数——无任何组合满足即 blocker
+ * （实测「首批挖掘机 5 台…剩余挖掘机 5 台补充进场」合计 10≠权威 5）。台数单元归属同句最近的
+ * 先行批词（列举「首批挖掘机5台、自卸汽车5台」两台均归首批）；「保持/维持/控制/以内」类
+ * 维持句豁免（非批次投入口径）；表格行/负向声明句豁免；仅判首批类+剩余类并存形态
+ * （零假阳性优先，多批次形态交 LLM 层）。 */
+export function equipmentBatchConflicts(
+  markdown: string,
+  equipment: Array<{ name: string; count: number }>,
+): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  for (const match of markdown.matchAll(STAGE_LABOR_RE)) {
-    const lineStart = markdown.lastIndexOf('\n', match.index) + 1;
-    let lineEnd = markdown.indexOf('\n', match.index);
-    if (lineEnd === -1) lineEnd = markdown.length;
-    const line = markdown.slice(lineStart, lineEnd);
-    // 表格行：分阶段投入明细表的合法承载，不检测（与 resourceConsistencyIssues 同口径）
-    if (/^\s*\|.*\|\s*$/u.test(line)) continue;
-    // 负向声明句豁免：「不再出现“XX阶段35人”」是修复声明引用旧值（与检测器家族同源）
-    if (NEGATIVE_DECLARATION_RE.test(line)) continue;
-    // V5 P6 误报豁免（run1 实测）：①最低配置声明「阶段不少于2人」（安全员配置）——数字前文含
-    // 不少于/不低于/至少/最低/不小于；②工种配置句「道路铺装阶段即安排管道工10人」——数字紧邻
-    // 前文以工种/职务词结尾（工/员/长/司机/班组）。两类均非阶段劳动力总量口径。
-    const valueIndex = (match.index ?? 0) + match[0].indexOf(match[1]);
-    const beforeNumber = markdown.slice(Math.max(lineStart, valueIndex - 12), valueIndex);
-    if (/不少于|不低于|至少|最低|不小于|≥/u.test(beforeNumber)) continue;
-    if (/(?:[\u4e00-\u9fa5]{1,3}(?:工|员|长)|司机|班组|队伍?)\s*$/u.test(beforeNumber)) continue;
-    // 阶段名提取（V5 P6 两步法）：回指句（「该阶段…统一为238人」）解析到行内最近实义阶段名
-    const stagePhrase = extractStagePhrase(markdown, lineStart, valueIndex);
-    if (!stagePhrase) continue;
-    const stagePrefix = stagePhrase.replace(/阶段$/u, '');
-    const value = Number(match[1].replace(/[,，]/gu, ''));
-    if (!Number.isFinite(value) || value <= 0) continue;
-    // 阶段名匹配：最长公共汉字子串 ≥4 字，取最长命中（多命中时最具体阶段胜出）
-    let best: { phase: string; value: number; trace?: string; score: number } | null = null;
-    for (const entry of phaseAuthorities) {
-      const score = longestCommonHanSubstring(stagePrefix, entry.phase);
-      if (score >= 4 && (best === null || score > best.score)) best = { ...entry, score };
+  if (equipment.length === 0) return issues;
+  const firstBatchRe = /首批|第一批|首期|第一期/gu;
+  const laterBatchRe = /剩余|补充|追加/gu;
+  const holdWordRe = /保持|维持|确保|不少于|不低于|控制在|以内|以下/u;
+  for (const item of equipment) {
+    if (!item.name || !Number.isFinite(item.count) || item.count <= 0) continue;
+    const namePattern = flexNamePattern(item.name);
+    const unitRe = new RegExp(`${namePattern}[^\\n。；;、，,]{0,4}?([\\d,]+)\\s*(?:台|辆)`, 'gu');
+    const firstValues = new Set<number>();
+    const laterValues = new Set<number>();
+    let excerpt = '';
+    for (const sentence of markdown.matchAll(/[^。；;\n]+/gu)) {
+      const text = sentence[0];
+      const base = sentence.index ?? 0;
+      const firstWords = [...text.matchAll(firstBatchRe)].map(match => match.index ?? 0);
+      const laterWords = [...text.matchAll(laterBatchRe)].map(match => match.index ?? 0);
+      if (firstWords.length === 0 && laterWords.length === 0) continue;
+      for (const unit of text.matchAll(unitRe)) {
+        if (!unit[1]) continue;
+        const value = Number(unit[1].replace(/[,，]/gu, ''));
+        if (!Number.isFinite(value) || value <= 0) continue;
+        const unitOffset = unit.index ?? 0;
+        const unitIndex = base + unitOffset;
+        // 行级豁免：表格行/负向声明句（与检测器家族同源）
+        const lineStart = markdown.lastIndexOf('\n', unitIndex) + 1;
+        let lineEnd = markdown.indexOf('\n', unitIndex);
+        if (lineEnd === -1) lineEnd = markdown.length;
+        const line = markdown.slice(lineStart, lineEnd);
+        if (/^\s*\|.*\|\s*$/u.test(line)) continue;
+        if (NEGATIVE_DECLARATION_RE.test(line)) continue;
+        // 维持句豁免：「挖掘机保持5台/控制在5台以内」是存量维持表述，非批次投入口径
+        const unitText = unit[0];
+        if (holdWordRe.test(unitText) || /以内|以下|上限/u.test(markdown.slice(unitIndex + unitText.length, unitIndex + unitText.length + 4))) continue;
+        const nearestFirst = firstWords.filter(index => index < unitOffset && unitOffset - index <= 40).pop();
+        const nearestLater = laterWords.filter(index => index < unitOffset && unitOffset - index <= 40).pop();
+        if (nearestFirst === undefined && nearestLater === undefined) continue;
+        if (nearestLater !== undefined && (nearestFirst === undefined || nearestLater > nearestFirst)) {
+          laterValues.add(value);
+        } else {
+          firstValues.add(value);
+        }
+        if (!excerpt) excerpt = markdown.slice(Math.max(lineStart, unitIndex - 20), Math.min(lineEnd, unitIndex + unitText.length)).trim();
+      }
     }
-    if (!best) continue;
-    if (value === best.value) continue;
-    // 引号原文切片：数字前 24 字到数值/人结束（正文真实片段，供修复轮章节定位）——
-    // 两步法下阶段短语可能不在数字紧邻前文，切片锚定数字位置而非 match 起点
-    const excerpt = markdown.slice(Math.max(lineStart, valueIndex - 24), (match.index ?? 0) + match[0].length).trim();
+    if (firstValues.size === 0 || laterValues.size === 0) continue;
+    const firstList = [...firstValues];
+    const laterList = [...laterValues];
+    const consistent = firstList.some(first => laterList.some(later => first + later === item.count));
+    if (consistent) continue;
     issues.push({
       level: 'error',
       severity: 'blocker',
       category: 'fact_consistency',
       owner: 'llm',
       repairability: 'llm_repairable',
-      message: `阶段劳动力数据矛盾：正文“${excerpt.slice(0, 60)}”取值 ${value} 人，与蓝图分阶段劳动力推导不符（“${best.phase}”阶段应为 ${best.value} 人）`,
-      suggestion: `分阶段劳动力人数必须以蓝图推导为准：将“${best.phase}”阶段人数统一为 ${best.value} 人${best.trace ? `（依据：${best.trace}）` : ''}，删除其他口径数字。`,
+      message: `机械设备分批台数矛盾：“${item.name}”分批投入（首批 ${firstList.join('/')} 台＋剩余 ${laterList.join('/')} 台）各批组合之和均不等于蓝图机械汇总 ${item.count} 台${excerpt ? `（原文“${excerpt.slice(0, 50)}”）` : ''}`,
+      suggestion: `分批投入的台数之和必须等于蓝图机械汇总台数：将“${item.name}”各批次调整为首批与剩余合计 ${item.count} 台，或删除分批描述仅保留“${item.name} ${item.count} 台”汇总口径。`,
     });
-    if (issues.length >= 8) break;
+    if (issues.length >= 5) break;
+  }
+  return issues;
+}
+
+/** 前期动作时限矛盾检测（V5 P4b-2，12:33 评审 P0-3）：前期准备动作（交底/考察/封样/编制/
+ * 审批/报审等）被安排在「开工后第 N 日」类时限且 N ≥ 总工期时必为矛盾——竣工日不可能安排
+ * 开工前的准备动作（实测「制度交底安排在开工令下发后第90日内」而总工期 90 日本身）。
+ * 总工期未知时不判；动作词窗口 ±40 字（动作可在时限表述前后）；表格行/负向声明句豁免。 */
+export function preliminaryActionTimingIssues(markdown: string, totalDays?: number): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!totalDays || !Number.isFinite(totalDays) || totalDays <= 0) return issues;
+  const actionWordRe = /交底|考察|封样|编制|审批|报审|报批|培训|演练|签订|组建|建立|采购|调查|备案|申报|进场确认/u;
+  for (const match of markdown.matchAll(/(?:开工令下发|开工令下达|下达开工令|开工|计划开工)[^。；;\n年月]{0,8}?(?:第\s*(\d+)\s*(?:个)?(?:日历)?日|(\d+)\s*(?:个)?(?:日历)?日)/gu)) {
+    const raw = match[1] || match[2];
+    if (!raw) continue;
+    const days = Number(raw);
+    if (!Number.isFinite(days) || days <= 0) continue;
+    if (days < totalDays) continue;
+    const valueIndex = (match.index ?? 0) + match[0].lastIndexOf(raw);
+    const lineStart = markdown.lastIndexOf('\n', valueIndex) + 1;
+    let lineEnd = markdown.indexOf('\n', valueIndex);
+    if (lineEnd === -1) lineEnd = markdown.length;
+    const line = markdown.slice(lineStart, lineEnd);
+    if (/^\s*\|.*\|\s*$/u.test(line)) continue;
+    if (NEGATIVE_DECLARATION_RE.test(line)) continue;
+    const context = markdown.slice(Math.max(lineStart, valueIndex - 40), Math.min(lineEnd, valueIndex + raw.length + 40));
+    if (!actionWordRe.test(context)) continue;
+    const excerpt = markdown.slice(Math.max(lineStart, valueIndex - 30), Math.min(lineEnd, valueIndex + raw.length + 14)).trim();
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'fact_consistency',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      message: `前期动作时限矛盾：正文“${excerpt}”将前期准备动作时限设在开工后第 ${days} 日，已达到/超过总工期 ${totalDays} 日（竣工日）——前期动作不可能安排在项目末期`,
+      suggestion: `前期准备动作时限必须落在施工准备阶段内：将第 ${days} 日改为与施工准备阶段相匹配的早期天数（早于总工期 ${totalDays} 日），或删除具体天数改述为“开工令下发后在施工准备阶段内完成”。`,
+    });
+    if (issues.length >= 5) break;
   }
   return issues;
 }

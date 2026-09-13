@@ -26,13 +26,23 @@ const H4B = '轴线引测';
 const H4C = '高程传递';
 const H4D = '沉降观测';
 
+/**
+ * 正文行工厂（V2 批1 块质检兼容契约）：句号结句（避免「句尾截断」阻断判定）+ 尾部唯一短语
+ * （避免「完全重复行 ≥40 字」确定性清理把同度数各节正文误删为空小节——同长度重复内容是
+ * 测试夹具产物，真实生成各节正文不同）。'施' 字数与旧用例断言口径保持一致。
+ */
+const BODY_TAILS = ['配套作业', '现场组织', '工序衔接', '验收复核', '资料归档', '成品保护'];
+function bodyLine(chars: number, index: number): string {
+  return `${'施'.repeat(chars)}${BODY_TAILS[index % BODY_TAILS.length]}。`;
+}
+
 /** 达标正文（≥0.9×targetWords 且 H4 齐全无重复） */
 function passingContent(h4s: string[], bodyChars: number): string {
-  return `### 测量放线\n\n${h4s.map(title => `#### ${title}\n\n${'施'.repeat(bodyChars)}`).join('\n\n')}`;
+  return `### 测量放线\n\n${h4s.map((title, index) => `#### ${title}\n\n${bodyLine(bodyChars, index)}`).join('\n\n')}`;
 }
 
 /** 字数不足的不达标正文（≥120 字符避免走 undefined 分支，但 <0.9×targetWords） */
-const shortContent = `### 测量放线\n\n#### ${H4A}\n\n${'施'.repeat(150)}`;
+const shortContent = `### 测量放线\n\n#### ${H4A}\n\n${bodyLine(150, 0)}`;
 
 function mockDiagnostics(): DocumentGenerationDiagnostics {
   return createGenerationDiagnostics({ mode: 'fast', enableChapterReview: false, enableGlobalReview: false, enableFinalQualityReview: false });
@@ -126,7 +136,7 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
   });
 
   it('重复 H4 但字数达标 → 确定性去重兜底成稿（首轮即兜底，结构性重复不整块作废）', async () => {
-    const duplicated = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map(title => `#### ${title}\n\n${'施'.repeat(130)}`).join('\n\n')}\n\n#### ${H4A}\n\n${'施'.repeat(130)}`;
+    const duplicated = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(130, index)}`).join('\n\n')}\n\n#### ${H4A}\n\n${bodyLine(130, 4)}`;
     llmMock.mockResolvedValue(duplicated);
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
     // 首轮 duplicates 不达标 → 确定性去重兜底（删第二次 H4A）后字数达标 → 成稿（不再耗二轮）
@@ -138,7 +148,7 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
   
   it('清单外 H4 但字数达标 → 确定性修复（删标题留正文）成稿（第五次回归：4083 字块因清单外标题失败）', async () => {
     // 字数充足、要点齐全，但多了 1 个清单外 H4（模型自由发挥/标题微调）
-    const extraneousContent = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map(title => `#### ${title}\n\n${'施'.repeat(130)}`).join('\n\n')}\n\n#### 沉降观测智能化\n\n${'施'.repeat(130)}`;
+    const extraneousContent = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(130, index)}`).join('\n\n')}\n\n#### 沉降观测智能化\n\n${bodyLine(130, 4)}`;
     llmMock.mockResolvedValue(extraneousContent);
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
     expect(result?.allSucceeded).toBe(true);
@@ -150,7 +160,7 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
   
   it('清单外 H4 删标题留正文 → 正文零丢失，字数不减首轮通过（第七次回归：1084 字块不浪费）', async () => {
     // 单要点块写错形态：4 个要点各 120 字 + 1 个清单外 H4 200 字，总字数充足
-    const content = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map(title => `#### ${title}\n\n${'施'.repeat(120)}`).join('\n\n')}\n\n#### 自由发挥一\n\n${'施'.repeat(200)}`;
+    const content = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(120, index)}`).join('\n\n')}\n\n#### 自由发挥一\n\n${bodyLine(200, 4)}`;
     llmMock.mockResolvedValue(content);
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
     expect(result?.allSucceeded).toBe(true);
@@ -163,7 +173,7 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
   
   it('清单外 H4 删标题留正文后字数仍不足 → 二轮反馈重试（真实缺口才重试）', async () => {
     // 要点正文薄（各 25 字）+ 两个自由发挥各 100 字：删标题后总字数仍 <0.9×500=450 → 二轮
-    const thinContent = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map(title => `#### ${title}\n\n${'施'.repeat(25)}`).join('\n\n')}\n\n#### 自由发挥一\n\n${'施'.repeat(100)}\n\n#### 自由发挥二\n\n${'施'.repeat(100)}`;
+    const thinContent = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(25, index)}`).join('\n\n')}\n\n#### 自由发挥一\n\n${bodyLine(100, 4)}\n\n#### 自由发挥二\n\n${bodyLine(100, 5)}`;
     llmMock
       .mockResolvedValueOnce(thinContent)
       .mockResolvedValueOnce(passingContent([H4A, H4B, H4C, H4D], 150));
@@ -178,7 +188,7 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
     // 要点标题=块标题（H3 直接承担），模型按证据写出细目原标题「编制说明与工程概况」→
     // sources 白名单豁免 extraneous 判定，1084 字达标直接成稿（修复前：误杀 → 整块作废 → 章失败）
     const singlePointBlock: PlannedChapterBlock = { title: '项目理解与编制边界', subPoints: [{ title: '项目理解与编制边界', sources: ['编制说明与工程概况'] }], facts: [], targetWords: 1200 };
-    const content = `### 项目理解与编制边界\n\n#### 编制说明与工程概况\n\n${'施'.repeat(1084)}`;
+    const content = `### 项目理解与编制边界\n\n#### 编制说明与工程概况\n\n${bodyLine(1084, 0)}`;
     llmMock.mockResolvedValue(content);
     const result = await buildPlannedChapterContent(makeInput(), makeStructure({ blocks: [singlePointBlock] }));
     expect(result?.allSucceeded).toBe(true);
@@ -191,8 +201,8 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
       // A2：拆半子块共享父块标题（prompt 无「（一）（二）」后缀），按覆盖清单 `#### ` 前缀切片区分：
       // 禁词清单（forbiddenTitlesLine）把另一半块 H4 以裸词注入，全部 prompt 词面含 4 个 H4；
       // 仅覆盖清单带 `#### ` 前缀 → 前半块只含 ####H4B，后半块只含 ####H4C，原块两轮四个都有 → shortContent
-      if (prompt.includes('#### ' + H4B) && !prompt.includes('#### ' + H4C)) return `### 测量放线\n\n#### ${H4A}\n\n${'施'.repeat(400)}\n\n#### ${H4B}\n\n${'施'.repeat(400)}`;
-      if (prompt.includes('#### ' + H4C) && !prompt.includes('#### ' + H4B)) return `### 测量放线\n\n#### ${H4C}\n\n${'施'.repeat(400)}\n\n#### ${H4D}\n\n${'施'.repeat(400)}`;
+      if (prompt.includes('#### ' + H4B) && !prompt.includes('#### ' + H4C)) return `### 测量放线\n\n#### ${H4A}\n\n${bodyLine(400, 0)}\n\n#### ${H4B}\n\n${bodyLine(400, 1)}`;
+      if (prompt.includes('#### ' + H4C) && !prompt.includes('#### ' + H4B)) return `### 测量放线\n\n#### ${H4C}\n\n${bodyLine(400, 2)}\n\n#### ${H4D}\n\n${bodyLine(400, 3)}`;
       return shortContent;
     });
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
@@ -207,7 +217,7 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
     // 容器块（「主要分部分项工程施工方案」在「主要施工方法」章内）是全章总述小节：
     // 修复前按三段式 divisionPrompt 展开 → LLM 把本章全部分部名写成 H4（清单外）+三段标签重复 → 章阻断
     const containerBlock: PlannedChapterBlock = { title: '主要分部分项工程施工方案', subPoints: [{ title: '主要分部分项工程施工方案', sources: ['主要分部分项工程施工方案'] }], facts: [], targetWords: 3600 };
-    llmMock.mockResolvedValue(`### 主要分部分项工程施工方案\n\n${'施'.repeat(3300)}`);
+    llmMock.mockResolvedValue(`### 主要分部分项工程施工方案\n\n${bodyLine(3300, 0)}`);
     const result = await buildPlannedChapterContent(makeInput({ chapter: makeChapter({ title: '主要施工方法' }) }), makeStructure({ blocks: [containerBlock] }));
     expect(result?.allSucceeded).toBe(true);
     expect(llmMock).toHaveBeenCalledTimes(1);
@@ -221,7 +231,7 @@ describe('buildPlannedChapterContent（达标契约：0.9 阈值 + 重试 ≤2 �
   it('4.19.5 回归：分部章容器块输出清单外 H4 → 标题剥离正文保留，字数达标成稿', async () => {
     // 总述块模型仍写出分部名 H4（历史习惯）时：块质检确定性修复删标题行保留正文，字数达标即通过
     const containerBlock: PlannedChapterBlock = { title: '主要分部分项工程施工方案', subPoints: [{ title: '主要分部分项工程施工方案', sources: ['主要分部分项工程施工方案'] }], facts: [], targetWords: 3600 };
-    const strayH4s = `### 主要分部分项工程施工方案\n\n#### 道路工程\n\n${'施'.repeat(500)}\n\n#### 排水工程\n\n${'施'.repeat(500)}\n\n${'施'.repeat(2400)}`;
+    const strayH4s = `### 主要分部分项工程施工方案\n\n#### 道路工程\n\n${bodyLine(500, 0)}\n\n#### 排水工程\n\n${bodyLine(500, 1)}\n\n${bodyLine(2400, 2)}`;
     llmMock.mockResolvedValue(strayH4s);
     const result = await buildPlannedChapterContent(makeInput({ chapter: makeChapter({ title: '主要施工方法' }) }), makeStructure({ blocks: [containerBlock] }));
     expect(result?.allSucceeded).toBe(true);

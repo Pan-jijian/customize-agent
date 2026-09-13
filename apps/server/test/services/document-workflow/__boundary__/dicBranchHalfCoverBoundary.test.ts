@@ -180,14 +180,14 @@ describe('GG8 嵌入表头：无分隔行重复表头切分为两张表', () => 
   });
 });
 
-// ── GG9. modeOfValues：平局取大（L3238，经 fixCrossSectionNumericConflicts 众数兜底） ──
+// ── GG9. 众数兜底已删除（V2 批1-4 零兜底写入）：多值冲突无权威 → 不修复，交检测器阻断 ──
 
-describe('GG9 众数权威：平局取大', () => {
-  it('GG9 两表格行 4具/20具 各一次 → 平局取大 20 → 4 替换为 20', () => {
-    const result = applyNumericConsistencyDeterministicFixes('| 区域 | 灭火器 | 4具 |\n| 区域 | 灭火器 | 20具 |');
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).not.toContain('4具');
-    expect((result.markdown.match(/20具/g) || []).length).toBe(2);
+describe('GG9 众数兜底已删除：多值冲突不修复', () => {
+  it('GG9 两表格行 4具/20具 无外部权威 → 不修复（原平局取大行为删除）', () => {
+    const md = '| 区域 | 灭火器 | 4具 |\n| 区域 | 灭火器 | 20具 |';
+    const result = applyNumericConsistencyDeterministicFixes(md);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(md);
   });
 });
 
@@ -376,13 +376,13 @@ describe('GG25 奖项白名单：tenderRequirements 未提取', () => {
   });
 });
 
-// ── GG28. 众数冲突阈值 false 侧（L3287） ──
+// ── GG28. 众数兜底已删除（V2 批1-4 零兜底写入）：多值冲突一律不修复 ──
 
-describe('GG28 众数权威：不同数值即启用（平手取大）', () => {
-  it('GG28 两表格行 10具/11具 不同数值 → 众数权威 11 → 10→11', () => {
-    const result = applyNumericConsistencyDeterministicFixes('| 区域 | 灭火器 | 10具 |\n| 区域 | 灭火器 | 11具 |');
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).not.toContain('10具');
-    expect(result.markdown).toContain('11具');
+describe('GG28 众数兜底已删除：不同数值不修复', () => {
+  it('GG28 两表格行 10具/11具 且无外部权威 → 不修复（原众数归一行为删除）', () => {
+    const md = '| 区域 | 灭火器 | 10具 |\n| 区域 | 灭火器 | 11具 |';
+    const result = applyNumericConsistencyDeterministicFixes(md);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(md);
   });
 });

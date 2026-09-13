@@ -8,7 +8,7 @@
  * - 修复器（FixerEntry）：确定性修复器（SURFACE_FIX_STEPS 锚定声明）与 LLM patch 修复轮
  *   （LLM_PATCH_REPAIR_ROUNDS 八调用点声明）强制 anchoredTo 锚定检测器——检测定位=修复定位；
  * - assertRegistryConsistency：启动与单测执行的结构一致性检查（锚定存在性 / 权威集合相等 /
- *   llm-patch 必带 patchGuard / patchGuard 引用检测器必须 deterministicSafe）。
+ *   llm-patch 必带 patchGuard / patchGuard 引用检测器必须 deterministicSafe / category 合法性）。
  *
  * 全部声明为纯元数据：检测与修复执行仍走原函数路径（行为保持），注册表只承载口径声明与一致性约束。
  */
@@ -22,7 +22,7 @@ import {
 import { blueprintLaborPeakAuthority } from './authorityIndex';
 import type { BlueprintData } from './integratedBlueprint';
 import { SURFACE_FIX_STEPS } from './deterministicFixChains';
-import type { DocumentFact, DocumentFactsModel } from './types';
+import type { DocumentFact, DocumentFactsModel, ValidationIssue } from './types';
 
 export type AuthorityId =
   | 'schedule'
@@ -71,6 +71,15 @@ export interface DetectorEntry {
   category: string;
 }
 
+/**
+ * 检测器 category 合法值全集（V2 批3 门禁升级 L3）：与 ValidationIssue.category 联合类型单源对齐。
+ * 门禁硬阻断按 category 判定（buildExportGate 黑名单式全量阻断），缺卡/错卡的声明会使检测器
+ * 静默逃逸硬阻断——「新检测器上线不生效」陷阱的根因之一，故纳入注册表一致性强制校验。
+ */
+export const VALID_DETECTOR_CATEGORIES: ReadonlySet<string> = new Set([
+  'structure', 'table', 'fact_consistency', 'evidence_coverage', 'professional_chain', 'control_loop', 'format', 'style', 'scope', 'qingtian_review',
+] satisfies NonNullable<ValidationIssue['category']>[]);
+
 /** 修复器条目：修复定位声明（anchoredTo 强制锚定检测器，防修复无检测哑火） */
 export interface FixerEntry {
   id: string;
@@ -114,6 +123,9 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   // L5 结构完整性门禁（sectionCountOverflowIssues）：成稿 H3 数不得超过主题块数（多节方向；缺节由 section-content-integrity 覆盖）
   { id: 'section-count-overflow', scope: 'chapter', category: 'structure' },
   { id: 'heading-duplicate', scope: 'full-document', category: 'structure', deterministicSafe: true },
+  // V2 批1 结构完整性（structureIntegrityIssues）：编号跳号/孤立编号/孤立单项列表/重复表头/表内重复行/
+  // 重复行/相邻重复句（cleanable）+ 截断/空节/表名混入表头/空表/标点断裂（blocking）；确定性修复器 structure-integrity 收口
+  { id: 'structure-integrity', scope: 'full-document', category: 'structure', deterministicSafe: true },
   // WS1 结构标签残留（templatedLabelIssues）：标签标题/段首标签前缀，确定性修复器 templated-labels 兜底
   { id: 'templated-label', scope: 'full-document', category: 'structure', deterministicSafe: true },
   // WS1 标题完整性（titleIntegrityIssues）：残缺标题（<4 汉字）/句化标题（含逗号）/悬挂连接词结尾
@@ -134,8 +146,12 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'cross-project-value-copy', scope: 'full-document', category: 'fact_consistency', authorities: ['blueprint'] },
   // V5 P4b 阶段人数混用（正文「XX阶段 + N 人」 vs byPhase 推导权威）
   { id: 'phase-labor-mixing', scope: 'full-document', category: 'fact_consistency', authorities: ['blueprint'] },
+  // V5 P4b-2 机械设备分批台数矛盾（「首批N台…剩余M台」之和 ≠ 蓝图汇总台数，12:33 评审 P0-2）
+  { id: 'equipment-batch-conflict', scope: 'full-document', category: 'fact_consistency', authorities: ['blueprint'] },
+  // V5 P4b-2 前期动作时限矛盾（「开工后第N日」N ≥ 总工期：竣工日安排开工前准备动作，12:33 评审 P0-3）
+  { id: 'preliminary-action-timing', scope: 'full-document', category: 'fact_consistency', authorities: ['blueprint'] },
   { id: 'foundation-form-residue', scope: 'full-document', category: 'fact_consistency' },
-  { id: 'ambiguous-either-or', scope: 'full-document', category: 'fact_consistency' },
+  { id: 'ambiguous-either-or', scope: 'full-document', category: 'fact_consistency', authorities: ['supportSystem'] },
   { id: 'excavation-depth-lock', scope: 'full-document', category: 'fact_consistency' },
   { id: 'excavation-hazard-classification', scope: 'full-document', category: 'fact_consistency' },
   { id: 'support-form-fact-consistency', scope: 'full-document', category: 'fact_consistency', authorities: ['supportSystem'] },
@@ -248,10 +264,16 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'table-line-residue', kind: 'deterministic', anchoredTo: 'table-quality', giveUpOnFailure: true },
   // WS1 结构标签残留清洗（标签标题行删除/段首前缀剥离，正文零丢失）
   { id: 'templated-labels', kind: 'deterministic', anchoredTo: 'templated-label', giveUpOnFailure: true },
+  // V2 批1 结构完整性确定性清理（与检测器 structure-integrity 同源单扫描：检测定位=清理定位）
+  { id: 'structure-integrity', kind: 'deterministic', anchoredTo: 'structure-integrity', giveUpOnFailure: true },
   { id: 'repeated-words', kind: 'deterministic', anchoredTo: 'repeated-word', giveUpOnFailure: true },
   { id: 'duplicate-tables', kind: 'deterministic', anchoredTo: 'duplicate-table', giveUpOnFailure: true },
   { id: 'finish-thickness', kind: 'deterministic', anchoredTo: 'finish-thickness', giveUpOnFailure: true },
   { id: 'labor-peak', kind: 'deterministic', anchoredTo: 'resource-consistency', authorities: ['laborPeak'], giveUpOnFailure: true },
+  // V5 P4b-2 阶段劳动力确定性回写（与检测器 phase-labor-mixing 同源双通道扫描；蓝图权威）
+  { id: 'phase-labor-values', kind: 'deterministic', anchoredTo: 'phase-labor-mixing', authorities: ['blueprint'], giveUpOnFailure: true },
+  // A3 资源章数值拆分确定性统一（4.27.0）：与检测器 resource-breakdown-consistency 同源（blueprint 权威）
+  { id: 'resource-breakdown', kind: 'deterministic', anchoredTo: 'resource-breakdown-consistency', authorities: ['blueprint'], giveUpOnFailure: true },
   { id: 'internal-table-row-dup', kind: 'deterministic', anchoredTo: 'table-spam', giveUpOnFailure: true },
   { id: 'greening-maintenance', kind: 'deterministic', anchoredTo: 'greening-maintenance-mismatch', authorities: ['greeningMaintenance'], giveUpOnFailure: true },
   { id: 'paragraph-opening-repeat', kind: 'deterministic', anchoredTo: 'paragraph-opening-repeat', giveUpOnFailure: true },
@@ -259,11 +281,17 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'collision-numbered-heading', kind: 'deterministic', anchoredTo: 'collision-numbered-heading', giveUpOnFailure: true },
   { id: 'inverted-date-range', kind: 'deterministic', anchoredTo: 'inverted-date-range', giveUpOnFailure: true },
   { id: 'truncated-sentence', kind: 'deterministic', anchoredTo: 'truncated-sentence', giveUpOnFailure: true },
-  { id: 'table-borne-prose', kind: 'deterministic', anchoredTo: 'major-content-governance', giveUpOnFailure: true },
   { id: 'meta-discourse', kind: 'deterministic', anchoredTo: 'meta-discourse-declaration', giveUpOnFailure: true },
   { id: 'formula-residue', kind: 'deterministic', anchoredTo: 'formula-residue', giveUpOnFailure: true },
   { id: 'self-undermining', kind: 'deterministic', anchoredTo: 'self-undermining-candidate', giveUpOnFailure: true },
+  // A4 关键设计决策两可表述唯一化（4.27.0）：与检测器 ambiguous-either-or 同源（supportSystem 权威）
+  { id: 'ambiguous-either-or', kind: 'deterministic', anchoredTo: 'ambiguous-either-or', authorities: ['supportSystem'], giveUpOnFailure: true },
   { id: 'empty-scoring-response', kind: 'deterministic', anchoredTo: 'requirements-coverage', giveUpOnFailure: true },
+  // 4.27.2 招标元语言确定性清理（语气泄漏治理）：与检测器 formal-style（文风泄漏/后台话术）同源锚定——
+  // 「按招标文件要求/约定」条幅与调用式元语言属正式文风失分面，检测定位=修复定位
+  { id: 'tender-meta-language', kind: 'deterministic', anchoredTo: 'formal-style', giveUpOnFailure: true },
+  // 4.27.2 条款响应重复行去重：与检测器 duplicate-paragraph 同源（整行完全重复的重复段落族）
+  { id: 'duplicate-response-line', kind: 'deterministic', anchoredTo: 'duplicate-paragraph', giveUpOnFailure: true },
   { id: 'atlas-reference', kind: 'deterministic', anchoredTo: 'drawing-reference', giveUpOnFailure: true },
   { id: 'tertiary-h4-dedupe', kind: 'deterministic', anchoredTo: 'tertiary-heading', giveUpOnFailure: true },
   { id: 'internal-term-heading', kind: 'deterministic', anchoredTo: 'internal-terminology-anchor', giveUpOnFailure: true },
@@ -273,6 +301,21 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'flow-form-variants', kind: 'deterministic', anchoredTo: 'flow-form-repeat', giveUpOnFailure: true },
   // WS1 残缺标题确定性补全（round-2 链、终检前最后一道：正文取证 core+工程后缀补全 <4 字残缺标题）
   { id: 'truncated-title-completion', kind: 'deterministic', anchoredTo: 'title-integrity', giveUpOnFailure: true },
+  // 4.27.2 句化标题切分（标题合并治理）：与检测器 title-integrity（句化标题「含逗号」判定）同源锚定
+  { id: 'sentence-like-heading-split', kind: 'deterministic', anchoredTo: 'title-integrity', giveUpOnFailure: true },
+];
+
+/**
+ * 数值冲突裁决器修复器声明（4.27.0 A1/A2）：确定性裁决但不进 SURFACE_FIX_STEPS——
+ * 裁决依赖全文语义聚类（bge 异步）与清单事实锁上下文，无法纳入同步章级修复链；
+ * 执行点：finalize 跨章一致性阶段 global-consistency-repair LLM 定向修复轮之前
+ * （runGlobalConsistencyReviewLoop 前置段）——检测端 llm-patch 不收敛的参数口径冲突必须先经确定性分流。
+ * anchoredTo 与检测端同源：numeric-arbiter-concept 同步 conceptConflictGroups 扫描，
+ * numeric-arbiter-spec 同步 scanSpecLocationMismatchHits 扫描（检测定位=修复定位）。
+ */
+export const NUMERIC_ARBITER_FIXERS: readonly FixerEntry[] = [
+  { id: 'numeric-arbiter-concept', kind: 'deterministic', anchoredTo: 'parameter-concept-conflict', giveUpOnFailure: true },
+  { id: 'numeric-arbiter-spec', kind: 'deterministic', anchoredTo: 'spec-location-mismatch', giveUpOnFailure: true },
 ];
 
 /**
@@ -349,6 +392,33 @@ export function det<T>(id: string, run: () => T): T {
   return run();
 }
 
+/**
+ * 末期语义类检测器安全包装（生成中止韧性 P0：finalize 末期硬停治理）：
+ * await 包裹 + try/catch + 引用登记（覆盖断言不因降级逃逸）；失败不穿透 finalize 主链硬停整篇任务，
+ * 而是返回显性 warning 降级 issue（可观测/可复核/可重跑）——静默降级违反失败即暴露规范，
+ * 炸整篇让已产出的全部进度作废且恢复必复现（死循环）。降级 issue 为基础设施异常而非内容缺陷：
+ * severity=warning 不阻断导出，repairability=manual_review 不引 LLM 修复轮空转。
+ * 仅用于交付前末期语义类调用点；生成链路前段保持 fail-loud（继续用 det）。
+ */
+export async function detSafe(id: string, run: () => ValidationIssue[] | Promise<ValidationIssue[]>): Promise<ValidationIssue[]> {
+  usedDetectorIds.add(id);
+  try {
+    return await run();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`[gen] detector degraded: ${id} failed, fallback to warning issue:`, error);
+    return [{
+      level: 'warning',
+      severity: 'warning',
+      category: 'format',
+      owner: 'system',
+      repairability: 'manual_review',
+      message: `交付前检测器「${id}」执行失败，已降级为待复核：${detail}`,
+      suggestion: '此为检测器基础设施异常，非正文内容缺陷；其余交付前检查已照常完成。可稍后重新生成复核，或人工复核该检测维度。',
+    }];
+  }
+}
+
 /** 单测专用：清空执行侧引用登记（断言前重置，避免跨用例污染） */
 export function resetDetectorUsage(): void {
   usedDetectorIds.clear();
@@ -379,7 +449,7 @@ function authoritySetsEqual(left?: AuthorityId[], right?: AuthorityId[]): boolea
  */
 export function assertRegistryConsistency(): void {
   const errors: string[] = [];
-  const fixers: FixerEntry[] = [...DETERMINISTIC_FIXER_ANCHORS, ...LLM_PATCH_REPAIR_ROUNDS];
+  const fixers: FixerEntry[] = [...DETERMINISTIC_FIXER_ANCHORS, ...NUMERIC_ARBITER_FIXERS, ...LLM_PATCH_REPAIR_ROUNDS];
   for (const fixer of fixers) {
     const anchored = detectorEntry(fixer.anchoredTo);
     // 1. 锚定检测器必须存在（防修复无检测哑火）
@@ -421,6 +491,19 @@ export function assertRegistryConsistency(): void {
   for (const entry of DETERMINISTIC_FIXER_ANCHORS) {
     if (!surfaceStepKeys.has(entry.id)) {
       errors.push(`确定性修复器锚定声明 ${entry.id} 无对应 SURFACE_FIX_STEPS 键（声明多余或键已改名）`);
+    }
+  }
+  // 6. 数值裁决器修复器声明重复检查（与 DETERMINISTIC_FIXER_ANCHORS 同口径；不进 SURFACE_FIX_STEPS 键比对）
+  for (const [anchorIndex, anchor] of NUMERIC_ARBITER_FIXERS.entries()) {
+    if (NUMERIC_ARBITER_FIXERS.slice(0, anchorIndex).some(entry => entry.id === anchor.id)) {
+      errors.push(`数值裁决器修复器声明重复：${anchor.id}`);
+    }
+  }
+  // 7. category 强制校验（V2 批3 门禁升级 L3）：门禁硬阻断按 category 判定，缺卡/错卡会使检测器
+  //    静默逃逸硬阻断——声明必须携带 ValidationIssue.category 合法值（新检测器上线漏标即报错暴露）
+  for (const detector of ALL_DETECTORS) {
+    if (!detector.category || !VALID_DETECTOR_CATEGORIES.has(detector.category)) {
+      errors.push(`检测器 ${detector.id} 声明了非法 category（当前=${detector.category || '缺失'}；合法值：${[...VALID_DETECTOR_CATEGORIES].join('、')}）`);
     }
   }
   if (errors.length > 0) {

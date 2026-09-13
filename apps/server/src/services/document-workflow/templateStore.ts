@@ -13,7 +13,6 @@ import type { DocumentTemplate, ProjectBinding, PromptBinding } from './types';
 import { templateProjectBindings } from './projectMaterialProfile';
 import { charsPerPageForSettings, explicitLengthTargets } from './budget';
 import { tuningProfile } from './tuningProfile';
-import { referenceStructureSuggestion as buildReferenceStructureSuggestion } from './templateReferenceService';
 
 export type PromptExecutionCategory = 'writer' | 'chapter' | 'extraction' | 'formatting' | 'reference';
 
@@ -471,14 +470,8 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
   } catch {
     // 策略预估失败不影响模板校验主流程
   }
-  // T6 大纲建议：模板章节 vs 同类工程典型结构，缺失高频章节仅建议（不阻断、不强制）
-  let referenceStructureSuggestion;
-  try {
-    referenceStructureSuggestion = buildReferenceStructureSuggestion({ templateName: template.name, chapterTitles: template.chapters.map(chapter => chapter.title) });
-  } catch {
-    // 参考库建议失败不影响模板校验主流程
-  }
-  return { templateId, projectRoleConfigId: configId, configName: config?.name, fileDiagnostics, promptDiagnostics, roleDiagnostics, readiness, issues, strategyPreview, referenceStructureSuggestion };
+  // T6 大纲建议（4.26.0 起移除）：参考库已整体下线，不再产出参考结构建议
+  return { templateId, projectRoleConfigId: configId, configName: config?.name, fileDiagnostics, promptDiagnostics, roleDiagnostics, readiness, issues, strategyPreview };
 }
 
 interface TemplateRunValidationCacheEntry {

@@ -65,4 +65,15 @@ describe('parameterConceptConflictIssues（h13b 过滤）', () => {
     // 68993.93/14249.23≈4.84 倍：旧 >20 倍门不拦（run1 生产误报现场），倍数门4 整簇跳过
     expect(issues).toEqual([]);
   });
+
+  it('嵌入数量不一致 → 显性 warning 降级跳过（不 throw，finalize 末期不硬停）', async () => {
+    embedMock.mockResolvedValue([[1, 0]]);
+    const markdown = '围挡高度2.5m。围挡高度1.8m。喷锚厚度80mm。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.level).toBe('warning');
+    expect(issues[0]!.severity).toBe('warning');
+    expect(issues[0]!.message).toContain('已降级跳过');
+    expect(issues[0]!.message).toContain('嵌入数量不一致');
+  });
 });

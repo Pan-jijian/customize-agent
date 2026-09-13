@@ -254,7 +254,7 @@ describe('qingtianReviewValidationIssues（W8 门禁接驳）', () => {
   });
 });
 
-describe('buildExportGate（W8 category 判定）', () => {
+describe('buildExportGate（V2 批3 黑名单式全量阻断；原 W8 category 白名单已升级）', () => {
   const factsModel = { project: [{ id: '1', key: 'projectName', value: '某办公楼' }], schedule: [], quality: [], safety: [], preciseFacts: [] } as unknown as DocumentFactsModel;
   const bodyChapter = () => makeChapter('1', '工程概况', '本项目为某办公楼改造工程，总建筑面积约 5000 平方米，工期 45 日历天。'.repeat(12));
 
@@ -267,7 +267,7 @@ describe('buildExportGate（W8 category 判定）', () => {
     expect(gate.blockingIssues[0].category).toBe('qingtian_review');
   });
 
-  it('有正文时 structure 类仍硬阻断（原消息白名单行为由 category 保持）', () => {
+  it('有正文时 structure 类硬阻断（消息白名单校准路径）', () => {
     const gate = buildExportGate([{ level: 'error', severity: 'blocker', repairability: 'llm_repairable', category: 'structure', owner: 'system', message: '工程概况 正文不足：当前 100 字，要求不少于 300 字', suggestion: '补足' }], factsModel, [bodyChapter()]);
     expect(gate.passed).toBe(false);
     expect(gate.blockingIssues.some(issue => issue.category === 'structure')).toBe(true);
@@ -278,7 +278,13 @@ describe('buildExportGate（W8 category 判定）', () => {
     expect(gate.passed).toBe(false);
   });
 
-  it('无正文时全部 error 阻断（hasBody=false 路径不变）', () => {
+  it('有正文时非旧白名单 category（evidence_coverage）的 blocker 也硬阻断（V2 批3 全量阻断回归）', () => {
+    const gate = buildExportGate([{ level: 'error', severity: 'blocker', repairability: 'llm_repairable', category: 'evidence_coverage', owner: 'system', message: '第 2 章 章节缺少证据：评分点未承接', suggestion: '补充证据' }], factsModel, [bodyChapter()]);
+    expect(gate.passed).toBe(false);
+    expect(gate.blockingIssues.some(issue => issue.category === 'evidence_coverage')).toBe(true);
+  });
+
+  it('标题-only 章（无实质正文）时 blocker 同样硬阻断', () => {
     const gate = buildExportGate([{ level: 'error', severity: 'blocker', repairability: 'llm_repairable', category: 'structure', owner: 'system', message: '工程概况 正文不足：当前 100 字，要求不少于 300 字', suggestion: '补足' }], factsModel, [makeChapter('1', '工程概况', '标题')]);
     expect(gate.passed).toBe(false);
   });

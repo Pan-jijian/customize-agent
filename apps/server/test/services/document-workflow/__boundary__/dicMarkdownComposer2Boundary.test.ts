@@ -348,6 +348,15 @@ describe('N4 normalizeProductionText 全谱系', () => {
     expect(normalizeProductionText('单位 dm2')).toBe('单位 dm2');
   });
 
+  it('里程碑编号 M2/M3（无数字前缀）→ 原样（编号不是量纲单位）', () => {
+    expect(normalizeProductionText('M2 污水管网进度过半')).toBe('M2 污水管网进度过半');
+    expect(normalizeProductionText('| M3 污水管网完成 | 开工后第70日 |')).toBe('| M3 污水管网完成 | 开工后第70日 |');
+  });
+
+  it('表格竖线阻断数字前缀 → 编号原样', () => {
+    expect(normalizeProductionText('| 70 | M2 污水管网 |')).toBe('| 70 | M2 污水管网 |');
+  });
+
   it('2.5平方 → 2.5平方米', () => {
     expect(normalizeProductionText('约2.5平方')).toBe('约2.5平方米');
   });

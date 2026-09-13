@@ -13,7 +13,10 @@ import { tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrg
 import { constructionOrgBonusModulePrompt, constructionOrgChapterRulePrompt } from './constructionOrgQualityRules';
 import { buildProcessKnowledgePrompt, matchProcessKnowledgeCards } from './constructionProcessKnowledge';
 import { criticalSectionBlockerMinChars, currentSectionBlock, ensureGroupTertiaryShell, ensureTertiarySectionShell, isCriticalDeepSection, majorContentPollutionIssue, matchBlockSkeletonNames, mergeDuplicateWorkPackageSubsections, parseMajorConstructionPackages, sectionContentBody, sectionStructureIssue, stripMarkdownTableBlocks, workPackageCrossSectionIssue, workPackageSkeletonPrompt, workPackageSkeletonTitles } from './chapterPostProcessing';
+// V2 批1 结构完整性单源（扫描/清理/反馈/终检包装四件套）：写时块质检与小节质检共用，检测定位=清理定位
+import { cleanStructureDefects, scanStructureDefects, structureIntegrityFeedback } from './structureIntegrityRules';
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE, QUANTIFIED_FACT_RE } from './parameterPatterns';
+import { scanFillerSentences } from './tenderBidChecks';
 import { buildSemanticGate } from './semanticGate';
 import type { PlannedChapterBlock, PlannedChapterStructure } from './integratedBlueprint';
 import { cleanFactValue, isActionableFactValue } from './documentFactTrace';
@@ -989,6 +992,17 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
       structureIssue = sectionStructureIssue(input.sectionTitle, finalContent);
     }
   }
+  // V2 批1 写时结构完整性（小节成稿输出即检，与块质检/终检清理器同源）：cleanable 类缺陷确定性就地清理
+  // （零内容生成：编号重排/孤立号去号/孤立列表项去号/删重复行）——清理先于结构判定，防缺陷带进下游；
+  // blocking 类（截断/空节/表名混入表头/空表/标点断裂）折入 structureIssue 拦截重写；
+  // workPackageSection 仍可经下方宽松门降级验收（修复链防小节永久缺失），普通小节严格拒绝并反馈重写
+  const structureCleaned = cleanStructureDefects(finalContent);
+  if (structureCleaned.cleaned.length > 0) {
+    finalContent = structureCleaned.markdown;
+    if (input.diagnostics) input.diagnostics.llm.lastInfo = `小节结构确定性清理：${input.sectionTitle}（${structureCleaned.cleaned.length} 项）`;
+  }
+  const integrityFeedback = structureIntegrityFeedback(scanStructureDefects(finalContent), input.sectionTitle);
+  if (integrityFeedback) structureIssue ||= integrityFeedback;
   // WS1 治理：原 repairMajorContentWorkPackageLabels 兜底已删除——其给裸文本补“施工概况：/施工流程：/
   // 施工方法：”前缀骗过 workPackageContentElementsComplete 字面检测（形式作弊），且补出的标签会被
   // 终检 templatedLabelIssues 报错、被确定性修复器 templated-labels 剥离，构成自我抵消回路；
@@ -1345,6 +1359,10 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     let lastChars = 0;
     let lastNumericFeedback = '';
     let lastFlowFeedback = '';
+    // C3 生成期套话反馈（第二轮注入）：首轮套话句阻断时携带命中句原文定向重写
+    let lastFillerFeedback = '';
+    // V2 批1 结构完整性反馈（第二轮注入）：首轮 blocking 类结构缺陷原文定向重写
+    let lastStructureFeedback = '';
     // 2.6 补写上限收紧：块级写作/反馈重试循环上限显式化（固化为 2，与既有行为一致）
     // ——上限超出即判失败转上层紧凑备用（原 DOCUMENT_BLOCK_MAX_ATTEMPTS 已固化删除）
     const blockMaxAttempts = 2;
@@ -1360,6 +1378,10 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         lastNumericFeedback,
         // WS3 工序表达形式反馈（第二轮注入）：指定形式未落地时定向重写
         lastFlowFeedback,
+        // C3 套话句反馈（第二轮注入）：首轮命中句原文定向重写为可核查措施
+        lastFillerFeedback,
+        // V2 批1 结构完整性反馈（第二轮注入）：截断/空节/表名混入表头等缺陷原文 + 修正方向
+        lastStructureFeedback,
         // 二期蓝图接管：must_cite+strict 数值清单挂进第二轮反馈（未引用/数值不一致时定向重试）
         input.blueprintMustCiteHint ? `【蓝图锁定数值检查】正文必须逐条出现以下蓝图锁定数值且与给定值完全一致：${input.blueprintMustCiteHint}。` : '',
         // A22 缺口数字反馈（丰乐镇第九轮）：只报“不少于目标字数”不报缺口时模型输出不升反降
@@ -1424,6 +1446,21 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           const headingLines = (withBlockShell.match(/^#{3,4}\s+(.+)$/gmu) || []).map(line => line.replace(/^#{3,4}\s+/u, ''));
           skeletonMissing = blockSkeletonNames.filter(name => !headingLines.some(line => normalizeSubsectionTitleForDedup(line).includes(normalizeSubsectionTitleForDedup(name))));
         }
+        // V2 批1 写时七查（块成稿输出即检）：cleanable 类结构缺陷确定性就地清理（零内容生成，与终检清理器
+        // 同一扫描源）——清理先于字数/数值/结构判定，防重复行/孤立编号凑字数与缺陷进入下游链条；
+        // blocking 类（截断/空节/表名混入表头/空表/标点断裂）照 numericBlocking 首轮模式：attempt 0
+        // 阻断并把缺陷原文反馈二轮定向重写，最后一轮放行交终检链兜底（防块级无限重试）
+        const structureCleaned = cleanStructureDefects(withBlockShell);
+        if (structureCleaned.cleaned.length > 0) {
+          withBlockShell = structureCleaned.markdown;
+          if (input.diagnostics) input.diagnostics.llm.lastInfo = `块结构确定性清理：${block.title}（${structureCleaned.cleaned.length} 项）`;
+        }
+        const blockStructureScan = scanStructureDefects(withBlockShell);
+        const structureBlocking = attempt === 0 && blockStructureScan.blocking.length > 0;
+        if (structureBlocking) {
+          lastStructureFeedback = structureIntegrityFeedback(blockStructureScan, block.title) || '';
+          console.error(`[gen][block-qc] 首轮结构完整性阻断（${blockStructureScan.blocking.length} 处）: ${block.title}: ${blockStructureScan.blocking.slice(0, 3).map(defect => defect.message).join(' / ')}`);
+        }
         const chars = documentTextLength(withBlockShell);
         lastChars = chars;
         // P4 落位数值一致性核验：块成稿与证据对账（注入证据=章级共享事实层+块级证据；完整证据池=全章证据）。
@@ -1441,6 +1478,21 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           console.error(`[gen][block-qc] 骨架小缺口豁免（交修复链兑底 ${skeletonMissing.length} 个）: ${block.title}: ${skeletonMissing.join('、')}`);
         }
         const skeletonMissingBlocking = skeletonMissing.length <= 2 ? [] : skeletonMissing;
+        // C3 生成期首轮套话阻断（4.28.0）：与终检 fillerDensityReport 共享判定器（0.80 校准阈值 + 14 原型），
+        // 首轮命中 ≥2 句即阻断重试并反馈命中句原文（定向重写）；二轮放行交终检链兑底（照 numericBlocking 首轮模式）。
+        // 扫描失败不阻断写作（检测故障≠内容缺陷，本地模型异常不应杀块）。
+        let blockFillerHits: string[] = [];
+        if (attempt === 0) {
+          try {
+            blockFillerHits = await scanFillerSentences(withBlockShell);
+          } catch (error) {
+            console.error(`[gen][block-qc] 套话句扫描失败（放行）: ${block.title}`, error);
+          }
+        }
+        const fillerBlocking = attempt === 0 && blockFillerHits.length >= 2;
+        if (fillerBlocking) {
+          console.error(`[gen][block-qc] 首轮套话句阻断（${blockFillerHits.length} 句）: ${block.title}: ${blockFillerHits.slice(0, 3).join(' / ')}`);
+        }
         // 稳定版：要点标题缺失判定归一化包含匹配（与骨架/清单外同口径）——模型微调要点标题
         // （如“主要分部分项施工方案”中间加“工程”、编号格式变化）时精确子串匹配会误判缺失 → 重试/拆半耗尽；
         // 按行归一化比较（行内提及要点标题即视为覆盖，保留对自然成文形态的宽容）；归一化行池预计算一次，
@@ -1470,7 +1522,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         const expectedFlowForm = keySectionKind && !isDivisionChapterContainer ? flowFormForBlockIndex(index) : undefined;
         const actualFlowForm = expectedFlowForm ? primaryFlowForm(withBlockShell) : undefined;
         const flowFormBlocking = attempt === 0 && expectedFlowForm !== undefined && actualFlowForm !== undefined && actualFlowForm !== expectedFlowForm;
-        if (chars >= Math.floor(block.targetWords * 0.9) && missing.length === 0 && duplicates.length === 0 && extraneous.length === 0 && !numericBlocking && !flowFormBlocking) {
+        if (chars >= Math.floor(block.targetWords * 0.9) && missing.length === 0 && duplicates.length === 0 && extraneous.length === 0 && !numericBlocking && !flowFormBlocking && !fillerBlocking && !structureBlocking) {
           return withBlockShell;
         }
         lastMissing = missing;
@@ -1482,11 +1534,15 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         lastFlowFeedback = expectedFlowForm !== undefined && actualFlowForm !== expectedFlowForm
           ? `【上一轮工序表达形式不符】本块指定的工序顺序表达形式为「${expectedFlowForm}」，上一轮正文${actualFlowForm ? `使用了「${actualFlowForm}」形式` : '未见明确的工序顺序表达'}。必须改用「${expectedFlowForm}」形式重写工序顺序表达，内容与数值保持不变。`
           : '';
+        lastFillerFeedback = fillerBlocking
+          ? `【上一轮空话套话句】以下句子是空泛口号（无责任岗位、量化标准、检查频次等可核查信息）：${blockFillerHits.map(sentence => `“${sentence}”`).join('、')}。必须删除或改写为“责任岗位 + 执行动作 + 量化标准 + 检查频次 + 整改时限”式具体措施，并嵌入本节项目事实（不得编造数值）。`
+          : '';
         // 4.12.17 确定性清洗兜底（每一轮不达标都先试）：同 H3 重复 H4 去重 + 清单外标题块删除后重检字数，
         // 结构性重复/清单外骨架由代码兜底，避免内容合格的块整块作废 → 整章降级 → 字数雪崩。
         // 第五次回归实证：首轮仅因清单外 H4（模型自由发挥/标题微调）不达标（4083 字达标块仍失败），
-        // 首轮兜底删后字数达标即通过；二轮同样兜底（原只 attempt===1，二轮删后字数不足 → 块死亡 → 章失败）
-        if (missing.length === 0) {
+        // 首轮兜底删后字数达标即通过；二轮同样兜底（原只 attempt===1，二轮删后字数不足 → 块死亡 → 章失败）。
+        // V2 批1：结构缺陷首轮阻断时禁用本修复通道（否则未修复的截断/空节会被字数达标直接放行，破坏首轮重试）
+        if (missing.length === 0 && !structureBlocking) {
           // 4.19.1 确定性修复优先：先同 H3 重复 H4 去重，再清单外标题行剥离（正文零丢失），
           // 修复后字数达标即通过——标题层问题由代码确定性修复，不因整块删除掉档触发重试/失败
           const repaired = stripExtraneousBlockHeadings(dedupeRepeatedSubsections(withBlockShell), block.title, sectionTitles, [...block.subPoints.flatMap(point => point.sources)]);
@@ -1496,10 +1552,10 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
             return repaired;
           }
         }
-        if (input.diagnostics) input.diagnostics.llm.lastError = `规划块质检未达标：${block.title}（${chars} 字，缺 ${missing.join('、') || '无'}${duplicates.length ? `，重复 H4 ${duplicates.join('、')}` : ''}${extraneous.length ? `，清单外 ${extraneous.slice(0, 5).join('、')}${extraneous.length > 5 ? ' 等' : ''}` : ''}）`;
+        if (input.diagnostics) input.diagnostics.llm.lastError = `规划块质检未达标：${block.title}（${chars} 字，缺 ${missing.join('、') || '无'}${duplicates.length ? `，重复 H4 ${duplicates.join('、')}` : ''}${extraneous.length ? `，清单外 ${extraneous.slice(0, 5).join('、')}${extraneous.length > 5 ? ' 等' : ''}` : ''}${blockStructureScan.blocking.length ? `，结构缺陷 ${blockStructureScan.blocking.length} 处` : ''}）`;
         // 章失败归因诊断日志：块级质检不达标详情落盘（轮3 实测“重点难点/新技术”两章拆半后仍未成稿，
         // failures=0 表示 LLM 正常返回但质检不过，必须拿到具体不达标项才能定向修复）
-        console.error(`[gen][block-qc] 块质检不达标 attempt=${attempt}: ${block.title}（目标 ${block.targetWords} 字，实际 ${chars} 字，缺 ${missing.join('、') || '无'}，重复 ${duplicates.join('、') || '无'}，清单外 ${extraneous.join('、') || '无'}，keySection=${keySectionKind || 'none'}）`);
+        console.error(`[gen][block-qc] 块质检不达标 attempt=${attempt}: ${block.title}（目标 ${block.targetWords} 字，实际 ${chars} 字，缺 ${missing.join('、') || '无'}，重复 ${duplicates.join('、') || '无'}，清单外 ${extraneous.join('、') || '无'}，结构缺陷 ${blockStructureScan.blocking.length} 处，keySection=${keySectionKind || 'none'}）`);
       } catch (error) {
         if (input.diagnostics) input.diagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
       }

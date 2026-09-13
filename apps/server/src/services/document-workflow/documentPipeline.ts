@@ -20,7 +20,7 @@ import { validateFactConsistency } from '../document-validation/factConsistencyS
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from './markdownComposer';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from './budget';
 import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, qualitySeveritySummary, applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown, markdownTableQualityIssues, headingUncoveredEngineeringItems } from './qualityValidation';
-import { applyNumericConsistencyDeterministicFixes, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixTableBorneContentSections, fixTocFromBody, runDeterministicChainUntilConverged, runFixUntilClean, stripCommercialDataBodyLines, stripDuplicateTablesAcrossChapters } from './documentIntegrityChecks';
+import { applyNumericConsistencyDeterministicFixes, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixTocFromBody, runDeterministicChainUntilConverged, runFixUntilClean, stripCommercialDataBodyLines, stripDuplicateTablesAcrossChapters } from './documentIntegrityChecks';
 import { internalTerminologyAnchorIssues, stripInternalTerminologySentences } from './internalTerminologyAnchors';
 import { semanticChoiceConflicts, semanticChoiceConflictIssue } from './dataConsistencyReview';
 import { extractDecisionLockEntries } from './integratedBlueprint';
@@ -32,7 +32,6 @@ import { buildKnowledgeCoverageReport, knowledgeCoverageIssues } from './documen
 import { buildDocumentFactTraces, factTraceIssues } from './documentFactTrace';
 import { buildChapterCoverageReports, chapterCoverageIssues } from './documentChapterCoverage';
 import { buildDocumentQualityReport, qualityReportIssues } from './documentQualityReport';
-import { benchmarkGeneratedMarkdown } from './benchmarkQuality';
 import { buildRepairStrategies, repairStrategyIssues } from './documentRepairStrategies';
 import { repairChapterByQuality, repairPatchGuard } from './rolePipeline';
 import { withPatchRollback } from './patchRollback';
@@ -55,8 +54,6 @@ import type { kbIndexHealth } from './documentGeneratorHelpers';
 import { constructionOrgProfessionalAuditIssues } from './constructionOrgAudit';
 import { buildProfessionalScoreReport } from './documentProfessionalScore';
 import { recordDeterministicFixCases } from './workflowCaseLog';
-import { referenceBenchmarkForType } from './templateReferenceService';
-import { suggestProjectType } from './referenceQualityProfile';
 import { reviewTemplatingSemantics } from './templatingReview';
 import { qingtianReviewValidationIssues, runFullDimensionReview } from './fullDimensionReview';
 import { SURFACE_FIX_STEPS, type SurfaceFixerContext } from './deterministicFixChains';
@@ -170,7 +167,6 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
       writingTaskBrief: session.writingTaskBrief,
       workflowVersion: DOCUMENT_WORKFLOW_VERSION,
       telemetry: session.telemetry,
-      qualityBenchmark: await benchmarkGeneratedMarkdown(session.finalMarkdown),
     },
     generatedAt: Date.now(),
     markdown: session.finalMarkdown,

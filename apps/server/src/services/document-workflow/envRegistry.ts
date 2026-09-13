@@ -62,10 +62,10 @@ export const DOCUMENT_ENV_REGISTRY: readonly DocumentEnvEntry[] = [
   { name: 'DOCUMENT_REPAIR_EVIDENCE_CHARS', status: 'merged', note: '→ tuningProfile.repairEvidenceChars' },
   // ── B 类：保留注册的调优/调试开关 ──
   { name: 'DOCUMENT_ABANDONED_RECORD_STALE_MS', status: 'managed', default: '86400000', note: '废弃任务记录陈旧阈值' },
-  { name: 'DOCUMENT_RECENT_UPDATE_GRACE_MS', status: 'managed', default: '60000', note: '任务最近更新宽限期' },
+  { name: 'DOCUMENT_RECENT_UPDATE_GRACE_MS', status: 'managed', default: '180000', note: '任务最近更新宽限期（clamp ≥3×心跳写盘间隔，防多实例误判中断）' },
   { name: 'DOCUMENT_MAX_CONCURRENT_GENERATIONS', status: 'managed', default: '2', note: '全局并发生成上限' },
   { name: 'DOCUMENT_PROGRESS_SAVE_INTERVAL_MS', status: 'managed', default: '5000', note: '进度落盘节流间隔' },
-  { name: 'DOCUMENT_PROGRESS_HEARTBEAT_SAVE_INTERVAL_MS', status: 'managed', default: '60000', note: '心跳落盘节流间隔' },
+  { name: 'DOCUMENT_PROGRESS_HEARTBEAT_SAVE_INTERVAL_MS', status: 'managed', default: '30000', note: '心跳落盘节流间隔（与中断宽限联动：宽限自动 clamp ≥3×本值）' },
   { name: 'DOCUMENT_GENERATION_HEARTBEAT_MS', status: 'managed', default: '30000', note: '生成心跳周期' },
   { name: 'DOCUMENT_EMBED_CACHE', status: 'managed', default: '1', note: 'bge 嵌入全局 LRU 缓存开关' },
   { name: 'DOCUMENT_EMBED_CACHE_SIZE', status: 'managed', default: '40000', note: 'bge 嵌入缓存容量（检索侧/报告侧默认口径 2000/40000，均为展示口径）' },
@@ -80,8 +80,9 @@ export const DOCUMENT_ENV_REGISTRY: readonly DocumentEnvEntry[] = [
   { name: 'DOCUMENT_MAX_QUERIES_PER_CHAPTER', status: 'managed', default: '12', note: '单章主检索查询数上限' },
   { name: 'DOCUMENT_SEMANTIC_TOP_CANDIDATES', status: 'managed', default: '0', note: '语义召回 Top 候选数（0=自动）' },
   { name: 'DOCUMENT_TEMPLATE_VALIDATION_CACHE_TTL_MS', status: 'managed', default: '30000', note: '模板运行验证缓存 TTL' },
-  { name: 'DOCUMENT_REFERENCE_SUGGEST_MIN_SAMPLES', status: 'managed', default: '2', note: '参考建议最少样例数' },
   { name: 'DOCUMENT_WRITING_CONSTRAINTS_EVOLUTION', status: 'managed', default: '1', note: '写作硬约束自进化开关（P19，默认开启；历史缺陷热力图规避提醒注入 L1 可变段末尾，=0 关闭）' },
+  { name: 'DOCUMENT_SKIP_EMBED_PREFLIGHT', status: 'managed', default: '0', note: '任务启动本地语义模型预热快速失败跳过开关（=1 跳过，仅限本地调试）' },
+  { name: 'DOCUMENT_MEMORY_ALERT_MB', status: 'managed', default: '3072', note: 'finalize 收尾 rss 内存采样告警阈值（MB，超阈值写入 healthAlerts）' },
 ];
 
 /**

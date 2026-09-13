@@ -14,8 +14,8 @@ vi.mock('@customize-agent/knowledge', () => {
 import { buildBidProcedureJudge, filterOffTopicSections, filterOffTopicSectionsForChapters, isBidderQualificationText, isHardBannedSectionTitle, isQualificationSectionTitle, partitionEvidenceByContentSafety } from '@/services/document-workflow/evidenceContentSafety';
 import type { DocumentEvidence, DocumentTemplateChapter } from '@/services/document-workflow/types';
 
-const STRONG_BID_RE = /评标|投标|澄清|评审|中标|保证金|开标|递交|廉洁|行贿|串标|围标|报价|清单计量/u;
-const STRONG_CONSTRUCTION_RE = /劳动力|班组|混凝土|钢筋|基坑|支护|机械|质量|安全|进度|材料/u;
+const STRONG_BID_RE = /评标|投标|澄清|评审|中标|保证金|开标|递交|廉洁|行贿|串标|围标|报价|清单计量|暂列金额|预付款|进度款|价格波动|担保|违约|发票|计税|税金|材料调差/u;
+const STRONG_CONSTRUCTION_RE = /劳动力|班组|混凝土|钢筋|基坑|支护|机械|质量|安全|进度计划|材料/u;
 const VAGUE_RE = /纪律|施工|教育/u;
 
 /**
@@ -70,6 +70,29 @@ describe('partitionEvidenceByContentSafety', () => {
     const item = evidence({ sectionTitle: '清单计量与报价口径', content: '投标人应按招标清单计量规则编制报价。' });
     const result = await partitionEvidenceByContentSafety([item], embedDocuments);
     expect(result.excluded).toEqual([item]);
+  });
+
+  it('商务合同条款类证据被排除（批2-2：预付款/暂列金额/价格波动/违约）', async () => {
+    const prepay = evidence({ sectionTitle: '预付款与进度款支付约定', content: '合同签订后支付预付款10%，进度款按月计量支付。' });
+    const provisional = evidence({ sectionTitle: '暂列金额使用约定', content: '暂列金额由招标人掌握使用，不得擅自挪用。' });
+    const fluctuation = evidence({ sectionTitle: '价格波动调整条款', content: '钢材价格波动超过5%时按合同约定调整工程价款。' });
+    const penalty = evidence({ content: '违约金按合同价款的0.5‰按日计取，逾期竣工赔偿另行约定。' });
+    const result = await partitionEvidenceByContentSafety([prepay, provisional, fluctuation, penalty], embedDocuments);
+    expect(result.excluded).toEqual([prepay, provisional, fluctuation, penalty]);
+    expect(result.safe).toEqual([]);
+  });
+
+  it('农民工工资保证金证据放行（批2-2 负例保护：与商务原型双向比对后放行）', async () => {
+    const item = evidence({ sectionTitle: '农民工工资保证金与实名制管理', content: '农民工工资保证金专用账户管理，班组考勤与工资支付台账按月核对。' });
+    const result = await partitionEvidenceByContentSafety([item], embedDocuments);
+    expect(result.safe).toEqual([item]);
+    expect(result.excluded).toEqual([]);
+  });
+
+  it('材料采购验收证据放行（批2-2 负例保护：发票词面召回但施工语义压制）', async () => {
+    const item = evidence({ content: '材料进场验收需提供合格证、检测报告与采购发票，验收合格后方可使用。' });
+    const result = await partitionEvidenceByContentSafety([item], embedDocuments);
+    expect(result.safe).toEqual([item]);
   });
 
   it('劳动纪律施工内容放行（负例保护）', async () => {
@@ -142,6 +165,13 @@ describe('filterOffTopicSections', () => {
     const result = await filterOffTopicSectionsForChapters(chapters, embedDocuments);
     expect(result[0]).toEqual({ id: 'ch-1', title: '人材机保障', purpose: '', queries: [], requiredFacts: [], sections: ['劳动力配置计划'] });
     expect(result[1]).toEqual({ id: 'ch-2', title: '工期与质量保障', purpose: '', queries: [], requiredFacts: [], sections: ['进度计划与关键线路', '质量保证措施'] });
+  });
+
+  it('商务合同条款类小节硬剔除（批2-2：暂列金额/预付款/价格波动，语义不可用时仍生效）', async () => {
+    const zeroEmbed = async (texts: string[]) => texts.map(() => [0, 0]);
+    const sections = ['暂列金额使用与结算约定', '预付款支付与比例约定', '价格波动调整约定', '劳动力配置计划与高峰期人数安排'];
+    const result = await filterOffTopicSections({ sections, chapterTitle: '施工管理', embedDocuments: zeroEmbed });
+    expect(result).toEqual(['劳动力配置计划与高峰期人数安排']);
   });
 
   it('确定性硬剔除层：语义模型恒零（不可用承接）时仍剔除条款碎片与纪律黑名单标题（真实生成回归）', async () => {
@@ -247,6 +277,11 @@ describe('buildBidProcedureJudge（阶段三 3.3 清洗层语义判定器，与�
     const judge = await buildBidProcedureJudge(embedDocuments);
     await expect(judge([])).resolves.toEqual([]);
   });
+
+  it('商务条款句判定命中（批2-2 与证据过滤同口径）', async () => {
+    const judge = await buildBidProcedureJudge(embedDocuments);
+    await expect(judge(['预付款支付比例为合同价款的10%'])).resolves.toEqual([true]);
+  });
 });
 
 describe('isQualificationSectionTitle（1.4 形态 A 句式级资格条款判别）', () => {
@@ -286,6 +321,17 @@ describe('isHardBannedSectionTitle（P3 异常低价 / P5 电子保函 商务条
     expect(isHardBannedSectionTitle('农民工工资保证金专用账户管理制度')).toBe(false);
     expect(isHardBannedSectionTitle('工资保证金与实名制考勤')).toBe(false);
     expect(isHardBannedSectionTitle('工资保证金缴纳与退还管理办法')).toBe(false);
+  });
+
+  it('商务合同条款类小节硬拦截（批2-2：预付款/价格波动/违约金/发票；施工侧表达零误杀）', () => {
+    expect(isHardBannedSectionTitle('暂列金额使用与结算约定')).toBe(true);
+    expect(isHardBannedSectionTitle('预付款支付与比例约定')).toBe(true);
+    expect(isHardBannedSectionTitle('价格波动调整约定')).toBe(true);
+    expect(isHardBannedSectionTitle('违约金条款与赔偿约定')).toBe(true);
+    // 施工侧表达零误杀：价格风险管控/工资保障/进度奖惩不含商务后缀组合
+    expect(isHardBannedSectionTitle('材料价格波动风险管控措施')).toBe(false);
+    expect(isHardBannedSectionTitle('农民工工资支付保障措施')).toBe(false);
+    expect(isHardBannedSectionTitle('工期考核奖惩管理制度')).toBe(false);
   });
 
   it('施工技术小节标题不受商务黑名单影响', () => {

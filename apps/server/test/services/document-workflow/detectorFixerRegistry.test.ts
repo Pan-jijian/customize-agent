@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { assertDetectorUsageCoverage, assertRegistryConsistency, AUTHORITY_REGISTRY, DETERMINISTIC_FIXER_ANCHORS, det, detectorEntry, FINALIZE_REPAIR_ROUNDS, FULL_VALIDATION_DETECTORS, LLM_PATCH_REPAIR_ROUNDS, resetDetectorUsage, STANDARD_FINAL_DETECTORS } from '@/services/document-workflow/detectorFixerRegistry';
+import { assertDetectorUsageCoverage, assertRegistryConsistency, AUXILIARY_DETECTORS, AUTHORITY_REGISTRY, DETERMINISTIC_FIXER_ANCHORS, det, detSafe, detectorEntry, FINALIZE_REPAIR_ROUNDS, FULL_VALIDATION_DETECTORS, LLM_PATCH_REPAIR_ROUNDS, NUMERIC_ARBITER_FIXERS, resetDetectorUsage, STANDARD_FINAL_DETECTORS, VALID_DETECTOR_CATEGORIES } from '@/services/document-workflow/detectorFixerRegistry';
 import { SURFACE_FIX_STEPS } from '@/services/document-workflow/deterministicFixChains';
 import { buildStandardFinalValidationIssues } from '@/services/document-workflow/documentFinalValidation';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate } from '@/services/document-workflow/types';
@@ -90,6 +90,14 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
+  it('检测器 category 全部落在合法集（V2 批3：门禁硬阻断按 category 判定，非法值静默逃逸即缺陷）', () => {
+    const all = [...FULL_VALIDATION_DETECTORS, ...STANDARD_FINAL_DETECTORS, ...AUXILIARY_DETECTORS];
+    expect(VALID_DETECTOR_CATEGORIES.size).toBe(10);
+    for (const entry of all) {
+      expect(VALID_DETECTOR_CATEGORIES.has(entry.category)).toBe(true);
+    }
+  });
+
   it('确定性修复器锚定声明与 SURFACE_FIX_STEPS 键一一对应（顺序快照）', () => {
     const stepKeys = SURFACE_FIX_STEPS.map(step => step.key);
     const anchorIds = DETERMINISTIC_FIXER_ANCHORS.map(entry => entry.id);
@@ -97,6 +105,18 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     for (const entry of DETERMINISTIC_FIXER_ANCHORS) {
       expect(entry.kind).toBe('deterministic');
       expect(detectorEntry(entry.anchoredTo)).toBeDefined();
+    }
+  });
+
+  it('数值裁决器修复器 2 项（4.27.0 A1/A2）：kind deterministic、锚定检测器存在、不进 SURFACE_FIX_STEPS 键集', () => {
+    expect(NUMERIC_ARBITER_FIXERS).toHaveLength(2);
+    expect(NUMERIC_ARBITER_FIXERS.map(entry => entry.anchoredTo)).toEqual(['parameter-concept-conflict', 'spec-location-mismatch']);
+    const stepKeys = new Set(SURFACE_FIX_STEPS.map(step => step.key));
+    for (const entry of NUMERIC_ARBITER_FIXERS) {
+      expect(entry.kind).toBe('deterministic');
+      expect(entry.giveUpOnFailure).toBe(true);
+      expect(detectorEntry(entry.anchoredTo)).toBeDefined();
+      expect(stepKeys.has(entry.id)).toBe(false);
     }
   });
 
@@ -183,5 +203,33 @@ describe('detectorFixerRegistry 执行侧登记（P7/P8）', () => {
       professionalDepthClassifier,
     });
     expect(() => assertDetectorUsageCoverage('standard-final')).not.toThrow();
+  });
+});
+
+describe('detSafe 末期安全包装（finalize 硬停治理）', () => {
+  it('run 成功：透传返回值且登记 id 与 det 契约一致', async () => {
+    const issues = await detSafe('fact-consistency', async () => [{ level: 'warning' as const, message: 'x' }]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toBe('x');
+  });
+
+  it('run 抛错：返回显性 warning 降级 issue（不抛出、不静默）', async () => {
+    const issues = await detSafe('fact-consistency', () => { throw new Error('嵌入服务不可用'); });
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ level: 'warning', severity: 'warning', category: 'format', owner: 'system', repairability: 'manual_review' });
+    expect(issues[0]!.message).toContain('fact-consistency');
+    expect(issues[0]!.message).toContain('嵌入服务不可用');
+    expect(issues[0]!.message).toContain('已降级');
+  });
+
+  it('run 异步抛错同样降级（await 包裹）', async () => {
+    const issues = await detSafe('fact-consistency', async () => { throw new Error('异步失败'); });
+    expect(issues[0]!.level).toBe('warning');
+    expect(issues[0]!.message).toContain('异步失败');
+  });
+
+  it('id 登记契约与 det 一致：未声明 id 触发逃逸检查', async () => {
+    await detSafe('undeclared-detector-id', async () => []);
+    expect(() => assertDetectorUsageCoverage('standard-final')).toThrow(/未登记的检测器/);
   });
 });

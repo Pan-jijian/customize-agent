@@ -240,7 +240,7 @@ describe('constructionOrgMajorContentIssues（项目主要施工内容门禁）'
     expect(issues.some(issue => issue.message.includes('表格替代专业工程正文'))).toBe(true);
   });
 
-  it('段落正文 + 数据附表（工程量汇总）不判表格承载（与 fixTableBorneContentSections 同源口径校准）', () => {
+  it('段落正文 + 数据附表（工程量汇总）不判表格承载（表格承载判定口径校准）', () => {
     const content = `### 2.3 项目主要施工内容\n${fiveGood}\n| 分部分项工程 | 单位 | 工程量 |\n| --- | --- | --- |\n| 道路工程 | m² | 12000 |\n| 排水工程 | m | 800 |`;
     const issues = constructionOrgMajorContentIssues([chapter('项目主要施工内容', content)]);
     expect(issues.some(issue => issue.message.includes('表格替代专业工程正文'))).toBe(false);

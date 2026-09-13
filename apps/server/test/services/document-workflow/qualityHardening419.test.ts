@@ -483,6 +483,29 @@ describe('crossChapterConsistencyIssues 工期口径（D-1）', () => {
   });
 });
 
+// ── D-2：跨章设备台数分配语境校准（4.27.0 A3）──
+// gap 排除顿号/逗号后与修复器 CROSS_SECTION_ANCHORS excavator 模式同口径：
+// 丰乐镇基线「5台挖掘机，其中3台用于…」分配语境误采 3/1 形成假冲突不再发生
+
+describe('crossChapterConsistencyIssues 设备台数分配语境（D-2）', () => {
+  const deviceModel = {
+    project: [], schedule: [], quality: [],
+  } as unknown as DocumentFactsModel;
+  const embedNone = async (texts: string[]) => texts.map(() => [0, 0]);
+
+  it('「5台挖掘机，其中3台用于…」分配语境 → 不报设备口径冲突', async () => {
+    const markdown = '施工部署\n施工准备阶段投入全部5台挖掘机，其中3台用于房前屋后整理与清杂，2台用于拆除路面及基层。\n污水管网工程阶段保留5台挖掘机用于沟槽开挖。';
+    const issues = await crossChapterConsistencyIssues(markdown, deviceModel, undefined, undefined, embedNone);
+    expect(issues.filter(issue => issue.message.includes('挖掘机'))).toEqual([]);
+  });
+
+  it('真冲突（挖掘机5台与8台正向并存）→ 仍报 error', async () => {
+    const markdown = '施工部署\n施工准备阶段配置挖掘机5台。\n主体阶段再配挖掘机8台。';
+    const issues = await crossChapterConsistencyIssues(markdown, deviceModel, undefined, undefined, embedNone);
+    expect(issues.some(issue => issue.message.includes('挖掘机') && issue.level === 'error')).toBe(true);
+  });
+});
+
 // ── E-1：规划小节归一去重 ──
 
 describe('dedupePlannedSections 规划小节去重（E 模块）', () => {

@@ -1244,6 +1244,23 @@ describe('E6 selfUnderminingCandidateIssues 自伤表述候选', () => {
     const md = '专项设计文件尚未完成的内容作为施工组织的控制性约束条件。';
     expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
   });
+  it('E6 D2 管理闭环句豁免：未落实情况当日整改复查销项（恒值语义下不召回）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '技术负责人组织施工员、安全员逐项制定针对性措施，项目经理每周检查措施落实情况不少于1次，未落实到位的由责任岗位当日整改，安全员次日复查并销项。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 D2 标准程序句豁免：未明确事项按标准执行（恒值语义下不召回）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '针对特殊技术标准中未单独列明的分项，项目部按设计图纸标注的构造做法与材料规格执行，图纸未明确的按现行国家、行业及地方标准中较高要求执行。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 D2 真伤句不豁免：分包否定式自述仍召回（与 R9 fixer 改写通道一一对应）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '本工程不进行分包，全部施工内容由我方自行组织完成。';
+    const issues = await selfUnderminingCandidateIssues(md);
+    expectBlockIssue(issues, '自伤表述候选');
+    expect(issues[0].message).toContain('本工程不进行分包');
+  });
   it('E6 重复句去重', async () => {
     const md = '专项设计文件尚未完成，相关内容待后续补充。\n专项设计文件尚未完成，相关内容待后续补充。';
     expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);

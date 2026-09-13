@@ -8,11 +8,12 @@ import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
 import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgDivisionSectionIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
-import { ambiguousEitherOrIssues, areaArithmeticIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, closurePhraseDensityCapIssues, collapseRepeatedWords, commercialDataInBodyIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, equipmentEntryTimingIssues, excavationDepthLockIssues, excavationHazardClassificationIssues, extractSupportSystemAuthority, fabricatedAwardIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, hazardExclusionContradictionIssues, invertedDateRangeIssues, collisionNumberedHeadingIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, paragraphOpeningRepeatIssues, paragraphTailRepeatIssues, phaseLaborMixingIssues, repeatedWordIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCommercialDataSentences, supportFormFactConsistencyIssues, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, areaArithmeticIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, closurePhraseDensityCapIssues, collapseRepeatedWords, commercialDataInBodyIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, equipmentBatchConflicts, equipmentEntryTimingIssues, excavationDepthLockIssues, excavationHazardClassificationIssues, extractSupportSystemAuthority, fabricatedAwardIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, hazardExclusionContradictionIssues, invertedDateRangeIssues, collisionNumberedHeadingIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, paragraphOpeningRepeatIssues, paragraphTailRepeatIssues, phaseLaborMixingIssues, preliminaryActionTimingIssues, repeatedWordIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCommercialDataSentences, supportFormFactConsistencyIssues, supportSystemConflictIssues } from './documentIntegrityChecks';
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { normalizeChapterTitleLine, requirementsCoverageIssues, tenderRequirementCheckItems, tenderRequirementSemanticQuery } from './tenderRequirements';
 import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
 import { parameterConceptConflictIssues } from './parameterConceptConflicts';
+import type { BillFactLock } from './billFactLock';
 import { constructionSystemCoverageIssues } from './constructionSystemCoverage';
 import { dangerousApplicabilityIssues } from './dangerousApplicability';
 import { stagePhrasingIssues } from './stagePhrasing';
@@ -20,8 +21,9 @@ import { emergencySectionDepthIssues } from './emergencySectionDepth';
 import { displayChapterTitle } from './outline';
 import { blueprintCitationConsistencyIssues } from './integratedBlueprint';
 import type { BlueprintData } from './integratedBlueprint';
-import { blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, blueprintQuantityGroupAuthorities } from './authorityIndex';
-import { det } from './detectorFixerRegistry';
+import { blueprintEquipmentAuthorities, blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, blueprintQuantityGroupAuthorities } from './authorityIndex';
+import { det, detSafe } from './detectorFixerRegistry';
+import { structureIntegrityIssues } from './structureIntegrityRules';
 import { flowFormRepeatIssues, skeletonFingerprintIssues, templatedLabelIssues, titleIntegrityIssues } from './templatingGovernance';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, TenderRequirementModel, ValidationIssue } from './types';
 
@@ -121,6 +123,8 @@ export async function buildStandardFinalValidationIssues(input: {
   professionalDepthClassifier: ProfessionalDepthClassifier;
   /** 一体化蓝图参数桶（生成前锁定口径）：蓝图引用冲突终检兑底（实时 finalMarkdown 重跑，替除生成阶段全卷快照） */
   blueprintData?: BlueprintData;
+  /** B1 清单事实锁（4.27.0 A1）：参数口径冲突组多值分别命中不同清单条目时判误报降级 info（不阻断） */
+  billFactLock?: BillFactLock;
 }): Promise<ValidationIssue[]> {
   const factVerification = await generatedFactVerificationIssuesAsync(input.markdown, input.factsModel, { scopeClassifier: input.factTokenScopeClassifier });
   // W4/P3 评分项要求正文级语义检测：要求项 ↔（章节标题 + 正文句）同闭包 embedding，
@@ -145,6 +149,10 @@ export async function buildStandardFinalValidationIssues(input: {
     // L5 结构完整性门禁：成稿 H3 数不得超过主题块数（多节方向；缺节方向由 section-content-integrity 覆盖）
     ...det('section-count-overflow', () => sectionCountOverflowIssues(input.chapters)),
     ...det('heading-duplicate', () => headingDuplicateIssues(input.markdown)),
+    // V2 批1 结构完整性终检（安全网，与写时质检/确定性清理器同源单扫描）：编号跳号/孤立编号/孤立
+    // 单项列表/重复表头/表内重复行/完全重复行/相邻重复句（cleanable——确定性清理器 structure-integrity
+    // 步收口，残留即暴露不静默）+ 句尾截断/空小节/表名混入表头/空表/标点断裂（blocking——须重写，宁缺毋假）
+    ...det('structure-integrity', () => structureIntegrityIssues(input.markdown)),
     // WS1 结构标签残留终检（templatedLabelIssues）：标签标题/段首标签前缀——确定性修复器
     // fixTemplatedLabels（SURFACE_FIX_STEPS templated-labels 步）先行动作，此处兜底报告残留
     ...det('templated-label', () => templatedLabelIssues(input.markdown)),
@@ -152,7 +160,7 @@ export async function buildStandardFinalValidationIssues(input: {
     // 规划层双闸（isInvalidPlannedSectionTitle / isInvalidTitle）的交付前兜底
     ...det('title-integrity', () => titleIntegrityIssues(input.markdown)),
     ...det('evaluation-criteria-coverage', () => evaluationCriteriaCoverageIssues(input.markdown, input.evaluationCriteriaItems || [], { semanticSimilarity: evaluationCriteriaSimilarity })),
-    ...await det('requirements-coverage', () => requirementsCoverageIssues(input.markdown, input.tenderRequirements, { semanticSimilarity: requirementsSimilarityForCoverage, bodyTexts: requirementBodySentences })),
+    ...await detSafe('requirements-coverage', () => requirementsCoverageIssues(input.markdown, input.tenderRequirements, { semanticSimilarity: requirementsSimilarityForCoverage, bodyTexts: requirementBodySentences })),
     ...det('fabricated-start-date', () => fabricatedStartDateIssues(input.markdown, input.factsModel)),
     ...det('field-value-mismatch', () => fieldValueMismatchIssues(input.markdown, input.factsModel)),
     ...det('area-arithmetic', () => areaArithmeticIssues(input.markdown)),
@@ -177,6 +185,12 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('cross-project-value-copy', () => crossProjectValueCopyIssues(input.markdown, blueprintQuantityGroupAuthorities(input.blueprintData))),
     // V5 P4b 阶段人数混用终检兑底：正文「XX阶段 + N 人」vs byPhase 推导权威（阶段名命中但数值不符）
     ...det('phase-labor-mixing', () => phaseLaborMixingIssues(input.markdown, blueprintPhaseLaborAuthorities(input.blueprintData))),
+    // 批2-1 机械分批求和终检兑底：句内「首批/剩余补充」分批台数并存但无组合等于权威总数
+    //（丰乐镇实测「首批挖掘机 5 台…剩余挖掘机 5 台补充进场」5+5≠权威 5）
+    ...det('equipment-batch-conflict', () => equipmentBatchConflicts(input.markdown, blueprintEquipmentAuthorities(input.blueprintData))),
+    // 批2-1 前期动作时限终检兑底：前期准备动作（交底/考察/封样/编制审批…）时限落在开工后第 N 日且 N≥总工期
+    //（丰乐镇实测「开工令下发后第 90 日内办理完成」占满全工期）
+    ...det('preliminary-action-timing', () => preliminaryActionTimingIssues(input.markdown, input.blueprintData?.contract.totalDays)),
     // h13：桩基表述残留（地基与基础无桩基工序但全文残留桩基表述）
     ...det('foundation-form-residue', () => foundationFormResidueIssues(input.markdown)),
     // h14：关键设计决策两可表述阻断（评分报告 P4「桩基（或独立基础/筏板基础按图纸实施）」）
@@ -228,10 +242,10 @@ export async function buildStandardFinalValidationIssues(input: {
     ...await det('commercial-data-in-body', () => commercialDataInBodyIssues(input.markdown)),
     ...det('overview-recap', () => overviewRecapIssues(input.markdown)),
     ...det('closure-phrase-density-cap', () => closurePhraseDensityCapIssues(input.markdown)),
-    // C1 参数概念多口径冲突（bge 概念自组织聚类 + 同簇数值冲突）
-    ...await det('parameter-concept-conflict', () => parameterConceptConflictIssues(input.markdown)),
-    // C2 内部话术语义锚点泄漏（bge 句子级锚点匹配 + 精确词兜底）
-    ...await det('internal-terminology-anchor', () => internalTerminologyAnchorIssues(input.markdown)),
+    // C1 参数概念多口径冲突（bge 概念自组织聚类 + 同簇数值冲突；末期安全包装：失败降级为待复核不硬停）
+    ...await detSafe('parameter-concept-conflict', () => parameterConceptConflictIssues(input.markdown, { billFactLock: input.billFactLock })),
+    // C2 内部话术语义锚点泄漏（bge 句子级锚点匹配 + 精确词兜底；末期安全包装）
+    ...await detSafe('internal-terminology-anchor', () => internalTerminologyAnchorIssues(input.markdown)),
     // C3 招标范围工程系统零覆盖（章节标题义务提取 + 正文词面覆盖，确定性判定）
     ...det('construction-system-coverage', () => constructionSystemCoverageIssues(input.chapters)),
     // C4 危大工程兜底适用性（前提参数阈值判定 + 辨识区别名覆盖，确定性判定）

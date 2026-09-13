@@ -28,7 +28,7 @@ export interface AuthorityAuditFinding {
   value: string;
   /** 语境窗口（首现位置前后各 16 字，空白折叠）：分流判据与修复定位 */
   context: string;
-  /** 全文出现次数（按 token 去重聚合） */
+  /** 全文出现次数（按 token 去重聚合；4.28.0 A6 边界严格口径，不计入更长数值内部子串） */
   occurrences: number;
 }
 
@@ -72,14 +72,16 @@ const AUDIT_REGISTERED_TOKEN_RES: Array<{ re: RegExp; reason: string }> = [
  * 清单构件工程量词汇（砖基础/圈梁/管道基础等）归投影覆盖缺口——权威投影应含清单明细行值。
  * 收编记录（第三轮·run1 三篇校准）：桩号里程（桩号/里程/K\d）与管网属性（管网/管道）；安装专业器材
  * （线缆/配线/配管/JDG/SC管/PC管/双绞）；拆除与人行道类工程量（拆除/人行道/侧石/缘石）；苗木规格
- * （胸径/地径/冠幅）；进度管理要素（工长/负责人/施工员/完成率/计划）。 */
-const DERIVATION_GAP_CONTEXT_RE = /(?:劳动力|人力|用工|工人|民工|工种|普工|技工|管理人员|作业人员|人员|班组|峰值|高峰|机械|机具|设备|车辆|台班|挖掘机|装载机|自卸|搅拌|塔吊|吊车|起重机|进度|工期|日历天|节点|阶段|开工|竣工|进场|退场|保养|维修|周转|材料|物资|水泥|砂石|碎石|钢筋|钢管|钢材|管材|灯具|电缆|光缆|通信|线缆|配线|配管|双绞|JDG|SC管|PC管|电源|电压|照明|工作站|服务器|存储|工具|角磨|垫板|苗木|绿植|种植|养护期|保修|储备|堆放|供应|工程量|桩号|里程|K\d|管网|管道|胸径|地径|冠幅|工长|负责人|施工员|完成率|计划|拆除|人行道|侧石|缘石|杆件|砖基础|圈梁|构造柱|矩形柱|矩形梁|基础梁|过梁|有梁板|天沟|挑檐|雨篷|楼梯|散水|坡道|块料|墙面|吊顶|砌体|砖墙|多孔砖|实心砖|金属门|木质门|金属窗|百叶窗|百页窗|门窗|扶手|栏杆|桥架|管道基础|包管|压顶|独立基础|墙基|防潮层|给水|排水|空调|公厕|停车场|零星)/u;
+ * （胸径/地径/冠幅）；进度管理要素（工长/负责人/施工员/完成率/计划）；
+ * 第四轮·4.27.0 终稿校准（A6）：路灯（套数）、苗木冠丛/蓬径、保勤人数。 */
+const DERIVATION_GAP_CONTEXT_RE = /(?:劳动力|人力|用工|工人|民工|工种|普工|技工|管理人员|作业人员|人数|保勤|人员|班组|峰值|高峰|机械|机具|设备|车辆|台班|挖掘机|装载机|自卸|搅拌|塔吊|吊车|起重机|进度|工期|日历天|节点|阶段|开工|竣工|进场|退场|保养|维修|周转|材料|物资|水泥|砂石|碎石|钢筋|钢管|钢材|管材|灯具|路灯|电缆|光缆|通信|线缆|配线|配管|双绞|JDG|SC管|PC管|电源|电压|照明|工作站|服务器|存储|工具|角磨|垫板|苗木|绿植|种植|养护期|保修|储备|堆放|供应|工程量|桩号|里程|K\d|管网|管道|胸径|地径|冠幅|冠丛|蓬径|工长|负责人|施工员|完成率|计划|拆除|人行道|侧石|缘石|杆件|砖基础|圈梁|构造柱|矩形柱|矩形梁|基础梁|过梁|有梁板|天沟|挑檐|雨篷|楼梯|散水|坡道|块料|墙面|吊顶|砌体|砖墙|多孔砖|实心砖|金属门|木质门|金属窗|百叶窗|百页窗|门窗|扶手|栏杆|桥架|管道基础|包管|压顶|独立基础|墙基|防潮层|给水|排水|空调|公厕|停车场|零星)/u;
 
 /** ② 工艺库缺口语境（工艺·构造·验收参数）：命中即分流到收编清单·工艺库登记。
  * 收编记录（V5 P6 首轮真实文档暴露）：施工动作与构造/设备安装参数字类（开挖/敷设/距地/温度/垂直度等）归工艺语境。
  * 收编记录（第三轮·run1 三篇校准）：安全文明施工类（施工现场/场区/硬化/围挡/反光/封闭段/渣土）；
- * 专项试验与安装工艺（淋水/稳压/压力降/风速）；脚手架几何参数（纵距/横距/步距/立杆/连墙件）。 */
-const PROCESS_GAP_CONTEXT_RE = /(?:混凝土|砼|砂浆|强度|等级|标号|配合比|坍落度|水灰比|掺量|养护|浇筑|振捣|模板|支架|脚手架|搭接|锚固|保护层|垫层|找平|找坡|坡度|防水|涂膜|卷材|闭水|蓄水|淋水|回填|夯实|压实|分层|虚铺|沟槽|基槽|基坑|边坡|标高|高程|厚度|间距|埋深|覆土|管径|井室|抹灰|腻子|涂料|面层|基层|安装|焊接|法兰|试压|冲洗|消毒|调试|接地|防雷|绝缘|电阻|验收|检验|检测|试验|取样|频率|焊缝|防腐|除锈|开挖|平整|清底|土方|路床|碾压|摊铺|温度|接头|管枕|接口|承插|热熔|连接|封堵|距地|挂墙|挂装|嵌墙|暗配|明配|暗装|敷设|过桥|随桥|排管|人孔|通棒|内径|管孔|垂直度|偏差|漏风|通风|壁厚|接缝|遍数|密植|分叉|栽植|浇灌|试运转|严密性|渗水|牌号|材质|分辨率|图像|稳压|压力降|风速|纵距|横距|步距|立杆|连墙件|施工现场|场区|硬化|围挡|反光|封闭段|渣土)/u;
+ * 专项试验与安装工艺（淋水/稳压/压力降/风速）；脚手架几何参数（纵距/横距/步距/立杆/连墙件）；
+ * 第四轮·4.27.0 终稿校准（A6）：季节性作业与给水/泵送专业（降雨/雨量/PPR/冷水管/提升泵/扬程）。 */
+const PROCESS_GAP_CONTEXT_RE = /(?:混凝土|砼|砂浆|强度|等级|标号|配合比|坍落度|水灰比|掺量|养护|浇筑|振捣|模板|支架|脚手架|搭接|锚固|保护层|垫层|找平|找坡|坡度|防水|涂膜|卷材|闭水|蓄水|淋水|回填|夯实|压实|分层|虚铺|沟槽|基槽|基坑|边坡|标高|高程|厚度|间距|埋深|覆土|管径|PPR|冷水管|井室|抹灰|腻子|涂料|面层|基层|安装|提升泵|扬程|焊接|法兰|试压|冲洗|消毒|调试|接地|防雷|绝缘|电阻|验收|检验|检测|试验|取样|频率|焊缝|防腐|除锈|开挖|平整|清底|土方|路床|碾压|摊铺|温度|降雨|雨量|接头|管枕|接口|承插|热熔|连接|封堵|距地|挂墙|挂装|嵌墙|暗配|明配|暗装|敷设|过桥|随桥|排管|人孔|通棒|内径|管孔|垂直度|偏差|漏风|通风|壁厚|接缝|遍数|密植|分叉|栽植|浇灌|试运转|严密性|渗水|牌号|材质|分辨率|图像|稳压|压力降|风速|纵距|横距|步距|立杆|连墙件|施工现场|场区|硬化|围挡|反光|封闭段|渣土)/u;
 
 const AUDIT_CONTEXT_WINDOW = 16;
 
@@ -92,13 +94,33 @@ const AUDIT_CONTEXT_WINDOW = 16;
  * 层/栋/幢/户 等建筑规模单位暂不收录（「第 3 层」类相对位置形态噪声大于收益，待收编流程裁决）。 */
 const AUDIT_SUPPLEMENT_TOKEN_RE = /(?:(?<![\d.])\d+\s*(?:座|辆|根|处|盏|株|道|孔|眼|樘|d(?![A-Za-z0-9]))|\d+(?:\.\d+)?\s*(?:%|℃|人日|工日)|(?:DN|Φ|φ|HRB|HPB)\s*\d+(?:\.\d+)?)/gu;
 
+/** 边界严格首现定位（4.28.0 A6）：token 首现须落在独立数值边界上——裸 indexOf 会命中更长数值的内部子串
+ * （「1.5m」首现落在「31.5mm」内、「5.5m」落在「3245.5m」内），语境窗口取到无关文本而误分流三桶；
+ * 出现次数（split 计数）同口径失真。边界判据：前字符非 [\d.]、后字符非 [\dA-Za-z]，与 PRECISE_TOKEN_RE
+ * 的 \b 提取口径对齐（²/³ 等上标非 ASCII 字母，仍视为合法尾界）；无严格出现时返回 -1。 */
+function strictIndexOf(text: string, token: string, fromIndex = 0): number {
+  for (let index = text.indexOf(token, fromIndex); index >= 0; index = text.indexOf(token, index + 1)) {
+    const before = text.charAt(index - 1);
+    const after = text.charAt(index + token.length);
+    if (!/[\d.]/u.test(before) && !/[\dA-Za-z]/u.test(after)) return index;
+  }
+  return -1;
+}
+
+/** 边界严格出现次数（与 strictIndexOf 同口径；无严格出现时为 0） */
+function countStrictOccurrences(text: string, token: string): number {
+  let count = 0;
+  for (let index = strictIndexOf(text, token); index >= 0; index = strictIndexOf(text, token, index + 1)) count += 1;
+  return count;
+}
+
 /** 审计 token 提取：共享提取器 + 补全提取，按首现位置排序（报告可读性与测试确定性） */
 function auditNumericTokens(markdown: string): string[] {
   const positions = new Map<string, number>();
   const add = (raw: string) => {
     const token = raw.trim();
     if (!token || positions.has(token)) return;
-    positions.set(token, markdown.indexOf(token));
+    positions.set(token, strictIndexOf(markdown, token));
   };
   for (const token of extractNumericTokens(markdown)) add(token);
   for (const match of markdown.matchAll(AUDIT_SUPPLEMENT_TOKEN_RE)) add(match[0]);
@@ -134,7 +156,8 @@ function classifyBucket(context: string): AuthorityAuditBucket {
 }
 
 /** 生成后无主数值审计：扫描正文全部数值 token → 登记表豁免 → 权威核心匹配 → 无主语境分流。
- * data 缺省（蓝图不可用）时全部未命中按语境分流（推导缺口语境即暴露投影层未接管）。 */
+ * data 缺省（蓝图不可用）时全部未命中按语境分流（推导缺口语境即暴露投影层未接管）。
+ * 4.28.0 A6：首现定位与出现次数按边界严格口径（防「1.5m 落在 31.5mm 内」类子串劫持语境与计数）。 */
 export function auditAuthorityCoverage(markdown: string, data?: BlueprintData): AuthorityAuditReport {
   const cores = data ? authorityNumericCores(data) : new Set<string>();
   const tokens = auditNumericTokens(markdown);
@@ -151,9 +174,9 @@ export function auditAuthorityCoverage(markdown: string, data?: BlueprintData): 
       continue;
     }
     const value = numericCore(token);
-    const index = markdown.indexOf(token);
+    const index = strictIndexOf(markdown, token);
     const context = (index >= 0 ? markdown.slice(Math.max(0, index - AUDIT_CONTEXT_WINDOW), index + token.length + AUDIT_CONTEXT_WINDOW) : token).replace(/\s+/gu, ' ').trim();
-    const finding: AuthorityAuditFinding = { token, value, context, occurrences: markdown.split(token).length - 1 };
+    const finding: AuthorityAuditFinding = { token, value, context, occurrences: countStrictOccurrences(markdown, token) };
     if (cores.has(value)) {
       matched += 1;
       // 撞核藏值观测：值命中权威但语境属资源/工艺桶（如上例 1.5）——计入 matched 不变，单独可观测

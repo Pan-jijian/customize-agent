@@ -4,7 +4,7 @@
  * 另有阶段五模糊应答语义升级单测：词面命中仅召回，语义 gate 复核才计套话句（负例零误杀）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildVagueResponseGate, difficultyCountermeasureReport, fillerDensityReport, fiveElementBlockStats } from '@/services/document-workflow/tenderBidChecks';
+import { buildVagueResponseGate, difficultyCountermeasureReport, fillerDensityReport, fiveElementBlockStats, isZeroInfoSloganSentence, judgeFillerSentences, scanFillerSentences } from '@/services/document-workflow/tenderBidChecks';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({
   buildSemanticSimilarity: vi.fn(),
@@ -118,6 +118,56 @@ describe('fillerDensityReport 模糊应答语义复核（阶段五 5.2）', () =
     expect(report.fillerSentenceDetails).toContain('严格执行相关规范和设计要求');
     expect(report.fillerSentenceDetails.filter(item => item === '精心组织科学管理确保工程质量')).toHaveLength(1);
     expect(report.fillerSentenceDetails.length).toBeLessThanOrEqual(40);
+  });
+});
+
+describe('fillerDensityReport 校准口径（0.80 阈值 + 14 原型 + 共享判定器）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('阈值边界：最高余弦 0.75 不判套话、0.85 判套话（0.80 校准分离点）', async () => {
+    mockSimilarity(0.75);
+    const low = await fillerDensityReport('精心组织科学管理确保工程质量。');
+    expect(low.fillerSentences).toBe(0);
+    mockSimilarity(0.85);
+    const high = await fillerDensityReport('精心组织科学管理确保工程质量。');
+    expect(high.fillerSentences).toBe(1);
+  });
+
+  it('目录条目行不进句池：第六章式目录行不计入总句数与套话句（伪命中防复发）', async () => {
+    mockSimilarity(0.9);
+    const report = await fillerDensityReport('第六章 确保工程质量的技术组织措施\n精心组织科学管理确保工程质量。');
+    expect(report.totalSentences).toBe(1);
+    expect(report.fillerSentences).toBe(1);
+    expect(report.fillerSentenceDetails.join('')).not.toContain('第六章');
+  });
+
+  it('judgeFillerSentences 通道标记：语义命中 semantic、模糊应答命中 vague', async () => {
+    mockSimilarity(0.9);
+    const semantic = await judgeFillerSentences(['精心组织科学管理确保工程质量']);
+    expect(semantic[0]).toMatchObject({ semantic: true, vague: false, filler: true });
+    mockSimilarity(0.1);
+    const vague = await judgeFillerSentences(['本工程力争在合同工期内完成全部施工内容']);
+    expect(vague[0]).toMatchObject({ semantic: false, vague: true, filler: true });
+  });
+
+  it('scanFillerSentences：仅返回语义命中句（去重）且低于阈值返回空', async () => {
+    buildSimilarityMock.mockResolvedValue(((left: string) => (left.includes('精心组织') ? 0.9 : 0.1)) as SimilarityFn);
+    const hits = await scanFillerSentences('精心组织科学管理确保工程质量。\n精心组织科学管理确保工程质量。\n混凝土浇筑后洒水养护并形成记录。');
+    expect(hits).toEqual(['精心组织科学管理确保工程质量']);
+    mockSimilarity(0.75);
+    expect(await scanFillerSentences('精心组织科学管理确保工程质量。')).toEqual([]);
+  });
+
+  it('isZeroInfoSloganSentence：零信息短口号可删，携带数字/岗位/频次/合规锚点或超长不删', () => {
+    expect(isZeroInfoSloganSentence('精心组织科学管理确保工程质量')).toBe(true);
+    expect(isZeroInfoSloganSentence('确保工程质量达到95%优良标准')).toBe(false);
+    expect(isZeroInfoSloganSentence('由项目经理精心组织确保工程质量')).toBe(false);
+    expect(isZeroInfoSloganSentence('每周组织检查确保工程质量')).toBe(false);
+    expect(isZeroInfoSloganSentence('承诺确保工程质量达到优良标准')).toBe(false);
+    // 62 字超长复合口号（>60 字硬闸）：不可删（交 LLM 具体化）
+    expect(isZeroInfoSloganSentence('加强管理严格控制确保工程质量达到优良标准精心策划周密部署全力以赴完成任务目标高度重视狠抓落实层层压实责任确保各项工作有序推进')).toBe(false);
   });
 });
 

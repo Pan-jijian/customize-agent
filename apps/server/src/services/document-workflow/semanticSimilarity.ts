@@ -21,6 +21,22 @@ export function getLocalSemanticProvider(): LocalTransformersEmbeddingProvider {
 /** 语义相似度函数：leftText/rightText → [0,1] 余弦相似度（向量缓存在闭包内，同文本不重复嵌入） */
 export type SemanticSimilarityFn = (leftText: string, rightText: string) => number;
 
+/**
+ * 生成任务前置检查（fail fast）：本地语义模型预热嵌入。
+ * 模型资源缺失/依赖未安装等系统性问题在任务启动即暴露（分钟 0 失败），
+ * 不再留到生成末期由语义检测器引爆（历史缺陷：末期 finalize 阶段嵌入异常导致整篇作废）；
+ * DOCUMENT_SKIP_EMBED_PREFLIGHT=1 可跳过（仅限本地调试）。
+ */
+export async function preflightLocalSemanticProvider(): Promise<void> {
+  if (process.env.DOCUMENT_SKIP_EMBED_PREFLIGHT === '1') return;
+  try {
+    await getLocalSemanticProvider().embedQuery('生成前置检查');
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`本地语义模型预热失败（生成前置检查，可用 DOCUMENT_SKIP_EMBED_PREFLIGHT=1 跳过）：${detail}`, { cause: error });
+  }
+}
+
 /** 语义承接判定阈值：余弦 ≥0.6 视为"语义上已承接" */
 export const SEMANTIC_COVERAGE_THRESHOLD = 0.6;
 

@@ -115,6 +115,40 @@ describe('V5 P5 无主数值审计（M6）', () => {
     expect(tokens).toEqual(expect.arrayContaining(['0.16MPa', '1.05m', '10.8m']));
   });
 
+  it('第四轮收编·边界严格定位：「1.5m」首现不落在「31.5mm」子串内（语境取真实出现处）', () => {
+    const markdown = '防水涂膜厚度 31.5mm，搭接宽度符合要求。管顶覆土堆高按 1.5m 控制。';
+    const report = auditAuthorityCoverage(markdown, makeBlueprintData());
+    const finding = [...report.derivationGaps, ...report.processGaps].find(item => item.token === '1.5m');
+    expect(finding).toBeDefined();
+    expect(finding?.context).toContain('堆高');
+    expect(finding?.context).not.toContain('涂膜');
+  });
+
+  it('第四轮收编·边界严格计数：「5.5m」出现次数不把「3245.5m³」子串计入', () => {
+    const markdown = '土方开挖总量 3245.5m³。泵站提升泵设计扬程 H=5.5m，流量满足要求。';
+    const report = auditAuthorityCoverage(markdown, makeBlueprintData());
+    const finding = report.processGaps.find(item => item.token === '5.5m');
+    expect(finding).toBeDefined();
+    expect(finding?.occurrences).toBe(1);
+    expect(finding?.context).toContain('提升泵');
+  });
+
+  it('第四轮收编：路灯套数/苗木冠丛/保勤人数语境未命中归推导缺口', () => {
+    const markdown = '配置太阳能路灯 24 套；栽植金桂 8 株（冠丛高度 280cm）；实行保勤制度，出勤人数 172 人。';
+    const report = auditAuthorityCoverage(markdown, makeBlueprintData());
+    expect(report.unregisteredCount).toBe(0);
+    const tokens = report.derivationGaps.map(item => item.token);
+    expect(tokens).toEqual(expect.arrayContaining(['24 套', '280cm', '172 人']));
+  });
+
+  it('第四轮收编：降雨阈值/PPR 管系列/提升泵扬程语境未命中归工艺缺口', () => {
+    const markdown = '日降雨量达到 95mm 时暂停室外作业；冷热水系统采用 PPR 管 S3.2 系列；提升泵扬程 H=5.5m 复核合格。';
+    const report = auditAuthorityCoverage(markdown, makeBlueprintData());
+    expect(report.unregisteredCount).toBe(0);
+    const tokens = report.processGaps.map(item => item.token);
+    expect(tokens).toEqual(expect.arrayContaining(['95mm', 'S3.2', '5.5m']));
+  });
+
   it('推导缺口：资源/劳动力/机械语境未命中进收编清单', () => {
     const markdown = '高峰期投入劳动力 58 人，配置挖掘机 3 台，材料运输车辆 7 台。';
     const report = auditAuthorityCoverage(markdown, makeBlueprintData());

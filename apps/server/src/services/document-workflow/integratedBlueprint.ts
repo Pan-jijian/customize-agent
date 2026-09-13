@@ -2459,11 +2459,21 @@ export function blueprintCitationConsistencyIssues(markdown: string, data: Bluep
       // 阶段细分/管理阈值豁免（与修复器 fixCrossSectionNumericConflicts「scheduleDays」域同源）：
       // 数字前窗口 = match 前 16 字 + match 内数字前文本，覆盖 match 外语境——「该阶段工期仅10天」
       // 的「阶段」（run1 实测「10日历天」误报）、「工期延误超过16天」阈值与「总工期目标分解为29天」
-      // 细分链（run1 全量穷举实测）均不判总工期冲突；数字定位取 match 内偏移防窗口内重复数字错位
+      // 细分链（run1 全量穷举实测）均不判总工期冲突；数字定位取 match 内偏移防窗口内重复数字错位。
+      // 4.28.0 D1 分项/计划类工期补豁免（丰乐镇 4.27.0 实测「亮化工程…进行，计划工期2天」被当
+      // 总工期报冲突）：旧词表缺「计划/安排」，分项工程的计划工期误入总工期校验；「总工期/施工工期/
+      // 合同工期」显式前缀句不参与豁免（「计划总工期120天」类错值仍拦）
       const dayWindowStart = Math.max(0, (match.index ?? 0) - 16);
       const dayWindow = nonTable.slice(dayWindowStart, (match.index ?? 0) + match[0].length);
       const dayDigitAt = (match.index ?? 0) - dayWindowStart + match[0].indexOf(String(match[1]));
-      if (dayDigitAt > 0 && /按|阶段|拆除|清杂|准备|第\d+日|至第|集中|延误|滞后|分解/u.test(dayWindow.slice(0, dayDigitAt))) continue;
+      const preWindow = dayWindow.slice(0, dayDigitAt);
+      // 新增「计划/安排」词仅在非「总工期/施工工期/合同工期」显式前缀句生效（「计划总工期120天」
+      // 类错值仍拦）；原词表豁免不受影响（「按90日历天总工期倒排，与污水管网工程63天」的
+      // 「按」豁免保持）
+      const strictTotalForm = /^(?:总工期|施工工期|合同工期)/u.test(match[0]);
+      const legacyExempt = dayDigitAt > 0 && /按|阶段|拆除|清杂|准备|第\d+日|至第|集中|延误|滞后|分解/u.test(preWindow);
+      const planExempt = !strictTotalForm && dayDigitAt > 0 && /计划|安排/u.test(preWindow);
+      if (legacyExempt || planExempt) continue;
       const value = Number(match[1]);
       if (value > 0 && value !== data.contract.totalDays) {
         issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `蓝图引用冲突：正文出现与蓝图不一致的工期表述 ${value}日历天`, suggestion: `请统一使用蓝图总工期：${data.contract.totalDays} 日历天` });

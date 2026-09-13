@@ -522,5 +522,23 @@ export function blueprintPhaseLaborAuthorities(data?: BlueprintData): PhaseLabor
     .map(entry => ({ phase: entry.label.slice(prefix.length), value: entry.value as number, trace: entry.trace }));
 }
 
+/** 机械设备台数权威（V5 P4b-2 分批台数矛盾检测专用）：equipment 域名条目投影（label=设备名，
+ * value=汇总台数，midValue 收敛）；同名多规格条目按名称求和（分批「首批+剩余」之和应对应
+ * 设备类型总台数），消费点与检测器输入同源。 */
+export interface EquipmentAuthority {
+  name: string;
+  count: number;
+}
+
+export function blueprintEquipmentAuthorities(data?: BlueprintData): EquipmentAuthority[] {
+  if (!data) return [];
+  const totals = new Map<string, number>();
+  for (const entry of buildAuthorityIndex(data).byDomain.get('equipment') ?? []) {
+    if (typeof entry.value !== 'number' || entry.value <= 0) continue;
+    totals.set(entry.label, (totals.get(entry.label) ?? 0) + entry.value);
+  }
+  return [...totals.entries()].map(([name, count]) => ({ name, count }));
+}
+
 /** 类型导出：消费端（检测/修复/审计）引用 */
 export type { BlueprintQuantity };

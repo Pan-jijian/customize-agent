@@ -9,6 +9,7 @@ import type { DocumentAsset, DocumentDraftChapter, DocumentEvidence, DocumentExe
 import type { FactTokenScopeClassifier } from '../factTokenClassifier';
 import type { ProfessionalDepthClassifier } from '../professionalDepthClassifier';
 import type { BlueprintData } from '../integratedBlueprint';
+import type { BillFactLock } from '../billFactLock';
 import { validateDraftWithAutoSpec } from '../../document-validation/documentValidationService';
 import { validateProjectContamination } from '../../document-validation/documentContaminationService';
 import { validateFactConsistency } from '../../document-validation/factConsistencyService';
@@ -36,9 +37,7 @@ import { buildValidationIssues } from '../chapterGeneration';
 import { chapterSectionFactUsageIssues } from '../chapterReview';
 import { factCoverageIssues, finalizeChapterContentQuality, finalizeFinalMarkdownStructure, normalizeProjectBasicInfoTable, partialChapterStatus, criticalSectionBlockerLine, projectBasicPlaceholderIssues, validateDraft, vectorStatusLabel } from '../documentGeneratorHelpers';
 import { constructionOrgProfessionalAuditIssues } from '../constructionOrgAudit';
-import { referenceBenchmarkForType } from '../templateReferenceService';
-import { suggestProjectType } from '../referenceQualityProfile';
-import { det } from '../detectorFixerRegistry';
+import { det, detSafe } from '../detectorFixerRegistry';
 import type { FinalizeSession } from './finalizeSession';
 
 export function sanitizeContaminationCandidates(markdown: string, summary: any) {
@@ -68,13 +67,21 @@ const REQUIRED_BASIS_CATEGORIES_ITEMS = [
   '- 招标文件及补疑补遗：本项目招标文件及招标补疑、澄清文件（招标文件与澄清、修正文件不一致的，以澄清、修正文件为准）；',
   '- 国家法律法规：《中华人民共和国建筑法》（2019年修正）、《中华人民共和国招标投标法》（2017年修正）、《中华人民共和国安全生产法》（2021年修正）、《中华人民共和国民法典》（2020年）、《建设工程质量管理条例》（国务院令第279号，2019年修订）、《建设工程安全生产管理条例》（国务院令第393号）、《保障农民工工资支付条例》（国务院令第724号）；',
   '- 国家/行业/地方现行规范标准：《建筑工程施工质量验收统一标准》（GB 50300-2013）及与本工程各分部分项工程对应的现行施工验收规范、标准与规程；',
-  '- 地方法规规章：工程所在地现行地方性法规与政府规章（招标文件引用的地方性法规按其原文列出）；',
+  '- 地方法规规章：工程所在地现行地方性法规与政府规章；',
   '- 企业管理体系：公司质量、环境、职业健康安全管理体系文件及企业施工工艺标准。',
 ];
 
-/** 编制依据五类清单的类别标记词（≥3 类命中即认定类别已列出；笼统句只含「国家法律法规/地方法规」
- * 两个词形无法命中「地方法规规章」精确词形，不满足类别清单口径） */
-const BASIS_CATEGORY_TERMS = ['招标文件及补疑补遗', '国家法律法规', '现行规范标准', '地方法规规章', '企业管理体系'];
+/** 编制依据五类清单的类别变体正则（≥3 类命中即认定类别已列出）：精确词形匹配对 LLM 变体表述
+ * 整类漏判（丰乐镇实测「招标及合同文件/国家法律法规/地方性法规与政府规章/现行工程建设标准规范/
+ * 企业管理体系文件」五类全覆盖，旧精确词只命中 2 类 → 误判未列出 → 重复注入「编制依据」块，
+ * 用户实测缺陷：编制依据开头结尾双现）；限定词容忍不跨句读标点，防跨句误判。 */
+const BASIS_CATEGORY_PATTERNS: RegExp[] = [
+  /招标(?:文件|及合同文件)|补疑补遗|招标澄清/u,
+  /国家[^\n，、；]{0,4}法律/u,
+  /现行[^\n，、；]{0,10}(?:规范|标准)/u,
+  /地方[^\n，、；]{0,8}(?:法规|规章)/u,
+  /企业管理体系|企业[^\n，、；]{0,8}体系/u,
+];
 
 /** 工伤保险政策合规句：正文有劳资管理内容却未提工伤保险时确定性补写（舒城第二轮实测全篇 0 处
  * 保险表述；P3.3 补挂依赖评分项摘要提及保险，未触发）。按投标响应口径写明参保义务/费用承担/凭证留存 */
@@ -96,7 +103,7 @@ function supplementTemplateAndBasisTexts(markdown: string, template: DocumentTem
   // 编制依据类别段落注入与术语缺失解耦（丰乐镇第十二轮实测）：LLM 写「编制依据」标题或只写
   // 「包括国家法律法规、地方法规及现行规范」一句笼统话时，missingRequiredTexts 已为空 → 原逻辑
   // 静默漏注入，总纲要求的五类清单全丢；类别词 ≥3 命中才认定类别已列出
-  const basisCategoryHit = BASIS_CATEGORY_TERMS.filter(term => markdown.includes(term)).length;
+  const basisCategoryHit = BASIS_CATEGORY_PATTERNS.filter(pattern => pattern.test(markdown)).length;
   // 施组类恒注入（丰乐镇第十三轮）：编制依据五类清单是总纲硬要求，LLM 零提及（无标题无词形）时
   // 原触发条件静默跳过导致清单全丢——模板为施组类或正文已出现编制说明/工程概况章节即触发
   const isConstructionDoc = /编制说明|工程概况|施工准备/u.test(markdown);
@@ -114,15 +121,30 @@ function supplementTemplateAndBasisTexts(markdown: string, template: DocumentTem
   const supplement = needBasisBlock
     ? [REQUIRED_BASIS_CATEGORIES_TITLE, ...items].join('\n')
     : items.join('\n').replace(/；$/u, '。');
-  // 锚点优先「编制依据」小节标题（LLM 已写标题但类别缺失时注入标题下），退「编制说明与工程概况」小节
-  // 锚点扩展：编制依据 / 编制说明（与工程概况）/ 工程概况 / 项目概况 小节标题（LLM 写变体标题也能注入标题下）
-  const anchor = /^(?:###|####)\s+(?:[\d.]+[\s\u00a0]*)?编制依据$/mu.exec(markdown)
-    ?? /^(?:###|####)\s+(?:[\d.]+[\s\u00a0]*)?编制说明(?:与工程概况)?$/mu.exec(markdown)
-    ?? /^(?:###|####)\s+(?:[\d.]+[\s\u00a0]*)?(?:工程概况|项目概况)$/mu.exec(markdown);
+  // 锚点优先「编制依据/编制文件/依据文件」小节标题（LLM 变体标题——丰乐镇「1.1 编制文件与现场条件核验」、
+  // 舒城「1.1 依据文件与踏勘范围」——也能注入标题下），退「编制说明/编制原则」、再退「工程概况/项目概况」
+  const BASIS_ANCHOR_RES: RegExp[] = [
+    /^(?:#{2,4})\s+(?:[\d.]+[\s\u00a0]*)?[^\n#]{0,16}(?:编制依据|编制文件|依据文件)[^\n#]{0,16}$/mu,
+    /^(?:#{2,4})\s+(?:[\d.]+[\s\u00a0]*)?[^\n#]{0,16}(?:编制说明|编制原则)[^\n#]{0,16}$/mu,
+    /^(?:#{2,4})\s+(?:[\d.]+[\s\u00a0]*)?[^\n#]{0,16}(?:工程概况|项目概况)[^\n#]{0,16}$/mu,
+  ];
+  let anchor: RegExpExecArray | null = null;
+  for (const pattern of BASIS_ANCHOR_RES) {
+    anchor = pattern.exec(markdown);
+    if (anchor) break;
+  }
   if (anchor) {
     // 注入到编制依据/编制说明小节标题行之后
     const insertAt = markdown.indexOf('\n', anchor.index) + 1;
     return `${markdown.slice(0, insertAt)}${supplement}\n\n${markdown.slice(insertAt)}`;
+  }
+  // 无锚点回退：插入首个非「目录」H2 标题行之后（原实现文末追加——与依据性内容位置脱节，
+  // 用户实测缺陷：编制依据块悬浮在成稿末尾）；连 H2 都没有（罕见）才退回文末追加
+  const lines = markdown.split(/\r?\n/u);
+  const firstChapterLine = lines.findIndex(line => /^##(?!#)\s+/u.test(line.trim()) && !/目录|contents/iu.test(line));
+  if (firstChapterLine >= 0) {
+    lines.splice(firstChapterLine + 1, 0, '', supplement);
+    return lines.join('\n');
   }
   return `${markdown.replace(/\s+$/u, '')}\n\n${supplement}`;
 }
@@ -235,8 +257,10 @@ export async function buildFullValidationIssues(input: {
   professionalDepthClassifier: ProfessionalDepthClassifier;
   /** 一体化蓝图参数桶（生成前锁定口径）：蓝图引用冲突终检兑底实时重跑（替除生成阶段全卷快照） */
   blueprintData?: BlueprintData;
+  /** B1 清单事实锁（4.27.0 A1）：参数口径冲突误报裁决（多值分别命中不同清单条目 → 降级 info） */
+  billFactLock?: BillFactLock;
 }): Promise<ValidationIssue[]> {
-  const { documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData } = input;
+  const { documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData, billFactLock } = input;
   // P7：检测器注册表化（detectorFixerRegistry）——各组检测器经 det() 登记引用，元数据（权威依赖/确定性/scope/category）
   // 单源于声明表；调用顺序与行为保持现状（分组顺序变更必须同步声明表并附理由）
   return collectValidationIssueGroups(
@@ -245,18 +269,18 @@ export async function buildFullValidationIssues(input: {
     det('fact-consistency', () => validateFactConsistency({ markdown: finalMarkdown, facts: structuredFacts, summary: projectMaterialSummary, profile: domainProfile })),
     det('project-contamination', () => validateProjectContamination(finalMarkdown, projectMaterialSummary)),
     det('project-basic-placeholder', () => projectBasicPlaceholderIssues(finalMarkdown, structuredFacts)),
-    await det('standard-final', () => buildStandardFinalValidationIssues({ markdown: finalMarkdown, chapters: finalChapterDrafts, factsModel, template, promptBindings, promptDocumentRules, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData })),
+    await detSafe('standard-final', () => buildStandardFinalValidationIssues({ markdown: finalMarkdown, chapters: finalChapterDrafts, factsModel, template, promptBindings, promptDocumentRules, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData, billFactLock })),
     det('fact-coverage', () => factCoverageIssues(finalMarkdown, [...structuredFacts, ...factsModel.preciseFacts], { maxIssues: 30 }).map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const, suggestion: '建议后续优化事实自然落位；导出阶段不因未落位的引用型或可优化事实阻断。' }))),
     det('page-target', () => pageTargetIssues(template.generationSettings || template.exportSettings, finalMarkdown).filter(issue => !(documentBudget.minPages && /低于目标页数/u.test(issue.message)))),
     det('document-budget', () => documentBudgetIssues(documentBudget, finalMarkdown)),
     det('planned-structure', () => plannedStructureIssues(finalMarkdown, template)),
     det('formal-text-gate', () => formalTextGateIssues(finalMarkdown)),
-    await det('internal-terminology-anchor', () => internalTerminologyAnchorIssues(finalMarkdown)),
+    await detSafe('internal-terminology-anchor', () => internalTerminologyAnchorIssues(finalMarkdown)),
     det('heading-uncovered-engineering-items', () => headingUncoveredEngineeringItems(finalMarkdown)),
     det('writer-missing-section', () => finalMarkdown.includes('WRITER_MISSING_SECTION') || finalMarkdown.includes('Writer 未完成') ? [{ level: 'error' as const, severity: 'blocker' as const, category: 'structure' as const, owner: 'system' as const, message: '最终正文仍包含未完成小节标记', suggestion: '必须重新补写对应小节并删除 WRITER_MISSING_SECTION/Writer 未完成。' }] : []),
     det('critical-section-depth', () => criticalSectionDepthIssues(finalChapterDrafts)),
     det('critical-section-fact-density', () => criticalSectionFactDensityIssues(finalChapterDrafts)),
-    await det('construction-org-professional-audit', async () => (await constructionOrgProfessionalAuditIssues(finalChapterDrafts, finalMarkdown)).map(issue => issue.level === 'error' ? { ...issue, severity: 'blocker' as const } : issue)),
+    await detSafe('construction-org-professional-audit', async () => (await constructionOrgProfessionalAuditIssues(finalChapterDrafts, finalMarkdown)).map(issue => issue.level === 'error' ? { ...issue, severity: 'blocker' as const } : issue)),
   ).map(issue => issue.level === 'error' ? { ...issue, severity: issue.severity || 'blocker' } : issue);
 }
 
@@ -283,10 +307,9 @@ export async function buildQualityReportBundle(input: {
   // 生成前/生成中的流程诊断（检索覆盖、事实覆盖、小节落位建议）反映的是检索与事实映射状态而非最终正文缺陷，
   // 无法由修复循环处理，按 info 计入避免污染缺陷计分
   issues = issues.map(issue => FLOW_DIAGNOSTIC_ISSUE_RE.test(issue.message) && issue.level === 'warning' ? { ...issue, level: 'info' as const } : issue);
-  // 可落地性目标基准：参考库同类工程完整五要素块均值（人工样本实测画像），
-  // 替代“每 1500 字 1 块”的历史目标（十度实测：10 万字文档需 68 块，人工样本天花板仅 16 块，目标失真导致可落地性 59 分）
-  const referenceCompleteBlocks = referenceBenchmarkForType(suggestProjectType(finalMarkdown))?.profile.fiveElementCompleteBlocks;
-  const qualityReport = await buildDocumentQualityReport({ markdown: finalMarkdown, chapters: finalChapterDrafts, issues, knowledgeCoverage, factTraces, template, referenceCompleteBlocks });
+  // 可落地性目标基准（4.26.0 起固化字数口径）：每 1500 字 1 块完整五要素块。
+  // 参考库锚点已随模板参考库移除下线，单一逻辑：target = max(6, ceil(字数/1500))
+  const qualityReport = await buildDocumentQualityReport({ markdown: finalMarkdown, chapters: finalChapterDrafts, issues, knowledgeCoverage, factTraces, template });
   const repairStrategies = buildRepairStrategies({ issues, qualityReport, knowledgeCoverage, factTraces, chapterCoverage });
   issues = collectValidationIssueGroups(issues, qualityReportIssues(qualityReport), repairStrategyIssues(repairStrategies));
   const finalExportGate = buildExportGate(issues, factsModel, finalChapterDrafts);
@@ -433,7 +456,7 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
 
   // 修复后重算问题组会重新计算，修复基线只保留基础累计问题，避免重复累加
   session.baseValidationIssues = session.validationIssues;
-  session.validationIssues = await buildFullValidationIssues({ documentSpec: session.documentSpec, validationIssues: session.validationIssues, factsModel: session.factsModel, finalChapterDrafts: session.finalChapterDrafts, finalMarkdown: session.finalMarkdown, template: session.template, promptBindings: session.promptBindings, promptDocumentRules: session.promptDocumentRules, projectMaterialSummary: session.projectMaterialSummary, domainProfile: session.domainProfile, structuredFacts: session.structuredFacts, documentBudget: session.documentBudget, scopeConflicts: session.scopeConflicts, evaluationCriteriaItems: session.evaluationCriteriaItems, effectiveChapters: session.effectiveChapters, tenderRequirements: session.tenderRequirements, requirementsSimilarity: session.requirementsSimilarity, factTokenScopeClassifier: session.factTokenScopeClassifier, professionalDepthClassifier: session.professionalDepthClassifier, blueprintData: session.blueprintData });
+  session.validationIssues = await buildFullValidationIssues({ documentSpec: session.documentSpec, validationIssues: session.validationIssues, factsModel: session.factsModel, finalChapterDrafts: session.finalChapterDrafts, finalMarkdown: session.finalMarkdown, template: session.template, promptBindings: session.promptBindings, promptDocumentRules: session.promptDocumentRules, projectMaterialSummary: session.projectMaterialSummary, domainProfile: session.domainProfile, structuredFacts: session.structuredFacts, documentBudget: session.documentBudget, scopeConflicts: session.scopeConflicts, evaluationCriteriaItems: session.evaluationCriteriaItems, effectiveChapters: session.effectiveChapters, tenderRequirements: session.tenderRequirements, requirementsSimilarity: session.requirementsSimilarity, factTokenScopeClassifier: session.factTokenScopeClassifier, professionalDepthClassifier: session.professionalDepthClassifier, blueprintData: session.blueprintData, billFactLock: session.billFactLock });
 
   session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: true, template: session.template });
   let { knowledgeCoverage, factTraces, chapterCoverage, qualityReport, repairStrategies, finalExportGate } = session.qualityBundle;
@@ -455,7 +478,7 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
     // 历史缺陷佐证：事实落位轮后已落位事实仍带修复前警告进入交付（如基本信息表招标人）；
     // 正文已删「本项目为…」但门禁仍报概况复述（B5）；终稿塑料管两口径仍报单一蓝图冲突（B8）。
     const repairedValidationBase = stripSnapshotIssues(session.baseValidationIssues);
-    session.validationIssues = await buildFullValidationIssues({ documentSpec: session.documentSpec, validationIssues: repairedValidationBase, factsModel: session.factsModel, finalChapterDrafts: session.finalChapterDrafts, finalMarkdown: session.finalMarkdown, template: session.template, promptBindings: session.promptBindings, promptDocumentRules: session.promptDocumentRules, projectMaterialSummary: session.projectMaterialSummary, domainProfile: session.domainProfile, structuredFacts: session.structuredFacts, documentBudget: session.documentBudget, scopeConflicts: session.scopeConflicts, evaluationCriteriaItems: session.evaluationCriteriaItems, effectiveChapters: session.effectiveChapters, tenderRequirements: session.tenderRequirements, requirementsSimilarity: session.requirementsSimilarity, factTokenScopeClassifier: session.factTokenScopeClassifier, professionalDepthClassifier: session.professionalDepthClassifier, blueprintData: session.blueprintData });
+    session.validationIssues = await buildFullValidationIssues({ documentSpec: session.documentSpec, validationIssues: repairedValidationBase, factsModel: session.factsModel, finalChapterDrafts: session.finalChapterDrafts, finalMarkdown: session.finalMarkdown, template: session.template, promptBindings: session.promptBindings, promptDocumentRules: session.promptDocumentRules, projectMaterialSummary: session.projectMaterialSummary, domainProfile: session.domainProfile, structuredFacts: session.structuredFacts, documentBudget: session.documentBudget, scopeConflicts: session.scopeConflicts, evaluationCriteriaItems: session.evaluationCriteriaItems, effectiveChapters: session.effectiveChapters, tenderRequirements: session.tenderRequirements, requirementsSimilarity: session.requirementsSimilarity, factTokenScopeClassifier: session.factTokenScopeClassifier, professionalDepthClassifier: session.professionalDepthClassifier, blueprintData: session.blueprintData, billFactLock: session.billFactLock });
     // 评审轮残留问题并入校验组（在导出门禁计算前），重算后 finalExportGate 即包含评审轮硬阻断
     session.validationIssues = [...session.validationIssues, ...session.qingtianReviewBlockingIssues];
     session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: false, template: session.template });

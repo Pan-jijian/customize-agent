@@ -4,7 +4,7 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSixHundredPercentCoverage, fixTableBorneContentSections, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSixHundredPercentCoverage, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
 import { repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
 import { splitMarkdownTableLine, stripTableCellInvisibleChars } from '@/services/document-workflow/helpers/markdownCleanup';
@@ -555,7 +555,7 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
     expect(fix.markdown).not.toContain('38.4%');
   });
 
-  it('4.17.4 fixCrossSectionNumericConflicts：塔吊多表 2台 vs 1台 取保守台数统一', () => {
+  it('4.17.4 fixCrossSectionNumericConflicts：塔吊多表 2台 vs 1台 多值冲突不再取保守台数（V2 批1-4 零兜底写入）→ 不修复', () => {
     const markdown = [
       '| 关键节点 | 投入资源 |',
       '| --- | --- |',
@@ -564,9 +564,8 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
       '主体施工阶段投入塔式起重机2台。',
     ].join('\n');
     const fix = applyNumericConsistencyDeterministicFixes(markdown);
-    expect(fix.fixedCount).toBeGreaterThan(0);
-    expect(fix.markdown).not.toContain('塔式起重机2台');
-    expect(fix.markdown).toContain('塔式起重机1台');
+    expect(fix.fixedCount).toBe(0);
+    expect(fix.markdown).toBe(markdown);
   });
 
   it('4.17.4 fixNodeScheduleConflicts：形态A不跨「）→（」节点分隔误采（施工准备22日保持）', () => {
@@ -1921,53 +1920,6 @@ describe('fixTruncatedSentenceArtifacts（B2 截断句残留确定性修复）',
   });
 });
 
-describe('fixTableBorneContentSections（B3 表格承载正文修复）', () => {
-  it('关键小节全表格正文 → 表格行改写段落插入标题后，表格保留', () => {
-    const markdown = [
-      '### 1.2 项目主要施工内容',
-      '',
-      '| 分部分项工程 | 工程内容 | 单位 | 工程量 |',
-      '| --- | --- | --- | --- |',
-      '| 道路工程 | 沥青混凝土路面 | m² | 12000 |',
-      '| 道路工程 | 路床碾压 | m² | 15000 |',
-      '| 排水工程 | 钢筋混凝土管铺设 | m | 800 |',
-    ].join('\n');
-    const result = fixTableBorneContentSections(markdown);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('本项目主要施工内容包括：道路工程的沥青混凝土路面12000m²、路床碾压15000m²；排水工程的钢筋混凝土管铺设800m。');
-    // 表格保留
-    expect(result.markdown).toContain('| 道路工程 | 沥青混凝土路面 | m² | 12000 |');
-    // 段落插入在标题之后
-    expect(result.markdown.indexOf('本项目主要施工内容包括：')).toBeLessThan(result.markdown.indexOf('| 分部分项工程 |'));
-  });
-
-  it('表格前已有成段正文 → 不动（正文已承载主体内容）', () => {
-    const markdown = [
-      '### 1.2 项目主要施工内容',
-      '',
-      '本项目主要包括道路工程与排水工程两大专业内容，其中道路工程涵盖路基处理、路面铺装与人行道施工，排水工程涵盖管道铺设与检查井砌筑等施工内容。',
-      '',
-      '| 分部分项工程 | 工程内容 | 单位 | 工程量 |',
-      '| --- | --- | --- | --- |',
-      '| 道路工程 | 沥青混凝土路面 | m² | 12000 |',
-    ].join('\n');
-    const result = fixTableBorneContentSections(markdown);
-    expect(result.fixedCount).toBe(0);
-  });
-
-  it('非关键小节标题 → 不动', () => {
-    const markdown = [
-      '### 2.1 施工进度计划',
-      '',
-      '| 阶段 | 工期 | 劳动力 |',
-      '| --- | --- | --- |',
-      '| 主体结构 | 120天 | 150人 |',
-    ].join('\n');
-    const result = fixTableBorneContentSections(markdown);
-    expect(result.fixedCount).toBe(0);
-  });
-});
-
 describe('markdownTableQualityIssues 规格型号列「—」豁免（丰乐镇实测：蛙式打夯机无型号，修复轮编造 HW-60）', () => {
   const table = (specValue: string, qtyValue = '1台') => [
     '| 道路工程机械名称 | 规格型号 | 数量 |',
@@ -2038,24 +1990,26 @@ describe('表格单元格不可见字符归一（十度实测缺陷：全角空�
     const issues = markdownTableQualityIssues(table);
     expect(issues.some(issue => issue.message.includes('空单元格'))).toBe(true);
   });
-  it('修复层：全角空格零星空单元格数据行被确定性删除', () => {
+  it('修复层：全角空格零星空单元格数据行不再删除（V2 批1-4 零兜底写入：不删行，交检测器阻断）', () => {
     const { lines, removed } = repairTableBlockLines([
       '| 工序名称 | 检查内容 | 责任岗位 |',
       '| --- | --- | --- |',
       '| 土方开挖 | 标高检查 | \u3000 |',
       '| 回填夯实 | 压实度检测 | 试验员 |',
     ]);
-    expect(removed).toBeGreaterThan(0);
-    expect(lines.join('\n')).not.toContain('土方开挖');
+    expect(removed).toBe(0);
+    expect(lines.join('\n')).toContain('土方开挖');
     expect(lines.join('\n')).toContain('回填夯实');
   });
-  it('修复层：合计行全角空格单元格填「—」（行业惯例豁免语义）', () => {
+  it('修复层：合计行全角空格单元格不再填「—」（V2 批1-4 零兜底写入：不伪造占位符）', () => {
     const { lines } = repairTableBlockLines([
       '| 项目 | 数量 | 备注 |',
       '| --- | --- | --- |',
+      '| 土方开挖 | 1000 | 正常 |',
       '| 合计 | \u3000 | \u00a0 |',
     ]);
-    expect(lines.join('\n')).toContain('—');
+    expect(lines.join('\n')).not.toContain('—');
+    expect(lines.join('\n')).toContain('合计');
   });
   it('清洗层：splitMarkdownTableLine 剥离全角空格/零宽字符', () => {
     const cells = splitMarkdownTableLine('| 土方开挖 | 标高检查 | \u3000\u200b |');

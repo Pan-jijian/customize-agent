@@ -25,6 +25,10 @@ vi.mock('@/services/document-workflow', () => ({
 vi.mock('@/services/document-workflow/qualityValidation', () => ({
   collectSectionContentGaps: vi.fn(() => []),
 }));
+// 语义模型预热隔离：任务启动链会调用 preflightLocalSemanticProvider，单测不加载真实 BGE 模型
+vi.mock('@/services/document-workflow/semanticSimilarity', () => ({
+  preflightLocalSemanticProvider: vi.fn(async () => {}),
+}));
 vi.mock('@/services/knowledge/kbService', () => ({
   getProjectKbRoot: vi.fn(() => '/kb-root'),
   getProjectRoot: vi.fn(() => '/proj-root'),
@@ -50,10 +54,12 @@ import {
   getGeneratedAsset,
   getGeneratedDocument,
   getGeneratedDocumentMeta,
+  getQueuedDocumentPosition,
   listGeneratedAssets,
   listGeneratedDocuments,
   openGeneratedAssetTarget,
   saveGeneratedDocument,
+  setProcessAliveProbeForTest,
   startGenerateDocumentTask,
   updateGeneratedDocument,
   upsertGeneratedAssets,
@@ -107,7 +113,9 @@ function makeRecord(overrides: Partial<GeneratedDocumentRecord> = {}): Generated
 }
 
 function clearTasks() {
-  (globalThis as { __generatedDocumentTasks?: Map<string, unknown> }).__generatedDocumentTasks?.clear();
+  const store = globalThis as { __generatedDocumentTasks?: Map<string, unknown>; __generatedDocumentQueue?: unknown[] };
+  store.__generatedDocumentTasks?.clear();
+  store.__generatedDocumentQueue?.splice(0);
 }
 
 beforeEach(() => {
@@ -119,6 +127,7 @@ beforeEach(() => {
   vi.mocked(getDocumentTemplate).mockReturnValue({ id: 't1', name: '标准模板', version: 1, description: '', category: '施工组织设计', outputTitle: '施工组织设计', chapters: [] });
   delete process.env.DOCUMENT_MAX_CONCURRENT_GENERATIONS;
   delete process.env.DOCUMENT_TUNING_PROFILE;
+  setProcessAliveProbeForTest(null);
 });
 
 afterAll(() => {
@@ -183,6 +192,21 @@ describe('abortGeneratedDocument', () => {
     expect(aborted?.error).toBe('用户中止');
     // 任务被移出注册表，轮询方通过落盘记录感知中止
     expect(getGenerateTask(taskId)).toBeNull();
+  });
+
+  it('中止审计：abortedAt/abortedBy/abortedStage 落盘（running 阶段提取）', async () => {
+    vi.mocked(generateDocumentDraft).mockImplementation(async (input) => {
+      input.onProgress?.([{ type: 'chapter_generation', roleId: 'chapter_generation', status: 'running', subtitle: '第三章 施工部署', message: '生成中' }]);
+      return new Promise(() => {});
+    });
+    const { documentId } = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const aborted = abortGeneratedDocument(documentId, '/proj');
+    expect(aborted?.status).toBe('aborted');
+    expect(aborted?.error).toBe('用户中止');
+    expect(aborted?.abortedBy).toBe('user-api');
+    expect(aborted?.abortedStage).toBe('第三章 施工部署');
+    expect(typeof aborted?.abortedAt).toBe('number');
   });
 });
 
@@ -294,10 +318,65 @@ describe('stale 标记与轮询判定', () => {
     expect(list[0]!.warningIssues).toContain('生成任务已中断，请点击继续生成或重新生成');
   });
 
+  it('服务重启后队列随内存消失：queued 记录读取时标记 failed（排队未执行文案）', () => {
+    setProcessAliveProbeForTest(() => false);
+    saveGeneratedDocument(makeRecord({ id: 'doc-q', status: 'queued', title: '排队中', updatedAt: 1, ownerPid: 4242 }), '/proj', { preserveUpdatedAt: true });
+    const record = getGeneratedDocument('doc-q', '/proj');
+    expect(record?.status).toBe('failed');
+    expect(record?.error).toContain('排队任务未执行');
+    expect(record?.interruptionReason).toBe('process-exited');
+  });
+
+  it('仍在待启动队列中的 queued 记录不判定中断（超宽限期亦不误杀）', () => {
+    vi.mocked(generateDocumentDraft).mockImplementation(() => new Promise(() => {}));
+    startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    const queued = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    // 模拟长排队：把排队记录时间改早至超出宽限定值与进程启动时刻之前
+    const stored = getGeneratedDocument(queued.documentId, '/proj')!;
+    saveGeneratedDocument({ ...stored, updatedAt: 1 }, '/proj', { preserveUpdatedAt: true });
+    setProcessAliveProbeForTest(() => false);
+    expect(getGeneratedDocument(queued.documentId, '/proj')?.status).toBe('queued');
+  });
+
   it('宽限期内的 generating 记录不被标记', () => {
     saveGeneratedDocument(makeRecord({ id: 'doc-g', status: 'generating', updatedAt: Date.now() - 5_000 }), '/proj', { preserveUpdatedAt: true });
     const list = listGeneratedDocuments('/proj');
     expect(list[0]!.status).toBe('generating');
+  });
+
+  it('宽限期 180s：owner 已死但 60s 内仍有更新 → 不判（旧 60s 宽限口径会误判为中断）', () => {
+    setProcessAliveProbeForTest(() => false);
+    saveGeneratedDocument(makeRecord({ id: 'doc-recent', status: 'generating', updatedAt: Date.now() - 60_000, ownerPid: 4242 }), '/proj', { preserveUpdatedAt: true });
+    expect(getGeneratedDocument('doc-recent', '/proj')?.status).toBe('generating');
+    expect(generatingRecordRequiresFullPoll(getGeneratedDocumentMeta('doc-recent', '/proj'))).toBe(false);
+  });
+
+  it('markStale 矩阵：owner 存活不判 / 已死立即判 process-exited / 缺失存量判 owner-unknown', () => {
+    const hourAgo = Date.now() - 60 * 60_000;
+    saveGeneratedDocument(makeRecord({ id: 'doc-alive', status: 'generating', updatedAt: hourAgo, ownerPid: 4242 }), '/proj', { preserveUpdatedAt: true });
+    saveGeneratedDocument(makeRecord({ id: 'doc-dead', status: 'generating', updatedAt: hourAgo, ownerPid: 4242 }), '/proj', { preserveUpdatedAt: true });
+    saveGeneratedDocument(makeRecord({ id: 'doc-legacy', status: 'generating', updatedAt: 1 }), '/proj', { preserveUpdatedAt: true });
+    // owner 存活：超出宽限也不判（跨实例/多窗口保护）
+    setProcessAliveProbeForTest(() => true);
+    expect(getGeneratedDocument('doc-alive', '/proj')?.status).toBe('generating');
+    // owner 已死：立即判 process-exited（带审计字段）
+    setProcessAliveProbeForTest(() => false);
+    const dead = getGeneratedDocument('doc-dead', '/proj');
+    expect(dead?.status).toBe('failed');
+    expect(dead?.interruptionReason).toBe('process-exited');
+    expect(typeof dead?.interruptedAt).toBe('number');
+    // 缺失归属的存量记录（updatedAt 早于进程启动）→ owner-unknown
+    const legacy = getGeneratedDocument('doc-legacy', '/proj');
+    expect(legacy?.status).toBe('failed');
+    expect(legacy?.interruptionReason).toBe('owner-unknown');
+  });
+
+  it('owner 存活但心跳 24h 未更新 → heartbeat-lost（PID 复用悬挂兜底）', () => {
+    setProcessAliveProbeForTest(() => true);
+    saveGeneratedDocument(makeRecord({ id: 'doc-hang', status: 'generating', updatedAt: Date.now() - 25 * 60 * 60_000, ownerPid: 4242 }), '/proj', { preserveUpdatedAt: true });
+    const record = getGeneratedDocument('doc-hang', '/proj');
+    expect(record?.status).toBe('failed');
+    expect(record?.interruptionReason).toBe('heartbeat-lost');
   });
 });
 
@@ -318,15 +397,18 @@ describe('startGenerateDocumentTask', () => {
     expect(record.assets?.some(asset => asset.id === `document-${documentId}`)).toBe(true);
   });
 
-  it('门禁未通过 + 实质正文 → completed_with_issues', async () => {
+  it('门禁未通过 + 实质正文 → failed（V2 批3 宁缺毋假：带病文档不作为交付件）', async () => {
     vi.mocked(generateDocumentDraft).mockResolvedValue(makeResult({
       markdown: '正文内容'.repeat(1000),
       exportGate: { passed: false, blockingIssues: [{ level: 'error', message: '空小节' }], checklist: [] },
     }));
     const { taskId } = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
     const record = await getGenerateTask(taskId)!.promise;
-    expect(record.status).toBe('completed_with_issues');
+    expect(record.status).toBe('failed');
     expect(record.warningIssues?.length).toBeGreaterThan(0);
+    // 未收敛阻断清单无条件置顶（不再依赖“警告为空才补泛化文案”的旧逻辑，可排查可续修）
+    expect(record.warningIssues?.[0]).toContain('导出门禁未通过');
+    expect(record.warningIssues?.[0]).toContain('空小节');
   });
 
   it('门禁未通过 + 无实质正文 → failed', async () => {
@@ -378,19 +460,101 @@ describe('startGenerateDocumentTask', () => {
     expect(record.status).toBe('aborted');
   });
 
-  it('并发上限：超过 DOCUMENT_MAX_CONCURRENT_GENERATIONS 抛错', () => {
+  it('第三方含 "aborted" 字样的错误不再误判已中止 → failed（精确匹配）', async () => {
+    vi.mocked(generateDocumentDraft).mockRejectedValue(new Error('This operation was aborted'));
+    const { taskId } = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    const record = await getGenerateTask(taskId)!.promise;
+    expect(record.status).toBe('failed');
+    expect(record.error).toBe('This operation was aborted');
+  });
+
+  it('signal 已中止时非精确中止文案仍落 aborted（signal 双判）', async () => {
+    let rejectDraft: ((error: Error) => void) | null = null;
+    vi.mocked(generateDocumentDraft).mockImplementation(() => new Promise((_resolve, reject) => { rejectDraft = reject; }));
+    const { taskId } = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const task = getGenerateTask(taskId)!;
+    task.controller.abort();
+    rejectDraft!(new Error('The operation was aborted'));
+    const record = await task.promise;
+    expect(record.status).toBe('aborted');
+  });
+
+  it('任务启动写入 ownerPid/ownerStartedAt（进度写盘与 meta 同步）', async () => {
+    vi.mocked(generateDocumentDraft).mockImplementation(() => new Promise(() => {}));
+    const { documentId } = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    const record = getGeneratedDocument(documentId, '/proj');
+    expect(record?.ownerPid).toBe(process.pid);
+    expect(typeof record?.ownerStartedAt).toBe('number');
+    expect(getGeneratedDocumentMeta(documentId, '/proj')?.ownerPid).toBe(process.pid);
+  });
+
+  it('并发上限：容量满时新请求进入排队（不再抛错）', () => {
     process.env.DOCUMENT_MAX_CONCURRENT_GENERATIONS = '1';
     vi.mocked(generateDocumentDraft).mockImplementation(() => new Promise(() => {}));
     startGenerateDocumentTask({ templateId: 't1' }, '/proj');
-    expect(() => startGenerateDocumentTask({ templateId: 't2' }, '/proj')).toThrow('上限');
+    const second = startGenerateDocumentTask({ templateId: 't2' }, '/proj');
+    expect(second.queuePosition).toBe(1);
+    expect(getGeneratedDocument(second.documentId, '/proj')?.status).toBe('queued');
   });
 
-  it('同模板同项目已有 active 任务时复用', () => {
+  it('同模板同项目连点：创建新的排队任务（不再复用运行中任务）', () => {
     vi.mocked(generateDocumentDraft).mockImplementation(() => new Promise(() => {}));
     const first = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
     const second = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
-    expect(second.taskId).toBe(first.taskId);
-    expect(second.documentId).toBe(first.documentId);
+    expect(second.taskId).not.toBe(first.taskId);
+    expect(second.queuePosition).toBe(1);
+    expect(getGeneratedDocument(first.documentId, '/proj')?.status).toBe('generating');
+    expect(getGeneratedDocument(second.documentId, '/proj')?.status).toBe('queued');
+  });
+
+  it('任务完成后自动接续下一个排队任务（无需人工再点）', async () => {
+    const resolvers: Array<(value: GeneratedDocumentDraft) => void> = [];
+    vi.mocked(generateDocumentDraft).mockImplementation(async () => new Promise<GeneratedDocumentDraft>(resolve => { resolvers.push(resolve); }));
+    const first = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    const second = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    expect(getGeneratedDocument(second.documentId, '/proj')?.status).toBe('queued');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    resolvers[0]!(makeResult());
+    await getGenerateTask(first.taskId)!.promise;
+    // finally 释放名额并 pump：第二个任务自动启动（无需再次调用 startGenerateDocumentTask）
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(getGeneratedDocument(second.documentId, '/proj')?.status).toBe('generating');
+    expect(getGenerateTask(second.taskId)).not.toBeNull();
+    resolvers[1]!(makeResult());
+    const done = await getGenerateTask(second.taskId)!.promise;
+    expect(done.status).toBe('completed');
+  });
+
+  it('队首同模板阻塞时跳过：后续不同模板排队任务先启动', () => {
+    vi.mocked(generateDocumentDraft).mockImplementation(() => new Promise(() => {}));
+    startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    const sameTemplate = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    expect(sameTemplate.queuePosition).toBe(1);
+    const other = startGenerateDocumentTask({ templateId: 't2' }, '/proj');
+    // 容量 2 有空位，但队首 t1 因同模板互斥不可启动 → t2 跳过直接启动
+    expect(other.queuePosition).toBeUndefined();
+    expect(getGeneratedDocument(other.documentId, '/proj')?.status).toBe('generating');
+    expect(getGeneratedDocument(sameTemplate.documentId, '/proj')?.status).toBe('queued');
+  });
+
+  it('中止排队任务：从队列摘除并落 aborted（abortedStage=生成队列）', () => {
+    vi.mocked(generateDocumentDraft).mockImplementation(() => new Promise(() => {}));
+    startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    const queued = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    const aborted = abortGeneratedDocument(queued.documentId, '/proj');
+    expect(aborted?.status).toBe('aborted');
+    expect(aborted?.abortedStage).toBe('生成队列');
+    expect(getQueuedDocumentPosition(queued.documentId)).toBeUndefined();
+  });
+
+  it('删除排队中的文档：同步摘除队列请求', () => {
+    vi.mocked(generateDocumentDraft).mockImplementation(() => new Promise(() => {}));
+    startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    const queued = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
+    expect(getQueuedDocumentPosition(queued.documentId)).toBe(1);
+    deleteGeneratedDocument(queued.documentId, '/proj');
+    expect(getQueuedDocumentPosition(queued.documentId)).toBeUndefined();
   });
 
   it('resumeDocumentId 复用现有 active 任务', () => {
@@ -408,7 +572,8 @@ describe('startGenerateDocumentTask', () => {
     });
     const { taskId, documentId } = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
     const promise = getGenerateTask(taskId)!.promise;
-    // 进度回调在任务启动时同步触发，checkpoint 立即落盘
+    // 任务链先经语义预热（mock 微任务）再进入生成：等待微任务刷新后 checkpoint 已落盘
+    await new Promise(resolve => setTimeout(resolve, 0));
     const mid = getGeneratedDocument(documentId, '/proj');
     expect(mid?.status).toBe('generating');
     expect(mid?.checkpointChapters?.[0]?.id).toBe('c1');

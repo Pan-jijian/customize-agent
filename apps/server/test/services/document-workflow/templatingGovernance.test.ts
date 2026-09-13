@@ -10,6 +10,7 @@ import {
   coreTitleName,
   countSkeletonFingerprint,
   fixFlowFormRepetition,
+  fixSentenceLikeHeadingSplit,
   fixSkeletonFingerprintRepetition,
   fixTemplatedLabels,
   fixTruncatedTitleCompletion,
@@ -19,12 +20,15 @@ import {
   flowRotationDirective,
   isStructuralLabelTitle,
   nextFlowForm,
+  plannedTitleMatchKey,
   primaryFlowForm,
   skeletonFingerprintIssues,
   skeletonFingerprintRepairTargets,
+  splitSentenceLikeHeading,
   templatedLabelIssues,
   titleIntegrityIssues,
   titleRepairTargets,
+  uncoveredHeadingRemainder,
 } from '@/services/document-workflow/templatingGovernance';
 
 describe('isStructuralLabelTitle（结构标签独立成题判定）', () => {
@@ -138,6 +142,45 @@ describe('fixTemplatedLabels（确定性修复：删标题行保正文 / 剥前�
     expect(result.markdown).toBe(md);
     expect(result.fixedCount).toBe(0);
     expect(result.details).toEqual([]);
+  });
+
+  it('正文孤立小节标题行删除（舒城 4.28.x 实测：小节名被当正文输出）', () => {
+    const md = [
+      '#### 2.7.1 路基处理',
+      '本段路基处理作业对象为车行道路基与人行道路基，核心工程量为素土回填与级配碎石。',
+      '路基处理',
+      '1. 进行清表与土方开挖；',
+      '2. 实施素土分层回填；',
+    ].join('\n');
+    const result = fixTemplatedLabels(md);
+    expect(result.markdown).toBe([
+      '#### 2.7.1 路基处理',
+      '本段路基处理作业对象为车行道路基与人行道路基，核心工程量为素土回填与级配碎石。',
+      '1. 进行清表与土方开挖；',
+      '2. 实施素土分层回填；',
+    ].join('\n'));
+    expect(result.fixedCount).toBe(1);
+    expect(result.details).toEqual(['正文孤立小节标题行删除 1 行']);
+  });
+
+  it('孤立标题行零误伤：标题后现/含标点/带列表符/无同名标题均不删', () => {
+    const md = [
+      '路基处理',
+      '#### 2.7.1 路基处理',
+      '路基处理。',
+      '- 路基处理',
+      '素土回填',
+    ].join('\n');
+    const result = fixTemplatedLabels(md);
+    expect(result.markdown).toBe(md);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('孤立标题行前后均空行时吞尾随空行（防双空行残留）', () => {
+    const md = ['#### 2.7.1 路基处理', '', '正文段落。', '', '路基处理', '', '1. 进行清表。'].join('\n');
+    const result = fixTemplatedLabels(md);
+    expect(result.markdown).toBe(['#### 2.7.1 路基处理', '', '正文段落。', '', '1. 进行清表。'].join('\n'));
+    expect(result.markdown).not.toContain('\n\n\n');
   });
 });
 
@@ -507,5 +550,95 @@ describe('fixTruncatedTitleCompletion（残缺标题确定性补全）', () => {
     const result = fixTruncatedTitleCompletion(md);
     expect(result.fixedCount).toBe(0);
     expect(result.markdown).toBe(md);
+  });
+});
+
+// ── 句化标题切分（4.27.2 标题合并治理：规划标题与正文首句并写还原） ──
+
+describe('plannedTitleMatchKey（规划标题匹配键归一化）', () => {
+  it('剥编号/标记与全部空白标点', () => {
+    expect(plannedTitleMatchKey('2.11 公厕机电安装工程')).toBe('公厕机电安装工程');
+    expect(plannedTitleMatchKey('第2节 质量保证措施')).toBe('质量保证措施');
+    expect(plannedTitleMatchKey('**村庄道路工程**')).toBe('村庄道路工程');
+    expect(plannedTitleMatchKey('公厕、机电 安装工程')).toBe('公厕机电安装工程');
+  });
+});
+
+describe('splitSentenceLikeHeading（句化标题切分识别）', () => {
+  it('规划标题前缀 + 长续写句 → 命中并返回余部（丰乐镇实测形态）', () => {
+    const split = splitSentenceLikeHeading(
+      '公厕机电安装工程集中在马老郢、马小郢等自然村的公厕进行给排水、电气及通风工程改造，施工前完成现场交接与首件样板验收',
+      ['公厕机电安装工程', '村庄道路基层与面层作业'],
+    );
+    expect(split?.plannedTitle).toBe('公厕机电安装工程');
+    expect(split?.remainder).toContain('集中在马老郢');
+  });
+
+  it('余部不足 10 字（正常标题修饰）不切分', () => {
+    expect(splitSentenceLikeHeading('公厕机电安装工程', ['公厕机电安装工程'])).toBeUndefined();
+    expect(splitSentenceLikeHeading('公厕机电安装工程改造', ['公厕机电安装工程'])).toBeUndefined();
+  });
+
+  it('最长前缀优先（村庄道路 vs 村庄道路基层与面层作业）', () => {
+    const split = splitSentenceLikeHeading(
+      '村庄道路基层与面层作业覆盖9个自然村进行混凝土浇筑施工',
+      ['村庄道路', '村庄道路基层与面层作业'],
+    );
+    expect(split?.plannedTitle).toBe('村庄道路基层与面层作业');
+  });
+});
+
+describe('uncoveredHeadingRemainder（续写句覆盖判定：零丢失防线）', () => {
+  it('后继正文已包含续写句（容忍软换行空格差异）→ 全部覆盖返回空串', () => {
+    expect(uncoveredHeadingRemainder('集中在马圩 自然村组进行施工。', '前置内容。集中在马圩自然村组进行施工。后续内容。')).toBe('');
+  });
+
+  it('部分覆盖 → 仅返回未覆盖整句拼接', () => {
+    expect(uncoveredHeadingRemainder('本项目严格落实扬尘防治措施。施工期间每日洒水。', '本项目严格落实扬尘防治措施。其他内容。')).toBe('施工期间每日洒水。');
+  });
+
+  it('无后继正文 → 全部返回（转正文插入）', () => {
+    expect(uncoveredHeadingRemainder('覆盖9个自然村的道路施工。', '')).toBe('覆盖9个自然村的道路施工。');
+  });
+});
+
+describe('fixSentenceLikeHeadingSplit（句化标题切分确定性修复）', () => {
+  const PLANNED = ['公厕机电安装工程', '村庄道路基层与面层作业'];
+
+  it('实测形态：### 2.11 规划标题+长句并写 → 标题还原，续写句未覆盖转正文段', () => {
+    const md = [
+      '## 第十一章 机电安装工程',
+      '### 2.11 公厕机电安装工程集中在马老郢、马小郢等自然村进行给排水与电气改造，施工前完成现场交接与样板验收。',
+      '后续正文。',
+    ].join('\n');
+    const result = fixSentenceLikeHeadingSplit(md, PLANNED);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('### 2.11 公厕机电安装工程\n\n集中在马老郢');
+    expect(result.markdown).not.toContain('### 2.11 公厕机电安装工程集中');
+  });
+
+  it('续写句已被后继正文覆盖 → 仅还原标题丢弃余部（不重复写入）', () => {
+    const md = [
+      '### 2.12 村庄道路基层与面层作业覆盖9个自然村的道路进行混凝土浇筑施工。',
+      '覆盖9个自然村的道路进行混凝土浇筑施工。',
+    ].join('\n');
+    const result = fixSentenceLikeHeadingSplit(md, PLANNED);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('### 2.12 村庄道路基层与面层作业');
+    expect(result.markdown.split('覆盖9个自然村的道路进行混凝土浇筑施工。').length - 1).toBe(1);
+  });
+
+  it('未注入规划标题 / 正常标题 / H2 标题 → 静默跳过（零误伤）', () => {
+    const md = ['## 第二章 质量保证措施', '### 2.1 模板与脚手架工程', '正文。'].join('\n');
+    expect(fixSentenceLikeHeadingSplit(md).fixedCount).toBe(0);
+    expect(fixSentenceLikeHeadingSplit(md, []).fixedCount).toBe(0);
+    expect(fixSentenceLikeHeadingSplit(md, ['模板与脚手架工程']).fixedCount).toBe(0);
+  });
+
+  it('H4 形态与编号保留（#### 2.11.3 前缀原样）', () => {
+    const md = '#### 2.11.3 公厕机电安装工程集中在马老郢等自然村进行改造施工。';
+    const result = fixSentenceLikeHeadingSplit(md, PLANNED);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('#### 2.11.3 公厕机电安装工程\n\n集中在马老郢等自然村进行改造施工。');
   });
 });
