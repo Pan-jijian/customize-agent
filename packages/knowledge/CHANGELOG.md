@@ -1,5 +1,14 @@
 # @customize-agent/knowledge
 
+## 4.8.0
+
+### Minor Changes
+
+- knowledge 定向内容查询与嵌入缓存自愈（舒城附表提取支撑）：
+
+  - IndexStateStore.listChunksByContentHints：按内容短语 LIKE 定向命中切片（与读取路径序无关），解决大库（舒城 6433 切片）中位于路径序末尾的关键内容在字符预算内稳定漏失的问题（80 万字符预算读不到「招标文件附表清单」）；limit 默认 60 / 上限 500，通配符转义防注入
+  - 本地嵌入管线缓存自愈（finalize 末期硬停治理）：rejected pipeline 从进程级静态缓存清除，模型路径/依赖修复后无需重启即下次调用重新加载
+
 ## 4.7.0
 
 ### Minor Changes
